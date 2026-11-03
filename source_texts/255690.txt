@@ -1,0 +1,145 @@
+Contribute to OstappMelnykk/Solvix development by creating an account on GitHub.
+
+Mark voxels that straddle disconnected body parts by OstappMelnykk · Pull Request #51 · OstappMelnykk/Solvix · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+OstappMelnykk
+commented
+Sep 22, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Adds automatic detection of docs/local-refinement/PROBLEMS.md's Проблема 2 — a coarse voxel can physically touch two topologically disconnected pieces of the imported body (the motivating tooth-root example: two roots with an air gap between them, both touching one grubby voxel). Naively snapping that voxel's boundary onto the nearest STL point later produces a self-intersecting/inverted element.
+This is deliberately scoped to marking + visualization only — "an instrument that marks which voxels need splitting, so I can actually see them." It does not build the T1/T2/T4 local-refinement engine itself (a separate, later feature), and does not touch ZonePaintingService/SurfaceZonePaintingService.
+Backend (Solvix.Voxelization): IsCubeIncluded now reports whether a triangle genuinely touched the cell (not just the center-inside fallback). For touched cells, HasConnectivitySplit samples a uniform 4×4×4 grid of points and flood-fills the "inside" ones by this same fine grid's own face-adjacency — more than one connected group means the cell straddles a real gap. An earlier recursive-octree version of this had a real bug (octants adjacent by index aren't necessarily adjacent in the sense that matters, silently merging disconnected pieces) — the fixed-resolution sampling approach avoids that class of bug entirely. VoxelizationResult gains a second bitmask, MarkedForRefinement, same shape as Occupancy.
+Frontend: decodes the new bitmask, and VoxelCell carries its own markedForRefinement flag so scene-objects/voxels.ts can tint a marked cell's fill a distinct red-orange — no click-to-refine interaction yet.
+New tests: a synthetic two-prong fixture (two thin boxes with a gap, both fitting inside one voxel) marks exactly that voxel; a plain solid box marks nothing.
+OstapMelnyk
+added 3 commits
+September 22, 2026 16:45
+mark voxels that straddle disconnected body parts (Варіант B)
+…
+43a4e95
+```
+Adds automatic detection of docs/local-refinement/PROBLEMS.md's
+Проблема 2 - a coarse voxel can physically touch two topologically
+disconnected pieces of the imported body (the motivating tooth-root
+example: two roots with an air gap between them, both touching one
+grubby voxel). Naively snapping that voxel's boundary onto the
+nearest STL point later produces a self-intersecting/inverted
+element.
+
+IsCubeIncluded now reports touchedByTriangle (true whenever any
+triangle genuinely intersects the box, regardless of which branch
+ultimately decided inclusion) - only cells the surface actually
+passes through are worth checking; a cell included purely via the
+center-inside fallback sits deep in solid material with nothing to
+split internally.
+
+HasConnectivitySplit samples a uniform 4x4x4 grid of points inside a
+candidate cell via the existing IsPointInsideViaGrid (already general
+enough for any point, not just cell centers - no new primitive
+needed), then flood-fills the "inside" samples using THIS SAME fine
+grid's own face-adjacency: more than one connected group means the
+cell straddles a real gap. Deliberately NOT a recursive octree split
+(divide into 8, recurse into each inside child on an inconclusive
+result) - an earlier version of this method did exactly that and had
+a real bug: octants adjacent BY INDEX (agree on 2 of 3 axes) aren't
+necessarily adjacent in the sense that matters - a gap narrower than
+one octant can sit entirely between two "inside" centers without
+either landing in it, silently merging two disconnected pieces into
+one group forever. Sampling everything at one fixed resolution up
+front avoids that class of bug entirely.
+
+VoxelizationResult gains a second bitmask, MarkedForRefinement, same
+shape/indexing as Occupancy - purely diagnostic today, nothing yet
+consumes it beyond the wire format and (next commit) a visual
+highlight; local refinement itself remains a separate, not-yet-built
+feature.
+
+New tests: a synthetic two-prong fixture (two 0.3-wide boxes with a
+0.2-wide gap, both fitting inside one unit voxel) marks exactly that
+voxel; a plain solid box marks nothing.
+```
+decode and visualize marked-for-refinement voxels
+…
+2defda3
+```
+Frontend counterpart to the backend's new MarkedForRefinement
+bitmask (previous commit): VoxelGridDto gains the field
+(fromVoxelGridBinary decodes the trailing bitmask, same shape as
+occupancy; withCellSet carries it forward across manual voxel
+add/delete, same reasoning as occupancy itself - a manual edit has no
+way to redo the real connectivity check, which needs the actual STL
+triangles only Solvix.Voxelization has, so "not marked" is the safe
+default for a newly added cell), isMarkedForRefinement mirrors
+isOccupied, and VoxelizationStorageService's persisted shape carries
+it through a reload the same explicit way it already does occupancy
+(JSON has no TypedArray of its own).
+
+VoxelCell itself now carries its own markedForRefinement flag (set
+from the grid in buildVoxelCells) - scene-objects/voxels.ts tints a
+marked cell's fill a distinct red-orange instead of threading the
+grid through buildVoxelPreviewFromCells just to look it up per cell.
+Purely diagnostic for now, per the explicit "just the instrument that
+marks which voxels need splitting, so I can actually see them" scope
+- no click-to-refine interaction yet, that's the separate,
+not-yet-built local refinement feature this prepares for.
+
+Every other buildVoxelGrid-style test fixture across the frontend
+(voxel-cell.spec.ts, surface-shell-grid.spec.ts, zone-painting and
+surface-zone-painting service specs, zone-list.component.spec.ts,
+mesh-api.service.spec.ts, voxelization.service.spec.ts) updated for
+the new required field/wire byte.
+```
+fix crash loading a voxelization session saved before markedForRefine…
+…
+dadeae7
+```
+…ment
+
+A session persisted before this PR's markedForRefinement field
+existed has no such key in its stored JSON at all - genuinely
+undefined, not an empty array - and Uint8Array.from(undefined)
+throws "undefined is not iterable" instead of producing an empty
+array, crashing VoxelizationService's own constructor on every
+reload for any pre-existing session (reported live: TypeError at
+VoxelizationStorageService.load).
+
+load() now falls back to an all-zero array (same shape as occupancy,
+matching Solvix.Voxelization's own convention) when the stored field
+is missing, instead of assuming it's always present. Re-voxelizing
+naturally produces the real bitmask on top of this.
+```
+OstappMelnykk
+commented
+Sep 23, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Закриваю — гілку архівуємо (refs/archive/feature/mark-connectivity-split-voxels), не мерджимо в поточному вигляді. Робота не втрачена, повернемось пізніше за потреби.
+OstappMelnykk
+closed this
+Sep 23, 2026
+OstappMelnykk
+deleted the
+feature/mark-connectivity-split-voxels
+branch
+September 23, 2026 19:25
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

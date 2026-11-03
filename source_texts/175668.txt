@@ -1,0 +1,1499 @@
+Resonant Brane Splatting for Arbitrary-Scale Super-Resolution
+Giulio Federico1,2 * Giuseppe Amato2
+1
+Claudio Gennaro2
+University of Pisa, Pisa, Italy
+2
+Fabio Carrara2
+Marco Di Benedetto2
+ISTI-CNR, Pisa, Italy
+{giulio.federico, giuseppe.amato, claudio.gennaro, fabio.carrara, marco.dibenedetto}@isti.cnr.it
+arXiv:2606.29453v3 [cs.CV] 8 Sep 2026
+Code is available at:
+https://github.com/GiulioFede/ResonantBraneSplatting.git
+Abstract
+Arbitrary-Scale Super-Resolution (ASR) reconstructs images at continuous magnification factors. Recent methods
+accelerate inference by replacing computationally heavy
+implicit neural decoders with explicit 2D Gaussian Splatting (GS). However, since standard Gaussians are smooth
+low-pass primitives, modeling edges and fine textures requires multiple overlapping, well-aligned splats, which creates severe bottlenecks during rasterization. To address
+this, we introduce Resonant Brane Splatting (RBS), a feedforward ASR framework. RBS replaces flat Gaussians with
+Branes: expressive primitives that emit spatially varying
+colors to natively model local contrast and complex textures within a single footprint. We achieve this by augmenting the standard Gaussian envelope with internal GaussianHermite modes, assigning a distinct color coefficient to
+each. The zero-order mode recovers standard GS, while
+higher-order modes capture high frequencies. We predict
+Brane parameters directly from low-resolution features. Because Branes provide a mathematically richer formulation
+than simple Gaussians, far fewer primitives need to overlap
+to reconstruct a given target pixel. To exploit this, we introduce an efficient fully differentiable rasterizer with a precise culling strategy based on the classical quantum turning point. This allows us to safely skip negligible regions,
+drastically reducing the rendering overhead. Experiments
+on standard ASR benchmarks show that RBS improves reconstruction quality over implicit and GS baselines, while
+achieving superior speed-quality trade-off than prior GS
+methods.
+Figure 1. Resonant Brane Splatting Overview. Given an LR
+input and scale factor, a backbone extracts a feature map decoded into our proposed Brane primitives, composing a continuous Brane field. Increasing primitive count and Brane complexity
+better models SR outputs. Conversely, degree-0 Branes (Gaussian
+Splatting) yield blurry results under equal primitive budgets.
+dominated ASR by learning coordinate-to-color mappings.
+While flexible, INRs require dense pixel-wise queries at inference time and suffer from spectral bias, making high frequencies difficult to reconstruct faithfully.
+Recent 2D Gaussian Splatting (GS) methods [4, 18] replace implicit decoding with explicit rendering, predicting
+primitives from LR features. While efficient, a standard
+Gaussian remains a smooth, low-pass footprint limited to
+a single color. Because a single Gaussian cannot represent
+1. Introduction
+Image Super-Resolution (SR) recovers details from lowresolution (LR) inputs, while Arbitrary-Scale SR (ASR) extends this goal to continuous magnification factors. Implicit
+Neural Representations (INRs) [2, 8, 16, 19, 29, 46, 51]
+* Corresponding author.
+1
+internal color variations, modeling sharp edges or complex
+textures forces the network to rely on the precise alignment
+and collaboration of numerous overlapping splats. This
+high degree of overlap creates a severe bottleneck, directly
+slowing down the rasterization process.
+To name our proposed 2D splatting framework for ASR
+(Fig. 1), we draw a purely conceptual analogy from MTheory [48], where vibrating multidimensional p-branes
+[14] generalize strings [39]. Our Brane primitive adopts
+the exact mathematical eigenfunctions of the Quantum Harmonic Oscillator [41], augmenting a Gaussian envelope
+with internal Gaussian-Hermite modes, that “vibrate” to
+create local structural patterns. Ultimately, the aggregation
+of these patterns constructs the complex visual matter of the
+super-resolved image.
+While prior work applied Gaussian-Hermite functions to
+spatial support [54] on 3D tasks, we uniquely use this basis
+for appearance generation. By assigning distinct color coefficients to each mode, a single Brane natively emits spatially varying colors. The zero-order mode recovers standard Gaussian splatting, while higher-order modes model
+signed color residuals. A single Brane can therefore synthesize local contrast, sharp edges, and multi-colored textures,
+representing high-frequency patterns with fewer splats. A
+feed-forward network predicts Brane parameters directly
+from LR features. Since Branes internally model complex
+textures, dense primitive overlapping is no longer required.
+To maximize inference speed, we design a custom differentiable CUDA rasterizer that bounds primitive evaluation using the quantum turning point, the exact radial threshold before Gaussian-Hermite modes exponentially decay. Safely
+culling Branes outside this boundary accelerates rendering
+well beyond standard GS.
+Our contributions are: (i) Resonant Brane Splatting, a
+Gaussian-Hermite primitive generalizing flat, single-color
+Gaussians into structured, color-generating splats; (ii) a
+feed-forward ASR framework predicting Brane geometry,
+opacity and mode-wise color coefficients from LR features; (iii) a differentiable 2D GPU/CUDA-based scaleaware rasterizer exploiting bounded Gaussian-Hermite support for faster inference; and (iv) state-of-the-art visual performance, establishing a new optimal balance between rendering speed and image quality.
+cially, these methods require scale-specific training and lack
+continuous magnification at inference.
+Arbitrary-Scale SR and Continuous Representations.
+ASR breaks integer-scale constraints by framing SR as a
+continuous representation problem [19, 43]. LIIF [8] formalized this by mapping continuous spatial coordinates
+to RGB values via an MLP. Subsequent works mitigated
+spectral bias and improved feature aggregation through
+Fourier mappings [29], Normalizing Flows [51], implicit
+attention [2], neural operators [46], and frequency encodings [6, 50]. Because dense point-wise MLP queries create severe inference bottlenecks, LMF [16] confined heavy
+computation to the LR space. However, coordinate-wise decoding still treats each output pixel independently, limiting
+data reuse across neighboring pixels and motivating explicit
+rendering alternatives based on spatial primitives.
+Splatting-Based ASR. Recently, 2D Gaussian Splatting (GS) [24] emerged as a faster ASR alternative. GaussianSR [18] blends pre-trained kernels, while
+GSASR [4] and the lightweight GRAPE [22] predict learnable anisotropic parameters. ContinuousSR [38] explicitly
+models continuous HR signals in a single pass. However,
+standard Gaussians inherently act as low-pass footprints requiring strong anisotropy for high-frequency synthesis, limiting local expressiveness and making reconstruction sensitive to splat alignment.
+Expressive Splatting Primitives. To overcome GS limitations, recent works explore modified primitives [5, 15,
+17, 21, 28, 35]. Recognizing that the standard flat-color
+assumption severely restricts textural fidelity, methods like
+Gaussian Billboards [47] and GStex [40] replace the single
+color with discrete texture grids. Alternatively, 2DGH [54],
+closely related to our work, introduces Gaussian-Hermite
+kernels to modulate the spatial footprint itself, increasing
+the kernel’s capacity to represent sharp boundaries and fine
+geometric structures during scene optimization.
+Positioning of our work. We build on the expressive
+Gaussian-Hermite primitive but differ in how appearance
+is represented. In 2DGH [54], the Gaussian-Hermite function defines the spatial opacity/support profile, while color
+remains a separate splat attribute. In contrast, we assign an
+RGB-valued coefficient to each Hermite mode, so the color
+emitted by a Brane varies according to its internal modes
+rather than being constant over the primitive. This allows
+a single primitive to model local contrast, structure, and
+multi-colored texture within the same footprint, instead of
+relying on stretched shapes or multiple overlapping splats
+to approximate high-frequency details.
+2. Related Work
+Image Super-Resolution. Fixed-scale image SuperResolution has evolved from early CNNs [11] to sophisticated architectures leveraging expanded receptive
+fields [25–27], compressed feature spaces [13], and
+Residual-in-Residual structures [31, 44, 59, 60]. Transformer models [32, 56, 58] further improved long-range dependency modeling. While diffusion models excel in perceptual SR, iterative sampling and hallucination risks hinder
+efficient, faithful reconstruction [3, 33, 49, 52, 53]. Cru2
+Figure 2. Brane Expressiveness. Left: Cropped ground truth. Right: Reconstructions varying the number of Branes (K) and GaussianHermite degrees (N, M ), where N = M = 0 corresponds to standard Gaussian Splatting. Please zoom in for details.
+3. Method
+3.1. Limitations of Splatting-Based ASR
+Given a low-resolution input image ILR ∈ RH×W ×3
+and a continuous target scale factor s ∈ R+ , ArbitraryScale Super-Resolution predicts an output image ISR ∈
+RHSR ×WSR ×3 with HSR = ⌊Hs⌋ and WSR = ⌊W s⌋. We
+follow the splatting-based ASR framework of GSASR [4]:
+a neural backbone extracts a dense feature map F̂ ∈
+RĤ×Ŵ ×C . To increase its spatial density, it can be optionally upsampled by a factor u ∈ N+ , obtaining F ∈
+′
+′
+RH ×W ×C , with H ′ = uĤ and W ′ = uŴ . Each feature
+vector in F predicts one spatial primitive to be rendered at
+the target resolution. Let K = H ′ W ′ be the number of
+primitives and let fk ∈ RC denote the feature associated
+with the k-th grid cell. Each primitive is anchored in the
+normalized image domain [0, 1]2 and contributes to the final color C(u, v) of a target pixel (u, v) through explicit
+rasterization. In standard Gaussian splatting,
+C(u, v) =
+K
+X
+αk E(x′k , yk′ )ck ,
+Figure 3. Visualization of 2D Gaussian-Hermite modes. The
+zero-order mode recovers the standard Gaussian splat, while
+higher-order modes introduce signed spatial variations within the
+same footprint. For each mode, the turning point Rmax is shown
+in dashed green; beyond this radius, the mode contribution decays
+exponentially.
+(1)
+single-color footprint.
+We define the Brane in a local 2D canonical space. The
+spatial boundary is governed by the same Gaussian envelope E(x, y). Inside this envelope, we use normalized Hermite polynomials [23]
+k=1
+where each primitive k has a single color vector ck ∈
+[0, 1]3 , an opacity αk , a Gaussian
+spatial envelope
+
+E(x, y) = exp − 12 (x2 + y 2 ) computed at the local
+canonical coordinates (x′k , yk′ ) of pixel (u, v).
+This formulation is efficient, but the primitive is locally
+limited: the color is constant over the footprint and all highfrequency structure must be explained through geometry
+and overlap with neighboring splats.
+1
+Hn (z), where
+2n n!
+H0 (z) = 1,
+H1 (z) = 2z, and
+H̄n (z) = √
+Hn (z) = 2zHn−1 (z) − 2(n − 1)Hn−2 (z) for n > 1 .
+(2)
+Here, Hn (z) is the physicist’s Hermite polynomial of degree n, that can be computed efficiently via the above recursive relation [9]. The normalization removes the dominant degree-dependent growth of Hn , improving numerical
+stability when using higher-order modes.
+Local 2D variations inside the Gaussian envelope can be
+expressed by combining one-dimensional Hermite modes
+along the canonical axes. A 2D mode of degree (n, m) is
+3.2. Resonant Brane Primitive
+To overcome this bottleneck, we replace each flat Gaussian
+splat with a Resonant Brane. A Brane keeps the Gaussian
+envelope of Eq. 1, but augments it with internal GaussianHermite modes. Just as these modes describe the localized
+vibrational states of a Quantum Harmonic Oscillator [41],
+they define higher-order polynomial patterns inside the exact same spatial support. This allows the primitive to represent complex internal structure instead of behaving as a flat,
+3
+given by the tensor product
+Ψn,m (x, y) = H̄n (x)H̄m (y) .
+(3)
+Figure 3 shows 2D modes when varying the degree (n, m).
+Gaussian-Hermite functions have already been used in
+splatting to make the spatial support (i.e., the shape of the
+opacity kernel) more expressive than an ellipse [54]. We
+use the same modal basis but to model appearance. Instead
+of assigning one color to the whole primitive, we assign its
+own color coefficient cn,m ∈ R3 to each mode. The Brane
+emission is therefore
+B(x, y) = αE(x, y)
+N X
+M
+X
+cn,m Ψn,m (x, y) .
+Figure 4. Effect of Brane parameters. Mode colors control the
+internal appearance of the primitive, while footprint and opacity
+control where and how strongly the Brane contributes.
+(4)
+n=0 m=0
+Figure 4 shows the effect of parameters on appearance.
+Mode colors. Given maximum degrees N and M , each
+Brane has L = (N + 1)(M + 1) modes. A dedicated head
+predicts all raw mode colors
+This makes a Brane a color-generating primitive. The zeroorder mode (N = M = 0) gives B(x, y) = αE(x, y)c0,0 ,
+which is exactly a standard Gaussian splat. Higher-order
+modes instead act as signed color residuals. They can
+add or subtract color locally inside the same footprint, allowing one primitive to synthesize local contrast, edges,
+and multi-colored textures without decomposing them into
+many small or highly anisotropic Gaussians (Fig. 2).
+C̃k = MLPθ2 (fk ) ∈ R3L .
+3.3. Predicting Branes from LR Features
+We now map the Brane primitive to ASR. The feature grid
+F defines K = H ′ W ′ Branes over the normalized image
+domain. For each feature vector fk , the network predicts
+the full Brane state
+#
+"
+∆xk , ∆yk , σx,k , σy,k , ρk , αk , c0,0,k , . . . , cN,M,k
+{z
+} |
+{z
+} .
+Φk = | {z } |
+anchoring
+footprint & opacity
+(∆xk , ∆yk ) = MLPθ1 (fk ) ,
+3.4. Differentiable Rasterization
+For the k-th Brane, we compute the displacement from its
+center as
+(δxk , δyk ) = (unorm − xk , vnorm − yk )
+(7)
+∆yk
+.
+H′
+(8)
+Footprint and opacity. Additional heads predict the
+anisotropic scales, rotation, and opacity as
+(σx,k , σy,k ) = sigmoid(MLPθ3 (fk )),
+(9)
+ρk = π tanh(MLPθ4 (fk )),
+(10)
+αk = sigmoid(MLPθ5 (fk )).
+(11)
+(15)
+that is then mapped to the local canonical coordinates
+through inverse rotation and scaling
+!
+ ′
+
+
+1
+0
+xk
+cos ρk
+sin ρk
+δxk
+σx,k
+=
+.
+1
+− sin ρk cos ρk
+δyk
+yk′
+0
+σy,k
+(16)
+The final RGB value C(u, v) is obtained by additively splatting all active Branes
+yielding the final center (xk , yk ) as
+yk = ykref +
+Thus, c0,0
+k defines the smooth base color, while higher-order
+coefficients can add or subtract color inside the footprint.
+To render the output image, each target pixel (u, v) is first
+projected into normalized coordinates
+
+
+u + 0.5 v + 0.5
+(unorm , vnorm ) =
+,
+.
+(14)
+WSR
+HSR
+To allow sub-pixel adaptation, an MLP head predicts continuous offsets
+∆xk
+,
+W′
+We reshape this vector into L color coefficients c̃n,m
+∈ R3 .
+k
+The zero-order coefficient is constrained to a positive color
+range, while higher-order modes are signed residuals:
+(
+sigmoid(c̃n,m
+), n = 0, m = 0,
+n,m
+k
+ck =
+(13)
+n,m
+tanh(c̃k ),
+otherwise.
+mode colors
+(5)
+Geometric anchoring. The k-th Brane is initially anchored
+at the center of its feature grid cell
+
+
+j + 0.5 i + 0.5
+ref
+(xref
+,
+y
+)
+=
+,
+.
+(6)
+k
+k
+W′
+H′
+xk = xref
+k +
+(12)
+C(u, v) =
+K
+X
+k=1
+αk E(x′k , yk′ )
+N X
+M
+X
+cn,m,k H̄n (x′k )H̄m (yk′ ).
+n=0 m=0
+(17)
+4
+Figure 5. Rasterization and culling. Decoded LR features form a continuous Brane space where sampling grid resolution dictates SR
+resolution (left). Target pixel color is computed by culling primitives outside box dmax or beyond quantum turning point Rmax (right).
+4. Experiments
+Culling Branes. Dense evaluation across all Branes and
+pixels requires O(KHSR WSR ) operations. Our CUDA
+rasterizer (Algorithm 1) avoids this via a dual culling strategy to efficiently determine the final color of each pixel.
+First, we map the target pixel into the continuous Brane field
+and define a bounding region around it using dmax , which
+represents a specific fraction of this normalized space. We
+restrict our evaluation strictly to the candidate Branes located inside this area. Second, to accelerate rendering further, we filter these surviving Branes by evaluating only
+those with a meaningful contribution. We achieve this using a canonical space boundary
+√ check based on the quantum turning point Rmax = 2nmax + 1 [41], that is the
+radius beyond which the visual impact of a Brane with maximum degree nmax = max (N, M ) is empirically negligi2
+2
+2
+.
+ble. Thus, we discard candidates where x′k + yk′ > Rmax
+4.1. Experimental Setup
+Implementation details. We adopt the GSASR [4]
+pipeline, using EDSR [34] or RDN [60] as the baseline extractor. Features are refined by a Transformer and upsampled to F ∈ RuH×uW ×180 , replacing standard 2D Gaussian
+projection heads with our Brane parameter heads (Eq. 5)
+and using our rasterizer. We test u ∈ {1, 2, 4} to vary the
+number of generated primitives, isolating the Brane’s true
+expressive power from the capacity of a large decoder. We
+set Hermite degree N = M = 3. Crucially, base colors use
+a Sigmoid activation while oscillatory residuals use Tanh;
+we avoid hard clipping during additive blending, letting the
+end-to-end L1 supervision natively bound the final rendering within the [0, 1]. For training on DIV2K [42], a 48 × 48
+LR patch at continuous scale s is rendered to ⌊48s⌋2 and
+optimized via L1 loss against the HR crop. We train with
+Adam for 500k iterations (s ∼ U (1, 4), initial LR 10−4
+halved every 100k steps), on three H100 GPUs.
+Algorithm 1 Differentiable CUDA rasterization of Resonant Branes
+Require: Branes {Bk }K
+k=1 , output size (HSR , WSR ),
+bounding box dmax , maximum degree nmax
+Ensure: Rendered image ISR
+1: Initialize ISR as zeros
+2
+2: Rmax
+← 2nmax + 1
+3: for each Brane Bk do
+4:
+Initialize Φk from Bk
+5:
+for each pixel (u, v) in ISR do
+v+0.5
+6:
+unorm , vnorm ← u+0.5
+sW , sH
+7:
+δxk , δyk ← unorm − xk , vnorm − yk
+8:
+if |δxk | < dmax and |δyk | < dmax then
+9:
+Obtain x′k , yk′ using Eq. 16
+2
+2
+2
+10:
+if x′k + yk′ ≤ Rmax
+then
+′
+11:
+Obtain Bk (xk , yk′ ) using Eq. 4
+12:
+ISR (u, v) ← ISR (u, v) + Bk (x′k , yk′ )
+13:
+end if
+14:
+end if
+15:
+end for
+16: end for
+Compared models. We compare against leading implicit
+(Meta-SR [19], LIIF [8], LTE [29], SRNO [46], LINF [51],
+CiaoSR [2], LMF [16]) and explicit (ContinuousSR [38],
+GRAPE [22], GaussianSR [18], GSASR [4]) methods. To
+explore alternative 3D primitives in 2D ASR, we integrated
+2DGH [54] and Gaussian Billboards (GB) [47] into our rasterizer and retrained from scratch. These validate our design: GB contrasts our continuous color with discrete grids,
+while with 2DGH we prove that Hermite bases favor internal color over spatial deformation.
+Evaluation protocol. We evaluate on Set5 [1],
+Set14 [55], DIV2K [42], Urban100 [20], BSDS100 [36],
+Manga109 [37], General100 [12], LSDIR [30] at
+standard (s ∈ {2, 3, 4, 6, 8, 12}) and extreme scales
+(s ∈ {16, 18, 24, 30}, see Supp.), reporting Y-channel
+PSNR/SSIM [45], LPIPS [57], and DISTS [10]. Following [4], efficiency is benchmarked on an H100 with fixed
+7202 DIV2K HR crops. Larger scales process smaller LR
+5
+PSNR ↑
+Method
+×2
+×3
+×4
+×6
+SSIM ↑ (×100)
+×8
+×12
+×2
+×3
+×4
+×6
+LPIPS ↓ (×100)
+×8
+×12
+DISTS ↓ (×100)
+×2
+×3
+×4
+×6
+×8
+×12
+×2
+×3
+×4
+×6
+×8
+×12
+5.52
+5.69
+5.52
+5.18
+5.69
+5.57
+5.34
+13.81
+13.82
+13.73
+13.32
+13.99
+13.35
+13.34
+20.62
+20.77
+20.47
+19.87
+20.90
+20.20
+19.66
+31.58
+30.99
+32.20
+31.48
+31.55
+31.69
+29.50
+40.22
+39.03
+41.07
+40.11
+40.10
+40.37
+37.33
+53.32
+51.98
+54.77
+53.74
+53.65
+54.03
+50.05
+6.66
+6.66
+6.60
+6.40
+6.71
+6.59
+6.38
+11.94
+11.94
+11.86
+11.58
+12.08
+11.67
+11.34
+15.62
+16.12
+16.00
+15.63
+16.36
+15.89
+15.59
+20.84
+21.76
+21.60
+21.10
+22.17
+21.49
+21.11
+25.12
+25.91
+25.86
+25.20
+26.57
+25.80
+25.07
+31.44
+32.09
+32.16
+31.49
+33.04
+32.16
+31.14
+Implicit Methods
+Meta-SR
+LIIF
+LTE
+SRNO
+LINF
+LMF
+Ciao-SR
+33.04
+32.84
+33.00
+33.27
+32.87
+33.08
+33.30
+28.94
+28.81
+28.96
+29.12
+28.82
+29.11
+29.17
+26.71
+26.67
+26.80
+26.97
+26.69
+26.94
+27.10
+24.07
+24.19
+24.27
+24.42
+24.18
+24.39
+24.58
+22.64
+22.78
+22.86
+23.01
+22.77
+22.97
+23.13
+21.00
+21.15
+21.22
+21.35
+21.12
+21.33
+21.44
+93.63
+93.53
+93.65
+93.90
+93.50
+93.71
+93.88
+86.77
+86.64
+86.86
+87.14
+86.58
+87.09
+87.16
+80.55
+80.41
+80.74
+81.19
+80.39
+81.04
+81.42
+69.66
+70.28
+70.58
+71.13
+70.10
+71.02
+71.73
+62.13
+63.38
+63.62
+64.23
+63.05
+64.08
+64.84
+53.17
+54.99
+55.14
+55.71
+54.62
+55.61
+56.37
+Gaussian-SR
+GSASR
+GRAPE
+CSR*
+32.96
+33.53
+30.08
+-
+28.93
+29.35
+27.61
+28.48
+26.77
+27.15
+25.86
+26.50
+24.16
+24.63
+23.51
+24.25
+22.64
+23.19
+22.24
+22.95
+20.84
+21.47
+20.74
+21.41
+93.63
+94.06
+91.69
+-
+86.80
+87.60
+83.65
+86.83
+80.64
+81.77
+78.06
+81.04
+69.96
+72.14
+66.59
+71.83
+62.34
+65.22
+59.70
+65.05
+53.19
+56.70
+51.85
+56.62
+5.63
+5.07
+6.67
+-
+13.84
+12.94
+15.41
+13.56
+20.69
+19.53
+23.22
+20.80
+32.41
+29.43
+32.83
+30.37
+42.49
+37.23
+43.27
+39.82
+59.29
+49.27
+58.48
+52.36
+6.65
+6.17
+7.59
+-
+11.96
+11.26
+13.76
+11.49
+16.10
+15.15
+17.21
+15.41
+21.91
+20.64
+23.40
+20.98
+27.04
+24.60
+27.59
+24.87
+34.85
+30.72
+33.80
+30.84
+RBS (u = 1) (ours)
+RBS (u = 2) (ours)
+RBS (u = 4) (ours)
+33.73
+33.91
+33.81
+29.67
+29.93
+29.85
+27.30
+27.62
+27.58
+24.56
+24.86
+24.86
+23.10
+23.32
+23.33
+21.38
+21.51
+21.51
+94.20
+94.29
+94.28
+87.96
+88.33
+88.29
+81.95
+82.74
+82.72
+71.73
+72.96
+73.05
+64.62
+65.88
+66.06
+56.07
+57.19
+57.46
+4.89
+4.83
+4.70
+12.24
+12.22
+12.02
+19.42
+18.73
+18.38
+31.79
+28.63
+27.90
+40.84
+36.53
+35.70
+55.02
+48.95
+47.88
+6.05
+6.11
+5.95
+10.69
+11.12
+10.99
+14.38
+15.07
+15.05
+20.53
+20.78
+20.99
+25.21
+24.87
+25.14
+31.91
+30.99
+31.12
+Explicit Methods
+Table 1. Quantitative results of Implicit and Explicit ASR models on Urban100 [20]. All models use the RDN [60] backbone, except
+GRAPE [22] (EDSR [34]) and ContinuousSR [38] (CSR*) (HAT [7]), as the only provided by their authors. We omit the ×2 results for
+CSR* (-) due to a bug in its architecture at this specific scale. Best results are in bold; PSNR and SSIM are computed on the Y channel.
+Inference Time (ms) ↓
+Methods
+×2
+×3
+×4
+GPU Memory (MB) ↓
+×6 ×8 ×12
+×2
+×3
+×4
+×6
+×8
+×12
+8,344
+389
+566
+6,354
+3,516
+5,764
+3,390
+8,265 8,236
+345 328
+315 302
+6,350 6,348
+3,475 3,462
+5,517 5,431
+1,625 1,583
+8,216
+317
+293
+6,347
+3,451
+5,369
+1,549
+Implicit Methods
+Meta-SR
+LIIF
+LTE
+SRNO
+LINF
+LMF
+CiaoSR
+178 104
+82
+518 486 220
+254 181 153
+236 163 150
+202 128 101
+311 172 113
+23,711 2,064 1,202
+69 55
+201 187
+136 128
+118 107
+84 77
+94 80
+736 633
+58 8,775 8,454
+178 1,246
+610
+129 1,970
+930
+114 6,381 6,361
+78 3,732 3,571
+110 7,096 6,108
+546 49,231 10,081
+GaussianSR
+GSASR
+CSR*
+GRAPE
+1,280
+1,679
+938
+16
+955
+857
+421
+10
+824 751 702 701 5,278
+572 284 206 98 13,535
+273 133 88 69 6,042
+8
+6
+6
+5 2,615
+5,216 5,130 5,301 5,092 5,291
+6,080 3,500 1,658 1,132 553
+2,868 1,918 1,070 771 559
+1,173 668 306 181
+90
+433
+499
+701
+223
+242
+337
+119
+140
+197
+1,002 701 417 334
+1,845 1,121 605 459
+6,286 3,622 1,720 1,174
+Explicit Methods
+RBS (u = 1) (ours)
+RBS (u = 2) (ours)
+RBS (u = 4) (ours)
+64
+73
+92
+57
+62
+72
+49 2,243
+50 3,910
+51 13,896
+Figure 6. Brane vibration energy across scales. Energy is the
+opacity-weighted (α) sum of absolute mode coefficients. As scale
+increases and primitive counts drop, Branes compensate via higher
+vibration energy instead of dense overlap, keeping our reduced
+variants (RBS (u = 2) and RBS (u = 1)) highly competitive.
+246
+296
+578
+Table 2. Computational costs. Evaluated on 7202 DIV2K [42]
+HR targets with RDN [60] (larger scales ⇒ smaller inputs ⇒
+lower costs). We report time (ms) and memory (MB). *ContinuousSR uses HAT [7]; GRAPE uses EDSR [34]. Best in bold.
+Brane expressiveness enables massive primitive reduction. By scaling down the feature upsampling stage from
+u = 4 to u = 2 and u = 1, we reduce the generated primitives by 4× and 16×. To compensate, Branes natively vibrate with higher energy (Fig. 6), capturing complex regions
+without relying on dense overlap. While standard RBS
+(u = 4) is required to establish the definitive state-of-the-art
+across all benchmarks, RBS (u = 2) emerges as the optimal
+quality-efficiency trade-off (details in Supp. Material). As
+shown in Table 2, at the demanding ×2 scale, it drops memory from standard 13.9 GB down to just 3.9 GB. Remarkably, RBS (u = 1) pushes efficiency even further: despite a
+16× primitive reduction, it still outperforms GSASR [4] at
+×2–×4 scales while slashing the ×2 memory footprint by
+∼ 84% (to 2.2 GB), vastly outperforming the lightweight
+GRAPE [22] using similar memory consumption.
+inputs, naturally reducing primitives, memory, and runtime.
+4.2. Discussion
+Brane vs. Gaussian: higher quality at equal primitive
+count. Table 1 evaluates RBS for u ∈ {4, 2, 1} on Urban100 [20] — the hardest benchmark given its intricate
+structural details (others in Supp.). As explained in Implementation details (Sec. 4.1), u determines the C×uH ×uW
+resolution of the final feature map F extracted by the decoder from the LR image. Since each spatial feature of F is
+decoded into a Brane, increasing u means using more primitives during rasterization. GSASR [4] uses u = 4; matching
+it against RBS (u = 4) thus ensures a strictly fair comparison under identical decoder capacity and primitive count
+(4H ·4W ). This isolates our advantage: at equal count, RBS
+achieves superior metrics with comparable memory (Tab. 2)
+and sharper textures (Fig. 7), proving Branes intrinsically
+outperform Gaussians.
+Internal expressiveness minimizes overlap and accelerates rendering. The speedups in Table 2 stem from alleviating the rasterization bottleneck. Standard Gaussians
+emit flat colors, requiring heavy overlap to resolve high frequencies. Branes instead model multi-colored textures internally, drastically reducing this overlap. Furthermore, be6
+Figure 7. Qualitative results. Visual comparison between RBS and several competing methods across different scale factors, using RDN
+[60] as the backbone network. Detailed results for each model are provided in the Supplementary Material.
+cause their envelope decays predictably, our CUDA rasterizer strictly discards evaluations beyond the quantum turning point (Rmax ). Applying this exact boundary check to a
+natively sparser field directly accelerates rendering.
+The worst-case scenario: simple benchmarks. While
+RBS excels on complex textures, it struggles on smooth
+datasets like Set5 (full evaluation in Supp.). Flat Gaussians
+are natively optimal here, whereas RBS must expend capacity suppressing higher-order modes to collapse Branes into
+flat envelopes. Consequently (Table 3), RBS slightly trails
+GSASR in PSNR/SSIM, though it surprisingly retains an
+edge in perceptual metrics (LPIPS/DISTS).
+×2
+Method
+×4
+×8
+RBS
+GB
+2DGH
+PSNR ↑ LPIPS ↓ PSNR ↑ LPIPS ↓ PSNR ↑ LPIPS ↓ PSNR ↑ LPIPS ↓
+SSIM ↑ DISTS ↓ SSIM ↑ DISTS ↓ SSIM ↑ DISTS ↓ SSIM ↑ DISTS ↓
+38.38
+0.9621
+0.0510
+0.0767
+32.83
+0.9027
+0.1688
+0.1551
+27.52
+0.7937
+0.2788
+0.2285
+24.68
+0.7053
+0.3813
+0.2820
+RBS (u = 4)
+38.28
+0.9618
+0.0508
+0.0755
+32.77
+0.9021
+0.1646
+0.1535
+27.44
+0.7924
+0.2747
+0.2262
+24.65
+0.7082
+0.3755
+0.2814
+×6
+×12
+PSNR ↑ SSIM ↑ Time ↓ PSNR ↑ SSIM ↑ Time ↓ PSNR ↑ SSIM ↑ Time ↓
+×12
+GSASR
+×3
+Method
+29.98
+29.68
+29.32
+0.8836
+0.8779
+0.8748
+∼307
+∼838
+∼838
+25.08
+24.71
+24.51
+0.7381
+0.7211
+0.7201
+∼88
+∼282
+∼282
+21.71
+21.48
+21.44
+0.5893
+0.5679
+0.5654
+∼45
+∼92
+∼92
+Figure 8. Alternative primitives. Top: Reconstruction vs. primitive count (K). For equal capacity, RBS and 2DGH [54] use
+N = M = 12, matching a 13 × 13 grid in Gaussian Billboards
+(GB) [47]. Bottom: Results on Urban100 [20] using EDSR[34].
+Table 3. Worst-case scenario on Set5.
+Alternative primitives. We adapted 2DGH [54] and
+Gaussian Billboards (GB) [47] to our rasterizer, retraining
+both from scratch (Fig. 8). The single-primitive visualization (K = 1, Fig. 8 Top) highlights our divergence. 2DGH
+deforms its footprint but still emits a flat color; its arbitrary
+shape prevents exact boundary culling, while its flat color
+representation still forces the use of dense overlapping. As
+acknowledged [54], this makes 2DGH slower than standard
+GS. In contrast to 2DGH, GB replaces flat colors with a
+discrete learnable N × N grid, and Fig. 8 shows how this
+approach outperforms 2DGH, already proving that internal
+color complexity inherently beats complex shapes. However, GB (as well as GSTex [40], which adapts grid resolution to primitive size) remains discrete. RBS instead models
+color continuously, which perfectly suits the continuous nature of ASR, yielding superior accuracy (Fig. 8, Bottom).
+7
+Figure 9. Impact of Brane degree. Higher-order modes (N =
+M ∈ {2, 3, 5}) progressively capture sharper details and complex
+textures than standard Gaussians (N = M = 0).
+Scale (PSNR / SSIM)
+Model
+×2
+Ablation Type
+w/o Regularization
+37.82 0.9522
+37.82 0.9522
+w/ Fine-Tuning
+Sparsity Loss (λsparse = 0.1)
+37.14 0.9514
+Sparsity Loss (λsparse = 0.001) 37.54 0.9520
+Sparsity Loss (λsparse = 0.0005) 37.79 0.9524
+Scales
+Metric
+×2
+Feature Extractor: Advantage of using EDSR over RDN
+Speed-up ↑
++10.05%
+Mem. Saving ↑
++0.58%
+EDSR vs RDN
+-0.14%
+PSNR ∆ ↑
+SSIM ∆ ↑
+-0.02%
+×4
+×8
+×12
++11.30%
++2.21%
+-0.10%
+-0.09%
++12.50%
++6.90%
++0.00%
+-0.01%
++13.33%
++13.84%
+-0.04%
++0.13%
+Culling Strategy: Rasterization Speedup with Rmax Enabled
++59.24%
++65.07%
+Time Saving ↑
+Rmax Active
+PSNR/SSIM ∆ ↑
+0.00%
+0.00%
++63.82%
+0.00%
++47.42%
+0.00%
+Color Space: Performance impact of using YCbCr over RGB
+PSNR ∆ ↑
+-0.69%
+-0.94%
+YCbCr vs RGB
+SSIM ∆ ↑
+-0.07%
+-0.59%
+-0.81%
+-1.00%
+-0.79%
+-0.92%
++0.04% / +0.07%
+PSNR/SSIM ∆ ↑
++0.05% / +0.01%
++0.06% / +0.07%
++0.00% / +0.00%
+N =M =3
+PSNR/SSIM ∆ ↑
++0.45% / +0.03%
++0.28% / +0.06%
++0.07% / +0.00%
++0.08% / +0.13%
+N =M =5
+PSNR/SSIM ∆ ↑
++0.64% / +0.07%
++0.44% / +0.16%
++0.32% / +0.23%
++0.34% / +0.44%
+N =M =7
+PSNR/SSIM ∆ ↑
++0.51% / +0.04%
++0.41% / +0.12%
++0.32% / +0.20%
++0.34% / +0.41%
+34.02
+34.08
+33.83
+34.01
+34.04
+0.9007
+0.9012
+0.8992
+0.9003
+0.9008
+×4
+32.00
+32.04
+31.87
+31.99
+32.02
+w/o Adaptive Mode Culling
+w/ Adaptive Mode Culling
+×6
+0.8541
+0.8546
+0.8524
+0.8537
+0.8537
+29.66
+29.71
+29.54
+29.65
+29.69
+0.7844
+0.7861
+0.7820
+0.7842
+0.7860
+×8
+28.23
+28.28
+28.14
+28.23
+28.27
+0.7384
+0.7414
+0.7359
+0.7382
+0.7412
+×12
+26.49
+26.54
+26.42
+26.50
+26.52
+0.6847
+0.6888
+0.6826
+0.6852
+0.6883
+Time
+Model
+×2
+×3
+×4
+×6
+×8
+×12
+701
+698
+223
+220
+119
+114
+64
+61
+57
+53
+49
+41
+Figure 10. Regularization and Mode Culling. Top: Fine-tuning
+and sparsity loss reduce excessive vibration in smooth regions.
+Middle: Quantitative comparison of both methods. Bottom: Inference speedups from Adaptive Mode Culling.
+Hermite degree: Advantage of N = M over Baseline (N = M = 0)
+N =M =2
+×3
+Table 4. Ablation study of the key components of RBS.
+Middle). To prove this energy reallocation, we tested an
+explicit route by addingPa sparsity
+loss to the L1 objecK P
+1
+tive: Lsparse = λsparse K
+k=1
+n+m>0 ∥cn,m,k ∥1 . While
+an aggressive penalty (λsparse = 0.1) stifles details, a tuned
+weight (λsparse = 0.0005) yields results virtually identical to
+the fine-tuned model. This supports that fine-tuning induces
+the exact “energy awareness” that Lsparse enforces directly.
+4.3. Ablation Study
+Ablation on key components. Table 4 ablates core designs on DIV2K [42] test set (full study in Supp.). Swapping RDN for EDSR trades minor quality for progressive
+efficiency gains (e.g., +13.8% memory at ×12). Crucially,
+Rmax culling accelerates rendering up to 65% without quality loss, proving Branes resolve complexity without dense
+overlap. Shifting to YCbCr slightly degrades performance:
+our single MLP struggles to balance asymmetric distributions (vibrating Y vs. flat Cb/Cr) compared to correlated
+RGB. Increasing Hermite degrees to N = M = 5 captures
+sharper details (Fig. 9), but predicting excessive modes
+(N = M = 7) in a single pass hampers generalization and
+causes smooth-region artifacts, addressed below.
+Adaptive Mode Culling. Fine-tuning and Lsparse train the
+model to zero unneeded coefficients, which our CUDA rasterizer can exploit via Adaptive Mode Culling. If a mode’s
+RGB coefficients are < 10−4 , it skips Hermite evaluation
+and color accumulation. By filtering this near-zero noise, it
+primarily yields modest speedups (given our already highly
+efficient rasterizer) with zero quality loss (Fig. 10, bottom).
+5. Conclusion
+We introduced Resonant Brane Splatting for ArbitraryScale Super-Resolution, proposing the Brane primitive. By
+internally modeling complex colors, Branes avoid the dense
+overlap required by Gaussian Splatting. This saves memory and accelerates inference, with rasterization further optimized via the quantum turning point. Though sparsity
+and fine-tuning mitigate extreme-scale smooth-region oscillations, perfect generalization remains future work. Overall,
+RBS balances expressive reconstruction with efficiency.
+Limitations and Regularization. As visualized (Fig. 6),
+Branes vibrate intensely at larger scales to compensate for
+primitive sparsity. However, training strictly on s ∈ U(1, 4)
+fails to suppress these oscillations when generalizing to
+smooth regions at higher scales. Here, over-expressing
+modes injects spurious spatial frequencies, causing aliasing artifacts (Fig. 10 Top). Fine-tuning on s ∈ U(1, 8)
+provides an implicit solution: exposed to smoother targets,
+the model naturally dampens coefficients (cn,m → 0 for
+n + m > 0) in flat areas, recovering performance (Fig. 10
+8
+References
+[13] Chao Dong, Chen Change Loy, and Xiaoou Tang. Accelerating the super-resolution convolutional neural network. In
+European conference on computer vision, pages 391–407.
+Springer, 2016. 2
+[14] Michael J Duff. M theory (the theory formerly known as
+strings). In The World in Eleven Dimensions, pages 416–
+434. CRC Press, 1999. 2
+[15] Abdullah Hamdi, Luke Melas-Kyriazi, Jinjie Mai, Guocheng
+Qian, Ruoshi Liu, Carl Vondrick, Bernard Ghanem, and
+Andrea Vedaldi. Ges : Generalized exponential splatting
+for efficient radiance field rendering. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), pages 19812–19822, 2024. 2
+[16] Zongyao He and Zhi Jin. Latent modulated function for computational optimal continuous image representation. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR), pages 26026–26035, 2024.
+1, 2, 5
+[17] Jan Held, Renaud Vandeghen, Abdullah Hamdi, Adrien
+Deliege, Anthony Cioppa, Silvio Giancola, Andrea Vedaldi,
+Bernard Ghanem, and Marc Van Droogenbroeck. 3d convex splatting: Radiance field rendering with 3d smooth convexes. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 21360–
+21369, 2025. 2
+[18] Jintong Hu, Bin Xia, Bin Chen, Wenming Yang, and Lei
+Zhang. Gaussiansr: High fidelity 2d gaussian splatting for
+arbitrary-scale image super-resolution. In Proceedings of
+the AAAI Conference on Artificial Intelligence, pages 3554–
+3562, 2025. 1, 2, 5
+[19] Xuecai Hu, Haoyuan Mu, Xiangyu Zhang, Zilei Wang,
+Tieniu Tan, and Jian Sun. Meta-sr: A magnificationarbitrary network for super-resolution. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 1575–1584, 2019. 1, 2, 5
+[20] Jia-Bin Huang, Abhishek Singh, and Narendra Ahuja. Single image super-resolution from transformed self-exemplars.
+In Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition (CVPR), 2015. 5, 6, 7
+[21] Yi-Hua Huang, Ming-Xian Lin, Yang-Tian Sun, Ziyi Yang,
+Xiaoyang Lyu, Yan-Pei Cao, and Xiaojuan Qi. Deformable
+radial kernel splatting. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition
+(CVPR), pages 21513–21523, 2025. 2
+[22] Jung In Jang and Kyong Hwan Jin. Grape (gaussian rendering for accelerated pixel enhancement) brings fast and
+lightweight arbitrary super-resolution. In Proceedings of the
+IEEE/CVF Winter Conference on Applications of Computer
+Vision (WACV), pages 7750–7758, 2026. 2, 5, 6
+[23] William Johnston. The weighted hermite polynomials form
+a basis for l2(r). The American Mathematical Monthly, 121
+(3):249–253, 2014. 3
+[24] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler,
+George Drettakis, et al. 3d gaussian splatting for real-time
+radiance field rendering. ACM Trans. Graph., 42(4):139–1,
+2023. 2
+[25] Jiwon Kim, Jung Kwon Lee, and Kyoung Mu Lee. Accurate
+image super-resolution using very deep convolutional net-
+[1] Marco Bevilacqua, Aline Roumy, Christine Guillemot, and
+Marie-Line Alberi Morel. Low-Complexity Single-Image
+Super-Resolution based on Nonnegative Neighbor Embedding. In British Machine Vision Conference (BMVC), Guildford, Surrey, United Kingdom, 2012. 5
+[2] Jiezhang Cao, Qin Wang, Yongqin Xian, Yawei Li, Bingbing
+Ni, Zhiming Pi, Kai Zhang, Yulun Zhang, Radu Timofte,
+and Luc Van Gool. Ciaosr: Continuous implicit attention-inattention network for arbitrary-scale image super-resolution.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 1796–1807, 2023. 1,
+2, 5
+[3] Du Chen, Zhengqiang Zhang, Jie Liang, and Lei Zhang. Ssl:
+A self-similarity loss for improving generative image superresolution. In Proceedings of the 32nd ACM International
+Conference on Multimedia, pages 3189–3198, 2024. 2
+[4] Du Chen, Liyi Chen, Zhengqiang Zhang, and Lei Zhang.
+Generalized and efficient 2d gaussian splatting for arbitraryscale super-resolution. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV), pages
+26435–26445, 2025. 1, 2, 3, 5, 6
+[5] Haodong Chen, Runnan Chen, Qiang Qu, Zhaoqing Wang,
+Tongliang Liu, Xiaoming Chen, and Yuk Ying Chung. Beyond gaussians: Fast and high-fidelity 3d splatting with linear kernels. arXiv preprint arXiv:2411.12440, 2024. 2
+[6] Hao-Wei Chen, Yu-Syuan Xu, Min-Fong Hong, Yi-Min
+Tsai, Hsien-Kai Kuo, and Chun-Yi Lee. Cascaded local
+implicit transformer for arbitrary-scale super-resolution. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 18257–18267,
+2023. 2
+[7] Xiangyu Chen, Xintao Wang, Wenlong Zhang, Xiangtao
+Kong, Yu Qiao, Jiantao Zhou, and Chao Dong. Hat: Hybrid
+attention transformer for image restoration. IEEE Transactions on Pattern Analysis and Machine Intelligence, 48(3):
+2676–2694, 2026. 6
+[8] Yinbo Chen, Sifei Liu, and Xiaolong Wang. Learning
+continuous image representation with local implicit image
+function. In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition, pages 8628–8638,
+2021. 1, 2, 5
+[9] Tom P Davis. A general expression for hermite expansions
+with applications. The Mathematics Enthusiast, 21(1):71–
+87, 2024. 3
+[10] Keyan Ding, Kede Ma, Shiqi Wang, and Eero P. Simoncelli.
+Image quality assessment: Unifying structure and texture
+similarity. IEEE Transactions on Pattern Analysis and Machine Intelligence, 44(5):2567–2581, 2022. 5
+[11] Chao Dong, Chen Change Loy, Kaiming He, and Xiaoou
+Tang. Learning a deep convolutional network for image
+super-resolution. In European conference on computer vision, pages 184–199. Springer, 2014. 2
+[12] Chao Dong, Chen Change Loy, and Xiaoou Tang. Accelerating the super-resolution convolutional neural network.
+In Computer Vision – ECCV 2016, pages 391–407, Cham,
+2016. Springer International Publishing. 5
+9
+Sketch-based manga retrieval using manga109 dataset. Multimedia tools and applications, 76(20):21811–21838, 2017.
+5
+[38] Long Peng, Anran Wu, Wenbo Li, Peizhe Xia, Xueyuan
+Dai, Xinjie Zhang, Xin Di, Haoze Sun, Renjing Pei, Yang
+Wang, et al. Pixel to gaussian: Ultra-fast continuous
+super-resolution with 2d gaussian modeling. arXiv preprint
+arXiv:2503.06617, 2025. 2, 5, 6
+[39] Joseph Polchinski. Dirichlet branes and ramond-ramond
+charges. Physical Review Letters, 75(26):4724, 1995. 2
+[40] Victor Rong, Jingxiang Chen, Sherwin Bahmani, Kiriakos
+Kutulakos, and David Lindell. Gstex: Per-primitive texturing
+of 2d gaussian splatting for decoupled appearance and geometry modeling. In Proceedings of the Winter Conference on
+Applications of Computer Vision (WACV), pages 3508–3518,
+2025. 2, 7
+[41] Jun John Sakurai and Jim Napolitano. Modern quantum mechanics. Cambridge university press, 2020. 2, 3, 5
+[42] Radu Timofte, Eirikur Agustsson, Luc Van Gool, MingHsuan Yang, and Lei Zhang. Ntire 2017 challenge on single
+image super-resolution: Methods and results. In Proceedings of the IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR) Workshops, 2017. 5, 6, 8
+[43] Longguang Wang, Yingqian Wang, Zaiping Lin, Jungang
+Yang, Wei An, and Yulan Guo. Learning a single network for scale-arbitrary super-resolution. In Proceedings of
+the IEEE/CVF international conference on computer vision,
+pages 4801–4810, 2021. 2
+[44] Xintao Wang, Ke Yu, Shixiang Wu, Jinjin Gu, Yihao Liu,
+Chao Dong, Yu Qiao, and Chen Change Loy. Esrgan: Enhanced super-resolution generative adversarial networks. In
+Proceedings of the European conference on computer vision
+(ECCV) workshops, pages 0–0, 2018. 2
+[45] Zhou Wang, A.C. Bovik, H.R. Sheikh, and E.P. Simoncelli.
+Image quality assessment: from error visibility to structural
+similarity. IEEE Transactions on Image Processing, 13(4):
+600–612, 2004. 5
+[46] Min Wei and Xuesong Zhang. Super-resolution neural operator. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 18247–
+18256, 2023. 1, 2, 5
+[47] Sebastian Weiss and Derek Bradley. Gaussian billboards:
+Expressive 2d gaussian splatting with textures. arXiv
+preprint arXiv:2412.12734, 2024. 2, 5, 7
+[48] Edward Witten. String theory dynamics in various dimensions. Nuclear Physics B, 443(1-2):85–126, 1995. 2
+[49] Rongyuan Wu, Tao Yang, Lingchen Sun, Zhengqiang Zhang,
+Shuai Li, and Lei Zhang. Seesr: Towards semanticsaware real-world image super-resolution. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 25456–25467, 2024. 2
+[50] Jingyu Yang, Sheng Shen, Huanjing Yue, and Kun Li. Implicit transformer network for screen content image continuous super-resolution. In Advances in Neural Information
+Processing Systems, pages 13304–13315. Curran Associates,
+Inc., 2021. 2
+[51] Jie-En Yao, Li-Yuan Tsao, Yi-Chen Lo, Roy Tseng, ChiaChe Chang, and Chun-Yi Lee. Local implicit normalizing
+works. In Proceedings of the IEEE Conference on Computer
+Vision and Pattern Recognition (CVPR), 2016. 2
+[26] Jiwon Kim, Jung Kwon Lee, and Kyoung Mu Lee. Deeplyrecursive convolutional network for image super-resolution.
+In Proceedings of the IEEE conference on computer vision
+and pattern recognition, pages 1637–1645, 2016.
+[27] Wei-Sheng Lai, Jia-Bin Huang, Narendra Ahuja, and MingHsuan Yang. Deep laplacian pyramid networks for fast and
+accurate super-resolution. In Proceedings of the IEEE conference on computer vision and pattern recognition, pages
+624–632, 2017. 2
+[28] Byeonghyeon Lee, Howoong Lee, Xiangyu Sun, Usman
+Ali, and Eunbyung Park. Deblurring 3d gaussian splatting.
+In Computer Vision – ECCV 2024, pages 127–143, Cham,
+2025. Springer Nature Switzerland. 2
+[29] Jaewon Lee and Kyong Hwan Jin. Local texture estimator for implicit representation function. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 1929–1938, 2022. 1, 2, 5
+[30] Yawei Li, Kai Zhang, Jingyun Liang, Jiezhang Cao, Ce Liu,
+Rui Gong, Yulun Zhang, Hao Tang, Yun Liu, Denis Demandolx, Rakesh Ranjan, Radu Timofte, and Luc Van Gool. Lsdir: A large scale dataset for image restoration. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR) Workshops, pages 1775–1787,
+2023. 5
+[31] Zhen Li, Jinglei Yang, Zheng Liu, Xiaomin Yang, Gwanggil Jeon, and Wei Wu. Feedback network for image superresolution. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR), 2019. 2
+[32] Jingyun Liang, Jiezhang Cao, Guolei Sun, Kai Zhang, Luc
+Van Gool, and Radu Timofte. Swinir: Image restoration using swin transformer. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) Workshops,
+pages 1833–1844, 2021. 2
+[33] Jie Liang, Hui Zeng, and Lei Zhang. Details or artifacts:
+A locally discriminative learning approach to realistic image super-resolution. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages
+5657–5666, 2022. 2
+[34] Bee Lim, Sanghyun Son, Heewon Kim, Seungjun Nah, and
+Kyoung Mu Lee. Enhanced deep residual networks for single
+image super-resolution. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR)
+Workshops, 2017. 5, 6, 7
+[35] Rong Liu, Dylan Sun, Meida Chen, Yue Wang, and Andrew
+Feng. Deformable beta splatting. In Proceedings of the Special Interest Group on Computer Graphics and Interactive
+Techniques Conference Conference Papers, New York, NY,
+USA, 2025. Association for Computing Machinery. 2
+[36] D. Martin, C. Fowlkes, D. Tal, and J. Malik. A database
+of human segmented natural images and its application to
+evaluating segmentation algorithms and measuring ecological statistics. In Proceedings Eighth IEEE International
+Conference on Computer Vision. ICCV 2001, pages 416–423
+vol.2, 2001. 5
+[37] Yusuke Matsui, Kota Ito, Yuji Aramaki, Azuma Fujimoto,
+Toru Ogawa, Toshihiko Yamasaki, and Kiyoharu Aizawa.
+10
+flow for arbitrary-scale image super-resolution. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), pages 1776–1785, 2023. 1, 2,
+5
+[52] Qiaosi Yi, Shuai Li, Rongyuan Wu, Lingchen Sun, Yuhui
+Wu, and Lei Zhang. Fine-structure preserved real-world image super-resolution via transfer vae training. In Proceedings of the IEEE/CVF international conference on computer
+vision, pages 12415–12426, 2025. 2
+[53] Fanghua Yu, Jinjin Gu, Zheyuan Li, Jinfan Hu, Xiangtao
+Kong, Xintao Wang, Jingwen He, Yu Qiao, and Chao Dong.
+Scaling up to excellence: Practicing model scaling for photorealistic image restoration in the wild. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 25669–25680, 2024. 2
+[54] Ruihan Yu, Tianyu Huang, Jingwang Ling, and Feng Xu.
+2dgh: 2d gaussian-hermite splatting for high-quality rendering and better geometry features. IEEE Transactions on Visualization and Computer Graphics, 32(2):1513–1524, 2026.
+2, 4, 5, 7
+[55] Roman Zeyde, Michael Elad, and Matan Protter. On single
+image scale-up using sparse-representations. In Curves and
+Surfaces, pages 711–730, Berlin, Heidelberg, 2012. Springer
+Berlin Heidelberg. 5
+[56] Leheng Zhang, Yawei Li, Xingyu Zhou, Xiaorui Zhao, and
+Shuhang Gu. Transcending the limit of local window: Advanced super-resolution transformer with adaptive token dictionary. In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition, pages 2856–2865,
+2024. 2
+[57] Richard Zhang, Phillip Isola, Alexei A. Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of
+deep features as a perceptual metric. In Proceedings of the
+IEEE Conference on Computer Vision and Pattern Recognition (CVPR), 2018. 5
+[58] Xindong Zhang, Hui Zeng, Shi Guo, and Lei Zhang.
+Efficient long-range attention network for image superresolution. In European conference on computer vision,
+pages 649–667. Springer, 2022. 2
+[59] Yulun Zhang, Kunpeng Li, Kai Li, Lichen Wang, Bineng
+Zhong, and Yun Fu. Image super-resolution using very
+deep residual channel attention networks. In Proceedings of
+the European conference on computer vision (ECCV), pages
+286–301, 2018. 2
+[60] Yulun Zhang, Yapeng Tian, Yu Kong, Bineng Zhong, and
+Yun Fu. Residual dense network for image super-resolution.
+In Proceedings of the IEEE conference on computer vision
+and pattern recognition, pages 2472–2481, 2018. 2, 5, 6, 7
+11

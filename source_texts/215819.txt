@@ -1,0 +1,257 @@
+Contribute to DeGrootResearchGroup/aquaflux development by creating an account on GitHub.
+
+Adaptive octree sampling of the fluence rate, on one Octree shared with the mesher (#726) by ctdegroot · Pull Request #800 · DeGrootResearchGroup/aquaflux · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ctdegroot
+commented
+Oct 22, 2026
+Copy link
+Copy Markdown
+Member
+Addresses #726: sample the fluence rate on an octree refined only where interpolating it fails, then interpolate it to any points (for example a flow mesh's cell centres, for a dose).
+What's in it
+aquaflux.octree, a generic package that imports nothing of aquaflux but its neutral leaves.
+Octree: the one octree, shared with the mesher's hex core (see below).
+sample_adaptively(sample, region, ...) → SampledField: the refinement loop.
+Each pass samples only its new points and measures each one's miss against the coarser tree. A cell is split where a miss exceeds the tolerance.
+The interpolant is hierarchical: each node carries a surplus on a hat function. It is continuous where coarse cells meet fine ones and passes through every sampled node, so the tree needs no 2:1 balance.
+Cut points are placed where cell edges cross the region's boundary, a standoff inside it by signed distance. The standoff defaults to a thousandth of the finest cell, so it scales with the case.
+Nodes outside the region get ghost values. These are fitted to the cut points and nearby samples, bounded by them, and refitted as cells refine.
+A cell the boundary cuts is also sampled at its centre (a probe). Its corners outside the region are fitted values, so nothing else tests its interior.
+Linear / Logarithm transforms (ln G gives a relative tolerance, with a floor below which misses are ignored).
+SampledField.hexahedra() for viewing the tree.
+Elsewhere:
+aquaflux.io.write_hexahedra: axis-aligned hexahedra with point and cell data, as .vtu.
+aquaflux.radiation.fluence_rate_at(scene, points): the scene solved with those points as its only receivers.
+validation/sozzi_radiation/adaptive_grid.py: the study below, built entirely from the reactor's STEP drawing with no mesh.
+One Octree for the mesher and the sampler
+Main's aquaflux/meshing/octree.py (#779/#788) and this branch's tree held the same data:
+leaves stored as a level plus a lower corner in integer units of the finest cube;
+children appended after the kept leaves, in the same order.
+Only the operations differed, so they are now one class in aquaflux.octree. The sampler cannot import meshing, but meshing may import a generic package.
+What it keeps: main's API unchanged (lattice, refined, refined_by, balanced, leaf_at, the level/corner/unit/depth fields).
+What it gains for the sampler:
+a depth fixed at construction;
+locate for points;
+cube_corners, point_level and subset;
+keys / coordinates, which also replace the hex core's private _decode.
+What stays in meshing: NearSurface and cube_samples, now in meshing/near_surface.py.
+Renames:
+RefinementCriterion is exported from aquaflux.octree instead of aquaflux.meshing; Octree likewise. There are no aliases left behind.
+sample_adaptively's max_level → depth, the tree's word.
+Hierarchy.at_lattice → at_units.
+The sampler's output is bit-identical before and after on the test vessel: every sample, miss and interpolated value matches. The hex core's and the octree balancing tests pass unchanged apart from imports.
+Sozzi results (tolerance 0.05 on ln G), median / p99
+arm
+samples
+0–0.5 mm
+0.5–1 mm
+1–2 mm
+2–5 mm
+>30 mm
+uniform 4 mm (0.5 mm standoff)
+109k
+9.7 / 40 %
+2.5 / 30 %
+2.0 / 23 %
+1.0 / 13 %
+0.17 / 2.4 %
+uniform 2 mm (2 µm standoff)
+851k
+3.7 / 7.9 %
+3.6 / 7.8 %
+1.1 / 5.0 %
+0.20 / 1.1 %
+0.036 / 0.27 %
+adaptive, default standoff
+1.09M
+1.1 / 4.4 %
+0.28 / 1.7 %
+0.16 / 0.82 %
+0.13 / 1.0 %
+0.30 / 1.8 %
+Run on Linux x86_64 (4 cores), jax 0.11.2, with a 25,876-facet lamp and black walls. The full table, with every arm and its configuration, is in validation/sozzi_radiation/README.md.
+The adaptive tree beats uniform 2 mm in every band within 5 mm of the sleeve, for 1.3–1.5× its samples.
+Not met: the issue's acceptance target (the 4 mm grid's error everywhere at a fraction of its points). The bulk (>10 mm) stays at 0.26–0.30 % median against 4 mm's 0.15–0.17 %.
+One more level (0.25 mm cells) doubled the samples and changed nothing beyond 0.5 mm. What remains near the sleeve is the lamp's facet pattern.
+On a uniform grid, a tiny standoff makes the near field worse. It only pays off together with refinement near the boundary.
+Not done
+Case-file wiring (receivers: to a tolerance).
+Porting background_grid.py onto the octree.
+The dose comparison, which needs the uvmesh mesh and tracker.
+Claude-facing files
+These follow main's rules/notes split. .claude/rules/octree.md holds the current state. Its dated record (failed designs, measurements, mutation passes) is in .claude/notes/octree-log.md, and the Sozzi numbers are in notes/validation-log.md. CLAUDE.md gains one index row and stays under its size ceiling (85.6 KB of 86.8 KB). tools/check_rules.sh is clean.
+Checks
+Lint and format: ruff check and ruff format --check are clean.
+Scoped fast tier (tools/fastgate.sh --changed): 2978 passed, 22 skipped, 1 failed. The failure is test_radiation_refracted.py::test_the_gathers_read_which_corners_have_a_path_from_the_mask_and_warn_only_where_found. JAX's write to its on-disk compilation cache raises a warning, and that test turns warnings into errors. It passes when run alone, and the refraction code isn't touched here.
+Docs: tools/build_docs.sh reports only the four intersphinx inventories this container cannot fetch, so CI's docs job is the real check.
+Mutation checks: done on the probes, the default standoff and the merged tree's new methods (locate, lattice's depth, point_level); details in notes/octree-log.md.
+Generated by Claude Code
+claude
+added 8 commits
+October 16, 2026 08:07
+Add adaptive octree sampling of the fluence rate (#726)
+…
+72fdbd0
+```
+A new generic package, aquaflux.octree, samples a field over a region on an
+octree refined where the coarser tree failed to predict its own new samples:
+split a cell, sample only its new points, compare each with the previous
+interpolant (its miss), split again where a miss exceeds the tolerance.
+
+- Octree: root cells over a box on one integer lattice; split, locate,
+  node levels; only the root cells the region can reach are kept.
+- Hierarchy: a hierarchical (hat-function) interpolant with one surplus per
+  node -- continuous where coarse cells meet finer ones, through every
+  sampled node, and needing no 2:1 balance.
+- Cut points where cell edges cross the region's boundary, placed where the
+  region's signed distance is minus a standoff, so no sample lies nearer the
+  boundary than that.
+- Ghost values for nodes outside the region (or within the standoff), fitted
+  to the cut points and nearby samples, re-fitted as finer cells appear and
+  bounded by the range of their data.
+- sample_adaptively / SampledField (callable, hexahedra()); Linear and
+  Logarithm transforms; compiled region queries.
+
+Around it: radiation.fluence_rate_at(scene, points), the scene as a sampler;
+io.write_hexahedra and point data in vtu_parts, to write an octree's leaves.
+
+validation/sozzi_radiation/adaptive_grid.py compares adaptive trees with
+uniform 8/4/2 mm grids on the Sozzi reactor read from its STEP drawing, against
+exact gathers at random points banded by distance from the sleeve. Tolerance
+0.05 matches or beats uniform 2 mm within 5 mm of the sleeve at 29 % of its
+samples; matching 4 mm everywhere costs 2.3x 4 mm's samples, so the issue's
+"fraction of its points" is not met: the bulk needs ~4 mm to reach 4 mm's
+error. The README records the table and its configuration.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UkcJ1KkqF97DTVoeHSVb4S
+```
+List the octree package in the annotated package tree
+…
+db12f06
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UkcJ1KkqF97DTVoeHSVb4S
+```
+Probe the octree cells the boundary cuts at their centres (#726)
+…
+6ec4e62
+```
+A cell with a corner that is not sampled has ghosts there, fitted to
+agree with its cut points, so its own samples cannot show how it
+interpolates between them. On the Sozzi reactor a strip of 4 mm cells
+along the lamp was never split and overshot by 10 % from 0.5 to 2.5 mm
+off the sleeve. Such a cell's centre is now sampled as a probe, missed
+against the interpolant the pass built, and entered as a node.
+
+The Sozzi harness takes a standoff per arm (_s<mm>) and keeps each
+arm's estimates and field for diagnosis.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UkcJ1KkqF97DTVoeHSVb4S
+```
+Default the octree standoff to a thousandth of the finest cell (#726)
+…
+5f1d48e
+```
+A fixed length does not travel between cases of different sizes. The
+region is the drawn shape, and a convex lamp's facets lie inside it, so
+any point of the drawn water is clear of them; the standoff only has to
+keep samples off the boundary itself, where a lattice node can lie in a
+facet's plane. Unset, it is now a thousandth of the finest cell's edge.
+
+The Sozzi harness uses the default and takes _l<levels> for a deeper tree.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UkcJ1KkqF97DTVoeHSVb4S
+```
+Record the Sozzi standoff and depth study (#726)
+…
+283249b
+```
+With the probes and the default standoff (0.5 um at 0.5 mm cells), the
+1-2 mm band is 0.16 % median / 0.82 % p99 against 0.63 / 4.0 % at a 0.5 mm
+standoff and uniform 2 mm's 0.81 / 6.3 %, for 1.09 M samples. One level
+deeper doubles the samples and moves nothing beyond 0.5 mm: what remains
+near the sleeve is the lamp's facet pattern. Uniform arms now take a
+standoff option; their default-standoff rebuild is under way.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UkcJ1KkqF97DTVoeHSVb4S
+```
+Add the uniform grids at the default standoff to the Sozzi study (#726)
+…
+c3affaa
+```
+On a grid that is never refined, sampling at the sleeve makes the near
+field worse (uniform 4 mm, 1-2 mm median 2.0 % -> 4.0 %): a straight line
+from the steep surface value across a coarse cell overshoots the convex
+profile. The adaptive tree beats uniform 2 mm's better standoff in every
+band within 5 mm at 1.3-1.5x its samples.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UkcJ1KkqF97DTVoeHSVb4S
+```
+Merge main into the adaptive-sampling branch (#726)
+…
+d774b99
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UkcJ1KkqF97DTVoeHSVb4S
+```
+Share one Octree between the mesher and the adaptive sampler (#726)
+…
+a27d403
+```
+The hex core's octree (meshing/octree.py) and the sampler's (octree/tree.py)
+held the same data -- a level and a lower corner per leaf in integer units
+of the finest cube, children appended after the leaves kept in the same
+order -- with different operations. They are now one class in the generic
+aquaflux.octree package, which the sampler can import and meshing may.
+
+The merged Octree keeps the mesher's API (lattice, refined, refined_by,
+balanced, leaf_at) and gains the sampler's: a depth fixed at construction,
+locate for points, cube_corners, point_level, subset, and keys/coordinates,
+which also replace the hex core's private decoder. NearSurface and
+cube_samples stay in meshing, in near_surface.py. sample_adaptively's
+max_level is now depth, the tree's word; Hierarchy.at_lattice is at_units.
+
+The sampler is bit-identical before and after on the test vessel (every
+sample, miss and interpolated value). The octree rule is rewritten to the
+rules/notes split, with its dated record in .claude/notes/octree-log.md.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UkcJ1KkqF97DTVoeHSVb4S
+```
+Hide details
+View details
+ctdegroot
+merged commit 64e7810
+into
+main
+Oct 22, 2026
+29 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+ctdegroot
+deleted the
+claude/aquaflux-issue-726-yq46n4
+branch
+October 22, 2026 11:52
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

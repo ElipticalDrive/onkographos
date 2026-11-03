@@ -1,0 +1,440 @@
+--- v001.md
++++ v002.md
+@@ -1,55 +1,53 @@
+ # Primal Grid Marching Cubes
+ 
+-Also called: Compute Shader Marching Cubes, ComputeMarchingCubes, GPU Marching Cubes, Implicit to Mesh via Marching Cubes, SDF to Mesh
++Also called: Marching Cubes (CUDA), GPU Marching Cubes, Compute Shader Marching Cubes
+ 
+ ## Overview
+-Primal Grid Marching Cubes is a GPU-accelerated isosurface extraction technique that processes a 3D scalar volume grid using a compute shader to output a triangle mesh [S1]. It adapts the classic Marching Cubes algorithm for parallel execution by utilizing precalculated triangle tables and atomic counters for buffer management, ensuring deterministic memory usage on the GPU [S1]. Unlike CPU implementations that may rely on linked lists or dynamic arrays, this method uses fixed-size buffers and a cleanup pass to manage memory, making it suitable for real-time or high-throughput implicit function (SDF) to mesh conversion [S1].
++Primal Grid Marching Cubes is a GPU-accelerated isosurface extraction technique that processes a 3D scalar volume grid using a compute shader to output a triangle mesh [S1, unofficial]. It adapts the classic Marching Cubes algorithm for parallel execution by utilizing precalculated triangle tables and atomic counters for buffer management, ensuring deterministic memory usage on the GPU [S1, unofficial]. Unlike CPU implementations that may rely on linked lists or dynamic arrays, this method uses fixed-size buffers and a cleanup pass to manage memory, making it suitable for real-time or high-throughput implicit function (SDF) to mesh conversion [S1, unofficial].
+ 
+ ## How it works
+-The method operates on a primal grid where cubes are formed by adjacent sample points. It typically involves two phases: evaluating the implicit function on the grid and reconstructing the mesh via a compute shader kernel.
++The method operates on a primal grid where cubes are formed by adjacent sample points [S4, unofficial]. It typically involves two phases: evaluating the implicit function on the grid and reconstructing the mesh via a compute shader kernel [S1, unofficial, S2, unofficial].
+ 
+ ### Inputs and Outputs
+ **Inputs:**
+-*   **Voxels:** A 1D or 3D buffer of scalar values representing the implicit function (e.g., SDF) on a grid of dimensions $D_x \times D_y \times D_z$ [S1].
+-*   **Isovalue:** The threshold scalar value for surface extraction [S1].
+-*   **Scale:** A scalar factor to transform grid coordinates to physical object space [S1].
+-*   **MaxTriangle:** The maximum number of triangles allowed in the output mesh to prevent buffer overflow [S1].
++*   **Voxels:** A 1D or 3D buffer of scalar values representing the implicit function (e.g., SDF) on a grid of dimensions $D_x \times D_y \times D_z$ [S1, unofficial].
++*   **Isovalue:** The threshold scalar value for surface extraction [S1, unofficial].
++*   **Scale:** A scalar factor used to transform grid coordinates to physical object space [S1, unofficial].
++*   **MaxTriangle:** The maximum number of triangles allowed in the output mesh to prevent buffer overflow [S1, unofficial].
+ 
+ **Outputs:**
+ *   **Mesh:** A triangle mesh consisting of vertices and indices.
+-    *   **Vertices:** Stored in a `RWByteAddressBuffer` (VertexBuffer). Each vertex occupies 24 bytes: 12 bytes for Position (Float32, 3) and 12 bytes for Normal (Float32, 3) [S1].
+-    *   **Indices:** Stored in a `RWByteAddressBuffer` (IndexBuffer). Each triangle consists of 3 `UInt32` indices, occupying 12 bytes [S1].
+-    *   **Counter:** A `ComputeBuffer` of size 1 `uint`, used as an atomic counter to allocate triangle slots [S1].
++    *   **Vertices:** Stored in a `RWByteAddressBuffer` (VertexBuffer). Each vertex occupies 24 bytes: 12 bytes for Position (Float32, 3) and 12 bytes for Normal (Float32, 3) [S1, unofficial].
++    *   **Indices:** Stored in a `RWByteAddressBuffer` (IndexBuffer). Each triangle consists of 3 `UInt32` indices, occupying 12 bytes [S1, unofficial].
++    *   **Counter:** A `ComputeBuffer` of size 1 `uint`, used as an atomic counter to allocate triangle slots [S1, unofficial].
+ 
+ ### Data Structures
+-1.  **TriangleTable:** A structured buffer of 256 `uint2` (or `ulong`) entries. Each entry stores the triangle configuration for one of the 256 possible cube states. The edge indices are packed such that the first 8 edges are in the lower 32 bits of the first integer, and edges 8-15 are in the lower 32 bits of the second integer [S1].
+-2.  **PrimalGrid (Optional/Caching Variant):** In some implementations (e.g., [S3]), a `PrimalGrid` struct is used to cache distance field values in layers to optimize sampling. It contains:
+-    *   `size`: The grid dimension $N$.
+-    *   `layers`: An array of 2 layers, each containing $size \times size$ elements. Each element is a tuple `(Vec3, D)` representing the corner position and the distance value [S3].
++1.  **TriangleTable:** A structured buffer of 256 `uint2` (or `ulong`) entries [S1, unofficial]. Each entry stores the triangle configuration for one of the 256 possible cube states [S1, unofficial]. The edge indices are packed such that the first 8 edges are in the lower 32 bits of the first integer, and edges 8-15 are in the lower 32 bits of the second integer [S1, unofficial].
++2.  **PrimalGrid (Optional/Caching Variant):** In some implementations (e.g., [S4, unofficial]), a `PrimalGrid` struct is used to cache distance field values in layers to optimize sampling. It contains `size` (the grid dimension $N$) and `layers` (an array of 2 layers, each containing $size \times size$ elements storing corner positions and distance values) [S4, unofficial].
+ 
+ ### Algorithm Steps
+ 
+ #### 1. Initialization (Host/CPU Side)
+-1.  Allocate the `TriangleTable` buffer with size $256 \times \text{sizeof(ulong)}$ and populate it with the precalculated Marching Cubes topology data [S1].
+-2.  Allocate the `Counter` buffer with size 1 `uint` and initialize it to 0 [S1].
+-3.  Allocate the `VertexBuffer` and `IndexBuffer` with capacity $3 \times \text{MaxTriangle}$ vertices/indices respectively [S1].
+-4.  Set compute shader constants: `Dims` (grid dimensions), `MaxTriangle`, `Scale`, and `Isovalue` [S1].
++1.  Allocate the `TriangleTable` buffer with size $256 \times \text{sizeof(ulong)}$ and populate it with the precalculated Marching Cubes topology data [S1, unofficial].
++2.  Allocate the `Counter` buffer with size 1 `uint` and initialize it to 0 [S1, unofficial].
++3.  Allocate the `VertexBuffer` and `IndexBuffer` with capacity $3 \times \text{MaxTriangle}$ vertices/indices respectively [S1, unofficial].
++4.  Set compute shader constants: `Dims` (grid dimensions), `MaxTriangle`, `Scale`, and `Isovalue` [S1, unofficial].
+ 
+ #### 2. Implicit Function Evaluation (Optional/Pre-processing)
+-If the input is not already a sampled grid, evaluate the implicit function $f(x,y,z)$ on the grid points.
+-*   Create a 3D grid of points ranging from $-scale$ to $scale$ with $grid\_size+1$ points per axis [S2].
+-*   Evaluate the function in chunks (e.g., `chunk_size` = 262144 points) to manage GPU memory [S2].
+-*   Store results in a tensor/voxel buffer [S2].
++If the input is not already a sampled grid, evaluate the implicit function $f(x,y,z)$ on the grid points [S2, unofficial].
++*   Create a 3D grid of points ranging from $-scale$ to $scale$ with $grid\_size+1$ points per axis [S2, unofficial].
++*   Evaluate the function in chunks (e.g., `chunk_size` = 262144 points) to manage GPU memory [S2, unofficial].
++*   Store results in a tensor/voxel buffer [S2, unofficial].
+ 
+ #### 3. Mesh Reconstruction (Compute Shader Kernel)
+-Launch a compute shader kernel (e.g., `[numthreads(4, 4, 4)]`) where each thread processes one voxel cube [S1].
++Launch a compute shader kernel (e.g., `[numthreads(4, 4, 4)]`) where each thread processes one voxel cube [S1, unofficial].
+ 
+ **Step 3.1: Boundary Check**
+-Calculate the cube coordinate `id` from `SV_DispatchThreadID`. If any component of `id + 1` is greater than or equal to the corresponding component of `Dims`, return immediately [S1].
++Calculate the cube coordinate `id` from `SV_DispatchThreadID` [S1, unofficial]. If any component of `id + 1` is greater than or equal to the corresponding component of `Dims`, return immediately [S1, unofficial].
+ 
+ **Step 3.2: Sample Voxel Values and Gradients**
+ For each vertex index $i$ from 0 to 7 of the current cube:
+-1.  Calculate the grid coordinate: $coord = id + \text{CubeVertex}(i)$, where $\text{CubeVertex}(i)$ returns `uint3(x^y, y, z)` with $x, y, z$ being the bits of $i$ [S1].
+-2.  Sample the voxel value and gradient at $coord$. The gradient is computed using central differences:
++1.  Calculate the grid coordinate: $coord = id + \text{CubeVertex}(i)$, where $\text{CubeVertex}(i)$ returns `uint3(x^y, y, z)` with $x, y, z$ being the bits of $i$ [S1, unofficial].
++2.  Sample the voxel value and gradient at $coord$ [S1, unofficial]. The gradient is computed using central differences:
+     $$
+     \begin{aligned}
+@@ -67,5 +65,5 @@
+     \text{samples}[i] = \text{float4}(v_{px} - v_{nx}, v_{py} - v_{ny}, v_{pz} - v_{nz}, v)
+     $$
+-    Here, `xyz` is the gradient and `w` is the scalar value [S1].
++    Here, `xyz` is the gradient and `w` is the scalar value [S1, unofficial].
+ 
+ **Step 3.3: Calculate Cube Configuration Selector**
+@@ -74,9 +72,9 @@
+ \text{if } \text{samples}[i].w < \text{Isovalue}, \text{ then } \text{selector} \ |= \ (1 \ll i)
+ $$
+-If `selector` is 0 or 0xFF (all vertices inside or outside), return immediately [S1].
++If `selector` is 0 or 0xFF (all vertices inside or outside), return immediately [S1, unofficial].
+ 
+ **Step 3.4: Calculate Intersection Points and Normals**
+ For each of the 12 edges (index $e$ from 0 to 11):
+-1.  Get the vertex pair using $\text{EdgeVertexPair}(e)$, returning `uint2(v1, v2)` [S1].
++1.  Get the vertex pair using $\text{EdgeVertexPair}(e)$, returning `uint2(v1, v2)` [S1, unofficial].
+ 2.  Calculate the interpolation parameter:
+     $$
+@@ -85,211 +83,141 @@
+ 3.  Compute the vertex position in physical space:
+     $$
+-    \text{pos} = \text{TransformPoint}(\text{lerp}(\text{samples}[v1].xyz, \text{samples}[v2].xyz, \text{param}))
+-    $$
+-    Where $\text{TransformPoint}(p) = (p + 0.5 - \text{Dims} / 2) \times \text{Scale}$ [S1].
++    \text{pos} = \text{TransformPoint}(\text{lerp}(\text{vertex1}, \text{vertex2}, \text{param}))
++    $$
++    Where $\text{TransformPoint}(p) = (p + 0.5 - \text{Dims} / 2) \times \text{Scale}$ [S1, unofficial].
+ 4.  Compute the normal:
+     $$
+     \text{normal} = -\text{normalize}(\text{lerp}(\text{samples}[v1].xyz, \text{samples}[v2].xyz, \text{param}))
+     $$
+-    Store these for the corresponding edge index.
++    Store these for the corresponding edge index [S1, unofficial].
+ 
+ **Step 3.5: Generate Triangles**
+-1.  Retrieve triangle configuration data: `tri_data = TriangleTable[selector]` [S1].
+-2.  Iterate through `tri_data` in steps of 3 (indices 0, 3, 6, 9, 12).
+-3.  Extract three edge indices $e_1, e_2, e_3$ using $\text{EdgeIndexFromTriangleTable}(\text{tri\_data}, \text{offset})$.
+-4.  If $e_1 == 15$, the configuration is exhausted; break.
+-5.  Atomically increment the counter: `count = Counter.IncrementCounter()` [S1].
+-6.  If `count >= MaxTriangle`, return to prevent overflow [S1].
+-7.  Calculate vertex index `vidx = count * 3`.
+-8.  Write vertices to `VertexBuffer` at offsets `vidx*24`, `(vidx+1)*24`, `(vidx+2)*24` using the computed positions and normals [S1].
+-9.  Write indices `vidx`, `vidx+1`, `vidx+2` to `IndexBuffer` at offset `vidx*12` [S1].
++1.  Retrieve triangle configuration data: `tri_data = TriangleTable[selector]` [S1, unofficial].
++2.  Iterate through `tri_data` in steps of 3 (indices 0, 3, 6, 9, 12) [S1, unofficial].
++3.  Extract three edge indices $e_1, e_2, e_3$ using $\text{EdgeIndexFromTriangleTable}(\text{tri\_data}, \text{offset})$ [S1, unofficial].
++4.  If $e_1 == 15$, the configuration is exhausted; break [S1, unofficial].
++5.  Atomically increment the counter: `count = Counter.IncrementCounter()` [S1, unofficial].
++6.  If `count >= MaxTriangle`, return to prevent overflow [S1, unofficial].
++7.  Calculate vertex index `vidx = count * 3` [S1, unofficial].
++8.  Write vertices to `VertexBuffer` at offsets `vidx*24`, `(vidx+1)*24`, `(vidx+2)*24` using the computed positions and normals [S1, unofficial].
++9.  Write indices `vidx`, `vidx+1`, `vidx+2` to `IndexBuffer` at offset `vidx*12` [S1, unofficial].
+ 
+ #### 4. Cleanup (Optional but Recommended)
+-Run a `ClearUnused` kernel with `[64, 1, 1]` threads. This kernel atomically increments the counter until it reaches `MaxTriangle`, writing zeroed vertices and indices to the remaining buffer space to ensure clean data for the mesh [S1].
++Run a `ClearUnused` kernel with `[64, 1, 1]` threads [S1, unofficial]. This kernel atomically increments the counter until it reaches `MaxTriangle`, writing zeroed vertices and indices to the remaining buffer space to ensure clean data for the mesh [S1, unofficial].
+ 
+ ### Pseudocode (Compute Shader Kernel)
+ 
+ ```python
+-# Constants
+-MAX_TRIANGLE = 1000000 # Example budget
+-DIM_X, DIM_Y, DIM_Z = 64, 64, 64
+-SCALE = 1.0
+-ISOVALUE = 0.0
+-
+-# Global Buffers
+-TriangleTable: array[256] of uint2
+-Voxels: array[DIM_X * DIM_Y * DIM_Z] of float
+-VertexBuffer: RWByteAddressBuffer
+-IndexBuffer: RWByteAddressBuffer
+-Counter: RWStructuredBuffer<uint>
+-
+-# Helper: CubeVertex returns the 3D offset for vertex index i
+-def CubeVertex(i):
+-    x = i & 1
+-    y = (i >> 1) & 1
+-    z = (i >> 2) & 1
+-    return (x ^ y, y, z)
+-
+-# Helper: EdgeVertexPair returns the two vertex indices for edge e
+-def EdgeVertexPair(e):
+-    v1 = e & 7
+-    if e < 8:
+-        v2 = ((e + 1) & 3) | (e & 4)
+-    else:
+-        v2 = v1 + 4
+-    return (v1, v2)
+-
+-# Helper: Get voxel value with gradient
+-def VoxelValueWithGradient(i):
+-    # Clamp indices to avoid out-of-bounds access for gradient calculation
+-    i_n = max(i - 1, 0)
+-    i_p = min(i + 1, (DIM_X-1, DIM_Y-1, DIM_Z-1))
+-    
+-    v = Voxels[i.x + DIM_X * (i.y + DIM_Y * i.z)]
+-    v_nx = Voxels[i_n.x + DIM_X * (i.y + DIM_Y * i.z)]
+-    v_px = Voxels[i_p.x + DIM_X * (i.y + DIM_Y * i.z)]
+-    v_ny = Voxels[i.x + DIM_X * (i_n.y + DIM_Y * i.z)]
+-    v_py = Voxels[i.x + DIM_X * (i_p.y + DIM_Y * i.z)]
+-    v_nz = Voxels[i.x + DIM_X * (i.y + DIM_Y * i_n.z)]
+-    v_pz = Voxels[i.x + DIM_X * (i.y + DIM_Y * i_p.z)]
+-    
+-    return (v_px - v_nx, v_py - v_ny, v_pz - v_nz, v)
+-
+-# Main Kernel
+-[numthreads(4, 4, 4)]
+-def MeshReconstruction(id: uint3):
++def MeshReconstruction(id_x, id_y, id_z, Dims, Scale, Isovalue, MaxTriangle, TriangleTable, Voxels, VertexBuffer, IndexBuffer, Counter):
+     # Boundary check
+-    if id.x + 1 >= DIM_X or id.y + 1 >= DIM_Y or id.z + 1 >= DIM_Z:
++    if id_x + 1 >= Dims[0] or id_y + 1 >= Dims[1] or id_z + 1 >= Dims[2]:
+         return
+ 
+-    # Sample 8 vertices of the cube
+-    samples = [None] * 8
++    # Helper to get voxel value with gradient
++    def VoxelValueWithGradient(ix, iy, iz):
++        ix_n = max(ix - 1, 0)
++        ix_p = min(ix + 1, Dims[0] - 1)
++        iy_n = max(iy - 1, 0)
++        iy_p = min(iy + 1, Dims[1] - 1)
++        iz_n = max(iz - 1, 0)
++        iz_p = min(iz + 1, Dims[2] - 1)
++        idx = ix + Dims[0] * (iy + Dims[1] * iz)
++        v = Voxels[idx]
++        v_nx = Voxels[ix_n + Dims[0] * (iy + Dims[1] * iz)]
++        v_px = Voxels[ix_p + Dims[0] * (iy + Dims[1] * iz)]
++        v_ny = Voxels[ix + Dims[0] * (iy_n + Dims[1] * iz)]
++        v_py = Voxels[ix + Dims[0] * (iy_p + Dims[1] * iz)]
++        v_nz = Voxels[ix + Dims[0] * (iy + Dims[1] * iz_n)]
++        v_pz = Voxels[ix + Dims[0] * (iy + Dims[1] * iz_p)]
++        return (v_px - v_nx, v_py - v_ny, v_pz - v_nz, v)
++
++    # Cube vertices
++    cube_verts = []
+     for i in range(8):
+-        cv = CubeVertex(i)
+-        coord = (id.x + cv[0], id.y + cv[1], id.z + cv[2])
+-        samples[i] = VoxelValueWithGradient(coord)
+-
+-    # Calculate selector
++        x = i & 1
++        y = i & 2
++        z = i & 4
++        vx = id_x + (x ^ y)
++        vy = id_y + y
++        vz = id_z + z
++        cube_verts.append((vx, vy, vz))
++
++    # Sample values
++    samples = [VoxelValueWithGradient(*v) for v in cube_verts]
++
++    # Selector
+     selector = 0
+     for i in range(8):
+-        if samples[i][3] < ISOVALUE:
++        if samples[i][3] < Isovalue:
+             selector |= (1 << i)
+-
+-    # Skip if no intersection
+     if selector == 0 or selector == 255:
+         return
+ 
+-    # Calculate edge intersections
++    # Edge intersections
+     edge_points = [None] * 12
+     edge_normals = [None] * 12
+-    
+     for e in range(12):
+-        v1, v2 = EdgeVertexPair(e)
++        v1 = e & 7
++        v2 = ((e + 1) & 3) | (e & 4) if e < 8 else v1 + 4
+         s1 = samples[v1]
+         s2 = samples[v2]
+-        
+         denom = s2[3] - s1[3]
+-        if denom == 0:
+-            param = 0.0
++        param = 0.0 if denom == 0 else (Isovalue - s1[3]) / denom
++        # Lerp grid positions
++        px = cube_verts[v1][0] + param * (cube_verts[v2][0] - cube_verts[v1][0])
++        py = cube_verts[v1][1] + param * (cube_verts[v2][1] - cube_verts[v1][1])
++        pz = cube_verts[v1][2] + param * (cube_verts[v2][2] - cube_verts[v1][2])
++        # Transform to physical space
++        px = (px + 0.5 - Dims[0] / 2) * Scale
++        py = (py + 0.5 - Dims[1] / 2) * Scale
++        pz = (pz + 0.5 - Dims[2] / 2) * Scale
++        edge_points[e] = (px, py, pz)
++        # Lerp gradients for normal
++        gx = s1[0] + param * (s2[0] - s1[0])
++        gy = s1[1] + param * (s2[1] - s1[1])
++        gz = s1[2] + param * (s2[2] - s1[2])
++        mag = (gx*gx + gy*gy + gz*gz)**0.5
++        edge_normals[e] = (-gx/mag, -gy/mag, -gz/mag)
++
++    # Triangles
++    tri_data = TriangleTable[selector]
++    # tri_data is a tuple of two integers (uint2)
++    def get_edge_index(data, offset):
++        # Each edge index is 4 bits. First 8 edges in data[0], next 4 in data[1]
++        if offset < 8:
++            return (data[0] >> (offset * 4)) & 0xF
+         else:
+-            param = (ISOVALUE - s1[3]) / denom
+-            
+-        # Lerp positions (grid coords)
+-        pos_x = s1[0] + param * (s2[0] - s1[0])
+-        pos_y = s1[1] + param * (s2[1] - s1[1])
+-        pos_z = s1[2] + param * (s2[2] - s1[2])
+-        
+-        # Lerp gradients
+-        grad_x = s1[0] + param * (s2[0] - s1[0]) # Note: s1[0] is gradient x from VoxelValueWithGradient
+-        grad_y = s1[1] + param * (s2[1] - s1[1])
+-        grad_z = s1[2] + param * (s2[2] - s1[2])
+-        
+-        # Transform to physical space
+-        # TransformPoint(p) = (p + 0.5 - Dims / 2) * Scale
+-        # Note: The gradient stored in samples is already the difference, 
+-        # but for normal we need the gradient vector. 
+-        # In the source, samples[i].xyz is the gradient.
+-        # The position lerp uses the gradient components? 
+-        # Correction: The source code uses samples[i].xyz for gradient, 
+-        # but for position it needs the actual vertex position.
+-        # The source code calculates position from lerp of vertex positions.
+-        # However, VoxelValueWithGradient returns gradient in xyz.
+-        # We need the actual vertex coordinates.
+-        # Let's assume we have access to grid coordinates or re-calculate.
+-        # Actually, the source code implies:
+-        # pos = TransformPoint(lerp(vertex1, vertex2, param))
+-        # vertex1 is the grid coordinate of the vertex.
+-        
+-        # Re-evaluating source logic:
+-        # samples[i] = float4(gradient, value)
+-        # To get position, we need the grid coordinate of the vertex.
+-        # The grid coordinate of vertex i of cube id is:
+-        # id + CubeVertex(i)
+-        
+-        # Let's fix the position calculation in the loop above
+-        # But for pseudocode clarity, we assume we have vertex positions.
+-        
+-        # Correct logic for position:
+-        # v1_coord = id + CubeVertex(v1)
+-        # v2_coord = id + CubeVertex(v2)
+-        # pos_grid = lerp(v1_coord, v2_coord, param)
+-        # pos_phys = TransformPoint(pos_grid)
+-        
+-        # For normal:
+-        # grad = lerp(samples[v1].xyz, samples[v2].xyz, param)
+-        # normal = -normalize(grad)
+-        
+-        # Storing simplified for brevity, assuming pos and norm are computed correctly
+-        edge_points[e] = pos_phys
+-        edge_normals[e] = -normalize(grad_x, grad_y, grad_z)
+-
+-    # Generate triangles
+-    tri_data = TriangleTable[selector]
+-    
+-    # Iterate through the 3 integers in tri_data (each stores 3 edge indices)
+-    # The table stores 3 uint32s packed into 2 uint32s or similar.
+-    # Source uses uint2, so we extract 3 indices from the 2 uints.
+-    
+-    # Simplified extraction based on source:
+-    # EdgeIndexFromTriangleTable(tri_data, i)
+-    
+-    for offset in [0, 3, 6, 9, 12]:
+-        e1, e2, e3 = ExtractEdges(tri_data, offset)
+-        
++            return (data[1] >> ((offset - 8) * 4)) & 0xF
++
++    for offset in (0, 3, 6, 9, 12):
++        e1 = get_edge_index(tri_data, offset)
+         if e1 == 15:
+             break
+-            
+-        count = Counter.IncrementCounter()
+-        if count >= MAX_TRIANGLE:
++        e2 = get_edge_index(tri_data, offset + 1)
++        e3 = get_edge_index(tri_data, offset + 2)
++        count = Counter.increment()
++        if count >= MaxTriangle:
+             return
+-            
+         vidx = count * 3
+-        
+-        # Write vertices
+-        VertexBuffer.Store3(vidx * 24, edge_points[e1])
+-        VertexBuffer.Store3((vidx + 1) * 24, edge_points[e2])
+-        VertexBuffer.Store3((vidx + 2) * 24, edge_points[e3])
+-        
+-        # Write normals
+-        VertexBuffer.Store3(vidx * 24 + 12, edge_normals[e1])
+-        VertexBuffer.Store3((vidx + 1) * 24 + 12, edge_normals[e2])
+-        VertexBuffer.Store3((vidx + 2) * 24 + 12, edge_normals[e3])
+-        
+-        # Write indices
+-        IndexBuffer.Store3(vidx * 12, uint3(vidx, vidx + 1, vidx + 2))
++        VertexBuffer.store(vidx * 24, edge_points[e1])
++        VertexBuffer.store((vidx + 1) * 24, edge_points[e2])
++        VertexBuffer.store((vidx + 2) * 24, edge_points[e3])
++        VertexBuffer.store(vidx * 24 + 12, edge_normals[e1])
++        VertexBuffer.store((vidx + 1) * 24 + 12, edge_normals[e2])
++        VertexBuffer.store((vidx + 2) * 24 + 12, edge_normals[e3])
++        IndexBuffer.store(vidx * 12, (vidx, vidx + 1, vidx + 2))
+ ```
+ 
+ ### Parameters
+-*   **MaxTriangle:** The maximum number of triangles allowed in the output mesh. Used to prevent buffer overflow. Typical values depend on the scene complexity and available GPU memory [S1].
+-*   **Scale:** A scalar factor used to transform grid coordinates to object space. Determines the physical size of the output mesh [S1].
+-*   **Isovalue:** The threshold value for isosurface extraction. Vertices with values below this are considered inside [S1].
+-*   **Chunk Size:** (Optional) The number of points processed in each iteration of the implicit function evaluation loop to limit GPU memory usage. Default value in some implementations: 262144 [S2].
+-*   **One Over Size:** (Optional) Calculated as $1.0 / (size - 1)$. Used to normalize coordinates to the $[0, 1]$ range in caching variants [S3].
++*   **MaxTriangle:** The maximum number of triangles allowed in the output mesh. Used to prevent buffer overflow. Typical values depend on the scene complexity and available GPU memory [S1, unofficial].
++*   **Scale:** A scalar factor used to transform grid coordinates to object space [S1, unofficial].
++*   **Isovalue:** The threshold value for isosurface extraction. Vertices with values below this are considered inside [S1, unofficial].
++*   **Chunk Size:** (Optional) The number of points processed in each iteration of the implicit function evaluation loop to limit GPU memory usage. Default value in some implementations: 262144 [S2, unofficial].
++*   **One Over Size:** (Optional) Calculated as $1.0 / (size - 1)$. Used to normalize coordinates to the $[0, 1]$ range in caching variants [S4, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Empty Cube:** If the selector is 0 (all vertices below isovalue) or 0xFF (all vertices above isovalue), the cube does not intersect the isosurface. The algorithm must return immediately to skip processing [S1].
+-*   **Buffer Overflow:** If the number of generated triangles exceeds `MaxTriangle`, the atomic counter check prevents writing out of bounds. However, this results in an incomplete mesh. A cleanup pass is recommended to zero out unused buffer space [S1].
+-*   **Gradient Calculation at Boundaries:** When calculating gradients using central differences, indices must be clamped to the grid boundaries to avoid out-of-bounds memory access [S1].
+-*   **Precision:** Floating-point precision in interpolation and gradient calculation can affect surface smoothness. Using `float` (32-bit) is standard, but `double` may be needed for high-precision SDFs [S1].
++*   **Empty Cube:** If the selector is 0 (all vertices below isovalue) or 0xFF (all vertices above isovalue), the cube does not intersect the isosurface. The algorithm must return immediately to skip processing [S1, unofficial].
++*   **Buffer Overflow:** If the number of generated triangles exceeds `MaxTriangle`, the atomic counter check prevents writing out of bounds. However, this results in an incomplete mesh. A cleanup pass is recommended to zero out unused buffer space [S1, unofficial].
++*   **Gradient Calculation at Boundaries:** When calculating gradients using central differences, indices must be clamped to the grid boundaries to avoid out-of-bounds memory access [S1, unofficial].
+ 
+ ## Subtopics
+@@ -305,17 +233,18 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the grid. Each voxel is processed by one thread (or thread group) in the compute shader [S1].
+-*   **Memory Complexity:** $O(N)$ for the input voxel grid and $O(M)$ for the output mesh, where $M$ is the number of triangles (bounded by `MaxTriangle`) [S1].
+-*   **Performance:** Highly parallelizable on GPU. Performance is limited by memory bandwidth for voxel sampling and atomic contention on the counter buffer [S1].
+-*   **Strengths:** Deterministic memory usage, GPU-friendly, suitable for real-time or high-throughput applications, simple topology [S1].
+-*   **Limitations:** Fixed topology (cannot handle arbitrary topology changes like merging/splitting as easily as adaptive methods), requires pre-allocated buffer size, may produce noisy normals if gradients are not smoothed [S1].
+-*   **When to Use:** When converting a dense, uniform SDF grid to a mesh on the GPU, especially for real-time visualization or when memory predictability is critical [S1].
+-*   **When Not to Use:** When the grid is sparse or adaptive (use Octree-based Isosurfacing), or when sharp features need to be preserved without grid alignment (use Extended Marching Cubes) [S1, S3].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the grid. Each voxel is processed by one thread (or thread group) in the compute shader [S1, unofficial].
++*   **Memory Complexity:** $O(N)$ for the input voxel grid and $O(M)$ for the output mesh, where $M$ is the number of triangles (bounded by `MaxTriangle`) [S1, unofficial].
++*   **Performance:** Highly parallelizable on GPU. Performance is limited by memory bandwidth for voxel sampling and atomic contention on the counter buffer [S1, unofficial].
++*   **Strengths:** Deterministic memory usage, GPU-friendly, suitable for real-time or high-throughput applications, simple topology [S1, unofficial].
++*   **Limitations:** Fixed topology (cannot handle arbitrary topology changes like merging/splitting as easily as adaptive methods), requires pre-allocated buffer size, may produce noisy normals if gradients are not smoothed [S1, unofficial].
++*   **When to Use:** When converting a dense, uniform SDF grid to a mesh on the GPU, especially for real-time visualization or when memory predictability is critical [S1, unofficial].
++*   **When Not to Use:** When the grid is sparse or adaptive (use Octree-based Isosurfacing), or when sharp features need to be preserved without grid alignment (use Extended Marching Cubes) [S1, unofficial, S3].
+ 
+ ## Background
+-Primal Grid Marching Cubes is a GPU adaptation of the classic Marching Cubes algorithm, originally described by Lorensen and Cline [S1]. The specific implementation referenced here is from the Unity sample project "ComputeMarchingCubes" by Keijiro [S1]. It leverages the Unity Compute Shader API and the new Mesh API to perform isosurface reconstruction directly on the GPU, avoiding CPU-GPU data transfer bottlenecks [S1]. The method is widely used in real-time volume rendering and implicit surface visualization within game engines and scientific visualization tools [S1].
++Primal Grid Marching Cubes is a GPU adaptation of the classic Marching Cubes algorithm, originally described by Paul Bourke [S1, unofficial, S2, unofficial]. The specific implementation referenced here is from the Unity sample project "ComputeMarchingCubes" by Keijiro [S1, unofficial]. It leverages the Unity Compute Shader API and the new Mesh API to perform isosurface reconstruction directly on the GPU, avoiding CPU-GPU data transfer bottlenecks [S1, unofficial]. The method is widely used in real-time volume rendering and implicit surface visualization within game engines and scientific visualization tools [S1, unofficial].
+ 
+ ## Sources
+ [S1] keijiro/ComputeMarchingCubes, https://github.com/keijiro/ComputeMarchingCubes, fetched 2026-10-26 (unofficial)
+-[S2] learning3d/assignment3, https://github.com/learning3d/assignment3, fetched 2026-10-26
+-[S3] https://github.com/swiftcoder/isosurface, https://github.com/swiftcoder/isosurface, fetched 2026-10-26 (unofficial)+[S2] lzhnb/CuMCubes, https://github.com/lzhnb/CuMCubes, fetched 2026-10-26 (unofficial)
++[S3] learning3d/assignment3, https://github.com/learning3d/assignment3, fetched 2026-10-26
++[S4] https://github.com/swiftcoder/isosurface, https://github.com/swiftcoder/isosurface, fetched 2026-10-26 (unofficial)

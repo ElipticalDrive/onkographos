@@ -1,0 +1,194 @@
+This code is way too slow when visualizing hundreds of thousands of meshes: rerun/crates/viewer/re_view_spatial/src/visualizers/utilities/proc_mesh_vis.rs Lines 152 to 236 in f7f0fc4 let mut num_instances = 0; for ( instance_index, (half...
+
+Rendering many `Boxes3D` is very slow · Issue #10276 · rerun-io/rerun · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Rendering many Boxes3D is very slow #10276
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Rendering many Boxes3D is very slow#10276
+Copy link
+Labels
+📉 performanceOptimization, memory use, etcOptimization, memory use, etc🔺 re_rendererrendering, graphics, GPUrendering, graphics, GPU🪳 bugSomething isn't workingSomething isn't working
+Description
+emilk
+opened on Jun 17, 2025
+Issue body actions
+This code is way too slow when visualizing hundreds of thousands of meshes:
+rerun/crates/viewer/re_view_spatial/src/visualizers/utilities/proc_mesh_vis.rs
+Lines 152 to 236
+in
+f7f0fc4
+let mut num_instances = 0;
+for (
+instance_index,
+(half_size, world_from_instance, radius, &color, proc_mesh_key, fill_mode),
+) in itertools::izip!(
+half_sizes,
+world_from_instances,
+line_radii,
+colors.iter(),
+batch.meshes,
+batch.fill_modes
+)
+.enumerate()
+{
+let instance = Instance::from(instance_index as u64);
+num_instances = instance_index + 1;
+let world_from_instance = world_from_instance
+* glam::Affine3A::from_scale(glam::Vec3::from(*half_size))
+* constant_instance_transform;
+world_space_bounding_box = world_space_bounding_box.union(
+proc_mesh_key
+.simple_bounding_box()
+.transform_affine3(&world_from_instance),
+);
+match fill_mode {
+FillMode::MajorWireframe | FillMode::DenseWireframe => {
+let Some(wireframe_mesh) = query_context.store_ctx().caches.entry(
+|c: &mut proc_mesh::WireframeCache| c.entry(proc_mesh_key, self.render_ctx),
+) else {
+return Err(ViewSystemExecutionError::DrawDataCreationError(
+"Failed to allocate wireframe mesh".into(),
+));
+};
+for strip in &wireframe_mesh.line_strips {
+let strip_builder = line_batch
+.add_strip(
+strip
+.iter()
+.map(|&point| world_from_instance.transform_point3(point)),
+)
+.color(color)
+.radius(radius)
+.picking_instance_id(PickingLayerInstanceId(instance_index as _))
+// Looped lines should be connected with rounded corners.
+.flags(LineStripFlags::FLAGS_OUTWARD_EXTENDING_ROUND_CAPS);
+if let Some(outline_mask_ids) = ent_context
+.highlight
+.instances
+.get(&Instance::from(instance_index as u64))
+{
+// Not using ent_context.highlight.index_outline_mask() because
+// that's already handled when the builder was created.
+strip_builder.outline_mask_ids(*outline_mask_ids);
+}
+}
+}
+FillMode::Solid => {
+let store_ctx = query_context.store_ctx();
+let Some(solid_mesh) =
+store_ctx.caches.entry(|c: &mut proc_mesh::SolidCache| {
+c.entry(proc_mesh_key, self.render_ctx)
+})
+else {
+return Err(ViewSystemExecutionError::DrawDataCreationError(
+"Failed to allocate solid mesh".into(),
+));
+};
+self.solid_instances.push(GpuMeshInstance {
+gpu_mesh: solid_mesh.gpu_mesh,
+world_from_mesh: world_from_instance,
+outline_mask_ids: ent_context.highlight.index_outline_mask(instance),
+picking_layer_id: re_view::picking_layer_id_from_instance_path_hash(
+InstancePathHash::instance(entity_path, instance),
+),
+additive_tint: color,
+});
+}
+}
+}
+In constrast, spheres and points are ~100x faster in Rerun.
+Optimizing boxes in particular would be nice because it is very useful for rendering voxel occupancy grids.
+Approaches
+Speed up instanced rendering
+Provide a way of mapping transforms onto the GPU directly, speeding up rendering of all our primitives.
+Write specific shaders for boxes
+We could consider a fast-path for boxes, like we have for spheres, e.g. generating the vertex data in a shader.
+Related
+The way we solve this could maybe also speed up having millions of Ellipsoids3D, which would unblock:
+Support Gaussian splatting #4529
+Links
+https://rerunio.slack.com/archives/C04NHBVF797/p1750121246221999
+👍React with 👍3Reacted by Andre Nguyen, Srinath Obla and rcp1
+Activity
+emilk
+added
+🪳 bugSomething isn't workingSomething isn't working
+🔺 re_rendererrendering, graphics, GPUrendering, graphics, GPU
+📉 performanceOptimization, memory use, etcOptimization, memory use, etc
+on Jun 17, 2025
+emilk
+added a commit that references this issue on Jun 23, 2025
+Add a benchmark for logging/rendering many boxes (#10302)
+...
+88b3ab6
+emilk
+added this to the 0.25.0This milestone has been deleted milestone on Jun 23, 2025
+emilk
+modified the milestones: 0.25.0 - MCAPThis milestone has been deleted, 0.26.0This milestone has been deleted on Aug 24, 2025
+Wumpf
+added
+oss-release-blockerBlockers for next releaseBlockers for next release
+on Sep 2, 2025
+Wumpf
+removed this from the 0.26.0This milestone has been deleted milestone on Sep 2, 2025
+emilk
+removed
+oss-release-blockerBlockers for next releaseBlockers for next release
+on Sep 29, 2025
+ashwanirathee commented on Apr 14, 2026
+ashwanirathee
+on Apr 14, 2026
+More actions
+Yeah it seems to be very slow, I was rendering voxels and it seems to be quite slow for that purpose
+ruthwikdasyam commented on Apr 15, 2026
+ruthwikdasyam
+on Apr 15, 2026
+More actions
+Yeah it seems to be very slow, I was rendering voxels and it seems to be quite slow for that purpose
+I am facing the same issue. Found any other way to define voxels?, so its easy for rerun to render
+rcp1 commented on May 28, 2026
+rcp1
+on May 28, 2026
+Last edited by rcp1
+More actions
+I am also struggling to visualize voxel environments with acceptable performance.
+Wumpf commented on May 30, 2026
+Wumpf
+on May 30, 2026
+Member
+More actions
+Given how promising @makeecat 's sparse voxel prototype looks like on #11358 there might be some movement there soon. That is ofc a bit different from the fully flexible box archetype where each box can be positioned arbitrarily, so it really depends what makes most sense for your input data.
+rerun-sync
+added a commit that references this issue on Jun 17, 2026
+Add sparse VoxelGridMap archetype
+...
+fa40ec1
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+📉 performanceOptimization, memory use, etcOptimization, memory use, etc🔺 re_rendererrendering, graphics, GPUrendering, graphics, GPU🪳 bugSomething isn't workingSomething isn't working
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

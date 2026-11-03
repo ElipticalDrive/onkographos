@@ -1,0 +1,1634 @@
+Constant-Memory Differentiable Light Tracing
+arXiv:2609.32920v1 [cs.GR] 26 Sep 2026
+LINAS BERESNA, Simon Fraser University, Canada
+EUGENE FIUME, Simon Fraser University, Canada
+Our interest is in bringing the same constant-memory property
+to light tracing (particle tracing), which propagates paths outward
+from emitters rather than inward from the sensor. At each scattering
+vertex along a light path, the renderer can connect the vertex to
+the sensor and splat its flux contribution to the image, so a single
+path of depth 𝑘 may contribute to up to 𝑘 different pixels. Figure 1
+illustrates this distinction. This many-to-many connectivity between
+paths and pixels is what makes light tracing effective in transport
+regimes dominated by concentrated illumination, such as caustics
+and specular chains. These are phenomena that camera-side path
+tracers must work hard to discover, and for which differentiable
+light tracing offers a natural way to optimize the scene parameters
+that govern them.
+Porting PRB to this setting, however, reveals a structural obstacle.
+During the adjoint pass of PRB, each vertex of the replayed path must
+be weighted by an adjoint that reflects how the loss changes when
+the radiance splatted at that vertex is perturbed. In viewpoint path
+tracing this adjoint is a single scalar tied to the one pixel the path
+contributes to, and it can be looked up before the replay begins. In
+light tracing, each path can contribute to multiple pixels, so no single
+adjoint scalar exists. The per-vertex adjoints depend on future sensor
+connections along the path and cannot be reconstructed during
+a forward replay from constant-size state. This breaks the core
+assumption underlying PRB’s two-pass formulation and prevents
+its direct extension to light tracing in constant memory.
+The most immediate response is to record the splat positions and
+radiance values during the primal pass so the adjoint pass can look
+them up. This reduces per-vertex storage relative to naive AD but
+does not eliminate the fundamental scaling: the number of recorded
+splats grows with path length, so memory remains linear, which
+carries the same memory penalty.
+We introduce two methods that remove the memory obstacle
+entirely, each making a different trade-off in exchange for constant
+memory.
+The first, Reservoir Light Replay Backpropagation (ResLRB), keeps
+the two-pass structure of PRB by compressing the set of per-path
+sensor connections down to a single stochastically selected representative. During the primal pass, each valid sensor connection is
+streamed into a weighted reservoir; when the path terminates, only
+the winning entry and its cumulative weight survive. The adjoint
+pass replays the path up to the selected depth and backpropagates
+through the retained connection, reweighting by the inverse selection probability to maintain an unbiased gradient estimate. The cost
+is increased variance: by discarding 𝑘 − 1 of the 𝑘 candidate connections, the estimator trades gradient fidelity for bounded memory.
+The second, LRB-3-pass, avoids this variance penalty by introducing an additional path traversal. The first pass traces paths and splats
+radiance to the image as usual. Between passes, the image-space gradient of the loss is computed and stored as a lookup tensor. A second
+pass re-traces each path and, at every vertex, reads the per-pixel
+Reverse-mode differentiation of Monte Carlo light transport naively requires storing a computation graph whose size grows with path length,
+making it impractical for deep or high-sample simulations. Path Replay
+Backpropagation (PRB) eliminates this memory complexity for viewpoint
+path tracing by reconstructing paths from their random seeds and performing a constant-memory backward replay. However, this formulation relies on
+a one-path–one-pixel property that does not hold for light tracing: a single
+light path can contribute to many pixels, and the corresponding per-vertex
+adjoints cannot be recovered during replay from constant-size state.
+We demonstrate that this structural difference prevents a direct extension
+of PRB to light tracing in constant memory, and that buffered two-pass variants retain linear memory scaling with path length. We then introduce two
+constant-memory reverse-mode formulations for differentiable light tracing.
+The first, Reservoir Light Replay Backpropagation (ResLRB), compresses
+the set of per-path sensor connections into a single stochastically selected
+representative using weighted reservoir sampling, preserving a two-pass
+structure at the cost of increased gradient variance. The second, LRB-3-pass,
+introduces an additional traversal that accumulates downstream adjoint contributions prior to backpropagation, retaining all connections and matching
+naive reverse-mode AD in expectation.
+Both methods support detached and attached formulations, including
+differentiation of sensor splat positions induced by geometric perturbations.
+We validate correctness against naive AD, characterize memory and runtime
+trade-offs, and demonstrate inverse rendering of specular caustics driven
+entirely by light tracing.
+CCS Concepts: • Computing methodologies → Ray tracing.
+Additional Key Words and Phrases: differentiable rendering, light tracing,
+inverse rendering, reservoirs
+1
+Introduction
+Differentiable rendering has become a core tool in computer graphics and vision, enabling scene parameters to be recovered from images through gradient-based optimization. By computing derivatives
+of the rendered image with respect to quantities such as material
+reflectance, emitter radiance, and surface geometry, a differentiable
+renderer turns the forward simulation into an objective function
+that an optimizer can explore. The parameter spaces involved are
+often large, a displacement map, a spatially varying BRDF, or a mesh
+with thousands of vertices, so reverse-mode differentiation is the
+practical choice: a single backward pass produces gradients for all
+parameters at once.
+Path Replay Backpropagation (PRB) [Vicini et al. 2021] eliminates
+this memory complexity for viewpoint path tracing by reconstructing paths from their pseudorandom seeds and performing a backward replay that differentiates each vertex locally. Because each
+path contributes to a single pixel, the required image-space adjoint
+is a single scalar that can be precomputed before replay, enabling
+memory usage that is constant in path length.
+Authors’ Contact Information: Linas Beresna, Simon Fraser University, School of Computing Science, Burnaby, BC, Canada, linas_beresna@sfu.ca; Eugene Fiume, Simon
+Fraser University, School of Computing Science, Burnaby, BC, Canada, eugene_fiume@
+sfu.ca.
+1
+which retains all connections through multi-pass accumulation
+and matches naive AD in expectation.
+• Detached and attached formulations of both methods, including
+differentiation of sensor splat positions induced by geometric
+perturbations.
+2
+Related Work
+This section situates our work against prior methods for adjoint
+differentiable rendering, differentiable light transport beyond path
+tracing, and reservoir-based sampling in rendering.
+(a) Viewpoint Path Tracing
+(b) Light Tracing
+2.1
+Memory-Efficient Adjoint Methods
+Naive reverse-mode AD records every operation of the forward
+simulation, producing memory that grows with path length and
+sample count. Radiative Backpropagation [Nimier-David et al. 2020]
+reformulates gradient computation as a separate adjoint transport
+problem, reducing memory at the cost of quadratic sample complexity: estimating the adjoint radiance at each primal path vertex
+requires an independent Monte Carlo simulation, making the overall
+cost proportional to the product of primal and adjoint sample counts.
+PRB [Vicini et al. 2021] eliminates both the memory growth and the
+quadratic cost for viewpoint path tracing by replaying paths from
+their pseudorandom number generator (PRNG) seeds and backpropagating locally at each vertex. The replay framework has since been
+extended to non-static geometry [Worchel et al. 2025], time-resolved
+acoustic transport [Finnendahl et al. 2025], and branching random
+walks in Monte Carlo PDE solvers [Yilmazer et al. 2024]. Our work
+extends replay to light tracing, where the per-vertex sensor splatting
+introduces a branching structure that PRB’s two-pass formulation
+cannot accommodate in constant memory.
+Fig. 1. Comparison of path–sensor connectivity. In viewpoint path tracing
+(a), a path from the sensor typically contributes to the image via a single
+emitter connection. In light tracing (b), a path from the emitter can connect
+to the sensor at every scattering vertex (dashed blue arrows), causing the
+computation graph to grow with both path length and the number of valid
+connections.
+adjoint from this tensor and accumulates the product of the adjoint and the local radiance contribution into a running per-sample
+sum. A third pass re-traces once more, consuming the accumulated
+sum by subtracting each vertex’s contribution as it proceeds and
+backpropagating the remainder into the scene parameters at each
+step. Only a constant number of fixed-size accumulators is carried
+per sample, so memory remains constant. The resulting gradient
+matches naive reverse-mode AD in expectation while maintaining
+constant memory with respect to path length.
+Both methods support detached and attached formulations. The
+detached case covers parameters that influence scattering values
+along the path, such as material albedo or emitter intensity, without
+altering the path geometry. The attached case extends this to parameters that move the vertices themselves, tracking how a geometric
+perturbation propagates through each ray segment to shift downstream vertices and, ultimately, the sensor coordinates at which
+flux is splatted. This extension is essential for optimizing geometry
+involved in specular transport, for example, a lens surface whose
+shape determines the caustic pattern on a receiving plane. A subtlety
+specific to light tracing arises here: unlike viewpoint path tracing,
+where the pixel coordinate is fixed by the initial camera ray, the
+sensor coordinate at which a light path splats is itself a function of
+the path geometry and must be differentiated alongside the splatted
+radiance. The adjoint pass must therefore backpropagate through
+both channels, a requirement that has no analogue on the camera
+side.
+Our contributions are:
+• A structural analysis showing that PRB’s two-pass replay formulation cannot be extended to light tracing in constant memory due
+to its one-path/many-pixels connectivity, together with an empirical demonstration that buffered variants retain linear memory
+scaling.
+• Two constant-memory reverse-mode differentiable light tracing methods: ResLRB, which preserves a two-pass structure via
+stochastic compression of sensor connections, and LRB-3-pass,
+2.2
+Differentiable Rendering beyond Path Tracing
+Camera-side path tracing and its variants have been the primary
+focus of physics-based differentiable rendering [Bangaru et al. 2020;
+Li et al. 2018; Loubet et al. 2019; Vicini et al. 2022; Zhang et al.
+2020, 2021], but several recent methods have broadened the scope.
+Mitsuba 2’s particle tracer (ptracer) [Nimier-David et al. 2019]
+provides a differentiable light tracer via naive reverse-mode AD,
+with memory that grows linearly in path length. Lipp et al. [Lipp
+et al. 2024] describe an adjoint light tracer for lighting design that
+targets object-space irradiance rather than image-space derivatives.
+Nimier-David et al. [Nimier-David et al. 2022] use reservoir sampling
+within differentiable volume rendering to select a single distance
+along a ray for transmittance gradient evaluation, yielding an unbiased single-sample estimator structurally similar to our ResLRB
+but applied within a volume rather than along a surface light path.
+Zeltner et al. [Zeltner et al. 2021] develop a taxonomy of Monte
+Carlo estimators for differentiable light transport, analyzing how
+sampling strategy choices affect gradient variance in both detached
+and attached settings. Fischer and Ritschel [Fischer and Ritschel
+2023] convolve the rendering function with a kernel to capture
+long-range parameter-to-pixel relationships at the cost of increased
+variance in high-dimensional parameter spaces.
+Extended Path Space Manifolds (EPSMs) [Xing et al. 2023] and
+their extension to differentiable photon mapping (DPM) [Xing et al.
+2
+2024] are the closest to our work in motivation, though different in
+approach. EPSMs provide a constraint-based framework for computing geometric derivatives through specular chains, and DPM-G
+adds contribution derivatives, enabling optimization of scenes with
+specular-diffuse-specular (SDS) transport via photon mapping. Our
+work and DPM both aim to bring differentiable rendering to transport regimes that camera-side methods struggle with, but they address different bottlenecks: DPM tackles the sampling problem (SDS
+paths are inaccessible to unidirectional tracers) by changing the renderer to photon mapping, while we tackle the memory problem (the
+AD graph grows with path length) by introducing constant-memory
+replay mechanisms for light tracing. DPM achieves bounded memory in the backward pass by subsampling the image, constructing
+gradient paths from a fraction of pixels per iteration; our methods
+process every pixel and every sample in every iteration, with the
+memory bound arising from the structure of the replay rather than
+from reduced workload.
+2.3
+(3)
+L̄ · ∇θ fs
+2
+i=1 L̄i
+x2
+(1)
+L̄ · ∇θ fs
+L̄
+x1
+(a) PRB (path tracing)
+L̄2
+(2)
+· ∇ θ fs
+3
+i=1 L̄i
+(3)
+· ∇ θ fs
+x3
+x2
+L̄3
+(1)
+L̄1 · ∇θ fs
+L̄1
+x1
+(b) Light Tracing
+Fig. 2. The adjoint structure of PRB and its obstruction in light tracing. In
+path tracing (a), the path contributes to one pixel, so a single scalar adjoint
+𝐿¯ can be precomputed before replay. In light tracing (b), each vertex 𝑥𝑖
+splats to a different pixel, requiring per-vertex adjoints 𝐿¯𝑖 that depend on
+future splat locations not yet visited during a forward replay. Scaling terms
+are omitted for brevity.
+Reservoir Sampling and Resampling
+in any fixed direction and cannot be evaluated for an arbitrary
+sensor connection), the path contributes flux to a pixel.
+Following the path integral formulation of Veach [1998], the
+measurement contribution of the full path to the image is
+𝐼(¯
+𝑥) =
+𝑘
+∑︁
+𝑊𝑒 (𝑥𝑖 → 𝑥𝑠 ) 𝑓𝑖 ( ¯
+𝑥) 𝐺 (𝑥𝑖 ↔ 𝑥𝑠 ) 𝑉 (𝑥𝑖 ↔ 𝑥𝑠 ),
+(1)
+𝑖=1
+where 𝑥𝑠 denotes the point on the sensor reached by the connection
+from 𝑥𝑖 , 𝑊𝑒 is the sensor importance (emitted importance response),
+𝐺 is the geometric term between 𝑥𝑖 and 𝑥𝑠 , 𝑉 is a binary visibility
+term, and 𝑓𝑖 collects the path throughput from the emitter through
+the first 𝑖 scattering events:
+𝑓𝑖 ( ¯
+𝑥) = 𝐿𝑒 (𝑥 0 → 𝑥 1 )
+𝑖
+Ö
+𝑓𝑠 (𝑥 𝑗 −1 → 𝑥 𝑗 → 𝑥 ∗𝑗+1 ) 𝐺 (𝑥 𝑗 −1 ↔ 𝑥 𝑗 ),
+𝑗=1
+(2)
+where 𝐿𝑒 is the emitted radiance at the source, 𝑓𝑠 is the BSDF, and
+𝑥 ∗𝑗+1 is either 𝑥 𝑗+1 (the next path vertex) when 𝑗 < 𝑖, or 𝑥𝑠 (the
+sensor point) when 𝑗 = 𝑖. The product telescopes: each additional
+vertex appends one BSDF evaluation and one geometric term to the
+running throughput.
+Each non-zero term in the sum of Eq. (1) corresponds to a sensor
+connection that lands at some coordinate 𝑢𝑖 on the image plane.
+The rendered image is formed by splatting each contribution 𝐿𝑖 =
+𝑊𝑒 𝑓𝑖 𝐺 𝑉 into the image through a reconstruction filter centred at
+𝑢𝑖 . A path of length 𝑘 can therefore produce up to 𝑘 splats, each at
+a potentially different pixel, and the per-path contribution to the
+image is the multiset {(𝐿𝑖 , 𝑢𝑖 )}𝑘𝑖=1 .
+This stands in contrast to viewpoint path tracing, where a path
+originates at the sensor and is connected to an emitter, either by
+BSDF sampling or next-event estimation (NEE), producing a single
+contribution to a single pixel. The one-path-one-pixel property is
+what allows PRB to precompute a scalar adjoint per sample before
+the replay pass begins. In light tracing, the one-path-many-pixels
+Background
+This section establishes the notation used throughout the paper and
+summarizes the two technical ingredients on which our methods
+build: the structure of light tracing with per-vertex sensor connections, and the path replay formulation of Vicini et al. [2021] for
+constant-memory reverse-mode differentiation. Readers already familiar with PRB and light tracing may wish to skip to Section 4,
+returning here only for notation.
+3.1
+x3
+(2)
+L̄ · ∇θ fs
+Weighted reservoir sampling [Vitter 1985] selects samples from a
+stream of unknown length in a single pass. Resampled Importance
+Sampling [Talbot et al. 2005] introduced streaming resampling for
+variance reduction in rendering, and ReSTIR [Bitterli et al. 2020]
+applied spatiotemporal reservoir reuse to direct lighting. Generalized Resampled Importance Sampling [Lin et al. 2022] extended
+the framework to select a single representative path from a larger
+path tree, and ReSTIR BDPT [Hedstrom et al. 2025] applies similar
+ideas to bidirectional path tracing including the selection of lightto-sensor connections. In differentiable rendering, Parameter-space
+ReSTIR [Chang et al. 2023] and amortized inverse rendering [Wang
+et al. 2023] use reservoir-based techniques for sample reuse during optimization. Our ResLRB method uses a weighted reservoir to
+compress the set of per-path sensor connections to a single representative, serving as a mechanism for bounding the AD graph rather
+than for importance sampling. Our LRB-3-pass method does not use
+reservoir sampling; it retains all connections through multi-pass
+accumulation.
+3
+Light Tracing
+A light tracer generates paths starting from emitters and propagates
+them into the scene. A path 𝑥¯ = (𝑥 0, 𝑥 1, . . . , 𝑥𝑘 ) begins at a point 𝑥 0
+sampled on an emitter surface and scatters through the scene via
+importance-sampled BSDF interactions at each subsequent vertex 𝑥𝑖 .
+At every scattering vertex 𝑥𝑖 for 𝑖 ≥ 1, the renderer tests whether 𝑥𝑖
+can be connected to the sensor: if the connection is unoccluded and
+the surface is non-specular (specular BSDFs have zero contribution
+3
+where 𝐿¯ = 𝜕L/𝜕𝐿 is the image-space adjoint at the pixel this path
+contributes to, and the ratio 𝐿/𝑓𝑠(𝑖 ) isolates the contribution of all
+other vertices so that each vertex is differentiated independently.
+After the local gradient is propagated into the scene parameters,
+the AD graph for that vertex is discarded before the next vertex
+is processed. At any moment, only a single vertex’s computation
+graph is live in memory, so the peak memory is independent of path
+length.
+A critical property of this formulation is that the image-space
+adjoint 𝐿¯ is a single scalar per sample (or, more precisely, one value
+per spectral channel). It is determined entirely by the pixel to which
+the path contributes, and since a viewpoint path contributes to
+exactly one pixel, 𝐿¯ is known before the adjoint replay begins. This
+is the assumption that Section 4.1 will show does not hold for light
+tracing.
+This formulation facilitates an unbiased estimator: the logderivative identity is exact, and the replay reconstructs the same
+path as the primal pass, so the expected gradient over samples
+matches that of naive reverse-mode AD. As with PRB, we restrict
+attention to the interior of the integration domain; gradients arising
+from geometric discontinuities such as silhouette boundaries are
+outside the scope of this work.
+v2
+p2
+3
+J ray = ∂p
+∂p2
+v1
+p3
+v3
+Fig. 3. Attached ray parameterization. The individual ray Jacobian 𝐽 ray is
+built using the partial of the two ray segments P2 and P3 . Each ray segment
+P𝑖 is calculated from the parameterization of v𝑖 −1 and v𝑖 .
+structure is the source of the memory difficulty we address in Section 4.
+3.2
+Path Replay Backpropagation
+Given a scalar loss L defined on the rendered image, the goal of
+reverse-mode differentiable rendering is to compute ∇𝜃 L, the gradient of the loss with respect to a set of scene parameters 𝜃 . The adjoint
+method achieves this by propagating the sensitivity of the loss backward through the computation: if the primal simulation computes
+a quantity 𝑦 (𝜃 ) that feeds into the loss, the adjoint 𝑦¯ = 𝜕L/𝜕𝑦 captures how much the loss changes per unit change in 𝑦, and the chain
+rule relates this to the parameter gradient via ∇𝜃 L = 𝑦¯ · 𝜕𝑦/𝜕𝜃 . In a
+path tracer, this means propagating the image-space loss gradient
+backward through every scattering interaction along every sampled
+path.
+Naive reverse-mode AD implements this by recording the full
+computation graph of the forward simulation and traversing it in
+reverse. The memory cost scales with the total number of recorded
+operations, which in a Monte Carlo renderer grows with both path
+length and sample count. PRB eliminates the depth dependence for
+viewpoint path tracing by observing that the path can be reconstructed exactly from the pseudorandom seed that generated it, so
+there is no need to store the graph.
+The algorithm proceeds in two passes. In the primal pass, a path
+is traced from the sensor into the scene, its radiance contribution
+𝐿 is evaluated and accumulated into the image, and two quantities
+are recorded per sample: the PRNG seed used to generate the path,
+and the final radiance value 𝐿, whilst no AD graph is retained.
+In the adjoint pass, shown in Figure 2a, the PRNG is re-seeded and
+the path is replayed from scratch. At each vertex 𝑥𝑖 of the replayed
+path, reverse-mode AD is enabled over a local scope that covers only
+the scattering computation at that vertex. The gradient contribution
+from vertex 𝑥𝑖 is computed using the log-derivative identity: rather
+than differentiating the full product of BSDF evaluations from 𝑥 0 to
+𝑥𝑘 , the cached radiance 𝐿 is used as a multiplicative weight and only
+the local BSDF factor 𝑓𝑠(𝑖 ) is differentiated. Concretely, the adjoint
+at each vertex takes the form
+𝐿¯ · 𝐿
+(3)
+∇𝜃 𝑓𝑠(𝑖 ) · (𝑖 ) ,
+𝑓𝑠
+3.3
+Detached and Attached Derivatives
+The gradient ∇𝜃 L depends on how the scene parameters 𝜃 influence the path contribution. There are two fundamentally different
+channels through which this influence can act, and separating them
+is important both for understanding the structure of the gradient
+and for implementing it efficiently.
+In the detached case, the parameters affect the values computed
+along the path, such as BSDF reflectance, emitter radiance, or sensor
+importance, but not the positions of the path vertices themselves.
+The path geometry is treated as fixed with respect to 𝜃 : the vertices 𝑥 0, . . . , 𝑥𝑘 and the sensor coordinates 𝑢𝑖 do not move when 𝜃
+is perturbed. Only the scattering weights and the emitted radiance
+respond to the perturbation. This is the setting described in the previous subsection, and the log-derivative identity of Eq. (3) handles
+it directly.
+In the attached case, the parameters also affect the path geometry.
+A perturbation of a surface, for instance, shifts the intersection
+point 𝑥𝑖 on that surface, which changes the incident and outgoing
+directions at 𝑥𝑖 , which in turn shifts the next intersection point
+𝑥𝑖+1 , and so on down the path. A single parameter perturbation can
+therefore propagate through every subsequent vertex, altering both
+the scattering values and the positions at which they are evaluated.
+In the terminology of Vicini et al. [2021], the samples are attached to
+the underlying geometry: they move with it rather than remaining
+fixed while only the integrand changes.
+The challenge is to track this propagation without recording
+the full computation graph from 𝑥 0 to 𝑥𝑘 . PRB handles this using
+forward-mode differentiation over a local parameterization of each
+ray segment, accumulated multiplicatively along the path. Specifically, each ray segment ending at vertex 𝑥𝑖 is parameterized by the
+surface coordinates of its two endpoints,
+p𝑖 = (v𝑖 −1, v𝑖 ) ∈ R4,
+4
+(4)
+where v 𝑗 ∈ R2 are the barycentric (or local UV) coordinates of
+𝑥 𝑗 on the mesh it lies on. At each vertex during the primal pass,
+forward-mode AD with respect to p𝑖 yields a local Jacobian
+ray
+𝐽𝑖
+𝜕p𝑖+1
+∈ R4×4,
+𝜕p𝑖
+=
+4.1
+(5)
+which describes how a perturbation of the current ray segment
+shifts the next one. Figure 3 illustrates an isolated calculation of one
+ray Jacobian. The chain rule gives the accumulated Jacobian from
+the first segment to the 𝑖-th,
+ray
+ray
+ray
+ray
+𝐽0→𝑖 = 𝐽𝑖 −1 · 𝐽𝑖 −2 · · · 𝐽0 ,
+(6)
+which is built incrementally during the primal pass by a single
+matrix multiplication per vertex, requiring only one 4 × 4 matrix of
+running storage.
+During the adjoint pass, the accumulated Jacobian serves as a
+bridge between frames of reference. The adjoint arriving from the
+loss is expressed in terms of the selected vertex’s parameterization,
+but the local scattering computation at an intermediate vertex 𝑥 𝑗 is
+expressed in terms of p 𝑗 . Projecting from one to the other requires
+the inverse of the accumulated Jacobian up to that point:
+𝜕(·) 𝜕(·)  ray  −1
+=
+· 𝐽0→𝑗
+.
+(7)
+𝜕p 𝑗
+𝜕p0
+ray
+The accumulated Jacobian 𝐽0→𝑗 is rebuilt during replay by the same
+forward-mode process used in the primal pass, so the inverse is
+always available at the vertex where it is needed.
+In the PRB formulation for viewpoint path tracing, the attached
+adjoint is a spatial quantity: it tracks how the loss changes when the
+point at which radiance is gathered shifts on the sensor. Because a
+viewpoint path starts at the sensor, the pixel coordinate is fixed by
+the camera ray and is not a function of downstream scene geometry.
+The adjoint therefore acts only through the radiance channel, and
+the accumulated Jacobian is used to project this radiance adjoint
+back through the path.
+For light tracing the situation is reversed. The path starts at the
+emitter and the radiance is gathered at 𝑥 0 , so perturbations along
+the path do not shift where radiance is collected. Instead, they shift
+where flux is delivered: a perturbation at vertex 𝑥 𝑗 propagates forward and changes the sensor coordinate 𝑢𝑖 at which a downstream
+vertex 𝑥𝑖 splats. The adjoint must therefore track the sensitivity of
+the loss to both the splatted radiance 𝐿𝑖 and the splatted position
+𝑢𝑖 . This second channel, the position adjoint 𝜕L/𝜕𝑢𝑖 , has no analogue in viewpoint path tracing and is one of the key differences we
+address in Section 4.
+4
+The Two-Pass Obstruction
+Suppose we attempt the most straightforward formulation of PRB
+to light tracing: trace light paths and splat their contributions in
+a primal pass, record the PRNG seed and total splatted flux, then
+replay each path from its seed and backpropagate at each vertex.
+The replay reconstructs the path geometry exactly, so we can
+revisit every vertex 𝑥𝑖 and re-evaluate the local scattering computation with AD enabled. At each vertex we need to weight the local
+gradient by the image-space adjoint 𝐿¯𝑖 = 𝜕L/𝜕𝐿𝑖 , which depends
+on which pixel 𝑢𝑖 the splat landed on. Unlike PRB, where a single
+scalar 𝐿¯ serves the entire path, different vertices along a light path
+splat to different pixels, so there is no single precomputable adjoint
+(Figure 2).
+The per-vertex adjoint can be looked up from the image-space
+gradient tensor after the primal pass, since 𝑢𝑖 is reconstructible
+during replay. However, the difficulty is that a perturbation at vertex
+𝑥 𝑗 affects all subsequent sensor connections along the path. As a
+result, the gradient at 𝑥 𝑗 must be weighted by the sum of adjointweighted contributions from all downstream vertices. During a
+forward replay, these downstream contributions have not yet been
+visited, so the required weighting cannot be computed without
+storing per-vertex information.
+Resolving this within a two-pass framework requires storing
+per-vertex data, such as splat positions or adjoint-weighted contributions, leading to memory that grows linearly with path length.
+This limitation is not an artifact of implementation but a fundamental consequence of the path–sensor connectivity structure in light
+tracing.
+The adjoint formulation itself remains valid; the challenge is
+purely one of bookkeeping. ResLRB (Section 4.2) sidesteps it by
+selecting a single representative splat per path. LRB-3-pass (Section 4.3) resolves it by accumulating the downstream sum in a
+dedicated pass before the backward replay.
+4.2
+Reservoir Light Replay Backpropagation (ResLRB)
+ResLRB stays as close to PRB’s two-pass structure as possible. It
+does this by selecting a single representative sensor connection per
+path, so the adjoint pass needs only one scalar 𝐿¯ rather than the full
+set {𝐿¯𝑖 }𝑘𝑖=1 . Figure 4 illustrates the two-pass structure. This reduces
+the problem to a setting where PRB’s replay formulation applies, at
+the cost of discarding all but one connection per path.
+During the primal pass, the candidate connections {(𝐿𝑖 , 𝑢𝑖 )}𝑘𝑖=1
+are streamed into a weighted reservoir of capacity one. At each
+vertex 𝑥𝑖 with a valid sensor connection, a scalar weight 𝜔𝑖 = ℓ (𝐿𝑖 )
+is computed, where ℓ denotes a scalar summary such as luminance,
+and the reservoir replaces its current contents with probability
+Í
+𝜔𝑖 /Ω𝑖 , where Ω𝑖 = 𝑖𝑗=1 𝜔 𝑗 is the running weight sum. After the
+path terminates, the reservoir holds a single index 𝑅 ∈ {1, . . . , 𝑘 }
+selected with probability
+Method
+This section develops two constant-memory reverse-mode differentiable light tracers. The first, ResLRB (Section 4.2), compresses
+per-path sensor connections into a single stochastically selected representative, preserving a two-pass structure at the cost of gradient
+variance. The second, LRB-3-pass (Section 4.3), retains all connections through a third traversal, matching naive AD in gradient
+quality. Both are developed in detached and attached formulations.
+We begin by examining why PRB’s two-pass structure does not
+generalize to light tracing in constant memory.
+Pr(𝑅 = 𝑖) =
+𝜔𝑖
+,
+Ω𝑘
+(8)
+which is the standard property of weighted reservoir sampling [Vitter 1985]. The primal image contribution is formed by splatting the
+5
+x2
+v0
+x0
+xs
+L
+J sensor
+xx23
+u
+x1
+v1
+(a) Primal Pass: reservoir selects one sensor connection
+(2)
+x2 L̄ · ∇θ fs
+xs
+L̄
+Fig. 5. Sensor-connection Jacobian 𝐽𝑖sensor . A perturbation of the raysegment parameterization p𝑖 shifts both the splatted radiance 𝐿𝑖 and the
+ray
+splat
+sensor coordinate 𝑢𝑖 . The composition 𝐽𝑖
+= 𝐽𝑖sensor · 𝐽0→𝑖 maps perturbations at the path origin to shifts in the splatted output.
+x0
+x3
+x1
+identity of Eq. (3), adapted to use the reweighted splat:
+(1)
+L̄ · ∇θ fs
+∇𝜃 𝑓𝑠(𝑖 ) ·
+(b) Adjoint Pass: replay to the selected vertex
+𝑓𝑠(𝑖 )
+,
+(11)
+where 𝐿¯𝑅 = 𝜕L/𝜕𝐿𝑅 is the image-space adjoint at the pixel where
+the selected connection is splatted. Because only one connection
+survives, there is exactly one adjoint to look up, and it plays the
+same role as the scalar 𝐿¯ in PRB. The replay terminates at depth 𝑅;
+ˆ
+vertices beyond the selected one do not contribute to 𝑆.
+Fig. 4. ResLRB two-pass structure. In the primal pass (a), candidate sensor
+connections are streamed into a weighted reservoir; discarded candidates
+are shown at reduced opacity. Only the selected connection (here at 𝑥 2 )
+is splatted, reweighted by 𝑊𝑘 /𝑤𝐼 . In the adjoint pass (b), the image-space
+adjoint 𝐿¯ at the selected pixel is propagated backward along the replayed
+path, and the log-derivative identity is applied at each vertex 𝑥𝑖 .
+4.2.2 Attached Formulation. The attached extension adds Jacobian
+transport to both passes. During the primal pass, the accumulated
+ray
+ray-segment Jacobian 𝐽0→𝑖 , defined in Eq. (6), is maintained alongside the reservoir. When the reservoir accepts a new candidate at
+ray
+vertex 𝑥𝑖 , the current 𝐽0→𝑖 is cached with it, so that at termination
+the reservoir holds the accumulated Jacobian at the selected depth
+𝑅.
+After the loop, a final forward-mode differentiation step computes
+the sensor-connection Jacobian at the selected vertex (Figure 5):
+selected connection, reweighted to compensate for the selection:
+Ω𝑘
+𝑆ˆ( ¯
+𝑥; 𝜃 ) =
+· 𝐿𝑅 (𝜃 ).
+𝜔𝑅
+𝐿¯𝑅 · 𝑆ˆ
+(9)
+Taking the expectation over 𝑅 recovers the exact per-path contribution:
+𝑘
+𝑘
+∑︁
+  ∑︁
+𝜔𝑖 Ω𝑘
+E𝑅 𝑆ˆ =
+·
+· 𝐿𝑖 =
+𝐿𝑖 ,
+(10)
+Ω𝑘 𝜔𝑖
+𝑖=1
+𝑖=1
+𝐽𝑅sensor =
+𝜕(𝐿𝑅 , 𝑢𝑅 )
+∈ R5×4,
+𝜕p𝑅
+(12)
+which describes how a perturbation of the ray-segment parameterization p𝑅 shifts both the splatted radiance 𝐿𝑅 (3 spectral channels)
+and the sensor coordinate 𝑢𝑅 (2 components). Composing with the
+cached accumulated Jacobian gives the total splat Jacobian from the
+emitter parameterization to the splatted output:
+so 𝑆ˆ is unbiased for the sum of all 𝑘 splats, and ∇𝜃 𝑆ˆ is unbiased for
+the per-path gradient.
+The variance increase is proportional to the number of discarded
+connections. In the worst case, where every vertex produces a valid
+sensor connection with comparable weight, the effective sample
+count is reduced by a factor proportional to path length. In practice, scenes dominated by specular transport exhibit far fewer valid
+connections, and the variance penalty is correspondingly smaller.
+splat
+𝐽𝑅
+ray
+= 𝐽𝑅sensor · 𝐽0→𝑅 .
+(13)
+ray
+During the adjoint pass, 𝐽0→𝑗 is rebuilt at each replayed vertex by
+the same forward-mode process used in the primal pass. At vertex
+𝑥 𝑗 , the adjoint is projected into the local frame via the inverse, as
+in Eq. (7). Two backward operations are performed: one through
+the radiance channel weighted by 𝐿¯𝑅 , and one through the position
+channel weighted by the position adjoint 𝜕L/𝜕𝑢𝑅 . The computation
+of this position adjoint is described in Section 4.4.
+Because the reservoir selects a single vertex, the attached formulation adds only constant storage per sample: one 4 × 4 matrix for
+ray
+𝐽0→𝑅 and one two-component vector for the position adjoint.
+4.2.1 Detached Formulation. The primal pass traces the light path,
+builds the reservoir, and records per sample: the PRNG seed, the
+selected index 𝑅, and the reweighting factor Ω𝑘 /𝜔 𝑅 . No AD graph
+is recorded.
+The adjoint pass re-seeds the PRNG and replays the path up to
+depth 𝑅. At each replayed vertex 𝑥𝑖 for 𝑖 ≤ 𝑅, reverse-mode AD is
+enabled over a local scope covering the scattering computation at
+that vertex. The gradient contribution follows the log-derivative
+6
+adjoint 𝐿¯𝑖 is read from 𝛿𝐼 at sensor coordinate 𝑢𝑖 using a filterweighted lookup matching the reconstruction filter used during
+splatting. The product 𝐿¯𝑖 · 𝐿𝑖 is accumulated into a running persample sum:
+𝑘
+∑︁
+𝛿 total =
+𝐿¯𝑖 · 𝐿𝑖 .
+(14)
+x2
+L2
+L1
+L3
+x3
+x1
+𝑖=1
+The accumulator is the sum of element-wise products 𝐿¯𝑖 · 𝐿𝑖 , not the
+Í
+Í
+product of separate sums ( 𝐿¯𝑖 )( 𝐿𝑖 ); the two expressions differ
+by cross-terms that grow with path length.
+Pass 3 (Backward). The path is re-traced a third time with 𝛿 rem
+initialized to 𝛿 total . At each vertex 𝑥𝑖 , two backward operations
+are performed. First, the per-vertex adjoint 𝐿¯𝑖 is read from 𝛿𝐼 and
+gradients are backpropagated through the local splat computation:
+(a) Pass 1 (Primal): trace and splat 𝐿𝑖 at each vertex.
+x2
+δtotal =
+L̄2
+2
+i=1 L̄i · Li
+L̄1
+L̄3
+x3
+δtotal =
+3
+x1
+i=1 L̄i · Li
+(b) Pass 2 (Accumulate): accumulate 𝛿 total =
+x2
+(𝑖 )
+∇𝜃 𝑓splat
+· 𝐿¯𝑖 .
+δtotal = L̄1 · L1
+Second, the current vertex’s contribution is subtracted,
+𝛿 rem ← 𝛿 rem − 𝐿¯𝑖 · 𝐿𝑖 ,
+(16)
+Í ¯
+leaving 𝛿 rem = 𝑗 >𝑖 𝐿 𝑗 · 𝐿 𝑗 , the downstream adjoint. The logderivative identity is applied using 𝛿 rem as the weight:
+Í¯
+𝐿𝑖 · 𝐿𝑖 .
+(2)
+δrem · ∇θ fs
+L̄2
+δrem
+δrem
+∇𝜃 𝑓𝑠(𝑖 ) ·
+δtotal
+L̄1
+L̄3
+x3
+(3)
+δrem · ∇θ fs
+x1
+𝛿 rem
+𝑓𝑠(𝑖 )
+.
+(17)
+Because 𝛿 rem already contains the radiance weighting 𝐿 𝑗 in each
+term, the separate remaining-radiance factor that PRB uses is not
+needed. After both operations, the AD graph for vertex 𝑥𝑖 is discarded. The live state at any point consists of 𝛿 rem (one spectral
+value per sample), the path throughput, and the local AD scope, all
+constant in path length. The gradient matches naive reverse-mode
+AD in expectation: no connections are discarded and no stochastic
+reweighting is applied.
+(1)
+δtotal · ∇θ fs
+(c) Pass 3 (Backward): consume 𝛿 rem by subtraction at each vertex.
+Fig. 6. LRB-3-pass structure. The primal pass (a) traces the light path and
+splats contributions to the sensor. The accumulation pass (b) re-traces
+the path, reading per-vertex adjoints from the image gradient tensor and
+summing 𝐿¯𝑖 · 𝐿𝑖 along the path. The backward pass (c) re-traces once more,
+consuming the accumulated sum by subtraction and backpropagating at
+each vertex. Only 𝛿 rem and the local AD scope are held in memory at any
+point.
+4.3
+(15)
+4.3.2 Attached Formulation. The attached extension adds a second
+accumulator 𝐴pos alongside 𝛿 total to handle the position adjoint
+channel.
+In Pass 2, at each vertex 𝑥𝑖 with a valid sensor connection, the position adjoint 𝜕L/𝜕𝑢𝑖 is computed by the procedure described in Secray
+tion 4.4. The accumulated Jacobian 𝐽0→𝑖 and the sensor-connection
+sensor
+Jacobian 𝐽𝑖
+(defined in Eq. (12)) are rebuilt on the fly, and their
+splat
+ray
+composition gives the per-vertex splat Jacobian 𝐽𝑖
+= 𝐽𝑖sensor · 𝐽0→𝑖
+as in Eq. (13). The position adjoint is projected through this Jacobian
+and accumulated:
+𝑘
+
+∑︁ 
+splat
+𝜕L
+0 0 𝜕𝑢𝜕 L
+𝐴pos =
+.
+(18)
+𝜕𝑢𝑖,𝑦 𝐽𝑖
+𝑖,𝑥
+LRB-3-Pass
+LRB-3-pass eliminates the variance penalty of ResLRB by retaining
+all 𝑘 sensor connections, at the cost of a third path traversal. The core
+Í
+observation is that the downstream sum 𝑖> 𝑗 𝐿¯𝑖 · 𝐿𝑖 needed at each
+vertex during the backward pass can be precomputed in a forward
+scan and then consumed by subtraction, mirroring the remainingradiance pattern of PRB but extended from a single contribution to
+a sum over sensor connections. Figure 6 illustrates the three-pass
+structure.
+𝑖=1
+This is a four-component vector per sample, not a matrix, because
+the left-multiplication by a row vector collapses each 4 × 4 Jacobian
+to a single row.
+In Pass 3, 𝐴pos is consumed by subtraction alongside 𝛿 rem . At
+vertex 𝑥 𝑗 , the remainder is projected into the local frame:
+
+
+ray −1
+𝐴pos,local = 𝐴pos,rem · 𝐽0→𝑗
+,
+(19)
+4.3.1 Detached Formulation. The algorithm proceeds in three
+passes over the same path, reconstructed each time from the same
+PRNG seed.
+Pass 1 (Primal). Light paths are traced and their contributions
+splatted to an image block as in a standard light tracer. The image
+is developed, the loss L evaluated, and the gradient 𝜕L/𝜕𝐼 [𝑝] backpropagated through the film pipeline to produce a per-pixel adjoint
+tensor 𝛿𝐼 , stored as a read-only lookup for subsequent passes.
+Pass 2 (Accumulate). Each path is re-traced from the same seed.
+At every vertex 𝑥𝑖 with a valid sensor connection, the image-space
+ray
+where 𝐽0→𝑗 is rebuilt during replay. The last two components of
+𝐴pos,local give the position adjoint in the local parameterization at 𝑥 𝑗 ,
+which is backpropagated through the two-point parameterization
+7
+alongside the radiance adjoint from Eq. (17). The total per-sample
+storage for the attached case is 𝛿 rem (one spectral value) plus 𝐴pos
+(four floats), independent of path length.
+1
+2
+3
+4.4
+4
+The UV Position Adjoint
+5
+Both attached formulations require the position adjoint 𝜕L/𝜕𝑢𝑖 at
+each vertex with a valid sensor connection. The splatting operation
+deposits radiance 𝐿𝑖 into the image through a reconstruction filter
+𝐹 centred at 𝑢𝑖 :
+𝐼 [𝑝] += 𝐹 (𝑢𝑖 , 𝑝) · 𝐿𝑖 · 𝑠,
+6
+7
+8
+9
+(20)
+10
+11
+where 𝑠 is a per-sample normalization factor and the sum runs over
+pixels 𝑝 in the filter’s support. The gradient of the loss with respect
+to 𝑢𝑖 involves the spatial derivative of 𝐹 :
+𝜕𝐹 (𝑢𝑖 , 𝑝)
+𝜕L ∑︁ 𝜕L
+=
+· 𝐿𝑖 · 𝑠 ·
+.
+𝜕𝑢𝑖
+𝜕𝐼
+[𝑝]
+𝜕𝑢𝑖
+𝑝
+12
+13
+14
+15
+(21)
+16
+17
+Rather than implementing the filter gradient analytically, we
+compute 𝜕L/𝜕𝑢𝑖 by reverse-mode differentiation through the filter
+weighted lookup. Within a local AD scope, we enable gradients
+on the position 𝑢𝑖 , perform a filter-weighted read from the adjoint
+tensor 𝛿𝐼 , multiply by 𝐿𝑖 , and backpropagate to obtain 𝜕L/𝜕𝑢𝑖 . This
+is a small self-contained computation involving only the filter kernel
+and a gather from 𝛿𝐼 , executing inside the symbolic loop without
+materializing additional global state. In ResLRB it is computed once
+for the selected vertex; in LRB-3-pass it is computed at every vertex
+splat
+during Pass 2 and projected through 𝐽𝑖
+before accumulation into
+𝐴pos .
+5
+def reslrb_primal ( ray ) :
+res = empty_reservoir ()
+Ω = 0 , 𝛽 = 1 , 𝑆ˆ = 0
+for i in range ( max_depth ) :
+v = intersect ( ray )
+L , u = connect_to_sensor (v , 𝛽 )
+if L is valid :
+𝜔 = luminance ( L )
+Ω += 𝜔
+if uniform () < 𝜔 / Ω:
+res . store (L , u , 𝜔 , i )
+ray , f_s , p = sample_bsdf ( v )
+𝛽 *= f_s / p
+if res is not empty :
+𝑆ˆ = res . L * Ω / res .𝜔
+splat (𝑆ˆ , res . u )
+return res , 𝑆ˆ
+Fig. 7. ResLRB primal pass. Candidate sensor connections are streamed
+into a weighted reservoir; the selected connection is splatted with reweight
+Ω𝑘 /𝜔 𝑅 .
+1
+2
+3
+4
+5
+6
+7
+Implementation
+8
+We implement all methods as custom integrators in Mitsuba 3 [Jakob
+et al. 2022b] on top of DrJit [Jakob et al. 2022a]. The tracing loop
+runs in symbolic mode, which records the loop body as a single
+fused kernel and executes all iterations in one launch, preserving
+the constant-memory property.
+ray
+The inverse of the accumulated Jacobian 𝐽0→𝑗 can be singular at
+vertices involving diffuse scattering or near-grazing intersections;
+we guard the inverse with a determinant threshold, substituting the
+ray
+zero matrix when | det 𝐽0→𝑗 | falls below a small value. As a complementary measure, we inject zero-mean stochastic noise into the
+local Jacobian at non-specular vertices, following the regularization
+scheme of Vicini et al. [2021].
+ResLRB. Listing 7 shows the ResLRB primal pass, which extends
+the standard light tracing loop with a streaming reservoir. The adjoint pass, shown in Listing 8, re-seeds the PRNG and replays the
+path up to the selected depth 𝑅. At each vertex, the reservoir update
+logic is re-executed purely to keep the PRNG synchronized, even
+though the selection outcome is already known. The log-derivative
+identity is applied at each vertex using the single image-space adˆ
+joint 𝐿¯𝑅 and the cached reweighted splat 𝑆.
+LRB-3-pass. Listing 9 shows the three-pass backward procedure.
+The adjoint tensor 𝛿𝐼 is constructed between Pass 1 and Pass 2 by
+enabling gradients on the image block’s internal tensor, developing
+the image, and backpropagating the loss gradient through the film
+9
+10
+def reslrb_adjoint ( ray , res , 𝑆ˆ , 𝐿¯𝑅 ) :
+𝛽 = 1
+for i in range ( res . depth ) :
+v = intersect ( ray )
+L , u = connect_to_sensor (v , 𝛽 )
+if L is valid :
+consume_reservoir_rng ()
+backward_grad ( f_s , 𝐿¯𝑅 * 𝑆ˆ / f_s )
+ray , f_s , p = sample_bsdf ( v )
+𝛽 *= f_s / p
+Fig. 8. ResLRB adjoint pass. The path is replayed to the selected depth 𝑅.
+The reservoir update is re-executed at each vertex to synchronize the PRNG.
+(𝑖 )
+The log-derivative identity weights each vertex by 𝐿¯𝑅 · ˆ
+𝑆/𝑓𝑠 .
+pipeline. The result is wrapped in a read-only image block configured with the same reconstruction filter as the primal block, so that
+a read at position 𝑢𝑖 returns the filter-matched adjoint.
+Attached extensions. The attached formulations add forwardray
+mode Jacobian accumulation (𝐽0→𝑖 ) to the primal or accumulation
+pass and an inverse-projection step to the backward pass, following
+the scheme described in Section 3.3. In ResLRB, the accumulated
+Jacobian is cached with the reservoir selection and used once during the adjoint pass. In LRB-3-pass, it is rebuilt during both Pass 2
+and Pass 3. Both attached formulations require the position adjoint
+𝜕L/𝜕𝑢𝑖 , computed jointly with the radiance adjoint as shown in
+Listing 10. Listing 11 shows how the attached LRB-3-pass accumulation pass combines the detached adjoint accumulation with Jacobian
+transport and position adjoint projection. In ResLRB attached, the
+same Jacobian and sensor-connection computations are performed
+but only the values at the reservoir-selected vertex are retained.
+8
+2
+3
+4
+5
+13
+14
+15
+(a) Detached Memory Usage
+2
+10
+.79
+10
+.79
+6.6
+2
+8
+0.2
+1.5
+Living Room
+Slab
+Tumbler
+(c) Detached Computation Time
+0.5
+Wave
+0.1
+4
+6
+0.2
+0.5
+0.5
+1
+5
+0.7
+8
+1.0
+5
+Time (s)
+0.1
+0
+0.0
+8
+0.0
+7
+0.0
+8
+0.08
+Fig. 10. Joint radiance and position adjoint read. The filter-weighted lookup
+is differentiated with respect to the splat position in a local AD scope,
+yielding both 𝐿¯𝑖 and 𝜕 L/𝜕𝑢𝑖 .
+6
+ptracer
+lrb_2pass
+lrb_3pass
+reslrb
+0.1
+7
+0.0
+7
+0.0
+7
+0.0
+8
+6
+5
+5
+Overhead
+(b) Attached Memory Usage
+2.0
+0.24
+0.16
+Mirror
+2.5
+0.0
+4
+0.32
+4
+0.1
+6
+0.1
+6
+3
+def read_adjoint (𝛿 I , u , L ) :
+u_diff = detach_copy ( u )
+enable_grad ( u_diff )
+𝐿¯ = filter_read (𝛿 I , u_diff )
+backward_from ( dot ( 𝐿¯ , detach ( L ) ) )
+𝛿 pos = grad ( u_diff )
+return 𝐿¯ , 𝛿 pos
+0.1
+2
+Time (s)
+1
+Wave
+0.1
+4
+0.1
+5
+0
+Tumbler
+4
+Slab
+0.7
+Living Room
+0.4
+0
+4
+0
+4
+Fig. 9. LRB-3-pass backward structure. Pass 2 accumulates the adjointweighted radiance; Pass 3 consumes it by subtraction while backpropagating
+at each vertex.
+8
+0.1
+4
+0.1
+4
+8
+6.6
+12
+0.2
+2
+0.2
+4
+26
+12
+1.6
+6
+1.7
+8
+25
+Attached sampling
+16
+11
+.01
+24
+Detached sampling
+16
+2
+22
+23
+6.7
+21
+4
+20
+1.8
+19
+Fig. 11. LRB-3-pass attached, Pass 2. The detached accumulation of 𝛿 total
+is augmented with forward-mode Jacobian transport and position adjoint
+accumulation into 𝐴pos . The read_adjoint call (Listing 10) returns both 𝐿¯𝑖
+and 𝜕 L/𝜕𝑢𝑖 .
+7
+18
+# Pass 3: backward
+𝛿 rem = 𝛿 total
+for i in range ( max_depth ) :
+v = intersect ( ray )
+L , u = connect_to_sensor (v , 𝛽 )
+if L is valid :
+𝐿¯𝑖 = read_adjoint (𝛿 I , u )
+backward_grad (L , 𝐿¯𝑖 )
+𝛿 rem -= 𝐿¯𝑖 * L
+backward_grad ( f_s , 𝛿 rem / f_s )
+advance_path ( v )
+0.2
+17
+Memory (GB)
+16
+15
+Memory (GB)
+13
+14
+11
+12
+.79
+12
+10
+11
+9
+10
+2.5
+5
+10
+8
+0.0
+5
+0.0
+7
+9
+7
+6
+8
+6
+0.0
+8
+0.1
+0
+7
+5
+# Pass 2: accumulate
+𝛿 total = 0
+for i in range ( max_depth ) :
+v = intersect ( ray )
+L , u = connect_to_sensor (v , 𝛽 )
+if L is valid :
+𝐿¯𝑖 = read_adjoint (𝛿 I , u )
+𝛿 total += 𝐿¯𝑖 * L
+advance_path ( v )
+2.6
+6
+# LRB -3 - pass attached : Pass 2
+𝛿 total = 0 , 𝐴pos = 0
+ray
+𝐽0→𝑖
+= identity ()
+for i in range ( max_depth ) :
+v = intersect ( ray )
+L , u = connect_to_sensor (v , 𝛽 )
+if L is valid :
+𝐿¯𝑖 , 𝛿 pos = read_adjoint (𝛿 I , u , L )
+𝛿 total += 𝐿¯𝑖 * L
+𝐽𝑖sensor = forward_jacobian (v , u )
+ray
+𝐽𝑖splat = 𝐽𝑖sensor * 𝐽0→𝑖
+𝐴pos += [0 , 0 , 𝛿 pos .x , 𝛿 pos . y ] * 𝐽𝑖splat
+ray
+𝐽𝑖
+= forward_jacobian ( v )
+ray
+ray
+𝐽0→𝑖
+= 𝐽𝑖ray * 𝐽0→𝑖
+advance_path ( v )
+0.7
+1
+4
+1
+0.0
+5
+0.0
+7
+3
+def lrb_3pass_backward ( seed , grad_in ) :
+# Pass 1: primal
+trace_light_path ( seed )
+𝛿 I = backprop_film ( grad_in )
+10
+.79
+2
+2.5
+5
+1
+Mirror
+Overhead
+(d) Attached Computation Time
+Fig. 12. Memory usage and computation time across the validation scenes,
+comparing detached and attached formulations. The attached variants are
+considerably slower than their detached counterparts due to the overhead
+of computing forward ray Jacobians in both the primal and backward passes.
+The constant-memory methods (reslrb and lrb_3pass) maintain a flat
+memory profile in both formulations, whereas ptracer and lrb_2pass
+grow linearly.
+Results
+All experiments are performed on a workstation with an NVIDIA
+GeForce RTX 5080 GPU (16 GB VRAM) and an AMD Ryzen 9 9950X
+CPU, using the CUDA/OptiX [Nickolls et al. 2008; Parker et al.
+2010] backend. We evaluate eight integrator variants spanning the
+design space: naive AD light tracing (ptracer), buffered two-pass
+(lrb_2pass, detached and attached), ResLRB (reslrb, detached
+and attached), and LRB-3-pass (lrb_3pass, detached and attached).
+Scenes. We use six scenes across the experiments: Living Room
+(open diffuse interior, high path–sensor connectivity), Glass Slab
+(dielectric slab over a diffuse receiver), Tumbler (glass object under
+a directional emitter), Mirror (roughened conductor producing a
+caustic on a diffuse receiver), Glass Panel (flat dielectric panel with
+a normal map caustic, referred to as Overhead in plots), and the
+Wave and Sunday lens scenes used for the heightfield optimization.
+9
+ptracer
+lrb_2pass
+reslrb
+lrb_3pass
+Tumbler
+Slab
+Living Room
+Scene
+Fig. 13. Detached gradient validation across three scenes and four integrators. Each row shows the primal render alongside the gradient of the parameter
+under test. Top: floor diffuse reflectance in the Living Room scene (path length 32, 32 spp). Middle: receiving plane diffuse reflectance in the Glass Slab scene
+(path length 4, 32 spp). Bottom: emitter radiance texture in the Tumbler scene (path length 16, 32 spp). Multi-channel gradients are visualised on a single
+channel using a symmetric red-blue colormap. All three constant-memory methods agree with the ptracer reference up to Monte Carlo noise.
+6.2
+The first three are used for detached validation and memory sweeps;
+the next two for attached validation; the lens scenes for optimization.
+6.1
+Memory Scaling
+We sweep maximum path length from 4 to 128 across all integrator
+variants on the Living Room and Tumbler scenes (Figures 16 and 17).
+Naive AD (ptracer) exhibits linear memory growth with path
+length, encountering an out-of-memory failure at path length 32 on
+our 16 GB hardware. The buffered two-pass variant (lrb_2pass) reduces the memory footprint relative to ptracer by a constant factor
+but retains the same linear asymptotic growth. Notably, lrb_2pass
+can exceed the memory limit at lower path lengths than ptracer
+in some cases: whereas naive AD only materialises graph nodes
+for path segments that survive Russian roulette, lrb_2pass preallocates storage for all potential sensor connections up to the maximum path length to ensure thread-safe indexing during replay. Both
+reslrb and lrb_3pass maintain a flat memory profile across all
+tested path lengths (Figure 12). Each carries a small constant persample overhead, one reservoir entry for reslrb and one pair of
+scalar accumulators for lrb_3pass, but this is negligible compared
+to the buffers required by the linear-memory methods. These formulations enable differentiable light transport at path lengths where
+AD-based approaches are not feasible on consumer hardware.
+Gradient Correctness
+We validate gradients by backpropagating an 𝐿2 loss through the
+rendered image and comparing the resulting parameter gradient.
+6.1.1 Detached Validation. We validate detached gradients against
+the ptracer reference on three scenes (Figure 13), using a synthetic
+target constructed by blurring the primal render with a Gaussian
+kernel. For the Living Room scene (path length 32, 32 spp) we
+differentiate the diffuse reflectance of the floor; for the Glass Slab
+(path length 4, 32 spp) we differentiate the diffuse reflectance of
+the receiving plane; for the Tumbler (path length 16, 32 spp) we
+differentiate the radiance texture of the directional emitter. In all
+three scenes reslrb, lrb_2pass, and lrb_3pass agree with the
+reference up to Monte Carlo noise, with reslrb exhibiting more
+noise for the Living Room scene.
+6.1.2 Attached Validation. We validate attached gradients on two
+caustic-producing scenes (Figure 14), again using a blurred-render
+target. The Mirror scene (path length 4, 128 spp) differentiates the
+vertex positions of a roughened conductor producing a caustic on
+a diffuse receiver. The Glass Panel scene (path length 4, 128 spp)
+differentiates the normal map of a flat dielectric panel, exercising
+Jacobian transport at refraction. All three constant-memory variants agree with the ptracer reference up to Monte Carlo noise,
+confirming that the Jacobian transport and position adjoint logic are
+correct. Figure 15 shows initial gradients for the lens heightfield optimization scene (path length 4, 32 spp), where the loss is computed
+against the target reference caustic rather than a blurred version of
+the primal, setting up the optimization described in Section 6.4. All
+variants are again consistent with the reference.
+6.3
+Timing
+Computation time per gradient evaluation is shown alongside memory in Figures 16, 17, and 12. The relative ordering of the integrators
+varies with both scene and path length, so no single method is
+fastest in all configurations. At low path lengths ptracer is generally the fastest, as it requires only a single pass with no replay
+overhead. lrb_2pass is slower than ptracer at equivalent path
+lengths due to the cost of maintaining and reading back the pervertex buffer, despite performing only two traversals. Between the
+two constant-memory methods, lrb_3pass is faster than reslrb
+10
+ptracer
+lrb_2pass
+reslrb
+lrb_3pass
+Glass
+Mirror
+Scene / Render
+Fig. 14. Attached gradient validation across two caustic-producing scenes and four integrators. Each row shows a scene schematic alongside the parameter
+gradients. Top: vertex positions of a roughened conductor in the Mirror scene (path length 4, 128 spp). Bottom: normal map of a flat dielectric panel in the
+Glass Panel scene (path length 4, 128 spp). All constant-memory variants agree with the ptracer reference up to Monte Carlo noise, confirming correctness of
+the Jacobian transport and position adjoint logic.
+(a) Setup / Reference
+(b) ptracer
+(c) lrb_2pass
+(d) reslrb
+(e) lrb_3pass
+Fig. 15. Lens caustic optimization setup and initial gradient validation (path length 4, 32 spp). (a) Scene schematic and target reference caustic. (b–e) Gradients
+of the 𝐿2 loss between the primal render and the target reference, evaluated at a flat initial lens heightfield. All integrators produce consistent gradients,
+confirming correctness before optimization begins.
+6.4
+in most configurations, with reslrb becoming competitive only in
+scenes with high path–sensor connectivity, such as the Living Room,
+where the cost of the third traversal in lrb_3pass grows relative
+to the reservoir overhead. In scenes with sparse connectivity, such
+as caustic-dominated transport, the reservoir in reslrb seldom has
+more than one candidate to compress, so the variance advantage
+of lrb_3pass does not materialise but neither does any speed advantage for reslrb. For the attached formulations, all three adjoint
+methods (lrb_2pass, reslrb, lrb_3pass) are considerably slower
+than their detached counterparts, as each requires computing the
+forward ray Jacobians during both the primal and the backward
+passes, as shown in Figure 12d.
+Geometric Inverse Problem
+We optimize the heightfield of a dielectric lens to produce a target
+caustic pattern on a diffuse receiving plane, using the attached formulation throughout. The gradients must propagate through the
+refractive interface to determine how shifting lens vertices alters
+the downstream splat positions on the sensor, so the detached formulation is insufficient for this task. Figure 15 shows the initial
+gradients for a flat lens, which are consistent across all integrators
+before any optimization has taken place. Figure 18 shows the loss
+curves and final optimized caustics after 1000 iterations with an
+Adam optimizer [Kingma and Ba 2014]. Because caustic paths have
+very few valid sensor connections per path, the reservoir in reslrb
+almost always selects the only available connection, so there is no
+meaningful difference in gradient variance between reslrb and
+11
+ptracer
+reslrb
+8
+4
+0
+OOM
+OOM
+16GB Limit
+12
+8
+10.78
+ptracer
+reslrb
+5.40
+4
+OOM
+0.25
+OOM
+OOM
+(a) Memory usage
+2.71
+0.20
+0.15
+0
+0.06
+0.06
+0.06
+4
+8
+16
+0.10
+0.05
+0.06
+32
+64
+0.06
+128
+(a) Memory usage
+8
+16
+Path length
+32
+64
+128
+(b) Computation time
+OOM
+4
+OOM
+0.00
+0.06
+Path length
+OOM
+Computation time (s)
+OOM
+OOM
+OOM
+16
+12
+Peak memory usage (GB)
+Peak memory usage (GB)
+OOM
+16GB Limit
+16
+0.10
+0.09 0.09
+Fig. 16. Memory usage and computation time for the Living Room scene
+across path lengths 4 to 128. Naive AD (ptracer) and the buffered two-pass
+variant (lrb_2pass) grow linearly and exceed the 16 GB memory limit before
+path length 32 and 128 respectively. Our constant-memory methods (reslrb
+and lrb_3pass) maintain a flat memory profile and remain feasible at all
+tested path lengths. Timing reflects the scene and path-length dependence
+discussed in Section 6.3.
+0.09
+32
+64
+0.09
+0.08
+0.08
+Computation time (s)
+0.09
+0.06
+0.05
+0.05
+0.04
+0.03
+0.02
+0.00
+the full-gradient methods. Consequently, all four integrators produce numerically consistent per-iteration loss curves and recover
+the same final caustic pattern from a flat initial lens. In terms of
+wall-clock time, ptracer is the fastest by a considerable margin,
+as this scene uses a fixed path length of 4 and ptracer carries no
+replay overhead at low path lengths. Among the adjoint methods,
+lrb_3pass is fastest, followed by reslrb and then lrb_2pass; the
+gap between them would widen at greater path lengths where the
+buffer overhead of lrb_2pass and the third traversal of lrb_3pass
+become more significant.
+7
+4
+8
+16
+Path length
+128
+(b) Computation time
+Fig. 17. Memory usage and computation time for the Tumbler scene across
+path lengths 4 to 128. The Tumbler scene has sparser path–sensor connectivity than the Living Room, which is reflected in the relative timing of the
+constant-memory methods. As in the Living Room, ptracer and lrb_2pass
+eventually exceed the memory limit while reslrb and lrb_3pass do not.
+Discussion
+The methods presented in this paper, together with naive AD and
+the buffered two-pass variant, span a design space of reverse-mode
+differentiable light tracers that trade memory, gradient variance, and
+computation time against one another. No single method dominates
+on all three axes, but our results suggest that LRB-3-pass is the right
+default for most practical settings.
+Practitioner guidance. At low path lengths where memory is
+not a concern, naive AD remains the simplest and fastest option.
+Once the path length exceeds the point at which naive AD exhausts
+GPU memory, the constant-memory methods become the only viable alternatives. Between them, LRB-3-pass produces gradients
+that match naive AD in expectation with no additional variance,
+and it is faster than ResLRB in most of the configurations we tested.
+ResLRB becomes competitive only in scenes with high path–sensor
+connectivity, where the cost of the third traversal in LRB-3-pass
+outweighs the reservoir overhead; the Living Room scene is the
+one configuration in our experiments where this occurs. However,
+even in that regime ResLRB’s variance grows with the number of
+valid sensor connections per path, which can slow optimization
+convergence relative to the cleaner gradients of LRB-3-pass. Unless wall-clock time per iteration is the binding constraint and the
+scene has high splat density, LRB-3-pass is the safer choice. The
+buffered two-pass variant occupies an awkward middle ground: it
+retains linear memory growth and is generally slower than both
+constant-memory methods, so we see limited practical motivation
+for it outside of debugging and validation.
+ResLRB in perspective. Reservoir compression is an appealing
+idea: it reduces the problem to the same two-pass structure as PRB
+and has a clean theoretical justification. In practice, however, the
+variance it introduces is rarely offset by a meaningful speed advantage. In scenes with sparse connectivity, such as caustic-dominated
+transport, the reservoir almost always selects the only available
+connection, so it behaves identically to LRB-3-pass but without the
+guarantee. In scenes with dense connectivity, where the reservoir
+12
+Reference
+3.5
+the cost of a third traversal, and our results show that this cost is
+modest in most configurations, or nonexistent.
+Toward more complex integrators. The core challenge we
+address, reconstructing per-vertex adjoints during a forward replay
+when a single path contributes to multiple image locations, is not
+unique to light tracing. Any integrator that breaks the one-path-onepixel property of viewpoint path tracing will face the same structural
+obstacle when attempting a PRB-style constant-memory adjoint.
+Bidirectional methods, photon mapping, and multi-light techniques
+all produce paths that contribute to multiple pixels, and the replay
+formulation will need to be adapted for each. The two strategies
+we establish here, stochastic compression via reservoirs and multipass adjoint accumulation, are general mechanisms that could serve
+as building blocks for these extensions. A combined bidirectional
+formulation using PRB on the camera side and LRB-3-pass on the
+light side is one natural next step.
+Limitations. Our methods inherit all the weaknesses of particle
+tracing. Light tracing is inefficient for scenes where most emitter paths miss the sensor, and it cannot discover specular-diffusespecular (SDS) paths that are inaccessible to unidirectional tracers.
+For SDS transport, methods that change the rendering algorithm
+itself, such as differentiable photon mapping [Xing et al. 2024], are
+necessary; our work addresses the memory problem within light
+tracing, not the sampling problem that motivates photon-based approaches. Following PRB, we restrict attention to interior derivatives
+and do not handle geometric discontinuities at silhouette boundaries, which require separate treatment via boundary integrals or
+reparameterization [Bangaru et al. 2020; Li et al. 2018; Xu et al. 2023].
+These techniques are in principle applicable to particle tracing, and
+their integration with our replay formulations is a natural direction
+for future work.
+3.0
+L2 Loss
+2.5
+ptracer
+lrb_3pass
+lrb_2pass
+reslrb
+2.0
+1.5
+1.0
+0.5
+0.0
+0
+200
+400
+600
+800
+1000
+Optimization Time (s)
+1200
+1400
+1600
+(a) Loss vs. Time
+ptracer
+lrb_2pass
+8
+lrb_3pass
+Conclusion
+We have shown that applying PRB’s two-pass replay structure to
+light tracing does not achieve constant-memory, because the pervertex image-space adjoints required during the backward replay
+cannot be reconstructed from constant-size per-sample state in a
+single forward pass. A buffered two-pass variant that stores pervertex splat data reduces the memory cost relative to naive AD but
+retains linear scaling with path length.
+To eliminate this scaling, we proposed two constant-memory
+reverse-mode differentiable light tracers that occupy different points
+on the memory/variance/time trade-off. ResLRB compresses the perpath sensor connections into a single reservoir sample, preserving
+the two-pass structure at the cost of increased gradient variance.
+LRB-3-pass retains all connections by introducing a third traversal
+that precomputes the per-vertex adjoint-weighted radiance, matching naive AD in gradient quality at the cost of an additional replay.
+Both methods support detached and attached formulations; the latter tracks how geometric perturbations propagate through the path
+to shift splatted sensor coordinates, a degree of freedom that does
+not arise in camera-side path tracing.
+reslrb
+(b) Final Optimized Caustics
+Fig. 18. Lens heightfield optimization results. (a) L2 loss versus wall-clock
+time, with the target reference image inset. The dotted line indicates the
+global convergence minimum. (b) Final optimized caustics after 1000 iterations for all four integrators. In terms of wall-clock time, ptracer is fastest
+due to the low fixed path length of this scene, followed by lrb_3pass,
+reslrb, and lrb_2pass.
+does discard connections, the variance penalty is at its highest. LRB3-pass sidesteps this tension entirely by retaining all connections at
+13
+Together with naive AD and the buffered two-pass variant, these
+methods characterize the design space of reverse-mode differentiable light tracing across four distinct points on the memoryvariance-time frontier. We hope that making this space explicit,
+rather than proposing a single method, gives practitioners the information they need to choose the right tool for their problem.
+Transactions on Graphics (Proceedings of SIGGRAPH) 39, 4 (July 2020). doi:10.1145/
+3386569.3392406
+Merlin Nimier-David, Delio Vicini, Tizian Zeltner, and Wenzel Jakob. 2019. Mitsuba 2:
+A Retargetable Forward and Inverse Renderer. Transactions on Graphics (Proceedings
+of SIGGRAPH Asia) 38, 6 (Dec. 2019). doi:10.1145/3355089.3356498
+Steven G. Parker, James Bigler, Andreas Dietrich, Heiko Friedrich, Jared Hoberock,
+David Luebke, David McAllister, Morgan McGuire, Keith Morley, Austin Robison,
+and Martin Stich. 2010. OptiX: a general purpose ray tracing engine. ACM Trans.
+Graph. 29, 4, Article 66 (July 2010), 13 pages. doi:10.1145/1778765.1778803
+Justin F. Talbot, David Cline, and Parris Egbert. 2005. Importance resampling for global
+illumination. In Proceedings of the Sixteenth Eurographics Conference on Rendering
+Techniques (Konstanz, Germany) (EGSR ’05). Eurographics Association, Goslar, DEU,
+139–146.
+Eric Veach. 1998. Robust Monte Carlo methods for light transport simulation. Stanford
+University.
+Delio Vicini, Sébastien Speierer, and Wenzel Jakob. 2021. Path Replay Backpropagation:
+Differentiating Light Paths using Constant Memory and Linear Time. Transactions
+on Graphics (Proceedings of SIGGRAPH) 40, 4 (Aug. 2021), 108:1–108:14. doi:10.1145/
+3450626.3459804
+Delio Vicini, Sébastien Speierer, and Wenzel Jakob. 2022. Differentiable Signed Distance
+Function Rendering. Transactions on Graphics (Proceedings of SIGGRAPH) 41, 4 (July
+2022), 125:1–125:18. doi:10.1145/3528223.3530139
+Jeffrey S. Vitter. 1985. Random sampling with a reservoir. ACM Trans. Math. Softw. 11,
+1 (March 1985), 37–57. doi:10.1145/3147.3165
+Yu-Chen Wang, Chris Wyman, Lifan Wu, and Shuang Zhao. 2023. Amortizing Samples
+in Physics-Based Inverse Rendering Using ReSTIR. ACM Trans. Graph. 42, 6, Article
+214 (Dec. 2023), 17 pages. doi:10.1145/3618331
+Markus Worchel, Ugo Finnendahl, and Marc Alexa. 2025. Radiative Backpropagation
+with Non-Static Geometry. arXiv preprint arXiv:2504.05750 (2025).
+Jiankai Xing, Xuejun Hu, Fujun Luan, Ling-Qi Yan, and Kun Xu. 2023. Extended Path
+Space Manifolds for Physically Based Differentiable Rendering. In SIGGRAPH Asia
+2023 Conference Papers (Sydney, NSW, Australia) (SA ’23). Association for Computing
+Machinery, New York, NY, USA, Article 30, 11 pages. doi:10.1145/3610548.3618195
+Jiankai Xing, Zengyu Li, Fujun Luan, and Kun Xu. 2024. Differentiable Photon Mapping
+using Generalized Path Gradients. ACM Trans. Graph. 43, 6, Article 257 (Nov. 2024),
+15 pages. doi:10.1145/3687958
+Peiyu Xu, Sai Bangaru, Tzu-Mao Li, and Shuang Zhao. 2023. Warped-Area Reparameterization of Differential Path Integrals. ACM Trans. Graph. 42, 6 (2023), 213:1–213:18.
+Ekrem Fatih Yilmazer, Delio Vicini, and Wenzel Jakob. 2024. Solving Inverse PDE Problems using Grid-Free Monte Carlo Estimators. Transactions on Graphics (Proceedings
+of SIGGRAPH Asia) 43, 6 (Dec. 2024). doi:10.1145/3687990
+Tizian Zeltner, Sébastien Speierer, Iliyan Georgiev, and Wenzel Jakob. 2021. Monte Carlo
+Estimators for Differential Light Transport. Transactions on Graphics (Proceedings
+of SIGGRAPH) 40, 4 (Aug. 2021). doi:10.1145/3450626.3459807
+Cheng Zhang, Bailey Miller, Kai Yan, Ioannis Gkioulekas, and Shuang Zhao. 2020. Pathspace differentiable rendering. ACM Trans. Graph. 39, 4, Article 143 (Aug. 2020),
+19 pages. doi:10.1145/3386569.3392383
+Cheng Zhang, Zihan Yu, and Shuang Zhao. 2021. Path-space differentiable rendering
+of participating media. ACM Trans. Graph. 40, 4, Article 76 (July 2021), 15 pages.
+doi:10.1145/3450626.3459782
+Acknowledgments
+We acknowledge with gratitude the funding provided for this research by Simon Fraser University as well as a Discovery Grant
+provided by the Natural Sciences and Engineering Research Council of Canada. We are also grateful to the anonymous reviewers,
+who suggested the LRB-3-pass formulation. Additionally, we thank
+Benedikt Bitterli [Bitterli 2016] for providing the Living Room scene.
+References
+Sai Praveen Bangaru, Tzu-Mao Li, and Frédo Durand. 2020. Unbiased warped-area
+sampling for differentiable rendering. ACM Trans. Graph. 39, 6, Article 245 (Nov.
+2020), 18 pages. doi:10.1145/3414685.3417833
+Benedikt Bitterli. 2016. Rendering resources. https://benedikt-bitterli.me/resources/.
+Benedikt Bitterli, Chris Wyman, Matt Pharr, Peter Shirley, Aaron Lefohn, and Wojciech
+Jarosz. 2020. Spatiotemporal reservoir resampling for real-time ray tracing with
+dynamic direct lighting. ACM Trans. Graph. 39, 4, Article 148 (Aug. 2020), 17 pages.
+doi:10.1145/3386569.3392481
+Wesley Chang, Venkataram Sivaram, Derek Nowrouzezahrai, Toshiya Hachisuka, Ravi
+Ramamoorthi, and Tzu-Mao Li. 2023. Parameter-space ReSTIR for Differentiable and
+Inverse Rendering. In ACM SIGGRAPH 2023 Conference Proceedings (Los Angeles,
+CA, USA) (SIGGRAPH ’23). Association for Computing Machinery, New York, NY,
+USA, Article 18, 10 pages. doi:10.1145/3588432.3591512
+Ugo Finnendahl, Markus Worchel, Tobias Jüterbock, Daniel Wujecki, Fabian Brinkmann,
+Stefan Weinzierl, and Marc Alexa. 2025. Differentiable Geometric Acoustic Path
+Tracing using Time-Resolved Path Replay Backpropagation. ACM Trans. Graph. 44,
+4, Article 82 (July 2025), 17 pages. doi:10.1145/3730900
+Michael Fischer and Tobias Ritschel. 2023. Plateau-Reduced Differentiable Path Tracing.
+In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition.
+4285–4294.
+Trevor Hedstrom, Markus Kettunen, Daqi Lin, Chris Wyman, and Tzu-Mao Li. 2025.
+ReSTIR BDPT: Bidirectional ReSTIR Path Tracing with Caustics. ACM Trans. Graph.
+44, 5, Article 169 (Sept. 2025), 16 pages. doi:10.1145/3744898
+Wenzel Jakob, Sébastien Speierer, Nicolas Roussel, Merlin Nimier-David, Delio Vicini,
+Tizian Zeltner, Baptiste Nicolet, Miguel Crespo, Vincent Leroy, and Ziyi Zhang.
+2022b. Mitsuba 3 renderer. https://mitsuba-renderer.org.
+Wenzel Jakob, Sébastien Speierer, Nicolas Roussel, and Delio Vicini. 2022a. Dr.Jit:
+A Just-In-Time Compiler for Differentiable Rendering. Transactions on Graphics
+(Proceedings of SIGGRAPH) 41, 4 (July 2022). doi:10.1145/3528223.3530099
+Diederik P Kingma and Jimmy Ba. 2014. Adam: A method for stochastic optimization.
+arXiv preprint arXiv:1412.6980 (2014).
+Tzu-Mao Li, Miika Aittala, Frédo Durand, and Jaakko Lehtinen. 2018. Differentiable
+Monte Carlo ray tracing through edge sampling. ACM Trans. Graph. 37, 6, Article
+222 (Dec. 2018), 11 pages. doi:10.1145/3272127.3275109
+Daqi Lin, Markus Kettunen, Benedikt Bitterli, Jacopo Pantaleoni, Cem Yuksel, and
+Chris Wyman. 2022. Generalized resampled importance sampling: foundations of
+ReSTIR. ACM Trans. Graph. 41, 4, Article 75 (July 2022), 23 pages. doi:10.1145/
+3528223.3530158
+Lukas Lipp, David Hahn, Pierre Ecormier-Nocca, Florian Rist, and Michael Wimmer.
+2024. View-Independent Adjoint Light Tracing for Lighting Design Optimization.
+ACM Trans. Graph. 43, 3, Article 35 (May 2024), 16 pages. doi:10.1145/3662180
+Guillaume Loubet, Nicolas Holzschuch, and Wenzel Jakob. 2019. Reparameterizing
+Discontinuous Integrands for Differentiable Rendering. Transactions on Graphics
+(Proceedings of SIGGRAPH Asia) 38, 6 (Dec. 2019). doi:10.1145/3355089.3356510
+John Nickolls, Ian Buck, Michael Garland, and Kevin Skadron. 2008. Scalable parallel
+programming with CUDA. In ACM SIGGRAPH 2008 Classes (Los Angeles, California)
+(SIGGRAPH ’08). Association for Computing Machinery, New York, NY, USA, Article
+16, 14 pages. doi:10.1145/1401132.1401152
+Merlin Nimier-David, Thomas Müller, Alexander Keller, and Wenzel Jakob. 2022. Unbiased Inverse Volume Rendering with Differential Trackers. ACM Trans. Graph. 41,
+4, Article 44 (July 2022), 20 pages. doi:10.1145/3528223.3530073
+Merlin Nimier-David, Sébastien Speierer, Benoît Ruiz, and Wenzel Jakob. 2020. Radiative
+Backpropagation: An Adjoint Method for Lightning-Fast Differentiable Rendering.
+14

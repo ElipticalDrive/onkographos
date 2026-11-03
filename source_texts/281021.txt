@@ -1,0 +1,156 @@
+Contribute to mnoles1911/voxelsim development by creating an account on GitHub.
+
+M4: voxel light field + cone-traced GI (default OFF, first slice, honest caveats) by mnoles1911 · Pull Request #53 · mnoles1911/voxelsim · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+mnoles1911
+commented
+Jul 21, 2026
+Copy link
+Copy Markdown
+Owner
+M4's last unbuilt piece, shipped as a first slice behind voxel.GI.Enabled (default off). The mechanism verifiably works; the visual quality is rough and there is one defect I could not explain. Both are stated plainly below rather than buried.
+Approach — surface-voxelized cone tracing (Crassin et al. 2011), CPU-side
+Three choices, each forced by a real constraint:
+Surface, not solid, voxelization. Cones stop at the first surface, so interiors never matter — which is fortunate, because the only voxel data reachable without touching VoxelWorldSubsystem's PImpl (owned by another agent) is the greedy-mesher quad list already flowing through SetChunkQuads — itself a surface description, and one that already fires on stream-in and every edit remesh.
+Field aligned 1:1 with level-0 chunks (8³ cells × 40 UU = ChunkEdgeUU), so brick lifetime, dirtying, and eviction follow chunk streaming exactly.
+Scalar into VertexColor.G, the channel M_VoxelTerrain already multiplies into BaseColor. No material-asset edit, no global shader, no render-pass integration — reviewable CPU code. With GI off the emitted FColor is byte-identical.
+Six 90° cones per surface-adjacent air cell → an ambient cube, recombined per-vertex with max(0, N·D). Mips are MAX-aggregated, biasing toward too-dark rather than light leaking through thin walls. Mesher AO is kept and multiplied in — it covers contact scale, the cone covers large scale.
+Edit response
+SetChunkQuads is the entire mechanism — no deterministic path is read or written. An edited chunk's brick is re-voxelized (clear-then-fill) and its 5×5×5 neighbourhood queued for re-solve. One bounce is progressive: cones pick up the previously-solved irradiance of what they hit, so nothing has to converge within a frame.
+Budget
+Per-frame caps: 16 voxelizes, 8 brick solves (blocking ParallelFor), 2 round-robin refreshes, 4 proxy rebuilds, 4096 bricks. At 1,999 resident bricks: 8.2 MB, 0.5–0.6 ms tick. A big explosion lengthens the queue, never the frame. Only level-0 chunks feed or sample the field; GI fades back to plain AO over 4800–6400 UU.
+M1 gate — not regressed
+-VoxelPerfRun=60, seed 20260719, min-spec proxy, 1080p:
+Config
+p50
+p95
+postWarmup hitches
+GI off (×2)
+3.09 / 3.00 ms
+4.82 / 4.85 ms
+0
+GI on
+4.09 ms
+7.80 ms
+0
+GI-off reproduces the published 4.79–4.93 ms gate band exactly. GI-on passes the 16.6 ms bar but eats a real slice of the budget — and notably the cost is extra vertices and proxy rebuilds, not the tracing (0.5 ms).
+Screenshots — docs/images/m4-gi/
+03/04-roofed-* is the convincing pair: the enclosed wall face goes bright cream → dark grey. 05/06-breach-* shows cut faces correctly dark after holing the roof. 01/02-outdoor-* is weak — GI deepens crevice occlusion but the framing is mostly ocean.
+⚠️ Honest assessment — read this before judging the screenshots
+The lighting is rough. It's monochrome; it modulates albedo rather than the ambient term (which only reads acceptably because the material is flat and untextured); resolution is vertex-rate.
+One unresolved defect: in 04-roofed-gi-on.png the roof slab underside renders fully lit even though the field probes 0.00 there and the chunk's vertex data is dark. The agent could not explain it and flagged it rather than overselling the shot. Filed as the top follow-up.
+And a finding that matters beyond GI: an underground screenshot could not be produced at all. The streaming footprint only meshes a band around the terrain surface, so a camera 9 m down sees open sky beneath a thin crust regardless of GI. That took three runs to discover and is why the enclosure fixture is above ground. This is a real limitation of the current streaming, not of GI — and it will block caves (M4), mining depth, and any underground gameplay until addressed.
+Instrumentation confirms the field itself is correct: voxel.GI.Debug 2 shows open terrain solving to 0.65–0.70, buried/enclosed chunks to 0.001–0.02, ~95% vertex hit rate.
+Follow-ups
+Resolve the roof-underside discrepancy; move tracing to GPU (the CPU per-vertex sampling is what costs the GI-on ms); coloured bounce; sun-visibility cone; underground streaming.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01Hc5jWrADQQkp22jTM52y1Z
+mnoles1911
+and others
+added 2 commits
+July 21, 2026 09:52
+M4: voxel light field + cone-traced GI (first slice, default off)
+…
+0e62680
+```
+Surface-voxelized voxel cone tracing (Crassin et al.), CPU-side, outside
+the determinism boundary. Default OFF via voxel.GI.Enabled.
+
+- VoxelLightField.{h,cpp}: sparse world-space field aligned 1:1 with
+  level-0 render chunks (8^3 cells of 40 UU == one 320 UU chunk), built
+  by surface-voxelizing the greedy-mesher quads. 4 in-brick mips +
+  3 sparse global levels, MAX-aggregated to bias against light leaking.
+  Six 90-degree cones per air-cell adjacent to a surface -> an ambient
+  cube; progressive one-bounce gather that converges over re-solves.
+- VoxelGI.{h,cpp}: UVoxelGISubsystem owning budgets, dirty queues and
+  16 voxel.GI.* cvars. Every stage is capped per frame, so a large
+  explosion lengthens the queue rather than the frame.
+- VoxelChunkComponent: the scene proxy samples the field per vertex and
+  folds the result into VertexColor.G, the channel M_VoxelTerrain
+  already multiplies into BaseColor -- no material asset change needed.
+  SetChunkQuads notifies the subsystem, which is the entire edit
+  responsiveness mechanism (it already fires on every edit remesh).
+  With GI off the emitted FColor is byte-identical to before.
+- VoxelEarthGameMode: one anchored, self-contained test-switch block
+  (-VoxelGIOn, -VoxelGITest, -VoxelGIBreach).
+
+M1 60fps gate re-run (-VoxelPerfRun=60, seed 20260719, min-spec proxy):
+GI off p95 4.82 / 4.85 ms -- matches the published 4.79-4.93 ms band,
+unchanged. GI on p95 7.80 ms, 0 post-warmup hitches, still inside the
+16.6 ms bar. Screenshots and an honest assessment of what is still
+missing are in docs/status.md.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Hc5jWrADQQkp22jTM52y1Z
+```
+Merge branch 'worktree-agent-a0d559c8e4f2289c4' into claude/m4-voxel-gi
+…
+a3acfc6
+```
+# Conflicts:
+#	docs/status.md
+```
+Hide details
+View details
+mnoles1911
+merged commit 2eda683
+into
+main
+Jul 21, 2026
+9 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+mnoles1911
+deleted the
+claude/m4-voxel-gi
+branch
+July 21, 2026 13:58
+mnoles1911
+mentioned this pull request
+Jul 21, 2026
+RENDERER FIX: inverted quad winding was drawing all terrain inside-out (+ GI cave validation)
+#62
+Merged
+mnoles1911
+added a commit
+that referenced
+this pull request
+Aug 5, 2026
+docs: underground water is not a priority — surface water is
+…
+f52077e
+```
+Owner, 2026-08-04. What matters is water the player sees from the surface:
+rivers, lakes, the ocean, and the CA behaviour around them.
+
+This does not retire PR #222. The water subsystem was reading cavern flood
+levels from the PROCEDURAL world while the screen showed the BAKED one, and
+that put a disc of water 527 m in the sky. It was fixed because it was a
+surface-visible defect, not because caverns matter.
+
+De-prioritised concretely: #63 (cavern site memo shared across worlds — real,
+but nothing the player sees depends on it), the two -VoxelCavernShot tools
+still on the wrong amplifier, and #53 which stays shelved.
+
+The test for whether cavern work is in scope: can the player see it without
+digging? If not, it waits.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014t8VFoKKf1X1V1q7xeZjhs
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

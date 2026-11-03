@@ -1,0 +1,1606 @@
+Code at the speed of thought – Zed is a high-performance, multiplayer code editor from the creators of Atom and Tree-sitter. - gpui: Add BlurRect and LensRect rendering primitives by df49b9cd · Pull Request #1 · df49b9cd/zed
+
+gpui: Add BlurRect and LensRect rendering primitives by df49b9cd · Pull Request #1 · df49b9cd/zed · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+df49b9cd
+commented
+Apr 22, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+Adds three framebuffer-sampling rendering primitives to GPUI for backdrop blur, liquid-glass refraction, and mirrored frame slices.
+Primitive::BlurRect — dual-Kawase blur of the current framebuffer, clipped to a rounded rectangle. Supports uniform or linear-gradient blur strength.
+Primitive::LensGroup — refraction + chromatic aberration + Fresnel edge highlight over the union of 1..=8 rounded rectangles, merged with a per-fragment smooth-min of their SDFs (the GPU equivalent of SwiftUI's GlassEffectContainer(spacing:)).
+Primitive::MirrorRect — a source region of the framebuffer composited at a destination with an optional flip, rounded-rect clip, and backdrop blur (SwiftUI backgroundExtensionEffect() analogue).
+Wired through the scene, window, and both Metal and WGPU backends; DirectX renders a flat tinted-quad fallback instead of a hole.
+Public API
+```
+Window::paint_blur_rect(bounds, corner_radii, BlurEffect {
+    radius, radius_end, gradient_direction, kernel_levels, tint,
+});
+
+Window::paint_lens_rect(bounds, corner_radii, LensEffect {
+    radius, radius_end, gradient_direction, kernel_levels,
+    refraction, depth, dispersion, splay,
+    light_angle, light_intensity, tint,
+});
+
+Window::paint_lens_rect_union(
+    shapes,               // 1..=MAX_LENS_SHAPES_PER_GROUP (=8) LensShapeSpecs
+    edge_blend_distance,  // smooth-min radius merging shape SDFs
+    LensEffect { .. },
+);
+
+Window::paint_mirror_rect(source, destination, corner_radii, MirrorEffect {
+    axis, clip_to_destination, blur, tint,
+});
+```
+Builders for HIG defaults: BlurEffect::{new, linear_gradient, with_gradient_direction}, LensEffect::{new, linear_gradient, with_gradient_direction}, MirrorEffect::{new, with_blur}, LensShapeSpec::{new, with_content_mask}. BlurAxis::{Horizontal, Vertical} picks a normalized gradient direction; MirrorAxis::{None, Horizontal, Vertical, Both} maps flip bits.
+kernel_levels is clamped to 1..=5 and selects the Kawase pyramid depth per frame.
+radius scales the per-pass offset relative to a 20 px reference; radius_end + gradient_direction turn a uniform blur into a per-pixel interpolation between the un-blurred snapshot and the max-blurred pyramid output. The gradient is a mix(unblurred, max-blurred, t) approximation — visually plausible for HIG scroll-edge fades, not a true per-pixel Gaussian.
+light_angle is a Radians newtype; paint_lens_rect* debug_asserts the scalar inputs are finite.
+On Metal, MetalRenderer::new takes an enable_frame_sampling: bool (flipped to true at the GPUI window callsite). When false, the three sampling primitives warn_once and silently skip — same pattern as the wgpu path when a surface lacks COPY_SRC.
+How the snapshot pipeline works
+Each blur/lens/mirror batch needs the current framebuffer as input. The renderers:
+Compute Scene::max_blur_kernel_levels() and Scene::max_blur_radius() once per frame.
+On the first sampling batch of the frame, break the current render pass and build a BLUR_CHAIN_LEVELS-deep Kawase pyramid in place: level 0 is a copy of the drawable; each subsequent mip is a downsample pass rendered directly into that mip through a per-mip view / set_level. The separate chain textures plus the upsample pass the original design used are gone — the fragment shaders sample the pyramid directly.
+Cache the pyramid. Subsequent sampling batches in the same frame reuse it. Any non-sampling primitive batch invalidates the cache.
+fs_blur_rect / fs_lens_rect / fs_mirror_rect sample the cached pyramid (the lens fragment loops over up to 8 shapes with an exponential smooth-min). The lens shader short-circuits three texture samples to one when dispersion == 0, skips the Fresnel path when light_intensity == 0, and returns zero for pixels outside the anti-aliased corner SDF. The mirror shader flips UVs per MirrorAxis and routes through the same rounded-corner clip.
+Files changed
+crates/gpui/src/scene.rs — Primitive::{BlurRect, LensGroup, MirrorRect}, PrimitiveBatch::{BlurRects, LensRects, MirrorRects}, LensPrimitive (rect + per-shape SmallVec<[_; MAX_LENS_SHAPES_PER_GROUP]>), Scene::max_blur_{kernel_levels,radius}, const-size invariants, round-trip + interleave + coalesce + multi-shape tests.
+crates/gpui/src/window.rs — paint_blur_rect, paint_lens_rect, paint_lens_rect_union, paint_mirror_rect; BlurEffect, LensEffect, LensShapeSpec, MirrorEffect, BlurAxis, MirrorAxis.
+crates/gpui_wgpu/src/wgpu_renderer.rs — pipelines, in-place Kawase pyramid allocation, snapshot-and-blur loop, single-frame dirty-flag cache, replace_surface COPY_SRC re-query with size-aware intermediate texture retention, persistent blur_params_scratch, naga-based WGSL parse test, fallback-adapter retry, CI-gated smoke panic.
+crates/gpui_wgpu/src/shaders.wgsl + blur_io_shaders.wgsl — dual-Kawase, lens composite with smooth-min SDF loop and gradient blur mix, mirror composite via blend_color.
+crates/gpui_macos/src/{metal_renderer.rs, shaders.metal, ../build.rs} — MSL port, frame_sampling_enabled opt-in, pyramid rendered in place via set_level, clamped mip count on small surfaces, nil stale pyramid on zero-size resize, Metal pipeline smoke test.
+crates/gpui_windows/src/directx_renderer.rs — per-primitive-kind exhaustive-match stubs that now render a flat tinted-quad fallback via a dedicated blur_fallback_pipeline; diagnostic includes blur/lens/mirror counts.
+Test plan
+cargo test -p gpui — scene round-trip, batching, coalesce, multi-shape lens round-trip, max_blur_* tests (clamp, zero-radius filtering, kernel_levels=0), mirror round-trip + interleave, MirrorAxis::flags mapping, BlurAxis gradient-direction helpers, with_gradient_direction override.
+cargo test -p gpui_wgpu — wgsl_shaders_parse and pipeline_creation_smoke.
+cargo test -p gpui_macos --features gpui/test-support — metal_renderer::tests::pipeline_creation_smoke.
+cargo clippy -p gpui -p gpui_wgpu -p gpui_macos — clean.
+Visual sign-off on Metal: confirm kernel_levels and radius drive visible changes, gradient blur fades as expected, multi-shape lens merges pill toolbars, and mirror-with-blur renders a recognizable extension strip.
+Linux verification (WGPU path compiles but hasn't been run on Linux).
+Review history
+Two deep-review rounds over the branch. The first flagged 27 findings (3 P1 correctness bugs, 12 P2 perf/test/consistency issues, 11 P3 cleanups, 1 P4 nit); the second covered the multi-shape / gradient-blur / mirror additions plus the in-place pyramid rewrite. Headline fixes:
+P1 — queue.write_buffer race on blur_params_buffer causing both passes to read the second-written value. Now a single write with dynamic offsets.
+P1 — BlurEffect::kernel_levels and BlurEffect::radius were dead fields — never read by any shader. Now drive the Kawase pyramid depth and offset multiplier respectively.
+P1 — Per-batch snapshot collapsed to one per frame via a dirty flag on both renderers.
+P2 — Kawase pyramid now rendered in place via per-mip views / set_level. Eliminates the frame → chain[0] copy plus N chain[i] → pyramid mip i blits per snapshot and halves scratch VRAM; the upsample pass + intermediate chain textures are gone (dead code — fragment shaders only sample the pyramid).
+P2 — set_framebuffer_only(false) no longer unconditional on Metal; gated by enable_frame_sampling (defaulted to true at the window callsite).
+P2 — sRGB surface formats no longer double-correct gamma in the Kawase chain (chain textures use format.remove_srgb_suffix()).
+P2 — Lens fragment shaders short-circuit texture sampling and Fresnel math when inputs make them no-ops; corner_avg / edge_band moved to vertex shader.
+P2 — MSL discard_fragment swapped for return float4(0) on lens early-exits; refracted_uv clamped to [0,1]; safe_dir = weighted_dir / max(len, 1e-4) in the Fresnel select; gradient_direction normalized inside gradient_target_radius.
+P2 — DirectX stubs upgraded from no-op to a tinted-quad fallback so the three unimplemented primitives render a flat tint rather than leave a hole.
+P3 — Primitive::LensRect(LensPrimitive) renamed to Primitive::LensGroup; LensRect::shape_offset / shape_count document the caller-value-overwrite contract; BlurRect / MirrorRect with zero radius filtered from max_blur_kernel_levels.
+Deferred as a follow-up: union-AABB scissor on snapshot passes. Non-trivial cross-shader UV work; marginal benefit now that the single-frame dirty-flag cache already collapses N snapshots to one.
+Release Notes:
+N/A
+Add BlurRect and LensRect rendering primitives
+…
+fd5541f
+```
+Implements two new GPUI scene primitives for per-element backdrop
+compositing:
+
+- `Primitive::BlurRect` — dual-Kawase (Marius Bjorge, SIGGRAPH 2015)
+  backdrop blur with configurable kernel levels, corner radii, and tint.
+- `Primitive::LensRect` — Liquid Glass composite: backdrop blur plus
+  parabolic UV refraction, chromatic aberration, and directional Fresnel
+  edge glow.
+
+Both primitives are wired through the full rendering pipeline on every
+backend:
+
+- **WGPU** (`gpui_wgpu`): framebuffer snapshot via `copy_texture_to_texture`,
+  separate `blur_io_shaders.wgsl` module with sRGB-correct downsample/
+  upsample, plus `fs_blur_rect` / `fs_lens_rect` compositing entry points.
+- **Metal** (`gpui_macos`): `MTLBlitCommandEncoder::copy_from_texture` for
+  the snapshot, MSL port of both shader modules, cbindgen-generated input
+  index enums.
+- **DirectX** (`gpui_windows`): exhaustive-match stub returning `Ok(())`.
+
+Public API additions on `Window`:
+- `paint_blur_rect(bounds, corner_radii, BlurEffect)`
+- `paint_lens_rect(bounds, corner_radii, LensEffect)`
+
+Each call forces a render-pass break so the framebuffer can be sampled,
+then re-opens the pass with `LoadOp::Load` for subsequent primitives.
+
+Tests: WGPU pipeline-creation smoke test, Scene round-trip test for both
+primitive types.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+df49b9cd
+commented
+Apr 22, 2026
+View reviewed changes
+df49b9cd
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review from the downstream consumer side — I'm integrating this PR in tahoe-gpui (dual-Kawase glass surfaces) and the primitives themselves work great. Everything below is follow-up polish on the public BlurEffect / LensEffect API surface and a couple of architectural notes; none block the merge in my view.
+Themes of the feedback:
+Unit/scale footguns: refraction / dispersion use raw Figma 0..100, light_angle_radians takes radians. Both silently shipped wrong in tahoe-gpui until caught in review (100× weaker refraction).
+Missing builders: constructing a BlurEffect / LensEffect with anything other than Default forces consumers to spell kernel_levels — which invites the misconception that it controls render-pass breaks.
+Architecture follow-ups: per-primitive render-pass break caps glass usage (no list-row backdrops), and scroll-edge-effects need variable-radius blur that the current scalar radius can't express.
+Concrete inline comments below.
+Comment thread
+crates/gpui/src/window.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/gpui/src/window.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/gpui/src/window.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+df49b9cd
+and others
+added 6 commits
+April 22, 2026 18:13
+gpui: Make blur/lens primitive structs Copy, use Radians, pin size in…
+…
+34bd3b9
+```
+…variants
+
+- Derive Copy on BlurRect / LensRect so they can be copied with `*val`
+  instead of `.clone()` in `Scene::insert_primitive`.
+- Replace `#[allow(missing_docs)]` with `#[expect(missing_docs)]` to match
+  sibling primitive structs.
+- Pin the WGSL-matching layouts with `const _: () = assert!(size_of::<_>()
+  == N)` so a future field reorder fails the build rather than silently
+  corrupting GPU memory.
+- Rename `_pad` / `_pad2` to `pad` / `pad2` to match the WGSL and MSL
+  struct definitions (and the existing `pad: u32` pattern on other
+  primitives in `scene.rs`).
+- Swap `LensEffect.light_angle_radians: f32` for `light_angle: Radians`,
+  reusing the existing `Radians` newtype in `crates/gpui/src/geometry.rs`.
+- Clamp `effect.kernel_levels` to `1..=5` at `paint_blur_rect` /
+  `paint_lens_rect` so the documented range is enforced. Full chain
+  wiring lands in a follow-up.
+- Add `debug_assert!(effect.light_angle.0.is_finite())` so NaN angles
+  fail tests instead of propagating into the GPU.
+- Replace `light_dir: Point<f32>` on `LensRect` with
+  `light_angle_radians: f32` + padding, and compute `light_dir` once per
+  vertex in both the WGSL and MSL lens shaders; fragment shaders receive
+  it as a flat varying.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+gpui: Include blur/lens counts in "scene too large" error and split D…
+…
+f13a591
+```
+…irectX stubs
+
+The "scene too large" bail message in the Metal and DirectX renderers
+listed every primitive vector length except the new `blur_rects` /
+`lens_rects`. If an overflow is caused by those counts, the message
+hides the culprit. Append both counts in both messages.
+
+Also split the combined `BlurRects(_) | LensRects(_)` arm in the
+DirectX stub into two separate arms. Collapsing them saves three
+lines now but means the eventual DX implementation has to split them
+back out; keeping them apart keeps that future diff narrow.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+gpui_wgpu: Re-query COPY_SRC capability in replace_surface
+…
+f605e49
+```
+replace_surface (invoked when the native window is re-created, e.g.
+Android TerminateWindow) reused self.surface_config and called
+surface.configure(...) without asking whether the new adapter still
+supports COPY_SRC on the swapchain format. If it doesn't, configure
+panics inside wgpu validation. If the flag was previously false but
+the new adapter does support it, blur/lens draws stay silently
+skipped forever.
+
+Re-query capabilities from the new surface, update
+self.surface_config.usage and self.surface_supports_copy_src to match,
+then configure.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+gpui: Expand BlurRect/LensRect round-trip tests to cover batching
+…
+8890c3a
+```
+The existing blur_rect_round_trip / lens_rect_round_trip tests insert
+a single primitive and assert one batch comes out — near-tautological
+given insert_primitive pushes directly. Add two tests that exercise
+the batching logic most likely to regress:
+
+- blur_rects_interleave_with_quads: inserts Quad@0, BlurRect@1,
+  Quad@2, BlurRect@3 and asserts batches yield Quads, BlurRects,
+  Quads, BlurRects in that order.
+- blur_rects_coalesce_when_adjacent: inserts two BlurRects at the
+  same layer and asserts they coalesce into a single batch of length
+  two.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+gpui: Short-circuit lens fragment shaders when no work is needed
+…
+1fbb353
+```
+fs_lens_rect / lens_rect_fragment always issued three textureSamples,
+always ran the Fresnel chain, and always ran corner_avg / edge_band
+math per fragment — even for inputs that trivially contribute nothing.
+The HIG default LensEffect sets dispersion=0, so every real scene
+runs three redundant texture taps per pixel.
+
+- Early-out with discard/return when the anti-aliased quad_sdf coverage
+  is zero. Skips the texture fetches on the bleeding edge pixels.
+- Branch on rect.dispersion > 0.0: one textureSample instead of three
+  when chromatic aberration is disabled.
+- Branch on rect.light_intensity > 0.0: skip Fresnel smoothstep +
+  facing dot when the edge glow is off.
+- Move corner_avg + edge_band computation from the fragment shader
+  into the vertex shader (both WGSL and MSL); expose edge_band as a
+  flat varying. They depend only on per-instance uniform data.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+gpui_wgpu: Reuse create_pipeline for blur_rect / lens_rect
+…
+f4bb450
+```
+make_rect_pipeline duplicated the existing create_pipeline closure
+with hardcoded TriangleStrip and sample_count=1. Two near-identical
+helpers in the same function invites drift. Call create_pipeline
+directly for blur_rect and lens_rect — both already use TriangleStrip
+and sample_count=1.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+This was referenced Apr 22, 2026
+Expose AX tree API on Div / Stateful<Div>
+#2
+Open
+Apply letter-spacing / tracking at text layout
+#3
+Open
+Add .text_align() style for horizontal text alignment
+#4
+Open
+Expose text-selection control API (drag-select, caret position)
+#5
+Open
+Expose text pre-truncation helper (truncation-at-width)
+#6
+Open
+Add native Spring easing (Easing::Spring)
+#7
+Open
+Allow with_animation() keys to share values across siblings
+#8
+Open
+Add NSSymbolEffect binding for SF Symbol animations
+#9
+Open
+NSVisualEffectView vibrancy for SVG icon compositing
+#10
+Open
+Add Hsla::blend (color-space-aware mixer)
+#11
+Open
+Support per-side border colors on Div
+#12
+Open
+Make Styled::shadow accept borrowed slice / Arc to avoid per-frame Vec alloc
+#13
+Open
+Add canvas_with_state<T: Copy>(state, fn(...)) to avoid Box<dyn FnOnce> per frame
+#14
+Open
+Expose NSWindow handle for AppKit sheet attachment (beginSheet:completionHandler:)
+#15
+Open
+Bridge AppKit Dock menu (applicationDockMenu:)
+#16
+Open
+Bridge share sheet: UIActivityViewController / NSSharingServicePicker
+#17
+Open
+Bridge user notifications (UNUserNotificationCenter / NSUserNotificationCenter)
+#18
+Open
+Add menu-bar-extra / NSStatusBar control
+#19
+Open
+Expose drag-region declaration on Div (for non-titlebar windows)
+#20
+Open
+Add multitasking / window-forwarding observers (Stage Manager, tile layouts)
+#21
+Open
+Expose macOS system accent color and font metrics
+#22
+Open
+Add WebView / iframe element (WKWebView / equivalent)
+#23
+Open
+This was referenced Apr 22, 2026
+Add content-visibility equivalent for lazy layout/paint
+#24
+Open
+Add swipe-action primitive on list rows
+#25
+Open
+Add cross-fade / morph transition for DisclosureGroup expand/collapse
+#26
+Open
+Batch adjacent BlurRect / LensRect primitives in a single pass-break
+#27
+Open
+Add variable-radius backdrop-blur primitive (paint_blur_rect_masked)
+#28
+Open
+Complete DirectX backend for BlurRect / LensRect
+#29
+Open
+feat(materials)!: real dual-Kawase blur and lens via GPUI primitives
+df49b9cd/tahoe-gpui#230
+Open
+df49b9cd
+added a commit
+to df49b9cd/tahoe-gpui
+that referenced
+this pull request
+Apr 22, 2026
+fix(ci): resolve gpui via git+branch on df49b9cd/zed fork so CI can b…
+…
+20d789a
+```
+…uild
+
+CI cannot populate `.context/zed`, so the `path = ".context/zed/..."`
+dep introduced on this branch blew up every job (clippy, rustdoc,
+nextest, cargo-deny) with "failed to read
+.context/zed/crates/gpui/Cargo.toml". Switch back to a git dep —
+same pattern as the pre-PR code — pointing at the
+`df49b9cd/zed` fork's `tahoe-gpui/blur-primitive` branch (PR
+df49b9cd/zed#1). Cargo resolves this over the network; no local
+checkout or submodule setup required.
+
+Pick up the fork's new lens API: `gpui::LensEffect.light_angle` is now
+a `Radians` newtype (was `light_angle_radians: f32`). The
+`From<&LensEffect> for gpui::LensEffect` impl wraps via `gpui::radians`,
+and the two assertions that compared raw radians read through
+`.light_angle.0`.
+
+Allow-list the fork URL in `deny.toml` and drop the `.context/zed`
+plumbing that the local-path setup needed — workspace exclude,
+gitignore section, and the CONTRIBUTING "Vendored GPUI fork" block
+collapse into a short note pointing at PR #1.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+df49b9cd
+added a commit
+that referenced
+this pull request
+Apr 22, 2026
+gpui: Normalize LensEffect scale fields and add effect builders
+…
+9a9172e
+```
+Two follow-ups to open review comments on #1:
+
+- refraction, depth, and dispersion were exposed on the raw Figma
+  0..100 scale with a Default of refraction: 100.0 / depth: 16.0,
+  which read like percentages and bit a downstream consumer with a
+  100x-weaker lens. Normalize the public API to 0..1 (matching the
+  already-normalized light_intensity), and fold the 100x conversion
+  into paint_lens_rect so the shader math stays calibrated on the
+  same Figma scale.
+- kernel_levels was a bare public u32 on both structs, inviting the
+  misreading that lowering it saves render-pass breaks (it doesn't -
+  each primitive always forces one pass break). Add a sentence to
+  the field docstring and expose BlurEffect::new / LensEffect::new
+  so a radius-only caller never has to spell kernel_levels.
+
+Release Notes:
+
+- N/A
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+df49b9cd
+closed this
+Apr 22, 2026
+df49b9cd
+deleted the
+tahoe-gpui/blur-primitive
+branch
+April 22, 2026 17:47
+df49b9cd
+restored the
+tahoe-gpui/blur-primitive
+branch
+April 22, 2026 17:48
+df49b9cd
+reopened this
+Apr 22, 2026
+df49b9cd
+and others
+added 9 commits
+April 22, 2026 19:49
+gpui_macos: Gate MetalLayer framebuffer_only opt-out behind a flag
+…
+613f555
+```
+Calling `set_framebuffer_only(false)` unconditionally disables on-chip
+tile-memory optimizations for the drawable for the lifetime of the
+layer. The overwhelming majority of Zed frames contain no blur / lens
+primitive, so every shipping build was paying a presentation-cost
+regression for a feature that may never be used in the session.
+
+Plumb a new `enable_frame_sampling` flag through `new_renderer` /
+`MetalRenderer::new` / `new_internal`. Only flip
+`layer.set_framebuffer_only(false)` when the flag is true, or when
+`cfg(any(test, feature = "test-support"))` is active (so visual-test
+screenshots keep working). When disabled, `BlurRects` / `LensRects`
+batches silently skip rendering — the same failure mode as the wgpu
+path when a surface doesn't advertise COPY_SRC.
+
+The existing `gpui_macos` call site in `window.rs` passes `false`
+today; any caller that actually paints `BlurRects` / `LensRects` must
+pass `true`.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+gpui_wgpu: Wire kernel_levels + radius; fix blur_params write race
+…
+ca4a017
+```
+The BlurRect/LensRect chain was using two scratch textures (full + half)
+and hardcoded offset_multiplier=1.0, so `BlurEffect::kernel_levels` and
+`BlurEffect::radius` had no effect on the rendered output. It also ran
+two `queue.write_buffer` calls into offset 0 of a single-slot
+`blur_params_buffer` before submit, so both passes actually read the
+second write — the downsample pass sampled with half-resolution params
+instead of full-resolution ones.
+
+Restructure the snapshot pipeline:
+
+- Replace the snapshot/half pair with a `BLUR_CHAIN_LEVELS`-deep mip
+  chain of `wgpu::Texture`s on `WgpuResources`. Level 0 is surface-sized
+  and receives the framebuffer snapshot; each subsequent level is half.
+- Fold `ensure_blur_textures` into `ensure_intermediate_textures` so
+  one allocation site owns both the path intermediate textures and the
+  blur chain.
+- Allocate chain textures with `format.remove_srgb_suffix()`. When the
+  surface happens to be an sRGB variant (possible on adapters that only
+  expose sRGB BGRA/RGBA), this avoids double-correcting gamma — the
+  hardware no longer transfers sRGB on sample and the manual pow() in
+  `blur_io_shaders.wgsl` runs against raw bytes.
+- Pre-build a down/up bind group per chain transition in
+  `create_blur_io_bind_group`, keyed on the source view. The previous
+  code recreated two bind groups every `snapshot_and_blur_frame` call.
+- Grow `blur_params_buffer` to `BLUR_PARAMS_SLOT_COUNT` slots aligned to
+  `min_uniform_buffer_offset_alignment`. Switch the bind-group layout
+  to `has_dynamic_offset: true` and write all per-pass params in one
+  `queue.write_buffer` call. Each `set_bind_group` now passes the slot
+  offset so the write-race is eliminated by construction.
+- Change `snapshot_and_blur_frame` to loop down N then up N steps,
+  where N is `kernel_levels.clamp(1, BLUR_CHAIN_LEVELS - 1)`.
+- Add `Scene::max_blur_kernel_levels` and `Scene::max_blur_radius`
+  helpers; the main draw loop samples these once per frame and maps
+  radius to `offset_multiplier = radius / BLUR_REFERENCE_RADIUS_PX`
+  (reference = 20px, current default).
+
+This also resolves the `let _ = half_tex` unused-binding cleanup that
+was previously called out separately — the destructure is gone.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+gpui_macos: Wire kernel_levels + radius through Metal Kawase chain
+…
+4ce25a9
+```
+Mirror the wgpu-side restructure. Replace blur_snapshot_texture +
+blur_half_texture with a BLUR_CHAIN_LEVELS-deep chain of Metal
+textures, allocate the chain lazily only when frame_sampling_enabled
+is true, and drive down/up passes from
+`scene.max_blur_kernel_levels()` / `scene.max_blur_radius()`.
+
+`BlurEffect::radius` now scales the Kawase offset multiplier linearly
+relative to BLUR_REFERENCE_RADIUS_PX (20 px = current default).
+`BlurEffect::kernel_levels` picks the chain depth 1..=5 per frame.
+Metal passes per-level BlurParams inline via `set_fragment_bytes`, so
+unlike the wgpu path it needs no dynamic-offset uniform buffer —
+there was no write-race to fix on this side.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+gpui: Cache blur snapshot across batches within a frame
+…
+ace5e9e
+```
+Every BlurRects/LensRects batch unconditionally ran
+snapshot_and_blur_frame — full-surface framebuffer copy plus two
+Kawase passes per blur-chain level. With N blur primitives interleaved
+with other primitives at different z-orders, the scene iterator emits
+N batches and the renderer paid that cost N times.
+
+Add a local `blur_snapshot_valid: bool` in the draw loop on both
+renderers. It's false at frame start and whenever a non-blur primitive
+batch writes to the main target. On a blur / lens batch, reuse the
+cached chain when valid; otherwise run snapshot_and_blur_frame and
+set the flag true. For typical UI scenes this collapses N snapshots
+to one, regardless of draw-order interleaving.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+gpui: Broader shader/pipeline smoke tests
+…
+6521e82
+```
+pipeline_creation_smoke in gpui_wgpu silently passed on adapter-less
+CI (common on Linux lanes without llvmpipe), so any breakage in the
+two new WGSL modules shipped untested. Metal had no analogous
+pipeline-creation test at all.
+
+- Add wgsl_shaders_parse: runs `naga::front::wgsl::parse_str` on
+  `shaders.wgsl`, `blur_io_shaders.wgsl`, and the dual-source-blending
+  concatenation of `shaders.wgsl` + `shaders_subpixel.wgsl`. Needs no
+  GPU, so it catches syntax / type errors on every CI lane.
+- Retry `request_adapter` with `force_fallback_adapter: true` if the
+  primary request fails (picks up llvmpipe / SwiftShader on Linux).
+- Have `pipeline_creation_smoke` panic when `CI` is set and no
+  adapter is available, so "no GPU" becomes a loud failure instead of
+  hiding in green output.
+- Add a Metal-side `pipeline_creation_smoke` using
+  `MetalRenderer::new_headless`; touches every new pipeline state
+  object so a missing Metal entry point fails at construction.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+gpui: Cover Scene::max_blur_kernel_levels / max_blur_radius
+…
+d653122
+```
+These are the actual values the renderer picks up per frame, so the
+contract they promise ("kernel_levels clamped to 1..=5") has to hold
+regardless of whether a caller came in through paint_blur_rect or
+inserted a BlurRect directly. Also pin the expected radius-max
+behavior when both BlurRect and LensRect are present with different
+radii.
+
+A previous commit added debug_assert on light_angle finiteness inside
+paint_lens_rect; driving paint_* through a TestAppContext Window is
+deferred to a follow-up since it requires pulling in the platform
+stack.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+gpui_wgpu: Fix redundant clone in lens_rect pipeline creation
+…
+c41ba81
+```
+Clippy flagged the `color_target.clone()` in the last use of
+`color_target` — the binding is dropped immediately after, so clone
+is redundant. This was introduced when `make_rect_pipeline` was
+folded into `create_pipeline`.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+gpui: Normalize LensEffect scale fields and add effect builders
+…
+4867b10
+```
+Two follow-ups to open review comments on #1:
+
+- refraction, depth, and dispersion were exposed on the raw Figma
+  0..100 scale with a Default of refraction: 100.0 / depth: 16.0,
+  which read like percentages and bit a downstream consumer with a
+  100x-weaker lens. Normalize the public API to 0..1 (matching the
+  already-normalized light_intensity), and fold the 100x conversion
+  into paint_lens_rect so the shader math stays calibrated on the
+  same Figma scale.
+- kernel_levels was a bare public u32 on both structs, inviting the
+  misreading that lowering it saves render-pass breaks (it doesn't -
+  each primitive always forces one pass break). Add a sentence to
+  the field docstring and expose BlurEffect::new / LensEffect::new
+  so a radius-only caller never has to spell kernel_levels.
+
+Release Notes:
+
+- N/A
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+gpui: Drop tahoe-gpui path references from doc comments
+…
+0f69d8b
+```
+Two shader-adjacent doc comments linked into tahoe-gpui source paths.
+The rest of the crate has no tahoe-gpui awareness, and the GPU field
+layout is dictated by the co-located WGSL / MSL structs anyway, so
+the external references are noise.
+
+Release Notes:
+
+- N/A
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+df49b9cd
+force-pushed
+the
+tahoe-gpui/blur-primitive
+branch
+from
+db28b58 to
+0f69d8b
+Compare
+April 22, 2026 17:50
+df49b9cd
+changed the base branch from
+main
+to
+tahoe-gpui/lense-blur-primitives
+April 23, 2026 09:09
+gpui: Guard lens scalars against NaN and sharpen dispersion doc
+…
+5a83ebd
+```
+Two review follow-ups on the normalization commit:
+
+- paint_lens_rect already debug_asserts light_angle.is_finite(), so a
+  single NaN in light_angle is caught before it reaches the shader and
+  produces corrupted visuals. The normalization change introduced the
+  same hazard for refraction / depth / dispersion — NaN * 100 is NaN
+  and flows straight through. Mirror the existing assert for the three
+  new scalar inputs.
+- LensEffect::dispersion doc said "1.0 ≈ max CA shift" without a
+  concrete magnitude. At dispersion = 1.0 the shader sees 100 and the
+  R/B shift at the rim is ~100 px, which is substantial; quote the
+  value so callers don't assume "max" means a pixel or two.
+
+Release Notes:
+
+- N/A
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+df49b9cd
+commented
+Apr 23, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+tahoe-gpui follow-ups blocked on this fork
+Implementing tahoe-gpui Phase 2 (GlassEffectContainer / morphing) and a couple of Phase 3 items needs three further extensions on top of the primitives this PR introduces. Filing them here so the surface stays in one PR's discussion thread per the project's GPUI-fork routing rule.
+1. Multi-shape LensRect + edge_blend_distance — unblocks Phase 2 in full
+Apple's GlassEffectContainer(spacing:) merges every glassEffect inside it into a single shared lens with edges that blend when shapes fall within spacing of each other (cf. SwiftUI GlassEffectContainer). Without this on the fork side, every tahoe-gpui glass surface paints in isolation — adjacent pill buttons can't merge into Safari's toolbar capsule.
+Proposed shape change:
+```
+pub struct LensRect {
+    pub shapes: SmallVec<[LensShape; 2]>,
+    pub edge_blend_distance: Pixels,
+    pub effect: LensEffect,
+}
+
+pub struct LensShape {
+    pub bounds: Bounds<Pixels>,
+    pub corners: Corners<Pixels>,
+}
+
+impl Window {
+    pub fn paint_lens_rect_union(
+        &mut self,
+        shapes: impl IntoIterator<Item = LensShape>,
+        edge_blend_distance: Pixels,
+        effect: LensEffect,
+    );
+}
+```
+The fragment shader composites the SDF union of every LensShape, smoothed over edge_blend_distance, into a single framebuffer sample — i.e. one render-pass break per container, not one per shape. The single-shape paint_lens_rect stays as a thin wrapper over the multi-shape path.
+This unblocks the entire tahoe-gpui Phase 2 stack: GlassEffectContainer, GlassNamespace, glassEffectID, glassEffectUnion, and GlassEffectTransition::matchedGeometry all hang off it.
+2. Variable-radius paint_blur_rect — unblocks HIG scroll-edge "Hard" effect
+paint_blur_rect today takes a single scalar radius. HIG §scroll-edge-effects describes a blur strength that fades across the edge band — soft and hard both want a per-row blur strength, not a gradient over alpha. tahoe-gpui currently approximates with a linear-color-stop gradient and leaves a // TODO: variable-radius blur primitive at crates/tahoe-gpui/src/foundations/materials.rs:1481 and :1561.
+Proposed extension:
+```
+pub enum BlurStrength {
+    Uniform(Pixels),
+    LinearGradient { from: Pixels, to: Pixels, axis: Axis },
+}
+
+pub struct BlurEffect {
+    pub strength: BlurStrength,
+    // existing fields …
+}
+```
+The Kawase chain stays per-frame — a linear-gradient strength just modulates the per-pixel blur radius lookup at sample time.
+3. Framebuffer-mirror primitive — unblocks backgroundExtensionEffect
+SwiftUI's backgroundExtensionEffect() (macOS 26+) mirrors the host view into the surrounding safe area, blurs the mirror, and clips the copies to prevent overlap. tahoe-gpui's Sidebar::background_extension(Hsla) is a static-color workaround that explicitly defers this — see crates/tahoe-gpui/src/components/navigation_and_search/sidebar.rs:94-100.
+Proposed primitive:
+```
+impl Window {
+    pub fn paint_mirror_rect(
+        &mut self,
+        source: Bounds<Pixels>,
+        destination: Bounds<Pixels>,
+        axis: MirrorAxis, // Horizontal | Vertical | Both
+        clip_to_destination: bool,
+        blur: Option<BlurEffect>,
+    );
+}
+```
+Implementation can ride the same Kawase chain the existing blur primitive populates — the mirror is a flipped UV sample of the snapshot texture, optionally re-blurred. Same render-pass-break budget as paint_blur_rect.
+These three are independent and can land as separate PRs after this one merges. (1) is the largest payoff per LOC since it unlocks all of Phase 2; (2) and (3) each unblock one concrete tahoe-gpui component.
+df49b9cd
+and others
+added 2 commits
+April 23, 2026 14:41
+gpui: Multi-shape lens, gradient blur, and mirror primitives (#30)
+…
+5fe4ba1
+```
+* gpui: Multi-shape LensRect with edge_blend_distance
+
+Extends LensRect to represent a union of 1..=MAX_LENS_SHAPES_PER_GROUP
+rounded rectangles, merged by a per-fragment smooth-min of their
+per-shape signed distance fields. This is the GPU-side equivalent of
+SwiftUI GlassEffectContainer(spacing:) - toolbar pills within
+edge_blend_distance of each other morph into a single continuous lens.
+
+- LensRect drops corner_radii in favor of (shape_offset, shape_count,
+  edge_blend_distance); stride stays at 112 bytes.
+- New LensShape struct holds per-shape bounds + corner_radii; stored
+  flat in Scene::lens_shapes and indexed by LensRect.shape_offset.
+- New Primitive::LensRect(LensPrimitive) carries both the header and
+  its shape list so Scene::replay repopulates offsets correctly.
+- Public API: paint_lens_rect_union accepts up to 8 LensShapeSpecs and
+  an edge_blend_distance; single-shape paint_lens_rect delegates to it.
+- Metal + WGSL fragment shaders rewritten to loop shapes, compute an
+  exponential smooth-min SDF, and softmin-weight the parabolic
+  refraction / chromatic-aberration / Fresnel glow against the union.
+- Metal/wgpu bindings extended with a per-frame lens_shapes storage
+  buffer bound alongside the existing LensRect instance buffer.
+- DirectX stubs unchanged; handled in a later commit.
+
+Release Notes:
+
+- N/A
+
+* gpui: Variable-radius gradient blur with un-blurred snapshot
+
+Adds support for linear-gradient blur strength: the fragment shader
+interpolates blur_radius_start..blur_radius_end along a user-supplied
+axis and mixes per-pixel between the un-blurred framebuffer and the
+max-blurred Kawase output. Covers HIG scroll-edge fades where the
+blur strength needs to fade across the band.
+
+Scaffold: both Metal and wgpu now preserve a surface-sized
+framebuffer_snapshot_texture alongside the Kawase chain so the mix
+has an un-blurred source to lerp against. The snapshot is produced
+once per frame (on the first blur/lens batch) and reused.
+
+- BlurRect grows to 96 bytes to carry blur_radius_end +
+  gradient_direction; LensRect stays at 112 bytes by repacking freed
+  padding (pad_light, pad, _pad_a).
+- BlurEffect / LensEffect gain radius_end + gradient_direction
+  fields, BlurAxis::{Horizontal, Vertical} enum, and
+  linear_gradient(from, to, axis) + with_gradient_direction(vec2)
+  builders. Uniform behavior is preserved when
+  gradient_direction == [0, 0].
+- Scene::max_blur_radius now considers both endpoints so the Kawase
+  chain is sized for the larger of radius_start / radius_end.
+- New SceneBlurParams uniform (max_blur_radius) is written once per
+  frame and bound to both pipelines; the shader uses it to scale
+  per-pixel target_radius into a [0, 1] mix factor.
+- The mix(unblurred, blurred, strength) approximation is documented
+  inline — it's visually correct for scroll-edge fades but not a
+  true Gaussian per-pixel blur at mid-range strengths. A mip-pyramid
+  follow-up is noted in the plan.
+
+Release Notes:
+
+- N/A
+
+* gpui: Add MirrorRect primitive with backgroundExtensionEffect semantics
+
+Introduces a new render primitive that samples a rectangular region of
+the framebuffer, flips it across one or both axes, and composites the
+result at a destination rect. Matches SwiftUI's
+backgroundExtensionEffect() - extend decorative content past the edge
+of an image or pane as a mirrored, optionally blurred continuation.
+
+- New MirrorRect struct (112 bytes) with source_bounds, mirror_axis
+  bitmask (MIRROR_AXIS_HORIZONTAL / VERTICAL), clip_to_destination,
+  and the same uniform-or-gradient blur fields as BlurRect/LensRect.
+  blur_radius == 0 sidesteps the Kawase chain and samples the
+  un-blurred framebuffer snapshot directly.
+- Primitive::MirrorRect variant, Scene::mirror_rects vec,
+  PrimitiveBatch::MirrorRects batching (coalesces adjacent same-order
+  rects), and PrimitiveKind::MirrorRect batch-iter integration.
+- Scene::max_blur_kernel_levels / max_blur_radius now consider
+  MirrorRect blur radii too; un-blurred mirrors contribute 0.
+- New paint_mirror_rect API with MirrorEffect + MirrorAxis types.
+  MirrorEffect::with_blur attaches a BlurEffect (supports gradient
+  strength) onto the mirrored source.
+- Metal + wgpu backends gain mirror pipelines + fragment shaders
+  that compute destination-normalized UV, apply the axis flips, map
+  back to source, clamp against the viewport, and mix un-blurred vs
+  blurred sources through the same gradient_blur_strength helper
+  Subsystem 2 added.
+- DirectX: new stub arm alongside the existing Blur/Lens stubs; full
+  port deferred with the rest of Subsystem 4.
+- Pipeline smoke tests extended on both backends.
+
+Release Notes:
+
+- N/A
+
+* gpui_windows: Surface warn-once on unsupported blur/lens/mirror batches
+
+The DirectX backend still no-ops BlurRect / LensRect / MirrorRect batches
+since the full D3D11 port is tracked as a follow-up. Switch each stub
+from a silent Ok(()) to a warn_once per primitive kind so the degradation
+is visible in logs without spamming every frame. Matches the plan's
+documented fallback when Windows verification capacity isn't available.
+
+Release Notes:
+
+- N/A
+
+* gpui: Replace mix approximation with true mip-pyramid variable blur
+
+The previous variable-radius blur mixed the un-blurred framebuffer with
+the full-strength Kawase result per pixel, which reads as "both sharp
+and soft" at mid-range strengths rather than as a clean intermediate
+blur. Switch to a preserved downsample pyramid with per-pixel fractional
+mip sampling so each target radius lands on the pyramid level that
+actually matches its Gaussian sigma.
+
+- New `blur_pyramid_texture` (single mipmapped texture with N mips) on
+  both Metal and wgpu. Mip 0 holds the un-blurred framebuffer copy;
+  subsequent mips are populated after each Kawase downsample pass (on
+  Metal via `copy_from_texture` into the destination mip; on wgpu via
+  `copy_texture_to_texture`). The full dual-Kawase chain still runs so
+  `chain[0]` keeps its dual-filter max-blur quality for any consumer
+  that wants it.
+- `framebuffer_snapshot_texture` retires - it's now pyramid mip 0.
+- Fragment shaders replace `mix(sharp, blurred, strength)` with
+  `sample_blur_pyramid(uv, target_radius)` which computes
+  `level = kernel_levels + log2(strength)`, clamps to [0, kernel_levels],
+  and samples with trilinear filtering. Doubling the target radius
+  bumps level by 1, matching the pyramid's exponential sigma spacing.
+- Samplers gain `mipmap_filter = Linear` (was Nearest on wgpu, unset on
+  Metal) so trilinear actually kicks in across mips.
+- `SceneBlurParams` grows a `kernel_levels: f32` field that the shader
+  uses as the log2 clamp ceiling; `max_blur_radius` stays as the
+  per-pixel strength normalizer.
+- wgpu's pyramid mip count is clamped to what the surface size
+  supports (a 20x20 surface hosts at most 5 mips, not 6).
+- Bind group layouts drop the old `unblurred_texture` entry (binding
+  5); the pyramid view replaces the single-mip chain[0] view at
+  binding 2.
+
+Release Notes:
+
+- N/A
+
+* gpui: Per-shape content masking for multi-shape lens groups
+
+Shapes in a multi-shape lens group can now carry their own
+content_mask, letting (e.g.) a toolbar pill at the edge of a sidebar
+fade out independently while its neighbors in the same lens keep
+rendering. Per-shape masks are applied as a soft attenuation inside
+the shader's SDF loop, so a clipped shape dissolves into its
+smooth-min neighbors instead of producing a hard seam at the mask
+edge.
+
+- LensShape.pad swaps for content_mask: Bounds<ScaledPixels>. Stride
+  stays at 48 bytes - no rebind or buffer-size churn.
+- LensShapeSpec gains `content_mask: Option<Bounds<Pixels>>` plus
+  `new()` and `with_content_mask()` helpers. `None` inherits the
+  element's content_mask; specified masks are intersected with the
+  element's mask at paint time so callers can't bypass the parent
+  clip.
+- Metal + WGSL fragment shaders compute a per-shape `mask_attn` in
+  Pass 1 and fold it into the softmin weights; union_sdf still uses
+  the unmasked exponential sum so the geometric outline is
+  preserved. A `coverage_factor` multiplies the final alpha so
+  fully-masked-out fragments go transparent.
+- Hard-min path (edge_blend_distance == 0) picks the winner on SDF
+  alone, then uses the winner's mask_attn as the coverage factor -
+  shapes fade smoothly at their mask boundaries without losing the
+  hard-union look.
+
+Release Notes:
+
+- N/A
+```
+gpui: Render blur pyramid in place and apply review feedback (#31)
+…
+5b8b2bd
+```
+Resolves a deep-review pass over the BlurRect / LensRect / MirrorRect
+pipeline. Highlights:
+
+- Metal: flip `enable_frame_sampling` default to true at the window
+  callsite; clamp pyramid mip count to surface size; `warn_once` when
+  sampling is disabled; CI-gated `pipeline_creation_smoke` panic; hoist
+  bounds-check/copy before encoder state in `draw_blur_rects` and
+  `draw_mirror_rects`; nil stale pyramid on zero-size resize.
+- Shader parity: MSL `discard_fragment` → `return float4(0)` on lens
+  early-exits; WGSL mirror routes through `blend_color`; clamp
+  `refracted_uv` to `[0,1]` on both backends; `safe_dir = weighted_dir /
+  max(len, 1e-4)` in the Fresnel select; clamp softmin weights; hoist
+  `MAX_LENS_SHAPES` constant; normalize `gradient_direction` inside
+  `gradient_target_radius`; document the γ=2.2 blur approximation;
+  document CA-fades-at-seams behavior.
+- Scene: `Primitive::LensRect(LensPrimitive)` → `Primitive::LensGroup`;
+  rename `_pad_end` → `pad_end`; document the `shape_offset` /
+  `shape_count` caller-value-overwrite contract on `LensRect`;
+  `BlurRect` zero-radius filtered from `max_blur_kernel_levels`.
+- Window API: `paint_lens_rect_union` specs + scaled_shapes and
+  `LensPrimitive.shapes` use `SmallVec<[_; MAX_LENS_SHAPES_PER_GROUP]>`
+  (zero heap for the typical 1..=8 case, stack copy on `Scene::replay`);
+  warn_once on empty specs; edge_blend_distance, paint-phase boilerplate,
+  MirrorEffect defaults + blur cross-link docs.
+- DirectX: per-batch tinted-quad fallback via a dedicated
+  `blur_fallback_pipeline` so the three unimplemented primitives render
+  a flat tint instead of a hole; reworded `warn_once` message.
+- WGPU: persistent `blur_params_scratch` on `WgpuResources`; size-aware
+  `invalidate_intermediate_textures` skips reallocation on same-size
+  replace_surface; move `b_mirror_rects` to `@binding(5)` so the group
+  has no gap.
+- Blur pipeline: declare the pyramid `RENDER_ATTACHMENT |
+  TEXTURE_BINDING | COPY_DST` on wgpu (and `RenderTarget | ShaderRead`
+  on Metal), render Kawase downsample passes directly into pyramid mips
+  via per-mip views / `set_level`, and drop the intermediate chain
+  textures plus the upsample pass entirely (dead code — fragment
+  shaders only sample the pyramid). Eliminates one `frame →
+  chain[0]` copy plus N `chain[i] → pyramid mip i` blits per snapshot
+  and halves scratch VRAM.
+- Tests: lens/mirror coalesce + interleave-with-quads; asymmetric
+  blur-radius endpoints; `BlurRect`/`Mirror` zero-radius filtering;
+  `kernel_levels=0` clamp; `mirror_rect_round_trip` field coverage;
+  `MirrorAxis::flags` mapping; `linear_gradient` axis mappings;
+  `with_gradient_direction` override.
+
+Release Notes:
+
+- N/A
+
+Co-authored-by: Claude Opus 4.7 <noreply@anthropic.com>
+```
+df49b9cd
+added a commit
+that referenced
+this pull request
+Apr 23, 2026
+gpui_wgpu: Cache frame-stable blur bind group, split instance data to…
+…
+748870a
+```
+… group(2) (#32)
+
+* Add BlurRect and LensRect rendering primitives
+
+Implements two new GPUI scene primitives for per-element backdrop
+compositing:
+
+- `Primitive::BlurRect` — dual-Kawase (Marius Bjorge, SIGGRAPH 2015)
+  backdrop blur with configurable kernel levels, corner radii, and tint.
+- `Primitive::LensRect` — Liquid Glass composite: backdrop blur plus
+  parabolic UV refraction, chromatic aberration, and directional Fresnel
+  edge glow.
+
+Both primitives are wired through the full rendering pipeline on every
+backend:
+
+- **WGPU** (`gpui_wgpu`): framebuffer snapshot via `copy_texture_to_texture`,
+  separate `blur_io_shaders.wgsl` module with sRGB-correct downsample/
+  upsample, plus `fs_blur_rect` / `fs_lens_rect` compositing entry points.
+- **Metal** (`gpui_macos`): `MTLBlitCommandEncoder::copy_from_texture` for
+  the snapshot, MSL port of both shader modules, cbindgen-generated input
+  index enums.
+- **DirectX** (`gpui_windows`): exhaustive-match stub returning `Ok(())`.
+
+Public API additions on `Window`:
+- `paint_blur_rect(bounds, corner_radii, BlurEffect)`
+- `paint_lens_rect(bounds, corner_radii, LensEffect)`
+
+Each call forces a render-pass break so the framebuffer can be sampled,
+then re-opens the pass with `LoadOp::Load` for subsequent primitives.
+
+Tests: WGPU pipeline-creation smoke test, Scene round-trip test for both
+primitive types.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+* gpui: Make blur/lens primitive structs Copy, use Radians, pin size invariants
+
+- Derive Copy on BlurRect / LensRect so they can be copied with `*val`
+  instead of `.clone()` in `Scene::insert_primitive`.
+- Replace `#[allow(missing_docs)]` with `#[expect(missing_docs)]` to match
+  sibling primitive structs.
+- Pin the WGSL-matching layouts with `const _: () = assert!(size_of::<_>()
+  == N)` so a future field reorder fails the build rather than silently
+  corrupting GPU memory.
+- Rename `_pad` / `_pad2` to `pad` / `pad2` to match the WGSL and MSL
+  struct definitions (and the existing `pad: u32` pattern on other
+  primitives in `scene.rs`).
+- Swap `LensEffect.light_angle_radians: f32` for `light_angle: Radians`,
+  reusing the existing `Radians` newtype in `crates/gpui/src/geometry.rs`.
+- Clamp `effect.kernel_levels` to `1..=5` at `paint_blur_rect` /
+  `paint_lens_rect` so the documented range is enforced. Full chain
+  wiring lands in a follow-up.
+- Add `debug_assert!(effect.light_angle.0.is_finite())` so NaN angles
+  fail tests instead of propagating into the GPU.
+- Replace `light_dir: Point<f32>` on `LensRect` with
+  `light_angle_radians: f32` + padding, and compute `light_dir` once per
+  vertex in both the WGSL and MSL lens shaders; fragment shaders receive
+  it as a flat varying.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+* gpui: Include blur/lens counts in "scene too large" error and split DirectX stubs
+
+The "scene too large" bail message in the Metal and DirectX renderers
+listed every primitive vector length except the new `blur_rects` /
+`lens_rects`. If an overflow is caused by those counts, the message
+hides the culprit. Append both counts in both messages.
+
+Also split the combined `BlurRects(_) | LensRects(_)` arm in the
+DirectX stub into two separate arms. Collapsing them saves three
+lines now but means the eventual DX implementation has to split them
+back out; keeping them apart keeps that future diff narrow.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+* gpui_wgpu: Re-query COPY_SRC capability in replace_surface
+
+replace_surface (invoked when the native window is re-created, e.g.
+Android TerminateWindow) reused self.surface_config and called
+surface.configure(...) without asking whether the new adapter still
+supports COPY_SRC on the swapchain format. If it doesn't, configure
+panics inside wgpu validation. If the flag was previously false but
+the new adapter does support it, blur/lens draws stay silently
+skipped forever.
+
+Re-query capabilities from the new surface, update
+self.surface_config.usage and self.surface_supports_copy_src to match,
+then configure.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+* gpui: Expand BlurRect/LensRect round-trip tests to cover batching
+
+The existing blur_rect_round_trip / lens_rect_round_trip tests insert
+a single primitive and assert one batch comes out — near-tautological
+given insert_primitive pushes directly. Add two tests that exercise
+the batching logic most likely to regress:
+
+- blur_rects_interleave_with_quads: inserts Quad@0, BlurRect@1,
+  Quad@2, BlurRect@3 and asserts batches yield Quads, BlurRects,
+  Quads, BlurRects in that order.
+- blur_rects_coalesce_when_adjacent: inserts two BlurRects at the
+  same layer and asserts they coalesce into a single batch of length
+  two.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+* gpui: Short-circuit lens fragment shaders when no work is needed
+
+fs_lens_rect / lens_rect_fragment always issued three textureSamples,
+always ran the Fresnel chain, and always ran corner_avg / edge_band
+math per fragment — even for inputs that trivially contribute nothing.
+The HIG default LensEffect sets dispersion=0, so every real scene
+runs three redundant texture taps per pixel.
+
+- Early-out with discard/return when the anti-aliased quad_sdf coverage
+  is zero. Skips the texture fetches on the bleeding edge pixels.
+- Branch on rect.dispersion > 0.0: one textureSample instead of three
+  when chromatic aberration is disabled.
+- Branch on rect.light_intensity > 0.0: skip Fresnel smoothstep +
+  facing dot when the edge glow is off.
+- Move corner_avg + edge_band computation from the fragment shader
+  into the vertex shader (both WGSL and MSL); expose edge_band as a
+  flat varying. They depend only on per-instance uniform data.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+* gpui_wgpu: Reuse create_pipeline for blur_rect / lens_rect
+
+make_rect_pipeline duplicated the existing create_pipeline closure
+with hardcoded TriangleStrip and sample_count=1. Two near-identical
+helpers in the same function invites drift. Call create_pipeline
+directly for blur_rect and lens_rect — both already use TriangleStrip
+and sample_count=1.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+* gpui_macos: Gate MetalLayer framebuffer_only opt-out behind a flag
+
+Calling `set_framebuffer_only(false)` unconditionally disables on-chip
+tile-memory optimizations for the drawable for the lifetime of the
+layer. The overwhelming majority of Zed frames contain no blur / lens
+primitive, so every shipping build was paying a presentation-cost
+regression for a feature that may never be used in the session.
+
+Plumb a new `enable_frame_sampling` flag through `new_renderer` /
+`MetalRenderer::new` / `new_internal`. Only flip
+`layer.set_framebuffer_only(false)` when the flag is true, or when
+`cfg(any(test, feature = "test-support"))` is active (so visual-test
+screenshots keep working). When disabled, `BlurRects` / `LensRects`
+batches silently skip rendering — the same failure mode as the wgpu
+path when a surface doesn't advertise COPY_SRC.
+
+The existing `gpui_macos` call site in `window.rs` passes `false`
+today; any caller that actually paints `BlurRects` / `LensRects` must
+pass `true`.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+* gpui_wgpu: Wire kernel_levels + radius; fix blur_params write race
+
+The BlurRect/LensRect chain was using two scratch textures (full + half)
+and hardcoded offset_multiplier=1.0, so `BlurEffect::kernel_levels` and
+`BlurEffect::radius` had no effect on the rendered output. It also ran
+two `queue.write_buffer` calls into offset 0 of a single-slot
+`blur_params_buffer` before submit, so both passes actually read the
+second write — the downsample pass sampled with half-resolution params
+instead of full-resolution ones.
+
+Restructure the snapshot pipeline:
+
+- Replace the snapshot/half pair with a `BLUR_CHAIN_LEVELS`-deep mip
+  chain of `wgpu::Texture`s on `WgpuResources`. Level 0 is surface-sized
+  and receives the framebuffer snapshot; each subsequent level is half.
+- Fold `ensure_blur_textures` into `ensure_intermediate_textures` so
+  one allocation site owns both the path intermediate textures and the
+  blur chain.
+- Allocate chain textures with `format.remove_srgb_suffix()`. When the
+  surface happens to be an sRGB variant (possible on adapters that only
+  expose sRGB BGRA/RGBA), this avoids double-correcting gamma — the
+  hardware no longer transfers sRGB on sample and the manual pow() in
+  `blur_io_shaders.wgsl` runs against raw bytes.
+- Pre-build a down/up bind group per chain transition in
+  `create_blur_io_bind_group`, keyed on the source view. The previous
+  code recreated two bind groups every `snapshot_and_blur_frame` call.
+- Grow `blur_params_buffer` to `BLUR_PARAMS_SLOT_COUNT` slots aligned to
+  `min_uniform_buffer_offset_alignment`. Switch the bind-group layout
+  to `has_dynamic_offset: true` and write all per-pass params in one
+  `queue.write_buffer` call. Each `set_bind_group` now passes the slot
+  offset so the write-race is eliminated by construction.
+- Change `snapshot_and_blur_frame` to loop down N then up N steps,
+  where N is `kernel_levels.clamp(1, BLUR_CHAIN_LEVELS - 1)`.
+- Add `Scene::max_blur_kernel_levels` and `Scene::max_blur_radius`
+  helpers; the main draw loop samples these once per frame and maps
+  radius to `offset_multiplier = radius / BLUR_REFERENCE_RADIUS_PX`
+  (reference = 20px, current default).
+
+This also resolves the `let _ = half_tex` unused-binding cleanup that
+was previously called out separately — the destructure is gone.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+* gpui_macos: Wire kernel_levels + radius through Metal Kawase chain
+
+Mirror the wgpu-side restructure. Replace blur_snapshot_texture +
+blur_half_texture with a BLUR_CHAIN_LEVELS-deep chain of Metal
+textures, allocate the chain lazily only when frame_sampling_enabled
+is true, and drive down/up passes from
+`scene.max_blur_kernel_levels()` / `scene.max_blur_radius()`.
+
+`BlurEffect::radius` now scales the Kawase offset multiplier linearly
+relative to BLUR_REFERENCE_RADIUS_PX (20 px = current default).
+`BlurEffect::kernel_levels` picks the chain depth 1..=5 per frame.
+Metal passes per-level BlurParams inline via `set_fragment_bytes`, so
+unlike the wgpu path it needs no dynamic-offset uniform buffer —
+there was no write-race to fix on this side.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+* gpui: Cache blur snapshot across batches within a frame
+
+Every BlurRects/LensRects batch unconditionally ran
+snapshot_and_blur_frame — full-surface framebuffer copy plus two
+Kawase passes per blur-chain level. With N blur primitives interleaved
+with other primitives at different z-orders, the scene iterator emits
+N batches and the renderer paid that cost N times.
+
+Add a local `blur_snapshot_valid: bool` in the draw loop on both
+renderers. It's false at frame start and whenever a non-blur primitive
+batch writes to the main target. On a blur / lens batch, reuse the
+cached chain when valid; otherwise run snapshot_and_blur_frame and
+set the flag true. For typical UI scenes this collapses N snapshots
+to one, regardless of draw-order interleaving.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+* gpui: Broader shader/pipeline smoke tests
+
+pipeline_creation_smoke in gpui_wgpu silently passed on adapter-less
+CI (common on Linux lanes without llvmpipe), so any breakage in the
+two new WGSL modules shipped untested. Metal had no analogous
+pipeline-creation test at all.
+
+- Add wgsl_shaders_parse: runs `naga::front::wgsl::parse_str` on
+  `shaders.wgsl`, `blur_io_shaders.wgsl`, and the dual-source-blending
+  concatenation of `shaders.wgsl` + `shaders_subpixel.wgsl`. Needs no
+  GPU, so it catches syntax / type errors on every CI lane.
+- Retry `request_adapter` with `force_fallback_adapter: true` if the
+  primary request fails (picks up llvmpipe / SwiftShader on Linux).
+- Have `pipeline_creation_smoke` panic when `CI` is set and no
+  adapter is available, so "no GPU" becomes a loud failure instead of
+  hiding in green output.
+- Add a Metal-side `pipeline_creation_smoke` using
+  `MetalRenderer::new_headless`; touches every new pipeline state
+  object so a missing Metal entry point fails at construction.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+* gpui: Cover Scene::max_blur_kernel_levels / max_blur_radius
+
+These are the actual values the renderer picks up per frame, so the
+contract they promise ("kernel_levels clamped to 1..=5") has to hold
+regardless of whether a caller came in through paint_blur_rect or
+inserted a BlurRect directly. Also pin the expected radius-max
+behavior when both BlurRect and LensRect are present with different
+radii.
+
+A previous commit added debug_assert on light_angle finiteness inside
+paint_lens_rect; driving paint_* through a TestAppContext Window is
+deferred to a follow-up since it requires pulling in the platform
+stack.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+* gpui_wgpu: Fix redundant clone in lens_rect pipeline creation
+
+Clippy flagged the `color_target.clone()` in the last use of
+`color_target` — the binding is dropped immediately after, so clone
+is redundant. This was introduced when `make_rect_pipeline` was
+folded into `create_pipeline`.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+* gpui: Normalize LensEffect scale fields and add effect builders
+
+Two follow-ups to open review comments on #1:
+
+- refraction, depth, and dispersion were exposed on the raw Figma
+  0..100 scale with a Default of refraction: 100.0 / depth: 16.0,
+  which read like percentages and bit a downstream consumer with a
+  100x-weaker lens. Normalize the public API to 0..1 (matching the
+  already-normalized light_intensity), and fold the 100x conversion
+  into paint_lens_rect so the shader math stays calibrated on the
+  same Figma scale.
+- kernel_levels was a bare public u32 on both structs, inviting the
+  misreading that lowering it saves render-pass breaks (it doesn't -
+  each primitive always forces one pass break). Add a sentence to
+  the field docstring and expose BlurEffect::new / LensEffect::new
+  so a radius-only caller never has to spell kernel_levels.
+
+Release Notes:
+
+- N/A
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+* gpui: Drop tahoe-gpui path references from doc comments
+
+Two shader-adjacent doc comments linked into tahoe-gpui source paths.
+The rest of the crate has no tahoe-gpui awareness, and the GPU field
+layout is dictated by the co-located WGSL / MSL structs anyway, so
+the external references are noise.
+
+Release Notes:
+
+- N/A
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+* gpui: Guard lens scalars against NaN and sharpen dispersion doc
+
+Two review follow-ups on the normalization commit:
+
+- paint_lens_rect already debug_asserts light_angle.is_finite(), so a
+  single NaN in light_angle is caught before it reaches the shader and
+  produces corrupted visuals. The normalization change introduced the
+  same hazard for refraction / depth / dispersion — NaN * 100 is NaN
+  and flows straight through. Mirror the existing assert for the three
+  new scalar inputs.
+- LensEffect::dispersion doc said "1.0 ≈ max CA shift" without a
+  concrete magnitude. At dispersion = 1.0 the shader sees 100 and the
+  R/B shift at the rim is ~100 px, which is substantial; quote the
+  value so callers don't assume "max" means a pixel or two.
+
+Release Notes:
+
+- N/A
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+* gpui: Multi-shape lens, gradient blur, and mirror primitives (#30)
+
+* gpui: Multi-shape LensRect with edge_blend_distance
+
+Extends LensRect to represent a union of 1..=MAX_LENS_SHAPES_PER_GROUP
+rounded rectangles, merged by a per-fragment smooth-min of their
+per-shape signed distance fields. This is the GPU-side equivalent of
+SwiftUI GlassEffectContainer(spacing:) - toolbar pills within
+edge_blend_distance of each other morph into a single continuous lens.
+
+- LensRect drops corner_radii in favor of (shape_offset, shape_count,
+  edge_blend_distance); stride stays at 112 bytes.
+- New LensShape struct holds per-shape bounds + corner_radii; stored
+  flat in Scene::lens_shapes and indexed by LensRect.shape_offset.
+- New Primitive::LensRect(LensPrimitive) carries both the header and
+  its shape list so Scene::replay repopulates offsets correctly.
+- Public API: paint_lens_rect_union accepts up to 8 LensShapeSpecs and
+  an edge_blend_distance; single-shape paint_lens_rect delegates to it.
+- Metal + WGSL fragment shaders rewritten to loop shapes, compute an
+  exponential smooth-min SDF, and softmin-weight the parabolic
+  refraction / chromatic-aberration / Fresnel glow against the union.
+- Metal/wgpu bindings extended with a per-frame lens_shapes storage
+  buffer bound alongside the existing LensRect instance buffer.
+- DirectX stubs unchanged; handled in a later commit.
+
+Release Notes:
+
+- N/A
+
+* gpui: Variable-radius gradient blur with un-blurred snapshot
+
+Adds support for linear-gradient blur strength: the fragment shader
+interpolates blur_radius_start..blur_radius_end along a user-supplied
+axis and mixes per-pixel between the un-blurred framebuffer and the
+max-blurred Kawase output. Covers HIG scroll-edge fades where the
+blur strength needs to fade across the band.
+
+Scaffold: both Metal and wgpu now preserve a surface-sized
+framebuffer_snapshot_texture alongside the Kawase chain so the mix
+has an un-blurred source to lerp against. The snapshot is produced
+once per frame (on the first blur/lens batch) and reused.
+
+- BlurRect grows to 96 bytes to carry blur_radius_end +
+  gradient_direction; LensRect stays at 112 bytes by repacking freed
+  padding (pad_light, pad, _pad_a).
+- BlurEffect / LensEffect gain radius_end + gradient_direction
+  fields, BlurAxis::{Horizontal, Vertical} enum, and
+  linear_gradient(from, to, axis) + with_gradient_direction(vec2)
+  builders. Uniform behavior is preserved when
+  gradient_direction == [0, 0].
+- Scene::max_blur_radius now considers both endpoints so the Kawase
+  chain is sized for the larger of radius_start / radius_end.
+- New SceneBlurParams uniform (max_blur_radius) is written once per
+  frame and bound to both pipelines; the shader uses it to scale
+  per-pixel target_radius into a [0, 1] mix factor.
+- The mix(unblurred, blurred, strength) approximation is documented
+  inline — it's visually correct for scroll-edge fades but not a
+  true Gaussian per-pixel blur at mid-range strengths. A mip-pyramid
+  follow-up is noted in the plan.
+
+Release Notes:
+
+- N/A
+
+* gpui: Add MirrorRect primitive with backgroundExtensionEffect semantics
+
+Introduces a new render primitive that samples a rectangular region of
+the framebuffer, flips it across one or both axes, and composites the
+result at a destination rect. Matches SwiftUI's
+backgroundExtensionEffect() - extend decorative content past the edge
+of an image or pane as a mirrored, optionally blurred continuation.
+
+- New MirrorRect struct (112 bytes) with source_bounds, mirror_axis
+  bitmask (MIRROR_AXIS_HORIZONTAL / VERTICAL), clip_to_destination,
+  and the same uniform-or-gradient blur fields as BlurRect/LensRect.
+  blur_radius == 0 sidesteps the Kawase chain and samples the
+  un-blurred framebuffer snapshot directly.
+- Primitive::MirrorRect variant, Scene::mirror_rects vec,
+  PrimitiveBatch::MirrorRects batching (coalesces adjacent same-order
+  rects), and PrimitiveKind::MirrorRect batch-iter integration.
+- Scene::max_blur_kernel_levels / max_blur_radius now consider
+  MirrorRect blur radii too; un-blurred mirrors contribute 0.
+- New paint_mirror_rect API with MirrorEffect + MirrorAxis types.
+  MirrorEffect::with_blur attaches a BlurEffect (supports gradient
+  strength) onto the mirrored source.
+- Metal + wgpu backends gain mirror pipelines + fragment shaders
+  that compute destination-normalized UV, apply the axis flips, map
+  back to source, clamp against the viewport, and mix un-blurred vs
+  blurred sources through the same gradient_blur_strength helper
+  Subsystem 2 added.
+- DirectX: new stub arm alongside the existing Blur/Lens stubs; full
+  port deferred with the rest of Subsystem 4.
+- Pipeline smoke tests extended on both backends.
+
+Release Notes:
+
+- N/A
+
+* gpui_windows: Surface warn-once on unsupported blur/lens/mirror batches
+
+The DirectX backend still no-ops BlurRect / LensRect / MirrorRect batches
+since the full D3D11 port is tracked as a follow-up. Switch each stub
+from a silent Ok(()) to a warn_once per primitive kind so the degradation
+is visible in logs without spamming every frame. Matches the plan's
+documented fallback when Windows verification capacity isn't available.
+
+Release Notes:
+
+- N/A
+
+* gpui: Replace mix approximation with true mip-pyramid variable blur
+
+The previous variable-radius blur mixed the un-blurred framebuffer with
+the full-strength Kawase result per pixel, which reads as "both sharp
+and soft" at mid-range strengths rather than as a clean intermediate
+blur. Switch to a preserved downsample pyramid with per-pixel fractional
+mip sampling so each target radius lands on the pyramid level that
+actually matches its Gaussian sigma.
+
+- New `blur_pyramid_texture` (single mipmapped texture with N mips) on
+  both Metal and wgpu. Mip 0 holds the un-blurred framebuffer copy;
+  subsequent mips are populated after each Kawase downsample pass (on
+  Metal via `copy_from_texture` into the destination mip; on wgpu via
+  `copy_texture_to_texture`). The full dual-Kawase chain still runs so
+  `chain[0]` keeps its dual-filter max-blur quality for any consumer
+  that wants it.
+- `framebuffer_snapshot_texture` retires - it's now pyramid mip 0.
+- Fragment shaders replace `mix(sharp, blurred, strength)` with
+  `sample_blur_pyramid(uv, target_radius)` which computes
+  `level = kernel_levels + log2(strength)`, clamps to [0, kernel_levels],
+  and samples with trilinear filtering. Doubling the target radius
+  bumps level by 1, matching the pyramid's exponential sigma spacing.
+- Samplers gain `mipmap_filter = Linear` (was Nearest on wgpu, unset on
+  Metal) so trilinear actually kicks in across mips.
+- `SceneBlurParams` grows a `kernel_levels: f32` field that the shader
+  uses as the log2 clamp ceiling; `max_blur_radius` stays as the
+  per-pixel strength normalizer.
+- wgpu's pyramid mip count is clamped to what the surface size
+  supports (a 20x20 surface hosts at most 5 mips, not 6).
+- Bind group layouts drop the old `unblurred_texture` entry (binding
+  5); the pyramid view replaces the single-mip chain[0] view at
+  binding 2.
+
+Release Notes:
+
+- N/A
+
+* gpui: Per-shape content masking for multi-shape lens groups
+
+Shapes in a multi-shape lens group can now carry their own
+content_mask, letting (e.g.) a toolbar pill at the edge of a sidebar
+fade out independently while its neighbors in the same lens keep
+rendering. Per-shape masks are applied as a soft attenuation inside
+the shader's SDF loop, so a clipped shape dissolves into its
+smooth-min neighbors instead of producing a hard seam at the mask
+edge.
+
+- LensShape.pad swaps for content_mask: Bounds<ScaledPixels>. Stride
+  stays at 48 bytes - no rebind or buffer-size churn.
+- LensShapeSpec gains `content_mask: Option<Bounds<Pixels>>` plus
+  `new()` and `with_content_mask()` helpers. `None` inherits the
+  element's content_mask; specified masks are intersected with the
+  element's mask at paint time so callers can't bypass the parent
+  clip.
+- Metal + WGSL fragment shaders compute a per-shape `mask_attn` in
+  Pass 1 and fold it into the softmin weights; union_sdf still uses
+  the unmasked exponential sum so the geometric outline is
+  preserved. A `coverage_factor` multiplies the final alpha so
+  fully-masked-out fragments go transparent.
+- Hard-min path (edge_blend_distance == 0) picks the winner on SDF
+  alone, then uses the winner's mask_attn as the coverage factor -
+  shapes fade smoothly at their mask boundaries without losing the
+  hard-union look.
+
+Release Notes:
+
+- N/A
+
+* gpui: Render blur pyramid in place and apply review feedback (#31)
+
+Resolves a deep-review pass over the BlurRect / LensRect / MirrorRect
+pipeline. Highlights:
+
+- Metal: flip `enable_frame_sampling` default to true at the window
+  callsite; clamp pyramid mip count to surface size; `warn_once` when
+  sampling is disabled; CI-gated `pipeline_creation_smoke` panic; hoist
+  bounds-check/copy before encoder state in `draw_blur_rects` and
+  `draw_mirror_rects`; nil stale pyramid on zero-size resize.
+- Shader parity: MSL `discard_fragment` → `return float4(0)` on lens
+  early-exits; WGSL mirror routes through `blend_color`; clamp
+  `refracted_uv` to `[0,1]` on both backends; `safe_dir = weighted_dir /
+  max(len, 1e-4)` in the Fresnel select; clamp softmin weights; hoist
+  `MAX_LENS_SHAPES` constant; normalize `gradient_direction` inside
+  `gradient_target_radius`; document the γ=2.2 blur approximation;
+  document CA-fades-at-seams behavior.
+- Scene: `Primitive::LensRect(LensPrimitive)` → `Primitive::LensGroup`;
+  rename `_pad_end` → `pad_end`; document the `shape_offset` /
+  `shape_count` caller-value-overwrite contract on `LensRect`;
+  `BlurRect` zero-radius filtered from `max_blur_kernel_levels`.
+- Window API: `paint_lens_rect_union` specs + scaled_shapes and
+  `LensPrimitive.shapes` use `SmallVec<[_; MAX_LENS_SHAPES_PER_GROUP]>`
+  (zero heap for the typical 1..=8 case, stack copy on `Scene::replay`);
+  warn_once on empty specs; edge_blend_distance, paint-phase boilerplate,
+  MirrorEffect defaults + blur cross-link docs.
+- DirectX: per-batch tinted-quad fallback via a dedicated
+  `blur_fallback_pipeline` so the three unimplemented primitives render
+  a flat tint instead of a hole; reworded `warn_once` message.
+- WGPU: persistent `blur_params_scratch` on `WgpuResources`; size-aware
+  `invalidate_intermediate_textures` skips reallocation on same-size
+  replace_surface; move `b_mirror_rects` to `@binding(5)` so the group
+  has no gap.
+- Blur pipeline: declare the pyramid `RENDER_ATTACHMENT |
+  TEXTURE_BINDING | COPY_DST` on wgpu (and `RenderTarget | ShaderRead`
+  on Metal), render Kawase downsample passes directly into pyramid mips
+  via per-mip views / `set_level`, and drop the intermediate chain
+  textures plus the upsample pass entirely (dead code — fragment
+  shaders only sample the pyramid). Eliminates one `frame →
+  chain[0]` copy plus N `chain[i] → pyramid mip i` blits per snapshot
+  and halves scratch VRAM.
+- Tests: lens/mirror coalesce + interleave-with-quads; asymmetric
+  blur-radius endpoints; `BlurRect`/`Mirror` zero-radius filtering;
+  `kernel_levels=0` clamp; `mirror_rect_round_trip` field coverage;
+  `MirrorAxis::flags` mapping; `linear_gradient` axis mappings;
+  `with_gradient_direction` override.
+
+Release Notes:
+
+- N/A
+
+Co-authored-by: Claude Opus 4.7 <noreply@anthropic.com>
+
+* gpui_wgpu: Cache frame-stable blur bind group, split instance data to group(2)
+
+Split the monolithic blur/lens/mirror bind group into two groups:
+- group(1): frame-stable resources (pyramid view, sampler, scene_blur_params),
+  cached for the lifetime of the pyramid texture
+- group(2): per-batch instance storage buffers, recreated each frame
+
+This avoids creating a full bind group per primitive per frame when only
+the instance buffer slice changes.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+---------
+
+Co-authored-by: Claude Opus 4.7 <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

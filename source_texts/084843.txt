@@ -1,0 +1,169 @@
+Overview WorldRenderer is VoxelKit's GPU rendering engine — a multi-pass Metal pipeline that draws all five world layers into a single MTKView-backed drawable. Designed for M1 Pro 16-core GPU: instanced rendering, frustum culling per chu...
+
+WorldRenderer: Metal pipeline for all five map layers · Issue #14 · plagness/VoxelKit · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+WorldRenderer: Metal pipeline for all five map layers #14
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+WorldRenderer: Metal pipeline for all five map layers#14
+Copy link
+Labels
+difficulty:expertRequires significant research or specialised expertiseRequires significant research or specialised expertiselayer:renderMetal renderer, GreedyMesher, VoxelKitUI, Demo appMetal renderer, GreedyMesher, VoxelKitUI, Demo apppriority:criticalBlocks everything elseBlocks everything elsesize:XL> 2 weeks> 2 weeks
+Milestone
+Render & UX
+Description
+plagness
+opened on Mar 5, 2026
+Issue body actions
+Overview
+WorldRenderer is VoxelKit's GPU rendering engine — a multi-pass Metal pipeline that draws all five world layers into a single MTKView-backed drawable. Designed for M1 Pro 16-core GPU: instanced rendering, frustum culling per chunk, LOD based on camera distance, and depth fog — all in one render pass where possible to minimise bandwidth.
+```
+WorldRenderer
+  │
+  ├── StructurePass      instanced MergedVoxel cuboids (GreedyMesher output)
+  │   └── Vertex shader: cuboid corners from center+halfSize, model→world transform
+  │   └── Fragment shader: diffuse (two-light), depth fog, height cutoff clip
+  │
+  ├── ObjectPass         USDZ models (RealityKit Entity snapshot) + wireframe bbox debug
+  │
+  ├── ZonePass           alpha-blended XZ polygons extruded to zone height range
+  │
+  ├── IoTPass            billboard sprites (MTLTexture atlas) + data label quads
+  │
+  ├── AgentPass          pulsing rings (instanced) + trajectory tubes + predicted path fade
+  │
+  └── PostProcess        depth-based LOD switching, height cutoff uniform, fog density
+```
+CameraUniforms (passed to all shaders via setVertexBytes):
+```
+struct CameraUniforms {
+    float4x4 viewProjection;
+    float3   cameraPosition;
+    float    voxelSize;
+    float2   viewportSize;
+    float    heightCutoff;
+    float    fogDensity;
+};
+```
+LOD bands (StructurePass):
+0–20 m: octree depth 5 (3.125 cm effective)
+20–100 m: depth 3 (12.5 cm)
+100 m: depth 1 (50 cm)
+Frustum culling: Gribb-Hartmann P-vertex AABB test per 1 m³ chunk — CPU-side, eliminates off-screen chunks before any GPU work.
+Subtasks
+Core pipeline:
+Define CameraUniforms Metal struct + matching Swift struct (byte-aligned)
+WorldRenderer class (non-actor, @MainActor bound to MTKView lifecycle): init with MTLDevice, holds all pipeline states
+MTLRenderPipelineDescriptor for each pass (vertex + fragment function pairs)
+MTLDepthStencilState — depth write enabled for structure/object passes, disabled for zone/IoT/agent passes
+Per-frame render loop: draw(in view: MTKView) — update uniforms, cull chunks, encode all passes, present
+StructurePass:
+Vertex shader structure_vertex.metal: expand MergedVoxel center+halfSize to 8 cube corners, apply model→clip transform
+Fragment shader structure_fragment.metal: two-directional diffuse lighting (key + fill), depth fog mix(colour, fogColour, fogFactor), clip if worldPos.y > heightCutoff
+Frustum culling: Gribb-Hartmann 6-plane AABB test for each ChunkKey bounding box
+LOD: query ChunkedOctree at appropriate depth based on distance(cameraPosition, chunkCenter)
+ZonePass:
+Triangulate zone polygons (fan from centroid) on CPU, upload to MTLBuffer
+Fragment shader: colour from ZoneType palette, alpha 0.25, additive blending for overlapping zones
+IoTPass:
+Billboard sprite: vertex shader computes screen-facing quad from world anchor point
+128×128 icon atlas texture (MTLTexture) for device type icons
+Label rendering via CoreText → CGContext → MTLTexture (baked per device, updated on data change)
+AgentPass:
+Pulsing ring: instanced sin(time) radius animation via time uniform
+Trajectory tube: MTLPrimitiveType.lineStrip for recorded/planned trajectories
+Predicted path: same geometry, alpha fades to 0 at furthest waypoint
+PostProcess:
+Height cutoff slider: updates CameraUniforms.heightCutoff — clip in fragment shader
+Fog: exponential fogFactor = 1 - exp(-fogDensity * depth)
+Frame rate control:
+CADisplayLink with preferredFrameRateRange: default adaptive (matches monitor ProMotion), manual lock options: 30 / 45 / 60 / 75 / 90 / 120 fps
+RendererSettings.frameRateMode enum: .adaptive, .locked(fps: Int)
+Hardware-aware quality preset: at renderer init, detect chip generation via MTLDevice.name → map to preset table (see Implementation Notes); adjust LOD aggressiveness, shadow quality, max instance count per preset
+Dependencies
+Blocked by #13 (GreedyMesher must produce MergedVoxel), #5 (ZonePass needs MapZone), #6 (IoTPass/AgentPass need device/agent data)
+Acceptance Criteria
+100 000 occupied voxels render at native monitor refresh rate (up to 120 fps ProMotion) on M1 Pro 16-core GPU — measure with Metal Frame Debugger
+Frame rate lock works for all values: 30 / 45 / 60 / 75 / 90 / 120 fps; actual fps within ±2 fps of target
+Hardware preset auto-selected at startup: M1 Pro → high, iPhone A15 → medium, M1 → high, M4 → ultra
+GPU utilisation ≤ 60% at 10M merged voxels at native resolution on M1 Pro 16 GB (Metal Frame Debugger)
+Frustum culling reduces draw calls by ≥ 50% when camera faces a wall (half map off-screen)
+LOD transitions are visually seamless (no popping within tolerance)
+Height cutoff clips geometry cleanly at the specified Y value
+Zone polygons render semi-transparent with correct colours per ZoneType
+No Metal validation layer errors or warnings
+Implementation Notes
+MTLStorageMode.shared for MergedVoxel buffers — CPU updates, GPU reads same physical memory
+Instanced draw: drawPrimitives(type:.triangle, vertexStart:0, vertexCount:36, instanceCount: mergedVoxels.count) — 36 vertices = 12 triangles = 6 faces of cube
+Two-light diffuse: key light direction (0.577, 0.577, 0.577), fill light (-0.577, 0.2, -0.577), ambient 0.3
+Zone triangulation: Accelerate.vDSP for centroid computation; fan triangulation O(N) for convex, ear-clip for concave
+Billboard IoT: float3 right = cross(cameraUp, toCamera) in vertex shader — always faces camera
+CADisplayLink.preferredFrameRateRange: set minimum = preferred = maximum = targetFps for locked mode; set minimum = 24, preferred = 120, maximum = 120 for adaptive
+Hardware preset table (chip → preset → LOD aggressiveness / max instances):
+Chip
+Preset
+Max instances
+LOD scale
+M4 Pro / M4 Max
+ultra
+50M
+1.0
+M3 / M4
+high
+20M
+1.0
+M1 Pro / M2 Pro
+high
+10M
+1.0
+M1 / M2
+medium
+5M
+0.8
+iPhone A17 / A18
+medium
+3M
+0.7
+iPhone A15 / A16
+low
+1M
+0.5
+Detect chip via MTLDevice.name contains substring matching (e.g. "M4 Pro", "M1 Pro", "A17")
+Benchmark mode (debug builds only): WorldRenderer.benchmarkMode = true prints frame time, GPU%, voxel count, draw call count to console each second
+Reactions are currently unavailable
+Activity
+plagness
+added this to the Render & UX milestone on Mar 5, 2026
+plagness
+added
+layer:renderMetal renderer, GreedyMesher, VoxelKitUI, Demo appMetal renderer, GreedyMesher, VoxelKitUI, Demo app
+size:XL> 2 weeks> 2 weeks
+priority:criticalBlocks everything elseBlocks everything else
+difficulty:expertRequires significant research or specialised expertiseRequires significant research or specialised expertise
+on Mar 5, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+difficulty:expertRequires significant research or specialised expertiseRequires significant research or specialised expertiselayer:renderMetal renderer, GreedyMesher, VoxelKitUI, Demo appMetal renderer, GreedyMesher, VoxelKitUI, Demo apppriority:criticalBlocks everything elseBlocks everything elsesize:XL> 2 weeks> 2 weeks
+Projects
+No projects
+Milestone
+Render & UXNo due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

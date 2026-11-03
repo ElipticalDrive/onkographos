@@ -1,0 +1,260 @@
+Signed Distance Field Utilities. Contribute to fu5ha/sdfu development by creating an account on GitHub.
+
+Implementing sdfu in a raytracer · Issue #8 · fu5ha/sdfu · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Implementing sdfu in a raytracer #8
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Implementing sdfu in a raytracer#8
+Copy link
+Labels
+questionFurther information is requestedFurther information is requested
+Description
+edap
+opened on Oct 10, 2022
+Issue body actions
+Hello, I am trying to use this crate in my raytracer that has been written in rust following the first book "raytracer in a weekend" https://raytracing.github.io/books/RayTracingInOneWeekend.html.
+Now I would like to add sdf shapes to list of the hittables objects. I have looked at your amazing path tracer rayn to see how it is implemented https://github.com/fu5ha/rayn/blob/master/src/sdf.rs but unfortunately my unfamiliarity with SIMD made your code a little hard to read for me. Therefore, I have implemented a classic raymarching function in the hit function.
+```
+use crate::hitable::{HitRecord, Hitable};
+use crate::material::Material;
+use crate::ray::Ray;
+use crate::setup::SDF_DETAIL_SCALE;
+use glam::Vec3A;
+use sdfu::SDF;
+
+use sdfu::*;
+
+const MAX_MARCHES: u32 = 256;
+const MAX_VIS_MARCHES: u32 = 100;
+
+pub struct TracedSDF<S> {
+    sdf: S,
+    mat: Material,
+}
+
+impl<S> TracedSDF<S> {
+    pub fn new(sdf: S, mat: Material) -> Self {
+        TracedSDF { sdf, mat }
+    }
+}
+
+impl<S: SDF<f32, Vec3A> + Send + Sync> Hitable for TracedSDF<S> {
+    fn hit(&self, ray: &Ray, _t0: f32, t1: f32) -> Option<HitRecord> {
+        let dist = self.sdf.dist(ray.origin).abs();
+        let mut t = dist;
+        let mut hit = false;
+
+        for _march in 0..MAX_MARCHES {
+            let point = ray.point_at_parameter(t);
+            let dist = self.sdf.dist(point).abs();
+            let eps = f32::from(0.00005 * SDF_DETAIL_SCALE).max(f32::from(0.05 * SDF_DETAIL_SCALE));
+            if dist < eps {
+                hit = true;
+                break;
+            }
+
+            t = t + dist;
+
+            if t > t1 || t.is_nan() {
+                break;
+            }
+        }
+
+        if hit {
+            // normal not used ATM in the material. Paint it red for debug purposes
+            let half_pixel_size = f32::from(0.0001).max(f32::from(SDF_DETAIL_SCALE));
+            let normals = self.sdf.normals_fast(half_pixel_size);
+            let normal = normals.normal_at(ray.point_at_parameter(t));
+
+            return Some(HitRecord {
+                t,
+                pos: ray.point_at_parameter(t),
+                normal,
+                front_face: true,
+                mat: &self.mat,
+            });
+        } else {
+            return None;
+        }
+    }
+}
+```
+And I have added a simple sphere to my world.
+```
+        let sdf_sphere = TracedSDF::new(
+            sdfu::Sphere::new(1.0).translate(Vec3A::new(0.0, 0.0, -1.0)),
+            Material::Lambertian(Lambertian::new(Color {
+                red: 0.8,
+                green: 0.6,
+                blue: 0.2,
+            })),
+        );
+        let mut hitables = HitableStore::new();
+        hitables.push(sdf_sphere);
+        World {
+            width: w,
+            height: h,
+            fov: 90.0,
+            hitables: hitables,
+        }
+```
+Unfortunately, something is wrong. The central part of the sphere is missing
+The first thing that I have thought is that the sphere is too big and it is clipped out. So I change the radius of the sphere from 1.0 to 0.5. An the sphere disappear completely.
+I set the radius back to 1.0, and I increase the epsilon value, so, in the hit function I change this line:
+```
+let eps = f32::from(0.00005 * SDF_DETAIL_SCALE).max(f32::from(0.05 * SDF_DETAIL_SCALE));
+```
+to
+```
+let eps = 0.5
+```
+With this result.
+The "hole" in the middle of the sphere is smaller, but the sphere is also obviously bigger. Of course I have tried a small eps, like 0.0015, and this is the result.
+Now, I think that what it is happening is that the rays closer to the sphere the first time do not hit the sphere, but in the iteration in the raymarching loop t becomes too big and it pass through the sphere.
+In your path tracer, you are multiplying eps by a function bounded to the value of t. https://github.com/fu5ha/rayn/blob/master/src/camera.rs#L210
+Before to do something similar, I would like to understand if I am doing something wrong in using your library inside a simple ray tracer, as for my understanding a fixed epsilon value should work as well.
+Any hints or suggestion is really appreciated.
+Reactions are currently unavailable
+Activity
+fu5ha commented on Oct 10, 2022
+fu5ha
+on Oct 10, 2022
+Last edited by fu5ha
+Owner
+More actions
+So I think the main problem here is that you're using dist.abs(), which means that you could move through the surface without the dist.abs() ever reaching below eps and therefore never triggering a hit, and then dist would start increasing again on the other side so you'd never hit the surface. And the reason it would happen more in the middle is that the relative change in dist.abs() compared to a change in t (in calculus terms, the derivative of the distance function with respect to t) is highest when the surface is aligned with the direction of the ray, so the issue of going through the surface is most likely to happen in that case. If you step based on dist but check whether you are close enough by dist.abs() then you should avoid this issue well for well defined SDFs. The reason I use always abs in rayn is that the SDFs of the fractals I was tracing weren't always well defined on the inside of the surface, so doing that isn't always possible.
+so your main tracing loop would then look like:
+```
+        for _march in 0..MAX_MARCHES {
+            let point = ray.point_at_parameter(t);
+            let dist = self.sdf.dist(point); // remove abs here
+            let eps = f32::from(0.00005 * SDF_DETAIL_SCALE).max(f32::from(0.05 * SDF_DETAIL_SCALE));
+            if dist.abs() < eps { // abs applied for comparison
+                hit = true;
+                break;
+            }
+
+            t = t + dist; // this addition can now be negative so you can then approach the surface again
+
+            if t > t1 || t.is_nan() {
+                break;
+            }
+        }
+```
+Also you will likely need to reevaluate this if you try to do refraction, i.e. have rays that pass through the inside of an SDF, in which case you could special case the tracing loop to negate the distance or something like that.
+fu5ha commented on Oct 10, 2022
+fu5ha
+on Oct 10, 2022
+Owner
+More actions
+oh also, one more thing to point out here is that if you're not using a function like half_pixel_size_at then you may as well get rid of all the fancy calculation of eps to just a constant (maybe times another constant)... right now that whole line should just evaluate to a single constant value anyway since there's no dynamic value in it anymore.
+fu5ha
+added
+questionFurther information is requestedFurther information is requested
+on Oct 10, 2022
+fu5ha commented on Oct 10, 2022
+fu5ha
+on Oct 10, 2022
+Owner
+More actions
+The reason I use always abs in rayn is that the SDFs of the fractals I was tracing weren't always well defined on the inside of the surface, so doing that isn't always possible.
+Actually I think I misspoke here and indeed my code likely has the same issue, the real reason I did this was because of the refraction thing I mentioned, and then didn't reevaluate if there was a better way to solve the problem (which there likely is).
+edap commented on Oct 11, 2022
+edap
+on Oct 11, 2022
+Author
+More actions
+Many thanks for your replies. You were correct, using abs() was the error for which the ray was marching through the surface. Removing the abs() fixed partially the error. After reading your comments, I have removed the half_pixel_size_at to make the example more simple and understand it better. I have to enable a lambert material to debug the issue and see what was happening, therefore the next images are slightly different than the red spheres. This code generates the following image:
+```
+impl<S: SDF<f32, Vec3A> + Send + Sync> Hitable for TracedSDF<S> {
+    fn hit(&self, ray: &Ray, _t0: f32, t1: f32) -> Option<HitRecord> {
+        let dist = self.sdf.dist(ray.origin).abs();
+        let mut t = dist;
+        let mut hit = false;
+        let eps = 0.0015;
+
+        for _march in 0..MAX_MARCHES {
+            let point = ray.point_at_parameter(t);
+            let dist = self.sdf.dist(point);
+            if dist < eps {
+                hit = true;
+                break;
+            }
+
+            t = t + dist;
+
+            if t > t1 || t.is_nan() {
+                break;
+            }
+        }
+
+        if hit {
+            let normals = self.sdf.normals_fast(eps);
+            let normal = normals.normal_at(ray.point_at_parameter(t));
+
+            return Some(HitRecord {
+                t,
+                pos: ray.point_at_parameter(t),
+                normal,
+                front_face: true,
+                mat: &self.mat,
+            });
+        } else {
+            return None;
+        }
+    }
+}
+```
+If I do the comparison using if dist.abs() < eps { instead of if dist < eps { as it is in the code listed, the sphere has a hole in the middle, as before, and I suppose for the same reason, the ray is going through without hitting.
+Now, I have another weird problem. The radius of the sphere is 0.7. If I make the sphere smaller, like 0.6, it disappear completely.
+But, If I add a big green sphere that act as ground, as in the book "Ray Tracer in a Weekend", the shadow of the sphere is there!
+If I manage to make a simple raytracer to debug the issue i will upload it. In the meantime, any hints is really appreciated.
+edap commented on Jan 3, 2023
+edap
+on Jan 3, 2023
+Last edited by edap
+Author
+More actions
+Dear Gray, everything works fine, thanks for your detailed answers. You can find a simple example here. https://github.com/edap/sdfu-example/blob/main/src/main.rs
+I have a couple of questions (again):
+Is there a way to implement a dynamic half pixel size variable for the calculation of the normal in the example that I have posted?
+I want to add an acceleration structure to the SDF. As the path tracer that I am writing supports AABB box, I was thinking to implement the same thing. For the sphere, it should not be complicated:
+```
+    fn bounding_box(&self) -> Option<Aabb> {
+        Some(Aabb {
+            min: sdf.translation
+                - Vec3A::new(radius(),radius(), radius()),
+            max: sdf.translation
+                + Vec3A::new(radius(), radius(), radius()),
+        })
+    }
+```
+The problem is that I can not read the radius and the position out of `sdfu::sdf.
+In the case I would like to add other primitives or functions (like https://mercury.sexy/hg_sdf/ ), how would you suggest to proceed ? Is there a way to extend this crate without necessarily fork it?
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+questionFurther information is requestedFurther information is requested
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

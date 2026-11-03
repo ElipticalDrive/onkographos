@@ -1,0 +1,169 @@
+# 3D Trilinear Interpolation
+
+Also called: Trilinear Interpolation (Standard), Trilinear Voxel Interpolation, Voxel Trilinear Interpolation
+
+## Overview
+3D Trilinear Interpolation retrieves the value of a scalar or vector field at arbitrary floating-point coordinates $(x, y, z)$ by interpolating the values at the 8 integer corners of the enclosing voxel grid cell [S1]. It is used in volume rendering and raycasting to achieve higher sampling resolution than nearest-neighbor sampling, providing smooth transitions between discrete voxel values [S1]. It differs from its sibling [Voxel Trilinear Interpolation (SIMD)](2564-voxel-trilinear-interpolation-simd.md) by focusing on the standard algorithmic definition rather than vectorized hardware optimizations, and from [Trilinear Interpolation (Compressed/Linked)](2629-trilinear-interpolation-compressed-linked.md) by operating on dense, contiguous memory layouts without link indirection [S2].
+
+## How it works
+**Inputs:**
+- A dense 3D grid of values $V$ with dimensions $D_x \times D_y \times D_z$ [S1, S2].
+- A query point $P = (x, y, z)$ in voxel space [S1, S2].
+- Optional grid origin $O = (o_x, o_y, o_z)$ and voxel spacings $S = (dx, dy, dz)$ for world-to-voxel conversion [S2].
+
+**Outputs:**
+- The interpolated value $val$ at $P$ [S1].
+- For batched inputs, an array of values or coefficient arrays [S2].
+
+**Data Structures:**
+- The grid $V$ is stored as a 3D array (e.g., NumPy or JAX array) with shape $(D_x, D_y, D_z)$ [S1, S2].
+- Corner values are retrieved as scalars or vectors depending on the data type [S2].
+
+**Steps:**
+
+1. **Coordinate Normalization:**
+   If coordinates are in world space, normalize to voxel space:
+   $$
+   xyz = \frac{P - O}{S}
+   $$
+   [S2].
+
+2. **Boundary Check:**
+   If $x < 0$ or $y < 0$ or $z < 0$ or $x \ge D_x$ or $y \ge D_y$ or $z \ge D_z$, return 0 [S1].
+
+3. **Floor Coordinates:**
+   Compute integer floor coordinates:
+   $$
+   x_0 = \lfloor x \rfloor, \quad y_0 = \lfloor y \rfloor, \quad z_0 = \lfloor z \rfloor
+   $$
+   [S1, S2].
+
+4. **Ceiling Coordinates:**
+   Compute:
+   $$
+   x_1 = x_0 + 1, \quad y_1 = y_0 + 1, \quad z_1 = z_0 + 1
+   $$
+   [S1, S2].
+
+5. **Fractional Differences:**
+   Compute:
+   $$
+   \alpha = x - x_0, \quad \beta = y - y_0, \quad \gamma = z - z_0
+   $$
+   [S1, S2]. Note that Source [S1] contains a precedence bug in `alpha = x - x0 / (x1 - x0)`, which evaluates to `x - (x0 / 1)` [S1]. The correct fractional part is `x - x0` [S1].
+
+6. **Corner Retrieval:**
+   Retrieve the 8 corner values:
+   $$
+   \begin{aligned}
+   v_{000} &= V(x_0, y_0, z_0) \\
+   v_{100} &= V(x_1, y_0, z_0) \\
+   v_{010} &= V(x_0, y_1, z_0) \\
+   v_{110} &= V(x_1, y_1, z_0) \\
+   v_{001} &= V(x_0, y_0, z_1) \\
+   v_{101} &= V(x_1, y_0, z_1) \\
+   v_{011} &= V(x_0, y_1, z_1) \\
+   v_{111} &= V(x_1, y_1, z_1)
+   \end{aligned}
+   $$
+   [S1, S2].
+
+7. **Weight Calculation:**
+   Compute:
+   $$
+   tmpX = 1 - \alpha, \quad tmpY = 1 - \beta, \quad tmpZ = 1 - \gamma
+   $$
+   [S1, S2]. Compute XY-plane weights:
+   $$
+   a_{000} = tmpX \cdot tmpY, \quad a_{100} = \alpha \cdot tmpY, \quad a_{010} = tmpX \cdot \beta, \quad a_{110} = \alpha \cdot \beta
+   $$
+   [S2].
+
+8. **Final Interpolation:**
+   Combine lower and upper Z corners:
+   $$
+   val = (a_{000}v_{000} + a_{010}v_{010} + a_{100}v_{100} + a_{110}v_{110}) \cdot tmpZ + (a_{000}v_{001} + a_{010}v_{011} + a_{100}v_{101} + a_{110}v_{111}) \cdot \gamma
+   $$
+   [S1, S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def trilinear_interpolation(volume, x, y, z):
+    # 1. Boundary Check
+    if x < 0 or y < 0 or z < 0 or x >= volume.shape[0] or y >= volume.shape[1] or z >= volume.shape[2]:
+        return 0.0
+
+    # 2. Floor and Ceiling Coordinates
+    x0 = int(np.floor(x))
+    y0 = int(np.floor(y))
+    z0 = int(np.floor(z))
+    x1 = x0 + 1
+    y1 = y0 + 1
+    z1 = z0 + 1
+
+    # 3. Fractional Differences
+    alpha = x - x0
+    beta = y - y0
+    gamma = z - z0
+    
+    tmpX = 1.0 - alpha
+    tmpY = 1.0 - beta
+    tmpZ = 1.0 - gamma
+
+    # 4. Retrieve Corner Values
+    v000 = volume[x0, y0, z0]
+    v100 = volume[x1, y0, z0]
+    v010 = volume[x0, y1, z0]
+    v110 = volume[x1, y1, z0]
+    v001 = volume[x0, y0, z1]
+    v101 = volume[x1, y0, z1]
+    v011 = volume[x0, y1, z1]
+    v111 = volume[x1, y1, z1]
+
+    # 5. Final Interpolation
+    val = (tmpX * tmpY * tmpZ * v000 +
+           alpha * tmpY * tmpZ * v100 +
+           tmpX * beta * tmpZ * v010 +
+           alpha * beta * tmpZ * v110 +
+           tmpX * tmpY * gamma * v001 +
+           alpha * tmpY * gamma * v101 +
+           tmpX * beta * gamma * v011 +
+           alpha * beta * gamma * v111)
+
+    return val
+```
+
+**Parameters:**
+- `volume`: The 3D grid data [S1, S2].
+- `x, y, z`: Query coordinates in voxel space [S1].
+- `origin`, `dx, dy, dz`: Optional grid origin and voxel spacings for world-to-voxel normalization [S2]. Default values are not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- **Boundary Conditions:** If the query point lies outside the grid bounds, the value is returned as 0 [S1].
+- **Precision:** Floating-point errors near integer boundaries are handled by using `np.floor` to compute integer coordinates [S1, S2].
+- **Operator Precedence:** Source [S1] contains a bug in `alpha = x - x0 / (x1 - x0)`, which evaluates to `x - (x0 / 1)` due to operator precedence [S1]. The correct fractional part is `x - x0` [S1].
+
+## Subtopics
+
+### [Trilinear Interpolation (Compressed/Linked)](2629-trilinear-interpolation-compressed-linked.md)
+This method performs trilinear interpolation on a sparse, compressed voxel grid by mapping logical voxel coordinates to a dense array of compressed values via a link array. It solves the problem of efficiently accessing non-contiguous data in sparse volume representations while maintaining the continuity of trilinear sampling. It differs from standard dense trilinear interpolation by introducing a lookup step that translates grid indices to compressed indices, and it differs from unstructured sparse interpolation by retaining the regular 8-corner neighborhood structure of the grid. It builds on [3D Trilinear Interpolation](2613-3d-trilinear-interpolation.md).
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per query point, involving a fixed number of arithmetic operations and 8 memory reads [S1, S2].
+- **Memory Complexity:** $O(1)$ auxiliary space per query, assuming the grid is already in memory [S1, S2].
+- **Measured Performance:** In JAX-accelerated implementations, batched trilinear interpolation is highly efficient using `vmap` and `jit` for parallel processing of sample points [S2].
+- **Strengths:** Provides smooth interpolation with simple implementation and low computational cost per sample [S1].
+- **Limitations:** Requires a dense memory layout, which can be inefficient for sparse volumes [S2].
+- **When to Use:** When smooth interpolation is required and the volume is dense or efficiently accessible [S1].
+
+## Background
+3D Trilinear Interpolation is a standard technique in computer graphics and scientific visualization for sampling dense grid data [G]. It is widely used in volume rendering, particularly in raycasting, to sample voxel values at sub-voxel precision [S1]. The method is fundamental to many volume rendering pipelines, including those using spherical harmonics for view-dependent effects [S2].
+
+## Sources
+[S1] faviasono/raycastingrendering, https://github.com/faviasono/raycastingrendering, fetched 2026-10-26 (unofficial)
+[S2] szat/Jax-Volumetric-Renderer, https://github.com/szat/Jax-Volumetric-Renderer, fetched 2026-10-27 (unofficial)

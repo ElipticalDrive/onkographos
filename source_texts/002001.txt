@@ -1,0 +1,673 @@
+Engine / Graphics Programmer
+
+Krzysztof Narkowicz | Engine / Graphics Programmer
+Krzysztof Narkowicz
+Engine / Graphics Programmer
+Skip to content
+Home
+Publications
+About
+← Older posts
+Journey to Lumen
+Posted on August 18, 2022 by Krzysztof Narkowicz
+Real-time GI has always been a holy grail of computer graphics. Over the years there were multiple approaches to this problem. Usually constraining problem domain by leveraging certain assumptions like static geometry, too coarse scene representation or tracing from coarse probes and interpolating lighting in between. When I started Lumen with Daniel Wright, our goal was to build a not nearly as compromised solution as anyone may have seen before, which would unify lighting and achieve quality similar to baked lighting.
+As with any novel system, we did a lot of exploration. Some of it was a dead end and we had to revise our approach and try something different. We tried to cover our journey in SIGGRAPH 2022 talk, but 90 minutes was barely enough to present how Lumen works now. This post will cover our discarded techniques and shed some light on our journey to the solutions presented during SIGGRAPH.
+Software Ray Tracing Representation
+When we started Lumen, hardware ray tracing was announced, but there were no GPUs supporting it, nor any concrete performance numbers. Current console generation was clearly coming to its end and next-gen consoles were just around the corner, but we had no idea how fast hardware ray tracing is going to be or if it’s even going to be supported on consoles. This forced us to first look for a practical software ray tracing approach, which later also proved to be a great tool for scaling down or supporting scenes with lots of overlapping instances, which isn’t well handled by a fixed two level BVH.
+Tracing in software opens a possibility to use a wild variety of tracing structures like triangles, distance fields, surfels or heightfields. We discarded triangles as it was clear that we won’t be able to beat a hardware solution at its own game. We briefly looked into surfels, but those require a quite high density to be able to represent geometry and updating or tracing so many surfels is quite expensive.
+Heightfields
+After initial exploration the most promising candidate was heightfield. Heightfields map well to hardware, provide compact surface representation and simple continuous LOD. They are also pretty fast to trace, as we can use all of the POM algorithms like min-max quadtrees. Multiple heightfields can represent complex geometry, similar to Rasterized Bounding Volume Hierarchies.
+It’s also interesting to think about them as an acceleration structure for surfels, where a single texel is one surfel constrained to a regular grid. This trades free placement for faster updates, tracing and lower memory overhead.
+Alongside the heightfield we also store other properties like albedo or lighting, which allow us to compute lighting at every hit. This entire decal-like projection with surface data is what we named cards in Lumen.
+Rasterized triangles
+Raymarched cards (heightfields)
+Cards also store opacity, which allows us to have holes in them – imagine something like a chain-link fence. With hardware bilinear interpolation every sample can potentially interpolate from a fully transparent texel with an invalid depth value. We didn’t want to do manual bilinear interpolation inside the inner loop of the ray marcher, so instead we dilated depth values during the card capture.
+Before and after card depth dilatation
+It would be too slow to raymarch every card in the scene for every ray. We needed some kind of an acceleration structure for cards. We settled on a 4-node BVH, which was built for an entire scene every frame on a CPU and uploaded to the GPU. Then inside the tracing shader we would do stack based traversal with node sorting on the fly in order to first traverse the closest ones.
+Heightfield BVH debug view
+Card Placement
+The tricky part is how to place heightfields in order to capture the entire mesh. One of the ideas was to make GPU based placement based on a global distance field. Every frame we would trace a small set of primary rays to find ray hits not covered by cards. Next for every uncovered hit we would walk the global distance field using surface gradients to figure out an optimal card orientation and extents in order to spawn a new card.
+Global distance field based card placement
+This is great for performance, as it allows you to spawn cards for an entire merged scene instead of having to spawn cards per mesh. Unfortunately it proved to be quite finicky in practice, as every time when the camera moved different results were generated.
+The next idea was to place cards per mesh as a mesh import step. We did this by building a BVH of geometry, where every node would be converted to N cards.
+Rasterized triangles
+Raymarched cards (heightfields)
+Card placement view
+This approach had issues with finding a good placement, as we found out that BVH nodes aren’t really a good proxy for where to place cards.
+The next idea was to follow the UV unwrapping techniques and try clustering surface elements. We also switched triangles to surfels, as this was a time where it was clear that we will need to handle millions of polygons made possible by Nanite. We also switched to a less constrained freely oriented cards to try to match surfaces better.
+Freely oriented card placement
+This worked great for simple shapes, but had issues with converging on more complex shapes, so in the end we switched back to axis-aligned cards, but this time generated from surfel clusters and per mesh.
+Cone Tracing
+The unique property of tracing heightfields is that we could do cone tracing. Cone tracing is great for reducing noise without any denoising, as a pre-filtered single cone trace represents thousands of individual rays. This means that we won’t need a strong denoiser and would avoid all issues caused by it like ghosting.
+Ray tracing
+Cone tracing
+For every card we stored a full pre-filtered mip-map chain with surface height, lighting and material properties. When tracing, the cone was selecting an appropriate mip level based on the cone footprint and ray-marching it. Cone doesn’t have to be fully occluded by a card, so we approximated partial cone occlusion using distance to card border and surface transparency.
+Tracing without and with card borders
+Cone tracing isn’t trivial, as every step we may have a partial surface hit, which should then accordingly occlude any future hits. This partial cone occlusion tracking gets more complicated with multiple heightfields, as heightfields aren’t depth sorted per ray and can’t be sorted in a general case, as they may intersect each other. This is basically another big and unsolved rendering problem – unordered transparency.
+Our solution was to accumulate occlusion assuming that no cards overlap, as we prefer to over-occlude instead of leaking. For the radiance accumulation we used Weighted Blended OIT. Interestingly while Weighted Blended OIT has a fair amount of leaking with primary rays due to large depth ranges, it worked pretty well for short GI rays.
+Weighted blended OIT with a narrow cone
+Weighted blended OIT with a wide cone
+Merged Scene Representation
+Having to trace lots of incoherent rays in software proved to be quite slow. Ideally we would raymarch a single global structure per ray, instead of multiple heightfields.
+We had an important realization that when cone footprint gets larger, we don’t really need a precise scene presentation and could switch to something more approximate and faster.
+A bit more complex scene with dozens of cards to trace per ray
+The first successful approach was to implement pure voxel cone tracing, where the entire scene was voxelized at runtime and we would ray march it just like in the classic ”Interactive Indirect Illumination Using Voxel Cone Tracing” paper.
+This is also where the concept of trace continuation in Lumen was born. We would first trace heightfields for a short distance and then switch to voxel cone tracing to continue the ray if necessary.
+Rasterized triangles
+Raymarched cards (heightfields)
+Voxel cone tracing
+Raymarched cards continued with voxel cone tracing
+The main drawback of voxel cone tracing is leaking due to aggressive merging of scene geometry, which is especially visible when tracing coarser (lower) mip-maps. Such merged representation is later interpolated both spatially between neighboring voxels and angulary between nearby voxel faces.
+First leaking reduction technique was to trace a global distance field and sample voxel volume only near the surface. During sampling we would accumulate opacity alongside radiance and stop tracing when opacity would reach 1. Always sampling voxel volume exactly near the geometry increased the chance of a cone stopping at a thin solid wall.
+The second technique was to voxelize mesh interiors. This greatly reduces leaking for thicker walls, but also causes some over occlusion, as now we are interpolating zero radiance voxel faces incorrectly reducing overall energy.
+Even with distance fields we would still see leaking in various places, so later we also were forcing cone tracing to terminate if we registered a distance field ray hit. This minimized leaking, but caused more over occlusion and somewhat contradicted the idea of tracing cones.
+Some other experiments included tracing sparse voxel bit bricks and voxels with transparency channel per face. Both of those experiments were designed to solve the issue of ray direction voxel interpolation, where an axis aligned solid wall would become transparent for rays which aren’t perpendicular to the wall.
+Voxel bit bricks were storing one bit per voxel in a 8x8x8 brick to indicate whether a given voxel is empty or not. Then we raymarched them using a two level DDA algorithm. Voxels with transparent faces were similar, but had only a single level DDA and were accumulating transparency along the ray. Both approaches turned out to be less effective at representing geometry than distance fields and were quite slow due to lack of good empty space skipping.
+Voxels with transparency
+Earliest approach to tracing a merged representation was cone tracing a global distance field and shading hits using global per scene cards. Specifically we were traversing a BVH to find which cards in the scene affect our hit point and then sampling every card’s appropriate mip level based on the cone footprint.
+Raymarched cards
+Raymarched global distance field with hit lighting from cards
+We discarded this approach as at that point we didn’t think about using this only for the far field trace representation and instead thought about it as a direct replacement for heightfield ray marching. Ironically this discarded approach was closest to the solution we finally arrived at two years later.
+Shipping First Demo
+At this point we could generate some quite nice results:
+Still, we had lots of issues with leaking and performance in this simple scene wasn’t ideal even on a good PC GPU:
+Radeon RX Vega 64 at 1080p
+3.86ms Radiosity
+2.26ms DirectLighting
+8.48ms Prefilter / Voxel injection
+5.50ms LightCardDiffuseGI
+5.46ms LightCardReflections
+Total 25.56ms
+This was the initial state when we started working on our first real world use case – “Lumen in the Land of Nanite” tech demo. We had to solve leaking, handle x100 more instances and ship all of this under 8ms on a PS5. This demo was truly a catalyst and a forcing-function for the Lumen 2.0.
+The first and biggest change was replacing heightfield tracing with distance field tracing. In order to shade the hit points we interpolate lighting at the hit point from the cards as distance fields have no vertex attributes and can’t evaluate materials. With this change, areas with missing coverage only result in lost energy, instead of leaking.
+In the same spirit voxel cone tracing was changed to global distance field ray tracing and shading hits from a merged card volume.
+We still used prefiltering by keeping a full mip-map hierarchy for cards and looking up appropriate mip based on the ray footprint, but later we noticed that it doesn’t really help to prefilter only some types of traces when other traces aren’t (like screen space). Additionally any kind of prefiltering, even only for the sky cubemap, was leading to more leaking as now potentially we were gathering invisible texels.
+Alongside this we also made lots of various optimizations and time-spliced different parts of Lumen through caching schemes. Notably without cone tracing we had to more aggressively denoise and cache traces, but that’s another long and complex story. Not only out of scope for this post, but also I’m likely not the one to write about it.
+Here’s our end result after shipping the first demo with Lumen being consistently below 8ms on PS5, including all shared data structure updates like the global distance field. Nowadays those numbers are even better, as we are close to 4ms in this demo and with many quality improvements.
+Epilogue
+That was quite a journey – from a variety of theoretical ideas and a bunch of prototypes to something shippable. We did a full rewrite of the entire Lumen and had lots of different ideas which didn’t pan out practice. Some things on the other hand were repurposed. Like initially we used cards as a tracing representation, but now it became a way to cache various computations on the mesh surfaces. Similar to software tracing, which started as our main tracing method betting on the idea of cone tracing, but ended up as a way to scale down and support complex heavy scenes with lots of overlapping instances.
+You can also learn more about where we arrived at with Lumen from the SIGGRAPH Advances talks:
+* “Radiance Caching for Real-Time Global Illumination”
+* “Lumen: Real-time Global Illumination in Unreal Engine 5”
+Posted in Uncategorized
+|
+Tagged Global Illumination, Graphics, Lighting
+|
+9 Comments
+Comparing Microfacet Multiple Scattering with Real-Life Measurements
+Posted on August 11, 2019 by Krzysztof Narkowicz
+Microfacet multiple scattering approximations change content authoring – both for good (energy conservation) and for not so good (saturation changes with roughness). I was curious how current microfacet multiple scattering techniques compare against a measured real-life reference. After all, real-life surfaces aren’t perfectly isotropic, they have small scratches causing diffraction which can’t be modeled by geometrical optics etc. So maybe color saturation changes shouldn’t be there?
+Unfortunately there isn’t much data for measurements of the same materials with varying roughness. According to Wenzel Jakob they have some differently machined metals in queue for scanning and will include them in they awesome RGL material database, but for now I could only find data in studies made for the material manufacturing industry.
+Let’s start with the state of the art approximation of microfacet multiple scattering from [Turquin]. We can see that with increasing roughness it conserves energy and color becomes more saturated:
+And here’s a photo of differently machined aluminium alloy from [Li 2018] which nicely fits multiple scattering energy conservation approach:
+Surface roughness increases with increased feed rate
+[Yonehara 2004] has some more detailed measurements of surface properties. Interestingly with increasing roughness color in real measurements is getting a bluish tint instead of simply gaining saturation as in microfacet multiple scattering models.
+“In all specimens, as the Ra became smaller, a tendency was seen that the reflectance in the measured wavelength region became lower. In particular, the drop in reflectance in the long wavelength side was significant in comparison with that of the short wavelength side. (…) In other ways, for the case where the roughness plane is the same, in comparison with the short wavelength side, the light of the long wavelength side causes specular reflection more easily”
+References
+[Turquin] – “Practical multiple scattering compensation for microfacet models”
+[Li 2018] – “Al6061 Surface roughness and optical reflectance when machined by single point diamond turning at a low feed rate”
+[Yonehara 2004] – “Experimental Relationships between Surface Roughness, Glossiness and Color of Chromatic Colored Metal”
+Tagged Graphics, PBR
+|
+2 Comments
+Biome Painter: Populating Massive Worlds
+Posted on August 11, 2019 by Krzysztof Narkowicz
+There is a steady rise of popularity of open-world games and their domination of the bestseller list. Every new game raises the bar for the world size and complexity. Just looking at recent open world game trailers reveals their aim for a sense of a huge scale.
+Building those worlds raises a big question – how to efficiently populate those massive worlds? Certainly, we don’t want to place every tree manually, especially if we are a smaller team. After all, game development is about making smart trade-offs.
+When we look at a typical open world game, we can clearly see Pareto’s principle at work – 20% of content is the player’s main path and 80% is background. The player’s main path needs to have excellent quality and be strongly art directed, as players will spend most of their time there. Background, like massive forests or desert areas around main cities, doesn’t require such attention to detail. This 80% makes a great target for better placement tools, which trade quality and art direction, for the speed and simplicity of content creation.
+After we had shipped our latest game “Shadow Warrior 2”, we had a chance to try some new ideas, while our design team was busy doing preproduction for a new game. We decided to spend that time building a prototype of a better placement tool, working closely with our level artists. Big thanks for my (former) employer Flying Wild Hog, for allowing to write about it so early and to everyone who was involved in the making of this prototype.
+How to transform this heightmap on the top into this forest on the bottom?
+Anyway, we knew how to generate a basic heightmap inside World Machine. The question was how to quickly transform that heightmap into some nice scenery, without killing the level artist team in the process.
+Solution Survey
+There are several ways to approach this challenge. Possible solutions include procedural placement, physics based placement, and painted color maps based placement.
+Procedural placement generates content based on a set of predefined rules and a provided random seed. Those can be further divided into methods trying to simulate physics process (teleological) and methods trying just to simulate the end result (ontogenetic). Examples of teleological methods include forest generation based on a simulation of water accumulation and sun distribution in Witcher 3. Another example is UE4 procedural foliage tool which simulates growth of consecutive generations of foliage. Examples of ontogenetic methods include procedural generation based on Houdini, where technical artists write custom rules themselves, like in Ghost Recon Wildlands.
+Physics based solutions are an interesting way of placing objects. They are based on physics simulation where you e.g. drop some objects from some height and let them scatter around the level. This is for example implemented inside Object Placement Tool for Unity.
+Color map based placement is based on manually painted colormaps, which are later converted to assets based on some set of rules. A recent example of such an approach are tools from Horizon Zero Dawn, which were a big inspiration for us.
+Starting Point
+As a rather small studio with limited resources, we were always looking for ways to speed up work – including better entity placement tools.
+Out first placing tool was based on physics and was done for our first game: Hard Reset (2011). The game featured dark cyberpunk cities, so we made a tool for fast placement of different kinds of “rubbish”. You could just place a bunch of objects in the air and enable physics simulation. After everything fell on the ground and stopped moving, if you liked the end results you could just press save. It was a pure joy to use that tool, but in the end, it saw quite limited use. It was hard to control the outcome and having to repeat simulation was often slower than manual placement, so in the end we decided to drop this idea.
+We evaluated procedural based solutions, but it never caught on. Mostly due to the level artist team, which didn’t have much experience using Houdini or similar packages.
+In the second game: Shadow Warrior (2013), we had some outdoor areas with different types of foliage, so we made a painting based placement tool. Our level workflow was then based on creating base level meshes in 3ds Max. Level artists vertex painted those level meshes and during level import this vertex painting was converted into a set of spawn points.
+Painted level mesh from Shadow Warrior – vertex color stored density of grass and debris
+Inside our game editor, level artists could select some area and setup a type of entity to be spawned there with a specific density and properties (e.g. align to mesh or color variation). Finally, at runtime we spawned those entities according to artist rules and runtime settings (e.g. LOD settings). This tool was well received by the level artist team and they were often asking if we could expand its functionality further.
+Requirements
+We started with writing down features which we expected from a new system:
+Quick prototyping. We want to quickly prototype worlds based on some high-level input from level artists, so they can roughly specify the overall look of the world in a fast manner. Level artist need to at least be able to specify, which areas are a forest, which a desert etc. E.g. draw a 2D world map and then convert that to an in-game world. It is crucial to quickly have some world prototype up and running inside game, so the entire game team can start their work.
+Simple and safe iterations. We need a way to do safe last-minute tweaks, which won’t rebuild the entire world and which won’t require to lock the area (convert placement tool data to manually placed entities). Locking the area allows arbitrary entity placement changes, but also destroys the entire idea behind a placement tool, as after a lock there is no way to tweak placement rules without destroying manual changes in the process. E.g. decreasing a parameter like tree density needs to remove a few tree instances and not to rebuild entire forest from scratch.
+Incremental. For smaller teams it’s important to able to incrementally add new assets. We can’t just plan in the first year of development, make assets in the second year, place them in the third year and ship the game. We need to able to work on the assets during the entire production and have some painless way to add them into existing world. For example, we need a simple way to replace one tree type with two tree types without changing their placements.
+Seamless integration with manually placed content. Obviously, we need some way to place a military base inside a generated forest or manually place a road that goes through that forest, without having to worry about generated trees sticking out of the placed building or roads.
+We were ready to trade some quality and manual control for the ability to place content more efficiently.
+Biome Painter
+While looking at how our level artists were using our previous painting tool, we noticed them doing duplicate work. For example, they first place some grass entities and later paint terrain under that grass with a matching grass texture. We decided to generate both terrain texturing and entity placement from the same system. It not only speeds up work, but also creates a coherent world, where all assets are placed on matching terrain textures.
+We wanted to be able to reuse biome color maps in order to speed up prototyping. To solve that we based our system on two color maps: biome type (e.g. forest, desert, water etc.) and weight (lushness) and introduced some rules regarding how to paint the weight map: low values should mean almost clear terrain and high values mean lush vegetation or a lot of obstacles.
+In our previous painting tool, we often had to revisit and repaint old areas, when a new batch of prefabs was completed. In order to simplify iterations we decided to build a system with more complex rules – namely a list of spawn rules which are evaluated in order of importance – from the most important one to the least important. This enables painless addition of a new prefab into an existing area.
+Additionally, in order to be able to iterate, we need to keep the impact of rule changes to a minimum. To solve that we base everything on pre-calculated spawn points and pre-calculated random numbers. For example, tree spawn points need to be fixed, so when you tweak their placement density, new instances appear, but most of the forest stays intact.
+Finally, after some initial tests we decided that after all we need some procedural generation in order to break some repetitive patterns. We solve that by placing very low density (low chance to spawn) special objects – e.g. a fallen tree inside forest.
+Biome Rules
+Now when we have a biome type map and weight map, we need some rules describing how to convert those maps into entities and terrain textures.
+Texture rules are quite simple:
+Biome weight range with custom falloff
+Terrain height range with custom falloff
+Terrain slope range with custom falloff
+Density
+Every rule has a specific terrain texture assigned to it and we apply those rules bottom-up. First, we fill entire biome with the base texture. Then we evaluate consecutive rules and place assigned texture if conditions are met, effectively replacing the previous one at that location.
+Entity placement rules are a bit more complex:
+All of the above texture rules
+Align to ground or to world up axis – e.g. trees are aligned to world up axis (as they usually grow up), but stones are aligned to the terrain
+Random angle offset off the align axis – allows to break uniformity of e.g. bamboo trees
+Random rotation around align axis
+Random scale range
+Offset along align axis
+Footprint (entity collision radius)
+Just like in the case of texture rules, every entity rule has a specific prefab assigned to it. Entity rules are applied top-down. First, we spawn large entities like rocks or trees, next if it’s possible we spawn bushes, grass etc. Additionally, every entity also checks collisions between itself and already placed elements.
+With those rules we can build an example biome, like this one for forest:
+Example of a weight assignment for a forest biome
+Other possible and interesting rules include distance to another entity. E.g. spawn smaller trees around large trees. We decided to skip it for now in order to minimize procedural generation as much as possible.
+Biome LOD
+This is where the entire system shines. Having all the entities in a form of color maps greatly improves LOD and streaming. We spawn entities at runtime, so from the standpoint of the streaming system it just needs to fetch 2 bytes per square meter instead of loading full entity placement data.
+For the graphics quality presets on the PC we just manipulate the density of smaller objects like debris or grass. For the world LOD we have complex spawn rules. We spawn everything near the player. After some distance we spawn only larger objects. Further away we spawn only largest objects and imposters. Finally, at some distance from the camera, we don’t spawn any objects at all. This doesn’t only help rendering, but also helps all CPU side calculations, as we don’t have to simulate or tick entities in the distance.
+Biome Integration
+We wanted to integrate our solution with manually placed entities and other tools. In case of spline based tools, like river or road tool, we can analytically calculate distance from that spline. Based on that distance we can automatically remove all biome painter entities from placed roads or rivers. Furthermore, we decrease the biome weight around such spline. This way if we place a road inside a forest, foliage lushness near the road will be lowered.
+Example how road tool automatically works with biomes
+A similar idea is applied to manually placed assets. Special biome blockers can be inserted into our prefabs. Biome blockers are simple shapes (e.g. spheres or convexes) which remove biome entities and decrease biome weight around them with some specified falloff. This not only helps to prevent trees from being spawned inside manually placed houses, but also allows buildings to be moved around freely without having to repaint color maps, as everything will adapt to the new building location without destroying painted biome data.
+Workflow
+Our workflow starts from the World Machine, where we generate the initial heightmap. In the next step, we iterate on rough biome color maps inside Substance Designer. We support automatic re-import of biome maps, so when the graphic artist hits save in Substance Designer, the new biome map is imported and changes can be instantly seen inside the game editor.
+This allows quick creation of a game world, filled with assets, terrain textures etc. Obviously, it doesn’t represent the final quality, but basically at that point we have our game up and running and the gameplay team can already start working on player speed, vehicle speed or combat.
+Finally, when we are happy with a coarse world version, we start to manually place assets and fine tune biome color maps using a set of brushes inside the game editor.
+Implementation
+Entity placing algorithm boils down to looping over pre-calculated spawn points, fetching world data at every point (e.g. terrain height, terrain slope…), computing density from spawn rules and comparing density against pre-calculated minimum spawn point density to decide if we should place entity at that point. By entities we mean here prefab instances, so we can spawn e.g. trees with triggers, sounds, special effects (e.g. fireflies) and terrain decals.
+Pre-computing a good set of spawn points is a surprisingly hard issue. We want to pre-calculate a pattern which has the following properties:
+Placement is as dense as possible
+Points keep specified minimal distance between themselves
+Nearby entities don’t align on a single line, as this would break the illusion of natural placement (you can read more about it in this excellent blog post series about grass placement in Witness)
+Above properties need to be maintained during density decrease (disabling a number of predefined spawn points according to a computed density)
+It needs to be seamlessly tileable to be able to cover a large world
+We tried generating a Poisson disk like set of points, with an additional constraint that nearby points can’t align on a single line. We finally settled on a regular grid distorted with a set of sin and cos functions. We also assign a weight to every point, which is simply a dithering algorithm, so we can maintain above properties, when some points are removed due to decreased spawn density.
+When spawning entities on a terrain, it’s important not to use an original terrain heightmap, but to use the one which includes manually inserted custom terrain meshes. Thankfully, we had this data around, as we raytrace that combined heightmap in order to draw long range terrain shadows.
+In order to handle collisions between entities we have a 2D collision bitmap and before entity placement we rasterize entity shape into it.
+Entity placement looks like a good fit for a compute shader running on the GPU, but actually when we started to implement more complex rules like collisions between entities of a different footprint, it started to be very messy. In the end we decided to just spawn entities using a CPU job. This job fetches a new 64m x 64m tile, spawns entities and when it finishes, we fire up another job with a different tile.
+On the other hand, terrain texture spawning works great on the GPU, as every texel can be evaluated in parallel without any dependencies. We just run one shader per terrain clipmap level in order to create a texture map for it. The only downside is, that in order to handle collision response (bullets, footsteps etc.) we need to have that data also in main memory on CPU side. To do that we need to copy mentioned texture maps from GPU memory to main memory.
+Conclusion
+Who knows what the future will bring, but Metaverse often pops out in interviews with industry visionaries (like this interview with Tim Sweeney). I have no idea how this Metaverse will look like, but certainly it will require smarter tools to be able to build and place massive amounts of content and I believe one day such tools will become standard in level artists’ toolbox.
+Posted in Uncategorized
+|
+Tagged Graphics, Tools
+|
+2 Comments
+Cloth Shading
+Posted on January 4, 2018 by Krzysztof Narkowicz
+Over the holiday break I had some time to play with interesting ideas presented during the last SIGGRAPH. One thing which caught my attention was new analytical cloth BRDF from Sony Pictures Imageworks [EK17], which they use in movie production.
+AshikhminD
+Current state of the art of cloth shading in games still seems to be Ashikhmin velvet BRDF [AS07], which was popularized in games by Ready at Dawn [NP13]. It basically boils down to skipping geometry term, replacing traditional microfacet BRDF denominator by a smoother version and using an inverted Gaussian for the distribution term:
+Full shader code (microfacet BRDF denominator and geometry term is included in V term):
+```
+float AshikhminD(float roughness, float ndoth)
+{
+float m2    = roughness * roughness;
+float cos2h = ndoth * ndoth;
+float sin2h = 1. - cos2h;
+float sin4h = sin2h * sin2h;
+return (sin4h + 4. * exp(-cos2h / (sin2h * m2))) / (PI * (1. + 4. * m2) * sin4h);
+}
+
+float AshikhminV(float ndotv, float ndotl)
+{
+return 1. / (4. * (ndotl + ndotv - ndotl * ndotv));
+}
+
+vec3 specular = lightColor * f * d * v * PI * ndotl;
+```
+CharlieD
+Imageworks’ presentation proposes a new cloth distribution term, which they call “Charlie” sheen:
+This term has more intuitive behavior with changing roughness and solves the issue of harsh transitions (near ndotl = 1) of Ashikhnim velvet BRDF:
+Left: Ashikhmin Right: Charlie
+Although Charlie distribution term is simpler than Ashikhmin’s, Imageworks’ approximation for the physically based height correlated Smith geometry term is quite heavy for real-time rendering. Nevertheless, we can just use CharlieD and follow the same process as in [AS07] for the geometry term and BRDF denominator:
+```
+float CharlieD(float roughness, float ndoth)
+{
+float invR = 1. / roughness;
+float cos2h = ndoth * ndoth;
+float sin2h = 1. - cos2h;
+return (2. + invR) * pow(sin2h, invR * .5) / (2. * PI);
+}
+
+float AshikhminV(float ndotv, float ndotl)
+{
+return 1. / (4. * (ndotl + ndotv - ndotl * ndotv));
+}
+
+vec3 specular = lightColor * f * d * v * PI * ndotl;
+```
+This results in a bit better looking, more intuitive to tweak and faster replacement of standard Ashikhmin velvet BRDF. See this Shadertoy for an interactive sample with full source code.
+References
+[NP13] David Neubelt, Matt Pettineo – “Crafting a Next-Gen Material Pipeline for The Order: 1886”, SIGGRAPH 2013
+[AS07] Michael Ashikhmin, Simon Premoze – “Distribution-based BRDFs”, 2007
+[EK17] Alejandro Conty Estevez, Christopher Kulla – “Production Friendly Microfacet Sheen BRDF”, SIGGRAPH 2017
+Posted in Uncategorized
+|
+Tagged Graphics, PBR
+|
+9 Comments
+Digital Dragons 2017
+Posted on May 28, 2017 by Krzysztof Narkowicz
+A few days ago I had a chance to attend and speak at Digital Dragons 2017 about rendering in Shadow Warrior 2. It was a total blast – very pro organized, had a honor to meet some incredible people and listen to some very inspiring talks. Anyway, if you are interested in the presentation (with notes), you can download it here – “Rendering of Shadow Warrior 2”.
+Posted in Uncategorized
+|
+Tagged Conference
+|
+7 Comments
+Job System and ParallelFor
+Posted on April 2, 2017 by Krzysztof Narkowicz
+Some time ago, while profiling our game, I noticed that we have a lot of thread locking and contention resulting from a single mutexed MPMC job queue processing a large amount of tiny jobs. It wasn’t possible to merge work into larger jobs, as it would result in bad scheduling. Obviously, the more fine grained work items there are, the better they schedule.
+There are two standard solutions: either make the global MPMC queue lock-free or use job stealing.
+Global lock-free MPMC queue is quite complex to implement and still has a lot of contention when processing a large amount of small jobs. Maciej Siniło has a great post about a lock-free MPMC implementations if you are looking for one.
+Job stealing replaces a single global MPMC queue with multiple lock-free local MPMC queues (one per a job thread). Jobs are pushed to multiple queues (static scheduling). Every job thread processes its own local queue and if there are no jobs left then it tries to steal a job from the end of a random queue (check out this post for an in-depth description). Job stealing has its own issues – it messes up the order of job processing or in other words it trades lower latency for a higher throughput. Moreover, if static scheduling fails (e.g. jobs have widely different lengths), then job stealing can degrade to a global MPMC queue with a lot of contention.
+Before going nuclear with a lock-free MPMC queue or before implementing job stealing it may be interesting to consider some alternatives. I learned to avoid complex generic solutions and instead to favor specialized, but simpler ones. Maybe the specialized solutions won’t be better in the end, but at least it will be easier for the future code maintainer to make some changes or rewrites.
+Going back to my profiling investigation, the interesting part was that almost all of those jobs were effectively doing a simple parallel for – spawning a lot of jobs of the same type in order to process the entire array of work items. For example: test visibility of 50k bounding boxes, simulate 100 particle emitters etc. This gave me the idea to abstract job system specifically for this case – a single function, array of elements to process in parallel and shared job configuration (dependencies, priorities, affinities etc.).
+The implementation is simple. First we need a ParallelForJob structure (just remember to add some padding to this structure in order to avoid false sharing).
+```
+struct ParallelForJob
+{
+uint pushNum;
+uint popNum;
+uint completedNum;
+
+uint elemBatchSize;
+uint nextArrayElem;
+uint arraySize;
+
+func* function;
+};
+```
+In order to add a new work item, we just push a single job to the global, protected by a mutex, MPMC queue. Contention isn’t an issue here, because the number of jobs going through this global queue is low.
+```
+uint reqBatchNum = ( arraySize + elemBatchSize - 1 ) / elemBatchSize;
+uint reqPushNum = ( reqBatchNum + JOB_THREAD_NUM - 1 ) / JOB_THREAD_NUM;
+uint pushNum = Min( reqPushNum, JOB_THREAD_NUM );
+
+ParallelForJob job;
+job.pushNum = pushNum;
+job.popNum = 0;
+job.completedNum = 0;
+job.elemBatchSize = elemBatchSize;
+job.nextArrayElem = 0;
+job.arraySize = arraySize;
+
+jobQueueMutex.lock();
+jobQueue.push( job );
+jobQueueMutex.unlock();
+
+jobThreadSemaphore.Release( pushNum );
+```
+After releasing the job thread semaphore, waked job threads pick the next ParallelForJob from the global queue.
+```
+jobThreadSemaphore.Wait();
+
+jobQueueMutex.lock();
+jobQueue.peek( job );
+if ( job.popNum.AtomicAdd( 1 ) + 1 == job.pushNum )
+{
+jobQueue.pop();
+}
+jobQueueMutex.unlock();
+```
+Next, job thread starts to process array elements of the picked job. Array elements make a fixed size queue without any producers, so a simple atomic increment is enough to safely pick the next batch of array elements from the multiple job threads in parallel.
+```
+while ( true )
+{
+uint fromElem = job.nextArrayElem.AtomicAdd( job.elemBatchSize );
+uint toElem = Min( fromElem + job.elemBatchSize, job.arraySize );
+for ( uint i = fromElem; i < toElem; ++i )
+{
+job.function( i );
+}
+
+if ( toElem >= job.arraySize )
+{
+break;
+}
+}
+```
+Finally, the last job thread runs an optional cleanup or dependency code.
+```
+if ( job.completedNum.AtomicAdd( 1 ) + 1 == job.pushNum )
+{
+OnJobFinished( job );
+}
+```
+Recently, I found out that Arseny Kapoulkine implemented something similar, but with an extra thread wait for the other threads to finish at the end of ParallelForJob processing loop. Still IMO it’s not a widely know approach and it’s worth sharing.
+The interesting part about ParallelForJob is that it allows to pause and resume a job without using fibers (just store current array index) and allows to easily cancel a job in flight (just override current array index). Furthermore, this abstraction can be also applied to the jobs themselves. Just replace an array of elements with an array of jobs (instead of an array elements you commit and process an array of jobs).
+Posted in Uncategorized
+|
+Tagged C++, Multithreading
+|
+2 Comments
+HDR Display – First Steps
+Posted on August 31, 2016 by Krzysztof Narkowicz
+Recently NVIDIA send us a nice HDR TV and we got a chance to checkout this new HDR display stuff in practice. It was a rather a fast implementation, as our game is shipping in less than 2 months from now. Regardless, results are good and it was definitely worth to identify issues and make preparations for full HDR display support. In future, we will be revisiting HDR display implementation, but first we need HDR monitors to become available (current HDR TVs are simply too big for a normal work), so we can think about using increased brightness and color gamut and in our art pipeline.
+Tone Mapping
+We want to output scRGB values (linear values, RGB primaries, 1.0 maps to 80 nits and ~12.5 maps to 1000 nits). Just like for the LDR display I just fitted ACES RRT+scRGB (1000 nits) to a simple analytical curve. Currently there is no HDR TV which supports more than 1000 nits, so there was no point in supporting anything else.
+```
+float3 ACESFilmRec2020( float3 x )
+{
+float a = 15.8f;
+float b = 2.12f;
+float c = 1.2f;
+float d = 5.92f;
+float e = 1.9f;
+return ( x * ( a * x + b ) ) / ( x * ( c * x + d ) + e );
+}
+```
+Just like in case of LDR curve, this curve is shifted a bit and in order to get a reference curve just multiply input x by 0.6. Curve isn’t precise at the end of the range, but it isn’t very important in practice:
+UI
+First issue with UI is that 1.0 in HDR render target maps to around 80 nits, which is looks too dark compared to the image on a LDR display. Solution was very simple – just multiply UI output by a magic constant :). Second issue with UI is that alpha blending with very bright pixels causes artifacts. In order to fix that we needed to draw UI to a separate render target and do a custom blend it with the rest of the scene in a separate pass.
+Color Grading
+Color grading was the only rendering pass, which used scene colors after tone mapping. Obviously, having two different curves (one for LDR display and one for the HDR display) breaks consistency of this pass. I looked through our color grading settings and managed to simplify it to a simple analytic system – shadow / highlight tint with some extra settings. Redoing color grading at this stage of the project was out of the question, so all old color grading settings were automatically fitted using least-squares. For the next project we plan grading in some different space with more bits and log like curve (ACEScc or Sony S-Log).
+Content
+Some things in our game look awesome in HDR display, but some don’t look so good. Most issues are caused by “artistic” lighting setups, which were carefully tuned for the LDR tone mapping curve. E.g. in some places sunlight is nicely “burned” in when viewed on LDR display, but on the HDR display looks washed out, as lighting isn’t bright enough. Unfortunately, this is something that can’t be fixed last minute and something to think about when we will be creating content for the next game.
+Summary
+Current HDR displays don’t have amazing brightness. 1000 nits (current HDR displays) vs 300 nits (current LDR displays) isn’t that big difference, as perceived brightness is square of luminance. On the other hand HDR displays add a lot of additional details – pixels which were grey, because of the tone mapping curve, now get a lot of color. Anyway, we are moving forwards here and there is no excuse not to support HDR displays.
+Digging Deeper
+“HDR Rendering in Lumberyard” – Hao Chen (Amazon Lumberyard)
+“Advanced Techniques and Optimization of HDR Color Pipelines” – Timothy Lottes (AMD)
+“DirectX 12 Advancements” (pdf, video) – Max McMullen (Microsoft)
+“UHD Color for Games” – Evan Hart (NVIDIA)
+“Preparing for Real HDR” – Evan Hart (NVIDIA)
+“Rendering a Game for HDR Display” – Evan Hart (NVIDIA)
+“Displaying HDR Nuts and Bolts” – Evan Hart (NVIDIA)
+“Implementing HDR in ‘Rise of the Tomb Raider’” – Jeroen Soethoudt (Nixxes), Jurjen Katsman (Nixxes) and Holger Gruen (NVIDIA)
+“Getting to know the new HDR” – Evan Hart (NVIDIA)
+Posted in Uncategorized
+|
+Tagged Graphics, Post Processing
+|
+3 Comments
+Automatic Exposure
+Posted on January 9, 2016 by Krzysztof Narkowicz
+In games automatic exposure or eye adaptation is an algorithm for simulating eye reaction to temporal changes in lighting conditions and for selecting optimal exposure for a given scene and lighting conditions. The main challenge here is that optimal settings are hard to define. Should we expose for sunlight, shadows or something in between? Should the image be normally exposed, underexposed or overexposed? This is main reason why some people dislike automatic exposure and prefer to set exposure manually.
+In photography exposure is something that’s carefully selected by a photographer during the shot or afterwards during photo processing and for many linear games with static lighting exposing manually is indeed a good solution. Even for some games with changing lighting conditions this can be done manually by placing virtual luminance meters and selecting one using manually placed triggers or exposure volumes (post process volumes).
+In some cases manual exposure won’t be enough; dynamic levels, big open worlds, a lot of lighting variation or simply when we can’t afford to spend time manually tweaking exposure volumes.
+Standard approach
+Automatic exposure in games is a pretty old concept. When HDR was introduced it was a must have feature for a HDR lighting pipeline. Standard approach to automatic exposure is to compute scene’s geometric mean of luminance (log2 average) and map it to some “key value”:
+Then we multiply all pixels by exposure, add tone mapping, color grading and gamma.
+This standard approach is still used in many games – even high profile titles like The Order 1886, but it also has many downsides and requires a lot of manual tweaking [NP15]. Lighting artists need to manually place multiple exposure volumes, which define optimal key value and min/max luminance values per region. Let’s see how we can improve over the standard approach.
+EV as luminance units
+Photographers usually work with EVs () for metering scene luminance. EVs provide approximately perceptually uniform log2 scale (one EV step doubles luminance) and are more intuitive to work with than raw luminance values [Ree14]. Additionally, instead of tweaking key value they tweak exposure compensation (EC), which is again represented in EV units. In order to be more artist friendly we should let them tweak all automatic exposure parameters in EV units instead of raw luminances, replace key value with constant 18% middle gray and add EC for manual exposure biasing:
+We could also take one step further and implement a physically based camera by parameterizing exposure equation using camera aperture, shutter time and ISO. It’s not important for this article and you can find all the required details in excellent course notes by Sébastien Lagarde and Charles de Rousiers [LR14].
+Center weighted metering
+Simple average metering is rarely used in real cameras. Usually the center of the screen is most important for the viewer and should be well exposed. We can take it into the account by metering in the small circle in the center of the image or by giving more influence to luminance values located in the center of the screen [Hen14]. Additionally we could also use a compute shader for computing averages [Pet11]. This is usually simpler and more efficient than repeated texture downsampling.
+Histogram
+Unfortunately, using either of the averages as described above has its issues. Small dark or bright spots (e.g. very bright specular reflections) can strongly influence the average. For example, if a player hides behind a dark tree, metering will result in very low average scene luminance and as a result will overexpose the entire image. Furthermore usually we don’t want to expose for some kind of average lighting condition. Instead we want to expose for the dominant one.
+A nice solution here is to use histogram, so we can adapt to some kind of median luminance instead of average. Valve used that approach for HL2: Episode One. They calculated one histogram bin per frame using occlusion queries and built the full histogram on the CPU side [Vla08]. Nowadays we can easily and efficiently build a histogram using a compute shader. More importantly with a compute shader a single texel can influence two nearby bins by some fractional amount. This allows us to cover the entire EV step with just a few log2 space bins. Using just 64 bins we can cover a large range of 16 steps and 128 bins are enough to cover entire range of real world exposures. We could also do a “sliding” histogram, just like we pre-expose the image (multiply shader outputs by adaptation from a previous frame, so we can store HDR data in R11G11B10Float buffers without any precision issues). By the way scene pre-exposure was also introduced by Valve in HL2: Episode One. This way they were able to have a full HDR pipeline using just LDR render targets.
+Finally after computing the histogram we skip a large percentage (50%-80%) of the darkest pixels, a smaller percentage (2%-20%) of the brightest pixels and calculate the average from the remaining ones. Metering this way stabilizes automatic exposure and helps to focus exposure on something important.
+Exposure compensation curve
+Exposure compensation (or key value) determines whether the exposed image will be relatively dark or bright. Imagine a dark room with closed shutters. After opening shutters, sunlight enters the room and lighting becomes at least a few EV steps brighter. We would expect the final image to also become brighter, but automatic exposure tries to maintain constant final image’s brightness and the image will look almost the same as before opening the shutters. As a rule, we want to have a darker image in low light conditions and a brighter image in high light conditions. This way viewer has a clue as to how bright the lighting is in the current scene. To account for this Krawczyk et al. [KMS05] empirically specified key values for several luminance conditions and fitted a simple curve:
+We can translate that to EV units and plot:
+This curve may be a bit too extreme for games, as high key results in a really bright image, but we can just roll our own function or even better – allow artists to tweak the exposure compensation curve directly and store it in a small lookup 1D texture.
+FX and translucents
+It’s impossible to balance the luminance of FX (particles, beams, trails…) for various times of a day while using real world enormous ranges of luminance values for lighting. FX artists want their effects to be well visible and have some glow in direct sunlight (~100000 LUX) and at the same time they shouldn’t be overblown in full moon lighting (~0.25 LUX).
+Trying to balance single FX brightness for different lighting conditions. Images from [Vai14]
+Similarly unlit debug meshes like transparent lines, planes and other editor meshes, should maintain constant brightness on screen despite varying exposure and scene lighting. Some debug meshes could be rendered after the HDR pipeline (after tone mapping), but most have to go through the HDR pipeline in order to get proper translucent sorting. This is important not only for translucent debug meshes, but also for all antialiased opaque debug meshes.
+This problem was solved in the game Infamous Second Son by applying manual exposure offset per time of a day [Vai14], but the developers weren’t happy with this solution, as it requires a lot of manual tweaking. A simpler and more robust solution is to negate exposure by dividing color by an estimated exposure. This estimated exposure can be our exposure from a previous frame, can be calculated from a virtual light meter placed at camera position, can be estimated from lightmap values at the center of the screen or can be estimated from light probes at camera position. In any case we usually don’t want to totally negate exposure, but we want to give the artists a slider which blends in log2 space between those two values. This way FX will be darker in low lighting and brighter in high lighting, while still being easily controlled by the artists.
+It makes no sense to adapt to a hacked luminance (pixels with a constant brightness on screen) and in some cases it can even introduce a feedback loop. Additionally, some FX like weapon muzzle flashes or explosions shouldn’t influence automatic exposure. As a rule, we want to adapt to something that’s constant on the screen like fire particles, but don’t want to adapt to temporary FX like muzzle flashes or explosions. Debug meshes also shouldn’t influence automatic exposure, so it’s possible to set up automatic exposure in editor or draw debug meshes without changing the final image’s brightness. We could try selectively picking what influences automatic exposure and what not, but it requires storing extra data per pass.
+A simple solution to both issues is to compute automatic exposure basing on scene luminance just after the main opaque pass. This way we can skip all translucents, emissive and debug meshes and they won’t influence automatic exposure. Additionally, this fixes feedback loop issues (at least if you don’t want to hack lights). The downside is that it won’t adapt to things like big emissive panels, but we can easily fix it by marking such surfaces in G-buffer or stencil buffer and adding emissive to automatic exposure input only for the marked surfaces.
+Adapting to illuminance
+Automatic exposure works with the final pixel luminance values and ignores the material reflectance (information about how dark materials are). For example, after automatic exposure a wall painted in white will just look just like a wall painted in black. We had this kind of issue in dark corridors, where part of them were covered in snow – either walls were too bright or snow was too dark.
+Naty Hoffman in his talk proposed to adapt to illuminance instead of final pixel luminance [Hof13]. This way material reflectance won’t influence automatic exposure – dark corridors will remain dark and snow will be pure white as expected. Additionally it will remove specular from automatic exposure input and further stabilize the automatic exposure.
+Most deferred engines have either a separate illuminance (diffuse lighting) buffer or some form of lighting buffer with additional information in alpha channel, which allows to approximately reconstruct plain illuminance. Usually this is motivated by very popular SSSSS algorithm (screen space subsurface scattering) which requires a separate illuminance buffer [JZJ*15].
+Having the illuminance, we just need to add skybox and (lit) fog to create the final buffer for automatic exposure calculation. It’s not obvious how to treat skybox. One constant color per skybox? Convert it to illuminance? Just sample skybox texture (luminance)? We settled on luminance, as we want exposure to change depending on camera direction (bright white clouds near sun should have different exposure than darker parts of the skybox at the opposite side). In any case we additionally need a manual exposure compensation for the skybox, so lighting artists are able to manually set the optimal skybox brightness on screen, as the nighttime skybox should be much darker on screen than a daytime one.
+Temporal adaptation
+Eye reaction to temporal changes in lighting conditions is usually simulated by blending exposures from many frames using the exponential decay function:
+In reality, the time of adaptation differs depending on whether we adapt to light or to darkness and on lighting conditions as cones and rods have different adaptation speeds.
+Image from UofC Psyc 369 course
+Furthermore rod and cones have different characterics and different light sensitivities. For example, when adapting to dark, colored surfaces appear colorless after the rod-cone break. Full light adaptation takes around 5 minutes and full dark adaptation is around 20-30 minutes [Wika]. This lengthy times are the reason why pilots and (possibly) pirates used eye patches [Wikb]. This way they were able to remove the eye patch and instantly see clearly in the dark without having to wait 20 minutes.
+For games these are unreasonably long time frames and exact temporal adaptation details aren’t important. Maybe in titles like Metal Gear Solid it would be interesting to use an eye patch for instant dark adaptation or speedup dark adaptation by eating rich in vitamin A foods (e.g. carrot or fish). For most games interesting takeaway here is to differentiate speeds of light adaptation and dark adaptation.
+What’s next?
+What are other possible ideas we could try? One very appealing idea is to adapt to a single dominant lighting condition. Possible implementation would be to bucket lights by tags, pick the most popular bin and use it for automatic exposure.
+We could also build a RGB histogram and use it for automatic chrominance adaptation which allows the human visual system to adapt to lighting of a particular color (in photography it’s called automatic white balance [Wro15]).
+Many cameras feature a multi-zone metering modes for tracking moving subjects – usually for sports photography. The idea here is to track a moving subject and try to expose based on its luminance. In games we have more information and we could extend this approach. We could expose based on important objects in a scene like enemies, player in third person view or predefined objects.
+Using automatic exposure more complex operations are possible than with manual exposure. For example, we could expose different parts of the image differently based on Ansel Adam’s Zone System [YS12]. This approach could simulate real movie lighting pipeline or advanced photo processing, where often HDR lighting is compressed using various tricks like placing additional lights in the dark interiors or placing neutral density gels on the windows. This would fix gameplay issues caused by too wide range of luminance values. For example, when a player being indoors can’t see enemies outside in sunlight, because that part of image is overexposed.
+Finally I’d like to thank Bartłomiej Wroński for an interesting discussion about automatic exposure.
+References
+[NP15] David Neubelt, Matt Pettineo – “Advanced Lighting R&D at Ready At Dawn Studios”, SIGGRAPH 2015
+[Ree14] Nathan Reed – “Artist-Friendly HDR With Exposure Values”, 2014
+[LR14] Sébastien Lagarde, Charles de Rousiers – “Moving Frostbite to Physically Based Rendering 2.0”, SIGGRAPH 2014
+[Hen14] Padraic Hennessy – “Implementing a Physically Based Camera: Automatic Exposure”, 2014
+[Pet11] Matt Pettineo – “Average Luminance Calculation Using A Compute Shader”, 2011
+[Vla08] Alex Vlachos – “Post Processing in The Orange Box”, GDC2008
+[KMS05] Grzegorz Krawczyk, Karol Myszkowski, Hans-Peter Seidel – “Perceptual Effects in Real-time Tone Mapping”, SCCG 2005
+[Vai14] Matt Vainio, “The Visual Effects of Infamous: Second Son”, GDC 2014
+[Hof13] Naty Hoffman – “Outside the Echo Chamber: Learning from Other Disciplines”, i3D 2013
+[JZJ*15] Jorge Jimenez, Károly Zsolnai, Adrian Jarabo, Christian Freude, Thomas Auzinger, Xian-Chun Wu, Javier von der Pahlen, Michael Wimmer and Diego Gutierrez – “Separable Subsurface Scattering”, CGF 2015
+[Wika] Wikipedia – “Adaptation (eye)”
+[Wikb] Wikipedia – “Eyepatch – Use for adaptation to dark”
+[Wro15] Bartłomiej Wroński – “White balance and physically based rendering pipelines”, 2015
+[YS12] Lu Yuan, Jian Sun – “Automatic Exposure Correction of Consumer Photographs“, ECCV 2012
+Posted in Uncategorized
+|
+Tagged Graphics, Post Processing
+|
+6 Comments
+ACES Filmic Tone Mapping Curve
+Posted on January 6, 2016 by Krzysztof Narkowicz
+Careful mapping of HDR values to LDR is an important part of a modern game rendering pipeline. One of the goals of our new renderer was to replace Reinhard‘s tone mapping curve with some kind of a filmic tone mapping curve. We tried one from Ucharted 2 and tried rolling our own, but weren’t happy with either of this solutions. Finally, we settled on the one from ACES, which is currently a default tone mapping curve in Unreal Engine 4.
+ACES color encoding system was designed for seamless working with color images regardless of input or output color space. It also features a carefully crafted filmic curve for displaying HDR images on LDR output devices. Full ACES integration is a bit of overkill for games, but we can just sample ODT( RRT( x ) ) transform and fit a simple curve to this data. We don’t even need to run any ACES code at all, as ACES provides reference images for all transforms. Although there is no linear RGB D65 ODT transform, but we can just use REC709 D65 and remove 2.4 gamma from it.
+Curve was manually fitted (max fit error: 0.0138) to be more precise in the blacks – after all we will be applying some kind gamma afterwards. Additionally, data was pre-exposed, so 1 on input maps to ~0.8 on output and resulting image’s brightness is more consistent with the one without any tone mapping curve at all. For the original ACES curve just multiply input (x) by 0.6.
+Fitted curve’s HLSL source code (free to use under public domain CC0 or MIT license):
+```
+float3 ACESFilm(float3 x)
+{
+float a = 2.51f;
+float b = 0.03f;
+float c = 2.43f;
+float d = 0.59f;
+float e = 0.14f;
+return saturate((x*(a*x+b))/(x*(c*x+d)+e));
+}
+```
+Fitted curve plotted against source data’s sample points:
+UPDATE: This is a very simple luminance only fit, which over saturates brights. This was actually something consistent with our art direction, but for a more realistic rendering you may want a more complex fit like this one from Stephen Hill.
+Posted in Uncategorized
+|
+Tagged Graphics, Post Processing
+|
+40 Comments
+Analytical DFG Term for IBL
+Posted on December 27, 2014 by Krzysztof Narkowicz
+Image-based lighting is an important part of a physically based rendering. Unfortunately straightforward IBL implementation for more complicated lighting models than Phong requires a huge lookup table and isn’t practical for real time. Current state of the art approach is split sum approximation [Kar13], which decomposes IBL integral into two terms: LD and DFG. LD is stored in standard cube map and DFG is stored in one global 2D LUT texture. This texture is usually 128×128 R16G16F, contains scale and bias for specular color and is indexed by roughness/gloss and ndotv. DFG LUT is quite regular and looks like it could be efficiently approximated by some kind of low order polynomial.
+My main motivation was to create a custom 3ds Max shader, so artists could see how their work will look in our engine. Of course 3ds Max supports custom textures, but it’s not very user friendly and error prone when artists need to assign some strange LUT texture. It’s better to hide such internal details. Furthermore it can be beneficial for performance, as you can replace memory lookup with ALU. Especially on bandwidth constrained platforms like mobile devices.
+Surface fitting
+There are many surface fitting tools, which given some data points and equation, automatically find best coefficients. It’s also possible to transform curve fitting problem into a nonlinear optimization problem and use tool designed for solving them. I prefer to work with Matlab, so of course I used Matlab’s cftool. It’s a separate application with GUI. You just enter an equation and it automatically fits functions, plots surface against data points and computes error metrics like SSE or RMSE. Furthermore you can compare side by side with previous approximations. Popular Mathematica can also easily fit surfaces (FindFit), but it requires more work, as you need to write some code for plotting and calculating error metrics.
+Usually curve fitting is used for smoothing data, so most literature and tools focus on linear functions like polynomial and Gaussian curves. For real-time rendering polynomial curves are most cost efficient on modern scalar architectures like GCN. Polynomial curves avoid costly transcendentals (exp2, log2 etc.), which are quarter rate on GCN. For extra quality add freebies like saturate or abs to constrain function output. In some specific cases it’s worth to add other full rate instructions like min, max or cndmask.
+Most fitting is done with non linear functions, where fitting tools often are stuck in a local solution. In order to find a global one you can either write a script which fits for different starting points and compares results or just try a few points by hand until plotted function will look good. For more complicated cases there are smarter tools for finding global minimum like Matlab’s MultiStart or GlobalSearch.
+Last thing is not only to try polynomial of some order, but also play with all it’s variables. Usually I first search for order of polynomial which properly approximates given data and then try to remove higher order variables and compare results. This step could be automatized to check all variable combinations. I never did it, as higher order are impractical for real time rendering, so there aren’t too many combinations.
+DFG LUT
+First I tried to generate LUT inside Matlab, but it was too slow compute, so I switched to C++ and loaded that LUT as CSV. Full C++ source for LUT generation is on Github. It uses popular GGX distribution, Smith geometry term and Schlick’s Fresnel approximation. Additionally I use roughness remap which results results in similar distribution to Blinn-Phong . This remap is also similar to , which was used by Crytek in Ryse [Sch14].
+```
+for ( unsigned y = 0; y < LUT_HEIGHT; ++y )
+{
+float const ndotv = ( y + 0.5f ) / LUT_WIDTH;
+
+for ( unsigned x = 0; x < LUT_WIDTH; ++x )
+{
+float const gloss = ( x + 0.5f ) / LUT_HEIGHT;
+float const roughness = powf( 1.0f - gloss, 4.0f );
+
+float const vx = sqrtf( 1.0f - ndotv * ndotv );
+float const vy = 0.0f;
+float const vz = ndotv;
+
+float scale = 0.0f;
+float bias = 0.0f;
+
+for ( unsigned i = 0; i < sampleNum; ++i )
+{
+float const e1 = (float) i / sampleNum;
+float const e2 = (float) ( (double) ReverseBits( i ) / (double) 0x100000000LL );
+
+float const phi = 2.0f * MATH_PI * e1;
+float const cosPhi = cosf( phi );
+float const sinPhi = sinf( phi );
+float const cosTheta = sqrtf( ( 1.0f - e2 ) / ( 1.0f + ( roughness * roughness - 1.0f ) * e2 ) );
+float const sinTheta = sqrtf( 1.0f - cosTheta * cosTheta );
+
+float const hx = sinTheta * cosf( phi );
+float const hy = sinTheta * sinf( phi );
+float const hz = cosTheta;
+
+float const vdh = vx * hx + vy * hy + vz * hz;
+float const lx = 2.0f * vdh * hx - vx;
+float const ly = 2.0f * vdh * hy - vy;
+float const lz = 2.0f * vdh * hz - vz;
+
+float const ndotl = std::max( lz, 0.0f );
+float const ndoth = std::max( hz, 0.0f );
+float const vdoth = std::max( vdh, 0.0f );
+
+if ( ndotl > 0.0f )
+{
+float const gsmith = GSmith( roughness, ndotv, ndotl );
+float const ndotlVisPDF = ndotl * gsmith * ( 4.0f * vdoth / ndoth );
+float const fc = powf( 1.0f - vdoth, 5.0f );
+
+scale += ndotlVisPDF * ( 1.0f - fc );
+bias += ndotlVisPDF * fc;
+}
+
+scale /= sampleNum;
+bias /= sampleNum;
+}
+}
+}
+```
+Code above outputs texture like this:
+Approximation
+[Laz13] presented an analytical solution to DFG term. He used Blinn-Phong distribution, so first I fitted his approximation for GGX and my roughness remap. Instead of storing scale directly, delta is used (scale = delta – bias). It simplifies fitting as delta is a simpler surface than scale. Additionally to get a tighter fit I added saturate for bias and delta values.
+```
+float3 EnvDFGLazarov( float3 specularColor, float gloss, float ndotv )
+{
+float4 p0 = float4( 0.5745, 1.548, -0.02397, 1.301 );
+float4 p1 = float4( 0.5753, -0.2511, -0.02066, 0.4755 );
+
+float4 t = gloss * p0 + p1;
+
+float bias = saturate( t.x * min( t.y, exp2( -7.672 * ndotv ) ) + t.z );
+float delta = saturate( t.w );
+float scale = delta - bias;
+
+bias *= saturate( 50.0 * specularColor.y );
+return specularColor * scale + bias;
+}
+```
+Then I tried to find a better approximation. I focused on simple instructions in order to avoid transcendentals like exp, which are quarter rate on GCN. I tried many ideas for bias fitting – from simple polynomials to expensive Gaussians. Finally settled on two polynomials oriented to axes and combined with min. One depends only on x and second only on y. Fitting delta was easy – 2nd order polynomial with some additional term did the job.
+```
+float3 EnvDFGPolynomial( float3 specularColor, float gloss, float ndotv )
+{
+float x = gloss;
+float y = ndotv;
+
+float b1 = -0.1688;
+float b2 = 1.895;
+float b3 = 0.9903;
+float b4 = -4.853;
+float b5 = 8.404;
+float b6 = -5.069;
+float bias = saturate( min( b1 * x + b2 * x * x, b3 + b4 * y + b5 * y * y + b6 * y * y * y ) );
+
+float d0 = 0.6045;
+float d1 = 1.699;
+float d2 = -0.5228;
+float d3 = -3.603;
+float d4 = 1.404;
+float d5 = 0.1939;
+float d6 = 2.661;
+float delta = saturate( d0 + d1 * x + d2 * y + d3 * x * x + d4 * x * y + d5 * y * y + d6 * x * x * x );
+float scale = delta - bias;
+
+bias *= saturate( 50.0 * specularColor.y );
+return specularColor * scale + bias;
+}
+```
+Some screenshots comparing reference and two approximations:
+Instruction histograms on GCN architecture:
+Lazarov
+Polynomial fit
+v_exp_f32
+1
+v_mac_f32
+3
+3
+v_min_f32
+1
+1
+v_mov_b32
+4
+2
+v_mul_f32
+1
+5
+v_add_f32
+2
+v_madmk_f32
+4
+v_mad_f32
+2
+1
+v_subrev_f32
+1
+1
+total cycles:
+16
+19
+Conclusion
+To sum up I presented here a simple analytical function for DFG approximation. In practice it’s hard to distinguish this approximation from reference and it uses a moderate amount of ALU.
+References
+[Kar13] B. Karis – “Real Shading in Unreal Engine 4”, Siggraph 2013
+[Laz13] D. Lazarov – “Getting More Physical in Call of Duty: Black Ops II”, Siggraph 2013
+[Sch14] N. Schulz – “The Rendering Technology of Ryse”, GDC 2014
+Posted in Uncategorized
+|
+Tagged Graphics, Lighting, PBR, Shader
+|
+13 Comments
+← Older posts
+Recent Posts
+Journey to Lumen
+Comparing Microfacet Multiple Scattering with Real-Life Measurements
+Biome Painter: Populating Massive Worlds
+Cloth Shading
+Digital Dragons 2017
+Job System and ParallelFor
+HDR Display – First Steps
+Automatic Exposure
+ACES Filmic Tone Mapping Curve
+Analytical DFG Term for IBL
+C++
+CELL
+Conference
+Global Illumination
+Graphics
+Lighting
+Multithreading
+PBR
+Post Processing
+Shader
+Tools
+Follow me on Twitter
+My Tweets
+Krzysztof Narkowicz
+Create a free website or blog at WordPress.com.
+Krzysztof Narkowicz
+Blog at WordPress.com.
+Subscribe
+Subscribed
+Krzysztof Narkowicz
+Have a WordPress.com account? Log in now.
+Krzysztof Narkowicz
+View site in Reader
+Manage subscriptionsSign upLog in
+Report this content
+Collapse this bar
+Loading Comments...
+Create your own website, free on WordPress.com.Create your own website.
+Start free

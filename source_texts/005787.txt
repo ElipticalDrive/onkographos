@@ -1,0 +1,120 @@
+Hello, fellow vis enthusiasts! I’m Nate Morrical, a graduate student from
+the University of Utah, and a member of the scientific computing and imaging institute. Today, I’m excited to present our new method,
+“Quick Clusters,” which you can use to render and explore large unstructured meshes
+like these in real-time… With this new approach, you can do all of
+this: without long preprocessing times of prior
+methods with a lower technical complexity than prior
+methods And all on a single workstation graphics card But first, you might be wondering: “What
+are unstructured volumes in the first place?” Well, as our computational capabilities improve,
+many simulations are moving to memory-efficient formats that scale better to big data. And unstructured meshes are a very memory-efficient
+format because they use finite elements that can adapt in shape and size in order to increase
+resolution where it’s needed and to reduce resolution where it isn’t. By doing this, simulation codes can bring
+the memory consumption of these datasets down from petabytes of voxels to just a couple
+gigabytes of finite elements. So now the question becomes, “Can we visualize
+these datasets interactively now that they fit in memory?” Well, normally, I’d actually still say “No”
+And that’s because two main challenges still stand in our way. The first challenge is that we need an efficient
+way to sample our data on the GPU… Typically, we use trees to efficiently locate
+the finite element containing our query point. Newer methods make this process fast and easy
+by using ray tracing units in modern GPU architectures. These units handle all the tree traversal
+complexity for us, making tracing a ray about as easy as sampling a texture. Then the surrounding graphics API handles
+tree construction for us, so we don’t need to worry about that either. All we need to do is give our graphics API
+an array of bounding boxes containing our elements, as well as a point-in-element test
+for those elements. Unfortunately, although these hardware-accelerated
+trees are relatively memory efficient, they still consume a significant amount of memory
+for datasets this large. So although our dataset fits in GPU memory,
+the tree required to query this data does not. Our second challenge is that these datasets
+exhibit a “teapot in a stadium” problem. Normally, we use an algorithm called ray marching,
+which samples the data at even steps into our screen. But as you can see, the objects we’re interested
+in observing are very small relative to the simulation domain. Because ray marching travels a constant distance
+between samples, we must oversample large regions of space to adequately the small but
+important regions we’re interested in observing. This can result in tens of thousands of samples
+per pixel, preventing interactive visualization. So how can we solve these two challenges while
+keeping our technique simple and accessible? Well, it turns out that we can address all
+of these issues with a single data transformation: by sorting our finite elements along a Hilbert
+space-filling curve. This allows us to quickly cluster nearby elements
+in space by grouping neighboring elements in memory together. Elements 0-N would define the first cluster,
+N+1 to 2N would be the second cluster, and so on. This sort only needs to occur once at startup
+and can be done either on the CPU or in parallel on the GPU. If implemented on the GPU, this sort takes
+only two to three seconds on our largest dataset. In terms of cluster quality, these Hilbert
+clusters aren’t perfect, but they’re good enough for our purposes, and they’re easy
+and fast to compute even on very large datasets Once we have our elements sorted, we can cluster
+our elements together on the fly to address our two challenges. First, let’s use these clusters to reduce
+memory consumption. Starting with the acceleration structure,
+our trees currently consume a significant amount of memory because we separate every
+primitive into its own leaf. This results in a costly number of internal
+nodes near the leaves of the tree because trees grow exponentially with depth. But for exactly this same reason, if we assign
+multiple elements to the same leaf, we can significantly reduce the tree’s memory footprint. So rather than build our acceleration structure
+down to the individual element, we instead build our tree over small Hilbert clusters
+of elements. And for our purposes, we’ll call these clusters
+“leaf clusters”. For our datasets, we found that four elements
+per leaf cluster appears to be the “sweet spot”, where we’re able to significantly
+reduce tree memory consumption without compromising too much on performance. Next, we can use hilbert clusters to also
+reduce the memory footprint of our unstructured mesh. At the moment, the memory usage of our mesh
+is dominated by mesh indices, which are currently 32 bits each. Therefore, we again use our hilbert reordered
+elements to cluster elements into groups of 8000-10,000 elements each. We’ll call these clusters “instance clusters”,
+and it will become more clear why later. If one of these instance clusters reference
+fewer than 2^16 vertices, we use 16 bits per index. And if one of these instance clusters references
+fewer than 2^8 vertices, we use 8 bits per index. Finally, rather than building one tree over
+leaf clusters, we now build multiple trees, one tree per instance cluster. Each of these trees contain leaf clusters
+like before. But now, we also build an “instance acceleration
+structure”, where we combine all of these trees together. This reduces peak memory consumption during
+tree construction With this optimization, on average are able
+to cut the memory of our meshes in half. Finally, let’s talk about rendering performance. As we mentioned before, these unstructured
+meshes often contain very small features of interest relative to the domain of the data. We tend to make these features optically “dense”
+so we can see them, while the surrounding elements are made more transparent to prevent
+them from obstructing our view. Ray marching fails us, because it samples
+our data equidistantly, not accounting for optical density. But if a region is relatively transparent,
+our sampling rate should be low. And if a region is dense, our sampling rate
+should be high. So instead, we use a volume rendering technique
+called “Delta Tracking”. Delta tracking adaptively samples the volume
+using local neighborhood density estimates, otherwise known as “majorants”. All we need to make this algorithm work is
+to compute a set of non-overlapping majorants along our ray. Therefore, we again turn to our Hilbert reordered
+elements, grouping them together into “adaptive sampling” clusters. For each cluster, we compute the maximum scalar
+density value of all of the contained elements whenever the transfer function is edited. Then, when we go to render our data, we trace
+a ray through these adaptive sampling clusters, rasterizing the maximum density values into
+view-aligned bins stored along our ray. Alternatively, you can rasterize these adaptive
+sampling clusters into a regular grid of “macrocells”, and then use an algorithm called DDA to step
+from one cell to the next. Ok, now let’s go over some of the highlights
+of our evaluation… For all of these screen captures, we used
+an RTX 8000 and an Intel 12900K. For our implementation, we’re using OptiX
+7. With this hardware, we tested our method on
+four real-world datasets. From left to right, we have the TACC Japan
+Earthquake dataset, the Deep Open Impact dataset, the NASA Landing Gear, and then the NASA Mars
+Lander dataset. In terms of overall memory consumption, if
+we use 16 elements per leaf, we achieve compression factors between 1.5X to 3X. To obtain this compression, it takes 2.5 seconds
+to sort elements along a Hilbert curve, then about four minutes to compress the mesh indices
+for our 1 billion element mesh. We also studied how effective our leaf clusters
+are at reducing tree memory consumption, and how that affects performance. And in general, we see about a 2X drop in
+memory consumption as we double the number of elements in a leaf cluster. Each time we do this, we see about a 5%-8%
+hit to performance. These results are sensitive to how effective
+the adaptive sampling is though. With our landing gear example, the small features
+are still hard to adaptively sample, resulting in more point queries and a higher sensitivity
+to linear searches at the leaves. For that dataset, we take a 35% hit to performance
+every time we cluster a pair of elements together. Fortunately, we found our Hilbert clusters
+are relatively robust to varying cell sizes. If we generate uniform tetrahedra versus highly
+varying tetrahedra, we find that varying cell size does not significantly impact performance
+as we cluster more elements together. Finally, evaluate our improvements to rendering
+performance over traditional methods. The speedup we see by switching from ray marching
+to adaptive delta tracking is dramatic. On the mars lander dataset, with ray marching,
+we get less than one frame per second, without volumetric shadows. But with adaptive delta tracking, we get up
+to 16 frames per second with volumetric shadows. We see a similar jump in performance for all
+of our datasets So to summarize, right before startup, we
+first sort our elements along a Hilbert curve, which allows us to quickly cluster elements
+together. Then, we use small “leaf clusters” to
+reduce tree memory consumption, and larger “instance clusters” to compress mesh indices
+and reduce peak tree memory consumption. Finally, we use “adaptive sampling clusters”
+in combination with Delta Tracking to achieve interactive rendering performance. With this method, all data transformations
+can be done before runtime, even on very large datasets like the NASA mars lander. Still, we believe there could be room for
+further improvement. In terms of memory compression, we currently
+don’t consider compressing neighboring tetrahedra pairs, but this could be done to potentially
+remove three indices and compress the mesh even further. Another issue we ran into was with our GPU
+parallel sort. At least with NVIDIA’s CUB library, it’s
+not really possible to sort elements in-place, so we needed roughly twice the memory of the
+raw unstructured mesh to execute the sort. For smaller VRAM systems, this could be an
+issue. Therefore, it likely makes the most sense
+to still do these transformations once as a preprocess. Lastly, in terms of rendering, I believe it
+would be worth exploring a hierarchical DDA approach for datasets like the landing gear
+dataset, because normal DDA fails to accurately represent majorants in that dataset without
+consuming too much memory. It would also be interesting to see a denoiser
+used to clean up the noise from initial frames. That’s all I have for today, if you have
+additional questions, please feel free to checkout the paper, or shoot me an email! Thank you for listening!

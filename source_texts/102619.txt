@@ -1,0 +1,1356 @@
+SO-NeRF: Active View Planning for NeRF using Surrogate Objectives
+Keifer Lee1 , Shubham Gupta1 , Sunglyoung Kim1,2 , Bhargav Makwana1,2 ,
+Chao Chen1 , Chen Feng1, *
+1
+New York University 2 Denotes Equal Contribution
+arXiv:2312.03266v1 [cs.CV] 6 Dec 2023
+https://ai4ce.github.io/SO-NeRF
+PSNR: 28.8
+Ours (SO-NeRF)
+Time: 10m 13s
+(i) Surface Coverage, C
+(iv) Textural Complexity, T
+Score = 0.5
+SOARNet
+Baseline (ActiveNeRF)
+Time: 14h 10m
+PSNR: 27.6
+Score = 0.2
+(ii) Geometric Complexity, Q
+(iii) Ray Diversity, D
+(a) Computing SOAR Scores on
+Training Objects
+(b) Train SOARNet
+on SOAR Scores
+(c) Trajectory
+Planning
+(d) Radiance Fields
+Training
+Figure 1. Overview of SO-NeRF against a baseline, ActiveNeRF [33]. (a) Given any training mesh, we compute the individual surrogate
+objective scores C, Q, D and T, (b) train a model, SOARNet (c) for trajectory planning, without the need of prior visit of the candidate
+poses (unlike ActiveNeRF). (d) We can achieve comparable NeRF quality, but with a significant speed-up compared to the baseline.
+Abstract
+Despite the great success of Neural Radiance Fields
+(NeRF), its data-gathering process remains vague with only
+a general rule of thumb of “sampling as densely as possible”. The lack of understanding of what actually constitutes good views for NeRF makes it difficult to actively plan
+a sequence of views that yield the maximal reconstruction
+quality. We propose Surrogate Objectives for Active Radiance Fields (SOAR), which is a set of interpretable functions
+that evaluates the goodness of views using geometric and
+photometric visual cues - surface coverage, geometric complexity, textural complexity, and ray diversity. Moreover,
+by learning to infer the SOAR scores from a deep network,
+SOARNet, we are able to effectively select views in mere
+* The work is supported by NSF Awards 2238968 and 2322242. The
+corresponding author is Chen Feng cfeng@nyu.edu
+seconds instead of hours, without the need for prior visits to all the candidate views or training any radiance field
+during such planning. Our experiments show SOARNet outperforms the baselines with ∼80x speed-up while achieving better or comparable reconstruction qualities. We finally show that SOAR is model-agnostic, thus it generalizes
+across fully neural-implicit to fully explicit approaches.
+1. Introduction
+A key aspect of a practical and intelligent embodied agent
+is the ability to dynamically respond and plan appropriately
+to an ever-changing environment - dubbed active perception [2]. Of course, one presupposes the ability to construct
+a reliable representation of the environment as a prior, and
+a class of approach has been found to be particularly efficacious in recent years - neural implicit representations
+with Neural Radiance Fields (NeRF) [1, 29]. Its applications ranges from Virtual Reality [8, 26, 44] to Simultaneous Localization, Mapping (SLAM) [20, 38, 50].
+However, in contrast to their popularity, the prototypical process of constructing such representations remained
+vague with a general rule of thumb - capture as many images of the subject as densely and directionally varied as
+possible. The latter suggestion may be fine for one-off tasks
+or small subjects, but grows to be intractable when either of
+the aforementioned conditions are not satisfied; e.g. capturing images for thousands of products or trying to reconstruct
+the Santa Maria del Fiore in its entirety for large-scale exploration and neural topological mapping. In robotics context, a properly perceived representation is key to planning
+and navigation. Therefore, it is of interest to study more
+efficient ways of capturing the required images, and indeed
+this is known as the Next Best View (NBV) problem [34].
+There have been many proposed approaches to tackle
+the NBV problem in the classical Structure from Motion
+(SfM) setting [14, 16], and even in the recent neural implicit framework [5, 13, 19, 21, 33, 35, 45]. However,
+these methods so far suffer from some key problems from
+an application-viability perspective in one way or another.
+Probabilistic uncertainty estimation methods such as ActiveNeRF [33], NeurAR [35] and Bayes’ Rays [13] are either too slow or not straightforward to work with by requiring training of a NeRF model - effectively an in-flight or
+post hoc approach; they are also not interpretable as abstract probabilistic uncertainties does not correspond to actual physical qualities. On the other end of the spectrum,
+there are methods from classical SfM tasks such as SCONE
+[14] that utilizes intuitive concepts like surface coverage as
+a proxy objective to maximize for. However, these unidimensional methods are too simplistic, which may not generalize well across object classes with different structure.
+Therefore, in this work, we introduce SOAR to tackle the
+aforementioned problems of active perception for radiance
+fields models such as NeRF. Specifically, the main contributions of our work are as follows:
+1. We propose a set of surrogate objectives, SOAR to characterize informative samples for training radiance fields
+models. These functions correspond directly to physical
+qualities, rendering them intuitive and explainable.
+2. Unlike in-flight and post hoc methods, SOAR is prescriptive, not needing any radiance field model training
+at all. Therefore it is also radiance fields model-agnostic.
+3. We further devised a method to efficiently compute these
+objectives with a novel neural network, dubbed SOARNet, generating trajectories in seconds instead of hours.
+4. Finally, SOAR provides an alternative training-free approach to estimating the goodness of a radiance field
+model with respect to the input data. We will release
+our code and data for reproducibility.
+2. Related Work
+Novel View Synthesis is generating views of the given object or scene from previously unseen camera poses. This
+is a challenging task due to the high uncertainty of elements that were previously occluded from the field of view
+[27, 28, 46, 49]. While there are many approaches recently
+published [4, 22, 43, 47], we only explore Novel View Synthesis using radiance fields [11, 29] to stay within the scope
+of this paper. Note that the original NeRF [29] by Mildenhall et al. shall be referenced as Vanilla NeRF interchangeably henceforth to distinct the generic idea of neural radiance field modeling and the actual model itself.
+The original NeRF while impressive was not very computationally efficient as it encodes the object via a neural
+network (implicit representation). To further improve
+the run-time performance, there have been recent works
+alleviating the computation bottleneck [12], and these
+works can be categorized as baked (fully-implicit), hybrid,
+and fully-explicit representation methods [6, 10, 18, 30].
+Fridovich-Keil et al. [10] voxelize the scene and store the
+density and spherical harmonics coefficients as scalars and
+vectors per color channel respectively. As such, slow neural
+networks are not required, resulting in what’s known as a
+fully-explicit representation. Müller et al. [30] leveraged
+a multi-resolution hash table of feature vectors to lookup
+the pixel’s features, resulting in a massive speed-up. Since
+their approach leverages a neural network for volumetric
+rendering, such methods are classified as hybrid representation approaches. In the same class, Chen et al. [6]
+proposed a method with massive speed-up and saving in
+memory footprint compared to fully-explicit approaches by
+representing a scene as a 4D tensor and decomposing the
+tensor into multiple low-rank components.
+Next Best View planning is a highly relevant topic for
+robotic perception that deals with finding the best sensor positioning to maximize information gain. This also directly
+ties in with the idea of active perception [2, 3], where the
+observer moves around a scene with an intention to better
+capture salient information. Active perception has previously been employed for various tasks [31, 37, 41] but only
+recently for training radiance fields model [33].
+Guédon et al. [14] propose a hybrid method that predicts an occupancy grid so as to maximize the total surface
+coverage using a neural networks and Monte Carlo integration over a volumetric representation. Improving on that,
+[16] utilizes only camera inputs and is able learn in a selfsupervised fashion. Kopanas and Drettakis [24] introduced
+observation frequency and angular uniformity as metrics to
+improve convergence for free-viewpoint navigation. Dhami
+et al. [9] propose a two-stage process that predicts the complete point cloud using partial observations and selects for
+views that minimizes the distance traveled.
+cache
+Cn
+NeRF
+SOARNet
+Qn
+Qn+1
+Dn
+Dn+1
+Tn
+Tn+1
+enumerate
+0.2 0.7 0.4
+(a) Object
+(b) Pseudo-coverage
+Initialization
+(c) Trajectory Generation
+(d) Radiance Fields
+Training
+0.1
+Chosen Objective
+Trajectory
+Generator
+Cn+1
+(e) Trajectory Generation Details
+Figure 2. The overall pipeline of our proposed approach. (a) Given an object, (b) we initialize via pseudo-coverage initialization to obtain
+ˆ (c) We then generate a trajectory for sampling in a greedy manner by
+a set of starting poses M̂ and corresponding camera-poses C.
+computing the objective scores of all unseen camera-poses, cn+1 where C − is the set of all unseen camera-poses. (e) To compute said
+scores, we utilize our novel model, SOARNet for speedy inference, and we then simply pick the candidate with the highest score, cz as our
+next pose, ĉn+1 until we reach our budget, B for (d) radiance fields training.
+Uncertainty estimation in NeRF has recently received a
+lot of interest. Pan et al. [33] incorporates uncertainty
+estimation into the Vanilla NeRF training pipeline, which
+learns to estimate the uncertainty of candidate poses in parallel during training via Bayesian estimation. These candidates are then greedily selected post-training to maximize
+the estimated information gain. Lee et al. [25] proposes
+a ray-based uncertainty estimator by computing the entropy
+of the distribution of the color samples along each ray. Similarly, Shen et al. [39] presents a generalized NeRF model
+that can learn the probability distribution of all radiance
+fields representing a given scene for uncertainty estimation
+via Bayesian learning. Jin et al. [21] proposes a generic
+framework that learns to predict the uncertainty of each candidate poses, but without needing to train a radiance fields
+model. However, to compute the uncertainties, their method
+still requires the images taken from said candidate poses in
+the first place, which is a non-negligible limitation in realworld applications.
+Goli et al. [13] presents a post hoc framework to evaluate
+the uncertainty in any pretrained NeRF model. The framework produces a spatial uncertainty field by introducing perturbations along the learned camera rays and by utilizing
+Bayesian Laplace approximations. Ran et al. [35] proposes
+a proxy for the Peak Signal-to-Noise Ratio (PSNR) metric
+that is jointly trained with the parameters of an implicit radiance fields model to predict a new quantity, dubbed Neural
+Uncertainty for trajectory planning. Our approach, does not
+perform post-hoc uncertainty estimation, but preemptively
+evaluates unseen candidate poses via the SOAR scores.
+straint, that will maximize a reconstruction quality metric
+such as PSNR, Γ via a radiance fields model, Ω. Formally,
+Cˆ = arg max Γ(Ω(C, M))
+(1)
+In the following subsections, we outline the different parts
+of the pipeline. In 3.1, we formally define the objective
+functions of our approach from first principles. In 3.2, we
+introduce SOARNet which enables us to efficiently compute the objective scores. Lastly, in 3.3 we introduce the
+finalized framework by delineating a simple trajectory planning schema with SOARNet.
+3.1. Objective Functions Definitions
+We begin with a set of presuppositions on the qualities of a
+training set that would yield a NeRF with good reconstruction as measured via Γ. Fundamentally, we hypothesized
+from first principles that a good training set can be obtained
+by maximizing the surface coverage of the object, the
+attention paid to local regions with particular geometric or
+textural complexity, and the resulting multi-view diversity
+of observations. Succinctly, we refer to the aforementioned
+qualities as the (i) Surface Coverage, C (ii) Geometric
+Complexity, Q (iii) Textural Complexity, T (iv) and Ray
+Diversity, D respectively.
+Surface Coverage, C as defined is simply the ratio of seen
+faces, j via the image taken from the k-th camera-pose, ck ,
+against the total number of faces of the object or mesh, J.
+We can therefore define a corresponding objective function
+for C as follows, where fC ∈ R
+3. Methodology
+We begin by formulating the problem - given an object and a corresponding set of images of said object,
+M = {m1 , m2 , ..., mN }, taken from camera-poses, C =
+{c1 , c2 , ..., cN }, c ∈ R3x4 and a budget constraint, B ∈ N
+we want to select a subset of poses, subjected to the con-
+s.t. dim( ˆ
+C) = B
+c
+fC =
+J
+n
+1X X k
+U(
+Vj )
+J j
+(2)
+k
+where U(·) is the Heaviside step function, n is the total
+number of camera-poses visited, and Vjk is an indicator
+function corresponding to the visibility of face j from the
+k-th camera-pose. Given the mesh of an object, optimizing
+for Eq. (2) amounts to maximizing the number of unique
+faces seen across the camera-poses.
+Geometric Complexity, Q corresponds to the variability of
+the mesh faces’ configurations, and one way to quantify this
+complexity is via the mesh normals, n̂. For example, a geometrically complex mesh such as a cathedral, would have
+a higher degree of surface normal variability compared to
+a simple smooth ball due to the varied substructures comprising the cathedral - e.g. pillars, the dome. In the case of
+the cathedral, we would intuitively want to pay extra attention to the local regions that are complex by sampling more
+varied views of said regions.
+We formally define the objective function for Q as follows, where fQ ∈ R
+′
+= |LoG(n̂j ; σQ )| βQ Vjk + 1
+fQ
+(3)
+J
+fQ =
+X
+1
+f′
+2
+J(5σQ ) j Q
+(4)
+where LoG(·) is the Laplacian of Gaussian filter, σQ is
+the standard deviation of the Gaussian filter, βQ a scaling
+′
+factor, fQ
+is the per-face geometric complexity and fQ
+is the normalized total complexity. We take the absolute
+value of the output since the directionality of the normal
+variations does not matter. Maximization of Eq. 4 will
+encourage the selection of camera-poses with higher
+geometric complexity as defined above. In practice, a
+scaling discount factor, dQ is applied towards the Q values
+of overlapping faces seen during trajectory planning in
+order to control for over-emphasis on certain local regions
+with unusually high geometric complexity, trapping it in a
+local maxima.
+Textural Complexity, T corresponds to the photometric
+variation of images taken at camera-pose, ck of the object.
+This means that T is computed with respect to the 2D projections of the object instead of the underlying 3D mesh.
+We have chosen this simplified approach for T since unlike
+geometric complexities which may be hard to discern on 2D
+projections, textural characteristics are not. Similar to Geometric Complexity, Q we hypothesized that regions with
+high textural complexity should be paid extra attention. Formally, we define the corresponding objective function for T
+as follows, where fT ∈ R
+fT′ = Hist (LBP (mk ; rT , pT ))
+fT = 1 − fT′ [b]
+(5)
+(6)
+where Hist(·) is simply the histogram function, b the last
+bin’s index, LBP(·) is the Local Binary Pattern texture
+descriptor [32], rT and pT are the filter radius and the
+number of circularly symmetric local neighborhood points
+of the descriptor, and finally mk is the image taken at
+camera-pose, ck . Similar to fQ , in practice, we also impose
+a discount factor, dT towards the T values seen during
+trajectory planning to prevent overfitting, and we used rT
+of 3 and pT of 3. Finally, we compute the final score by
+averaging fT computed on the Hue and Saturation channels
+of the image respectively. Maximization of Eq. (6) is
+equivalent to selecting the image with the highest textural
+complexity.
+Ray Diversity, D as defined is the variation of the rays, i
+projected from various viewing poses observing a particular
+face, j of the object mesh. Intuitively, having highly varied
+novel views of the object faces would yield better reconstruction. The idea is closely related to densely sampling a
+set of training images from as many views as possible to improve multi-view correspondences. We went a step further
+here by exactly quantifying said idea with a formal definition of the objective function as follows
+
+
+in̂j
+180◦
+k
+− 90◦
+(7)
+arccos
+θij =
+π
+|i| |n̂j |
+k
+where θij
+is the augmented ray-surface grazing angle between ray i from camera-pose ck and face j with surface
+normal n̂j . However, as opposed to indiscriminately maximizing for view-angle variance, we impose a penalty towards any ray observing a face beyond a certain grazing angle via soft-thresholding. The intuition behind the penalty
+is derived from the observation that it becomes increasingly
+difficult to visually obtain useful information about a given
+object’s face as we approach the orthogonal angle of its surface normal. We perform said soft-thresholding by assigning each observing ray, i with an outlier score
+k
+ψij
+=1−
+α1
+k
+1 + e−θij +α2
+(8)
+k
+where ψij
+is the outlier score, and α1 and α2 are hyperparameters to control the grazing angle soft-threshold with
+values of 1 and −10 respectively. We then compute the total
+outlier ratio of face j as follows
+!
+n
+I
+1 X X k k
+ϕj =
+ψij Vij
+(9)
+Kj
+i
+k
+where
+Kj =
+n
+X I
+X
+k
+Vijk
+(10)
+i
+which simplifies Eq. (9)
+ k
+ϕj = E ψij
+(11)
+μ
+ResNet-18
+(Backbone)
+...
+Concat
+Pooling
+Cn
+Qn
+Dn
+Tn
+Current Step Prediction
+Concat
+G
+...
+O
+Positional
+Encoding
+Hitherto Poses
+Shared
+Weights
+Cn+1
+Concat
+Concat
+Qn+1
+Dn+1
+Tn+1
+Next Step Prediction
+Next Pose
+H
+Figure 3. Architecture of the SOARNet.
+Next, we compute the ray diversity, dj of face j as follows
+" I
+#
+I
+I
+X
+X
+1 X
+2
+2
+2
+δj = 3
+(xi − x̄i )
+(yi − ȳi )
+(zi − z̄i )
+I
+i
+i
+i
+(12)
+where x, y, z are the corresponding principal axis values of
+each observing ray i. This is akin to multiplying the variances of each individual principal axis of the observing rays.
+δj = σx2 σy2 σz2
+(13)
+Finally, the normalized effective Ray Diversity objective
+function is as follows, where fD ∈ R
+J
+fD =
+1X
+δ j ϕj
+J j
+(14)
+Note that for all the objective functions of fC , fQ , fD , and
+fT , their values are further smoothened and clipped with the
+following smoothing function, ξ : R 7→ [0, 1] with α3 of 3.
+! !
+1
+
+, 1 , 0
+ξ(x) = max min
+1 + e(−α3 ex)+(α3 0.5e)
+(15)
+3.2. Efficient Computation with SOARNet
+With the objective functions defined, we now turn our attention to efficient computation. By default, the ground
+truth mesh is required to compute the objective functions,
+which limits its applicability. In order to remediate this,
+we proposed a Deep Neural Network, SOARNet to infer
+the respective objective scores for the poses visited so far,
+Cˆ = {ĉk : k ≤ n} and a further unvisited pose, cn+1 given
+a set of corresponding monocular 2D images up to step
+n, M̂ = {mk : k ≤ n}, with constraint n + 1 ≤ B, and
+the aforementioned camera parameters of each image; note
+that our method does not require the image of the unvisited
+camera-pose as input. Formally,
+
+
+ˆ M̂, cn+1 = {Fg : g ∈ {n, n + 1}} (16)
+SOARNet C,
+where
+n
+o
+g
+g
+Fg = fCg , fQ
+, fD
+, fTg
+(17)
+At each step, the elements of Fn correspond to the normalized concat
+cumulative scores of all poses seen so far for the corresponding objectives. Likewise, Fn+1 returns the normalized cumulative scores from an unseen camera-pose, cn+1
+conditioned upon the visited poses.
+The architecture of the model can be found in Fig. 3,
+where µ(·) is a ResNet [17] encoder, o(·) is an MLP encoder
+taking positionally encoded camera extrinsics, and G(·) and
+H(·) are simple MLP based prediction heads for generating
+the corresponding objective scores, Fg via regression. For
+loss functions, we used the Huber loss on the predictions of
+each head and take their sum as the final loss, L as follows
+
+
+
+
+L = LG F̂n , Fn + LH F̂n+1 , Fn+1
+(18)
+3.3. Trajectory Generation with SOARNet
+Once we are able to determine the importance of each candidate pose, the next step would be constructing an optimal trajectory. We propose a simple yet effective greedy
+strategy by picking the view that maximizes the desired objective at each step. At once, another question naturally
+follows from the proposed approach, which objective function should be optimized for? We observed that the optimal
+objective function, is class-dependent - some object classes
+are better addressed by surface coverage, C and some via
+textural complexity, T instead. Intuitively, this makes sense
+since each object may physically and visually differ significantly. Therefore, if we simply maximize the total objective
+scores, it may not actually be picking the candidate with
+the maximal marginal score of the most effective objective
+function for the object.
+Hence, our trajectory planning algorithm maximizes
+only a single objective per step in an interleaved manner.
+This way, we are able to generate a trajectory that accounts
+for all objectives as a whole. From our empirical testing, we
+Algorithm 1 Trajectory Planning
+1: procedure G ENERATE T RAJECTORY
+2:
+B ← length of budget
+3:
+4:
+5:
+6:
+7:
+8:
+9:
+10:
+11:
+12:
+13:
+14:
+15:
+16:
+17:
+18:
+19:
+20:
+21:
+P ← objective sequence, [C, Q, Q, D, D, T]
+C − ← set of unseen poses
+Cˆ ← camera poses list
+M̂ ← images list
+ninit ← number of initialization steps
+while step ≤ B do
+if step ≤ ninit then
+do PseudoCoverage
+else
+idx ← step % len(P)
+objective, f ← P[idx]
+scores ← empty array
+for cz in C − do
+
+
+selectf
+ˆ M̂, cz
+sf ←−−−− SOARNet C,
+scores.append (sf )
+ˆ
+C.append (argmax(scores))
+update M̂
+step ← step + 1
+done
+From this set of objects, we manually computed the
+individual fC , fQ , fD , and fT objectives’ score, and generated corresponding trajectories of length 30 via a random
+walk on the full train-set. Our final train, validation, and
+test sets have approximately 31k, 1.1k, and 5k samples
+respectively. For the final evaluation with actual radiance
+fields training, we further selected a subset of 50 objects
+from the test set to do so for computational feasibility;
+this subset will be referred to as the final-set for brevity.
+Finally, we also leveraged the NeRF-Synthetic dataset for
+out-of-distribution performance test.
+Modelling Radiance Fields. For radiance fields modeling,
+we utilized TensoRF [6] as our primary model. TensoRF
+adopts a hybrid approach to neural radiance fields modeling
+unlike the Vanilla NeRF, which enables it to achieve
+significant speed-up in model training and convergence
+via tensor decomposition. However, since the proposed
+objective functions are agnostic with respect to the radiance
+fields modeling method, we hypothesized that it should
+be effective regardless of the variants. Indeed, we show
+that our method generalizes across radiance fields model
+variants in Sec. 4.2.
+have found that D and Q to be most helpful, and therefore
+we gave particular emphasis to these objectives in our ensemble with the following sequence, [C, Q, Q, D, D, T];
+for brevity, we refer to this as the ensemble objective, E.
+Finally, we hypothesize and indeed observe that having
+good coverage is of particular importance during initialization when available information is minimal. As such, we
+utilize an effective yet easy-to-compute pseudo-coverage
+initialization schema which simply picks poses at the extremum along each principal spatial axis for ninit number
+of poses to begin with. Succinctly, the trajectory planning
+schema for E is summarized in Algorithm 1 with ninit = 3.
+Experimental Setup. The SOARNet model was trained
+on a machine with an NVIDIA RTX8000 GPU, 64GB of
+DRAM and 8 CPUs. The model was trained with a stepscheduler of step size of 0.6 and γ of 0.5, and the Adam
+optimizer [23] at a learning rate of 3e − 5, β1 of 0.9 and β2
+of 0.999, ϵ of 1e − 08, with AMSGrad [36] enabled, and no
+weight decay. Finally, we trained the model for 12 epochs
+with a batch-size of 8.
+We leverage the NerfStudio [40] implementations of
+TensoRF [6] and Vanilla-NeRF [29] for radiance field training. We also use Plenoxels [10] and ActiveNeRF [33] provided by the respective authors. For details on the exact
+configurations, please refer to supplementary.
+4. Experiment
+4.2. Results Evaluation
+In this section, we first present our experimental dataset and
+setup in Sec. 4.1, before delving more into the results with
+respect to various baselines in Sec.4.2.
+Primary Evaluation. We first evaluate the performance
+of our model on the NeRF-Synthetic dataset with unseen
+classes and objects of higher complexity for a challenging
+out-of-distribution test. Note that chair has been removed
+from the evaluation since our original training dataset contains said class. The result can be found in Tab. 1. For
+this evaluation, we compare our performance against a prior
+approach, ActiveNeRF [33]. Additionally, we have also
+trained multiple instances of each object across a range of
+budget, with B ∈ {3, 6, 12, 20, 30}. This way, we should
+be able to get a better representation of the potency of each
+method. We reported the averaged result across said budgets on 3 reconstruction metrics of Peak Signal-to-Noise
+Ratio (PSNR), Structural Similarity Index Measure (SSIM)
+4.1. Dataset and Setup
+Dataset. For our experiments, we have created a diverse
+dataset of 640 objects across 20 classes based on the Objaverse [7] dataset containing Large Vocabulary Instance Segmentation categories [15]. Similar to NeRF-Synthetic [29],
+for each object we sample images taken from random poses
+on a fixed-size spherical surface looking inward towards the
+object, with 100 images for training, 100 for validation and
+200 for testing using Blender. More information on the generation process can be found in supplementary.
+PSNR (↑)
+LPIPS (↓)
+SSIM (↑)
+Time (↓)
+Object
+AN
+Ours
+AN
+Ours
+AN
+Ours
+drums
+ficus
+hotdog
+lego
+materials
+mic
+ship
+17.92
+21.55
+25.36
+23.57
+19.54
+24.66
+21.27
+18.25
+21.81
+28.77
+25.17
+21.27
+24.94
+21.14
+0.332
+0.169
+0.202
+0.169
+0.234
+0.146
+0.334
+0.322
+0.163
+0.123
+0.127
+0.192
+0.135
+0.332
+0.779
+0.869
+0.888
+0.835
+0.811
+0.913
+0.721
+0.774
+0.877
+0.921
+0.865
+0.839
+0.918
+0.716
+AN (TG)
+AN (RFT)
+14h 12m
+14h 18m
+14h 10m
+14h 12m
+14h 22m
+14h 14m
+14h 17m
+Ours (TG)
+Ours (RFT)
+20s
+20s
+20s
+20s
+20s
+20s
+20s
+11m 42s
+15m 6s
+10m 13s
+9m 46s
+10m 4s
+8m 36s
+11m 28s
+Table 1. Reconstruction quality of TensoRF [6] trained via trajectory generated ActiveNeRF, AN [33] and Ensemble (Ours) on NeRF
+Synthetic. For time, TG is the trajectory generation time, and RFT is the radiance fields training time. Best result is represented with bold.
+ActiveNeRF
+Ours
+ActiveNeRF
+Ours
+ActiveNeRF
+Ours
+Figure 4. Example renders with our method against the baseline, ActiveNeRF. Here we used a budget of B = 30 for all instances.
+[42] and Perceptual Similarity (LPIPS) [48].
+Firstly, note that the reconstruction quality of a model
+trained via our Ensemble schema, E outperforms ActiveNeRF in almost every class and across all reconstruction quality metrics, lagging behind only on ship by a small margin, demonstrating its potency. Secondly, since our proposed approach is model agnostic for radiance fields modeling, we can therefore decouple trajectory planning from
+the radiance fields training. Succinctly, this means, unlike [33, 35] where they are locked into a particular radiance fields model, which could be very slow to train, our
+approach does not impose such a restriction and does not
+require any radiance fields training for trajectory planning.
+For these reasons, we are able to achieve a significant speedup, with an average ∼80x improvement compared to the
+ActiveNeRF. In Tab. 1 we report the total time taken as two
+separate components - the trajectory generation time, TG
+and the radiance fields training time, RFT. For ActiveNeRF we report only a single value for both time components
+since the two processes are inherently one. Finally, we re-
+trained additional TensoRF instances with the trajectories
+generated via ActiveNeRF with the same configurations so
+the reconstruction metrics would be comparable; for fairness, we have omitted the time taken for said retraining. It
+should be noted that our approach does not need the image
+taken from a candidate unseen pose for scoring, only the
+camera extrinsics, rendering it much more useful in realworld applications (e.g. does not need tedious sampling by
+actual visitation of poses). Renders of sample views of the
+methods can be found in Fig. 4 for visual comparison.
+For the in-distribution evaluation, we trained TensoRF
+on the custom Objaverse final-set via 6 trajectory planning
+schemas - Random as a baseline, Ensemble as described
+in Sec. 3.3, and the maximization of individual objective
+functions fC , fQ , fD and fD . For the random baseline,
+we independently generated 5 trajectories per object and reported their averaged result. As mentioned prior, the optimal objective function could differ across objects based on
+their physical representation. As such, we have grouped the
+set of results trained on the trajectory generated via the in-
+Vanilla NeRF
+PSNR (↑)
+Plenoxels
+LPIPS (↓)
+SSIM (↑)
+PSNR (↑)
+LPIPS (↓)
+SSIM (↑)
+Object
+Rand
+Ours
+Rand
+Ours
+Rand
+Ours
+Rand
+Ours
+Rand
+Ours
+Rand
+Ours
+bookcase
+cone
+earphone
+globe
+shoe
+snowman
+33.83
+31.50
+30.94
+28.83
+26.31
+35.63
+35.02
+31.75
+31.74
+28.52
+26.82
+36.93
+0.042
+0.059
+0.029
+0.039
+0.054
+0.017
+0.038
+0.055
+0.023
+0.043
+0.050
+0.014
+0.975
+0.969
+0.974
+0.958
+0.950
+0.991
+0.979
+0.970
+0.977
+0.955
+0.952
+0.993
+25.32
+–
+26.10
+23.89
+–
+31.87
+26.67
+–
+27.41
+23.61
+–
+33.24
+0.123
+–
+0.098
+0.129
+–
+0.049
+0.107
+–
+0.084
+0.131
+–
+0.050
+0.927
+–
+0.940
+0.916
+–
+0.977
+0.940
+–
+0.947
+0.911
+–
+0.978
+Table 2. Reconstruction quality of Vanilla NeRF [29] and Plenoxels [10] trained via trajectories generated from Ensemble (Ours) against
+the Random baseline. Results here are based on a subset of 6 objects from our Objaverse test-set and averaged across a range of budgets.
+The best result is represented with bold.
+Method
+PSNR (↑)
+LPIPS (↓)
+SSIM (↑)
+Random
+E (Ours)
+OP (Ours)
+29.07
+29.45
+29.67
+0.081
+0.071
+0.068
+0.951
+0.955
+0.957
+Table 3. Averaged result of Optimal CQDT, OP and Ensemble,
+E against the Random baseline. The best result is represented
+with bold, and second best with underline.
+dividual objective functions and took the best performing
+amongst them as another candidate schema dubbed, Optimal CQDT. The results can be found in Tab. 3; we used a
+simple baseline here due to limited computational resource.
+From the table, we can observe that Optimal CQDT performs the best, with Ensemble coming in as the second best,
+outperforming the Random baselines. The superior performance of Optimal CQDT reveals that the objects from
+the Objavserse dataset can be saliently captured and represented by a single objective function. However, it should
+also be noted that the efficacy may not be homogeneous
+across the objective functions for a given object. For example, for bookcase, fD is worse than fC . We hypothesized
+that this is due to the complexity of the shelving and largeflat surfaces, which creates a local minima for fD , resulting
+in an over concentration around a local region. On the flip
+side, for soccer ball, the random baseline is actually competitive compared to the other schemas. We hypothesized
+that for objects that are geometrically simple and easily covered from all directions, random walk could suffice since the
+difference in saliency across poses is minimal. From this
+observation, we further hypothesized that for such objects,
+one could simply utilize a cheap random walk for trajectory
+planning. The breakdown of the result by class can be found
+in the supplementary.
+Lastly, Ensemble does indeed offer a viable alternative
+to trajectory planning when the optimal objective function
+is not known ahead of time, or if it’s too costly to be determined explicitly.
+Model Variant Generalization. Intuitively, our approach
+should also generalize across radiance field model variants since the objective functions are grounded in geometry
+and photometric visual cues. Therefore, we also tested for
+such generalization by evaluating the approach on a subset
+of our Objaverse dataset with a fully neural-implicit radiance fields model, Vanilla NeRF and a fully explicit model,
+Plenoxels. With these, our evaluations covered the spectrum of radiance fields models from fully neural-implicit to
+fully explicit models. The result of the evaluation can be
+found in Tab. 2. For the results on cone and shoe with
+Plenoxels, we have omitted them as Plenoxels is unable to
+converge for them at all. The result validates our hypothesis
+by demonstrating that indeed, the proposed schema remain
+efficacious across model variants in almost all cases.
+5. Conclusion
+Limitation. The current ensembling schema is quite
+simple and by no means exhaustive; our future studies
+will consider more effective ways to merge the proposed
+objective functions. Additionally, we currently focus only
+on inward-looking scenes with singular objects, which
+is not representative of the complex environment one
+may encounter in complex mapping and navigation tasks.
+Therefore, we would also like to apply SOAR to more
+challenging large-scale environments in future works.
+Summary. In this work, we have proposed SOAR, a
+set of objective functions designed to serve as surrogates
+to indicate the goodness of a resultant radiance fields
+model, given a set of inputs. In order to enable efficient
+inference for real-time trajectory generation, we further
+proposed a deep neural network, SOARNet that enables
+per-step planning in <1s on unseen poses. With extensive
+evaluations, we have shown that indeed our approach is
+able to outperform various baselines, even in challenging
+out-of-distribution scenarios and across radiance fields
+model variants.
+Acknowledgement We extend our gratitude to several individuals and teams whose support contributed to the fruition
+of our work. We express our appreciation to Mohit Mehta
+and Anbang Yang for their helpful discussion, and to the
+NYU High Performance Computing team for their support
+in our experimentation. The work is supported by NSF
+Awards 2238968 and 2322242.
+References
+[1] Relja Arandjelović and Andrew Zisserman. Nerf in detail: Learning to sample for view synthesis. arXiv preprint
+arXiv:2106.05264, 2021. 2
+[2] R. Bajcsy. Active perception. Proceedings of the IEEE, 76
+(8):966–1005, 1988. 1, 2
+[3] Ruzena Bajcsy, Yiannis Aloimonos, and John K Tsotsos. Revisiting active perception. Autonomous Robots, 42:177–196,
+2018. 2
+[4] Eric R Chan, Koki Nagano, Matthew A Chan, Alexander W
+Bergman, Jeong Joon Park, Axel Levy, Miika Aittala, Shalini
+De Mello, Tero Karras, and Gordon Wetzstein. Generative
+novel view synthesis with 3d-aware diffusion models. arXiv
+preprint arXiv:2304.02602, 2023. 2
+[5] Anpei Chen, Zexiang Xu, Fuqiang Zhao, Xiaoshuai Zhang,
+Fanbo Xiang, Jingyi Yu, and Hao Su. Mvsnerf: Fast generalizable radiance field reconstruction from multi-view stereo.
+In Proceedings of the IEEE/CVF International Conference
+on Computer Vision, pages 14124–14133, 2021. 2
+[6] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and
+Hao Su. Tensorf: Tensorial radiance fields. In European
+Conference on Computer Vision (ECCV), 2022. 2, 6, 7, 1
+[7] Matt Deitke, Dustin Schwenk, Jordi Salvador, Luca Weihs,
+Oscar Michel, Eli VanderBilt, Ludwig Schmidt, Kiana
+Ehsani, Aniruddha Kembhavi, and Ali Farhadi. Objaverse:
+A universe of annotated 3d objects. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 13142–13153, 2023. 6, 1
+[8] Nianchen Deng, Zhenyi He, Jiannan Ye, Budmonde
+Duinkharjav, Praneeth Chakravarthula, Xubo Yang, and Qi
+Sun. Fov-nerf: Foveated neural radiance fields for virtual
+reality. IEEE Transactions on Visualization and Computer
+Graphics, 28(11):3854–3864, 2022. 2
+[9] Harnaik Dhami, Vishnu D Sharma, and Pratap Tokekar.
+Pred-nbv: Prediction-guided next-best-view for 3d object reconstruction. arXiv preprint arXiv:2304.11465, 2023. 2
+[10] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong
+Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels:
+Radiance fields without neural networks. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), pages 5501–5510, 2022. 2, 6, 8, 1
+[11] Kyle Gao, Yina Gao, Hongjie He, Dening Lu, Linlin Xu,
+and Jonathan Li. Nerf: Neural radiance field in 3d vision,
+a comprehensive review. arXiv preprint arXiv:2210.00379,
+2022. 2
+[12] Stephan J Garbin, Marek Kowalski, Matthew Johnson, Jamie
+Shotton, and Julien Valentin. Fastnerf: High-fidelity neural
+rendering at 200fps. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 14346–
+14355, 2021. 2
+[13] Lily Goli, Cody Reading, Silvia Selllán, Alec Jacobson, and Andrea Tagliasacchi. Bayes’ rays: Uncertainty
+quantification for neural radiance fields. arXiv preprint
+arXiv:2309.03185, 2023. 2, 3
+[14] Antoine Guédon, Pascal Monasse, and Vincent Lepetit.
+Scone: Surface coverage optimization in unknown environments by volumetric integration. Advances in Neural Information Processing Systems, 35:20731–20743, 2022. 2
+[15] Agrim Gupta, Piotr Dollar, and Ross Girshick. Lvis: A
+dataset for large vocabulary instance segmentation. In Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pages 5356–5364, 2019. 6, 1
+[16] Antoine Guédon, Tom Monnier, Pascal Monasse, and Vincent Lepetit. MACARONS: Mapping And Coverage Anticipation with RGB ONline Self-supervision. In CVPR, 2023.
+2
+[17] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+Deep residual learning for image recognition. In Proceedings of the IEEE conference on computer vision and pattern
+recognition, pages 770–778, 2016. 5
+[18] Peter Hedman, Pratul P. Srinivasan, Ben Mildenhall,
+Jonathan T. Barron, and Paul Debevec. Baking neural radiance fields for real-time view synthesis. ICCV, 2021. 2
+[19] Ajay Jain, Matthew Tancik, and Pieter Abbeel. Putting nerf
+on a diet: Semantically consistent few-shot view synthesis.
+In Proceedings of the IEEE/CVF International Conference
+on Computer Vision, pages 5885–5894, 2021. 2
+[20] Chenxing Jiang, Hanwen Zhang, Peize Liu, Zehuan Yu, Hui
+Cheng, Boyu Zhou, and Shaojie Shen. H2 -mapping: Realtime dense mapping using hierarchical hybrid representation.
+IEEE Robotics and Automation Letters, 8(10):6787–6794,
+2023. 2
+[21] Liren Jin, Xieyuanli Chen, Julius Rückin, and Marija
+Popović. Neu-nbv: Next best view planning using uncertainty estimation in image-based neural rendering. In 2023
+IEEE/RSJ International Conference on Intelligent Robots
+and Systems (IROS), 2023. 2, 3
+[22] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler,
+and George Drettakis. 3d gaussian splatting for real-time
+radiance field rendering. ACM Transactions on Graphics, 42
+(4), 2023. 2
+[23] Diederik P Kingma and Jimmy Ba. Adam: A method for
+stochastic optimization. arXiv preprint arXiv:1412.6980,
+2014. 6
+[24] Georgios Kopanas and George Drettakis.
+Improving
+NeRF Quality by Progressive Camera Placement for FreeViewpoint Navigation. In Vision, Modeling, and Visualization. The Eurographics Association, 2023. 2
+[25] Soomin Lee, Chen Le, Wang Jiahao, Alexender Liniger,
+Suryansh Kumar, and Fisher Yu. Uncertainty guided pol-
+icy for active robotic 3d reconstruction using neural radiance
+fields. IEEE Robotics and Automation Letters, 2022. 3
+[26] Ke Li, Tim Rolff, Susanne Schmidt, Reinhard Bacher, Wim
+Leemans, and Frank Steinicke. Interacting with neural radiance fields in immersive virtual reality. In Extended Abstracts of the 2023 CHI Conference on Human Factors in
+Computing Systems, New York, NY, USA, 2023. Association for Computing Machinery. 2
+[27] Yuan Liu, Sida Peng, Lingjie Liu, Qianqian Wang, Peng
+Wang, Christian Theobalt, Xiaowei Zhou, and Wenping
+Wang. Neural rays for occlusion-aware image-based rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 7824–7833,
+2022. 2
+[28] Yu-Lun Liu, Chen Gao, Andreas Meuleman, Hung-Yu
+Tseng, Ayush Saraf, Changil Kim, Yung-Yu Chuang, Johannes Kopf, and Jia-Bin Huang. Robust dynamic radiance
+fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, 2023. 2
+[29] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik,
+Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. In ECCV, 2020. 2, 6, 8, 1
+[30] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM Trans. Graph., 41(4):102:1–
+102:15, 2022. 2
+[31] Tonci Novkovic, Remi Pautrat, Fadri Furrer, Michel Breyer,
+Roland Siegwart, and Juan Nieto. Object finding in cluttered scenes using interactive perception. In 2020 IEEE International Conference on Robotics and Automation (ICRA),
+pages 8338–8344. IEEE, 2020. 2
+[32] T. Ojala, M. Pietikainen, and T. Maenpaa. Multiresolution
+gray-scale and rotation invariant texture classification with
+local binary patterns. IEEE Transactions on Pattern Analysis
+and Machine Intelligence, 24(7):971–987, 2002. 4
+[33] Xuran Pan, Zihang Lai, Shiji Song, and Gao Huang. Activenerf: Learning where to see with uncertainty estimation.
+In Computer Vision–ECCV 2022: 17th European Conference, Tel Aviv, Israel, October 23–27, 2022, Proceedings,
+Part XXXIII, pages 230–246. Springer, 2022. 1, 2, 3, 6, 7
+[34] R. Pito. A solution to the next best view problem for automated surface acquisition. IEEE Transactions on Pattern Analysis and Machine Intelligence, 21(10):1016–1030,
+1999. 2
+[35] Yunlong Ran, Jing Zeng, Shibo He, Jiming Chen, Lincheng
+Li, Yingfeng Chen, Gimhee Lee, and Qi Ye. Neurar: Neural
+uncertainty for autonomous 3d reconstruction with implicit
+neural representations. IEEE Robotics and Automation Letters, 8(2):1125–1132, 2023. 2, 3, 7
+[36] Sashank J. Reddi, Satyen Kale, and Sanjiv Kumar. On the
+convergence of adam and beyond. In International Conference on Learning Representations, 2018. 6
+[37] Xinyi Ren, Jianlan Luo, Eugen Solowjow, Juan Aparicio
+Ojea, Abhishek Gupta, Aviv Tamar, and Pieter Abbeel. Domain randomization for active pose estimation. In 2019 International Conference on Robotics and Automation (ICRA),
+pages 7228–7234. IEEE, 2019. 2
+[38] Antoni Rosinol, John J Leonard, and Luca Carlone. Nerfslam: Real-time dense monocular slam with neural radiance
+fields. arXiv preprint arXiv:2210.13641, 2022. 2
+[39] Jianxiong Shen, Adria Ruiz, Antonio Agudo, and Francesc
+Moreno-Noguer. Stochastic neural radiance fields: Quantifying uncertainty in implicit 3d representations. In 2021 International Conference on 3D Vision (3DV), pages 972–981.
+IEEE, 2021. 3
+[40] Matthew Tancik, Ethan Weber, Evonne Ng, Ruilong Li,
+Brent Yi, Justin Kerr, Terrance Wang, Alexander Kristoffersen, Jake Austin, Kamyar Salahi, Abhik Ahuja, David
+McAllister, and Angjoo Kanazawa. Nerfstudio: A modular
+framework for neural radiance field development. In ACM
+SIGGRAPH 2023 Conference Proceedings, 2023. 6, 1
+[41] Tsun-Hsuan Wang, Sivabalan Manivasagam, Ming Liang,
+Bin Yang, Wenyuan Zeng, and Raquel Urtasun. V2vnet:
+Vehicle-to-vehicle communication for joint perception and
+prediction. In Computer Vision–ECCV 2020: 16th European Conference, Glasgow, UK, August 23–28, 2020, Proceedings, Part II 16, pages 605–621. Springer, 2020. 2
+[42] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P Simoncelli. Image quality assessment: from error visibility to
+structural similarity. IEEE transactions on image processing,
+13(4):600–612, 2004. 7
+[43] Jamie Wynn and Daniyar Turmukhambetov. DiffusioNeRF:
+Regularizing Neural Radiance Fields with Denoising Diffusion Models. In CVPR, 2023. 2
+[44] Linning Xu, Vasu Agrawal, William Laney, Tony Garcia,
+Aayush Bansal, Changil Kim, Samuel Rota Bulò, Lorenzo
+Porzi, Peter Kontschieder, Aljaž Božič, Dahua Lin, Michael
+Zollhöfer, and Christian Richardt. VR-NeRF: High-fidelity
+virtualized walkable spaces. In SIGGRAPH Asia Conference
+Proceedings, 2023. 2
+[45] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa.
+pixelnerf: Neural radiance fields from one or few images.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 4578–4587, 2021. 2
+[46] Jason J. Yu, Fereshteh Forghani, Konstantinos G. Derpanis,
+and Marcus A. Brubaker. Long-term photometric consistent
+novel view synthesis with diffusion models. In Proceedings
+of the International Conference on Computer Vision (ICCV),
+2023. 2
+[47] Rui Zeng, Wang Zhao, and Yong-Jin Liu. Pc-nbv: A point
+cloud based deep network for efficient next best view planning. In 2020 IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS), pages 7050–7057. IEEE,
+2020. 2
+[48] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of
+deep features as a perceptual metric. In Proceedings of the
+IEEE conference on computer vision and pattern recognition, pages 586–595, 2018. 7
+[49] Chengxuan Zhu, Renjie Wan, Yunkai Tang, and Boxin Shi.
+Occlusion-free scene recovery via neural radiance fields. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 20722–20731,
+2023. 2
+[50] Zihan Zhu, Songyou Peng, Viktor Larsson, Weiwei Xu, Hujun Bao, Zhaopeng Cui, Martin R. Oswald, and Marc Pollefeys. Nice-slam: Neural implicit scalable encoding for slam.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), 2022. 2
+SO-NeRF: Active View Planning for NeRF using Surrogate Objectives
+Supplementary Material
+Algorithm 2 ProcessGLB
+Camera poses
+Train
+Validation
+Test
+1: procedure P ROCESS GLB
+2:
+C LEAN S CENE()
+▷ Clean the blender scene
+3:
+obj ← L OAD O BJECT(glb f ile path)
+4:
+5:
+6:
+7:
+Figure 5. Visualization of the camera poses visited to sample
+views for the train, validation and test sets of the cone object.
+6. Supplementary
+As supplementary, we provided more details of our proposed approach below. In Sec. 6.1, we discuss about the
+dataset generation procedure used to generate our custom
+Objaverse [7] based dataset. Then in Sec. 6.2 we outlined
+the detailed configurations we used for the respective radiance fields model and baseline. Thereafter in Sec. 6.3, a
+further drill-down of the results previously shown in Tab. 3
+of Sec. 4.2 is provided. Finally, we provided a video visualizing the trajectories and resulting novel view synthesis
+renders of our method, SO-NeRF against ActiveNeRF [33]
+in Sec. 6.4.
+6.1. Dataset Generation
+To begin, we generated our custom dataset using the Objaverse API [7]. Given the large variety of classes and object
+instances per class that are available within the Objaverse
+dataset, there is an expected amount of noise to the labels.
+For this reason, we specifically select only Large Vocabulary Instance Segmentation [15] (LVIS) objects within Objaverse, which have been manually verified by humans.
+Just like the NeRF Synthetic dataset, our custom data
+generation procedure samples views from poses around the
+object constrained to a fixed radius; this is equivalent to
+sampling views from the surface of an imaginary sphere.
+For the training and validation set, we performed the sampling randomly around the object, whereas for the test set,
+we used a smooth circular trajectory instead for ease of
+viewing. An illustration of the aforementioned sampling
+procedures can be found in Fig. 5. The procedure is summarized in Algorithm 2. We ran the algorithm on a machine
+with a single AMD Radeon MI50 GPU, 4 CPUs and 16GB
+of DRAM.
+Overall, we sampled 640 objects across 20 classes specifically, bookcase, chair, cone, control, die, earphone,
+S CALE O BJECT(obj)
+▷ Normalize scale
+imgs, cam parameters ← S AMPLE V IEWS()
+S AVE O BJ(obj)
+▷ Export obj + mtl file
+S AVE S AMPLES(imgs, cam parameters)
+fan, fireplug, fighter jet, globe, gravestone, guitar, lion,
+shoe, snowman, soccer ball, sunglasses, teddybear, toilet,
+and vase from the list of available categories. For each class,
+we downloaded twenty instances of that class and manually
+verified the labels for reliability. We pruned or replaced any
+outlier objects. Visualizations of the object classes can be
+found in Fig. 6.
+6.2. Additional Model Configuration Details
+For radiance fields modeling, we leveraged the Nerfstudio
+[40] implementations of TensoRF [6] and Vanilla NeRF
+[29] for training. For TensoRF, we trained each objectinstance for 300 epochs with all other configurations left as
+default. For Vanilla NeRF, we trained each object-instance
+for 3,000 epochs instead for better convergence, with all
+other configurations left as default as well. For Plenoxels
+[10], we trained it with an epoch-size of 300 per object, with
+a learning rate of 3e1, and spherical harmonics learning rate
+of 1e-2 with all other configurations as default. In terms of
+hardware, both models were trained on a platform with an
+NVIDIA RTX8000 GPU, 32GB of DRAM, and 2 CPUs.
+For our ActiveNeRF baseline, all the trajectory planning
+and generation runs were conducted on a machine with an
+NVIDIA RTX8000 GPU, 64GB of system DRAM, and 8
+CPUs for training, per object. We initialized each instance
+with a seed training set with 5 poses and let ActiveNeRF determine the required remaining images based on the quantified uncertainty. Closely following the experimental configuration of [33], we trained the model for 200,000 iterations
+each, and let it pick the remaining B − 5 number of images
+over the course of those iterations at a cadence of 5 images
+per 40,000 steps and minimum uncertainty kept at 0.01. The
+remaining settings were all kept at default.
+6.3. Additional Result Breakdown
+In Sec. 4.2, the averaged results on the Objaverse dataset
+were reported in Tab. 3. In this section, we go one step further by breaking down the result per-class to provide better
+PSNR (↑)
+LPIPS (↓)
+SSIM (↑)
+Class
+Rand
+E
+Op. CQDT
+Rand
+E
+Op. CQDT
+Rand
+E
+Op. CQDT
+bookcase
+chair
+cone
+control
+earphone
+fan
+fireplug
+globe
+gravestone
+guitar
+lion
+shoe
+snowman
+soccer ball
+sunglasses
+teddy bear
+toilet
+vase
+28.94
+29.33
+27.64
+29.33
+29.16
+27.30
+30.21
+25.54
+31.43
+32.22
+30.53
+26.23
+32.01
+25.53
+28.26
+30.92
+28.95
+29.75
+30.37
+29.59
+28.37
+30.41
+29.74
+27.01
+30.37
+26.05
+31.52
+32.43
+30.70
+26.97
+32.49
+24.24
+28.01
+31.44
+29.53
+30.92
+30.42
+30.00
+28.59
+30.48
+30.05
+26.98
+31.30
+26.14
+31.59
+32.33
+30.57
+26.73
+32.62
+25.10
+28.61
+31.53
+30.13
+30.97
+0.089
+0.084
+0.100
+0.069
+0.074
+0.091
+0.064
+0.110
+0.054
+0.053
+0.063
+0.099
+0.063
+0.113
+0.093
+0.064
+0.098
+0.073
+0.078
+0.069
+0.088
+0.055
+0.060
+0.092
+0.065
+0.094
+0.050
+0.045
+0.053
+0.085
+0.057
+0.109
+0.079
+0.055
+0.086
+0.063
+0.074
+0.067
+0.083
+0.055
+0.058
+0.093
+0.054
+0.089
+0.051
+0.045
+0.052
+0.085
+0.056
+0.097
+0.072
+0.054
+0.077
+0.064
+0.946
+0.949
+0.938
+0.957
+0.954
+0.939
+0.959
+0.915
+0.967
+0.976
+0.962
+0.931
+0.966
+0.941
+0.955
+0.960
+0.943
+0.952
+0.956
+0.956
+0.945
+0.965
+0.961
+0.938
+0.959
+0.925
+0.968
+0.979
+0.965
+0.937
+0.970
+0.939
+0.958
+0.965
+0.950
+0.959
+0.957
+0.957
+0.947
+0.965
+0.961
+0.938
+0.964
+0.928
+0.969
+0.979
+0.965
+0.937
+0.971
+0.944
+0.962
+0.965
+0.954
+0.959
+Table 4. Reconstruction quality of TensoRF trained via trajectory generated from Optimal CQDT and Ensemble, E against the Random
+baseline. Results here are grouped by object class and averaged across the budgets. The best result is represented with bold.
+bookcase
+chair
+cone
+control
+die
+earphone
+fan
+fireplug
+fighter_jet
+globe
+gravestone
+guitar
+lion
+shoe
+snowman
+soccer_ball
+sunglasses
+teddy_bear
+toilet
+vase
+Figure 6. Preview of an object from each class of our custom Objaverse dataset used to train and evaluate SOARNet.
+clarity on the performance of our proposed approach - Ensemble and Optimal CQDT as previously defined - against
+the Random baseline in Tab. 4.
+As we can observe from the table, the proposed approaches worked the best in almost all cases, except for
+soccer ball and fan, across all 3 metrics. The results shown
+here affirm the findings and conclusion we put forth previously.
+6.4. Video Rendering
+For additional visualization and demonstration of our approach, we have included a short video together with the
+supplementary submission to illustrate the trajectory generated and test-set renderings of SO-NeRF against ActiveNeRF on the NeRF Synthetic dataset.

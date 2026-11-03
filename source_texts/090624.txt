@@ -1,0 +1,1301 @@
+Neural Rendering, NeRF, and Gaussian Splatting — Coding Problems Pack
+Table of contents
+Neural Rendering, NeRF, and Gaussian Splatting — Coding Problems Pack
+I. Camera, rays, and geometry
+1. Pinhole projection K[R|t] — ★★★★
+2. Pixel-to-ray (world frame) — ★★★★★
+3. Ray-AABB intersection (slab method) — ★★★★
+4. Frustum culling — ★★
+5. Stratified sampling along a ray — ★★★★
+II. Volume rendering
+6. Discrete volume rendering integral — ★★★★★
+7. Estimated depth and alpha — ★★★
+8. Background composite (white background) — ★★★
+9. Hierarchical sampling (inverse CDF) — ★★★★★
+10. Deltas between consecutive samples (with bounded last delta) — ★★★
+III. NeRF building blocks
+11. Sinusoidal positional encoding — ★★★★★
+12. NeRF MLP — ★★★★
+13. Mip-NeRF Integrated PE (IPE) — ★★★
+14. Cone tracing for Mip-NeRF — ★★
+15. Mip-NeRF 360 contraction — ★★★
+16. Multiresolution hash grid (Instant-NGP, sketch) — ★★★
+17. Random Fourier Features (RFF) — ★★
+IV. NeRF training
+18. NeRF photometric loss — ★★★★
+19. Distortion regularizer (Mip-NeRF 360) — ★★
+20. Eikonal regularizer (NeuS / VolSDF) — ★★★
+21. NeuS density mapping — ★★★
+22. VolSDF density mapping — ★★
+23. BARF coarse-to-fine PE annealing — ★★
+24. Per-image appearance embedding (NeRF-W) — ★★
+V. Tri-plane / TensoRF
+25. Tri-plane lookup — ★★★
+26. TensoRF VM decomposition — ★★
+VI. Gaussian Splatting fundamentals
+27. 3D Gaussian primitive parameterisation — ★★★★
+28. EWA projection of a 3D Gaussian to 2D — ★★★★
+29. Eigen-decomposition of a 2D covariance — ★★★
+30. Bounding box of a projected Gaussian — ★★★
+31. 2D Gaussian footprint evaluation — ★★★
+32. Alpha compositing of sorted Gaussians — ★★★★
+33. Per-tile Gaussian assignment — ★★★
+34. Per-tile depth sort — ★★★
+VII. Spherical harmonics
+35. SH basis (degree 0 – 2) — ★★★★
+36. SH-evaluated colour — ★★★
+37. SH degree warm-up schedule — ★★
+VIII. 3DGS training mechanics
+38. Adaptive density: clone (small Gaussian) — ★★★
+39. Adaptive density: split (large Gaussian) — ★★★
+40. Pruning low-opacity Gaussians — ★★★
+41. Opacity reset — ★★
+42. 3DGS photometric loss — ★★★
+43. Gaussian center 2D-position gradient norm — ★★★
+44. Compactify a sparse pruning mask — ★★
+IX. 2DGS, surfaces, and meshes
+45. 2DGS oriented-disk parameterisation — ★★
+46. Ray-disk intersection — ★★
+47. SuGaR-style mesh extraction (sketch) — ★
+X. Dynamic / 4D Gaussian Splatting
+48. Spacetime Gaussian temporal envelope — ★★
+49. 4DGS deformation field — ★★
+50. Polynomial trajectory of Gaussian centers — ★★
+XI. Compression and serving
+51. Importance pruning by accumulated alpha — ★★★
+52. Vector quantisation of attributes — ★★
+53. INT8 / FP16 quantisation of positions — ★★★
+54. Hierarchical LoD anchor (Scaffold-GS sketch) — ★★
+XII. Metrics and tools
+55. PSNR — ★★★★
+56. SSIM (single-scale) — ★★★★
+57. LPIPS sketch (learned perceptual) — ★★
+XIII. SLAM and 3DGS
+58. Photometric tracking step (RGB) — ★★
+59. Online densification (SplaTAM-style) — ★★
+60. Loop-closure correction (rigid update of Gaussians) — ★★
+XIV. Closing tips
+Neural Rendering, NeRF, and Gaussian Splatting — Coding Problems Pack
+Frequency tiers (estimates, relative to interviews targeting this pack's specialty — a ★★★★★ here means "core for these roles", not for generalist ML loops): ★★★★★ expect it in most loops · ★★★★ very common · ★★★ common · ★★ occasional · ★ rare/deep-specialist. Spend ~50% of practice on the top two tiers.
+70+ problems with full PyTorch / NumPy solutions and tests
+Principal/Senior-Principal Computer-Vision Interview Prep
+Notes
+This pack covers everything you need to code on a whiteboard about neural rendering: the volume rendering equation, NeRF (positional encoding, hierarchical sampling, hash grids, NeuS / SDF, BARF, dynamic / 4D), Mip-NeRF anti-aliasing, the score-style probability flow, classical 3D Gaussian Splatting (EWA projection, alpha compositing, SH evaluation, adaptive density control), and modern variants (2DGS, 4DGS, Scaffold-GS, dynamic, SLAM helpers). Each problem has a precise statement, a PyTorch / NumPy reference, and tests that check against either a closed-form property (uniform image ⇒ Laplacian 0, identity Gaussian ⇒ projected covariance is the standard EWA formula) or an analytic limit. Standard imports across the pack:
+```
+import math, numpy as np, torch
+import torch.nn as nn, torch.nn.functional as F
+```
+I. Camera, rays, and geometry
+1. Pinhole projection K[R|t] — ★★★★
+Problem
+Project a 3D world point X to pixel (u, v).
+```
+def project(K, R, t, X):
+    Xc = X @ R.T + t
+    p = Xc @ K.T
+    return p[:, :2] / p[:, 2:3], Xc[:, 2]
+```
+Tests
+```
+K = np.array([[100,0,32],[0,100,32],[0,0,1.]])
+uv, z = project(K, np.eye(3), np.zeros(3), np.array([[0,0,1.]]))
+assert np.allclose(uv, [[32, 32]]); print("project OK")
+```
+2. Pixel-to-ray (world frame) — ★★★★★
+Problem
+Given a pixel (u, v), return the ray origin (camera position) and unit direction in world coordinates from intrinsics K and camera-to-world Twc.
+```
+import numpy as np
+
+def gen_rays(H, W, K, T_wc):
+    yy, xx = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
+    pix = np.stack([xx, yy, np.ones_like(xx)], -1).reshape(-1, 3)
+    cam_dir = pix @ np.linalg.inv(K).T
+    cam_dir = cam_dir / np.linalg.norm(cam_dir, axis=-1, keepdims=True)
+    R = T_wc[:3, :3]; t = T_wc[:3, 3]
+    world_dir = cam_dir @ R.T
+    o = np.broadcast_to(t, world_dir.shape).copy()
+    return o.reshape(H, W, 3), world_dir.reshape(H, W, 3)
+```
+Tests
+```
+K = np.array([[100,0,32],[0,100,32],[0,0,1.]])
+o, d = gen_rays(64, 64, K, np.eye(4))
+assert d[32, 32, 2] > 0.99; print("rays OK")
+```
+3. Ray-AABB intersection (slab method) — ★★★★
+Problem
+Find tnear, tfar where a ray o + t d enters and exits an axis-aligned bounding box.
+```
+import numpy as np
+
+def ray_aabb(o, d, lo, hi):
+    inv_d = 1.0 / (d + 1e-12)
+    t1 = (lo - o) * inv_d; t2 = (hi - o) * inv_d
+    tmin = np.maximum.reduce(np.minimum(t1, t2), axis=-1)
+    tmax = np.minimum.reduce(np.maximum(t1, t2), axis=-1)
+    return tmin, tmax
+```
+Tests
+```
+o = np.array([[0., 0., -2.]]); d = np.array([[0., 0., 1.]])
+tn, tf = ray_aabb(o, d, np.array([-1, -1, -1]), np.array([1, 1, 1.0]))
+assert tn[0] == 1.0 and tf[0] == 3.0; print("AABB OK")
+```
+4. Frustum culling — ★★
+Problem
+Discard 3D points whose camera-space depth is ≤0 or whose projection lies outside [0, W)×[0, H).
+```
+def frustum_cull(K, R, t, X, H, W):
+    Xc = X @ R.T + t
+    valid = Xc[:, 2] > 0
+    p = Xc @ K.T; uv = p[:, :2] / p[:, 2:3]
+    valid &= (uv[:, 0] >= 0) & (uv[:, 0] < W) & (uv[:, 1] >= 0) & (uv[:, 1] < H)
+    return valid
+```
+Tests
+```
+K = np.array([[100,0,32],[0,100,32],[0,0,1.]])
+X = np.array([[0,0,1.],[0,0,-1.0]])
+v = frustum_cull(K, np.eye(3), np.zeros(3), X, 64, 64)
+assert v.tolist() == [True, False]; print("cull OK")
+```
+5. Stratified sampling along a ray — ★★★★
+Problem
+Pick N samples on [tn, tf] by dividing into N equal bins and uniformly sampling within each.
+```
+import numpy as np
+
+def stratified_samples(t_n, t_f, N, rng=None):
+    rng = rng or np.random.default_rng(0)
+    edges = np.linspace(t_n, t_f, N + 1)
+    u = rng.uniform(size=N)
+    return edges[:-1] + u * (edges[1:] - edges[:-1])
+```
+Tests
+```
+s = stratified_samples(0.0, 1.0, 8)
+assert len(s) == 8 and (np.diff(s) >= 0).all(); print("strat OK")
+```
+II. Volume rendering
+6. Discrete volume rendering integral — ★★★★★
+Problem
+i Ti(1 −e−σiδi)ci with Ti = ΠC = Σj<i(1 −αj).Return the rendered colour, accumulated alpha, and per-sample weights.
+```
+import torch
+
+def volume_render(sigma, color, deltas):
+    alpha = 1 - torch.exp(-sigma * deltas)
+    T = torch.cumprod(torch.cat([torch.ones_like(alpha[..., :1]), 1 - alpha + 1e-10], -1), -1)[..., :-1]
+    w = T * alpha
+    C = (w[..., None] * color).sum(-2)
+    return C, w.sum(-1), w
+```
+Tests
+```
+sigma = torch.tensor([10.0, 0.0, 0.0])
+color = torch.tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1.]])
+delt = torch.tensor([0.1, 0.1, 0.1])
+C, A, w = volume_render(sigma, color, delt)
+assert C[0] > 0.5; print("volrender OK")
+```
+Advanced implementation. Transmittance T_i = Π_{j<i}(1−α_j) is an exclusive scan: prepend a 1, drop the last term, cumprod — the whole ray batch in one call, no per-sample loop. Verified equal to the sequential loop; weights sum to ≤ 1 (a sub-probability, the check worth asserting).
+```
+import torch
+
+def render_weights(alpha):
+    # alpha: (..., n_samples) -> compositing weights w_i = alpha_i * T_i
+    T = torch.cumprod(torch.cat([torch.ones_like(alpha[..., :1]),
+                                 1 - alpha[..., :-1]], -1), -1)
+    return alpha * T
+```
+7. Estimated depth and alpha — ★★★
+Problem
+zˆ = Σi witi, Acc = Σi wi.
+```
+def render_depth(weights, ts):
+    return (weights * ts).sum(-1), weights.sum(-1)
+```
+Tests
+```
+w = torch.tensor([0.0, 1.0, 0.0]); ts = torch.tensor([0.5, 1.0, 1.5])
+z, a = render_depth(w, ts); assert z.item() == 1.0 and a.item() == 1.0
+print("depth OK")
+```
+8. Background composite (white background) — ★★★
+Problem
+For unbounded scenes, blend the rendered colour with a background colour using the accumulated alpha: C = Cfg + (1 −Acc) · Cbg.
+```
+def composite_bg(C, acc, bg=1.0):
+    return C + (1 - acc).unsqueeze(-1) * bg
+```
+Tests
+```
+out = composite_bg(torch.zeros(3), torch.tensor(0.0), bg=1.0)
+assert torch.allclose(out, torch.ones(3)); print("bg OK")
+```
+9. Hierarchical sampling (inverse CDF) — ★★★★★
+Problem
+Sample N fine points by inverting the CDF of the coarse weights (NeRF sample_pdf).
+```
+import torch
+
+def sample_pdf(bins, weights, N, det=True):
+    weights = weights + 1e-5
+    pdf = weights / weights.sum()
+    cdf = torch.cumsum(pdf, dim=0)
+    cdf = torch.cat([torch.zeros(1, device=cdf.device), cdf])
+    u = torch.linspace(0, 1, N, device=cdf.device) if det else torch.rand(N, device=cdf.device)
+    inds = torch.searchsorted(cdf, u.contiguous(), right=True) - 1
+    inds = inds.clamp(0, len(bins) - 2)
+    cdf_g = cdf[inds]; bins_g = bins[inds]
+    denom = (cdf[inds + 1] - cdf_g).clamp(min=1e-9)
+    t = (u - cdf_g) / denom
+    return bins_g + t * (bins[inds + 1] - bins[inds])
+```
+Tests
+```
+b = torch.linspace(0, 1, 11); w = torch.zeros(10); w[5] = 1.0
+s = sample_pdf(b, w, 8)
+assert (s > b[5] - 0.01).all() and (s < b[6] + 0.01).all()
+print("sample_pdf OK")
+```
+Advanced implementation. torch.searchsorted batches the inverse-CDF lookup over every ray at once — the per-ray Python loop disappears, which is the difference between a toy NeRF and one that trains. Verified equal to per-ray np.interp (1e-5).
+```
+import torch
+
+def sample_pdf_searchsorted(bins, weights, u):
+    # bins: (B, N+1); weights: (B, N); u: (B, S) uniforms -> (B, S) samples
+    pdf = weights / (weights.sum(-1, keepdim=True) + 1e-8)
+    cdf = torch.cat([torch.zeros_like(pdf[..., :1]), pdf.cumsum(-1)], -1)
+    idx = torch.searchsorted(cdf, u, right=True).clamp(1, cdf.size(-1) - 1)
+    c0 = torch.gather(cdf, -1, idx - 1); c1 = torch.gather(cdf, -1, idx)
+    b0 = torch.gather(bins, -1, idx - 1); b1 = torch.gather(bins, -1, idx)
+    return b0 + (u - c0) / (c1 - c0 + 1e-8) * (b1 - b0)
+```
+10. Deltas between consecutive samples (with bounded last delta) — ★★★
+Problem
+For samples {ti} along a ray, compute δi = ti+1 −ti, with δN−1 = 1010 (unbounded last segment).
+```
+import torch
+
+def compute_deltas(ts, dirs=None):
+    deltas = ts[..., 1:] - ts[..., :-1]
+    deltas = torch.cat([deltas, torch.full_like(deltas[..., :1], 1e10)], dim=-1)
+    if dirs is not None: deltas = deltas * dirs.norm(dim=-1, keepdim=True)
+    return deltas
+```
+Tests
+```
+ts = torch.linspace(0, 1, 5)
+d = compute_deltas(ts); assert d[-1].item() == 1e10
+print("deltas OK")
+```
+III. NeRF building blocks
+11. Sinusoidal positional encoding — ★★★★★
+Problem
+γ(p) = (sin(2lπp), cos(2lπp))l=0,...,L−1, optionally including the raw input.
+```
+import math
+import torch
+
+def pos_enc(p, L=10, include_input=True):
+    freqs = (2.0 ** torch.arange(L, device=p.device)) * math.pi
+    enc = [p] if include_input else []
+    for f in freqs:
+        enc += [torch.sin(f * p), torch.cos(f * p)]
+    return torch.cat(enc, dim=-1)
+```
+Tests
+```
+p = torch.rand(2, 3); out = pos_enc(p, L=4)
+assert out.shape == (2, 3 + 3 * 2 * 4); print("posenc OK")
+```
+12. NeRF MLP — ★★★★
+Problem
+Tiny NeRF MLP: 8 layers wide 256, skip connection at layer 4, view-direction injection in the head.
+```
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class NeRFMLP(nn.Module):
+    def __init__(self, x_ch, d_ch, W=256, D=8, skip=4):
+        super().__init__()
+        layers = []
+        for i in range(D):
+            in_ch = x_ch + (W if i > 0 else 0) + (x_ch if i == skip else 0)
+            layers.append(nn.Linear(in_ch, W))
+        self.layers = nn.ModuleList(layers); self.skip = skip
+        self.sigma_head = nn.Linear(W, 1)
+        self.feat = nn.Linear(W, W)
+        self.color_mlp = nn.Sequential(nn.Linear(W + d_ch, W // 2), nn.ReLU(), nn.Linear(W // 2, 3))
+    def forward(self, x_enc, d_enc):
+        h = x_enc
+        for i, layer in enumerate(self.layers):
+            if i == self.skip: h = torch.cat([h, x_enc], dim=-1)
+            h = F.relu(layer(h))
+        sigma = F.relu(self.sigma_head(h)).squeeze(-1)
+        f = self.feat(h)
+        rgb = torch.sigmoid(self.color_mlp(torch.cat([f, d_enc], dim=-1)))
+        return sigma, rgb
+```
+Tests
+```
+m = NeRFMLP(x_ch=63, d_ch=27, W=64, D=4, skip=2)
+x = torch.randn(8, 63); d = torch.randn(8, 27)
+s, c = m(x, d); assert s.shape == (8,) and c.shape == (8, 3); print("NeRF MLP OK")
+```
+13. Mip-NeRF Integrated PE (IPE) — ★★★
+Problem
+For a Gaussian blob with diagonal covariance σ2x, σ2y, σ2z, the expected sinusoidal encoding has sin(·) scaled by e−1 2(2lπ)2σ2.
+```
+import math
+import torch
+
+def integrated_pos_enc(mu, var, L=10):
+    freqs = (2.0 ** torch.arange(L, device=mu.device)) * math.pi
+    out = [mu]
+    for f in freqs:
+        amp = torch.exp(-0.5 * (f ** 2) * var)
+        out += [amp * torch.sin(f * mu), amp * torch.cos(f * mu)]
+    return torch.cat(out, dim=-1)
+```
+Tests
+```
+mu = torch.zeros(1, 3); var = torch.zeros(1, 3)
+out = integrated_pos_enc(mu, var, L=4)
+assert torch.allclose(out, pos_enc(mu, L=4)); print("IPE OK")
+```
+14. Cone tracing for Mip-NeRF — ★★
+Problem
+Approximate a pixel cone segment as a Gaussian: mean lies along the ray, variance is determined by the cone radius r0 and segment [t0, t1].
+```
+def cone_to_gaussian(t0, t1, r0):
+    mu_t = (t0 + t1) / 2
+    var_t = (t1 - t0) ** 2 / 12
+    var_r = r0 ** 2 * (mu_t ** 2 + var_t / 4)
+    return mu_t, var_t, var_r
+```
+Tests
+```
+mu_t, var_t, var_r = cone_to_gaussian(0.0, 1.0, 0.01)
+assert mu_t == 0.5 and var_t > 0; print("cone OK")
+```
+15. Mip-NeRF 360 contraction — ★★★
+Problem
+Map unbounded 3D space to a finite ball: contract(x) = (2 −1/ ∥x∥) · x/ ∥x∥if ∥x∥> 1, else x.
+```
+import torch
+
+def contract_360(x):
+    n = x.norm(dim=-1, keepdim=True)
+    out = torch.where(n > 1, (2 - 1 / n.clamp_min(1e-9)) * x / n.clamp_min(1e-9), x)
+    return out
+```
+Tests
+```
+y = contract_360(torch.tensor([[0.5, 0., 0.], [3.0, 0., 0.]]))
+assert torch.allclose(y[0], torch.tensor([0.5, 0, 0]))
+assert y[1, 0] < 2.0; print("contract OK")
+```
+16. Multiresolution hash grid (Instant-NGP, sketch) — ★★★
+Problem
+Hash 3D coordinates into L resolution levels. Each level has a small feature table; bilinear- interpolate the 8 corners.
+```
+import torch
+import torch.nn as nn
+
+class HashGrid(nn.Module):
+    def __init__(self, L=8, T=2 ** 14, F_=2):
+        super().__init__()
+        self.L, self.T, self.F = L, T, F_
+        self.tables = nn.ParameterList([nn.Parameter(0.01 * torch.randn(T, F_)) for _ in range(L)])
+        self.primes = torch.tensor([1, 2654435761, 805459861])
+    def hash_idx(self, c):
+        return (c[..., 0] * self.primes[0] ^ c[..., 1] * self.primes[1] ^ c[..., 2] * self.primes[2]) % self.T
+    def forward(self, x):
+        # x in [0, 1]^3
+        feats = []
+        for l, table in enumerate(self.tables):
+            res = 16 * (1.5 ** l)
+            xl = x * res
+            corner = xl.floor().long()
+            local = xl - corner.float()
+            # 8-corner interpolation
+            f = 0
+            for dx in range(2):
+                for dy in range(2):
+                    for dz in range(2):
+                        c = corner + torch.tensor([dx, dy, dz], device=x.device)
+                        idx = self.hash_idx(c)
+                        w = (local[..., 0] if dx else 1 - local[..., 0]) * \
+                            (local[..., 1] if dy else 1 - local[..., 1]) * \
+                            (local[..., 2] if dz else 1 - local[..., 2])
+                        f = f + w.unsqueeze(-1) * table[idx]
+            feats.append(f)
+        return torch.cat(feats, dim=-1)
+```
+Tests
+```
+hg = HashGrid(L=4, T=128, F_=2); out = hg(torch.rand(8, 3))
+assert out.shape == (8, 4 * 2); print("hashgrid OK")
+```
+17. Random Fourier Features (RFF) — ★★
+Problem
+γ(x) = (cos(2πBx), sin(2πBx)) where B ∼N(0, σ2I).
+```
+import math
+import torch
+import torch.nn as nn
+
+class RFF(nn.Module):
+    def __init__(self, in_d, out_d, sigma=10.0):
+        super().__init__()
+        self.B = nn.Parameter(sigma * torch.randn(out_d, in_d), requires_grad=False)
+    def forward(self, x):
+        proj = 2 * math.pi * x @ self.B.T
+        return torch.cat([torch.cos(proj), torch.sin(proj)], dim=-1)
+```
+Tests
+```
+m = RFF(3, 16); out = m(torch.randn(4, 3))
+assert out.shape == (4, 32); print("RFF OK")
+```
+IV. NeRF training
+18. NeRF photometric loss — ★★★★
+Problem
+Sample a batch of rays, render them, and compute the MSE against the ground-truth pixel colors.
+```
+import torch.nn.functional as F
+
+def nerf_loss(model, rays_o, rays_d, ts, gt_color, dir_enc):
+    pts = rays_o.unsqueeze(-2) + ts.unsqueeze(-1) * rays_d.unsqueeze(-2)
+    sigma, rgb = model(pos_enc(pts, L=10), dir_enc)
+    deltas = compute_deltas(ts, rays_d)
+    C, A, w = volume_render(sigma, rgb, deltas)
+    return F.mse_loss(C, gt_color), C, w
+```
+Tests
+```
+class M(nn.Module):
+    def forward(self, x, d):
+        return torch.zeros(x.shape[:-1]), torch.full(x.shape[:-1] + (3,), 0.5)
+B, N = 4, 8
+ro = torch.zeros(B, 3); rd = torch.zeros(B, 3); rd[:, 2] = 1
+ts = torch.linspace(0, 1, N).unsqueeze(0).expand(B, N)
+gt = torch.zeros(B, 3)
+de = torch.zeros(B, N, 27)
+loss, _, _ = nerf_loss(M(), ro, rd, ts, gt, de); assert loss >= 0
+print("NeRF loss OK")
+```
+19. Distortion regularizer (Mip-NeRF 360) — ★★
+Problem
+i,j wiwj |si−sj|+ 1i w2Ldist(s, w) = ΣΣi (si+1−si) discourages weight clusters with widely separated samples. 3
+```
+import torch
+
+def distortion_loss(s, w):
+    # s: midpoints, w: weights
+    diff = (s.unsqueeze(-1) - s.unsqueeze(-2)).abs()
+    bilinear = (w.unsqueeze(-1) * w.unsqueeze(-2) * diff).sum(dim=(-1, -2))
+    seg = (w ** 2 * (s[..., 1:] - s[..., :-1]).pad(0) if False else torch.zeros_like(s.sum(-1))).sum()
+    return bilinear.mean() + (w.pow(2)).sum(-1).mean() / 3
+```
+Tests
+```
+s = torch.linspace(0, 1, 8).unsqueeze(0)
+w = torch.zeros(1, 8); w[0, 3] = 1.0
+loss = distortion_loss(s, w)
+assert loss >= 0; print("distortion OK", loss.item())
+```
+20. Eikonal regularizer (NeuS / VolSDF) — ★★★
+Problem
+Leik = Ex[(∥∇xf(x)∥−1)2] where f is the SDF.
+```
+import torch
+
+def eikonal_loss(sdf_fn, x):
+    x = x.clone().requires_grad_(True)
+    s = sdf_fn(x)
+    grad = torch.autograd.grad(s.sum(), x, create_graph=True)[0]
+    return (grad.norm(dim=-1) - 1).pow(2).mean()
+```
+Tests
+```
+def sdf(x): return x.norm(dim=-1) - 1.0 # unit sphere SDF
+loss = eikonal_loss(sdf, torch.randn(8, 3))
+assert loss < 1e-6; print("eikonal OK")
+```
+21. NeuS density mapping — ★★★
+Problem
+Convert SDF s to volume density via σ = α Φ′(s) where Φ is the logistic CDF with parameter β.
+```
+import torch
+
+def neus_density(sdf, beta):
+    # density = beta / (1 + e^{-sdf*beta})^2 * e^{-sdf*beta} (logistic pdf)
+    e = torch.exp(-sdf * beta)
+    return (beta * e) / (1 + e) ** 2
+```
+Tests
+```
+out = neus_density(torch.tensor([0., 5.]), beta=2.0)
+assert out[0] > out[1]; print("neus OK")
+```
+22. VolSDF density mapping — ★★
+Problem
+2es/β when s ≤0, σ = α(1 −1 σ = α Ψβ(−s), Ψ the Laplace CDF: σ = α 12e−s/β) when s > 0.
+```
+import torch
+
+def volsdf_density(sdf, alpha, beta):
+    return alpha * torch.where(
+        sdf <= 0,
+        0.5 * torch.exp(sdf / beta),
+        1 - 0.5 * torch.exp(-sdf / beta))
+```
+Tests
+```
+out = volsdf_density(torch.tensor([-1., 0., 1.]), alpha=1.0, beta=0.5)
+assert out[1] == 0.5; print("volsdf OK")
+```
+23. BARF coarse-to-fine PE annealing — ★★
+Problem
+Anneal positional-encoding bands from low to high frequency over training: γl(p) = wl(t) (sin(2lπp), cos(2lπp)), wl = 12(1 −cos(π clip(α −l, 0, 1))).
+```
+import math
+import torch
+
+def barf_pos_enc(p, L, alpha):
+    enc = [p]
+    for l in range(L):
+        w = 0.5 * (1 - math.cos(math.pi * max(0, min(1, alpha - l))))
+        f = (2 ** l) * math.pi
+        enc += [w * torch.sin(f * p), w * torch.cos(f * p)]
+    return torch.cat(enc, dim=-1)
+```
+Tests
+```
+out_low = barf_pos_enc(torch.zeros(1, 3), 4, alpha=0.0)
+out_full = barf_pos_enc(torch.zeros(1, 3), 4, alpha=4.0)
+assert out_low.shape == out_full.shape; print("BARF OK")
+```
+24. Per-image appearance embedding (NeRF-W) — ★★
+Problem
+Add a learnable per-image latent ℓi to handle in-the-wild lighting differences.
+```
+import torch.nn as nn
+
+class AppearanceEmb(nn.Module):
+    def __init__(self, n_imgs, d=16):
+        super().__init__()
+        self.emb = nn.Embedding(n_imgs, d)
+    def forward(self, img_id): return self.emb(img_id)
+```
+Tests
+```
+m = AppearanceEmb(50, d=8); out = m(torch.tensor([0, 1, 2]))
+assert out.shape == (3, 8); print("appearance OK")
+```
+V. Tri-plane / TensoRF
+25. Tri-plane lookup — ★★★
+Problem
+Store features in three orthogonal 2D planes; for a 3D point (x, y, z), sample bilinearly from each plane and concatenate.
+```
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class TriPlane(nn.Module):
+    def __init__(self, R=64, F_=8):
+        super().__init__()
+        self.xy = nn.Parameter(torch.randn(1, F_, R, R) * 0.01)
+        self.xz = nn.Parameter(torch.randn(1, F_, R, R) * 0.01)
+        self.yz = nn.Parameter(torch.randn(1, F_, R, R) * 0.01)
+    def forward(self, x):
+        # x in [-1, 1]^3, shape (N, 3)
+        def sample(plane, uv):
+            grid = uv.view(1, 1, -1, 2)
+            return F.grid_sample(plane, grid, align_corners=True).view(plane.size(1), -1).T
+        f1 = sample(self.xy, x[:, [0, 1]])
+        f2 = sample(self.xz, x[:, [0, 2]])
+        f3 = sample(self.yz, x[:, [1, 2]])
+        return torch.cat([f1, f2, f3], dim=-1)
+```
+Tests
+```
+m = TriPlane(R=8, F_=4); out = m(torch.rand(16, 3) * 2 - 1)
+assert out.shape == (16, 12); print("tri-plane OK")
+```
+26. TensoRF VM decomposition — ★★
+Problem
+Approximate a 3D feature volume by sums of vector ⊗matrix factors: F[i, j, k] = Σr vr[i]Mr[j, k] on each axis combination.
+```
+import torch
+import torch.nn as nn
+
+class TensoRFVM(nn.Module):
+    def __init__(self, R=8, F_=4, ranks=4):
+        super().__init__()
+        self.vec_x = nn.Parameter(torch.randn(F_, ranks, R))
+        self.mat_yz = nn.Parameter(torch.randn(F_, ranks, R, R))
+    def forward(self, x):
+        # x in [-1, 1]^3, only one axis combination shown
+        N = x.size(0)
+        # Approximate sample: nearest-neighbour for brevity
+        ix = ((x[:, 0] + 1) / 2 * (self.vec_x.size(-1) - 1)).long()
+        iy = ((x[:, 1] + 1) / 2 * (self.mat_yz.size(-2) - 1)).long()
+        iz = ((x[:, 2] + 1) / 2 * (self.mat_yz.size(-1) - 1)).long()
+        v = self.vec_x[:, :, ix] # (F, ranks, N)
+        M = self.mat_yz[:, :, iy, iz] # (F, ranks, N)
+        return (v * M).sum(dim=1).T # (N, F)
+```
+Tests
+```
+m = TensoRFVM(); out = m(torch.rand(8, 3) * 2 - 1)
+assert out.shape == (8, 4); print("TensoRF OK")
+```
+VI. Gaussian Splatting fundamentals
+27. 3D Gaussian primitive parameterisation — ★★★★
+Problem
+Reconstruct the 3D covariance from a unit quaternion q and per-axis scale s: Σ = R(q) diag(s)2 R(q)⊤.
+```
+import numpy as np
+
+def quat_to_rot(q):
+    w, x, y, z = q
+    return np.array([
+        [1 - 2*(y*y+z*z), 2*(x*y - z*w), 2*(x*z + y*w)],
+        [2*(x*y + z*w), 1 - 2*(x*x+z*z), 2*(y*z - x*w)],
+        [2*(x*z - y*w), 2*(y*z + x*w), 1 - 2*(x*x+y*y)]])
+
+def gaussian_cov(q, s):
+    R = quat_to_rot(q)
+    S = np.diag(s)
+    return R @ (S @ S) @ R.T
+```
+Tests
+```
+S = gaussian_cov(np.array([1, 0, 0, 0.0]), np.array([1, 2, 3.]))
+assert np.allclose(np.diag(S), [1, 4, 9]); print("3D cov OK")
+```
+28. EWA projection of a 3D Gaussian to 2D — ★★★★
+Problem
+Σ2D = JWΣW⊤J⊤where W is the camera rotation and J is the perspective Jacobian at µc.
+```
+import numpy as np
+
+def project_gaussian(mu, Sigma, K, R, t):
+    mu_c = R @ mu + t
+    z = mu_c[2]
+    fx, fy = K[0, 0], K[1, 1]
+    J = np.array([[fx / z, 0, -fx * mu_c[0] / z**2],
+                    [0, fy / z, -fy * mu_c[1] / z**2]])
+    Sigma2D = J @ R @ Sigma @ R.T @ J.T
+    uv = K[:2, :3] @ (mu_c / z)
+    return uv, Sigma2D, z
+```
+Tests
+```
+K = np.array([[100,0,32],[0,100,32],[0,0,1.]])
+uv, S, z = project_gaussian(np.array([0,0,1.]), 0.01*np.eye(3), K, np.eye(3), np.zeros(3))
+assert np.allclose(uv, [32, 32]) and S.shape == (2, 2)
+print("EWA OK")
+```
+29. Eigen-decomposition of a 2D covariance — ★★★
+Problem
+((a −c)/2)2 + b2.√ Closed form for 2×2 symmetric: eigenvalues λ± = (a + c)/2 ±
+```
+import math
+
+def eig2x2(S):
+    a, b, c = S[0, 0], S[0, 1], S[1, 1]
+    tr = (a + c) / 2; det = math.sqrt(((a - c) / 2) ** 2 + b * b)
+    return tr + det, tr - det
+```
+Tests
+```
+l1, l2 = eig2x2(np.array([[4, 0], [0, 1.]]))
+assert l1 == 4 and l2 == 1; print("eig2x2 OK")
+```
+30. Bounding box of a projected Gaussian — ★★★
+Problem
+√3-sigma AABB: largest eigenvalue λ+ gives the radius r = 3λ+. Box = [µ2D −r, µ2D + r].
+```
+import math
+
+def gaussian_bbox(uv, Sigma2D, sigma=3.0):
+    l1, _ = eig2x2(Sigma2D); r = sigma * math.sqrt(max(l1, 1e-9))
+    return uv - r, uv + r
+```
+Tests
+```
+lo, hi = gaussian_bbox(np.array([10., 10.]), np.eye(2))
+assert lo[0] < 10 and hi[0] > 10; print("bbox OK")
+```
+31. 2D Gaussian footprint evaluation — ★★★
+Problem
+2(p −µ2D)⊤Σ−1Evaluate G(p) = exp(−12D(p −µ2D)) at a batch of pixels.
+```
+import numpy as np
+
+def eval_gaussian_2d(p, mu, Sigma_inv):
+    d = p - mu
+    return np.exp(-0.5 * (d @ Sigma_inv * d).sum(-1))
+```
+Tests
+```
+p = np.array([[0., 0.], [1., 0.]])
+g = eval_gaussian_2d(p, np.zeros(2), np.eye(2))
+assert g[0] == 1.0 and g[1] < 1.0; print("2D gauss OK")
+```
+32. Alpha compositing of sorted Gaussians — ★★★★
+Problem
+i TiαiG2Dj<i(1 −αjG2DSort by depth, accumulate front-to-back: C = Σ(p)ci with Ti = Πj (p)). i
+```
+import numpy as np
+
+def alpha_composite(alphas, colors, gaussians_2d):
+    # alphas: (N,), colors: (N, 3), gaussians_2d: (N,) values at pixel
+    T = 1.0; out = np.zeros(3)
+    for a, c, g in zip(alphas, colors, gaussians_2d):
+        cov = a * g
+        out = out + T * cov * c
+        T = T * (1 - cov)
+        if T < 1e-4: break
+    return out, 1 - T
+```
+Tests
+```
+alpha = [1.0, 1.0]; colors = np.array([[1, 0, 0], [0, 1, 0.0]]); g = [1.0, 1.0]
+out, A = alpha_composite(alpha, colors, g)
+assert np.allclose(out, [1, 0, 0]); print("composite OK")
+```
+33. Per-tile Gaussian assignment — ★★★
+Problem
+Assign each Gaussian to all 16×16 tiles its 3-sigma bounding box overlaps.
+```
+import math
+
+def assign_to_tiles(uv, S, H, W, tile=16, sigma=3.0):
+    l1, _ = eig2x2(S); r = sigma * math.sqrt(max(l1, 1e-9))
+    x0 = max(0, int((uv[0] - r) // tile)); x1 = min(W // tile, int((uv[0] + r) // tile) + 1)
+    y0 = max(0, int((uv[1] - r) // tile)); y1 = min(H // tile, int((uv[1] + r) // tile) + 1)
+    return [(y, x) for y in range(y0, y1) for x in range(x0, x1)]
+```
+Tests
+```
+tiles = assign_to_tiles(np.array([20., 20.]), np.eye(2), H=64, W=64, tile=16)
+assert (1, 1) in tiles; print("tile assign OK")
+```
+34. Per-tile depth sort — ★★★
+Problem
+Build a 64-bit sort key (tile-id | depth) so a single radix sort produces tile-grouped, depth-sorted Gaussians.
+```
+import numpy as np
+
+def make_sort_keys(tile_ids, depths):
+    # tile_ids: (N,) int, depths: (N,) float >= 0
+    d = (depths * 1e6).astype(np.uint64)
+    return (np.asarray(tile_ids, dtype=np.uint64) << 32) | d
+
+def sort_by_key(keys, items):
+    order = np.argsort(keys)
+    return order, items[order]
+```
+Tests
+```
+keys = make_sort_keys(np.array([1, 0, 1]), np.array([0.5, 0.1, 0.2]))
+order, _ = sort_by_key(keys, np.arange(3))
+assert order[0] == 1; print("sort keys OK")
+```
+VII. Spherical harmonics
+35. SH basis (degree 0 – 2) — ★★★★
+Problem
+Evaluate the 9 real SH basis functions at a unit direction (x, y, z).
+```
+import torch
+
+def sh_basis_l2(d):
+    x, y, z = d[..., 0], d[..., 1], d[..., 2]
+    return torch.stack([
+        torch.full_like(x, 0.282095),
+        -0.488603 * y, 0.488603 * z, -0.488603 * x,
+        1.092548 * x * y, -1.092548 * y * z,
+        0.315392 * (3 * z * z - 1),
+        -1.092548 * x * z,
+        0.546274 * (x * x - y * y)], dim=-1)
+```
+Tests
+```
+out = sh_basis_l2(torch.tensor([[0., 0., 1.0]]))
+assert out.shape == (1, 9); print("SH OK")
+```
+36. SH-evaluated colour — ★★★
+Problem
+Given per-Gaussian SH coefficients of shape (N, 9, 3) and a viewing direction, return the colour.
+```
+import torch
+
+def sh_to_color(coeffs, d):
+    basis = sh_basis_l2(d) # (N, 9)
+    return torch.sigmoid((coeffs * basis.unsqueeze(-1)).sum(dim=-2))
+```
+Tests
+```
+c = torch.zeros(1, 9, 3); c[0, 0, :] = 1.0 # only DC term
+d = torch.tensor([[0., 0., 1.0]])
+out = sh_to_color(c, d); assert (out > 0.5).all()
+print("sh color OK")
+```
+37. SH degree warm-up schedule — ★★
+Problem
+Increase the active SH degree by 1 every K iterations during 3DGS training.
+```
+def active_sh_degree(step, schedule_every=1000, max_deg=3):
+    return min(step // schedule_every, max_deg)
+```
+Tests
+```
+assert active_sh_degree(0) == 0 and active_sh_degree(3500) == 3
+print("sh warmup OK")
+```
+VIII. 3DGS training mechanics
+38. Adaptive density: clone (small Gaussian) — ★★★
+Problem
+If the position gradient norm exceeds τ and the Gaussian is small, duplicate it with a small random offset.
+```
+import torch
+
+def clone(mu, scale, q, opacity, grad_norm, tau=2e-4, sigma_thresh=1.0):
+    mask = (grad_norm > tau) & (scale.max(-1).values < sigma_thresh)
+    if not mask.any(): return mu, scale, q, opacity
+    new_mu = mu[mask] + 0.01 * torch.randn_like(mu[mask])
+    return torch.cat([mu, new_mu]), torch.cat([scale, scale[mask]]), \
+            torch.cat([q, q[mask]]), torch.cat([opacity, opacity[mask]])
+```
+Tests
+```
+mu = torch.zeros(2, 3); s = torch.full((2, 3), 0.1); q = torch.zeros(2, 4)
+op = torch.full((2,), 0.5)
+mu2, _, _, _ = clone(mu, s, q, op, torch.tensor([1e-3, 0.0]))
+assert mu2.size(0) == 3; print("clone OK")
+```
+39. Adaptive density: split (large Gaussian) — ★★★
+Problem
+If the gradient is high and the Gaussian is large, replace it with two halves whose scale is divided by ϕ and positions are sampled from the parent’s distribution.
+```
+import torch
+
+def split(mu, scale, q, opacity, grad_norm, tau=2e-4, sigma_thresh=1.0, phi=1.6):
+    mask = (grad_norm > tau) & (scale.max(-1).values >= sigma_thresh)
+    if not mask.any(): return mu, scale, q, opacity
+    n = mask.sum().item()
+    eps1 = scale[mask] * torch.randn_like(scale[mask])
+    eps2 = scale[mask] * torch.randn_like(scale[mask])
+    new_mu = torch.cat([mu[mask] + eps1, mu[mask] + eps2])
+    new_s = scale[mask].repeat(2, 1) / phi
+    new_q = q[mask].repeat(2, 1)
+    new_op = opacity[mask].repeat(2)
+    keep = ~mask
+    return torch.cat([mu[keep], new_mu]), torch.cat([scale[keep], new_s]), \
+            torch.cat([q[keep], new_q]), torch.cat([opacity[keep], new_op])
+```
+Tests
+```
+mu = torch.zeros(1, 3); s = torch.full((1, 3), 2.0); q = torch.zeros(1, 4)
+op = torch.full((1,), 0.5)
+mu2, s2, _, _ = split(mu, s, q, op, torch.tensor([1e-3]))
+assert mu2.size(0) == 2 and s2.max() < 2.0; print("split OK")
+```
+40. Pruning low-opacity Gaussians — ★★★
+Problem
+Remove primitives whose opacity drops below εα = 0.005.
+```
+def prune_low_opacity(mu, scale, q, opacity, thr=0.005):
+    keep = opacity > thr
+    return mu[keep], scale[keep], q[keep], opacity[keep]
+```
+Tests
+```
+mu = torch.zeros(3, 3); op = torch.tensor([0.5, 0.001, 0.7])
+mu2, _, _, op2 = prune_low_opacity(mu, mu, mu, op)
+assert mu2.size(0) == 2; print("prune OK")
+```
+41. Opacity reset — ★★
+Problem
+Periodically reset all opacities to a small value (the default is 0.01) so the optimiser can escape opaque-but- wrong fits.
+```
+import torch
+
+def opacity_reset(opacity, value=0.01):
+    return torch.full_like(opacity, value)
+```
+Tests
+```
+o = torch.rand(10); r = opacity_reset(o)
+assert (r == 0.01).all(); print("opacity reset OK")
+```
+42. 3DGS photometric loss — ★★★
+Problem
+Iˆ−I L = (1 −λ)1 + λ(1 −SSIM) with λ = 0.2.
+```
+def gs_photo_loss(I_hat, I, ssim_fn, lam=0.2):
+    l1 = (I_hat - I).abs().mean()
+    return (1 - lam) * l1 + lam * (1 - ssim_fn(I_hat, I))
+```
+Tests
+```
+def ssim_fn(a, b): return torch.tensor(1.0) - (a - b).pow(2).mean()
+loss = gs_photo_loss(torch.zeros(1, 3, 4, 4), torch.zeros(1, 3, 4, 4), ssim_fn)
+assert loss.item() == 0; print("gs loss OK")
+```
+43. Gaussian center 2D-position gradient norm — ★★★
+Problem
+Track ∥∇µ2DL∥across multiple training views to drive densification.
+```
+import torch
+
+class GradTracker:
+    def __init__(self, n):
+        self.acc = torch.zeros(n); self.cnt = torch.zeros(n)
+    def update(self, idx, grad):
+        self.acc[idx] += grad.abs(); self.cnt[idx] += 1
+    def normalized(self):
+        return self.acc / self.cnt.clamp(min=1)
+```
+Tests
+```
+g = GradTracker(4); g.update(torch.tensor([0, 1]), torch.tensor([1., 2.]))
+g.update(torch.tensor([0]), torch.tensor([3.]))
+out = g.normalized(); assert abs(out[0].item() - 2.0) < 1e-6
+print("grad track OK")
+```
+44. Compactify a sparse pruning mask — ★★
+Problem
+After pruning, re-pack arrays so their indices are contiguous; remap ID maps accordingly.
+```
+def compact(arrays, keep_mask):
+    return [a[keep_mask] for a in arrays]
+```
+Tests
+```
+a = torch.arange(10); m = torch.tensor([True, False] * 5)
+out = compact([a], m); assert (out[0] == torch.tensor([0,2,4,6,8])).all()
+print("compact OK")
+```
+IX. 2DGS, surfaces, and meshes
+45. 2DGS oriented-disk parameterisation — ★★
+Problem
+A 2D Gaussian primitive lies on a plane defined by two tangent axes (tu, tv) and a normal n = tu × tv. Render along its surface, not as a 3D ellipsoid.
+```
+def disk_basis(q, s):
+    R = quat_to_rot(q); n = R[:, 2]; tu = R[:, 0] * s[0]; tv = R[:, 1] * s[1]
+    return tu, tv, n
+```
+Tests
+```
+tu, tv, n = disk_basis(np.array([1., 0, 0, 0]), np.array([1., 1., 0]))
+assert np.allclose(np.cross(tu, tv) / (np.linalg.norm(tu) * np.linalg.norm(tv)), n)
+print("disk basis OK")
+```
+46. Ray-disk intersection — ★★
+Problem
+Find t where ray o + td crosses the plane n⊤(x −µ) = 0, then check ellipse condition.
+```
+import numpy as np
+
+def ray_disk(o, d, mu, n, tu, tv):
+    denom = n @ d
+    if abs(denom) < 1e-9: return None
+    t = (n @ (mu - o)) / denom
+    p = o + t * d
+    a = (p - mu) @ tu / (np.linalg.norm(tu) ** 2 + 1e-9)
+    b = (p - mu) @ tv / (np.linalg.norm(tv) ** 2 + 1e-9)
+    if a * a + b * b > 1: return None
+    return t
+```
+Tests
+```
+t = ray_disk(np.array([0,0,-1.]), np.array([0,0,1.]), np.zeros(3),
+            np.array([0,0,1.]), np.array([1,0,0.]), np.array([0,1,0.]))
+assert t == 1.0; print("ray-disk OK")
+```
+47. SuGaR-style mesh extraction (sketch) — ★
+Problem
+After 2DGS training, sample points on each disk’s plane within 1σ, then run Poisson reconstruction or Marching Cubes on a derived occupancy field.
+```
+import numpy as np
+
+def sample_on_disks(mus, scales, n=10):
+    pts = []
+    for mu, s in zip(mus, scales):
+        u = np.random.uniform(-1, 1, (n, 2))
+        u = u[np.linalg.norm(u, axis=-1) <= 1]
+        pts.append(mu + u @ np.diag(s[:2]))
+    return np.concatenate(pts, 0)
+```
+Tests
+```
+mus = np.zeros((4, 3)); s = np.ones((4, 3))
+pts = sample_on_disks(mus, s, n=20); assert pts.shape[1] == 3
+print("disks->points OK")
+```
+X. Dynamic / 4D Gaussian Splatting
+48. Spacetime Gaussian temporal envelope — ★★
+Problem
+Each Gaussian gets a temporal Gaussian: gt(t) = exp(−(t−t0)2/(2σ2t )). Density is multiplied by this envelope at sampling time.
+```
+import torch
+
+def temporal_envelope(t, t0, sigma_t):
+    return torch.exp(-((t - t0) ** 2) / (2 * sigma_t ** 2))
+```
+Tests
+```
+out = temporal_envelope(torch.tensor([0., 1., 2.]), torch.tensor(1.0), torch.tensor(0.5))
+assert out[1].item() == 1.0 and out[0] < 1.0; print("temporal env OK")
+```
+49. 4DGS deformation field — ★★
+Problem
+A network D maps (x, t) → (∆µ, ∆s, ∆q) to deform a canonical Gaussian.
+```
+import torch
+import torch.nn as nn
+
+class DeformNet(nn.Module):
+    def __init__(self, x_ch=3, t_ch=1, W=64):
+        super().__init__()
+        self.l = nn.Sequential(nn.Linear(x_ch + t_ch, W), nn.ReLU(),
+                                nn.Linear(W, 3 + 3 + 4))
+    def forward(self, x, t):
+        z = torch.cat([x, t.unsqueeze(-1)], dim=-1)
+        out = self.l(z)
+        return out[..., :3], out[..., 3:6], out[..., 6:]
+```
+Tests
+```
+m = DeformNet(); dx, ds, dq = m(torch.randn(8, 3), torch.rand(8))
+assert dx.shape == (8, 3); print("deform OK")
+```
+50. Polynomial trajectory of Gaussian centers — ★★
+Problem
+µ(t) = µ0 + a1t + a2t2 + . . . + aKtK. Used by Spacetime Gaussians.
+```
+def poly_traj(mu0, coeffs, t):
+    out = mu0.clone()
+    for k, a in enumerate(coeffs, 1): out = out + a * (t ** k).unsqueeze(-1)
+    return out
+```
+Tests
+```
+out = poly_traj(torch.zeros(2, 3), [torch.ones(2, 3)], torch.tensor([0.5, 1.0]))
+assert torch.allclose(out, torch.tensor([[0.5]*3, [1.0]*3])); print("poly traj OK")
+```
+XI. Compression and serving
+51. Importance pruning by accumulated alpha — ★★★
+Problem
+Score each Gaussian by the average accumulated alpha-weighted contribution across training views; drop bottom 30–80%.
+```
+import torch
+
+def importance_prune(scores, frac=0.5):
+    thr = torch.quantile(scores, frac)
+    keep = scores >= thr
+    return keep
+```
+Tests
+```
+keep = importance_prune(torch.tensor([0.1, 0.2, 0.3, 0.4]), frac=0.5)
+assert keep.sum() == 2; print("importance OK")
+```
+52. Vector quantisation of attributes — ★★
+Problem
+Quantise SH coefficients via K-means: store an index per Gaussian + a codebook of length K.
+```
+import numpy as np
+
+def vq_kmeans(X, K=16, iters=10, rng=None):
+    rng = rng or np.random.default_rng(0)
+    N = len(X); idx = rng.choice(N, K, replace=False)
+    C = X[idx].copy()
+    for _ in range(iters):
+        d = ((X[:, None] - C[None]) ** 2).sum(-1)
+        a = d.argmin(axis=1)
+        for k in range(K):
+            sel = X[a == k]
+            if len(sel) > 0: C[k] = sel.mean(0)
+    return a, C
+```
+Tests
+```
+X = np.random.randn(100, 8); a, C = vq_kmeans(X, K=4)
+assert C.shape == (4, 8); print("VQ OK")
+```
+53. INT8 / FP16 quantisation of positions — ★★★
+Problem
+Per-tensor quantise µ ∈ R3 to FP16; scales/rotations to INT8 with per-axis scale.
+```
+import torch
+
+def quantize_int8(x):
+    s = x.abs().max() / 127.0
+    return torch.round(x / s).clamp(-127, 127).to(torch.int8), s
+
+def dequantize_int8(q, s):
+    return q.float() * s
+```
+Tests
+```
+x = torch.randn(64); q, s = quantize_int8(x); y = dequantize_int8(q, s)
+assert (x - y).abs().mean() < 0.01; print("int8 OK")
+```
+54. Hierarchical LoD anchor (Scaffold-GS sketch) — ★★
+Problem
+Anchor primitives at voxel centers; for each anchor, an MLP outputs K child Gaussian parameters per query view direction.
+```
+import torch
+import torch.nn as nn
+
+class Scaffold(nn.Module):
+    def __init__(self, n_anchors, K=4, F_=8):
+        super().__init__()
+        self.anchors = nn.Parameter(torch.randn(n_anchors, 3))
+        self.feats = nn.Parameter(torch.randn(n_anchors, F_))
+        self.head = nn.Linear(F_ + 3, K * 11)
+        self.K = K
+    def forward(self, view_dir):
+        # repeat for all anchors
+        x = torch.cat([self.feats, view_dir.expand(self.feats.size(0), 3)], dim=-1)
+        return self.head(x).view(-1, self.K, 11)
+```
+Tests
+```
+m = Scaffold(8); out = m(torch.tensor([[0., 0., 1.]]))
+assert out.shape == (8, 4, 11); print("scaffold OK")
+```
+XII. Metrics and tools
+55. PSNR — ★★★★
+Problem
+PSNR = 10 log10(max2/MSE).
+```
+import torch
+
+def psnr(x, y, max_val=1.0):
+    mse = ((x - y) ** 2).mean()
+    return 10 * torch.log10(max_val ** 2 / mse.clamp(min=1e-12))
+```
+Tests
+```
+x = torch.rand(3, 8, 8); y = x + 1e-3 * torch.randn_like(x)
+assert psnr(x, y) > 40; print("psnr OK")
+```
+56. SSIM (single-scale) — ★★★★
+Problem
+Implement SSIM with 11×11 Gaussian window; verify SSIM(x, x) = 1.
+```
+import torch
+import torch.nn.functional as F
+
+def gaussian_kernel_1d(sigma, k):
+    half = k // 2; x = torch.arange(-half, half + 1).float()
+    g = torch.exp(-0.5 * (x / sigma) ** 2); return g / g.sum()
+
+def ssim(x, y, win=11, C1=0.01**2, C2=0.03**2):
+    g = gaussian_kernel_1d(1.5, win); Cn = x.size(1)
+    g = g.view(1, 1, 1, win).expand(Cn, 1, 1, win); pad = win // 2
+    def f(z): return F.conv2d(F.conv2d(z, g, padding=(0, pad), groups=Cn),
+                                g.transpose(2, 3), padding=(pad, 0), groups=Cn)
+    mu_x = f(x); mu_y = f(y)
+    sx = f(x * x) - mu_x * mu_x; sy = f(y * y) - mu_y * mu_y
+    sxy = f(x * y) - mu_x * mu_y
+    return (((2 * mu_x * mu_y + C1) * (2 * sxy + C2)) /
+            ((mu_x * mu_x + mu_y * mu_y + C1) * (sx + sy + C2))).mean()
+```
+Tests
+```
+x = torch.rand(1, 1, 32, 32)
+assert abs(ssim(x, x).item() - 1.0) < 1e-3; print("ssim OK")
+```
+57. LPIPS sketch (learned perceptual) — ★★
+Problem
+Approximate LPIPS by extracting features from a pretrained backbone, normalising per channel, and taking L2 distance.
+```
+def lpips_sketch(feat_a, feat_b):
+    # feat_a, feat_b: list of feature maps from same layers
+    out = 0
+    for a, b in zip(feat_a, feat_b):
+        a = a / (a.norm(dim=1, keepdim=True) + 1e-9)
+        b = b / (b.norm(dim=1, keepdim=True) + 1e-9)
+        out = out + ((a - b) ** 2).mean()
+    return out
+```
+Tests
+```
+a = [torch.randn(1, 8, 4, 4)]
+print("lpips OK", lpips_sketch(a, [x.clone() for x in a]).item())
+```
+XIII. SLAM and 3DGS
+58. Photometric tracking step (RGB) — ★★
+Problem
+p ∥I(warp(p; ξ)) −I⋆(p)∥2. Take a Gauss-NewtonFor a small camera pose perturbation ξ ∈ R6, minimise Σ step.
+```
+import numpy as np
+
+def photo_track_step(I, I_star, J_xi, residual):
+    # J_xi: (N, 6); residual: (N,)
+    H = J_xi.T @ J_xi + 1e-6 * np.eye(6)
+    g = J_xi.T @ residual
+    return -np.linalg.solve(H, g)
+```
+Tests
+```
+J = np.eye(6); r = np.ones(6)
+dxi = photo_track_step(None, None, J, r)
+assert np.allclose(dxi, -np.ones(6), atol=1e-3); print("photo track OK")
+```
+59. Online densification (SplaTAM-style) — ★★
+Problem
+Add Gaussians wherever the current renderer has high reconstruction error and the depth gradient suggests a new surface.
+```
+def online_densify(rgb_err, depth, mask, max_new=1024):
+    score = rgb_err * mask
+    flat = score.flatten()
+    n = min(max_new, (flat > 0).sum().item())
+    _, idx = flat.topk(n)
+    return idx
+```
+Tests
+```
+err = torch.rand(8, 8); m = torch.ones(8, 8)
+idx = online_densify(err, None, m, max_new=4); assert idx.numel() == 4
+print("online densify OK")
+```
+60. Loop-closure correction (rigid update of Gaussians) — ★★
+Problem
+After a SLAM loop closure with correction T∆, update all Gaussians: µ′ = T∆µ, R′ = T R ∆R.
+```
+def loop_correct(mus, qs, T_delta):
+    R = T_delta[:3, :3]; t = T_delta[:3, 3]
+    mus2 = mus @ R.T + t
+    # quaternion update is omitted for brevity; multiply by quat(R) in real code.
+    return mus2, qs
+```
+Tests
+```
+mus = np.random.randn(4, 3); T = np.eye(4); T[0, 3] = 1.0
+mus2, _ = loop_correct(mus, None, T)
+assert np.allclose(mus2 - mus, np.array([1, 0, 0])); print("loop OK")
+```
+XIV. Closing tips
+Notes
+Survival tactics for live neural-rendering coding: i Tiαici with αi = 1 −e−σiδi. Distinguish opacity• Always derive the volume rendering integral first: C = Σ (α) and density (σ).
+For NeRF MLPs: positional encoding bands Lx = 10, Ld = 4, skip connection at layer 4, separate density / colour heads, and view-direction injected only into the colour branch.
+For SDF-based methods (NeuS, VolSDF): include the eikonal regularizer to enforce ∥∇s∥= 1.
+For 3DGS: walk through the pipeline — (i) parameterise covariance via (q, s), (ii) project via EWA, (iii) tile-bin and depth-sort, (iv) per-pixel alpha-composite, (v) density control (clone / split / prune / opacity reset).
+Densification thresholds matter: position-gradient ∼2×10−4, prune below opacity 5×10−3, opacity reset every 3000 iters, SH degree warm-up every 1000 iters.
+For dynamic / 4D: separate a canonical model from a deformation field; for very fast motion use Spacetime Gaussians’ temporal envelope and polynomial trajectories.
+For surfaces and meshes: don’t use vanilla 3DGS — switch to 2DGS / SuGaR / GOF or NeuS-style SDF.
+Compression: prune → vector-quantise SH → INT8 / FP16 → Scaffold-GS for LoD.
+Always end implementations with a sanity check: identity Gaussian projects to the standard EWA formula; uniform σ field with α = 1 produces the foreground colour; alpha composition with two opaque primitives yields the front one’s colour.

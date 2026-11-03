@@ -1,0 +1,197 @@
+Pan/zoom on a 209M-point COPC (the WV 3DEP merge) hangs: measured with a rAF long-frame monitor during live interaction, the main thread stalls up to 1.9 seconds whenever a batch of streamed octree nodes lands. Average fps between stalls...
+
+Point cloud viewer performance on huge clouds: incremental node rendering / SSE LOD · Issue #183 · palavido-dev/gratis-gis · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Point cloud viewer performance on huge clouds: incremental node rendering / SSE LOD #183
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Point cloud viewer performance on huge clouds: incremental node rendering / SSE LOD#183
+Copy link
+Assignees
+Labels
+3dTerrain, point clouds, 3D renderingTerrain, point clouds, 3D renderinghelp wantedExtra attention is neededExtra attention is needed
+Description
+palavido-dev
+opened on Jul 20, 2026
+Issue body actions
+Pan/zoom on a 209M-point COPC (the WV 3DEP merge) hangs: measured with a rAF long-frame monitor during live interaction, the main thread stalls up to 1.9 seconds whenever a batch of streamed octree nodes lands. Average fps between stalls is fine (~50), so this is batch-rebuild jank, not steady-state render cost.
+Why
+maplibre-gl-lidar decodes LAZ in workers, but every stream update rebuilds the deck.gl layer dataset on the main thread: node buffers get merged into fresh typed arrays and the layers are recreated, so cost scales with the full in-memory budget rather than the delta. Camera movement triggers repeated rebuilds (debounced at 150ms by default). Point picking additionally maintains a picking buffer over the whole set.
+Shipped mitigation (size-aware tuning)
+Clouds over 20M points now load with a 1.5M streaming budget, 400ms viewport debounce, and picking off by default (panel toggle still available); smaller clouds keep 4M/150ms/picking. This trades density for responsiveness inside the current renderer and is honest about being a tuning knob, not a fix.
+The real fixes, in order of leverage
+Incremental node management in the renderer. The mature viewers (Potree, Cesium, deck.gl's Tile3DLayer traversal) never rebuild the world per update: each octree node becomes its own GPU resource, added/removed individually, with screen-space-error-driven traversal deciding which nodes are resident. deck.gl supports this shape today (one PointCloudLayer per node, or Tile3DLayer's managed traversal). Worth an upstream issue/PR against maplibre-gl-lidar: append/evict per-node layers instead of dataset rebuild. Biggest win, benefits every consumer of the library.
+Screen-space error LOD. Budget alone picks how MANY points; SSE picks the RIGHT points per view (coarse nodes when zoomed out, deep nodes only in the close-up frustum). COPC's octree carries everything needed. This is what makes "zoom out over 200M points" cheap in Potree.
+3D Tiles as the heavy-cloud path (strategy phase B). Convert COPC to 3D Tiles 1.1 server-side (py3dtiles / pdal pipelines) and render with deck.gl Tile3DLayer, which already implements SSE traversal, per-tile GPU resources, and eviction. Phase B of the 3D direction wants Tile3DLayer anyway for meshes and terrain; point clouds riding the same renderer consolidates the stack. The COPC endpoint stays for interchange and external viewers either way.
+Suggested sequence: file the upstream incremental-append issue now (1), prototype Tile3DLayer with a converted copy of the WV cloud when phase B starts (3), and treat (2) as part of whichever renderer wins.
+Activity
+palavido-dev commented on Oct 26, 2026
+palavido-dev
+on Oct 26, 2026
+OwnerAuthor
+More actions
+Progress on the interim mitigation (not the real incremental/SSE fix):
+Tip on #318 adds an ultra tier for clouds over 100M points on top of the existing 20M huge tier:
+tier
+budget
+debounce
+concurrent
+picking
+default
+4M
+150ms
+4
+on
+huge (>20M)
+1.5M
+400ms
+4
+off
+ultra (>100M)
+750k
+600ms
+2
+off
+Still waiting on upstream maplibre-gl-lidar incremental per-node append (and SSE LOD / Tile3DLayer path) for the real fix.
+cursor
+added a commit that references this issue on Oct 26, 2026
+feat(portal-web): ultra point-cloud tier + locale format sweep (#183/#…
+...
+379f59d
+palavido-dev commented on Oct 26, 2026
+palavido-dev
+on Oct 26, 2026
+OwnerAuthor
+More actions
+Not addressed in #321. Point-cloud incremental/SSE LOD performance work remains — leaving open.
+palavido-dev commented on Oct 27, 2026
+palavido-dev
+on Oct 27, 2026
+OwnerAuthor
+More actions
+Progress on tip (cursor/point-cloud-lod-183-2838):
+Shared streaming tiers — streamingOptionsForPointCount now drives both the item viewer and the map overlay. Maps pick up the ultra (>100M) budget/debounce/concurrent caps that were previously viewer-only.
+Move-deferred rebuilds — deferLidarUpdatesWhileMoving wraps PointCloudManager.updatePointCloud so stream batches coalesce until MapLibre moveend/zoomend. Streaming I/O continues; interactive pan no longer pays a full deck.gl rebuild per batch.
+Still not the real fix (per-node GPU resources / SSE LOD / Tile3DLayer). Upstream issue against opengeos/maplibre-gl-lidar could not be opened from this token (no createIssue scope); will file manually or when credentials allow.
+PR: will link once opened.
+palavido-dev commented on Oct 27, 2026
+palavido-dev
+on Oct 27, 2026
+OwnerAuthor
+More actions
+PR: #323
+palavido-dev
+added a commit that references this issue on Oct 27, 2026
+Merge pull request #323 from palavido-dev/cursor/point-cloud-lod-183-…
+...
+f76d34f
+palavido-dev commented on Oct 27, 2026
+palavido-dev
+on Oct 27, 2026
+OwnerAuthor
+More actions
+Merged #323 to main (12/12 CI green).
+Shipped mitigations only — leaving this issue open until upstream per-node append / SSE LOD (or a Tile3DLayer path) lands.
+palavido-dev commented on Oct 27, 2026
+palavido-dev
+on Oct 27, 2026
+OwnerAuthor
+More actions
+Research note for the upstream incremental-append path (not a product fix, does not close this issue):
+Note: docs/research/maplibre-gl-lidar-incremental-append-2026-10-27.md (PR docs(research): maplibre-gl-lidar incremental append note (#183) #336)
+Covers rebuild jank in PointCloudManager.updatePointCloud, proposed per-node append/evict, and why local huge/ultra tiers + move-deferred rebuilds remain mitigations only.
+Upstream opengeos/maplibre-gl-lidar issue still needs filing from a token with createIssue on that org; the note is the paste-ready brief.
+Tile3D / COPC conversion path stays queued as needs-maintainer (strategy phase B).
+palavido-dev
+added a commit that references this issue on Oct 27, 2026
+Merge pull request #336 from palavido-dev/cursor/lidar-incremental-wr…
+...
+0ac6002
+palavido-dev commented on Oct 27, 2026
+palavido-dev
+on Oct 27, 2026
+OwnerAuthor
+More actions
+Research note merged via #336 (docs/research/maplibre-gl-lidar-incremental-append-2026-10-27.md). Leaving this issue open until upstream per-node append/SSE (or an explicit Tile3D path) lands.
+palavido-dev
+added a commit that references this issue on Oct 28, 2026
+Autonomy: research-cycle-8 refill ship-without-input queue (#397)
+...
+1bf8e66
+palavido-dev
+closed this as completedin 60d1348on Oct 28, 2026
+palavido-dev commented on Oct 28, 2026
+palavido-dev
+on Oct 28, 2026
+OwnerAuthor
+More actions
+Reopened after #404. That PR was docs/UI honesty for size-aware streaming tiers only (mitigations, not Potree/Tile3D). Playbook still tracks COPC → 3D Tiles / SSE LOD as needs-maintainer (Q-183b); do not close this issue on local density knobs alone.
+palavido-dev
+reopened this on Oct 28, 2026
+suhendra0812
+added 4 commits that reference this issue on Oct 29, 2026
+fix(point-cloud): align ultra tier + defer rebuilds while moving (pal…
+...
+2353b1f
+docs(research): maplibre-gl-lidar incremental append note (palavido-d…
+...
+9a787ba
+chore(deps): bump maplibre-gl-lidar to 0.21 and drop overlay patch
+...
+71c01f2
+docs(point-cloud): honest size-aware streaming tiers (palavido-dev#183 …
+...
+60d1348
+palavido-dev commented on Oct 30, 2026
+palavido-dev
+on Oct 30, 2026
+OwnerAuthor
+More actions
+Triage (2026-10-30)
+Status: Keep open — real fix is still strategy work, not another tuning PR.
+Shipped mitigations already on main: size-aware streaming budget / debounce / picking defaults for large COPC; lidar dep bumps. Those reduce jank but do not implement incremental node GPU resources or SSE LOD.
+Still blocked / needs-maintainer:
+Upstream incremental append/evict in the lidar renderer (biggest leverage)
+Screen-space-error LOD
+COPC → 3D Tiles heavy-cloud path (strategy phase B) — tracked as Q-183b in docs/autonomy/QUEUE.md
+Autonomy playbook continues to reject closing this on local rebuild/tuning alone. No ship-without-input PR planned until (1) or (3) is unblocked.
+palavido-dev
+added
+help wantedExtra attention is neededExtra attention is needed
+3dTerrain, point clouds, 3D renderingTerrain, point clouds, 3D rendering
+on Oct 30, 2026
+palavido-dev
+assigned
+yukikato123123123-byte
+on Oct 30, 2026
+palavido-dev
+added a commit that references this issue on Oct 30, 2026
+docs: outreach corrections and AI disclosure (maintainer review) (#515)
+...
+31f1e71
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+yukikato123123123-byte
+Labels
+3dTerrain, point clouds, 3D renderingTerrain, point clouds, 3D renderinghelp wantedExtra attention is neededExtra attention is needed
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

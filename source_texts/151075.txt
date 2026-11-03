@@ -1,0 +1,522 @@
+COMPUTER GRAPHICS forum
+Pacific Graphics 2026
+Y. He, N. Thürey, and L. Liu
+(Guest Editors)
+Volume 45 (2026), Number 7
+TileGS: Tile-Local Depth Binning for Gaussian Splatting
+Rasterization
+Supplemental Material
+Wei Tan1
+Matias Turkulainen1
+Lauri Ilola2
+Hamed Rezazadegan Tavakoli2
+Juho Kannala1
+1
+2
+Aalto University, Finland
+Nokia Technologies, Finland
+Algorithm 1 Overall TileGS forward path
+Input: Projected Gaussian attributes; baseline Gaussian–tile entries E; image and tile dimensions; K = 64
+Output: Rendered image matching baseline compositing up to numerical noise
+1: Estimate robust depth range [zmin , zmax ] using Algorithm 2
+2: Build a tile-bin-major pair stream and bin offsets using Algorithm 3
+3: Apply selected exact repair by sorting selected tile/bin segments using Algorithm 4
+4: Rasterize the repaired tile-bin-major stream using the binned
+traversal procedure in Section 4
+5: return rendered image
+Overview. This supplemental material provides implementationlevel pseudocode for the TileGS forward path used in the main paper. The goal is to clarify the execution structure: robust depthrange estimation, tile-local bin construction, selective exact repair, and binned raster traversal. The pseudocode follows the current No-GW implementation at the level of data dependencies and
+routing decisions, while omitting low-level CUDA launch details,
+workspace allocation, and optional profiling/debug paths.
+1. Notation and Default Configuration
+Let E denote the emitted Gaussian–tile intersection entries. Each
+entry stores a tile id t(e), a Gaussian id g(e), and an original baseline sort key s(e) encoding the baseline depth order inside the tile. TileGS assigns each entry to a coarse bin b(e) ∈
+{0, . . . , K − 1} and constructs a flattened tile-bin-major stream. For
+each tile t, the offset array binOffsets[t, 0 . . . K] defines the concatenated interval for all bins in that tile; the segment for bin b
+is [binOffsets[t, b], binOffsets[t, b + 1]).
+Table 1: Default No-GW configuration represented by this supplement.
+Setting
+Value
+Raster path
+No-GW: no pre-raster geometry materialization
+Depth bins
+K = 64
+Depth-to-bin map- Log-space (default); linear variant availping
+able but unused
+Depth-range per- plo = 1.0, phi = 99.0
+centiles
+Depth-range
+fpad = 0.05 (5% of clipped span)
+padding
+Depth-range sam- Up to S = 8192 candidates
+ple count
+Depth-range selec- Exact order statistics (kthvalue); histion method
+togram alternative exists but unused
+Near-depth shift
+Enabled by default, α = 1.0, γ = 0.25
+Count/scatter path Direct atomic tile-bin construction
+Warp-key grouping Disabled in the reported default
+Geometry sidecar
+Disabled for No-GW; optional for the
+Packed-GW ablation
+Flat-id sidecar
+Optional; otherwise the raster kernel
+reads the flat id from the pair stream
+Raster replay
+Concatenated tile-bin stream in front-toback bin order
+Color staging
+Enabled by default in the binned raster
+kernel
+Conservative alpha Enabled by default in the binned raster
+cull
+kernel
+Repair
+Selective exact repair for selected tile/bin
+segments
+2. Tile-Local Bin Construction
+The current implementation builds a pair stream. Each pair stores
+the original baseline ordering key and the Gaussian flat id. The final
+pair stream is tile-bin-major: all entries of tile t, bin 0 appear before entries of tile t, bin 1, and so on. In the No-GW path, the raster
+© 2026 The Author(s). Computer Graphics Forum published by Eurographics - The European Association for Computer Graphics and John Wiley & Sons Ltd.
+This is an open access article under the terms of the Creative Commons Attribution License, which
+permits use, distribution and reproduction in any medium, provided the original work is properly
+cited.
+kernel normally fetches geometry attributes from the original arrays using the flat id. Packed-GW materializes optional geometry
+sidecars, but that path is not the default reported configuration.
+2 of 5
+Tan et al. / TileGS Supplemental Material
+Algorithm 2 Robust depth-range estimation
+Input: Projected depths; Gaussian scales; optional emitted flat ids;
+near/far planes; sample count S = 8192; near-depth shift parameters α = 1.0, γ = 0.25; percentiles plo = 1.0, phi = 99.0;
+padding fraction fpad = 0.05; numerical floor ϵ = 10−4
+Output: Robust clipped range [zmin , zmax ]
+1: Sample up to S depth candidates from visible Gaussians or
+emitted flat ids
+2: if near-depth mode is enabled (default) then
+3:
+Convert each sampled depth zc to zkey ← zc − min(α ·
+smax , γ · zc ), where smax is the Gaussian’s maximum projected
+scale
+4: end if
+5: Discard candidates with zkey ≤ 0; clamp remaining values using the near/far planes and ϵ
+6: Select the exact plo /phi percentile values of the sampled candidates via order statistics to obtain [zlo , zhi ]
+7: span ← max(zhi − zlo , 10−6 )
+8: zmin ← max(znear , zlo − fpad · span), zmax ← min(zfar , zhi +
+fpad · span)
+9: return [zmin , zmax ]
+Percentile selection uses exact order statistics (kthvalue) over
+the sampled candidates rather than a histogram approximation; this
+is the method that produced all reported results. A histogram-based
+percentile estimator (log-spaced, 128 bins by default) is available
+as an alternative but is not the default and was not used for the
+reported numbers. The near-depth shift is used only to form the
+binning key; it does not change the projected Gaussian attributes or
+the alpha-compositing equations used by the raster kernel.
+Algorithm 3 Tile-local bin construction
+Input: Baseline entries E with tile id t(e), flat id g(e), baseline sort
+key s(e), and depth z(e); clipped range [zmin , zmax ]; number of
+bins K
+Output: Tile offsets, bin offsets, tile-bin-major pair stream P, and
+optional sidecars
+1: Initialize count[t, b] ← 0 for all tiles and bins
+2: for all entries e ∈ E in parallel do
+3:
+b(e) ← log-depth-bin(z(e), zmin , zmax , K)
+4:
+Atomically increment count[t(e), b(e)]
+5: end for
+6: Exclusive-scan the count array to obtain binOffsets[t, b]
+7: Initialize write cursors from binOffsets
+8: for all entries e ∈ E in parallel do
+9:
+b ← b(e)
+10:
+p ← atomic increment of cursor[t(e), b]
+11:
+P[p] ← (s(e), g(e))
+12:
+if flat-id sidecar is enabled then
+13:
+flatIds[p] ← g(e)
+14:
+end if
+15:
+if Packed-GW geometry sidecar is enabled then
+16:
+Materialize selected geometry attributes at index p
+17:
+end if
+18: end for
+19: return tile offsets, binOffsets, P, and optional sidecars
+Table 2: Packed-GW diagnostic on RTX 4090. The April 22 profiling sweep shows that Packed-GW can reduce raster DRAM traffic,
+but the April 23 timing-only rerun is uniformly slower. We therefore
+use No-GW as the default and treat Packed-GW as a bandwidthoriented diagnostic.
+Evidence
+Result
+Interpretation
+April 22 profiling DRAM reduced in 7/9 bandwidth benefit
+sweep
+scenes
+exists
+Mean
+DRAM −28.64 MB
+traffic-side
+imchange
+provement
+Largest reductions garden −92.46 MB; strongest on heavy
+bicycle −82.34 MB scenes
+April 23 timing re- slower in 9/9 scenes not selected as derun
+fault
+Mean
+timing +0.208 ms / +7.87% materialization
+change
+cost dominates
+Table 3: Count/scatter construction variants on RTX 4090 (kernel_variant_full9_rtx4090_20260504_v3). All variants produce identical bin-offset arrays and Gaussian-ID streams;
+only construction/runtime overhead changes.
+Variant
+Mean time Relative to default
+(ms)
+Warp-key grouping
+Two-stage aggregation
+Default direct atomics
+Block-local hash agg.
+Warp-private histogram
+2.85796
+2.85863
+2.86811
+2.92911
+3.32800
+0.996×
+0.997×
+1.000×
+1.021×
+1.160×
+The mapping log-depth-bin(z, zmin , zmax , K) used above is, by default, a clamped log-space bin index:
+
+
+ln(max(z, ϵ)) − ln(z′min )
+−6
+u = clamp
+,
+0,
+1
+−
+10
+,
+ln(z′max ) − ln(z′min )
+b = ⌊Ku⌋ ,
+b ← clamp(b, 0, K − 1).
+where z′min = max(zmin , ϵ), z′max = max(zmax , z′min + 10−6 ), and
+−4
+ϵ = 10 . The per-entry depth z(e) passed to this mapping is the
+same near-depth-shifted key zkey used during range estimation (Algorithm 2), so bin assignment and range estimation apply an identical depth transform. A linear (non-log) variant with the same
+clamp-and-floor structure is available but is not the default.
+Warp-private histograms were slower than the default on all
+nine scenes, with the largest slowdowns on bicycle (+0.932 ms)
+and garden (+0.840 ms). Although warp-key grouping and twostage aggregation were within 0.4% of the default in this isolated
+sweep, a later paired rerun favored the final warp-key-disabled path
+by 0.01982 ms in median time and showed a tighter run range
+(0.01952 ms vs. 0.04773 ms). We therefore use direct atomics with
+warp-key grouping disabled as the reported default.
+3. Selective Exact Repair
+The implementation represents every coarse tile/bin slice as a logical segment. Repair is applied before rasterization by sorting se© 2026 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+Tan et al. / TileGS Supplemental Material
+lected segments according to their original baseline key. Nonselected segments remain in the tile-bin-major stream produced
+by the construction pass. The reported selective policy uses fixed
+global thresholds; they are not tuned per scene.
+3 of 5
+Algorithm 4 Selective repair selection and local exact sorting
+Input: Pair stream P; bin offsets; K; emitted-entry count M;
+repair-entry budget Brep = ⌊0.25M⌋
+Output: Pair stream with selected segments restored to baseline
+order
+1: R ← ∅, used ← 0
+2: for logical segment ids q = tK + b in tile-bin order do
+3:
+begin ← binOffsets[t, b]
+4:
+end ← binOffsets[t, b + 1]
+5:
+ℓ ← end − begin
+6:
+if ℓ ≤ 1 then
+7:
+continue
+8:
+end if
+9:
+ℓtile ← binOffsets[t, K] − binOffsets[t, 0]
+10:
+keep ← false
+11:
+if ℓ ≥ 320 then
+12:
+keep ← true
+13:
+end if
+14:
+if ℓ > 512 then
+15:
+keep ← true
+16:
+end if
+17:
+if ℓ/ℓtile ≥ 45% then
+18:
+keep ← true
+19:
+end if
+20:
+if 129 ≤ ℓ ≤ 256 and ℓ/ℓtile ≥ 10% then
+21:
+keep ← true
+22:
+end if
+23:
+if b < 2 and ℓ ≥ 16 then
+24:
+keep ← true
+25:
+end if
+26:
+if keep and used + ℓ ≤ Brep then
+27:
+Add (t, b, begin, end) to R
+28:
+used ← used + ℓ
+29:
+end if
+30: end for
+31: for all segments (t, b, begin, end) ∈ R do
+32:
+Sort P[begin : end) by original baseline key s(e)
+33:
+Keep flat-id/geometry sidecars aligned with the sorted pair
+order
+34: end for
+35: return repaired pair stream and aligned sidecars
+4. Binned Raster Traversal
+Table 4: Default selective-repair thresholds represented in the
+pseudocode.
+Parameter
+Default value
+No-repair threshold
+ℓ≤1
+Local exact-repair maximum
+512 entries
+Always-keep long segment cutoff ℓ ≥ 320
+Global-tail bucket
+ℓ > 512
+Tile-share cutoff
+ℓ/ℓtile ≥ 45%
+Local-256 share cutoff
+129 ≤ ℓ ≤ 256 and ℓ/ℓtile ≥ 10%
+Very-front cutoff
+b < 2 and ℓ ≥ 16
+Repair-entry budget
+Brep = ⌊0.25M⌋, where M = |E|
+© 2026 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+Relationship to the baseline traversal. At the control-flow level,
+Algorithm 5 resembles the baseline: each tile’s CUDA block
+linearly scans one contiguous interval of the pair stream, in
+batches, with the same per-pixel early-termination test. What
+differs from the baseline is the contents and organization of
+the interval being scanned. Concretely, the interval [a, b) =
+[binOffsets[t, 0], binOffsets[t, K]) that each tile’s block replays is
+not a single globally depth-sorted range as in the baseline, but the
+concatenation of the tile’s K coarse bins produced by tile-local bin
+construction (Algorithm 3), laid out back to back in front-to-back
+bin order — the tile-bin-major layout defined in the Tile-local bin
+construction subsection of the main paper’s Method section. Within
+a given bin’s sub-range, entries sit in whatever order the atomic
+4 of 5
+Tan et al. / TileGS Supplemental Material
+scatter of Algorithm 3 happened to produce; they are not depthsorted, except where selective exact repair (Algorithm 4) has restored exact baseline depth order to that specific segment. Algorithm 5 therefore requires no per-bin branching: the tile-local reordering is already baked into the stream before the raster kernel
+runs, so a plain linear scan over [a, b) is sufficient to consume the
+bins in front-to-back order. The main paper’s Mechanism analysis
+section discusses why this reordering, rather than any change to the
+traversal loop itself, is the source of the measured speedup.
+Implementation details. In the default No-GW path, the kernel
+loads Gaussian attributes from the original arrays using either a flatid sidecar or the flat id stored in the pair stream, using one CUDA
+block per tile. A profiling mode can instead replay a specified bin
+window in isolation, but this is not the default reported path. Thus,
+the default raster loop does not use intermediate bin boundaries as
+separate raster-loop exits; the boundaries determine the materialized stream layout and repair segments before rasterization. Algorithm 5 gives pseudocode for the binned raster traversal after repair.
+Algorithm 5 Binned raster traversal after repair (default No-GW
+path)
+Input: Repaired pair stream P; bin offsets; optional flat-id sidecar;
+Gaussian attributes; image/tile dimensions
+Output: Rendered colors, alphas, and last contributing ids
+1: for all tiles t in parallel do
+2:
+Determine tile pixel coordinates; skip masked tiles
+3:
+for all pixels p in tile t do
+4:
+C p ← 0; Tp ← 1
+5:
+end for
+6:
+a ← binOffsets[t, 0]; b ← binOffsets[t, K]
+7:
+for each batch in [a, b) do
+8:
+if all pixels in tile have terminated then break
+9:
+end if
+10:
+Load candidate Gaussian ids into shared memory
+11:
+if tile-alpha culling is enabled then
+12:
+Remove candidates below the tile-level contribution threshold
+13:
+end if
+14:
+if color staging is enabled then
+15:
+Stage candidate colors cooperatively in shared
+memory
+16:
+end if
+17:
+for all Gaussians g in surviving batch order do
+18:
+for all active pixels p in tile t do
+19:
+Count candidate visit if traversal profiling is enabled
+20:
+Evaluate the same opacity/conic test as the
+baseline
+21:
+Update C p and Tp using baseline alpha compositing
+22:
+if Tp reaches the early-termination threshold
+then
+23:
+Mark pixel p inactive
+24:
+end if
+25:
+end for
+26:
+end for
+27:
+end for
+28:
+Write final color, alpha, and last contributing id for each
+pixel
+29: end for
+30: return rendered image
+5. Synthetic Scale-Up Stress Diagnostic
+To complement the full 9-scene benchmark in the main paper, we
+include a single-view synthetic scale-up diagnostic on a fixed highworkload view from the real bicycle scene (_DSC8687.JPG).
+This diagnostic is not a replacement for the full benchmark; instead, it isolates how the sort/reordering and raster stages behave
+as the emitted Gaussian workload increases. We synthetically scale
+the workload from 5M to 30M Gaussians and measure median-of5 timings under the same locked RTX 4090 timing-only protocol
+used for the main evaluation.
+Figure 1 and Table 5 show that both the sort/reordering stage
+and the raster stage remain consistently cheaper for TileGS across
+the tested range, and the absolute timing gaps widen with scale.
+At 30M emitted entries, the sort stage improves by 1.71× and the
+© 2026 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+Tan et al. / TileGS Supplemental Material
+Figure 1: Synthetic scale-up diagnostic on a fixed high-workload
+bicycle view (_DSC8687.JPG). The workload increases from 5M
+to 30M Gaussians. TileGS keeps both sort/reordering and raster
+stages cheaper than the gsplat baseline; this should be read as supplementary scale-up evidence rather than as a new headline benchmark.
+Table 5: Synthetic scale-up timing on the fixed bicycle view used in
+Figure 1. Times are median-of-5 measurements on RTX 4090 under
+the locked timing-only protocol.
+Points
+Sort (ms)
+Raster (ms)
+Total (ms)
+(M) Base TileGS
+×
+Base TileGS
+×
+Base
+TileGS
+×
+5
+10
+15
+20
+25
+30
+2.72
+2.72
+2.13
+1.84
+1.75
+1.71
+2.277
+3.793
+4.939
+6.106
+7.035
+7.980
+1.46
+1.46
+1.44
+1.45
+1.43
+1.42
+4.843
+8.797
+12.174
+15.290
+18.311
+21.106
+4.345
+7.650
+10.772
+13.923
+16.733
+19.441
+1.11
+1.15
+1.13
+1.10
+1.09
+1.09
+1.051
+2.255
+3.230
+4.087
+4.906
+5.709
+0.387
+0.828
+1.513
+2.216
+2.807
+3.340
+1.554
+2.601
+3.440
+4.216
+4.916
+5.603
+raster stage by 1.42×, consistent with the main paper’s interpretation that tile-local depth-binned traversal reduces forward-pass cost
+as raster workload intensity increases. The total-frame speedup is
+smaller and not monotonic because the synthetic scale-up includes
+non-raster and auxiliary overheads that are not eliminated by the
+binned raster path; this behavior is consistent with the frame/kernel
+gap analysis in the main paper.
+6. Reproducibility Checklist
+For the main reported timing runs, use locked GPU clock presets,
+CUDA-event GPU timing, resident Gaussian parameters, and the
+same projected Gaussian inputs for baseline and TileGS. Nsight
+Compute counter collection should be performed in a separate
+profiling pass and should not be mixed with the primary timingonly measurements. Unless otherwise stated, use the No-GW path,
+K = 64, direct-atomic tile-bin construction with warp-key grouping disabled, color staging and conservative alpha culling enabled,
+log-space depth binning with the depth-range and near-depth-shift
+constants in Table 1, and selective exact repair with the thresholds
+in Table 4.
+© 2026 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+5 of 5

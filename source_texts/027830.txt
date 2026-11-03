@@ -1,0 +1,376 @@
+# GPU Isosurface Ray Casting
+
+A real-time **GPU-based isosurface ray casting** implementation developed for a Scientific Visualization exercise.
+
+Instead of extracting an explicit polygon mesh, the renderer directly searches for an isosurface while tracing rays through a volumetric scalar field.
+
+The implementation includes:
+
+- GPU ray marching
+- Isosurface intersection detection
+- Bisection-based hit refinement
+- Surface normal computation using central differences
+- Shadow ray traversal
+- Lambertian shading
+- Interactive control of isovalue, step size, refinement iterations, and shadows
+
+---
+
+## Demo
+
+<p align="center">
+  <img src="demo/isosurface-demo.gif"
+       alt="GPU Isosurface Ray Casting Demo"
+       width="900">
+</p>
+
+<p align="center">
+  <b>Real-time GPU isosurface ray casting</b>
+</p>
+
+The full recording is available here:
+
+```text
+demo/isosurface-demo.mkv
+```
+
+---
+
+## Overview
+
+An isosurface represents all positions in a scalar field where the scalar value is equal to a chosen isovalue.
+
+For a scalar field
+
+```text
+f(x)
+```
+
+and an isovalue
+
+```text
+c
+```
+
+the isosurface is defined by:
+
+```text
+f(x) = c
+```
+
+Instead of first generating a triangle mesh using an algorithm such as Marching Cubes, this project directly finds the visible surface by tracing rays through the volume.
+
+For every rendered pixel, a ray is constructed:
+
+```text
+x(t) = o + t d
+```
+
+where:
+
+```text
+o = ray origin
+d = ray direction
+t = distance along the ray
+```
+
+The algorithm searches along this ray for the first location where the scalar field crosses the selected isovalue.
+
+---
+
+## Rendering Pipeline
+
+```text
+                     Camera
+                       │
+                       ▼
+                 Construct Ray
+                       │
+                       ▼
+              Enter Volume Bounds
+                       │
+                       ▼
+                  Ray Marching
+                       │
+                       ▼
+               Detect Sign Change
+                       │
+                       ▼
+             Bisection Refinement
+                       │
+                       ▼
+               Refined Hit Point
+                       │
+              ┌────────┴─────────┐
+              │                  │
+              ▼                  ▼
+       Compute Normal       Shadow Ray
+              │                  │
+              └────────┬─────────┘
+                       ▼
+                Lambert Shading
+                       │
+                       ▼
+                  Final Color
+```
+
+---
+
+## 1. Isosurface Detection
+
+The isosurface is detected while marching through the volume.
+
+For the ray
+
+```text
+x(t) = o + t d
+```
+
+we define the signed function
+
+```text
+g(t) = f(x(t)) - c
+```
+
+The isosurface is reached whenever:
+
+```text
+g(t) = 0
+```
+
+Instead of expecting a ray sample to land exactly on the surface, consecutive samples are checked for a sign change.
+
+For two ray positions:
+
+```text
+ta
+tb
+```
+
+the intersection condition is:
+
+```text
+g(ta) * g(tb) <= 0
+```
+
+A sign change means that the isosurface lies somewhere between the two samples.
+
+Conceptually:
+
+```text
+Ray direction →
+
+----●---------●---------●---------●----
+
+   g > 0     g > 0     g < 0
+                       ↑
+                 sign change
+
+        Isosurface lies here
+```
+
+The first interval containing a sign change is stored and passed to the refinement stage.
+
+---
+
+## 2. Bisection Hit Refinement
+
+Ray marching only gives an interval containing the intersection.
+
+To obtain a more accurate surface position, the interval is refined using the **bisection method**.
+
+Starting with:
+
+```text
+[ta, tb]
+```
+
+the midpoint is calculated:
+
+```text
+tm = (ta + tb) / 2
+```
+
+The scalar field is evaluated at the midpoint:
+
+```text
+g(tm) = f(x(tm)) - c
+```
+
+The interval containing the sign change is kept:
+
+```text
+if g(ta) * g(tm) <= 0
+
+    tb = tm
+
+else
+
+    ta = tm
+```
+
+This process is repeated for several refinement iterations.
+
+After refinement:
+
+```text
+thit = (ta + tb) / 2
+```
+
+and the final surface position is:
+
+```text
+xhit = o + thit * d
+```
+
+Increasing the number of refinement iterations improves intersection accuracy without requiring a very small ray-marching step everywhere.
+
+---
+
+## 3. Surface Normal Computation
+
+To shade the isosurface, a surface normal is required.
+
+The normal is estimated from the scalar field gradient using **central differences**.
+
+For the x direction:
+
+```text
+gx = f(x + h, y, z) - f(x - h, y, z)
+```
+
+For the y direction:
+
+```text
+gy = f(x, y + h, z) - f(x, y - h, z)
+```
+
+For the z direction:
+
+```text
+gz = f(x, y, z + h) - f(x, y, z - h)
+```
+
+Together:
+
+```text
+gradient = (gx, gy, gz)
+```
+
+The surface normal is the normalized negative gradient:
+
+```text
+n = -gradient / |gradient|
+```
+
+The negative gradient is used so that the normal points outward toward the lighter medium.
+
+---
+
+## 4. Shadow Ray Traversal
+
+To improve depth perception, the implementation supports shadows.
+
+After finding the visible isosurface point:
+
+```text
+xhit
+```
+
+a secondary ray is cast toward the light.
+
+```text
+               Light
+                 *
+                /
+               /
+              /
+      shadow ray
+            /
+           ●  xhit
+```
+
+The shadow ray starts slightly away from the surface to avoid immediately intersecting the same surface because of numerical precision.
+
+The ray is then marched through the volume.
+
+If the isosurface is encountered again before leaving the volume:
+
+```text
+shadow = 0
+```
+
+The point is occluded.
+
+If no intersection is found:
+
+```text
+shadow = 1
+```
+
+The point is fully illuminated.
+
+---
+
+## 5. Lambertian Shading
+
+The final surface color uses Lambertian diffuse lighting.
+
+The lighting term is:
+
+```text
+L = max(0, dot(n, l))
+```
+
+where:
+
+```text
+n = surface normal
+l = light direction
+```
+
+The resulting color is:
+
+```text
+color = baseColor * L
+```
+
+When shadows are enabled:
+
+```text
+color = baseColor * L * shadow
+```
+
+This provides a simple but effective visualization of the surface geometry.
+
+---
+
+## Algorithm Summary
+
+For each pixel:
+
+```text
+1. Construct a ray through the volume.
+
+2. March along the ray.
+
+3. Sample the scalar field.
+
+4. Detect the first isovalue sign change.
+
+5. Refine the intersection with bisection.
+
+6. Compute the gradient at the hit position.
+
+7. Convert the gradient into a surface normal.
+
+8. Cast a shadow ray toward the light.
+
+9. Calculate Lambertian illumination.
+
+10. Write the final pixel color.
+```
+
+---
+
+## Important Parameters

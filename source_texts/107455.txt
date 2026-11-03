@@ -1,0 +1,162 @@
+I have been trying to create a voxel cone tracer for Unity (in Universal Render Pipeline 16). 
+ I have this  (unoptimized)  C# code that turns the [CubeScale] area around 0,0,0 of the scene into a 3D texture and saves it in the editor. 
+ using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEditor;
+
+
+
+public class LBTraceArea : MonoBehaviour
+{   
+    public Texture3D Volume;
+    public float CubeScale;
+    public int CubeQuality;
+    public string SaveAs;
+    
+    //pre-define texel size so it can be used among all functions
+    float texelSize = 1f;
+
+    // Start is called before the first frame update
+    void Start()
+    {   
+        Debug.Log(Volume.mipmapCount);
+        //define the size of 1 3d texel/volumetric cube pixel/voxel
+        texelSize = CubeScale / CubeQuality;
+        VoxelizeArea();
+        AssetDatabase.CreateAsset(Volume, "Assets/" + SaveAs + ".asset");
+        Debug.Log(Volume.mipmapCount);
+    }
+    
+    //function to create 3D texture AKA voxel image with scene objects.
+    void VoxelizeArea(){
+
+
+        //Setup a 3d Texture
+        
+        //Format
+        TextureFormat form = TextureFormat.RGBA32;
+        TextureWrapMode wrap = TextureWrapMode.Clamp;
+        
+        //Defining the Volume
+        Volume = new Texture3D(CubeQuality, CubeQuality, CubeQuality, form, false);
+        Volume.wrapMode = wrap;
+        Volume.filterMode = FilterMode.Trilinear;
+
+        //Create a volumetric color array.
+        Color[] color = new Color[CubeQuality * CubeQuality * CubeQuality];
+
+
+        //Loop to actually create the color volume
+        
+        //Define how offset the position of the object is from the center of the Volume.
+        //object Offset
+        Vector3 oOff = new Vector3(
+            transform.position.x + (CubeScale * -0.5f),
+            transform.position.x + (CubeScale * -0.5f),
+            transform.position.x + (CubeScale * -0.5f)
+        );
+
+        //define "Real Tick"/rt or how many loops total of all 3 for loops
+        int rt = 0;
+
+        //tx ty and tz is a pun because they are short for texel+(the axis, for example x) and also short for tick+(the axis, for example y)
+        for (int tx = 0; tx < CubeQuality; tx++){
+            for (int ty = 0; ty < CubeQuality; ty++){
+                for (int tz = 0; tz < CubeQuality; tz++){
+                    //tick area, ya have access to tx, ty, and tz all in here so you shouldn't need to be outsize of this when calculating coor math and stuff.
+
+                    //Color at Real Tick AKA rt would define the exact pixel at the exact position.
+                    //so Color[rt] would be Color at the pixel
+                    
+                    //color[rt] = new Color(tx, 1f, tz, ty);
+                    color[rt] = GetColorAtPosition(new Vector3(tz * texelSize, ty * texelSize, tx * texelSize) + oOff);
+                    
+                    rt++;
+                }
+            }
+        }
+
+        //Put the colors on the 3d bitmap volume and apply the changes so it gets resent to the GPU.
+        Volume.SetPixels(color);
+        Volume.Apply();
+
+    }
+    
+    //function to get an objects surface color at an exact Vector3 location
+    void GetColorAt(Vector3 cpos){
+
+    }
+
+    Color GetColorAtPosition(Vector3 position) {
+        Vector4 grabber = Vector4.zero;
+        grabber += GetColorAtPosAndRot(position, Vector3.up);
+        grabber += GetColorAtPosAndRot(position, -Vector3.up);
+        grabber += GetColorAtPosAndRot(position, Vector3.right);
+        grabber += GetColorAtPosAndRot(position, -Vector3.right);
+        grabber += GetColorAtPosAndRot(position, Vector3.forward);
+        grabber += GetColorAtPosAndRot(position, -Vector3.forward);
+        return grabber;
+    }
+
+    Vector4 GetColorAtPosAndRot(Vector3 position, Vector3 normal){
+        RaycastHit hit;
+        if (Physics.Raycast(position, normal, out hit, texelSize)){
+            Renderer renderer = hit.collider.GetComponent<Renderer>();
+            
+            if (renderer != null){
+                Texture2D texture = renderer.material.mainTexture as Texture2D;
+                
+                if (texture){
+                    Vector2 pixelUV = hit.textureCoord;
+                    pixelUV.x *= texture.width;
+                    pixelUV.y *= texture.height;
+
+                    return texture.GetPixel((int)pixelUV.x, (int)pixelUV.y);
+                } else {
+                    return renderer.material.color;
+                }
+            }
+            return new Vector4(1f,1f,1f,1f);
+        }
+        
+        return new Vector4(0f,0f,0f,0f);
+    }
+}
+ 
+ 
+ Please ignore the name of the texture. It does not currently have LODs or Mipmaps, it needs to have them which is why it is called that. 
+ The Debug.Log used at the end of void Start() returns with 1. which makes me believe there are no mipmaps. 
+ I also have a custom HLSL function in the shader editor to ray march the 3D texture. The desired results are for clean and noise-free global illumination. This may not be that useful for solving the problem, but it demonstrates what I am trying to accomplish. Here is the code for that. 
+ Color = float4(0, 0, 0, 0);
+Distance = 0;
+
+float MarchSize = 1 / VolumeQuality;
+
+float3 pos = float3(0,0,0);
+
+//Define t and start 4 steps out
+//4 because honestly it's the best I could do
+float t = MarchSize * 4;
+while (t < 1) {
+    
+
+
+    if (Color.a < 1) {
+        pos = Position + (Normal * t);
+        Color += SAMPLE_TEXTURE3D_LOD(Volume, Sampler, pos, Roughness * t);
+        Distance = t;
+    }
+    
+    //advance tick size
+    t += MarchSize;     
+}
+Color.a = min(Color.a, 1.0);
+ 
+ Here is what this raymarch looks like in a scene:
+ 
+ Here is what it SHOULD look like (except this image has a lot of noise because I had to stochastically sample this instead of sampling it with the mipmaps):
+ 
+ I need mipmaps for my Texture3D, otherwise, LOD on the SAMPLE_TEXTURE3D_LOD in my HLSL(the fourth parameter of that function) does not do anything. This is bad because if I cannot obtain Mipmaps on my 3D Texture, I cannot get my desired lack of noise, and I would have to resort to using stochastic sampling or giving up. So, I need to know how to generate mipmaps for my 3D Texture. 
+ Additional information: The 3D texture is only saved to the assetdatabase for now. I will later find a way to automatically apply the 3D texture to all raymarching shaders. I need to do this because (after I optimize my script that writes the scene to a 3D texture) I need to write the scene to a 3D texture in real time for some epic reflections and real-time GI. I say this to say that it would be ideal that the mipmapping method would be fast and work at runtime. Also, even though it may not be practical, I would prefer if the solution were to work on most URP-supported hardware if at all possible, so please no Direct-X-only stuff unless it is required. 
+ If someone believes the issue is something else, that information would be greatly appreciated aswell. 

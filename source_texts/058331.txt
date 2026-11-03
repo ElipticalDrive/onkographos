@@ -1,0 +1,1775 @@
+ECNR: Efficient Compressive Neural Representation of Time-Varying
+Volumetric Datasets
+Kaiyuan Tang*
+Chaoli Wang†
+arXiv:2311.12831v4 [cs.CV] 9 Mar 2024
+University of Notre Dame
+A BSTRACT
+Due to its conceptual simplicity and generality, compressive neural
+representation has emerged as a promising alternative to traditional
+compression methods for managing massive volumetric datasets.
+The current practice of neural compression utilizes a single large
+multilayer perceptron (MLP) to encode the global volume, incurring
+slow training and inference. This paper presents an efficient compressive neural representation (ECNR) solution for time-varying data
+compression, utilizing the Laplacian pyramid for adaptive signal
+fitting. Following a multiscale structure, we leverage multiple small
+MLPs at each scale for fitting local content or residual blocks. By
+assigning similar blocks to the same MLP via size uniformization,
+we enable balanced parallelization among MLPs to significantly
+speed up training and inference. Working in concert with the multiscale structure, we tailor a deep compression strategy to compact the
+resulting model. We show the effectiveness of ECNR with multiple
+datasets and compare it with state-of-the-art compression methods
+(mainly SZ3, TTHRESH, and neurcomp). The results position
+ECNR as a promising solution for volumetric data compression.
+1 I NTRODUCTION
+Over the past few years, deep learning techniques have surfaced
+as a variable solution in solving different scientific visualization
+problems, including data compression [37]. Lu et al. [24] proposed
+neurcomp, a deep learning-based method for neural compression of
+volumetric datasets. They applied a multilayer perceptron (MLP)
+to fit a volume, where the network takes the spatial coordinates
+(x, y, z) as input upon training and generates the corresponding voxel
+values to reconstruct the volume. As a result, only the trained
+model must be stored since the data in the entire volume can be
+inferred. This provides an excellent compression opportunity as
+the model size is orders of magnitude smaller than the size of the
+original volumetric data. Furthermore, the network can be extended
+to ingest spatiotemporal coordinates (x, y, z,t) to represent timevarying volumetric data naturally.
+Despite its great promise, neurcomp suffers several limitations.
+First, as a solution based on a coordinate-based network, neurcomp is
+slow in training and inference as an entire feedforward pass through
+the network must be computed for every sample (for training) and
+coordinate (for inference). Second, the current solution selects
+random voxel samples during training, ignoring that volumetric
+data often exhibit spatial features or regions of interest that demand
+greater attention than less important ones. Third, the temporal aspect
+is treated as an additional input coordinate to the network without
+a careful design that leverages their spatiotemporal similarities to
+speed up the training.
+In this paper, we propose ECNR, an efficient compressive neural
+representation for time-varying volumetric datasets. Unlike neurcomp, which employs a single large MLP to fit the entire volume,
+* e-mail: ktang2@nd.edu
+† e-mail: chaoli.wang@nd.edu
+ECNR advocates MINER, a multiscale approach [31] proposed
+for implicit neural representation (INR) of image and point cloud
+data. Similar to MINER, ECNR adaptively decomposes the spatiotemporal volume into blocks via the Laplacian pyramid, starting
+from the coarsest scale. As such, a block is only partitioned further
+if its residual remains significant, demanding the capture of finer
+space-time details for accurate signal reconstruction. To fit the local spatiotemporal blocks at each scale, we utilize multiple small
+MLPs, permitting fast encoding and decoding, reduced memory
+consumption, and enhanced reconstruction quality.
+Different from MINER, ECNR handles 4D (3D+time) volumetric
+datasets, while MINER only processes 2D static images or 3D mesh.
+We treat spatial and temporal dimensions equally and produce the
+same number of scales during data partitioning. At each scale,
+we group similar blocks into clusters, and each cluster consists of
+nearly the same number of blocks. We then assign each cluster
+to an MLP and effectively train them in parallel. Furthermore,
+we leverage a deep compression strategy (including block-guided
+pruning, global quantization, and entropy encoding) to compact
+the resulting model with a high compression rate (CR). Finally,
+we propose a lightweight convolutional neural network (CNN) to
+mitigate the possible boundary artifacts in the MLP-decoded results
+during inference.
+We demonstrate the effectiveness and efficiency of ECNR by comparing it with three state-of-the-art solutions: deep learning-based
+neurcomp and conventional compression methods SZ3 [22] and
+TTHRESH [1]. Compared with conventional compression methods
+(SZ3 and TTHRESH), ECNR achieves better quality (on average,
++5.87 dB and +7.18 dB in PSNR) under high CRs. ECNR can handle
+time-varying volumetric datasets with a large spatial extent and/or
+long temporal sequence. Compared with neurcomp, it speeds up
+the encoding (up to 3.18×) and decoding (up to 29.57×) process,
+making it a more practical choice.
+Table 1: Comparison of different methods over encoding time (ET),
+decoding time (DT), compression rate (CR), and data quality (DQ).
+method
+SZ3
+TTHRESH
+neurcomp
+ECNR
+ET
+very fast
+fast
+very slow
+slow
+DT
+very fast
+fast
+slow
+fast
+CR
+high
+high
+very high
+very high
+DQ
+medium
+medium
+high
+high
+Table 1 summarizes the comparison among these four methods.
+As deep learning-based solutions that depend on GPUs, ECNR’s
+efficiency advantage over neurcomp lies in its encoding and decoding
+speed improvement. Nevertheless, it is still slow compared with
+SZ3 and TTHRESH, which are CPU-based solutions. This renders
+ECNR unsuitable for time-critical scenarios like co-processing and
+in situ processing unless massive GPU parallelism (i.e., a largescale GPU cluster) becomes commonplace. Our value proposition
+is that ECNR can be an ideal choice if one needs to archive a large
+time-varying dataset during post-processing when the speed is not
+the primary concern, aiming for highly compressive results while
+preserving the high fidelity of decompressed data.
+The contributions of this work can be summarized as follows.
+First, we present ECNR, a new INR-based compression method that
+uses a unified space-time partitioning strategy to adaptively compresses the time-varying volumetric dataset using multiple small
+MLPs for fitting local blocks (Section 3.1). Second, we propose a
+novel block assignment scheme that leads to balanced parallelization
+among MLPs, significantly speeding up training and inference (Section 3.3). Third, our deep MLP compression strategy features blockguided pruning that adjusts the sparsity of each MLP based on the
+average block loss and global quantization that supports fine-tuning
+shared parameters of all MLPs within the same scale (Section 3.5).
+Fourth, we incorporate a lightweight CNN to mitigate block boundary artifacts in the MLP-decoded results (Section 3.6). All these
+additions (unified 4D partition, block assignment, deep compression,
+boundary artifact mitigation) are not presented in MINER. They contribute to performance and quality gains, highlighting the differences
+and novelty of ECNR.
+2 R ELATED W ORK
+Volume data compression. Given the prevalent need for data reduction in scientific computing, much research has been done to compress large-scale scientific simulation data. The earlier works leveraged wavelet transform [28] or discrete cosine transform (DCT) [48].
+Later, researchers developed TAMRESH [34] and TTHRESH [1]
+that utilize data decomposition for tensor compression of multidimensional data over regular grids. Another compression technique
+is data fitting using pre-conditioners or predictors [18, 21]. Other
+models seek to save different data features, such as graph-based models [17], topological features [33], and dictionaries [5]. Researchers
+also explored various statistical approaches, such as frequency statistics and Gaussian mixture-based techniques and sampling, for solving similar problems [4,6,29,38,39]. In a bigger scope, Li et al. [20]
+surveyed data reduction techniques for simulation, visualization,
+and data analysis. Lu et al. [24] presented neurcomp to achieve
+volume data fitting via MLPs. Our work addresses its limitations by
+encoding time-varying data using multiple small MLPs that fit local
+spatiotemporal blocks, inspired by MINER [31] and KiloNeRF [30].
+Neural field representation. In computer vision, neural field representation has become a popular topic due to its versatility in fitting
+various signals or tasks [46]. Martel et al. [25] presented ACORN, an
+INR that optimizes the multiscale block hierarchy to represent largescale or complex scenes. Müller et al. [27] introduced Instant-NGP,
+which leverages multiresolution hash tables (MHTs) to dramatically
+downsize the number of network parameters. Signals across various
+scales often exhibit inherent similarities. This property has been
+leveraged in 3D volume representation using octrees [19, 25, 35].
+Saragadam et al. [31] proposed MINER, a multiscale INR based on
+a Laplacian pyramid for more efficient presenting multiscale signals.
+Instant-NGP requires larger space than regular implicit networks to
+store explicit 4D MHTs for time-varying data, rendering it unsuitable for our data compression goal. Unlike ACORN [25], our ECNR
+follows MINER and employs the Laplacian pyramid to decompose
+signals into low-resolution content at the coarsest scale and residuals
+at subsequent finer scales (refer to Figure 1 for an example). ECNR
+eliminates the need for time-consuming on-the-fly maintenance and
+tree structure updating. At the beginning of processing each scale, a
+one-time computation of block partitioning suffices.
+In volume visualization, neural representation methods have
+been utilized for generative rendering model [3], visualization synthesis [10, 15, 42], and image compression [7]. They have also
+been leveraged in interactive neural rendering via scene representation network (SRN), such as fV-SRN [40], APMGSRN [45], and
+MHT-based INR [43]. Other works include super-resolution generation [8–10, 12, 36, 42]. Wurster et al. [44] presented a hierarchical
+super-resolution solution that upscales volumetric data to a high
+resolution with minimal seam artifacts along boundaries of different
+resolutions. However, this hierarchical structure trains several large
+networks for upscaling, which can be expensive to store. In contrast,
+ENCR utilizes straightforward downsampling and upsampling with
+small MLPs to represent the volumetric data cost-effectively.
+Model compression. The common practice for compressing deep
+network models is a three-step process: network pruning, weight
+quantization, and entropy encoding [13]. Wen et al. [41] proposed a
+structured sparsity learning (SSL) method to regularize the network
+structures (i.e., filters, channels, filter shapes, and layer depth). Ye
+et al. [47] utilized the alternating direction method of multipliers
+(ADMM) to perform weight pruning and clustering/quantization in a
+unified way. Additional techniques, including iterative weight quantization and retraining, joint weight clustering training and centroid
+updating, and weight clustering retraining, were also employed for
+further performance improvement. Molchanov et al. [26] estimated
+the contribution of a neuron (filter) to the final loss and iteratively
+removed those with smaller scores. Lin et al. [23] obtained a performant sparse model in one single training pass by dynamically
+allocating the sparsity pattern and incorporating feedback signal to
+reactivate prematurely pruned weights. Our deep compression of
+MLPs follows that of the common three-step [13], but we reconsider
+several design choices given the multiple-MLP architecture. Specifically, we propose the block-guided pruning and global quantization
+strategy for small MLPs within our model to further improve the
+performance.
+3
+ECNR
+Given a time-varying volume dataset, INR encodes the data by leveraging MLP, which inputs the coordinates to fit the volume. When
+employing a single large global MLP for the encoding task, a single
+forward pass through such an MLP may require millions of operations for one voxel. Thus, the cost of computing a complete volume
+with merely 1003 voxels already inflates to trillions of operations.
+ECNR employs multiple small local MLPs to encode the volume
+data to circumvent this issue. Since each MLP is small in parameter size and represents all voxels belonging to a disjoint cluster of
+local blocks, the computation time for a single MLP can be significantly reduced. Furthermore, parallel processing of MLPs boosts
+the efficiency of encoding the entire volume. Besides using multiple
+MLPs, ECNR integrates three main steps to improve the overall
+performance: a spatiotemporal multiscale method that decomposes
+the spatiotemporal volume into blocks hierarchically (Section 3.2)
+and achieves fast convergence using a balanced block assignment
+scheme (Section 3.3), a multiple-MLP deep compression strategy
+that works in concert with the multiscale structure to compact the
+resulting model (Section 3.5), and a lightweight CNN module to
+mitigate the possible block boundary artifacts in the MLP-decoded
+results (Section 3.6).
+Our ECNR is an adaptive solution that utilizes MLPs with sinusoidal activation functions but focuses on time-varying volumetric
+data compression. Compared with the existing practice, ECNR offers several advantages. First, instead of relying on a predetermined
+network capacity (i.e., a fixed number of parameters) for encoding,
+ECNR exhibits superior robustness by adaptively adjusting network
+capacity to encode large-scale time-varying volumetric data, ensuring stable compression of data with various spatiotemporal characteristics. Second, ECNR employs a distinct group of MLPs at
+each scale for compressive neural representation, resulting in fast encoding and decoding, reduced memory consumption, and enhanced
+reconstruction quality. Third, ECNR leverages block-guided pruning that adjusts the sparsity of each MLP differently according to
+their nonuniform blocks fitting error, global quantization that allows
+representing MLP parameter with the shared parameters of all MLPs
+within the same scale, and entropy encoding to achieve a higher CR
+without quality loss.
+3.1
+Unified Space-Time Approach
+We advocate a unified approach that treats spatial and temporal
+domains equally and applies ECNR to the 4D space-time data. Both
+encoding
+!!
+encoding/decoding order
+!!
+scale 3
+!!
+3
+7
+!!
+!
+"!
+1
+"!
+!
+"!
+!
+!!
+2
+!!
+"
+!!
+decoding
+6
+5
+!!
+"
+!!
+!!
+scale 1
+!!
+4
+"!
+!
+!!
+!!
+!-th block
+downsampling
+upsampling
+subtraction
+addition
+Figure 1: Employing the Laplacian pyramid, ECNR decomposes a volume into blocks in terms of their low-resolution content (coarsest scale)
+and residuals (finer scales). A three-scale (s = 3) example with the simplified 3D version (i.e., the temporal dimension is omitted) is sketched.
+A group of MLPs encodes all blocks at the same scale.
+e s during inference. The downsampling operator D(·),
+decoded to V
+⃝ in Figure 1, subsamples the original data V once
+denoted as ↓
+along each spatiotemporal dimension, and Vs is the application of
+D(·) to V for (s − 1) times. The upsampling operator U(·), denoted
+e s once
+⃝ in Figure 1, upsamples the reconstructed volume V
+as ↑
+along each spatiotemporal dimension by first conducting trilinear
+interpolation in the spatial domain and then linear interpolation in
+the temporal domain. The entire encoding and decoding process can
+be represented as
+(a) scale 3 partition
+(b) scale 1 partition
+Figure 2: At each scale, the encoding target is split into equal-sized
+blocks, and only effective blocks with large residual values (shown
+in red bounding boxes) are processed.
+domains produce the same number of scales as we partition the data.
+Each partition divides each of the (x, y, z,t) dimensions in half. At
+each scale, we split these 4D space-time blocks into individual 3D
+spatial blocks for efficient MLP fitting, which also enables us to
+handle datasets with long temporal sequences. These spatial blocks
+have the same dimension regardless of which scale they reside in.
+Assuming the volume dimension, block dimension, and number of
+scales are (x, y, z,t), (xb , yb , zb ), and s, respectively, then the number
+of spatial blocks at scale i (where i = s is the coarsest scale) will
+be x/(2i−1 xb ) × y/(2i−1 yb ) × z/(2i−1 zb ) × t/2i−1 . As i decreases,
+we have increasingly more blocks to discard at a fine scale if their
+residuals are small, leading to a dramatically reduced number of
+effective blocks that need to be fitted. Since we process scale by
+scale, only the effective blocks at the current scale need to be loaded
+into memory simultaneously. With this spatiotemporal treatment,
+ECNR can handle volumetric datasets with a large spatial extent
+and/or long temporal sequence, as long as the memory can hold the
+effective blocks at the finest scale.
+3.2 Multiscale Block Partitioning
+Like MINER, ECNR represents the large-scale volume dataset as
+the sum of blocks from different scales. As sketched in Figure 1,
+the volume is encoded/decoded sequentially scale by scale, starting
+from the coarsest scale. A distinct group of MLPs handles each scale
+to achieve fast convergence. Take the coarsest scale s, for example,
+e s be the ECNR-decoded (i.e., reconstructed)
+let Vs be the volume, V
+volume, and Ms be the corresponding MLPs, we have Ms (Vs ) →
+e s , indicating that Vs is encoded by Ms during training and then
+V
+es;
+⃝
+1 Ms (Vs ) → V
+e s ) → Rs−1 , ⃝
+e s−1 , ⃝
+es) ⊕ R
+e s−1 → V
+e s−1 ;
+⃝ Vs−1 ⊖U(V
+2
+3 Ms−1 (Rs−1 ) → R
+4 U(V
+···
+e 2 ) → R1 , ⃝
+e1, ⃝
+e2) ⊕ R
+e1 → V
+e1;
+⃝ V1 ⊖U(V
+5
+6 M1 (R1 ) → R
+7 U(V
+e s ) → Rs−1 indicates that residual Rs−1 is the
+where Vs−1 ⊖ U(V
+e s . Given each
+difference between Vs−1 and the upscaled version of V
+scale’s encoding target, we split these space-time target signals into
+individual 3D spatial blocks (refer to Figure 2 for example). Each
+block is then assigned to a local MLP for encoding. Even though
+the fitting target covers different resolutions across scales, the block
+dimensions are identical. Therefore, a coarse scale will contain
+fewer blocks for fast encoding, while a fine scale will contain more
+blocks to handle the content-rich parts not preserved in the coarse
+scale. Still, a finer scale may also have content-poor blocks as the
+encoded residuals could be sparse. We discard these blocks (i.e.,
+representing them as empty blocks) without MLP encoding if the
+L2 norm of their residual is below a threshold. To increase the CR
+of ECNR, we initialize and assign each effective block a learnable
+latent code. We then concatenate the block’s latent code with spatial
+coordinates as the input to each MLP, enabling it to identify and
+reconstruct multiple blocks based on different input latent codes.
+3.3 Block Assignment
+MINER assigns each block to a different MLP for encoding. Unlike
+MINER, which only handles a single image, we tackle a sequence of
+volumes, demanding an MLP to encode multiple blocks to achieve
+good compression performance. This poses the issue of block assignment. After splitting the encoding target into ni 3D spatial blocks at
+scale i, we assume that ECNR leverages mi MLPs to encode these
+blocks (ni > mi ). We are interested in investigating whether an effective assignment scheme exists to arrange ni blocks to mi MLPs. In
+our scenario, an MLP at a scale will be optimized based on blocks
+at the same scale across various spatiotemporal locations. While
+these blocks utilize distinct latent codes for encoding, the expressive
+capacity of these latent codes is considerably limited compared to
+MLPs. Consequently, it is necessary for the blocks assigned to a
+particular MLP to exhibit intrinsic similarities to achieve effective
+optimization.
+This paper addresses block assignment via block clustering using
+the k-means clustering method. Note that standard k-means clustering can lead to imbalanced block assignment among MLPs. In
+extreme cases, this could result in one MLP only getting a single
+block assigned and another MLP getting thousands of blocks. Such
+an assignment is not ideal due to the following reasons. First, MLPs
+getting a few blocks achieve a low CR, even with aggressive pruning in the subsequent deep compression. Second, MLPs getting
+excessive blocks could not ensure high-quality reconstruction due to
+their limited network capacity. Third, imbalanced block assignment
+leads to an imbalanced workload that could severely impact parallel
+efficiency during encoding and decoding.
+Algorithm 1: K-means cluster size uniformization
+Input: number of clusters k, set of n points
+D = {d1 , d2 , . . . , dn }.
+Output: cluster set S = {S1 , S2 , . . . , Sk } with nearly uniform
+cluster size and corresponding centroids
+C = {C1 ,C2 , . . . ,Ck }
+1 Initialize S and C using a standard k-means:
+(S,C) ← Kmeans(D, k);
+2 Create distance matrix D[1, . . . , n][1, . . . , k];
+3 Create maximum gain array δ [1, . . . , n];
+4 foreach (di ,C j ) in D do
+5
+D[i][ j] = ||di −C j ||2 ;
+6 end
+/* calculate the assignment priority
+*/
+7 foreach di in D do
+8
+δ [i] = max(D[i]) − min(D[i]);
+9 end
+10 Sort points in D by δ in descending order;
+/* reassign points to achieve nearly uniform
+cluster size
+*/
+11 foreach di in sorted D do
+12
+select Ŝ from S with cluster size less than ⌊ nk ⌋;
+13
+if Ŝ ̸= ∅ then assign di to the nearest cluster in Ŝ;
+14
+else assign di to the nearest cluster in S with cluster size
+less than ⌈ nk ⌉;
+15 end
+16 return (S,C)
+The ideal block assignment strategy should ensure each MLP
+processes a similar number of blocks. In other words, each cluster’s
+size should be roughly the same. Given the target number of blocks
+bi that each MLP should fit at scale i, we set mi to ⌈ nbii ⌉. To this end,
+we propose a k-means cluster size uniformization algorithm (refer to
+Algorithm 1). The algorithm is initialized with a non-uniform clustering result from a standard k-means, where the distance between
+two points (in our case, blocks) is defined as the Euclidean distance
+between their corresponding voxel values (following the rationale
+that similar blocks should go to the same MLP). Then, for each point,
+we reassign it to its nearest unfull cluster in Ŝ, which has not reached
+the desired uniform size (i.e., bi ). Note that the assignment order
+influences the result. In particular, the data point having the longest
+distance between its nearest (min(D[i])) and farthest (max(D[i]))
+clusters should be reassigned first, as reallocating this point correctly
+can maximize the gain (i.e., minimizing the inner-cluster distance
+and maximizing the inter-cluster distance). Our solution is easy to
+implement and runs efficiently to address the imbalance workload
+among MLPs. We provide further implementation details in the
+appendix.
+3.4
+Loss Function
+To optimize each MLP fθ , we compute for each block fθ fits, the
+ei and GT
+mean squared error (MSE) between its decoded version v
+version vi as the loss function, which is defined as
+L fθ =
+1 j
+∑ ∥evi − vi ∥2 ,
+j i=1
+(1)
+ei = fθ (xi ; φi )
+where j is the number of blocks for fθ to fit, and v
+with local coordinates xi and corresponding latent code φi as input
+(refer to the bottom-left corner of Figure 1). MLPs are optimized
+sequentially from the coarsest to finest scales, while MLPs at the
+same scale are trained in parallel.
+3.5
+Deep Compression of MLPs
+We arrange similar blocks to the same MLP, and each MLP gets a
+similar number of blocks. This promotes a balanced workload as we
+input all voxels (content or residuals) in the blocks in batches for
+training (content-rich blocks do not take more time than content-poor
+ones). Furthermore, such an assignment allows us to prune each
+MLP with varying intensities during training, based on the fitting
+error of their respective blocks. As a result, one MLP handling
+content-poor blocks can prune more aggressively and consistently
+with high CR without quality downgrade, and another MLP tackling
+content-rich ones can prune more conservatively. After network
+training, global quantization and entropy encoding follow to increase
+CR further.
+Block-guided pruning. For MLPs at a scale of the multiscale
+representation’s encoding phase, we prune unimportant neurons
+globally across all MLPs at the scale by permanently setting their
+parameters to zero. After pruning, the network may perform worse
+due to the reduction of parameter numbers. We fine-tune the pruned
+network with extra epochs to lessen the performance drop using
+a reduced learning rate. Specifically, we conduct iterative pruning [14, 23, 47]: instead of one-shot pruning, we prune and fine-tune
+MLPs multiple times to achieve a higher CR without significant
+performance degradation. For MLPs used in our work, we observe
+the following. First, the number of parameters in the last layer for
+each MLP is much fewer than in other layers, so pruning parameters in the last layer cannot obtain significant model size reduction.
+Second, MLPs that optimize simple blocks tend to have a sparser
+structure than those handling complex blocks. Third, the bias in the
+first layer of each MLP is non-sparse and crucial for achieving good
+performance.
+Based on these insights, we prune all network parameters, excluding the weights in the last layer and biases in the first and last layers.
+For each pruning round, we rank each parameter by its importance.
+With a target sparsity, we start pruning from the least important
+parameters and iteratively prune the parameters until the target sparsity is met. The importance I of each candidate parameter p is
+represented by
+I (p) = N (|p|) + λb N (Lb (p)),
+(2)
+where |p| is absolute value of p, Lb (p) is the average block loss
+(we simply use MSE) for the MLP that contains p, λb is a weight
+parameter, and N (·) denotes min-max normalization. The two
+terms emphasize parameters that need pruning with high priority:
+N (|p|) indicates that parameters with small magnitude should be
+pruned first; N (Lb (p)) suggests that parameters in an MLP that
+achieve low average block loss should be pruned more aggressively.
+As such, even though the difficulty of fitting the target blocks varies
+for each MLP, pruning can adaptively compact the MLPs.
+Global quantization. After block-guided pruning, we apply
+global quantization to compress network parameters further. Network quantization has shown its effectiveness in neurcomp [24], and
+we follow a similar strategy. For example, given weight quantization
+precision β bits, we employ standard k-means to group one layer of
+unpruned weights in an MLP to 2β clusters. MLP weights in this
+quantized layer can then be represented as β -bit indices that map to
+2β floating-point shared parameters. These parameters are shared
+among unpruned weights in the layer.
+Besides the above quantization, we also make three improvements based on the structure of ECNR. First, each scale consists
+of multiple MLPs. While each MLP encodes distinct blocks, these
+blocks often contain similar content that the same parameters can
+represent. Therefore, we apply global quantization across all MLPs
+per scale rather than quantizing each MLP individually. Second,
+after quantization, we fix the parameter indices and fine-tune the corresponding shared parameters through backpropagation to achieve
+minimal performance degradation at the same precision. Third, instead of only quantizing the MLP’s weights, we quantize MLPs’
+biases and weights, respectively, to boost CR under similar reconstruction accuracy.
+Entropy encoding. In the last step, we leverage entropy encoding to compress the resulting model file further using Huffman
+coding [16], a lossless encoding scheme. Empirically, entropy encoding brings an additional 10% model size reduction.
+3.6
+Boundary Artifact Mitigation
+ECNR decomposes volumetric data into disjoint blocks for encoding, which are then composed to form the complete volume. While
+this ensures high reconstruction accuracy at the data level, it does
+not guarantee high rendering fidelity at the image level, especially
+for data with intricate structures. The inconsistent outputs between
+adjacent blocks along their boundary could lead to artifacts in rendering. To mitigate this problem, we apply a lightweight CNN module
+to the output of the finest scale MLPs. The CNN’s parameter size
+should be small for efficient compression: we use five convolution
+layers, each with 32 channels. Since the CNN is shallow, there is
+no need to add skip connections between layers. The loss function
+uses the MSE between the MLP-decoded results and ground-truth
+(GT) volume. Considering the trade-off between efficiency and CR,
+we only apply quantization with 9 bits at the end of CNN training
+without fine-tuning. This treatment reduces boundary artifacts with
+slightly increased encoding time and decreased CR.
+Table 2: The dimensions of experimented datasets.
+dataset
+combustion
+half-cylinder
+solar plume
+Targaroa
+asteroids
+supernova-1
+supernova-2
+supernova-3
+4
+4.1
+volume dimension
+(x × y × z × t)
+480 × 720 × 120 × 70
+640 × 240 × 80 × 100
+256 × 256 × 1024 × 28
+300 × 180 × 120 × 150
+500 × 500 × 500 × 1
+432 × 432 × 432 × 1
+1200 × 1200 × 1200 × 1
+1728 × 1728 × 1728 × 1
+data
+size
+10.81 GB
+4.57 GB
+7 GB
+3.62 GB
+476.83 MB
+307.54 MB
+6.43 GB
+19.22 GB
+block dimension
+(xb × yb × zb )
+40 × 45 × 15
+40 × 30 × 20
+32 × 32 × 32
+25 × 15 × 10
+25 × 25 × 25
+18 × 18 × 18
+50 × 50 × 50
+72 × 72 × 72
+scale
+3
+3
+3
+3
+3
+3
+4
+3
+R ESULTS AND D ISCUSSION
+Datasets and Network Training
+Table 2 displays the datasets we experimented with. We primarily
+used four time-varying datasets for comparison with baseline methods. Four static datasets were used in additional comparisons. We
+only used the first 70 of 100 timesteps for the combustion dataset
+because neurcomp could not handle more than 70 timesteps. A
+single NVIDIA A40 GPU, Intel Xeon CPU with 3.5 GHz, and 256
+GB RAM was used for network training and inference. We set the
+block dimensions based on the volume dimensions. We set s = 3 for
+most datasets to effectively filter out non-effective blocks. For large
+spatial datasets, we set s = 4 for supernova-2 due to its spatial extent and s = 3 for supernova-3 to conduct a comparative study with
+supernova-1. We removed a block at a finer scale if its residual’s L2
+norm is below 10−4 . From the coarsest to finest scales, we set the
+number of target blocks per MLP to 8, 16, and 32, respectively. All
+MLPs at each scale comprise three layers with sinusoidal activation
+functions followed by one linear layer for output. The sinusoidal
+activation factor ω0 is set to 30. Each MLP contains 24 neurons in
+hidden layers. We initialized all layers in MLPs following Sitzmann
+et al. [32] and utilized Adam optimizer with β1 = 0.9, β2 = 0.999,
+and a weight decay of 2 × 10−5 to optimize the network parameters.
+Table 3: Average PSNR (dB), LPIPS, and CD values across all
+timesteps, as well as encoding time (ET), decoding time (DT), and
+compression rate (CR). The isovalue v reported is for CD calculation. s, m, and h represent seconds, minutes, and hours. The best
+performance is highlighted in bold.
+dataset
+combustion
+(v = −0.7)
+half-cylinder
+(v = 0.1)
+solar plume
+(v = −0.5)
+Tangaroa
+(v = −0.85)
+method
+SZ3
+TTHRESH
+neurcomp
+ECNR
+SZ3
+TTHRESH
+neurcomp
+ECNR
+SZ3
+TTHRESH
+neurcomp
+ECNR
+SZ3
+TTHRESH
+neurcomp
+ECNR
+PSNR↑
+34.79
+30.89
+33.15
+37.37
+40.23
+32.87
+44.32
+45.12
+27.98
+41.25
+41.98
+42.05
+39.53
+32.25
+36.58
+41.47
+LPIPS↓
+0.142
+0.051
+0.155
+0.114
+0.063
+0.131
+0.031
+0.026
+0.343
+0.067
+0.051
+0.039
+0.085
+0.240
+0.097
+0.046
+CD↓
+1.67
+1.75
+2.54
+1.58
+2.28
+12.82
+0.96
+0.87
+3.63
+1.05
+2.15
+1.98
+1.66
+1.83
+3.06
+1.50
+ET↓
+70s
+32.4m
+23.9h
+11.4h
+19.2s
+118.3s
+15.3h
+4.8h
+44.2s
+23.3m
+10.8h
+4.6h
+25.3s
+6.2m
+3.6h
+98.5m
+DT↓
+89s
+6.9m
+2.8h
+7.8m
+10.3s
+50.4s
+38.6m
+1.3m
+1.1m
+4.1m
+1.5h
+5.1m
+32.8s
+2.3m
+28.8m
+2.2m
+CR↑
+2,453
+2,129
+2,521
+2,662
+2,553
+2,022
+2,633
+2,736
+4,483
+5,119
+5,778
+6,262
+779
+540
+772
+838
+For time-varying datasets, we trained the MLPs and latent codes
+at each scale for 500 epochs. We started with a learning rate of 0.001
+and decayed it exponentially with a factor of 0.75 after each round of
+pruning. Block-guided pruning occurs four rounds during training,
+first at 150 epochs, then at every 75 subsequent epochs until 375
+epochs. λb is set to 0.1 to compute I in Equation 2 for pruning.
+Because the network contains more potentially sparse structures at
+the beginning of training, we pruned candidate network parameters
+to meet a target sparsity of 30% at the first round of pruning and
+then 40%, 45%, and 50%. Once trained, we quantized the MLPs
+with β = 8 bits and then fine-tuned 75 epochs with a learning rate of
+10−5 . Subsequently, we trained a lightweight CNN using a learning
+rate of 10−5 for 100 epochs to mitigate boundary artifacts in the
+MLP-decoded results. For static datasets, we train the number of
+target blocks per MLP from the coarsest to finest scales was adjusted
+to 1, 2, and 4 because the dataset is static. We trained the MLPs and
+latent codes from the coarsest to finest scales for 200, 150, and 125
+epochs. Block-guided pruning happened at 75 and 115 epochs with
+a target sparsity of 20% and 30%.
+Note that ECNR involves extra space for storing the metadata,
+including data structure for block assignments and network configurations, which is encapsulated in the header of our output file and
+factors in the CR computation. Refer to the appendix for a detailed
+investigation.
+4.2 Results
+We present the primary quantitative and qualitative comparison results of ECNR and three baseline methods (SZ3, TTHRESH, and
+neurcomp). Additional comparison with traditional and grid-based
+(MHT, fV-SRN, and APMGSRN) methods and further discussion of
+ECNR’s streaming reconstruction capability and neurcomp’s unstable optimization are presented in the appendix.
+Baselines. We compared our ECNR with three baseline solutions:
+• SZ3 [22]: an error-bounded lossy compression method identifies sparse representations within the domain of locally spanning splines.
+• TTHRESH [1]: a lossy compressor using the Tucker decomposition, a higher-order singular value decomposition.
+(a) combustion
+(b) half-cylinder
+(c) solar plume
+(d) Tangaroa
+Figure 3: Average PSNR (dB) values across all timesteps under different CRs.
+• neurcomp [24]: an implicit neural network that utilizes MLPs
+for volumetric data representation, achieving a desirable CR
+by limiting the number of network parameters.
+Both SZ3 and TTHRESH support data compression at higher dimensions. For neurcomp, we modified the original code by adding a
+time dimension to the network input. Hence, all methods compress
+a time-varying volumetric dataset as a space-time 4D volume.
+SZ3 and TTHRESH accept an error tolerance as the input parameter. To achieve a fair comparison, after we obtained the CR
+of ECNR, we adjusted the input tolerance of these two methods
+to match the CR of ECNR roughly. For neurcomp, we adapted
+the number of neurons in each hidden layer to reach a certain CR.
+We performed inference multiple rounds during training, each after
+a certain number of training iterations. We stopped the training
+when neurcomp reached a PSNR similar to ECNR or the network
+converged. The reported encoding time refers to the training time,
+excluding the time spent on multiple rounds of inference.
+Evaluation metrics. Three metrics were considered in our evaluation. We used peak signal-to-noise ratio (PSNR) at the data level.
+The calculation is based on the original data and the compressed
+and decompressed version of data generated from one of the methods. At the image level, we utilized learned perceptual image patch
+similarity (LPIPS) [49]. The calculation is based on the volume
+rendering images produced from the corresponding versions of data.
+At the feature level, chamfer distance (CD) [2] is measured on the
+isosurfaces extracted from the corresponding versions of data.
+Table 4: Model size (MS, in MB) and GPU and CPU memory (GB)
+consumption for compressing the combustion dataset.
+method
+SZ3
+TTHRESH
+neurcomp
+ECNR scale 3
+ECNR scale 2
+ECNR scale 1
+MS↓
+4.6
+5.3
+4.5
+0.068
+0.434
+4.2
+GPU-mem↓
+—
+—
+15.97
+2.35
+2.38
+8.14
+CPU-mem↓
+120.7
+115.3
+202.1
+5.6
+8.4
+34.3
+Quantitative results. In Table 3, we report quantitative results
+of applying the four methods to compress the time-varying datasets.
+Regarding the three quality metrics, ECNR achieves the best for all
+datasets, only losing to TTHRESH on the LPIPS of the combustion dataset and CD of the solar plume dataset. The CR of ECNR
+ranges from 838 to 6,262, depending on the underlying data complexity. The CRs of the other three methods reference those of
+ECNR. Regarding encoding and decoding time, SZ3 is the clear
+winner, followed by TTHRESH. The training speedup of ECNR
+over neurcomp is 2.09× to 3.18×, and the inference speedup is
+12.97× to 29.57×. This shows the advantage of ENCR as an efficient INR-based solution compared with neurcomp. Note that the
+training speedup is lowest for the combustion dataset because if
+we train neurcomp further, the PSNR unexpectedly drops below 21
+dB, which is undesirable. Even though ECNR’s encoding time falls
+behind SZ3 and TTHRESH by a large margin, its decoding time
+is comparable to that of TTHRESH. Furthermore, ECNR achieves
+better quality; for example, the average gain of PSNR is 5.87 dB
+over SZ3 and 7.18 dB over TTHRESH.
+Table 4 shows these four methods’ model size and GPU memory
+and CPU memory (i.e., RAM) consumption for compressing the
+combustion dataset. The model size for SZ3 or TTHRESH simply
+refers to the compressed data size. SZ3 and TTHRESH do not utilize
+GPU, and thus we only report their CPU memory consumption.
+ECNR processes these scales sequentially, and we list them scale
+by scale. The memory consumption is capped at the finest scale
+(scale 1). Compared with neurcomp, the efficiency gain of ECNR is
+about 2× on GPU memory usage and 5.8× on CPU memory usage.
+ECNR takes less GPU memory due to its smaller parameter size
+and less CPU memory because its multiscale representation skips
+processing blocks with low residuals at a finer scale. The smaller
+memory footprint allows ECNR to process volume datasets with a
+large spatial extent and/or long temporal sequence.
+Furthermore, we report the performance of ECNR under different
+CRs for the time-varying datasets experimented. We controlled the
+CR of ECNR by adjusting its block dimension. Note that we only
+compared ECNR with SZ3 and TTHRESH in this experiment. Since
+neurcomp is far from convergence when controlling its training time
+to align with that of ECNR for a fair comparison. Figure 3 shows
+the performance curves. The results indicate that ECNR achieves
+better accuracy than SZ3 and TTHRESH under high CRs. SZ3 is
+superior to TTHRESH except for the solar plume dataset. In the
+extreme case of the solar plume dataset, ECNR could still maintain
+a PSNR value above 35 dB under a CR higher than 17,500, while
+SZ3 already suffers large distortion when CR reaches 7,500.
+Qualitative results. In Figures 4 and 5, we show volume rendering and isosurface rendering images at a selected timestep for
+different methods. We compute the pixel-wise difference images
+(i.e., the Euclidean distance in the CIELUV color space) to better
+perceive the differences between each method and GT. These different images are shown on the bottom-left side. On the bottom-right
+side, we show a zoomed-in view for close-up comparison. Overall,
+ECNR achieves the best visual quality in both volume rendering
+and isosurface rendering images. SZ3 and TTHRESH are undesirable, yielding severe block- and strip-like artifacts. Nevertheless,
+TTHRESH has the best quality for the combustion dataset as the
+specified transfer function or chosen isovalue does not reveal the
+lower value range where it suffers the most quality loss. neurcomp
+produces similar results as ECNR but still falls behind upon close
+examination.
+Large spatial extent. In addition to the above results for timevarying data compression, we experimented with one large spatial
+static volume, supernova-2, with the dimension of 1200 × 1200 ×
+1200, to evaluate the performance differences between ECNR and
+neurcomp. For ECNR, we set s = 4 due to its large spatial extent.
+From the coarsest to finest scales, the numbers of target blocks per
+MLP were adjusted to 1, 2, 4, and 8 because the dataset is static.
+We optimized the model 225, 175, 150, and 125 epochs for each
+scale. Block-guided pruning happened at 75 and 115 epochs with
+a target sparsity of 20% and 30%. After training, we quantized the
+MLP parameters with β = 9 bits and fine-tuned 20 epochs. For neurcomp, we trained the model long enough until it converged. ECNR
+(a) SZ3
+(b) TTHRESH
+(c) neurcomp
+(d) ECNR
+(e) GT
+Figure 4: Volume rendering results of SZ3, TTHRESH, neurcomp, ECNR, and GT. From top to bottom: combustion, half-cylinder, solar
+plume, and Tangaroa.
+achieves better reconstruction accuracy based on the quantitative
+results reported in Table 5. The isosurface rendering results shown
+in Figure 6 indicate that ECNR outperforms neurcomp in terms of
+visual quality.
+Table 5: PSNR (dB), LPIPS, and CD (v = 0.45) values, as well as
+model size (MS, in MB) of the supernova-2 dataset.
+method
+neurcomp
+ECNR
+PSNR↑
+43.98
+47.65
+LPIPS↓
+0.025
+0.028
+CD↓
+4.24
+2.94
+MS↓
+1.1
+0.99
+Evaluation of different spatial resolutions. To analyze the performance of ECNR on datasets with different spatial resolutions, we
+compressed supernova-1 and supernova-3 (64× that of supernova-1).
+We set the block dimension of supernova-3 4× that of supernova1 and kept other hyperparameters identical. Table 6 shows that
+supernova-3 needs a significantly longer time than supernova-1 for
+both encoding and decoding, while the model size of supernova3 is even less than supernova-1. The corresponding CRs are 205
+and 13,122 for supernova-1 and supernova-3, respectively. This
+is because supernova-3 employs proportionally larger blocks than
+supernova-1, making each MLP iterate more coordinates in reconstruction and less sensitive to small fitting errors when obtaining
+effective blocks. As for visual quality, we show zoomed-in volume
+rendering in Figure 7. For larger datasets and block dimensions,
+the reconstruction results tend to be smoother with more obvious
+boundary artifacts due to the limited capacity of local MLPs.
+Table 6: PSNR (dB) and LPIPS values, as well as model size (MS,
+in MB), encoding time (ET), and decoding time (DT).
+dataset
+supernova-1
+supernova-3
+PSNR↑
+48.55
+49.94
+LPIPS↓
+0.029
+0.052
+MS↓
+1.5
+1.3
+ET↓
+2.2m
+3.1h
+DT↓
+2.2s
+8.3m
+Table 7: PSNR (dB), LPIPS, and CD values, as well as model size
+(MS, in MB).
+dataset
+asteroids
+(v = 0.0)
+supernova-1
+(v = 0.0)
+method
+MINER
+MINER+
+ECNR
+MINER
+MINER+
+ECNR
+PSNR↑
+37.56
+39.92
+40.59
+50.47
+49.03
+48.55
+LPIPS↓
+0.256
+0.118
+0.107
+0.026
+0.035
+0.029
+CD↓
+7.56
+2.80
+2.18
+0.75
+0.67
+0.74
+MS↓
+0.53
+0.50
+0.49
+14.2
+3.7
+1.5
+4.3 Network Analysis
+For network analysis of ECNR, we investigate block assignment
+and lightweight CNN. Additional network analysis in six aspects,
+including sparse vs. dense model, deep compression ablation study,
+(a) SZ3
+(b) TTHRESH
+(c) neurcomp
+(d) ECNR
+(e) GT
+Figure 5: Isosurface rendering results of SZ3, TTHRESH, neurcomp, ECNR, and GT. From top to bottom: combustion, half-cylinder, solar
+plume, and Tangaroa. The chosen isovalues are reported in Table 3.
+(a) neurcomp
+(b) ECNR
+(c) GT
+Figure 6: Isosurface rendering (v = 0.45) results of neurcomp and
+ECNR using the supernova-2 dataset.
+Table 8: Average PSNR (dB) and LPIPS values across all timesteps,
+as well as encoding time (ET), decoding time (DT), and model size
+(MS, in MB) of the half-cylinder dataset.
+scheme
+w/o CNN
+w/ CNN
+PSNR↑
+44.61
+45.12
+LPIPS↓
+0.036
+0.028
+ET↓
+4.7h
+4.8h
+DT↓
+25.3s
+78.6s
+MS↓
+1.65
+1.75
+comparison with standard pruning and local quantization, block
+dimension, choice of s, and λb in block-guided pruning, is presented
+in the appendix.
+Block assignment. To investigate the impact of block assignment, we compared ECNR with and without block assignment on
+compressing the asteroids and supernova-1 datasets. Without block
+(a) ECNR
+(b) GT
+(c) ECNR
+(d) GT
+Figure 7: Zoomed-in volume rendering results of ECNR with
+datasets of different spatial resolutions. (a) and (b): supernova-1. (c)
+and (d): supernova-3.
+assignment, the network processes the data like MINER, where
+each MLP is assigned to encode a single block. MINER does not
+optimize or store latent codes since no multiple blocks are assigned
+to an MLP. So, besides this basic version, we employed the same
+deep compression strategy (Section 3.5) for MINER to make the
+comparison fair and name it MINER+. For the asteroids dataset,
+we keep the model sizes of MINER and MINER+ similar to that
+of ECNR, and therefore, all three methods will have similar CRs.
+For the supernova-1 dataset, we keep the same model parameters
+(i.e., block dimension, neuron number) for all three methods. The
+resulting model size of MINER is 3.84× that of MINER+, and
+9.47× that of ECNR. We report quantitative results in Table 7 and
+(a) MINER
+(b) MINER+
+(c) ECNR
+(d) GT
+Figure 8: Rendering results of MINER, MINER+, and ECNR. Top:
+volume rendering using the asteroids dataset. Bottom: isosurface
+rendering (v = 0.0) using the supernova-1 dataset.
+(a) w/o CNN
+(b) w/ CNN
+(c) GT
+Figure 9: Isosurface rendering (v = 0.1) results of ECNR using the
+half-cylinder dataset with or without CNN post-processing.
+corresponding rendering results in Figure 8. The results show that
+with the same model size, ECNR yields the best result and MINER+
+outperforms MINER. With the same model parameters, all three
+achieve similar results while ECNR gains the highest CR.
+Lightweight CNN. We conducted an ablation study on the halfcylinder dataset to investigate the cost and effectiveness of the
+lightweight CNN for reducing boundary artifacts. The CNN only
+adds about five minutes to the training time and 100 KB to the model
+size (refer to Table 8). Even though decoding takes an additional
+50 seconds due to the sequential inference of CNN, it is still significantly faster than neurcomp, and the inference result (refer to
+Figure 9) shows less pronounced boundary artifacts.
+4.4
+Discussion and Limitations
+As a neural representation solution based on GPUs, the training and
+inference performance of ECNR, while outperforming neurcomp,
+still lags significantly behind SZ3 and TTHRESH (refer to Table 3).
+Thanks to the unified 4D space-time partitioning strategy, ECNR
+can handle large time-varying datasets as long as the memory can
+hold the effective blocks at the finest scale.
+One caveat is that due to the multiscale spatiotemporal representation, ECNR does not process each timestep independently, which
+may limit its use. A concurrent work of KD-INR [11] uses a flat
+block partition to lift this constraint. Second, our current ECNR
+implementation enforces the same number of scales for both spatial
+and temporal domains in the multiscale block partitioning. This
+may not work ideally for volumetric datasets with a small spatial
+dimension and a large temporal dimension. An easy solution may be
+to manually separate the dataset into several temporal intervals and
+compress them individually. However, such a scenario may hinder
+the model from fully utilizing temporal coherence or redundancy.
+A strategy that handles these domains separately can address this
+issue. Third, the effectiveness of ECNR, like any other compression
+method, would drop when the time-varying dataset exhibits consis-
+tently super-rich spatiotemporal content and/or variations. In such
+a scenario, the percentage of effective blocks remains high at fine
+scales, limiting the compression efficacy.
+Additionally, we use the Euclidean distance to measure the similarity between blocks in the block assignment. Even though the
+Euclidean distance can be computed cost-effectively, it does not
+capture the distribution similarity between blocks. Using the JensenShannon divergence or a more advanced statistical measure may
+offer a more appropriate solution. Finally, the limited capacity of
+the lightweight CNN does not guarantee the removal of boundary
+artifacts that exist in the MLP-decoded results when the distortion is
+significant. The remaining artifacts in the decompressed data may
+still negatively impact the visual quality of the rendering results.
+5
+C ONCLUSIONS AND F UTURE W ORK
+We have presented ECNR, an efficient compressive neural representation solution for compressing time-varying volumetric datasets.
+As an INR-based method, ECNR abandons the “one-size-fits-all” notion of nercomp and advocates using multiple small MLPs to encode
+local blocks in a multiscale fashion. This enables us to consume
+only about half of the GPU memory and less than 20% of the CPU
+memory as required by neurcomp, allowing successful processing of
+time-varying datasets with a large spatial extent and/or long temporal
+sequence. The multiscale strategy taken by ECNR leads to significant encoding and decoding speedups compared with neurcomp,
+positioning it as a practical solution for deployment. Experimental
+results show that under a similar CR, ECNR achieves better quality
+(PSNR at the data level, LPIPS at the image level, and CD at the
+feature level) than neurcomp and conventional compression methods
+(SZ3 and TTHRESH).
+Our future work includes the following. First, the current implementation is built with PyTorch only, without utilizing advanced
+CUDA techniques to accelerate MLP computations. We plan to integrate tiny-cuda-nn to improve the encoding and decoding efficiency.
+Second, multiscale block partitioning produces a series of hierarchical bounding boxes, potentially serving as stratified sampling
+criteria in the rendering process. We will leverage this property and
+evaluate the neural rendering performance of ECNR as an SRN like
+fV-SRN [40]. Third, we would like to extend ECNR to handle multivariate time-varying datasets by ingesting variable-specific latent
+vector information into the encoding and decoding process.
+ACKNOWLEDGEMENTS
+This research was supported in part by the U.S. National Science Foundation through grants IIS-1955395, IIS-2101696, OAC2104158, and the U.S. Department of Energy through grant DESC0023145. The authors would like to thank the anonymous reviewers for their insightful comments.
+R EFERENCES
+[1] R. Ballester-Ripoll, P. Lindstrom, and R. Pajarola. TTHRESH: Tensor compression for multidimensional visual data. IEEE TVCG,
+26(9):2891–2903, 2020.
+[2] H. G. Barrow, J. M. Tenenbaum, R. C. Bolles, and H. C. Wolf. Parametric correspondence and chamfer matching: Two new techniques for
+image matching. In Proc. IJCAI, pages 659–663, 1977.
+[3] M. Berger, J. Li, and J. A. Levine. A generative model for volume
+rendering. IEEE TVCG, 25(4):1636–1650, 2019.
+[4] A. Biswas, S. Dutta, E. Lawrence, J. Patchett, J. C. Calhoun, et al. Probabilistic data-driven sampling via multi-criteria importance analysis.
+IEEE TVCG, 27(12):4439–4454, 2021.
+[5] J. Dı́az, F. Marton, and E. Gobbetti. Interactive spatio-temporal exploration of massive time-varying rectilinear scalar volumes based on a
+variable bit-rate sparse representation over learned dictionaries. C&G,
+88:45–56, 2020.
+[6] S. Dutta, J. Woodring, H.-W. Shen, J.-P. Chen, and J. P. Ahrens. Homogeneity guided probabilistic data summaries for analysis and visu-
+alization of large-scale data sets. In Proc. PacificVis, pages 111–120,
+2017.
+[7] P. Gu, D. Z. Chen, and C. Wang. NeRVI: Compressive neural representation of visualization images for communicating volume visualization
+results. C&G, 116:216–227, 2023.
+[8] J. Han and C. Wang. TSR-TVD: Temporal super-resolution for timevarying data analysis and visualization. IEEE TVCG, 26(1):205–215,
+2020.
+[9] J. Han and C. Wang. SSR-TVD: Spatial super-resolution for timevarying data analysis and visualization. IEEE TVCG, 28(6):2445–2456,
+2022.
+[10] J. Han and C. Wang. CoordNet: Data generation and visualization
+generation for time-varying volumes via a coordinate-based neural
+network. IEEE TVCG, 29(12):4951–4963, 2023.
+[11] J. Han, H. Zheng, and C. Bi. KD-INR: Time-varying volumetric data
+compression via knowledge distillation-based implicit neural representation. IEEE TVCG, 2023. Accepted.
+[12] J. Han, H. Zheng, D. Z. Chen, and C. Wang. STNet: An end-to-end
+generative framework for synthesizing spatiotemporal super-resolution
+volumes. IEEE TVCG, 28(1):270–280, 2022.
+[13] S. Han, H. Mao, and W. J. Dally. Deep compression: Compressing
+deep neural networks with pruning, trained quantization and Huffman
+coding. arXiv preprint arXiv:1510.00149, 2015.
+[14] S. Han, J. Pool, J. Tran, and W. Dally. Learning both weights and
+connections for efficient neural network. In Proc. NeurIPS, pages
+1135–1143, 2015.
+[15] W. He, J. Wang, H. Guo, K.-C. Wang, H.-W. Shen, et al. InSituNet:
+Deep image synthesis for parameter space exploration of ensemble
+simulations. IEEE TVCG, 26(1):23–33, 2020.
+[16] D. A. Huffman. A method for the construction of minimum-redundancy
+codes. Proc. IRE, 40(9):1098–1101, 1952.
+[17] J. Iverson, C. Kamath, and G. Karypis. Fast and effective lossy compression algorithms for scientific datasets. In Proc. ECPP, pages
+843–856, 2012.
+[18] S. Lakshminarasimhan, N. Shah, S. Ethier, S. Klasky, R. Latham, et al.
+Compressing the incompressible with ISABELA: In-situ reduction of
+spatio-temporal data. In Proc. ECPP, pages 366–379, 2011.
+[19] H. Li, X. Yang, H. Zhai, Y. Liu, H. Bao, et al. Vox-Surf: Voxel-based
+implicit surface representation. IEEE TVCG, 2022. Accepted.
+[20] S. Li, N. Marsaglia, C. Garth, J. Woodring, J. P. Clyne, and H. Childs.
+Data reduction techniques for simulation, visualization and data analysis. CGF, 37(6):422–447, 2018.
+[21] X. Liang, S. Di, D. Tao, S. Li, S. Li, et al. Error-controlled lossy compression optimized for high compression ratios of scientific datasets.
+In Proc. BigData, pages 438–447, 2018.
+[22] X. Liang, K. Zhao, S. Di, S. Li, R. Underwood, et al. SZ3: A modular framework for composing prediction-based error-bounded lossy
+compressors. IEEE TBD, 9(2):485–498, 2022.
+[23] T. Lin, S. U. Stich, L. Barba, D. Dmitriev, and M. Jaggi. Dynamic
+model pruning with feedback. In Proc. ICLR, 2020.
+[24] Y. Lu, K. Jiang, J. A. Levine, and M. Berger. Compressive neural
+representations of volumetric scalar fields. CGF, 40(3):135–146, 2021.
+[25] J. N. P. Martel, D. B. Lindell, C. Z. Lin, E. R. Chan, M. Monteiro, et al.
+ACORN: Adaptive coordinate networks for neural scene representation.
+ACM ToG, 40(4):58:1–58:13, 2021.
+[26] P. Molchanov, A. Mallya, S. Tyree, I. Frosio, and J. Kautz. Importance
+estimation for neural network pruning. In Proc. CVPR, pages 11264–
+11272, 2019.
+[27] T. Müller, A. Evans, C. Schied, and A. Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM ToG,
+41(4):102:1–102:15, 2022.
+[28] S. Muraki. Approximation and rendering of volume data using wavelet
+transforms. In Proc. Vis, pages 21–22, 1992.
+[29] T. Rapp, C. Peters, and C. Dachsbacher. Void-and-cluster sampling
+of large scattered data and trajectories. IEEE TVCG, 26(1):780–789,
+2020.
+[30] C. Reiser, S. Peng, Y. Liao, and A. Geiger. KiloNeRF: Speeding up
+neural radiance fields with thousands of tiny MLPs. In Proc. ICCV,
+pages 14315–14325, 2021.
+[31] V. Saragadam, J. Tan, G. Balakrishnan, R. G. Baraniuk, and A. Veer-
+araghavan. MINER: Multiscale implicit neural representation. In Proc.
+ECCV, pages 318–333, 2022.
+[32] V. Sitzmann, J. Martel, A. Bergman, D. Lindell, and G. Wetzstein.
+Implicit neural representations with periodic activation functions. In
+Proc. NeurIPS, pages 7462–7473, 2020.
+[33] M. Soler, M. Plainchault, B. Conche, and J. Tierny. Topologically
+controlled lossy compression. In Proc. PacificVis, pages 46–55, 2018.
+[34] S. K. Suter, M. Makhynia, and R. Pajarola. TAMRESH–tensor approximation multiresolution hierarchy for interactive volume visualization.
+CGF, 32(3):151–160, 2013.
+[35] T. Takikawa, J. Litalien, K. Yin, K. Kreis, C. Loop, et al. Neural
+geometric level of detail: Real-time rendering with implicit 3D shapes.
+In Proc. CVPR, pages 11358–11367, 2021.
+[36] K. Tang and C. Wang. STSR-INR: Spatiotemporal super-resolution for
+time-varying multivariate volumetric data via implicit neural representation. C&G, 2024. Accepted.
+[37] C. Wang and J. Han. DL4SciVis: A state-of-the-art survey on deep
+learning for scientific visualization. IEEE TVCG, 29(8):3714–3733,
+2023.
+[38] C. Wang and K.-L. Ma. A statistical approach to volume data quality
+assessment. IEEE TVCG, 14(3):590–602, 2008.
+[39] K.-C. Wang, K. Lu, T.-H. Wei, N. Shareef, and H.-W. Shen. Statistical
+visualization and analysis of large data using a value-based spatial
+distribution. In Proc. PacificVis, pages 161–170, 2017.
+[40] S. Weiss, P. Hermüller, and R. Westermann. Fast neural representations
+for direct volume rendering. CGF, 41(6):196–211, 2022.
+[41] W. Wen, C. Wu, Y. Wang, Y. Chen, and H. Li. Learning structured
+sparsity in deep neural networks. In Proc. NeurIPS, pages 2074–2082,
+2016.
+[42] Q. Wu, D. Bauer, Y. Chen, and K.-L. Ma. HyperINR: A fast and predictive hypernetwork for implicit neural representations via knowledge
+distillation. arXiv preprint arXiv:2304.04188, 2023.
+[43] Q. Wu, D. Bauer, M. J. Doyle, and K.-L. Ma. Interactive volume visualization via multi-resolution hash encoding based neural representation.
+IEEE TVCG, 2023. Accepted.
+[44] S. W. Wurster, H. Guo, H.-W. Shen, T. Peterka, and J. Xu. Deep hierarchical super resolution for scientific data. IEEE TVCG, 29(12):5483–
+5495, 2023.
+[45] S. W. Wurster, T. Xiong, H.-W. Shen, H. Guo, and T. Peterka. Adaptively placed multi-grid scene representation networks for large-scale
+data visualization. IEEE TVCG, 30(1):965–974, 2024.
+[46] Y. Xie, T. Takikawa, S. Saito, O. Litany, S. Yan, et al. Neural fields in
+visual computing and beyond. CGF, 41(2):641–676, 2022.
+[47] S. Ye, T. Zhang, K. Zhang, J. Li, J. Xie, et al. A unified framework of
+DNN weight pruning and weight clustering/quantization using ADMM.
+arXiv preprint arXiv:1811.01907, 2018.
+[48] B.-L. Yeo and B. Liu. Volume rendering of DCT-based compressed
+3D scalar data. IEEE TVCG, 1(1):29–43, 1995.
+[49] R. Zhang, P. Isola, A. A. Efros, E. Shechtman, and O. Wang. The
+unreasonable effectiveness of deep features as a perceptual metric. In
+Proc. CVPR, pages 586–595, 2018.
+A PPENDIX
+1 I MPLEMENTATION D ETAILS
+For easy reproducing ECNR, we list the pseudocode of one linear
+layer of ECNR in Algorithm 1 and provide the details of training
+MLPs in parallel. Let m denote the number of MLPs, Fin and
+Fout are the input and output feature dimensions of this linear layer.
+Unlike the conventional linear layer representing its weight and bias
+by two 2D matrices, the linear layer of ECNR is constructed by
+two 3D tensors where the extra dimension denotes which MLP to
+use. In the encoding process, we train all MLPs simultaneously.
+Thus MLPs indices would be an array with values in [0, m − 1]. For
+ECNR with only one layer, its input would be a tensor with shape
+(m, N, Fin ), where N is the number of voxels in one block. bmm(·)
+is a PyTorch function that computes matrix-matrix product. The
+linear layer can output a tensor with shape (m, N, Fout ). Since
+in PyTorch, all matrix multiplications in the feedforward process
+can be handled in parallel, parallel training of multiple MLPs can
+be accomplished without resorting to complex coding beyond the
+PyTorch implementation.
+Algorithm 1: ECNR linear layer in PyTorch-like format
+class ECNRLinearLayer():
+def init(self, Fin , Fout , m):
+/* initialize weight and bias
+3
+self.weight = Parameter(m, Fin , Fout )
+4
+self.bias = Parameter(m, 1, Fout )
+1
+2
+*/
+5
+6
+7
+8
+9
+def forward(self, input, MLPs indices):
+/* select MLPs parameters for
+forwarding
+*/
+MLPs weight = self.weight[MLPs indices, · · · ]
+MLPs bias = self.bias[MLPs indices, · · · ]
+return bmm(input, MLPs weight) + MLPs bias
+2 A DDITIONAL R ESULTS
+Quantitative performance across timesteps. In addition to the
+average performance results reported in Table 2 in the paper, we plot
+PSNR, LPIPS, and CD curves over timesteps, as shown in Figure 1.
+For the combustion dataset, the increasing LPIPS values over time
+for SZ3, neurcomp, and ECNR are due to the increasingly turbulent
+nature of the combustion process. As the data gets more complex,
+the volume rendering results show larger differences with respect to
+the GT. For the half-cylinder dataset, the low performance on PSNR
+and CD of TTHRESH in the beginning 21 timesteps is due to data
+sparsity.
+Compression file storage. During encoding, extra space is necessary to store the metadata, including the volume dimensions and
+network configurations. We used an array to map the MLPs to their
+assigned blocks in the multiscale block partition and assignment step.
+We encapsulated this information and metadata in the header of our
+output file. Besides the header, we stored the block latent codes with
+floating-point precision. After applying block-guided pruning and
+network quantization, we need to save three components: a binary
+mask that indicates unpruned parameters, floating-point precision
+shared parameters, and the parameter indices (with precision β bits)
+that map the unpruned parameters (after block-guided pruning) to
+the shared parameters (after network quantization). Our output file
+contains all the necessary information for decoding.
+For each component in the output file, we show its occupied
+storage percentage in Figure 2. For the combustion, half-cylinder,
+and Tangaroa datasets, latent codes and parameter indices occupy
+most storage. Rather than using 32-bit floating-point precision for
+all parameters, combining a subset of floating-point precision shared
+parameters with β -bit parameter indices offers a more concise representation. Therefore, the large storage percentage of parameter
+indices suggests the effectivity of deep compression. Note that latent
+codes in the solar plume dataset take less space than others. This
+can be attributed to its relatively larger block dimension and fewer
+timesteps, leading to fewer blocks for encoding.
+Table 1: PSNR (dB), LPIPS, and CD values, as well as encoding
+time (ET) and decoding time (DT).
+dataset
+asteroids
+(v = 0.0)
+supernova-1
+(v = 0.0)
+method
+SZ3
+TTHRESH
+MHT
+fV-SRN
+APMGSRN
+neurcomp
+ECNR
+SZ3
+TTHRESH
+MHT
+fV-SRN
+APMGSRN
+neurcomp
+ECNR
+PSNR↑
+35.21
+38.49
+40.46
+37.49
+38.29
+36.78
+38.85
+36.48
+43.73
+43.56
+40.38
+41.23
+43.23
+44.08
+LPIPS↓
+0.017
+0.036
+0.029
+0.047
+0.043
+0.054
+0.037
+0.261
+0.221
+0.229
+0.270
+0.262
+0.227
+0.228
+CD↓
+1.13
+2.87
+1.85
+5.66
+4.46
+8.67
+3.72
+2.06
+1.52
+2.35
+3.42
+3.02
+2.17
+1.77
+ET↓
+2.4s
+1.4m
+1.7m
+1.6m
+1.2m
+54.4m
+2.9m
+1.8s
+47.1s
+1.7m
+1.6m
+1.2m
+33.1m
+5.7m
+DT↓
+3.7s
+15.7s
+1.1s
+2.1s
+1.8s
+23.8s
+3.1s
+2.3s
+7.5s
+0.6s
+1.2s
+1.1s
+15.2s
+2.1s
+Static volume compression. To investigate the performance of
+ECNR on static volume compression, we compress asteroids and
+supernova-1 datasets with traditional methods (SZ3 and TTHRESH),
+grid-based methods (MHT, fV-SRN, and APMGSRN), neurcomp,
+and ECNR. The model size of all methods was controlled to 280
+KB, which is the small storage setting of APMGSRN. We used the
+implementation in APMGSRN1 for the comparison of fV-SRN and
+MHT. We stopped neurcomp training when the network converged.
+For ECNR, we set the parameters (i.e., block dimension and neuron
+number, etc.) to control its model size. We still applied three scales
+for both datasets. The number of target blocks per MLP from the
+coarsest to finest scales was adjusted to 1, 2, and 4 because the
+dataset is static. We trained the MLPs and latent codes from the
+coarsest to finest scales for 200, 150, and 125 epochs. Block-guided
+pruning happened at 75 and 115 epochs with a target sparsity of 20%
+and 30%. The lightweight CNN was not applied since we did not
+observe obvious boundary artifacts from the MLP-decoded result.
+In Table 1, we report the quantitative results. Compared with
+traditional and grid-based methods, ECNR is slower in encoding and
+decoding except for the decoding of TTHRESH. However, ECNR
+shows faster convergence and inference compared with neurcomp,
+thanks to the multiple MLPs and multiscale representation. Since
+the CR is not high and both datasets are relatively sparse, traditional
+methods and MHT perform well on reconstruction quality. For
+asteroids, SZ3 preserves the superior visual quality, and all deeplearning methods demonstrate similar reconstruction accuracy as
+shown in Figure 3. For less sparse supernova-1, ECNR reaches the
+best or second-best reconstruction quality of PSNR, LPIPS, and CD.
+The rendering results in Figure 3 also show that ECNR yields less
+error compared with other deep-learning methods.
+Streaming reconstruction. In ECNR, decoding the data at a
+coarse scale is independent of encoding the data at a finer scale.
+Considering the scenario of in-situ encoding, transmitting the coarsescale compression file first to preview the simulation result by end
+users is possible. As shown in Table 2 and Figure 4, the coarsest scale
+3 model file has only 0.3 MB while preserving the primary structure
+of the supernova. Since scale 3 also takes the least time to encode
+and decode, it could serve as a preview of the compression target.
+The detailed structure could then be added along with encoding the
+subsequent scales.
+neurcomp unstable optimization. When training neurcomp on
+a large-scale dataset, the network could encounter unstable opti1 https://github.com/skywolf829/APMGSRN
+(a) combustion
+(b) half-cylinder
+(c) solar plume
+(d) Tangaroa
+Figure 1: Top to bottom: PSNR (dB), LPIPS, and CD values over timesteps. For CD, the chosen isovalues are reported in Table 2 in the paper.
+Table 2: Encoding model size (MS, in MB), encoding time (ET),
+and decoding time (DT) for each scale of the supernova-1 dataset.
+scale
+scale 3
+scale 2
+scale 1
+(a) combustion
+(b) half-cylinder
+(c) solar plume
+(d) Tangaroa
+Figure 2: ECNR compression file storage percentages for different
+components.
+mization, leading to unacceptable outcomes. This could be partly
+attributed to the limited network capacity for fitting complex distribution and rich content of 4D volume. Such an example with the
+combustion dataset is shown in Figure 5. We can see that increasing
+the training epochs of neurcomp yields undesirable results. Unlike
+neurcomp, our ECNR is stable thanks to the adaptive increase of
+network capacity for the complex content in the multiscale fitting
+process.
+3
+A DDITIONAL N ETWORK A NALYSIS
+Besides block assignment and lightweight CNN presented in the
+paper, we further study ECNR in six aspects.
+Sparse vs. dense model. In ECNR, we prune unimportant network parameters to reduce the model size. Block-guided pruning
+reaches 30% sparsity for a large network with 24 neurons in each
+layer. Initializing and training a dense, small network with fewer
+MS↓
+0.3
+0.6
+1.6
+ET↓
+12s
+28s
+87s
+DT↓
+0.04s
+1.2s
+2.7s
+neurons in each layer should result in a similar model size without pruning. We trained two ECNR models (ECNR-dense and
+ECNR-sparse) on the supernova-1 dataset to investigate which is
+better, assuming both should have a similar CR for a fair comparison.
+ECNR-dense denotes multiple MLPs initialized with 16 neurons in
+each layer and without block-guided pruning in training. ECNRsparse denotes multiple MLPs initialized with 24 neurons in each
+layer and with 30% of parameters pruned in the training. To make
+a fair comparison and avoid the influence of other factors, we set
+s = 1 without applying quantization or entropy encoding. The block
+dimension was set to 54 × 54 × 54 in this experiment. In Table 3,
+we report PSNR and LPIPS values. ECNR-sparse shows higher
+accuracy than ECNR-dense under the same model size, indicating
+that it is necessary to employ a sparse network to achieve higher
+performance.
+Table 3: PSNR (dB) and LPIPS values, as well as model size (MS,
+in MB) of the supernova-1 dataset.
+model
+ECNR-sparse
+ECNR-dense
+PSNR↑
+40.93
+39.84
+LPIPS↓
+0.034
+0.038
+MS↓
+1.5
+1.5
+Deep compression ablation study. To investigate the impact of
+deep compression strategy on model size and reconstruction quality,
+we conducted an ablation study on the two steps, i.e., block-guided
+pruning and network quantization, using the Tangaroa dataset. We
+did not consider entropy encoding since it is applied directly to
+compress the model file losslessly. Table 4 reports the average
+PSNR and LPIPS values across all timesteps and the model size
+under different schemes. The results show that different schemes
+achieve a similar reconstruction accuracy. As displayed in Figure 6,
+(a) SZ3
+(b) TTHRESH
+(c) MHT
+(d) fV-SRN
+(e) APMGSRN
+(f) neurcomp
+(g) ECNR
+(h) GT
+Figure 3: Comparison of rendering results of different compression methods. Top and bottom: asteroids and supernova-1.
+(a)
+(a) scale 3
+(b) scale 2
+(c) scale 1
+(b)
+(c)
+(d) GT
+Figure 4: Isosurface rendering (v = 0.0) results of the supernova-1
+dataset with ECNR under streaming reconstruction (from scale 3 to
+scale 1).
+(d)
+(e)
+Figure 6: Volume rendering results of the Tangaroa dataset under
+different deep compression schemes: (a) w/o pruning and quantization, (b) w/ pruning but w/o quantization, (c) w/o pruning but w/
+quantization, and (d) w/ pruning and quantization. (e) is the GT.
+(a) 6, 000 iterations
+(b) 104 iterations
+(c) GT
+Figure 5: Volume rendering results of neurcomp using the combustion dataset. Increasing the training iterations could lead to unstable
+outcomes.
+visual quality under different schemes is also close. Therefore,
+pruning and quantization can reduce the model size with a small
+reconstruction quality loss, and we chose the scheme with pruning
+and quantization in our experiments.
+Table 4: Average PSNR (dB) and LPIPS values across all timesteps,
+as well as model size (MS, in MB) of the Tangaroa dataset.
+scheme
+w/o pruning; w/o quantization
+w/ pruning; w/o quantization
+w/o pruning; w/ quantization
+w/ pruning; w/ quantization
+PSNR↑
+42.33
+42.38
+41.29
+41.47
+LPIPS↓
+0.044
+0.047
+0.045
+0.039
+MS↓
+12.9
+7.8
+5.5
+4.7
+Comparison with standard pruning and local quantization.
+For block-guided pruning, we add block error information to guide
+the pruning intensity of different MLPs within the same scale. Moreover, unlike most deep compression strategies that only operate on
+the weight of the neural networks [14, 23, 47], we prune and quantize both the weight and bias for each small MLP. Compared with
+traditional deep learning approaches, our model contains numerous
+independent small MLPs in which the number of weights per layer
+is limited, resulting in a relatively high bias proportion compared to
+a large MLP. For instance, given one hidden layer of an MLP, if its
+weight size is 5122 , its proportion of bias is approximately 0.2% for
+this hidden layer. However, for a small weight size of 242 , this proportion can increase to 4%. Given the existence of thousands of such
+small MLPs, identifying a sparse bias structure becomes feasible and
+meaningful for model compression. Furthermore, prior quantization
+approaches only focused on a single neural network [24]. Applying
+quantization to multiple networks has not been thoroughly investigated. Considering multiple independent small MLPs can choose
+the same shared parameters to represent effective blocks containing
+similar content. We quantize MLPs globally instead of locally and
+maintain only one global shared parameter table for all MLPs in the
+following fine-tuning stage.
+To highlight the difference between our scheme and standard
+compression (denoted as ECNR⋆ ), we evaluated our block-guided
+pruning and global quantization with the common practice of standard pruning and local quantization on the asteroids and supernova-1
+datasets. We chose β = 7 bits for local quantization due to the small
+size of local MLPs. We controlled neuron numbers for two schemes
+to reach a similar PSNR for asteroids and a similar model size for
+supernova-1. Table 5 shows the quantitative results. With a similar
+PSNR, the model size of ECNR⋆ is 1.9× that of ECNR. As shown
+in Figure 7, ECNR achieves better reconstruction accuracy than
+ECNR⋆ under the same model size.
+Table 5: PSNR (dB) and LPIPS values, as well as model size (MS,
+in MB). ECNR⋆ denotes ECNR with standard pruning and local
+quantization.
+dataset
+asteroids
+supernova-1
+scheme
+ECNR⋆
+ECNR
+ECNR⋆
+ECNR
+PSNR↑
+40.24
+40.59
+44.86
+48.55
+LPIPS↓
+0.123
+0.107
+0.042
+0.029
+MS↓
+0.93
+0.49
+1.5
+1.5
+Block dimension. Among ECNR’s hyperparameters, block dimension emerges as a salient factor to adjust the CR. We evaluated
+ECNR on the Tangaroa dataset with different block dimensions to
+study quality performance under various CRs. We report quantitative
+Table 7: PSNR (dB), LPIPS, and CD (v = 0.1) values, as well as
+model size (MS, in MB), effective blocks (EB), total blocks (TB),
+and percentage of effective blocks (EB/TB) of the half-cylinder
+dataset using different s values.
+s
+2
+3
+4
+(a) ECNR⋆
+(b) ECNR
+(c) GT
+PSNR↑
+46.60
+46.34
+45.91
+LPIPS↓
+0.016
+0.019
+0.015
+(a) s = 2
+Figure 7: Volume rendering results of ECNR⋆ and ECNR. Top and
+bottom: asteroids and supernova-1.
+results in Table 6 and corresponding volume rendering and isosurface rendering results in Figure 8. As block dimension increases, the
+CR increases, reconstruction quality decreases, and encoding time
+and decoding time increase because each MLP needs to represent
+larger blocks, which hurts parallel efficiency. We chose a block
+dimension of 25 × 15 × 10 for the Tangaroa dataset as a tradeoff.
+CD↓
+0.790
+0.776
+0.814
+MS↓
+11.2
+8.7
+9.2
+(b) s = 3
+EB↓
+141,377
+112,448
+118,075
+TB↓
+435,200
+436,800
+436,904
+(c) s = 4
+EB/TB↓
+32.49%
+25.74%
+27.03%
+(d) GT
+Figure 9: Zoomed-in isosurface rendering (v = 0.1) results of the
+half-cylinder dataset with ECNR under different scales.
+Table 8: Average PSNR (dB), LPIPS, and CD (v = 0.1) values across
+all timesteps of the half-cylinder dataset.
+λb
+1.0
+0.0
+0.1
+0.01
+PSNR↑
+43.41
+44.69
+45.12
+44.98
+LPIPS↓
+0.031
+0.027
+0.026
+0.026
+CD↓
+1.04
+0.86
+0.87
+0.92
+Table 6: Average PSNR (dB), LPIPS, and CD (v = −0.85) values
+across all timesteps, as well as encoding time (ET), decoding time
+(DT), and model size (MS, in MB) of the Tangaroa dataset.
+block dimension
+25 × 5 × 5
+25 × 15 × 10
+25 × 45 × 15
+PSNR↑
+43.84
+41.47
+38.53
+LPIPS↓
+0.038
+0.046
+0.062
+CD↓
+1.07
+1.50
+2.74
+ET↓
+91.2m
+98.5m
+165.6m
+DT↓
+131.7s
+133.2s
+140.6s
+MS↓
+20.1
+4.6
+1.5
+(a) λb = 1
+(b) λb = 0
+(d) λb = 0.01
+(c) λb = 0.1
+(e) GT
+Figure 10: Zoomed-in volume rendering results of the half-cylinder
+dataset with ECNR under different λb .
+(a) 25 × 5 × 5
+(b) 25 × 15 × 10
+(c) 25 × 45 × 15
+Figure 8: Volume rendering and isosurface rendering (v = −0.85)
+results of ECNR using the Tangaroa dataset with different block
+dimensions.
+Choice of s. In Table 7 and Figure 9, we compare the result
+of ECNR using different scales s on the half-cylinder dataset with
+an identical block dimension 40 × 15 × 5. When s increases, the
+total block numbers will increase, but it may also filter out more
+non-effective blocks. The results show that s = 3 could reach the
+lowest percentage of effective blocks and preserve good quality with
+the smallest model size. Therefore, we set s = 3 for most datasets.
+λb in block-guided pruning. To choose an appropriate weight
+λb for pruning, we optimized our model on the half-cylinder dataset
+with different λb values. In Table 8, we report the average PSNR,
+LPIPS, and CD values using different λb . Figure 10 shows the
+zoomed-in volume rendering results. λb = 0.1 achieves the overall
+best quality, and we chose this setting for all experiments.

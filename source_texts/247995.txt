@@ -1,0 +1,128 @@
+Goal Reemplazar el sphere tracer clásico de `ome_render::raymarch` por Enhanced Sphere Tracing (Keinert et al. 2014). Resuelve los artifacts de cuellos cóncavos visibles en #221 sin aumentar `MAX_STEPS` ni costo de GPU. Approach Strict s...
+
+feat(render): enhanced sphere tracing (Keinert 2014) — fix concave-neck convergence · Issue #222 · lobinuxsoft/kooch · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+feat(render): enhanced sphere tracing (Keinert 2014) — fix concave-neck convergence #222
+New issue
+Copy link
+New issue
+Copy link
+Closed as not planned
+Closed as not planned
+feat(render): enhanced sphere tracing (Keinert 2014) — fix concave-neck convergence#222
+Copy link
+Labels
+difficulty:mediumComplejidad moderadaComplejidad moderadaenhancementNew feature or requestNew feature or requestnext-sessionContinuar en la próxima sesiónContinuar en la próxima sesiónpriority:highAlta prioridadAlta prioridad
+Description
+lobinuxsoft
+opened on Apr 22, 2026
+Issue body actions
+Goal
+Reemplazar el sphere tracer clásico de `ome_render::raymarch` por Enhanced Sphere Tracing (Keinert et al. 2014). Resuelve los artifacts de cuellos cóncavos visibles en #221 sin aumentar `MAX_STEPS` ni costo de GPU.
+Approach
+Strict superset del sphere tracing actual: cada step prueba un avance over-relaxed (`d * 1.6`) y, si detecta overshoot vía la condición de Keinert, hace fallback al avance conservador (`d` exacto). En el peor caso degrada al algoritmo actual; en el mejor reduce 30-50% de pasos.
+```
+// Pseudo-WGSL, ~10 líneas extra en el loop principal:
+let d = sdf(P);
+let candidate = P + dir * (d * RELAXATION);   // RELAXATION = 1.6
+let d_next = sdf(candidate);
+if (d_next + d * (RELAXATION - 1.0) >= d) {
+    P = P + dir * d;                           // overshoot → safe step
+} else {
+    P = candidate;                             // accept aggressive
+}
+```
+Paper: http://erleuchtet.org/~cupe/permanent/enhanced_sphere_tracing.pdf (6 páginas, muy legible).
+Tareas
+Identificar el shader WGSL del ray-marcher en `crates/ome_render/src/raymarch/`.
+Implementar la condición de Keinert con `RELAXATION = 1.6` como uniform configurable.
+Exponer el factor en `RayMarchParams` para tuning sin recompilar.
+Verificar que el demo `raymarch_demo` standalone sigue funcionando (no regression).
+Probar con la escena de `TestEngine2.0` que reproduce fix(render): SDF ray-marcher artifacts in concave intersections + hard CSG seams #221.
+Acceptance Criteria
+Los gaps oscuros de fix(render): SDF ray-marcher artifacts in concave intersections + hard CSG seams #221 desaparecen sin tocar `MAX_STEPS`.
+Frame time no aumenta (debe BAJAR ~20-40% en escenas con concavos).
+Silhouettes mantienen pixel-perfect sharpness — NO se introduce blur tipo cone tracing.
+Documentación del módulo explica por qué la condición de Keinert garantiza no-overshoot.
+Notas
+Bloqueante para futuras optimizaciones — Segment Tracing (#XXX) y Adaptive Epsilon (#XXX) construyen sobre ESL como baseline.
+NO combina mal con cone tracing futuro: cone tracing eventual irá en shadow rays / AO, no en primary visibility.
+Refs #221
+Closes #221 (cuando merged — ESL es la solución elegida del menú #221)
+Activity
+lobinuxsoft
+added
+enhancementNew feature or requestNew feature or request
+priority:highAlta prioridadAlta prioridad
+difficulty:mediumComplejidad moderadaComplejidad moderada
+next-sessionContinuar en la próxima sesiónContinuar en la próxima sesión
+on Apr 22, 2026
+lobinuxsoft
+added 2 commits that reference this issue on Apr 22, 2026
+fix(render): bump default max_steps 128 → 256 to reduce concave-neck …
+...
+7affa7c
+fix(render): adaptive calc_normal eps to stop CSG seam bridging (#225 …
+...
+51686e5
+lobinuxsoft commented on Apr 23, 2026
+lobinuxsoft
+on Apr 23, 2026
+OwnerAuthor
+More actions
+Segundo intento (post-#234) — también killed
+Sesión 2026-04-22 cierre. Re-implementé ESL con omega=1.6 + algoritmo cleaner del primer intento (hit test FIRST, explicit rollback math), asumiendo que #234 (calc_normal adaptive eps) era prerequisite. Falsa hipótesis.
+Lo que pasó
+Primero salió pantalla negra → bug de alignment Rust/WGSL: _pad: vec3<f32> en WGSL forzaba 16-byte align, struct llegaba a 48 bytes vs Rust 32. Buffer corrupto, params garbage. Fix: 3 separate f32 pad fields en ambos lados, evitar vec3 padding semantics.
+Después de fix de alignment: rendering funcionó pero con artifacts geométricos (facetas planares/cuts angulares, no patches grises). Ver screenshots adjuntos por usuario.
+Diagnóstico real
+Los artifacts NO son del calc_normal (#234 los arregló). Son por interacción ESL ↔ violación Lipschitz por non-uniform scale (hipótesis #2 de #225, ahora confirmada como blocker para ESL):
+Test scene tiene SdfSphere "Ana" con scale (4.8, 0.7, 1.0). s_min = 0.7 subestima distancia ~10× en eje X.
+ESL overlap test (radius + prev_radius) < step_length opera sobre valores subestimados → false-positive disparos constantes.
+Rollback a t_prev + prev_radius aterriza en posición que NO es el safe boundary real (porque prev_radius está subestimado).
+Standard sphere tracing desde posición incorrecta converge a t distinto del clásico.
+Hit en posición no-superficie → rays "stop" en planos virtuales → facetas geométricas visuales.
+Conclusión firme
+ESL es incompatible con el s_min workaround del shader actual. Para que ESL funcione clean en escenas con non-uniform scale extremo (>~3-5×), se necesita:
+Path A: SdfEllipsoid primitive con fórmula EXACTA (no aproximación iq) — Lipschitz-1 estricto.
+Path B: Segment Tracing (feat(render): segment tracing with local Lipschitz bounds (Galin et al. 2020) #224) con Lipschitz LOCAL por primitiva — ataca causa raíz, ESL se vuelve obsoleto.
+Path C: Rechazar non-uniform scale en SdfSphere via warning UI (forzar al usuario a usar primitive correcto).
+Status
+Killed branch. Issue queda OPEN como recordatorio de que ESL requiere alguno de los paths A/B/C como prerequisito. NO re-intentar sin uno de esos resuelto primero.
+lobinuxsoft commented on Apr 23, 2026
+lobinuxsoft
+on Apr 23, 2026
+OwnerAuthor
+More actions
+Cerrada en favor de #224 (Segment Tracing).
+Dos intentos confirmaron experimentalmente que ESL no puede funcionar clean mientras el shader use el `s_min` workaround para non-uniform scale. La causa raíz no es ESL — es la violación Lipschitz que ESL solo expone más visiblemente.
+El camino correcto para optimizar el tracer es #224 (Segment Tracing): usa Lipschitz local por primitiva, no requiere el `s_min` hack, smooth blends se mantienen compatibles, y reportado 2-5× más rápido que sphere tracing en CSG analítico (nuestro caso de uso exacto).
+Si en el futuro alguien quiere re-intentar ESL, el prerequisito es resolver hipótesis #2 de #225 vía:
+SdfEllipsoid con fórmula EXACTA (closed-form bisection, no aproximación iq que falló en feat(ecs,render): SdfEllipsoid primitive (closed-form, no scale-Lipschitz issue) #229), o
+Migración a Segment Tracing (que vuelve ESL obsoleto), o
+Rechazar non-uniform scale en SdfSphere via UI warning.
+Detalle técnico en comments de #222 y #225.
+lobinuxsoft
+closed this as not plannedon Apr 23, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+difficulty:mediumComplejidad moderadaComplejidad moderadaenhancementNew feature or requestNew feature or requestnext-sessionContinuar en la próxima sesiónContinuar en la próxima sesiónpriority:highAlta prioridadAlta prioridad
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

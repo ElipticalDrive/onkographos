@@ -1,0 +1,596 @@
+chombo-discharge might require storign point-clouds in PackedBVH for fast SIMD traversal when merging nearest-neighbors. We could run this either in chombo-discharge, or perhaps even in EBGeometry instead. The method should support direc...
+
+PointCloudSoA · Issue #92 · rmrsk/EBGeometry · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+PointCloudSoA #92
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#106
+Closed
+PointCloudSoA#92
+#106
+Copy link
+Assignees
+Labels
+bvhAffects the bounding volume hierarchies functionalitiesAffects the bounding volume hierarchies functionalitiesenhancementNew feature or requestNew feature or request
+Description
+rmrsk
+opened on Jul 7, 2026
+Issue body actions
+chombo-discharge might require storign point-clouds in PackedBVH for fast SIMD traversal when merging nearest-neighbors.
+We could run this either in chombo-discharge, or perhaps even in EBGeometry instead. The method should support direct packing into PackedBVH rather than rerouting through TreeBVH. This should just be an extra constructor.
+PackedBVH might want to have RAW access, not via std::shared_ptr. Not sure how to do this, but shouldn't be that hard.
+Activity
+rmrsk
+self-assigned this
+on Jul 7, 2026
+rmrsk commented on Jul 7, 2026
+rmrsk
+on Jul 7, 2026
+OwnerAuthor
+More actions
+Benchmarked this against chombo-discharge's own nearest-neighbor particle-merge tree this week (standalone scratch benchmarks, not committed anywhere) to get real numbers behind the two checklist items above, plus a few more that fell out of the exercise. Summary below; happy to share the benchmark sources if useful.
+Numbers behind the two existing checklist items
+Direct-to-PackedBVH build (skip TreeBVH entirely): at N=90,441 points (K=4), building via TreeBVH+pack() took ~62ms vs. our own flat-array build's ~10ms (6.1x slower) — almost entirely shared_ptr<TreeBVH>-per-node allocation, not the partitioning logic itself (BVCentroidPartitioner's count-split is the same algorithm we use). A prototype building straight into a PackedBVH::Node-shaped flat array (K-way count-median split via nth_element, still individually shared_ptr-wrapping primitives) closed this to ~6-9% slower than our own build at realistic sizes (20K-90K points) — i.e. nearly the entire 6x gap is the TreeBVH node allocation, not primitive allocation.
+shared_ptr-free primitive storage: isolated at the per-leaf-scan level (leaf sizes 8-32, matching our own tree's typical leaf occupancy). shared_ptr<const P>-per-primitive leaf scanning (dereference + ->signedDistance()) was 3.4x slower than a flat-array-with-indices leaf scan, and 6.4x slower than an SoA-packed leaf scan (see PointCloudSoA idea below), at leaf size 24. Two separable costs bundled in there: (a) each primitive is a scattered, independent heap allocation — poor cache locality on every subsequent query, not just at build; (b) signedDistance()'s contract returns actual (sqrt'd) distance, so a std::sqrt gets paid per candidate even though nearest-point search only needs squared distance to compare.
+Additional items that fell out of this
+A generic SoA leaf-group primitive for point-only primitives (position, no vertex/edge/normal data) — same shape as TriangleSoAT<T,W> (pack/pad-last-valid/dispatch-by-width via DefaultWidth<T>()). Measured ~1.8-2.2x faster leaf scans than flat-array-with-indices, independent of and additive with the two points above (so combined vs. today's shared_ptr leaf: ~6-7x on the leaf-scan side alone).
+Fold build + SoA-pack into one constructor pass — not build-direct-to-PackedBVH, then a second packWith<Q>-style conversion afterward. One pass: partition primitives, write flat Nodes, SoA-pack each leaf's positions directly, never materializing per-primitive shared_ptrs or an intermediate AoS leaf representation at all.
+A squared-distance leaf/primitive contract, alongside (or instead of) signedDistance(), for use cases (like nearest-neighbor search) where sign/exact distance is never needed. This wants to reach further than just the primitive interface, though — see below.
+evalLeaf in PackedBVH::signedDistance() is already a good seam to templatize. It's currently a single local lambda (hardcoding m_primitives[...]->signedDistance(a_point)) reused verbatim across every SIMD-width branch (AVX-512 K=8/double, AVX-512 K=16/float, AVX, scalar fallback) — i.e. leaf handling is already factored out from the node-traversal skeleton, which is the part that's actually hard to get right. Making that a template parameter (not std::function — stays zero-cost/inlinable) would let a caller supply their own leaf-eval (e.g. one that walks SoA-packed point groups via its own intrinsics) against the same SIMD node-traversal skeleton, instead of hand-duplicating the whole AVX-512/AVX/scalar dispatch tree for every new leaf-data shape. One catch: the pruning check (curBest2 = minDist * minDist) assumes minDist is tracked linear and squares it for comparison against the AABB's squared distance — a fully sqrt-free path needs that parameterized too (track minDist already-squared and skip the multiply), not just the leaf callback, or the sqrt saving doesn't make it all the way through.
+Raw-array/index-based input instead of requiring std::vector<PrimAndBV<P,BV>> up front — once primitive shared_ptrs are gone, materializing that pair list is the next-largest remaining per-build allocation.
+Scratch/arena reuse across repeated builds. chombo-discharge's use case rebuilds this tree per spatial patch per merge round (not once at startup the way geometry BVHs are) — a build path that accepts caller-owned, .clear()-and-reused buffers rather than allocating fresh vectors every call would avoid repeated allocator churn on top of the per-build costs above.
+Open question, not blocking: whether the direct+SoA path needs to stay K-generic or can specialize to K∈{4,8} (the only widths that currently get a SIMD node-traversal path anyway).
+Don't have a strong preference on EBGeometry vs. chombo-discharge for where the new type/constructors land — flagging per the first checklist item, this is planned for chombo-discharge to consume once available, whichever repo it ends up in.
+rmrsk commented on Jul 7, 2026
+rmrsk
+on Jul 7, 2026
+OwnerAuthor
+More actions
+Follow-up on the shared_ptr-free primitive storage point above: how invasive would this actually be inside PackedBVH?
+Not the node-traversal skeleton or tree layout. m_linearNodes/ChildAABBSoA/buildSoA() are already flat, POD, index-based — untouched by this question either way.
+What does need to change: PrimitiveList<P> is defined at namespace scope as std::vector<shared_ptr<const P>> and reused pervasively -- PackedBVH::m_primitives, getPrimitives()'s return type, PackedUpdater<P>'s callback signature, and both existing PackedBVH constructors (which build it via make_shared internally). That's several coordinated spots inside PackedBVH specifically (not TreeBVH, not the traversal skeleton), not a one-line change.
+Doesn't have to be a breaking rewrite, though. Cleanest path is additive: parameterize the storage/handle type instead of hardcoding shared_ptr -- e.g. a template-template parameter defaulting to std::shared_ptr (template <class T, class P, size_t K, template<class> class Handle = std::shared_ptr>), with a trivial value-holding alternative (struct ValueHandle<P> { P value; const P* operator->() const noexcept { return &value; } };) presenting the same ->-based interface the leaf-eval code already uses. Existing consumers (mesh/DCEL, TreeBVH-sourced construction) get Handle=std::shared_ptr by default with zero behavior change; a new direct-build constructor would instantiate with the value-wrapper instead. Standard policy-based-storage pattern -- real surgery (several coordinated edits), but backward-compatible and doesn't ripple into TreeBVH or the traversal skeleton at all.
+Alternative, if touching PackedBVH itself is unwanted: a separate type reusing the same Node/ChildAABBSoA/buildSoA() shapes but storing std::vector<P> by value, sidestepping any risk to the geometry use case at the cost of some duplication between the two classes -- though the actual hard part (the SIMD node-traversal skeleton) could still be factored out and shared rather than duplicated outright.
+Worth being explicit that this specifically is what's needed for the walk-side win (the 3.4-6.4x leaf-scan gap measured against shared_ptr AoS above) on top of the tree-node allocation fix -- the tree-node shared_ptr elimination (the ~6x build-side win) is orthogonal and doesn't require touching primitive storage at all, since that's purely about TreeBVH's own node allocation.
+Also for context, since it came up: estimated this migration's actual payoff against ItoSolver::makeSuperparticles() (equal_weight_kd, chombo-discharge's existing, structurally different merge algorithm that doesn't do per-particle nearest-neighbor queries at all). Rough estimate: current gap after the whole-patch-tree/count-median-split/average-density-prefilter work is already down to ~6.7x from an original ~18x. This migration would likely bring it to roughly 4.5-5.5x, not closer -- ~30% of total round time is non-search overhead (proposal/verdict/placement) untouched by any of this, and equal_weight_kd's structural advantage (no per-particle search at all) isn't something a faster search closes. Real, worthwhile win, not a full close of the gap.
+rmrsk
+added a commit that references this issue on Jul 7, 2026
+Rebuild the nearest-neighbor merge search as one count-median tree pe…
+...
+e47f87e
+rmrsk commented on Jul 7, 2026
+rmrsk
+on Jul 7, 2026
+OwnerAuthor
+More actions
+PackedBVH: Handler-based storage (pointer vs. raw value) + direct constructor
+Context
+GitHub issue #92 ("PointCloudSoA") notes that chombo-discharge needs to store point-clouds in PackedBVH for fast SIMD nearest-neighbor traversal, and flags two gaps:
+PackedBVH can only be built by first constructing a TreeBVH, partitioning it, and calling pack()/packWith() — there's no single constructor that goes straight from a list of primitives to a PackedBVH.
+PackedBVH always stores primitives as std::shared_ptr<const P>, even when P is a self-contained value type. For a point cloud (potentially millions of particles), per-primitive shared_ptr indirection and control-block overhead during traversal is pure waste — the whole point of packing into SIMD-friendly SoA-style leaves is to avoid pointer-chasing.
+The user's ask: design a Handler abstraction so callers can choose between the existing pointer-based storage and a new raw-value storage mode, and add a constructor that builds a PackedBVH directly (not by requiring the caller to manually drive TreeBVH). The particle-cloud SoA structure itself (P) is explicitly out of scope — this plan only prepares PackedBVH to host such a type later.
+Investigation (3 parallel Explore agents + direct file reads, all confirmed against Source/EBGeometry_BVH.hpp/EBGeometry_BVHImplem.hpp) found no existing "Handler" or similar storage-policy abstraction anywhere in the codebase — it needs to be designed from scratch. It also found that PrimitiveList<P>/PrimAndBV<P,BV> (the aliases TreeBVH and its partitioners are built on) hard-code shared_ptr<const P> at the alias level, and that even today's "value-type" leaf case (TriangleSoAT, packed via TreeBVH::packWith) doesn't truly avoid shared_ptr — it uses the shared_ptr aliasing constructor to fake by-value semantics while keeping the same ABI everywhere else.
+Two more items were flagged as separate, independent follow-up work (not part of this implementation, but scoped below for later): (a) signedDistance()'s SIMD traversal is entirely hand-duplicated 5× with no generic/reusable "SIMD traverse" abstraction, and MeshSDF::signedDistance() doesn't even call it (never benefits from SIMD); (b) several traversal comparisons take an avoidable sqrt (AABBT::getDistance() has no squared-distance companion).
+Approach
+1. The Handler concept
+Add two small stateless policy structs to EBGeometry::BVH, in Source/EBGeometry_BVH.hpp just before the PackedBVH forward declaration (currently lines 103-108):
+```
+template <class P>
+struct SharedPtrHandler   // default; preserves today's exact behavior/ABI
+{
+  using StorageType = std::shared_ptr<const P>;
+  static const P& get(const StorageType& a_stored) noexcept { return *a_stored; }
+  static void appendTreeLeaf(std::vector<StorageType>& a_dst, const PrimitiveList<P>& a_leafPrims);
+  static void appendAliased(std::vector<StorageType>& a_dst, const std::shared_ptr<std::vector<P>>& a_block, size_t a_index);
+};
+
+template <class P>
+struct ValueHandler        // new; stores P directly, zero shared_ptr overhead
+{
+  using StorageType = P;
+  static const P& get(const StorageType& a_stored) noexcept { return a_stored; }
+  static void appendTreeLeaf(std::vector<StorageType>& a_dst, const PrimitiveList<P>& a_leafPrims);
+  static void appendAliased(std::vector<StorageType>& a_dst, const std::shared_ptr<std::vector<P>>& a_block, size_t a_index);
+};
+```
+These three operations cover every existing touch point of m_primitives: per-element access (get, used by evalLeaf in signedDistance()), the identity-pack constructor's leaf copy (appendTreeLeaf, replaces the current m_primitives.insert(...) at EBGeometry_BVHImplem.hpp:411), and the converting-pack/direct-construct materialization from one shared buffer (appendAliased, replaces the aliasing emplace_back at EBGeometry_BVHImplem.hpp:480).
+PackedBVH gains a 4th template parameter defaulted to SharedPtrHandler<P>:
+```
+template <class T, class P, size_t K, class Handler = BVH::SharedPtrHandler<P>>
+class PackedBVH { ... };
+```
+(default only on the forward declaration at line 107-108; the class definition at line 828 repeats the parameter list without =, per C++ rules). m_primitives (line 1109) becomes std::vector<typename Handler::StorageType>; add using StorageType = typename Handler::StorageType; as a public alias. getPrimitives() (line 1026-1027 / impl 486-491) returns const std::vector<typename Handler::StorageType>&.
+Backward compatibility: every existing use of PackedBVH<T,P,K> (3 args) — EBGeometry_CSG.hpp:412,463,497,547, EBGeometry_MeshDistanceFunctions.hpp:127,242, plus every ->pack()/->packWith<Q>(conv) call site in EBGeometry_MeshDistanceFunctionsImplem.hpp and EBGeometry_CSGImplem.hpp — resolves to the identical SharedPtrHandler<P> instantiation and compiles/behaves byte-for-byte as today (confirmed no file names PackedBVH<...> with more than 3 args, and getPrimitives() has no external callers). TreeBVH::pack()/packWith() (decl EBGeometry_BVH.hpp:741-742,756-758, impl EBGeometry_BVHImplem.hpp:340-357) each gain a defaulted Handler template parameter so existing callers need no changes; PackedUpdater<P> (line 174-175) similarly grows a defaulted Handler parameter (no external users beyond PackedBVH::traverse/signedDistance, so this is risk-free).
+2. The new direct constructor
+```
+template <class P, class BV>
+using ValuePrimAndBVList = std::vector<std::pair<P, BV>>;   // new alias, near PrimAndBVList (~line 131)
+
+// New PackedBVH member (declared after the existing converting constructor, ~line 1015):
+inline PackedBVH(BVH::ValuePrimAndBVList<P, BV> a_primsAndBVs, const BVH::Build a_build = BVH::Build::SAH);
+```
+Takes primitives by value as std::vector<std::pair<P, BV>> (a sink parameter the caller can std::move in) — never requires the caller to wrap anything in shared_ptr, regardless of which Handler the resulting PackedBVH uses. BV is caller-supplied per element (not computed via some new P::getBoundingVolume() contract) to match every existing precedent (MeshDistanceFunctionsDetail::buildDCELTreeBVH, CSGDetail::buildBVH both take pre-paired (primitive, BV) lists).
+Internally, to avoid the "millions of particles → millions of individual make_shared calls" trap during the temporary TreeBVH build phase, reuse the exact one-block-aliasing trick the converting constructor already uses (EBGeometry_BVHImplem.hpp:439,480):
+Move the caller's values into one std::make_shared<std::vector<P>>(...) block — one allocation total.
+Build a PrimAndBVList<P,BV> where each element is the shared_ptr aliasing constructor pointing into that one block (shares one control block, no per-element allocation).
+Construct a genuinely-temporary TreeBVH<T,P,BV,K> from that list and run the existing, unchanged Build-enum dispatch (topDownSortAndPartition / bottomUpSortAndPartition<SFC::Morton|Nested> / SAH via BinnedSAHPartitioner) — the same switch (a_build) shape already used by buildDCELTreeBVH (EBGeometry_MeshDistanceFunctionsImplem.hpp:133-206) and CSGDetail::buildBVH (EBGeometry_CSGImplem.hpp:40-95).
+Flatten into *this via a new shared private helper packTree(const TreeBVH<T,P,BV,K>&), factored out of the existing identity-pack constructor's dfs lambda (EBGeometry_BVHImplem.hpp:389-428), using Handler::appendTreeLeaf at the leaf step.
+This means TreeBVH itself needs zero changes — its partitioning machinery stays 100% shared_ptr-based, and the Handler only governs PackedBVH's final storage. For ValueHandler, the end result is a genuinely pointer-free std::vector<P> (one allocation for the whole array); for SharedPtrHandler, behavior matches today.
+3. Concrete change list
+Source/EBGeometry_BVH.hpp
+Add SharedPtrHandler<P>/ValueHandler<P> definitions before the PackedBVH forward declaration (~line 103-108); update the forward declaration to include the defaulted 4th parameter.
+Add ValuePrimAndBVList<P,BV> alias near PrimAndBVList (~line 131).
+PackedUpdater<P> (174-175): add defaulted Handler parameter.
+TreeBVH::pack()/packWith() decls (741-742, 756-758): add defaulted Handler template parameter, propagate into return type.
+PackedBVH class header (828): gains , class Handler (no default here).
+Add new direct-constructor declaration + doxygen after the converting constructor (~line 1015).
+Add new private packTree() helper declaration.
+getPrimitives() (1026-1027), traverse() (1084-1089), m_primitives (1109): update types to go through Handler/StorageType.
+No changes to Node, ChildAABBSoA, buildSoA() — Handler-agnostic.
+Source/EBGeometry_BVHImplem.hpp
+TreeBVH::pack()/packWith() impls (340-357): propagate Handler template parameter into the PackedBVH<...> instantiation.
+Identity-pack constructor (389-428): extract the dfs lambda + buildSoA() call into the new packTree() method; replace the leaf-copy line (411) with Handler::appendTreeLeaf(...).
+Converting-pack constructor (430-484): replace the tail loop (477-481) with Handler::appendAliased(...).
+New direct constructor (insert ~line 485): implements the one-block-alias + temp-TreeBVH + Build-switch + packTree() sequence from §2.
+getPrimitives() impl (486-491): update return type.
+traverse() impl (507-549): update a_updater parameter type; body unchanged (already forwards m_primitives opaquely).
+signedDistance() (551-1077): only the shared evalLeaf lambda (561-568) and the scalar-fallback's inline updater (1048-1058) need their m_primitives[i]->signedDistance(...) calls changed to Handler::get(m_primitives[i]).signedDistance(...). All 6 SIMD branches need zero changes — confirmed via direct read that none of them index m_primitives directly; they only call evalLeaf.
+Mechanical: every template <class T, class P, size_t K> header for a PackedBVH member (~10 occurrences) gains , class Handler, and every PackedBVH<T, P, K>:: qualifier becomes PackedBVH<T, P, K, Handler>::.
+No changes needed: EBGeometry_CSG.hpp, EBGeometry_CSGImplem.hpp, EBGeometry_MeshDistanceFunctions.hpp, EBGeometry_MeshDistanceFunctionsImplem.hpp, EBGeometry_ParserImplem.hpp — all instantiate PackedBVH<T,P,K>/call pack()/packWith() with no explicit Handler argument, so they resolve to the default and are unaffected.
+4. Tests — new Tests/TestBVH.cpp
+No dedicated BVH test file exists today (register via ebgeometry_add_test(TestBVH) in Tests/CMakeLists.txt, matching the existing pattern used by TestSTL/TestPLY/etc.). Cover:
+Handler equivalence: same primitive set packed via SharedPtrHandler (default) and explicit ValueHandler; signedDistance() results and getPrimitives().size() must agree.
+Direct constructor correctness: build via the new constructor for each Build::{TopDown,Morton,Nested,SAH}, check signedDistance() against a brute-force O(N) scan over the same inputs.
+Direct-ctor vs. tree-then-pack equivalence: same primitives built two ways (manual TreeBVH+partition+pack() vs. new direct constructor) must agree for both Handlers.
+ValueHandler layout sanity: confirm StorageType really is P (no pointer indirection) vs. SharedPtrHandler's shared_ptr<const P>.
+Regression baseline: since this is the first BVH test file, also exercise the pre-existing default-argument TreeBVH/pack()/packWith()/signedDistance()/traverse() paths, and confirm TestDCEL.cpp's FastTriMeshSDF case (exercises the SIMD packWith path with real mesh data) and the full existing suite still pass unmodified.
+Use Triangle<T,Meta> (already a self-contained value type, see Source/EBGeometry_Triangle.hpp) or a small local point/particle test struct as the P fixture for ValueHandler cases — do not design the real PointCloudSoA type here.
+Follow-up work (separate, independent — not part of this implementation)
+Flagged by the user as decoupled improvements; scoped here for later but sequenced after this Handler work since both build on the accessor/storage shape it establishes:
+Generic SIMD-traverse specialization: PackedBVH::signedDistance()'s SIMD code (EBGeometry_BVHImplem.hpp:586-970) is hand-duplicated once per (ISA,K,T) combination with no shared helper. Separately, MeshSDF::signedDistance() (EBGeometry_MeshDistanceFunctionsImplem.hpp:260-301) — confirmed via direct exploration — never calls m_bvh->signedDistance() at all; it hand-rolls its own scalar-only traversal via the generic (non-SIMD) traverse(), so it never benefits from SIMD even when (K,T) matches a compiled ISA path, unlike TriMeshSDF which correctly delegates. Fixing that delegation is a quick, high-value win independent of the larger "extract one generic SIMD-traverse primitive" refactor (which would also unify MeshSDF::getClosestFaces(), BVHUnionIF::value(), BVHSmoothUnionIF::value() — 3 more near-duplicate traversal bodies).
+Squared-distance/sqrt-avoidance: PackedBVH::signedDistance()'s SIMD branches already correctly compare squared distances (no sqrt) for AABB pruning — no change needed there. The gap is AABBT<T>::getDistance() (EBGeometry_BoundingVolumesImplem.hpp:437-460, sqrt at line 459), which has no squared companion, called via PackedBVH::Node::getDistanceToBoundingVolume() from 5 places that each pay a sqrt per node purely for a comparison: the scalar fallback in PackedBVH::signedDistance(), MeshSDF::signedDistance(), MeshSDF::getClosestFaces(), BVHUnionIF::value(), BVHSmoothUnionIF::value(). Add AABBT<T>::getDistance2() (mirroring Vec3T::length2()/the unsignedDistance2() convention already used throughout EBGeometry_DCEL_*, and matching the exact pattern already proven in DCEL::MeshT::DirectSignedDistance2()), and switch those 5 call sites to compare squared quantities. Note: BVHUnionIF/BVHSmoothUnionIF's running-best can be negative (an implicit-function value, not a pure distance), so those two call sites need extra care when squaring — the pure-SDF call sites (PackedBVH, MeshSDF) are the safe, straightforward wins.
+Verification
+Build with the default AVX debug preset: cmake --build build -j$(nproc).
+Run the full suite including the new TestBVH: ctest --test-dir build --output-on-failure -L "unit|example".
+Cross-compile with Clang (-DCMAKE_CXX_COMPILER=clang++-18) to catch template-instantiation issues the primary compiler might not.
+Compile-check the AVX-512 tier (-DEBGEOMETRY_SIMD=avx512) since signedDistance()'s SIMD branches are being touched (only evalLeaf's body, but worth confirming no accidental breakage on the AVX-512F/K=8,double and K=16,float branches).
+clang-tidy via Scripts/clang-tidy-check.sh and a Doxygen build check, per the project's established verification convention.
+Manually confirm (via a quick standalone compile) that PackedBVH<T,P,K> (3-arg, no Handler) still compiles and that sizeof of the new ValueHandler-instantiated StorageType equals sizeof(P) with no added indirection.
+rmrsk commented on Jul 8, 2026
+rmrsk
+on Jul 8, 2026
+OwnerAuthor
+More actions
+Follow-up on overall strategy, since this came up while deciding what to prototype next.
+Direct build (no TreeBVH, no shared_ptr anywhere) + SIMD traversal + SoA-packed leaves is the strategy -- the first two are strongly confirmed by the earlier numbers (6x on build, 3.4-6.4x on leaf-scan), and PackedBVH::traverse()'s SIMD node pruning already comes for free with any PackedBVH regardless of build strategy (it never used shared_ptr for node walking to begin with). The part that needs deliberate design is pairing that with SoA-packed leaves, since the node-level SIMD win and the leaf-level SoA win are separate and additive -- "SIMD traversal" alone only gets the node-pruning half.
+Whether SFC specifically still wins once shared_ptr is removed from both sides is still open, flagging honestly. The ~2.7-3x SFC-over-topdown speedup measured earlier was entirely within the shared_ptr-laden TreeBVH path. The "direct-to-packed" prototype that got within 6-9% of a from-scratch build used a topdown count-median split (nth_element), not SFC -- so it's not yet known whether SFC's edge survives once the dominant shared_ptr cost is gone from both sides, or whether the remaining gap between "direct topdown" and "direct SFC" shrinks a lot once neither pays the allocation tax. Next benchmark to run, not yet done.
+Independent of that speed question, there's a separate reason to still lean SFC: Morton-order grouping tends to produce more spatially coherent leaves than an arbitrary count-split, which could mean tighter leaf AABBs and better query-time pruning -- a quality argument, not just a build-speed one.
+Design for a target-size-aware SFC leaf cut (came up because bottomUpSortAndPartition<S>() today ignores any target leaf size entirely -- it derives numLeaves = K^floor(log_K(N)) purely from N and K, which doesn't match how leaf size has been actively tuned this whole session via a_subPartitionThresh):
+Leaf formation is a single linear scan, no tree structure needed for this part. Once every point has an SFC code and the array is sorted by it, walk left to right accumulating a running count, and cut a new leaf boundary whenever the running count reaches (or would exceed) the target size. O(n), gives numLeaves ≈ numPrimitives / targetLeafSize directly and controllably -- replaces the current K^floor(log_K(N)) computation with the thing actually wanted.
+Building the internal K-ary structure on top of those leaves is the part that needs new logic, not a parameter tweak. The existing merge-upward code only works cleanly because it deliberately forces numLeaves to be a power of K, so the tree is perfectly regular (every leaf at the same depth, groups of exactly K at every level). Once leaf count comes from a target size instead, numLeaves generally won't be a power of K, so the upward merge needs to handle a ragged last group somewhere (fewer than K children at some level) -- a routine, well-understood problem in LBVH-style builders (pad to the next power of K with empty/duplicate leaves, or just allow a short last group and skip padding), but genuinely new construction code, not something that drops into bottomUpSortAndPartition as-is.
+Full shape: SFC-sort once → linear-scan leaf-cut at the target size → group leaves upward in (mostly) K-sized chunks for the SIMD-traversable internal structure → SoA-pack each leaf's positions. Planning to prototype leaf formation this way (target-size-cut, not power-of-K) for the next round of benchmarking, to get a real SFC-vs-topdown number under the "direct, no shared_ptr" condition rather than extrapolating from the shared_ptr-laden comparison.
+rmrsk commented on Jul 8, 2026
+rmrsk
+on Jul 8, 2026
+OwnerAuthor
+More actions
+PR1: Generic SIMD nearest-search traversal with a caller-supplied update rule
+Context
+Follow-up to the discussion above: this issue's design work has three genuinely separable axes
+(traversal genericization, storage policy, build strategy), and we're splitting them into three
+PRs. This is the plan for the first: extracting PackedBVH::signedDistance()'s SIMD box-pruning
+skeleton into a reusable, public traversal primitive that takes a caller-supplied per-leaf update
+rule, removing the hard requirement that the primitive type P provide signedDistance().
+Ordered first because PR2 (storage policy) and PR3 (build strategy) both want a stable seam to
+plug their leaf-access logic into, and doing this first means PR2 only has to edit one small
+lambda body later instead of touching the traversal skeleton itself.
+Confirmed by direct read of Source/EBGeometry_BVHImplem.hpp:551-1077 (current signedDistance()
+body, ~530 lines): it is six near-identical if constexpr branches (AVX-512 K=8/double, AVX-512
+K=16/float, AVX K=4/double, AVX K=8/float, AVX K=8/double-as-two-passes, SSE4.1 K=4/float) plus a
+scalar fallback that goes through the existing generic traverse(). Across all six branches, the
+only primitive-type-dependent code is the evalLeaf lambda (EBGeometry_BVHImplem.hpp:561-568)
+and the two minDist * minDist pruning expressions. Everything else — SoA AABB register loads,
+squared point-to-box distance, child sort, stack push/pop — never touches P and is already,
+functionally, a reusable skeleton; it's just not been factored out as one.
+Also confirmed: MeshSDF::signedDistance() and MeshSDF::getClosestFaces()
+(EBGeometry_MeshDistanceFunctionsImplem.hpp:270, 313) and BVHUnionIF::value() /
+BVHSmoothUnionIF::value() (EBGeometry_CSGImplem.hpp:467, 553) all hand-roll their own
+traversal via the generic (non-SIMD) PackedBVH::traverse(), never getting SIMD node pruning —
+unlike TriMeshSDF::signedDistance(), which correctly delegates to signedDistance(). Migrating
+these onto the new seam is real, low-risk follow-up value once it exists, but is not part of
+this PR's scope — flagged at the end instead.
+The one non-mechanical design decision
+Today's evalLeaf bundles three things into a single scalar minDist: (1) the per-primitive
+scan, (2) the running "best" state, and (3) the sign/abs() semantics used both for the leaf
+comparison and for squaring into a pruning bound. That last part is specific to "nearest signed
+distance, could be negative" and doesn't fit a plain point-cloud nearest-neighbor search (no sign,
+and squared distance is all that's ever needed — which also avoids the sqrt the issue's first
+benchmark comment flagged as wasted work in the SDF case, for free, in the NN case). So the seam
+needs to separate "the SIMD skeleton" from "how a leaf visit updates state" and "how state maps
+to a squared prune bound" — not just turn evalLeaf into a template parameter while still hardcoding
+T/abs().
+New public API
+Add to PackedBVH in Source/EBGeometry_BVH.hpp, next to signedDistance()'s declaration
+(currently line 1100):
+```
+/**
+ * @brief Generic SIMD-accelerated nearest-search traversal.
+ * @details Runs the same box-pruning traversal as signedDistance() (identical AVX-512/AVX/SSE4.1
+ * dispatch, selected the same way, falling back to scalar traverse()), but the per-leaf scan and
+ * the pruning bound are supplied by the caller instead of being hardcoded to P::signedDistance().
+ * This lets outside code -- e.g. nearest-neighbor search over primitives with no signedDistance()
+ * at all -- reuse the SIMD node traversal.
+ * @tparam State      Caller-defined running search state, carried by reference through the whole traversal.
+ * @tparam LeafEval    Callable: (State&, size_t offset, size_t count) noexcept -> void. Scans
+ * primitives [offset, offset+count) and updates a_state in place.
+ * @tparam PruneDist2  Callable: (const State&) noexcept -> T. Returns the current squared-distance
+ * pruning bound derived from a_state; a node farther than this (in squared distance) is pruned.
+ * @param[in]     a_point      Query point.
+ * @param[in,out] a_state      Running search state; mutated by a_evalLeaf, read by a_pruneDist2.
+ * @param[in]     a_evalLeaf   Leaf-visit callback.
+ * @param[in]     a_pruneDist2 Pruning-bound callback.
+ */
+template <class State, class LeafEval, class PruneDist2>
+inline void
+nearestTraverse(const Vec3T<T>& a_point, State& a_state, LeafEval&& a_evalLeaf, PruneDist2&& a_pruneDist2) const noexcept;
+```
+Implementation
+In Source/EBGeometry_BVHImplem.hpp, move the body currently at lines 551-1077 into
+nearestTraverse():
+Delete the evalLeaf lambda (561-568) — the caller supplies it now.
+Remove each branch's local T/double/float minDist declaration; use a_state directly.
+(Every branch's native SIMD scalar type already equals T given its own is_same_v<T, ...>
+guard, so casting a PruneDist2 result of type T into the branch is a no-op, not a real cast.)
+Every evalLeaf(minDist, offset, count) call becomes a_evalLeaf(a_state, offset, count).
+Every curBest2 = minDist * minDist / newBest2 = minDist * minDist becomes
+a_pruneDist2(a_state) (called twice per interior node visit, same as today's two evaluations).
+Each branch's trailing return static_cast<T>(minDist); is deleted — the method is void; the
+caller reads the final value back out of a_state after the call.
+Scalar fallback (1045-1076): keep routing through the existing generic traverse(), but its
+updater lambda calls a_evalLeaf(a_state, offset, count) instead of the hardcoded
+signedDistance() loop, and its visiter lambda compares d * d <= a_pruneDist2(a_state)
+(d is the linear node-to-point distance from MetaUpdater, already paying one sqrt inside
+AABBT::getDistance() exactly as it does today — squaring it once here avoids ever calling
+sqrt on the search state, and is not a new cost). sorter/metaUpdater are unchanged.
+All six #if defined(...) / if constexpr (K==.., T==..) guards, SIMD register loads, AABB
+distance math, child sort, and stack push/pop are untouched line-for-line in every branch.
+signedDistance() becomes a thin default instantiation:
+```
+template <class T, class P, size_t K>
+inline T
+PackedBVH<T, P, K>::signedDistance(const Vec3T<T>& a_point) const noexcept
+{
+  T minDist = std::numeric_limits<T>::max();
+
+  const auto evalLeaf = [this, &a_point](T& a_state, size_t a_offset, size_t a_count) noexcept {
+    for (size_t i = 0; i < a_count; i++) {
+      const auto d = m_primitives[a_offset + i]->signedDistance(a_point);
+      if (std::abs(d) < std::abs(a_state)) {
+        a_state = d;
+      }
+    }
+  };
+
+  const auto pruneDist2 = [](const T& a_state) noexcept -> T { return a_state * a_state; };
+
+  this->nearestTraverse(a_point, minDist, evalLeaf, pruneDist2);
+
+  return minDist;
+}
+```
+This reproduces today's exact behavior (same abs()-based leaf comparison, same squared prune
+bound) — a pure refactor, no behavior change, no public API break. signedDistance()'s own
+signature is untouched, so EBGeometry_CSG*, EBGeometry_MeshDistanceFunctions*, and
+EBGeometry_Parser* need no changes at all.
+Tests (extend the existing Tests/TestBVH.cpp, 327 lines today)
+Build a PackedBVH over a small primitive set using a bare test struct with no
+signedDistance() method at all (e.g. struct TestPoint { Vec3T<T> pos; }), call
+nearestTraverse() directly with a leaf-eval that tracks squared distance to the nearest point
+and a pruneDist2 that returns the state unchanged (no abs(), no extra squaring) — proving the
+hard P::signedDistance() requirement is gone. Check against a brute-force O(N) scan.
+Regression: signedDistance() results before/after the refactor must match exactly (bit-for-bit,
+since the arithmetic sequence is unchanged) on the existing sphere/mesh fixtures already exercised
+elsewhere in the suite (TestDCEL.cpp's FastTriMeshSDF case, etc.).
+Explicitly out of scope (flagged, not bundled)
+Migrating MeshSDF::signedDistance()/getClosestFaces() and BVHUnionIF::value()/
+BVHSmoothUnionIF::value() from the scalar-only generic traverse() onto nearestTraverse() to
+pick up SIMD node pruning. Mechanically simple once this seam exists (same shape, different call
+sites), but touches different files and deserves its own review pass rather than being folded into
+this refactor.
+Verification
+cmake --build --preset debug -j$(nproc) && ctest --preset debug — full suite, including the
+new TestBVH cases.
+cmake --preset release && cmake --build --preset release-test -j$(nproc) && ctest --preset release-test
+to exercise the AVX-compiled branches (the debug preset builds with no SIMD).
+Compile-check -DEBGEOMETRY_SIMD=avx512 to confirm the two AVX-512 branches are unaffected.
+Scripts/run-all-checks.sh (clang-tidy, Doxygen, Sphinx cross-reference check) before merging,
+per this repo's standard pre-merge convention.
+rmrsk commented on Jul 8, 2026
+rmrsk
+on Jul 8, 2026
+OwnerAuthor
+More actions
+PR2: Handler-based storage policy (pointer vs. raw value)
+Context
+Second of the three axes this issue's design splits into (traversal genericization / storage
+policy / build strategy — see the PR1 and PR3 plans posted alongside this one). This is purely
+about what PackedBVH::m_primitives holds — std::shared_ptr<const P> (today, always) vs. a raw
+P by value — and is independent of how the tree got built. Sequenced after PR1 (generic
+nearestTraverse()) specifically because PR1 moves the only place that dereferences
+m_primitives[i] out of the SIMD skeleton and into a small caller-owned lambda
+(signedDistance()'s own evalLeaf) — so this PR only has to edit that one lambda body, not the
+traversal internals.
+This targets the second checklist item from the top of the issue and the benchmark numbers in the
+first comment: shared_ptr<const P>-per-primitive leaf scanning measured 3.4x slower than
+flat-array-with-indices and 6.4x slower than an SoA-packed leaf scan, at realistic leaf sizes —
+almost entirely scattered heap allocation / pointer-chasing, not the scan logic itself.
+The Handler concept
+Add two small stateless policy structs to EBGeometry::BVH in Source/EBGeometry_BVH.hpp, right
+after the existing TreeBVH/PackedBVH forward declarations (currently lines 100-108):
+```
+template <class P>
+struct SharedPtrHandler   // default; preserves today's exact behavior/ABI
+{
+  using StorageType = std::shared_ptr<const P>;
+
+  static const P& get(const StorageType& a_stored) noexcept { return *a_stored; }
+
+  static void appendTreeLeaf(std::vector<StorageType>& a_dst, const PrimitiveList<P>& a_leafPrims)
+  {
+    a_dst.insert(a_dst.end(), a_leafPrims.begin(), a_leafPrims.end());
+  }
+
+  static void appendAliased(std::vector<StorageType>& a_dst, const std::shared_ptr<std::vector<P>>& a_block)
+  {
+    a_dst.reserve(a_dst.size() + a_block->size());
+    for (size_t i = 0; i < a_block->size(); i++) {
+      a_dst.emplace_back(a_block, &(*a_block)[i]);   // aliasing ctor, one shared control block
+    }
+  }
+};
+
+template <class P>
+struct ValueHandler       // new; stores P directly, zero shared_ptr overhead
+{
+  using StorageType = P;
+
+  static const P& get(const StorageType& a_stored) noexcept { return a_stored; }
+
+  static void appendTreeLeaf(std::vector<StorageType>& a_dst, const PrimitiveList<P>& a_leafPrims)
+  {
+    a_dst.reserve(a_dst.size() + a_leafPrims.size());
+    for (const auto& p : a_leafPrims) {
+      a_dst.push_back(*p);   // one copy out of the source TreeBVH's shared_ptr; unavoidable here
+    }
+  }
+
+  static void appendAliased(std::vector<StorageType>& a_dst, const std::shared_ptr<std::vector<P>>& a_block)
+  {
+    a_dst = std::move(*a_block);   // no aliasing machinery needed at all -- take ownership directly
+  }
+};
+```
+These three operations cover every existing touch point of m_primitives: per-element access
+(get, used by signedDistance()'s leaf-eval), the identity-pack constructor's leaf copy
+(appendTreeLeaf, replaces m_primitives.insert(...) at EBGeometry_BVHImplem.hpp:411), and the
+converting-pack constructor's aliased materialization (appendAliased, replaces the loop at
+EBGeometry_BVHImplem.hpp:477-481). Note ValueHandler::appendAliased is strictly cheaper than
+SharedPtrHandler's today — no aliasing-shared_ptr control block per element at all, just a move.
+TreeBVH itself needs zero changes. Its own m_primitives stays shared_ptr-based always;
+Handler only governs PackedBVH's final storage, populated from a TreeBVH that was already
+built the normal way.
+Threading the parameter through
+Source/EBGeometry_BVH.hpp:
+Forward declaration (currently lines 107-108) gains the defaulted 4th parameter:
+template <class T, class P, size_t K, class Handler = SharedPtrHandler<P>> class PackedBVH;
+PackedUpdater<P> (174-175) becomes
+template <class P, class Handler = SharedPtrHandler<P>> using PackedUpdater = std::function<void(const std::vector<typename Handler::StorageType>&, size_t, size_t)>;
+— defaults to today's exact PrimitiveList<P> (vector<shared_ptr<const P>>), so existing
+callers are unaffected.
+TreeBVH::pack() decl (744-745) and impl (EBGeometry_BVHImplem.hpp:340-347): add a defaulted
+class Handler = BVH::SharedPtrHandler<P> template parameter, propagate into the returned
+PackedBVH<T, P, K, Handler>.
+TreeBVH::packWith() decl (759-761) and impl (349-357): same, defaulted to
+BVH::SharedPtrHandler<Q> (Q is the destination primitive type here, not P).
+PackedBVH class header (currently line 832): gains , class Handler with no default
+(repeating the forward declaration's default is not allowed at the definition, matching
+existing C++ rules already followed elsewhere in this header).
+Add using StorageType = typename Handler::StorageType; as a public alias.
+m_primitives (1112): std::vector<StorageType> m_primitives;.
+getPrimitives() decl (1029-1030) / impl (486-491): return type
+const std::vector<StorageType>&.
+traverse() decl (1087-1092) / impl (507-549): a_updater parameter type updated to
+BVH::PackedUpdater<P, Handler>; body unchanged (already forwards m_primitives opaquely,
+never dereferences an element itself).
+Source/EBGeometry_BVHImplem.hpp:
+Identity-pack constructor (389-428): replace the leaf-copy line (411) with
+Handler::appendTreeLeaf(m_primitives, prims);.
+Converting-pack constructor (430-484): replace the tail loop (477-481) with
+Handler::appendAliased(m_primitives, dstStorage);.
+signedDistance()'s evalLeaf lambda (introduced as a standalone lambda by PR1, living inside
+signedDistance() itself): change m_primitives[a_offset + i]->signedDistance(a_point) to
+Handler::get(m_primitives[a_offset + i]).signedDistance(a_point). This is the only line PR1's
+nearestTraverse() skeleton needs touched by this PR — everything else in the six SIMD
+branches never references P or m_primitives element access directly.
+Every template <class T, class P, size_t K> header for a PackedBVH member (~10 occurrences)
+gains , class Handler, and every PackedBVH<T, P, K>:: qualifier becomes
+PackedBVH<T, P, K, Handler>:: — mechanical, no logic changes.
+Backward compatibility
+Every existing PackedBVH<T,P,K> (3-arg) instantiation —
+Source/EBGeometry_CSG.hpp:412,463,497,547, Source/EBGeometry_MeshDistanceFunctions.hpp:127,242,
+every ->pack()/->packWith<Q>(...) call in EBGeometry_MeshDistanceFunctionsImplem.hpp and
+EBGeometry_CSGImplem.hpp, and the parser's readIntoPackedBVH at
+EBGeometry_ParserImplem.hpp:1943 — resolves to Handler = SharedPtrHandler<P> and is
+byte-for-byte unaffected. No file currently names PackedBVH<...> with more than 3 arguments, and
+getPrimitives() has no external callers outside the library, so there is no breaking-change risk.
+Tests (extend Tests/TestBVH.cpp)
+Handler equivalence: same primitive set packed via default (SharedPtrHandler) and explicit
+ValueHandler; signedDistance() results and getPrimitives().size() must agree exactly.
+ValueHandler layout sanity: sizeof(PackedBVH<...>::StorageType) == sizeof(P) for
+ValueHandler (no indirection) vs. sizeof(std::shared_ptr<const P>) for SharedPtrHandler.
+Use Triangle<T,Meta> (already a self-contained value type, Source/EBGeometry_Triangle.hpp) or
+a small local point/particle test struct as the P fixture for ValueHandler cases — the real
+PointCloudSoA type stays out of scope here, exactly as the original issue comment noted.
+Verification
+cmake --build --preset debug -j$(nproc) && ctest --preset debug.
+ctest --preset release-test (AVX-compiled, exercises the SIMD leaf-eval path with both
+Handlers).
+Manual standalone compile check that PackedBVH<T,P,K> (3-arg, no explicit Handler) still
+compiles unchanged, and that a 4-arg PackedBVH<T,P,K,ValueHandler<P>> compiles and produces
+the expected sizeof.
+Scripts/run-all-checks.sh before merging.
+rmrsk commented on Jul 8, 2026
+rmrsk
+on Jul 8, 2026
+OwnerAuthor
+More actions
+PR3: Direct-build constructor + a build-time benchmark example
+Context
+Third of the three axes (see the PR1/PR2 plans posted alongside this one). This is the "build
+strategy" axis: constructing a PackedBVH without requiring the caller to manually drive a
+TreeBVH through partition + pack(). This is scoped narrower than the full "no TreeBVH, no
+shared_ptr anywhere, SoA-packed leaves" strategy from the most recent comment above, for a
+concrete reason: that fuller rewrite has open questions this issue itself flags as
+not yet resolved ("whether SFC specifically still wins once shared_ptr is removed from both
+sides is still open," and the target-size-aware SFC leaf-cut construction is "planned to
+prototype... for the next round of benchmarking, not yet done"). Rather than block this PR on that
+research landing, this PR ships the mechanical, low-risk direct constructor now, plus a benchmark
+example whose job is to actually generate the numbers needed to settle those open questions —
+turning "standalone scratch benchmarks, not committed anywhere" (as the first comment describes
+them) into a reproducible, versioned tool.
+Part A: direct constructor
+```
+template <class P, class BV>
+using ValuePrimAndBVList = std::vector<std::pair<P, BV>>;   // new alias, near PrimAndBVList (EBGeometry_BVH.hpp:131)
+
+// New PackedBVH member, declared after the existing converting constructor (~EBGeometry_BVH.hpp:1018):
+inline PackedBVH(BVH::ValuePrimAndBVList<P, BV> a_primsAndBVs, const BVH::Build a_build = BVH::Build::SAH);
+```
+Takes primitives by value as std::vector<std::pair<P, BV>> — a sink parameter the caller can
+std::move in, never requiring a shared_ptr wrap regardless of which Handler (PR2) the
+resulting PackedBVH uses. BV is caller-supplied per element, matching every existing precedent
+(MeshDistanceFunctionsDetail::buildDCELTreeBVH, CSGDetail::buildBVH both take pre-paired
+(primitive, BV) lists already).
+Internally, to avoid "millions of primitives → millions of individual make_shared calls" during
+the temporary TreeBVH build phase, reuse the one-block-aliasing trick the existing converting
+constructor already uses (EBGeometry_BVHImplem.hpp:439,480):
+Move the caller's values into one std::make_shared<std::vector<P>>(...) block — one allocation
+total for all primitive storage.
+Build a PrimAndBVList<P,BV> where each element aliases into that one block (shares one control
+block; no per-element allocation).
+Construct a genuinely temporary TreeBVH<T,P,BV,K> from that list and run the existing,
+unchanged Build-enum dispatch (topDownSortAndPartition / bottomUpSortAndPartition<Morton|Nested>
+/ SAH via BinnedSAHPartitioner) — the same switch (a_build) shape already used by
+buildDCELTreeBVH (EBGeometry_MeshDistanceFunctionsImplem.hpp:133-206) and CSGDetail::buildBVH
+(EBGeometry_CSGImplem.hpp:40-95).
+Flatten into *this via a new shared private helper packTree(const TreeBVH<T,P,BV,K>&),
+factored out of the existing identity-pack constructor's dfs lambda
+(EBGeometry_BVHImplem.hpp:389-428), using Handler::appendTreeLeaf (PR2) at the leaf step.
+Honesty about what this does and doesn't fix: this still builds a temporary TreeBVH
+internally, which still pays TreeBVH's own per-node shared_ptr<TreeBVH> allocation — the part
+the first benchmark comment measured as the dominant ~6x cost. So Part A delivers the ergonomic
+ask (no manual TreeBVH-then-pack() dance) and, combined with PR2's Handler, a genuinely
+pointer-free final storage — but does not close the build-time gap. Closing that requires
+skipping TreeBVH node allocation entirely, which is exactly the open, not-yet-designed work from
+the most recent comment above. Flagged as follow-up at the end, not bundled here.
+TreeBVH itself needs zero changes for Part A — its partitioning machinery stays untouched;
+Handler only governs final storage (per PR2).
+Part B: build-time benchmark example
+New Examples/BVHBuildBenchmark/ (matching the existing per-example layout: CMakeLists.txt,
+GNUmakefile, main.cpp, README.md, registered in Examples/CMakeLists.txt via
+ebgeometry_add_example(BVHBuildBenchmark), same EBGEOMETRY_PRECISION override convention used
+by every other example, e.g. Examples/PackedSpheres/main.cpp).
+Generates a synthetic point/sphere primitive set at several sizes (matching the range the issue's
+benchmark comment used: ~20K-90K, plus a couple of larger sizes to see asymptotic behavior), and
+for each size times, using EBGeometry::SimpleTimer:
+TreeBVH + topDownSortAndPartition() (BVCentroidPartitioner) + pack()
+TreeBVH + bottomUpSortAndPartition<SFC::Morton>() + pack()
+TreeBVH + bottomUpSortAndPartition<SFC::Nested>() + pack()
+TreeBVH + topDownSortAndPartition() with BinnedSAHPartitioner (SAH) + pack()
+The new direct constructor from Part A, once per Build enum value
+...for both the default SharedPtrHandler and (once PR2 is in) ValueHandler, printing a table of
+build times and, as a correctness check, confirming all resulting PackedBVHs agree on
+signedDistance() for a shared set of sample query points (mirroring the cross-check pattern
+already used in Examples/PackedSpheres/main.cpp, which compares slow/fast/array results with a
+relative tolerance).
+This is deliberately the tool meant to answer the open questions flagged in the most recent
+comment above — whether SFC ordering still wins over top-down once shared_ptr overhead drops, and
+what the actual build-time gap looks like end to end — rather than trying to resolve them by
+inspection now.
+Explicitly out of scope for this PR (flagged as future follow-up)
+The fully-flat "no TreeBVH at all" rewrite with SoA-packed leaves and a target-size-aware
+SFC leaf-cut (linear scan + ragged K-ary grouping, as sketched in the comment above) — this is
+real, new construction logic, not a parameter tweak to bottomUpSortAndPartition, and is gated on
+what Part B's benchmark actually shows. Proposed as a follow-up PR once that data exists.
+A squared-distance companion to AABBT<T>::getDistance() (EBGeometry_BoundingVolumesImplem.hpp:437-460,
+sqrt at line 459) to remove the last remaining avoidable sqrt from the scalar traversal path
+and from MeshSDF/BVHUnionIF/BVHSmoothUnionIF's hand-rolled traversals. Independent of
+everything above; separate small PR.
+The nearest-neighbor-merge example using PointCloudSoA (comparing SoA vs. an AoS-style point
+cloud, across the build/traversal strategies this and the other two PRs enable) — this needs all
+three PRs landed first (PR1's generic nearestTraverse() so the example's update rule doesn't
+need signedDistance(); PR2's ValueHandler for pointer-free storage; PR3's direct constructor
+and whatever build strategy Part B's numbers end up recommending), plus a decision on whether the
+point/particle SoA primitive itself belongs in Source/ as a first-class library type or stays
+example-local for illustration — the original issue comment explicitly kept that type's design
+out of scope for the Handler work, and it's still open here. Tracked as the natural next step
+once PR1-3 land; not drafted in detail yet.
+Tests (extend Tests/TestBVH.cpp)
+Direct-constructor correctness: build via the new constructor for each Build::{TopDown, Morton, Nested, SAH}, check signedDistance() against a brute-force O(N) scan over the same
+inputs.
+Direct-ctor vs. tree-then-pack equivalence: same primitives built two ways (manual TreeBVH +
+partition + pack() vs. the new direct constructor) must agree, for both Handlers.
+Verification
+cmake --build --preset debug -j$(nproc) && ctest --preset debug.
+ctest --preset examples to run the new BVHBuildBenchmark example to completion (it's a
+timing/comparison tool, not a pass/fail perf gate — the add_test registration just checks it
+runs and its internal cross-checks pass, consistent with how PackedSpheres already asserts
+equal results across representations rather than asserting on absolute timings).
+ctest --preset release-test for the AVX-compiled, realistic-timing numbers.
+Scripts/run-all-checks.sh before merging, including the new example's README in the
+documentation audit (Examples/README.md needs a one-line entry for the new example, matching
+the existing list format).
+rmrsk
+added 3 commits that reference this issue on Jul 8, 2026
+Move ChildDistancer extension idea to a GitHub issue instead
+...
+5a92b61
+Add Examples/BuildBVH: benchmark all BVH build strategies by build time
+...
+316379d
+Add Point<T,Meta> and PointSoAT<T,W,Meta>: unsigned-distance point pr…
+...
+615d58e
+rmrsk
+added
+enhancementNew feature or requestNew feature or request
+bvhAffects the bounding volume hierarchies functionalitiesAffects the bounding volume hierarchies functionalities
+on Jul 10, 2026
+rmrsk
+closed this as completedin #106on Jul 11, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+rmrsk
+Labels
+bvhAffects the bounding volume hierarchies functionalitiesAffects the bounding volume hierarchies functionalitiesenhancementNew feature or requestNew feature or request
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

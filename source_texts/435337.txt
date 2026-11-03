@@ -1,0 +1,195 @@
+OpenGL render does not correctly handle the Depth merging when the depth buffer is enabled. This is because the raySurfaceTrilinear never had the depth code inserted, and it must handle it differently. I haven't had any time to work on a...
+
+Corrections for Depth merge with OpenGL · Issue #95 · NVIDIA/gvdb-voxels · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Corrections for Depth merge with OpenGL #95
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Corrections for Depth merge with OpenGL#95
+Copy link
+Description
+ramakarl
+opened on Jun 20, 2020
+Issue body actions
+OpenGL render does not correctly handle the Depth merging when the depth buffer is enabled. This is because the raySurfaceTrilinear never had the depth code inserted, and it must handle it differently.
+I haven't had any time to work on a branch (because my local code differs too much now in other ways), so I am just posting the fixes here.
+Here they are:
+```
+// SurfaceTrilinearBrick - Trace brick to render surface with trilinear smoothing
+__device__ void raySurfaceTrilinearBrick ( VDBInfo* gvdb, uchar chan, int nodeid, float3 t, float3 pos, float3 dir, float3& pStep, float3& hit, float3& norm, float4& hclr )
+{
+	float3 vmin;
+	VDBNode* node	= getNode ( gvdb, 0, nodeid, &vmin );			// Get the VDB leaf node	
+	float3  o = make_float3( node->mValue ) ;				// Atlas sub-volume to trace	
+	float3	p = (pos + t.x*dir - vmin) / gvdb->vdel[0];					// sample point in index coords			
+	t.x = SCN_PSTEP * ceil ( t.x / SCN_PSTEP );
+
+	for (int iter=0; iter < MAX_ITER && p.x >=0 && p.y >=0 && p.z >=0 && p.x < gvdb->res[0] && p.y < gvdb->res[0] && p.z < gvdb->res[0]; iter++) 
+	{	
+		// depth buffer test [optional]
+		if (SCN_DBUF != 0x0) {
+			if (t.x > getLinearDepth(SCN_DBUF) ) {
+				hit.x = t.x;
+				hit.z = OBJHIT;				
+				return;
+			}
+		}
+		if ( tex3D<float>(gvdb->volIn[chan], p.x+o.x, p.y+o.y, p.z+o.z ) >= SCN_THRESH ) {
+			hit = p*gvdb->vdel[0] + vmin;
+			norm = getGradient ( gvdb, chan, p+o );
+			if ( gvdb->clr_chan != CHAN_UNDEF ) hclr = make_float4( getColorC4 ( gvdb, gvdb->clr_chan, p+o ) );
+			return;	
+		}	
+		p += SCN_PSTEP*dir;		
+		t.x += SCN_PSTEP;
+	}
+}
+```
+Here is the updated rayCast function:
+```
+//----------------------------- MASTER RAYCAST FUNCTION
+// 1. Performs empty skipping of GVDB hiearchy
+// 2. Checks input depth buffer [if set]
+// 3. Calls the specified 'brickFunc' when a brick is hit, for custom behavior
+// 4. Returns a color and/or surface hit and normal
+//
+__device__ void rayCast ( VDBInfo* gvdb, uchar chan, float3 pos, float3 dir, float3& hit, float3& norm, float4& clr, gvdbBrickFunc_t brickFunc )
+{
+	int		nodeid[MAXLEV];					// level variables
+	float	tMax[MAXLEV];
+	int		b;	
+
+	// GVDB - Iterative Hierarchical 3DDA on GPU
+	float3 vmin;	
+	int lev = gvdb->top_lev;
+	nodeid[lev]		= 0;		// rootid ndx
+	float3 t		= rayBoxIntersect ( pos, dir, gvdb->bmin, gvdb->bmax );	// intersect ray with bounding box	
+	VDBNode* node	= getNode ( gvdb, lev, nodeid[lev], &vmin );			// get root VDB node	
+	if ( t.z == NOHIT ) return;	
+
+	// 3DDA variables		
+	t.x += gvdb->epsilon;
+	tMax[lev] = t.y -gvdb->epsilon;
+	float3 pStep	= make_float3(isign3(dir));
+	float3 p, tDel, tSide, mask;
+	int iter;
+
+	PREPARE_DDA	
+
+	for (iter=0; iter < MAX_ITER && lev > 0 && lev <= gvdb->top_lev && p.x >=0 && p.y >=0 && p.z >=0 && p.x <= gvdb->res[lev] && p.y <= gvdb->res[lev] && p.z <= gvdb->res[lev]; iter++ ) {
+
+		NEXT_DDA
+
+		// depth buffer test [optional]
+		if (SCN_DBUF != 0x0) {
+			if (t.x > getLinearDepth(SCN_DBUF) ) {
+				hit.x = t.x;
+				hit.z = OBJHIT;
+				return;
+			}
+		}
+
+		// node active test
+		b = (((int(p.z) << gvdb->dim[lev]) + int(p.y)) << gvdb->dim[lev]) + int(p.x);	// bitmaskpos
+		if ( isBitOn ( gvdb, node, b ) ) {							// check vdb bitmask for voxel occupancy						
+			if ( lev == 1 ) {									// enter brick function..
+				nodeid[0] = getChild ( gvdb, node, b ); 
+				t.x += gvdb->epsilon;
+				(*brickFunc) (gvdb, chan, nodeid[0], t, pos, dir, pStep, hit, norm, clr);
+				if ( clr.w <= 0) {								// deep termination
+					clr.w = 0; 
+					return; 
+				}			
+				if (hit.z != NOHIT) return;						// surface termination: OBJHIT or volume hit
+				
+				STEP_DDA										// leaf node empty, step DDA
+				//t.x = hit.y;				
+				//PREPARE_DDA
+
+			} else {				
+				lev--;											// step down tree
+				nodeid[lev]	= getChild ( gvdb, node, b );				// get child 
+				node		= getNode ( gvdb, lev, nodeid[lev], &vmin );	// child node
+				t.x += gvdb->epsilon;										// make sure we start inside child
+				tMax[lev] = t.y -gvdb->epsilon;							// t.x = entry point, t.y = exit point							
+				PREPARE_DDA										// start dda at next level down
+			}
+		} else {			
+			STEP_DDA											// empty voxel, step DDA
+		}
+		while ( t.x > tMax[lev] && lev <= gvdb->top_lev ) {
+			lev++;												// step up tree
+			if ( lev <= gvdb->top_lev ) {		
+				node	= getNode ( gvdb, lev, nodeid[lev], &vmin );
+				PREPARE_DDA										// restore dda at next level up
+			}
+		}	
+	}	
+}
+```
+At the top of cuda_gvdb_scene.cuh:
+constant float NOHIT = 1.0e10f;
+constant float OBJHIT = 2.0e10f;
+In the above code I've added a "OBJHIT" semantic which is part of the Vec3 hit return value, in addition to the existing NOHIT.
+The reason the depth merge failed was that NOHIT implies hitting the background (should shade with 1.0 alpha), whereas OBJHIT implies hitting an opengl surface (newly added).
+Note the line ~615 in cuda_gvdb_raycast.cuh, which says:
+if (hit.z != NOHIT) return;
+Used by both surface & deep pathways, this is the key as it means that rays should terminate if they hit an actual volume surface (x,y,z), or if the opengl object is hit (hit.z=OBJHIT), but rays will not terminate so long as the (hit.z==NOHIT) meaning that a deep volume render is in progress, or a surface trilinear has not yet hit a surface.
+The above code should fix the OpenGL depth merge case for surfaceTrilinear rendering.
+Activity
+ramakarl commented on Jun 21, 2020
+ramakarl
+on Jun 21, 2020
+Last edited by ramakarl
+ContributorAuthor
+More actions
+For clarification here is a summary:
+raySurfaceTrilinear for isosurfaces:
+hit = <any, any, NOHIT> => nothing hit yet
+hit = <any, any, NOHIT> => when trace terminates, means backgrd was hit.
+hit = valid <x,y,z> => hit is surface point of trilinear volume isosurface. normal will also be returned.
+hit = <any, any, OBJHIT> => hit the opengl depth buffer. hit.x is the t-value of the hit. clr is still valid as ray may be partially rendered.
+rayDeep for varying density clouds:
+hit = <any,any, NOHIT> => trace in progress, semi-transparent samples will continue to accumulate in clr, as a cloud has no surface.
+hit = <any,any, OBJHIT> => opengl surface was hit during deep render.
+hit = <tminx, tmax, 1> => when raytrace finishes, x and y hold the t-min and t-max values for the range of the ray containing the cloud. clr holds the accumulated result.
+NBickford-NV
+added a commit that references this issue on Jul 10, 2020
+Normalizes ray directions when raymarching. Fixes an artifact in g3DP…
+...
+9ffc6b7
+NBickford-NV commented on Jul 10, 2020
+NBickford-NV
+on Jul 10, 2020
+Collaborator
+More actions
+Quick note - I think this might not have been fixed in the latest series of commits (contrary to the above references, whoops), since only rayDeepBrick includes this test against the depth buffer on the voxel level, and OBJHIT hasn't been implemented! Will need to look into this again in the future.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,121 @@
+「点群表示機能を自作してみる」のその５です。 プログレッシブ表示とLOD (Level of detail)を実装してみます。 アウトプットのメインテーマとしてはプログレッシブ表示となりますが、前提となる LOD 機能も実装しないと実用上意味がありません。一つのページでまと...
+
+プログレッシブ表示とLODを実装してみる（点群表示機能を自作してみる その５） #C++ - Qiita
+2
+Go to list of users who liked
+1
+Share on X(Twitter)
+Share on Facebook
+Add to Hatena Bookmark
+more_horiz
+Delete article
+close
+Deleted articles cannot be recovered.
+Draft of this article would be also deleted.
+Are you sure you want to delete this article?
+CancelDeletedelete
+info
+More than 3 years have passed since last update.
+@yumimatoba14
+プログレッシブ表示とLODを実装してみる（点群表示機能を自作してみる その５）
+C++
+DirectX11
+点群
+2
+Last updated at 2023-04-28Posted at 2023-04-16
+「点群表示機能を自作してみる」のその５です。
+プログレッシブ表示とLOD (Level of detail)を実装してみます。
+アウトプットのメインテーマとしてはプログレッシブ表示となりますが、前提となる LOD 機能も実装しないと実用上意味がありません。一つのページでまとめるには盛沢山になるかもしれませんが、ひとまずアウトプットしてみます。
+出来上がり図
+GitHub 以下のリビジョンを参照してください。
+Revision: 28dc2f8d554a70ac4543f1fb310491dcff3e67b6
+Message:
+modified to show number of all drawn points, also.
+changed type of number of drawn point.
+1枚100万点の板を10枚描いたモデルです。 結果図だけでは分かりませんが、以下のように動的にプログレッシブに表示されます。
+最初のフレームでは非常に粗い描画になっているのが分かります。2フレーム目で少し密になり、3フレーム目からフル描画になっています。
+手前から順番にフル描画されていますが、これは最も詳細なレベルの点群を複数フレームにわけて描画している結果です。手前から描画しているわけではなく、点がたまたま手間から並んでいるだけです。
+説明
+概要
+このページでは以下のステップに分けて説明します。
+プログレッシブ表示
+メモリマップドファイル
+Level of Detail データの構築
+ここでは点群を複数回に分けて描画するという少し狭い意味で「プログレッシブ表示」を考えます。 この機能が実現できれば、点の描画順(並び順)を変えることで点群をだんだん濃くしていくような描画が可能になります。
+「メモリマップドファイル」は今回の Out of core 実装で用いるコア技術になります。 今回のページの中では最も汎用的なサンプルコードでしょう。
+「Level of Detail データの構築」では点群を分割する部分に焦点をあてます。
+プログレッシブ表示
+以下のリビジョンでビルドすると、プログレッシブ表示の本質的な動作を確認できます。(LODは未実装です。)
+コードでは PointListEnumeratorSampleModel というモデルクラスを使用しています。
+Revision: 8587c78d1d323c2446bd09d38ce4193fab723565
+Message:
+implemented progressive view mode.
+modified to show how many points had been drawn.
+板が一枚ずつ描画されているように見えるのは、たまたま100万点ずつ描画しているだけです。
+実装の概要は以下の通り。
+描画終了後に、点が残っている場合 WM_TIMER で1ミリ秒後に再度描画するようにしています。
+2回目の描画の時に出力バッファをクリアしないことで追記します。(後述の D3DGraphics::DrawBegin() の項を参照。)
+D3DGraphics::DrawBegin()
+プログレッシブ描画ではDrawBegin() を isEraseBackground=false で呼び出します。
+D3DGraphics.cpp
+```
+void D3DGraphics::DrawBegin(bool isEraseBackground)
+{
+	PrepareDepthStencilView();
+	PrepareRenderTargetView();
+
+	if (isEraseBackground) {
+		float aClearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f }; //red,green,blue,alpha
+		m_pDC->ClearRenderTargetView(m_pRenderTargetView.Get(), aClearColor);
+		m_pDC->ClearDepthStencilView(m_pDepthStencilView.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+	}
+
+	m_pDC->RSSetViewports(1, &m_viewport);
+	m_pDC->RSSetState(m_pRasterizerState.Get());
+	m_pDC->OMSetDepthStencilState(m_pDepthStencilState.Get(), 1);
+
+	ID3D11RenderTargetView* apRtv[1] = { m_pRenderTargetView.Get() };
+	m_pDC->OMSetRenderTargets(1, apRtv, m_pDepthStencilView.Get());
+
+	m_nDrawnPoint = 0;
+}
+```
+m_pDC の型は ComPtr<ID3D11DeviceContext> です。 ClearRenderTargetView() と ClearDepthStencilView() の呼び出しが出力バッファのクリア処理になります。
+メモリマップドファイル
+以下のリビジョンでビルドするとメモリマップドファイルを用いた実装になります。
+コードでは MemoryMappedPointListEnumeratorSampleModel というモデルクラスを使用しています。
+Revision: 98b67987d28e60f0b534747bbc98e0c805a2d782
+Message:
+MemoryMappedPointListEnumeratorSampleModel was added.
+modified to enable progressive mode always.
+added D3DPointListBuilder.
+以下の Win32 API を呼び出しているだけであまり難しいことはないです。アクセス権がどうとかオフセットの割り当て粒度がどうとか面倒くさいとも言えますが、サンプルコード(今回のコードで言えば D3DMemoryMappedFile クラス)があれば大丈夫でしょう。
+CreateFileMapping()
+MapViewOfFile()
+UnmapViewOfFile()
+LOD データの構築
+データの間引き機能としての LOD を考えます。今回は Voxel Grid を用意し、その中に最大1点のみ採択するという方式で間引くことにしました。 Voxel Grid の格子長を小さくしていくことで段階的に細かいデータをつくります。 単純な方法ですが見た目上問題ないと判断しました。
+元データは 0.001m 間隔の点群です。それを最も粗い点群は0.01m刻み、その後 0.005m、0.0025m といった間隔でボクセルを作ってサンプリングしています。
+近づいてみると以下のように見えます。(100万点のモデルの3段階分の絵。)
+LOD データを構築するコードは D3DExclusiveLodPointListCreator クラスに存在します。やることはそれほど難しくはないのですが、それでも実装は少々込み入って見えるかもしれません...
+2
+Go to list of users who liked
+1
+comment0
+Go to list of comments
+Register as a new user and use Qiita more conveniently
+You get articles that match your needs
+You can efficiently read back useful information
+You can use dark theme
+What you can do with signing up
+Sign upLogin
+2
+Go to list of users who liked
+1
+more_horiz
+Delete article
+close
+Deleted articles cannot be recovered.
+Draft of this article would be also deleted.
+Are you sure you want to delete this article?
+CancelDeletedelete

@@ -1,0 +1,112 @@
+This article outlines how to implement real-time volumetric fog in OpenGL by combining compute shaders with a 3D texture grid, commonly referred to as a frustum grid or "froxel" volume. You will learn how the frustum space is discretized, how lighting and
+
+Volumetric Fog Using 3D Textures in OpenGL - opengl
+Volumetric Fog Using
+3D Textures in OpenGL
+This article outlines how to implement real-time volumetric fog in
+OpenGL by combining compute shaders with a 3D texture grid, commonly
+referred to as a frustum grid or "froxel" volume. You will learn how the
+frustum space is discretized, how lighting and density are injected into
+the 3D volume, the mathematical accumulation of light along the view
+ray, and the final compositing step with the rendered scene.
+1. Allocating the
+Frustum Volume (Froxels)
+Rather than using an axis-aligned world-space grid, volumetric fog
+typically relies on a view-frustum-aligned grid. In OpenGL, this
+structure is stored as an immutable 3D texture allocated via
+glTexStorage3D with a target of
+GL_TEXTURE_3D.
+The dimensions are typically set to a fraction of the screen
+resolution (for instance, \(160 \times 90
+\times 64\) or \(256 \times 144 \times
+128\)) to balance performance and quality:
+X and Y dimensions: Map linearly to normalized
+device coordinates (screen space).
+Z dimension (depth): Distributed exponentially
+between the near and far planes. An exponential distribution places more
+slices near the camera where visual fidelity is critical and fewer
+slices in the distance.
+The mapping from view-space depth \(z\) to a normalized texture coordinate
+\(w\) typically follows the
+formula:
+\[w = \frac{\ln(z / z_{near})}{\ln(z_{far}
+/ z_{near})}\]
+2. Density and Phase
+Function Evaluation
+The implementation begins with a compute shader pass
+(glDispatchCompute) that evaluates fog density and material
+properties for every cell in the 3D texture.
+Density Generation: For uniform fog, density is
+constant. For dynamic, patchy fog, the compute shader samples an
+auxiliary 3D noise texture (such as Perlin-Worley noise) using the
+reconstructed world-space position of the froxel.
+Scattering and Absorption: Medium parameters define
+scattering (\(\sigma_s\)) and
+absorption (\(\sigma_a\)) coefficients,
+giving an extinction coefficient \(\sigma_t =
+\sigma_s + \sigma_a\).
+Phase Function: The angular distribution of
+scattered light is modeled using the Henyey-Greenstein phase
+function:
+\[p(\theta) = \frac{1}{4\pi} \frac{1 -
+g^2}{(1 + g^2 - 2g \cos\theta)^{3/2}}\]
+where \(g \in (-1, 1)\) is the
+asymmetry parameter controlling forward or backward scattering relative
+to the view vector and light direction.
+3. Light Injection Pass
+In this compute pass, incoming radiance is calculated for each
+froxel:
+World Position Reconstruction: The shader maps the
+3D grid index \((x, y, z)\) to clip
+space, applies the inverse view-projection matrix, and divides by \(w\) to determine the world-space center of
+the cell.
+Shadow Map Sampling: The shader samples standard
+shadow maps (e.g., cascaded shadow maps for directional lights or shadow
+cubemaps for point lights) to check for occlusion.
+In-Scattering Calculation: For all unshadowed
+lights, the shader evaluates light color, attenuation, and the phase
+function \(p(\theta)\), storing the
+resulting in-scattered radiance alongside the extinction coefficient in
+the 3D texture using image load/store
+(glBindImageTexture).
+4. Raymarching and
+Accumulation
+Once the lighting and extinction are evaluated per cell, a separate
+compute shader integrates the volume along the view rays (the Z-axis of
+the 3D texture) from near to far.
+Using the Beer-Lambert law, light is accumulated through each cell
+slice:
+Transmittance Step: \[\Delta \tau = \exp(-\sigma_t \cdot \Delta
+d)\] where \(\Delta d\) is the
+distance between the near and far planes of the current slice.
+Light Accumulation: \[L_{accum} = L_{accum} + L_{cell} \cdot
+T_{current}\]
+Transmittance Accumulation: \[T_{current} = T_{current} \cdot \Delta
+\tau\]
+This integration computes the total light scattered toward the camera
+and the net transmittance up to each depth slice. The output is written
+into a final filtered 3D texture.
+5. Temporal Filtering and
+Jittering
+To hide spatial banding artifacts caused by coarse slice resolution,
+depth jittering is applied. Each frame, a sub-voxel offset derived from
+a pseudo-random sequence (such as blue noise or Halton sequence) offsets
+the ray positions.
+A temporal reprojection compute pass then blends the current frame’s
+3D texture with the previous frame's 3D texture using camera motion
+vectors. This effectively smooths out noise and improves perceived
+volume resolution without extra raymarching steps.
+6. Final Scene Composition
+The accumulated volumetric data is applied to the scene during the
+post-processing or forward-lighting pass:
+The linear depth of the opaque scene fragment is retrieved from the
+scene's depth buffer.
+The fragment's screen coordinates and linear depth are converted
+into 3D texture coordinates \((u, v,
+w)\) using the exponential depth equation.
+The integrated 3D texture is sampled using hardware trilinear
+interpolation (GL_LINEAR).
+The sampled in-scattered light is added to the scene color, and the
+scene color is attenuated by the sampled transmittance:
+\[\text{Final Color} = \text{Scene Color}
+\times \text{Transmittance} + \text{InScattered Light}\]

@@ -1,0 +1,1188 @@
+GEMM-GS: Accelerating 3D Gaussian Splatting on Tensor Cores
+with GEMM-Compatible Blending
+Haomin Li1,† , Bowen Zhu1,† , Fangxin Liu1,2,†,‡ , Zongwu Wang1,2 , Xinran Liang3 , Li Jiang1,2,‡ , and
+Haibing Guan1
+1.Shanghai Jiao Tong University, 2. Shanghai Qi Zhi Institute, 3. United Imaging Intelligence Co., Ltd.
+{haominli, liufangxin, ljiang_cs}@sjtu.edu.cn
+Tensor Core (TF32)
+103
+102
+494.7
+125.0
+156.0
+989.0
+Not Utilized by 3DGS
+14.0
+19.5
+66.9
+V100 (2017)
+A100 (2020)
+H100 (2022)
+101
+67.0
+80.0
+H200 (2023)
+B200 (2024)
+Utilized by 3DGS
+GPUs
+Figure 1: Computing Power Breakdown of modern GPUs
+utilized by 3D Gaussian Splatting. Data is collected from the
+data sheets of the GPU products [22–26].
+high-quality rendering from novel viewpoints. This makes NeRF
+particularly valuable for applications like augmented reality (AR),
+virtual reality (VR), and 3D reconstruction [29–31, 33]. However,
+NeRF’s sampling-point-based design requires over a million model
+inferences per image, resulting in significant rendering latency that
+hinders real-time performance.
+Recently, 3D Gaussian Splatting (3DGS) [10] has gained prominence as a highly efficient neural rendering technique. 3DGS models
+the scenes with parametric point clouds of differentiable 3D Gaussian primitives. By employing explicit scene representations and a
+well-designed rendering pipeline, 3DGS delivers better rendering
+quality and lower latency compared to NeRF-based methods. Therefore, 3DGS has emerged as a leading method for 3D reconstruction
+and differentiable rendering, widely adopted across the field.
+Despite its advancements, 3DGS falls short of real-time performance required for practical applications. To be specific, as the scale
+and resolution of images increase, both the number of Gaussians
+and the size of each Gaussian grow. At the hardware level, some
+domain specific architectures (DSAs) have been proposed to accelerate the rendering process, but these involve significant design and
+tape-out costs [5, 12, 14, 16, 17, 32]. In addition, the DSAs are hard
+to adapt to various optimization approaches. At the software level,
+some works [3, 6, 13, 27] adopt mature quantization or pruning
+methods to reduce storage cost. For example, LightGaussian [3]
+adopts Gaussian pruning to reduce the huge number of Gaussians
+in the models and vector quantization to compress the attributes of
+Gaussians. However, these methods mainly focus on storage reduction, but have not yielded significant performance improvements.
+Some other software efforts [4, 7, 28] focus on optimizing GPU
+implementation, achieving performance gains by improving the
+precision of intersection detection during the preprocessing stage
+to reduce redundant duplication of Gaussians.
+However, existing software optimization methods overlook the
+evolutionary characteristics of modern GPUs, namely the increasingly powerful TensorCores capable of efficiently performing general matrix multiplication (GEMM). That’s because the rendering
+ACM Reference Format:
+Haomin Li1,† , Bowen Zhu1,† , Fangxin Liu1,2,†,‡ , Zongwu Wang1,2 , Xinran
+Liang3 , Li Jiang1,2,‡ , and Haibing Guan1 . 2026. GEMM-GS: Accelerating
+3D Gaussian Splatting on Tensor Cores with GEMM-Compatible Blending.
+In 63rd ACM/IEEE Design Automation Conference (DAC ’26), July 26–29,
+2026, Long Beach, CA, USA. ACM, New York, NY, USA, 7 pages. https:
+//doi.org/10.1145/3770743.3803899
+1
+Cuda Core (FP32)
+2500.0
+Neural Radiance Fields (NeRF) enables 3D scene reconstruction
+from several 2D images but incurs high rendering latency via its
+point-sampling design. 3D Gaussian Splatting (3DGS) improves on
+NeRF with explicit scene representation and an optimized pipeline
+yet still fails to meet practical real-time demands. Existing acceleration works overlook the evolving Tensor Cores of modern
+GPUs because 3DGS pipeline lacks General Matrix Multiplication
+(GEMM) operations. This paper proposes GEMM-GS, an acceleration approach utilizing tensor cores on GPUs via GEMM-friendly
+blending transformation. It equivalently reformulates the 3DGS
+blending process into a GEMM-compatible form to utilize Tensor Cores. A high-performance CUDA kernel is designed, integrating a three-stage double-buffered pipeline that overlaps computation and memory access. Extensive experiments show that
+GEMM-GS achieves 1.42× speedup over vanilla 3DGS and provides an additional 1.47× speedup on average when combining
+with existing acceleration approaches. Code is released at https:
+//github.com/shieldforever/GEMM-GS.
+TFLOPS
+arXiv:2604.02120v2 [cs.AR] 6 Apr 2026
+Abstract
+Introduction
+Neural rendering [19] has emerged as a transformative approach
+in bridging computer graphics and vision, leveraging differentiable
+rendering to reconstruct photo-realistic images and videos with
+exceptional fidelity. Early neural rendering techniques, such as
+Neural Radiance Fields (NeRF), marked a significant departure from
+traditional methods reliant on 3D grids and voxels. By harnessing
+the generalization capabilities of neural networks, NeRF implicitly
+reconstructs 3D scenes from a sparse set of 2D images, enabling
+† These authors contributed equally to the paper. ‡ Corresponding authors.
+This work was partially supported by the National Key Research and Development
+Program of China (2024YFE0204300), National Natural Science Foundation of China
+(Grant No.62402311), Natural Science Foundation of Shanghai (Grant No.24ZR1433700),
+and Key Research and Development Program of Shanghai (25LN3201200).
+This work is licensed under a Creative Commons Attribution 4.0 International License.
+DAC ’26, Long Beach, CA, USA
+© 2026 Copyright held by the owner/author(s).
+ACM ISBN 979-8-4007-2254-7/2026/07
+https://doi.org/10.1145/3770743.3803899
+1
+DAC ’26, July 26–29, 2026, Long Beach, CA, USA
+Haomin Li, Bowen Zhu, Fangxin Liu, et al.
+Intersection Test Feature Compute
+Inference
+Features: (depth, color) of a gaussian
+1
+3
+New
+View
+tile
+tile
+2
+tile
+... ti
+3
+2
+le 5
+Render
+tile
+le 8 Image
+7 ti
+tile
+2
+1
+le 1
+0 ti
+3
+tile 0
+(d,c)
+(d,c)
+tile 1
+(d,c)
+(d,c)
+(d,c)
+(d,c)
+(d,c)
+(d,c)
+(d,c)
+(d,c)
+...
+6
+tile 4
+Known
+Views Train
+...
+...
+Pro
+jec
+tion
+(a) Neural Rendering
+tile 8
+(b) Preprocessing
+tile 0
+(d,c)
+sort
+by
+(d,c) depth
+(d,c) per
+tile
+(d,c)
+...
+tile 4
+...
+sorted gaussian list
+gaussians Volume
+in order
+Render
+rendered
+image
+tile 8
+(d,c)
+(c) Duplication
+pixels
+in parallel
+tile 1
+(d) Sorting
+(e) Blending
+Figure 2: Neural Rendering and Process of 3DGS [10]. (a) Neural rendering (process of novel view synthesis). 3DGS consists
+of three stages. (b) Stage 1: Preprocessing. Gaussians are projected onto the render image and intersection test is performed
+to relating projected Gaussians and tiles. Gaussians’ features are also computed, including depth 𝑑 and color c. (c) Stage 2:
+Duplication. Each Gaussian is duplicated according to the number of tiles it intersects with. (d) Stage 3: Sorting. Gaussians in
+each tile are sorted by depth 𝑑. (e) Stage 4: Blending. The pixels in one tile are rendered by volume rendering in parallel, with
+the same sorted Gaussian list.
+pipeline of 3DGS contains few GEMM-style operations, resulting
+in idle Tensor Cores on GPUs. As shown in Figure ??, starting
+from the Volta architecture, the computing power of GPU Tensor
+Cores has become increasingly stronger. Therefore, how to design a
+GEMM-friendly 3DGS rendering pipeline to fully utilize the powerful computing capabilities of Tensor Cores is the key to improving
+3DGS performance.
+To this end, this paper proposes GEMM-GS, an acceleration approach utilizing tensor cores on GPUs via GEMM-friendly blending
+transformation. We transform the conventional 3DGS blending
+process into a GEMM-style formulation equivalently, leveraging
+the powerful tensor cores in modern GPUs for acceleration. To
+fully utilize the computing resources, we develop a well-designed
+blending kernel in CUDA. Based on the asynchronous memory
+copy technique, the kernel is designed as a three-stage pipeline
+with double buffer, well overlapping the computation and memory access. The results demonstrate that GEMM-GS delivers 1.42×
+speedup over the vanilla 3DGS implementation on average. It is
+worth noting that our approach is orthogonal to existing acceleration methods, and can achieve an additional 1.47× speedup over
+them. Our contributions are summarized as follows:
+Figure 2, the rendering pipeline consists of four stages: preprocessing, duplication, sorting, and blending. (a) Preprocessing: Given a
+camera pose, 3D Gaussians within the view frustum are projected
+onto the 2D image plane (from ellipsoids to ellipses). The 2D screen
+is divided into tiles (e.g., 16 × 16 pixels) based on the target resolution and tile size. Intersection detection identifies which Gaussians
+contribute to each tile. For each projected Gaussian, depth 𝑑 and
+RGB color c are computed for use in subsequent stages. (b) Duplication: To facilitate parallel blending, each Gaussian is duplicated
+according to the number of tiles it overlaps. Specifically, each copy
+is assigned a tile index, which is concatenated with the depth value
+to ensure that Gaussians corresponding to the same tile are gathered after sorting. (c) Sorting: Each tile may intersect multiple
+Gaussians, with closer Gaussians occluding those farther away. To
+ensure correct rendering, Gaussians are sorted by depth 𝑑. GPU
+implementations typically employ radix sort [10] to exploit CUDA
+core parallelism, producing a sorted list of Gaussians for each tile.
+(d) Blending: Blending iterates through the sorted Gaussians for
+each tile, processing all pixels in parallel. For each Gaussian G𝑖
+and pixel 𝑝 𝑗 , the opacity 𝛼𝑖 𝑗 and the corresponding color contribution to 𝑝 𝑗 are computed according to standard volume rendering
+operations:
+• We propose an equivalent transformation to reformulate
+the 3DGS blending process into a GEMM-compatible form,
+enabling the effective utilization of idle Tensor Cores on
+GPUs.
+• We develop a CUDA kernel to implement the transformed
+blending process. The kernel adopts a three-stage doublebuffered pipeline with asynchronous memory copy, fully
+overlapping Tensor Core computation and memory access.
+• Evaluations demonstrate that GEMM-GS achieves an average 1.42× speedup over vanilla 3DGS and an additional 1.47×
+speedup when combined with existing methods. Moreover,
+GEMM-GS is directly deployable on commodity GPUs without hardware modification, ensuring low adoption cost and
+real-world applicability.
+C𝑗 =
+𝑁
+∑︁
+𝑖=1
+𝑇𝑖 𝛼𝑖 𝑗 c𝑖 ,
+𝑇𝑖 =
+𝑖Ö
+−1
+(1 − 𝛼𝑘 𝑗 ),
+(1)
+𝑘=1
+where C 𝑗 is the rendered color of pixel 𝑝 𝑗 , and 𝑇𝑖 represents the
+accumulated transmittance up to Gaussian 𝑖.
+As shown in Algorithm 1, rendering a 16 × 16 tile is assigned to
+a thread block of 256 threads, with each thread handling one pixel.
+For Gaussians stored in global memory, the thread block processes
+them in batches, loading one batch into shared memory at a time.
+Each thread iterates over the Gaussian attributes to compute the
+pixel color according to Eq.(1). This tile-based organization enables
+coalesced memory accesses and efficient use of shared memory,
+reducing memory bandwidth pressure and improving throughput.
+2 Background
+2.1 3D Gaussian Splatting
+2.2
+3DGS GPU Acceleration
+To improve the rendering speed of 3DGS models, existing acceleration approaches can be broadly categorized into compression-based
+and preprocessing-based methods.
+3D Gaussian Splatting (3DGS) represents a scene using Gaussian
+ellipsoids and renders it in a tile-by-tile fashion. As illustrated in
+2
+Duplicate
+72.6
+Sort
+Blend
+68.0
+73.0
+72.3
+72.9
+73.5
+67.8
+70.3
+75.3
+40
+70.4
+60
+73.0
+80
+20
+0
+r
+r
+k
+p
+n
+n
+n
+ll
+n
+le
+ai
+truc trai rjohnso layroombicyc bons counte flowe garde kitche room stum treehi
+p
+d
+Scenes
+Figure 3: Rendering Latency Breakdown of 3DGS. The scenes
+for rendering are from three datasets: Tank&Temples [11],
+Deep Blending [9], and Mip-NeRF 360 [1].
+rendering time, making it the primary performance bottleneck. At
+the same time, modern GPUs feature increasingly powerful Tensor
+Cores optimized for GEMM-based computations. As illustrated in
+Figure 1, the theoretical FLOPS of Tensor Cores on the latest GPUs
+can exceed 30 times that of CUDA cores. However, the conventional 3DGS pipeline contains very few GEMM-style operations,
+leaving these resources largely idle and representing a substantial
+opportunity for acceleration.
+These observations motivate our primary optimization target:
+transforming the blending stage into a GEMM-compatible pipeline
+to leverage the idle Tensor Cores. To this end, we propose GEMMGS, which constructs a GEMM-compatible computation pipeline
+by applying an equivalent transformation to the blending stage
+and implements a high-performance CUDA kernel for accelerated
+Gaussian blending. Our approach is orthogonal to existing GPU
+acceleration methods and provides a plug-and-play tensor-based
+computation framework, enabling further acceleration of various
+state-of-the-art 3DGS implementations.
+3
+GEMM-GS Design and Implementation
+The blending stage dominates the computational cost of 3DGS. To
+exploit Tensor Cores, GEMM-GS reformulates the opacity computation (𝛼) into a GEMM-compatible form and designs a highperformance CUDA kernel that fully leverages the GPU memory
+hierarchy and parallel execution resources.
+Compression-based approaches aim to reduce the memory
+footprint of Gaussian representations. Two common techniques
+are pruning, which reduces the number of Gaussians based on
+importance metrics [8, 18], and vector quantization (VQ), which
+represents the attribute vectors of a large number of Gaussians
+using a small set of cluster centroids [2, 20, 21]. Some works, such
+as LightGaussian [3], combine pruning and VQ to achieve further
+storage reduction [6, 13, 27]. However, these approaches typically
+require retraining the model to restore rendering quality.
+Preprocessing-based approaches focus on optimizing Gaussian intersection tests to avoid redundant processing, without modifying the underlying 3DGS models. FlashGS [4] employs a precise
+redundancy elimination algorithm with opacity skipping. StopThePop [28] introduces a tile-based culling strategy similar to FlashGS.
+Speedy-Splat [7] proposes the SnugBox algorithm, which constructs
+tight bounding boxes around each Gaussian and identifies the exact set of intersected tiles. These methods are lossless and do not
+require retraining or model modification.
+2.3
+Preprocess
+100
+69.1
+Percentage (%)
+Algorithm 1: Blending Process in Vanilla 3DGS [10].
+Data: Index list of sorted projected Gaussians G
+overlapping with current tile, batch size 𝑏
+Result: Rendered Color C 𝑗 s of pixels in current tile
+1 for each batch (𝑏 Gaussians) ⊂ G do
+2
+/************ Prepare Data *************/
+3
+for each Gaussian G𝑖 in current batch parallel do
+4
+Fetch data of Gaussian G𝑖 :
+5
+projected coordinates: (𝑥𝑔𝑖 , 𝑦𝑔𝑖 )
+
+
+𝐴 𝐵𝑖
+6
+covariance matrix: Σ𝑖−1 = 𝑖
+𝐵𝑖 𝐶𝑖
+7
+opacity weight and RGB color: 𝑜𝑖 and c𝑖
+8
+end
+9
+/************ Volume Render ************/
+10
+for each Gaussian G𝑖 in current batch do
+11
+for each pixel 𝑝 𝑗 in current tile parallel do
+12
+x𝑔𝑖 ← [𝑥𝑔𝑖 − 𝑥 𝑝 𝑗 𝑦𝑔𝑖 − 𝑦𝑝 𝑗 ]𝑇
+13
+𝛼𝑖 𝑗 ← 𝑜𝑖 × 𝑒𝑥𝑝 (− 12 x𝑇𝑔𝑖 Σ𝑖−1 x𝑔𝑖 )
+1
+then
+14
+if 𝛼𝑖 𝑗 ≤ 255
+15
+skip to next Gaussian
+// 𝛼-skipping [10]
+16
+end
+17
+𝑇 𝑗 ← 𝑇 𝑗 × (1 − 𝛼𝑖 𝑗 )
+18
+if 𝑇 𝑗 ≤ 0 then
+19
+stop rendering 𝑝 𝑗
+// early terminate[19]
+20
+end
+21
+C 𝑗 ← C 𝑗 + c𝑖 𝛼𝑖 𝑗 𝑇 𝑗
+22
+end
+23
+end
+24 end
+DAC ’26, July 26–29, 2026, Long Beach, CA, USA
+72.6
+GEMM-GS: Accelerating 3D Gaussian Splatting on Tensor Cores with GEMM-Compatible Blending
+3.1
+Calculation Form of 𝛼’s Exponential
+In 3DGS, the opacity 𝛼𝑖 𝑗 of a Gaussian G𝑖 at pixel 𝑝 𝑗 is computed
+as:
+1 𝑇 −1
+(2)
+𝛼𝑖 𝑗 = 𝑜𝑖 × 𝑒 − 2 x𝑔𝑖 Σ𝑖 x𝑔𝑖
+where x𝑔𝑖 = [Δ𝑥𝑖 𝑗 Δ𝑦𝑖 𝑗 ]𝑇 = [𝑥𝑔𝑖 − 𝑥 𝑝 𝑗 𝑦𝑔𝑖 − 𝑦𝑝 𝑗 ]𝑇 , i.e., the vector from the projected coordinate of Gaussian 𝑔𝑖 (𝑥𝑔𝑖 , 𝑦𝑔𝑖 ) to the
+
+
+𝐴 𝐵𝑖
+coordinate of the current pixel (𝑥 𝑝 𝑗 , 𝑦𝑝 𝑗 ). Σ𝑖−1 = 𝑖
+is the
+𝐵𝑖 𝐶𝑖
+covariance matrix of 𝑔𝑖 .
+Thus, the exponential term in Eq.(2) is expanded as
+1
+1
+(3)
+𝑝𝑜𝑤𝑒𝑟𝑖 𝑗 = − 𝐴𝑖 Δ𝑥𝑖2𝑗 − 𝐵𝑖 Δ𝑥𝑖 𝑗 Δ𝑦𝑖 𝑗 − 𝐶𝑖 Δ𝑦𝑖2𝑗
+2
+2
+This formulation involves element-wise quadratic terms, which cannot be directly expressed as a matrix multiplication. As a result, the
+blending stage cannot natively benefit from Tensor Cores, leading
+to low compute efficiency on modern GPUs. GEMM-GS addresses
+this by transforming the computation into a GEMM-compatible
+representation, enabling effective Tensor Core acceleration.
+Analysis and Motivation
+We first profile 3DGS rendering latency across scenes from three
+datasets [1, 9, 11] on an NVIDIA A100 GPU (Figure 3). The results
+show that the blending stage contributes nearly 70% of the total
+3
+DAC ’26, July 26–29, 2026, Long Beach, CA, USA
+3.2
+Haomin Li, Bowen Zhu, Fangxin Liu, et al.
+Transformation based on Intra-Tile
+Coordinates
+Algorithm 2: GEMM-compatible Blending Process.
+Data: Index list of sorted projected Gaussians G
+overlapping with current tile, batch size 𝑏,
+offline-computed matrix M𝑝
+Result: Rendered Color C 𝑗 s of pixels in current tile
+1 for each batch (𝑏 Gaussians) ⊂ G do
+To enable Tensor Core utilization, we reformulate the opacity computation in the blending stage into a dot-product form. The key
+idea is to exploit intra-tile relative coordinates so that the quadratic
+power term can be expressed as a linear dot product, which is then
+amenable to batched matrix multiplications. For each tile, we select
+a reference pixel 𝑝𝑐 (e.g., the center pixel) with coordinates (𝑥𝑐 , 𝑦𝑐 ).
+The coordinates of any pixel 𝑝 𝑗 in the tile can be expressed as:
+(𝑥 𝑝 𝑗 , 𝑦𝑝 𝑗 ) = (𝑥𝑐 − 𝑥¯𝑝 𝑗 , 𝑦𝑐 − 𝑦¯𝑝 𝑗 ),
+2
+3
+4
+(4)
+5
+where ( ¯
+𝑥𝑝 𝑗 , ¯
+𝑦𝑝 𝑗 ) are the intra-tile relative coordinates of 𝑝 𝑗 with
+respect to 𝑝𝑐 . Accordingly, the coordinate differences between a
+Gaussian G𝑖 and pixel 𝑝 𝑗 become:
+7
+Δ𝑥𝑖 𝑗 = (𝑥𝑔𝑖 − 𝑥𝑐 ) + 𝑥¯𝑝 𝑗 , Δ𝑦𝑖 𝑗 = (𝑦𝑔𝑖 − 𝑦𝑐 ) + 𝑦¯𝑝 𝑗
+8
+6
+(5)
+9
+10
+(6)
+products into a single GEMM operation, allowing efficient execution
+on GPU Tensor Cores for 3DGS acceleration.
+For a 16×16 tile (256 pixels) and a batch of 256 Gaussians—typical
+in 3DGS rendering [10]—we construct a 256 × 6 Gaussian matrix
+M𝑔 and a 256 × 6 pixel matrix M𝑝 based on Eq. (6):
+where v®gi ∈ R6 is a vector determined by Gaussian parameters
+(𝐴𝑖 , 𝐵𝑖 , 𝐶𝑖 ) and offsets (𝑥ˆ𝑔𝑖 , 𝑦ˆ𝑔𝑖 ), and v®pj ∈ R6 encodes intra-tile
+relative coordinate terms for pixel 𝑝 𝑗 . Notably, the v®pj vectors depend only on intra-tile relative coordinates and constant terms,
+making them independent of specific Gaussians or tile positions.
+Hence, v®pj for all pixels in a tile can be precomputed once offline,
+stored in global memory, and reused throughout the rendering process. In contrast, v®gi must be computed once per Gaussian per tile,
+as it incorporates both Gaussian parameters and relative offsets
+(𝑥ˆ𝑔𝑖 , 𝑦ˆ𝑔𝑖 ).
+This reformulation converts the blending stage into a set of
+six-dimensional dot products, which can be naturally expressed
+as matrix multiplications. Specifically, a matrix composed of v®gi
+vectors for multiple Gaussians is multiplied by a matrix of v®pj
+vectors for all pixels in a tile, enabling direct mapping to highthroughput GEMM operations on Tensor Cores.
+3.3
+/********** Construct Matrix **********/
+for each Gaussian G𝑖 in current batch parallel do
+v®gi ← [ − 21 𝐴𝑖 , − 12 𝐶𝑖 , −𝐵𝑖 , −𝐴𝑖 𝑥ˆ𝑔𝑖 − 𝐵𝑖 𝑦ˆ𝑔𝑖 ,
+−𝐶𝑖 𝑦ˆ𝑔𝑖 − 𝐵𝑖 𝑥ˆ𝑔𝑖 , − 12 𝐴𝑖 𝑥ˆ𝑔2𝑖 − 21 𝐶𝑖 𝑦ˆ𝑔2𝑖 −𝐵𝑖 𝑥ˆ𝑔𝑖 𝑦ˆ𝑔𝑖 ] // Eq 6
+end
+M𝑔 ← [ v®𝑇𝑔0 , ®v𝑇𝑔1 , . . . , ®v𝑇𝑔𝑖 , . . . , v®𝑇𝑔𝑏 ]𝑇
+// Eq 7
+/** GEMM-Compatible Volume Render **/
+M𝑝𝑜𝑤𝑒𝑟 ← M𝑔 · M𝑝
+// Eq 8
+11
+for each Gaussian G𝑖 in current batch do
+12
+for each pixel 𝑝 𝑗 in current tile parallel do
+13
+𝛼𝑖 𝑗 ← 𝑜𝑖 × 𝑒𝑥𝑝 (M𝑝𝑜𝑤𝑒𝑟 [𝑖] [ 𝑗])
+14
+Same as Line 14-21 in Algorithm 1
+15
+end
+16
+end
+17 end
+We let 𝑥ˆ𝑔𝑖 and 𝑦ˆ𝑔𝑖 to denote the blue parts 𝑥𝑔𝑖 − 𝑥𝑐 and = 𝑦𝑔𝑖 − 𝑦𝑐 ,
+which are the coordinate differences between Gaussian G𝑖 and the
+reference pixel 𝑝𝑐 . These pairs of values (𝑥ˆ𝑔𝑖 , 𝑦ˆ𝑔𝑖 )s are constant for
+all pixels in a tile for a given Gaussian, requiring computation only
+once per tile.
+Substituting these terms into Eq.(3), the quadratic form can be
+reorganized as:
+1
+𝑝𝑜𝑤𝑒𝑟𝑖 𝑗 = − 𝐴𝑖 (𝑥ˆ𝑔𝑖 + 𝑥¯𝑝 𝑗 ) 2 − 𝐵𝑖 (𝑥ˆ𝑔𝑖 + 𝑥¯𝑝 𝑗 )(𝑦ˆ𝑔𝑖 + 𝑦¯𝑝 𝑗 )
+2
+1
+− 𝐶𝑖 (𝑦ˆ𝑔𝑖 + 𝑦¯𝑝 𝑗 ) 2
+2
+
+ 𝑇  𝑥¯𝑝2 𝑗 
+− 12 𝐴𝑖
+
+  2 
+1
+
+  𝑦¯𝑝 
+− 2 𝐶𝑖
+𝑗 
+
+ 
+
+ 𝑥¯𝑝 𝑦¯𝑝 
+−𝐵
+𝑖
+𝑗
+𝑗
+
+
+
+=
+ ·  𝑥¯ 
+−𝐴𝑖 𝑥ˆ𝑔𝑖 − 𝐵𝑖 𝑦ˆ𝑔𝑖
+
+  𝑝𝑗 
+
+  𝑦¯ 
+−𝐶𝑖 𝑦ˆ𝑔𝑖 − 𝐵𝑖 𝑥ˆ𝑔𝑖
+  𝑝𝑗 
+ 1
+− 𝐴𝑖 𝑥ˆ 2 − 1 𝐶𝑖 𝑦ˆ2 − 𝐵𝑖 𝑥ˆ𝑔 𝑦ˆ𝑔   1 
+𝑔𝑖
+𝑔𝑖
+𝑖
+𝑖
+ 2
+
+
+2
+= v®gi · v®pj
+/************ Prepare Data *************/
+Same as Line 3-8 in Algorithm 1
+
+M𝑔 = ®v𝑇𝑔0
+
+M𝑝 = v®𝑝 0
+𝑇
+v®𝑇𝑔1
+...
+v®𝑇𝑔𝑖
+...
+v®𝑇𝑔255
+®v𝑝 1
+...
+v®𝑝𝑖
+...
+v®𝑝 255
+
+(7)
+The power values are computed via matrix multiplication:
+M𝑝𝑜𝑤𝑒𝑟 = M𝑔 · M𝑝
+(8)
+where M𝑝𝑜𝑤𝑒𝑟 is a 256 × 256 matrix containing all 𝑝𝑜𝑤𝑒𝑟𝑖 𝑗 values
+for Gaussian–pixel pairs within the tile. As discussed in Section 3.2,
+M𝑝 remains identical across tiles due to fixed intra-tile coordinates,
+enabling offline precomputation and reuse with negligible overhead.
+Algorithm 2 summarizes the blending procedure. In contrast
+to vanilla 3DGS blending (Algorithm 1), which evaluates 𝑝𝑜𝑤𝑒𝑟𝑖 𝑗
+per pixel individually, our method directly consumes the offlineprecomputed M𝑝 . For each tile, the steps are: 1) Fetch Gaussian
+attributes (𝐴𝑖 , 𝐵𝑖 , 𝐶𝑖 , 𝑥𝑔𝑖 , 𝑦𝑔𝑖 ) for the current Gaussian batch. 2)
+Compute v®gi for each Gaussian G𝑖 using 𝑑𝑥𝑖𝑐 and 𝑦ˆ𝑔𝑖 , forming
+M𝑔 . 3) Perform matrix multiplication (Eq.(8)) to obtain M𝑝𝑜𝑤𝑒𝑟 . 4)
+Execute volume rendering, computing 𝛼𝑖 𝑗 using exponentials of
+M𝑝𝑜𝑤𝑒𝑟 values, consistent with Algorithm 1.
+GEMM-compatible Blending
+Building on the intra-tile coordinate transformation, we formulate
+the computation of multiple 𝑝𝑜𝑤𝑒𝑟𝑖 𝑗 values as a batched matrix
+multiplication. This converts the collection of six-dimensional dot
+4
+GEMM-GS: Accelerating 3D Gaussian Splatting on Tensor Cores with GEMM-Compatible Blending
+Stage 1
+Load Gaussians' Features
+CUDA
+Cores
+Stage 3
+Tensor
+Cores
+CUDA
+Cores
+Output
+s
+Input
+s(
+s
+Output
+Input
+Output
+Input
+s,
+)
+Shared Memory
+Global Memory
+Loop
+Batch i-2 Batch i-1 Batch i Batch i+1 Batch i+2
+Iterations
+Stage 1 Stage 1 Stage 1 Stage 1 Stage 1
+Batch i-2 Batch i-1 Batch i Batch i+1 Batch i+2
+Stage 2 Stage 2 Stage 2 Stage 2 Stage 2
+Batch i-2 Batch i-1 Batch i Batch i+1 Batch i+2
+Stage 3 Stage 3 Stage 3 Stage 3 Stage 3
+Load Gaussians' Indices &
+Stage 2
+DAC ’26, July 26–29, 2026, Long Beach, CA, USA
+Double Buffer
+Organization
+for storing IBuffer[0]
+Gaussians'
+indices IBuffer[1]
+Detailed operations
+in a Loop Iteration
+Batch
+i
+Batch
+i-1
+Batch
+i-2
+for storing FBuffer[0]
+Gaussians'
+features FBuffer[1]
+for storing MBuffer[0]
+Mg matrices
+MBuffer[1]
+(a) Pipeline Stages, Dataflow, and Double Buffer Organization
+Load Gaussians' indices (batch i) to IBuffer[i&1]
+Load Gaussians' features (batch i-1) to FBuffer[(i-1)&1]
+Compute Mg and store to MBuffer[(i-1)&1]
+Load Mg(batch i-2) from MBuffer[(i-2)&1] and compute MPower
+Using colors from FBuffer[(i-2)&1] for to perform volume render
+(b) Loop Iterations and Detailed Operations
+Figure 4: High-Performance GPU Kernel Design and Implementation. (a) Dataflow of 3-stage pipeline configured with double
+buffer. (b) Execution timing of loop iterations and detailed operations in a single iteration.
+Figure 4(b). Double buffering of indices enables the use of asynchronous memory copy2 , introduced in the Ampere architecture, to
+overlap data transfer with computation. Similarly, double buffering
+of features and M𝑔 prevents synchronization stalls between Stage 2
+and Stage 3. This design minimizes global memory traffic, ensuring
+sustained tensor-core utilization.
+Table 1: 3DGS Workloads Statics.
+Datasets
+Tank & Temples
+(Outdoor) [11]
+Deep Blending
+(Indoor) [9]
+Mip-NeRF 360
+(5 outdoors,
+4 indoors) [1]
+3.4
+Scenes
+Train
+Truck
+Playroom
+Drjohnson
+bicycle, bonsai,
+counter, flowers,
+garden, kitchen,
+room, stump, treehill
+Resolution
+980 × 545
+979 × 546
+1264 × 832
+1332 × 876
+#Gaussians
+1.09M
+2.06M
+1.85M
+3.07M
+around
+1060 × 1600
+1.04M ∼
+4.74M
+4 Evaluation
+4.1 Methodology
+Workloads and Datasets. We evaluate 3DGS on three widely-used
+real-world datasets: Tank & Temples [11], Deep Blending [9], and
+Mip-NeRF 360 [1]. Each scene is trained for 30K iterations using
+the official 3DGS pipeline. In total, we evaluate across 13 scenes
+(workloads), with dataset statistics summarized in Table 1.
+Implementation and Baselines. We implement our design on
+2 types of NVIDIA GPUs: A100 and H100. We use CUDA events to
+delay the forward rendering process within the forward function.
+For each scene, we iterate through rendering the entire test dateset
+10 times, record the latency, and take the average. Apart from the
+Vanilla 3DGS implementation [10], we select several representive
+3DGS accleration as baselines. Preprocess Optimization Methods:
+FlashGS [4], StopThePop [28], and Speedy-Splat [7]. Compression Methods:
+LightGaussian [3] and c3dgs [13]. We compare the latency of these
+baseline designs with the latency after integrating the proposed
+GEMM-GS into these designs.
+GPU Implementation
+Following the vanilla implementation [10], we assign a thread block
+of 256 threads to render each 16 × 16 tile and process the sorted
+Gaussian list with a batch size of 256.
+Three-Stage Pipeline. To overlap latency and reduce synchronization overhead, we design a three-stage pipeline, illustrated in
+Figure 4(a): Stage 1: Load Gaussian indices into shared memory.
+Stage 2: Each thread fetches the attributes of one Gaussian according to its index (as in line 4 of Algorithm 2), and collaboratively
+constructs M𝑔 . Each thread computes one 𝑣®𝑔𝑖 vector, forming the
+rows of M𝑔 . Stage 3: Perform matrix multiplication between the
+preloaded M𝑝 and the constructed M𝑔 to obtain M𝑝𝑜𝑤𝑒𝑟 , followed
+by volume rendering.
+Mini-batch Design with PTX-based GEMM Instruction.
+Due to limited shared memory, Stage 3 adopts a mini-batch design. In each iteration, a 16 × 8 submatrix of M𝑔 is multiplied with
+M𝑝 . The multiplication is executed via four rounds of warp-level
+mma(m16n8k8) PTX instructions1 , where each thread block consists of 8 warps (32 threads per warp). Thus, 8 × 4 = 32 warp-level
+calls complete an effective m256n16k8 multiplication. This partitioning confines synchronization to the warp level, eliminating
+costly thread block barriers.
+Double Buffer Organization. We employ double buffering
+for Gaussian indices, features, and the matrix M𝑔 , as illustrated in
+4.2
+Performance Comparison
+Table 2 and Figure 5 compares the latency between baseline methods and our GEMM-GS. Compared to the vanilla 3DGS, GEMM-GS
+achieves 1.42× and 1.37× speedup on A100 and H100, respectively.
+Such improvements are due to utilization of powerful tensor cores
+on GPUs and efficient pipeline kernel design. Furthermore, we integrate GEMM-GS with several preprocess optimization methods.
+GEMM-GS provides averagely 1.19× (1.21×), 1.42× (1.33×), and
+1.50× (1.44×) over FlashGS, StopThePop, and SpeedySplat on A100
+(H100), demonstrating that our method is orthogonal to existing
+1 https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-ma
+2 https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#pipeline-pr
+trix-fragment-mma-1688.
+imitives-interface.
+5
+DAC ’26, July 26–29, 2026, Long Beach, CA, USA
+Haomin Li, Bowen Zhu, Fangxin Liu, et al.
+Table 2: Average image rendering latency (ms) comparison between GEMM-GS and baseline methods on an A100 GPU.
+Datasets
+Tank & Temples [11] Deep Blending [9]
+Mip-NeRF 360 [1]
+Scenes
+truck
+train
+drjohnson playroom bicycle bonsai counter flowers garden kitchen room stump treehill
+Methods
+Vanilla 3DGS
+4.28
+4.51
+6.16
+4.37
+9.64
+3.77
+5.17
+4.22
+6.49
+5.97
+5.32
+4.73
+5.02
++ GEMM-GS
+2.78
+3.01
+4.16
+2.86
+6.87
+2.7
+3.72
+2.99
+4.81
+4.33
+3.97
+3.47
+3.63
+Speedup
+1.54×
+1.50×
+1.48×
+1.53×
+1.40× 1.40× 1.39×
+1.41× 1.35×
+1.38× 1.34× 1.36× 1.38×
+FlashGS
+2.53
+2.6
+2.08
+1.51
+4.16
+1.52
+2.08
+2.31
+3.74
+2.84
+2.02
+2.71
+2.48
++ GEMM-GS
+2.29
+2.15
+1.58
+1.23
+3.69
+1.27
+1.73
+1.93
+3.21
+2.39
+1.72
+2.28
+2.15
+Speedup
+1.10×
+1.21×
+1.32×
+1.23×
+1.13× 1.20× 1.20×
+1.20× 1.17×
+1.19× 1.17× 1.19× 1.15×
+StopThePop
+3.52
+3.86
+5.49
+3.53
+8.91
+2.91
+4.31
+3.62
+5.74
+5.31
+4.72
+4.12
+4.28
++ GEMM-GS
+2.56
+2.67
+3.75
+2.23
+6.28
+2.016
+3.11
+2.63
+4.324
+3.83
+3.35 2.928
+3.048
+Speedup
+1.38×
+1.45×
+1.46×
+1.58×
+1.42× 1.45× 1.39×
+1.38× 1.33×
+1.39× 1.41× 1.41× 1.40×
+Speedy-Splat
+2.83
+2.93
+2.85
+2.01
+4.7
+1.91
+2.5
+2.61
+4.16
+3.37
+2.31
+2.99
+2.82
++ GEMM-GS
+1.86
+1.88
+1.79
+1.26
+3.38
+1.25
+1.59
+1.78
+2.79
+2.44
+1.44
+2.09
+2.04
+Speedup
+1.52×
+1.56×
+1.59×
+1.60×
+1.39× 1.53× 1.57×
+1.47× 1.49×
+1.38× 1.60× 1.43× 1.38×
+c3dgs
+4.3
+4.93
+6.22
+4.35
+10.85
+4.37
+5.92
+4.71
+7.83
+7.37
+6
+5.53
+6.09
++ GEMM-GS
+2.53
+2.89
+3.49
+2.44
+6.29
+2.55
+3.4
+2.87
+4.56
+4.18
+3.37
+3.18
+3.61
+Speedup
+1.70×
+1.71×
+1.78×
+1.78×
+1.72× 1.71× 1.74×
+1.64× 1.72×
+1.76× 1.78× 1.74× 1.69×
+LightGaussian
+2.9
+2.29
+3.55
+2.7
+5.96
+2.95
+3.94
+3.38
+5.14
+4.17
+4
+3.85
+4.18
++ GEMM-GS
+1.85
+1.51
+2.2
+1.68
+3.67
+1.88
+2.48
+2.18
+3.23
+2.62
+2.49
+2.47
+2.6
+Speedup
+1.57×
+1.52×
+1.61×
+1.61×
+1.62× 1.57× 1.59×
+1.55× 1.59×
+1.59× 1.61× 1.56× 1.61×
+Latency (ms)
+Vanilla 3DGS
+Vanilla 3DGS+GeMM-GS
+FlahsGS
+FlahsGS+GeMM-GS
+6
+StopThePop
+StopThePop+GeMM-GS
+1.37× Speedup Over Vanilla 3DGS
+1.21× Speedup Over FlashGS
+SpeedySplat
+SpeedySplat+GeMM-GS
+1.33× Speedup Over StopThePop
+1.44× Speedup Over SpeedySplat
+4
+2
+0
+truck
+train
+drjohnson playroom
+bicycle
+bonsai
+counter
+Scenes
+flower
+garden
+kitchen
+room
+stump
+treehill
+20
+0
+b=256
+Vanilla 3DGS(1×)
+GeMM-GS(2×)
+GeMM-GS(1×)
+Vanilla 3DGS(3×)
+Vanilla 3DGS(2×)
+GeMM-GS(3×)
+truck
+train
+drjohnson
+playroom
+Scenes
+flower
+garden
+Latency (ms)
+Latency (ms)
+Figure 5: Average image rendering latency (ms) comparison between GEMM-GS and baseline methods on an H100 GPU.
+40
+stump
+Figure 6: Average image rendering latency (ms) comparison
+between GEMM-GS and vanilla 3DGS with various resolution
+(1×, 2×, 3×).
+b=64
+b=32
+b=16
+6
+4
+2
+0
+k
+truc
+i
+l
+train rjohnsonlayroom bonsa counter flower garden kitchen room stump treehil
+p
+d
+Scenes
+Figure 7: Average rendering latency (ms) comparison between
+GEMM-GS and vanilla 3DGS with various batch size 𝑏.
+methods and can be combined with them to achieve co-optimization
+for better performance. In addition, we evaluate GEMM-GS integrated with compression methods on A100. GEMM-GS achieves
+1.73× and 1.58× over c3dgs and LightGaussian on average, indicating that our method is also friendly to compression methods that
+pruning redundant computation.
+4.3
+b=128
+2× and 3× resolution, emphasizing the scalability of our method
+on high-resolution scenarios.
+5
+Sensitivity study
+Conclusion
+This paper presents GEMM-GS, an approach to accelerating 3DGS
+rendering on modern GPUs with tensor cores. By leveraging intratile relative coordinates, we propose a GEMM-compatible variant
+of the 3DGS blending operation that enables acceleration via tensor cores. While TC-GS [15] explores Tensor Core integration for
+3DGS, GEMM-GS distinguishes itself through architecture-aware
+optimizations, including asynchronous data fetch and mini-batch
+design with PTX-based GEMM instructions. By maximizing GPU
+hardware utilization, GEMM-GS achieves superior speedups over
+existing acceleration methods.
+Impact of Batch Size. Figure 7 presents the latency comparison
+under different batch sizes. Smaller batches result in higher latency
+due to poor parallel acceleration. Specifically, a tile (16×16 pixels) is
+allocated 256 threads, so when the batch size is smaller than 256, the
+task of constructing matrix M𝑔 cannot be evenly divided into each
+thread, and smaller workload causes worse parallel acceleration.
+Impact of Resolution. We evaluate GEMM-GS on rendering
+images with various resolutions, from 1× to 3×, as shown in Figure 6.
+GeMM-GS provides 1.73× and 1.74× speedup over vanilla 3DGS on
+6
+GEMM-GS: Accelerating 3D Gaussian Splatting on Tensor Cores with GEMM-Compatible Blending
+References
+DAC ’26, July 26–29, 2026, Long Beach, CA, USA
+[21] Simon Niedermayr, Josef Stumpfegger, and Rüdiger Westermann. 2024. Compressed 3d gaussian splatting for accelerated novel view synthesis. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. 10349–
+10358.
+[22] Nvidia. 2017. V100 Data Sheet. https://images.nvidia.cn/content/technologies/
+volta/pdf/volta-v100-datasheet-update-us-1165301-r5.pdf.
+[23] Nvidia. 2020. A100 Data Sheet. https://www.nvidia.com/content/dam/enzz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-nvidia-us-2188504web.pdf.
+[24] Nvidia. 2022. H100 Data Sheet. https://resources.nvidia.com/en-us-hopperarchitecture/nvidia-tensor-core-gpu-datasheet.
+[25] Nvidia. 2023. H200 Data Sheet. https://nvdam.widen.net/s/nb5zzzsjdf/hpcdatasheet-sc23-h200-datasheet-3002446.
+[26] Nvidia. 2024. B200 Data Sheet. https://nvdam.widen.net/s/wwnsxrhm2w/black
+well-datasheet-3384703.
+[27] Panagiotis Papantonakis, Georgios Kopanas, Bernhard Kerbl, Alexandre Lanvin,
+and George Drettakis. 2024. Reducing the memory footprint of 3d gaussian
+splatting. Proceedings of the ACM on Computer Graphics and Interactive Techniques
+7, 1 (2024), 1–17.
+[28] Lukas Radl, Michael Steiner, Mathias Parger, Alexander Weinrauch, Bernhard
+Kerbl, and Markus Steinberger. 2024. Stopthepop: Sorted gaussian splatting for
+view-consistent real-time rendering. ACM Transactions on Graphics (TOG) 43, 4
+(2024), 1–17.
+[29] Jiaming Sun, Xi Chen, Qianqian Wang, Zhengqi Li, Hadar Averbuch-Elor, Xiaowei
+Zhou, and Noah Snavely. 2022. Neural 3D Reconstruction in the Wild. In ACM SIGGRAPH 2022 Conference Proceedings (SIGGRAPH ’22). Association for Computing
+Machinery, New York, NY, USA, Article 26, 9 pages. doi: 10.1145/3528233.3530718
+[30] Matthew Tancik, Vincent Casser, Xinchen Yan, Sabeek Pradhan, Ben Mildenhall,
+Pratul P Srinivasan, Jonathan T Barron, and Henrik Kretzschmar. 2022. Blocknerf: Scalable large scene neural view synthesis. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition. 8248–8258.
+[31] Chen Wang, Xian Wu, Yuan-Chen Guo, Song-Hai Zhang, Yu-Wing Tai, and ShiMin Hu. 2022. Nerf-sr: High quality neural radiance fields using supersampling. In
+Proceedings of the 30th ACM International Conference on Multimedia. 6445–6454.
+[32] Lizhou Wu, Haozhe Zhu, Siqi He, Jiapei Zheng, Chixiao Chen, and Xiaoyang
+Zeng. 2024. GauSPU: 3D Gaussian Splatting Processor for Real-Time SLAM
+Systems. In 2024 57th IEEE/ACM International Symposium on Microarchitecture
+(MICRO). IEEE, 1562–1573.
+[33] Allan Zhou, Moo Jin Kim, Lirui Wang, Pete Florence, and Chelsea Finn. 2023.
+NeRF in the Palm of Your Hand: Corrective Augmentation for Robotics via NovelView Synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR). 17907–17917.
+[1] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter
+Hedman. 2022. Mip-nerf 360: Unbounded anti-aliased neural radiance fields. In
+Proceedings of the IEEE/CVF conference on computer vision and pattern recognition.
+5470–5479.
+[2] Zhenqi Dai, Ting Liu, and Yanning Zhang. 2025. Efficient Decoupled Feature 3D
+Gaussian Splatting via Hierarchical Compression. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR). 11156–11166.
+[3] Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia Xu, Zhangyang Wang,
+et al. 2024. Lightgaussian: Unbounded 3d gaussian compression with 15x reduction and 200+ fps. Advances in neural information processing systems 37 (2024),
+140138–140158.
+[4] Guofeng Feng, Siyan Chen, Rong Fu, Zimu Liao, Yi Wang, Tao Liu, Boni Hu,
+Linning Xu, Zhilin Pei, Hengjie Li, et al. 2025. Flashgs: Efficient 3d gaussian
+splatting for large-scale and high-resolution rendering. In Proceedings of the
+Computer Vision and Pattern Recognition Conference. 26652–26662.
+[5] Yu Feng, Weikai Lin, Yuge Cheng, Zihan Liu, Jingwen Leng, Minyi Guo, Chen
+Chen, Shixuan Sun, and Yuhao Zhu. 2025. Lumina: Real-Time Neural Rendering
+by Exploiting Computational Redundancy. In Proceedings of the 52nd Annual
+International Symposium on Computer Architecture. 1925–1939.
+[6] Sharath Girish, Kamal Gupta, and Abhinav Shrivastava. 2024. Eagles: Efficient
+accelerated 3d gaussians with lightweight encodings. In European Conference on
+Computer Vision. Springer, 54–71.
+[7] Alex Hanson, Allen Tu, Geng Lin, Vasu Singla, Matthias Zwicker, and Tom
+Goldstein. 2025. Speedy-splat: Fast 3d gaussian splatting with sparse pixels and
+sparse primitives. In Proceedings of the Computer Vision and Pattern Recognition
+Conference. 21537–21546.
+[8] Alex Hanson, Allen Tu, Vasu Singla, Mayuka Jayawardhana, Matthias Zwicker,
+and Tom Goldstein. 2025. PUP 3D-GS: Principled Uncertainty Pruning for 3D
+Gaussian Splatting. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR). 5949–5958.
+[9] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis,
+and Gabriel Brostow. 2018. Deep blending for free-viewpoint image-based rendering. ACM Transactions on Graphics (ToG) 37, 6 (2018), 1–15.
+[10] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis.
+2023. 3d gaussian splatting for real-time radiance field rendering. ACM Trans.
+Graph. 42, 4 (2023), 139–1.
+[11] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. 2017. Tanks and
+temples: Benchmarking large-scale scene reconstruction. ACM Transactions on
+Graphics (ToG) 36, 4 (2017), 1–13.
+[12] Junseo Lee, Seokwon Lee, Jungi Lee, Junyong Park, and Jaewoong Sim. 2024.
+Gscore: Efficient radiance field rendering via architectural support for 3d gaussian
+splatting. In Proceedings of the 29th ACM International Conference on Architectural
+Support for Programming Languages and Operating Systems, Volume 3. 497–511.
+[13] Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko, and Eunbyung Park.
+2024. Compact 3d gaussian representation for radiance field. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition. 21719–21728.
+[14] Haomin Li, Yue Liang, Fangxin Liu, Bowen Zhu, Zongwu Wang, Yu Feng, Liqiang
+Lu, Li Jiang, and Haibing Guan. 2026. ORANGE: Exploring Ockham’s Razor
+for Neural Rendering by Accelerating 3DGS on NPUs with GEMM-Friendly
+Blending and Balanced Workloads. In 2026 IEEE International Symposium on High
+Performance Computer Architecture (HPCA). IEEE, 1–15.
+[15] Zimu Liao, Jifeng Ding, Siwei Cui, Ruixuan Gong, Boni Hu, Yi Wang, Hengjie
+Li, Hui Wang, Xingcheng Zhang, and Rong Fu. 2025. Tc-gs: A faster gaussian
+splatting module utilizing tensor cores. In Proceedings of the SIGGRAPH Asia 2025
+Conference Papers. 1–9.
+[16] Weikai Lin, Yu Feng, and Yuhao Zhu. 2025. Metasapiens: Real-time neural
+rendering with efficiency-aware pruning and accelerated foveated rendering. In
+Proceedings of the 30th ACM International Conference on Architectural Support for
+Programming Languages and Operating Systems, Volume 1. 669–682.
+[17] Fangxin Liu, Haomin Li, Bowen Zhu, Zongwu Wang, Zhuoran Song, Haibing
+Guan, and Li Jiang. 2025. Asdr: Exploiting adaptive sampling and data reuse for
+cim-based instant neural rendering. In Proceedings of the 30th ACM International
+Conference on Architectural Support for Programming Languages and Operating
+Systems, Volume 3. 18–33.
+[18] Saswat Subhajyoti Mallick, Rahul Goel, Bernhard Kerbl, Markus Steinberger,
+Francisco Vicente Carrasco, and Fernando De La Torre. 2024. Taming 3dgs: Highquality radiance fields with limited resources. In SIGGRAPH Asia 2024 Conference
+Papers. 1–11.
+[19] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi
+Ramamoorthi, and Ren Ng. 2021. NeRF: representing scenes as neural radiance
+fields for view synthesis. Commun. ACM 65, 1 (dec 2021), 99–106. doi: 10.1145/
+3503250
+[20] K Navaneet, Kossar Pourahmadi Meibodi, Soroush Abbasi Koohpayegani, and
+Hamed Pirsiavash. 2023. Compact3d: Compressing gaussian splat radiance field
+models with vector quantization. arXiv preprint arXiv:2311.18159 2, 3 (2023).
+7

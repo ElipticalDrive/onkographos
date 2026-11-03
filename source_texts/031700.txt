@@ -1,0 +1,463 @@
+Real-Time GPU-Based Voxel Carving with
+Systematic Occlusion Handling
+Alexander Schick1 and Rainer Stiefelhagen1,2
+1
+Interactive Analysis and Diagnosis, Fraunhofer IITB Karlsruhe
+alexander.schick@iitb.fraunhofer.de
+2
+Institut für Anthropomatik, Universität Karlsruhe (TH)
+stiefel@ira.uka.de,
+rainer.stiefelhagen@iitb.fraunhofer.de
+Abstract. We present an approach to compute the visual hulls of multiple people in real-time in the presence of occlusions. We prove that
+the resulting visual hulls are correct and minimal under occlusions. Our
+proposed algorithm runs completely on the GPU with framerates up to
+50f ps for multiple people using only one computer equipped with oﬀthe-shelf hardware. We also compare runtimes for diﬀerent graphic chips
+and show that our approach scales very well without additional eﬀort.
+Comparison to other work shows that our algorithm is as fast as stateof-the-art technology. The resulting visual hulls can be the basis for a
+wide range of algorithms that require a robust voxel representation as
+input.
+1
+Introduction
+We are interested in analyzing people that are interacting in multi-camera environments like smart rooms, smart control rooms, and smart housing. In these
+scenarios, the same scene is observed by multiple cameras. Due to diﬀerent viewpoints, this leads to ambiguities. In one image, the actions of a person could be
+clearly visible, whereas in another image, the person might be occluded. Applications working with this data must ﬁnd a way to reason with ambiguities, for
+example by fusing the inputs into one well-deﬁned representation. Volumetric
+reconstruction algorithms, like voxel carving, provide a solution by building a
+coherent 3D representation.
+The visual hull concept is well-known in the context of volumetric reconstruction and many applications can beneﬁt from it. However, it relies on silhouette
+information and is very sensitive to segmentation errors. Static occlusions, like
+tables and chairs, cause severe problems for foreground segmentation and therefore for visual hulls in general. Current solutions do not address this problem
+properly. We will present a systematic solution to compute the minimal visual
+hulls during occlusions and prove its correctness.
+To achieve real-time runtimes, many computer vision applications use the
+power of modern GPUs. By strictly following the highly parallel mathematical
+J. Denzler, G. Notni, and H. Süße (Eds.): DAGM 2009, LNCS 5748, pp. 372–381, 2009.
+c
+ Springer-Verlag Berlin Heidelberg 2009
+Real-Time GPU-Based Voxel Carving with Systematic Occlusion Handling
+373
+problem formulation of voxel carving, we implemented our algorithm with integrated occlusion handling on the GPU. It runs with up to 50f ps for multiple
+people and will scale eﬀortlessly with future graphic chips.
+2
+Related Work
+Laurentini introduced the visual hull concept to reconstruct 3D structures using
+only silhouette images [1]. There are many ways to compute the visual hull, e.g.
+ray intersection [2]; we focus on voxel carving because it is very robust and can
+be implemented on the GPU due to its highly parallel nature. In voxel carving,
+the 3D space is sampled into a set of 3D points. Each point is projected into
+every silhouette image. If the projected voxel is outside the silhouette in one or
+more images, it gets removed or carved. This is repeated for every voxel until
+the set of remaining voxels forms the visual hull.
+Static scene occlusions, like tables, introduce signiﬁcant diﬃculties for most
+visual hull approaches because they directly aﬀect the silhouettes of objects that
+they occlude. This leads to severe defects in the visual hulls and is a huge problem for real-world applications. Guan et al. handle occlusions by using artiﬁcial
+silhouettes of the occluding objects [3], but the resulting visual hulls seem not to
+be minimal. In other work, Guan et al. infer the 3D location of static occluders
+in very diﬃcult scenarios using a Bayesian sensor fusion approach [4], but their
+system needs approximately one minute per frame. Kim et al. allow one silhouette miss in one camera per voxel to avoid defects in the visual hull [5] which
+will not work when occlusions occur in more than one view. Ladikos et al. add
+the silhouettes of occluders that were either manually annotated or the result
+of projections of 3D models [6]. However, this potentially adds a lot of noise.
+Even though some partial solutions were proposed, most visual hull algorithms
+are still evaluated in scenarios without occlusions and with only one person. In
+Section 3.2, we will propose a systematic and general solution by introducing
+depth-based occlusion maps. In addition, we will prove that the resulting visual
+hulls are correct and minimal.
+For interactive smart environments, computation speed is another critical
+factor because the applications must run in real-time. Lookup tables reduce
+computation speed by storing the voxel projections. Examples are provided by
+Luck et al. [7] and Kehl et al. [8]. But lookup tables have severe drawbacks:
+once computed they are ﬁxed, one lookup table per image is required, and their
+size grows cubical in the number of voxels. Octrees oﬀer a way to reduce the
+number of computations without relying on lookup tables. They start with very
+large voxels and only reﬁne the resolution where the voxel projection results in
+a partial silhouette hit. Examples of octree-based visual hull computations are
+presented by Caillette and Howard [9] and Erol et al. [10].
+Instead of minimizing computations, they can be carried out very eﬃciently
+using the power of modern GPUs, for example with NVIDIA Cuda [11].
+Overviews of GPU programming using Cuda are given by Lindholm et al. [12]
+and Garland et al. [13]. Fung and Mann discuss the importance of GPUs in future computer vision and image processing research [15]. Kim et al. implement
+374
+A. Schick and R. Stiefelhagen
+their volumetric reconstruction on the GPU and show a signiﬁcant speed-up
+[5]. Ladikos et al. compare four diﬀerent voxel carving implementations on the
+GPU that are based on octree- and non-octree-versions with diﬀerent levels of
+precomputation [6]. In Section 4, we will compare our results with theirs.
+3
+GPU-Based Voxel Carving
+This section introduces our voxel carving algorithm that computes visual hulls
+even in the presence of static occlusions. The voxel carving runs completely on
+the GPU and is implemented using NVIDIA Cuda [11]. For the remainder of
+this chapter, we assume a static scene that is observed by n calibrated cameras. The silhouette images Sj for camera j are computed using diﬀerence-based
+foreground segmentation and morphological operators.
+3.1
+Problem Description
+We followed a discrete formulation of voxel carving. The voxels are deﬁned by a
+3D grid. For the sake of simplicity, we assume that the grid is cubic with k ∈ N
+entries along each axis resulting in k 3 voxels. In addition, its axes match the
+axes of the world coordinate system. Furthermore, the voxels are assumed to be
+cubes with side length c ∈ R. Thus, the set of voxels is deﬁned by:
+V = {(x, y, z) ∈ R3 |∃k1 , k2 , k3 < k : x = k1 c ∧ y = k2 c ∧ z = k3 c}.
+(1)
+Let Sj ⊆ N0 × N0 be the set of image pixels that are part of the silhouette in
+image j and let pj : V → N0 ×N0 be the projection from voxel space to the image
+plane. The visual hull H ⊆ V is the set of voxels that project onto silhouette
+pixels for every image:
+H = {x ∈ V |∀j : pj (x) ∈ Sj }.
+(2)
+Voxels are volumetric structures. In our work, however, they project onto single
+pixels due to their small size. Therefore, we just project the center of each voxel
+into the image. This approach can be modiﬁed when the volumetric nature must
+be maintained, e.g. in case of a coarser resolution. Then, the corners of the voxels
+are projected into the image and silhouette lookups done on integral images [14].
+Voxel carving starts with a full set of voxels. Voxels that do not satisfy Equation 2 are carved, e.g. removed from H. In this context, Equation 2 can be
+reformulated:
+/ Sj }.
+(3)
+H = V \ {x ∈ V |∃j : pj (x) ∈
+The key for eﬃcient visual hull computation using the power of modern GPUs
+lies in Equation 3 as we will show later.
+Real-Time GPU-Based Voxel Carving with Systematic Occlusion Handling
+3.2
+375
+Static Scene Occluders
+Voxel carving is based on silhouettes extracted by foreground-background segmentation. These segmentation techniques usually learn the background model
+of an empty scene and compute the foreground of new images by comparing
+the diﬀerences. Even though foreground segmentation is very fast and robust, it
+runs into problems when there are static objects in the scene. These objects are
+part of the background and therefore not segmented. This is also true for every
+object behind that occluder. This causes problems for visual hulls that rely on
+the silhouettes. Figure 3 shows that, without occlusion handling, large parts of
+the visual hull are not reconstructed.
+Adding the binary silhouettes of occluders to the silhouette image solves this
+problem in the sense that the occluded parts are reconstructed. But then the
+visual hull also contains a lot of noise, i.e. voxels that could be carved. We are
+interested in the best possible minimal visual hulls.
+Kim et al. do not carve voxels that fall into background pixels for only one
+camera [5], thus relaxing the carving procedure. But this would not work when
+occlusions happen in multiple camera images. Guan et al. add the occluder’s
+binary silhouette if it intersects with the foreground silhouettes [3]. However,
+voxels that project into these silhouettes are not always truly occluded. They
+are only occluded when the 3D position of the object is behind the occluding
+object in the camera view. But binary silhouettes cannot account for this and
+will lead to avoidable noise resulting in a non-minimal visual hull. We will now
+present our solution and prove its correctness.
+We assume that the size and position of static scene occluders is known. Let
+Hunoccl ⊆ V be the visual hull assuming no occluding objects would be present,
+Hoccl the (defective) visual hull in the presence of occlusions, and O ⊆ V the set
+of 3D points occupied by the occluders. The function dj : V → R computes the
+distance of voxel x to camera j. It directly follows that
+Hoccl = Hunoccl \ {x ∈ V |∃j∃y ∈ O : pj (x) = pj (y) ∧ dj (y) < dj (x)}.
+(4)
+Let Mj be the set of voxels that are occluded by static scene objects for
+camera j:
+Mj = {x ∈ V |∃y ∈ O : pj (x) = pj (y) ∧ dj (y) < dj (x)}.
+(5)
+The modiﬁed visual hull is
+H = {x ∈ V |∀j : (pj (x) ∈ Sj ∨ ∃y ∈ Mj : x = y)} \ O.
+(6)
+We will prove now that the visual hull is correct and minimal.
+Proof. Using silhouette images and 3D positions of occluding objects only, the
+modiﬁed visual hull H from Equation 6 is the smallest approximation of Hunoccl
+with Hunoccl ⊆ H.
+We show that Hunoccl ⊆ H. Let x ∈ Hunoccl . If x is not occluded, it contributes
+to every silhouette Sj and is therefore also in H. If x ∈ Hunoccl is occluded in
+376
+A. Schick and R. Stiefelhagen
+view j, it follows from Equation 5 that it is in Mj and, following Equation 6,
+also in H. Thus, Hunoccl ⊆ H.
+Now, let H be not minimal, y ∈ H, and H \ y minimal. From Equation 6
+/ Sj . Assuming no errors in the silhouette segmentation,
+follows that ∃1 j : pj (y) ∈
+this can only happen due to occlusion, e.g. when an object is in front of y
+with respect to view j. But then y ∈ Mj and it is impossible to decide based
+/ Hunoccl . Therefore, we can choose
+on silhouettes alone if y ∈ Hunoccl or y ∈
+y ∈ Hunoccl leading to Hunoccl  H \ y.
+3.3
+GPU Implementation Using Cuda
+After we have introduced our voxel carving algorithm with occlusion handling,
+we will now present our GPU implementation. We assume that the basic concepts
+of GPU programming with NVIDIA Cuda are known [11,12,13].
+In our GPU algorithm, we implement Equations 5 and 6 using additional
+occlusion maps. An occlusion map has the same dimensions as the camera image
+and stores for every pixel the distance of the closest occluding object at that
+pixel to the camera (or inﬁnite in case of no occlusions). This allows us to
+decide if a voxel is truly occluded because the voxel’s distance to the camera can
+be compared to the corresponding distance stored in the occlusion map. Using
+binary silhouette information, this would not be possible.
+Algorithm 1 shows the pseudocode of our kernel that is executed by every
+thread on the GPU. Each voxel can be identiﬁed by a unique id due to the ﬁxed
+grid size (see Section 3.1). Each thread projects one voxel into every camera
+image. Only if the voxel projects into the silhouette or behind an occluding
+object for all camera views, it’s id is inserted into the visual hull result array.
+The design of Algorithm 1 allows using an arbitrary number of camera images.
+Unnecessary computations are avoided by terminating as soon as one projection
+fails. Occlusion map lookups do not cause additional expensive computations
+because the projection was already done for the silhouette image. To allow efﬁcient image lookups, the silhouette images as well as the occlusion maps are
+stored in texture memory; the camera parameters used for the projections reside
+in constant memory space. In addition, the algorithm scales independent of the
+number of occluders because the occlusion map size is constant.
+However, we experienced one major bottleneck. The ids of the uncarved voxels
+are returned to the host using an array. To avoid that multiple parallel threads
+write at the same position into this array, we used atomic operations to increase
+the array index. This leads to a bottleneck if a large number of threads try to
+access the array at the same time.
+We found two additional extensions to be useful: First, to avoid the reconstruction of large areas that are occluded in every view, at least one true silhouette
+hit can be required. Second, to reduce the bottleneck introduced by the use of
+the atomicAdd operator, each thread can check more than one voxel and insert
+the uncarved voxels in one batch into the visual hull vector thus reducing the
+total number of atomic operations.
+Real-Time GPU-Based Voxel Carving with Systematic Occlusion Handling
+377
+Algorithm 1. Voxel Carving Kernel in NVIDIA Cuda Pseudocode
+voxelCarvingKernel(visualHullArray):
+blockId, threadId ← blockIdx.x, threadIdx.x
+voxel ← getVoxel(blockId, threadId)
+FORALL camera views j:
+(x, y) ← projectVoxel(voxel, j)
+voxelT oCamDist ← distanceToCam(voxel, j)
+IF silhouetteHit(x, y, j) OR voxelT oCamDist > occlusionM ask(x, y, j)
+continue
+ELSE
+terminate thread
+add(visualHullArray, voxel)
+Details on the number of voxels, the exact kernel conﬁguration, and runtime
+results are presented in Section 4. There, we will also show that the design of
+this algorithm allows eﬀortless scaling with future graphic cards.
+4
+Results
+After introducing our voxel carving algorithm in Section 3, we will now discuss
+results obtained with it. We evaluated our algorithm in two diﬀerent scenarios. To
+provide a basis for comparison with other algorithms, results on the Middlebury
+dataset [16] are shown in Section 4.1. Results in a multi-camera environment are
+given in Section 4.2.
+We did all experiments on a standard workstation with a 3GHz Intel(R)
+Core(TM) 2 Duo CPU and 4GB of RAM. The graphic chip was an NVIDIA
+GTX280. To show that our algorithm scales very well with diﬀerent graphic
+chips, we also ran experiments on the same workstation but with an NVIDIA
+NVS290 that is signiﬁcantly weaker. All components are oﬀ-the-shelf hardware.
+4.1
+Evaluation on the Middlebury Dataset
+The Middlebury dataset provides data to compare volumetric reconstruction
+algorithms and was introduced by Seitz et al. [16]. It consists of two objects –
+the ”Temple of the Dioskouroi” and a stegosaurus – that are recorded in three
+diﬀerent camera setups (16, 47, and 312 views for the temple; 16, 48, and 363
+for the dino). Results of various algorithms can be found on their page [17]. We
+did not use occlusion maps in this evaluation because no occlusions occured.
+We conﬁgured our kernel to use 512 threads per block; each thread checked 64
+voxels.
+Figure 1 shows qualitative results. Fine details were preserved and the volumetric structure was well reconstructed. However, due to the nature of voxel
+carving, concavities are not reconstructed.
+Table 1 shows computation times for both objects with two diﬀerent camera
+conﬁgurations each. We used two diﬀerent graphic chips, the NVIDIA GTX280
+378
+A. Schick and R. Stiefelhagen
+Fig. 1. Results on the Middlebury dataset. The images show examples from the Middlebury dataset [17] and our voxel-based visual hulls. Even with a very coarse grid
+resolution (643 ) many details were preserved.
+Table 1. Runtimes on Middlebury dataset with NVIDIA GTX280 and NVIDIA
+NVS290 graphic chips compared to results provided by Ladikos et el. [6]. Note that [6]
+used 4 PCs with dedicated NVIDIA 8800 GTX graphic chips while our algorithm runs
+on only one PC using an NVIDIA GTX280.
+Data
+Cams Total Visual Runtime Runtime Ladikos
+Ladikos
+Grid Hull
+GTX280 NVS290 et al. [6] et al. [6]
+Voxels Voxels [ms]
+[ms]
+GPU2,
+GPU2 OT,
+PCs)
+(4
+PCs) (4
+[ms]
+[ms]
+dinoSparseRing 16
+dinoSparseRing 16
+48
+dinoRing
+48
+dinoRing
+templeSparseRing 16
+templeSparseRing 16
+47
+templeRing
+47
+templeRing
+1283
+2563
+1283
+2563
+1283
+2563
+1283
+2563
+823
+1653
+793
+1593
+843
+1703
+833
+1663
+72
+511
+171
+1214
+66
+486
+151
+1036
+1056
+2933
+935
+2495
+-
+417.79
+3033.89
+372.95
+3022.10
+99.89
+296.71
+170.91
+516.80
+with 30 multiprocessors and the NVIDIA NVS290 with only 2 multiprocessors.
+In Table 1, we also compare our direct voxel carving to the work of Ladikos et
+al. [6] which is one of the fastest GPU-based voxel carving approaches to the
+best of our knowledge. Direct comparison is diﬃcult because they use four PCs
+with dedicated graphic cards simultaneously. However, our approach is faster
+than their direct algorithm (GPU2 ). Taking into account that they were using 4
+PCs, our runtime results are comparable to their highly optimized octree-based
+voxel carving (GPU2 OT ).
+Table 1 also shows runtimes for a signiﬁcantly weaker graphic chip. The
+GTX280 constructs the visual hull approximately 15 times faster than the
+NVS290 without additional modiﬁcations; this speedup was expected due to
+hardware speciﬁcations. We follow that this will be true for future graphic chips
+as well allowing even faster and more detailed reconstructions without additional
+eﬀort. This implies that researchers can rely on available and future hardware
+to produce reliable high-quality visual hulls.
+Real-Time GPU-Based Voxel Carving with Systematic Occlusion Handling
+379
+Fig. 2. Camera images and resulting visual hulls for multiple people rendered from an
+unobserved viewpoint. The voxel size is 1.8cm3 and the grid resolution 2563 . Note that
+the resolution of the people in the camera images is relatively small compared to the
+whole room which introduces additional diﬃculties.
+Table 2. Runtimes in a multi-camera environment with varying number of people and
+multiple grid resolutions. All experiments were carried out on an NVIDIA GTX280
+graphic chip.
+Data
+1 person
+1 person
+3 people
+3 people
+4.2
+Cameras Total Grid Voxels Visual Hull Voxels Runtime GTX280 [ms]
+4
+4
+4
+4
+1283
+2563
+1283
+2563
+193
+373
+253
+503
+17
+43
+17
+45
+Experiments in a Multi-camera Environment
+We also evaluated our voxel carving algorithm in a multi-camera environment.
+The room is approximately 6 × 9m and four calibarated AXIS 210 network
+cameras [18] positioned in the corners observe the scene. They capture 640 ×
+480px RGB images with frame rates up to 30f ps. We used 512 threads per block
+and one thread per voxel. In our evaluation, we used oﬄine video data to avoid
+being limited by the cameras’ capturing speed.
+Figure 2 shows the visual hulls of one and multiple people in our multi-camera
+environment from an unobserved viewpoint. The voxels are carved according to
+Section 3.3. The images show results obtained at a grid resolution of 2563 and
+the voxels’ side length is 1.8cm. The visual hulls are detailed enough to provide
+a solid basis for further processing, e.g. for articulated body tracking.
+Table 2 shows that the algorithm runs in real-time with 20 − 50f ps depending
+on the resolution. This leaves enough time for additional components. Comparing
+Table 1 to Table 2 shows that the runtimes diﬀer signiﬁcantly for the same grid
+resolution but are comparable within the same setting. The reason for this is the
+number of voxels remaining after carving. If a voxel gets carved the threads are
+terminated and no other image is checked, thus less computation is necessary.
+In addition, every non-carved voxel must be returned to the CPU-based host
+program. If many voxels are returned, this leads to a signiﬁcant bottleneck as
+was discussed in Section 3.3.
+We will now present our results in case of severe occlusions. Figure 3 shows
+one person sitting at a table. The legs are only visible in two out of four cameras.
+380
+A. Schick and R. Stiefelhagen
+Fig. 3. Visual hull computation in the presence of severe occlusions. The legs are
+occluded in two of the four camera views. Without occlusion reasoning, the voxels
+under the table are carved. Our approach computes the best possible minimal visual
+hull even in the presence of occlusions. The resolution of the person is very small due
+to the size of the room. However, our approach even works under these conditions. To
+avoid large blocks of uncarved voxels under the table that are occluded in all views,
+we used the extension described in Section 3.3.
+Without occlusion handling, the visual hull has huge defects. With our proposed
+occlusion maps, however, we can model the exact position of the table and can
+include this information in the voxel carving process. This allows to reason about
+voxels under the table from the two occluded camera views resulting in a visual
+hull that includes the occluded legs. Even though noise is still present, the visual
+hull is the best possible minimal visual hull obtainable.
+5
+Conclusion
+We presented a voxel carving algorithm for computing visual hulls that is robust
+to severe occlusions in multiple camera views. We proved that the visual hulls obtained under occlusions are correct and that they are minimal which is important
+to reduce noise as much as possible while maintaining valuable information about
+foreground objects. To the best of our knowledge, this was not yet addressed systematically for real-time applications. We mapped the voxel carving together with
+the occlusion handling to a parallel GPU-implementation that is an extension to
+the general voxel carving approach. Our GPU-implementation runs in real-time
+with up to 50f ps for multiple people in a multi-camera environment. In addition,
+we showed that our algorithm scales very well with diﬀerent graphic chips. Therefore, we assume it will also scale with future GPU technologies thus allowing even
+faster computations and higher resolutions without additional eﬀort.
+Acknowledgements. This work was supported by the FhG Internal Programs
+under Grant No. 692026. We also thank the reviewers for their valuable comments that helped to improve this paper.
+References
+1. Laurentini, A.: The visual hull concept for silhouette-based image understanding. IEEE Transactions on Pattern Analysis and Machine Intelligence 16, 150–162
+(1994)
+Real-Time GPU-Based Voxel Carving with Systematic Occlusion Handling
+381
+2. Li, M., Magnor, M., Seidel, H.-P.: Hardware-accelerated visual hull reconstruction
+and rendering. Graphics Interface, 65–71 (2003)
+3. Guan, L., Sinha, S., Franco, J.-S., Pollefeys, M.: Visual Hull Construction in the
+Presence of Partial Occlusion. In: Proceedings of the Third International Symposium on 3D Data Processing, Visualization, and Transmission, pp. 413–420 (2006)
+4. Guan, L., Franco, J.-S., Pollefeys, M.: 3D Occlusion Inference from Silhouette Cues.
+In: IEEE Conference on Computer Vision and Pattern Recognition, pp. 1–8 (2007)
+5. Kim, H., Sakamoto, R., Kitahara, I., Orman, N., Toriyama, T., Kogure, K.: Compensated Visual Hull for Defective Segmentation and Occlusion. In: 17th International Conference on Artiﬁcial Reality and Telexistence, pp. 210–217 (2007)
+6. Ladikos, A., Benhimane, S., Navab, N.: Eﬃcient visual hull computation for realtime 3D reconstruction using CUDA. In: IEEE Computer Society Conference on
+Computer Vision and Pattern Recognition Workshops, pp. 1–8 (2008)
+7. Luck, J., Small, D., Little, C.Q.: Real-Time Tracking of Articulated Human Models
+Using a 3D Shape-from-Silhouette Method. In: Proceedings of the International
+Workshop on Robot Vision, pp. 19–26 (2001)
+8. Kehl, R., Bray, M., Van Gool, L.: Full body tracking from multiple views using
+stochastic sampling. In: IEEE Computer Society Conference on Computer Vision
+and Pattern Recognition, vol. 2, pp. 129–136 (2005)
+9. Caillette, L., Howard, T.: Real-Time Markerless Human Body Tracking with MultiView 3-D Voxel Reconstruction. In: Proc. ISMAR, pp. 597–606 (2004)
+10. Erol, A., Bebis, G., Boyle, R.D., Nicolescu, M.: Visual Hull Construction Using
+Adaptive Sampling. In: Proceedings of the Seventh IEEE Workshops on Application of Computer Vision, vol. 1, pp. 234–241 (2005)
+11. NVIDIA Cuda (March 2009), http://www.nvidia.com/cuda
+12. Lindholm, E., Nickolls, J., Oberman, S., Montrym, J.: NVIDIA Tesla: A Uniﬁed
+Graphics and Computing Architecture. IEEE Micro 28, 39–55 (2008)
+13. Garland, M., Le Grand, S., Nickolls, J., Anderson, J., Hardwick, J., Morton, S.,
+Phillips, E., Zhang, Y., Volkov, V.: Parallel Computing Experiences with CUDA.
+IEEE Micro 28, 13–27 (2008)
+14. Viola, P., Jones, M.: Rapid object detection using a boosted cascade of simple
+features. In: Proceedings of the 2001 IEEE Computer Society Conference on Computer Vision and Pattern Recognition, vol. 1, pp. 511–518 (2001)
+15. Fung, J., Mann, S.: Using graphics devices in reverse: GPU-based Image Processing
+and Computer Vision. In: IEEE International Conference on Multimedia and Expo,
+pp. 9–12 (2008)
+16. Seitz, S.M., Curless, B., Diebel, J., Scharstein, D., Szeliski, R.: A Comparison and
+Evaluation of Multi-View Stereo Reconstruction Algorithms. In: Proceedings of the
+IEEE Computer Society Conference on Computer Vision and Pattern Recognition,
+pp. 519–528 (2006)
+17. Middlebury data sets (March 2009),
+http://vision.middlebury.edu/mview/data/
+18. AXIS Communications (March 2009), http://www.axis.com/

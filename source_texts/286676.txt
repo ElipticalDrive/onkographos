@@ -1,0 +1,373 @@
+Experimenting with scientific visualization in wgpu for portability (Rust, Python, and web) - Volume rendering: per-mode visuals (Direct/Additive/MIP/minIP/Average/Iso) by aganders3 · Pull Request #6 · aganders3/bovista
+
+Volume rendering: per-mode visuals (Direct/Additive/MIP/minIP/Average/Iso) by aganders3 · Pull Request #6 · aganders3/bovista · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+aganders3
+commented
+Jun 10, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+Replaces PR #1. The original branch was 5 months stale; cherry-pick conflicted on every overlapping file, so this is a clean reimplementation of the same design on top of current main.
+The single `VolumeVisual` becomes `VolumeCore` + six concrete visual types, one per rendering algorithm. Each type's API exposes only the parameters that apply to its mode — Direct/Additive get density, MIP gets attenuation, Iso gets threshold, etc. — rather than one struct with mode-irrelevant setters.
+Type
+Algorithm
+`DirectVolume`
+Front-to-back alpha compositing (Beer-Lambert). Also hosts existing debug modes (LOD tint / atlas direct / step heatmap).
+`AdditiveVolume`
+Additive accumulation, no occlusion. Useful for multi-channel composition.
+`MipVolume`
+Maximum Intensity Projection. `set_attenuation(>0)` switches to vispy-style attenuated MIP.
+`MinipVolume`
+Minimum Intensity Projection.
+`AverageVolume`
+Mean intensity along the ray.
+`IsosurfaceVolume`
+First-hit isosurface with Phong shading + sub-voxel bisection against a smooth manual-trilinear field.
+Shader
+Six fragment entry points (`fs_translucent`, `fs_additive`, `fs_mip`, `fs_minip`, `fs_average`, `fs_iso`) sharing the setup_ray / compute_advance / contrast_normalise helpers. Three notable details:
+Attenuated MIP follows vispy: each step's attenuation is driven by accumulated contrast-normalised density, not raw ray distance. So empty regions don't burn through the attenuation budget. Includes a contrast-ceiling early termination — once `maxval > contrast_max * scale`, no future sample can do better.
+Isosurface bisection uses manual trilinear (8 page-table walks per sample) because the VT atlas sampler stays Nearest. Hardware linear filtering would leak between tile slots since there are no border guards yet. The cost is only paid for the ~10 samples inside the bisection + gradient stencil, not the coarse ray-march.
+Gradient stencil for the iso normal is sized to the resident LOD's voxel — collapsing it to a fixed step would zero the gradient inside coarse voxels.
+Page-table encoding unchanged
+Stays at `(resident:1, atlas_id:2, t:13, slot:16)` — multi-atlas friendly, no encoding changes from PR #5.
+API surface
+Rust: `DirectVolume::new(…)` / `AdditiveVolume::new(…)` / etc. with identical signatures to the old `VolumeVisual::new`. `VolumeVisual` itself is gone.
+Python: a local `py_volume_class!` macro generates `PyDirectVolume` / `PyAdditiveVolume` / `PyMipVolume` / `PyMinipVolume` / `PyAverageVolume` / `PyIsosurfaceVolume`. Common methods (set_contrast, set_colormap, set_relative_step_size, set_lod_bias, set_chunk_data_u16, wanted_keys, get_stats) are in the macro body; mode-specific ones (set_density_scale, set_attenuation, set_iso_threshold, set_debug_mode…) pass through the `extra: { … }` arm.
+WASM: `js_volume_class!` does the same shape. `JsViewer` gains six `addX_Volume` methods, one per type, so each visual reference is type-checked.
+Examples
+`volume_renderer/python` and `volume_renderer/web` pick `DirectVolume` / `JsDirectVolume` and document the other five in a code comment. A full Mode-dropdown UI is straightforward to add on top but adds ~380 LOC of UI plumbing — left as a follow-up; orbit_stream already exercises the Direct path end-to-end and the others are wired through the bindings and ready to call.
+`orbit_stream` switches `VolumeVisual::new` → `DirectVolume::new` (one-line change).
+Test plan
+`orbit_stream` still renders the ZSNS001 OME-Zarr on Linux GL (NVIDIA L40) — verifies DirectVolume regression-free
+Each of the six modes produces a sensible image on Metal (Mac) with a synthetic volume
+Python `volume_renderer` example still loads and renders
+WASM `volume_renderer` example still loads and renders
+HPC L40 GL: ray-marching helpers work on the core profile (no naga regression on the multi-entry-point shader)
+Closes
+Closes #1 (replaces with this reimplementation against current main).
+🤖 Generated with Claude Code
+aganders3
+added a commit
+that referenced
+this pull request
+Jun 10, 2026
+orbit_stream: --mode flag for picking the volume render mode at startup
+…
+1a56922
+```
+--mode direct|additive|mip|minip|average|iso picks which of the six
+typed volume visuals orbit_stream constructs. Default is direct (same
+behaviour as before this commit).
+
+--attenuation N applies at startup to MIP mode (default 0 = plain MIP).
+--iso-threshold N applies at startup to Iso mode (default 0.5).
+
+The implementation wraps the six types in a small local Volume enum
+with match-dispatched setters. Common methods (contrast / lod_bias /
+prefetch / t-controls / stats) work uniformly across modes; the
+density slider in the HTML control page is a no-op on MIP/minIP/
+Average/Iso (those modes don't consume per-step density).
+
+Runtime mode-switching without rebuilding the atlas is a follow-up —
+it needs the VolumeBackend split discussed in PR #6's notes.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+aganders3
+mentioned this pull request
+Jun 10, 2026
+Volume rendering: per-mode visuals (Direct/Additive/MIP/minIP/Average/Iso)
+#1
+Closed
+5 tasks
+aganders3
+and others
+added 2 commits
+June 10, 2026 15:18
+Volume: per-mode visuals (Direct/Additive/MIP/minIP/Average/Iso)
+…
+7a55f1e
+```
+Replace the single VolumeVisual with VolumeCore + six concrete visual
+types, one per rendering algorithm. Each type only exposes the params
+that apply to its mode (density on Direct/Additive, attenuation on MIP,
+threshold on Iso, etc.) instead of one struct with mode-irrelevant
+fields.
+
+Shader:
+- Six fragment entry points sharing setup_ray + compute_advance +
+  contrast_normalise helpers.
+- fs_translucent hosts the existing DVR + debug modes (1/2/3).
+- fs_mip is attenuated MIP per vispy's algorithm: density-weighted
+  ray accumulation (not raw distance) with a contrast-ceiling early
+  termination so empty space doesn't burn the attenuation budget.
+- fs_iso bisects against a smooth manual-trilinear field (the atlas
+  sampler stays Nearest because the VT doesn't have border guards
+  yet); gradient stencil is sized to the resident LOD's voxel.
+
+API:
+- VolumeUniforms gains iso_threshold + attenuation fields (with pads).
+- src/visuals/mod.rs and src/lib.rs export DirectVolume / AdditiveVolume
+  / MipVolume / MinipVolume / AverageVolume / IsosurfaceVolume (the
+  VolumeVisual name is gone).
+- orbit_stream switches to DirectVolume.
+
+Bindings:
+- src/python.rs uses a local py_volume_class! macro to generate the six
+  PyClass wrappers with shared pull-based loader plumbing.
+- src/wasm.rs mirrors with js_volume_class!. JsViewer gains six addX_Volume
+  methods so each type has its own type-checked entry point.
+
+Examples:
+- volume_renderer Python + JS pick the Direct mode and document the
+  others in a comment; a full Mode dropdown UI is left to a follow-up.
+
+Original commit being revived: 514ae8c on phase-1-volume-modes
+(never merged). Reimplemented on top of post-orbit_stream main rather
+than rebased — the file overlap was too large to merge cleanly.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+orbit_stream: --mode flag for picking the volume render mode at startup
+…
+8d9bd0f
+```
+--mode direct|additive|mip|minip|average|iso picks which of the six
+typed volume visuals orbit_stream constructs. Default is direct (same
+behaviour as before this commit).
+
+--attenuation N applies at startup to MIP mode (default 0 = plain MIP).
+--iso-threshold N applies at startup to Iso mode (default 0.5).
+
+The implementation wraps the six types in a small local Volume enum
+with match-dispatched setters. Common methods (contrast / lod_bias /
+prefetch / t-controls / stats) work uniformly across modes; the
+density slider in the HTML control page is a no-op on MIP/minIP/
+Average/Iso (those modes don't consume per-step density).
+
+Runtime mode-switching without rebuilding the atlas is a follow-up —
+it needs the VolumeBackend split discussed in PR #6's notes.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+aganders3
+force-pushed
+the
+volume-modes-revival
+branch
+from
+1a56922 to
+8d9bd0f
+Compare
+June 10, 2026 19:19
+aganders3
+and others
+added 8 commits
+June 10, 2026 15:50
+fs_iso: drop manual trilinear, halve bisection iterations
+…
+1cd862b
+```
+Both the bisection refinement and the gradient stencil were sampling
+the manual trilinear field — 8 page-table walks per sample, 11 samples
+per hit pixel, ~88 walks before lighting. Visually nice in theory but
+the orbit-stream's typical viewing distance makes the smoothness
+indistinguishable from Nearest, while burning a lot of GPU time.
+
+Replace `sample_trilinear_adjusted` calls in fs_iso with the cheap
+`sample_adjusted` (= sample_vvt + contrast_normalise + 0 fallback for
+unresident regions). The gradient stencil straddles a full voxel so
++h/-h always land in different voxels — Nearest gives a well-defined
+gradient. The bisection now converges to the voxel-boundary crossing
+rather than the smooth iso-crossing; at 3 iterations on a step_size = 1
+LOD-0-voxel coarse step that's 1/8 of a voxel of t-precision, below
+any visible pixel at orbit distance.
+
+Bisection iterations 5 → 3.
+
+Net per hit-pixel: 88 page-table walks → 9. ~10× faster on iso pixels.
+The manual `sample_trilinear_adjusted` function is now unused and
+deleted; `lod_voxel_size_uv` stays (still drives the stencil size).
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+fs_iso: replace 6-tap central difference with 3³ Sobel-Feldman gradient
+…
+9f0380b
+```
+The 6-tap stencil produces visible noise/faceting on flat iso surfaces
+when sampled at Nearest — each axis sample is a single voxel's value,
+so the gradient direction snaps between voxel boundaries.
+
+The 3³ Sobel kernel weights the 26 neighbours of the surface voxel:
+on-axis (4), face-adjacent (2), corner (1). Smooths over a 3-voxel
+neighbourhood; the directional sum is much closer to the true gradient
+than two-sample differences.
+
+Cost: 26 page-table walks per hit pixel for the gradient (vs 6 before),
+plus 3 for bisection = 29 total. Still ~3× cheaper than the manual-
+trilinear version (88), and the lighting is dramatically smoother.
+
+Kernel is ported from napari's `calculateGradient` GLSL (the
+"smooth" gradient path). Border/background-detection fixes from
+napari's version are not included — sample_adjusted's natural 0 for
+unresident regions gives reasonable behaviour at the volume boundary.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+examples: mode dropdown in Python + JS volume_renderer
+…
+ea7942f
+```
+Both viewers gain a Mode selector that switches between the six volume
+visuals (Direct / Additive / MIP / minIP / Average / Isosurface) and
+shows only the sliders that apply to the active mode.
+
+JS:
+- index.html: <select id="render-mode"> in the header; new hidden
+  control-groups for attenuation (MIP) and iso-threshold (Iso).
+- main.js: VOLUME_MODES table maps each mode → (ctor, viewer.addX_,
+  capability flags). createVisual() picks the right wasm class and
+  addX_Volume() method based on currentMode. applyModeCaps() shows
+  only the relevant sliders + disables debug toggles when the active
+  mode doesn't honour them. Density / debug-mode calls are now guarded
+  with feature-detection (`volumeVisual.setX && …`) so a mode that
+  doesn't expose the method is a no-op rather than a runtime throw.
+
+Python:
+- QComboBox of the six modes alongside the existing debug combo.
+- attenuation slider + iso-threshold slider in a new row, visible only
+  for MIP and Iso respectively.
+- _switch_mode triggers a load_zarr() to rebuild the visual through the
+  same setup_scene path; setup_scene picks the ctor from the active
+  mode's entry in self._modes.
+- _update_density / _update_debug guard with hasattr(...) so they no-op
+  on modes that don't carry density / debug-mode.
+- setup_scene's `set_density_scale(base_density)` guarded the same way.
+
+No bovista-side changes — the existing per-type bindings + macros
+already expose the right method surface; the examples just learn to
+ask for the right one.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+fs_iso: stop double-negating the Sobel normal
+…
+6cc0b27
+```
+napari's sobel_gradient uses `val * -float(i) * w`, which produces the
+gradient pointing FROM HIGH VALUES TO LOW (−∇f, downhill). For an iso
+surface enclosing a high-density interior that's already the outward-
+pointing normal direction.
+
+The previous fs_iso had `normal = -grad / glen` — which was correct
+for the older 6-tap `f(+h) - f(-h)` stencil (= +∇f, uphill) but
+double-negated when paired with the napari Sobel (G is already −∇f,
+so −G points UPHILL = INTO the surface = away from the camera).
+Result: Phong's `max(dot(normal, light), 0)` clamped to 0 nearly
+everywhere → only ambient, surface looked flat / unlit.
+
+Drop the `-` on normal. The Sobel result is used directly as the
+outward normal.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+fs_iso: surface colour is white, not the colormap at iso_threshold
+…
+b782608
+```
+The previous code sampled the colormap at vol.iso_threshold to tint the
+surface, which made the iso appearance vary as the user adjusted the
+threshold slider — confusing UX, since the threshold is meant to pick
+WHICH iso surface to render, not what colour to paint it.
+
+Fixed white base with the existing ambient/diffuse/specular weights.
+Surface shape changes with threshold, surface colour does not.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+Drop AdditiveVolume mode
+…
+05af31e
+```
+Additive accumulation without occlusion is essentially a saturated
+"see everything overlaid" mode that MIP does more usefully (max
+intensity wins, no washing out from accumulation), and bovista doesn't
+have the multi-channel-compositing use case where Additive would shine
+(stacking N additive layers with different colormaps).
+
+Surface area removed:
+- src/shaders/volume_raymarch.wgsl: fs_additive entry point.
+- src/visuals/volume.rs: VolumeRenderMode::Additive variant +
+  AdditiveVolume struct + impls + macro invocations.
+- src/visuals/mod.rs, src/lib.rs: drop from re-exports.
+- src/python.rs: PyAdditiveVolume, add() dispatch arm, add_class.
+- src/wasm.rs: JsAdditiveVolume, addAdditiveVolume, import.
+- examples/orbit_stream: VolumeMode::Additive variant, dispatch arms,
+  try_set_density_scale collapses to "Direct only".
+- examples volume_renderer (python/web): mode dropdown entry,
+  has_density flag, density now Direct-only.
+
+No behavioural change to the remaining five modes.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+volume_renderer python: viewer absorbs vertical resize, not controls
+…
+ea5609d
+```
+ViewerWidget defaulted to QSizePolicy.Preferred which doesn't actively
+claim extra space, so resizing the QMainWindow vertically would either
+no-op or stretch the control rows weirdly.
+
+Set the viewer's policy to Expanding/Expanding, drop the minimum-size
+floor to 320×240 (was 800×600 — prevented small windows), and pass
+stretch=1 to addWidget so the QVBoxLayout solver gives all extra
+vertical space to the canvas. Control rows keep their natural height.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+slice_viewer python: viewer absorbs vertical resize too
+…
+d6c11b8
+```
+Same fix as the volume_renderer example: switch ViewerWidget to
+Expanding size policy, drop minimum to 320×240, give the canvas
+stretch=1 in the QVBoxLayout so vertical resize grows the viewer
+rather than the control rows.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+aganders3
+merged commit d69dbc3
+into
+main
+Jun 11, 2026
+aganders3
+deleted the
+volume-modes-revival
+branch
+June 11, 2026 14:40
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

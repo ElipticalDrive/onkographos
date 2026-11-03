@@ -1,0 +1,160 @@
+--- v001.md
++++ v002.md
+@@ -28,12 +28,12 @@
+     *   Calculate `scale = 1 << (max_depth - depth)` and grid coordinates `gx, gy, gz` [S1, unofficial].
+     *   Retrieve corner values for the 8 corners of the cell from the cache, storing in `corner_values[8]` where `corner_values[i] = func(corner_i) - iso_value` [S1, unofficial].
+-    *   For each axis group `axis` in `0..3` and each edge index `edge_in_group` in `0..4`:
++    *   For each axis group `axis` in `0..2` and each edge index `edge_in_group` in `0..3`:
+         *   Calculate `edge_idx = axis * 4 + edge_in_group` [S1, unofficial].
+         *   Get corner indices `(c0, c1)` from `EDGE_CORNERS[edge_idx]` [S1, unofficial].
+-        *   Compute `val0 = corner_values[c0]` and `val1 = corner_values[c1]` [S1, unofficial].
++        *   Compute `val0 = corner_values[c0] - iso_value` and `val1 = corner_values[c1] - iso_value` [S1, unofficial].
+         *   If `(val0 < 0.0) == (val1 < 0.0)`, continue (no sign change on this edge) [S1, unofficial].
+         *   Calculate edge offset bits: `a1_off = edge_in_group & 1`, `a2_off = (edge_in_group >> 1) & 1` [S1, unofficial].
+         *   Identify the 4 sharing cells for this edge. Let `(a1, a2)` be the non-axis dimensions for this `axis` from `NON_AXIS_DIMS[axis]`. Let `cell_coords = [cx, cy, cz]` [S1, unofficial].
+-        *   Iterate `da1` in `0..2` and `da2` in `0..2`:
++        *   Iterate `da1` in `0..1` and `da2` in `0..1`:
+             *   Calculate `na1 = cell_coords[a1] + a1_off` and `na2 = cell_coords[a2] + a2_off` [S1, unofficial].
+             *   If `na1 < da1` or `na2 < da2`, skip (boundary check) [S1, unofficial].
+@@ -56,26 +56,20 @@
+ 
+ ```python
+-def ensure_edge_completeness(octree, cubic_bounds, min_depth, max_depth, iso_value, func, cache):
++def ensure_edge_completeness(octree, cubic_bounds, min_depth, max_depth, iso_value, func, cache, gradients_provided=False):
+     """
+     Ensures all edges with sign changes in the adaptive octree have complete 4-cell neighborhoods.
+     """
+-    # Constants
++    total_evals = 0
+     CANONICAL_EDGES = [0, 4, 8]
+     NON_AXIS_DIMS = [(1, 2), (0, 2), (0, 1)]
+     ALL_EDGES_BY_AXIS = [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11]]
+-    
+-    # Edge-to-corner lookup table (12 edges, 2 corners each)
+-    # Indices: 0-3 (X-axis), 4-7 (Y-axis), 8-11 (Z-axis)
+-    # Corner indexing: bit 0=X, bit 1=Y, bit 2=Z (0=min, 1=max)
+     EDGE_CORNERS = [
+-        (0, 1), (2, 3), (4, 5), (6, 7),  # X-axis edges
+-        (0, 2), (1, 3), (4, 6), (5, 7),  # Y-axis edges
+-        (0, 4), (1, 5), (2, 6), (3, 7),  # Z-axis edges
++        (0, 1), (2, 3), (4, 5), (6, 7),
++        (0, 2), (1, 3), (4, 6), (5, 7),
++        (0, 4), (1, 5), (2, 6), (3, 7),
+     ]
+-
+-    total_evals = 0
++    max_coord = cubic_bounds.size / (1 << max_depth) # Grid dimension limit [G]
+     
+     while True:
+-        # 1. Collect surface leaves
+         leaf_set = set()
+         for leaf in octree.get_surface_leaves():
+@@ -88,13 +82,10 @@
+         seen = set()
+         
+-        # 2. Identify neighbors for subdivision
+         for (cx, cy, cz, depth) in leaf_set:
+             scale = 1 << (max_depth - depth)
+-            # Grid coordinates at max_depth scale
+             gx = cx * scale
+             gy = cy * scale
+             gz = cz * scale
+             
+-            # Retrieve corner values
+             corner_values = [0.0] * 8
+             for i in range(8):
+@@ -103,25 +94,19 @@
+                 corner_values[i] = val
+             
+-            # Check all 12 edges
+             for axis in range(3):
+-                edges_in_group = ALL_EDGES_BY_AXIS[axis]
+                 a1, a2 = NON_AXIS_DIMS[axis]
+-                
+                 for edge_in_group in range(4):
+                     edge_idx = axis * 4 + edge_in_group
+                     c0, c1 = EDGE_CORNERS[edge_idx]
+                     
+-                    val0 = corner_values[c0]
+-                    val1 = corner_values[c1]
+-                    
+-                    # No sign change
++                    val0 = corner_values[c0] - iso_value
++                    val1 = corner_values[c1] - iso_value
++                    
+                     if (val0 < 0.0) == (val1 < 0.0):
+                         continue
+                     
+-                    # Edge offset bits
+                     a1_off = edge_in_group & 1
+                     a2_off = (edge_in_group >> 1) & 1
+                     
+-                    # Identify 4 sharing cells
+                     cell_coords = [cx, cy, cz]
+                     other_coord = cell_coords[3 - a1 - a2]
+@@ -132,5 +117,4 @@
+                             na2 = cell_coords[a2] + a2_off
+                             
+-                            # Boundary checks
+                             if na1 < da1 or na2 < da2:
+                                 continue
+@@ -139,6 +123,4 @@
+                             ca2 = na2 - da2
+                             
+-                            # Max coordinate check (assuming max_coord is derived from bounds)
+-                            # Not given in sources, assumed to be based on grid size
+                             if ca1 >= max_coord or ca2 >= max_coord:
+                                 continue
+@@ -146,15 +128,11 @@
+                             sharing_cell = (ca1, ca2, other_coord)
+                             
+-                            # Skip current cell
+                             if sharing_cell == (cx, cy, cz):
+                                 continue
+                             
+-                            # Check if neighbor exists at same depth
+-                            if not find_surface_neighbor_same_depth(leaf_set, sharing_cell[0], sharing_cell[1], sharing_cell[2], depth):
+-                                # Check if neighbor is coarser
++                            if sharing_cell not in leaf_set:
+                                 actual_depth = octree.get_depth(sharing_cell)
+                                 if actual_depth < depth and not octree.is_branch(sharing_cell):
+                                     s = 1 << (depth - actual_depth)
+-                                    # Normalize coordinates to coarser grid
+                                     nx = sharing_cell[0] // s
+                                     ny = sharing_cell[1] // s
+@@ -170,22 +148,19 @@
+             break
+         
+-        # 3. Collect and evaluate new points
+         new_points = []
+         for (nx, ny, nz) in cells_to_subdivide:
+             target = target_depths[(nx, ny, nz, octree.get_depth((nx, ny, nz)))]
+-            # Collect corners needed from current depth to target depth
++            # Gather grid positions and world coordinates for all corners needed from current depth to target depth [G]
+             corners = collect_deep_corners(octree, nx, ny, nz, target, cubic_bounds)
+             new_points.extend(corners)
+         
+         if new_points:
+-            # Evaluate function
+-            results = bridge.batch_evaluate(func, new_points)
++            results = [func(pt) for pt in new_points]
+             total_evals += len(new_points)
+             
+-            # Estimate gradients if not provided
+             if not gradients_provided:
+-                grads = bridge.estimate_gradients_fd(new_points, results)
++                # Estimate gradients via finite differences [G]
++                grads = estimate_gradients_fd(new_points, results)
+                 total_evals += len(new_points) * 6
+-                # Insert into cache
+                 for i, pt in enumerate(new_points):
+                     cache.insert(pt, results[i], grads[i])
+@@ -194,7 +169,7 @@
+                     cache.insert(pt, results[i])
+         
+-        # 4. Subdivide cells
+         for (nx, ny, nz) in cells_to_subdivide:
+             target = target_depths[(nx, ny, nz, octree.get_depth((nx, ny, nz)))]
++            # Recursively create Branch nodes and leaves down to target depth [G]
+             subdivide_deep(octree, cache, nx, ny, nz, target, max_depth)
+             

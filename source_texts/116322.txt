@@ -1,0 +1,2729 @@
+C3: High-performance and low-complexity neural compression
+from a single image or video
+*Equal contribution
+Corresponding authors: {hyunjikk, msbauer, edupont}@google.com
+Abstract
+Most neural compression models are trained on large
+datasets of images or videos in order to generalize to unseen data. Such generalization typically requires large and
+expressive architectures with a high decoding complexity.
+Here we introduce C3, a neural compression method with
+strong rate-distortion (RD) performance that instead overfits
+a small model to each image or video separately. The resulting decoding complexity of C3 can be an order of magnitude
+lower than neural baselines with similar RD performance.
+C3 builds on COOL-CHIC (Ladune et al. [43]) and makes
+several simple and effective improvements for images. We
+further develop new methodology to apply C3 to videos. On
+the CLIC2020 image benchmark, we match the RD performance of VTM, the reference implementation of the H.266
+codec, with less than 3k MACs/pixel for decoding. On the
+UVG video benchmark, we match the RD performance of
+the Video Compression Transformer (Mentzer et al. [59]),
+a well-established neural video codec, with less than 5k
+MACs/pixel for decoding.
+1. Introduction
+Most neural compression models are based on autoencoders
+[5, 78], with an encoder mapping an image to a quantized
+latent vector and a decoder mapping the latent vector back
+to an approximate reconstruction of the image. To be practically useful as codecs, these models must generalize, i.e.,
+the decoder should be able to approximately reconstruct any
+natural image. Such a decoding function is likely to be complex and expensive to compute. Indeed, while most neural
+codecs enjoy very strong rate-distortion (RD) performance
+[16, 31, 38], their decoding complexity can make them impractical for many use cases, particularly when hardware
+is constrained, e.g., on mobile devices [45, 82]. As a reJRS is now at Harvard University.
+Detailed author contributions are at the end of the paper.
+BD-rate vs VTM in % (↓)
+arXiv:2312.02753v1 [eess.IV] 5 Dec 2023
+Hyunjik Kim*, Matthias Bauer*, Lucas Theis, Jonathan Richard Schwarz, Emilien Dupont*
+Google DeepMind
+COOL-CHIC
+40
+COOL-CHICv2
+BMS
+20
+C3 (Ours)
+0
+EVC-S
+C3 adapt.
+(Ours)
+Better
+103
+CST
+EVC-M
+EVC-L
+MLIC
+104
+105
+MLIC+
+106
+Decoding complexity in MACs/pixel (↓)
+Figure 1. Rate-distortion performance (BD-rate) vs. decoding
+complexity on the Kodak image benchmark. Our method, C3,
+achieves a better trade-off than existing neural codecs.
+sult, designing low complexity codecs that offer strong RD
+performance is one of the major open problems in neural
+compression [88].
+Recently, an alternative approach to neural compression
+called COIN was proposed [20]. Instead of generalizing
+across images, COIN overfits a neural network to a single
+image. The quantized weights of this neural network (often
+referred to as a neural field [85]) are then transmitted as a
+compressed code for the image. As the decoder only needs
+to reconstruct a single image, the resulting network is significantly smaller than traditional neural decoders [6, 16, 63],
+reducing the decoding complexity by orders of magnitude.
+However, while the decoding complexity of COIN is low,
+its RD performance is poor, and it is therefore not a viable
+alternative to other codecs.
+More recently, Ladune et al. [43] introduced COOLCHIC which, in addition to learning a decoder per image
+like COIN, also learns an entropy model per image. This
+led to significantly improved RD performance while maintaining low decoding complexity. A recent extension of
+Entropy net gψ
+Bitstream
+Bilinearly
+upsample
+3 × 3 conv
+3 × 3 conv
+Decoded img
+Upsampled
+latents
+1 × 1 conv
+1 × 1 conv
+1 × 1 conv
+1 × 1 conv
+µ
+σ
+Entropy decoding
+Multi-resolution
+latents
+Partially
+decoded zn
+ij
+B. Decode image from multi-resolution decoded latents
+given its context
+1 × 1 conv
+A. Decode next
+Synthesis net fθ
+Header
+bn
+Figure 2. Decoding the bitstream into an image with COOL-CHIC and C3. A. A latent entry z
+ij ( ) is autoregressively decoded by applying
+n
+the entropy network gψ to the context context(z ; (i, j)) (
+). B. The decoded latent grids at multiple resolutions are first upsampled and
+then decoded into image space using the synthesis network fθ . Figure adapted from Leguay et al. [48].
+COOL-CHIC that we refer to as COOL-CHICv2 [48] exceeds the RD performance of the widely used BPG/HEVC
+codec [8, 76] while only requiring 2.3k MACs/pixel at decoding time, an order of magnitude less than the most efficient neural codecs [29] (decoding complexity is measured
+in number of multiply-accumulate (MAC) operations, cf.
+App. B for details). Despite these impressive results, the
+performance of COOL-CHIC still falls short of the latest
+classical codecs such as VTM [11]. Further, COOL-CHIC
+has not been applied to video, where low decoding cost is of
+greater importance as fast decoding is required to maintain a
+satisfactory frame rate for streaming.
+In this paper, we introduce C3, a neural compression
+method that builds on COOL-CHIC but substantially improves its RD performance while maintaining a low decoding complexity (see Fig. 1). More specifically, we propose a
+series of simple and effective improvements to the optimization, quantization, and architecture of COOL-CHIC. These
+changes result in a 22.2% reduction in BD-rate [9] compared
+to COOL-CHICv2 while matching VTM on the CLIC2020
+benchmark [79]. To the best of our knowledge, C3 is the
+first neural compression method to achieve RD performance
+matching VTM on images while maintaining very low decoding complexity (less than 3k MACs/pixel). Further, C3 is the
+state of the art among neural codecs obtained from a single
+image.
+Going beyond COOL-CHIC, which is only applied to
+images, we also extend C3 to videos, making several crucial methodological changes enabling the application of our
+method to this modality. On the UVG benchmark [60], we
+demonstrate strong RD performance that matches VCT [59]
+while requiring 4.4k MACs/pixel, less than 0.1% of VCT’s
+decoding complexity. We believe this is a promising step
+towards efficient neural codecs trained on a single video.
+2. Background: COOL-CHIC
+Autoencoder based neural compression methods train an
+encoder network (also known as analysis transform) to compress an image x into a quantized latent b
+z, and a corresponding decoder network (also known as synthesis transform)
+b. Typically, the latent z
+b is the only
+to reconstruct x from z
+image-dependent component and is encoded into a bitstream
+using a shared entropy model P [88].
+In contrast, COOL-CHIC [43] and COOL-CHICv2 [48]
+are methods for single image compression, in which all
+components are fit to each image separately. In the following
+we provide further details on COOL-CHIC. See Fig. 2 for
+an overview.
+Overview. At a high level, the COOL-CHIC model consists of three components (cf. Fig. 2): (i) a set of latent
+grids at different spatial resolutions z = (z1 , . . . , zN ), (ii)
+a synthesis transform fθ to decode these latents into an image, and (iii) an autoregressive entropy-coding network gψ
+that is used to convert the latents into a bitstream. Because
+the networks do not need to be general, they can be very
+small, which allows for low decoding complexity. Instead
+of an analysis transform, COOL-CHIC uses optimization to
+jointly fit the latents, the synthesis transform and the entropy
+network per image. The gradient-based optimization acts on
+continuous values but is quantization-aware as we describe
+below; for the final encoding and decoding, the latent and
+the network parameters are both quantized.
+Latent grids. COOL-CHIC structures the latent z as
+a hierarchy of latent grids (z1 , . . . , zN ) at multiple spatial resolutions to efficiently capture structure at different spatial frequencies. By default they are of shape
+(h, w), ( h2 , w2 ), . . . , ( 2Nh−1 , 2Nw−1 ), where h and w are the
+height and width of the image, respectively.
+Synthesis. The synthesis transform fθ approximately reconstructs the image x from these latent grids. First, each
+latent grid zn is deterministically upsampled to the resolution of the image. Then, the synthesis network fθ uses the
+resulting concatenated tensor Up(z) of shape (h, w, N ) to
+predict the RGB values of the image, xrec = fθ (Up(z))
+(see Fig. 2B). COOL-CHICv2 uses learned upsampling and
+a small convolutional network to parameterize fθ .
+Entropy coding. For transmission, the latent grids and
+network parameters are quantized via rounding before being entropy-encoded into a bitstream. As this coding cost
+is dominated by the latent grids, an image-specific entropy
+model gψ is learned to losslessly compress them. COOLCHIC uses an integrated Laplace distribution for entropy
+n
+coding, where the location and scale parameters (µnij , σij
+)
+n
+of the distribution for each latent grid element zij are autoregressively predicted by the entropy network from the local
+neighborhood of that grid element,
+
+Q
+n
+Pψ (zn ) = i,j P znij ; µnij , σij
+(1)
+n
+µnij , σij
+= gψ (context (zn , (i, j))) .
+(2)
+Here, context(zn , (i, j)) extracts a small causally masked
+neighborhood (5 − 7 latent pixels wide) around a location
+(i, j) from latent grid zn (c.f. Fig. 2A). Individual grids are
+modelled independently with the same network gψ , Pψ (z) =
+Q
+n
+n Pψ (z ).
+The entropy and synthesis model are both small networks
+of depth ≤ 4 and width ≤ 40, and their parameters are quantized after training using different bin widths. The bin width
+with the best RD trade-off is chosen and added to the bitstream. The quantized network parameters θb and ψb are also
+entropy-coded using an integrated Laplace distribution that
+factorizes over entries with zero mean and scale determined
+by the empirical standard deviation:
+P (b
+θ) =
+Q
+i P (θi ; µ = 0; σ =
+b
+(3)
+√1 std( b
+θ))
+2
+b Entropy coding for the latents and
+and similarly for ψ.
+network parameters is performed using a range coder [64].
+Quantization-aware gradient-based optimization. The
+latent (z) and parameters (ψ, θ) are fit to an image x by
+jointly optimizing the following RD objective that trades off
+better reconstructions and more compressible latents with an
+RD-weight λ:
+Lθ,ψ (z) = ∥x − fθ (Up(z)) ∥22 − λ
+P
+n log2 Pψ (z
+n
+). (4)
+The optimization is made quantization-aware in several
+ways and proceeds in two stages (cf. Tab. 1): in the (longer)
+first stage, uniform noise u is added to the continuous latents z; in the (shorter) second stage with very low learning
+rate, the latents z are quantized and their gradients are approximated with the straight-through estimator, which is
+biased. Moreover, the rate term uses an integrated Laplace
+distribution.
+Stage 1
+Stage 2
+∇z,θ,ψ Lθ,ψ (z + u);
+u ∼ Uniform(0, 1)
+∇θ,ψ Lθ,ψ (⌊z⌉) and e
+∇z Lθ,ψ (⌊z⌉)
+e z is straight-through estimation.
+Table 1. Two-stage optimization; ∇
+3. C3: Improving COOL-CHIC
+We first present a series of simple and effective improvements to COOL-CHIC, which we collectively refer to as
+C3 (Cooler-ChiC), that lead to a significant increase in RD
+performance with similar decoding complexity. The overall
+model structure remains unchanged (cf. Fig. 2) and most
+of our improvements fall into one of two categories: (1)
+improvements to the quantization-aware optimization, and
+(2) improvements to the model architecture. Subsequently,
+we introduce the modifications necessary to apply C3 to
+videos. We confirm with extensive ablations in Sec. 5 and
+App. D that each contribution is beneficial and that their
+improvements are cumulative. See App. A for full details on
+all improvements.
+3.1. Optimization improvements
+We maintain the same two-stage optimization structure of
+COOL-CHIC (see Tab. 1) but make several improvements in
+both stages, most notably how quantization is approximated.
+Soft-rounding (stage 1). We apply a soft-rounding function before and after the addition of noise [2]. Let sT be
+a smooth approximation of the rounding function whose
+smoothness is controlled by a temperature parameter T . For
+large T , sT approaches the identity while for small T , sT
+approaches the rounding function so that
+limT →0 sT (sT (z) + u) = ⌊⌊z⌉ + u⌉ = ⌊z⌉.
+(5)
+By varying T we can interpolate between rounding and
+the simple addition of uniform noise u. Note that the softrounding does not create an information bottleneck as it is an
+invertible function. Therefore, adding noise is still necessary
+for reliable compression [2].
+Small T leads to a better approximation of rounding but
+increases the variance of gradients for z. Following previous
+work using soft-rounding, we therefore anneal the temperature over the course of the optimization. See Fig. 3 for a
+visualization and App. A.2.4 for details.
+Kumaraswamy noise (stage 1). The addition of uniform
+noise as an approximation to rounding has been motivated
+by pointing out that for sufficiently smooth distributions,
+COOL-CHIC Stage 1
+z +u
+C3 Stage 1 (beginning)
+C3 Stage 1 (middle)
+C3 Stage 1 (end)
+sT =0.3 (sT =0.3 (z) + ukum=2 ) sT =0.2 (sT =0.2 (z) + ukum=1.5 ) sT =0.1 (sT =0.1 (z) + ukum=1 )
+Stage 2
+round(z)
+Figure 3. Approximating the round(z) function during Stage 1 of optimization. COOL-CHIC adds uniform noise u, whereas C3 uses
+soft-rounding sT with varying temperatures T and Kumaraswamy noise of different strengths, ukum . We plot the mean and 95% interval.
+the marginal distribution of the quantization error (z − ⌊z⌉)
+is approximately uniform [5]. The approximation further
+assumes that the quantization error and the input are uncorrelated. In practice, these assumptions may be violated,
+suggesting that other forms of noise are worth exploring.
+To that end, we replace uniform noise with samples from
+the Kumaraswamy distribution [41] whose support is compact on [0, 1]. This distribution is very similar to the Beta
+distribution but has an analytic cumulative distribution function that allows for more efficient sampling. By controlling
+its shape parameters we can interpolate between a peaked
+(lower noise) distribution at beginning of stage 1 and a uniform distribution at the end. See Fig. 3 for a visualization
+and App. A.2.5 for details.
+Cosine decay schedule (stage 1). We found that a simple
+cosine decay schedule for the learning rate of the Adam optimizer performed well during the first stage of optimization.
+Smaller quantization step (stages 1 & 2). COOL-CHIC
+quantizes the latents by rounding their values to the nearest
+whole integer; as a result the inputs to the synthesis and
+entropy networks can become large (exceeding values of 50),
+which can lead to instabilities or suboptimal optimization.
+We found that quantizing the latents in smaller steps than
+1 (and correspondingly rescaling the soft-rounding in both
+stages) empirically improved optimization.
+Soft-rounding for gradient (stage 2). We apply hard
+rounding/quantization to the latents z for the forward pass
+of stage 2 following COOL-CHIC. For the backward pass,
+COOL-CHICv2 uses a straight-through gradient estimator
+and multiplies the gradient by a small ϵ. This has the effect of replacing rounding by a linear function (cf. Fig. 3)
+and downscaling the learning rate of the latents. Instead we
+use soft-rounding to estimate the gradients (with a very low
+temperature) and start stage 2 with a low learning rate.
+Adaptive learning rate (stage 2). We adaptively decrease
+the learning rate further when the RD-loss does not improve
+for a fixed number of steps.
+3.2. Model improvements
+We make a number of changes to the network architectures
+to increase their expressiveness, support the optimization,
+and allow for more adaptability depending on the bitrate.
+Conditional entropy model. COOL-CHIC uses the same
+entropy network to independently model latent grids of
+starkly varying resolutions. We explored several options
+to increase the expressiveness of the entropy model: first, we
+optionally allow the context at a particular latent location to
+also include values from the previous grid, P (zn |zn−1 ), as
+this information may be helpful for prediction when different
+grids are correlated. Second, we optionally allow the network to be resolution-dependent by either using a separate
+network per latent grid or using FiLM [66] layers to make the
+network resolution-dependent in a more parameter-efficient
+way.
+ReLU → GELU. As we are constrained to use very small
+networks, we replace the simple ReLU activation function
+with a more expressive activation; empirically we found that
+GELU activations [33] worked better.
+Shift log-scale of entropy model output. Small changes
+in how quantities are parameterized can affect optimization
+considerably. For example, how the scale of the entropy distribution is computed from the raw network output strongly
+affects optimization dynamics, in particular at initialization;
+we found that shifting the predicted log-scale prior to exponentiation consistently improves performance. With improved optimization we can also use larger initialization
+scales than COOL-CHIC to improve performance.
+Adaptivity. We optionally sweep over several architecture
+choices per image or video patch to find the best RD-tradeoff on a per-instance basis. We refer to this as C3 adaptive.
+This setting includes an option to vary the relative latent
+resolutions; e.g., it may be beneficial not to use the highest
+resolution latent grid for low bitrates. Note that such adaptive
+settings are also common in traditional codecs [37, 76].
+video context
+and a small rectangular mask for the previous latent frame
+whose position is learned during encoding time (cf. Fig. 4
+video context with custom masking). See App. A.3 for
+details of how the position of this mask is learned.
+image context
+frame τ − 1
+frame τ
+frame τ + 1
+video context with custom masking
+frame τ − 1
+frame τ
+frame τ + 1
+Figure 4. Visualization of entropy model’s context for images and
+video (with and without custom masking).
+3.3. Video-specific methodology
+COOL-CHIC has been successfully applied to images but
+not videos. Here we describe our methodology for applying
+C3 (and COOL-CHIC) to video, which we use on top of the
+improvements in Sec. 3.1 and Sec. 3.2.
+2D → 3D. Given that videos have an extra time dimension compared to images, a natural way to extend C3 to
+video is to convert 2D parameters and operations to their
+3D counterparts. Namely, we use 3D latent grids z1 , z2 , . . .
+of shapes (t, h, w), ( 2t , h2 , w2 ), . . . , and the entropy model’s
+context context(zn , (τ, i, j)) is now a 3D causal neighborhood of the latent entry znτij (cf. Fig. 4 video context).
+Using video patches. Videos have orders of magnitude
+more pixels than images, and a full HD video does not fit
+into the memory of modern GPUs. We therefore split the
+video into smaller video patches, and fit a separate C3 model
+to each patch. We find that larger patches work best for lower
+bitrates and smaller patches work best for higher bitrates.
+Our patch sizes range from (30, 180, 240) to (75, 270, 320).
+Wider context to capture fast motion. For video patches
+with fast motion, the small context size that works well for
+images (5-7 latent pixels wide) can be smaller than the displacement of a particular keypoint in consecutive frames.
+This means that for a target latent pixel, the context in the
+previous latent frame does not contain the relevant information for the entropy model’s prediction. Hence we use a
+wider spatial context (up to 65 latent pixels wide) to enhance
+predictions for videos with faster motion.
+Custom masking. Naı̈vely increasing the context width
+also increases the parameter count of the entropy model,
+which scales linearly with the context size. However, most
+of the context dimensions are irrelevant for prediction and
+can be masked out. We use a small causal mask centered at the target latent pixel for the current latent frame,
+4. Related work
+Neural compression by overfitting to a single instance.
+COIN [20] introduced the idea of overfitting a neural network to a single image as a means for compression. This has
+since been improved with reduced encoding times through
+meta-learning [21, 70, 75] and increased RD performance
+via better architectures [13] or more refined quantization
+[18, 26]. Further improvements to RD performance have
+been achieved by pruning networks [46, 68, 70] and incorporating traditional compressive autoencoders [67, 71]. Recent
+approaches using Bayesian neural fields directly optimize
+RD losses, further improving performance [28, 32]. Despite
+this progress, no approach yet matches the RD performance
+of traditional codecs such as VTM.
+For video, NeRV [14] overfits neural fields to single
+videos, using a deep convolutional network to map time
+indices to frames. Various follow-ups have greatly improved
+compression performance [4, 15, 25, 42, 47, 53], among
+which HiNeRV [42] shows impressive RD performance that
+closely matches HEVC (HM-18.0, random access setting)
+on standard video benchmarks. While these models are typically smaller than autoencoder-based neural codecs, the
+model size (and hence decoding complexity) is directly correlated with the bitrate (each point on the RD curve corresponds to a different model size), making it challenging
+to design a low-complexity codec at high bitrates. Further,
+these models are typically unsuitable for video-streaming
+applications, as the entire bitstream needs to be transmitted
+before the first frame can be decoded [80]. Note that C3 does
+not suffer from this limitation – the very small synthesis and
+entropy models can be transmitted first with little overhead,
+and then be used to decode the bitstream for the latents that
+can be synthesized into frames in a streaming fashion.
+Given the generality of neural fields, codecs applicable
+to multiple modalities have been developed [21, 24, 70, 71].
+There also exist methods specialized to other modalities:
+climate data [34], 3D shapes [19, 35, 55], NeRF scenes [24,
+52, 77], audio [28, 44] and medical images [21, 23, 58, 72].
+Instance adaptive neural compression. Several
+autoencoder-based approaches adapt the encoder to each
+instance through optimization but leave the decoder fixed
+[12, 27, 54, 87]. Such methods generally perform worse
+than approaches that optimize both the encoder and
+decoder w.r.t. an RD loss [57, 61, 80, 81]. In particular,
+Van Rozendaal et al. [80] introduce Insta-SSF, an instance
+adaptive version of the scale-space flow (SSF) model [3] (a
+popular autoencoder model for neural video compression).
+10
+30
+25
+C3 (ours)
+VTM
+C3 adapt. (ours)
+COOL-CHICv2
+BPG
+20
+−10
+Better
+0
+35
+10
+30
+MLIC+
+C3 (ours)
+VTM
+C3 adapt. (ours)
+COOL-CHICv2
+BPG
+MLIC+
+30
+30
+0
+0.2
+0.4
+0.6
+0.8
+1
+20
+BD-rate vs VTM Better
+0
+40
+PSNR (dB) (↑)
+PSNR (dB) (↑)
+35
+BD-rate vs VTM Better
+−10
+Better
+0
+0.2
+0.4
+0.6
+0.8
+Rate (bpp) (↓)
+Rate (bpp) (↓)
+Figure 5. Rate-distortion curve and BD-rate on Kodak.
+Figure 6. Rate-distortion curve and BD-rate on CLIC2020.
+For a fixed RD performance, the decoder of Insta-SSF is
+much smaller and has lower complexity than the shared
+decoder of SSF. Note that C3 and COOL-CHIC follow the
+same principle for low complexity decoding. However,
+there are key differences between C3/COOL-CHIC and the
+aforementioned instance adaptive methods: 1. we train from
+scratch rather than learning an initialization from a dataset;
+2. we use a neural field model (without encoder) instead
+of an autoencoder, and show an order of magnitude lower
+decoding complexity; 3. for videos, there is no explicit
+motion compensation based on flows in our model.
+by VCT [59] in terms of RD. AlphaVC [74] introduces a
+technique to skip latent dimensions for entropy coding, improving efficiency in flow-based autoencoder models and
+surpassing VTM (low-delay) in terms of RD performance,
+albeit with a high decoding complexity of 1M MACs/pixel.
+Low complexity neural codecs. While the problem of
+high decoding complexity in neural compression is well
+established [88], most works to mitigate it are relatively
+recent. Early methods reduced complexity at little cost in
+RD performance by pruning network weights [39]. More
+recently, He et al. [30, 31] replace traditional autoregressive
+entropy models with checkerboard-based designs that allow
+for more efficient and parallelizable entropy coding. Further, Yang and Mandt [86] use shallow decoders to reduce
+decoding complexity and offset the resulting decrease in RD
+performance with iterative encoding. EVC [29] achieves RD
+performance surpassing VTM on images with decoding at
+30FPS on a GPU, by carefully choosing architectures and
+using sparsity-based mask decay. Despite these impressive
+results, the decoding complexity required for these models
+is still an order of magnitude higher than C3.
+For video, some prior works [45, 82] focus on providing
+efficient neural components and entropy coding that run on
+mobile devices. Due to these constraints, their RD performance is not yet competitive with most neural video codecs
+and their decoding complexity is an order of magnitude
+higher than C3. ELF-VC [69], based on autoencoders and
+flows, provides gains in efficiency by encoder/decoder asymmetry and an efficient convolutional architecture. However
+they do not report decoding complexity and are outperformed
+5. Results
+5.1. Image compression
+We evaluate our model on the Kodak [40] and CLIC2020
+[79] benchmarks. Kodak contains 24 images at a resolution
+of 512 × 768. For CLIC2020, we use the professional validation dataset split containing 41 images at various resolutions
+from 439 × 720 to 1370 × 2048, following COOL-CHIC
+[43, 48]. We compare C3 against a series of baselines, including classical codecs (BPG [8], VTM [11]), autoencoder
+based neural codecs (BMS [6], a standard neural codec; CST
+[16], a strong neural codec; EVC [29], a codec optimized
+for RD performance and low decoding complexity; MLIC+
+[38], the state of the art in terms of RD performance) and
+COOL-CHICv2 [48]. We measure PSNR on RGB and quantify differences in RD performance with the widely used
+BD-rate metric. See App. A for full experimental details and
+App. B for full evaluation details.
+Rate-distortion and decoding complexity. On
+CLIC2020, C3 (with a single setting for its architecture and hyperparameters) significantly outperforms
+COOL-CHICv2 across all bitrates (−22.2% BD-rate) and
+nearly matches VTM (+1.4% BD-rate), cf. Fig. 6. When
+adapting the model per image, C3 even outperforms VTM
+(−2.0% BD-rate). To the best of our knowledge, this
+is the first time a neural codec has been able to match
+VTM while having very low decoding complexity (below
+3k MACs/pixel). While C3 does not yet match the RD
+performance of state of the art neural codecs such as
+MLIC+, it uses two orders of magnitude fewer operations
+at decoding time, making it substantially cheaper. Results
+are also strong on Kodak (see Fig. 5), although, as is the
+case for COOL-CHIC, we perform slighly worse on this
+dataset relative to VTM. In Fig. 1 we compare the decoding
+complexity (measured in MACs/pixel) and the achieved
+BD-rate for C3 and other neural baselines. C3 has a similar
+complexity to COOL-CHIC but much better BD-rate and
+codecs achieving similar BD-rate to ours require at least
+an order of magnitude more MACs (even ones optimized
+for low decoding complexity such as EVC). See App. C.1
+for comparisons with additional baselines (including other
+autoencoder based codecs and overfitted codecs) in terms of
+RD performance and decoding complexity.
+Decoding time. A concern with using autoregressive models is that runtimes may be prohibitive despite low computational complexity [62]. To address this, we time the decoding
+process, which includes a full iterative roll-out of the autoregressive entropy model (and the upsampling and application
+of the synthesis network). On CPU (Intel Xeon Platinum,
+Skylake, 2GHz) these together take < 100 ms (∼ 55 ms
+and ∼ 30 ms, respectively) for an image of size 768 × 512.
+This does not account for the cost of range-decoding the bitstream (which is also a component of every classical codec).
+We emphasize that these numbers are based on unoptimized
+research code and can likely be improved substantially.
+Encoding time. C3 faces the same limitations as COOLCHIC, in that it has very long encoding times. Here we
+report encoding times on an NVIDIA V100 GPU. The largest
+CLIC image at 1370 × 2048 resolution takes 48s per 1000
+iterations of optimization (i.e., excluding range-encoding)
+with the slowest setting (largest architecture), and 22s per
+1000 iterations with the fastest setting (smallest architecture).
+While we train for a maximum of 110k iterations, we show
+in App. D.3 that we can approach similar RD performance
+with much fewer iterations. As we run unoptimized research
+code, we believe the runtime can be greatly improved.
+Ablations. In Tab. 2, we ablate our methodological contributions on Kodak by starting with our best performing model
+and sequentially removing each of our improvements, one
+after another. We show the resulting BD-rate with respect
+to the top row, demonstrating that our contributions stack to
+yield significant improvements in RD performance. In Tab. 3,
+we show BD-rate with respect to C3 when disabling individual features. We find that soft-rounding, Kumaraswamy
+noise and using GELU activations are responsible for the majority of the improvement. For the corresponding ablations
+on CLIC2020, please refer to App. D.1.
+Qualitative comparisons In Fig. 7, we compare reconstructions from C3 and COOL-CHICv2 on an image from
+CLIC2020, showing that C3 has fewer artifacts. See App. E
+for a more thorough comparison.
+Model variant
+BD-rate vs. C3 Adaptive
+C3 (adaptive)
+C3
+✗ Quantiz. step < 1
+✗ Adaptive lr (stage 2)
+✗ Shift log-scale
+✗ GELU
+✗ Kumaraswamy noise
+✗ Soft-rounding
+0.0%
+2.2%
+2.6%
+3.4%
+4.2%
+12.6%
+23.6%
+39.8%
+0%
+10%
+20%
+30%
+40%
+Table 2. Kodak ablation sequentially removing one improvement
+after another. Note higher BD-rate means worse RD performance.
+Removed feature
+BD-rate vs. C3
+Soft-rounding
+Kumaraswamy noise
+GELU
+Shifted log-scale
+Adaptive lr (stage 2)
+Quantization step < 1
+22.18%
+3.90%
+3.27%
+0.87%
+0.68%
+0.40%
+Table 3. Kodak ablation knocking out individual features from C3
+(fixed hyperparameters across all images). Note higher BD-rate
+means worse RD performance.
+C3 (ours)
+0.3097 bpp
+COOL-CHIC v2
+0.3150 bpp
+Figure 7. Qualitative comparison of compression artifacts for C3
+and COOL-CHICv2 at around 0.31 bpp with a PSNR of 30.28dB
+and 28.98dB, respectively. See App. E for the full image.
+5.2. Video compression
+We evaluate C3 on the UVG-1k dataset [60] containing
+7 videos at HD resolution (1080 × 1920) with a total of
+3900 frames. We evaluate PSNR on RGB, and compare
+against a series of baselines, including classical codecs
+(HEVC medium, no B-frames [76]), neural codecs based on
+overfitting (HiNeRV [42], FFNeRV [47]) and autoencoder
+PSNR (dB) (↑)
+40
+38
+−40
+36
+34
+C3 (ours)
+HEVC (medium)
+VCT
+VTM (RA)
+Insta-SSF5
+FFNeRV
+HiNeRV
+MIMT
+32
+−20
+BD-rate vs HEVC in % (↓)
+−60
+BD-rate vs HEVC Better
+Better
+−20
+0.1
+0.2
+0.3
+0.4
+Rate (bpp) (↓)
+Figure 8. Rate-distortion curve and BD-rate on UVG.
+based neural codecs (DCVC [49], VCT [59], Insta-SSF [81],
+MIMT [84]), among which MIMT reports state of the art RD
+performance on the UVG-1k dataset. Note that extensions
+of DCVC [50, 51, 73] also show strong RD performance
+but report results on a subset of UVG frames, hence we do
+not compare against them. See App. A for full experimental
+details and App. B for full evaluation details.
+Rate-distortion and decoding complexity In Fig. 8, we
+show the RD performance of C3 compared to other baselines,
+with more baselines shown in App. C.1. In Fig. 9, we show
+the MACs/pixel count of each method vs the BD-rate using
+HEVC (medium, no B-frames) [76] as anchor. In terms
+of RD performance, we are on par with VCT [59], a competitive neural baseline, while requiring 4.4k MACs/pixel,
+which is less than 0.1% of VCT’s MACs/pixel. Among the
+baselines that overfit to a single video instance (NeRV and
+its followups) we are second best in terms of RD, widely outperforming FFNeRV [47], the previous runner up. Although
+C3 is behind stronger neural baselines such as HiNeRV and
+MIMT in terms of RD performance, our decoding complexity is orders of magnitude lower. Note that NeRV-based
+methods have different model sizes (and hence different
+MACs/pixel) for each point on the RD curve. For example,
+the 5 points on the RD curve for HiNeRV correspond to
+MACs/pixel values between 87k-1.2M [42]. In App. D.4
+we show ablation studies showing the effectiveness of our
+video-specific methodology.
+Encoding times. We also report encoding times for video
+patches on an NVIDIA V100 GPU. The slowest setting on
+the largest video patch of size 75×270×320 resolution takes
+457s per 1000 iterations of optimization, whereas the fastest
+setting on the smallest video patch of size 30 × 180 × 240
+takes 29s per 1000 iterations. We train for a maximum of
+110k iterations but show in App. D.3 that we can approach
+similar RD performance with much fewer iterations.
+VCT
+C3 (ours)
+−40
+HiNeRV
+−60
+Better
+0
+0
+DCVC
+Insta-SSF5
+Insta-SSF18
+103
+MIMT
+104
+105
+106
+107
+Decoding complexity in MACs/pixel (↓)
+Figure 9. BD-rate vs decoding complexity relative to HEVC
+(medium). For methods with varying MACs for different bitrates
+(e.g., C3 and HiNeRV), we report the largest MACs/pixel.
+6. Conclusion, limitations and future work
+We propose C3, the first low complexity neural codec on
+single images that is competitive with VTM while requiring
+an order of magnitude fewer MACs for decoding than state
+of the art neural codecs. We then extend C3 to the video setting, where we match the RD performance of VCT with less
+than 0.1% of their decoding complexity. Our contributions
+are a step towards solving one of the major open problems
+in neural compression — achieving high compression performance with low decoding complexity — and ultimately
+towards making neural codecs a practical reality.
+Limitations. In this paper, we focused on maximizing RD
+performance while minimizing decoding complexity. As
+a result, the encoding of C3 is slow, making it impractical
+for use cases requiring real time encoding. Yet, there are
+several use cases for which paying a significant encoding
+cost upfront can be justified if RD performance and decoding time are improved. For example, a popular video on a
+streaming service is encoded once but decoded millions of
+times [1]. Further, the autoregressive entropy model used
+during decoding is inherently sequential in nature, posing
+challenges for efficient use of hardware designed for parallel computing. However, as shown in Sec. 5, even with
+unoptimized research code, an image can be decoded relatively quickly on CPU due to the very small network sizes.
+Moreover, further optimizations and specialized implementations such as wavefront decoding [17] can likely speed
+up decoding times significantly. Nevertheless, it would be
+interesting to explore alternative probabilistic models that
+can be efficiently evaluated on relevant hardware.
+Future work. There are several promising avenues for
+future work. Firstly, it would be interesting to accelerate
+encoding via better initializations or meta-learning [21, 70,
+75]. Secondly, improving decoding speed through the use
+of different probabilistic models or decoding schemes is an
+important direction. Further, while we took an extreme view
+of using only a single image or video to train our models, it
+is likely that some level of sharing across images or videos
+could be beneficial. For example, sharing parts of the entropy
+or synthesis model may improve RD performance.
+Acknowledgements
+We would like to thank: Wei Jiang for providing RD and
+MACs/pixels numbers for several baselines both on the Kodak and CLIC2020 datasets; Fabian Mentzer and Ho Man
+Kwan for providing video RD numbers for various baselines;
+Eirikur Agustsson for helping to run VTM (RA); COOLCHIC authors for open sourcing their code; Yee Whye Teh,
+Nick Johnston, Fabian Mentzer and Eirikur Agustsson for
+helpful feedback.
+Author Contributions
+ED conceived the project and wrote the initial codebase with
+the help of HK and MB. HK, MB, ED, LT developed and
+refined the project vision with the help of JRS. MB, LT, HK,
+ED implemented and refined the general methodology. HK
+designed and implemented the video-specific methodology
+and evaluation with help from ED and MB. MB, HK, LT
+worked on scaling, evaluating and improving the efficiency
+of experiments. MB, ED, HK, LT wrote the paper.
+These authors contributed equally: HK, MB, ED.
+References
+[1] Anne Aaron, Zhi Li, Megha Manohara, Jan De Cock, and
+David Ronca. Per-title encode optimization. https:
+//netflixtechblog.com/per- title- encodeoptimization- 7e99442b62a2, 2015. [Online; accessed 26-Feb-2021]. 8
+[2] Eirikur Agustsson and Lucas Theis. Universally quantized
+neural compression. In Proceedings of the 34th International
+Conference on Neural Information Processing Systems, Red
+Hook, NY, USA, 2020. Curran Associates Inc. 3, 17
+[3] Eirikur Agustsson, David Minnen, Nick Johnston, Johannes
+Balle, Sung Jin Hwang, and George Toderici. Scale-space
+flow for end-to-end optimized video compression. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pages 8503–8512, 2020. 5
+[4] Yunpeng Bai, Chao Dong, Cairong Wang, and Chun Yuan.
+Ps-nerv: Patch-wise stylized neural representations for videos.
+In 2023 IEEE International Conference on Image Processing
+(ICIP), pages 41–45. IEEE, 2023. 5
+[5] J Ballé, V Laparra, and E P Simoncelli. End-to-end optimized image compression. In Int’l Conf on Learning Representations (ICLR), Toulon, France, 2017. Available at
+http://arxiv.org/abs/1611.01704. 1, 4
+[6] Johannes Ballé, David Minnen, Saurabh Singh, Sung Jin
+Hwang, and Nick Johnston. Variational image compression
+with a scale hyperprior. In International Conference on Learning Representations, 2018. 1, 6, 15, 27
+[7] Jean Bégaint, Fabien Racapé, Simon Feltman, and Akshay
+Pushparaja. Compressai: a pytorch library and evaluation
+platform for end-to-end compression research. arXiv preprint
+arXiv:2011.03029, 2020. 28
+[8] Fabrice Bellard. Bpg image format. URL https://bellard.
+org/bpg, 1(2):1, 2015. 2, 6
+[9] Gisle Bjontegaard. Calculation of average psnr differences
+between rd-curves. ITU SG16 Doc. VCEG-M33, 2001. 2, 26
+[10] James Bradbury, Roy Frostig, Peter Hawkins, Matthew James
+Johnson, Chris Leary, Dougal Maclaurin, George Necula,
+Adam Paszke, Jake VanderPlas, Skye Wanderman-Milne,
+and Qiao Zhang. JAX: composable transformations of
+Python+NumPy programs, 2018. 27
+[11] Benjamin Bross, Ye-Kui Wang, Yan Ye, Shan Liu, Jianle
+Chen, Gary J Sullivan, and Jens-Rainer Ohm. Overview of
+the versatile video coding (vvc) standard and its applications.
+IEEE Transactions on Circuits and Systems for Video Technology, 31(10):3736–3764, 2021. 2, 6, 28
+[12] Joaquim Campos, Meierhans Simon, Abdelaziz Djelouah,
+and Christopher Schroers. Content adaptive optimization for
+neural image compression. In CVPR Workshop and Challenge
+on Learned Image Compression, 2019. 5
+[13] Lorenzo Catania and Dario Allegra. Nif: A fast implicit image
+compression with bottleneck layers and modulated sinusoidal
+activations. In Proceedings of the 31st ACM International
+Conference on Multimedia, pages 9022–9031, 2023. 5
+[14] Hao Chen, Bo He, Hanyu Wang, Yixuan Ren, Ser Nam Lim,
+and Abhinav Shrivastava. Nerv: Neural representations for
+videos. Advances in Neural Information Processing Systems,
+34:21557–21568, 2021. 5, 28
+[15] Hao Chen, Matthew Gwilliam, Ser-Nam Lim, and Abhinav
+Shrivastava. Hnerv: A hybrid neural representation for videos.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 10270–10279, 2023.
+5, 28, 38
+[16] Zhengxue Cheng, Heming Sun, Masaru Takeuchi, and Jiro
+Katto. Learned image compression with discretized gaussian
+mixture likelihoods and attention modules. In Proceedings
+of the IEEE/CVF conference on computer vision and pattern
+recognition, pages 7939–7948, 2020. 1, 6, 27
+[17] Gordon Clare, Félix Henry, and Stéphane Pateux. Wavefront
+parallel processing for hevc encoding and decoding. document
+JCTVC-F274, 2011. 8
+[18] Bharath Bhushan Damodaran, Muhammet Balcilar, Franck
+Galpin, and Pierre Hellier. Rqat-inr: Improved implicit neural
+image compression. In 2023 Data Compression Conference
+(DCC), pages 208–217. IEEE, 2023. 5
+[19] Thomas Davies, Derek Nowrouzezahrai, and Alec Jacobson.
+On the effectiveness of weight-encoded neural implicit 3d
+shapes. arXiv preprint arXiv:2009.09808, 2020. 5
+[20] Emilien Dupont, Adam Goliński, Milad Alizadeh, Yee Whye
+Teh, and Arnaud Doucet. Coin: Compression with implicit
+neural representations. arXiv preprint arXiv:2103.03123,
+2021. 1, 5, 28
+[21] Emilien Dupont, Hrushikesh Loya, Milad Alizadeh, Adam
+Golinski, Yee Whye Teh, and Arnaud Doucet. Coin++: Neural compression across modalities. Transactions on Machine
+Learning Research, 2022. 5, 8, 28
+[22] The fvcore contributors. fvcore. https://github.com/
+facebookresearch/fvcore. 27
+[23] Harry Gao, Weijie Gan, Zhixin Sun, and Ulugbek S Kamilov.
+Sinco: A novel structural regularizer for image compression
+using implicit neural representations. In ICASSP 2023-2023
+IEEE International Conference on Acoustics, Speech and
+Signal Processing (ICASSP), pages 1–5. IEEE, 2023. 5
+[24] Sharath Girish, Abhinav Shrivastava, and Kamal Gupta.
+Shacira: Scalable hash-grid compression for implicit neural
+representations. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 17513–17524,
+2023. 5
+[25] Carlos Gomes, Roberto Azevedo, and Christopher Schroers.
+Video compression with entropy-constrained neural representations. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 18497–18506,
+2023. 5
+[26] Cameron Gordon, Shin-Fang Chng, Lachlan MacDonald, and
+Simon Lucey. On quantizing implicit neural representations.
+In Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision, pages 341–350, 2023. 5
+[27] Tiansheng Guo, Jing Wang, Ze Cui, Yihui Feng, Yunying Ge,
+and Bo Bai. Variable rate image compression with content
+adaptive optimization. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops, pages 122–123, 2020. 5
+[28] Zongyu Guo, Gergely Flamich, Jiajun He, Zhibo Chen,
+and José Miguel Hernández-Lobato. Compression with
+bayesian implicit neural representations. arXiv preprint
+arXiv:2305.19185, 2023. 5
+[29] Wang Guo-Hua, Jiahao Li, Bin Li, and Yan Lu. EVC: Towards real-time neural image compression with mask decay.
+In The Eleventh International Conference on Learning Representations, 2023. 2, 6, 27
+[30] Dailan He, Yaoyan Zheng, Baocheng Sun, Yan Wang, and
+Hongwei Qin. Checkerboard context model for efficient
+learned image compression. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 14771–14780, 2021. 6
+[31] Dailan He, Ziming Yang, Weikun Peng, Rui Ma, Hongwei
+Qin, and Yan Wang. Elic: Efficient learned image compression with unevenly grouped space-channel contextual adaptive coding. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages 5718–5727,
+2022. 1, 6, 28
+[32] Jiajun He, Gergely Flamich, Zongyu Guo, and José Miguel
+Hernández-Lobato. Recombiner: Robust and enhanced compression with bayesian implicit neural representations. arXiv
+preprint arXiv:2309.17182, 2023. 5, 28
+[33] Dan Hendrycks and Kevin Gimpel. Gaussian error linear
+units (gelus). arXiv preprint arXiv:1606.08415, 2016. 4, 13
+[34] Langwen Huang and Torsten Hoefler. Compressing multidimensional weather and climate data into neural networks. In
+The Eleventh International Conference on Learning Representations, 2023. 5
+[35] Berivan Isik, Philip A Chou, Sung Jin Hwang, Nick Johnston,
+and George Toderici. Lvac: Learned volumetric attribute compression for point clouds using coordinate based networks.
+Frontiers in Signal Processing, 2:1008812, 2022. 5
+[36] Itseez. Open source computer vision library. https://
+github.com/opencv/opencv, 2015. 19
+[37] ITU-T. Recommendation ITU-T T.81: Information technology – Digital compression and coding of continuous-tone still
+images – Requirements and guidelines, 1992. 4
+[38] Wei Jiang, Jiayu Yang, Yongqi Zhai, Peirong Ning, Feng
+Gao, and Ronggang Wang. Mlic: Multi-reference entropy
+model for learned image compression. In Proceedings of
+the 31st ACM International Conference on Multimedia, page
+7618–7627, New York, NY, USA, 2023. Association for Computing Machinery. 1, 6, 27
+[39] Nick Johnston, Elad Eban, Ariel Gordon, and Johannes Ballé.
+Computationally efficient neural image compression. arXiv
+preprint arXiv:1912.08771, 2019. 6
+[40] Kodak. Kodak Dataset. http://r0k.us/graphics/
+kodak/, 1991. 6
+[41] P. Kumaraswamy. A generalized probability density function
+for double-bounded random processes. Journal of Hydrology,
+46(1):79–88, 1980. 4, 18
+[42] Ho Man Kwan, Ge Gao, Fan Zhang, Andrew Gower, and
+David Bull. Hinerv: Video compression with hierarchical
+encoding based neural representation, 2023. 5, 7, 8, 28, 38
+[43] Théo Ladune, Pierrick Philippe, Félix Henry, Gordon Clare,
+and Thomas Leguay. Cool-chic: Coordinate-based low complexity hierarchical image codec. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision,
+pages 13515–13522, 2023. 1, 2, 6, 13, 15, 16, 17, 27
+[44] Luca A Lanzendörfer and Roger Wattenhofer. Siamese
+siren: Audio compression with implicit neural representations. arXiv preprint arXiv:2306.12957, 2023. 5
+[45] Hoang Le, Liang Zhang, Amir Said, Guillaume Sautiere,
+Yang Yang, Pranav Shrestha, Fei Yin, Reza Pourreza, and
+Auke Wiggers. Mobilecodec: neural inter-frame video compression on mobile devices. In Proceedings of the 13th ACM
+Multimedia Systems Conference, pages 324–330, 2022. 1, 6
+[46] Jaeho Lee, Jihoon Tack, Namhoon Lee, and Jinwoo Shin.
+Meta-learning sparse implicit neural representations. Advances in Neural Information Processing Systems, 34:11769–
+11780, 2021. 5
+[47] Joo Chan Lee, Daniel Rho, Jong Hwan Ko, and Eunbyung
+Park. Ffnerv: Flow-guided frame-wise neural representations
+for videos. 2023. 5, 7, 8
+[48] Thomas Leguay, Théo Ladune, Pierrick Philippe, Gordon
+Clare, and Félix Henry. Low-complexity overfitted neural
+image codec. arXiv preprint arXiv:2307.12706, 2023. 2, 6,
+13, 16, 27, 33
+[49] Jiahao Li, Bin Li, and Yan Lu. Deep contextual video compression. Advances in Neural Information Processing Systems, 34:18114–18125, 2021. 8, 28
+[50] Jiahao Li, Bin Li, and Yan Lu. Hybrid spatial-temporal entropy modelling for neural video compression. In Proceedings
+of the 30th ACM International Conference on Multimedia,
+pages 1503–1511, 2022. 8
+[51] Jiahao Li, Bin Li, and Yan Lu. Neural video compression with
+diverse contexts. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 22616–
+22626, 2023. 8
+[52] Lingzhi Li, Zhen Shen, Zhongshu Wang, Li Shen, and Liefeng
+Bo. Compressing volumetric radiance fields to 1 mb. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pages 4222–4231, 2023. 5
+[53] Zizhang Li, Mengmeng Wang, Huaijin Pi, Kechun Xu, Jianbiao Mei, and Yong Liu. E-nerv: Expedite neural video
+representation with disentangled spatial-temporal context. In
+European Conference on Computer Vision, pages 267–284.
+Springer, 2022. 5
+[54] Guo Lu, Chunlei Cai, Xiaoyun Zhang, Li Chen, Wanli
+Ouyang, Dong Xu, and Zhiyong Gao. Content adaptive
+and error propagation aware deep video compression. In
+Computer Vision–ECCV 2020: 16th European Conference,
+Glasgow, UK, August 23–28, 2020, Proceedings, Part II 16,
+pages 456–472. Springer, 2020. 5
+[55] Yuzhe Lu, Kairong Jiang, Joshua A Levine, and Matthew
+Berger. Compressive neural representations of volumetric
+scalar fields. In Computer Graphics Forum, pages 135–146.
+Wiley Online Library, 2021. 5
+[56] Bruce D Lucas and Takeo Kanade. An iterative image registration technique with an application to stereo vision. In
+IJCAI’81: 7th international joint conference on Artificial
+intelligence, pages 674–679, 1981. 19
+[57] Yue Lv, Jinxi Xiang, Jun Zhang, Wenming Yang, Xiao Han,
+and Wei Yang. Dynamic low-rank instance adaptation for
+universal neural image compression. In Proceedings of the
+31st ACM International Conference on Multimedia, pages
+632–642, 2023. 5
+[58] Matteo Mancini, Derek K Jones, and Marco Palombo. Lossy
+compression of multidimensional medical images using sinusoidal activation networks: An evaluation study. In International Workshop on Computational Diffusion MRI, pages
+26–37. Springer, 2022. 5
+[59] Fabian Mentzer, George Toderici, David Minnen, Sergi
+Caelles, Sung Jin Hwang, Mario Lucic, and Eirikur Agustsson. VCT: A video compression transformer. In Advances in
+Neural Information Processing Systems, 2022. 1, 2, 6, 8, 26,
+28
+[60] Alexandre Mercat, Marko Viitanen, and Jarno Vanne. Uvg
+dataset: 50/120fps 4k sequences for video codec analysis and
+development. In Proceedings of the 11th ACM Multimedia
+Systems Conference, pages 297–302, 2020. 2, 7
+[61] Yu Mikami, Chihiro Tsutake, Keita Takahashi, and Toshiaki
+Fujii. An efficient image compression method based on neural
+network: An overfitting approach. In 2021 IEEE International
+Conference on Image Processing (ICIP), pages 2084–2088.
+IEEE, 2021. 5
+[62] David Minnen and Nick Johnston. Advancing the ratedistortion-computation frontier for neural image compression.
+In 2023 IEEE International Conference on Image Processing
+(ICIP), pages 2940–2944. IEEE, 2023. 7
+[63] David Minnen, Johannes Ballé, and George D Toderici. Joint
+autoregressive and hierarchical priors for learned image compression. Advances in neural information processing systems,
+31, 2018. 1, 27, 28
+[64] G. Nigel and N. Martin. Range encoding: An algorithm for
+removing redundancy from a digitized message. In Video &
+Data Recording Conference, 1979. 3
+[65] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer,
+James Bradbury, Gregory Chanan, Trevor Killeen, Zeming
+Lin, Natalia Gimelshein, Luca Antiga, Alban Desmaison,
+Andreas Kopf, Edward Yang, Zachary DeVito, Martin Raison, Alykhan Tejani, Sasank Chilamkurthy, Benoit Steiner,
+Lu Fang, Junjie Bai, and Soumith Chintala. Pytorch: An
+imperative style, high-performance deep learning library. In
+Advances in Neural Information Processing Systems 32, pages
+8024–8035. Curran Associates, Inc., 2019. 27
+[66] Ethan Perez, Florian Strub, Harm de Vries, Vincent Dumoulin,
+and Aaron C. Courville. Film: Visual reasoning with a general
+conditioning layer. In AAAI, 2018. 4
+[67] Tuan Pham, Yibo Yang, and Stephan Mandt. Autoencoding
+implicit neural representations for image compression. In
+ICML 2023 Workshop Neural Compression: From Information Theory to Applications, 2023. 5
+[68] Juan Ramirez and Jose Gallego-Posada. L0 onie: Compressing
+coins with l0 -constraints, 2022. 5
+[69] Oren Rippel, Alexander G Anderson, Kedar Tatwawadi, Sanjay Nair, Craig Lytle, and Lubomir Bourdev. Elf-vc: Efficient
+learned flexible-rate video coding. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision,
+pages 14479–14488, 2021. 6, 28
+[70] Jonathan Schwarz and Yee Whye Teh. Meta-learning sparse
+compression networks. Transactions on Machine Learning
+Research, 2022. 5, 8, 28
+[71] Jonathan Richard Schwarz, Jihoon Tack, Yee Whye Teh,
+Jaeho Lee, and Jinwoo Shin. Modality-agnostic variational
+compression of implicit neural representations. In Proceedings of the 40th International Conference on Machine Learning. JMLR.org, 2023. 5, 28
+[72] Armin Sheibanifard and Hongchuan Yu. A novel implicit
+neural representation for volume data. Applied Sciences, 13
+(5):3242, 2023. 5
+[73] Xihua Sheng, Jiahao Li, Bin Li, Li Li, Dong Liu, and Yan
+Lu. Temporal context mining for learned video compression.
+IEEE Transactions on Multimedia, 2022. 8
+[74] Yibo Shi, Yunying Ge, Jing Wang, and Jue Mao. Alphavc:
+High-performance and efficient learned video compression.
+In European Conference on Computer Vision, pages 616–631.
+Springer, 2022. 6
+[75] Yannick Strümpler, Janis Postels, Ren Yang, Luc Van Gool,
+and Federico Tombari. Implicit neural representations for
+image compression. In European Conference on Computer
+Vision, pages 74–91. Springer, 2022. 5, 8, 28
+[76] Gary J Sullivan, Jens-Rainer Ohm, Woo-Jin Han, and Thomas
+Wiegand. Overview of the high efficiency video coding (hevc)
+standard. IEEE Transactions on circuits and systems for video
+technology, 22(12):1649–1668, 2012. 2, 4, 7, 8, 28
+[77] Towaki Takikawa, Alex Evans, Jonathan Tremblay, Thomas
+Müller, Morgan McGuire, Alec Jacobson, and Sanja Fidler.
+Variable bitrate neural fields. In ACM SIGGRAPH 2022
+Conference Proceedings, pages 1–9, 2022. 5
+[78] Lucas Theis, Wenzhe Shi, Andrew Cunningham, and Ferenc
+Huszár. Lossy image compression with compressive autoencoders. arXiv preprint arXiv:1703.00395, 2017. 1
+[79] George Toderici, Wenzhe Shi, Radu Timofte, Lucas Theis, Johannes Balle, Eirikur Agustsson, Nick Johnston, and Fabian
+Mentzer. Workshop and challenge on learned image compression (clic2020). In CVPR, 2020. 2, 6
+[80] Ties Van Rozendaal, Johann Brehmer, Yunfan Zhang, Reza
+Pourreza, Auke Wiggers, and Taco S Cohen. Instanceadaptive video compression: Improving neural codecs by
+training on the test set. arXiv preprint arXiv:2111.10302,
+2021. 5, 28
+[81] Ties van Rozendaal, Iris AM Huijben, and Taco Cohen. Overfitting for fun and profit: Instance-adaptive data compression.
+In International Conference on Learning Representations,
+2021. 5, 8
+[82] Ties van Rozendaal, Tushar Singhal, Hoang Le, Guillaume
+Sautiere, Amir Said, Krishna Buska, Anjuman Raha, Dimitris
+Kalatzis, Hitarth Mehta, Frank Mayer, et al. Mobilenvc: Realtime 1080p neural video compression on a mobile device.
+arXiv preprint arXiv:2310.01258, 2023. 1, 6
+[83] Adam Wieckowski, Jens Brandenburg, Tobias Hinz, Christian
+Bartnik, Valeri George, Gabriel Hege, Christian Helmrich,
+Anastasia Henkel, Christian Lehmann, Christian Stoffers,
+Ivan Zupancic, Benjamin Bross, and Detlev Marpe. Vvenc:
+An open and optimized vvc encoder implementation. In Proc.
+IEEE International Conference on Multimedia Expo Workshops (ICMEW), pages 1–2. 28
+[84] Jinxi Xiang, Kuan Tian, and Jun Zhang. Mimt: Masked image
+modeling transformer for video compression. In The Eleventh
+International Conference on Learning Representations, 2023.
+8
+[85] Yiheng Xie, Towaki Takikawa, Shunsuke Saito, Or Litany,
+Shiqin Yan, Numair Khan, Federico Tombari, James Tompkin,
+Vincent Sitzmann, and Srinath Sridhar. Neural fields in visual
+computing and beyond. In Computer Graphics Forum, pages
+641–676. Wiley Online Library, 2022. 1
+[86] Yibo Yang and Stephan Mandt. Computationally-efficient
+neural image compression with shallow decoders. In Proceedings of the IEEE/CVF International Conference on Computer
+Vision, pages 530–540, 2023. 6
+[87] Yibo Yang, Robert Bamler, and Stephan Mandt. Improving
+inference for neural image compression. Advances in Neural
+Information Processing Systems, 33:573–584, 2020. 5
+[88] Yibo Yang, Stephan Mandt, Lucas Theis, et al. An introduction to neural data compression. Foundations and Trends® in
+Computer Graphics and Vision, 15(2):113–200, 2023. 1, 2, 6
+[89] Renjie Zou, Chunfeng Song, and Zhaoxiang Zhang. The
+devil is in the details: Window-based attention for image
+compression. In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition, pages 17492–17501,
+2022. 28
+C3: High-performance and low-complexity neural compression
+from a single image or video
+Supplementary Material
+A. Method and experimental details
+A.1. Model architecture
+Here we provide full details of all model components of C3, cf. Fig. 2 in the main paper for a visualization of the model. In
+App. A.4 we provide all hyperparameter settings for our experiments.
+A.1.1
+Multi-resolution latent grids
+We follow COOL-CHIC and structure the latent z in a hierarchy of N latent grids, z1 , . . . , zN , at multiple resolutions. Each
+latent grid zn has a single channel and is of shape (hn , wn ) for images and (tn , hn , wn ) for videos. By default, these sizes are
+related to the image shape (h, w) or video shape (t, h, w) through
+t
+h
+w
+(tn , hn , wn ) = ( 2n−1
+, 2n−1
+, 2n−1
+),
+n = 1, . . . , N,
+(6)
+that is, the latent grid zn is a factor 2 smaller in each dimension than the previous grid zn−1 . All latent grids are initialized to
+zero at the start of optimization.
+A.1.2
+Upsampling the latent grids to the resolution of the input
+Each latent grid is deterministically upsampled to the input resolution ({t}, h, w) before all grids are concatenated together
+and passed as input to the synthesis network. COOL-CHIC uses simple bicubic upsampling for this [43]. COOL-CHICv2
+instead uses learned upsampling that is implemented as a strided convolution (allowing for upsampling by a factor of 2 only)
+that is initialized to bicubic upsampling [48].
+We experimented with different forms of upsampling (both learned and fixed) in our setup but found that for almost all
+bitrates, using simple bilinear upsampling led to the best results. More complex upsampling methods such as bicubic or
+Lanczos upsampling only led to better results for very low bitrates. We explain this observation as follows. For high bitrates,
+fine details are modeled by the highest resolution latent grid, which already matches the resolution of the input, see, e.g., the
+top row in Fig. 26. Therefore bilinear upsampling of the lower resolution latents is sufficient. For low bitrates, only very few
+details are modeled by the highest resolution latent grid, see bottom row in Fig. 26. The model therefore relies much more
+heavily on information upsampled from the lower resolution latent grids to explain fine details; in this case, more complex
+upsampling methods are beneficial. Because the differences even for lowest bitrates were very small, we opted to exclusively
+use bilinear interpolation as it also has a lower decoding complexity. For videos we use trilinear interpolation.
+A.1.3
+Image synthesis with the synthesis network
+The upsampled latents are stacked into a single tensor of shape ({t}, h, w, N ) and are then used as input for the synthesis
+network fθ , which directly predicts the raw RGB intensity values (output values are clipped to lie in the correct range).
+To parameterize fθ , COOL-CHIC uses a simple MLP that is applied separately to each of the ({t}, h, w) pixel locations.
+This operation can be equivalently implemented as a sequence of 1 × 1 convolutions. In addition, COOL-CHICv2 optionally
+adds several 3 × 3 residual convolutions. For the residual convolutions the input and output channel dimensionality is set to
+3 to keep the decoding complexity low. C3 follows the same architecture layout but uses the more expressive GELU [33]
+activation function instead of ReLUs. We also opt to use narrower and deeper networks with a similar overall decoding
+complexity. For C3, the 1 × 1 convolutions are initialized with the standard He initialization while the residual convolutions
+are initialized to zero.
+Context for znij
+Context for znij with previous grid conditioning
+i, j
+i, j
+latent grid zn
+downsampled latent grid zn−1
+latent grid zn
+Figure 10. Illustration of the context used by the entropy model to predict the distribution parameters of a latent grid location zn
+ij . Left:
+Without previous grid conditioning the context only comes from a (causal) neighborhood in the same latent grid. Right: With previous grid
+conditioning a small neighborhood from the bilinearly downsampled latent grid zn−1 is used in addition to the context from the current
+latent grid zn .
+A.1.4
+Entropy model for the latent grids
+The entropy model is used to losslessly compress the (quantized) latent grids into a bitstream. Each latent grid location, znij for
+images and znτij for videos, respectively, is entropy en-/decoded using a quantized Laplace distribution with mean parameter
+n
+µnij (µnτij for video) and scale parameter σij
+(στnij for video). Both parameters are autoregressively predicted from the context
+of the latent grid entry using the entropy network gψ :
+n
+µnij , σij
+= gψ (context (zn , (i, j))) .
+for images
+(7)
+µnτij , στnij = gψ (context (zn , (τ, i, j))) .
+for videos
+(8)
+Because the autoregressive prediction also occurs at decoding time, the context has to be causally masked/extracted; following
+COOL-CHIC, we use a (causally masked) neighborhood of the latent entry as its context (cf. Fig. 10 (left)). gψ is a fully
+connected network that maps the context to the Laplace distribution parameters. During optimization and encoding, when all
+latent entries are available, we use 1 × 1 convolutions (1 × 1 × 1 for video) with the corresponding number of channels to
+replace the MLP and use a masked kh × kw convolution (kt × kh × kw for video) to replace the extraction of context of size k
+and the first layer of the MLP, cf. Fig. 10 (left).
+The scale parameter σ of the Laplace distribution is constrained to be positive while the output of the entropy network
+gψ in unconstrained and can be positive and negative. We therefore pass the raw prediction of the network through an
+exponential function; in other words, the network predicts the log-scale instead of the scale as is usually done in practice
+when parameterizing positive values. We found that shifting the predicted raw log-scale value by a constant can improve
+optimization dynamics as it determines the behavior of the model close to initialization.
+So far the context for an entry znij only takes into account the local neighborhood in the same grid zn . This means that the
+entropy model factorizes across grids:
+Y
+Pψ (z) =
+Pψ (zn ).
+(9)
+n
+Alternatively, we also consider the option of extending this context to include local grid entries in a neighboring grid zn−1 :
+Y
+Pψ (z) = Pψ (z1 )
+Pψ (zn |zn−1 ).
+(10)
+n>1
+Note that because of the autoregressive structure, we can only depend on the neighboring grid in one direction. In that case,
+we downsample the previous latent grid zn−1 to the same resolution as the current grid, zn , and extract the full neighborhood
+around the location of interest from it; cf. Fig. 10 (right) for an illustration. The size of the neighborhood extracted from the
+previous grid can vary from the size of the neighborhood in the current grid. We found that in practice, small neighborhood
+sizes for the previous grid (e.g. 3 × 3) were sufficient.
+We also explored the option of using separate entropy parameters for different grids
+Pψ (z) =
+Y
+Pψn (zn ),
+(11)
+n
+and found that while this did not help for images, it gave better RD performance on videos, especially when using different
+masking patterns for different grids (cf. App. A.3).
+A.2. Quantization-aware optimization of the rate-distortion objective
+Here, we provide further details about the RD objective in Eq. (4) that is used to fit the latent grids z as well as the synthesis
+network fθ and the entropy network gψ to a particular image x using gradient-based optimization. We reproduce the objective
+here for easier reference:
+Lθ,ψ (z) = ∥x − fθ (Upsample(z)) ∥22 − λ log2 Pψ (z).
+(4)
+The objective trades off reconstruction of the image (first term) and compression of the latent z (second term) with an
+RD-weight λ. By varying λ we trace out different points in the RD-plane that we plot as RD-curves. High values of λ lead to
+low bitrates and vice versa. Note that the objective does not take into account the quantization of the model parameters θ and
+ψ.
+At evaluation time, the distortion (measured in PSNR) and the rate are computed from quantized versions of the variables,
+b, b
+z
+θ, and b
+ψ, that have been entropy-decoded from the bitstream, see Fig. 2 for an illustration of the decoding.
+During optimization we evaluate the RD-loss in Eq. (4) using continuous variables z, θ, ψ. Naive minimization of the
+objective w.r.t. the continuous variables would give rise to a solution that does not work well when the variables are quantized.
+Instead, we have to take the subsequent quantization into account during optimization. In practice, quantization of the latent
+grid values z is most relevant, such that the optimization is only made aware of the quantization of the latent grids and not of
+the quantization of the network parameters themselves. We explain how these network parameters are quantized and entropy
+en-/decoded in App. A.2.6.
+A.2.1
+Quantized Laplace distribution for continuous variables: Integrated Laplace distribution
+As explained above, the rate is modeled by (the log density of) a quantized Laplace distribution Pψ whose distribution
+parameters are predicted by the entropy model gψ .
+During optimization we use continuous values and, following Ballé et al. [6] and Ladune et al. [43], replace the quantized
+Laplace distribution with an integrated Laplace distribution that integrates the probability mass over the rounding/quantization
+interval. When evaluated on quantized values, the two distributions are identical:
+Pψ (znij ) =
+Z znij +0.5
+zn
+ij −0.5
+n
+Laplace(z; µnij , σij
+) dz,
+(12)
+n
+where the location parameter µnij and the scale parameter σij
+of the Laplace distribution are autoregressively predicted by the
+entropy network gψ .
+A.2.2
+Two stages of optimization
+Following COOL-CHIC and COOL-CHICv2, we split the optimization into two stages that differ in how the quantization of
+the latents is approximated. As discussed in the main paper, we make improvements to both stages. Here, we explain the two
+stages used by C3 in details; we also highlight the main differences to prior work where appropriate.
+Stage 1: Soft-rounding z and adding noise to it. In the first stage, the continuous values for the latent grids z are passed
+through an invertible soft-rounding function and additionally perturbed with additive noise as we describe in Apps. A.2.4
+and A.2.5, respectively. Because the soft-rounding function is invertible and differentiable everywhere, we can compute
+its gradient with backpropagation, and the additive noise can be ignored for the gradient computation as it does not
+depend on any of the parameters (the soft-rounding function is implemented in a reparameterized form):
+forward :
+backward for θ, ψ :
+backward for z :
+Lθ,ψ (softroundT (z, u))
+u ∼ pnoise (u)
+∇θ,ψ Lθ,ψ (softroundT (z, u))
+(13)
+(14)
+(15)
+∇z Lθ,ψ (softroundT (z, u))
+Gradient variance is a concern in this stage of training, especially since we use larger learning rates. Because of this, we
+cannot use a temperature T in the soft-rounding that is too low (cf. App. A.2.4 for details), and we also found it beneficial
+to use more concentrated noise distributions than uniform noise early in training (cf. App. A.2.5 for details).
+COOL-CHIC and COOL-CHICv2 do not use soft-rounding and instead directly add uniform noise, pnoise (u) =
+Uniform(u).
+Stage 2: Hard-rounding z. In the second stage, the continuous values for the latent grids z are (hard-)rounded; i.e., they
+b = ⌊z⌉. Quantizing the latents increases the variance of the gradients w.r.t. the
+are replaced by their quantized values z
+network parameters θ and ψ and necessitates lower learning rates as we discuss in App. A.2.3. To estimate gradients w.r.t.
+the latent z, we have to backpropagate through the discrete rounding; as this is not possible, we replace the hard-rounding
+with soft-rounding using a very low temperature T = 10−4 for this case. This estimator approximates the hard-rounding
+well but is invertible; however, it is still biased. Note that we do not add any noise when using this soft-rounding estimator.
+forward :
+backward for θ, ψ :
+backward for z :
+Lθ,ψ (⌊z⌉)
+(16)
+∇z Lθ,ψ (softroundT→0 (z))
+(18)
+(17)
+∇θ,ψ Lθ,ψ (⌊z⌉)
+Because of our improvements to stage 1, the loss as well as the corresponding rate and distortion values do not change by
+much in the second stage of optimization. Overall, stage 2 seems to be less important for C3 than for COOL-CHICv2,
+though it still leads to small improvements. See App. D.2 for an ablation.
+b in the second stage but uses simple (linear) straight-through estimation to
+COOL-CHIC also uses the quantized latent z
+estimate gradients w.r.t. z [43]; the linear function is a cruder approximation of (hard) rounding than the soft-rounding
+function, such that the bias of this estimator is larger than for C3. COOL-CHICv2 also uses linear straight-through
+estimation but downscales the gradient by a factor ϵ ≪ 1 [48]. This results in the same biased straight-through estimator
+but effectively changes the learning rate of the latents to be smaller.
+A.2.3
+Learning rate decay
+learning rate
+10−2
+10−4
+0
+Stage 1
+Stage 2
+steps
+Figure 11. Schematic of the learning rates used for the two stages of optimization. Axes are not to scale and values are only indicative. In
+stage 1, the learning rate is decayed with a cosine schedule from an initial value to 0 at the end of stage 1. In stage 2 we adaptively decay the
+learning rate by a constant factor whenever the evaluation loss does not improve for a certain number of steps.
+As for most optimization based algorithms the learning rate is one of the most important hyperparameters in C3. We use
+two simple strategies to choose the learning rate for stage 1 and stage 2, respectively, cf. Fig. 11 for a schematic.
+Learning rate in Stage 1. We use a cosine decay schedule that starts at a higher value and is decayed to 0 throughout stage 1,
+which also makes up most of the optimization steps. The initial learning rate value is chosen empirically.
+Learning rate in Stage 2. Due to the variance of the gradients and the bias of the estimator, the second stage of optimization
+depends even more strongly on the learning rate. We found that starting with a high enough learning rate was important
+to make progress, but that an aggressive decay of the learning rate may be necessary as otherwise the loss can quickly
+get worse. Instead of using a fixed schedule, we therefore opted for the following automatic and adaptive mechanism:
+Starting from a fixed sufficiently high learning rate (10−4 in our experiments), we track the loss and decay the learning
+rate by a fixed factor if the loss does not improve for a certain number of steps. Upon decaying the learning rate we also
+reset the parameters (z, θ, ψ) and optimizer state to their previous best values as measured by the loss. The stage finishes
+after a certain number of steps or when the learning rate is decayed below a certain threshold value.
+A.2.4
+Soft-rounding
+As discussed above, we warp the continuous latent values z during the first stage of optimization with a soft-rounding function
+to better approximate the eventual quantization of the latents. A soft-rounding function is a differentiable relaxation of the
+(hard) rounding function; that is, it has a parameter T (typically referred to as temperature) whose value determines how well
+we approximate the hard rounding function. Crucially, by setting T to a particular value (T = 0 in our case), we recover
+the hard rounding function. As T → ∞ our soft-rounding function (see below) tends to a linear function, equivalent to the
+straight-through gradient estimator that is used in COOL-CHIC [43]. Note that despite using a soft-rounding function, we still
+have to add random noise to regularize the optimization. We explain this further in App. A.2.5.
+Following Agustsson and Theis [2], we use a construction where we apply soft-rounding twice: first to the raw value z and
+a second time after adding random noise u to the result. That is, the softroundT (z, u) function in Eqs. (13) to (15) is given by
+softroundT (z, u) = rT (sT (z) + u),
+(19)
+where rT and sT are simple soft-rounding functions.
+Following Agustsson and Theis [2], we used the following simple soft-rounding function,
+1 tanh(∆/T )
+1
++ ,
+2 tanh(1/2T ) 2
+1
+∆ = z − ⌊z⌋ − ,
+2
+(20)
+rT (y) = s−1
+T (y − 0.5) + 0.5 ≈ EX [X | sT (X) + U = y]
+(21)
+sT (z) = ⌊z⌉ +
+which is invertible and differentiable everywhere. We further also use
+for the second soft-rounding function (instead of applying sT again) as suggested by Agustsson and Theis [2]. Here, X and U
+are assumed to be uniform random variables. We found that sT (sT (z) + u) seemed to perform equally well in our setting.
+As the learning rate is decayed throughout stage 1, we can also decrease the temperature T of the soft-rounding to better
+approximate the rounding operation. For simplicity we use a linear schedule that interpolates between a higher temperature
+(T = 0.3) at the beginning of stage 1 and a lower temperature (T = 0.1) at the end of stage 1. A higher temperature
+corresponds to a more linear function while a lower temperature leads to a more step-like function, cf. Fig. 3.
+A.2.5
+Kumaraswamy noise distribution
+As discussed in Sec. 3.1, adding noise during stage 1 is necessary even with soft-rounding because the (invertible) soft-rounding
+function alone does not create an information bottleneck. What do we mean by this? Hard rounding irreversibly destroys
+information by mapping all latent values in a certain quantization bin to the same (quantized) value. Downstream computations,
+such as the reconstruction of the image with the synthesis network, then only have access to these quantized values. Therefore,
+it is important that the synthesis and entropy network are optimized in such a way as to only rely on the information in
+the quantized values, rather than information about the precise location of the latent within the quantization bin. During
+optimization we use continuous valued latents as well as a continuous and invertible relaxation of rounding (as discussed in
+App. A.2.4). And while the soft-rounding function can be steep for low temperatures T , its warping can be undone; that is, the
+synthesis network could learn to invert the soft-rounding function and then rely on information about location within the bin to
+improve the distortion loss without sacrificing the rate loss. The addition of noise is a mechanism to destroy this information
+Soft-rounding with uniform noise (u ∼ pkum=1 (u))
+1
+0
+0
+0.5
+1
+z
+PDF
+2
+pkum=2 (u)
+rT =0.3 (sT =0.3 (z) + ukum=1 )
+pkum=1 (u)
+Soft-rounding
+Soft-rounding
+rT =0.3 (sT =0.3 (z) + ukum=2 )
+PDF
+2
+Soft-rounding with Kumaraswamy noise (u ∼ pkum=2 (u))
+1
+0
+0
+0.5
+u
+1
+z
+u
+Figure 12. Probability density function (PDF) of the simplified Kumaraswamy distribution, cf. Eq. (23), and the effect of using it in the
+soft-rounding function (Eq. (19)) for two values of the shape parameter a. left: a = 1 corresponds to the uniform distribution; right: a = 2
+yields a more peaked distribution that results in reduced variability of the soft-rounding function. For the soft-rounding we plot the mean and
+its 95-percentiles.
+in a differentiable manner, such that we can still evaluate gradients of the objective, but prevent the networks from learning to
+use this information (that will get destroyed with quantization).
+A consequence of adding noise is that the gradients of the objective (Eqs. (14) and (15)) become stochastic, and the strength
+of the noise determines the variance of these gradients. Large gradient variance can lead to slower or worse optimization. In
+particular when using the soft-rounding function, there is no reason a priori that uniform noise should strike the best balance.
+We therefore explored other noise distributions as the detail in the following.
+We want to flexibly parameterize the noise distribution in the compact interval [0, 1]. A natural choice for this is the
+Beta(a, b)-distribution that has two shape parameters a and b and can represent the Uniform distribution as well as symmetric
+and asymmetric overdispearsed (spread out) and underdispersed (peaked) distributions. However, we found that sampling from
+the Beta-distribution is slow due to the transcendental functions involved in computing its density and CDF. We therefore use
+the Kumaraswamy distribution [41] that is similar to the Beta-distribution but has a closed form density and CDF.
+The Kumaraswamy probability density function also has two shape parameters, a and b, and is given by
+pa,b (u) = abua−1 (1 − ua )b−1 .
+(22)
+We are only interested in distributions with a mode at 0.5 so as not to favor one direction; we can therefore simplify the
+distribution to only have a single parameter a:
+1
+a
+pkum=a (u) = (2a (a − 1) + 1)ua−1 (1 − ua ) a (2 −1)(a−1) .
+(23)
+Setting a = 1 corresponds to the uniform distribution, pkum=1 (u) = Uniform(u). We plot this simplified Kumaraswamy
+distribution (Eq. (23)) for a = 1 and a = 2 in Fig. 12. Note that while the mode is at u = 0.5, the distribution is not quite
+symmetric; yet we observed that this did not matter in practice, likely because the asymmetry is small.
+In Fig. 12 we also show the effect of sampling from these distributions on the soft-rounding; as expected, sampling from a
+more peaked distribution, pkum=2 , leads to smaller uncertainty intervals at the same temperature (T = 0.3 in this case) for the
+soft-rounding.
+Because gradient variance is of more concern at high learning rates at the beginning of stage 1, the trade-off between
+regularization and optimization dynamics changes throughout stage 1. Empirically we found that linearly decaying the shape
+parameter a from a = 2 at the beginning of stage 1 to a = 1 (uniform distribution) at the end of stage 1 performed best.
+A.2.6
+Quantization and entropy encoding/decoding of the network parameters
+Following COOL-CHIC, we treat the synthesis and entropy parameters θ, ψ as continuous values during training, and quantize
+them separately after training. We do a grid search over the quantization steps for the weights and bias terms for θ and ψ (so
+two terms in total, one for weight terms in either θ or ψ and one for bias terms in either θ or ψ), that give quantized parameters
+b We select the quantization step that minimizes the following modified objective:
+θb and ψ.
+2
+b
+b
+L′θ,
+b(z) + log P (θ) + log P (ψ))
+bψ
+b(z) = ∥x − fθb (Upsample(z)) ∥2 − λ(log2 Pψ
+(24)
+Note that the RD-objective and the optimization thereof are not quantization-aware with respect to these network parameters.
+Addressing this may constitute interesting future work.
+A.3. Video: learning the custom masking
+Frame 0
+Frame 1
+Frame 2
+Frame 3
+Displacement 0 → 1
+Displacement 0 → 2
+Displacement 0 → 3
+Figure 13. (Top) First few frames of a video patch from the Jockey sequence (UVG). (Bottom) displacement of key-points between
+consecutive frames computed using the OpenCV [36] implementation of Lucas-Kanade optical flow estimation [56].
+In the video setting, the context for predicting latent entries for a particular frame can also contain entries from the previous
+frame (cf. Fig. 4). As discussed in Sec. 3.3, it is important that the context is wide enough for the context of the previous
+frame to contain relevant information for predicting the latent entry of a particular frame. For example, consider the first
+few frames of the video patch shown in the first row Fig. 13. The second row shows the displacement of key-points between
+consecutive frames, and we can see that the displacement is greater than the small context width (5 − 7 latent pixels) that we
+use for images. In fact, the displacement of key-points between consecutive frames in the second row can be quantified using
+the Lucas-Kanade method for optical flow estimation [56]. This gives a mean displacement of (19.5, 0.6) pixels per frame in
+the x and y direction respectively, where the mean is taken across the first 30 frames. Given that the latents and the synthesis
+network are designed in such a way that the latents only contain very local information about the video pixels, we would not
+be able to use the previous latent frame for predicting the current latent frame with a small context width. Hence we use a
+larger context width to be able to better capture motion.
+The issue with naı̈vely using a larger context is that the number of entropy parameters grows with the context size, as we
+need chidden entropy parameters for every context entry. Given that most of the latent entries in this wide context are irrelevant
+for predicting the target latent entry, we learn a custom mask for the previous latent frame context such that the entropy model
+can still access the relevant context in the previous latent frame while ignoring the irrelevant context therein.
+Here we describe the procedure for learning this custom mask, with an overview in Fig. 14:
+1. Train C3 with wide spatial context for a few iterations. First, train the entropy model with causal masking using a wide
+spatial context of size C × C per latent grid for M iterations, where M is small. Typically we use C = 65. Note that the
+wide context applies to both the previous latent frame τ − 1 and the current latent frame τ . We train with separate entropy
+parameters for each latent grid.
+2. Compute magnitudes of entropy model weights for each context dimension. For each latent grid, take the C 2 dimensions
+of the previous latent frame τ − 1, and for each dimension compute the mean magnitude of the entropy model’s first layer
+weights that process this dimension. i.e., suppose the entropy model’s first 1 × 1 Conv layer for the previous latent frame
+context has weights of shape C × C × 1 × fout . Take the absolute value of these weights, followed by the mean across the
+final two axes to obtain the C × C magnitudes for each of the C 2 context dimensions.
+Step 1
+frame τ − 1
+frame τ
+frame τ + 1
+frame τ
+frame τ + 1
+frame τ
+frame τ + 1
+Step 2
+frame τ − 1
+Step 3
+frame τ − 1
+Figure 14. Visualization of the 3-step procedure for learning the custom masking.
+3. Choose rectangular mask location that maximizes the sum of magnitudes within mask. Given a fixed rectangular
+mask shape c × c′ (where c, c′ ≪ C), sweep over all possible locations of the rectangular mask within the C × C context
+grid. For each location, compute the sum of the c × c′ magnitudes within the mask. Then choose the location that has the
+highest sum.
+We thus obtain the c × c′ learned rectangular mask for the previous latent frame τ − 1. We also empirically observed that for
+the lower resolution latent grids, there is little correlation between the latents for different frames, hence the entropy model
+doesn’t use the previous latent frame for the prediction of the target latent pixel (orange border in Fig. 14). Hence we only use
+a learned mask for the K highest resolution latent grids, and for the remaining grids we mask out all of the previous latent
+frame so that it is unused by the entropy model.
+Also note that for the current latent frame τ , the relevant contexts for predicting the target latent pixel should only be a
+handful of values in the neighborhood of the target among the (C 2 − 1)/2 causal context dimensions. So it would be a waste
+of entropy parameters (that need to be compressed and transmitted) to process the irrelevant context dimensions. Hence we
+use a small causal neighbourhood of size l (where l ≤ C and l is odd) around the target latent pixel, the same as for images
+Fig. 10 (left). Note that this causal neighbourhood for the current latent frame is fixed rather than learned, and used for all
+latent grids rather than just the K highest resolution grids. Given this custom masking for the previous and latent frames, we
+train C3 from scratch, fixing the custom mask.
+Learned custom mask for the first latent grid z1
+Frame τ − 1
+Frame τ
+Learned custom mask for the second latent grid z2
+Frame τ − 1
+Frame τ
+Figure 15. Visualization of the custom masks learned with the procedure described in App. A.3. The heatmap represents the magnitude of
+the weights in step 2 of App. A.3, and the blue box represents the learned custom masking for the previous latent frame for each latent grid.
+In practice we use C = 65, M = 1000, c = c′ = 4, K = 3, l = 7; these values were obtained from a hyperparameter
+sweep on a small subset of patches of the UVG dataset.
+In Fig. 15, we show that we are able to learn a sensible custom mask with the above procedure when applied to a video
+patch of the Jockey sequence in Fig. 13. We use a low value of RD-weight λ (Eq. (4)) for training, i.e., train for a high bitrate.
+The heatmaps in Fig. 15 correspond to step 2 of the procedure above (compute magnitudes of entropy model weights for
+each context dimension) when training on this video patch. After M = 1000 iterations, we see that the entropy model for the
+first latent grid z1 (top row) assigns the highest weights to the context dimensions that are consistent with the displacement
+calculated above, relative to the central target pixel. In step 3, the blue learned mask is placed here as this position has the
+greatest sum of magnitudes within the mask. For the second latent grid z2 (bottom row), we see that the region corresponding
+to the displacement calculated above does indeed have higher weights than its neighborhood, but the highest weight is given to
+the central pixel. This indicates that the correlation between the latent dimensions that correspond to the same key-point in
+consecutive frames is weaker for z2 compared to z1 . Given that we have trained for a high bitrate, most of the information
+content lies in z1 . This is consistent with the above observation that the aforementioned correlation is stronger for z1 compared
+to z2 .
+A.4. Hyperparameters
+Here, we give an overview and a brief description of the hyperparameters used in our experiments as well as their settings.
+These comprise both architecture choices (and their hyperparameters) as well as optimization hyperparameters. As explained
+in the main paper, for images we distinguish between evaluations with a single fixed setting for all images (that we simply
+denote as C3) and an adaptive setting where we select the best hyperparameter choice out of a small set on a per-image basis
+(we denote this as C3 adaptive). For videos we always select the best hyperparameters out of a small set on a per-patch basis.
+The choices of varying hyperparameters form part of the header that is transmitted with the bitstream, as they are needed to
+decode the image.
+In Tab. 4 we provide a comprehensive list of all hyperparameters of C3. We also give their default values if they are fixed
+for all experiments and specify whether they are included in the adaptive setting.
+In Tabs. 5 and 6 we separately list all hyperparameters that differ for images and videos, respectively. We provide both
+fixed values as well as the possible sets of values that are explored in the adaptive setting.
+Adaptive setting for Kodak. For Kodak, the adaptive setting independently explores different values for three hyperparameters (see Tab. 5):
+• Whether the highest resolution latent grid is included (2 choices);
+• Different entropy and synthesis network sizes (3 choices);
+• Different context sizes for the entropy model (2 choices)
+In total the adaptive setting explores 2 × 2 × 3 = 12 hyperparameter settings and picks the best one per image.
+Adaptive setting for CLIC2020. For CLIC2020, the adaptive setting independently explores different values for two
+hyperparameters (see Tab. 5):
+• Whether the highest resolution latent grid is included (2 choices);
+• Different entropy and synthesis network sizes (3 choices)
+In total the adaptive setting explores 2 × 3 = 6 hyperparameter settings and picks the best one per image.
+Adaptive setting for UVG. For UVG, we only use the adaptive setting, which explores different values for six hyperparameters that are grouped together as follows (see Tab. 6). See App. D.4 for results using single/fewer settings. Namely we explore
+three ”entropy parameter settings”, E 1 , E 2 , E 3 , that jointly specify the following hyper parameters:
+• Whether a separate entropy model is learned per grid;
+• Different context sizes for the entropy model;
+• Whether custom masking is used
+Similarly, we explore three ”synthesis parameter settings”, S 1 , S 2 , S 3 , that jointly specify the following hyperparameters:
+• Whether the bias of the last layer of the synthesis network is initialized to the mean RGB values of the image;
+• Whether the 3 × 3 × 3 3D convolutions in the synthesis model are replaced by 3 × 3 2D convolutions per frame.
+In total the adaptive setting explores 3 × 3 = 9 hyperparameter settings and picks the best one per video patch.
+Moreover, the video patch size is chosen according to the RD-weight λ, as we observed that larger patches give better RD
+performance for high values of λ (low bitrates) and vice versa. We use (30 × 180 × 240) for λ ≤ 2 · 10−4 , (60 × 180 × 240)
+for 2 · 10−4 < λ ≤ 10−3 , (75 × 270 × 320) for λ > 10−3 .
+Hyperparameter
+Fixed value
+In adaptive setting?
+Quantization – Stage 1
+Number of encoding iterations
+Initial learning rate
+Final learning rate
+Initial value of T for soft rounding
+Final value of T for soft rounding
+Initial value of a for Kumaraswamy noise
+Final value of a for Kumaraswamy noise
+Threshold for gradient L2 norm clipping
+105
+10−2
+0
+0.3
+0.1
+2.0 () / 1.75 ( )
+1.0
+10 () / 0.03 ( )
+Quantization – Stage 2
+Maximum number of encoding iterations
+Initial learning rate
+Decay lr if loss has not improved for this many steps
+Decay lr by multiplying with this factor
+Finish Stage 2 early if lr drops below this value
+Value of T for soft-rounding gradient estimation
+104
+10−4
+20
+0.8
+10−8
+10−4
+Architecture – Latents
+Number of latent grids
+Quantization step (bin width) for rounding
+Use the highest resolution grid ({t}, h, w)?
+−
+−
+−
+
+Architecture – Synthesis model
+Output channels of the 1 × 1 convolutions (list)
+Number of 3 × 3 residual convolutions (with 3 channels)
+Initialize the last layer bias with mean RGB of the image?
+(video only) Replace 3 × 3 × 3 Conv with 3 × 3 Convs per frame
+−
+2
+−
+−
+ and
+Widths of the 1 × 1 convolutions
+Log-scale of Laplace is shifted by . . . before exp
+Scale parameter of Laplace is clipped to
+Context size (same grid)
+Include previous grid in context?
+Context size (previous grid)
+−
+8
+[10−3 , 150]
+−
+−
+3×3
+ and
+Architecture – Entropy model
+ and
+
+Architecture – Entropy model (video only)
+Learn separate models per grid, ψ = (ψ1 , . . . ψN )?
+Use custom masking (cf. App. A.3)?
+Mask size (current frame), l
+Mask size (previous frame), c × c′
+Iteration count to learn the mask, M
+Number of grids for which mask is learned, K
+−
+−
+7×7
+4×4
+1000
+3
+Other
+Possible quantization steps for network parameters
+(video only) Size of video patches
+♣
+−
+Table 4. Hyperparameters and their values for the quantization-aware optimization and architecture of C3 for images () and video ( ).
+Where hyperparameters are fixed for all experiments and evaluations, their values are listed. Otherwise they are specified in the image or
+video specific hyperparameter list in Tabs. 5 and 6, respectively. An icon in the last column indicates whether a hyperparameter is included
+in the adaptive setting for images and/or videos. Except for gradient L2 norm clipping, all quantization hyperparameter values are the same
+for images and videos.
+♣ The possible quantization steps for the network parameter θ and ψ are {5 · 10−5 , 10−4 , 5 · 10−4 , 10−3 , 3 ·
+−3
+−3
+−2
+10 , 6 · 10 , 10 } for the weights and biases separately.
+Hyperparameter
+Fixed value
+Adaptive values
+7
+0.4
+✓
+−
+−
+✓, ✗
+Output channels of synthesis 1 × 1 convs♣
+Initialize the last synthesis layer bias with mean RGB of the image?
+(18, 18)
+✗
+Output channels of entropy 1 × 1 convs♣
+Learn separate entropy model per grid, ψ = (ψ1 , . . . ψN )?
+(12, 12), (18, 18), (24, 24)
+−
+(18, 18)
+✗
+(12, 12), (18, 18), (24, 24)
+−
+✗
+7×7
+−
+5 × 5, 7 × 7
+✓
+7×7
+−
+−
+Number of latent grids
+Latent quantization step (bin width) for rounding
+Use the highest resolution grid (h, w)?
+Kodak only
+Include previous grid in context?
+Context size (same grid) in entropy model
+CLIC2020 only
+Include previous grid in context?
+Context size (same grid) in entropy model
+Table 5. Hyperparameter values that are specific to images. Fixed value contains the values that are fixed for all images. It also contains the
+default values in the (non-adaptive) setting. Adaptives values specifies the values that are explored in the adaptive setting.
+♣
+The adaptive values for the synthesis and entropy model sizes are varied together.
+Hyperparameter
+Fixed value
+Size of video patches
+Number of latent grids
+Latent quantization step (bin width) for rounding
+Use the highest resolution grid (t, h, w)?
+−
+−
+0.3
+✓
+Learn separate entropy model per grid, ψ = (ψ1 , . . . ψN )?
+Output channels of entropy 1 × 1 convs
+Context size (same grid) in entropy model
+Use custom masking?
+Include previous grid in context?
+−
+−
+−
+−
+✗
+Output channels of synthesis 1 × 1 convs
+Initialize the last synthesis bias with mean RGB of the image?
+Replace 3 × 3 × 3 Conv with 3 × 3 Convs per frame
+(32, 32)
+−
+−
+E1
+6
+E2
+Adaptive values
+E3
+S1
+S2
+S3
+(30 × 180 × 240), (60 × 180 × 240), (75 × 270 × 320)♣
+5
+6
+✗
+(16, 16)
+3×9×9
+✗
+✓
+(2, 2)
+3×9×9
+✗
+✓
+(8, 8)
+3 × 65 × 65
+✓
+✓
+✓
+✓
+✗
+✗
+✓
+Table 6. Hyperparameter settings that are specific to videos. Fixed value contains the hyperparameter values that are fixed for all images. Adaptive values lists the hyperparameter
+values that are explored for each patch separately. There are three possible settings for the entropy model, E 1 , E 2 , E 3 , and three possible settings for the synthesis model,
+S 1 , S 2 , S 3 . Therefore, for each patch, we explore 3 × 3 = 9 different settings.
+The video patch size is chosen according to the RD-weight λ. We use (30 × 180 × 240) for λ ≤ 2 · 10−4 , (60 × 180 × 240) for 2 · 10−4 < λ ≤ 10−3 , (75 × 270 × 320) for
+λ > 10−3 .
+♣
+B. Evaluation details
+B.1. BD-rate
+The Bjøntegaard Delta rate (BD-rate) metric [9] is a scalar that estimates the saving in bitrate of one RD curve compared to
+another. It is useful since it allows to quantify the improvement of one RD curve over another with a single scalar. Given an
+anchor RD curve and a candidate RD curve, the curves are first transformed into a curve of distortion vs log-rate. Then the
+difference between the area under the curve (with respect to the distortion/PSNR axis) of the candidate and the anchor are
+computed. Note that since the area under the curve is measured with respect to the distortion axis, the smaller the area under
+the curve, the better. Therefore a negative value of the BD-rate implies that the candidate curve is better than the anchor. Also
+note that the output is invariant to (positive) scalar multiplication of the rate, due to the use of the log rate. Hence the BD rate
+should be invariant to whether we use bpp, bits or nats.
+B.2. PSNR evaluation for videos
+We compute PSNR with the following convention also used in Mentzer et al. [59]: take the per-frame PSNR for each frame of
+a given video, then take the mean across all frames for that video to get a PSNR value for that video. Take the mean of these
+values across all videos to get the PSNR for a given RD-weight. For bpp, simply take the mean across all patches of a video to
+get the bpp for a given video, then take the mean across all videos.
+B.3. Entropy coding
+Kodak
+1.5
+1
+0.5
+0
+0
+0.5
+1
+CLIC2020
+2
+True rate (bpp)
+True rate (bpp)
+2
+1.5
+2
+Estimated rate (bpp)
+1.5
+1
+0.5
+0
+0
+0.5
+1
+1.5
+2
+Estimated rate (bpp)
+Figure 16. The true bit-rate observed when range coding images into a bit-stream is nearly identical to our estimates of the bit-rate obtained
+by evaluating log-probabilities. Each point corresponds to an image encoded at a given rate-distortion weight.
+To encode images to files, we use the range-coder Python package available in PyPI. First, hyperparameter choices
+and other information that depend on the image are uniformly encoded. These currently include the image resolution and the
+choice of quantization step widths for the synthesis transform and the entropy model. Other hyperparameters (such as the
+model architecture) are assumed to be fixed and known to the decoder. Next, the weights and biases of the synthesis transform
+and entropy model are encoded assuming a different zero-mean Laplace distribution for each layer’s set of weights and set of
+biases. The scale of the Laplace distribution is estimated from the parameters themselves, quantized to one of 1024 possible
+values, and uniformly entropy encoded using the range coder. Finally, the latent grids are autoregressively encoded with a
+Laplace distribution whose mean and scale are predicted by the entropy model.
+For convenience and faster turnaround times, bpp values used in plots throughout the paper were estimated by evaluating
+the log-probabilities that would be used when range coding model parameters and latent values. We find that these estimates
+are very close to the bit-rates observed when range coding using the default, non-adaptive setting of C3 (Fig. 16).
+B.4. Estimating the decoding complexity in MACs
+Here we explain in more detail how we obtained the estimates for the decoding complexity. We report this value in terms of
+the number of multiply-accumulate operations (MACs) per pixel. We follow the convention that 1 MAC = 2 FLOPs, though
+note that this is not always consistently done in the literature.
+We follow COOL-CHIC [43] and COOL-CHICv2 [48] and report theoretic MACs for applying the neural networks in our
+model, i.e., matrix multiplications, but exclude pointwise operations such as non-linearities. We also include an estimate for
+bi-/trilinear upsampling.
+COOL-CHICv2 uses fvcore [22] to automatically estimate the number of theoretic MACs in PyTorch [65]. We
+implement our method in JAX [10], which (to the best of our knowledge) does not easily allow for the automatic estimation of
+theoretic MACs/FLOPs. We therefore use back-of-the-envelope estimates as detailed below and confirm they agree with the
+numbers as reported by fvcore in a PyTorch codebase.
+The MACs estimates for other baselines were obtained from various sources while ensuring the numbers were comparable
+with ours. For BMS [6], MBT [63] and CST [16], we calculated the MACs using the fvcore library on the CompressAI
+implementations of these models (measuring MACs only on the decoder of the model). For MLIC and MLIC+ [38], the
+numbers were directly provided to us by the authors, who calculated their numbers using the DeepSpeed library. For EVC
+[29], we used the numbers for the EVC-S, EVC-M and EVC-L models in the paper, which were obtained using the ptflops
+library.
+Bi- and trilinear upsampling To upsample the latent grids we use bilinear upsampling for images and trilinear upsampling
+for videos, respectively. fvcore does not provide a complexity estimate for upsampling; we therefore use the following
+upper-bound estimates. We upper bound the complexity of bilinear upsampling with 8 MACs per output pixel; this estimate
+includes computing the weighted average of the values at the four closest grid points (4 MACs) and computation of the
+corresponding weights (4 MACs). Similarly, we upper bound the complexity of trilinear upsampling with 16 MACs per output
+pixel; this estimate includes computing the weighted average of the values at the eight closest grid points (8 MACs) and
+computation of the corresponding weights (8 MACs). Note that in practice, most of the weights can be pre-computed and
+cached, especially when we are upsampling by an exact factor of 2.
+Application of the entropy model. While we implement the entropy as a convolutional network with a masked convolution
+as first layer and a sequence of 1 × 1 convolutions during encoding, it can be equivalently evaluated as a feed-forward MLP
+where the context for each latent grid location is read from memory. Each latent grid location is evaluated independently in
+this case. Therefore, the cost of evaluating the entropy model on all latent entries is given by the cost of applying it to one
+entry multiplied by the number of latent values Z, which is given by
+X
+Z=
+hn · wn
+(25)
+n
+where hn and wn are the height and width of latent grid n. The cost of applying the entropy model is the cost of applying all
+layers, which depends on the input, hidden, and output sizes. The cost in MACs of each single layer is simply the product of
+the input and output size, cin · cout . The total complexity in MACs/pixel is then given by adding the contributions from all
+latent values and dividing them by the number of pixels.
+We verify that the numbers we obtain for the application of the feed-forward MLP are the same as those reported by
+fvcore that is used by COOL-CHICv2. When estimating the cost of additionally conditioning on the previous grid, we
+need to take into account the larger input-size to the entropy network as well as the bilinear upsampling of the latent. We
+upper-bound the cost of the bilinear upsampling by Z · costone upsampling as we have to resample exactly one value from a
+previous grid for each current grid location. This is an upper bound because the first grid does not actually depend on a
+previous grid.
+Application of the synthesis model The synthesis model fθ is a simple convolutional network with skip connections in its
+second part. The cost of applying a single convolutional layer at one location is
+k · k · cin · cout .
+(26)
+As the number of locations is given by the number of pixels, the above estimate is the cost of applying a single layer in
+MACs/pixel. We again evaluate the cost for different network sizes and verify that they agree with the numbers reported by
+fvcore when implementing them.
+C. Additional results
+C.1. Full RD curves with all baselines
+We include several large-format RD-curve plots in which we compare C3 to:
+Component
+KODAK
+CLIC
+UVG
+Entropy model
+Upsampling
+Synthesis model
+1600
+48
+978
+1889
+48
+978
+2540
+80
+1798
+Total
+2626
+2925
+4418
+BD-rate vs VTM in % (↓)
+Table 7. Maximum computational complexity in MACs/pixel of different components of C3 for the hyperparameters used in each dataset.
+COOL-CHICv2
+20
+CST
+C3 (Ours)
+C3 adapt. (Ours)
+0
+MLIC
+MLIC+
+better
+103
+104
+105
+106
+MACs/pixel (↓)
+Figure 17. MACs/pixel vs BD-rate on CLIC2020. C3 performs well both in terms of BD-rate and decoding MACs/pixel, achieving a better
+trade off than existing neural codecs.
+1. overfitted neural compression methods on the Kodak image benchmark in Fig. 18,
+2. autoencoder based neural compression methods on the Kodak image benchmark in Fig. 19,
+3. several additional baselines on the CLIC2020 image benchmark in Fig. 20, and
+4. several additional baselines on the UVG video benchmark in Fig. 21.
+Image baselines. In addition to the baselines used in the main paper, for images we also compare against1 : COIN [20], SPY
+[75], COIN++ [21], MSCN [70], VC-INR [71], RECOMBINER [32], MBT [63], ELIC [31] and STF [89]. COOL-CHIC,
+COOL-CHICv2, COIN, COIN++ and STF results were obtained from official code implementations. MLIC, SPY, MSCN,
+VC-INR and RECOMBINER results were obtained from direct communication with the respective paper authors. BPG, VTM,
+BMS, MBT, CST and ELIC were obtained from CompressAI [7].
+Video baselines. In addition to the baselines cited in the main paper, for videos we also include HEVC (HM 18.0, Random
+Access, default setting) [76], VTM (17.0, Random Access, default setting) [11], Insta-SSF18 [80] (bigger model than InstaSSF5), DCVC [49], ELF-VC [69], NeRV [14] and HNeRV [15]. HEVC (RA), NeRV, HNeRV, FFNeRV and HiNeRV results
+were obtained from Kwan et al. [42] or direct communication with the authors. HEVC (medium, no B-frames), DCVC,
+ELF-VC and VCT results were obtained from direct communication with the authors of Mentzer et al. [59]. Insta-SSF5/18
+and MIMT results were obtained directly from their papers. VTM (RA) results were obtained by running VTM 17.0 using the
+default setting of encoder randomaccess vtm.cfg [83].
+Discussion of the additional results. From Fig. 18, we see that on the Kodak image benchmark, C3 is SOTA among
+methods based on overfitting neural fields to a single image instance by a noticeable margin, and is the only method that is
+competitive with VTM . From Fig. 19, we see that C3 is not as competitive as the more recent autoencoder-based methods in
+terms of RD, although the gap has been significantly reduced compared to COOL-CHICv2.
+On CLIC2020, arguably a more realistic dataset than Kodak with images at higher resolution, we see in Fig. 20 that C3
+adaptive outperforms VTM and is quite close to MLIC+, the best-performing baseline. We also show the plot of BD-rate
+against decoding complexity in Fig. 17; C3 performs much better in terms of RD performance compared to other baselines
+with a low decoding complexity such as COOL-CHICv2.
+1We follow the CompressAI [7] convention of using the first letters of the first three authors for unnamed methods
+On UVG, we show in Fig. 21 that C3 is also a competitive baseline for video compression, despite being the first one of its
+kind (in the COOL-CHIC line of work) to be applied to videos. Note that there is a clear room for improvement that is visible
+in the gap between C3 and stronger baselines such as HiNeRV and MIMT, however we emphasize again that C3 achieves its
+competitive performance with 2-3 orders of magnitude lower decoding complexity than these baselines (cf. Fig. 9).
+C.2. Encoding times
+See Tab. 8 for details on encoding times for each dataset, showing the fastest and slowest settings among the hyperparameter
+settings in the adaptive sweeps. Note that the encoding time for CLIC2020 depends on the size of the image, hence we measure
+it on the largest image of resolution 1370 × 2048. We emphasize again that we do not optimize for encoding times and use
+unoptimized research code to obtain these encoding times.
+Hyperparameter
+Value
+Kodak – fastest setting
+Context size (same grid)
+Width of 1 × 1 convolutions (synthesis & entropy)
+Use the highest resolution grid (t, h, w)?
+3.9
+5×5
+(12, 12)
+✗
+Kodak – slowest setting
+Context size (same grid)
+Width of 1 × 1 convolutions (synthesis & entropy)
+Use the highest resolution grid (t, h, w)?
+7.1
+7×7
+(24, 24)
+✓
+CLIC2020 – fastest setting
+Width of 1 × 1 convolutions (synthesis & entropy)
+Use the highest resolution grid (t, h, w)?
+21.5
+(12, 12)
+✗
+CLIC2020 – slowest setting
+Width of 1 × 1 convolutions (synthesis & entropy)
+Use the highest resolution grid (t, h, w)?
+48.0
+(24, 24)
+✓
+UVG – fastest setting
+Patch size
+Entropy setting
+Replace 3 × 3 × 3 Conv with 3 × 3 Convs per frame
+28.7
+(30, 180, 240)
+No conditioning
+✓
+UVG – slowest setting
+Patch size
+Entropy setting
+Replace 3 × 3 × 3 Conv with 3 × 3 Convs per frame
+Encoding time (sec/1k steps)
+456.7
+(75, 270, 320)
+Learned mask
+✗
+Table 8. Encoding times for C3 measured on a single NVIDIA V100 GPU.
+C.3. RD curves for individual UVG videos
+In Fig. 22, we include RD curves for individual UVG videos. Note that C3 tends to perform better than VCT for Beauty,
+Bosphorus, Honeybee, Shakendry and Yachtride, and even outperforms VTM (17.0, random access setting) on Beauty and
+Shakendry. However C3 appears to struggle with Jockey and Readysetgo, which are the video sequences with faster motion.
+While we show in App. D.4 that the learned mask helps to achieve a better RD performance, it would be interesting to
+investigate how the performance can be improved further especially on these sequences with fast motion.
+Better
+0
+Better
+38
+36
+20
+32
+40
+30
+28
+C3 (ours)
+COOL-CHIC
+VTM
+COIN++
+VC-INR
+RECOMBINER
+26
+24
+22
+C3 adapt. (ours)
+COOL-CHICv2
+COIN
+MSCN
+SPY
+BD-rate vs VTM
+PSNR (dB) (↑)
+34
+60
+80
+0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+1
+Rate (bpp) (↓)
+Better
+38
+−10
+Better
+Figure 18. Rate-distortion curve and BD-rate on the Kodak image benchmark comparing C3 to other overfitted neural field based compression
+methods, including those in Fig. 5. Note that we omit methods with very large values from the BD-rate plot on the right.
+36
+34
+32
+10
+30
+BD-rate vs VTM
+PSNR (dB) (↑)
+0
+20
+C3 (ours)
+BMS
+MBT
+ELIC
+EVC-L
+28
+26
+0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+C3 adapt. (ours)
+VTM
+MLIC+
+STF
+CST
+0.9
+30
+1
+Rate (bpp) (↓)
+Figure 19. Rate-distortion curve and BD-rates on the Kodak image benchmark comparing C3 to autoencoder-based neural compression
+methods, including those in Fig. 5.
+−10
+Better
+Better
+40
+38
+0
+10
+34
+20
+32
+BD-rate vs VTM
+PSNR (dB) (↑)
+36
+30
+30
+28
+0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+C3 (ours)
+MLIC+
+C3 adapt. (ours)
+COOL-CHICv2
+VTM
+CST
+0.7
+40
+STF
+BPG
+0.8
+0.9
+Rate (bpp) (↓)
+Figure 20. Rate-distortion curve and BD-rates of more baselines on CLIC2020, including those in Fig. 6.
+Better
+Better
+PSNR (dB) (↑)
+38
+−40
+36
+34
+32
+30
+0
+5 · 10−2
+0.1
+0.15
+0.2
+0.25
+0.3
+C3 (ours)
+HEVC (medium)
+HEVC (RA)
+VCT
+Insta-SSF5
+MIMT
+HNeRV
+DCVC
+VTM (RA)
+HiNeRV
+Insta-SSF18
+FFNeRV
+NeRV
+ELF-VC
+0.35
+0.4
+Rate (bpp) (↓)
+Figure 21. Rate-distortion curve of more baselines on all UVG videos, including those in Fig. 8.
+−20
+0
+0.45
+BD-rate vs HEVC (medium)
+−60
+40
+Beauty
+Bosphorus
+Better
+36
+34
+32
+0
+0.1
+C3 (ours)
+VTM (RA)
+HEVC (medium)
+VCT
+HiNeRV
+0.2
+0.3
+PSNR (dB) (↑)
+PSNR (dB) (↑)
+Better
+40
+35
+0.4
+0
+0.1
+Honeybee
+VTM (RA)
+HEVC (medium)
+VCT
+HiNeRV
+0.2
+0.3
+0.4
+Jockey
+Better
+Better
+40
+40
+38
+36
+34
+0
+0.1
+C3 (ours)
+VTM (RA)
+HEVC (medium)
+VCT
+HiNeRV
+0.2
+0.3
+PSNR (dB) (↑)
+PSNR (dB) (↑)
+C3 (ours)
+35
+0
+0.4
+0.1
+C3 (ours)
+VTM (RA)
+HEVC (medium)
+VCT
+HiNeRV
+0.2
+0.3
+0.4
+Shakendry
+Readysetgo
+Better
+Better
+40
+35
+30
+0
+0.1
+C3 (ours)
+VTM (RA)
+HEVC (medium)
+VCT
+HiNeRV
+0.2
+0.3
+0.4
+PSNR (dB) (↑)
+PSNR (dB) (↑)
+40
+35
+30
+0
+0.1
+C3 (ours)
+VTM (RA)
+HEVC (medium)
+VCT
+HiNeRV
+0.2
+Yachtride
+PSNR (dB) (↑)
+Better
+40
+35
+30
+0
+0.1
+C3 (ours)
+VTM (RA)
+HEVC (medium)
+VCT
+HiNeRV
+0.2
+0.3
+Rate (bpp) (↓)
+0.3
+0.4
+Rate (bpp) (↓)
+Figure 22. Rate-distortion curves for individual videos in UVG.
+0.4
+D. Additional ablations
+D.1. CLIC2020 ablations
+In Tab. 9 we show the ablations for CLIC2020 when sequentially removing each of our improvements from the best performing
+C3 Adpative model, similarly to Tab. 2 for Kodak in the main paper. In Tab. 10, we show the results when disabling individual
+features from the C3 model, similar to Tab. 3 for Kodak in the main paper. We have an additional row for the previous
+grid conditioning described in App. A.1.4, since this option is only used for CLIC2020. The conclusions are similar in that
+soft-rounding, the GELU activation function and Kumaraswamy noise account for most of the boost in RD performance. Two
+minor differences for CLIC2020 are: 1) the quantization step is slightly more important than the remaining features compared
+to Kodak, 2) conditioning on the previous grid improves performance for CLIC2020. In Tab. 11 we ablate the annealing
+schedules for the soft-rounding temperature and the shape parameter of the Kumaraswamy noise. We find that fixing them to a
+single value leads to worse performance. A lower soft-rounding temperature results in a closer approximation of quantization
+but higher variance in the gradients. Annealing the temperature allows us to control this bias-variance trade-off over time, with
+less biased gradients becoming more important later in training. Also note that different shape parameters of the noise are
+optimal for different soft-rounding temperatures.
+Model variant
+BD-rate vs. C3 Adaptive
+C3 (adaptive)
+C3
+✗ Adaptive lr (Stage 2)
+✗ Shifted log-scale
+✗ Quantization step < 1
+✗ Previous grid conditioning
+✗ Kumaraswamy noise
+✗ GELU
+✗ Soft-rounding
+0.0%
+3.2%
+4.6%
+4.9%
+7.2%
+8.8%
+20.2%
+45.4%
+65.3%
+0%
+20%
+40%
+60%
+Table 9. CLIC2020 ablation sequentially removing methodological changes. Note that a higher BD-rate means worse RD performance
+relative to our default settings for C3.
+Removed Feature
+C3 − Soft-rounding
+C3 − GELU
+C3 − Kumaraswamy noise
+C3 − Quantization step < 1
+C3 − Previous grid conditioning
+C3 − Shifted log-scale > 0
+C3 − Adaptive lr (Stage 2)
+BD-rate vs. C3
+24.87%
+9.83%
+8.06%
+2.82%
+1.50%
+0.99%
+0.54%
+Table 10. CLIC2020 ablation knocking out individual features from C3 (fixed hyperparameters across all images). Note that a higher
+BD-rate means worse RD performance relative to our default settings for C3.
+D.2. Effect of Stage 2
+We also ablate the increase in performance that we can attribute to stage 2 of optimization, by comparing the default setting of
+C3 (both stage 1 + 2) vs only having stage 1. We find that the BD-rate with respect to VTM for these two settings is +1.39%
+vs +2.00% on the CLIC2020 benchmark. The gain in BD-rate for stage 2 is indeed not as significant as was observed for
+COOL-CHICv2 [48].
+Soft-round temperature T
+Kumaraswamy noise a
+BD-rate vs. C3
+0.1
+0.1
+0.1
+0.2
+0.2
+0.2
+0.3
+0.3
+0.3
+1.0
+1.5
+2.0
+1.0
+1.5
+2.0
+1.0
+1.5
+2.0
+88.48%
+109.08%
+129.96%
+11.66%
+5.66%
+5.97%
+10.32%
+5.57%
+9.78%
+Table 11. Ablation of annealing schedules for the soft-rounding temperature and the shape parameter of the Kumaraswamy noise on
+CLIC2020. Instead of annealing the soft-rounding temperature from 0.3 to 0.1 and the Kumaraswamy noise parameter from 2 to 1, we
+clamp them at the fixed value specified in the table. A higher BD-rate corresponds to worse RD performance relative to C3 with annealing.
+D.3. BD-rate vs encoding iterations/time evaluation for CLIC and UVG
+CLIC
+BD-rate vs VTM in % (↓)
+150
+100
+50
+0
+103
+104
+105
+Number of encoding iterations in Stage 1
+BD-rate vs HEVC medium in % (↓)
+In Fig. 23 we show how the BD-rate of C3 changes as a function of the number of encoding iterations for both CLIC2020
+and the Shakendry sequence of UVG. Note that with around 20 − 30k iterations, we can approach the BD-rate of the default
+setting (100k iterations).
+Shakendry (UVG)
+−20
+−40
+−60
+103
+104
+105
+Number of encoding iterations in Stage 1
+Figure 23. Ablation on the effect of using different number of encoding iterations in Stage 1 of the optimization. We evaluate the BD-rate
+(right) vs VTM (lower BD-rate values are better) on CLIC2020 and (left) vs HEVC on the Shakendry sequence of UVG. The number of
+encoding iterations in Stage 2 is determined adaptively but set to be at most 10% of the number of iterations in Stage 1.
+D.4. Video ablations
+Settings
+Single setting: E 1 S 1
+3 settings: single setting for S 1 but sweep E 1 , E 2 , E 3
+9 settings (default): sweep all combinations of E 1 , E 2 , E 3 and S 1 , S 2 , S 3
+BD-rate vs. HEVC (medium)
+−7.67%
+−21.44%
+−28.89%
+Table 12. UVG ablation for the 9 hyperparameter settings used (cf. App. A.4). Note that lower BD-rate means better RD performance.
+In Fig. 24, we highlight the importance of learning the mask by comparing the rate and distortion values when using
+different custom mask locations for the previous latent grid. Among the four different choices of mask locations, we see that
+Mask for 1st latent grid z1
+Mask for 2nd latent grid z2
+PSNR (dB) (↑)
+42.65
+42.6
+42.55
+42.5
+Frame τ − 1
+Frame τ − 1
+0.28
+0.29
+Rate (bpp) (↓)
+Figure 24. Comparison of (bpp, psnr) when training with different mask locations for the previous latent frame on the Jockey patch in Fig. 13.
+The different locations are colour coded as follows: learned (
+), top-left (
+), center (
+), diametrically opposed to learned (
+),
+the learned mask (same as mask shown in Fig. 15) achieves the best RD values.
+In Tab. 12, we show an ablation for how the BD-rate changes when we use a subset of the 9 settings used for the video
+experiments on the UVG dataset (see Tab. 6 for details on the 9 settings). We see that varying the entropy settings and the
+synthesis settings are both important for improvements in performance.
+OOL-CHICv2
+E. Additional visualizations
+In this section, we show visualizations of C3 reconstructions and latents for both images and video.
+Reconstruction with C3
+0.3097 bpp
+Reconstruction with COOL-CHICv2
+0.3097 bpp
+0.3150 bpp
+Figure 25. Qualitative comparison between C3 (top) and COOL-CHIC v2 (bottom). The PSNR for C3 is 30.28dB and the PSNR for
+COOL-CHIC v2 is 28.98dB.
+Reconstruction
+0.3150 bpp
+High bitrate (1.413 bpp)
+Low bitrate (0.079 bpp)
+Figure 26. Top: Reconstruction and visualization of C3’s latents for kodim19 at a high bit-rate (1.413 bpp). The first row shows reconstructions when all but one out of 7 sets of
+latents is set to zero. For example, the highest resolution latent grid appears to encode luminance information. The second row visualizes the raw latents, upscaled to match the
+resolution of the output. Bottom: As above but at a lower rate (0.079 bpp).
+Ground Truth
+HNeRV [15]
+39.1dB PSNR@0.101bpp
+HiNeRV [42]
+41.1dB PSNR@0.051bpp
+C3 (ours)
+40.4dB PSNR@0.054bpp
+Figure 27. Reconstructions of a frame of Bosphorus from the UVG dataset for various models. Adapted from Figure 9 of Kwan et al. [42].
+Figure 28. C3 latents of the first four grids corresponding to the frame in Fig. 27. Note that the highest resolution grid (top left) are mostly
+zeros, hence highly compressible. Also note that we see patch artifacts in the latents because each patch has been optimized independently,
+so we have different parameter values for the synthesis and entropy models of each patch. However we see in Fig. 27 that these artifacts are
+not visible in reconstructions even for bpp values around 0.05.
+F. Raw values
+In this section we provide the raw values for the RD-curves of C3 on all benchmarks.
+Rate [bits per pixel]
+PSNR [dB]
+Rate [bits per pixel]
+PSNR [dB]
+0.0938
+0.1351
+0.1552
+0.2041
+0.2333
+0.2785
+0.3527
+0.5181
+0.5808
+0.7309
+0.8162
+0.9217
+1.0977
+1.4105
+27.124
+28.492
+28.993
+30.058
+30.602
+31.337
+32.436
+34.391
+35.039
+36.393
+37.008
+37.835
+38.896
+40.869
+0.0791
+0.1228
+0.1427
+0.1937
+0.2241
+0.2709
+0.3493
+0.5175
+0.5804
+0.7296
+0.8067
+0.9135
+1.0812
+1.4081
+27.049
+28.383
+28.860
+29.923
+30.472
+31.240
+32.389
+34.404
+35.053
+36.408
+37.059
+37.895
+39.033
+40.918
+(a) C3
+(b) C3 adaptive
+Table 13. Raw values of our proposed method, C3, on the Kodak image benchmark.
+Rate [bits per pixel]
+PSNR [dB]
+Rate [bits per pixel]
+PSNR [dB]
+0.0623
+0.0926
+0.1058
+0.1405
+0.1610
+0.1908
+0.2408
+0.3517
+0.3952
+0.4994
+0.5649
+0.6501
+0.7841
+1.0723
+29.159
+30.541
+31.004
+32.036
+32.502
+33.176
+34.079
+35.716
+36.242
+37.336
+37.804
+38.470
+39.445
+40.959
+0.0542
+0.0861
+0.0995
+0.1343
+0.1557
+0.1860
+0.2369
+0.3470
+0.3915
+0.4974
+0.5560
+0.6443
+0.7798
+1.0665
+29.090
+30.532
+31.011
+32.019
+32.537
+33.181
+34.109
+35.700
+36.240
+37.328
+37.827
+38.520
+39.460
+41.006
+(a) C3
+(b) C3 adaptive
+Table 14. Raw values of our proposed method, C3, on the CLIC2020 professional validation dataset split image benchmark.
+Rate [bits per pixel]
+PSNR [dB]
+0.0159
+0.0227
+0.0331
+0.0546
+0.0846
+0.1276
+0.2540
+0.4425
+32.926
+33.967
+35.027
+36.328
+37.450
+38.364
+39.705
+40.795
+(a) C3 on all UVG videos
+Rate [bits per pixel]
+PSNR [dB]
+0.0101
+0.0124
+0.0161
+0.0242
+0.0420
+0.1082
+0.4446
+0.9688
+32.975
+33.410
+33.735
+34.065
+34.289
+34.936
+36.891
+38.808
+(b) C3 on Beauty
+Rate [bits per pixel]
+PSNR [dB]
+0.0103
+0.0143
+0.0203
+0.0325
+0.0530
+0.0737
+0.1382
+0.2078
+35.567
+36.722
+37.919
+39.322
+40.383
+41.239
+42.429
+43.286
+(c) C3 on Bosphorus
+Rate [bits per pixel]
+8.8842 · 10
+0.0107
+0.0131
+0.0179
+0.0313
+0.0414
+0.0888
+0.1987
+PSNR [dB]
+−3
+35.782
+36.516
+37.126
+37.793
+38.392
+38.736
+39.198
+39.889
+(d) C3 on Honeybee
+Rate [bits per pixel]
+PSNR [dB]
+Rate [bits per pixel]
+PSNR [dB]
+Rate [bits per pixel]
+PSNR [dB]
+0.0154
+0.0217
+0.0321
+0.0551
+0.0861
+0.1289
+0.2235
+0.3799
+31.971
+33.017
+34.098
+35.462
+36.861
+37.866
+39.126
+40.033
+0.0344
+0.0502
+0.0732
+0.1182
+0.1685
+0.2376
+0.3640
+0.5231
+29.710
+31.278
+32.884
+34.938
+36.799
+38.199
+40.092
+41.219
+0.0114
+0.0168
+0.0261
+0.0451
+0.0759
+0.1107
+0.2100
+0.3895
+32.945
+33.901
+34.950
+36.195
+37.219
+37.956
+38.823
+39.846
+(e) C3 on Jockey
+(f) C3 on Readysetgo
+(g) C3 on Shakendry
+Rate [bits per pixel]
+PSNR [dB]
+0.0212
+0.0328
+0.0512
+0.0892
+0.1353
+0.1930
+0.3088
+0.4301
+31.529
+32.923
+34.475
+36.520
+38.208
+39.616
+41.375
+42.480
+(h) C3 on Yachtride
+Table 15. Raw values of our proposed method, C3, UVG video benchmark; average rate and PSNR over the seven 1080p videos.

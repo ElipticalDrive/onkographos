@@ -1,0 +1,114 @@
+I'd like to ask for your help if you're experience in OpenCL.
+The task is so trivial, it's a shame I can't see what's wrong, but I couldn't solve this for 2 days now.
+We have a binary 3D volume data stored in 2D slices. On the CPU side in Java, each slice is compressed into a bit array, that is, each slice's size is calculated as: 
+ sliceSize = (width*height+31)/32;
+ 
+ The Java code for compressing slices from 1 byte/voxel to 1 int/32 voxels is: 
+     hostUncompressed = new byte[depth * height * width];
+    hostCompressed = new int[depth * sliceSize];
+
+    deviceUncompressed = new byte[depth * height * width];
+    deviceCompressed = new int[depth * sliceSize];
+
+    int numOnes = 0;
+    int k = 0;
+    for (int i = 0; i < depth; ++i) {
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                hostUncompressed[k++] = (byte) (((int) (Math.random() * 1000)) % 2);
+                numOnes += (hostUncompressed[k - 1] == 1) ? 1 : 0;
+            }
+        }
+    }
+for (int i = 0; i < depth; ++i) {
+        int start = i * sliceSize;
+        int index = start;
+        int targetIndex = 0;
+        int mask = 1;
+        int buffer = 0;
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                if (hostUncompressed[index] > 0) {
+                    buffer |= mask;
+                }
+                ++index;
+                if ((index & 31) == 0) {
+                    hostCompressed[start + targetIndex++] = buffer;
+                    buffer = 0;
+                    mask = 1;
+                } else {
+                    mask <<= 1;
+                }
+            }
+        }
+    }
+ 
+ My OpenCL port of it looks like this: 
+ public void compress(cl_mem vol, int[] size3, int[] voxels) {
+    int totalCompressedSize = voxels.length;
+
+    cl_mem devCompressed = CL.clCreateBuffer(cl.getContext(),
+            CL.CL_MEM_WRITE_ONLY, Sizeof.cl_int * totalCompressedSize,
+            null, null);
+
+    int[] sliceSizeInts = new int[]{(size3[0] * size3[1] + 31) / 32};
+    int[] dimensions = new int[]{size3[0], size3[1], size3[2], 0};
+    long[] localWorkSize = new long[]{1, 1, 1};
+    long[] globalWorkSize = new long[]{sliceSizeInts[0], size3[2], 1};
+
+    cl.calcLocalWorkSize(globalWorkSize, localWorkSize);
+    CLUtils.round_size(localWorkSize, globalWorkSize);
+
+    int k = 0;
+    CL.clSetKernelArg(kernels[1], k++, Sizeof.cl_mem,
+            Pointer.to(devCompressed));
+    CL.clSetKernelArg(kernels[1], k++, Sizeof.cl_mem, Pointer.to(vol));
+    CL.clSetKernelArg(kernels[1], k++, Sizeof.cl_int4,
+            Pointer.to(dimensions));
+
+    CL.clEnqueueNDRangeKernel(cl.getCommandQueue(), kernels[1], 2, null,
+            globalWorkSize, localWorkSize, 0, null, null);
+
+    CL.clEnqueueReadBuffer(cl.getCommandQueue(), devCompressed, CL.CL_TRUE,
+            0, Sizeof.cl_int * totalCompressedSize, Pointer.to(voxels), 0,
+            null, null);
+    CL.clReleaseMemObject(devCompressed);
+    CL.clFinish(cl.getCommandQueue());
+}
+
+kernel void roiVolume_dataCompress(
+global int*     compressed,
+global char*    raw,
+int4            dimensions) {
+int comprSubId = get_global_id(0);
+int sliceIndex = get_global_id(1);
+
+int rawSliceSize   = dimensions.y * dimensions.x;
+int comprSliceSize = (rawSliceSize + 31)/32;
+
+if ( sliceIndex < 0 || sliceIndex >= dimensions.z ||
+     comprSubId < 0 || comprSubId >= comprSliceSize )
+    return;
+
+int rawIndex;
+int rawSubIndex;
+int value = 0;
+
+for (int i = 0; i < 32; ++i)
+{   
+    rawSubIndex = comprSubId*32+i;
+    if ( rawSubIndex < rawSliceSize) 
+    {
+        rawIndex = sliceIndex * rawSliceSize + rawSubIndex;
+        if (raw[rawIndex] != 0)
+            value |= (1 << i);
+    }
+}
+
+int comprIndex = sliceIndex * comprSliceSize + comprSubId;
+compressed[comprIndex] = value;
+}
+ 
+ It works if depth=1, so if executed only on one slice, but from the second slice it gets wrong and I can't see any pattern in the array that could help. 
+ Any help would really be appreciated.
+Thank you. 

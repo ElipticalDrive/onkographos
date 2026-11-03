@@ -1,0 +1,145 @@
+Problem On large depth-sorted splat scenes, WebGPU is now faster than WebGL on the GPU (#3152), but whole frames are still slower: 10M normal-blend splats, RTX 3070 WebGL WebGPU gpuMs (GPU time at a static pose) 56.6 ms 54.0 ms (after #3...
+
+WebGPU: large depth-sorted scenes are CPU-bound (10M splats 93 vs 66 ms per frame) · Issue #3162 · royerlab/luxar · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+WebGPU: large depth-sorted scenes are CPU-bound (10M splats 93 vs 66 ms per frame) #3162
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+WebGPU: large depth-sorted scenes are CPU-bound (10M splats 93 vs 66 ms per frame)#3162
+Copy link
+Labels
+bugSomething isn't workingSomething isn't workingin-progressWe have an open PR for this issueWe have an open PR for this issue
+Description
+royerloic
+opened on Oct 17, 2026
+Issue body actions
+Problem
+On large depth-sorted splat scenes, WebGPU is now faster than WebGL on the GPU (#3152), but whole frames are still slower:
+10M normal-blend splats, RTX 3070
+WebGL
+WebGPU
+gpuMs (GPU time at a static pose)
+56.6 ms
+54.0 ms (after #3152)
+frameMs, synced orbit
+~66 ms
+~93 ms (after #3152)
+throughputMs, pipelined orbit (#3155)
+~58 ms
+~69 ms (before #3152)
+cpuMs per orbit frame
+6–7 ms
+10 ms
+renders per frame, synced orbit
+1.01
+1.2
+On the M4 Max the CPU gap is similar in ratio: cpuMs is 0.4 on WebGL and 1.0 on WebGPU for 10M normal.
+So the remaining gap is on the CPU and sort side, not in the shaders.
+What we know
+Each landing depth sort uploads the whole order buffer (aSortedIndex / aSortedIndexB, 40 MB at 10M elements) with one writeBuffer. That costs about 12–28 ms of main thread on Chrome/Dawn. Splitting it into 4 MB or 16 MB slices made things worse (WebGPU: upload the depth-sort order in slices #3142, closed with numbers).
+The sort is GPU-independent CPU work in a worker (rendering/depth-sort-coordinator/). On WebGPU the extra renders per frame come partly from sort results landing while the frame waits for the GPU, which WebGL's blocking readPixels sync hides (see Render gate: write missing gate stores and record host load #3155).
+three's per-object WebGPU bookkeeping (render objects, bind groups, NodeMaterialObserver checks) runs every frame and costs more than WebGLRenderer's.
+Ideas
+Profile first. Take a Chrome performance trace of a 10M normal orbit on both backends. Attribute main-thread time to: the sort-result commit (writeBuffer), three's renderObject / bindings updates, Luxar's per-frame work (LOD, density guard, sort scheduling), and Dawn submit.
+Sort cadence. If sort commits dominate, land a new sort at most every N frames while the camera is moving, or skip a commit whose permutation barely changed (small view delta).
+GPU-side indexing. If the 40 MB upload dominates, stop shipping the whole permutation. Ship a compact key array and let a WebGPU compute shader build or scan the order. WebGPU is the only backend that can do this, and the depth-sorting spec lists GPU sort as a future option (docs/guides/specs/GSPLAT_DEPTH_SORTING_SPEC.md).
+three overhead. If render-object or bind-group updates dominate, check for per-frame uniform writes that could become one uniform buffer per node, and for bind groups rebuilt every frame.
+Measure with the render gate's perf-splats-10m-normal and perf-splats-5m-volumetric cases (frameMs, throughputMs, cpuMs), on both backends.
+Activity
+royerloic
+added
+bugSomething isn't workingSomething isn't working
+in-progressWe have an open PR for this issueWe have an open PR for this issue
+on Oct 17, 2026
+royerloic commented on Oct 17, 2026
+royerloic
+on Oct 17, 2026
+MemberAuthor
+More actions
+I’ll profile the large sorted orbit on both backends, identify the main-thread cost, then make the smallest change supported by the trace. I’ll check sort and render integration, add a regression test for any behavior change, and rerun the relevant viewer tests and perf cases.
+royerloic commented on Oct 17, 2026
+royerloic
+on Oct 17, 2026
+MemberAuthor
+More actions
+The sort-order copy change is in draft PR #3198. Its regression test failed on dev before the fix; the full viewer unit suite, typecheck, lint, and real WebGL/WebGPU pixel comparisons now pass. I’m finishing the 10M and 5M render-gate measurements before marking it ready.
+royerloic
+added 2 commits that reference this issue on Oct 17, 2026
+docs(viewer): describe WebGPU sort-order ownership (#3162)
+8a50997
+Avoid copying full WebGPU sort orders before upload (#3198)
+...
+eef0998
+royerloic
+added
+in-progressWe have an open PR for this issueWe have an open PR for this issue
+and removed
+in-progressWe have an open PR for this issueWe have an open PR for this issue
+on Oct 19, 2026
+royerloic commented on Oct 19, 2026
+royerloic
+on Oct 19, 2026
+MemberAuthor
+More actions
+I’m continuing from #3198. I’ll measure the current 10M and 5M sorted orbits with the sort-copy change included, then trace the remaining main-thread and render scheduling costs. I’ll make one bounded change supported by those measurements, add a regression test, and compare both backends again before proposing a reviewable PR.
+royerloic
+added 2 commits that reference this issue on Oct 19, 2026
+docs: record depth-sort draw wake fix (#3162)
+5078299
+docs: clarify depth-sort frame callback behavior (#3162)
+5dd44f7
+royerloic
+added
+needs-infoSomeone posted a question for @royerloic or otehr core devs on the PRSomeone posted a question for @royerloic or otehr core devs on the PR
+on Oct 19, 2026
+royerloic
+added a commit that references this issue on Oct 19, 2026
+fix(viewer): report sorted-index flips through frame callback (#3162)
+1514861
+royerloic
+added
+needs-infoSomeone posted a question for @royerloic or otehr core devs on the PRSomeone posted a question for @royerloic or otehr core devs on the PR
+and removed
+needs-infoSomeone posted a question for @royerloic or otehr core devs on the PRSomeone posted a question for @royerloic or otehr core devs on the PR
+in-progressWe have an open PR for this issueWe have an open PR for this issue
+on Oct 19, 2026
+royerloic commented on Oct 26, 2026
+royerloic
+on Oct 26, 2026
+MemberAuthor
+More actions
+Decision: this gates the per-platform WebGPU default. The Linux/NVIDIA WebGPU default stays held until large depth-sorted scenes are no longer CPU-regressed here, ALONGSIDE the cold-start gate (#3172) and the hold mechanism (#3243). Continue the measure then one-bounded-change then regression-test approach; the default does not flip on Linux/NVIDIA until both #3162 and #3172 are met.
+royerloic
+added
+in-progressWe have an open PR for this issueWe have an open PR for this issue
+and removed
+needs-infoSomeone posted a question for @royerloic or otehr core devs on the PRSomeone posted a question for @royerloic or otehr core devs on the PR
+on Oct 26, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+bugSomething isn't workingSomething isn't workingin-progressWe have an open PR for this issueWe have an open PR for this issue
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

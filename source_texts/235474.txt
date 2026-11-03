@@ -1,0 +1,1214 @@
+A wavelet-adaptive method for multiscale simulation of turbulent flows in flying insects
+Thomas Engels1,4, * , Kai Schneider2 , Julius Reiss3 , Marie Farge4
+1 Institute of Biosciences, University of Rostock, Rostock, Germany
+2 Aix-Marseille Université, CNRS, I2M UMR 7373, Marseille, France
+arXiv:1912.05371v3 [math.NA] 6 Jan 2021
+3 ISTA, Technische Universität Berlin, Berlin, Germany
+4 LMD UMR 8539 École Normale Supérieure-PSL, Paris, France
+Abstract. We present a wavelet-based adaptive method for computing 3D multiscale
+flows in complex, time-dependent geometries, implemented on massively parallel computers. While our focus is on simulations of flapping insects, it can be used for other
+flow problems. We model the incompressible fluid with an artificial compressibility
+approach in order to avoid solving elliptical problems. No-slip and in/outflow boundary conditions are imposed using volume penalization. The governing equations are
+discretized on a locally uniform Cartesian grid with centered finite differences, and
+integrated in time with a Runge–Kutta scheme, both of 4th order. The domain is
+partitioned into cubic blocks with different resolution and, for each block, biorthogonal interpolating wavelets are used as refinement indicators and prediction operators. Thresholding the wavelet coefficients allows to generate dynamically evolving
+grids, and an adaption strategy tracks the solution in both space and scale. Blocks are
+distributed among MPI processes and the grid topology is encoded using a tree-like
+data structure. Analyzing the different physical and numerical parameters allows us
+to balance their errors and thus ensures optimal convergence while minimizing computational effort. Different validation tests score accuracy and performance of our new
+open source code, WABBIT. Flow simulations of flapping insects demonstrate its applicability to complex, bio-inspired problems.
+AMS subject classifications: 65M06; 65M50; 65M55; 65M85; 65T60; 76M20; 76D05; 76Z10
+Key words: adaptive numerical method, wavelets, volume penalization, artificial compressibility,
+flapping flight
+1
+Introduction
+Computing multiscale flows in complex geometries, which may move or deform, is required in numerous applications, e.g., many biological flow problems such as flying insects or beating hearts. This remains a major challenge for computational fluid dynamics, especially in the turbulent flow regime. To simulate turbulent flows in the presence
+∗ Corresponding author. Email addresses: thomas.engels@ens.fr (T. Engels)
+http://www.global-sci.com/
+Global Science Preprint
+2
+of moving boundaries, numerical techniques are needed that allow the solution to be
+tracked in both space and scale, and the numerical grid to be dynamically adapted accordingly. If the fluid-structure interaction must also be taken into account, it is all the
+more difficult since the motion of the boundary is no longer known a priori, but depends
+on its nonlinear interaction with the fluid. In this regard adaptive numerical discretization methods, which can be traced back to the 1980s [6, 7], are indeed attractive. In many
+cases they can be much more competitive than schemes on uniform fine grids, depending on the character of the solution. However, for adaptive discretizations two major
+challenges can be identified: their actual implementation on massively parallel supercomputers and the numerical error analysis of adaptivity.
+The implementation of the code is crucial to optimize computing, and two conceptually different approaches can be distinguished: one uses point-based techniques, while
+the other uses block-based techniques. In the former, the error indicator determines for
+each grid point whether it is significant or not (e.g., [45, 58]), while in the latter significant
+grid points are clustered in patches with the drawback of including non-significant points
+and thus decreasing the compression rate [24]. Due to the hardware layout of modern
+CPU, block-based implementations are in many cases more competitive and have become
+increasingly popular during the last years, see, e.g., [62] for a recent review on available
+software packages. The locally regular block data can be transferred in one contiguous
+chunk to the CPU cache, which greatly increases the performance despite an increase in
+the number of points.
+The mathematical support for adaptivity needs to provide reliable error estimators
+of the solution and, for evolutionary problems, a prediction of the grid used to compute
+the next time step. For both, a variety of heuristic criteria exists, e.g., gradient-based
+approaches [18]. Adaptive mesh refinement algorithms use these heuristic criteria and
+are error-indicated methods because of their heuristic nature. A posteriori error estimators
+[4] are mathematically rigorous but require solving expensive adjoint problems.
+Wavelets and related multiresolution analysis techniques provide likewise a mathematical framework and yield reliable error estimators, coupled with high computational
+efficiency; thus they are well suited for developing adaptive solvers with error control. The
+idea of wavelet analysis is to decompose data into contributions in both space and scale
+(and possibly direction). The wavelet transform has been introduced by Grossmann and
+Morlet [37], and the algorithm of the fast wavelet transform by Mallat [49]. Nonlinear
+approximation [21] provides the conceptual support for adaptivity; indeed, it introduces
+a systematic way to classify functions according to the sparsity of their representation in
+wavelet space, i.e., the possibility of describing a function by a small number of wavelet
+coefficients. Wavelet-based algorithms for solving PDEs, starting with [48], were the first
+ones to be proved to guarantee the best n-term approximation [11]. The books of Cohen [10] and Müller [52] and the review articles [23, 61] give a detailed overview on the
+subject.
+To take into account boundary conditions for complex geometries, in particular at
+solid walls, the family of immersed boundary methods (IBM) [51, 56, 60] is now often
+3
+preferred over the traditional body-fitted grids for complex geometries. While the latter can yield better accuracy near the wall, IBM approaches convince with their ease of
+implementation and great flexibility. An early application for computing flow in a beating heart can be found in [55], illustrating that this class of methods has been designed
+from the start for complex, bio-inspired flow problems. Among the variety of methods, the volume penalization method [3], physically motivated by flow in porous media,
+is furthermore distinguished by its convergence proof for nonlinear Navier–Stokes [2].
+Moreover, its convergence properties are improved in the turbulent regime [53].
+In biological applications the flow can be typically described as incompressible, which
+requires specialized numerical techniques to decouple the pressure from the velocity,
+most of which involve solving a Poisson equation. While there are adaptive solvers following this strategy, e.g., [45], alternative methods such as the Lattice–Boltzmann method
+are an attractive choice for adaptive simulations due to their explicit character [62]. Another recently revisited method [54] is the artificial compressibility method [9], which
+introduces a large but finite speed of sound and avoids solving elliptic equations.
+In this work, we present a wavelet-based fully adaptive approach for solving the incompressible Navier–Stokes equations in complex and time-varying geometries on massively parallel computers. To this end, we combine two physically motivated models:
+the artificial compressibility method, which relaxes the kinematic incompressibility constraint and allows for a finite speed of sound, and the volume penalization, which models solid objects as porous media with finite permeability. In the limit when the speed
+of sound and the permeability parameters tend to infinity and to zero, respectively, we
+recover the incompressible Navier–Stokes equations with no-slip boundary conditions.
+The numerical method for solving the resulting model equations is based on centered
+finite differences and explicit time integration, both of 4th order. The MPI parallel implementation uses block-based grids, which are coarsened and refined using biorthogonal
+wavelets. While the framework we present is quite general and can be applied to a large
+variety of fields, our main motivation for its development comes from the spectacular
+flight capabilities of flying insects, which use flapping wings to produce the required
+aerodynamic forces.
+The remainder of the paper presents the governing equations (sec. 2), followed by
+the numerical method including discretization errors (sec. 2.3), and the multiresolution
+analysis for introducing adaptivity (sec. 3). The choice of the parameters for balancing
+the different errors is discussed in sec. 3.6. The parallel implementation is presented in
+sec. 4. Different numerical results are shown in sec. 5, and the performance of the code is
+analyzed in sec. 5.4. Finally, an outlook is given in sec. 6 conclusions are drawn in sec. 7.
+4
+2
+Governing equations and numerical method
+2.1
+Artificial compressibility
+The applications we have in mind involve exterior, incompressible flows past obstacles
+of complex shape which may vary in time. Numerical methods for such flows usually
+require the solution of a Poisson-type, elliptic PDE. Even though powerful libraries (e.g.,
+PETSc [1]) exist for that purpose, the solution of the Poisson equation is causing major
+computational cost, especially on irregular, time-dependent grids.
+Instead of the incompressible Navier–Stokes equations,
+∂t u +(u ·∇) u +∇ p − ν∇2 u = 0
+(2.1)
+∇· u = 0
+(2.2)
+for the velocity u and the pressure p in the fluid domain Ω f ⊂ RD for t > 0 and D = 2 or
+3, completed with suitable boundary and initial conditions, and where ν is the kinematic
+viscosity, we consider the artificial compressibility method (ACM). An artificial speed of
+sound C0
+|u| is introduced and eqn. (2.2) is replaced by
+∂t p + C02 ∇· u + Cγ p = 0
+(2.3)
+where Cγ > 0 is a dashpot damping term discussed below. Note that the fluid density $ f
+is normalized to unity and the equations are written in dimensionless form. The basic
+idea of the ACM can be traced back to Chorin [9]. More recently, several authors have reconsidered it. Guermond and Minev state that “the artificial compressibility method may
+not have been given all the attention it deserves in the literature” [38]. The spirit adopted
+here, which is to explicitly solve eqns. (2.1,2.3), is inspired by the work of Ohwada and
+Asinari [54]. The ACM solution converges to the solution of the incompressible Navier–
+Stokes equations (INC) with
+eACM = kU ACM − U INC k2 = O(C0−2 )
+(2.4)
+as C0 → ∞. Here, U is the state vector, containing u and p. We will confirm this result
+numerically later. Note that [54] proposes a strategy to increase the accuracy to O(C0−4 )
+using Richardson extrapolation, but we do not follow this approach because the second
+order is sufficient when combined with the volume penalization method. We also point
+out that there is a natural upper limit for C0 , which is the true speed of sound of the fluid
+(e.g. C0 = 340ms−1 in air), and that any fluid is at least slightly compressible.
+2.2
+Volume penalization
+The no-slip boundary conditions at the fluid–solid interface are imposed using the volume penalization method [2,3], which is based on the physical intuition of approximating
+a solid obstacle as a porous medium with small permeability. The penalized versions of
+5
+eqns. (2.1,2.3) are solved in the larger domain Ω = Ω f
+and read
+S
+Ωs , where Ωs is the solid domain,
+χsp
+χ
+(u − us )+
+(u − u∞ ) = 0
+Cη
+Csp
+χsp
+∂t p + C02 ∇· u + Cγ p +
+( p − p∞ ) = 0,
+Csp
+∂t u + u ·∇u +∇ p − ν∇2 u +
+(2.5)
+(2.6)
+Here χ is the indicator function, Cη
+1 is the penalization parameter (permeability) and
+us the solid body velocity field. The indicator function is χ = 1 inside Ωs and χ = 0 in
+Ω f , and we use a thin smoothing layer with thickness proportional to the grid spacing
+in the case of moving [47] or deforming obstacles [31]. For details on the generation
+of χ, see [33]. From the penalization term aerodynamic forces are obtained by volume
+integration [2],
+F = Cη−1
+Z
+Ω
+χ (u − us ) dV,
+for which we use the midpoint quadrature rule. We anticipate that the penalization error
+converges as
+eVPM = U ACM,Cη − U ACM
+2
+= O(Cη1/2 )
+(2.7)
+for Cη → 0 using similar arguments as for INC.
+For our application to unbounded exterior flows, an additional sponge penalization
+term (index sp) has been added [31, 32], which imposes mean flow conditions, u∞ and
+p∞ , in a layer at the outer boundary of the computational domain. Contrarily to the penalization for the obstacle itself, this term also acts on the pressure p. We can understand
+the ACM as a transport of divergence, which is created both at the boundary and in the
+nonlinear term. Hence, some outflow conditions are required to remove it from the physical domain, and the sponge term here plays the dual role of absorbing outgoing pressure
+waves as well as damping outgoing vortical structures.
+In the case of impulsively started flow, the initial condition is incompatible with the
+boundary conditions, which causes a singularity in the aerodynamic force. A strong
+pressure wave of width δs =O(Cη C0 ) is created at the boundary, because the penalization
+requires a time O(Cη ) to damp the velocity inside the obstacle, and the ACM transports
+it with a speed C0 . Its intensity decays with the distance R as R−( D−1) , where D = 2 or
+3 is the dimensionality of the problem. Even though, physically speaking, the pressure
+wave is an artifact of the ACM. It still needs to be resolved, as it transports information
+needed to create an (approximative) solenoidal flow field in the full domain. If δs is
+too small, dispersion errors occur, and spurious oscillations in the forces can appear.
+In practice, we ensure that ∆x ≤ δs . In order to minimize reflections, the width of the
+sponge layer Lsp is set larger than characteristic length scales of the geometry; a wider
+sponge reduces reflections. We then adjust the sponge constant Csp such that the time the
+pressure wave spends in the sponge is equivalent to τ times the relaxation time, yielding
+6
+Csp = Lsp (C0 τ )−1 . Here we set τ = 20, but found that the specific choice of both τ and Lsp
+only has a weak impact on the solution (see Appendix D in suppl. material for details).
+In simulations with periodic boundary conditions, the sponge technique cannot be
+used. For such cases, we use the dashpot damping term Cγ p proposed in [54] to mitigate
+pressure waves; the constant is then Cγ = 1, as suggested in [54].
+The combination of artificial compressibility and volume penalization constitutes our
+physical model. It has four parameters (Cη , C0 , Csp , Cγ ), the choice of which will be
+discussed in detail below.
+2.3
+Numerical method and discretization errors
+The model equations (2.5-2.6), are discretized in space and time. Spatial derivatives are
+approximated using centered higher-order finite differences on a collocated, periodic
+grid. We use the optimized fourth order scheme proposed by Tam and Webb [67] for
+first order derivatives (Appendix A in suppl. material) and a classical, centered, fourth
+order stencil for second order derivatives.
+Time integration is done with a classical Runge–Kutta-4 scheme. The explicit scheme
+implies stability restrictions on the time step ∆t, namely
+
+2
+∆t < min CFL∆xmin /ueig , CFLη Cη , CFLν ∆xmin
+/ν ,
+q
+where the characteristic velocity is ueig = |umax |+ u2max + C02 , which we can approximate
+by ueig ≈ C0 as C0
+|umax |. The constants are set to CFL = CFLη = 1.0 and CFLν = 1/4.
+We therefore expect the fully discretized solution to converge with 4th order accuracy in
+space and time,
+∆x,∆t
+eFDM = U ACM
+− U ACM
+2
+= O(∆x4 )+O(∆t4 ),
+(2.8)
+which we will verify later numerically. This is valid in the case without penalization. As
+pointed out in [53], the discretization (eq. 2.8) and penalization (eq. 2.7) error cannot be
+treated independently. A too small value for Cη results in a loss of regularity of the exact
+solution and by consequence the discretization error increases, thus there is an optimal
+choice of Cη as a function of ∆x. As discussed in our previous work [32, 33], the relation
+is
+
+
+Cη = Kη2 /ν ∆x2
+(2.9)
+where Kη is a constant which depends only on the discretization scheme. It can be interpreted as the number of grid points in the penetration boundary layer inside the obstacle.
+Using eqn. (2.9), first order convergence [53] is assured for any value of Kη , i.e.,
+∆x,∆t
+U ACM,C
+− U ACM
+η
+2
+= O(∆x )+O(∆t4 ),
+(2.10)
+as ∆x,Cη → 0. The error offset can be tuned by choosing Kη . In the present work, we
+obtained best results using the same values of 0.05 ≤ Kη ≤ 0.4 as reported in [33] with a
+Fourier discretization, which suggests a certain universality of this scaling.
+7
+3
+Multiresolution analysis and grid adaptation
+Motivated by the multitude of scales which are excited in the flow, especially in the turbulent regime, and close to the boundary, whose location may even change in time, we introduce dynamically adaptive grids. The grid is supposed to track automatically the motion
+in both scale and position and allows furthermore its prediction for the next time step.
+To this end we use multiresolution analysis and decompose the solution into biorthogonal wavelets. First we recall the point-value multiresolution analysis and we give the link
+with biorthogonal wavelets. Some drawbacks of point-value multiresolution analysis are
+pointed out and we show how they can be overcome using lifted wavelets. Some details
+on the parallel implementation are given later in section 4.
+For ease of presentation we limit the description to the one-dimensional scalar-valued
+case, denoted by u. The extension to higher dimension and vector-valued data is outlined
+at the end of the section.
+3.1
+Point-value multiresolution analysis
+Discrete multiresolution analysis introduced by Harten [39–41] is well-suited for introducing adaptivity into discretization schemes of PDEs. In particular for finite difference
+methods the point-value multiresolution [39], which is directly related to the interpolating subdivision scheme by Deslauriers & Dubuc [19, 20], has been designed.
+J
+Starting point is a nested sequence of uniform grids at level J, X J = { xiJ }2i=0 with an
+J +1
+odd number of grid points defined by xiJ = i/2 J for i = 0,...2 J . The grids satisfy x2i
+= xiJ
+J +1
+J
+J
+J
+for i = 0,...,2 J and x2i
+−1 = ( xi + xi −1 ) /2 for i = 1,...,2 .
+For the solution u given on the grid X J we can then define a prediction operator
+PJ → J +1 : u( X J ) → u( X J +1 ) which interpolates values of u onto the next finer grid. For this,
+we use the fourth order interpolating subdividison scheme [19, 20] to interpolate missing
+J +1
+values at x2i
++1 , i.e.,
+J +1
+u2i
++1 = −
+1 J
+9
+9
+1
+u + uJ + uJ − uJ .
+16 i−1 16 i 16 i+1 16 i+2
+(3.1)
+Following Harten, we also define a restriction operator R J +1→ J : u( X J +1 ) → u( X J )
+J +1
+which is simply the decimation by a factor of two, i.e., uiJ = u2i
+. Note that R J +1→ J ◦
+PJ → J +1 = Id. Combining restriction and prediction, detail coefficients can be computed
+by subtracting the values predicted from the coarse grid from the values at the fine grid.
+At even grid points the details are zero, while at odd grid points we obtain
+J
+J +1
+J +1
+ue2i
++1 = u2i +1 − PJ → J +1 R J +1→ J u2i +1
+(3.2)
+Thus, the solution on the fine grid u J +1 can be represented as a solution at the coarser
+grid u J plus detail coefficients ueJ . Iterating this procedure from J down to 1 yields the
+8
+multiresolution transform. The fine grid solution can be reconstructed by inverting the
+above procedure. Detail coefficients are mostly significant in regions of steep gradients
+and discontinuities, and are small or even do vanish in regions where the solution is
+smooth. They “measure the local deviation from a polynomial” and are obtained as the
+interpolation error. Thus adaptivity can be introduced by removing small detail coefficients without loosing the precision of the computation.
+3.2
+Biorthogonal wavelets
+The point-value multiresolution analysis is intimately related to biorthogonal wavelets,
+as already pointed out by Harten [39], and the solution u ∈ C s (R) (s ≥ 0) can be expanded
+into a biorthogonal wavelet series,
+D
+E
+∞
+fJ
+0
+e
+0
+u( x ) = ∑ u, φi ( x ) φi ( x )+ ∑ ∑ u, ψi ( x ) ψiJ ( x )
+(3.3)
+i ∈Z
+J =0 i ∈Z
+e can be
+Note that for a given primary scaling function φ, different dual scaling functions φ
+constructed (and vice versa) and thus the choice is not unique and there is some flexibility
+compared to the orthogonal case (in terms of symmetry, number of vanishing moments,
+e = φ and ψ
+e = ψ.
+filter length, etc.). For orthogonal wavelets we have φ
+For the point-value multiresolution the scaling function φ (cf. appendix C in suppl.
+material) is identical to the Deslauriers–Dubuc fundamental function [19, 20]. It can be
+obtained by interpolating a delta Dirac impulse (using Lagrange interpolation), and the
+filters are defined to be symmetrical and have minimal support for a given polynomial
+order. They are equivalent to the autocorrelation function of orthogonal Daubechies [14]
+eJ ( x ) =
+scaling functions [50]. The dual scaling functions are delta Dirac distributions φ
+k
+δ( x − xkJ ). The wavelets are interpolating (‘interpolets’), yield an interpolating subdivision scheme, and correspond to a shifted scaling function ψ( x )= φ(2x − 1), while the dual
+wavelets are linear combinations of δ distributions. The construction of these interpolating wavelets was also proposed by Donoho [25] and rediscussed later by Sweldens [65].
+Note that the primary scaling function is normalized with respect to the L∞ norm, i.e.,
+φiJ ( x ) = φ(2 J x − i ) implying φiJ
+∞
+= 1, and not with respect to the L2 norm, as it is typi-
+cally the case.
+Both scaling functions and wavelets fulfill refinement relations,
+φ( x ) = ∑ hn φ(2x − n)
+e( x ) = ∑ e
+e(2x − n)
+φ
+hn φ
+(3.4)
+ψ( x ) = ∑ gn φ(2x − n)
+e( x ) = ∑ gen φ
+e(2x − n)
+ψ
+(3.5)
+n ∈Z
+n ∈Z
+n ∈Z
+n ∈Z
+and the filter coefficients are coupled via gen = (−1)1−n h1−n and gn = (−1)1−n e
+h 1− n .
+Rearranging the restriction and prediction operations of the multiresolution transform yields the filter coefficients. Then applying the fast wavelet transform with these
+9
+filters and downsampling will yield equivalent results. The detail coefficients correspond to the wavelet coefficients. For the point-value multiresolution we have e
+h0 = 1
+e
+and hn = 0 for n 6= 0 and thus g1 = 1 and gn = 0 for n 6= 1. The coefficients of h and ge depend
+on the interpolation order, and in the linear case we have hn = {1/2,1,1/2}n=−1,0,1 and
+gen = {−1/2,1, −1/2}n=0,1,2 .
+The filter e
+h illustrates the loose downsampling of the data (simple decimation by a
+factor of two) when going to coarser scale and it is thus not a low pass filter in the classical sense as no high frequency contributions are eliminated. The corresponding scaling
+e is a distribution, and even not in L2 (R). The wavelet ψ is a shifted scaling
+function φ
+function and hence not a wavelet with vanishing mean. The corresponding filter g is
+thus not a band pass filter neither.
+These wavelets resulting from Harten’s point-value multiresolution are Cohen–Daubechies–
+Feauveau (CDF) biorthogonal wavelets [12] which are symmetric and compactly supported. For cubic interpolation we have CDF 4/0 wavelets, because the analyzing wavelet
+has 4 vanishing moments while the synthesizing one has zero vanishing moments. The
+corresponding filter coefficients h,g and e
+h, ge are summarized in appendix C (suppl. material) together with an illustration of the functions.
+This biorthogonal wavelet decomposition yields good compression properties of the
+e has vanishing moments. However, there is no separation
+data, as the analyzing wavelet ψ
+into scales with well separated frequency bands, as the loosely downsampling does not
+filter out high frequency contributions (which produces aliasing) and, since the synthesizing wavelet has no vanishing moment, all frequencies are mixing up. For denoising [26]
+and Coherent Vorticity Simulation [34] such decompositions are only of limited use and
+for this reason we are applying Sweldens’ lifting scheme to construct second generation
+wavelets. The CDF 4/0 biorthogonal wavelets are upgraded to CDF 4/4 [64–66] which
+yield a reasonable scale and frequency separation.
+3.2.1
+Lifted biorthogonal wavelets
+To improve the frequency selectivity of the point-value multiresolution decomposition
+we apply (primary) lifting to the wavelet ψ and thus construct a wavelet with vanishing
+moments. To this end we modify the primary wavelet ψ and the dual scaling function
+e correspondingly, while the secondary wavelet ψ
+e and the primary scaling function φ
+φ
+remain unchanged. For the filters the lifting operations are applied accordingly [64].
+More precisely we determine lifting coefficients sn such that
+ψ( x ) = ψold ( x ) − ∑ sn φold (2x − n)
+(3.6)
+n
+e( x ) =
+φ
+∑ ehn φeold (2x − n) + ∑ sn ψold (x − n)
+n
+(3.7)
+n
+R
+requiring that the new ψ has M vanishing moments, i.e., x p ψ( x )dx = 0 for p = 0,..., M − 1.
+In the linear interpolation case, i.e., CDF 2/0, we have s0 = s1 =−1/4 and for the resulting
+lifted filters we get { gn ,n = −3,...,1} = {/1/8, −1/4,3/4, −1/4,
+10
+− 1/8} and {e
+hn ,n = −2,...,2} = {/1/8, −1/4, −3/4, −1/4,1/8}, yielding thus CDF 2/2
+wavelets, which have two vanishing moments. Applying lifting to the cubic interpolatory wavelets CDF 4/0 yields CDF 4/4. The functions φ and ψ as well as their dual
+functions and filter coefficients are illustrated in Appendix C (suppl. material).
+3.3
+Nonlinear approximation and thresholding
+The biorthogonal wavelet representation of the solution u (eqn. 3.3) can be used for introducing
+an adaptive
+grid. To this end we apply thresholding to the detail coefficients
+f
+ueiJ = u, ψiJ ( x ) and mark details with magnitude below a constant, level-independent
+threshold Cε , precisely if |ueiJ |/ kuk∞ < Cε . As a detail coefficient ueiJ is directly related to
+J +1
+a grid point x2i
++1 , we could remove the corresponding grid points. In our block-based
+structure, a block is coarsened only if all its details are smaller than Cε , i.e., some insignificant points can be included. The thresholding error can be estimated in the L∞ norm and
+is directly proportional to the threshold, i.e., after Nt time steps we have,
+∆x,Cε
+∆x
+uACM
+− uACM
+def
+∞
+= eMR ≤ Nt Cε
+(3.8)
+as shown in [13, 59]. This upper bound assumes a worst-case scenario that the filtering
+introduces an error O(Cε ) in all Nt time steps, which of course depends on the problem.
+For example in pure transport, the production of fine scales is related only to the lack
+of translation invariance of the multiresolution transform. Eventually, if no velocity is
+imposed, the error is in fact eMR ≤ Cε . Thus, whether the number of time steps enters
+eqn. (3.8) depends on the non-linearity. Assuming the pure transport-based CFL condition, we have Nt ∝ ∆x −1 .
+3.4
+Extension to higher dimensions and vectors
+Extensions in dimension larger than one are obtained by tensor product of the onedimensional wavelets. For multiresolution constructions in two dimensions we obtain
+wavelets in the horizontal, vertical and diagonal directions, while in three dimensions
+we have seven directions. For details we refer to [50]. For vector-valued quantities, e.g.,
+the state vector U, the biorthogonal wavelet expansion is applied to each component of
+the vector and thus a vector-valued wavelet series is obtained. Hence the coefficients become vector-valued, but not the basis functions. During thresholding, each component
+is normalized by the L∞ -norm of the total (global) field.
+3.5
+Grid prediction and time stepping algorithm
+The algorithm to advance the numerical solution U (tn ,x ) (state vector containing u and
+p) on the block-structured grid G n to the new time level tn+1 is as follows:
+11
+1. Refinement. Given U (tn ,x ) on the grid G n , we first extend the grid by adding neighbors in position and scale. This concept of a safety zone, introduced in [48], ensures
+that the solution is tracked in scale and space. Adding neighbors in scale captures
+newly emerging scales due to the quadratic nonlinearity, which can produce scales
+twice as small in one time step. The grid G n is thus extended to Gen by refining all
+blocks by one level.
+2. Evolution. On the extended grid Gen , we solve equations (2.5–2.6) using finite differences with explicit time-marching.
+3. Coarsening. We compute the detail coefficients of U (tn+1 ,x ) for each block, and
+tag it for coarsening if the largest detail is smaller than the prescribed threshold
+Cε . Next, the tag is removed if coarsening would result in a non-graded grid, and
+finally the tagged blocks are merged with their sister blocks. This procedure is
+repeated until no more blocks can be coarsened.
+This well established algorithm (see, e.g., [24, 45, 46, 48, 61]) is at the core of our adaptive
+strategy. In practice, the above algorithm is modified by imposing an upper bound for
+the refinement, i.e., a level Jmax is introduced at which no refinement is allowed anymore.
+The largest possible value in the current implementation is Jmax = 18. This is done not
+only because of finite computational resources, but also in the interest of balancing the
+discretization- and thresholding error. While the former error depends mainly on ∆x
+(and thus directly on Jmax ), the latter is determined by Cε . The relation between both is
+discussed below.
+If the maximum level Jmax is reached after the refinement stage and the detail coefficients are significant after the evolution step, we can choose between two possibilities:
+either, the corresponding block is coarsened, even though its details are significant, or
+it remains at Jmax . The former option corresponds to dealiasing and avoids accumulation of energy in high wavenumbers, if viscous dissipation is not sufficient to stabilize
+the simulation. In low Reynolds number simulations, it can be omitted for the benefit of
+improved precision, while in most simulations it is required for stabilization.
+While the volume penalization term does usually result in large detail coefficients
+near the fluid-solid interface, it can happen that for large values of Cε the grid is coarsened at the interface. In this case, oscillations appear in the aerodynamic forces, which
+are undesirable. Therefore, we use the mask function χ as secondary criterion for block
+coarsening, i.e., a block is not coarsened if it satisfies max(χ)− min(χ) > 0. Consequently,
+blocks containing the fluid-solid interface are coarsened only if the dealiasing option is
+used. The initial grid at t = 0 is created in an iterative process, starting from the coarsest
+level Jmin and likewise takes χ into account.
+12
+3.6
+Balancing modeling, discretization and thresholding errors
+The numerical solution of the Navier–Stokes equations with artificial compressibility on
+adaptive grids and volume penalization involves five parameters in total, ACM (C0 ), penalization (Cη ), time (∆t), space (∆x) and thresholding (Cε ). The accuracy of the computation with respect to the reference solution, i.e., the exact solution of the incompressible
+Navier–Stokes equation, can be estimated from the various error contributions, namely,
+the artificial compressibilty (eq. 2.4), penalization (eqn. 2.7), discretization (eqn. 2.8) and
+thresholding (eqn. 3.8) errors and then applying the triangle inequality, we find,
+∆x,∆t,Cε
+UACM,C
+− UINC
+η
+2
+≤ O(C0−2 )+O(Cη1/2 )+O(∆x4 )+O(∆t4 )+O(Cε )
+(3.9)
+A suitable choice of the parameters must take their respective scaling into account in
+order to balance the different errors. In sec. 2.3 we also already discussed the balancing
+of discretization and penalization errors, which formally reduces the convergence in ∆x
+to first order, (eqn. 2.10). Requiring all errors to decrease simultaneously by the same
+amount, we find in the case without penalization the following relations
+C0 ∝ ∆x −2 ,
+Cε ∝ ∆x5
+(3.10)
+while in the penalized case we have
+Cε ∝ ∆x2
+C0 ∝ ∆x −1/2
+
+
+Cη = Kη2 /ν ∆x2 ,
+(3.11)
+where 0.05 ≤ Kη ≤ 0.4. In addition, as described above, we fix the sponge constant to
+Csp = Lsp /C0 τ with τ = 20 (see Appendix D in suppl. material for details).
+4
+Parallel implementation
+4.1
+Data structure
+Previous work on wavelet-based adaptivity exploited the fact that the fast interpolating
+wavelet transform can be used to assign one wavelet coefficient to each grid point, and
+hence allows judging for each point if its wavelet coefficient is important or can be discarded [43]. The resulting grids are as sparse as possible, and each point is a node in
+a tree data structure [59] or hash-table [52]. The difficulty is that these data structures
+are poorly aligned with the memory access of typical modern CPUs. Moreover it creates
+administration overhead for each grid point. If the CPU requires a data point for computing, the vicinity of this point in the 1D memory is also transferred to the CPUs cache,
+which explains the high performance of structured grids. To turn the achievable sparsity
+into CPU time compression, a block-based hybrid data structure is a suitable choice. In
+the context of wavelet-based multiresolution, block-based grids have first been proposed
+by Domingues et al. [24] and later, independently, in [57]. The basic idea is however
+13
+Figure 1: Data structure. Left: grid layout, composed of Nb = 7 blocks of the same size but at different positions
+and levels. Right: memory layout, the grid is stored as simple, contiguous array. Memory allocation done done
+once on startup, but only the portion required at time t is used.
+older; for adaptive computations without wavelet-support, they have been pioneered by
+Berger and Collela [5] and further developed by Deiterding and coworkers [15–17]. An
+excellent overview over recently developed software packages can be found in [62].
+Block-based grids are locally structured and for the relations between blocks, a flexible data structure has to be used. In our implementation, we use a tree-based structure
+for this task, and define blocks of size BsD . All blocks have the same number of points,
+which is the same in all directions in the present computations. The number of entries in
+the tree data structure, and thus its overhead, is reduced by the same factor BsD . On the
+other hand, the total number of grid points Npoints is increased, until for (very) large Bs ,
+an equidistant monoblock grid is recovered. Figure 1 illustrates the concept of our data
+structure. The grid layout contains blocks of the same size on different levels, while the
+memory layout is a simple, contiguous array of size Bs × Bs × Bs × Nb . Since the number
+of blocks Nb changes during the simulation, our code allocates an array with the largest
+possible number of blocks for the given memory, which is specified in the program call
+using the flag --memory=40.0GB. Memory allocation is done once during the initialization and is not deallocated again until the termination of the code. This type of memory
+management is suitable for high-performance supercomputers, where typically only one
+application is running on a given processor.
+Since the number of blocks Nb in the tree data structure is typically low (Nb = O(105 )
+blocks, while Npoints = Nb BsD =O(1010 ) in 3D applications) there is no need for an external
+high-performance tree library, such as p4est [8]. Here, we design a simple tree library
+based on the work of Gargantini [35, 36], where octal numbers are used to encode the
+position of an element in the tree. From the octal number, level and position of the block
+can be computed, as well as the IDs of neighboring blocks. It constitutes, along with
+a refinement flag and level indicator, the metadata, which is separated from the actual
+block data named heavy data. The metadata is stored redundantly on all CPUs and is
+kept synchronized, so that neighbor lookup is a local process, while the heavy data is
+process-local.
+14
+4.2
+Parallelization aspects
+Parallelization appears in our implementation with two functions: to ensure that each
+MPI rank has the same amount of blocks to compute (load balancing), and to synchronize
+the layer of ghost nodes.
+The creation and removal of blocks during the simulation can lead to an imbalanced
+distribution of blocks among processes. As we use blocks of identical size, load balancing
+is guaranteed if the number of blocks on each process is the same. The load balancing
+process first computes the index of all blocks on a space-filling Hilbert-curve [42,69], then
+distributes contiguous chunks of blocks to the processes. Special care is devoted to keeping the required number of transfers as small as possible. The Hilbert-curve preserves
+the locality of blocks and minimizes the interface between processes.
+Any parallelization by decomposition of the domain requires communication between the processes, either in the form of flux transfer or ghost node synchronization.
+Our blocks are equipped with a layer of n g ghost nodes (where n g depends on the support of the interpolation and discretization stencils) that overlaps with adjacent blocks.
+During the synchronization of the ghost nodes, the processes first prepare the required
+data, i.e., apply restriction and prediction operators if required, and copy them into a
+buffer, which is then sent to the receiving process. The receiver then extracts the data to
+the ghost node layers of each block. We skip more details on this technical part in the
+interest of brevity. The handling of block-block interfaces via the ghost nodes is linked
+to the precise definition of blocks and grid, and it is critical for numerical stability. We
+elaborate on our choices in appendix B (suppl. material)
+Parallelization of an adaptive code is inherently more complicated than for a code
+using static grids. The number of blocks can vary significantly during a simulation and
+choosing the same number of processes throughout the simulation is often not an efficient
+choice. On most supercomputers, a simulation is interrupted after a given time limit
+is exceeded, which is usually of the order of 24h. We exploit this fact to decide upon
+resubmission of a simulation if the number of CPUs is increased, decreased or can remain
+unchanged. We will discuss the performance in greater detail in section 5.4.
+5
+Numerical results and performance
+All simulations presented in this paper can be reproduced using the code† and the parameter files from the supplementary material (See section E for an overview).
+5.1
+Three vortices
+As a quantitative validation test for the fluid part in two-dimensions, we consider the
+vortex merger proposed in [44]. The setup involves no walls and is a good starting point
+† https://github.com/adaptive-cfd/WABBIT
+15
+for the validation of our new numerical method. At time t = 0, three Gaussian vortices
+(Fig. 2A,B) are set into the periodic domain of size L = 2π, two with positive (Γ = 1) and
+one with negative (Γ = −1/2) circulation. The initial vorticity field is given by
+
+Γi
+2
+2
+2
+exp
+−((
+x
+−
+x
+)
++(
+y
+−
+y
+)
+)
+/a
+,
+0,i
+0,i
+π · a2
+i =1
+3
+ω ( x,t = 0) = ∑
+where a = 1/π and the vortex centers ( x0,i ,y0,i ) are located at (0.75,1)π, (1.25,1)π and
+(1.25,1.25)π. Note that initially, the mean vorticity is small but not zero. The vortices
+then interact nonlinearily, but their evolution remains deterministic. Due to the low viscosity of ν = 5 · 10−5 , thin vortex filaments develop during the merging of the two positive
+vortices (Fig. 2A). We stop the simulation at t = 20 (Fig. 2C), and use this time instant for
+comparing different simulations. The creation of small scales due to the nonlinearity is
+an important test for our adaptive framework.
+We perform four types of numerical simulations for this problem:
+1. Incompressible Navier–Stokes (INC) solved with a Fourier pseudospectral method
+[33], which is the quasi-exact reference solution,
+2. ACM solved with the same Fourier pseudospectral method, as quasi-exact solution
+of the artificial compressibility equations,
+3. ACM solved with the fourth-order finite difference method on equidistant grids,
+with and without filtering at the finest scale
+4. ACM solved with the fourth-order finite difference method on dynamically adaptive grids using multiresolution analysis with CDF 4/0 and CDF 4/4 wavelets.
+Those simulations allow us to assess (i) the model error of the ACM, (ii) the discretization
+error and (iii) the thresholding error. Combined, they allow us to confirm the relation
+between the three numerical parameters of the problem (Co , ∆x, Cε ) presented in eq.
+(3.10). Instead of ∆x, it is however more practical to use the maximum refinement Jmax ,
+which is related to ∆x via ∆x = 2− Jmax L/( Bs − 1). In all ACM simulations of this problem,
+we set the pressure damping Cγ = 1, as the sponge technique cannot be used for periodic
+domains.
+(i) Compressibility error We first consider the Fourier pseudo-spectral solution of the
+artificial compressibility eqns. (2.5-2.6). Comparing the spectral ACM simulations with
+the incompressible reference solution from [44] allows us to evaluate the compressibility
+error alone. We compute the reference solution with spatial resolution of 1536 × 1536
+modes using the FLUSI code [33], which uses the same Fourier pseudospectral scheme
+as in [44]. Time integration is done with the classical 4th order Runge–Kutta scheme
+and CFL = 0.15. For all times t ≥ 0, we verified that the isotropic Fourier spectrum decays
+exponentially for large wavenumber k below machine precision, hence both the reference
+16
+Figure 2: Three vortices simulations. A-C: Time evolution of the vorticity field in a simulation with Bs = 33, Cε =
+10−5 , Jmax = 8 and C0 = 10 using the CDF 4/4 wavelet. Time evolution (A), initial condition (B) and final time
+used for error calculation (C). D: Decay of the compressibility error with respect to the incompressible solution as
+a function of C0 , computed using a non-adaptive spectral discretization. Second order is observed. E: Decay of
+the error w.r.t. the spectral ACM solution as a function of ∆x for C0 = 10. Shown are equidistant computations
+with and without wavelet filtering and adaptive simulations with Cε small enough for the discretization error to
+be dominant. The adaptive computations preserve the accuracy of the equidistant ones. F: Decay of the error
+using CDF 4/4 w.r.t. the spectral ACM solution as a function of Cε for different Jmax and C0 = 10. Leftmost
+points of each line are also shown in E.
+17
+solution and the spectral ACM simulations can be considered highly accurate. Figure 2D
+shows the resulting convergence in C0 , confirming the second order convergence from
+eq. (2.4).
+(ii) Discretization error We next evaluate the discretization error of the finite difference
+scheme on equidistant grids, fixing C0 = 10 for computational convenience, and compare
+with the corresponding spectral solution of the ACM equations. The equidistant computations with resolutions from N = 256 to 4096 are performed using the WABBIT code
+with adaptivity turned off. In this test case, the viscosity is sufficiently elevated to stabilize the simulation without filtering at the maximum level Jmax . Therefore we perform
+three types of equidistant computations shown in Fig. 2E, CDF 4/0 (red line), CDF 4/4
+(green) and without (purple) a filter. Without filtering, the method is clearly fourth order
+accurate. If wavelet filtering at Jmax is used, which corresponds to removing the detail
+coefficients, the error in the CDF 4/4 solution increases slightly, as expected, compared
+to the case without filtering. Note that filtering is usually required for stabilization. The
+convergence rate locally varies, but a linear least squares fit to the data yields a slope
+of 4.04. With the CDF 4/4 wavelet, we can hence preserve the accuracy. The CDF 4/0
+method on the other hand significantly increases the error and deteriorates the convergence rate. We anticipate that this is due to the lack of scale separation in the CDF 4/0
+wavelet.
+(iii) Thresholding error We now consider fully adaptive simulations, where we fix
+C0 = 10 and use the refine – evolve – coarsen cycle in each time step to remove aliasing
+errors. The block size Bs is mainly a parameter that impacts the computational efficiency,
+which is crucial only for 3D simulations. We here fix Bs = 33 for all 2D simulations and
+discuss the performance as a function of Bs later in section 5.4. Two snapshots of an
+adaptive computation are shown in Fig. 2B,C. Visibly, the initial grid contains less blocks
+than the terminal one. The refinement is concentrated, as expected, in regions with sharp
+gradients.
+In adaptive simulations, the thresholding error arises in addition to discretization and
+compressibility errors. We compare with the spectral ACM solution for C0 fixed, hence
+the compressibility error is absent. Figure 2F shows the error as a function of Cε for
+different Jmax . For large Cε , all simulations run on the coarsest possible level (Jmax = 1)
+and therefore yield the same error. When Cε is decreased, the error generally decreases,
+until a saturation at a level-dependent value of Cε,opt ( Jmax ) is observed. At this point,
+the discretization- and thresholding error are of the same size. Decreasing Cε further can
+thus not increase the precision, as the discretization error then dominates. Before the
+saturation, the error decays ∝ Cε . Fig. 2E shows the convergence as a function of ∆x
+when using CDF 4/0 (blue line) and CDF 4/4 (orange), where we use the smallest Cε
+used for each Jmax . The obtained curves overlap the equidistant one almost perfectly –
+we can hence conclude that we preserve the accuracy and the order of the discretization
+18
+scheme on adaptive grids. Consequently, all further results are obtained with the CDF
+4/4 wavelet.
+5.2
+A flapping wing
+As example of a time-dependent geometry in 3D, we consider the test case proposed by
+Suzuki et al. [63], Appendix B2. It has also been considered as validation case in our previous work [33] and by Dilek et al. [22]. We therefore limit the description of the setup
+to a minimum and refer the reader to [33] for details of the geometry and wingbeat kinematics. The test consists of a single, rectangular, rigid flapping wing with finite thickness
+hwing = 0.04171 and length R = 1. No inflow is imposed; the setup mimics hovering flight.
+The wing moves in an horizontal stroke plane, its prescribed wingbeat motion is visualized in Fig. 3A. The two half cycles, conventionally termed up- and downstroke, are
+symmetrical. The size of the computational domain is chosen large enough to be a good
+approximation for an unbounded flow, in our case we set 6R × 6R × 6R, which is slightly
+larger than [22, 63]. At the outer border, we impose homogeneous Dirichlet conditions
+on u∞ = 0 and p∞ = 0 using the sponge term in eqns. (2.5-2.6). The initial condition is
+u(t = 0) = p(t = 0) = 0.
+As penalization is used for the wing, the scaling relations (3.11) are used, and we use
+the constant Kη = 0.365 justified from our previous work [33]. Figure 3B summarizes the
+parameters used for a coarse, medium and fine resolution simulation.
+The low Reynolds number of Re = utip cm /ν = 100, which is comparable to that of
+a fruit fly, results in a smooth flow topology. Here, utip is the mean wingtip velocity
+and cm the chord length. The flow displays the characteristic features of flapping flight,
+namely a strong leading edge vortex and a wingtip vortex. The computational grid shows
+the expected refinement near the wing, while the resolution in the remaining parts of
+the domain is dictated by gradedness. Because of the absence of fine-scale structures in
+the flow, the grid is in practice determined uniquely by the mask function χ, and the
+parameter Cε is not important. Nonetheless, Cε has been scaled according to eq. (3.11)
+for consistency. We set a block size of Bs = 23 (see section 5.4) and because Nb does not
+strongly vary over time, the number of CPU is constant throughout the simulation.
+Figure 3C-D compares the lift- and drag force obtained by present simulations with
+the results obtained by Suzuki et al. [63], Dilek et al [22] and our own previous work [33].
+As already noted by Suzuki in their initial publication using two different solvers, some
+discrepancy between the reference solutions is observed. The difference, integrated over
+the stroke period, is of the order of 5%, which is why we do not present convergence
+plots.
+5.3
+Bumblebee in forward flight
+The last example in our hierarchy of validation cases is the simulation of a model bumblebee. This model has also been used in our previous work [29,30] and it was the first to
+19
+A
+z
+x
+y
+B
+C
+D
+Figure 3: Suzuki’s test case. A: visualization of the wingbeat. The rigid wing moves in an horizontal stroke plane
+with varying angle of attack, the motion is symmetrical in down- and upstroke. B: computational parameters
+used in the simulations. C-D: Time evolution of lift and drag and comparison with results from the literature.
+All results are obtained with CDF 4/4 wavelets.
+be studied in fully developed turbulence. In the interest of brevity, we limit the description of the model to a minimum and refer to [29, 30] for further details. The electronic
+supplementary material to this article contains the parameter files used in the simulation
+for reproducibility. The penalization method allows for the inclusion of obstacles of arbitrary complexity, and we hence include the bumblebees body. The wingbeat is illustrated
+in Fig. 4A. We are considering forward flight, which is why the stroke plane is inclined
+with respect to horizontal. The wing kinematics differs significantly between down- and
+upstroke. During the downstroke, also called power-stroke, most of the aerodynamic
+20
+A
+B
+lift
+10
+drag
+C
+6
+D
+8
+4
+6
+4
+2
+2
+0
+0
+2
+2
+4
+4
+2.0
+2.2
+2.4
+2.6
+t/T
+2.8
+3.0
+2.0
+Engels et al. 2016
+coarse
+medium
+fine
+2.2
+2.4
+2.6
+2.8
+3.0
+t/T
+Figure 4: Bumblebee simulations. A: Wingbeat of the bumblebee model in forward flight. During the downstroke, the angle of attack is more elevated than during the upstroke. The stroke plane is inclined to generate
+a forward force. B: computational parameters for the three levels of simulation. C-D: Lift- (=vertical) and drag
+(=horizontal) force. All results are obtained with CDF 4/4 wavelets.
+forces are generated, as the wing moves against the flow direction at elevated angle of
+attack. The upstroke at much smaller angle of attack primarily serves to enable the next
+downstroke. The wings are rigid and have a thickness hwing = 0.025R. Our bumblebee
+has a Reynolds number of Re = utip cm /ν = 2000 and as such produces a more complicated
+flow topology than the previous test [28–30].
+The domain size is L = 8, the block size is Bs = 23 (see section 5.4) and the other numerical parameters of three simulations levels are given in Fig. 4B. All results are obtained
+with the CDF 4/4 wavelets.
+The drag (Fig. 4C) and lift (Fig. 4D) show good convergence and display features
+typical for flapping wings. The leading edge vortex (LEV, cf. Fig. 5A) is built up during
+the downstroke and reaches its maximum intensity during the mid-downstroke (t = 2.25),
+21
+which results in a peak in the lift force. At the turning point (t = 2.5) between down- and
+upstroke, the rapid wing rotation causes large peaks in the forces.
+Figure 5A-C shows the same snapshot of the flow field at t/T = 2.3 in all three simulations. Shown is the |ω | = 50 isosurface of vorticity magnitude. Visually, the three levels
+yield similar results for the large scale structures of the flow field. The grids concentrate,
+as expected, high resolution near the insect, but contrarily to the previous testcase parts of
+the wake are now likewise are refined to Jmax , because they are detected by the wavelet
+thresholding. In the coarse simulation, 3% of the full grid is used, which decreases to
+1.3% and 0.6% for the medium and fine resolution, respectively.
+5.4
+Performance
+For a specific simulation, three factors are important for the computational performance:
+the block size Bs , the number of blocks per CPU Nb /NCPU and the number of CPU itself.
+Bs balances grid sparsity and data regularity and thus influences the solution, while the
+other parameters are purely computational. We clarify the influence of these parameters
+in this section.
+The impact of Bs can be divided into to contributions: the grid sparsity that depends
+on the physics of a simulation and the computational efficiency resulting from the data
+regularity. The latter depends only on the machine. We therefore study this part as follows. For each value of Bs , a random grid of given Nb is first generated, then, 15 time
+steps of the ACM equations are performed on this grid. Each step consists of the refineevolve-coarsening cycle explained in section 3.5. As we use random data, the adaptation
+is set to coarsen everywhere instead of using wavelet thresholding. After measuring the
+performance on this grid, a new, slightly denser grid is generated. The procedure is repeated until the allocated memory is exhausted.
+Figure 6A shows the CPU time (in seconds) consumed per grid point and per right
+hand side evaluation, as the RK4 scheme has s = 4 stages. This number is hence independent of the chosen time stepper, as our adaptivity only concerns spatial discretization.
+We used three different supercomputers, Irene SKL, Irene AMD‡ , Zay SKL§ . For smaller
+Bs , the cost increases because the overhead due to adaptivity becomes larger. Larger Bs
+reduces the cost per point because of the increased data regularity. It is important to
+compare the performance to other existing codes, therefore the computational cost for
+the spectral code FLUSI [33] is also shown. We choose this code because we can simulate exactly the same bumblebee setup with a completely different approach. In this
+simulation, the resolution is 20483 grid points and NCPU = 1152. The comparably low
+NCPU ensures best possible performance for the FLUSI code. The performance of WABBIT
+is about four times better than that of FLUSI for larger Bs , which demonstrates that the
+additional overhead due to adaptivity is successfully mitigated by the block based data
+structure. Because of the full grid in the FLUSI case, the total cost is much more elevated,
+‡ http://www-hpc.cea.fr/fr/complexe/tgcc.htm
+§ http://www.idris.fr/
+22
+A
+B
+C
+Figure 5: Bumblebee simulations. A (coarse), B (medium), C (fine resolution): Visualization of the flow field
+(||ω || = 50 isosurface of vorticity magnitude) at t/T = 2.3 (right) and 2D projections of the computational grid
+used at this time (left) for the three simulations. All results are obtained with CDF 4/4 wavelets.
+23
+but on the other hand it relies on highly optimized FFT libraries. The similar performance
+per grid point and time step is thus a strong indicator for competitive performance of the
+WABBIT code.
+Using dynamical grids the work load per CPU is not constant. It is therefore important to verify that the performance remains indeed constant over a large range of blocks
+per CPU, Nb /NCPU , as shown in Fig. 6B, computed using NCPU = 200 on Zay SKL. For
+Nb /NCPU > 50, the performance is nearly constant, while it drops for smaller values.
+With increasing NCPU , reasonable values for Nb /NCPU are obtained only for very large
+simulations. At this point, the overhead of the global topology management can eventually become important and increases the cost per grid point (Fig. 6C). Improving this
+scaling behaviour is left for future work.
+Figure 6D shows the fraction of CPU time spent on refinement, evolution and coarsening, which sum to 100%. The fractions spent on refinement, evolution and coarsening
+remain approximately constant over the range of Bs , while the ghost node synchronization and hence the parallelization overhead are much larger at small Bs . Synchronization
+is performed in all three of refinement, evolution and coarsening. Approximately 60%
+–70% are spent on computing the actual right hand side. We should note at this point
+that the ACM equations considered here are extremely simple and can be solved very
+efficiently. For more complicated equations, such as the full compressible Navier–Stokes
+equation, the portion of time spent on time evolution easily exceeds 90%.
+For the simulations presented earlier, we have not yet discussed how the block size
+Bs = 23 has been chosen. Prior to performing the actual simulations, we performed a
+series of runs with varying Bs on the bumblebee configuration. As the smallest ∆x depends on Bs , we cannot simply change Bs without altering the results. Therefore, we took
+advantage of the fact that for an exterior flow, the domain size L is an artifact from the
+simulation rather than a physical quantity (L → ∞ in reality). Thus, for every Bs we modified L to obtain the same ∆x. All simulations run until t = 0.15, and the other parameters
+are Jmax = 8, Cε = 10−3 , C0 = 20 and Cη = 1.65 · 10−4 .
+Fig. 6E shows the total number of points on the grid, averaged over the time span
+of the simulations. It is observed that as the computational cost per point decreases
+(Fig. 6A), the total number of points increases. Both influences combined yield Fig. 6F,
+which shows the total cost per simulation time unit. It presents a minimum for an intermediate value of Bs , where a compromise between sparsity and data regularity is
+achieved. We therefore choose Bs = 23, but we also note that any value between 15 and
+30 would have resulted in near-optimal performance
+6
+Outlook: bumblebee in the wake of a fractal tree
+To give an outlook and to illustrate the flexibility of the present adaptive wavelet approach to compute flows with multiple scales, we simulate the flow of the bumblebee
+model, described previously, in the wake of a model flower, corresponding to a bio-
+24
+15
+20
+25
+Bs
+30
+35
+10 7
+40
+Bs = 15
+Bs = 31
+Bs = 19
+Bs = 23
+Bs = 27
+Bs = 35
+Bs = 39
+10 6
+0
+50
+100
+150
+200
+Nb/NCPU
+250
+300
+350
+400
+5
+C
+irene SKL
+irene AMD
+zay SKL
+70
+D
+60
+CPU time fraction (%)
+10
+B
+irene SKL
+irene AMD
+zay SKL
+FLUSI (irene SKL)
+10 6
+10 7
+tCPU/(Npoints Nts)
+10 5
+A
+tCPU/(Npoints Nts)
+tCPU/(Npoints Nts)
+10 5
+10 6
+50
+40
+30
+refinement
+time evolution
+20
+coarsening
+ghost nodes
+10
+10 7
+0
+2000
+4000
+6000
+NCPU
+8000
+10000
+12000
+15
+E
+20
+F
+25
+Bs
+30
+35
+40
+irene SKL
+irene AMD
+zay SKL
+109
+tCPU/T
+Npoints
+104
+6 × 103
+10
+8
+15
+20
+25
+Bs
+30
+35
+40
+15
+20
+25
+Bs
+30
+35
+Figure 6: Computational performance. A-D: performance on randomly generated grids. E-F: performance of
+bumblebee simulations. A: CPU cost per grid point per right hand side evaluation as a function of Bs , measured
+on three different supercomputers (Irene SKL, Irene AMD, Zay SKL). For comparison, the cost of the FLUSI
+code on Irene SKL is included as well. Note only one simulation is shown, which does not depend on Bs .
+Shaded areas correspond to mean ± 1 s.d. B: CPU cost as a function of Nb /NCPU for different Bs , computed
+on NCPU = 200 cores on Zay SKL. C: for Bs = 23, CPU cost as a function of the number of CPU (weak scaling).
+For each datapoint Nb /NCPU is sufficiently high to be independent of that parameter. D: fraction of time
+spend on grid refinement, time evolution and coarsening (=100%), as well as ghost node synchronization via
+MPI. Computed on NCPU = 200 cores on Zay SKL. E: Bumblebee simulations, time-averaged total number of
+points on the grid Npoints = Nb Bs3 as a function of Bs F: Bumblebee simulations, total cost per time unit of a
+simulation with different Bs All results are obtained with CDF 4/4 wavelets.
+25
+Figure 7: Bumblebee behind a fractal tree. Top part shows the setup consisting of a bumblebee and a treeinspired fractal turbulence generator composed of rigid cylinders. Bottom part illustrates the flow field with an
+isosurface of the Q-criterion.
+inspired turbulence generator. The latter is composed of an array of rigid cylinders arranged in a fractal manner, largely motivated by plants. For a detailed description of the
+geometry we refer the reader to [27]. Both bumblebee and fractal tree are simulated using
+the volume penalization method in a large cubic domain of size L = 64R, where R is the
+wing length of the insect. Figure 7 (top, left) illustrates the setup. The thinnest cylinders
+in the fractal tree have a diameter of dmin = 0.114R and thus we have a Reynolds number
+of Re = u∞ dmin /ν = 250. The other numerical parameters are chosen as in the coarse simulations of the bumblebee alone, described in section 5.3. The simulation is performed
+using CDF 4/4 wavelets where Cε = 4 · 10−2 . The flow field is visualized in Fig. 7 with
+an isosurface of the Q-criterion. It shows the turbulent wake produced by the tree model
+and the wake of the bumblebee after twelve wingbeats. The maximum number of refinement levels is Jmax = 9 and the grid is composed, on average, of Nb = 2 · 105 blocks with
+a total number of 2.5 · 109 grid points. The dynamically adapted grid allows us to use a
+large domain size, which would result in 117763 points on the corresponding, uniform
+grid with the same ∆x. We hence use on average only 0.15% of the uniform grid. Note
+however that the domain size could possibly be reduced. A detailed study on the flow
+physics of the bumblebee-plant interaction will be reported elsewhere.
+26
+7
+Conclusions
+This article presents a novel framework for wavelet-based adaptive simulations of turbulent flows with a wide range of dynamically active scales in complex, time-dependent geometries on massively parallel computers, with a specific focus on flapping insect flight.
+It is implemented in the WABBIT-code, which is open-source in order to maximize its accessibility and its utility to the scientific community. We base our physical model on the
+original combination of artificial compressibility and volume penalization, and discretize
+the governing equations using classical centered finite differences on a locally uniform
+Cartesian grid together with a Runge–Kutta scheme for time integration, both of fourth
+order. Motivated by the intermittent nature of our applications, we employ biorthogonal interpolating wavelets to introduce a dynamically adaptive grid tracking the solution
+in space and scale. In contrast to many previous wavelet-based implementations, the
+data structure is based on locally uniform blocks, which leads to an improved performance on modern CPUs. Thresholding the wavelet coefficients allows us to decide if a
+block can be coarsened at the end of a time step. As a block contains multiple wavelet
+coefficients but can only be coarsened as a whole, the number of points per block is a
+numerical parameter balancing the influence of data compression and CPU efficiency.
+The global grid topology is encoded using a custom tree-like data structure, as is natural
+in the wavelet-context. Even though our method has excellent compression properties,
+the applications we have in mind require many blocks and thus using massively parallel
+supercomputers is mandatory. To this end, blocks are distributed among MPI processes
+and the layer of overlapping ghost nodes is synchronized. This implementation yields
+high parallel efficiency using thousands of CPUs while maintaining both memory- and
+CPU time compression.
+Through numerical estimations and a series of validation cases, we discussed how
+the parameters for this model have to be chosen in order to simultaneously reduce all occurring errors, i.e. compressibility, penalization, discretization and thresholding errors,
+while maintaining computational efficiency. We also assessed the impact of the block
+size on the performance and illustrated how it is chosen to yield maximum efficiency.
+Considering different supercomputers we furthermore showed that the performance per
+grid point and time step is very similar to that of the previously developed Fourier pseudospectral code FLUSI. Because this spectral code relies on the fast Fourier transform, a
+task for which highly tuned libraries are used, we can conclude that our new framework
+offers excellent performance and can indeed translate the sparsity of the grid into CPU
+time savings.
+If we consider, for instance, the case of the high-resolution bumblebee computation with corresponding uniform grid resolution 56323 , we showed that the adaptive
+wavelet-based computation is, for similar accuracy, about 160 times faster than the classical Fourier pseudospectral code. While this is an optimistic scenario because the domain
+size can still be reduced, it still illustrates the strength of our novel approach.
+We finally presented a simulation of an insect together with a fractal tree, which will
+27
+be used in future work to study interactions of insects with their environment. Such
+multiscale simulations are out of reach for other approaches, in particular spectral codes,
+and we are not aware of other codes suitable for such problems.
+In future work we are planning to perform adaptive computations of insects using
+realistic bodies from micro CT data of real insects and mass-spring models for flexible
+wings [68] to perform adaptive fluid-structure interaction simulations.
+Acknowledgments
+TE, KS, MF gratefully acknowledge financial support from ANR (Agence Nationale de la
+Recherche), grant no 15-CE40-0019, and DFG (Deutsche Forschungsgemeinschaft), grant
+no SE 824/26-1, project AIFIT (Aerodynamics of Insect Flight In Turbulence). The authors were granted access to the HPC resources of IDRIS (Institut du développement
+et des ressources en informatique scientifique) under the allocation no 2018-91664 attributed by GENCI (Grand équipement national de calcul intensif). For this work we
+were also granted access to the HPC resources of Aix-Marseille Université financed by
+the project Equip@Meso (no ANR-10-EQPX- 29-01). The authors thankfully acknowledge
+financial support granted by MAEDI (Ministère des Affaires étrangères et du développement international), MEN (Ministère de l’Education Nationale), MESRI (Ministère de
+l’enseignement supérieur, de la recherche et de l’innovation), DAAD (Deutscher Akademischer Austauschdienst) within the French-German program Procope, project FIFIT (Flapping Insect Flight In Turbulence). JR, TE gratefully acknowledge financial support from
+DFG, grant no SFB1029.
+References
+[1] S. Abhyankar, J. Brown, E. M Constantinescu, D. Ghosh, B. F. Smith, and H. Zhang. Petsc/ts:
+A modern scalable ode/dae solver library. arXiv:1806.01437, 2018.
+[2] P. Angot, C. Bruneau, and P. Fabrie. A penalization method to take into account obstacles in
+incompressible viscous flows. Numer. Math., 81:497–520, 1999.
+[3] E. Arquis and J.-P. Caltagirone. Sur les conditions hydrodynamiques au voisinage d’une
+interface milieu fluide milieu poreux: application à la convection naturelle. C. R. Acad. Sci.
+Paris, Sér. II, 299, 1984.
+[4] R. Becker and R. Rannacher. An optimal control approach to a-posteriori error estimation, pages
+1–102. Cambridge University Press, Cambridge, 2001.
+[5] M. Berger and P. Colella. Local adaptive mesh refinement for shock hydrodynamics. J.
+Comput. Phys., 82:64–84, 1988.
+[6] M. Berger and J. Oliger. Adaptive mesh refinement for hyperbolic partial differential equations. J. Comput. Phys., 53:484–512, 1984.
+[7] A. Brandt. Multilevel adaptive solutions to boundary value problems. Math. Comp., 31:333–
+390, 1977.
+28
+[8] C. Burstedde, L. C. Wilcox, and O. Ghattas. p4est: Scalable algorithms for parallel adaptive
+mesh refinement on forests of octrees. SIAM Journal on Scientific Computing, 33(3):1103–1133,
+2011.
+[9] A.J. Chorin. A numerical method for solving incompressible viscous flow problems. J.
+Comput. Phys., 2:12–26, 1967.
+[10] A. Cohen. Wavelet methods in numerical analysis, volume VII of Handbook of Numerical Analysis.
+Elsevier, Amsterdam, 2000.
+[11] A. Cohen, W. Dahmen, and R. DeVore. Adaptive wavelet methods for elliptic operator
+equations – convergence rates. Math. Comp, 70:27–75, 1998.
+[12] A. Cohen, I. Daubechies, and J. C. Feauveau. Biorthogonal bases of compactly supported
+wavelets. Comm. Pure and Appl. Math., 45:485–560, 1992.
+[13] A. Cohen, N. Dyn, S. M. Kaber, and M. Postel. Multiresolution schemes on triangles for
+scalar conservation laws. J. Comp. Phys., 161:264–286, 2000.
+[14] I. Daubechies. Orthonormal bases of compactly supported wavelets. Comm. Pure and Appl.
+Math., 41(7):909–996, 1988.
+[15] R. Deiterding. Parallel Adaptive Simulation of Multi-dimensional Detonation Structures. PhD
+thesis, Brandenburgische Technische Universität Cottbus, 2003.
+[16] R. Deiterding. Construction and application of an amr algorithm for distributed memory
+computers. In Tomasz Plewa, Timur Linde, and V. Gregory Weirs, editors, Adaptive Mesh
+Refinement - Theory and Applications, pages 361–372, Berlin, Heidelberg, 2005. Springer Berlin
+Heidelberg.
+[17] R. Deiterding, M. Domingues, S. Gomes, O. Roussel, and K. Schneider. Adaptive multiresolution or adaptive mesh refinement? A case study for 2D Euler equations. ESAIM: Proceedings, 29:28–42, 2009.
+[18] R. Deiterding, M. Domingues, S. Gomes, O. Roussel, and K. Schneider. Comparison of
+adaptive multiresolution and adaptive mesh refinement applied to simulations of the compressible Euler equations. SIAM J. Sci. Comput., 38(5):S173–S193, 2016.
+[19] G. Deslauriers and S. Dubuc. Interpolation dyadique, 1987.
+[20] G. Deslauriers and S. Dubuc. Symmetric iterative interpolation processes. Constr. Approx.,
+5(1):49, 1989.
+[21] R. A. DeVore. Nonlinear approximation. Acta Numerica, 7:51–150, 1998.
+[22] E. Dilek, B. Erzincanli, and M. Sahin. The numerical investigation of lagrangian and eulerian
+coherent structures for the near wake structure of a hovering drosophila. Theoretical and
+Computational Fluid Dynamics, Apr 2019.
+[23] M. Domingues, S. Gomes, O. Roussel, and K. Schneider. Adaptive multiresolution methods.
+ESAIM: Proceedings, 34:1–96, 2011.
+[24] M. Domingues, S. M. Gomes, and L. M. A. Díaz. Adaptive wavelet representation and
+differentiation on block-structured grids. Appl. Num. Math., 47:421–437, 2003.
+[25] D L Donoho. Interpolating wavelet transforms. Preprint, Department of Statistics, Stanford
+University, 2(3):1–54, 1992.
+[26] D. L. Donoho and J. M. Johnstone. Ideal spatial adaptation by wavelet shrinkage. Biometrika,
+81(3):425–455, 1994.
+[27] M. Dreissigacker. Turbulence generated by fractal trees - PIV measurements and comparison
+with numerical data. Master’s thesis, TU Berlin, 2017.
+[28] T. Engels, D. Kolomenskiy, K. Schneider, M. Farge, F.-O. Lehmann, and J. Sesterhenn. Helical
+vortices generated by flapping wings of bumblebees. Fluid Dyn. Res., 50:011419, 2018.
+[29] T. Engels, D. Kolomenskiy, K. Schneider, M. Farge, F.-O. Lehmann, and J. Sesterhenn. Im-
+29
+pact of turbulence on flying insects in tethered and free flight: High-resolution numerical
+experiments. Phys. Rev. Fluids, 4:013103, Jan 2019.
+[30] T. Engels, D. Kolomenskiy, K. Schneider, F.-O. Lehmann, and J. Sesterhenn. Bumblebee flight
+in heavy turbulence. Phys. Rev. Lett., 116:028103, 2016.
+[31] T. Engels, D. Kolomenskiy, K. Schneider, and J. Sesterhenn. Two-dimensional simulation of
+the fluttering instability using a pseudospectral method with volume penalization. Computers & Structures, 122:101–112, 2012.
+[32] T. Engels, D. Kolomenskiy, K. Schneider, and J. Sesterhenn. Numerical simulation of fluidstructure interaction with the volume penalization method. J. Comput. Phys., 281:96–115,
+2015.
+[33] T. Engels, D. Kolomenskiy, K. Schneider, and J. Sesterhenn. FluSI: A novel parallel simulation tool for flapping insect flight using a Fourier method with volume penalization. SIAM
+J. Sci. Comput., 38(5):S3–S24, 2016.
+[34] M. Farge, K. Schneider, and N. Kevlahan. Non-Gaussianity and Coherent Vortex Simulation
+for two-dimensional turbulence using an adaptive orthonormal wavelet basis. Phys. Fluids,
+11:2187–2201, 1999.
+[35] I. Gargantini. An effective way to represent quadtrees. Communications of the ACM,
+25(12):905–910, 1982.
+[36] I. Gargantini. Linear octtrees for fast processing of three-dimensional objects. Computer
+graphics and Image processing, 20(4):365–374, 1982.
+[37] A. Grossmann and J. Morlet. Decomposition of Hardy functions into square integrable
+wavelets of constant shape. SIAM J. Math. Anal., 15:723–736, 1984.
+[38] J. Guermond and P. Minev. High-order time stepping for the incompressible Navier–Stokes
+equations. SIAM Journal on Scientific Computing, 37(6):A2656–A2681, 2015.
+[39] A. Harten. Discrete multi-resolution analysis and generalized wavelets. Appl. Numer. Anal.,
+12:153–192, 1993.
+[40] A. Harten. Multiresolution algorithms for the numerical solution of hyperbolic conservation
+laws. Comm. Pure Appl. Math., 48:1305–1342, 1995.
+[41] A. Harten. Multiresolution representation of data: a general framework. SIAM J. Numer.
+Anal., 33:385–394, 1996.
+[42] D. Hilbert. Über die stetige Abbildung einer Linie auf ein Flächenstück. Mathematische
+Annalen, 38:459–460, 1891.
+[43] M. Holmström. Solving hyperbolic PDEs using interpolating wavelets. SIAM J. Sci. Comput.,
+21(2):405–420, 1999.
+[44] N. Kevlahan and M. Farge. Vorticity filaments in two-dimensional turbulence: Creation,
+stability and effect. J. Fluid Mech., 346:49–76, 1997.
+[45] N. Kevlahan and O. Vasilyev. An adaptive wavelet collocation method for fluid–structure
+interaction at high Reynolds numbers. SIAM J. Sci. Comput., 26(6):1894–1915, 2005.
+[46] D. Kolomenskiy, J.-C. Nave, and K. Schneider. Adaptive gradient-augmented level set
+method with multiresolution error estimation. J. Sci. Comput., 66:116–140, 2016.
+[47] D. Kolomenskiy and K. Schneider. A Fourier spectral method for the Navier-Stokes equations with volume penalization for moving solid obstacles. J. Comput. Phys., 228:5687–5709,
+2009.
+[48] J. Liandrat and P. Tchamitchian. Resolution of the 1d regularized Burgers equation using a
+spatial wavelet approximation. Technical report, 1990.
+[49] S. Mallat. Multiresolution approximation and orthonormal wavelet basis of L2 (R). Trans.
+Am. Math. Soc., 315:69–87, 1989.
+30
+[50] S. Mallat. A Wavelet Tour of Signal Processing The Sparse Way. Academic Press, 3rd edition,
+2009.
+[51] R. Mittal and G. Iaccarino. Immersed boundary methods. Annu. Rev. Fluid Mech., 37:239–261,
+2005.
+[52] S. Müller. Adaptive multiscale schemes for conservation laws, volume 27 of Lectures Notes in
+Computational Science and Engineering. Springer, Heidelberg, 2003.
+[53] R. Nguyen van yen, D. Kolomenskiy, and K. Schneider. Approximation of the Laplace and
+Stokes operators with Dirichlet boundary conditions through volume penalization: A spectral viewpoint. Numer. Math., 128:301–338, 2014.
+[54] T. Ohwada and P. Asinari. Artificial compressibility method revisited: Asymptotic numerical method for incompressible Navier–Stokes equations. J. Comp. Phys., 229:1698–1723, 2010.
+[55] C. S. Peskin. Numerical analysis of blood flow in the heart. J. Comput. Phys., 25:220–252,
+1977.
+[56] C. S. Peskin. The immersed boundary method. Acta Numerica, 11:479–517, 2002.
+[57] D. Rossinelli, C. Conti, and P. Koumoutsakos. Mesh-particle interpolations on graphics processing units and multicore central processing units. Philosophical Transactions of the Royal
+Society A: Mathematical, Physical and Engineering Sciences, 369(1944):2164–2175, may 2011.
+[58] O. Roussel and K. Schneider. Coherent Vortex Simulation of weakly compressible turbulent mixing layers using adaptive multiresolution methods. J. Comput. Phys., 229:2267–2286,
+2010.
+[59] O. Roussel, K. Schneider, A. Tsigulin, and H. Bockhorn. A conservative fully adaptive multiresolution algorithm for parabolic PDEs. J. Comput. Phys., 188:493–523, 2003.
+[60] K. Schneider. Immersed boundary methods for numerical simulation of confined fluid and
+plasma turbulence in complex geometries: a review. J. Plasma Phys., 81:435810601, 2015.
+[61] K. Schneider and O. Vasilyev. Wavelet methods in computational fluid dynamics. Annu.
+Rev. Fluid Mech., 42:473–503, 2010.
+[62] F. Schornbaum and U. Rüde. Extreme-scale block-structured adaptive mesh refinement.
+SIAM Journal on Scientific Computing, 40(3):C358–C387, 2018.
+[63] K. Suzuki, K. Minami, and T. Inamuro. Lift and thrust generation by a butterfly-like flapping wing-body model: immersed boundary-lattice Boltzmann simulations. J. Fluid Mech.,
+767:659–695, 2015.
+[64] W. Sweldens. The lifting scheme: A construction of second generation wavelets. SIAM J.
+Math. Anal., 29(2):511–546, 1989.
+[65] W. Sweldens and P. Schröder. Building your own wavelets at home. Wavelets in Computer
+Graphics, 1997.
+[66] W. Sweldens and P. Schröder. Building your own wavelets at home, pages 72–107. Springer
+Berlin Heidelberg, Berlin, Heidelberg, 2000.
+[67] C. K.W. Tam and J. C. Webb. Dispersion-relation-preserving finite difference schemes for
+computational acoustics. J. Comput. Phys., 107(2):262–281, 1993.
+[68] H. Truong, T. Engels, D. Kolomenskiy, and K. Schneider. A mass-spring fluid-structure
+interaction solver: Application to flexible revolving wings. Comput. & Fluids, 200:104426,
+2020.
+[69] G. Zumbusch. Parallel multilevel methods: adaptive mesh refinement and loadbalancing. Advances
+in Numerical Mathematics. Springer, 2003.

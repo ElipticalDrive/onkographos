@@ -1,0 +1,142 @@
+Various Distance Field Generation Techniques
+abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
+Various Distance Field Generation Techniques
+Friday, February 09, 2018
+This is meant as a quick refresher of various ways to make distance fields, starting with a way to do it in photoshop and working up to custom shaders. If you are wondering why I am posting this instead of the promised impostor tool, once again I started this a couple months ago and just need to clear the backlog before uploading anything new. But rest assured it won't be long. The impostor tool is one of the reasons I revisited this topic.
+Most readers here are probably familiar with distance fields at least in the general sense. They are most typically used for things like font textures to give a nicer, adjustable look but their applications are endless. Distance fields have existed far before game developers were talking about them. Valve popularized the term in the game dev world in 2007 with this quick but effective paper:
+http://www.valvesoftware.com/publications/2007/SIGGRAPH2007_AlphaTestedMagnification.pdf
+UE4 makes use of some internal distance field rendering methods (RTDF, DFAO, SignedDF Shadowmaps, mostly by Daniel Wright or @EpicShaders) but this post is mostly going to be about using and generating distance fields in 2D textures in a more general sense. There are a bunch of examples where having distance fields is beneficial:
+Foliage materials, adjust leaf thickness for season or mipmap reasons, or fake Edge Scatter (don't call it backscatter somebody might freak out).
+Flipbooks can use them for free smoothed alpha transitions
+Give any texture the ability to grow/expand using it's alpha while maintaining detail
+Use procedural mixing to vary masked edges
+Creating foam/shoreline masks for rocky beaches
+This video I uploaded a while back has an example of usage case number 2. The example in the center is a standard Frame Blended SubUV that has the alpha mask replaced with a Distance Field. Notice how the edges transition completely smoothly. This comes at no extra cost in the material.
+Here, a Distance Field alpha is used to adjust some fake rim/scattering on a tree impostor:
+Here Distance Field Gradients were used to attract a realtime fluid sim using the fluid content plugin (might be able to show more of this soon):
+Generating Distance Field Alphas
+There are a bunch of ways to create distance fields. First I will mention a way to make them in photoshop then we will move on to generating them in shaders which is often useful for content creation blueprints.
+My friend Jon Lindquist (Sr Technical Artist at Epic) showed me a way using photoshop many years ago. It is such an obscure and hard to find feature that both of us have forgotten how to do it and had to ask each other how to do it at least once over the last few years. I eventually made some images so I wouldn't forget how to do it since its so buried in the interface.
+These images are from an example I made for somebody for how to take a heightmap and make it into a distance field for a rocky beach. The heightmap itself won't be good for foam masks because steep rock edges won't have a gradient of depth surrounding them.
+Extracing the height above the water as white is the first step. This can usually be done by just using levels adjustment, upping contrast until the shoreline area is isolated and sharp. The next step is to make a new layer using only the white area. You can use the Quick/Magic Wand or Select->Color Range tool. I am showing the latter here to select the white region:
+Then you make a new layer and fill it with white. Then add a Layer Style of type Stroke to that layer.
+To make the stroke style create signed distance fields, Position should be set to Center.
+Next, set Fill Type to Gradient and set the Style to Shape Burst.
+The result is a Signed Distance Field , meaning the original hard boundary will be encoded as 0.5, and distance is stored on both sides of the edge. That means Alpha thresholds for materials should be set to 0.5 instead of 0.333 for masked materials. Offsets can be applied to expand or contract the mask. Signed just means it stores distance for both positive and negative distance from the edge. The 0.5 is really intepreted to be 0 here but simply biased so that a -1 to 1 range can be stored in a 0 to 1 range, as 8 bit formats cannot store negative values.
+Here is what that looks like for the above shoreline:
+Now any part of that gradient can be extracted in a shader to use. A basic example of that operation would be to Subtract a ScalarParameter for the Min threshold value, then to divide by the desired Length. I typically define the Length to be the Max - Min. So let's say you wanted to use a range of 0.3 to 0.4. In that case you would just do ( x - 0.3 ) / (0.4 - 0.3) or simplified (x - 0.3) / 0.1.
+Shader Based Creation
+Now that we know how to make distance fields in photoshop, there are a few ways to create them in a shader. The two most common ways to do that are through Brute Force Edge Searching and Jump Flooding.
+Searching is involves sampling a radius of neighbor pixels and looking for texture edges and returning the minimum distance to any edge. This method is extremely expensive since it is of O(N^2) complexity. So if you want to search a radius of 256 pixels, that means performing up to ((256 * 2) + 1)^2 = 263,169 texture lookups. There are ways to optimize the number of lookups a bit but its generally inefficient. Still, this method is often useful because it can be done in one simple pass. Note that most cases would only require a radius of less than 64 so it is only a few thousand lookups, but still enough to be slow.
+Jump flooding on the other hand is pretty efficient. It involves First marking edges as seed pixels and then taking log2(N) steps to 'flood' the texture. It is a bit tricky to explain, but you can think of it as the seed pixels all jumping Half of the remaining distance at every pass, until that distance is one pixel. At each step, the value that is closest will actually be written. So for the above example A radius of 256 (which would search a 512x512 texture), can be done in a mere 8 passes! That is roughly 32k times faster. The downside is that is comparatively much harder to set up since it requires two render targets to be ping ponged in order to work.
+Edge Searching
+The basic code for a brute force radius search to find edges is pretty simple. It is just a nested search that checks if the sampled texel matches the starting texel. If they are different, the distance is checked from the starting texel and the minimum of all distances within the radius is returned (as always anything not defined here is an input to the UE4 material custom node):
+float curdist = 0;
+float mindist = MaxRadius;
+float texelsize = 1 / TextureSize;
+UV = ( floor(UV * TextureSize) / TextureSize ) + ( 0.5 / TextureSize);
+float startsample = dot(ChannelMask, Tex.SampleLevel(TexSampler, UV, 0));
+int startinside = startsample;
+for(int i = -MaxRadius; i < MaxRadius; i++)
+{
+for(int j = -MaxRadius; j < MaxRadius; j++)
+{
+float2 curoffset = float2((float)i, float(j));
+float2 curUV = UV + curoffset * texelsize;
+curUV = ( floor(curUV * TextureSize) / TextureSize ) + ( 0.5 / TextureSize);
+float cursample = dot(ChannelMask, Tex.SampleLevel(TexSampler, curUV, 0));
+if( cursample != startsample )
+{
+curdist = length(curoffset);
+mindist = min( mindist, curdist );
+}
+}
+}
+float output = (mindist - 0.5) / (MaxRadius - 0.5);
+output *= startinside == 0.0 ? -1 : 1;
+return (output + 1) * 0.5;
+But the problem with writing it out that way is that it is pretty inefficient. Now we already know Jump Flooding is way faster so in some ways pursuing optimizations of the brute force method is a bit pointless. But of course that has never stopped me. Recently I was working on a new foliage impostor baking system and was converting lots of frames into distance fields. A typical render required around 256 frames to be captued (with Basecolor, Roughnes, Normal etc) and before I started optimizing, it was taking almost a minute to generate, mostly spent on the distance fields. I was able to get that down to under 5 seconds.
+It may have been faster to use jump flooding but all my JF experiments were in another branch so I opted to just throw in some optimizations to my DF shader. Keep in mind this next variant is more of an academic curiosity than something that useful:
+The first thing I tried was to make the search pattern start in the center and trace in expanding rings. This way, once an edge is found, the shader can quit early. Here is an illustration showing the expanding square trace pattern:
+Here is the psuedocode modification to make the above shader work like this. Instead of nested i,j loops each being equal based on radius, i is based on radius while j based on i*8, from the fact that the number of samples in any 'box ring' is 8 times the radius:
+for(int i = 0; i < MaxRadius; i++)
+{
+//8 neighbors per texel radius
+float totneighbors = i * 8;
+for(int j = 0; j < totneighbors; j++ )
+{
+float progress = j / totneighbors;
+curoffset.x=saturate(4*progress)-saturate(4*(progress-0.5));
+curoffset.y=saturate(4*(progress-0.25))-saturate(4*(progress-0.75));
+//normalize and offset by radius
+curoffset = (curoffset * totneighbors / 4) - i;
+//shader continues as above from here....
+This should be safe to use to early terminate...
+Or at least that was my first assumption. While it does work, it turns out that since the pattern is based on a square and the distances are euclidean, quitting the trace at any point can miss a potentially closer point that was outside of that current square yet still within the search radius. The solution is to adjust the MaxRadius to be sqrt(2) * the current radius when the first edge is found. That way if an intersection is found at radius level 5 (with a max level of say 32), it will then limit the trace to 5x1.41 = 7 steps, meaning only 2 additional loops get performed to ensure no artifacts.
+That optimization helps a bit, if you have edges everywhere in your texture. But if the texture has lots of white/black space it will end up searching the whole grid. A solution there is to use the mip maps of your alpha. Using a very lowres mip, you can skip distance field generation for any pixels that are fully black or white.
+You just pick a search radius that is half of the texel ratio of the mip level. Ie, if the texture is 512x512, then mip 5 is 16x16. So each texel in mip 5 covers 32 texels in mip0. So with mip5 you can search a radius of 16 texels, using the mip to optimize. You don't have to do that math, you can just adjust either the radius or the mip level until the artifacts are gone.
+Note that render targets in UE4 do not have mips, but you can create a mip of any size by simply rendering to a smaller render target. It is a good idea to to do it successively using each power of two to reach the target level without missing any features.
+Jump Flooding
+As mentioned before, JumpFlooding is quite a bit more efficient. So efficient that you can use it in realtime to create 3D distance fields, like I was prototyping here:
+In terms of seeing a simpler example, I originally started making some example 2D images showing whats going on, but then @Paniq sent me his awesome shader toy demo:
+https://www.shadertoy.com/view/4syGWK
+I am not quite ready to release the updated fluidsim plugin with the voxelization/jumpflood support yet (probably after GDC), but here is the custom node code for a 3D jump flood in UE4. This needs my fluid sim content plugin and it needs some basic BP to ping pong 2 render targets and index the offsetmult param (Alan's link below should give the missing bits):
+const float NumFrames = XYFrames.x * XYFrames.y;
+float3 PixelSize = 1 / TextureSize;
+float3 offsets[26] = {float3(0,0,1), float3(1,0,1) , float3(-1,0,1) , float3(0,1,1) , float3(0,-1,1), float3(1,1,1), float3(1,-1,1), float3(-1,1,1), float3(-1,-1,1),
+float3(1,0,0) , float3(-1,0,0) , float3(0,1,0) , float3(0,-1,0), float3(1,1,0), float3(1,-1,0), float3(-1,1,0), float3(-1,-1,0),
+float3(0,0,-1), float3(1,0,-1) , float3(-1,0,-1) , float3(0,1,-1) , float3(0,-1,-1), float3(1,1,-1), float3(1,-1,-1), float3(-1,1,-1), float3(-1,-1,-1)};
+float3 simpleoffsets[10] = {float3(1,0,0), float3(-1,0,0), float3(0,1,0), float3(0,-1,0), float3(0,0,1), float3(0,0,-1), float3(1,1,0), float3(1,-1,0), float3(-1,1,0), float3(-1,-1,0)};
+//return PseudoVolumeTexture(Tex, TexSampler, UVW, XYFrames, NumFrames).rgb;
+if (offsetmult < 1) return Tex.SampleLevel(TexSampler, UV0, 0).rgb;
+float3 cursample = Tex.SampleLevel(TexSampler, UV0, 0).rgb;
+float curlen = length(cursample - UVW);
+float minlen = curlen;
+if (cursample.x == 0 && cursample.y == 0 && cursample.z == 0) minlen = 1000000;
+float3 nearest = cursample;
+int i = 0;
+while ( i < 26)
+{
+float3 CurUVW = UVW + offsets[i] * offsetmult * PixelSize;
+cursample = PseudoVolumeTexture(Tex, TexSampler, CurUVW, XYFrames, NumFrames).rgb;
+if (cursample.x > 0 || cursample.y > 0 || cursample.z > 0)
+{
+curlen = length( (cursample - UVW) );
+if ( curlen < minlen )
+{
+minlen = curlen;
+nearest = cursample;
+}
+}
+i++;
+}
+return nearest;
+Custom inputs are: Tex =TextureObject, UV0 = point sampled UV grid, UVW = EncodeVolumeCoordinates function, TextureSize=2D tex size, offsetmult = 2^ log2(VolumeSize) - PassIndex. XYFrames is from the psuedovolume layout of the volume.
+It is still a hefty shader since each pass does 26 lookups. That can be dropped to 18 by removing all the far corners but it will cause discontinuities if you need to make a gradient. Alan Wolfe wrote some shader toys showing the effects of dropping corners and doing separable passes in 2D. The latter can be seen here:
+https://www.shadertoy.com/view/Mdy3D3
+He also has a post on doing SDF with a bit more detail. The only thing I would add to his description is that you do not need to run the JFA twice in order to generate the signed aspect. When computing the final distance you just check the original mask again and multiply the distance by -1 when inside the mask before you bias scale into the 0 to 1 range. I never saw any problem doing that
+https://blog.demofox.org/2016/03/02/actually-making-signed-distance-field-textures-with-jfa/
+Ryan Brucks
+This blog focuses on shader and blueprint development in Unreal Engine 4 from a tech artist's perspective. The goal is to help other artists grasp more advanced technical concepts through examples.
+​
+Blog RSS
+
+Distance Field Ray Tracing Part 1:...
+06/06/2020
+Octahedral Impostors
+03/18/2018
+Green Screen live in UE4
+09/15/2017
+
+
+RECENT POSTS
+Name
+E-mail
+Message
+Submit
+Site Map
+Note
+Contact Ryan Brucks
+Work shown on this website also indirectly showcases the work of other artists employed by Epic Games. This primarily includes high polygon models. The work pages will attempt to add detail about this but feel free to contact me with specific questions.
+PrivacyPolicy
+UE4, Materials, Gears of War, Tech Art, Shaders, HLSL, Code, C++, Render Targets, Fluid Simulation, POM, Parallax Occlusion Mapping, Curved Surface Mapping, Shader Blog

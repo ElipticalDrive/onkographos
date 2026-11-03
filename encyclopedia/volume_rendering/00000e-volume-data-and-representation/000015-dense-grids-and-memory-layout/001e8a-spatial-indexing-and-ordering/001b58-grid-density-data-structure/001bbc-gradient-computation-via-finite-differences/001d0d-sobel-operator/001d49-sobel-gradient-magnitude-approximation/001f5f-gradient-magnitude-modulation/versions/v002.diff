@@ -1,0 +1,115 @@
+--- v001.md
++++ v002.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-Gradient Magnitude Modulation is a post-processing step in volume rendering that uses the computed gradient magnitude to modulate sample opacity and illumination values [S1]. It emphasizes surface boundaries by increasing opacity and brightness where gradients are high, while de-emphasizing homogeneous regions and noise where gradients are small [S1]. It differs from the underlying [Sobel Gradient Magnitude Approximation](1429-sobel-gradient-magnitude-approximation.md) by adding a lookup-based mapping and the final multiplication step, rather than just computing the raw magnitude value.
++Gradient Magnitude Modulation is a post-processing step in volume rendering that uses the computed gradient magnitude to modulate sample opacity and illumination values [S1]. It emphasizes surface boundaries by increasing opacity and brightness where gradients are high, while de-emphasizing homogeneous regions and noise where gradients are small [S1]. It differs from the underlying [Sobel Gradient Magnitude Approximation](1429-sobel-gradient-magnitude-approximation.md) by adding a lookup-based mapping and the final multiplication step, rather than just computing the raw magnitude value [S1].
+ 
+ ## How it works
+ **Inputs:**
+-- Gradient magnitude approximation $M$, an 8-bit integer in the range $[0, 2^{20}]$ (derived from the previous stage) [S1].
++- Gradient magnitude approximation $M$, an 8-bit approximation in the range $[0, 2^{20}]$ derived from the previous stage [S1].
+ - Current sample opacity $\alpha$ and illumination $I$ (diffuse/specular) [S1].
+ - Three control registers: `Gmimd` (Gradient Magnitude Illumination Modulation for diffuse), `Gmims` (for specular), and `Gmom` (Gradient Magnitude Opacity Modulation) [S1].
+@@ -18,11 +18,11 @@
+ 
+ **Data Structures:**
+-- **GmLUT**: A table of eight entries. Each entry specifies a point on a piece-wise linear function. The entries are spaced at equal intervals along the gradient magnitude axis (input domain) [S1]. The output values of the table entries represent the modulation factor [S1].
++- **GmLUT**: A table of eight entries specifying points of a piece-wise linear function at equal intervals along the gradient magnitude axis [S1]. The output values of the table entries represent the modulation factor [S1].
+ 
+ **Steps:**
+-1. **Compute Squared Magnitude**: Calculate the sum of the squares of the gradient components $(g_x, g_y, g_z)$. Each component has signed 8-bit precision (range $[-127, 127]$) [S1].
++1. **Compute Squared Magnitude**: Calculate the sum of the squares of the gradient components $(g_x, g_y, g_z)$ [S1]. Each component has signed 8-bit precision in the range $[-127, 127]$ [S1].
+    $$ S = g_x^2 + g_y^2 + g_z^2 $$
+-2. **Approximate Square Root**: Use a Newton-Raphson iteration to compute the square root of $S$, resulting in an 8-bit approximation $M$ in the range $[0, 2^{20}]$ [S1].
+-3. **Map to Lookup Index**: Map the magnitude $M$ into the range $[0, 255]$ using the piece-wise linear function defined by GmLUT. Since GmLUT has 8 entries at equal intervals, the input domain $[0, 2^{20}]$ is divided into 7 segments. The index $i$ for the table is determined by scaling $M$ to $[0, 255]$ and identifying the segment [S1].
++2. **Approximate Square Root**: Use a Newton-Raphson iteration to compute the square root of $S$, resulting in the 8-bit approximation $M$ in the range $[0, 2^{20}]$ [S1].
++3. **Map to Lookup Index**: Map the magnitude $M$ into the range $[0, 255]$ using the piece-wise linear function defined by GmLUT [S1]. Since GmLUT has 8 entries at equal intervals, the input domain $[0, 2^{20}]$ is divided into 7 segments [S1]. The index $i$ for the table is determined by scaling $M$ to $[0, 255]$ and identifying the segment [S1].
+ 4. **Interpolate Modulation Value**: Perform linear interpolation between the two nearest table values in GmLUT to compute the 8-bit repeating-fraction modulation value $m$ [S1]. This value represents a float in the range $[0, 1]$ [S1].
+ 5. **Apply Modulation**:
+@@ -30,5 +30,4 @@
+    - If `Gmimd` is enabled, compute $I'_{diffuse} = I_{diffuse} \times m$ [S1].
+    - If `Gmims` is enabled, compute $I'_{specular} = I_{specular} \times m$ [S1].
+-   - If a register is disabled, the corresponding value remains unchanged [S1].
+ 
+ **Pseudocode:**
+@@ -37,5 +36,5 @@
+                                   Gmimd, Gmims, Gmom, GmLUT):
+     """
+-    gx, gy, gz: signed 8-bit integers representing gradient components.
++    gx, gy, gz: signed 8-bit integers representing gradient components in [-127, 127].
+     alpha: current sample opacity.
+     I_diffuse, I_specular: current illumination values.
+@@ -45,49 +44,30 @@
+     """
+     # Step 1: Compute squared magnitude
+-    # Note: Components are signed 8-bit, so values are in [-127, 127]
+     S = gx*gx + gy*gy + gz*gz
+     
+     # Step 2: Newton-Raphson square root approximation
+     # Result M is an 8-bit approximation in range [0, 2^20]
+-    # Implementation of Newton-Raphson for sqrt(S)
+-    # Initial guess x0
+     x = S / 2.0 if S > 0 else 0.0
+-    # Iterate a few times for 8-bit precision
+     for _ in range(4):
+         if x == 0:
+             break
+         x = 0.5 * (x + S / x)
+-    M = x # M is now the magnitude approximation
++    M = x
+     
+     # Step 3 & 4: Map M to [0, 255] and interpolate using GmLUT
+     # GmLUT has 8 entries at equal intervals along the gradient magnitude axis.
+-    # The input domain [0, 2^20] is mapped to [0, 255].
+-    # Let's assume linear scaling for the index calculation.
+     max_mag = 2**20
+-    normalized_m = M / max_mag
+-    index_float = normalized_m * 255.0
++    num_entries = 8
++    step = max_mag / (num_entries - 1)
+     
+-    # Determine table indices
+-    # 8 entries mean 7 intervals. 
+-    # Index 0 corresponds to 0, Index 7 corresponds to 255.
+-    # We need to find which interval index_float falls into.
+-    table_size = 8
+-    interval_width = 255.0 / (table_size - 1)
++    idx = int(M / step)
++    idx = min(idx, num_entries - 2)  # Clamp to valid interpolation pair
++    frac = (M - idx * step) / step
+     
+-    idx = int(index_float / interval_width)
+-    # Clamp idx to valid range [0, 7]
+-    idx = max(0, min(idx, table_size - 2))
+-    
+-    # Fractional part for interpolation
+-    frac = (index_float - idx * interval_width) / interval_width
+-    
+-    # Get table values
+     val_low = GmLUT[idx]
+     val_high = GmLUT[idx + 1]
+     
+-    # Linear interpolation
++    # Linear interpolation yields the 8-bit repeating-fraction value in [0, 1]
+     m = val_low + frac * (val_high - val_low)
+-    
+-    # Clamp m to [0, 1]
+     m = max(0.0, min(1.0, m))
+     
+@@ -99,8 +79,6 @@
+     if Gmom:
+         mod_alpha = alpha * m
+-        
+     if Gmimd:
+         mod_I_diffuse = I_diffuse * m
+-        
+     if Gmims:
+         mod_I_specular = I_specular * m
+@@ -123,5 +101,4 @@
+ - **Limitations**: Relies on the accuracy of the gradient magnitude approximation; incorrect LUT configuration can lead to over- or under-emphasis of features [S1].
+ - **When to use**: When surface definition is critical and noise reduction is desired [S1].
+-- **When not to use**: When homogeneous regions need to be visible or when gradient information is unreliable [S1].
+ 
+ ## Background

@@ -1,0 +1,562 @@
+Introduction to GigaVoxels and Sparse Textures | Real-Time Voxels
+Sep
+14
+Introduction to GigaVoxels and Sparse Textures
+This is a semester long independent study where we will implementing and extending Cyril Crassin's PhD thesis on GigaVoxels. The technique was popular at SIGGRAPH and has inspired much of the rendering technology behind the Unreal Engine 4. We hope to modify the original approach by using partially resident textures (sparse textures).
+Sponza scene rendered with GigaVoxels - Cyril Crassin
+Background
+In one sentence, the GigaVoxels technique performs adaptive level-of-detail selection of lighting and material information during the ray-marching of a sparse voxelized scene. It is made up of several stages:
+First, the scene is converted from triangles to voxels in a two-step process:
+Check if the triangle's plane intersects the voxel.
+Rasterize the triangle along its dominant axis (the one that results in the largest projected area) and check if the resulting fragments intersect the 2D projection of the voxel.
+Each voxel that passes both tests is inserted into an octree structure that hierarchically subdivides the scene. The octree is implemented in a linear buffer where each node contains 64 bits of information, 30 for a pointer to its first child (the other seven can be accessed with an offset) and 30 for a pointer to its brick. The other four bits are described in the picture below.
+Octree node layout - Cyril Crassin -
+GigaVoxels 2011
+A brick is a region in 3D texture memory that contains colors, normals, and light information for a region of voxels (usually 3x3x3 voxels). If a region of space is empty or has a constant value, the node in the octree does not point to a brick or any children. Due to the fact that our voxelization is sparse, neighbor bricks are not guaranteed to be next to each other in the 3D texture.
+Nodes and bricks - Cyril Crassin -
+GigaVoxels 2011
+Initially, only the lowest level of the octree has material information. We fill the higher levels of the octree by averaging all of the material properties of the child bricks. This filtering process is done in separate passes for each level of the octree, allowing us to have multiple levels of detail (see picture below).
+Sponza Scene at different levels in the octree - Cyril Crassin - OpenGL Insights Chapter 22
+Now that the octree and bricks contain the scene information at all levels of detail, we perform a cone tracing
+step. Each pixel on the screen shoots a ray that samples from different levels of the octree based on distance from the eye, mimicking the shape of a cone. If the camera is really close to the scene, the cone stays relatively thin and mostly samples material information from the leaf nodes of the octree. If the scene is far away or the cone aperture is large, we sample from higher levels of the octree which contain averaged values and result in a blurrier look. Material properties are retrieved by doing a top-down traversal of the octree until we find the lowest node that contains the ray. Since neighboring bricks are not necessarily adjacent in the brick pool, we must append neighbor values to the borders of our bricks to take advantage of hardware texture interpolation. We must also do a linear interpolation between adjacent levels of the octree to get the precise level of detail. These two steps mimic quadrilinear interpolation.
+There are a couple advantages of using a cone over a regular ray. First, as the cone widens we start sampling larger voxels which allows us to use larger step sizes. Second, as objects move farther from the camera we can avoid aliasing by sampling the blurrier values from higher levels in the octree.
+Cone tracing and adaptive LOD selection - Cyril Crassin - GigaVoxels 2011
+Due to the speed of the GigaVoxels technique, it is possible to do advanced effects like global illumination. Each light rasterizes the scene from its point of view and writes direction and intensity values into the leaf nodes of the octree corresponding to the world space position of each fragment. These values are filtered up the octree. Indirect diffuse illumination is handled by bouncing five wide cones off of the hemisphere of the surface and gathering their light values. Specular reflections are handled by reflecting a single thin cone off the surface. The indirect diffuse and specular light values are combined with the light values at the surface to get realistic one-bounce global illumination. From this point it is easy to calculate the final pixel color by combining the accumulated light value with the color and normal information stored at the surface.
+Indirect illumination calculation - Cyril Crassin - GigaVoxels 2011
+Static and dynamic objects are inserted into the same octree but are handled differently. Static objects only need to be voxelized once as a prepass whereas dynamic objects need to be voxelized every frame. The two types are differentiated by a flag that prevents dynamic voxels from overwriting static voxels.
+Disadvantages
+There are several cons to the
+GigaVoxels approach:
+Slow octree traversal. The octree
+is an indirect mechanism for sampling the actual scene
+information stored in the bricks. When a ray needs to get
+information from the scene, it must first traverse down the octree.
+Once it finds the correct node it can sample from the
+associated brick. This process can be slow and it would be nicer to
+sample from the voxel data directly.
+Non-automatic linear interpolation
+between mip-map levels. Since all bricks of different LODs are
+stored in the same memory pool, we are not taking advantage of
+mip-maps. Therefore we can not make use of hardware quadrilinear interpolation.
+Reduntant memory use. Each brick
+must contain information about neighboring voxels, which takes up a
+lot of memory. For example, the number of voxels inside an 8*8*8
+brick is 512 and 169 of these are redundant neighbor
+voxels. This is a 33% increase in memory.
+The filtering process is
+encumbered by determining which neighbors are shared among the
+bricks.
+It's important to note that these
+limitations are the by-product of achieving a very important goal –
+keeping the system sparse. When space is partitioned into bricks in
+this fashion and linked together through the octree, empty and
+constant space do not have to be stored in texture memory.
+The alternative is to encode the entire
+scene – empty space and all – into a very large mip-mapped 3D
+texture. This simplifies many aspects of the GigaVoxels design:
+There is no longer the need for a
+separate octree data structure; now the octree is implicit in the
+mipmap levels of the 3D texture. Instead of traversing an octree,
+rays can traverse the mip-map chain. Plus, rays can index into the
+voxel data directly because the 3D texture is a world space
+representation of the scene.
+Quadrilinear interpolation is
+automatically achieved with texture() calls because of the mip map
+chain.
+We no longer have to store
+redundant neighbor voxels since bricks are spatially aligned in the
+scene rather than existing in an amorphous memory pool.
+The filtering stage, or the stage
+where the mip maps are generated, is straightforward when there are
+no redundant neighbor voxels.
+Despite these benefits, dense 3D textures are impractical because of how much memory they consume. The real killer
+is all the empty space that must be backed by physical memory,
+especially considering the fact that most scenes are quite sparse.
+Sparse Textures
+Thankfully, partially-resident textures
+solve this problem. With partially-resident textures, certain regions
+of the texture do not have to be backed by physical memory. Volumes
+of empty space or constant-color space can be marked as non-resident and will not consume any physical memory. AMD exposes this
+capability for Southern Island GPUs through the AMD_sparse_texture
+OpenGL extension.
+Red X's are non-resident regions
+Sparse textures are well-suited for 2D
+textures, but fall short for 3D textures on Southern Islands
+architecture. The smallest allowable cube volume dimensions are 64 by
+64 by 64 texels. This means that if there is a single voxel in a 64^3
+space, the whole region must be resident. Compare this to the
+recommended brick sizes of 3x3x3 or 8x8x8 which are able to do a much
+better job at removing empty space. In order to take advantage of
+sparse textures at all, our scenes must be specifically designed to
+have large empty regions and models that are compact. Ultimately we
+are unhappy that we have to limit ourselves in this way, but we
+expect that next generation hardware will allow brick
+sizes that are much more reasonable. Our approach will scale very
+well when that time comes.
+Overview of the sparse 3D texture
+approach
+First, initialize a large NULL 3D texture
+(8192*8192*8192 is the maximum). Next, fill the texture with voxel
+data from the objects in the scene. We need three textures – one for
+colors (including alpha), one for normals, and one for light
+information.
+Once all the objects are added,
+generate a mip map chain for each texture. We have to see if we will
+need to write our own kernel for this, or use the built-in OpenGL
+command.
+Now that the scene is initialized we can start cone tracing. The ray selects an LOD level based
+on the radius of the cone and a texture index based on its position
+in world space. The texture read should also return whether or not
+the region we are sampling from is resident. For these, we use the
+command:
+int sparseTextureLod(gsampler3D
+sampler, vec3 P, float lod, inout gvec4 texel);
+and afterwards:
+bool sparseTexelResident(int code);
+Where the int returned from the
+sparseTextureLod call is the input to the sparseTexelResident
+command.
+If the texel is resident, then we can
+safely use the result stored in texel.
+However, if the texel is non-resident then we know this region must
+be either empty or a constant color. To retrieve the constant color,
+we may store it in a separate map which we index based on some
+function of the LOD and the texture coordinate. This is an idea we
+need to continue to develop.
+Because our brick
+sizes are so big (64*64*64), we need another mechanism that allows us
+to skip pockets of empty or constant-color space within resident regions. To do this, we encode whether a region is
+constant/empty inside of the normal.w channel. Since this
+region is resident, we can retrieve the constant color right from the color
+texture.
+Right now some of our ideas are rough and we will elaborate some more in future blog posts.
+References
+GigaVoxels PhD thesis - Cyril Crassin
+http://maverick.inria.fr/Publications/2011/Cra11/
+Octree-Based Sparse Voxelization - Cyril Crassin
+http://www.seas.upenn.edu/~pcozzi/OpenGLInsights/OpenGLInsights-SparseVoxelization.pdf
+Unreal Engine 4
+http://www.unrealengine.com/unreal_engine_4/
+Partially Resident Textures
+http://developer.amd.com/gpu_assets/Partially%20Resident%20Textures%20on%20Next-Generation%20GPUs.v04.pps
+Posted 14th September 2012 by Ian Lilley
+2
+View comments
+Real-Time Voxels
+Classic
+Classic
+Flipcard
+Magazine
+Mosaic
+Sidebar
+Snapshot
+Timeslide
+Nov
+13
+View Centered Voxels
+For all of the project so far we have been using a simple Cornell box style scene. This week we made the jump and loaded in the Sponza scene, which is a common scene for testing global illumination algorithms.
+We are still using a single 3D texture to store our voxels. Right now its resolution is 128*128*128, which is just fine for the Cornell box. But this presents problems for the much larger Sponza scene. Initially we tried rendering the entire Sponza into the 3D texture, but the detail was very poor. Next we tried bumping up our 3D texture resolution, but the memory hit was too much and the quality still wasn't great.
+Instead we looked for another solution. We drew inspiration from the cascaded shadow map technique which centers multiple shadow maps of increasing size around the eye. This means shadow map detail is high right near the eye, and is low further from the eye.
+We can apply this thinking to the voxel regions. Instead of voxelizing the entire scene, it makes more sense to voxelize geometry that surrounds the eye. We can use multiple 3D textures to create cascades that surround the eye so that farther areas can still benefit from indirect illumination, but at a less-detailed level. This technique makes voxel-based global illumination a possibility in open world style games.
+This image shows two cascades that center around the eye. Some voxels remain behind the eye since objects in front of the eye may still receive indirect color from objects behind the eye.
+Of course, the main challenge will be to implement this cascaded system efficiently and as alias-free as possible. One main issue we have already noticed is that by moving the camera through the scene, the voxel colors swim. Any slight movement of the camera causes different fragments to be rendered, which causes different voxels to be created. We can fix this by clamping the axis-aligned orthographic projections to world-space voxel-sized increments.
+Another issue is handling the edges between cascades. Maybe just a linear interpolation between the two values is enough to solve this, but we will see. Right now we have not implemented the multiple cascade approach. Instead we just have the single 3D texture that is centered around the camera.
+Some other features that we implemented for this week:
+Textures
+Normal maps
+Specular maps
+Physical light objects (no longer invisible)
+Everything came together to bring us these screenshots. Pay careful attention to the reflective surfaces.
+Global illumination off
+Global illumination on
+Posted 13th November 2012 by Sean Lilley
+5
+View comments
+Nov
+6
+Directional (Anisotropic) Voxels
+This was a short work week for a number of reasons, though were able to get some work done with directional voxels and shadow maps.
+Directional Voxels
+So far our voxels have been isotropic, meaning they return the same color from every viewing direction. This can be a problem for walls that are lighted on one side and shadowed on the other because during mip-mapping the values are averaged to get a semi-lighted voxel. We use directional voxels to solve this problem. A directional voxel stores lighting information from all six directions, resulting in more accurate mip-mapping and voxel color sampling. We compute the directional color with:
+```
+materialColor*lightColor*visibility*dot(light, normal)*dot(axis, normal);
+```
+```
+
+```
+```
+
+```
+The last term can be calculated with max(normal.x, 0.0) for the positive x-direction and max(-normal.x, 0.0) for the negative x-direction. We do this calculation once per axis (+x,-x,+y,-y,+z,-z) and store the values into six different textures. During the mip-mapping stage we do alpha blending along the four voxels facing each direction and calculate an alpha weighted average. The picture below illustrates a 2D example (from Cyril Crassin's GigaVoxels thesis):
+In the rendering step we sample a maximum of three directional voxel textures weighted by the cone direction. For example, if the direction is (0.9, 0.1, -0.3), the sampled voxel color is 0.9*posX + 0.1*posY + 0.3*negZ. The rest of the cone-tracing is the same as before.
+Like most features that improve visual quality, there are some drawbacks. The main drawback is memory. Right now we are rendering to a 128^3 grid, which means 6*128^3 with directional voxels. We can counter this memory increase by reducing our voxel resolution to 64^3. Another drawback is having to do more texture calls in several areas of the pipeline, especially the cone-tracer.
+Now for some images. Below are negative-x directional voxels at different mip-levels (rendered as cubes). In this scene the light is pointing in the same direction as the camera.
+We are still fixing some of the visual artifacts, so the benefits of directional voxels are not immediately apparent. We'll post final images of the technique once we have fewer bugs and artifacts. The main benefit will be less light leakage through walls that are not illuminated.
+Exponential Shadow Maps
+We also fixed some of the artifacts associated with the shadow mapping stage. In particular, we fixed the light leaking issue by implementing Exponential Shadow Maps.
+With plain Variance Shadow Maps, the shadow function looked like:
+float getVisibility()
+{
+float fragLightDepth = vertexData.shadowMapPos.z;
+vec2 moments = texture(shadowMap, vertexData.shadowMapPos.xy).rg;
+// Fully lit
+if (fragLightDepth <= moments.x)
+return 1.0;
+float variance = moments.y - (moments.x*moments.x);
+variance = max(variance,0.00002);
+float d = moments.x - fragLightDepth;
+float p_max = variance / (variance + d*d);
+return p_max;
+}
+Now with Exponential Shadow Maps, the shadow function looks like:
+float getVisibility()
+{
+float fragLightDepth = vertexData.shadowMapPos.z;
+float shadowMapDepth = texture(shadowMap, vertexData.shadowMapPos.xy).r;
+// Fully lit
+if (fragLightDepth <= moments.x)
+return 1.0;
+// Less darknessFactor means more gradual fall-offs
+float darknessFactor = 20.0;
+float visibility = exp(darknessFactor * (shadowMapDepth - fragLightDepth));
+return clamp(visibility, 0.0, 1.0);
+}
+The exponential shadow map function only uses the depth texture, and there is no need to store the depth^2 in the green channel. Overall ESMs are great as they save memory, speed, and most importantly, fix light leaking. There is one downside however, and it lies in the darknessFactor constant. The purpose of this constant is to constrain the darkness range of shadows of overlapping occluders. The ESM algorithm causes closer occluders to cast light shadows and further occluders to cast dark shadows, which goes against our intuition.
+By bumping up darknessFactor the shadows merge together cohesively. However, we lose the nice soft falloff and the shadowed shapes end up looking pudgier.
+So it's a matter of tweaking constants to get the right look.
+Finally, here are some images for this week (still a lot to things to fix/improve, especially banding issues):
+Posted 6th November 2012 by Sean Lilley
+4
+View comments
+Nov
+5
+Mid-Point Report
+Last Wednesday we gave a presentation to Patrick's GPU class (link) on the progress we had so far.
+Here is our slide deck with an overview of our methods.
+http://www.seas.upenn.edu/~pjia/conetracing/midpoint.pdf
+Posted 5th November 2012 by Nop Jiarathanakul
+1
+View comments
+Oct
+30
+Dynamic Lighting (part 2)
+As we were working on our dynamic lighting pipeline (outlined in the previous post), we came upon several problems that forced us to rethink our methods. Some of the problems we encountered are:
+There isn't a good way to produce soft shadows. In fact, our pipeline not only does sharp shadows only, but the shadows are also blocky due to the voxel grid.
+When we render from lights to calculate radiance we are not able to capture all fragments that are supposed to be lit, especially those at glancing angles. This results in banding patterns of black spots where they cannot be seen from the light.
+As mentioned in the previous post, we store the outgoing radiance color and direction in our voxel structure. However, this information is insufficient to render a high-frequency diffuse pass. Imagine the detailed marbled floor of the Sponza scene; we would not be able to produce it because we only have low-frequency lighting information in the voxel structure.
+Finally, since we render diffuse lighting from the voxel structure, we encounter the same issues of voxel-shaped artifacts as we've seen with AO. Specifically, they are caused by 1) the voxel not lining up exactly with the higher detail triangle mesh, and 2) linear interpolation causes voxels at the edge to appear darker (interpolated with empty black voxels).
+Our current lighting pipeline:
+Render the scene from the light's POV and write the depth values into a variance shadow map.
+For the time being we decided to remove the timestamp, which means we have to clean the entire voxel grid before voxelization.
+Next we voxelize. The voxel color value is vec4(materialColor * lightColor * visibility * lightDotNormal, materialAlpha) and the voxel normal is currently ignored. Right now all of the rendering is done with a single 128x128x128 voxel grid, though we might have to use the normal texture again once we implement more advanced/accurate lighting effects.
+Mip-map/filtering. Nothing changed here.
+In the main rendering shader, we compute direct color the same as the voxelizer (all from the fragment information). Next, we add indirect light using four cones instead of six. These new cones have an FOV of 45 degrees, resulting in faster indirect computation with minimal difference in rendering quality. Finally, we mix the diffuse (direct + indirect) with the specular to get the final color.
+The largest change to the pipeline was the incorporation of shadow maps. At first we implemented the basic shadow mapping algorithm to give us hard shadows. However, we were not happy with the blockiness and usual z-fighting artifacts, so we looked towards soft shadow algorithms. We considered using Percentage Closer Filtering, but ultimately settled on using Variance Shadow Maps (VSM).
+The VSM algorithm involves storing two shadow maps - one for the depth and another for depth^2. We store these in a 1024x1024 RG32F texture. Afterwards, we filter these maps. Specifically, we use a 33 wide Gaussian blur kernel, which may be excessive but doesn't hurt performance too badly.
+The shadow map generation process goes as follows:
+Preprocess:
+1. Create two RGB32F textures. These textures will ping pong during the blurring stage.
+2. Create two framebuffer objects for the blurring process.
+a. FBO 1 attaches texture 1
+b. FBO 2 attaches texture 2
+3. Create a shadow generation FBO
+a. Attach a depth renderbuffer
+b. Attach texture 1
+Render Time:
+1. Bind the shadow map generation FBO
+2. Clear color and depth
+3. Render the scene, transforming vertices into light-space. Output the fragment depth and depth^2 to the FBO. Texture 1 is now a shadow map of the scene
+4. Bind texture 1, bind FBO 2. Perform a y-axis gaussian blur on texture 1, writing the results into texture 2
+5. Bind texture 2, bind FBO 1. Perform an x-axis gaussian blur on texture 2, writing the results into texture 1
+6. If we want to blur more, go back to step 4. Else, we are done and texture 1 is the final blurred texture.
+Now our shadow map is ready and we can render the scene. For each fragment, we determine it's visibility through the the Chebyshev probability function. This is fundamentally different from basic shadow mapping, which simply compares the fragment's depth in light space with the depth in the shadow map to give us a binary result of shadowed vs lit.
+The biggest issue with Variance Shadow Maps is a phenomenon called light leaking, which happens when two or more occluders shadow the same region. Essentially the probability function breaks down because the shadow map can only store one depth per light-space pixel. We have not fixed this problem yet, but we will look into Exponential Shadow Maps.
+Minus the light leaking, the soft shadows considerably improve the visual quality of the scene. Here are some screenshots:
+And here is a video showing our project in action. Objects, lights, and shadows are entirely dynamic:
+Obviously there are some visual glitches/artifacts in the video.
+At the 00:50 mark there is some noticeable light leaking in the shadows on the back wall.
+There is a bit of flickering near the back corner of the cornell box from two walls trying to write their fragments to the same voxel. We can fix this by averaging all of the incoming colors using atomic counters, but this is not high priority.
+There are some strange ambient occlusion/indirect lighting effects when the sphere and cow are near the surface of a wall. This is most noticeable on the bottom of the sphere at around the 00:15 mark (the video compression blurs the artifacts a bit).
+There is some banding on the walls during indirect lighting mode. This has something to do with the indirect light falloff, but we haven't yet pinpointed the exact source of the error.
+Up next is fixing our current problems, supporting multiple lights, and starting to think more about sparse textures.
+Posted 30th October 2012 by Sean Lilley
+0
+Add a comment
+Oct
+23
+Dynamic Lighting (part 1)
+The main focus of this week was to start dynamic lighting, though before that we made a bunch of small yet useful tweaks to our existing code.
+Tweaks
+Dynamic object time-stamps: As described in the previous blog post, we increment a counter every frame and only render voxels that have the most current time-stamp. We soon realized we could improve upon this by switching between two values instead of maintaining a counter. The first frame we write 0 to each voxel and render all of them. The next frame we write a 1 to all the new voxels and clear all of the 0 voxels. We continue to alternate between 0 and 1 for the duration of the program.
+RGBA8 textures only: In order to save as much memory as possible, we made the two voxel grid textures RGBA8. Previously, the color texture was RGBA8 and the normal texture was RGBA32F. After some tests we determined that RGBA8 would probably be sufficient for normals. We use an internal format of RGBA8_SNORM for normals because we need them to be signed and normalized.
+Removed deferred code: We realized that although FBOs come in handy for retrieving surface properties, they consume a lot of memory. On top of that, we were only using the FBOs for a single render pass, so it made no sense keeping them around when we could just use the mesh properties directly. However, after removing the deferred renderer our cone-trace code started to process occluded fragments. We tried to combat this problem by using the layout qualifier: layout(early_fragment_tests) in, but for some reason it did not work. By the end we decided to use a passthrough shader to write the closest fragments to the depth buffer followed by a regular rendering pass which would only evaluate fragments with the closest depths. These changes improved the speed of our code by around 5-10 fps.
+Finally, we added keys for changing specular amount, specular angle, and linear vs nearest texture sampling.
+Now on to the important stuff:
+Dynamic Lighting
+In the beginning of the week we came up with the basic lighting pipeline. Some of this is subject to change over the next week:
+Voxelize the scene. For each voxel, write (0,0,0,1) to the color texture and (0,0,0,timestamp) to the normal texture. Our goal is to only use two voxel textures for all of the rendering.
+Calculate light values. To do so, we follow a similar approach to Chapter 9 of Cyril Crassin's Gigavoxels thesis. We rasterize the scene from each light's point of view and write the light values to the the lowest level of the voxel grid. Instead of storing incoming radiance and light direction, we store outgoing radiance and light direction. The outgoing radiance is meshColor * lightColor * dot(surfaceNormal, lightDirection) and the outgoing direction is reflect(-lightDirection, surfaceNormal).
+Clean and mip-map/filter the voxel grid. This has not changed since the last blog post.
+Conetrace! This is where we are having the most problems at the moment. The first problem is retrieving the direct light values from the voxel grid. Not all fragments fall perfectly inside a voxel, so when we try to sample the voxel texture at the fragment's position we sometimes get black (this can be seen in the pictures below). One way we might fix this is to scale each mesh by a small amount during voxelization, though this isn't guaranteed to work so we may have to think of something else. Another complication comes from the outgoing radiance being scaled by the normal/light incidence. This makes it difficult to retrieve the actual material color when computing specular.
+So far there is only one directional light in the scene. It looks down the z-axis and has an orthographic projection, which means the side walls do not get illuminated. Soon enough will we have support for actual light objects that can be rotated. When we start supporting multiple interacting lights, it will be important to accumulate light values without overwriting old ones, which means using atomic operations.
+Anyway, here is a picture of some really simple shadows/lighting. The banding on the objects is due to the first problem in part four above. There will be better looking images as we make progress over the next week.
+Let's hope for some good images and videos next week!
+Posted 23rd October 2012 by Ian Lilley
+2
+View comments
+Oct
+16
+Dynamic Objects
+This week we focused on implementing dynamic objects. The key idea behind dynamic objects is to write a time-stamp to each newly-generated voxel and have the mip-mapping/filtering stage only process voxels whose time-stamps are up to date. To make this work in real-time we abandoned our CPU mip-mapper and made a faster one with OpenGL.
+1. Time-Stamp
+Let's say we have a scene with a moving sphere. In the first frame we write a time-stamp of 0 to the voxels produced during rasterization. The next frame the sphere moves to a new position and we write a time-stamp of 1 to the new voxels, meaning voxels with a time-stamp of 0 will be ignored during the mip-mapping stage. In the future we are going to alternate between writing 0 and 1 to the new voxels instead of continuously incrementing the time-stamp because we only need information about the previous frame. We can improve performance by only voxelizing dynamic objects and filtering the regions of the screen that contain them.
+2. GPU Mip-Mapper
+The new mip-mapper has two main steps: throw out old voxels from the first mip-level and average the remaining levels. First, we render a full screen quad and read texels from the lowest mip-level of the texture using glFragCoord and a depth value that goes between zero and the voxel grid resolution. If the texel's time-stamp is not the same as the current time, write (0,0,0,0) using an image store operation. Once the first level is clean of old voxels, we process the rest of the mip-levels in a similar fashion to the CPU mip-mapper. Initially we tried to do this in a single shader call but the mip-levels were getting corrupted. For now we just invoke the shader once for each mip-level and will look into the problem later.
+3. Misc. Improvements
+We improved some self-intersection problems by using a larger epsilon for the specular bounce ray and positioning the diffuse and ambient occlusion cones slightly above the surface, leading to smooth spheres and cows. We also wrote a function that performs rudimentary empty-space skipping by comparing the alpha values from the current and next mip-levels until they are no longer the same. Then we do a ray-cube intersection based on the current mip-level's voxel size to skip the empty space and continue with the cone trace. Unfortunately, due to linear sampling there are rarely large regions of empty space due to filtering in the mip-mapping stage, so this feature is mostly useful for larger grids.
+Enough text! Here's a video of our progress along with some screenshots:
+Ambient Occlusion
+Indirect Diffuse (color bleeding)
+Specular Reflection
+Everything
+Next up is dynamic lighting. More updates on our approach later!
+Posted 16th October 2012 by Ian Lilley
+6
+View comments
+Oct
+9
+Cone Traced Deferred Shading Pipeline
+Over the past week and a half, we have been working on putting together the different components of the renderer. We now have a deferred shading pipeline, where the shading is powered by cone tracing. We are still using dense 3D textures; yet we are able to run at interactive frame rates between 12-17 fps a with reasonably large texture resolution (128x128x128).
+The different components of the renderer are described below:
+1. Model Loader and Triangles Pipeline
+This is the basic core component of the engine, which loads triangle meshes from COLLADA files into the scene. It then draws these triangles as color, normal, and position information into the frame buffer object to be used later for shading.
+2. Triangle Voxelizer
+This component generates the 3D voxel texture from the triangle mesh to be used for shading. For now, we have opted to use our own simpler method rather than Cyril's method which uses the hardware rasterizer. Our method performs the voxelization in 3 passes using the fragment shader. For each pass, we render the whole scene orthographically to a viewport the same size as the resolution of our desired 3D voxel texture (always cubic). With depth test disabled, each fragment in the scene will be drawn to exactly one texel in our 3D texture. We need to do this 3 times from each major axis, in order to capture all the visible fragments. At this point, our scene is static so we only perform voxelization once, at initialization. We will do more detailed performance testing and optimize the voxelizer, possibly reimplementing it, as we move on to support dynamic objects.
+3. Cone-Traced Shading
+This component produces all the shading for the engine. The passes that this shader outputs are: diffused color, ambient occlusion, diffused reflection, and specular reflection. Note that there is no light at this point. All the shading done here has no lighting effects.
+3.1. Diffused Color
+Passed through earlier using the FBO, as explained above.
+Here is the diffuse color of one of our early test scenes.
+3.2 Ambient Occlusion
+Calculated by projecting cones outwards from the shading position to approximate a hemisphere and gather a visibility value from the 3D texture using cone tracing.
+Cyril mentions that he uses 5 cones to approximate the hemisphere, but we were wondering whether it is possible to approximate a hemisphere using N number of cones. Turns out the problem is similar to Tammes problem, which, currently, cannot be solved by analytical means. In the end we settled for 6 cones which worked the best, inspired by the shape of the dodecahedron, 6 cones being the 6 sides of a hemisphere of a dodecahedron.
+The AO pass will eventually be removed in the final renderer, but is useful to implement since it is very similar and a stepping stone to performing the indirect lighting pass.
+Below are a few AO values for each single cone, which are averaged to produce the final value.
+AO Pass - average of 6 of the above AO contributions
+3.3 Diffused Reflection (or Indirect Bounce)
+Done in a similar way, by projecting cones out in a hemisphere, except instead of sampling visibility (alpha values), the cones gather color.
+3.4 Specular Reflection
+Produced by projecting a single cone tracing in the direction of the reflected eye vector. This cone has a tighter angle (smaller FOV) and samples the reflected ray direction. The cone's FOV determines how specular (glossy) the surface is, and can be tuned to produce sharper or duller reflections.
+Here are all the passes combined, step by step:
+Color + AO
+Color + AO + Diffused Reflection
+Color + AO + Diffused Reflection + Specular Reflection
+Current Render
+With all three components combined, we are able to 1) load any arbitrary triangle mesh, 2) voxelize the mesh data into 3D texture data, and 3) shade it using cone-traced techniques described above. Here is an image we are able to produce with the current state of the renderer.
+Final Image
+Debug Visualization of the Voxel Data
+Issue
+At the moment, our biggest issue are the artifacts during shading. We have two representations of the scene: the original triangle mesh and the generated voxel texture. The triangle scene provides the positions from which to render, while the voxel scene provides all the shading information. The problem is that the two have different surfaces that do not line up, specifically, we have a more expanded surface in the voxel representation since we do conservative voxelization. This causes problems while shading. Specifically, the artifacts happen because of self-intersection during cone tracing. Cones are traced from the surface of the triangle, however, those positions are buried within voxels in the voxel representation, and when a cone is traced, the cone intersects those voxels which contribute to the shading when they should not. We have tried many methods and have not found a good way to fix the problem for all cases. We will keep thinking about this while we move forward.
+Posted 9th October 2012 by Nop Jiarathanakul
+0
+Add a comment
+Sep
+28
+Basic Framework
+This past week we have set up a basic framework that allows us to load voxel data and view them in different modes.
+Voxel Texture Loading
+We are able to load both procedurally generated 3D textures and external 3D textures. For external ones, we downloaded data sets from The Volume Library and used their utility tool to convert from .pvm to .raw formats. We then load the raw byte data into our 3D texture to display.
+Voxel Display
+We implemented 3 modes for displaying our data.
+OpenGL draw - Draws each texel as a cube.
+Volume ray marching - Uses ray casting to march and accumulate transmittance. Has dynamic lights.
+Volume cone tracing - Uses Cyril's technique of cone tracing to step through the volume at adaptive sizes and sample from appropriate mipmaps. Rendered using simple alpha compositing.
+Generating Mipmaps
+We also implemented our own mipmapping in order to correctly weight alpha values such that colors are unaffected (not multiplied) by alpha.
+Interactive Controls
+We implemented some keyboard shortcuts to enable us to easily switch between rendering modes, textures, and mipmap levels.
+Here are some images from our OpenGL draw view at different mipmap levels.
+Here are ones from ray casting view.
+Here is a more complex texture, an external engine texture, at 256 cubed. Rendered using simple cone-tracing view.
+Posted 28th September 2012 by Nop Jiarathanakul
+1
+View comments
+Sep
+20
+Update - Week 1
+We spent most of the week getting ourselves setup, doing more reading, and starting on the first set of milestones.
+We have completely setup our workflow on GitHub, which we found to be an amazing collaboration tool. We are using GitHub issues tracking as our project management. We stated our milestones, and for each of them, specified a deadline and listed concrete features that needed to be done. We also use issue tracking as a knowledge base by putting up any questions and answers that we had about the project. Finally, we clearly outlined the pull request process so our code collaboration will be streamlined and clean.
+Sean has written a basic OpenGL viewport for us to use for the project, and has initialized an arbitrary 3D texture for testing. Our milestone next week is to build on this code and achieve basic functionality for this project. This involves the following tasks:
+Creating a good camera for the project
+Loading external voxel data
+Storing normals and colors in separate 3D textures
+Generating mipmaps with OpenCL
+Ray-casting 3D textures with lighting
+Basic cone tracing
+We have assigned the tasks according to each of our experiences, so we can all work in parallel, and GitHub has made this very easy. The tasks are assigned as follows:
+Sean is assigned with generating mip maps, since he by far has the strongest expertise with OpenGL and OpenCL, and the task is a technology dependent one.
+Nop is assigned with importing external voxel data, since he has prior experience working with file encodings and raw file formats. He is also assigned with implementing volume ray casting, since he already has a working shader-based volume renderer written in WebGL.
+Finally, Ian is assigned with building us a better camera for use for the project, and also tightening up the base code that we already have.
+Those are our tasks for this weekend and we hope to finish them by Monday when we meet with Patrick.
+Posted 20th September 2012 by Nop Jiarathanakul
+10
+View comments
+Sep
+14
+Introduction to GigaVoxels and Sparse Textures
+This is a semester long independent study where we will implementing and extending Cyril Crassin's PhD thesis on GigaVoxels. The technique was popular at SIGGRAPH and has inspired much of the rendering technology behind the Unreal Engine 4. We hope to modify the original approach by using partially resident textures (sparse textures).
+Sponza scene rendered with GigaVoxels - Cyril Crassin
+Background
+In one sentence, the GigaVoxels technique performs adaptive level-of-detail selection of lighting and material information during the ray-marching of a sparse voxelized scene. It is made up of several stages:
+First, the scene is converted from triangles to voxels in a two-step process:
+Check if the triangle's plane intersects the voxel.
+Rasterize the triangle along its dominant axis (the one that results in the largest projected area) and check if the resulting fragments intersect the 2D projection of the voxel.
+Each voxel that passes both tests is inserted into an octree structure that hierarchically subdivides the scene. The octree is implemented in a linear buffer where each node contains 64 bits of information, 30 for a pointer to its first child (the other seven can be accessed with an offset) and 30 for a pointer to its brick. The other four bits are described in the picture below.
+Octree node layout - Cyril Crassin -
+GigaVoxels 2011
+A brick is a region in 3D texture memory that contains colors, normals, and light information for a region of voxels (usually 3x3x3 voxels). If a region of space is empty or has a constant value, the node in the octree does not point to a brick or any children. Due to the fact that our voxelization is sparse, neighbor bricks are not guaranteed to be next to each other in the 3D texture.
+Nodes and bricks - Cyril Crassin -
+GigaVoxels 2011
+Initially, only the lowest level of the octree has material information. We fill the higher levels of the octree by averaging all of the material properties of the child bricks. This filtering process is done in separate passes for each level of the octree, allowing us to have multiple levels of detail (see picture below).
+Sponza Scene at different levels in the octree - Cyril Crassin - OpenGL Insights Chapter 22
+Now that the octree and bricks contain the scene information at all levels of detail, we perform a cone tracing
+step. Each pixel on the screen shoots a ray that samples from different levels of the octree based on distance from the eye, mimicking the shape of a cone. If the camera is really close to the scene, the cone stays relatively thin and mostly samples material information from the leaf nodes of the octree. If the scene is far away or the cone aperture is large, we sample from higher levels of the octree which contain averaged values and result in a blurrier look. Material properties are retrieved by doing a top-down traversal of the octree until we find the lowest node that contains the ray. Since neighboring bricks are not necessarily adjacent in the brick pool, we must append neighbor values to the borders of our bricks to take advantage of hardware texture interpolation. We must also do a linear interpolation between adjacent levels of the octree to get the precise level of detail. These two steps mimic quadrilinear interpolation.
+There are a couple advantages of using a cone over a regular ray. First, as the cone widens we start sampling larger voxels which allows us to use larger step sizes. Second, as objects move farther from the camera we can avoid aliasing by sampling the blurrier values from higher levels in the octree.
+Cone tracing and adaptive LOD selection - Cyril Crassin - GigaVoxels 2011
+Due to the speed of the GigaVoxels technique, it is possible to do advanced effects like global illumination. Each light rasterizes the scene from its point of view and writes direction and intensity values into the leaf nodes of the octree corresponding to the world space position of each fragment. These values are filtered up the octree. Indirect diffuse illumination is handled by bouncing five wide cones off of the hemisphere of the surface and gathering their light values. Specular reflections are handled by reflecting a single thin cone off the surface. The indirect diffuse and specular light values are combined with the light values at the surface to get realistic one-bounce global illumination. From this point it is easy to calculate the final pixel color by combining the accumulated light value with the color and normal information stored at the surface.
+Indirect illumination calculation - Cyril Crassin - GigaVoxels 2011
+Static and dynamic objects are inserted into the same octree but are handled differently. Static objects only need to be voxelized once as a prepass whereas dynamic objects need to be voxelized every frame. The two types are differentiated by a flag that prevents dynamic voxels from overwriting static voxels.
+Disadvantages
+There are several cons to the
+GigaVoxels approach:
+Slow octree traversal. The octree
+is an indirect mechanism for sampling the actual scene
+information stored in the bricks. When a ray needs to get
+information from the scene, it must first traverse down the octree.
+Once it finds the correct node it can sample from the
+associated brick. This process can be slow and it would be nicer to
+sample from the voxel data directly.
+Non-automatic linear interpolation
+between mip-map levels. Since all bricks of different LODs are
+stored in the same memory pool, we are not taking advantage of
+mip-maps. Therefore we can not make use of hardware quadrilinear interpolation.
+Reduntant memory use. Each brick
+must contain information about neighboring voxels, which takes up a
+lot of memory. For example, the number of voxels inside an 8*8*8
+brick is 512 and 169 of these are redundant neighbor
+voxels. This is a 33% increase in memory.
+The filtering process is
+encumbered by determining which neighbors are shared among the
+bricks.
+It's important to note that these
+limitations are the by-product of achieving a very important goal –
+keeping the system sparse. When space is partitioned into bricks in
+this fashion and linked together through the octree, empty and
+constant space do not have to be stored in texture memory.
+The alternative is to encode the entire
+scene – empty space and all – into a very large mip-mapped 3D
+texture. This simplifies many aspects of the GigaVoxels design:
+There is no longer the need for a
+separate octree data structure; now the octree is implicit in the
+mipmap levels of the 3D texture. Instead of traversing an octree,
+rays can traverse the mip-map chain. Plus, rays can index into the
+voxel data directly because the 3D texture is a world space
+representation of the scene.
+Quadrilinear interpolation is
+automatically achieved with texture() calls because of the mip map
+chain.
+We no longer have to store
+redundant neighbor voxels since bricks are spatially aligned in the
+scene rather than existing in an amorphous memory pool.
+The filtering stage, or the stage
+where the mip maps are generated, is straightforward when there are
+no redundant neighbor voxels.
+Despite these benefits, dense 3D textures are impractical because of how much memory they consume. The real killer
+is all the empty space that must be backed by physical memory,
+especially considering the fact that most scenes are quite sparse.
+Sparse Textures
+Thankfully, partially-resident textures
+solve this problem. With partially-resident textures, certain regions
+of the texture do not have to be backed by physical memory. Volumes
+of empty space or constant-color space can be marked as non-resident and will not consume any physical memory. AMD exposes this
+capability for Southern Island GPUs through the AMD_sparse_texture
+OpenGL extension.
+Red X's are non-resident regions
+Sparse textures are well-suited for 2D
+textures, but fall short for 3D textures on Southern Islands
+architecture. The smallest allowable cube volume dimensions are 64 by
+64 by 64 texels. This means that if there is a single voxel in a 64^3
+space, the whole region must be resident. Compare this to the
+recommended brick sizes of 3x3x3 or 8x8x8 which are able to do a much
+better job at removing empty space. In order to take advantage of
+sparse textures at all, our scenes must be specifically designed to
+have large empty regions and models that are compact. Ultimately we
+are unhappy that we have to limit ourselves in this way, but we
+expect that next generation hardware will allow brick
+sizes that are much more reasonable. Our approach will scale very
+well when that time comes.
+Overview of the sparse 3D texture
+approach
+First, initialize a large NULL 3D texture
+(8192*8192*8192 is the maximum). Next, fill the texture with voxel
+data from the objects in the scene. We need three textures – one for
+colors (including alpha), one for normals, and one for light
+information.
+Once all the objects are added,
+generate a mip map chain for each texture. We have to see if we will
+need to write our own kernel for this, or use the built-in OpenGL
+command.
+Now that the scene is initialized we can start cone tracing. The ray selects an LOD level based
+on the radius of the cone and a texture index based on its position
+in world space. The texture read should also return whether or not
+the region we are sampling from is resident. For these, we use the
+command:
+int sparseTextureLod(gsampler3D
+sampler, vec3 P, float lod, inout gvec4 texel);
+and afterwards:
+bool sparseTexelResident(int code);
+Where the int returned from the
+sparseTextureLod call is the input to the sparseTexelResident
+command.
+If the texel is resident, then we can
+safely use the result stored in texel.
+However, if the texel is non-resident then we know this region must
+be either empty or a constant color. To retrieve the constant color,
+we may store it in a separate map which we index based on some
+function of the LOD and the texture coordinate. This is an idea we
+need to continue to develop.
+Because our brick
+sizes are so big (64*64*64), we need another mechanism that allows us
+to skip pockets of empty or constant-color space within resident regions. To do this, we encode whether a region is
+constant/empty inside of the normal.w channel. Since this
+region is resident, we can retrieve the constant color right from the color
+texture.
+Right now some of our ideas are rough and we will elaborate some more in future blog posts.
+References
+GigaVoxels PhD thesis - Cyril Crassin
+http://maverick.inria.fr/Publications/2011/Cra11/
+Octree-Based Sparse Voxelization - Cyril Crassin
+http://www.seas.upenn.edu/~pcozzi/OpenGLInsights/OpenGLInsights-SparseVoxelization.pdf
+Unreal Engine 4
+http://www.unrealengine.com/unreal_engine_4/
+Partially Resident Textures
+http://developer.amd.com/gpu_assets/Partially%20Resident%20Textures%20on%20Next-Generation%20GPUs.v04.pps
+Posted 14th September 2012 by Ian Lilley
+2
+View comments
+Blog Archive
+Blog Archive
+201210
+November3
+View Centered Voxels
+Directional (Anisotropic) Voxels
+Mid-Point Report
+October4
+September3
+Contributors
+Contributors
+Ian Lilley
+Nop Jiarathanakul
+Sean Lilley
+Loading
+Dynamic Views theme. Powered by Blogger. Report Abuse.

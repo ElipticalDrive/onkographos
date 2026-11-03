@@ -1,0 +1,122 @@
+bagwiz — a terminal wizard, swift as a spark, for the recorded worlds of ROS 2 rosbags. - feat(slam)!: normal-aware elliptical splat footprint for `map slam --cam` by otenim · Pull Request #377 · tier4/bagwiz
+
+feat(slam)!: normal-aware elliptical splat footprint for `map slam --cam` by otenim · Pull Request #377 · tier4/bagwiz · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+otenim
+commented
+Jul 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Closes #362. Part of #372 (Phase 1).
+Problem
+The colorize depth buffer splatted each projected map point over an isotropic disc. A circle over-culls specifically at grazing incidence: a surface seen nearly edge-on projects to a sliver whose samples pile up on screen along the tilt direction, yet every one of them stamped a full circle of its own depth and occluded its own neighbours. That is exactly the geometry a vehicle-mounted camera sees most — the road ahead, the facades running alongside.
+The normals were already computed by the geometry pre-pass (ColorizeGeometry::normals) and already consumed by the incidence weight. The rasterizers simply never received them.
+What changed
+Splat the projected surfel — the disc of radius spacing/2 lying in the plane the point's normal defines — instead of a screen-space circle. A disc projects to an ellipse, which covers exactly the direction the samples are sparse in and stops where they are dense.
+New colorize_splat.hpp holds the EWA form specialized to a pinhole:
+```
+C = radius_world^2 * J (I - n n^T) J^T
+```
+with J the 2x3 projection Jacobian. Factoring J = K/z collapses this to a handful of flops and needs no tangent basis for the surfel plane. The footprint is stored as the symmetric 2x2 C (the ellipse {q : qᵀC⁻¹q ≤ 1}), so the degenerate edge-on case stays representable and division-free; the inner loop swaps a circle test for an inverse-free quadratic form of the same cost.
+Backward compatible where it matters. A {0,0,0} normal (the pre-pass's "no normal" sentinel) and an empty/mismatched normals span both fall back to the previous f_avg * spacing / 2z disc bit-for-bit. Dynamic scan splats stay circular — raw returns carry no orientation.
+The cap is preserved. splat_radius_max_px now bounds the major semi-axis; the ellipse is scaled down uniformly so the cap bounds the footprint without undoing its foreshortening. The square root that needs is kept off the common path (squared comparison first) since it runs per projected point per image.
+Both backends. The CUDA kernel mirrors the math in FP32, the same way its distortion kernels mirror image::distort_normalized.
+BREAKING: both factories grow a normals span after spacings.
+Measured effect
+8-camera 4K validation bag (YuY5LyKH…mcap, 2.2 M map points, ~4700 images), RTX 3080 Ti, --backend cuda, 3 runs each:
+circular (before)
+elliptical (after)
+uncolored map points
+3219
+346 (−89%)
+colorize stage
+65.5 s
+71.6 s (+9%)
+Per-camera coverage rose +0.4% to +6.5%, consistently on every one of the 8 cameras.
+On cost: #362 predicted "no measurable extra cost". That is not what I measured — there is a consistent ~9% on the colorize stage. Part is real overhead (the normals are a third 12 B/point stream the kernel now reads per image, plus the rotation and C); part is simply more work, since more points now survive to be weighted and accumulated. Flagging it rather than repeating the prediction.
+Tests
+colorize_splat_test.cpp (new, 12 cases) — fronto-parallel reduces to the focal-scaled disc; tilt compresses by |cos θ|; edge-on collapses to a bounded segment; off-axis perspective stretch; normal-sign invariance; zero-normal fallback; major-axis clamp preserves aspect; degenerate inputs.
+colorize_rasterizer_test.cpp (new, 8 cases — the CPU rasterizer had no direct test) — the headline pair is CircularFootprintOverCullsGrazingGeometry (only the nearest road sample survives) vs EllipticalFootprintKeepsGrazingGeometryVisible (all three do).
+colorize_rasterizer_gpu_test.cpp — new EllipticalFootprintMatchesCpu parity case on a laterally-staggered grazing surface (exercises the off-diagonal term), asserting CPU == GPU and that the oriented set beats the isotropic one.
+map_colorizer_test.cpp — SplatClosesHolesBetweenSparseOccluders rebuilt on a real 9×9 plane. Its old 5-point cloud had no valid surface: PCA over 4 coplanar points plus the far occludee put the smallest-variance axis sideways, so the front points got an edge-on normal. That is a genuine limitation worth knowing — where the neighbourhood cannot support a plane, the footprint follows a meaningless normal — but it made the test assert against garbage geometry rather than against splatting.
+Test plan
+pixi run -e jazzy test-full — 1833 tests, 0 failures
+pixi run -e humble test-full — 1833 tests, 0 failures
+pixi run -e jazzy-cuda test-full — 1818 tests, 0 failures (GPU parity suite runs on the RTX 3080 Ti)
+pre-commit run on every touched file — clean
+E2E on the 8-camera 4K bag, 3 runs per branch (numbers above)
+Visual check of map.pcd in the map viewer — the coverage gain is unambiguous in the counts, but a reviewer may want to confirm the recovered points are correctly coloured rather than leaking through depth edges
+https://claude.ai/code/session_01KaJadPb4Gq1GH9DdENuJiE
+otenim
+added 2 commits
+July 30, 2026 12:55
+feat(slam)!: normal-aware elliptical splat footprint for map slam --cam
+…
+b66f7ff
+```
+The colorize depth buffer splatted each projected map point over an
+isotropic disc. A circle over-culls at grazing incidence: a surface seen
+nearly edge-on projects to a sliver whose samples pile up on screen along
+the tilt direction, yet every one of them stamped a full circle of its own
+depth and occluded its own neighbours. That is the geometry a
+vehicle-mounted camera sees most — the road ahead, the facades alongside.
+
+Splat the projected surfel instead: the disc of radius spacing/2 lying in
+the plane the point's normal defines projects to an ellipse, which covers
+exactly the direction the samples are sparse in and stops where they are
+dense. New colorize_splat.hpp holds the EWA form specialized to a pinhole,
+C = r^2 * J (I - n n^T) J^T, which needs no tangent basis; the inner loop
+swaps a circle test for an inverse-free quadratic form of the same cost.
+Points with no normal — and callers that supply none — keep the isotropic
+disc bit-for-bit, so the change is confined to oriented geometry.
+
+The normals were already computed by the geometry pre-pass and consumed by
+the incidence weight; the rasterizers simply never received them. Both
+factories grow a `normals` span (BREAKING for direct callers).
+
+Measured on the 8-camera 4K validation bag (RTX 3080 Ti, --backend cuda,
+3 runs each): uncolored map points 3219 -> 346 (-89%), per-camera coverage
++0.4% to +6.5%. Colorize time 65.5s -> 71.6s (+9%) — the issue predicted no
+measurable cost, but the extra per-point normal stream and the larger
+surviving set are both real; the square root in the major-axis clamp is
+kept off the common path to hold it there.
+
+Closes #362
+
+Claude-Session: https://claude.ai/code/session_01KaJadPb4Gq1GH9DdENuJiE
+```
+chore: teach the spell-check dictionary 'fronto' and drop a coinage
+55dc5df
+Hide details
+View details
+otenim
+merged commit 1219abe
+into
+main
+Jul 30, 2026
+5 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+otenim
+mentioned this pull request
+Jul 30, 2026
+feat(slam): multi-camera visual constraints in map slam, --color/--cam topic-role split, and camera-only mode
+#376
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

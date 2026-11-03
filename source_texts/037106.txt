@@ -1,0 +1,1887 @@
+L3GS: Layered 3D Gaussian Splats
+for Efficient 3D Scene Delivery
+Yi-Zhen Tsai*
+arXiv:2504.05517v1 [cs.GR] 7 Apr 2025
+University of California, Riverside
+Riverside, California, USA
+ytsai036@ucr.edu
+Xuechen Zhang*, Zheng
+Li
+University of Michigan
+Ann Arbor, Michigan, USA
+{zxuechen,jimmyli}@umich.edu
+Jiasi Chen
+University of Michigan
+Ann Arbor, Michigan, USA
+jiasi@umich.edu
+Abstract
+Keywords
+Traditional 3D content representations include dense point
+clouds that consume large amounts of data and hence network bandwidth, while newer representations such as neural
+radiance fields suffer from poor frame rates due to their nonstandard volumetric rendering pipeline. 3D Gaussian splats
+(3DGS) can be seen as a generalization of point clouds that
+meet the best of both worlds, with high visual quality and
+efficient rendering for real-time frame rates. However, delivering 3DGS scenes from a hosting server to client devices is
+still challenging due to high network data consumption (e.g.,
+1.5 GB for a single scene). The goal of this work is to create
+an efficient 3D content delivery framework that allows users
+to view high quality 3D scenes with 3DGS as the underlying
+data representation. The main contributions of the paper
+are: (1) Creating new layered 3DGS scenes for efficient delivery, (2) Scheduling algorithms to choose what splats to
+download at what time, and (3) Trace-driven experiments
+from users wearing virtual reality headsets to evaluate the
+visual quality and latency. Our system for Layered 3D Gaussian Splats delivery (L3GS) demonstrates high visual quality,
+achieving 16.9% higher average SSIM compared to baselines,
+and also works with other compressed 3DGS representations. The code is available at https://github.com/mavenslab/layered_3d_gaussian_splats.
+3D scene delivery, 3D Gaussian splats, layered encoding,
+scheduling
+CCS Concepts
+• Human-centered computing → Ubiquitous and mobile computing; • Computing methodologies → Rendering; Machine learning; • Networks → Network services.
+*Equal contributors.
+This work is licensed under a Creative Commons Attribution 4.0 International License.
+ACM MOBICOM ’25, Hong Kong, China
+© 2025 Copyright held by the owner/author(s).
+ACM ISBN 979-8-4007-1129-9/2025/11
+https://doi.org/10.1145/3680207.3723485
+ACM Reference Format:
+Yi-Zhen Tsai*, Xuechen Zhang*, Zheng Li, and Jiasi Chen. 2025.
+L3GS: Layered 3D Gaussian Splats for Efficient 3D Scene Delivery.
+In The 31st Annual International Conference on Mobile Computing
+and Networking (ACM MOBICOM ’25), November 4–8, 2025, Hong
+Kong, China. ACM, New York, NY, USA, 18 pages. https://doi.org/
+10.1145/3680207.3723485
+1
+Introduction
+Traditional representations of 3D content include meshes
+and point clouds. Recently, new technologies to model 3D
+scenes have emerged that outperform traditional representations in terms of realism and modeling capability, such as
+neural radiance fields (NeRF [22]) and 3D Gaussian splats
+(3DGS [15]). NeRF requires substantial training of machine
+learning models to represent the 3D scene and relies on
+slow volumetric rendering techniques. 3D Gaussian splats,
+introduced in 2023, can be seen as a generalization of point
+clouds, where each 3D “splat” has position, volume, and color
+features. They have gained prominence for their real-time
+rendering capabilities and excellent visual quality.
+Typically, these 3D scenes are created and stored on a
+server, due to the substantial amount of computation needed
+to create the 3D scenes. Clients seeking to view the 3D
+scenes can download these scene models and render them
+locally for viewing. This creates several network delivery
+challenges for viewers of 3DGS scenes: (1) The 3DGS scenes
+can be very large (e.g., 1.52 GB for the bicycle scene from
+Mip-NeRF360 [3]), and downloading the entire scene before
+viewing will create a long startup delay for the viewer. (2)
+3DGS scenes are comprised of a large number of splats (700k
+to 1M splats in standard datasets), which are of varying importance to the visual quality. It’s not clear which splats
+should be prioritized for delivery to the client. (3) 3DGS
+scenes immersively surround the user. Users have the full 6
+degrees of freedom (6DoF) to walk around and view different
+ACM MOBICOM ’25, November 4–8, 2025, Hong Kong, China
+layers and parts of the scene from different angles, making
+it difficult to determine what parts to deliver to users.
+In this work, we design an efficient and high-fidelity delivery framework for 3D scenes, L3GS, using 3DGS as the
+underlying data representation. Our framework addresses
+the above challenges as follows. (1) Leveraging the unique
+structure of the Gaussian splats, we design a custom training scheme that produces layered 3DGS. This representation
+enables a “base layer” of splats to be displayed first, followed
+by additional “enhancement layers” on top. This enables progressive download of different parts of the scene based on
+network bandwidth, while re-using previously downloaded
+layers. (2) To enable fine-grained, scalable selection of visually important splats for downloading, instead of making
+individual decisions for each splat, we segment the 3D scene
+into objects, where each object is a set of splats. This grouping also enables interactive editing of the 3D scene, so the
+user can interact with semantic objects instead of individual
+splats. (3) We collected traces of users wearing virtual reality
+headsets and moving around standard 3DGS scenes. This
+powers an a user prediction module that determines which
+splats are likely to be relevant and important to the user’s
+viewport, and hence require priority delivery.
+Overall, the contributions of the paper are:
+• Custom training to create layered 3D Gaussian splats that
+represent 3D scenes. Objects are segmented in the scene to
+provide fine-grained control for downloading and editing.
+• Scheduling algorithms to choose the right sets of splats to
+download maximize visual quality, based on predictions
+of the user’s future viewport and network bandwidth. The
+scheduler accommodates other compressed 3DGS representations too.
+• Experiments to measure visual quality and latency, driven
+by traces that we collected of users exploring 3DGS scenes
+using VR headsets (Meta Quest 3).
+The paper is organized as follows. Section 2 discusses the
+background and related work. Section 3 describes the overall
+system design and the individual modules. Section 4 shows
+the experimental results and we conclude in Section 6. The
+code and technical report are available at https://github.com/
+mavens-lab/layered_3d_gaussian_splats.
+2
+Background and Related Work
+3D representations. Traditional 3D representations such as
+point clouds and meshes usually represent 3D scenes explicitly. Point clouds represent 3D scenes using a set of points
+in 3D space. It can also include other features like colors to
+better represent the scene. 3D meshes use vertices, edges and
+faces to represent 3D objects. These vertices can also have
+feature vectors associated with them. Despite many efforts
+Yi-Zhen Tsai*, Xuechen Zhang*, Zheng Li, and Jiasi Chen
+to efficiently stream such representations [11, 12, 20], they
+do not leverage the latest advances in 3D representations.
+Emerging 3D representations such as NeRF and 3DGS can
+more accurately represent 3D scenes. NeRF [22] represents
+3D scenes as a continuous volumetric field using a multilayer perceptron (MLP) [2]. 3DGS [15] represents 3D scenes
+as a set of 3D Gaussian splats. Each splat is represented by a
+set of attributes including its position, opacity, a covariance
+matrix containing size and rotation information, and Spherical Harmonic coefficients representing view-dependent color.
+When rendered, these 3D Gaussian splats will be projected
+into 2D camera coordinates and a tile-based rasterizer will
+be used for color computation.
+3DGS training. To train a set of splats to represent a 3D
+scene [15], the splats will be initialized with a sparse point
+cloud produced by Structure-from-Motion (SfM) methods.
+The training proceeds in iterations, where in each iteration
+adjusts the values of the splat attributes (color, position, radius, etc.) to create rendered images that match the ground
+truth. At the same time, densification and pruning processes
+are used to improve the overall quality of the 3DGS model
+and ensure that splats are created in the right places to accurately represent the 3D scene. Specifically, to cover the
+geometry in under-reconstructed regions (regions with too
+few splats), the training algorithm will clone the splats in
+the region by simply creating a copy of the splats. Also, because larger splats in visually complex regions may not be
+able to capture all the details, the training will split a splat
+into smaller splats (replace a splat with two new ones). The
+training will also prune unimportant splats (e.g., splats with
+too low opacity) to keep the scene a reasonable size.
+NeRF and 3DGS optimizations for efficient delivery.
+Although NeRF and 3DGS have high visual quality, they still
+face problems that impede their efficient delivery. NeRF suffers from large model size and slow rendering [23], while
+3DGS faces the challenges of large model size [25, 29]. Compression techniques are needed to decrease model size for
+efficient network delivery and rendering. For NeRF compression, efforts usually focus on decreasing the size of the
+MLP [5, 9, 23]. Standard compression techniques such as
+quantization, pruning and knowledge distillation can also
+be used for NeRF compression [7] and 3DGS compression
+[25]. For 3DGS, LightGaussians [10] uses knowledge distillation, pseudo-view augmentation and global significance
+scores to compress 3D scenes. To eliminate structural redundancies and further compress 3DGS, Scaffold-GS [21]
+used anchors to cluster 3DGS. HAC [8] further introduced a
+hash grid to make 3DGS representation more compact. Based
+on octrees, Octree-GS [27] anchors Gaussians with different level-of-details to improve the rendering performance
+of 3DGS. Mip-Splatting [41] uses a 3D smoothing filter and
+a 2D Mip filter to improve rendering quality. These works
+L3GS: Layered 3D Gaussian Splats for Efficient 3D Scene Delivery
+3
+Server
+Client
+Version 1
+...
+mainly focus on non-layered representations and do not consider their network delivery. Further, we will demonstrate
+that L3GS can work alongside versions of [8, 16, 30].
+Recently, LapisGS [29] also proposed layered 3DGS, but
+lack the ability to control the target number of splats, and
+hence the scene size. Based on LapisGS, LTS [34] adapts
+layered representations for dynamic 3DGS scene streaming
+but does not segment the scene into objects for fine-grained
+splat scheduling, as we do. Other recent work studies 3DGS
+volumetric video streaming and integrates traditional video
+delivery optimization into their system design [19, 33–35],
+whereas we focus on scene delivery.
+Multimedia delivery. Layering and viewport prediction
+are two important techniques that can be used to improve
+the efficiency of multimedia streaming. Layering can improve streaming efficiency by making the streaming more
+adaptive. Scalable Video Coding (SVC) [28] encodes video
+stream in layered structure, where a base layer provides a
+minimum quality level, and enhancement layers improve the
+resolution, frame rate, and quality. Multiple Description Coding (MDC) differs from layered codecs by encoding multiple
+independent descriptions that can be sent over separate network paths, with any additional received streams enhancing
+quality. L3GS has more similarities to SVC but for 3D scenes,
+not 2D videos.
+Viewport prediction makes streaming more efficient by
+only fetching parts of the scene that include what a user
+is about to view. Regression, machine learning, and video
+saliency features are commonly used techniques for viewport
+prediction [18, 26, 37]. In our work, we focus on lightweight
+6 DoF viewport prediction where we have to predict not only
+orientation but position in a 3D scene, particularly for the
+standard 3DGS scenes for which user traces and viewport
+prediction has not been well studied.
+ACM MOBICOM ’25, November 4–8, 2025, Hong Kong, China
+Note
+User traces
+5G traces
+Visual
+Differences
+User
+Bandwidth
+Viewport
+Predictor
+Predictor
+Version 4
+= Layers 1 + 2 + 3 + 4
+Segmented, Layered
+3D Gaussians
+User
+poses
+Bandwidth
+Scene metadata
+Scheduler
+Request Gaussians
+Gaussians
+Rendering
+Figure 1: System architecture. Given a set of layered
+and segmented 3D Gaussian splats, L3GS retrieves the
+most useful splats within the user’s predicted viewport
+and network bandwidth.
+of each segmented object in each layer, plus the available network bandwidth. We formally define the optimization problems for various cases (layered, non-layered, segmented, non-segmented), prove the NP-hardness of the
+main cases, and design optimal algorithms to solve them.
+• User viewport predictor (Section 3.3). We collect our
+own traces of users wearing VR headsets (Meta Quest 3)
+and their 6-DoF movements around standard 3DGS scenes.
+To predict the user’s future viewport based on past history,
+we use linear regression due to its simplicity and success.
+• Bandwidth predictor (Section 3.4). We use outdoor 5G
+users’ walking traces [24] to simulate variable 5G network
+bandwidth. To predict the available network bandwidth,
+we borrow from existing methods [40].
+3.1 Segmented, Layered 3D Gaussian Splats
+System Design
+The architecture of L3GS is presented in Figure 1. Given a
+3D scene comprised of 3DGS, the system decides what are
+the best splats to retrieve in order to render the content in
+the user’s viewport while respecting the estimated network
+bandwidth. To accomplish this, there are four components:
+• Segmented, layered 3D Gaussian splats (Section 3.1).
+To provide users with progressively improving quality,
+we create 3DGS scenes with layers, including a base layer
+and several enhancement layers. Further, we also create
+more complex layered scenes that are automatically segmented into semantically meaningful object, enabling user
+interactions and scene editing.
+• Splat download scheduler (Section 3.2). Given a 3DGS
+scene, our scheduler determines what splats to download
+for each object in each layer, based on the utility values
+Figure 2: Our approaches (“Ours” and “Separate”) can
+gracefully trade off visual quality for the number of
+splats. Data from the “Train” scene [17].
+A key component of L3GS is the layered 3DGS representation. When creating layered splats, we need to balance between the number of splats (which is directly proportional to
+model size) and the visual quality (in terms of SSIM). Figure 2
+ACM MOBICOM ’25, November 4–8, 2025, Hong Kong, China
+Figure 3: Training framework for layered 3DGS. The
+layers are iteratively trained, with subsequent layers
+relying on frozen splats from preceding layers.
+presents this tradeoff for existing methods, alongside our
+proposed methods (to be discussed below). With default pretrained 3DGS models [15], although they have high visual
+quality, each scene can contain anywhere from 650K to more
+than 5M Gaussian splats, which is challenging for network
+delivery due to the large size (e.g., 1.52 GB for the bicycle
+scene from Mip-NeRF360 [3]). This is represented by “3DGS” for a specific 3D scene in Figure 2. Existing 3DGS methods (Mip-Splatting [41], Scaffold-GS [21], Octree-GS [27],
+LightGaussian [10]) can achieve similarly high visual quality
+(SSIM ≥ 0.8), but still require at least 300k splats. In contrast,
+our goal is to create splats that achieve a graceful tradeoff
+between visual quality and number of splats, represented by
+“Ours” and “Separate” in the figure.
+Algorithm 1 The overall pipeline of Layered Model Training
+𝐿
+Input: Pretrained 3D-GS: G, Target size D = {𝑑𝑙 }𝑙=1
+Output: Layered 3D-GS LG 1, ..., LG 𝐿
+𝑑𝑙
+← Prune2TargetSize(G, 𝑑𝐿 )
+⊲ Algorithm 2
+1: G𝐿 = {𝐺𝑖 }𝑖=1
+2: LG 1, ..., LG 𝐿 ← ProgressiveTraining(G𝐿 , D) ⊲ Algorithm 3
+The overall procedure of training these layered 3DGS is
+summarized in Algorithm 1 and Figure 3. There are two main
+steps in the example shown, where we want to create a scene
+with 180k total splats, split into layers of 45k splats each.
+First, we create an initial scene with a controlled number
+of splats by pruning from the default pretrained model (1M
+splats) down to the total target number (180k splats on the
+left side of Figure 3). Second, we take the 180k splats and split
+them into layers, 45k splats each in the example, and train
+them in an iterative fashion (right side of Figure 3). Below,
+we delve into these steps in more detail. Throughout this
+work, we call the different qualities of a 3D scene as separate
+“versions”, and the delta between versions as “layers”. In the
+above example, the versions contain 45k, 90k, 135k, or 180k
+splats, while each layer has 45k splats.
+(1) Creating an initial scene with a controlled total
+number of splats. To create splats that can trade off between visual quality and size, we need to be able to control
+the total number of splats in the initial 180k model. In the
+Yi-Zhen Tsai*, Xuechen Zhang*, Zheng Li, and Jiasi Chen
+original 3DGS training pipeline, the number of splats is indirectly controlled by a set of hyperparameters, such as 𝜏𝑝 for
+cloning and splitting decisions, or the densification interval.
+However, since these hyperparameters interact with each
+other in complex ways to produce the final output, the mapping between the hyperparameter settings and total number
+of splats is unclear. Furthermore, the mapping could change
+for different 3D scenes being created.
+Therefore, to effectively control the model size, we design
+Algorithm 2 to obtain a layer of precisely the desired size
+while achieving good visual quality. We start with the default
+pre-trained model from [15] (line 1), and prune down to
+the target number of splats from there. This is a top-down
+approach; the basic idea is to repeatedly prune the number
+of splats (which decreases the visual quality), and then grow
+(which improves the visual quality) multiple times. Note that
+we also experimented with a bottom-up approach where
+we grew the number of splats to the target size, but found
+top-down approach worked better in practice.
+Specifically, if the number of splats is much larger than
+the target 𝑑, we Prune the splats down to remove the worst
+𝑟 fraction of splats, according to their global significance
+score [10] (line 6). After pruning, we run Recovery to recover the visual quality by training the splat parameters,
+following a regular training iteration that allows cloning,
+splitting, and pruning (line 7). This might cause the number
+of splats to increase again, so we repeat the pruning and
+recovery process multiple times. For the final pruning, to ensure the number of splats in the final model exactly matches
+the target, we Finetune the splat attributes according to a
+regular training iteration but do not allow cloning, splitting,
+or pruning (line 11). After the desired number of splats are
+obtained, L3GS sorts the splats by their score to prepare for
+the next step, layered model training (line 15).
+(2) Layered model training. In order to support efficient 3DGS delivery, we need to create layered splats that
+can overlay on top of one another to increase visual quality.
+A naive strategy to create a layered structure is to create
+a combined loss function and jointly train splats in the 𝐿
+layers simultaneously. For example, if there are 𝐿 = 2 layers,
+the first model would be trained with loss function ℓ1 (corresponding to splats in layer 1), and the second model trained
+simultaneously with loss function ℓ1 + ℓ2 (corresponding to
+splats in layer 1 and layer 2). However, we found that with
+this technique, the splats in layer 1 would effectively get
+weighted twice in every training iteration compared to layer
+2, leading to unstable layer 1 splats and poor performance.
+To overcome this, we had to design a custom training procedure instead of simply modifying the training loss function,
+given in Algorithm 3. The main idea, as shown in the right
+side of Figure 3, is to incrementally train the models from
+the lower to higher layers. To ensure the higher layers can
+L3GS: Layered 3D Gaussian Splats for Efficient 3D Scene Delivery
+ACM MOBICOM ’25, November 4–8, 2025, Hong Kong, China
+Algorithm 2 Prune2TargetSize
+Algorithm 3 ProgressiveTraining
+Input: Pretrained 3DGS: G, Target size 𝑑, Max pruning ratio
+𝑟 , Training view images I, and their associated camera
+poses P
+Output: pruned and sorted 3DGS G𝐿 = {𝐺𝑖 }𝑑𝑖=1
+1: Initialize 3D-GS G ∗ ← G
+⊲ G pretrained by [15]
+2: 𝑛 = NumOfGS(G ∗ )
+⊲ Compute the number of splats
+3: while 𝑛 > 𝑑 do
+4:
+S ← CalGS(G ∗, I, P)
+⊲ Compute global
+significance score [10]
+5:
+if 𝑛 ∗ (1 − 𝑟 ) > 𝑑 then
+6:
+G ∗ ← Prune(G ∗, GS, 𝑛 ∗ 𝑟 ) ⊲ Prune 𝑟 faction of
+splats with lowest S
+7:
+G ∗ ← Recovery(G ∗, I, P, IsRefinementIteration
+= True) ⊲ Training method [15] with prune, split, and
+clone
+8:
+𝑛 = NumOfGS(G ∗ )
+9:
+else
+10:
+G ∗ ← Prune(G ∗, GS, 𝑛 − 𝑑)
+11:
+G ∗ ← Finetune(G ∗, I, P, IsRefinementIteration=False) ⊲ Training method [15] without prune, split
+and clone.
+12:
+end if
+13: end while
+14: S ← CalGS(G ∗, I, P)
+15: G𝐿 ← Sort(G ∗ , S )
+⊲ Sort splats by their global
+significance score in descending order.
+𝐿
+Input: Pruned and sorted 3DGS: G𝐿 = {𝐺𝑖 }𝑑𝑖=1
+, cumulative target
+# of splats D = {𝑑 1, 𝑑 2, . . . 𝑑𝐿 }
+Output: Layered 3D-GS LG 1, ..., LG 𝐿
+1: LG 1, ΔLG 2, ..., ΔLG 𝐿
+←
+𝑑𝐿
+2
+{𝐺𝑖 }𝑑1𝑖=1 , {𝐺𝑖 }𝑑𝑖=𝑑
+,
+.
+.
+.
+,
+{𝐺
+}
+⊲
+ΔLG
+means
+𝑖
+𝑙
+𝑖=𝑑𝐿−1 +1
+1 +1
+LG𝑙 \ LG𝑙 −1
+2: LG 1 ← Finetune(LG 1, I, P,IsRefinementIteration=False) ⊲
+Train base layer
+3: for 𝑙 ← 2 to 𝐿 do
+𝑙
+4:
+LG𝑙 = {𝐺𝑖 }𝑑𝑖=1
+← Concatenate(LG𝑙 −1 , ΔLG𝑙 )
+overlay on the preceding lower layers, when training each
+layer, we freeze the lower layers and only train on the added
+splats. In the example in Figure 3, we first train layer 1 (45k
+splats in the figure), freeze layer 1, add on another 45k splats
+for layer 2 and train them, and so on.
+Specifically, we first obtain the splats output by Algorithm 2 and partition its splats into 𝐿 layers, denoted as
+ΔLG𝑙 (line 1). We train the smallest layer LG 1 using the
+Finetune function, which doesn’t change the number of
+splats (line 2). For subsequent layers, we freeze the splats
+from the preceding layers (line 5) and only allow training
+for the current version’s newly added splats (line 6), training them using Finetune, which again doesn’t change the
+number of splats. This continues until all the enhancement
+layers have been trained. Note that in each training iteration,
+the loss function is computed based on rendering all splats
+in a given layer and its preceding layers (LG𝑙 ), but only the
+latest enhancement layer’s splats (ΔLG𝑙 ) are allowed to be
+updated to reduce the loss. This enables the layered effect.
+Segmentation. Segmenting the 3D scene into objects is
+useful in order to group splats together into semantically
+meaningful objects and do more efficient scheduling later in
+Section 3.2. To implement segmentation in our 3DGS models,
+{𝐺𝑖 }𝑑1𝑙 −1 .requires_grad_(false)
+⊲ Freeze splats from
+previous layers
+6:
+{𝐺𝑖 }𝑑𝑑𝑙 +1 .requires_grad_(true) ⊲ Newly added splats are
+𝑙 −1
+trainable
+7:
+LG𝑙 ← Finetune(LG𝑙 , I, P, 𝐼𝑠𝑅𝑒 𝑓 𝑖𝑛𝑒𝑚𝑒𝑛𝑡𝐼𝑡𝑒𝑟𝑎𝑡𝑖𝑜𝑛 =
+𝐹𝑎𝑙𝑠𝑒)
+⊲ Train
+8: end for
+5:
+we add the object ID as an additional feature to each splat in
+Algorithm 1, assigning the initial object IDs according to [38].
+These object IDs are refined throughout the training process
+described above. Although the total number of splats in each
+layer 𝑑𝑙 is fixed, we did not constrain the object ID during
+training, so the number of splats assigned to each object
+is non-uniform in a given layer. In other words, more/less
+splats can be automatically allocated to different objects by
+the training process to achieve the best visual quality.
+3.2
+Splat Download Scheduler
+Given the layered splats produced by the algorithms in Section 3.1, the scheduler needs to determine what splats to
+download, in what order. This section describes the problem
+setup, including the splat utility definition, problem formulation, and scheduling algorithms. Due to space constraints,
+proofs and some problem definitions are provided in the
+technical report [1].
+3.2.1 Problem Setup. As described in Section 3.1, a scene
+is comprised of splats encoded into different layers. An enhancement layer of an object is only useful if the base layer
+and all lower enhancement layers were previously downloaded. Optionally, the scene can be segmented into objects,
+and multiple splats belong to a single object. Notation-wise,
+this means each splat has a layer ID 𝑙 and optionally an object ID 𝑗. Time is divided into slots of duration 𝑇 indexed
+by 𝑡. Given the bandwidth 𝐵 [𝑡] over time, the goal is to select which splats to download that maximize the total utility
+while staying under the available bandwidth. We denote the
+main decision variable 𝑥 𝑗𝑙 [𝑡] as whether to download the
+splats comprising object 𝑗 at layer 𝑙 at time slot 𝑡. There
+ACM MOBICOM ’25, November 4–8, 2025, Hong Kong, China
+𝐵 [𝑡]
+𝑐 𝑗𝑙
+Δ𝑐 𝑗𝑙
+𝑑𝑙
+G = {𝐺𝑖 }
+ℎ𝑤
+𝑝𝑤
+𝑁
+𝑀 𝑗𝑙
+𝑇
+𝑈 𝑗𝑙 [𝑡]
+Δ𝑈 𝑗𝑙 [𝑡]
+𝑈˜ 𝑗𝑙 [𝑡]
+𝑥 𝑗𝑙 [𝑡]
+𝑦 𝑗𝑙 [𝑡]
+predicted bandwidth in time slot 𝑡
+for separate splat representations, the cost of
+object 𝑗 of version 𝑙.
+for layered splat representations, the cost of
+object 𝑗 of layer 𝑙. Δ𝑐 𝑗𝑙 [𝑡] = 𝑐 𝑗𝑙 [𝑡] − 𝑐 𝑗,𝑙 −1 [𝑡]
+Target number of splats for layer 𝑙
+entire set of splats in scene
+length of history time window (s)
+length of prediction time window (s)
+number of layers per scene
+number of splats for object 𝑗 in layer 𝑙
+duration of time slot
+for separate splat representations, the utility of
+object 𝑗 of version 𝑙 at time 𝑡.
+for layered splat representations, the utility of
+object 𝑗 from layer 𝑙 at time 𝑡. See (2).
+utility of object 𝑗 from layer 𝑙 from time 𝑡 onwards. See (9).
+decision variable of whether to download object
+𝑗 from layer 𝑙 at time 𝑡
+binary indicator of whether object 𝑗 from layer
+𝑙 is stored at time 𝑡
+Table 1: Table of Notation.
+layered
+separate
+segmented objects
+not segmented
+case I (Section 3.2.2);
+NP-hard (Theorem 1);
+Solved by knapsack.
+case II (Section 3.2.3);
+NP-hard (Theorem 2);
+Solved by progressive
+loading.
+case III (Section 3.2.4);
+NP-hard (Theorem 1);
+Solved by knapsack.
+case IV (Section 3.2.4);
+NP-hard (Theorem 2);
+Solved by progressive
+loading.
+Table 2: Taxonomy of problems and algorithms for
+different 3D Gaussian splat representations.
+are several scenario variations, depending on whether the
+splats at layered (or not) and whether the scene is segmented
+into objects (or not). Our scheduler is designed to work with
+all these scenarios, which are summarized in Table 2. The
+mathematical notation is summarized in Table 1.
+Splat utility definition. We must assign a numerical utility
+value to each splat to determine its importance to the scene
+and whether its download should be prioritized by the scheduler. However, it is difficult to assign a utility to an individual
+splat because it is just one component of the rendered view;
+typical methods of estimating visual quality like PSNR or
+SSIM require an entire image (similarly, calculating the SSIM
+of a 3D point in a point cloud is ill-defined). Therefore, we
+design a splat utility function for use by the scheduler. The
+Yi-Zhen Tsai*, Xuechen Zhang*, Zheng Li, and Jiasi Chen
+Δ"!!
+Δ"!"
+("!# , $!# )
+("!" , $!" )
+("!$ , $!$ )
+("!! , $!! )
+(""" , $"" )
+Δ$""
+(""$ , $"$ )
+(""# , $"# )
+Δ$"!
+Figure 4: Illustration of the utility function (1) for
+two objects (egg and pork belly) from the “Ramen”
+scene [38].
+utility of a splat 𝑖 in object 𝑗 in version 𝑙 at time 𝑡 is:
+𝑈𝑖 𝑗𝑙 [𝑡] = closeness𝑖 𝑗𝑙 [𝑡] × overlap𝑖 𝑗𝑙 [𝑡] × opacity𝑖 𝑗𝑙
+(1)
+The “closeness” measures the 3D Euclidean distance between
+the center of the splat to the center of the user’s viewport.
+The “overlap” is the 2D area of the 3D splat when projected
+onto the user’s 2D viewport. The “opacity” is a standard feature stored within the splat data structure. Note that closeness and overlap depend on the user’s viewport at time 𝑡,
+while opacity is a static property. The intuition is that large,
+opaque splats that are near the center of the viewport should
+have higher utility. The total utility of an object is the Í
+sum of
+utilities of splats that comprise that object, i.e., 𝑈 𝑗𝑙 = 𝑖 𝑈𝑖 𝑗𝑙 .
+These splat utilities are pre-computed offline, and retrieved
+online for the relevant splats and objects in the viewport as
+needed. Note that this utility function differs from the global
+significance score (GSG) [10], which is used to train the
+layered splats in Algorithm 2. The GSG does not depend
+on the viewport; our utility function incorporates similar
+factors as the GSG, such as splat opacity, but adds viewport
+dependence because we seek to optimize the visual quality of
+the user’s current viewport, rather than a general set of splats.
+We experiment with a version of the global significance score
+as a baseline in Section 4.
+It’s also useful to define the utility of an object in a layer
+(rather than a version in (1)) as the difference from the previous version:
+Δ𝑈 𝑗𝑙 [𝑡] = 𝑈 𝑗𝑙 [𝑡] − 𝑈 𝑗,𝑙 −1 [𝑡]
+(2)
+Intuitively, this represents the additional utility provided by
+layer 𝑙.An empirical example of the utility function for a
+single splat at time 𝑡 is shown in Figure 4. Note that 𝑈 𝑗𝑙 and
+Δ𝑈 𝑗𝑙 are used only by the scheduler to determine the utility
+of individual splats; the evaluations in Section 4 are done
+using overall scene SSIM according to standard practice.
+L3GS: Layered 3D Gaussian Splats for Efficient 3D Scene Delivery
+ACM MOBICOM ’25, November 4–8, 2025, Hong Kong, China
+3.2.2 Case I: Layered splats with segmented objects. This is
+the main scenario we consider in L3GS, because it incorporates both layers semantic segmentation into objects, thus
+enabling the most fine-grained control. The scheduling problem is defined as follows.
+Problem 1. Layered splats with segmented objects
+∑︁ ∑︁ ∑︁
+max
+Δ𝑈 𝑗𝑙 [𝑡]𝑦 𝑗𝑙 [𝑡]
+(3)
+𝑥,𝑦
+𝑗
+s.t.
+∑︁ ∑︁
+𝑗
+Theorem 1. Problem 1 is NP-Hard.
+𝑡
+𝑙
+Δ𝑐 𝑗𝑙 𝑥 𝑗𝑙 [𝑡] ≤ 𝐵 [𝑡] ∀𝑡
+(4)
+𝑙
+∑︁
+𝑥 𝑗𝑙 [𝑡] ≤ 1 ∀𝑗, 𝑙
+(5)
+𝑡
+∑︁
+𝑥 𝑗𝑙 [𝑡 ′ ] ∀𝑗, 𝑡, 𝑙
+(6)
+𝑥 𝑗𝑙 [𝑡] ≤ 𝑦 𝑗,𝑙 −1 [𝑡] ∀𝑗, 𝑙, 𝑡
+(7)
+𝑥 𝑗𝑙 [𝑡], 𝑦 𝑗𝑙 [𝑡] ∈ {0, 1} ∀𝑗, 𝑡
+(8)
+𝑦 𝑗𝑙 =
+NP-hard generalized assignment problem. However, one subtlety is that adding another constraint to the generalized
+assignment problem does not necessarily mean that it is also
+NP-hard; constraining the feasible set could potentially make
+it easier to solve the problem. Therefore, we require Theorem 1 to state that our precedence-constrained generalized
+assignment is NP-hard.
+𝑡 ′ <𝑡
+The main variable 𝑥 𝑗𝑙 [𝑡] is 1 if layer 𝑙 of object 𝑗 is downloaded in time slot 𝑡, and 0 otherwise. The objective (3) is to
+maximize the total utility across all splats in the viewport
+across all time. Constraint (4) states that the total size of
+the downloaded splats in each time slot must not exceed
+the available predicted bandwidth. Constraint (5) states that
+each layer of each object can be downloaded only once over
+the entire duration of the user trace. Note that all objects in
+a given layer do not have be downloaded before proceeding
+to the next layer, i.e., layers can be partially downloaded.
+Constraint (6) keeps track of previously downloaded splats
+in the helper variable 𝑦 𝑗𝑙 [𝑡], which is 1 if layer 𝑙 of object 𝑗
+has been downloaded before time slot 𝑡, and 0 otherwise. In
+other words, 𝑥 𝑗𝑙 [𝑡] is 1 when the splat is downloaded, and
+the corresponding 𝑦 𝑗𝑙 [𝑡] is 1 thereafter. Constraint (7) states
+that layer 𝑙 can only be downloaded if the preceding layer
+𝑙 − 1 has previously been downloaded.
+To understand the difficulty of Problem 1, we first transform it into an equivalent Problem 3 according to Lemma 1.
+Lemma 1. Problem 3 is equivalent to Problem 1.
+The transformation is done by defining a new cumulative
+utility Δ𝑈˜ 𝑗𝑙 [𝑡] as
+∑︁
+Δ𝑈˜ 𝑗𝑙 [𝑡] ≡
+Δ𝑈 𝑗𝑙 [𝑡],
+(9)
+𝑡 ′ ≥𝑡
+summing up the utility of layer 𝑙 of object 𝑗 for a user from
+time 𝑡 onward. Intuitively, it aggregates the total future utility, from time 𝑡 onwards, of a user for an object based on the
+user’s movements around the scene. The new Problem 3 (see
+technical report [1]) This adds a complication to the already
+Because Problem 1 is NP-hard, we turn our attention to
+heuristic solutions. In the simple case where 𝐵 [𝑡] and 𝑈 𝑗𝑙 [𝑡]
+are static over time, a greedy algorithm (sort the utility functions by their slopes, and pick the best slope each time) is
+optimal; however, static bandwidth and user viewport assumptions are unrealistic. In practice, bandwidth and user
+prediction far into the future is difficult. We therefore focus
+on one individual time slot and optimize within that. This
+turns out to be a multiple choice knapsack problem, which
+can be solved in pseudo-polynomial time via dynamic programming. Lemma 2 shows the equivalency of Problem 1 to
+a knapsack problem for a single time slot.
+Lemma 2. Within a single time slot, Problem 1 is a multiple
+choice knapsack problem.
+3.2.3 Case II: Separate splats with segmented objects. Next,
+we consider the case where the splats are still segmented
+into different objects but not layered. We need to choose the
+right version for each object, and subsequent better quality
+versions replace prior low quality versions. We consider this
+non-layered scenario because recent work in the computer
+vision community design new compression schemes for nonlayered splats, and we would like our framework to be able to
+work with them (see Section 4.5). The main difference from
+Problem 1 is we now consider the maximum utility across
+layers for a given object (rather than summation) in the
+objective function (10), because subsequent versions replace
+earlier ones rather than adding onto them as in the layered
+approach. The other difference is the lack of precedence
+constraints, as each layer is downloaded independently, so
+constraint (7) is not needed in Problem 2 below.
+Problem 2. Case II: Separate splats with segmented objects
+∑︁ ∑︁
+max
+max 𝑈 𝑗𝑙 [𝑡]𝑦 𝑗𝑙 [𝑡]
+(10)
+𝑙
+𝑡
+𝑗
+s.t.
+∑︁ ∑︁
+𝑗
+𝑐 𝑗𝑙 𝑥 𝑗𝑙 [𝑡] ≤ 𝐵 [𝑡] ∀𝑡
+(11)
+∑︁
+(12)
+𝑙
+𝑥 𝑗𝑙 [𝑡] ≤ 1 ∀𝑗, 𝑙
+𝑡
+∑︁
+𝑥 𝑗𝑙 [𝑡 ′ ] ∀𝑗, 𝑡, 𝑙
+(13)
+𝑥 𝑗𝑙 [𝑡] ∈ {0, 1} ∀𝑗, 𝑡
+(14)
+𝑦 𝑗𝑙 =
+𝑡 ′ <𝑡
+ACM MOBICOM ’25, November 4–8, 2025, Hong Kong, China
+It turns out that this problem is also NP-hard according to
+Theorem 2, so in practice we solve it by simply loading the
+versions in sequence, starting version 0, . . . , 𝐿, similar to a
+progressive JPEG image.
+Theorem 2. Problem 2 is NP-hard.
+3.2.4 Cases III and IV. Case III, layered splats without object
+segmentation, is similar to Case I and is covered by Problem 1
+and hence its knapsack algorithm. This is because without
+segmented objects in the scene to choose from, the decision is
+what layer of the entire scene to download. Thus the decision
+variable 𝑥 𝑗𝑙 [𝑡] represents the choice of whether to download
+layer 𝑙 of the entire scene, and the index 𝑗 is moot. Once the
+layer is chosen, the splats within the layer are downloaded
+in order according to their score (1).
+Case IV, without object segmentation and with separate
+versions of the scene, can be covered by Problem 2 following
+similar arguments as the previous paragraph. The representation is similar to using existing splat compression methods [8, 10] and tuning their parameters to create different
+versions of the same scene. We consider this as a baseline in
+the evaluation.
+3.3
+User Viewport Predictor
+Trace collection and generation. We collected viewport
+traces from 6 users for 8 scenes each. The viewport trajectory
+data is recorded as a time series using the Meta Quest 3 VR
+headset’s inside-out tracking with 6DoF. This 6DoF tracking system can track rotational and positional movements
+along the x, y, and z axes. The sampling rate is set to 36Hz.
+Examples of the viewport trajectories are shown in Figure 5.
+Additionally, 6 synthetic traces were generated, including
+elliptical, circular, and spiral paths, and three other paths
+derived from the original test sets of the 3DGS datasets.
+Yi-Zhen Tsai*, Xuechen Zhang*, Zheng Li, and Jiasi Chen
+26, 37]. Given the recent viewports within a history window
+(ℎ𝑤), we apply the model to predict the subsequent viewports within a prediction window (𝑝𝑤). During runtime, the
+model is continuously fitted to the data points from the recent history window (ℎ𝑤) and then used to forecast future
+positions in the prediction window (𝑝𝑤). The six features
+of 6DoF are predicted separately. We treat the value of each
+feature as the dependent variable and its relative order in
+the sequence, compared to the first point in ℎ𝑤, as the independent variable. A challenge arises from the cyclical nature
+of angles, where 0◦ is equivalent to 360◦ . To address this, we
+re-center the data before each prediction to ensure the model
+accurately adapts to this angular continuity. We set the first
+point in ℎ𝑤 as 0. Using it as the reference, angles increase in
+the clockwise direction and decrease in the counterclockwise
+direction, resulting in a final range of [-180, 180]. In practice,
+we set ℎ𝑤 = 0.5 s and 𝑝𝑤 = 1 s. The modular design of L3GS
+allows for more sophisticated viewport prediction modules,
+such as deep learning for panoramic videos [37], to be slotted
+in in the future.
+3.4
+Bandwidth Predictor
+L3GS makes downloading decisions based on the available
+network bandwidth. Specifically, we used a harmonic mean
+bandwidth predictor with a history window (ℎ𝑤) of size 0.5
+seconds to predict the next second into the future (𝑝𝑤). The
+harmonic mean is defined as Í𝑛 𝑛 1 , where 𝑛 is the number
+𝑖=1 𝑎𝑖
+of bandwidth samples in ℎ𝑤, and 𝑎𝑖 are the sample values.
+We further add linear interpolation to the ℎ𝑤 to make the
+bandwidth sample frequency the same as that of the viewport trace, 36 FPS. We chose the harmonic mean predictor
+due to its simplicity and successful use in prior multimedia
+systems [14, 40]. More sophisticated bandwidth predictor
+modules could easily be slotted into our framework (Section
+5). To simulate an outdoor 5G network, we sampled outdoor
+user walking traces from [24], scaling down the bandwidth
+to adapt to our use case as has been done in other work [39].
+The scaled average network bandwidth is 11.8 Mbps.
+4 Experimental Results
+4.1 Setup
+Figure 5: Real viewport trajectory data from the bicycle
+scene, each color representing a different user.
+Prediction model. A linear regression model is used
+in several viewport-adaptive systems due to its simplicity,
+speed, and reasonable accuracy in short-term forecasting [13,
+We conduct evaluations on 8 scenes from public datasets,
+including 3 scenes from Mip-NeRF360 [3], 2 scenes from
+Tanks&Temples [17], and 3 segmented scenes from Gaussian
+Grouping [38]. We create each scene with 4 layers, each layer
+having 45k splats. To evaluate our delivery framework, we
+report the visual quality (SSIM) of the user viewport every
+1 second within the 60-second user traces, averaging over
+all scenes and user traces. To decrease the influence of the
+difficult position, we randomly sample 3 different starting
+L3GS: Layered 3D Gaussian Splats for Efficient 3D Scene Delivery
+ACM MOBICOM ’25, November 4–8, 2025, Hong Kong, China
+points for each trace and show the average SSIM. Since we
+do not have the ground truth images for all viewports in our
+real user traces (the standard datasets only provide ground
+truth images for a handful of viewports), we calculate the
+SSIM with reference to renderings generated by the original
+pre-trained 3DGS models with the full number of splats.
+4.2
+Baselines
+We evaluate our 3DGS delivery pipeline with our layered
+representations, marked as “Ours”, along with several other
+baselines described below.
+Figure 6: Visual quality vs number of splats for the
+Train scene [17]. L3GS provides viable options to deliver
+3D scenes with fewer splats.
+• Splat sorting (“Sort”). We sort the Gaussian splats of the
+officially pre-trained 3DGS models by their global significance score proposed by LightGaussians[10]. Recall that
+this score is viewport-independent, so it does not adjust to
+where the user is currently looking. When downloading,
+splats are progressively retrieved with higher scores first.
+• Non-layered models (“Separate”). We use Algorithm 2
+to create independent models with different target number
+of splats, without the layered structure. When downloading, a complete stand-alone version of the scene is downloaded sequentially at increasing quality. Once a lower
+version is retrieved and displayed, a higher version is subsequently downloaded. This baseline corresponds to cases
+II and IV from Table 2.
+• Optimal (“Pre-load”). We compare to the ideal performance that could be achieved by pre-loading our largest
+separate model (180k splats, generated after Algorithm 2),
+onto the client in advance, instead of downloading it.
+Finally, we evaluate L3GS with various 3DGS models [10,
+21, 27, 41], particularly [10] and [27] that are specifically
+designed for model compression.
+4.3
+Visual quality of our layered splats
+We first examine the visual quality of the splats produced
+by L3GS without the network delivery pipeline. Our methods are able to precisely control the number of splats
+to achieve a good tradeoff between visual quality and
+size, compared to 3DGS models from the literature. The
+results, presented in Figure 6 and Figure 2, utilize ground
+truth images and positions from the test set to compute the
+SSIM. The performance values of models from other works
+(dots without transparency) are directly taken from [10, 27].
+Our models (“Ours” and “Separate”) significantly reduce the
+number of splats (and hence size) and provide viable options to deliver 3D scenes with fewer splats. We created
+additional versions of original 3DGS model [15] and LightGaussians [10] (dots with transparency) by optimizing their
+hyperparameters using grid search to vary the model size.
+Note that to ensure a fair comparison with other models
+(a) With segmentation
+(b) Without segmentation
+Figure 7: Visual quality of our layered splats (Ours)
+compared to baselines. The layering achieves high visual quality, even close to the non-layered versions
+(Separate).
+from the literature, we exclude feature distillation and quantization strategies (such strategies can be applied to all splat
+models to reduce file size, although not splat numbers). Overall, L3GS not only precisely controls the number of splats but
+also achieves higher SSIM than other compressed variants.
+L3GS constructs layered scenes without significantly
+compromising performance. We also evaluate Algorithm 3
+by comparing against the splat-sorting and non-layered baselines across all 8 scenes with varying model sizes. In Figure 7,
+we showed that our layered 3DGS (“Ours”) outperforms
+the “Sort” baseline significantly. Further, although L3GS constructs layered splats that could potentially constrain the
+optimization space and result in worse visual quality, Algorithm 3 still achieves comparable performance with the
+non-layered model (“Separate”).
+4.4
+Main results of our delivery pipeline
+L3GS outperforms other baselines because its scheduler
+can effectively retrieve splats within the user’s viewport. The main performance results are illustrated in Figure 8
+for the synthetic and real user traces. For the first 5 seconds,
+“Ours” significantly outperforms other baselines. For “Sort”,
+not only the visual quality of scenes with limited number
+of splats is poor, but their selection is only determined by
+a global significance score, which is not view-dependent.
+Worst of all, “Separate” cannot finish downloading even the
+ACM MOBICOM ’25, November 4–8, 2025, Hong Kong, China
+Yi-Zhen Tsai*, Xuechen Zhang*, Zheng Li, and Jiasi Chen
+(a) SSIM of synthetic traces.
+Figure 9: Screenshots capturing various viewpoints.
+Views from the test set demonstrate higher visual
+quality. However, some views derived from real-world
+traces display uncommon characteristics resulting in
+low visual quality, which affects all methods.
+(b) SSIM of real traces.
+Figure 8: We evaluate L3GS with both synthetic and
+real traces for the segmented and layered 3DGS we
+developed. The SSIM is significantly higher than the
+baselines and not far from the optimal (Pre-load).
+lowest quality version, resulting in blank rendered images
+and an initial SSIM of 0. In contrast, L3GS efficiently selects
+the most critical splats for the current viewport, thereby
+achieving superior performance. Even when the base 45ksplat “Separate” model is fully loaded (at around 8 seconds on
+average), our method achieves better performance by prioritizing important splats based on predicted future viewports,
+such as those closer to the user.
+With the layered approach of L3GS, performance stabilizes
+after downloading all 180k splats, which takes approximately
+30 seconds. The performance is comparable to the “Pre-load”
+baseline, with only minor losses due to the layered structure.
+However, “Sort” can achieve better performance towards
+the end of the traces by loading more splats (360k splats at
+time 60s), because it has access to a larger model. Regarding “Separate”, although the model’s visual quality is slightly
+better than ours for the same number of splats, the lack of
+progressively overlapping splats in different versions necessitates loading the entire larger model and discarding the
+previous one. This process results in substantial bandwidth
+wastage, leading to lower SSIM compared to L3GS under
+limited bandwidth conditions.
+The best SSIM L3GS can achieve is lower than the ideal
+values shown in Figure 7, particularly for real traces shown
+in Figure 8a. This is because users may explore some strange
+positions in the scene, such as walking too close or inside
+the train, or attempting to walk beyond the boundaries of
+the scene. Our data collection revealed that users are often
+curious about the holes and low-quality parts, resulting in
+out-of-scene viewports. Even the original pre-trained 3DGS
+model [15] shows low quality in such edge cases due to lack
+of ground truth images. We provide some example screenshots in Figure 9. The main take-away is that such real user
+behavior hurts our SSIM, because the SSIM of these strange
+positions tends to be lower, but this issue affects all methods,
+not just ours.
+4.5
+Adapting to other splat representations
+3DGS development is rapid, with new versions continuously
+emerging despite the original paper only appearing in 2023.
+Thus the ability of L3GS to adapt to such improvements is an
+important consideration. Two popular strategies are being
+explored: compressing the feature size of each splat through
+distillation or quantization, and building hierarchical models
+for more efficient rendering. We explore the performance of
+our delivery framework under these two alternative 3DGS
+representations, to demonstrate the flexibility of our framework. The alternative methods are:
+• Ours + spherical harmonics distillation [10]. We incorporate the spherical harmonics (SH) distillation module
+from [10] into our layered model to create two versions
+of splats. A schematic of the model is illustrated at the
+bottom of Figure 10 as “Ours+Distill”. The main idea is
+L3GS: Layered 3D Gaussian Splats for Efficient 3D Scene Delivery
+ACM MOBICOM ’25, November 4–8, 2025, Hong Kong, China
+Figure 11: L3GS works with other compressed splat representations.
+Figure 10: Other representations of 3DGS that L3GS can
+work with. Both “Ours” and “Ours+Distill” utilize layered architectures. Splats in the “Ours+Distill” model
+have two forms: shared features with compact or full
+SH. Splats can also be organized in a hierarchy.
+that splats are still organized into layers as in our model,
+but each splat contains both a compact and full version of
+the SH representation. Meanwhile, other shared features
+such as opacity and location remain consistent with the
+original model. When downloading the splats, we add the
+dimension (compact or full) of the SH as a component to
+our utility function, and thus the scheduler can choose
+from layered splats with the full or compact SH.
+• Hierarchy [16, 30] Inspired by the classical idea of Levels
+of Detail (LoD), some works store the splats in a tree structure. Each node in this tree can be represented in greater
+detail by several of its children. To showcase the hierarchy
+model in our framework, we use the non-layered models
+(“Separate”) with different target sizes to form the tree
+structure, with lower-version splats set as root nodes and
+the higher-version splats as their child nodes, sharing the
+same object ID and highest similarity score. An illustration
+of this method is shown in the top half of Figure 10.
+The results with these various 3DGS compression methods
+are shown in Figure 11. The “Ours + Distill” variant demonstrates that beyond the layered approach of our model, when
+there are more variants of individual splats available by compressing the spherical harmonics, L3GS can achieve good
+performance. To further understand these results, we look at
+the proportion of splats with full or compact SH. As shown
+in Figure 12, initially, the compact SH version of the splats
+tends to be loaded (orange bars), allowing more splats to
+be downloaded within the same bandwidth and achieving
+higher SSIM. Over time, as the total number of bits transferred increases, the compact SH will be replaced by the full
+SH (blue bars) to enhance visual quality. Since the other splat
+features are shared, only the SH features need to be upgraded,
+Figure 12: L3GS works with 3DGS distilled spherical
+harmonics (SH). Over time, a greater fraction of splats
+are upgraded from compact to full SH.
+enabling “Ours + Distill” to quickly reach performance levels
+comparable to our original model.
+The “Hierarchy” variant in Figure 11 demonstrates our
+framework’s adaptability to hierarchical splat organization,
+similar to level of details (LoD). As with the “Separate” baseline, no splats are shared across levels of the tree, requiring
+the replacement of multiple splats, leading to bandwidth inefficiencies compared to our layered approach. However, since
+parent nodes can be replaced by child nodes, “Hierarchy”
+allows fine-grained progressive splat replacement, achieving a smoother performance enhancement compared to the
+original “Separate” baseline that can only do coarse-grained
+replacement at the per-scene level, rather than per-splat.
+4.6
+3D scenes with and without object
+segmentation
+We compare the performance of the scheduler with and without segmenting the 3D scene into objects. With segmentation,
+referred to as Case I in Table 2, the scheduler has flexibilty
+to choose both objects and layers, resulting in a larger selection space. In contrast, in Case II, which uses layered splats
+without object segmentation, we only have coarse-grained
+control over which layer to download. The results, shown
+in Figure 13, indicate that the scheduler with segmentation
+ACM MOBICOM ’25, November 4–8, 2025, Hong Kong, China
+Yi-Zhen Tsai*, Xuechen Zhang*, Zheng Li, and Jiasi Chen
+Figure 15: Latency breakdown per scheduling period.
+Figure 13: L3GS with and without object segmentation
+in the scene.
+algorithm to decide which splats to download (“Scheduler”).
+The rendering time of our largest model (180k splats) is 3.69
+ms. All latency values are measured with 2vCPU @ 2.2GHz.
+In summary, the latency overhead of L3GS is negligible, consuming less than 3 ms.
+4.8
+(a) GroundTruth
+(b) Remove truck
+(c) Truck Only
+Figure 14: With segmentation, we can render objects
+independently. To visualize the truck clearly (right),
+the background is set to white.
+has better performance. This suggests that incorporating
+object-level decisions enhances L3GS.
+With segmentation, we can also selectively render specific
+objects. For instance, in Figure 14b, we can exclude the truck
+and render only the background. Conversely, in Figure 14c,
+we only render with the splats associated with the truck,
+which takes only 25.9% of the total splats. This approach
+enables more efficient rendering based on user preferences.
+For example, users may prefer to prioritize the rendering of
+the main foreground object before the background [6, 18, 36].
+4.7
+Ablation studies
+User viewport prediction is inherently imperfect due to the
+unpredictable nature of human behavior and attention. Similarly, bandwidth prediction can be difficult due to fluctuations in network conditions. The average error of our viewport predictor is shown in Figure 16. In Figure 17, we show
+an example of the predicted network bandwidth with the
+ground truth network trace. The performance of our method
+is reasonable, but the question is still how any remaining
+inaccuracies affect overall system performance?
+Figure 16: Absolute error of viewport prediction.
+Latency overhead
+We also measure the latency every scheduler period (every
+1 second), as shown in Figure 15. To perform the rendering,
+we first initialize the camera parameters, a process that takes
+approximately 1.30 seconds but occurs only once. Following
+this, the viewport and bandwidth predictor modules output
+the viewport and bandwidth in parallel; the maximum latency across these two predictions is labeled as “prediction”
+in the figure. Once the predictions are completed, we use the
+predicted viewport for utility calculation and the predicted
+bandwidth to determine which splats to download with the
+scheduler. Calculating the utility of all splats for a single
+viewport takes around 10.29 seconds, which is infeasible for
+real-time rendering. To address this, we pre-compute the
+utility values by uniformly sampling 1,000 viewport positions and 1,728 viewport orientations, then load the values
+from disk at runtime. This pre-computation step is labeled
+as “Load Utility” in Figure 15. Finally, we run the scheduling
+Figure 17: Sample bandwidth prediction trace. The
+mean absolute error across all traces is 3.11 Mbps, with
+a standard deviation of 1.43.
+L3GS: Layered 3D Gaussian Splats for Efficient 3D Scene Delivery
+Figure 18: Ablation study compared to perfect user
+viewport or throughput prediction.
+Figure 19: SSIM improves as the bandwidth prediction
+accuracy increases, for bandwidth traces with different
+levels of variance.
+To investigate this, we conducted an ablation study, evaluating L3GS with perfect prediction of viewport or bandwidth,
+with the results presented in Figure 18. Replacing both predictors with ground truth values (a hypothetical scenario)
+improves average visual quality, as imperfect predictions can
+lead to suboptimal splat downloads and potential bandwidth
+wastage; however, the observed gaps are relatively modest,
+with average SSIM differences of 0.077 for bandwidth and
+0.041 for viewport over a 60-second period. This suggests
+that the prediction mechanisms work effectively.
+To further understand the system’s robustness to fluctuating network conditions, we partition the bandwidth traces
+into three levels of variance (low/medium/high, corresponding to 0-29, 29-45, 45+) and plot the bandwidth prediction
+accuracy (in terms of mean absolute error) and visual quality (in terms of SSIM) across these categories. The results
+are shown in Figure 19 and indicate that higher network
+bandwidth variance negatively impacts bandwidth prediction accuracy, and hence results in some decrease in SSIM.
+However, even for the bandwidth traces with the highest
+variance, the performance remains comparable to the overall
+average SSIM across all traces.
+5
+Limitations and Future Work
+Limitations of L3GS include the difficulty of accuracy viewport and bandwidth prediction. Viewport prediction is challenging in 3DGS scenes because users have 6 degrees of freedom, both translation and rotation (different from, for example, rotation-only user movements in panoramic videos). Beyond harmonic mean or linear predictors, machine learning
+models that could be used, but they require larger datasets
+ACM MOBICOM ’25, November 4–8, 2025, Hong Kong, China
+of user movements in 3DGS scenes that are not currently
+available. These machine learning models could incorporate additional features such as visual saliency estimation
+or eye tracking data to aid prediction accuracy, as has been
+found useful in the related domains of VR viewport prediction [31, 32].
+The bandwidth prediction module currently used by L3GS
+is relatively simple, although it has been effective in previous multimedia adaptation works [14, 40]. L3GS could incorporate more sophisticated predicton modules employing adaptive filtering [4] or LSTM [24]. The system uses
+application-layer bandwidth to make decisions, abstracting
+away from fluctuations like packet loss or handovers. To
+adapt in real time if the actual bandwidth differs from the
+predicted bandwidth, we can adopt heuristic rules to change
+the splat download schedule accordingly. For example, if
+the actual bandwidth is higher than predicted and the splats
+finish downloading earlier, the framework can re-run the
+scheduler sooner and start fetching the next set of splats.
+Future work includes integrating new compressed 3DGS
+representations that are constantly being developed into our
+framework, deploying a prototype on live networks, and
+user studies to evaluate perceptual visual quality. Finally, it
+would be interesting to explore scenarios of multiple clients
+sharing a bottleneck link, and how splats from 3DGS scenes
+could be scheduled fairly and efficiently across users.
+6
+Conclusions
+In this paper, we created an efficient delivery framework for
+3D scenes using layered 3D Gaussian splats. We developed a
+training pipeline to create layered 3DGS models, where the
+scenes can further be segmented into objects to provide finegrained control for downloading and editing. By layering
+the 3DGS models and creating splat scheduling algorithms
+based on user viewport and network bandwidth, our system
+can adapt to varying network bandwidths while maintaining
+high visual quality. In addition, the scheduler also works with
+various types of 3DGS representations. The experimental
+results show higher performance compared to the baseline,
+achieving higher average SSIM scores and low overhead.
+Acknowledgments
+Thank you to our shepherd, Robert LiKamWa, and the anonymous reviewers for their valuable suggestions. Thank you
+also to the volunteers who participated in our data collection.
+This work was supported by NSF CAREER 1942700 and Meta
+research funds.
+ACM MOBICOM ’25, November 4–8, 2025, Hong Kong, China
+References
+[1] 2024. L3GS: Layered 3D Gaussian Splats for Efficient 3D Scene Delivery (technical report). https://github.com/mavens-lab/layered_3d_
+gaussian_splats.
+[2] Jonathan T Barron, Ben Mildenhall, Matthew Tancik, Peter Hedman,
+Ricardo Martin-Brualla, and Pratul P Srinivasan. 2021. Mip-nerf: A
+multiscale representation for anti-aliasing neural radiance fields. In
+IEEE/CVF ICCV.
+[3] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan,
+and Peter Hedman. 2022. Mip-NeRF 360: Unbounded Anti-Aliased
+Neural Radiance Fields. CVPR (2022).
+[4] Abdelhak Bentaleb, Christian Timmerer, Ali C Begen, and Roger Zimmermann. 2019. Bandwidth prediction in low-latency chunked streaming. In Proceedings of the 29th ACM workshop on network and operating
+systems support for digital audio and video. 7–13.
+[5] Bo Chen, Zhisheng Yan, Bo Han, and Klara Nahrstedt. 2024. NeRFHub:
+A Context-Aware NeRF Serving Framework for Mobile Immersive
+Applications. In Proceedings of the 22nd Annual International Conference
+on Mobile Systems, Applications and Services. 85–98.
+[6] Cuiqun Chen, Mang Ye, Meibin Qi, Jingjing Wu, Yimin Liu, and Jianguo
+Jiang. 2022. Saliency and Granularity: Discovering Temporal Coherence for Video-Based Person Re-Identification. IEEE Transactions
+on Circuits and Systems for Video Technology 32, 9 (2022), 6100–6112.
+https://doi.org/10.1109/TCSVT.2022.3157130
+[7] Yihang Chen, Qianyi Wu, Mehrtash Harandi, and Jianfei Cai. 2024.
+How Far Can We Compress Instant-NGP-Based NeRF?. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition.
+20321–20330.
+[8] Yihang Chen, Qianyi Wu, Weiyao Lin, Mehrtash Harandi, and Jianfei
+Cai. 2024. HAC: Hash-grid Assisted Context for 3D Gaussian Splatting
+Compression. arXiv:2403.14530 [cs.CV] https://arxiv.org/abs/2403.
+14530
+[9] Zhiqin Chen, Thomas Funkhouser, Peter Hedman, and Andrea
+Tagliasacchi. 2023. Mobilenerf: Exploiting the polygon rasterization
+pipeline for efficient neural field rendering on mobile architectures. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. 16569–16578.
+[10] Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia Xu, and
+Zhangyang Wang. 2023. Lightgaussian: Unbounded 3d gaussian
+compression with 15x reduction and 200+ fps. arXiv preprint
+arXiv:2311.17245 (2023).
+[11] Yongjie Guan, Xueyu Hou, Nan Wu, Bo Han, and Tao Han. 2023.
+Metastream: Live volumetric content capture, creation, delivery, and
+rendering in real time. In Proceedings of the 29th Annual International
+Conference on Mobile Computing and Networking. 1–15.
+[12] Bo Han, Yu Liu, and Feng Qian. 2020. ViVo: Visibility-aware mobile volumetric video streaming. In Proceedings of the 26th annual international
+conference on mobile computing and networking. 1–13.
+[13] Jian He, Mubashir Adnan Qureshi, Lili Qiu, Jin Li, Feng Li, and Lei
+Han. 2018. Rubiks: Practical 360-Degree Streaming for Smartphones.
+In Proceedings of the 16th Annual International Conference on Mobile
+Systems, Applications, and Services (Munich, Germany) (MobiSys ’18).
+Association for Computing Machinery, New York, NY, USA, 482–494.
+https://doi.org/10.1145/3210240.3210323
+[14] Junchen Jiang, Vyas Sekar, and Hui Zhang. 2012. Improving fairness,
+efficiency, and stability in http-based adaptive video streaming with
+festive. In Proceedings of the 8th international conference on Emerging
+networking experiments and technologies. 97–108.
+[15] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George
+Drettakis. 2023. 3D Gaussian Splatting for Real-Time Radiance Field
+Rendering. ACM Transactions on Graphics 42, 4 (July 2023). https:
+Yi-Zhen Tsai*, Xuechen Zhang*, Zheng Li, and Jiasi Chen
+//repo-sam.inria.fr/fungraph/3d-gaussian-splatting/
+[16] Bernhard Kerbl, Andreas Meuleman, Georgios Kopanas, Michael Wimmer, Alexandre Lanvin, and George Drettakis. 2024. A hierarchical 3d
+gaussian representation for real-time rendering of very large datasets.
+ACM Transactions on Graphics (TOG) 43, 4 (2024), 1–15.
+[17] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. 2017.
+Tanks and temples: benchmarking large-scale scene reconstruction.
+ACM Trans. Graph. 36, 4, Article 78 (jul 2017), 13 pages. https://doi.
+org/10.1145/3072959.3073599
+[18] Jie Li, Zhixin Li, Zhi Liu, Pengyuan Zhou, Richang Hong, Qiyue Li, and
+Han Hu. 2023. Viewport Prediction for Volumetric Video Streaming by
+Exploring Video Saliency and Trajectory Information. arXiv preprint
+arXiv:2311.16462 (2023).
+[19] Bangya Liu and Suman Banerjee. 2024. Swings: Sliding window Gaussian splatting for volumetric video streaming with arbitrary length.
+arXiv preprint arXiv:2409.07759 (2024).
+[20] Yu Liu, Puqi Zhou, Zejun Zhang, Anlan Zhang, Bo Han, Zhenhua Li,
+and Feng Qian. 2024. MuV2: Scaling up Multi-user Mobile Volumetric
+Video Streaming via Content Hybridization and Sharing. In Proceedings
+of the 30th Annual International Conference on Mobile Computing and
+Networking. 327–341.
+[21] Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin Wang, Dahua
+Lin, and Bo Dai. 2024. Scaffold-gs: Structured 3d gaussians for viewadaptive rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. 20654–20664.
+[22] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T
+Barron, Ravi Ramamoorthi, and Ren Ng. 2021. Nerf: Representing
+scenes as neural radiance fields for view synthesis. Commun. ACM 65,
+1 (2021), 99–106.
+[23] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller.
+2022. Instant neural graphics primitives with a multiresolution hash
+encoding. ACM Transactions on Graphics 41, 4 (2022), 1–15.
+[24] Arvind Narayanan, Eman Ramadan, Rishabh Mehta, Xinyue Hu,
+Qingxu Liu, Rostand A. K. Fezeu, Udhaya Kumar Dayalan, Saurabh
+Verma, Peiqi Ji, Tao Li, Feng Qian, and Zhi-Li Zhang. 2020. Lumos5G:
+Mapping and Predicting Commercial MmWave 5G Throughput. In Proceedings of the ACM Internet Measurement Conference (Virtual Event,
+USA) (IMC ’20). Association for Computing Machinery, New York, NY,
+USA, 176–193. https://doi.org/10.1145/3419394.3423629
+[25] Panagiotis Papantonakis, Georgios Kopanas, Bernhard Kerbl, Alexandre Lanvin, and George Drettakis. 2024. Reducing the Memory Footprint of 3D Gaussian Splatting. Proceedings of the ACM on Computer
+Graphics and Interactive Techniques 7, 1 (2024), 1–17.
+[26] Feng Qian, Bo Han, Qingyang Xiao, and Vijay Gopalakrishnan. 2018.
+Flare: Practical Viewport-Adaptive 360-Degree Video Streaming for
+Mobile Devices. In Proceedings of the 24th Annual International Conference on Mobile Computing and Networking (New Delhi, India) (MobiCom ’18). Association for Computing Machinery, New York, NY, USA,
+99–114. https://doi.org/10.1145/3241539.3241565
+[27] Kerui Ren, Lihan Jiang, Tao Lu, Mulin Yu, Linning Xu, Zhangkai Ni, and
+Bo Dai. 2024. Octree-gs: Towards consistent real-time rendering with
+lod-structured 3d gaussians. arXiv preprint arXiv:2403.17898 (2024).
+[28] Heiko Schwarz, Detlev Marpe, and Thomas Wiegand. 2007. Overview
+of the scalable video coding extension of the H. 264/AVC standard.
+IEEE Transactions on circuits and systems for video technology 17, 9
+(2007), 1103–1120.
+[29] Yuang Shi, Simone Gasparini, Géraldine Morin, and Wei Tsang Ooi.
+2024. LapisGS: Layered Progressive 3D Gaussian Splatting for Adaptive
+Streaming. arXiv:2408.14823 [cs.CV] https://arxiv.org/abs/2408.14823
+[30] Qing Shuai, Haoyu Guo, Zhen Xu, Haotong Lin, Sida Peng, Hujun Bao,
+and Xiaowei Zhou. 2024. Real-Time View Synthesis for Large Scenes
+with Millions of Square Meters.
+L3GS: Layered 3D Gaussian Splats for Efficient 3D Scene Delivery
+[31] Vincent Sitzmann, Ana Serrano, Amy Pavel, Maneesh Agrawala, Diego
+Gutierrez, Belen Masia, and Gordon Wetzstein. 2018. Saliency in VR:
+How do people explore virtual environments? IEEE transactions on
+visualization and computer graphics 24, 4 (2018), 1633–1642.
+[32] Niklas Stein, Gianni Bremer, and Markus Lappe. 2022. Eye trackingbased lstm for locomotion prediction in vr. In 2022 IEEE conference on
+virtual reality and 3D user interfaces (VR). IEEE, 493–503.
+[33] Jiakai Sun, Han Jiao, Guangyuan Li, Zhanjie Zhang, Lei Zhao, and Wei
+Xing. 2024. 3dgstream: On-the-fly training of 3d gaussians for efficient
+streaming of photo-realistic free-viewpoint videos. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition.
+20675–20685.
+[34] Yuan-Chun Sun, Yuang Shi, Cheng-Tse Lee, Mufeng Zhu, Wei Tsang
+Ooi, Yao Liu, Chun-Ying Huang, and Cheng-Hsin Hsu. 2025. LTS:
+A DASH Streaming System for Dynamic Multi-Layer 3D Gaussian
+Splatting Scenes. In The 16th ACM Multimedia Systems Conference,
+MMSys 2025, 2025. ACM.
+[35] Penghao Wang, Zhirui Zhang, Liao Wang, Kaixin Yao, Siyuan Xie,
+Jingyi Yu, Minye Wu, and Lan Xu. 2024. Vˆ 3: Viewing Volumetric Videos on Mobiles via Streamable 2D Dynamic Gaussians. ACM
+Transactions on Graphics (TOG) 43, 6 (2024), 1–13.
+[36] Wenguan Wang, Jianbing Shen, Fang Guo, Ming-Ming Cheng, and Ali
+Borji. 2018. Revisiting video saliency: A large-scale benchmark and a
+new model. In Proceedings of the IEEE Conference on computer vision
+and pattern recognition. 4894–4903.
+[37] Tan Xu, Bo Han, and Feng Qian. 2019. Analyzing viewport prediction
+under different VR interactions. In Proceedings of the 15th International
+Conference on Emerging Networking Experiments And Technologies (Orlando, Florida) (CoNEXT ’19). Association for Computing Machinery,
+New York, NY, USA, 165–171. https://doi.org/10.1145/3359989.3365413
+[38] Mingqiao Ye, Martin Danelljan, Fisher Yu, and Lei Ke. 2024.
+Gaussian Grouping: Segment and Edit Anything in 3D Scenes.
+arXiv:2312.00732 [cs.CV] https://arxiv.org/abs/2312.00732
+[39] Wei Ye, Xinyue Hu, Steven Sleder, Anlan Zhang, Udhaya Kumar Dayalan, Ahmad Hassan, Rostand AK Fezeu, Akshay Jajoo, Myungjin Lee,
+Eman Ramadan, et al. 2024. Dissecting Carrier Aggregation in 5G Networks: Measurement, QoE Implications and Prediction. In Proceedings
+of the ACM SIGCOMM 2024 Conference. 340–357.
+[40] Xiaoqi Yin, Abhishek Jindal, Vyas Sekar, and Bruno Sinopoli. 2015. A
+Control-Theoretic Approach for Dynamic Adaptive Video Streaming
+over HTTP. In Proceedings of the 2015 ACM Conference on Special
+Interest Group on Data Communication (London, United Kingdom)
+(SIGCOMM ’15). Association for Computing Machinery, New York, NY,
+USA, 325–338. https://doi.org/10.1145/2785956.2787486
+[41] Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and Andreas
+Geiger. 2024. Mip-splatting: Alias-free 3d gaussian splatting. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. 19447–19456.
+ACM MOBICOM ’25, November 4–8, 2025, Hong Kong, China
+ACM MOBICOM ’25, November 4–8, 2025, Hong Kong, China
+A
+Yi-Zhen Tsai*, Xuechen Zhang*, Zheng Li, and Jiasi Chen
+Proofs and Problem Definitions
+Problem 3. Generalized assignment problem with precedence constraints
+∑︁ ∑︁ ∑︁
+max
+Δ𝑈˜ 𝑗𝑙 [𝑡]𝑥 𝑗𝑙 [𝑡]
+𝑗
+s.t.
+∑︁ ∑︁
+𝑗
+(15)
+𝑡
+𝑙
+Δ𝑐 𝑗𝑙 𝑥 𝑗𝑙 [𝑡] ≤ 𝐵 [𝑡] ∀𝑡
+(16)
+𝑙
+∑︁
+𝑥 𝑗𝑙 [𝑡] ≤ 1 ∀𝑗, 𝑙
+(17)
+𝑡
+∑︁
+𝑥 𝑗𝑙 [𝑡 ′ ] ∀𝑗, 𝑙, 𝑡
+(18)
+𝑥 𝑗𝑙 [𝑡] ∈ {0, 1} ∀𝑗, 𝑡
+(19)
+𝑥 𝑗𝑙 [𝑡] ≤
+𝑡 ′ <𝑡
+Lemma 1
+Proof. Substituting (6) into the objective function (3), we can re-write the objective as
+∑︁ 𝑇
+∑︁
+Δ𝑈 𝑗𝑙 [𝑡]𝑦 𝑗𝑙 [𝑡] =
+∑︁ 𝑇
+∑︁
+=
+∑︁ 𝑇
+∑︁ 𝑇
+∑︁
+𝑗,𝑙
+=
+(20)
+Δ𝑈 𝑗𝑙 [𝑡]𝑥 𝑗𝑙 [𝑡 ′ ]
+(21)
+𝑡 ′ =1
+𝑗,𝑙 𝑡 =1
+𝑗,𝑙 𝑡 =1
+𝑡
+∑︁
+𝑥 𝑗𝑙 [𝑡 ′ ]
+Δ𝑈 𝑗𝑙 [𝑡]
+𝑡 ′ =1 𝑡 =𝑡 ′
+∑︁ 𝑇
+∑︁
+Δ𝑈˜ 𝑗𝑙 [𝑡 ′ ]𝑥 𝑗𝑙 [𝑡 ′ ]
+(22)
+𝑗,𝑙 𝑡 ′ =1
+where (22) is just (15), the objective of Problem 3. The other constraints are equivalent: (4) and (16), (5) and (17), and (7) and (18).
+□
+Theorem 1
+Proof. The first step is a reduction from the generalized assignment problem (GAP) to an instance of Problem 3. The GAP can be stated
+as: given 𝑇 bins (with capacity 𝑐𝑡 ) and 𝑛 items (with profit 𝑝 𝑗𝑡 and weight 𝑤 𝑗𝑡 ), find the assignment of items to bins to maximize the profit
+without exceeding each bin’s capacity. Consider the following simplified instance of our Problem 3 where there is only one layer (𝐿 = 1).
+Map each item in the GAP to a splat in Problem 3 by setting Δ𝑈˜ 𝑗 [𝑡] = 𝑝 𝑗𝑡 , 𝑐 𝑗 = 𝑤 𝑗𝑡 ∀𝑡, and 𝐵 [𝑡] = 𝑐𝑡 . Hence the reduction from GAP to
+Problem 3 is shown, so Problem 3 is NP-hard. Second, we note that Problem 3 is equivalent to Problem 1 by Lemma 1, so Problem 1 is also
+NP-hard.
+□
+Theorem 2
+Proof. The proof involves a reduction from the generalized assignment problem (GAP) to an instance of Problem 2. The GAP can be
+stated as: given 𝑇 bins (with capacity 𝑐𝑡 ) and 𝑛 items (with profit 𝑝 𝑗𝑡 and weight 𝑤 𝑗𝑡 ), find the assignment of items to bins to maximize the
+profit without exceeding each bin’s capacity. Consider the following simplified instance of our Problem 2 where there is only one layer
+(𝐿 = 1). Then the objective function (10) can be written as
+∑︁ 𝑇
+∑︁
+𝑈˜ 𝑗 [𝑡]𝑥 𝑗 [𝑡]
+(23)
+𝑗 𝑡 =1
+Í
+using (9) and following the same derivation as Lemma 1 with 𝑈˜ 𝑗 = 𝑡 ′ ≥𝑡 𝑈 𝑗 [𝑡], similar to (9). Map each item in the GAP to a splat in
+Problem 2 by setting 𝑈˜ 𝑗 [𝑡] = 𝑝 𝑗𝑡 , 𝑐 𝑗 = 𝑤 𝑗𝑡 ∀𝑡, and 𝐵 [𝑡] = 𝑐𝑡 . Or to be more precise, set 𝑈 𝑗 [𝑡] = 𝑝 𝑗𝑡 − 𝑝 𝑗 (𝑡 +1) (reverse transformation of (9)).
+Hence the reduction from GAP to Problem 2 is shown.
+□
+Lemma 2
+L3GS: Layered 3D Gaussian Splats for Efficient 3D Scene Delivery
+4
+0.6
+0.4
+X
+Y
+Z
+0.2
+X
+Y
+Z
+2
+1
+Position
+3
+Position
+Position
+ACM MOBICOM ’25, November 4–8, 2025, Hong Kong, China
+0
+0.0
+1
+2
+3
+Time(s)
+4
+5
+6
+0
+150
+150
+100
+100
+50
+50
+0
+50
+100
+0
+1
+2
+3
+Time(s)
+2
+3
+Time(s)
+4
+5
+6
+5
+6
+0.0
+0.2
+0.4
+0.6
+Time(s)
+0.8
+1.0
+0
+50
+1.2
+X
+Y
+Z
+100
+50
+0
+50
+100
+150
+4
+X
+Y
+Z
+150
+100
+X
+Y
+Z
+150
+1
+X
+Y
+Z
+Rotation
+1
+Rotation
+Rotation
+0
+1.00
+0.75
+0.50
+0.25
+0.00
+0.25
+0.50
+0.75
+1.00
+150
+0
+1
+2
+3
+Time(s)
+4
+5
+6
+0.0
+0.2
+0.4
+0.6
+Time(s)
+0.8
+1.0
+1.2
+Figure 20: Position and rotation of 3 synthetically generated user movement traces, to accompany our real user
+traces.
+Proof. The multiple choice knapsack problem is defined as:
+∑︁ ∑︁
+𝑈 𝑗𝑙 [𝑡]𝑧 𝑗𝑙 [𝑡]
+(24)
+𝑐 𝑗𝑙 𝑥 𝑗𝑙 [𝑡] ≤ 𝐵 [𝑡] ∀𝑡
+(25)
+max
+𝑗
+s.t.
+∑︁ ∑︁
+𝑗
+𝑙
+𝑙
+∑︁
+𝑧 𝑗𝑙 [𝑡] ≤ 1 ∀𝑗
+(26)
+𝑧 𝑗𝑙 [𝑡] ∈ {0, 1} ∀𝑗, 𝑙
+(27)
+𝑙
+We will show that Problem 3, which is equivalent to Problem 1 by Lemma 1, can be transformed into this knapsack problem.
+Í
+Let the decision variable from Problem 3 be defined as 𝑥 𝑗𝑙 ≡ 𝑙 ′ ≥𝑙 𝑧 𝑗𝑙 ′ . For a given time slot, the objective (15) from Problem 3 can be
+re-written as:
+∑︁ ∑︁
+∑︁ ∑︁
+Δ𝑈 𝑗𝑙 𝑥 𝑗𝑙 =
+(𝑈 𝑗𝑙 − 𝑈 𝑗,𝑙 −1 )𝑥 𝑗𝑙
+(28)
+𝑗
+𝑗
+𝑙
+=
+𝑙
+∑︁ ∑︁
+𝑗
+𝑈 𝑗𝑙 (𝑥 𝑗𝑙 − 𝑥 𝑗,𝑙+1 )
+(29)
+𝑙
+!
+=
+∑︁ ∑︁
+𝑗
+=
+∑︁
+𝑙 ′ ≥𝑙
+𝑙
+∑︁ ∑︁
+𝑗
+𝑈 𝑗𝑙
+𝑈 𝑗𝑙 𝑧 𝑗𝑙
+𝑧 𝑗𝑙 ′ −
+∑︁
+𝑧 𝑗𝑙 ′
+(30)
+𝑙 ′ ≥𝑙+1
+(31)
+𝑙
+A similar transformation can be done on the cost constraint (16) from Problem 3 to turn it into the knapsack cost constraint (25). Finally,
+Í
+Í
+we see that (17) from Problem 3 can be written as 𝑥 𝑗𝑙 = 𝑙 ′ ≥𝑙 𝑧 𝑗𝑙 ′ ≤ 1, ∀𝑗, 𝑙, which implies 𝑙 𝑧 𝑗𝑙 ≤ 1, ∀𝑗, which is constraint (26) from the
+knapsack problem.
+□
+B
+Additional visual quality evaluation metrics
+We further evaluate the models using additional metrics of PSNR, SSIM, and LPIPS, as presented in Table 3. Our layered model
+consistently demonstrates comparable performance to the “Separate” while consistently outperforming the “Sort”. However,
+due to variations in scene size, model performance differs significantly across scenes. For instance, the “Bicycle” scene, which
+is notably large with an original model size of 1.52 GB, exhibits lower visual quality.
+C
+Synthetic traces generation
+Since the user’s movements in real traces are somewhat random, as described in the main text, they might focus on some
+out-of-scene viewports such as holes where there is no ground truth visual data, affecting the evaluation of our pipeline.
+Therefore, we generated 6 synthetic traces. 3 traces of those traces were generated by placing the existing test views from
+ACM MOBICOM ’25, November 4–8, 2025, Hong Kong, China
+Yi-Zhen Tsai*, Xuechen Zhang*, Zheng Li, and Jiasi Chen
+Table 3: Evaluation was conducted using visual quality metrics, including PSNR (Peak Signal-to-Noise Ratio), SSIM
+(Structural Similarity Index), and LPIPS (Learned Perceptual Image Patch Similarity).
+Scene
+Bicycle
+Bonsai
+Counter
+Train
+Truck
+Figurines
+Ramen
+Teatime
+# of splats
+45,000
+90,000
+135,000
+180,000
+45,000
+90,000
+135,000
+180,000
+45,000
+90,000
+135,000
+180,000
+45,000
+90,000
+135,000
+180,000
+45,000
+90,000
+135,000
+180,000
+45,000
+90,000
+135,000
+180,000
+45,000
+90,000
+135,000
+180,000
+45,000
+90,000
+135,000
+180,000
+Separate
+21.315
+21.771
+22.082
+22.301
+25.930
+27.993
+29.159
+30.045
+24.874
+26.412
+27.270
+27.799
+19.603
+20.712
+21.288
+21.608
+21.106
+22.527
+23.239
+23.676
+21.228
+22.281
+23.938
+24.657
+25.236
+27.099
+27.499
+27.787
+27.588
+28.016
+28.476
+28.912
+PSNR
+Sort
+14.180
+14.663
+15.020
+15.317
+18.193
+20.279
+21.848
+23.181
+18.214
+20.422
+21.957
+23.179
+14.694
+16.286
+17.399
+18.355
+13.870
+14.872
+16.104
+17.104
+14.075
+14.872
+20.986
+22.985
+21.014
+22.154
+23.891
+23.904
+21.891
+23.076
+23.098
+23.371
+Ours
+21.315
+21.817
+21.949
+22.028
+25.930
+27.685
+28.304
+28.600
+24.874
+26.410
+26.847
+27.076
+19.603
+20.610
+20.937
+21.047
+21.106
+22.5652
+22.902
+23.071
+21.228
+22.279
+23.610
+24.176
+25.236
+26.804
+27.021
+27.283
+27.588
+27.819
+28.051
+28.517
+Separate
+0.464
+0.490
+0.510
+0.527
+0.797
+0.856
+0.887
+0.9065
+0.789
+0.831
+0.854
+0.870
+0.638
+0.704
+0.740
+0.762
+0.707
+0.767
+0.799
+0.819
+0.461
+0.493
+0.509
+0.525
+0.798
+0.836
+0.859
+0.884
+0.746
+0.770
+0.845
+0.856
+SSIM
+Sort
+0.313
+0.342
+0.363
+0.379
+0.639
+0.707
+0.758
+0.799
+0.643
+0.706
+0.748
+0.781
+0.490
+0.561
+0.615
+0.658
+0.559
+0.575
+0.625
+0.664
+0.439
+0.451
+0.458
+0.573
+0.674
+0.678
+0.701
+0.704
+0.685
+0.694
+0.700
+0.703
+Ours
+0.464
+0.493
+0.497
+0.516
+0.797
+0.853
+0.875
+0.885
+0.789
+0.834
+0.850
+0.860
+0.638
+0.700
+0.724
+0.734
+0.707
+0.771
+0.790
+0.800
+0.461
+0.490
+0.498
+0.514
+0.798
+0.814
+0.850
+0.862
+0.746
+0.762
+0.816
+0.833
+Separate
+0.571
+0.531
+0.499
+0.474
+0.371
+0.306
+0.269
+0.244
+0.376
+0.319
+0.286
+0.263
+0.427
+0.358
+0.319
+0.293
+0.380
+0.315
+0.275
+0.248
+0.541
+0.507
+0.500
+0.482
+0.397
+0.302
+0.264
+0.240
+0.395
+0.341
+0.276
+0.255
+LPIPS
+Sort
+0.612
+0.572
+0.545
+0.525
+0.458
+0.399
+0.357
+0.3240
+0.446
+0.388
+0.3497
+0.319
+0.508
+0.439
+0.390
+0.352
+0.460
+0.4352
+0.384
+0.346
+0.603
+0.587
+0.551
+0.535
+0.448
+0.416
+0.411
+0.407
+0.403
+0.402
+0390
+0.387
+Ours
+0.571
+0.523
+0.502
+0.490
+0.371
+0.315
+0.287
+0.2731
+0.376
+0.315
+0.291
+0.276
+0.427
+0.364
+0.335
+0.322
+0.380
+0.310
+0.284
+0.268
+0.541
+0.522
+0.516
+0.516
+0.397
+0.338
+0.289
+0.253
+0.395
+0.348
+0.300
+0.296
+the 3D scenes in sequence. The remaining 3 synthetic traces follow simple movement patterns such as walking in a circle,
+spinning on the spot, etc. Their position and rotation are visualized in Figure 20.

@@ -1,0 +1,1901 @@
+GCC: A 3DGS Inference Architecture with Gaussian-Wise and
+Cross-Stage Conditional Processing
+Minnan Pei1,2 , Gang Li1† , Junwen Si1 , Zeyu Zhu1,2 , Zitao Mo1 , Peisong Wang1,2 , Zhuoran Song3 ,
+Xiaoyao Liang3 , Jian Cheng1,2†
+1 The Key Laboratory of Cognition and Decision Intelligence for Complex Systems, CASIA, Beijing, China
+2 University of Chinese Academy of Sciences, Beijing, China
+3 Shanghai Jiao Tong University, Shanghai, China
+arXiv:2507.15300v3 [cs.AR] 25 Jul 2025
+ABSTRACT
+Among these, 3D Gaussian Splatting (3DGS) [15] has emerged as
+a leading method, combining the advantages of continuous volumetric representations with explicit point clouds to deliver highquality, real-time novel-view synthesis on high-end GPUs. However,
+efficient deployment of 3DGS models on mobile devices like AR
+headsets [21] remains challenging due to limited computational
+power and battery life. For instance, a comfortable immersive experience demands a rendering rate of at least 90 FPS—a target the
+original 3DGS algorithm, often operating below 10 FPS on mobile
+platforms, falls far short of [13, 15]. This has spurred growing research in academia and industry on dedicated accelerators for fast
+and energy-efficient 3DGS inference [19].
+Existing hardware accelerators [11, 19, 40] for 3DGS follow the
+standard processing pipeline of GPU implementation, featuring
+a two-stage “preprocess-then-render” process and tile-wise rendering. Specifically, for a given viewpoint, the millions of trained 3D
+Gaussians first undergo preprocessing: Gaussians outside the view
+frustum are culled, while the remaining ones are projected into 2D
+representations. These 2D Gaussians are then rendered tile-by-tile
+(e.g., 16×16 pixels) to compute per-pixel RGB values. For each tile,
+all overlapping Gaussians are retrieved, sorted by depth, and processed via 𝛼-blending to determine the final colors. While showing
+promise, we identify that this standard dataflow employed in existing 3DGS accelerators exhibits two major limitations, preventing
+them from achieving optimal performance and energy efficiency:
+First, the two-stage “preprocess-then-render” approach introduces redundant Gaussian movements and computations.
+During the rendering phase, the early termination strategy in 𝛼blending results in significantly fewer Gaussians are used in rendering than are preprocessed. This implies that the 3D Gaussians corresponding to those non-rendered 2D ones can be entirely excluded
+during preprocessing, thereby reducing both data movements and
+computations. However, in the standard two-stage dataflow, all 3D
+Gaussians undergo preprocessing regardless of their actual utilization in subsequent rendering, introducing substantial redundancy.
+For example, our profiling reveals that approximately 40% of runtime in the state-of-the-art GSCore [19] accelerator is dedicated to
+preprocessing 3D Gaussians, while over 60% of the preprocessed
+Gaussians remain unused during subsequent rendering.
+Second, the tile-wise rendering incurs repeated data accesses for the same Gaussians. At the beginning of rendering, all
+preprocessed 2D Gaussians establish indexing relationships with
+image tiles based on their spatial coordinates and bounding sizes.
+The rendering then processes tiles in scanline order: for each tile, it
+1) retrieves all associated Gaussians, 2) sorts them by depth, and
+3) computes 𝛼-blending to determine RGB values for every pixel
+3D Gaussian Splatting (3DGS) has emerged as a leading neural rendering technique for high-fidelity view synthesis, prompting the development of dedicated 3DGS accelerators for resource-constrained
+platforms. The conventional decoupled preprocessing-rendering
+dataflow in existing accelerators has two major limitations: 1) a
+significant portion of preprocessed Gaussians are not used in rendering, and 2) the same Gaussian gets repeatedly loaded across
+different tile renderings, resulting in substantial computational and
+data movement overhead. To address these issues, we propose GCC,
+a novel accelerator designed for fast and energy-efficient 3DGS
+inference. GCC introduces a novel dataflow featuring: 1) cross-stage
+conditional processing, which interleaves preprocessing and rendering to dynamically skip unnecessary Gaussian preprocessing;
+and 2) Gaussian-wise rendering, ensuring that all rendering operations for a given Gaussian are completed before moving to the next,
+thereby eliminating duplicated Gaussian loading. We also propose
+an alpha-based boundary identification method to derive compact
+and accurate Gaussian regions, thereby reducing rendering costs.
+We implement our GCC accelerator in 28nm technology. Extensive experiments demonstrate that GCC significantly outperforms
+the state-of-the-art 3DGS inference accelerator, GSCore, in both
+performance and energy efficiency.
+CCS CONCEPTS
+• Computer systems organization → Architectures; • Computing methodologies → Rasterization; Computer vision; • Hardware
+→ Logic circuits.
+KEYWORDS
+Accelerators, Gaussian Splatting, 3D Rendering
+1
+INTRODUCTION
+In recent years, neural rendering techniques [2, 7, 15, 26, 38, 39, 42,
+43] have advanced significantly in computer graphics and vision.
+† Co-corresponding authors.
+Permission to make digital or hard copies of all or part of this work for personal or
+classroom use is granted without fee provided that copies are not made or distributed
+for profit or commercial advantage and that copies bear this notice and the full citation
+on the first page. Copyrights for components of this work owned by others than the
+author(s) must be honored. Abstracting with credit is permitted. To copy otherwise, or
+republish, to post on servers or to redistribute to lists, requires prior specific permission
+and/or a fee. Request permissions from permissions@acm.org.
+MICRO 2025, October 18–22, 2025, Seoul, Korea
+© 2025 Copyright held by the owner/author(s). Publication rights licensed to ACM.
+ACM ISBN 978-X-XXXX-XXXX-X/XX/XX. . . $15.00
+https://doi.org/XXXXXXX.XXXXXXX
+1
+MICRO 2025, October 18–22, 2025, Seoul, Korea
+Minnan Pei, et al.
+3DGS Representation
+Standard Pipeline
+Preprocessing Stage
+Rendering Stage
+0
+T < Threshold
+Full Loading
+μ, s, q, sh, ω
+Conditional
+Loading
+Tile 17 Sorting
+Step 1
+Tile 18
+Step 2
+Assigning to Tiles
+2D Projection
+Repeated Gaussian Access
+View
+Gaussian 1
+T = 0.6
+GCC Pipeline
+Rendering
+Step 2
+T = 0.2
+Gaussian 3
+Step 3
+T < Threshold
+Early Termination
+Rendering
+Gaussian 2
+Preprocessed but not Used in Rendering
+Projection
+Not Preprocessed and Rendered
+Step 1
+Projection
+Global Sorting by Depth
+Projection
+Gaussian-wise
+Splatting
+Gaus. 5 Gaus. 4 Gaus. 3 Gaus. 2 Gaus. 1
+Tile-wise
+Rendering
+17 18
+Rendering
+Figure 1: An illustration of the standard and our proposed dataflow for 3DGS inference. GCC exploits a cross-stage conditional
+processing scheme to dynamically eliminate redundant Gaussian preprocessing, and a Gaussian-wise approach to mitigate
+duplicated Gaussian accesses during rendering.
+within the tile. For tiles of fixed size, a Gaussian overlapping multiple tiles is repeatedly loaded for each tile’s rendering. This leads to
+total Gaussian loads far exceeding the number of unique Gaussians,
+causing significant memory inefficiency.
+To address these issues, this paper proposes GCC, a specialized
+accelerator designed for fast and energy-efficient 3DGS inference.
+It introduces a novel dataflow that incorporates two key techniques:
+cross-stage conditional processing and Gaussian-wise rendering. On
+the one hand, unlike the standard pipeline, which strictly separates Gaussian preprocessing and rendering into two sequential
+stages, we interleave them conditionally at runtime, preprocessing and rendering only the Gaussians that contribute to the final
+RGB values. This avoids redundant Gaussian movements and computations present in the preprocessing stage of the conventional
+two-stage dataflow. On the other hand, to mitigate the issue of
+repeatedly loading the same Gaussian in different tiles during tilewise rendering, we adopt a Gaussian-wise rendering approach. This
+involves rendering the complete Gaussians one by one in depth
+order, enabling each Gaussian’s feature data to be loaded only once
+throughout rendering. To further reduce rendering cost, we propose
+an alpha-based boundary identification method to derive compact
+and accurate Gaussian regions. In summary, the contributions of
+this paper are as follows:
+Gaussian boundaries, reducing rendering costs while preserving accuracy.
+• We propose GCC, a 3DGS inference accelerator tailored
+for the proposed dataflow. Evaluations show that GCC can
+achieve an average of 5.24× and 3.35× area-normalized speedup
+and energy efficiency, respectively, over state-of-the-art 3DGS
+inference accelerator GSCore, with a peak throughput of 667
+FPS on the Lego dataset.
+The rest of this paper is organized as follows. Section 2 presents
+background and motivates the need for a more efficient dataflow
+and architecture. Section 3 introduces the proposed GCC dataflow.
+Section 4 details the hardware architecture of GCC. Section 5 provides evaluation results. Section 7 briefly introduces related work,
+and Section 8 concludes this paper.
+2 BACKGROUND AND MOTIVATION
+2.1 3D Gaussian Splatting
+3D Gaussian Splatting [15], as an emerging explicit scene representation approach, has drawn considerable attention due to its
+high-performance rendering capabilities [1, 4, 5, 14, 41]. 3DGS represents scenes as a set of anisotropic Gaussian points continuously
+distributed in space, directly rasterizing these Gaussian points (i.e.,
+splatting) to synthesize novel views. Compared to traditional implicit NeRF approaches [26] (e.g., using deep MLPs), 3DGS explicitly
+represents scene elements and avoids per-pixel neural network inference, achieving significant improvements in rendering speed
+up to real-time frame rates desktop-class GPU [15] (≥ 30 FPS at
+1080p). It simultaneously maintains the differentiability advantages
+of NeRF and the sparsity benefits of explicit point clouds.
+The rendering pipeline of 3DGS employs the classical EWA splatting method [46] but incorporates several critical optimization
+strategies for efficient GPU acceleration, including 1) data compression and memory-friendly representations, 2) preprocessing
+• We propose a novel 3DGS inference dataflow that integrates
+two key techniques: cross-stage conditional processing and
+Gaussian-wise rendering. This approach can dynamically
+eliminate both preprocessing and rendering operations for ineffective Gaussians, while reducing the overhead of repeated
+loading of the same Gaussians in conventional tile-wise rendering.
+• We propose an alpha-based boundary identification method
+to dynamically determine the effective regions of each Gaussian during rendering. Combining expansion-based alpha
+computation with early termination, it can yield tighter
+2
+3.0
+Average per-Gaussian Loading
+4.0
+Total
+In Frustum
+Rendered
+2.0
+Truck
+(a)
+82.8%
+Train
+81.4%
+0.0
+64.0%
+1.0
+67.1%
+Number of Gaussians (×10 )
+GCC: A 3DGS Inference Architecture with Gaussian-Wise and Cross-Stage Conditional Processing
+Playroom Drjohnson
+5.63
+6
+4
+3.94
+2.2
+6.45
+Train
+3.17
+Truck
+(b)
+Playroom Drjohnson
+Figure 2: (a) The number of Gaussians in different processing
+phases; (b) The average number of per-Gaussian loadings
+during rendering in GSCore [19].
+and rendering optimizations, and 3) early termination. First, to reduce storage overhead and memory bandwidth demands, 3DGS
+compresses Gaussian parameters into a compact representation,
+each consisting of position coordinates, spherical harmonics (SH)
+for color, and covariance matrices. Specifically, position coordinates
+are represented as 3D spatial vectors, colors as 48 spherical harmonic coefficients, and covariance matrices through scale factors
+and rotation quaternion factors, accompanied by a transparency parameter [36]. Each Gaussian point has its unique set of parameters,
+with camera parameters varying per viewpoint, including camera
+poses, view matrices, and projection matrices. Second, 3DGS optimizes the rendering pipeline for GPU characteristics, transforming
+the 3D world coordinate system first into a normalized device coordinate (NDC) space and then into the camera perspective. Major
+computational workloads involve numerous small matrix multiplications for projection (1) and summation of spherical harmonic
+functions via Legendre polynomials (2).
+Σ = 𝑅𝑆𝑆𝑇 𝑅𝑇 ,
+𝐶𝑅𝐺𝐵 =
+−1
+𝐿
+∑︁ 𝐵𝑙∑︁
+Σ′ = 𝐽𝑊 Σ𝑊 𝑇 𝐽 𝑇
+𝑐𝑙𝑚 · 𝑓𝑙,𝑚 (𝑥, 𝑦, 𝑧) · 𝑠ℎ𝑏𝑙 +𝑚
+(1)
+(2)
+𝑙=0 𝑚=0
+Next, the preprocessing pipeline assigns an ellipse and an axisaligned bounding box (AABB) to each Gaussian projected onto
+2D, generating Gaussian-tile key-value pairs through tile coverage
+traversal. These Gaussians undergo sorting based on view depth
+using radix sorting, ensuring the blending will be correct order.
+Rasterization within each tile processes all pixels concurrently to
+compute each Gaussian’s current-layer transparency:
+
+
+1 𝑇 ′−1
+𝛼 = min 0.99, 𝜔 · 𝑒 − 2 ·𝒅 Σ 𝒅
+(3)
+Final process updates transmittance and blending colors in depthorder [20] shown as Equation (4) . To mitigate numerical instability
+during training, 3DGS excludes pixels in bounding box with alpha
+values less than 1/255 in forward and backward passes, and training
+terminates once cumulative transparency reaches 0.0001 [15]. These
+termination criteria introduce predictable patterns in intermediate rendering variables, offering opportunities for computational
+efficiency improvements.
+𝑇𝑖 =
+𝑖 −1
+Ö
+𝑗=1
+(1 − 𝛼 𝑗 ),
+𝐶=
+𝑁
+∑︁
+𝑇𝑖 𝛼𝑖 𝑐𝑖
+Challenges in 3DGS Accelerator Design
+Although 3DGS achieves faster inference speeds than NeRF [26] on
+high-performance GPUs, its deployment on resource-constrained
+mobile devices remains challenging [1]. To enhance speed and reduce energy consumption, several dedicated accelerators for 3DGS
+have recently been proposed, including: the first 3DGS inference
+architecture, GSCore [19]; the 3DGS-based SLAM architecture,
+GauSPU [40]; and GSArch [11], an accelerator optimized for 3DGS
+training.
+While promising, we observe that existing 3DGS accelerators
+adopt the same dataflow as GPU implementations (termed the
+“standard dataflow” for clarity), characterized by two key features:
+1) a two-stage “preprocess-then-render” process, and 2) tile-wise
+rendering, as shown in Figure 1. Specifically, in the preprocessing
+stage, the millions of trained 3D Gaussians are first culled to remove those outside the view frustum for a given viewpoint. They
+are then transformed into 2D representations through a series of
+matrix operations. In the rendering stage, each 2D Gaussian determines its boundaries using a specific method and establishes
+an indexed relationship with multiple fixed-size tiles on the image
+based on their overlap regions. The image is then rendered in scanline order, starting from the first tile. The rendering process for each
+tile includes operations such as Gaussian sorting and 𝛼-blending.
+Through in-depth analysis, we identify two major limitations in
+this standard dataflow that hinder optimal hardware efficiency:
+Challenge 1: Decoupling preprocessing and rendering incurs significant redundancy in preprocessing. The standard
+3DGS dataflow begins with a preprocessing stage, where each 3D
+Gaussian is independently projected into 2D representation through
+position transformation and color computation based on third-order
+spherical harmonics (SH). These 2D Gaussians then serve as input for the subsequent rendering stage. Nevertheless, owing to the
+inherent early termination mechanism in 𝛼-blending during rendering, a significant portion (over 60%, as shown in Figure 2 (a)) of
+the preprocessed 2D Gaussians are ultimately unused. Particularly,
+each 3D Gaussian is represented by 59 floating-point parameters,
+among which a staggering 81.4% (48 out of 59) of the SH coefficients
+remain unused before 𝛼-blending begins. Existing 3DGS accelerators, however, uniformly load and process all 3D Gaussians during
+preprocessing without considering their subsequent utilization in
+rendering. This leads to substantial inefficiencies in both off-chip
+data transfer and on-chip computation. For instance, GSCore [19]
+spends up to 40% of the total time on preprocessing, yet over half
+of the 2D Gaussians are discarded in the rendering stage.
+Challenge 2: Tile-wise rendering causes duplicated loadings for Gaussians overlapping multiple tiles. In the standard
+dataflow, image rendering is performed at the tile granularity. The
+2D Gaussians are mapped to several fixed-size tiles in the image
+based on their size and positional information, with larger Gaussians overlapping more tiles. For each tile’s rendering, all overlapping Gaussians are first sorted by depth. Their colors are then
+computed and blended from near to far using 𝛼-blending to produce
+the tile’s final color. Evidently, when a Gaussian overlaps multiple
+tiles, its parameters should be loaded repeatedly during rendering
+due to limited on-chip storage. As shown in Figure 2(b), we observe
+that in various tasks, the same Gaussian is loaded 3.17 to 6.45 times
+2
+0
+MICRO 2025, October 18–22, 2025, Seoul, Korea
+(4)
+𝑖=1
+3
+MICRO 2025, October 18–22, 2025, Seoul, Korea
+Input
+Discard
+μ(x, y, z)
+Minnan Pei, et al.
+μ (3 floats) s (3 floats) q (4 floats) lnω(1 floats)
+Output μ’ (2 floats)
+Group 2
+Group 3
+Group 4
+✘
+1
+1
+d
+4
+d3
+3
+…4
+…
+Stage I Gaussian Grouping by Depth
+Region Growing
+from Gaussian Center
+…
+Σ’2-1
+Σ’5-1
+…
+Mean
+Position
+μ2
+μ'2
+μ5
+…
+SH
+2D Cov.
+shR
+Screen
+Culling
+shG
+ID
+shB
+2
+5 ✘
+…
+μ'5
+ID & Depth
+ID9
+d9
+ID2
+d2
+IDn
+dn
+…
+…
+Stage II Position and Shape Projection
+Blending
+Sort
+Color Transmittance
+RGB
+R
+colorR
+Blending
+…
+1
+d
+…
+Alpha-based Gaussian
+Boundary Identification
+Color
+SH Space
+Sort in Group 1
+d5
+2
+5
+…1
+Object Space
+SH Computation
+…
+d4
+1
+d2
+d5
+s5，q5
+Projection
+μ5
+d2
+d3
+Depth Grouping
+μ4
+View Transform
+μ2
+μ3
+Group Depth ID
+1
+1
+Out of Screen
+Depth Increase
+Shape Computation
+S&Q
+d1
+RGB (3 floats)
+Object Space
+s2，q2
+μ1
+μ (3 floats) sh (48 floats)
+SH
+Transform
+…
+Depth
+Input
+Output
+Group 1
+Object Space
+Mean
+Σ’ (3 floats)
+G
+colorB
+B
+ID & Depth
+d2
+Gaus1 Pixel1
+ID9
+d9
+Gaus1 Pixel2
+IDn
+dn
+Gaus1 Pixeln
+Stage III Color Mapping and Sorting
+Ti
+Opicity in ln
+Gaussian Cover
+ID2
+…
+Ti+1
+colorG
+Alpha Computation
+…
+Stage IV Alpha Computation and Blending
+Figure 3: Overview of GCC dataflow.
+on average during rendering in GSCore [19]. Therefore, although
+the number of Gaussians used in rendering is significantly lower
+than in preprocessing, tile-wise rendering still incurs substantial
+data transfer overhead from repeated Gaussian loading, leading to
+energy inefficiency.
+2.3
+Figure 3 presents an overview of our dataflow. The pipeline
+consists of four stages: 1) Gaussian grouping by depth, 2) position
+and shape projection, 3) color mapping and sorting, and 4) alpha
+computation and blending. Each stage progressively filters out
+irrelevant Gaussians based on visibility, depth, or contribution,
+ensuring that only effective Gaussians participate in downstream
+computation. Notably, the initial grouping stage establishes the
+foundation for Gaussian-wise scheduling by organizing Gaussians
+in depth order, enabling early termination across groups.
+Our Approach
+To address the above limitations of the standard dataflow and enable
+fast and energy-efficient 3DGS inference, we propose GCC, a novel
+inference accelerator with two key dataflow innovations:
+Cross-stage conditional processing. Unlike the conventional
+decoupled pipeline, we propose a novel dataflow where Gaussian
+preprocessing and rendering are executed alternately. Once the
+rendering termination condition is met, all subsequent preprocessing and rendering operations for remaining Gaussians are skipped,
+thereby effectively eliminating redundant computations and data
+movements caused by unnecessary Gaussian preprocessing.
+Gaussian-wise rendering. To avoid repeated off-chip loading
+of the same Gaussian in tile-wise rendering, we present a Gaussianwise approach. Starting from the nearest Gaussian, we complete
+the entire rendering of one Gaussian before proceeding to the next.
+In this scheme, each Gaussian’s parameters are loaded only once,
+significantly reducing data movement overhead.
+As shown in Figure 1, our proposed dataflow fundamentally unifies preprocessing and rendering into a Gaussian-wise processing
+pipeline, effectively mitigating the computational and data movement redundancies caused by the mismatch between Gaussian-wise
+preprocessing and tile-wise rendering in standard dataflow.
+3
+Stage I: Gaussian Grouping by Depth
+The GCC dataflow begins by computing the view-space depth (𝒅)
+of each Gaussian, based on its 3D mean position 𝝁. This is achieved
+by applying a view matrix transformation to obtain 𝝁 ′ = (𝑥 ′, 𝑦 ′, 𝑧 ′ ),
+where 𝑧 ′ is used as the depth value. Gaussians are then assigned into
+depth bins according to their 𝒅 values, forming multiple processing
+groups sorted from near to far. Those with 𝒅 below a visibility
+threshold (e.g., 0.2) are immediately culled, as they fall outside the
+effective frustum. This early-stage Gaussian-wise culling reduces
+unnecessary projection and blending computations for invisible
+objects. These depth groups not only dictate the order of execution
+but also enable coarse-grained conditional skipping: once the accumulated transmittance meets the early termination criteria, deeper
+groups are bypassed entirely.
+With such organization, Gaussians can be processed in a globally
+sorted order, eliminating the need for per-tile sorting and assignment in tile-wise pipelines, where each Gaussian must be redundantly sorted and associated with multiple tiles.
+Stage II: Position and Shape Projection
+GCC DATAFLOW
+In this stage, each Gaussian in a depth group undergoes two concurrent transformations: position projection and shape projection.
+First, the 3D mean 𝝁 is transformed into 2D pixel coordinates 𝝁 ′
+via the camera projection matrix and normalized to screen space.
+This defines the center of the Gaussian’s 2D influence region. The
+scale vector 𝒔 and rotation quaternion 𝒒 are used to reconstruct
+the 3D covariance matrix 𝚺, which is then projected into 2D as
+Our GCC accelerator adopts a fundamentally different dataflow
+based on two principles: Gaussian-wise rendering and cross-stage
+conditional processing. Unlike conventional 3DGS accelerators that
+statically separate preprocessing and rendering, our design treats
+each Gaussian as an independent compute primitive and dynamically triggers its processing only when necessary.
+4
+GCC: A 3DGS Inference Architecture with Gaussian-Wise and Cross-Stage Conditional Processing
+MICRO 2025, October 18–22, 2025, Seoul, Korea
+Table 1: Average number of rendered pixels per frame.
+Bounding-Box
+Methods
+AABB
+OBB
+Rendered
+Truck
+(M Pixels)
+Playroom
+(M Pixels)
+Drjohnson
+(M Pixels)
+1164
+378
+31
+1161
+416
+32
+1177
+333
+60
+1697
+460
+73
+group in front-to-back order. Since blending in Stage IV is orderdependent, this step ensures that transparency is resolved correctly.
+The sorting is performed using the precomputed depth 𝒅 values
+from Stage I. By performing both color computation and sorting in
+a Gaussian-centric and group-local manner, this stage avoids global
+tile-based sorting, maintains processing regularity, and prepares
+each Gaussian for efficient 𝛼-blending in the final stage.
+Figure 4: Different Gaussian regions under AABB, OBB methods, and the effictive regions (blue) affected by Opacity. (a)
+Opacity is 1; (b) Opacity is 0.01.
+Stage IV: Alpha Computation and Blending
+𝚺′ via a Jacobian matrix 𝑱 . The resulting matrix 𝚺′ describes the
+elliptical footprint of the Gaussian under the current view. The
+spatial extent of this footprint is typically approximated using a 3𝜎
+envelope, defined by the quadratic form:
+(𝒑 − 𝝁 ′ ) ⊤ 𝚺′−1 (𝒑 − 𝝁 ′ ) = 32
+Train
+(M Pixels)
+In the final stage, we perform alpha computation and blending to
+produce the final pixel values. This stage processes each Gaussian
+in front-to-back order, based on the sorted per-group list from
+Stage III.
+Each Gaussian casts its influence over a subset of pixels, determined by its projected position 𝝁 ′ and 2D covariance matrix 𝚺′
+from Stage II. For each pixel within this elliptical region, the alpha
+contribution is computed using the opacity 𝜔 and the offset from
+the projected center, following:
+
+
+1
+′
+′ 𝑇 ′−1
+′
+′
+1
+𝛼 = min 0.99, 𝑒 ln 𝜔 − 2 · (𝒑 −𝝁 ) Σ (𝒑 −𝝁 ) ≥
+(9)
+255
+To avoid evaluating all pixels in the image for every Gaussian, we
+introduce Alpha-based Gaussian Boundary Identification, a runtime strategy that dynamically restricts each Gaussian’s evaluation
+to a minimal set of pixels based on its alpha footprint and a fixed
+perceptual threshold. This alpha-based identifier significantly reduces redundant weight calculations, especially for low-opacity or
+spatially compact Gaussians.
+During compositing, we track the per-pixel accumulated transmittance 𝑇 . Once the transmittance surpasses a predefined threshold, subsequent Gaussians are skipped to avoid redundant blending.
+Working in tandem, alpha-based identifier and early termination
+complete the final stage of our Gaussian-wise pipeline by eliminating both unnecessary region evaluation and downstream composition.
+(5)
+where 𝒑 is a 2D pixel position on the image plane. Equation 5
+represents the elliptical boundary within which the Gaussian has
+non-negligible influence. The eigenvalues 𝜆1 and 𝜆2 of 𝚺′ correspond to the squared lengths of the major and minor axes of the
+ellipse, from which we derive the conservative bounding-box radius:
+√︁
+(6)
+𝑟 = ⌈3 · max(𝜆1, 𝜆2 )⌉
+If the resulting AABB lies entirely outside the screen bounds, the
+Gaussian is culled.
+However, the 3𝜎 rule provides a fixed approximation that ignores the actual opacity 𝜔 of each Gaussian. To tighten the culling
+criterion, we adopt an opacity-aware envelope based on the minimum alpha threshold 𝛼 ≥ 1/255. Recall that alpha is computed as
+Equation 3. To ensure that 𝛼 ≥ 1/255, the elliptical support must
+satisfy:
+(𝒑 − 𝝁 ′ ) ⊤ 𝚺′−1 (𝒑 − 𝝁 ′ ) ≤ 2 · ln(255 · 𝜔)
+(7)
+This leads to a tighter radius estimate that varies with the opacity:
+l√︁
+m
+𝑟 = 2 · ln(255 · 𝜔) · max(𝜆1, 𝜆2 )
+(8)
+We refer to this dynamic thresholding scheme as the 𝜔-𝜎 law, which
+adapts the Gaussian footprint to its actual visual contribution. Compared to the static 3𝜎 rule, this opacity-aware culling removes more
+redundant Gaussians while preserving visual fidelity. At the end of
+this stage, only visible Gaussians remain. Their projected positions
+𝝁 ′ and inverse covariance matrices 𝚺′−1 are passed to the next
+stage for color computation.
+Alpha-based Gaussian Boundary Identification
+By transitioning tile-wise rendering to a Gaussian-wise paradigm
+that decouples computation from fixed tile boundaries, we must
+correspondingly establish an efficient method to delineate each
+Gaussian’s influence region in image space. Although recent works
+such as GSCore [19] adoptes Oriented Bounding Boxes (OBBs)
+and subtile partitioning to reduce redundancy over Axis-Aligned
+Bounding Boxes (AABBs), these strategies remain fundamentally
+tile-centric based on 3𝜎 criterion, failing to capture the true elliptical
+footprint of a Gaussian, which is governed by its alpha profile as
+defined in Equation 9. As shown in Figure 4 and Table 1, many
+pixels outside a Gaussian’s actual influence are still processed in
+conventinal methods, with rendered pixel counts exceeding the
+effective region by 5–10× in typical scenes.
+Stage III: Color Mapping and Sorting
+In this stage, each Gaussian that survives visibility culling undergoes spherical harmonics (SH)–based color evaluation and intragroup depth sorting. For color computation, we use third-order real
+spherical harmonics, where each RGB channel is represented by
+16 coefficients, yielding 48 parameters per Gaussian. The normalized view direction 𝒗 = (𝑥, 𝑦, 𝑧) is used to evaluate the SH basis
+Equation 2. Meanwhile, we sort all Gaussians within each depth
+5
+MICRO 2025, October 18–22, 2025, Seoul, Korea
+Minnan Pei, et al.
+μ, s, q, lnω, d
+μ’ , Σ’ , d
+Projection Unit
+RGB
+μ
+Σ’
+μ’
+Adder
+RCA
+R SHE
+…
+G SHE
+…
+Blending Unit
+Sorted Buffer
+Alpha Unit
+…
+Cmp array
+T
+α
+T mask
+Runtime
+Identification
+Sort Unit
+Cmp array
+CRGB , T
+…
+B SHE
+SH Unit
+SCU
+d
+d, ID
+CRGB , T
+FMA array
+…
+PPU
+Shared
+MVM
+NORM
+Controller
+RU
+J, Σ
+Image Buffer
+SH Buffer
+μ, sh
+Projection Unit
+CRGB
+sh
+μ
+Shared Buffer
+…
+index
+Bitonic Sort
+Σ’
+μ’
+Alpha Array
+Figure 5: GCC Architecture.
+operations to improve arithmetic efficiency. The on-chip memory consists of several dedicated buffers. The Shared Buffer and
+SH Buffer handle data transfers of Gaussian parameters between
+DRAM and the compute pipeline. The Image Buffer stores intermediate results for color and transmittance accumulation. A local Sort
+Buffer temporarily holds sorted indices to avoid off-chip accesses.
+Meanwhile, the entire rendering process is coordinated by an onchip controller, which schedules execution stages based on depth
+grouping and sorting outcomes.
+During processing, Gaussian model parameters and camera view
+data are streamed from off-chip memory. At the beginning of each
+frame, the Shared Matrix-Vector Multiplier (MVM) in the Projection Unit computes the depth of Gaussians by processing their
+3D means in batches. These depth values are then used to group
+Gaussians into depth-aware bins. For each Gaussian group, the
+3D mean vectors 𝜇 are projected onto the 2D screen space using
+the Position Projection Unit (PPU). Meanwhile, shape parameters
+𝜇, 𝑠 and 𝑞 are reconstructed by the Reconstruction Unit (RU) and
+converted into 2D inverse covariance matrices through the Shared
+MVM. A dedicated Screen Culling Unit (SCU) then removes Gaussians falling outside the current view frustum. For each group of
+in-frustum Gaussians, the Sort Unit determines the rendering order
+using a 16-element bitonic sorting network, following the design in
+GSCore [19]. Once sorted, the spherical harmonics coefficients of
+each Gaussian are streamed into the Spherical Harmonics Element
+(SHE), where RGB colors are computed separately for each channel.
+In the Alpha Unit, Gaussians are processed in pixel blocks using a
+alpha-based identifier algorithm to reduce unnecessary alpha computations. This block-wise execution aligns with the architecture’s
+processing array and ensures efficient memory access patterns. The
+valid transmittance weights and RGB contributions are then accumulated in the Blending Unit. Final results are written to the Image
+Buffer for subsequent output.
+To accommodate memory-constrained edge platforms, we design
+a Compatibility Mode (Cmode) that partitions the full image plane
+Algorithm 1 Alpha-based Gaussian Boundary Identification
+1: Input: Pixel grid 𝑃, projected Gaussian center 𝜇 ′ , effective
+condition 𝐸 (·), visited map 𝑆
+2: Output: Pixel set 𝑃 influence
+3: 𝑝𝑐 ← FindNearestInBounds(𝜇 ′ , 𝑃)
+4: 𝑄 ← new Queue(); 𝑄.𝑝𝑢𝑠ℎ(𝑝𝑐 )
+5: 𝑃 influence ← {𝑝𝑐 }
+6: 𝑆 [𝑝𝑐 ] ← true
+7: while not 𝑄.𝑒𝑚𝑝𝑡𝑦() do
+Shared
+Cmode
+Control
+DRAM
+In contrast, our Gaussian-wise rendering paradigm enables perGaussian evaluation, naturally aligning with the elliptical influence
+defined by the alpha threshold. Leveraging this advantage, we introduce a runtime Alpha-based Boundary Identification technique
+(detailed in Algorithm 1) that dynamically determines the minimal
+set of contributing pixels for each Gaussian, eliminating redundant evaluations without compromising accuracy. Unlike static
+bounding-box methods that often introduce substantial redundant
+computations, our approach dynamically identifies the Gaussian’s
+exact elliptical boundary in image space, guided by an alpha-based
+criterion established previously in Stage II and Stage IV.
+The algorithm employs a breadth-first pixel traversal starting
+from the Gaussian’s projected center 𝝁 ′ . If the projected center lies
+outside the image boundary, traversal initiates from the nearest
+valid pixel within image bounds. Pixels are explored progressively
+outward, and for each pixel visited, we evaluate the elliptical alpha
+condition 𝐸 (𝑝) to determine whether it falls within the Gaussian’s
+influence region. Crucially, due to the convexity of the Gaussian’s
+elliptical footprint, if a pixel fails the alpha condition, the algorithm
+can safely terminate further traversal in that direction by marking the corresponding pixel block as visited. This effectively skips
+unnecessary alpha evaluations across entire pixel blocks, substantially reducing redundant computations, especially around elliptical
+boundaries of low-opacity Gaussians.
+⊲ Initialize visited map
+𝑝 ← 𝑄.𝑝𝑜𝑝 ()
+for each neighbor 𝑞 of 𝑝 do
+10:
+if 𝑞 is in bounds and 𝑆 [𝑞] is false then
+11:
+𝑆 [𝑞] ← true
+12:
+if 𝐸 (𝑞) then
+13:
+𝑃influence ← 𝑃influence ∪ {𝑞}
+14:
+𝑄.𝑝𝑢𝑠ℎ(𝑞)
+15:
+end if
+16:
+end if
+17:
+end for
+18: end while
+19: return 𝑃 influence
+8:
+9:
+4 GCC ARCHITECTURE
+4.1 Overview
+The overall GCC architecture, as shown in Figure 5, consists of a
+series of pipelined hardware modules: Reconfigurable Comparator
+Array (RCA), Projection Unit, Spherical Harmonics (SH) Unit, Sort
+Unit, Alpha Unit, and Blending Unit. Each module performs its core
+computations using floating-point fused multiply-add (FMA) [25]
+6
+(a) Reconfigurable Path for Grouping
+Rendering Invocations
+Rendered Gaussians
+Shared Buffer
+3.0
+viewz
+2.0
+1.0
+16
+Grp. ID
+…
+<
+comparator
+…
+comparator
++
+Coarse
+Accurate
+Grp. ID
++
+…
+To ensure correct Gaussian-wise rendering order, the depth of all
+Gaussians must be computed before entering the pipeline. Since
+rendering in 3DGS follows a strict back-to-front strategy, unknown
+depths would cause incorrect scheduling and blending. Therefore,
+depth calculation and grouping are performed globally at the beginning of each frame as a standalone preprocessing stage, referred
+to as Stage I in Figure 3.
+Importantly, both the MVM in Figure 8(a) and the RCA in Figure 7(b) used in Stage I are essential hardware components already
+required by Stage II and Stage III. Given the logical separation, our
+design goal is to reuse these compute and memory resources to
+minimize hardware cost and data movement. After grouping, the
+depth values and sorted IDs are stored back to DRAM via a shared
+on-chip buffer, preparing them for reuse in the rendering pipeline.
+To compute depth efficiently, we reuse the MVM units embedded
+in the Projection Unit of Stage II. These units are designed to handle
+multiple matrix operations in Stage II. In Stage I, we instantiate 4
+parallel MVMs to simulate the depth estimation. Once depth values
+are computed, Gaussians are passed into the RCA for hierarchical
+grouping. In the coarse grouping stage, the RCA operates in parallel with a cascaded adder-tree structure, enabling high-throughput
+comparison across millions of Gaussians. A Z-axis pivot of 0.2 is
+used to eliminate Gaussians outside the viewing frustum, effectively performing the first level of frustum culling. The remaining
+Gaussians are grouped into tens of thousands of coarse bins. For
+coarse bins with more than 𝑁 Gaussians (i.e., 𝑁 ′ > 𝑁 ), a recursive
+subdivision is applied to ensure that the number of Gaussians in
+each subgroup does not exceed the threshold 𝑁 , we set 𝑁 = 256 in
+GCC.
+<
+<
+comparator
++Adder Tree
+Figure 7: Grouping by shared resources.
+(a)
+(b)
+FMA
+× + × + × +
+Reusing Compute Units for Grouping
+z FMA
+Coarse/Accurate
+…
+y FMA
+× + × + × +
+× + × + × +
+into smaller sub-views using frustum tiling. Each sub-view is rendered independently, allowing the on-chip buffers to operate under
+tighter resource constraints without modifying the core Gaussianwise pipeline. As shown in Figure 6, when the sub-view size is
+larger than 128×128, Compatibility Mode introduces only marginal
+overhead in terms of redundant Gaussian processing compared to
+full-view rendering.
+4.3
+d
+pivots
+Div 0
+Div 1
+Div 2
+Div 3
+Position Projection
+(c)
+Div 0
+Div 1
+Div 2
+Div 3
+Shared Matrix Vector Multiplier Jacobian Reconstruction
+×
++
+32
+d
+d
+Adder
+x FMA
+Figure 6: The overhead of Gaussian loading when partitioning an image into sub-views of size 𝑛 × 𝑛 in Gaussian-wise
+rendering.
+4.2
+N’ Groups
+comparator
+0.0 1024 512 256 128 64
+(b) Train
+N Groups
+(b) Reconfigurable Comparator Array
+×
++
+Numbers v.s. Invocations(×10 )
+4.0
+…
+16
+5.0
+comparator
+1.2
+Rendering Invocations
+Rendered Gaussians
+1.0
+0.8
+0.6
+0.4
+0.2
+0.0 1024 512 256 128 64 32
+(a) Lego
+MICRO 2025, October 18–22, 2025, Seoul, Korea
+popcount
+Numbers v.s. Invocations(×10 )
+GCC: A 3DGS Inference Architecture with Gaussian-Wise and Cross-Stage Conditional Processing
+NDC
+Screen
+× ×
+×
+×
+× ×
+Figure 8: Key logic in Projection Unit.
+rotation 𝑞 to form a 3D covariance matrix and applies a perspective
+projection, resulting in a 2D inverse covariance matrix Σ′ . Finally,
+the SCU estimates the elliptical coverage region of each Gaussian
+using Σ′ and prunes those that fall outside the viewing frustum.
+In the PPU, the mean vector 𝜇 is first transformed by the view matrix into camera space. This process is performed by three parallel
+MVM, corresponding to the three channels of the projected position. Further transformation into NDC and pixel-space coordinates
+requires a division and square root operation, which introduces
+pipeline delays. To balance computational precision and hardware
+area, we implement a four-cycle iterative fused division and square
+root unit. Four of these units are deployed along the critical path
+and scheduled in an interleaved fashion, enabling one new Gaussian
+to be processed per cycle. This structure ensures high-throughput
+projection without pipeline stalls. The same unit design is reused
+later in the SH unit for vector norm normalization.
+The RU module decodes the scale 𝑠 and quaternion rotation 𝑞
+of each Gaussian to reconstruct the 3D covariance matrix Σ and
+rotation matrix 𝑅. In parallel, the RU computes a Jacobian matrix
+𝐽 shown in Figure 8(c). These matrices are subsequently fed into
+MVMs for sequential multiplications as Equation 1.
+The SCU identifies off-screen Gaussians and prunes them early
+in the rendering pipeline to reduce computational overhead. It
+receives Σ′ from the RU and estimates the elliptical coverage of each
+Gaussian based on its principal axes and covariance eigenvalues.
+To approximate the effective visible region of each Gaussian, we
+apply the 𝜔 − 𝜎 law described in Equation 8. Gaussians with no
+overlap are marked as invisible. The opacity 𝜔 is computed offline
+Projection Unit
+In Projection Unit, the PPU receives the mean vector 𝜇 of each
+Gaussian from the shared buffer, projects it into camera view space,
+and further transforms it into screen-space coordinates. Then, the
+RU jointly reconstructs the same Gaussian’s mean 𝜇, scale 𝑠, and
+7
+MICRO 2025, October 18–22, 2025, Seoul, Korea
+Minnan Pei, et al.
+in log-space, and since it is view-independent for a given 3DGS
+model, it does not require on-chip processing and the Alpha Unit
+directly consumes the log-space 𝜔 values.
+Octree Fetchmask
+p-1
+p
+3
+p+1
+1
+p+15 p+16 p+17
+2
+9
+pleft
+Alpha Unit
+discard
+p-2 …
+✘
+Q
+…
+9
+…
+Picture
+Runtime Identifier
+p(x, y)
+×
+…
+FMA ARRAY
+a 0b 0c 0
+a1b1c1
+…
+a15b15c15
+<<
+discard
+0.99
+×
++
+c
+c1 c2
+μ’ conic lnω
+LUT
+-5.54, 0
+a
+α
+b
+S0 Filling in
+Early
+0
+Termination
+…
+0
+0
+0
+…
+0
+T mask
+S
+1
+…
+1
+1
+0
+…
+0
+Update
+Status Map
+A
+B
+Snew
+1
+…
+1
+Q1
+1
+…
+0
+0
+0
+…
+0
+1
+0 Index
+0
+A
+Q
+B
+Q
+1
+p+1
+1
+…
+Update
+… …
+Search-Queue 0
+0
+Next step
+Identifier Controller pnext
+1
+…
+0
+0
+0
+…
+0
+Octree Fetchmask
+FP16 EXP
+In the 3DGS rendering pipeline, each projected Gaussian must compute a transparency weight 𝛼 for its coverage on the image plane. As
+shown in Equation 7, 𝛼 is modeled as the exponential of a negative
+quadratic form, derived from the pixel’s relative position and the
+inverse covariance matrix. To efficiently support this computation
+in hardware, we implement a lookup-table-based EXP unit using
+piecewise linear approximation. Given the range of meaningful
+𝛼 values lies in [1/255, 1), the corresponding exponent input is
+constrained to [−5.54, 0). Our LUT covers only this interval; inputs
+below −5.54 are clamped to 𝛼 = 0, and those above 0 are saturated to
+𝛼 = 1. The LUT contains 16 linear segments, ensuring less than 1%
+approximation error while significantly reducing area and storage
+overhead. Unlike GSCore [19], which suffers from FP16 overflows
+in EXP operations due to value mapping, our design avoids such
+issues through fully fixed-point arithmetic in the EXP unit.
+Despite early culling stages, redundant 𝛼 evaluations persist in
+regions with negligible visual contribution, as illustrated in Figure 4. To address this, we integrate a runtime Alpha-based Gaussian Boundary Identification algorithm within the Alpha Unit. This
+block-level identification scheme dynamically eliminates pixel clusters with insignificant alpha contributions based on the actual spatial extent of each Gaussian. The screen is divided into fixed-size
+𝑛 × 𝑛 pixel blocks, and a corresponding 𝑛 × 𝑛 PE array processes
+each block’s alpha computations in parallel. We set 𝑛 = 8 in GCC.
+For each Gaussian, block traversal starts from the pixel block containing its projected center; if the center lies outside the image
+bounds, traversal begins from the nearest image corner. A status
+map 𝑆 is maintained on-chip, with each block marked as unvisited
+initially.
+Traversal proceeds in a breadth-first manner along eight octant
+directions. If all alpha values on the boundary of a direction fall
+below a threshold (𝛼 < 1/255), the corresponding region from the
+current block to the image edge is marked as pruned in 𝑆, skipping
+further evaluation in that direction. This directional early termination leverages the convex support of projected Gaussians to significantly reduce unnecessary computation. During execution, pixel
+blocks are streamed into the compute array in the order defined
+by the traversal queue. Once all blocks for the current Gaussian
+are dispatched, the next Gaussian’s parameters are prefetched to
+maintain throughput. Given a per-Gaussian latency of 14 cycles, we
+reserve space for up to 16 Gaussians’ status map S and queue Q in
+the on-chip preload buffer to sustain continuous pipeline operation.
+4.5
+p-1
++
+4.4
+0
+1
+2
+3
+p-17 p-16 p-15
+…
+p-1
+p
+…
+Figure 9: Alpha Unit and alpha-based controller.
+Equation 4. The resulting blended outputs are written back to the
+Image Buffer for subsequent Gaussian compositions.
+Since 3DGS requires strict back-to-front blending, the pipeline
+enforces ordering at the block level. If a later Gaussian in the sorted
+sequence attempts to access a block whose previous Gaussian has
+not yet completed processing, the pipeline stalls until the prior
+Gaussian finishes, ensuring correctness of blending results. To
+avoid unnecessary computation, we introduce a transmittance mask
+(𝑇mask ) that disables blending for blocks whose 𝑇 value has already
+fallen below a predefined threshold. This mask is updated during
+blending and applied during the initialization of the status map
+𝑆 for the next Gaussian. Any block with 𝑇mask = 1 is excluded
+from future 𝛼 computation. The updated 𝑇 and accumulated color
+values are written back to the buffer and reused in the blending of
+subsequent Gaussians.
+4.6
+Scheduling under Compatibility Modes
+Our rendering pipeline adopts a Gaussian-wise dataflow, enabling
+each Gaussian to independently undergo projection, identifier, and
+blending to minimize redundant computation. However, on resourceconstrained edge platforms, the on-chip image buffer often cannot
+accommodate a full-resolution frame. To address this, we design a
+Compatibility Mode (Cmode) that dynamically adapts the pipeline
+to large-scale scenes without sacrificing overall rendering efficiency.
+When the hardware detects that the target image exceeds the
+supported resolution, the pipeline automatically switches to Cmode.
+In this mode, the image is partitioned into multiple sub-views of
+manageable size and processed sequentially. To support this, we implement a 2D spatial binning scheme, where Gaussians are grouped
+not only by depth but also by their screen-space coordinates. Each
+spatial group corresponds to a specific sub-view, ensuring that the
+working set remains within the limits of on-chip storage. Based
+on the analysis in Figure 6, we select a sub-view size of 128 × 128,
+which introduces negligible redundancy and hardware overhead
+while maintaining the original Gaussian distribution.
+To further improve execution efficiency under Cmode, we analyze the computational load of each pipeline stage and observe
+that the projection unit, when operating independently, becomes
+memory-bound. To alleviate this, we configure the projection stage
+with a parallelism factor of 2.
+Blending Unit
+After the 𝛼 computation for a given pixel block is complete, if
+the block passes the transparency threshold check, its result is
+forwarded to the Blending Unit. The 𝑛 × 𝑛 array of 𝛼 values and
+corresponding temporary transmittance values 𝑇 are processed in
+parallel using FMA units. The updated 𝑇 is then used to accumulate
+the intermediate RGB color values for the block, as defined in
+8
+GCC: A 3DGS Inference Architecture with Gaussian-Wise and Cross-Stage Conditional Processing
+6
+5.69x
+6.22x
+5.91x
+GSCore
+5.00x
+4
+4.64x
+4.27x
+GCC
+Norm. Energy Efficiency
+Normalized Speedup
+8
+5.24x
+2
+0
+Palace
+Lego
+Train
+Truck
+(a)
+Playroom Drjohnson Geomean
+MICRO 2025, October 18–22, 2025, Seoul, Korea
+5
+GSCore
+3.51x
+4
+3
+GCC
+3.17x
+3.17x
+3.05x
+Lego
+Train
+Truck
+3.51x
+3.72x
+3.35x
+2
+1
+0
+Palace
+(b)
+Playroom Drjohnson Geomean
+Figure 10: The area-normalized performance and energy efficiency per frame of GCC and GSCore [19] on the six scenes.
+Table 2: Comparison of rendering quality.
+5 EVALUATION
+5.1 Methodology
+Baseline
+GW
+GW+CC (GCC)
+Speedup
+3
+2
+1
+0
+Palace
+Train
+Drjohnson
+(a) Performance
+3
+Baseline
+3D
+Metrics
+Palace
+Lego
+Train
+Truck
+Playroom
+Drjohnson
+GPU
+PSNR ↑
+LPIPS ↓
+38.35
+0.02
+34.90
+0.03
+24.66
+0.23
+26.82
+0.17
+36.18
+0.25
+35.18
+0.25
+GSCore
+PSNR ↑
+LPIPS ↓
+38.36
+0.02
+34.90
+0.03
+24.70
+0.23
+26.9
+0.17
+36.62
+0.25
+35.32
+0.25
+GCC
+PSNR ↑
+LPIPS ↓
+38.35
+0.02
+34.90
+0.03
+24.70
+0.23
+26.9
+0.17
+36.49
+0.25
+35.29
+0.25
+the memory configuration used in GSCore, we adopt a Micron
+LPDDR4-3200 DRAM model as the off-chip memory system, with
+a peak bandwidth of 51.2 GB/s.
+For a fair comparison, we also develop a simulator for GSCore
+based on the architectural details provided in its paper with less
+than 3% performance deviation. All evaluations are conducted under the same configuration settings as reported. Our reproduced
+performance results closely match the reported data, confirming
+the reliability of our simulator.
+5.2
+Performance and Quality
+To ensure that these performance gains do not compromise rendering fidelity, Table 2 compares image quality metrics—including
+PSNR and LPIPS [44]—across GCC, GSCore, and the original GPU
+implementation. All methods produce nearly indistinguishable visual results, with PSNR deviations below 0.1 dB and identical LPIPS
+scores, indicating imperceptible quality degradation.
+Figure 10(a) illustrates the area-normalized throughput across
+six benchmark scenes. GCC consistently outperforms GSCore on
+all datasets, achieving speedups ranging from 4.27× (Playroom)
+GW
+2D
+GW+CC (GCC)
+KV
+2
+1
+0
+Palace
+Train
+Drjohnson
+(b) DRAM Access
+Normalized Computation
+4
+Normalized Memory Access
+Baseline and Dataset: To demonstrate the efficiency of the proposed GCC dataflow and architecture, we select the state-of-the-art
+3DGS inference accelerator, GSCore [19], as our major baseline,
+which employs the standard two-stage processing with tile-wise
+rendering, and is 10× faster than an NVIDIA Xavier NX mobile
+GPU. We adopt the six representative datasets used in GSCore, covering indoor, outdoor, and synthetic scenes, to ensure consistency
+in scene complexity and fairness in comparison with prior work.
+For datasets Tanks and Temples [16] (T&T) and Deep Blending [12]
+(DB), we directly use the pre-trained Gaussian models released by
+the original 3DGS paper. For scenes not publicly provided in the
+original paper, such as Lego and Palace, we follow the same training protocol and reproduce the models locally using an RTX 3090
+GPU [31] to ensure consistency in model quality. All evaluations
+are conducted using high-quality 3DGS models trained with 30K
+iterations.
+Implementation: We implement the proposed GCC accelerator
+in SystemVerilog, and synthesize the RTL using Synopsys Design
+Compiler with a commercial 28 nm standard cell library at 1 GHz to
+obtain the area and power of compute units. The on-chip buffers are
+modeled using CACTI-P [22]. We develop a cycle-accurate simulator in Python to model both data traffic and the execution behavior
+of key compute units in our architecture. Each hardware module
+is modeled as a dedicated Python class that performs functionallycorrect computations for the rendering pipeline while internally
+tracking the cycle-level execution cost of each operation. The execution cycles of the computation modules of all simulators have
+been validated with the HDL design at the cycle level. To match
+Method
+4
+Baseline
+2
+1
+0
+Palace
+Train
+Drjohnson
+(c) Rendering Computations
+Figure 11: Breakdown Analysis of performance and DRAM access for GCC.
+9
+GCC
+3
+MICRO 2025, October 18–22, 2025, Seoul, Korea
+Minnan Pei, et al.
+Table 3: Comparison of Neural Rendering Accelerators
+Table 4: Area and Power Comparison with GSCore.
+MetaVRain
+ISSCC’23
+Fusion-3D
+MICRO’24
+Nvidia
+A6000
+Jetson AGX
+Xavier
+GSCore
+ASPLOS’24
+GCC
+This Work
+Component
+Area (mm2)
+Power (mW)
+Configuration
+Model
+NeRF
+NeRF
+3DGS
+3DGS
+3DGS
+3DGS
+PSNR
+31.58dB
+31dB
+35.78dB
+35.54dB
+34.90dB
+34.90dB
+RCA
+Projection Unit
+SH Unit
+Sorting Unit
+Alpha Unit
+Blending Unit
+0.010
+0.358
+0.339
+0.010
+0.576
+0.382
+2
+147
+141
+11
+266
+172
+4 units
+2 units
+1 units
+1 units
+64 PEs
+64 PEs
+Total
+1.675
+739
+-
+Shared Buffer
+SH Buffer
+Sorted Buffer
+Image Buffer
+0.019
+0.116
+0.029
+0.872
+3
+10
+1
+37
+2 × 1 × 6 KB
+2 × 3 × 8 KB
+2 × 1 × 1 KB
+1 × 4 × 32 KB
+Total
+1.036
+51
+190 KB
+GCC Total
+2.711
+790
+-
+Compute Units
+Buffer
+2.70
+1.25
+830
+40
+272 KB
+GSCore Total
+3.95
+870
+-
+Process
+28nm
+28nm
+8nm
+12nm
+28nm
+28nm
+Area
+20.25mm2
+8.7mm2
+628mm2
+350mm2
+3.95mm2
+2.71mm2
+190KB
+SRAM
+2015KB
+1099KB
+–
+–
+272KB
+Frequency
+250MHz
+600MHz
+1040MHz
+854MHz
+1GHz
+1GHz
+Power
+0.89W
+6.0W
+300W
+30W
+0.87W
+0.79W
+Throughput∗
+110FPS
+36FPS
+300FPS
+20FPS
+190FPS
+667FPS
+Area-normed
+Throughput
+5.43
+FPS/mm2
+4.13
+FPS/mm2
+0.48
+FPS/mm2
+0.05
+FPS/mm2
+48.10
+FPS/mm2
+246.00
+FPS/mm2
+∗ All throughput values are tested on the Lego dataset, as prior NeRF works
+such as Fusion-3D focus on the Synthetic-Nerf benchmark.
+to 6.22× (Lego), with a geometric mean of 5.24×. These improvements stem from GCC’s Gaussian-wise rendering and cross-stage
+conditional execution, which effectively eliminate redundant computations and reduce memory traffic compared to the conventional
+tile-based pipeline.
+To further attribute performance gains to specific architectural
+innovations, Figure 11(a) illustrates an ablation study across three
+representative scenes: Palace (compact synthetic scene), Train (mediumscale real scene), and Drjohnson (large-scale real scene). Combined
+with Figure 10(a), the results confirm that our two key contributions, Gaussian-wise (GW) rendering and cross-stage conditional
+(CC) execution, consistently deliver performance benefits across
+scenes of varying complexity and scale.
+For compact scenes such as Palace, where most Gaussians cluster
+near the camera center, GW is especially effective in reducing tilelevel redundancy. In these cases, the Alpha-based Identifier further
+improves runtime by aggressively pruning unnecessary blending
+operations. In contrast, large-scale scenes like Drjohnson exhibit
+sparse Gaussian distributions. Here, CC plays a more prominent
+role by suppressing the SH evaluation and projection of visually
+ineffective Gaussians. Figure 11(b) quantifies reductions in off-chip
+memory accesses for 3D Gaussian attributes, 2D projected ellipses,
+and tile-level key-value (KV) mappings. GW rendering eliminates
+repeated KV lookups, while CC processing avoids loading Gaussians that do not contribute to final rendering results. Figure 11(c)
+confirms that Alpha-based pruning contributes to computation
+reduction across all scene types.
+Table 3 further compares GCC with recent neural rendering accelerators, including MetaVRain [9] and Fusion-3D [24] for NeRF,
+and GSCore for 3DGS. While MetaVRain and Fusion-3D target implicit neural fields and differ in rendering characteristics, they represent prominent dedicated accelerators in neural scene rendering.
+We also include the NVIDIA A6000 [32] and NVIDIA Jetson AGX
+Xavier [30] GPUs as the high-end and low-end references, respectively. Compared to NeRF accelerators, GCC achieves more than
+40× higher area-normalized throughput while requiring 5×/10×
+less SRAM, under similar PSNR levels. Compared to GSCore, GCC
+achieves 3.5× throughput, 30% lower area. Through its Gaussianwise execution model and cross-stage optimizations, GCC delivers
+GPU-level throughput with <1W power and <0.3% of the A6000’s
+silicon area, demonstrating strong efficiency and scalability under
+edge constraints.
+10
+5.3
+Area and Energy Efficiency
+Table 4 presents the area and power breakdown of our GCC architecture. To account for architectural differences from GSCore,
+we separately report contributions from compute units and onchip buffers, with proportional breakdowns shown in parentheses.
+While both designs employ identical numbers of FPEXP modules,
+GCC reduces the number of FPMACs without sacrificing throughput. This is enabled by our balanced Gaussian-wise dataflow, which
+leverages CC scheduling to lower the required parallelism in both
+compute and memory subsystems—reducing SH evaluation to 1way and projection to 2-way, as opposed to the 4-way parallelism in
+GSCore. Overall, GCC occupies 40% less area compared to GSCore,
+while exhibiting marginally lower power consumption.
+Figure 12 provides the per-frame energy consumption breakdown. In both designs, DRAM accesses dominate overall energy
+usage. However, by avoiding repeated loading of the same Gaussian and eliminating tile-induced redundancy, GCC reduces DRAM
+traffic by over 50%. While SRAM activity slightly increases due to
+intensified data exchange between the Blending Unit and the Image
+Buffer under the Gaussian-wise pipeline, the substantially lower
+energy cost per SRAM access compared to DRAM results in significant overall energy savings. By significantly reducing the alpha
+computation and blending workload, alpha-based identifier accelerates per-frame execution and consequently lowers the dynamic
+energy consumed during each frame.
+From a system-level perspective, GCC converts high-cost, repeated DRAM accesses into low-cost, one-pass off-chip interactions.
+This reorganization of memory access patterns, combined with reduced per-frame latency and minimized data movement, enables
+GCC to operate with high energy efficiency under stringent power
+constraints. As shown in Figure 10(b), GCC achieves a 3.35× improvement in area-normalized energy efficiency over GSCore across
+all benchmark scenes.
+Palace
+Lego
+Train
+Truck
+LPDDR6-14400
+LPDDR5X-8533
+LPDDR5-6400
+GSCore
+GCC
+On-Chip Memory Access
+Off-Chip Memory Access
+Computation
+LPDDR4X-4266
+60
+50
+40
+30
+20
+10
+0
+MICRO 2025, October 18–22, 2025, Seoul, Korea
+LPDDR4-3200
+Energy Consumption (mJ / frame)
+GCC: A 3DGS Inference Architecture with Gaussian-Wise and Cross-Stage Conditional Processing
+Playroom Drjohnson
+Figure 12: Energy breakdown of GCC and GSCore [19].
+75
+50
+150
+20
+15
+10
+2532KB 128KB 512KB 2MB 8MB5
+(a) Impact of image buffer size
+100
+50
+FPS/mm²
+mJ/mm²
+Figure 14: Throughput comparison under different DRAM
+bandwidth levels for the Train scene.
+50
+40
+Energy per Frame
+100
+mJ/mm²
+Throughput
+125
+FPS/mm²
+Energy per Frame
+Throughput
+150
+30
+access latency becomes the dominant performance bottleneck and
+offsets the gains from additional parallelism.
+DRAM Bandwidth. In the performance evaluation in Section
+5.2, our GCC accelerator initially adopts the same off-chip memory
+configuration as GSCore [19]—LPDDR4 with a peak bandwidth
+of 51.2 GB/s. In this experiment, we further investigate how varying off-chip bandwidth affects GCC’s performance and compare
+with GSCore. The results in Figure 14 clearly show that: 1) When
+DRAM bandwidth remains below 220 GB/s, both GCC and GSCore
+exhibit significant performance improvements as bandwidth increases. The primary reason is that the preprocessing and rendering
+stages in 3DGS inference require extensive on-chip/off-chip data
+transfers. Higher DRAM bandwidth effectively mitigates memorybound bottlenecks. This suggests that upgrading from LPDDR4 to
+more advanced memory technologies (e.g., LPDDR4X, LPDDR5,
+LPDDR5X, or future LPDDR6 variants) would further enhance inference performance; 2) as the DRAM bandwidth exceeds 220GB/s,
+the performance of GSCore continues to improve slightly, but the
+performance of GCC remains unchanged. This is because, due to
+cross-stage conditional processing and Gaussian-wise rendering,
+GCC’s off-chip data transfer volume is significantly lower than that
+of GSCore. As bandwidth increases beyond 220GB/s, GCC becomes
+compute-bound, unlike GSCore, which remains memory-bound.
+20
+10
+0 4
+8
+16 32 64 0
+(b) Impact of alpha & blending array size
+Figure 13: Design space exploration on performance-per-area
+(FPS/mm2) and energy-per-area (mJ/mm2) under different
+architectural configurations evaluated for the Train scene.
+5.4
+Sensitivity Study
+Image Buffer Size. The image buffer is a critical design factor
+that determines the scalability and edge deployability of the GCC
+architecture. On resource-constrained platforms such as edge devices, the on-chip buffer capacity directly determines whether full
+Gaussian-wise + Cross-stage Conditional (CC) rendering can be
+supported. Based on the analysis in Figure 6, we adopt a 128 × 128
+image buffer combined with compatibility mode to support complex
+scenes efficiently. Notably, rendering accuracy remains unchanged
+across different sub-view sizes. This is an expected outcome, as our
+compatibility mode only alters the processing order of Gaussians.
+As demonstrated in earlier sections, this configuration achieves
+strong performance while maintaining reasonable area. To further
+validate this design choice, we explore the design space from a
+performance perspective. As shown in Figure 13(a), configurations
+with 128KB and 512KB buffers yield comparable normalized performance. While a larger buffer reduces runtime latency, the area
+overhead amortization becomes less favorable, leading to a net
+decline in area-normalized performance. We select 128KB as the
+default image buffer size to strike a balance between performance
+and energy efficiency.
+Alpha & Blending Array Size. This component reflects a tradeoff between compute parallelism and redundancy control. Larger
+arrays enable higher throughput by processing more Gaussians
+in parallel, but they may introduce additional redundancy due to
+coarser boundary checks. In contrast, smaller arrays provide finergrained control of Gaussian coverage but sacrifice overall throughput. We explore this trade-off through design space analysis. As
+shown in Figure 13(b), an 8 × 8 array provides the best performance
+when normalized by area. Although slightly larger arrays (e.g.,
+16 × 16) can reduce rendering time, the resulting increase in DRAM
+6
+DISCUSSION
+To enable efficient 3DGS inference on edge devices for wearable
+applications, we propose the GCC dataflow and its specialized architecture in this work. However, a noteworthy question arises:
+Can we satisfy the requirements for 3DGS inference in edge computing scenarios by implementing the GCC dataflow directly on GPUs,
+thereby obviating the need for custom hardware?
+To comprehensively evaluate the effectiveness of GCC dataflow
+on GPUs, we conducted experiments using both cloud-oriented
+(NVIDIA RTX 3090) and mobile-oriented (NVIDIA Jetson AGX
+Xavier) GPU platforms. For both the standard dataflow and GCC
+dataflow implementations, we use the PyTorch framework and
+apply equal optimization efforts to ensure fair comparison. Results
+are shown in Figure 15.
+Beyond this result, we identify two noteworthy observations.
+First, rendering time dominates the overall execution time in GPUbased 3DGS inference, making methods like GCC—which primarily
+11
+MICRO 2025, October 18–22, 2025, Seoul, Korea
+100%
+Standard Dataflow
+GCC Dataflow
+Minnan Pei, et al.
+Preprocess
+Duplicate
+Sort
+Render
+a wide range of studies have proposed systematic optimizations
+for NeRF rendering, including algorithmic restructuring, feature
+encoding, and computation graph-level enhancements [3, 17, 21,
+23, 28, 29, 33, 34, 45]. Recent state-of-the-art NeRF acceleration
+frameworks focus on improving end-to-end inference efficiency,
+reducing power consumption, and enabling deployment on edge devices. MetaVRain [9] introduces a low-power neural 3D rendering
+processor tailored for mobile platforms, integrating a visual perception core with hybrid neural engines and an efficient positional
+encoding module to support high-throughput, end-to-end NeRF inference. Fusion-3D [24] proposes a full-stack acceleration solution
+combining dynamic scheduling, mixed-precision execution, and
+chiplet-based Mixture-of-Experts (MoE) architecture, significantly
+improving both training and inference performance and scalability.
+3DGS System-Level Optimization and Specialized Accelerators. Recent works have accelerated 3DGS through both specialized
+hardware and system-level optimizations. Dedicated hardware efforts include ASICs targeting inference [19], dynamic SLAM [40],
+and training [11], as well as FPGA-based optimizations for pipeline
+stages like projection [35]. Concurrently, VR-Pipe [18] enhance performance on existing GPUs by integrating early alpha termination
+into the rendering pipeline.
+While some algorithmic optimizations also leverage alpha values
+to reduce computation [6, 10, 37], they operate by pruning Gaussiantile pairings within the conventional dataflow. Beyond splattingstyle rasterization [8], other works have even explored alternative
+rendering techniques like ray tracing for Gaussian scenes [27],
+highlighting the representation’s versatility.
+Despite this diversity of approaches, a common thread persists:
+most prior work adheres to the traditional, decoupled tile-wise rendering paradigm. This model, while modular, introduces structural
+inefficiencies—such as redundant memory transfers and poor data
+reuse—which are particularly detrimental on resource-constrained
+platforms. In contrast, our work fundamentally departs from this
+paradigm by introducing a holistic, Gaussian-wise execution model
+with cross-stage conditional awareness. This architecture directly
+targets the aforementioned inefficiencies, enabling significant gains
+in throughput and energy efficiency for 3DGS inference.
+80%
+60%
+40%
+20%
+0%
+Palace Train Drjohn
+RTX 3090
+Palace Train Drjohn
+Jetson Xavier
+Palace Train Drjohn
+GSCore / GCC
+Figure 15: Breakdown analysis of per-frame execution time
+for the standard dataflow and our GCC dataflow on GPUs
+and accelerators. All results are normalized to that of the
+standard dataflow in each setting.
+target reducing redundant data movement—offer relatively limited
+performance improvements. This is primarily due to the abundant
+on-chip cache of GPUs, making 3DGS inference compute-bound.
+Conversely, in customized architectures with limited on-chip storage (such as GSCore [19] with 272 KB on-chip SRAM), data movement has a more significant impact on inference performance, and
+as the complexity of the scenario increases (e.g., Drjohnson), the proportion of time spent on data movement becomes even greater. In
+such cases, our GCC dataflow demonstrates a clear advantage over
+standard dataflow in improving performance. Second, although
+GCC reduces rendering computation by identifying more compact
+Gaussian regions, the rendering time actually increases. The reason
+is that GCC dataflow is “Gaussian-parallel” in our GPU implementation, where a single thread writes a Gaussian’s contribution to multiple pixels. The “many-to-one” pattern causes data races, forcing
+costly atomic operations for deterministic blending, which disrupts
+the GPU’s parallel efficiency. However, our GCC accelerator can
+fully translate the reduction in rendering computation into savings
+in inference time through carefully designed compute units and
+pipeline parallel processing methods.
+Note that GCC-based 3DGS inference on the Jetson AGX Xavier
+delivers just 6∼20 FPS in this experiment, well below the widely
+recognized 90 FPS target [13, 15]. By designing dedicated architectures instead of directly implementing on existing GPU platforms,
+we can fully unleash the performance potential of GCC dataflow,
+achieving inference performance (>150 FPS) comparable to—or
+even surpassing—high-end GPUs.
+7
+8
+CONCLUSION
+This paper introduces GCC, a specialized accelerator for 3D Gaussian Splatting (3DGS) inference. By addressing the inherent inefficiencies of tile-wise rendering and decoupled-staged execution
+in standard dataflow, GCC employs Gaussian-wise rendering and
+a cross-stage conditional processing scheme to eliminate redundant data movements and computations. The resulting architecture
+achieves substantial improvements in throughput and energy efficiency over prior art, while maintaining competitive rendering
+quality and inference latency comparable to high-end GPUs—all
+within a significantly smaller area and power budget.
+RELATED WORK
+Neural Rendering Accelerators. The rapid advancement of neural rendering techniques has driven the demand for real-time, highfidelity rendering on dedicated hardware platforms. NeRF-based
+methods typically rely on multilayer perceptron networks to perform point-wise inference over densely sampled spatial coordinates. This leads to intensive computation and complex data dependencies, making real-time execution challenging. Consequently,
+ACKNOWLEDGMENTS
+This work was supported in part by National Key R&D Program
+of China (No.2022ZD0160304), Beijing Natural Science Foundation
+(No.4254088), and AMD Heterogeneous Accelerated Compute Clusters (HACC) program.
+12
+GCC: A 3DGS Inference Architecture with Gaussian-Wise and Cross-Stage Conditional Processing
+REFERENCES
+MICRO 2025, October 18–22, 2025, Seoul, Korea
+advanced leakage reduction techniques. In ICCAD: International Conference on
+Computer-Aided Design. 694–701.
+[23] Sixu Li, Chaojian Li, Wenbo Zhu, Boyang Yu, Yang Zhao, Cheng Wan, Haoran
+You, Huihong Shi, and Yingyan Lin. 2023. Instant-3d: Instant neural radiance
+field training towards on-device ar/vr 3d reconstruction. In Proceedings of the
+50th Annual International Symposium on Computer Architecture. 1–13.
+[24] Sixu Li, Yang Zhao, Chaojian Li, Bowei Guo, Jingqun Zhang, Wenbo Zhu, Zhifan
+Ye, Cheng Wan, and Yingyan Celine Lin. 2024. Fusion-3D: Integrated Acceleration
+for Instant 3D Reconstruction and Real-Time Rendering. In 2024 57th IEEE/ACM
+International Symposium on Microarchitecture (MICRO). IEEE, 78–91.
+[25] Stefan Mach, Fabian Schuiki, Florian Zaruba, and Luca Benini. 2020. FPnew: An
+open-source multiformat floating-point unit architecture for energy-proportional
+transprecision computing. IEEE Transactions on Very Large Scale Integration (VLSI)
+Systems 29, 4 (2020), 774–787.
+[26] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi
+Ramamoorthi, and Ren Ng. 2021. Nerf: Representing scenes as neural radiance
+fields for view synthesis. Commun. ACM 65, 1 (2021), 99–106.
+[27] Nicolas Moenne-Loccoz, Ashkan Mirzaei, Or Perel, Riccardo de Lutio, Janick
+Martinez Esturo, Gavriel State, Sanja Fidler, Nicholas Sharp, and Zan Gojcic. 2024.
+3D Gaussian Ray Tracing: Fast Tracing of Particle Scenes. ACM Transactions on
+Graphics (TOG) 43, 6 (2024), 1–19.
+[28] Muhammad Husnain Mubarik, Ramakrishna Kanungo, Tobias Zirr, and Rakesh
+Kumar. 2023. Hardware acceleration of neural graphics. In Proceedings of the
+50th Annual International Symposium on Computer Architecture. 1–12.
+[29] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. 2022. Instant neural graphics primitives with a multiresolution hash encoding. ACM
+transactions on graphics (TOG) 41, 4 (2022), 1–15.
+[30] NVIDIA Corporation. 2018. NVIDIA Jetson Xavier. https://www.nvidia.com/enus/autonomous-machines/embedded-systems/jetson-xavier-series/.
+[31] NVIDIA Corporation. 2020. GeForce RTX 3090 Family. https://www.nvidia.com/
+en-us/geforce/graphics-cards/30-series/rtx-3090/.
+[32] NVIDIA Corporation. 2020. NVIDIA RTX A6000 Graphics Card. https://www.
+nvidia.com/en-us/products/workstations/rtx-a6000/.
+[33] Gwangtae Park, Seokchan Song, Haoyang Sang, Dongseok Im, Donghyeon Han,
+Sangyeob Kim, Hongseok Lee, and Hoi-Jun Yoo. 2024. 20.8 Space-Mate: A 303.5
+mW Real-Time Sparse Mixture-of-Experts-Based NeRF-SLAM Processor for Mobile Spatial Computing. In 2024 IEEE International Solid-State Circuits Conference
+(ISSCC), Vol. 67. IEEE, 374–376.
+[34] Junha Ryu, Hankyul Kwon, Wonhoon Park, Zhiyong Li, Beomseok Kwon,
+Donghyeon Han, Dongseok Im, Sangyeob Kim, Hyungnam Joo, and Hoi-Jun
+Yoo. 2024. 20.7 NeuGPU: A 18.5 mJ/Iter neural-graphics processing unit for
+instant-modeling and real-time rendering with segmented-hashing architecture.
+In 2024 IEEE International Solid-State Circuits Conference (ISSCC), Vol. 67. IEEE,
+372–374.
+[35] Kotaro Shimamura, Ayumi Ohno, and Shinya Takamaeda-Yamazaki. 2025. Exploring the Versal AI Engine for 3D Gaussian Splatting. arXiv preprint
+arXiv:2502.11782 (2025).
+[36] Peter-Pike Sloan, Jan Kautz, and John Snyder. 2023. Precomputed radiance
+transfer for real-time rendering in dynamic, low-frequency lighting environments.
+In Seminal Graphics Papers: Pushing the Boundaries, Volume 2. 339–348.
+[37] Xinzhe Wang, Ran Yi, and Lizhuang Ma. 2024. AdR-Gaussian: Accelerating
+Gaussian Splatting with Adaptive Radius. In SIGGRAPH Asia 2024 Conference
+Papers. 1–10.
+[38] Xiaobao Wei, Peng Chen, Ming Lu, Hui Chen, and Feng Tian. 2025. Graphavatar:
+Compact head avatars with gnn-generated 3d gaussians. In Proceedings of the
+AAAI Conference on Artificial Intelligence, Vol. 39. 8295–8303.
+[39] Xiaobao Wei, Qingpo Wuwu, Zhongyu Zhao, Zhuangzhe Wu, Nan Huang, Ming
+Lu, Ningning Ma, and Shanghang Zhang. 2024. Emd: Explicit motion modeling
+for high-quality street gaussian splatting. arXiv preprint arXiv:2411.15582 (2024).
+[40] Lizhou Wu, Haozhe Zhu, Siqi He, Jiapei Zheng, Chixiao Chen, and Xiaoyang
+Zeng. 2024. GauSPU: 3D Gaussian Splatting Processor for Real-Time SLAM
+Systems. In 2024 57th IEEE/ACM International Symposium on Microarchitecture
+(MICRO). IEEE, 1562–1573.
+[41] Tong Wu, Yu-Jie Yuan, Ling-Xiao Zhang, Jie Yang, Yan-Pei Cao, Ling-Qi Yan, and
+Lin Gao. 2024. Recent advances in 3d gaussian splatting. Computational Visual
+Media 10, 4 (2024), 613–642.
+[42] Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin Shu, Kalyan Sunkavalli,
+and Ulrich Neumann. 2022. Point-nerf: Point-based neural radiance fields. In
+Proceedings of the IEEE/CVF conference on computer vision and pattern recognition.
+5438–5448.
+[43] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and Angjoo Kanazawa.
+2021. Plenoctrees for real-time rendering of neural radiance fields. In Proceedings
+of the IEEE/CVF international conference on computer vision. 5752–5761.
+[44] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang.
+2018. The unreasonable effectiveness of deep features as a perceptual metric.
+In Proceedings of the IEEE conference on computer vision and pattern recognition.
+586–595.
+[1] Yanqi Bao, Tianyu Ding, Jing Huo, Yaoli Liu, Yuxin Li, Wenbin Li, Yang Gao,
+and Jiebo Luo. 2025. 3d gaussian splatting: Survey, technologies, challenges, and
+opportunities. IEEE Transactions on Circuits and Systems for Video Technology
+(2025).
+[2] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter
+Hedman. 2022. Mip-nerf 360: Unbounded anti-aliased neural radiance fields. In
+Proceedings of the IEEE/CVF conference on computer vision and pattern recognition.
+5470–5479.
+[3] Zhiqin Chen, Thomas Funkhouser, Peter Hedman, and Andrea Tagliasacchi. 2023.
+Mobilenerf: Exploiting the polygon rasterization pipeline for efficient neural field
+rendering on mobile architectures. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition. 16569–16578.
+[4] Anurag Dalal, Daniel Hagen, Kjell G Robbersmyr, and Kristian Muri Knausgård.
+2024. Gaussian splatting: 3d reconstruction and novel view synthesis, a review.
+IEEE Access (2024).
+[5] Ben Fei, Jingyi Xu, Rui Zhang, Qingyuan Zhou, Weidong Yang, and Ying He. 2024.
+3d gaussian splatting as new era: A survey. IEEE Transactions on Visualization
+and Computer Graphics (2024).
+[6] Guofeng Feng, Siyan Chen, Rong Fu, Zimu Liao, Yi Wang, Tao Liu, Boni Hu,
+Linning Xu, Zhilin Pei, Hengjie Li, et al. 2025. Flashgs: Efficient 3d gaussian
+splatting for large-scale and high-resolution rendering. In Proceedings of the
+Computer Vision and Pattern Recognition Conference. 26652–26662.
+[7] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht,
+and Angjoo Kanazawa. 2022. Plenoxels: Radiance fields without neural networks. In Proceedings of the IEEE/CVF conference on computer vision and pattern
+recognition. 5501–5510.
+[8] Andrew S Glassner. 1989. An introduction to ray tracing. Morgan Kaufmann.
+[9] Donghyeon Han, Junha Ryu, Sangyeob Kim, Sangjin Kim, Jongjun Park, and
+Hoi-Jun Yoo. 2023. MetaVRain: A mobile neural 3-D rendering processor with
+bundle-frame-familiarity-based NeRF acceleration and hybrid DNN computing.
+IEEE Journal of Solid-State Circuits 59, 1 (2023), 65–78.
+[10] Alex Hanson, Allen Tu, Geng Lin, Vasu Singla, Matthias Zwicker, and Tom
+Goldstein. 2025. Speedy-splat: Fast 3d gaussian splatting with sparse pixels and
+sparse primitives. In Proceedings of the Computer Vision and Pattern Recognition
+Conference. 21537–21546.
+[11] Houshu He, Gang Li, Fangxin Liu, Li Jiang, Xiaoyao Liang, and Zhuoran Song.
+2025. GSArch: Breaking Memory Barriers in 3D Gaussian Splatting Training via
+Architectural Support. In 2025 IEEE International Symposium on High Performance
+Computer Architecture (HPCA). 366–379. https://doi.org/10.1109/HPCA61900.
+2025.00037
+[12] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis,
+and Gabriel Brostow. 2018. Deep blending for free-viewpoint image-based rendering. ACM Transactions on Graphics (ToG) 37, 6 (2018), 1–15.
+[13] Xiaotong Huang, He Zhu, Zihan Liu, Weikai Lin, Xiaohong Liu, Zhezhi He,
+Jingwen Leng, Minyi Guo, and Yu Feng. 2025. Seele: A unified acceleration
+framework for real-time gaussian splatting. arXiv preprint arXiv:2503.05168
+(2025).
+[14] Ying Jiang, Chang Yu, Tianyi Xie, Xuan Li, Yutao Feng, Huamin Wang, Minchen
+Li, Henry Lau, Feng Gao, Yin Yang, et al. 2024. Vr-gs: A physical dynamics-aware
+interactive gaussian splatting system in virtual reality. In ACM SIGGRAPH 2024
+Conference Papers. 1–1.
+[15] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis.
+2023. 3d gaussian splatting for real-time radiance field rendering. ACM Trans.
+Graph. 42, 4 (2023), 139–1.
+[16] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. 2017. Tanks and
+temples: Benchmarking large-scale scene reconstruction. ACM Transactions on
+Graphics (ToG) 36, 4 (2017), 1–13.
+[17] Junseo Lee, Kwanseok Choi, Jungi Lee, Seokwon Lee, Joonho Whangbo, and
+Jaewoong Sim. 2023. Neurex: A case for neural rendering acceleration. In Proceedings of the 50th Annual International Symposium on Computer Architecture.
+1–13.
+[18] Junseo Lee, Jaisung Kim, Junyong Park, and Jaewoong Sim. 2025. VR-Pipe:
+Streamlining Hardware Graphics Pipeline for Volume Rendering. arXiv preprint
+arXiv:2502.17078 (2025).
+[19] Junseo Lee, Seokwon Lee, Jungi Lee, Junyong Park, and Jaewoong Sim. 2024.
+Gscore: Efficient radiance field rendering via architectural support for 3d gaussian
+splatting. In Proceedings of the 29th ACM International Conference on Architectural
+Support for Programming Languages and Operating Systems, Volume 3. 497–511.
+[20] Marc Levoy. 1988. Display of surfaces from volume data. IEEE Computer graphics
+and Applications 8, 3 (1988), 29–37.
+[21] Chaojian Li, Sixu Li, Yang Zhao, Wenbo Zhu, and Yingyan Lin. 2022. Rt-nerf:
+Real-time on-device neural radiance fields towards immersive ar/vr rendering.
+In Proceedings of the 41st IEEE/ACM International Conference on Computer-Aided
+Design. 1–9.
+[22] Sheng Li, Ke Chen, Jung Ho Ahn, Jay B. Brockman, and Norman P. Jouppi.
+2011. CACTI-P: Architecture-level modeling for SRAM-based structures with
+13
+MICRO 2025, October 18–22, 2025, Seoul, Korea
+Minnan Pei, et al.
+[45] Yang Katie Zhao, Shang Wu, Jingqun Zhang, Sixu Li, Chaojian Li, and Yingyan Celine Lin. 2023. Instant-nerf: Instant on-device neural radiance field training
+via algorithm-accelerator co-designed near-memory processing. In 2023 60th
+ACM/IEEE Design Automation Conference (DAC). IEEE, 1–6.
+[46] Matthias Zwicker, Hanspeter Pfister, Jeroen Van Baar, and Markus Gross. 2002.
+EWA splatting. IEEE Transactions on Visualization and Computer Graphics 8, 3
+(2002), 223–238.
+14

@@ -1,0 +1,844 @@
+Implementations of the Closest Point Method. Contribute to hody-chang/cp_matrices development by creating an account on GitHub.
+
+Add differentiable closest point method layer in JAX by hody-chang · Pull Request #1 · hody-chang/cp_matrices · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+hody-chang
+commented
+Sep 28, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+This PR introduces diffcpm, a complete JAX implementation of the closest point method (CPM) for solving PDEs on implicit surfaces with full differentiability with respect to both PDE coefficients and surface geometry. The implementation enables PDE-constrained optimization directly on neural implicit surfaces without requiring meshing.
+Key Changes
+Core Infrastructure
+grid.py: Banded Cartesian grid construction with fixed sparsity patterns and Ruuth-Merriman bandwidth estimation
+interp.py: Differentiable Lagrange interpolation weights (extension matrix E) using nodal basis to avoid singularities at grid lines
+operators.py: CPM operators combining finite-difference Laplacian (L) with interpolation, including stabilization schemes (diagsplit, lapsharp)
+solve.py: Differentiable linear solves via jax.lax.custom_linear_solve that compute exact adjoints without unrolling iterations
+Geometry and Implicit Surfaces
+sdf.py: Closest point computation on level sets via Newton's method with implicit function theorem differentiation; includes SIREN neural network utilities
+surfaces.py: Closed-form closest point maps for sphere/circle/torus and generic level-set solver for ellipsoids and learned SDFs
+Inverse Problems
+inverse.py: Observation operators, misfit functionals, regularizers, and finite-difference gradient verification utilities
+Five complete examples demonstrating source recovery, diffusivity recovery, shape optimization, SDF error propagation, and spectral validation
+Testing
+Comprehensive test suite (tests/test_diffcpm.py) with 19 tests covering:
+Operator correctness and stability
+Interpolation accuracy and transpose properties
+Geometry gradient verification
+Adjoint correctness
+Continuous-to-discrete convergence rates
+Shape derivative behavior under grid alignment
+Notable Implementation Details
+Fixed sparsity pattern: The band structure and stencil pattern remain constant during optimization, enabling JAX tracing despite moving geometry. Only integer gather indices change, which carry no gradients.
+Nodal Lagrange basis: Avoids barycentric form's division-by-zero singularities when closest points land exactly on grid lines (common for symmetric surfaces on symmetric grids), ensuring smooth derivatives everywhere.
+Consistent base-point computation: Computes stencil base index and local coordinate from a single division to prevent rounding inconsistencies that could cause O(1) interpolation errors.
+Adjoint-based gradients: Uses custom_linear_solve to compute exact adjoints of the discrete operator without unrolling, achieving memory-independent gradient computation.
+Geometry diagnostics: Provides clearance() and violations() checks to detect when moving surfaces leave the band, with early warning before accuracy degrades.
+https://claude.ai/code/session_01MDYS3aeAwm4GyMpnHsZdv2
+claude
+added 6 commits
+September 27, 2026 23:30
+Add diffcpm: a differentiable closest point method layer in JAX
+…
+d262112
+```
+Implements the CPM forward solve so that it is differentiable with respect
+to PDE coefficients and to the geometry, including the weights of a neural
+implicit surface, for PDE-constrained optimization on implicit surfaces
+with no meshing step.
+
+Structure:
+  diffcpm/grid.py        banded Cartesian grids, Ruuth-Merriman bandwidth
+  diffcpm/interp.py      differentiable Lagrange weights, extension matrix E
+  diffcpm/operators.py   banded Laplacian, stabilized CPM operator
+  diffcpm/solve.py       lax.custom_linear_solve: dense LU or matrix-free GMRES
+  diffcpm/sdf.py         closest points on a level set by Newton + IFT; SIREN
+  diffcpm/surfaces.py    circle/sphere/torus closed forms, ellipsoid implicitly
+  diffcpm/inverse.py     observation operator, misfit, regularizers, FD checker
+
+Conventions follow the MATLAB cp_matrices/ in this repository: ndgrid tensor
+grids, C-order linear indices, the band radius of rm_bandwidth.m, the base
+point convention of findGridInterpBasePt.m, and the diagonal-split
+stabilization of lapsharp.m.
+
+Gradients use the adjoint rather than unrolling: lax.custom_linear_solve is
+given the forward matvec and a transpose solver, so reverse mode produces
+A^T lam = dJ/du and dJ/dp = lam^T (db/dp - (dA/dp) u) with memory independent
+of the Krylov iteration count. Geometry gradients flow through the
+interpolation weights, which are polynomials in the closest point. Closest
+points on a level set are obtained by Newton on the first-order conditions
+and differentiated with lax.custom_root, i.e. by the implicit function
+theorem at the converged root.
+
+Two departures from the MATLAB interpolation code, both for differentiability:
+
+- Lagrange weights use the nodal form prod_{m!=j}(s-m)/(j-m) instead of the
+  barycentric form of LagrangeWeights1D.m. The barycentric form divides by
+  x - x_j, which MATLAB special-cases with a branch returning binary weights;
+  under autodiff that branch returns a constant and so a zero derivative
+  exactly at grid lines, which closest points hit routinely on symmetric
+  geometry. The nodal form is a polynomial, exact and smooth everywhere.
+
+- The stencil base index and the local coordinate are computed from a single
+  division and never re-derived from each other. Computing s as
+  (x - (relpt + I*dx))/dx rounds the same real number twice, and when a
+  closest point lands on a grid line the two roundings can straddle the
+  integer, leaving I and s describing stencils one cell apart. That produced
+  an 85% error in the solution on the unit circle at dx=0.1, visible only
+  under jax.jit because it depends on how the compiler reassociates the
+  arithmetic.
+
+Verified in diffcpm/tests/test_diffcpm.py (17 tests): E is exact on
+polynomials of degree <= p; apply_sparse_T is the exact transpose; the
+forward solve is second order near the surface; custom_linear_solve
+reproduces the hand-assembled adjoint to 1e-11; dense and GMRES agree on
+value and gradient; dJ/dtheta and dJ/d(shape) match central differences for
+a circle radius, ellipse axes, torus radii, a 3D sphere radius and SIREN
+weights; diagsplit and lapsharp stabilizations coincide exactly while the
+raw product L E is unstable.
+
+Experiments in examples_diffcpm/ cover source recovery on a circle,
+diffusivity recovery on a sphere, the convergence of the discrete shape
+derivative against a closed form, how a learned SDF's geometric error
+propagates into recovered parameters, and ellipse shape optimization with a
+spectral check of the surface Laplacian.
+
+Known limitations, including the moving-band issue, are documented in
+diffcpm/README.md rather than left implicit.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MDYS3aeAwm4GyMpnHsZdv2
+```
+Add band clearance diagnostics; report the moving-band findings honestly
+…
+601af16
+```
+Two findings from running the experiments, and the diagnostics they call for.
+
+Band staleness has two failure modes, and the natural check catches the
+wrong one. InterpPattern.violations asks whether the interpolation stencils
+of the band points still land in the band; that is the LAST thing to fail.
+The first is the outer edge of the band, where the Laplacian drops
+out-of-band neighbours and imposes an artificial Dirichlet condition, coming
+within the Ruuth-Merriman radius of the surface. On a band built for the unit
+circle at dx=0.1, drifting to R=1.1 leaves violations at zero while the
+solution near the surface is already contaminated.
+
+BandedGrid.uncovered_near_surface and BandedGrid.clearance are the sufficient
+check: they ask the question the band was built to answer -- is every grid
+point within the Ruuth-Merriman radius of the CURRENT surface in the band? --
+and report the largest fraction of that radius still covered. Measured
+against required_bw (the RM radius for this p and stencil radius) rather than
+bw, so slack added by extra_bw is spent on surface motion instead of on
+inflating its own requirement.
+
+What losing clearance costs is lopsided: the objective degrades by about a
+factor of 2 while its shape derivative loses more than two orders of
+magnitude. The gradient is far more sensitive to band staleness than the
+solution, which is the wrong way round for an optimizer that moves the shape.
+test_band_clearance_predicts_degradation pins down both the ordering of the
+two failures and this disparity.
+
+Second finding: the discrete shape derivative converges more slowly than the
+objective. Against the closed form on a circle, J_h -> J at a clean second
+order, but dJ_h/dR -> dJ/dR non-monotonically and at roughly first order on
+average, so refining the grid can make the derivative error worse. Averaging
+over sub-cell grid offsets recovers second order while the spread across
+offsets is as large as the mean error, which identifies the cause as grid
+alignment: the CPM discretization error depends on where the surface sits
+relative to the grid lines, and differentiating in a shape direction
+differentiates that dependence as well as the physics. The adjoint itself is
+exact for the discrete objective (checked to 1e-11), so this is a statement
+about the discretization and an argument for tapered or blended stencils.
+ex3 is that experiment; the test now asserts what actually holds rather than
+a rate that does not.
+
+Also in this commit:
+
+- solve: note that GMRES is ~6x faster than dense LU per value-and-gradient
+  at ~1000 unknowns and agrees to every printed digit; dense stays the
+  default because it cannot fail to converge.
+- tests: 18 total, adding band clearance and splitting the 3D sphere into a
+  GMRES forward check and a dense gradient check (the gradient check needs a
+  step below the stencil-crossing scale, at which an iterative solve stopped
+  at 1e-13 puts a floor of 1e-13/eps on the difference quotient).
+- ex1: project the surface trace of u for the forward check rather than
+  band values, which were contaminated by the band edge.
+- ex2: sweep the sensor count rather than only the regularization weight;
+  at 60 sensors and 9 unknowns the weight is inert, so the earlier table
+  showed nothing and its narrative claimed a degree trend the numbers do
+  not support.
+- ex5: matrix-free GMRES, and clearance assertions at both ends of the
+  optimization.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MDYS3aeAwm4GyMpnHsZdv2
+```
+Make clearance exact and single-pass; jit Adam; document scope
+…
+b63209a
+```
+clearance is now the distance from the surface to the nearest out-of-band
+grid point, in units of the Ruuth-Merriman radius, capped at 1. Previously it
+searched a ladder of safety levels and so returned a coarse 0.1-quantised
+answer, and evaluated the distance function once per level. That matters when
+the distance function is a closest point solve through a neural network:
+uncovered_near_surface now only evaluates it at out-of-band grid points, and
+clearance evaluates it once rather than ten times. Values agree with the old
+search (R=1.05 read 0.9, now 0.941; R=1.10 read 0.8, now 0.802).
+
+adam puts its whole loop inside one lax.scan and jits it. Run step by step
+from Python, a few thousand steps of a small SIREN spend nearly all their time
+in dispatch: 4000 steps went from minutes to 25s. A callback still forces the
+Python loop, since a callback cannot be traced.
+
+interp hardening: the snap tolerance is now relative to |t|, since a fixed 1e-9
+in cell units stops separating rounding noise from a genuine near-integer once
+a grid has more than ~1e7 cells on a side. InterpPattern rejects an
+interpolation degree above the one the band was sized for (the wider stencils
+are not guaranteed to fit) and a grid too large for its int32 linear indices.
+
+New test: the Newton/IFT closest point solver against the closed-form sphere
+and torus maps, to ~1e-14, with first-order residuals at machine precision,
+including on a level-set function with |grad f| != 1. 19 tests, all passing.
+
+README gains a scope section mapping the three steps of the plan's first
+experiment to what is actually here, including the two that are partial and
+why: no bunny (the code path is verified on a SIREN-fitted circle; what a
+bunny adds is scale, which needs CPM multigrid rather than dense LU), and no
+spectral morphing (a closed curve's Laplace-Beltrami spectrum depends only on
+its perimeter, so the 2D target is degenerate -- ex5 verifies the spectrum
+against that formula instead and recovers ellipse axes, which is identifiable).
+
+ex4 retuned from a measured sweep: five fits spanning a factor of ~17 in
+geometric error, avoiding both ends, where the level set is not yet a closed
+curve and where Adam starts to oscillate.
+
+ex5 gains a noise-free control run, because the previous closing text
+attributed the residual axis error to the piecewise-C^1 shape derivative
+without evidence. Repeating the recovery on noise-free data separates
+noise-limited from discretization-limited instead of asserting a cause.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MDYS3aeAwm4GyMpnHsZdv2
+```
+README: add a getting-started section, sharpen the fixed-sparsity claim
+…
+24acce4
+```
+The getting-started snippet is checked to run verbatim: install, path, and a
+minimal end-to-end differentiable solve on a circle, with the two checks
+(violations and clearance) a caller should make before trusting a result.
+
+"Fixed sparsity pattern" was overstated. The *shape* of the pattern is fixed
+-- every row has exactly (p+1)^dim interpolation entries and
+1 + 2*dim*stenrad difference entries, set by the band and the stencil rather
+than by the geometry -- but which columns those entries land in does move with
+the surface. That movement is integer arithmetic on a gather, so it costs
+nothing at trace time and carries no gradient, and nothing is reallocated,
+re-factorized or re-banded. Worth stating precisely, since it is the property
+that makes the whole thing traceable.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MDYS3aeAwm4GyMpnHsZdv2
+```
+Match ex3's narrative to its measured data; presentation fixes
+…
+3ed45a6
+```
+ex3 part 2 claimed clearance "drops below 1 exactly where the error starts to
+grow by an order of magnitude". The table does not say that: clearance reads
+0.996 at R=1.03 while the error is still 2e-4, and the order-of-magnitude jump
+comes at R=1.05 where clearance is 0.941. Reworded to state the correlation
+the numbers actually support -- error at the 1e-4 level while clearance is near
+1, an order of magnitude worse by ~0.94, two orders worse again by ~0.80 --
+and to keep the mechanism (the band's Dirichlet outer edge coming within reach
+of the surface) as the explanation rather than as a claimed threshold.
+
+ex1 prints per-mode coefficient errors in exponential rather than fixed
+format. The mode-1 error is far below the others and was showing as +0.00000,
+which reads as an exact zero rather than as the small number it is.
+
+tests: the module docstring listed five categories from before the suite grew
+to nineteen tests, and omitted the operator, closest-point and band checks
+entirely; drop an unused import while there.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MDYS3aeAwm4GyMpnHsZdv2
+```
+Name the inverse crime; add a control that measures discretization bias
+…
+9317559
+```
+ex5's noise-free recovery returns the ellipse axes to 2.4e-14, and the text
+read that as evidence the discretization bias is negligible. It is not
+evidence of anything of the kind. The data are generated by the same discrete
+forward model that is then inverted, so the discretization error cancels
+identically and what the number measures is that the adjoint and the optimizer
+agree with each other. Reporting it as accuracy would have been the most
+misleading claim in the package, so it is now named as the inverse crime and
+labelled a self-consistency check.
+
+The measurement the old text was reaching for now exists. Control 2 generates
+noise-free data on a grid twice as fine and inverts on the coarse one, which
+breaks the cancellation:
+
+  discretization bias at dx = 0.08     -4.9e-4 / +2.4e-4
+  between-grid data mismatch            1.9e-4 rms
+  noise-driven error, noisy run        +3.6e-4 / -2.3e-4
+
+Same order, so at this noise level neither alone binds -- a more useful
+statement than either number by itself, and one the earlier version could not
+have made.
+
+ex4 had the same defect in its narrative: its "exact" row is set by the
+optimizer's stopping tolerance, not by discretization, for the same
+cancellation reason. Its SIREN rows are unaffected and are the point of the
+experiment, because those invert a genuinely different geometry from the one
+that generated the data -- which is what makes the 1.03 log-log slope of
+parameter error against geometric error meaningful.
+
+Also: fix a leaked %.2f in ex5's output; ex1 prints per-mode errors in
+exponential form, since the mode-1 error is far smaller than the others and was
+displaying as +0.00000; correct the examples README runtimes from measurement
+and note that XLA compilation is a visible share of the shorter runs.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MDYS3aeAwm4GyMpnHsZdv2
+```
+hody-chang
+changed the base branch from
+main
+to
+idea
+September 28, 2026 01:56
+claude
+added 10 commits
+September 28, 2026 02:44
+Add mesh support, the bunny checkpoint, and the topology-change exper…
+…
+f3780d3
+```
+…iment
+
+Two new experiments, and the library work the first of them forced.
+
+diffcpm/mesh.py reads an ASCII PLY and computes exact closest points on a
+triangle mesh, so the Stanford bunny already in ../surfaces/tri/ can be driven
+through the pipeline. Closest points use a KD-tree on triangle centroids for
+candidates and an exact point-to-triangle kernel covering all seven Voronoi
+regions. The tree is a heuristic, so a second pass makes it exact: any point
+whose candidate set is not provably sufficient is re-queried over every centroid
+within dbest + max_reach, a ball that provably contains any triangle that could
+win. Validated against brute force over all 69,451 triangles, agreeing to
+5.6e-17; the exact pass costs 0.7s per 4,000 points and changed no answers,
+which makes k=24 provably right here rather than luckily right.
+
+examples_diffcpm/ex7_bunny_diffusivity.py is the checkpoint: recover a
+diffusivity field on the bunny from 120 sensors, at three resolutions, with data
+generated on a finer grid. It runs mesh closest points and SIREN closest points
+side by side, so discretization convergence and the cost of the learned surface
+are measured separately. scripts/fit_bunny_siren.py fits and caches the network.
+
+examples_diffcpm/ex6_topology_change.py is the experiment that distinguishes this
+from differentiable mesh FEM: two circles, smoothly unioned, whose separation is
+the shape parameter, so the topology changes at a known value (s = r + k log 2,
+confirmed numerically). Part A sweeps through the merge and shows the solver's
+residuals not noticing while the region's component count steps from 2 to 1.
+Part B recovers the separation from data generated on the merged shape at a finer
+grid, starting from a separated shape, so the optimizer has to cross the merge.
+
+Findings that changed the code:
+
+- The closest point Newton was not robust on a real learned SDF. Where a SIREN's
+  gradient is small the Gauss-Newton step is unbounded, and on the bunny that put
+  closest points thousands of units away with the residual stuck near 1. _newton
+  now takes the best of a geometric ladder of step lengths and only accepts a
+  step that reduces ||F||, which makes the residual non-increasing by
+  construction, plus optional step clipping. Failures on the bunny fell from
+  10.1% to 2.4% of band points, and what remains is a clean per-point failure the
+  caller can detect. level_set_residuals reports residuals per point for exactly
+  that, since a maximum cannot distinguish a few bad points from a bad solve.
+
+- A band built from the first-order distance estimate |f|/|grad f| had a hole
+  exactly at the seam of the smooth union, because the smoothing flattens the
+  gradient there and the estimate overshoots. That gave 58 interpolation
+  violations and zero clearance at the merge, i.e. the band failed precisely
+  where the experiment happens. ex6 now builds its band from the exact distance
+  to the un-smoothed union, which underestimates near the seam, and
+  underestimating is the safe direction.
+
+- adam takes an optional key and threads it, so a loss can draw minibatches.
+  Full-batch training on 120k 3D samples is not affordable on CPU.
+
+Two measurements worth recording, neither of them flattering:
+
+- On the bunny, 2 to 4% of band points have a genuinely non-unique closest point
+  at every resolution from dx = 0.12 to 0.04, and the fraction does not shrink
+  with refinement. Real scanned geometry has feature sizes below any grid spacing
+  worth running.
+
+- I guessed those ambiguous points were the ones where Newton fails. They are
+  not: the two rates nearly coincide, 2.4% against 2.2%, but the sets overlap by
+  only about 11%. The coincidence is a coincidence.
+
+Also revised: GMRES needs no preconditioning at checkpoint scale, reaching 1e-14
+in about 2 seconds at 10k unknowns, so the earlier claim that multigrid was a
+prerequisite for the bunny was too pessimistic. It remains one for the ~8e5
+unknowns that full feature resolution would need.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MDYS3aeAwm4GyMpnHsZdv2
+```
+Fix three things the bunny checkpoint exposed in its own setup
+…
+de3543e
+```
+The first ex7 run produced a usable mesh-geometry result and a worthless
+learned-geometry one: field error 865% at dx=0.12 and 314% at dx=0.09, with J
+around 1100x its noise floor. Three causes, all mine.
+
+Each geometry now gets a band built from its own surface. Building the learned
+surface's band from the mesh looks harmless and is not. A SIREN with 0.008 rms
+signed-distance error still places its zero level set as much as 0.7 from the
+mesh at a few points -- larger than a band half-width of 0.49 at dx=0.12 -- so
+the learned surface pokes out of a mesh-built band. One interpolation violation
+in that row is the evidence. The learned surface's band is built from |f|, which
+is affordable over a whole grid where a Newton solve is not, and then checked
+with violations and clearance on real closest points rather than trusted.
+
+The data-generating grid moves from dx=0.05 to 0.035. At 0.05 it was only 1.4x
+finer than the finest inversion grid, which is not enough separation for the
+refinement study to be about anything other than the inverse crime again.
+
+The fit gains an eikonal penalty on |grad f| - 1, and more steps. Plain distance
+regression drives the rms down while leaving a tail, and the tail is what breaks
+CPM: the band cares about the largest deviation, not the average. The same term
+addresses the other failure mode, since the closest point Newton blows up exactly
+where |grad f| collapses. The fit script now reports |grad f| percentiles and the
+p99 and max of the geometric error, not just the median.
+
+Long-running examples flush their output, so progress is visible instead of
+appearing all at once at the end.
+
+Results so far, mesh geometry, data at dx=0.05 (superseded by the 0.035 rerun):
+
+  dx     band n   J       ||dc||   field err
+  0.120   5552    1637    0.291    0.307
+  0.090   9938     574    0.364    0.171
+  0.070  16299     607    0.128    0.117
+
+Worth reading both error columns. ||dc|| is non-monotone while the field error
+falls steadily and roughly halves per refinement: the four coefficients are not
+equally determined and trade against each other at nearly constant misfit.
+Quoting ||dc|| alone would read as non-convergence, and quoting the field error
+alone would hide the conditioning. J stays 10 to 27 times its noise floor of 60,
+so model error rather than sensor noise is what the fit is up against, which fits
+the 2 to 4% of band points whose closest point is genuinely non-unique.
+
+Also: the SIREN's {f < 0} is a single connected component, so the 0.7 tail is not
+a spurious blob. That was my second wrong guess about this fit in a row, after
+the ambiguity-equals-Newton-failure one; recording both rather than only the
+hypotheses that survived.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MDYS3aeAwm4GyMpnHsZdv2
+```
+Clip the closest point projection step; test the mesh module and the fix
+…
+0f2143a
+```
+A new test exposed a bug the earlier fix had missed. Backtracking inside the
+Newton solve only guarantees the residual does not increase from where it starts,
+and on a learned SDF the *initial guess* is already gone: the projection step
+-f grad f / |grad f|^2 has length |f| / |grad f|, which is unbounded exactly
+where the gradient decays. On tanh(5(|y|-1)), whose zero set is the unit sphere,
+the initial guess landed 1.4e9 away before Newton ran at all. The projection
+steps are now clipped to max_step as well. Clipping only slows the approach to
+the surface; it cannot move the converged root, which the first-order conditions
+fix.
+
+Four tests added, 23 total, all passing, and the 19 that predate the Newton
+changes still pass:
+
+- mesh closest points against brute force over every triangle, on an
+  icosahedron, including query points inside the mesh and on its surface where
+  the barycentric region logic is actually exercised;
+- signed distance sign inside and out, with magnitude equal to the closest
+  distance;
+- the PLY reader on the repository's bunny, pinning the 1,113 orphaned vertices
+  that made an earlier assertion fail;
+- the flat-gradient case above, asserting both that the hardened path converges
+  and that the naive path still fails, so the test keeps exercising the fix.
+
+Measured contribution of the clipping on the bunny, same network and band, only
+the solver settings changed: failures 2.67% -> 2.20%. It does not touch the
+geometric error tail, which stays at 0.73 max against a 0.055 p95, so that tail
+is a fit-quality problem rather than a solver one. The eikonal term is the lever
+for it.
+
+Checkpoint result with the learned surface, and it is a failure worth recording
+precisely. At dx = 0.12, 0.09, 0.07 the recovered coefficients are nonsense --
+||dc|| 2.72, 2.38, 2.45 against a true coefficient norm of 0.53, with the z
+coefficient at 2.07 instead of 0.30 and y sign-flipped -- J sits about 1250 times
+its noise floor, and refinement does not help. The mesh geometry on the same
+problem converges, so this is the learned surface, not the solver or the
+discretization.
+
+The mechanism looks like this: the closest point solve fails on a few percent of
+band points, and on a *different* few percent for each grid spacing, 1.24% on the
+data grid against 1.76 to 3.10% on the inversion grids. So each grid carries a
+slightly different corrupted geometry, which is grid-dependent model error that
+does not shrink under refinement. That would explain both the huge misfit and the
+flat convergence, and it contrasts sharply with the clean first-order propagation
+measured on a circle in ex4. A learned surface at bunny scale is not a scaled-up
+version of a learned circle.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MDYS3aeAwm4GyMpnHsZdv2
+```
+Retract the learned-surface failure; jit ex6 and fix its part A claim
+…
+f1098c4
+```
+RETRACTION. The previous commit reported that the learned surface fails at bunny
+scale, with ||dc|| around 2.4 to 2.7 and no improvement under refinement, and
+proposed that grid-dependent closest point failures were the mechanism. With the
+setup corrected -- each geometry's band built from its own surface, an eikonal
+term in the fit, and a data grid 2x finer instead of 1.4x -- the learned surface
+performs as well as the exact mesh or slightly better:
+
+  dx      ||dc|| mesh   ||dc|| siren   field err mesh   field err siren
+  0.120   0.390         0.313          0.324            0.187
+  0.090   0.753         0.305          0.360            0.274
+  0.070   0.311         0.231          0.196            0.200
+
+The proposed mechanism is also wrong. The eikonal fit halved the closest point
+failures, 2.20% to 1.10%, and that is not what changed the outcome; the band
+built from the wrong geometry and the insufficiently fine data grid were. Both
+were my errors, not findings about learned surfaces.
+
+A second correction, in the other direction. The earlier mesh-geometry result
+"field error halves per refinement, 0.31 to 0.17 to 0.12" was obtained with the
+data grid only 1.4x finer than the finest inversion grid, so it was measuring
+partly the inverse crime it was meant to avoid. With proper separation neither
+geometry converges cleanly: field error is about 20% at best and non-monotone,
+and J stays 9 to 73 times its noise floor. That earlier number should not be
+quoted.
+
+The most likely cause of the floor is the one quantity measured here that does
+not shrink with refinement: 2 to 4% of band points lie beyond the medial axis at
+every spacing from dx = 0.12 to 0.04, because the bunny has feature sizes below
+any grid worth running. A fixed fraction of invalid closest point extensions
+gives a fixed error floor. That is a measured reason to put multigrid first,
+rather than the estimate I had before.
+
+Recorded as a hypothesis, not a finding, since three mechanisms I proposed for
+this fit have now been wrong: the mesh fits worse than the SIREN at every
+resolution, J/floor 43 to 73 against 9 to 42. A triangle mesh's closest point map
+is only piecewise smooth, with kinks between triangles, while a network's is
+smooth, and CPM accuracy may care. If it survives a real test, a learned SDF is
+preferable to a mesh here rather than merely tolerable. It is not tested.
+
+ex6 changes. The per-shape solve is jitted and compiled once per band; the
+previous version retraced every evaluation, took about 140 seconds per shape and
+ran out of time partway through part B, so the topology question is still
+unanswered. Part A's text claimed the merge left both the linear solve and the
+closest point solve untouched. Its own table contradicted the second half:
+|f(cp)| went from 2e-16 while split to 1.6e-1 once merged, because the merged
+shape has a saddle at the seam where the closest point is ill conditioned. The
+solver claim stands, the geometry claim does not, and the text now says so and
+reports a per-shape closest point failure rate.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MDYS3aeAwm4GyMpnHsZdv2
+```
+README: record what ex6 and ex7 measured, including the error floor
+…
+7d5856d
+```
+The scope section previously said the bunny was not attempted and the topology
+change only partly. Both now exist, so it says what they found instead of what
+they would need.
+
+The new limitation is the one that matters most for the programme. On the bunny,
+2 to 4% of band points have a genuinely non-unique closest point at every
+spacing from dx = 0.12 to 0.04, and the fraction does not shrink with refinement,
+because the ear tips, base hole and near self-contacts have feature sizes below
+the band half-width. A fixed fraction of invalid closest point extensions gives a
+fixed error floor, which is the likely reason ex7 recovers the field to only
+about 20% and not monotonically. Getting under it needs bandwidth*dx below the
+local feature size, so dx near 0.01 and roughly 8e5 unknowns. That makes
+"multigrid first" a measured conclusion rather than an estimate.
+
+CPM assumes the closest point is unique within the band. A scanned surface does
+not grant that at any resolution worth running, and the README now says so.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MDYS3aeAwm4GyMpnHsZdv2
+```
+GMRES restart was costing a factor of 44, and it shaped earlier concl…
+…
+91b18e9
+```
+…usions
+
+Every example in this package passed restart=200 or 250 to GMRES, on the
+assumption that a larger restart is a harmless upper bound. It is not.
+solve_method="batched" builds the entire restart-sized Krylov basis on every
+call, converged or not, so restart is a cost paid in full rather than a budget.
+Measured on a 2,137-point 2D band, identical 1.8e-13 residual either way:
+
+  restart=250   forward 147 s      value-and-gradient 270 s
+  restart=50    forward   3.3 s    value-and-gradient   6.6 s
+
+Newton settings were irrelevant beside it: 6.55 s against 6.61 s for lean versus
+beefy. So the thing I spent two rounds diagnosing as a compile-time problem was
+runtime, in a parameter I had chosen carelessly and never measured.
+
+This is not only a speed fix, because the cost shaped what got measured. ex6's
+part B ran out of wall clock twice, so the topology-change optimization -- the
+load-bearing result -- is still unanswered. And ex7's refinement study stopped at
+dx = 0.07 and concluded "does not converge cleanly", which is a weak conclusion
+from three points when the suspected cause is an error floor: the question is
+whether the error stops falling, and three points cannot separate a floor from a
+wobble.
+
+So ex7 gains a fourth resolution at dx = 0.055 and its data grid moves from 0.035
+to 0.0275 to keep the 2x separation. The earlier conclusion stands as reported
+until this run replaces it.
+
+Also documented in solve.py, with the measurement, and every example now carries
+the reason inline so the next person does not restore the larger value thinking it
+is safer. The remaining restart=120 in the dense-versus-GMRES agreement test is
+deliberate.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MDYS3aeAwm4GyMpnHsZdv2
+```
+Add a differentiable P1 surface FEM baseline, and confirm the smoothn…
+…
+d3f0e0c
+```
+…ess cause
+
+Two things the package was missing: a baseline to compare against, and a
+controlled test of the mechanism behind the mesh-versus-network result.
+
+diffcpm/fem.py is a P1 surface FEM: cotangent stiffness, lumped mass,
+matrix-free, and differentiable with respect to both the coefficients and the
+vertex positions, driven by the same lax.custom_linear_solve adjoint as the CPM
+layer so the comparison is between discretizations rather than solvers. It
+handles triangles in 3D and segments in 2D, with barycentric observation as the
+counterpart of the CPM Observer.
+
+Validated before being used for anything: total area converges to 4 pi at second
+order; the eigenvalues of M^-1 K come out 0, 2, 2, 2 and 5.966 five times against
+the exact l(l+1) = 0, 2, 2, 2, 6...; solving (-Delta_s + 1) u = 3z on the unit
+sphere converges at rate 1.71 to the exact u = z; and gradients with respect to
+the reaction coefficient and with respect to vertex positions both match central
+differences to about 1e-9. It differentiates through vertex motion correctly,
+which matters -- the comparison must not be against a straw man.
+
+The controlled smoothness test settles the mechanism. Same unit sphere, two
+closest point maps, only smoothness differing:
+
+  dx      analytic ||dc||   mesh ||dc||   analytic J/floor   mesh J/floor
+  0.160   5.5e-3           2.3e-2        0.8                2.2
+  0.120   5.0e-3           2.2e-2        0.8                2.2
+  0.090   5.1e-3           5.7e-2        0.8                3.6
+  0.070   5.3e-3           4.9e-2        0.8                3.9
+
+The analytic map sits at the noise floor at every resolution. The triangulated
+map is 4 to 11 times worse and its misfit *rises* under refinement. A fixed
+geometric offset cannot produce growth, so this is not the icosphere's 2.2e-3
+geometric error: refining sharpens the stencil's view of the kinks in the cp map,
+and the degree-3 interpolation behind the CP extension loses its accuracy against
+a map that is only piecewise smooth.
+
+That confirms what the bunny was saying and supersedes the medial-axis
+explanation committed earlier: CPM accuracy depends on the smoothness of the
+closest point map, not only on its pointwise accuracy. A smooth neural SDF is a
+better input to this method than an exact triangle mesh.
+
+examples_diffcpm/ex8_fem_comparison.py is the comparison itself, with the PDE
+kept in the form both methods discretize identically, -Delta_s u + c u = f, so
+that the choice of form does not decide the outcome. Part A is the sphere, where
+FEM should and does win on cost. Part B is the topology change, where the measured
+point is sharper than "marching squares is not differentiable": its vertex count
+is an integer that changes whenever the contour crosses a grid node, so a remeshed
+objective is not a continuous function of the shape parameter and finite
+differences of it do not converge as eps shrinks. Results pending.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MDYS3aeAwm4GyMpnHsZdv2
+```
+Fix ex8 part B, and correct an overstatement in part A
+…
+f253f22
+```
+Part A stands and says FEM wins on a fixed smooth surface, but by less than I
+claimed. Matching rows by accuracy rather than by grid size:
+
+  ||dtheta||   CPM dof   FEM dof   CPM s/grad   FEM s/grad
+  ~1.6e-3        7840      2562        0.277        0.085
+  ~1.1e-3       21676     10242        2.85         2.15
+
+About 3x cheaper in unknowns and in time at matched accuracy, both reaching the
+noise floor. The text said "not close" and "roughly an order of magnitude", which
+the numbers do not support: the band is thin and CPM's interpolation is higher
+order than P1, so the structural argument overshoots. Corrected, with the
+conclusion that matters left intact -- CPM's case cannot rest on cost for a fixed
+smooth surface, so it has to rest on part B.
+
+Part B was invalid as first run and is now fixed. Two defects, both mine.
+
+Marching squares returned zero-length segments whenever the contour grazed a grid
+node, because the crossing parameter landed at 0 or 1 and two crossings in a cell
+coincided. A P1 segment stiffness is 1/L, so those gave NaN: 9 of 13 shapes in the
+sweep had no objective at all. Crossings are now clamped away from the endpoints,
+degenerate and duplicate segments are dropped, and the survivors are renumbered so
+every vertex carries positive lumped mass. This is a defect of my extractor, not of
+FEM, and reporting a comparison over NaNs would have been worthless.
+
+The CPM data were taken from the same grid the objective is then evaluated on,
+which drove J to exactly 0 at the true shape. That is the inverse crime, in a file
+written after I had already named and fixed it twice elsewhere. Data now come from
+a grid twice as fine, with noise.
+
+The question is also restructured. Comparing the two methods' gradient values is
+not a fair contrast, since their discretizations differ and they approximate
+different numbers. Each pipeline is now asked the self-contained question of
+whether its own central difference settles as eps shrinks, with the mesh vertex
+count printed beside it for the FEM column, so the reason for any failure is
+visible rather than asserted: the quotient subtracts two objectives computed on
+different numbers of unknowns.
+
+Results pending. What is not claimed is stated in the file: FEM differentiates
+with respect to vertex positions correctly at fixed connectivity, to about 1e-9,
+and is the cheaper method when the shape is fixed. The obstacle is re-extraction.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MDYS3aeAwm4GyMpnHsZdv2
+```
+Fix the real cause of ex8's NaNs: sliver elements, not assembly
+…
+0f6893b
+```
+My first fix was wrong about the mechanism, so it did not work: part B still
+returned NaN at every sweep point. Measured properly instead of theorised:
+
+  s        shortest segment   condition    GMRES     dense
+  0.7000   3.5e-08            4.4e+09      NaN       fine
+  0.7100   2.4e-04            4.3e+05      fine      fine
+
+The assembly was never producing NaN. Clamping the contour crossing away from the
+grid node left a *sliver* segment of length ~1e-6 h, a P1 segment stiffness is
+1/L, and GMRES at restart 50 diverged on the resulting 4.4e9 condition number
+while a dense solve on the same matrix was fine. That also explains the pattern I
+had noticed but not followed up: every "round" value of s failed and every
+off-grid value worked, because the circles' extreme points sit on grid lines
+exactly when s is round.
+
+Two changes. Crossings within 2% of a grid node now snap *to* it, so adjacent
+cells share the node and no sliver exists; a coincident pair then yields a
+zero-length segment that the existing filter removes, which is the correct answer
+when the contour really does pass through the node. And the small polyline systems
+use method="auto", which picks dense LU at a few hundred unknowns, so the
+comparison does not hinge on which Krylov method survives a bad matrix.
+
+After the fix, across s = 0.50 to 0.80: shortest segment 5e-4 to 2e-3, condition
+5e4 to 2e5, every shape finite. At s = 0.70 the solution matches the dense answer
+to all printed digits, so snapping did not move the geometry meaningfully.
+
+Worth recording as a finding in its own right, since it is a genuine cost of
+re-extraction rather than an artefact of my code: marching squares generates
+near-degenerate elements whose conditioning varies erratically with the shape
+parameter. It is one more way an extracted mesh depends discontinuously on shape,
+separate from the vertex-count changes the experiment is about.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MDYS3aeAwm4GyMpnHsZdv2
+```
+Characterise the moving-band obstruction, and add the check that catc…
+…
+03fb7dd
+```
+…hes it
+
+Chasing a spike in ex8's objective produced the sharpest result of this work, and
+it is an obstruction rather than a tuning problem.
+
+The symptom: near s = 0.6925 the CPM objective rose from about 1e6 to 3.6e8 across
+three steps of 5e-4, and the exact adjoint gradient went to +5.3e12 then -2.7e11.
+Two hypotheses were wrong and are recorded as such. It is not band overlap in the
+gap between the circles: narrowing the band from half-width 0.330 to 0.205 left
+max|u| identical to four digits. It is not the closest point solve: residuals are
+2e-16 at every s and identical under a much tighter Newton.
+
+The cause is a spurious eigenvalue. The true operator -Delta_s + 1 has smallest
+eigenvalue exactly 1, the constants on each component. The discrete operator's
+smallest eigenvalue fell 0.812, 0.246, 0.055 as s approached 0.6925, so a mode
+below the true floor passed near zero, and max|u| grew 2.8, 5.6, 19.2 with it.
+
+It is caused by band points that are valid for some shape in the family but not
+for the one being solved. The band was built as the union over s in [0.50, 0.80],
+and 51.7% of its points are farther from the current surface than the
+Ruuth-Merriman radius, up to 0.40 against a radius of 0.18 -- deep inside the
+discs, where a closest point extension means nothing. Rebuilding as the
+intersection over the family removes the spurious mode completely: no stale
+points, smallest eigenvalue 1.6 to 6.6, and max|u| smooth and monotone.
+
+But the intersection band has clearance 0.000: it does not cover the surface, so
+its answer is wrong for a different reason. That is the obstruction, in two
+numbers. Over a family whose shapes move by more than about a band width, no
+single fixed band is both sufficient (covers every shape's stencils) and valid
+(holds no point outside any shape's reach). The union is sufficient and invalid,
+the intersection valid and insufficient, and there is nothing in between to tune.
+
+BandedGrid.stale_fraction is the missing check. clearance tests sufficiency only,
+which is why a union band passes it at 1.000 while carrying 51.7% invalid points.
+Verified: union 0.517 stale at clearance 1.000; intersection 0.000 stale at
+clearance 0.000; neither passes both.
+
+This gives the tapered-weight idea a measured justification and a test: taper to
+zero the weights of points that are stale for the current shape, so the band stays
+nominally the union and is effectively valid, then check that the spurious
+eigenvalue below 1 does not appear.
+
+Consequences for results already reported. ex6 part B's recovery to 1.9e-3 ran on
+a union band with about half its points stale, and succeeded partly because L-BFGS
+jumped from s = 0.750 to 0.426 in one step, over the bad region rather than
+through it. ex8's gradient at s = 0.70 is exact for its discrete objective and that
+objective is corrupted; the smallest eigenvalue is a healthy 1.0 at that s, but the
+spike sits 0.0075 away. Neither result is retracted, and neither should be quoted
+without this.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MDYS3aeAwm4GyMpnHsZdv2
+```
+hody-chang
+deleted the branch
+idea
+September 28, 2026 15:57
+hody-chang
+closed this
+Sep 28, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

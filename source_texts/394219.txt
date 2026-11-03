@@ -1,0 +1,270 @@
+Arbitrary-precision formula parser and solver. Contribute to hozblok/formula development by creating an account on GitHub.
+
+Add RaySurface: all intersections of a ray with an implicit surface by hozblok · Pull Request #44 · hozblok/formula · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+hozblok
+commented
+Jun 10, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Adds RaySurface, a way to find every intersection of a ray with an implicit
+surface F(x, y, z) = 0 at arbitrary precision, alongside Solver and Number.
+It rests on one reduction: substituting a ray r(t) = O + t·d into F = 0
+collapses the surface to a single-variable g(t) = F(O + t·d), so every
+intersection is a real root of g on [t_min, t_max]. formula already
+evaluates F and its partials symbolically at any precision, so g(t) and
+g'(t) = ∇F·d come straight from Solver.evaluate / get_derivative — no new
+symbolic machinery. The rest is univariate root-finding behind one contract.
+API
+```
+from formula import RaySurface
+
+rs  = RaySurface("x*x + y*y - 1", precision=24)
+ts  = rs.intersect((-2, 0, 0), (1, 0, 0), t_max=10)   # sorted [Number, ...] of t
+pts = rs.points((-2, 0, 0), (1, 0, 0), t_max=10)      # the same hits as (x, y, z)
+```
+direction is normalized internally, so t is arc length (distance for a unit
+d); t_min defaults to 0.
+Backends
+Pick one with method=; auto is the default.
+method
+how
+best for
+auto
+dispatch per surface
+unsure / default
+sturm
+interpolate → square-free → Sturm chain → bisect
+algebraic surfaces (quadrics, cones, tori); exact root count
+chebyshev
+Chebyshev fit → monomial proxy → isolate → Newton polish
+smooth analytic (sin, exp, log)
+subdivision
+adaptive derivative-bound exclusion
+general / oscillatory surfaces
+sampling
+grid sign-change + safeguarded Newton
+quick checks; not rigorous (oracle/baseline)
+auto routes algebraic surfaces to sturm and everything else to the deduped
+union of chebyshev and subdivision, so one method's blind spot can't drop a
+root; if sturm raises (e.g. degree over the cap) it falls back to the general
+backends.
+Complex-valued surfaces are handled by sturm (real hits are the common roots of
+Re g and Im g); the other backends are real-only.
+Supporting changes
+Number gains the small public API the backends need: wrap, __neg__,
+.precision, .is_complex, .parts().
+Shared root-finding helpers live in _roots/utils.py (sign, rtsafe,
+merge_close_roots); polynomial ops in _roots/_poly.py; Sturm isolation in
+_roots/_isolate.py.
+Docs (each with an RU mirror)
+doc/ray-surface-intersections.md — usage reference: every backend, worked
+examples, and the limits of applicability with reproducible failure/workaround
+cases.
+doc/ray-surface-design.md — the design decisions and why each backend exists.
+README gets a "Finding all ray–surface intersections" section.
+Tests
+tests/test_intersect*.py — 132 tests covering quadrics/conics, transcendentals,
+oblique/arc-length geometry, endpoint roots, tangent/even-multiplicity cases, the
+degree cap, complex surfaces, and the documented limits. Full suite: 809 passed,
+2 xfailed.
+Known limits (documented, not bugs)
+sturm is exact only up to a moderate algebraic degree (default cap 16);
+equally-spaced interpolation degrades at high degree.
+chebyshev self-validates the fit, not the root isolation; its
+Chebyshev→monomial step is ill-conditioned, so it can undercount densely
+oscillatory surfaces — prefer subdivision/auto there.
+subdivision is practically reliable, not a formal proof: its exclusion test
+is only as good as the estimated bound on g''.
+claude
+and others
+added 9 commits
+June 10, 2026 18:15
+Add RaySurface all-intersections finder (sampling + Sturm backends)
+…
+8677a39
+```
+Ray r(t)=O+t*d reduces F(x,y,z)=0 to g(t)=F(O+t*d); all intersections are
+the real roots of g on [t_min, t_max]. Pluggable backends behind RaySurface:
+- sampling: safeguarded Newton/bisection reference oracle
+- sturm: exact all-roots via interpolation, square-free, Sturm isolation;
+  complex surfaces via gcd of Re g and Im g
+- interval/chebyshev: placeholders for later phases
+
+Reuses Solver.evaluate/get_derivative for g and grad F . d. Tests pending
+local extension build.
+
+https://claude.ai/code/session_015PRdmeBfg6J5JZdsAvXvRT
+```
+Verify backends, clean up, add Number.wrap/neg/precision/parts API
+…
+fe8378d
+```
+- Fix Newton divided-difference denominator (xs[i]-xs[i-j]) in interpolation
+- Add Number.__neg__, .precision, .is_complex, .parts(), .wrap() public API
+- Refactor backends to use the public Number API; pylint 10/10, isort clean
+- All 12 intersection tests pass; full suite 739 passed
+
+https://claude.ai/code/session_015PRdmeBfg6J5JZdsAvXvRT
+```
+Add Chebyshev-proxy backend for general analytic surfaces
+…
+a4cd0dd
+```
+g is fitted with a Chebyshev interpolant (Chebyshev-Gauss nodes), converted to
+a monomial proxy, isolated via the shared Sturm machinery (_isolate.py), then
+simple roots polished on the true g by Newton. auto now routes transcendental
+real surfaces here instead of sampling. Captures even-multiplicity roots.
+
+Extract _isolate.py (sturm_chain/variations/isolate/bisect/sign) shared by the
+sturm and chebyshev backends. pylint 10/10; full suite 742 passed.
+
+https://claude.ai/code/session_015PRdmeBfg6J5JZdsAvXvRT
+```
+Add subdivision backend (variant 7) and self-validating Chebyshev
+…
+01143c2
+```
+- subdivision.py: adaptive Taylor-bound exclusion (|g(m)| <= |g'(m)|h + M2/2 h^2)
+  with M2 estimated from g'; refines simple roots (rtsafe) and tangencies (g'=0),
+  rejecting turning points where g != 0. Pure Python, real surfaces.
+- Chebyshev now self-validates: escalates degree until the spectral tail
+  converges, so oscillatory walls a low degree would miss are captured. Fit
+  reduced to O(m^2).
+- Move shared rtsafe into _isolate; sampling/subdivision reuse it.
+- Tests: corrugated capillary wall x^2+y^2-(1+0.3 sin 4z)^2 (12 roots at k*pi/4),
+  Chebyshev self-validation parity, tangent double roots, polynomial parity,
+  complex-rejection. 21 intersection tests; full suite 748 passed.
+
+https://claude.ai/code/session_015PRdmeBfg6J5JZdsAvXvRT
+```
+Route auto to Sturm for polynomials, Chebyshev+subdivision union othe…
+…
+eb7a92c
+```
+…rwise
+
+auto now reconciles both general backends for non-polynomial real surfaces:
+Chebyshev (precise on smooth roots) is backed up by subdivision (the safety
+net), returning their deduped union so neither method's blind spot drops a
+root. Drop the now-unused surface arg from get_backend.
+
+Test: auto on the corrugated wall returns all 12 roots. Full suite 749 passed.
+
+https://claude.ai/code/session_015PRdmeBfg6J5JZdsAvXvRT
+```
+Document RaySurface all-intersections API in README
+…
+7c0bb81
+```
+Add a section covering the ray->g(t) reduction, the method table
+(auto/sturm/chebyshev/subdivision/sampling), tangent-root recovery, complex
+support via sturm, and the practical-vs-rigorous caveat for subdivision.
+
+https://claude.ai/code/session_015PRdmeBfg6J5JZdsAvXvRT
+```
+Add PR description for RaySurface all-intersections finder
+…
+ab74187
+```
+https://claude.ai/code/session_015PRdmeBfg6J5JZdsAvXvRT
+```
+fix
+0600e54
+Remove the unimplemented interval backend; sync EN/RU docs
+…
+8c27994
+```
+Delete _roots/interval.py and its registry entry; the stub only raised
+NotImplementedError and Sturm already covers the algebraic case. Strip
+interval from all docs and mirror the restructured RaySurface guide into
+the English pairs.
+```
+hozblok
+force-pushed
+the
+claude/gaussian-newton-methods-fPNsz
+branch
+from
+4f3ee12 to
+8c27994
+Compare
+June 23, 2026 09:47
+hozblok
+added
+the
+run-tests
+label
+Jun 23, 2026
+github-advanced-security
+Bot
+found potential problems
+Jun 23, 2026
+View reviewed changes
+Comment thread
+src/formula/intersect.py
+Fixed
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+tests/test_intersect_surfaces.py
+Fixed
+Uh oh!
+There was an error while loading. Please reload this page.
+Refactor _roots shared helpers; fix doc accuracy and rendering
+…
+8968248
+```
+Code:
+- Extract sign/rtsafe/merge_close_roots into _roots/utils.py behind a
+  _RootFunc protocol; move sampling's _sign there as finite_sign.
+- Simplify _isolate (carry Sturm variation counts across splits instead
+  of recomputing them) and _poly (drop redundant break/trim); route
+  sampling and subdivision through utils.
+- Drop an unused import in intersect.py; tidy test comments and imports.
+
+Docs (EN + RU):
+- README: pair_fixed -> pair, correct the log(exp(1)) drift example,
+  "0.000…" -> "0", 3e-50 -> 3e-20.
+- ray-surface-intersections: fence the Quick start block, add the
+  Parameters table header separator, renumber the duplicate "6)".
+- precision-ladder: "any single character" -> "any single letter".
+- tests.md: fix the dangling "Because" sentence.
+```
+hozblok
+changed the title
+Claude/gaussian newton methods f p nsz
+Add RaySurface: all intersections of a ray with an implicit surface
+Jun 23, 2026
+Hide details
+View details
+hozblok
+merged commit 5dd2bab
+into
+master
+Jun 23, 2026
+14 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+run-tests
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

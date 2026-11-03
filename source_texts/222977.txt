@@ -1,0 +1,824 @@
+EigenmodeCoefficient adjoint gradients are consistent with finite-difference gradients when I use a version before PR #1855, but sometimes inconsistent when I use a later version, such as the version at PR #1855 or the current version. T...
+
+Inconsistent finite-difference and adjoint gradients in EigenmodeCoefficient · Issue #2087 · NanoComp/meep · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Inconsistent finite-difference and adjoint gradients in EigenmodeCoefficient #2087
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Inconsistent finite-difference and adjoint gradients in EigenmodeCoefficient#2087
+Copy link
+Labels
+adjoint optimizationbug
+Description
+mawc2019
+opened on May 26, 2022
+Issue body actions
+EigenmodeCoefficient adjoint gradients are consistent with finite-difference gradients when I use a version before PR #1855, but sometimes inconsistent when I use a later version, such as the version at PR #1855 or the current version. This problem does not seem the same as that in Issue #2060 although they might be related. An example is as follows, which has periodic boundary condition on the left and right sides but has no waveguides:
+Before PR #1855, the comparison is
+```
+Finite-difference gradient:  [9.43066378 8.55637235 5.44260038 6.00455709 9.86189984]
+Adjoint gradient:  [9.42658149 8.56925371 5.44463946 5.99088911 9.8554528 ]
+```
+With the current version, the comparison is
+```
+Finite-difference gradient:  [-6.89340813e-01  6.28734749e-01  2.16646787e-01 -3.20364658e+03 1.21335856e+03]
+Adjoint gradient:  [16.80440512 18.16346474 10.00790008 10.54084191 18.28658828]
+```
+The code is as follows.
+```
+import meep as mp
+import meep.adjoint as mpa
+import autograd.numpy as npa
+import numpy as np
+from matplotlib import pyplot as plt
+
+Si,SiO2 = mp.Medium(index=3.4),mp.Medium(index=1.44)
+
+resolution,design_region_resolution = 20,20
+Sx,Sy = 1,8
+design_region_width,design_region_height = 1,1
+pml_layers = [mp.PML(1.0,direction=mp.Y)]
+
+cell_size = mp.Vector3(Sx,Sy)
+
+fcen,fwidth = 1/0.53,0.2/0.53
+source_center,source_size  = [0,-2,0],mp.Vector3(Sx,0)
+src = mp.GaussianSource(frequency=fcen,fwidth=fwidth)
+source = [mp.EigenModeSource(src,eig_band = 1,size = source_size,center=source_center)]
+
+Nx,Ny = int(design_region_resolution*design_region_width),1
+
+design_variables = mp.MaterialGrid(mp.Vector3(Nx,Ny),SiO2,Si,grid_type='U_MEAN')
+design_region = mpa.DesignRegion(design_variables,volume=mp.Volume(center=mp.Vector3(), size=mp.Vector3(design_region_width, design_region_height, 0)))
+
+geometry = [mp.Block(center=design_region.center, size=design_region.size, material=design_variables)]
+
+sim = mp.Simulation(cell_size=cell_size,boundary_layers=pml_layers,geometry=geometry,sources=source,
+                    default_material=SiO2,resolution=resolution)
+
+TE_top = mpa.EigenmodeCoefficient(sim,mp.Volume(center=mp.Vector3(0,2,0),size=mp.Vector3(x=Sx)),mode=1)
+ob_list = [TE_top]
+
+def J(top):
+    power = npa.abs(top) ** 2
+    return power
+
+opt = mpa.OptimizationProblem(simulation = sim,objective_functions = J,objective_arguments = ob_list,
+                              design_regions = [design_region],fcen=fcen,df = 0,nf = 1,decay_by=1e-11)
+
+x0 = 0.5*np.ones(Nx*Ny)
+opt.update_design([x0])
+
+f0, dJ_dn = opt()
+
+db,choose = 1e-4,5
+np.random.seed(20220505)
+
+g_discrete, idx = opt.calculate_fd_gradient(num_gradients=choose,db=db)
+g_discrete = np.array(g_discrete).flatten()
+g_adjoint = dJ_dn.flatten()
+
+print("Randomly selected indices: ",idx)
+print("Finite-difference gradient: ",g_discrete)
+print("Adjoint gradient: ",g_adjoint[idx])
+
+plt.plot(g_discrete,g_adjoint[idx],"ro")
+plt.plot(g_discrete,g_discrete,"g-",label="y=x")
+plt.xlabel("Finite-difference gradient")
+plt.ylabel("Adjoint gradient")
+plt.legend();
+```
+Activity
+Next
+smartalecH commented on May 27, 2022
+smartalecH
+on May 27, 2022
+Collaborator
+More actions
+What happens if you place PML all around?
+mawc2019 commented on May 27, 2022
+mawc2019
+on May 27, 2022
+Last edited by mawc2019
+ContributorAuthor
+More actions
+If PML is placed all around, i.e.,
+, the finite-difference and adjoint gradients are inconsistent even if I use the old version that works for the previous example. The comparison is as follows.
+```
+Finite-difference gradient:  [7.82635093 6.45812632 0.07731389 1.26033203 8.7589992 ]
+Adjoint gradient:  [4.40278041 5.28076178 5.80512295 6.58949921 3.55635715]
+```
+smartalecH
+added
+bug
+on May 28, 2022
+smartalecH commented on May 29, 2022
+smartalecH
+on May 29, 2022
+Last edited by smartalecH
+Collaborator
+More actions
+There's certainly a bug here, but there are also some issues with your test:
+An example is as follows, which has periodic boundary conditions on the left and right sides but has no waveguides:
+Actually, your original example is using metallic boundaries (you don't specify a k_point needed for periodic boundary conditions.
+If PML is placed all around, i.e.,
+Your sources and monitor should stretch into the PML in this case (and you probably want to set is_integrated=True). Technically, it should work without this (even if it doesn't simulate what you think it does) but this particular error seems more related to #2060 (although the above issue with metallic boundary conditions may indeed be different...)
+Can you force all your simulations (forward, adjoint, and finite difference checks) to run for at least 1500 meep time units? If this works, this will tell us what part of #1855 is acting flaky.
+Note you can use this parameter in the OptimizationProblem class:
+meep/python/adjoint/optimization_problem.py
+Line 33
+in
+543e8e7
+minimum_run_time=0,
+mawc2019 commented on May 29, 2022
+mawc2019
+on May 29, 2022
+ContributorAuthor
+More actions
+Your sources and monitor should stretch into the PML in this case (and you probably want to set is_integrated=True).
+The source and the monitor now stretch into the PML and is_integrated=True is added to GaussianSource. The structure is as follows.
+Can you force all your simulations (forward, adjoint, and finite difference checks) to run for at least 1500 meep time units?
+When I use the old version, the finite-difference and adjoint gradients are consistent whether I set minimum_run_time=1500 or not. But when I use the current version, the finite-difference and adjoint gradients are inconsistent whether I set minimum_run_time=1500 or not. The comparison between the inconsistent gradients at minimum_run_time=1500 is as follows.
+```
+Finite-difference gradient:  [ 1.90889274e+00  1.96016845e+00 -8.90496369e-01 -3.04765661e+03 -9.33144553e+02]
+Adjoint gradient:  [ 8.25735964  7.81446443  8.67928892 13.26996242  7.81785958]
+```
+Actually, your original example is using metallic boundaries (you don't specify a k_point needed for periodic boundary conditions.
+I see. Thanks!
+smartalecH commented on May 29, 2022
+smartalecH
+on May 29, 2022
+Collaborator
+More actions
+Ok good to know. So something is up with the recombination step, not the dft convergence.
+smartalecH commented on May 29, 2022
+smartalecH
+on May 29, 2022
+Collaborator
+More actions
+Do you have the same issue if you use FourierFields rather than EigenmodeCoefficient?
+mawc2019 commented on May 29, 2022
+mawc2019
+on May 29, 2022
+ContributorAuthor
+More actions
+Do you have the same issue if you use FourierFields rather than EigenmodeCoefficient?
+I replace EigenmodeCoefficient with FourierFields of mp.Ex in the above example, and replace power = npa.abs(top)**2 with power = npa.sum(npa.abs(top)**2) in the function J. As before, I set decay_by=1e-11 and minimum_run_time=1500. With the current version of Meep, the finite-difference and adjoint gradients are inconsistent. The comparison is as follows.
+```
+Finite-difference gradient:  [ 1.20859623e+01  1.23650194e+01 -7.49215643e+00 -1.21929073e+04  3.11094800e+03]
+Adjoint gradient:  [49.323058   48.91459837 27.27281404 38.19446389 49.37917127]
+```
+With the old version of Meep, the simulation does not stop during Calculating gradient....
+In a previous example for FourierFields, we can see that PR #1855 causes inconsistency between finite-difference and adjoint gradients. With the current version of Meep, even if I set decay_by=1e-11 and minimum_run_time=1500, the gradients are still inconsistent. With the old version, even if I set decay_by=1e-6 without minimum_run_time=1500, the gradients are consistent.
+smartalecH
+added
+adjoint optimization
+on Jun 2, 2022
+mawc2019 commented on Jun 11, 2022
+mawc2019
+on Jun 11, 2022
+Last edited by mawc2019
+ContributorAuthor
+More actions
+Actually, your original example is using metallic boundaries (you don't specify a k_point needed for periodic boundary conditions.
+In the previous example with decay_by=1e-11 and minimum_run_time=1500, when k_point=mp.Vector3() is added to mp.Simulation, even the old version of Meep does not work normally. The comparison of gradients is as follows.
+```
+Finite-difference gradient:  [7.24780821 7.24986543 7.25170056 7.25417369 7.25651753]
+Adjoint gradient:  [9.9844742  9.98448019 9.98448193 9.98447942 9.98447471]
+```
+The discrepancy becomes more obvious when resolution,design_region_resolution = 20,20 are increased to resolution,design_region_resolution = 40,40. The comparison of gradients is as follows.
+```
+Finite-difference gradient:  [-0.95476104 -0.95534628 -0.95402034 -0.95552225 -0.95260051]
+Adjoint gradient:  [4.66512651 4.66512718 4.66512843 4.66512823 4.66512813]
+```
+oskooi commented on Jul 11, 2022
+oskooi
+on Jul 11, 2022
+Collaborator
+More actions
+I am also seeing a large mismatch in the adjoint and finite-difference gradients via the directional derivative in a random direction for a 3D test problem. (This test is planned to be used as a unit test for the adjoint solver after #2127 is merged.) The test involves an EigenModeCoefficient objective function and a 2D binary grating with periodic boundaries in $xy$ and PML in $z$. The objective function is based on the transmittance of the m=+1 diffraction order in the $x$ direction based on the approach described in #2054 (comment). The results are generated using the current master branch (5e42685).
+Following a suggestion from @smartalecH, I made sure to choose a small decay_by parameter of 1e-12 (default is 1e-11) in the OptimizationProblem object to ensure that the DFT fields have converged. The difference in the two values does not go away with increasing resolution either. Both the sign and magnitude are different:
+```
+directional derivative:, -8.075997821279038e-07 (adjoint solver), 1.8491152732266758e-07 (finite difference)
+```
+```
+import meep as mp
+import meep.adjoint as mpa
+import math
+import numpy as np
+from autograd import numpy as npa
+from autograd import tensor_jacobian_product
+
+
+resolution = 80  # pixels/μm                                                                                                                                 
+
+ng = 2.5
+glass = mp.Medium(index=ng)
+
+theta_d = math.radians(40.0)
+
+wvl = 0.5  # wavelength                                                                                                                                      
+fcen = 1/wvl
+
+sx = wvl/math.sin(theta_d)  # period in x                                                                                                                    
+sy = 0.5*wvl  # period in y                                                                                                                                  
+
+m = 1  # diffraction order in x direction                                                                                                                    
+
+# wavevector of transmitted order in substrate in xz plane                                                                                                   
+kdiff = mp.Vector3(m/sx,0,((fcen*ng)**2-(m/sx)**2)**0.5)
+
+dpml = 1.0  # PML thickness                                                                                                                                  
+dsub = 3.0  # substrate thickness                                                                                                                            
+dair = 3.0  # air padding                                                                                                                                    
+hcyl = 0.2  # height of cylinder                                                                                                                             
+rcyl = 0.1  # radius of cylinder
+
+sz = dpml+dair+hcyl+dsub+dpml
+
+cell_size = mp.Vector3(sx,sy,sz)
+
+design_region_size = mp.Vector3(sx,sy,0)
+design_region_resolution = int(2*resolution)
+Nx = int(design_region_size.x*design_region_resolution)
+Ny = int(design_region_size.y*design_region_resolution)
+
+boundary_layers = [mp.PML(thickness=dpml,direction=mp.Z)]
+
+# periodic boundary conditions                                                                                                                               
+k_point = mp.Vector3()
+
+# planewave at normal incidence in +z direction                                                                                                              
+# plane of incidence: XZ                                                                                                                                     
+# polarization: (1) S/TE: Ey or (2) P/TM: Ex                                                                                                                 
+src_cmpt = mp.Ex
+src_pt = mp.Vector3(0,0,-0.5*sz+dpml)
+sources = [mp.Source(src=mp.GaussianSource(fcen,fwidth=0.2*fcen),
+                     size=mp.Vector3(sx,sy,0),
+                     center=src_pt,
+                     component=src_cmpt)]
+
+substrate = [mp.Block(size=mp.Vector3(mp.inf,mp.inf,dpml+dsub),
+                      center=mp.Vector3(0,0,0.5*sz-0.5*(dpml+dsub)),
+                      material=glass)]
+
+if src_cmpt == mp.Ey:
+    mode_parity = mp.ODD_Y
+    symmetries = [mp.Mirror(direction=mp.Y,phase=-1)]
+elif src_cmpt == mp.Ex:
+    mode_parity = mp.EVEN_Y
+    symmetries = [mp.Mirror(direction=mp.Y)]
+else:
+    mode_parity = mp.NO_PARITY
+    symmetries = []
+
+def adjoint_solver(design_params, need_gradient=True):
+    matgrid = mp.MaterialGrid(mp.Vector3(Nx,Ny),
+                              mp.air,
+                              glass,
+                              weights=np.ones((Nx,Ny)))
+
+    matgrid_region = mpa.DesignRegion(matgrid,
+                                      volume=mp.Volume(center=mp.Vector3(0,0,0.5*sz-dpml-dsub-0.5*hcyl),
+                                                       size=mp.Vector3(design_region_size.x,
+                                                                       design_region_size.y,
+                                                                       hcyl)))
+
+    matgrid_geometry = [mp.Block(center=matgrid_region.center,
+                                 size=matgrid_region.size,
+                                 material=matgrid)]
+
+    geometry = substrate + matgrid_geometry
+
+    sim = mp.Simulation(resolution=resolution,
+                        cell_size=cell_size,
+                        sources=sources,
+                        geometry=geometry,
+                        boundary_layers=boundary_layers,
+                        k_point=k_point,
+                        symmetries=symmetries,
+                        eps_averaging=False)
+
+    obj_list = [mpa.EigenmodeCoefficient(sim,
+                                         mp.Volume(center=mp.Vector3(0,0,0.5*sz-dpml),
+                                                   size=mp.Vector3(sx,sy,0)),
+                                         1,
+                                         eig_parity=mode_parity,
+                                         kpoint_func=lambda *not_used: kdiff)]
+
+    # objective function                                                                                                                                     
+    def J(mode_coeff):
+        return npa.power(npa.abs(mode_coeff),2)
+
+    opt = mpa.OptimizationProblem(simulation=sim,
+                                  objective_functions=J,
+                                  objective_arguments=obj_list,
+                                  design_regions=[matgrid_region],
+                                  frequencies=[fcen],
+                                  decay_by=1e-12)
+
+    if need_gradient:
+        f, dJ_du = opt([design_params])
+        return f, dJ_du
+    else:
+        f = opt([design_params], need_gradient=False)
+
+if __name__ == '__main__':
+    xcoord = np.linspace(-0.5*design_region_size.x,0.5*design_region_size.x,Nx)
+    ycoord = np.linspace(-0.5*design_region_size.y,0.5*design_region_size.y,Ny)
+    xv, yv = np.meshgrid(xcoord,ycoord)
+
+    # cylindrical grating                                                                                                                                    
+    p = np.where(np.sqrt(np.square(xv) + np.square(yv)) < rcyl, 0.9, 0.)
+    p = p.flatten(order='F')
+
+    # ensure reproducible results                                                                                                                            
+    rng = np.random.RandomState(9861548)
+
+    # random epsilon perturbation for design region                                                                                                          
+    deps = 1e-5
+    dp = deps*rng.rand(Nx*Ny)
+
+    # compute objective value and gradient for unperturbed design                                                                                            
+    unperturbed_val, unperturbed_grad = adjoint_solver(p)
+
+    # compute objective value for perturbed design                                                                                                           
+    perturbed_val = adjoint_solver(p+dp, False)
+
+    # compare directional derivative                                                                                                                         
+    if unperturbed_grad.ndim < 2:
+        unperturbed_grad = np.expand_dims(unperturbed_grad,axis=1)
+    adj_dd = (dp[None,:]@unperturbed_grad).flatten()
+    fd_dd = perturbed_val-unperturbed_val
+    print("directional derivative:, {} (adjoint solver), {} (finite difference)".format(adj_dd[0],fd_dd[0]))
+```
+oskooi commented on Jul 12, 2022
+oskooi
+on Jul 12, 2022
+Collaborator
+More actions
+TLDR: I do not think there is much we can do here until #1951 is merged.
+I think the main reason these errors in the adjoint gradient have thus far gone undetected (regardless of the type and dimensionality of the test problem) is because all of the unit tests in python/tests/test_adjoint_solver.py involve a random design region which contain a continuum of values for the weights of the MaterialGrid. However, @mawc2019's original test in this issue as well as my test in the previous comment involved a binarized design which has not been previously tested because subpixel smoothing of the MaterialGrid, specifically the back propagation of the gradients from the Yee grid to the MaterialGrid, is not yet available.
+Recall that to get a gradient test of a binarized design in #1854 to show agreement between the adjoint solver and the finite difference, we had to do two things: (1) apply a conic filter to the original ring-resonator design and (2) use #1951 (which has yet to be merged) in order to turn on subpixel smoothing of the DesignRegion with beta=mp.inf.
+mawc2019 commented on Jul 13, 2022
+mawc2019
+on Jul 13, 2022
+ContributorAuthor
+More actions
+Two types of problems are presented in this Issue.
+One of them is illustrated by the mismatch between finite-difference and adjoint gradients in the original test. This mismatch is absent when I use a version of Meep before #1855, such as the released version v1.23.0.
+The other problem is illustrated here, which indicates that, even with an old version, such as v1.23.0, the mismatch can occur when k_point=mp.Vector3() is added to mp.Simulation. Without k_point=mp.Vector3(), the finite-difference and adjoint gradients are consistent.
+However, in @oskooi 's example, when I remove the k_point option in mp.Simulation and use the old version of Meep, the finite-difference and adjoint gradients still have different magnitude although the sign becomes the same:
+directional derivative:, 4.3260779131860476e-07 (adjoint solver), 6.610618253494183e-08 (finite difference)
+oskooi commented on Jul 14, 2022
+oskooi
+on Jul 14, 2022
+Collaborator
+More actions
+Actually, it looks like I misspoke. If the random design region in test_adjoint_solver.py is replaced with a binarized circle (shown below), all the unit tests still pass without #1951. Thus, the bug is probably not related to subpixel smoothing of the MaterialGrid. The bug in the adjoint solver could be related to k_point, as @mawc2019 suggests, even though we already have a unit test for this in test_complex_fields.
+```
+diff --git a/python/tests/test_adjoint_solver.py b/python/tests/test_adjoint_solver.py
+index f7db4d15..0d92d7f5 100644
+--- a/python/tests/test_adjoint_solver.py
++++ b/python/tests/test_adjoint_solver.py
+@@ -37,12 +37,17 @@ class TestAdjointSolver(ApproxComparisonTestCase):
+         cls.Nx = int(cls.design_region_size.x*cls.design_region_resolution)
+         cls.Ny = int(cls.design_region_size.y*cls.design_region_resolution)
+ 
++        xcoord = np.linspace(-0.5*cls.design_region_size.x,0.5*cls.design_region_size.x,cls.Nx)
++        ycoord = np.linspace(-0.5*cls.design_region_size.y,0.5*cls.design_region_size.y,cls.Ny)
++        xv, yv = np.meshgrid(xcoord,ycoord)
++
++        # binarized circle (actually, a cylinder)
++        rcyl = 0.4
++        cls.p = np.where(np.sqrt(np.square(xv) + np.square(yv)) < rcyl, 0.5, 0.)
++        cls.p = cls.p.flatten(order='F')
++
+         # ensure reproducible results
+         rng = np.random.RandomState(9861548)
+ 
+-        # random design region
+-        cls.p = 0.5*rng.rand(cls.Nx*cls.Ny)
+-
+         # random perturbation for design region
+         deps = 1e-5
+         cls.dp = deps*rng.rand(cls.Nx*cls.Ny)
+@@ -273,8 +278,9 @@ class TestAdjointSolver(ApproxComparisonTestCase):
+             adj_dd = (self.dp[None,:]@unperturbed_grad).flatten()
+             fnd_dd = perturbed_val-unperturbed_val
+             print("directional derivative:, {} (adjoint solver), {} (finite difference)".format(adj_dd,fnd_dd))
+-            tol = 0.07 if mp.is_single_precision() else 0.006
++            tol = 0.07 if mp.is_single_precision() else 0.008
+             self.assertClose(adj_dd,fnd_dd,epsilon=tol)
+```
+mawc2019 commented on Jul 14, 2022
+mawc2019
+on Jul 14, 2022
+ContributorAuthor
+More actions
+even though we already have a unit test for this in test_complex_fields.
+That test is for the FourierFields adjoint solver, but other adjoint solvers do not have unit tests with k_point. Although the results for FourierFields are often acceptable, in my experience, including k_point still makes the results a little worse.
+By the way, the number of points in the simulation cell increases when k_point is included. Could those extra points cause the mismatch between finite-difference and adjoint gradients?
+1 remaining item
+Load more
+mawc2019 commented on Jul 14, 2022
+mawc2019
+on Jul 14, 2022
+ContributorAuthor
+More actions
+I doubled the resolution in my previous test. It did not help but made things worse. I just increased the resolution further to resolution,design_region_resolution = 80,80, but the mismatch between finite-difference and adjoint gradients remains:
+```
+Finite-difference gradient:  [-0.18707753 -0.18689045 -0.18686273 -0.18710259 -0.18763169]
+Adjoint gradient:  [3.5904677  3.59046815 3.59046799 3.59046784 3.59046829]
+```
+The mismatch is not reduced compared with the case of resolution,design_region_resolution = 20,20. Here, the tests are run on the released version v1.23.0. When I use the current version in the master branch, the Calculating gradient... step does not stop. By the way, compared with v1.23.0, adjoint simulations sometimes seem more difficult to reach convergence when the current version of Meep is used.
+smartalecH commented on Jul 14, 2022
+smartalecH
+on Jul 14, 2022
+Last edited by smartalecH
+Collaborator
+More actions
+There is way too much going on here. Unfortunately, we keep posting test cases that don't clearly highlight a particular piece of the adjoint code that could have a bug. Instead, all of the test cases above involve multiple features/aspects of our increasingly complex adjoint solver, which don't really reveal anything new... I'm going to do my best to parse through everything and outline a plan of action.
+Potential bugs introduced by #1855
+This was a big PR that made two important changes: (1) it localized the computation of the adjoint gradient to each processor owning the respective DFT chunks; (2) it expanded the default size of adjoint DFT chunks to include an additional halo needed for localized gradient computation.
+There are many ways this could have introduced a bug. For example, we had to modify the DFT convergence criteria to only check "non-halo" points within each chunk (see here). So some of the convergence issues described above could be due to this... (although we somewhat investigated this already at the beginning of this issue...)
+Similarly, the "recombination step" requires us to restrict and interpolate over the Yee grid throughout our chunk. This means we sometimes need to pull points outside of the chunk, which hopefully refers to points within the halo. This halo is not well-defined for chunks on the edge of a cell with periodic boundary conditions. More importantly, meep lacks good data structures to check if we are accessing invalid elements of the array, and we have no good error checking within this piece of the code (see here).
+We should resolve any potential issues here first before fixing any other bugs that also existed before we merged #1855.
+Potential problems due to periodic boundary conditions
+Properly implementing the adjoint derivative with Bloch boundary conditions is rather hairy for two reasons: (1) we want to use the same solver for both runs, which means we need to somehow fake Lorentz reciprocity by modifying the setup of the adjoint run; (2) the maxwell operator is modified to incorporate the Bloch boundary conditions, and this modified operator needs to be factored into the $\frac{\partial \widehat{A}}{\partial \rho}$ term of the recombination step.
+Let me expand a bit. The traditional (continuous-variable) Maxwell operator is of the form
+$$
+\overbrace{
+\begin{bmatrix}
+-i\omega\varepsilon & \nabla\times \\
+\nabla\times & i\omega\mu
+\end{bmatrix}}^{A}
+\begin{bmatrix}
+E \\
+H
+\end{bmatrix} =
+\begin{bmatrix}
+J \\
+K
+\end{bmatrix}
+$$
+To use the same Maxwell solver for the forward and adjoint runs, we have to show that $(Ax_1,x_2) = (x_1,Ax_2)$, (which is just Lorentz reciprocity). If $\varepsilon$ and $\mu$ are complex symmetric (i.e. reciprocal), and the surface term that pops out of the integration by parts also cancels, then the operator is complex symmetric and we can use the same solver. If we are using metallic boundary conditions, then the resulting surface fields go to zero and cancel (even in the presence of PML which is modeled as a complex symmetric material)
+When we use Bloch periodic boundary conditions, we assume the fields are of a particular form, and the operator now becomes (See ch. 3 in Molding the Flow of Light):
+$$
+\overbrace{
+\begin{bmatrix}
+-i\omega\varepsilon & (i\mathbf{k}+\nabla)\times \\
+(i\mathbf{k}+\nabla)\times & i\omega\mu
+\end{bmatrix}}^{\widehat{A}}
+\begin{bmatrix}
+E_{\mathbf{k}} \\
+H_{\mathbf{k}}
+\end{bmatrix} =
+\begin{bmatrix}
+J_{\mathbf{k}} \\
+K_{\mathbf{k}}
+\end{bmatrix}
+$$
+This extra $\mathbf{k}$ (the k_point) poses a problem when trying to show that $(\widehat{A}x_1,x_2) = (x_1,\widehat{A}x_2)$. The cross product is antisymmetric, so we need to flip the sign of our k_point to ensure these terms properly cancel (which we do). However, we are no longer using metallic boundary conditions (at all the boundaries), so the surface term above might not cancel!
+(note that with cylindrical symmetries, we have a similar factor $im$ in place of the $i\mathbf{k}$ that also requires adjusting, which we do here.)
+Furthermore, we need to be careful with how we recombine the $D$ fields near the Bloch boundaries themselves.
+We should look closely at these issues after we debug the potential issues introduced by #1855. My suggestion would be to first check the halo is what we want it to be, and that the restriction and interpolation steps never try to reach points they shouldn't.
+👍React with 👍3Reacted by Ardavan Oskooi, Wenchao Ma and Hongfeng Ma
+stevengj commented on Jul 14, 2022
+stevengj
+on Jul 14, 2022
+Collaborator
+More actions
+@oskooi, I would start with Wenchao's test and make sure you can reproduce it. Then you can modify it in various ways and see if the problem goes away (e.g. shrink the design region so that it doesn't touch the edge of the cell).
+mawc2019 commented on Jul 29, 2022
+mawc2019
+on Jul 29, 2022
+Last edited by mawc2019
+ContributorAuthor
+More actions
+Apart from the potential problems due to #1855 and periodic boundary conditions as summarized by @smartalecH, another problem may exist.
+The following example is a 90°-rotated version of the original example. It does not have the k_point option and hence the metallic boundary is assumed in addition to PML. The geometric structure is as follows.
+I ran this example using the latest released version before #1855, i.e., v1.23.0. The results are as follows, which illustrate the mismatch between finite-difference and adjoint gradients.
+```
+Finite-difference gradient:  [9.43754279 8.56758566 5.44340514 5.98992949 9.86774399]
+Adjoint gradient:  [6.39471621 7.18741416 7.15714477 5.42592305 6.36863286]
+```
+In contrast, the finite-difference and adjoint gradients are consistent in the original test when v1.23.0 is used. Moreover, both finite-difference and adjoint gradients in the test here are different from those in the original test. In other words, the 90° rotation changes the results of both forward and adjoint simulation, which then gives incorrect results.
+The code is as follows.
+```
+import meep as mp
+import meep.adjoint as mpa
+import autograd.numpy as npa
+import numpy as np
+from matplotlib import pyplot as plt
+
+Si,SiO2 = mp.Medium(index=3.4),mp.Medium(index=1.44)
+
+resolution,design_region_resolution = 20,20
+Sx,Sy = 8,1
+design_region_width,design_region_height = 1,1
+pml_layers = [mp.PML(1.0,direction=mp.X)]
+
+cell_size = mp.Vector3(Sx,Sy)
+
+fcen,fwidth = 1/0.53,0.2/0.53
+src = mp.GaussianSource(frequency=fcen,fwidth=fwidth)
+source = [mp.EigenModeSource(src,eig_band=1,size=mp.Vector3(0,Sy,0),center=[-2,0,0])]
+
+Nx,Ny = 1,int(design_region_resolution*design_region_width)
+
+design_variables = mp.MaterialGrid(mp.Vector3(Nx,Ny),SiO2,Si,grid_type='U_MEAN')
+design_region = mpa.DesignRegion(design_variables,
+                                 volume=mp.Volume(center=mp.Vector3(), 
+                                                  size=mp.Vector3(design_region_height,design_region_width)))
+
+geometry = [mp.Block(center=design_region.center, size=design_region.size, material=design_variables)]
+
+sim = mp.Simulation(cell_size=cell_size,boundary_layers=pml_layers,geometry=geometry,sources=source,
+                    default_material=SiO2,resolution=resolution)
+
+emc = mpa.EigenmodeCoefficient(sim,mp.Volume(center=mp.Vector3(2,0,0),size=mp.Vector3(y=Sy)),mode=1)
+ob_list = [emc]
+
+def J(emc):
+    power = npa.abs(emc) ** 2
+    return power
+
+opt = mpa.OptimizationProblem(simulation = sim,objective_functions = J,objective_arguments = ob_list,
+                              design_regions = [design_region],fcen=fcen,df = 0,nf = 1,
+                              decay_by=1e-12,minimum_run_time=2000)
+
+x0 = 0.5*np.ones(Nx*Ny)
+opt.update_design([x0])
+
+plt.figure()
+opt.plot2D(True)
+plt.show()
+
+f0, dJ_dn = opt()
+
+db,choose = 1e-4,5
+np.random.seed(20220505)
+
+g_discrete, idx = opt.calculate_fd_gradient(num_gradients=choose,db=db)
+g_discrete = np.array(g_discrete).flatten()
+g_adjoint = dJ_dn.flatten()
+
+print("Randomly selected indices: ",idx)
+print("Finite-difference gradient: ",g_discrete)
+print("Adjoint gradient: ",g_adjoint[idx])
+
+plt.plot(g_discrete,g_adjoint[idx],"ro")
+plt.plot(g_discrete,g_discrete,"g-",label="y=x")
+plt.xlabel("Finite-difference gradient")
+plt.ylabel("Adjoint gradient")
+plt.legend();
+```
+smartalecH commented on Jul 29, 2022
+smartalecH
+on Jul 29, 2022
+Last edited by smartalecH
+Collaborator
+More actions
+@mawc2019 can you run the same test as above, but limit the design region's width such that it does not touch the boundaries?
+mawc2019 commented on Jul 29, 2022
+mawc2019
+on Jul 29, 2022
+ContributorAuthor
+More actions
+In the example just above, the monitor width is decreased from y=Sy to y=Sy-0.2. In the original example, the monitor width is decreased from x=Sx to x=Sx-0.2. Now in both examples, the monitors do not touch the boundaries and the geometric structures are as follows.
+However, during Calculating gradient..., RuntimeError: meep: simulation fields are NaN or Inf occurs.
+smartalecH commented on Jul 29, 2022
+smartalecH
+on Jul 29, 2022
+Collaborator
+More actions
+Sorry -- can you keep the monitors the same size, but reduce the size of the design region?
+mawc2019 commented on Jul 29, 2022
+mawc2019
+on Jul 29, 2022
+Last edited by mawc2019
+ContributorAuthor
+More actions
+Sorry, the tests for shrinking design regions are here. In both examples, after design_region_height shrinks from 1 to 0.8, the geometric structures are as follows, which are similar to the structures without shrinking.
+The finite-difference and adjoint gradients are still consistent in this modified original example and still inconsistent in this modified 90°-rotated example. For the latter case, the comparison is as follows.
+```
+Finite-difference gradient:  [ 2.42609315  1.6959052  -1.41939008 -0.8714431   2.79806534]
+Adjoint gradient:  [ 0.73320453  0.78333414 -0.25884852 -0.25319041  0.85056165]
+```
+In both examples, after design_region_width shrinks from 1 to 0.8, the geometric structures are as follows, where the design regions do not touch the boundaries.
+In both cases, finite-difference and adjoint gradients nearly diverge. In this modified original example, the comparison is as follows.
+```
+Finite-difference gradient:  [ 9.15765240e+303  1.10346033e+303 -6.57980032e+303  1.94912069e+304
+  1.71005928e+304]
+Adjoint gradient:  [-5.24587762e+305 -5.96712014e+305 -5.96713733e+305 -7.40025580e+305
+ -5.49714038e+305]
+```
+In this modified 90°-rotated example, the comparison is as follows.
+```
+Finite-difference gradient:  [ 9.15768004e+303  1.10261112e+303 -6.57969476e+303  1.94908125e+304
+  1.71005002e+304]
+Adjoint gradient:  [-5.24583644e+305 -5.96707330e+305 -5.96709049e+305 -7.40019771e+305
+ -5.49709722e+305]
+```
+Unlike the cases without divergence where the adjoint gradients change obviously when the structure is rotated by 90°, in the cases where divergence happens, the relative change in the adjoint gradients is negligible when the structure is rotated by 90°.
+mawc2019 commented on Aug 8, 2022
+mawc2019
+on Aug 8, 2022
+Last edited by mawc2019
+ContributorAuthor
+More actions
+Another feature of the incorrect EigenmodeCoefficient adjoint gradients is as follows.
+When the periodic boundary condition is assumed and the design region touches the periodic boundaries (with k_point=mp.Vector3()), the adjoint gradient with respect to the leftmost design pixel is distinct from the adjoint gradients with respect to other pixels. When the design region does not touch those boundaries or when metallic boundaries are assumed (without k_point=mp.Vector3()), this problem does not appear. The same situation happens if the eigenmode coefficient monitor is replaced with a Fourier fields monitor.
+Here are some tests based on the original example, where the design region touches boundaries. Here, the resolution and design_region_resolution are increased to 40, and the released version v1.23.0 is used.
+For the FourierFields adjoint gradients, when k_point=mp.Vector3() is present, the situation is the same as above, i.e., the adjoint gradient with respect to the leftmost design pixel is distinct from the adjoint gradients with respect to other pixels. When k_point=mp.Vector3() is absent, sometimes the problem disappears, but sometimes, with the same code, the adjoint gradient with respect to the rightmost design pixel is distinct from the adjoint gradients with respect to other pixels.
+MarkMa1990 commented on Aug 10, 2022
+MarkMa1990
+on Aug 10, 2022
+More actions
+There is way too much going on here. Unfortunately, we keep posting test cases that don't clearly highlight a particular piece of the adjoint code that could have a bug. Instead, all of the test cases above involve multiple features/aspects of our increasingly complex adjoint solver, which don't really reveal anything new... I'm going to do my best to parse through everything and outline a plan of action.
+Potential bugs introduced by #1855
+This was a big PR that made two important changes: (1) it localized the computation of the adjoint gradient to each processor owning the respective DFT chunks; (2) it expanded the default size of adjoint DFT chunks to include an additional halo needed for localized gradient computation.
+There are many ways this could have introduced a bug. For example, we had to modify the DFT convergence criteria to only check "non-halo" points within each chunk (see here). So some of the convergence issues described above could be due to this... (although we somewhat investigated this already at the beginning of this issue...)
+Similarly, the "recombination step" requires us to restrict and interpolate over the Yee grid throughout our chunk. This means we sometimes need to pull points outside of the chunk, which hopefully refers to points within the halo. This halo is not well-defined for chunks on the edge of a cell with periodic boundary conditions. More importantly, meep lacks good data structures to check if we are accessing invalid elements of the array, and we have no good error checking within this piece of the code (see here).
+We should resolve any potential issues here first before fixing any other bugs that also existed before we merged #1855.
+Potential problems due to periodic boundary conditions
+Properly implementing the adjoint derivative with Bloch boundary conditions is rather hairy for two reasons: (1) we want to use the same solver for both runs, which means we need to somehow fake Lorentz reciprocity by modifying the setup of the adjoint run; (2) the maxwell operator is modified to incorporate the Bloch boundary conditions, and this modified operator needs to be factored into the ∂A^∂ρ term of the recombination step.
+Let me expand a bit. The traditional (continuous-variable) Maxwell operator is of the form
+[−iωε∇×∇×iωμ]⏞A[EH]=[JK]
+To use the same Maxwell solver for the forward and adjoint runs, we have to show that (Ax1,x2)=(x1,Ax2), (which is just Lorentz reciprocity). If ε and μ are complex symmetric (i.e. reciprocal), and the surface term that pops out of the integration by parts also cancels, then the operator is complex symmetric and we can use the same solver. If we are using metallic boundary conditions, then the resulting surface fields go to zero and cancel (even in the presence of PML which is modeled as a complex symmetric material)
+When we use Bloch periodic boundary conditions, we assume the fields are of a particular form, and the operator now becomes (See ch. 3 in Molding the Flow of Light):
+[−iωε(ik+∇)×(ik+∇)×iωμ]⏞A^[EkHk]=[JkKk]
+This extra k (the k_point) poses a problem when trying to show that (A^x1,x2)=(x1,A^x2). The cross product is antisymmetric, so we need to flip the sign of our k_point to ensure these terms properly cancel (which we do). However, we are no longer using metallic boundary conditions (at all the boundaries), so the surface term above might not cancel!
+(note that with cylindrical symmetries, we have a similar factor im in place of the ik that also requires adjusting, which we do here.)
+Furthermore, we need to be careful with how we recombine the D fields near the Bloch boundaries themselves.
+We should look closely at these issues after we debug the potential issues introduced by #1855. My suggestion would be to first check the halo is what we want it to be, and that the restriction and interpolation steps never try to reach points they shouldn't.
+can I ask do you have a plan of when are you going to check this issue? Thank you :)
+👍React with 👍1Reacted by Rafael de la Fuente Herrezuelo
+smartalecH commented on Aug 14, 2022
+smartalecH
+on Aug 14, 2022
+Last edited by smartalecH
+Collaborator
+More actions
+@mochen4 what if we tackle this issue the same way we did in #2193? Specifically, can you run @mawc2019's example above before and after #1855 and ensure that both the forward and adjoint fields remain the same?
+mochen4 commented on Aug 17, 2022
+mochen4
+on Aug 17, 2022
+Collaborator
+More actions
+@mochen4 what if we tackle this issue the same way we did in #2193? Specifically, can you run @mawc2019's example above before and after #1855 and ensure that both the forward and adjoint fields remain the same?
+I ran that code after #1855 and before #1855 (using #1959). Both the forward fields and adjoint fields actually agreed before and after #1855. On the other hand, both adjoint gradients and fd_gradients changed, with the fd_gradient after #1855 not making sense.
+Meanwhile, #1855 actually solved a potential issue. Before #1855, the gradient loop went over points with y from -0.5 to 0.5; but the field values actually corresponded to points from y=-0.45 to y=0.5. Thus, throughout the loop, the points locations were "out of sync" with field values; and eventually the loop went through all fields first, and started to have garbage values for the remaining locations. After #1855, the points locations started at y=-0.45, and the loop went through fields and locations in sync.
+smartalecH commented on Aug 17, 2022
+smartalecH
+on Aug 17, 2022
+Collaborator
+More actions
+Both the forward fields and adjoint fields actually agreed before and after #1855.
+Great! We can confirm that even after #1855, the adjoint sources themselves are still fine (as expected) and that the dft convergence is probably fine.
+Meanwhile, #1855 actually solved a potential issue...After #1855, the points locations started at y=-0.45, and the loop went through fields and locations in sync.
+Woohoo! This makes sense as we are now using the same looping macros that the DFT fields use to update.
+fd_gradient after #1855 not making sense.
+Can you elaborate on this point? Is it possible that the adjoint gradients themselves are fine, but the "ground truth" we've been using (i.e. the finite differences) is somehow flawed (have we recently tried different step sizes or a Richardson extrapolation)?
+Even if there is still a bug with the adjoint routine, at least we've narrowed it down to the following two things: (1) we may not be handling the boundaries of the design region properly (particularly if we are next to a metallic or periodic boundary condition); (2) there may be a bug in the $\frac{\partial \varepsilon}{\partial \rho_i}$ step (which was also modified in #1855).
+mochen4 commented on Aug 17, 2022
+mochen4
+on Aug 17, 2022
+Collaborator
+More actions
+fd_gradient after #1855 not making sense.
+Can you elaborate on this point? Is it possible that the adjoint gradients themselves are fine, but the "ground truth" we've been using (i.e. the finite differences) is somehow flawed (have we recently tried different step sizes or a Richardson extrapolation)?
+It's probably easier just to show the values:
+Before #1855:
+```
+Randomly selected indices:  [11  7 16 15 10]
+Finite-difference gradient:  [9.41704571 8.57755297 5.45435233 5.97166323 9.8756136 ]
+Adjoint gradient:  [6.39467823 7.18738784 7.15715232 5.42591364 6.36861599]
+```
+After #1855:
+```
+Randomly selected indices:  [11  7 16 15 10]
+Finite-difference gradient:  [-2.20169989e-01 -1.68289430e+00  2.52706456e-01 -3.20137574e+03 1.21596727e+03]
+Adjoint gradient:  [16.80432049 18.16344281 10.00780161 10.54080082 18.2865708 ]
+```
+The finite difference gradients are definitely wrong after #1855. The adjoint gradients, is also incorrect but within the same order of magnitude (in fact, roughly factor of 2 as the fd_gradient before #1855).
+By the way, after #1855, the simulations took significantly longer than before. So I changed the stopping criteria and saw no significant changes compared to the values reported above.
+mawc2019 commented on Oct 4, 2022
+mawc2019
+on Oct 4, 2022
+Last edited by mawc2019
+ContributorAuthor
+More actions
+Finite-difference and adjoint gradients may be inconsistent in some other cases. In the example below that involves multiple frequencies, the finite-difference and adjoint gradients are inconsistent at some frequencies when the resolution is high, such as 60 or higher. The comparisons at the resolution 60 are as follows. The test is based on the latest vesion of Meep in the master branch.
+At some lower resolution, such as 50 or lower, the finite-difference and adjoint gradients become consistent. In addition, if the adjoint solver involves only one frequency, such as fcen=1/1.265,df = 0,nf = 1, the finite-difference and adjoint gradients are also consistent even if the resolution is 60. At that frequency, the finite-difference gradients remain almost the same between the cases of single and multiple frequencies, but the adjoint gradients change significantly.
+The geometric structure is as follows.
+The code is as follows.
+```
+import meep as mp
+import meep.adjoint as mpa
+import numpy as np
+from autograd import numpy as npa
+from matplotlib import pyplot as plt
+
+resolution = 60          # pixels/μm
+w = 0.4          # waveguide width
+l = 3.0          # waveguide length (on each side of design region)
+dpad = 0.6       # padding length above/below design region
+dpml = 1.0       # PML thickness
+dx, dy = 1.6, 1.6         # length and width of design region
+
+sx, sy = dpml+l+dx+l+dpml, dpml+dpad+dy+dpad+dpml
+cell_size = mp.Vector3(sx,sy,0)
+pml_layers = [mp.PML(thickness=dpml)]
+
+# pulsed source center frequency and bandwidth
+wvl_min, wvl_max = 1.26, 1.30
+frq_min, frq_max = 1/wvl_max, 1/wvl_min
+wavelengths = np.array([1.265, 1.270, 1.275, 1.285, 1.290, 1.295])
+frequencies = 1/wavelengths
+fcen, df = 0.5*(frq_min+frq_max), frq_max-frq_min
+
+eig_parity = mp.ODD_Z
+
+src_pt = mp.Vector3(-0.5*sx+dpml,0)
+sources = [mp.EigenModeSource(src=mp.GaussianSource(fcen,fwidth=df),
+                              size=mp.Vector3(0,sy),center=src_pt,eig_band=1,eig_parity=eig_parity)]
+
+SiO2,Si = mp.Medium(index=1.5),mp.Medium(index=3.5)
+
+Nx,Ny = int(resolution*dx),int(resolution*dy)
+design_variables = mp.MaterialGrid(mp.Vector3(Nx, Ny), SiO2, Si, grid_type="U_MEAN")
+design_region = mpa.DesignRegion(design_variables, volume=mp.Volume(center=mp.Vector3(), size=mp.Vector3(dx,dy)))
+geometry = [mp.Block(size=mp.Vector3(sx,w),center=mp.Vector3(),material=Si),
+            mp.Block(size=design_region.size,center=design_region.center,material=design_variables)]
+
+sim = mp.Simulation(resolution=resolution,default_material=SiO2,cell_size=cell_size,sources=sources,k_point=mp.Vector3(),
+                    geometry=geometry,boundary_layers=pml_layers)
+
+tran_pt = mp.Vector3(0.5*sx-dpml-0.5*l)
+emc = mpa.EigenmodeCoefficient(sim,mp.Volume(center=tran_pt,size=mp.Vector3(0,sy,0)),2,eig_parity=eig_parity)
+ob_list = [emc]
+
+def J(emc): return npa.abs(emc)**2
+
+opt = mpa.OptimizationProblem(simulation=sim,objective_functions=J,objective_arguments=ob_list,
+                              design_regions=[design_region],frequencies=frequencies,decay_by=1e-12)
+
+np.random.seed(20220505)
+x = np.random.rand(Nx*Ny)
+opt.update_design([x])
+f0, dJ_dn = opt()
+
+db,choose = 1e-4,20
+np.random.seed(20220505)
+
+g_discrete, idx = opt.calculate_fd_gradient(num_gradients=choose,db=db)
+g_discrete = np.squeeze(np.array(g_discrete))
+g_adjoint = dJ_dn[idx,:]
+
+print("Randomly selected indices: ",idx)
+print("Finite-difference gradient: ",g_discrete)
+print("Adjoint gradient: ",g_adjoint)
+# export the gradients if needed
+#np.savetxt("gradients_resolution"+str(resolution)+"_1003.dat",np.hstack((g_discrete,g_adjoint)))
+
+plt.figure(figsize=(20,10))
+for freq_idx in range(len(frequencies)):
+    plt.subplot(2,3,freq_idx+1)
+    plt.plot(g_discrete[:,freq_idx],g_adjoint[:,freq_idx],"ro")
+    plt.plot([np.min(g_discrete[:,freq_idx]),np.max(g_discrete[:,freq_idx])],
+             [np.min(g_discrete[:,freq_idx]),np.max(g_discrete[:,freq_idx])],"g",label="y=x") # line of y = x
+    plt.title("Wavelength = "+str(wavelengths[freq_idx]))
+    plt.xlabel("Finite-difference gradient")
+    plt.ylabel("Adjoint gradient")
+    plt.legend();
+```
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+adjoint optimizationbug
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

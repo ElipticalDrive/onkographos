@@ -1,0 +1,77 @@
+Loading blocks can quickly become a slow and intensive task when there is a 3D noise generator at stake, network access, hard drive accesses, or the use of a slow GDScript prototype. To that end, it is important to reduce the number of l...
+
+Optimize block streaming · Issue #107 · Zylann/godot_voxel · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Optimize block streaming #107
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Optimize block streaming#107
+Copy link
+Labels
+Needs researchNot trivial / needs prototyping / translating paper into codeNot trivial / needs prototyping / translating paper into codeenhancement
+Description
+Zylann
+opened on Jan 17, 2020
+Issue body actions
+Loading blocks can quickly become a slow and intensive task when there is a 3D noise generator at stake, network access, hard drive accesses, or the use of a slow GDScript prototype.
+To that end, it is important to reduce the number of loading calls to a minimum, while allowing to move around without too much hurdles.
+Note: this mostly applies to VoxelLodTerrain, which is the most general case. It may also apply to VoxelTerrain but not entirely, due to some shortcuts taken.
+I'm not immediately working on this, but I needed a better place to write ideas (some copied from #87). Some of those ideas might depend on other things to do first in the future, some introduce more complexity and refactorings, and some others might never be done.
+Note: the "stream" can be referred to as "generator" below. While it's true generators could be queried on the fly from the mesher, this issue is also about other forms of voxel data sources.
+During octree subdivision, intermediary blocks could be skipped
+This one can be hard to figure out, and not sure yet if it actually is a good idea.
+Level Of Detail (LOD) is handled using an octree.
+Starting from a given octree shape, if we want to move somewhere else, we may have to transition it to a different ideal shape. Reaching such a shape requires to join or split one or more levels of nodes, with the usual split policy (distance) ensuring the bordering rule*. This is currently done step by step, but some intermediary steps are not always required. Indeed, if we look at the visible LOD maps after loading is complete, we can see concentric rings of blocks converging to the viewer. All blocks located in the ring's "holes" are not needed in the final result, because that space is occuppied by the next LOD. Yet, they are loaded anyways, and they will eventually be used when we start moving. Most obvious one is LODmax. We will never see LODmax if we are within the region of the octree, so it's pointess to calculate it.
+To ignore them, we may first evaluate the octree to split every node we need to split, without affecting blocks yet. Now we know what to load down to LOD0, we do a second pass in which we will trigger the loading of all nodes that aren't split. This way, only the absolutely required ones will be scheduled for loading, skipping the others. They will still be sorted based on distance and LOD.
+I don't know if this solution is good yet, because it has two caveats:
+It may cause much more blocks to be scheduled if we move fast, since we would ask for all of them from top to bottom, rather than the "top level only". i.e the "ideal octree shape" can change faster than the efforts we make to reach it. This might be tunable by limiting how deep the look-ahead is done, with some formula based on speed and block latency.
+Because we skip intermediaries, loaded blocks will be unable to become visible until the whole "ideal octree shape" has been fulfilled, as only the full result will satisfy the bordering rule. Which means it may load faster, but visuals will "pop in" abrubtly the faster we move. This sounds like a show-stopper so again it needs prototyping to know if it's actually viable.
+*bordering rule: a block of LODn can only be bordered by blocks of LOD n-1, n, or n+1. This rule comes from the fact polygonizers are unable to fill cracks if LODs are too different, and may cause high visual discrepancy.
+Disregard neighboring rule
+As stated in the above section, the neighboring rule is the main constraint forcing us to subdivide LOD from top to bottom. But we could override that by just not caring about it.
+It won't look pretty as meshes will start overlapping or z-fighting with lower lods, but it might not be a problem in some project's requirements. Have an option?
+Joining a LOD does not need to invoke the generator again
+If we have 8 blocks of LODn that need to be joined into a lower LOD, we can simply produce LODn+1 by downscaling the 8 blocks using nearest-neighbor sampling, using the data we already have. It works because that's what the generator would do anyways, and is even assumed by Transvoxel.
+Another advantage is that we don't need to have LODn+1 if we edit LODn, because LODn+1 is derivable from it. One caveats of this approach is that I'm not sure if it would still happen in the loader thread (which currently doesn't have access to the map) or on the main thread, assuming the operation is fast enough.
+Asking for a higher LOD could skip 1/8th of the voxels
+Similarly to the above, when we need the 8 higher-LOD children of a block, we don't need to generate all voxels, because we have the low-LOD voxels already. It's like we would be subdividing each voxel into 8 (2x2x2), but the voxel at (0,0,0) remains the same.
+I don't know how efficient it would actually turn out, though. The generator would have to skip some values based on a few conditions, wich complexifies its task.
+Ask world generator directly instead of loading extra neighbors
+Because polygonizing a given block requires its neighbors, we are currently loading one extra neighbor around every loaded blocks that we can render. This was a simple approach so far, however it adds up to the amount of loading calls, by about 20% depending on the split scale setting.
+Instead, we could either ask the generator to load only a fraction of the neighbor data corresponding to the faces we need, or directly querying it from the polygonizer, at least for cases where the terrain was not edited manually.
+This optimization could be done as a consequence of #60 (comment)
+Have an option to use the generator in the mesher instead
+This is also related to #60. In this mode, the only thing we would ask for the stream would be edited blocks. In case a block was never edited, the stream would simply return an empty block, which would be completed in the meshing process by querying the generator. It will do that every time, however it might save a bit of time and space for not having to cache the data.
+👍React with 👍2Reacted by Zireael07 and Benjamin Stanley
+Activity
+Zylann
+added
+enhancement
+Needs researchNot trivial / needs prototyping / translating paper into codeNot trivial / needs prototyping / translating paper into code
+on Jan 17, 2020
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+Needs researchNot trivial / needs prototyping / translating paper into codeNot trivial / needs prototyping / translating paper into codeenhancement
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

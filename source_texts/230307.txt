@@ -1,0 +1,198 @@
+Description get_intersection iterates over get_height, which interpolates over 4 calls, unless rounded to the nearest vertex, in which case it only does one call. So snap to the nearest vertex before every call. I considered doing it onc...
+
+Optimize get_intersection in non-gpu mode · Issue #690 · TokisanGames/Terrain3D · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Optimize get_intersection in non-gpu mode #690
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Optimize get_intersection in non-gpu mode#690
+Copy link
+Labels
+enhancementNew feature or requestNew feature or requestgood first issueGood for newcomersGood for newcomers
+Milestone
+1.2
+Description
+TokisanGames
+opened on May 7, 2025
+Issue body actions
+Description
+get_intersection iterates over get_height, which interpolates over 4 calls, unless rounded to the nearest vertex, in which case it only does one call. So snap to the nearest vertex before every call. I considered doing it once before the loop, but if it's off axis, it will always need to be snapped.
+We iterate one meter at a time, which is inaccurate if vertex_spacing != 1. direction should be multipled by vertex_spacing after being normalized, as should 4000. However if vs is sub 1, you'll need to not snap to the nearest vertex if the distance is less than 1.
+Bonus points:
+Rather than iterating linearly, iterate like quick sort does, which will change the algorithm from O(n) to O(log n). Most checks are going to be sub 1000m, likely sub 500m and even 100m. So I'd start looking at 100m, then:
+If passed the terrain, check at 50m then continue to divide the remaining in half.
+If it hasn't passed, check 1000m, 10,000m, 100,000m. Then divide the remaining section in half. Somewhat like the following picture.
+Activity
+TokisanGames
+added this to the 1.1 milestone on May 7, 2025
+TokisanGames
+added
+enhancementNew feature or requestNew feature or request
+on May 7, 2025
+TokisanGames
+added this to Terrain3D Roadmapon May 7, 2025
+TokisanGames
+added
+good first issueGood for newcomersGood for newcomers
+on May 7, 2025
+TokisanGames
+moved this to 1.1 in Terrain3D Roadmapon May 7, 2025
+aidandavey
+added a commit that references this issue on Jun 5, 2025
+Merge branch 'Optimize-get_intersection-in-non-gpu-mode-TokisanGames#690
+...
+e78f029
+aidandavey commented on Jun 5, 2025
+aidandavey
+on Jun 5, 2025
+Last edited by aidandavey
+Collaborator
+More actions
+I'd like to shoot for the bonus points, but I can't see how this could work.
+If we do the first check at 100m, how do we know we didn't miss something?
+In the example below, the first check would register a miss, and start the next partition along.
+To catch this we'd need to start from the origin, as it does now.
+TokisanGames commented on Jun 5, 2025
+TokisanGames
+on Jun 5, 2025
+Last edited by TokisanGames
+OwnerAuthor
+More actions
+You can check at 0 initially. You first want to establish outside bounds. So, 0 and 100 are good initial checks based on practical use. If 100 is above the terrain, increase 10x each time until 100,000.
+Once you have outside bounds, check at the midpoint of your range. You'll be testing points above and below the true terrain height, getting closer and closer to it until within tolerance. (eg <0.001). This is sphere assisted ray marching, though it's not mentioned here.
+Look at 0, if below the terrain, quit w/ MAX
+Look at 100, if within -.001 quit w/ height
+If above the terrain at 100, look at 1000
+if above at 1000, look at 10,000, then 100,000 (maximum)
+if below at 1000, look at 500
+If below at 100, look at 50
+if above at 50, look at 75
+if below at 50, look at 25
+Once you've found the outer bounds (eg. 0 and 100,000 or 0 and 1000), then do a binary search, checking the half way point, and bringing in your minimum or maximum bounds each iteration. Quit when the distance is within tolerance (0.001).
+Currently it iterates linearly from 0 to 4000 as O(n) and costs 4000 iterations before determining if it has failed. This new algorithm is O(log n), and can determine a failure in 4 iterations, and a success in up to 31: 1 check if below at 0, 3 more checks if above at 100,000, and up to 27 more iterations (log2(100,000/0.001)) if somewhere between 10,000 and 100,000m (to use the full bounds).
+Before submitting a PR, read our contributing doc, and submit to another branch.
+aidandavey commented on Jun 6, 2025
+aidandavey
+on Jun 6, 2025
+Collaborator
+More actions
+This is the problem I'm struggling with:
+aidandavey commented on Jun 6, 2025
+aidandavey
+on Jun 6, 2025
+Collaborator
+More actions
+Still, the optimized use of get_height() halves the time taken.
+TokisanGames commented on Jun 6, 2025
+TokisanGames
+on Jun 6, 2025
+OwnerAuthor
+More actions
+Yes, you're right, earlier peaks need to be accounted for. Iterating from 0 is accurate. I need to think if there's a way to fix the binary search method to ensure accuracy.
+aidandavey commented on Jun 6, 2025
+aidandavey
+on Jun 6, 2025
+Collaborator
+More actions
+I'm trying using a step size of 2, if we get a hit step back one and check again. Hopefully nearly halving the iterations.
+aidandavey commented on Jun 6, 2025
+aidandavey
+on Jun 6, 2025
+Last edited by aidandavey
+Collaborator
+More actions
+Here's the average time taken over 500 samples for three versions of get_intersection()
+Original = 26 us
+Snap point = 18 us
+Snap and Stepsize=2 = 11 us
+And when determining a fail:
+Original = 343 us
+Snap point = 323 us
+Snap and Stepsize=2 = 176 us
+In each case, the intersection point I get is only 0.17 away from the physics collision position
+TokisanGames commented on Jun 7, 2025
+TokisanGames
+on Jun 7, 2025
+Last edited by TokisanGames
+OwnerAuthor
+More actions
+That's a good improvement. Once you narrow down to 1-2x vertex_spacing, you can search in smaller increments to get more accurate. 0.17m isn't great when up close. That is a hand width, which would be noticeable if the player was hovering that far above the terrain.
+Maybe there's a way we can combine the iterative and binary search methods for greater gains. Being natural terrain, it's not likely to have very narrow, sharp spikes. Terrain heights are going to have some breadth. Maybe that is a multiplier of 5*vertex_spacing.
+So what if you start iterating from 0 to 4,000 with a 5*vertex_spacing snapped step. (800 iterations on fail)
+Then go until you hit the terrain. Now you have the point above and the point below, which are around 5*vs apart. You can then check half way without snapping, pull in the known boundaries, and repeat until you are within a low tolerance of 0.001m.
+If aiming the ray just over a mountain peak, it will "miss" the peak until the ray is low enough that it is at least 5*vs thick. We can refine it or even provide a parameter, but that's probably in the ballpark.
+👍React with 👍1Reacted by aidandavey
+aidandavey commented on Jun 7, 2025
+aidandavey
+on Jun 7, 2025
+Last edited by aidandavey
+Collaborator
+More actions
+So what if you start iterating from 0 to 4,000 with a 5*vertex_spacing snapped step. (800 iterations on fail) Then go until you hit the terrain. Now you have the point above and the point below, which are around 5*vs apart. You can then check half way without snapping, pull in the known boundaries, and repeat until you are within a low tolerance of 0.001m.
+This was good but got much slower where the origin/intersection distance is close to a multiple of step_size * _vertex_spacing
+It was getting to an error of 0.6 in 100 steps, vs ~0.002 in 10 steps if the distance was close to a multiple of half steps size * _vertex spacing.
+Rather than using the mid-point, we can estimate the intersection point using the points/terrain heights at the known boundaries. The Geometry3D helper has a function that does exactly this.
+https://docs.godotengine.org/en/stable/classes/class_geometry3d.html#class-geometry3d-method-get-closest-points-between-segments
+This largely gets a ~0.0017 hit in 1-3 steps over any distance, though each step is slower. Takes the same time as the original, though it is likely more accurate.
+There may be a faster way of calculating the intersection point using trigonometry
+We know the points circled red. We know the length of the blue lines, forming a triangle.
+If we calculate the length of the green line on the bottom right drawing we can interpolate between the boundaries.
+Putting this here while I work it out
+TokisanGames commented on Jun 8, 2025
+TokisanGames
+on Jun 8, 2025
+OwnerAuthor
+More actions
+If you know the nearest vertices 2 vertices, you can get the other two (or one as below), then you can calculate the intersection point of a ray and a square in 3D space. Grok implements it here in GDExtension, assuming we know for sure the ray intersects the plane and excluding bounds checking:
+```
+Vector3 calculate_ray_square_intersection(
+    const Vector3& ray_origin, const Vector3& ray_direction,
+    const Vector3& v0, const Vector3& v1, const Vector3& v2) {
+
+    // Define 4-vertex plane from any three vertices
+    Plane plane(v0, v1, v2);
+    
+    // Compute ray-plane intersection
+    float t = -plane.distance_to(ray_origin) / plane.get_normal().dot(ray_direction);
+    return ray_origin + ray_direction * t;
+}
+```
+aidandavey commented on Jun 8, 2025
+aidandavey
+on Jun 8, 2025
+Collaborator
+More actions
+This works really nicely I think, speed is stable over different distances and low error rate (~0.001m) in only 2 steps once the boundaries are known.
+TokisanGames
+moved this from 1.1 to 1.2 in Terrain3D Roadmapon Oct 5, 2025
+TokisanGames
+modified the milestones: 1.1, 1.2 on Dec 3, 2025
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or requestgood first issueGood for newcomersGood for newcomers
+Projects
+Terrain3D Roadmap
+Status
+1.2
+Show more project fields
+Milestone
+1.2No due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

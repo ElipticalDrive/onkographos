@@ -1,0 +1,174 @@
+# CHAPTER 43
+
+# EFFICIENT UNBIASED VOLUME PATH TRACING ON THE GPU
+
+Nikolai Hofmann and Alex Evans
+
+NVIDIA
+
+# ABSTRACT
+
+We present a set of optimizations that improve the performance of high-quality volumetric path tracing. We build upon unbiased volume sampling techniques, i.e., null-collision trackers [16, 8, 15], with voxel data stored in an OpenVDB [14, 13] tree. The presented optimizations achieve an overall 2*×* to 3*×* speedup when implemented on a modern GPU, with an approximately 6.5*×* reduction in memory footprint. The improvements primarily stem from a multi-level digital differential analyzer (DDA) [1, 11, 6] to step through a grid of precomputed bounds; a replacement of the top levels of the OpenVDB tree with a dense indirection texture, similar to virtual textures [3, 4, 17], while preserving some sparsity; and quantization of the voxel data, encoded using GPU-supported block compression. Finally, we examine the isolated effect of our optimizations, covering stochastic filtering, the use of dense indirection textures, compressed voxel data, and singleversus multi-level DDAs.
+
+
+
+Figure 43-1. The Disney Moana cloud [18] (left) and an explosion cloud with emission [7] (right) with three bounces of multiple scattering, rendered in 3.9 ms and 4.1 ms per sample, respectively, using our approach at 1920 × 1080 resolution on an NVIDIA RTX 3090. Our optimizations and lossy compression scheme provide a 2.5× to 3.0× speedup and a ca. 6.5× reduced memory footprint over the baseline implementation, without noticeable loss in quality (PSNR > 50 dB).
+
+
+
+Figure 43-2. An example path is traced through a volume: We use distance sampling to find the collision vertices along the main path. At each vertex, transmittance estimation computes the fraction of photons arriving from the light source, sampled along shadow rays.
+
+#### 43.1 BACKGROUND
+
+Rendering volumetric data, e.g., as in Figure 43-1, is a memory- and compute-intensive task. We refer the reader to the state of the art report by Novák et al. [15] for an extensive overview. The cloud in the left image is represented by a 1000 × 680 × 1224 grid of density values. Storing a 32-bit floating-point value for every voxel in the grid would require 3.3 GB of storage. OpenVDB [14] uses a tree structure to compactly encode constant regions of the volume, requiring only 585.2 MB to encode the cloud. By quantizing the data carefully, we build on the serialized OpenVDB representation (NanoVDB [12]) and re-encode it into three textures whose combined size is 86.7 MB, at the cost of some quantization error. The error is small enough to not be visible in the rendered results, which will be discussed in Section 43.5.3, while the performance of random volume lookups is improved.
+
+The two fundamental queries that our data structure must efficiently support are distance sampling and transmittance estimation. The former is used to determine the length of each path segment between scattering events in the volume, whereas the latter computes the probability of a ray segment passing through the volume without interacting with it. The transmittance value is used to estimate the fractional visibility along shadow rays. See Figure 43-2 for an illustration applied to path tracing.
+
+In homogeneous media with constant density µc, an unbiased distance sampler is straightforward: we importance-sample the free-flight distance t according to transmittance with a cumulative distribution function (the Beer–Lambert law [9]):
+
+$$F(t) = 1 - e^{-\mu_c t}$$
+. (43.1)
+
+
+
+Figure 43-3. Local versus global upper bounds: Null-collision methods homogenize regions of the volume by introducing a fictitious medium to bulk out the density to be piecewise constant in each region. The more finely we subdivide, the tighter these majorants become, and the less fictitious matter is added.
+
+Thus, we can sample free paths with uniform random numbers ξ ∈ 0, 1), such that
+
+$$t = -\frac{\ln(1-\xi)}{\mu_c}. \quad (43.2)$$
+
+For spatially varying (heterogeneous) volumes, we must extend this sampling scheme because the previous approach is only valid for constant density. We rely on delta tracking [[19] for free path sampling and ratio tracking [16] for transmittance estimation. The main idea behind both approaches is to homogenize the medium by introducing additional fictitious matter, which has no impact on light transport. In other words, we "fill" all gaps in the medium between the maximum (majorant) µ*max and real density *µr with null-collision density: µn(x) = µ*max – *µr(x). This allows us to analytically sample the free-flight distances as before, as if the volume were homogeneous.
+
+In order to return to the correct distribution, each collision must now be stochastically categorized as null or real, in proportion to the ratio of null to real matter:
+
+$$p_{\text{null}} = \frac{\mu_n(x)}{\mu_r(x) + \mu_n(x)}. \quad (43.3)$$
+
+We wish to minimize p*null, as such collisions are "wasted effort" and have no effect on light transport. This corresponds to minimizing *µ*max: instead of using a single global maximum, we subdivide space into smaller regions and precompute a local *µ*max for each region, which more closely follows *µr(x). See Figure 43-3 for an illustration. Though this leads to fewer rejected null collisions, the ray must be split at each region boundary, so as not to leave the region for which each upper bound was computed. This splitting introduces runtime overhead that offsets the benefit of the tighter bounds.
+
+To render a single path-traced frame at typical resolutions and sample counts, these algorithms require hundreds of millions of volume density evaluations. To make these as efficient as possible, in both execution time and memory bandwidth use, we next present a GPU-friendly data structure for efficiently storing and querying the volume data.
+
+# 43.2 COMPRESSED DATA STRUCTURE
+
+We use three textures to sparsely store the volume data: an atlas texture, indirection texture, and min/max range texture. Similar to Crassin et. al. [4], and following the leaf size in NanoVDB [12], we refer to a group of 8 × 8 × 8 voxels containing data, e.g., density values, as a brick. We pack the bricks into the atlas texture. Offsets into the atlas are stored in a dense indirection texture, which serves to link a position in space with a brick of data in the atlas, similar to a page table. This scheme is applied to address sparsity and is also known as virtual textures [17, 10]. We precompute and store in the range texture the minimum and maximum value of each brick's voxels (referred to as minorant and majorant, respectively), using these ranges to scale the values in the atlas texture to lie in [0, 1]. This makes it straightforward to encode high dynamic range values in the atlas at reduced bit depths, such as 16 or 8 bits in UNORM format, or 4 bits via hardwaresupported block compression (BC4). In regions of constant density (minorant = majorant), including empty space, the brick's range will be zero and we can therefore omit storing any unique data in the atlas for that brick. The indirection texture simply points such bricks at address 0, whose contents will be ignored due to the empty range. A visual overview of our data structure is given in Figure 43-4. Note that all code is presented in voxel index space, where one unit along any axis corresponds to the distance between adjacent voxels. A volume lookup thus translates to the lines of HLSL code in Listing 43-1.
+
+| 32 pixels    | 4 pixels      | 4 pixels            |    | 32 pixels     |   |
+|--------------|---------------|---------------------|----|---------------|---|
+| Dense Volume | Range Texture | Indirection Texture |    | Atlas Texture |   |
+|              |               | A B                 |    |               |   |
+|              |               | C D E               |    |               |   |
+|              |               | G H I J             |    |               |   |
+|              |               | K L M               |    |               |   |
+|              |               |                     | BA | C             |   |
+|              |               |                     | E  | F G           |   |
+|              |               |                     | I  | J K           | L |
+
+Figure 43-4. We illustrate our data structure with a 2D example. The dense volume (left) is divided into 8 3 (*8 *in the figure) bricks packed into an atlas texture (right). A range texture encodes the range of values in each brick. In this example, three bricks have empty ranges and are thus omitted from the atlas. An indirection texture encodes the position of each brick in the atlas.
+
+#### Listing 43-1. Sparse volume lookup routine (HLSL).
+
+ float lookup(int3 index) { int3 brick = index >> 3; float2 range = rangetex[brick]; // (minorant , majorant) uint3 ptr = indirecttex[brick].xyz; float value\_unorm = atlastex[(ptr.xyz << 3) + (index & 7)].x; return value\_unorm \* (range.y - range.x) + range.x; 7 }
+
+We encode the indirection texture as RGBA8Uint, the range texture as RGFloat16, and the atlas texture via BC4 hardware compression. Therefore, the total memory cost of our encoding scheme is W×H×D 64 + (N × 256) bytes, where N is the number of spatially varying bricks within the volume. Because we lossily quantize the voxel data, our format is less suitable for storage or simulation. However, for rendering of density fields, the brick-level rescaling ensures that the visual impact is minimal, which will be evaluated later in Section 43.5.3. Although the leaf data is 8*×* more compact than the equivalent data stored as float32 values in a NanoVDB tree, the latter's tree structure is more compact than our dense indirection and range texture scheme. Thus, the overall memory saving amounts to ca. 6.5*×*. If the volume is very sparse, a second level of indirection, further mirroring the NanoVDB tree structure, could reduce the storage requirements further, at the cost of complicating the lookup routine.
+
+# 43.3 FILTERING AND RANGE DILATION
+
+A common approach to smoothly interpolate the discrete density grid is trilinear or tricubic interpolation. Performing this operation in software has significant cost, but the GPU texture unit only supports trilinear filtering for directly addressable, i.e., dense, textures. We could work around that limitation by redundantly storing voxels that lie on the border of each brick [4]. However, that would impose either a 8 7 3 ≈ 1.49*×* memory overhead due to duplicated borders or a performance penalty from falling back to software filtering at those locations. We instead stochastically jitter the lookup point by *±*0.5 voxels before point sampling. This is equivalent to importance sampling linear interpolation, where the probability density function and the interpolation factor cancel out. At high sample counts, this "stochastic filtering" scheme yields identical results to trilinear filtering at a fraction of the cost. Refer to Section 43.5.2 for an evaluation of the noise introduced.
+
+Whatever the chosen filtering scheme, values from neighboring bricks may "leak" into each other due to the width of the filter kernel, causing filtered values to lie outside the central brick's precomputed range. Ratio tracking requires the per-brick majorants to be strict upper bounds [16]. Even applying the computationally more expensive weighted ratio tracker [8], which relaxes that requirement, may exhibit increased variance if the majorant is not conservative. To address this, we precompute the brick majorants over a 103 volume, encompassing the one-ring of voxels around the brick's original 8 3 footprint. For a trilinear or stochastic trilinear filter, which only have a kernel radius of half a voxel, this allows the center of the jittered sample to lie an extra half voxel outside the brick. We exploit this slight "over-dilation" to take larger steps in the digital differential analyzer (DDA) than would otherwise be possible, which we will describe next.
+
+# 43.4 DDA TRAVERSAL
+
+Both the distance sampling and transmittance estimation schemes require us to trace rays through the volume to find collisions. We start by sampling a target optical thickness: τ*target = – ln(1 – *ξ). We then employ a DDA [1] to visit all bricks that intersect the ray and accumulate their (tentative) optical thicknesses τ*brick = *µ*brick\_max *× dt, where dt is the length of the ray segment that intersects the brick. Should the accumulated optical thickness exceed the sampled target thickness, we step backward along the ray until they match exactly. This is illustrated in Figure 43-5a. At this point, we have found a tentative collision. Next, we perform a filtered density lookup and compare it to the local majorant, stochastically deciding whether to accept the collision as real. When sampling distances, we return the distance to the first real collision along the ray. When estimating transmittance, we adjust the current estimate using the ratio of real to fictitious matter. In the event of a rejected null collision, we restart the traversal by sampling a new target optical thickness value. The algorithm continues until we have sampled a distance, the transmittance estimate is aborted by Russian roulette, or we have left the volume.
+
+The key to achieving optimal traversal performance is the balance between large step sizes and tight upper bounds. A small brick size yields accurate upper bounds and thus less wasted samples, but causes more work, splitting the ray due to the DDA's small steps. On the other hand, large bricks enable the DDA to move quickly, but cause a higher sample rejection rate. See Figure 43-3. A rejected sample is costly because it corresponds to multiple
+
+
+
+Figure 43-5. Left: the DDA traverses along the ray in steps (t*1, *t*2, *t*3) such that each segment falls entirely inside a brick. The majorants τ*brick of each brick are accumulated, τ*sum = *τ*1 + *τ*2 + *τ*3, until their sum exceeds τ*target*. Finally, a backward step (t*4*) is taken to the point where τ*sum matches τ*target *exactly. Right: during traversal, a regular DDA would require five steps, as highlighted by the black intersection points. Because we intersect against dilated brick boundaries instead, 0.5 voxels outside in the direction of travel, our DDA manages in only three steps, as shown by the green intersection points. This also improves numerical stability, as we do not land exactly on brick boundaries.
+
+texture lookups and requires us to restart the traversal after reverting to the point of collision, which voids some of the benefits of larger DDA steps.
+
+Therefore, we additionally compute three min-max mip levels of the range texture. This enables us to search for tentative collisions at four different scales, with minorant and majorant information available for dilated bricks computed over a domain of 8 × 2 mip + 2 voxels, with mip ∈ [0, 3]. As we step backward to the exact point of collision in a brick, the chosen mip level only affects how quickly collisions are found, without introducing bias or affecting image quality.
+
+The chosen mip level has a large impact on performance and varies strongly between scenes. It would be possible to implement each level of the DDA as a separate loop in a shader, for example, starting with a coarse mip level loop and then falling down to finer levels in separate loops. However, on a wide single-instruction-multiple-threads (SIMT) device like a GPU, this would lead to significant execution divergence between rays at different levels of the hierarchy. We therefore chose to reformulate the DDA to be able to independently select a mip level at every step without branching, a concept previously applied to screen-space reflections [6]. We empirically chose a very straightforward heuristic for selecting the per-step mip level: We initialize to the coarsest level (mip = 3.0), add 0.33 for each iteration, and subtract 2.0 when a tentative collision was found. The DDA then takes a step according to
+
+
+
+Figure 43-6. Average number of volume and majorant lookups per path on the same viewpoint as Figure 43-1, mapped from [0, 150]. The number of required volume lookups can be reduced significantly, especially for empty space regions, when stepping over a larger grid of upper bounds [(a) versus (d)]. However, when choosing the mip level too large, and thus causing frequent backtracking, the number of lookups increases (e). Our multi-level DDA addresses this issue by adapting the step size locally and manages with the least amount of lookups overall (f). Note that in (a) all lookups are full volume lookups, while for the DDA-based variants most are solely majorant lookups, which only require one instead of three texture taps.
+
+the nearest integer mip level: b*mip*e. Figure 43-6 illustrates how the number of volume lookups is affected by the DDA mip level. The multi-level traversal scheme achieves the best performance, making the least number of lookups overall, and automatically adapts to the underlying scene.
+
+As previously mentioned in Section 43.3, filtering requires us to use dilated majorants, which we "over-dilate" by half a voxel. This has the additional benefit of allowing us to perform ray intersections against bricks that have been enlarged by half a voxel, reducing the number of steps taken while still leaving room for the filter's footprint. Because the DDA oversteps into each brick by half a voxel, we eliminate the usual numerical problems associated with intersections falling exactly on brick boundaries. We illustrate this in Figure 43-5b and provide HLSL code snippets for the core parts of our algorithm in Listings 43-2 and 43-3.
+
+Listing 43-2. DDA stepping routine using bricks enlarged by half a voxel (HLSL).
+
+ float stepDDA(float3 ro, float3 ri, float3 pos, int mip) { const float dim = 8 << mip; const float3 ofs = ri \* (((ri >= 0.f) ? dim + 0.5f : -0.5f ) - ro); const float3 tmax = floor(pos \* (1.f / dim)) \* dim \* ri + ofs; return min(tmax.x, min(tmax.y, tmax.z)); 6 }
+
+Listing 43-3. DDA-based volume sampling routine (HLSL). The two red lines are all that is required to dynamically select a mip level at each step.
+
+ float tauToGo = -log(1.f - random()); float mip = 3; float3 invRayDir = 1.0 / rayDir; while (/\* Inside volume \*/) { float3 pos = rayOrigin + t \* rayDir; float majorant = lookupMajorant(pos, round(mip)); float nextt = stepDDA(rayOrigin , invRayDir , pos, round(mip)); mip = min(3.f, mip + 0.33); float dt = nextt - t; float dtau = majorant \* dt; t = nextt; tauToGo -= dtau; if (tauToGo > 0) continue; // No collision , skip ahead mip = max(0.f, mip - 2); t += dt \* tauToGo / dtau; // Step back to collision float density = lookup(rayOrigin + t \* rayDir); if (random() \* majorant < density) { /\* Handle real collision \*/ } tauToGo = -log(1.f - random()); // Null collision , continue 19 }
+
+# 43.5 RESULTS
+
+In the following, we evaluate our approach against a baseline implementation and examine the achieved speedups and compression rates versus the magnitude of numerical error introduced into the image. We summarize our results in Table 43-1.
+
+#### 43.5.1 BASELINE
+
+As a baseline, we employ an unbiased path tracer using NanoVDB to lookup float32 density values, delta tracking for distance sampling, and ratio tracking for transmittance estimation, all with global majorants. We trace up to three bounces of multiple scattering, while shooting a shadow ray at each path vertex, importance sampling the scene's light sources, and weighting accidental and sampled light source hits from next event estimation with multiple importance sampling. We implement anisotropic scattering via the Henyey–Greenstein [5] phase function, although we used g = 0 in our evaluation, i.e., isotropic scattering. As a quality baseline, we rely on a software implementation of trilinear filtering to smooth the discrete, regular grids. For the performance baseline, we chose stochastic filtering over trilinear, due to its substantial effect on performance. Any errors introduced into the image are evaluated using the FLIP [2] perceptual metric (see also Chapter 19) and the peak signal-to-noise ratio (PSNR), by comparing converged images with 32,000 samples per pixel.
+
+
+
+|           | Variant |              |   | Moana Time | Cloud MB | (Figure ÷ Time | 43-1, left) × MB | F LIP   |       | PSNR |
+|-----------|---------|--------------|---|------------|----------|----------------|------------------|---------|-------|------|
+| BaselineQ |         | (trilinear)  |   | 38.9       | 585.2    | 0.29           | 1.00             | 0.00000 | +inf  |      |
+| BaselineP |         | (stochastic) |   | 11.1       | 585.2    | 1.00           | 1.00             | 0.00501 | 56.23 | dB   |
+| Texture   |         | (16 bit)     |   | 9.2        | 292.3    | 1.21           | 0.50             | 0.00501 | 56.23 | dB   |
+| Texture   |         | (8 bit)      |   | 9.1        | 153.9    | 1.22           | 0.26             | 0.00589 | 55.89 | dB   |
+| Texture   |         | (BC4)        |   | 9.2        | 86.7     | 1.21           | 0.15             | 0.00738 | 54.34 | dB   |
+| BC4,      | DDA     | mip          | 0 | 5.9        | 86.7     | 1.88           | 0.15             | 0.00811 | 51.99 | dB   |
+| BC4,      | DDA     | mip          | 1 | 4.5        | 86.7     | 2.47           | 0.15             | 0.00806 | 52.08 | dB   |
+| BC4,      | DDA     | mip          | 2 | 4.3        | 86.7     | 2.58           | 0.15             | 0.00805 | 52.12 | dB   |
+| BC4,      | DDA     | mip          | 3 | 5.3        | 86.7     | 2.09           | 0.15             | 0.00804 | 52.16 | dB   |
+| BC4,      | DDA     | adaptive     |   | 3.9        | 86.7     | 2.85           | 0.15             | 0.00809 | 52.07 | dB   |
+
+Table 43-1. Timings in milliseconds are taken on an NVIDIA RTX 3090 GPU and refer to rendering one sample per pixel at 1920 × 1080 resolution, with three bounces of multiple (isotropic) scattering. We use the Moana cloud [18] at 1000 × 680 × 1224 voxel resolution. As a baseline, we employ NanoVDB in float32 encoding with trilinear filtering (BaselineQ) for quality and stochastic filtering (BaselineP) for performance. We compare performance and memory consumption between the baseline and several variations of our approach with different levels of quantization and DDA traversal strategies. FLIP [2] and PSNR are computed from converged images with 32,000 samples.
+
+#### 43.5.2 STOCHASTIC SAMPLING
+
+Switching from eight weighted volume lookups (trilinear interpolation) to a single stochastically jittered sample gives the single largest speedup of our optimizations, roughly 3.5*×*. It introduces no bias in the converged image and thus provides a virtually indistinguishable result (PSNR 56.23 dB). Even at low sample counts, the difference is negligible. When comparing both software-trilinear and stochastic-trilinear filtering at 32 samples per pixel to a converged result, we only found a less than 0.1 dB PSNR difference between the two approaches, as outlined in Figure 43-7.
+
+#### 43.5.3 QUANTIZED TEXTURE REPRESENTATION
+
+We re-encode the NanoVDB float32 data into textures as previously described in Section 43.2. We examine the error due to quantization for 16 bits per texel (UNORM16), 8 bits per texel (UNORM8), and 4 bits per texel (BC4) in an isolated environment in Figure 43-8. The most compressed form (BC4) is selected for all subsequent steps, as it yields the most compact representation (6.5*×* compression) without notable quality or performance impacts. The high quality regardless of texture compression is a valuable
+
+
+
+Figure 43-7. Virtually indistinguishable results from (b) our stochastic filtering scheme, compared to (a) the trilinear baseline implementation at 32 samples per pixel. We compute FLIP [2] and PSNR against a converged reference rendering with 32,000 samples. Note that the version with stochastic filtering rendered roughly 3.5× as fast.
+
+
+
+
+
+Figure 43-8. Isolated numerical error introduced by our lossy compression, evaluated against uncompressed 32-bit encoding, using global majorants and stochastic filtering. We evaluated FLIP [2] and PSNR on converged images with 32,000 samples. For visibility, we show a grayscale FLIP error map of the cloud in Figure 43-1 scaled by 10×, because the error would otherwise be imperceptible.
+
+result, as memory is often a limiting factor in volume rendering, particularly when rendering volumetric animations with many frames resident in memory.
+
+#### 43.5.4 SINGLE- AND MULTI-LEVEL DDA WITH LOCAL MAJORANTS
+
+As demonstrated in Figure 43-6, the resolution of the local majorants are inherently tied to rendering performance. A coarser grid enables taking larger steps, but also reduces the tightness of the bounds and may lead to backtracking. We measure timings for different mip levels of the range texture, yielding local majorants computed over 8 × 2 level + 2 texel bricks for level ∈ [0, 3]. We found the optimal level to be highly scene dependent, which turned out to be level = 2 for the Moana cloud data set (Figure 43-6d\). By dynamically choosing a mip level per step, as we described in Section 43.4, we manage to achieve the largest speedup and automatically accommodate different scene sizes as well.
+
+#### 43.6 CONCLUSION
+
+In summary, we showed how to optimize existing unbiased volumetric path tracing techniques for use on modern GPUs and managed to achieve a 2*×* to 3*×* speedup at a roughly 6.5*×* reduced memory footprint compared to a baseline implementation. We demonstrated that the error introduced by our lossy compression scheme is virtually imperceptible and thus enables high-quality renderings of volumetric assets at a fraction of the cost.
+
+# REFERENCES
+
+[1] Amanatides, J. and Woo, A. A fast voxel traversal algorithm for ray tracing. In Eurographics 1987—Technical Papers, pages 3–10, 1987. DOI: [10.2312/egtp.19871000](https://doi.org/10.2312/egtp.19871000). [2] Andersson, P., Nilsson, J., Akenine-Möller, T., Oskarsson, M., Åström, K., and Fairchild, M. D. FLIP: A difference evaluator for alternating images. Proceedings of the ACM on Computer Graphics and Interactive Techniques (HPG 2020), 3(2):15:1–15:23, 2020. DOI: [10.1145/3406183](https://doi.org/10.1145/3406183). [3] Beyer, J., Hadwiger, M., Möller, T., and Fritz, L. Smooth mixed-resolution GPU volume rendering. In Proceedings of the Fifth Eurographics/IEEE VGTC Conference on Point-Based Graphics, pages 163–170, 2008. [4] Crassin, C., Neyret, F., Lefebvre, S., and Eisemann, E. Gigavoxels: Ray-guided streaming for efficient and detailed voxel rendering. In Proceedings of the 2009 Symposium on Interactive 3D Graphics and Games, pages 15–22, 2009. [5] Henyey, L. G. and Greenstein, J. L. Diffuse radiation in the galaxy. The Astrophysical Journal, 93:70–83, 1941. [6] Hofmann, N., Bogendörfer, P., Stamminger, M., and Selgrad, K. Hierarchical multi-layer screen-space ray tracing. In Proceedings of High Performance Graphics, pages 1–10. 2017. [7] JangaFX. Free VDB simulations created with EmberGen. , 2020. Acessed December 10, 2020. [8] Kutz, P., Habel, R., Li, Y. K., and Novák, J. Spectral and decomposition tracking for rendering heterogeneous volumes. ACM Transactions on Graphics (Proceedings of SIGGRAPH 2017), 36(4):111:1–111:16, 2017. DOI: [10.1145/3072959.3073665](https://doi.org/10.1145/3072959.3073665). [9] Lambert, J. H. Photometria sive de mensura et gradibus luminis, colorum et umbrae. Klett, 1760. [10] Lefohn, A. E., Sengupta, S., Kniss, J., Strzodka, R., and Owens, J. D. Glift: Generic, efficient, random-access GPU data structures. ACM Transactions on Graphics, 25(1):60–99, 2006. DOI: [10.1145/1122501.1122505.](https://doi.org/10.1145/1122501.1122505) [11] Museth, K. Hierarchical digital differential analyzer for efficient ray-marching in openvdb. In ACM SIGGRAPH 2014 Talks, 40:1. 2014. DOI: [10.1145/2614106.2614136](https://doi.org/10.1145/2614106.2614136). [12] Museth, K. NanoVDB: A GPU-friendly and portable VDB data structure for real-time rendering and simulation. In ACM SIGGRAPH 2021 Talks, 2021. In submission.
+
+[13] Museth, K. VDB: High-resolution sparse volumes with dynamic topology. ACM Transactions on Graphics, 32(3):27:1–27:22, 2013. DOI: [10.1145/2487228.2487235](https://doi.org/10.1145/2487228.2487235). [14] Museth, K., Lait, J., Johanson, J., Budsberg, J., Henderson, R., Alden, M., Cucka, P., Hill, D., and Pearce, A. OpenVDB: An open-source data structure and toolkit for high-resolution volumes. In ACM SIGGRAPH 2013 Courses, 19:1. 2013. DOI: [10.1145/2504435.2504454.](https://doi.org/10.1145/2504435.2504454) [15] Novák, J., Georgiev, I., Hanika, J., and Jarosz, W. Monte Carlo methods for volumetric light transport simulation. Computer Graphics Forum (Proceedings of Eurographics—State of the Art Reports), 37(2):551–576, May 2018. DOI: [10.1111/cgf.13383](https://doi.org/10.1111/cgf.13383). [16] Novák, J., Selle, A., and Jarosz, W. Residual ratio tracking for estimating attenuation in participating media. ACM Transactions on Graphics (Proceedings of ACM SIGGRAPH Asia 2014), 33(6):179:1–179:11, Nov. 2014. DOI: [10.1145/2661229.2661292.](https://doi.org/10.1145/2661229.2661292) [17] Van Waveren, J. M. P. and Hart, E. Using virtual texturing to handle massive texture data. Presentation at GPU Technology Conference, [https://www.nvidia.com/content/GTC-2010/pdfs/2152\\_GTC2010.pdf,](https://www.nvidia.com/content/GTC-2010/pdfs/2152_GTC2010.pdf) September 21, 2010. [18] Walt Disney Animation Studios. Data sets: Clouds. [https://www.disneyanimation.com/data-sets/?drawer=/resources/clouds/,](https://www.disneyanimation.com/data-sets/?drawer=/resources/clouds/) 2020. Acessed December 10, 2020. [19] Woodcock, E, Murphy, T, Hemmings, P, and Longworth, S. Techniques used in the GEM code for Monte Carlo neutronics calculations in reactors and other systems of complex geometry. In Applications of Computing Methods to Reactor Problems, ANL-7050, page 557, 1965.
+
+Open Access This chapter is licensed under the terms of the Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International License ([http://creativecommons.org/licenses/by-nc-nd/4.0/\)](http://creativecommons.org/licenses/by-nc-nd/4.0/), which permits any noncommercial use, sharing, distribution and reproduction in any medium or format, as long as you give appropriate credit to the original author(s) and the source, provide a link to the Creative Commons license and indicate if you modified the licensed material. You do not have permission under this license to share adapted material derived from this chapter or parts of it.
+
+
+
+The images or other third party material in this chapter are included in the chapter's Creative Commons license, unless indicated otherwise in a credit line to the material. If material is not included in the chapter's Creative Commons license and your intended use is not permitted by statutory regulation or exceeds the permitted use, you will need to obtain permission directly from the copyright holder.

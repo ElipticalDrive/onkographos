@@ -1,0 +1,115 @@
+Contribute to xiaobiaodu/Mobile-4DGS development by creating an account on GitHub.
+
+Add optional ROCm (gsplat) rasterization backend — MI300X verified by alexhegit · Pull Request #2 · xiaobiaodu/Mobile-4DGS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+alexhegit
+commented
+Oct 29, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Add a parallel AMD ROCm (gsplat) rasterization backend for the static-3DGS training path of Mobile-4DGS. The native CUDA extension remains the primary choice; the gsplat backend is selected only when the extension is not compiled, so the CUDA workflow is unchanged.
+Design (CUDA-safe)
+gaussian_renderer/__init__.py (the only pre-existing file touched): try: <original CUDA import> / except ImportError: <gsplat backend>. Verified both directions — with diff_gaussian_rasterization_fluxgs built, the original module wins (byte-identical behavior); without it, rocm_adapter/ loads and training runs.
+Everything else is new files: rocm_adapter/ (adapter, one-shot setup script, docs). train.py, scene/, utils/, submodules/ are untouched.
+Verified on AMD Instinct MI300X (ROCm 7.0, gsplat 1.5.3 ROCm wheel)
+Full static-3DGS training loop runs end-to-end: forward/backward, multi-view alpha densification (clone/split/prune active — counts move), model save at each saving iteration, ~100 it/s.
+Gradient contract: means2D.grad per-gaussian viewspace gradients are finite and non-zero on the rows the Inria kernel would mark visible; all five attribute gradients (means/scales/quats/opacities/colors) finite on the synthetic-scene smoke run.
+A one-gaussian rendering probe on this wheel (fixed focal, 128px) — scale 0.05→10px blob, 0.5→99px, symmetric, monotonic — documents that this ROCm kernel consumes raw linear scales, which the adapter now respects (the upstream gsplat Python API assumes log-space for the CUDA build; applying log() here is a 10⁵× magnification). Note in rocm_adapter/IMPLEMENTATION.md §3 + fix commit.
+Known scope boundaries (upstream Mobile-4DGS features, not covered)
+Neural-attribute / SH-compression stage (step ≥3000, apply_attribute_stage_transition → tcnn.NetworkWithInputEncoding): tiny-cuda-nn is CUDA-only and does not build for ROCm, so runs past ~3000 iters with the SH-aggregator path target NVIDIA. Static path before that stage, plus the full rasterizer + densification contract, is covered here.
+4D dynamic path (velocity field / time axis / SVQ / N3DV): still targets the CUDA extensions; not covered by this backend.
+Verified training runs therefore use the pre-net_itr window (≈2000–3000 iters on synthetic data, real PSNR-style fidelity requires the full 30k schedule which is out of scope here).
+Install & run
+```
+bash rocm_adapter/setup_rocm_env.sh   # venv @ ./gs210venv: torch 2.10.0+rocm7.0 + gsplat 1.5.3 wheel + shims
+source ./gs210venv/bin/activate
+python train.py --source_path <scene> ...   # identical CLI to the CUDA path
+```
+Full record: rocm_adapter/IMPLEMENTATION.md — ABI matrix (torch/gsplat), the three contract-gap fixes with kernel-source citations, the scales-convention probe, the tcnn boundary, and the reproduction steps.
+alexhegit
+added 5 commits
+October 29, 2026 16:32
+Add optional ROCm (gsplat) backend for the static-3DGS path (new file…
+…
+a6209ce
+```
+…s only)
+
+rocm_adapter/:
+- fluxgs_to_gsplat.py   GaussianRasterizationSettings / GaussianRasterizer
+                        drop-in on gsplat 1.5.3, with the three contract-gap
+                        fixes: radii scatter back to (N,), zero-bias differentiable
+                        means2D.grad coupling, and per-gaussian accum_metric_counts
+- setup_rocm_env.sh     one-shot venv (torch 2.10.0+rocm7.0 + gsplat ROCm wheel
+                        + pure-torch simple_knn / fused_ssim stand-ins)
+- README.md             usage + translation table + contract notes
+- IMPLEMENTATION.md     full design record: ABI matrix, the three contract gaps
+                        with Inria-kernel source citations, verification numbers
+
+Verified on AMD Instinct MI300X (ROCm 7.0): full train loop incl.
+densification (clone/split/prune); 2000 iters, L1 0.231 / PSNR 14.40.
+```
+CUDA-safe selection: native extension first, gsplat backend as Import…
+…
+16cdd15
+```
+…Error fallback
+
+gaussian_renderer/__init__.py (the only pre-existing file this PR touches):
+try the original diff_gaussian_rasterization_fluxgs import first; on
+ImportError load rocm_adapter/fluxgs_to_gsplat. Verified both directions:
+with the CUDA extension present the original module wins (behavior
+byte-identical to upstream); without it the adapter loads and a 500-iter
+training smoke run passes on MI300X.
+```
+README: AMD ROCm (MI300X) install & usage section (parallel backend, …
+…
+71afdbb
+```
+…no CUDA changes)
+```
+Fix scales convention: pass RAW linear scales, not log
+…
+7b0f1fa
+```
+Empirical probe on the gsplat 1.5.3 ROCm kernel (single gaussian at fixed
+focal, 128px canvas): scale 0.05 -> 10px blob, 0.5 -> 99px, symmetric for
++-value, monotone — the kernel consumes RAW linear world-unit scales.
+(The upstream gsplat Python API passes log-space to ITS CUDA build; this
+ROCm kernel evidently does not expect log.)  Previous torch.log(scales)
+made 0.03 -> -3.5, inflating every gaussian ~10^5x into a full-frame smear,
+which corrupted all visual output in prior smoke runs.
+
+Also corrects the in-code convention comment.
+```
+docs: correct scales convention (raw linear, not log) + note the ROCm…
+…
+484e4f8
+```
+…-wheel quirk
+
+Remove the incorrect 'gsplat expects log-space' statements; document that this
+pypi.amd.com gsplat 1.5.3 ROCm kernel consumes RAW linear scales (empirical
+probe: 0.05->10px, 0.5->99px) and that log() must NOT be applied.
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

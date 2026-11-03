@@ -1,0 +1,1897 @@
+FastGS: Training 3D Gaussian Splatting in 100 Seconds
+Shiwei Ren*
+Tianci Wen* Yongchun Fang
+NanKai University
+Biao Lu
+renshiwei, wentc, lubiao@mail.nankai.edu.cn, fangyc@nankai.edu.cn
+arXiv:2511.04283v3 [cs.CV] 6 Dec 2025
+https://fastgs.github.io
+Figure 1. We propose FastGS, a general acceleration framework for 3D Gaussian Splatting (3DGS) that significantly reduces training
+time without sacrificing rendering quality. In static scenes, our method completes training on the Tanks & Temples train scene within 100
+seconds. Furthermore, our method achieves 2.82× and 2.24× faster training for dynamic and surface reconstruction, respectively.
+simultaneous localization and mapping.
+Abstract
+The dominant 3D Gaussian splatting (3DGS) acceleration
+methods fail to properly regulate the number of Gaussians during training, causing redundant computational
+time overhead. In this paper, we propose FastGS, a novel,
+simple, and general acceleration framework that fully considers the importance of each Gaussian based on multi-view
+consistency, efficiently solving the trade-off between training time and rendering quality. We innovatively design a
+densification and pruning strategy based on multi-view consistency, dispensing with the budgeting mechanism. Extensive experiments on Mip-NeRF 360, Tanks & Temples, and
+Deep Blending datasets demonstrate that our method significantly outperforms the state-of-the-art methods in training
+speed, achieving a 3.29× training acceleration and comparable rendering quality compared with DashGaussian on
+the Mip-NeRF 360 dataset and a 15.45× acceleration compared with vanilla 3DGS on the Deep Blending dataset. We
+demonstrate that FastGS exhibits strong generality, delivering 2-6× training acceleration across various tasks, including dynamic scene reconstruction, surface reconstruction,
+sparse-view reconstruction, large-scale reconstruction, and
+1. Introduction
+Novel view synthesis (NVS) is a fundamental problem in
+computer vision and graphics, with broad applications in
+augmented reality [46], virtual reality [40], and autonomous
+driving [38]. Neural Radiance Field (NeRF) [26] methods
+model scenes as continuous volumetric functions and render
+photorealistic views, but require hours of training per scene.
+Recently, 3D Gaussian Splatting (3DGS) [17] has achieved
+rendering quality comparable to NeRF while offering significantly faster training and rendering speed. It models 3D
+scenes via explicit Gaussian primitives and employs a tilebased rasterizer. Benefiting from its efficiency, 3DGS has
+been successfully applied to a wide range of tasks, including dynamic scene reconstruction, surface reconstruction,
+and simultaneous localization and mapping (SLAM). However, a major bottleneck in its current practical application
+is the extended training time, which often requires tens of
+minutes per scene, hindering user-friendly deployment.
+∗ Equal contribution.
+ Corresponding author.
+1
+A detailed analysis of the vanilla 3DGS [17] training
+pipeline reveals two primary limitations: (1) its adaptive
+density control (ADC) of Gaussians often introduces numerous redundant Gaussians and (2) inefficiencies in the
+rendering pipeline. While recent works [9, 11, 12, 24]
+have significantly optimized the rendering pipeline, ADC
+remains a major area for improvement.
+ADC in vanilla 3DGS [17] comprises two main components. The first is Gaussian densification, which clones
+or splits a Gaussian based on its positional gradient. The
+second is Gaussian pruning, which removes Gaussians with
+low opacity or oversized scales. Existing 3DGS acceleration methods [4, 6, 8, 10, 12, 13, 18, 24, 27, 35] have introduced improvements to ADC. One direction of improvement focuses on designing mechanisms to constrain Gaussian densification, aiming to minimize the growth of redundant Gaussians. For example, Taming-3DGS [24] employs a budget-constrained optimization to control Gaussian growth. Similarly, DashGaussian [4] leverages an
+adaptive Gaussian primitive budgeting method to maintain
+continuous densification throughout training. The other direction involves refining the pruning strategy to accelerate
+training by deleting a greater number of Gaussians. For
+example, Speedy-Splat [12] applies a soft pruning strategy
+during densification and a hard pruning strategy afterward.
+One major drawback of these methods is the limited
+effectiveness of their densification and pruning strategies,
+which fail to maintain rendering quality while avoiding excessive Gaussian redundancy, resulting in an inefficient representation, as illustrated in Fig. 2. This indicates that
+their Gaussian control strategies are suboptimal. Based
+on our observations, some densification and pruning methods [4, 10, 18, 33] do not leverage multi-view consistency,
+while others [12, 13, 24] exploit it suboptimally. Specifically, they enforce multi-view consistency merely through
+Gaussian-associated scores, which we argue is insufficient.
+It may lead to the excessive growth of redundant Gaussians
+that provide only marginal improvements to the rendering
+quality from a few viewpoints while contributing little to
+others. On one hand, for certain densification methods
+such as Taming-3DGS [24], Gaussian importance is considered across views. However, it fully relies on Gaussianassociated scores rather than their actual contribution to rendering quality, resulting in weak multi-view constraints and
+leading to redundancy. Moreover, it lacks a dedicated redesign of the pruning strategy. On the other hand, for some
+pruning methods, such as Speedy-Splat [12], multi-view information is also considered, but it uses the gradients of
+Gaussian rather than evaluating each Gaussian’s contribution to multi-view rendering quality. This indirect enforcement of multi-view consistency leads to significant degradation in rendering quality.
+To address the above issues, we propose FastGS, a new,
+Figure 2. Gaussian count over training iterations. Benefiting from the efficient VCD and VCP strategies, FastGS keeps the
+number of Gaussians consistently low throughout the entire training process on the treehill scene of Mip-NeRF 360 [2].
+simple, and general 3DGS acceleration framework, capable
+of training a scene in around 100 seconds while maintaining comparable rendering quality, as shown in Fig. 1. In
+fact, nearly every Gaussian primitive participates in rendering the same region across multiple viewpoints. Our insight
+is similar to the concept behind bundle adjustment in traditional 3D reconstruction, where each 3D Gaussian should
+maintain multi-view consistency. This implies that the 3D
+Gaussian should enhance rendering quality across multiple views of the same region. Therefore, we introduce a
+multi-view consistent densification (VCD) strategy, which
+uses a multi-view reconstruction quality importance score
+to evaluate whether a Gaussian contributes beneficially to
+the improvement of multi-view rendering quality. Based on
+the same idea, we propose a multi-view consistent pruning
+(VCP) strategy, which removes redundant Gaussians that
+are useless to multi-view rendering quality. Notably, because VCD and VCP accurately identify which Gaussians
+need to be densified or pruned, our method does not require
+a budget mechanism, making it easily applicable to other
+tasks. To summarize our contributions,
+1. New, simple, and general framework for 3DGS acceleration that can train a scene in around 100 seconds while
+achieving comparable rendering quality.
+2. Efficient densification and pruning strategy strictly
+controlling the addition and removal of each Gaussian
+based on its contribution to multi-view reconstruction
+quality, greatly accelerating the training process.
+3. General and state-of-the-art performance across various tasks. Our method outperforms state-of-the-art
+(SOTA) methods in training speed while maintaining
+comparable rendering quality on static scenes. It generalizes well to dynamic scene reconstruction, surface reconstruction, sparse-view reconstruction, large-scale recon2
+µi ∈ R3 , rotation ri ∈ R4 , scale si ∈ R3 , opacity σi ∈ R,
+and color coefficients ci ∈ R16×3 represented in viewdependent spherical harmonics (SH). The rotation and scale
+together define the covariance matrix as
+struction, and SLAM.
+2. Related Work
+In this section, we review related works that focus on accelerating both the training and inference of 3DGS [17].
+Gaussian Densification. A key bottleneck of 3DGS is
+the excessive Gaussians that significantly slow down the
+training process. Recent works [4, 6, 18, 24, 32] attempt
+to address this issue by refining the densification strategy to control the primitive count. Specifically, Taming3DGS [24] employs a budgeting mechanism to control
+Gaussian growth, primarily computing importance scores
+based on Gaussian-associated properties. DashGaussian [4]
+introduces a resolution-guided primitive scheduler that progressively reconstructs the scene throughout the entire training process. Nevertheless, they still require millions of
+Gaussians to maintain rendering quality, resulting in heavy
+optimization overhead.
+Gaussian Pruning. Besides modifying densification, some
+methods [1, 8, 10, 12, 13, 27, 33] achieve acceleration by
+designing pruning strategies to remove a large number of
+Gaussians. Some of them design importance scores according to Gaussian-associated properties to guide pruning, discarding less critical Gaussians [1, 10, 33]. MiniSplatting [8] removes a large number of Gaussians through
+a simplification strategy based on intersection preserving
+and sampling. PUP 3DGS [13] and Speedy-Splat [12] remove Gaussians by computing a Gaussian-associated Hessian approximation across all training views. Nonetheless,
+some of them fail to fully remove redundant Gaussians,
+while others remove many Gaussians at the cost of significantly degraded rendering quality.
+Other Methods. Some works focus on optimizing 3DGS
+rasterization or optimization strategies. Taming-3DGS [24]
+replaces per-pixel with per-splat parallel backpropagation,
+which significantly speeds up the optimization process
+and serves as a strong baseline for subsequent research.
+StopThePop [30], FlashGS [9], and Speedy-Splat [12] use
+precise tile intersection to reduce Gaussian-tile pairs and
+accelerate rasterization. 3DGS-LM [15] replaces Adam
+with Levenberg-Marquardt for faster convergence, and
+3DGS² [21] achieves near second-order convergence via
+prioritized per-kernel updates.
+Σi3D = Ri Si Si⊤ Ri⊤ .
+(2)
+To render from a given camera viewpoint, all 3D Gaussians need to be projected into the 2D image plane. Given a
+viewing transformation W , the covariance matrix in camera
+coordinates is computed as
+Σ′i3D = JW Σi3D W ⊤ J ⊤ ,
+(3)
+where J denotes the Jacobian of the affine approximation
+of the projective transformation. The projected 3D Gaussian is then approximated as a 2D elliptical Gaussian on the
+image plane, with covariance Σi2D obtained by marginalizing Σ′i3D along the viewing direction. Each 2D Gaussian
+contributes to pixels within its footprint using α-blending:
+given Gaussians {Gi }N
+i=1 sorted by depth, the accumulated
+color of pixel p is computed as
+X
+i−1
+Y
+αi = σi Gi′ (p),
+(4)
+
+
+Gi′ (p) = exp − 21 (p − µi2D )⊤ Σ−1
+i2D (p − µi2D ) ,
+(5)
+C(p) =
+i∈N
+ci αi
+(1 − αj ),
+j=1
+where
+with µi2D and Σi2D denoting the mean and covariance of
+the projected 2D Gaussian, respectively.
+4. FastGS
+4.1. Overview
+The framework of our method is shown in Fig. 3. We
+initialize 3D Gaussians using SfM point clouds and train
+the 3DGS model on multi-view images. The addition and
+removal of 3D Gaussians are controlled via the proposed
+multi-view consistent densification and pruning strategies.
+As illustrated in Fig. 3b and Fig. 3c, Taming-3DGS [24]
+and Speedy-Splat [12] also estimate importance scores from
+multiple views, for densification and pruning, respectively.
+However, both rely on Gaussian-associated scores to control the number of Gaussians. This suboptimal use of
+multi-view information results in redundancy for Taming3DGS [24] and degraded rendering quality for SpeedySplat [12]. In contrast, as illustrated in Fig. 3a, our method
+evaluates the importance of each Gaussian based on multiview reconstruction quality, rather than gaussian-associated
+properties. Furthermore, our method leverages multi-view
+consistency constraints to effectively guide both densification and pruning, which will be detailed in Sections Sec. 4.2
+3. Background: 3D Gaussian Splatting
+3DGS models a scene as an explicit point-based representation composed of a set of anisotropic 3D Gaussians:
+ N
+
+Gi (x) = exp − 12 (x − µi )⊤ Σ−1
+i3D (x − µi ) i=1 . (1)
+To construct this representation, a sparse point cloud obtained from SfM is used to initialize the positions of Gaussian primitives. Each primitive Gi is parameterized by mean
+3
+Figure 3. The pipeline of FastGS. (a) We redesign the ADC of the vanilla 3DGS [17] based on multi-view consistency. To accurately
+assess the importance of each Gaussian, we sample training views and generate the corresponding per-pixel L1 loss maps. For each
+sampled view, a multi-view score is computed for each Gaussian by counting the number of high-error pixels within its 2D footprint, which
+is subsequently used to guide Gaussian densification and pruning. (b) Taming-3DGS [24] primarily computes the importance score based
+on Gaussian-associated properties across sampled views. (c) Speedy-Splat [12] computes the Gaussian score by accumulating Gaussianassociated Hessian approximations across all training views. We visualize the densification results from 0.5K to 15K iterations without
+pruning on the far left, and pruning results on the far right using Speedy-Splat [12]’s pruning strategy and VCP on vanilla 3DGS [17].
+and Sec. 4.3. To further improve rasterization efficiency,
+Sec. 4.4 introduces the compact box (CB) we use, which is
+adapted from the precise tile-intersection strategy proposed
+in Speedy-Splat [12].
+of Fig. 3b. Moreover, the computation of its score is complex and relatively inefficient. To address these issues, we
+propose a new, simple densification strategy VCD based on
+multi-view consistency. As illustrated in Fig. 3a, it computes the average number of high-error pixels in each Gaussian’s 2D footprint across sampled views, where high-error
+pixels are identified solely from the per-pixel L1 loss between the ground truth and the rendering. As shown on the
+left of Fig. 3a, VCD achieves comparable rendering quality
+with fewer Gaussians, thereby greatly avoiding redundancy.
+We then detail how VCD is implemented.
+4.2. Multi-view Consistent Densification
+The vanilla 3DGS [17] densifies Gaussians solely based on
+the gradient magnitude in the image space, which leads to
+a large number of redundant Gaussians. Other densification methods [4, 6, 43] also generate millions of Gaussians,
+leading to inefficiency. We argue that the redundancy arises
+because these methods fail to rigorously determine from
+multiple views whether a Gaussian needs densification. As
+illustrated in Fig. 3b, Taming-3DGS [24] considers multiview consistency during densification. However, it primarily computes the score based on Gaussian-associated properties (e.g., opacity, scale, depth, and gradient), making it
+difficult to enforce strict multi-view consistency for a Gaussian. This also leads to redundancy, as visualized on the left
+Given K camera views V = {v j }K
+j=1 , randomly sampled from the training views, together with their corresponding ground-truth images G = {g j }K
+j=1 and rendered
+j
+images R = {rj }K
+.
+For
+each
+view
+v
+,
+we compute the
+j=1
+j
+error between the rendered color ru,v
+and the ground-truth
+4
+j
+color gu,v
+at pixel (u, v):
+C′
+eju,v =
+1 X j,c′
+j,c′
+,
+ru,v − gu,v
+′
+C ′
+(6)
+c =1
+where c′ ∈ {1, 2, . . . , C ′ } denotes the color channel. We
+then construct the loss map Mj ∈ RW ×H from the perpixel errors:
+
+
+−1,H−1
+,
+(7)
+Mj = N { eju,v }W
+u=0,v=0
+Figure 4. Compact box. Compared with vanilla 3DGS [17] and
+Speedy-Splat [12], incorporating CB leads to a reduced number of
+Gaussian-tile pairs.
+where N (·) denotes a min–max normalization function. A
+threshold τ is then applied to Mj to identify pixel ph with
+high reconstruction error, forming a mask:
+Mjmask = I(Mj > τ ),
+remove truly redundant Gaussians, we propose a new, simple pruning strategy VCP based on multi-view consistency,
+as illustrated in Fig. 3a. Similar to VCD, it evaluates the
+score according to each Gaussian’s impact on multi-view reconstruction quality. As shown on the right of Fig. 3a, VCP
+removes a significant number of redundant Gaussians while
+preserving rendering quality. We then detail how VCP is
+implemented.
+Specifically, for each view v j ∈ V , we compute the photometric loss between the rendered image rj and the corresponding ground-truth image g j :
+(8)
+where pixels P with Mjmask (u, v) = 1 indicate regions of
+poor reconstruction quality.
+Next, we need to find the Gaussian primitives associated with these high-error pixels. For each 3D Gaussian
+primitive Gi , we project it onto the 2D image space to obtain its 2D footprint
+ Ωi . We then use an indicator function
+I Mjmask (p) = 1 to determine whether a pixel has high error. We compute an importance score sid for each Gaussian
+primitive, which accumulates the number of high-error pixels contained in the 2D footprint across all sampled views
+and then averages the accumulated value:
+sid =
+K Ωi 
+
+1 XX
+I Mjmask (p) = 1 ,
+K j=1 p
+j
+Ephoto
+= (1 − λ)Lj1 + λ(1 − LjSSIM ),
+(10)
+where Lj1 and LjSSIM denote the mean absolute error and the
+structural similarity loss over the entire image, respectively.
+Since the photometric loss provides a reliable indicator of
+reconstruction fidelity, we incorporate it with Eq. (9) to derive the pruning score for each Gaussian primitive Gi :
+
+
+!
+Ωi 
+K
+
+X
+X
+j
+j
+I Mmask (p) = 1
+· Ephoto  .
+sip = N 
+(9)
+where a higher sid indicates that the Gaussian consistently
+lies in high-error regions across multiple views, thus suggesting it as a candidate for densification. A Gaussian
+primitive Gi is selected for densification only when its importance score sid exceeds a threshold τd , ensuring that
+new Gaussians focus on under-reconstructed regions across
+views. Notably, we can efficiently determine the number of
+high-error pixels within the 2D footprint directly from the
+forward pass of the render.
+j=1
+p
+(11)
+Here, sip can be interpreted as a quantitative measure of the
+contribution of the Gaussian primitive Gi to the degradation of the overall rendering quality. A Gaussian primitive
+Gi is selected for pruning if its pruning score sip exceeds a
+predefined threshold τp , indicating that it has relatively low
+contribution to rendering quality across multiple views.
+4.3. Multi-view Consistent Pruning
+4.4. Compact Box
+The vanilla 3DGS [17] removes Gaussians with low opacity
+or overly large scale, but cannot effectively address redundancy. Recent pruning strategies [1, 7, 8, 10, 33] similarly
+fail to eliminate redundancy and can even significantly degrade rendering quality. In all cases, they do not determine
+Gaussian redundancy based on multi-view consistency. As
+illustrated in Fig. 3c, Speedy-Splat [12] computes the pruning score by accumulating Gaussian-associated Hessian approximations across all training views. Hence, it leads to
+degraded rendering quality due to its indirect use of multiview consistency, as visualized on the right of Fig. 3c. To
+During the preprocessing stage of rasterization, the
+vanilla 3DGS [17] uses the 3-sigma rule to obtain 2D ellipses, generating many Gaussian–tile pairs that introduce
+computational redundancy and reduce rendering efficiency.
+Speedy-Splat [12] partially addresses this with precise tile
+intersection, yet we observe that some 2D Gaussians still
+have a negligible impact on pixels in certain tiles. As illustrated in Fig. 4, to further reduce unnecessary pairs, we
+introduce a compact box (CB), which builds upon and extends Speedy-Splat [12]’s precise tile-intersection strategy
+5
+Figure 5. Qualitative results of Tab. 1. We present qualitative results on the kitchen and stump scenes from Mip-NeRF 360 [2], the
+playroom scene from Deep Blending [5], and the truck scene from Tanks & Temples [20]. Notably, the rendered results of the kitchen
+scene under multiple viewpoints demonstrate that our method achieves more consistent details across views.
+NeRF-DS [41], and Neu3D [22] datasets. Tanks & Temples [20], LLFF [25], BungeeNeRF [39], and Replica [34]
+are respectively used for surface reconstruction, sparseview reconstruction, large-scale reconstruction, and SLAM.
+by pruning Gaussian–tile pairs with minimal contribution
+based on the Mahalanobis distance from the Gaussian center. This further accelerates rendering while maintaining
+quality. Details are provided in Sec. 8 of the supplementary
+material.
+Metrics. To evaluate the performance, we report commonly
+used metrics for novel view rendering quality, including
+PSNR, SSIM [37], and LPIPS [45]. In addition, training
+efficiency and model compactness are assessed by reporting the total training time (in minutes), the final number of
+Gaussians, and the rendering speed (FPS).
+4.5. Optimization
+Same as the vanilla 3DGS [17], we optimize the learnable
+parameters with respect to the L1 loss over rendered pixel
+colors, combined with the SSIM term [36] LSSIM . The total
+supervision is defined as:
+L = (1 − λ)L1 + λ(1 − LSSIM ).
+Implementation Details. All methods, including ours and
+the other compared approaches, are trained for 30K iterations using the Adam [19] optimizer. For our approach, we
+set K = 10 and λ = 0.2 in all experiments. In the base
+setting, densification is performed every 500 iterations until the 15,000th iteration, and pruning is executed every 500
+iterations before 15K and every 3,000 iterations afterwards.
+To ensure fairness, all experiments are conducted with an
+NVIDIA RTX 4090 GPU, and all comparison methods are
+implemented using their official code. The default configu-
+(12)
+5. Experiments
+5.1. Experimental Setup
+Datasets. Same as vanilla 3DGS [17], we conduct experiments on three real-world datasets: Mip-NeRF 360 [2],
+Deep-Blending [14], and Tanks & Temples [20]. Moreover,
+we evaluate dynamic scene reconstruction on D-NeRF [29],
+6
+Table 1. Quantitative comparisons with existing 3DGS fast optimization methods. With FastGS, the training of 3DGS can be completed
+in around 100 seconds, while achieving comparable rendering quality to the other methods. Best results are marked as best score ,
+second best score , and third best score . Time is reported in minutes.
+Method
+Mip-NeRF 360 [2]
+3DGS [17]
+20.93
+Mini-Splatting [8] 17.69
+Speedy-splat [12] 13.38
+Taming-3DGS [24] 5.36
+DashGaussian [4]
+6.35
+FastGS (Ours)
+FastGS-Big (Ours)
+Deep Blending [14]
+Tanks & Temples [20]
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑
+27.53
+27.32
+26.91
+27.48
+27.73
+0.812
+0.821
+0.781
+0.794
+0.817
+1.93 27.56 0.797
+3.58 27.93 0.820
+0.221 2.63M
+0.217 0.53M
+0.295 0.30M
+0.261 0.68M
+0.218 2.40M
+146 19.77
+567 13.35
+552 10.75
+221 3.06
+155 4.16
+0.261 0.40M 579
+0.216 1.15M 469
+29.71
+29.99
+29.42
+29.50
+29.65
+0.903
+0.907
+0.898
+0.894
+0.906
+1.28 30.03 0.901
+2.00 30.12 0.907
+0.241 2.46M
+0.244 0.56M
+0.272 0.25M
+0.278 0.29M
+0.246 1.94M
+158 11.34
+624 9.06
+664 6.32
+352 2.71
+208 4.28
+0.270 0.22M 714
+0.243 0.65M 607
+23.71
+23.46
+23.38
+23.89
+24.00
+0.850
+0.844
+0.816
+0.833
+0.853
+1.32 24.15 0.839
+2.03 24.39 0.855
+0.170 1.57M
+0.181 0.30M
+0.242 0.18M
+0.214 0.32M
+0.178 1.21M
+195
+756
+691
+379
+240
+0.210 0.24M 655
+0.175 0.54M 569
+Figure 6. Visualization results on four representative tasks. We present the rendered results of the coffee-martini, fern, Ignatius, and
+bilbao scenes from the Neu3D [22], LLFF [25], Tanks & Temples [20], and BungeeNeRF [39] datasets, respectively.
+Table 2. Quantitative results of dynamic scene reconstruction.
+Our method achieves an average 2.84× training speed-up.
+Dataset Method
+Table 3. Quantitative results of sparse-view reconstruction.
+Our method achieves an average 2.56× training speed-up.
+Time↓PSNR↑SSIM↑LPIPS↓NGS ↓FPS↑
+Method
+NeRF- Deformable-3DGS [42] 7.86 23.83 0.851 0.180 0.13M 103
+DS [41]+Ours
+2.75 23.90 0.854 0.176 0.03M 484
+DropGaussian [28]
++Ours
+Neu3D Deformable-3DGS [42] 26.16 26.74 0.888 0.168 0.21M 69
+[22] +Ours
+9.29 29.29 0.908 0.146 0.09M 161
+LLFF [25] (9-view)
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑
+1.41
+0.55
+26.13
+26.14
+0.874
+0.873
+0.089 0.42M
+0.095 0.21M
+154
+189
+together with the vanilla 3DGS [17] for reference. These
+methods represent complementary approaches to accelerating training from different perspectives.
+Quantitative Results. As shown in Tab. 1 and Fig. 5,
+FastGS achieves the fastest training with comparable rendering quality. A scene can be trained in around 100 seconds, and the fastest case takes only 77 seconds. Taming3DGS [24] applies weak multi-view consistency constraints, resulting in excessive Gaussians and slower training. Similarly, the pruning strategy of Speedy-Splat [12]
+leads to a significant drop in rendering quality. The current
+SOTA, DashGaussian [4], achieves high rendering quality.
+However, its scene optimization still retains several million
+Gaussians, which limits the training speed. In contrast, our
+ration of FastGS builds upon 3DGS-accel [17, 24], detailed
+in Sec. 11, and incorporates the proposed VCD, VCP, and
+CB. To achieve extreme training acceleration, the rendering
+quality of our method is not the highest. Therefore, we provide a variant, FastGS-Big, which achieves both the highest rendering quality and the fastest training speed, where
+densification is executed once every 100 iterations. Further
+details are in Sec. 9.1 of the supplementary material.
+5.2. Comparison with Fast Optimization Methods
+Baselines. We report comparisons with the SOTA fast
+optimization methods, including DashGaussian [4], MiniSplatting [8], Speedy-Splat [12], and Taming-3DGS [24],
+7
+Table 6. Quantitative results of accelerating various backbones. Our method achieves a 3-8× training speed-up.
+Table 4. Quantitative results of surface reconstruction. Our
+method achieves a 2-6× training speed-up.
+Dataset
+Method Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑ F1↑
+Tanks &
+PGSR [3] 32.28 24.20 0.857 0.149 1.56M 87 0.57
+15.74 24.37 0.845 0.190 0.40M 210 0.55
+Temples [20] +Ours
+Mip-NeRF
+360 [2]
+PGSR [3] 74.70 27.22 0.832 0.183 3.79M 45
++Ours
+11.68 27.23 0.813 0.240 0.49M 202
+-
+Table 5. Quantitative results of large-scale reconstruction. Our
+method achieves an average 2.19× training speed-up.
+Method
+Octree-GS [31]
++Ours
+Mip-NeRF 360 [2]
+Method
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑
+Mip-Splatting [44]
++Ours
+26.20
+2.98
+27.89
+27.95
+0.837
+0.828
+0.176 3.98M
+0.208 0.83M
+224
+606
+Scaffold-GS [23]
++Ours
+18.37
+5.06
+27.70
+27.68
+0.812
+0.809
+0.226 0.57M
+0.220 0.30M
+194
+281
+Table 7. Ablation studies over the proposed methods of
+FastGS. Experiments are performed on the Mip-NeRF 360
+dataset [2] with 3DGS-accel [17, 24] as the baseline.
+BungeeNeRF [39]
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑
+21.18
+9.68
+28.04
+28.04
+0.917
+0.910
+0.093
+0.102
+0.99M
+0.74M
+Time↓
+PSNR↑
+SSIM↑
+LPIPS↓
+NGS ↓
+FPS↑
+3DGS-accel
++VCD.
++VCP.
++CB.
+7.10
+3.53
+5.32
+6.13
+27.46
+27.69
+27.70
+27.44
+0.810
+0.798
+0.812
+0.810
+0.226
+0.259
+0.228
+0.223
+2.64M
+0.53M
+1.96M
+2.78M
+182
+222
+285
+303
+Full
+1.93
+27.56
+0.797
+0.261
+0.40M
+579
+Method
+141
+162
+variant FastGS-Big surpasses DashGaussian [4] by more
+than 0.2 dB in rendering quality, reduces training time by
+43.6%, and cuts the number of Gaussians by more than half.
+These results demonstrate the superiority of our multi-view
+consistent densification and pruning strategies.
+adding each component individually, we analyze its impact
+on both reconstruction quality and training efficiency.
+Multi-View Consistent Densification. We first evaluate
+the effect of the densification strategy VCD. As shown in
+Tab. 7, VCD achieves over 2× faster training without any
+loss in reconstruction quality. This is because our Gaussian
+addition is guided by stricter multi-view consistency, which
+prevents the addition of redundant Gaussians. Tab. 7 further validates this by showing that with VCD, the number of
+Gaussians is reduced by 80%. This ablation study demonstrates the effectiveness of VCD for accelerating training.
+Multi-View Consistent Pruning. Next, we evaluate the
+effectiveness of VCP. As shown in Tab. 7, adding VCP
+shortens the training time by 25% and reduces the number
+of Gaussians by 26%, without sacrificing rendering quality.
+This is because our method effectively removes redundant
+Gaussians while preserving those critical for scene reconstruction. The strict multi-view consistency evaluation for
+each deleted Gaussian ensures this effectiveness, demonstrating that VCP is highly effective.
+Compact Box. Finally, we evaluate the effectiveness of
+compact box. As shown in Tab. 7, adding CB shortens the
+training time by 14% while achieving comparable rendering
+quality. This demonstrates that CB can accelerate training
+without degrading reconstruction quality.
+5.3. Generality of FastGS
+Baselines. Deformable-3DGS [42], PGSR [3], DropGaussian [28], OctreeGS [31], and Photo-SLAM [16] are selected as the backbones for dynamic scene reconstruction,
+surface reconstruction, sparse-view reconstruction, largescale reconstruction, and SLAM, respectively.
+Enhancing Various Tasks. We further test several SOTA
+methods combined with our framework across these tasks.
+As shown in Tab. 2, Tab. 3, Tab. 4, and Tab. 5, our method
+improves the training speed of all baselines by 2-6× while
+preserving rendering quality. We visualize rendered results
+in Fig. 6, there is no degradation in rendering quality across
+multiple tasks. This improvement demonstrates the strong
+generality of our approach. We argue that this benefits from
+the multi-view consistency, which is fundamental to various
+reconstruction tasks. More details and results are provided
+in Sec. 9.2 of the supplementary material.
+Enhancing Backbone. Our framework is simple, which
+can be easily applied to other 3DGS backbones with different representation primitives [23], or additional filters [44].
+As shown in Tab. 6, our method achieves 3–8× faster training while maintaining the same rendering quality.
+5.4. Ablation Study
+5.5. Discussions and Limitations
+We adopt 3DGS-accel [17, 24] as our baseline, which preserves the vanilla 3DGS [17] pipeline and integrates persplat parallel backpropagation and accelerated SH optimization from Taming-3DGS [24], along with optimizer
+scheduling. We then systematically evaluate the contribution of each proposed module based on this baseline. By
+Our method performs optimally within training from sparse
+point clouds. However, it faces challenges when applied to
+the post-training of the popular feed-forward 3DGS. Since
+the output Gaussians from these methods are very dense,
+our approach struggles to prune a massive number of points
+8
+effectively within just a few thousand iterations while maintaining rendering quality, making it difficult to achieve extreme acceleration. In our tests, even a short post-training
+of 3K iterations still requires approximately 20 seconds.
+[9] Guofeng Feng, Siyan Chen, Rong Fu, Zimu Liao, Yi Wang,
+Tao Liu, Boni Hu, Linning Xu, Zhilin Pei, Hengjie Li, et al.
+Flashgs: Efficient 3d gaussian splatting for large-scale and
+high-resolution rendering. In Proceedings of the Computer
+Vision and Pattern Recognition Conference, pages 26652–
+26662, 2025. 2, 3
+[10] Sharath Girish, Kamal Gupta, and Abhinav Shrivastava. Eagles: Efficient accelerated 3d gaussians with lightweight encodings. In European Conference on Computer Vision, pages
+54–71. Springer, 2024. 2, 3, 5
+[11] Hao Gui, Lin Hu, Rui Chen, Mingxiao Huang, Yuxin Yin, Jin
+Yang, Yong Wu, Chen Liu, Zhongxu Sun, Xueyang Zhang,
+et al. Balanced 3dgs: Gaussian-wise parallelism rendering
+with fine-grained tiling. arXiv preprint arXiv:2412.17378,
+2024. 2
+[12] Alex Hanson, Allen Tu, Geng Lin, Vasu Singla, Matthias
+Zwicker, and Tom Goldstein. Speedy-splat: Fast 3d gaussian splatting with sparse pixels and sparse primitives. In
+Proceedings of the Computer Vision and Pattern Recognition Conference, pages 21537–21546, 2025. 2, 3, 4, 5, 7,
+1
+[13] Alex Hanson, Allen Tu, Vasu Singla, Mayuka Jayawardhana,
+Matthias Zwicker, and Tom Goldstein. Pup 3d-gs: Principled
+uncertainty pruning for 3d gaussian splatting. In Proceedings
+of the Computer Vision and Pattern Recognition Conference,
+pages 5949–5958, 2025. 2, 3
+[14] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm,
+George Drettakis, and Gabriel Brostow. Deep blending for
+free-viewpoint image-based rendering. ACM Transactions
+on Graphics (ToG), 37(6):1–15, 2018. 6, 7, 3
+[15] Lukas Höllein, Aljaž Božič, Michael Zollhöfer, and
+Matthias Nießner.
+3dgs-lm: Faster gaussian-splatting
+optimization with levenberg-marquardt. arXiv preprint
+arXiv:2409.12892, 2024. 3
+[16] Huajian Huang, Longwei Li, Cheng Hui, and Sai-Kit Yeung.
+Photo-slam: Real-time simultaneous localization and photorealistic mapping for monocular, stereo, and rgb-d cameras.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, 2024. 8, 2
+[17] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler,
+and George Drettakis. 3d gaussian splatting for real-time
+radiance field rendering. ACM Transactions on Graphics, 42
+(4), 2023. 1, 2, 3, 4, 5, 6, 7, 8
+[18] Sieun Kim, Kyungjin Lee, and Youngki Lee. Color-cued
+efficient densification method for 3d gaussian splatting. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 775–783, 2024. 2, 3
+[19] Diederik P Kingma. Adam: A method for stochastic optimization. arXiv preprint arXiv:1412.6980, 2014. 6, 2, 3
+[20] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen
+Koltun. Tanks and temples: Benchmarking large-scale scene
+reconstruction. ACM Transactions on Graphics (ToG), 36
+(4):1–13, 2017. 6, 7, 8, 3, 4, 5
+[21] Lei Lan, Tianjia Shao, Zixuan Lu, Yu Zhang, Chenfanfu
+Jiang, and Yin Yang. 3dgs2: Near second-order converging
+3d gaussian splatting. In Proceedings of the Special Interest Group on Computer Graphics and Interactive Techniques
+Conference Conference Papers, pages 1–10, 2025. 3
+6. Conclusion
+This paper presents a novel, simple, and general 3DGS acceleration framework FastGS. We propose multi-view consistent densification and pruning strategies that prevent redundant Gaussians. Extensive experiments demonstrate the
+effectiveness of our view-consistency design. Our method
+achieves the fastest training speed among all SOTA methods while maintaining comparable rendering quality. The
+results also demonstrate the strong generality of FastGS,
+greatly reducing training time across various tasks.
+References
+[1] Muhammad Salman Ali, Maryam Qamar, Sung-Ho Bae, and
+Enzo Tartaglione. Trimming the fat: Efficient compression of 3d gaussian splats through pruning. arXiv preprint
+arXiv:2406.18214, 2024. 3, 5
+[2] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P
+Srinivasan, and Peter Hedman. Mip-nerf 360: Unbounded
+anti-aliased neural radiance fields.
+In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 5470–5479, 2022. 2, 6, 7, 8, 3, 4, 5
+[3] Danpeng Chen, Hai Li, Weicai Ye, Yifan Wang, Weijian Xie,
+Shangjin Zhai, Nan Wang, Haomin Liu, Hujun Bao, and
+Guofeng Zhang. Pgsr: Planar-based gaussian splatting for efficient and high-fidelity surface reconstruction. IEEE Transactions on Visualization and Computer Graphics, 2024. 8,
+2
+[4] Youyu Chen, Junjun Jiang, Kui Jiang, Xiao Tang, Zhihao Li,
+Xianming Liu, and Yinyu Nie. Dashgaussian: Optimizing
+3d gaussian splatting in 200 seconds. In Proceedings of the
+Computer Vision and Pattern Recognition Conference, pages
+11146–11155, 2025. 2, 3, 4, 7, 8, 5
+[5] Kangle Deng, Andrew Liu, Jun-Yan Zhu, and Deva Ramanan. Depth-supervised nerf: Fewer views and faster training for free. In Proceedings of the IEEE/CVF conference
+on computer vision and pattern recognition, pages 12882–
+12891, 2022. 6, 5
+[6] Xiaobin Deng, Changyu Diao, Min Li, Ruohan Yu, and Duanqing Xu. Efficient density control for 3d gaussian splatting. arXiv preprint arXiv:2411.10133, 2024. 2, 3, 4
+[7] Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia
+Xu, Zhangyang Wang, et al. Lightgaussian: Unbounded
+3d gaussian compression with 15x reduction and 200+ fps.
+Advances in neural information processing systems, 37:
+140138–140158, 2024. 5
+[8] Guangchi Fang and Bing Wang. Mini-splatting: Representing scenes with a constrained number of gaussians. In
+European Conference on Computer Vision, pages 165–181.
+Springer, 2024. 2, 3, 5, 7
+9
+[34] Julian Straub, Thomas Whelan, Lingni Ma, Yufan Chen, Erik
+Wijmans, Simon Green, Jakob J. Engel, Raul Mur-Artal,
+Carl Ren, Shobhit Verma, Anton Clarkson, Mingfei Yan,
+Brian Budge, Yajie Yan, Xiaqing Pan, June Yon, Yuyang
+Zou, Kimberly Leon, Nigel Carter, Jesus Briales, Tyler
+Gillingham, Elias Mueggler, Luis Pesqueira, Manolis Savva,
+Dhruv Batra, Hauke M. Strasdat, Renzo De Nardi, Michael
+Goesele, Steven Lovegrove, and Richard Newcombe. The
+Replica dataset: A digital replica of indoor spaces. arXiv
+preprint arXiv:1906.05797, 2019. 6
+[35] Xinzhe Wang, Ran Yi, and Lizhuang Ma. Adr-gaussian: Accelerating gaussian splatting with adaptive radius. In SIGGRAPH Asia 2024 Conference Papers, pages 1–10, 2024. 2
+[36] Zhou Wang, A.C. Bovik, H.R. Sheikh, and E.P. Simoncelli.
+Image quality assessment: from error visibility to structural
+similarity. IEEE Transactions on Image Processing, 13(4):
+600–612, 2004. 6
+[37] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P Simoncelli. Image quality assessment: from error visibility to
+structural similarity. IEEE transactions on image processing,
+13(4):600–612, 2004. 6
+[38] Zirui Wu, Tianyu Liu, Liyi Luo, Zhide Zhong, Jianteng
+Chen, Hongmin Xiao, Chao Hou, Haozhe Lou, Yuantao
+Chen, Runyi Yang, et al. Mars: An instance-aware, modular and realistic simulator for autonomous driving. In CAAI
+International Conference on Artificial Intelligence, pages 3–
+15. Springer, 2023. 1
+[39] Yuanbo Xiangli, Linning Xu, Xingang Pan, Nanxuan Zhao,
+Anyi Rao, Christian Theobalt, Bo Dai, and Dahua Lin.
+Bungeenerf: Progressive neural radiance field for extreme
+multi-scale scene rendering. In European conference on
+computer vision, pages 106–122. Springer, 2022. 6, 7, 8
+[40] Linning Xu, Vasu Agrawal, William Laney, Tony Garcia,
+Aayush Bansal, Changil Kim, Samuel Rota Bulò, Lorenzo
+Porzi, Peter Kontschieder, Aljaž Božič, et al. Vr-nerf: Highfidelity virtualized walkable spaces. In SIGGRAPH Asia
+2023 Conference Papers, pages 1–12, 2023. 1
+[41] Zhiwen Yan, Chen Li, and Gim Hee Lee. Nerf-ds: Neural radiance fields for dynamic specular objects. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 8285–8295, 2023. 6, 7
+[42] Ziyi Yang, Xinyu Gao, Wen Zhou, Shaohui Jiao, Yuqing
+Zhang, and Xiaogang Jin. Deformable 3d gaussians for highfidelity monocular dynamic scene reconstruction. In Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pages 20331–20341, 2024. 7, 8, 2
+[43] Zongxin Ye, Wenyu Li, Sidun Liu, Peng Qiao, and Yong
+Dou. Absgs: Recovering fine details in 3d gaussian splatting. In Proceedings of the 32nd ACM International Conference on Multimedia, pages 1053–1061, 2024. 4, 1, 2, 3
+[44] Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and
+Andreas Geiger. Mip-splatting: Alias-free 3d gaussian splatting. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages 19447–19456,
+2024. 8, 2, 3
+[45] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of
+[22] Tianye Li, Mira Slavcheva, Michael Zollhoefer, Simon
+Green, Christoph Lassner, Changil Kim, Tanner Schmidt,
+Steven Lovegrove, Michael Goesele, Richard Newcombe,
+et al. Neural 3d video synthesis from multi-view video. In
+Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages 5521–5531, 2022. 6, 7
+[23] Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin
+Wang, Dahua Lin, and Bo Dai. Scaffold-gs: Structured 3d
+gaussians for view-adaptive rendering. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 20654–20664, 2024. 8, 3
+[24] Saswat Subhajyoti Mallick, Rahul Goel, Bernhard Kerbl,
+Markus Steinberger, Francisco Vicente Carrasco, and Fernando De La Torre. Taming 3dgs: High-quality radiance
+fields with limited resources. In SIGGRAPH Asia 2024 Conference Papers, pages 1–11, 2024. 2, 3, 4, 7, 8, 1, 5
+[25] Ben Mildenhall, Pratul P Srinivasan, Rodrigo Ortiz-Cayon,
+Nima Khademi Kalantari, Ravi Ramamoorthi, Ren Ng, and
+Abhishek Kar. Local light field fusion: Practical view synthesis with prescriptive sampling guidelines. ACM Transactions on Graphics (ToG), 38(4):1–14, 2019. 6, 7, 2
+[26] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik,
+Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65(1):99–106, 2021.
+1
+[27] Panagiotis Papantonakis, Georgios Kopanas, Bernhard
+Kerbl, Alexandre Lanvin, and George Drettakis. Reducing
+the memory footprint of 3d gaussian splatting. Proceedings
+of the ACM on Computer Graphics and Interactive Techniques, 7(1):1–17, 2024. 2, 3
+[28] Hyunwoo Park, Gun Ryu, and Wonjun Kim. Dropgaussian:
+Structural regularization for sparse-view gaussian splatting.
+In Proceedings of the Computer Vision and Pattern Recognition Conference, pages 21600–21609, 2025. 7, 8, 2
+[29] Albert Pumarola, Enric Corona, Gerard Pons-Moll, and
+Francesc Moreno-Noguer. D-nerf: Neural radiance fields
+for dynamic scenes. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages
+10318–10327, 2021. 6
+[30] Lukas Radl, Michael Steiner, Mathias Parger, Alexander Weinrauch, Bernhard Kerbl, and Markus Steinberger.
+Stopthepop: Sorted gaussian splatting for view-consistent
+real-time rendering. ACM Transactions on Graphics (TOG),
+43(4):1–17, 2024. 3
+[31] Kerui Ren, Lihan Jiang, Tao Lu, Mulin Yu, Linning Xu,
+Zhangkai Ni, and Bo Dai. Octree-gs: Towards consistent
+real-time rendering with lod-structured 3d gaussians. arXiv
+preprint arXiv:2403.17898, 2024. 8, 2
+[32] Samuel Rota Bulò, Lorenzo Porzi, and Peter Kontschieder.
+Revising densification in gaussian splatting. In European
+Conference on Computer Vision, pages 347–362. Springer,
+2024. 3
+[33] Muhammad Salman Ali, Sung-Ho Bae, and Enzo
+Tartaglione.
+Elmgs: Enhancing memory and computation scalability through compression for 3d gaussian
+splatting. arXiv e-prints, pages arXiv–2410, 2024. 2, 3, 5
+10
+deep features as a perceptual metric. In Proceedings of the
+IEEE conference on computer vision and pattern recognition, pages 586–595, 2018. 6
+[46] Tinghui Zhou, Richard Tucker, John Flynn, Graham Fyffe,
+and Noah Snavely.
+Stereo magnification: Learning
+view synthesis using multiplane images. arXiv preprint
+arXiv:1805.09817, 2018. 1
+11
+FastGS: Training 3D Gaussian Splatting in 100 Seconds
+Supplementary Material
+7. Overview
+The supplementary material provides the following contents: Sec. 8 gives a detailed description of the proposed
+compact box. Sec. 9 presents additional experimental details, where Sec. 9.1 provides implementation details, and
+Secs. 9.2 and 9.3 describe the execution details of integrating FastGS into different tasks and backbones. Sec. 10 reports the computational overhead, Sec. 11 includes additional ablations, and Sec. 12 provides scene-wise results.
+Figure 7. Compact box. Compared with vanilla 3DGS [17] and
+Speedy-Splat [12], incorporating CB leads to a reduced number of
+Gaussian-tile pairs.
+8. Details of Compact Box
+During the preprocessing stage of rasterization,
+vanilla 3DGS [17] employs the 3-sigma rule to coarsely obtain effective 2D ellipses, which results in a large number of
+Gaussian–tile pairs as shown in Fig. 7a, introducing computational redundancy and significantly reducing rendering efficiency. To address this issue, Speedy-Splat [12] proposes
+a precise tile-intersection method to reduce the number of
+Gaussian–tile pairs. However, according to our observations, there remains room for further improvement, as some
+2D Gaussians still have a negligible impact on the pixels
+within the numbered tiles in Fig. 7b. Therefore, we propose Compact Box, which builds upon and refines SpeedySplat’s precise tile-intersection strategy to further reduce
+the effective 2D Gaussian region and eliminate unnecessary
+Gaussian–tile pairs, as illustrated in Fig. 7c.
+Formally, during the α-blending process, the alpha value
+of the i-th Gaussian at pixel p is defined as:
+
+
+⊤
+. (13)
+αi (p) = σi ·exp − 12 (p−µi2D )Σ−1
+i2D (p−µi2D )
+where β is a scaling factor. By adjusting β, the effective
+support region of each 2D Gaussian can be flexibly controlled. A smaller β yields a tighter ellipse around the mean
+µi2D , thereby reducing the spatial extent of (p − µi2D ) and
+limiting the number of pixels influenced by the Gaussian
+Gj . This selective suppression of marginal Gaussian contributions effectively reduces redundant Gaussian–tile pairs
+and accelerates rasterization.
+In implementation, Eq. (15) is integrated into SpeedySplat [12]’s snugbox, where the parameter β further reduces
+the 2D Gaussian footprint and shrinks its intersection region
+with tiles, thus forming our CB. We then obtain the Gaussian–tile pairs using Speedy-Splat [12]’s accutile method.
+The comparison between snugbox [12] and our CB can be
+found in Tab. 16. We sincerely appreciate the excellent
+work of Speedy-Splat [12].
+9. More Details
+9.1. Implementation Details
+This equation implies that αi (p) decays exponentially with
+the Mahalanobis distance:
+⊤
+A(p) = (p − µi2D )Σ−1
+i2D (p − µi2D ) .
+Our FastGS integrate VCD, VCP, and CB into 3DGSaccel [17, 24] and adopt the widely used absolute gradients [43] to ensure more accurate densification, ultimately
+achieving an average training time of around 100 seconds
+per scene. The core of our method lies in strictly controlling the number of Gaussians throughout training via VCD
+and VCP, maintaining it at a very low level and thereby enabling significant acceleration, as shown in Fig. 2.
+In practice, our VCD and VCP introduce a multi-view
+consistency constraint that strictly regulates Gaussian densification and pruning, preventing the creation of redundant
+Gaussians. For densification, newly added Gaussians are required not only to satisfy the gradient-based criteria but also
+to have an importance score greater than τd , which is set
+to 5 in our experiments. We follow the vanilla 3DGS [17]
+gradient for cloning, while adopting the absolute gradient
+(14)
+Intuitively, pixels closer to the Gaussian center contribute
+more, while those farther away have negligible influence.
+Based on this observation, a reasonable criterion can be established: Gaussian–tile pairs corresponding to pixels with
+large Mahalanobis distances can be safely discarded, as
+their effect on the final rendering is minimal.
+To prune Gaussian–tile pairs whose contributions are
+negligible, we define a threshold for the Mahalanobis distance as:
+
+
+σi
+T
+(p − µi2D ) Σi−1 (p − µi2D ) = β 2 ln
+,
+(15)
+2D
+τα
+1
+Table 8. Quantitative results of sparse-view reconstruction. We present the results under the 3-view and 6-view settings.
+LLFF [25] 3-view
+Method
+DropGaussian [28]
++Ours
+LLFF [25] 6-view
+Time↓
+PSNR↑
+SSIM↑
+LPIPS↓
+NGS ↓
+FPS↑
+Time↓
+PSNR↑
+SSIM↑
+LPIPS↓
+NGS ↓
+FPS↑
+0.73
+0.30
+20.43
+20.58
+0.707
+0.708
+0.202
+0.217
+0.08M
+0.03M
+183
+206
+0.88
+0.37
+24.67
+24.68
+0.836
+0.834
+0.116
+0.131
+0.18M
+0.09M
+174
+199
+Table 9. Quantitative results of SLAM. Our method achieves an
+average 2.70× training speed-up.
+from AbsGS [43] for splitting. For pruning, before 15k iterations, we follow 3DGS [17] but retain VCP by sampling
+half of the candidate Gaussians according to their pruning
+scores. After 15k iterations, pruning is performed every 3k
+iterations by removing Gaussians with opacity below 0.1 or
+pruning score exceeding 0.9, ensuring multi-view consistency.
+Our baseline, 3DGS-accel [17, 24], preserves the vanilla
+3DGS [17] pipeline while integrating the per-splat parallel backpropagation and accelerated SH optimization from
+Taming-3DGS [24], along with an optimizer schedule that
+updates the optimizer every 32 iterations from 15,000 to
+20,000 iterations and every 64 iterations thereafter. This
+schedule is inspired by the SH optimization strategy in
+Taming-3DGS [24]. We do not consider it a conceptual
+contribution of our method, so instead of discussing it in
+the main paper, we incorporate it directly into the baseline
+configuration. As shown in Tab. 15, this scheduling strategy provides acceleration comparable to sparse Adam [24]
+while fully preserving rendering quality.
+We sincerely thank Taming-3DGS [24] for providing a
+strong baseline, upon which our work builds. By further
+integrating the proposed VCD, VCP, and CB components,
+together with the absolute gradients from AbsGS [43], our
+method achieves significant acceleration. This improvement largely stems from the strict control of Gaussian count
+enforced by VCD and VCP, ensuring that the number of
+Gaussians remains as low as possible throughout training.
+Other modules contribute only marginally to this aspect,
+which we further analyze in the ablation study.
+Method
+Photo-SLAM [16]
++Ours
+Replica RGB-D
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑
+5.03 37.01 0.961
+1.86 37.01 0.957
+0.026 0.33M 744
+0.042 0.11M 2700
+integrated into the rasterization stage to further improve efficiency. Adam [19] is used as the optimizer.
+Sparse-view Reconstruction: DropGaussian [28] differs
+from vanilla 3DGS [17] in that it randomly sets the opacity of a subset of Gaussians to zero during rendering, eliminating their contribution. Based on our accelerated 3DGS
+backbone, we apply VCD and VCP to precisely control densification and pruning, keeping the number of Gaussians
+low throughout training. CB is incorporated to accelerate
+rendering, and Adam [19] is used as the optimizer. Additional experimental results are presented in Tab. 8.
+Large-scale Reconstruction: Octree-GS [31] uses an
+anchor-based parameterization where each anchor generates multiple Gaussians. Based on our accelerated 3DGS
+backbone, we apply VCD to constrain anchor expansion,
+requiring the importance score of associated Gaussians to
+exceed 5. VCP is not applied since pruning is performed
+at the anchor level. CB is integrated into rasterization. The
+optimizer is Adam [19].
+SLAM: Photo-SLAM [16] follows vanilla 3DGS [17]’s
+ADC strategy. Based on our accelerated 3DGS backbone, we integrate VCD and VCP for effective densification and pruning, and incorporate CB to speed up rendering.
+Adam [19] is used as the optimizer. Results are presented
+in Tab. 9.
+9.2. Generalizing FastGS to Other Tasks
+Dynamic Scene Reconstruction: Deformable-3DGS [42]
+adopts the same ADC strategy as vanilla 3DGS [17], while
+additionally predicting per-Gaussian deformation parameters. This design remains fully compatible with our framework. Building on our accelerated 3DGS backbone, we employ VCD and VCP to precisely regulate densification and
+pruning, ensuring that the number of Gaussians remains low
+throughout training. CB is further integrated to speed up
+rendering, and the optimizer is Adam [19].
+Surface Reconstruction: PGSR [3] uses an ADC strategy similar to vanilla 3DGS [17]. Based on our accelerated 3DGS backbone, we replace ADC with VCD and VCP
+to strictly control Gaussian growth and elimination. CB is
+9.3. Equipping FastGS to Backbones
+Mip-Splatting [44]: Mip-Splatting [44] introduces a filtering mechanism for anti-aliasing while following an ADC
+strategy similar to vanilla 3DGS [17]. Based on our accelerated 3DGS backbone, we replace its ADC pipeline with
+VCD and VCP, which precisely control Gaussian densification and pruning to keep the number of Gaussians low
+throughout training. CB is also integrated into the rasterization stage to further accelerate rendering. Adam [19] is
+used as the optimizer. Additional experimental results are
+2
+Table 10. Quantitative results of accelerating various backbones.
+Deep Blending [14]
+Method
+Tanks & Temples [20]
+Time↓
+PSNR↑
+SSIM↑
+LPIPS↓
+NGS ↓
+FPS↑
+Time↓
+PSNR↑
+SSIM↑
+LPIPS↓
+NGS ↓
+FPS↑
+Mip-Splatting [44]
++Ours
+23.94
+1.74
+29.35
+29.68
+0.899
+0.899
+0.241
+0.274
+3.48M
+0.20M
+219
+698
+14.57
+2.01
+23.77
+24.18
+0.856
+0.843
+0.158
+0.200
+2.36M
+0.36M
+300
+729
+Scaffold-GS [23]
++Ours
+13.31
+2.82
+30.09
+30.00
+0.905
+0.900
+0.256
+0.267
+0.18M
+0.08M
+307
+423
+9.83
+3.77
+24.09
+24.15
+0.851
+0.849
+0.175
+0.180
+0.26M
+0.14M
+261
+332
+Table 11. Quantitative comparison of computational overhead. We report the mean GPU memory usage (GB), peak GPU memory
+usage (GB), and storage size (MB).
+MipNeRF-360 [2]
+Method
+Deep Blending [14]
+Tanks&Temples [20]
+mean GPU mem.↓
+peak GPU mem.↓
+Storage↓
+mean GPU mem.↓
+peak GPU mem.↓
+Storage↓
+mean GPU mem.↓
+peak GPU mem.↓
+Storage↓
+3DGS [17]
+Mini-Splatting [8]
+Speedy-splat [12]
+Taming-3DGS [24]
+DashGaussian [4]
+7.70
+5.21
+4.97
+4.78
+6.71
+9.89
+7.44
+7.03
+5.88
+9.96
+652
+132
+74
+170
+595
+5.97
+4.16
+3.82
+3.39
+4.79
+8.10
+6.20
+5.03
+4.01
+7.75
+610
+138
+61
+73
+482
+3.47
+2.51
+2.19
+1.94
+2.81
+4.73
+4.63
+2.66
+2.43
+4.49
+389
+75
+45
+79
+301
+FastGS (Ours)
+FastGS-Big (Ours)
+4.58
+5.37
+5.21
+6.63
+99
+208
+3.34
+3.81
+3.77
+4.65
+54
+114
+1.91
+2.22
+2.27
+2.83
+60
+86
+Table 12. Ablation studies over the proposed methods. Experiments are performed on the Mip-NeRF 360 dataset [2] with
+3DGS-accel [17, 24] as the baseline.
+We report computational resource consumption in Tab. 11.
+As shown, our method requires relatively low GPU memory, making it suitable for devices with limited resources.
+the proposed multi-view consistency-based densification
+and pruning strategies, VCD and VCP, contribute most significantly to the overall acceleration.
+Component-wise Ablation. We examine the effects of
+VCD, VCP, CB, and the absolute gradients from AbsGS [43] in Tab. 12. The ablation results indicate that neither absolute gradients nor CB effectively reduce the number of Gaussians, and their contribution to acceleration is
+limited. In contrast, our proposed VCD and VCP achieve
+significantly greater speed-up, as they strictly control
+the Gaussian count, keeping it low throughout the entire training process, as shown in Fig. 2.
+VCD Threshold τd . We study the effect of the densification threshold τd in VCD on Tanks & Temples [20], as
+shown in Tab. 13. A smaller τd allows more Gaussians to
+be densified, leading to slightly higher rendering quality but
+at the cost of increased training time and Gaussian count.
+Conversely, a larger τd reduces the number of Gaussians,
+accelerating training while slightly degrading quality. Our
+default choice of τd = 5 achieves a balanced trade-off between efficiency and rendering fidelity.
+Number of sampled views K. We study the effect of the
+number of sampled views on both training efficiency and
+rendering quality on the Mip-NeRF 360 [2] dataset. As
+shown in Tab. 14, using too few views slightly degrades
+quality, while sampling more views increases training time
+with minimal improvement. Our default choice of K = 10
+achieves a good balance.
+11. Additional Ablation
+12. Scene-wise Results
+In this section, we perform more comprehensive ablations
+based on 3DGS-accel [17, 24] to further demonstrate that
+We present the quantitative results in Tab. 17, Tab. 18, and
+Tab. 19, and provide the qualitative comparisons in Fig. 8,
+Time↓
+PSNR↑
+SSIM↑
+LPIPS↓
+NGS ↓
+3DGS-accel
+7.10
+27.46
+0.810
+0.226
+2.64M
++Abs grad
++CB.
++VCD.
++VCP.
+6.85
+6.13
+3.53
+5.32
+27.60
+27.44
+27.69
+27.70
+0.817
+0.810
+0.798
+0.812
+0.216
+0.223
+0.259
+0.228
+2.29M
+2.78M
+0.53M
+1.96M
+Full
+1.93
+27.56
+0.797
+0.261
+0.40M
+Method
+presented in Tab. 10.
+Scaffold-GS [23]: Scaffold-GS [23] adopts an anchorbased Gaussian representation. On our accelerated 3DGS
+backbone, we apply VCD to control densification and maintain a low number of Gaussians. VCP is not applicable
+because pruning is performed at the anchor level. CB is
+integrated into the rasterization stage to further accelerate
+rendering. Adam [19] is used as the optimizer. Additional
+experimental results are presented in Tab. 10.
+10. Computational Overhead
+3
+Table 13. Ablation study on thresh τd on Tanks & Temples [20].
+τd
+Time↓
+PSNR↑
+SSIM↑
+LPIPS↓
+NGS ↓
+1.44
+1.42
+1.32
+1.30
+1.23
+1.15
+1.12
+24.17
+24.18
+24.15
+23.98
+23.84
+23.54
+23.26
+0.841
+0.841
+0.839
+0.834
+0.829
+0.819
+0.809
+0.205
+0.207
+0.210
+0.218
+0.226
+0.241
+0.252
+0.30M
+0.28M
+0.24M
+0.21M
+0.17M
+0.13M
+0.11M
+1
+2
+5(ours)
+10
+20
+50
+100
+Table 14. Ablation study on the number of sampled views K
+on Mip-NeRF 360 [2]. “all” indicates using all training views.
+K
+5
+10(ours)
+20
+50
+all
+Time↓
+PSNR↑
+SSIM↑
+LPIPS↓
+NGS ↓
+1.91
+1.93
+2.03
+2.10
+2.29
+27.47
+27.56
+27.55
+27.55
+27.54
+0.795
+0.797
+0.797
+0.797
+0.796
+0.265
+0.261
+0.261
+0.262
+0.263
+0.36M
+0.40M
+0.43M
+0.43M
+0.42M
+Table 15. Comparison of different optimization strategies.
+Method
+Optimizer
+FastGS
+Sparse Adam [24]
+Optimizer schedule
+Time↓
+PSNR↑
+SSIM↑
+LPIPS↓
+NGS ↓
+1.93
+1.93
+27.37
+27.56
+0.792
+0.797
+0.270
+0.261
+0.37M
+0.40M
+Table 16. Comparison of rasterization methods. Experiments
+are performed on the Mip-NeRF 360 dataset [2] with 3DGSaccel [17, 24] as the baseline.
+Time↓
+PSNR↑
+SSIM↑
+LPIPS↓
+NGS ↓
+FPS↑
+3DGS-accel
+7.10
+27.46
+0.810
+0.226
+2.64M
+182
++snugbox [12]
++CB.
+6.50
+6.13
+27.46
+27.44
+0.811
+0.810
+0.224
+0.223
+2.69M
+2.78M
+288
+303
+Method
+Fig. 9 and Fig. 10.
+4
+Table 17. Scene-wise quantitative results over the Mip-NeRF 360 dataset [2].
+bicycle
+Method
+flowers
+garden
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑
+3DGS [17]
+27.97
+Mini-Splatting [8] 16.17
+Speedy-Splat [12] 15.87
+Taming-3DGS [24] 5.65
+DashGaussian [4]
+9.93
+FastGS
+FastGS-Big
+25.14
+25.23
+24.79
+24.72
+25.31
+0.748
+0.764
+0.704
+0.693
+0.763
+1.92 24.84 0.714
+2.59 25.26 0.755
+0.242 4.71M
+0.241 0.59M
+0.333 0.58M
+0.332 0.81M
+0.222 4.70M
+80 18.98
+564 17.22
+460 13.38
+199 4.97
+105 7.05
+0.310 0.54M 582
+0.245 1.55M 463
+21.30
+21.43
+21.21
+21.10
+21.78
+1.95 21.21 0.560
+3.22 21.60 0.602
+stump
+Method
+0.586
+0.614
+0.560
+0.552
+0.604
+0.360 2.82M
+0.341 0.63M
+0.418 0.34M
+0.416 0.58M
+0.341 2.82M
+162 26.78
+511 15.97
+526 15.73
+233 9.82
+158 8.27
+0.406 0.49M 555
+0.341 1.14M 468
+27.34
+27.36
+26.69
+27.42
+27.57
+0.857
+0.806
+0.814
+0.851
+0.857
+2.47 27.20 0.836
+6.50 27.56 0.864
+treehill
+0.122 4.19M
+0.215 0.67M
+0.214 0.52M
+0.138 2.08M
+0.131 3.37M
+103
+487
+474
+177
+153
+0.174 0.74M 538
+0.110 2.64M 332
+room
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑
+3DGS [17]
+21.77
+Mini-Splatting [8] 16.52
+Speedy-Splat [12] 13.77
+Taming-3DGS [24] 3.93
+DashGaussian [4]
+6.57
+FastGS
+FastGS-Big
+26.64
+26.80
+26.67
+26.05
+27.17
+0.768
+0.839
+0.765
+0.729
+0.783
+1.72 26.65 0.756
+2.88 27.18 0.786
+0.244 4.05M
+0.161 0.67M
+0.288 0.46M
+0.324 0.48M
+0.229 3.42M
+130 20.33
+521 17.05
+480 12.90
+280 5.37
+164 8.20
+0.297 0.39M 576
+0.240 1.06M 489
+22.59
+22.76
+22.48
+22.92
+22.94
+1.72 22.94 0.612
+2.78 22.83 0.632
+counter
+Method
+0.636
+0.656
+0.590
+0.628
+0.640
+0.347 3.01M
+0.326 0.63M
+0.462 0.32M
+0.395 0.79M
+0.333 3.42M
+136 18.78
+487 18.00
+548 12.05
+214 3.88
+134 4.00
+0.429 0.38M 568
+0.378 1.01M 507
+31.71
+31.48
+30.83
+31.64
+31.81
+0.927
+0.928
+0.903
+0.917
+0.924
+1.62 31.98 0.920
+2.38 32.20 0.929
+kitchen
+0.197 1.25M
+0.190 0.39M
+0.258 0.11M
+0.227 0.23M
+0.205 1.04M
+164
+506
+617
+230
+182
+0.217 0.21M 632
+0.189 0.57M 577
+bonsai
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑
+3DGS [17]
+17.58
+Mini-Splatting [8]
+9.83
+Speedy-Splat [12] 12.10
+Taming-3DGS [24] 4.60
+DashGaussian [4]
+3.95
+FastGS
+FastGS-Big
+29.16
+28.65
+28.22
+29.20
+29.11
+0.915
+0.911
+0.876
+0.909
+0.911
+1.83 29.15 0.907
+2.62 29.57 0.917
+0.183 1.05M
+0.181 0.41M
+0.259 0.10M
+0.200 0.31M
+0.191 0.85M
+171 21.30
+590 10.23
+606 13.25
+221 3.48
+162 5.52
+0.204 0.21M 596
+0.177 0.47M 522
+31.54
+31.05
+30.09
+31.84
+31.69
+0.932
+0.930
+0.895
+0.929
+0.927
+2.42 31.87 0.929
+5.15 32.17 0.938
+0.116 1.53M
+0.120 0.44M
+0.195 0.11M
+0.128 0.48M
+0.129 1.18M
+144 14.90
+614 11.02
+608 11.37
+209 4.60
+135 3.95
+0.127 0.38M 543
+0.105 1.18M 395
+32.37
+31.24
+31.16
+32.40
+32.15
+0.946
+0.943
+0.925
+0.942
+0.945
+1.83 32.19 0.942
+3.22 32.97 0.953
+0.180 1.07M
+0.177 0.36M
+0.228 0.13M
+0.193 0.41M
+0.180 0.82M
+224
+661
+652
+227
+193
+0.191 0.28M 622
+0.161 0.85M 498
+Table 18. Scene-wise quantitative results over the Deep Blending dataset [5].
+playroom
+Method
+drjohnson
+Time↓
+PSNR↑
+SSIM↑
+LPIPS↓
+NGS ↓
+FPS↑
+Time↓
+PSNR↑
+SSIM↑
+LPIPS↓
+NGS ↓
+FPS↑
+3DGS [17]
+Mini-Splatting [8]
+Speedy-Splat [12]
+Taming-3DGS [24]
+DashGaussian [4]
+16.75
+12.30
+9.70
+3.35
+4.70
+30.14
+30.47
+29.77
+29.96
+30.17
+0.904
+0.908
+0.898
+0.901
+0.909
+0.243
+0.241
+0.274
+0.264
+0.243
+1.85M
+0.51M
+0.18M
+0.40M
+2.38M
+189
+618
+695
+354
+233
+22.78
+14.40
+11.80
+2.77
+3.62
+29.28
+29.51
+29.07
+29.04
+29.13
+0.902
+0.905
+0.898
+0.888
+0.903
+0.239
+0.246
+0.269
+0.292
+0.250
+3.07M
+0.60M
+0.31M
+0.19M
+1.51M
+126
+629
+633
+349
+182
+FastGS
+FastGS-Big
+1.22
+1.93
+30.57
+30.55
+0.905
+0.909
+0.266
+0.239
+0.19M
+0.60M
+727
+619
+1.35
+2.07
+29.50
+29.69
+0.898
+0.905
+0.275
+0.247
+0.25M
+0.70M
+700
+595
+Table 19. Scene-wise quantitative results over the Tanks & Temples dataset [20].
+truck
+Method
+train
+Time↓
+PSNR↑
+SSIM↑
+LPIPS↓
+NGS ↓
+FPS↑
+Time↓
+PSNR↑
+SSIM↑
+LPIPS↓
+NGS ↓
+FPS↑
+3DGS [17]
+Mini-Splatting [8]
+Speedy-Splat [12]
+Taming-3DGS [24]
+DashGaussian [4]
+12.50
+9.08
+7.22
+2.38
+4.25
+25.39
+25.32
+25.18
+25.27
+25.80
+0.881
+0.879
+0.863
+0.865
+0.886
+0.142
+0.139
+0.192
+0.187
+0.150
+2.05M
+0.32M
+0.26M
+0.27M
+1.43M
+186
+716
+648
+409
+257
+10.18
+9.03
+5.42
+3.03
+4.32
+22.03
+21.60
+21.59
+22.50
+22.19
+0.818
+0.809
+0.768
+0.802
+0.819
+0.198
+0.223
+0.292
+0.240
+0.206
+1.09M
+0.28M
+0.11M
+0.37M
+1.00M
+203
+795
+733
+348
+222
+FastGS
+FastGS-Big
+1.30
+2.13
+25.73
+26.09
+0.872
+0.886
+0.178
+0.140
+0.25M
+0.63M
+666
+579
+1.33
+1.93
+22.57
+22.68
+0.805
+0.824
+0.242
+0.210
+0.23M
+0.46M
+644
+558
+5
+Figure 8. Additional visual comparisons on the bicycle, garden, stump, room, counter, kitchen, bonsai, and playroom scenes.
+6
+Figure 9. Additional visual comparisons on different tasks, including the flame salmon, cut roasted beef, Caterpillar, Meetingroom scenes.
+7
+Figure 10. Additional visual comparisons on different tasks, including the trex, leaves, amsterdam, and office0 scenes.
+8

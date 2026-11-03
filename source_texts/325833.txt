@@ -1,0 +1,434 @@
+[CVPR 2026] 4C4D: 4 Camera 4D Gaussian Splatting. Contribute to xuelongmu/4C4D development by creating an account on GitHub.
+
+Add sparse Adam over batch-visible gaussians (--sparse_adam, off by default) by xuelongmu · Pull Request #42 · xuelongmu/4C4D · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+xuelongmu
+commented
+Aug 17, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Refs #17. Stacked on the #20 static-freeze PR, and merged up to its corrected
+static freeze.
+Taming 3DGS restricts the Adam step to the gaussians a batch actually rendered.
+This lands it here behind an off-by-default --sparse_adam, with a fused CUDA
+kernel that skips rows outside the visibility mask.
+Results
+Both arms from this branch at the same revision, 7,500 iterations, seed 42, run
+back to back on a box gated to no other train.py and sampled every 30 s to
+prove it stayed idle.
+Speed: dense 19:36 (1,176 s) against sparse 17:50 (1,070 s) — 9.0% faster end
+to end, and 13.5% per iteration over the 1M-point plateau (iterations
+4,000-7,000: 495 s against 436 s).
+segment
+dense
+sparse
+delta
+0-1,000
+147 s
+151 s
++4 s
+1,000-2,000
+109 s
+107 s
+-2 s
+2,000-3,000
+156 s
+135 s
+-21 s
+3,000-4,000
+173 s
+148 s
+-25 s
+4,000-5,000
+168 s
+149 s
+-19 s
+5,000-6,000
+160 s
+140 s
+-20 s
+6,000-7,000
+167 s
+147 s
+-20 s
+Three checks pin the saving to the masked step rather than to anything else:
+The first two thousand iterations are a wash (256 s against 258 s). N is
+small there and the Adam step is ~2% of an iteration, so the mechanism
+predicts no saving and none appears; the gap opens only as densification
+drives N up and the visible fraction down.
+The sparse arm carries a bigger model, not a smaller one — 1,035,672
+gaussians against 995,421 at iteration 7,000, so this is not a
+fewer-gaussians artifact.
+The kernel did the work. SPARSE_ADAM_STATS=1 over the full run: 66,861
+kernel steps, zero dense fallbacks, 621 skips.
+Quality: no measurable difference. Scored over all 300 held-out images at
+iteration 7,000 with scripts/evaluate_full_heldout.py --stride 1:
+pair
+dense
+sparse
+delta
+merged base
+20.090
+20.264
++0.173
+pre-merge
+20.336
+20.077
+-0.260
+pre-merge (2nd)
+20.516
+20.662
++0.147
+mean
+20.314
+20.334
++0.020
+The sign flips, so there is nothing here. For scale, two runs of the same code
+at the same seed differ by 0.18 dB on this metric (nondeterministic atomics in
+the rasterizer backward), so three pairs cannot resolve anything below ~0.2 dB.
+Note for anyone reviewing metrics in this repo: an earlier revision of this
+PR quoted the training log's Evaluating test line, which is
+test_cameras[::100] — 3 images out of 300 on this split. It reported sparse
+ahead in every pair; the full set shows it 0.26 dB behind in one of the
+three. The 3-image estimator inverted a sign. Nothing here uses it any more.
+What the measurements changed about the plan
+The visible fraction collapses as densification proceeds — 0.71 at 75k
+points but 0.12 at the 1M cap. Four views out of eight cover most of a coarse
+cloud but barely an eighth of a fine one, so an early reading badly understates
+the mask's value.
+A pure-torch masked step would have been a slowdown. index_select → Adam →
+index_copy_ moves ~11 row-widths where the dense step moves 7, so it only wins
+below ~64% visible; at N=1M it costs 36.5 ms against torch's 19.5 ms at full
+visibility. That forced the kernel, which launches over all rows and returns
+before touching memory for masked-out gaussians.
+Kernel against torch.optim.Adam at N=1M on an A6000:
+visible
+sparse kernel
+speedup
+100%
+21.9 ms
+2.28x
+50%
+11.7 ms
+4.28x
+25%
+6.3 ms
+7.88x
+12%
+3.7 ms
+13.40x
+The 2.28x at full visibility is not masking — it is fusing what torch's
+foreach path does in several passes into one. That is also why the 13.5%
+plateau figure slightly exceeds the ~10% ceiling implied by the Adam step's
+share of an iteration.
+The issue's 20-40% estimate was unreachable, and measurably so: the Adam
+step is ~19.8 ms of a ~200 ms plateau iteration, about 10%, so ~10% bounds what
+removing it entirely could buy from total wall clock.
+What a reviewer should weigh
+Masking is a behavioural change, not only an optimisation. A dense Adam step
+still moves a gaussian with no gradient, because stale momentum keeps being
+applied while the moments decay. Masking freezes those gaussians instead. That is
+what the method accepts; it is called out because it is not obvious.
+tests/test_sparse_adam.py asserts those gaussians and their moments really do
+not move — exactly zero, not approximately.
+I predicted that would show up as slower mid-run convergence and an earlier
+revision reported it as measured. Withdrawn: those numbers were the 3-image
+metric, and they came from the one pair whose dense arm was contended. It also
+cannot be re-measured from what was saved, since only chkpnt7000.pth and
+chkpnt_best.pth are written — so the mid-run trajectory is simply unmeasured,
+in either direction. Anyone wanting to early-stop should save mid-run
+checkpoints and score them on the full set.
+The 700-iteration smoke test cannot gate this flag: it never leaves the
+~0.7-visible regime where there is no speedup to collect, and its held-out
+number is the 3-image estimator.
+I did not copy upstream's omission of bias correction — that makes it a
+different optimizer and would confound a speed A/B with an optimizer change.
+With an all-true mask this kernel reproduces dense Adam to ~1 ulp, asserted over
+20 steps.
+Implementation notes
+SparseGaussianAdam subclasses torch.optim.Adam and keeps its state layout,
+so GaussianModel's densification/pruning surgery on optimizer.state and
+existing checkpoints keep working.
+Composes with the corrected static freeze unchanged: the base snapshots frozen
+rows and restores them after the step, which is exact whatever the optimizer
+did, and a static row the batch never touched was not stepped at all.
+densify_and_prune runs before optimizer.step(), so the mask can go stale;
+those params fall back to a dense step. In practice that never fires — they
+carry no gradient, so the p.grad is None check short-circuits first — making
+it defensive. The unit test drives it directly.
+fetchPly builds positions as np.vstack([x, y, z]).T, so _xyz arrives
+F-contiguous (stride (1, N)) until the first densification cat. The
+optimizer relays such params out at construction. Worth a separate fix at the
+loader: for the first ~500 iterations every rasterizer call re-lays-out _xyz
+too.
+Opacity decay's visibility (frustum ∧ temporal, counted per gaussian) is not
+nested inside the union radii > 0 mask, so a few sub-pixel gaussians can have
+opacity decayed without an Adam step. Recorded in the experiment doc; no
+correction made.
+SPARSE_ADAM_STATS=1 reports kernel / fallback / skip counts at exit, so it is
+possible to confirm the kernel is doing the work rather than silently falling
+back.
+The extension is JIT-built on first use and cached, so the flag costs nothing
+when off. Needs ninja, now declared in environment.yml.
+One file carried in from the integration branch
+This branch also contains scripts/evaluate_full_heldout.py, byte-identical to
+the copy on agent/quality-fixes (sha256 3914f9f7c2899e4c...), so the add/add
+merge resolves cleanly when the stack lands. It is here only so the quality table
+above is reproducible from this branch instead of requiring the integration
+branch. It is not part of the sparse-Adam change and can be dropped if you would
+rather it arrived only via the stack.
+Experiment record: docs/experiments/2026-08-16-sparse-adam.md.
+🤖 Generated with Claude Code
+xuelongmu
+added 2 commits
+August 16, 2026 17:44
+Add sparse Adam over batch-visible gaussians (--sparse_adam, off by d…
+…
+f7d7795
+```
+…efault)
+
+Refs #17. A dense Adam step touches all 161 floats of every gaussian on every
+iteration, so its cost scales with N no matter how few gaussians the batch
+actually rendered. Instrumenting a full run shows how wasteful that is here:
+once densification reaches the 1M-point cap, the union of `radii > 0` over a
+four-view batch covers only ~12% of gaussians, while the step itself takes
+~19.8 ms of a ~200 ms iteration.
+
+This adds a fused CUDA Adam step that skips rows outside the visibility mask,
+behind an off-by-default `--sparse_adam`. Measured against torch's optimizer at
+N=1M on an A6000: 2.3x faster at 100% visible (torch's foreach path makes
+several passes over the state; this makes one) and 13.4x at 12% visible.
+
+The arithmetic matches torch.optim.Adam's single-tensor path term for term,
+including global-step bias correction, so an all-true mask reproduces the dense
+update to float32 rounding. Upstream's kernel drops bias correction, which
+makes it a different optimizer; keeping it means the flag is a pure speed
+change. tests/test_sparse_adam.py covers that equivalence, that invisible
+gaussians and their moments stay frozen, and the two fallbacks below.
+
+Implementation notes:
+
+- SparseGaussianAdam subclasses torch.optim.Adam and keeps its state layout, so
+  GaussianModel's densification/pruning surgery on optimizer.state and existing
+  checkpoints keep working.
+- densify_and_prune runs before the step, so the mask can be stale; parameters
+  whose leading dimension no longer matches fall back to a dense step (they are
+  freshly cat-ed and carry no gradient, so it is a no-op either way).
+- fetchPly builds positions as np.vstack([x, y, z]).T, leaving _xyz
+  F-contiguous until the first densification cat. The optimizer relays such
+  parameters out at construction, which is a pure layout change.
+- The extension is compiled on first use and cached, so the flag costs nothing
+  when off. It needs ninja, now declared in environment.yml.
+```
+Record the sparse Adam experiment
+daa3292
+xuelongmu
+mentioned this pull request
+Aug 17, 2026
+Sparse/selective Adam: update only gaussians visible in the current batch
+#17
+Open
+Replace the contended timing arm with a certified-idle A/B
+…
+a18d142
+```
+Batch 2 was gated on no foreign train.py and sampled throughout (others=0).
+Dense 19:10 against sparse 17:42: 7.7% end to end, 11.1% over the 1M-point
+plateau, with the first two thousand iterations identical to within a second
+or two, which is where the mechanism predicts no saving.
+
+Also retracts the slower-mid-run-convergence finding. It came from the one
+contended pair and reverses sign in the clean batch; the same-seed held-out
+spread is 0.38 dB, so mid-run differences of that size are not resolvable
+with two samples per arm.
+```
+xuelongmu
+mentioned this pull request
+Aug 17, 2026
+Add scale-invariant depth supervision (--depth_supervision, off by default)
+#43
+Open
+xuelongmu
+added 4 commits
+August 17, 2026 11:30
+Merge remote-tracking branch 'origin/pr/issue-20-static-freeze' into …
+…
+361620b
+```
+…enh/issue-17-sparse-adam
+
+# Conflicts:
+#	environment.yml
+#	train.py
+```
+Compose the masked step with the corrected static freeze
+…
+8305456
+```
+The base now snapshots the frozen rows and restores them after the step, which
+is exact whatever the optimizer did, so it composes with the masked step
+unchanged: a static row the batch never touched was not stepped at all and the
+restore is a no-op for it.
+
+Also adds an opt-in SPARSE_ADAM_STATS=1 report of kernel vs dense-fallback vs
+skipped step counts. A masked step that quietly fell back to dense for every
+parameter would still train and still pass every quality check, so being able
+to confirm the kernel did the work is worth a counter. Measured over a
+700-iteration smoke: 6246 kernel steps, zero fallbacks.
+```
+Update the experiment notes for the merged base
+…
+b436951
+```
+The base rewrote the decay path (per-gaussian view count as the decay exponent
+rather than a batch-item-0 mask) and the static freeze, so those interaction
+notes described code that no longer exists. The non-nesting of the decay
+visibility and the Adam mask survives the rewrite; the frustum-vs-radii gap is
+the reason.
+
+Also records that the stale-mask fallback never fires during training - the
+grad-is-None check short-circuits first - so it is defensive, and notes the
+SPARSE_ADAM_STATS counts that establish the kernel is doing the work.
+```
+Re-score the A/B on the full held-out set and on the merged base
+…
+34fa9f9
+```
+Two corrections.
+
+Every held-out number reported before came from the training logs Evaluating
+test line, which is test_cameras[::100] - three images out of three hundred on
+this split. Re-scoring the saved iteration-7000 checkpoints over all 300 images
+with scripts/evaluate_full_heldout.py changes the picture: the delta is +0.173,
+-0.260 and +0.147 dB across the three pairs, mean +0.020, sign flipping. The
+conclusion that quality is unchanged survives and is better supported, but the
+earlier claim that sparse led in every pair was an artifact - the 3-image
+estimator inverted a sign on one pair.
+
+Speed is now measured on the merged base, where the arms are 19:36 against
+17:50: 9.0% end to end and 13.5% over the plateau, up from 7.7%/11.1%
+pre-merge because the bases own optimisations made iterations cheaper and the
+Adam step a larger share of them. Attribution is pinned by three checks: the
+first two thousand iterations are a wash, the sparse arm carries 4.0% more
+gaussians rather than fewer, and the kernel counter shows 66,861 kernel steps
+with zero dense fallbacks.
+
+The mid-run convergence retraction now rests on the metric as well as on
+contention, and notes the trajectory cannot be re-measured because no mid-run
+checkpoints are saved.
+```
+chatgpt-codex-connector
+Bot
+reviewed
+Aug 17, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 34fa9f9828
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+scripts/evaluate_full_heldout.py
+Usage:
+python scripts/evaluate_full_heldout.py \
+--config configs/custom/xuelong_clip_f300_5s_rgb_posefix_7500.yaml \
+chatgpt-codex-connector
+Bot
+Aug 17, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Add the configuration referenced by the evaluation command
+The documented command cannot run because configs/custom/xuelong_clip_f300_5s_rgb_posefix_7500.yaml is absent from this commit; a repo-wide tree search finds only depthkit_rgb_5s_7500.yaml and xuelong_posefix_smoke700.yaml under configs/custom. Since the experiment report references the same missing file, the reported full-scale evaluation is not reproducible from the repository without reconstructing its configuration.
+Useful? React with 👍 / 👎.
+Comment thread
+scripts/evaluate_full_heldout.py
+Comment on lines
++92
+to
++93
+elif hasattr(args, key):
+setattr(args, key, host[key])
+chatgpt-codex-connector
+Bot
+Aug 17, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Preserve explicit CLI values during config merging
+When the YAML contains a key also supplied on the command line, this assignment unconditionally replaces the parsed CLI value. For example, every checked-in custom config defines time_duration, so invoking this evaluator with --time_duration silently evaluates using the config value instead; the same applies to options such as rot_4d or any configured view selection. Track explicitly supplied arguments, as train.py does, so evaluator overrides actually take effect.
+Useful? React with 👍 / 👎.
+Comment thread
+scripts/evaluate_full_heldout.py
+downsample_method=args.downsample_method)
+model_params, it = torch.load(ckpt)
+gaussians.restore(model_params, None)
+name = os.path.basename(os.path.dirname(ckpt))
+chatgpt-codex-connector
+Bot
+Aug 17, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Keep every checkpoint distinct in JSON results
+When two requested checkpoints share a parent directory—such as chkpnt3000.pth and chkpnt7000.pth from one run—or come from identically named run directories, both derive the same name, so the later results[name] assignment silently overwrites the earlier score. Key results by a unique checkpoint identifier or store a list so --json retains every checkpoint passed to --checkpoints.
+Useful? React with 👍 / 👎.
+Comment thread
+scripts/evaluate_full_heldout.py
+pp = PipelineParams(ap)
+ap.add_argument("--config", required=True)
+ap.add_argument("--checkpoints", nargs="+", required=True)
+ap.add_argument("--training_view", type=str, default="")
+chatgpt-codex-connector
+Bot
+Aug 17, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Require a camera split before reporting held-out metrics
+If --training_view is omitted and the config does not define it—as with the checked-in custom configs—this empty string reaches the COLMAP split logic in scene/dataset_readers.py:281-286; no camera matches the training set, so every camera is placed in the test set. The script then labels a score containing all training views as “held-out,” silently producing an invalid quality measurement. Require either training_view or testing_view, or load the split from checkpoint metadata.
+Useful? React with 👍 / 👎.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,1384 @@
+A Hybrid and Hierarchical Ray Tracing Method for
+Efficient 3D Gaussian Rendering
+Tiancheng Zhao1,2 , Sixu Li2 , Yuzhou Chen3 , Hengyu Ding2 , Zhiming Pan4 , Chaojian Li1
+arXiv:2610.13498v1 [cs.AR] 9 Oct 2026
+1
+Hong Kong University of Science and Technology
+2
+Georgia Institute of Technology
+3
+Shanghai Jiao Tong University
+4
+Peking University
+Abstract—3D Gaussian Splatting (3DGS) is a powerful representation for real-time neural reconstruction and rendering.
+While existing 3DGS systems rely on rasterization for efficiency,
+recent work explores ray tracing to enable secondary lighting,
+highly distorted cameras, and depth-of-field effects. However,
+compared with rasterization, ray-traced 3DGS introduces three
+major challenges: (1) the highly non-uniform spatial distribution
+of massive numbers of Gaussian primitives creates severe load
+imbalance; (2) neighboring pixels often generate rays with highly
+similar traversal paths, leading to substantial redundant traversal
+overhead; and (3) supporting both Gaussian and triangle primitives yields heterogeneous intersection workloads that are not
+well matched to existing GPU architectures. We present H2 -Ray,
+a hybrid and hierarchical ray tracing architecture for efficient
+3D Gaussian rendering. H2 -Ray introduces three techniques.
+Load-Balanced Spatial BVH (LB-SBVH) partitions the scene into
+uniform grids and uses density-aware representations to convert
+an imbalanced global workload into balanced local traversal
+units. Ray-Cluster Path Reuse (RCPR) lets a proxy ray share
+traversal state with neighboring rays to amortize redundant
+traversal. The Unified Intersection Engine (UIE) supports mixed
+Gaussian and triangle intersections through a mode-multiplexed
+datapath that shares 40% of its floating-point units across both
+primitive types. Across 8 scenes, H2 -Ray achieves a geometricmean speedup of 3.77× and a maximum speedup of 9.26×
+over RaySplats on the NVIDIA RTX A5000, combining a cycleaccurate model of the modified RT Core with measured CUDA
+timings.
+Index Terms—Neural Rendering, 3D Gaussian Splatting, Ray
+Tracing, GPU Architecture, Hardware Acceleration
+Fig. 1. Applying ray tracing to 3D Gaussian rendering enables advanced optical effects but introduces three key challenges: spatial imbalance, redundant
+traversal, and heterogeneous primitive intersections. H2 -Ray addresses these
+challenges with a Load-Balanced Spatial BVH, Ray-Cluster Path Reuse, and
+a Unified Intersection Engine, respectively.
+the rendering envelope of 3DGS, but making this flexibility
+practical requires architectural support beyond both trianglecentric ray tracing hardware and rasterization-based 3DGS
+pipelines.
+This gap stems from 3D Gaussian ray-tracing workloads,
+which differ from rasterization and triangle-based ray tracing.
+First, Gaussian primitives are highly non-uniform across space,
+so a monolithic acceleration structure must simultaneously
+serve extremely dense and extremely sparse regions, leading
+to poor traversal balance and inefficient parallelism. In rasterization, imbalance mainly arises from the number of projected
+fragments in 2D screen space. In ray tracing, which operates
+in 3D, secondary-ray effects (e.g., reflections and refractions)
+further amplify spatial non-uniformity, resulting in more severe
+load imbalance and irregular execution. Second, neighboring
+pixels often generate rays that traverse highly similar BVH
+path prefixes, so processing these rays independently causes
+substantial redundant traversal work. This redundancy is most
+pronounced at high resolutions, where dense pixel sampling
+induces strong spatial coherence among rays and deep BVH
+hierarchies lead to long shared traversal prefixes. Third, advanced effects increasingly mix ray–Gaussian and ray–triangle
+intersections, creating a heterogeneous workload mismatched
+to fixed-function specialization around one dominant primitive
+type. Modern GPU architectures provide dedicated hardware
+I. I NTRODUCTION
+3D Gaussian Splatting (3DGS) has become a compelling
+scene representation for neural reconstruction and rendering, delivering high visual quality at real-time rates [8]. Its
+anisotropic primitives and rasterization-friendly rendering capture fine geometric and appearance details at interactive rates.
+However, the rasterization-centric design that makes 3DGS
+efficient also limits its ability to model real-world optical
+effects. In particular, rasterization-based Gaussian rendering
+struggles to support (1) secondary-lighting effects such as reflections and refractions needed for mirror-like and transparent
+materials [17], (2) highly distorted fisheye cameras used in
+autonomous-driving surround-view systems [24], (3) depthof-field effects arising from finite-aperture camera optics [4],
+and other rendering modes that benefit from per-ray visibility
+reasoning. As summarized in Figure 1, ray tracing broadens
+1
+Fig. 2. Preview of 8 representative scenes from Mip-NeRF 360 [2] and Deep Blending [6] rendered using H2 -Ray. Each PSNR annotation is computed for
+the displayed representative view against its ground-truth image, rather than averaged across views.
+support for ray–triangle intersections (e.g., via RT Cores),
+while ray–Gaussian intersections are typically handled by
+general-purpose compute units, leading to an imbalance in execution efficiency. This heterogeneity limits hardware efficiency
+and motivates unified support for both primitives.
+Recent efforts have brought ray tracing to 3D Gaussian rendering. 3DGRT [13], 3DGUT [23], and RaySplats [3] demonstrate ray-traced 3DGS with different rendering formulations,
+and GRTX [9] adds hardware support for Gaussian BVH
+traversal. However, these works target rendering formulations
+or single-ray traversal, leaving spatial imbalance, redundant
+traversal across neighboring rays, and heterogeneous intersection largely unexplored.
+To address these challenges, we present H2 -Ray, a hybrid and hierarchical ray tracing architecture. H2 -Ray is
+hybrid in two senses: it combines rasterization with ray
+tracing for fast region-of-interest culling, and it supports mixed
+ray–Gaussian and ray–triangle intersection workloads. It is
+hierarchical because it addresses the workload at three levels:
+scene-level spatial partitioning, ray-level traversal reuse, and
+intersection-level execution adaptation. Rather than replacing
+modern graphics hardware, H2 -Ray adopts a practical codesign approach, adding targeted support at key points in the
+GPU rendering pipeline. Our contributions are as follows.
+floating-point units (approximately 40%) across primitive
+types, with 15 units (approximately 19%) dedicated to
+triangles.
+We evaluate H2 -Ray on 8 scenes from Mip-NeRF 360 [2]
+and Deep Blending [6] (Figure 2), combining cycle-level
+modeling of the modified RT Core with measured RTX A5000
+timings for all CUDA work. H2 -Ray achieves a geometricmean speedup of 3.77× (up to 9.26×) over RaySplats on the
+A5000 while enabling rendering effects beyond rasterizationbased pipelines.
+II. BACKGROUND
+A. 3D Gaussian Splatting
+3DGS represents a scene as a set of anisotropic Gaussian primitives, where each primitive stores a mean position,
+covariance, opacity, and view-dependent appearance [8]. A
+Gaussian primitive can be written as
+
+
+1
+T −1
+Gi (x) = αi exp − (x − µi ) Σi (x − µi ) , (1)
+2
+where µi and Σi describe the primitive’s spatial support,
+and αi controls its contribution strength. In practice, a reconstructed scene contains a very large number of such Gaussians,
+and their spatial distribution is often highly non-uniform, as
+quantified later in Table I and Figure 3.
+Rasterization-based 3DGS projects these 3D Gaussians onto
+the image plane, bins them into screen-space tiles, and blends
+their contributions in front-to-back order. The rendered color
+of a pixel can be written in the standard alpha-compositing
+form
+X
+Y
+C(r) =
+Ti α̂i ci ,
+Ti =
+(1 − α̂j ),
+(2)
+We propose Load-Balanced Spatial BVH (LB-SBVH), a
+density-aware spatial partitioning scheme that converts
+globally skewed Gaussian distributions into balanced
+traversal regions, achieving a microarchitectural traversal
+speedup of up to 1.31× over a monolithic BVH.
+• We propose Ray-Cluster Path Reuse (RCPR), which
+shares traversal across neighboring rays to reduce redundant BVH operations. In matched multi-view evaluation,
+H2 -Ray decreases average PSNR by only 0.034 dB relative to RaySplats.
+• We design a Unified Intersection Engine (UIE) that
+supports both Gaussian and triangle primitives within
+a single reconfigurable datapath, sharing 31 of its 78
+•
+i
+j<i
+where α̂i is the projected opacity of the i-th Gaussian along
+ray r, ci is its color, and Ti is the accumulated transmittance
+before it. This rasterization pipeline is highly efficient for
+standard pinhole-camera novel-view synthesis, but it is less
+2
+natural for rendering modes that require arbitrary-ray queries,
+secondary visibility, or tight integration with conventional raytraced geometry.
+TABLE I
+S UB - REGION OCCUPANCY UNDER AN 83 GRID .
+B. Ray Tracing for 3DGS Rendering
+Recent work revisits 3DGS rendering from a ray-based
+viewpoint. 3DGRT [13] builds a BVH over Gaussian primitives, encapsulates each with a stretched bounding mesh,
+and uses hardware ray–triangle intersection. This design improves flexibility, but traversal and ordering remain proxybased: primitives are gathered through bounding-mesh hits,
+and integration follows proxy intersections rather than exact
+sample locations along the ray. 3DGUT [23] instead preserves
+splatting for primary rendering while extending 3DGS to
+nonlinear cameras through Unscented-Transform sigma points.
+3DGUT further aligns its rendering formulation with 3DGRT
+so that primary rays can still be splatted efficiently while
+secondary rays are traced in the same representation. This
+bridges rasterization efficiency and ray-tracing flexibility, but
+primary rays still use a sigma-point approximation rather
+than direct ray–Gaussian intersection, while secondary rays
+follow the ray-traced representation. These designs emphasize
+rendering flexibility and camera-model support, whereas our
+architectural study focuses on the execution costs exposed by
+direct Gaussian traversal.
+RaySplats [3] moves further toward a direct ray-based formulation. Instead of using bounding polytopes as the primitive
+representation, RaySplats explicitly computes intersections
+between rays and Gaussian confidence ellipsoids, avoiding
+polytope approximation and remaining applicable to flat Gaussians. Importantly, this ellipsoid is not a different primitive
+from (1); it is an iso-surface induced by the same Gaussian
+after choosing a fixed density threshold. Specifically, setting
+Gi (x) = ρ in (1) yields
+(x − µ)T Σ−1 (x − µ) = τ,
+Bicycle
+Bonsai
+Garden
+Kitchen
+Room
+Stump
+drJohnson
+Playroom
+73.8%
+56.6%
+75.8%
+73.6%
+70.7%
+65.6%
+88.3%
+54.1%
+18.2%
+26.6%
+16.2%
+21.7%
+21.9%
+25.2%
+8.4%
+29.3%
+8.0% 6.9
+16.8% 8.3
+8.0% 6.2
+4.7% 11.2
+7.4% 4.5
+9.2% 10.1
+3.3% 3.4
+16.6% 2.7
+Avg.
+69.8%
+20.9%
+9.3%
+CV
+6.7
+N Gaussian centers, empty denotes N = 0, sparse denotes 0 < N < 100,
+and dense denotes N ≥ 100. CV is computed over non-empty grids.
+C. Why Hybrid Rendering Matters
+Once Gaussian rendering is expressed in a ray-tracing
+framework, it inherits many of the benefits of ray tracing.
+Prior work shows that ray-traced 3DGS can naturally support reflections, refractions, shadows, stochastic ray sampling,
+highly distorted cameras, and rolling-shutter effects [3], [13],
+[23]. It also becomes easier to combine Gaussian scene
+content with triangle-based geometry, mesh proxies, or standard graphics assets within the same rendering pipeline. For
+instance, 3DGRT demonstrates compatibility with ray-based
+visual effects and mesh interactions, 3DGUT performs hybrid
+rendering with splatted primary rays and traced secondary
+rays, and RaySplats shows that Gaussian scenes can be rendered together with mesh-based objects and lighting effects.
+These capabilities make mixed primitive support relevant even
+when Gaussian rendering remains the dominant workload: the
+architecture must handle the less frequent triangle path without
+duplicating an entire rendering backend.
+Hybrid scenes therefore create a genuine mixed-intersection
+workload: different rays may encounter Gaussian primitives,
+triangles, or both. Figure 11 later quantifies this behavior for
+perspective, fisheye, and mesh-augmented rendering. We treat
+this workload as an architectural requirement for unified ray–
+Gaussian and ray–triangle execution.
+(3)
+(4)
+III. M OTIVATION
+We characterize a RaySplats-style renderer at the scene,
+ray, and intersection levels. Its workload is shaped by spatial
+imbalance, redundant neighboring-ray traversal, and scenedependent Gaussian–triangle mixtures, motivating the three
+components of H2 -Ray.
+where
+a = dT Σ−1 d,
+Empty Sparse∗ Dense∗
+∗ Empty, Sparse, and Dense sum to 100% of all grids. For a grid containing
+where τ = −2 ln(ρ/α) is a threshold-dependent constant. For
+a ray r(t) = o + td, substituting x = o + td into this isosurface equation yields a quadratic
+at2 + bt + c = 0,
+Scene
+b = 2dT Σ−1 (o − µ),
+c = (o − µ)T Σ−1 (o − µ) − τ.
+The closest valid hit is given by the smaller positive root. For
+our architectural study, this formulation exposes native ray–
+Gaussian intersection without polyhedral approximation. Its
+arithmetic is dominated by symmetric matrix-vector products,
+dot products, and a quadratic solve, directly reflecting the
+workload that the hardware must execute. Accordingly, the
+rest of this paper adopts this RaySplats-style workload model:
+rays are intersected directly with Gaussian primitives, and their
+contributions are accumulated in ray order.
+A. Scene-Level Challenge: Spatial Imbalance in Gaussian
+Distributions
+Unlike mesh scenes, 3DGS Gaussians cluster around visible
+surfaces, leaving empty or weakly observed regions sparsely
+populated. The skew varies by scene: the coefficient of variation in Table I ranges from 2.7 (Playroom) to 11.2 (Kitchen).
+This spatial skew is problematic for a conventional monolithic BVH, as shown in Figure 3. A single global hierarchy
+3
+Kitchen
+Fig. 3.
+Stump
+drJohnson
+Playroom
+Gaussian-center density under a uniform 163 grid. Kitchen and Stump are high-CV scenes; drJohnson and Playroom are lower-CV scenes.
+herence is especially strong at high resolution and in primary
+visibility.
+Current execution nevertheless fetches and tests these upperlevel nodes repeatedly, even though much of the traversal
+state is shared. This wastes memory bandwidth and RT Core
+cycles in coherent workloads such as mild lens distortion
+and some secondary-ray queries. The wasted work is not
+limited to duplicate node tests; repeated address generation
+and state updates also increase pressure on the traversal stack
+and memory system.
+Takeaway. Ray-traced 3DGS contains substantial inter-ray
+reuse. RCPR amortizes BVH traversal over a ray cluster
+instead of paying the full cost for every ray.
+Fig. 4. Illustration of path reuse in BVH traversal. Multiple neighboring
+rays share long traversal prefixes (e.g., root → A2 → B5 → C) before
+diverging toward different leaf nodes, where each leaf node represents a
+Gaussian primitive. By reusing the shared prefix computed by a proxy ray,
+subsequent rays avoid redundant traversal of identical nodes.
+C. Intersection-Level Challenge:
+Primitive Intersection Workloads
+Heterogeneous
+Mixed-
+must serve dense regions with long traversal and intersection
+queues as well as sparse regions that underutilize ray-tracing
+hardware. This produces uneven per-ray cost, reducing parallel
+efficiency and complicating load balance as scenes grow. The
+imbalance also makes a single global hierarchy a poor unit for
+memory placement and scheduling: dense regions dominate
+queues and cache traffic, while sparse regions leave traversal
+capacity idle.
+Table I quantifies this imbalance across all eight scenes
+under a uniform 83 partition. On average, 69.8% of grids are
+empty and another 20.9% are sparse (1–99 Gaussians), leaving
+only 9.3% dense (at least 100 Gaussians). Even among nonempty grids, Gaussian counts remain highly uneven (average
+CV of 6.7).
+The final bottleneck appears when Gaussian rendering extends to hybrid scenes with triangle meshes, proxy geometry,
+or conventional ray-traced effects, where rays require Gaussian
+tests, triangle tests, or both.
+A rigid pipeline specialized for one primitive type is therefore inefficient: a triangle-centric datapath loses efficiency
+when Gaussian intersections dominate, while a Gaussian-only
+datapath cannot serve triangle work. The challenge is both
+mixed execution and a dominant primitive that varies with
+scene, camera, and task.
+Takeaway. Ray-traced 3DGS exhibits severe spatial imbalance. LB-SBVH restructures this workload into more
+uniform traversal units.
+IV. H 2 -R AY ACCELERATION F RAMEWORK
+Takeaway. Mixed workloads require an adaptive backend.
+UIE shares floating-point units between Gaussian and triangle paths and selects the active mode per test.
+H2 -Ray combines three mechanisms: LB-SBVH for scene
+partitioning, RCPR for traversal reuse, and UIE for mixedprimitive intersection. Together, they form a hybrid and hierarchical ray-tracing framework for efficient 3D Gaussian
+rendering.
+B. Ray-Level Challenge: Redundant Traversal Across Neighboring Rays
+A second inefficiency remains even with a fixed acceleration
+structure: neighboring rays often share BVH prefixes because
+adjacent pixels enter the same coarse Gaussian regions before
+diverging near boundaries (Figure 4). This image-space co-
+A. The End-to-End Rendering Pipeline
+The H2 -Ray pipeline reorganizes conventional ray tracing
+into four density-aware stages:
+4
+(a) LB-SBVH density-aware partitioning
+(b) Ray-Cluster Path Reuse (RCPR) execution flow
+Fig. 5. Key algorithmic mechanisms of H2 -Ray. (a) LB-SBVH partitions the scene into uniform spatial grids, each classified as Dense (assigned a dedicated
+local BVH) or Sparse (stored as a flat primitive list). (b) RCPR designates the center ray of each 3 × 3 tile as a proxy that performs full BVH traversal;
+neighboring side rays short-circuit to the shared interior node when the grid matches, falling back to root traversal only for divergent grids.
+overhead. Empty grids (N = 0) are excluded from both
+categories.
+b) Coverage-Preserving Grid Bounds: Ownership and
+traversal bounds are separate. Each Gaussian is assigned once
+by its center, avoiding duplicate occupancy counts. Each nonempty grid then builds a tight conservative AABB around the
+full support of its assigned Gaussians. These AABBs may
+expand beyond or shrink within the original cells and may
+overlap one another, so any ray intersecting a Gaussian support
+reaches its owning grid even when it misses the center cell.
+The local BVH or sparse list performs the exact intersection,
+ensuring complete coverage without duplicating Gaussians.
+c) Hardware Support for LB-SBVH: LB-SBVH adds two
+hardware mechanisms. Hybrid Metadata Storage (HMS)
+combines a meta-tree with meta-bitmaps to encode BVH
+addresses and sub-region positions, allowing threads to locate
+target trees with little decoding overhead. The Raster-toRT Forward Path (R2RFP) forwards BVH pointers directly
+from the Raster Engine to the RT Cores, avoiding DRAM
+synchronization and redundant top-level traversal.
+a) Raster-Assisted Culling: Rather than starting each ray
+from a cold BVH traversal, H2 -Ray first runs a lightweight
+low-resolution rasterization pass to generate a grid hit map
+that records per-grid hit counts (Figure 5). The map prunes
+empty regions and skips rays with negligible Gaussian energy,
+reducing initial traversal pressure.
+b) Balanced Scene Partitioning: The scene is partitioned
+into uniform spatial grids by LB-SBVH, with each grid classified as dense or sparse by primitive count. Dense grids
+are assigned dedicated local BVHs, while sparse grids store
+primitives in flat lists for brute-force enumeration. Culling then
+dispatches rays only to active grids, concentrating traversal on
+occupied regions with bounded local workloads.
+c) Coherent Path Traversal: For each ray cluster, the
+RCPR unit selects a proxy ray that performs BVH node
+fetching and internal intersection tests. Its traversal state
+is broadcast to worker rays, amortizing memory bandwidth
+across the group.
+d) Adaptive Intersection & Accumulation: When rays
+reach leaf nodes, the UIE selects the appropriate Gaussian
+or triangle mode for each primitive, using a shared pool
+of floating-point units with mode-multiplexed inputs. The
+pipeline then performs front-to-back alpha blending and color
+accumulation.
+Summary. LB-SBVH addresses the scene-level challenge
+by partitioning an imbalanced Gaussian distribution into
+local traversal regions with bounded cost. HMS and R2RFP
+provide the metadata and dispatch support needed to realize
+this partitioning efficiently in hardware.
+B. Load-Balanced Spatial BVH (LB-SBVH)
+3D Gaussian scenes are highly non-uniform, making a
+monolithic BVH prone to divergence and hotspots. The LoadBalanced Spatial BVH (LB-SBVH) converts this global workload into locally balanced traversal units (Figure 5 (a)).
+a) Density-Aware Sub-Region Construction: LB-SBVH
+partitions the scene into a uniform spatial grid and chooses
+a representation per grid. Dense grids (N ≥ 100 Gaussians)
+construct specialized shallow BVHs to accelerate traversal in
+regions with high primitive density. Sparse grids (0 < N <
+100 Gaussians) bypass BVH construction and store primitives
+in flat lists for direct enumeration, avoiding unnecessary tree
+C. Ray-Cluster Path Reuse (RCPR)
+For primary and coherent secondary rays, neighboring paths
+through the BVH are highly correlated. RCPR shares intermediate states within localized 3 × 3 ray tiles (Figure 5 (b)).
+a) Proxy-Ray-Based Cluster Traversal: For each tile, the
+center proxy ray performs a full BVH traversal. When it
+reaches a leaf, hardware “hops back” by c levels (e.g., c = 2
+or 3) to define a coherence volume. The eight worker rays are
+dispatched to these intermediate nodes, bypassing redundant
+upper-level tests.
+5
+Fig. 6. Overall H2 -Ray hardware architecture. The system view shows GPC-level integration, while R2RFP, SPM, pinned cache, and UIE integrate partitioning,
+path reuse, and mixed-primitive intersection into the GPU pipeline.
+b) Hardware Support for Path Reuse: RT Cores are
+augmented with a Shared Prefix Memory (SPM) and a
+Pinned Cache. SPM stores the deepest nodes found by the
+proxy ray so worker rays resume from the longest shared path.
+Frequently accessed Gaussian primitives are pinned in L2 with
+a dedicated flag bit. A specialized internal Load-Store Unit
+(LSU) provides Direct Color Duplication, offloading copyheavy work that would otherwise stall the warp.
+TABLE II
+FP UNIT CLASSIFICATION IN THE UIE RECONFIGURABLE DATAPATH .
+Summary. RCPR addresses the ray-level challenge by
+converting inter-ray coherence into reduced traversal and
+memory overhead. SPM, pinned caching, and direct color
+duplication provide the hardware support needed to exploit
+shared BVH prefixes efficiently.
+Unit Type
+Total
+Shared
+Gaussian
+Triangle
+fp mult
+fp add
+fp sub
+fp mac
+fp recip
+fp sqrt
+30
+14
+18
+13
+2
+1
+18 (60%)
+2 (14%)
+6 (33%)
+4 (31%)
+1 (50%)
+0
+9
+10
+3
+9
+0
+1
+3
+2
+9
+0
+1
+0
+Total
+78
+31(40%)
+32(41%)
+15(19%)
+Unit Type: fp mult = multiplier, fp add = adder, fp sub = subtractor,
+fp mac = multiply-accumulate unit, fp recip = reciprocal unit, fp sqrt =
+square-root unit.
+D. Unified Intersection Engine (UIE)
+15 units (19%) serve only the triangle path. The Gaussian
+path needs more dedicated hardware because its quadratic
+solve and alpha computation have no triangle analog, while
+Möller–Trumbore is more compact. Table II reports sharing
+by unit type: multipliers and reciprocal units are shared most
+aggressively, while adders and the square-root unit are largely
+path-specific.
+The active datapath is selected per intersection by the
+primitive-type field in the ray-intersection instruction; no runtime workload prediction is required. Once traversal reaches a
+leaf, UIE gates the corresponding operands into the shared
+pipeline, so primitive-type selection requires no software
+branching while the triangle path stays lightweight. Trianglededicated units account for 15 of the 78 floating-point units
+(approximately 19%); this is a unit-count fraction, not an areaoverhead estimate.
+Since the Gaussian-to-triangle ratio varies by view, scene,
+and ray effect, fixed hardware for one primitive type is
+inefficient. UIE reuses the LB-SBVH grid structure: each grid
+points to either a Gaussian-BVH or a triangle-BVH, keeping
+primitive selection local to leaf-level intersection while ray
+generation, culling, and blending remain unchanged.
+a) Structural Isomorphism Between Intersection
+Pipelines: Gaussian ellipsoid intersection and MöllerTrumbore triangle intersection follow a similar algebraic
+flow: both transform the ray into a local frame, execute
+multiply-accumulate stages, and solve for the intersection
+distance t. Many floating-point units can therefore be shared;
+switching primitive types changes operands and control bits
+rather than the pipeline topology.
+b) Reconfigurable Unified Datapath: We instantiate 78
+floating-point units organized in an eight-stage feed-forward
+pipeline. Of these, 31 units (40%) are shared between Gaussian and triangle modes: they execute the same operation in
+both modes but receive different operands via mode-MUX
+input selection. The remaining units are dedicated to one primitive type: 32 units (41%) serve only the Gaussian path, while
+Summary. UIE addresses the intersection-level challenge
+with a reconfigurable datapath for Gaussian and triangle
+primitives. This shared structure avoids dedicating separate
+hardware to each primitive type in mixed-primitive workloads.
+6
+Metric / Core
+TABLE III
+S UMMARY OF THE EVALUATION SCENES . R ESOLUTION DENOTES THE
+RENDERED IMAGE SIZE USED IN OUR EXPERIMENTS . E VAL . V IEWS
+DENOTES MATCHED RENDERED CAMERAS , NOT A HELD - OUT TEST SPLIT.
+Value
+Technology Node
+28 nm
+Core Area
+0.81 mm2
+Power
+24.7 mW
+PrimitiveCores
+2
+AABB Units
+2
+Peak FLOPs/cycle
+213
+Fig. 7. Layout of the proposed H2 -Ray core after synthesis, placement, and
+routing in a 28 nm process. The table summarizes the hardware configuration
+of a single core. Power is scaled to the 1 GHz operating point from postsynthesis measurements at 100 MHz, assuming dynamic power scales linearly
+with clock frequency while leakage power remains constant.
+Scene
+Dataset
+Bicycle
+Bonsai
+Garden
+Kitchen
+Room
+Stump
+Mip-NeRF 360 1236 × 822
+Mip-NeRF 360 1559 × 1039
+Mip-NeRF 360 1297 × 840
+Mip-NeRF 360 1558 × 1039
+Mip-NeRF 360 1557 × 1038
+Mip-NeRF 360 1244 × 825
+Outdoor
+Indoor
+Outdoor
+Indoor
+Indoor
+Outdoor
+1.77M
+1.22M
+5.37M
+1.69M
+1.40M
+1.04M
+169
+255
+161
+244
+272
+109
+666 × 438
+632 × 416
+Indoor
+Indoor
+3.08M
+1.01M
+230
+196
+drJohnson Deep Blending
+Playroom Deep Blending
+E. Hardware Integration
+Resolution
+Category #Gaussians Eval. Views
+cannot directly support H2 -Ray, we port it to Linux and build a
+C++ validation renderer. The same C++ H2-Ray renderer used
+to produce the H2 -Ray outputs cross-checks image formation
+against the original RaySplats implementation; the resulting
+matched-view comparison is reported in Table IV.
+b) Datasets: Table III covers six Mip-NeRF 360
+scenes [2] and two Deep Blending scenes [6]. Following
+the standard protocol, outdoor and indoor Mip-NeRF 360
+scenes use 4× and 2× downsampling, respectively; for Deep
+Blending, we report the actual rendered resolution used rather
+than assuming a dataset-wide downsampling factor. Unless
+otherwise stated, view counts and multi-view quality statistics
+use the camera-name intersection for which ground truth,
+RaySplats, and H2 -Ray outputs are all available. These evaluation views are matched rendered cameras, not a held-out test
+split, and can overlap with views used to train the RaySplats
+scene representation. Runtime and visual-preview results use
+fixed representative views for per-scene illustration; they are
+not assumed to be the same camera as one another or as the
+views used for multi-view statistics.
+c) Evaluation Platform Setup: We combine cycleaccurate simulation for the modified RT Core with GPU
+measurements for unmodified CUDA execution. Simulation
+is limited to the proposed RT Core traversal and intersection
+datapaths that do not exist in the baseline GPU. All CUDAcore work, including intersection, sorting, and auxiliary kernels, is measured on the RTX A5000. The synthesizable
+C++/SystemC core is translated to RTL with Siemens Catapult
+HLS [18], then synthesized, placed, and routed at 28 nm, 0.9 V,
+and 1 GHz with Synopsys Fusion Compiler [20]; Figure 7
+shows its layout. Power is extrapolated to 1 GHz from postsynthesis results at 100 MHz.
+We scale to the A5000’s 54.2 RT TFLOPS: 255 cores at
+213 RT-equivalent FP32 operations/cycle and 1 GHz provide
+54.315 RT TFLOPS.
+d) Metric Definitions.: Runtime results in Figure 8 report
+per-frame latency for representative views. Each scene entry is
+a profiled run after initialization, without additional warm-up
+or repeated-run averaging. The arithmetic/geometric averaging
+conventions for the runtime table are given in its caption.
+The timing excludes offline RaySplats training/preprocessing,
+model loading, and image I/O; it covers the rendering pipeline
+components shown in Figure 8(a). Quality results use the
+Figure 6 shows how LB-SBVH, RCPR, and UIE are integrated into the GPU pipeline. At the system level (left),
+each Graphics Processing Cluster (GPC) contains a Streaming
+Multiprocessor (SM), an H2 -Ray RT Core, and a Raster Engine
+connected by R2RFP. The Pinned L2 Cache sits beside the
+DRAM controller to support RCPR. This organization leaves
+shader execution, memory hierarchy, and rasterization largely
+intact; H2 -Ray adds only the paths needed to pass culling and
+reuse information to the RT Core. This section describes the
+target hardware path; the evaluation separately reports modeled
+RT Core behavior and measured CUDA kernels, as detailed
+in Section V.
+The H2 -Ray RT Core (center) adds four blocks to a conventional RT Core: (1) a Raster-to-RT Interface that receives
+BVH pointers without a DRAM round-trip, (2) a Shared Prefix
+Memory (SPM) for proxy-ray path pointers, (3) a Reconfigurable Intersection Unit that switches between Gaussian and
+triangle logic, and (4) a Direct Color Duplication unit that
+offloads pixel-copy operations from the SM. These additions
+are placed around the existing traversal and intersection flow:
+R2RFP supplies the starting BVH handle, SPM changes where
+worker rays resume traversal, UIE changes the leaf test, and
+color duplication handles repeated output writes.
+Execution proceeds in two phases (right). In the Proxy
+Ray Phase, the Raster Engine performs low-resolution culling,
+forwards valid grid BVH handles through R2RFP, and the RT
+Core writes proxy-ray prefix pointers into SPM. In the Real
+Ray Phase, worker rays load these pointers, skip redundant
+upper-level nodes, and proceed to the Reconfigurable Intersection Unit. The two phases therefore reuse traversal state
+while leaving the front-to-back blending semantics unchanged;
+the quality impact of this approximate reuse is evaluated in
+Section V. The Pinned L2 Cache (bottom) protects marked
+cache lines from eviction so Gaussian primitives found during
+the proxy phase remain resident for worker rays.
+V. E VALUATION
+A. Evaluation Settings
+a) Baselines.: We use the official RaySplats [3] implementation on an NVIDIA RTX A5000 as the baseline, using
+its standard preprocessing and training pipeline to generate all
+Gaussian PLY inputs. Because its Windows OptiX pipeline
+7
+TABLE IV
+P ER - VIEW PSNR AND SSIM COMPARISON BETWEEN R AY S PLATS AND H 2 -R AY ACROSS 8 SCENES . ∆ DENOTES H 2 -R AY MINUS R AY S PLATS .
+Scene
+Views
+Bicycle
+Bonsai
+Garden
+Kitchen
+Stump
+Room
+Playroom
+drJohnson
+169
+255
+161
+244
+109
+272
+196
+230
+RaySplats PSNR
+Min
+Max
+Avg
+H2 -Ray PSNR
+Min
+Max
+Avg
+Min
+16.16
+24.68
+24.73
+25.62
+17.63
+28.79
+28.32
+29.55
+16.16
+24.62
+24.73
+25.63
+17.64
+28.82
+28.36
+29.56
+-0.14
+-0.45
+-0.14
+-0.30
+-0.06
+-0.20
+-1.38
+-5.05
+31.07
+35.77
+31.62
+35.67
+31.94
+36.32
+40.32
+42.07
+24.24
+32.87
+29.39
+32.30
+26.52
+32.93
+35.07
+36.51
+31.01
+35.75
+31.62
+35.61
+31.93
+36.26
+40.28
+41.95
+24.22
+32.85
+29.37
+32.28
+26.52
+32.90
+35.03
+36.39
+∆ PSNR
+Max
+Avg
+0.04
+0.48
+0.04
+0.14
+0.07
+0.09
+0.26
+0.17
+-0.02
+-0.02
+-0.02
+-0.02
+0.00
+-0.02
+-0.04
+-0.13
+0.3564
+0.9018
+0.8225
+0.7850
+0.5716
+0.8633
+0.9064
+0.9221
+0.9145
+0.9664
+0.9341
+0.9669
+0.9140
+0.9802
+0.9817
+0.9863
+(a) CUDA/RT Latency and Speedup
+RT Core OptiX
+CUDA Intersection
+H2 -Ray SSIM
+Min
+Max
+Avg
+RaySplats SSIM
+Min
+Max
+Avg
+0.7633
+0.9487
+0.9043
+0.9404
+0.8011
+0.9349
+0.9548
+0.9652
+0.3561
+0.9005
+0.8218
+0.7854
+0.5713
+0.8634
+0.9047
+0.9156
+CUDA Sort
+0.0001
+0.0008
+0.0000
+0.0014
+0.0002
+0.0023
+0.0004
+0.0002
+-0.0008
+-0.0013
+-0.0006
+-0.0004
+-0.0004
+-0.0017
+-0.0006
+-0.0006
+Latency
+Speedup
+DRAM
+1.21×
+1.31×
+1.11×
+1.27×
+1.08×
+1.20×
+1.20×
+1.10×
+21.3%↓
+31.3%↓
+12.1%↓
+30.9%↓
+5.9%↓
+20.7%↓
+17.9%↓
+11.1%↓
+10
+1-Grid 27-Grid
+5.58x
+800
+600
+3.66x
+2.84x
+5.36x
+3.42x
+6
+4
+2.20x
+1.89x
+2
+200
+0
+0
+le
+yc
+Bic
+ai
+B
+s
+on
+n
+G
+e
+ard
+n
+Ki
+e
+tch
+om
+Ro
+S
+p
+tum
+n
+o
+ns
+Joh
+dr
+Pla
+m
+roo
+y
+Speedup (x)
+8
+1000
+Time (ms)
+Avg
+-0.0018
+-0.0039
+-0.0013
+-0.0018
+-0.0021
+-0.0058
+-0.0028
+-0.0129
+Speedup
+Scene
+400
+0.7626
+0.9474
+0.9037
+0.9400
+0.8008
+0.9332
+0.9542
+0.9645
+∆ SSIM
+Max
+Table V: Simulated RT Kernel Performance
+9.26x
+1200
+0.9143
+0.9664
+0.9337
+0.9665
+0.9139
+0.9801
+0.9816
+0.9861
+Min
+Bicycle
+Bonsai
+Garden
+Kitchen
+Room
+Stump
+drJohnson
+Playroom
+12,118
+7,207
+19,390
+7,828
+4,944
+14,993
+7,104
+5,536
+9,974
+5,481
+17,423
+6,142
+4,582
+12,500
+5,919
+5,022
+Latency is reported in cycles per ray over proxy center
+rays sent to the RT Core traversal engine. Each row is
+an independent per-scene average over 40 benchmark
+patches.
+Fig. 8. Runtime and traversal microbenchmark summary. (a) decomposes H2 -Ray latency into the modeled RT Core component and measured CUDA
+components, with per-scene speedup over RaySplats overlaid. Table V isolates RT-core traversal latency and DRAM read reduction.
+reports a 3.77× geometric-mean speedup over RaySplats. The
+arithmetic-mean runtime decreases from 514.59 to 131.65 ms,
+with per-scene speedups ranging from 1.89× on Stump to
+9.26× on Garden; drJohnson and Playroom reach 5.58× and
+5.36×. The average runtime and average speedup use different
+means, so 3.77× is not the ratio of the two average runtime
+entries.
+The same figure decomposes H2 -Ray latency. Since only
+each tile’s center ray is traced on the RT Core, parallel
+CUDA work largely hides RT latency. The RT portion is
+estimated with the modified RT Core model, while CUDA
+intersection and sorting are measured on the RTX A5000.
+Intersection dominates CUDA latency in six scenes; sorting
+dominates in Stump and Playroom, where per-ray hit counts
+vary more. In this evaluated pipeline, worker-ray intersection
+and sorting run as CUDA kernels, so the end-to-end runtimes
+do not include any benefit from executing worker rays on the
+proposed Reconfigurable Intersection Unit.
+b) Quality Validation: Table IV reports per-view PSNR
+and SSIM statistics on matched RaySplats and H2 -Ray views.
+The arithmetic mean of the per-scene average PSNR deltas
+is -0.034 dB for H2 -Ray minus RaySplats, while the min/max
+statistics expose view-level outliers. Figure 10 visualizes the
+ten worst per-view PSNR differences for each scene, and
+Figure 2 provides representative examples. Unless noted, experiments use 2 hops and a 33 grid.
+camera-name intersection in Table III, so every reported view
+has ground truth, RaySplats, and H2 -Ray outputs. PSNR is
+computed over RGB 8-bit images as 20 log10 (255/RMSE)
+using all pixels in the common top-left image region when
+two images differ by at most a boundary pixel. SSIM is
+computed on RGB images, not grayscale, using a Gaussian
+window with σ = 1.5, an 11 × 11 support, data range 255,
+and channel averaging. Both PSNR and SSIM compare each
+rendered image against its ground-truth image; they are not
+computed between RaySplats and H2 -Ray outputs.
+e) Performance and Workload Characterization: We
+separate end-to-end runtime, the RT/CUDA latency breakdown, the RT-Core-only LB-SBVH microbenchmark, and
+primitive-test counts for perspective, fisheye, and hybrid rendering. The first two combine the modeled modified RT Core
+with measured CUDA kernels; the microbenchmark isolates
+simulated RT-Core traversal, while RCPR is examined separately through hop-distance quality sensitivity. The 3.77× endto-end result is therefore a combined-system result, not an
+isolated attribution to LB-SBVH or RCPR. Per-scene runtime
+averages are arithmetic means, whereas the reported average
+speedup is the geometric mean of per-scene speedups.
+B. End-to-End Results
+a) Efficiency Analysis: Figure 8(a) combines the modeled modified RT Core with measured CUDA execution and
+8
+Percentage (%)
+Non-empty / Total
+Sparse / Non-empty
+Max Gaussian / Total
+100
+50
+0
+8
+27
+64
+125
+216
+8
+27
+Grid Count
+bicycle
+64
+125
+216
+8
+27
+Grid Count
+bonsai
+garden
+kitchen
+room
+64
+125
+216
+Grid Count
+stump
+drJohnson
+playroom
+Fig. 9. Impact of grid granularity on spatial workload distribution. Left: fraction of non-empty grids over total grids. Middle: fraction of Gaussians contained
+in the densest grid. Right: fraction of sparse grids (0 < N < 100) among non-empty grids.
+0
+ΔPSNR (dB)
+−1
+0 dB
+TABLE VII
+H OP - DISTANCE PSNR SENSITIVITY.
+-1 dB
+−2
+−3
+−4
+−5
+Bic
+ycle
+Bon
+sai
+n
+rde
+Ga
+hen
+Kitc
+mp
+Stu
+m
+Roo
+om
+yro
+Pla
+on
+hns
+drJo
+Scene
+Fig. 10. Worst-case per-view PSNR differences across 8 scenes. Each point
+denotes one of the ten lowest per-view differences between H2 -Ray and
+RaySplats for a scene. The black-outlined marker denotes the worst view in
+each scene. Values closer to zero indicate better agreement with RaySplats.
+img_6486
+img_6541
+RaySplats 2-hop
+39.86
+37.60
+∆ 3-hop
+34.81 -5.05
+35.81 -1.79
+0-hop
+1-hop
+2-hop
+31.10
+35.81
+31.66
+35.71
+36.36
+31.97
+42.11
+40.36
+28.07 (-3.03)
+35.51 (-0.30)
+26.11 (-5.55)
+35.22 (-0.49)
+35.99 (-0.37)
+31.69 (-0.28)
+38.40 (-3.71)
+30.17 (-10.19)
+29.96 (-1.14)
+35.75 (-0.06)
+30.38 (-1.28)
+35.59 (-0.12)
+36.24 (-0.12)
+31.89 (-0.08)
+41.26 (-0.85)
+33.42 (-6.94)
+31.05 (-0.05)
+35.76 (-0.05)
+31.64 (-0.02)
+35.64 (-0.07)
+36.29 (-0.07)
+31.96 (-0.01)
+41.98 (-0.13)
+40.32 (-0.04)
+Mean Diff (dB)
+-
+-2.99
+-1.32
+-0.06
+across-scene mean by 2.99, 1.32, and 0.06 dB, respectively;
+the maximum per-scene loss at 2 hops is 0.13 dB. These
+representative-view statistics do not bound all camera views,
+but they show the quality trend as the reuse window is
+relaxed. At 0 hops, neighboring rays reuse only the center
+ray’s leaf-level hits, which is vulnerable when a tile crosses a
+foreground/background boundary. This effect is most visible
+in Garden and Playroom, where 0-hop reuse loses 5.55 and
+10.19 dB, respectively. One hop recovers much of the loss by
+resuming traversal from a higher shared state, but Playroom
+still loses 6.94 dB because its transitions remain difficult. At 2
+hops, all scenes are within 0.13 dB of baseline on these views,
+so we use 2 hops as the accuracy–cost balance.
+b) Grid Division Analysis.: Figure 9 evaluates grid granularity, which changes traversal organization but not correctness because all candidate Gaussians remain reachable.
+Grid statistics use the center-based ownership rule, while
+traversal uses the support-aware per-grid AABBs described
+in Section IV-B; Gaussians are not duplicated across cells.
+Moving from coarse to moderate partitions generally reduces
+occupied-grid fraction and densest-cell concentration by separating empty regions from dense Gaussian clusters. At finer
+settings, occupied- and sparse-grid fractions increase as dense
+regions are subdivided into cells with too few primitives to
+benefit from BVH pruning. These trends motivate our 33
+default, which isolates major hotspots while retaining enough
+Gaussians per occupied grid for local BVHs. Figure 3 uses
+∆ No proxy
+35.05 -4.82
+34.68 -2.92
+Baseline
+Baseline is the C++ full per-ray traversal renderer without RCPR, not RaySplats. All
+hop settings use the same selected view and ground truth per scene. Parentheses denote
+dB differences from baseline; the final row reports their arithmetic mean.
+TABLE VI
+D IAGNOSTIC RERUNS FOR THE TWO LARGEST drJohnson PSNR
+OUTLIERS . A LL VALUES ARE PSNR IN D B; ∆ VALUES ARE RELATIVE TO
+R AY S PLATS . T HE NO - PROXY COLUMN REPORTS INDEPENDENT PER - RAY
+TRAVERSAL , WHILE THE 2- HOP AND 3- HOP COLUMNS USE RCPR.
+View
+Scene
+Bicycle
+Bonsai
+Garden
+Kitchen
+Room
+Stump
+drJohnson
+Playroom
+34.95
+35.45
+For the two largest drJohnson outliers listed in Table VI,
+we rerun the corresponding views with proxy reuse disabled,
+so every ray performs independent traversal, and also test hop
+distance 3. The no-proxy reruns improve PSNR by less than
+0.4 dB for the inspected views, and the default proxy result
+is sometimes better. Since neither setting consistently closes
+the RaySplats–H2 -Ray gaps, the outliers are unlikely to be
+caused primarily by proxy reuse or hop truncation. Because
+RaySplats does not expose the exact OptiX BVH construction
+and traversal details, the remaining gaps may instead stem
+from implementation-level differences such as BVH structure,
+traversal order, or floating-point ordering.
+C. Sensitivity Analysis
+a) Hop Distance Analysis.: Table VII reports PSNR for
+representative views across 8 scenes. Unlike Table IV, which
+compares H2 -Ray against RaySplats over matched multi-view
+sets, this table compares RCPR hop settings against the C++
+full per-ray traversal baseline on selected representative views.
+Relative to that baseline, 0-, 1-, and 2-hop reuse reduce the
+9
+ray–AABB
+ray–Gaussian
+ray–triangle
+Perspective
+Perspective + Mesh
+Fisheye
+Fisheye + Mesh
+9,156,983,251
+1,873,882,463
+-
+9,344,892,164
+1,898,858,274
+1,380,169
+7,744,344,921
+1,741,258,064
+-
+7,842,369,262
+1,754,039,606
+731,771
+Fig. 11. Mixed rendering workloads and corresponding ray–primitive intersection statistics. The first row shows rendered images for the Room scene under
+different rendering modes at the evaluation resolution, using the default 2-hop and 33 grid setting. The following rows report the number of ray–primitive
+tests, including ray–AABB, ray–Gaussian, and ray–triangle tests.
+163 to visualize spatial skew, Table I uses 83 for occupancy
+statistics, and the renderer uses 33 by default. Table I reports
+sparse and dense fractions over all grids, whereas Figure 9
+reports sparse grids over non-empty grids, so the percentages
+are not directly comparable.
+Table V isolates modified RT Core traversal by comparing
+one global BVH with 27 local grid BVHs. Each scene row
+averages 40 benchmark patches over proxy center rays sent
+to the RT Core traversal engine; CUDA-only reused rays
+are excluded. All rows use the same per-ray correctnesschecking procedure. The across-scene arithmetic means are
+9,890 and 8,380 cycles per ray, while the geometric mean
+of the per-scene speedups is 1.18×. Across 8 scenes, 27
+grids reduce traversal latency by 1.08×–1.31×. The benefit
+is largest for Bonsai (1.31×; 7,207 to 5,481 cycles per ray)
+and Kitchen (1.27×), and smallest for Room (1.08×), while
+remaining positive in every scene. The 27-grid organization
+also reduces DRAM reads by 5.9%–31.3%, with an arithmetic
+mean reduction of 18.9% across scenes. The Room row was
+additionally checked for traversal correctness on representative views. As the table reports only the modeled RT Core
+microarchitecture, it represents the traversal-level contribution
+of LB-SBVH rather than end-to-end runtime.
+to 1.90 billion tests under perspective rendering). These results
+justify the UIE design: the datapath supports both intersection
+types and shares arithmetic units with the less frequent triangle path. UIE consequently broadens the rendering modes
+supported by H2 -Ray without a separate triangle-only pipeline.
+This experiment establishes the mixed-primitive workload
+need rather than an isolated UIE speedup or area reduction;
+the architecture section reports UIE’s FP-unit sharing as a
+structural resource breakdown.
+VI. R ELATED W ORK
+a) Neural Rendering Accelerator: NeRF accelerators target repeated point sampling and neural-field evaluation. Prior
+designs optimize multiresolution encoding and MLP inference [14], fused scene learning [19], and sampling through codesign [5], [10]. H2 -Ray instead accelerates explicit Gaussian
+traversal and intersection.
+b) 3D Gaussian Splatting Accelerator: GauSPU [22],
+GauRast [12], Splatonic [7], ORANGE [11], and CambriconGS [21] accelerate SLAM, rasterization, sparse pixels, blending, or training. Unlike H2 -Ray, these systems retain splattingstyle projection rather than ray-traced visibility.
+c) Ray Tracing Accelerator: NVIDIA RT Cores [15],
+[16] and AMD RDNA units [1] accelerate BVH traversal and
+triangle tests. GRTX [9] adds Gaussian BVHs and single-ray
+traversal checkpointing.1 GRTX stores breakpoints along one
+ray, whereas RCPR lets independent neighboring rays reuse a
+nearby ray’s traversal path; these optimizations are orthogonal.
+H2 -Ray further adds LB-SBVH for BVH partitioning and
+UIE for Gaussian–triangle datapaths. These systems therefore
+optimize different levels of the pipeline: prior accelerators primarily change representation or primitive execution, whereas
+H2 -Ray co-designs scene partitioning, inter-ray reuse, and
+mixed-primitive support around direct ray–Gaussian traversal.
+D. Ray Tracing with Heterogeneous Primitives
+Figure 11 characterizes perspective, fisheye, and hybrid
+mesh workloads supported by the same pipeline. The four
+examples use the Room scene at its evaluation resolution
+with the same acceleration structure and scheduling flow,
+while varying the camera model and mesh insertion. They
+use the default 2-hop RCPR setting and 33 grid partition.
+Across all modes, Gaussian tests dominate the intersection
+workload. Perspective-plus-mesh performs 1.90 billion ray–
+Gaussian tests but only 1.38 million ray–triangle tests, while
+fisheye-plus-mesh performs 1.75 billion and 0.73 million,
+respectively. Triangle tests therefore remain a small fraction
+of the intersection workload.
+The fisheye camera changes ray directions and coverage,
+reducing ray–AABB and ray–Gaussian counts relative to perspective rendering. Adding meshes introduces triangle tests
+while leaving the Gaussian workload nearly unchanged (1.87
+VII. C ONCLUSION
+2
+H -Ray combines LB-SBVH scene partitioning, RCPR
+traversal reuse, and unified Gaussian–triangle intersection to
+1 GRTX has no public implementation at the time of writing, so we cannot
+directly compare against it.
+10
+address spatial imbalance, redundant traversal, and heterogeneous primitives in ray-traced 3DGS. Across 8 scenes, it
+achieves a 3.77× geometric-mean speedup over RaySplats
+while maintaining small average PSNR differences across the
+matched views.
+[15] NVIDIA, “NVIDIA Turing architecture in-depth,” 2018. [Online].
+Available: https://www.nvidia.com/en-us/geforce/news/geforce-rtx-20series-turing-architecture-whitepaper/
+[16] NVIDIA, “NVIDIA Ada Lovelace architecture,” 2022. [Online]. Available: https://www.nvidia.com/en-us/design-visualization/ada-lovelacearchitecture/
+[17] M. Pharr, W. Jakob, and G. Humphreys, Physically Based Rendering:
+From Theory to Implementation, 4th ed. The MIT Press, 2023.
+[Online]. Available: https://mitpress.mit.edu/9780262048026/physicallybased-rendering/
+[18] Siemens EDA, Catapult High-Level Synthesis, 2026, accessed: 2026-0330. [Online]. Available: https://eda.sw.siemens.com/en-US/ic/catapulthigh-level-synthesis/
+[19] X. Song, Y. Wen, X. Hu, T. Liu, H. Zhou, H. Han, T. Zhi,
+Z. Du, W. Li, R. Zhang, C. Zhang, L. Gao, Q. Guo, and
+T. Chen, “Cambricon-R: A fully fused accelerator for real-time
+learning of neural scene representation,” in Proceedings of the 56th
+Annual IEEE/ACM International Symposium on Microarchitecture,
+ser. MICRO ’23. ACM, 2023, pp. 1305–1318. [Online]. Available:
+https://doi.org/10.1145/3613424.3614250
+[20] Synopsys,
+Fusion
+Compiler:
+RTL-to-GDSII
+Implementation
+Solution,
+2026,
+accessed:
+2026-03-30.
+[Online].
+Available: https://www.synopsys.com/implementation-and-signoff/physicalimplementation/fusion-compiler.html
+[21] R. Wen, Z. Yue, T. Liu, X. Song, J. Li, D. Huang, J. Guo, X. Hu,
+Z. Du, Q. Guo, and T. Chen, “Cambricon-GS: An accelerator for 3D
+Gaussian splatting training with Gaussian-pixel hybrid parallelism,” in
+Proceedings of the 2026 IEEE 32nd International Symposium on High
+Performance Computer Architecture (HPCA), 2026, pp. 1–14. [Online].
+Available: https://ieeexplore.ieee.org/document/11408562/
+[22] L. Wu, H. Zhu, S. He, J. Zheng, C. Chen, and X. Zeng, “GauSPU:
+3D Gaussian splatting processor for real-time SLAM systems,” in
+Proceedings of the 57th IEEE/ACM International Symposium on
+Microarchitecture, ser. MICRO ’24, 2024, pp. 1562–1573. [Online].
+Available: https://doi.org/10.1109/MICRO61859.2024.00114
+[23] Q. Wu, J. M. Esturo, A. Mirzaei, N. Moenne-Loccoz, and Z. Gojcic,
+“3DGUT: Enabling distorted cameras and secondary rays in Gaussian
+splatting,” arXiv preprint arXiv:2412.12507, 2024. [Online]. Available:
+https://arxiv.org/abs/2412.12507
+[24] S. Yogamani, C. Hughes, J. Horgan, G. Sistu, P. Varley, D. O’Dea,
+M. Uricar, S. Milz, M. Simon, K. Amende, C. Witt, H. Rashed,
+S. Chennupati, S. Nayak, S. Mansoor, X. Perrotton, and P. Perez,
+“WoodScape: A multi-task, multi-camera fisheye dataset for autonomous
+driving,” in Proceedings of the IEEE/CVF International Conference on
+Computer Vision (ICCV), October 2019.
+R EFERENCES
+[1] AMD, “AMD RDNA architecture,” 2025. [Online]. Available: https:
+//www.amd.com/en/technologies/rdna.html
+[2] J. T. Barron, B. Mildenhall, D. Verbin, P. P. Srinivasan, and
+P. Hedman, “Mip-NeRF 360: Unbounded anti-aliased neural radiance
+fields,” in 2022 IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR). Los Alamitos, CA, USA: IEEE
+Computer Society, Jun. 2022, pp. 5460–5469. [Online]. Available:
+https://doi.ieeecomputersociety.org/10.1109/CVPR52688.2022.00539
+[3] K. Byrski, M. Mazur, J. Tabor, T. Dziarmaga, M. Kadziołka,
+D. Baran, and P. Spurek, “RaySplats: Ray tracing-based Gaussian
+splatting,” arXiv preprint arXiv:2501.19196, 2025. [Online]. Available:
+https://arxiv.org/abs/2501.19196
+[4] R. L. Cook, T. Porter, and L. Carpenter, “Distributed ray tracing,” in
+Proceedings of the 11th Annual Conference on Computer Graphics
+and Interactive Techniques, ser. SIGGRAPH ’84, 1984, pp. 137–145.
+[Online]. Available: https://dl.acm.org/doi/10.1145/964965.808590
+[5] Y. Fu, Z. Ye, J. Yuan, S. Zhang, S. Li, H. You, and Y. Lin, “Gen-NeRF:
+Efficient and generalizable neural radiance fields via algorithm-hardware
+co-design,” in Proceedings of the 50th Annual International Symposium
+on Computer Architecture, ser. ISCA ’23, 2023, pp. 1–12. [Online].
+Available: https://doi.org/10.1145/3579371.3589109
+[6] P. Hedman, J. Philip, T. Price, J.-M. Frahm, G. Drettakis, and
+G. Brostow, “Deep blending for free-viewpoint image-based rendering,”
+ACM Trans. Graph., vol. 37, no. 6, Dec. 2018. [Online]. Available:
+https://doi.org/10.1145/3272127.3275084
+[7] X. Huang, H. Zhu, T. Ma, Y. Xiong, F. Liu, Z. He, Y. Gan,
+Z. Liu, J. Leng, Y. Feng, and M. Guo, “Splatonic: Architecture
+support for 3D Gaussian splatting SLAM via sparse processing,”
+arXiv preprint arXiv:2511.18755, 2025. [Online]. Available: https:
+//arxiv.org/abs/2511.18755
+[8] B. Kerbl, G. Kopanas, T. Leimkühler, and G. Drettakis, “3D Gaussian
+splatting for real-time radiance field rendering,” ACM Transactions on
+Graphics, vol. 42, no. 4, pp. 1–14, July 2023. [Online]. Available:
+https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/
+[9] J. Lee, S. Jeon, J. Lee, J. Park, and J. Sim, “GRTX: Efficient ray tracing
+for 3D Gaussian-based rendering,” arXiv preprint arXiv:2601.20429,
+2026. [Online]. Available: https://arxiv.org/abs/2601.20429
+[10] C. Li, S. Li, Y. Zhao, W. Zhu, and Y. Lin, “RT-NeRF: Real-time
+on-device neural radiance fields towards immersive AR/VR rendering,”
+in Proceedings of the 41st IEEE/ACM International Conference on
+Computer-Aided Design, ser. ICCAD ’22, 2022, pp. 1–9. [Online].
+Available: https://doi.org/10.1145/3508352.3549380
+[11] H. Li, Y. Liang, F. Liu, B. Zhu, Z. Wang, Y. Feng, L. Lu, L. Jiang,
+and H. Guan, “ORANGE: Exploring Ockham’s Razor for neural
+rendering by accelerating 3DGS on NPUs with GEMM-friendly
+blending and balanced workloads,” in Proceedings of the 2026
+IEEE 32nd International Symposium on High Performance Computer
+Architecture (HPCA), 2026. [Online]. Available: https://2026.hpcaconf.org/details/hpca-2026-main-conference/4/ORANGE-Exploringunderline-O-ckham-s-underline-R-azor-for-Neural-Rendering-by-und
+[12] S. Li, B. Keller, Y. C. Lin, and B. Khailany, “GauRast:
+Enhancing GPU triangle rasterizers to accelerate 3D Gaussian
+splatting,” in Proceedings of the 62nd ACM/IEEE Design
+Automation Conference, ser. DAC ’25, 2025. [Online].
+Available:
+https://research.nvidia.com/publication/2025-06 gaurastenhancing-gpu-triangle-rasterizers-accelerate-3d-gaussian-splatting
+[13] N. Moenne-Loccoz, A. Mirzaei, O. Perel, R. de Lutio, J. M. Esturo,
+G. State, S. Fidler, N. Sharp, and Z. Gojcic, “3D Gaussian ray tracing:
+Fast tracing of particle scenes,” arXiv preprint arXiv:2407.07090, 2024.
+[Online]. Available: https://arxiv.org/abs/2407.07090
+[14] M. H. Mubarik, T. Zirr, R. Kanungo, and R. Kumar, “Hardware
+acceleration of neural graphics,” in Proceedings of the 50th Annual
+International Symposium on Computer Architecture, ser. ISCA
+’23, 2023, pp. 702–713. [Online]. Available: https://doi.org/10.1145/
+3579371.3589085
+11

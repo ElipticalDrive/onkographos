@@ -1,0 +1,175 @@
+# Octree-based Level of Detail and Culling
+
+Also called: CPU Culling, LoD, CPU Frustum Culling, CPU-based Octree LOD & Frustum Culling, Distance-based LoD
+
+## Overview
+This method reduces the rendering load of large point clouds by traversing a pre-built octree on the CPU to perform frustum culling and view-dependent sampling before uploading data to the GPU [S1, unofficial]. It sets itself apart from GPU-based culling techniques by aggregating point data into cached averages at internal octree nodes, allowing the CPU to decide exactly which subset of points to render based on distance thresholds [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+*   **Input:** An octree structure built from a point cloud, where each node contains a bounding volume and a cached average point representing all points in its subtree [S1, unofficial]. The current Model-View-Projection (MVP) matrix and camera eye position [S1, unofficial].
+*   **Output:** A list of aggregated points (positions and colors) suitable for upload to a Vertex Buffer Object (VBO) for rendering as `GL_POINTS` [S1, unofficial].
+
+### Data Structures
+*   **Octree Node:** Contains a bitmask `activeOctants` indicating which of the 8 children exist, a bounding region `region` (with `center()` and `testAgainstFrustum()` methods), and a cached `average_point` (position and color) [S1, unofficial].
+*   **PointModel:** A structure containing position and color data, used to define the layout for the VBO [S1, unofficial].
+
+### Parameters
+*   `maxDepth`: Maximum recursion depth for the LOD traversal, typically 15 [S1, unofficial].
+*   `_world_size`: The diagonal length of the point cloud's Axis-Aligned Bounding Box (AABB), calculated as `glm::length(pc.aabb.max() - pc.aabb.min())` [S1, unofficial].
+*   `_cpuCulling`: Boolean flag to enable/disable CPU-side aggregation and frustum culling. Default: `false` [S1, unofficial].
+*   `_cpuCullingEveryFrame`: Boolean flag to recompute culling every frame. Default: `false` [S1, unofficial].
+
+### Algorithm Steps
+
+1.  **Preparation (Load Time):**
+    *   Compute `_world_size` from the point cloud's AABB diagonal [S1, unofficial].
+    *   Build the octree. For each node, compute and cache the average position and color of all points in its subtree [S1, unofficial].
+
+2.  **Traversal (Per Frame):**
+    *   If `_cpuCulling` is disabled, skip this method [S1, unofficial].
+    *   Start recursive traversal at the root node at depth 15 with the current MVP matrix and eye position [S1, unofficial].
+    *   For each node, iterate through its 8 potential children (index `i` from 0 to 7):
+        *   Check if the child is active: `if (!(node->activeOctants & (1 << i))) continue;` [S1, unofficial].
+        *   Perform frustum culling: `if (!node->children[i]->region.testAgainstFrustum(mvp)) continue;` [S1, unofficial].
+        *   Calculate distance from the child's center to the eye: `dist = glm::length(node->children[i]->region.center() - eye)` [S1, unofficial].
+        *   Determine the target emission depth for this child based on distance thresholds relative to `_world_size`:
+            *   If `dist > _world_size / 2`: set target depth to 9 [S1, unofficial].
+            *   If `_world_size / 4 < dist < _world_size / 2`: set target depth to 10 [S1, unofficial].
+            *   Otherwise (`dist <= _world_size / 4`): set target depth to 15 [S1, unofficial].
+        *   Recurse into the child with the new target depth [S1, unofficial].
+    *   **Base Case (Emission):**
+        *   If the current traversal depth matches the target depth for the current node, emit the node's cached `average_point` to the output list and stop recursing into this branch [S1, unofficial].
+
+3.  **Rendering:**
+    *   Upload the emitted aggregated points to a VBO using the byte size of `PointModel` [S1, unofficial].
+    *   If the point list is empty (due to aggressive culling), return early from the draw call to prevent drawing invalid buffers [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def norm(v):
+    """Compute Euclidean length of a 3D vector."""
+    return (v[0]**2 + v[1]**2 + v[2]**2)**0.5
+
+def traverse_octree(node, current_depth, target_depth, mvp, eye, world_size, output_points):
+    """
+    Recursively traverse the octree to cull and sample points.
+    
+    Args:
+        node: The current octree node.
+        current_depth: The current absolute depth in the octree (starts at 15).
+        target_depth: The absolute depth at which to emit points for this subtree.
+        mvp: The Model-View-Projection matrix.
+        eye: The camera eye position.
+        world_size: The diagonal length of the point cloud AABB.
+        output_points: List to append aggregated points to.
+    """
+    # Base case: If we have reached the target depth for this branch, emit the cached average point.
+    if current_depth == target_depth:
+        output_points.append(node.average_point)
+        return
+    
+    # Guard against over-traversal if target depth is shallower than current
+    if current_depth < target_depth:
+        return
+
+    # Iterate through all 8 possible children
+    for i in range(8):
+        # Check if this child exists using the bitmask
+        if not (node.active_octants & (1 << i)):
+            continue
+        
+        child = node.children[i]
+        
+        # Frustum culling: Skip if the child's bounding region is outside the view frustum
+        if not child.region.test_against_frustum(mvp):
+            continue
+        
+        # Calculate distance from child center to eye
+        dist = norm(child.region.center() - eye)
+        
+        # Determine the new target depth for the child based on distance thresholds
+        if dist > world_size / 2:
+            new_target_depth = 9
+        elif world_size / 4 < dist < world_size / 2:
+            new_target_depth = 10
+        else:
+            new_target_depth = 15
+            
+        # Recurse with the new target depth, decrementing current depth by 1
+        traverse_octree(child, current_depth - 1, new_target_depth, mvp, eye, world_size, output_points)
+
+def render_point_cloud_octree_lod(scene, mvp, eye):
+    """
+    Main entry point for octree-based LOD and culling.
+    """
+    if not scene.rendering_params.cpu_culling:
+        return []
+        
+    world_size = norm(scene.pc.aabb.max - scene.pc.aabb.min)
+    output_points = []
+    
+    # Start traversal at max depth (15)
+    traverse_octree(scene.octree.root, 15, 15, mvp, eye, world_size, output_points)
+    
+    # Edge case: Empty list after culling
+    if not output_points:
+        return []
+        
+    # Upload to VBO using sizeof(PointModel) stride
+    stride = 24  # sizeof(PointModel) as defined in the source
+    vbo = allocate_vbo(output_points, stride)
+    gl_draw_points(vbo)
+    
+    return output_points
+
+def allocate_vbo(points, stride):
+    """Allocate GPU memory and upload point data."""
+    buffer = create_gpu_buffer(size=len(points) * stride)
+    upload_data(buffer, points, stride)
+    return buffer
+
+def gl_draw_points(vbo):
+    """Issue a draw call for the uploaded point data."""
+    bind_vbo(vbo)
+    draw_array(mode=GL_POINTS, count=len(vbo.data))
+```
+
+### Edge Cases and Pitfalls
+*   **Empty Output:** If all nodes are culled by the frustum or distance thresholds, the output list may be empty. The draw function must check for this and return early to avoid rendering invalid buffers [S1, unofficial].
+*   **Precision:** Distance calculations and frustum tests should use sufficient precision to avoid jittering or incorrect culling, especially near threshold boundaries [G].
+
+## Subtopics
+
+### CPU Frustum Culling
+*   **What it is:** The process of testing octree node bounding volumes against the camera's view frustum to skip subtrees that are not visible.
+*   **Differentiation:** Unlike GPU culling, this happens on the CPU before data transfer, reducing bandwidth usage.
+*   **When to choose:** When bandwidth to the GPU is a bottleneck or when the scene has large empty regions.
+*   **Link:** [CPU Frustum Culling](52-cpu-frustum-culling.md)
+
+### Distance-based LOD
+*   **What it is:** A technique to select the level of detail (depth) of the octree traversal based on the distance of the node from the camera.
+*   **Differentiation:** Uses fixed distance thresholds relative to the world size to determine sampling density, rather than screen-space error metrics.
+*   **When to choose:** When a simple, predictable reduction in point count is sufficient and screen-space error is not critical.
+*   **Link:** [Distance-based LOD](53-distance-based-lod.md)
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Not given in the sources.
+*   **Limitations:** Not given in the sources.
+*   **When to use:** Not given in the sources.
+*   **When not:** Not given in the sources.
+
+## Background
+This method is described in the context of a point cloud rendering engine using OpenGL and ImGui [S1, unofficial]. It is part of a pipeline that includes voxelization and octree construction for point clouds [S1, unofficial]. The specific implementation details, including the depth thresholds (9, 10, 15) and the use of cached averages, are derived from the `arminkz/PointCloudRendering` repository [S1, unofficial].
+
+## Sources
+
+[S1] arminkz/PointCloudRendering, https://github.com/arminkz/PointCloudRendering, fetched 2026-10-28 [S1, unofficial]

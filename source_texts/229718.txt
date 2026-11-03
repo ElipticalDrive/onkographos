@@ -1,0 +1,133 @@
+CUDA accelerated rasterization of gaussian splatting - Add ROCm/HIP support for AMD GPUs (Linux + Windows) by jeffdaily · Pull Request #970 · nerfstudio-project/gsplat
+
+Add ROCm/HIP support for AMD GPUs (Linux + Windows) by jeffdaily · Pull Request #970 · nerfstudio-project/gsplat · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jeffdaily
+commented
+Jun 2, 2026
+Copy link
+Copy Markdown
+Completes ROCm/HIP support for gsplat's differentiable Gaussian-splatting rasterization (PyTorch's hipify translates the .cu at build time). The project carried only build-config ROCm awareness; this fills the gaps so the rasterizer builds and is GPU-validated on AMD Linux (gfx90a MI250X wave64, gfx1100 W7800 wave32) and Windows (gfx1151 Radeon 8060S wave32), with every change behind USE_ROCM / torch.version.hip and the CUDA path unchanged.
+The substantive work was HIP Cooperative Groups: ROCm's CG (7.2.1) has no cg::reduce and no cg::labeled_partition. cg::reduce over a 32-thread tile becomes a butterfly shfl_xor all-reduce; cg::labeled_partition is rebuilt from warp.match_any(label) -- a masked all-reduce over same-label lanes plus one atomicAdd per label by the lowest-set-bit lane. Matching CUDA's one-atomic-per-label granularity (not a per-lane fan-out) is load-bearing: the larger atomic count changes float accumulation order and pushed the v_viewmats gradient past gsplat's own test tolerance. The 32-lane tiles stay within their 32 lanes on a 64-lane wavefront (shfl_xor/match_any use width 32), so no wave64 lane-count rework is needed.
+Other gaps: ROCm -ffast-math is more aggressive than CUDA's and perturbed ill-conditioned projection-covariance gradients past tolerance, so FAST_MATH defaults off on ROCm (opt-in FAST_MATH=1); torch's hipify mangles the bundled GLM, worked around by monkeypatching hipify to skip the GLM dir (GLM 1.0.2 detects HIP natively); plus std::min/max host shims, cuda::std->std, namespace cub = hipcub (radix sort uses begin_bit=0), the hipFuncSetAttribute const void* cast, and CUDA_ARCH || HIP_DEVICE_COMPILE guards.
+3DGUT on ROCm: the 3DGUT path needs cuda::std::optional, which the ROCm stack does not ship. The header-only ROCm/libhipcxx port supplies the cuda::std namespace, so 3DGUT builds and runs on ROCm: clone github.com/ROCm/libhipcxx and point LIBHIPCXX_INCLUDE at its include/ (build.py then defaults BUILD_3DGUT on; unset, it stays off so a plain pip install does not hard-error). The two RasterizeToPixelsFromWorld3DGS kernels also needed the hipFuncSetAttribute const-void* cast.
+Windows (gfx1151) enablement, all guarded to win32 + torch.version.hip so Linux and CUDA are byte-identical: build.py dropped the nvcc-only -allow-unsupported-compiler and the MSVC -Xcompiler /Zc:preprocessor and /openmp from the device flags (amdclang is a gcc-style driver: it rejects the first and treats the MSVC flags as input files; it uses -fopenmp instead). The host .cpp op-wrappers include c10/cuda/CUDAGuard.h, which on ROCm pulls in the HIP runtime headers whose GCC attribute syntax MSVC cl.exe cannot parse; build.py routes each wrapper through hipcc/amdclang by handing torch a byte-identical .cu shim next to the source (same dir, so every relative #include resolves identically; the wrappers carry no device code, so the device pass compiles nothing). distributed.py now imports torch.distributed.nn lazily: the Windows ROCm torch wheel ships without a c10d backend, and the eager import failed at module load; collective helpers are multi-GPU-only and unused single-process.
+Also adds "AMD GPUs (ROCm)" install notes to the README and the Windows install guide (docs/INSTALL_WIN.md).
+Test Plan:
+```
+HIP_VISIBLE_DEVICES=<n> PYTORCH_ROCM_ARCH=<arch> pip install -e . --no-build-isolation
+HIP_VISIBLE_DEVICES=<n> python -m pytest tests/test_basic.py
+# 3DGUT: clone ROCm/libhipcxx, then
+LIBHIPCXX_INCLUDE=<clone>/include BUILD_3DGUT=1 BUILD_3DGS=1 BUILD_2DGS=1 BUILD_ADAM=1 BUILD_RELOC=1 BUILD_LOSSES=1 \
+  HIP_VISIBLE_DEVICES=<n> PYTORCH_ROCM_ARCH=<arch> pip install -e . --no-build-isolation
+# Windows gfx1151: TheRock torch[device-gfx1151] wheel, Python on a space-free path,
+# DISTUTILS_USE_SDK=1, HIP_DEVICE_LIB_PATH=<rocm>/lib/llvm/amdgcn/bitcode, MSVC link.exe ahead of MSYS on PATH.
+```
+Validated on gfx90a (MI250X, ROCm 7.2.1, PyTorch 2.13 ROCm), gfx1100 (W7800, ROCm 7.2.1), and gfx1151 (Radeon 8060S, TheRock ROCm 7.x, PyTorch 2.12 ROCm). tests/test_basic.py core 3DGS/2DGS passes 108 (HIP vs a pure-torch reference, forward + autograd.grad); an independent compositing oracle agrees with a backward finite-difference check; forward is bit-exact deterministic. With libhipcxx the 3DGUT/lidar/UT and distortion/ftheta suites pass. (test_rasterize_to_pixels_eval3d still needs nerfacc, which is CUDA-only -- a separate dependency gap, not a kernel issue. On gfx1151 one UT-projection gaussian's derived pixel radius lands 12 vs 10 px over a heuristic atol, 1/769252 -- an FP-rounding boundary, not a kernel defect.)
+Authored with Claude.
+This port was prepared with the assistance of Claude (AI), reviewed before submission.
+[ROCm] HIP port for gfx90a/gfx1100/gfx1151 (Gaussian splatting)
+…
+e17d495
+```
+Completes ROCm/HIP support for gsplat's differentiable Gaussian-splatting rasterization (PyTorch's hipify translates the .cu at build time). The project carried only build-config ROCm awareness; this fills the gaps so the rasterizer builds and is GPU-validated on AMD Linux (gfx90a MI250X wave64, gfx1100 W7800 wave32) and Windows (gfx1151 Radeon 8060S wave32), with every change behind USE_ROCM / torch.version.hip and the CUDA path unchanged.
+
+The substantive work was HIP Cooperative Groups: ROCm's CG (7.2.1) has no cg::reduce and no cg::labeled_partition. cg::reduce over a 32-thread tile becomes a butterfly shfl_xor all-reduce; cg::labeled_partition is rebuilt from warp.match_any(label) -- a masked all-reduce over same-label lanes plus one atomicAdd per label by the lowest-set-bit lane. Matching CUDA's one-atomic-per-label granularity (not a per-lane fan-out) is load-bearing: the larger atomic count changes float accumulation order and pushed the v_viewmats gradient past gsplat's own test tolerance. The 32-lane tiles stay within their 32 lanes on a 64-lane wavefront (shfl_xor/match_any use width 32), so no wave64 lane-count rework is needed.
+
+Other gaps: ROCm -ffast-math is more aggressive than CUDA's and perturbed ill-conditioned projection-covariance gradients past tolerance, so FAST_MATH defaults off on ROCm (opt-in FAST_MATH=1); torch's hipify mangles the bundled GLM, worked around by monkeypatching hipify to skip the GLM dir (GLM 1.0.2 detects __HIP__ natively); plus std::min/max host shims, cuda::std->std, namespace cub = hipcub (radix sort uses begin_bit=0), the hipFuncSetAttribute const void* cast, and __CUDA_ARCH__ || __HIP_DEVICE_COMPILE__ guards.
+
+3DGUT on ROCm: the 3DGUT path needs cuda::std::optional, which the ROCm stack does not ship. The header-only ROCm/libhipcxx port supplies the cuda::std namespace, so 3DGUT builds and runs on ROCm: clone github.com/ROCm/libhipcxx and point LIBHIPCXX_INCLUDE at its include/ (build.py then defaults BUILD_3DGUT on; unset, it stays off so a plain pip install does not hard-error). The two RasterizeToPixelsFromWorld3DGS kernels also needed the hipFuncSetAttribute const-void* cast.
+
+Windows (gfx1151) enablement, all guarded to win32 + torch.version.hip so Linux and CUDA are byte-identical: build.py dropped the nvcc-only -allow-unsupported-compiler and the MSVC -Xcompiler /Zc:preprocessor and /openmp from the device flags (amdclang is a gcc-style driver: it rejects the first and treats the MSVC flags as input files; it uses -fopenmp instead). The host .cpp op-wrappers include c10/cuda/CUDAGuard.h, which on ROCm pulls in the HIP runtime headers whose GCC __attribute__ syntax MSVC cl.exe cannot parse; build.py routes each wrapper through hipcc/amdclang by handing torch a byte-identical .cu shim next to the source (same dir, so every relative #include resolves identically; the wrappers carry no device code, so the device pass compiles nothing). distributed.py now imports torch.distributed.nn lazily: the Windows ROCm torch wheel ships without a c10d backend, and the eager import failed at module load; collective helpers are multi-GPU-only and unused single-process.
+
+Also adds "AMD GPUs (ROCm)" install notes to the README and the Windows install guide (docs/INSTALL_WIN.md).
+
+Test Plan:
+```
+HIP_VISIBLE_DEVICES=<n> PYTORCH_ROCM_ARCH=<arch> pip install -e . --no-build-isolation
+HIP_VISIBLE_DEVICES=<n> python -m pytest tests/test_basic.py
+# 3DGUT: clone ROCm/libhipcxx, then
+LIBHIPCXX_INCLUDE=<clone>/include BUILD_3DGUT=1 BUILD_3DGS=1 BUILD_2DGS=1 BUILD_ADAM=1 BUILD_RELOC=1 BUILD_LOSSES=1 \
+  HIP_VISIBLE_DEVICES=<n> PYTORCH_ROCM_ARCH=<arch> pip install -e . --no-build-isolation
+# Windows gfx1151: TheRock torch[device-gfx1151] wheel, Python on a space-free path,
+# DISTUTILS_USE_SDK=1, HIP_DEVICE_LIB_PATH=<rocm>/lib/llvm/amdgcn/bitcode, MSVC link.exe ahead of MSYS on PATH.
+```
+Validated on gfx90a (MI250X, ROCm 7.2.1, PyTorch 2.13 ROCm), gfx1100 (W7800, ROCm 7.2.1), and gfx1151 (Radeon 8060S, TheRock ROCm 7.x, PyTorch 2.12 ROCm). tests/test_basic.py core 3DGS/2DGS passes 108 (HIP vs a pure-torch reference, forward + autograd.grad); an independent compositing oracle agrees with a backward finite-difference check; forward is bit-exact deterministic. With libhipcxx the 3DGUT/lidar/UT and distortion/ftheta suites pass. (test_rasterize_to_pixels_eval3d still needs nerfacc, which is CUDA-only -- a separate dependency gap, not a kernel issue. On gfx1151 one UT-projection gaussian's derived pixel radius lands 12 vs 10 px over a heuristic atol, 1/769252 -- an FP-rounding boundary, not a kernel defect.)
+
+Authored with Claude.
+```
+HPC-Ken
+commented
+Jun 25, 2026
+Copy link
+Copy Markdown
+@jeffdaily and I are working together inside AMD to consolidate this PR with my #957
+This was referenced Aug 5, 2026
+Detect ROCm toolkit in lazy backend
+#1043
+Closed
+Make JIT compiler flags ROCm-aware
+#1044
+Closed
+eust-w
+commented
+Aug 5, 2026
+Copy link
+Copy Markdown
+We used this PR's head (e17d495) as the base for a Linux Radeon PRO W7900D (gfx1100) / ROCm 7.2.1 BiGym three-camera gsplat bring-up. The compile/runtime investigation produced a 24-commit follow-up stack: eust-w/gsplat@e17d495...agent/rocm-gfx1100-runtime
+The main failure/fix clusters are:
+hipcc-compatible flags plus RDNA wave32/half/BF16 compatibility defines
+labeled_partition rebuilt with tile-local ballot/shuffle behavior for wave32 and both halves of wave64
+tile-local warp.any and active-lane mask handling
+unresolved HIP device math calls across Adam, intersections, camera, LiDAR, Gaussian losses, and MCMC perturbation
+This is not a rebased alternative PR, and I am not claiming a full current-upstream suite pass for the stack. It is concrete gfx1100 failure/fix evidence intended to help the ongoing consolidation with #957. I split two independent current-main prerequisites into #1043 (toolkit discovery) and #1044 (JIT compiler flags) so they can be reviewed without the kernel port.
+eust-w
+mentioned this pull request
+Aug 6, 2026
+[ROCm] Apply gfx1100 runtime follow-ups to the HIP port
+jeffdaily/gsplat#1
+Closed
+eust-w
+commented
+Aug 6, 2026
+Copy link
+Copy Markdown
+I opened the gfx1100 follow-up as a stacked draft PR directly against the head branch of this ROCm port: jeffdaily#1
+This keeps the review diff limited to the 24 follow-up commits instead of duplicating #970 against upstream main. The two independently mergeable JIT prerequisites remain in #1043 and #1044. Current local validation is 19 CPU-safe source-contract tests plus git diff --check; the stacked PR stays draft pending a fresh ROCm hardware-matrix run.
+This was referenced Aug 6, 2026
+Detect ROCm toolkit in lazy backend
+#1045
+Open
+Make JIT compiler flags ROCm-aware
+#1046
+Open
+0xDELUXA
+commented
+Oct 11, 2026
+Copy link
+Copy Markdown
+Great work!
+Tested this branch (e17d495) on Windows 11 with an RX 9060 XT (gfx1200) and TheRock torch 2.16.0a0+rocm10.2.0a20261011. It builds unmodified (clang-cl as CXX, HIP_DEVICE_LIB_PATH set as in INSTALL_WIN.md).
+Checked the core 3DGS path, rasterization() with rasterize_mode="classic", pinhole, packed=False, RGB+ED, sh_degree=0, against a brute-force per-pixel compositing reference built on _fully_fused_projection: forward max abs diff about 1e-6, and gradients for means/quats/scales/opacities/colors within 3.5e-5 relative L2. tests/test_basic.py: 102 passed.
+A few test-harness things I hit, none of them ROCm kernel issues:
+test_basic.py imports tests.test_cameras, which skips at module level unless the extension was built with BUILD_CAMERA_WRAPPERS=1, so a plain build followed by pytest tests/test_basic.py collects 0 tests.
+test_isect_lidar_corner_cases has no 3DGUT skip guard, so without a 3DGUT build it fails with "no attribute intersect_tile_lidar".
+Every test in test_rasterization.py uses the dist_init fixture with the nccl backend, so on Windows they all error before running.
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+4 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

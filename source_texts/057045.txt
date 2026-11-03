@@ -1,0 +1,223 @@
+solhsa.com - tutorials
+Instancing in OpenGL
+This is more or less a re-hash of my "rendering lots of cubes" article, but hopefully more coherent and informative.
+This stuff is really old. The latest graphics APIs have instancing baked in as a first-class citizen, so none of this is strictly neccessary.
+What is instancing?
+Whenever you find yourself in a situation where you want to render many copies of a single object, you're instancing said object. The general case that I was trying to optimize for was to have lots of otherwise identical objects, but each with its own transformation matrix.
+That's what 125000 cubes look like. I pumped the instance count up to ridiculous levels so I could see what kind of performance different instancing approaches would get. Each of the approaches described here has its good and bad sides.
+For the performance values listed here, two computers were used. Both have Core i7, 8 GB of RAM and win7 64bit; one has an Nvidia gtx260 and the other has a ATI hd5700 video card. Screen refresh sync was turned off for all tests. Here's an overview table of the results, before we dig into the approaches:
+Nvidia
+ATI
+Cubes(VA)
+Cubes(VBO)
+Torus(lo)
+Torus(hi)
+Cubes(VA)
+Cubes(VBO)
+Torus(lo)
+Torus(hi)
+No shaders
+59.3ms
+41.1ms
+41.1ms
+55.3ms
+49.2ms
+Plain shaders
+86.7ms
+80.5ms
+81.0ms
+80.4ms
+50.0ms
+Pseudoinstancing
+70.1ms
+30.0ms
+30.4ms
+51.9ms
+103.6ms
+Matrices in texture
+41.0ms
+10.4ms
+22.8ms
+50.7ms
+18.8ms
+2.8ms
+12.2ms
+23.0ms
+Matrices in uniforms
+45.5ms
+18.7ms
+23.1ms
+50.5ms
+Instanced arrays
+11.3ms
+22.8ms
+53.2ms
+19.3ms
+2.8ms
+12.2ms
+23.0ms
+The test setup uses 64000 instances, and the geometry includes cubes in vertex arrays (VA) or vertex buffer objects (VBO), and low (80 tris) and high (230 tris) poly count toruses (both in a VBO). I did not run through all test cases on both machines, because some of these tests take a long time to run.
+Specifically non-VBO instanced arrays were extremely slow on Nvidia, and my matrices in uniforms case doesn't run on the ATI board even though I'm "only" using an array of 32 matrices (the Nvidia board can do 100).
+No shaders
+The "no shaders" test case is just that - no shaders, no instancing extensions. The old-school, fixed-function, opengl 1.x way of doing things. Just render lots of copies of a single object.
+```
+for (i = 0; i < instancecount; i++)
+{
+	glLoadMatrixf(matrices[i]);
+	glDrawElements(primitivetype, indices, GL_UNSIGNED_INT, 0);  
+}
+```
+Good sides to this approach is that it'll work anywhere, and bad sides include reliance on the fixed function pipeline, slowness, and, well, you can't use shaders.
+Basic shaders
+The "basic shaders" test case is otherwise identical with the "no shaders" case, except that rendering is done using minimal shaders. The vertex shader looks something like this:
+```
+void main()
+{
+	gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+	gl_TexCoord[0] = gl_MultiTexCoord0;
+}
+```
+The fragment shader for this and all subsequent cases is just the minimal non-lit texture shader:
+```
+uniform sampler2D tex;
+
+void main()
+{	
+	gl_FragColor = texture2D(tex, gl_TexCoord[0].xy);
+}
+```
+Surprisingly enough, this is slower than using the fixed function pipeline, even though the shader is probably much simpler than whatever the default fixed function state would require. On the other hand, we're doing tons of drawelements calls, so it's entirely possible the fixed function code in the drivers can work on some assumptions it cannot do when using shaders. Who knows.
+Pros for this approach is the flexibility shaders give, and cons include performance, and the fact a lot of 3d hardware out there still doesn't like shaders - especially the rather common embedded graphics hardware from Intel.
+Pseudoinstancing
+Pseudoinstancing is a hack published by Nvidia (pseudoinstancing PDF here). Basically what this means is that we abuse the fixed-pipeline variables, texture coordinates to be precise, to send the matrix to the shader.
+```
+for (i = 0; i < instancecount; i++)
+{
+	glMultiTexCoord4fv(GL_TEXTURE1, ((float*)(matrices[i])));
+	glMultiTexCoord4fv(GL_TEXTURE2, ((float*)(matrices[i]))+4);
+	glMultiTexCoord4fv(GL_TEXTURE3, ((float*)(matrices[i]))+8);
+	glMultiTexCoord4fv(GL_TEXTURE4, ((float*)(matrices[i]))+12);
+	glDrawElements(primitivetype, indices, GL_UNSIGNED_INT, 0);  
+}
+```
+And on the shader, we grab these to build a matrix by:
+```
+mat4 mvp = mat4(
+	gl_MultiTexCoord1,
+	gl_MultiTexCoord2,
+	gl_MultiTexCoord3,
+	gl_MultiTexCoord4);
+```
+This is faster - on Nvidia cards - than using glLoadMatrix or using a matrix uniform. This makes little sense to me, as the amount of data is the same, and I'm pretty sure the transport mechanism is the same too (see near bottom of this page for a hint of this).
+Pros for this approach are simple implementation, and some performance gain on at least some Nvidia hardware. Cons include (but are not limited to) poor performance on ATI hardware, reliance on older GLSL version (the gl_ shader variables have since been deprecated) and limited data per instance (there's only so many tex coords available).
+Extensions - ARB_draw_instanced
+There are two extensions which were designed to help with the instancing. The first of these (ARB_draw_instanced) aims to reduce the number of draw calls required.
+The extension introduces new rendering calls which basically say "draw instance n times". To differentiate between the instances (and not just render the exact same thing N times), a new built-in uniform called gl_InstanceID is introduced, which tells the shaders which instance they're rendering.
+Which then gives us the problem of, where does the shader get the matrix based on the id?
+Matrices in Uniforms
+The first approach is to define an array of matrices as an uniform, update the array and then call the glDrawElementsInstanced function. This increases the batch size and shows some performance increase, but is limited by the uniform store size. On my Nvidia card I could make an array of 100 uniform matrices, but my ATI card couldn't even handle 32, and I did not feel like finding out how low I'd have to go with it.
+```
+int pos = 0;
+for (i = 0; i < instancecount; i++)
+{  
+	glUniformMatrix4fv(uniformlocation[pos], 1, 0, matrices[i]);
+	pos++;
+	if (pos == max_instances)
+	{
+		glDrawElementsInstanced(primitivetype, indices, GL_UNSIGNED_INT, 0, max_instances);  
+		pos = 0;
+	}
+}
+glDrawElementsInstanced(primitivetype, indices, GL_UNSIGNED_INT, 0, pos);
+```
+The shader looks something like this. Note that this is not exctly kosher, as I'm still using the fixed-function tie-in variables (should replace them with my own).
+```
+#extension GL_ARB_draw_instanced : enable
+uniform mat4 instancematrices[32];
+
+void main()
+{
+	gl_Position = gl_ModelViewProjectionMatrix * instancematrices[gl_InstanceID] * gl_Vertex;
+	gl_TexCoord[0] = gl_MultiTexCoord0;
+}
+```
+Pros include.. well, it's faster than the previous methods, but is still rather limited. It's also a huge waste of uniform space.
+Matrices in a texture
+The other place to put the matrices in which definitely does not have the space limitations of the uniforms is a texture. This does, however, take a bit more work than using the uniforms.
+First, defining the texture. We want a non-filtered, 32-bit float RGBA texture to store our data in.
+```
+glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1024, 1024, 0, GL_RGBA, GL_FLOAT, matrices);
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+```
+I opted to make a "big enough" texture - that one has space enough for 256k matrices. An alternate method would be to use GL_TEXTURE_RECTANGLE instead of the GL_TEXTURE_2D target, which may simplify the calculations on the shader side.
+Rendering, however, is as simple as it gets.
+```
+glDrawElementsInstanced(primitivetype, indices, GL_UNSIGNED_INT, 0, instancecount);
+```
+On the shader side things get a bit more hairy again. And like before, I'm using gl_ModelViewProjectionMatrix and gl_MultiTexCoord0, both of which are deprecated.
+```
+#extension GL_ARB_draw_instanced : enable
+uniform sampler2D vtxtex;
+
+void main()
+{
+	int y = (gl_InstanceID * 4) / 1024;
+
+	mat4 mvp = mat4(texture2D(vtxtex,vec2((gl_InstanceID*4+0)&1023,y) * (1.0/1024.0)),
+		texture2D(vtxtex,vec2((gl_InstanceID*4+1)&1023,y) * (1.0/1024.0)),
+		texture2D(vtxtex,vec2((gl_InstanceID*4+2)&1023,y) * (1.0/1024.0)),
+		texture2D(vtxtex,vec2((gl_InstanceID*4+3)&1023,y) * (1.0/1024.0)));
+
+	gl_Position = gl_ModelViewProjectionMatrix * mvp * gl_Vertex;
+	gl_TexCoord[0] = gl_MultiTexCoord0;
+}
+```
+If GL_TEXTURE_RECTANGLE was used, all those (1.0/1024.0) calculations would go away.
+Pros for this method include the fact that it's very fast, cons include the tricky implementation, use of a texture slot, requirement of vertex shader textures, and performance in more complicated geometry relies on sufficient caching of texture fetches on the hardware.
+Extensions - ARB_instanced_arrays
+The second instancing extension (ARB_instanced_arrays) exists to solve this problem. It lets you place the per-instance data into your regular vertex attributes.
+Normally, each vertex reads the next attribute in the stream, but with this extension you can freeze the attribute index for the whole instance. It's basically the same as storing the same attribute N times for an N-vertex instance, but is much more efficient.
+The setup code looks something like this:
+```
+int pos = glGetAttribLocation(shader_instancedarrays.program, "transformmatrix");
+int pos1 = pos + 0; 
+int pos2 = pos + 1; 
+int pos3 = pos + 2; 
+int pos4 = pos + 3; 
+glEnableVertexAttribArray(pos1);
+glEnableVertexAttribArray(pos2);
+glEnableVertexAttribArray(pos3);
+glEnableVertexAttribArray(pos4);
+glBindBuffer(GL_ARRAY_BUFFER, VBO_containing_matrices);
+glVertexAttribPointer(pos1, 4, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 4 * 4, (void*)(0));
+glVertexAttribPointer(pos2, 4, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 4 * 4, (void*)(sizeof(float) * 4));
+glVertexAttribPointer(pos3, 4, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 4 * 4, (void*)(sizeof(float) * 8));
+glVertexAttribPointer(pos4, 4, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 4 * 4, (void*)(sizeof(float) * 12));
+glVertexAttribDivisor(pos1, 1);
+glVertexAttribDivisor(pos2, 1);
+glVertexAttribDivisor(pos3, 1);
+glVertexAttribDivisor(pos4, 1);
+```
+Rather many lines, but relatively simple code. GLSL defines a matrix as four vectors, so we need to set up all four separately. The extension defines the glVertexAttribDivisor function call, which tells how often the attributes should be updated. Value 0 means for each vertex, 1 means for each instance, 2 means for every second instance, and so on.
+Rendering, again, is as simple as it gets:
+```
+glDrawElementsInstanced(primitivetype, indices, GL_UNSIGNED_INT, 0, instancecount);
+```
+The shader is much simpler than with the texture-matrix case. The same non-kosher disclaimer applies.
+```
+attribute mat4 transformmatrix;
+
+void main()
+{
+	mat4 mvp = gl_ModelViewProjectionMatrix * transformmatrix;
+
+	gl_Position = mvp * gl_Vertex;
+	gl_TexCoord[0] = gl_MultiTexCoord0;
+}
+```
+Pros for this method are speed and much cleaner implementation. The only negative side I could think of is being limited to some of the very latest video cards, but then again, so you will be if you want to use shaders anyway.
+Both of the instancing extensions are required in the OpenGL 3.3, but may be implemented on earlier OpenGL versions too. According to the OpenGL Extensions Viewer 3.34, everything from Nvidia since GeForce 8800 and everyting from ATI since raden 3100 (and all HD radeons) support these extensions.
+Comments, etc, appreciated.

@@ -1,0 +1,387 @@
+# An Architectural Review of the 3D Gaussian Splatting Rendering Pipeline
+
+Karthik Palliyan Manakadavath
+
+Universität Siegen
+
+Karthik.PalliyanManakadavath@student.uni-siegen.de
+
+## Abstract
+
+3D Gaussian Splatting (3DGS) was the first novel-view synthesis method to deliver radiance-field image quality at real-time frame rates on consumer hardware. This report reviews it as an architecture, tracing how each design decision follows from a single constraint: the scene representation must remain rasterisable at render time and differentiable during training. Neural radiance fields store a scene implicitly in network weights, so every pixel costs hundreds of network evaluations along a ray, keeping training at hours to days and rendering at seconds per frame; explicit grid structures reduce training to minutes but still march rays, while point-based splatting renders quickly without matching volumetric quality. 3DGS instead stores the scene as anisotropic 3D Gaussians carrying opacity and view-dependent spherical-harmonic colour. The report examines the four components that make this viable—the factorisation of the covariance into a rotation and a scale, which keeps it positive semi-definite under unconstrained gradient descent; the spherical-harmonic colour model, repurposed from irradiance environment maps; the EWA projection, whose local affine approximation preserves the Gaussian form through a non-linear perspective divide; and the tile-based rasteriser, whose single sort per frame serves both rendering and backpropagation—together with the adaptive density control that grows and prunes the primitive set in response to image error. On the Mip-NeRF360 benchmark the method reaches 27.21 dB PSNR and 0.214 LPIPS at 134 fps, surpassing the previous quality leader in perceptual similarity while trailing marginally in PSNR and rendering roughly three orders of magnitude faster.
+
+## 1 Introduction
+
+Photorealistic reconstruction of real scenes from ordinary photographs is now a core capability of computer graphics and vision, underpinning virtual and augmented reality, digital twins, robotics simulation, and film production. The underlying task, novel-view synthesis, is to recover a renderable representation of a scene from a set of posed images and to display it from viewpoints where no photograph was taken. A practical solution must satisfy three requirements at once: photorealistic quality, including the view-dependent highlights and reflections that make an image look real; training times of minutes rather than days; and rendering at interactive frame rates on a consumer GPU. These requirements pull against one another, and meeting all three simultaneously has remained the central open problem of the field.
+
+Neural radiance fields Mildenhall et al. \(2020\) solved the quality requirement: a neural network, optimised directly from the input images and queried densely along camera rays, produces photorealistic novel views—but at the cost of hours to days of training and seconds per rendered frame. Subsequent work relaxes one cost at a time. Explicit data structures such as sparse voxel grids Fridovich-Keil et al. \(2022\) and multiresolution hash encodings Müller et al. \(2022\) cut training to minutes, yet still render by marching rays and therefore fall short of real-time rates at high resolution. Point-based splatting, from the closed-form Gaussian projection of EWA splatting Zwicker et al. \(2002\) to differentiable rasterisers of points and spheres Lassner and Zollhöfer \(2021\); Kopanas et al. \(2021\), renders fast, but kept a neural decoder in the display path and did not match volumetric fidelity. Each of these lines, reviewed in Section 3, achieves two of the three requirements.
+
+3D Gaussian Splatting Kerbl et al. \(2023\), the subject of this report, is the first method to meet all three. It represents the scene as an explicit set of anisotropic 3D Gaussians carrying opacity and view-dependent spherical-harmonic colour, optimises them directly from calibrated images while an adaptive density control clones, splits, and prunes primitives to match scene complexity, and renders through a tile-based differentiable rasteriser instead of ray marching. The result trains in minutes and renders in real time (≥30 fps at 1080p) while matching or exceeding the fidelity of the best volumetric methods. This report reviews the method as an architecture: the following sections trace how each design choice—the primitive, its parameterisation, the closed-form projection, the tiled rasteriser, and the density control—serves a single goal, keeping the representation rasterisable and differentiable at the same time.
+
+## 2 Motivation
+
+Walk around a statue and take twenty photographs. Each shows the statue from one fixed position, and no photo exists of the view between two of them, or from above where the camera never went. Producing such an image anyway is the task of novel-view synthesis. It cannot be solved by blending or editing the existing photos: the system must first recover the three-dimensional structure of the scene—where every surface lies in space and how it looks—from nothing but flat 2D images, and only then can it render the scene from a virtual camera placed anywhere. Solving this turns a handful of ordinary photographs into a scene one can move through freely, underpinning virtual walkthroughs of buildings, free-viewpoint replays in sport, digital twins, and content capture for VR and AR.
+
+In practice, three requirements make the task demanding.
+
+Photorealism. Correct geometry alone is not enough. Real surfaces change appearance with viewing direction—a highlight slides across a polished floor, a window reflects a different part of the room from every angle—and these viewdependent effects are precisely what the eye uses to judge whether an image is real. The representation must therefore store not "what colour is this point" but "what colour is this point seen from this direction"; without this, even perfect geometry looks like a cardboard model.
+
+Training time. The time taken to build a model of the scene from the input photographs. At hours or days per scene, capture is impractical for anyone who wants more than a handful of scenes.
+
+Rendering time. The stricter constraint, because it is what the user directly feels. Smooth, interactive motion requires roughly 30 frames per second—a budget of about 33 milliseconds per image—and it must be met on the graphics card an ordinary user already owns. Miss that budget and a walkthrough degrades into a slideshow; in VR it becomes physically uncomfortable.
+
+These three demands—photorealistic quality, practical training times, and real-time rendering on consumer hardware—pull against one another, and the central challenge in this field has been meeting all of them at once.
+
+#### 2.1 The idea behind 3D Gaussian Splatting
+
+3D Gaussian Splatting Kerbl et al. \(2023\) closes this gap by attacking rendering time at its root: rather than making rayfollowing faster, it removes it entirely. If a scene is built from simple shapes whose projection onto the screen has a direct formula, then drawing an image is no longer a search along rays—it becomes ordinary rasterisation, which is exactly the operation graphics cards are designed to perform. This is why real-time speed becomes achievable at all.
+
+The shape chosen is a 3D Gaussian: a soft, semi-transparent blob that can be stretched and rotated to hug a surface. It is a good choice on all three fronts at once. It projects to a simple ellipse on the image, which is cheap to draw (rendering time). It is smooth and can be tuned by gradient descent directly from the photographs, which makes fitting fast (training time). And each blob carries a colour that varies with viewing direction, so highlights and reflections survive (photorealism).
+
+The question the paper sets out to answer is whether a scene made of such blobs can be learned from photographs well enough to rival neural radiance fields in realism, while keeping the speed that made splatting attractive in the first place.
+
+## 3 Related Work
+
+Classical view synthesis. Light-field rendering \(Levoy and Hanrahan, 1996; Gortler et al., 1996\) synthesises new views by interpolating directly between densely captured images, but the required capture density is impractical for casual photography. With sparser input, geometry must be estimated: Structure-from-Motion \(Schönberger and Frahm, 2016\) recovers camera poses and a sparse point cloud from unordered photos, and multi-view stereo densifies it, though rendering these reconstructions directly exposes holes and noise. The sparse SfM point cloud survives in the reviewed paper as the initialisation of 3D Gaussian Splatting (3DGS).
+
+Implicit neural radiance fields. NeRF \(Mildenhall et al., 2020\) models a scene as a continuous volumetric function: an MLP maps a 3D position and viewing direction to density and colour, and pixels are formed by integrating these values along camera rays. Conditioning colour on direction captures view-dependent effects, and Mip-NeRF 360 \(Barron et al., 2022\) extends the formulation to unbounded scenes with anti-aliased cone sampling, setting the fidelity benchmark for the field. The cost is structural: the scene exists only in network weights, so every pixel requires hundreds of MLP evaluations along its ray, keeping training at hours to days and rendering far from interactive rates.
+
+Acceleration through explicit structure. A second line of work keeps the volumetric model but stores it in a directly indexable structure. Plenoxels \(Fridovich-Keil et al., 2022\) optimises density and spherical-harmonic colour coefficients on a sparse voxel grid with no network at all—evidence that the differentiable volumetric rendering model, not the MLP, is the essential ingredient—while Instant-NGP \(Müller et al., 2022\) interpolates features from a multiresolution hash grid feeding a very small MLP, cutting training to seconds or minutes. Both, however, still render by marching rays and sampling the structure many times per pixel, so rendering speed remains bounded by the sampling budget.
+
+Differentiable point splatting. Point-based methods avoid ray marching entirely by projecting (splatting) explicit primitives onto the screen. EWA splatting \(Zwicker et al., 2002\) derives the closed-form projection of an anisotropic 3D Gaussian to a 2D elliptical footprint, with a built-in low-pass filter against aliasing—precisely the projection 3DGS reuses. Differentiable successors such as Pulsar \(Lassner and Zollhöfer, 2021\), which rasterises millions of semi-transparent spheres and optimises their positions, radii, opacities, and colours from images, and the per-view-optimised point splatting of Kopanas et al. \(2021\) achieve fast rendering, but kept a neural decoder in the display path and did not match volumetric fidelity.
+
+
+
+| Method         |                 | Photorealism Fast training Real-time                                        |
+|----------------|-----------------|-----------------------------------------------------------------------------|
+|                |                 | What 3DGS inherits                                                          |
+| Light          | fields;         | SfM + MVS                                                                   |
+| (Levoy         | and Hanrahan,   |                                                                             |
+| 1996;          | Gortler         | et al., 1996;                                                               |
+| Schönberger    |                 | and Frahm,                                                                  |
+|                |                 | × (dense                                                                    |
+|                |                 | capture only)                                                               |
+|                |                 | — ✓ Sparse SfM point cloud as initialisation                                |
+| NeRF           | (Mildenhall     | et al.,                                                                     |
+|                |                 | ✓ × (hrs–days) × (secs/frame) Volumetric compositing; direction-conditioned |
+| Mip-NeRF       | 360             | (Barron                                                                     |
+| et al.,        | 2022)           |                                                                             |
+|                |                 | × (days) × Fidelity benchmark and evaluation scenes                         |
+| Plenoxels      | (Fridovich-Keil |                                                                             |
+| et al.,        | 2022)           |                                                                             |
+|                |                 | ( ✓ ) ✓ (minutes) ( ✓ )                                                     |
+|                |                 | Network-free explicit storage; spherical-harmonic                           |
+| Instant-NGP    |                 | (Müller et al.,                                                             |
+|                |                 | ( ✓ ) ✓                                                                     |
+|                |                 | ( ✓ )                                                                       |
+|                |                 | Fast optimisation of an interpolated explicit                               |
+| EWA            | splatting       | (Zwicker                                                                    |
+| et al.,        | 2002)           |                                                                             |
+|                |                 | — — ✓ Closed-form projection of 3D Gaussians with                           |
+| Differentiable |                 | point                                                                       |
+| splatting      | (Lassner        | and                                                                         |
+| Zollhöfer,     | 2021;           | Kopanas                                                                     |
+| et al.,        | 2021)           |                                                                             |
+|                |                 | ( ✓ ) (neural                                                               |
+|                |                 | ✓ ✓ Differentiable rasterisation and α -blending of                         |
+| 3DGS           | (Kerbl          | et al., 2023) ✓ ✓ (minutes) ✓ ( ≥ 30 fps,                                   |
+
+Table 1: Prior work measured against the three requirements of the motivation: photorealistic view-dependent appearance, practical training time, and real-time rendering on consumer hardware. ✓ = met; (✓) = partially met; × = not met; — = not applicable (EWA splatting is a rendering technique, not a reconstruction method). The final column names the component each line of work contributes to 3D Gaussian Splatting.
+
+Positioning. The pattern across these lines is consistent: implicit fields achieve fidelity but not speed; explicit grids achieve fast training but keep ray-marched rendering; splatting achieves fast rendering but not top fidelity, and not without a network. 3DGS \(Kerbl et al., 2023\) combines the volumetric image-formation model of radiance fields, the network-free explicit storage of Plenoxels, and the closed-form Gaussian projection of EWA into a single representation that is optimised like a radiance field but rendered like a splatting system (Table 1\).
+
+## 4 Method
+
+#### 4.1 Overview: the pipeline at a glance
+
+The reviewed method turns a set of posed photographs into a renderable scene in one loop (Figure 1\). Structure-from-Motion \(Schönberger and Frahm, 2016\) first calibrates the cameras and produces a sparse point cloud; every point becomes the seed of one 3D Gaussian. In each training step, the current Gaussians are rendered from one of the input viewpoints by a differentiable rasteriser, the result is compared with the real photograph, and the error is backpropagated to update every Gaussian. At fixed intervals, an adaptive density control step adds Gaussians where the image error demands more detail and removes those that contribute nothing. After training, only the rendering half of the loop remains, and it runs in real time.
+
+
+
+Figure 1: The 3D Gaussian Splatting optimisation pipeline. A sparse Structure-from-Motion point cloud initialises a set of anisotropic 3D Gaussians. For a given camera the Gaussians are projected to 2D and drawn by a differentiable tile rasteriser to form an image; the error against the ground-truth photograph is backpropagated (gradient flow) to update the Gaussians, while adaptive density control periodically clones, splits, and prunes them.
+
+One idea explains every design choice that follows: each component is built so that rendering stays rasterisable and training stays differentiable at the same time. The primitive is chosen because it projects with a direct formula; the rasteriser is tiled because that makes it fast and trainable; the density control exists because an explicit representation, unlike a network, allows the model to grow and shrink.
+
+#### 4.2 Initialization : SfM Point Clouds
+
+In 3D Gaussian Splatting, optimization is typically initialized using the sparse point cloud generated by Structure-from-Motion (SfM) camera calibration, providing a reliable structural foundation for the scene. While initializing from a randomly initialized point cloud does not result in complete failure, it introduces significant artifacts in real-world captures (Figure 2\). Specifically, random initialization degrades visual quality primarily in the background and tends to produce persistent geometric "floaters" in poorly observed regions that the optimization process struggles to remove.
+
+
+
+Figure 2: Effect of initialisation: random point positions (top) versus the sparse SfM point cloud (bottom), with a zoomed background crop (right). SfM initialisation recovers finer background structure. Figure reproduced from Kerbl et al. \(2023\).
+
+### 4.3 The primitive: an anisotropic 3D Gaussian
+
+
+$$G(\mathbf{x}) = \exp\left(-\frac{1}{2}(\mathbf{x}-\boldsymbol{\mu})^\top \boldsymbol{\Sigma}^{-1}(\mathbf{x}-\boldsymbol{\mu})\right), \quad (1)$$
+
+where µ ∈ R3 is its centre and the 3 × 3 covariance matrix Σ describes its shape: geometrically, an ellipsoid that can be large or small, stretched or round, and tilted in any direction (Figure 3, anisotropic means exactly this—different extent in different directions). Each Gaussian additionally carries an opacity α and a set of spherical-harmonic (SH) coefficients that encode its colour as a function of viewing direction, so a blob can look different from different angles—this is what preserves highlights and reflections.
+
+
+
+Figure 3: Anisotropic (left) vs. isotropic (right) representation of grass structures. Anisotropic 3D Gaussians dynamically stretch and rotate, offering a highly compact representation that requires fewer volume elements to achieve comparable detail.
+
+Why the shape matters in practice. Figure 3 makes the argument schematically: a blade of grass is a thin, oriented thing, so one stretched ellipse fits it where many circles would be needed to tile the same shape. The paper's own ablation confirms this on real captures (Figure 4\). Training a scene with a single scalar radius per Gaussian instead of the full covariance leaves the geometry recognisable but soft: stems, spokes and tread lose their edges, because a sphere cannot align itself with a surface the way an ellipsoid can. The cost is measured in Section 5.2 and turns out to be smaller in PSNR than these images suggest—a discrepancy that says more about the metric than about the primitive.
+
+
+
+Figure 4: Anisotropy on real scenes. Each triple shows the ground truth, the full method, and the same scene retrained with a single scalar radius per Gaussian in place of the full covariance. Stretched, rotated Gaussians align with surfaces and hold thin structure—the plant's stems, the tread and rim detail of the wheel—which the isotropic model blurs into a soft approximation. For the leftmost scene both configurations were restricted to at most 5k Gaussians, so the comparison reflects the shape of the primitive rather than how many were spent. Figure from Kerbl et al. \(2023\).
+
+#### 4.4 Covariance Factorization and Eigendecomposition
+
+The Positive Semi-Definite Constraint. To define a valid 3D Gaussian, the covariance matrix Σ must remain symmetric and positive semi-definite. Physically, this ensures that Eq. \(1\) describes a valid probability distribution and a well-defined ellipsoid in 3D space. If the optimizer were to update the nine entries of Σ directly, an unconstrained gradient descent step could easily produce an invalid matrix with negative eigenvalues, causing the ellipsoid to collapse or invert, which would instantly destabilize the training process.
+
+Connection to Eigendecomposition. To make the shape of every Gaussian safely and freely trainable, the method never explicitly stores Σ. Instead, the formulation relies on the spectral theorem, which states that any real, symmetric, positive semi-definite matrix can be factored using eigendecomposition:
+
+$$\Sigma = Q\Lambda Q^{-1}, \quad (2)$$
+
+$$\Sigma = Q\Lambda Q^{-1}, \quad (2)$$
+
+where Q is an orthogonal matrix of eigenvectors and Λ is a diagonal matrix of non-negative eigenvalues. Because Q is orthogonal (Q−1 = Q⊤), this simplifies to Σ = QΛQ⊤.
+
+In the context of 3D geometry, the eigenvectors in Q represent the principal axes of the ellipsoid (its rotation), and the eigenvalues in Λ represent the variance along those axes. Because variance is the square of the standard deviation (σ 2 ), we can safely decompose the eigenvalue matrix as Λ = SS⊤ = S2 , where S is a diagonal matrix representing the linear scaling (the standard deviation, σ) along each axis.
+
+Substituting R for the rotation matrix Q, we arrive at the final parameterized reconstruction of the covariance:
+
+| $\Sigma = RSS^\top R^\top$ | (3) |
+|----------------------------|-----|
+|----------------------------|-----|
+
+Read from the inside out, this offers a simple geometric recipe: stretch a unit sphere along its three principal axes using S, and then orient it in space using R. By optimizing the components of S and R independently, Σ is mathematically guaranteed to be a valid covariance matrix by design (Figure 5\).
+
+Explicit Parameterization. To optimize these properties, the framework maintains a 3D scale vector s = [sx, sy, sz]⊤ and a rotation quaternion q = [qr, qi, qj , qk]⊤, where qr is the real component. The scaling matrix S is constructed directly on the diagonal:
+
+$$S = \begin{bmatrix} s_x & 0 & 0 \\ 0 & s_y & 0 \\ 0 & 0 & s_z \end{bmatrix}. \quad (4)$$
+
+Before building the rotation matrix, the quaternion q is normalized to ensure it represents a valid 3D rotation. The expanded rotation matrix R(q) is then computed as:
+
+| $R(\mathbf{q}) = \begin{bmatrix} 1 - 2(q_j^2 + q_k^2) & 2(q_i q_j - q_r q_k) & 2(q_i q_k + q_r q_j) \\ 2(q_i q_j + q_r q_k) & 1 - 2(q_i^2 + q_k^2) & 2(q_j q_k - q_r q_i) \\ 2(q_i q_k - q_r q_j) & 2(q_j q_k + q_r q_i) & 1 - 2(q_i^2 + q_r^2) \end{bmatrix}. \quad (5)$ |
+|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+
+Together, optimizing s and q rather than Σ provides a robust, differentiable pathway that perfectly maps the unconstrained outputs of the neural optimization into the strict mathematical bounds required for 3D Gaussian Splatting.
+
+
+
+
+The diagram illustrates the scaled along axes and final Gaussian square square scales. A square is shown with a blue arrow pointing to its center, labeled 'unit sphere'. A red arrow points from this square to a square with a red arrow pointing to its center, labeled 'scaled along axes (scales squared = eigenvalues)'. A red arrow points from this square to a square with a blue arrow pointing to its center, labeled 'scaled along axes (scales squared = eigenvalues)'. A red arrow points from this square to a square with a red arrow pointing to its center, labeled 'scaled along axes (scales squared = eigenvalues)'. A red arrow points from this square to a square with a blue arrow pointing to its center, labeled 'final Gaussian 
+$$\Sigma = RSS^T R^T$$
+ (axes are eigenvectors)'. The text 'stretch' is positioned between the scaled along axes and the final Gaussian square square scales.
+
+Figure 5: Geometric intuition behind the covariance factorization. We start with a unit sphere representing isotropic variance. The scaling matrix S stretches the sphere along the coordinate axes; these scaling factors (sx, sy) relate directly to the eigenvalues of the covariance matrix (λ1 = s 2 x , λ2 = s 2 y ). Finally, the rotation matrix R orients the ellipse in space. The resulting directional axes (v1, v2) are the eigenvectors of the final covariance matrix Σ.
+
+#### 4.5 View-dependent colour: spherical harmonics
+
+Why colour must depend on direction. The photorealism requirement of the motivation is, at its core, a requirement on colour: real surfaces change appearance with viewing direction—a highlight slides across a polished floor as the camera moves, a window reflects a different part of the room from every angle. A Gaussian carrying a single fixed RGB value could reproduce none of this, and however accurate the geometry, the result would look like a cardboard model. Each Gaussian must therefore store not one colour but an answer to the question "what colour does this blob show in this direction?"—a function on the sphere of viewing directions.
+
+A basis of waves on the sphere. Spherical harmonics (SH) represent such a function compactly. They form an orthogonal basis for functions on the unit sphere—the spherical analogue of a Fourier series. Each basis function Y m ℓ is a wave wrapped onto the sphere, its peaks and troughs becoming positive and negative lobes (Figure 6\), and the degree ℓ plays the role of frequency: low-degree harmonics vary slowly and capture smooth, diffuse shading, while higher degrees add the sharper directional variation of glossy highlights and reflections.
+
+
+
+Figure 6: The frequency intuition behind spherical harmonics. A one-dimensional wave (left) alternates between positive and negative half-periods; wrapped onto the sphere (right), these become positive and negative lobes separated by a nodal line (dashed equator). Shown is the lowest nonconstant harmonic, Y 1 ∝ z. The degree ℓ plays the role of frequency: higher-degree harmonics have more lobes and oscillate faster, so low degrees capture smooth diffuse colour while higher degrees encode sharp view-dependent effects \(Ramamoorthi and Hanrahan, 2001\).
+
+Origin: representing lighting, repurposed for colour. Spherical harmonics did not originate in radiance-field or splatting work. They were introduced to graphics for a different problem: describing how much light arrives at a surface point from all directions at once \(Ramamoorthi and Hanrahan, 2001\). Computing this directly is expensive, because it means summing the contribution of every direction in an environment map for every point being shaded. Ramamoorthi and Hanrahan observed that this arriving-light function varies only smoothly with direction—it has no sharp detail—so the low-frequency terms of an SH expansion capture nearly all of it, and roughly nine coefficients suffice. The reviewed method borrows this machinery unchanged but aims it at a different quantity: not the light arriving at a surface, but the colour leaving a Gaussian. The mathematics is identical; only the meaning of the function has changed.
+
+The SH expansion, term by term. Each Gaussian stores one set of coefficients per colour channel, and its colour in viewing direction d is reconstructed as the weighted sum
+
+
+$$C_c(\mathbf{d}) = \sum_{\ell=0}^L \sum_{m=-\ell}^{\ell} k_{\ell,c}^m Y_{\ell}^m(\mathbf{d}), \quad c \in \{G, G, B\}. \quad (6)$$
+
+Reading this equation from the inside out: Y m ℓ (d) is one fixed basis wave evaluated at the query direction d—a closed-form polynomial in the components of d, identical for every Gaussian in the scene and never updated during training. The index ℓ selects the band (its frequency, as in Figure 6\), and within a band the index m ranges over 2ℓ + 1 orientations of that same frequency, so band ℓ contributes 2ℓ + 1 basis functions rather than one (Figure 7\). The coefficient km ℓ,c is the only learned quantity in the whole expression: it is a single scalar weight that says how strongly basis function Y m ℓ contributes to channel c. Fixing a direction d and summing every (ℓ, m) term, each weighted by its coefficient, is precisely evaluating a truncated Fourier-style series on the sphere—the outer sum over ℓ moves through frequency bands from coarse to fine, and the inner sum over m combines all orientations within a band before moving on.
+
+
+
+Figure 7: The 16 building blocks used to store a Gaussian's colour. Each sphere shows one basis function Y m ℓ : a fixed pattern painted over all viewing directions, where orange means a positive value and blue a negative one. Reading down the pyramid the patterns get progressively more detailed—the top one is a single flat colour, while the lower rows alternate more and more quickly across the sphere. Row ℓ contains 2ℓ + 1 patterns, so the four rows give 1 + 3 + 5 + 7 = 16 in total. The formula under each sphere is the polynomial used to evaluate it for a given viewing direction. These patterns are identical for every Gaussian and never change during training; only the weights k m ℓ,c are learned.
+
+The method truncates the series at maximum degree L = 3, giving the (L + 1)2 = 16 basis functions of Figure 7 per channel and, across the three colour channels, 16 × 3 = 48 coefficients stored per Gaussian. Band ℓ = 0 has only m = 0, and Y 0 0 is a constant function of direction, so k 0,c alone is the flat, non-view-dependent base colour of the blob; bands ℓ = 1, 2, 3 add successively higher-frequency corrections on top of that base, which is what lets the same primitive look different from different angles. Evaluating Eq. \(6\) for all three channels at one direction and stacking the results gives the RGB colour in that direction. Storing appearance this way on an explicit primitive is inherited from Plenoxels \(Fridovich-Keil et al., 2022\), which attaches a degree-2 expansion (27 coefficients) to every voxel; the reviewed method spends one degree more on each Gaussian.
+
+How the coefficients are learned. Figure 8 shows the structure of the problem: the basis functions are frozen, and the only learned quantities are the coefficients that rescale them—adjusting a coefficient reweights one fixed pattern in the sum, on the sphere exactly as in a Fourier series on a line. The coefficients are therefore ordinary parameters of the model: gradients reach them through the differentiable rasteriser exactly as they reach position, shape, and opacity, and all attributes are updated jointly by the same stochastic gradient descent. The one special treatment is a coarse-to-fine schedule: optimisation begins with the degree-0 band alone—in the figure, only k0 is live, so every Gaussian first fits a flat base colour—and one further band is unlocked every 1 000 iterations until all four are active \(Kerbl et al., 2023\). The schedule amounts to switching on the summands of Figure 8 from left to right: the base colour settles first, and the higher-frequency bands are fitted only to what remains—the shine—so that view-dependent detail refines a stable diffuse estimate rather than competing with it from the start.
+
+
+
+green coefficients ki are the only learned quantities — gradient descent nudges them until the rendered colour matches the photographs; the basis functions themselves never change.
+
+Figure 8: How a Gaussian's colour is learned. Top: the familiar picture on a line—fixed basis waves of increasing frequency, each rescaled by one coefficient ki and summed into the final curve. Bottom: the identical construction on the sphere of viewing directions, shown for the zonal (m = 0) basis functions of degrees 0–2; the weighted sum is the colour function C(d) of Eq. \(6\), evaluated at render time by plugging in the viewing direction. During training the basis is frozen and only the coefficients receive gradients: each optimisation step compares the rendered image with the photograph and nudges every ki by its gradient, which is how view-dependent colour is fitted without any network. Coefficient values here are illustrative; the full expansion uses all 2ℓ+1 orientations per band and one coefficient set per colour channel.
+
+Evaluation at render time. To draw a Gaussian for a given camera, the normalised direction from the camera centre to the Gaussian's mean is inserted into Eq. \(6\) for each channel. The resulting colour is exactly the ci that enters the front-to-back compositing rule of the following section. Because this is a handful of fixed polynomial evaluations per Gaussian, view-dependent appearance costs almost nothing at display time and keeps the render path entirely closed form, with no network to query.
+
+#### 4.6 Rendering: projection, sorting, and tile-based rasterisation
+
+From a 3D blob to a 2D splat. To draw the scene from a camera, every Gaussian is projected onto the image plane. A 3D Gaussian seen through a camera becomes—to a good approximation—a 2D Gaussian on the image: an ellipse-shaped "splat". Its 2 × 2 covariance is
+
+
+$$\Sigma' = J W \Sigma W^\top J^\top, \quad (7)$$
+
+where W is the camera's viewing transform and J is the Jacobian of a local affine approximation of the perspective projection. This is exactly the EWA splatting projection of Zwicker et al. \(2002\) (Figure 9\); the reviewed paper inherits it unchanged. Its value is architectural: the projection is a closed-form formula, so drawing a Gaussian never requires searching along a ray.
+
+
+
+Figure 9: The projection pipeline of EWA splatting. A 3D Gaussian in world space (Σ) is first rotated into camera space using the viewing transform W. Because true perspective projection is non-linear and would distort the ellipsoid, it is approximated locally by its Jacobian J. This local affine transformation successfully maps the 3D ellipsoid to a perfectly flat, 2D elliptical splat (Σ′ ) on the image plane.
+
+The Non-Linearity of Perspective Projection. To understand why Eq. \(7\) is necessary, we must examine the linear mapping property of Gaussians. A fundamental property of the multivariate normal distribution is that it remains closed under linear (or affine) transformations. If a variable follows a Gaussian distribution, applying a matrix multiplication directly scales and rotates its covariance matrix, preserving its Gaussian form.
+
+However, camera projection is a perspective transformation, which is inherently non-linear because it requires dividing the x and y coordinates by the depth z:
+
+$$\phi(x, y, z) = \left( \frac{f_x x}{z}, \frac{f_y y}{z} \right). \quad (8)$$
+
+If one were to project a 3D Gaussian ellipsoid through this true perspective divide, the transformation would be depthdependent. As shown in Figure 10, the "back" of the Gaussian (further from the camera) is magnified less than the "front." This depth-dependent scaling warps the symmetric ellipsoid into an asymmetric, non-Gaussian shape—fuller toward the camera and pinched away from it. Because this warped volume is no longer a Gaussian, it cannot be represented by a simple 2 × 2 covariance matrix, rendering standard efficient 2D rasterization impossible.
+
+
+
+Figure 10: Visualization of perspective non-linearity. True perspective projection warps a 3D Gaussian into an asymmetric, non-Gaussian shape on the 2D image plane due to depth-dependent scaling.
+
+The Affine Approximation (The Jacobian). To solve this, EWA splatting bypasses the true perspective divide by replacing it with a local affine approximation. Using a first-order Taylor expansion evaluated at the 3D center of the Gaussian, the non-linear projection is approximated as a linear transformation.
+
+Mathematically, this process effectively "flattens" the perspective transformation in the immediate neighborhood of the Gaussian's center. By computing the Jacobian J at the Gaussian's mean position, we create a linear mapping that acts as a tangent plane to the perspective projection (Figure 10\). Because this local affine approximation is a linear operator, it preserves the Gaussian distribution, allowing the 3D ellipsoid to squash down into a flat, mathematically sound 2D covariance ellipse on the screen without the non-linear warping that a true perspective divide would cause (Figure 11\).
+
+This linearization is mathematically represented by the Jacobian matrix, J. Because J is a linear operator, it preserves the Gaussian distribution, allowing the 3D ellipsoid to be projected into a flat, mathematically sound 2D covariance ellipse on the screen.
+
+
+
+Figure 11: Projection of a 3D Gaussian onto the image plane. The true perspective divide warps the Gaussian into an asymmetric shape (red), which is not itself a 2D Gaussian and cannot be rasterised in closed form. Replacing the perspective divide by its Jacobian at the Gaussian's centre restores a clean elliptical splat (green), shown overlaid on the same location to make the correction visible.
+
+- 1. World-to-Camera Transform (W): The 3D Gaussian is first moved from world space to camera space. While the mean of the Gaussian is affected by both rotation and translation, the shape (the covariance) is only affected by rotation. Therefore, W is simply the 3 × 3 rotation matrix Rcam extracted from the camera's extrinsic view matrix. The camera-space covariance is calculated as:
+
+$$\Sigma_{cam} = W\Sigma W^T. \quad (9)$$
+
+- 2. Camera-to-Screen Transform (J): Let the center of the Gaussian in camera space be t = [tx, ty, tz]⊤. The standard pinhole projection function to 2D screen coordinates is ϕ(t) = [ fxtx tz , fyty tz ]⊤, where fx and fy are the focal lengths of the camera. Taking the partial derivatives of ϕ(t) with respect to tx, ty, and tz yields the 2 × 3 Jacobian matrix:
+
+$$\mathbf{J} = \frac{\partial \phi}{\partial \mathbf{t}}(\mathbf{t}) = \begin{bmatrix} \frac{f_x}{t_x} & 0 & -\frac{f_x t_x}{t_x^2} \\ 0 & \frac{f_y}{t_x} & -\frac{f_y t_y}{t_x^2} \end{bmatrix}. \quad (10)$$
+
+Applying this Jacobian to the camera-space covariance flattens the 3 × 3 matrix into the final 2 × 2 screen-space splat:
+
+$$\Sigma' = J\Sigma_{cam}J^\top = JW\Sigma W^\top J^\top. \quad (11)$$
+
+This closed-form pipeline corrects the geometric warping of the perspective divide. By sacrificing a negligible amount of global geometric accuracy (which is unnoticeable given the highly localized nature of each tiny Gaussian splat), it unlocks the immense computational speed required to render millions of Gaussians in real-time.
+
+Compositing. The splats covering a pixel are sorted by depth and blended front to back,
+
+
+$$C = \sum_{i \in \mathcal{N}} c_i \alpha_i \prod_{j < i} (1 - \alpha_j), \quad (12)$$
+
+where ci is the SH colour of Gaussian i evaluated for the current viewing direction and αi its opacity after projection (Figure 12\). Notably, Eq. \(12\) is the same compositing rule that volumetric radiance fields use \(Mildenhall et al., 2020\): the method changes how the samples are found—rasterisation instead of ray marching—not how they are combined. This is why it can match the image quality of radiance fields rather than merely approximating them.
+
+
+
+Figure 12: The 3D Gaussian Splatting rendering pipeline: anisotropic 3D Gaussians are projected to 2D elliptical splats on the image plane (EWA projection), then sorted by depth and alpha-blended front to back to give each pixel its colour.
+
+The tile-based rasteriser. Sorting per pixel would be far too slow for millions of splats. The rasteriser instead divides the image into 16 × 16-pixel tiles (Figure 13\). Each Gaussian is assigned to every tile its splat touches, producing one work item per (Gaussian, tile) pair. A single GPU radix sort over combined tile-and-depth keys then orders all items at once: within each tile the splats come out front-to-back. Every tile is processed by one GPU thread block that walks its sorted list and applies Eq. \(12\), stopping early once a pixel is effectively opaque. The backward pass reuses the very same sorted lists, so gradients flow to position, shape, opacity, and colour of every Gaussian without any additional sorting. One sort per frame, shared by rendering and training—this is the component that makes the whole method real-time.
+
+
+
+Figure 13: The tile-based rasteriser. The image is divided into 16 × 16-pixel tiles and every splat is assigned to the tiles it overlaps. A single GPU radix sort over combined tile-and-depth keys orders all (splat, tile) pairs at once; each tile then blends its sorted list front to back with early termination. The backward pass reuses the same lists, so one sort serves both rendering and training.
+
+#### 4.7 Optimisation: loss and adaptive density control
+
+Initialisation and loss. Training starts from the SfM point cloud: each point becomes a small Gaussian with its photograph-derived colour. All parameters are then optimised by stochastic gradient descent against the input photographs. The loss combines a per-pixel term with a structural term,
+
+$$\mathcal{L} = (1-\lambda)\mathcal{L}_1 + \lambda\mathcal{L}_{\text{SSIM}}, \quad (13)$$
+
+with λ = 0.2: the L1 term keeps every pixel close to the photograph, while the D-SSIM term rewards matching local structure (edges, texture) rather than raw values, which sharpens fine detail.
+
+Adaptive density control. The optimisation begins with a deliberately sparse model: one small Gaussian is placed on each point of the SfM point cloud, which typically covers the scene only coarsely and misses thin structures entirely. Gradient descent can move, stretch, and fade the blobs that already exist, but it can never create a new one where nothing was placed, nor cleanly remove one that serves no purpose. Some mechanism must therefore change the number of Gaussians during training, and this is the decisive difference from a fixed point cloud (Figure 15\). At fixed intervals the method inspects each Gaussian's view-space positional gradient: a persistently large value means the optimiser keeps trying to move that blob back and forth—the signature of a region the current set cannot explain—and triggers one of three actions. Clone: in under-reconstructed regions, where too few blobs cover the geometry, a small Gaussian is duplicated and the copy nudged along the gradient direction, adding coverage. Split: in over-reconstructed regions, where a single blob is too coarse for the detail it must represent, a large Gaussian is replaced by two smaller ones sampled inside its footprint, adding resolution. Prune: Gaussians whose opacity falls below a threshold are deleted, and periodically all opacities are reset to a low value, so that floating artefacts hovering near the cameras must re-earn their opacity or vanish. Starting sparse and growing on demand means model capacity follows image error: the representation densifies exactly where the scene is complex and stays lean where it is simple—something a fixed grid cannot do. The paper's own ablation makes the division of labour between the two growth operations concrete (Figure 14\): with split disabled, over-large Gaussians are never broken up and the background stays blurry, while with clone disabled, under-covered thin structures such as the bicycle's spokes fail to appear.
+
+
+
+Figure 14: Why densification needs both operations: ablation on the bicycle scene after 5k training iterations (left: full view; right: crop). Top — no split: over-reconstructed regions remain covered by a few over-large Gaussians that cannot be subdivided, so the background vegetation stays blurry. Middle — no clone: under-reconstructed regions gain no extra coverage, and thin structures such as the spokes are lost (arrow). Bottom — full method: with clone and split enabled, both the background and the fine geometry are recovered. Figure from Kerbl et al. \(2023\).
+
+
+
+
+
+Figure 15: Adaptive density control. A Clone: in under-reconstructed regions a small Gaussian is duplicated to add coverage. B Split: an oversized Gaussian is replaced by two smaller ones to add detail. C Prune: nearly transparent Gaussians are removed; periodic opacity resets eliminate floaters.
+
+## 5 Results
+
+### 5.1 Comparison with prior methods
+
+Table 2 reports four measures—SSIM and PSNR for reconstruction accuracy, LPIPS for perceptual similarity to the ground truth, and FPS for rendering speed—across the three standard benchmarks used by the original paper. On Tanks & Temples and Deep Blending, 3DGS-30K exceeds Mip-NeRF360, the previous fidelity leader, on all three quality metrics; on Mip-NeRF360's own dataset it leads on SSIM and LPIPS while trailing by 0.48 dB in PSNR (27.21 against 27.69). In every case it renders roughly three orders of magnitude faster. The 7K variant, obtained after only a few minutes of training, already delivers lower LPIPS than Plenoxels and Instant-NGP on every dataset and reaches the highest frame rate of any method. Figure 16 makes the visual side of this concrete: the bicycle spokes, the fine background vegetation, and the specular highlights on reference scenes are recovered more faithfully by 3DGS than by any compared method, whose renderings either drop thin
+
+structure (arrows) or blur high-frequency texture. Together the table and the images support the paper's central claim that radiance-field fidelity and real-time rendering are no longer incompatible.
+
+Reading PSNR. Because both tables of this section are reported in PSNR, it is worth fixing what the numbers mean. The peak signal-to-noise ratio compares a rendered image with the ground-truth photograph,
+
+
+$$\text{PSNR} = 10 \log_{10} \left( \frac{\text{MAX}^2}{\text{MSE}} \right), \quad (14)$$
+
+where MSE is the mean squared error over all pixels and MAX is the largest representable pixel value. Two consequences matter for what follows. First, the scale is logarithmic, so differences between two PSNR values are ratios rather than increments: a gap of 3 dB corresponds to a halving of the squared error and 6 dB to a quartering. This is why the tables carry two-digit absolute values while the discussion quotes single-digit gaps—a value of 26.05 dB is a level, whereas "6.9 dB below the full method" is the distance between two levels. Second, PSNR is an average taken over every pixel of the frame, so it weights a large smooth region far more heavily than a small bright one; a specular highlight or a grass blade occupies too few pixels to move it much. This is why SSIM and LPIPS are reported alongside it in Table 2.
+
+
+
+Figure 16: Qualitative results on Mip-NeRF360 test views. 3D Gaussian Splatting reconstructs fine structures (insets, arrows) more faithfully than Mip-NeRF360, InstantNGP, and Plenoxels, closely matching ground truth. Figure from Kerbl et al. \(2023\).
+
+Table 2: Quantitative comparison on the three benchmarks used by the original paper, with numbers reproduced from Kerbl et al. \(2023\). For each dataset four measures are shown: SSIM for structural similarity, PSNR (in dB, Eq. \(14\)) for pixel-level accuracy, LPIPS for perceptual similarity to the ground truth, and FPS for rendering speed at 1080p on a single consumer GPU. For each dataset and metric, the best , second-best , and third-best value across methods is shaded. 3DGS-7K and 3DGS-30K denote the reviewed method after 7 000 and 30 000 training iterations.
+
+| Method      | SSIM  | ↑ PSNR | Mip-NeRF360 ↑ LPIPS | ↓ FPS | ↑ SSIM | Tanks ↑ PSNR | & Temples ↑ LPIPS | ↓ FPS | ↑ SSIM | Deep ↑ PSNR | Blending ↑ LPIPS | ↓ FPS ↑ |
+|-------------|-------|--------|---------------------|-------|--------|--------------|-------------------|-------|--------|-------------|------------------|---------|
+| Plenoxels   | 0.626 | 23.08  | 0.463               | 6.79  | 0.719  | 21.08        | 0.379             | 13.0  | 0.795  | 23.06       | 0.510            | 11.2    |
+| INGP-Base   | 0.671 | 25.30  | 0.371               | 11.7  | 0.723  | 21.72        | 0.330             | 17.1  | 0.797  | 23.62       | 0.423            | 3.26    |
+| INGP-Big    | 0.699 | 25.59  | 0.331               | 9.43  | 0.745  | 21.92        | 0.305             | 14.4  | 0.817  | 24.96       | 0.390            | 2.79    |
+| Mip-NeRF360 | 0.792 | 27.69  | 0.237               | 0.06  | 0.759  | 22.22        | 0.257             | 0.14  | 0.901  | 29.40       | 0.245            | 0.09    |
+| 3DGS-7K     | 0.770 | 25.60  | 0.279               | 160   | 0.767  | 21.20        | 0.280             | 197   | 0.875  | 27.78       | 0.317            | 172     |
+| 3DGS-30K    | 0.815 | 27.21  | 0.214               | 134   | 0.841  | 23.14        | 0.183             | 154   | 0.903  | 29.41       | 0.243            | 137     |
+
+#### 5.2 Ablation study
+
+The paper isolates each design choice by disabling it and retraining on three scenes at 5K and 30K iterations (Table 3\). These runs use input images re-downsampled from the high-resolution originals, so the absolute values are not comparable with Table 2; only differences between rows are meaningful.
+
+How the difference is computed. Each configuration is compared with the Full method row of the same column,
+
+
+
+| $\Delta = \text{PSNR}_{\text{config}} - \text{PSNR}_{\text{full}}$ | (15) |
+|--------------------------------------------------------------------|------|
+|--------------------------------------------------------------------|------|
+
+taken here on the Average-30K column, so ∆ is negative and its magnitude is the loss caused by removing that component. Substituting the definition of PSNR from Eq. \(14\) for each term gives a difference of two logarithms with the same base and the same MAX2 numerator,
+
+$$\Delta = 10 \log_{10} \frac{\text{MAX}^2}{\text{MSE}_{\text{config}}} - 10 \log_{10} \frac{\text{MAX}^2}{\text{MSE}_{\text{full}}}. \quad (16)$$
+
+The quotient rule for logarithms, log10 a − log10 b = log10(a/b), collapses the two terms into the logarithm of a single ratio, and in forming that ratio the MAX2 factors—identical in both—cancel:
+
+$$\Delta = 10 \log_{10} \left( \frac{\text{Max}^2/\text{MSE}_{\text{config}}}{\text{Max}^2/\text{MSE}_{\text{full}}} \right) = 10 \log_{10} \frac{\text{MSE}_{\text{full}}}{\text{MSE}_{\text{config}}}. \quad (17)$$
+
+This is the key property of a logarithmic scale: the quantity that depends on an arbitrary choice—MAX, fixed by the bit depth of the image format—drops out entirely the moment two PSNR values on the same format are subtracted, leaving a comparison of nothing but the two error terms. Two further consequences of the same log10 follow directly. A fixed gap always means a fixed ratio rather than a fixed amount: because log10 2 ≈ 0.30, a difference of 10 × 0.30 = 3 dB corresponds to exactly a factor of two in error, and 6 dB to a factor of four, independent of where on the scale the two values sit. And the relation inverts to recover the error ratio itself from any gap,
+
+
+$$\frac{\text{MSE}_{\text{config}}}{\text{MSE}_{\text{full}}} = 10^{-\Delta/10}, \quad (18)$$
+
+which raising 10 to a power undoes the base-10 logarithm. This factor, 10−∆/10, is reported in the rightmost column of Table 3. The comparison is always against the full method on the same scenes: a value of 1.00 means the ablated configuration has the same frame-averaged squared error as the full method, 2.00 means twice that error, and 4.85 means nearly five times it. The full method is therefore the fixed reference at 1.00, and every other row states how many times larger its reconstruction error is. The factor is quoted alongside ∆ because a decibel gap compresses large differences and small ones onto the same narrow numeric range—6.86 and 0.70 look comparable as printed—whereas the error factors, 4.85 against 1.17, separate them the way the underlying reconstruction quality actually does. For Limited-BW, for instance, ∆ = 19.19 − 26.05 = −6.86 dB, so 106.86/10 = 4.85: removing unlimited gradient depth multiplies the frame-averaged squared error by nearly five. Both derived columns are exact arithmetic on the published values; whether the underlying values are themselves separated by more than run-to-run noise is a separate question, taken up in the caveats below. The paper itself discusses only one of these gaps numerically—the 11 dB drop on TRUCK for Limited-BW—and refers the reader to figures for the rest; the two derived columns make the remaining comparisons explicit.
+
+Table 3: Absolute PSNR (↑, in dB) for the ablation runs, reproduced from Kerbl et al. \(2023\), Table 3. Each row is the full method with one component removed. Limited-BW: only the N = 10 front-most Gaussians per pixel receive gradients; Random Init: no SfM initialisation; No-Split/No-Clone: one densification operation disabled; No-SH: fixed RGB colour; Isotropic: one scalar radius instead of full anisotropic covariance. The two rightmost columns are derived and are not part of the original table: ∆ follows Eq. \(15\) on the Average-30K column and MSE× follows Eq. \(18\). Rows are ordered by ∆, worst first, and shaded by severity of degradation— severe (> 5 dB), moderate (1–5 dB), minor (< 1 dB). Note that this differs from Table 2, where shading marks rank; here the strongest colour marks the largest loss. Shading and both derived columns are added for readability and are not present in the original table.
+
+| Configuration | Truck      | 5K Garden | iterations Bicycle | Truck | 30K Garden | iterations Bicycle | 5K    | Average 30K | ∆   | vs. full (dB) |   | (30K) MSE × |
+|---------------|------------|-----------|--------------------|-------|------------|--------------------|-------|-------------|-----|---------------|---|-------------|
+| Limited-BW    | 14.66      | 22.07     | 20.77              | 13.84 | 22.88      | 20.87              | 19.16 | 19.19       | − 6 | 86            | 4 | 85          |
+| Random        | Init 16.75 | 20.90     | 19.86              | 18.02 | 22.19      | 21.05              | 19.17 | 20.42       | − 5 | 63            | 3 | 66          |
+| No-Split      | 18.31      | 23.98     | 22.21              | 20.59 | 26.11      | 25.02              | 21.50 | 23.90       | − 2 | 15            | 1 | 64          |
+| Isotropic     | 22.40      | 25.49     | 22.81              | 23.89 | 27.00      | 24.81              | 23.56 | 25.23       | − 0 | 82            | 1 | 21          |
+| No-SH         | 22.36      | 25.22     | 22.88              | 24.39 | 26.59      | 25.08              | 23.48 | 25.35       | − 0 | 70            | 1 | 17          |
+| No-Clone      | 22.29      | 25.61     | 22.15              | 24.82 | 27.47      | 25.46              | 23.35 | 25.91       | − 0 | 14            | 1 | 03          |
+| Full method   | 22.71      | 25.82     | 23.18              | 24.81 | 27.70      | 25.65              | 23.90 | 26.05       | —   |               | 1 | 00          |
+
+The ranking follows the architectural reading of Section 4. The two largest losses come from the components that keep the render path trainable at all. Limited-BW truncates backpropagation to the ten front-most Gaussians per pixel, a strategy proposed for speed in Pulsar \(Lassner and Zollhöfer, 2021\); the authors report a degradation of 11 dB on TRUCK, and averaged over the three scenes the configuration falls 6.86 dB below the full method at 30K—nearly five times the squared error. They attribute this to unstable optimisation caused by the severity of the gradient approximation. Two further observations follow from the table itself. The average barely moves between the two budgets—19.16 dB at 5K against 19.19 dB at 30K—so the optimisation is not merely converging slowly; it is not converging. And read architecturally, this suggests the tiled rasteriser is a correctness requirement rather than only a speed optimisation: the single sort per frame is what makes an exact gradient for every Gaussian affordable in the first place. Random Init falls 5.63 dB below the full method, degrading exactly where Figure 2 shows—background and thinly observed regions—because densification can refine geometry near primitives that already exist but cannot discover it where none were placed.
+
+The densification and appearance ablations are smaller and more instructive. Disabling split costs 2.15 dB while disabling clone costs only 0.14 dB, a factor of 1.03 in error that amounts to no measurable difference at all. Clone's penalty is, however, four times larger at 5K (0.55 dB), which identifies it as a convergence mechanism rather than a quality one: split eventually reaches a similar optimum, whereas clone gets there sooner and brings out thin structures early (Figure 14\). Isotropic and No-SH cost least in PSNR, 0.82 dB and 0.70 dB respectively. Read as error factors these are 1.21 and 1.17, small but not zero, and the whole ranking is clearest in this form: 4.85× for Limited-BW and 3.66× for Random Init, then 1.64× for No-Split, then the appearance terms just above the 1.03× of No-Clone that is a tie in all but name. This is the quantitative version of the architectural ranking—the components that preserve gradient flow and initialisation separate from the rest by whole multiples of error, while those that only refine appearance sit close to the full method. For the latter two the paper argues the value of the component visually rather than from these numbers, showing the anisotropy comparison in Figure 4.
+
+Caveats. Three qualifications temper any strong reading of Table 3. First, the study covers three outdoor scenes with one-at-a-time ablations, so interactions—for instance between anisotropy and split, which both govern how much detail a single primitive must carry—go unmeasured. Second, one cell inverts the expected ordering: No-Clone exceeds the full method on TRUCK at 30K by 0.01 dB—a fifth of a percent in squared error, well inside run-to-run variation, and best read as a tie. It is the only such cell in the table; the full method leads in all twenty-two others, which is why the shading above marks the magnitude of each configuration's average loss rather than ranking individual cells against one another. Third, this table reports PSNR alone, whereas the main comparison in Table 2 reports SSIM and LPIPS as well. The paper presents the evidence for spherical harmonics and anisotropic covariance through figures rather than these numbers, describing anisotropy as allowing "much higher rendering quality" (Figure 4\); no perceptual or structural score is given for the ablation configurations.
+
+## 6 Limitations and Conclusion
+
+Several limitations remain, and the paper is open about them. The clearest one appears where a region was photographed from only a few angles. There the optimisation has too little information to work with, and it fills the gap badly: stretched or blotchy Gaussians in the foreground, coarse low-detail blobs in the background, and floaters that the pruning step never removes. Nothing in the loss penalises geometry that matches the training photographs but looks wrong from anywhere else. Figure 17 shows two such cases. What is worth noting is that Mip-NeRF360 fails in the same places. It simply fails differently—it turns grainy and speckled, while 3D Gaussian Splatting turns coarse and smooth. The problem is the missing input data, not the choice of representation.
+
+
+
+Figure 17: Failure modes in poorly observed regions. In both rows the left image is Mip-NeRF360 and the right is 3DGS. Top — Train scene: Mip-NeRF360 shows floaters and a grainy foreground, while 3DGS covers the background with a few over-large Gaussians and loses detail. Bottom — DrJohnson scene: in a view with little overlap with the training cameras, 3DGS produces visible artefacts, and Mip-NeRF360 degrades in the same region. Figures from Kerbl et al. \(2023\).
+
+The remaining limitations are smaller. Depth is sorted once per tile rather than once per pixel, so two splats at similar depths can swap places when the camera moves a little, which shows up as a visible pop. That is the direct price of the single sort that makes the method real time. The EWA projection is inherited but its anti-aliasing filter is not, so images rendered much closer or further away than the training views begin to alias. Memory is where the method loses most clearly to neural approaches: a trained Mip-NeRF360 scene takes 734 MB against 8.6 MB for Mip-NeRF360's network weights, most of it the 48 spherical-harmonic coefficients carried by every Gaussian. And the scene must be static with cameras already calibrated by SfM, while the result is a cloud of overlapping ellipsoids rather than a surface, so extracting a mesh or running collision queries needs a separate reconstruction step.
+
+None of this undermines the architecture. 3D Gaussian Splatting is best read as a consistent set of consequences drawn from one constraint: once the representation must be rasterisable at render time and differentiable during training, the anisotropic primitive, the rotation–scale factorisation, the spherical-harmonic colour model, the Jacobian projection, the tiled sort, and the clone–split–prune cycle all follow as the choices that keep both properties true at once. The ablation confirms this—what breaks the method is the removal of whatever preserves gradient flow or supplies a usable starting point, while the components that only improve appearance cost less than a decibel. The limitations above are less counterarguments than the agenda the follow-up literature has taken up.
+
+## Acknowledgements
+
+During the preparation of this work the author used Claude (Anthropic) to check mathematical reasoning, clarify concepts for the write-up, and assist with figure formatting in LaTeX/TikZ. The author reviewed and edited all content and takes full responsibility for it.
+
+## References
+
+Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter Hedman. Mip-NeRF 360: Unbounded anti-aliased neural radiance fields. In Proc. IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2022. Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels: Radiance fields without neural networks. In Proc. IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2022. Steven J. Gortler, Radek Grzeszczuk, Richard Szeliski, and Michael F. Cohen. The lumigraph. In Proc. SIGGRAPH, 1996. Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3D Gaussian splatting for real-time radiance field rendering. ACM Transactions on Graphics, 42(4), 2023. doi: 10.1145/3592433. Georgios Kopanas, Julien Philip, Thomas Leimkühler, and George Drettakis. Point-based neural rendering with per-view optimization. Computer Graphics Forum, 40(4), 2021. doi: 10.1111/cgf.14339. Christoph Lassner and Michael Zollhöfer. Pulsar: Efficient sphere-based neural rendering. In Proc. IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2021. Marc Levoy and Pat Hanrahan. Light field rendering. In Proc. SIGGRAPH, 1996. Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. NeRF: Representing scenes as neural radiance fields for view synthesis. In Proc. European Conference on Computer Vision (ECCV), 2020. doi: 10.1007/978-3-030-58452-8\_24. Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM Transactions on Graphics, 41(4):102:1–102:15, 2022. doi: 10.1145/3528223.3530127. Johannes L. Schönberger and Jan-Michael Frahm. Structure-from-motion revisited. In Proc. IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2016. Matthias Zwicker, Hanspeter Pfister, Jeroen van Baar, and Markus Gross. EWA splatting. IEEE Transactions on Visualization and Computer Graphics, 8(3):223–238, 2002. doi: 10.1109/TVCG.2002.1021576. Ravi Ramamoorthi and Pat Hanrahan. An efficient representation for irradiance environment maps. In Proc. SIGGRAPH, 2001. doi: 10.1145/383259.383317.

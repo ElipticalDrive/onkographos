@@ -1,0 +1,193 @@
+# Shear-Warp Factorization Volume Rendering
+
+Also called: Lacroute-Levoy algorithm, Perspective SWF, SWF VRS, Volume Shearing
+
+## Overview
+Shear-Warp Factorization Volume Rendering is an object-order algorithm that factors the viewing transformation into a 3D shearing matrix, a permutation matrix, and a 2D warping matrix to reduce 3D ray casting to two 2D resampling operations [S3]. It treats the volume as a stack of 2-D slices, shearing them into a space where viewing rays align with a coordinate axis, compositing them into an intermediate image, and warping that image to the final viewport [S2, S3]. It is distinguished from ray casting and splatting by its scanline-based traversal in sheared object space, which exploits memory alignment and spatial coherence to achieve substantially faster software rendering, typically at the cost of lower image quality due to bilinear interpolation without prior opacity weighting [S2, S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume dataset $V$ (scalar field), a viewing transformation matrix $M_{view}$, and image dimensions $W \times H$ [S2].
+*   **Output:** A 2D image buffer $I_{final}$ of size $W \times H$ [S2].
+
+**Data Structures:**
+*   **Volume Data:** Stored as a 3D array or stack of 2-D slices [S2].
+*   **Intermediate Image:** A 2D buffer storing the composited result in sheared object space before warping [S2].
+*   **Alpha Accumulation Buffer:** A 2D buffer storing accumulated opacity for front-to-back compositing [G].
+*   **RLE Optimization:** Lacroute's implementation uses run-length encoding (RLE) on pre-classified opacities to skip transparent runs during scanline traversal [S2].
+
+**Mathematical Factorization:**
+The algorithm factorizes the viewing transformation $M_{view}$ into a permutation matrix $P$, a shearing matrix $M_{shear}$, and a warping matrix $M_{warp}$ [S3].
+
+For **parallel projections**:
+$$ M_{view} = M_{warp} \cdot M_{shear} \cdot P $$
+where $P$ permutes the coordinate axes to align the principal viewing direction with a data slice axis [S3].
+
+For **perspective projections**:
+$$ M_{view} = M_{warp} \cdot M_{shear} \cdot T_{shift} \cdot P $$
+where $T_{shift}$ is a translation matrix defined by the eye location in object space [S3].
+
+**Step 1: Determine Principal Viewing Axis and Permutation Matrix $P$** [S3].
+The algorithm aligns the view direction with one of the coordinate axes [S2]. The principal viewing axis is determined by the largest dot product between the viewing direction vector and the object space unit vectors [S3].
+*   If the principal axis is $x_0$, standard coordinates $(i, j, k)$ correspond to object coordinates $(y_0, z_0, x_0)$ [S3].
+*   If the principal axis is $y_0$, standard coordinates $(i, j, k)$ correspond to object coordinates $(z_0, x_0, y_0)$ [S3].
+*   If the principal axis is $z_0$, standard coordinates $(i, j, k)$ correspond to object coordinates $(x_0, y_0, z_0)$ [S3].
+
+For perspective projections, the principal axis may vary across the volume [S3]. Vectors from the eye-point to each of the eight corners of the volume box are computed [S3]. The largest axis projection for each corner defines its principal viewing axis [S3]. If the principal axis is not consistent for all eight corners, the volume must be subdivided, and rendering proceeds for each defined principal viewing direction [S3].
+
+**Step 2: Compute Shear and Warp Matrices** [S3].
+Define the permuted view matrix $M'_{view} = M_{view} \cdot P^T$ (for parallel) or $M'_{view} = M_{view} \cdot P^T \cdot T_{shift}$ (for perspective) [S3].
+
+Compute shear coefficients $S_i$ and $S_j$ for parallel projections:
+$$ S_i = \frac{M'_{12}M'_{23} - M'_{13}M'_{22}}{M'_{11}M'_{22} - M'_{21}M'_{12}} $$
+$$ S_j = \frac{M'_{21}M'_{13} - M'_{11}M'_{23}}{M'_{11}M'_{22} - M'_{21}M'_{12}} $$
+where $M'_{ij}$ are elements of $M'_{view}$ [S3].
+
+Compute translation coefficients $T_i$ and $T_j$ based on the signs of $S_i, S_j$ and $K_{max}$ (maximum voxel slice index) [S3]:
+*   Case 1 ($S_i > 0, S_j > 0$): $T_i = -S_i K_{max}, T_j = -S_j K_{max}$ [S3]
+*   Case 2 ($S_i > 0, S_j < 0$): $T_i = -S_i K_{max}, T_j = -S_j K_{max}$ [S3]
+*   Case 3 ($S_i < 0, S_j > 0$): $T_i = -S_i K_{max}, T_j = -S_j K_{max}$ [S3]
+*   Case 4 ($S_i < 0, S_j < 0$): $T_i = -S_i K_{max}, T_j = -S_j K_{max}$ [S3]
+
+The shear matrix $M_{shear}$ for parallel projections is:
+$$ M_{shear} = \begin{pmatrix} 1 & S_i & 0 & 0 \\ 0 & 1 & 0 & 0 \\ 0 & 0 & 1 & 0 \\ 0 & 0 & 0 & 1 \end{pmatrix} $$
+[S3].
+
+For perspective projections, the shear matrix includes per-slice scaling derived from eye coordinates to guarantee perspective effects [S3]. The warping matrix $M_{warp2D}$ for parallel projections is:
+$$ M_{warp2D} = \begin{pmatrix} M'_{x1} & M'_{x2} & M'_{x3} \\ M'_{y1} & M'_{y2} & M'_{y3} \\ 0 & 0 & 1 \end{pmatrix} $$
+where $M'_{x1} = M'_{14} - T_i M'_{11} - T_j M'_{12}$ and $M'_{y1} = M'_{24} - T_i M'_{21} - T_j M'_{22}$ [S3].
+
+**Step 3: Shear and Composite (Object Space)** [S3].
+1.  **Slicing:** The 3-D image is sliced into a set of 2-D sub-images along the principal viewing axis [S3].
+2.  **Shearing:** Each slice is sheared in object space [S3]. For perspective, slices are scaled to guarantee perspective effects [S3]. This results in a shear-space where all viewing rays are parallel to the third coordinate axis [S3].
+3.  **Projection/Compositing:** The sheared slices are projected into an intermediate, distorted image [S3]. This step uses bilinear interpolation [S3].
+    *   Traverse the volume in slice order [S3].
+    *   Warp the slices to project correctly on the image plane [S3].
+    *   Use RLE to skip transparent runs. Data slices are accessed in scanline order, in synchrony with the scanlines in the intermediate image [S2].
+    *   Composite front-to-back:
+        $$ I_{inter}[y, x] = I_{inter}[y, x] + c \cdot \alpha \cdot (1 - A[y, x]) $$
+        $$ A[y, x] = A[y, x] + \alpha \cdot (1 - A[y, x]) $$
+        where $c$ is the interpolated sample value, $\alpha$ is the opacity, and $A$ is the accumulated alpha [G].
+
+**Step 4: Warp (Image Space)**
+The intermediate image is warped to the final image space using $M_{warp}$ (or $M_{warp2D}$) [S3]. This is a 2D operation that undoes the distortion caused by the shear [S3]. The warping involves a re-sampling of the slice with a linear kernel, performed in two 1-D warping steps: first aligning the Y coordinate, then the X coordinate [S3].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def mat_mul(A, B):
+    C = [[0]*4 for _ in range(4)]
+    for i in range(4):
+        for j in range(4):
+            for k in range(4):
+                C[i][j] += A[i][k] * B[k][j]
+    return C
+
+def transpose(M):
+    return [[M[j][i] for j in range(4)] for i in range(4)]
+
+def vec_mul(v, M):
+    return [sum(v[k] * M[k][j] for k in range(4)) for j in range(4)]
+
+def shear_warp_factorization(volume, view_matrix, image_dims, is_perspective=False):
+    # 1. Determine principal viewing axis [S3]
+    view_dir = normalize(vec_mul([0, 0, -1, 0], view_matrix)) # [G] Camera forward in world
+    principal_axis = 'x' if abs(view_dir[0]) >= abs(view_dir[1]) and abs(view_dir[0]) >= abs(view_dir[2]) else \
+                    'y' if abs(view_dir[1]) >= abs(view_dir[2]) else 'z'
+
+    # 2. Construct permutation matrix P [S3]
+    P = get_permutation_matrix(principal_axis) # [G] Standard 4x4 permutation matrix
+
+    # 3. Compute transformed view matrix M'_view [S3]
+    if is_perspective:
+        eye_pos = compute_eye_location(view_matrix) # [G] Inverse of view matrix
+        T_shift = compute_translation_shift(eye_pos) # [G] Translation to eye position
+        M_prime_view = mat_mul(mat_mul(view_matrix, transpose(P)), T_shift)
+    else:
+        M_prime_view = mat_mul(view_matrix, transpose(P))
+
+    # 4. Compute shear coefficients S_i, S_j [S3]
+    M11, M12, M13, M14 = M_prime_view[0]
+    M21, M22, M23, M24 = M_prime_view[1]
+    denom = M11 * M22 - M21 * M12
+    if denom == 0:
+        raise ValueError("Degenerate view matrix")
+    S_i = (M12 * M23 - M13 * M22) / denom
+    S_j = (M21 * M13 - M11 * M23) / denom
+
+    # 5. Compute translation coefficients T_i, T_j [S3]
+    K_max = volume.depth
+    T_i = -S_i * K_max
+    T_j = -S_j * K_max
+
+    # 6. Construct shear matrix M_shear [S3]
+    if is_perspective:
+        M_shear = construct_perspective_shear(S_i, S_j, eye_pos, volume) # [G] Applies per-slice scale
+    else:
+        M_shear = [[1, S_i, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+
+    # 7. Construct warp matrix M_warp [S3]
+    M_warp = mat_mul(M_prime_view, M_shear)
+
+    # 8. Shear and composite slices into intermediate image [S3]
+    intermediate_image = zeros(image_dims)
+    alpha_accum = zeros(image_dims)
+    for slice_idx in range(volume.depth):
+        slice_data = volume.get_slice(slice_idx, principal_axis)
+        sheared_slice = apply_shear_to_slice(slice_data, M_shear, slice_idx)
+        for y in range(image_dims[1]):
+            for x in range(image_dims[0]):
+                val = interpolate_bilinear(sheared_slice, x, y)
+                alpha = classify(val) # Opacity from transfer function [G]
+                if alpha > 0:
+                    intermediate_image[y][x] += val * alpha * (1 - alpha_accum[y][x])
+                    alpha_accum[y][x] += alpha * (1 - alpha_accum[y][x])
+
+    # 9. Warp intermediate image to final image space using M_warp [S3]
+    final_image = zeros(image_dims)
+    for y in range(image_dims[1]):
+        for x in range(image_dims[0]):
+            src_coords = vec_mul([x, y, 0, 1], transpose(M_warp))
+            src_x, src_y = src_coords[0] / src_coords[3], src_coords[1] / src_coords[3]
+            if 0 <= src_x < image_dims[0] and 0 <= src_y < image_dims[1]:
+                final_image[y][x] = interpolate_bilinear(intermediate_image, src_x, src_y)
+    return final_image
+```
+
+## Subtopics
+
+### CPU-based Shear-Warp
+A CPU-based implementation that uses RLE compression and Hounsfield scale classification to skip empty voxels [S7]. It compresses volume data using RLE for each coordinate axis and slice, classifies voxels using a linear transfer function with lower and upper bounds, and traverses data structures slice by slice, ignoring completely transparent runs [S7]. It does not use 3D data structures like octrees, unlike some original Shear-Warp paper variations [S7].
+
+### Shear-Warp Factorization Rendered Examples Pipeline
+A hardware-accelerated pipeline implementation (SWF VRS) that includes a gradient processor, matrix multiplication processor, shader, and classifier [S3]. It applies a rotation transformation matrix, classification transfer functions (e.g., making soft tissues transparent to show bone), and a Phong fast lighting model [S3]. It supports perspective projections and both front-to-back and back-to-front compositing, overcoming limitations of earlier hardware like VolumePro [S3].
+
+### Coordinate System Conventions
+A set of six distinct coordinate systems used to track transformations in the shear-warp algorithm, each identified by a unique single character [S6]. Transition matrices between coordinate systems are named using the source and destination identifiers, e.g., $M_{ow}$ for object-to-world, and $M_{wo}$ for world-to-object [S6]. Coordinate systems: 'o' (object space, actual volume data coordinates), 's' (standard object space, after permutation), 'd' (deformed space, 3D coordinates after shear), 'i' (intermediate image space, 2D coordinates within intermediate image), 'w' (world coordinate space), 'v' (viewport space, 2D output window coordinates) [S6].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+The algorithm reduces the 3D ray-casting complexity to two 2D operations (shearing and warping), resulting in substantial speedup over basic ray-casting [S3]. Memory overhead is higher if separate RLE encoded volumes are constructed for each of the three major viewing directions [S2].
+
+**Measured Performance:**
+On an SGI Octane (R10000 CPU, 250MHz) with 250 MB main memory, Shear-Warp achieved average frame times of 0.09s (Fuel injection), 0.24s (Skull), 0.27s (Blood vessel), and 0.09s (Neghip), compared to ray casting times of 4.96s, 8.15s, 12s, and 1.87s respectively [S3]. It can render 256^3 volumes in under 1 second on an SGI machine without graphics accelerators [S3]. Semi-interactive rendering (<10 fps) is possible on conventional workstations [S3].
+
+**Strengths and Limitations:**
+*   **Strengths:** Extremely fast purely software-based rendering; exploits memory alignment and spatial coherence; supports both parallel and perspective projections (in SWF VRS); supports both front-to-back and back-to-front compositing [S3].
+*   **Limitations:** Reduced image quality compared to ray casting and splatting because voxels are interpolated without prior opacity and color incorporation in the basic form [S3]. Artifacts may occur from sampling as the viewpoint approaches a 45-degree angle from any axis [S1]. Insufficient interpolation in sliced-based methods can lead to visual artifacts, often mitigated by super-sampling which slows performance [S3].
+
+**When to Use:**
+Use when real-time or near real-time performance is critical and high image fidelity is secondary, or when hardware acceleration is unavailable [S3]. Suitable for medical imaging visualization where speed of interaction is prioritized over photorealism [S3].
+
+## Background
+The algorithm was conceived as early as 1994 by Levoy and Lacroute [S3]. It was proposed by Levoy and primarily implemented by Lacroute [S3]. It is described as the world's fastest purely software-based volume rendering algorithm [S3]. The Shear-Warp Factorization Volume Rendering System (SWF VRS) was developed to provide real-time volume rendering speed, using a time-sliced pipelined architecture [S3].
+
+## Sources
+[S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26
+[S2] Advanced illumination and view-selection techniques for volume rendering and its application to medical imaging, http://hdl.handle.net/10803/371154, fetched 2026-10-27
+[S3] Shear-warp factorization volume rendering visualization system, https://archive.org/details/0162018299360, fetched 2026-10-26
+[S4] PDF Direct Volume Rendering, https://www.sci.utah.edu/~stevec/classes/cs5630/dvr.pdf, fetched 2026-10-27
+[S5] (PDF) EWA volume splatting - ResearchGate, https://www.researchgate.net/publication/48546966_EWA_volume_splatting, fetched 2026-10-28 (unofficial)
+[S6] The Perspective Shear-Warp Algorithm in a Virtual Environment., https://www.researchgate.net/publication/220943822_The_Perspective_Shear-Warp_Algorithm_in_a_Virtual_Environment, fetched 2026-10-29 (unofficial)
+[S7] (PDF) GPU-Based Volume Rendering for Medical Imagery - ResearchGate, https://www.researchgate.net/publication/228912978_GPU-Based_Volume_Rendering_for_Medical_Imagery, fetched 2026-10-28

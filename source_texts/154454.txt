@@ -1,0 +1,2404 @@
+Bounding Volume Hierarchies
+7.3 Bounding Volume Hierarchies
+Bounding volume hierarchies (BVHs) are an approach for ray intersection
+acceleration based on primitive subdivision, where the primitives are
+partitioned into a hierarchy of disjoint sets. (In contrast, spatial
+subdivision generally partitions space into a hierarchy of disjoint sets.)
+Figure 7.3 shows a bounding volume hierarchy for a simple
+scene. Primitives are stored in the leaves, and each node stores a
+bounding box of the primitives in the nodes beneath it. Thus, as a ray
+traverses through the tree, any time it does not intersect a node’s bounds,
+the subtree beneath that node can be skipped.
+Figure 7.3: Bounding Volume Hierarchy for a Simple Scene.
+(a) A small collection of primitives, with bounding boxes shown by dashed
+lines. The primitives are aggregated based on proximity; here, the sphere
+and the equilateral triangle are bounded by another bounding box before
+being bounded by a bounding box that encompasses the entire scene (both
+shown in solid lines).
+(b) The corresponding bounding volume hierarchy. The root node holds the
+bounds of the entire scene. Here, it has two children, one storing a bounding box
+that encompasses the sphere and equilateral triangle (that in turn has
+those primitives as its children) and the other storing the bounding
+box that holds the skinny triangle.
+One property of primitive subdivision is that each primitive appears in the
+hierarchy only once. In contrast, a primitive may overlap multiple spatial
+regions with spatial subdivision and thus may be tested for intersection
+multiple times as the ray passes through them.
+†
+Another implication of this property is that the amount of memory needed to
+represent the primitive subdivision hierarchy is bounded. For a binary BVH
+that stores a single primitive in each leaf, the total number of nodes is
+2 n minus 1
+, where
+n
+is the number of primitives. (There are
+n
+leaf
+nodes and
+n minus 1
+interior nodes.) If leaves store multiple primitives,
+fewer nodes are needed.
+BVHs are more efficient to build than kd-trees, and are generally more
+numerically robust and less prone to missed intersections due to round-off
+errors than kd-trees are. The BVH aggregate, BVHAggregate, is
+therefore the default acceleration structure in pbrt.
+<<BVHAggregate Definition>>=
+class BVHAggregate {
+public:
+<<BVHAggregate Public Types>>
+enum class SplitMethod { SAH, HLBVH, Middle, EqualCounts };
+<<BVHAggregate Public Methods>>
+BVHAggregate(std::vector<Primitive> p, int maxPrimsInNode = 1,
+SplitMethod splitMethod = SplitMethod::SAH);
+static BVHAggregate *Create(std::vector<Primitive> prims,
+const ParameterDictionary &parameters);
+Bounds3f Bounds() const;
+pstd::optional<ShapeIntersection> Intersect(const Ray &ray, Float tMax) const;
+bool IntersectP(const Ray &ray, Float tMax) const;
+private:
+<<BVHAggregate Private Methods>>
+BVHBuildNode *buildRecursive(ThreadLocal<Allocator> &threadAllocators,
+pstd::span<BVHPrimitive> bvhPrimitives,
+std::atomic<int> *totalNodes,
+std::atomic<int> *orderedPrimsOffset,
+std::vector<Primitive> &orderedPrims);
+BVHBuildNode *buildHLBVH(Allocator alloc,
+const std::vector<BVHPrimitive> &primitiveInfo,
+std::atomic<int> *totalNodes,
+std::vector<Primitive> &orderedPrims);
+BVHBuildNode *emitLBVH(BVHBuildNode *&buildNodes,
+const std::vector<BVHPrimitive> &primitiveInfo,
+MortonPrimitive *mortonPrims, int nPrimitives, int *totalNodes,
+std::vector<Primitive> &orderedPrims,
+std::atomic<int> *orderedPrimsOffset, int bitIndex);
+BVHBuildNode *buildUpperSAH(Allocator alloc,
+std::vector<BVHBuildNode *> &treeletRoots, int start,
+int end, std::atomic<int> *totalNodes) const;
+int flattenBVH(BVHBuildNode *node, int *offset);
+<<BVHAggregate Private Members>>
+int maxPrimsInNode;
+std::vector<Primitive> primitives;
+SplitMethod splitMethod;
+LinearBVHNode *nodes = nullptr;
+};
+Its constructor takes an enumerator value that describes which of four
+algorithms to use when partitioning primitives to build the tree. The
+default, SAH, indicates that an algorithm based on the “surface
+area heuristic,” discussed in Section 7.3.2, should be used. An
+alternative, HLBVH, which is discussed in Section 7.3.3,
+can be constructed more efficiently (and more easily parallelized), but it
+does not build trees that are as effective as SAH. The remaining
+two approaches use even less computation but create
+fairly low-quality trees. They are mostly useful for illuminating the
+superiority of the first two approaches.
+<<BVHAggregate Public Types>>=
+enum class SplitMethod { SAH, HLBVH, Middle, EqualCounts };
+In addition to the enumerator, the constructor takes the primitives
+themselves and the maximum number of primitives that can be in any leaf
+node.
+<<BVHAggregate Method Definitions>>=
+BVHAggregate::BVHAggregate(std::vector<Primitive> prims,
+int maxPrimsInNode, SplitMethod splitMethod)
+: maxPrimsInNode(std::min(255, maxPrimsInNode)),
+primitives(std::move(prims)), splitMethod(splitMethod) {
+<<Build BVH from primitives>>
+<<Initialize bvhPrimitives array for primitives>>
+std::vector<BVHPrimitive> bvhPrimitives(primitives.size());
+for (size_t i = 0; i < primitives.size(); ++i)
+bvhPrimitives[i] = BVHPrimitive(i, primitives[i].Bounds());
+<<Build BVH for primitives using bvhPrimitives>>
+<<Declare Allocators used for BVH construction>>
+pstd::pmr::monotonic_buffer_resource resource;
+Allocator alloc(&resource);
+using Resource = pstd::pmr::monotonic_buffer_resource;
+std::vector<std::unique_ptr<Resource>> threadBufferResources;
+ThreadLocal<Allocator> threadAllocators([&threadBufferResources]() {
+threadBufferResources.push_back(std::make_unique<Resource>());
+auto ptr = threadBufferResources.back().get();
+return Allocator(ptr);
+});
+std::vector<Primitive> orderedPrims(primitives.size());
+BVHBuildNode *root;
+<<Build BVH according to selected splitMethod>>
+std::atomic<int> totalNodes{0};
+if (splitMethod == SplitMethod::HLBVH) {
+root = buildHLBVH(alloc, bvhPrimitives, &totalNodes, orderedPrims);
+} else {
+std::atomic<int> orderedPrimsOffset{0};
+root = buildRecursive(threadAllocators,
+pstd::span<BVHPrimitive>(bvhPrimitives),
+&totalNodes, &orderedPrimsOffset, orderedPrims);
+}
+primitives.swap(orderedPrims);
+<<Convert BVH into compact representation in nodes array>>
+bvhPrimitives.resize(0);
+bvhPrimitives.shrink_to_fit();
+nodes = new LinearBVHNode[totalNodes];
+int offset = 0;
+flattenBVH(root, &offset);
+}
+<<BVHAggregate Private Members>>=
+int maxPrimsInNode;
+std::vector<Primitive> primitives;
+SplitMethod splitMethod;
+7.3.1 BVH Construction
+There are three stages to BVH construction in the implementation here.
+First, bounding information about each primitive is computed and stored in
+an array that will be used during tree construction. Next, the tree is
+built using the algorithm choice encoded in splitMethod. The result
+is a binary tree where each interior node holds pointers to its children
+and each leaf node holds references to one or more primitives. Finally,
+this tree is converted to a more compact (and thus more efficient)
+pointerless representation for use during rendering. (The implementation
+is easier with this approach, versus computing the
+pointerless representation directly during tree construction, which is also
+possible.)
+<<Build BVH from primitives>>=
+<<Initialize bvhPrimitives array for primitives>>
+std::vector<BVHPrimitive> bvhPrimitives(primitives.size());
+for (size_t i = 0; i < primitives.size(); ++i)
+bvhPrimitives[i] = BVHPrimitive(i, primitives[i].Bounds());
+<<Build BVH for primitives using bvhPrimitives>>
+<<Declare Allocators used for BVH construction>>
+pstd::pmr::monotonic_buffer_resource resource;
+Allocator alloc(&resource);
+using Resource = pstd::pmr::monotonic_buffer_resource;
+std::vector<std::unique_ptr<Resource>> threadBufferResources;
+ThreadLocal<Allocator> threadAllocators([&threadBufferResources]() {
+threadBufferResources.push_back(std::make_unique<Resource>());
+auto ptr = threadBufferResources.back().get();
+return Allocator(ptr);
+});
+std::vector<Primitive> orderedPrims(primitives.size());
+BVHBuildNode *root;
+<<Build BVH according to selected splitMethod>>
+std::atomic<int> totalNodes{0};
+if (splitMethod == SplitMethod::HLBVH) {
+root = buildHLBVH(alloc, bvhPrimitives, &totalNodes, orderedPrims);
+} else {
+std::atomic<int> orderedPrimsOffset{0};
+root = buildRecursive(threadAllocators,
+pstd::span<BVHPrimitive>(bvhPrimitives),
+&totalNodes, &orderedPrimsOffset, orderedPrims);
+}
+primitives.swap(orderedPrims);
+<<Convert BVH into compact representation in nodes array>>
+bvhPrimitives.resize(0);
+bvhPrimitives.shrink_to_fit();
+nodes = new LinearBVHNode[totalNodes];
+int offset = 0;
+flattenBVH(root, &offset);
+For each primitive to be stored in the BVH, an instance of the
+BVHPrimitive structure stores its
+complete bounding box and its index in the primitives array.
+<<Initialize bvhPrimitives array for primitives>>=
+std::vector<BVHPrimitive> bvhPrimitives(primitives.size());
+for (size_t i = 0; i < primitives.size(); ++i)
+bvhPrimitives[i] = BVHPrimitive(i, primitives[i].Bounds());
+<<BVHPrimitive Definition>>=
+struct BVHPrimitive {
+BVHPrimitive(size_t primitiveIndex, const Bounds3f &bounds)
+: primitiveIndex(primitiveIndex), bounds(bounds) {}
+size_t primitiveIndex;
+Bounds3f bounds;
+<<BVHPrimitive Public Methods>>
+Point3f Centroid() const { return .5f * bounds.pMin + .5f * bounds.pMax; }
+};
+A simple method makes the centroid of the bounding box available.
+<<BVHPrimitive Public Methods>>=
+Point3f Centroid() const { return .5f * bounds.pMin + .5f * bounds.pMax; }
+Hierarchy construction can now begin. In addition to initializing the
+pointer to the root node of the BVH, root, an important side effect
+of the tree construction process is that a new array of
+Primitives is stored in orderedPrims; this array stores
+the primitives ordered so that the primitives in each leaf node occupy
+a contiguous range in the array. It is swapped with the original
+primitives array after tree construction.
+<<Build BVH for primitives using bvhPrimitives>>=
+<<Declare Allocators used for BVH construction>>
+pstd::pmr::monotonic_buffer_resource resource;
+Allocator alloc(&resource);
+using Resource = pstd::pmr::monotonic_buffer_resource;
+std::vector<std::unique_ptr<Resource>> threadBufferResources;
+ThreadLocal<Allocator> threadAllocators([&threadBufferResources]() {
+threadBufferResources.push_back(std::make_unique<Resource>());
+auto ptr = threadBufferResources.back().get();
+return Allocator(ptr);
+});
+std::vector<Primitive> orderedPrims(primitives.size());
+BVHBuildNode *root;
+<<Build BVH according to selected splitMethod>>
+std::atomic<int> totalNodes{0};
+if (splitMethod == SplitMethod::HLBVH) {
+root = buildHLBVH(alloc, bvhPrimitives, &totalNodes, orderedPrims);
+} else {
+std::atomic<int> orderedPrimsOffset{0};
+root = buildRecursive(threadAllocators,
+pstd::span<BVHPrimitive>(bvhPrimitives),
+&totalNodes, &orderedPrimsOffset, orderedPrims);
+}
+primitives.swap(orderedPrims);
+Memory for the initial BVH is allocated using the following
+Allocators. Note that all are based on the C++ standard library’s
+pmr::monotonic_buffer_resource, which efficiently allocates memory
+from larger buffers. This approach is not only more computationally
+efficient than using a general-purpose allocator, but also uses less memory
+in total
+due to keeping less bookkeeping information with each allocation. We have
+found that using the default memory allocation algorithms in the place of
+these uses approximately 10% more memory and takes approximately 10% longer for complex scenes.
+Because the pmr::monotonic_buffer_resource class cannot be used
+concurrently by multiple threads without mutual exclusion, in the parts of
+BVH construction that execute in parallel each thread uses
+per-thread allocation of them with help from the ThreadLocal class.
+Non-parallel code can use alloc directly.
+<<Declare Allocators used for BVH construction>>=
+pstd::pmr::monotonic_buffer_resource resource;
+Allocator alloc(&resource);
+using Resource = pstd::pmr::monotonic_buffer_resource;
+std::vector<std::unique_ptr<Resource>> threadBufferResources;
+ThreadLocal<Allocator> threadAllocators([&threadBufferResources]() {
+threadBufferResources.push_back(std::make_unique<Resource>());
+auto ptr = threadBufferResources.back().get();
+return Allocator(ptr);
+});
+If the HLBVH construction algorithm has been selected, buildHLBVH()
+is called to build the tree. The other three construction algorithms are
+all handled by buildRecursive(). The initial calls to these
+functions are passed all the primitives to be stored. Each returns a
+pointer to the root of a BVH for the primitives they are given, which is
+represented with the BVHBuildNode structure and the total number of nodes
+created, which is stored in totalNodes. This value is represented
+by a std::atomic variable so that it can be modified correctly by
+multiple threads executing in parallel.
+<<Build BVH according to selected splitMethod>>=
+std::atomic<int> totalNodes{0};
+if (splitMethod == SplitMethod::HLBVH) {
+root = buildHLBVH(alloc, bvhPrimitives, &totalNodes, orderedPrims);
+} else {
+std::atomic<int> orderedPrimsOffset{0};
+root = buildRecursive(threadAllocators,
+pstd::span<BVHPrimitive>(bvhPrimitives),
+&totalNodes, &orderedPrimsOffset, orderedPrims);
+}
+primitives.swap(orderedPrims);
+Each BVHBuildNode represents a node of the BVH. All nodes store a
+Bounds3f that represents the bounds of all the children beneath the
+node. Each interior node stores pointers to its two children in
+children. Interior nodes also record the coordinate axis along
+which primitives were partitioned for distribution to their two children; this
+information is used to improve the performance of the traversal
+algorithm. Leaf nodes record which primitive or primitives are
+stored in them; the elements of the BVHAggregate::primitives array
+from the offset firstPrimOffset up to but not including
+monospace f monospace i monospace r monospace s monospace t monospace upper P monospace r monospace i monospace m monospace upper O monospace f monospace f monospace s monospace e monospace t plus monospace n monospace upper P monospace r monospace i monospace m monospace i monospace t monospace i monospace v monospace e monospace s
+are the primitives in the
+leaf. (This is why the primitives array needs to
+be reordered—so that this representation can be
+used, rather than, for example, storing a variable-sized array of primitive
+indices at each leaf node.)
+<<BVHBuildNode Definition>>=
+struct BVHBuildNode {
+<<BVHBuildNode Public Methods>>
+void InitLeaf(int first, int n, const Bounds3f &b) {
+firstPrimOffset = first;
+nPrimitives = n;
+bounds = b;
+children[0] = children[1] = nullptr;
+}
+void InitInterior(int axis, BVHBuildNode *c0, BVHBuildNode *c1) {
+children[0] = c0;
+children[1] = c1;
+bounds = Union(c0->bounds, c1->bounds);
+splitAxis = axis;
+nPrimitives = 0;
+}
+Bounds3f bounds;
+BVHBuildNode *children[2];
+int splitAxis, firstPrimOffset, nPrimitives;
+};
+We will distinguish between leaf and interior nodes by whether their
+child pointers have the value nullptr or not, respectively.
+<<BVHBuildNode Public Methods>>=
+void InitLeaf(int first, int n, const Bounds3f &b) {
+firstPrimOffset = first;
+nPrimitives = n;
+bounds = b;
+children[0] = children[1] = nullptr;
+}
+The InitInterior() method requires that the two child nodes
+already have been created, so that their pointers can be passed in. This
+requirement makes it easy to compute the bounds of the interior node, since
+the children bounds are immediately available.
+<<BVHBuildNode Public Methods>>+=
+void InitInterior(int axis, BVHBuildNode *c0, BVHBuildNode *c1) {
+children[0] = c0;
+children[1] = c1;
+bounds = Union(c0->bounds, c1->bounds);
+splitAxis = axis;
+nPrimitives = 0;
+}
+In addition to the allocators used for BVH nodes and the array
+of BVHPrimitive structures, buildRecursive() takes a pointer
+totalNodes that is used to track the total number of BVH nodes that have been
+created; this value makes it possible to allocate exactly the right number of the more
+compact LinearBVHNodes later.
+The orderedPrims array is used to store primitive references as
+primitives are stored in leaf nodes of the tree. It is initially
+allocated with enough entries to store all the primitives, though all
+entries are nullptr. When a leaf node is created,
+buildRecursive() claims enough entries in the array for its
+primitives; orderedPrimsOffset starts at 0 and keeps track of where
+the next free entry is. It, too, is an atomic variable so that multiple
+threads can allocate space from the array concurrently. Recall that when
+tree construction is finished, BVHAggregate::primitives is replaced
+with the ordered primitives array created here.
+<<BVHAggregate Method Definitions>>+=
+BVHBuildNode *BVHAggregate::buildRecursive(
+ThreadLocal<Allocator> &threadAllocators,
+pstd::span<BVHPrimitive> bvhPrimitives,
+std::atomic<int> *totalNodes, std::atomic<int> *orderedPrimsOffset,
+std::vector<Primitive> &orderedPrims) {
+Allocator alloc = threadAllocators.Get();
+BVHBuildNode *node = alloc.new_object<BVHBuildNode>();
+<<Initialize BVHBuildNode for primitive range>>
+++*totalNodes;
+<<Compute bounds of all primitives in BVH node>>
+Bounds3f bounds;
+for (const auto &prim : bvhPrimitives)
+bounds = Union(bounds, prim.bounds);
+if (bounds.SurfaceArea() == 0 || bvhPrimitives.size() == 1) {
+<<Create leaf BVHBuildNode>>
+int firstPrimOffset = orderedPrimsOffset->fetch_add(bvhPrimitives.size());
+for (size_t i = 0; i < bvhPrimitives.size(); ++i) {
+int index = bvhPrimitives[i].primitiveIndex;
+orderedPrims[firstPrimOffset + i] = primitives[index];
+}
+node->InitLeaf(firstPrimOffset, bvhPrimitives.size(), bounds);
+return node;
+} else {
+<<Compute bound of primitive centroids and choose split dimension dim>>
+Bounds3f centroidBounds;
+for (const auto &prim : bvhPrimitives)
+centroidBounds = Union(centroidBounds, prim.Centroid());
+int dim = centroidBounds.MaxDimension();
+<<Partition primitives into two sets and build children>>
+if (centroidBounds.pMax[dim] == centroidBounds.pMin[dim]) {
+<<Create leaf BVHBuildNode>>
+int firstPrimOffset = orderedPrimsOffset->fetch_add(bvhPrimitives.size());
+for (size_t i = 0; i < bvhPrimitives.size(); ++i) {
+int index = bvhPrimitives[i].primitiveIndex;
+orderedPrims[firstPrimOffset + i] = primitives[index];
+}
+node->InitLeaf(firstPrimOffset, bvhPrimitives.size(), bounds);
+return node;
+} else {
+int mid = bvhPrimitives.size() / 2;
+<<Partition primitives based on splitMethod>>
+switch (splitMethod) {
+case SplitMethod::Middle: {
+<<Partition primitives through node’s midpoint>>
+Float pmid = (centroidBounds.pMin[dim] + centroidBounds.pMax[dim]) / 2;
+auto midIter =
+std::partition(bvhPrimitives.begin(), bvhPrimitives.end(),
+[dim, pmid](const BVHPrimitive &pi) {
+return pi.Centroid()[dim] < pmid;
+});
+mid = midIter - bvhPrimitives.begin();
+if (midIter != bvhPrimitives.begin() && midIter != bvhPrimitives.end())
+break;
+}
+case SplitMethod::EqualCounts: {
+<<Partition primitives into equally sized subsets>>
+mid = bvhPrimitives.size() / 2;
+std::nth_element(bvhPrimitives.begin(), bvhPrimitives.begin() + mid,
+bvhPrimitives.end(),
+[dim](const BVHPrimitive &a, const BVHPrimitive &b) {
+return a.Centroid()[dim] < b.Centroid()[dim];
+});
+break;
+}
+case SplitMethod::SAH:
+default: {
+<<Partition primitives using approximate SAH>>
+if (bvhPrimitives.size() <= 2) {
+<<Partition primitives into equally sized subsets>>
+mid = bvhPrimitives.size() / 2;
+std::nth_element(bvhPrimitives.begin(), bvhPrimitives.begin() + mid,
+bvhPrimitives.end(),
+[dim](const BVHPrimitive &a, const BVHPrimitive &b) {
+return a.Centroid()[dim] < b.Centroid()[dim];
+});
+} else {
+<<Allocate BVHSplitBucket for SAH partition buckets>>
+constexpr int nBuckets = 12;
+BVHSplitBucket buckets[nBuckets];
+<<Initialize BVHSplitBucket for SAH partition buckets>>
+for (const auto &prim : bvhPrimitives) {
+int b = nBuckets * centroidBounds.Offset(prim.Centroid())[dim];
+if (b == nBuckets) b = nBuckets - 1;
+buckets[b].count++;
+buckets[b].bounds = Union(buckets[b].bounds, prim.bounds);
+}
+<<Compute costs for splitting after each bucket>>
+constexpr int nSplits = nBuckets - 1;
+Float costs[nSplits] = {};
+<<Partially initialize costs using a forward scan over splits>>
+int countBelow = 0;
+Bounds3f boundBelow;
+for (int i = 0; i < nSplits; ++i) {
+boundBelow = Union(boundBelow, buckets[i].bounds);
+countBelow += buckets[i].count;
+costs[i] += countBelow * boundBelow.SurfaceArea();
+}
+<<Finish initializing costs using a backward scan over splits>>
+int countAbove = 0;
+Bounds3f boundAbove;
+for (int i = nSplits; i >= 1; --i) {
+boundAbove = Union(boundAbove, buckets[i].bounds);
+countAbove += buckets[i].count;
+costs[i - 1] += countAbove * boundAbove.SurfaceArea();
+}
+<<Find bucket to split at that minimizes SAH metric>>
+int minCostSplitBucket = -1;
+Float minCost = Infinity;
+for (int i = 0; i < nSplits; ++i) {
+<<Compute cost for candidate split and update minimum if necessary>>
+if (costs[i] < minCost) {
+minCost = costs[i];
+minCostSplitBucket = i;
+}
+}
+<<Compute leaf cost and SAH split cost for chosen split>>
+Float leafCost = bvhPrimitives.size();
+minCost = 1.f / 2.f + minCost / bounds.SurfaceArea();
+<<Either create leaf or split primitives at selected SAH bucket>>
+if (bvhPrimitives.size() > maxPrimsInNode || minCost < leafCost) {
+auto midIter = std::partition(bvhPrimitives.begin(),
+bvhPrimitives.end(),
+[=](const BVHPrimitive &bp) {
+int b = nBuckets * centroidBounds.Offset(bp.Centroid())[dim];
+if (b == nBuckets) b = nBuckets - 1;
+return b <= minCostSplitBucket;
+});
+mid = midIter - bvhPrimitives.begin();
+} else {
+<<Create leaf BVHBuildNode>>
+int firstPrimOffset = orderedPrimsOffset->fetch_add(bvhPrimitives.size());
+for (size_t i = 0; i < bvhPrimitives.size(); ++i) {
+int index = bvhPrimitives[i].primitiveIndex;
+orderedPrims[firstPrimOffset + i] = primitives[index];
+}
+node->InitLeaf(firstPrimOffset, bvhPrimitives.size(), bounds);
+return node;
+}
+}
+break;
+}
+}
+BVHBuildNode *children[2];
+<<Recursively build BVHs for children>>
+if (bvhPrimitives.size() > 128 * 1024) {
+<<Recursively build child BVHs in parallel>>
+ParallelFor(0, 2, [&](int i) {
+if (i == 0)
+children[0] =
+buildRecursive(threadAllocators, bvhPrimitives.subspan(0, mid),
+totalNodes, orderedPrimsOffset, orderedPrims);
+else
+children[1] =
+buildRecursive(threadAllocators, bvhPrimitives.subspan(mid),
+totalNodes, orderedPrimsOffset, orderedPrims);
+});
+} else {
+<<Recursively build child BVHs sequentially>>
+children[0] =
+buildRecursive(threadAllocators, bvhPrimitives.subspan(0, mid),
+totalNodes, orderedPrimsOffset, orderedPrims);
+children[1] =
+buildRecursive(threadAllocators, bvhPrimitives.subspan(mid),
+totalNodes, orderedPrimsOffset, orderedPrims);
+}
+node->InitInterior(dim, children[0], children[1]);
+}
+}
+return node;
+}
+If bvhPrimitives has only a single primitive,
+then the recursion has bottomed out and a leaf node is created. Otherwise,
+this method partitions its elements using one of
+the partitioning algorithms and reorders the array elements so that they
+represent the partitioned subsets. If the
+partitioning is successful, these two primitive sets are in turn passed to
+recursive calls that will themselves return pointers to nodes for the two
+children of the current node.
+<<Initialize BVHBuildNode for primitive range>>=
+++*totalNodes;
+<<Compute bounds of all primitives in BVH node>>
+Bounds3f bounds;
+for (const auto &prim : bvhPrimitives)
+bounds = Union(bounds, prim.bounds);
+if (bounds.SurfaceArea() == 0 || bvhPrimitives.size() == 1) {
+<<Create leaf BVHBuildNode>>
+int firstPrimOffset = orderedPrimsOffset->fetch_add(bvhPrimitives.size());
+for (size_t i = 0; i < bvhPrimitives.size(); ++i) {
+int index = bvhPrimitives[i].primitiveIndex;
+orderedPrims[firstPrimOffset + i] = primitives[index];
+}
+node->InitLeaf(firstPrimOffset, bvhPrimitives.size(), bounds);
+return node;
+} else {
+<<Compute bound of primitive centroids and choose split dimension dim>>
+Bounds3f centroidBounds;
+for (const auto &prim : bvhPrimitives)
+centroidBounds = Union(centroidBounds, prim.Centroid());
+int dim = centroidBounds.MaxDimension();
+<<Partition primitives into two sets and build children>>
+if (centroidBounds.pMax[dim] == centroidBounds.pMin[dim]) {
+<<Create leaf BVHBuildNode>>
+int firstPrimOffset = orderedPrimsOffset->fetch_add(bvhPrimitives.size());
+for (size_t i = 0; i < bvhPrimitives.size(); ++i) {
+int index = bvhPrimitives[i].primitiveIndex;
+orderedPrims[firstPrimOffset + i] = primitives[index];
+}
+node->InitLeaf(firstPrimOffset, bvhPrimitives.size(), bounds);
+return node;
+} else {
+int mid = bvhPrimitives.size() / 2;
+<<Partition primitives based on splitMethod>>
+switch (splitMethod) {
+case SplitMethod::Middle: {
+<<Partition primitives through node’s midpoint>>
+Float pmid = (centroidBounds.pMin[dim] + centroidBounds.pMax[dim]) / 2;
+auto midIter =
+std::partition(bvhPrimitives.begin(), bvhPrimitives.end(),
+[dim, pmid](const BVHPrimitive &pi) {
+return pi.Centroid()[dim] < pmid;
+});
+mid = midIter - bvhPrimitives.begin();
+if (midIter != bvhPrimitives.begin() && midIter != bvhPrimitives.end())
+break;
+}
+case SplitMethod::EqualCounts: {
+<<Partition primitives into equally sized subsets>>
+mid = bvhPrimitives.size() / 2;
+std::nth_element(bvhPrimitives.begin(), bvhPrimitives.begin() + mid,
+bvhPrimitives.end(),
+[dim](const BVHPrimitive &a, const BVHPrimitive &b) {
+return a.Centroid()[dim] < b.Centroid()[dim];
+});
+break;
+}
+case SplitMethod::SAH:
+default: {
+<<Partition primitives using approximate SAH>>
+if (bvhPrimitives.size() <= 2) {
+<<Partition primitives into equally sized subsets>>
+mid = bvhPrimitives.size() / 2;
+std::nth_element(bvhPrimitives.begin(), bvhPrimitives.begin() + mid,
+bvhPrimitives.end(),
+[dim](const BVHPrimitive &a, const BVHPrimitive &b) {
+return a.Centroid()[dim] < b.Centroid()[dim];
+});
+} else {
+<<Allocate BVHSplitBucket for SAH partition buckets>>
+constexpr int nBuckets = 12;
+BVHSplitBucket buckets[nBuckets];
+<<Initialize BVHSplitBucket for SAH partition buckets>>
+for (const auto &prim : bvhPrimitives) {
+int b = nBuckets * centroidBounds.Offset(prim.Centroid())[dim];
+if (b == nBuckets) b = nBuckets - 1;
+buckets[b].count++;
+buckets[b].bounds = Union(buckets[b].bounds, prim.bounds);
+}
+<<Compute costs for splitting after each bucket>>
+constexpr int nSplits = nBuckets - 1;
+Float costs[nSplits] = {};
+<<Partially initialize costs using a forward scan over splits>>
+int countBelow = 0;
+Bounds3f boundBelow;
+for (int i = 0; i < nSplits; ++i) {
+boundBelow = Union(boundBelow, buckets[i].bounds);
+countBelow += buckets[i].count;
+costs[i] += countBelow * boundBelow.SurfaceArea();
+}
+<<Finish initializing costs using a backward scan over splits>>
+int countAbove = 0;
+Bounds3f boundAbove;
+for (int i = nSplits; i >= 1; --i) {
+boundAbove = Union(boundAbove, buckets[i].bounds);
+countAbove += buckets[i].count;
+costs[i - 1] += countAbove * boundAbove.SurfaceArea();
+}
+<<Find bucket to split at that minimizes SAH metric>>
+int minCostSplitBucket = -1;
+Float minCost = Infinity;
+for (int i = 0; i < nSplits; ++i) {
+<<Compute cost for candidate split and update minimum if necessary>>
+if (costs[i] < minCost) {
+minCost = costs[i];
+minCostSplitBucket = i;
+}
+}
+<<Compute leaf cost and SAH split cost for chosen split>>
+Float leafCost = bvhPrimitives.size();
+minCost = 1.f / 2.f + minCost / bounds.SurfaceArea();
+<<Either create leaf or split primitives at selected SAH bucket>>
+if (bvhPrimitives.size() > maxPrimsInNode || minCost < leafCost) {
+auto midIter = std::partition(bvhPrimitives.begin(),
+bvhPrimitives.end(),
+[=](const BVHPrimitive &bp) {
+int b = nBuckets * centroidBounds.Offset(bp.Centroid())[dim];
+if (b == nBuckets) b = nBuckets - 1;
+return b <= minCostSplitBucket;
+});
+mid = midIter - bvhPrimitives.begin();
+} else {
+<<Create leaf BVHBuildNode>>
+int firstPrimOffset = orderedPrimsOffset->fetch_add(bvhPrimitives.size());
+for (size_t i = 0; i < bvhPrimitives.size(); ++i) {
+int index = bvhPrimitives[i].primitiveIndex;
+orderedPrims[firstPrimOffset + i] = primitives[index];
+}
+node->InitLeaf(firstPrimOffset, bvhPrimitives.size(), bounds);
+return node;
+}
+}
+break;
+}
+}
+BVHBuildNode *children[2];
+<<Recursively build BVHs for children>>
+if (bvhPrimitives.size() > 128 * 1024) {
+<<Recursively build child BVHs in parallel>>
+ParallelFor(0, 2, [&](int i) {
+if (i == 0)
+children[0] =
+buildRecursive(threadAllocators, bvhPrimitives.subspan(0, mid),
+totalNodes, orderedPrimsOffset, orderedPrims);
+else
+children[1] =
+buildRecursive(threadAllocators, bvhPrimitives.subspan(mid),
+totalNodes, orderedPrimsOffset, orderedPrims);
+});
+} else {
+<<Recursively build child BVHs sequentially>>
+children[0] =
+buildRecursive(threadAllocators, bvhPrimitives.subspan(0, mid),
+totalNodes, orderedPrimsOffset, orderedPrims);
+children[1] =
+buildRecursive(threadAllocators, bvhPrimitives.subspan(mid),
+totalNodes, orderedPrimsOffset, orderedPrims);
+}
+node->InitInterior(dim, children[0], children[1]);
+}
+}
+The primitive bounds will be needed regardless of whether an interior or
+leaf node is created, so they are computed before that determination is made.
+<<Compute bounds of all primitives in BVH node>>=
+Bounds3f bounds;
+for (const auto &prim : bvhPrimitives)
+bounds = Union(bounds, prim.bounds);
+At leaf nodes, the primitives overlapping the leaf are appended to the
+orderedPrims array and a leaf node object is initialized. Because
+orderedPrimsOffset is a std::atomic variable and
+fetch_add() is an atomic operation, multiple threads can safely
+perform this operation concurrently without further synchronization: each
+one is able to allocate its own span of the orderedPrimitives
+array that it can then safely write to.
+<<Create leaf BVHBuildNode>>=
+int firstPrimOffset = orderedPrimsOffset->fetch_add(bvhPrimitives.size());
+for (size_t i = 0; i < bvhPrimitives.size(); ++i) {
+int index = bvhPrimitives[i].primitiveIndex;
+orderedPrims[firstPrimOffset + i] = primitives[index];
+}
+node->InitLeaf(firstPrimOffset, bvhPrimitives.size(), bounds);
+return node;
+For interior nodes, the collection of primitives must be partitioned
+between the two children’s subtrees. Given
+n
+primitives, there are in
+general
+2 Superscript n minus 1 Baseline minus 2
+possible ways to partition them into two non-empty
+groups. In practice when building BVHs, one generally considers partitions
+along a coordinate axis, meaning that there are about
+3 n
+candidate
+partitions. (Along each axis, each primitive may be put into the first
+partition or the second partition.)
+Here, we choose just one of the three coordinate axes to use in
+partitioning the primitives. We select the axis with the
+largest extent of bounding box centroids for the primitives in
+bvhPrimitives.
+(An alternative would be to try
+partitioning the primitives along all three axes and
+select the one that gave the best result, but in practice this approach
+works well.) This approach gives good partitions in many scenes;
+Figure 7.4 illustrates the strategy.
+Figure 7.4: Choosing the Axis along which to Partition Primitives.
+The BVHAggregate chooses an axis along which to partition the primitives
+based on which axis has the largest range of the centroids of the
+primitives’ bounding boxes. Here, in two
+dimensions, their extent is largest along the
+y
+axis (filled points on the
+axes), so the primitives will be partitioned in
+y
+.
+The general goal is to select a partition of primitives that does not have
+too much overlap of the bounding boxes of the two resulting primitive
+sets—if there is substantial overlap, then it will more frequently be
+necessary to traverse both children’s subtrees when traversing the tree,
+requiring more computation than if it had been possible to more effectively
+prune away collections of primitives. This idea of finding effective
+primitive partitions will be made more rigorous shortly, in the discussion
+of the surface area heuristic.
+<<Compute bound of primitive centroids and choose split dimension dim>>=
+Bounds3f centroidBounds;
+for (const auto &prim : bvhPrimitives)
+centroidBounds = Union(centroidBounds, prim.Centroid());
+int dim = centroidBounds.MaxDimension();
+If all the centroid points are at the same position (i.e., the centroid
+bounds have zero volume), then recursion stops and a leaf node is created
+with the primitives; none of the splitting methods here is effective in
+that (unusual) case. The primitives are otherwise partitioned using the
+chosen method and passed to two recursive calls to buildRecursive().
+<<Partition primitives into two sets and build children>>=
+if (centroidBounds.pMax[dim] == centroidBounds.pMin[dim]) {
+<<Create leaf BVHBuildNode>>
+int firstPrimOffset = orderedPrimsOffset->fetch_add(bvhPrimitives.size());
+for (size_t i = 0; i < bvhPrimitives.size(); ++i) {
+int index = bvhPrimitives[i].primitiveIndex;
+orderedPrims[firstPrimOffset + i] = primitives[index];
+}
+node->InitLeaf(firstPrimOffset, bvhPrimitives.size(), bounds);
+return node;
+} else {
+int mid = bvhPrimitives.size() / 2;
+<<Partition primitives based on splitMethod>>
+switch (splitMethod) {
+case SplitMethod::Middle: {
+<<Partition primitives through node’s midpoint>>
+Float pmid = (centroidBounds.pMin[dim] + centroidBounds.pMax[dim]) / 2;
+auto midIter =
+std::partition(bvhPrimitives.begin(), bvhPrimitives.end(),
+[dim, pmid](const BVHPrimitive &pi) {
+return pi.Centroid()[dim] < pmid;
+});
+mid = midIter - bvhPrimitives.begin();
+if (midIter != bvhPrimitives.begin() && midIter != bvhPrimitives.end())
+break;
+}
+case SplitMethod::EqualCounts: {
+<<Partition primitives into equally sized subsets>>
+mid = bvhPrimitives.size() / 2;
+std::nth_element(bvhPrimitives.begin(), bvhPrimitives.begin() + mid,
+bvhPrimitives.end(),
+[dim](const BVHPrimitive &a, const BVHPrimitive &b) {
+return a.Centroid()[dim] < b.Centroid()[dim];
+});
+break;
+}
+case SplitMethod::SAH:
+default: {
+<<Partition primitives using approximate SAH>>
+if (bvhPrimitives.size() <= 2) {
+<<Partition primitives into equally sized subsets>>
+mid = bvhPrimitives.size() / 2;
+std::nth_element(bvhPrimitives.begin(), bvhPrimitives.begin() + mid,
+bvhPrimitives.end(),
+[dim](const BVHPrimitive &a, const BVHPrimitive &b) {
+return a.Centroid()[dim] < b.Centroid()[dim];
+});
+} else {
+<<Allocate BVHSplitBucket for SAH partition buckets>>
+constexpr int nBuckets = 12;
+BVHSplitBucket buckets[nBuckets];
+<<Initialize BVHSplitBucket for SAH partition buckets>>
+for (const auto &prim : bvhPrimitives) {
+int b = nBuckets * centroidBounds.Offset(prim.Centroid())[dim];
+if (b == nBuckets) b = nBuckets - 1;
+buckets[b].count++;
+buckets[b].bounds = Union(buckets[b].bounds, prim.bounds);
+}
+<<Compute costs for splitting after each bucket>>
+constexpr int nSplits = nBuckets - 1;
+Float costs[nSplits] = {};
+<<Partially initialize costs using a forward scan over splits>>
+int countBelow = 0;
+Bounds3f boundBelow;
+for (int i = 0; i < nSplits; ++i) {
+boundBelow = Union(boundBelow, buckets[i].bounds);
+countBelow += buckets[i].count;
+costs[i] += countBelow * boundBelow.SurfaceArea();
+}
+<<Finish initializing costs using a backward scan over splits>>
+int countAbove = 0;
+Bounds3f boundAbove;
+for (int i = nSplits; i >= 1; --i) {
+boundAbove = Union(boundAbove, buckets[i].bounds);
+countAbove += buckets[i].count;
+costs[i - 1] += countAbove * boundAbove.SurfaceArea();
+}
+<<Find bucket to split at that minimizes SAH metric>>
+int minCostSplitBucket = -1;
+Float minCost = Infinity;
+for (int i = 0; i < nSplits; ++i) {
+<<Compute cost for candidate split and update minimum if necessary>>
+if (costs[i] < minCost) {
+minCost = costs[i];
+minCostSplitBucket = i;
+}
+}
+<<Compute leaf cost and SAH split cost for chosen split>>
+Float leafCost = bvhPrimitives.size();
+minCost = 1.f / 2.f + minCost / bounds.SurfaceArea();
+<<Either create leaf or split primitives at selected SAH bucket>>
+if (bvhPrimitives.size() > maxPrimsInNode || minCost < leafCost) {
+auto midIter = std::partition(bvhPrimitives.begin(),
+bvhPrimitives.end(),
+[=](const BVHPrimitive &bp) {
+int b = nBuckets * centroidBounds.Offset(bp.Centroid())[dim];
+if (b == nBuckets) b = nBuckets - 1;
+return b <= minCostSplitBucket;
+});
+mid = midIter - bvhPrimitives.begin();
+} else {
+<<Create leaf BVHBuildNode>>
+int firstPrimOffset = orderedPrimsOffset->fetch_add(bvhPrimitives.size());
+for (size_t i = 0; i < bvhPrimitives.size(); ++i) {
+int index = bvhPrimitives[i].primitiveIndex;
+orderedPrims[firstPrimOffset + i] = primitives[index];
+}
+node->InitLeaf(firstPrimOffset, bvhPrimitives.size(), bounds);
+return node;
+}
+}
+break;
+}
+}
+BVHBuildNode *children[2];
+<<Recursively build BVHs for children>>
+if (bvhPrimitives.size() > 128 * 1024) {
+<<Recursively build child BVHs in parallel>>
+ParallelFor(0, 2, [&](int i) {
+if (i == 0)
+children[0] =
+buildRecursive(threadAllocators, bvhPrimitives.subspan(0, mid),
+totalNodes, orderedPrimsOffset, orderedPrims);
+else
+children[1] =
+buildRecursive(threadAllocators, bvhPrimitives.subspan(mid),
+totalNodes, orderedPrimsOffset, orderedPrims);
+});
+} else {
+<<Recursively build child BVHs sequentially>>
+children[0] =
+buildRecursive(threadAllocators, bvhPrimitives.subspan(0, mid),
+totalNodes, orderedPrimsOffset, orderedPrims);
+children[1] =
+buildRecursive(threadAllocators, bvhPrimitives.subspan(mid),
+totalNodes, orderedPrimsOffset, orderedPrims);
+}
+node->InitInterior(dim, children[0], children[1]);
+}
+The two recursive calls access independent data, other than when they
+allocate space in the orderedPrims array by incrementing
+orderedPrimsOffset, which we already have seen is thread safe.
+Therefore, when there are a reasonably large number of active primitives,
+those calls can be performed in parallel, which improves the performance of BVH
+construction.
+<<Recursively build BVHs for children>>=
+if (bvhPrimitives.size() > 128 * 1024) {
+<<Recursively build child BVHs in parallel>>
+ParallelFor(0, 2, [&](int i) {
+if (i == 0)
+children[0] =
+buildRecursive(threadAllocators, bvhPrimitives.subspan(0, mid),
+totalNodes, orderedPrimsOffset, orderedPrims);
+else
+children[1] =
+buildRecursive(threadAllocators, bvhPrimitives.subspan(mid),
+totalNodes, orderedPrimsOffset, orderedPrims);
+});
+} else {
+<<Recursively build child BVHs sequentially>>
+children[0] =
+buildRecursive(threadAllocators, bvhPrimitives.subspan(0, mid),
+totalNodes, orderedPrimsOffset, orderedPrims);
+children[1] =
+buildRecursive(threadAllocators, bvhPrimitives.subspan(mid),
+totalNodes, orderedPrimsOffset, orderedPrims);
+}
+A parallel for loop over two items is sufficient to expose the
+available parallelism. With pbrt’s implementation of
+ParallelFor(), the current thread will end up handling the first
+recursive call, while another thread, if available, can take the second.
+ParallelFor() does not return until all the loop iterations have
+completed, so we can safely proceed, knowing that both children
+are fully initialized when it does.
+<<Recursively build child BVHs in parallel>>=
+ParallelFor(0, 2, [&](int i) {
+if (i == 0)
+children[0] =
+buildRecursive(threadAllocators, bvhPrimitives.subspan(0, mid),
+totalNodes, orderedPrimsOffset, orderedPrims);
+else
+children[1] =
+buildRecursive(threadAllocators, bvhPrimitives.subspan(mid),
+totalNodes, orderedPrimsOffset, orderedPrims);
+});
+The code for the non-parallel case, <<Recursively build child BVHs
+sequentially>>, is equivalent, just without the parallel for loop. We have
+therefore not included it here.
+We also will not include the code fragment <<Partition primitives
+based on splitMethod>> here; it just uses the value of
+BVHAggregate::splitMethod to determine which primitive partitioning
+scheme to use. These three schemes will be described in the following few
+pages.
+A simple splitMethod is Middle, which first computes the
+midpoint of the primitives’ centroids along the splitting axis. This
+method is implemented in the fragment <<Partition primitives
+through node’s midpoint>>. The primitives are classified into the two
+sets,
+depending on whether their centroids are above or below the midpoint. This
+partitioning is easily done with the std::partition() C++ standard
+library function, which takes a range of elements in an array and a
+comparison function and orders the elements in the array so that all the
+elements that return true for the given
+predicate function appear in
+the range before those that return false for it.
+std::partition() returns a pointer to the first element
+that had a false value for the predicate.
+Figure 7.5 illustrates this approach,
+including cases where it does and does not work well.
+If the primitives all have large overlapping bounding boxes, this splitting
+method may fail to separate the primitives into two groups. In that case,
+execution falls through to the SplitMethod::EqualCounts approach to try
+again.
+<<Partition primitives through node’s midpoint>>=
+Float pmid = (centroidBounds.pMin[dim] + centroidBounds.pMax[dim]) / 2;
+auto midIter =
+std::partition(bvhPrimitives.begin(), bvhPrimitives.end(),
+[dim, pmid](const BVHPrimitive &pi) {
+return pi.Centroid()[dim] < pmid;
+});
+mid = midIter - bvhPrimitives.begin();
+if (midIter != bvhPrimitives.begin() && midIter != bvhPrimitives.end())
+break;
+When splitMethod is SplitMethod::EqualCounts, the
+<<Partition primitives into equally sized subsets>> fragment runs.
+It partitions the primitives into two equal-sized subsets such that the
+first half of the
+n
+of them are the
+n slash 2
+with smallest centroid
+coordinate values along the chosen axis, and the second half are the ones
+with the largest centroid coordinate values. While this approach can
+sometimes work well, the case in Figure 7.5(b) is
+one where this method also fares poorly.
+Figure 7.5: Splitting Primitives Based on the Midpoint of Centroids on an Axis.
+(a) For some distributions of primitives, such as the one shown here, splitting
+based on the midpoint of the centroids along the chosen axis (thick vertical line) works well.
+(The bounding boxes of the two resulting primitive groups are shown with
+dashed lines.)
+(b) For distributions like this one, the midpoint is a suboptimal choice;
+the two resulting bounding boxes overlap substantially.
+(c) If the same group of primitives from (b) is instead split along the
+line shown here, the resulting bounding boxes are smaller and do not
+overlap at all, leading to better performance when rendering.
+This scheme is also easily implemented with a standard library call,
+std::nth_element(). It takes a start, middle, and ending iterator
+as well as a comparison function. It orders the array so that the element
+at the middle iterator is the one that would be there if the array was fully
+sorted, and such that all the elements before the middle one compare to
+less than the middle element and all the elements after it compare to
+greater than it. This ordering can be done in
+upper O left-parenthesis n right-parenthesis
+time, with
+n
+the
+number of elements, which is more efficient than the
+upper O left-parenthesis n log n right-parenthesis
+cost of
+completely sorting the array.
+<<Partition primitives into equally sized subsets>>=
+mid = bvhPrimitives.size() / 2;
+std::nth_element(bvhPrimitives.begin(), bvhPrimitives.begin() + mid,
+bvhPrimitives.end(),
+[dim](const BVHPrimitive &a, const BVHPrimitive &b) {
+return a.Centroid()[dim] < b.Centroid()[dim];
+});
+7.3.2 The Surface Area Heuristic
+The two primitive partitioning approaches described so far can work well for some
+distributions of primitives, but they often choose partitions that perform
+poorly in practice, leading to more nodes of the tree being visited by rays
+and hence unnecessarily inefficient ray–primitive intersection
+computations at rendering time. Most of the best current algorithms for
+building acceleration structures for ray tracing are based on the “surface
+area heuristic” (SAH), which provides a well-grounded cost model for
+answering questions like “which of a number of partitions of primitives
+will lead to a better BVH for ray–primitive intersection tests?” or
+“which of a number of possible positions to split space in a spatial
+subdivision scheme will lead to a better acceleration structure?”
+The SAH model estimates the computational expense of performing ray
+intersection tests, including the time spent traversing nodes of the tree
+and the time spent on ray–primitive intersection tests for a particular
+partitioning of primitives. Algorithms for
+building acceleration structures can then follow the goal of minimizing
+total cost. Typically, a greedy algorithm is used that minimizes the cost
+for each single node of the hierarchy being built individually.
+The ideas behind the SAH cost model are straightforward: at any point in
+building an adaptive acceleration structure (primitive subdivision or
+spatial subdivision), we could just create a leaf node for the current
+region and geometry. In that case, any ray that passes through this region
+will be tested against all the overlapping primitives and will incur a
+cost of
+sigma-summation Underscript i equals 1 Overscript n Endscripts t Subscript normal i normal s normal e normal c normal t Baseline left-parenthesis i right-parenthesis comma
+where
+n
+is the number of primitives and
+t Subscript normal i normal s normal e normal c normal t Baseline left-parenthesis i right-parenthesis
+is the
+time to compute a ray–object intersection with the
+i
+th primitive.
+The other option is to split the region. In that case, rays will incur the
+cost
+c left-parenthesis upper A comma upper B right-parenthesis equals t Subscript normal t normal r normal a normal v Baseline plus p Subscript upper A Baseline sigma-summation Underscript i equals 1 Overscript n Subscript upper A Baseline Endscripts t Subscript normal i normal s normal e normal c normal t Baseline left-parenthesis a Subscript i Baseline right-parenthesis plus p Subscript upper B Baseline sigma-summation Underscript i equals 1 Overscript n Subscript upper B Baseline Endscripts t Subscript normal i normal s normal e normal c normal t Baseline left-parenthesis b Subscript i Baseline right-parenthesis comma
+(7.1)
+where
+t Subscript normal t normal r normal a normal v
+is the time it takes to traverse the interior node
+and determine which of the children the ray passes through,
+p Subscript upper A
+and
+p Subscript upper B
+are the probabilities that the ray passes through each of the child nodes
+(assuming binary subdivision),
+a Subscript i
+and
+b Subscript i
+are the indices of
+primitives in the two child nodes, and
+n Subscript upper A
+and
+n Subscript upper B
+are
+the number of primitives that overlap the regions of the two child nodes,
+respectively. The choice of how primitives are partitioned affects
+the values of the two probabilities as well as the set of primitives on
+each side of the split.
+In pbrt, we will make the simplifying assumption that
+t Subscript normal i normal s normal e normal c normal t Baseline left-parenthesis i right-parenthesis
+is the same for all the primitives; this assumption is probably not too
+far from reality, and any error that it introduces does not seem to affect
+the performance of accelerators very much. Another possibility would be to
+add a method to Primitive that returned an estimate of the number of
+processing cycles that its intersection test requires.
+The probabilities
+p Subscript upper A
+and
+p Subscript upper B
+can be computed using ideas
+from geometric probability. It can be shown that for a convex volume
+upper A
+contained in another convex volume
+upper B
+, the conditional probability that a
+uniformly distributed random ray passing through
+upper B
+will also pass through
+upper A
+is the ratio of
+their surface areas,
+s Subscript upper A
+and
+s Subscript upper B
+:
+p left-parenthesis upper A vertical-bar upper B right-parenthesis equals StartFraction s Subscript upper A Baseline Over s Subscript upper B Baseline EndFraction period
+Because we are interested in the cost for rays passing through the
+node, we can use this result directly. Thus, if we are considering
+refining a region of space
+upper A
+such that there are two new subregions
+with bounds
+upper B
+and
+upper C
+(Figure 7.6), the
+probability that a ray passing through
+upper A
+will also pass through either of
+the subregions is easily computed.
+Figure 7.6: If a node of the bounding hierarchy with
+surface area
+s Subscript upper A
+is split into two children with surface areas
+s Subscript upper B
+and
+s Subscript upper C
+, the probabilities that a ray passing through
+upper A
+also passes through
+upper B
+and
+upper C
+are given by
+s Subscript upper B Baseline slash s Subscript upper A
+and
+s Subscript upper C Baseline slash s Subscript upper A
+, respectively.
+When splitMethod has the value SplitMethod::SAH, the SAH is
+used for building the BVH; a partition of the primitives along the chosen
+axis that gives a minimal SAH cost estimate is found by considering a
+number of candidate partitions. (This is the default SplitMethod,
+and it creates the most efficient hierarchies of the partitioning options.) However, once it
+has refined down to two primitives, the implementation
+switches over to directly partitioning them in half. The incremental
+computational cost for applying the SAH at that point is not beneficial.
+<<Partition primitives using approximate SAH>>=
+if (bvhPrimitives.size() <= 2) {
+<<Partition primitives into equally sized subsets>>
+mid = bvhPrimitives.size() / 2;
+std::nth_element(bvhPrimitives.begin(), bvhPrimitives.begin() + mid,
+bvhPrimitives.end(),
+[dim](const BVHPrimitive &a, const BVHPrimitive &b) {
+return a.Centroid()[dim] < b.Centroid()[dim];
+});
+} else {
+<<Allocate BVHSplitBucket for SAH partition buckets>>
+constexpr int nBuckets = 12;
+BVHSplitBucket buckets[nBuckets];
+<<Initialize BVHSplitBucket for SAH partition buckets>>
+for (const auto &prim : bvhPrimitives) {
+int b = nBuckets * centroidBounds.Offset(prim.Centroid())[dim];
+if (b == nBuckets) b = nBuckets - 1;
+buckets[b].count++;
+buckets[b].bounds = Union(buckets[b].bounds, prim.bounds);
+}
+<<Compute costs for splitting after each bucket>>
+constexpr int nSplits = nBuckets - 1;
+Float costs[nSplits] = {};
+<<Partially initialize costs using a forward scan over splits>>
+int countBelow = 0;
+Bounds3f boundBelow;
+for (int i = 0; i < nSplits; ++i) {
+boundBelow = Union(boundBelow, buckets[i].bounds);
+countBelow += buckets[i].count;
+costs[i] += countBelow * boundBelow.SurfaceArea();
+}
+<<Finish initializing costs using a backward scan over splits>>
+int countAbove = 0;
+Bounds3f boundAbove;
+for (int i = nSplits; i >= 1; --i) {
+boundAbove = Union(boundAbove, buckets[i].bounds);
+countAbove += buckets[i].count;
+costs[i - 1] += countAbove * boundAbove.SurfaceArea();
+}
+<<Find bucket to split at that minimizes SAH metric>>
+int minCostSplitBucket = -1;
+Float minCost = Infinity;
+for (int i = 0; i < nSplits; ++i) {
+<<Compute cost for candidate split and update minimum if necessary>>
+if (costs[i] < minCost) {
+minCost = costs[i];
+minCostSplitBucket = i;
+}
+}
+<<Compute leaf cost and SAH split cost for chosen split>>
+Float leafCost = bvhPrimitives.size();
+minCost = 1.f / 2.f + minCost / bounds.SurfaceArea();
+<<Either create leaf or split primitives at selected SAH bucket>>
+if (bvhPrimitives.size() > maxPrimsInNode || minCost < leafCost) {
+auto midIter = std::partition(bvhPrimitives.begin(),
+bvhPrimitives.end(),
+[=](const BVHPrimitive &bp) {
+int b = nBuckets * centroidBounds.Offset(bp.Centroid())[dim];
+if (b == nBuckets) b = nBuckets - 1;
+return b <= minCostSplitBucket;
+});
+mid = midIter - bvhPrimitives.begin();
+} else {
+<<Create leaf BVHBuildNode>>
+int firstPrimOffset = orderedPrimsOffset->fetch_add(bvhPrimitives.size());
+for (size_t i = 0; i < bvhPrimitives.size(); ++i) {
+int index = bvhPrimitives[i].primitiveIndex;
+orderedPrims[firstPrimOffset + i] = primitives[index];
+}
+node->InitLeaf(firstPrimOffset, bvhPrimitives.size(), bounds);
+return node;
+}
+}
+Rather than exhaustively considering all
+2 n
+possible partitions along the
+axis, computing the SAH for each to select the best, the implementation
+here instead divides the range along the axis into a small number of
+buckets of equal extent. It then only considers partitions at bucket
+boundaries. This approach is more efficient than considering all
+partitions while usually still producing partitions that are nearly as
+effective. This idea is illustrated in Figure 7.7.
+Figure 7.7: Choosing a Splitting Plane with the Surface Area Heuristic for
+BVHs. The projected extent of primitive bounds centroids is
+projected onto the chosen split axis. Each primitive is placed in a
+bucket along the axis based on the centroid of its bounds. The
+implementation then estimates the cost for splitting the primitives using
+the planes at each of the bucket boundaries (solid vertical lines); whichever
+one gives the minimum cost per the surface area heuristic is
+selected.
+<<BVHSplitBucket Definition>>=
+struct BVHSplitBucket {
+int count = 0;
+Bounds3f bounds;
+};
+We have found that 12 buckets usually work well in practice. An
+improvement may be to increase this value when there are many primitives
+and to decrease it when there are few.
+<<Allocate BVHSplitBucket for SAH partition buckets>>=
+constexpr int nBuckets = 12;
+BVHSplitBucket buckets[nBuckets];
+For each primitive, the following fragment determines the
+bucket that its centroid lies in and updates the bucket’s bounds to include
+the primitive’s bounds.
+<<Initialize BVHSplitBucket for SAH partition buckets>>=
+for (const auto &prim : bvhPrimitives) {
+int b = nBuckets * centroidBounds.Offset(prim.Centroid())[dim];
+if (b == nBuckets) b = nBuckets - 1;
+buckets[b].count++;
+buckets[b].bounds = Union(buckets[b].bounds, prim.bounds);
+}
+For each bucket, we now have a count of the number of primitives and the
+bounds of all of their respective bounding boxes. We want to use the SAH
+to estimate the cost of splitting at each of the bucket boundaries. The
+fragment below loops over all the buckets and initializes the
+cost[i] array to store the estimated SAH cost for splitting after
+the ith bucket. (It does not consider a split after the last
+bucket, which by definition would not split the primitives.)
+We arbitrarily set the estimated intersection cost to 1, and then set the
+estimated traversal cost to
+1 slash 2
+. (One of the two of them can always be
+set to 1 since it is the relative, rather than absolute, magnitudes of the
+estimated traversal and intersection costs that determine their effect.)
+However, not only is the absolute amount of computation necessary for node traversal—a
+ray–bounding box intersection—much less than the amount of
+computation needed to intersect a ray with a shape, the full cost of a
+shape intersection test is even higher. It includes the overhead of at
+least two instances of dynamic dispatch (one or more via
+Primitives and one via a Shape), the cost of
+computing all the geometric information needed to initialize a
+SurfaceInteraction if an intersection is found, and any resulting
+costs from possibly applying additional transformations and interpolating animated
+transformations.
+We have intentionally underestimated the performance ratio between these
+two costs because the raw amount of computation each performs does not
+measure their full expense. With a lower traversal cost, the resulting
+BVHs would be deeper and require more nodes. For complex scenes, this
+additional memory use may be undesirable. Even for simpler scenes, visiting more
+nodes when a ray is traced will generally incur the cost of cache misses,
+which not only may reduce performance for that ray, but may harm future
+performance from displacing other useful data from the cache. We have
+found the
+2 colon 1
+ratio that we have used here to make a reasonable trade-off
+between all of these issues.
+In order to be able to choose a split in linear time, the implementation
+first performs a forward scan over the buckets and then a backward scan
+over the buckets that incrementally compute each bucket’s
+cost.
+†
+There is one fewer candidate split than the number of
+buckets, since all splits are between pairs of buckets.
+<<Compute costs for splitting after each bucket>>=
+constexpr int nSplits = nBuckets - 1;
+Float costs[nSplits] = {};
+<<Partially initialize costs using a forward scan over splits>>
+int countBelow = 0;
+Bounds3f boundBelow;
+for (int i = 0; i < nSplits; ++i) {
+boundBelow = Union(boundBelow, buckets[i].bounds);
+countBelow += buckets[i].count;
+costs[i] += countBelow * boundBelow.SurfaceArea();
+}
+<<Finish initializing costs using a backward scan over splits>>
+int countAbove = 0;
+Bounds3f boundAbove;
+for (int i = nSplits; i >= 1; --i) {
+boundAbove = Union(boundAbove, buckets[i].bounds);
+countAbove += buckets[i].count;
+costs[i - 1] += countAbove * boundAbove.SurfaceArea();
+}
+The loop invariant is that countBelow stores the number of primitives that are
+below the corresponding candidate split, and boundsBelow stores
+their bounds. With these values in hand, the value of the first sum in
+Equation (7.1) can be evaluated for each split.
+<<Partially initialize costs using a forward scan over splits>>=
+int countBelow = 0;
+Bounds3f boundBelow;
+for (int i = 0; i < nSplits; ++i) {
+boundBelow = Union(boundBelow, buckets[i].bounds);
+countBelow += buckets[i].count;
+costs[i] += countBelow * boundBelow.SurfaceArea();
+}
+A similar backward scan over the buckets finishes initializing the
+costs array.
+<<Finish initializing costs using a backward scan over splits>>=
+int countAbove = 0;
+Bounds3f boundAbove;
+for (int i = nSplits; i >= 1; --i) {
+boundAbove = Union(boundAbove, buckets[i].bounds);
+countAbove += buckets[i].count;
+costs[i - 1] += countAbove * boundAbove.SurfaceArea();
+}
+Given all the costs, a linear search over the potential splits finds the
+partition with minimum cost.
+<<Find bucket to split at that minimizes SAH metric>>=
+int minCostSplitBucket = -1;
+Float minCost = Infinity;
+for (int i = 0; i < nSplits; ++i) {
+<<Compute cost for candidate split and update minimum if necessary>>
+if (costs[i] < minCost) {
+minCost = costs[i];
+minCostSplitBucket = i;
+}
+}
+<<Compute leaf cost and SAH split cost for chosen split>>
+Float leafCost = bvhPrimitives.size();
+minCost = 1.f / 2.f + minCost / bounds.SurfaceArea();
+To find the best split, we evaluate a simplified version of Equation
+(7.1), neglecting the traversal cost and the division by the
+surface area of the bounding box of all the primitives to compute the
+probabilities
+p Subscript upper A
+and
+p Subscript upper B
+; these have no effect on the choice of the
+best split. That cost is precisely what is stored in costs, so the
+split with minimum cost is easily found.
+<<Compute cost for candidate split and update minimum if necessary>>=
+if (costs[i] < minCost) {
+minCost = costs[i];
+minCostSplitBucket = i;
+}
+To compute the final SAH cost for a split, we need to divide by the surface
+area of the overall bounding box to compute the probabilities
+p Subscript upper A
+and
+p Subscript upper B
+before adding the estimated traversal cost,
+1 slash 2
+. Because we set
+the estimated intersection cost to 1 previously, the estimated cost for
+just creating a leaf node is equal to the number of primitives.
+<<Compute leaf cost and SAH split cost for chosen split>>=
+Float leafCost = bvhPrimitives.size();
+minCost = 1.f / 2.f + minCost / bounds.SurfaceArea();
+If the chosen bucket boundary for partitioning has a lower estimated cost
+than building a node with the existing primitives or if more than the
+maximum number of primitives allowed in a node is present, the
+std::partition() function is used to do the work of reordering nodes
+in the bvhPrimitives array. Recall from its use earlier that it
+ensures that all elements of the array that return true
+from the given predicate appear before those that return false and
+that it returns a pointer to the first element where the predicate returns
+false.
+<<Either create leaf or split primitives at selected SAH bucket>>=
+if (bvhPrimitives.size() > maxPrimsInNode || minCost < leafCost) {
+auto midIter = std::partition(bvhPrimitives.begin(),
+bvhPrimitives.end(),
+[=](const BVHPrimitive &bp) {
+int b = nBuckets * centroidBounds.Offset(bp.Centroid())[dim];
+if (b == nBuckets) b = nBuckets - 1;
+return b <= minCostSplitBucket;
+});
+mid = midIter - bvhPrimitives.begin();
+} else {
+<<Create leaf BVHBuildNode>>
+int firstPrimOffset = orderedPrimsOffset->fetch_add(bvhPrimitives.size());
+for (size_t i = 0; i < bvhPrimitives.size(); ++i) {
+int index = bvhPrimitives[i].primitiveIndex;
+orderedPrims[firstPrimOffset + i] = primitives[index];
+}
+node->InitLeaf(firstPrimOffset, bvhPrimitives.size(), bounds);
+return node;
+}
+7.3.3 Linear Bounding Volume Hierarchies
+While building bounding volume hierarchies using the surface area heuristic
+gives very good results, that approach does have two disadvantages: first,
+many passes are taken over the scene primitives to compute the SAH costs at
+all the levels of the tree. Second, top-down BVH construction is
+difficult to parallelize well: the approach used in
+buildRecursive()—performing parallel construction of independent
+subtrees—suffers from limited independent work until the top few levels
+of the tree have been built, which in turn inhibits parallel scalability.
+(This second issue is particularly an issue on GPUs, which perform poorly
+if massive parallelism is not available.)
+Linear bounding volume hierarchies (LBVHs) were developed to address
+these issues. With LBVHs, the tree is built with a small number of
+lightweight passes over the primitives; tree construction time is linear in
+the number of primitives. Further, the algorithm quickly partitions the
+primitives into clusters that can be processed independently. This
+processing can be fairly easily parallelized and is well suited to GPU
+implementation.
+The key idea behind LBVHs is to turn BVH construction into a sorting
+problem. Because there is no single ordering function for sorting
+multidimensional data, LBVHs are based on Morton codes, which
+map nearby points in
+n
+dimensions to nearby points along the 1D line,
+where there is an obvious ordering function. After the primitives have
+been sorted, spatially nearby clusters of primitives are in contiguous
+segments of the sorted array.
+Morton codes are based on a simple transformation: given
+n
+-dimensional
+integer coordinate values, their Morton-coded representation is found by
+interleaving the bits of the coordinates in base 2. For example, consider
+a 2D coordinate
+left-parenthesis x comma y right-parenthesis
+where the bits of
+x
+and
+y
+are denoted by
+x Subscript i
+and
+y Subscript i
+. The corresponding Morton-coded value is
+midline-horizontal-ellipsis y 3 x 3 y 2 x 2 y 1 x 1 y 0 x 0 period
+Figure 7.8 shows a plot of the 2D points in
+Morton order—note that they are visited along a path that follows a
+reversed “z” shape. (The Morton path is sometimes called “z-order” for
+this reason.) We can see that points with coordinates that are close
+together in 2D are generally close together along the Morton
+curve.
+†
+Figure 7.8: The Order That Points Are Visited along the Morton Curve.
+Coordinate values along the
+x
+and
+y
+axes are shown in binary. If we
+connect the integer coordinate points in the order of their
+Morton indices, we see that the Morton curve visits the points along a
+hierarchical “z”-shaped path.
+A Morton-encoded value also encodes useful information about the position
+of the point that it represents. Consider the case of 4-bit coordinate
+values in 2D: the
+x
+and
+y
+coordinates are integers in
+left-bracket 0 comma 15 right-bracket
+and the
+Morton code has 8 bits:
+y 3 x 3 y 2 x 2 y 1 x 1 y 0 x 0
+. Many interesting properties follow from the encoding; a few examples
+include:
+For a Morton-encoded 8-bit value where the high bit
+y 3
+is set,
+we then know that the high bit of its underlying
+y
+coordinate is set and
+thus
+y greater-than-or-equal-to 8
+(Figure 7.9(a)).
+The next bit value,
+x 3
+, splits the
+x
+axis in the middle (Figure 7.9(b)). If
+y 3
+is set and
+x 3
+is off, for example, then the corresponding point must
+lie in the shaded area of Figure 7.9(c). In
+general, points with a number of matching high bits lie in a power-of-two
+sized and axis-aligned region of space determined by the matching bit values.
+The value of
+y 2
+splits the
+y
+axis into four regions
+(Figure 7.9(d)).
+Figure 7.9: Implications of the Morton Encoding.
+The values of various bits in the Morton value indicate the region of space
+that the corresponding coordinate lies in.
+(a) In 2D, the high bit of the Morton-coded value of a point’s coordinates
+defines a splitting plane along the middle of the
+y
+axis. If the high bit is set, the
+point is above the plane.
+(b) Similarly, the second-highest bit of the Morton value splits the
+x
+axis in the middle.
+(c) If the high
+y
+bit is 1 and the high
+x
+bit is 0, then the point
+must lie in the shaded region.
+(d) The second-from-highest
+y
+bit splits the
+y
+axis into four regions.
+Another way to interpret these bit-based properties is in terms of
+Morton-coded values. For example,
+Figure 7.9(a) corresponds to the index being
+in the range
+left-bracket 8 comma 15 right-bracket
+, and Figure 7.9(c)
+corresponds to
+left-bracket 8 comma 11 right-bracket
+. Thus, given a set of sorted Morton indices, we
+could find the range of points corresponding to an area like
+Figure 7.9(c) by performing a binary search
+to find each endpoint in the array.
+LBVHs are BVHs built by partitioning primitives using
+splitting planes that are at the midpoint of each region of space
+(i.e., equivalent to the SplitMethod::Middle path defined earlier).
+Partitioning is extremely efficient, as it takes advantage of properties of the
+Morton encoding described above.
+Just reimplementing Middle in a different manner is not particularly
+interesting, so in the implementation here, we will build a
+hierarchical linear bounding volume hierarchy (HLBVH). With this
+approach, Morton-curve-based clustering is used to first build trees for
+the lower levels of the hierarchy (referred to as “treelets” in the
+following), and the top levels of the tree are then created using the
+surface area heuristic. The buildHLBVH() method implements this
+approach and returns the root node of the resulting tree.
+<<BVHAggregate Method Definitions>>+=
+BVHBuildNode *BVHAggregate::buildHLBVH(
+Allocator alloc, const std::vector<BVHPrimitive> &bvhPrimitives,
+std::atomic<int> *totalNodes,
+std::vector<Primitive> &orderedPrims) {
+<<Compute bounding box of all primitive centroids>>
+Bounds3f bounds;
+for (const BVHPrimitive &prim : bvhPrimitives)
+bounds = Union(bounds, prim.Centroid());
+<<Compute Morton indices of primitives>>
+std::vector<MortonPrimitive> mortonPrims(bvhPrimitives.size());
+ParallelFor(0, bvhPrimitives.size(), [&](int64_t i) {
+<<Initialize mortonPrims[i] for ith primitive>>
+constexpr int mortonBits = 10;
+constexpr int mortonScale = 1 << mortonBits;
+mortonPrims[i].primitiveIndex = bvhPrimitives[i].primitiveIndex;
+Vector3f centroidOffset = bounds.Offset(bvhPrimitives[i].Centroid());
+Vector3f offset = centroidOffset * mortonScale;
+mortonPrims[i].mortonCode = EncodeMorton3(offset.x, offset.y, offset.z);
+});
+<<Radix sort primitive Morton indices>>
+RadixSort(&mortonPrims);
+<<Create LBVH treelets at bottom of BVH>>
+<<Find intervals of primitives for each treelet>>
+std::vector<LBVHTreelet> treeletsToBuild;
+for (size_t start = 0, end = 1; end <= mortonPrims.size(); ++end) {
+uint32_t mask = 0b00111111111111000000000000000000;
+if (end == (int)mortonPrims.size() ||
+((mortonPrims[start].mortonCode & mask) !=
+(mortonPrims[end].mortonCode & mask))) {
+<<Add entry to treeletsToBuild for this treelet>>
+size_t nPrimitives = end - start;
+int maxBVHNodes = 2 * nPrimitives - 1;
+BVHBuildNode *nodes = alloc.allocate_object<BVHBuildNode>(maxBVHNodes);
+treeletsToBuild.push_back({start, nPrimitives, nodes});
+start = end;
+}
+}
+<<Create LBVHs for treelets in parallel>>
+std::atomic<int> orderedPrimsOffset(0);
+ParallelFor(0, treeletsToBuild.size(), [&](int i) {
+<<Generate ith LBVH treelet>>
+int nodesCreated = 0;
+const int firstBitIndex = 29 - 12;
+LBVHTreelet &tr = treeletsToBuild[i];
+tr.buildNodes =
+emitLBVH(tr.buildNodes, bvhPrimitives, &mortonPrims[tr.startIndex],
+tr.nPrimitives, &nodesCreated, orderedPrims,
+&orderedPrimsOffset, firstBitIndex);
+*totalNodes += nodesCreated;
+});
+<<Create and return SAH BVH from LBVH treelets>>
+std::vector<BVHBuildNode *> finishedTreelets;
+for (LBVHTreelet &treelet : treeletsToBuild)
+finishedTreelets.push_back(treelet.buildNodes);
+return buildUpperSAH(alloc, finishedTreelets, 0,
+finishedTreelets.size(), totalNodes);
+}
+The BVH is built using only the centroids of primitive bounding boxes to
+sort them—it does not account for the actual spatial extent of each
+primitive. This simplification is critical to the performance that HLBVHs
+offer, but it also means that for scenes with primitives that span a wide
+range of sizes, the tree that is built will not account for this variation
+as an SAH-based tree would.
+Because the Morton encoding operates on integer coordinates, we first need
+to bound the centroids of all the primitives so that we can quantize
+centroid positions with respect to the overall bounds.
+<<Compute bounding box of all primitive centroids>>=
+Bounds3f bounds;
+for (const BVHPrimitive &prim : bvhPrimitives)
+bounds = Union(bounds, prim.Centroid());
+Given the overall bounds, we can now compute the Morton code for each
+primitive. This is a fairly lightweight calculation, but given that there
+may be millions of primitives, it is worth parallelizing.
+<<Compute Morton indices of primitives>>=
+std::vector<MortonPrimitive> mortonPrims(bvhPrimitives.size());
+ParallelFor(0, bvhPrimitives.size(), [&](int64_t i) {
+<<Initialize mortonPrims[i] for ith primitive>>
+constexpr int mortonBits = 10;
+constexpr int mortonScale = 1 << mortonBits;
+mortonPrims[i].primitiveIndex = bvhPrimitives[i].primitiveIndex;
+Vector3f centroidOffset = bounds.Offset(bvhPrimitives[i].Centroid());
+Vector3f offset = centroidOffset * mortonScale;
+mortonPrims[i].mortonCode = EncodeMorton3(offset.x, offset.y, offset.z);
+});
+A MortonPrimitive instance is created for each primitive; it stores
+the index of the primitive, as well as its
+Morton code, in the bvhPrimitives array.
+<<MortonPrimitive Definition>>=
+struct MortonPrimitive {
+int primitiveIndex;
+uint32_t mortonCode;
+};
+We use 10 bits for each of the
+x
+,
+y
+, and
+z
+dimensions, giving a
+total of 30 bits for the Morton code. This granularity allows the values
+to fit into a single 32-bit variable. Floating-point centroid offsets
+inside the bounding box are in
+left-bracket 0 comma 1 right-bracket
+, so we scale them by
+2 Superscript 10
+to get integer coordinates that fit in 10 bits. The
+EncodeMorton3() function, which is defined with other bitwise utility
+functions in Section B.2.7, returns the 3D Morton code for the
+given integer values.
+<<Initialize mortonPrims[i] for ith primitive>>=
+constexpr int mortonBits = 10;
+constexpr int mortonScale = 1 << mortonBits;
+mortonPrims[i].primitiveIndex = bvhPrimitives[i].primitiveIndex;
+Vector3f centroidOffset = bounds.Offset(bvhPrimitives[i].Centroid());
+Vector3f offset = centroidOffset * mortonScale;
+mortonPrims[i].mortonCode = EncodeMorton3(offset.x, offset.y, offset.z);
+Once the Morton indices have been computed, we will sort the
+mortonPrims by Morton index value using a radix sort. We have found
+that for BVH construction, our radix sort implementation is noticeably
+faster than using std::sort() from our system’s standard library
+(which is a mixture of a quicksort and an insertion sort).
+<<Radix sort primitive Morton indices>>=
+RadixSort(&mortonPrims);
+Recall that a radix sort differs from most sorting algorithms in that it is
+not based on comparing pairs of values but rather is based on bucketing
+items based on some key. Radix sort can be used to sort integer values by
+sorting them one digit at a time, going from the rightmost digit to the
+leftmost. Especially with binary values, it is worth sorting multiple
+digits at a time; doing so reduces the total number of passes taken over
+the data. In the implementation here, bitsPerPass sets the number
+of bits processed per pass; with the value 6, we have 5 passes to sort the
+30 bits.
+<<BVHAggregate Utility Functions>>=
+static void RadixSort(std::vector<MortonPrimitive> *v) {
+std::vector<MortonPrimitive> tempVector(v->size());
+constexpr int bitsPerPass = 6;
+constexpr int nBits = 30;
+constexpr int nPasses = nBits / bitsPerPass;
+for (int pass = 0; pass < nPasses; ++pass) {
+<<Perform one pass of radix sort, sorting bitsPerPass bits>>
+int lowBit = pass * bitsPerPass;
+<<Set in and out vector references for radix sort pass>>
+std::vector<MortonPrimitive> &in = (pass & 1) ? tempVector : *v;
+std::vector<MortonPrimitive> &out = (pass & 1) ? *v : tempVector;
+<<Count number of zero bits in array for current radix sort bit>>
+constexpr int nBuckets = 1 << bitsPerPass;
+int bucketCount[nBuckets] = { 0 };
+constexpr int bitMask = (1 << bitsPerPass) - 1;
+for (const MortonPrimitive &mp : in) {
+int bucket = (mp.mortonCode >> lowBit) & bitMask;
+++bucketCount[bucket];
+}
+<<Compute starting index in output array for each bucket>>
+int outIndex[nBuckets];
+outIndex[0] = 0;
+for (int i = 1; i < nBuckets; ++i)
+outIndex[i] = outIndex[i - 1] + bucketCount[i - 1];
+<<Store sorted values in output array>>
+for (const MortonPrimitive &mp : in) {
+int bucket = (mp.mortonCode >> lowBit) & bitMask;
+out[outIndex[bucket]++] = mp;
+}
+}
+<<Copy final result from tempVector, if needed>>
+if (nPasses & 1)
+std::swap(*v, tempVector);
+}
+Each pass sorts bitsPerPass bits, starting at
+lowBit.
+<<Perform one pass of radix sort, sorting bitsPerPass bits>>=
+int lowBit = pass * bitsPerPass;
+<<Set in and out vector references for radix sort pass>>
+std::vector<MortonPrimitive> &in = (pass & 1) ? tempVector : *v;
+std::vector<MortonPrimitive> &out = (pass & 1) ? *v : tempVector;
+<<Count number of zero bits in array for current radix sort bit>>
+constexpr int nBuckets = 1 << bitsPerPass;
+int bucketCount[nBuckets] = { 0 };
+constexpr int bitMask = (1 << bitsPerPass) - 1;
+for (const MortonPrimitive &mp : in) {
+int bucket = (mp.mortonCode >> lowBit) & bitMask;
+++bucketCount[bucket];
+}
+<<Compute starting index in output array for each bucket>>
+int outIndex[nBuckets];
+outIndex[0] = 0;
+for (int i = 1; i < nBuckets; ++i)
+outIndex[i] = outIndex[i - 1] + bucketCount[i - 1];
+<<Store sorted values in output array>>
+for (const MortonPrimitive &mp : in) {
+int bucket = (mp.mortonCode >> lowBit) & bitMask;
+out[outIndex[bucket]++] = mp;
+}
+The in and out references correspond to the vector to be sorted and
+the vector to store the sorted values in, respectively. Each pass through
+the loop alternates between the input vector *v and the temporary
+vector for each of them.
+<<Set in and out vector references for radix sort pass>>=
+std::vector<MortonPrimitive> &in = (pass & 1) ? tempVector : *v;
+std::vector<MortonPrimitive> &out = (pass & 1) ? *v : tempVector;
+If we are sorting
+n
+bits per pass, then there are
+2 Superscript n
+buckets that each
+value may land in. We first count how many values will land in each
+bucket; this will let us determine where to store sorted values in the
+output array. To compute the bucket index for the current value, the
+implementation shifts the index so that the bit at index lowBit is at bit 0
+and then masks off the low bitsPerPass bits.
+<<Count number of zero bits in array for current radix sort bit>>=
+constexpr int nBuckets = 1 << bitsPerPass;
+int bucketCount[nBuckets] = { 0 };
+constexpr int bitMask = (1 << bitsPerPass) - 1;
+for (const MortonPrimitive &mp : in) {
+int bucket = (mp.mortonCode >> lowBit) & bitMask;
+++bucketCount[bucket];
+}
+Given the count of how many values land in each bucket, we can compute the
+offset in the output array where each bucket’s values start; this is just
+the sum of how many values land in the preceding buckets.
+<<Compute starting index in output array for each bucket>>=
+int outIndex[nBuckets];
+outIndex[0] = 0;
+for (int i = 1; i < nBuckets; ++i)
+outIndex[i] = outIndex[i - 1] + bucketCount[i - 1];
+Now that we know where to start storing values for each bucket, we can take
+another pass over the primitives to recompute the bucket that each one lands
+in and to store their MortonPrimitives in the output array. This
+completes the sorting pass for the current group of bits.
+<<Store sorted values in output array>>=
+for (const MortonPrimitive &mp : in) {
+int bucket = (mp.mortonCode >> lowBit) & bitMask;
+out[outIndex[bucket]++] = mp;
+}
+When sorting is done, if an odd number of radix sort passes were performed,
+then the final sorted values need to be copied from the temporary vector to
+the output vector that was originally passed to RadixSort().
+<<Copy final result from tempVector, if needed>>=
+if (nPasses & 1)
+std::swap(*v, tempVector);
+Given the sorted array of primitives, we can now find clusters of
+primitives with nearby centroids and then create an LBVH over the
+primitives in each cluster. This step is a good one to parallelize as
+there are generally many clusters and each cluster can be processed
+independently.
+<<Create LBVH treelets at bottom of BVH>>=
+<<Find intervals of primitives for each treelet>>
+std::vector<LBVHTreelet> treeletsToBuild;
+for (size_t start = 0, end = 1; end <= mortonPrims.size(); ++end) {
+uint32_t mask = 0b00111111111111000000000000000000;
+if (end == (int)mortonPrims.size() ||
+((mortonPrims[start].mortonCode & mask) !=
+(mortonPrims[end].mortonCode & mask))) {
+<<Add entry to treeletsToBuild for this treelet>>
+size_t nPrimitives = end - start;
+int maxBVHNodes = 2 * nPrimitives - 1;
+BVHBuildNode *nodes = alloc.allocate_object<BVHBuildNode>(maxBVHNodes);
+treeletsToBuild.push_back({start, nPrimitives, nodes});
+start = end;
+}
+}
+<<Create LBVHs for treelets in parallel>>
+std::atomic<int> orderedPrimsOffset(0);
+ParallelFor(0, treeletsToBuild.size(), [&](int i) {
+<<Generate ith LBVH treelet>>
+int nodesCreated = 0;
+const int firstBitIndex = 29 - 12;
+LBVHTreelet &tr = treeletsToBuild[i];
+tr.buildNodes =
+emitLBVH(tr.buildNodes, bvhPrimitives, &mortonPrims[tr.startIndex],
+tr.nPrimitives, &nodesCreated, orderedPrims,
+&orderedPrimsOffset, firstBitIndex);
+*totalNodes += nodesCreated;
+});
+Each primitive cluster is represented by an LBVHTreelet. It encodes
+the index in the mortonPrims array of the first primitive in the
+cluster as well as the number of following primitives. (See
+Figure 7.10.)
+<<LBVHTreelet Definition>>=
+struct LBVHTreelet {
+size_t startIndex, nPrimitives;
+BVHBuildNode *buildNodes;
+};
+Figure 7.10: Primitive Clusters for LBVH Treelets.
+Primitive centroids are clustered in a uniform grid over their bounds.
+An LBVH is created for each cluster of primitives within a cell that
+are in contiguous sections of the sorted Morton index values.
+Recall from Figure 7.9 that a set of points with
+Morton codes that match in their high bit values lie in a power-of-two
+aligned and sized subset of the original volume. Because we have already
+sorted the mortonPrims array by Morton-coded value, primitives with
+matching high bit values are already together in contiguous sections of the
+array.
+Here we will find sets of primitives that have the same values for the high
+12 bits of their 30-bit Morton codes. Clusters are found by taking a
+linear pass through the mortonPrims array and finding the offsets
+where any of the high 12 bits changes. This corresponds to clustering
+primitives in a regular grid of
+2 Superscript 12 Baseline equals 4096
+total grid cells with
+2 Superscript 4 Baseline equals 16
+cells in each dimension. In practice, many of the grid cells will be
+empty, though we will still expect to find many independent clusters here.
+<<Find intervals of primitives for each treelet>>=
+std::vector<LBVHTreelet> treeletsToBuild;
+for (size_t start = 0, end = 1; end <= mortonPrims.size(); ++end) {
+uint32_t mask = 0b00111111111111000000000000000000;
+if (end == (int)mortonPrims.size() ||
+((mortonPrims[start].mortonCode & mask) !=
+(mortonPrims[end].mortonCode & mask))) {
+<<Add entry to treeletsToBuild for this treelet>>
+size_t nPrimitives = end - start;
+int maxBVHNodes = 2 * nPrimitives - 1;
+BVHBuildNode *nodes = alloc.allocate_object<BVHBuildNode>(maxBVHNodes);
+treeletsToBuild.push_back({start, nPrimitives, nodes});
+start = end;
+}
+}
+When a cluster of primitives has been found for a treelet,
+BVHBuildNodes are immediately allocated for it. (Recall that the
+number of nodes in a BVH is bounded by twice the number of leaf nodes,
+which in turn is bounded by the number of primitives.) It is simpler to
+preallocate this memory now in a serial phase of execution than during
+parallel construction of LBVHs.
+<<Add entry to treeletsToBuild for this treelet>>=
+size_t nPrimitives = end - start;
+int maxBVHNodes = 2 * nPrimitives - 1;
+BVHBuildNode *nodes = alloc.allocate_object<BVHBuildNode>(maxBVHNodes);
+treeletsToBuild.push_back({start, nPrimitives, nodes});
+Once the primitives for each treelet have been identified, we can create
+LBVHs for them in parallel. When construction is finished, the
+buildNodes pointer for each LBVHTreelet will point to the root
+of the corresponding LBVH.
+There are two places where the worker threads building LBVHs must
+coordinate with each other. First, the total number of nodes in all the
+LBVHs needs to be computed and returned via the totalNodes pointer
+passed to buildHLBVH(). Second, when leaf nodes are created for the
+LBVHs, a contiguous segment of the orderedPrims array is needed to
+record the indices of the primitives in the leaf node. Our implementation
+uses atomic variables for both.
+<<Create LBVHs for treelets in parallel>>=
+std::atomic<int> orderedPrimsOffset(0);
+ParallelFor(0, treeletsToBuild.size(), [&](int i) {
+<<Generate ith LBVH treelet>>
+int nodesCreated = 0;
+const int firstBitIndex = 29 - 12;
+LBVHTreelet &tr = treeletsToBuild[i];
+tr.buildNodes =
+emitLBVH(tr.buildNodes, bvhPrimitives, &mortonPrims[tr.startIndex],
+tr.nPrimitives, &nodesCreated, orderedPrims,
+&orderedPrimsOffset, firstBitIndex);
+*totalNodes += nodesCreated;
+});
+The work of building the treelet is performed by emitLBVH(), which
+takes primitives with centroids in some region of space and successively
+partitions them with splitting planes that divide the current region of
+space into two halves along the center of the region along one of the three
+axes.
+Note that instead of taking a pointer to the atomic variable
+totalNodes to count the number of nodes created, emitLBVH()
+updates a non-atomic local variable. The fragment here then only updates
+totalNodes once per treelet when each treelet is done. This
+approach gives measurably better performance than the alternative—having
+the worker threads frequently modify totalNodes over the course of
+their execution. (To understand why this is so, see the discussion of the
+overhead of multi-core memory coherence models in
+Appendix B.6.3.)
+<<Generate ith LBVH treelet>>=
+int nodesCreated = 0;
+const int firstBitIndex = 29 - 12;
+LBVHTreelet &tr = treeletsToBuild[i];
+tr.buildNodes =
+emitLBVH(tr.buildNodes, bvhPrimitives, &mortonPrims[tr.startIndex],
+tr.nPrimitives, &nodesCreated, orderedPrims,
+&orderedPrimsOffset, firstBitIndex);
+*totalNodes += nodesCreated;
+Thanks to the Morton encoding, the current region of space does not need to
+be explicitly represented in emitLBVH(): the sorted
+MortonPrims passed in have some number of matching high bits, which
+in turn corresponds to a spatial bound. For each of the remaining bits in
+the Morton codes, this function tries to split the primitives along the
+plane corresponding to the bitIndex bit (recall
+Figure 7.9(d)) and then calls itself
+recursively. The index of the next bit to try splitting with is passed as
+the last argument to the function: initially it is
+29 minus 12
+, since
+29
+is
+the index of the
+30
+th bit with zero-based indexing, and we previously
+used the high
+12
+bits of the Morton-coded value to cluster the
+primitives; thus, we know that those bits must all match for the cluster.
+<<BVHAggregate Method Definitions>>+=
+BVHBuildNode *BVHAggregate::emitLBVH(BVHBuildNode *&buildNodes,
+const std::vector<BVHPrimitive> &bvhPrimitives,
+MortonPrimitive *mortonPrims, int nPrimitives, int *totalNodes,
+std::vector<Primitive> &orderedPrims,
+std::atomic<int> *orderedPrimsOffset, int bitIndex) {
+if (bitIndex == -1 || nPrimitives < maxPrimsInNode) {
+<<Create and return leaf node of LBVH treelet>>
+++*totalNodes;
+BVHBuildNode *node = buildNodes++;
+Bounds3f bounds;
+int firstPrimOffset = orderedPrimsOffset->fetch_add(nPrimitives);
+for (int i = 0; i < nPrimitives; ++i) {
+int primitiveIndex = mortonPrims[i].primitiveIndex;
+orderedPrims[firstPrimOffset + i] = primitives[primitiveIndex];
+bounds = Union(bounds, bvhPrimitives[primitiveIndex].bounds);
+}
+node->InitLeaf(firstPrimOffset, nPrimitives, bounds);
+return node;
+} else {
+int mask = 1 << bitIndex;
+<<Advance to next subtree level if there is no LBVH split for this bit>>
+if ((mortonPrims[0].mortonCode & mask) ==
+(mortonPrims[nPrimitives - 1].mortonCode & mask))
+return emitLBVH(buildNodes, bvhPrimitives, mortonPrims, nPrimitives,
+totalNodes, orderedPrims, orderedPrimsOffset,
+bitIndex - 1);
+<<Find LBVH split point for this dimension>>
+int splitOffset = FindInterval(nPrimitives, [&](int index) {
+return ((mortonPrims[0].mortonCode & mask) ==
+(mortonPrims[index].mortonCode & mask));
+});
+++splitOffset;
+<<Create and return interior LBVH node>>
+(*totalNodes)++;
+BVHBuildNode *node = buildNodes++;
+BVHBuildNode *lbvh[2] = {
+emitLBVH(buildNodes, bvhPrimitives, mortonPrims, splitOffset,
+totalNodes, orderedPrims, orderedPrimsOffset, bitIndex - 1),
+emitLBVH(buildNodes, bvhPrimitives, &mortonPrims[splitOffset],
+nPrimitives - splitOffset, totalNodes, orderedPrims,
+orderedPrimsOffset, bitIndex - 1)
+};
+int axis = bitIndex % 3;
+node->InitInterior(axis, lbvh[0], lbvh[1]);
+return node;
+}
+}
+After emitLBVH() has partitioned the primitives with the final low
+bit, no more splitting is possible and a leaf node is created.
+Alternatively, it also stops and makes a leaf node if it is down to a small
+number of primitives.
+Recall that orderedPrimsOffset is the offset to the next available
+element in the orderedPrims array. Here, the call to
+fetch_add() atomically adds the value of nPrimitives to
+orderedPrimsOffset and returns its old value before the addition.
+Given space in the array, leaf construction is similar to the
+approach implemented earlier in <<Create leaf BVHBuildNode>>.
+<<Create and return leaf node of LBVH treelet>>=
+++*totalNodes;
+BVHBuildNode *node = buildNodes++;
+Bounds3f bounds;
+int firstPrimOffset = orderedPrimsOffset->fetch_add(nPrimitives);
+for (int i = 0; i < nPrimitives; ++i) {
+int primitiveIndex = mortonPrims[i].primitiveIndex;
+orderedPrims[firstPrimOffset + i] = primitives[primitiveIndex];
+bounds = Union(bounds, bvhPrimitives[primitiveIndex].bounds);
+}
+node->InitLeaf(firstPrimOffset, nPrimitives, bounds);
+return node;
+It may be the case that all the primitives lie on the same side of the
+splitting plane; since the primitives are sorted by their Morton index,
+this case can be efficiently checked by seeing if the first and last
+primitive in the range both have the same bit value for this plane. In
+this case, emitLBVH() proceeds to the next bit without unnecessarily
+creating a node.
+<<Advance to next subtree level if there is no LBVH split for this bit>>=
+if ((mortonPrims[0].mortonCode & mask) ==
+(mortonPrims[nPrimitives - 1].mortonCode & mask))
+return emitLBVH(buildNodes, bvhPrimitives, mortonPrims, nPrimitives,
+totalNodes, orderedPrims, orderedPrimsOffset,
+bitIndex - 1);
+If there are primitives on both sides of the splitting plane, then a binary
+search efficiently finds the dividing point where the bitIndexth bit goes
+from 0 to 1 in the current set of primitives.
+<<Find LBVH split point for this dimension>>=
+int splitOffset = FindInterval(nPrimitives, [&](int index) {
+return ((mortonPrims[0].mortonCode & mask) ==
+(mortonPrims[index].mortonCode & mask));
+});
+++splitOffset;
+Given the split offset, the method can now claim a node to use as an
+interior node and recursively build LBVHs for both partitioned sets of
+primitives. Note a further efficiency benefit from Morton encoding:
+entries in the mortonPrims array do not need to be copied or
+reordered for the partition: because they are all sorted by their Morton
+code value and because it is processing bits from high to low, the two
+spans of primitives are already on the correct sides of the partition
+plane.
+<<Create and return interior LBVH node>>=
+(*totalNodes)++;
+BVHBuildNode *node = buildNodes++;
+BVHBuildNode *lbvh[2] = {
+emitLBVH(buildNodes, bvhPrimitives, mortonPrims, splitOffset,
+totalNodes, orderedPrims, orderedPrimsOffset, bitIndex - 1),
+emitLBVH(buildNodes, bvhPrimitives, &mortonPrims[splitOffset],
+nPrimitives - splitOffset, totalNodes, orderedPrims,
+orderedPrimsOffset, bitIndex - 1)
+};
+int axis = bitIndex % 3;
+node->InitInterior(axis, lbvh[0], lbvh[1]);
+return node;
+Once all the LBVH treelets have been created, buildUpperSAH()
+creates a BVH of all the treelets. Since there are generally tens or
+hundreds of them (and in any case, no more than 4096), this step takes very
+little time.
+<<Create and return SAH BVH from LBVH treelets>>=
+std::vector<BVHBuildNode *> finishedTreelets;
+for (LBVHTreelet &treelet : treeletsToBuild)
+finishedTreelets.push_back(treelet.buildNodes);
+return buildUpperSAH(alloc, finishedTreelets, 0,
+finishedTreelets.size(), totalNodes);
+The implementation of buildUpperSAH() is not included here, as it
+follows the same approach as fully SAH-based BVH construction, just over
+treelet root nodes rather than scene primitives.
+7.3.4 Compact BVH for Traversal
+Once the BVH is built, the last step is to convert it into a compact
+representation—doing so improves cache, memory, and thus
+overall system performance. The final BVH is stored in a linear array in
+memory. The nodes of the original tree are laid out in depth-first order,
+which means that the first child of each interior node is immediately after
+the node in memory. In this case, only the offset to the second
+child of each interior node must be stored
+explicitly. See Figure 7.11 for an
+illustration of the relationship between tree topology and node order in
+memory.
+Figure 7.11: Linear Layout of a BVH in Memory. The nodes of the BVH
+(left) are stored in memory in depth-first order (right). Therefore, for any interior
+node of the tree (A and B in this example), the first child is found
+immediately after the parent node in memory. The second child is found
+via an offset pointer, represented here by lines with arrows. Leaf
+nodes of the tree (D, E, and C) have no children.
+The LinearBVHNode structure stores the information needed to traverse
+the BVH. In addition to the bounding box for each node, for leaf nodes it
+stores the offset and primitive count for the primitives in the node. For
+interior nodes, it stores the offset to the second child as well as which
+of the coordinate axes the primitives were partitioned along when the
+hierarchy was built; this information is used in the traversal routine
+below to try to visit nodes in front-to-back order along the ray.
+The structure is declared to require 32-byte alignment in memory. It could
+otherwise be allocated at an alignment that was sufficient to satisfy the first
+member variable, which would be 4 bytes for the Float-valued
+Bounds3f::pMin::x member variable. Because modern processor caches
+are organized into cache lines of a size that is a multiple of 32, a more
+stringent alignment constraint ensures that no LinearBVHNode
+straddles two cache lines. In turn, no more than a single cache miss will
+be incurred when one is accessed, which improves performance.
+<<LinearBVHNode Definition>>=
+struct alignas(32) LinearBVHNode {
+Bounds3f bounds;
+union {
+int primitivesOffset; // leaf
+int secondChildOffset; // interior
+};
+uint16_t nPrimitives; // 0 -> interior node
+uint8_t axis; // interior node: xyz
+};
+The built tree is transformed to the LinearBVHNode representation by
+the flattenBVH() method, which performs a depth-first
+traversal and stores the nodes in memory in linear order. It is helpful to
+release the memory in the bvhPrimitives array before doing so, since
+that may be a significant amount of storage for complex scenes and is no
+longer needed at this point. This is handled by the resize(0) and shrink_to_fit() calls.
+<<Convert BVH into compact representation in nodes array>>=
+bvhPrimitives.resize(0);
+bvhPrimitives.shrink_to_fit();
+nodes = new LinearBVHNode[totalNodes];
+int offset = 0;
+flattenBVH(root, &offset);
+The pointer to the array of LinearBVHNodes is stored as a
+BVHAggregate member variable.
+<<BVHAggregate Private Members>>+=
+LinearBVHNode *nodes = nullptr;
+Flattening the tree to the linear representation is straightforward; the
+*offset parameter tracks the current offset into the
+BVHAggregate::nodes array. Note that the current node is added to the
+array before any recursive calls to process its children.
+<<BVHAggregate Method Definitions>>+=
+int BVHAggregate::flattenBVH(BVHBuildNode *node, int *offset) {
+LinearBVHNode *linearNode = &nodes[*offset];
+linearNode->bounds = node->bounds;
+int nodeOffset = (*offset)++;
+if (node->nPrimitives > 0) {
+linearNode->primitivesOffset = node->firstPrimOffset;
+linearNode->nPrimitives = node->nPrimitives;
+} else {
+<<Create interior flattened BVH node>>
+linearNode->axis = node->splitAxis;
+linearNode->nPrimitives = 0;
+flattenBVH(node->children[0], offset);
+linearNode->secondChildOffset = flattenBVH(node->children[1], offset);
+}
+return nodeOffset;
+}
+At interior nodes, recursive calls are made to flatten the two subtrees.
+The first one ends up immediately after the current node in the array, as
+desired, and the offset of the second one, returned by its recursive
+flattenBVH() call, is stored in this node’s
+secondChildOffset member.
+<<Create interior flattened BVH node>>=
+linearNode->axis = node->splitAxis;
+linearNode->nPrimitives = 0;
+flattenBVH(node->children[0], offset);
+linearNode->secondChildOffset = flattenBVH(node->children[1], offset);
+7.3.5 Bounding and Intersection Tests
+Given a built BVH, the implementation of the Bounds() method is
+easy: by definition, the root node’s bounds are the bounds of all the
+primitives in the tree, so those can be returned directly.
+<<BVHAggregate Method Definitions>>+=
+Bounds3f BVHAggregate::Bounds() const {
+return nodes[0].bounds;
+}
+The BVH traversal code is quite simple—there are no recursive function
+calls and a small amount of data to maintain about the current state of
+the traversal. The Intersect() method starts by precomputing a few
+values related to the ray that will be used repeatedly.
+<<BVHAggregate Method Definitions>>+=
+pstd::optional<ShapeIntersection>
+BVHAggregate::Intersect(const Ray &ray, Float tMax) const {
+pstd::optional<ShapeIntersection> si;
+Vector3f invDir(1 / ray.d.x, 1 / ray.d.y, 1 / ray.d.z);
+int dirIsNeg[3] = {int(invDir.x < 0), int(invDir.y < 0),
+int(invDir.z < 0)};
+<<Follow ray through BVH nodes to find primitive intersections>>
+int toVisitOffset = 0, currentNodeIndex = 0;
+int nodesToVisit[64];
+while (true) {
+const LinearBVHNode *node = &nodes[currentNodeIndex];
+<<Check ray against BVH node>>
+if (node->bounds.IntersectP(ray.o, ray.d, tMax, invDir, dirIsNeg)) {
+if (node->nPrimitives > 0) {
+<<Intersect ray with primitives in leaf BVH node>>
+for (int i = 0; i < node->nPrimitives; ++i) {
+<<Check for intersection with primitive in BVH node>>
+pstd::optional<ShapeIntersection> primSi =
+primitives[node->primitivesOffset + i].Intersect(ray, tMax);
+if (primSi) {
+si = primSi;
+tMax = si->tHit;
+}
+}
+if (toVisitOffset == 0) break;
+currentNodeIndex = nodesToVisit[--toVisitOffset];
+} else {
+<<Put far BVH node on nodesToVisit stack, advance to near node>>
+if (dirIsNeg[node->axis]) {
+nodesToVisit[toVisitOffset++] = currentNodeIndex + 1;
+currentNodeIndex = node->secondChildOffset;
+} else {
+nodesToVisit[toVisitOffset++] = node->secondChildOffset;
+currentNodeIndex = currentNodeIndex + 1;
+}
+}
+} else {
+if (toVisitOffset == 0) break;
+currentNodeIndex = nodesToVisit[--toVisitOffset];
+}
+}
+return si;
+}
+Each time the following while loop starts an
+iteration, currentNodeIndex holds the offset into the nodes
+array of the node to be visited. It starts with a value of 0, representing
+the root of the tree. The nodes that still need to be visited are stored
+in the nodesToVisit[] array, which acts as a stack;
+toVisitOffset holds the offset to the next free element in the
+stack. With the following traversal algorithm, the number of nodes in the
+stack is never more than the maximum tree depth. A statically allocated
+stack of 64 entries is sufficient in practice.
+<<Follow ray through BVH nodes to find primitive intersections>>=
+int toVisitOffset = 0, currentNodeIndex = 0;
+int nodesToVisit[64];
+while (true) {
+const LinearBVHNode *node = &nodes[currentNodeIndex];
+<<Check ray against BVH node>>
+if (node->bounds.IntersectP(ray.o, ray.d, tMax, invDir, dirIsNeg)) {
+if (node->nPrimitives > 0) {
+<<Intersect ray with primitives in leaf BVH node>>
+for (int i = 0; i < node->nPrimitives; ++i) {
+<<Check for intersection with primitive in BVH node>>
+pstd::optional<ShapeIntersection> primSi =
+primitives[node->primitivesOffset + i].Intersect(ray, tMax);
+if (primSi) {
+si = primSi;
+tMax = si->tHit;
+}
+}
+if (toVisitOffset == 0) break;
+currentNodeIndex = nodesToVisit[--toVisitOffset];
+} else {
+<<Put far BVH node on nodesToVisit stack, advance to near node>>
+if (dirIsNeg[node->axis]) {
+nodesToVisit[toVisitOffset++] = currentNodeIndex + 1;
+currentNodeIndex = node->secondChildOffset;
+} else {
+nodesToVisit[toVisitOffset++] = node->secondChildOffset;
+currentNodeIndex = currentNodeIndex + 1;
+}
+}
+} else {
+if (toVisitOffset == 0) break;
+currentNodeIndex = nodesToVisit[--toVisitOffset];
+}
+}
+Figure 7.12: Visualization of BVH Performance with the Kroken Scene.
+(a) Number of BVH nodes visited when tracing the camera ray at each pixel
+for the scene shown in Figure 1.1.
+Not only are more nodes visited in geometrically complex regions of the
+scene such as the rug, but objects that are not accurately
+bounded by axis-aligned bounding boxes such as the support under the bottom
+shelf lead to many nodes being visited.
+(b) Number of ray–triangle intersection tests performed for the camera ray
+at each pixel. The BVH is effective at limiting the
+number of intersection tests even in highly complex regions of the scene
+like the rug. However, objects that are poorly fit by axis-aligned
+bounding boxes lead to many intersection tests for rays in their vicinity.
+(Kroken scene courtesy of Angelo Ferretti.)
+Figure 7.13: Visualization of BVH Performance with the Moana Island Scene.
+(a) Number of BVH nodes visited when tracing the camera ray at each pixel
+for the scene shown in Figure 1.4.
+As with the Kroken scene, silhouette edges and regions where the ray passes
+by many objects before finding an intersection see the most nodes visited.
+(b) Number of ray–triangle intersection tests performed for the camera ray
+at each pixel. The most geometrically complex trees and the detailed
+ground cover on the beach require the most intersection tests.
+(Scene courtesy of Walt Disney Animation Studios.)
+At each node, the first step is to check if the ray intersects the node’s
+bounding box (or starts inside of it). The node is visited if so, with its
+primitives tested for intersection if it is a leaf node or its children are
+visited if it is an interior node. If no intersection is found, then the
+offset of the next node to be visited is retrieved from
+nodesToVisit[] (or traversal is complete if the stack is empty).
+See Figures 7.12
+and 7.13 for visualizations of how many
+nodes are visited and how many intersection tests are performed at each
+pixel for two complex scenes.
+<<Check ray against BVH node>>=
+if (node->bounds.IntersectP(ray.o, ray.d, tMax, invDir, dirIsNeg)) {
+if (node->nPrimitives > 0) {
+<<Intersect ray with primitives in leaf BVH node>>
+for (int i = 0; i < node->nPrimitives; ++i) {
+<<Check for intersection with primitive in BVH node>>
+pstd::optional<ShapeIntersection> primSi =
+primitives[node->primitivesOffset + i].Intersect(ray, tMax);
+if (primSi) {
+si = primSi;
+tMax = si->tHit;
+}
+}
+if (toVisitOffset == 0) break;
+currentNodeIndex = nodesToVisit[--toVisitOffset];
+} else {
+<<Put far BVH node on nodesToVisit stack, advance to near node>>
+if (dirIsNeg[node->axis]) {
+nodesToVisit[toVisitOffset++] = currentNodeIndex + 1;
+currentNodeIndex = node->secondChildOffset;
+} else {
+nodesToVisit[toVisitOffset++] = node->secondChildOffset;
+currentNodeIndex = currentNodeIndex + 1;
+}
+}
+} else {
+if (toVisitOffset == 0) break;
+currentNodeIndex = nodesToVisit[--toVisitOffset];
+}
+If the current node is a leaf, then the ray must be tested for intersection
+with the primitives inside it. The next node to visit is then found from
+the nodesToVisit stack; even if an intersection is found in the
+current node, the remaining nodes must be visited in case one of them
+yields a closer intersection.
+<<Intersect ray with primitives in leaf BVH node>>=
+for (int i = 0; i < node->nPrimitives; ++i) {
+<<Check for intersection with primitive in BVH node>>
+pstd::optional<ShapeIntersection> primSi =
+primitives[node->primitivesOffset + i].Intersect(ray, tMax);
+if (primSi) {
+si = primSi;
+tMax = si->tHit;
+}
+}
+if (toVisitOffset == 0) break;
+currentNodeIndex = nodesToVisit[--toVisitOffset];
+If an intersection is found, the tMax value can be updated to the
+intersection’s parametric distance along the ray; this makes it possible to efficiently discard any
+remaining nodes that are farther away than the intersection.
+<<Check for intersection with primitive in BVH node>>=
+pstd::optional<ShapeIntersection> primSi =
+primitives[node->primitivesOffset + i].Intersect(ray, tMax);
+if (primSi) {
+si = primSi;
+tMax = si->tHit;
+}
+For an interior node that the ray hits, it is necessary to visit both of
+its children. As described above, it is desirable to visit the first child
+that the ray passes through before visiting the second one in case
+the ray intersects a primitive in the first one. If so, the ray’s
+tMax value can be updated, thus reducing the ray’s extent and thus
+the number of node bounding boxes it intersects.
+An efficient way to perform a front-to-back traversal without incurring the
+expense of intersecting the ray with both child nodes and comparing the
+distances is to use the sign of the ray’s direction vector for the
+coordinate axis along which primitives were partitioned for the current
+node: if the sign is negative, we should visit the second child before the
+first child, since the primitives that went into the second child’s subtree
+were on the upper side of the partition point. (And conversely for a
+positive-signed direction.) Doing this is straightforward: the offset for
+the node to be visited first is copied to currentNodeIndex, and the offset for the
+other node is added to the nodesToVisit stack. (Recall that the first child
+is immediately after the current node due to the depth-first layout of
+nodes in memory.)
+<<Put far BVH node on nodesToVisit stack, advance to near node>>=
+if (dirIsNeg[node->axis]) {
+nodesToVisit[toVisitOffset++] = currentNodeIndex + 1;
+currentNodeIndex = node->secondChildOffset;
+} else {
+nodesToVisit[toVisitOffset++] = node->secondChildOffset;
+currentNodeIndex = currentNodeIndex + 1;
+}
+The BVHAggregate::IntersectP()
+method is essentially the same as the regular intersection method, with the
+two differences that Primitive’s IntersectP() methods
+are called rather than Intersect(), and traversal stops immediately
+when any intersection is found. It is thus not included here.

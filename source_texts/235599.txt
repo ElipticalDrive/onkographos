@@ -1,0 +1,125 @@
+SfM, MVS, visual-inertial SLAM, 3D Gaussian Splatting and map-based localization in Rust - gsplat-cuda: TSDF fusion and surface nets on the GPU, in slabs by rsasaki0109 · Pull Request #411 · rsasaki0109/visloc-rs
+
+gsplat-cuda: TSDF fusion and surface nets on the GPU, in slabs by rsasaki0109 · Pull Request #411 · rsasaki0109/visloc-rs · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+rsasaki0109
+commented
+Oct 29, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+TSDF fusion and surface-nets extraction on the GPU for the CUDA meshes: gsplat_mesh_cuda --gpu-tsdf, mesh::extract_mesh_gpu, CudaGsplat::tsdf_surface. It uses the CPU Tsdf's maths, options and filters. Stacked on #409.
+Allocation first: every view is rendered once, and the 8^3-voxel blocks of its truncation band go into an open-addressing set on the device. So every block sees every view; the CPU allocates as it fuses, and a block first touched by view k misses views 0 to k-1.
+Slabs: the sorted blocks are fused in slabs along x of at most --slab-blocks blocks (default 65536, 0.67 GB of voxels). Each slab also holds the next layer up for its top face's cells. Each slab emits its vertices and its edges with a sign change, and the host assembles the quads across slabs with a parallel sorted lookup (rayon). Memory stays bounded at any voxel size.
+View cache: the views' depth and colour stay on the device up to 2 GiB, instead of being rendered again for every slab.
+CPU path: Mesh::remove_small_components counts per component in a vector instead of a hash map, which speeds up the CPU path too.
+ABI: CUDA ABI 7.
+Validation (tests/tsdf.rs)
+One view: both sides allocate before fusing, so the meshes must match. Every vertex is within 4e-4 voxels of the CPU's, colours are within 1 of 255, and the triangles are the same.
+Four views: the surface is bit-identical in 1 slab or 30, with or without the view cache, and 99.8% of its vertices lie within 0.01 voxels of the CPU's.
+Lints and tests: cargo fmt, clippy -D warnings and rustdoc -D warnings are clean, and the gsplat-cuda and gsplat-core tests pass.
+ETH3D (baseline splats, ETH3D-oriented options, 1 cm voxels, depths up to 20 m; another training run shared the GPU)
+Scene
+Blocks
+CPU TSDF: F1 at 2 cm, wall, peak RSS
+GPU TSDF: F1 at 2 cm, wall, peak RSS
+terrains
+834k
+34.1%, 24.0 s, 10.3 GB
+34.1%, 5.4 s, 1.6 GB
+playground
+2.35M
+out of memory (11 GB)
+44.5%, 12.0 s, 4.2 GB
+office
+786k
+21.4%, 20.3 s, 9.8 GB
+21.2%, 4.5 s, 1.5 GB
+Quality: F1 matches the CPU's to 0.2 points. The GPU carves slightly more, because every block sees every view.
+playground: it no longer needs the 1.5 cm / 14 m exception. At 1 cm it scores 44.5% against 43.9% before.
+Time breakdown on playground: fusion takes 6.5 s, quad assembly 1.9 s and the filters 1.0 s. Without the view cache, fusion took 31.6 s, because each of the 38 slabs re-rendered the 38 views.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01ALg7o2tEeih482YpNj56bs
+gsplat-cuda: TSDF fusion and surface nets on the GPU, in slabs (ABI 7)
+…
+5780a77
+```
+`gsplat_mesh_cuda --gpu-tsdf` (`mesh::extract_mesh_gpu`,
+`CudaGsplat::tsdf_surface`) fuses the median depth and extracts the mesh on
+the device (native/gsplat_cuda/tsdf.cuh), with visloc_gsplat_core's `Tsdf`
+maths, options and filters.
+
+- Allocation first: every view is rendered once and the 8^3-voxel blocks
+  of its truncation band go into an open-addressing set on the device, so
+  every block sees every view (the CPU allocates as it fuses).
+- Slabs: the sorted blocks are fused in slabs along x of at most
+  `slab_blocks` (default 65536), each with the next layer up for its top
+  face's cells; each slab emits its cells' vertices and the edges with a
+  sign change, and the host assembles the quads across slabs by a parallel
+  sorted lookup (rayon).
+- View cache: the views' depth and colour stay on the device up to 2 GiB,
+  instead of rendering every view again per slab.
+- `Mesh::remove_small_components` counts per component in a vector instead
+  of a hash map (the CPU path gets it too).
+- Tests: one view gives the CPU's mesh (vertices within 4e-4 voxels,
+  colours within 1, the same triangles); four views give a bit-identical
+  surface in 1 or 30 slabs, with or without the cache, and 99.8% of the
+  vertices within 0.01 voxels of the CPU's.
+- ETH3D at 1 cm, 20 m (baseline splats): terrains 34.1% in 5.4 s / 1.6 GB
+  (CPU 34.1%, 24.0 s / 10.3 GB), office 21.2% in 4.5 s / 1.5 GB (CPU
+  21.4%, 20.3 s / 9.8 GB), playground 44.5% in 12.0 s / 4.2 GB (the CPU
+  ran out of WSL's 11 GB).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01ALg7o2tEeih482YpNj56bs
+```
+rsasaki0109
+mentioned this pull request
+Oct 29, 2026
+gsplat-cuda: step wall time in the bench; three optimizations measured, not adopted
+#412
+Merged
+Merge gsplat-cuda-normal-loss (with origin/main) into gsplat-cuda-tsdf
+…
+5060f4b
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01ALg7o2tEeih482YpNj56bs
+```
+Base automatically changed from
+gsplat-cuda-normal-loss
+to
+main
+October 30, 2026 09:12
+Hide details
+View details
+rsasaki0109
+merged commit c60f97d
+into
+main
+Oct 30, 2026
+13 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+rsasaki0109
+deleted the
+gsplat-cuda-tsdf
+branch
+October 30, 2026 09:12
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,478 @@
+Simulation platform for general-purpose robotics & embodied AI learning. - [MISC] Speed up raycast BVH rebuild by removing atomic contention in the scene-extent reduction. by Kashu7100 · Pull Request #3162 · Genesis-Embodied-AI/genesis-world
+
+[MISC] Speed up raycast BVH rebuild by removing atomic contention in the scene-extent reduction. by Kashu7100 · Pull Request #3162 · Genesis-Embodied-AI/genesis-world · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Kashu7100
+commented
+Aug 3, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Description
+LBVH.compute_aabb_centers_and_scales reduced the per-batch scene extent (used only to normalize Morton codes) with a flat atomic reduction:
+```
+for i_b, i_a in qd.ndrange(self.n_batches, self.n_aabbs):
+    qd.atomic_min(self.aabb_min[i_b], self.aabbs[i_b, i_a].min)
+    qd.atomic_max(self.aabb_max[i_b], self.aabbs[i_b, i_a].max)
+```
+Every one of the n_aabbs lanes of a batch contends on the same two vec3 cells. For a batched scene with articulated collision geometry that turns a trivially memory-bound min/max into the single most expensive kernel of the per-step BVH rebuild.
+Updated per @duburcqa's review (the first revision hand-rolled a two-stage reduction; this one uses the built-in primitives). The fold now goes through qd.simt.block.reduce_min / qd.simt.block.reduce_max: every lane folds a strided slice in registers, the block reduction collapses the block, and only thread 0 issues an atomic. A batch then contends over as many atomics as it has blocks rather than as many as it has AABBs. Consecutive lanes read consecutive AABBs, so the strided walk stays coalesced.
+The launch geometry is decided on the host at construction:
+Block width — the widest of 256 / 128 / 64 that a batch can fill. block.reduce_* requires a multiple of the subgroup size, which is 32 on CUDA / Metal / Vulkan-on-NVIDIA and 64 on AMDGPU, and Quadrants only accepts a non-power-of-two block_dim on CUDA / Vulkan / AMDGPU, so every candidate is a power of two and a multiple of 64 and no backend has to be queried on the host. Clamping to what a batch can actually fill keeps a small tree from launching blocks whose lanes have nothing to fold.
+Blocks per batch — max(1, n_aabbs // (block_width * 32)). The block reduction costs the same per block whatever its slice is worth (a shuffle tree, a shared-memory staging round and a barrier), so splitting a batch across more blocks than that stops paying off and starts costing. That threshold is measured, not guessed — see the tuning note at the end.
+A tree too small for even one block (n_aabbs < 64), and the CPU backend (no subgroup shuffles), keep the flat reduction. Contention is bounded by n_aabbs there anyway.
+The output is bit-identical: min/max is exact, associative and commutative, so the fold order cannot change a single bit. Every lane is seeded with an actual AABB of its batch, so no lane is left uninitialized and no monoid identity is needed.
+Related Issue
+No open issue. Direct follow-up to #3078 ("Speed up raycast sensors by splitting the rigid collision BVH into static and dynamic subsets"): that split correctly keeps static geometry on one shared tree, but the dynamic subset still rebuilds one full LBVH per env per step, and this reduction was the dominant kernel inside that rebuild.
+Motivation and Context
+Profiling a raycast DepthCamera in a batched scene with two fixed-base articulated robots, almost none of the per-step cost was actually casting rays — it was the BVH rebuild, and within it this one kernel. The cost scales with n_batches * n_aabbs and is nearly independent of ray count, which is why it shows up as "raycast sensors get slower with more envs" rather than "with higher resolution".
+Results
+One RTX 3080, CUDA backend, quadrants 1.3.0, based on 70a0f413. Every figure is a median of medians over 3 independent runs.
+The kernel itself, compute_aabb_centers_and_scales, median of 60 launches over 5746 AABBs per batch:
+n_batches
+before
+after
+speedup
+1
+0.287 ms
+0.026 ms
+11.1x
+64
+7.757 ms
+0.069 ms
+112x
+256
+26.207 ms
+0.204 ms
+129x
+1024
+91.396 ms
+0.667 ms
+137x
+2048
+182.622 ms
+1.262 ms
+145x
+End to end, scene.step() + sensor.read(), median over 25 steps. Scene: plane + fixed-base Go2 + Franka Panda + 8 static cylinders; raycast DepthCamera at 64x64. The movable tree is n_envs x 5746, the shared static tree 1 x 1692:
+n_envs
+before
+after
+speedup
+1
+3.476 ms
+2.585 ms
+1.34x
+256
+39.867 ms
+12.014 ms
+3.32x
+1024
+132.683 ms
+47.834 ms
+2.77x
+2048
+286.556 ms
+105.358 ms
+2.72x
+The two tables agree on where the time goes: the end-to-end saving tracks the kernel saving to within run-to-run spread (27.9 ms against 26.0 ms at 256 envs, 84.8 ms against 90.7 ms at 1024, 181.2 ms against 181.4 ms at 2048). So essentially the whole end-to-end gain is this one reduction, and after the change it is no longer a significant part of the step. n_envs=1 is dominated by fixed per-step cost and is correspondingly noisy (2.4-3.2 ms after, 3.1-3.6 ms before); treat that row as "unchanged to somewhat better".
+How Has This Been / Can This Be Tested?
+Environment: Linux x86-64, single RTX 3080 (10 GB), CUDA backend, Python 3.12.8, quadrants 1.3.0, torch 2.13.0+cu130, based on 70a0f413.
+Test: tests/core/test_bvh.py::test_scene_bounds asserts the per-batch aabb_min / aabb_max that build() produces against a host-side reduction of the input AABBs, exactly (atol=rtol=0) — the reduction selects an input value, so no rounding is involved and no tolerance is warranted. It runs off the existing lbvh fixture, and the parametrized sizes cover the flat path (1), the narrowest cooperative block (64), a block width that does not divide the AABB count (255), the widest block (1776), and several blocks per batch (16384). No existing test covers those two fields: test_morton_code only checks that the codes come out sorted, and test_build_tree checks node bounds against their children, which are computed by a separate kernel from separate storage.
+Zeroing out the block reduction (block_min[i] = lane_min[i]) makes every cooperative size fail and leaves the flat one passing, so the assertion does bite on the path this PR adds.
+tests/core/test_bvh.py — 26 passed with --backend gpu, 26 passed with --backend cpu.
+tests/sensors/test_raycaster.py and tests/coupling/test_hybrid.py (the SAP coupler is the other LBVH consumer) — 28 passed.
+Screenshots (if appropriate):
+n/a
+Checklist:
+I read the CONTRIBUTING document.
+I followed the Submitting Code Changes section of CONTRIBUTING document.
+I tagged the title correctly (including BUG FIX/FEATURE/MISC/BREAKING)
+I updated the documentation accordingly or no change is needed.
+I tested my changes and added instructions on how to test it for reviewers.
+I have added tests to cover my changes.
+All new and existing tests passed.
+Tuning note: why blocks per batch is capped
+Same setup, kernel only, 5746 AABBs per batch, varying how many blocks each batch is split across (block width 256):
+blocks / batch
+1
+2
+5
+11
+22
+n_batches=1
+0.026 ms
+0.026 ms
+0.030 ms
+0.033 ms
+0.042 ms
+n_batches=64
+0.069 ms
+0.087 ms
+0.153 ms
+0.287 ms
+0.595 ms
+n_batches=256
+0.204 ms
+0.254 ms
+0.477 ms
+1.020 ms
+2.009 ms
+More blocks is monotonically worse once each block's slice gets thin, which is what the n_aabbs // (block_dim * 32) cap encodes. Block width 128 against 256 is within ~3% across these shapes, so 256 is kept to match the width Quadrants' own device-wide reduce uses.
+Notes for reviewers / possible follow-ups
+Two further items in the same rebuild path, deliberately not included here to keep this PR to one reviewable change:
+compute_bounds does a host-side while not is_done loop, launching one kernel per tree layer and reading its return value back to the CPU each time (~21 launches + 21 syncs per step, independent of batch size). It is most of the fixed cost raycasting shows at n_envs=1. A single-launch Karras bottom-up refit with an atomic per-node counter fixes it, but it needs explicit qd.simt.grid.mem_fence() release/acquire pairs around the counter — without them it is a data race that silently undersizes internal bounds (I measured up to 1.5 m of wrong depth). It also stops paying off above a few hundred envs, so it wants gating on n_batches. Worth its own PR.
+n_radix_sort_groups is hardcoded to 64 at three LBVH(...) call sites in genesis/engine/sensors/raycaster.py (and to min(64, n_slots) in genesis/vis/viewer_plugins/raycast.py), independent of n_batches, while the LBVH default is 256. Sizing it so n_batches * n_groups saturates the device looks like a further easy win.
+Structurally, the remaining rebuild cost is still spent re-deriving a tree whose topology barely changes: faces on a rigid link move rigidly with that link. A refit (or a two-level static-per-link BLAS + small TLAS) would make the dynamic subset's rebuild scale with link count rather than face count x env count. Happy to discuss if that is of interest.
+🤖 Generated with Claude Code
+duburcqa
+reviewed
+Aug 3, 2026
+View reviewed changes
+Comment thread
+genesis/engine/bvh.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Milotrince
+mentioned this pull request
+Aug 4, 2026
+[MISC] Fix the heterogeneous parity test on Apple Metal.
+#3167
+Closed
+5 tasks done
+jeetrex17
+commented
+Aug 21, 2026
+Copy link
+Copy Markdown
+Contributor
+Hi @Kashu7100, I checked this against current main. The optimization is still relevant: LBVH.compute_aabb_centers_and_scales() still performs the flat per-AABB atomic_min / atomic_max reduction, and movable raycast BVHs still rebuild per environment.
+I also saw Alexis’s feedback that this should use Quadrants’ built-in reduction primitives rather than the handwritten two-stage reduction. Genesis now uses Quadrants 1.3.0, so the implementation would need to be refreshed and revalidated against the current API.
+Are you planning to continue this PR? If not, I’d be happy to prepare a superseding draft on current main, crediting this PR and preserving its intent, while using the Quadrants reduction primitives and adding focused correctness coverage and updated benchmarks.
+Kashu7100
+commented
+Aug 21, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Thanks for the heads up. I can finish this PR.
+Kashu7100
+force-pushed
+the
+misc/bvh-extent-reduction
+branch
+2 times, most recently
+from
+83eb134 to
+bc3a0ef
+Compare
+August 24, 2026 23:43
+Kashu7100
+marked this pull request as ready for review
+August 24, 2026 23:53
+Kashu7100
+requested a review
+from YilingQiao
+as a code owner
+August 24, 2026 23:53
+[MISC] Speed up raycast BVH rebuild by removing atomic contention in …
+…
+75d13dd
+```
+…the scene-extent reduction.
+
+`LBVH.compute_aabb_centers_and_scales` reduced the per-batch scene extent with a flat atomic
+reduction: every one of the `n_aabbs` lanes of a batch contended on the same two vec3 cells. For a
+batched scene with articulated collision geometry that turned a trivially memory-bound min/max into
+the dominant kernel of the per-step BVH rebuild.
+
+Fold it with the built-in block reduction instead: each block folds a strided slice in registers,
+`qd.simt.block.reduce_min` / `reduce_max` collapse the block, and only thread 0 issues an atomic, so
+a batch contends over as many atomics as it has blocks rather than as many as it has AABBs. The
+block width is clamped to what a batch can fill and kept a multiple of 64 (a multiple of every
+supported subgroup size); a tree too small for one block, and the CPU backend, keep the flat
+reduction.
+
+Output is bit-identical: min / max is exact, associative and commutative.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+Kashu7100
+force-pushed
+the
+misc/bvh-extent-reduction
+branch
+from
+bc3a0ef to
+75d13dd
+Compare
+August 25, 2026 18:21
+Kashu7100
+added
+the
+ready for review
+First pass review complete and ready for final review and merge.
+label
+Aug 26, 2026
+duburcqa
+reviewed
+Aug 27, 2026
+View reviewed changes
+Comment thread
+tests/core/test_bvh.py
+Outdated
+aabbs_min = (np.random.rand(n_batches, n_aabbs, 3).astype(gs.np_float) - 0.5) * 20.0
+aabbs_max = aabbs_min + np.random.rand(n_batches, n_aabbs, 3).astype(gs.np_float)
+def scene_extent(cooperative):
+duburcqa
+Aug 27, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Remove this function and use a for-loop to validate cooperative=True/False.
+duburcqa
+reviewed
+Aug 27, 2026
+View reviewed changes
+Comment thread
+tests/core/test_bvh.py
+Outdated
+# The kernel branches on this at compile time, so it has to be set before the first call.
+lbvh.extent_reduce_coop = lbvh.extent_reduce_coop and cooperative
+lbvh.compute_aabb_centers_and_scales()
+return lbvh.aabb_min.to_numpy(), lbvh.aabb_max.to_numpy(), lbvh.scale.to_numpy()
+duburcqa
+Aug 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+to_numpy / to_torch is prohibited in unit tests.
+duburcqa
+reviewed
+Aug 27, 2026
+View reviewed changes
+Comment thread
+tests/core/test_bvh.py
+Outdated
+Comment on lines
++87
+to
++90
+aabb = AABB(n_batches=n_batches, n_aabbs=n_aabbs)
+aabb.aabbs.min.from_numpy(aabbs_min)
+aabb.aabbs.max.from_numpy(aabbs_max)
+lbvh = LBVH(aabb)
+duburcqa
+Aug 27, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Use our 'lbvh' fixture if possible.
+duburcqa
+reviewed
+Aug 27, 2026
+View reviewed changes
+Comment thread
+tests/core/test_bvh.py
+Outdated
+Comment on lines
++91
+to
++95
+# Quadrants only accepts a non-power-of-two `block_dim` on CUDA / Vulkan / AMDGPU, and `block.reduce_*` needs
+# a multiple of the subgroup size (64 on AMDGPU). Assert it here so a bad width fails on every backend.
+block_dim = lbvh.extent_reduce_block_dim
+if lbvh.extent_reduce_coop:
+assert block_dim & (block_dim - 1) == 0 and block_dim % 64 == 0 and block_dim <= n_aabbs
+duburcqa
+Aug 27, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Remove this check, it makes no sense.
+duburcqa
+reviewed
+Aug 27, 2026
+View reviewed changes
+Comment thread
+tests/core/test_bvh.py
+Outdated
+[(1, 1), (63, 4), (64, 4), (65, 3), (255, 2), (256, 8), (1776, 64), (12345, 2)],
+)
+@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
+def test_scene_extent_reduction(n_aabbs, n_batches):
+duburcqa
+Aug 27, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Make sure this unit test is not redundant with any of the existing unit tests.
+duburcqa
+reviewed
+Aug 27, 2026
+View reviewed changes
+Comment thread
+tests/core/test_bvh.py
+Outdated
+Comment on lines
++73
+to
++74
+"n_aabbs, n_batches",
+[(1, 1), (63, 4), (64, 4), (65, 3), (255, 2), (256, 8), (1776, 64), (12345, 2)],
+duburcqa
+Aug 27, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I doubt checking 8 configurations is really necessary. 5-6 should be more than enough.
+duburcqa
+reviewed
+Aug 27, 2026
+View reviewed changes
+Comment thread
+tests/core/test_bvh.py
+Outdated
+Comment on lines
++78
+to
++82
+"""The block-cooperative scene-extent reduction must agree with the flat atomic one, bit for bit.
+The sizes cover every branch of its launch geometry: no cooperative path at all, a block narrower than the
+maximum, a block width that does not divide the AABB count, and several blocks per batch.
+"""
+duburcqa
+Aug 27, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Docstring in unit tests is violating the guidelines. Please read them (CLAUDE.md for AI agents, CODING_GUIDELINES.md for humans)
+duburcqa
+reviewed
+Aug 27, 2026
+View reviewed changes
+Comment thread
+tests/core/test_bvh.py
+Outdated
+[(1, 1), (63, 4), (64, 4), (65, 3), (255, 2), (256, 8), (1776, 64), (12345, 2)],
+)
+@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
+def test_scene_extent_reduction(n_aabbs, n_batches):
+duburcqa
+Aug 27, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I don't like the name of this test. It is not clear which feature is being validated here.
+duburcqa
+removed
+the
+ready for review
+First pass review complete and ready for final review and merge.
+label
+Aug 28, 2026
+[MISC] Assert the BVH scene bounds against a host-side reduction.
+…
+59583cb
+```
+Validate `LBVH.aabb_min` / `aabb_max` directly against the min / max of the input AABBs instead of
+comparing the block-cooperative reduction against the flat one, and drive the tree through the `lbvh`
+fixture. The parametrized sizes cover the flat path, each block width, a width that does not divide
+the AABB count, and several blocks per batch; the backend dimension is left to the session fixture.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+github-actions
+Bot
+commented
+Aug 29, 2026
+Copy link
+Copy Markdown
+⚠️ Abnormal Benchmark Result Detected ➡️ Report
+duburcqa
+force-pushed
+the
+misc/bvh-extent-reduction
+branch
+from
+97b4c68 to
+18ea719
+Compare
+August 29, 2026 13:14
+Rename the scene-extent reduction state and pack its coverage into th…
+…
+cecb866
+```
+…e Morton code test.
+```
+duburcqa
+force-pushed
+the
+misc/bvh-extent-reduction
+branch
+from
+18ea719 to
+cecb866
+Compare
+August 29, 2026 13:19
+Hide details
+View details
+duburcqa
+merged commit daf3517
+into
+Genesis-Embodied-AI:main
+Aug 29, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

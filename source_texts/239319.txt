@@ -1,0 +1,128 @@
+wukong-shader-539ebc039e965dfd.zip With #985 and #986 applied, several Nanite persistent-culling compute shaders in Black Myth: Wukong spend almost all their GPU time in loops that never exit on their own. Dispatch time scales with KYTY_...
+
+Wukong: Nanite persistent-culling compute shaders never exit, every group runs to the loop cap · Issue #1072 · KytyPS5/KytyPS5 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Wukong: Nanite persistent-culling compute shaders never exit, every group runs to the loop cap #1072
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Wukong: Nanite persistent-culling compute shaders never exit, every group runs to the loop cap#1072
+Copy link
+Description
+rohit267
+opened on Oct 5, 2026
+Issue body actions
+wukong-shader-539ebc039e965dfd.zip
+With #985 and #986 applied, several Nanite persistent-culling compute shaders in Black Myth: Wukong spend almost all their GPU time in loops that never exit on their own. Dispatch time scales with KYTY_SHADER_LOOP_LIMIT. On the title screen three of them are about 53% of GPU time (316 of 591 ms per second at cap 4096). This follows up on the discussion in #986.
+Setup: Black Myth: Wukong PPSA23226 v01.000.021, Windows 11, RTX 4070, driver 595.71, db17585 + #985 + #986 + the phi fix.
+GPU time per dispatch (Vulkan timestamp queries; each dispatch is 1440 groups x 64 threads):
+shader
+cap 4096
+cap 2048
+cap 512
+539ebc039e965dfd
+20.4 ms
+-
+2.6 ms
+7851ac82b44e6ec6
+18.7 ms
+10.6 ms
+3.1 ms
+1a77a43e9fa6a44e
+13.6 ms
+5.8 ms
+-
+70a429e729343769
+13.1 ms
+-
+-
+Title screen: about 1 fps on the boot/loading screen at the 65536 default, 5-6 fps at 4096, about 8 fps at 512 (the picture looks the same).
+Shader 539ebc039e965dfd: code_words=4448, 3047 instructions, CFG 132 blocks / 3 loops / 3 back edges (157 after structurizing), 283072 SPIR-V words, wave64, 64 s_cbranch_execz. Notes from the decoded RDNA2 listing:
+The back edge is s_branch 0x100 at 0x4198 and s_endpgm is at 0x419c. The only branches to it are s_cbranch_vccnz at 0x2c0 and 0x324.
+The 0x2c0 exit needs v36 == 0 && s58 <= LDS[0]. LDS[0] holds the old value returned by buffer_atomic_add v1(=1) ... offset:4 glc (a claim counter; lane 0 with exec=1).
+Constant buffer: dword[4] = 0x00800000, so s58 = 0x20000; dword[68] = 0x00200000 is s60. They look like capacities (8M, 2M), not produced-work counts.
+v36 only becomes 0 on the path at 0x190, when a 16-wide claim (buffer_atomic_add 16, offset:12) returns an index >= s60.
+Slots are 8 bytes and 0xFFFFFFFF/0xFFFFFFFF means empty. The loads at 0x1bc are glc+dlc, and consumed slots are reset with buffer_store_dwordx2 -1,-1 glc at 0x417c.
+Atomics hit the 44-byte state buffer at byte offsets 0, 4, 8, 12, 16, 20, 28, 36 and 40.
+State seen just before one dispatch (CPU-side view of guest memory, never synced from the GPU, so possibly stale; binding numbers come from the SPIR-V):
+State buffer (binding 1, 44 B): offsets 4 and 12 = 0 and 0; offsets 16 and 20 = 0x23b2 each; the rest 0.
+Slot queue (binding 2, 41 MiB): the first 384 bytes were all 0x00000000, not 0xFFFFFFFF.
+No after-dispatch values captured yet.
+Things to check (from the #986 discussion, none verified):
+Are the counters and the -1 slot markers reset before each dispatch (a CP fill/DMA or a small compute pass that we skip or reorder)?
+How does the buffer_atomic_add ... glc return written by lane 0 with exec=1 reach LDS[0] and the other lanes on a wave64 shader?
+Forward progress between workgroups: a persistent queue assumes producer groups keep running while consumers spin.
+To capture the counters: in RenderExecutor::DispatchDirect, after recording the dispatch, call m_context.GetCommandScheduler().FlushAndWait(), then m_context.GetBufferCache().ReadMemory(source.address, min(source.size, 4096)) for each bindings.buffer_sources entry and print the first dwords at source.address. Doing the same drain + ReadMemory before recording gives a GPU-accurate "before".
+I have the decoded RDNA2 listing and the SPIR-V disassembly of 539ebc039e965dfd and can share them if they would help.
+Activity
+wuboo commented on Oct 5, 2026
+wuboo
+on Oct 5, 2026
+Contributor
+More actions
+Thanks for writing this up. The before-dispatch snapshot is a useful hint: the slot queue reading zeros instead of the 0xFFFFFFFF empty marker, with the claim counters at 0, fits the reset theory. If the pass that fills the queue with -1 (a CP DMA/fill packet or a small compute pass) is skipped, reordered, or not visible to this dispatch, consumers would never see an empty slot and the exit condition can't be reached. A next step for whoever picks this up is to log which packet writes 0xFFFFFFFF to that buffer and whether it executes before the dispatch on the GPU timeline, not just in the CPU-side view.
+ogeidexe
+added a commit that references this issue on Oct 6, 2026
+graphics: add opt-in compute dispatch buffer inspector for persistent…
+...
+2b8acb4
+theantipopau commented on Oct 12, 2026
+theantipopau
+on Oct 12, 2026
+Contributor
+More actions
+Worked this against main (descriptors.cpp and the buffer-cache/memory-tracker paths) without any game access. Three findings that sharpen the two open questions:
+1. The zeros in the CPU snapshot are expected and don't prove the reset was skipped.
+The issue's snapshot is guest memory read on the CPU while the slot queue has active GPU-dirty state. On this code path a page marked GPU-modified is the only source of truth; the CPU copy stops being updated the moment some host or shader write takes GPU ownership (MemoryTracker::ChangeState flips the dirty owner under the manager lock), so the bytes the CPU sees are stale from an arbitrary tick ago. The queue body once held 0xFFFFFFFF from a producer booking, then some consumer's atomic/store claimed GPU ownership for the whole 4 KiB range (ObtainBuffer with is_written=true claims at page granularity in m_gpu_modified_ranges.Add), and every later reset that went through FillBuffer's fast path — where !IsRegionGpuModified(vaddr, size) is false only when GPU-side state covers the range — hits the ObtainBuffer(vaddr, size, true, true) branch and writes -1 into the host-side cached buffer, not into guest RAM the CPU can see. So "the CPU-side view shows 0x00000000, not 0xFFFFFFFF" is fully consistent with the refills actually running on the GPU timeline. This is why the issue's proposed in-DispatchDirect drain (FlushAndWait then ReadMemory) is the right instrument: it syncs those GPU-dirty pages back into guest memory before printing, bypassing the staleness.
+2. The reset-pass question is testable by packet value, not by theory.
+The DMA fill that would write 32-bit -1 (src_sel==2 in DmaData at graphicsRun.cpp:415) goes through BufferCache::FillBuffer, which checks IsRegionGpuModified per call. If the fill lands while the -1 target pages are briefly registered but untracked (fresh or after GC UntrackMemory at the tick buy-back in RunGarbageCollector), the fast path writes directly into guest RAM via std::fill — and that write lands on untracked addresses that the dispatch's gpu scalar access will then discover as a fresh buffer, reading the -1 the CPU memory actually contains. That's the good case. The bad case is the reverse order: if the dispatch claims GPU ownership first and a later fill is issued into still-dirty pages, it goes into the host buffer but the dispatch keeps its old ownership — the shader's exit condition never sees the reset on any subsequent submit until a download force-syncs. Worth logging in FillBuffer which branch each -1 fill takes alongside the capture the issue already proposes.
+3. A real suspect inside the shader itself (not a reset bug).
+The shader reads LDS[0] written by lane-0 (buffer_atomic_add ... glc) on a wave64 loop whose only back edges are s_cbranch_vccnz. The #986 note about "how the atomic return reaches the other lanes" is still checked nowhere in this repo: GetShaderBufferAtomicResult/ReadLane-style shaders rely on LDS re-broadcast, and if the IR emitted a ReadFirstLane-gone-wide pattern (analogous to what #986's discussion hit), some lanes' v36 value becomes independent of the buffer state entirely — they only exit when v36==0 becomes true because a sibling lane's claim index hit s60. Their exit is then controlled by the 16-wide claim loop, whose index space is s60 (capacity 0x200000 records, i.e. 2M * 8 bytes = 16 MiB) — that's exactly the "shot up the cap, runtime scales" symptom in the table (53% GPU at cap 4096, dropping linearly as the cap drops). This is the shape of a consumer-side liveness bug rather than a producer being skipped: lowering the cap doesn't make the picture converge, it just shortens the per-group sprint, which matches "picture looks the same at every setting."
+Suggested next step (cheap, one-line each).
+a) Log in BufferCache::FillBuffer whether each call to fill -1 goes to the guest-direct branch (!IsRegionGpuModified) or the ObtainBuffer branch — distinguishes hypothesis 2 from a real skipped pass on the same frame captures the issue already has.
+b) In the shader IR dump, grep for whether the atomic return value feeding LDS[0] is a broadcast (DppBroadcast/ReadFirstLane) or real LDS lane-0 write, and whether v36's producers agree per-lane. If they don't, this is reproducible in the voxel test harness without Wukong (encode the 0x2c0/0x324 vccnz pattern with wave_size=64 in ShaderRecompilerComputeTests) — much better than the full game for whoever picks it up.
+tarek369
+added a commit that references this issue on Oct 16, 2026
+fix(graphics): mark guest fills and copies CPU-dirty so resets reach …
+...
+8b9eaf7
+theantipopau
+added 2 commits that reference this issue on Oct 18, 2026
+graphics: mark guest fills/copies CPU-dirty so resets reach consumers (…
+...
+336b5d4
+graphics: add opt-in BufferCache -1-fill and write-claim tracing (Kyt…
+...
+3177b4e
+Ariyo31
+added a commit that references this issue on Oct 31, 2026
+test(shader): probe wave64 atomic return through LDS (KytyPS5#1072)
+1002f1e
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,525 @@
+A physically-based path tracer in safe Rust, USD-native, capable of rendering production datasets like Moana and ALab. - Add an indirect firefly clamp; honour visibility and preview-surface opacity by doubleailes · Pull Request #150 · doubleailes/Crust
+
+Add an indirect firefly clamp; honour visibility and preview-surface opacity by doubleailes · Pull Request #150 · doubleailes/Crust · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+doubleailes
+commented
+Sep 26, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Indirect firefly clamp. Each camera sample's indirect light is capped at a max-channel limit, scaling the colour whole (crust:indirectClamp / --indirect-clamp). On by default at 10, as in production renderers; 0 is the unbiased estimator and bit-identical to the previous renderer. Direct light is never clamped — including a primary bounce that escapes to a dome or sun — so both MIS halves stay paired. Pinned by indirect_clamp_never_touches_direct_light.
+visibility = "invisible" is honoured. The subtree is pruned (geometry and lights, read at the evaluated time, and inside prototypes). The top-level walk still descends it for cameras only, so --camera keeps working on hidden rigs. ALab parks four lights this way, and all four used to light the shot.
+UsdPreviewSurface opacity as translucency. Under the default opacityThreshold = 0, opacity < 1 maps to transmission_weight = 1 − opacity refracting at ior (how ALab authors all its glass). A textured ior below 1 keeps the constant (production ior maps are 0 in UV gutters), and make_ray reads a textured opacity at the hit so guided refraction crosses the interface correctly. opacityThreshold > 0 (cutout) stays unimplemented and renders opaque.
+Notes
+The default render is now biased: on the checked-in samples at 16 spp the clamp moves 0–0.17% of pixels (outliers only). Use --indirect-clamp 0 for convergence/bias measurements and golden A/Bs.
+Test plan
+CI: cargo fmt --check, cargo clippy -D warnings, cargo test --workspace
+scripts/check_images.sh check with --indirect-clamp 0 shows no change
+🤖 Generated with Claude Code
+Add an indirect firefly clamp; honour visibility and preview-surface …
+…
+d99e9b8
+```
+…opacity
+
+- Indirect clamp: cap each camera sample's indirect light at a max-channel
+  limit (crust:indirectClamp / --indirect-clamp, default 10, 0 = off and
+  bit-identical to before). Direct light, including a primary bounce that
+  escapes to a dome or sun, is never clamped.
+- visibility = "invisible" prunes the subtree (geometry and lights, at the
+  evaluated time, inside prototypes too); the top-level walk still descends
+  it for cameras so --camera keeps working on hidden rigs.
+- UsdPreviewSurface opacity < 1 under opacityThreshold 0 is translucency:
+  transmission_weight = 1 - opacity at ior (how ALab authors its glass).
+  A textured ior below 1 keeps the constant, and make_ray reads a textured
+  opacity at the hit.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+qodo-code-review
+Bot
+commented
+Sep 26, 2026
+Copy link
+Copy Markdown
+Contributor
+PR Summary by Qodo
+Clamp indirect fireflies and honor USD visibility and opacity
+✨ Enhancement 🐞 Bug fix 🧪 Tests 📝 Documentation 🕐 40+ Minutes
+AI Description
+```
+• Adds configurable indirect radiance clamping while preserving all direct-light MIS contributions.
+• Prunes invisible USD geometry and lights while retaining hidden cameras.
+• Maps preview-surface translucency to refraction, including textured opacity and safe IOR handling.
+```
+Diagram
+```
+graph TD
+  A["USD Stage"] --> B["USD Importer"] --> D["Visible Scene"] --> F["Path Tracer"] --> G["Indirect Clamp"] --> H["Film Sample"]
+  B --> C["Render Settings"] --> F
+  B --> E["Preview BSDF"] --> F
+```
+Loading
+High-Level Assessment
+The following are alternative approaches to this PR:
+1. Clamp complete film samples
+➕ Requires less integrator bookkeeping
+➕ Caps every extreme sample regardless of source
+➖ Incorrectly removes direct-light energy
+➖ Disturbs paired MIS contributions
+➖ Produces broader and less predictable bias
+2. Treat opacity as stochastic alpha
+➕ Can represent coverage and cutout-style materials
+➕ Avoids introducing dielectric transmission
+➖ Conflicts with default UsdPreviewSurface translucency semantics
+➖ Does not reproduce ALab glass refraction
+➖ Would require separate medium and ray-offset handling
+3. Prune invisible subtrees before traversal
+➕ Reduces work in the main importer walk
+➕ Centralizes visibility filtering
+➖ Would discard cameras inside hidden rigs
+➖ Complicates time evaluation and prototype-specific behavior
+➖ Requires exceptions equivalent to the current traversal logic
+Recommendation: Keep the PR's component-aware approach. Clamping at the primary continuation preserves direct-light MIS invariants, dielectric transmission matches the authored USD semantics, and visibility-aware traversal provides the necessary hidden-camera exception without importing hidden geometry or lights.
+Files changed (8) +753 / -46
+Enhancement (3) +154 / -8
+lib.rsExport the default indirect clamp constant +3/-1
+Export the default indirect clamp constant
+```
+• Re-exports 'DEFAULT_INDIRECT_CLAMP' through the core crate API for hosts and tests.
+```
+crates/crust-core/src/lib.rs
+tracer.rsClamp per-sample indirect radiance without touching direct light +112/-6
+Clamp per-sample indirect radiance without touching direct light
+```
+• Adds a default clamp of 10 and a settings builder that disables invalid or non-positive limits. Separates the primary continuation during backward gathering so only deeper indirect radiance is hue-preservingly capped.
+```
+crates/crust-core/src/tracer.rs
+main.rsExpose indirect clamping through the renderer CLI +39/-1
+Expose indirect clamping through the renderer CLI
+```
+• Adds '--indirect-clamp' as an override for the scene-authored limit and reports active clamping in the render banner. Tests the default, explicit limits, disabling behavior, and invalid values.
+```
+crates/crust-render/src/main.rs
+Bug fix (2) +228 / -33
+preview_surface.rsEvaluate textured opacity as dielectric transmission +95/-5
+Evaluate textured opacity as dielectric transmission
+```
+• Maps textured opacity to transmission weight and samples it when constructing guided rays. Rejects textured IOR values below one in favor of the constant value and adds focused material tests.
+```
+crates/crust-core/src/material/preview_surface.rs
+usd_import.rsHonor USD visibility and preview opacity during import +133/-28
+Honor USD visibility and preview opacity during import
+```
+• Prunes time-evaluated invisible geometry and lights, including prototype contents, while continuing hidden subtrees to discover cameras. Maps non-cutout preview opacity to transmission and imports 'crust:indirectClamp' into render settings.
+```
+crates/crust-core/src/scene/usd_import.rs
+Tests (2) +340 / -0
+render_smoke.rsVerify indirect clamp boundaries and direct-light preservation +122/-0
+Verify indirect clamp boundaries and direct-light preservation
+```
+• Adds render-level tests proving the clamp leaves direct NEE, emitter hits, and environment escapes unchanged. Verifies progressively tighter limits monotonically reduce indirect energy and checks the default setting.
+```
+crates/crust-core/tests/render_smoke.rs
+usd_scene.rsCover USD translucency and invisible subtree behavior +218/-0
+Cover USD translucency and invisible subtree behavior
+```
+• Adds importer tests for constant and textured preview opacity, cutout handling, inherited and animated visibility, prototype pruning, hidden lights, and cameras under invisible rigs.
+```
+crates/crust-core/tests/usd_scene.rs
+Documentation (1) +31 / -5
+CLAUDE.mdDocument clamp, visibility, and preview translucency semantics +31/-5
+Document clamp, visibility, and preview translucency semantics
+```
+• Documents the new CLI and USD clamp settings, including its biased default and unbiased zero value. Explains invisible-subtree camera handling and the preview-surface opacity-to-refraction mapping.
+```
+CLAUDE.md
+qodo-code-review
+Bot
+commented
+Sep 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Code Review by Qodo
+🐞 Bugs (1) 📘 Rule violations (1) 🔗 Cross-repo conflicts (0) 📜 Skill insights (0)
+1. Hidden prototype content still renders 🐞 Bug ≡ Correctness
+Description
+```
+collect_proto_parts starts its traversal at the referenced prototype root and only calls
+is_invisible on prims at or below that root, so it has no hidden state from the root’s ancestors.
+When a visible PointInstancer references a prototype beneath an invisible containing scope, the
+collector still returns its parts and emit_point_instancer attaches them for every instance.
+```
+Code
+crates/crust-core/src/scene/usd_import.rs[R2295-2301]
+```
++        if is_invisible(&prim) {
++            debug!(
++                "Skipping invisible prim {} (prototype {})",
++                prim.path(),
++                root.path()
++            );
++            continue;
+```
+Relevance
+●●● Strong
+```
+Visibility is inherited, but prototype traversal restarts without ancestor state, so hidden
+prototype scopes can leak geometry.
+```
+ⓘ Recommendations generated based on similar findings in past PRs
+Evidence
+```
+The new prototype pruning checks only the current prim, while the top-level traversal explicitly
+carries inherited hidden state. Prototype parts are then cached and attached by the visible
+instancer without reevaluating the prototype hierarchy.
+```
+crates/crust-core/src/scene/usd_import.rs[223-273]
+crates/crust-core/src/scene/usd_import.rs[2256-2301]
+crates/crust-core/src/scene/usd_import.rs[2733-2804]
+crates/crust-core/src/scene/usd_import.rs[402-417]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+Prototype collection only checks visibility authored on the prototype root or its descendants. An invisible ancestor of the referenced prototype root is not represented in the collector’s traversal state, so its geometry remains attached through a visible point instancer.
+
+## Fix Focus Areas
+- crates/crust-core/src/scene/usd_import.rs[2256-2301]
+- crates/crust-core/src/scene/usd_import.rs[2733-2748]
+
+## Recommended Fix
+Determine whether the prototype root is hidden by any ancestor before collecting its parts, then carry a `parent_hidden` flag through `collect_proto_parts` as the top-level traversal does. Prune the root and all descendants when that initial state or a descendant’s own visibility is invisible, and add a regression test where an invisible scope contains the prototype target referenced by a visible `PointInstancer`.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+2. Infinite radiance becomes a NaN sample ✓ Resolved 🐞 Bug ☼ Reliability
+Description
+```
+clamp_indirect handles a positive-infinite peak by multiplying the radiance by limit / peak,
+which is zero and makes the infinite channel evaluate as infinity × zero = NaN. The render loop
+adds that result directly to the pixel sum and variance statistics, so one overflowed indirect
+contribution contaminates the completed pixel and its adaptive-sampling state.
+```
+Code
+crates/crust-core/src/tracer.rs[R1838-1840]
+```
++    let peak = indirect.max_element();
++    if peak > limit {
++        indirect * (limit / peak)
+```
+Relevance
+●●● Strong
+```
+Positive infinity passes the comparison and infinity times zero yields NaN, contaminating pixel sums
+and variance statistics.
+```
+ⓘ Recommendations generated based on similar findings in past PRs
+Evidence
+```
+The clamp's new scaling branch accepts an infinite peak because infinity compares greater than every
+finite limit, producing a zero scale and then NaN through IEEE floating-point multiplication. No
+finite-value guard exists before the returned color is added to the sample sum and luminance
+moments.
+```
+crates/crust-core/src/tracer.rs[1792-1803]
+crates/crust-core/src/tracer.rs[1832-1843]
+crates/crust-core/src/tracer.rs[699-709]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+`clamp_indirect` scales positive-infinite radiance by zero, creating NaN rather than preserving or safely handling the non-finite contribution. That NaN is accumulated directly into the rendered pixel and variance calculations.
+
+## Fix Focus Areas
+- crates/crust-core/src/tracer.rs[1837-1843]
+- crates/crust-core/src/tracer.rs[699-709]
+
+## Recommended Fix
+Check that the peak and scale are finite before multiplying the vector. Preserve the existing non-finite input unchanged, consistent with the function's documented policy of not repairing broken samples, and add tests covering positive infinity and NaN channels.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+3. Guided glass rays miss the interior ✓ Resolved 🐞 Bug ≡ Correctness
+Description
+```
+PreviewSurface::make_ray re-shades the hit only when opacity is textured, so constant-transmission
+materials with a normal map pass the original geometric normal to OpenPBR::make_ray. When path
+guiding selects a direction that transmits relative to the mapped normal but not the geometric
+normal, the ray receives neither the interface offset nor any configured interior-medium tag.
+```
+Code
+crates/crust-core/src/material/preview_surface.rs[R386-389]
+```
++        if self.transmission_textured {
++            self.shade(rec, |m, rec| m.make_ray(rec, wi))
++        } else {
++            self.base.make_ray(rec, wi)
+```
+Relevance
+●●● Strong
+```
+Guided refraction must reuse the mapped shading record; the fast path can omit required interface
+offsets and medium tagging.
+```
+ⓘ Recommendations generated based on similar findings in past PRs
+Evidence
+```
+The new fast path records only textured opacity, while normal maps independently modify the normal
+used by evaluation. Guided sampling evaluates with that modified normal and then calls make_ray,
+whose OpenPBR implementation uses the supplied record normal to decide whether the ray crossed the
+interface.
+```
+crates/crust-core/src/material/preview_surface.rs[299-308]
+crates/crust-core/src/material/preview_surface.rs[336-364]
+crates/crust-core/src/tracer.rs[959-975]
+crates/crust-core/src/material/openpbr.rs[1282-1293]
+crates/crust-core/src/scene/usd_import.rs[4485-4490]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+`PreviewSurface::make_ray` resolves textures and the shading normal only when opacity is textured. Constant-opacity transmissive surfaces with normal maps therefore classify guided rays against the geometric normal instead of the normal used by BSDF evaluation.
+
+## Fix Focus Areas
+- crates/crust-core/src/material/preview_surface.rs[380-390]
+
+## Recommended Fix
+Run `make_ray` through `self.shade` whenever a normal map or textured transmission can affect ray construction, or unconditionally shade this guided-ray path. Add a test combining constant transmissive opacity, a tilted normal map, and a guided transmission direction to verify the origin offset and medium tagging.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+4. Textured cutouts render fully opaque 📘 Rule violation ≡ Correctness
+Description
+```
+preview_surface_material excludes a connected opacity texture whenever opacity_transmission(&ps)
+is false, allowing the material to bypass the PreviewSurface wrapper. When opacityThreshold is
+positive, per-hit opacity is never sampled or written to the underlying material, and the authored
+cutout surface instead remains opaque.
+```
+Code
+crates/crust-core/src/scene/usd_import.rs[R4212-4213]
+```
++            Target::Opacity,
++            ps.opacity.texture().is_some() && opacity_transmission(&ps),
+```
+Relevance
+●● Moderate
+```
+The behavior is explicitly documented as intentional for unsupported cutouts, despite the
+connected-texture wrapper requirement.
+```
+PR-#144
+ⓘ Recommendations generated based on similar findings in past PRs
+Evidence
+```
+PR Compliance ID 2230732 requires every UsdPreviewSurface with a UsdUVTexture connection to use
+the PreviewSurface wrapper and sample the connected value per hit. The changed condition at lines
+4212-4213 suppresses an opacity texture when opacityThreshold is positive; the subsequent
+empty-input path returns the bare base material, while the nearby diagnostic explicitly states that
+the surface renders opaque.
+```
+Rule 2230732: Map UsdPreviewSurface materials to OpenPBR with PreviewSurface wrapper when textures are present
+crates/crust-core/src/scene/usd_import.rs[4209-4214]
+crates/crust-core/src/scene/usd_import.rs[4265-4273]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+A `UsdPreviewSurface` opacity texture is excluded when `opacityThreshold` enables cutout mode, so the material can remain a bare `OpenPBR` and render fully opaque instead of sampling opacity per hit.
+
+## Fix Focus Areas
+- crates/crust-core/src/scene/usd_import.rs[4209-4214]
+- crates/crust-core/src/material/preview_surface.rs[228-244]
+
+## Recommended Fix
+Include connected opacity textures in the `PreviewSurface` wrapper regardless of opacity mode. Preserve whether the input represents cutout or translucency, sample it per hit, and write the result to `geometry_opacity` for cutouts or `transmission_weight` for translucency before delegating to `OpenPBR`.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+Context sources
+✅ Compliance rules (platform): 127 rules
+✅ Cross-repo context — repo relationships
+Review mode: 🧠 Deep: This is a broad, behavior-heavy renderer and USD-import change spanning multiple independent paths—path tracing, material/refraction semantics, visibility traversal, CLI/settings, and extensive tests—with several subtle correctness and bias risks.
+Tip of the day
+```
+💡 Did you know, you can type 'qodo, fix this' on a finding and the fix lands right on your PR
+```
+More tips ↗ | Customize Qodo ↗ | Qodo docs ↗
+qodo-code-review
+Bot
+reviewed
+Sep 26, 2026
+View reviewed changes
+Comment thread
+crates/crust-core/src/scene/usd_import.rs
+Comment on lines
++4212
+to
++4213
+Target::Opacity,
+ps.opacity.texture().is_some() && opacity_transmission(&ps),
+qodo-code-review
+Bot
+Sep 26, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+4. Textured cutouts render fully opaque 📘 Rule violation ≡ Correctness
+```
+preview_surface_material excludes a connected opacity texture whenever opacity_transmission(&ps)
+is false, allowing the material to bypass the PreviewSurface wrapper. When opacityThreshold is
+positive, per-hit opacity is never sampled or written to the underlying material, and the authored
+cutout surface instead remains opaque.
+```
+Agent Prompt
+```
+## Issue description
+A `UsdPreviewSurface` opacity texture is excluded when `opacityThreshold` enables cutout mode, so the material can remain a bare `OpenPBR` and render fully opaque instead of sampling opacity per hit.
+
+## Fix Focus Areas
+- crates/crust-core/src/scene/usd_import.rs[4209-4214]
+- crates/crust-core/src/material/preview_surface.rs[228-244]
+
+## Recommended Fix
+Include connected opacity textures in the `PreviewSurface` wrapper regardless of opacity mode. Preserve whether the input represents cutout or translucency, sample it per hit, and write the result to `geometry_opacity` for cutouts or `transmission_weight` for translucency before delegating to `OpenPBR`.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+Comment thread
+crates/crust-core/src/material/preview_surface.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/crust-core/src/tracer.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/crust-core/src/scene/usd_import.rs
+Comment on lines
++2295
+to
++2301
+if is_invisible(&prim) {
+debug!(
+"Skipping invisible prim {} (prototype {})",
+prim.path(),
+root.path()
+);
+continue;
+qodo-code-review
+Bot
+Sep 26, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+1. Hidden prototype content still renders 🐞 Bug ≡ Correctness
+```
+collect_proto_parts starts its traversal at the referenced prototype root and only calls
+is_invisible on prims at or below that root, so it has no hidden state from the root’s ancestors.
+When a visible PointInstancer references a prototype beneath an invisible containing scope, the
+collector still returns its parts and emit_point_instancer attaches them for every instance.
+```
+Agent Prompt
+```
+## Issue description
+Prototype collection only checks visibility authored on the prototype root or its descendants. An invisible ancestor of the referenced prototype root is not represented in the collector’s traversal state, so its geometry remains attached through a visible point instancer.
+
+## Fix Focus Areas
+- crates/crust-core/src/scene/usd_import.rs[2256-2301]
+- crates/crust-core/src/scene/usd_import.rs[2733-2748]
+
+## Recommended Fix
+Determine whether the prototype root is hidden by any ancestor before collecting its parts, then carry a `parent_hidden` flag through `collect_proto_parts` as the top-level traversal does. Prune the root and all descendants when that initial state or a descendant’s own visibility is invisible, and add a regression test where an invisible scope contains the prototype target referenced by a visible `PointInstancer`.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+Address review: keep infinite indirect samples finite-safe; shade gui…
+…
+c68b3b6
+```
+…ded rays under a normal map
+
+- clamp_indirect no longer scales an infinite peak by limit/inf = 0, which
+  turned the infinite channel into a NaN; non-finite samples pass through.
+- PreviewSurface::make_ray shades the hit when a normal map sits over a
+  transmissive surface, not only when opacity is textured, so a guided
+  refraction is classified against the same normal scatter_importance used.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Hide details
+View details
+doubleailes
+merged commit 3c147f2
+into
+main
+Sep 26, 2026
+4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+doubleailes
+deleted the
+compare_alab
+branch
+September 26, 2026 08:02
+This was referenced Sep 26, 2026
+Shade once per vertex (shading performance steps 1–3)
+#151
+Merged
+Render in 16x16 tiles by default (13–48% faster, bit-identical)
+#153
+Merged
+Add a Guerilla-style render profile and extend --stats
+#157
+Merged
+MaterialX: evaluate the closure tree and read the surface-shader nodes (Material Fidelity 14.4 → 20.0 dB)
+#170
+Merged
+Adaptive sampling: zero-signal gate, sqrt(spp) floor, cross-neighbour tolerance
+#184
+Merged
+This was referenced Oct 6, 2026
+Thin-walled transmission is a pass-through
+#217
+Merged
+Honour the render camera's exposure (camera-exposure)
+#269
+Merged
+qodo-code-review
+Bot
+mentioned this pull request
+Oct 14, 2026
+Place prims on the rendered surface from an MCP session
+#306
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

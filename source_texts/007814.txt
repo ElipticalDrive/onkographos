@@ -1,0 +1,135 @@
+Combined scientific CFD simulation and interactive raytracing
+with OpenCL
+Moritz Lehmann
+moritz.lehmann@uni-bayreuth.de
+University of Bayreuth
+Germany
+ABSTRACT
+One of the main uses for OpenCL is (scientific) compute applications
+where graphical rendering is done externally, after the simulation
+has finished. However separating simulation and rendering has
+many disadvantages, especially the extreme slowdown caused by
+copying simulation data from device to host, and needing to store
+raw data on the hard drive, taking up hundreds of gigabyte, just
+to visualize preliminary results. A much faster approach is to implement both simulation and rendering in OpenCL. The rendering
+kernels have direct read-only access to the raw simulation data that
+resides in ultra-fast GPU memory. This eliminates all PCIe data
+transfer but camera parameters and finished frames, allowing for
+interactive visualization of simulation results in real time while the
+simulation is running. This is an invaluable tool for rapid prototyping. Although OpenCL does not have existing functionality for
+graphical rendering, being a general compute language, it allows
+for implementing an entire graphics engine, such that no data has
+to be moved to the CPU during rendering. On top, specific lowlevel optimizations make this OpenCL graphics engine outperform
+any existing rendering solution for this scenario, enabling drawing
+billions of lines per second and fluid raytracing in real time on even
+non-RTX GPUs. This combination of simulation and rendering in
+OpenCL is demonstrated with the software FluidX3D [3] - a lattice
+Boltzmann method (LBM) fluid dynamics solver.
+The first part will briefly introduce the numerical method for
+simulating fluid flow in a physically accurate manner. After introducing the LBM, the optimizations to make it run at peak efficiency
+are discussed: Being a memory-bound algorithm, coalesced memory access is key. This is achieved through array-of-structures data
+layout as well as the one-step-pull scheme, a certain variant of
+the LBM streaming step. One-step-pull leverages the fact that the
+misaligned read penalty is much smaller than the misaligned write
+penalty on almost all GPUs. Roofline analysis shows that with
+these optimizations, the LBM runs at 100% efficiency on the fastest
+data-center and gaming GPUs [5]. To simulate free surface flows,
+the LBM is extended with the Volume-of-Fluid (VoF) model. An
+efficient algorithm has been designed to vastly accelerate the challenging surface tension computation [4]. This extremely efficient
+VoF-LBM GPU implementation allows covering new grounds in science: FluidX3D has been used to simulate more than 1600 raindrop
+Permission to make digital or hard copies of part or all of this work for personal or
+classroom use is granted without fee provided that copies are not made or distributed
+for profit or commercial advantage and that copies bear this notice and the full citation
+on the first page. Copyrights for third-party components of this work must be honored.
+For all other uses, contact the owner/author(s).
+IWOCL’22, May 10–12, 2022, Bristol, United Kingdom, United Kingdom
+© 2022 Copyright held by the owner/author(s).
+ACM ISBN 978-1-4503-9658-5/22/05.
+https://doi.org/10.1145/3529538.3529542
+impacts to statistically evaluate how microplastics transition from
+the ocean surface into the atmosphere when the spray droplets are
+generated during drop impact [6]. At the same power consumption,
+with existing CPU-parallelized codes, compute time would have
+been several years, whilst with FluidX3D it was about a week.
+The second part will focus on real time rendering with OpenCL,
+especially raytracing. Rasterization on the GPU is parallelized not
+over pixels but lines/triangles instead, making runtime mostly independent of screen resolution and lightning fast. Each line/triangle
+is transformed with the camera parameters from 3D to 2D screen
+coordinates and then rasterized onto the frame (integer array) with
+Bresenham algorithm [2] and z-buffer. The raytracing graphics are
+based on a combination of fast ray-grid traversal and marchingcubes, leveraging that the computational grid from the LBM already
+is an ideal acceleration structure for raytracing. The idea of raytracing is simple: Through each pixel on the screen, shoot a reverse
+light ray out of the camera and see where it intersects with a surface in the scene. Then (recursively) calculate reflected/refracted
+rays and mix the colors. If a ray doesn’t intersect with anything,
+its color is determined by the skybox image via UV mapping and
+bilinear pixel interpolation. With mesh surfaces consisting of many
+triangles, computation time quickly becomes a problem, as for each
+ray all triangles have to be tested for intersection. To overcome
+this, an acceleration structure is required. While computer games
+often use a bounding volume hierarchy, the LBM already provides
+an ideal alternative acceleration structure: the simulation grid. The
+corresponding algorithm is called ray-grid traversal: When a ray
+shoots through the 3D grid, intersections with the surface only
+have to be checked for at each traversed grid cell rather than the
+entire grid. In each traversed grid cell, the 0-5 surface triangles
+are generated on-the-fly with the marching-cubes algorithm and
+ray-triangle intersections are checked with the Möller-Trumbore
+algorithm. If an intersection has been found, only afterwards the
+normals are calculated on the 8 grid points spanning the cell, and
+are trilinearly interpolated to the intersection coordinates. The so
+interpolated surface normal makes the raytraced surface appear
+perfectly smooth. On the GPU, the ray(s) for each pixel on screen
+are computed in parallel, vastly speeding up rendering. It is of key
+importance how to align the OpenCL workgroups on the 2D array
+of screen pixels: best performance is achieved for 8x8 pixel tiles; this
+is about 50% faster than 64x1 tiles, because with small, square-ish
+tiles, all rays of the workgroup are more likely to traverse the same
+grid cells, greatly improving memory broadcasting. In ray-grid traversal, 8 isovalues spanning a cell have to be loaded from GPU
+memory for each traversed cell. Once the triangle intersection has
+been found, the gradient on each of the 8 cell isovalues is calculated
+with central differences. Instead of loading an additional 6 isovalues
+IWOCL’22, May 10–12, 2022, Bristol, United Kingdom, United Kingdom
+for each of the 8 grid points, their isovalues are reused such that
+only 24 additional isovalues are loaded. For marching-cubes, the
+algorithm by Paul Bourke [1] is implemented in OpenCL. With
+16-/8-bit integers, bit-packing and symmetry, the tables are reduced
+to 1/8 of their original size and stored in constant memory space.
+For computing the cube index, branching is eliminated by bit operations. The Möller-Trumbore algorithm [7] is implemented in an
+entirely branchless manner.
+This raytracing implementation is fast enough to run in real time
+for even the largest lattice dimensions that fit into the memory of
+a GPU. Finally, the combined VoF-LBM simulation and raytracing
+implementation is demonstrated on the most realistic simulation
+of an impacting raindrop ever done [8].
+CCS CONCEPTS
+• Computing methodologies → Parallel programming languages.
+KEYWORDS
+lattice Boltzmann method, Volume-of-Fluid, raytracing, rasterization, graphics, OpenCL, GPU, CFD, fluid, marching-cubes, ray-grid
+traversal, raindrop
+Moritz Lehmann
+ACM Reference Format:
+Moritz Lehmann. 2022. Combined scientific CFD simulation and interactive
+raytracing with OpenCL. In International Workshop on OpenCL (IWOCL’22),
+May 10–12, 2022, Bristol, United Kingdom, United Kingdom. ACM, New York,
+NY, USA, 2 pages. https://doi.org/10.1145/3529538.3529542
+REFERENCES
+[1] [n.d.]. Polygonising a scalar field.
+http://www.paulbourke.net/geometry/
+polygonise/
+[2] J. E. Bresenham. 1965. Algorithm for computer control of a digital plotter. IBM
+Systems Journal 4, 1 (1965), 25–30. https://doi.org/10.1147/sj.41.0025
+[3] Moritz Lehmann. 2021. High Performance Free Surface LBM on GPUs. https:
+//epub.uni-bayreuth.de/5400/
+[4] Moritz Lehmann and Stephan Gekle. 2022. Analytic Solution to the Piecewise Linear Interface Construction Problem and Its Application in Curvature
+Calculation for Volume-of-Fluid Simulation Codes. Computation 10, 2 (2022).
+https://doi.org/10.3390/computation10020021
+[5] Moritz Lehmann, Mathias J. Krause, Giorgio Amati, Marcello Sega, Jens Harting, and Stephan Gekle. 2021. On the accuracy and performance of the lattice Boltzmann method with 64-bit, 32-bit and novel 16-bit number formats.
+https://doi.org/10.48550/ARXIV.2112.08926
+[6] Moritz Lehmann, Lisa Marie Oehlschlägel, Fabian P. Häusl, Andreas Held, and
+Stephan Gekle. 2021. Ejection of marine microplastics by Raindrops: A computational and experimental study - microplastics and Nanoplastics. https:
+//doi.org/10.1186/s43591-021-00018-8
+[7] Tomas Möller and Ben Trumbore. 1997. Fast, Minimum Storage Ray-Triangle
+Intersection. Journal of Graphics Tools 2, 1 (1997), 21–28. https://doi.org/10.1080/
+10867651.1997.10487468 arXiv:https://doi.org/10.1080/10867651.1997.10487468
+[8] ProjectPhysX. [n.d.]. FluidX3D - Defeating the Lattice Boltzmann Method (Esoteric
+Twist + FP32/FP16 on GPU). YouTube. https://youtu.be/1g_zFsvScME

@@ -1,0 +1,220 @@
+Proposed feature More details, clarifications, examples and guidelines on Differentiable Programming. Context In the process of developing a differentiable Direct Volume Rendering (DVR) renderer, I realize that the information from the d...
+
+Documentation: More details, clarifications, examples and guidelines on Differentiable Programming · Issue #2485 · taichi-dev/taichi · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Documentation: More details, clarifications, examples and guidelines on Differentiable Programming #2485
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Documentation: More details, clarifications, examples and guidelines on Differentiable Programming#2485
+Copy link
+Labels
+autodiffThis issue is related to automatic differentiation systemThis issue is related to automatic differentiation systemdocDocumentation related issues & PRsDocumentation related issues & PRsfeature requestSuggest an idea on this projectSuggest an idea on this project
+Description
+ifsheldon
+opened on Jul 2, 2021
+Issue body actions
+Proposed feature
+More details, clarifications, examples and guidelines on Differentiable Programming.
+Context
+In the process of developing a differentiable Direct Volume Rendering (DVR) renderer, I realize that the information from the documentation, the paper and the DiffTaichi repo is still far from enough. So, from my pitfalls, I'd like to point out several points that should be detailed in the documentation to facilitate Taichi users to efficiently develop their differentiable applications.
+Feature details
+Guidelines for developing differentiable applications
+As autodiff of Taichi enforces many constraints that will lead to code/data structure changes and algorithmic changes, there should be some suggestions on how to develop a differentiable application from the first step. Some users, like me, tend to only focus on the forward pass of an application, naively transferring the development workflow from PyTorch or Tensorflow.
+But such a development style does not work when we develop differentiable applications on Taichi. Therefore, you should explicitly point out this problem by giving some suggestions. I can see, in some issues, you suggest users to develop their applications step by step in the forward pass, only adding new features when autodiff works correctly in the backward pass. So, I think you should solidify such suggestions in your documentation.
+Clarifications on APIs inter-compatibility
+To get optimized performance, we users are suggested to customize data layout via .place() APIs of ti.root, but you didn't mention how to properly mix .place() APIs with autodiff.
+To make things even more complex, we first see how we can declare and structure multiple fields and then how we can specify that we need gradients.
+To declare and struct a field, we can:
+Declare with dimensions/shape, like vec_field = ti.Vector.field(3, ti.f32, shape=3)
+Declare it first and then structure it with ti.root's .place() API, like
+```
+volume = ti.field(ti.f32)
+ti.root.dense(ti.ijk, volume_resolution).dense(ti.ijk, (4, 4, 4)).place(volume)
+```
+So, to declare and structure multiple fields, we can do that in 3 ways(purely the basic, purely place, mixing the basic and place).
+Now, to specify we want gradients, we can:
+set needs_grad=True
+use ti.root.lazy_grad()
+So, we also have 3 ways to specify that we want gradients on multiple fields.
+Therefore, you see now we have 3*3 ways to structure fields and set up gradients. Here come the questions:
+Do these 9 ways all work? Do they have conflicts?
+If I have specified a field needs_grad=True, do I need to place its grad as well? For example,
+```
+volume = ti.field(ti.f32, needs_grad=True)
+ti.root.dense(ti.ijk, volume_resolution).dense(ti.ijk, (4, 4, 4)).place(volume)
+ti.root.dense(ti.ijk, volume_resolution).dense(ti.ijk, (4, 4, 4)).place(volume.grad) # necessary?
+```
+If I have specified ti.root.lazy_grad(), do I need to place its grad as well? For example,
+```
+volume = ti.field(ti.f32) # it needs grad in the code of backward pass
+ti.root.dense(ti.ijk, volume_resolution).dense(ti.ijk, (4, 4, 4)).place(volume)
+ti.root.dense(ti.ijk, volume_resolution).dense(ti.ijk, (4, 4, 4)).place(volume.grad) # necessary?
+ti.root.lazy_grad()
+```
+Examples of tracing gradients of recursive formulations
+We sometimes have recursive formulations in our program, for example, Exponentially Weighted Moving Average. And how to workaround the Data Access Rule of autodiff is tricky. I called my workaround as Explicit Taping. For the discussion, please see this issue (#2425 ).
+The examples in that issues are parallelized differentiable EWMA calculator. And I think the two example (wrong one and correct one) are great for illustration purpose.
+Also, I have encountered an issue, in which, when I used a field whose values are read and written and they are used to control kernel code flows, the gradients are not traced. This is also caused by violation on Data Access Rule. Although the values that need gradients are not over-written, the values for control flows are over-written, which also leads to gradient tracing failures.
+A simple example is
+```
+import taichi as ti
+import numpy as np
+
+np.random.seed(0)
+ti.init(ti.cuda, default_fp=ti.f32)
+row_num, column_num = 1, 2
+data_field = ti.field(ti.f32, shape=(row_num, column_num), needs_grad=True)
+ewma_tape = ti.field(ti.f32, shape=(row_num, column_num), needs_grad=True)
+sample = ti.field(ti.i32, shape=row_num)
+sample_tape = ti.field(ti.i32, shape=(row_num, column_num))
+loss = ti.field(ti.f32, (), needs_grad=True)
+data = np.random.randn(row_num, column_num)
+data_field.from_numpy(data)
+
+
+@ti.kernel
+def calc_ewma_err():
+    for row in range(row_num):
+        for col in range(column_num):
+            col_idx = sample[row]
+            if col_idx == 0:
+                ewma_tape[row, col_idx] = data_field[row, col_idx]
+            else:
+                ewma_tape[row, col_idx] = ewma_tape[row, col_idx - 1] * 0.5 + data_field[row, col_idx] * 0.5
+            sample[row] += 1  # Data Access Rule violation here
+
+@ti.kernel
+def prepare_sample_tape():
+    for row in range(row_num):
+        for col in range(column_num):
+            sample_tape[row, col] = col
+
+@ti.kernel
+def calc_ewma_ok():
+    for row in range(row_num):
+        for col in range(column_num):
+            col_idx = sample_tape[row, col]
+            if col_idx == 0:
+                ewma_tape[row, col_idx] = data_field[row, col_idx]
+            else:
+                ewma_tape[row, col_idx] = ewma_tape[row, col_idx - 1] * 0.5 + data_field[row, col_idx] * 0.5
+
+
+@ti.kernel
+def calc_loss():
+    for i in range(row_num):
+        loss[None] += ewma_tape[row_num, column_num - 1] ** 2
+
+
+prepare_sample_tape()
+with ti.Tape(loss):
+    # calc_ewma_err()
+    calc_ewma_ok()
+    calc_loss()
+
+print(f"data = {data}")
+print(loss[None])
+print(data_field.grad.to_numpy())
+```
+Comments
+It's understandable that Taichi's documentation is not detailed enough, but I think you can do better on explaining and giving more guidance on the Differentiable Programming part.
+I can definitely make an PR to improve the documentation of Differentiable Programming, but I think you may have something more to add and my comments above are a good draft for you to complete the documentation improvement.
+Reactions are currently unavailable
+Activity
+ifsheldon
+added
+feature requestSuggest an idea on this projectSuggest an idea on this project
+on Jul 2, 2021
+k-ye
+added
+docDocumentation related issues & PRsDocumentation related issues & PRs
+on Jul 2, 2021
+k-ye commented on Jul 2, 2021
+k-ye
+on Jul 2, 2021
+Last edited by k-ye
+Collaborator
+More actions
+@ifsheldon
+As always, appreciate the quality of your input. Some of these are great points. FYI, we are heavily refactoring the docs in https://github.com/taichi-dev/docs.taichi.graphics.
+To give some quick answers:
+So, to declare and structure multiple fields, we can do that in 3 ways(purely the basic, purely place, mixing the basic and place).
+Yes. And by default you just need to use the basic version. The advanced ti.root stuff is mostly for defining the sparse hierarchical SNodes.
+So, we also have 3 ways to specify that we want gradients on multiple fields.
+I think there are only two? Also the doc has mentioned that if you use ti.root.lazy_grad(), you don't have to repeatedly define needs_grad on each field. (That said, it's hard to say whether this is a good API. IMHO explicitly calling out which set of fields you need the gradient could make the code more readable):
+taichi/python/taichi/lang/snode.py
+Lines 82 to 92
+in
+d92b2c2
+def lazy_grad(self):
+"""Automatically place the adjoint fields following the layout of their primal fields.
+Users don't need to specify ``needs_grad`` when they define scalar/vector/matrix fields (primal fields) using autodiff.
+When all the primal fields are defined, using ``taichi.root.lazy_grad()`` could automatically generate
+their corresponding adjoint fields (gradient field).
+To know more details about primal, adjoint fields and ``lazy_grad()``,
+please see Page 4 and Page 13-14 of DiffTaichi Paper: https://arxiv.org/pdf/1910.00935.pdf
+"""
+self.ptr.lazy_grad()
+Clearly you are putting a nontrivial amount of efforts using Taichi, which is invaluable to us & the community :-) Just so you know, we have a slack channel to discuss all sorts of things related to Taichi. Would you prefer sending us an email (listed in https://taichi.graphics/contact/) so that we can invite you in? That way it will be much faster and more effective for your development & sharing your feedback.
+Enjoy your weekend!
+ifsheldon commented on Jul 2, 2021
+ifsheldon
+on Jul 2, 2021
+Author
+More actions
+I think there are only two?
+Well, you can do it with only needs_grad, only ti.root.lazy_grad() or mixed use. When my collaborator wrote the code, he actually tried writing like:
+```
+volume = ti.field(ti.f32, needs_grad=True)
+ti.root.dense(ti.ijk, volume_resolution).dense(ti.ijk, (4, 4, 4)).place(volume)
+ti.root.dense(ti.ijk, volume_resolution).dense(ti.ijk, (4, 4, 4)).place(volume.grad)
+ti.root.lazy_grad()
+```
+so he seemed to have done many duplicate configurations here. And I don't know whether this will break autodiff without testing because such an edge case is not mentioned anywhere. Now I still don't know what will happen under the hood in this case, but our tests empirically tell us that it doesn't matter.
+The advanced ti.root stuff is mostly for defining the sparse hierarchical SNodes.
+Well, since one of the target fields of Taichi is differentiable rendering, we will need dense hierarchical SNodes (for better cache hit) and autodiff together.
+What I tried to say is that please consider all possible use combinations of your APIs, check their inter-compatibilities and tell us users about the (in)compatibilities in your documentation.
+ljcc0930
+added
+autodiffThis issue is related to automatic differentiation systemThis issue is related to automatic differentiation system
+on Jul 13, 2021
+ljcc0930 commented on Jul 13, 2021
+ljcc0930
+on Jul 13, 2021
+Contributor
+More actions
+#2509 moved to here.
+ljcc0930 commented on Jul 13, 2021
+ljcc0930
+on Jul 13, 2021
+Contributor
+More actions
+Another idea, I think it's possible to implement the real lazy_grad() due to the release of #2501? @k-ye
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+autodiffThis issue is related to automatic differentiation systemThis issue is related to automatic differentiation systemdocDocumentation related issues & PRsDocumentation related issues & PRsfeature requestSuggest an idea on this projectSuggest an idea on this project
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

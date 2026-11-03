@@ -1,0 +1,187 @@
+When playing around with vulkan i stumbled upon a strange performance characteristic that hopefully someone here might be able to explain. I'm…
+
+instanced rendering performance : r/vulkan
+Skip to main content
+Get the Reddit app
+Scan this QR code to download the app now
+Or check it out in the app stores
+Go to vulkan
+r/vulkan
+r/vulkan
+News, information and discussion about Khronos Vulkan, the high performance cross-platform graphics API.
+Members
+Online
+•
+FaeRhan
+ADMIN
+MOD
+instanced rendering performance
+When playing around with vulkan i stumbled upon a strange performance characteristic that hopefully someone here might be able to explain.
+I'm drawing a bunch of simple 2D quads, it looks like this: https://imgur.com/UEcRZMW
+I've tried two different approaches and compared the performance between the two.
+Approach 1: All the quads use the same 4 vertices that are in a tiny vertex buffer that is used with VK_VERTEX_INPUT_RATE_VERTEX. Each frame the CPU calculates a 3x3 transform matrix for each quad and puts them all in a big buffer that is used with VK_VERTEX_INPUT_RATE_INSTANCE so each instance(quad) has its own matrix in the vertex shader.
+Approach 2: The CPU does the vertex transformation and puts all the vertices of all the quads in a big vertex buffer each frame so its just a normal draw with 1 instance.
+From my understanding, the instanced version should be better because there is less data to be written each frame which means less CPU work, less PCIe bandwith, more cache friendly. However, when testing with my GTX 780 the second version is an order of magnitude faster (3000 vs 300 fps for ~2000 quads).
+Can someone explain this to me? is this a general thing with how instancing works or a problem with the driver and/or specific hardware? Or maybe i'm missing the point of instancing in general?
+EDIT: i've done some more performance tests. These tests are not super-accurate, I just measured the FPS (with a timer) when drawing 2800 quads, but the relative differences between them should still be somewhat representational.
+For each of these tests i've done a separete version where instead of the CPU, a compute shader produces the vertex buffer and writes it directly to GPU memory. It made no performance difference whatsoever in any of these tests.
+One draw call with index buffer: 7.588 megaquads/s
+One big vertex buffer that is updated each frame, the index buffer is created at initialization time and never changed.
+Separate draw call for each quad: 7.756 megaquads/s
+This one doesn't make sense to me at all. The reason this is faster that the single draw call is probably because there is no need for an index buffer with single draw calls. What I don't understand is why separate draw calls can be properly parallelized and multiple instances of a single call can not.
+Separate draw call for each quad with index buffer: 1.862 megaquads/s
+Basically the same as above except that indexed draw calls are used. Looks like using a (useless) index buffer for lots of small draw calls is a bad idea, though its still not as slow as:
+One draw call, one instance per quad: 1.1536 megaquads/s
+The method described as "Approach 1" in the original post.
+EDIT2: turns out i've been using the wrong memory type. VK_MEMORY_PROPERTY_HOST_CACHED_BIT seems to be pretty bad for this use case. When using the memory with just VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, im getting about 10.1 megaquads/s for all of the above tests except the instanced one.
+Share
+Add a comment
+Sort by:
+Best
+Open comment sort options
+Best
+Top
+New
+Controversial
+Old
+Q&A
+TheBuzzSaw
+•
+•
+I don't have the answers to your questions, but I have a guess (barring the general explanation that "maybe NVIDIA's implementation of instanced rendering just sucks").
+I think the fact that the data is already laid out nicely in memory with the solutions essentially pre-calculated is why it is so much faster. We may be underestimating the cost of processing the instances and generating the results. After all, you are drawing mere quads; this is classic case where the overhead may exceed the cost of the actual task.
+I think a more telling test would be to compare the two modes using a mesh with many triangles instead of a simple quad.
+Reply
+reply
+[deleted]
+•
+•
+Edited
+•
+I actually think there are a couple of reasons why you're seeing this.
+The first reason is that instancing is really meant to reduce draw calls. It used to be the case that if you wanted to draw 1,000 objects, all with the same geometry, you had to make 1,000 draw calls. Each draw call has considerable CPU overhead. By reducing those draw calls to 1, instancing allows you to save a whole lot of CPU time. However, you aren't making a draw call per quad in either example. In both approaches, you're making exactly one draw call. So, even if your second approach seems like it should be less efficient, it's not really comparing instancing to the case that it was meant to optimize.
+The second reason is that the GPU absolutely hates drawing two triangles at a time. I recently learned the hard way that even instancing does not help with this. I made a very similar performance test in OpenGL with 100,000 quads made with 1 instanced draw call, versus the same 100,000 quads made with 100,000 separate draw calls. I found that there was absolutely no performance gain in the instanced case. I was really surprised by this, because I had reduced the number of draw calls so drastically. However, it turns out that, even internally, the GPU "sees" this as 100,000 different jobs of 2 triangles each, rather than a single job of 200,000 triangles. I know that seems crazy, but it's true. I was able to use CPU and CPU timers to time everything. I'll share the data with you when I get home. The upshot is that drawing instanced does free up CPU time, but that doesn't matter when you're GPU bound. So, never feed the GPU a bunch of tiny draw jobs.
+So what I would probably do is re-run your test, this time with something much more complex than quads. I bet you'll see the performance difference then. Maybe also add a case where you're drawing each object as a separate draw call, just to as a baseline.
+Edit: Keep in mind that all of my experience is in OpenGL, and I haven't had a chance to crack open Vulkan yet. It's possible that Vulkan has done away with a lot of the overhead that made a 100,000-instance, two-triangle draw call slow. However, I suspect that's not the case.
+Reply
+reply
+FaeRhan
+•
+•
+that makes a lot of sense, thank you!
+did you use an nvidia card too? would be interesting to know if AMD cards behave this way too when using instancing.
+Reply
+reply
+[deleted]
+•
+•
+That's a good question. I did use an NVidia card, so I'm not sure how AMD will behave. If you do try this with more complex models, I'd be interested to hear how it went.
+Another thing I learned, that I neglected to mention, is that the GPU hates drawing tiny triangles. So, if you have a lot of quads that are very distant, and thus take up a few pixels or less, that can negatively impact performance.
+Reply
+reply
+[deleted]
+•
+•
+Edited
+•
+By the way, here is a forum post that I made back when I was doing similar experiments, and running into similar issues, and feeling really confused:
+http://www.gamedev.net/topic/672485-im-having-trouble-making-sense-of-these-performance-numbers-opengl/#entry5257168
+It turns out, all of my data is in that post as well. Hope it helps.
+Edit: Notice what Hodgman says in one of the replies:
+If you perform "psuedo-instancing" where you duplicate the one cube mesh 10000 times into a very large VBO, then it will be a single batch, and will render very efficiently.
+This is what you're doing in your second approach! So it makes sense that you got good performance with it. I suspect in the context of a real game with complex models, though, the bandwidth issues will start to become a problem and instancing will be a lot better.
+Reply
+reply
+FaeRhan
+•
+•
+interesting post. i'm gonna do a bit more testing and post the results here.
+Reply
+reply
+More replies
+More replies
+More replies
+Cliksum
+•
+•
+My guess would be that the overhead from instancing is completely erasing the gains you were expecting to see. Instancing generally only improves performance for large models (think hundreds or thousands of verts), and I don't know if there's ever a case where you would want to use it with just simple quads.
+Also, the amount data being being transferred to the GPU each frame is almost the same (and negligible with only 2000 quads) in both of your approaches. A 3x3 matrix will be 36 bytes for each quad, whereas the quad data itself will only be around 48 or 72 bytes depending on how you format it. In any case, you're probably sending less than 1MB of data each frame.
+Reply
+reply
+FaeRhan
+•
+•
+thats what I thought as well
+i just find it kind of strange that it would have such a big overhead when every time you read about instancing, the first thing thats being said is "its efficient for when you want to draw thousands of the same object"
+Reply
+reply
+ancientGouda
+•
+•
+It does have an overhead, but as Cliksum already outlined, it is outweighed by the overhead of setting up thousands of draws for very complex meshes. Instancing is definitely not free.
+Reply
+reply
+More replies
+More replies
+nosmileface
+•
+•
+less PCIe bandwidth
+Suggestion: count bytes.
+You see memory doesn't work like we all imagine it is. It doesn't transfer one byte by one byte. It's called band width for a reason. Most likely you just don't see an overhead from transfer ops here. Because it's PCI-E we're talking about. Even version 1.x can transfer 4GB/s.
+3000 frames * 2000 quads = 6 megaquads per second
+6 megaquads * 9 floats = 216MB/s.
+I mean, when PCI-E sees it, it laughs at you. SSD can read data faster using random access in some cases...
+Reply
+reply
+slime73
+•
+•
+Edited
+•
+GPUs generally use one or more wavefronts/warps for each instance. The size of a wavefront/warp is usually 32 or 64 (vertices in this case), so at 4 vertices per instance you're making the GPU only use a small fraction of its power. Rendering the vertices without instancing won't have that problem.
+Another approach is to draw quadcount*4 indexed vertices, but do "attributeless rendering" and pull in per-sprite data from a buffer in the shader using VertexIndex / 4 (and use VertexIndex % 4 to get the index of the vertex within each sprite), rather than pushing pretransformed vertices through the fixed function vertex attribute API.
+Reply
+reply
+[deleted]
+•
+•
+GPUs generally use one or more wavefronts/warps for each instance. The size of a wavefront/warp is usually 32 or 64 (vertices in this case), so at 4 vertices per instance you're making the GPU only use a small fraction of its power.
+I agree 100% that this is the issue, but it's surprising to me that the GPU can't just treat a "100,000-instance of 2-triangles" call as a single 200,000-triangle call. I'm sure there's a reason, because the people working on these things are much smarter than I am, but it seems silly to make developers worry about this peculiarity.
+Reply
+reply
+More replies
+moonshineTheleocat
+•
+•
+My thought... without the driver overhead, it is now significantly faster to spend a little extra time on the CPU to process things, and then upload them.
+Reply
+reply
+FaeRhan
+•
+•
+See the edit in the OP. If this were the reason, the compute shader method would make a performance difference.
+Reply
+reply
+moonshineTheleocat
+•
+•
+This is peculiar. The only other reason I have is memory access, which was a huge component for vulkan. If I remember anything, and mind you my knowledge on gpu hardware is minimum, instancing requires the gpu to constantly jump back to the beginning of the buffer before calculations are ran. CPUs seem to hate bouncing in arrays as well. Memory access isn't that bad, but instructions are constantly swapped if it works like a normal processor.
+But if geometry is calculated in a single pass and cached, the driver might only have to tear through memory sequentially with the same instruction. Still doesn't make sense as it requires instruction jumping still but my best guess.
+Reply
+reply
+More replies
+More replies
+FaeRhan
+•
+•
+Added some more tests to the OP post.
+Reply
+reply
+Top Posts
+Reddit
+reReddit: Top posts of February 25, 2016
+Reddit
+reReddit: Top posts of February 2016
+Reddit
+reReddit: Top posts of 2016

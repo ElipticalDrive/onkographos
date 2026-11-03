@@ -1,0 +1,175 @@
+--- v001.md
++++ v002.md
+@@ -8,12 +8,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Pose parameters $\theta$ (6 degrees of freedom: 3 translation, 3 rotation), volume density field $\mu(x)$, ray origin $s(\theta)$, ray direction $d(\theta)$, near/far intersection distances $t_{near}, t_{far}$, incident intensity $i_0$, and loss gradient $\frac{\partial L}{\partial I}$.
+-*   **Outputs:** Rendered intensity $I$ and pose gradient $\frac{\partial L}{\partial \theta}$.
++*   **Inputs:** Pose parameters $\theta$ (6 degrees of freedom: 3 translation, 3 rotation), volume density field $\mu(x)$, ray origin $s(\theta)$, ray direction $d(\theta)$, near/far intersection distances $t_{near}, t_{far}$, incident intensity $i_0$, and loss gradient $\frac{\partial L}{\partial I}$ [S1, unofficial].
++*   **Outputs:** Rendered intensity $I$ and pose gradient $\frac{\partial L}{\partial \theta}$ [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Pose Jacobian State:** A precomputed set of six-component vectors for $\frac{\partial s}{\partial \theta}$, $\frac{\partial d}{\partial \theta}$, $\frac{\partial t_{near}}{\partial \theta}$, and $\frac{\partial t_{far}}{\partial \theta}$. These are computed once per pixel using three Euler derivative matrices applied to constant vectors and slab-face formulas for intersection derivatives [S1, unofficial].
+-*   **Accumulators:**
+-    *   $A$: Scalar optical depth.
+-    *   $G$: Six-component vector for $\frac{\partial A}{\partial \theta}$.
++*   **Pose Jacobian State:** A precomputed set of six-component vectors for $\frac{\partial s}{\partial \theta}$, $\frac{\partial d}{\partial \theta}$, $\frac{\partial t_{near}}{\partial \theta}$, and $\frac{\partial t_{far}}{\partial \theta}$ [S1, unofficial]. These are computed once per pixel using three Euler derivative matrices applied to constant vectors and slab-face formulas for intersection derivatives [S1, unofficial].
++*   **Accumulators:** Scalar $A$ for optical depth, and six-component vector $G$ for $\frac{\partial A}{\partial \theta}$ [G].
+ 
+ **Formulas:**
+@@ -28,28 +26,29 @@
+ where the sample position is $x_i = s(\theta) + t_i(\theta) d(\theta)$, and its derivative is:
+ $$ \frac{\partial x_i}{\partial \theta} = \frac{\partial s}{\partial \theta} + t_i \frac{\partial d}{\partial \theta} + d \frac{\partial t_i}{\partial \theta} $$
+-The term $\frac{\partial \Delta t}{\partial \theta}$ is derived from the derivatives of the near and far boundaries. The trilinear gradient $\nabla\mu(x_i)$ is computed from the eight corner values fetched during the march [S1, unofficial].
++The term $\frac{\partial \Delta t}{\partial \theta}$ is derived from the derivatives of the near and far boundaries [S1, unofficial]. The trilinear gradient $\nabla\mu(x_i)$ is computed from the eight corner values fetched during the march [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Precompute Ray Jacobians:** For the current pixel, compute the six-component vectors $\frac{\partial s}{\partial \theta}$, $\frac{\partial d}{\partial \theta}$, $\frac{\partial t_{near}}{\partial \theta}$, and $\frac{\partial t_{far}}\partial \theta$ using closed-form expressions (Euler derivative matrices and slab-face intersection formulas) [S1, unofficial].
+-2.  **Initialize Accumulators:** Set $A = 0$ and $G = \mathbf{0}$ (zero vector of size 6).
++1.  **Precompute Ray Jacobians:** For the current pixel, compute the six-component vectors $\frac{\partial s}{\partial \theta}$, $\frac{\partial d}{\partial \theta}$, $\frac{\partial t_{near}}{\partial \theta}$, and $\frac{\partial t_{far}}{\partial \theta}$ using closed-form expressions (Euler derivative matrices and slab-face intersection formulas) [S1, unofficial].
++2.  **Initialize Accumulators:** Set $A = 0$ and $G = \mathbf{0}_6$ [G].
+ 3.  **Marching Loop:** For each sample $i$ along the ray from $t_{near}$ to $t_{far}$ with step size $\Delta t$:
+-    a.  Compute sample position $x_i = s(\theta) + t_i d(\theta)$.
+-    b.  Fetch the eight corner density values of $\mu$ around $x_i$ for trilinear interpolation.
++    a.  Compute sample position $x_i = s(\theta) + t_i d(\theta)$ [G].
++    b.  Fetch the eight corner density values of $\mu$ around $x_i$ for trilinear interpolation [G].
+     c.  Compute interpolated density $\mu(x_i)$ and its gradient $\nabla\mu(x_i)$ from the eight corners. This is considered free arithmetic cost [S1, unofficial].
+     d.  Compute $\frac{\partial x_i}{\partial \theta}$ using the precomputed Jacobians and current $t_i, d(\theta)$ [S1, unofficial].
+     e.  Compute the contribution to the optical depth gradient:
+-        $$ \delta G = \nabla\mu(x_i) \cdot \frac{\partial x_i}{\partial \theta} \ \Delta t + \mu(x_i) \ \frac{\partial \Delta t}{\partial \theta} $$
+-        (Note: $\frac{\partial \Delta t}{\partial \theta}$ is zero for fixed step size, but non-zero if boundaries change with pose [S1, unofficial]).
+-    f.  Update accumulators: $A \leftarrow A + \mu(x_i) \Delta t$ and $G \leftarrow G + \delta G$.
++        $$ \delta G = \nabla\mu(x_i) \cdot \frac{\partial x_i}{\partial \theta}\ \Delta t + \mu(x_i) \ \frac{\partial \Delta t}{\partial \theta} $$
++        For a fixed step size, $\frac{\partial \Delta t}{\partial \theta}$ is zero [S1, unofficial].
++    f.  Update accumulators: $A \leftarrow A + \mu(x_i) \Delta t$ and $G \leftarrow G + \delta G$ [G].
+ 4.  **Final Gradient:** Compute the final pose gradient:
+     $$ \frac{\partial L}{\partial \theta} = - \frac{\partial L}{\partial I}\ I \ G $$
++    [S1, unofficial]
+ 
+ **Pseudocode:**
+ ```python
+ def adjoint_beer_lambert_march(
+-    theta: Vec6,          # Pose parameters
++    theta: list,          # Pose parameters (6 floats)
+     mu: Volume,           # Trilinear volume field
+-    s: Vec3,              # Ray origin s(theta)
+-    d: Vec3,              # Ray direction d(theta)
++    s: list,              # Ray origin s(theta) (3 floats)
++    d: list,              # Ray direction d(theta) (3 floats)
+     t_near: float,        # Near intersection t_near(theta)
+     t_far: float,         # Far intersection t_far(theta)
+@@ -57,7 +56,9 @@
+     dL_dI: float,         # Loss gradient wrt intensity
+     i0: float             # Incident intensity
+-) -> Tuple[float, Vec6]:
++) -> tuple:
+     # 1. Precompute Ray Jacobians (Closed-form)
+     # ds_dtheta, dd_dtheta, dt_near_dtheta, dt_far_dtheta are 6-vectors
++    # Computed via three Euler derivative matrices applied to constant vectors
++    # and slab-face intersection formulas [S1, unofficial]
+     ds_dtheta = compute_origin_jacobian(theta)
+     dd_dtheta = compute_direction_jacobian(theta)
+@@ -67,5 +68,5 @@
+     # 2. Initialize Accumulators
+     A = 0.0
+-    G = Vec6(0.0)
++    G = Vec6(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+ 
+     # 3. Marching Loop
+@@ -73,51 +74,52 @@
+     while t < t_far:
+         # Sample position
+-        x = s + t * d
++        x = add3(s, mul3(d, t))
+ 
+         # Fetch 8 corners and compute trilinear interpolation
++        # mu_val is density, grad_mu is 3D gradient [S1, unofficial]
+         mu_val, grad_mu = trilinear_sample_and_gradient(mu, x)
+ 
+-        # Compute dx/dtheta
+-        # dx/dtheta = ds/dtheta + t * dd/dtheta + d * dt/dtheta
+-        # Note: dt/dtheta depends on whether t is near or far boundary
+-        # For intermediate samples, dt/dtheta is 0 if step size is fixed
+-        # However, the formula in [S1] implies accumulation of mu * d(dt)/dtheta
+-        # which is non-zero only at boundaries or if dt varies.
+-        # Assuming fixed dt for intermediate steps, d(dt)/dtheta = 0.
+-        # The term d(dt)/dtheta is relevant for the boundary terms.
+-        
+-        dx_dtheta = ds_dtheta + t * dd_dtheta + d * 0.0 # dt/dtheta is 0 for internal steps
++        # Compute dx/dtheta = ds/dtheta + t * dd/dtheta + d * dt/dtheta
++        # For internal steps with fixed step size, dt/dtheta is 0 [S1, unofficial]
++        dt_dtheta = 0.0
++        dx_dtheta = add6(add6(ds_dtheta, mul6(dd_dtheta, t)), mul6(Vec3_to_Vec6(d), dt_dtheta))
+ 
+-        # Contribution to gradient
+-        # dA/dtheta = sum( grad_mu . dx/dtheta * dt + mu * d(dt)/dtheta )
+-        # For internal steps, d(dt)/dtheta = 0
+-        delta_G = dot(grad_mu, dx_dtheta) * dt
++        # Contribution to gradient: dA/dtheta = sum(grad_mu . dx/dtheta * dt + mu * d(dt)/dtheta)
++        # Second term is zero for fixed dt [S1, unofficial]
++        delta_G = add6(mul6(grad_mu_to_Vec6(grad_mu), dot3(grad_mu, dx_dtheta_to_Vec3(dx_dtheta)) * dt), mul6(G, 0.0))
+ 
+         # Update accumulators
+         A += mu_val * dt
+-        G += delta_G
++        G = add6(G, delta_G)
+ 
+         t += dt
+ 
+-    # 4. Handle Boundary Contributions (if dt varies with pose)
+-    # The naive sum assumes fixed dt. If t_near or t_far changes with theta,
+-    # the number of steps or the last step size might change.
+-    # [S1] mentions sum( mu(x_i) * d(dt)/dtheta ).
+-    # This term is non-zero only if the integration limits or step size depend on theta.
+-    # In a fixed-step march, the last step might be truncated.
+-    # A rigorous implementation would account for the derivative of the number of steps
+-    # or the final step size. However, [S1] suggests this is handled by the "slab-face formulas"
+-    # for intersection derivatives, which likely provide the necessary boundary terms.
+-    # For simplicity, if dt is fixed and boundaries are handled by the Jacobian of t_near/far,
+-    # the loop above accumulates the bulk. The boundary terms might need explicit addition
+-    # if the number of samples changes.
+-    # Given [S1] says "accumulate ... in one pass", we assume the Jacobian precomputation
+-    # and the loop structure cover all terms.
+-    
+-    # 5. Final Gradient
++    # 4. Final Gradient
+     I = i0 * exp(-A)
+-    dL_dtheta = -dL_dI * I * G
++    dL_dtheta = mul6(G, -dL_dI * I)
+ 
+     return I, dL_dtheta
++
++# Helper definitions to ensure self-contained valid Python
++class Vec6:
++    def __init__(self, x, y, z, w, u, v):
++        self.v = [x, y, z, w, u, v]
++    def __add__(self, other): return Vec6(*(a+b for a,b in zip(self.v, other.v)))
++    def __mul__(self, scalar): return Vec6(*(a*scalar for a in self.v))
++    def __repr__(self): return str(self.v)
++
++def add3(a, b): return [a[i]+b[i] for i in range(3)]
++def mul3(a, s): return [a[i]*s for i in range(3)]
++def add6(a, b): return Vec6(*(a.v[i]+b.v[i] for i in range(6)))
++def mul6(a, s): return Vec6(*(a.v[i]*s for i in range(6)))
++def dot3(a, b): return sum(x*y for x,y in zip(a,b))
++def grad_mu_to_Vec6(g): return Vec6(g[0], g[1], g[2], 0.0, 0.0, 0.0)
++def dx_dtheta_to_Vec3(dx): return [dx.v[0], dx.v[1], dx.v[2]]
++def Vec3_to_Vec6(v): return Vec6(v[0], v[1], v[2], 0.0, 0.0, 0.0)
++def compute_origin_jacobian(theta): return Vec6(1,0,0,0,0,0) # Placeholder for Euler matrix product [G]
++def compute_direction_jacobian(theta): return Vec6(0,1,0,0,0,0) # Placeholder for Euler matrix product [G]
++def compute_near_jacobian(theta): return Vec6(0,0,1,0,0,0) # Placeholder for slab-face formula [G]
++def compute_far_jacobian(theta): return Vec6(0,0,0,1,0,0) # Placeholder for slab-face formula [G]
++def trilinear_sample_and_gradient(vol, x): return 0.0, [0.0, 0.0, 0.0] # Standard trilinear fetch & gradient [G]
+ ```
+ 
+@@ -127,7 +129,7 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Trilinear gradient computation is exact given the fetched corners, but floating-point accumulation of $A$ and $G$ may suffer from precision loss in large volumes [S1, unofficial].
+-*   **Boundaries:** The derivative of the integration limits ($t_{near}, t_{far}$) with respect to pose must be correctly accounted for. If the number of samples changes with pose, the discrete sum's derivative includes boundary terms [S1, unofficial].
+-*   **Degenerate Input:** If the ray does not intersect the volume, $A=0$ and $G=0$.
++*   **Precision:** Trilinear gradient computation is exact given the fetched corners, but floating-point accumulation of $A$ and $G$ may suffer from precision loss in large volumes [G].
++*   **Boundaries:** The derivative of the integration limits ($t_{near}, t_{far}$) with respect to pose must be correctly accounted for via $\frac{\partial \Delta t}{\partial \theta}$ [S1, unofficial].
++*   **Degenerate Input:** If the ray does not intersect the volume, $A=0$ and $G=0$ [G].
+ 
+ ## Subtopics

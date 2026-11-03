@@ -1,0 +1,1402 @@
+Efficient Estimation of Boundary Integrals for
+Path-Space Differentiable Rendering
+KAI YAN, University of California, Irvine, USA and Meta Reality Labs, USA
+CHRISTOPH LASSNER, BRIAN BUDGE, and ZHAO DONG, Meta Reality Labs, USA
+SHUANG ZHAO, University of California, Irvine, USA
+(a) Target
+(b) Initial
+(c) Optimized
+Fig. 1. In physics-based differentiable rendering, boundary integrals are crucial for handling scene parameters that control object geometry such as mesh
+vertex positions. In this paper, we introduce a new Monte Carlo method to efficiently estimate boundary integrals under the differential path integral
+formulation [Zhang et al. 2020]. This example consists of three objects under environmental lighting, and our technique allows efficient reconstruction of their
+shapes via a single inverse-rendering optimization. (Please use Adobe Acrobat and click column (c) to see the optimization process animated.)
+Boundary integrals are unique to physics-based differentiable rendering
+and crucial for differentiating with respect to object geometry. Under the
+differential path integral framework—which has enabled the development
+of sophisticated differentiable rendering algorithms—the boundary components are themselves path integrals. Previously, although the mathematical
+formulation of boundary path integrals have been established, efficient estimation of these integrals remains challenging.
+In this paper, we introduce a new technique to efficiently estimate boundary path integrals. A key component of our technique is a primary-samplespace guiding step for importance sampling of boundary segments. Additionally, we show multiple importance sampling can be used to combine
+multiple guided samplings. Lastly, we introduce an optional edge sorting step
+to further improve the runtime performance. We evaluate the effectiveness
+of our method using several differentiable-rendering and inverse-rendering
+examples and provide comparisons with existing methods for reconstruction
+as well as gradient quality.
+CCS Concepts: • Computing methodologies → Rendering.
+ACM Reference Format:
+Kai Yan, Christoph Lassner, Brian Budge, Zhao Dong, and Shuang Zhao. 2022.
+Efficient Estimation of Boundary Integrals for Path-Space Differentiable
+Rendering . ACM Trans. Graph. 41, 4, Article 123 (July 2022), 13 pages.
+https://doi.org/10.1145/3528223.3530080
+Authors’ addresses: Kai Yan, kyan8@uci.edu, University of California, Irvine, USA and
+Meta Reality Labs, USA; Christoph Lassner, classner@fb.com; Brian Budge, bbudge@
+fb.com; Zhao Dong, zhaodong@fb.com, Meta Reality Labs, USA; Shuang Zhao, shz@
+ics.uci.edu, University of California, Irvine, USA.
+This work is licensed under a Creative Commons Attribution International 4.0 License.
+© 2022 Copyright held by the owner/author(s).
+0730-0301/2022/7-ART123
+https://doi.org/10.1145/3528223.3530080
+1
+INTRODUCTION
+Provided a virtual scene with fully specified object geometries, material optical properties, and detector configurations, forward rendering focuses on numerical estimations of a detector’s radiometric
+response. Differentiable rendering, in contrast, computes gradients of
+detector responses with respect to differential changes of the scene
+and has applications in a wide range of areas such as computational
+imaging, remote sensing, and computational fabrication.
+Recently, great progress has been made in physics-based differentiable rendering theory, algorithms, and systems [Li et al. 2018;
+Zhang et al. 2019; Loubet et al. 2019; Nimier-David et al. 2019; Zhang
+et al. 2020; Bangaru et al. 2020; Zhang et al. 2021b,a; Zeltner et al.
+2021]. These advances have made it possible to differentiate a scene
+representation with respect to arbitrary scene parameters including those controlling global object geometry (e.g., the positions
+of mesh vertices). Mathematically, it has been demonstrated that
+physics-based differentiable rendering generally amounts to evaluating interior and boundary integrals.
+The interior integrals for differentiable rendering share the same
+domain as those for forward rendering. To estimate these terms,
+previous differentiable rendering techniques have mostly relied
+on existing stochastic sampling strategies developed for forward
+rendering. Recently, several differentiable-rendering-specific Monte
+Carlo methods have been developed [Zeltner et al. 2021; Zhang et al.
+2021a] with advantages in terms of speed and quality.
+In contrast, the boundary integrals are unique to differentiable
+rendering and defined on discontinuity boundaries of the ordinary
+rendering integrals. To handle them, several new techniques—such
+as Monte Carlo edge sampling [Li et al. 2018], reparameterization
+of the ordinary rendering integral [Loubet et al. 2019; Bangaru et al.
+2020], and differential path integrals [Zhang et al. 2020, 2021b]—
+have been introduced. Among these techniques, differential path
+ACM Trans. Graph., Vol. 41, No. 4, Article 123. Publication date: July 2022.
+123:2
+• Yan, Lassner, Budge, Dong, and Zhao
+integrals introduced by Zhang et al. [2020; 2021b] have enabled the
+development of sophisticated differentiable rendering algorithms
+beyond unidirectional path tracing—similar to ordinary path integrals for forward rendering. Unfortunately, Monte Carlo estimation
+of boundary integrals under Zhang et al.’s path-space formulation
+remains largely under-explored, making it difficult to solve complex
+inverse-rendering problems efficiently.
+In this paper, we introduce a new technique1 for efficient estimation of these boundary path integrals. Concretely, our contributions
+include:
+• We develop a primary-sample-space guiding technique for efficient importance sampling of boundary light paths (§4.1). Additionally, we show how multiple importance sampling (MIS) can
+be used to combine multiple guided sampling processes (§4.2).
+• We introduce an optional edge sorting step that can further improve the performance of our technique (§4.3).
+To show the effectiveness of our method, we compare gradient
+images estimated with our method and previous techniques in Figures 6 and 7. Additionally, we conduct detailed ablation studies
+in Figures 8 and 9 to evaluate individual components of our technique. Further, with our improved estimation of boundary integrals,
+inverse-rendering problems under challenging conditions, such as
+environmental and indirect illumination, can be solved more efficiently. We demonstrate this via several synthetic inverse-rendering
+examples in Figures 10 and 11.
+2
+RELATED WORK
+Sampling for forward rendering. Monte Carlo sampling of light
+transport paths has been an essential component for most, if not
+all, physics-based forward rendering techniques. To this end, a commonly used approach is local sampling that grows light paths vertex
+by vertex. This boils down path sampling to drawing an incident
+direction given the exitant one (or the other way around) at each
+vertex—which is typically achieved by importance sampling local
+BSDFs. Previously, a large variety of BSDF models have been proposed (e.g., [Phong 1975; Cook and Torrance 1982; Ashikhmin and
+Shirley 2000; Oren and Nayar 1994]). Among these models, microfacet BSDFs (e.g., [Cook and Torrance 1982; Ward 1992; Schlick
+1994; van Ginneken et al. 1998; Kelemen and Szirmay-Kalos 2001;
+Pont and Koenderink 2002; Walter et al. 2007; Heitz et al. 2016; Lee
+et al. 2018; Xie and Hanrahan 2018]) have been widely adopted.
+Importance sampling of these models, therefore, has been studied
+thoroughly and can be performed by sampling the underlying normal distributions [Walter et al. 2007; Heitz and d’Eon 2014] or via
+localized Monte Carlo processes [Heitz et al. 2016].
+All these sampling methods are developed for forward rendering
+and can be repurposed to estimate interior integrals for differentiable
+rendering. On the other hand, they are largely complementary to
+the estimation of boundary integrals—which is the main focus of
+this paper.
+Path guiding. Recently, several methods (e.g., [Jensen 1995; Lafortune and Willems 1995; Vorba et al. 2014; Müller et al. 2017; Guo et al.
+1 Our implementation is available at https://shuangz.com/projects/psdr-aq-sg22/.
+ACM Trans. Graph., Vol. 41, No. 4, Article 123. Publication date: July 2022.
+2018; Zheng and Zwicker 2019; Müller et al. 2019]) have been developed to accelerate unidirectional path tracing for forward rendering.
+Although these techniques are conceptually related to our technique,
+especially the primary-sample-space guiding step, our technique
+focuses on a very different use case of estimating boundary integrals
+that are unique to differentiable rendering.
+Physics-based differentiable rendering. Physics-based differentiable
+rendering is the process of numerically computing derivatives of
+forward-rendering results with respect to arbitrary scene parameters such as object geometries and optical material properties.
+Although simple (e.g., one-bounce) light transport can be simulated and differentiated approximately using soft rasterization (e.g.,
+[Laine et al. 2020]) or analytical methods (e.g., [Zhou et al. 2021]),
+physics-based differentiable rendering generally requires estimating (i) interior integrals given by differentiating the integrands of
+corresponding forward-rendering integrals; and (ii) boundary ones
+defined over discontinuities of those integrands.
+Previously, the interior integrals have been mostly estimated
+using path sampling methods developed for forward rendering.
+Recently, Zeltner et al. [2021] have studied how various parameterizations (e.g., “attached” and “detached”) affect the performance
+of Monte Carlo estimation of the interior integral. Additionally,
+Zhang et al. [2021a] have introduced antithetic sampling (at both
+BSDF- and path-level) for efficiently estimating the interior integral.
+Both of these methods are orthogonal to our technique.
+The boundary integrals are unique to differentiable rendering. Recent works have shown that the boundary integrals can be estimated
+by Monte Carlo edge sampling [Li et al. 2018; Zhang et al. 2019] or
+avoided altogether by reparameterizing rendering integrals [Loubet
+et al. 2019; Bangaru et al. 2020].
+Further, Zhang et al. [2020; 2021b] have introduced the differential
+path integral framework that formulates both the interior and the
+boundary components as full path integrals, making it possible
+for the development of sophisticated Monte Carlo estimators for
+both components (beyond unidirectional path tracing). On the other
+hand, efficiently estimating boundary path integrals (by importance
+sampling full boundary light paths) remains challenging. In this
+paper, we introduce a new solution to this problem.
+3
+PRELIMINARIES
+We now briefly revisit some mathematical and algorithmic preliminaries on the differential path integral formulation (§3.1) and Monte
+Carlo estimation of boundary integrals (§3.2). Table 1 presents a list
+symbols that are commonly used in this paper and their definitions.
+3.1
+Differential Path Integral
+In forward rendering, the path integral formulation introduced
+by Veach [1997] has allowed the development of many advanced
+techniques such as bidirectional path tracing (BDPT). Under this
+formulation, the intensity of a pixel is given by
+∫
+𝐼=
+𝑓 (¯
+𝒙) d𝜇 ( ¯
+𝒙),
+(1)
+Ω
+where Ω := ∪𝑁 ≥1 M 𝑁 +1 is the path space comprised of all light
+transport paths 𝒙¯ = (𝒙 0, 𝒙 1, . . . , 𝒙 𝑁 ) with finite lengths (with
+Efficient Estimation of Boundary Integrals for Path-Space Differentiable Rendering
+Table 1. List of symbols commonly used in this paper.
+Source subpath
+Definition
+x2D
+abstract scene parameter
+object surfaces
+measurement contribution
+path space
+𝜃
+M (𝜃 )
+𝑓
+Ω (𝜃 )
+X
+B
+𝑓ˆ
+Ω̂
+𝜕 Ω̂ (𝜃 )
+x1D
+motion
+reference configuration
+material measurement contribution
+material path space
+material boundary path space
+Material-form reparameterization. Differentiable rendering is about
+differentiating 𝐼 given by Eq. (1) with respect to some (arbitrary)
+scene parameter 𝜃 ∈ R. However, when the scene geometry M depends on the parameter 𝜃 , so will the path space Ω, making the differentiation more difficult. To address this problem, Zhang et al. [2020]
+propose to reparameterize the path integral (1) using some reference configuration B independent of 𝜃 coupled with a mapping (or
+a motion) X such that, for any 𝜃 , X(·, 𝜃 ) is a differentiable one-to-one
+mapping from the reference B to the scene geometry M (𝜃 ). This
+reparameterization induces a change of variable from a ordinary
+light path 𝒙¯ = (𝒙 0, . . . , 𝒙 𝑁 ) to a material path 𝒑¯ = (𝒑 0, . . . , 𝒑 𝑁 )
+via the relation 𝒙𝑛 = X(𝒑𝑛 , 𝜃 ) for all 0 ≤ 𝑛 ≤ 𝑁 . Applying this
+change of variable to the path integral (1) yields:
+∫
+¯ d𝜇 ( 𝒑),
+¯
+𝐼=
+𝑓ˆ( 𝒑)
+(2)
+Ω̂
+where Ω̂ = ∪𝑁 ≥1 B 𝑁 +1 is the material path space, and 𝑓ˆ is the
+material measurement contribution function that captures the
+ordinary measurement contribution and the Jacobian resulting from
+the reparameterization.
+In theory, the reference configuration B and the corresponding
+mapping X can be arbitrary as long as smoothness conditions hold.
+In practice, when estimating the gradient d𝐼/d𝜃 at some 𝜃 = 𝜃 0 , the
+reference is typically set to B = M (𝜃 0 ).
+Differential path integral. Zhang et al. [2020] have recently shown
+that differentiating Eq. (2) with respect to a scene parameter 𝜃 yields
+the material-form differential path integral of the form
+interior
+d𝐼
+=
+d𝜃
+d 𝑓ˆ( ¯
+𝒑)
+d𝜇 ( ¯
+𝒑) +
+Ω̂ d𝜃
+boundary
+∫
+𝜕 Ω̂
+𝑓ˆ B 𝑓ˆ S 𝑓ˆ D d𝜇¤ ,
+x1S
+xB
+x0S
+ωB
+xB
+x0S
+(b)
+Fig. 2. Boundary segments: (a) A boundary light path is comprised of a
+M being the union of all object surfaces), 𝑓 is the measurement
+contribution function, and 𝜇 is the area-product measure.
+∫
+x2S
+x0D
+(a)
+123:3
+x0D
+Boundary seg.
+Detector subpath
+Symbol
+•
+(3)
+where the interior term is obtained by simply differentiating the
+integrand 𝑓ˆ; the boundary term, on the other hand, is unique to
+differentiable rendering.
+In Eq. (3), the domain of the boundary integral is the material
+boundary path space 𝜕 Ω̂. Unlike the material path space that is
+independent of the scene parameter 𝜃 , 𝜕 Ω̂ generally does depend
+on 𝜃 . If we let superscripts ‘S’ and ‘D’ indicate, respectively, vertices
+boundary segment 𝒙 0S 𝒙 0D (shown in red) as well as a source and a detector
+subpath (illustrated in orange and blue, respectively). The two endpoints of
+the boundary segment are located on the visibility boundary of each other.
+(b) A boundary segment 𝒙 0S 𝒙 0D can be uniquely determined with a surface
+point 𝒙 B ∈ M interior to the segment, along with a direction 𝝎 B .
+belonging to the source and detector subpaths, then each material
+boundary light path 𝒑¯ = (𝒑𝑠S, . . . , 𝒑 0S, 𝒑 0D, . . . , 𝒑𝑡D ) ∈ 𝜕 Ω̂ contains
+exactly one material boundary segment 𝒑 0S 𝒑 0D such that their corresponding ordinary path vertices 𝒙 0S = X(𝒑 0S, 𝜃 ) and 𝒙 0D = X(𝒑 0D, 𝜃 )
+lie on the visibility boundary of each other (see Figure 2-a).
+In the integrand of the boundary integral, given a boundary path,
+the terms 𝑓ˆ B , 𝑓ˆ S , and 𝑓ˆ D capture, respectively, the contributions
+of the boundary segment 𝒑 0S 𝒑 0D , the source subpath (𝒑𝑠S, . . . , 𝒑 0S ),
+and the detector subpath (𝒑 0D, . . . , 𝒑𝑡D ). Please refer to the work by
+Zhang et al. [2020] for exact definitions of these terms as well as
+the measure ¤𝜇.
+3.2
+Multi-Directional Sampling of Boundary Paths
+Numerically estimating the boundary integral in Eq. (3) is known
+to be challenging. Monte Carlo edge sampling [Li et al. 2018], for
+instance, requires detecting object silhouettes at each vertex of
+a light path and can be prohibitively expensive for scenes with
+complex geometry.
+To avoid explicit silhouette detection, Zhang et al. [2020] propose
+to sample boundary paths in a multi-directional fashion by (i) sampling the material boundary segment 𝒑 0S 𝒑 0D ; and (ii) using standard
+methods such as unidirectional and bidirectional path sampling to
+construct the source and detector subpaths.
+Using this approach, the first boundary-segment sampling step is
+unique to path-space differentiable rendering and crucial to the effectiveness of the resulting Monte Carlo estimator. To this end, instead
+of directly sampling the two endpoints 𝒑 0S and 𝒑 0D (or, equivalently,
+the corresponding ordinary vertices 𝒙 0S and 𝒙 0D ), Zhang et al. have
+proposed to sample a point 𝒙 B ∈ M and a direction 𝝎 B ∈ S2
+such that 𝒙 B lies in the interior of the segment 𝒙 0S 𝒙 0D and 𝝎 B
+determines the directions of the segment. In other words, 𝒙 0S =
+rayIntersect(𝒙 B, −𝝎 B ) and 𝒙 0D = rayIntersect(𝒙 B, 𝝎 B ), as illustrated
+in Figure 2-b.
+Sampling the boundary segment this way enjoys the benefit of
+not requiring explicit silhouette detection (since 𝒙 0S and 𝒙 0B are
+ACM Trans. Graph., Vol. 41, No. 4, Article 123. Publication date: July 2022.
+123:4
+• Yan, Lassner, Budge, Dong, and Zhao
+EFFICIENT SAMPLING OF BOUNDARY SEGMENTS
+Ideally, we would like to have 𝑝 (𝑢 1, 𝒖 2 ) being proportional to
+|𝐹 (𝑢 1, 𝒖 2 )|. This, however, is difficult because (i) the ℎ S and ℎ D components are given by path integrals; and (ii) the boundary contribution 𝑓ˆ B 𝐽 B can be highly complex and potentially discontinuous.
+To address these challenges, Zhang et al. [2020] propose to approximate (the absolute value of) Eq. (5) with
+We now introduce our technique that allows efficient sampling of
+boundary segments.
+𝐹˜ (𝑢 1, 𝒖 2 ) = 𝑓ˆ B (𝒑 0S, 𝒑 0D ) 𝐽 B (𝑢 1, 𝒖 2 ) ℎ˜ S (𝒑 0S, 𝒑 0D ) ℎ˜ D (𝒑 0S, 𝒑 0D ), (11)
+guaranteed to located on the visibility boundary of each other).
+On the other hand, efficiently sampling 𝒙 B and 𝝎 B remains highly
+nontrivial. In this paper, we introduce a new technique to tackle
+this problem.
+4
+4.1
+Primary-Sample-Space Guiding
+With the scene geometry M (𝜃 ) expressed using polygonal meshes
+(which is the case for many, if not most, applications in computer
+graphics and vision), it has been demonstrated that the point 𝒙 B
+must lie on an edge of some polygonal face—a 1D manifold. Further,
+the direction 𝝎 B is drawn from a 2D manifold. In other words, the
+primary sample space for (𝒙 B, 𝝎 B ) is three-dimensional. This allows
+us to rewrite the boundary integral in Eq. (3) as a primary-samplespace integral:
+∫
+𝐹 (𝑢 1, 𝒖 2 ) d𝒖 2 d𝑢 1,
+(4)
+[0,1) 3
+where 𝑢 1 ∈ R, 𝒖 2 ∈ R2 , and
+𝐹 (𝑢 1, 𝒖 2 ) := 𝑓ˆ B (𝒑 0S, 𝒑 0D ) 𝐽 B (𝑢 1, 𝒖 2 ) ℎ S (𝒑 0S, 𝒑 0D ) ℎ D (𝒑 0S, 𝒑 0D ) .
+|
+{z
+} | {z } | {z }
+boundary
+source
+(5)
+detector
+In Eq. (5), 𝐽 B is the Jacobian determinant capturing the change of
+variable from (𝒙 B, 𝝎 B ) to (𝑢 1, 𝒖 2 ), and
+∫
+ℎ S (𝒑 0S, 𝒑 0D ) :=
+𝑓ˆ S ( 𝒑¯ S ; 𝒑 0S, 𝒑 0D ) d𝜇 ( 𝒑¯ S ),
+(6)
+∫
+ℎ D (𝒑 0S, 𝒑 0D ) :=
+𝑓ˆ D ( 𝒑¯ D ; 𝒑 0S, 𝒑 0D ) d𝜇 ( 𝒑¯ D ),
+(7)
+capture, respectively, the contributions of the source subpath 𝒑¯ S :=
+(𝒑 1S, 𝒑 2S, . . .) and the detector subpath 𝒑¯ D := (𝒑 1D, 𝒑 2D, . . .).
+We note that, under this formulation, 𝒑 0S and 𝒑 0D are essentially
+functions of the primary samples 𝑢 1 and 𝒖 2 :
+
+
+ 
+𝒑 0S = X −1 rayIntersect 𝒙 B (𝑢 1 ), −𝝎 B (𝒖 2 ) , 𝜃 ,
+(8)
+
+
+ 
+𝒑 0D = X −1 rayIntersect 𝒙 B (𝑢 1 ), 𝝎 B (𝒖 2 ) , 𝜃 ,
+(9)
+where X −1 (·, 𝜃 ) denotes the inverse of the (predetermined) mapping
+from the reference configuration B to the scene geometry M (𝜃 ).
+By randomly drawing the primary samples (𝑢 1, 𝒖 2 ), the source
+subpath 𝒑¯ S , and the detector subpath 𝒑¯ D , we obtain an unbiased
+single-sample Monte Carlo estimator for Eq. (4):
+*
++
+𝑓ˆ B (𝒑 0S, 𝒑 0D ) 𝐽 B (𝑢 1, 𝒖 2 ) 𝑓ˆ S (𝒑¯ S ; 𝒑 0S, 𝒑 0D ) 𝑓ˆ D (𝒑¯ D ; 𝒑 0S, 𝒑 0D )
+, (10)
+𝑝 (𝑢 1, 𝒖 2 ) 𝑝 ( 𝒑¯ S ) 𝑝 ( 𝒑¯ D )
+where 𝑝 (𝑢 1, 𝒖 2 ), 𝑝 ( 𝒑¯ S ), 𝑝 (𝒑¯ D ) denote the corresponding probability densities. In practice, given the boundary segment 𝒑 0S, 𝒑 0D , the
+source and detector subpaths 𝒑¯ S and 𝒑¯ D can be constructed using
+standard unidirectional or bidirectional methods. In what follows,
+we focus on sampling the boundary segment itself.
+ACM Trans. Graph., Vol. 41, No. 4, Article 123. Publication date: July 2022.
+where ℎ˜ S and ℎ˜ D are, respectively, approximations of ℎ S and ℎ D
+obtained using photon mapping. We note that, with the photon (and
+importon) maps pre-generated, the evaluations of ℎ˜ S and ℎ˜ D —which
+query those maps—become deterministic.
+Further, Zhang et al. [2020] discretize 𝐹˜ as a piecewise-constant
+function using a regular three-dimensional grid with the value of
+each cell computed by averaging evaluations of 𝐹˜ at several random
+locations within that cell. With the regular grid computed, it can
+then be used to importance sample (𝑢 1, 𝒖 2 ). We note that, despite
+the use of approximations (i.e., photon mapping and discretization),
+the resulting Monte Carlo method generally remains unbiased since
+the approximations are used only to construct the PDF 𝑝 (𝑢 1, 𝒖 2 ).
+Although this method works adequately for simple scenes, more
+complex ones (with, for example, detailed geometries and environmental illumination) can lead to rapidly varying 𝐹˜ that requires grids
+with unpractically high resolutions. To address this problem, we
+introduce a new technique that utilizes Kd-trees that automatically
+adapt to the structure of the function 𝐹˜ given by Eq. (11).
+Kd-tree construction. We use Kd-trees to partition the primary
+sample space [0, 1) 3 for (𝑢 1, 𝒖 2 ). Specifically, we pre-partition the
+first dimension into multiple intervals each of which corresponds
+to a face edge. This allows that, for each interval [𝑎, 𝑏) ⊂ [0, 1), the
+mapping from the primary sample 𝑢 1 ∈ [𝑎, 𝑏) to the corresponding
+point 𝒙 B ∈ M (𝜃 ) is continuous.
+Then, for each interval [𝑎, 𝑏), we build a Kd-tree that further
+subdivides the primary sample space [𝑎, 𝑏) × [0, 1) 2 based on the
+function 𝐹˜ of Eq. (11). As described in Algorithm 1, at each tree
+node 𝑟 with axis-aligned bounding box 𝑎𝑎𝑏𝑏 corresponding to the
+primary sample space covered by this node, we compute a (tri)linear
+fit of the function 𝐹˜ using samples drawn from 𝑎𝑎𝑏𝑏. If the fitting
+error is low (i.e., below some predetermined threshold), the fit is
+likely already a close approximation of 𝐹˜ , and the node no longer
+needs to be subdivided. Otherwise, we split the node into two equalsized children. For each possible dimension ax ∈ {𝑥, 𝑦, 𝑧} of the split,
+we compute fits of 𝐹˜ in the two children (Lines 5–8 of Algorithm 1).
+Then, we select the dimension ax∗ with maximal total fitting error,
+split the node accordingly, and recursively process the two child
+nodes (Lines 9–13 of Algorithm 1).
+When building the Kd-trees, we make the number of samples
+used for computing (tri)linear fits of 𝐹˜ a user-specifiable parameter.
+Generally, this sampling rate needs to be sufficiently high to capture
+the detailed structures of 𝐹˜ . In practice, since we pre-subdivide the
+first dimension of the primary space, we find 32 to work well for all
+of our examples.
+Sampling. When building the Kd-trees, we also construct a global
+list containing references of all the leaf nodes. This allows us to
+Efficient Estimation of Boundary Integrals for Path-Space Differentiable Rendering
+123:5
+x0S
+ALGORITHM 1: Build Kd-trees to approximate the function 𝐹˜ in
+Eq. (11) in a piecewise linear fashion
+BuildTree(𝑟 , 𝑎𝑎𝑏𝑏)
+Input: Current tree node 𝑟 , the corresponding axis-aligned
+bounding box 𝑎𝑎𝑏𝑏, and error threshold 𝜖 ∈ R>0
+2 begin
+3
+Compute first-order fit of 𝐹˜ within aabb with err being the
+fitting error
+4
+if err > 𝜖 then
+5
+for ax ∈ {𝑥, 𝑦, 𝑧 } do
+6
+Split the box 𝑎𝑎𝑏𝑏 in half along the axis ax
+7
+Compute first-order fits of 𝐹˜ within the two split
+regions and let errax be the total fitting error
+8
+end
+9
+ax∗ ← arg maxax errax
+10
+Split 𝑎𝑎𝑏𝑏 along ax∗ into 𝑎𝑎𝑏𝑏 1 and 𝑎𝑎𝑏𝑏 2
+11
+Make 𝑟 an internal node with children 𝑟 1 and 𝑟 2
+12
+BuildTree (𝑟 1 , 𝑎𝑎𝑏𝑏 1 )
+13
+BuildTree (𝑟 2 , 𝑎𝑎𝑏𝑏 2 )
+14
+else
+15
+Make 𝑟 a leaf node and add it to a (global) list
+16
+end
+17 end
+•
+1
+xB
+Fig. 3. When sampling the direction 𝝎 B of the boundary segment by first
+drawing 𝒙 0S on a light source and setting 𝝎 B = normalized(𝒙 0S − 𝒙 B ), the
+resulting 𝝎 B may be invalid: Taking this direction, the boundary segment
+would penetrate the object.
+Unfortunately, using this MIS sampler leads to a target function
+light
+𝐹 (𝑢 1, 𝒖 2 , 𝒖 2dir ) over [0, 1) 5 , which can be expensive to guide.
+Instead, we apply our primary-sample-space guiding (§4.1) to
+two processes that draw the direction 𝝎 B using light and direction
+sampling, respectively. These sampling processes give two mappings
+B
+B from a primary sample 𝒖 ∈ [0, 1) 2 to the direction
+𝝎light
+and 𝝎dir
+2
+𝝎 B of the boundary segment, which further yield two versions of
+the function 𝐹˜ from Eq. (11):
+B
+𝐹˜light (𝑢 1, 𝒖 2 ) = 𝑓ˆ B (𝒑 0S, 𝒑 0D ) 𝐽light
+(𝑢 1, 𝒖 2 ) ℎ˜ S (𝒑 0S, 𝒑 0D ) ℎ˜ D (𝒑 0S, 𝒑 0D ),
+(12)
+create a discrete distribution of all nodes such that the probability
+mass of each node is proportional to the (trilinear) fit of 𝐹˜ integrated
+over the node’s axis-aligned bounding box.
+At render time, to sample a boundary segment, we first select a
+tree node using the discrete distribution. Then, we draw the primary
+samples (𝑢 1, 𝒖 2 ) ∈ R3 using the inversion method based on the fit
+of the 𝐹˜ function associated with that node.
+4.2
+Multiple Importance Sampling
+When estimating the boundary integral in Eq. (3), Zhang et al. [2020]
+utilize next-event estimation by further decomposing this integral
+into a direct and an indirect term where the former accounts for
+boundary paths with the vertex 𝒙 0S = X(𝒑 0S, 𝜃 ) located on a light
+source.
+To estimate the direct component, after selecting 𝒙 B , Zhang et al.
+draw the direction 𝝎 B ∈ S2 of the boundary segment by sampling the light source. For area lights, this process becomes drawing a point 𝒙 0S on the surface of an area light and letting 𝝎 B =
+normalize(𝒙 B − 𝒙 0S ). Although this works well for simple (e.g., small
+area) lighting, it can become less effective for complex illumination conditions (e.g., image-based environmental lighting) since the
+sampled direction 𝝎 B can usually be invalid due to occlusion (see
+Figure 3). In these cases, it is usually more efficient to directly sample
+the direction 𝝎 B .
+To address this problem, we combine multiple importance sampling (MIS) with our primary-sample-space guiding. To this end,
+one possibility is to guide a full MIS sampler which uses a primary
+light
+sample 𝑢 1 ∈ [0, 1) to obtain the location 𝒙 B as well as 𝒖 2 , 𝒖 2dir ∈
+2
+B
+B .
+[0, 1) to draw, respectively, two direction samples 𝝎light and 𝝎dir
+B
+𝐹˜dir (𝑢 1, 𝒖 2 ) = 𝑓ˆ B (𝒑 0S, 𝒑 0D ) 𝐽dir
+(𝑢 1, 𝒖 2 ) ℎ˜ S (𝒑 0S, 𝒑 0D ) ℎ˜ D (𝒑 0S, 𝒑 0D ).
+(13)
+We note that, since 𝒑 0S and 𝒑 0D are determined by 𝝎 B via Eqs. (8)
+and (9), they take different values in Eqs. (12) and (13) for the same
+primary sample (𝑢 1, 𝒖 2 ).
+During preprocessing, we apply our primary-sample-space guiding to both 𝐹˜light and 𝐹˜dir , obtaining two probability densities 𝑝 light
+and 𝑝 dir that are approximately proportional to 𝐹˜light and 𝐹˜dir , respectively. At render time, we draw two sets of primary samples
+light light
+(𝑢 1 , 𝒖 2 ) and (𝑢 1dir, 𝒖 2dir ) with the probability densities 𝑝 light
+and 𝑝 dir , respectively. This gives us two unbiased estimators of the
+boundary integral:
+*
+*
++
+light light +
+𝐹˜light (𝑢 1 , 𝒖 2 )
+𝐹˜dir (𝑢 1dir, 𝒖 2dir )
+,
+.
+(14)
+light light
+𝑝 dir (𝑢 1dir, 𝒖 2dir )
+𝑝 light (𝑢 1 , 𝒖 2 )
+To obtain proper weights for these estimators, we rewrite the probability densities 𝑝 light and 𝑝 dir with respect to 𝒙 B and 𝝎 B (as opposed
+to 𝑢 1 and 𝒖 2 ) by letting
+𝑝 light (𝑢 1, 𝒖 2 )
+,
+𝑝ˆlight (𝑢 1, 𝒖 2 ) := B
+𝐽light (𝑢 1, 𝒖 2 )
+𝑝 (𝑢 1, 𝒖 2 )
+𝑝ˆdir (𝑢 1, 𝒖 2 ) := dir
+. (15)
+B (𝑢 , 𝒖 )
+𝐽dir
+1 2
+Using the balance heuristic, this allows us to weight contributions
+of the two estimators in Eq. (14) with
+𝑝ˆlight (𝒖 light )
+𝑝ˆlight (𝒖 light ) + 𝑝ˆdir (𝒖 light )
+𝑝ˆdir (𝒖 dir )
+,
+𝑝ˆlight (𝒖 dir ) + 𝑝ˆdir (𝒖 dir )
+,
+light
+respectively, where 𝒖 light := (𝑢 1
+light
+, 𝒖2
+(16)
+) and 𝒖 dir := (𝑢 1dir, 𝒖 2dir ).
+ACM Trans. Graph., Vol. 41, No. 4, Article 123. Publication date: July 2022.
+123:6
+• Yan, Lassner, Budge, Dong, and Zhao
+vnext
+𝑢1 = 0
+𝑢1 = 1
+vcur
+vprev
+(a)
+(a) Scene configuration
+(b)
+5.8
+Fig. 4. Edge sorting: (a) Sorting the edges of a mesh allows us to create
+long “chains” (marked in red), improving the continuity of 𝒙 B (𝑢 1 ). (b) When
+extending a chain ending at the vertices 𝒗prev and 𝒗cur , we pick the neighbor
+𝒗next such that the direction of (𝒗cur , 𝒗next ) is as close as possible to that of
+(𝒗prev , 𝒗cur ).
+4.3
+(c1) With sorting
+4.6
+3.4
+2.2
+1.0
+0.0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+1.0
+(b2) Marginalized target function 𝐹˜dir (𝑢 1 ) without edge sorting
+5.8
+In practice, evaluating the probability densities 𝑝 light and 𝑝 dir
+in Eq. (15) requires traversing the corresponding Kd-trees. To accelerate the computation, we exploit the fact that 𝑝ˆlight and 𝑝ˆdir
+are approximately proportional to 𝐹˜light and 𝐹˜dir , respectively. This
+allow us to write
+𝐹˜light (𝑢 1, 𝒖 2 )
+𝐹˜dir (𝑢 1, 𝒖 2 )
+ˆdir (𝑢 1, 𝒖 2 ) ≈
+𝑝ˆlight (𝑢 1, 𝒖 2 ) ≈
+,
+𝑝
+,
+B (𝑢 , 𝒖 )
+B (𝑢 , 𝒖 )
+𝑐 light 𝐽light
+𝑐 dir 𝐽dir
+1 2
+1 2
+(17)
+where 𝑐 light and 𝑐 dir are normalization constants obtained when
+building the Kd-trees (by summing the probability masses stored
+in all leaf nodes). We note that, in Eq. (17), 𝐹˜light and 𝐹˜dir can be
+calculated, respectively, via Eqs. (12) and (13) in 𝑂 (1) time.
+(b1) No sorting
+1e−3
+1e−3
+4.6
+3.4
+2.2
+1.0
+0.0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+1.0
+(c2) Marginalized target function 𝐹˜dir (𝑢 1 ) with edge sorting
+Fig. 5. We demonstrate the effectiveness of our edge sorting using a
+simple scene containing a glossy egg under environmental illumination (a).
+Without edge sorting, the mapping from the primary sample 𝑢 1 to points on
+mesh edges can be highly discontinuous (b1), causing the target functions
+to have many jump discontinuities (b2). With edge sorting, on the other
+hand, the mapping becomes significantly more continuous (c1), causing the
+target functions to contain fewer discontinuities (c2).
+Edge Sorting
+When the target functions 𝐹˜ of Eq. (11), 𝐹˜light of Eqs. (12), and
+𝐹˜dir of Eqs. (13) are highly discontinuous, the performance of our
+technique can degrade as the Kd-trees need to have very large depths
+to properly approximate the targets. In practice, this is mostly caused
+by discontinuities of 𝒙 B as a function of the primary sample 𝑢 1 .
+To address this problem, we introduce an optional step that can
+greatly reduce the number of jump discontinuity points of 𝒙 B (𝑢 1 ).
+Specifically, we sort the edges to form long “chains” along which the
+ALGORITHM 2: Construct a chain of mesh edges
+BuildChain(M, 𝒗0 )
+Input: A polygonal mesh M and a mesh edge (𝒗0 , 𝒗1 )
+2 begin
+3
+chain ← [ (𝒗0 , 𝒗1 ) ] ;
+// The resulting chain
+4
+𝒗prev ← 𝒗0 ; 𝒗cur ← 𝒗1 ;
+5
+while 𝒗cur is associated with some unused edge do
+6
+Select an unused edge (𝒗cur , 𝒗next ) with a direction as close
+to that of (𝒗prev , 𝒗cur ) as possible;
+7
+Append the edge (𝒗cur , 𝒗next ) to the end of chain;
+8
+𝒗prev ← 𝒗cur ; 𝒗cur ← 𝒗next ;
+9
+end
+10
+return chain;
+11 end
+1
+ACM Trans. Graph., Vol. 41, No. 4, Article 123. Publication date: July 2022.
+mapping from 𝑢 1 to 𝒙 B is continuous (see Figure 4-a). Since finding
+the optimal edge ordering that results in a minimal number of chains
+is NP-hard, we instead traverse the mesh edges in a greedy fashion.
+As described in Algorithm 2, starting from an arbitrary mesh edge,
+we construct a chain of edges by iteratively moving to a neighboring
+vertex 𝒗 next from the current one 𝒗 cur . When there are multiple
+possible neighbors, we pick the one such that the direction of the
+edge (𝒗 cur, 𝒗 next ) is as close to that of the previous one (𝒗 prev, 𝒗 cur )
+as possible (see Figure 4-b). We demonstrate the usefulness of our
+edge sorting process using a simple scene in Figure 5 and will show
+more ablations in §5.
+For applications where remeshing can be applied (which is typically the case when solving inverse-rendering problems), we preapply remeshing [Jakob et al. 2015] to make the input mesh fieldaligned. This allows our edge sorting process to output fewer longer
+chains, further improving the overall effectiveness of our technique.
+5
+RESULTS
+In what follows, we validate our technique and evaluate its effectiveness by comparing gradient images (§5.1). Then, we compare the
+performance of our technique and baseline methods using several
+inverse-rendering examples (§5.2) and show additional results (§5.3).
+Please refer to the supplemental material for more examples and
+animated inverse-rendering results.
+Efficient Estimation of Boundary Integrals for Path-Space Differentiable Rendering
+(a) Ordinary
+(b1) PSDR (reference)
+(b2) PSDR (equal-time)
+•
+123:7
+(c) Ours
+Bunny
+0.5
+-0.5
+Bunny shadow 1
+0.8
+-0.8
+Cornell box 1
+0.01
+-0.01
+Fig. 6. Differentiable-rendering comparisons: We compare boundary-component-only gradient images generated with our technique (c) with Zhang et al.’s
+method [2020] indicated as “PSDR” (b1, b2). At equal-time, our technique produces significantly cleaner gradient estimates (b2, c).
+5.1
+Validation and Evaluation
+Validation and comparison with Zhang et al. We evaluate our technique by comparing gradient images generated with our method
+and with Zhang et al.’s approach [2020] which performs simple guiding using regular grids. Since our technique focuses on estimating
+the boundary component of Eq. (3), we estimate this term only (i.e.,
+by neglecting the interior integral) for both methods.
+We show three examples in Figure 6. The bunny scene contains
+a glossy bunny under environmental illumination, and the gradient
+images are computed with respect to the rotation angle of the bunny
+(around the vertical axis). The bunny shadow 1 scene involves a
+bunny lit by a large area light, casting a soft shadow on the ground.
+The gradients are computed with respect to the translation of the
+bunny. The Cornell box 1 scene has a rough-glass object and an
+area light pointing toward the ceiling, causing most of the scene to
+be indirectly lit. In all examples, our results closely match the references (obtained using Zhang et al.’s method [2020] with very high
+sample counts). At equal-time—and approximately equal sample
+and storage—our results enjoy much lower variances.
+Comparison with warped-area sampling. Additionally, in Figure 7
+and the supplement, we compare gradients estimated using our
+method and warped-area sampling [Bangaru et al. 2020]. This technique is largely orthogonal to ours as it handles visibility discontinuities very differently (by turning the boundary integral into
+an interior one using the divergence theorem). Nonetheless, we
+compare with this technique for completeness. Since warped-area
+sampling uses a different formulation than ours, we show full gradient estimates—as opposed to boundary-component-only estimates—
+where our results have the interior components computed using
+Zhang et al.’s method [2020].
+In Figure 7, the bunny shadow 1 scene is identical to the one
+used in Figure 6, and the Cornell box 2 scene is a simplified version
+of Cornell box 1 with a diffuse object2 and the area light pointing
+downward. When using equal numbers of samples, our technique is
+significantly faster while producing gradient estimates with lower
+noise. At equal time, our method offers even greater advantage in
+result quality.
+Ablation: differentiable rendering. Lastly, we conduct an ablation
+study using the bunny scene to evaluate the effectiveness of our
+edge sorting and remeshing (§4.3) as well as multiple important
+sampling (§4.2). This scene uses outdoor environmental lighting
+with a bright sun, creating a clear shadow on the ground (as shown
+in the top row of Figure 6-a).
+When performing light sampling, the area containing the sun
+will be selected with a very high probability. This strategy works
+well for boundary segments with 𝒙 B located on regions that are
+2We use a diffuse object in the Cornell box 2 scene because the implementation of
+warped-area sampling [Bangaru et al. 2020] released by the authors does not support
+the rough dielectric BSDF.
+ACM Trans. Graph., Vol. 41, No. 4, Article 123. Publication date: July 2022.
+123:8
+• Yan, Lassner, Budge, Dong, and Zhao
+(a) Ordinary
+(b) Reference
+(c1) WAS (equal-sample)
+(c2) WAS (equal-time)
+(d) Ours
+Bunny shadow 1
+0.8
+3.9× render time
+-0.8
+Cornell box 2
+0.02
+4.0× render time
+-0.02
+Fig. 7. Differentiable-rendering comparisons: We compare gradient images generated with our technique and the warped-area sampling (WAS)
+method [Bangaru et al. 2020]. With equal sample counts, our technique produces cleaner results while being significantly faster. At equal-time, the quality
+differences become even greater.
+visible to the sun and produces clean gradient estimates around
+the shadow boundaries. On the other hand, for boundary segments
+with 𝒙 B occluded from the sun, light sampling is a poor strategy—as
+illustrated in Figure 8—and causes high variance around the bunny.
+Even with Zhang et al.’s (Figure 8-b) and our primary-sample-space
+guiding (Figure 8-c1), the results remain noisy as the support of the
+target function 𝐹˜light of Eq. (12) is very narrow, making it difficult
+to detect the high-value regions of 𝐹˜light .
+When using direction sampling with our guiding, the result is
+much cleaner overall since the sampled directions of boundary
+segments are no longer affected by the position of the sun (Figure 8c2). On the other hand, estimated gradients around the shadow
+boundaries become slightly worse.
+Our multiple importance sampling technique (§4.2) combines
+light- and direction-sampling strategies and, thus, enjoys the advantages of both (Figure 8-d).
+With edge sorting (§4.3), Zhang et al.’s method—which does not
+adapt to the structure of the target function—has hardly any improvement in result quality. In contrast, our method benefits from
+improved continuity of the target functions and produces cleaner
+results, as shown in the bottom row of Figure 8.
+5.2
+Inverse-Rendering Comparisons
+We now demonstrate the effectiveness of our technique using several inverse-rendering examples using synthetic input images. Since
+our technique focuses on estimating the boundary integral, we
+use Zhang et al.’s method [2020] to estimate the interior term of
+Eq. (3). For all inverse-rendering optimizations, we use Nicolet et al.’s
+method [2021] to update mesh vertex positions (provided the estimated gradients). Additionally, we utilize mini-batch gradient descent by only rendering a subset of input images per iteration. Please
+ACM Trans. Graph., Vol. 41, No. 4, Article 123. Publication date: July 2022.
+refer to Table 2 for optimization configurations and performance
+statistics.
+Ablation: inverse rendering. As a continuation of the ablation
+study (Figure 8), we show two inverse-rendering comparisons in
+Figure 9. Both the jumpy dumpty (top) and the Klee (bottom)
+scenes are comprised of glossy objects under environmental illuminations with cast shadows on the ground. Using multiple target
+images under identical illumination but varying viewing directions
+(with one shown in the figure), we solve for the object shapes by
+minimizing image 𝐿1 losses. Initialized with a sphere (Figure 9-a)
+and using identical settings (e.g., learning rates and numbers of iterations), we configure three optimizations with gradients estimated
+using our primary-sample-space guiding with light sampling, direction sampling, and multiple importance sampling (MIS), respectively
+(Figure 9-cd). Further, we ran these optimizations with and without
+our edge sorting method, respectively. The results demonstrate that,
+both our MIS and edge sampling processes yield reduced variance
+in gradient estimates, allowing the optimization to converge faster
+and produce more accurate reconstructions.
+Further, we compare the performance of inverse-rendering optimization using gradients estimated with our (full) technique and
+with Zhang et al.’s method [2020]. Figure 10 shows three examples.
+The kirby scene contains a rough-glass object under area illumination; The bunny in glass scene consists of a diffuse bunny enclosed
+by a cube made of rough glass. Taking as input 35 images for the first
+scene and 50 for the second, we solve for the shapes of these objects
+to minimize image 𝐿1 losses. Since our technique has identical interior estimates and offers lower variance boundary integral estimates,
+gradients obtained with our method result in faster convergence.
+Additionally, the bunny shadow 2 scene contains a bunny (outside the camera’s field of view) under environmental illumination,
+casting a shadow on the ground. Taking as input 70 shadow images
+Efficient Estimation of Boundary Integrals for Path-Space Differentiable Rendering
+(a) GT
+(b) [Zhang et al. 2020]
+(c1) Ours (light sampling)
+(c2) Ours (dir. sampling)
+•
+123:9
+(d) Ours (MIS)
+No edge sorting
+0.5
+-0.5
+RMSE:
+7.56
+6.32
+4.86
+4.72
+With edge sorting
+0.5
+-0.5
+RMSE:
+7.57
+5.28
+2.99
+2.80
+Fig. 8. Ablation study (differentiable rendering): We evaluate the effectiveness of our edge-sorting (§4.3) and multiple-importance-sampling (§4.2) steps.
+All results in columns (b–d) are generated in equal time.
+Table 2. Optimization configuration and performance statistics for our inverse-rendering results. The “guiding time” numbers indicate per-iteration
+computation time for building the Kd-trees; the “render time” numbers account for the differentiable rendering time; and “postproc. time” captures the cost
+for updating mesh vertices (using Nicolet et al.’s method [2021]). All experiments are conducted on a workstation with an AMD Ryzen Threadripper Pro
+3975WX CPU (with 32 cores) and an Nvidia RTX Titan graphics card.
+Scene
+Dodoco
+Jumpy Dumpty
+Klee
+Kirby
+Bunny in glass
+Bunny shadow 2
+Duck
+Mora
+Glass Dodoco
+# Target
+images
+# Param.
+Batch
+size
+# Iter.
+Guiding
+memory
+Guiding
+time
+Render
+time
+Postproc.
+time
+70
+140
+40
+35
+50
+70
+35
+70
+140
+450,000
+60,000
+60,000
+15,000
+30,000
+30,000
+3,205,728
+150,001
+60,000
+2
+2
+1
+1
+2
+2
+1
+1
+1
+3000
+520
+200
+400
+2000
+600
+400
+1600
+700
+4 MB
+2 MB
+2 MB
+80 KB
+128 KB
+2 MB
+2 MB
+4 MB
+400 KB
+1.34 s
+0.61 s
+0.33 s
+0.91 s
+1.79 s
+0.47 s
+0.34 s
+0.43 s
+0.94 s
+2.59 s
+1.11 s
+0.82 s
+3.67 s
+17.55 s
+0.72 s
+0.94 s
+1.01 s
+5.76 s
+0.310 s
+0.016 s
+0.016 s
+0.017 s
+0.022 s
+0.012 s
+0.092 s
+0.109 s
+0.093 s
+(Fig. 1)
+(Fig. 9)
+(Fig. 9)
+(Fig. 10)
+(Fig. 10)
+(Fig. 10)
+(Fig. 11)
+(Fig. 11)
+(Fig. 11)
+with the object having varying known orientations, we solve for the
+shape of the object. Since the gradients around shadow boundaries
+are captured solely by the boundary integral, the quality of its estimates is crucial to the performance. Compared with Zhang et al.’s
+method, our gradient estimates have significantly lower noise, yielding much better reconstruction of object geometry. We note that
+the object’s geometric details are difficult to recover due to the
+non-line-of-sight configuration.
+5.3
+Additional Inverse-Rendering Results
+We show additional inverse-rendering results in Figure 11. The
+Duck scene [Dong et al. 2014] contains a textured duck model
+under environmental illumination. Using 35 target images of the
+object with different viewing directions, we jointly optimize the
+shape of the object and its spatially varying albedo. The Mora scene
+involves a glossy coin under environmental lighting. Using 70 target
+images of the object under multiple views, we jointly optimize the
+shape of the object and the global rotation angle of the environment
+map (around the vertical axis). The glass Dodoco scene consists
+of a rough-glass object under area lighting. Taking as input 140
+multi-view images, we optimize the shape of the object.
+The boundary component of Eq. (3) plays a significant role in all
+these examples. Our technique successfully provides low-variance
+gradient estimates, allowing all the inverse-rendering optimizations
+to converge smoothly. Please refer to the supplement for animated
+versions of these results.
+ACM Trans. Graph., Vol. 41, No. 4, Article 123. Publication date: July 2022.
+123:10
+• Yan, Lassner, Budge, Dong, and Zhao
+(a1) Initial
+(b1) Target
+(a2) Initial
+(b2) Target
+MIS
+(c1) Ours (no edge sorting)
+Light sampling
+Dir. sampling
+MIS
+(d1) Ours (with edge sorting)
+Light sampling
+Dir. sampling
+2.04 × 10 −2
+9.44 × 10 −2
+1.10 × 10 −1
+3.50 × 10 −4
+7.58 × 10 −2
+1.10 × 10 −2
+MIS
+(c2) Ours (no edge sorting)
+Light sampling
+Dir. sampling
+MIS
+(d2) Ours (with edge sorting)
+Light sampling
+Dir. sampling
+1.26 × 10 −2
+6.77 × 10 −2
+4.01 × 10 −1
+9.05 × 10 −3
+6.79 × 10 −2
+1.83 × 10 −2
+Fig. 9. Ablation study (inverse rendering): We evaluate the effectiveness of our edge sorting and multiple-importance-sampling (MIS) processes by
+comparing inverse-rendering results. On the bottom of (a3), (a4), (b3) and (b4), we visualize the reconstructed models and show the corresponding Chamfer
+distances [Barrow et al. 1977] to the groundtruth geometries (normalized so that the GT has a unit bounding box). Using identical target images (one of which
+is shown for each example), losses, initializations, and optimization configurations (including learning rates and numbers of iterations), our edge sorting and
+multiple importance sampling can both lead to more accurate reconstructions.
+6
+DISCUSSION AND CONCLUSION
+Limitations and future work. Our technique focuses on the surfaceonly light transport. For scenes with participating media, as demonstrated by Zhang et al. [2021b], the dimensionality of the primarysample space for constructing boundary segments increases from
+ACM Trans. Graph., Vol. 41, No. 4, Article 123. Publication date: July 2022.
+three to five, making the guiding much more challenging. Generalizing our technique to support volumetric light transport is an
+important future topic.
+Efficient Estimation of Boundary Integrals for Path-Space Differentiable Rendering
+(a) Initial
+(b) Target
+(c1) Opt (ours)
+(c2) RMSE (ours)
+Kirby
+1.8
+1e−2
+(d1) Opt (PSDR)
+Image Loss
+1.8
+1.6
+1.4
+1.4
+1.2
+1.2
+1.0
+1.0
+100
+Bunny in glass
+300
+400
+0
+0.8
+0.6
+0.6
+0.4
+0.4
+0.2
+0.2
+0
+100
+1e−2
+200
+300
+400
+Image Loss
+0.0
+5
+4
+4
+3
+3
+2
+2
+0
+500
+1000 1500 2000
+Mesh Error
+2.0
+1
+1.5
+1.0
+1.0
+0.5
+0.5
+8
+0
+500
+1e−2
+1000 1500 2000
+Image Loss
+0.0
+8
+7
+7
+6
+6
+5
+5
+4
+4
+3
+300
+400
+0
+100
+1e−2
+0
+200
+300
+400
+Image Loss
+500
+1000 1500 2000
+Mesh Error
+0
+1000
+2000
+1e−2
+Image Loss
+0
+200
+1e1
+Mesh Error
+0
+200
+3
+0
+200
+400
+600
+Mesh Error
+1.4
+1.4
+1.2
+1.2
+1.0
+1.0
+0.8
+0.8
+0.6
+0.6
+0.4
+0.4
+0.2
+0.0
+200
+Mesh Error
+2.0
+1.5
+0.0
+Image Loss
+100
+1.0
+0.8
+1
+Bunny shadow 2
+200
+Mesh Error
+1.0
+5
+1e−2
+0.8
+0
+0.0
+123:11
+(d2) RMSE (PSDR)
+1.6
+0.8
+•
+400
+600
+0.2
+0
+200
+400
+600
+0.0
+400
+600
+Fig. 10. Inverse-rendering comparison: We solve inverse-rendering problems using gradients estimated using our technique and PSDR [Zhang et al. 2020].
+For each example, we use identical target images (with one shown), losses, and optimization settings (e.g., initial states, optimizers, and learning rates). At
+equal-time, our technique has allowed significantly faster convergence for all examples. The plotted mesh error captures the Chamfer distance [Barrow
+et al. 1977] between the reconstructed and groundtruth geometries (normalized so that the GT has a unit bounding box). We use this information only for
+evaluation, and not for optimization.
+ACM Trans. Graph., Vol. 41, No. 4, Article 123. Publication date: July 2022.
+123:12
+• Yan, Lassner, Budge, Dong, and Zhao
+(a) Initial
+(b) Intermediate
+(c) Optimized
+(d) Target
+(e) RMSE
+4.0
+1e−2
+Image Loss
+3.5
+Duck
+3.0
+2.5
+2.0
+1.5
+1.0
+0
+Iter #0
+Iter #100
+Iter #200
+Iter #400
+100
+200
+300
+400
+Mesh Error
+0.8
+0.6
+0.4
+0.2
+0.0
+6
+0
+100
+200
+300
+1e−2
+Image Loss
+0
+500
+400
+Mora
+5
+4
+3
+2
+1
+Iter #0
+Iter #160
+Iter #400
+Iter #1600
+1.00
+1e−2
+1000
+1500
+Mesh Error
+0.75
+0.50
+0.25
+0.00
+0
+500
+1000
+1500
+0
+500
+1000
+1500
+1e−2
+Image Loss
+0
+200
+1.00
+Rotate Error
+0.75
+0.50
+0.25
+Glass Dodoco
+0.00
+3
+2
+1
+Iter #0
+Iter #100
+Iter #200
+Iter #700
+400
+600
+Mesh Error
+0.5
+0.4
+0.3
+0.2
+0.1
+0.0
+0
+200
+400
+600
+Fig. 11. Additional inverse-rendering results generated with gradient estimates obtained using our method. The mesh error [Jensen et al. 2014] is used for
+evaluation only, and not for optimization.
+ACM Trans. Graph., Vol. 41, No. 4, Article 123. Publication date: July 2022.
+Efficient Estimation of Boundary Integrals for Path-Space Differentiable Rendering
+Additionally, our technique focuses on constructing boundary
+segments, so improving the sampling of source and detector subpaths may further benefit the performance of our technique.
+Lastly, combining our method with Markov-Chain Monte Carlo
+(MCMC) sampling may be an interesting topic for future exploration.
+Conclusion. We introduced a new technique to effectively estimate boundary path integrals. A core component of our technique
+is a primary-sample-space guiding algorithm that adapts to the
+structures of the integrand of boundary path integrals and allows efficient importance sampling of boundary segments. We also showed
+how multiple importance sampling can be applied to combine two
+guiding strategies. Additionally, we introduced an optional edge
+sorting step to further improve the performance of our technique.
+We evaluated the effectiveness of our technique by comparing
+with existing methods using several differentiable-rendering and
+inverse-rendering experiments.
+ACKNOWLEDGMENTS
+We thank the anonymous reviewers for their constructive comments and suggestions. Thanks to the Stanford University Computer
+Graphics Laboratory for the Bunny model. This work started when
+Kai Yan was an intern at Meta Reality Labs Research. Kai Yan’s contributions while at the University of California, Irvine were partially
+supported by NSF grant 1900927.
+REFERENCES
+Michael Ashikhmin and Peter Shirley. 2000. An anisotropic phong BRDF model. Journal
+of graphics tools 5, 2 (2000), 25–32.
+Sai Praveen Bangaru, Tzu-Mao Li, and Frédo Durand. 2020. Unbiased Warped-Area
+Sampling for Differentiable Rendering. ACM Trans. Graph. 39, 6 (2020), 245:1–245:18.
+Harry G Barrow, Jay M Tenenbaum, Robert C Bolles, and Helen C Wolf. 1977. Parametric correspondence and chamfer matching: Two new techniques for image matching.
+Technical Report. SRI INTERNATIONAL MENLO PARK CA ARTIFICIAL INTELLIGENCE CENTER.
+Robert L Cook and Kenneth E. Torrance. 1982. A reflectance model for computer
+graphics. ACM Transactions on Graphics (ToG) 1, 1 (1982), 7–24.
+Yue Dong, Guojun Chen, Pieter Peers, Jiawan Zhang, and Xin Tong. 2014. Appearancefrom-motion: Recovering spatially varying surface reflectance under unknown
+lighting. ACM Trans. Graph. 33, 6 (2014), 1–12.
+Jerry Guo, Pablo Bauszat, Jacco Bikker, and Elmar Eisemann. 2018. Primary sample
+space path guiding. In Eurographics Symposium on Rendering, Vol. 2018. 73–82.
+Eric Heitz and Eugene d’Eon. 2014. Importance sampling microfacet-based BSDFs
+using the distribution of visible normals. In Computer Graphics Forum, Vol. 33. Wiley
+Online Library, 103–112.
+Eric Heitz, Johannes Hanika, Eugene d’Eon, and Carsten Dachsbacher. 2016. Multiplescattering microfacet BSDFs with the Smith model. ACM Trans. Graph. 35, 4 (2016),
+58:1–58:14.
+Wenzel Jakob, Marco Tarini, Daniele Panozzo, and Olga Sorkine-Hornung. 2015. Instant
+Field-Aligned Meshes. ACM Trans. Graph. 34, 6 (2015), 189:1–189:15.
+Henrik Wann Jensen. 1995. Importance driven path tracing using the photon map. In
+Eurographics Workshop on Rendering Techniques. Springer, 326–335.
+Rasmus Jensen, Anders Dahl, George Vogiatzis, Engin Tola, and Henrik Aanæs. 2014.
+Large scale multi-view stereopsis evaluation. In CVPR. 406–413.
+Csaba Kelemen and Laszlo Szirmay-Kalos. 2001. A microfacet based coupled specularmatte BRDF model with importance sampling. In Eurographics short presentations,
+Vol. 2. 4.
+Eric P Lafortune and Yves D Willems. 1995. A 5D tree to reduce the variance of Monte
+Carlo ray tracing. In Eurographics Workshop on Rendering Techniques. Springer,
+11–20.
+Samuli Laine, Janne Hellsten, Tero Karras, Yeongho Seol, Jaakko Lehtinen, and Timo
+Aila. 2020. Modular Primitives for High-Performance Differentiable Rendering.
+ACM Trans. Graph. 39, 6 (2020), 194:1–194:14.
+Joo Ho Lee, Adrian Jarabo, Daniel S. Jeon, Diego Gutierrez, and Min H. Kim. 2018.
+Practical multiple scattering for rough surfaces. ACM Trans. Graph. 37, 6 (2018),
+275:1–275:12.
+•
+123:13
+Tzu-Mao Li, Miika Aittala, Frédo Durand, and Jaakko Lehtinen. 2018. Differentiable
+Monte Carlo ray tracing through edge sampling. ACM Trans. Graph. 37, 6 (2018),
+222:1–222:11.
+Guillaume Loubet, Nicolas Holzschuch, and Wenzel Jakob. 2019. Reparameterizing
+discontinuous integrands for differentiable rendering. ACM Transactions on Graphics
+(TOG) 38, 6 (2019), 1–14.
+Thomas Müller, Markus Gross, and Jan Novák. 2017. Practical path guiding for efficient
+light-transport simulation. In Computer Graphics Forum, Vol. 36. 91–100.
+Thomas Müller, Brian Mcwilliams, Fabrice Rousselle, Markus Gross, and Jan Novák.
+2019. Neural Importance Sampling. ACM Trans. Graph. 38, 5 (2019), 145:1–145:19.
+Baptiste Nicolet, Alec Jacobson, and Wenzel Jakob. 2021. Large Steps in Inverse Rendering of Geometry. ACM Trans. Graph. 40, 6 (2021), 248:1–248:13.
+Merlin Nimier-David, Delio Vicini, Tizian Zeltner, and Wenzel Jakob. 2019. Mitsuba 2:
+a retargetable forward and inverse renderer. ACM Transactions on Graphics (TOG)
+38, 6 (2019), 203.
+Michael Oren and Shree K Nayar. 1994. Generalization of Lambert’s reflectance model.
+In Proceedings of the 21st annual conference on Computer graphics and interactive
+techniques. 239–246.
+Bui Tuong Phong. 1975. Illumination for computer generated pictures. Commun. ACM
+18, 6 (1975), 311–317.
+Sylvia C Pont and Jan J Koenderink. 2002. Bidirectional reflectance distribution function
+of specular surfaces with hemispherical pits. JOSA A 19, 12 (2002), 2456–2466.
+Christophe Schlick. 1994. An inexpensive BRDF model for physically-based rendering.
+In Computer graphics forum, Vol. 13. Wiley Online Library, 233–246.
+Bram van Ginneken, Marigo Stavridi, and Jan J Koenderink. 1998. Diffuse and specular
+reflectance from rough surfaces. Applied optics 37, 1 (1998), 130–139.
+E. Veach. 1997. Robust Monte Carlo methods for light transport simulation. Vol. 1610.
+Stanford University PhD thesis.
+Jiří Vorba, Ondřej Karlík, Martin Šik, Tobias Ritschel, and Jaroslav Křivánek. 2014.
+On-Line Learning of Parametric Mixture Models for Light Transport Simulation.
+ACM Trans. Graph. 33, 4 (2014), 101:1–101:11.
+Bruce Walter, Stephen R Marschner, Hongsong Li, and Kenneth E Torrance. 2007.
+Microfacet models for refraction through rough surfaces. Rendering techniques 2007
+(2007), 18th.
+Gregory J Ward. 1992. Measuring and modeling anisotropic reflection. In Proceedings of
+the 19th annual conference on Computer graphics and interactive techniques. 265–272.
+Feng Xie and Pat Hanrahan. 2018. Multiple scattering from distributions of specular
+V-grooves. ACM Trans. Graph. 37, 6 (2018), 276:1–2767:14.
+Tizian Zeltner, Sébastien Speierer, Iliyan Georgiev, and Wenzel Jakob. 2021. Monte
+Carlo Estimators for Differential Light Transport. ACM Trans. Graph. 40, 4 (2021),
+78:1–78:16.
+Cheng Zhang, Zhao Dong, Michael Doggett, and Shuang Zhao. 2021a. Antithetic
+Sampling for Monte Carlo Differentiable Rendering. ACM Trans. Graph. 40, 4 (2021),
+77:1–77:12.
+C. Zhang, B. Miller, K. Yan, I. Gkioulekas, and S. Zhao. 2020. Path-Space Differentiable
+Rendering. ACM Transactions on Graphics (SIGGRAPH 2020) 39, 4 (2020), 143:1–
+143:19.
+Cheng Zhang, Lifan Wu, Changxi Zheng, Ioannis Gkioulekas, Ravi Ramamoorthi, and
+Shaung Zhao. 2019. A differential theory of radiative transfer. ACM Trans. Graph.
+38, 6 (2019), 227:1–227:16.
+Cheng Zhang, Zihan Yu, and Shuang Zhao. 2021b. Path-Space Differentiable Rendering
+of Participating Media. ACM Trans. Graph. 40, 4 (2021), 76:1–76:15.
+Quan Zheng and Matthias Zwicker. 2019. Learning to importance sample in primary
+sample space. In Computer Graphics Forum, Vol. 38. 169–179.
+Yang Zhou, Lifan Wu, Ravi Ramamoorthi, and Ling-Qi Yan. 2021. Vectorization for Fast,
+Analytic, and Differentiable Visibility. ACM Trans. Graph. 40, 3 (2021), 27:1–27:21.
+ACM Trans. Graph., Vol. 41, No. 4, Article 123. Publication date: July 2022.

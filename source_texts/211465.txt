@@ -1,0 +1,151 @@
+# NeRF 3D Reconstruction
+
+A from-scratch PyTorch reimplementation of Neural Radiance Fields for novel view synthesis from posed images, written to study volumetric scene representations for 3-D perception.
+
+> **Status:** a reimplementation of NeRF (Mildenhall et al., ECCV 2020), not original research. The full pipeline (coarse and fine networks, hierarchical sampling, volume rendering, training, held-out evaluation) runs and is tested. It has been trained for a short run on the lego scene on a laptop GPU (results below), not for the full 200,000-step schedule.
+
+## Pipeline
+
+```mermaid
+flowchart LR
+    A[Posed images<br/>+ camera-to-world poses] --> B[Ray generation<br/>origin + direction per pixel]
+    B --> C[Stratified sampling<br/>along each ray]
+    C --> D[Positional encoding<br/>xyz and view direction]
+    D --> E[MLP<br/>density + view-dependent RGB]
+    E --> F[Volume rendering<br/>alpha compositing]
+    F --> G[MSE loss vs. pixel colour]
+    F -. coarse weights .-> H[Hierarchical sampling<br/>fine samples]
+    H --> D
+```
+
+## What it does
+
+Given a set of images with known camera poses, the code trains a network that maps a 3-D position and a viewing direction to a volume density and an RGB colour. Images from new camera poses are produced by integrating that field along each pixel's ray.
+
+Why this matters for perception: because NeRF models density along every ray, the representation encodes what lies in front of what, so occlusion and visibility are handled by the rendering equation instead of being added as a separate heuristic. The rendering code also outputs an expected-depth value per ray.
+
+## What is implemented here
+
+All of the following is in this repository (file paths in parentheses):
+
+- Sinusoidal positional encoding for positions (10 frequencies) and view directions (4 frequencies), with the raw input concatenated (`src/models/nerf.py`).
+- NeRF MLP: 8 fully connected layers of width 256 with ReLU, an input skip connection, a non-negative density head, and a colour branch conditioned on the encoded view direction with a sigmoid output (`src/models/nerf.py`).
+- Pinhole ray generation from image size, focal length and a 4x4 camera-to-world pose (`src/rendering/rays.py`).
+- Stratified (jittered) sampling along rays and inverse-CDF hierarchical sampling from coarse-pass weights (`src/rendering/rays.py`).
+- Discrete volume rendering returning RGB, expected depth and per-sample weights, with optional white background, plus chunked full-image rendering (`src/rendering/volume_renderer.py`).
+- Training loop with a coarse and a fine network, random ray batches, Adam with exponential learning-rate decay, float16 mixed precision on CUDA (autocast and gradient scaling), held-out validation PSNR, TensorBoard logging and checkpoint save/resume (`src/training/trainer.py`). Runs on CUDA, Apple MPS or CPU.
+- Sum of coarse and fine MSE losses (`src/training/losses.py`).
+- Dataclass-based YAML configuration (`src/config/config.py`, `configs/lego_config.yaml`).
+- Training and rendering entry points, PSNR, standard Gaussian-window SSIM, image and video helpers (`experiments/`, `src/utils/`). Test views are rendered with both networks, exactly as in training.
+
+## Method summary
+
+- **Positional encoding.** Each coordinate is expanded to sin and cos at frequencies 2^0 ... 2^(L-1), so the MLP can represent high-frequency detail. L is 10 for position and 4 for direction. (Like the authors' reference implementation, frequencies are 2^k without the factor of pi shown in the paper's equation. This only rescales the input coordinates and does not change what the network can represent.)
+- **Radiance field.** The MLP sees the encoded position and outputs density and a feature vector. Colour is predicted from that feature plus the encoded view direction, so density depends on position only and colour also depends on viewing direction.
+- **Volume rendering.** Along a ray, each sample gets opacity alpha = 1 - exp(-density x spacing). Transmittance is the running product of (1 - alpha) over samples in front. Each sample's weight is transmittance x alpha, and the pixel colour is the weighted sum of sample colours. Expected depth uses the same weights.
+- **Hierarchical sampling.** A coarse network renders 64 samples per ray; its weights define a distribution from which 128 extra samples are drawn. The fine network is evaluated on all samples sorted by distance.
+- **Loss.** Mean squared error between rendered and ground-truth pixel colours for both the coarse and fine renders.
+
+Default hyperparameters (from `configs/lego_config.yaml`): learning rate 5e-4 decaying by 0.1 over 250,000 steps, 1024 rays per step, one image per step, white background, mixed precision on.
+
+## Quick start
+
+Tested on Python 3.12 with current PyTorch on an Apple M-series Mac (MPS) and on CPU.
+
+```bash
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+pip install -e .
+```
+
+**Data.** The code expects the NeRF synthetic (Blender) dataset under `data/nerf_synthetic/<scene>/` with `transforms_train.json`, `transforms_test.json` and the image folders. Run `python scripts/download_data.py` to print download instructions (Nerfstudio's `ns-download-data blender`, or the original Google Drive folder) and to create the target directory. The script does not download anything itself.
+
+**Train** (default scene lego, config path in `configs/lego_config.yaml`):
+
+```bash
+python experiments/train.py --config configs/lego_config.yaml            # full schedule; --device cuda, mps or cpu
+python experiments/train.py --config configs/lego_quick.yaml             # short half-resolution run for a laptop
+python experiments/train.py --config configs/lego_config.yaml --resume outputs/checkpoints/checkpoint_step_10000.pth
+tensorboard --logdir outputs/logs
+```
+
+**Render and evaluate** (writes PNGs to `outputs/renders`, prints mean PSNR over the rendered test views, optional 360-degree video):
+
+```bash
+python experiments/render.py --config configs/lego_config.yaml \
+    --checkpoint outputs/checkpoints/<checkpoint>.pth --num_views 5 --render_360
+```
+
+**Tests:**
+
+```bash
+pip install pytest
+pytest tests
+```
+
+## Project structure
+
+```
+configs/lego_config.yaml      Training configuration for the lego scene
+experiments/train.py          Training entry point
+experiments/render.py         Novel-view and 360-degree rendering, PSNR
+scripts/download_data.py      Prints dataset download instructions
+src/config/                   Dataclass config + YAML loader
+src/models/nerf.py            Positional encoding and NeRF MLP
+src/rendering/                Ray generation, sampling, volume renderer
+src/training/                 Trainer and loss
+src/utils/                    PSNR, SSIM, optional LPIPS, image/video helpers
+tests/test_nerf.py            Two unit tests (model forward, positional encoding)
+notebooks/                    Data exploration, training analysis, visualization
+```
+
+## Results
+
+Short run with `configs/lego_quick.yaml`: lego scene at half resolution (400 x 400), 1,024 rays per step, 64 coarse + 128 fine samples, Apple M-series GPU (MPS), about 1.6 training steps per second.
+
+| Training steps | Test views scored | PSNR | SSIM |
+|---|---|---|---|
+| 2,500 | 5 (test images 0, 40, 80, 120, 160) | 22.2 dB | 0.79 |
+
+![Held-out test view 40: photo and NeRF render after 2,500 steps](docs/img/lego_test040_step2500.png)
+
+For scale, the paper reports 32.5 dB on lego after full training (100,000 to 300,000 iterations at 800 x 800 on a GPU). A short run on a laptop recovers the right geometry and colours but is still blurry; reaching published quality needs the full schedule on a CUDA GPU. Reproduce with:
+
+```bash
+python experiments/train.py --config configs/lego_quick.yaml
+python experiments/render.py --config configs/lego_quick.yaml \
+    --checkpoint outputs/quick/checkpoints/checkpoint_step_2500.pth --num_views 5 --view_stride 40
+```
+
+Tests: `pytest tests/` gives **29 passed** on CPU. They cover positional encoding, the reference skip-connection layout, view-direction normalization, hierarchical sampling, volume-rendering weights on a known case, metric spacing for non-unit ray directions, coarse-to-fine image rendering, SSIM properties, real validation PSNR, the dataset loader, and a regression test for each earlier fix.
+
+## Fixed in the second correctness pass
+
+1. `Trainer.validate()` was a stub returning 0. It now renders held-out views in full and logs PSNR.
+2. SSIM was a single global window. It is now the standard 11 x 11 Gaussian-window SSIM per channel.
+3. Mixed precision had no effect. It now applies float16 autocast with gradient scaling on CUDA (compositing stays in float32), and is off on MPS and CPU.
+4. The skip connection re-entered one layer early. It now matches the reference implementation (encoded input concatenated after layer 4).
+5. Ray directions are no longer normalized: the camera-space z component is -1, so near/far are depth planes and depth maps match the reference implementation. Sample spacing is scaled by the direction length in the renderer, and the model normalizes view directions itself.
+6. Test-time rendering used only the fine network on uniform samples. It now uses the coarse network and hierarchical sampling, as in training.
+7. The 360-degree video orbited the wrong axis for the Blender scenes (y-up instead of z-up). It now uses the reference camera path.
+8. `setup.py` placeholders are filled in.
+
+
+## Limitations and next steps
+
+- Run the test suite in CI.
+- Install and report LPIPS alongside PSNR and SSIM.
+- Train the full schedule on a CUDA GPU and report PSNR/SSIM on all 200 test views.
+- Evaluate speed-ups (hash-grid encodings, occupancy-based sampling).
+- Extend to real captured scenes with estimated poses.
+
+## Related work
+
+[lunar-occlusion-tracking](https://github.com/sadeeqgandalf/lunar-occlusion-tracking): a separate project on tracking under occlusion.
+
+## References
+
+- B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi, R. Ng. *NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis.* ECCV 2020. https://arxiv.org/abs/2003.08934
+- NeRF synthetic (Blender) dataset, released with the paper above: https://drive.google.com/drive/folders/1cK3UDIJqKAAm7zyrxRYVFJ0BRMgrwhh4
+
+MIT licence (see `LICENSE`).

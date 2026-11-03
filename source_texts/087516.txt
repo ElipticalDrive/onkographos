@@ -1,0 +1,325 @@
+Baselode is an open-source toolkit designed for the mineral exploration and mining industries - feat: 3D IDW interpolation volume and voxel visualisation by Copilot · Pull Request #50 · darkmine-oss/baselode
+
+feat: 3D IDW interpolation volume and voxel visualisation by Copilot · Pull Request #50 · darkmine-oss/baselode · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Copilot
+AI
+commented
+Mar 18, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Adds a complete 3D inverse-distance weighting (IDW) interpolation pipeline that generates a scalar field from drill-hole sample data and renders it as a shader-driven voxel volume inside the existing Three.js scene.
+New modules
+Pure-JS interpolation kernel (no Three.js dependency)
+SpatialHash3D — uniform 3D hash grid; queryRadius() and queryKNearest(); O(1) cell lookup, predictable performance for static datasets
+IDWSampler — getValueAt(x,y,z) with configurable power, searchRadius, maxNeighbors, minNeighbors, epsilon; exact-hit short-circuit; designed for reuse by future slice/section/probe tools
+computeVolumeBounds — AABB with configurable padding from any {x,y,z} point array
+buildVoxelGrid — evaluates sampler onto a Float32Array voxel grid; async with event-loop yielding, onProgress callback, and cancellation token
+buildInterpSamplesFromAssays — extracts midpoint support points from desurveyed assay rows; falls back to straight-line-vertical when desurvey coords are absent
+Three.js rendering
+IDWVolumeRenderer — uploads grid as Data3DTexture (one float/voxel), raymarches through a unit-cube ShaderMaterial; supports block mode (snap to voxel centres → crisp block-model look) and smooth compositing; display min/max, opacity, threshold, and colour gradient are uniform-only updates (no texture re-upload)
+Inline GLSL (idwVolume.vert/frag.glsl) — front-to-back compositing, nodata sentinel skip (< -1e29), two-stop colour transfer function
+Integration layer
+IDWVolumeLayer — orchestrates the full pipeline; exposes setSamples, setIDWOptions, setGridOptions, rebuild(), getValueAt(), dispose(); cancels in-flight builds on re-trigger
+Usage
+```
+const samples = buildInterpSamplesFromAssays(assayRows, 'Au_ppb');
+
+const layer = new IDWVolumeLayer({
+  samples,
+  idw:        { power: 2, searchRadius: 60, maxNeighbors: 16 },
+  grid:       { dims: [64, 64, 64] },
+  displayMin: 0,
+  displayMax: 500,
+  opacity:    0.4,
+});
+
+await layer.rebuild();
+scene.add(layer.object3D);
+
+// Runtime display tweaks — no rebuild needed
+layer.setOpacity(0.6);
+layer.setThreshold(0.1);
+```
+Architecture notes
+Interpolation math has zero Three.js imports → reusable by section/slice/probe tools without scene context
+IDWVolumeLayer wires the pipeline but IDWSampler and buildVoxelGrid are independently importable
+Shader clipping-plane support is present via ShaderMaterial for future slicing features
+Memory: 64³ ≈ 1 MB, 128³ ≈ 8 MB, 256³ ≈ 64 MB — documented in buildVoxelGrid.js
+Tests
+39 unit tests added covering InterpSamplePoint, computeVolumeBounds, SpatialHash3D, IDWSampler, and buildVoxelGrid. Three.js-dependent modules follow existing repo pattern of not being unit-tested.
+Original prompt
+This section details on the original issue you should resolve
+<issue_title>3d idw</issue_title>
+<issue_description># Baselode Feature Specification: 3D IDW Interpolation Volume and Voxel Visualisation
+Purpose
+Add a new Baselode feature that generates a continuous 3D scalar field from drill-hole sample data using inverse distance weighting (IDW), then visualises that field inside a bounded 3D volume as voxels in the existing Three.js scene.
+This feature is intended for exploration-style inspection of interpolated values such as Au_ppb, Cu_pct, or any other numeric downhole/sample attribute. It should work on a selected set of drill holes and support later extension to section and slice tools.
+Goals
+Compute a 3D bounding volume from a set of selected drill holes or sample points.
+Build a spatial lookup structure for efficient nearest-sample queries.
+Implement IDW interpolation for any point in 3D space.
+Voxelise the interpolation volume and render it efficiently in the scene.
+Expose controls for attribute selection, IDW exponent, search radius, voxel resolution, and display thresholds.
+Design the implementation so it can later support section/slice inspection along X/Y/Z planes.
+Non-goals for first implementation
+No kriging, RBF, or advanced geostatistics.
+No anisotropy or variogram modelling.
+No hard geological domain constraints.
+No implicit meshing / iso-surface extraction in v1.
+No production-grade resource estimation claims. This is a visual analytic tool only.
+User story
+As a user viewing drill holes in a 3D Baselode scene, I want to select a numeric sample attribute and generate an interpolated 3D voxel volume around those holes so that I can visually inspect spatial patterns and potential trends between samples.
+Scope
+Inputs
+A Three.js scene already containing drill-hole geometry and/or drill-hole sample data.
+A selected subset of drill holes, or all currently visible drill holes.
+A numeric sample attribute name, e.g. Au_ppb.
+Sample intervals with 3D locations.
+Optional interval lengths, downhole traces, and desurveyed positions.
+Outputs
+A computed 3D interpolation volume over a bounded box.
+A rendered voxel/block-style representation in the scene.
+A reusable scalar-field evaluation API for arbitrary 3D points.
+Parameters exposed to the application/UI.
+Data assumptions
+The interpolation should operate on sample support points in 3D.
+Preferred input form per sample:
+```
+type InterpSamplePoint = {
+  id: string
+  holeId: string
+  x: number
+  y: number
+  z: number
+  value: number
+  from?: number
+  to?: number
+  length?: number
+  metadata?: Record<string, unknown>
+}
+```
+How sample points are derived
+For interval data, create a representative point for each interval.
+Default approach:
+Use the midpoint of the sample interval along the drill trace.
+Use desurveyed coordinates if available.
+If desurvey is unavailable, allow a fallback assumption such as vertical or straight-line collar-to-end-of-hole.
+This feature must not assume only collar positions. It should interpolate from interval/sample support points distributed downhole.
+Functional requirements
+1. Bounding box generation
+Create a 3D axis-aligned bounding box that encloses the selected drill holes or selected sample points.
+Requirements
+Compute bounds from all participating sample points.
+Allow optional padding in world units on all sides.
+Store:
+minX, minY, minZ
+maxX, maxY, maxZ
+dimensions
+center
+Support user override of padding and resolution.
+API shape
+```
+type VolumeBounds = {
+  min: [number, number, number]
+  max: [number, number, number]
+  size: [number, number, number]
+  center: [number, number, number]
+}
+```
+2. Spatial lookup / neighbour search
+IDW should not scan all samples for every voxel if the sample count is large.
+Requirement
+Implement a reusable spatial index for 3D nearest-neighbour or radius-based queries.
+Acceptable implementations
+Uniform 3D grid / hash grid
+KD-tree in 3D
+Octree
+Recommended v1
+Use a simple spatial hash grid because:
+data are static for each interpolation run
+implementation is straightforward
+radius queries are easy
+performance is predictable
+Required capabilities
+insert sample points
+query points within a search radius
+optionally cap to max nearest neighbours
+handle empty-neighbour cases
+API shape
+```
+interface SpatialIndex3D<T> {
+  build(points: T[]): void
+  queryRadius(x: number, y: number, z: number, radius: number): T[]
+  queryKNearest?(x: number, y: number, z: number, k: number): T[]
+}
+```
+3. IDW interpolation
+Implement inverse distance weighting for any point in 3D.
+Formula
+For a query point p, using nearby samples i:
+weight: w_i = 1 / d_i^power
+interpolated value: v = sum(w_i * value_i) / sum(w_i)
+Wher...
+Fixes 3d idw #14
+📱 Kick off Copilot coding agent tasks wherever you are with GitHub Mobile, available on iOS and Android.
+Initial plan
+a319e2f
+Copilot
+AI
+assigned
+Copilot and
+tamaravasey
+Mar 18, 2026
+Copilot started work on behalf of
+tamaravasey
+March 18, 2026 15:02
+View session
+vercel
+Bot
+commented
+Mar 18, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+The latest updates on your projects. Learn more about Vercel for GitHub.
+Project
+Deployment
+Actions
+Updated (UTC)
+baselode
+Ready
+Preview, Comment
+Mar 18, 2026 3:23pm
+baselode-react-demo
+Ready
+Preview, Comment
+Mar 18, 2026 3:23pm
+vercel
+Bot
+deployed
+to
+Preview – baselode-react-demo
+March 18, 2026 15:02
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – baselode
+March 18, 2026 15:03
+View deployment
+Initial plan: implement 3D IDW interpolation feature
+…
+08ba735
+```
+Co-authored-by: tamaravasey <65271776+tamaravasey@users.noreply.github.com>
+```
+vercel
+Bot
+deployed
+to
+Preview – baselode
+March 18, 2026 15:05
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – baselode-react-demo
+March 18, 2026 15:05
+View deployment
+feat: implement 3D IDW interpolation volume and voxel visualisation
+…
+a56325a
+```
+Co-authored-by: tamaravasey <65271776+tamaravasey@users.noreply.github.com>
+```
+vercel
+Bot
+deployed
+to
+Preview – baselode
+March 18, 2026 15:22
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – baselode-react-demo
+March 18, 2026 15:23
+View deployment
+Copilot
+AI
+changed the title
+[WIP] Add 3D IDW interpolation volume and voxel visualisation
+feat: 3D IDW interpolation volume and voxel visualisation
+Mar 18, 2026
+Copilot
+AI
+requested a review
+from tamaravasey
+March 18, 2026 15:26
+Copilot finished work on behalf of
+tamaravasey
+March 18, 2026 15:26
+tamaravasey
+closed this
+Jun 9, 2026
+tamaravasey
+deleted the
+copilot/add-3d-idw-visualisation
+branch
+June 9, 2026 03:38
+tamaravasey
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+rebased and finished off with claude on a new branch
+Hide environments
+Show environments
+This branch was successfully deployed
+2 active
+deployments
+Preview – baselode-react-demo
+—
+a56325a2
+Deployed
+Mar 18, 2026 by
+vercel[bot]
+View deployment
+Preview – baselode
+—
+a56325a2
+Deployed
+Mar 18, 2026 by
+vercel[bot]
+View deployment
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

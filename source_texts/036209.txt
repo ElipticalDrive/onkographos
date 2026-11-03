@@ -1,0 +1,1852 @@
+Volume xx (20yy), Number z, pp. 1–19
+ENTIRE: Learning-based Volume Rendering Time Prediction
+Z. Yin1 , H. Gadirov1 , J. Kosinka1 , S. Frey1
+arXiv:2501.12119v3 [cs.GR] 20 Apr 2026
+1 Univeristy of Groningen
+Abstract
+We introduce ENTIRE, a novel deep learning-based approach for fast and accurate volume rendering time prediction. Predicting
+rendering time is inherently challenging due to its dependence on multiple factors, including volume data characteristics,
+image resolution, camera configuration, and transfer function settings. Our method addresses this by first extracting a feature
+vector that encodes structural volume properties relevant to rendering performance. This feature vector is then integrated with
+additional rendering parameters, such as image resolution, camera setup, and transfer function settings, to produce the final
+prediction. We evaluate ENTIRE across multiple rendering frameworks (CPU- and GPU-based) and configurations (with and
+without single-scattering) on diverse datasets. The results demonstrate that our model achieves high prediction accuracy with
+fast inference speed and can be efficiently adapted to new scenarios by fine-tuning the pretrained model with few samples.
+Furthermore, we showcase ENTIRE’s effectiveness in two case studies, where it enables dynamic parameter adaptation for
+stable frame rates and load balancing.
+CCS Concepts
+• Computing methodologies → Rendering; Volumetric models; Neural networks; Machine learning approaches;
+1. Introduction
+The high computational demand of rendering high-resolution volumes with millions or even billions of cells in volume grid structures presents challenges across various visualization use cases,
+from interactive exploration on workstations [BHP15, BFE16] and
+clusters [TFM∗ 17] to generating image databases for in-situ visualization [AJO∗ 14,BLE∗ 22]. In these scenarios, accurate rendering
+time prediction is crucial for adjusting rendering algorithm parameters and task distribution, enabling stable interactive frame rates
+or balanced workloads. A recent study [BMFE19] identifies four
+key factors influencing rendering performance: hardware, rendering algorithm settings, camera parameters, and volume structure.
+Each factor can significantly impact rendering time, making it challenging to model their combined effects [BMFE19]. For example,
+Fig. 1 illustrates how rendering time varies depending on the volume, camera pose, and transfer function, highlighting the complexity of performance prediction.
+Several application scenarios for rendering time prediction have
+been discussed in prior work, with two being particularly prominent. First, in interactive volume exploration, performance prediction helps estimate how to adjust sampling parameters to achieve
+stable rendering performance while maintaining the highest possible quality. A key use case is adapting rendering parameters before generating a frame to meet specific constraints, such as a target frame rate. While the rendering times change smoothly between frames with user interaction such as small rotations, also
+abrupt changes can occur with fast camera movement or transsubmitted to COMPUTER GRAPHICS Forum (4/2026).
+fer function (TF) adaptation where small changes can have a significant impact on both visual appearance and rendering performance [BFE16]. For instance, in cases where a user shifts opacity
+peaks in TF space to reveal different internal structures, the rendering time can change abruptly from one frame to another, e.g.,
+due to early ray termination. In such cases, adjusting the ray step
+size solely based on a window of prior frames falls short and can
+yield high frame latency. Second, in distributed rendering scenarios where a collection of tasks are assigned across different compute nodes (e.g., for creating Cinema-style databases with different
+views and TF settings [AJO∗ 14]), the goal is to balance the workload so that all nodes complete their tasks in approximately the
+same amount of time [FE]. In both cases, a model that gives predictions directly based on each frame’s individual configuration is essential. Establishing a time prediction model only needs to be done
+once, after which it can be reused (i) for fluent interaction or (ii) efficiently distributing many rendering tasks across large clusters. Regarding the second case for instance, this can help to significantly
+reduce the time required for rendering tasks on high-performance
+computing systems [BLE∗ 22].
+While there are prior works on predicting volume rendering timings [LHK∗ 16, BFE17, BFE16, TFM∗ 17, BLE∗ 22], these models
+generally suffer from requiring significant manual modeling effort, low flexibility for adaption to other factors (rendering methods, graphics cards) or application scenarios, and are based on assumptions on the inner workings of the rendering methods. In particular, Larsen [LHK∗ 16] developed an analytical model to eval-
+2 of 19
+Z. Yin, H. Gadirov, J. Kosinka & S.Frey / ENTIRE: Learning-based Volume Rendering Time Prediction
+uate rendering performance under explicit consideration of various cost factors (the parameters in the cost model require manual tuning). Bruder et al. [BFE16, BFE17] focused on modeling
+the performance impact of early ray termination. Tkachev et al.’s
+model predicts rendering time based on hardware configurations
+for distributed volume raycasting [TFM∗ 17]. For load balancing in
+in-situ visualization settings for creating Cinema-style image data
+bases, Bruder et al. [BLE∗ 22] predict the rendering time of volume datasets via probing (completing a subset of rendering tasks)
+and from this calculate the mean value of selected samples’ rendering times. This yields a (predicted) average time for each individual frame task, but no detailed information per frame to allow for
+higher-accuracy load balancing. While considering more rendering
+tasks during probing increases prediction accuracy, it increases cost
+and reduces the amount of work that can be flexibly distributed.
+We focus on the question: How to predict volume rendering time
+quickly and accurately? Among others, one influential factor impacting volume rendering performance is the volume itself, and it is
+of great importance for our rendering time prediction model to consider the volume’s key features that contribute to its rendering time
+performance. While directly considering a high-resolution volume
+with millions to billions of cells is comparatively time-consuming,
+in many typical analysis scenarios the volume data does not change
+on a frame-to-frame basis. To account for this and achieve high prediction efficiency, our model splits the frame-time prediction procedure into two stages: (i) generation of the feature vector from the
+volume and (ii) time prediction. In this way, once a feature representation is extracted from a volume, time predictions can be performed even more quickly for changes to camera position, transfer
+function, etc. Crucially, even when considering changing volumes,
+our model predicts timings substantially faster than the actual rendering process. The main contributions of our work are as follows:
+• We present ENTIRE (rEnderiNg TIme pREdiction network), a
+novel end-to-end model that decouples volume feature extraction
+(VolumeNet) and rendering time prediction (PredNet).
+• ENTIRE makes no assumptions about the underlying volume
+rendering method, dataset characteristics, or target hardware, enabling application to different volume-visualization scenarios.
+• ENTIRE’s concatenation-based framework is designed for flexible extensibility and allows for incorporating additional rendering parameters (ray step size, lighting, sampling rates, etc.) by
+expanding the input vector, requiring no architectural changes.
+ENTIRE can be quickly adapted to new scenarios with few training data by fine-tuning a pre-trained model.
+• We evaluate ENTIRE across various datasets and demonstrate
+its effectiveness on two use cases: steering toward stable frame
+rates and load balancing.
+To the best of our knowledge, this is the first deep learning-based
+approach for dynamic volume rendering time prediction.
+In the remainder of the paper, we will review related work
+(Sec. 2), discuss ENTIRE and its design (Sec. 3), and present our
+experimental setup and model evaluation (Sec. 4). We then consider
+two use cases (Sec. 5) in detail and conclude our work (Sec. 7).
+2. Related Work
+2.1. Volume Visualization
+There are two main approaches for classical volume visualization:
+indirect and direct volume rendering. The indirect method converts
+volume data to an intermediate representation (e.g., an isosurface),
+while the direct method considers the data as a semi-transparent
+gel with physical properties and directly uses a 3D representation
+of it. Seminal works of indirect methods extracting isosurfaces are
+marching cubes [LC98] and marching tetrahedra [DK91]. For direct methods, the most prominently used approaches nowadays are
+based on raycasting [Rot82] for rendering and early ray termination (ERT) for acceleration. The rendering time of raycastingbased algorithms is highly dependent on hardware and parameter setting. This provides a good evaluation scenario for ENTIRE.
+Recently, works have been proposed that focus on deep learningbased volume representations and rendering, called neural rendering [TFT∗ 20], which map a voxel to color and opacity using a neural network. However, training a neural rendering model usually
+requires significant computational resources and large datasets.
+In the context of visualizing time-dependent volumes, several works aim to reduce costs and enhance performance. Wang
+et al. [WWSS19] proposed to store data’s depth information to
+recover the evolution while reducing the sampling rate. Flexpath [DBE∗ 14] reduces data movements and optimizes the data
+placements to save transfer costs. Frey et al. [FE17] introduced a
+method for time-step selection to reduce memory cost and speed up
+the rendering process. Gross et al. [GA21] proposed a sub-sampling
+algorithm for time-dependent data that enables efficient local processing and focuses on optimizing computational resource usage.
+Bruder et al. [BLE∗ 22] introduced a hybrid in-situ approach for
+generating Cinema databases by dynamically distributing rendering tasks between simulation and visualization nodes using a simple prediction model.
+2.2. Volume Feature Extraction
+Extracting a volume’s features and representing them adequately
+has shown great importance in volume reconstruction and scene
+representation. Traditionally, a volume is represented via a large
+number of cells or points which explicitly store the volume and
+usually require a larger amount of memory. Recent works allow
+a volume to be stored using a neural network, i.e., using an implicit neural representation (INR). Typical works include Convolutional Occupancy Network [PNM∗ 20], and Neural Radiance Fields
+(NeRF) [MST∗ 21] as well as its variants [YYTK21, RPLG21].
+More recently, 3D Gaussian Splatting (3DGS) [KKLD23] has
+emerged as an efficient explicit-implicit hybrid representation for
+high-quality scene reconstruction and rendering, and several optimized variants have been proposed [WYZ∗ 24,FXZ∗ 24,BWGM25].
+Although these methods greatly improve rendering performance,
+their memory usage still scales with scene complexity and the number of Gaussian primitives.
+To address this, Niemeyer et al. [NMOG19] introduced a network that learns deforming volumes by wrapping space and time.
+Weiss et al. [WHW22] proposed an efficient neural representation
+submitted to COMPUTER GRAPHICS Forum (4/2026).
+Z. Yin, H. Gadirov, J. Kosinka & S.Frey / ENTIRE: Learning-based Volume Rendering Time Prediction
+3 of 19
+Time[s]
+3
+2
+1
+0
+0
+20
+40
+60
+0
+20
+40
+60
+0
+20
+40
+60
+(a) MAESTROeX
+(b) Nyx
+(c) Castro
+Figure 1: Rendering time measurements across different volumes, camera poses, and transfer functions. One representative volume was selected from each
+dataset used in this study. For each volume, different camera orbits were applied, with the transfer function randomized at each position. At the top of each
+subfigure, the corresponding rendered images (CUDA, with single-scattering) are shown.
+method by utilizing GPU tensorcores. Tang et al. [TW24] presented ECNR which uses a unified space-time partitioning strategy to adaptively represent and compresses volumetric data. Still,
+these methods store volumes in network weights. Gadirov et al.
+introduced FLINT [GRF25] and HyperFLINT [GWB∗ 25], deep
+learning-based methods for volumetric flow estimation, density reconstruction, and ensemble exploration using convolutional neural networks and a hypernetwork, respectively. Wu et al. introduced HyperINR [WBCM23], where a hypernetwork generates the
+weights of an INR network.
+model for GPU clusters’ scaling behavior for parallel rendering that
+explicitly accounts for and manually models each rendering stage.
+For in situ visualization, Larsen et al. [LHK∗ 16] modeled the performance of rasterization, ray tracing, and volume rendering analytically. They analyzed application performance on a single machine and applied statistical methods to calculate model weights.
+After that, they further extended the model to parallel execution by
+utilizing a similar model for evaluating image compositing performance. In contrast, ENTIRE can flexibly deal with different rendering methods, hardware, and tasks without manual adjustment.
+In ENTIRE, capturing volume features via network weights
+would be possible, yet instead we opted to represent each volume
+as an explicit feature vector. This approach allows for a more compact representation with significantly fewer elements in the feature
+vector compared to the number of weights stored with implicit representations. This facilitates creating smaller, more efficient prediction networks and avoiding the dominance of volume network
+parameters over the other factors.
+Bruder et al. [BFE16] further incorporated the effects of acceleration approaches (early ray termination and empty space skipping)
+and how this affects rendering time in interactive volume visualization. They then employed this for dynamically adjusting image
+resolution and load balancing. Tkachev et al. [TFM∗ 17] predicted
+rendering time based on different hardware configurations. While
+they explicitly consider the inner workings of the (accelerated) raycasting method, their model implicitly learns the interplay of application and hardware, and users do not need to manually adapt
+the model to a given scenario. Bruder et al. [BLE∗ 22] estimated
+time by rendering a random selection of images from poses of an
+arcball-style camera and using the arithmetic mean of the obtained
+times as the final time prediction. While this is agnostic to inner
+workings of methods and hardware, it requires many images to be
+actually rendered before being able to make a prediction, and it
+cannot accurately predict the rendering time of individual frames.
+ENTIRE can adapt to complicated scenarios with heterogeneous
+render times more quickly and accurately (see Sec. 4.2 for a detailed comparison).
+2.3. Rendering Time Prediction
+The prediction and modeling of algorithm performance have
+evolved as important research topics in scientific visualization.
+With regard to predicting rendering time in volume rendering, several models that combine empirical measurements have been developed. Sodhi et al. [SSX08] created performance skeletons to
+model program execution times on the CPU. Ipek et al. [IDSSM05]
+trained a neural network to predict the performance of large-scale
+application running specifically on CPUs. These approaches are
+CPU architecture-specific, and thus inadequate for modeling rendering performance on GPUs. Baghsorkhi et al. [BDP∗ 10] statically analyze GPU kernel code. Zhang and Owen [ZO11] modeled
+GPU performance by conducting micro-benchmarks on the target
+platform. Lee et al. [LBdS∗ 07] proposed an early neural networkbased approach that explicitly integrates statistical methods. Wu et
+al. [WGL∗ 15] also applied machine learning to predict the scaling
+of power and time consumption of an application that scales with
+different GPU configurations. These above-mentioned methods primarily focus on offline applications, whereas we specifically target
+interactive volume visualization. Overall, there are fewer existing
+approaches that deal with performance prediction for real-time rendering compared to offline rendering.
+Wimmer et al. [WW03] proposed a rendering time prediction
+framework that primarily focuses on modeling the contributions
+of CPUs and GPUs. Rizzi et al. [RHI∗ 14] proposed an analytical
+submitted to COMPUTER GRAPHICS Forum (4/2026).
+3. Method
+We now describe ENTIRE in detail. Sec. 3.1 reviews background
+on volume visualization and the challenges of time prediction.
+Sec. 3.2 introduces our two-stage model, followed by detailed descriptions of its components in Secs. 3.3 and 3.4. Finally, Sec. 3.5
+presents the loss functions.
+3.1. Background
+During volume rendering, as a ray traverses the volume, the scalar
+value at each sample s is mapped to RGB color and opacity O
+via a transfer function. These values are then accumulated to compute the final pixel color. To optimize performance, we account
+for early ray termination: once the accumulated opacity reaches a
+Z. Yin, H. Gadirov, J. Kosinka & S.Frey / ENTIRE: Learning-based Volume Rendering Time Prediction
+4 of 19
+Training
+Stage 1: Feature extraction
+(VolumeNet)
+Inference
+Vrec
+V
+(32, 1)
+(64, 32)
+(128, 64)
+(128, 64)
+(128, 64)
+tpred
+4x
+Feature vector
+Stage 2: Rendering time prediction
+(PredNet)
+(256, 128)
+(256, 256)
+(37, 256)
+Decoder
+Encoder
+ℒ rec
+Rendering Parameters
+Concatenation
+FC Layer
+SELU
+tpred
+ℒ pred
+tpred
+t
+Concatenation
+Rendering parameters
+Feature vector
+FC layer
+FC Layer
+(4, 512)
+(64, 1, 3, 2, 1)
+Virec
+5x
+5x
+Feature vector
+(64, 64, 3, 2, 1)
+(512, 4)
+(64, 64, 3, 2, 1)
+Vi
+(1, 64, 3, 2, 1)
+Figure 2: Overview of the proposed prediction model. Left: Model training.
+Right: Inference. Lrec and Lpred are reconstruction loss and prediction loss
+respectively, and tpred is the predicted rendering time. The details of VolumeNet and PredNet are illustrated in Fig. 3 and Fig. 4, respectively. We
+first train VolumeNet for collecting feature vectors. Then we train PredNet
+for rendering time prediction based on the collected feature vectors and rendering parameters.
+3D Conv
+3D TransConv
+SELU
+Batch Norm
+Figure 4: PredNet’s architecture. PredNet is a multi-layer perceptron with
+SELU activations after each fully connected layer that takes a concatenated
+feature vector and rendering parameters as input, and predicts the rendering
+time tpred .
+predicts rendering time (PredNet). Considering that our target application scenarios require interactive operations, we designed ENTIRE’s architecture to be as lightweight as possible to achieve a
+low memory footprint and fast inference speed.
+VolumeNet. First, the model transforms the considered volume
+into a feature representation by using an autoencoder, which consists of two components: an encoder and a decoder. The encoder
+maps the data into a feature space, while the decoder reconstructs
+the data by remapping the feature space back to the original data
+space. In our implementation, the autoencoder leverages convolutional layers, transpose convolutional layers, and fully connected
+layers to enhance its feature representation capabilities (the decoder
+is only used for training purposes).
+Figure 3: VolumeNet’s architecture. VolumeNet is a symmetric autoencoder
+with an encoder consisting of six 3D convolutional blocks followed by a
+fully connected (FC) layer. Each block includes a 3D convolution, batch
+normalization, and SELU activation [KUMH17]. The decoder mirrors the
+encoder but consists of 3D transposed convolutions. The encoder compresses input data into a feature vector, while the decoder reconstructs it.
+Layer parameters are given as (input channels, output channels, kernel size,
+stride, padding) for convolutions, (input channels, output channels, kernel
+size, stride, padding, output padding) for transposed convolutions, and (input channels, output channels) for FC layers. We assume an input size of
+1283 and a feature vector of dimension 4.
+PredNet. At the prediction stage, the model combines the
+learned volume feature with camera poses (comprising position
+and orientation) and the transfer function. The network consists of
+fully-connected layers only and outputs the final rendering time
+prediction. The rationale behind this two-stage design is that in
+many scenarios, multiple renderings of a single volume are generated by varying the camera position or transfer function. By decoupling the model into VolumeNet and PredNet, the volume is
+processed only once, allowing subsequent camera variations to rely
+solely on the compact feature representation, significantly reducing
+computational overhead.
+predefined threshold (close to 1), further sampling along the ray is
+halted to save computation time. As a result, rendering time is influenced by the volume’s contents (specifically, voxel opacities), the
+applied transfer function, and the camera pose, which determines
+ray traversal lengths. Additionally, we consider single-scattering as
+a key factor contributing to the complexity of rendering time behavior. Single-scattering models the interaction between light and the
+volume by accounting for light that is scattered once. Incorporating this effect into rendering time prediction introduces additional
+light transport considerations, impacting the accumulated color and
+opacity along the ray. ENTIRE takes the volume, transfer function,
+and camera pose as inputs, enabling an end-to-end prediction of
+rendering time without explicitly modeling the internal computations of the rendering pipeline.
+Fig. 3 and Fig. 4 show the two parts of the ENTIRE architecture based on our architecture selection which has three steps and
+is mainly focused on three architectural factors that influence the final prediction accuracy: (1) the resolution of the volume as input to
+VolumeNet, (2) the dimensionality of the feature vector describing
+the volume (output of VolumeNet, input to PredNet), and (3) the
+number of (256, 256) layers in PredNet. We aim for a model that
+works well across all datasets and rendering frameworks. Accordingly, we tested models on every ‘rendering framework + dataset’
+scenario and calculated the relative deviation to the lowest prediction error. We finally selected the model with the lowest mean relative deviation (MRD) as the final model.
+3.2. Architecture Design
+As illustrated in Fig. 2, ENTIRE consists of two stages. Stage 1
+extracts a feature vector from the volume (VolumeNet) and Stage 2
+3.3. VolumeNet: Feature Vector Extraction
+At this stage, we extract a single feature vector from the volume using a neural network called VolumeNet (Volume feature extraction
+Network, see Fig. 3). VolumeNet adopts a symmetric autoencoder
+architecture, where the encoder learns the volume’s feature represubmitted to COMPUTER GRAPHICS Forum (4/2026).
+Z. Yin, H. Gadirov, J. Kosinka & S.Frey / ENTIRE: Learning-based Volume Rendering Time Prediction
+sentation, and the decoder reconstructs the volume from the learned
+feature. For time step i, where i = 0, 1, ..., n − 1, and Xi is the feature
+vector of volume Vi , the encoder is formulated as
+
+
+ K 
+
+1 
+u
+
+
+Xi = fFC 
+φ I⟨Wu ,Hu ,Du ⟩  ,
+(1)
+u=1...5
+where φu represents the uth convolutional layer, and I⟨Wu ,Hu ,Du ⟩ de-
+notes the input tensor to each layer with shape ⟨Wu , Hu , Du ⟩, where
+W, H, and D correspond to the width, height, and depth of the input
+1 is a fully connected (FC)
+volume, respectively. The function fFC
+layer that projects the output of the convolutional layers to the feature vector Xi .
+The decoder’s objective is to recover the contents of the volume
+from the feature vector (for the sake of training the encoder). After
+a linear projection, the feature vector is reshaped into a 3D feature
+map to match the input dimensions of the 3D transposed convolutional layer. The transposed convolutional layers then produce the
+final predicted scalar values.
+The reconstructed volume Virec at time step i can be described as
+K
+Virec =
+σv (J⟨Wv ,Hv ,Dv ⟩ ),
+(2)
+We represent the transfer function as the parameter vector:
+κ = (c0 , w0 , h0 , ..., cm−1 , wm−1 , hm−1 ).
+(5)
+This compact representation captures the essential properties of the
+transfer function for our model.
+Rendering time prediction. Our rendering time prediction network PredNet is depicted in Fig. 4. PredNet (denoted as ψ(·)) consists exclusively of fully connected layers with non-linear activation functions. The input to the network is the concatenation of the
+dataset’s feature vector and the camera pose. Then, the predicted
+pred
+at time step i with regard to feature vector Xi ,
+rendering time ti
+camera pose η, and transfer function κ is formulated as
+pred
+ti
+= ψ(Xi , η, κ).
+(6)
+3.5. Loss Functions
+The volume reconstruction loss Lrec for VolumeNet is calculated
+by measuring the voxel-wise difference between the ground-truth
+volume Vi and its reconstructed counterpart Virec :
+n−1
+Lrec =
+v=1,...,6
+1X
+2
+Vi − Virec 2 .
+n
+(7)
+i=0
+where σ is the vth transposed convolutional layer, and J is the input
+of each layer with shape ⟨Cv , Hv , Wv ⟩. The input J⟨W0 ,H0 ,D0 ⟩ of the
+transposed convolutional layers is
+2
+S ⟨W0 ,H0 ,D0 ⟩ = fFC
+(Xi ),
+5 of 19
+(3)
+2 (·) is the FC layer that projects X to the dimension that
+where fFC
+i
+v
+σ can process.
+Since the task of predicting rendering time is inherently a regression problem, the mean squared error (MSE) serves as the most
+straightforward and effective loss function.
+This is also the case with the objective of minimizing the difference between predicted and actual rendering times with PredNet.
+We quantify prediction loss via
+K−1
+Note that we downsample volumes to a resolution of 1283 prior
+to passing them into PredNet for the sake of efficiency. As an
+autoencoder-based network, VolumeNet is inherently lossy. However, note that in the context of this work perfectly accurate reconstruction is not the main concern, but rather the fact that VolumeNet produces a compact and consistent feature representation
+that serves as expressive input for timing prediction with PredNet.
+with K and k representing the number of frames and frame index,
+pred
+respectively; tk and tk denote the ground-truth and predicted renrec
+dering time. L and Lpred are applied independently in the training process of Stage 1 and Stage 2, respectively (Sec. 3.2).
+3.4. PredNet: Rendering Time Prediction
+4. Experiments
+Camera pose. We employ arcball camera control in our work. The
+camera pose is represented by η, a vector consisting of rotation angles R = (R x , Ry ) (in degrees) and translation distance Dz along the
+z-axis for zooming. Throughout this work, for the sake of simplicity but without limiting the generality of our approach, the camera
+view is always centered on the volume.
+4.1. Experimental Setup
+Lpred =
+1 X
+pred 2
+tk − tk
+,
+2
+K
+(8)
+i=0
+Transfer function representation. We adopt a transfer function
+design based on Gaussian lobes [KIL∗ 03], a widely used approach
+that is also the default in the yt visualization library [TSO∗ 10].
+Given a scalar volume field s ∈ [0, 1], a transfer function with m
+Gaussian components yields respective opacity O(s) as follows:
+!
+m−1
+X
+(s − ci )2
+O(s) =
+hi exp −
+,
+(4)
+wi
+Datasets. The three datasets employed for model evaluation are
+listed in Tab. 1. MAESTROeX [FNA∗ 19] simulates low Mach
+number stratified flows, from which we selected the white dwarf
+convection problem. Nyx [ABL∗ 13] is a cosmological simulation of baryonic gas evolution coupled with an N-body treatment
+of dark matter. Castro [ABB∗ 10] is an astrophysical hydrodynamic simulation of reacting flows, from which we selected the
+white dwarf merger problem. For evaluating ENTIRE’s generalization capability to a different dataset, we use the CT scan of a
+chameleon [Mai03]. To save memory space, we normalized data
+values in all four datasets and stored them as unsigned byte (8 bit);
+prior to providing volumes as input to VolumeNet, we converted
+the data to float values in [−1, 1].
+where hi controls the magnitude, ci determines the center, and wi
+defines the width of each Gaussian component.
+For MAESTROeX, we randomly divided its volumes into 80%
+for training, 10% for validation, and 10% for evaluation. We used
+i=0
+submitted to COMPUTER GRAPHICS Forum (4/2026).
+Z. Yin, H. Gadirov, J. Kosinka & S.Frey / ENTIRE: Learning-based Volume Rendering Time Prediction
+6 of 19
+Table 1: Dataset overview with dimensions M × T × W × H × D, where M
+and T are the number of members and time steps, and W, H, D are the
+volume’s width, height, and depth, respectively. The columns “avgRT” reports the mean rendering time in seconds along with its standard deviation
+in brackets. The star (*) denotes the configuration where single-scattering
+was applied. The dagger (†) indicates that the measurement was conducted
+on a cluster node.
+Dataset
+MAESTROeX
+Nyx
+avgRT
+Dimension
+CUDA-raycaster
+yt
+1×2000×512×512×512
+0.0138(0.0206)
+21.443(33.823)
+ParaView
+-
+8×600×512×512×512
+0.0170(0.0283)
+0.3340(0.3565)∗
+0.0054(0.0085)†
+21.843(35.365)
+-
+0.0347(0.0343)
+-
+Castro
+10×300×512×512×512
+0.0124(0.1700)
+21.140(33.850)
+-
+Chameleon
+1×1×1024×1024×1080
+0.0357(0.0500)
+-
+-
+6 members from Nyx for training, 1 member for validation, and 1
+member for evaluation. For Castro, 8 members were used for training, 1 member for validation, and 1 member for evaluation. To
+ensure volume diversity in our dataset, we selected every 10th volume from the time series and applied varying sparsity thresholds
+to generate multiple variants of each selected volume, creating a
+dataset where volumes exhibit distinct structural characteristics.
+Renderers. To evaluate ENTIRE’s generalizability across GPU
+and CPU platforms, we utilized a CUDA volume raycaster running
+on the GPU [NVI24], and yt [TSO∗ 10](implemented in Python and
+executed on the CPU), which is commonly used for visualizing cosmology simulation data. The CUDA raycaster uses early ray termination (with a threshold of 0.99), 1D transfer function lookup table,
+and empty space skipping for acceleration. It employs local lighting with gradients from central differences. Optionally, we further
+employ single-scattering with a termination threshold of 0.25. The
+CUDA raycaster ran on an RTX 3060 GPU desktop for model evaluation, while yt was executed on a cluster node with an AMD 7763
+(32 threads). To assess generalization to a different device, rendering times were additionally collected on a cluster node equipped
+with a V100 GPU. We also ran ParaView [AGL05] on our local
+RTX 3060 GPU to evaluate ENTIRE’s generalization ability to different renderers.
+Data collection. Bruder et al. [BMFE19] highlighted that data
+sampled from a camera in an arcball-style orbit provides good coverage of rendering time distributions. We followed a similar strategy. Our camera followed the surfaces of several semi-spheres with
+various radii. In our implementation, the renderer processes one
+volume at a time. Each volume is fully loaded into memory, all
+its assigned frames are rendered, and only then is the next volume loaded. Accordingly, all reported rendering times cover the
+rendering process only and exclude data loading costs. The rendered image resolution varies from 322 to 10242 . To ensure stable time measurements, each frame was rendered multiple times,
+and the median rendering time was taken as the final value. This
+is to capture performance under real-world deployment conditions
+(including GPU clock variations and system-level effects) rather
+than idealized fixed-clock scenarios. This approach also works consistently across all platforms (GPU and CPU) without requiring
+hardware-specific APIs or administrative privileges. Each volume
+was rendered 100 times with random rendering parameters to col-
+lect training data. For validation and evaluation sets, each volume
+was rendered 10 times using randomly chosen rendering parameters. An overview of rendering times for each dataset is presented
+in Tab. 1. Please note that the goal of our model evaluation is to
+assess ENTIRE’s prediction accuracy across a broad range of rendering configurations, rather than to fit a specific user interaction
+scenario. Randomly varying parameters at each frame provides the
+most generic and challenging test scenario of the model’s ability to
+predict rendering time based on each frame’s individual configuration.
+Baseline. We employ three different baseline models in total for
+comparison in different contexts. First, we adopted the rendering
+time prediction method by Bruder et al. [BLE∗ 22] as a baseline
+model for model performance evaluation. As discussed in Sec. 2.3,
+while many models rely on manual modeling tailored to specific
+rendering approaches and hardware [LHK∗ 16,BFE16], ENTIRE is
+designed to be independent of these factors. We selected Bruder et
+al. [BLE∗ 22]’s method because it similarly generalizes across different rendering techniques and compute architectures without requiring manual adaptation [BLE∗ 22]. Furthermore, their approach
+was developed for load balancing of a collection of rendering tasks,
+aligning with our goal of optimizing rendering workloads. Following their methodology, the baseline selects 15% of rendering jobs
+from a task set and estimates the final rendering time as the arithmetic mean of the sampled times.
+Second, LVRP (Low Volume Resolution-based Prediction) exploits the correlation between rendering times at different volume
+resolutions. The method first renders volumes at low resolution
+(643 ) to obtain timings, then applies a pre-computed linear scaling
+coefficient and a bias to predict high-resolution rendering times.
+To determine the scaling coefficient and bias, we render the same
+scenes at both low and high resolutions with identical rendering parameters and fit a linear regression model to the time relationship.
+Third, for ray step size control in Use Case 1 (Sec. 5.1)—where
+we consider an interactive exploration scenario and with this have a
+temporal sequence of frames—we implemented an online-learning
+baseline model for rendering time prediction (called OLP). This
+model estimates the rendering time for the current frame by computing the average over the three preceding frames. The rationale
+behind this approach is that rendering performance often exhibits
+temporal coherence, meaning that recent frames provide a strong
+indication of future rendering costs. This online-learning strategy
+allows the system to dynamically adjust in response to variations
+in scene complexity and transfer function changes, making it another candidate for comparison. In addition, we further implemented a PID (proportional–integral–derivative) controller as a reactive feedback-loop baseline. The PID controller directly adjusts
+the ray step size based on the error between the actual and target
+rendering time of the previous frame. The proportional, integral,
+and derivative coefficients were set empirically to 0.3, 0.05, and
+0.1, respectively.
+Evaluation setup. To evaluate ENTIRE’s prediction accuracy,
+we consider the root mean square error (RMSE). In addition to accuracy, we also measured the time ENTIRE required (average time
+per prediction in milliseconds) during inference. We use the standard deviation (STD) of prediction errors to evaluate how rendering
+submitted to COMPUTER GRAPHICS Forum (4/2026).
+Z. Yin, H. Gadirov, J. Kosinka & S.Frey / ENTIRE: Learning-based Volume Rendering Time Prediction
+Table 2: Comparison of rendering time prediction accuracy in terms of
+RMSE (in seconds) and inference time (in milliseconds) per sample on average. For [BLE∗ 22], since its inference time is not applicable, we did not
+compare its inference time here. The star (*) denotes configurations where
+single-scattering was applied. The best prediction results are highlighted in
+bold.
+Framework
+CUDA-raycaster
+yt
+Bruder et al. [BLE∗ 22]
+LVRP
+pred
+RMSE ↓ / Tinfer ↓
+RMSE ↓
+pred
+RMSE ↓ / Tinfer ↓
+MAESTROeX
+Nyx
+Nyx∗
+Castro
+0.0054 / 0.275
+0.0045 / 0.274
+0.1042 / 0.270
+0.0037 / 0.271
+0.0208
+0.0271
+0.3351
+0.0173
+0.0474 / 27.595
+0.0190 / 8.9078
+0.3014 / 21.375
+0.0075 / 9.3684
+MAESTROeX
+Nyx
+Castro
+4.337 / 0.274
+2.553 / 0.285
+3.541 / 0.285
+34.182
+34.159
+34.645
+20.63 / 2924.67
+8.974 / 2611.74
+19.35 / 2755.18
+Dataset
+ENTIRE
+Table 3: Quantitative comparison and ablation study on the Nyx dataset
+using the CUDA raycaster (no single-scattering). For each pair of rows of
+(a), models were evaluated with one target rendering parameter varied; for
+(b), all rendering parameters were varied.
+Model
+RMSE↓
+STD↓
+ENTIRE
+w/o feature vector
+0.0010
+0.0427
+0.0001
+0.0027
+ENTIRE
+w/o image resolution
+0.0056
+0.021
+0.0001
+0.0009
+ENTIRE
+w/o transfer function
+0.0197
+0.0398
+0.0020
+0.0040
+ENTIRE
+w/o camera pose
+0.0146
+0.0366
+0.0005
+0.0028
+(a) Quantitative comparison
+parameters affect prediction accuracy. The reconstruction quality of
+VolumeNet is evaluated in peak signal to noise ratio (PSNR) in the
+supplementary material.
+7 of 19
+Model
+RMSE↓
+STD↓
+ENTIRE
+w/o feature vector
+w/o image resolution
+w/o transfer function
+w/o camera pose
+0.0045
+0.0143
+0.0263
+0.0175
+0.0098
+0.0003
+0.0021
+0.0039
+0.0027
+0.0007
+(b) Ablation study
+Notably, ENTIRE’s inference both concerning VolumeNet and
+vol <
+PredNet induces only a small computational footprint: T infer
+pred
+4.2. Evaluation of Rendering Time Prediction
+We evaluate ENTIRE’s performance on MAESTROeX, Nyx, and
+Castro for yt. For the CUDA raycaster, we conducted evaluations
+across two scenarios on Nyx: without/with single-scattering applied. These varied scenarios were chosen to demonstrate the effectiveness of ENTIRE across different rendering techniques. Tab. 2
+presents prediction accuracy and runtime across different datasets
+and compares ENTIRE to baselines.
+Overall, we can see from Tab. 2 that ENTIRE exhibits high prediction accuracy with fast inference speed. The standard deviation
+reported for avgRT in Tab. 1 indicates the high fluctuation in render times, which has already been shown by example in Fig. 1.
+The comparison with the baseline model in Tab. 2 shows that the
+RMSE of the rendering time prediction of ENTIRE is substantially
+lower across all cases. Note that the rendering time of (CPU-based)
+yt is three orders of magnitudes larger than with the (GPU-based)
+CUDA raycaster, which is also reflected accordingly in the RMSE.
+We investigate different variants with the CUDA raycaster and
+the Nyx dataset. Both baseline models exhibit significantly higher
+prediction errors compared to ENTIRE. [BLE∗ 22]’s method assumes homogeneous rendering time behavior, which works reasonably well when rendering parameters remain relatively stable or
+when jointly considering batches of rendering tasks (as in their targeted in situ visualization scenario), but the substantial variability
+across individual frames (see Fig. 1) cannot be adequately captured.
+On the other hand, LVRP also shows significantly worse performance. Volume downsampling inherently discards fine-scale structural features that significantly influence rendering performance
+during raycasting. This loss is particularly severe for our cosmology simulation datasets, leading to limited predictive capability.
+Our yt results in Tab. 2 show that with a different renderer and
+compute architecture, different characteristics can be observed. For
+MAESTROeX, the RMSE is slightly higher than that of Nyx and
+Castro, not only for ENTIRE but also the baseline model (although
+to a lesser extent; to some degree this is also the case with the
+CUDA raycaster). This indicates more complex timing behavior
+with this data.
+submitted to COMPUTER GRAPHICS Forum (4/2026).
+10 ms and T infer < 0.5 ms, respectively. With this, they are substantially faster than generating an image using either renderer (avgRT
+in Tab. 1). Furthermore, an advantage of our two-stage design is
+that VolumeNet needs to run only once per volume and can be
+reused for different camera poses. In summary, our experiments
+show that ENTIRE consistently achieves high accuracy and fast
+inference across different raycasting methods and both GPU and
+CPU environments.
+4.3. Impact of Rendering Parameters and Ablation Study
+To evaluate how each rendering parameter affects prediction accuracy, we designed four controlled experiments on the Nyx dataset
+using the CUDA raycaster.
+Quantitative analysis (Tab. 3a). Each experiment varies one
+rendering parameter while fixing the rest, and compares a reduced variant of ENTIRE not explicitly considering this parameter
+against standard ENTIRE. Overall, the results demonstrate that ENTIRE consistently achieves higher accuracy than the ablated models across all parameter variations. Volume variations produce the
+most significant results, with prediction accuracy decreasing approximately 40× when volume feature vectors are removed. This
+indicates that ENTIRE’s autoencoder produces an expressive feature vector for each volume. As an end-to-end prediction model,
+ENTIRE does not require high-fidelity volume reconstruction. Instead, it is sufficient that each volume is mapped to a distinct representation that allows PredNet to differentiate rendering performance characteristics across volumes. As we can see from the
+image resolution experiments, the prediction accuracy decreased
+by 4× when resolution information is removed. This performance
+degradation confirms that image resolution is an essential factor
+that fundamentally determines rendering cost and cannot be omitted from accurate time prediction models. Different transfer functions can produce vastly different rendering times for the same volume and camera configuration, depending on how they map scalar
+values to opacity. ENTIRE’s learned transfer function representation successfully captures these non-linear effects, maintaining stable predictions. Camera pose is another critical factor for rendering
+time prediction. With camera pose ablated, ENTIRE showed nearly
+Z. Yin, H. Gadirov, J. Kosinka & S.Frey / ENTIRE: Learning-based Volume Rendering Time Prediction
+8 of 19
+LVRP
+ENTIRE
+0.15
+GT
+0.2
+0.2
+0.2
+0.15
+Time[s]
+0.1
+0.1
+0.1
+0.1
+0.05
+0.05
+0
+0
+2
+4
+(a) Volume
+6
+8
+0
+322
+642
+1282
+2562
+5122
+10242
+(b) Image resolution
+0
+0
+2
+4
+6
+(c) Transfer function
+8
+0
+0
+2
+4
+6
+8
+(d) Camera pose
+Figure 5: Performance of ENTIRE and LVRP on different scenarios. For (a), (c), and (d), the frame index is indicated on x axis. For (b), x axis indicates the
+image resolution.
+3× degradation of prediction accuracy. Note that these experiments
+were designed to emphasize the impact of these parameters, and the
+performance impact in practical scenarios would be different (also
+see the ablation study below).
+Qualitative analysis (Fig. 5). When only the volume varies,
+rendering times show substantial variation (Fig. 5a). The close
+alignment between predicted and ground-truth (GT) curves demonstrates that VolumeNet’s learned feature representations effectively
+capture the timing-relevant properties of volumes. When varying
+only the image resolution (Fig. 5b), ENTIRE demonstrates highly
+accurate predictions for low image resolution, but we observed
+slightly higher prediction with higher image resolution. Varying
+only the transfer function (Fig. 5c) or camera pose (Fig. 5d) reveals
+more complex timing behavior. Fig. 5c and Fig. 5d shows significant variation in timings,reflecting the transfer function and camera
+pose’s impact on early ray termination. Transfer functions that produce higher opacity values lead to earlier termination and faster
+rendering, while lower opacity settings require longer ray traversal.
+Similarly, camera pose determines ray traversal paths through the
+volume, which creates complex rendering time behavior. ENTIRE
+accurately accounts for these variations, including sharp peaks,
+demonstrating its ability to model the non-linear relationship between transfer function/camera pose and rendering performance.
+Across all four parameter variations, ENTIRE consistently
+demonstrates accurate prediction with small errors (< 0.02s), validating that the model has learned meaningful relationships between
+each input factor and rendering time. However, we observe a small
+systematic bias: ENTIRE tends to underpredict when GT rendering
+times are comparably large(≈ 0.15s). We attribute this to imbalance
+in the training data, where high-cost rendering scenarios comprise
+only a small fraction (< 10%) of collected samples, which further
+leads to the underestimation of rare peak rendering times.
+Ablation Study (Tab. 3b). To further evaluate the individual
+contribution of each rendering parameter to prediction accuracy,
+we performed ablation experiments on the Nyx dataset using the
+CUDA raycaster. Specifically, we evaluated ENTIRE and ablated
+models with all rendering parameters varied. The ablation study
+reveals that image resolution is the dominant factor influencing
+rendering time prediction (as indicated by significantly increased
+RMSE). The impact of the remaining parameters of (volume) feature vector, transfer function and camera pose are smaller yet still
+substantial. This confirms that accurate rendering time prediction
+requires the integration of all considered parameters.
+4.4. Fine-tuning
+While ENTIRE achieves accurate rendering time prediction, collecting training data and training VolumeNet is computationally
+expensive. In practice, it would be desirable for users to adapt ENTIRE to new scenarios—different renderers, devices, or datasets—
+with minimal data collection effort. In this subsection, we investigate how a pre-trained ENTIRE model can achieve comparable
+prediction accuracy to a fully trained model while requiring significantly fewer training samples to adapt a pre-trained model to a
+new target scenario. The pre-trained model was obtained by training ENTIRE (both VolumeNet and PredNet) from scratch on the
+combined MAESTROeX, Nyx, and Castro datasets rendered via
+the CUDA raycaster without scattering (totally 2.4 × 105 training
+samples for PredNet). We chose this scenario as it yields the greatest diversity in both volume structure and rendering time behavior.
+We then fine-tuned the pre-trained PredNet model using varying
+numbers of training samples (randomly drawn from the new target
+scenario). Each experiment was repeated five times and the median
+RMSE was taken as the final metric to account for randomness.
+The results are shown in Fig. 6. Note that in the following context,
+the sampling ratio is expressed relative to the pre-trained model’s
+training set.
+The pre-trained model provides a benifical initialization for finetuning: even with very few training samples (as few as 0.45 % for
+ParaView and V100 cluster, and 0.1 % for Chameleon), the finetuned ENTIRE achieves acceptable prediction accuracy without
+significant degradation. To match the accuracy of training from
+scratch on the full dataset, fine-tuning the pre-trained model with
+approximately 11.25 % suffices for the ParaView and V100 Cluster, and 0.24 % for Chameleon. When fine-tuning to ParaView
+(Fig. 6a), the pre-trained model provides relatively smaller benefits. This is because ParaView employs different rendering techniques from the CUDA raycaster used during pre-training, which
+leads to ParaView’s different rendering timing behavior. Consequently, the pre-trained weights have limited initialization benefit. Nevertheless, ParaView also employs a raycasting algorithm
+and shares common patterns with our CUDA raycaster. Consequently, a pre-trained ENTIRE fine-tuned with fewer training samsubmitted to COMPUTER GRAPHICS Forum (4/2026).
+Z. Yin, H. Gadirov, J. Kosinka & S.Frey / ENTIRE: Learning-based Volume Rendering Time Prediction
+0.02
+9 of 19
+0.007
+with pretrained model
+0.02
+w/o pretrained model
+RMSE
+0.006
+train from scratch (full)
+0.015
+0.005
+0.01
+0.01
+0.004
+0
+0
+0.09
+0.18
+0.27
+0.36
+0
+0.45
+0.09
+0.18
+0.27
+0.36
+0.45
+0
+0.05
+0.11
+0.16
+0.22
+0.27
+(a) ParaView
+(b) V100 cluster
+(c) Chameleon
+Figure 6: Fine-tuning experiment on various new scenarios. The x-axis denotes the fraction of training samples used relative to the dataset (sampling ratio)
+for training the pre-trained model.
+GT
+Fully-trained
+0.45% / 0.27%
+2.25% / 1.35%
+11.25% / 6.75%
+0.1
+0.08
+0.08
+Time[s]
+0.06
+0.06
+0.04
+0.04
+0.02
+0
+0
+0.02
+2
+4
+6
+0
+0
+8
+0.04
+2
+4
+6
+8
+2
+4
+6
+8
+2
+4
+6
+8
+Time[s]
+0.06
+0.04
+0.02
+0.02
+0
+0
+2
+4
+6
+0
+0
+8
+0.06
+Time[s]
+0.04
+0.04
+0.02
+0
+0
+0.02
+2
+4
+6
+8
+(a) Transfer function
+0
+0
+(b) Camera pose
+Figure 7: Qualitative comparison of fine-tuned models on different scenarios. Top row: ParaView. Middle row: V100 cluster. Bottom row:
+Chameleon. The fine-tuned models are indicated in soft teal. The value before “/” denotes the ratio for ParaView and V100 cluster, and the value after
+means the ratio for Chameleon.
+ples still achieves better prediction accuracy than a model trained
+from scratch with the same number of samples.
+This benefit of the pre-trained model is most significant when
+fine-tuning to a new device (a cluster; see Fig. 6b) or a new
+dataset (Chameleon; see Fig. 6c), where the underlying rendering behavior remains consistent with the pre-training configuration.
+Even at zero-shot, ENTIRE retains high prediction accuracy for
+Chameleon. The pre-trained model is already a good starting point
+submitted to COMPUTER GRAPHICS Forum (4/2026).
+for this scenario: adding more training samples brings little further improvement. The Chameleon is acquired from CT scanning
+a real-world reptile and thus represents a fundamentally different
+modality from the astrophysical simulation datasets used in pretraining. Accordingly, the extracted feature vector does not fully
+encode Chameleon’s volume information, resulting in lower reconstruction quality (approximately 15dB in PSNR). However, this degraded feature representation is still sufficiently expressive to yield
+accurate predictions accuracy for Chameleon. This finding further
+verifies our earlier discussion in Sec. 4.3 that reconstruction quality is not the most important metric for the feature vector in our
+context. What matters is that the representation is consistent across
+predictions for the same volume and distinguishable across different volumes, providing a stable and unique conditioning signal
+for PredNet rather than a high-quality volumetric reconstruction.
+Hence, the pre-trained VolumeNet can be applied to an ensemble
+or a single volume to obtain feature representations without retraining. The time cost is negligible, as VolumeNet’s inference time is
+under 10 ms (Sec. 4.2).
+To further validate that the fine-tuned model generalizes rather
+than overfits to the training data, we conducted experiments on two
+representative interactive visualization scenarios, where users only
+vary camera pose or transfer functions (Fig. 7). We selected models
+fine-tuned with 0.45 %, 2.25 %, and 11.25 % of training samples
+for ParaView and V100 Cluster, and 0.27 %, 1.35 %, and 6.75 %
+for Chameleon. Even with a performance drop, fine-tuning the pretrained model with as few as 0.45 % of training samples for ParaView and Cluster, and 0.27 % for Chameleon, still yields reasonable prediction accuracy, while increasing to 2.25 % and 1.35 %
+respectively does not yield substantial further improvement.
+Overall, ENTIRE generalizes effectively to new renderers, devices, and datasets by fine-tuning the pre-trained model with only
+a small number of training samples. Users can deploy ENTIRE
+rapidly in their target scenario with minimal data collection effort.
+For quick adaptation to a new scenario, 0.45 % of training samples
+for ParaView and V100 Cluster, and 0.1 % for Chameleon, already
+yields acceptable performance. For users seeking full prediction accuracy, 11.25 % and 0.24 % respectively suffice.
+5. Use Cases
+We now discuss two use cases of ENTIRE: ray step size control
+(Sec. 5.1) and load balancing (Sec. 5.2). Note that in Sec. 5.1 the
+prediction and ray step size control are conducted on-the-fly while
+10 of 19
+Z. Yin, H. Gadirov, J. Kosinka & S.Frey / ENTIRE: Learning-based Volume Rendering Time Prediction
+the evaluation in Sec. 5.2 considers rendering times collected a priori. Here we tested our use cases without single-scattering.
+5.1. Steering Ray Step Size for Interactive Frame Rates
+Achieving interactive frame rates reliably is essential to enable fluent exploration for many visualization tasks. In this use case, our
+goal is to render frames while not exceeding a certain timing bound
+ttarget . The means to achieve this is by controlling the ray step size,
+δ, on the basis of predicted rendering time tpred . For this, we experimentally determine a function G(·) that models the relative impact
+that ray step size has on rendering times. This is done by sampling
+rendering times of different volumes from different poses first, and
+normalizing them with respect to what is achieved with reference
+step size δref , yielding tnorm .
+With this, controlling the step size for each frame works as presented in Alg. 1: for each pose along the path, obtain a time prediction from ENTIRE (which can be done in less than 0.3 ms as
+discussed above), and then using G we determine what adjustment
+to make from δref to δadapt to eventually reach the target rendering
+time when rendering.
+The experiments in this use case employ the CUDA raycaster
+and Nyx. Here, we utilized the ENTIRE model trained with randomly varied transfer function configurations and without singlescattering (refer to line 2 in Tab. 2). Our study depicts a scenario
+where the user explores a volume by adjusting the transfer function and camera pose. The target rendering time is set to 25 ms,
+corresponding to a frame rate of 40 FPS. For OLP (see Sec. 4.1),
+we normalize each time measurement (tadapt ) conducted with the
+respective current steps size to an estimated tref that reflects the
+reference time step before averaging, as:
+tref =
+tadapt
+ adapt  ,
+G δδref
+(9)
+ adapt 
+where G δδref captures the relative rendering time change due to
+a changed step size. With this, tref quantifies timing with respect
+to the reference time step just like ENTIRE’s prediction does. To
+evaluate the rendering quality after ray step size adjustment, we use
+peak signal-to-noise ratio (PSNR).
+Results for ray step size steering based on this approach are
+shown in Fig. 8. ENTIRE achieves more stable frame rates compared to baselines. During the sequences that have dramatic rendering time changes induced by the transfer function adjustment
+(frames 0–10, 44–53, 118–141), OLP and the PID controller
+struggle to adapt, whereas ENTIRE maintains stable predictions
+throughout. When rendering time changes smoothly, e.g., the camera is moving in a smooth orbit in later phases, OLP and PID even
+achieve slightly more stable frame rates than ENTIRE. While ENTIRE occasionally produces some fluctuations due to misprediction
+(e.g., frames 49 and 126), it significantly outperforms both OLP
+and the PID controller, which suffer from several practical limitations. First, the PID controller requires careful manual tuning of the
+proportional, integral, and derivative settings, and the optimal values differ across volumes, renderers, and hardware configurations.
+Second, OLP and PID controller cannot respond effectively to drastic rendering time changes, as their adjustments are based on past
+frames that may no longer adequately reflect the current rendering cost. Third, even under smooth rendering time changes where
+their adjustments are relatively accurate, being purely reactive, both
+OLP and PID need at least one frame to ‘warm up’, and the step size
+adjustment only takes effect from the second frame onward. As a
+result, they always lag by at least one frame. In contrast, ENTIRE
+predicts rendering time before each frame is rendered and adjusts
+the step size proactively, without requiring any manual tuning.
+Regarding the image quality, as shown in Fig. 8a (bottom), all
+three methods achieve high PSNR values throughout the sequence.
+We present the rendered images from all three methods in Fig. 8b.
+The differences in PSNR across the three methods are minor, and
+no temporal coherence artifacts were observed in the test sequence.
+Hence, we argue that our method achieves stable frame rate at the
+cost of imperceptible degradation in image quality.
+We acknowledge that ENTIRE has fundamentally different cost
+profiles compared to OLP and the PID controller: they require no
+training and are immediately applicable (although PID requires
+some parameter tuning), whereas ENTIRE needs upfront investment in data collection and model training. However, the training is
+a one-time investment per renderer and device configuration. Given
+interactive visualization scenarios targeting in-depth data analysis,
+the one-time training cost is quickly amortized. Furthermore, as
+shown in Sec. 4.4, fine-tuning the pre-trained model substantially
+reduces this overhead when adapting to new scenarios.
+5.2. Load Balancing
+Algorithm 1: Steering ray step size. In our evaluation, we
+consider a camera path and transfer funtions κ with a duration of T .
+Input: path, κ, T , ttarget , G, ENTIRE, volume
+1 timer.start();
+2 while timer < T do
+3
+pose = path(timer);
+4
+tf = κ(timer);
+5
+tpredict = ENTIRE(volume, pose, tf );
+ target 
+6
+δadapt = δref G−1 ttpredict ;
+7
+renderer(volume, pose, tf, δadapt );
+8 end
+We now present a distributed volume rendering use case involving the CUDA renderer and the Nyx dataset. In this scenario, we
+generate a database of images spanning six time steps, each with
+64 different camera poses along an orbit, resulting in a total of
+6 × 64 = 384 visualization tasks. The objective is to distribute these
+rendering tasks across N identical machines such that the maximum
+completion time across all machines (or nodes) n ∈ N is minimized.
+An optimal assignment should also balance the workload evenly.
+Mathematically, the goal is to determine an assignment A : N → V
+that maps nodes N to visualization tasks V, optimizing:
+
+
+
+
+ X
+
+
+
+min max 
+t(v) ,
+(10)
+A:N→V n∈N
+v∈A(n)
+submitted to COMPUTER GRAPHICS Forum (4/2026).
+Z. Yin, H. Gadirov, J. Kosinka & S.Frey / ENTIRE: Learning-based Volume Rendering Time Prediction
+11 of 19
+0.1
+0.08
+OLP
+PID
+ENTIRE
+Target
+Time[s]
+0.06
+0.04
+0.02
+0
+PSNR=69.34
+PSNR=65.96
+PSNR=70.28
+PSNR=53.71
+PSNR=54.19
+PSNR=50.05
+PSNR=59.43
+PSNR=56.79
+PSNR=55.27
+10
+Ray step size
+8
+adapt
+δOLP
+adapt
+δPID
+adapt
+δENTIRE
+6
+4
+2
+0
+PSNR[dB]
+70
+OLP
+PID
+ENTIRE
+60
+50
+0
+20
+40
+80
+60
+100
+120
+140
+160
+180
+200
+Normalized Maximum Runtime
+(a)
+(b)
+Figure 8: Steering the ray step size for interactive frame rates during an exploration session of a Nyx time step. (a) Top to bottom, for OLP, PID, and ENTIRE:
+indicates
+the measured rendering time, the adapted ray step size δadapt , and the measured image quality in PSNR. The frame index is indicated on the x-axis.
+phases with drastic rendering time changes. △ markers above the x-axis indicate the frames selected for qualitative comparison in (b). (b) Selected rendered
+images at frames 6, 50, and 133 (top to bottom) for GT, OLP, the PID controller, and ENTIRE (left to right).
+1.4
+t(·) used in Eq. (10): GT: Measured ground truth rendering times,
+assuming perfect predictions; ENTIRE: Rendering times predicted
+by ENTIRE; Uniform: All tasks are assumed to have the same
+(uniform) rendering time. With the Uniform approach, LPT assigns
+tasks in a random order, resulting in a balanced task count but potentially suboptimal scheduling.
+Max GT
+Max ENTIRE
+Max Uniform
+1.2
+1.0
+0.8
+N=4
+N=8
+N = 32
+N = 16
+Number of Nodes N
+N = 64
+Figure 9: Load balancing use case. Boxplots show the distribution of total
+P
+rendering times ( v∈A(n) t(v)) across nodes n ∈ N. Lines highlight the maximum render time that determines the runtime until completion of all tasks.
+All rendering times are normalized with respect to the GT runtime.
+where t : v → R provides an estimate of the anticipated rendering
+time for each task v ∈ V.
+This problem is NP-hard, even under the assumption of identical machines. To address it, we employ the Longest Processing
+Time First (LPT) algorithm, a well-established greedy approach
+with a tight error bound [Gra69]. LPT assigns rendering tasks in
+descending order of cost—here, based on predicted rendering times
+t(·),—iteratively distributing them to nodes in a way that minimizes
+the maximum load after each step.
+We compare three approaches for estimating the rendering time
+submitted to COMPUTER GRAPHICS Forum (4/2026).
+Fig. 9 presents the results for varying numbers of nodes N, where
+rendering times are normalized relative to the slowest node in the
+GT case (i.e., the theoretical optimum from Eq. (10)). Each node
+count N is associated with three boxplots representing GT, ENTIRE, and Uniform, showing the distribution of total rendering
+P
+times v∈A(n) t(v) across nodes n ∈ N. The boxplots reveal that as
+N increases, load imbalance grows for both ENTIRE and Uniform
+relative to the GT baseline. The three curves overlaid on the boxplots in Fig. 9 represent the maximum render time for each method,
+directly reflecting the objective value in Eq. (10).
+The relative difference from GT increases with N for both ENTIRE and Uniform. While ENTIRE incurs less than 4% of additional cost compared to GT even for large N due to its high prediction accuracy, Uniform suffers a significantly higher overhead,
+nearing 20%. Overall, these results highlight the effectiveness of
+ENTIRE in large-scale volume visualization, closely approximating the theoretical optimum while significantly reducing computational overhead.
+12 of 19
+Z. Yin, H. Gadirov, J. Kosinka & S.Frey / ENTIRE: Learning-based Volume Rendering Time Prediction
+6. Discussion
+Multi-dimensional performance analysis. The evaluation in
+Sec. 4.2 shows that various factors influence not only the rendering time but also the prediction quality as they introduce complexity in timing behavior. Additionally, the comparison across different datasets, such as the Nyx dataset and the MAESTROeX
+dataset, highlights that the rendering method and dataset-specific
+characteristics play a significant role in rendering performance.
+The results obtained using the CUDA raycaster and yt show that
+while comparable prediction accuracy can generally be achieved,
+there are noticeable differences, especially in the case of the MAESTROeX dataset that require further investigation. An extended,
+adaptive performance assessment effort could help to account for
+this in future work. Specifically, we plan to incorporate ENTIRE
+with [BMFE19]’s method for performance assessment.
+Generalization. Sec. 4.2 has demonstrated that ENTIRE can
+generalize without specific architecture adjustment across various
+configurations: different rendering codes and hardware (CUDAraycaster on the GPU and yt on the CPU), raycasting variants
+(with/without single scattering), different transfer function configurations, and datasets. When the user is working with different
+renderers, devices, or datasets, they can fine-tune the pre-trained
+ENTIRE model with relatively few samples to achieve reasonable
+prediction accuracy. Furthermore, ENTIRE’s concatenation-based
+framework enables flexible extension of the model to the target application scenario by simply adding required input parameters.
+Training efficiency. Although ENTIRE achieves accurate rendering time prediction on-the-fly, the collection of training data remains a computationally expensive process. Even with acceleration
+techniques such as early ray termination, and empty space skipping,
+collecting rendering times for Nyx’s training set required over 18
+hours on the GPU. This represents a practical obstacle for users
+seeking to apply ENTIRE to new datasets immediately. Inspired by
+[HPT∗ 21], a promising direction for future work is to train ENTIRE
+via online learning. Specifically, ENTIRE is trained incrementally
+as users render frames during exploration. Once ENTIRE reaches
+sufficient prediction accuracy (e.g., below a target threshold), the
+training process terminates. This approach combines data collection and model training, eliminating the need for dedicated upfront
+data collection and enabling users to apply ENTIRE to new datasets
+immediately. Currently, VolumeNet and PredNet are trained separately. We aim to investigate joint training strategies, which could
+potentially improve performance by allowing the two components
+to learn more cohesive representations that are specifically tuned
+toward rendering time prediction. Such an architecture could potentially yield more task-relevant feature representations compared
+to our current decoupled design. However, this also introduces challenges, particularly increased memory consumption and training
+complexity, which we plan to address.
+Ray Step Size Adaptation (Use Case 1). As shown in Sec. 5.1,
+the rendering times achieved by ENTIRE are generally slightly
+slower than the target times due to the simple approach how we
+adapt the ray step size with G. A more general and direct solution
+is to extend ENTIRE to additionally take the ray step size δ as an
+input. While this increases the model complexity and the amount
+and variation of training data required, this would also be the most
+flexible method that could further capture complex interdependencies between δ and other influence factors [BMFE19].
+Load balancing (Use case 2). Sec. 5.2 shows the effectiveness of ENTIRE’s timing predictions in load-balancing in a distributed rendering scenario by demonstrating only small inefficiency in comparison to a hypothetical perfect prediction model
+(GT). To be able to make this comparison, we relied on measurements conducted a priori. In future work we plan to implement
+ENTIRE load balancing in existing distributed rendering frameworks. In doing so, we further aim to extend the investigation of
+ENTIRE’s utility for different use cases in parallel volume rendering [MCEF94]—especially sort-last approaches—and also evaluate them with practical experiments on clusters and large-scale
+compute infrastructures. Related to our targeted generalization efforts described above, we also aim to experiment with applying
+ENTIRE to other timing predictions tasks, e.g., with the compositing step required for sort-last methods.
+Future work. We plan to explore the application and extension
+of ENTIRE to predict rendering quality/error alongside rendering
+time for given renderer parameters. With both predictions, the system could select parameter combinations (e.g., ray step size and
+image resolution) that lie on the Pareto frontier, achieving optimal quality within a specified time budget. Furthermore, the current
+evaluation assumes volumes are fully pre-loaded into memory and
+data loading costs are excluded from all reported rendering times.
+Extending ENTIRE to account for data loading and caching effects
+is a promising direction for future work.
+7. Conclusion
+We introduced ENTIRE, a novel ML-based approach for predicting
+volume rendering time without requiring manual adjustments for
+specific rendering methods, hardware, or datasets. Our approach
+follows a two-stage design: (1) encoding the volume into a feature
+vector (VolumeNet), and (2) leveraging this representation, along
+with rendering parameters, to predict rendering time (PredNet). We
+demonstrated that ENTIRE achieves both high accuracy and fast inference across diverse datasets, computing environments, and rendering techniques (even in the presence of complex interactions in
+single-scattering scenarios). We also showed that a user can finetune a pre-trained ENTIRE model with relatively few training samples for fast adaptation to new scenarios. Furthermore, we demonstrated ENTIRE’s practical utility in two key scenarios: (1) dynamically adapting rendering parameters to optimize computational cost
+while maintaining performance targets, and (2) balancing workloads in distributed rendering setups to ensure efficient resource
+utilization.
+References
+[ABB∗ 10] Almgren A. S., Beckner V. E., Bell J. B., Day M., Howell
+L. H., Joggerst C., Lijewski M., Nonaka A., Singer M., Zingale M.:
+Castro: A new compressible astrophysical solver. i. hydrodynamics and
+self-gravity. The Astrophysical Journal 715, 2 (2010), 1221. 5
+[ABL∗ 13] Almgren A. S., Bell J. B., Lijewski M. J., Lukić Z., Van Andel
+E.: Nyx: A massively parallel amr code for computational cosmology.
+The Astrophysical Journal 765, 1 (2013), 39. 5
+submitted to COMPUTER GRAPHICS Forum (4/2026).
+Z. Yin, H. Gadirov, J. Kosinka & S.Frey / ENTIRE: Learning-based Volume Rendering Time Prediction
+[AGL05] Ahrens J., Geveci B., Law C.: ParaView: An end-user tool
+for large data visualization. In Visualization Handbook. Elesvier, 2005.
+ISBN 978-0123875822. 6
+[AJO∗ 14] Ahrens J., Jourdain S., O’Leary P., Patchett J., Rogers D. H.,
+Petersen M.: An image-based approach to extreme scale in situ visualization and analysis. In SC’14: Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis (2014), IEEE, pp. 424–434. 1
+13 of 19
+[GTEF21] Gadirov H., Tkachev G., Ertl T., Frey S.: Evaluation and selection of autoencoders for expressive dimensionality reduction of spatial ensembles. In International Symposium on Visual Computing (2021),
+Springer, pp. 222–234. 16
+[GWB∗ 25] Gadirov H., Wu Q., Bauer D., Ma K.-L., Roerdink J. B.
+T. M., Frey S.: HyperFLINT: Hypernetwork-based flow estimation and
+temporal interpolation for scientific ensemble visualization. Computer
+Graphics Forum 43, 3 (2025). 3
+[BDP∗ 10] Baghsorkhi S. S., Delahaye M., Patel S. J., Gropp W. D., Hwu
+W.-m. W.: An adaptive performance modeling tool for GPU architectures. In Proceedings of the 15th ACM SIGPLAN symposium on Principles and practice of parallel programming (2010), pp. 105–114. 3
+[HCX∗ 22] He K., Chen X., Xie S., Li Y., Dollár P., Girshick R.:
+Masked autoencoders are scalable vision learners. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(2022), pp. 16000–16009. 19
+[BFE16] Bruder V., Frey S., Ertl T.: Real-time performance prediction
+and tuning for interactive volume raycasting. In SIGGRAPH ASIA 2016
+Symposium on Visualization (2016), pp. 1–8. 1, 2, 3, 6
+[HPT∗ 21] Herveau K., Pfaffe P., Tillmann M., Tichy W. F., Dachsbacher
+C.: Analysis of acceleration structure parameters and hybrid autotuning for ray tracing. IEEE Transactions on Visualization and Computer
+Graphics 29, 2 (2021), 1345–1356. 12
+[BFE17] Bruder V., Frey S., Ertl T.: Prediction-based load balancing
+and resolution tuning for interactive volume raycasting. Visual Informatics 1, 2 (June 2017), 106–117. 1, 2
+[BHP15] Beyer J., Hadwiger M., Pfister H.: State-of-the-art in GPUbased large-scale volume visualization. In Computer Graphics Forum
+(2015), vol. 34, Wiley Online Library, pp. 13–37. 1
+[BLE∗ 22] Bruder V., Larsen M., Ertl T., Childs H., Frey S.: A hybrid in situ approach for cost efficient image database generation. IEEE
+Transactions on Visualization and Computer Graphics (2022). 1, 2, 3, 6,
+7
+[BMFE19] Bruder V., Müller C., Frey S., Ertl T.: On evaluating runtime performance of interactive visualizations. IEEE transactions on
+visualization and computer graphics 26, 9 (2019), 2848–2862. 1, 6, 12
+[BWGM25] Bauer D., Wu Q., Gadirov H., Ma K.-L.: GSCache: Realtime radiance caching for volume path tracing using 3d gaussian splatting. IEEE Transactions on Visualization and Computer Graphics (Nov.
+2025). 2
+[IDSSM05] Ipek E., De Supinski B. R., Schulz M., McKee S. A.: An
+approach to performance prediction for parallel applications. In EuroPar 2005 Parallel Processing: 11th International Euro-Par Conference,
+Lisbon, Portugal, August 30-September 2, 2005. Proceedings 11 (2005),
+Springer, pp. 196–205. 3
+[KB15] Kingma D., Ba J.: Adam: A method for stochastic optimization.
+In International Conference on Learning Representations (ICLR) (San
+Diego, CA, USA, 2015). 15
+[KIL∗ 03] Kniss J., Ikits M., Lefohn A., Hansen C., Praun E., et al.:
+Gaussian transfer functions for multi-field volume visualization. In IEEE
+Visualization, 2003. VIS 2003. (2003), IEEE, pp. 497–504. 5
+[KKLD23] Kerbl B., Kopanas G., Leimkühler T., Drettakis G.: 3d gaussian splatting for real-time radiance field rendering. ACM Trans. Graph.
+42, 4 (2023), 139–1. 2
+[KUMH17] Klambauer G., Unterthiner T., Mayr A., Hochreiter S.:
+Self-normalizing neural networks. Advances in neural information processing systems 30 (2017). 4
+[DBE∗ 14] Dayal J., Bratcher D., Eisenhauer G., Schwan K., Wolf M.,
+Zhang X., Abbasi H., Klasky S., Podhorszki N.: Flexpath: Type-based
+publish/subscribe system for large-scale science analytics. In 2014 14th
+IEEE/ACM International Symposium on Cluster, Cloud and Grid Computing (2014), IEEE, pp. 246–255. 2
+[LBdS∗ 07] Lee B. C., Brooks D. M., de Supinski B. R., Schulz M., Singh
+K., McKee S. A.: Methods of inference and learning for performance
+modeling of parallel applications. In Proceedings of the 12th ACM SIGPLAN symposium on Principles and practice of parallel programming
+(2007), pp. 249–258. 3
+[DK91] Doi A., Koide A.: An efficient method of triangulating equivalued surfaces by using tetrahedral cells. IEICE TRANSACTIONS on
+Information and Systems 74, 1 (1991), 214–224. 2
+[LC98] Lorensen W. E., Cline H. E.: Marching cubes: A high resolution 3d surface construction algorithm. In Seminal graphics: pioneering
+efforts that shaped the field. 1998, pp. 347–353. 2
+[FE] Frey S., Ertl T.: Load balancing utilizing data redundancy in distributed volume rendering. In Proceedings of the 11th Eurographics conference on Parallel Graphics and Visualization, EGPGV ’11, Eurographics Association, pp. 51–60. 1
+[LH17] Loshchilov I., Hutter F.: SGDR: Stochastic gradient descent
+with warm restarts. In International Conference on Learning Representations (2017). 15
+[FE17] Frey S., Ertl T.: Flow-based temporal selection for interactive
+volume visualization. In Computer Graphics Forum (2017), vol. 36,
+pp. 153–165. 2, 19
+[FNA∗ 19] Fan D., Nonaka A., Almgren A. S., Harpole A., Zingale M.:
+Maestroex: A massively parallel low mach number astrophysical solver.
+The Astrophysical Journal 887, 2 (2019), 212. 5
+[FXZ∗ 24] Fei B., Xu J., Zhang R., Zhou Q., Yang W., He Y.: 3d gaussian
+splatting as new era: A survey. IEEE Transactions on Visualization and
+Computer Graphics (2024). 2
+[GA21] Grosset P., Ahrens J.: Lightweight interface for in situ analysis
+and visualization of particle data. In ISAV’21: In Situ Infrastructures for
+Enabling Extreme-Scale Analysis and Visualization. 2021, pp. 12–17. 2
+[Gra69] Graham R. L.: Bounds on multiprocessing timing anomalies.
+SIAM Journal on Applied Mathematics 17, 2 (1969), 416–429. 11
+[GRF25] Gadirov H., Roerdink J. B. T. M., Frey S.: FLINT: Learningbased flow estimation and temporal interpolation for scientific ensemble
+visualization. IEEE Transactions on Visualization and Computer Graphics (2025). 3
+submitted to COMPUTER GRAPHICS Forum (4/2026).
+[LHK∗ 16] Larsen M., Harrison C., Kress J., Pugmire D., Meredith J. S.,
+Childs H.: Performance modeling of in situ rendering. In Proceedings
+of the International Conference for High Performance Computing, Networking, Storage and Analysis (2016), pp. 1–12. 1, 3, 6
+[Mai03] Maisano J.:
+Chamaeleo calyptratus (veiled chameleon),
+2003.
+URL: https://digimorph.org/specimens/Chamaeleo_
+calyptratus/whole/. 5
+[MCEF94] Molnar S., Cox M., Ellsworth D., Fuchs H.: A sorting classification of parallel rendering. IEEE Computer Graphics and Applications 14, 4 (1994), 23–32. 12
+[MST∗ 21] Mildenhall B., Srinivasan P. P., Tancik M., Barron J. T., Ramamoorthi R., Ng R.: NeRF: Representing scenes as neural radiance
+fields for view synthesis. Communications of the ACM 65, 1 (2021),
+99–106. 2
+[NMOG19] Niemeyer M., Mescheder L., Oechsle M., Geiger A.: Occupancy flow: 4d reconstruction by learning particle dynamics. In International Conference on Computer Vision (Oct. 2019). 2
+[NVI24] NVIDIA:
+Cuda samples, 2024.
+Accessed: 2024-1003.
+URL: https://github.com/NVIDIA/cuda-samples/tree/
+master/Samples/5_Domain_Specific/volumeRender. 6
+14 of 19
+Z. Yin, H. Gadirov, J. Kosinka & S.Frey / ENTIRE: Learning-based Volume Rendering Time Prediction
+[PNM∗ 20] Peng S., Niemeyer M., Mescheder L., Pollefeys M., Geiger
+A.: Convolutional occupancy networks. In Computer Vision–ECCV
+2020: 16th European Conference, Glasgow, UK, August 23–28, 2020,
+Proceedings, Part III 16 (2020), Springer, pp. 523–540. 2
+[PXvO∗ 19] Porter W. P., Xing Y., von Ohlen B. R., Han J., Wang C.: A
+deep learning approach to selecting representative time steps for timevarying multivariate data. In 2019 IEEE Visualization Conference (VIS)
+(2019), IEEE, pp. 1–5. 19
+[RHI∗ 14] Rizzi S., Hereld M., Insley J., Papka M. E., Uram T., Vishwanath V.: Performance modeling of vl3 volume rendering on GPUbased clusters. In Proceedings of the 14th Eurographics Symposium on
+Parallel Graphics and Visualization (2014), pp. 65–72. 3
+[Rot82] Roth S. D.: Ray casting for modeling solids. Computer graphics
+and image processing 18, 2 (1982), 109–144. 2
+[RPLG21] Reiser C., Peng S., Liao Y., Geiger A.: KiloNeRF: Speeding
+up neural radiance fields with thousands of tiny MLPs. In Proceedings
+of the IEEE/CVF international conference on computer vision (2021),
+pp. 14335–14345. 2
+[SSX08] Sodhi S., Subhlok J., Xu Q.: Performance prediction with skeletons. Cluster Computing 11 (2008), 151–165. 3
+[TFM∗ 17] Tkachev G., Frey S., Müller C., Bruder V., Ertl T.: Prediction of distributed volume visualization performance to support render
+hardware acquisition. In EGPGV@ EuroVis (2017), pp. 11–20. 1, 2, 3
+[TFT∗ 20] Tewari A., Fried O., Thies J., Sitzmann V., Lombardi S.,
+Sunkavalli K., Martin-Brualla R., Simon T., Saragih J., Niessner M.,
+et al.: State of the art on neural rendering. In Computer Graphics Forum
+(2020), vol. 39, Wiley Online Library, pp. 701–727. 2
+[TSO∗ 10] Turk M. J., Smith B. D., Oishi J. S., Skory S., Skillman S. W.,
+Abel T., Norman M. L.: yt: A multi-code analysis toolkit for astrophysical simulation data. The Astrophysical Journal Supplement Series 192,
+1 (2010), 9. 5, 6, 15
+[TW24] Tang K., Wang C.: Ecnr: Efficient compressive neural representation of time-varying volumetric datasets. In 2024 IEEE 17th Pacific
+Visualization Conference (PacificVis) (2024), IEEE Computer Society,
+pp. 72–81. 3
+[WBCM23] Wu Q., Bauer D., Chen Y., Ma K.-L.: Hyperinr: A fast and
+predictive hypernetwork for implicit neural representations via knowledge distillation. arXiv preprint arXiv:2304.04188 (2023). 3
+[WGL∗ 15] Wu G., Greathouse J. L., Lyashevsky A., Jayasena N., Chiou
+D.: GPGPU performance and power estimation using machine learning. In 2015 IEEE 21st international symposium on high performance
+computer architecture (HPCA) (2015), IEEE, pp. 564–576. 3
+[WHW22] Weiss S., Hermüller P., Westermann R.: Fast neural representations for direct volume rendering. In Computer Graphics Forum
+(2022), vol. 41, Wiley Online Library, pp. 196–211. 2
+[WW03] Wimmer M., Wonka P.: Rendering time estimation for real-time
+rendering. In Rendering Techniques (2003), pp. 118–129. 3
+[WWSS19] Wang K.-C., Wei T.-H., Shareef N., Shen H.-W.: Ray-based
+exploration of large time-varying volume data using per-ray proxy distributions. IEEE Transactions on Visualization and Computer Graphics
+26, 11 (2019), 3299–3313. 2
+[WYZ∗ 24] Wu T., Yuan Y.-J., Zhang L.-X., Yang J., Cao Y.-P., Yan L.Q., Gao L.: Recent advances in 3d gaussian splatting. Computational
+Visual Media 10, 4 (2024), 613–642. 2
+[YYTK21] Yu A., Ye V., Tancik M., Kanazawa A.: pixelNeRF: Neural radiance fields from one or few images. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(2021), pp. 4578–4587. 2
+[ZO11] Zhang Y., Owens J. D.: A quantitative performance analysis
+model for GPU architectures. In 2011 IEEE 17th international symposium on high performance computer architecture (2011), IEEE, pp. 382–
+393. 3
+submitted to COMPUTER GRAPHICS Forum (4/2026).
+Z. Yin, H. Gadirov, J. Kosinka & S.Frey / ENTIRE: Learning-based Volume Rendering Time Prediction
+Supplementary Material
+A. Implementation
+ENTIRE is implemented in PyTorch. We employed the Adam optimizer [KB15] and trained our model using the cosine annealing
+learning rate decay strategy [LH17]. Adam’s momentum settings
+are β1 = 0.9, β2 = 0.999. To prevent overfitting, early stopping
+was applied to halt the training process once the validation loss
+ceased to decrease. Additionally, we applied gradient clipping with
+a maximum norm of 1.0 to avoid gradient explosion. VolumeNet
+was trained for 200 epochs and evaluated on an Nvidia A100
+GPU, with batch size of 16 and decreasing learning rate in range
+[10−3 , 10−5 ]. PredNet was trained for 200 epochs and tested on
+an Nvidia RTX 3060 GPU. We set PredNet’s decreasing learning
+rate to [10−4 , 10−6 ]. Training VolumeNet required approximately
+2.5 hours, while it only took up to 5 minutes for PredNet.
+B. Scientific Dataset
+Examples from the employed datasets can be found in Fig. 10.
+For MAESTROeX, the volume exhibits significant changes during
+the early stages, then stabilizes in the middle and late phases. Nyx
+shows relatively consistent evolution throughout all time steps. In
+Castro, sharp changes occur initially, particularly during the merger
+of two white dwarfs; then the volume enters an oscillatory phase.
+We provide three videos for each dataset to illustrate their evolution
+over time. Fig. 11 presents the datasets used in this study, rendered
+by CUDA raycaster and yt [TSO∗ 10].
+C. Architecture Selection
+Here, we describe how we selected the final ENTIRE architecture.
+To develop a model that generalizes effectively across all three
+datasets, we trained ENTIRE on the combined data from MAESTROeX, Nyx, and Castro. The architecture selection followed a
+two-stage process: First, we evaluated VolumeNet architectures by
+comparing volume reconstruction quality (measured by PSNR) and
+the dimension of feature vectors for the best rendering time prediction accuracy. Second, we determined the optimal number of fullyconnected layers for PredNet through the evaluation of prediction
+performance. Below, we refer to architecture variants in a short-had
+form, such as 1283 F16 → 5C256, where:
+F is used to indicate the resolution of the input volume and the dimensionality of the volume feature vector. For instance, 1283 F16
+indicates a volume of dimension 1283 encoded into a feature vector of length 16.
+C depicts fully-connected layers. It is preceded by the number of
+layers, and followed by the number of channels of the first layer;
+the number of channels repeats for each following layer. For instance, 16C256 denotes 16 repeated fully-connected layers, with
+the input and output size of 256. Note that PredNet’s rest layers are not explicitly represented in this notation. Each layer’s
+dimension is halved with respect to its previous layer.
+→ denotes the transition between a feature vector and fullyconnected layers.
+Accordingly, 1283 F16 → 5C256 means that VolumeNet considers volumes with a resolution of 1283 and the output feature
+submitted to COMPUTER GRAPHICS Forum (4/2026).
+15 of 19
+vector’s dimension is 16. The corresponding PredNet has 5 fullyconnected layers as described above.
+(1) Volume resolution. We tested with volume resolutions 643
+and 1283 . Training VolumeNet on volumes with higher resolutions
+took more than 15 hours, which we consider to be impracticable in
+our target application scenarios. Note that all volumes for training
+and testing here were downsampled from the original full volumes,
+and that this downsampling only applies to VolumeNet input (i.e.,
+in order to obtain the feature vector describing the volume). The
+rendering time measurements used to train PredNet are captured
+with the original volume size. We experimented with five different
+feature vector sizes {16, 32, 64, 128, 256} and four C256 layers.
+For VolumeNet, increasing the input volume resolution consistently led to improved volume reconstruction quality. Interestingly,
+a higher input volume resolution to VolumeNet does not necessarily lead to a higher prediction accuracy. Tab. 4 indicates for CUDA
+raycaster and yt that ENTIRE showed its best performance with
+1283 . From Tab. 4, we observe that prediction accuracy is jointly
+influenced by both input volume resolution and feature vector dimensionality. When the input resolution is high but the feature vector dimension is low, the resulting feature vector may fail to capture
+sufficient structural information, thus reducing prediction accuracy.
+Moreover, higher input resolution significantly increases training
+cost—up to a 5× increase for 1283 volumes.
+(2) Feature vector dimension. From Tab. 4, we see that for
+the CUDA raycaster, ENTIRE’s best volume resolution and feature vector dimension combinations are 1283 F16. For yt, the best
+combinations is 643 F32.
+The final prediction accuracy decreased as F grew from 16 for
+CUDA-raycaster and 32 for yt. To further explore the feature vector dimension’s effect on prediction accuracy, we took the models
+from Tab. 4 which have the best performance and used them as the
+baseline model. If F in the baseline model is 16, then we decreased
+it until ENTIRE’s prediction accuracy showed a downward trend.
+The results are presented in Tab. 5. Note that, as the optimal configuration of volume resolution and feature vector dimension for
+yt has already been identified as 643 F32, we did not include further experiments for this setting in Tab. 5. Surprisingly, reducing
+feature vector dimensionality yielded higher prediction accuracy.
+We decreased feature dimension from 16 to 2, finding that each reduction improved performance. Although further reduction to F = 1
+was theoretically possible, a single scalar cannot adequately represent the complex structural variations across volumes, so we set
+F = 2 as the minimum viable dimension.
+Overall, the best input volume size and feature vector dimension for the CUDA raycaster are 1283 F4, 643 F16, and 1283 F16 for
+MAESTROeX, Nyx, and Castro. For yt, the best input volume size
+and feature vector dimension are 643 F32.
+When the feature vector dimension F becomes very high, it may
+include volume features that are negligible for relevance for rendering time prediction. This can introduce noise or shift the model’s
+focus away from other input features that are more predictive, such
+as camera pose or transfer function. Consequently, the model’s ability to generalize across varying rendering configurations may diminish, leading to reduced prediction accuracy. This suggests that
+Z. Yin, H. Gadirov, J. Kosinka & S.Frey / ENTIRE: Learning-based Volume Rendering Time Prediction
+16 of 19
+Figure 10: Examples for MAESTROeX (top row), Nyx (middle row), and Castro (bottom row).
+Table 4: PSNR and inference time (Tvol
+) of VolumeNet and Prediction RMSE values of PredNet. Best prediction results are highlighted in
+infer
+bold.
+F=16
+Res
+64x64x64
+128x128x128
+PSNR ↑/Tvol
+↓
+infer
+27.85/1.994
+27.28/9.733
+F=32
+RMSE ↓
+CUDA
+yt
+0.0080 3.879
+0.0071 3.853
+PSNR ↑/Tvol
+↓
+infer
+28.07/1.987
+27.42/5.769
+F=64
+RMSE ↓
+CUDA
+yt
+0.0081 3.823
+0.0080 3.868
+PSNR ↑/Tvol
+↓
+infer
+28.37/1.835
+27.62/5.786
+F=128
+RMSE ↓
+CUDA
+yt
+0.0083 3.885
+0.0078 3.931
+PSNR ↑/Tvol
+↓
+infer
+28.44/1.983
+27.74/6.410
+F=256
+RMSE ↓
+CUDA
+yt
+PSNR ↑
+RMSE ↓
+CUDA
+yt
+00086 3.911 28.40/1.880 0.0088 3.928
+0.0084 3.922 27.75/5.710 0.0086 3.890
+separated clusters for the three training datasets, with minor overlap between Castro and MAESTROeX. Nevertheless, Chameleon’s
+feature vector falls within the Castro cluster in the feature space and
+ENTIRE reconstructs Chameleon with a Castro-like appearance.
+As Chameleon was never seen during training and differs from the
+simulation datasets, VolumeNet maps it to the nearest cluster in the
+learned latent space, which happens to be Castro. This is consistent with the renderings of the two datasets (Fig. 13d), which share
+the most similarity among all datasets. This is expected behavior
+when the autoencoder encounters out-of-distribution samples, as it
+maps them to the nearest known representation in the learned feature space [GTEF21]. We leave a deeper investigation of this behavior to future work.
+(a) MAESTROeX
+(b) Nyx
+(c) Castro
+Figure 11: Example renderings with the CUDA raycaster (top) and
+yt (bottom) of datasets employed in this paper.
+it is not simply the quality of the reconstructed volume, but the
+distinctiveness and size of the extracted features that determine
+overall performance. We visualized the feature vectors of the pretraining datasets and Chameleon in Fig. 12. A qualitative comparison of VolumeNet is shown in Fig. 13. VolumeNet produces well-
+(3) PredNet architecture selection. We now aim to determine a
+good balance between the final prediction accuracy and PredNet’s
+inference speed by considering the number of C256 layers in PredNet. We started without C256 layers, and continued increasing the
+count until PredNet stopped improving (see Tab. 6). The overall
+trend is that as PredNet gets deeper, the prediction accuracy increases and reaches its peak. Then, the prediction accuracy of PredNet stopped increasing and started to decline due to overfitting.
+For the CUDA raycaster, the optimal ENTIRE architectures are
+1283 F2 → 12C256. For yt, the optimal ENTIRE architectures are
+submitted to COMPUTER GRAPHICS Forum (4/2026).
+Z. Yin, H. Gadirov, J. Kosinka & S.Frey / ENTIRE: Learning-based Volume Rendering Time Prediction
+17 of 19
+Table 6: Comparison of RMSE of different PredNet architectures
+pred
+and inference time Tinfer . Best predictions are in bold.
+MAESTROeX
+Nyx
+Castro
+Chameleon
+pred
+RMSE ↓/Tinfer ↓
+PredNet
+CUDA-raycaster
+yt
+0.0045/0.364
+0.0046/0.324
+0.0045/0.308
+0.0045/0.276
+0.0046/0.244
+0.0046/0.219
+0.0047/0.190
+0.0048/0.163
+0.0054/0.133
+0.0078/0.104
+3.917/0.244
+3.925/0.222
+3.949/0.190
+3.823/0.165
+3.956/0.133
+4.086/0.107
+18C256
+16C256
+14C256
+12C256
+10C256
+8C256
+6C256
+4C256
+2C256
+0C256
+·10−2
+Figure 12: Visualizations of feature vectors for all training datasets and
+Chameleon. Each point represents a volume, with opacity indicating the
+time step of the corresponding simulation member.
+1.2
+0.16
+RMSE
+1
+0.14
+0.8
+0.12
+0.6
+0.1
+0.4
+0.2
+0.4
+0.6
+γ
+0.8
+1.0
+0.2
+(a) No scattering
+(a) MAESTROeX
+(b) Nyx
+(c) Castro
+(d) Chameleon
+Figure 13: Comparison of GT (top row) and VolumeNet’s reconstruction (bottom row).
+643 F32 → 4C256. As expected, the model with the least number of
+layers has the fastest inference speed.
+Final model selection. We have two “optimal” models in total
+(one for each renderer). To select one model that performs well
+across all scenarios and datasets, we trained these two model architectures for both the CUDA raycaster and yt rendering scenarios on all datasets. Then, we compared the prediction accuracy of
+each model with the best performance by calculating relative deviations. The model with the lowest mean relative deviation was
+Table 5: Further investigation of feature vector dimension. We highlighted the best prediction results in bold.
+Model
+1283 F2
+1283 F4
+1283 F8
+1283 F16
+PSNR ↑/Tvol
+↓
+infer
+26.14/5.670
+26.82/5.700
+27.03/5.776
+27.27/9.733
+submitted to COMPUTER GRAPHICS Forum (4/2026).
+0.0049
+0.0051
+0.0070
+0.0071
+0.6
+γ
+0.8
+1.0
+(b) Single scattering
+Figure 14: RMSE evaluated with varying numbers of training samples. For each number of training samples, the experiment was conducted five times. The experiments demonstrated that the collected
+training samples are sufficient for training PredNet.
+selected as our final model. As shown in Tab. 7, the optimal model
+is 1283 F2 → 12C256.
+Overall, our model architecture selection shows that good performance can be achieved across a range of considered model configurations and scenarios.
+Table 7: Comparison of RMSE of different PredNet architectures
+pred
+and inference time Tinfer . They are separated by “/”. “⋄” indicates
+that the results were from the baseline model. RD denotes relative
+deviation from the best prediction and MRD is each model’s mean
+value of relative deviations. We highlighted the best prediction accuracy and MRD in bold.
+RMSE ↑
+CUDA-raycaster
+0.4
+pred
+Renderer
+RMSE ↓/Tinfer ↓/RD ↓
+1283 F2 → 12C256
+64F32 → 4C256
+CUDA-raycaster
+yt
+⋄0.0045/0.276/0%
+3.869/0.291/1.2%
+0.0079/0.163/74.7%
+⋄3.823/0.165/0%
+MRD
+0.6%
+37.4%
+18 of 19
+Z. Yin, H. Gadirov, J. Kosinka & S.Frey / ENTIRE: Learning-based Volume Rendering Time Prediction
+Median
+101
+Outliers
+101
+10 3
+100
+Nyx*
+Castro
+103
+10 4
+100
+10 7
+10 3
+10
+MAESTROeX Nyx
+In this section, we analyze the prediction error distriburion of
+ENTIRE. Fig. 15 presents both the rendering time distributions
+(top) and squared prediction error distributions (bottom) across all
+datasets for the CUDA raycaster and yt renderer. For the CUDA
+raycaster without single-scattering, all datasets exhibit tight, consistent distributions with minimal outliers, indicating stable and
+predictable GPU rendering performance. However, once singlescattering was applied (Nyx*), we observed significantly increased
+diversity in timing behavior, with a broader distribution and more
+frequent outliers extending to higher rendering times. This increased variability makes the prediction task considerably more
+challenging.
+For yt, all three datasets display similar rendering time distributions, which aligns with the comparable prediction errors.We
+observed that some outliers reach extremely high values (>400s),
+which can be attributed to our yt rendering being executed on
+a shared cluster where computational resources are occasionally
+overloaded due to concurrent jobs. We deliberately retain these outliers in our training data, as such performance variability represents
+realistic conditions when executing massive rendering tasks on supercomputers and HPC systems.
+The squared error distributions (bottom row) quantify ENTIRE’s
+prediction accuracy. For CUDA raycaster, MAESTROeX, Nyx, and
+Castro achieve low squared errors with tight distributions. Nyx with
+single-scattering exhibits elevated squared errors. While singlescattering shows numerically larger prediction errors due to more
+diverse timing distributions (similar to how CPU-based yt rendering shows wider distributions than GPU), ENTIRE maintains comparable prediction quality across all scenarios. The higher absolute RMSE for single-scattering reflects the increased variability in
+the underlying rendering times rather than degraded model performance. For yt, all three datasets show similar error distributions.
+Castro
+Nyx*
+Castro
+MAESTROeX
+Nyx
+Castro
+(b) yt
+Figure 15: Prediction error distribution. (a) CUDA raycaster. (b)
+yt. ∗ indicates single-scattering was applied. Note the logarithmic
+scales.
+6
+Time/s
+E. Prediction Error Distribution Analysis
+Nyx
+10 6
+(a) CUDA raycaster
+For the scenarios with and without single-scattering, we observed that the RMSE decreased more slowly once the samplig ratio reached 0.6. This suggests that increasing the number of training
+samples beyond this point yields diminishing returns in prediction
+accuracy, even in the more complex case where single-scattering
+is applied. Thus, we demonstrate that collecting 100 samples per
+volume is sufficient to effectively train PredNet.
+MAESTROeX
+10 1
+10
+Mean
+102
+10 1
+MAESTROeX Nyx
+Squared Error
+We examined the effect of training sample size on prediction accuracy and demonstrated that collecting 100 rendering time measurements per volume is sufficient for training ENTIRE. For this
+study, we used the Nyx dataset with the CUDA-raycaster renderer.
+ENTIRE was evaluated under two scenarios: (1) without singlescattering, and (2) with single-scattering applied. Their results are
+presented in Fig. 14. For all scenarios, ENTIRE was trained on a
+subset by selecting fewer samples from the full training set. The
+ratio of samples used in comparison to the full set (γ) ranged from
+10% to 90%. Accordingly, γ = 100% means the full set was employed for training PredNet. Each experiment was conducted five
+times, with randomly selecting samples from the full training set at
+the same number of training samples.
+Rendering Time (s)
+D. Study on the Number of Training Samples
+4
+G′ (δ)
+G(δ)
+(500, 0)
+(500, 1)
+(500, 2)
+G(δ)
+(1000, 0)
+(1000, 1)
+♦ Theoretical point
+(1000, 2)
+(1500, 0)
+(1500, 1)
+(1500, 2)
+ Interpolation point
+2
+0
+5
+10 15 20 25 30 n − 2 n − 1 n n + 1 n + 2 n + 3
+Ray step size/δref
+Ray step size/δref
+(a) Sampled curves
+(b) Linear interpolation
+Figure 16: Our proposed ray step size adaption method. (a) Sampled δ-tnorm curves. Time step and sample index pairs are denoted
+in the form of (time step, sample index) in the legend. (b) Linear
+interpolation on G(δ); G′ depicts the theoretical GT curve.
+Overall, the distribution of prediction errors aligns well with the
+rendering time behavior and the quantitative results.
+F. More Results for Use Case 1
+In Fig. 16a, we present all measured curves; the curve G that we use
+for final ray step size adaptation results from their median value at
+each ray step size. Notably, while the absolute rendering times vary,
+the overall trends remain consistent across all curves. In our implementation, we access G via a lookup table using linear interpolation
+(see Fig. 16b). Fig. 17 shows three example poses for acquiring the
+look up table.
+We developed an interactive widget for Use Case 1 based on the
+CUDA-raycaster. The widget comprises two primary components:
+a panel for transfer function adjustment and a rendering window
+that supports interactive volume exploration. The measured frame
+rate is displayed in real time for each rendered frame.
+Fig. 18 presents the user interface designed for interactive volume exploration while maintaining a target frame rate. The user can
+manipulate the volume in real time and adjust the transfer function
+using the slider in the control panel. The resulting frame rate is
+submitted to COMPUTER GRAPHICS Forum (4/2026).
+Z. Yin, H. Gadirov, J. Kosinka & S.Frey / ENTIRE: Learning-based Volume Rendering Time Prediction
+19 of 19
+including global illumination approaches—or parallel volume rendering (see the discussion below on load balancing).
+Figure 17: Three poses for obtaining G(·).
+Training Efficiency. In time series data such as used in this
+work, consecutive volumes often exhibit a high degree of similarity, leading to redundancy in our training dataset. To address this,
+we plan to explore time step selection algorithms as a promising
+direction (e.g., [FE17, PXvO∗ 19]).
+Architecture Improvements. We also aim to enhance VolumeNet’s feature representation by leveraging recent advances in
+autoencoder architectures. For instance, Kaiming et al. [HCX∗ 22]
+demonstrated the effectiveness of an asymmetric autoencoder with
+a reduced decoder, trained on randomly masked images. Investigating similar architectures could further refine the volume encoding
+process and improve the overall predictive accuracy of ENTIRE.
+Figure 18: Screenshot of the widget for use case 1. The panel for
+transfer function adjustment and rendering time prediction model
+selection is placed at the top-left. The measured frame rate is displayed the bottom of the panel. The rendered volume is shown at
+the center of the window.
+displayed at the bottom of the interface, providing immediate feedback on performance. A respective demonstration of user interaction with and without ray step size adjustment is included in the
+accompanying video.
+G. Further Discussion of Limitations and Future Work
+Here, we would like to extend upon our discussion of limitations
+and future work.
+Generalization. In future work, we aim to further investigate
+the implications of training a single combined model across these
+variations that is able to exploit commonalities across different variants. This could significantly facilitate the deployment of ENTIRE
+in practical scenarios such that no dedicated training is required but
+in a way the pre-trained weights can be used to achieve usable results already. While with our data feature vector we can account for
+different volume data, similar means would be necessary to represent the other influence factors in such a generic model. For example, for taking into account different compute hardware, we plan to
+capture relevant characteristics using micro-benchmarks; data resolution and ray step sizes could further be supplemented via additional model parameters. Note, however, that this spans an increasingly high-dimensional parameter space that needs to be sampled
+adequately for efficient training (see the training efficiency discussion below). Another, complementary effort regarding generalization involves investigating the effectiveness of ENTIRE in predicting timings from other kinds of (rendering) methods in the context of computer graphics—i.e., for mesh-based data, potentially
+submitted to COMPUTER GRAPHICS Forum (4/2026).

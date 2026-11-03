@@ -1,0 +1,318 @@
+A realtime 3D engine for Flutter. Contribute to bdero/flutter_scene development by creating an account on GitHub.
+
+[WIP] Add 2D-array and 3D data textures, sampler2DArray/sampler3D materials, and GPU limits by flowhorn · Pull Request #507 · bdero/flutter_scene · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+flowhorn
+commented
+Oct 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+WIP / experimental. A prototype that explores the texture items of #506 and measures them, shared as an example for discussion rather than for merging as is.
+Summary
+This implements the texture items of #506 that the rest depend on: 2D-array and 3D textures in the public API, sampler2DArray / sampler3D in .fmat, both texture types in the WebGL2 and WebGPU backends, data formats beyond RGBA8, and device limits. It also adds examples/volume_bench, which compares them with the slices-in-an-atlas workaround. It does not close the issue; the remaining items are listed below.
+Public API
+```
+final layers = Texture2DArray.fromLayers(
+  slices, // one Uint8List / Float32List per layer
+  width: 256,
+  height: 256,
+  format: gpu.PixelFormat.r8g8UNormInt,
+); // also .empty(...) + writeLayer(i, data), byteSize
+
+final volume = Texture3D.fromVoxels(voxels, width: 256, height: 256, depth: 256,
+    format: gpu.PixelFormat.r8UNormInt); // web only, see Texture3D.isSupported
+
+final lut = Texture2D.fromData(texels, 64, 1, format: gpu.PixelFormat.r32Float);
+
+material.parameters.setTexture('layers', layers.gpuTexture,
+    sampler: layers.sampledSampler);
+
+gpu.gpuLimits.maxTextureSize; // maxArrayLayers, max3DTextureSize, ...
+```
+```
+parameters: [
+  { type: sampler2DArray, name: layers, hint: default_black },
+  { type: sampler3D, name: density },
+]
+```
+Data formats: r8, rg8, rgba8, r32Float, rgba16Float, rgba32Float (dataTextureBytesPerTexel). TextureSampling.data (bilinear, no mips, clamped) is their default.
+gpu.dart exports PixelFormat, TextureType, GpuLimits, and gpuLimits.
+setTexture throws when a texture's type does not match the sampler's (Metal rejects that at draw time, and WebGL2 samples black). An unset array or 3D sampler binds a 1x1x1 placeholder of its own type.
+Backends
+Metal / Vulkan (Flutter GPU)
+WebGL2
+WebGPU
+2D array
+yes (already in Flutter GPU)
+new: TEXTURE_2D_ARRAY, texStorage3D, texSubImage3D, framebufferTextureLayer
+new: 2d-array views
+3D
+no: Flutter GPU has no 3D texture type, so Texture3D throws and a sampler3D material refuses to load
+new: TEXTURE_3D, TEXTURE_WRAP_R
+new: 3d textures and views
+gpuLimits
+Metal feature set table values on Apple platforms; sizes null elsewhere (Flutter GPU reports none)
+from the context
+from the device (now requested at the adapter's maximum)
+impellerc already compiles sampler2DArray and sampler3D for Metal, Vulkan, and GLSL ES 3.00, so the generated .fmat shaders needed only the new types and a vec3 keep-alive fetch.
+Also in this PR
+Fix: the WebGL2 backend never set UNPACK_ALIGNMENT, so r8 and rg8 textures whose rows are not a multiple of four bytes uploaded skewed (2D textures included). It is now 1, matching flutter_gpu's tightly packed uploads.
+timeGpuWork (shim-internal, used by the benchmark) times a batch of command buffers: EXT_disjoint_timer_query_webgl2 on WebGL2, onSubmittedWorkDone on WebGPU, and completion callbacks on Flutter GPU. It submits each buffer as the next one opens, because a Metal queue holds at most 64.
+Benchmark
+examples/volume_bench generates a synthetic 16-bit density field and times two workloads over a 1024 x 1024 target: an oblique reslice (one trilinear sample per pixel) and a ray-marched MIP (one sample per voxel step). It draws through the shim directly, so only the fetch path differs between variants:
+atlas: the workaround. Slices are tiled on RGBA8 pages of at most 4096², two 16-bit voxels per texel, and filtered by hand with eight texelFetch per sample.
+2D array in r8 (8-bit), rg8 (16-bit, high byte in red; filtering is linear, so the filtered pair still decodes to the filtered value), or r32Float: hardware bilinear within a layer, two reads blended across layers.
+3D in the same formats (web only): one hardware trilinear read.
+Each variant's image is read back and compared with the atlas's: every variant is within 1 gray level of it (mean difference 0.01 for rg8, about 0.27 for r8).
+Apple M1 Pro, macOS 27.0.1, Flutter 3.50.0-0.2.pre (beta), Chrome 156. The values are the median ms per full-screen draw over 7 samples.
+WebGL2 uses the GPU timer query, so it measures GPU time only.
+Metal uses wall time from submission to the last command buffer's completion, because Flutter GPU has no timestamp queries. An empty pass measures 0.058 ms that way.
+Reslice draws 16 additive draws per pass so it rises above that floor.
+256 x 256 x 256
+Backend
+Storage
+MiB
+Upload ms
+Reslice ms
+MIP ms
+Metal
+atlas
+32
+8
+0.163
+33.4
+Metal
+2D array r8
+16
+14
+0.024
+2.85
+Metal
+2D array rg8
+32
+17
+0.027
+3.68
+Metal
+2D array r32f
+64
+64
+0.027
+6.81
+WebGL2
+atlas
+32
+21
+0.157
+10.6
+WebGL2
+2D array r8
+16
+32
+0.026
+3.33
+WebGL2
+2D array rg8
+32
+15
+0.030
+3.51
+WebGL2
+2D array r32f
+64
+51
+0.026
+4.10
+WebGL2
+3D r8
+16
+12
+0.018
+2.26
+WebGL2
+3D rg8
+32
+17
+0.020
+2.23
+WebGL2
+3D r32f
+64
+25
+0.017
+3.17
+512 x 512 x 400
+Backend
+Storage
+MiB
+Upload ms
+Reslice ms
+MIP ms
+Metal
+atlas (4 pages)
+200
+74
+0.154
+87.8
+Metal
+2D array r8
+100
+38
+0.022
+11.6
+Metal
+2D array rg8
+200
+57
+0.024
+51.4
+Metal
+2D array r32f
+400
+137
+0.023
+121.2
+WebGL2
+atlas (4 pages)
+200
+114
+0.174
+35.6
+WebGL2
+2D array r8
+100
+69
+0.024
+12.7
+WebGL2
+2D array rg8
+200
+188
+0.027
+39.0
+WebGL2
+2D array r32f
+400
+327
+0.024
+77.7
+WebGL2
+3D r8
+100
+117
+0.015
+13.1
+WebGL2
+3D rg8
+200
+134
+0.019
+32.3
+WebGL2
+3D r32f
+400
+390
+0.018
+61.1
+What the numbers show:
+Hardware filtering makes the reslice 6x faster on Metal and 5 to 9x faster on WebGL2, at the same 16-bit precision and memory.
+At 256³ the MIP is 9x faster on Metal with a 16-bit 2D array, and 3x faster on WebGL2. A 3D texture saves another third on WebGL2.
+At 512 x 512 x 400 the MIP is bound by memory bandwidth, so bytes per voxel decide the time. 16-bit arrays are 1.7x faster than the atlas on Metal and about level on WebGL2. 8-bit arrays are 3 to 8x faster, and r32Float is the slowest. That is the case for a single-channel 16-bit format.
+The atlas MIP costs 33 ms on Metal through Flutter GPU but 10.6 ms on WebGL2 (ANGLE on the same GPU), from the same GLSL source. The array variants cost about the same on both backends. I did not investigate further; the atlas shader's integer division, modulo, and four-way sampler branch are the likely cause.
+Tests
+test/data_texture_gpu_test.dart (needs --enable-impeller --enable-flutter-gpu; compiles a sampler2DArray shader with impellerc at test time). Covers:
+r8, rg8, and r32Float layers sampled and read back, and layer rewrites.
+Size and format validation, and Texture2D.fromData.
+Runtime-compiled .fmat materials binding an array, refusing a 2D texture, and a sampler3D material refusing to load on native.
+gpuLimits on macOS.
+test/fmat_test.dart: parsing (including the lowercase aliases), emitted uniforms and keep-alive fetches, sidecar types, and the hint rule.
+test/gpu/data_texture_webgl_browser_test.dart (WebGL2, against an impellerc-built bundle embedded under test/fixtures/data_textures/): array layers, 3D linear filtering across depth slices, slice rewrites, and limits.
+test/gpu/webgpu/webgpu_data_texture_browser_test.dart: the same for WebGPU.
+Run locally:
+All of the above pass, as do the existing WebGPU browser tests and dart analyze packages examples (the editor's window API names aside, which CI patches on non-stable channels).
+flutter test --enable-impeller had no failures apart from one test that compiles every lit shader with impellerc. It timed out while another suite ran in parallel and passes on its own.
+With --enable-flutter-gpu, 24 tests fail identically on master here: the test runner cannot load the engine's shader bundle.
+Not in this PR (from #506)
+Needs Flutter GPU changes:
+r16 / r16Float formats.
+3D textures on native.
+GPU timestamps.
+Texture size limits on Vulkan and OpenGL ES.
+Region (sub-rectangle) writes; this PR writes whole layers and slices.
+Explicit disposal.
+Not attempted: .fmat #include, pipeline pre-warm, render scale, GPU time in render stats, compute, and depth/blend control for unlit materials.
+Not benchmarked: WebGPU (it is covered by the tests).
+🤖 Generated with Claude Code
+flowhorn
+and others
+added 2 commits
+October 24, 2026 13:31
+Add 2D-array and 3D data textures, sampler2DArray/sampler3D materials…
+…
+33ce8b3
+```
+…, and GPU limits
+
+- Texture2DArray.fromLayers / .empty and Texture3D.fromVoxels / .empty, plus
+  Texture2D.fromData for raw texels in r8, rg8, rgba8, r32Float, rgba16Float
+  and rgba32Float; layer and slice writes; byteSize.
+- .fmat parameters of type sampler2DArray and sampler3D: emitted as
+  top-level uniforms with vec3 keep-alive fetches, recorded in the sidecar,
+  bound through MaterialParameters.setTexture, which now checks the texture's
+  type and binds a placeholder of the matching type when unset.
+- GPU shim: TextureType.texture2DArray, createTexture(layerCount:) and
+  doesSupportTextureArrays on WebGL2 (TEXTURE_2D_ARRAY, texStorage3D,
+  texSubImage3D, framebufferTextureLayer) and WebGPU; createTexture3D on both
+  web backends (TEXTURE_3D / '3d'); native reports 3D as unsupported, since
+  Flutter GPU has no 3D texture type.
+- gpuLimits / GpuLimits: max texture size, array layers, 3D size, samplers
+  per stage, float32 filtering (WebGL2 and WebGPU from the device; Metal from
+  Apple's feature set tables; null elsewhere on native).
+- timeGpuWork: GPU timing of a batch of command buffers (WebGL2 timer
+  queries, WebGPU onSubmittedWorkDone, Flutter GPU completion callbacks).
+- WebGL2: set UNPACK_ALIGNMENT to 1, so r8/rg8 rows that are not a multiple
+  of four bytes upload correctly.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Add volume_bench: atlas against 2D-array and 3D data textures
+…
+6546193
+```
+Times a planar reslice and a ray-marched MIP of a synthetic 16-bit volume
+over a 1024x1024 target, with the volume in an RGBA8 slice atlas (manual
+trilinear), 2D arrays (r8, rg8, r32f) and 3D textures (web), and compares
+each image with the atlas's. Results for an M1 Pro on Metal and Chrome
+WebGL2 are in the README.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+flowhorn
+marked this pull request as draft
+October 24, 2026 11:49
+flowhorn
+changed the title
+Add 2D-array and 3D data textures, sampler2DArray/sampler3D materials, and GPU limits
+[WIP] Add 2D-array and 3D data textures, sampler2DArray/sampler3D materials, and GPU limits
+Oct 24, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

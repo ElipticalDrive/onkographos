@@ -1,0 +1,1140 @@
+Multi-View Mesh Reconstruction with Neural Deferred Shading
+Markus Worchel1,2 * Rodrigo Diaz1,3 * Weiwen Hu1
+Oliver Schreer1
+arXiv:2212.04386v1 [cs.CV] 8 Dec 2022
+1
+Fraunhofer HHI
+2
+Ingo Feldmann1
+Peter Eisert1,4
+TU Berlin 3 Queen Mary University of London 4 HU Berlin
+Abstract
+We propose an analysis-by-synthesis method for fast
+multi-view 3D reconstruction of opaque objects with arbitrary materials and illumination. State-of-the-art methods use both neural surface representations and neural rendering. While flexible, neural surface representations are
+a significant bottleneck in optimization runtime. Instead,
+we represent surfaces as triangle meshes and build a differentiable rendering pipeline around triangle rasterization
+and neural shading. The renderer is used in a gradient descent optimization where both a triangle mesh and a neural
+shader are jointly optimized to reproduce the multi-view images. We evaluate our method on a public 3D reconstruction dataset and show that it can match the reconstruction
+accuracy of traditional baselines and neural approaches
+while surpassing them in optimization runtime. Additionally, we investigate the shader and find that it learns an
+interpretable representation of appearance, enabling applications such as 3D material editing.
+1. Introduction
+The reconstruction of 3D objects based on multiple images is a long standing problem in computer vision. Traditionally, it has been approached by matching pixels between images, often based on photo-consistency constraints
+or learned features [21, 36]. More recently, analysis-bysynthesis, a technique built around the rendering operation,
+has re-emerged as a promising direction for reconstructing
+scenes with complex illumination, materials and geometry [45, 47, 48, 50, 52, 81]. At its core, parameters of a virtual scene are optimized so that its rendered appearance
+from the input camera views matches the camera images. If
+the reconstruction focuses on solid objects, these parameters usually include a representation of the object surface.
+In gradient descent-based optimizations, analysis-bysynthesis for surfaces is approached differently depending
+* Equal contribution
+Figure 1. We reconstruct an object from images by simultaneously deforming a triangle mesh and optimizing a neural shader,
+comparing the renderings to the input images.
+on the differentiable rendering operation at hand. Methods
+that physically model light transport typically build on prior
+information such as light and material models [46, 47]. It is
+common to represent object surfaces with triangle meshes
+and use differentiable path tracers (e.g., [40, 53, 83]) to
+jointly optimize the geometry and parameters like the light
+position or material diffuse albedo. Due to the inherent priors, these methods do not generalize to arbitrary scenes.
+Other methods instead model the rendering operation
+with neural networks [52,54,80], i.e., the interaction of material, geometry and light is partially or fully encoded in the
+network weights, without any explicit priors. Surfaces are
+often represented with implicit functions or more specifically implicit neural representations [44, 52, 55] where the
+indicator function is modeled by a multi-layer perceptron
+(MLP) or any other form of neural network and optimized
+with the rendering networks in an end-to-end fashion.
+While fully neural approaches are general, both in terms
+of geometry and appearance, current methods exhibit excessive runtime, making them impractical for domains that
+handle a large number of objects or multi-view video (e.g.
+of human performances [8, 20, 62, 67, 73]).
+We propose Neural Deferred Shading (NDS), a
+fast analysis-by-synthesis method that combines triangle
+meshes and neural rendering. The rendering pipeline is inspired by real-time graphics and implements a technique
+called deferred shading [10]: a triangle mesh is first rasterized and the pixels are then processed by a neural shader
+that models the interaction of geometry, material, and light.
+Since the rendering pipeline, including rasterization and
+shading, is differentiable, we can optimize the neural shader
+and the surface mesh with gradient descent (Figure 1). The
+explicit geometry representation enables fast convergence
+while the neural shader maintains the generality of the modeled appearance. Since triangle meshes are ubiquitously
+supported, our method can also be readily integrated with
+existing reconstruction and graphics pipelines. Our technical contributions include:
+• A fast analysis-by-synthesis pipeline based on triangle
+meshes and neural shading that handles arbitrary illumination and materials
+• A runtime decomposition of our method and a stateof-the-art neural approach
+• An analysis of the neural shader and the influence of
+its parameters
+2. Related Work
+2.1. Multi-View Mesh Reconstruction
+There is a vast body of work on image-based 3D reconstruction for different geometry representations (e.g. voxel
+grids, point clouds and triangle meshes). Here, we will only
+focus on methods that output meshes and refer to Seitz et
+al. [64] for an overview of other approaches.
+Photo-Consistency. During the past decades, multi-view
+methods have primarily exploited photo-consistency across
+images. Most of these approaches traverse different geometry representations like depth maps or point clouds before
+extracting (and further refining) a mesh, e.g. [2, 6, 18, 19,
+26, 68, 72, 74]. Some methods directly estimate a mesh by
+deforming or carving an initial mesh (e.g. the visual hull)
+while minimizing an energy based on cross-image agreement [15–17, 28, 84]. Recently, learned image features and
+neural shape priors have been used to drive the mesh deformation process [41,76]. Our method is similar to full meshbased approaches in the sense that we do not use intermediate geometry representations. However, we also do not
+impose strict assumptions on object appearance across images, which enables us to handle non-Lambertian surfaces
+and varying light conditions.
+Analysis-by-Synthesis. More than 20 years ago, Rockwood and Winget [59] proposed to deform a mesh so that
+synthesized images match the input images. Their early
+analysis-by-synthesis method builds on an objective function with similar terms as ours (and many modern approaches): shading, silhouette, and geometry regularization. Later works propose similar techniques (e.g. [11, 77,
+82]), yet all either assume known material or light parameters or restrict the parameter space with prior information,
+e.g. by assuming constant material across surfaces. In contrast, we optimize all parameters of the virtual scene and do
+not assume specific material or light models.
+Optimizing many parameters of a complex scene, including geometry, material and light, has only lately become
+practical, arguably with the advent of differentiable rendering. Differentiable path tracers have been used on top of triangle meshes to recover not only the geometry but also the
+(spatially varying) reflectance and light [46, 47], only from
+images. Related techniques can reconstruct transparent objects [48]. Similarly, we perform analysis-by-synthesis by
+optimizing a mesh with differentiable rendering. However, we use rasterization and do not simulate light transport. In our framework, the view-dependent appearance is
+learned by a neural shader, which neither depends on material or light models nor imposes constraints on the acquisition setup (e.g. co-located camera and light).
+Besides mesh reconstruction from real world images,
+analysis-by-synthesis with differentiable rendering has recently been used for image-based geometry processing [43]
+and appearance-driven mesh simplification [25]. Similar to
+us, these approaches deform a triangle mesh to reproduce
+target images, albeit their targets are fully synthetic.
+2.2. Neural Rendering and Reconstruction
+In this work, we understand neural rendering as training and using a neural network to synthesize color images
+from 2D input (e.g. semantic labels or UV coordinates),
+recently named “2D Neural Rendering” [70]. Neural rendering has been used as integral part of 3D reconstruction
+methods with neural scene representations.
+Introduced by Mildenhall et al. [50], neural radiance
+fields are volumetric scene representations used for 3D reconstruction, which are trained to output RGB values and
+volume densities at points along rays casted from different
+views. This idea has been adapted by a large number of recent works [12]. Although not strictly based on neural rendering, these methods are related to ours by their analysisby-synthesis characteristics. While the volumetric representation can handle transparent objects, most methods focus on view synthesis, so extracted surfaces lack geometric
+accuracy. Lassner et al. [38] propose a volumetric representation based on translucent spheres, which are shaded with
+neural rendering. Similar to us, they jointly optimize geom-
+Figure 2. Overview of our optimization procedure. We rasterize the triangle mesh and shade the results with a neural network to synthesize
+an image for each input camera view. The shader is updated based on the difference between rendered and input images, whereas the mesh
+vertices are also updated based on the silhouette and a geometric regularization term. We optimize using gradient descent.
+etry and appearance with a focus on speed, yet most details
+in their reconstruction are not present in the geometry but
+“hallucinated” by the neural renderer.
+Implicit surfaces encoded in neural networks are another popular geometry representation for 3D reconstruction, most notably occupancy networks [49, 52, 54, 57] and
+neural signed distance functions [32, 55, 75, 80]. Here, surfaces are implicitly defined by level sets. For 3D reconstruction, these geometry networks are commonly trained
+end-to-end with a neural renderer to synthesize scenes that
+reproduce the input images. We also use neural rendering
+to model the appearance, but represent geometry explicitly
+with triangle meshes, which can be efficiently optimized
+and readily integrated into existing graphics workflows.
+Similar to us, Thies et al. [71] present a deferred mesh
+renderer with neural shading. However, their convolutional
+neural network-based renderer can “hallunicate” colors at
+image regions that are not covered by geometry, as opposed
+to our MLP-based shader. Most notably, their method aims
+at view synthesis, therefore only the renderer weights are
+optimized, while the mesh vertices remain unchanged.
+Faithfully reproducing the images via rendering requires
+an estimate of the surface material and illumination if
+we simulate light transport, e.g. with a differentiable path
+tracer [40, 53]. However, because our focus is mainly on
+the geometry, we do not accurately estimate these quantities and thus also avoid the limitations imposed by material
+and light models. Instead, we propose a differentiable mesh
+renderer that implements a deferred shading pipeline and
+handles arbitrary materials and light settings. At its core, a
+differentiable rasterizer produces geometry maps per view,
+which are then processed by a learned shader. See Figure 2
+for an overview.
+3.1. Neural Deferred Shading
+256
+256
+256
+262
+128
+15
+3
+3
+PE
+RGB
+3. Method
+Given a set of images I = {I1 , · · · , In } from calibrated
+cameras and corresponding masks M = {M1 , · · · , Mn },
+we want to estimate the 3D surface of an object shown in the
+images. To this end, we follow an analysis-by-synthesis approach: we find a surface that reproduces the images when
+rendered from the camera views. In this work, the surface
+is represented by a triangle mesh G = (V, E, F), consisting
+of vertex positions V , a set of edges E, and a set of faces F.
+We solve the optimization problem using gradient descent
+and gradually deform a mesh based on an objective function
+that compares renderings of the mesh to the input images.
+Figure 3. Architecture of the neural shader. The position x is
+transformed by a positional encoding (PE) [69] and processed by
+3 fully-connected layers. The resulting feature vector is concatenated with the surface normal n and the view direction ω o and
+processed by the last two layers, yielding a color value. We use
+ReLU activations for the hidden layers and a sigmoid activation
+for the last layer.
+Our differentiable mesh renderer follows the structure of
+a deferred shading pipeline from real-time graphics: Given
+a camera i, the mesh is rasterized in a first pass, yielding a
+triangle index and barycentric coordinates per pixel. This
+information is used to interpolate both vertex positions and
+vertex normals, creating a geometry buffer (g-buffer) with
+per-pixel positions and normals. In a second pass, the gbuffer is processed by a learned shader
+f_\theta (\mathbf {x}, \mathbf {n}, \boldsymbol {\omega }_o) \in [0, 1]^3
+(1)
+with parameters θ. The shader returns an RGB color value
+for a given position x ∈ R3 , normal n ∈ R3 , and view di3
+rection ω o = ∥ccii −x
+−x∥ , with ci ∈ R the center of camera i.
+It encapsulates the appearance, i.e., interaction of geometry, material and light as well as the camera pixel response,
+and is optimized together with the geometry. We represent
+the shader as a shallow multi-layer perceptron, with θ as the
+parameters of the fully-connected layers (Figure 3). In this
+context, it has been shown that providing the normal and
+view direction with the position is necessary for disentangling the geometry from the appearance [80].
+In addition to a color image, the renderer also produces
+a mask that indicates if a pixel is covered by the mesh.
+3.2. Objective Function
+Finding an estimate of shape and appearance formally
+corresponds to solving the following minimization problem
+in our framework
+\argmin _{\vertices , \theta } L_\text {appearance}(\mesh , \theta ; \images , \masks ) + L_\text {geometry}(\mesh ),
+(2)
+where Lappearance compares the rendered appearance of the
+estimated surface to the camera images and Lgeometry regularizes the mesh to avoid undesired vertex configurations.
+3.2.1
+Appearance
+Naively moving the vertices unconstrained in each iteration
+quickly leads to undesirable meshes with degenerate triangles and self-intersections. We use a geometry regularization term that favors smooth solutions and is inspired by
+Luan et al. [47]:
+L_\text {geometry} = L_\text {laplacian} + L_\text {normal}.
+(6)
+Let V ∈ Rn×3 be a matrix with vertex positions as rows,
+the Laplacian term is defined as
+L_\text {laplacian} = \lambda _\text {laplacian} \frac {1}{n} \sum _{i=1}^{n} \Vert \boldsymbol {\delta }_i \Vert _2^2,
+(7)
+\boldsymbol {\delta }_i = (\laplacian {} V)_i \in \mathbb {R}^3
+(8)
+where
+(4)
+L_\text {normal} = \lambda _\text {normal} \frac {1}{\vert \bar {\faces } \vert } \sum _{(i, j) \in \bar {\faces }} (1 - \normal _i \cdot \normal _j)^2,
+ensures that the color images produced by the shader I˜i correspond to the input images and the silhouette term
+L_\text {silhouette} = \lambda _{\text {silhouette}} \frac {1}{\setcard {\masks }} \sum _{i = 1}^{\setcard {\masks }} \Vert \mask _i - \tilde {\mask }_i \Vert _1
+Geometry Regularization
+(3)
+where the shading term
+L_\text {shading} = \lambda _{\text {shading}} \frac {1}{\setcard {\images }} \sum _{i = 1}^{\setcard {\images }} \Vert \image _i - \tilde {\image }_i \Vert _1
+3.2.2
+are the differential coordinates [1] of vertex i, L ∈ Rn×n is
+the graph Laplacian of the mesh G and ∥·∥2 is the Euclidean
+norm. Intuitively, by minimizing the magnitude of the differential coordinates of a vertex, we minimize its distance
+to the average position of its neighbors.
+The normal consistency term is defined as
+The appearance objective is composed of two terms
+L_\text {appearance} = L_\text {shading} + L_\text {silhouette},
+color images I˜i are also functions of the neural shader (or
+more precisely its parameters θ).
+Separating the shading from the silhouette objective
+mainly has performance reasons: For a camera view i,
+the rasterization considers all pixels in the image, therefore computing the mask M̃i is cheap. However, shading
+is more involved and requires invoking the neural shader
+for all pixels after rasterization, which is an expensive operation. In practice, we only shade a subset of pixels inside
+the intersection of input and rendered masks while comparing the silhouette for all pixels. Additionally, we also limit
+the number of camera views considered in each gradient descent iteration.
+(5)
+ensures that the rendered masks M̃i match the input masks
+for all views. Here, ∥ · ∥1 denotes the mean absolute error of
+all pixels in an image. Formally, the masks M̃i are functions
+of the geometry G and the parameters of camera i, while the
+(9)
+where F̄ is the set of triangle pairs that share an edge and
+ni ∈ R3 is the normal of triangle i (under an arbitrary ordering of the triangles). It computes the cosine similarity
+between neighboring face normals and enforces additional
+smoothness.
+While some prior work (e.g., [43, 47]) uses El Topo [5]
+for robust mesh evolution, we found that our geometric regularization sufficiently avoids degenerate vertex configurations. Without El Topo, we are unable to handle topology
+changes but avoid its impact on runtime performance.
+mm
+10
+5
+0
+Reference
+C OLMAP
+IDR
+Ours (Initial)
+Ours
+C OLMAP
+IDR
+Ours
+Figure 4. Qualitative comparison on the DTU dataset. Left: Reference geometry and reconstruction results. Right: Point-to-mesh distance
+between the reference scan and the reconstructed mesh.
+3.3. Optimization
+Our optimization starts from an initial mesh that is computed from the masks and resembles a visual hull [39]. Alternatively, it can start from a custom mesh.
+Similar to prior work, we use a coarse-to-fine scheme for
+the geometry: Starting from a coarsely triangulated mesh,
+we progressively increase its resolution during optimization. Inspired by Nicolet et al. [51] we remesh the surface with the method of Botsch and Kobbelt [3], halving
+the average edge length multiple times at fixed iterations.
+After mesh upsampling, we also increase the weights of the
+regularization terms by 4 and decrease the gradient descent
+step size for the vertices by 25 %, which we empirically
+found helps to improve the smoothness for highly tesselated
+meshes.
+Since some quantities in geometry regularization (e.g.
+graph Laplacian) only depend on the connectivity of the
+mesh, we save time by precomputing them once after upsampling and reusing them in the iterations after.
+4. Experimental Results
+We implemented our method on top of the automatic differentiation framework PyTorch [56] and use the
+A DAM [33] optimizer for momentum-based gradient descent. Our differentiable rendering pipeline uses the highperformance primitives by Laine et al. [37]. In our experiments, we run 2000 gradient descent iterations and remesh
+after 500, 1000, and 1500 iterations. We randomly select one view per iteration to compute the appearance term
+and shade 75 % of mask pixels. The individual objective terms are weighted with λshading = 1, λsilhouette = 2,
+λlaplacian = 40, and λnormal = 0.1. All time measurements
+were taken on a Windows workstation with an Intel Xeon
+32×2.1 GHz CPU, 128 GB of RAM, and an NVIDIA Titan
+RTX GPU with 24 GB of VRAM.
+Table 1. Quantitative results for multi-view reconstruction of objects from the DTU dataset. Chamfer scores are in millimeters and
+the C OLMAP runtime is for the trim7 configuration.
+C OLMAP [60, 61]
+Scan
+IDR [80]
+NDS (Ours)
+trim7 (trim0)
+↓ Chamfer-L1
+↓ time [min]
+↓ Chamfer-L1
+↓ time [min]
+↓ Chamfer-L1
+↓ time [min]
+24
+37
+40
+55
+63
+65
+69
+83
+97
+105
+106
+110
+114
+118
+122
+0.45 (0.81)
+0.90 (2.03)
+0.36 (0.75)
+0.36 (1.20)
+0.90 (1.75)
+0.94 (1.55)
+0.53 (1.02)
+1.16 (3.03)
+1.08 (1.42)
+0.63 (1.96)
+0.48 (0.99)
+0.58 (1.33)
+0.31 (0.50)
+0.44 (0.78)
+0.43 (1.17)
+66.81
+81.19
+65.47
+64.71
+75.62
+62.62
+86.77
+77.96
+50.89
+51.59
+108.01
+85.87
+88.39
+105.75
+80.80
+1.58
+2.06
+0.75
+0.43
+1.06
+0.79
+0.68
+1.38
+1.17
+0.88
+0.63
+0.99
+0.37
+0.50
+0.52
+551.83
+566.13
+550.19
+565.27
+553.07
+568.41
+557.58
+745.18
+743.11
+742.31
+735.23
+752.94
+730.50
+748.60
+747.90
+4.24
+5.25
+1.30
+0.53
+2.47
+1.22
+1.35
+1.59
+2.77
+1.15
+1.02
+3.18
+0.62
+1.65
+0.91
+12.24
+7.56
+10.69
+7.54
+6.18
+9.95
+9.64
+4.76
+7.32
+7.00
+7.41
+6.68
+7.99
+6.77
+5.76
+mean
+0.64 (1.35)
+76.83
+0.92
+657.22
+1.95
+7.83
+4.1. 3D Reconstruction
+We demonstrate that our method can be used for multiview 3D reconstruction. Starting from a coarse visual hulllike mesh, it quickly converges to a reasonable estimate of
+the object surface. We test our method on the DTU multiview dataset [30] with the object selection and masks from
+previous work [52, 80]. We compare our results to two
+methods: (1) C OLMAP [60, 61], a traditional SfM pipeline
+that serves as a baseline, and (2) IDR [80], a state-of-the-art
+analysis-by-synthesis method that uses neural signed distance functions as geometry representation. By default, our
+C OLMAP results include trimming (trim7) and we indicate
+untrimmed results explicitly (trim0).
+Figure 4 shows qualitative results for two objects from
+the DTU dataset and Table 1 contains quantitative results
+for all objects. We used the official DTU evaluation script to
+generate the Chamfer-L1 scores and benchmarked all workflows for the time measurements (including data loading
+times). For IDR and our method we disabled any intermediate visualizations.
+Table 2. Average runtime of one gradient descent iteration of IDR
+and our method, decomposed hierarchically. Geometry rendering
+time excludes shading and corresponds to ray marching 2048 pixels for IDR and rasterizing to 1.9 million pixels in our case.
+IDR
+time [s]
+share
+time [s]
+share
+0.3577
+0.2099
+0.1472
+100 %
+58.7 %
+70.1 %
+0.1561
+0.0034
+–
+100 %
+2.2 %
+↰
+↰
+Gradient descent iteration
+Geometry rendering
+SDF evaluation
+NDS (Ours)
+↰
+↰
+↰
+In absolute terms (millimeters), the reconstruction accuracy of our method is close to both the traditional baseline and the state-of-the-art neural method. Although
+C OLMAP reconstructs many surfaces accurately, only IDR
+and our method properly handle regions dominated by
+view-dependent effects (e.g. non-Lambertian materials) and
+produce watertight surfaces that can remain untrimmed.
+When C OLMAP is used without trimming, the reconstruction becomes more complete but it is less accurate than ours
+for some objects. Our method is limited by the topology and
+genus of the initial mesh and therefore cannot capture some
+geometric details that can be recovered with more flexible
+surface representations. We also observe that our surfaces
+are often not as smooth as IDR’s and concave regions are
+not as prominent. The latter is potentially related to the
+mesh stiffness induced by our geometry regularization.
+On the other hand, our method is significantly faster:
+roughly 10 times faster than C OLMAP and 80 times faster
+than IDR in the default configuration. Since the number of
+iterations is a hyper parameter for IDR and our method (and
+also has different semantics), we show equal time results for
+a fair comparison of both (Figure 5). Our method quickly
+converges to a detailed estimate, while IDR only recovers a
+rough shape in the same time. Even after 50 minutes, IDR
+still lacks details present in our result.
+ating the network, thus switching to a more shallow neural
+representation could be a way to reduce the runtime. The remaining time is spent on operations like root finding, which
+could be accelerated by a more optimized implementation.
+However, the runtime difference in gradient descent iterations cannot be the sole reason for our fast convergence.
+Even though iterations in IDR require twice the time, it requires more than twice the total time to show the same level
+of detail as our method (see Figure 5).
+In our method, we noticed that after mesh upsampling
+finer details quickly appear in the geometry. Thus, our fast
+convergence time might partially be related to the fact that
+we can locally increase the geometric freedom with a finer
+tessellation, while IDR and similar methods have no explicit control over geometric resolution.
+Ours
+IDR
+4.2. Mesh Refinement
+1 min
+10 min
+50 min
+Figure 5. Equal time reconstruction. We consider our result converged after 10 minutes. Even after 50 minutes, IDR lacks details
+that are present in our reconstruction (e.g., feathers and eyes).
+Since IDR and our method have similar architectures,
+i.e., both perform analysis-by-synthesis and use gradient
+descent to jointly optimize shape and appearance, we can
+meaningfully compare the runtime in more detail. Table 2
+shows the runtime of one gradient descent iteration (see the
+supplementary material for a full decomposition of our runtime).
+An iteration in IDR takes roughly twice the time as in
+our method, with the majority of time spent for ray marching the implicit function. In contrast, the time taken for rasterizing the triangle mesh is negligible in our method. Most
+of the ray marching time in IDR can be attributed to evalu-
+Images
+Initial
+Refined
+Figure 6. Refining meshes from an established multi-view reconstruction pipeline. Four of the 32 images are shown.
+Many reconstruction workflows based on photoconsistency are very mature, established and deliver highquality results. Yet, they can fail for challenging materials or different light conditions across images, producing smoothed outputs as a compromise to errors in photoconsistent matching.
+Since our method can start from arbitrary triangle
+meshes, we propose the refinement of outputs from traditional pipelines as one possible application. Our method
+then acts as a post-processing step, improving the given geometry or parts of it with global multi-view constraints. We
+demonstrate this application on a human body dataset that
+contains 360° images of human subjects captured by 32
+cameras and meshes from a traditional 3D reconstruction
+pipeline [62].
+Figure 6 shows refinement results for the heads of two
+persons. We use 1000 iterations and upsample the mesh
+once. Since the initial mesh is already a good estimate of the
+true surface but the neural shader is randomly initialized, we
+rebalance the gradient descent step sizes so that the shader
+progresses faster than the geometry. We are able to recover
+details that are lost in the initial reconstruction. Very fine
+details like the facial hair are still challenging and lead to
+slight noise in our refined meshes.
+4.3. Analysis of the Neural Shader
+Original
+Rendered
+Rendered
+Rendered
+(fixed mesh)
+(new view)
+Figure 7. View synthesis for an input view and a new view. By
+fixing the mesh after reconstruction and continuing shader optimization, we can further improve the view synthesis results.
+Although recovering geometry is the main focus of our
+work, investigating the neural shader after optimization can
+potentially give insights into the reconstruction procedure
+and the information that is encoded in the network.
+Figure 7 shows that rendering with a trained shader can
+be used for basic view synthesis, producing reasonable results for input and novel views. Thus, the shader seems to
+learn a meaningful representation of appearance, disentangled from the geometry. If desired, the view synthesis quality can be further improved by continuing the optimization
+of the shader while keeping the mesh fixed.
+The neural shader is a composite of two functions (Figure 3)
+f_\theta (\mathbf {x}, \mathbf {n}, \boldsymbol {\omega }_o) = c\big (h(\mathbf {x}), \mathbf {n}, \boldsymbol {\omega }_o\big ),
+(10)
+where h : R3 → R256 transforms points in 3D space to
+positional features and c : (R256 × R3 × R3 ) → [0, 1]3
+then extracts view-dependent colors. Both functions are dependent on parameters θh and θc , respectively. To further
+decompose the behavior of the shader, we perform a principle component analysis of the positional features from h
+Image
+Feature Projection
+Material Edit
+Figure 8. A principle component analysis of the shader’s positional features reveals a connection to materials. We show the projection to the two largest principle components. Replacing features
+in the positional latent space before computing the view-dependent
+color enables simple material editing. The feature vector at the yellow square (pants material) determines regions that are replaced
+with the feature vector at the green square (beard material).
+and project them to the two dominant components (Figure 8). The shader naturally learns similar positional features for regions with similar material, despite their distance
+in space. Variations in illumination also seem to be encoded
+in the positional features because shadowed regions have
+slightly different features than exposed regions of the same
+material.
+We investigate the behavior of the view-dependent part
+by replacing feature vectors in the positional latent space
+and then extracting colors with the function c. More specifically, we replace all features representing one material by
+a feature representing another material (Figure 8). The results suggest that the function c reasonably generalizes to
+view and normal directions not encountered in combination
+with the replacement feature, which in this example leads to
+geometric features of the mesh being still perceivable and
+thus allows simple material editing.
+4.4. Ablation Studies
+We experiment with different encodings and network
+sizes for the position dependent part of the neural shader. In
+Figure 9, we show the different results using positional encoding (PE) [69], Gaussian Fourier features (GFF) [69], sinusoidal activations (SIREN) [66] and a standard MLP with
+ReLU activations.
+While some of these methods can generate acceptable
+renderings, they do not necessarily guarantee a sharper geometry. In particular, we observe that although the image
+rendered with SIREN or GFF has sharp features, the geometric detail of the mesh is less adequate. A possible
+explanation is that the network might quickly overfit and
+compensate for geometrical inaccuracies only in the appearance. Conversely, finding the correct direction along which
+to move the mesh vertices might be more difficult without
+positional encoding. In our experiments, we have obtained
+accurate reconstructions using positional encoding with 4
+PE4 (Ours)
+PE10
+GFF
+ReLU
+SIREN
+Figure 9. Ablation of different encodings for the positional features and activation functions. Note that the ears of the owl are only present
+in few views and not part of the reference geometry, thus are not considered in the comparison. For ReLU and SIREN we use no encoding.
+octaves, as opposed to the recommended 10 [50].
+We also examined the effect of different network sizes on
+the geometry and appearance (see supplementary). While
+there are no dramatic differences between the results, we
+observe that configurations with less than 2 layers or with
+more than 512 units per layer result in fewer geometric details. Additional ablation studies for the initial geometry
+and the objective function can also be found in the supplementary.
+5. Concluding Remarks
+We have presented a fast analysis-by-synthesis pipeline
+for 3D surface reconstruction from multiple images. Our
+method jointly optimizes a triangle mesh and a neural
+shader as representations of geometry and appearance to
+reproduce the input images, thereby combining the speed
+of triangle mesh optimization with the generality of neural
+rendering.
+Our approach can match state-of-the-art methods in reconstruction accuracy, yet is significantly faster with average runtimes below 10 minutes.
+Using triangle meshes as geometry representation makes
+our method fully compatible with many traditional reconstruction workflows. Thus, instead of replacing the complete reconstruction architecture, our method can be integrated as a part, e.g., a refinement step.
+Finally, a preliminary analysis of the neural shader suggests that it decomposes appearance in a natural way, which
+could help our understanding of neural rendering and enable simple ways for altering the scene appearance (e.g. for
+material editing).
+Limitations and Future Work. While triangle meshes
+are a simple and fast representation, using them robustly
+in 3D reconstruction with differentiable rendering is still
+challenging. We currently avoid undesired mesh configurations (e.g. self-intersections) with carefully weighted geometry regularizers that steer the optimization towards smooth
+solutions. Finding an appropriate balance between smoothness and rendering terms is not always straightforward and
+can require fine-tuning for custom data. In this regard,
+we are excited about integrating very recent work that proposes gradient preconditioning instead of geometry regularization [51].
+Topology changes are a challenge for most mesh-based
+methods, including ours, and computationally expensive
+to handle (e.g. with El Topo [5]). Likewise, adaptive reconstruction-aware subdivision would be preferable
+over standard remeshing, potentially including learned priors [42]. Instead of moving vertices directly, a (partially pretrained) neural network could drive the deformation [22,23], making it more efficient, detail-aware, and less
+dependent on geometric regularization.
+While neural shading is a powerful component of our
+system, allowing us to handle non-Lambertian surfaces and
+complex illumination, it is also a major obstruction for interpretability. The effect of changes to the network architecture can only be evaluated with careful experiments and
+often the black box shader behaves in non-intuitive ways.
+We experimentally provided preliminary insights but also
+think that a more thorough analysis is needed. Alternatively, physical light transport models could be combined
+with more specialized neural components (e.g. irradiance
+or material) to isolate their effects. In this context, pretraining components to include learned priors also seems
+like a promising direction.
+Although the shader can handle arbitrary material and
+light in theory, this claim needs more investigation. A possible path is exhaustive experiments with artificial scenes,
+starting with the simplest cases (how well does it handle a
+perfectly Lambertian surface?).
+Acknowledgements
+This work is part of the INVICTUS project that has received funding from the European Union’s Horizon 2020
+research and innovation programme under grant agreement
+No 952147.
+References
+[1] Marc Alexa. Differential coordinates for local mesh morphing and deformation. The Visual Computer, 19(2):105–114,
+2003. 4
+[2] David C. Blumenthal-Barby and Peter Eisert.
+Highresolution depth for binocular image-based modeling. Comput. Graph., 39:89–100, Apr. 2014. 2
+[3] Mario Botsch and Leif Kobbelt. A remeshing approach to
+multiresolution modeling. In Proceedings of the 2004 Eurographics/ACM SIGGRAPH Symposium on Geometry Processing, SGP ’04, page 185–192, New York, NY, USA,
+2004. Association for Computing Machinery. 5
+[4] G. Bradski. The OpenCV Library. Dr. Dobb’s Journal of
+Software Tools, 2000. 13
+[5] Tyson Brochu and Robert Bridson. Robust topological operations for dynamic explicit surfaces. SIAM Journal on Scientific Computing, 31(4):2472–2493, 2009. 4, 8
+[6] Neill D. F. Campbell, George Vogiatzis, Carlos Hernández,
+and Roberto Cipolla. Using multiple hypotheses to improve depth-maps for multi-view stereo. In David Forsyth,
+Philip Torr, and Andrew Zisserman, editors, Computer Vision – ECCV 2008, pages 766–779, Berlin, Heidelberg,
+2008. Springer Berlin Heidelberg. 2
+[7] Alex Clark et al. Pillow (pil fork). https://github.
+com/python-pillow/Pillow, 2021. 13
+[8] Alvaro Collet, Ming Chuang, Pat Sweeney, Don Gillett, Dennis Evseev, David Calabrese, Hugues Hoppe, Adam Kirk,
+and Steve Sullivan. High-quality streamable free-viewpoint
+video. ACM Trans. Graph., 34(4), July 2015. 2
+[9] Michael Dawson-Haggerty et al. Trimesh. https://
+github.com/mikedh/trimesh. 13
+[10] Michael Deering, Stephanie Winner, Bic Schediwy, Chris
+Duffy, and Neil Hunt. The triangle processor and normal
+vector shader: A vlsi system for high performance graphics.
+In Proceedings of the 15th Annual Conference on Computer
+Graphics and Interactive Techniques, SIGGRAPH ’88, page
+21–30, New York, NY, USA, 1988. Association for Computing Machinery. 2
+[11] Amael Delaunoy, Emmanuel Prados, Pau Gargallo I Piracés,
+Jean-Philippe Pons, and Peter Sturm. Minimizing the
+Multi-view Stereo Reprojection Error for Triangular Surface Meshes. In Mark Everingham, Chris J. Needham, and
+Roberto Fraile, editors, BMVC 2008 - British Machine Vision Conference, pages 1–10, Leeds, United Kingdom, Sept.
+2008. BMVA. 2
+[12] Frank Dellaert and Yen-Chen Lin. Neural volume rendering:
+Nerf and beyond. CoRR, abs/2101.05204, 2021. 2
+[13] Szabolcs Dombi. Moderngl, high performance python
+bindings for opengl 3.3+. https://github.com/
+moderngl/moderngl. 13
+[14] DTU.
+MVS Data Set – 2014.
+https : / /
+roboimagedata . compute . dtu . dk / ?page _ id =
+36. 13
+[15] C.H. Esteban and F. Schmitt. Silhouette and stereo fusion
+for 3d object modeling. In Fourth International Conference
+on 3-D Digital Imaging and Modeling, 2003. 3DIM 2003.
+Proceedings., pages 46–53, 2003. 2
+[16] Pascal Fua and Yvan G Leclerc. Object-centered surface
+reconstruction: Combining multi-image stereo and shading. International Journal of Computer Vision, 16(1):35–56,
+1995. 2
+[17] Yasutaka Furukawa and Jean Ponce. Carved visual hulls for
+image-based modeling. volume 81, pages 564–577, 07 2006.
+2
+[18] Yasutaka Furukawa and Jean Ponce. Accurate, dense, and
+robust multiview stereopsis. IEEE Transactions on Pattern
+Analysis and Machine Intelligence, 32(8):1362–1376, 2010.
+2
+[19] Silvano Galliani, Katrin Lasinger, and Konrad Schindler.
+Massively parallel multiview stereopsis by surface normal
+diffusion. In 2015 IEEE International Conference on Computer Vision (ICCV), pages 873–881, 2015. 2
+[20] Kaiwen Guo, Peter Lincoln, Philip Davidson, Jay Busch,
+Xueming Yu, Matt Whalen, Geoff Harvey, Sergio OrtsEscolano, Rohit Pandey, Jason Dourgarian, Danhang Tang,
+Anastasia Tkach, Adarsh Kowdle, Emily Cooper, Mingsong Dou, Sean Fanello, Graham Fyffe, Christoph Rhemann,
+Jonathan Taylor, Paul Debevec, and Shahram Izadi. The relightables: Volumetric performance capture of humans with
+realistic relighting. ACM Trans. Graph., 38(6), Nov. 2019. 2
+[21] X. Han, H. Laga, and M. Bennamoun. Image-based 3d object
+reconstruction: State-of-the-art and trends in the deep learning era. IEEE Transactions on Pattern Analysis and Machine
+Intelligence, 43(05):1578–1604, may 2021. 1
+[22] Rana Hanocka, Amir Hertz, Noa Fish, Raja Giryes, Shachar
+Fleishman, and Daniel Cohen-Or. Meshcnn: A network with
+an edge. ACM Trans. Graph., 38(4), July 2019. 8
+[23] Rana Hanocka, Gal Metzer, Raja Giryes, and Daniel CohenOr. Point2mesh: A self-prior for deformable meshes. ACM
+Trans. Graph., 39(4), July 2020. 8
+[24] Charles R. Harris, K. Jarrod Millman, Stéfan J. van der Walt,
+Ralf Gommers, Pauli Virtanen, David Cournapeau, Eric
+Wieser, Julian Taylor, Sebastian Berg, Nathaniel J. Smith,
+Robert Kern, Matti Picus, Stephan Hoyer, Marten H. van
+Kerkwijk, Matthew Brett, Allan Haldane, Jaime Fernández
+del Rı́o, Mark Wiebe, Pearu Peterson, Pierre GérardMarchant, Kevin Sheppard, Tyler Reddy, Warren Weckesser,
+Hameer Abbasi, Christoph Gohlke, and Travis E. Oliphant.
+Array programming with NumPy. Nature, 585(7825):357–
+362, Sept. 2020. 13
+[25] Jon Hasselgren, Jacob Munkberg, Jaakko Lehtinen, Miika
+Aittala, and Samuli Laine. Appearance-Driven Automatic
+3D Model Simplification. In Adrien Bousseau and Morgan
+McGuire, editors, Eurographics Symposium on Rendering DL-only Track. The Eurographics Association, 2021. 2
+[26] Vu Hoang Hiep, Renaud Keriven, Patrick Labatut, and JeanPhilippe Pons. Towards high-resolution large-scale multiview stereo. In 2009 IEEE Conference on Computer Vision
+and Pattern Recognition, pages 1430–1437, 2009. 2
+[27] J. D. Hunter. Matplotlib: A 2d graphics environment. Computing in Science & Engineering, 9(3):90–95, 2007. 13
+[28] Isidro and Sclaroff. Stochastic refinement of the visual
+hull to satisfy photometric and silhouette consistency constraints. In Proceedings Ninth IEEE International Conference on Computer Vision, pages 1335–1342 vol.2, 2003. 2
+[29] Alec Jacobson, Daniele Panozzo, et al. libigl: A simple
+C++ geometry processing library. https://libigl.
+github.io/, 2018. 13
+[30] Rasmus Jensen, Anders Dahl, George Vogiatzis, Engil Tola,
+and Henrik Aanæs. Large scale multi-view stereopsis evaluation. In 2014 IEEE Conference on Computer Vision and
+Pattern Recognition, pages 406–413. IEEE, 2014. 5
+[31] Justin Johnson, Nikhila Ravi, Jeremy Reizenstein, David
+Novotny, Shubham Tulsiani, Christoph Lassner, and Steve
+Branson. Accelerating 3d deep learning with pytorch3d. In
+SIGGRAPH Asia 2020 Courses, SA ’20, New York, NY,
+USA, 2020. Association for Computing Machinery. 13
+[32] Petr Kellnhofer, Lars Jebe, Andrew Jones, Ryan Spicer, Kari
+Pulli, and Gordon Wetzstein. Neural lumigraph rendering.
+In CVPR, 2021. 3
+[33] Diederik P. Kingma and Jimmy Ba. Adam: A method for
+stochastic optimization. In Yoshua Bengio and Yann LeCun,
+editors, 3rd International Conference on Learning Representations, ICLR 2015, San Diego, CA, USA, May 7-9, 2015,
+Conference Track Proceedings, 2015. 5
+[34] Almar Klein et al. Imageio. https://github.com/
+imageio/imageio. 13
+[35] Holger Krekel, Bruno Oliveira, Ronny Pfannschmidt, Floris
+Bruynooghe, Brianna Laugher, and Florian Bruhin. pytest.
+https : / / github . com / pytest - dev / pytest,
+2004. 13
+[36] Hamid Laga, Laurent Valentin Jospin, F. Boussaid, and Mohammed Bennamoun. A survey on deep learning techniques
+for stereo-based depth estimation. IEEE Transactions on
+Pattern Analysis and Machine Intelligence, page 1–1, 2020.
+1
+[37] Samuli Laine, Janne Hellsten, Tero Karras, Yeongho Seol,
+Jaakko Lehtinen, and Timo Aila. Modular primitives for
+high-performance differentiable rendering. ACM Transactions on Graphics, 39(6), 2020. 5, 13
+[38] Christoph Lassner and Michael Zollhöfer. Pulsar: Efficient
+sphere-based neural rendering. arXiv:2004.07484, 2020. 2
+[39] A. Laurentini. The visual hull concept for silhouette-based
+image understanding. IEEE Transactions on Pattern Analysis and Machine Intelligence, 16(2):150–162, 1994. 5
+[40] Tzu-Mao Li, Miika Aittala, Frédo Durand, and Jaakko Lehtinen. Differentiable monte carlo ray tracing through edge
+sampling. ACM Trans. Graph. (Proc. SIGGRAPH Asia),
+37(6):222:1–222:11, 2018. 1, 3
+[41] Chen-Hsuan Lin, Oliver Wang, Bryan C. Russell, Eli Shechtman, Vladimir G. Kim, Matthew Fisher, and Simon Lucey.
+Photometric mesh optimization for video-aligned 3d object
+reconstruction. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR), June
+2019. 2
+[42] Hsueh-Ti Derek Liu, Vladimir G. Kim, Siddhartha Chaudhuri, Noam Aigerman, and Alec Jacobson. Neural subdivision. ACM Trans. Graph., 39(4), July 2020. 8
+[43] Hsueh-Ti Derek Liu, Michael Tao, and Alec Jacobson. Paparazzi: Surface editing by way of multi-view image processing. ACM Transactions on Graphics, 2018. 2, 4
+[44] Shichen Liu, Shunsuke Saito, Weikai Chen, and Hao Li.
+Learning to infer implicit surfaces without 3d supervision.
+In Hanna M. Wallach, Hugo Larochelle, Alina Beygelzimer,
+Florence d’Alché-Buc, Emily B. Fox, and Roman Garnett,
+editors, Advances in Neural Information Processing Systems
+32: Annual Conference on Neural Information Processing
+Systems 2019, NeurIPS 2019, December 8-14, 2019, Vancouver, BC, Canada, pages 8293–8304, 2019. 1
+[45] Stephen Lombardi, Tomas Simon, Jason Saragih, Gabriel
+Schwartz, Andreas Lehrmann, and Yaser Sheikh. Neural volumes: Learning dynamic renderable volumes from images.
+ACM Trans. Graph., 38(4):65:1–65:14, July 2019. 1
+[46] Guillaume Loubet, Nicolas Holzschuch, and Wenzel Jakob.
+Reparameterizing discontinuous integrands for differentiable
+rendering. ACM Trans. Graph., 38(6), Nov. 2019. 1, 2
+[47] Fujun Luan, Shuang Zhao, Kavita Bala, and Zhao Dong.
+Unified Shape and SVBRDF Recovery using Differentiable
+Monte Carlo Rendering. Computer Graphics Forum, 2021.
+1, 2, 4
+[48] Jiahui Lyu, Bojian Wu, Dani Lischinski, Daniel CohenOr, and Hui Huang. Differentiable refraction-tracing for
+mesh reconstruction of transparent objects. ACM Transactions on Graphics (Proceedings of SIGGRAPH ASIA 2020),
+39(6):195:1–195:13, 2020. 1, 2
+[49] Lars Mescheder, Michael Oechsle, Michael Niemeyer, Sebastian Nowozin, and Andreas Geiger. Occupancy networks:
+Learning 3d reconstruction in function space. In Proceedings IEEE Conf. on Computer Vision and Pattern Recognition (CVPR), 2019. 3
+[50] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik,
+Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. In ECCV, 2020. 1, 2, 8, 13
+[51] Baptiste Nicolet, Alec Jacobson, and Wenzel Jakob. Large
+steps in inverse rendering of geometry. ACM SIGGRAPH
+Asia 2021, 2021. 5, 8
+[52] Michael Niemeyer, Lars Mescheder, Michael Oechsle, and
+Andreas Geiger. Differentiable volumetric rendering: Learning implicit 3d representations without 3d supervision. In
+Proceedings IEEE Conf. on Computer Vision and Pattern
+Recognition (CVPR), 2020. 1, 3, 5, 13
+[53] Merlin Nimier-David, Delio Vicini, Tizian Zeltner, and Wenzel Jakob. Mitsuba 2: A retargetable forward and inverse
+renderer. ACM Trans. Graph., 38(6), Nov. 2019. 1, 3
+[54] Michael Oechsle, Songyou Peng, and Andreas Geiger.
+Unisurf: Unifying neural implicit surfaces and radiance
+fields for multi-view reconstruction. In International Conference on Computer Vision (ICCV), 2021. 1, 3
+[55] Jeong Joon Park, Peter Florence, Julian Straub, Richard
+Newcombe, and Steven Lovegrove. Deepsdf: Learning continuous signed distance functions for shape representation.
+In The IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR), June 2019. 1, 3
+[56] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer,
+James Bradbury, Gregory Chanan, Trevor Killeen, Zeming
+Lin, Natalia Gimelshein, Luca Antiga, Alban Desmaison,
+Andreas Kopf, Edward Yang, Zachary DeVito, Martin Raison, Alykhan Tejani, Sasank Chilamkurthy, Benoit Steiner,
+Lu Fang, Junjie Bai, and Soumith Chintala. Pytorch: An imperative style, high-performance deep learning library. In H.
+Wallach, H. Larochelle, A. Beygelzimer, F. d'Alché-Buc, E.
+Fox, and R. Garnett, editors, Advances in Neural Information Processing Systems 32, pages 8024–8035. Curran Associates, Inc., 2019. 5, 13
+[57] Songyou Peng, Michael Niemeyer, Lars Mescheder, Marc
+Pollefeys, and Andreas Geiger. Convolutional occupancy
+networks. In Computer Vision–ECCV 2020: 16th European
+Conference, Glasgow, UK, August 23–28, 2020, Proceedings, Part III 16, pages 523–540. Springer, 2020. 3
+[58] Nikhila Ravi, Jeremy Reizenstein, David Novotny, Taylor Gordon, Wan-Yen Lo, Justin Johnson, and Georgia
+Gkioxari. Accelerating 3d deep learning with pytorch3d.
+arXiv:2007.08501, 2020. 13
+[59] Alyn P Rockwood and Jim Winget. Three-dimensional
+object reconstruction from two-dimensional images.
+Computer-Aided Design, 29(4):279–285, 1997. Reverse
+Engineering of Geometric Models. 2
+[60] Johannes Lutz Schönberger and Jan-Michael Frahm.
+Structure-from-motion revisited. In Conference on Computer Vision and Pattern Recognition (CVPR), 2016. 5, 13
+[61] Johannes Lutz Schönberger, Enliang Zheng, Marc Pollefeys,
+and Jan-Michael Frahm. Pixelwise view selection for unstructured multi-view stereo. In European Conference on
+Computer Vision (ECCV), 2016. 5, 13
+[62] Oliver Schreer, Ingo Feldmann, Sylvain Renault, Marcus
+Zepp, Markus Worchel, Peter Eisert, and Peter Kauff. Capture and 3d video processing of volumetric video. In 2019
+IEEE International Conference on Image Processing (ICIP),
+pages 4310–4314, 2019. 2, 7, 13
+[63] Johannes Lutz Schönberger et al.
+COLMAP Release
+3.6. https : / / github . com / colmap / colmap /
+releases/tag/3.6. 13
+[64] Steven Seitz, Brian Curless, James Diebel, Daniel
+Scharstein, and Richard Szeliski. A comparison and evaluation of multi-view stereo reconstruction algorithms. volume 1, pages 519–528, 01 2006. 2
+[65] Silvia Sellán and Baptiste Nicolet. Libigl botsch-kobbelt
+local remesher. https://github.com/sgsellan/
+botsch-kobbelt-remesher-libigl, 2021. 13
+[66] Vincent Sitzmann, Julien N.P. Martel, Alexander W.
+Bergman, David B. Lindell, and Gordon Wetzstein. Implicit
+neural representations with periodic activation functions. In
+Proc. NeurIPS, 2020. 7, 13, 14
+[67] J. Starck and A. Hilton. Surface capture for performancebased animation. IEEE Computer Graphics and Applications, 27(3):21–31, 2007. 2
+[68] R. Tamura, S. Ito, N. Kaneko, and K. Sumi. Towards detailed 3d modeling: Mesh super-resolution via deformation. In 2020 Joint 9th International Conference on Informatics, Electronics & Vision (ICIEV) and 2020 4th International Conference on Imaging, Vision & Pattern Recognition
+(icIVPR), pages 1–6, Los Alamitos, CA, USA, aug 2020.
+IEEE Computer Society. 2
+[69] Matthew Tancik, Pratul P. Srinivasan, Ben Mildenhall, Sara
+Fridovich-Keil, Nithin Raghavan, Utkarsh Singhal, Ravi Ra-
+mamoorthi, Jonathan T. Barron, and Ren Ng. Fourier features let networks learn high frequency functions in low dimensional domains. NeurIPS, 2020. 3, 7
+[70] Ayush Tewari, O Fried, J Thies, V Sitzmann, S Lombardi, Z
+Xu, T Simon, M Nießner, E Tretschk, L Liu, et al. Advances
+in neural rendering. In ACM SIGGRAPH 2021 Courses,
+pages 1–320. 2021. 2
+[71] Justus Thies, Michael Zollhöfer, and Matthias Nießner. Deferred neural rendering: Image synthesis using neural textures. ACM Trans. Graph., 38(4), July 2019. 3
+[72] Engin Tola, Christoph Strecha, and Pascal Fua. Efficient
+large-scale multi-view stereo for ultra high-resolution image sets. Machine Vision and Applications, 23(5):903–920,
+2012. 2
+[73] Daniel Vlasic, Pieter Peers, Ilya Baran, Paul Debevec, Jovan
+Popović, Szymon Rusinkiewicz, and Wojciech Matusik. Dynamic shape capture using multi-view photometric stereo. In
+ACM SIGGRAPH Asia 2009 Papers, SIGGRAPH Asia ’09,
+New York, NY, USA, 2009. Association for Computing Machinery. 2
+[74] Hoang-Hiep Vu, Patrick Labatut, Jean-Philippe Pons, and
+Renaud Keriven. High accuracy and visibility-consistent
+dense multiview stereo. IEEE Transactions on Pattern Analysis and Machine Intelligence, 34(5):889–901, 2012. 2
+[75] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku
+Komura, and Wenping Wang. Neus: Learning neural implicit
+surfaces by volume rendering for multi-view reconstruction.
+NeurIPS, 2021. 3
+[76] Chao Wen, Yinda Zhang, Zhuwen Li, and Yanwei Fu.
+Pixel2mesh++: Multi-view 3d mesh generation via deformation. In ICCV, 2019. 2
+[77] Chenglei Wu, Bennett Wilburn, Yasuyuki Matsushita, and
+Christian Theobalt. High-quality shape from multi-view
+stereo and shading under general illumination. In CVPR
+2011, pages 969–976, 2011. 2
+[78] Lior Yariv, Yoni Kasten, Dror Moran, Meirav Galun,
+Matan Atzmon, Basri Ronen, and Yaron Lipman. Derived
+DTU MVS Dataset. https://www.dropbox.com/
+sh/5tam07ai8ch90pf/AADniBT3dmAexvm_J1oL_
+_uoa. 13
+[79] Lior Yariv, Yoni Kasten, Dror Moran, Meirav Galun, Matan
+Atzmon, Basri Ronen, and Yaron Lipman. IDR Code.
+https://github.com/lioryariv/idr. 13
+[80] Lior Yariv, Yoni Kasten, Dror Moran, Meirav Galun, Matan
+Atzmon, Basri Ronen, and Yaron Lipman. Multiview neural surface reconstruction by disentangling geometry and appearance. Advances in Neural Information Processing Systems, 33, 2020. 1, 3, 4, 5, 13
+[81] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa.
+pixelNeRF: Neural radiance fields from one or few images.
+In CVPR, 2021. 1
+[82] Tianli Yu, Ning Xu, and Narendra Ahuja. Shape and
+view independent reflectance map from multiple views. In
+Tomás Pajdla and Jiri Matas, editors, Computer Vision ECCV 2004, 8th European Conference on Computer Vision,
+Prague, Czech Republic, May 11-14, 2004. Proceedings,
+Part IV, volume 3024 of Lecture Notes in Computer Science,
+pages 602–616. Springer, 2004. 2
+[83] Cheng Zhang, Bailey Miller, Kai Yan, Ioannis Gkioulekas,
+and Shuang Zhao. Path-space differentiable rendering. ACM
+Trans. Graph., 39(4), July 2020. 1
+[84] Li Zhang and Steven M. Seitz. Image-based multiresolution shape recovery by surface deformation. In Sabry F. ElHakim and Armin Gruen, editors, Videometrics and Optical
+Methods for 3D Shape Measurement, volume 4309, pages 51
+– 61. International Society for Optics and Photonics, SPIE,
+2000. 2
+Supplementary Material
+A. Dataset Details
+outside any image or mask region, it is removed. We reconstruct a mesh surface from the remaining points with
+marching cubes.
+A.1. DTU MVS Dataset
+C. Experiment Details
+Our evaluation is based on the scripts included in the official DTU MVS dataset release [14]. In our experiments,
+we use a derived dataset [78] that includes object masks and
+was assembled in the context of prior work [52,80]. Our implementation expects the input in a different file structure
+and we will release the converted dataset with our paper.
+We are not aware of any copyright or license attached to
+the DTU dataset. This dataset is widely used in the scientific
+community.
+Optimization. In the 3D reconstruction experiments, we
+set the gradient descent step size to 10−3 for both the mesh
+vertices and the neural shader. For mesh refinement, we
+use a step size of 10−4 for the vertices and 2 · 10−3 for the
+shader, progressing the shader faster than the mesh.
+A.2. Human Body Dataset
+The human body dataset used in the mesh refinement experiments consist of recordings of two persons, taken in a
+volumetric capture studio [62]. The subjects are hired actors and they consented in writing to be recorded and to
+their data being used for research purposes. The consent
+covers showing the subjects’ faces in publications.
+B. Implementation Details
+Grid
+Remaining points
+Marching cubes mesh
+Figure 10. Construction of the initial visual hull mesh for 3D reconstruction.
+Our implementation is built on top of the automatic differentiation framework PyTorch [56] and includes code released in the context of previous publications [31,50,58,66].
+For remeshing we use a library with Python bindings [65];
+for differentiable rasterization we use the high-performance
+primitives by Laine et al. [37]. Additionally, we rely on a
+variety of other libraries [4, 7, 9, 13, 24, 27, 29, 34, 35].
+In our implementation, we do not assume normalized
+camera positions. However, we require a rectangular
+bounding box to normalize the domain to a cube centered
+at (0, 0, 0) with side length 2.
+For 3D reconstruction, we also use the bounding box to
+construct the initial mesh (Figure 10): we place a grid of
+points (32 × 32 × 32) inside the bounding box volume and
+project the points into each camera image. If a point lies
+Reconstruction Baselines. For C OLMAP [60,61], we use
+the official release 3.6 with CUDA support [63]. Similar
+to prior work [52], we clean the dense point clouds with
+masks. We also perform trimming after the screened Poisson surface reconstruction (“trim7”).
+For IDR [80], we use the official implementation [79]
+and run the reconstruction experiments with camera training, using the dtu trained cameras.conf configuration.
+Runtime Decomposition. In the main work, we compare
+the runtime of one gradient descent iteration of our method
+to the one of IDR [80]. The comparison uses data produced by an extensive profiling mode that we implemented
+for our method and a simpler mode implemented on top
+of IDR. When profiling, we disable all intermediate outputs (e.g. visualizations). In the case of IDR, we profile
+calls to RayTracing.forward and inside these calls
+those to ImplicitNetwork.forward, obtaining measurements for Geometry rendering and SDF evaluation, respectively.
+For our method, we record the runtime of most operations during reconstruction. Table 3 shows the full decomposition for one sample from the DTU dataset. Computing
+the shading term of our objective function and computing
+the gradients with back propagation are the main bottlenecks of our method.
+D. Additional Experimental Results
+Ablation Study of Initial Mesh. We investigate how initial meshes with different resolutions, topology, and geometric distance to the target affect the reconstruction (Figure 11). Very coarse initial meshes result in missing details,
+while fine meshes provide too much geometric freedom,
+which leads to artifacts. Since we do not support topology
+changes, holes are only reconstructed if they are present in
+the initial geometry.
+The initial meshes for all DTU objects consist of around
+2000 triangles and the output meshes of around 100000 triangles. In terms of scalability, our method handles highresolution meshes efficiently: in the last 500 iterations (with
+Table 3. Full hierarchical runtime decomposition of our method
+for DTU scan 122 (“Owl”) with 2000 iterations. Invocations of
+the neural shader are included in the shading term. Some onetime operations before to the optimization loop are not explicitly
+listed (e.g. initialization of the neural network, optimizers, and the
+rasterizer). In this experiment, we pre-computed the initial mesh.
+Computing the visual hull takes roughly 0.5 seconds.
+Operation
+Time [s]
+Total
+Reading data
+Images
+Mesh
+Optimization loop
+Applying vertex offsets
+Sampling views
+Creating g-buffers
+Rasterization
+Interpolating coverage
+Interpolating positions
+Interpolating normals
+Computing objective function
+Silhouette
+Shading
+Laplacian
+Normal consistency
+Aggregating terms
+Computing gradients
+Performing descent step
+Remeshing
+341.03
+20.54
+20.50
+0.04
+312.16
+2.26
+0.63
+11.49
+6.86
+1.50
+1.45
+1.43
+135.63
+0.73
+128.50
+3.58
+1.37
+1.24
+129.12
+5.79
+23.28
+↰
+↰
+↰
+↰
+↰
+7.82 min
+8.90 min
+6.96 min
+540 faces
+2552 faces
+11366 faces
+2048 faces
+31106 faces
+141278 faces
+604146 faces
+124242 faces
+VH 163
+VH 323 (Ours)
+VH 643
+Sphere
+Final
+Initial
+6.43 min
+Figure 11. Reconstruction results for different initial meshes. We
+vary the resolution of the grid used to build the visual hull (VH)
+and also start from a sphere.
+2000 iterations in total), the optimization runs on a mesh
+with the output resolution and still performs fast gradient
+descent steps.
+Ablation Study of Objective Function. We investigate
+the influence of the individual terms of our objective function (Figure 12). Without the Laplacian term, we observe noticeable bumps and crack-like artifacts. The normal
+term has a small influence but improves smoothness around
+edges. Without the silhouette term, the object boundaries
+are not properly reconstructed. Without the shading term,
+the reconstructed shape resembles a smooth visual hull,
+missing almost all details.
+Ablation Study of Network Architecture. In Figure 13,
+we show the results for different architecture configurations.
+Using very few units per layer leads to sharper geometry
+while the opposite leads to a smoother surface. In the first
+case, a sharper geometry does not equate with a better estimation of the surface (e.g., shadows are baked into the
+geometry). In the latter case, we obtain a smooth geometry but we lose geometrical sharpness. Moreover, with the
+increase in the network parameters, the optimization time
+grows accordingly.
+We found that using 3 layers with 256 units per layers
+is a good compromise between network complexity and expressive power and yields the best results.
+For SIREN [66], we noticed that the optimization procedure diverges with our default learning rate. We lowered
+it to 10−4 to obtain meaningful results. Despite the lower
+learning rate, SIREN still converges quickly.
+E. Interactive Viewer
+Since the renderer we use for optimization has the layout of a standard real-time graphics pipeline, the shader
+part (i.e. the neural shader) can be readily integrated into
+other graphics pipelines after training, allowing the interactive synthesis of novel views.
+As an example, we implemented a “neural” viewer that
+uses OpenGL to rasterize positions and normals. Then, we
+use OpenGL-CUDA interoperability and PyTorch to shade
+the buffers with a pre-trained neural shader. We can envision an exciting extension where the shader is directly compiled to GPU byte code and used similar to other shaders
+written in high-level shading languages.
+F. Failure Cases
+Figure 14 shows some failure cases of our reconstruction
+method. Since the reconstruction starts from a visual hulllike mesh, deep concavities require large movements in the
+mesh. This movement is driven by relatively weak shading
+gradients, which cannot recover these concavities before the
+mesh becomes overly stiff (e.g. because the gradient descent
+step size is reduced during remeshing). On the other hand,
+silhouette gradients are larger than shading gradients, so the
+mesh easily “grows” to fill the masks.
+No Laplacian term
+No normal term
+No silhouette term
+No shading term
+Ours
+Figure 12. Ablation study of the objective function.
+3 × 256
+1 × 256
+8 × 256
+3 × 32
+3 × 512
+(Ours)
+16 × 256
+Figure 13. Different sizes of the positional part of the neural shader (number of layers × width of layers).
+We also observed that the remeshing operation sometimes produces tangled meshes for some objects. This failure case is unrecoverable and the reconstruction needs to be
+restarted. We are investigating the issue and will coordinate
+with the authors of the remeshing library.
+Some regions show weak structure in the majority of im-
+ages for a variety of reasons, for example because they are
+overexposed. Since we randomly sample one camera view
+per iteration, there is a high probability to select an image with low structure information for these regions. Using
+such a view can drive the regions’ vertices in unexpected
+directions away from the actual surface. If such movement
+Deep concavities
+Failed remeshing
+Figure 14. Failure cases of our reconstruction.
+occurs at the wrong time (e.g. right before remeshing), the
+optimization often fails to correct those vertices.
+G. Ethical Considerations
+Our method has the same potential for misuse as other
+multi-view 3D reconstruction pipelines. For example, it
+could be used to digitally reconstruct dangerous objects
+(e.g. weapons, weapons parts, ammunition) for reproduction in 3D printing.
+Because we also train an appearance model, a malicious
+actor could potentially modify or edit materials of a reconstructed scene, for example to create fakes by modifying the
+skin color of a person.
+With publicly available code, means for mitigation
+would be difficult to implement from our side. However,
+we feel that the overall potential for misuse is low and there
+are few obvious paths to malicious use or potential damage.
+Also, our method requires a set of calibrated images, thus is
+much less accessible than 3D reconstruction or deep fakes
+based on single images.
+Overexposed regions

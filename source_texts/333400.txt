@@ -1,0 +1,277 @@
+OptiX + GL based implementations of ANARI. Contribute to NVIDIA/VisRTX development by creating an account on GitHub.
+
+Volume rendering optimization pass by tarcila · Pull Request #299 · NVIDIA/VisRTX · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+tarcila
+commented
+May 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Summary
+Rework the overall volume rendering and render backends to try and decrease register spill, direct callable usage in hot loops and double precision operations.
+Optimization levers
+Volume Woodcock sampler — per-sampler direct-callable dispatch (frees raygen registers); leaf-only NanoVDB ReadAccessor in sampler state; halved macrocell size; opacity min/max packed into float2; strict-bound macrocell TF via a point-filtered sibling texture.
+Quality-path RR / shadow culling — adaptive RR for NEE shadow rays; skip Quality shadow trace below an epsilon contribution; volume RR depth tuned + survival capped; skip volume normal compute on Quality bounces ≥ 1.
+RNG / camera sampling — PCG-XSH-RR-32 replaces curand Philox; camera sampling switched to Halton; drops the CUDA::curand link.
+MDL footprint — textureResults shrunk to 8; MDL sampler table aliased (drops the 128 B inline copy).
+Shadow anyhit gating — MaterialGPUData::isFullyOpaque precomputed; opaque shadow anyhits skipped.
+Hit / instance data — (Surface|Volume)Hit transforms relocated to Instance(Surface|Volume)GPUData; SurfaceHit copy dropped in Interactive bounce raygen
+CDF build — conditional-CDF construction batched into single thrust launches.
+Device codegen — --use_fast_math enabled for OptiX device kernels; spurious double arithmetic trimmed.
+Wall-clock
+tsdRender of some test scenes, PR vs baseline, mean ms, 5 runs
+scene
+renderer
+baseline
+PR
+speedup
+test2
+quality
+7997.5
+2014.6
+3.97×
+test1
+quality
+4724.0
+1215.9
+3.89×
+dragon
+quality
+6595.9
+2055.2
+3.21×
+dragon
+interactive
+2823.6
+952.5
+2.96×
+villa
+quality
+2971.3
+2021.4
+1.47×
+villa
+interactive
+1569.7
+1349.9
+1.16×
+tarcila
+added 19 commits
+May 27, 2026 14:57
+rtx: per-sampler volume callable dispatch via direct-callables
+…
+b8ab15e
+```
+Volume integrator dispatched a direct-call per inner-loop sample where SBT-callable barrier + drain dominated.
+Move full Woodcock bodies (sampleDistance, ratioTrack, rayMarch) into per-sampler direct-callables:
+one call per ray segment, sampler state stays in registers.
+
+The following callables are expected to be implemented for a volume type:
+__direct_callable__sampleDistance (used by Quality renderer)
+__direct_callable__ratioTrackTransmittance (used by Quality renderer)
+__direct_callable__rayMarchVolume (used by Interactive and Fast renderers)
+Implementation helpers are provided in the form of templated functions:
+- woodcockSampleDistance
+- woodcockRatioTrackTransmittance
+- latticeRayMarchVolume
+
+CustomField are supported using the existing callables:
+- __direct_callable__init
+- __direct_callable__sample
+```
+rtx: pack macrocell opacity min/max into float2 opacityBounds
+…
+014e0f5
+```
+The Woodcock loop reads both per-cell min and max opacity on every cell entry.
+Pack the two so they can be read in one load.
+```
+rtx: precompute MaterialGPUData::isFullyOpaque so it gates opaque sha…
+…
+54f4463
+```
+…dow anyhits
+
+Every shadow-ray anyhit went through the material init / opacity /
+transmission callable chain even for OPAQUE-with-alpha-1 materials.
+Precompute isFullyOpaque at material commit; shadow anyhits short-circuit
+with optixTerminateRay.
+
+PBR predicate also gates on transmission — a non-zero static transmission
+can still let shadow light through with alpha = 1.
+```
+rtx: Fuse two bool as a single int
+be698d5
+rtx: Drop SurfaceHit copy in Interactive bounce raygen
+…
+72fb515
+```
+Bounce loop kept a 204 B SurfaceHit copy live across the bounce-ray
+dispatch. Replace with a freshly-allocated bounceHit; origin reads
+original's fields directly.
+```
+rtx: Trim double precision computations and enable --use_fast_math fo…
+…
+7244009
+```
+…r OptiX device kernels
+
+Performances upgrade, but also drastically decrease thet amount of warnings
+emitted at pipelines compilation.
+
+As a last bit, NanoVDB Grid::voxelSize() is returning a Vec3d.
+Handle that one on the host as invTwoVoxelSize so GPU stays single
+precision driven.
+```
+rtx: leaf-only NanoVDB ReadAccessor in Woodcock sampler state
+…
+1255949
+```
+NanoVDB DefaultReadAccessor's upper-level caches (~84 B) almost never re-hit
+— Woodcock walk stays inside one or two leaves per macrocell, so the upper bytes
+were mostly spill weight.
+```
+rtx: relocate (Surface|Volume)Hit transforms to Instance(Surface|Volu…
+…
+adca796
+```
+…me)GPUData
+
+(worldToObject, objectToWorld) lived on every SurfaceHit/VolumeHit — 96 B
+of per-instance-constant data carried across path continuation, only read
+by shadingHitpoint, MDL state init, and computeWorldNormal. Move to
+InstanceSurfaceGPUData/InstanceVolumeGPUData (host-side at world rebuild).
+```
+rtx: alias MDL sampler table
+…
+f44d012
+```
+TextureHandler::samplers[32] duplicated MaterialGPUData::MDL::
+samplers[32] inline per shading state. Replace with pointer alias.
+```
+rtx: shrink MDL textureResults to 8
+…
+6ce97e8
+```
+MDL backend was sizing textureResults at 16 per shading state; ≤8 used in
+practice. Halve to free MaterialShadingState union space.
+textureSpaces stays at 4 to match the number of attributes ANARI supports.
+```
+rtx: Halve macrocell size
+…
+fe4f486
+```
+Halve MACROCELL_SIZE 16→8: cells were spanning multiple opacity bands,
+weakening the σ_min/σ_max bracket the space-skipper relies on.
+
+Mostly driven by experimental measurements.
+```
+rtx: strict-bound macrocell TF lookup via point-filtered sibling texture
+…
+6e4e9ad
+```
+Macrocell σ_min/σ_max scan was wider than the runtime linear-filter TF
+actually touches, diluting σ_min so decomposition-tracking control flights
+couldn't fire on cells whose true σ_min > 0.
+```
+rtx: skip volume normal compute on Quality bounces >= 1
+…
+d7e2a94
+```
+Volume gradient sample was computed every bounce; only the first-bounce
+G-buffer reads it.
+```
+rtx: Tune volume RR depth + cap survival
+…
+a54d367
+```
+White smoke / dense cloud (high albedo) volumes had paths running to
+maxRayDepth, as max(contribution) stayed near 1 forever, RR never engaged.
+Drop volume-RR start depth to 1 and cap survival probability at 0.5.
+```
+rtx: skip Quality shadow trace below epsilon contribution
+…
+6663a96
+```
+Compute maxContrib up front and skip shadow computation when maxContrib < 1e-5.
+Applied to both volume-scatter and surface NEE branches.
+```
+rtx: adaptive RR for Quality NEE shadow rays
+…
+b3b7916
+```
+Shadow RR ran with a fixed RR_THRESHOLD = 0.5 regardless of the NEE sample'
+pre-shadow contribution magnitude. Dim rays paid full walk cost.
+
+Add shadowContribWeight set by the raygen before each shadow trace and
+use it to adjust RR threshold to decrease the cose of dim rays.
+```
+rtx: replace curand Philox with PCG-XSH-RR-32
+…
+89cbdaf
+```
+PCG-XSH-RR-32 replaces curand Philox as the main RNG. State drops
+from 64 B to 16 B per thread, the step compiles to a handful of ALU ops
+versus the more complex Philox.
+```
+rtx: switch camera sampling to Halton, drop CUDA::curand link
+…
+713e8f2
+```
+Halton ensure a low discrepency sequence that samples evenly across the
+pixel area. As with PCG, it is lighter when compared to our current curand rng.
+```
+rtx: batch conditional-CDF build into single thrust launches
+…
+fa322a3
+```
+Too many unnecessary kernel launches, possibly tripping some profiling/replay session.
+```
+tarcila
+requested a review
+from jeffamstutz
+May 27, 2026 19:55
+jeffamstutz
+commented
+May 27, 2026
+Copy link
+Copy Markdown
+Collaborator
+LGTM, thanks!
+Hide details
+View details
+jeffamstutz
+merged commit e81d730
+into
+NVIDIA:next_release
+May 27, 2026
+8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+tarcila
+deleted the
+performance
+branch
+May 28, 2026 12:50
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

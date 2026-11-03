@@ -1,0 +1,145 @@
+Tracking an experiment: reorienting a large scan at full resolution (level 0) using a transform and crop box made on a coarser level, plus choosing interpolation and output bit depth. Nothing has been applied to level 0 yet; everything b...
+
+Reorient + crop at full resolution: block-wise resampling, interpolation choice, output bit depth · Issue #1 · muratmaga/omezarr-converter · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Reorient + crop at full resolution: block-wise resampling, interpolation choice, output bit depth #1
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Reorient + crop at full resolution: block-wise resampling, interpolation choice, output bit depth#1
+Copy link
+Description
+muratmaga
+opened on Oct 3, 2026
+Issue body actions
+Tracking an experiment: reorienting a large scan at full resolution (level 0) using a transform and crop box made on a coarser level, plus choosing interpolation and output bit depth. Nothing has been applied to level 0 yet; everything below is estimates and measurements on test blocks (2026-10-02).
+The case
+Data: large-sample-data/dry_skull_4K_12.5micron.ome.zarr (6.127 µm despite the name). Level 0 is 1908 × 2596 × 3882 uint16 = 19.2 G voxels: 35.8 GiB in memory, 5.37 GiB stored.
+Inputs: made in Slicer's Crop Volume "Reorient" tab on level 1:
+Reorient_transform.h5: ITK affine, a rigid 138° rotation.
+Crop_Extra.mrk.json: a world-aligned crop box.
+Both files are in Add dry-skull reorient transform and crop box (issue #1) #2 (experiments/reorient-dry-skull/).
+Same frame on every level: the store's level translations are correct (half-voxel offsets), so a transform and box made on level 1 apply unchanged to level 0.
+What Crop Volume does, from the Slicer source
+Reorient "Apply" is free: it hardens a linear transform, which only changes the volume's orientation matrix (vtkMRMLVolumeNode::ApplyTransform).
+The crop needs a full resample: the box is world-aligned and the rotated volume no longer is, so the crop runs through ResampleScalarVectorDWIVolume.
+Inside Slicer that peaks at ~146 GiB: the module holds 2 copies of the input and 2 of the output. That's not feasible on a 36 GB laptop or on a Jetstream2 m3.xl (125 GB).
+Output size
+Level 0 after reorient + crop: 2440 × 4258 × 1927 = 20.0 G voxels, 37.3 GiB as uint16. That's about 4% larger than the input.
+22% of the box is fill outside the scan, and the box keeps 81% of the original field of view.
+Proposed approach: block-wise, outside Slicer
+Blocks: resample per 512³ output block (180 blocks; blocks that are all fill are skipped).
+Per-block input: each block reads only its input footprint, about 590 × 713 × 697 voxels (0.55 GiB).
+Memory: ~12–15 GiB peak with 4–8 workers, so it fits on a laptop.
+Lower levels: rebuild them afterwards with the existing block-mean code (about 1 minute for this scan).
+Estimated time: about 15 min of B-spline compute on an M3 Pro, plus transfer. Downloading 5.4 GiB took ~7 min at the 14 MB/s we've seen from Jetstream2 to home; upload speed is not measured.
+Interpolation: measured on real 288³ blocks with this rotation (ITK, 12 threads)
+"Round-trip error" means rotate, rotate back, and compare to the original; it is roughly twice the damage of the single pass we'd actually run.
+Speed
+Fine detail kept, top two quarters of the frequency range
+Round-trip error, dry skull
+Round-trip error, 9 µm embryo (as % of voxel noise)
+linear
+~270 M voxels/s
+58% / 41–45%
+238
+430 (58%)
+cubic B-spline
+~20 M voxels/s
+97% / 79%
+33
+71 (10%)
+sinc, Lanczos window, radius 3
+~2 M voxels/s
+~100% / 96%
+65
+83 (11%)
+sinc, Hamming window, radius 3
+~2 M voxels/s
+~100% / 99%
+220
+not run
+Use cubic B-spline. Sinc is no better and about 10× slower.
+Contrast-stained scans have more at stake. The embryo (Scan_0006.ome.zarr, 9 µm, contrast-stained) has ~7× more of its signal in the frequency band linear damages than the dry skull does.
+B-spline in blocks needs a 16-voxel overlap so block edges don't show, and 8 bytes per voxel of working memory for its coefficients.
+Values below zero: B-spline can dip below 0 in air. Air is already 0 in these reconstructions, so clamping to the output type is harmless.
+Output bit depth
+Decision: dry-bone scans → 8 bit; contrast-stained (diceCT) scans stay 16 bit.
+Why 8 bit is enough for dry bone:
+Bone is at ~26–36k and air is clipped to 0, so a window of 0 to the scan's maximum (or a high percentile) loses nothing real.
+Mapping 0–40,000 to 8 bit gives steps of 157. That adds about 45 grey levels (RMS) of rounding, against 1678 grey levels of natural variation inside bone.
+For reference, the embryo would also survive 8 bit: its voxel noise of 735 spans 4 steps with a 0–47,000 window, and rounding adds 0.26% to the noise. We're keeping contrast scans at 16 bit anyway.
+Implementation: convert in the same pass as the resample (read 16-bit, interpolate in floating point, write 8-bit) so the data is rounded only once. Record the window used in the store metadata.
+To do
+Block-wise reorient + crop step: reads the ITK transform and Slicer ROI JSON; interpolation selectable, default cubic B-spline.
+Automatic trim: object box from a coarse level (Otsu, piece filtering, report pieces outside the box) + 10-voxel pad on all sides, as an alternative to the hand-placed box (see comment). Fill/pad value = background (0 for dry bone).
+Output bit-depth option with a recorded window (default 8 bit for dry bone, 16 bit kept for contrast scans).
+Rebuild the lower levels from the new level 0.
+Run it on the dry skull and verify against the same operation done on level 1 in Slicer.
+🤖 Generated with Claude Code
+Reactions are currently unavailable
+Activity
+muratmaga commented on Oct 3, 2026
+muratmaga
+on Oct 3, 2026
+OwnerAuthor
+More actions
+Inputs: the transform and crop box are in #2 (experiments/reorient-dry-skull/), with steps to replicate the operation in Slicer.
+Automatic trim instead of a hand-placed box
+The crop box was placed by hand. Instead, compute it: take the bounding box of the object in the rotated frame, then pad it with 10 empty voxels on all six sides so the image doesn't end exactly at the object. Morphological operations and other filters behave badly at the image edge.
+I measured this on the dry skull using level 2 (24.5 µm, ~90 MB download, 12 s):
+Threshold level 2 at its automatic Otsu threshold (12074).
+Keep the largest connected piece. Out of 9609 pieces, the skull is a single one of 9.09 M voxels. The next three (8949, 4240 and 914 voxels) all lie inside the skull's box.
+Rotate every kept voxel into the output frame and take the min/max. Add one rotated level-2 voxel of safety margin, then the 10-voxel pad at level-0 spacing.
+Box size (mm)
+Level-0 size (voxels)
+Voxel count
+uint16
+uint8
+Hand-placed box
+14.95 × 26.09 × 11.81
+2440 × 4258 × 1927
+20.0 G
+37.3 GiB
+18.6 GiB
+Automatic + 10-voxel pad
+11.84 × 23.66 × 9.11 (before pad)
+1953 × 3883 × 1507
+11.4 G
+21.3 GiB
+10.6 GiB
+43% fewer voxels. The hand-placed box had 1.1–2.0 mm of slack on every side, and it contains the automatic box completely, so no bone is lost.
+B-spline compute drops from ~15 to ~10 min on an M3 Pro.
+Robustness
+Threshold: lowering it from Otsu (12074) to 6000 and then 3000 grows the box by under 0.05 mm.
+Lower thresholds pick up something else: below that, a large, low-density piece appears about 2.3 mm outside the skull on both sides, probably the holder. The hand-placed box excluded it too. The Otsu threshold leaves it out.
+Dust: with every voxel above threshold kept (no piece filtering), dust specks push the box to 23.6 G voxels. Removing small pieces is essential.
+Open points
+Loose pieces: "largest piece only" would drop a detached bone or tooth lying outside the main skull's box. Keep every piece above a minimum physical size, and report any that fall outside the box rather than silently including or dropping them.
+Pad value: 0 is right for dry bone, since the reconstruction clips air to 0. Contrast-stained scans sit in a medium (around 1500 in the 9 µm embryo), so the pad and the fill for the rotated corners should be the background value, not 0.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

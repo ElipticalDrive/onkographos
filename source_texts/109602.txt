@@ -1,0 +1,69 @@
+![voxlvoxl](resources/voxlvoxl.gif)
+
+# voxlvoxl
+A voxel hash chunk map using **Bonxai**(https://github.com/facontidavide/Bonxai), aiming for efficient memory management of point cloud maps. <br>
+
+Primarily designed for Mapping and Localization with LiDAR sensors, and a map representation for [ULAM](https://github.com/goguma426/ulam) LiDAR-Inertial odometry system.
+
+> ## IMPORTANT NOTE:
+> * `voxlvoxl` is currently in development stage. There are memory glitches lurking under the surface.
+> * The causes are known and a fix is on the way, but not right now!
+
+# What is this?
+**Voxel hash maps** are frequently used in mapping and localization applications for their computational advantages:
+* Typical time complexity of ***O(1)*** (for lookup and update) with reasonable hash functions.
+* Sparse memory usage: only occupied voxels take up memory.
+* Next-to-infinite spatial representation: **int32** coordinates with **1cm** voxel size can represent space larger than earth itself. <br>
+
+Nevertheless, **point cloud maps** created with range sensors such as 3D LiDARs can take up substantial memory space if you load it as a single instance. To mitigate this problem, `voxlvoxl` divides 3D space represented by the voxel map into **chunks**, which is simply a cube of *n x n x n* voxels(just like [Minecraft](https://www.minecraft.net/)!). <br>
+
+# How is it better?
+This representation has a number of advantages:
+* Chunks can be separately saved to/loaded from disk, saving memory space for regions that are not needed right now.
+* Since a chunk is actually an independent voxel hash map, we do not have to worry about coordinate conversions - just directly save the point coordinates to an appropriate voxel in a chunk.
+* The chunks are completely independent of one another, so we can summon or dismiss them using any policy that fits our needs - for example, one might want to pre-load the region that a robot is expected to enter soon. <br>
+
+`voxlvoxl` can be thought of as an alternative to **[Rolling Bonxai](https://github.com/mukundbala/Rolling-Bonxai)**, but with different chunk management. **Rolling Bonxai** indexes and activates chunks based on the current position in the map, and the number of chunks in the rolling window is hard-fixed to 27 (3 by 3 by 3 chunks). This may be undesirable for some applications and use-cases. <br>
+
+In contrast, `voxlvoxl` indexes chunks using another hash function. Internally, the active chunks are kept as `std::unordered_map` of `Bonxai::CoordT` integer 3-dimensional coordinates, with a hash function borrowed from https://niessnerlab.org/papers/2013/4hashing/niessner2013hashing.pdf. <br>
+As mentioned above, this allows unlimited degrees of freedom for chunk management(summon and dismiss), which of course includes **Rolling Bonxai** style behavior.
+
+# What can it do right now?
+The initial plan was to release `voxlvoxl` as a complete point cloud map representation including all convenience functions and even Ray-Tracing for dynamic object removal. However my personal circumstances forced me to pre-release this development version that just barely suits my needs for 3D LiDAR mapping. <br>
+As of now, `voxlvoxl` is capable of performing the following functions:
+* Asynchronous summon/dismiss of chunks from/to the disk based on chunk index
+* Chunk state tracking (UNINITIALIZED/UNTOUCHED/MODIFIED)
+* OpenMP-Parallelized radius search for a large number of query points(critical for SLAM applications)
+
+# Interesting technical details on optimization
+Voxel hash chunk maps are cool and all, but there are two elephants in the room if you plan on hardcore query/update tasks.
+* For point lookup/insertion, we need to calculate the chunk index in addition to the voxel index, which can really add up if we're talking about millions of points.
+* Calculating the voxel index often involves using the `std::floor()` function, which is actually more expensive than you might think(in computational terms). See [this link](https://stackoverflow.com/questions/824118/why-is-floor-so-slow).
+
+To mitigate these shortcomings, `voxlvoxl` has two tricks under the hood:
+* Use of [Bit-shift operations](https://www.geeksforgeeks.org/cpp/left-shift-right-shift-operators-c-cpp/) for chunk index calculation. The downside is that the size of the chunk must be 2<sup>n</sup> x 2<sup>n</sup> x 2<sup>n</sup>, but this is often negotiable since the voxel size is configurable.
+* Use of `Eigen::Vector3d::array()::floor()` that triggers the use of SIMD operations such as `_mm_floor_ps` for supported CPUs. This in theory accelerates voxel index calculation by a factor of 3 or more.
+```C++
+  Bonxai::CoordT V3DToVoxelCoord(const V3D& p) const {
+    // this allows SIMD operations such as _mm_floor_ps
+    // MUCH faster than std::floor()
+    Eigen::Vector3i coord =
+        (p * inv_resolution_).array().floor().template cast<int32_t>();
+
+    return {coord.x(), coord.y(), coord.z()};
+  }
+
+  Bonxai::CoordT getCorrespondingChunkIdx(const Bonxai::CoordT& coord) const {
+    // bitshift operations to calculate chunk index
+    // the downside is that chunk_size must be a power of two
+    return {coord.x >> chunk_bits_, coord.y >> chunk_bits_,
+            coord.z >> chunk_bits_};
+  }
+```
+
+# Roadmap
+- [ ] Implement initially planned convenience functions such as **PCL** conversions
+- [ ] Fix memory access glitches
+- [ ] Implement dynamic object removal with Ray-Tracing
+- [ ] Implement parallelized point insertion
+- [ ] Improve readme with examples

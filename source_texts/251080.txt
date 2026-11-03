@@ -1,0 +1,772 @@
+Gaussian Splat Renderer for the Godot Engine. Contribute to klausi3D/godotGS development by creating an account on GitHub.
+
+gaussian_splatting: pin the IndirectDispatch ABI across every declaration and binding (#54) by klausi3D · Pull Request #1041 · klausi3D/godotGS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+klausi3D
+commented
+Sep 22, 2026
+Copy link
+Copy Markdown
+Owner
+Base SHA: 6f4552076c7e71caec893fbbc8180dcbc5b60d9a (origin/master at branch time).
+Risk class: R1 — guard/test only, no runtime, shader or host behaviour change.
+Step 1 of the Option C plan on #54 (assessment, addendum). Independent of #54's own fix and worth landing on its own merits.
+The gap
+GaussianSplatting::IndirectDispatchLayout (modules/gaussian_splatting/renderer/pipeline_io_contracts.h:11-18) is the 24-byte GPU-driven dispatch/count header. It is declared eight times in GLSL:
+Declaration
+set/binding
+shaders/tile_prefix_scan.glsl:60 IndirectDispatch
+0 / 5
+shaders/tile_rasterizer.glsl:106 IndirectDispatch
+0 / 6
+shaders/tile_rasterizer_compute.glsl:110 IndirectDispatch
+0 / 6
+shaders/tile_binning.glsl:225 IndirectDispatch
+0 / 9
+shaders/tile_binning.glsl:128 InstanceIndirectDispatch
+0 / 15
+shaders/includes/tile_raster_common.glsl:30 InstanceIndirectDispatch
+0 / 15
+compute/instance_count_clamp.glsl:18 IndirectDispatch
+0 / 1
+compute/instance_count_clamp.glsl:25 InstanceCount
+0 / 3
+Before this change only two were pinned to anything: the regex ABI contract at shaders/compile_shaders.py:1380-1412 (key="indirect_dispatch_layout"), covering tile_prefix_scan.glsl and compute/instance_count_clamp.glsl's IndirectDispatch. tests/ci/check_gaussian_layout_sync.py did not mention the struct at all.
+The other six could drift from the host struct with nothing failing. Swapping two fields in one rasterizer makes it read unclamped_total as overflow_flag and element_count as a dispatch dimension — a wrong record count rasterized off a buffer the host wrote in the other order, with no compile-, link- or load-time signal.
+Binding numbers were unpinned on both sides. check_gaussian_layout_sync.py parses no binding qualifier anywhere (every occurrence of the string in it was inside a comment: :105,550,579,1078), and the reader-side numbers appear nowhere else. The host wires them in C++ (renderer/tile_render_rasterizer_stage.cpp:464, mirrored at :602; tile_render_prefix_scan.cpp:788; tile_render_binning.cpp:380, :316, :539). A one-sided binding change binds a different buffer into the block, and a field-layout check cannot see it, because the layout is not what changed.
+What this pins
+Modelled on OVERFLOW_STATS_SHADER_MIRRORS (check_gaussian_layout_sync.py:555-560), extended with the two things that pattern does not cover:
+Field layout, field-by-field against the host struct (names, std430 signatures, offsets, total size), plus the host struct's own sizeof/offsetof static_asserts, so the contracts stay the single source of truth.
+layout(set = S, binding = B, std430) qualifiers on every declaration.
+Host C++ binding slots. For every X.append_id(...indirect_dispatch_buffer) / ...indirect_count_buffer, the nearest preceding X.binding = N; must equal the pinned number — and the number of such sites is pinned too, so a new binding site is reconciled rather than silently accepted. A shader-only pin would just let the C++ move instead.
+Coverage is derived, policy is enumerated. Which declarations exist is read out of the tree, so a ninth buffer block with the same field set fails the guard instead of escaping it. Which set/binding each must use stays explicit, because that is the contract, not a description of it.
+One accepted spelling alias. The tree spells the leading dispatch triple two ways: uint dispatch_xyz[3] and three uint dispatch_x/y/z scalars. Both are 12 bytes at offsets 0/4/8 in std430, so the array form is expanded onto the host's three scalar names before comparison. It is a spelling equivalence only — M2 below proves a reorder that swaps a dispatch component with element_count still fails.
+Known gap, stated rather than left implicit. The host side of compute/instance_count_clamp.glsl's bindings 1 and 3 goes through a shared helper that takes the binding as a parameter (interfaces/gpu_sorting_pipeline.cpp:2656, contract.binding = p_binding), so there is no literal to anchor at the call site. Both GLSL declarations are pinned; only the C++ half of that one shader is not. Recorded in the guard's own comment.
+Mutation proof
+Each mutation applied alone, guard re-run, then restored; line endings preserved so only the named bytes change. The restored tree is GREEN after every one.
+#
+Mutation
+Guard
+M1
+swap overflow_flag/unclamped_total in tile_rasterizer_compute.glsl only
+RED
+M2
+swap element_count/dispatch_z in tile_rasterizer_compute.glsl only
+RED
+M3
+GLSL binding 6 -> 7 in tile_rasterizer_compute.glsl only
+RED
+M4
+host C++ binding 6 -> 7 in tile_render_rasterizer_stage.cpp
+RED
+M5
+drop a field from tile_binning.glsl's EMIT-pass declaration
+RED
+M6
+add a ninth, unlisted declaration of the same layout
+RED
+M7
+reorder the host struct without updating its offsetof contracts
+RED
+M8
+retype element_count uint -> uvec2 in tile_raster_common.glsl only
+RED
+M1 is the mutation the plan asked for (two fields reordered in one shader only). M3/M4 prove the binding pin on each side independently. M6 proves the derived-coverage arm.
+Sample failure text (M1):
+```
+[gaussian-layout-check] FAIL modules\gaussian_splatting\shaders\tile_rasterizer_compute.glsl:
+  `buffer IndirectDispatch` layout [... ('unclamped_total','uint',16), ('overflow_flag','uint',20)]
+  != host IndirectDispatchLayout [... ('overflow_flag','uint',16), ('unclamped_total','uint',20)].
+```
+Checks run
+python tests/ci/run_module_tests.py --guard-only — zero guard failed / FAILED ( lines, ends Guard-only mode complete. Run locally on Windows; says nothing about the CI-only arms of other guards.
+python tests/ci/check_gaussian_layout_sync.py — PASSED, and now prints the eight pinned declarations and eight host binding sites by name.
+No GPU run needed: nothing executable changed.
+Refs #54
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01UA1aX2xX8cajR4uKaMeLN6
+gaussian_splatting: pin the IndirectDispatch ABI across every declara…
+…
+b98496c
+```
+…tion and binding (#54)
+
+`IndirectDispatchLayout` (renderer/pipeline_io_contracts.h:11) is the 24-byte
+GPU-driven dispatch/count header the tile prefix scan writes and binning, both
+rasterizers and the instance-count clamp read. It is declared eight times in
+GLSL, and before this change only two of those declarations were pinned to
+anything: a regex ABI contract in shaders/compile_shaders.py:1380-1412
+(key="indirect_dispatch_layout") covering tile_prefix_scan.glsl and
+compute/instance_count_clamp.glsl. check_gaussian_layout_sync.py did not
+mention the struct at all.
+
+So the six other copies could drift from the host struct with nothing failing.
+Swapping two fields in one rasterizer would make it read `unclamped_total` as
+`overflow_flag` and `element_count` as a dispatch dimension -- rasterizing a
+wrong record count off a buffer the host wrote in the other order, with no
+compile-, link- or load-time signal.
+
+Binding numbers were unpinned on both sides as well. check_gaussian_layout_sync.py
+parses no `binding` qualifier anywhere (every occurrence of the string in it was
+inside a comment), and the reader-side numbers -- 6 in both rasterizers, 9 and 15
+in tile_binning.glsl -- appear nowhere else. A binding that drifts on one side
+binds a *different* buffer into the block, and a field-layout check cannot see
+that, because the layout is not what changed.
+
+This extends the existing guard the way OVERFLOW_STATS_SHADER_MIRRORS covers
+OverflowStats, and pins three things per declaration:
+
+  * field layout, field-by-field against the host struct (names, std430
+    signatures, offsets, total size), plus the host struct's own
+    sizeof/offsetof static_asserts;
+  * the `layout(set = S, binding = B, std430)` qualifiers;
+  * the host C++ that wires the same slot -- for every
+    `X.append_id(...indirect_dispatch_buffer)` / `...indirect_count_buffer` the
+    nearest preceding `X.binding = N;` must equal the pinned number, and the
+    number of such sites is pinned too. A shader-only pin would just let the C++
+    move instead.
+
+Coverage of WHICH declarations exist is derived from the tree, not enumerated:
+a ninth buffer block declaring the same field set fails the guard rather than
+escaping it. The set/binding each one must use stays explicit, because that is
+policy, not description.
+
+Two spellings of the leading dispatch triple exist in the tree (`uint
+dispatch_xyz[3]` and three scalars). Both are the same 12 bytes in std430, so
+one documented alias maps the array form onto the host's three scalar names
+before comparison. It is a spelling equivalence only -- a reorder that swaps a
+dispatch component with `element_count` still fails (proved by M2 below).
+
+Known gap, stated rather than left implicit: the host side of
+compute/instance_count_clamp.glsl's bindings 1 and 3 goes through a shared
+helper that takes the binding as a parameter
+(interfaces/gpu_sorting_pipeline.cpp:2656, `contract.binding = p_binding`), so
+there is no literal to anchor at the call site. Both GLSL declarations are
+pinned; only the C++ half of that one shader is not.
+
+Guard-only; no runtime, shader or host behaviour changes.
+
+Mutation proof (each applied alone, guard re-run, then restored; the restored
+tree is GREEN after every one):
+
+  M1 swap overflow_flag/unclamped_total in tile_rasterizer_compute.glsl only -> RED
+  M2 swap element_count/dispatch_z in tile_rasterizer_compute.glsl only     -> RED
+  M3 GLSL binding 6 -> 7 in tile_rasterizer_compute.glsl only               -> RED
+  M4 host C++ binding 6 -> 7 in tile_render_rasterizer_stage.cpp            -> RED
+  M5 drop a field from tile_binning.glsl's EMIT-pass declaration            -> RED
+  M6 add a ninth, unlisted declaration of the same layout                   -> RED
+  M7 reorder the host struct without updating its offsetof contracts        -> RED
+  M8 retype element_count uint -> uvec2 in tile_raster_common.glsl only     -> RED
+
+Checks run: `python tests/ci/run_module_tests.py --guard-only` -> zero
+`guard failed`/`FAILED (` lines, "Guard-only mode complete".
+
+Refs #54
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UA1aX2xX8cajR4uKaMeLN6
+```
+chatgpt-codex-connector
+Bot
+reviewed
+Sep 22, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: b98496c630
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+tests/ci/check_gaussian_layout_sync.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+tests/ci/check_gaussian_layout_sync.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+This was referenced Sep 22, 2026
+tests: stop the overlap-record drop proof from vanishing out of the GPU harness (#54)
+#1042
+Merged
+docs: disclose the overlap-record drop artifact, measured (#54)
+#1043
+Merged
+Overlap-record overflow recovery and persistent truncation (accepted alpha limitation)
+#54
+Open
+gaussian_splatting: close six review findings in the IndirectDispatch…
+…
+d485778
+```
+… ABI pin (#54)
+
+Two independent reviews (Codex and /code-review high) found the first version of
+this guard was narrower than its own comment claimed. All six findings are
+closed, each with a mutation.
+
+F1 (HIGH) -- the sweep globbed `*.glsl` only, and a NINTH declaration of the same
+24-byte layout already existed outside that glob: renderer/gpu_sorter.cpp:2356
+embeds GLSL in a C++ raw string literal declaring
+`layout(set = 0, binding = 0, std430) readonly buffer IndirectCount` with the
+full field set, bound to the very `global_sort_resources.indirect_dispatch_buffer`
+this guard pins (tile_renderer.cpp:1127). The comment claiming "all eight" and
+"a ninth copy cannot quietly escape the pin" was therefore false as written. Fixed
+by scanning INDIRECT_DISPATCH_EMBEDDED_GLSL_FILES alongside the .glsl roots and
+pinning that block; the count is now nine.
+
+F2 (MEDIUM) -- only the FIRST declaration of a block name per file was parsed, and
+the sweep skipped anything whose (path, block) was already listed. A second
+declaration of an already-pinned name -- the `#ifdef`/`#else` variant-pair shape,
+which tile_binning.glsl's EMIT-pass block is already one half of -- was exempt
+from both. Fixed by inverting the structure: the sweep is now the ENUMERATOR.
+Every occurrence is validated on its own body and its own layout qualifiers, then
+matched against the pinned list; a duplicate of a listed name fails, and a pinned
+entry the sweep does NOT find exactly once fails too (that direction catches a
+rename or a reformat past the parser, which silently shrinks what is checked).
+
+F3 (MEDIUM) -- the host binding walk scanned text[0:append_id] and took the last
+`var.binding = N;`, crossing function boundaries. DELETING an assignment therefore
+passed: it fell back to the identically-named variable in the previous function.
+RD::Uniform::binding defaults to 0, a real slot, so the compute rasterizer would
+have bound the buffer at slot 0 while the guard reported the ABI pinned. Fixed by
+anchoring the window to this uniform's own `RD::Uniform <var>;` declaration.
+
+F4 (LOW) -- the sweep's marker test was the whitespace-exact substring
+`"uint element_count;"`, so `uint  element_count;` hid a declaration entirely.
+Fixed: discovery is now by PARSED FIELD NAME via _parse_fields_from_body, and an
+unparsable block that mentions any marker field raises instead of being skipped.
+
+F5 (LOW) -- `_SCALAR_BASE_TYPES[...][1]` is the ALIGNMENT slot, not the size slot.
+Inert today because every entry has alignment == size; fixed to [2].
+
+F6 (LOW) -- renderer/tile_render_prefix_scan.cpp:441 declares a local C++
+`struct IndirectDispatchReadback` with the same four fields and reinterpret_casts
+mapped readback bytes through it instead of using the canonical struct. A
+canonical reorder would leave it reading the wrong word with nothing failing.
+Pinned via INDIRECT_DISPATCH_HOST_STRUCT_MIRRORS.
+
+Codex additionally found that BOTH C++ scans parsed comments as code, so
+
+    indirect_uniform.binding = 7;
+    // indirect_uniform.binding = 6;
+    indirect_uniform.append_id(...indirect_dispatch_buffer);
+
+passed -- a binding drift hidden behind nothing but a comment. Fixed by blanking
+comments to same-length spaces (offsets stay valid) before every C++ and GLSL
+scan.
+
+Mutation proof is now 15, each applied alone and restored, tree GREEN after every
+one. The eight original mutations still go RED, plus:
+
+  R1 reorder fields in the embedded GLSL in gpu_sorter.cpp      -> RED  (F1)
+  R2 add a second declaration of an already-pinned block name   -> RED  (F2)
+  R3 DELETE a .binding assignment (would default to slot 0)     -> RED  (F3)
+  R4 hide a declaration behind whitespace-only reformatting     -> RED  (F4)
+  R5 reorder the host duplicate struct IndirectDispatchReadback -> RED  (F6)
+  R6 hide a binding drift behind a commented-out assignment     -> RED  (Codex)
+  R7 rename a pinned block so the sweep stops finding it        -> RED  (new)
+
+R3, R6 and R7 are the ones that matter most: each is a way to make the guard
+report agreement that does not exist.
+
+Still not covered, stated rather than left implicit: gpu_sorter.cpp also holds
+three 16-byte PREFIX views of the layout (:1823, :1909, :2038, `dispatch_xyz[3]`
+plus `element_count`) which depend on element_count staying at offset 12 but do
+not carry the full field set, so the marker-based sweep does not see them. They
+need a prefix-mirror concept rather than a list entry.
+
+Guard-only; no runtime, shader or host behaviour changes.
+
+Checks run: `python tests/ci/run_module_tests.py --guard-only` -> zero
+`guard failed`/`FAILED (` lines, "Guard-only mode complete".
+
+Refs #54
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UA1aX2xX8cajR4uKaMeLN6
+```
+chatgpt-codex-connector
+Bot
+reviewed
+Sep 22, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: d4857784d0
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+tests/ci/check_gaussian_layout_sync.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+klausi3D
+commented
+Sep 22, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Review disposition — all six findings accepted and fixed
+Head: d4857784d02. Two independent reviews ran on b98496c630f (Codex gpt-5.4 read-only, and /code-review high, which materialized the checker and ran its own mutations). Both found the guard was narrower than its own comment claimed. Every finding is accepted; none is waived.
+#
+Finding
+Severity
+Disposition
+F1
+Sweep globbed *.glsl only — a ninth declaration already existed outside it
+HIGH
+Fixed + mutation R1
+F2
+Only the first declaration per (file, block) was parsed; a second was exempt
+MEDIUM
+Fixed + mutation R2
+F3
+Binding walk crossed function boundaries — deleting a .binding = N; passed
+MEDIUM
+Fixed + mutation R3
+F4
+Sweep marker was whitespace-exact; uint&nbsp;&nbsp;element_count; hid a declaration
+LOW
+Fixed + mutation R4
+F5
+_SCALAR_BASE_TYPES[...][1] is the alignment slot, not size
+LOW
+Fixed
+F6
+Host-side duplicate struct IndirectDispatchReadback unpinned
+LOW
+Fixed + mutation R5
+—
+(Codex) Both C++ scans parsed comments as code
+HIGH
+Fixed + mutation R6
+F1 is the one that mattered
+renderer/gpu_sorter.cpp:2356 embeds GLSL in a C++ raw string literal declaring layout(set = 0, binding = 0, std430) readonly buffer IndirectCount with the full 24-byte field set — bound to the very global_sort_resources.indirect_dispatch_buffer this guard pins (tile_renderer.cpp:1127). A .glsl-only sweep could not see it, so the commit's claim that "a ninth copy added to a shader cannot quietly escape the pin" was false as written. The count is now nine, and INDIRECT_DISPATCH_EMBEDDED_GLSL_FILES scans C++ translation units that embed GLSL alongside the .glsl roots.
+F2 changed the structure, not just a list
+Rather than looking each pinned entry up by name — which parses only the first declaration of that name in a file — the sweep is now the enumerator. Every occurrence is validated on its own body and its own layout qualifiers, then matched against the pinned list. Two consequences: a duplicate of a listed name fails (the #ifdef/#else variant-pair shape, which tile_binning.glsl's EMIT-pass block is already one half of), and a pinned entry the sweep does not find exactly once also fails — which catches a rename or a reformat past the parser, both of which silently shrink what is checked. That second direction is new; it is mutation R7.
+F3 and the Codex comment finding are the same class
+Both let the guard report an agreement that does not exist:
+```
+indirect_uniform.binding = 7;
+// indirect_uniform.binding = 6;
+indirect_uniform.append_id(owner.global_sort_resources.indirect_dispatch_buffer);
+```
+passed, because the last regex match was the commented 6. And deleting an assignment passed, because the walk fell back past the function boundary to the first rasterizer variant's = 6 — while RD::Uniform::binding defaults to 0, a real slot. Fixed by blanking comments to same-length spaces (offsets preserved) and anchoring the window to this uniform's own RD::Uniform <var>; declaration.
+Mutation proof: 15, all RED
+Each applied alone, guard re-run, restored; line endings preserved; tree GREEN after every one.
+#
+Mutation
+Guard
+M1
+swap overflow_flag/unclamped_total in tile_rasterizer_compute.glsl only
+RED
+M2
+swap element_count/dispatch_z in tile_rasterizer_compute.glsl only
+RED
+M3
+GLSL binding 6 → 7 in tile_rasterizer_compute.glsl only
+RED
+M4
+host C++ binding 6 → 7
+RED
+M5
+drop a field from tile_binning.glsl's EMIT-pass declaration
+RED
+M6
+add a tenth, unlisted declaration
+RED
+M7
+reorder the host struct without updating its offsetof contracts
+RED
+M8
+retype element_count uint → uvec2 in tile_raster_common.glsl only
+RED
+R1
+reorder fields in the embedded GLSL in gpu_sorter.cpp
+RED (F1)
+R2
+add a second declaration of an already-pinned block name
+RED (F2)
+R3
+delete a .binding assignment (would default to slot 0)
+RED (F3)
+R4
+hide a declaration behind whitespace-only reformatting
+RED (F4)
+R5
+reorder the host duplicate struct IndirectDispatchReadback
+RED (F6)
+R6
+hide a binding drift behind a commented-out assignment
+RED (Codex)
+R7
+rename a pinned block so the sweep stops finding it
+RED (new)
+Every one of R1–R7 was verified to pass against the previous head before the fix, which is what makes them proofs rather than decoration.
+Still not covered — stated rather than left implicit
+gpu_sorter.cpp also holds three 16-byte prefix views of the layout (:1823, :1909, :2038 — dispatch_xyz[3] plus element_count) that depend on element_count staying at offset 12 but do not carry the full field set, so the marker-based sweep does not see them. Covering them needs a prefix-mirror concept, not a list entry, and it is recorded in the commit rather than half-done here.
+Also unchanged and already documented in the guard: the host side of compute/instance_count_clamp.glsl's bindings 1 and 3 goes through a helper that takes the binding as a parameter (interfaces/gpu_sorting_pipeline.cpp:2656), so there is no literal to anchor. Both GLSL declarations are pinned; only that one C++ half is not.
+Checks run on the new head
+python tests/ci/run_module_tests.py --guard-only — zero guard failed / FAILED ( lines, ends Guard-only mode complete.
+python tests/ci/check_gaussian_layout_sync.py — PASSED, now printing nine GLSL declarations, eight host binding sites and one host struct mirror by name.
+The two ruff findings on this file (F401 sys, I001) are pre-existing on master and untouched by this PR.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01UA1aX2xX8cajR4uKaMeLN6
+gaussian_splatting: pin the embedded radix sorter's constructor-form …
+…
+07dc363
+```
+…IndirectCount binding (#54)
+
+Codex finding on #1041, first declined, then re-judged on merit: gpu_sorter.cpp wires the
+embedded IndirectCount shader's binding through dispatch_uniforms.push_back(RD::Uniform(...,
+0, count_buffer)), which the append_id walk cannot see, so a one-sided change of that 0 passed
+the guard while the embedded GLSL still expects binding 0. New
+INDIRECT_DISPATCH_HOST_CTOR_BINDING_PINS pins the constructor form (binding and occurrence
+count), and the NOT COVERED comment now points to it instead of implying the clamp shader was
+the only unpinned host side.
+
+Mutation-proven: binding 0 -> 2 was GREEN, now RED. The declaration-anchored append_id check
+(already in d485778) still catches a second builder losing its binding. Guard-only exit 0.
+
+Refs #54.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+```
+chatgpt-codex-connector
+Bot
+reviewed
+Sep 25, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 07dc363ac7
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+tests/ci/check_gaussian_layout_sync.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+tests/ci/check_gaussian_layout_sync.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+gaussian_splatting: pin the radix sorter's IndirectCount prefix views…
+…
+cb22a3b
+```
+… and prove the ABI check stays wired (#54)
+
+Codex review of 07dc363, two findings:
+
+1. The discovery sweep required all three marker fields, so gpu_sorter.cpp's
+   histogram, workgroup-prefix and scatter IndirectCount blocks (bindings
+   2/3/6), which declare only the dispatch_xyz[3] + element_count prefix, were
+   checked by nothing, and neither were their constructor-form host bindings.
+   Discovery now takes any block naming a marker field. Each block must be a
+   leading prefix of IndirectDispatchLayout. Pins sharing a (file, block) name
+   are matched to declarations in file order. The three host ctor bindings are
+   pinned, and a reverse sweep fails on any constructor-form count_buffer
+   binding from an unpinned uniform list.
+
+2. Deleting the _check_indirect_dispatch_abi() call left the guard exiting 0,
+   and its summary was printed from the pin lists. The check now returns what
+   it examined, and the summary prints from that. A new
+   test_check_gaussian_layout_sync.py asserts main() reaches the check and
+   that every count is non-zero. The guard lane runs it before the guard, and
+   the lane-ledger check/test pairing contract enforces that wiring.
+
+Mutation-proven with python -B (in place, restored from memory). The new guard
+is red and the HEAD guard green for a reordered prefix view, a GLSL binding
+3->4, a host ctor binding 6->7, an unpinned list binding count_buffer, and a
+non-leading slice. Replacing the call with list-derived counts leaves the
+guard at exit 0 but fails the unit test. Unwiring the unit test fails the
+lane ledger.
+
+Refs #54
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+```
+chatgpt-codex-connector
+Bot
+reviewed
+Sep 25, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: cb22a3bdfc
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+tests/ci/check_gaussian_layout_sync.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+klausi3D
+and others
+added 2 commits
+September 25, 2026 18:15
+gaussian_splatting: derive the embedded-GLSL source set for the Indir…
+…
+51fe015
+```
+…ectDispatch sweep (#54)
+
+Codex review of cb22a3b: INDIRECT_DISPATCH_EMBEDDED_GLSL_FILES was a
+hand-kept list of two C++ files, so an IndirectDispatch block embedded in any
+other translation unit was never scanned and could drift in layout or binding
+while the guard stayed green.
+
+The sweep now derives its C/C++ source set from the module tree (0.2 s over
+413 files; today it finds only gpu_sorter.cpp's four IndirectCount blocks).
+Build-generated *.gen.* files are excluded, which is the pattern .gitignore
+uses. A built tree carries 41 *.glsl.gen.h copies of the tracked .glsl files
+that the SHADER_ROOTS sweep already checks, and scanning them would report
+every declaration twice.
+
+Mutation-proven with python -B (in place, restored from memory):
+- A reordered, unpinned IndirectDispatch raw-string block injected into
+  tile_render_prefix_scan.cpp: new guard exit 1, cb22a3b guard exit 0.
+- A generated tile_prefix_scan.glsl.gen.h present: guard exit 0 with the
+  exclusion, and exit 1 with the exclusion line deleted.
+
+Refs #54
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+```
+Merge origin/master into gs/54-indirect-dispatch-abi-pin
+…
+5e7297d
+```
+Conflict in tests/ci/check_gaussian_layout_sync.py, main()'s PASSED summary
+only. Both sides are kept: master's (#1062) DebugCounters and SH SNORM10
+lines, followed by this branch's coverage-derived IndirectDispatch line, which
+matches the call order in main() (_check_debug_counters_mirror,
+_check_sh_snorm10_contract, _check_indirect_dispatch_abi; the calls merged
+cleanly).
+
+Verified with python -B on the merged tree. check_gaussian_layout_sync.py
+exits 0, test_check_gaussian_layout_sync.py passes, and run_module_tests.py
+--guard-only exits 0. Every IndirectDispatch mutation is still red (the
+origin/master guard is green on each). Master's SH check is still red on
+int word = int(packed) -> uint word = uint(packed).
+
+Refs #54
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+```
+chatgpt-codex-connector
+Bot
+reviewed
+Sep 25, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 5e7297d820
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+tests/ci/check_gaussian_layout_sync.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+gaussian_splatting: pin the instance count clamp's literal host bindi…
+…
+9951b13
+```
+…ngs (#54)
+
+Codex review of 5e7297d: the guard claimed instance_count_clamp.glsl's
+host bindings 1 and 3 could not be pinned. That claim was false:
+interfaces/gpu_sorting_pipeline.cpp:2733-2734 passes them as literals to
+append_binding(clamp_bindings, type, N, buffer, label). Changing either
+literal left the guard green.
+
+INDIRECT_DISPATCH_HOST_CTOR_BINDING_PINS now accepts the append_binding
+spelling alongside RD::Uniform(...). Both spellings go through one shared
+_literal_binding_sites() helper, which the per-list check and the reverse
+coverage sweep both use. The table gains the two clamp entries, and the false
+NOT COVERED comment is replaced.
+
+Mutation-proven with python -B (in place, restored from memory); the new guard
+exits 1 and the 5e7297d guard exits 0 on each:
+- clamp binding 1 -> 2
+- clamp binding 3 -> 4
+- a second append_binding of inputs.indirect_count_buffer from another list
+The existing gpu_sorter constructor mutations (6 -> 7, unpinned list) stay red.
+
+Refs #54
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+```
+chatgpt-codex-connector
+Bot
+reviewed
+Sep 25, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 9951b1350d
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+tests/ci/check_gaussian_layout_sync.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+tests/ci/check_gaussian_layout_sync.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+tests/ci/check_gaussian_layout_sync.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+klausi3D
+mentioned this pull request
+Sep 25, 2026
+tests: derive the IndirectDispatch host-mirror and binding-site lists in check_gaussian_layout_sync.py
+#1067
+Open
+Hide details
+View details
+klausi3D
+merged commit bd3934e
+into
+master
+Sep 25, 2026
+8 of 10 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+klausi3D
+deleted the
+gs/54-indirect-dispatch-abi-pin
+branch
+September 25, 2026 18:48
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 26, 2026
+Merge origin/master into docs/54-accepted-limitation
+…
+75fa3cc
+```
+#1065 landed on master as squash 26ab0f0, whose content for the two
+conflicting docs is identical to #1065's head 29d85fb, the base this
+branch was built on. Conflicts in known-public-alpha-limitations.md and
+release-acceptance-bar.md were resolved by keeping this branch's side,
+which is #1065's text plus the #54-acceptance deltas; the manifest and ADR
+merged cleanly. Also brings in #1041, #1042 and #1059.
+
+Refs #54
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,363 @@
+Compile and explore arbitrarily large n-dimensional scientific data in the browser — points, lines, Gaussian splats and meshes, streamed from Zarr and rendered on the GPU. - Depth sort stays current while a scene loads by royerloic · Pull Request #2974 · royerlab/luxar
+
+Depth sort stays current while a scene loads by royerloic · Pull Request #2974 · royerlab/luxar · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+royerloic
+commented
+Sep 29, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+When a gsplat scene is rotated while it loads, the back-to-front order lags the camera for seconds. On the hosted h2afva timelapse it lagged by up to 180° (fully inverted) for 11.7 s. There are three causes, all already on dev, and this PR fixes them test-first.
+Per-frame re-sorts were paused while the loader was busy. The isLoadInProgress gate in evaluateDepthSortPerFrame is wired to isUpdateInProgress(). That stays true through the whole progressive-refinement drain and every view pass, so during a load the order only moved on rung commits. The gate was an optimisation from feat(viewer): depth-sorting Phase 3 — camera-triggered gsplat re-sorts #553, not an invariant: a re-sort that races a commit is already discarded by the generation guard, and the commit's own sort queues behind it. It is dropped, which also covers view passes during a drag.
+The first sort ran for the pose before auto-framing. The same gate held back the re-sort after the framing move. Fixed by (1), with its own regression test.
+A grown node was drawn in storage order until its sort landed. Appends, and pool grows (every doubling rung), reset the ordering to identity for a sort round-trip: 75–225 ms per rung above the 250k synchronous-sort limit. The node now keeps drawing the previous population in its sorted order, and the new splats appear one sort later, already sorted. Every path on which that sort can never arrive releases the hold.
+Measured. Sortlag probe on the hosted profile (100 ms, 25 Mbps, h2), h2afva timelapse up to its 1.1M-splat rung, orbiting at 30°/s during the load:
+dev
++ (1)
++ (1)+(3)
+Worst lag during load
+180°
+55°
+6.6°
+Mean lag
+44.8°
+2.7°
+2.7°
+Sorts/s
+4.6
+8.4
+8.4
+Frames drawn in storage order
+2
+2
+0
+Still camera, worst / mean
+119° / 19.9°
+116° / 1.1°
+2.3° / 0.7°
+Sort latency is unchanged (mean 5 ms), and orbiting after the load settles is unchanged.
+Not changed:
+The chunked ordering apply streams 1M elements per drawn frame, so a 10M-splat order takes about 10 frames. It is always a complete permutation, and I found no safe improvement.
+About half the probe runs stop refining at 554k splats and never commit the 1.1M rung. This happens on dev too, and is separate from this PR.
+Checks: typecheck, lint, check:layers and prettier pass, and so does the full unit suite (15,712). The E2E specs blending-modes, lines-blending-modes, gsplat-rendering-visual, frame-pacing and worker-wasm-integration also pass (39/39).
+🤖 Generated with Claude Code
+⚠️ Maintainers may push to this branch. Before pushing, run git fetch && git reset --hard origin/viewer-sort-during-load, and use git push --force-with-lease (never plain --force) so those commits are not dropped.
+royerloic
+and others
+added 5 commits
+September 29, 2026 16:48
+test: depth sort stops re-sorting a moving camera while the loader is…
+…
+5ca1f91
+```
+… busy (fails)
+
+evaluateDepthSortPerFrame skips every per-frame re-sort while
+isLoadInProgress() is true, and the pipeline wires that to the loader's
+isUpdateInProgress(), which stays true for the whole progressive-refinement
+drain and every view pass. Orbiting while a scene streams in is therefore
+answered only by rung commits: on the hosted h2afva timelapse the back-to-front
+order lagged the camera by up to 180 degrees (fully inverted) for 11.7 s. The
+same gate hides the auto-framing move, so a still camera sees the order sorted
+for the pre-framing pose until the drain ends.
+
+Marked `.fails` until the fix:
+- "keeps re-sorting a moving camera while the loader stays busy (refinement drain / view pass)"
+- "re-sorts for the auto-framed pose even while the loader is still refining"
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Depth sort: keep re-sorting while the loader is busy
+…
+0aaf614
+```
+Drop the loader-busy gate from the per-frame camera re-sort. It was an
+optimisation from #553 ("the pending commit will sort anyway"), not an
+invariant: a re-sort that races a commit is already discarded by the
+generation guard, commits are synchronous, and a commit's own sort queues
+behind the in-flight one (resortQueued). isLoadInProgress now only gates the
+starved-worker-init retry, whose reasoning still holds. Dropping the gate
+rather than narrowing it to isLoadPassInProgress() also keeps view passes
+during a drag from pausing re-sorts of nodes the pass never re-commits. The
+test that pinned the old skip is removed; the README, the rendering README,
+the pipeline comment and GSPLAT_DEPTH_SORTING_SPEC.md describe the new rule.
+
+Measured (sortlag probe, hosted profile 100 ms / 25 Mbps / h2, h2afva
+timelapse to its 1.1M-splat rung, 30 deg/s orbit during load): worst lag
+180 -> 55 deg (the remainder is the grown-population storage-order window,
+fixed next), mean 44.8 -> 2.7 deg, sorts/s 4.6 -> 8.4, settled 11.7 -> 2.9 s;
+still camera mean 19.9 -> 1.1 deg. Sort latency unchanged (mean 5 ms).
+
+Verified: the previous commit's tests pass; full unit suite, typecheck, lint,
+check:layers, prettier.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test: a grown gsplat node draws in storage order until its sort lands…
+…
+c51d5be
+```
+… (fails)
+
+A commit that appends to a sorted node, or grows it past the pool's capacity
+headroom (every doubling rung of a real ladder), resets the ordering to
+identity and draws the whole grown population in storage order for a sort
+round-trip: 75-225 ms per rung above the 250k synchronous-sort limit.
+
+Marked `.fails` until the fix:
+- "keeps drawing the previous population in its sorted order, then shows the grown one sorted"
+- "a grow that extends the drawn population seeds the new geometry with its drawn order"
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+GSplats: hold a grown draw on the previous sorted population until it…
+…
+a3d0729
+```
+…s own ordering lands
+
+element-storage gains a held draw: holdSortedIndexDrawForAppend keeps the
+active prefix and draws only the previous count; holdSortedIndexDrawFromSeed
+does the same on the pool-grow path, seeding the fresh geometry with the
+previous geometry's drawn permutation (identity past it). The hold lifts
+when an ordering of exactly the grown count is installed (the slot flip or
+the synchronous sort's live write); releaseSortedIndexDrawHold is the
+fallback (repaired full permutation, everything drawn), and the identity and
+repair writers clear any hold. commit-gsplats-geometry splits out the
+lineage proof (extendsCommitted) and passes the drawn permutation as
+GSplatsUpdateOptions.seedOrdering on a grow. The coordinator releases the
+hold on every path where that ordering will never arrive: order-independent
+or sort-off modes, empty commit, no API, registerNode failure, unreachable
+worker, undispatchable sort, a current-generation result that stages
+nothing, RPC failure or timeout, a switch to a commutative mode, and node
+release; a stale result does not, since the newer commit's sort is queued.
+The two tests that pinned identity-on-append are rewritten; about 16 guard
+tests cover the release paths (mutation-checked), stale results, the
+sync-sort raise, the grow seed and the declined cases.
+
+Measured (same probe and scene): storage-order frames 2 -> 0, worst orbit lag
+during load 55 -> 6.6 deg, still-camera worst 116 -> 2.3 deg; the 1.1M rung
+first appears already ordered (3.7-5.1 deg, was 42-51 deg). New splats become
+visible one sort round-trip later, already sorted.
+
+Verified: the previous commit's tests pass; full unit suite (15,712),
+typecheck, lint, check:layers, prettier.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+changelog: depth order stays current while a scene loads (#2974)
+…
+dcd56ef
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+royerloic
+marked this pull request as ready for review
+September 30, 2026 00:51
+royerloic
+commented
+Sep 30, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Let's fix this PR and merge it when green. It's independent of the viewer-perf stack and targets dev directly.
+royerloic
+commented
+Sep 30, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Review of dcd56ef — approving. One nit below, nothing blocking.
+What this does. It fixes three reasons the gsplat back-to-front order fell behind the camera while a scene streamed in:
+evaluateDepthSortPerFrame no longer skips within-mesh re-sorts while isLoadInProgress() is true. That signal now gates only the starved-worker init retry.
+The auto-framed pose therefore gets its re-sort without waiting for the refinement drain to finish.
+A gsplat commit that grows the population no longer draws it in storage order. On an append (same geometry) or a pool grow (fresh geometry, seeded with the previous geometry's drawn permutation), instanceCount is held at the previous population. It is raised only when an ordering of exactly the grown count is installed: at the chunked flip, or by the live write from the synchronous sort. The coordinator releases the hold (repair plus draw everything) on every path where that ordering can never arrive.
+Findings
+nit: packages/luxar-viewer/src/rendering/gpu-buffer-pool/gsplats-adapter.ts, releaseGeometry (~L350). On a grow while a hold is active, the old geometry goes back to the free bucket and keeps its heldDrawTargets entry. Today that is harmless, because every re-adoption starts with writeSortedIndexIdentity (directly, or through holdSortedIndexDrawFromSeed), and that clears the entry. The vouched && held branch in writeCommitOrdering also needs sameBuffers. Still, a pooled buffer carrying another tenant's hold state is the kind of thing that bites the next person who adds a path. Suggested fix: call releaseSortedIndexDrawHold, or just drop the entry, next to the existing cancelSortedIndexOrderingApply in releaseGeometry. Optional.
+Considered and dropped
+scheduleSort releases the hold on !camera or when the worker isn't ready. This can end a hold before a later sort would have raised it. But the per-frame path only dispatches for registered nodes, and the commit path only reaches scheduleSort after ensureWorker resolves, so this is rare and degrades safely to the repaired full draw. Not worth more code.
+A vouched (preserveOrdering/repairFromCount) recommit while held ends the hold and draws [drawn order, storage-order tail]. That is the same fallback as a release, and the recommit's own sort replaces it one round-trip later. It's a defensible choice, not a defect.
+While a hold is active, instanceCount is below visibleSplatCount, so the debug-state and scene-stats readers of instanceCount report the drawn count for one sort round-trip. That is the honest "drawn" number. The commit path keys its lineage on visibleSplatCount, not instanceCount, so append/repair bookkeeping is unaffected.
+What I checked
+Read the full modified files plus the consumers: commitGSplatsGeometry (the prevCount source, the lineage conjuncts, and the fact that noteDepthSortCommit always runs after the pool update), the pool grow path (releaseGeometry → adoptOrAllocate → post-grow evictUnused), the chunk pump, writeSortedIndexOrdering, writeSortedIndexOrderingLive, repairSortedIndexForCount, the per-frame scheduler, the capture force loop, mode-switch, release and demotion. I also checked every other writer of the ordering buffer, including the non-pool gsplat-geometry.ts path (it never holds) and the points/lines adapters (unchanged).
+The seed is sound. The previous geometry's active buffer over [0, instanceCount) is a complete permutation in every state (identity, sorted, or an existing hold's prefix). The lineage proof makes it an ordering of the new geometry's prefix. The view is consumed inside updateGSplatsGeometry, before mesh.geometry is swapped or the placeholder is disposed. Dispose does not touch the CPU arrays.
+Hold/raise invariants: during a hold, every drawn frame samples [0, drawn) of a complete permutation. Raising happens only on a matching count. Stale-generation results correctly keep the hold, because the newer commit's scheduleSort runs in a microtask before any worker reply can land, so resortQueued is already set. Small nodes raise inside the commit through trySynchronousFirstSort. Hidden or culled nodes finish the flip once drawn again, so there is no stuck hold.
+Clamps: the held target comes from writeSplatTexels's returned count. It matches the clamped count the commit hands the worker, so the flip's state.count meets it.
+Removing the loader gate: a re-sort that races a commit is dropped by the generation guard, and the commit's sort queues behind it. loadInProgress is still read for the retry only, and the pipeline/configure comments and the spec agree with that.
+Ran at this head: the three touched suites pass (313/313), and pnpm typecheck and pnpm lint are clean (suppression baseline untouched). Mutation check: dropping the flip-time raiseHeldDraw and dropping the mode-switch release together fail 5 of the new tests, so they catch real breakage.
+Cross-PR: Viewer perf 1/5: verification infrastructure, render-on-change, WebGPU uploads #2945 adds a render-on-change fingerprint keyed on visibleSplatCount ?? instanceCount, so a raise will not change it for gsplats. That is fine as long as the flip keeps calling requestRender() (it does). Worth remembering when those two meet.
+Docs are in sync: the rendering, coordinator and pool READMEs, GSPLAT_DEPTH_SORTING_SPEC.md, and the changelog.d/2974.md fragment.
+royerloic
+commented
+Sep 30, 2026
+Copy link
+Copy Markdown
+Member
+Author
+I found the docs warning ratchet failure and a runner-side wasm-pack install error in the TypeScript job. I’m fixing the docs warning and the pooled-geometry cleanup noted in review, then I’ll rerun the local viewer checks before pushing.
+royerloic
+added 2 commits
+September 29, 2026 18:01
+docs: resolve held-draw TypeDoc link (#2974)
+6b983d3
+fix(gsplats): clear held draws on pool release (#2974)
+e485bab
+royerloic
+commented
+Sep 30, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Fixed the TypeDoc link warning and cleared held gsplat draws when geometry returns to the pool. During review of that cleanup, I found that a pool grow can raise the old geometry’s count before the next commit reads its ordering seed; the commit now uses the pre-acquire drawn count. Added regressions for both paths and updated the depth-sorting spec’s stale identity-reset description.
+Local checks pass: full viewer unit suite (15,975 passed, 1 skipped), typecheck, lint, layer checks, formatting, and make check-docs (including the TypeDoc ratchet and warning-fatal Sphinx build). The previous TypeScript CI run stopped before project checks because the runner could not rename the downloaded wasm-pack binary across filesystems (EXDEV).
+royerloic
+commented
+Sep 30, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Pushed review fixes to viewer-sort-during-load (head now e485bab). Heads-up that this branch is shared — if you have local commits, run git fetch && git reset --hard origin/viewer-sort-during-load before pushing, and use git push --force-with-lease (never plain --force), or those commits will be dropped.
+royerloic
+commented
+Sep 30, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Re-review of e485bab (the delta since dcd56ef). Approving. No findings.
+What the delta does
+gsplats-adapter.ts releaseGeometry: calls releaseSortedIndexDrawHold right after cancelSortedIndexOrderingApply. A pooled buffer therefore no longer carries its old tenant's heldDrawTargets entry. This is the nit from the last round, done.
+commit-gsplats-geometry.ts: prevDrawnCount is taken from prevGeometry.instanceCount before the pool acquire, and drawnOrderingSeed reads that count instead of the live one. This is a real follow-on to the release change. The grow path calls releaseGeometry on the old geometry inside the acquire, which now raises its instanceCount to the hold target. The live read would then seed [sorted prefix, storage-order tail] rather than only the prefix that was actually sorted on screen. Catching it here was right.
+The redundant getPrefixParent(...) !== undefined conjunct is dropped. That's safe: hadCommittedData already guarantees getCommittedData(mesh) !== undefined, so the identity comparison can't match undefined === undefined.
+Docs: the TypeDoc {@link raiseHeldDraw} became a code span (it isn't exported, so the link warned). The stale "identity reset / hold rejected" paragraph in GSPLAT_DEPTH_SORTING_SPEC.md now describes the held draw that actually shipped.
+What I checked
+The seed survives the release. releaseSortedIndexDrawHold → repairSortedIndexForCount keeps arr[0..drawn) in place, because pass 1 keeps the surviving prefix in its existing order, and every value there is < drawn ≤ target. It works on the same active slot, and the in-flight apply is cancelled first. So subarray(0, prevDrawnCount) of the released geometry is still the exact on-screen permutation when holdSortedIndexDrawFromSeed copies it. A seed shorter than the new geometry's lineage prefix (drawn 4 of a committed 6) is fine, since the function only needs a complete permutation of [0, seed.length) with seed.length < count.
+Callers of releaseGeometry: the grow path inside acquireGeometry (L217), and node release in scene-loader.ts:2109. On the node-release path the mesh is going away anyway, so repairing and raising the released geometry does no harm. The released buffer is re-adopted through writeSortedIndexIdentity, directly or through the seed writer, which renormalises it.
+prev === next still returns no seed, so the append path is unaffected.
+The two touched suites pass at this head (82/82), and pnpm typecheck plus eslint on the three touched source files are clean. Mutation check: reverting drawn = drawnCount to geometry.instanceCount and deleting the new releaseSortedIndexDrawHold call fails exactly the two new tests. Both are real regressions, not tautologies.
+CI: the typescript-tests failure is the runner's wasm-pack install step (the same cross-filesystem rename issue already tracked in typescript-tests intermittently fails on EXDEV cross-device rename installing wasm-pack #2973). It stops before any project code runs. The other legs are green.
+Dropped
+Release now does an O(n) repair on a buffer that is leaving service, where a bare heldDrawTargets.delete would do. It's one pass per grow and it leaves the pooled buffer in a fully consistent state, so it isn't worth changing.
+Nothing deferred.
+royerloic
+commented
+Sep 30, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Final review of e485bab — approving, good to merge.
+What it does. Keeps the gsplat back-to-front order current while a scene streams in: the per-frame camera re-sort no longer pauses on the loader-busy signal (which now gates only the starved-worker init retry), and an append or pool grow holds instanceCount at the previously drawn population, in its drawn order, until an ordering of the grown population flips in. Every no-sort path releases the hold with a repaired full permutation.
+What I checked at this head
+Read the whole thread; the earlier nit (pooled buffer keeping its old tenant's hold) and its follow-on (seed read after the release raised the old geometry's count) are both in and covered by the new regressions.
+Hold lifecycle: traced every exit of noteDepthSortCommit, scheduleSort (guard, null/stale/rejected resolve, RPC failure), mode switch and node release; a stale-generation result correctly keeps the hold because the newer commit's sort is queued behind it. The count the coordinator registers is the same clamped splatCount the adapter holds on (the pool acquires at that count, so the texel writer's capacity clamp is a no-op), so the raise cannot miss.
+No other writer raises instanceCount on a pooled gsplat geometry behind the hold (the held buffer's undrawn suffix is stale, so that would have been the corruption to look for).
+The seed for a grow is the released geometry's active [0, drawn) permutation, still intact after the release repair, overlaid on a fresh identity — the buffer stays a complete permutation.
+Local: pnpm typecheck clean; the four touched suites 353/353; full viewer unit suite 744 files, 15,975 passed, 1 skipped (CI's typescript-tests leg stopped at the runner's wasm-pack EXDEV install error, tracked in typescript-tests intermittently fails on EXDEV cross-device rename installing wasm-pack #2973, so this is the run CI did not get). Docs and changelog fragment are in sync with the code.
+Heads-up, not a blocker: the viewer-perf stack (#2945 and later) touches depth-sort-coordinator.ts and element-storage.ts and will need a conflict resolution once this lands; #2945's render-on-change fingerprint keys on visibleSplatCount, so a raised hold relies on the flip's requestRender(), which is present.
+royerloic
+enabled auto-merge (squash)
+September 30, 2026 01:29
+royerloic
+mentioned this pull request
+Sep 30, 2026
+Viewer: progressive refinement sometimes stalls before the last rung (h2afva stops at 554k splats)
+#2975
+Closed
+Hide details
+View details
+royerloic
+merged commit ad841ef
+into
+dev
+Sep 30, 2026
+58 of 62 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+royerloic
+deleted the
+viewer-sort-during-load
+branch
+September 30, 2026 12:48
+royerloic
+added a commit
+that referenced
+this pull request
+Sep 30, 2026
+Merge dev: #2923 (squashed) and #2974
+…
+917019f
+```
+One conflict, the caseUrl doc comment in run-gate.mjs (kept).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+royerloic
+added a commit
+that referenced
+this pull request
+Sep 30, 2026
+Merge viewer-view-context: dev with #2923 and #2974
+…
+8652e20
+```
+Two conflicts with #2974: the evaluateDepthSortPerFrame doc comment
+(#2974's loader-gate rule plus A2's render-on-change @returns) and the
+module blocks in element-storage.ts (identity memo and held draw both
+kept). As in the same resolution on the stack tip (d8f7829):
+holdSortedIndexDrawFromSeed clears the identity memo and registers an
+upload range for the seed; releaseSortedIndexDrawHold reports whether a
+hold ended and the coordinator then requests a render; commitGSplatsGeometry
+is split for the 120-line cap. Each fix has a test that fails on the plain
+merge. Full unit suite (15,933), typecheck, lint.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+This was referenced Sep 30, 2026
+Viewer: per-frame ViewContext; LOD, ortho partition order and clipping fixes
+#2924
+Merged
+Viewer perf 1/5: verification infrastructure, render-on-change, WebGPU uploads
+#2945
+Merged
+Viewer perf: network, first paint and decode pipeline
+#2949
+Merged
+Viewer performance: playback, cache, loading, large trees, and LOD
+#2946
+Merged
+Viewer perf: huge trees, gated partition loading and scrubbing
+#2956
+Merged
+Viewer perf: LOD policy (stable coverage, timed dissolve, playback aspiration, normal thinning)
+#2957
+Merged
+Viewer performance audit: ranked, measured opportunities (loading, LOD, rendering, playback, caching)
+#2944
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

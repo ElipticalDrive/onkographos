@@ -1,0 +1,218 @@
+OpenVDB: nanovdb/examples/ex_raytrace_fog_volume/common.h Source File
+OpenVDB
+9.0.1
+Main Page
+Related Pages
+Namespaces
+Classes
+Files
+File List
+File Members
+nanovdb
+examples
+ex_raytrace_fog_volume
+common.h
+Go to the documentation of this file.
+1 // Copyright Contributors to the OpenVDB Project
+2 // SPDX-License-Identifier: MPL-2.0
+3
+4 #pragma once
+5
+6 #include <cmath>
+7 #include <chrono>
+8 #include <fstream>
+9 #include <nanovdb/NanoVDB.h>
+10 #include "ComputePrimitives.h"
+11
+12 inline __hostdev__ uint32_t CompactBy1(uint32_t x)
+13 {
+14 x &= 0x55555555;
+15 x = (x ^ (x >> 1)) & 0x33333333;
+16 x = (x ^ (x >> 2)) & 0x0f0f0f0f;
+17 x = (x ^ (x >> 4)) & 0x00ff00ff;
+18 x = (x ^ (x >> 8)) & 0x0000ffff;
+19 return x;
+20 }
+21
+22 inline __hostdev__ uint32_t SeparateBy1(uint32_t x)
+23 {
+24 x &= 0x0000ffff;
+25 x = (x ^ (x << 8)) & 0x00ff00ff;
+26 x = (x ^ (x << 4)) & 0x0f0f0f0f;
+27 x = (x ^ (x << 2)) & 0x33333333;
+28 x = (x ^ (x << 1)) & 0x55555555;
+29 return x;
+30 }
+31
+32 inline __hostdev__ void mortonDecode(uint32_t code, uint32_t& x, uint32_t& y)
+33 {
+34 x = CompactBy1(code);
+35 y = CompactBy1(code >> 1);
+36 }
+37
+38 inline __hostdev__ void mortonEncode(uint32_t& code, uint32_t x, uint32_t y)
+39 {
+40 code = SeparateBy1(x) | (SeparateBy1(y) << 1);
+41 }
+42
+43 template<typename RenderFn, typename GridT>
+44 inline float renderImage(bool useCuda, const RenderFn renderOp, int width, int height, float* image, const GridT* grid)
+45 {
+46 using ClockT = std::chrono::high_resolution_clock;
+47 auto t0 = ClockT::now();
+48
+49 computeForEach(
+50 useCuda, width * height, 512, __FILE__, __LINE__, [renderOp, image, grid] __hostdev__(int start, int end) {
+51 renderOp(start, end, image, grid);
+52 });
+53 computeSync(useCuda, __FILE__, __LINE__);
+54
+55 auto t1 = ClockT::now();
+56 auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1000.f;
+57 return duration;
+58 }
+59
+60 inline void saveImage(const std::string& filename, int width, int height, const float* image)
+61 {
+62 const auto isLittleEndian = []() -> bool {
+63 static int x = 1;
+64 static bool result = reinterpret_cast<uint8_t*>(&x)[0] == 1;
+65 return result;
+66 };
+67
+68 float scale = 1.0f;
+69 if (isLittleEndian())
+70 scale = -scale;
+71
+72 std::fstream fs(filename, std::ios::out | std::ios::binary);
+73 if (!fs.is_open()) {
+74 throw std::runtime_error("Unable to open file: " + filename);
+75 }
+76
+77 fs << "Pf\n"
+78 << width << "\n"
+79 << height << "\n"
+80 << scale << "\n";
+81
+82 for (int i = 0; i < width * height; ++i) {
+83 float r = image[i];
+84 fs.write((char*)&r, sizeof(float));
+85 }
+86 }
+87
+88 template<typename Vec3T>
+89 struct RayGenOp
+90 {
+91 float mWBBoxDimZ;
+92 Vec3T mWBBoxCenter;
+93
+94 inline RayGenOp(float wBBoxDimZ, Vec3T wBBoxCenter)
+95 : mWBBoxDimZ(wBBoxDimZ)
+96 , mWBBoxCenter(wBBoxCenter)
+97 {
+98 }
+99
+100 inline __hostdev__ void operator()(int i, int w, int h, Vec3T& outOrigin, Vec3T& outDir) const
+101 {
+102 // perspective camera along Z-axis...
+103 uint32_t x, y;
+104 #if 0
+105 mortonDecode(i, x, y);
+106 #else
+107 x = i % w;
+108 y = i / w;
+109 #endif
+110 const float fov = 45.f;
+111 const float u = (float(x) + 0.5f) / w;
+112 const float v = (float(y) + 0.5f) / h;
+113 const float aspect = w / float(h);
+114 const float Px = (2.f * u - 1.f) * tanf(fov / 2 * 3.14159265358979323846f / 180.f) * aspect;
+115 const float Py = (2.f * v - 1.f) * tanf(fov / 2 * 3.14159265358979323846f / 180.f);
+116 const Vec3T origin = mWBBoxCenter + Vec3T(0, 0, mWBBoxDimZ);
+117 Vec3T dir(Px, Py, -1.f);
+118 dir.normalize();
+119 outOrigin = origin;
+120 outDir = dir;
+121 }
+122 };
+123
+124 struct CompositeOp
+125 {
+126 inline __hostdev__ void operator()(float* outImage, int i, int w, int h, float value, float alpha) const
+127 {
+128 uint32_t x, y;
+129 int offset;
+130 #if 0
+131 mortonDecode(i, x, y);
+132 offset = x + y * w;
+133 #else
+134 x = i % w;
+135 y = i / w;
+136 offset = i;
+137 #endif
+138
+139 // checkerboard background...
+140 const int mask = 1 << 7;
+141 const float bg = ((x & mask) ^ (y & mask)) ? 1.0f : 0.5f;
+142 outImage[offset] = alpha * value + (1.0f - alpha) * bg;
+143 }
+144 };
+RayGenOp::RayGenOp
+RayGenOp(float wBBoxDimZ, Vec3T wBBoxCenter)
+Definition: common.h:94
+RayGenOp
+Definition: common.h:89
+saveImage
+void saveImage(const std::string &filename, int width, int height, const float *image)
+Definition: common.h:60
+RayGenOp::operator()
+__hostdev__ void operator()(int i, int w, int h, Vec3T &outOrigin, Vec3T &outDir) const
+Definition: common.h:100
+RayGenOp::mWBBoxDimZ
+float mWBBoxDimZ
+Definition: common.h:91
+CompositeOp
+Definition: common.h:124
+NanoVDB.h
+Implements a light-weight self-contained VDB data-structure in a single file! In other words...
+mortonEncode
+__hostdev__ void mortonEncode(uint32_t &code, uint32_t x, uint32_t y)
+Definition: common.h:38
+CompositeOp::operator()
+__hostdev__ void operator()(float *outImage, int i, int w, int h, float value, float alpha) const
+Definition: common.h:126
+ComputePrimitives.h
+A collection of parallel compute primitives.
+computeForEach
+void computeForEach(bool useCuda, int numItems, int blockSize, const char *file, int line, const FunctorT &op, Args...args)
+Definition: ComputePrimitives.h:146
+RayGenOp::mWBBoxCenter
+Vec3T mWBBoxCenter
+Definition: common.h:92
+value
+ValueT value
+Definition: GridBuilder.h:1287
+CompactBy1
+__hostdev__ uint32_t CompactBy1(uint32_t x)
+Definition: common.h:12
+computeSync
+void computeSync(bool useCuda, const char *file, int line)
+Definition: ComputePrimitives.h:125
+openvdb::v9_0::math::scale
+MatType scale(const Vec3< typename MatType::value_type > &s)
+Return a matrix that scales by s.
+Definition: Mat.h:637
+renderImage
+float renderImage(bool useCuda, const RenderFn renderOp, int width, int height, float *image, const GridT *grid)
+Definition: common.h:44
+mortonDecode
+__hostdev__ void mortonDecode(uint32_t code, uint32_t &x, uint32_t &y)
+Definition: common.h:32
+SeparateBy1
+__hostdev__ uint32_t SeparateBy1(uint32_t x)
+Definition: common.h:22
+__hostdev__
+#define __hostdev__
+Definition: NanoVDB.h:168
+Generated by
+1.8.11

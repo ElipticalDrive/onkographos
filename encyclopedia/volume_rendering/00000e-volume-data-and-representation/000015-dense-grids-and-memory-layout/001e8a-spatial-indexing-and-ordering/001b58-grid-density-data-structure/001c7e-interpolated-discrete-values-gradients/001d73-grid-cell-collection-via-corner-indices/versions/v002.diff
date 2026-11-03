@@ -1,0 +1,136 @@
+--- v001.md
++++ v002.md
+@@ -4,20 +4,20 @@
+ 
+ ## Overview
+-This method collects the values at the 8 vertices of the grid cell enclosing each input point, providing the raw data required for trilinear interpolation or similar operations [S1, unofficial]. It differs from [Nearest Voxel Lookup with Periodic Boundary](1573-nearest-voxel-lookup-with-periodic-boundary.md) by retrieving all 8 neighbors rather than a single nearest neighbor, enabling smooth gradient-based reconstruction.
++This method collects the values at the 8 vertices of the grid cell enclosing each input point, providing the raw data required for trilinear interpolation or similar operations [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A tensor of normalized sample coordinates (shape $[N, 3]$) and a dense grid tensor.
+-**Outputs:** A tensor of collected corner values (shape $[N, 8, C]$) or indices ready for indexing.
++**Inputs:** A tensor of sample coordinates (shape $[N, 3]$) and a dense grid tensor [S1, unofficial].
++**Outputs:** A tensor of collected corner indices (shape $[N \times 8, 3]$) or gathered values [S1, unofficial].
+ 
+ **Data Structures:**
+-- `normalized_samples`: Float tensor of shape $[N, 3]$ containing $(x, y, z)$ coordinates.
++- `samples`: Float tensor of shape $[N, 3]$ containing $(x, y, z)$ coordinates.
+ - `grid`: Tensor storing values at grid vertices.
+ 
+ **Steps:**
+-1. **Compute Bounds:** For each dimension $d \in \{x, y, z\}$, calculate the floor and ceiling indices of the sample coordinates. Let $p_d$ be the coordinate. The indices are $i_{floor} = \lfloor p_d \rfloor$ and $i_{ceil} = \lceil p_d \rceil$.
+-2. **Generate Combinations:** Form the Cartesian product of the floor/ceil indices for all three dimensions. This yields 8 index tuples $(i_x, i_y, i_z)$ representing the corners of the enclosing voxel.
+-3. **Reshape:** Flatten the list of corner indices to align with the input points. The resulting tensor has shape $[N \times 8, 3]$.
+-4. **Boundary Handling:** Apply periodic boundary conditions to any indices that fall outside the valid grid range $[0, D-1]$. The index $i$ is mapped to $i \mod D$.
+-5. **Indexing:** Use the fixed indices to gather values from the grid tensor.
++1. For each input point, compute `ceil` and `floor` coordinates for $x$, $y$, $z$ dimensions [S1, unofficial].
++2. Generate all 8 combinations of $(\text{ceil}/\text{floor}) \times (\text{ceil}/\text{floor}) \times (\text{ceil}/\text{floor})$ to form the corner indices [S1, unofficial].
++3. Reshape the corner indices tensor to a flat list of points [S1, unofficial].
++4. Fix out-of-bounds indices using periodic boundary conditions [S1, unofficial].
++5. Index into the grid tensor using the fixed indices [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -25,58 +25,40 @@
+ import torch
+ 
+-def collect_corner_indices(normalized_samples):
++def collect_corner_indices(samples, grid_size):
+     """
+     Collects corner indices for trilinear interpolation.
+     Args:
+-        normalized_samples: Tensor of shape [N, 3] with coordinates in [0, 1] or similar range.
+-                            Assumes grid dimensions are known or handled in a wrapper.
++        samples: Tensor of shape [N, 3] with coordinates.
++        grid_size: Tuple or tensor of grid dimensions [Dx, Dy, Dz].
+     Returns:
+         indices: Tensor of shape [N*8, 3] containing integer corner indices.
+     """
+     # 1. Compute floor and ceil for each dimension
+-    # Note: In practice, coordinates must be scaled by grid dimensions before floor/ceil
+-    # to get actual vertex indices. Assuming normalized_samples are already scaled 
+-    # to [0, Dim-1] or the function handles scaling externally.
+-    # Here we assume inputs are already in index space or we scale them.
+-    # For strict implementation based on [S1]:
+-    
+-    # Extract components
+-    x = normalized_samples[:, 0]
+-    y = normalized_samples[:, 1]
+-    z = normalized_samples[:, 2]
+-    
+-    # Compute floor and ceil
+-    floor_x = torch.floor(x)
+-    ceil_x = torch.ceil(x)
+-    floor_y = torch.floor(y)
+-    ceil_y = torch.ceil(y)
+-    floor_z = torch.floor(z)
+-    ceil_z = torch.ceil(z)
+-    
++    floor_x = torch.floor(samples[:, 0])
++    ceil_x = torch.ceil(samples[:, 0])
++    floor_y = torch.floor(samples[:, 1])
++    ceil_y = torch.ceil(samples[:, 1])
++    floor_z = torch.floor(samples[:, 2])
++    ceil_z = torch.ceil(samples[:, 2])
++
+     # 2. Generate all 8 combinations
+-    # Create lists for each dimension
+     x_components = [floor_x, ceil_x]
+     y_components = [floor_y, ceil_y]
+     z_components = [floor_z, ceil_z]
+-    
+-    relevant_points = []
++
++    corners = []
+     for xc in x_components:
+         for yc in y_components:
+             for zc in z_components:
+-                # Concatenate along the last dimension
+-                point = torch.stack([xc, yc, zc], dim=1)
+-                relevant_points.append(point)
+-    
++                corners.append(torch.stack([xc, yc, zc], dim=1))
++
+     # 3. Reshape to flat list
+-    # Stack all 8 tensors: shape [8, N, 3] -> [N*8, 3]
+-    all_corners = torch.cat(relevant_points, dim=0)
+-    
+-    # 4. Fix out-of-bounds indices (Periodic Boundary)
+-    # Assuming grid dimensions are passed or known. 
+-    # If not provided, this step is marked [G].
+-    # For demonstration, assume grid_size is a tuple (Dx, Dy, Dz)
+-    # indices = all_corners % torch.tensor(grid_size, device=all_corners.device)
+-    
+-    return all_corners.long()
++    indices = torch.cat(corners, dim=0).type(torch.long)
++
++    # 4. Fix out-of-bounds indices using periodic boundary conditions
++    grid_size_tensor = torch.tensor(grid_size, device=indices.device, dtype=torch.long)
++    indices = indices % grid_size_tensor
++
++    return indices
+ ```
+ 
+@@ -86,5 +68,5 @@
+ 
+ **Edge Cases:**
+-- **Precision:** Floating point errors in coordinate calculation may cause `floor` and `ceil` to be equal for integer coordinates. This is handled naturally by the Cartesian product (duplicate corners will have identical indices).
++- **Precision:** Floating point errors may cause `floor` and `ceil` to be equal for integer coordinates. This is handled naturally by the Cartesian product, as duplicate corners will have identical indices [G].
+ - **Boundaries:** Indices outside the grid must be wrapped. The source specifies periodic boundary conditions [S1, unofficial].
+ 
+@@ -98,11 +80,11 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the number of sample points, as it involves constant-time arithmetic and indexing per point.
+-- **Memory Complexity:** $O(N)$ to store the 8 indices per point.
+-- **Strengths:** Simple to implement; provides all necessary data for trilinear interpolation.
+-- **Limitations:** Requires boundary handling logic; periodic boundaries may introduce artifacts if the grid is not periodic.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Strengths:** Not given in the sources.
++- **Limitations:** Not given in the sources.
+ 
+ ## Background
+-This method is used in implementations of neural radiance fields and dense voxel representations, such as Plenoxels [S1, unofficial]. It serves as the foundational step for sampling values from a grid for subsequent interpolation.
++Not given in the sources.
+ 
+ ## Sources

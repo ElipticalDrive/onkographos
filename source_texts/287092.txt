@@ -1,0 +1,326 @@
+algorithm - Triangulate a set of points with a concave domain - Stack Overflow
+Collectives™ on Stack Overflow
+Find centralized, trusted content and collaborate around the technologies you use most.
+Learn more about Collectives
+Teams
+Q&A for work
+Connect and share knowledge within a single location that is structured and easy to search.
+Learn more about Teams
+Get early access and see previews of new features.
+Learn more about Labs
+Triangulate a set of points with a concave domain
+Ask Question
+Asked
+6 years, 3 months ago
+Modified
+3 years, 5 months ago
+Viewed
+6k times
+14
+Setup
+Given some set of nodes within a convex hull, assume the domain contains one or more concave areas:
+where blue dots are points, and the black line illustrates the domain. Assume the points are held as a 2D array points of length n, where n is the number of point-pairs.
+Let us then triangulate the points, using something like the Delaunay method from scipy.spatial:
+As you can see, one may experience the creation of triangles crossing through the domain.
+Question
+What is a good algorithmic approach to removing any triangles that span outside of the domain? Ideally but not necessarily, where the simplex edges still preserve the domain shape (i.e., no major gaps where triangles are removed).
+Since my question is seeming to continue to get a decent amount of activity, I wanted to follow up with the application that I'm currently using.
+Assuming that you have your boundary defined, you can use a ray casting algorithm to determine whether or not the polygon is inside the domain.
+To do this:
+Take the centroid of each polygon as C_i = (x_i,y_i).
+Then, imagine a line L = [C_i,(+inf,y_i)]: that is, a line that spans east past the end of your domain.
+For each boundary segment s_i in boundary S, check for intersections with L. If yes, add +1 to an internal counter intersection_count; else, add nothing.
+After the count of all intersections between L and s_i for i=1..N are calculated:
+```
+if intersection_count % 2 == 0:
+    return True # triangle outside convex hull
+else:
+    return False # triangle inside convex hull
+```
+If your boundary is not explicitly defined, I find it helpful to 'map' the shape onto an boolean array and use a neighbor tracing algorithm to define it. Note that this approach assumes a solid domain and you will need to use a more complex algorithm for domains with 'holes' in them.
+algorithm
+triangulation
+convex-hull
+delaunay
+Share
+Improve this question
+Follow
+edited Jun 14, 2018 at 16:10
+Daniel R. Livingston
+asked Jul 20, 2017 at 23:59
+Daniel R. LivingstonDaniel R. Livingston
+1,2271414 silver badges3636 bronze badges
+7
+1
+This is hardly a python question
+– Mauricio
+Jul 21, 2017 at 0:04
+1
+Try the algorithms in the polygon package in BOOST.
+– Prune
+Jul 21, 2017 at 0:07
+1
+Are you familiar with alpha hulls / alpha shapes? en.wikipedia.org/wiki/Alpha_shape
+– Rethunk
+Jul 21, 2017 at 1:57
+1
+@Rethunk Not at all, but thank you for the link / info!
+– Daniel R. Livingston
+Jul 21, 2017 at 2:06
+1
+I would use the marching square algorithm for any convex polygon. It was made to find borders easily
+– asdfasdf
+Feb 6, 2018 at 19:02
+|
+Show 2 more comments
+6 Answers
+6
+Sorted by:
+Reset to default
+Highest score (default)
+Trending (recent votes count more)
+Date modified (newest first)
+Date created (oldest first)
+7
+Here is some Python code that does what you want.
+First, building the alpha shape (see my previous answer):
+```
+def alpha_shape(points, alpha, only_outer=True):
+    """
+    Compute the alpha shape (concave hull) of a set of points.
+    :param points: np.array of shape (n,2) points.
+    :param alpha: alpha value.
+    :param only_outer: boolean value to specify if we keep only the outer border or also inner edges.
+    :return: set of (i,j) pairs representing edges of the alpha-shape. (i,j) are the indices in the points array.
+    """
+    assert points.shape[0] > 3, "Need at least four points"
+
+    def add_edge(edges, i, j):
+        """
+        Add a line between the i-th and j-th points,
+        if not in the list already
+        """
+        if (i, j) in edges or (j, i) in edges:
+            # already added
+            assert (j, i) in edges, "Can't go twice over same directed edge right?"
+            if only_outer:
+                # if both neighboring triangles are in shape, it's not a boundary edge
+                edges.remove((j, i))
+            return
+        edges.add((i, j))
+
+    tri = Delaunay(points)
+    edges = set()
+    # Loop over triangles:
+    # ia, ib, ic = indices of corner points of the triangle
+    for ia, ib, ic in tri.vertices:
+        pa = points[ia]
+        pb = points[ib]
+        pc = points[ic]
+        # Computing radius of triangle circumcircle
+        # www.mathalino.com/reviewer/derivation-of-formulas/derivation-of-formula-for-radius-of-circumcircle
+        a = np.sqrt((pa[0] - pb[0]) ** 2 + (pa[1] - pb[1]) ** 2)
+        b = np.sqrt((pb[0] - pc[0]) ** 2 + (pb[1] - pc[1]) ** 2)
+        c = np.sqrt((pc[0] - pa[0]) ** 2 + (pc[1] - pa[1]) ** 2)
+        s = (a + b + c) / 2.0
+        area = np.sqrt(s * (s - a) * (s - b) * (s - c))
+        circum_r = a * b * c / (4.0 * area)
+        if circum_r < alpha:
+            add_edge(edges, ia, ib)
+            add_edge(edges, ib, ic)
+            add_edge(edges, ic, ia)
+    return edges
+```
+To compute the edges of the outer boundary of the alpha shape use the following example call:
+```
+edges = alpha_shape(points, alpha=alpha_value, only_outer=True)
+```
+Now, after the edges of the outer boundary of the alpha-shape of points have been computed, the following function will determine whether a point (x,y) is inside the outer boundary.
+```
+def is_inside(x, y, points, edges, eps=1.0e-10):
+    intersection_counter = 0
+    for i, j in edges:
+        assert abs((points[i,1]-y)*(points[j,1]-y)) > eps, 'Need to handle these end cases separately'
+        y_in_edge_domain = ((points[i,1]-y)*(points[j,1]-y) < 0)
+        if y_in_edge_domain:
+            upper_ind, lower_ind = (i,j) if (points[i,1]-y) > 0 else (j,i)
+            upper_x = points[upper_ind, 0] 
+            upper_y = points[upper_ind, 1]
+            lower_x = points[lower_ind, 0] 
+            lower_y = points[lower_ind, 1]
+
+            # is_left_turn predicate is evaluated with: sign(cross_product(upper-lower, p-lower))
+            cross_prod = (upper_x - lower_x)*(y-lower_y) - (upper_y - lower_y)*(x-lower_x)
+            assert abs(cross_prod) > eps, 'Need to handle these end cases separately'
+            point_is_left_of_segment = (cross_prod > 0.0)
+            if point_is_left_of_segment:
+                intersection_counter = intersection_counter + 1
+    return (intersection_counter % 2) != 0
+```
+On the input shown in the above figure (taken from my previous answer) the call is_inside(1.5, 0.0, points, edges) will return True, whereas is_inside(1.5, 3.0, points, edges) will return False.
+Note that the is_inside function above does not handle degenerate cases. I added two assertions to detect such cases (you can define any epsilon value that fits your application). In many applications this is sufficient, but if not and you encounter these end cases, they need to be handled separately.
+See, for example, here on robustness and precision issues when implementing geometric algorithms.
+Share
+Improve this answer
+Follow
+answered Jun 28, 2018 at 11:41
+Iddo HannielIddo Hanniel
+1,6811010 silver badges1818 bronze badges
+Add a comment
+|
+1
+One of Classic DT algorithms generates first a bounding triangle, then adds all new triangles sorted by x, then prunes out all triangles having a vertex in the supertriangle.
+At least from the provided image one can derive the heuristics of pruning out also some triangles having all vertices on the concave hull. Without a proof, the triangles to be pruned out have a negative area when their vertices are sorted in the same order as the concave hull is defined.
+This may need the concave hull to be inserted as well, and to be pruned out.
+Share
+Improve this answer
+Follow
+answered Jul 23, 2017 at 11:11
+Aki SuihkonenAki Suihkonen
+19.3k11 gold badge3737 silver badges5757 bronze badges
+Add a comment
+|
+1
+Since my question is seeming to continue to get a decent amount of activity, I wanted to follow up with the application that I'm currently using.
+Assuming that you have your boundary defined, you can use a ray casting algorithm to determine whether or not the polygon is inside the domain.
+To do this:
+Take the centroid of each polygon as C_i = (x_i,y_i).
+Then, imagine a line L = [C_i,(+inf,y_i)]: that is, a line that spans east past the end of your domain.
+For each boundary segment s_i in boundary S, check for intersections with L. If yes, add +1 to an internal counter intersection_count; else, add nothing.
+After the count of all intersections between L and s_i for i=1..N are calculated:
+```
+if intersection_count % 2 == 0:
+    return True # triangle outside convex hull
+else:
+    return False # triangle inside convex hull
+```
+If your boundary is not explicitly defined, I find it helpful to 'map' the shape onto an boolean array and use a neighbor tracing algorithm to define it. Note that this approach assumes a solid domain and you will need to use a more complex algorithm for domains with 'holes' in them.
+Share
+Improve this answer
+Follow
+answered Jun 14, 2018 at 16:08
+Daniel R. LivingstonDaniel R. Livingston
+1,2271414 silver badges3636 bronze badges
+Add a comment
+|
+0
+You can try a constrained delaunay algorithm for example with sloan algoritm or cgal library.
+[1] A Brute-Force Constrained Delaunay Triangulation?
+Share
+Improve this answer
+Follow
+edited Feb 20, 2018 at 15:54
+Ripi2
+7,06911 gold badge1717 silver badges3333 bronze badges
+answered Jul 23, 2017 at 10:13
+MicromegaMicromega
+12.5k77 gold badges3535 silver badges7272 bronze badges
+0
+Add a comment
+|
+0
+A simple but elegant way is to loop over the triangels and check wether they are within our domain or not. The shapely package could do the trick for you.
+for more on this please check the following post: https://gis.stackexchange.com/a/352442
+Note that triangulation in shapely is also implemented, even for MultiPoin objects.
+I used it, the performance was amazing and the code was only like five lines.
+Share
+Improve this answer
+Follow
+answered Jun 5, 2020 at 15:52
+magrafmagraf
+43055 silver badges88 bronze badges
+Add a comment
+|
+-1
+Compute the triangles centroid an check if it's inside the polygon using this algorithm.
+Share
+Improve this answer
+Follow
+answered Jul 21, 2017 at 6:43
+abenciabenci
+8,4741919 gold badges7070 silver badges134134 bronze badges
+2
+Not sure that would work; consider a "pointy bit" on the polygon that might happen to contain the centroid, but not the rest of the triangle
+– meowgoesthedog
+Jul 21, 2017 at 8:12
+The final DT doesn't contain such a triangle, even though the intermediate tessellation can.
+– Aki Suihkonen
+Jul 23, 2017 at 10:54
+Add a comment
+|
+Not the answer you're looking for? Browse other questions tagged
+algorithm
+triangulation
+convex-hull
+delaunay
+or ask your own question.
+The Overflow Blog
+An intuitive introduction to text embeddings
+How the co-creator of Kubernetes is helping developers build safer software
+Featured on Meta
+Update: New Colors Launched
+Incident update and uptime reporting
+Temporary policy: Generative AI (e.g., ChatGPT) is banned
+Beta test for short survey in banner ad slots starting on the week of...
+Linked
+14
+Boundary enclosing a given set of points
+6
+A Brute-Force Constrained Delaunay Triangulation?
+2
+Efficient triangulation of weakly simple polygon with known, ordered boundary points
+1
+Python shapely: How to triangulate just the inner area of the shape
+Related
+2
+c++: CGAL 2D delauny triangulation: Concave Shapes
+0
+Delaunay triangulation from convex hull
+0
+Create delaunay triangulation in N-Dimensions from points forming non-convex surface (DelaunayTri for 5-D case)
+4
+Delaunay: Triangulate two point sets with the best fitting mesh
+1
+Triangulating a planar point set with known Boundary
+2
+Create concave polygon passing through all given points
+2
+Concave Mesh Triangulation With Known Boundary
+5
+How to use delaunay trianglation in 3d points?
+1
+2d triangulation given a set of boundary points
+2
+Constant work-space algorithm for triangulating a set of points
+Hot Network Questions
+Why isn't the Global South pro-Israel like the rest of the world?
+Besides Jamaica, are there other countries where a "Labour" (or Workers' etc.) party is actually right-wing/conservative?
+Is the sum of the reciprocals of the products of pairs of coprime positive integers and their sums equal to 2?
+Decline PhD offer gracefully due to low salary
+Strange cymbals notation in The Free Lance March
+Is There a Lower Limit on the Size of Fusion Reactor?
+Selecting Solve results according to conditions
+Is a microscope an allowable carry-on item and an allowable checked bag item? Which way is better, checked or carry on?
+Does the law of large numbers explain why quantum mechanics leads to statistical regularities?
+Grab first 20 bytes of 32-bytes input
+What language was the first to feature smart casts that check for null?
+Predictions after Cox regression
+Why is the identity predicate needed?
+What is the etymology of phrase "морского извозчика"
+What scientists and mathematicians were afraid to publish their findings?
+Generating functional for fields with non-zero expectation value
+Why am I getting heavy output distortion from a BJT amplifier when driving an 8 ohm load?
+How might a science-fiction world's technology advance faster than our own?
+Does anyone make dummy batteries for eTap AXS derailleurs?
+Find supremum of an integral
+Capturing all matches (occurences) with QGIS regular expressions
+What is the burden of proof? Has this principle ever been challenged?
+Why do many template languages have `for-else` statements?
+Downsides to creating a fully modular cooking setup instead of using a fixed oven range?
+more hot questions
+Question feed
+Your privacy
+By clicking “Accept all cookies”, you agree Stack Exchange can store cookies on your device and disclose information in accordance with our Cookie Policy.
+Accept all cookies
+Necessary cookies only
+Customize settings

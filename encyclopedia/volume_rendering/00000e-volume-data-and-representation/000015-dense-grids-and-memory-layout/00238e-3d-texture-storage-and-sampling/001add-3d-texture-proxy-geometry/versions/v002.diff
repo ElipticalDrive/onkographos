@@ -1,0 +1,136 @@
+--- v001.md
++++ v002.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** Volumetric scalar field data (e.g., medical imaging data), camera position and orientation, transfer function (mapping scalar values to color and opacity).
++- **Input:** Volumetric scalar field data, camera position and orientation, transfer function (mapping scalar values to color and opacity).
+ - **Output:** 2D color buffer (image).
+ 
+@@ -14,5 +14,5 @@
+ 1.  **3D Texture Object:** A GPU texture object storing the volume data.
+     -   **Format:** Depends on data type. For `unsigned short` data, the sampler must be `usampler3D` [S3]. Using `sampler3D` results in all values being 0 [S3].
+-    -   **Dimensions:** Width, Height, Depth. Note: In `glTexImage3D`, the `depth` parameter corresponds to the first dimension of the array (or the outermost layer depending on implementation details), and passing the wrong dimension causes index confusion [S3].
++    -   **Dimensions:** Width, Height, Depth. Note: In `glTexImage3D`, the `depth` parameter corresponds to the first dimension of the array. Passing the wrong dimension causes index confusion [S3].
+     -   **Filters:** `GL_TEXTURE_MIN_FILTER` and `GL_TEXTURE_MAG_FILTER` must be chosen carefully as they affect the interpolation performed by the GPU texture mapping hardware [S2]. Commonly set to `GL_LINEAR` for trilinear interpolation [S3].
+     -   **Wrapping:** Typically `GL_CLAMP_TO_EDGE` to prevent artifacts at boundaries [S3].
+@@ -45,51 +45,75 @@
+ 
+ ```python
+-# Pseudocode for 3D Texture Proxy Geometry Rendering Loop
+-
+-def render_volume(camera, volume_data, transfer_function):
++def render_volume(volume_data, camera, transfer_function, width, height, num_slices):
+     # 1. Setup 3D Texture
+-    texture_id = create_3d_texture(volume_data)
+-    # Note: Ensure correct sampler type (usampler3D for unsigned short)
+-    # Note: Ensure correct dimension mapping (depth vs first dimension)
+-    set_texture_parameters(texture_id, min_filter=GL_LINEAR, mag_filter=GL_LINEAR)
+-
++    # Upload volume_data to GPU as GL_TEXTURE_3D
++    # Note: depth parameter in glTexImage3D corresponds to the first dimension of the array
++    texture = create_3d_texture(volume_data)
++    set_texture_parameters(texture, min_filter=GL_LINEAR, mag_filter=GL_LINEAR)
++    
+     # 2. Compute View-Port Aligned Slices
+-    # Option A: CPU-based
+-    slices = compute_view_port_aligned_slices_cpu(camera, volume_data.bounds)
++    # Intersect volume bounding box with planes parallel to view plane
++    slices = compute_view_port_aligned_slices(camera, volume_data.bounds, num_slices)
+     
+-    # Option B: GPU-based (Vertex Shader)
+-    # slices = compute_view_port_aligned_slices_gpu(camera, volume_data.bounds)
+-    # This involves finding intersection points of cube edges with view-parallel planes
+-
+-    # 3. Render Loop
+-    for slice in slices:
++    # Initialize output image buffers
++    out_color = zeros((height, width, 3))
++    out_alpha = zeros((height, width))
++    
++    # 3. Render Loop (Back-to-Front)
++    for slice in reversed(slices):
+         # 4. Rasterize Slice
+-        # The slice is a polygon parallel to the view plane
+-        rasterize_polygon(slice)
++        # Project slice vertices to screen space
++        screen_coords = project_to_screen(slice.vertices, camera)
+         
+-        # 5. Fragment Shader Execution
+-        # For each fragment in the slice:
+-        #   a. Sample 3D texture at fragment's 3D texture coordinates
+-        #   b. Apply transfer function to get color (C) and opacity (A)
+-        #   c. If using dependent lookup:
+-        #      - Compute ray parameters
+-        #      - Lookup minimum texture
+-        #      - Reconstruct back face scalar using gradient and front face scalar
+-        #      - Lookup final color/opacity using denormalized ray parameter
+-        
+-        # 6. Back-to-Front Blending
+-        # Since slices are processed back-to-front, use alpha blending
+-        blend_with_current_image(color, opacity)
++        # 5. Fragment Processing
++        # For each pixel covered by the slice:
++        for y, x in pixels_covered_by(screen_coords):
++            # Compute 3D texture coordinates from slice geometry and camera ray
++            tex_coords = compute_texture_coords(x, y, slice, camera)
++            
++            # Fetch scalar value from 3D texture
++            scalar = texture_sample(texture, tex_coords)
++            
++            # Apply transfer function
++            color, opacity = transfer_function(scalar)
++            
++            # 6. Back-to-Front Blending (Alpha Compositing)
++            out_alpha[y, x] = out_alpha[y, x] + opacity * (1.0 - out_alpha[y, x])
++            out_color[y, x] = out_color[y, x] * (1.0 - opacity) + color * opacity
++            
++    return out_color
+ 
+ def create_3d_texture(data):
+-    # Create GL_TEXTURE_3D
+-    # Upload data
+-    # Handle dimension mapping carefully
+-    # Return texture ID
++    # Create GL_TEXTURE_3D object
++    # Upload data, handling dimension mapping carefully
++    # Return texture reference
+     pass
+ 
+-def compute_view_port_aligned_slices_cpu(camera, bounds):
++def set_texture_parameters(texture, min_filter, mag_filter):
++    # Set GL_TEXTURE_MIN_FILTER and GL_TEXTURE_MAG_FILTER
++    # Affects interpolation (nearest neighbor or trilinear)
++    pass
++
++def compute_view_port_aligned_slices(camera, bounds, num_slices):
+     # Intersect bounding box with planes parallel to view plane
+-    # Return list of polygons
++    # Returns list of polygon meshes
++    pass
++
++def project_to_screen(vertices, camera):
++    # Transform vertices to screen coordinates
++    pass
++
++def pixels_covered_by(screen_coords):
++    # Return list of (y, x) pixel indices covered by the polygon
++    pass
++
++def compute_texture_coords(x, y, slice, camera):
++    # Compute 3D texture coordinates for the fragment
++    # Based on ray intersection with slice
++    pass
++
++def texture_sample(texture, coords):
++    # Sample 3D texture at given coordinates
++    # Handles interpolation based on filters
+     pass
+ ```
+@@ -113,5 +137,5 @@
+ 
+ ## Operating characteristics
+--   **Time Complexity:** Linear with respect to the number of pixels and the number of slices [S1, S2]. Performance is heavily dependent on the number of slices and the complexity of the fragment program [S2].
++-   **Time Complexity:** Linear with respect to the number of pixels and the number of slices [S1, S2]. Performance can be improved by optimization techniques like empty space skipping and occlusion clipping [S2].
+ -   **Memory Complexity:** Linear with respect to the volume size, limited by available texture memory [S1, S3].
+ -   **Measured Performance:** Li et al. [40] reported an average of 2.8 speedup using optimization techniques like occlusion clipping in fragment programs [S2].

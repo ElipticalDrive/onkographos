@@ -1,0 +1,392 @@
+Mutable Compressed Tree Representations
+via Construction Chains
+Kenzi M’hamdi∗
+Brown University
+May 1, 2026
+Abstract
+Trees arise naturally in search, optimization, and high-dimensional exploration, but their
+memory cost forces solvers to prune, discarding regions that may contain better solutions. Existing compressed tree representations are either immutable and identity-only (grammar-based
+methods) or static and domain-specific (spatial methods). Neither supports mutation on the
+compressed form. We show that a tree represented as addressed nodes with references, uniform
+declarations, and a last-writer-wins resolution rule constitutes a mutable compressed representation with provable bounds. The chain strictly extends DAG compression: every DAG is a chain
+where every reference is exact and no later entries override, but the chain admits references
+between non-identical subtrees, with later entries correcting the differences. The representation is parameterized by a similarity relation satisfying three correctness conditions (soundness,
+economy, reflexivity). A two-pass builder first constructs the DAG in O(N ), then identifies similarity improvements over the D distinct subtrees in O(D). Under any valid similarity relation,
+compression is at least as good as DAG compression and approaches the optimal subtree tiling
+as structural regularity increases, with O(1) mutation by append, where the equivalent DAG
+operation requires path copying proportional to tree depth. Compression scales with structural
+regularity, not tree size. Under mutation, the representation degrades gracefully, accumulating
+a bounded diff over the compressed base. The chain represents a 221,626-node tic-tac-toe game
+tree in 10,277 entries; the similarity pass alone halves the DAG. We apply the representation
+to parallel tree search: each worker holds an independent copy of the full search state at O(K)
+cost, operates without shared memory, and synchronizes by concatenation. The representation
+makes it feasible to retain the full search tree at a fraction of the memory cost, preserving regions
+that pruning would discard.
+1
+Introduction
+Optimization solvers prune. They do it because the search trees they produce exceed available
+memory, and pruning is the standard response. Every pruned subtree is a region the solver cannot
+revisit, warm-start from, or hand to another worker. The quality of the final solution is bounded by
+the quality of the pruning heuristic. For problems where suboptimality is expensive, that bound is
+the binding constraint. A tree with N nodes costs O(N ) to store regardless of how much internal
+regularity it contains.
+Compressed tree representations exist but split along lines that leave the most useful combination unoccupied. Grammar-based methods (tree straight-line programs, top-DAGs, RePair) share
+∗
+kenzi_mhamdi@brown.edu
+1
+identical subtrees with worst-case guarantees and are theoretically mature, but immutable: editing
+a shared subtree requires path copying, decompression, and recompression. Spatial methods (sparse
+voxel DAGs and their lossy, symmetry-aware, and hash-based extensions) exploit uniformity and
+similarity with compression ratios of two to three orders of magnitude, but are specific to voxel octrees and built bottom-up from complete trees. Mutability, similarity, and generality over arbitrary
+trees have not been combined.
+This paper shows that a simple representation achieves this combination. The representation
+consists of three entry types: node entries, references to other subtrees, and uniform declarations.
+A last-writer-wins resolution rule makes mutation a single append. The chain strictly extends DAG
+compression: a DAG is the special case where every reference is exact and no later entries override.
+The general case admits references between non-identical subtrees, with later entries correcting the
+differences at no additional format complexity. The resolution rule handles both cases identically.
+We apply the representation to parallel tree search. Because the chain is compact, each worker
+can hold the full compressed search state. Workers synchronize by concatenation when operating
+on disjoint regions. For problems with sufficient structural regularity, the chain makes it feasible to
+retain the full search tree at a fraction of the memory cost, preserving regions that pruning would
+discard.
+2
+The Representation
+A tree T over alphabet Σ is a rooted ordered tree where each node carries a value from Σ and is
+identified by an integer address. For a k-ary tree, the children of node i occupy addresses ki + 1
+through ki + k. Whether address x is in the subtree rooted at y reduces to an integer range check.
+No variable-length paths or prefix matching is required. The representation is agnostic to what
+constitutes a node’s value. The entry format stores an integer; the interpretation of that integer is
+external to the chain.
+A chain is a flat list of entries. Each entry is one of three types:
+Node. An address and a value.
+Reference. An address and a pointer to another entry. States that the subtree below this address
+has the same structure and values as the subtree below the referenced entry.
+Uniform. An address, a value, and a depth. States that all nodes in this subtree carry this value.
+Every entry is fixed-size: a type marker, an integer address, and either an integer value, an
+integer pointer, or an integer value plus an integer depth.
+Two things impose sequence on the entries: when entries overlap in address space, later ones take
+precedence (resolution priority), and references must not form cycles (acyclicity). A builder that
+emits references only to earlier entries guarantees acyclicity by construction; this is the approach
+taken in our implementation. The format itself does not require references to point in any particular
+direction.
+When an entry carries a reference, it claims that the subtree at its address is identical to
+the subtree at the referenced entry. If some positions within the referenced subtree should carry
+different values, later entries at those addresses provide the correct values and take precedence by
+the resolution rule. The reference does not know about these overrides. They are simply later
+entries that happen to cover addresses within its range. Correcting entries are not limited to node
+entries. A reference at a differing position replaces an entire sub-subtree, compounding compression
+2
+across levels. This is the mechanism by which the chain extends DAG compression: a DAG either
+shares two subtrees (identical) or does not (distinct). The chain can share non-identical subtrees
+and correct the differences with later entries, at a cost of one entry per differing region.
+2.1
+Resolution
+Given a query address a, scan the chain backward. The first entry whose address covers a determines
+the result:
+• If it is a node entry at exactly a, return its value.
+• If it is a uniform entry covering a, return its value.
+• If it is a reference covering a, remap a into the referenced subtree and resolve recursively.
+This is last-writer-wins: later entries always take precedence over earlier ones at the same
+address. The naive backward scan costs O(K) per query. A spatial index over entry addresses
+(longest-prefix match on integer addresses) gives O(log K) per query. If the covering entry is a
+reference, resolution follows the pointer and remaps. The total cost is O(c log K), where c is the
+reference chain depth: the longest sequence of references that must be followed before reaching a
+non-reference entry.
+2.2
+Mutation
+To modify the value at address a: append a node entry at a with the new value. To delete a subtree:
+append a uniform entry with a designated null value covering the address. To graft structure from
+one location to another: append a reference from the target address to the source entry. To edit a
+position within a shared subtree: append a node entry at that address. The reference is unaffected.
+No path copying, no decompression. Each mutation is one appended entry.
+Proposition 1 (Mutation correctness). Let C be a chain representing tree T . Appending a node
+entry (a, v) produces a chain C ′ representing the tree T ′ identical to T except that position a has
+value v.
+Proof. For any query address q ̸= a, the backward scan of C ′ encounters the same first covering
+entry as in C, since the new entry at a does not cover q. For q = a, the new entry is last and
+therefore first encountered in the backward scan, returning v.
+After M mutations, the chain has length K + M . The original compression is intact: the first
+K entries encode the same structure. The mutations are a bounded diff on top. The representation
+degrades from compressed to compressed-plus-diff, never to uncompressed. When the diff grows
+large, compaction rebuilds a fresh chain from the current logical state, recovering compression
+quality.
+2.3
+What Works Without Decompression
+Point operations at known addresses (query, mutate, delete) resolve by walking the chain. Cost
+depends on chain length and reference depth.
+Prefix-region operations (delete a subtree, declare a region uniform, graft a subtree) are each
+one appended entry.
+3
+On compacted chains (no overlapping entries), entry-decomposable operations work in O(K):
+count nodes by summing sizes, check existence at a prefix by scanning entries, compare two chains
+structurally. Mutations introduce overlapping entries; compaction or a side index restores O(K)
+cost.
+What requires decompression: operations that search over values rather than addresses. “Which
+nodes satisfy predicate P ?” requires resolving values behind references and within uniform regions.
+Global metrics (shortest path, diameter, aggregate functions over all values) require it for the same
+reason. The chain indexes by address and compresses by structure. It does not index by value.
+3
+The Similarity Relation
+The chain is parameterized by a similarity relation S that governs which references the builder emits
+during the second construction pass. S maps pairs of subtrees to accept or reject. A valid S satisfies
+three conditions:
+Soundness. S accepts a pair (tref , ttarget ) only if the reference, combined with a set of correcting
+entries, reconstructs ttarget exactly. Correcting entries may be node entries, references, or uniform
+declarations.
+Economy. Let Cdag be the number of entries the DAG uses for the subtree rooted at ttarget ,
+and let Csim = 1 + |∆| where |∆| is the number of correcting entries. S accepts the pair only if
+Csim < Cdag .
+Reflexivity. S accepts any subtree paired with itself.
+Two instantiations: identity, where S accepts only identical subtrees (recovering the DAG with
+zero corrections), and substitution distance, where S accepts subtrees with the same topology whose
+values differ at fewer than a threshold number of positions (generalizing the similarity function in
+lossy sparse voxel DAGs [9]).
+4
+Compression Bound
+Let T be a tree of size N , with D distinct rooted subtrees (the DAG size) and an optimal nonoverlapping rooted subtree tiling of size F ∗ : the minimum number of distinct rooted subtree fragments whose compositions generate T .
+Proposition 2 (Upper bound). Under any valid similarity relation S, the chain length K satisfies
+K ≤ D.
+Proof. By reflexivity, S accepts every subtree paired with itself. A builder using only reflexive
+matches emits one entry per distinct subtree (as a node or uniform entry) and one reference per
+repeated occurrence. This produces exactly the DAG. Similarity can only reduce K further, since
+any accepted pair replaces entries with a single reference plus corrections that, by economy, cost
+fewer entries than the DAG uses. Therefore K ≤ D under any valid S.
+Proposition 3 (Lower bound). Under any valid similarity relation S, the chain length K satisfies
+K ≥ F ∗.
+Proof. Every distinct fragment in the optimal tiling must appear at least once in the chain: as a
+node entry, as a uniform entry, or as the first occurrence of a reference target. A uniform region
+is itself a valid fragment. No valid chain can represent T with fewer entries than the number of
+distinct fragments required to tile T . Therefore K ≥ F ∗ .
+4
+The gap between F ∗ and D is where similarity operates. Greedy construction closes this gap
+to within a logarithmic factor, inheriting known approximation results from grammar-based tree
+compression [2]. The worst case is one entry per distinct subtree. The best case, for a tree with
+bounded feature count, has K constant or sublinear while N grows. The compression ratio then
+grows linearly with tree size.
+Remark. F ∗ is defined over rooted subtree fragments. Tree straight-line programs can share internal
+connected patterns via parameterized nonterminals, producing grammars smaller than any rooted
+subtree tiling. The chain’s referencing mechanism does not capture arbitrary internal pattern sharing. This is a genuine expressiveness gap. The chain compensates with mutability and similarity,
+which TSLPs lack. The tradeoff is real, not a dominance relation.
+5
+Construction
+A chain is built from a tree in two passes.
+Pass 1: DAG construction. Walk the tree bottom-up. At each node, check whether the subtree
+is uniform (all descendants carry the same value); if so, emit a uniform entry. Otherwise, compute
+a content hash over the subtree (value at the node plus hashes of children). If the hash has been
+seen, emit a reference to the earlier entry. Otherwise, emit a node entry and record the hash. Each
+check is O(1) amortized: uniformity is a boolean propagated from children, and hash comparison is
+a table lookup. The pass visits each node once. Total cost: O(N ). The result is a chain equivalent
+to the minimal DAG.
+Pass 2: Similarity compression. Among the D distinct subtrees produced by Pass 1, group
+by topology hash (content hash with values removed). Within each group, subtrees have identical
+branching structure but may differ in node values. Select one subtree per group as the representative.
+For each non-representative, compute the number of differing positions. If the economy condition
+holds (Csim < Cdag ), replace the DAG entries with a reference to the representative plus correcting
+node entries at differing positions. This can only reduce K, since replacements are admitted only
+when they improve on the existing decomposition. Cost: O(D) with topology hashes already
+computed.
+Our builder uses a topology-matching S where corrections are node entries at differing values.
+The framework admits any S satisfying soundness, economy, and reflexivity, including relations
+where corrections are themselves references or uniform declarations.
+Total construction cost: O(N ). The approximation guarantee for the identity-sharing layer
+inherits the O(rg log(n/rg)) bound from Jeż and Lohrey [2], where g is the optimal grammar size
+and r is the maximum symbol rank.
+6
+Parallel Search Architecture
+The practical obstacle in parallel tree search is not coordination. It is that the full tree does not fit in
+memory. When the tree exceeds capacity, the only options are to prune until it fits or to partition
+it across workers, giving each worker its slice and nothing else. Pruning sacrifices completeness.
+Partitioning sacrifices context: a worker exploring one region cannot query another, cannot warmstart from a distant subproblem, cannot prune based on bounds discovered elsewhere.
+The chain removes this constraint. A chain of length K for a tree of size N is a contiguous
+array of K fixed-size entries. For structured trees, K is orders of magnitude smaller than N . Every
+worker holds the full compressed tree, queryable at any address.
+5
+6.1
+Coordination
+A coordinator holds the base chain and a bitmap of region identifiers: one bit per region, taken
+or available. When a worker requests work, the coordinator sends the base chain and a region
+assignment. The same base chain every time. The coordinator does not maintain an updated
+version during execution.
+A worker receives the base chain, explores its assigned region, and appends entries: discovered
+structure, uniform declarations for infeasible subspaces, mutations for pruned nodes. When finished,
+it returns the extension. The coordinator receives the extension and flips the bit.
+Cost: O(K) once to distribute the base chain. O(1) per dispatch. O(Kreturned ) per collection.
+The coordinator never decompresses, never reads chain content, never holds the tree. Its memory
+is O(K).
+Proposition 4 (Merge correctness). Extensions from workers assigned disjoint address regions
+concatenate without conflict.
+Proof. Each worker appends entries only within its assigned address prefix. Entries from disjoint
+prefixes cannot cover the same address. In the concatenated chain, the backward scan for any
+address a finds the same entry it would find in the individual worker’s extension (if a is in that
+worker’s region) or in the base chain (otherwise). No resolution conflict arises.
+6.2
+Staleness and Updates
+Every worker holds the base tree’s full structure. A worker exploring one region can query another
+region’s structure locally, without communication. It sees the base version, not the latest version.
+The base structure is enough for heuristics that use global context: warm-starting from similar
+subproblems, estimating bounds from neighboring regions, identifying structural similarity across
+distant subtrees.
+Staleness is the number of entries other workers have appended since the base chain was copied.
+It is exactly quantifiable at any moment. For fully decomposable problems, stale base copies are
+sufficient. When cross-region information matters, the coordinator pushes deltas at cost O(Kδ ),
+where Kδ is the number of new entries since last copy. The sensible default is to push when Kδ
+exceeds a fixed fraction of K, which is an O(1) check. The optimal threshold depends on the
+problem’s coupling structure; the architecture does not prescribe it.
+6.3
+Applicability
+The architecture suits problems where the search space decomposes into regions that can be explored
+independently. Because each worker holds the full compressed tree, it retains access to other regions
+for heuristic use.
+It does not suit problems with strong global coupling: adversarial search where pruning depends
+on a global best-so-far that changes rapidly, dynamic programming where each node’s value depends
+on the entire tree below it. For these, shared state is unavoidable and the chain offers no architectural
+advantage.
+The measurable claim: for any parallel tree search where K ≪ N , replacing the tree representation with a chain changes the coordination cost from O(N ) to O(K) and gives every worker access
+to the full search state rather than a partition. The cost of this is bounded staleness, recoverable
+at O(Kδ ) per update.
+6
+7
+Related Work
+Grammar-based tree compression. Tree straight-line programs compress trees by sharing
+identical subtrees and internal patterns [1, 2, 3]. Lohrey, Maneth, and Reh [4] achieve constanttime traversal on grammar-compressed trees. Bille et al. [5] introduce top-DAGs with logarithmic
+navigation.
+The chain inherits this literature’s approximation guarantees for the identity-sharing layer.
+Where it departs: TSLPs are declarative and immutable. Editing a shared subtree in a DAG
+requires path copying: create new nodes along the root path and re-merge. The chain requires one
+appended entry. The only published work on editing grammar-compressed trees without full decompression is Fisher and Maneth [6], without polylogarithmic edit bounds. TSLPs do not perform
+similarity-based sharing. The chain’s referencing mechanism is more expressive for approximate
+matches but less expressive for internal pattern sharing. This is a tradeoff, not a dominance relation.
+Sparse voxel DAGs. Kämpe, Sintorn, and Assarsson [7] compress voxel octrees by one to three
+orders of magnitude through subtree sharing. Villanueva et al. [8] add symmetry-aware merging.
+Van der Laan, Scandolo, and Eisemann [9] introduce lossy similarity-based merging. Careil, Billeter,
+and Eisemann [10] achieve interactive editing via per-level hash tables, solving through hashing a
+problem that does not arise when sharing is encoded as a claim in a sequential list rather than as a
+structural property of a graph. Molenaar and Eisemann [11] generalize to transform-aware sharing.
+SVDAGs provide identity sharing, similarity sharing, and mutability for voxel octrees but not
+internal pattern sharing or generality beyond fixed branching. TSLPs provide identity sharing
+and internal pattern sharing with worst-case guarantees but not similarity or mutability. The two
+literatures do not cite each other. The chain combines similarity, mutability, and generality over
+arbitrary trees. LSVDAG’s similarity function is one valid S. HashDAG’s hashing is one valid index
+implementation.
+Parallel search coordination. MallobSat [14] scales parallel SAT to thousands of cores via clause
+sharing. Parallel branch-and-bound partitions by subtree assignment. Parallel MCTS degrades
+beyond 16–32 threads. All coordinate by communicating derived information rather than structural
+state. None compresses the search tree itself. The chain’s contribution is not a better coordination
+algorithm. It is the removal of the assumption that the tree is too large to replicate.
+Search certificates. DRAT/LRAT [12] and VeriPB [13] certify deductive outcomes, not explored
+territory. No domain-agnostic format for transferring explored search territory between solvers
+exists. The chain encodes which regions are explored, which are infeasible, and what structure was
+found, independent of the solver that produced them.
+E-graphs. Egg [15] and egglog [16] maintain equivalence classes over terms. Steuwer et al. [17]
+document that e-graphs fail on 3D loop tiling due to memory. E-graphs are the production system
+whose scaling bottleneck most closely matches the chain’s target. Whether the chain could serve as
+a backend for e-graph storage is an open question.
+7
+8
+Experimental Evaluation
+We implemented the chain representation in C: a 12-byte packed entry struct (type encoded in the
+top 2 bits of the address field, union payload), a two-pass builder, and backward-scan resolution.
+All experiments verify correctness by resolving every address in the chain and comparing against
+the original tree. Source code accompanies the paper.1
+8.1
+Compression
+We tested four tree families. Results report N (live nodes), D (DAG entries from Pass 1), K (chain
+entries after Pass 2), and byte ratio (naive storage divided by chain storage, where naive stores one
+4-byte value per node and the chain stores 12 bytes per entry).
+Uniform trees. A complete binary tree where every node carries the same value. A single uniform
+entry covers the entire tree regardless of size. At height 18 (N = 262,143), the chain is 12 bytes.
+Byte ratio: 87,381:1.
+Unique-value trees. A complete binary tree where every node carries a distinct value. No sharing
+is possible. K = D = N at all sizes. The chain is 3× larger in bytes than naive storage, reflecting
+the 12-byte entry overhead. This is the worst case and confirms the lower bound.
+Self-similar trees. A complete binary tree of height h constructed by tiling copies of a base
+subtree of height 4, then mutating m random leaf values per copy. This models search trees with
+repeated subproblem structure and local variation.
+At h = 16 with zero mutations (N = 131,071), D = 215 and K = 198, giving entry ratio 662:1
+and byte ratio 221:1. With 2 mutations per copy, D = 10,917 and K = 10,595, giving entry ratio
+12.4:1 and byte ratio 4.1:1.
+K < D at every size and mutation count tested. The similarity pass consistently improves on
+the DAG, with the largest relative improvement at low mutation counts where subtrees differ by
+few values.
+Tic-tac-toe. The full game tree to depth 6, branching factor 9, with 221,626 live nodes. D =
+19,834, K = 10,277. Entry ratio 21.6:1. Byte ratio 7.2:1 (123 KB chain versus 887 KB naive). The
+similarity pass reduces the DAG by 48%, reflecting the high incidence of board states that differ
+by a single move. Uniform entries appear primarily in deletion and pruning operations rather than
+initial construction.
+N-queens. Full backtracking search trees for N = 4 through N = 8. At N = 8: 2,057 nodes,
+D = 1,413, K = 1,375. Entry ratio 1.5:1. The chain is larger in bytes than naive storage at this
+ratio, reflecting the 12-byte entry overhead. N-queens has limited structural regularity: each partial
+placement produces a distinct constraint set, limiting both identity and similarity sharing.
+Byte break-even. Each entry is 12 bytes; each raw node value is 4 bytes. The chain is smaller in
+bytes when N/K ≥ 3. Below this ratio, the chain is larger in bytes but still provides O(1) mutation
+and O(K) copy. The overhead is the cost of mutability and contiguous layout.
+1
+https://github.com/kenmham/mutable-compressed-trees
+8
+8.2
+Mutation
+We built a chain from a self-similar tree (h = 16, m = 2, N = 131,071, K = 10,230) and performed
+10,000 mutations at random addresses.
+Chain mutation (append a node entry): 2.4 ns per operation. DAG mutation (simulated path
+copy with memcpy and hash table insert at each ancestor): 8.7 ns per operation, averaging 15 steps
+to the root.
+The chain is 3.6× faster under cache-optimal conditions. The DAG cost is a lower bound: a
+production DAG implementation would additionally recompute subtree hashes at every ancestor,
+allocate nodes, and update parent pointers. After 10,000 mutations, the chain grew from K =
+10,230 to K = 20,230, confirming bounded degradation: the original compression is intact and the
+mutations are a contiguous diff on top.
+9
+Future Work
+The chain compresses tree structure. Values at nodes are a second layer that admits the same
+treatment: uniform value regions, repeated value patterns, similar value distributions. Applying
+the same two primitives to the value layer independently of the structural layer is a natural extension.
+A shared dictionary across a sequence of correlated trees would achieve compression that improves with each additional tree, since subtrees encountered earlier become references for later ones.
+The framework defines the mechanism once; each application is an instantiation.
+The expressiveness gap with TSLPs is a theoretical question worth resolving. Can the referencing
+mechanism be extended to capture internal patterns without sacrificing mutability? If not, what is
+the precise class of trees for which the gap matters?
+10
+Conclusion
+The chain strictly extends DAG compression. A DAG shares identical subtrees by making multiple
+parents point to the same child node; editing any shared subtree requires path copying and remerging. The chain shares subtrees by reference: a claim that one region looks like another.
+Editing a position within a shared subtree is one appended entry. Sharing non-identical subtrees is
+the same mechanism with later entries correcting the differences. The resolution rule handles both
+cases without additional machinery.
+Under any similarity relation satisfying soundness, economy, and reflexivity, the chain’s compression is bounded between the optimal subtree tiling and DAG size. A two-pass builder achieves
+this in O(N ). Mutation is append. Degradation under mutation is bounded. Compaction recovers
+compression quality.
+The representation enables a parallel search architecture in which every worker holds the full
+compressed search state, coordination is stateless concatenation, and the tradeoff between freshness
+and communication cost is a tunable parameter. For problems where pruning is a forced error rather
+than a strategic choice, this makes exhaustive exploration practical at scales where existing systems
+are forced to discard.
+References
+[1] M. Lohrey, S. Maneth, and R. Mennicke. XML tree structure compression using RePair. Information Systems, 38(8):1150–1167, 2013.
+9
+[2] A. Jeż and M. Lohrey. Approximation of smallest linear tree grammar. Information and Computation, 251:215–251, 2016.
+[3] D. Hucke, M. Lohrey, and E. Noeth. Optimal tree compression. In Proc. FSTTCS, 2014.
+[4] M. Lohrey, S. Maneth, and C. P. Reh. Constant-time tree traversal and subtree equality check
+for grammar-compressed trees. Algorithmica, 80(7):2082–2105, 2018.
+[5] P. Bille, I. L. Gørtz, G. M. Landau, and O. Weimann. Tree compression with top trees. In Proc.
+ICALP, 2013.
+[6] M. Fisher and S. Maneth. Incremental updates on compressed XML. In Proc. ICDE, 2016.
+[7] V. Kämpe, E. Sintorn, and U. Assarsson. High resolution sparse voxel DAGs. ACM Trans.
+Graphics (SIGGRAPH), 32(4), 2013.
+[8] A. J. Villanueva, F. Marton, and E. Gobbetti. SSVDAGs: symmetry-aware sparse voxel DAGs.
+In Proc. I3D, 2016.
+[9] R. van der Laan, L. Scandolo, and E. Eisemann. Lossy geometry compression for high resolution
+voxel scenes. In Proc. I3D, 2020.
+[10] S. Careil, M. Billeter, and E. Eisemann. Interactively modifying compressed sparse voxel representations. In Proc. Eurographics, 2020.
+[11] R. Molenaar and E. Eisemann. Transform-aware sparse voxel DAGs. Proc. ACM CGIT, 8(1),
+2025.
+[12] N. Wetzler, M. J. H. Heule, and W. A. Hunt. DRAT-trim: efficient checking and trimming using
+expressive clausal proofs. In Proc. SAT, 2014.
+[13] B. Bogaerts, S. Gocht, C. McCreesh, and J. Nordström. Certified dominance and symmetry
+breaking for combinatorial optimisation. J. Artificial Intelligence Research, 2023.
+[14] D. Schreiber and P. Sanders. Scalable SAT solving in the cloud. J. Artificial Intelligence Research, 80:1437–1495, 2024.
+[15] M. Willsey, C. Nandi, Y. R. Wang, O. Flatt, Z. Tatlock, and P. Panchekha. egg: fast and
+extensible equality saturation. In Proc. POPL, 2021.
+[16] Y. R. Wang et al. Relational e-matching. In Proc. PLDI, 2023.
+[17] M. Steuwer et al. Guided equality saturation. In Proc. POPL, 2024.
+10

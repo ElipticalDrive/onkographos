@@ -1,0 +1,107 @@
+I want to showcase something that has been my weekend project for the past couple of months. 
+It only barely qualifies as a game per se at this point. It's a physically somewhat accurate river boating simulation -- you d…
+
+Building yet another 3D engine -- a devlog, of sorts - Playdate Developer Forum
+Building yet another 3D engine -- a devlog, of sorts
+SDK Development Discussion
+graphics,
+c
+balpha
+(Benjamin Dumke-von der Ehe)
+August 10, 2024, 8:50pm
+1
+I want to showcase something that has been my weekend project for the past couple of months.
+It only barely qualifies as a game per se at this point. It's a physically somewhat accurate river boating simulation -- you drive a boat along a river, with the crank as the steering wheel (the Playdate is turned sideways, so that the "wheel" is in the correct poisition).
+The simulation itself, with the exception of collision detection, is implemented in Lua. It's not a very exciting game obviously, although it actually is quite relaxing.
+I didn't spend a lot of time yet really designing things -- the objects aren't too pretty, the size relations are a little off, and the map isn't too interesting.
+And all that is because, at least so far, the main purpose of this simulation isn't the game itself, but to serve as a use case for the "real" work I've been doing: Yet another Playdate 3D engine.
+This is my first Playdate project written in C, and I'm both impressed by what I was able to get out of the device, and admittedly a little proud of myself.
+Because I've been having a lot of fun with this and I also learned a lot, I want to abuse this forum as a blogging platform and describe some things that went into this.
+Since I want to show on-device performance, here's a slightly shaky cellphone video. It shows the "intro" where the camera flies towoards the boat, then you see me leaving the berth, and then I switch to camera control mode to show that this is all realtime. At the end, notice how the bridge actually casts a shadow onto the boat as it's passing beneath!
+And here's a simulator gif (pretty short because this content goes over the forum's 4MB limit pretty quickly):
+In the video of the actual device, frame rate is unlocked and you can see that it's hovering around 32 fps. That doesn't tell the whole story though, because the engine is adaptive. It can trade off a slightly higher risk of artifacts towards the edge of the screen with an increase in rendering speed. It gets a desired time allotment for rendering a single frame, and it adjusts parameters to match that. Right now that number is hardcoded to 27 ms, but it can also be dynamic, depending on what else the game needs to do besides rendering. More on this later.
+And of course it's rendering full screen, where an actual game might frame the 3d window with other content, which would also mean less work for the rendering engine.
+The game world is a map of 128x128 tiles, where each tile in turn is a voxel block with a base of 32x32 pixels and a maximum height of 28. There are four different voxel colors, with an additional brightness component depending on whether it's in the shadow or not.
+The shading is dynamically computed, but not in realtime -- it's done once per tile during startup. Only the boat's shading is recalculated once it has turned a certain number of degrees.
+Memory latency
+The biggest bottleneck was (and still is) memory latency. And maybe pipeline stalls -- I'm not experienced enough with ARM to be sure; I'm trusting the compiler to do as much as it can about this.
+Now, since we're traversing more than one dimension in arbitrary directions, there's an upper limit to how smart we can be about memory layout. Some of that latency we just have to eat. But there are ways to minimize the damage.
+For example, in most cases, all the engine needs to know is the top-most voxel color at a particular location. Only when it needs to draw e.g. a vertical wall does it needs to go below. Therefore, most of the tiles have an array of 32x32 bytes, where each byte only contains the height (5 bits), the top-most color (2 bits), and the top-most shading (1 bit). All the information about the voxels below the top is in a separate data structure, so that there's a higher chance for a cache hit in the data we need more often.
+So that's an example of keeping memory tight -- but there are examples in the opposite direction as well. In fact, I'm trading off space for performance a lot. CPU is definitely the more scarce resource for me than RAM.
+Time/space tradeoff
+One example: Rendering the boat is comparatively expensive, because unlike everything else, the boat can be in arbitrary positions and with an arbitrary rotation. The computation itself isn't actually the expensive part -- if you know a little bit of linear algebra, it's amazing how much you can avoid expensive trigonometric functions by using some vector multiplications instead.
+The expensive part is, once again, memory access. Grabbing the location and orientation of the ship, even from a stack variable, becomes an expensive operation if it happens on every run through a tight loop (which is not tight enough for that data to remain in registers).
+And so, to avoid much of the work, I doubled the size of the map from 64 KB to 128 KB.
+Originally, the map was an array of 128x128 pointers, at 4 bytes each. To avoid the boat calculation penalty as much as possible, I changed it to be a map of 8-byte structs: 4 bytes for the tile pointer, and 4 bytes of additional data. For now, I'm only using a single one of those additional 32 bits: To mark those particular four tiles that the boat touches right now. Since the boat position is fixed per frame, I only have to update the map before rendering, and then during rendering, when the "boat bit" is zero, I don't have to grab anything else.
+And this "boat bit" sits right next to the tile pointer, which I had to grab anyway, so there's pretty much no penalty to grabbing that additional data -- other than doubling the memory use of the map. There's also no impact on cache performance from this -- when you're traversing a 128x128 map in arbitrary directions, the chances of two subsequent pointers sitting in the same cache line are slim to begin with, and thus halving the chance by doubling the size of the data doesn't really make a difference.
+The space/speed tradeoff applies not just to data, but also to code. Here's an exmple.
+There are three different types of tiles: "Flat", which only stores the elevation and top color; "Opaque", which also stores the voxels below, and "Transparent", which is allowed to have "holes" (like the bridge that the boat drives through). I originally implemented transparency by allowing a tile to define one of the four colors as transparent, and thus allow arbitrary holes. That came with a lot of problems though, and I eventually changed it to only allow one contiguous hole in each vertical voxel column. Among other advantages, this allowed me to re-use the drawing algorithm of the "Opaque" tiles: The part above the hole and the part below the hole could be rendered exactly in the same way as the regular "Opaque" voxel colums.
+And thus my drawTransparentColumn() function came down to little more than two calls to drawOpaqueColumn(). Great!
+Except that performance immediately took a dive.
+And the profiling sampler in the simulator, together with the disassembly of the compiled code, quickly showed the reason.
+Before this change, drawOpaqueColumn() was only called in one place -- directly in the rendering loop, when I'm drawing a slice of an "Opaque" type tile. And therefore, the compiler inlined this function right there.
+But after this change, there were two more places that called drawOpaqueColumn(). And with the function being called in three different places, GCC stopped inlining it. But the function call overhead was brutal.
+And so I explicitly marked the function as inline. Now this code is compiled three times into three different places, but the performance benefit of avoiding the function call outweighs the wasted memory by a lot.
+Avoid floats in the inner loop
+The innermost loop, which is executed once per pixel, has no floats whatsoever. Everything is fixed point. Outside the tight loop, I'm happy to compute a bunch of vectors with floating point math, but before I enter the innermost loop, there's a bunch of stuff like this:
+```
+const int thisViewX1024 = roundf(thisView.x * 1024);
+const int thisViewY1024 = roundf(thisView.y * 1024);
+const int bottomX1024 = roundf(bottom.x * 1024);
+const int bottomY1024 = roundf(bottom.y * 1024);
+```
+and inside the loop, that's what we work with, only doing a 10-bit shift once we need actual pixels:
+```
+const int worldPointX1024 = bottomX1024 + ((yData.depth64 * thisViewX1024) >> 6);
+```
+(depth64, which is also precomputed elsewhere, is only shifted by 6 bits, to prevent the multiplication from overflowing).
+A couple of floats in the outer loop don't hurt, and in the "once per frame" code, there's even a bunch of tanf() calls and (shock!) float divisions. I could probably shave off a few microseconds by optimizing things there, but it would come at the cost of readability and maintainability of the code. And that doesn't seem worth it.
+Cheating: Interlacing
+Even after all of the above, if I actually rendered every single pixel everytime, I wouldn't go above 15 to 20 fps ever. At least not if there's no horizon where I can stop early. So I need to start cheating.
+The outer loop in my rendering algorithm goes left-to-right (on the rotated screen); the inner loop goes bottom-to-top. So I'm rendering 240 slices of 400 pixels each. And the cheat is: I'm only rendering 120 slices in each frame. I render the odd-numbered slices in one frame, and the even-numbered slices in the second one, leaving the framebuffer untouched for the respective other slice. If you're familiar with old-time TVs, this is somewhat related to interlacing.
+This does not mean I'm rendering at half-resolution! After two frames, you see a full resolution image with 240 rendered slices.
+So isn't this just rendering at 15 fps then? No, because your eye sees movement at 30 fps, and it doesn't notice that it's always only half of the pixels that move.
+That is, unless the camera moves really fast, like when I manually control the camera in the video. In that case, you would actually start to see banding artifacts from the interlacing. But if the camera moves fast, your eyes don't see the smallest details anyway. So in that case, I actually render at half-resolution -- I still only calculate 120 slices, but each of them is copied twice to the screen.
+Dithering is still applied separately though, which means this method is minimally slower than the interlaced drawing, but 1) it looks much better than literally blitting the identical pixels, and 2) it avoids interlacing artifacts because the complete screen is redrawn on every frame.
+Adaptive quality
+And this brings me to the final thing: The adaptive rendering time that I mentioned at the beginning.
+The engine has global number called reduceQuality. It starts at zero.
+And the engine measures (via playdate->system->getElapsedTime()) how long it took to render a frame, and builds a moving average of that number over time. And every four frames, if that moving average is worse (higher) than the desired time, it increases reduceQuality. If it's lower, it decreases it. With reduced quality, the rendering time is faster and thus the average goes down, and that's how the engine dynamically adjusts to keep the framerate constant.
+And how does that quality reduction work?
+Remember how I described interlacing above? How we only touch every other slice during each frame? What if we only touched every third slice? That would mean even less work!
+But it would also slightly increase the chance of visible banding artifacts. In many cases, you still wouldn't notice, but the danger is higher. And so this is exactly what we do, but we do it where your eyes are least likely to be focused: At the edge of the screen.
+If, say, reduceQuality has a value of 20, then in the 20 left-most and the 20 right-most slices of the screen, we perform 3-way interlacing (or, in the case of rapid camera movement, we triple a slice instead of duplicating it). Because you usually look at the center of the screen, chances are you won't notice, even if there's the odd artifact.
+In closing
+Will I actually publish this game, or another game with this engine? Will I open source the code? Will I turn this thread into a devlog?
+I don't know
+For now, I just wanted to tell you about my little side project, and maybe inspire some people or give a few tips on what goes into optimizing something like this.
+We'll see what comes.
+thomastc
+August 12, 2024, 3:25pm
+2
+Great writeup, and very impressive results!
+If the pointed-to data aligns on 2-byte boundaries, you could use the lowest but of the 32-bit pointer for the "contains boat" flag? Not sure what the alignment rules are in ARM, but you can always hack it by reserving an extra byte and shifting the content of the allicate memory up 1 byte, or not.
+balpha
+(Benjamin Dumke-von der Ehe)
+August 12, 2024, 5:28pm
+3
+Oh, that's a neat idea! If I end up with memory constraints after all, I might look at that, but right now I have plenty. And since my extra data has no real downside (and I'm sure I'll find uses for more of those bits, e.g. when I add more moving actors), I'll keep it for now.
+thomastc
+August 12, 2024, 5:49pm
+4
+It also saves memory bandwith and increases the chance that things are still in cache at the next loop iteration. But of course it's hard for me to say whether any of that matters.
+galfaroth
+(Batme)
+August 17, 2024, 9:10am
+5
+I’d even pay you to have access to such engine. Not much because I’m a solo dev too but definitely something. Didn’t think of Patreon?
+balpha
+(Benjamin Dumke-von der Ehe)
+August 21, 2024, 4:55pm
+6
+Nah, this is a hobby project for fun. Getting money involved isn't really something I'm considering.
+galfaroth
+(Batme)
+August 21, 2024, 5:11pm
+7
+Well then open it on GitHub and let’s collaborate!

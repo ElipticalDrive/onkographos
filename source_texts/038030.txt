@@ -1,0 +1,171 @@
+Steve's Game Library — Rust game-building libraries for AI coding agents - SGL3D fog: bound a point or spot light's inverse square by the froxel's size by stevepryde · Pull Request #265 · stevepryde/sgl
+
+SGL3D fog: bound a point or spot light's inverse square by the froxel's size by stevepryde · Pull Request #265 · stevepryde/sgl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+stevepryde
+commented
+Oct 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Closes #262.
+A point light near the camera left soft, discrete puffs in the volumetric fog: Hyperdrive's cyan engine light, 2.9 m behind the craft. Fog injection lights each froxel at one jittered sample, cycling through 16 positions. With 1/max(d², 1e-4), a sample landing centimetres from the light took thousands of times the froxel's light. The 0.9 reprojected history then held each spike in world space, so a still light pulsed with the jitter and a moving one left puffs behind.
+References (RD-2)
+Source
+What it does
+Godot b130438 volumetric_fog_process.glsl
+Omni and spot lights take get_omni_attenuation, floored only at max(dist, 0.0001), with a default decay of 1 (1/d). Only its area lights clamp d ≥ 1 m "against extreme flickering".
+Bevy 9d12036 volumetric_fog.wesl
+getDistanceAttenuation with the same 1e-4 floor; per-pixel IGN jitter, no history.
+Hillaire 2015, Frostbite (slides 17, 22, 25)
+One Halton-jittered sample per froxel with a 5% blend. Lists "Moving lights leave trails. Use neighbour clamping?" as open.
+Unreal, practice only, no code
+r.VolumetricFog.InverseSquaredLightDistanceBiasScale: "Scales the amount added to the inverse squared falloff denominator. This effectively removes the spike from inverse squared falloff that causes extreme aliasing." The bias is the volume cell's size.
+Unity VolumetricLighting sample b5b0713 (MIT, allowed)
+Bounded point-light falloff in the fog: 1/(1 + 25 d²/range²).
+The shared treatment is a bounded near field. This PR takes Unreal's form, since it scales with the froxel.
+Change
+In the fog's point and spot evaluation only, the inverse square takes in its denominator the squared diagonal of the froxel's view-space bounding box: its slice's depth and, on each axis across the frame, the extent of its corners at both ends. It is the same size wherever the froxel lies on screen.
+light_reach.wgsl stays the formula's single owner. It takes the bias as a parameter; every surface caller passes 0, so surface shading is unchanged.
+Rectangles are unchanged: their light in the fog is already bounded by solid angle.
+Trade-off: within about a froxel's diagonal of a light, its fog falls short of the inverse square, and more so where Fog::length makes slices deep. This is recorded in the fog provenance header, the README and the CHANGELOG.
+Tests
+a_still_point_light_holds_its_froxel_steady_over_the_jitter_cycle: a still point light at the centre of a 0.6 m-deep near froxel must hold that froxel within 25% over a 16-frame jitter cycle. The bound comes from the bias, not a measurement: every sample lies within half the diagonal b, so 1/(d²+b²) stays within [1/(1.25 b²), 1/b²]. On main it ranged 6.03–12.47 (2.07×).
+The still-light test runs at the screen centre and at the top-left and bottom-right corners, with the light at the centre of each froxel's view-space box.
+a_light_holds_the_same_fog_on_either_side_of_the_screen: a light near a froxel's centre and its mirror image across the view's axis must hold the same fog. This covers the frame's corners and a mid-screen cell. The review's oblique corner-pair measure fails it: 0.0538 against 0.0442 at the top-left corner and its mirror.
+froxels_far_smaller_than_their_distance_to_a_light_keep_its_falloff: froxels a few centimetres across, 4 m or more from a light, keep its physical falloff within half-float rounding.
+Mutations, each reverted by restoring a saved copy:
+Mutation
+Result
+No bias
+Still-light test fails: 6.03–12.47, the same as main
+0.01 × the bias
+Still-light test fails: 2.36–3.10
+1000 × the bias
+Far-light test fails, 5% dimmer; the still-light test fails as unlit
+One oblique corner pair, the previous measure
+Mirror test fails
+Not caught: a depth-only bias. It is symmetric, and the history damps its jitter swing inside the 1.25 bound.
+The existing fog tests, including the single-scattering integral, still pass.
+Evidence
+Measured through Hyperdrive's capture harness, with SGL patched to base 94ab896 against this branch, at the owner's Ultra settings, on an Apple M5 with Metal.
+Fog GPU time (RD-6). 1920×1080 on Meridian's tunnel route, 100 measured frames per run, three runs each, interleaved base/fix:
+Pass
+Base, median ms
+Fix, median ms
+Fog injection
+1.765 / 1.782 / 1.745 (mean 1.764)
+1.677 / 1.835 / 1.840 (mean 1.784)
+Fog filter
+0.098–0.101
+0.098–0.102
+Fog integration
+0.043
+0.043
+The injection's p95 is 2.31–2.43 ms on base and 2.42–2.46 ms with the fix. The +1% median is within run-to-run noise.
+Puffs. Hyperdrive's cyan engine light (intensity 8, range 9 m, 3.9 m from the camera) in the tunnel at 60 Hz, frames 118–135. This is the light's fog contribution: fog on minus that light's fog_energy 0.
+Base
+Fix
+Brightest 16 px block
+0.008–0.088 (puffs)
+0.001–0.002
+Mean frame-to-frame change
+0.017
+0.000
+Sawtooth. A still craft, idle engine light, rear panel:
+Base
+Fix
+Largest frame-to-frame rise
+0.00124, a 16-frame sawtooth
+0.00015, steady
+Trade-off, measured. Hyperdrive's fog is 1200 m long, so its near slices are about 2.4 m deep. That bias is large, and this light's halo all but disappears. Hyperdrive has since set the engine light's fog_energy to 0 (hyperdrive#173). With Godot's default 64 m fog, a point light 1–2 m from fog 10 m out loses about 14–39% of its near-field fog.
+Captures, local in Mission Control's .mc/captures/puffs/262/:
+moving-engine-fog-contribution-{base,fix}-f118-135.png
+moving-game-frames-base-vs-fix-f123-125.png
+stationary-sawtooth-base-vs-fix.png
+The owner judges the look.
+Validation
+bun scripts/tasks.ts check passes on the branch merged with main 91a3810: sgl-3d's 381 native tests, WASM and the browser lanes.
+🤖 Generated with Claude Code
+stevepryde
+and others
+added 4 commits
+October 7, 2026 21:23
+WIP SGL3D fog: bias near point and spot lights by the froxel diagonal (…
+…
+c0d048f
+```
+…#262)
+
+A point or spot light's inverse square in the fog takes the froxel's
+squared diagonal in its denominator, Unreal's practice for volumetric fog
+(r.VolumetricFog.InverseSquaredLightDistanceBiasScale), so one jittered
+sample near the light no longer spikes and the history no longer holds
+puffs. Surfaces pass 0 and keep the physical falloff. Tests, captures and
+timings still to run on the GPU.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+WIP: describe the bias's dimming near the light
+ad4c81b
+Merge remote-tracking branch 'origin/main' into claude/fog-near-light…
+…
+5c8520f
+```
+…-bias
+
+# Conflicts:
+#	CHANGELOG.md
+```
+SGL3D fog: bias by the froxel's view-space box diagonal
+…
+b866a8a
+```
+Review of #265: the bias was one oblique corner-to-corner vector of a
+froxel the frustum shears, so it depended on where the froxel lay on
+screen. It is now the squared diagonal of the froxel's bounding box in
+view space: its slice's depth and, on each axis across the frame, the
+extent of its corners at both ends. The still-light test covers the frame's
+corners, a new test holds a light and its mirror image across the view's
+axis to the same fog (the old measure fails it), the architecture's fog
+design records the bias, and the CHANGELOG bullet is shorter.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+stevepryde
+merged commit d29682d
+into
+main
+Oct 7, 2026
+stevepryde
+mentioned this pull request
+Oct 7, 2026
+Ready SGL 0.3.0 for publishing
+#266
+Merged
+stevepryde
+deleted the
+claude/fog-near-light-bias
+branch
+October 13, 2026 08:21
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

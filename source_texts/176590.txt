@@ -1,0 +1,2459 @@
+Spectral and Decomposition Tracking for Rendering Heterogeneous
+Volumes
+PETER KUTZ, Walt Disney Animation Studios
+RALF HABEL, Walt Disney Animation Studios
+YINING KARL LI, Walt Disney Animation Studios
+JAN NOVÁK, Disney Research
+Delta tracking
+Spectral and decomposition tracking
+Figure 1. A cloudscape rendered with a combination of our spectral and decomposition tracking techniques, which gracefully handle chromatic media and
+reduce collision coefficient evaluations. The insets on the right were computed in equal time, with our method yielding 3.5× lower MSE than delta tracking.
+We present two novel unbiased techniques for sampling free paths in heterogeneous participating media. Our decomposition tracking accelerates
+free-path construction by splitting the medium into a control component
+and a residual component and sampling each of them separately. To minimize expensive evaluations of spatially varying collision coefficients, we
+define the control component to allow constructing free paths in closed form.
+The residual heterogeneous component is then homogenized by adding a
+fictitious medium and handled using weighted delta tracking, which removes
+the need for computing strict bounds of the extinction function. Our second
+contribution, spectral tracking, enables efficient light transport simulation in
+chromatic media. We modify free-path distributions to minimize the fluctuation of path throughputs and thereby reduce the estimation variance.
+To demonstrate the correctness of our algorithms, we derive them directly
+from the radiative transfer equation by extending the integral formulation of
+null-collision algorithms recently developed in reactor physics. This mathematical framework, which we thoroughly review, encompasses existing
+trackers and postulates an entire family of new estimators for solving transport problems; our algorithms are examples of such. We analyze the proposed
+methods in canonical settings and on production scenes, and compare to
+the current state of the art in simulating light transport in heterogeneous
+participating media.
+© 2017 Copyright held by the owner/author(s). Publication rights licensed to ACM.
+This is the author’s version of the work. It is posted here for your personal use. Not for
+redistribution. The definitive Version of Record was published in ACM Transactions on
+Graphics, http://dx.doi.org/10.1145/3072959.3073665.
+CCS Concepts: • Computing methodologies → Rendering; Ray tracing;
+Additional Key Words and Phrases: participating media, volume rendering,
+free-path sampling, transmittance, delta tracking, ratio tracking, color
+ACM Reference format:
+Peter Kutz, Ralf Habel, Yining Karl Li, and Jan Novák. 2017. Spectral and
+Decomposition Tracking for Rendering Heterogeneous Volumes. ACM Trans.
+Graph. 36, 4, Article 111 (July 2017), 16 pages.
+DOI: http://dx.doi.org/10.1145/3072959.3073665
+1
+INTRODUCTION
+Accurate and efficient simulation of radiative transfer in participating media is essential in many domains, such as nuclear reactor
+design, medical imaging, scientific visualization, and realistic image
+synthesis. The animation and visual effects industry, in particular,
+employs rich and complex volumetric structures (such as smoke, fire,
+or clouds) and translucent materials (such as marble, wax, or skin)
+to create aesthetically pleasing visuals and convey natural depth
+and scale cues. Simulating radiative transfer in such materials, however, presents a significant computational challenge. Monte Carlo
+methods based on path tracing—a popular tool for solving transport
+problems—require constructing a massive number of light paths.
+When the appearance of the medium is dominated by high-order
+scattering, each such light path can consist of up to thousands of
+scattering events. Modeling these scattering events—by means of
+sampling free paths—is the main contributor to the cost of synthesizing an image, and the main focus of this paper.
+ACM Transactions on Graphics, Vol. 36, No. 4, Article 111. Publication date: July 2017.
+111:2 •
+Peter Kutz, Ralf Habel, Yining Karl Li, and Jan Novák
+In continuous homogeneous media, stochastically constructing
+free paths is relatively cheap as we can obtain distance samples
+analytically. The general case of heterogeneous media, however,
+requires a specific approach—delta tracking—that homogenizes the
+volume parameters by adding a fictitious medium that interacts
+with light only formally. The properties of the fictitious medium
+are defined such that, upon a collision, light scatters forward with
+its direction and radiant intensity unaltered. While the inclusion
+of these null collisions is of no use for the principal description of
+radiative transfer, it does enable formulating Monte Carlo methods
+for sampling free paths. The main drawback of delta tracking is
+the large number of expensive lookups of spatially varying volume
+parameters.
+We propose to accelerate delta tracking by decomposing the
+scattering medium into a homogeneous control component and a
+heterogeneous residual component. Individual free paths, or their
+segments, are then constructed using only one component. If the
+control component is used, the calculation is fully analytic and
+we avoid expensive memory lookups or procedural evaluations,
+keeping the cost of constructing paths low (see Figure 2). A similar
+decomposition was previously explored in the context of transmittance estimation [Novák et al. 2014]; we investigate the application
+of this concept to free-path sampling.
+We also address the challenges of efficiently handling wavelengthdependent collision coefficients. We analyze several vectorized variants of weighted tracking and propose a history-aware strategy for
+setting collision probabilities to prevent geometric growth of the
+path throughput.
+In order to demonstrate that our techniques are unbiased, we
+derive them directly from the radiative transfer equation (RTE) using the integral formulation of null-collision algorithms recently
+proposed by Galtier et al. [2013]. This mathematical framework
+defines an entire, largely unexplored family of Monte Carlo methods for solving radiative transfer in heterogeneous media, opening
+opportunities for developing new practical algorithms of which
+our decomposition and spectral trackers are examples. Such improvements would be difficult to achieve, if not impossible, when
+postulating the algorithms using physical interpretations. Instead,
+we derive our trackers directly from the RTE, obviating the need for
+more involved mathematical proofs [Coleman 1968; Miller 1967].
+In what follows, we review several existing trackers for constructing free paths (Section 2), rederive Galtier et al.’s reformulation of
+the RTE (Section 3), and discuss configurations that lead to a number of known, previously published algorithms. We then introduce
+the concept of decomposing a scattering medium to sample free
+paths more efficiently (Section 4). For didactic purposes, we start
+with an intuitive, albeit constrained solution, which we later generalize by direct derivation from the RTE. The resulting algorithm
+reduces evaluations of spatially varying coefficients by obtaining
+some of the free-path samples analytically. We further improve the
+algorithm using a complementary approach for efficiently handling
+wavelength-dependent collision coefficients (Section 5). We analyze individual techniques in isolation and combined together in
+canonical settings and in realistic rendering scenarios (Section 6),
+demonstrating multiple facets of improved performance over existing methods.
+ACM Transactions on Graphics, Vol. 36, No. 4, Article 111. Publication date: July 2017.
+free path in residual component
+free path in control component
+null collision with lookup
+real collision with lookup
+real collision without lookup
+Figure 2. Our decomposition tracking constructs some of the free paths
+(yellow) in a heterogeneous medium without evaluating spatially varying
+collision coefficients. The portion of yellow segments represents the savings
+in memory lookups. The resulting light paths are identical to delta tracking.
+2
+EXISTING TRACKING ALGORITHMS
+The propagation of light in a participating medium is governed
+by the radiative transfer equation [Chandrasekhar 1960], which
+relates the change in radiative energy to collision coefficients of the
+medium: the absorption coefficient µ a (x), the scattering coefficient
+µ s (x), and their sum, the extinction coefficient µ t (x) = µ a (x) + µ s (x).
+Each of these coefficients quantifies the distance density (with physical units of inverse length) of the corresponding physical process.
+A key tool for numerically solving the RTE is a stochastic construction of light particles’ trajectories that consist of free paths, i.e.
+straight flight paths between subsequent collisions with the medium.
+Unbiased estimators that rely on constructing such paths can be
+classified as either analog methods, that directly model the actual
+physical process, or non-analog methods, that bias the free-path
+distribution and reweight samples to produce unbiased results with
+lower variance or without the constraints of the analog process.
+Closed-form Tracking. In simple volumes, e.g. those with constant,
+polynomial, or exponentially varying extinction, free paths can be
+sampled using the inverse transform sampling, first applied to Monte
+Carlo integration by Ulam [Eckhardt 1987]. We define a probability
+density function
+ R t (PDF) by normalizing the transmittance function
+T (t ) = exp − 0 µ t (xt )dt along a ray parameterized by t. If the
+corresponding cumulative distribution function (CDF) is analytically
+invertible, then the free-path distance t 0 can be sampled analytically
+using a single random number ζ and a closed-form expression,
+e.g. t 0 = − log(1 − ζ )/µ t for homogeneous volumes. In cases when
+the CDF is not invertible,
+but an analytic solution for the optical
+Rt
+thickness τ (t ) = 0 µ t (xt )dt still exists, one can find the solution
+iteratively using Newton’s method [Brown and Martin 2003].
+Regular Tracking. If the medium consists of piecewise homogeneous regions, the free path can be found by visiting boundaries
+along the ray and integrating optical thickness of individual regions until its negative exponentiated value reaches a stochastically
+chosen value of transmittance. This procedure, known as regular
+tracking [Sutton et al. 1999] or surface tracking [Leppänen 2010],
+quickly becomes expensive as we need to identify all boundaries
+between individual regions along the ray. Unless they can be discovered quickly, as with grids [Amanatides and Woo 1987] or octrees [Hubert-Tremblay et al. 2006], the method is relatively slow,
+especially when free paths cross many boundaries.
+Spectral and Decomposition Tracking for Rendering Heterogeneous Volumes • 111:3
+Ray Marching. A straightforward approach to reduce the cost of
+regular tracking is to ignore the boundaries and march along the ray
+with a fixed stride [Perlin and Hoffert 1989]. However, ignoring the
+true heterogeneity and assuming a constant extinction along each
+step leads to bias, which persists even if the marching is randomly
+jittered [Raab et al. 2008]. The bias is characterized by Jensen’s
+inequality [Jensen 1906], exp(E[−τ ]) ≤ E[exp(−τ )], and can be
+reduced by taking smaller stride steps (ideally conforming to the
+Nyquist frequency), but this significantly reduces performance.
+Delta Tracking. Unbiased sampling of free paths in heterogeneous
+volumes can be achieved using delta tracking. The method is based
+on von Neumann’s [1951] rejection sampling and strictly adheres
+to the physical process, hence matching the classification of analog estimators. It was independently developed in neutron transport [Bertini 1963; Woodcock et al. 1965; Zerby et al. 1961] and in
+plasma physics [Skullerud 1968], and is also known as Woodcock
+tracking, the null-collision algorithm, or pseudo scattering.
+The main idea of delta tracking is to introduce a fictitious medium,
+represented by the null-collision coefficient µ n (x), that homogenizes
+the total collision density in order to enable analytic sampling of free
+paths. The shortening of free paths due to increasing the combined
+collision coefficient is counteracted by rejecting some collisions
+and continuing the free flight forward. The rejected collisions—
+referred to as null collisions—occur with probability equal to the
+ratio of the null-collision coefficient to the combined (real + null)
+collision coefficient. The fictitious medium can be interpreted as
+being perfectly transparent and thereby having no effect on light
+transport; its sole purpose is to allow analytic distance sampling.
+The correctness of the method was rigorously proven using two
+different mathematical approaches [Coleman 1968; Miller 1967].
+Since null collisions incur computational overhead, several approaches were developed to lower the null-collision coefficient, typically by partitioning the medium, e.g. using kd-trees [Yue et al. 2010,
+2011] or grids [Szirmay-Kalos et al. 2011], and optimizing the the
+amount of added fictitious medium for each region independently.
+Our decomposition tracking is complementary to these approaches
+and further reduces computational cost by omitting queries of µ t (x).
+Weighted Tracking. Another way to reduce null collisions is to allow the combined coefficient to occasionally underestimate the real
+extinction. To remain unbiased, the resulting non-analog estimator
+must appropriately reweight samples that step into regions with
+negative values of the null-collision coefficient [Carter et al. 1972;
+Cramer 1978]. Various weighting schemes were also proposed to
+artificially increase collision rates in measurement regions [Spanier
+and Gelbard 1969; Steen 1966], or to ensure that free paths reach a
+certain distance in deep-penetration problems [Cramer 1978; Morgan and Kotlyar 2015] and transmittance calculations [Novák et al.
+2014] by replacing the rejection with a statistical weight. Eymet et
+al. [2013] investigated the benefits of combining weighted tracking
+with energy partitioning [Shamsundar et al. 1973].
+While reasoning about negative extinctions using physical arguments is difficult, a purely mathematical view [Galtier et al. 2013]
+reveals an entire family of weighted algorithms that all lead to the
+correct solution; we review this integral framework in Section 3.
+Multi-volume Tracking. Until now we have only considered scattering volumes that consist of a single, spatially varying medium.
+For materials where absorption can occur due to multiple transitions,
+Galtier et al. [2016] proposed to reduce the tracking cost by probabilistically evaluating only a single term in the sum. We combine
+this concept with the control/residual decomposition, which was
+proposed for transmittance estimation [Novák et al. 2014; SzirmayKalos et al. 2011]. Thanks to its multiplicative nature, transmittance
+can be calculated as the product of per-component estimates, reducing variance if the decomposition is chosen carefully. Our application to free-path sampling (Section 4) relies on a different theoretical
+justification, and, instead of reducing sample variance, we reduce
+the per-sample cost.
+Multi-wavelength Tracking. Collision coefficients that vary spectrally require special handling. Raab et al. [2008] recommended
+avoiding wavelength-dependent extinction coefficients when possible, and otherwise tracing separate light paths for each wavelength [Eymet et al. 2013]. In the latter case, the tracking cost grows
+linearly with the number of wavelengths.
+Tracing multiple wavelengths together can increase efficiency
+and reduce distracting color noise. Wilkie et al. [2014] described a
+technique in which a single “hero” wavelength is chosen for path
+construction, secondary wavelengths are carried along, and their
+(potentially high) variance is kept low using multiple importance
+sampling (MIS) [Veach 1997]. A similar approach was used by Chiang et al. [2016] who derive wavelength selection probabilities from
+per-wavelength throughput and single-scattering albedo. These
+techniques work well in homogeneous media. The hero-wavelength
+method can be extended to heterogeneous volumes, however, it
+employs delta tracking and ray marching for calculating a single
+free-path sample and the proposed implementation is biased. In
+contrast, our multi-wavelength tracking (Section 5) is unbiased and
+does not require explicit selection of a hero wavelength. We also
+discuss situations that permit combining multiple path-construction
+strategies, that employ an unbiased rejection-based tracker, using
+MIS without explicitly evaluating or approximating distance PDFs.
+3
+RADIATIVE TRANSFER WITH NULL COLLISIONS
+In this section, we derive a version of the RTE that includes null
+collisions. We then extend it by incorporating the work of Galtier
+et al. [2013] to obtain the integral formulation of null-collision
+algorithms. Finally, we elaborate on specific configurations that
+yield delta tracking and weighted delta tracking and discuss other
+existing trackers in appendices. Readers familiar with the framework
+may skip directly to Section 4.
+3.1
+Integral Formulation of RTE with Null Collisions
+The radiative transfer equation in its differential form
+(ω · ∇)L(x, ω) = − µ t (x)L(x, ω) + µ a (x)Le (x, ω)
+Z
++ µ s (x)
+fp (ω, ω̄)L(x, ω̄) dω̄
+(1)
+S2
+describes the equilibrium radiance L(x, ω) parameterized by point
+x and direction of travel ω. The first term on the right side of Equation (1) expresses the losses due to absorption and out-scattering.
+ACM Transactions on Graphics, Vol. 36, No. 4, Article 111. Publication date: July 2017.
+111:4 •
+Peter Kutz, Ralf Habel, Yining Karl Li, and Jan Novák
+The gains due to radiant emission Le (x, ω) and inscattering are
+described in the second and third term, respectively. The phase function fp (ω, ω̄) quantifies the directional density of scattered light.
+In order to incorporate null collisions, we can formally write the
+transport due to the null-collision coefficient µ n (x) as
+Z
+−µ n (x)L(x, ω) + µ n (x)
+δ (ω − ω̄)L(x, ω̄) dω̄ = 0.
+(2)
+S2
+The losses due to the first term equal to the null-collided radiance
+that is “inscattered” using the Dirac delta function. Since the two
+terms cancel out, we can add them to the RTE without changing its
+validity, yielding [Cramer 1978]
+(ω · ∇)L(x, ω) = − [µ t (x) + µ n (x)]L(x, ω) + µ a (x)Le (x, ω)
+Z
++ µ s (x)
+fp (ω, ω̄)L(x, ω̄) dω̄
+2
+ZS
++ µ n (x)
+δ (ω − ω̄)L(x, ω̄) dω̄.
+(3)
+S2
+We will refer to the term on the last line as the null-collided radiance. By integrating both sidesRspatially along ω, introducing the
+shorthand notation Ls (x, ω) = S 2 fp (ω, ω̄)L(x, ω̄)dω̄, and solving
+the Dirac integral we obtain the integral form of the RTE including
+null collisions:
+!
+Z ∞
+Z t
+L(x, ω) =
+exp −
+µ t (xs ) + µ n (xs ) ds µ a (xt )Le (xt , ω)
+0
+0
+
++ µ s (xt )Ls (xt , ω) + µ n (xt )L(xt , ω) dt,
+(4)
+where xt = x − tω and xs = x − sω. In this formulation, the change
+in transmittance (the exponential term) due to null collisions is
+always compensated for by the null-collided radiance: if µ n (x) is
+positive, the reduction in transmittance is counteracted by adding
+the positive null-collided radiance. If µ n (x) is negative, then the
+surplus of radiance due to overestimating transmittance is removed
+by adding the negative null-collided radiance.
+Since negative values of collision coefficients are undefined in the
+physical sense, we must abandon a purely physical interpretation
+of Equation (4) here. The equation is still a valid RTE reformulation
+though, as null collisions have no impact on light transport.
+3.2
+Integral Formulation of Tracking Methods
+In order to provide an algorithmic recipe for tracking algorithms in
+heterogeneous media, Galtier et al. [2013] introduce a number of
+identities that allow for translating Equation (4) directly into code
+for solving it. We loosely follow their derivation for absorptive-only
+media and extend it to include the process of scattering [Eymet et al.
+2013]. We first define the probability density function (PDF)
+!
+Z t
+p(t ) = µ̄ (xt ) exp −
+µ̄ (xs ) ds ,
+(5)
+0
+which will be used to sample free-path lengths t ∈ (0, ∞) along
+the source-seeking ray (x, −ω) in closed form. We refer to µ̄ (x) =
+µ t (x) + µ n (x) as the free-path-sampling coefficient, which combines
+the extinction and the null-collision coefficients. Substituting the
+ACM Transactions on Graphics, Vol. 36, No. 4, Article 111. Publication date: July 2017.
+tj
+ω1
+ω0
+x0
+x1
+ωj
+scattering
+null-collision
+xj
+xj+1
+ωk xk
+absorption/emission
+µ (x )
+µ (x )L (x ,ω )
+µ (x )
+w (X) = µ̄ (x s)P 1(x ) · · · µ̄ (x n)P j(x ) · · · a µ̄ (xk )Pe (xk ) k
+1 s 1
+j n j
+k a k
+Figure 3. A light path X = {x0 . . . xk } in a heterogeneous medium consists
+of absorption, scattering, and null-collision events that determine the Monte
+Carlo score w (X).
+PDF for the exponential term in Equation (4) yields
+Z ∞
+ µ (x )
+µ s (xt )
+a t
+Le (xt , ω) +
+Ls (xt , ω)
+L(x, ω) =
+p(t )
+µ̄ (xt )
+µ̄ (xt )
+0
+
+µ n (xt )
++
+L(xt , ω) dt .
+µ̄ (xt )
+(6)
+Next, we introduce probabilities Pa (x), Ps (x), and Pn (x) to allow
+probabilistically evaluating each of the emission, inscattering, and
+null-collided radiance terms, respectively. To distinguish the individual free-path segments that are built to numerically solve the
+recursive RTE, we denote x0 ≡ x and xj+1 = xj − t j ω j :
+"
+Z ∞
+µ a (xj+1 )Le (xj+1 , ω j )
+L(xj , ω j ) =
+p(t j ) Pa (xj+1 )
+µ̄ (xj+1 )Pa (xj+1 )
+0
+µ s (xj+1 )Ls (xj+1 , ω j )
++Ps (xj+1 )
+µ̄ (xj+1 )Ps (xj+1 )
+#
+µ n (xj+1 )L(xj+1 , ω j )
+dt j . (7)
++Pn (xj+1 )
+µ̄ (xj+1 )Pn (xj+1 )
+Figure 3 shows a light path consisting of a number of free-path
+segments between different types of collision events, indexed by j.
+Similarly to Galtier et al. [2013], we formalize the notion of probabilistic testing using the Heaviside function, which returns 1 if the
+condition is true, and 0 otherwise. A probabilistic evaluation of a
+random variable X can be written as the product
+Z 1
+PX =
+H [y < P]X dy,
+(8)
+0
+where P is the probability of evaluating X . Introducing H and
+substituting x+ = xj+1 for readability, we obtain
+Z ∞
+L(xj , ω j ) =
+p(t j )
+0
+"Z 1
+µ a (x+ )
+×
+H [ξ e < Pa (x+ )]
+Le (x+ , ω j ) dξ e
+µ̄
+(x
++ )Pa (x+ )
+0
+Z 1
+µ s (x+ )
+H [ξ s < Ps (x+ )]
++
+Ls (x+ , ω j ) dξ s
+µ̄ (x+ )Ps (x+ )
+0
+#
+Z 1
+µ n (x+ )
++
+H [ξ n < Pn (x+ )]
+L(x+ , ω j ) dξ n dt j . (9)
+µ̄ (x+ )Pn (x+ )
+0
+By replacing the integrals with Monte Carlo estimators, this version
+of the RTE can be directly translated into a multitude of recursive algorithms that all yield the correct solution regardless of the choice of
+µ n (x) and probabilities Pa (x), Ps (x), and Pn (x). While these degrees
+of freedom may be uninteresting from a purely theoretical point
+of view, their presence is of high interest for numerical methods
+Spectral and Decomposition Tracking for Rendering Heterogeneous Volumes • 111:5
+as different choices lead to vastly different convergence characteristics and algorithmic constraints. Next, we review two existing
+techniques deriving them directly from Equation (9).
+3.3
+Delta Tracking
+In standard delta tracking, the probabilities for evaluating the emitted, inscattered, and null-collided radiance are strictly proportional
+to the relative value of the corresponding coefficient:
+µ a (x)
+µ s (x)
+µ n (x)
+Pa (x) =
+, Ps (x) =
+, Pn (x) =
+.
+(10)
+µ̄ (x)
+µ̄ (x)
+µ̄ (x)
+In order for these probabilities to be mathematically valid (i.e. in
+[0, 1]), the free-path-sampling coefficient µ̄ (x) is set to a majorant
+of µ t (x), typically represented by a piecewise constant function.
+These probabilities perfectly cancel the fractions first introduced in
+Equation (7), leaving “only” the unweighted radiance functions to
+be evaluated. To this end, most implementations employ branching
+to evaluate only one of the radiance functions and thus avoid a
+geometric growth of function calls. Since the probabilities sum to
+one, and exactly one decision test is true at any time, Equation (9)
+simplifies to
+Z 1
+Z ∞
+L(xj , ω j ) =
+p(t j )
+H [ξ < Pa (x+ )]Le (x+ , ω j )
+0
+0
++H [Pa (x+ ) < ξ < 1 − Pn (y)]Ls (x+ , ω j )
++H [1 − Pn (x+ ) < ξ ]L(x+ , ω j ) dξ dt j . (11)
+Figure 1 (left) shows a direct translation of Equation (11) into the
+code of a Monte Carlo estimator. First, a random distance t is sampled from p(t j ) to estimate the outer integral. Then a uniformly
+distributed random variable ξ selects one of the if (line 5), else if
+(line 7), and else (line 9) branches that correspond to the three
+Heaviside functions in the inner integral.
+3.4
+Weighted Delta Tracking
+One way to remove the burden of finding tight majorants on µ t (x)
+is to introduce a weighted Monte Carlo scheme [Carter et al. 1972;
+Cramer 1978; Galtier et al. 2013]. Notice that Equation (6) is still
+valid even if the free-path-sampling coefficient is not a majorant, i.e.
+µ̄ (x) < µ t (x), as long as we provide mathematically valid definitions
+of the branching probabilities. Freeing themselves from a physical
+1.6
+1.4
+µ n (x)
+1.2
+extinction
+1.2
+extinction
+Medium (real & null)
+µ̄ (x)
+1.4
+1.0
+0.8
+0.6
+0.4
+µ t (x)
+0.0
+0.0
+µ̄ (x)
+µ n (x)
+1.0
+0.8
+0.6
+µ t (x)
+0.4
+0.2
+0.2
+0.2
+0.4
+0.6
+0.8
+0.0
+0.0
+1.0
+0.2
+0.4
+free-path density
+sample weight
+density × weight
+# null collisions
+1.4
+1.2
+0.8
+1.0
+1.6
+0.38
+1.4
+1.2
+(see legend)
+1.6
+0.6
+distance
+distance
+(see legend)
+1 function DeltaTracking(x, ω )
+1 function WgtDeltaTracking(x, ω )
+2
+while true do
+2
+w ←1
+ln(1−ζ )
+3
+while true do
+3
+t ← − µ̄
+ln(1−ζ )
+4
+t ← − µ̄
+4
+x ← x−t ×ω
+µ (x)
+5
+x ← x−t ×ω
+5
+if ξ < aµ̄ then
+6
+if ξ < P a (x) then
+6
+return L e (x, ω )
+µ (x)L (x, ω )
+µ (x)
+return w × a µ̄ Pae(x)
+7
+else if ξ < 1 − nµ̄ then 7
+8
+else
+if
+ξ
+<
+1
+−
+Pn (x) then
+8
+ω ← sample ∝ fp (ω )
+9
+ω ← sample ∝ fp (ω )
+9
+else
+µ (x)
+10
+continue
+10
+w ← w × µ̄ Pss (x)
+11
+else
+µ (x)
+12
+w ← w × µ̄ Pnn (x)
+1.6
+Free paths & weights
+Algorithm 1. Delta tracking and weighted delta tracking. The combined freepath-sampling coefficient µ̄ is assumed to be constant along the ray (x, −ω ).
+ζ and ξ represent uniformly distributed random numbers.
+1.0
+0.8
+0.6
+0.4
+1.0
+0.8
+0.15
+0.6
+0.4
+0.10
+0.2
+0.0
+0.0
+0.2
+0.2
+0.4
+0.6
+0.8
+1.0
+0.0
+0.0
+0.04
+0.2
+0.4
+distance
+0.6
+0.8
+1.0
+distance
+(a) Bounding µ̄
+(b) Non-bounding µ̄
+Figure 4. Weighted delta tracking in a medium with bounding and nonbounding free-path-sampling coefficient. The stretching of the free-path
+probability density in (b) is compensated for by weighting the samples. The
+red line, illustrating the weight, starts diverging from 1 as we enter regions
+where µ̄ < µ t (x). The density × weight product is in both cases the same,
+but the statistical error is higher in (b) due to the very noisy weight; the red
+band illustrates its standard deviation. The dashed line shows the average
+number of null-collisions, which is reduced in (b) thanks to the lower µ̄.
+interpretation, Cramer [1978] and Galtier et al. [2013] exploit this
+observation and propose to set
+µ a (x)
+,
+µ t (x) + |µ n (x)|
+µ s (x)
+Ps (x) =
+,
+µ t (x) + |µ n (x)|
+|µ n (x)|
+.
+Pn (x) =
+µ t (x) + |µ n (x)|
+Pa (x) =
+(12)
+(13)
+(14)
+The stretching of the free-path PDF is compensated for by properly
+reweighting the radiance functions; see Figure 4 for an illustration.
+Without restricting ourselves to a particular definition of the branching probabilities, we can express the Monte Carlo score w (X) of
+path sample X as
+w (X) = Le (xk , ωk ) w a (xk )
+w ? (xj ) =
+µ ? (xj )
+,
+µ̄ (xj )P? (xj )
+kY
+−1
+w ? (xj ),
+(15)
+j=1
+(16)
+where X = {x0 . . . xk }, k is the index of the first absorption collision—
+the termination point—and w ? is a local collision weight with the
+subscript ? representing a, s, or n, depending on whether the corresponding event was an absorptive, scattering, or null collision. The
+product of all collision weights is referred to as the path throughput.
+Algorithm 1 (right) shows a pseudocode that implements a branching version of Equation (9) and computes w (X) progressively.
+ACM Transactions on Graphics, Vol. 36, No. 4, Article 111. Publication date: July 2017.
+111:6 •
+Peter Kutz, Ralf Habel, Yining Karl Li, and Jan Novák
+Table 1. Collision coefficients used by the decomposition trackers.
+Symbol & Value
+Description
+ray
+µ a (x) ∈ [0, ∞)
+absorption coef. of original volume
+µ s (x) ∈ [0, ∞)
+scattering coef. of original volume
+µ t (x) = µ a (x) + µ s (x) extinction coef. of original volume
+µ ac ∈ [0, ∞)
+µ sc ∈ [0, ∞)
+µ tc = µ ac + µ sc
+absorption coef. of control volume
+scattering coef. of control volume
+extinction coef. of control volume
+µ ar (x) = µ a (x) − µ ac
+µ sr (x) = µ s (x) − µ sc
+µ tr (x) = µ t (x) − µ tc
+absorption coef. of residual volume
+scattering coef. of residual volume
+extinction coef. of residual volume
+µ̄ ∈ (µ tc , ∞)
+free-path-sampling coefficient
+µ n (x) = µ̄ − µ tc − µ tr (x) null-collision coefficient
+Discussion. Not having to define the free-path-sampling coefficient as a majorant of µ t (x) eases the search for an analytically
+integrable function µ̄ (x) that closely approximates µ t (x). However,
+numerous analyses [Carter et al. 1972; Cramer 1978; Galtier et al.
+2013; Novák et al. 2014] demonstrate that the variance of the path
+throughput increases rapidly with non-bounding µ̄ (x). In fact, the
+throughput will alternate sign whenever a null collision occurs
+and µ n (x) is negative. It is thus still important to seek free-pathsampling coefficients that bound µ t (x) in most parts of the volume.
+Having the ability to occasionally violate this rule is nonetheless
+very practical.
+Other Estimators. In Appendix A we discuss the configuration
+that yields the free-path-sampling technique briefly discussed by
+Novák et al. [2014]. Numerous transmittance estimators employing
+various forms of weighting [Cramer 1978; Novák et al. 2014] can
+also be formalized using the aforementioned integral framework,
+as long as the underlying equations are adapted to calculate only
+transmittance; we show how to do this in Appendix B.
+4
+DECOMPOSITION TRACKING
+In this section, we present a volume-decomposition technique for
+accelerating free-path sampling. Our approach is motivated by the
+benefits of applying such decomposition to transmittance estimation [Novák et al. 2014], where it lowers variance and reduces memory accesses due to handling a part of the volume—the control
+component—analytically.
+Similarly to previous work, we decompose the original volume
+into a homogeneous control component {µ ac , µ sc } and the remaining
+heterogeneous residual component {µ ar (x), µ sr (x)}; see Table 1 for
+symbol overview and Figure 5 for an illustration.
+In the next two sections, we describe how to generate free-path
+samples using the two components. We begin with an intuitive,
+albeit limited approach (Section 4.1) that cannot incorporate sample
+weighting, to later derive a more flexible formulation (Section 4.2)
+using the integral framework from Section 3.
+ACM Transactions on Graphics, Vol. 36, No. 4, Article 111. Publication date: July 2017.
+(a) Original medium
+(b) Control medium
+(c) Residual medium
+Figure 5. We decompose a medium (a) into a homogeneous control component (b) and a heterogeneous residual component (c). A free-path sample
+in the original medium can then be obtained by taking the minimum of
+free-path samples in individual components.
+4.1
+Analog Decomposition Tracking
+We observe that a free-path sample in the original medium can be
+obtained by taking the minimum of free-path samples in individual
+components. This concept is illustrated in Figure 5 and can be understood intuitively by considering the first collision of a ray with
+two separate sets of particles. If we intersect the union of the two
+sets, only the collision at the first, or minimum, free-flight distance
+from either set actually matters. This is similar to finding the nearest
+hit in surface rendering. We will now prove rigorously that freepath samples obtained by taking the minimum follow the desired
+distribution. An extended version of this proof can be found in the
+supplemental material.
+Theorem 1. Let non-negative extinction coefficients µ A (x), µ B (x)
+be combined to µC (x) = µ A (x) + µ B (x). Let A, B, and C be independent random variables
+ R t distributed
+ according to the following CDF
+F X (t ) = 1 − exp − 0 µ X (xs )ds with X ∈ {A, B, C}. The CDFs of C
+and min(A, B) are identical.
+Proof. Consider a random variable D = min(A, B). According
+to basic probability theory, the CDF of D reads
+F D (t ) = F A (t ) + F B (t ) − F A (t )F B (t ).
+(17)
+Substituting the CDFs
+R tof A and B into the previous relation and
+using TX (t ) = exp(− 0 µ X (xs )ds), we obtain
+F D (t ) = [1 − TA (t )] + [1 − TB (t )] − [1 − TA (t )] [1 − TB (t )]
+= 1 − TA (t )TB (t ).
+(18)
+Since TA (t ) and TB (t ) are exponential functions and integration is
+a linear operator, Equation (18) simplifies to
+F D (t ) = 1 − TA (t )TB (t ) = 1 − TC (t ) = FC (t ).
+Hence we have demonstrated that the CDF of C is indeed equal to
+the CDF of min(A, B).
+
+The combination is therefore very elegant—we create free-path
+samples for each component and simply take the minimum of them
+to arrive at the combined estimate. However, the proof assumes A, B,
+and C to be distributed according to transmittance, i.e. they obey an
+exponential distribution parameterized by negative optical thickness.
+As such, we can use the aforementioned min-based combination
+only with analog trackers; weighted trackers that produce arbitrary
+weighted distributions must be combined differently.
+Spectral and Decomposition Tracking for Rendering Heterogeneous Volumes • 111:7
+Algorithm 2. Analog decomposition tracking. ζ , ψ , and ξ are uniformly
+distributed random numbers.
+1 function AnalogDecompositionTracking(x, ω )
+2
+while true do
+ln(1−ζ )
+3
+t c ← − µc
+t
+4
+5
+6
+tr ← 0
+while true do
+ln(1−ψ )
+t r ← t r − µ̄ −µ c
+t
+7
+8
+9
+if t r > t c then
+x ← x − ct c × ω
+µ (x)
+if ξ < aµ c then
+return L e (x, ω )
+else
+ω ← sample ∝ fp (ω )
+break
+else
+µ r (x)
+if ξ < µ̄ a−µ c then
+t
+16
+17
+18
+x ← x − tr × ω
+return L e (x, ω )
+µ (x)
+else if ξ < 1 − µ̄ n−µ c then
+t
+19
+20
+21
+1 function WeightedDecompositionTracking(x, ω )
+2
+w ←1
+3
+while true do
+ln(1−ζ )
+4
+t ← − µ̄
+5
+x ← x−t ×ω
+6
+F ←0
+7
+if ξ < (F ← F + P ac (x)) then
+µc
+return w × µ̄ P ca(x) ×L e (x, ω )
+8
+t
+10
+11
+12
+13
+14
+15
+Algorithm 3. Weighted decomposition tracking. F is a CDF and the assignment operator ← returns the assigned value.
+x ← x − tr × ω
+ω ← sample ∝ fp (ω )
+break
+Efficient Implementation. Given that the decomposition requires
+drawing two free-path samples, it may appear less efficient than
+delta tracking in the original volume. However, a simple shortcircuit optimization can save computation and most of the expensive
+extinction queries. We first analytically sample the free path in the
+control component. Then we use delta tracking to construct a free
+path in the residual component, but as soon as the delta tracker
+exceeds the control free path, we stop and return the control sample.
+This avoids the lookups needed to finish the free-path sampling in
+the residual component. Algorithm 2 presents the algorithm of the
+described approach. The technique can also be adjusted to combine
+distance samples from multiple separate superimposed volumes,
+without having all of these volumes in memory at the same time,
+facilitating easy integration into streaming renderers.
+Limitations. In addition to requiring the majorant, the main drawback of the analog method is that it also needs a minorant for decomposing the medium. The best performance requires both bounds
+to be tight. As mentioned before, computing tight bounds is challenging in practice—sometimes nearly impossible if the function
+is defined procedurally. Removing this requirement would make
+the decomposition tracking a lot more practical. Furthermore, since
+the analog decomposition relies on delta tracking, it can handle
+only a single wavelength (discussed in Section 5), and cannot easily
+accommodate additional information to further reduce variance. We
+overcome these limitations in the next section.
+µc
+w ← w × µ̄ P cs (x)
+11
+s
+else if ξ < (F ← F + P ar (x)) then
+12
+µ r (x)
+return w × µ̄ Par (x) ×L e (x, ω )
+a
+else if ξ < (F ← F + Psr (x)) then
+ω ← sample ∝ fp (ω )
+µ r (x)
+w ← w × µ̄ Psr (x)
+s
+13
+14
+15
+16
+else
+µ (x)
+w ← w × µ̄ Pnn (x)
+17
+18
+4.2
+The analog decomposition tracking requires both the residual extinction coefficient µ tr (x) and the null-collision coefficient µ n (x) to
+be always non-negative. The control extinction µ tc thus needs to be
+a minorant of µ t (x) to ensure µ tr (x) ≥ 0, and the free-path-sampling
+coefficient of the residual component µ̄ r must be a majorant of µ tr (x)
+to ensure µ n (x) ≥ 0.
+a
+else if ξ < (F ← F + Psc (x)) then
+ω ← sample ∝ fp (ω )
+9
+10
+Weighted Decomposition Tracking
+In this section, we derive a weighted version of the decomposition tracker that can handle non-bounding control extinctions and
+free-path-sampling coefficients, and enables efficient handling of
+chromatic collision coefficients—both of which are problematic with
+the analog version. The RTE with null collisions from Equation (4)
+can be rewritten for a medium with k absorptive and/or scattering
+components [Galtier et al. 2016]:
+Z ∞
+Z t k
+X
+*
+exp .−
+µ ti (xs ) + µ n (xs ) ds +/
+L(x, ω) =
+0 i=1
+0
+,
+k
+k
+X
+X
+×
+µ ai (xt )Le (xt , ω) +
+µ si (xt )Ls (xt , ω)
+i=1
+i=1
+
++ µ n (xt )L(xt , ω) dt,
+(19)
+where the superscript i is used to index individual components.
+Substituting in p(t ) and incorporating probabilities and their probabilistic evaluation from Section 3.2 yields
+Z ∞
+L(xj , ω j ) =
+p(t j )
+0
+×
+" k
+XZ 1
++
++
+i=1 0
+k
+XZ 1
+i=1 0
+Z 1
+H [ξ ei < Pai (x+ )]
+H [ξ si < Psi (x+ )]
+H [ξ n < Pn (x+ )]
+0
+µ ai (x+ )
+µ̄ (x+ )Pai (x+ )
+µ si (x+ )
+µ̄ (x+ )Psi (x+ )
+Le (x+ , ω j )dξ ei
+Ls (x+ , ω j )dξ si
+#
+µ n (x+ )
+L(x+ , ω j )dξ n dt j .
+µ̄ (x+ )Pn (x+ )
+(20)
+In our case, Equation (20) can be simplified since we have only the
+two previously introduced components, the control and the residual.
+We thus have exactly five terms to evaluate: emitted and inscattered
+radiance of the control component, emitted and inscattered radiance
+of the residual component, and the null-collided radiance.
+ACM Transactions on Graphics, Vol. 36, No. 4, Article 111. Publication date: July 2017.
+Peter Kutz, Ralf Habel, Yining Karl Li, and Jan Novák
+1.5
+extinction
+extinction
+1.5
+µ tr (x)
+1.0
+0.5
+µ tc (x)
+0.0
+.00
+1.0
+0.5
+0.25
+0.50
+0.75
+0.0
+.00
+1.00
+0.25
+0.50
+distance
+1.6
+Analysis & Discussion
+In the analog approach, the residual component is sampled using a
+much lower free-path-sampling coefficient than in the case of the
+original volume. Delta tracking on the residual component thus
+performs longer steps, which, given that we stop the tracker as soon
+as it exceeds the control free path, reduces the number of lookups
+of spatially-varying coefficients; see Figure 6 for a visualization.
+Despite the weighted formulation using a different procedure for
+constructing the free path, it produces identical lookup statistics as
+the analog version—the statistics stem from the parameters of the
+volume, not the procedure itself.
+ACM Transactions on Graphics, Vol. 36, No. 4, Article 111. Publication date: July 2017.
+Delta tracker
+lookups
+lookups
+1.00
+3+ lookups
+2 lookups
+1 lookup
+1.2
+0.8
+0.8
+0.4
+0.0
+.00
+0.25
+0.50
+0.75
+0.0
+.00
+1.00
+0.25
+0.50
+distance
+1.6
+1.6
+3+ lookups
+2 lookups
+1 lookup
+0 lookups
+1.00
+3+ lookups
+2 lookups
+1 lookup
+0 lookups
+1.2
+lookups
+1.2
+0.75
+distance
+0.8
+0.4
+0.8
+0.4
+0.0
+.00
+0.25
+0.50
+0.75
+0.0
+.00
+1.00
+0.25
+0.50
+distance
+0.75
+1.00
+distance
+(a) 1 − µ tc / µ̄ = 0.5
+(b) 1 − µ tc / µ̄ = 0.1
+Figure 6. Number of extinction lookups required without and with decomposition in two media with high and low degree of heterogeneity. The middle
+and bottom rows depict free-path densities visualizing the portions of freepath samples according to the number of lookups they performed. The
+bottom row represents both analog and weighted decomposition tracking.
+2.0
+relative cost
+mean of w(X)
+variance of w(X)
+cost × variance
+3.0
+1.8
+2.5
+(see legend)
+1.5
+1.2
+1.0
+0.8
+2.0
+1.5
+1.0
+0.5
+0.5
+0.2
+0.0
+0.0
+0.2
+0.4
+0.6
+0.8
+0.0
+1.0
+0.0
+distance
+1.0
+2.5
+0.8
+2.0
+(see legend)
+The first term always represents the marginal probability of not
+sampling the control component. The second term then defines the
+conditional probability of selecting the residual absorption, residual scattering, and null collision. The algorithmic realization of
+weighted decomposition tracking is shown in Algorithm 3.
+The control probabilities, as defined in Equations (21) and (22),
+always cancel out with the fractions in Equation (20). Taking one
+of the two control branches therefore does not change the path
+throughput. This is also the case for the other branches when all of
+the residual and null coefficients are positive; otherwise, the path
+throughput is adjusted to account for negative values. Unlike the
+analog tracker, the weighted version allows handling chromatic
+coefficients, which we describe in Section 5.
+1.6
+0.4
+lookups
+Residual and Null-collision Probabilities. The residual and nullcollision components are handled analogously, except that we employ absolute values (as in Section 3.4) to handle situations when
+either of the components is negative:
+!
+µc
+|µ ar (x)|
+Par (x) = 1 − t
+,
+(23)
+r
+µ̄ |µ a (x)| + |µ sr (x)| + |µ n (x)|
+!
+µc
+|µ sr (x)|
+Psr (x) = 1 − t
+,
+(24)
+r
+µ̄ |µ a (x)| + |µ sr (x)| + |µ n (x)|
+!
+µc
+|µ n (x)|
+Pn (x) = 1 − t
+.
+(25)
+µ̄ |µ ar (x)| + |µ sr (x)| + |µ n (x)|
+1.2
+Decomposition trackers
+(22)
+0.75
+distance
+3+ lookups
+2 lookups
+1 lookup
+(21)
+In words, the probability of sampling emission or inscattering using the control component is set to the product of the marginal
+probability Pc = µ tc /µ̄ of choosing the control component, and the
+conditional probability of choosing the respective term. Note that
+the definition of Pc requires µ̄ > µ tc :
+4.3
+2.0
+µ̄ (x)
+µ n (x)
+extinction
+µc µc
+µc
+Pac = Pc Pa |c = t ac = a ,
+µ̄ µ t
+µ̄
+c c
+µ
+µ
+µc
+Psc = Pc Ps |c = t sc = s .
+µ̄ µ t
+µ̄
+2.0
+Medium
+Control Probabilities. We shall now define the probabilities of
+evaluating each of the five terms. Similarly to previous tracking
+methods, we enable branching by forcing the probabilities to sum
+to 1 and relate them to the respective coefficients to keep the local
+collision weights close to 1. Most importantly though, we define
+the probabilities of sampling the control component using only
+the constant coefficients, avoiding possibly expensive lookups of
+spatially varying coefficients:
+extinction
+111:8 •
+0.6
+0.4
+1.0
+1.5
+2.0
+relative cost
+mean of w(X)
+variance of w(X)
+cost × variance
+1.5
+1.0
+0.5
+0.2
+0.0
+0.0
+0.5
+control extinction µct
+0.2
+0.4
+0.6
+distance
+(a) Medium
+0.8
+1.0
+0.0
+-0.2
+0.0
+0.2
+0.4
+0.6
+0.8
+control extinction µct
+1.0
+1.2
+(b) Statistics
+Figure 7. Visualization of the relative cost ρ (purple) of weighted decomposition tracking, the mean and the variance of path throughput until the
+first real collision (orange), and their product (dashed); all plotted w.r.t. µ tc .
+Spectral and Decomposition Tracking for Rendering Heterogeneous Volumes • 111:9
+0.5
+1.00
+0.75
+0.5
+0.50
+0.0
+0.2
+0.0
+0.0
+1.0
+0.2
+0.4
+0.6
+0.8
+1.0
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+0.00
+0.0
+0.4
+0.2
+0.8
+0.8
+0.6
+0.6
+0.4
+0.4
+0.2
+0.0
+0.6
+(a) Medium
+0.2
+0.4
+0.8
+1.0
+-0.2
+0.0
+0.6
+0.8
+1.0
+0.2
+0.4
+0.6
+1.0
+1.0
+0.8
+0.6
+0.5
+0.4
+0.0
+0.2
+0.0
+0.0
+0.8
+1.0
+0.6
+0.8
+1.0
+0.0
+4
+0.5
+2
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+0
+distance
+1.2
+1.0
+1.2
+1.75
+1.0
+0.8
+0.8
+0.6
+0.6
+0.4
+0.4
+0.2
+0.2
+0.2
+0.0
+0.0
+-0.2
+0.0
+0.2
+0.4
+distance
+(b) Absolute cost N dcmp
+0.4
+6
+1.0
+0.0
+0.2
+0.2
+8
+1.5
+distance
+1.0
+1.0
+control extinction µct
+control extinction µtc
+extinction
+0.6
+distance
+0.4
+1.2
+1.2
+1.0
+0.4
+0.5
+1.2
+1.5
+distance
+1.2
+0.8
+0.2
+0.6
+distance
+1.0
+0.0
+0.0
+0.8
+1.0
+0.0
+0.25
+distance
+1.0
+1.5
+control extinction µct
+0.8
+1.25
+2.0
+1.4
+0.6
+0.8
+distance
+1.0
+0.0
+0.8
+1.25
+0.6
+1.00
+3
+0.6
+0.75
+0.2
+0.50
+0.0
+0.25
+0.0
+0.00
+-0.2
+0.0
+0.2
+0.4
+0.6
+0.8
+distance
+(c) Relative cost ρ
+0.8
+0.4
+-0.2
+0.0
+(d) Mean of w (X)
+1.0
+4
+1.0
+1.50
+control extinction µct
+1.0
+1.50
+1.5
+2.0
+1.2
+control extinction µct
+1.2
+control extinction µct
+control extinction µtc
+extinction
+1.5
+1.6
+2.0
+1.75
+control extinction µct
+2.0
+1.8
+10
+1.4
+2.00
+2.0
+2
+0.4
+0.2
+1
+0.2
+0.4
+0.6
+0.8
+1.0
+distance
+(e) Variance of w (X)
+Figure 8. For media shown in column (a), we visualize the absolute cost of our weighted-decomposition tracking in column (b), the relative cost of our weighted
+decomposition tracking w.r.t. delta tracking (ρ = N dcmp /N delta ) in column (c), the mean path throughput w (X) after the first real collision in column (d), and
+the variance of w (X) in column (e).
+Relative Cost. Denoting the number of spatially-varying extinction lookups performed by our decomposition tracker N dcmp , and
+the number of lookups performed by delta tracker in the original
+volume N delta , we can define the relative cost of decomposition
+tracking to be ρ = N dcmp /N delta = 1 − µ tc /µ̄. This relation, which
+holds only when the control extinction µ tc ∈ [0, min(µ t (x))], i.e.
+µ tc is a minorant of µ t (x), is depicted in Figure 7(b) by the straight
+purple line in interval [0, min(µ t (x))]. When µ tc > min(µ t (x)), the
+relative cost increases to eventually surpass 1, i.e. the decomposition tracking becomes more expensive than delta tracking. This is
+to be expected as the control medium at that point significantly
+overestimates the density of the original medium.
+Mean and Variance of w (X). The statistics in Figure 7 were collected by invoking the tracker multiple times and recording, in
+addition to the cost, the path throughput after the first real collision.
+The orange and yellow curves depict the mean and the variance of
+the path throughput, respectively. Because the tracker is unbiased,
+the mean of the path throughput w (X) at the first collision (over all
+paths) is always 1. Furthermore, if µ tc ∈ [0, min(µ t (x))], then the
+collision weight w ? is always 1 and the variance of w (X) is thus
+zero.∗ Similarly to the case of the relative cost, the tracker becomes
+inefficient when µ tc > min(µ t (x)), in which case the variance of
+w (X) increases rapidly.
+Optimal Configuration. In Figure 8, we further study the cost and
+the path throughput as a function of distance (horizontal axis) and
+the value of control extinction µ tc (vertical axis). The absolute cost
+N dcmp in column (b) is minimized when µ tc equals the local extinction coefficient µ t (x). This is also the situation in which decomposition tracking brings the largest cost savings over delta tracking, as
+can be seen in column (c) that visualizes ρ. In the same configuration,
+however, the throughputs tends to have significantly more extreme
+∗ Note that zero variance of the path throughput does not imply zero variance in
+actual estimation problems, where the randomness of the path’s termination point can
+contribute significantly to the estimation variance.
+values than elsewhere, and often above 1. Paths undergoing several
+collisions with such a configuration will tend to suffer from geometric growth of the throughput. This explains the steep increase of
+variance (yellow curve) in Figure 7(b) when µ tc > min(µ t (x)).
+Based on these experiments, and the plots in Figure 7, we conclude that the best performance is achieved by setting the control
+extinction to the tight lower bound of the extinction function, i.e.
+µ tc = min(µ t (x)). However, having the option of overestimating
+min(µ t (x)) and still converging to the correct solution is one of the
+main advantages of the weighted decomposition tracker over the
+analog version.
+It is also worth noting that as the residual part reduces to 0, the
+performance of decomposition tracking approaches that of closedform tracking with the relative number of lookups approaching 0,
+i.e. ρ → 0. As the control part reduces to 0, the performance of
+the algorithm approaches that of delta tracking with ρ → 1. The
+decomposition tracking thus bridges the performance gap between
+closed-form tracking and delta tracking, with the weighted variant
+allowing arbitrary values of µ tc and µ̄ to be handled at the expense
+of increased cost and weight variance.
+Numerical Equivalence with Delta Tracking. Either form of decomposition tracking can be be used as a drop-in replacement for
+delta tracking. In fact, the weighted decomposition tracking can
+produce path samples that are identical to delta tracking (just at a
+lower cost). Both trackers (c.f. Algorithms 1 and 3) draw the same
+pair of random numbers ζ and ξ . In both cases ζ is used to sample
+a tentative distance, and ξ is used to select an interaction type. As
+long as ζ and ξ stem from the same random-number sequences, the
+free-path-sampling coefficients are the same, and the interaction
+types are ordered analogously in both implementations (which we
+omit in the pseudocode for readability), both delta tracking and
+decomposition tracking produce identical results.
+ACM Transactions on Graphics, Vol. 36, No. 4, Article 111. Publication date: July 2017.
+0
+111:10 •
+5
+Peter Kutz, Ralf Habel, Yining Karl Li, and Jan Novák
+SPECTRAL TRACKING
+As described in Section 3, and illustrated in Figure 4, weighted tracking can produce correct results even if the distribution of distance
+samples does not obey Beer’s law: the bias in the distribution is
+counteracted by properly reweighting the samples. We leverage this
+ability to efficiently handle spectrally resolved collision coefficients.
+We define a single distribution for sampling collisions and counteract the discrepancy between this distribution and the true, perwavelength free-path distribution by reweighting. We invoke the
+tracker only once for all wavelengths and, at each collision, we
+compute a spectrally resolved collision weight. The weight can be
+expressed using a spectral basis or simply as a vector of N λ wavelengths: we use three primaries—red, green, and blue (RGB)—in all
+experiments but our formulas and proofs hold for arbitrary counts.
+Continuous spectra can be handled by carrying a discrete set of
+wavelengths per-path, e.g. by using the wavelength selection and
+bundling techniques presented by Wilkie et al. [2014]. Algorithm 4
+shows a vectorized weighted delta tracking that was used to sample
+(weighted) free paths in a medium with independently varying RGB
+extinction coefficients in Figure 9.
+Free-path-sampling Coefficient. In order to keep the variance of
+the estimation low, we should ideally set the free-path-sampling
+coefficient µ̄ (x) to bound the maximum value of µ t (x, λ) across all
+wavelengths λ, or as close to this value as possible, as discussed in
+Section 3.4.
+5.1
+Collision Probabilities
+5.1.1 Maximum- and Average-based Probabilities. We can bound
+the magnitude of the local collision weight |w ? (x, λ)| for all λ by
+deriving the probabilities from maxima over all wavelengths:
+Pa (x) = max (|µ a (x, λ)|) c −1 ,
+(26)
+Ps (x) = max (|µ s (x, λ)|) c −1 ,
+(27)
+Pn (x) = max (|µ n (x, λ)|) c −1 ,
+(28)
+λ
+λ
+λ
+c = max (|µ a (x, λ)|) + max (|µ s (x, λ)|) + max (|µ n (x, λ)|), (29)
+λ
+1 function SpectralTracking(x, ω )
+2
+w
+D ← (1, . . . , 1) N λ
+3
+while true do
+ln(1−ζ )
+4
+t ← − µ̄
+5
+x ← x−t ×ω
+6
+if ξ < P a (x) then
+µ
+D (x)
+L e (x, ω )
+7
+return w
+D ◦ a ◦D
+µ̄ P a (x)
+8
+9
+else if ξ < 1 − Pn (x) then
+ω ← sample ∝ fp (ω )
+10
+11
+12
+w
+D←w
+D × µ̄ Pss (x)
+else
+µ
+D (x)
+w
+D←w
+D × µ̄ Pnn (x)
+µ
+D (x)
+5.1.2 Incorporating Path History. Despite being bounded, the
+local collision weights can still exceed 1. Multiplying a sequence
+of them together may therefore result in a geometric growth of
+the path throughput. We can suppress this trend by incorporating
+the path throughput—path history—into the average-based collision probabilities. At each j-th vertex of the path, we include the
+Qj−1
+path throughput w (Xj−1 , λ) = i=1 w ? (xi , λ), of the already built
+subpath Xj−1 . The probabilities then become:
+Pa (xj ) = avg (|µ a (xj , λ) w (Xj−1 , λ)|) c −1 ,
+(30)
+Ps (xj ) = avg (|µ s (xj , λ) w (Xj−1 , λ)|) c −1 ,
+(31)
+Pn (xj ) = avg (|µ n (xj , λ) w (Xj−1 , λ)|) c −1 ,
+(32)
+λ
+λ
+The variance of the spectral tracker largely depends on the variance of the spectrally resolved collision weights. The weight will
+inevitably deviate from 1 as we cannot set the collision probabilities
+to cancel out the µ ? (x, λ)/µ̄ (x) fractions for all wavelengths simultaneously. The worst situations occur when P? (x)
+|µ ? (x, λ)/µ̄ (x)|,
+for which |w ? (x, λ)|
+1. Should there be multiple such collisions,
+the path throughput would grow geometrically for that wavelength.
+However, by carefully setting the collision probabilities, we can
+bound the local collision weight and also the throughput of the path.
+λ
+Algorithm 4. Spectral tracking. The hat (D) denotes vectorized quantities
+that are handled using element-wise multiplication and division.
+λ
+where c is a normalization constant. When all collision coefficients
+are non-negative, it can be shown that the proposed probabilities
+keep the local collision weight at or below the number of collision
+types, i.e. w ? (x, λ) ≤ 3, for all λ regardless of the total number of
+wavelengths N λ being traced; see the supplementary material for a
+proof. In contrast, replacing the max() function by avg() would keep
+the local collision weight at or below the number of wavelengths N λ .
+ACM Transactions on Graphics, Vol. 36, No. 4, Article 111. Publication date: July 2017.
+λ
+c = avg (|µ a (xj , λ) w (Xj−1 , λ)|)
+λ
++ avg (|µ s (xj , λ) w (Xj−1 , λ)|)
+λ
++ avg (|µ n (xj , λ) w (Xj−1 , λ)|).
+(33)
+λ
+With these probabilities the sum of the throughputs over all wavelengths is always equal to the number of wavelengths N λ , as long
+as µ̄ (xj ) is a majorant; a proof can be found in the supplemental
+material. This property implies that the average of the throughputs
+over all of the wavelengths is always—for all path vertices—equal
+to 1, and that the maximum throughput for any wavelength is N λ .
+The geometric growth of the path throughput during successive
+collisions is thereby prevented.
+Incorporating the path history into maximum-based probabilities
+only slows down the growth but does not limit the throughput.
+Discussion. In practice, these probabilities reduce the magnitude
+of undesired color noise and avoid bright chromatic outliers (“fireflies”). The ability to keep the average throughput at 1 is analogous
+to delta tracking, where one wavelength is selected randomly and
+the throughput divided by the selection probability, which amounts
+to multiplying by N λ . In fact, in the extreme case of completely uncorrelated chromatic coefficients, our technique gracefully regresses
+to naive (weighted) delta tracking and automatically settles on tracing only one particular wavelength at a time. When this occurs,
+µ̄ (xj ) can be reduced to bound only the one relevant wavelength.
+Spectral and Decomposition Tracking for Rendering Heterogeneous Volumes •
+5
+µ.red
+µ.green
+µ.blue
+6
+4
+5
+throughput.red
+throughput.green
+throughput.blue
+4
+5
+throughput.red
+throughput.green
+throughput.blue
+5
+throughput.red
+throughput.green
+throughput.blue
+4
+4
+extinction
+5
+3
+3
+3
+3
+2
+2
+2
+2
+5
+throughput.red
+throughput.green
+throughput.blue
+throughput.red
+throughput.green
+throughput.blue
+4
+max throughput
+111:11
+max throughput
+3
+4
+2
+3
+1
+1
+1
+1
+1
+2
+0
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+0
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+0
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+0
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+0
+0.0
+0.2
+0.4
+0.6
+0.8
+distance
+distance
+distance
+distance
+distance
+(b) Maximum
+(c) Average
+(d) History-aware max.
+(e) History-aware avg.
+(f) Naive delta
+1.0
+1
+0
+0.0
+0.2
+0.4
+0.6
+0.8
+distance
+(a) RGB medium
+1.0
+4
+2
+1
+0
+0.0
+5.1.3 Reduced Termination Rates. If the medium is non-emissive,
+we can further reduce the throughput if desired by not simulating
+absorption collisions and redistributing the absorption probability
+among the other two collision types. We simply set Pa (xj ) = 0,
+remove the corresponding term from c, and recompute Ps (xj ) and
+Pn (xj ). Since Ps (xj ) and Pn (xj ), which appear in denominators
+in Equation (20), are increased, the throughput upon a scattering
+or null-collision reduces. While disabling absorption increases the
+computational cost—we need to simulate longer paths—it can reduce
+variance, and the magnitude of outliers if µ̄ does not bound µ t (x).
+5.2
+Spectral and Decomposition Tracking
+There are numerous ways in which the decomposition technique
+from Section 4 can be applied to spectral tracking. In our implementation, we opted for the following straightforward approach:
+• set µ̄ to bound the maximum value of µ t (x, λ) across all
+wavelengths λ,
+• set each component of µ ac and µ sc to the minimum value of
+µ a (x, λ) and µ s (x, λ), respectively, across all wavelengths,
+• set the control probabilities to vectorized versions of Equations (21) and (22), and
+• use Equations (30), (31), and (32), modified to account only
+for the residual component, to set residual probabilities.
+If a control component is sampled, the local collision weight is
+(1, . . . , 1)N λ . When a residual component is sampled, the desirable
+properties afforded by the probability schemes presented in Sections 5.1.1 and 5.1.2 still apply.
+In summary, to efficiently handle chromatic media, we vectorize
+the collision coefficients, decompose the medium into an achromatic
+control component and a chromatic residual component, derive
+the collision probabilities from the maxima or averages across all
+wavelengths, incorporate the path history, and, if the medium is
+non-emissive, reduce termination rates in favor of decreasing the
+growth of path-throughput weights.
+naive delta
+max.
+avg.
+history-aware max.
+history-aware avg.
+3
+density
+In the other extreme, when the extinction coefficient is achromatic, our technique produces the same noise as standard delta
+tracking, provided that the latter used only one simulation for all
+wavelengths. In between these extremes, our technique provides
+advantages of both techniques, automatically and robustly bridging
+the gap between the “one-wavelength-at-a-time” and “one-trackingfor-all-wavelengths” variants of delta tracking.
+density (normalized sample count)
+Figure 9. Comparison of four variants of our spectral tracking (b)-(e), described in Section 5.1, and naive delta tracking that handles each wavelength
+separately (f) in a perfectly forward-scattering, non-absorptive medium with spectrally and spatially varying µ s (x, λ) (a). The top row visualizes the mean path
+throughput with ±1 standard deviation band for each wavelength along the line of travel. The bottom row shows noise exemplars produced by each technique.
+0.2
+0.4
+0.6
+0.8
+distance
+(a) Distribution of first scatter. event
+1.0
+max.
+avg.
+history-aware max.
+history-aware avg.
+1.75
+1.50
+1.25
+1.00
+0.75
+0.50
+0.25
+0.00
+0.0
+0.5
+1.0
+1.5
+2.0
+2.5
+3.0
+3.5
+4.0
+4.5
+5.0
+throughputs of paths scattered at least twice
+(b) Histogram of avg. path throughputs
+Figure 10. Distributions of the first scattering event (a) visualized for the five
+spectral trackers compared in Figure 9. The histograms of path throughputs
+in (b) illustrate how the history-aware average-based probabilities bound
+the path throughput regardless of the number of scattering events and the
+spatial and spectral variations of the collision coefficients.
+5.3
+Analysis & Discussion
+Figure 9 visualizes multi-bounce path throughputs—their means
+and standard-deviation bands—as a function of distance obtained
+with (non-decomposed) spectral tracking with various schemes for
+setting the collision probabilities. We also include the naive delta
+tracking algorithm that handles each wavelength independently. In
+order to emphasize the differences in the weighting schemes, the
+medium is non-absorptive, i.e. albedo α = 1, with largely uncorrelated scattering coefficients. Each spectral tracker produces paths
+with a different average number of scattering events, which are all
+around 4 in this case. For the trackers that bound the throughput,
+the throughput ceiling is visualized. The history-aware trackers
+provide a better-behaved path throughput and lower estimation
+noise than the other techniques in this test.
+Figure 10(a) shows the distribution of the first scattering event for
+the setting in Figure 9. Note that the history-aware average-based
+probability scheme produces the same distribution of distances as
+naive delta tracking. Since all trackers are unbiased, multiplying
+the distance distributions in Figure 10(a) by the corresponding RGB
+throughputs always yields the same weighted distribution.
+Figure 10(b) shows histograms of path throughputs after multiple
+(forward) scattering collisions. The wider the tail of the histogram,
+the more prone the tracker is to fireflies. In this scene, the historyaware average-based tracker is immune to such problems as it keeps
+the throughput at 1 during the path construction.
+ACM Transactions on Graphics, Vol. 36, No. 4, Article 111. Publication date: July 2017.
+111:12 •
+Peter Kutz, Ralf Habel, Yining Karl Li, and Jan Novák
+0k
+0.0k
+100k
+0.2k
+200k
+0.4k
+300k
+0.6k
+400k
+500k
+0k
+2000k
+4000k
+6000k
+0k
+8000k
+100k
+200k
+300k
+400k
+500k
+0k
+2000k
+4000k
+(a) Delta tracking
+(b) Decomposition tracking
+Lookups: 2.96 G
+Lookups: 1.71 G
+0.8k
+1.0k
+0.0k
+5.0k
+10.0k
+15.0k
+20.0k
+25.0k
+0.0k
+0.2k
+0.4k
+0.6k
+0.8k
+1.0k
+0.0k
+5.0k
+10.0k
+6000k
+15.0k
+(c) Delta tracking
+(d) Decomposition tracking
+Lookups: 80.1 M
+Lookups: 33.9 M
+20.0k
+8000k
+25.0k
+Figure 11. Delta tracking in (a), (c) and decomposition tracking in (b), (d) produce the same image up to identical noise patterns (see the top insets). However,
+decomposition tracking requires 42% and 58% fewer extinction lookups to render the optically thicker (top) and thinner (bottom) cloud, respectively. The
+lookup counts within a thin slice and across the full volume are visualized in the left and right false-color images, respectively, for renderings with 1024 spp.
+6
+IMPLEMENTATION & RESULTS
+In addition to implementing the various trackers in a simple Monte
+Carlo framework for running the canonical experiments, we integrated them into a production path tracer for generating the results
+in this section. We use an octree as an acceleration structure to cull
+empty space and store approximate local minorants and majorants
+of the underlying volumes. The octree adapts to the homogeneity
+of the volume. We use VDB [Museth 2013] for storing voxel-based
+volumetric datasets.
+We compare the performance using the number of lookups, the
+render time, the root mean square error (RMSE), and the “lookupsto-unit-variance” (LTUV) metric, which is computed as the product
+of the number of lookups and variance. For all of the aforementioned
+metrics, lower values represent better performance. The timings
+were measured on a dual 12-core 2.50 GHz Intel Xeon E5-2680 v3
+but we report them in single-core equivalents.
+Cloud Scene. Figure 11 shows an optically thick and an optically thin cloud with α = 1, a Henyey–Greenstein phase function [Henyey and Greenstein 1941] with д = 0.877, and an octree
+depth of 8. The insets were rendered with 32 samples per pixel (spp),
+and the statistics are based on these renders. For the two configurations, our decomposition tracking avoids 42% and 58% of the
+extinction lookups required by delta tracking, respectively. Note
+that the noise produced by both trackers is identical as our decomposition tracking does not change the light paths, but generates them
+with significantly fewer lookups.
+ACM Transactions on Graphics, Vol. 36, No. 4, Article 111. Publication date: July 2017.
+Table 2. Comparisons of delta and decomposition tracking performance for
+various octree depths. The scene is the thick cloud from Figure 11, rendered
+with 32 spp. The last two rows report the non-lookup tracker time.
+Octree depth
+1
+4
+8
+16
+Octree leaves visited
+1.86 G
+2.06 G
+3.11 G
+4.05 G
+Lookup num. (Delta)
+Lookup num. (Decomp)
+106 G
+106 G
+22.8 G
+22.6 G
+2.96 G
+1.71 G
+2.49 G
+1.03 G
+Lookup time (Delta)
+Lookup time (Decomp)
+20065 s
+20065 s
+5785 s
+5472 s
+1030 s
+536 s
+876 s
+336 s
+Octree time (Delta)
+Octree time (Decomp)
+64 s
+64 s
+315 s
+319 s
+734 s
+714 s
+916 s
+918 s
+Tracker time (Delta)
+Tracker time (Decomp)
+6108 s
+6108 s
+1389 s
+1379 s
+299 s
+280 s
+321 s
+300 s
+The false-color images visualize the number of lookups on a
+plane cutting through the volume (left) and integrated over the
+entire volume by sweeping the plane through it (right). Note that
+the number of lookups is reduced most in the interior of the cloud
+where the extinction varies less.
+In Table 2, we study the impact of the octree depth on the performance of the thick cloud. With no spatial partitioning (depth
+1), delta and decomposition tracking exhibit near-identical performance; the control component is 0. Increasing the depth allows the
+Spectral and Decomposition Tracking for Rendering Heterogeneous Volumes •
+(a) Ground truth
+111:13
+(b) Delta tracking
+(c) Spec. tracking (max)
+(d) Spec. tracking (avg)
+RMSE: 0.086
+LTUV: 1422.8K
+RMSE: 0.047
+LTUV: 579.6K
+RMSE: 0.052
+LTUV: 689.3K
+Figure 12. A colorful explosion with chromatic extinction rendered using 8 samples with delta tracking (b) in 198 core seconds, with spectral tracking using
+history-aware maximum-based probabilities (c) in 245 seconds, and with spectral tracking using history-aware average-based probabilities (d) in 266 seconds.
+(a) Maximum-based
+(a) Render with µ̄
+(d) Render with 0.4 × µ̄
+1.0
+0.9
+0.9
+0.8
+0.8
+0.7
+0.7
+0.6
+0.5
+normalized lookups
+normalized time
+P (µn(x) < 0)
+LTUV ×10−10
+RMSE ×10−3
+0.3
+0.2
+0.1
+0.0
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+1.2
+1.4
+µ̄ multiplier
+(e) Absorbing volume
+1.6
+1.8
+(see legend)
+(see legend)
+(c) Render with 0.4 × µ̄
+0.4
+Figure 14. Comparison of the history-aware probabilities on the nonabsorbing color explosion scene with adjusted exposure to visualize fireflies.
+(b) Render with µ̄
+1.0
+0.6
+0.5
+normalized lookups
+normalized time
+P (µn(x) < 0)
+LTUV ×10−10
+RMSE ×10−3
+0.4
+0.3
+0.2
+0.1
+2.0
+0.0
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+1.2
+1.4
+(b) Average-based
+1.6
+1.8
+2.0
+µ̄ multiplier
+(f) Non-absorbing volume
+Figure 13. Effects of non-bounding free-path-sampling coefficients on the
+variance of rendering an absorbing (left) and a non-absorbing (right) color
+explosion scene. Both versions use the same colored extinction coefficients—
+only the albedo differs. In (a) and (b), we used a bounding µ̄. In (c) and (d),
+the µ̄ is scaled down by 0.4 leading to increased variance. The plots show
+various statistics as functions of the relative free-path-sampling coefficient.
+decomposition to reduce the lookups more effectively since the volume within each octree leaf becomes more homogeneous; however,
+octree traversal eventually begins to dominate the render time. We
+found that maximum depths of 8–10 typically strike a good balance
+in such scenes. The decomposition reduces the overall render time
+by 10–20% as the octree traversal, directional sampling, and other
+overheads take significant time.
+Color Explosion. In Figure 12, we show a medium with spectrally
+varying absorption, scattering, and extinction coefficients. We rendered the scene with 8 spp using one-wavelength-at-a-time delta
+tracking and our two history-aware spectral trackers. For the same
+number of light paths, spectral tracking increases the overall number of path segments, the number of lookups, and the render time all
+by 25%–30% in this scene. This is mainly due to taking smaller steps
+on average as the free-path-sampling coefficient must bound the
+extinction across all wavelengths in the highly chromatic medium.
+The slightly higher cost is compensated for by the 40%–45% lower
+RMSE, which amounts to 2.7×–3.4× lower variance for the averagebased and maximum-based probabilities, respectively. The overall
+improvement over delta tracking is 2.06×–2.46× lower LTUV with
+the maximum-based probabilities yielding slightly better performance than the average-based ones in this particular scene.
+In Figure 13, we study how various statistics of the spectral tracker
+depend on the value of the free-path-sampling coefficientwith focus
+on situations when µ̄ (x) < µ t (x). We analyze two configurations:
+an absorbing (left) and a non-absorbing (right) version of the color
+explosion. The 16-spp images in the first and second rows show
+how the noise increases when the bounding piecewise constant µ̄ (x)
+is globally scaled down; see the supplementary material for more
+examples. As shown in the plots, lower values of the multiplier, i.e.
+more frequent and more significant underestimation of the bound,
+reduce the tracking cost. However, the variance and the LTUV rise
+abruptly due to many positive and negative fireflies, especially when
+the volume is non-absorbing.
+In Figure 14, we compare the history-aware maximum-based and
+history-aware average-based probabilities on the non-absorbing
+color explosion scene, illustrating the robustness of the latter to
+high albedos. See the supplemental material for full images.
+ACM Transactions on Graphics, Vol. 36, No. 4, Article 111. Publication date: July 2017.
+111:14 •
+Peter Kutz, Ralf Habel, Yining Karl Li, and Jan Novák
+(a) Ground truth
+(b) Delta tracking
+(c) Spectral tracking
+(d) Spec. & dec. tracking
+RMSE: 0.0939
+LTUV: 296.2K
+RMSE: 0.0559
+LTUV: 109.8K
+RMSE: 0.0569
+LTUV: 53.5K
+Figure 15. A translucent heterogeneous Stanford dragon with chromatic extinction rendered using 40 samples with delta tracking (b) in 133 core seconds,
+spectral tracking (c) in 112 core seconds, and spectral & decomposition tracking (d) in 88 core seconds.
+Translucent Dragon. Our techniques can also be used for simulating subsurface scattering. Figure 15 shows a translucent dragon
+with a smooth dielectric boundary enclosing a colored, procedural
+medium. In this case, no acceleration data structure was used—the
+control and free-path-sampling coefficients are based on approximate minimum and maximum values over the entire medium, found
+by random sampling in a short pre-pass. In this figure, handling the
+spectrally resolved coefficients using our spectral tracking reduces
+the LTUV by 2.70×, and our weighted decomposition tracking further reduces it by 2.05×. Together, the spectral and decomposition
+techniques yield 5.54× lower LTUV than delta tracking and 1.65×
+lower RMSE.
+The time spent simulating subsurface scattering reduces from 133
+core seconds with delta tracking, to 112 with spectral tracking, an to
+88 with spectral and decomposition tracking. The decrease in render
+time with spectral tracking is caused by different path distributions
+and by lower throughputs allowing Russian roulette to terminate
+paths earlier. The decrease in render time with decomposition easily
+compensates for the corresponding slight increase in RMSE. In all
+cases, the total render time is about 80 core seconds higher than
+the subsurface scattering time. Spectral and decomposition tracking
+together reduce the total render time by 22%.
+7
+DISCUSSION & FUTURE WORK
+Performance. While our techniques—combined or standalone—
+outperform the previous state of the art in many situations, certain
+scene configurations may not harvest the full benefit. For instance,
+the efficiency of decomposition tracking largely depends on how
+tightly we can bound the extinction coefficient from below. This
+can becomes challenging when the medium exhibits a high degree
+of heterogeneity, in which case the performance largely depends
+on how well the spatial structure isolates and subdivides heterogeneous regions. We experimented with uniform grids and octrees,
+with the latter providing generally better performance. Higher efficiency could possibly be obtained with kd-trees [Yue et al. 2010]
+and polynomial bounds [Szirmay-Kalos et al. 2011].
+ACM Transactions on Graphics, Vol. 36, No. 4, Article 111. Publication date: July 2017.
+An important feature of our weighted decomposition and spectral
+trackers is the ability to handle non-bounding free-path-sampling
+coefficients and control extinctions. Not having to worry about
+occasionally violating the desired inequalities µ tc (x) ≤ min(µ t (x)),
+µ̄ (x) ≥ max(µ t (x)) enables fast precomputation of near-optimal
+control and free-path-sampling coefficients, even for (non-pathological) procedural volumes.
+In some situations, spatially varying lookups may not be the
+bottleneck, in which case decomposition tracking can only offer a
+rather small improvement in overall render time. Decomposition
+tracking excels in situations where memory lookups are expensive,
+data sets are large and prone to cache thrashing, or expensive highorder interpolation is used. Especially if the volume is modeled with
+complex procedural functions, the savings can be considerable.
+It is also worth noting that our methods retain correctness and
+efficiency with arbitrary (valid) values of the collision coefficients
+and the albedo, as long as the free-path-sampling coefficient (approximately) bounds the extinction coefficient.
+Unknown Distance PDF and MIS. The PDF of the free-path sample
+cannot be evaluated exactly (only estimated or approximated). This
+drawback is common to all rejection-based trackers and might appear as preventing the combination of multiple path-construction
+strategies using MIS, as in next-event estimation (NEE) or bidirectional techniques. However, we can still compute the optimal
+balance-heuristic weight if we use the same unbiased tracker for
+free-path and transmittance sampling; their PDFs are identical and
+cancel out in the calculation of the MIS weight. This is true even
+for our spectral tracker since the distance PDFs are not wavelengthdependent. The balance-heuristic weight is thus effectively based
+only on directional PDFs; this is what we use for volumetric NEE.
+Note that the cancellation occurs only for certain MIS heuristics (e.g. balance or power) and only if use use the same tracker
+for free-path and transmittance sampling. This recipe thus does
+not generalize. Nevertheless, a near-optimal weight can almost always be computed using a deterministic approximation of the PDF
+(obtained e.g. by an extra ray-marching pass [Wilkie et al. 2014]).
+Spectral and Decomposition Tracking for Rendering Heterogeneous Volumes •
+7.1
+Future Work
+Adjoint-guided Tracking. As demonstrated in Section 5, the probabilities Pa , Ps , and Pn can be adjusted in many ways to achieve
+certain goals—in our case to reduce the weight when tracking multiple wavelengths. We have merely scratched the surface of the
+large body of problems that could benefit from having this freedom.
+For instance, if information about the distribution of light in the
+scene is available, the probabilities could be biased towards increasing the absorption rates [Spanier and Gelbard 1969; Steen 1966] in
+emissive parts, or scattering more in brightly lit regions. Incorporating techniques for importance sampling single or double scattering [Georgiev et al. 2013; Kalli and Cashwell 1977; Kulla and Fajardo
+2012] into the tracker, and investigating advanced zero-variance
+schemes [Dwivedi 1982] would be interesting future avenues.
+Dynamically Refined Extinction Bounds. To reduce the significance of finding tight extinction bounds a priori, the extinction
+bounds could be refined progressively based on actual extinction
+lookups during rendering. The initial extinction bounds could be
+set conservatively wide (slowing down the simulation at first), or to
+rough estimates (temporarily increasing variance), and then dynamically refined. This would be highly desirable for large production
+assets where lengthy precomputations impede productivity.
+8
+CONCLUSION
+We presented two complementary techniques, the decomposition
+tracking for reducing costs, and the spectral tracking for reducing
+variance when simulating light transport in heterogeneous volumes.
+The combination of the two yields higher performance than previous
+state-of-the-art methods and gracefully handles spectrally resolved
+collision coefficients. We derived both approaches directly from
+the RTE using the recently proposed integral formulation of nullcollision algorithms. We believe that importing this framework into
+computer graphics will stimulate further explorations in applications that are unique to rendering, but also increase the permeability
+between fields by enabling easy exchange of novel ideas.
+ACKNOWLEDGMENTS
+We thank Patrick Kelly for implementing various components of our
+volume rendering system, as well as for numerous discussions, and
+David Adler for help with profiling the code. Alex Nijmeh and Henrik Falt created the cloud scenes used in Figure 1 and Figure 11. Jesse
+Erickson created the colored explosion in Figure 12. The geometry
+of the dragon in Figure 15 is from the Stanford Computer Graphics Laboratory. We thank Thomas Müller, Marios Papas, Géraldine
+Conti, and David Adler for proofreading, and Brent Burley, Michael
+Kaschalk, and Rajesh Sharma for providing support, encouragement, and resources for this project. All images were rendered using
+Disney’s Hyperion Renderer.
+REFERENCES
+J. Amanatides and A. Woo. 1987. A fast voxel traversal algorithm for ray tracing. In
+Eurographics ’87. 3–10.
+H. W. Bertini. 1963. Monte Carlo simulations on intranuclear cascades. Technical
+Report ORNL–3383. Oak Ridge National Laboratory, Oak Ridge, TN, USA. DOI:
+https://doi.org/10.2172/4692927
+111:15
+F. B. Brown and W. R. Martin. 2003. Direct sampling of Monte Carlo flight paths in
+media with continuously varying cross-sections. In Proc. of ANS Mathematics &
+Computation Topical Meeting. 6–11.
+L. L. Carter, E. D. Cashwell, and W. M. Taylor. 1972. Monte Carlo sampling with continuously varying cross sections along flight paths. Nuclear Science and Engineering
+48, 4 (1972), 403–411. DOI:https://doi.org/10.13182/NSE72-1
+S. Chandrasekhar. 1960. Radiative transfer. Dover Publications.
+M. J. Chiang, P. Kutz, and B. Burley. 2016. Practical and controllable subsurface scattering for production path tracing. In ACM SIGGRAPH 2016 Talks (SIGGRAPH ’16).
+ACM, New York, NY, USA, Article 49, 2 pages. DOI:https://doi.org/10.1145/2897839.
+2927433
+W. A. Coleman. 1968. Mathematical verification of a certain Monte Carlo sampling
+technique and applications of the technique to radiation transport problems. Nuclear
+Science and Engineering 32, 1 (April 1968), 76–81. DOI:https://doi.org/10.13182/
+NSE68-1
+S. N. Cramer. 1978. Application of the fictitious scattering radiation transport model
+for deep-penetration Monte Carlo calculations. Nuclear Science and Engineering 65,
+2 (1978), 237–253.
+S. R. Dwivedi. 1982. Zero variance biasing schemes for Monte Carlo calculations of
+neutron and radiation transport problems. Nuclear Science and Engineering 80, 1
+(1982), 172–178.
+R. Eckhardt. 1987. Stan Ulam, John von Neumann, and the Monte Carlo Method. Los
+Alamos Science, Special Issue (1987), 131–137.
+V. Eymet, D. Poitou, M. Galtier, M. El Hafi, G. Terrée, and R. Fournier. 2013. Null-collision
+meshless Monte-Carlo—Application to the validation of fast radiative transfer solvers
+embedded in combustion simulators. Journal of Quantitative Spectroscopy and
+Radiative Transfer 129 (April 2013), 145–157. DOI:https://doi.org/10.1016/j.jqsrt.
+2013.06.004
+M. Galtier, S. Blanco, C. Caliot, C. Coustet, J. Dauchet, M. El Hafi, V. Eymet, R. Fournier,
+J. Gautrais, A. Khuong, B. Piaud, and G. Terrée. 2013. Integral formulation of nullcollision Monte Carlo algorithms. Journal of Quantitative Spectroscopy and Radiative
+Transfer 125 (April 2013), 57–68. DOI:https://doi.org/10.1016/j.jqsrt.2013.04.001
+M. Galtier, S. Blanco, J. Dauchet, M. El Hafi, V. Eymet, R. Fournier, M. Roger, C. Spiesser,
+and G. Terrée. 2016. Radiative transfer and spectroscopic databases: A line-sampling
+Monte Carlo approach. Journal of Quantitative Spectroscopy and Radiative Transfer
+172 (March 2016), 83–97. DOI:https://doi.org/10.1016/j.jqsrt.2015.10.016
+I. Georgiev, J. Křivánek, T. Hachisuka, D. Nowrouzezahrai, and W. Jarosz. 2013. Joint importance sampling of low-order volumetric scattering. ACM TOG (Proc. of SIGGRAPH
+Asia) 32, 6 (Nov. 2013), 164:1–164:14. DOI:https://doi.org/10.1145/2508363.2508411
+L. G. Henyey and J. L. Greenstein. 1941. Diffuse radiation in the galaxy. Astrophysical
+Journal 93 (Jan. 1941), 70–83. DOI:https://doi.org/10.1086/144246
+V. Hubert-Tremblay, L. Archambault, D. Tubic, R. Roy, and L. Beaulieu. 2006. Octree
+indexing of DICOM images for voxel number reduction and improvement of Monte
+Carlo simulation computing efficiency. Medical Physics 33, 8 (2006), 2819–2831. DOI:
+https://doi.org/10.1118/1.2214305
+J. L. W. V. Jensen. 1906. Sur les fonctions convexes et les inégalités entre les valeurs
+moyennes. Acta Math. 30 (1906), 175–193. DOI:https://doi.org/10.1007/BF02418571
+H. J. Kalli and E. D. Cashwell. 1977. Evaluation of three Monte Carlo estimation schemes
+for flux at a point. Technical Report LA–6865-MS. Los Alamos Scientific Lab.
+C. Kulla and M. Fajardo. 2012. Importance sampling techniques for path tracing in
+participating media. CGF (Proc. of Eurographics Symposium on Rendering) 31, 4 (June
+2012), 1519–1528. DOI:https://doi.org/10.1111/j.1467-8659.2012.03148.x
+J. Leppänen. 2010. Performance of Woodcock delta-tracking in lattice physics applications using the Serpent Monte Carlo reactor physics burnup calculation code. Annals
+of Nuclear Energy 37, 5 (2010), 715 – 722. DOI:https://doi.org/10.1016/j.anucene.
+2010.01.011
+L. B. Miller. 1967. Monte Carlo analysis of reactivity coefficients in fast reactors; general
+theory and applications. Technical Report ANL–7307. Argonne National Laboratory,
+Argonne, IL, USA. DOI:https://doi.org/10.2172/4500721
+L. W. G. Morgan and D. Kotlyar. 2015. Weighted-delta-tracking for Monte Carlo
+particle transport. Annals of Nuclear Energy 85 (2015), 1184–1188. DOI:https:
+//doi.org/10.1016/j.anucene.2015.07.038
+K. Museth. 2013. VDB: High-resolution sparse volumes with dynamic topology. ACM
+TOG 32, 3 (July 2013), 27:1–27:22. DOI:https://doi.org/10.1145/2487228.2487235
+J. Novák, A. Selle, and W. Jarosz. 2014. Residual ratio tracking for estimating attenuation
+in participating media. ACM TOG (Proc. of SIGGRAPH Asia) 33, 6 (Nov. 2014), 179:1–
+179:11. DOI:https://doi.org/10.1145/2661229.2661292
+K. H. Perlin and E. M. Hoffert. 1989. Hypertexture. Computer Graphics (Proc. of
+SIGGRAPH) 23, 3 (July 1989), 253–262. DOI:https://doi.org/10.1145/74334.74359
+M. Raab, D. Seibert, and A. Keller. 2008. Unbiased global illumination with participating
+media. In Monte Carlo and Quasi-Monte Carlo Methods 2006. Springer, 591–606. DOI:
+https://doi.org/10.1007/978-3-540-74496-2_35
+N. Shamsundar, E. M. Sparrow, and R. P. Heinisch. 1973. Monte Carlo radiation
+solutions—effect of energy partitioning and number of rays. International Journal of Heat and Mass Transfer 16, 3 (1973), 690–694. DOI:https://doi.org/10.1016/
+0017-9310(73)90236-6
+ACM Transactions on Graphics, Vol. 36, No. 4, Article 111. Publication date: July 2017.
+111:16 •
+Peter Kutz, Ralf Habel, Yining Karl Li, and Jan Novák
+H. R. Skullerud. 1968. The stochastic computer simulation of ion motion in a gas
+subjected to a constant electric field. Journal of Physics D: Applied Physics 1, 11
+(1968), 1567–1568. DOI:https://doi.org/10.1088/0022-3727/1/11/423
+J. Spanier and E. M. Gelbard. 1969. Monte carlo principles and neutron transport problems.
+Addison-Wesley Pub. Co.
+N. M. Steen. 1966. A simple method to improve the efficiency of the Σa /Σt estimator
+in certain Monte Carlo programs. Technical Report WAPD-TM–609. Bettis Atomic
+Power Lab., Pittsburgh, PA, USA.
+T. M. Sutton, F. B. Brown, F. G. Bischoff, D. B. MacMillan, C. L. Ellis, J. T. Ward, C. T.
+Ballinger, D. J. Kelly, and L. Schindler. 1999. The physical models and statistical
+procedures used in the RACER Monte Carlo Code. Technical Report KAPL-4840. Knolls
+Atomic Power Laboratory, Niskayuna, NY, USA. DOI:https://doi.org/10.2172/767449
+L. Szirmay-Kalos, B. Tóth, and M. Magdics. 2011. Free path sampling in high resolution
+inhomogeneous participating media. Computer Graphics Forum 30, 1 (2011), 85–97.
+DOI:https://doi.org/10.1111/j.1467-8659.2010.01831.x
+E. Veach. 1997. Robust Monte Carlo methods for light transport simulation. Ph.D.
+Dissertation. Stanford University, Stanford, CA, USA.
+J. von Neumann. 1951. Various techniques used in connection with random digits.
+Journal of Research of the National Bureau of Standards, Appl. Math. Series 12 (1951),
+36–38.
+A. Wilkie, S. Nawaz, M. Droske, A. Weidlich, and J. Hanika. 2014. Hero wavelength
+spectral sampling. CGF (Proc. of Eurographics Symposium on Rendering) 33, 4 (June
+2014), 123–131. DOI:https://doi.org/10.1111/cgf.12419
+E. R. Woodcock, T. Murphy, P. J. Hemmings, and T. C. Longworth. 1965. Techniques
+used in the GEM code for Monte Carlo neutronics calculations in reactors and other
+systems of complex geometry. In Applications of Computing Methods to Reactor
+Problems. Argonne National Laboratory.
+Y. Yue, K. Iwasaki, B. Chen, Y. Dobashi, and T. Nishita. 2010. Unbiased, adaptive
+stochastic sampling for rendering inhomogeneous participating media. ACM TOG
+(Proc. of SIGGRAPH Asia) 29, 6 (Dec. 2010), 177:1–177:8. DOI:https://doi.org/10.1145/
+1866158.1866199
+Y. Yue, K. Iwasaki, B. Chen, Y. Dobashi, and T. Nishita. 2011. Toward optimal space
+partitioning for unbiased, adaptive free path sampling of inhomogeneous participating media. CGF (Proc. of Pacific Graphics) 30, 7 (2011), 1911–1919. DOI:
+https://doi.org/10.1111/j.1467-8659.2011.02049.x
+C. D. Zerby, R. B. Curtis, and H. W. Bertini. 1961. The relativistic doppler problem.
+Technical Report ORNL-61-7-20. Oak Ridge National Laboratory, Oak Ridge, TN,
+USA. DOI:https://doi.org/10.2172/4836227
+A
+FREE-PATH-SAMPLING RESIDUAL RATIO TRACKING
+Novák et al. [2014] briefly discuss a potential free-path-sampling
+technique based on the mechanisms underlying residual ratio tracking. The authors suggest sampling free paths analytically from a representative control volume and then computing the sample weight
+using ratio tracking. We observe that this algorithm is a special case
+of weighted delta tracking with the configuration
+µ̄ (x) = µ tc (x) + µ̄ r (x),
+µ c (x)
+Pt (x) = t
+,
+µ̄ (x)
+µ̄ r (x)
+Pn (x) =
+,
+µ̄ (x)
+(34)
+(35)
+where Pt (x) is the probability of sampling a real collision (absorption or scattering). As the authors describe, µ tc (x) and µ̄ r (x) must
+allow analytic free-path sampling, and would in practice be set to
+constants, such as avg(µ t (x)) and max(|µ tr (x)|), respectively. Since
+the distribution of sampled free paths is fully determined by the relatively simple µ tc (x), it can differ drastically from the true free-path
+distribution, frequently resulting in extreme weights.
+B
+INTEGRAL FORMULATION OF TRANSMITTANCE
+ESTIMATORS
+In order to derive the integral formulation of transmittance trackers,
+we first modify the RTE to estimate only transmittance (i.e. uncollided radiance). We rewrite Equation (3) to account only for losses
+ACM Transactions on Graphics, Vol. 36, No. 4, Article 111. Publication date: July 2017.
+and a point source of unit radiance at xd , xd = x0 − dω:
+(ω · ∇)L(x, ω) = − [µ t (x) + µ n (x)]L(x, ω) + δ (x − xd )
+Z
++ µ n (x)
+δ (ω − ω̄)L(x, ω̄) dω̄.
+(36)
+Integrating both sides along ω,
+!
+Z ∞
+Z t
+L(x, ω) =
+exp − µ̄ (xs ) ds
+0
+0
+
+
+× δ (xt − xd ) + µ n (xt )L(xt , ω) dt
+!
+Z ∞
+Z t
+=
+exp − µ̄ (xs ) ds δ (xt − xd ) dt
+0
+0
+!
+Z ∞
+Z t
+exp − µ̄ (xs ) ds µ n (xt )L(xt , ω) dt,
++
+(37)
+S2
+0
+0
+solving the Dirac integral, noting that we only need to integrate
+up to the remaining distance di to the point source (L(x, ω) = 0 for
+t > d), and introducing p(t ) yields
+Z di
+Z di
+µ n (xt )
+L(x, ω) = exp *−
+µ̄ (xs ) ds + +
+p(t )
+L(xt , ω) dt, (38)
+µ̄ (xt )
+0
+0
+,
+which represents the weighted next-flight estimator presented by
+Cramer [1978]. At each collision point, the estimator performs
+a next-flight estimation by adding an underestimated uncollided
+contribution—the transmittance through the rest of the combined
+medium (first term)—and then proceeds with sampling null collisions to correct for the initial underestimation (second term). The
+Monte Carlo score can be written as
+Z di
+kX
+−1
+i
+Y µ n (xj )
+*
+w (X) =
+exp −
+µ̄ (xs ) ds +
+,
+(39)
+, 0
+- j=1 µ̄ (xj )
+i=0
+where k is the index of the first collision after exceeding distance d
+from x0 . To the best of our knowledge, this is the first derivation
+of the next-flight estimator directly from a modified version of the
+RTE, and its first description in computer graphics literature.
+Cramer [1978] also analyzed a simpler version, which removes
+the next-flight estimation and tracks only the product of relative
+concentrations of null particles. By observing that the transmittance
+from 0 to di is equivalent to the integral of p(t ) from di to ∞, we
+can rewrite Equation (38) to
+Z di
+Z ∞
+µ n (xt )
+L(x, ω) =
+p(t )
+L(xt , ω) dt +
+p(t ) dt .
+(40)
+µ̄ (xt )
+0
+di
+The two integrals in Equation (40) each contain the same PDF and
+have disjoint domains whose union is the whole domain of the PDF,
+leading to a natural translation into a Monte Carlo estimator. In
+particular, we sample a distance t according to p(t ), then return the
+µ (x )
+remaining factors of the corresponding integrand: µ̄n(x t) L(xt , ω) if
+t
+t < di and 1 otherwise. The Monte Carlo score simplifies to
+w (X) =
+k−1
+Y
+µ n (xj )
+.
+µ̄ (xj )
+j=1
+(41)
+In the context of rendering, this algorithm was reinvented and
+studied by Novák et al. [2014] under the name ratio tracking.

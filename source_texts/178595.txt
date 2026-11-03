@@ -1,0 +1,287 @@
+# PG-NeuS: Robust and Efficient Point Guidance for Multi-View Neural Surface Reconstruction
+
+Chen Zhang1 Wanjuan Su1 Qingshan Xu2 Wenbing Tao1,\*
+
+1Huazhong University of Science and Technology 2Nanyang Technological University
+
+{zhangchen , suwanjuan, wenbingtao}@hust.edu.cn 2 {qingshan.xu}@ntu.edu.sg
+
+# Abstract
+
+Recently, learning multi-view neural surface reconstruction with the supervision of point clouds or depth maps has been a promising way. However, due to the underutilization of prior information, current methods still struggle with the challenges of limited accuracy and excessive time complexity. In addition, prior data perturbation is also an important but rarely considered issue. To address these challenges, we propose a novel point-guided method named PG-NeuS, which achieves accurate and efficient reconstruction while robustly coping with point noise. Specifically, aleatoric uncertainty of the point cloud is modeled to capture the distribution of noise, leading to noise robustness. Furthermore, a Neural Projection module connecting points and images is proposed to add geometric constraints to implicit surface, achieving precise point guidance. To better compensate for geometric bias between volume rendering and point modeling, high-fidelity points are filtered into a Bias Network to further improve details representation. Benefiting from the effective point guidance, even with a lightweight network, the proposed PG-NeuS achieves fast convergence with an impressive 11x speedup compared to NeuS. Extensive experiments show that our method yields high-quality surfaces with high efficiency, especially for fine-grained details and smooth regions, outperforming the state-of-the-art methods. Moreover, it exhibits strong robustness to noisy data and sparse data.
+
+# 1. Introduction
+
+Surface reconstruction from multiple calibrated views is a long-standing problem in computer vision and graphics. Recently, neural surface reconstruction with volume rendering [5, 8, 29, 30, 39] is highly valued for its potential to improve and simplify multi-view 3D reconstruction. These
+
+
+
+
+
+Figure 1. (a) Reconstruction results of our method with highintensity noisy data. "Base" is the baseline for our method without point cloud inputs. "Naive PG" is a naive point guidance mechanism as explained in our Preliminaries Section. (b) Comparison with SOTA methods on accuracy and efficiency.
+
+methods introduce the Signed Distance Function (SDF) to express opacity in the radiance field, enabling indirect SDF optimization during rendering. Impressively, photo-realistic color appearance and more complete geometry are modeled compared to the traditional framework. However, due to the lack of explicit geometric constraints, geometric bias in volume rendering [10, 43] and excessive optimization time become its fly in the ointment.
+
+Some methods introduce additional geometric priors to explicitly guide the implicit surface, aiming to improve the reconstruction accuracy. For example, MonoSDF [40] and MVSDF [41] leverage depth maps to guide the learning of SDF network. Recognizing the redundant geometric information in depth maps, some approaches, such as RegSDF [42] and TUVR [43], opt for point clouds as a more reliable and concise alternative for supervisory signals, leading to an improvement in the geometric quality of reconstructions.
+
+\*Corresponding author.
+
+However, these methods still face several key challenges in achieving high-quality point guidance.
+
+1) Noise distribution across different regions are difficult to estimate and eliminate. Point noise stands out as a crucial factor influencing the quality of point guidance. Its characteristic of varying with the regions makes it difficult to handle well. RegSDF [42] introduces a uniform smoothing term for all points to mitigate the impact of noise. However, such a manner neglects the characteristic of noise and also weakens the strong support offered by precise points.
+
+2) Distinguishing high-fidelity data is challenging, resulting in underutilization of high-fidelity information. Utilizing high-fidelity data for precise reconstruction is expected and necessary for point guidance. TUVR [43] takes confidence values output from the MVS network as an indicator of point reliability, assigning higher weights to points with greater confidence. However, its reconstruction accuracy is still limited due to the unreliability of confidence maps as adjuncts to MVS networks. Additionally, this manner is unable to handle data captured by depth cameras. To achieve high-quality point guidance, point reliability needs to be assessed during the geometry optimization process.
+
+3) Accuracy and efficiency are hard to balance. Despite using priors as guidance, these methods still need several hours or even longer for optimization, thirsting for an efficient reconstruction solution. In fact, the trade-off between efficiency and accuracy is a common challenge, as prioritizing one often comes at the expense of the other. Some methods use complex networks in an attempt to achieve a balance, but with limited effectiveness. In contrast, our method demonstrates that integrating a robust point guidance mechanism allows for achieving superior accuracy and efficiency, even using lightweight networks.
+
+To address the above challenges, we present PG-NeuS, a universal framework with robust point guidance mechanisms to enhance and accelerate neural surface reconstruction. Different from previous point-guided methods, we model the SDF value of each point as a Gaussian distribution. Aleatoric uncertainty estimation is introduced into point modeling to capture the distribution of inherent noise and estimate point reliability. Furthermore, we propose a Neural Projection module to achieve accurate point guidance. In this process, the point data undergoes two projections: first in space onto the implicit surface and then onto the image. Photometric consistency constraint is imposed on the projected positions, serving as the regularization of SDF. Finally, a filter operation is performed utilizing the modeled uncertainty, and high-fidelity points are fed into a Bias Network to compensate for the geometric bias between volume rendering and point modeling. We conduct experiments on the DTU [11] and BlendedMVS [37] datasets for evaluations. The results demonstrate the robustness of our method across some challenging tasks, particularly with noisy point data (see Figure 1.a) and sparse point data. Benefiting from the outstanding point guidance, superior reconstruction accuracy and efficient convergence are achieved with lightweight networks, enabling an impressive 33.3% improvement in accuracy and an 11x speedup compared to NeuS [29] without masks (see Figure 1.b). In summary, our contributions are as follows:
+
+- By employing uncertainty modeling to capture inherent noise and a Neural Projection module to regularize the SDF, accurate reconstruction and strong noise robustness are achieved.
+- With the estimated point reliability, the Bias Network compensates for the geometric bias between volume rendering and point modeling, leading to more precise details representation.
+- Benefiting from effective point guidance, lightweight networks are allowed to achieve efficient convergence while maintaining high accuracy.
+
+# 2. Related Work
+
+Traditional multi-view reconstruction. Traditional multiview reconstruction typically involves two steps: fusing depth maps obtained from MVS [9, 26, 44] or depth cameras into a point cloud, followed by employing point cloud surface reconstruction algorithms [17, 25] to generate a mesh. Classical screened Poisson Surface Reconstruction (sPSR) [13] is a widely used technique to generate watertight surfaces from point clouds. Although the traditional pipeline has made successive breakthroughs in reconstruction quality due to accumulated technical progress, there are still challenges of sensitivity to point noise and density.
+
+Multi-view neural surface reconstruction. Recently, with the development of differentiable rendering [1, 3, 7, 28, 35], neural surface reconstruction [2, 22, 33, 36, 38, 46] is valued for its single-stage optimization and strong representation potential. Nerf [19] as a pioneer triggers plenty of works [4, 6, 18, 21, 24] to represent scenes within the volume rendering framework. To improve geometric quality, VolSDF [39] and NeuS [29] design new weight functions involving SDF for color accumulation in the rendering. Compared to traditional pipelines, these methods not only render photo-realistic appearances but also reconstruct more complete surfaces, especially for non-Lambertian surfaces. However, geometric bias is still an urgent problem due to discrete sampling and other factors [10, 43]. Additionally, lengthy optimization also hinders their broader application. Subsequent methods [27, 30, 31] try to solve these problems, but still struggle to strike an accuracyefficiency balance. Impressively, some methods use voxelbased representation to enhance training efficiency, such as Voxurf [32] and Vox-Surf [16], making significant strides in achieving this equilibrium.
+
+
+
+Figure 2. (a) The pipeline of Point-NeuS. Our network integrates point modeling with volume rendering through the SDF network, enhancing scene representation. NeuS serves as the base framework for the volume rendering part, while the point modeling part focuses on improving the quality of surface guidance. To this end, uncertainty estimation and a Neural Projection module are designed to attenuate the effect of noise, allowing accurate reconstruction. Additionally, the Bias network further learns to compensate for the geometric bias between volume rendering and point modeling for high-fidelity data. (b) The mechanism of Neural Projection module.
+
+#### Geometry supervision for multi-view neural reconstruc-
+
+tion. To achieve high-quality reconstruction, some methods [12, 45] introduce additional geometric information to explicitly guide the geometry modeling. MonoSDF [40] employs monocular normal and depth cues to supervise the SDF network, while MVSDF [41] works with depth information from an MVS network. Related to our method, RegSDF [42] and TUVR [43] use point clouds as supervisory signals, enhancing scene representation while accounting for point noise. RegSDF smooths all data by constraining the second derivative, which overlooks noise variation across regions. On the other hand, TUVR simply relies on confidence value output by the MVS network to avoid this problem. In contrast, our method introduces uncertainty to capture the distribution of noise, allowing surface optimization and point reliability assessment to be mutually reinforcing. Although the additional geometry priors accelerate the convergence of these methods, they still require several hours to optimize a scene. Thus, an efficient implementation is still desperately needed. Additionally, point clouds are also used by some methods to render high-quality images, such as Point-NeRF [34], NPBG [1] and SNP [47], but they do not focus on implicit surface quality.
+
+# 3. Preliminaries
+
+Reconstruction from volume rendering. NeuS [29] is a very popular method for neural implicit surface reconstruction. It represents the surface as the zero-level set of SDF S = {x ∈ R 3 |f (x) = 0}. In rendering, a ray emitting from the camera center o along the direction d that passes through a pixel can be expressed as {p(t) = o + td|t > 0}. The rendered color Cˆ of this pixel is accumulated along the ray with N discrete sampled points.
+
+| $\hat{C} = \sum_{i=1}^N T_i \alpha_i c_i, \quad T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$ | (1) |
+|-----------------------------------------------------------------------------------------|-----|
+|                                                                                         |     |
+
+where αi is the discrete opacity, and Ti is the accumulated transmittance. To reduce the estimation bias of SDF, NeuS defines the opacity as follows:
+
+$$\alpha_i = \max\left(\frac{\Phi_s(f(p(t_i))) - \Phi_s(f(p(t_{i+1})))}{\Phi_s(f(p(t_i)))}, 0\right), \quad (2)$$
+
+Here, Φs(x) = (1 + e −sx) −1 is the Sigmoid function, where the s value is a trainable parameter.
+
+Naive point guidance. Given a point cloud {P|xP ∈ P}, a straightforward guidance for neural surface reconstruction is to assume that all points are distributed over the implicit surface, such that the SDF network can be effectively supervised by {f(xP ) = 0}. However, in reality, the point cloud distribution varies around the implicit surface, leading to varying degrees of noise across different regions. The key to achieving high-quality reconstruction lies in effectively removing noise and leveraging high-fidelity points to enhance detail expression.
+
+#### 4. Method
+
+Given a set of RGB images with known camera parameters, our aim is to accurately reconstruct geometry within the volume rendering framework. To counteract the inherent geometric bias in the rendering, a point cloud is additionally introduced as the guidance for the implicit surface to achieve high-quality and efficient reconstruction. The pipeline of our method is illustrated in Figure 2.a.
+
+#### 4.1. Point Cloud Generation
+
+Point clouds can be obtained by fusing depth maps obtained from MVS or depth cameras. For simplicity, we use Trans-MVSNet [9] with robust generalization ability to generate a depth map for each view. Proper geometric consistency filtering is performed in the fusion process to produce relatively accurate and clean point clouds.
+
+#### 4.2. Uncertainty Estimation
+
+In Bayesian deep learning [14, 15], the inherent noise of the observed data is modeled as aleatoric uncertainty. Inspired by this, we learn the uncertainty for the input point cloud to capture the distribution of noise. For each point xP in point set P, its SDF value is modeled as a Gaussian distribution rather than a single value, where the predicted variance can reflect the aleatoric uncertainty of xP . Considering that the noise varies across regions, each point is allowed to learn a different variance. As a result, the model provides a large variance for points with high noise, rather than collapsing to a trivial solution. The learning of heteroscedastic aleatoric uncertainty can well help our method capture complex noise for better geometry optimization.
+
+Specifically, the SDF value of a point xP in P is output as a Gaussian distribution parameterized by mean f (xP ) and variance σe 2 (xP ). We take the output of the SDF network as the mean and add an additional header to model the variance.
+
+| $f(x_P), \sigma^2(x_P), fea = MLP_{sdf}(x_P)$ | (3) |
+|-----------------------------------------------|-----|
+|-----------------------------------------------|-----|
+
+fea is the feature vector fed into the color network, but we do not use it for point modeling. Softplus function is further adopted to σ to produce a valid variance value. Then a minimum variance constraint σ 2 0 is added for all points.
+
+$$\bar{\sigma}^2(x_P) = \sigma_0^2 + \log(1 + \exp(\sigma^2(x_P))) \quad (4)$$
+
+To optimize the model, we assume that the SDF values of all points fluctuate around the 0 value. This assumption is reasonable since the ideal point cloud is distributed over a 0 value surface. Therefore, following the theoretical guidance of Bayesian deep learning [14], the negative log-likelihood of a point set is optimized in the regression as follows:
+
+$$\begin{aligned} \mathcal{L}_{usdf} &= -\frac{1}{D_P} \sum_{x_P \in P} \log p_\theta(f_\varepsilon(x_P)) \\ &= \frac{1}{D_P} \sum_{x_P \in P} \frac{\|f_\varepsilon(x_P) - f(x_P)\|_2^2}{2\bar{\sigma}^2(x_P)} + \frac{\log \bar{\sigma}^2(x_P)}{2} \end{aligned} \quad (5)$$
+
+where DP represents the number of points in the set P, and fε(xP ) denotes the ideal SDF value for xP , which is set to 0. In the first term in the loss, large value of σe 2 (xP ) reduces the importance assigned to a point with high noise, thereby mitigating adverse effects. The second term is a regularization term to avoid predicting infinite variance for all points.
+
+#### 4.3. Bias Network
+
+To achieve superior point guidance, it is not only essential to eliminate noise-related effects, but also to utilize highfidelity data for more precise reconstruction. For each point xP with a predicted variance σe 2 (xP ), a larger σe 2 (xP ) represents a higher uncertainty and also a lower reliability for xP . To focus on learning precise geometric representations with reliable points, we perform a filtering operation to extract the point set Ps with a variance below the threshold ε, i.e., {Ps|xP ∈ Ps, σe 2 (xP ) < ε}. Ps is further fed to a Bias network to capture the geometric bias between volume rendering and point modeling. This process aims to filter noisy data and enhance the representation of details. With the SDF network in volume rendering taken as the base SDF network, the final SDF value of xP is the sum of the bias SDF value fb (xP ) and the base SDF value f(xP ). The whole process is formulated as follows:
+
+| $f_b(x_P) = MLP_{bias}(x_P)$ | (6) |
+|------------------------------|-----|
+|------------------------------|-----|
+
+$$f_{final}(x_P) = f(x_P) + f_b(x_P) \quad (7)$$
+
+Furthermore, we design a SDF loss to optimize the model.
+
+$$\mathcal{L}_{bias} = \frac{1}{D_{Ps}} \sum_{x_P \in P_s} |f_\varepsilon(x_P) - f_{final}(x_P)| \quad (8)$$
+
+where DP s is the number of points in Ps, and fε(xP ) is the ideal SDF value of xP , which is set to 0. With the loss, the network learns a more accurate representation of the regions where high-fidelity points are located.
+
+It is worth noting that this Bias network specifically designed for high-fidelity points works independently of the volume rendering, making our method fundamentally different from another method HF-NeuS [30] that is prone to confusion. The latter relies on volume rendering to learn high-frequency information, involving the gradient of SDF field. For more details, please refer to the supplementary.
+
+#### 4.4. Neural Projection
+
+In order to enhance the prediction accuracy of SDF values for points while further enforcing geometric constraints on noisy data, a Neural Projection module is designed to regularize the SDF field using photometric consistency. As shown in Figure 2.b, for a point xP , we use the predicted SDF value f(xP ) and the gradient g(xP ) to project it to the nearest neighbor tP on the implicit surface S. The gradient g(xP ) represents the direction vector with the fastest increasing SDF value at xP . Therefore, tP can be obtained by moving xP along or against the direction of g(xP ) by a distance of |f(xP )|.
+
+tP = xP − f (xP ) × g(xP )/∥g(xP )∥2 (9)
+
+g(xP ) can be also denoted as ∇f (xP ), whose direction is always toward the outside of surface S.
+
+In fact, the accuracy of learned projection distance is consistent with the accuracy of constructed implicit surface. To ensure that tP is distributed on the real surface, a geometric constraint is necessary. For a small area s on the surface where tP is located, its projection patches in different views are supposed to be geometry-consistent. Therefore, we use the photometric consistency constraint from MVS to supervise the position of tP . The normalization cross-correlation scores of patches between the reference image Ir and the source image Is are calculated according to Equation 10. The image corresponding to the depth map that generates xP is taken as the reference image and the rest as source images.
+
+
+$$Score(I_r(s), I_s(s)) = \frac{Cov(I_r(s), I_s(s))}{\sqrt{Var(I_r(s))Var(I_s(s))}} \quad (10)$$
+
+where Cov is covariance and V ar is variance. Ir(s) and Is(s) are the patches of s projecting to Ir and Is, respectively. The photometric consistency loss Lpc is calculated as follows.
+
+$$\mathcal{L}_{pc} = \frac{1}{mD_P} \sum_{x_P \in P} \sum_{i=1}^m (1 - \text{Score}(I_r(s), I_{s_i}(s))) \quad (11)$$
+
+where DP is the number of points in the set P. m is the number of source images achieving the best scores, which is set to 4. Lpc in our Neural Projection module imposes a strong geometric constraint on the projection position tP , indirectly ensuring the accuracy of the predicted SDF value at xP . This point-to-image constraint is beneficial for learning better SDF representations from noisy data. Therefore, we apply it to the signals output from our base SDF network for enhancing the resistance to noise. Since this process requires derivatives of the networks, this constraint is not imposed on the final SDF for efficiency and avoiding affecting the Bias network.
+
+#### 4.5. Loss Function
+
+Similar to previous works, we use L1 loss to minimize the difference between the ground truth colors and the rendered colors:
+
+$$\mathcal{C}_{rgb} = \frac{1}{N} \sum_{i=1}^N |C_i - \hat{C}_i| \quad (12)$$
+
+where N is the number of a batch rays.
+
+Eikonal loss is also added to regularize the SDF field.
+
+$$\mathcal{L}_{eik} = \frac{1}{MN} \sum_{i,j=1}^{MN} \|\nabla f(p_{i,j}) - 1\|^2 \quad (13)$$
+
+where M is the number of sampled locations on each ray. Then the total loss is defined as:
+
+$$\mathcal{L} = (\mathcal{L}_{rgb} + 0.1\mathcal{L}_{eik}) + (\lambda_1\mathcal{L}_{usdf} + \lambda_2\mathcal{L}_{bias} + \lambda_3\mathcal{L}_{pc}) \quad (14)$$
+
+The first two items are regular losses, and the last three items correspond to the three modules we proposed. In our experiments, we choose λ1 = 1, λ2 = 1, λ3 = 0.25.
+
+### 5. Experiments
+
+#### 5.1. Experimental Setting
+
+Datasets. Following previous works, we use 15 scenes from the DTU dataset [11] for quantitative and qualitative evaluations, which include challenging cases, such as low-texture areas, thin structures, and specular reflection. Chamfer Distance (CD) is taken as the evaluation metric. Additionally, we also select several challenging scenes from the low-res BlendedMVS dataset [37] for qualitative comparisons.
+
+Network architecture. Our network is built based on NeuS with light MLPs. The base SDF network is parameterized by a 4-layer MLP with 256 hidden units and the Bias network is parameterized by a similar 2-layer MLP. We also use a 2-layer MLP with 128 hidden units to construct the color network. To enhance learning efficiency, the popular InstantNGP [20] is utilized to encode the input position information of the three networks using the same parameters as MonoSDF [40].
+
+Implementation details. We use pre-trained TransMVS-Net [9] on DTU to provide reliable depth map and point cloud for each view. To ensure fairness, we exclude the tested scenes from its original training set and retrain it on DTU. The time for depth prediction is about one second per image, thus the total preprocessing time is relatively short. The final point cloud contains about tens of millions of points. To demonstrate that our method does not rely on overly dense data, we downsample it to 2 million points
+
+
+
+| Scan       | ID     | 24    | 37    | 40    | 55    | 63    | 65    | 69    | 83    | 97    | 105   | 106   | 110   | 114   | 118   | 122   | Mean  | Time  |
+|------------|--------|-------|-------|-------|-------|-------|-------|-------|-------|-------|-------|-------|-------|-------|-------|-------|-------|-------|
+| COLMAP     | [23]   | 0.81  | 2.05  | 0.73  | 1.22  | 1.79  | 1.58  | 1.02  | 3.05  | 1.40  | 2.05  | 1.00  | 1.32  | 0.49  | 0.78  | 1.17  | 1.36  |       |
+| sPSR       | 0 [13] | 0.49  | 1.27  | 0.63  | 0.57  | 0.88  | 0.69  | 0.53  | 1.37  | 0.93  | 0.76  | 0.60  | 0.86  | 0.30  | 0.51  | 0.70  | 0.74  |       |
+| sPSR       | 7 [13] | 0.47  | 1.10  | 0.44  | 0.34  | 0.81  | 0.69  | 0.53  | 1.21  | 0.91  | 0.68  | 0.51  | 0.70  | 0.30  | 0.40  | 0.48  | 0.64  |       |
+| SIREN      | [25]   | 0.56  | 1.05  | 0.46  | 0.44  | 1.15  | 0.88  | 1.56  | 1.95  | 1.87  | 0.78  | 1.22  | 1.16  | 1.78  | 1.50  | 0.53  | 1.13  |       |
+| VolSDF     | [39]   | 1.14  | 1.26  | 0.81  | 0.49  | 1.25  | 0.70  | 0.72  | 1.29  | 1.18  | 0.70  | 0.66  | 1.08  | 0.42  | 0.61  | 0.55  | 0.86  | 5.5h  |
+| NeuS       | [29]   | 1.00  | 1.37  | 0.93  | 0.43  | 1.10  | 0.65  | 0.57  | 1.48  | 1.09  | 0.83  | 0.52  | 1.20  | 0.35  | 0.49  | 0.54  | 0.84  | 8h    |
+| DVGO       | [27]   | 1.83  | 1.74  | 1.70  | 1.53  | 1.91  | 1.91  | 1.77  | 2.60  | 2.08  | 1.79  | 1.76  | 2.12  | 1.60  | 1.80  | 1.58  | 1.85  | 15min |
+| HF-NeuS    | [30]   | 0.76  | 1.32  | 0.70  | 0.39  | 1.06  | 0.63  | 0.63  | 1.15  | 1.12  | 0.80  | 0.52  | 1.22  | 0.33  | 0.49  | 0.50  | 0.77  | 20h   |
+| NeuralWarp | [8]    | 0.49  | 0.71  | 0.38  | 0.38  | 0.79  | 0.81  | 0.82  | 1.20  | 1.06  | 0.68  | 0.66  | 0.74  | 0.41  | 0.63  | 0.51  | 0.68  | 5h    |
+| PET-NeuS   | [31]   | 0.56  | 0.75  | 0.68  | 0.36  | 0.87  | 0.76  | 0.69  | 1.33  | 1.08  | 0.66  | 0.51  | 1.04  | 0.34  | 0.51  | 0.48  | 0.71  | 9h    |
+| NeuDA      | [5]    | 0.47  | 0.71  | 0.42  | 0.36  | 0.88  | 0.56  | 0.56  | 1.43  | 1.04  | 0.81  | 0.51  | 0.78  | 0.32  | 0.41  | 0.45  | 0.65  |       |
+| Voxurf     | [32]   | 0.72  | 0.75  | 0.47  | 0.39  | 1.47  | 0.76  | 0.81  | 1.02  | 1.04  | 0.92  | 0.52  | 1.13  | 0.40  | 0.53  | 0.53  | 0.76  | 55min |
+| MVSDF      | [41]   | 0.83  | 1.76  | 0.88  | 0.44  | 1.11  | 0.90  | 0.75  | 1.26  | 1.02  | 1.35  | 0.87  | 0.84  | 0.34  | 0.47  | 0.46  | 0.88  | 2.7h  |
+| MonoSDF    | [40]   | 0.66  | 0.88  | 0.43  | 0.40  | 0.87  | 0.78  | 0.81  | 1.23  | 1.18  | 0.66  | 0.66  | 0.96  | 0.41  | 0.57  | 0.51  | 0.73  | 5h    |
+| Point-NeRF | [34]   | 0.87  | 2.06  | 1.20  | 1.01  | 1.01  | 1.39  | 0.80  | 1.04  | 0.92  | 0.74  | 0.97  | 0.76  | 0.56  | 0.90  | 1.05  | 1.02  | 4.5h  |
+| RegSDF     | [42]   | 0.597 | 1.410 | 0.637 | 0.428 | 1.342 | 0.623 | 0.599 | 0.895 | 0.919 | 1.020 | 0.600 | 0.594 | 0.297 | 0.406 | 0.389 | 0.717 | 3.5h  |
+| TUVR       | [43]   | 0.56  | 0.92  | 0.39  | 0.39  | 0.85  | 0.58  | 0.51  | 1.20  | 0.90  | 0.78  | 0.42  | 0.84  | 0.32  | 0.43  | 0.44  | 0.64  | 9h    |
+| Ours       |        | 0.338 | 0.822 | 0.403 | 0.331 | 0.754 | 0.541 | 0.493 | 1.128 | 0.855 | 0.713 | 0.367 | 0.606 | 0.302 | 0.371 | 0.378 | 0.560 | 43min |
+
+Table 1. Quantitative comparison results with different state-of-the-art (SOTA) methods on DTU without masks. Best and Second -best are highlighted. In the last column, the optimization time for multi-view neural surface reconstruction is additionally compared. '-' stands for data not evaluated.
+
+
+
+Figure 3. Convergence speed of different methods.
+
+
+
+4 min 8 min 12 min ... 8 h NeuS by interval, i.e., sampling one point every k points. This manner works well to balance efficiency while preserving the distribution characteristics of raw data. Furthermore, to facilitate the image projection in our Neural Projection module, we pick the point set generated by the current view to feed into the network at each iteration. In each batch, 512 rays and 1024 points are randomly sampled. We experiment on a single RTX 3090 GPU, optimizing for 30k steps for around 43 minutes on each scene with a batch size of 1. Please refer to the supplementary material for more details.
+
+Figure 4. Reconstruction results at different optimization times.
+
+
+
+| PET-NeuS   | [31] | HF-NeuS | [30] | NeuralWarp | [8]  | NeuS | [29] |
+|------------|------|---------|------|------------|------|------|------|
+| 30         | GB   | 16.21   | GB   | 9.28       | GB   | 6.84 | GB   |
+| Point-NeRF | [34] | MVSDF   | [41] | Voxurf     | [32] |      | Ours |
+| 23.30      | GB   | 18.85   | GB   | 23.55      | GB   | 4.88 | GB   |
+
+Table 2. Comparison with different methods in terms of GPU memory usage.
+
+Baselines. We compare our method with 1) sPSR [13], which is a classic geometric surface reconstruction method from point cloud. 2) SIREN [25], which is a popular learning-based implicit reconstruction method from point cloud. 3) VolSDF [39], NeuS [29], NeuralWarp [8], HF-NeuS [30], DVGO [27], Voxurf [32], PET-NeuS [31] and NeuDA [5], which are neural surface reconstruction methods with volume rendering. 4) MVSDF [41], Point-NeRF [34], MonoSDF [40], RegSDF [42] and TUVR [43], which use geometric priors to supervise neural surface reconstruction. In addition, COLMAP [23] is also added.
+
+#### 5.2. Comparisons
+
+As shown in Table 1, we report the quantitative comparison results of our method with different methods on the DTU dataset without masks, including mesh quality and optimization time. Mesh quality evaluation results of all compared neural surface methods are derived from their original papers. Specially, the results of COLMAP are from the NeuDA paper [5], and the results of DVGO and Point-NeRF are from the Voxurf paper [32]. For sPSR, we report two results with trimming values set to 0 and 7. Although sPSR7 scores higher than sPSR0, the surface integrity is compromised. In addition, the mask cropping provided by NeuS is also applied to the results of sPSR and SIREN for fair comparisons. Importantly, both methods utilize undownsampled point clouds as input, making the comparison more
+
+
+
+Sculpture(BlendedMVS)It can also be seen from Table 1 that the balance between accuracy and efficiency is still a challenge for current methods. DVGO [27] achieves a fast speed, but the reconstruction quality is not satisfactory. In contrast to other methods that require several hours for optimization, Voxurf and our method complete the task within one hour and reconstruct competitive results. Additionally, compared to Voxurf using multiple CUDA acceleration techniques for networks and sampling, our method achieves superior speed without relying on these, except for InstantNGP's CUDA implementation. The 11x speedup compared to NeuS and the 21.8% speedup compared to Voxurf demonstrate the high efficiency of our method. As shown in Figure 3 and 4, our method achieves fast convergence and a good reconstruction in a short time. As another advantage, it possesses a low GPU memory usage. Table 2 shows the comparison of our approach with different competitors in terms of resource usage. Even with lightweight networks, our approach still strikes a good balance between efficiency and accuracy, fur-
+
+Figure 5. Qualitative comparison of our approach with methods from different categories on DTU and BlendedMVS.
+
+challenging. In the comparison of accuracy with diverse baselines, our method shows significant advantages with a 33.3% improvement over NeuS and a 12.5% improvement over the SOTA method.
+
+
+
+| Mehtod   | L sdf L pc | L usdf L bias | CD    |
+|----------|------------|---------------|-------|
+| Base     |            |               | 1.059 |
+| Naive PG | ✓          |               | 0.687 |
+| Model-A  | ✓ ✓        |               | 0.649 |
+| Model-B  |            | ✓             | 0.582 |
+| Model-C  | ✓          | ✓             | 0.569 |
+| Ours     | ✓          | ✓ ✓           | 0.560 |
+
+Table 3. Ablation study on DTU.
+
+ther demonstrating that the potential of point guidance is well exploited.
+
+Figure 5 presents a qualitative comparison of our method with other methods. Our approach combines the advantages brought by volume rendering and point modeling, resulting in improved reconstruction outcomes. Compared to other neural surface reconstruction methods, richer fine-grained details are characterized by our method, such as windows in Scan24 and cobblestones in Stone. Moreover, smoother surfaces are also reconstructed, like flat areas in Scan40 and curved ones in Scan114. Compared to sPSR, more complete surfaces and better noise robustness are presented by our method, such as the nose in Sculpture.
+
+
+
+Figure 6. Visual results of different baselines when point clouds without geometric consistency filtering are taken as input.
+
+
+
+| Proportion | 0%           | 10%   | 15%   | 20%   | 25%   | 30%   |
+|------------|--------------|-------|-------|-------|-------|-------|
+| CD         | 0.560 | 0.565 | 0.571 | 0.576 | 0.588 | 0.602 |
+
+Table 4. Quantitative results of applying Gaussian noise to points of different proportions.
+
+
+
+| Number | 5 Million | 2 Million | 1 Million | 0.5 Million | 0.1 Million |
+|---------------|------------------|------------------|------------------|--------------------|--------------------|
+| CD     | 0.600     | 0.600     | 0.565            | 0.572              | 0.575              |
+
+Table 5. Quantitative results with different number of points.
+
+#### 5.3. Analysis
+
+Ablation study. In order to evaluate the improvement brought by point guidance compared to the base framework and the effect of each module in our method, we conduct an ablation study on the DTU dataset, as presented in Table 3. First, by removing the point modeling part of our pipeline, we only keep the volume rendering part as the Base model. Subsequently, we introduce the point cloud and a simple loss Lsdf as 'Naive PG', which is equivalent to Lusdf with σe 2 (xP ) treated as a constant value in uncertainty estimation, to compare the effects brought by a naive point guidance. On this basis, we introduce 'Model-A', incorporating Lpc corresponding to the Neural Projection module, and 'Model-B', where Lsdf is replaced with Lusdf corresponding to uncertainty modeling. This allows us to evaluate the distinct effects of the two modules individually. The combination of the two modules is referred to as 'Model-C'. Finally, the Bias Network is added as our final model. It is evident that each module in our method contributes to higherprecision reconstruction, demonstrating the effectiveness of each module. More meaningfully, our point modeling is a universal module, not just for lightweight NeuS. The significant improvement over baseline not only illustrates the effectiveness of our point modeling module, but also illustrates the strong potential of point guidance.
+
+Noise resistance. To test the robustness of our method to noisy point clouds, we perform experiments on two types of noisy data. The first type is a high-intensity noisy point cloud without any geometric consistency filtering during depth maps fusion, and the reconstruction results are presented in Figure 6. Additionally, the results of each baseline in Table 3 are also presented, further demonstrating the resistance of each module to high-intensity noisy data. To more clearly quantify noise intensity, we apply artifi-
+
+
+
+Figure 7. Reconstruction results with high-intensity artificial noise data. sPSR fails to work, while our method remains robust.
+
+cial noise to the point cloud as the second type of noisy data. We randomly select different percentages of points from the point cloud to add high-intensity Gaussian noise with a standard deviation of 50%. As shown in Table 4, as the noise intensity increases significantly, our CD value still maintains a small fluctuation, demonstrating strong robustness to noise. The visual results for high-intensity artificial noise are presented in Figure 7.
+
+Adaptation to density variations. Adaptability to sparse data is also an important challenge for point-guided methods, reflecting the robustness to complex extreme cases. As shown in Table 5, we downsample the raw points to different numbers to test the adaptability of our method for sparse data. It can be seen that our method remains a robust performance even as the point density significantly decreases. Satisfyingly, for sparse one hundred thousand points, we still maintain an excellent result.
+
+Limitations. Reconstruction of non-visible regions remains a bottleneck in our approach. In these regions, point data usually cannot be reasonably generated, making it difficult to achieve effective surface guidance. This is also a common problem faced by current multi-view reconstruction. It would be a good direction to combine other generative models in future work.
+
+### 6. Conclusion
+
+We propose PG-NeuS, a novel point-guided method for multi-view neural surface reconstruction, giving an effective solution to resist geometric ambiguity in the rendering and inherent noise in point cloud. Benefiting from effective point guidance, accurate and efficient reconstruction is achieved by our method, even using lightweight networks. Experiments demonstrate the superiority of our method in reconstruction accuracy, efficiency and robustness.
+
+## References
+
+- [1] Kara-Ali Aliev, Artem Sevastopolsky, Maria Kolos, Dmitry Ulyanov, and Victor Lempitsky. Neural point-based graphics. In Computer Vision–ECCV 2020: 16th European Conference, Glasgow, UK, August 23–28, 2020, Proceedings, Part XXII 16, pages 696–712. Springer, 2020. 2, 3 [2] Dejan Azinovic, Ricardo Martin-Brualla, Dan B Goldman, ´ Matthias Nießner, and Justus Thies. Neural rgb-d surface reconstruction. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 6290– 6301, 2022. 2 [3] Sai Praveen Bangaru, Michael Gharbi, Fujun Luan, Tzu-Mao ¨ Li, Kalyan Sunkavalli, Milos Hasan, Sai Bi, Zexiang Xu, Gilbert Bernstein, and Fredo Durand. Differentiable rendering of neural sdfs through reparameterization. In SIGGRAPH Asia 2022 Conference Papers, pages 1–9, 2022. 2 [4] Jonathan T Barron, Ben Mildenhall, Matthew Tancik, Peter Hedman, Ricardo Martin-Brualla, and Pratul P Srinivasan. Mip-nerf: A multiscale representation for anti-aliasing neural radiance fields. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 5855–5864, 2021. 2 [5] Bowen Cai, Jinchi Huang, Rongfei Jia, Chengfei Lv, and Huan Fu. Neuda: Neural deformable anchor for highfidelity implicit surface reconstruction. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 8476–8485, 2023. 1, 6 [6] Anpei Chen, Zexiang Xu, Fuqiang Zhao, Xiaoshuai Zhang, Fanbo Xiang, Jingyi Yu, and Hao Su. Mvsnerf: Fast generalizable radiance field reconstruction from multi-view stereo. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 14124–14133, 2021. 2 [7] Wenzheng Chen, Huan Ling, Jun Gao, Edward Smith, Jaakko Lehtinen, Alec Jacobson, and Sanja Fidler. Learning to predict 3d objects with an interpolation-based differentiable renderer. Advances in neural information processing systems, 32, 2019. 2 [8] Franc¸ois Darmon, Ben´ edicte Bascle, Jean-Cl ´ ement Devaux, ´ Pascal Monasse, and Mathieu Aubry. Improving neural implicit surfaces geometry with patch warping. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 6260–6269, 2022. 1, 6 [9] Yikang Ding, Wentao Yuan, Qingtian Zhu, Haotian Zhang, Xiangyue Liu, Yuanjiang Wang, and Xiao Liu. Transmvsnet: Global context-aware multi-view stereo network with transformers. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 8585– 8594, 2022. 2, 4, 5 [10] Qiancheng Fu, Qingshan Xu, Yew Soon Ong, and Wenbing Tao. Geo-neus: Geometry-consistent neural implicit surfaces learning for multi-view reconstruction. Advances in Neural Information Processing Systems, 35:3403–3416, 2022. 1, 2 [11] Rasmus Jensen, Anders Dahl, George Vogiatzis, Engin Tola, and Henrik Aanæs. Large scale multi-view stereopsis evaluation. In Proceedings of the IEEE conference on computer vision and pattern recognition, pages 406–413, 2014. 2, 5 [12] Hanqi Jiang, Cheng Zeng, Runnan Chen, Shuai Liang, Yinhe Han, Yichao Gao, and Conglin Wang. Depth-neus: Neural implicit surfaces learning for multi-view reconstruction based on depth information optimization. arXiv preprint arXiv:2303.17088, 2023. 3 [13] Michael Kazhdan and Hugues Hoppe. Screened poisson surface reconstruction. ACM Transactions on Graphics (ToG), 32(3):1–13, 2013. 2, 6 [14] Alex Kendall and Yarin Gal. What uncertainties do we need in bayesian deep learning for computer vision? Advances in neural information processing systems, 30, 2017. 4 [15] Balaji Lakshminarayanan, Alexander Pritzel, and Charles Blundell. Simple and scalable predictive uncertainty estimation using deep ensembles. Advances in neural information processing systems, 30, 2017. 4 [16] Hai Li, Xingrui Yang, Hongjia Zhai, Yuqian Liu, Hujun Bao, and Guofeng Zhang. Vox-surf: Voxel-based implicit surface representation. IEEE Transactions on Visualization and Computer Graphics, 2022. 2 [17] Baorui Ma, Zhizhong Han, Yu-Shen Liu, and Matthias Zwicker. Neural-pull: Learning signed distance functions from point clouds by learning to pull space onto surfaces. In Proceedings of the 38th International Conference on Machine Learning, 2021. 2 [18] Ricardo Martin-Brualla, Noha Radwan, Mehdi SM Sajjadi, Jonathan T Barron, Alexey Dosovitskiy, and Daniel Duckworth. Nerf in the wild: Neural radiance fields for unconstrained photo collections. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 7210–7219, 2021. 2 [19] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65(1):99–106, 2021. 2 [20] Thomas Muller, Alex Evans, Christoph Schied, and Alexan- ¨ der Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM Transactions on Graphics (ToG), 41(4):1–15, 2022. 5 [21] Xuran Pan, Zihang Lai, Shiji Song, and Gao Huang. Activenerf: Learning where to see with uncertainty estimation. In European Conference on Computer Vision, pages 230–
+  - 246. Springer, 2022. 2 [22] Jiaxiong Qiu, Peng-Tao Jiang, Yifan Zhu, Ze-Xin Yin, Ming-Ming Cheng, and Bo Ren. Looking through the glass: Neural surface reconstruction against high specular reflections. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 20823–20833, 2023. 2 [23] Johannes L Schonberger, Enliang Zheng, Jan-Michael ¨ Frahm, and Marc Pollefeys. Pixelwise view selection for unstructured multi-view stereo. In Computer Vision–ECCV 2016: 14th European Conference, Amsterdam, The Netherlands, October 11-14, 2016, Proceedings, Part III 14, pages 501–518. Springer, 2016. 6 [24] Jianxiong Shen, Antonio Agudo, Francesc Moreno-Noguer, and Adria Ruiz. Conditional-flow nerf: Accurate 3d modelling with reliable uncertainty quantification. In European
+
+Conference on Computer Vision, pages 540–557. Springer, 2022. 2 [25] Vincent Sitzmann, Julien Martel, Alexander Bergman, David Lindell, and Gordon Wetzstein. Implicit neural representations with periodic activation functions. Advances in neural information processing systems, 33:7462–7473, 2020. 2, 6 [26] Wanjuan Su and Wenbing Tao. Efficient edge-preserving multi-view stereo network for depth estimation. In Proceedings of the AAAI Conference on Artificial Intelligence, pages 2348–2356, 2023. 2 [27] Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct voxel grid optimization: Super-fast convergence for radiance fields reconstruction. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5459– 5469, 2022. 2, 6, 7 [28] Matthew Tancik, Vincent Casser, Xinchen Yan, Sabeek Pradhan, Ben Mildenhall, Pratul P Srinivasan, Jonathan T Barron, and Henrik Kretzschmar. Block-nerf: Scalable large scene neural view synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 8248–8258, 2022. 2 [29] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku Komura, and Wenping Wang. Neus: Learning neural implicit surfaces by volume rendering for multi-view reconstruction. Advances in Neural Information Processing Systems, 34:27171–27183, 2021. 1, 2, 3, 6 [30] Yiqun Wang, Ivan Skorokhodov, and Peter Wonka. Hf-neus: Improved surface reconstruction using high-frequency details. Advances in Neural Information Processing Systems, 35:1966–1978, 2022. 1, 2, 4, 6 [31] Yiqun Wang, Ivan Skorokhodov, and Peter Wonka. Pet-neus: Positional encoding tri-planes for neural surfaces. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 12598–12607, 2023. 2, 6 [32] Tong Wu, Jiaqi Wang, Xingang Pan, Xudong Xu, Christian Theobalt, Ziwei Liu, and Dahua Lin. Voxurf: Voxel-based efficient and accurate neural surface reconstruction. In International Conference on Learning Representations (ICLR), 2023. 2, 6 [33] Xiaojun Xiang, Hanqing Jiang, Guofeng Zhang, Yihao Yu, Chenchen Li, Xingbin Yang, Danpeng Chen, and Hujun Bao. Mobile3dscanner: An online 3d scanner for high-quality object reconstruction with a mobile device. IEEE Transactions on Visualization and Computer Graphics, 27(11): 4245–4255, 2021. 2 [34] Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin Shu, Kalyan Sunkavalli, and Ulrich Neumann. Point-nerf: Point-based neural radiance fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5438–5448, 2022. 3, 6 [35] Bangbang Yang, Yinda Zhang, Yinghao Xu, Yijin Li, Han Zhou, Hujun Bao, Guofeng Zhang, and Zhaopeng Cui. Learning object-compositional neural radiance field for editable scene rendering. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 13779– 13788, 2021. 2 [36] Bangbang Yang, Chong Bao, Junyi Zeng, Hujun Bao, Yinda Zhang, Zhaopeng Cui, and Guofeng Zhang. Neumesh: Learning disentangled neural mesh-based implicit field for geometry and texture editing. In European Conference on Computer Vision, pages 597–614. Springer, 2022. 2 [37] Yao Yao, Zixin Luo, Shiwei Li, Jingyang Zhang, Yufan Ren, Lei Zhou, Tian Fang, and Long Quan. Blendedmvs: A largescale dataset for generalized multi-view stereo networks. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages 1790–1799, 2020. 2, 5 [38] Lior Yariv, Yoni Kasten, Dror Moran, Meirav Galun, Matan Atzmon, Basri Ronen, and Yaron Lipman. Multiview neural surface reconstruction by disentangling geometry and appearance. Advances in Neural Information Processing Systems, 33:2492–2502, 2020. 2 [39] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. Volume rendering of neural implicit surfaces. Advances in Neural Information Processing Systems, 34:4805–4815, 2021. 1, 2, 6 [40] Zehao Yu, Songyou Peng, Michael Niemeyer, Torsten Sattler, and Andreas Geiger. Monosdf: Exploring monocular geometric cues for neural implicit surface reconstruction. Advances in neural information processing systems, 35:25018–25032, 2022. 1, 3, 5, 6 [41] Jingyang Zhang, Yao Yao, and Long Quan. Learning signed distance field for multi-view surface reconstruction. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 6525–6534, 2021. 1, 3, 6 [42] Jingyang Zhang, Yao Yao, Shiwei Li, Tian Fang, David McKinnon, Yanghai Tsin, and Long Quan. Critical regularizations for neural surface reconstruction in the wild. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 6270–6279, 2022. 1, 2, 3, 6 [43] Yongqiang Zhang, Zhipeng Hu, Haoqian Wu, Minda Zhao, Lincheng Li, Zhengxia Zou, and Changjie Fan. Towards unbiased volume rendering of neural implicit surfaces with geometry priors. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 4359– 4368, 2023. 1, 2, 3, 6 [44] Zhe Zhang, Rui Peng, Yuxi Hu, and Ronggang Wang. Geomvsnet: Learning multi-view stereo with geometry perception. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 21508–21518, 2023. 2 [45] Bingfan Zhu, Yanchao Yang, Xulong Wang, Youyi Zheng, and Leonidas Guibas. Vdn-nerf: Resolving shape-radiance ambiguity via view-dependence normalization. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 35–45, 2023. 3 [46] Zihan Zhu, Songyou Peng, Viktor Larsson, Weiwei Xu, Hujun Bao, Zhaopeng Cui, Martin R Oswald, and Marc Pollefeys. Nice-slam: Neural implicit scalable encoding for slam. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 12786–12796, 2022. 2 [47] Yiming Zuo and Jia Deng. View synthesis with sculpted neural points. In The Eleventh International Conference on Learning Representations, 2023. 3

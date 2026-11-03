@@ -1,0 +1,128 @@
+Summary CyberCadKernel's tetrahedral volume meshing (the "mesh tetting" step) is the single capability blocking downstream FE work in CalculiX++. The interface is already pinned in the consumer as cxpp::geometry::CadMesher (include/calcu...
+
+Tetrahedral volume meshing (CadMesher::tet_mesh) — the mesh-tetting keystone blocking CalculiX++ FE meshing · Issue #1 · CyberdyneCorp/CyberCadKernel · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Tetrahedral volume meshing (CadMesher::tet_mesh) — the mesh-tetting keystone blocking CalculiX++ FE meshing #1
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Tetrahedral volume meshing (CadMesher::tet_mesh) — the mesh-tetting keystone blocking CalculiX++ FE meshing#1
+Copy link
+Labels
+enhancementNew feature or requestNew feature or requesthelp wantedExtra attention is neededExtra attention is needed
+Description
+leonardoaraujosantos
+opened on Jul 4, 2026
+Issue body actions
+Summary
+CyberCadKernel's tetrahedral volume meshing (the "mesh tetting" step) is the single capability blocking downstream FE work in CalculiX++. The interface is already pinned in the consumer as cxpp::geometry::CadMesher (include/calculixpp/geometry/cad_mesher.hpp) — every method currently throws "CyberCadKernel geometry meshing is not available in Phase 1; import mesh from the deck instead". We need the real implementation of the surface→volume→FE path.
+OCCT (which CyberCadKernel extends) covers B-rep + surface triangulation (BRepMesh), but it does not produce tetrahedral volume meshes. That step needs a tetrahedralizer.
+Do NOT implement tetrahedralization from scratch. Constrained Delaunay + quality refinement is a large, subtle, numerically fragile algorithm — integrate a mature, proven library and spend the effort on the wiring (data marshalling, C3D4/C3D10 ordering, quality reporting), not on reinventing the mesher. But the choice of library is constrained by this project's mobile target and MIT-licensing goal — the "obvious" libraries (TetGen/CGAL/Netgen) each conflict with one or both. Read Library selection below before picking.
+Library selection — footprint + license (read before picking)
+This kernel cross-compiles to arm64 iOS (device + simulator) and its strategic goal is a cleanly MIT-licensed library — the entire point of drop-occt is to shed OCCT's LGPL obligation. Two hard constraints follow, and they eliminate the usual first choices:
+Dependency footprint — must build for arm64 iOS and link statically with no heavy transitive chains (avoid Boost / GMP / MPFR). Prefer self-contained, few-file libraries.
+License — must be safe for a shipped, closed-source mobile app and ideally match the kernel's MIT trajectory. Copyleft (GPL/AGPL) is a showstopper; LGPL re-introduces exactly the obligation drop-occt is removing.
+Library
+License (verify current terms)
+Mobile footprint
+Verdict for this project
+TetGen
+AGPL-3.0 (commercial license via WIAS)
+Excellent — single self-contained .cxx/.h, no deps
+Best engineering fit, but AGPL blocks a shipped app unless a commercial license is purchased
+Netgen
+LGPL-2.1
+Heavy, large codebase
+Re-introduces the LGPL obligation drop-occt exists to remove
+CGAL Mesh_3
+GPL-3.0+
+Heavy — needs Boost, GMP/MPFR
+GPL blocker and big transitive deps
+fTetWild
+MPL-2.0 (permissive, file-level)
+Moderate — pulls Eigen/libigl
+License OK for linking; heavier deps to trim
+Geogram
+BSD-3-Clause (permissive)
+Moderate, self-containable
+Permissive + MIT-friendly; has its own Delaunay/tet path
+Recommendation to evaluate: lead with a permissive option (Geogram / fTetWild) since it satisfies both the MIT and mobile goals, even though TetGen is the cleaner pure-engineering fit. If TetGen's robustness turns out to be required, budget for its commercial license rather than shipping AGPL. Confirm the exact current license of any candidate before adopting — terms change between versions.
+What CalculiX++ needs (the API contract)
+The consumer already declares the exact interface — implement these behind the CyberCadKernel link:
+```
+class CadMesher {
+  BoundaryRep import(const std::string& path, CadFormat format) const;      // STEP/IGES/BREP -> B-rep
+  BoundaryRep heal(const BoundaryRep&, const HealingOptions&) const;         // close gaps, remove slivers
+  SurfaceMesh triangulate(const BoundaryRep&, const TriangulationOptions&) const;  // watertight tri surface
+  Mesh        tet_mesh(const SurfaceMesh&, const VolumeMeshOptions&) const;  // <-- the tet meshing
+  QualityReport quality(const Mesh&) const;                                  // per-element metrics
+  void        map_to_model(const Mesh& source, Mesh& out) const;            // into the FE Mesh
+};
+```
+tet_mesh is the keystone. Given a watertight/closed SurfaceMesh, produce a conforming tetrahedral Mesh (the CalculiX++ FE mesh: nodes + connectivity) honouring VolumeMeshOptions:
+MeshOrder order — linear C3D4 (4-node) or quadratic C3D10 (10-node, mid-edge nodes). Quadratic is the default and the common FE case.
+target_element_size (0 ⇒ kernel default), grading (size grow factor away from small features).
+min_scaled_jacobian — reject/refine elements below this quality.
+quality() must return the QualityReport (min/max dihedral angle, min/mean scaled Jacobian, max aspect ratio, count + ids of elements below threshold) — FE accuracy is very sensitive to sliver tets, so quality control and sliver removal are first-class, not optional.
+Why this matters / what it unblocks
+CalculiX++ (a C++20 FE solver) is a downstream consumer. Two structural capabilities are blocked on this and cannot ship until it lands:
+Adaptive mesh refinement (*REFINE MESH) — needs field-driven tet (re)meshing (follow-up issue).
+Crack propagation (*CRACK PROPAGATION) — needs conforming local remeshing (follow-up issue).
+Both build directly on tet_mesh. Delivering a solid tet mesher + quality reporting here is the foundation that unblocks both.
+Acceptance / validation
+A closed surface (e.g. a healed STEP box, or a triangulated sphere) → a watertight C3D4 and C3D10 tet mesh with all elements above a configurable min_scaled_jacobian.
+QualityReport flags degenerate/sliver elements; a stress patch test on the generated mesh recovers a linear field exactly (partition-of-unity / rigid-body null space) — the mesh must be valid FE input.
+map_to_model yields a cxpp::core::Mesh the solver can assemble on.
+References
+Consumer interface + intended pipeline (with per-method spec refs): include/calculixpp/geometry/cad_mesher.hpp in CalculiX++; capability mesh-processing (requirements: CAD geometry import, Geometry healing and validation, Surface triangulation, Tetrahedral volume meshing, Mesh quality metrics and reporting, Mapping into the FE model).
+Tetrahedralizer: integrate a library, don't reimplement — see Library selection above. Candidates: Geogram (BSD) / fTetWild (MPL-2.0) for a permissive + mobile-friendly fit; TetGen (Hang Si, AGPL — commercial license needed for a shipped app), Netgen (LGPL), or CGAL Mesh_3 (GPL) as the higher-friction alternatives.
+Environment
+CyberCadKernel main (OCCT-based, C++20). Downstream: CalculiX++ (C++20 FE solver), Linux x86-64.
+Reactions are currently unavailable
+Activity
+leonardoaraujosantos
+added
+enhancementNew feature or requestNew feature or request
+help wantedExtra attention is neededExtra attention is needed
+on Jul 4, 2026
+leonardoaraujosantos
+added 4 commits that reference this issue on Jul 4, 2026
+native tetrahedral volume meshing (TetGen-backed, optional) + mesh qu…
+...
+526a596
+native tetrahedral volume meshing (TetGen-backed, optional) + mesh qu…
+...
+a1c9c32
+MOAT M2c3: land chain seam-graph builder (>=3-seam, 3-arc/2-junction)…
+...
+e3cace1
+Add the 6 app-parity cc_* functions the app links but the kernel was …
+...
+d75000c
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or requesthelp wantedExtra attention is neededExtra attention is needed
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

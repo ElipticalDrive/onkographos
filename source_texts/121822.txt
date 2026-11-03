@@ -1,0 +1,293 @@
+# 最適化問題としての画像再構成
+
+[別記事](https://qiita.com/airtech/items/cfd6099eb5003a1b1669)で画像再構成の５つの数学的枠組みに言及しました。
+
+1. 解析的再構成(analytical reconstruction) ～システム関数の逆関数を作用させる～
+2. 代数的再構成(algebraic reconstruction) ～システム方程式を解く～ 
+3. ML再構成(maximum likelihood reconstruction) ～最尤推定問題を解く～
+4. MAP再構成(maximum a posteriori reconstruction) ～最大事後確率推定問題を解く～
+5. 学習型再構成(learned reconstruction) ～学習した再構成モデルを適用する～
+
+この記事では，小規模な問題を例にして，Eigenを用いたコードを示しながら，ML再構成の実装のコンセプトをお伝えしようと思います。ML再構成の作業手順は，[別記事](https://qiita.com/airtech/items/1db7ae0d7fad87d18750#ml%E5%86%8D%E6%A7%8B%E6%88%90)に書いてありますので，適宜ご参照ください :bow: 
+
+製品開発の現場では，Eigenベースで画像再構成ソフトウェアを組むことは，まずありませんが，実装のコンセプト（計算処理の実体）は伝わると期待します。
+
+（補足）なぜ，製品開発の現場では，Eigenを使わないのか？
+高解像度な3次元画像再構成では，システム行列（後述）のメモリサイズが，疎行列を使ったとしても「数百TB」になるケースがあり（手元でざっくり試算），**メモリ容量の観点で非現実的**であるためです。スケーラビリティがないということです。実際，CTやPETの3次元画像再構成において，システム行列を事前計算して，メモリ上に置くことは非常に稀であり，必要なタイミングでシステム行列の要素を都度計算すること（on-the-fly計算と呼ぶ）が一般的です。
+
+
+# ML再構成の構成要素
+## 未知の画像
+* 未知の画像を表す，長さ$N$の列ベクトル $\boldsymbol{x} \in R_+^N$
+
+被写体内の測定したい物理量分布(Ground Truth)は連続関数ですが，仮に，それを離散化した分布はこんな画像（以下，GT画像）だったとします。この例では，$N=200 \times 200$ です。
+
+<img width="200" src="https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/440702/e8157423-a1e5-15ab-0caf-69fbe34c7de3.png">
+
+
+GT画像を求めたいけど，実測された投影データには，系統誤差や統計誤差が含まれるので，GT画像は求められません。GT画像になるべく近い画像を得ることが，現実世界における画像再構成の目的です。
+
+
+## 既知の投影データ
+* 実測された既知の投影データを表す，長さ$M$の列ベクトル $\boldsymbol{y} \in R^M $
+
+とあるファンビーム投影系(360度収集，詳細は省略)で，こんなノイジーな投影データが得られたとします。この例では，$M=250 \times 200$ です。PSNRはおよそ40[dB]です。
+
+<img width="250" src="https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/440702/60856afb-f3ed-db18-817d-595eefc1d251.png">
+
+
+X線CTの場合，X線の照射線量を増やせばノイズ（統計誤差）は減りますが，被写体が人体の場合，被ばく量は増えますので，照射線量は簡単には増やせません。被写体に関わらず，X線発生器やX線検出器のハードウェア的な制約も考慮が必要です。
+
+
+## 既知のシステム行列
+* **投影データと画像の線形な関係**を表現する，既知の$M$行$N$列の行列 $A = ( \boldsymbol{a}_ 0, \boldsymbol{a}_ 1, \cdots,\boldsymbol{a}_ {M-1})^T \in R_+^{M \times N}$
+
+代数的再構成やML再構成，MAP再構成を行うには，$\boldsymbol{y} \approx A\boldsymbol{x}$ となるような 行列$A$ が必要不可欠です。
+
+以下は，上述のファンビーム投影系のシステム行列（行数$M$：50,000，列数$N$：40,000）のほんの一部分（左上角の$1100 \times 1400$くらいの領域）です。つまり，行列の要素数は$M \times N = 2,000,000,000$ (20億) です。float型なので，ファイルサイズとしては約7.5GBです。
+
+<img width="960" src="https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/440702/f90a980d-9f62-f5af-d9ef-164334b5ffc8.png">
+
+システム行列は，**非常にスパースな行列**です。今回の例では，**99.4%の要素がゼロ**でした。投影は「直線上」の積分値なので，システム行列の要素のうち，直線に関与するごく一部の要素（直線と交わる要素）のみ値を持ち，直線に関与しない大多数の要素（直線と交わらない要素）の値はゼロになるためです。
+
+以下は，システム行列の125行目の行ベクトルを画像化したものです。125行目は，0度の投影（投影データの1行目）の中心のデータ点に対応します。この画像からも，システム行列がいかにスパースであるかが分かります。
+
+<img width="200" src="https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/440702/d21f57e0-4d54-6238-e123-011f45d3c680.png">
+
+システム行列の計算には，何らかの**投影計算アルゴリズム**（画像再構成分野では「Projector」と呼ばれる）を利用します。Siddon法，Incremental Siddon法，Joseph法，Kohler法，Distance-Driven法など，様々な手法が存在し，高速性やアンチエイリアシング性能に違いがあります。上記では，それらのバランスが良いとされるJoseph法を利用しました。自作のCTシミュレータMySimuでは，Joseph法とIncremental Siddon法を選択できるようにしています。投影計算アルゴリズムは，コンピュータグラフィックス分野では「[Line drawing algorithm](https://en.wikipedia.org/wiki/Line_drawing_algorithm)」と呼ばれ，伝統的に研究されています。例えば，[ブレゼンハムのアルゴリズム](https://ja.wikipedia.org/wiki/%E3%83%96%E3%83%AC%E3%82%BC%E3%83%B3%E3%83%8F%E3%83%A0%E3%81%AE%E3%82%A2%E3%83%AB%E3%82%B4%E3%83%AA%E3%82%BA%E3%83%A0)は有名かと思います。
+
+最後に，「システム行列も系統誤差を含む」という点は，実際には無視するものの，頭の片隅に置いておきます。どのようなハードウェアであっても，実際のモノが，幾何的な設計値と寸分の誤差なく出来上がることはありません。X線CT装置であれば，X線発生器とX線検出器の位置関係は設計値からズレます，回転中心もズレます，X線検出器(フラットパネル検出器)の検出面は面内・面外で傾きます，さらに言えば，検出面は完全にフラットではありません（湾曲している）。基本的に，幾何学的な誤差因子は，測定に先立ってキャリブレーションを実施して補正しますが，補正も完璧ではないですし，補正できない要素も残ります。
+
+
+## 順投影
+$A\bar{\boldsymbol{x}}$
+
+何らかの画像ベクトル$\bar{\boldsymbol{x}}$に対して，システム行列$A$を作用させることを順投影(forward projection)と呼び，得られた投影データ$A\bar{\boldsymbol{x}}$ を順投影データと呼びます。
+
+画像を正確に再構成できたら，実測投影データ$\boldsymbol{y}$と順投影データ$A\bar{\boldsymbol{x}}$の差は小さくなるはずです。
+
+以下は，前出のGT画像$\boldsymbol{x}$のファンビーム順投影データ$A\boldsymbol{x}$です。横方向が検出面の中心からの距離，縦方向が回転角度（投影角度）に対応します。
+<img width="250" src="https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/440702/d7889366-1926-033a-82bd-bf450fc77847.png">
+
+
+## 逆投影
+$A^T \bar{\boldsymbol{y}}$
+
+投影データベクトル$\bar{\boldsymbol{y}}$に対して，システム行列の転置$A^T$を作用させることを逆投影(backprojection)と呼び，得られた画像データ$A^T \bar{\boldsymbol{y}}$ を逆投影画像と呼びます。
+
+順投影は「直線上の全ての画素の値を足し合わせて，１つの値を得ること」であるのに対して，逆投影は「直線上の全ての画素に１つの値を書き込むこと」つまり，「画像上に直線を引くこと」です。例えるなら，逆投影画像は，異なる濃さのペンで，膨大な数の直線を**重ね書き**したものです。以下に示すような「String Art」は，同じ濃さのペンでの重ね書き（正確には上書き）であり，逆投影を体現しています。
+<img width="250" src="https://upload.wikimedia.org/wikipedia/commons/thumb/8/88/Knit_1.jpg/600px-Knit_1.jpg">
+(出典) [https://en.m.wikipedia.org/wiki/String_art](https://en.m.wikipedia.org/wiki/String_art)
+
+以下は，前出のファンビーム順投影データ$A\boldsymbol{x}$の逆投影画像$A^TA\boldsymbol{x}$です。非常にぼやけた画像となっており，GT画像には程遠いですが，ぼんやりと被写体の分布が浮かび上がっています。
+<img width="200" src="https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/440702/0f923162-332c-c6d1-cb3c-240b3497e8fd.png">
+
+
+## 再構成問題の定義
+
+実測投影データのノイズ分布を考慮した**最尤推定問題**として定義することが一般的です。
+
+ノイズ分布が正規分布に近いのであれば，正規分布の最尤推定，つまり，「実測投影データと順投影データのユークリッド距離」を最小化する問題（いわゆる最小二乗問題）を解くことが妥当です。
+
+$$ \min \frac{1}{2} ||A\boldsymbol{x}-\boldsymbol{y}||^2 \quad s.t. \quad \boldsymbol{x} \geq 0 $$
+
+ノイズ分布がポアソン分布に近いのであれば，ポアソン分布の最尤推定，つまり，「実測投影データと順投影データのカルバック・ライブラー(KL)距離」を最小化する問題を解くことが妥当です。ちなみに，KL距離は正確には「距離」ではないのですが，ここでは気にしません :bow: 
+
+$$\min \sum_{i=0}^{M-1} \left[(\boldsymbol{a}_i \cdot \boldsymbol{x}) - y_i \log(\boldsymbol{a}_i \cdot \boldsymbol{x})\right] \quad s.t. \quad \boldsymbol{x} \geq 0 $$
+
+再構成画像の画素値は基本的に非負なので，非負制約が付きます。ということで，いずれも**微分可能な凸連続関数の非負制約付き最小化問題**になります。
+
+非負制約がなければ，最小二乗問題の解は正規方程式$A^TA\boldsymbol{x}=A^T\boldsymbol{y}$の解になりますが，非負制約がある場合は解析的に表現できません。
+
+## 再構成問題の解法
+
+前出の最適化問題（最小二乗問題，最小KL距離問題）は解析的に解けないので，反復計算により数値的に解きます。
+
+反復計算アルゴリズム（最適化アルゴリズム）には色々なものがありますが，CTやPETといったトモグラフィーの画像再構成分野で頻出するアルゴリズムの基本骨格は「**勾配法**」と「**期待値最大化(EM)法**」です。
+
+この記事の後半では，Eigenのコードを示しつつ，「勾配法」と「期待値最大化(EM)法」に属するアルゴリズムをいくつか紹介します。
+
+
+# 小規模なML再構成問題を解いてみた
+
+前出のノイジーなファンビーム投影を，5つの異なるアルゴリズム(勾配法，共役勾配法，SART法，SPS法，EM法)で画像再構成してみました。
+
+先に結果を示すと，再構成画像はこんな感じになりました。
+<img width="640" src="https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/440702/958bac4a-b66d-a8f3-a244-2f5101fd124c.png">
+
+基本的に，どのアルゴリズムも同じ目的関数，もしくは同じような目的関数を最小化するので，当然ながら，十分に反復させた画像（収束点）の品質は概ね同じです。平均値の大きなポアソン分布は正規分布で近似できるので，統計誤差が小さい条件では，ポアソン分布の最尤推定解と正規分布の最尤推定解も似通った解になります。
+
+
+## 実装の骨格
+どのアルゴリズムも実装の骨格はこんな感じです。
+
+```cpp
+// Eigen のヘッダ
+// #include <Eigen\Core>
+// #include <Eigen\Dense>
+// #include <Eigen\SparseCore>
+
+using T = float;
+using SpMat = Eigen::SparseMatrix<T>;
+using Mat = Eigen::MatrixX<T>;
+using Vec = Eigen::VectorX<T>;
+
+// 画素数
+const int N = 200 * 200;
+
+// 投影データ点数
+const int M = 250 * 200;
+
+// 再構成画像
+Vec x(N);
+
+// 再構成画像の初期値設定
+// ...
+
+// 実測投影データ
+Vec y(M);
+
+// 実測投影データのファイル読込み
+// ...
+
+// システム行列（疎行列）
+SpMat A(M, N);
+
+// システム行列のファイル読込み＆疎行列化
+// ...
+
+// 反復回数
+// 今回，50, 200, 1000を試した
+const int num_iter = 50;
+
+// 最小画素値
+const T min = 0.f; // EM法以外
+//const T min = 1e-16f; // EM法
+
+// 射影関数
+const auto proj = [min]( T x ) { ( x < min ) ? min : x; };
+
+// ★ 事前計算（アルゴリズム毎に異なる）
+// ...
+
+// 反復計算
+for ( int iter = 0; iter < num_iter; iter++ )
+{
+    // ★ 更新計算（アルゴリズム毎に異なる）
+    // ...
+    
+    // 非負制約
+    std::transform( std::begin( x ), std::end( x ), std::begin( x ), proj );
+}
+```
+
+アルゴリズム毎に異なるのは，★印を付けた「事前計算」と「更新計算」の部分です。
+
+どのアルゴリズムも，事前計算や更新計算のコードは，Eigenで定義されている演算子やメソッドを使うと，3行くらいで書けました。拍子抜けするほど，シンプルです。ご覧ください👇
+
+
+## 勾配法 (for 正規分布モデル)
+
+```cpp:事前計算
+// なし
+```
+```cpp:更新計算
+// 勾配画像
+const Vec grad = A.transpose() * ( y - A * x );
+// ステップサイズ（勾配画像から計算）
+const T alpha = grad.squaredNorm() / ( A * grad ).squaredNorm();
+// 加算型更新
+x += alpha * grad;
+```
+
+ステップサイズ```alpha```の計算は，順投影```A*grad```の計算を含むため，計算コストは小さくないですが，二乗誤差の単調減少性は保証されます。
+
+
+## 共役勾配法 (for 正規分布モデル)
+
+```cpp:事前計算
+Eigen::LeastSquaresConjugateGradient<SpMat> solver;
+solver.compute( A );
+solver.setMaxIterations( 1 );
+```
+```cpp:更新計算
+x = solver.solveWithGuess( y, x );
+```
+
+## SART法 (for 正規分布モデル)
+Simultaneous algebraic reconstruction technique法 [[Link](https://doi.org/10.1016/0161-7346(84)90008-7)]
+
+勾配法や共役勾配法，SPS法は最小二乗問題の解法であるのに対して，SART法は，システム行列の行和の逆数を重みとする重み付き最小二乗問題の解法です。この重みは，測定データの分散と直接的には関係しないので，重み付けに特にポジティブな効果はない気がします。
+
+```cpp:事前計算
+// システム行列の列和(画像)
+const Vec colsum = A.transpose() * Vec::Ones( M );
+// システム行列の行和(投影データ)
+const Vec rowsum = A * Vec::Ones( N );
+```
+```cpp:更新計算
+// 加算型更新
+x += ( A.transpose() * ( ( y - A * x ).cwiseQuotient( rowsum ) ) ).cwiseQuotient( colsum );
+```
+```cwiseQuotient```は要素毎の商を返却するメソッドです。
+
+## SPS法 (for 正規分布モデル)
+Separable paraboloidal surrogates法
+最小KL距離問題に対する[SPS](https://doi.org/10.1109/NSSMIC.1998.774361)法のエッセンスを最小二乗問題に応用したアルゴリズム。
+
+```cpp:事前計算
+// 規格化画像（行和投影データの逆投影画像）
+const Vec norm = A.transpose() * ( A * Vec::Ones( N ) );
+```
+
+```cpp:更新計算
+// 加算型更新
+x += ( A.transpose() * ( y - A * x ) ).cwiseQuotient( norm );
+```
+
+## EM法 (for ポアソン分布モデル)
+Maximum-likelihood expectation-maximization法 [[Link](https://doi.org/10.1109/TMI.1982.4307558)]
+
+ポアソン分布に対するEM法は，画像処理の分野では，[Richardson-Lucyアルゴリズム](https://en.wikipedia.org/wiki/Richardson%E2%80%93Lucy_deconvolution)と呼ばれています。非負値行列分解でも同じアルゴリズムが利用されています。この[論文](https://www.kecl.ntt.co.jp/people/kameoka.hirokazu/publications/Kameoka2012SICE09published.pdf)に記載されている「Iダイバージェンス規準のNMFアルゴリズム」(P.839)はEM法そのものです。分野が異なれば呼び名も異なるけど，実体は一緒ってやつです。
+
+```cpp:事前計算
+// システム行列の列和(画像)
+const Vec colsum = A.transpose() * Vec::Ones( M );
+```
+
+```cpp:更新計算
+// 乗算型更新
+x = x.cwiseProduct( ( A.transpose() * y.cwiseQuotient( A * x ) ).cwiseQuotient( colsum ) );
+```
+```cwiseProduct```は要素毎の積を返却するメソッドです。
+
+
+# 収束性の改善方法
+この記事で紹介した5つのアルゴリズムは，いずれも「全てのデータ点を用いて，全ての画素を同時に更新する」タイプのアルゴリズムであり，収束は遅いために，実用性はあまり高くありません。
+
+CTやPETの画像再構成では，収束を速くするために**ブロック反復法**(Block iterative method / Ordered-subsets method)や**ローアクション法**(Row-action method)を適用したアルゴリズムが利用されています。
+
+ブロック反復法は「データ点を複数の重複しない部分データ（サブセットやブロックと呼ばれる）に分割し，複数の部分データを逐次的に利用して，更新する」というコンセプトです。ローアクション法は「1つのサブセット＝1つデータ点」という意味で，ブロック反復法の究極形です。
+
+ブロック反復法やローアクション法が収束するためには，基本的に**ステップサイズの動的な調整**（反復回数に応じてステップサイズを小さくすること）が必須であり，そうしないとリミットサイクルと呼ばれる周期解に陥る（つまり，解が振動する）ので，注意が必要です。
+
+ブロック反復法やローアクション法についても，今後の記事で紹介したいです。
+
+
+# 深層学習との関係
+
+勘の良い方は既にお気づきかもしれません。
+
+* ブロック反復法は，深層学習におけるミニバッチ学習に対応します
+
+* ローアクション法は，確率的勾配降下法(SGD)に対応します
+
+* ステップサイズの調整は，深層学習における学習率の調整に対応します
+
+* 逆投影計算は誤差逆伝播計算に対応します。BackprojectionとBackpropagationという言葉が似ているのも偶然ではありません
+
+深層学習について勉強し始めた頃，深層学習の学習処理と反復型の画像再構成処理の共通点を見つけては「**なんだ，深層学習って画像再構成と同じじゃん！**」と思っていました。
+
+深層学習を理解する上で，画像再構成の知識は非常に大きな助けになりました。
+
+以上です。

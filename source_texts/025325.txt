@@ -1,0 +1,408 @@
+3D medical imaging reconstruction software. Contribute to invesalius/invesalius3 development by creating an account on GitHub.
+
+Surface Texture Export from Volume Rendering (OBJ/VRML Integration) by Kaipapurandeswarreddy · Pull Request #1291 · invesalius/invesalius3 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Kaipapurandeswarreddy
+commented
+Mar 25, 2026
+Copy link
+Copy Markdown
+Contributor
+Summary
+Adds the ability to export a textured 3D surface mesh directly from InVesalius's volume rendering view. Users can now export their CT/MRI surface as a production-quality textured OBJ or VRML file with a single click from the Export tab.
+Implementation
+InVesalius already provides beautiful volume rendering with full WW/WL, CLUT, and projection type controls. However, users could not export this as a textured 3D mesh for use in external tools like Blender, MeshLab, Unity, or for 3D printing with colors.
+This feature bridges that gap by physically baking the volume rendering appearance onto the surface mesh and exporting it as a standardized textured 3D file format that natively retains these color maps.
+How It Works
+User loads a DICOM dataset and creates a 3D surface.
+User enables Volume Rendering and adjusts settings (WW/WL, CLUT, projection type) as desired.
+User navigates to the Export tab.
+User clicks the new hyperlink: "Export 3D surface from volume rendering...".
+User picks a save location and selects a format (Wavefront OBJ or VRML).
+A responsive Progress Dialog appears while the high-resolution texture is generated asynchronously.
+Output files are compiled and saved gracefully:
+OBJ Format: mesh.obj + mesh.mtl + mesh_texture.png
+VRML Format: mesh.vrml + mesh_texture.png
+Technical Implementation
+Algorithm
+Based on the medical_triangle_texture algorithm by Thiago Franco de Moraes (2016):
+For each triangle in the surface mesh, the algorithm natively shoots rays along the surface normals INTO the dense CT/MRI volume.
+It dynamically samples HU values utilizing sub-voxel trilinear interpolation.
+Applies the active WW/WL + CLUT scalar mapping to accumulate genuine RGB colors using Front-to-Back opacity accumulation.
+Packs all distinct triangle mappings into a massive single 2D atlas image (5000x5000 default) and assigns sub-pixel UV coordinates sequentially to the matching mesh faces.
+Reference:
+Moraes et al. (2016). Isosurface rendering of medical images improved by automatic texture mapping. Computer Methods in Biomechanics and Biomedical Engineering: Imaging & Visualization. https://doi.org/10.1080/21681163.2016.1254069
+Rust Engine Optimization
+The core texture generation fully converted legacy Python/Cython wrappers and ports processing heavily into the native invesalius_rs Rust module suite via _native.generate_surface_texture().
+Data Flow
+Project().surface_dict → mesh (vertices, normals, faces)
+Slice().matrix → CT/MRI volume (int16 Z,Y,X)
+Slice().spacing → voxel spacing (mm)
+project.raycasting_preset → dynamically grabs WW/WL + 16-bit preset CLUT dictionaries
+↓
+_native.generate_surface_texture()
+↓
+Generates RGB high-res texture atlas (.PNG) + Barycentric UV maps
+↓
+Strict syntax construction to portable OBJ / MTL or VRML standards
+Files Changed
+New Files
+invesalius/data/surface_texture.py
+Core module for surface compilation logic
+export_textured_surface() bridging function
+Strict syntax standard builders for OBJ/MTL and VRML outputs
+invesalius/gui/dialog_export_texture.py
+Adds ExportTextureProgressDialog keeping wxPython thread-safe wx.CallAfter GUI execution while Rust calculates underneath without frame-locking.
+Modified Files
+invesalius/gui/task_exporter.py
+Injected "Export 3D surface from volume rendering..." button/link.
+Added active OnLinkExportTexturedSurface router and file-dialog bindings ensuring users simply navigate the native OS Save dialog.
+Rust Backend (invesalius_rs/src/*): Ported core dependencies directly into the rust structure including updating bindings via texture_py.rs.
+Key Design Decisions
+Presets: Utilizes exact settings from the actively viewed volume plane (Volume()) and dynamically scrapes .plist definitions for embedded 16-bit CLUT tables rather than demanding separate user configuration. "What you see is exactly what exports."
+Volumetric Spatial Alignment: Added absolute normalization vectors shifting mesh coordinates by mesh_min - [10, 10, 10]. This elegantly reverses the Y-axis flips inherent in VTK image data imports, ensuring volumetric arrays are never raycasted onto empty grid spaces.
+Strict 3D Viewer Compliance:
+OBJ: Sanitizes whitespace inside saved .png files replacing them with underscores to prevent parsing failures in legacy MTL managers like MeshLab.
+VRML: Extensively formats V2.0 structural arrays ensuring commas are strictly internal and all MF-Values are perfectly enclosed inside [ ] brackets, bypassing primitive OutOfMemory crashes discovered in native 32-bit viewers like FreeWRL.
+No Cython Dependencies: Pure Rust execution is robust.
+Testing Guidelines
+Build Instructions:
+Since this feature relies on entirely new Rust backend routines for the rendering algorithms, you must first compile the native module before testing the workflow:
+```
+cd invesalius_rs
+maturin develop --release
+```
+Manual Execution Steps or (see video for execution)
+Launch application via python app.py.
+Load standard DICOM
+Create an explicit 3D surface from a mask.
+Activate Volume Rendering and apply distinctive visual colorations (e.g. Bone + Skin preset).
+Navigate directly to the active Export tab on the left-side workflow.
+Click "Export 3D surface from volume rendering..." and assign a test save location favoring OBJ format.
+Verify progress bar fills naturally without blocking the main GUI frame.
+Observe output directory contains standard files (.obj, .mtl, .png atlas).
+Open mesh.obj inside MeshLab / Blender verifying dynamic color patterns fully mapped uniformly across mesh triangles.
+Repeat workflow but explicitly define VRML output format. Open rendered VRML inside strict clients like FreeWRL to ensure valid parsing structure parsing completion.
+Screen.Recording.2026-03-25.153154.mp4
+Resources & Related
+Discussion Thread: Looking for suggestion on surface texture integration for triangular meshes #1255
+Core Implementation Source: medical_triangle_texture GitHub Repo
+GSoC 2026 Assignment Focus: Surface Texture Export
+Note: Surface texture raytracing algorithms are heavily parallel-dependent . Average executions will scale natively with defined texture_dim grid sizes ( computationally reasonable 5000x5000). If no custom volumetric layout is assigned initially, execution strictly falls back implicitly prioritizing conventional generic HotMetal mappings.
+surface texture flow creation
+cd27132
+Kaipapurandeswarreddy
+force-pushed
+the
+surface-textures
+branch
+4 times, most recently
+from
+25bedf8 to
+e8fe2ca
+Compare
+March 25, 2026 11:12
+Kaipapurandeswarreddy
+commented
+Mar 25, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Hi @paulojamorim, @tfmoraes,
+I have created a PR implementing the surface texture export workflow based on your guidance. The full pipeline from volume rendering to textured mesh export (OBJ/VRML) is now integrated into InVesalius.
+Note:
+The current surface texture output is not final output need to work on optimization and texture quality
+The overall pipeline and data flow are working correctly. At this stage, the core functionality is complete, though some texture quality refinements are still needed. I will continue working on improving the visual quality and robustness.
+I would really appreciate your feedback and suggestions on the current implementation so I can refine it further in the right direction.
+Thank you!
+paulojamorim
+commented
+Mar 25, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Hi @Kaipapurandeswarreddy
+Did you commit all the files to the repository? Here, when I click to export the file and choose the directory, nothing happens.
+Add surface texture export pipeline with obj/vrml
+dacfdae
+Kaipapurandeswarreddy
+force-pushed
+the
+surface-textures
+branch
+from
+e8fe2ca to
+dacfdae
+Compare
+March 25, 2026 14:30
+Kaipapurandeswarreddy
+commented
+Mar 25, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+Hi @Kaipapurandeswarreddy
+Did you commit all the files to the repository? Here, when I click to export the file and choose the directory, nothing happens.
+Hi @paulojamorim, Sorry for the issue
+I found the issue.
+It was caused by a side-effect import that was removed by the ruff formatter. The module "surface_texture.py" registers its PubSub listeners on import, so removing the import prevented the export event from being handled.
+I have restored the import and added a linter suppression to prevent it from being removed again:
+import invesalius.data.surface_texture # noqa: F401
+The export workflow is now working correctly again on my side. I’ve updated the PR could you please try again?
+Thank you!
+Additionally, I would like to mention that while VRML export is supported, it may not work reliably for very large meshes (e.g., millions of faces). This is due to limitations of the VRML format and some viewers when handling large array-based geometry.
+In my testing, OBJ export works consistently for large datasets since it streams geometry more efficiently.
+So currently:
+OBJ is recommended for large medical volumes
+VRML works better for smaller meshes
+I will continue to explore possible improvements or safeguards ( warnings or decimation) for VRML export.
+paulojamorim
+commented
+Mar 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+@Kaipapurandeswarreddy @tfmoraes
+I think the ideal approach would be to use transfer functions to “segment” the volume and then use this volume to generate the surface when the user clicks the option to export the surface with texture. This way, the user wouldn’t need to explicitly create the surface. The surface would have a better match with the texture.
+It’s just an idea. I’m not sure how well it would work in practice.
+Kaipapurandeswarreddy
+commented
+Mar 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+@Kaipapurandeswarreddy @tfmoraes
+I think the ideal approach would be to use transfer functions to “segment” the volume and then use this volume to generate the surface when the user clicks the option to export the surface with texture. This way, the user wouldn’t need to explicitly create the surface. The surface would have a better match with the texture.
+It’s just an idea. I’m not sure how well it would work in practice.
+Hi @paulojamorim,
+Thank you for this insight! I understand the idea:
+Instead of using a pre-existing surface from a mask, we would:
+Use the transfer function opacity threshold to automatically extract an isosurface from the volume (similar to marching cubes, but driven by the transfer function rather than a manual mask)
+Generate texture on that auto-extracted surface
+This would ensure strong alignment between the rendered volume and the exported textured surface.
+While thinking about how this could be implemented, a couple of considerations came to mind:
+Multiple opacity peaks
+Volume rendering presets can contain multiple opacity peaks (example: highlighting both skin and bone). Since standard isosurface extraction methods typically rely on a single threshold, handling multiple density ranges consistently may require additional logic.
+Performance considerations
+Extracting a high-resolution surface at export time could introduce additional processing overhead, especially for large datasets.
+I think this is a strong approach, and I would like to explore it further to understand how best to implement it.
+It would also be great to hear @tfmoraes thoughts on this approach.
+Thank you!
+paulojamorim
+commented
+Mar 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Yes, instead of using a mask, I would use the transfer function to “remove” or “add” tissues. We could use the same surface generation methods, instead of taking a volume derived from a mask as input, it would use this other volume segmented through the transfer function.
+I understand that some inconsistencies may occur, but it would be necessary to run tests to verify whether this approach is feasible.
+Kaipapurandeswarreddy
+commented
+Mar 27, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Hi @paulojamorim,
+Thank you, that makes sense. I will run some tests on this approach and share the results soon.
+Thanks again for the great idea!
+Kaipapurandeswarreddy
+commented
+Mar 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+Hi @paulojamorim,
+Following your suggestion, I implemented an alternative Pipeline 2 approach based on transfer-function-driven volume segmentation instead of using a pre-existing mask.
+I ran some initial experiments and wanted to share the progress:
+Pipeline 2 (transfer-function-based) — significantly richer detail from volumetric sampling, but currently introduces noise and artifacts
+The new approach seems promising in terms of capturing internal anatomical structures, and I am currently working on refining it to improve stability and reduce cross-tissue noise.
+Thank you for the great idea
+paulojamorim
+commented
+Mar 28, 2026
+Copy link
+Copy Markdown
+Collaborator
+Hi @Kaipapurandeswarreddy
+Very good!
+The exported mesh is inverted, try applying this code to the volume before generating the mesh. The texture might fit better then.
+```
+    flip = vtkImageFlip()
+    flip.SetInputData(image)
+    flip.SetFilteredAxis(1)
+    flip.FlipAboutOriginOn()
+    flip.ReleaseDataFlagOn()
+    flip.Update()
+```
+Kaipapurandeswarreddy
+commented
+Mar 28, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Hi @paulojamorim,
+It was just an old code line issue I had removed it, and now it’s working correctly.
+Thank you! I applied the flip before mesh generation and the alignment looks better now.
+I’ll continue refining the texture quality and will share the results soon.
+Thanks again!
+paulojamorim
+commented
+Mar 29, 2026
+Copy link
+Copy Markdown
+Collaborator
+Hi @Kaipapurandeswarreddy
+Did you update all the files? When I click on “Export 3D surface from …”, the message is still shown: "You need to create a surface and make it visible before exporting it."
+Kaipapurandeswarreddy
+commented
+Mar 29, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Hi @Kaipapurandeswarreddy
+Did you update all the files? When I click on “Export 3D surface from …”, the message is still shown: "You need to create a surface and make it visible before exporting it."
+Hi @paulojamorim,
+Thanks for checking. The latest changes for the new pipeline are not pushed yet I’m still working on optimizing it and improving the visual quality.
+I’ll update the PR once it’s in a stable state and ready for testing.
+Sorry for not clearly mentioning this earlier.
+Thank you!
+Kaipapurandeswarreddy
+added 3 commits
+April 23, 2026 17:36
+Pipeline 2: transfer-function-based approach
+6f83427
+ruff formatting
+d98cf20
+fix: pre-commit fixes
+6fedac4
+Kaipapurandeswarreddy
+commented
+Apr 23, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+Hi @paulojamorim
+I have updated the PR with the Pipeline 2 implementation (transfer-function–driven approach).
+Its inital progress
+Looking forward to your feedback to refine the output quality and any further improvements
+Testing Guidelines Pipeline 2 (Transfer-function–driven approach):
+Build Instructions:
+Since this feature relies on Rust backend routines, first compile the native module:
+cd invesalius_rs
+maturin develop --release
+Manual Execution Steps:
+Launch application using: python app.py
+Load a standard DICOM dataset
+Enable Volume Rendering (no need to create surface manually)
+Adjust VR preset
+Navigate to Export tab
+Click "Export 3D surface from volume rendering..."
+Choose save location and select OBJ or VRML format
+Wait for progress dialog to complete
+Verification:
+Output should contain:
+OBJ: .obj, .mtl, .png
+Key Difference (Pipeline 2):
+No manual mask or surface creation required
+Surface is automatically extracted from VR transfer function
+Texture matches VR appearance directly
+Kaipapurandeswarreddy
+commented
+Apr 27, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Hi @paulojamorim,
+Just a gentle follow-up on the surface texture PR. The Pipeline 2 update is pushed.
+Whenever you have time, I’d appreciate your review.
+Thank you!
+paulojamorim
+commented
+Apr 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Hi @Kaipapurandeswarreddy
+Thanks for the improvements. There are still a few issues to be resolved:
+1. The first time the export feature is used, the progress bar window is not rendered correctly, at least on Ubuntu.
+2. Use the same pattern (size, font etc.) as the other progress windows. Do not use bold font.
+3. Presets that do not have a CLUT, such as Airways, do not produce the correct texture. See the input and output.
+```
+2026-04-27 14:24:26,771 - INFO - Extracted isovalues from VR preset: [-621.8283902062831]
+2026-04-27 14:24:26,772 - INFO - Opacity curve: 4 points
+2026-04-27 14:24:32,346 - INFO - Auto-generated surface: 483453 vertices, 956308 faces
+2026-04-27 14:24:32,371 - WARNING - CLUT file not found: /invesalius3/presets/raycasting/color_list/16-bit CLUT.plist. Using grayscale.
+```
+4. It seems that when there is any type of transparency (even minimal) in the rendering, that part is not generated in the surface. See the input and output.
+Always keep the branch up to date with master.
+Kaipapurandeswarreddy
+commented
+Apr 27, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Hi @paulojamorim,
+Thank you for the detailed review and testing.
+Thanks for your guidance it keeps me motivated.
+I’ll push improvements and share updates soon.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

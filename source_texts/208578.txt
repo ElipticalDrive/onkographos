@@ -1,0 +1,146 @@
+Isaac for Healthcare sensor simulation. Contribute to isaac-for-healthcare/i4h-sensor-simulation development by creating an account on GitHub.
+
+fix(fluorosim): apply post-processing VJP by chrisvoncsefalvay · Pull Request #69 · isaac-for-healthcare/i4h-sensor-simulation · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+chrisvoncsefalvay
+commented
+Aug 14, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Summary
+render_with_gradients() returned the configured display image but differentiated a different quantity. Its forward result had already been min-max normalised and inverted in NumPy, while grad_output went straight to the Slang backward kernel for raw Beer-Lambert intensity. Under the defaults, that makes the pose gradient point uphill.
+This patch applies the exact vector-Jacobian product of the display transform before uploading grad_output. render(), render_with_gradients(), SlangDiffDRRFunction and TorchSlangDiffDRR retain their existing processed-image outputs. A keyword-only raw=True path exposes raw intensity and raw-intensity gradients explicitly for callers that need them.
+The boundary repair
+For a raw image $r$, let
+$$
+\begin{aligned}
+a &= \min_i r_i, \\
+b &= \max_i r_i, \\
+d &= b-a+\varepsilon, \\
+z_i &= \frac{r_i-a}{d}.
+\end{aligned}
+$$
+Inversion first maps the upstream gradient $g$ to $h=-g$. Without inversion, $h=g$. Let $m_a$ and $m_b$ be unit-mass masks over the pixels tied at the minimum and maximum respectively. The exact normalisation VJP is
+$$
+\frac{\partial L}{\partial r} = \frac{h}{d} + m_a\left(-\frac{\mathbf{1}^{\mathsf T}h}{d} + \frac{h^{\mathsf T}(r-a\mathbf{1})}{d^2} \right) - m_b\frac{h^{\mathsf T}(r-a\mathbf{1})}{d^2}
+$$
+This includes the direct $h/d$ term and the derivatives through both extrema. Sharing the extremal terms through $m_a$ and $m_b$ matches torch.amin and torch.amax rather than choosing an arbitrary first pixel.
+Moving the display transform into TorchSlangDiffDRR would fix the module path, but SlangDiffDRRFunction is exported and documented as returning the processed image, while the standalone render_with_gradients() API would remain wrong. Repairing the VJP at the shared renderer boundary fixes both paths without changing their public outputs.
+The raw option defines both contracts explicitly:
+Call
+Default
+raw=True
+render()
+processed image
+raw Beer-Lambert intensity
+render_with_gradients()
+processed image and gradients with respect to it
+raw image and raw-image gradients
+GPU validation
+The end-to-end gradient check passes through the live Slang CUDA backend (validation env: NVIDIA GeForce RTX 3090, using Python 3.12.3 and slangpy 0.43.1 under WSL). The integration run uses the SHA256-pinned 3D Slicer CTChest sample, resampled to 2.5 mm isotropic spacing and converted from HU to linear attenuation with VolumePreprocessor. The PA-oriented volume passed to Slang is 156 x 139 x 156.
+The current pose is zero. The target is $\theta^\star=(7,-5,9)^\circ$ and $t^\star=(14,-10,8),\mathrm{mm}$, matching the 200-step reproduction. The live diagnostic uses a 128 x 128 detector, 6.0 mm pixel spacing, a 2.5 mm march step and central differences at $2\times10^{-3},\mathrm{rad}$ and $0.2,\mathrm{mm}$.
+Display processing
+Corrected cosine
+Pre-fix cosine
+Corrected sign agreement
+Pre-fix sign agreement
+normalise and invert
++0.985298
+-0.987843
+5/6
+0/6
+invert only
++0.990983
+-0.990983
+6/6
+0/6
+These are the unscaled six-component cosines used by the issue reproducer. The gradient figure also reports a unit-balanced cosine, with rotation components multiplied by $10^{-2}$ so that translation remains visible. The diagnostic records the exact gradients, CT provenance, hashes, configuration, device and software versions in JSON and NPZ, alongside PNG and PDF figures for the pose-gradient and forward-image checks.
+The full 200-step live-CUDA run separates the registration trajectories by more than seven orders of magnitude at the endpoint:
+Gradient boundary
+Final MSE
+Rotation error
+Translation error
+Image MAE
+pre-fix boundary, emulated
+3.1993e-1
+117.239 deg
+141.454 mm
+4.7666e-1
+corrected VJP
+1.2881e-8
+0.000919 deg
+0.000488 mm
+`5.7466e-6
+Fixes #68 (see for more details).
+fix(fluorosim): apply post-processing VJP
+…
+301bbe2
+```
+Map processed-image upstream gradients through the configured normalisation and inversion before Slang autodiff.
+
+Preserve default processed-image outputs and expose raw image semantics explicitly through the keyword-only raw option.
+```
+greptile-apps
+Bot
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Contributor
+Greptile Summary
+The PR repairs the gradient boundary between display-processed DRR images and the raw Beer–Lambert intensity differentiated by Slang.
+Extracts shared normalization and inversion post-processing.
+Applies the corresponding vector-Jacobian product before the Slang backward dispatch.
+Adds keyword-only raw output and raw-gradient semantics to the renderer methods.
+Validates explicitly supplied upstream-gradient shapes.
+Confidence Score: 5/5
+The PR appears safe to merge, with no concrete changed-code defect identified.
+The renderer’s processed forward output and backward gradient interpretation are now consistent, existing wrapper calls retain processed-image semantics, and the new raw option does not disrupt current positional callers.
+Important Files Changed
+Filename
+Overview
+fluoro-simulator/fluorosim/rendering/diffdrr_slang_renderer.py
+Centralizes display processing, maps processed-image gradients to raw-intensity gradients before Slang backpropagation, and introduces an explicit raw renderer path without changing wrapper defaults.
+Flowchart
+```
+%%{init: {'theme': 'neutral'}}%%
+flowchart LR
+    R[Raw Beer-Lambert image] --> P[Normalize and optionally invert]
+    P --> O[Returned display image]
+    G[Upstream display-image gradient] --> V[Post-processing VJP]
+    R --> V
+    V --> B[Slang backward kernel]
+    B --> Q[Pose gradients]
+    R -->|raw=True| X[Returned raw image]
+    G -->|raw=True| B
+```
+Loading
+Reviews (1): Last reviewed commit: "fix(fluorosim): apply post-processing VJ..." | Re-trigger Greptile
+chrisvoncsefalvay
+commented
+Aug 15, 2026
+Copy link
+Copy Markdown
+Author
+BTW, greptile caught this: #53 (comment) I was curious to see how this passed autoreview, and found it might have slipped through resolutions.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

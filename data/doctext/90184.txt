@@ -1,0 +1,208 @@
+Original post on reddit: https://old.reddit.com/r/VoxelGameDev/comments/9yu8qy/palettebased_compression_for_chunked_discrete/
+Disclaimer:
+This is the very first time I am writing an article about anything at all, and with a rather large amount of text to boot. The writing may not be coherent in some places, so if you find any mistakes (grammar, code/logic, etc.) or have a suggestion to improve it, throw it right in my face! I need the learning experience... ;D
+This also happens to be my first post here, so hello /r/VoxelGameDev!
+Palette-based compression for chunked discrete voxel data.
+With the release of Minecraft 1.13, Mojang added lossless compression for voxel/block data to the game, based upon the basic concept of color palettes (think GIF's!).
+This 'new' type of compression has numerous advantages...
+Massively reducing memory footprint of blocks as a whole:
+With this new system in place, a single block ideally takes up one single bit of memory. The common case is three to four bits. This leads to less RAM usage and faster transmission of block groups (chunks) across network connections.
+Practically infinite block types & states:
+As long as not every single block in a block group is completely different from one another (maximum randomness), the game can have as many types of blocks and their possible states as one wants (several tens of thousands).
+Overlapping block states / arbitrary data layers:
+This system makes it viable (performance and memory-wise) to overlay multiple layers of block-data over one another. The best use-case being separating solids and fluids into their own layers, thus allowing fluids to actually flow 'into' other blocks.
+There are probably more things that are possible with this new system (and maybe some things are made impossible?)... but these three points should be enough to make one ask "how does it work?"...
+How does it work?
+To make this work, it is necessary to separate block groups/chunks from their actual storage of block data. Doing so results in a new structure henceforth called BlockStorage.
+The BlockStorage data-structure is basically a GIF-Image, but instead of storing RGB-colors in the palette, we store block types & states in it!
+At its simplest, it is a combination of a buffer holding variable-bit-length indices, and a palette (array) into which these indices point, whose entries hold the actual block type & state data, including a reference counter, to track how often the block type is being used.
+The magic of this technique is, that the less types of blocks are in a certain area, the less memory that area actually needs, both at runtime and when serialized. It is important to remember that a world of discrete voxels (eg: Minecraft), generally consists of large amounts of air and stone, with a few blocks mixed in; these regions thus only need one or two bits for every block stored. They are balanced out by regions of 'high entropy', like forests of any kind, player-built structures and overall the 'surface' of the world.
+Below is a semi-complete implementation of BlockStorage, expressed in java-ish pseudocode:
+```
+// a group of blocks
+class Chunk {
+  public static final int CHUNK_SIZE = ...;
+  private BlockStorage storage = new BlockStorage(CHUNK_SIZE pow 3);
+
+  public void setBlock(x, y, z, BlockType type) {
+     int index = /* turn x/y/z into a index */;
+     storage.setBlock(index, type);
+  }
+
+  public BlockType getBlock(x, y, z) {
+     int index = /* turn x/y/z into a index */;
+     return storage.getBlock(index);
+  }
+}
+
+// the actual storage for blocks
+class BlockStorage {
+  private final int size;
+  private BitBuffer data;
+  private PaletteEntry[] palette;
+  private int paletteCount;
+  private int indicesLength;
+
+  public BlockStorage(int size) {
+          this.size = size;
+          this.indicesLength = 1;
+          this.paletteCount = 0;
+          this.palette = new PalleteEntry[2 pow indicesLength];
+          this.data = new BitBuffer(size * indicesLength); // the length is in bits, not bytes!
+  }
+
+  public void setBlock(index, type) {
+    int paletteIndex = data.get(index * indicesLength, indicesLength);
+    PaletteEntry current = palette[paletteIndex];
+
+    // Whatever block is there will cease to exist in but a moment...
+    current.refcount -= 1;
+
+    // The following steps/choices *must* be ordered like they are.
+
+    // --- Is the block-type already in the palette?
+    int replace = palette.indexOf((entry) -> {entry.type.equals(type)});
+    if(replace != -1) {
+      // YES: Use the existing palette entry.
+      data.set(index * indicesLength, indicesLength, replace);
+      palette[replace].refcount += 1;
+      return;
+    }
+
+    // --- Can we overwrite the current palette entry?
+    if(current.refcount == 0) {
+      // YES, we can!
+      current.type = type;
+      current.refcount = 1;
+      return;
+    }
+
+    // --- A new palette entry is needed!
+
+    // Get the first free palette entry, possibly growing the palette!
+    int newEntry = newPaletteEntry();
+
+    palette[newEntry] = new PaletteEntry(1, type);
+    data.set(index * indicesLength, indicesLength, newEntry);
+    paletteCount += 1;
+  }
+
+  public BlockType getBlock(index) {
+    int paletteIndex = data.get(index * indicesLength, indicesLength);
+    return palette[paletteIndex].type;
+  }
+
+  private int newPaletteEntry() {
+     int firstFree = palette.indexOf((entry) -> {entry == null || entry.refcount == 0});
+
+     if(firstFree != -1) {
+       return firstFree;
+     }
+
+     // No free entry?
+     // Grow the palette, and thus the BitBuffer
+     growPalette();
+
+     // Just try again now!
+     return newPaletteEntry();
+  }
+
+  private void growPalette() {
+    // decode the indices
+    int[] indices = new int[size];
+    for(int i = 0; i < indices.length; i++) {
+      indices[i] = data.get(i * indicesLength, indicesLength);
+    }
+
+    // Create new palette, doubling it in size
+    indicesLength = indicesLength << 1;
+    PaletteEntry[] newPalette = new PaletteEntry[2 pow indicesLength];
+    System.arrayCopy(palette, 0, newPalette, 0, paletteCount);
+    palette = newPalette;
+
+    // Allocate new BitBuffer
+    data = new BitBuffer(size * indicesLength); // the length is in bits, not bytes!
+
+    // Encode the indices
+    for(int i = 0; i < indices.length; i++) {
+      data.set(i * indicesLength, indicesLength, indices[i]);
+    }
+  }
+
+  // Shrink the palette (and thus the BitBuffer) every now and then.
+  // You may need to apply heuristics to determine when to do this.
+  public void fitPalette() {
+    // Remove old entries...
+    for(int i = 0; i < palette.length; i++) {
+      if(palette[i].refcount == 0) {
+        palette[i] = null;
+        paletteCount -= 1;
+      }
+    }
+
+    // Is the palette less than half of its closest power-of-two?
+    if(paletteCount > powerOfTwo(paletteCount)/2) {
+      // NO: The palette cannot be shrunk!
+      return;
+    }
+
+    // decode all indices
+    int[] indices = new int[size];
+    for(int i = 0; i < indices.length; i++) {
+      indices[i] = data.get(i * indicesLength, indicesLength);
+    }
+
+    // Create new palette, halfing it in size
+    indicesLength = indicesLength >> 1;
+    PaletteEntry[] newPalette = new PaletteEntry[2 pow indicesLength];
+
+    // We gotta compress the palette entries!
+    int paletteCounter = 0;
+    for(int pi = 0; pi < palette.length; pi++, paletteCounter++) {
+      PaletteEntry entry = newPalette[paletteCounter] = palette[pi];
+
+      // Re-encode the indices (find and replace; with limit)
+      for(int di = 0, fc = 0; di < indices.length && fc < entry.refcount; di++) {
+        if(pi == indices[di]) {
+          indices[di] = paletteCounter;
+          fc += 1;
+        }
+      }
+    }
+
+    // Allocate new BitBuffer
+    data = new BitBuffer(size * indicesLength); // the length is in bits, not bytes!
+
+    // Encode the indices
+    for(int i = 0; i < indices.length; i++) {
+      data.set(i * indicesLength, indicesLength, indices[i]);
+    }
+  }
+}
+
+// Ideally, this would be a struct.
+class PaletteEntry {
+  public int refcount = 0;
+  public BlockType type;
+}
+```
+Notes:
+The BitBuffer-Structure represents a memory region (array of bytes/ints/longs), wherein we can set and get arbitrary ranges/slices of bits, by means of an index pointing to bits in memory and a length of the slice (in bits) we are accessing.
+```
+interface BitBuffer {
+  void set(int bitIndex, int bitLength, int bits);
+  int get(int bitIndex, int bitLength);
+}
+```
+The 'pow' operator is, as one might guess, a operator that takes it's left operand to the power of it's right operand (Math.pow(left, right)).
+The palette naturally grows/shrinks exponentially in powers of two, so if one is adding or removing a lot of new block types, time is not needlessly wasted reallocating memory.
+The operation that is done the most is reading blocks, due to things like rendering, lighting, collisions and effect calculations; as such the reading of blocks must happen in O(1)-time. Writing blocks in a Minecraft-like game generally happens at a low frequency, with there sometimes being bursts of massive changes (explosions, world-edit, quarries, flooding, etc. etc.).
+Additional things that can be done to increase performance and reduce memory usage:
+Use value-types or structs for the palette entries (highly recommended, if not outright required).
+Use area-allocation for the BitBuffer and palette (JVM and CLR will be mostly fine without it).
+Use union/enum data-types, to encode the state where there is only one type of block in the palette.
+Use palette-compression with Run-Length-Encoding (as long as the palette is small enough, that is).
+Things one should avoid doing:
+By making BlockStorage too big, performance will actually be reduced at the cost of more memory usage. That, of course, is much worse than if one were just using plain-old arrays of shorts/integers. The "too big" limit can be defined as a chunk larger than 32³ or 64³ (haven't done any testing on that yet).
+Using a Dictionary/HashMap structure in place of a plain array for the palette. Searching trough the palette for existing entries is a linear operation over a very small amount of items and a small range of memory. If the palette entries are structs, the time for the search is generally shorter than the calculation of a dictionary index.
+Applying delta-compression is pointless, since the amount of block types perfectly fits the bit-length of the indices, and it would make reading blocks a O(n) operation in the worst case.

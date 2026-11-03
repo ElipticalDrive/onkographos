@@ -1,0 +1,288 @@
+Morrowind Script Extender v2. Contribute to MWSE/MWSE development by creating an account on GitHub.
+
+Accelerate raytests and swept collisions with cached per-mesh triangl… by StormAtronach · Pull Request #748 · MWSE/MWSE · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+StormAtronach
+commented
+Aug 25, 2026
+Copy link
+Copy Markdown
+…e BVHs
+Resubmission of #722 (merged 2026-07-08, reverted in 771f88b), rebased on master with a further hardening pass. The mechanism is unchanged; what changed since the revert is listed at the end.
+What it does
+Gamebryo's raytest (NiTriBasedGeom::FindIntersections) and swept collision leaf (FindCollisionsTriVsABV) test every triangle of every mesh they reach. This caches a small in-tree bounding volume hierarchy per NiTriBasedGeomData (about 250 lines, no dependencies) and runs the engine's own exact tests over only the triangles the query can reach. Results are identical to the exhaustive loop by construction: candidate sets are conservative, candidates are tested in ascending index order, and skinned geometry and meshes under 64 triangles keep the exhaustive path.
+Two related per-frame walk eliminations ride along, both in the collider update path: the per-actor collision probe's Update + UpdateCollisionData pair is skipped when the node's world transform already equals its local pose, and colliders whose collision volume sits on the scene node root only (all actors, per MobileActor::setupCollision) refresh that volume directly instead of walking the subtree.
+Everything is behind one toggle, UsePhysicsOptimizations (MCM "Enable physics optimizations", default on). Off means the vanilla calls, not a degraded custom path.
+Where the time goes
+In dense modded interiors the exhaustive loop is the top engine row in VTune.
+Scene (2026-08-25, rebased build)
+Exhaustive
+BVH (warm)
+Speedup
+The Garden (White Cliffs), dense interior, position 1
+0.858 ms/ray
+0.057 ms/ray
+15.1x
+The Garden, position 2
+0.856 ms/ray
+0.054 ms/ray
+15.9x
+Old Ebonheart exterior, 5 positions
+0.081-0.118 ms/ray
+0.052-0.062 ms/ray
+1.3x-2.2x
+Every run: 2000 rays, findAll, identical hit counts and per-hit results on vs off. The exterior floor (~0.05 ms/ray) is scene-graph descent and bound tests, not triangle loops; the BVH only removes the triangle-loop share.
+Verification
+Ray path: in-game A/B harness casts 2000 rays (fibonacci sphere, findAll, accurateSkinned = true) with the toggle off, on-cold, and on-warm, and compares every hit of every ray for identical object, distance, and intersection point. All runs pass with zero mismatches, including with actors moving between passes.
+Collision path: identical-by-construction (candidate set is a superset; the engine's FindIntersectBVGeom and collision callbacks run unchanged per candidate) plus gameplay; VTune shows CollideBoxTri down ~57% and the collider update walk from ~3x UpdateControllers to negligible.
+Debug builds run a bounded self-check on the first 4096 BVH-backed raytests that asserts every exhaustive-loop hit is in the candidate set.
+mwse.getPhysicsOptimizationStats() reports cache entries, bytes, builds, and evictions for measuring memory on a real load order.
+Changes since #722
+Cache entries are released by the geometry data destructor: NiTriBasedGeomData::~NiTriBasedGeomData (an 11-byte body every subclass destructor chains through) is reimplemented as TriBasedGeometryData::dtor. The previous pointer-plus-content validation and the 4096-entry wholesale clear are gone; a recycled address can never match an old tree, and memory is bounded by the live meshes.
+Ray queries are clipped by the tree root instead of the model bound sphere, so a stale or zero model bound cannot drop hits.
+One tree per mesh over the full triangle list; the ray query filters to the active triangle count afterwards, so the two query kinds cannot rebuild over each other.
+Engine calls moved behind class wrappers per AGENTS.md (BoundingVolume::updateWorldData/findIntersectGeom, AVObject::runCollisionCallbacks/updateCollisionData/updateWorldCollisionVolume, Node::updateCollisionData/updateForCollisionProbe, CollisionGroup::updateWorldData); PatchUtil.cpp holds only the install lines. CollisionGroup::Intersect is hoisted to NI::CollisionIntersect (alias kept) so AVObject can name it.
+TriangleBVH extracted to SharedSE/NITriangleBVH.{h,cpp}.
+Box ABV bounds use the verified NiBoxBV basis convention (axes as rows) instead of a row/column hedge.
+Collider tracking is evicted when the engine removes a collider (RemoveCollider/RemoveAll call sites routed through the wrappers) instead of relying on a periodic rescan alone; rescans are counted in walks rather than GetTickCount; the probe skip also requires the parent to be absent or identity.
+Debug-only candidate self-check and mwse.getPhysicsOptimizationStats() (autocomplete + docs regenerated).
+Accelerate raytests and swept collisions with cached per-mesh triangl…
+…
+2aec051
+```
+…e BVHs
+
+Resubmission of MWSE#722 (reverted in 771f88b), rebased on master with a
+further hardening pass.
+
+Caches a small in-tree bounding volume hierarchy per NiTriBasedGeomData and
+runs the engine's exact triangle tests over the candidates only, in ascending
+index order, so raytest and swept-collision results are identical to the
+exhaustive loop. Skinned geometry and meshes under 64 triangles keep the
+exhaustive path. Also skips the per-actor collision probe's redundant
+Update/UpdateCollisionData pair and the subtree walk for colliders whose
+volume sits on the root only. One toggle, UsePhysicsOptimizations
+(default on), falls back to the vanilla calls.
+
+Since MWSE#722: cache entries are released by a reimplemented
+NiTriBasedGeomData destructor instead of pointer/content validation and a
+wholesale clear; ray queries are clipped by the tree root, not the model
+bound; one tree per mesh over the full triangle list; engine calls are
+wrapped on their NI classes with PatchUtil holding only install lines;
+TriangleBVH extracted to its own file; NiBoxBV basis convention verified;
+collider tracking is evicted through the RemoveCollider/RemoveAll wrappers;
+Debug builds self-check candidate sets; mwse.getPhysicsOptimizationStats()
+exposes cache counters.
+
+Verified in-game: 2000-ray findAll A/B at 8 positions, identical hits on
+vs off in every run; 15x warm in a dense interior, 1.3-2.2x in exteriors.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+C3pa
+reviewed
+Aug 26, 2026
+View reviewed changes
+Comment thread
+autocomplete/definitions/global/mwse/getPhysicsOptimizationStats.lua
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+SharedSE/NINode.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+SharedSE/NITriangleBVH.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+SharedSE/NITriangleBVH.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+SharedSE/NITriangleBVH.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+SharedSE/NITriBasedGeometry.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+SharedSE/NITriBasedGeometry.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+SharedSE/NITriBasedGeometry.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+SharedSE/NINode.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+SharedSE/NIBound.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Address C3pa's review of PR MWSE#748
+…
+edf9787
+```
+ 1. static_assert(sizeof(Point3) == 12) in NITriangleBVH.cpp
+    Dropped. NIPoint3.h already asserts the size.
+ 2. buildCandidateCacheEntry helper
+    Inlined into getUsableCandidateCacheEntry (single call site).
+ 3. Point3(0, 0, 0) in NINode.cpp isIdentity
+    Moot: the helper is gone (see 10).
+ 4. Magic 1.0f sweep margin in findCollisionsTriVsABV
+    Named sweepPadding, with a comment on what it absorbs.
+ 5. Per-component min/max in findCollisionsTriVsABV corner loop
+    Replaced by BoundingBox::merge(Point3); firstCorner flag removed.
+ 6. Per-component min/max in BoundingVolume::computeBoundingBox (union)
+    Replaced by BoundingBox::merge(BoundingBox).
+ 7. "Reimplements NiNode::UpdateCollisionData" comment in NINode.h
+    Dropped.
+ 8. "Non-deleting destructor" comment in NITriBasedGeometryData.h
+    Dropped, along with the identical one in NIGeometryData.h.
+ 9. char bCalcNormals in findCollisionsTriVsABV
+    Now bool calculateNormals. All three hooked engine call sites
+    push a literal 1 into a 4-byte slot, so the change is ABI-safe.
+10. Transform::IDENTITY instead of a local isIdentity()
+    Added Transform::operator==/!= and Transform::IDENTITY. IDENTITY
+    is built from literals so static initialization does not call
+    the engine or depend on statics in other translation units.
+    operator== compares scale, translation, rotation in that order
+    so the engine testEqual call stays last.
+11. Use NI::BoundingBox instead of a private AABB in TriangleBVH
+    Done. Added Point3::operator[] (inline) and BoundingBox::merge
+    (box and point overloads). Node size is unchanged at 32 bytes.
+12. BoundingBox::contains for the box overlap test
+    Added as BoundingBox::intersects (the test at that line is
+    box-vs-box overlap, not point containment). Written as the
+    negated separation test so NaN stays conservative; inline
+    because it sits on the BVH query hot path.
+13. roundingPadding taking const float* arguments
+    Now takes const BoundingBox&.
+14. Should findCollisionsTriVsABV return bool?
+    Kept int. The engine returns the value in the full register
+    (xor eax,eax at 0x6f12fd, mov eax,1 at 0x6f1309), the callers in
+    NiTriBasedGeom::FindCollisions pass EAX straight through, and the
+    vtable slot is already declared int findCollisions. A bool
+    replacement would set only AL.
+15. out_candidates -> outCandidates
+    Renamed in TriangleBVH and TriBasedGeometryData.
+16. camelCase arguments on BoundingVolume::findIntersectGeom
+    out_time/out_point/out_normal0/out_normal1 renamed to camelCase.
+    fTime kept: already camelCase, mirrors the engine argument and
+    AVObject::update.
+17. Why a static candidateScratch?
+    Removed. Both candidate getters now return bool and fill a
+    caller-owned vector. findIntersections keeps a file-static
+    scratch beside deformVertices (no per-query allocation);
+    findCollisionsTriVsABV uses a local and drops its defensive copy.
+18. mwse.getPhysicsOptimizationStats as public API
+    Un-documented: autocomplete definition deleted, docs and meta
+    stub restored. The binding stays as a developer tool, like
+    mwse.validateReferenceTracker.
+
+Verification
+
+Release|x86 builds clean; the one warning is the pre-existing C4624
+raised by the static_assert in TES3DataHandler.cpp.
+
+In-game A/B harness on the rebuilt DLL, 2026-08-26: 36 runs of 2000
+rays each (fibonacci sphere, findAll), three passes per run (off,
+on-cold, on-warm), every hit compared for object, distance and
+intersection point. 36/36 identical on vs off, zero mismatches.
+
+  Scene                                 Runs  Off ms/ray   Warm ms/ray  Speedup
+  Balmora, Guild of Mages (interior)       2  0.038-0.040  0.019-0.022  1.9-2.0x
+  Balmora exterior (-3,-2)                 5  0.142-0.180  0.041-0.051  3.1-4.0x
+  The Garden, White Cliffs (interior)      4  1.71-2.58    0.071-0.100  17-36x
+  Old Ebonheart (6/7,-19)                 15  0.077-0.114  0.036-0.072  1.4-2.1x
+  Narsis / Foreign Quarter (5-7,-52)      10  0.094-0.128  0.036-0.064  1.8-2.5x
+
+The on-cold pass (includes BVH builds) landed between off and warm in
+every run. The session ran about 440 s across five cells with actors
+present and exited normally.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+C3pa
+reviewed
+Aug 26, 2026
+View reviewed changes
+Comment thread
+SharedSE/NIBoundingBox.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+SharedSE/NITransform.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+SharedSE/NITransform.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Pruned the comments
+08958ee
+C3pa
+reviewed
+Sep 5, 2026
+View reviewed changes
+Comment thread
+SharedSE/NITriangleBVH.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+StormAtronach
+and others
+added 2 commits
+September 6, 2026 17:40
+Pad BVH node bounds once instead of each triangle box
+…
+b25a1ac
+```
+Traversal only tests node boxes, and buildNode already merges the
+per-triangle boxes into one. Pad the merged box there and leave the
+per-triangle boxes exact. The node's largest coordinate is at least as
+big as any of its triangles', so every node covers what it did before.
+Padding is the same on all axes, so the split axis does not change.
+
+bvhtest: 3/3 runs bit-identical on vs off, The Garden 18.7x and 37.7x
+warm, Charach exterior 1.3x.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+Merge branch 'MWSE:master' into feature/bvh-query-acceleration
+5c4f55c
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

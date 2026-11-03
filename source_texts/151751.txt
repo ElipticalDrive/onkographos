@@ -1,0 +1,536 @@
+Graphics Runner: Volume Rendering 101
+Pages
+Home
+Thursday, January 15, 2009
+Volume Rendering 101
+Pictures above from: http://www.cs.utah.edu/~jmk/simian/
+There is quite a bit of documentation and papers on volume rendering. But there aren't many good tutorials on the subject (that I have seen). So this tutorial will try to teach the basics of volume rendering, more specifically volume ray-casting (or volume ray marching).
+What is volume ray-casting you ask? You didn't? Oh, well I'll tell you anyway. Volume rendering is a method for directly displaying a 3D scalar field without first fitting an intermediate representation to the data, such as triangles. How do we render a volume without geometry? There are two traditional ways of rendering a volume: slice-based rendering and volume ray-casting. This tutorial will be focusing on volume ray-casting. There are many advantages over slice-based rendering that ray-casting provides; such as empty space skipping, projection independence, simple to implement, and single pass.
+Volume ray-casting (also called ray marching) is exactly how it sounds. [edit: volume ray-casting is not the same as ray-casting ala Doom or Nick's tutorials] Rays are cast through the volume and is sample along equally spaced intervals. As the ray is marched through the volume scalar values are mapped to optical properties through the
+use of a transfer function which results in an RGBA color value that includes the corresponding emission and absorption coefficients for the current sample point. This color is then composited by using front-to-back or back-to-front alpha blending.
+This tutorial will focus specifically on how to intersect a ray with the volume and march it through the volume. In another tutorial I will focus on transfer functions and shading.
+First we need to know how to read in the data. The data is simply scalar values (usually integers or floats) stored as slices [x, y, z], where x = width, y = height, and z = depth. Each slice is x units wide and y units high, and the total number of slices is equal to z. A common format for the data is to be stored in 8-bit or 16-bit RAW format. Once we have the data, we need to load it into a volume texture. Here's how we do the whole process:
+```
+//create the scalar volume texturemVolume = new Texture3D(Game.GraphicsDevice, mWidth, mHeight, mDepth, 0,
+                        TextureUsage.Linear, SurfaceFormat.Single);
+
+private void loadRAWFile8(FileStream file)
+{
+    BinaryReader reader = new BinaryReader(file);
+
+    byte[] buffer = new byte[mWidth * mHeight * mDepth];
+    int size = sizeof(byte);
+
+    reader.Read(buffer, 0, size * buffer.Length);
+
+    reader.Close();
+
+    //scale the scalar values to [0, 1]
+    mScalars = new float[buffer.Length];
+    for (int i = 0; i < buffer.Length; i++)
+    {
+        mScalars[i] = (float)buffer[i] / byte.MaxValue;
+    }
+
+    mVolume.SetData(mScalars);
+    mEffect.Parameters["Volume"].SetValue(mVolume);
+}
+```
+In order to render this texture we fit a bounding box or cube, that is from [0,0,0] to [1,1,1] to the volume. And we render the cube and sample the volume texture to render the volume. But we also need a way to find the ray that starts at the eye/camera and intersects the cube.
+We could always calculate the intersection of the ray from the eye to the current pixel position with the cube by performing a ray-cube intersection in the shader. But a better and faster way to do this is to render the positions of the front and back facing triangles of the cube to textures. This easily gives us the starting and end positions of the ray, and in the shader we simply sample the textures to find the sampling ray.
+Here's what the textures look like (Front, Back, Ray Direction):
+And here's the code to render the front and back positions:
+```
+//draw front faces
+//draw the pixel positions to the textureGame.GraphicsDevice.SetRenderTarget(0, mFront);
+Game.GraphicsDevice.Clear(Color.Black);
+
+base.DrawCustomEffect();
+
+Game.GraphicsDevice.SetRenderTarget(0, null);
+//draw back faces
+//draw the pixel positions to the textureGame.GraphicsDevice.SetRenderTarget(0, mBack);
+Game.GraphicsDevice.Clear(Color.Black);
+Game.GraphicsDevice.RenderState.CullMode = CullMode.CullCounterClockwiseFace;
+
+base.DrawCustomEffect();
+
+Game.GraphicsDevice.SetRenderTarget(0, null);
+Game.GraphicsDevice.RenderState.CullMode = CullMode.CullClockwiseFace;
+```
+Now, to perform the actual ray-casting of the volume, we render the front faces of the cube. In the shader we sample the front and back position textures to find the direction (back - front) and starting position (front) of the ray that will sample the volume. The volume is then iteratively sampled by advancing the current sampling position along the ray at equidistant steps. And we use front-to-back compositing to accumulate the pixel color.
+```
+float4 RayCastSimplePS(VertexShaderOutput input) : COLOR0{
+    //calculate projective texture coordinates
+    //used to project the front and back position textures onto the cube
+    float2 texC = input.pos.xy /= input.pos.w;
+    texC.x =  0.5f*texC.x + 0.5f;
+    texC.y = -0.5f*texC.y + 0.5f;
+ 
+    float3 front = tex2D(FrontS, texC).xyz;
+    float3 back = tex2D(BackS, texC).xyz;
+ 
+    float3 dir = normalize(back - front);
+    float4 pos = float4(front, 0);
+ 
+    float4 dst = float4(0, 0, 0, 0);
+    float4 src = 0;
+ 
+    float value = 0;
+ 
+    float3 Step = dir * StepSize;
+ 
+    for(int i = 0; i < Iterations; i++)
+    {
+        pos.w = 0;
+        value = tex3Dlod(VolumeS, pos).r;
+             
+        src = (float4)value;
+        src.a *= .5f; //reduce the alpha to have a more transparent result 
+         
+        //Front to back blending
+        // dst.rgb = dst.rgb + (1 - dst.a) * src.a * src.rgb
+        // dst.a   = dst.a   + (1 - dst.a) * src.a     
+        src.rgb *= src.a;
+        dst = (1.0f - dst.a)*src + dst;     
+     
+        //break from the loop when alpha gets high enough
+        if(dst.a >= .95f)
+            break; 
+     
+        //advance the current position
+        pos.xyz += Step;
+     
+        //break if the position is greater than <1, 1, 1>
+        if(pos.x > 1.0f  pos.y > 1.0f  pos.z > 1.0f)
+            break;
+    }
+ 
+    return dst;
+}
+```
+And here's the result when sampling a foot, teapot with a lobster inside, engine, bonsai tree, ct scan of an aneurysm, skull, and a teddy bear:
+So, not very colorful but pretty cool. When we get into transfer functions we will start shading the volumes. The volumes used here can be found at volvis.org
+Notes:
+Refer to the scene setup region in VolumeRayCasting.cs, Volume.cs, and RayCasting.fx for relevant implementation details.
+Also, a Shader Model 3.0 card (Nvidia 6600GT or higher) is needed to run the sample.
+Posted by
+Kyle Hayward
+at
+10:58 PM
+Labels:
+Volume Ray-Casting,
+Volume Rendering,
+XNA
+57 comments:
+vanbirk
+said...
+Woow, extremely cool.
+Last time I saw similar images it was being done with marching cubes etc., but not as simple and elegant like the algorithm you are using.
+January 16, 2009 at 6:17 AM
+Anonymous
+said...
+Marching cubes is for isosurface extraction, which is required for useful segmentation and registration... a completely different goal then just an alpha blended draw.
+Good stuff though, thanks for posting this!
+January 16, 2009 at 11:48 AM
+Kyle Hayward
+said...
+Isosurface extraction can also be achieved through volume rendering, and can possibly achieve higher quality results than marching cubes because it is not limited to a polygonal mesh.
+January 16, 2009 at 12:13 PM
+Anonymous
+said...
+I've never heard of volume rendering being able to extract a surface? Do you have a link?
+What type of mesh would you like to create that isn't made of polygons?
+January 16, 2009 at 5:03 PM
+Kyle Hayward
+said...
+All marching cubes does is take a certain isovalue from a scalar volume and build a triangular mesh from it.
+Direct volume rendering can achieve the same idea by only focusing on a specific isovalue and throwing away all the other iso values.
+Here's a good example that also includes a deferred rendering approach.
+January 16, 2009 at 6:13 PM
+Charles Humphrey
+said...
+Wow, that all looks lovely!!
+Can you give me any idea of minimum caps, shader model, etc..
+You know me, 3D dev on a shoestring lol..
+January 20, 2009 at 10:32 AM
+Kyle Hayward
+said...
+Hey Charles,
+Sorry, but it needs at least an SM3 card that supports RGBA16F on 2D and 3D textures.
+You could look into slice based rendering if you're interested in the subject. Here's a really good, free slice based renderer w/ source.
+January 20, 2009 at 11:44 AM
+Charles Humphrey
+said...
+Cool, thanks Kyle :) Will take a look.
+January 21, 2009 at 6:07 AM
+Darren
+said...
+Hi Kyle,
+Interesting stuff...do you still have source available to look at? I think the link may be down.
+Thanks,
+Darren
+January 27, 2009 at 4:07 PM
+Kyle Hayward
+said...
+Hi Darren,
+The link seems to be working fine for me and a friend. But here is the link to the file on sky drive and another one to my server; in case one doesn't work.
+Link1
+link2
+I've had one other complaint about this before. Maybe the server was just down? What browser are you using?
+January 27, 2009 at 11:30 PM
+Darren
+said...
+Hi Kyle,
+Thanks, that did the trick. I was using IE. I was able to download the code from your "Volume Rendering 102" code, but it was giving me a page not found where the link was supposed to be on the "101" page. I'm sure it was just some server glitch.
+Anyhow, I've done all of my previous rendering work in C++ and Cg, but at work I develop in C#, which is what makes your work really interesing to me...that and using the Xna framwork. I'm really looking foward to comparing the results!
+Thanks again,
+Darren
+January 30, 2009 at 5:06 PM
+Kyle Hayward
+said...
+No problem. I'll be interested in comparing results too :)
+I'll be releasing another tutorial that involves empty space skipping which will improve performance by a considerable amount.
+January 30, 2009 at 5:15 PM
+Anonymous
+said...
+>> There is quite a bit of documentation and papers on volume rendering. But there aren't many good tutorials on the subject (that I have seen). <<
+You can find a very good docu about gpu-based volume rendering here [1].
+[1] http://wwwcg.in.tum.de/Research/data/vis03-rc.pdf
+February 3, 2009 at 7:10 AM
+Kyle Hayward
+said...
+Thanks for the link!
+February 3, 2009 at 8:56 PM
+MMMovania
+said...
+Hi,
+I m trying to compile the project on visual studio 2005 and i get this error
+/////////////////////////////////
+Building Shaders\RayCasting.fx -> C:\Documents and Settings\mova0002\Desktop\PHD_Stuff\XNA Volume Rendering\VolRayCasting\bin\x86\Debug\Content\Shaders\RayCasting.xnb
+Content\Shaders\RayCasting.fx(151,1): error : Errors compiling C:\Documents and Settings\mova0002\Desktop\PHD_Stuff\XNA Volume Rendering\VolRayCasting\Content\Shaders\RayCasting.fx:
+Content\Shaders\RayCasting.fx(151,1): error : C:\Documents and Settings\mova0002\Desktop\PHD_Stuff\XNA Volume Rendering\VolRayCasting\Content\Shaders\RayCasting.fx(151): error X3000: syntax error: unexpected token 'break'
+Done building project "Content.contentproj" -- FAILED.
+/////////////////////////////////
+February 8, 2009 at 5:36 AM
+Kyle Hayward
+said...
+The project is an XNA 3.0 project which requires VS 2008. So I assume you're trying to rebuild the project in 2005.
+If you look in my original project I had a custom effect compiler which is needed to compile the RayCasting.fx.
+The default fx compiler used by XNA is outdated and won't be able to compile the shader. The effect compiler that I use uses the latest fx compiler in the directx sdk.
+February 8, 2009 at 12:43 PM
+Anonymous
+said...
+HI Kyle,
+I am trying to compile your project on my GeForce FX 7800 GTX and it gives me a compilation error
+/////////////////////////////////
+Error 2 C:\Documents and Settings\Desktop\VolumeRayCasting_101_1\VolumeRayCasting_101\VolumeRayCasting\Content\Shaders\RayCasting.fx(121,12): warning X4121: gradient-based operations must be moved out of flow control to prevent divergence. Performance may improve by using a non-gradient operation
+C:\Documents and Settings\XNA Volume Rendering\VolumeRayCasting_101\VolumeRayCasting_101\VolumeRayCasting\Content\Shaders\RayCasting.fx VolumeRayCasting
+/////////////////////////////////
+How do i solve this?
+February 8, 2009 at 11:45 PM
+MMMovania
+said...
+Hi kyle,
+I have downloaded the latest visual studio version. I get this error now, Note: I have DirectX sdk March 2008 release, should i update to the latest sdk?
+//////////////////////////////
+Error 2 C:\Documents and Settings\KMan\Desktop\VolumeRayCasting_101_1\VolumeRayCasting_101\VolumeRayCasting\Content\Shaders\RayCasting.fx(121,12): warning X4121: gradient-based operations must be moved out of flow control to prevent divergence. Performance may improve by using a non-gradient operation
+C:\Documents and Settings\mova0002\Desktop\PHD_Stuff\XNA Volume Rendering\VolumeRayCasting_101\VolumeRayCasting_101\VolumeRayCasting\Content\Shaders\RayCasting.fx VolumeRayCasting
+//////////////////////////////
+February 8, 2009 at 11:51 PM
+Kyle Hayward
+said...
+Anonymous, Mobeen:
+I actually ran into this myself on an older version of the DirectX SDK (I'm using November 2008). It seems that an older version of the fxc compiler tool returns an error exit code when there is only a warning.
+The latest DirectX SDK (November 2008) should resolve the problem, or you can use the following fix.
+To fix this: in the WindowsEffectCompiler.cs file change,
+if (p.ExitCode != 0 || text.Contains("error"))
+to
+if (text.Contains("error"))
+February 9, 2009 at 12:45 AM
+MMMovania
+said...
+Hi Kyle,
+Thanks for the info. That solved the compilation problem but when i run the application, I only see the bbox. One thing that i have noticed is that as soon as the code comes into the LoadContent function, it echoes
+///////////////////////////
+A first chance exception of type 'Microsoft.Xna.Framework.Content.ContentLoadException' occurred in Microsoft.Xna.Framework.dll
+///////////////////////////
+which suggests that the content is not loaded and thats why i dont see the volume but just the bbox. Any clues why this might be?
+Thanks,
+Mobeen
+February 9, 2009 at 1:53 AM
+MMMovania
+said...
+Hi Kyle,
+If u have not read my last reply forget it. I thought the data files are contained in the contents folder but they arent thats y i m getting the error.
+Thanks for the help again,
+Mobeen
+February 9, 2009 at 1:59 AM
+Kyle Hayward
+said...
+No problem :) Glad it's working. It is a rather complex demo (more so than usual I guess).
+I really should have included a content importer, but I thought that would distract from the actual aim of the tutorial.
+Kyle
+February 9, 2009 at 2:40 AM
+MMMovania
+said...
+Hi Kyle,
+Now there are no compilation errors however I still get an empty bbox without any volume rendering, I have tried to use the render position and raycast direction techniques and they are producing the correct output. For some reason the raycast shader is not running at all?
+February 9, 2009 at 2:43 AM
+Kyle Hayward
+said...
+What kind of video card do you have? I've only been able to test on the Nvidia 8800 series.
+If you have an ATi there might be something in the RayCastPS shader that ATi doesn't like.
+And there aren't any errors loading the teapot.raw and the 3d texture?
+Do you have the d3d debug runtimes enabled? If so are there any errors in the output window in VS?
+February 9, 2009 at 3:02 AM
+MMMovania
+said...
+I have an NVIDIA GeFORCE 7800 GTX card. It supports SM3.
+As for loading teapot.raw and the 3d texture, there are no errors reported.
+For d3d debugging in XNA, i am not aware of . Can u detail this process a bit or pass in some pointers?
+February 9, 2009 at 3:19 AM
+Kyle Hayward
+said...
+I've ran the project with d3d debugging enabled and haven't gotten any errors.
+Shawn gives a good explanation on how to get it working.
+If you have a non express version of Visual Studio you don't need the debug output capture program. You can just go to Project Properties->Debug and select enable unmanaged code debugging.
+Now some help debugging:
+1. Try using SurfaceFormat.HalfSingle for the volume texture.
+1.1. Try putting a break point in loadRAWFile8() where the data is set on the texture. And then in the Locals window, expand the mScalars and see if there is anything in it besides zero (there should be non-zero values in the 4000 and 8000 ranges).
+2. Try just returning the front or back texture in RayCastSimplePS before the loop.
+2.1. If that works, try replacing Iterations with a constant like 100 and see if that works.
+3. Also, remove the texC TEXCOORD from the VertexShaderInput struct as that doesn't need to be there.
+February 9, 2009 at 3:42 AM
+Anonymous
+said...
+Great stuff! Thanks for taking the time to lay all of this out. I am anxious to go through what you have done!!
+Can someone say how to extract the raw.gz volume data? gzip for windows, winzip, winrar, and 7z all fail to extract any foo.raw.gz data... I just want the teapot in a raw format so I can test it out with this tutorial! Surely there must be a way to do this on windows... anyone? :)
+February 10, 2009 at 4:52 AM
+Anonymous
+said...
+Kyle,
+Please disregard my last question about how to extract the .gz files. I am new to this and didn't realize what was happening. IE8 was downloading the file as a .raw.gz but it was extracting the file as it downloaded without renaming. I was trying to gunzip a .raw.gz file that was already decompressed. If I download with firefox I get a small file that is a .raw.gz that extracts. Thanks and sorry for the confusion on my end.
+Can't wait to go through the tutorial! Please disregard this comment as well. Cheers!
+February 10, 2009 at 10:41 AM
+MMMovania
+said...
+Hi Kyle,
+I read Shawns article (it wasn't helpful at all cos the output in the debug windows isn't enough i think there isn't much debugging support for XNA at least thats what i concluded from my search on the topic.
+1) When I try to use the HalfSingle format, an exception is thrown saying its not supported.
+1.1) loadraw8 is called with the data values ranging from 0-255 hence the scalars array contains values between 0 - 1.
+>2. Try just returning the front >or back texture in >RayCastSimplePS
+I tried that but for some reason when I edit the shader file, the result is the same (just blank bbox). As a test i tried to edit the shader file by creating a custom technique that returns a constant color. I then rebuild the whole project again, i even deleted the compiled shader file (xnb) and rebuild but I got an exception in content load sayign that my technique does not exists. I can use the 4 technqiues that u have given. The other three technqiues; the front positions, back positions and the directions are all showing correct results. One thing i really dont understand is why I can't add a new technique.
+>2.1. If that works, try replacing >Iterations with a constant like >100 and see if that works. >3)..
+see the above point, even if i add something in the shader file, it is not compiled.
+One thing I dont understand is the flow of how the fx file is being compiled by your windowsfx compiler? It needs the _fxc.fxo file? how is it generated? I suspect there is something i need to generate this file for the new fx shader I edit? please give details on this as I m new in this area. One more thing, if possible can u please refer me to a good site/book on the fx framework details as discussed in this article?
+Thanks,
+Mobeen
+February 12, 2009 at 12:15 AM
+Kyle Hayward
+said...
+Hi Mobeen,
+The custom effect content processor simply calls the fxc.exe compiler in the DirectX SDK (It looks in the Program Files/ for a DirectX folder and the fxc.exe file). It will generate the .fxo file and the binary data from this file is sent to the content pipeline as a CompiledEffect. So this should work w/out problems if your DirectX SDK is installed in the usual path (C:\Program Files\Microsoft DirectX SDK\...)
+I'm not sure why you're having problems creating a new technique. I can create new techniques without problems. Did you create a new technique and not just a PixelShader function?
+As for the fx framework and shaders, the XNA creators has a few tutorials on shaders.
+Kyle
+February 12, 2009 at 1:42 AM
+MMMovania
+said...
+Hi Kyle,
+Just an update, finally i get the rendering result but the frame rate is awfully low ~10 fps and the rendering result is this
+http://www.geocities.com/mobeen211/teapot.PNG
+for the volume rendering 101 project,
+The problem i have identified is the break statement, replacing it with i=Iterations did the trick for me :)
+NOTE: i had to regenerate the .fxo file again after changing the shader to make it work.
+One more thing, the rendering results that I get (as shown above) on my card are no way near the quality u have shown here. Is it something related to the hardware or are there some nifty tricks that u have applied to the shaders please discuss I get a lot of banding artifacts?
+Thanks for the help,
+Mobeen
+February 12, 2009 at 1:50 AM
+Anonymous
+said...
+hey graphics dude,
+thanks for the sample!
+i want to render an animated pool of something using just perlin noise.
+since only the top layer will show, i'm thinking about doing slice-based rendering, where I "scroll" the slice-to-be-rendered thru the texture.
+let me try it.
+February 15, 2009 at 2:09 AM
+Noha
+said...
+I am a beginner in using directx 9 and i have a task to render a CT volume.
+Woukld you guide me to the suitable technique to render the 3D volume?
+Thanks in advance
+February 15, 2009 at 11:30 AM
+Kyle Hayward
+said...
+Actually you can use the methods I describe in this series.
+You can also use a slice based rendering approach. Or you can use a marching cubes/tetrahedron algorithm to build a mesh from the ct dataset.
+February 17, 2009 at 5:36 PM
+Unknown
+said...
+Hi Kyle
+Nice tutorial but I'm also getting empty box. I have ATI Radeon mobility X1400 that (I think) does support shaders 3.0. Thus I'm a bit stuck.
+btw. I'm also studying at Purdue :)
+April 5, 2009 at 5:43 PM
+Kyle Hayward
+said...
+Hi Mus,
+If you use the RayCastDirection technique do you still get a black volume?
+The black volume indicates to me there is something that the graphics driver doesn't like, and it's probably the for loop.
+Did you try Mobeen's trick a few comments up? Instead of having the break statement, set i to a number larger than the max iterations.
+You can also try using a constant for the number of iterations.
+Also, on my 8800gt the tex*dlod functions were faster than the tex*dgrad functions. But the tex*dgrad functions might work better with ati.
+Are you CS? What year are you? There's a gamedev club in cs (SIGGD) that you might want to join :)
+Kyle
+April 5, 2009 at 8:06 PM
+അപരിചിതന്‍
+said...
+Sir, your blog is awesome,
+Iam a master graudaute student whos is doing an academic project in 3d reconstruction of face,
+My input will be a dataset of slices of CT images.
+Could you please tell me which technique will be suitable for me.
+Now Iam focussing in Marching cubes algorithm,Is this fair enough,
+With Regards,
+Rakesh
+October 5, 2009 at 9:28 AM
+Anonymous
+said...
+Hi Kyle I'm implementing a volume rendering using raycasting, similar to this but the front to back composition its not working for me, i get a black cube can you help me?
+ps: I want to render it in gray scale, and I have render the raystart and raystop, and direction and it seems like yours.
+thank you
+September 23, 2011 at 11:24 AM
+Kyle Hayward
+said...
+Do you have anymore information? Are you rendering your volume with the same process I am (e.g. render front faces, render back faces, do ray-cast pass)?
+September 23, 2011 at 7:42 PM
+Anonymous
+said...
+Kyle thank you for answering, first I render the Front faces I save it as a texture, second I render back faces and save it as a texture, and third I do the raycasting.
+I have check that the textures coordinates of the front and back facing are correct by texturing it to the cube to see the results and the image its like the one at this post, and also I have render the directions and I get the same results.
+in opengl do I have to activate the blend function?
+My raycasting shader(GLSL):
+my 3dtextures are floats and the density value I store it the alpha channel.
+void main()
+{
+vec2 texC = Position.xy / Position.w;
+texC.x = 0.5f*texC.x + 0.5f;
+texC.y = 0.5f*texC.y + 0.5f;
+////////////////
+vec3 rayStart = texture2D(RayStartPoints, texC).xyz;
+vec3 rayStop = texture2D(RayStopPoints, texC).xyz;
+if (rayStart == rayStop)
+{
+FragColor = vec4(1.0);
+gl_FragColor = FragColor;
+return;
+}
+vec3 pos = rayStart;
+vec3 step = normalize(rayStop-rayStart) * stepSize;
+float travel = distance(rayStop, rayStart);
+vec4 value = vec4(0.0);
+vec4 dst = vec4(0.0);
+float scalar;
+for (int i=0; i < numSamples && travel > 0.0; ++i, pos += step, travel -= stepSize)
+{
+//data acces to scalar value 3D volume
+value = texture3D(Density, pos);
+scalar = value.a;
+//aplicar valores
+vec4 src= vec4(scalar);
+/
+src.rgb*=src.a;
+//front to back composition
+dst = (1.0 - dst.a) * src + dst;
+if(dst.a>=0.95)
+break;
+}
+September 24, 2011 at 1:34 PM
+Anonymous
+said...
+Hi Kyle
+I am doing my final year in I.T. Engineering. My project needs some information on volume rendering and the transfer function.
+So please can you help me by giving me an idea where to find this information.
+Thank you
+Pradnya Bhagat
+October 15, 2011 at 4:41 AM
+Anonymous
+said...
+Kyle,
+Is a very good tutorial. I need create a volume from bmp images, it's possible ?
+I am working VS2010 and XNA 4.0, but your example don't compile. Do you have a version compiled in VS2010 ?
+Thank you !
+October 22, 2012 at 9:38 AM
+Unknown
+said...
+hi i found very interesting your article, do you think is possible make a Volume rendering application using only C/C++ and OpenGL?
+Thank
+February 4, 2013 at 4:15 AM
+Kyle Hayward
+said...
+Yeah it's definitely possible. In fact most volume vis applications are made in c++/opengl.
+February 4, 2013 at 9:21 AM
+andrew
+said...
+How can I read volvis dataset to map to my raytraced cube? What I am trying to do is Ray Trace a cube and map the skull dataset to my cube.
+March 1, 2013 at 12:01 PM
+Kyle Hayward
+said...
+I'm not exactly sure what you're asking / trying to accomplish.
+March 3, 2013 at 8:15 PM
+Joel B
+said...
+I have to say, this is some pretty awesome stuff you've been posting (I mean the whole series on volume rendering, not just this post!). Any chance of an XNA 4.0 version? It seems they've ditched the CompiledEffect.
+(I'm doing a Master's and dealing with volumetric scanning of objects, so naturally, I need to be able to render them. :) )
+July 17, 2013 at 6:47 PM
+Kyle Hayward
+said...
+Thanks!
+Unfortunately I haven't dealt with xna in quite a while. So the the likelihood of me updating for xna 4 is not looking good :).
+July 18, 2013 at 9:57 AM
+Joel B
+said...
+Kyle, you might be happy to know that I've got it working on XNA 4.0 now. :) There are still a few small issues with it, but the general process works. If you'd like I can certainly send a copy of the modified source your way. Just let me know. joel.bennett [at] live.ca
+July 22, 2013 at 12:23 PM
+Kyle Hayward
+said...
+Awesome, glad to hear it.
+July 22, 2013 at 5:22 PM
+Joel B
+said...
+Before anyone else asks, here's a link to an XNA 4.0 port of the volume rendering 101 project:
+https://dl.dropboxusercontent.com/u/144587/VolumeRayCasting.zip
+It does have a few issues though. In XNA 4.0, the clamp color texture wrap mode is no longer available, so when looking at the model from certain angles, it looks like it is being mirrored/repeated. The other issue is that linear filtering isn't supported on HalfVector4 surfaces (or any sort of equivalent surface), which means I had to roll it back to use point filtering. Thus, it's a bit uglier, but at least it runs. (Kyle: I'm guessing that's the original reason you used a compiled effect: to compile the shader in such a way to ignore the warning, then import it as a compiled shader into the project so it'd work in XNA. Am I right on that?)
+Eventually I'd like to do a SlimDX/SharpDX port of it to get the original features working, but that's a ways out yet. At least this will work in the mean time. I'll try to keep the public link up as long as I can, but no guarantees.
+August 1, 2013 at 12:29 PM
+Unknown
+said...
+Joel B, would you mind sharing the XNA4 port?
+August 1, 2013 at 5:21 PM
+Kyle Hayward
+said...
+@Joel B
+Yeah, I used a compiled effect because the shader compiler used by xna was really out of date. So I hooked up the shader compiler to use the latest fxc in the d3d libs.
+These issues you mentioned are why I have moved away from xna unfortunately.
+August 2, 2013 at 10:42 AM
+大天使泰瑞尔
+said...
+Your blog is so brilliant.But where is the download link of your sample code?Or are we have to paste your code?
+November 3, 2013 at 10:22 PM
+Kyle Hayward
+said...
+Does the link to the source not work for you?
+November 6, 2013 at 11:02 AM
+Unknown
+said...
+Well, nice work.By the way, have ever wrote the article about the transfer function .... if exists, could you tell me the link, Many thanks.
+December 30, 2014 at 11:36 AM
+Kyle Hayward
+said...
+Please see the next article in the series Volume Rendering 102: Transfer Functions :-).
+January 4, 2015 at 6:15 PM
+Post a Comment
+Newer Post
+Older Post
+Home
+Subscribe to:
+Post Comments (Atom)

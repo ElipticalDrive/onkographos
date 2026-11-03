@@ -1,0 +1,106 @@
+I've been looking at voxel cone traced global illumination for a while as something that I want to implement since it gives a decent approximation of global
+
+Voxel Cone Traced Global Illumination – Leif Node
+DirectX Voxel Cone Traced Global Illumination
+Voxel Cone Traced Global Illumination
+Leif Erkenbrach •May 4, 2015DirectX, Programming, Shading
+I’ve been looking at voxel cone traced global illumination for a while as something that I want to implement since it gives a decent approximation of global illumination in real time for dynamic scenes. In the past month I’ve finally given myself a chance to look at the algorithm more in-depth and try at implementing it.
+Voxel Cone Traced Global Illumination
+Voxel cone traced global illumination allows real-time evaluation of indirect lighting. It works by voxelizing a scene into a structure on the GPU that stores outgoing radiance and occlusion. Then the scene is rendered as normal, but cones are cast through the volume from each fragment to approximate indirect diffuse and specular lighting.
+Voxelization
+The first step of the algorithm is to voxelize the scene. The original implementation builds a sparse octree structure on the GPU. The octree implementation helps reduce memory usage on the GPU significantly so it is possible to voxelize the scene at higher resolution, but traversing the structure is not incredibly fast.
+Instead of using a sparse voxel octree I just used a 3D texture in my implementation to simplify the cone tracing and mip mapping steps.
+The OpenGL Insights chapter about voxelization using the hardware rasterizer has helpful for getting an idea of how to do voxelization. The method for averaging colors on voxels using interlocked operations was useful, but I ran into some problems when using it with DirectX.
+When I’m voxelizing geometry it gets passed through the geometry shader to find the normal of triangle faces and get the dominant axis from that normal to project the triangle onto. Once the triangle is projected onto its dominant axis it gets passed through a pixel shader that writes to the target 3D texture.
+I store the diffuse albedo, normal, and emisssive color in three 3D textures. All of the textures have the format RGBA8. In total, along with the radiance texture these end up taking about 350MB of memory on the GPU with 256x256x256 volumes since they are not sparse volumes so there is a lot of unused, wasted space. A 512x512x512 volume takes about 2.5 GB of GPU memory so I normally stick with the 256 volume.
+Injecting Radiance
+Next I render a shadow map from the light’s perspective. I then run a compute shader on the resulting depth map that unprojects each pixel back into world space and then into voxel volume coordinates. It then gets the diffuse color and normal at the position of the pixel, calculates the diffuse lighting on the voxel, and stores the result in a radiance texture.
+Mip Mapping
+Anisotropic voxels mip for the -Z direction
+In order to do cone tracing the volume needs to be mip mapped. I mip map the volume into anisotropic voxels in the same way that the original implementation does. Anisotropic voxels store a color that varies based on the direction that the voxel gets sampled from.
+I store a color for positive and negative X, Y, and Z. These values are calculated by taking the 8 values that go into the upper mip and doing volume integration on those voxels in the direction that the anisotropic voxel is for.
+Since DirectX has no 3D texture array structure I just store the colors for the different axis of the anisotropic voxels in one larger 3D texture where the X axis size is extended to be 6x the size of the mipmap x dimension. This is not that terrible for memory usage since I don’t need to do this on the base volume mip, and only on the upper mip maps. Since I normally use a 256x256x256 volume this means that the first mip level will end up being 768x128x128.
+Because of this, the anisotropic voxel volume is stored as a different texture than the base radiance texture.
+Cone Tracing
+Cone tracing is a way to approximate the result of casting many rays into a scene with a distribution on a lobe. This is done by taking samples along a ray, but as the samples get further from the ray origin the sampled mip map level increases.
+Each circle is a sample along a ray; the size of the circles corresponds to the mip map sampling level
+It’s not possible to get perfect spheres during sampling, but quadralinearly interpolating the sampled colors works well enough to approximate a sphere.
+Each sample is accumulated based on the sample’s occlusion value and color as the cone traces outwards. Once the accumulated occlusion is close to 1.0 the cone tracing stops.
+This can be seen when you’re doing cone tracing for the specular reflection cone. As the samples get further from the ray origin their sample radius increases. This makes reflections of objects close to a surface appear sharper, but appear more blurry as they get further from the surface.
+Specular Cone Tracing
+Tracing cones with wide apertures along the view vector reflected long surface normals to approximate specular reflections
+I ended up working out a function to map the roughness value I’m using in my physically based shading implementation to a cone aperture using the GGX importance sampling function for image based lighting. So it’s pretty simple to just take the roughness and get a cone that would give a similar approximation of roughness to the image based lighting.
+Only the indirect specular component with roughness to vary cone aperture
+Diffuse Cone Tracing
+Using cone tracing to figure out indirect diffuse lighting works the same way, but you trace multiple cones in different directions to try and approximate a hemisphere on the surface’s normal. I use 6 cones with 60 degree apertures. One points in the direction of the surface normal and 5 others circle around it.
+In this stage it’s also possible to approximate ambient occlusion by using the average occlusion of all of the diffuse cones.
+Final Composition
+Now it’s pretty simple to just add the diffuse and specular components into the direct lighting. I have yet to go and put in the rest of the physically based rendering work at the moment though. So more specular surfaces can appear to be metallic.
+Emissive Materials
+Voxel cone tracing also makes it pretty simple to add direct lighting from emissive materials. This is done simply by adding the emissive color of a material to the radiance volume.
+This is useful because it supports arbitrarily shaped lights with emissive colors that can vary across the surfaces of objects. This makes it possible to approximate the illumination from area lights easily.
+Performance
+There’s still a lot that I want to optimize. At the moment everything runs with decent frame rates, but there’s not much room left for other GPU work. I’m running these tests on my GTX 980.
+When the only thing that needs to be done is cone tracing, each frame only takes about 4 ms @ 720p and 10 ms @ 1080p
+The whole injection and mip mapping process takes about 4 ms on top of that so if the directional light is moving then that will be added to the total.
+Re-voxelizing the entire Sponza scene also takes about 4 ms and is necessary at the moment if there are dynamic objects since I’m not flagging static geometry or anything.
+Drawbacks
+The most significant drawback with my implementation is that it takes a significant chunk of GPU memory to store the scene. My implementation using a volume with the resolution of 256x256x256 takes ~350MB. And that’s for a comparably very small scene. Because of this it’s not very plausible to make the volume any higher resolution than it currently is. A volume with 512 resolution takes ~2.5GB. This is mostly an issue because it becomes hard to scale this to larger scenes and maintain decent quality. Even on a small scene like Sponza with 256x256x256 sized volumes each voxel is about 10 cm wide.
+Performance is also a major concern. While my implementation is not yet optimized that well, the cone tracing step performs better than the sparse octree tracing since there’s a lot less cache thrashing.
+Problems at the Moment
+At the moment I’m not mip mapping the radiance volume using a gaussian kernel. I started by doing this, but when I switched over to anisotropic voxels I did not get around to implementing it again. This causes a lot of banding when sampling specular and diffuse. At the moment I’m just continuing the cone until its occlusion reaches 0.999, but this ruins the occlusion on diffuse and specular so you can see color bleed through occluding geometry. Another issue that this would probably alleviate is apparent flickering in indirect diffuse and specular illumination from dynamic objects.
+I got the interlocked average during voxelization converted to HLSL syntax using InterlockedCompareExchange, but once I try to do it to average values in multiple output textures it seems like the shader gets deadlocked because of scheduling.
+Other Storage Methods
+I did the most basic implementation by just using a plain 3D texture. There are several other ways that the voxel structure can be stored.
+Sparse Voxel Octrees
+The first alternative is to store voxels in a sparse octree structure. This is what the original implementation uses and allows much more effective use of memory since it does not store anything for empty areas of the volume. Though there is a performance tradeoff due to needing to traverse the tree.
+Sparse Voxel DAGs
+There’s an extension to the SVO technique called Sparse Voxel Directed Acyclic Graphs. These work by taking the basic sparse voxel octree and merging identical nodes together and redirecting the pointers of parent nodes to single nodes. This is capable of decreasing the memory footprint further. However, it seems like it would not work well unless you just need to store occlusion values like in the paper’s implementation. If you store more data such as diffuse albedo, then it would become much less likely to find identical child nodes to the point where it would probably not be worth the extra time to build the tree.
+Cascaded Voxel Volumes
+Another method is to extend the concept of cascaded shadow maps to VXGI. This has multiple volumes with identical resolution, but different scale that are centered around the player and voxelize the scene for varying levels of coverage and spacial resolution. The Tomorrow Children by Q-Games does this to get efficient coverage of large scenes on the PS4. They also stagger the updates of each cascade across frames and prioritize the one closest to the player. It seems like NVIDIA’s recent implementation of VXGI in Unreal Engine 4 also does this based on the observation that specular reflections lose quality at greater distances from the player.
+Tiled Volume Textures
+Finally, DirectX 11.3 and 12 bring volume tiled resources in as a feature to primarily target the memory issues while maintaining high performance. Tiled resources were first added to DirectX in 11.2 which is included with Windows 8.1, but there was no support for 3D textures. Tiled resources expose some of the virtual addressing capability that graphics cards have to allow you to load high resolution textures that would otherwise not fit on the GPU by only having part of the texture loaded on the GPU at any given time. id Tech 5 used virtual texturing for Rage which is close to the same thing as tiled resources, but it had to spend a large portion of time to texture everything since the engine had to manage all of the pages itself.
+Having tiled resources as a hardware feature makes it both easier to implement, and more efficient. It allows the performance of 3D texture volume while allowing you to mark blocks of the texture as unused to maintain some of the sparseness of SVOs and DAGs. This will probably be a good enough compromise for memory, though the mapping of tiles in the volume texture needs to be done by the CPU. This means that dynamic parts of the scene would need to flag which bricks need to be marked as active, then write the list of bricks back to the CPU, then have the CPU mark the bricks as active/inactive. Reading back to the CPU takes a few frames so the dynamic objects may not get fully voxelized across the bounds of bricks until the CPU can mark the brick as used.
+Where to Go From Here
+First I am going to implement the correct filtering on the radiance volume so that I can get more correct-looking occlusion.
+I also want to implement the sparse octree structure and tracing just to use it for comparing to other implementations on performance and memory usage. I am inclined to try a DAG with this, but I don’t think it will be that worthwhile for this application so I’m not sure if I’ll get around to that.
+I really want to implement the sparse 3D texture when I can, but at the moment Microsoft has not released the public SDK for DirectX 11.3 and 12. I’m waiting for a response to my application to the early access program, but have not gotten a response in the past month so I’m not confident on that. Along with this I want to do more to manage voxelization of scene geometry so that I can mark static and dynamic geometry.
+Resources
+-Interactive Indirect Illumination Using Voxel Cone Tracing
+-Implementing Voxel Cone Tracing
+-Octree-Based Sparse Voxelization Using the GPU Hardware Rasterizer
+-GigaVoxels: Ray-Guided Streaming for Efficient and Detailed Voxel Rendering
+-Cascaded Voxel Cone Tracing in The Tomorrow Children
+-High Resolution Sparse Voxel DAGs
+Tiled Deferred Shading
+2 Comments:
+Adam Miles
+May 9, 2015 at 6:28 am
+Note, you don’t need to be on the Early Access Program to start using DX12. A recent build of Windows 10 and Visual Studio 2015 is sufficient to begin development.
+Reply
+Leif Erkenbrach
+May 9, 2015 at 8:16 am
+Oh that’s great! I’ve been really excited about DX12 so it looks like I’ll be messing with that next. Thanks!
+Reply
+Leave a Reply Cancel reply
+Recent Posts
+Voxel Cone Traced Global Illumination
+Tiled Deferred Shading
+Video Reel
+LEAP Motion + Oculus Rift Particle Interactions
+Game Engine Development
+Categories
+Select Category
+Programming (14)
+AI (2)
+DirectX (7)
+Networking (2)
+OpenGL (4)
+VR (2)
+XNA (2)
+Shading (2)
+Meta
+Log in
+Entries RSS
+Comments RSS
+WordPress.org

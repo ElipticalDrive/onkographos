@@ -1,0 +1,1101 @@
+i-Octree: A Fast, Lightweight, and Dynamic Octree for Proximity Search
+arXiv:2309.08315v2 [cs.RO] 29 Feb 2024
+Jun Zhu1 , Hongyi Li1 , Zhepeng Wang2 , Shengjie Wang3,† , and Tao Zhang1,† , Fellow, IEEE
+Abstract— Establishing the correspondences between newly
+acquired points and historically accumulated data (i.e., map)
+through nearest neighbors search is crucial in numerous robotic
+applications. However, static tree data structures are inadequate
+to handle large and dynamically growing maps in real-time.
+To address this issue, we present the i-Octree, a dynamic
+octree data structure that supports both fast nearest neighbor
+search and real-time dynamic updates, such as point insertion,
+deletion, and on-tree down-sampling. The i-Octree is built upon
+a leaf-based octree and has two key features: a local spatially
+continuous storing strategy that allows for fast access to points
+while minimizing memory usage, and local on-tree updates
+that significantly reduce computation time compared to existing
+static or dynamic tree structures. The experiments show that
+i-Octree outperforms contemporary state-of-the-art approaches
+by achieving, on average, a 19% reduction in runtime on realworld open datasets.
+I. I NTRODUCTION
+Nearest neighbors search (NNS) is necessary in many
+robotic applications, such as real-time LiDAR-based simultaneous localization and mapping (SLAM) and motion planning, where the data is sampled sequentially and real-time
+mapping is essential. For example, in LiDAR-based SLAM,
+NNS is crucial to compute feature [1], [2], estimate normal
+[3], [4], and match new points to the map [5]–[8]. Recent
+advances in LiDAR technology have not only significantly
+reduced the cost, size, weight, and power of LiDAR but also
+enabled high performance of LiDAR, making it an essential
+sensor for robots [9]. However, this also poses challenges to
+NNS. The current LiDAR sensor can produce a large amount
+of 3D points with centimeter accuracy at hundreds of meters
+measuring range per second. The large amount of sequential
+data requires being processed in real-time, which is a quite
+challenging task on robots with limited onboard computing
+resources. To guarantee the efficiency of NNS, maintaining
+a large map supporting high efficient inquiry and dynamic
+updates with newly arriving points in real-time comes to vital
+importance.
+Although various static tree data structures have been
+proposed, they struggle to meet the demands. R-tree [10]
+and R∗-tree [11] partition the data by grouping nearby
+points into their minimum bounding rectangle in the next
+higher level of the tree. k-d tree [12] is a well-known
+instance to split the space. The octree recursively splits
+the space equally into eight axis-aligned cubes, which form
+the volumes represented by eight child nodes. Although
+† Corresponding author: taozhang@tsinghua.edu.cn,
+wangsj23@mail.tsinghua.edu.cn.
+1 Department of Automation, Tsinghua University. 2 Lenovo Research. 3 Institute for Interdisciplinary Information Sciences (IIIS), Tsinghua
+University.
+k-d tree is a favored data structure in general k-nearest
+neighbors (KNN) search libraries, it is hard to draw any
+final conclusions as to whether the k-d tree is better suited
+for NNS compared to other data structures. Comparative
+studies [13], [14] show that the performance of different
+implementations of k-d trees can be diverse, and the octree is
+amongst the best performing algorithms especially for radius
+search due to its regular partitioning of the search space.
+Despite its performance, octree has not been fully exploited.
+Elseberg et al. [15] proposed an efficient octree to store and
+compress 3D data without loss of precision. Behley et al. [16]
+proposed an index-based octree that significantly improves
+the radius neighbor search in three-dimensional data, while
+the KNN search and dynamic updates are not enabled. When
+incorporating these static trees in real robotic applications,
+re-building the entire tree from scratch [17] repeatedly is
+inevitable, which is so time-consuming that the robots may
+fail to run.
+In this paper, we propose a dynamic octree structure called
+i-Octree, which incrementally updates the octree with new
+points and enables fast NNS. In addition, our i-Octree boasts
+impressive efficiency in both time and memory, adaptable
+to various types of points, and allows for on-tree downsampling and box-wise delete. We conduct validation experiments on both randomized data and real-world open datasets
+to assess the effectiveness of i-Octree. In the randomized data
+experiments, our i-Octree demonstrates significant improvements in runtime compared to the state-of-the-art incremental
+k-d tree (i.e., ikd-Tree [9] proposed recently). Specifically,
+it reduces run-time by 64% for building the tree, 66% for
+point insertion, 30% for KNN search, and 56% for radius
+neighbors search. Moreover, when applied to real-world data
+in LiDAR-based SLAM, i-Octree showcases remarkable time
+performance enhancements. It achieves over twice the speed
+of the original method while often maintaining higher accuracy levels. Furthermore, Our implementation of i-Octree is
+open-sourced on Github1 .
+The remaining paper is organized as follows: the design of
+i-Octree is described in Section II. Experiments are shown
+in Section III, followed by conclusions in Section IV.
+II. i-Octree D ESIGN AND I MPLEMENTATION
+The i-Octree takes sequential point clouds as input with
+two objectives: dynamically maintains a global map and
+performs fast NNS (i.e., KNN search and radius neighbors
+search) on the map. Fig. 1 illustrates a typical application
+1 https://sites.google.com/view/I-Octree
+N
+First?
+Y
+Construction
+Establishing
+Correspondences
+KNN Search
+Incremental Update
+Updated 3D data
+Box-wise Delete
+Updated Pose
+Range Data
+Pose Estimate
+Range Sensors
+i-Octree
+Odometry
+Fig. 1. An example of using i-Octree in odometry. The i-Octree and odometry collaborate to estimate the poses of the 3D data obtained from the range
+sensors. The i-Octree provides a robust and efficient data structure for storing and querying the 3D data, while the odometry enables the estimation of the
+poses of the data points.
+Point in memory
+Point in octant
+……
+……
+……
+……
+(a)
+(a)
+(b)
+Fig. 2. Illustration of locations of a octant’s points in memory. (a) scattered
+locations; (b) continual locations.
+of the i-Octree. The range sensors continuously perceive
+their surroundings and generate sequential 3D range data
+periodically. The initial scan of the range data is utilized
+to construct the i-Octree and define the global coordinate
+frame. The i-Octree then facilitates the establishment of
+correspondences between the newly arriving data and the
+historical data through KNN search or radius neighbors
+search. Based on these correspondences, the poses of the new
+data can be estimated, and the 3D points with pose are added
+to the i-Octree. To prevent the map size in i-Octree from
+growing uncontrollably, only map points within a large local
+region (i.e., axis-aligned box) centered around the current
+position are maintained. In the following, we first describe
+the data structure and construction of the i-Octree, then we
+focus on dynamic updates and NNS.
+A. Data Structure and Construction
+An i-Octree node has up to eight child nodes, each
+corresponding to one octant of the overlying axis-aligned
+cube. An octant, starting with an axis-aligned bounding box
+with center c ∈ R3 and equal extents e ∈ R, would be
+subdivided recursively into smaller octants of extent 21 e until
+it contains less than a given number of points – the bucket
+size b or its extent is less than a minimal extent – emin . For
+memory efficient, octants without points are not created. In
+addition, we only keep indices and coordinates of points in
+each leaf octant and there is no points in non-leaf octants. To
+enable extremely fast access to each point in each leaf octant,
+we propose a local spatially continuous storing strategy (as
+shown in Fig. 2) which reallocates a segment of continuous
+memory for storing points information in the leaf octant after
+subdivision. Furthermore, the reallocation facilitates boxwise delete and incremental update, as it allows operating
+on a segment of memory without influencing others.
+Based on above consideration, an octant Co of our i-Octree
+contains the center co ∈ R3 , the extent eo , the points Po
+storing coordinates and indices, and a pointer pointing to the
+address of the first child octant. The subscript “o” is used to
+(b)
+Fig. 3. Fig. (a) and (b) illustrate insertion of new points (red) out of the
+range to the i-Octree. In (a), the left yellow cube is the root octant as well
+as the leaf octant with points (black) in the beginning. After inserting, the
+root octant becomes the light purple cube. In (b), the purple node is the root
+octant and it is updated after inserting new octants (dashed black rectangle).
+distinguish between different octants. Particularly, let Cr be
+the root octant, and Pr , er , and cr are the points, the extent,
+and the center, respectively.
+As for building an incremental octree, we firstly eliminate
+invalid points, calculate the axis-aligned bounding box of all
+valid points, and keep only indices and coordinates of valid
+points. Then, starting at the root, the i-Octree recursively
+splits the axis-aligned bounding box at the center into eight
+cubes indexed by Morton codes [18] and subdivides all the
+points in current octant into each cube according to their cube
+indices calculated. When a stopping criteria is satisfied, a leaf
+octant will be created and a segment of continuous memory
+will be allocated to store information in points of the leaf
+node.
+B. Dynamic Updates
+The dynamic updates include insertion of one or more
+points (i.e, incremental update) and delete of all points in
+an axis-aligned box (i.e., box-wise delete). The insertion is
+integrated with down-sampling, which maintains the octree
+at a pre-determined resolution.
+1) Incremental Update: When inserting new points, we
+have to consider the situation that some points may be
+beyond the boundary of the axis-aligned bounding box of
+the original tree. Once there are points out of the range of
+octree, we have to expand the bounding box by creating new
+root octant whose children contain current root octant. This
+process may be executed several times to ensure that all new
+points are within the range of the tree. Then, new points are
+added to the expanded octree (see Fig. 3).
+In consideration of efficient points queries in robotic
+applications, i-Octree supports down-sampling that executes
+simultaneously with point insertion. The down-sampling
+focuses on the new points and deletes the points that satisfy
+a certain condition: they are subdivided into a leaf octant
+whose extent is less than 2emin and size is larger than b/8.
+4
+5
+6 After
+7
+2
+0
+1
+3
+6
+deletion
+2
+3
+Fig. 4. Illustration of box-wise delete. The blue box is the given box, and
+the numbers 0 to 7 (Morton codes) are the indices of the octants. Octants,
+with indices 0, 1, 4, and 5 are directly deleted. Octant 7 is also deleted due
+to having no points.
+The process of adding new points to an octant Co is similar
+to the construction of an octant. If Co is a leaf node and it
+satisfies the subdivision criteria, all points (i.e., old points and
+new added points) in Co will be recursively subdivided into
+child octants. If down-sampling is enabled, eo ≤ 2emin , and
+|Po | > b/8, new points will be deleted later instead of being
+added to Co . Otherwise, a segment of continuous memory
+will be allocated for the updated points. If Co has child
+octants, the problem becomes assigning the newly added
+points to various children, and only the new points are to
+be subdivided. This process is similar to the one mentioned
+above, except for the recursive updating of octants.
+2) Box-wise Delete: In certain robotic applications, such
+as SLAM, only the points near the agent are required to
+estimate the state. Consequently, the points located far away
+from the agent in the i-Octree are not essential and can be
+removed for efficiency concerns.
+When it comes to removing unnecessary points in an
+axis-aligned cuboid, instead of directly searching for points
+within the given space and deleting them, the i-Octree firstly
+checks whether the octants are inside the given box. All
+octants inside the given box will be directly deleted without
+searching for points in them, which significantly reduces
+the deletion time. The deletion of octants have no influence
+on others thanks to the local spatially continuous storing
+strategy. For the leaf octants overlapping with the given
+box, we delete the points within the box and allocate a
+new segment of memory for the remaining. If a leaf octant
+contains no points after deletion, it will be deleted as shown
+in Fig. 4.
+C. K-Nearest Neighbors Search
+Using i-Octree, we can retrieve k nearest neighbors for
+an arbitrary query point q ∈ R3 . The nearest search on
+the i-Octree is an accurate nearest search [19] instead of
+an approximate one as [20]. We maintain a priority queue h
+with a maximal length of k to store the k-nearest neighbors
+so far encountered and their distance to the query point
+q. The last element of h always has the largest distance
+regardless of pushing or popping. The axis-aligned box of
+each octant is well utilized effectively to accelerate the
+nearest neighbor search using a “bounds-overlap-ball” test
+[21] and a proposed priority search order pre-computed
+according to the fixed indices of child octants.
+Firstly, we recursively search down the i-Octree from
+its root node until reach the leaf node closest to q. Then
+the distances from q to all points in the leaf node and
+corresponding indices will be pushed to priority queue h.
+All leaf nodes so far encountered will be searched before h
+is full. If h is full and the search ball S(q, dmax ) defined by
+q and the largest distance dmax in h is inside the axis-aligned
+box of current octant, the searching is over. If a octant Ck
+doesn’t contain the search ball S(q, dmax ), then one of the
+following three conditions must be satisfied:
+ek − |qx − ck,x | < dmax ,
+(1)
+ek − |qy − ck,y | < dmax ,
+(2)
+ek − |qz − ck,z | < dmax ,
+(3)
+where q = (qx , qy , qz )T , ck = (ck,x , ck,y , ck,z )T . If none of
+the above conditions hold, the search ball is inside the octant.
+We update h by investigating octants overlapping the
+search ball S(q, dmax ), since only these could potentially
+contain points that are also inside the desired neighborhood.
+We define the distance d between q and Ck as below:
+d =∥σ(|q − co | − 1eo )∥2 ,
+(4)
+where 1 = (1, 1, 1)T and σ(x) = x if x > 0, otherwise
+σ(x) = 0. d < dmax indicates that Ck overlaps S(q, dmax ).
+In order to speed up the process, we sort the candidate child
+octants of Co according to their distances to Ck and get 8
+different sequences in Iorder . Such that the closer octants are
+earlier to be searched and the search reaches its end early.
+D. Radius Neighbors Search
+For an arbitrary query point q ∈ R3 and radius r, the
+radius neighbors search method finds every point p satisfying
+∥p − q∥2 < r. The process is similar to KNN search except
+for a fixed radius and an unlimited k. We adopt the pruning
+strategy proposed by Behley et al. [16] with improvements
+to reduce computation cost. Before test whether S(q, r)
+completely contains an octant Ck , we make a simple test
+whether r2 is larger than 3e2k . The simple test is the necessary
+condition for S(q, r) containing Ck with small cost. Besides,
+we try to avoid the extraction of a root in the algorithm.
+These two tricks together with our local spatially continuous
+storing strategy play key roles in accelerating the searching.
+III. A PPLICATION E XPERIMENTS
+We compare our i-Octree to publicly available implementations of static k-d trees (i.e., k-d tree used in Point Cloud
+Library (PCL)) , incremental k-d tree (i.e., ikd-Tree), and
+PCL octree. We conduct the experiments on randomized
+data and various open real-world datasets. We first evaluate
+our i-Octree against PCL octree and the state-of-the-art
+incremental k-d tree, i.e., ikd-Tree, for tree construction,
+point insertion, KNN search, radius neighbors search, and
+box-wise delete on randomized three dimensional (3D) point
+data of different size. Then, we validate the i-Octree in
+actual robotic applications on real-world dataset by replacing
+the static k-d tree in the LiDAR-based SLAM without any
+refinement and evaluate the time performance and accuracy.
+All experiments are performed on a PC with Intel i7-13700K
+CPU at 3.40GHz.
+Run Time/ms
+8
+6
+4
+2
+0
+i-Octree
+ikd-Tree
+PCL-octree
+1.75
+1.50
+1.25
+1.00
+0.75
+0.50
+KNN search
+0.6
+0.4
+212000
+214000
+216000
+218000
+220000
+222000
+Radius Neighbors Search
+Fig. 5.
+2.25
+2.50
+2.75
+3.00
+Tree size
+3.25
+3.50
+3.75
+4.00
+×105
+Dynamic data structure comparison over different tree size.
+A. Randomized Data Experiments
+The efficiency of our i-Octree is fully investigated by the
+following experiments on randomized incremental data.
+1) Performance Comparison: In this experiment, we investigate the time performance of three implementations of
+dynamic data structure (i.e., the i-Octree, the ikd-Tree, and
+the PCL octree). Both ikd-Tree and PCL octree are stateof-the-art implementations with high efficiency and support
+point insertion, which is the key consideration why we
+choose them to be compared with our i-Octree for a fair
+comparison. In this experiment, 200,000 points are generated
+randomly in a 10m × 10m × 10m space (i.e., the workspace)
+to build the trees. Then 100 test operations are conducted.
+In each test operation, 2000 new points randomly sampled
+in the workspace are inserted to the trees. Besides, we
+perform KNN search with k = 5 on each of 200 new
+points randomly sampled and radius neighbors search with
+r = 0.3m on each of another 200 ones. Down-sampling is
+not enabled on i-Octree and ikd-Tree in this experiment. We
+fix emin = 0.01m for i-Octree and PCL octree and b = 32
+for i-Octree in the following experiments. We record the time
+for tree construction and point insertion, the total time of
+KNN search for 200 points, and the total time of radius
+neighbors search for another 200 points at each step.
+The dynamic data structure comparison over different tree
+size is shown in Fig. 5. The Table I shows the comparison of
+average time consumption and peak memory usage. When
+the tree size increases from 200,000 to 400,000, the time for
+point insertion (without down-sampling) of i-Octree and PCL
+octree remains stable at 0.8ms while that for the ikd-Tree is
+3 times larger and grows linearly with the tree size. For KNN
+TABLE I
+T HE C OMPARISON OF AVERAGE T IME C ONSUMPTION AND P EAK
+M EMORY U SAGE
+i-Octree ikd-Tree PCL octree
+Construction[ms]1
+16.63
+Point Insertion[ms]
+0.83
+KNN Search[ms]
+0.41
+Radius Neighbors Search[ms] 0.81
+Peak Memory Usage[Mb]
+21.53
+46.26
+2.45
+0.59
+1.85
+62.91
+52.66
+0.85
+2.53
+3.96
+136.82
+1 The construction of the tree is conducted only once at the
+first time.
+i-Octree
+ikd-Tree
+Radius Neighbors Search
+i-Octree
+ikd-Tree
+0
+i-Octree
+ikd-Tree
+PCL-octree
+2.00
+KNN Search
+0.6
+0.5
+0.4
+0.3
+0.2
+0.1
+i-Octree
+ikd-Tree
+PCL-octree
+Run Time/ms
+Run Time/ms
+8
+6
+4
+2
+0
+Point Insertion
+Run Time/ms
+Run Time/ms
+8
+6
+4
+2
+0
+20
+Fig. 6.
+40
+Counter
+60
+80
+100
+The comparison of time consumption.
+search, our method demonstrates a performance that is more
+than twice as fast as the PCL octree and achieves a 20%
+reduction in runtime compared to the ikd-Tree. Regarding
+the execution time for radius neighbors search, the i-Octree
+demonstrates a performance that is more than twice as fast
+as both the ikd-Tree and the PCL octree. Furthermore, the
+construction time of the i-Octree is less than 36% compared
+to the ikd-Tree. Additionally, the peak memory usage of the
+i-Octree is the lowest, being less than 35% of that observed
+for the ikd-Tree.
+2) Box-wise Delete: The ikd-Tree is chosen to be compared with the i-Octree since both support the box-wise
+delete. This experiment investigates the time performance
+of deleting all points in an axis-aligned box and the time
+performance of KNN serach and radius neighbors search
+after delete. In the experiment, we sample 400,000 points
+randomly in a 10m × 10m × 10m space (i.e., the workspace)
+to initialize the incremental octree. Then 1,00 test operations
+are conducted on the trees. In each test operation, we randomly sample 200 points in the workspace for KNN search
+and another 200 points for radius neighbors search. For every
+20 test operations, one axis-aligned box is sampled in the
+workspace with side length of 1.0m and points contained in
+the box are deleted from the trees. We record the tree size
+after each delete, the time of box-wise delete, the total time
+of KNN search for 200 points, and the total time of radius
+neighbors search for another 200 points at each step.
+The time of box-wise delete and the tree size are shown
+in Table II. The run time performance of i-Octree and ikdTABLE II
+T HE T IME C ONSUMPTION OF B OX - WISE D ELETE AND T REE S IZE
+Counter
+0
+20
+40
+60
+80
+100
+Box-wise Delete[ms]
+Tree Size
+i-Octree
+ikd-Tree
+GT1
+–
+0.017
+0.013
+0.017
+0.016
+0.006
+–
+0.222
+0.343
+0.250
+0.320
+0.126
+400,000
+399,614
+399,205
+398,783
+398,375
+398,185
+i-Octree
+ikd-Tree
+400,000
+399,614
+399,205
+398,783
+398,375
+398,185
+400,000
+399,623
+399,236
+398,826
+398,437
+398,247
+1 GT denotes the exact size of the point cloud at each test.
+Tree on KNN search and radius neighbors search is shown
+in Fig. 6. In this experiment, it appears that the box-wise
+delete operation on the ikd-Tree does not remove all points
+within the given box as shown in Table II. The results show
+that our i-Octree runs over 10 times faster than the ikd-Tree
+on the box-wise delete and approximately 3 times faster on
+the radius neighbors search. Besides, the i-Octree reduces
+the run time of KNN search by 58% over the ikd-Tree.
+TABLE IV
+T HE C OMPARISON OF M AXIMAL AND AVERAGE T IME C ONSUMPTION
+PER S CAN ON I NCREMENTAL U PDATE
+FLOAM[ms]
+Sequence
+Name
+B. Real-world Data Experiments
+TABLE III
+T HE PARAMETERS S ETUP FOR EACH DATASET
+FLOAM
+Dataset
+LIO SAM 6AXIS
+SurfRes EdgeRes MinRange SurfRes EdgeRes MinRange
+M2DGR
+0.1m
+0.05m
+0.2m
+0.4m
+0.2m
+1.0m
+Newer
+College
+0.2m
+0.1m
+0.2m
+0.4m
+0.2m
+1.0m
+NCLT
+0.4m
+0.2m
+0.2m
+0.4m
+0.2m
+1.0m
+* SurfRes and EdgeRes denote the map resolution of surface map and
+edge map, respectively; MinRange means that any points within the
+LiDAR range defined by MinRange will not be considered.
+1 https://github.com/JokerJohn/LIO_SAM_6AXIS
+gate 01
+walk 01
+street 02
+street 03
+room 01
+room 02
+room dark 01
+Incre max
+Incre mean
+Incre max
+Incre mean
+ioct
+ioct
+orig
+ioct
+orig
+ioct
+orig
+7.20 969.98 5.57
+6.92 271.49 5.17
+7.07 793.63 4.20
+9.22 1983.50 6.52
+2.22 17.41 0.64
+3.00 24.00 0.65
+2.48 13.57 0.71
+354.73
+141.08
+286.17
+893.20
+5.67
+6.30
+6.13
+5.16
+4.66
+6.95
+7.27
+0.42
+0.43
+0.52
+33.99
+15.39
+19.88
+30.05
+1.70
+0.73
+0.74
+2.82
+2.53
+2.94
+3.58
+0.29
+0.28
+0.29
+17.56
+11.18
+10.84
+19.57
+0.48
+0.46
+0.44
+orig
+* Note:
+Run Time/ms
+Incre max and Incre mean denote the maximal and average
+incremental update time of each scan respectively; ioct means i-Octree
+and orig means the static k-d tree.
+Run Time/ms
+We test our developed i-Octree in actual robotic applications (e.g., LiDAR-inertial SLAM [8], [9], [22], [23] and
+pure LiDAR SLAM [5], [6], [24]). In these experiments,
+we directly replace the static k-d tree in the LiDAR-based
+SLAM by our proposed i-Octree without any refinement and
+evaluate the time performance and accuracy. To ensure a
+fair and complete comparison, we test on three datasets:
+M2DGR [25], Newer College Dataset [26] and NCLT [27]
+with different sensor setups. The M2DGR is a low-beam
+LiDAR data, the Newer College Dataset is a high-beam
+LiDAR data, and the NCLT is a long-term dataset. They all
+have ground truth trajectories such that we can evaluate the
+accuracy of the LiDAR trajectories using absolute trajectory
+error (ATE) [28].
+For the sake of simplicity, we will focus on three representative LiDAR-based SLAM algorithms: FAST-LIO2 [9]
+and LIO-SAM [22] that combine LiDAR and inertial measurements (LiDAR-inertial SLAM), and FLOAM [24] that
+relies solely on LiDAR data (pure LiDAR SLAM). LIOSAM and FLOAM are both the state-of-the-art algorithms
+and uses the static k-d tree for the nearest points search,
+which is crucial to match a point in a new LiDAR scan to
+its correspondences in the map (or the previous scan). For
+the LIO-SAM, we choose the LIO SAM 6AXIS1 , which is
+modified from LIO-SAM to support a wider range of sensors
+(e.g., 6-axis IMU and low-cost GNSS) without accuracy loss.
+Besides, the loop closure module of LIO SAM 6AXIS is
+deactivated. The parameters setups, as shown in Table III, for
+every sequence in a dataset are the same. Both algorithms
+build two independent maps: surface map and edge map,
+where two k-d trees or i-Octree will be built. The SurfRes
+and EdgeRes determine the minimal extent of the two iOctree structures, respectively. Moreover, the performance
+of i-Octree and ikd-Tree, once integrated into FAST-LIO2, is
+evaluated using the Newer College Dataset.
+LIO SAM 6AXIS[ms]
+Incremental Update Time
+800
+700
+600
+500
+400
+300
+200
+100
+0
+1200
+1000
+800
+600
+400
+200
+0
+Fig. 7.
+LIO_SAM_6AXIS(i-Octree)
+LIO_SAM_6AXIS(kd-tree)
+FLOAM(i-Octree)
+FLOAM(kd-tree)
+10
+5
+501.5
+501.6
+501.7
+501.8
+501.9
+Total Time Consumption
+LIO_SAM_6AXIS(i-Octree)
+LIO_SAM_6AXIS(kd-tree)
+FLOAM(i-Octree)
+FLOAM(kd-tree)
+0.0
+0.2
+0.4
+0.6
+Time/s
+0.8
+1.0
+1.2
+×103
+The Comparison of time consumption on the street 02 sequence.
+1) Low-beam LiDAR Data: The first dataset is M2DGR,
+which is a large-scale dataset collected by an unmanned
+ground vehicle (UGV) with a full sensor-suite including a
+Velodyne VLP-32C LiDAR sampled at 10 Hz, a 9-axis
+Handsfree A9 inertial measurement unit (IMU) sampled
+at 150 Hz, and other sensors. The dataset comprises 36
+sequences captured in diverse scenarios including both indoor and outdoor environments on the university campus.
+The ground truth trajectories of the outdoor sequences are
+obtained by the Xsens MTi 680G GNSS-RTK suite while
+for the indoor environment, a motion-capture system named
+Vicon Vero 2.2 whose localization accuracy is 1mm is used
+to collect the ground truth. We choose several sequences
+from this dataset and the detailed information is summarized
+in Table V.
+The maximal and average time consumption of incremental update for each scan are listed in Table IV. For the
+FLOAM running in the outdoor environment, the size of
+map grows gradually making it computational costly when
+using the static k-d tree. The rebuilding process may cost
+a lot when the size of map is large, which deteriorates
+the real-time performance sharply. The time for rebuilding
+the entire k-d tree fills a large percentage of the total time
+per scan, as shown in the Fig. 7. The time for rebuilding
+the entire k-d tree fills a large percentage of the total
+time per scan. After replacing the k-d tree by i-Octree, the
+incremental time reduces to less than 10ms and the real-
+TABLE V
+T HE C OMPARISON OF AVERAGE T IME C ONSUMPTION PER S CAN AND A BSOLUTE T RANSLATIONAL E RRORS (RMSE, METERS )
+Average Time Consumption per Scan[ms]
+Dataset
+Name
+M2DGR
+Newer
+College
+NCLT
+Sequence
+Name
+Attributes
+FLOAM
+RMSE[m]
+LIO SAM 6AXIS
+FLOAM
+LIO SAM 6AXIS
+Duration Length i-Octree static k-d tree i-Octree static k-d tree i-Octree static k-d tree i-Octree static k-d tree
+gate 01
+walk 01
+street 02
+street 03
+room 01
+room 02
+room dark 01
+172s
+291s
+1227s
+354s
+72s
+75s
+111s
+-
+101.70
+91.21
+82.85
+117.55
+22.42
+22.52
+22.85
+570.62
+273.72
+462.21
+1318.47
+25.91
+26.60
+26.16
+40.69
+18.98
+24.26
+39.11
+3.11
+3.02
+2.70
+100.50
+52.42
+58.0
+114.55
+12.32
+6.32
+5.73
+8.667
+0.108
+133.602
+15.781
+0.134
+0.128
+0.146
+9.206
+0.087
+80.935
+16.923
+0.135
+0.129
+0.148
+0.167
+0.078
+2.296
+0.137
+0.137
+0.123
+0.151
+0.340
+0.079
+2.942
+0.138
+0.209
+0.121
+0.155
+Quad-Easy
+Quad-Medium
+Quad-Hard
+Cloister
+Maths-Easy
+Underground-Easy
+198s
+190s
+187s
+278s
+216s
+141s
+247m
+260m
+234m
+429m
+264m
+162m
+73.87
+58.19
+44.86
+41.06
+62.53
+28.16
+225.31
+430.78
+300.38
+156.80
+180.89
+41.27
+38.03
+43.02
+32.85
+20.07
+31.34
+9.37
+100.73
+96.86
+70.35
+53.77
+74.46
+30.85
+0.795
+15.626
+17.133
+15.100
+1.026
+0.143
+0.399
+18.358
+7.326
+7.685
+0.260
+0.078
+0.083
+0.100
+0.130
+0.115
+0.088
+0.077
+0.079
+0.095
+0.152
+0.169
+0.125
+0.073
+2012-01-08
+5633s
+6.4km
+21.88
+70.62
+24.65
+53.54
+187.588
+62.188
+1.890
+9.291
+TABLE VI
+P ERFORMANCE C OMPARISON OF i-Octree AND ikd-Tree
+time performance is approximately guaranteed. The FLOAM
+with i-Octree runs over 5 times faster than the original one,
+with sometimes a slight accuracy loss as shown in Table V.
+The LIO SAM 6AXIS with i-Octree runs over 2 times faster
+than original one on almost all sequences and the accuracy
+is usually improved. Besides, the i-Octree reduces the peak
+time which degrades the real-time ability.
+2) High-beam LiDAR Data: The second dataset is the
+Newer College Dataset, which is a multi-camera LiDAR
+inertial dataset of 4.5 km walking distance. The dataset is
+collected by a handheld device equipped with an Ouster OS0128 LiDAR sampled at 10 Hz with embedded IMU sampled
+at 100 Hz. Precise centimetre accurate ground truth is provided and calculated by registering each undistorted LiDAR
+frame to a prior map scanned by 3D imaging laser scanner,
+Leica BLK360. Table V shows the 6 sequences selected
+from the dataset. These sequences contain small and narrow
+passages, large scale open spaces, as well as vegetated areas.
+Besides, challenging situations such as aggressive motion are
+presented.
+In this test, we record average total time consumption of
+each scan and calculate the RMSE of the absolute translational errors, as shown in Table V. We find that the i-Octree
+shows promising compatibility with LIO SAM 6AXIS since
+it not only reduces the time consumption a lot but also
+improves the accuracy. For the LOAM, the i-Octree significantly accelerates the processing speed per scan, but
+sometimes at a cost of degrading accuracy, as it directly
+replaces the static k-d tree without any refinement. Furthermore, the performance comparison between i-Octree and ikdTree, as integrated into FAST-LIO2 without parallelization,
+is evaluated using this dataset, as presented in Table VI.
+In this experiment, we set emin = 0.5m for both i-Octree
+and ikd-Tree, and b = 1 specifically for i-Octree. The
+other ikd-Tree parameters are kept at their default settings.
+The i-Octree method exhibits superior memory efficiency
+and speed compared to the ikd-Tree, achieving an average
+Sequence
+Name
+Quad-Easy
+Quad-Medium
+Quad-Hard
+Cloister
+Maths-Easy
+Underground-Easy
+AveTim[ms]
+RMSE[m]
+PeaMem[Mb]
+i-Octree ikd-Tree i-Octree ikd-Tree i-Octree ikd-Tree
+14.58
+14.24
+10.35
+7.30
+12.45
+4.82
+19.70
+16.21
+12.08
+9.08
+16.41
+5.96
+0.069
+0.059
+0.051
+0.053
+0.093
+0.029
+0.071
+0.059
+0.047
+0.063
+0.093
+0.036
+242.06
+239.04
+240.58
+255.93
+252.77
+235.12
+252.26
+259.13
+257.86
+261.62
+278.04
+239.61
+* Note: AveTim denotes the average time required for updating the tree
+and executing KNN search for each scan ; PeaMem means the peak
+memory usage of ROS node.
+reduction in runtime of 19% without sacrificing accuracy,
+consistent with findings from experiments on randomized
+datasets.
+3) Long-term LiDAR Data: Finally, we test on a long
+sequence called 2012-01-08 form a large scale dataset named
+NCLT captured by a Velodyne HDL-32E LiDAR sampled at
+10 Hz, a Microstrain 3DM-GX3-45 IMU sampled at 100
+Hz, and other sensors. The length of the sequence is 6.4km
+and the duration is 5633s. The average run time of each
+scan and the absolute translational errors are added to Table
+V. The FLOAM drifts severely on the large scale sequence
+while LIO SAM 6AXIS (i-Octree) shows surprising performance, except for a slight drift along the z-axis, even without
+enabling loop closure. LIO SAM 6AXIS (static k-d tree) can
+only use the very recent key frames to estimate the poses,
+whereas LIO SAM 6AXIS (i-Octree) can take advantage of
+point information from the start, which contributes to its
+better performance.
+IV. C ONCLUSION
+In this paper, we propose a novel dynamic octree data
+structure, i-Octree, which supports incrementally point insertion with on-tree down-sampling, box-wise delete, and
+fast NNS. Besides, a large amount of experiments on both
+randomized datasets and open datasets show that our i-Octree
+can achieve the best overall performance among the state-ofthe-art tree data structures.
+R EFERENCES
+[1] X. Xiong, D. Munoz, J. A. Bagnell, and M. Hebert, “3-d scene
+analysis via sequenced predictions over points and regions,” in 2011
+IEEE International Conference on Robotics and Automation, 2011,
+pp. 2609–2616.
+[2] J. Behley, V. Steinhage, and A. B. Cremers, “Performance of histogram
+descriptors for the classification of 3d laser range data in urban
+environments,” in 2012 IEEE International Conference on Robotics
+and Automation, 2012, pp. 4391–4398.
+[3] N. J. Mitra and A. Nguyen, “Estimating surface normals in
+noisy point cloud data,” in Proceedings of the Nineteenth Annual
+Symposium on Computational Geometry, ser. SCG ’03. New York,
+NY, USA: Association for Computing Machinery, 2003, p. 322–328.
+[Online]. Available: https://doi.org/10.1145/777792.777840
+[4] K. Klasing, D. Wollherr, and M. Buss, “A clustering method for
+efficient segmentation of 3d laser data,” in 2008 IEEE International
+Conference on Robotics and Automation, 2008, pp. 4043–4048.
+[5] J. Zhang and S. Singh, “Loam: Lidar odometry and mapping in realtime.” in Robotics: Science and Systems, vol. 2, no. 9, 2014.
+[6] T. Shan and B. Englot, “Lego-loam: Lightweight and groundoptimized lidar odometry and mapping on variable terrain,” in 2018
+IEEE/RSJ International Conference on Intelligent Robots and Systems
+(IROS). IEEE, 2018, pp. 4758–4765.
+[7] J. Lin and F. Zhang, “Loam livox: A fast, robust, high-precision lidar
+odometry and mapping package for lidars of small fov,” in 2020 IEEE
+International Conference on Robotics and Automation (ICRA). IEEE,
+2020, pp. 3126–3131.
+[8] W. Xu and F. Zhang, “Fast-lio: A fast, robust lidar-inertial odometry
+package by tightly-coupled iterated kalman filter,” arXiv preprint
+arXiv:2010.08196, 2020.
+[9] W. Xu, Y. Cai, D. He, J. Lin, and F. Zhang, “Fast-lio2: Fast direct lidarinertial odometry,” IEEE Transactions on Robotics, vol. 38, no. 4, pp.
+2053–2073, 2022.
+[10] A. Guttman, “R-trees: A dynamic index structure for spatial searching,” in Proceedings of the 1984 ACM SIGMOD international conference on Management of data, 1984, pp. 47–57.
+[11] N. Beckmann, H.-P. Kriegel, R. Schneider, and B. Seeger, “The r*tree: An efficient and robust access method for points and rectangles,”
+in Proceedings of the 1990 ACM SIGMOD international conference
+on Management of data, 1990, pp. 322–331.
+[12] J. L. Bentley, “Multidimensional binary search trees used for associative searching,” Communications of the ACM, vol. 18, no. 9, pp.
+509–517, 1975.
+[13] J. L. Vermeulen, A. Hillebrand, and R. Geraerts, “A comparative study
+of k-nearest neighbour techniques in crowd simulation,” Computer
+Animation and Virtual Worlds, vol. 28, no. 3-4, p. e1775, 2017.
+[14] J. Elseberg, S. Magnenat, R. Siegwart, and A. Nüchter, “Comparison
+of nearest-neighbor-search strategies and implementations for efficient
+shape registration,” Journal of Software Engineering for Robotics,
+vol. 3, no. 1, pp. 2–12, 2012.
+[15] J. Elseberg, D. Borrmann, and A. Nüchter, “One billion points in
+the cloud–an octree for efficient processing of 3d laser scans,” ISPRS
+Journal of Photogrammetry and Remote Sensing, vol. 76, pp. 76–88,
+2013.
+[16] J. Behley, V. Steinhage, and A. B. Cremers, “Efficient radius neighbor
+search in three-dimensional point clouds,” in 2015 IEEE International
+Conference on Robotics and Automation (ICRA), 2015, pp. 3625–
+3630.
+[17] R. B. Rusu and S. Cousins, “3d is here: Point cloud library (pcl),”
+in 2011 IEEE international conference on robotics and automation.
+IEEE, 2011, pp. 1–4.
+[18] G. M. Morton, “A computer oriented geodetic data base and a
+new technique in file sequencing,” International Business Machines
+Company, New York, Tech. Rep., 1996.
+[19] J. H. Friedman, J. L. Bentley, and R. A. Finkel, An algorithm for
+finding best matches in logarithmic time. Department of Computer
+Science, Stanford University, 1975.
+[20] M. Muja and D. G. Lowe, “Fast approximate nearest neighbors with
+automatic algorithm configuration.” VISAPP (1), vol. 2, no. 331-340,
+p. 2, 2009.
+[21] J. H. Friedman, J. L. Bentley, and R. A. Finkel, “An algorithm
+for finding best matches in logarithmic expected time,” ACM Trans.
+Math. Softw., vol. 3, no. 3, p. 209–226, sep 1977. [Online]. Available:
+https://doi.org/10.1145/355744.355745
+[22] T. Shan, B. Englot, D. Meyers, W. Wang, C. Ratti, and D. Rus,
+“Lio-sam: Tightly-coupled lidar inertial odometry via smoothing and
+mapping,” in 2020 IEEE/RSJ international conference on intelligent
+robots and systems (IROS). IEEE, 2020, pp. 5135–5142.
+[23] K. Li, M. Li, and U. D. Hanebeck, “Towards high-performance
+solid-state-lidar-inertial odometry and mapping,” IEEE Robotics and
+Automation Letters, vol. 6, no. 3, pp. 5167–5174, 2021.
+[24] H. Wang, C. Wang, C.-L. Chen, and L. Xie, “F-loam: Fast lidar
+odometry and mapping,” in 2021 IEEE/RSJ International Conference
+on Intelligent Robots and Systems (IROS). IEEE, 2021, pp. 4390–
+4396.
+[25] J. Yin, A. Li, T. Li, W. Yu, and D. Zou, “M2dgr: A multi-sensor and
+multi-scenario slam dataset for ground robots,” IEEE Robotics and
+Automation Letters, vol. 7, no. 2, pp. 2266–2273, 2021.
+[26] L. Zhang, M. Camurri, D. Wisth, and M. Fallon, “Multi-camera lidar
+inertial extension to the newer college dataset,” 2021.
+[27] N. Carlevaris-Bianco, A. K. Ushani, and R. M. Eustice, “University
+of Michigan North Campus long-term vision and lidar dataset,”
+International Journal of Robotics Research, vol. 35, no. 9, pp. 1023–
+1035, 2015.
+[28] J. Sturm, N. Engelhard, F. Endres, W. Burgard, and D. Cremers,
+“A benchmark for the evaluation of rgb-d slam systems,” in 2012
+IEEE/RSJ international conference on intelligent robots and systems.
+IEEE, 2012, pp. 573–580.

@@ -1,0 +1,1421 @@
+MRFMap: Online Probabilistic 3D Mapping using
+Forward Ray Sensor Models
+Kumar Shaurya Shankar and Nathan Michael
+arXiv:2006.03512v2 [cs.RO] 13 Jun 2020
+The Robotics Institute
+Carnegie Mellon University
+Pittsburgh, PA 15213, USA
+{kshaurya,nmichael}@cmu.edu
+Abstract—Traditional dense volumetric representations for
+robotic mapping make simplifying assumptions about sensor
+noise characteristics due to computational constraints. We
+present a framework that, unlike conventional occupancy grid
+maps, explicitly models the sensor ray formation for a depth
+sensor via a Markov Random Field and performs loopy belief
+propagation to infer the marginal probability of occupancy at
+each voxel in a map. By explicitly reasoning about occlusions our
+approach models the correlations between adjacent voxels in the
+map. Further, by incorporating learnt sensor noise characteristics
+we perform accurate inference even with noisy sensor data
+without ad-hoc definitions of sensor uncertainty. We propose
+a new metric for evaluating probabilistic volumetric maps and
+demonstrate the higher fidelity of our approach on simulated as
+well as real-world datasets.
+I. I NTRODUCTION
+Robotic navigation algorithms for real-world robots require
+accurate and dense probabilistic volumetric representations of
+the environment in order to plan and execute optimal traversal.
+Sensor data, however, always has associated acquisition noise
+and encoding this uncertainty within the map representation
+while still maintaining computational tractability is a key
+challenge in deploying these systems outside of controlled
+laboratory settings.
+Occupancy grids are the conventional means of representing
+dense probabilistic volumetric data for robotic applications and
+are a discretised representation of binary labels probabilistically assigned to each cell denoting whether it is occupied
+or not [6]. However, a fundamental assumption made for
+tractability of occupancy grids and its variants is the conditional independence of the occupancy of cells given sensor
+data. In the presence of sensor noise, or glancing rays, these
+methods end up blurring out the map details and clearing
+occupied space, respectively [12].
+The seminal work of Thrun [29] argued that the occupancy
+mapping problem is essentially a high dimensional search in
+the space of all maps and should be tackled as such. By
+reasoning about the physics of sensor formation using forward
+models it is possible to reason in terms of the likelihood of
+the measurements for a given map hypothesis. The sensor
+data then directly drives a solution that explains the noisy
+observations as well as possible given the forward sensor
+model. However, this approach to mapping has historically
+been prohibitively expensive to compute in real-time.
+Fig. 1: In the presence of sensor noise, or glancing rays, standard
+occupancy grid methods (OctoMap [12], Left) end up blurring out the
+map details and clearing occupied space, respectively. An MRFMap
+(Right) reasons about sensor ray formation and explicitly couples
+voxels both within each ray and between rays. Inset from Fig. 8
+from maps inferred using the augmented ICL-NUIM dataset [4] at
+0.05 m resolution. Occupied voxels coloured by height to highlight
+morphological differences.
+We present a framework that explicitly reasons about the
+conditional dependence imposed on the occupancy of voxels
+traversed by each ray of a depth camera as a Markov Random
+Field (MRF). The tight intra-and inter-ray coupling explicitly incorporates conditional dependence of the occupancy of
+individual voxels as opposed to effectively marginalising out
+the sensor data in the form of log-odds updates as occupancy
+maps do. Visibility constraints imposed by using a forward
+sensor model enables simplification of the otherwise high dimensional inference. The forward model allows incorporating
+learnt sensor noise characteristics for more accurate inference.
+Finally, the inherent parallelisablity of both constructing the
+MRF and inferring it enable real-time performance on GPUs.
+Our key contributions are:
+• A Markov Random Field (MRF) based 3D occupancy
+grid framework that explicitly couples all voxels ray
+traced based on visibility;
+• Incorporation of learnt sensor noise characteristics for
+improved map fidelity compared to occupancy grids;
+• A principled evaluation metric for probabilistic occupancy maps; and
+1
+• An open-sourced real-time GPU implementation.
+II. R ELATED W ORK
+Although many representations exist for high fidelity surface
+mapping and SLAM, in this section we focus the discussion
+1 https://mrfmap.github.io
+on volumetric probabilistic map representations that can be
+used directly within planning that explicitly represent free as
+well as occupied space.
+Occupancy Grids [6] are the canonical representation used
+for this purpose. Binary labelled cells denote occupied or
+unoccupied regions of the map. A Bayes filter is used to
+update the probability of occupancy for each cell independently. Hornung et al. [12] introduced the OctoMap framework
+that uses octrees as an efficient data structure to implement
+variable resolution occupancy grids. However, by virtue of
+using very restrictive simplifying independence assumptions,
+measurement updates to neighbouring cells are not shared in
+occupancy grids, and adding noisy sensor data ends up blurring
+the map estimate. Variants such as Normal Distribution Transform Occupancy Maps [23] store a Gaussian density within
+each cell to capture a more precise measure of the occupancy
+distribution. Schulz et al. [25] present a real-time version
+of the same and add occlusion aware updates. Similarly,
+approaches exist that perform per cell filtering [24] that can be
+used to filter incoming sensor scan end points. Although the
+fidelity of the reconstruction in all these approaches is better
+than equivalent occupancy grid maps, they suffer the same
+drawbacks with independent cells not sharing information.
+Gaussian Process Occupancy Maps [19] and their variants
+such as [33, 13] have been employed for estimating continuous
+occupancy maps by casting occupancy inference as a classification problem. By exploiting implicit structure in the world
+correlated sparse sensor measurements are used to reason
+about unobserved regions of space. Additionally, these maps
+can also encode sensor data and pose uncertainty. However, a
+major drawback of these approaches is the high computational
+complexity and memory usage that is prohibitive for real-time
+operation with dense 3D data, despite recent attempts to address the same [22, 10]. However, these approaches effectively
+marginalise out the sensor information to point samples of
+occupied and unoccupied space. Intuitively, reasoning about
+measurements as rays instead of endpoints provides more
+information that all such approaches discard.
+Confidence-rich grid mapping [1] aims to enhance occupancy grids by encoding uncertainty within the grid and
+coupling voxels by reasoning about forward sensor models.
+The Bayes filter updates turn out to be identical to the
+ones used in [21], and thus share similar properties as with
+the MRFMap framework. The key difference between their
+approach and ours is that our framework allows for obtaining
+occupancy marginals based on poses being added or removed
+ad-hoc rather than relying on recursive Bayes filter updates,
+provides varying levels of resolution fidelity, and also permits
+the addition of visual data for enhancing inference, if required.
+Recently Vespa et al. [32] introduced a novel hybrid representation that combines TSDFs and occupancy grids that although
+doesn’t combine information from multiple rays explicitly,
+does use an implicit forward sensor model.
+The theoretical foundations for performing inference using ray belief propagation trace their origins to methods
+that recover shape from silhouette cues [9, 8]. More recent
+work [16, 30, 31] use similar probabilistic foundations to
+come up with generative models of appearance and occupancy
+representations from multiple image views. However, for all
+these frameworks, depth (and thus occupancy) is a latent
+variable that is not directly observed. Our framework, although
+heavily inspired by Ulusoy et al. [30, 31], utilises depth
+images as opposed to using grayscale camera images. Since
+the variable of interest is directly observed, inference is much
+faster and possible to do in real-time. Further, we augment the
+formulation to incorporate learnt sensor noise to enable higher
+mapping fidelity.
+III. T HEORY
+We focus on sensors whose measurements can be modelled
+as ray measurements that return a single distance. For such
+sensors the uncertainty in angle is negligible in comparison to
+the uncertainty in distance, permitting the ray approximation
+instead of volumetric tracing. We also assume independence
+of rays in order to handle the updates separately for each ray.
+We first present a brief introduction of depth ray potentials
+followed by the inference procedure, and finally the extension
+to incorporate learnt forward sensor model uncertainty.
+Fig. 2: Graphical model illustration of the MRFMap framework. Each
+ray traversing through the voxels oi establishes a depth potential ψr
+that connects all the occupancy nodes ori it traverses through and an
+auxiliary depth variable dr . Each voxel has a prior depth potential
+φi . Voxels connected by multiple rays (such as o9 ) share information
+across the graph. Voxels within a shaded region are the or voxels for
+that particular ray.
+A. Ray Markov Random Field
+A Markov Random Field (MRF) is essentially a bipartite
+graph containing nodes corresponding to variables and factors
+that are connected by edges. Consider the ray MRF formation
+process as shown in Fig. 2. Each ray from the camera
+sensor generates a ray potential that associates all the cells
+traversed by the ray. The cells are signified as nodes that
+can have a binary label oi ∈ {0, 1} signifying whether they
+are unoccupied or occupied, respectively. Similar to Ulusoy
+et al. [30], we specify a variable dr associated with the ray
+to represent the event that the depth of the first occupied cell
+along the direction of the ray is dri (for ori , i ∈ 1 . . . Nr in
+increasing distance along a ray). However, we do not model
+the appearance of the voxels along the ray, since unlike their
+work, we have direct access to depth information. The joint
+distribution of this field is
+p(o, d) =
+Y
+1 Y
+φi (oi )
+ψr (or , dr ),
+Z
+i∈X
+(1)
+r∈R
+where X is the set of all the voxels oi ∈ {0, 1} corresponding
+to them being empty or occupied respectively, and R is the
+set of all the rays from all the cameras viewing the scene,
+or = {or1 , . . . , orNr } is the list of all the voxels traversed by
+a ray r, dr is its corresponding depth variable, and Z is the
+normalisation constant. The total set of all the occupancy and
+depth variables are summarised as o = {oi | i ∈ X } and
+d = {dr | r ∈ R}. φi and ψr are the potential factors as
+described as follows:
+1) Prior Occupancy Factor: This is simply a unary factor
+assigning an independent Bernoulli prior γ to the voxel
+occupancy label for each voxel
+φi (oi ) = γ oi (1 − γ)1−oi .
+(2)
+In our experiments we use a non-informative prior however
+note that these per-voxel priors can be informed from perpixel predictive methods if desired.
+2) Ray Depth Potential Factor: A ray depth potential creates a factor graph connecting the binary occupancy variables
+ori for all the voxels traversed by a single ray by virtue of making a measurement. Each of these voxels has a corresponding
+distance from the camera origin, and thus the ray is defined
+to include a depth variable dr that represents the event that
+the measured depth is at distance dri . For this to happen all
+the preceding voxels ought to be empty, i.e., have the value 0,
+and the corresponding voxel needs to be occupied, i.e., have
+a value 1. This leads to the definition of the joint occupancy
+and depth potential factor
+(
+PNr r Q
+νr (dri ) if dr = i=1
+oi j<i (1 − orj )dri
+ψr (or , dr ) =
+.
+0
+otherwise
+(3)
+Here νr (dri ) denotes the probability of observing the measured
+depth measurement Zr if it originated from the latent depth
+variable dri that we model as
+νr (dri ) = N (Zr ; dri , σ(dri )).
+(4)
+This is our forward sensor model. This is based on the nature
+of RGB-D sensors, that are more precise compared to sonars
+that require different forward sensor models [29]. Similar
+to Basso et al. [3] we model this probability to vary in mean
+and noise as a function of the distance from the camera, which
+enables utilising learnt sensor noise characteristics for most
+RGB-D sensors for accurate map inference.
+This ray potential measures how well the occupancy and
+the depth variables explain the depth measurement Zr . This
+is more apparent when Eq. S7 is written as
+
+νr (dr1 ) if dr = dr1 , or1 = 1
+
+
+
+
+r
+r
+r r
+
+
+νr (d2 ) if d = d2 , o1 = 0, o2 = 1
+..
+ψr (or , dr ) = .
+.
+
+
+
+r
+r
+r
+r
+
+νr (dN ) if d = dN , o1 = 0,
+
+
+
+. . . , orNr −1 = 0, orNr = 1
+(5)
+This sparse structure of the ray potential enables simplification
+of the message passing equations by reducing the inference to
+a linear pass along the ray instead of exponential steps as
+detailed in the following subsections.
+B. Sum-Product Belief Propagation
+Sum-Product belief propagation [15] is a common messagepassing algorithm for performing approximate inference on
+cyclic factor graphs. By exploiting marginalisation of joint
+distributions using factorisation of a graph it enables computing marginal distributions very efficiently. Messages are
+passed back and forth between connected nodes and factors
+that try to influence the marginal belief of their neighbours.
+Although convergence is not guaranteed, in practice since the
+depth images are mostly consistent due to the relative accuracy
+of depth sensor measurements oscillations are rare and we
+obtain a solution quickly [14, p. 429].
+The message sent from a variable node x to a factor f is the
+cumulative belief of all the incoming messages from factors
+to the node except the factor in question
+µx→f (x) =
+Y
+µg→x (x),
+(6)
+g∈Fx \f
+where Fx is the set of neighbouring factors to x. Similarly, the
+message sent from the factor to the node is the marginalisation
+of the product of the value of the factor φf with all the
+incoming messages from nodes other than the node in question
+µf →x (x) =
+X
+Y
+φf (Xf )
+Xf \x
+µy→f (y),
+(7)
+y∈Xf \x
+where Xf is the set of all neighbouring nodes of f .
+Upon convergence, the estimated marginal distribution of
+each node is proportional to the product of all messages from
+adjoining factors
+p(x) ∝
+Y
+µg→x (x).
+(8)
+g∈Fx
+Similarly, the joint marginal distribution of the set of nodes
+belonging to one factor is proportional to the product of the
+factor and the messages from the nodes
+p(Xf ) ∝ φf (Xf )
+Y
+Xf
+µx→f (x).
+(9)
+C. Messages to the variables
+1) Ray Depth Potential to Depth Variable Messages:
+Since we are only concerned about the depth variable, we
+marginalise out the messages from all the occupancy nodes
+going to the ray depth potential. Following Eq. S2 we have
+µψr →dr (dr = dri ) =
+X
+···
+X
+ψr (or , dr )
+orNr
+or1
+Nr
+Y
+
+µorj →ψr orj .
+j=1
+(10)
+Naı̈vely evaluating this equation would involve 2Nr evaluations for each ray (corresponding to the two possible event
+states for each orj ). However, we can exploit the sparse nature
+of the ray depth potential to recursively simplify this expression. After dropping the ray index for notational convenience
+and abbreviating µorj →ψr (orj ) as µ(oj ) we obtain (see the
+supplementary document [26] for a detailed derivation)
+Y
+µψ→d (d = di ) = ν(di )µ(oi = 1)
+µ(ok = 0).
+(11)
+possibility of each preceding voxel to be occupied (first
+term). The first terms in both these equations are significant
+since they encapsulate the concept of visibility, i.e., as we
+traverse the ray through regions of occlusion, we can be less
+certain of the information the sensor measurement provides,
+and eventually the outgoing messages send out uninformative
+uniform messages.
+4) Occupancy Variable to Ray Depth Potential Messages:
+Since other rays can (and often do) pass through the same
+occupancy variable node, the outgoing message µori →ψr is
+computed as per Eq. S1. However, if a voxel is only traversed
+by a single ray, the only other factor that it receives messages
+from is the prior factor, φi , described in Eq. 2.
+D. Evaluation Metric for Probabilistic Occupancy Maps
+k<i
+2) Depth Variable to Ray Depth Potential Messages: Since
+the only factor connected to the depth variable is the ray
+depth potential itself, the message µdr →ψr is uninformative
+and, following Eq. S1, it is set to a uniform value.
+3) Ray Depth Potential to Occupancy Variable Messages:
+Similar to the depth variable messages, we marginalise out all
+the variables except the occupancy node in question
+µψr →ori (ori = 1) =
+XX
+dr
+µdr →ψr (dr )ψr (or , dr )
+or
+j
+j6=i
+Nr
+Y
+
+µorj →ψr orj . (12)
+j=1
+After simplification using the sparse structure of Eq. S7 and
+dropping the ray indices for convenience we obtain (see the
+supplementary document [26] for a detailed derivation)
+µψ→oi (oi = 1) =
+i−1
+X
+µ (oj = 1) ν(dj )
+j=1
+ν(di )
+Y
+Y
+µ (ok = 0) +
+k<j
+µ (ok = 0)
+(13)
+k<i
+and
+µψ→oi (oi = 0) =
+i−1
+X
+j=1
+µ (oj = 1) ν(dj )
+Y
+µ (ok = 0) +
+k<j
+N
+X
+Y
+µ (oj = 1)
+ν(dj )
+µ (ok = 0) . (14)
+µ(oi = 0)
+j=i+1
+k<j
+To provide an intuition of what these messages do, the
+positive outgoing message in Eq. 13 sends a high value only
+if the likelihood of all the preceding voxels being empty is
+high (second term) after taking into account the possibility of
+each preceding voxel to be occupied (first term). Similarly,
+the negative outgoing message in Eq. 14 sends a high value
+if any of the subsequent voxels have a high likelihood of
+being occupied (second term) after taking into account the
+Fig. 3: Piecewise continuous ray generating surface likelihood evaluation. For a camera ray parameterised by s, the probability of
+occupancy per voxel can be considered a region with a constant
+occlusion density α(s). The visibility decreases corresponding to the
+magnitude of α(s) and the length traversed within. The probability
+of an occluding surface existing at a distance s is ω(s), which is
+the product of the visibility and the map occlusion probability along
+the ray. Here, even though a voxel in the second region of the
+probabilistic map has higher probability mass of occupancy, it is
+obscured by a traversed region before it that reduces the likelihood
+of it being the generating surface for the ray depth measurement.
+In order to determine the accuracy of a given probabilistic occupancy map, especially one that has been generated
+from noisy data, the best map hypothesis should be one
+that maximises the likelihood of the sensor data. Further,
+it is not simply enough to look at thresholded occupancy
+values of a map and determine if sensor ray endpoints lie
+within an occupied voxel, as done in [12]; one has to reason
+about visibility and occlusions by partially occupied voxels
+along the way. To approximate this, Stoyanov et al. [28]
+sampled negative free space to determine the fidelity of the
+reconstructed map. However, this is an ad-hoc approach and
+needs heuristics to determine what the region of the negative
+sampled distance along a ray should be. Pathak et al. [20]
+introduced a visibility based measure that reasoned about
+occlusion. However their model does not take into account the
+fact that rays traverse through unequal lengths within a voxel,
+allowing the choice of discretisation to significantly influence
+the likelihood. To fix this, a continuous version of the same
+is presented by Crispell [5] that models voxels as piecewise
+constant regions of occlusion density, which is what we present
+here in the context of probabilistic map evaluation.
+As an analogue for the event that an occluding surface
+occurs at cell depth di , ω(s) is defined as the probability
+density function of the measurement generating surface along
+the ray length parameterised by a distance variable s. The
+probabilistic volume is reimagined as a region of occlusion
+density, α(s), that monotonically reduces the chances of the
+originating surface being at distance s as we move further
+along the ray (see Fig. 3). The visibility at a distance s is
+defined as
+0
+Rs
+0
+vis(s) = e− 0 α(s )ds = e−
+Pn−1
+i=0
+αi `i +αn (s−sn )
+,
+(15)
+where αi denote the piecewise constant occlusion density, sn
+denotes the distance of the ray upon hitting the nth voxel,
+and li = si+1 − si denote the lengths travelled within each
+voxel discretisation. This permits using voxels of differing
+dimensions while evaluating the accuracy. The difference
+between two consecutive visibility probabilities across a voxel
+boundary then is equivalent to an occlusion probability assigned to it
+Ωi = visi − visi+1 .
+(16)
+The likelihood of the originating surface being at a particular
+distance s is proportional to the rate of change in the visibility
+along the ray as it traverses a region. This leads to the
+definition
+d
+(1 − vis(s))
+(17)
+ω(s) =
+ds
+Rs
+0
+0
+= α(s)e− 0 α(s )ds
+ω(s) = α(s) vis(s).
+(18)
+Intuitively, even if there exist voxels along a ray with a
+higher probability of occupancy as per the map, the fact
+that the ray has already traversed through partially occluded
+regions previously reduce the probability that the measurement
+generating surface exists further along the ray (see Fig. 3).
+Note the similarity with the first terms in Eq. 13 and Eq.14.
+We thus define a ray depth measurement as being accurately
+classified if the sensor measurement lies within the voxel
+boundaries of the voxel at which the maximum likelihood
+generating surface,i.e., the distance arg max ω(s) is found. On
+reaching the map boundary, if the visibility is not reduced
+sufficiently by the map volume, then the generating surface is
+determined to be accurate if the sensor measurement is greater
+than the distance to the map boundary, i.e., if Zr > s∞ .
+IV. I MPLEMENTATION
+A. Belief Propagation
+We initialise all the occupancy variables with a Bernoulli
+initial distribution as in [31] with a probability of 0.1. The
+lower value corresponds to the observation that regions of
+interest are mostly empty. Lower prior probabilities aid in
+the initial inference steps since it permits the visibility terms
+to not saturate the outgoing messages. At inference time
+all keyframe images are ray traced and each ray atomically
+updates the corresponding nodes it traverses. We explicitly
+take into account the traversed length of each ray within
+a voxel to determine the contribution of the specific ray.
+The ray traversal is done via the standard 3DDA traversal
+algorithm [2]. These are then accumulated to obtain the
+current incoming belief and prepared for the next pass of
+inference. Since storing all incoming messages for each voxel
+is prohibitive, we make an assumption that all rays going
+through a voxel from a single keyframe send the same average
+message. Thus, for each new keyframe image we create an
+auxiliary buffer that stores the average outgoing message. For
+the purpose of this work we perform three sequential up and
+down passes of belief propagation between all the factors and
+nodes respectively which we have empirically observed to be
+sufficient for obtaining convergence.
+B. Compact GPU representation
+We extend and utilise the GVDB library [11], which
+represents a VDB [17]-like sparse data structure on GPUs.
+The smallest unit of allocated storage is a brick, which is a
+configurable size. In our implementation we chose it to be 83 .
+Each level of the hierarchy then can contain a configurable
+number of bricks. Brick data is stored in contiguous space,
+enabling sparse data storage. The library allows for empty
+skip 3DDA ray traversals for regions where no data is stored.
+Fig. 3 demonstrates a pictorial 2D example of a < 2, 2, 2 >
+configuration of the topology.
+When adding new depth images, new bricks are allocated
+in a region around the reprojected 3D depth point cloud. This
+enables fast skip steps until within the neighbourhood of the
+ray measurement where the sensor model provides the most
+information. Once within an occupied brick, we traverse each
+voxel until a 3σ distance beyond the measured depth at which
+point the sensor model provides no more useful information.
+C. Incorporating learnt sensor noise models
+Projective Infra-Red (IR) based RGB-D cameras and stereo
+cameras have a distinct quadratic increase in measurement
+uncertainty as a function of depth and often also have bias
+errors [3]. We choose to model the sensor bias and noise
+as a function of distance travelled along a ray. Other factors
+such as angle of incidence, reflectivity, and texture are also
+some of the primary contributors to sensor noise that are only
+partially addressed within this model and are out of scope
+to model in this work. Within our implementation for the
+forward sensor model (Eq. 4), at any given traversed length,
+we first utilise the sensor bias to predict what the mean sensor
+measurement would be and then evaluate the probability of
+a given measurement originating from this predicted measurement and distributed using the learnt noise value. Note
+that this is a significant difference to traditional approaches,
+where undistortion functions need to be computed [3] as
+a first step that are then provided to conventional mapping
+processes. In addition to incorporating it within the mapping
+process to reduce latency, directly using the learnt sensor
+noise characteristics can also easily account for other sensor
+or environment idiosyncrasies without doing any additional
+preprocessing.
+2) Acquisition Process: The camera is held static on a tripod while a chessboard is moved around in the view frustum of
+the depth camera. The projected calibration target dimensions
+in the image are used to create a valid masked depth image. For
+every valid pixel in the masked depth image, the corresponding
+ground truth location is determined by performing a ray to
+plane intersection test using the relative transform obtained
+from the relevant mocap frames. Thus, each masked depth
+image provides a large number of ground truth and measured
+depth values per pixel location. This data is then binned over
+small configurable pixel neighbourhoods that are then used to
+fit bias and noise models (Fig. 4). We choose a 20 × 20 pixel
+neighbourhood to trade-off noise model fidelity and memory
+usage on the GPU. Overall meta trends of the bias and variance
+of the raw data compared to the ground truth are shown in
+Fig. 5. These are generated by taking the mean of the bias
+and standard deviation images in the central third patch of
+pixels and are used in our evaluation.
+V. E VALUATION AND R ESULTS
+Fig. 4: Top: A real-time utility that visualises the mocap calibration
+target location and the relevant slices of the view frustum for which
+sufficient data has been collected for learning the forward sensor noise
+model. Bottom: After collecting up to the order of 104 data points
+for each valid 20 × 20 pixel cell, the measured depth is regressed
+against the ground truth depth to fit a polynomial sensor noise model
+and the residuals are used to regress the bias and variance. Shown
+for a Realsense D435 operating at 848 × 480 px resolution.
+Fig. 5: Meta level characteristics of the bias and standard deviation
+for the Realsense D435 and the Kinect One on the left and right,
+respectively. Note that the characteristics of the D435 camera follow
+a quadratic profile whereas those of the Kinect One are almost linear.
+We thus choose to directly learn the sensor bias and noise
+for every pixel region for all depths in the operating range of
+the camera. We collect measured and ground truth depths for
+pixel regions and fit a 2nd degree polynomial as suggested by
+prior literature [3]. These coefficients are then loaded into GPU
+memory and are used during inference and accuracy estimation
+(see Fig. 4).
+1) Instrumentation: Motion capture (mocap) is used to
+determine camera and a calibration target’s extrinsics. The
+capture volume adequately covers the sensor frustum for both
+the camera sensors. Next, temporal lag between the motion
+capture data stream and the image stream is computed by
+comparing the relative velocities of the calibration target
+within the image frame and within the mocap arena.
+The emphasis of our results here is that
+• The MRFMap framework enables higher fidelity mapping
+than OctoMap [12], the standard robotic grid based
+volumetric occupancy framework, especially for noisy
+data; and
+• The time taken for ray tracing and inference is much
+faster than CPU based approaches, especially at finer map
+resolutions.
+Quantitatively, we measure the accuracy of the maps by
+utilising the metric discussed in Sec. III-D. All pixels (rays)
+for which the distance of the maximum likelihood generating
+surface, s lies within a constant 1.5σ standard deviation of the
+measured depth are classified as accurate, and those that are
+not are classified as being incorrect. Sample accuracy images
+are shown in Fig. 7. The final accuracy score for a given depth
+image is then the sum of all pixels (rays) that are accurately
+explained by the map over the total number of valid depth
+pixels in the depth image. The accuracy score is then computed
+over all scans in the dataset and the mean and the standard
+deviation reported in the tables below.
+We detail three different scenarios
+1) A simple simulated scene in the Gazebo2 simulator to
+demonstrate the accuracy measure and ability to encode
+bias and noise modelling within inference;
+2) A standard open access dataset with very precise simulated sensor noise for RGB-D sensors to demonstrate
+inference with simulated real-world noise; and
+3) A real-world dataset where we use a noisy sensor
+(Realsense D435) and evaluate the generated map using
+a much more accurate sensor (Kinect One).
+1) Demonstrating the accuracy metric: For the Gazebo
+simulation environment shown in Fig. 6 we obtain 12 ground
+truth ray traced images and then sample simulated depth
+images by utilising the learnt per 20 × 20 px patch bias and
+2 http://gazebosim.org/
+Octomap Accuracy
+0
+Fig. 6: Left: We use a synthetic scene in the Gazebo simulator as
+viewed from 12 different simulated depth camera views of 640 × 480
+px resolution. Right: Camera rig for a Realsense D435 and a Kinect
+One sensor used for acquiring the real-world dataset.
+standard deviation noise models for the Realsense D435 at
+640 × 480 px resolution. These simulated true noise images
+are used to infer the probabilistic maps and are then evaluated
+for accuracy in a leave one out cross-validation scheme.
+A sample view is shown in Fig. 7 and the corresponding
+accuracy is shown in Table I. For a specific pixel, we plot
+the occupancy probability of the map pocc , the visibility vis,
+and the generating surface probability ω(s). The peak of the
+ω(s) distribution is highlighted by a blue vertical line - thus,
+according to the accuracy metric the pixel would be classified
+as being accurate if the ground truth depth measurement at
+that pixel lies within 1σ of this distance. This region is shown
+as a purple translucent region. As can be seen in Fig. 6 for
+the given pixel the MRFMap predicted ground truth distance
+lies within this region, while that for the OctoMap does not.
+The dashed vertical line is the noisy measurement sampled
+from the ground truth for the pixel that was used for inferring
+the map - highlighting the fact that incorporating the forward
+sensor noise and the bias within the inference allows to
+compensate for noisy, inflated depth measurements.
+Since the injected depth noise and bias is non-trivial,
+OctoMap struggles at accurately inferring the map, while
+MRFMap infers the map accurately, predicting the generating
+surface location for each pixel to be close to the ground
+truth depth, thus demonstrating the ability to compensate for
+injected bias and noise when correctly modelled.
+Resolution
+0.01m
+0.02m
+0.05m
+MRFMap
+OctoMap
+0.870 ± 0.011
+0.082 ± 0.010
+0.917 ± 0.022
+0.118 ± 0.020
+0.843 ± 0.017
+0.213 ± 0.049
+200
+200
+400
+400
+0
+1.5
+200 400
+d maxdgt dmeas
+600
+0.5
+0.0
+0
+1.5
+pocc
+vis
+1.0
+MRFMap Accuracy
+0
+200 400
+d gtmaxdmeas
+600
+pocc
+vis
+1.0
+0.5
+2.5
+3.0
+3.5
+Cell Depth ||di||
+4.0
+0.0
+2.5
+3.0
+3.5
+Cell Depth ||di||
+4.0
+Fig. 7: Computing accuracy with simulated learnt noise. Top: Accuracy images. Correctly predicted pixels are coloured yellow, incorrectly predicted pixels as green, and invalid pixels as purple.
+Insets: Plots of ray-traced pocc (s), ω(s), andvis(s) for the selected
+pixel. Purple vertical line represents the ground truth depth dgt , with
+a corresponding 1σ band around it to determine if the maximum
+likelihood generating surface location is present within. Dashed
+vertical line is the depth measurement dmeas at the selected pixel
+in this held out sampled depth image for evaluation. Blue vertical
+line is the location of the maximum likelihood generating surface
+dmax = arg max ω(s)(Sec. III-D). Note how for the selected ray at
+the right edge of the cuboidal box, the MRFMap accurately describes
+the probability of occupancy along the ray (green). The ray first
+hits the cuboidal box, corresponding to the first peak of ω around
+3.05 m and then travels through empty space till it hits the ground
+at a distance of 4.0 m. For the OctoMap, an incorrect over-confident
+map occupancy probability causes the visibility (red) to drastically
+drop and it incorrectly predicts the most likely generating surface.
+[3] for performing map inference, and a constant noise model
+for the evaluation. Accuracy results are presented in Table II.
+As expected, at finer resolutions, the noise model can very
+precisely impact inference involving multiple voxels and thus
+provides much more accuracy than at lower voxel resolutions.
+TABLE I: Accuracy values for the simulated ground truth environment using leave one out cross-validation over 12 images in a
+4 × 4 × 3 m3 environment.
+2) Demonstration on publicly available dataset with known
+ground truth: We use the livingroom1 noisy depth sequence of the Augmented ICL-NUIM Dataset [4] since it
+accurately models sensor noise characteristics of projective IR
+based RGB-D cameras. To select the keyframes to perform
+inference we use a simple geometric displacement based
+heuristic. A new keyframe is generated if the tangent norm
+of the translation or the rotation from the last keyframe pose
+is larger than a threshold (here 1.0 for each). To evaluate the
+accuracy we then use the ground truth depth images from the
+same trajectory. We use the Kinect noise model as reported in
+Fig. 8: Occupied voxel map for the livingroom1 noisy depth
+sequence of the Augmented ICL-NUIM dataset [4]. 10 × 10 × 2 m3
+volume at 0.05 m resolution. Left: OctoMap, Right: MRFMap. Note
+the artifacts in the OctoMap due to a combination of glancing rays
+and sensor noise.
+3) Real-world dataset: For the real-world dataset we utilise
+a rig shown in Fig. 6 in a Vicon motion capture arena and
+capture a human subject. Maps are built with the noisier
+stereo IR Realsense D435 camera and accuracy evaluated with
+data from the Kinect One, a Time of Flight (ToF) based
+Resolution
+0.01 m
+0.02 m
+0.05 m
+Resolution
+0.01 m
+0.02 m
+0.05 m
+MRFMap
+OctoMap
+0.945 ± 0.097
+0.922 ± 0.105
+0.939 ± 0.101
+0.882 ± 0.108
+0.891 ± 0.114
+0.723 ± 0.113
+MRFMap
+OctoMap
+0.305 ± 0.185
+0.309 ± 0.192
+0.335 ± 0.195
+0.302 ± 0.191
+0.406 ± 0.188
+0.263 ± 0.170
+TABLE II: Accuracy means and standard deviations over the entire
+dataset for the livingroom1 noisy depth sequence. The MRFMaps
+are constructed using the Kinect forward sensor noise model and
+evaluated on a constant noise model. Map volume is 10 × 10 × 5 m3 .
+inference than an OctoMap, especially at finer resolutions.
+Fig. 10 demonstrates that, for instance, at a resolution of
+0.01 m on the livingroom1 dataset even after adding 30
+keyframes, ray tracing a new image and performing three
+passes of inference over all keyframes still takes two orders
+of magnitude less time than adding it to the OctoMap. These
+results were obtained on an NVIDIA RTX 2060 Super and an
+eight-core AMD Ryzen 3700x CPU.
+ICL livingroom1
+101
+Time taken (s)
+camera. The latter is employed for evaluating accuracy in
+the absence of having ground truth depth. For inference, we
+use the aggregate polynomial model for bias and standard
+deviation demonstrated in Fig. 5 for all pixels. The keyframes
+are selected based on the same geometric heuristic with
+smaller thresholds (0.5 each) to account for the smaller capture
+volume. Low accuracy values can be attributed to errors in
+the inter-camera registration and the dynamic camera motion.
+Inferred maps are shown in Fig. 9 at multiple resolutions and
+highlight the drastically better qualitative maps obtained from
+the noisy sensor data.
+TABLE III: Accuracy values for the real-world dataset shown in
+Fig. 9. Map volume is 3 × 3 × 2 m3 .
+100
+MRFMap 0.01m
+OctoMap 0.01m
+MRFMap 0.02m
+OctoMap 0.02m
+MRFMap 0.05m
+OctoMap 0.05m
+10 1
+10 2
+(a) 0.01 m
+0
+5
+10
+15
+Image index
+20
+25
+30
+Fig. 10: Incremental time taken for adding a new image and performing inference in an MRFMap and an OctoMap to generate Fig. 8
+(b) 0.02 m
+(c) 0.05 m
+Fig. 9: OctoMap (left) and MRFMap (right) at various map resolutions on real-world data. The MRFMaps are constructed using
+Realsense D435 data at 848 × 480 px resolution with the aggregate
+forward sensor noise model (including bias) shown in Fig. 5 and
+evaluated on a constant noise model using a rigidly attached Kinect
+One. Note the much better reconstructed fidelity of the MRFMaps in
+the head and the hand region. Dark violet represents lower occupancy
+probability while bright yellow represents high occupancy probability.
+4) Timing: By virtue of being a framework that retains
+keyframe sensor data in memory, adding a new image causes
+the inference to iterate over all the images, and the overall time
+taken for inference increases monotonically. However, due to
+the accelerated data structure and parallelised implementation,
+an MRFMap is much faster at ray tracing and performing map
+VI. C ONCLUSION AND F UTURE W ORK
+Through our experiments, we show that explicitly modelling
+the intra-and inter-dependence of neighbouring voxels due to
+sensor ray formation as opposed to treating all voxels as being
+independent enable more accurate occupancy inference than
+conventional occupancy grid mapping frameworks. Incorporating learnt forward sensor models helps obtain even higher
+map fidelity, and ensures that the map is a maximum likelihood
+solution that best attempts to explain the sensor data.
+The MRFMap framework is envisioned as an essential
+building block for replacing traditional grid based submapping
+implementations [7, 18, 27] since it enables performing ondemand inference to obtain a probabilistically accurate map
+without having to approximately resample the submaps when
+moving any subset of keyframe poses. The monotonically increasing memory and runtime considerations can be addressed
+by marginalising out occupancy in the inactive regions. In
+the future we intend to explore these two capabilities for
+performing dense probabilistic SLAM.
+ACKNOWLEDGEMENTS
+The authors would like to thank Dr. Osman Ulusoy for their
+valuable insights and discussions.
+R EFERENCES
+[1] Ali-Akbar Agha-Mohammadi, Eric Heiden, Karol Hausman, and Gaurav Sukhatme. Confidence-rich Grid Mapping. The Intl. Journal of Robotics Research, 38(12-13):
+1352–1374, 2019.
+[2] John Amanatides and Andrew Woo. A Fast Voxel Traversal Algorithm for Ray Tracing. In Proc. of Eurographics,
+volume 87, pages 3–10, 1987.
+[3] Filippo Basso, Emanuele Menegatti, and Alberto Pretto.
+Robust Intrinsic And Extrinsic Calibration Of RGB-D
+Cameras. IEEE Transactions on Robotics, (99):01–18,
+2018.
+[4] Sungjoon Choi, Qian-Yi Zhou, and Vladlen Koltun.
+Robust Reconstruction of Indoor Scenes. In Proc. of
+IEEE Conf. on Computer Vision and Pattern Recognition
+(CVPR), 2015.
+[5] Daniel E. Crispell. A Continuous Probabilistic Scene
+Model for Aerial Imagery. PhD thesis, Brown University,
+2010.
+[6] Alberto Elfes. Using Occupancy Grids for Mobile Robot
+Perception and Navigation. Computer, 22(6):46–57,
+1989.
+[7] Carlos Estrada, José Neira, and Juan D. Tardós. Hierarchical SLAM: Real-Time Accurate Mapping of Large
+Environments. IEEE Transactions on Robotics, 21(4):
+588–596, 2005.
+[8] Pau Gargallo, Peter Sturm, and Sergi Pujades. An
+Occupancy-Depth Generative Model of Multi-view Images. In Proc. of Asian Conf. on Computer Vision, pages
+373–383. Springer, 2007.
+[9] Li Guan, Jean-Sébastien Franco, and Marc Pollefeys. 3D
+Object Reconstruction with Heterogeneous Sensor Data.
+In Proc. of Intl. Symposium on 3D Data Processing,
+Visualization and Transmission, 2008.
+[10] Siwei Guo and Nikolay A. Atanasov. Information Filter
+Occupancy Mapping using Decomposable Radial Kernels. In Proc. of IEEE/RSJ Intl. Conf. on Intelligent
+Robots and Systems (IROS), 2019.
+[11] Rama K. Hoetzlein. GVDB: Raytracing Sparse Voxel
+Database Structures on the GPU. In Proc. of High
+Performance Graphics, pages 109–117, 2016.
+[12] Armin Hornung, Kai M. Wurm, Maren Bennewitz, Cyrill
+Stachniss, and Wolfram Burgard. OctoMap: An efficient
+probabilistic 3D mapping framework based on octrees.
+Autonomous Robots, 34(3):189–206, 2013.
+[13] Soohwan Kim and Jonghyuk Kim. Building Occupancy
+Maps with a Mixture of Gaussian processes. In Proc.
+of IEEE Intl. Conf. on Robotics and Automation (ICRA),
+pages 4756–4761. IEEE, 2012.
+[14] Daphne Koller and Nir Friedman. Probabilistic Graphical Models: Principles and Techniques. MIT press, 2009.
+[15] Frank R. Kschischang, Brendan J. Frey, and H.-A.
+Loeliger. Factor Graphs and the Sum-Product Algorithm.
+IEEE Transactions on information theory, 47(2):498–
+519, 2001.
+[16] Shubao Liu and David B. Cooper. Ray Markov Random
+Fields for Image-Based 3D Modeling: Model and Efficient Inference. In Proc. of IEEE Conf. on Computer
+Vision and Pattern Recognition (CVPR), pages 1530–
+1537, 2010.
+[17] Ken Museth. VDB: High-resolution Sparse Volumes
+with Dynamic Topology. ACM Transactions on Graphics
+(TOG), 32(3):27, 2013.
+[18] Kai Ni, Drew Steedly, and Frank Dellaert. Tectonic
+SAM: Exact, Out-of-Core, Submap-Based SLAM. In
+Proc. 2007 IEEE Intl. Conf. on Robotics and Automation
+(ICRA), pages 1678–1685, 2007.
+[19] Simon T. O’Callaghan and Fabio T. Ramos. Gaussian
+Process Occupancy Maps. The International Journal of
+Robotics Research, 31(1):42–62, 2012.
+[20] Kaustubh Pathak, Andreas Birk, Jann Poppinga, and
+Soren Schwertfeger. 3D Forward Sensor Modeling and
+Application to Occupancy Grid based Sensor Fusion. In
+Proc. of IEEE/RSJ Intl. Conf. on Intelligent Robots and
+Systems (IROS), pages 2059–2064, 2007.
+[21] Thomas Pollard and Joseph L. Mundy. Change Detection
+in a 3-d World. In Proc. of IEEE Conf. on Computer
+Vision and Pattern Recognition (CVPR), pages 1–6, 2007.
+[22] Fabio Ramos and Lionel Ott. Hilbert Maps: Scalable
+Continuous Occupancy Mapping with Stochastic Gradient Descent. The Intl. Journal of Robotics Research, 35
+(14):1717–1730, 2016.
+[23] Jari Saarinen, Henrik Andreasson, Todor Stoyanov, Juha
+Ala-Luhtala, and Achim J. Lilienthal. Normal Distributions Transform Occupancy Maps: Application to LargeScale Online 3D Mapping. In Proc. of IEEE Intl. Conf.
+on Robotics and Automation (ICRA), pages 2233–2238,
+2013.
+[24] Marcelo Saval-Calvo, Luis Medina-Valdés, José Marı́a
+Castillo-Secilla, Sergio Cuenca-Asensi, Antonio
+Martı́nez-Álvarez, and Jorge Villagrá. A Review of the
+Bayesian Occupancy Filter. Sensors, 17(2):344, 2017.
+[25] Cornelia Schulz, Richard Hanten, and Andreas Zell.
+Efficient Map Representations for Multi-Dimensional
+Normal Distributions Transforms. In Proc. of IEEE/RSJ
+Intl. Conf. on Intelligent Robots and Systems (IROS),
+pages 2679–2686, 2018.
+[26] Kumar Shaurya Shankar and Nathan Michael. Supplementary Material to: MRFMap: Online Probabilistic 3D
+Mapping using Forward Ray Sensor Models.
+[27] Paloma Sodhi, Bing-Jui Ho, and Michael Kaess. Online
+and Consistent Occupancy Grid Mapping for Planning
+in Unknown Environments. In Proc. of IEEE/RSJ Intl.
+Conf. on Intelligent Robots and Systems (IROS), pages
+7879–7886, 2019.
+[28] Todor Stoyanov, Martin Magnusson, and Achim J. Lilienthal. Comparative Evaluation of the Consistency of
+Three-dimensional Spatial Representations used in Autonomous Robot Navigation. Journal of Field Robotics,
+30(2):216–236, 2013.
+[29] Sebastian Thrun. Learning Occupancy Grid Maps with
+Forward Sensor Models. Autonomous robots, 15(2):111–
+127, 2003.
+[30] Ali O. Ulusoy, Andreas Geiger, and Michael J. Black.
+Towards Probabilistic Volumetric Reconstruction using
+Ray Potentials. In Proc. of Intl. Conf. on 3D Vision
+(3DV), pages 10–18, 2015.
+[31] Ali O. Ulusoy, Michael J. Black, and Andreas Geiger.
+Patches, Planes and Probabilities: A Non-Local Prior
+for Volumetric 3D Reconstruction. In Proc. of the
+IEEE Conf. on Computer Vision and Pattern Recognition
+(CVPR), pages 3280–3289, 2016.
+[32] Emanuele Vespa, Nikolay Nikolov, Marius Grimm, Luigi
+Nardi, Paul H.J. Kelly, and Stefan Leutenegger. Efficient
+Octree-based Volumetric SLAM Supporting SignedDistance and Occupancy Mapping. IEEE Robotics and
+Automation Letters, 3(2):1144–1151, 2018.
+[33] Jinkun Wang and Brendan Englot. Fast, Accurate Gaussian Process Occupancy Maps via Test-Data Octrees and
+Nested Bayesian Fusion. In Proc. of IEEE Intl. Conf.
+on Robotics and Automation (ICRA), pages 1003–1010,
+2016.
+Supplementary Material to:
+MRFMap: Online Probabilistic 3D Mapping using Forward Ray Sensor Models
+Kumar Shaurya Shankar and Nathan Michael
+This document derives the messages for the sum-product belief propagation algorithm presented in the paper and should be
+treated as an appendix to the same.
+I. S UM -P RODUCT B ELIEF P ROPAGATION
+A. Sum-Product Belief Propagation
+Sum-Product belief propagation is a common message-passing algorithm for performing inference on factor graphs. By
+exploiting marginalisation of joint distributions using factorisation of a graph it enables computing marginal distributions very
+efficiently. A factor graph is a bipartite graph containing nodes corresponding to variables and factors that are connected by
+edges. Messages are passed between connected nodes and factors that try to influence the marginal belief of their neighbours.
+The passing continues until convergence (if any) is achieved.
+The message sent from a variable node x to a factor f is the cumulative belief of all the incoming messages from factors
+to the node except the factor in question
+Y
+µx→f (x) =
+µg→x (x),
+(S1)
+g∈Fx \f
+where Fx is the set of neighbouring factors to x. Similarly, the message sent from the factor to the node is the marginalisation
+of the product of the value of the factor φf with all the incoming messages from nodes other than the node in question
+Y
+X
+µf →x (x) =
+φf (Xf )
+µy→f (y),
+(S2)
+Xf \x
+y∈Xf \x
+where Xf is the set of all neighbouring nodes of f .
+Upon convergence, the estimated marginal distribution of each node is proportional to the product of all messages from
+adjoining factors
+Y
+p(x) ∝
+µg→x (x)
+(S3)
+g∈Fx
+Similarly, the joint marginal distribution of the set of nodes belonging to one factor is proportional to the product of the factor
+and the messages from the nodes
+Y
+p(Xf ) ∝ φf (Xf )
+µx→f (x)
+(S4)
+Xf
+B. Markov Random Field
+Each ray in all the cameras generates a factor graph, the joint distribution of which is
+Y
+1 Y
+φi (oi )
+ψr (or , dr ),
+p(o, d) =
+Z
+i∈X
+(S5)
+r∈R
+where X is the set of all the voxels oi ∈ {0, 1} and R is the set of all the rays from all the cameras viewing the scene,
+or = {or1 , . . . , orNr } is the list of all the voxels traversed by a ray r, dr is its corresponding depth variable, and Z is the
+normalisation constant. The total set of all the occupancy and depth variables are summarised as o = {oi | i ∈ X } and
+d = {dr | r ∈ R}. φi and ψr are the potential factors as described as follows:
+1) Prior Occupancy Factor: This is simply a unary factor assigning an independent Bernoulli prior γto the voxel occupancy
+label for each voxel
+φi (oi ) = γ oi (1 − γ)1−oi .
+(S6)
+Note that these priors can be informed from predictive methods if required.
+2) Ray Depth Potential Factor: A ray potential creates a factor graph connecting the binary occupancy label oi for all voxels
+traversed by a single ray by virtue of making a measurement. Each of these voxels has a corresponding distance from the
+camera origin, and thus the ray is defined to include a depth variable dr that represents the event that the measured depth is at
+distance dri . For this to happen all the preceding voxels ought to be empty and the corresponding voxel needs to be occupied.
+This leads to the definition of the joint occupancy and depth potential factor
+(
+PNr r Q
+νr (dri ) if dr = i=1
+oi j<i (1 − orj )dri
+ψr (or , dr ) =
+.
+(S7)
+0
+otherwise
+Here νr (dri ) denotes the probability of observing depth dri given the measured depth value Dr that we model as νr (dri ) =
+N (dri ; Dr , σ(dri )). Note that we model this probability to vary in mean and noise as a function of the distance from the camera,
+which enables utilising learnt sensor noise characteristics.
+This ray potential measures how well the occupancy and the depth variables explain the depth measurement Dr . This is
+more apparent when Eq. S7 is written as
+
+νr (dr1 ) if dr = dr1 , or1 = 1
+
+
+
+
+νr (dr2 ) if dr = dr2 , or1 = 0, o2 = 1
+ψr (or , dr ) = .
+(S8)
+..
+
+
+
+
+
+νr (drN ) if dr = drN , or1 = 0, . . . , orNr −1 = 0, orNr = 1
+This sparse structure of the ray potential enables massive simplification of the message passing equations, as shown next.
+II. M ESSAGE PASSING D ERIVATION
+A. Ray Depth Potential to Depth Variable Messages
+Since we’re only concerned about the depth variable, we marginalise out the messages from all the occupancy nodes going
+to the ray depth potential. Following S2 we have
+µψr →dr (dr = dri ) =
+X
+···
+or1
+X
+ψr (or , dr )
+orNr
+N
+r
+Y
+
+µorj →ψr orj .
+(S9)
+j=1
+Naı̈vely evaluating this equation is not feasible. However, we can exploit the sparse diagonal nature of the ray depth potential
+to recursively simplify this expression. After dropping the ray index for notational convenience and abbreviating µorj →ψr (orj )
+as µ(oj ) we have
+4
+}|
+z
+{
+N
+Y
+X
+X
+µ (oj )
+···
+ψ (o1 = 1, o2 , . . . , oN , d = di )
+µψ→d (d = di ) = µ (o1 = 1) 
+o2
+oN
+j=2
+
+
+N
+X
+X
+Y
++ µ (o1 = 0) 
+···
+ψ (o1 = 0, o2 , . . . , oN , d = di )
+µ (oj )
+o2
+oN
+(S10)
+j=2
+|
+{z
+}
+
+From Eq. S8, for the top expression 4 the ray potential term ψ (o1 = 1, o2 , . . . , oN , d = di ) evaluates to ν(d1 ) if i = 1 and
+0 otherwise. Since it only depends on d1 it can be brought out of the summation as follows:
+4 = ν(d1 )
+X
+o2
+|
+···
+N
+XY
+µ (oj ) .
+(S11)
+oN j=2
+{z
+evaluates to 1.
+}
+Assuming that all the incoming messages µ are normalised such that they sum to 1, the terms highlighted with the underbrace
+evaluate to 1. We maintain this normalisation in our implementation.
+Assuming that i 6= 1,Qthe bottom expression  can be recursively expanded similar to this step. Each such expansion brings
+in a term of the form k<j µ(ok = 0)µ(oj = 1)ν(dj ), until we reach the ith term Thus
+µψ→d (d = di ) =
+Y
+evaluates to ν(di )
+
+N
+}|
+{ Y
+X
+Xz
+···
+ψ (o1 = 0, o2 = 0, . . . , oi = 1, oi+1 , . . . oN , d = di )
+µ (oj )
+µ(ok = 0) µ(oi = 1)
+oi+1
+k<i
++ µ(oi = 0)
+X
+oi+1
+···
+X
+oN
+oN
+j=i+1
+ψ (o1 = 0, o2 = 0, . . . , oi = 0, oi+1 , . . . oN , d = di )
+|
+{z
+}
+evaluates to 0
+N
+Y
+j=i+1
+
+µ (oj )
+(S12)
+where the first term evaluates to ν(di ), and the next term evaluates to 0, giving us
+Y
+µψ→d (d = di ) =
+X
+µ(ok = 0)µ(oi = 1)ν(di )
+···
+oi+1
+k<i
+Y
+µ (oj )
+oN j=i+1
+|
+= ν(di )µ(oi = 1)
+N
+X Y
+{z
+}
+evaluates to 1
+µ(ok = 0)
+(S13)
+k<i
+B. Depth Variable to Ray Depth Potential Messages
+The message from the depth variable to the depth ray potential is irrelevant since the only factor connected to the variable
+is the potential itself.
+C. Ray Depth Potential to Occupancy Variable Messages
+Similar to the depth variable messages, we marginalise out all the variables except the node in question
+XX
+µψr →ori (ori = 1) =
+µdr →ψr (dr )ψr (or , dr )
+dr
+or
+j
+j6=i
+···
+XX
+Nr
+Y
+
+µorj →ψr orj .
+(S14)
+j=1
+After dropping the ray indices, we have
+µψ→oi (oi = 1) =
+dN
+X
+X
+µ(d)
+o1
+d=d1
+|
+{z
+...
+oi−1 oi+1
+X
+ψ (o1 , . . . , oi = 1, . . . , oN , d)
+oN
+N
+Y
+µ (oj ) ,
+(S15)
+j=1
+j6=i
+}
+evaluates to 1
+where we use the shorthand µ(d) = µdr →ψr (dr ), and µ(o) = µorj →ψr (orj ). Note that as mentioned above, µ(d) sends a uniform
+message to the potential since it has no other factor connected to it. Thus the outermost summation evaluates to 1.
+µψ→oi (oi = 1) =
+X
+XX
+···
+o1
+...
+oi−1 oi+1
+X
+ψ (o1 , . . . , oi = 1, . . . , oN , dj )
+oN
+N
+Y
+µ (oj )
+(S16)
+j=1
+j6=i
+We intend to simplify this expression in a similar manner to the previous derivation. Breaking apart into two terms, we have
+evaluates to ν(d1 )
+X
+µψ→oi (oi = 1) = µ (o1 = 1)
++ µ (o1 = 0)
+···
+XX
+
+}|
+{ N
+Y
+Xz
+ψ (o1 = 1, . . . , oi = 1, . . . , oN , d)
+µ (oj )
+...
+o2
+oi−1 oi+1
+oN
+X
+XX
+X
+···
+o2
+...
+oi−1 oi+1
+j=2
+j6=i
+ψ (o1 = 0, . . . , oi = 1, . . . , oN , d)
+oN
+N
+Y
+
+µ (oj )
+(S17)
+j=2
+j6=i
+Similar to the previous strategy, we can keep breaking it up till oi−1 . At that point we have
+µψ→oi (oi = 1) =
+i−1
+X
+µ(oj = 1)ν(dj )
+j
++
+Y
+k<i
+Y
+µ(ok = 0)
+k<j
+X
+
+N
+X
+Y
+µ(ok = 0)
+...
+ψ (o1 = 0, o2 = 0, . . . , oi−1 = 0, oi = 1, . . . , oN , d)
+µ (oj ) .
+|
+{z
+}
+o
+o
+i+1
+N
+(S18)
+j=i+1
+evaluates to ν(di )
+Thus, we have
+µψ→oi (oi = 1) =
+i−1
+X
+µ (oj = 1) ν(dj )
+j=1
+Y
+µ (ok = 0) + ν(di )
+k<j
+Y
+µ (ok = 0)
+(S19)
+k<i
+For the negative case we get to the same point as Eq. S18, except with oi = 0
+µψ→oi (oi = 0) =
+i−1
+X
+µ(oj = 1)ν(dj )
+j
++
+Y
+k<i
+Y
+µ(ok = 0)
+k<j
+X
+
+N
+X
+Y
+µ(ok = 0)
+...
+ψ (o1 = 0, o2 = 0, . . . , oi−1 = 0, oi = 0, . . . , oN , d)
+µ (oj ) .
+oi+1
+oN
+j=i+1
+(S20)
+Observing that starting from oi+1 it is the same form of expansion, we then simplify and get
+µψ→oi (oi = 0) =
+i−1
+X
+µ (oj = 1) ν(dj )
+j=1
+Y
+µ (ok = 0) +
+k<j
+N
+X
+j=i+1
+µ (oj = 1) ν(dj )
+Y
+µ (ok = 0) ,
+(S21)
+k<j
+k6=i
+Which for convenience can also be written as
+µψ→oi (oi = 0) =
+i−1
+X
+j=1
+µ (oj = 1) ν(dj )
+Y
+µ (ok = 0) +
+k<j
+N
+X
+Y
+1
+µ (oj = 1) ν(dj )
+µ (ok = 0) .
+µ(oi = 0) j=i+1
+(S22)
+k<j
+D. Occupancy Variable to Ray Depth Potential Messages
+Since other rays can (and often do) pass through the same occupancy variable node, the outgoing message µori →ψr is
+computed as per Eq. S1.

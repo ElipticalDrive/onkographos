@@ -1,0 +1,395 @@
+Open-source, AI-native, code-first 3D engine. Contribute to Murisixz/Aether3D development by creating an account on GitHub.
+
+Stage 10: Scene intelligence and spatial queries (v0.10.0) by Murisixz · Pull Request #11 · Murisixz/Aether3D · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Murisixz
+commented
+Oct 15, 2026
+Copy link
+Copy Markdown
+Owner
+Stage 10: scene intelligence and spatial queries (v0.10.0)
+Read-only, exact answers about where things are in a scene: bounds, object discovery, ray casts, nearest points, containment, overlaps, regions, camera picking and projection, lines of sight, visibility and spatial relations. They work from Python (Scene methods and aether3d.spatial), as JSON requests, from the command line (aether3d query) and in scene scripts. Objects gain tags and metadata (project format 6). Documentation: docs/SPATIAL.md.
+Merge order
+This PR is stacked on #10 (Stage 9 into main), so its base is stage-9-integration:
+Merge Integrate Stage 9 (operations history, v0.9.0) into main #10 (Stage 9, v0.9.0 into main).
+Retarget this PR to main (GitHub may do this automatically when the base branch is merged), then merge it.
+Nothing is merged yet; both PRs await your approval.
+What it adds
+Query
+Python
+Notes
+Bounds
+scene.bounds(obj, space="world"/"local", children=...), obj.bounds()
+exact AABB from the vertices, oriented box (the local box through the world matrix), enclosing sphere, hierarchy aggregates
+Discovery
+scene.find_objects(name=, kind=, tags=, any_tags=, metadata=, metadata_keys=, parent=, ancestor=, visible=, material=, region=)
+glob names, JSON-equal metadata
+Rays
+scene.raycast, scene.raycast_all
+position, distance, geometric + shading normals, front/back, triangle, face group, barycentrics, UV, material, instance identity; surfaces="rendered" passes alpha cut-outs and single-sided backs like the path tracer
+Nearest
+scene.closest_point, scene.nearest_objects, scene.distance(a, b)
+exact (Ericson's closest point; exact triangle-pair distances)
+Containment
+scene.contains_point(obj, p)
+inside/outside/surface for closed solids (winding number); "undefined" + fractional winding + reason for open, non-manifold or inconsistent meshes
+Overlaps
+scene.overlaps(..., exact=True, tolerance=0)
+broad phase on world boxes, then exact triangle tests and solid containment; box overlap only ever reported as exact=False candidates
+Regions
+scene.query_region(Box(...)/Sphere(...), mode=...)
+inside / intersects / contains (or bounds)
+Cameras
+scene.camera_ray, scene.pick, scene.project, scene.objects_in_view
+camera rays are the path tracer's, bit for bit; picks match the rasterizer's object ids
+Sight
+scene.line_of_sight, scene.visible_from
+deterministic area-weighted surface samples; camera observers also respect the frustum
+Relations
+scene.relation(a, b, near_distance=, tolerance=, viewer=)
+distance, intersecting, near, above, below, inside, contains, in front of, behind, nearer to a viewer, with definitions in the docs
+Summary
+scene.describe()
+compact JSON scene-inspection schema
+Results are frozen dataclasses with to_dict(). Errors are QueryError (code, location, hint; e.g. INVALID_ARGUMENT, OBJECT_NOT_FOUND, NO_GEOMETRY, NO_CAMERA).
+JSON requests: aether3d.run_query(scene, {"query": ..., ...}).
+CLI: aether3d query QUERY PATH KEY=VALUE ... [--json], and aether3d query run PATH --request FILE for one request or a list.
+Scene scripts: a read-only query operation.
+Python, run_query, the CLI and scripts give the same JSON for every query (tested).
+Tags and metadata: obj.tags, add_tags, remove_tags, has_tag, obj.metadata, set_metadata, remove_metadata.
+Undoable, with a new object.annotations history aspect.
+Saved in project format 6 (v5 migrates with nothing to add) and in history files (0.9.0 history files still load).
+Written to glTF extras and read back; invalid values are reported as STORED_ANNOTATIONS_REJECTED.
+Copied by duplicate and merge, and settable from scripts and object set --tags/--add-tag/--remove-tag/--metadata.
+history.in_progress: new public flag for open operations or transactions.
+Examples:
+examples/castle_spatial.py inspects the Minecraft castle: a height map from rays, contacts, relations, sight lines through the gate, keep visibility, and picks checked against the rasterizer.
+examples/hero_picking.py clicks on and probes the blocky hero: a picked id map that matches the rasterizer, dropping a crate onto the ground, and contacts.
+Both draw cheap diagnostic overlays (committed in examples/output).
+Design
+Reuses the Stage 8 two-level BVH.
+Closest hits are SceneAccel.closest_hit.
+all_hits walks the same structure with the same watertight test on the same object-space rays (the same arithmetic), so the first of all hits is the closest hit.
+A ray through a shared edge or vertex reports one hit per object.
+Rendered surfaces use PathScene.trace.
+Per-object world BVHs serve nearest-point branch and bound, pair walks for distance and intersection, and region and frustum candidates.
+Triangle intersection. Separating axes prove a pair disjoint; the remaining pairs are decided constructively (edge crossings, zero vertex-triangle or edge-edge distances). Correctness therefore does not depend on the completeness of the axis set, and degenerate triangles are handled.
+Caching only where measured.
+One index per scene revision, in a weak cache. On the castle, the first query after a change takes 21 ms (it evaluates and indexes), later ones 1.3 ms.
+Every change bumps scene.revision, undo and redo included. During an open transaction (history.in_progress) a fresh index is built, so rollbacks and uncommitted changes are always seen.
+Queries never mutate the scene or record history; tested for every query.
+Change to Stage 8 code: closed BVH boxes (commit b43ebc2)
+While testing grazing rays I found a robustness bug in the shared slab test.
+The bug: a ray with a zero direction component that lies exactly in the plane of a box face missed the box on one side ((hi - o) * inv = 0 * inv = 0 makes the slab empty for t > 0). For example, a ray straight down along the side of a cube missed the top face's edge that it passes through.
+The fix: SceneAccel.build now grows every node and instance box by one ulp, so such rays are strictly inside the slab and the watertight triangle test decides. Traversal cost is unchanged, and the GPU path tracer reads the same boxes.
+Test: test_axis_parallel_rays_on_a_box_face_plane_still_reach_its_edges. I checked that it fails without the fix.
+Effect on renders: they change only for such rays. No golden image, reference or assertion changed. The CPU and GPU (NVIDIA and lavapipe) render tests pass unchanged.
+Earlier test assertions that changed
+Test
+Before
+After
+Why
+tests/test_material_persistence.py
+FORMAT_VERSION == 5
+== 6
+project format 6 (tags and metadata)
+tests/test_pathtrace_api.py
+doc["format_version"] == 5
+== FORMAT_VERSION == 6
+same
+No other existing test was changed or loosened. The new tests in tests/test_raytrace.py, tests/test_examples.py and tests/test_docs_examples.py are additions.
+Verification
+All local, on the development machine (Arch Linux, i9-12900H, RTX 4060 Laptop):
+Check
+Result
+ruff check ., ruff format --check . (including Markdown code blocks)
+clean
+Full suite (Python 3.14, GPU tests switched off as in the portable CI jobs)
+1744 passed, 99 skipped (GPU)
+GPU test files on the RTX 4060 (Vulkan)
+181 passed, 1 skipped (the refusal path for adapters that cannot run the GPU path tracer: none here)
+GPU test files on Mesa lavapipe (what CI uses)
+180 passed, 2 skipped (no hardware performance on a software adapter; the same refusal path)
+Whole suite with lavapipe as the GPU
+1841 passed, 2 skipped (the same two)
+Python 3.11, without manifold3d and wgpu
+1718 passed, 118 skipped (manifold3d and GPU tests); every spatial test ran
+Python 3.11 with the oldest manifold3d (3.4.1)
+1743 passed, 100 skipped
+Khronos glTF Validator (AETHER3D_REQUIRE_GLTF_VALIDATOR=1), corpus now with tags and metadata
+0 errors, 0 warnings
+examples/castle_spatial.py, examples/hero_picking.py
+15/15 and 15/15 checks pass; outputs committed
+84 new tests, all comparing with independent truth where there is one:
+test_spatial_kernels.py: closest points (an independent projection/edge reference), segment distances, triangle-triangle intersection against Moller's interval test on 3,000 random pairs plus contact, coplanar, parallel and degenerate cases, triangle-box tests against Sutherland-Hodgman clipping on 2,000 triangles, winding numbers, connected components, BVH box queries, box distance bounds.
+test_spatial_queries.py:
+raycast_all against brute-force Moller-Trumbore over every world triangle (150 random rays through a scene with hierarchy, rotation, non-uniform and mirrored scales, shared meshes, a procedural array, a hidden object, a degenerate triangle and an open mesh).
+Shared edges and vertices; grazing and near-parallel rays; ranges and selection.
+Alpha masks and single-sided backs (surfaces="rendered").
+Closest points and nearest objects against brute force; exact object distances against all triangle pairs.
+Containment (closed, mirrored, open, non-manifold, inconsistent).
+Overlaps: exact contacts against box-only candidates, containment, tolerance.
+Regions against clipping; bounds against transformed vertices.
+find_objects filters.
+Camera rays bit for bit equal to the path tracer's (parented camera, perspective and orthographic); project inverting camera_ray; picking equal to the rasterizer's object ids on every interior pixel sampled; view volumes against renders.
+Lines of sight and visibility (the visible fraction of a sphere against the analytic cap); relations.
+Empty scenes, degenerate and zero-scale geometry, failing procedural geometry, and error codes and locations.
+Determinism and no mutation (every query: same revision, same history, same project document, same answers in a fresh copy).
+Cache invalidation through edits, mesh edits, undo, redo, transactions and rollback, and procedural parameter changes.
+test_spatial_cli.py: every query through the CLI, run_query and a scene script gives the Python JSON; batches, errors, and the project file stays untouched.
+test_annotations.py: tags and metadata validation, undo/redo, projects, v5 migration, invalid stored values, history files, glTF round trip and rejection, duplicate/merge, scripts and the CLI.
+Docs and examples: the quick-start code in docs/SPATIAL.md and README runs with the stated results; both examples run in the suite (--quick).
+Performance (i9-12900H, one process, NumPy, warm index unless noted)
+Scene
+Query
+Time
+Castle (21 objects, 6,804 triangles)
+first raycast / then
+21 / 1.3 ms
+raycast_all / closest_point / nearest_objects(count=5)
+1.8 / 1.6 / 6 ms
+overlaps() (all pairs, exact) / objects_in_view / query_region
+38 / 7.5 / 2.2 ms
+visible_from (64 samples) / relation
+5 / 8.6 ms
+300 instanced spheres (662,402 triangles)
+first raycast / then
+16 / 2.8 ms
+closest_point / nearest_objects(count=10) / overlaps()
+64 / 56 / 95 ms
+objects_in_view / 100 picks / visible_from (256 samples)
+206 / 136 / 10 ms
+Limitations (also in docs/SPATIAL.md)
+Sampled where stated:
+visible_from's fraction is estimated from fixed surface samples (each sample is exact).
+The bounding sphere encloses all geometry but is not minimal.
+Box-based where stated: above/below compare world-box heights and XY footprints.
+Alpha masks (surfaces="rendered") are evaluated at the exact hit point at full texture resolution. At a cut-out's edge, a filtered raster pixel may disagree.
+Containment is only claimed for closed solids. Welding is by exact position, so near-miss seams make a mesh open.
+Zero-scale objects are never hit by rays (as in renders), but still have bounds and closest points.
+No physics: overlaps and distances are geometric tests on static geometry.
+Performance: Python/NumPy, meant for tools, editors and agents rather than per-frame game logic on large scenes.
+Threads: not thread-safe; use one thread per scene.
+Stage 11 (AI tools and MCP) has not been started.
+🤖 Generated with Claude Code
+Murisixz
+and others
+added 7 commits
+October 15, 2026 07:59
+Add object tags and metadata (project format 6)
+…
+37f9ff3
+```
+Stage 10's object discovery filters by tags and metadata, which objects
+did not have yet.
+
+- SceneObject.tags: sorted, unique strings (1-64 characters, no
+  surrounding whitespace, at most 64), set as a whole or with add_tags /
+  remove_tags; has_tag.
+- SceneObject.metadata: free-form JSON (finite numbers, strings, lists,
+  objects; at most 16 KiB). It is kept as canonical JSON text, so it is
+  immutable inside the scene; the property returns a copy, and
+  set_metadata / remove_metadata change entries.
+- Every change is an undo step: a new history aspect (object.annotations),
+  also in history files. 0.9.0 history files, which have no annotations,
+  still load.
+- Project format 6 writes "tags" and "metadata" on every object, after its
+  name. The v5 -> v6 migration adds nothing (the reader's defaults are
+  empty), and invalid values are ProjectFormatErrors with their location.
+- glTF: written to node.extras.aether3d (only when present) and read back.
+  Invalid ones are reported (STORED_ANNOTATIONS_REJECTED), not imported.
+- duplicate() and merge() copy them.
+- Scene scripts: set_object takes tags, add_tags, remove_tags and metadata
+  (null removes an entry). CLI: object set --tags, --add-tag, --remove-tag
+  and --metadata KEY=VALUE.
+
+Changed old tests: test_material_persistence and test_pathtrace_api
+asserted that projects are written as format version 5; they now expect
+6.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Treat BVH boxes as closed sets in ray traversal
+…
+b43ebc2
+```
+A ray with a zero direction component that lies exactly in the plane of a
+box face missed the box on one side: the slab test inverts the zero as a
+tiny stand-in, and on that side computes (hi - o) * inv = 0 * inv = 0, so
+the slab looked empty for t > 0 (on the other side it was unbounded, as it
+should be). Straight-down rays along a mesh's side, or orthographic camera
+rays that land exactly on a bound, therefore skipped triangles whose edges
+they touch.
+
+SceneAccel.build now grows every node and instance box by one ulp
+outward, so such rays are strictly inside the slab and the watertight
+triangle test decides as for any other ray. Traversal costs nothing more;
+the GPU path tracer reads the same boxes.
+
+New test: axis-parallel rays exactly on a cube's face planes hit the top
+and bottom edges (it fails without this change). The rest of the suite,
+golden images included, is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Add spatial queries: aether3d.spatial, Scene methods, aether3d query
+…
+f7d3bb2
+```
+Stage 10's read-only questions about where things are, answered exactly
+from the scene's triangles in world space (hierarchies, rotations,
+non-uniform and mirrored scales, shared meshes and evaluated procedural
+geometry included):
+
+- bounds: world/local axis-aligned boxes (exact: from the vertices), the
+  oriented box (the local box through the world matrix), an enclosing
+  sphere, and aggregates over descendants (children=True).
+- find_objects: by name (glob), kind, tags, metadata, parent/ancestor,
+  visibility, material and region.
+- raycast / raycast_all: position, distance, geometric and shading
+  normals, front/back, triangle, face group, barycentrics, UVs, material
+  and instance identity. Rays use the Stage 8 two-level BVH and its
+  watertight test; all-hits walks the same structure, so the first of all
+  hits is the closest hit, and a ray through a shared edge or vertex
+  reports one hit. surfaces="rendered" lets rays through alpha-mask
+  cut-outs and backs of single-sided materials (the path tracer's rules).
+- closest_point, nearest_objects: exact point-to-surface distances
+  (Ericson's closest point on a triangle, BVH branch and bound).
+- contains_point: inside/outside/surface for closed meshes by the winding
+  number; "undefined" (with the fractional winding number and a reason)
+  for open, non-manifold or inconsistently oriented meshes.
+- distance, overlaps: exact surface distance and intersection between
+  objects (broad phase on world boxes, then triangle pairs: separating
+  axes prove pairs apart, edge crossings and zero distances prove them
+  touching); containment of one closed solid in another. Box overlap is
+  only ever reported as such (exact=False).
+- query_region (box, sphere), objects_in_view (frustum), camera_ray, pick
+  (bit-for-bit the path tracer's camera rays), project, line_of_sight,
+  visible_from (deterministic area-weighted surface samples), relation
+  (near, above, below, inside, contains, in front of, behind, nearer to a
+  viewer, with tolerances), describe (compact JSON scene summary).
+
+Queries never change the scene, its revision or its history. The spatial
+index is cached per scene revision (a weak cache, not scene state) and
+rebuilt while an operation or transaction is open (new public
+History.in_progress), so edits, undo, redo and rollback are always seen.
+
+Results are frozen dataclasses with to_dict(); errors are QueryError
+(code, location, hint). The same queries run as JSON requests
+(aether3d.run_query), from the command line (aether3d query QUERY PATH
+KEY=VALUE..., or query run PATH --request FILE) and in scene scripts (a
+read-only "query" operation).
+
+Tests compare with independent references (Moller's interval test,
+polygon clipping, brute-force ray casts and closest points, analytic
+cases, rasterizer object ids for picking) and check determinism, cache
+invalidation, history neutrality and CLI/script/Python parity.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Add spatial examples: castle inspection and hero picking
+…
+53993df
+```
+examples/castle_spatial.py tags the Minecraft castle's parts and inspects
+it: describe, hierarchy bounds, objects by tag and in the courtyard, a
+height map from rays straight down, exact contacts against box-only
+candidates, relations, sight lines through and beside the gate, how much
+of the keep the camera sees, and picking checked against the
+rasterizer's object ids.
+
+examples/hero_picking.py clicks on the blocky hero scene (head, sword,
+crate, ground, sky), builds a picked id map that matches the
+rasterizer's ids away from silhouettes, drops a crate onto the ground
+with a ray cast, and finds the exact contacts (feet and sword tip in
+the grass block) that the box overlaps cannot tell from near misses.
+
+Both draw cheap diagnostics (examples/overlay.py: crosses, segments,
+projected boxes, id colors) and check every answer; their outputs are in
+examples/output, and tests/test_examples.py runs both in --quick mode.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Document spatial queries and release 0.10.0
+…
+5b73898
+```
+- docs/SPATIAL.md: conventions (world space, hidden objects, selection,
+  order, exactness), tags and metadata, every query's semantics and
+  result fields, containment for closed and open meshes, overlaps (broad
+  and narrow phase), regions, camera conventions, sight and visibility,
+  relation definitions, the describe schema, caching and history, JSON
+  requests, the CLI and scripts, errors, design, measured performance and
+  limitations.
+- API.md (Scene methods, tags and metadata, History.in_progress,
+  QueryError, the query command), ARCHITECTURE.md (the spatial package and
+  its decisions), FILE_FORMAT.md (format 6), GLTF.md (tags and metadata in
+  extras), HISTORY.md, RENDERING.md (script operations),
+  RENDER_QUALITY.md (closed BVH boxes), README, AGENTS.md, CHANGELOG.
+- Version 0.10.0.
+- The quick-start examples of SPATIAL.md and the README run in the tests,
+  with the results their comments state.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Spatial queries: report failing procedural objects only where they ta…
+…
+6a93677
+```
+…ke part
+
+A procedural object whose geometry fails to evaluate made every spatial
+query fail, even when it was hidden or left out, while renders only fail
+for objects they draw. The index now records the failure per object
+(QueryError GEOMETRY_EVALUATION_FAILED, location objects[NAME]) and
+raises it only when the object takes part in a query: selected,
+visible or included with include_hidden, or named as a subject.
+describe() reports such objects with an "error" instead of failing.
+
+Also: rendered-surface queries turn a RenderError of the scene
+extraction into a QueryError with the same code; an unused helper is
+gone; the Khronos validator corpus now includes an export with tags and
+metadata (nested JSON, non-ASCII text), which validates with no errors
+or warnings.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Changelog: state the exact number of new tests (84)
+…
+a2b38b8
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Hide details
+View details
+Murisixz
+merged commit 8019c9e
+into
+stage-9-integration
+Oct 15, 2026
+17 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Murisixz
+mentioned this pull request
+Oct 15, 2026
+Integrate Stage 10 (scene intelligence and spatial queries, v0.10.0) into main
+#12
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

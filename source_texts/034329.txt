@@ -1,0 +1,663 @@
+4D NEURAL VOXEL SPLATTING: DYNAMIC SCENE RENDERING WITH VOXELIZED
+GUASSIAN SPLATTING
+Chun-Tin Wu1 , Jun-Cheng Chen2
+arXiv:2511.00560v2 [cs.CV] 11 May 2026
+1 National Taiwan University, 2 Academia Sinica
+ABSTRACT
+Although 3D Gaussian Splatting (3D-GS) achieves efficient rendering for novel view synthesis, extending it to dynamic scenes still
+results in substantial memory overhead from replicating Gaussians
+across frames. To address this challenge, we propose 4D Neural
+Voxel Splatting (4D-NVS), which combines voxel-based representations with neural Gaussian splatting for efficient dynamic scene
+modeling. Instead of generating separate Gaussian sets per timestamp, our method employs a compact set of neural voxels with learned
+deformation fields to model temporal dynamics. The design greatly
+reduces memory consumption and accelerates training while preserving high image quality. We further introduce a novel view refinement
+stage that selectively improves challenging viewpoints through targeted optimization, maintaining global efficiency while enhancing
+rendering quality for difficult viewing angles. Experiments demonstrate that our method outperforms state-of-the-art approaches with
+significant memory reduction and faster training, enabling real-time
+rendering with superior visual fidelity.
+1. INTRODUCTION
+Dynamic 3D scene reconstruction and novel view synthesis are recent
+research hotspots in computer vision with a widespread applications
+in virtual reality (VR), augmented reality (AR), and digital entertainment. Capturing and rendering temporal phenomena—such as
+human motion or deformable objects—is essential for immersive
+experiences.
+While Neural Radiance Fields (NeRF) [1] achieve photorealistic
+view synthesis in static scenes, extending them to dynamics faces key
+bottlenecks: long training times, slow inference, and poor scalability
+with temporal complexity. Acceleration methods like DirectVoxGO
+[2] and Instant-NGP [3] improve efficiency but remain limited by volumetric rendering. 3D Gaussian Splatting (3D-GS) [4] shifts toward
+explicit point-based rendering, enabling real-time performance, yet
+naive extensions to dynamics suffer from memory growth proportional to sequence length. Canonical-space methods like 4D-GS [5]
+reduce this but rely on heavy deformation networks and costly backward mapping. Recent advances attempt to balance efficiency and
+expressiveness: Ex4DGS [6] improves temporal consistency via explicit motion modeling, FreeTimeGS [7] decouples space and time
+for flexible representation, and LongVolCap [8] compresses long
+sequences effectively. However, the practical deployment of these
+methods remains constrained by memory and training overhead, especially in the scenarios of embodied AI which has a critical demand
+This research is supported by the National Science and Technology
+Council (NSTC), Taiwan under Grants 114-2221-E-001-004, 114-2221-E001-016, 114-2634-F-001-001-MBK, and 114-2634-F-002-004 by Academia
+Sinica under Grants AS-IAIA-114-M10 and AS-GCS-115-M06. We thank
+to National Center for High-performance Computing (NCHC) of National
+Applied Research Laboratories (NARLabs) in Taiwan for providing computational and storage resources.
+for the resource consumption. For instance, Mobile robots on edge
+devices (e.g., NVIDIA Jetson with 4–8GB memory) must rapidly
+reconstruct and track dynamic scenes for navigation and interaction.
+Field robots likewise require scene adaptation within minutes, not
+hours, to operate effectively. Current methods often exceed available
+resources on edge or mid-range GPUs, forcing compromises in scene
+complexity or hardware cost. Thus, the core challenge is how to
+capture rich temporal dynamics while keeping memory and computational efficiency for real-time, resource-constrained applications.
+To address these limitations, we introduce 4D Neural Voxel Splatting (4D-NVS), which combines voxel-based efficiency with Gaussian
+splatting quality through learned temporal deformation. Our key insight is decoupling spatial structure from temporal dynamics: we
+generate neural Gaussians on-demand from persistent voxel anchors
+and apply unified deformations. This achieves O ( 𝑓 𝑉 + 𝐹) memory
+complexity compared to traditional O (𝑁 · 𝑇) scaling, where 𝑉 is the
+number of voxels, 𝑓 is the feature dimension per voxel, 𝐹 represents
+the deformation network parameters, 𝑁 is the number of Gaussians,
+and 𝑇 is the number of timestamps.s While our method builds upon
+established techniques (voxel-based generation from Scaffold-GS [9]
+and HexPlane decomposition [10]), we introduce several key innovations that distinguish our approach:
+• Unified 4D Voxel Architecture: We extend 3D voxel grids
+to 4D by treating time as an additional dimension in the voxel
+feature space, enabling temporal-aware Gaussian generation
+that adapts both spatially and temporally. Unlike Scaffold-GS
+which generates static Gaussians, our voxels produce timevarying Gaussians through learned temporal features.
+• Selective Deformation Strategy: Through extensive experimentation, we identified that deforming all Gaussian properties leads to training instability. We introduce a selective
+approach that only deforms geometric properties (position,
+scale, rotation) while keeping appearance properties (color,
+opacity) fixed, greatly improving convergence and quality.
+• View-Adaptive Refinement: We propose a novel refinement
+mechanism that identifies and selectively improves underperforming viewpoints through adaptive densification, addressing temporal inconsistencies without global overhead.
+• Memory-Efficient Design: Our framework achieves O ( 𝑓 𝑉 +
+𝐹) memory complexity instead of O (𝑁 · 𝑇). This makes
+dynamic scene rendering feasible on consumer GPUs.
+To sum up, the proposed approach successfully bridges computational efficiency and visual quality, enabling new possibilities for
+real-time dynamic visualization and interactive scene manipulation.
+Visible Voxel
+O1 O2
+Invisible Voxel
+Fα
+O3
+Δx, Δy, Δz
+φx
+Fc
+Time t
+Δr
+φr
+Fs
+Δs
+Neural Gaussians
+Deformed Gaussians
+φs
+Fr
+Visible Neural Voxels at time t
+Rendered
+Image
+HexPlane Encoder
+GT
+4D Neural Voxel Splatting
+Voxel
+Densification
+Forward
+Rendering
+Crude View
+HexPlane Encoder
+Backward
+Rendered Image
+GT
+Deformed Gaussians
+Neural Gaussians
+View densification
+of visible crude
+voxels at time t
+View Refinement
+Fig. 1: Pipeline overview: (1) Initialize with voxel-based Gaussian splatting, (2) Generate neural Gaussians with temporal information, (3)
+Apply HexPlane temporal corrections, (4) Optimize with color loss, total variation loss, and scaling regularization, and (5) View refinement
+stage for underperforming viewpoints through adaptive densification.
+2. PRELIMINARIES
+3. METHOD
+2.1. 3D Gaussian Splatting
+3D Gaussian Splatting (3D-GS) [4] represents scenes using anisotropic
+3D Gaussians, each defined by a mean position 𝜇 ∈ R3 and covariance matrix Σ:
+1
+⊤ −1
+𝐺 (𝑥) = 𝑒 − 2 ( 𝑥− 𝜇) Σ ( 𝑥− 𝜇) ,
+(1)
+where the covariance matrix is constructed as Σ = 𝑅𝑆𝑆𝑇 𝑅𝑇 using
+scaling matrix 𝑆 and rotation matrix 𝑅. Each Gaussian has associated
+color 𝑐 and opacity 𝛼 (modeled with spherical harmonics) .
+Unlike volumetric rendering, 3D-GS projects Gaussians onto the
+image plane as 2D Gaussians and applies 𝛼-blending:
+𝐶 (𝑥 ′ ) =
+𝑁
+∑︁
+𝑖=1
+𝑐 𝑖 𝛼𝑖
+𝑖−1
+Ö
+(1 − 𝛼 𝑗 ),
+(2)
+𝑗=1
+where 𝑥 ′ is the pixel position, 𝛼 depends on the pixel position 𝑥 ′ and 𝑁
+is the number of overlapping Gaussians. This tile-based rasterization
+enables real-time rendering with differentiable optimization.
+Our 4D Neural Voxel Splatting (4D-NVS) framework addresses the
+challenge of efficiently rendering dynamic scenes by extending traditional 3D voxel representations into the temporal domain. As shown
+in Fig. 1, we achieve this through a three-stage training approach: (1)
+coarse initialization builds a foundational geometric representation
+from mixed timestamps without modeling temporal deformation, (2)
+fine temporal training enables the HexPlane deformation module to
+learn full spatiotemporal dynamics while identifying poorly reconstructed viewpoints, and (3) view refinement selectively re-trains
+only those challenging viewpoints with stronger densification to improve quality without degrading already well-reconstructed areas.
+The details are described in the following sections, respectively.
+3.1. Initialization and Voxel Setup
+We initialize neural voxels using the sparse point cloud from
+Structure-from-Motion (SfM) [11], distributing voxel centers to ensure comprehensive spatial coverage. The scene is first trained using
+Scaffold-GS [9] for 3K iterations with mixed timestamp samples to
+establish a foundational geometric representation.
+2.2. Scaffold-GS: Grid-Based Gaussian Generation
+Scaffold-GS [9] generates Gaussians from structured anchor points
+rather than optimizing individual primitives. Starting from a sparse
+point cloud 𝑃 ∈ R 𝑀 ×3 , it creates voxel centers:
+  
+P
+· 𝜖,
+(3)
+V=
+𝜖
+where 𝜖 is the voxel size. Each voxel center 𝑣 ∈ 𝑉 serves as an anchor
+with local features 𝑓𝑣 , scaling factor 𝑙 𝑣 ∈ R3 , and 𝑘 learnable offsets
+𝑂 𝑣 ∈ R 𝑘×3 .
+Neural Gaussians are generated on-demand within the viewing
+frustum. For each visible anchor, 𝑘 Gaussians are spawned with
+positions 𝜇𝑖 = 𝑥 𝑣 + 𝑂 𝑖 · 𝑙 𝑣 , while attributes (opacity, color, scale, rotation) are decoded from anchor features using MLPs conditioned on
+viewing direction and distance. This approach significantly reduces
+memory requirements compared to storing explicit Gaussians for the
+entire scene.
+3.2. Neural Gaussian Generation
+On-Demand Generation. Unlike existing methods that pre-compute
+and store Gaussians, our approach generates neural Gaussians dynamically based on viewing conditions and temporal context. This
+represents a fundamental shift from static storage to dynamic computation, enabling both memory efficiency and view-dependent optimization. At each timestamp 𝑡, we perform visibility culling to identify voxels within the camera frustum, significantly reducing computational overhead from O (𝑁) to O (𝑉𝑣𝑖𝑠𝑖𝑏𝑙𝑒 ) where 𝑉𝑣𝑖𝑠𝑖𝑏𝑙𝑒 ≪ 𝑁. For
+each visible voxel 𝑣, we generate 𝑘 neural Gaussians with positions:
+𝜇𝑖 = 𝑥 𝑣 + 𝑂 𝑖 · 𝑙 𝑣 ,
+𝑖 = 0, . . . , 𝑘 − 1,
+(4)
+where 𝑥 𝑣 ∈ R3 is the voxel center position, 𝑂 𝑖 ∈ R3 are learnable
+offset vectors for each of the 𝑘 Gaussians, and 𝑙 𝑣 ∈ R3 is the voxel’s
+spatial extent (scale factor).
+Gaussian attributes are decoded using dedicated MLPs that take
+anchor features 𝑓𝑣 , viewing distance 𝛿 𝑣𝑐 , and directional vector 𝑑®𝑣𝑐
+as input:
+(5)
+{𝑐 0 , . . . , 𝑐 𝑘−1 } = 𝐹𝑐 ( 𝑓𝑣 , 𝛿 𝑣𝑐 , 𝑑®𝑣𝑐 ),
+(6)
+{𝑠0 , . . . , 𝑠 𝑘−1 } = 𝐹𝑠 ( 𝑓𝑣 , 𝛿 𝑣𝑐 , 𝑑®𝑣𝑐 ),
+(7)
+{𝑟 0 , . . . , 𝑟 𝑘−1 } = 𝐹𝑟 ( 𝑓𝑣 , 𝛿 𝑣𝑐 , 𝑑®𝑣𝑐 ),
+(8)
+where 𝐹𝛼 , 𝐹𝑐 , 𝐹𝑠 , and 𝐹𝑟 are MLPs for opacity, color, scale, and
+rotation respectively.
+3.3. Dynamic Gaussians Deformation
+Unified 4D Representation. Our method introduces a novel temporal modeling approach that treats space and time as a unified 4D
+manifold while maintaining computational efficiency. Unlike previous methods that either use separate deformation networks for each
+Gaussian or employ expensive per-frame optimization, we leverage a
+shared HexPlane decomposition that captures temporal correlations
+across the entire scene.
+To capture dynamic motihon, we employ HexPlane [12] decomposition, encoding 4D space into six planes with multi-resolution
+temporal features 𝑓 ℎ . Specifically, HexPlane factorizes the 4D spacetime volume into six 2D planes: three spatial planes (XY, XZ, YZ)
+and three space-time planes (XT, YT, ZT). For a 4D point (𝑥, 𝑦, 𝑧, 𝑡),
+we extract features via bilinear interpolation from each plane and
+aggregate them:
+∑︁
+Interp 𝑝 (𝑥, 𝑦, 𝑧, 𝑡).
+Our loss function combines multiple terms for robust optimization:
+L = L 𝑐𝑜𝑙𝑜𝑟 + 𝜆 𝑡 𝑣 L𝑡 𝑣 + 𝜆 𝑣𝑜𝑙 L 𝑣𝑜𝑙 ,
+{𝛼0 , . . . , 𝛼 𝑘−1 } = 𝐹𝛼 ( 𝑓𝑣 , 𝛿 𝑣𝑐 , 𝑑®𝑣𝑐 ),
+𝑓ℎ =
+3.4. Optimization
+(9)
+(12)
+where L 𝑐𝑜𝑙𝑜𝑟 = L1 +𝜆 𝑆𝑆𝐼 𝑀 L 𝑆𝑆𝐼 𝑀 ensures pixel accuracy and structural coherence, L𝑡 𝑣 enforces spatial smoothness in the HexPlane,
+Í𝑁
+and L 𝑣𝑜𝑙 = 𝑖=1𝑛𝑔 sx𝑖 · sy 𝑖 · sz𝑖 prevents oversized Gaussians.
+For density control, we grow anchors in high-gradient regions
+and prune those producing consistently low-opacity Gaussians.
+3.5. View Refinement
+Motivation. During training, we observed that certain viewpoints
+consistently under-perform due to large deformations, complex occlusions, or rapid temporal changes. Rather than applying uniform densification across all views—which wastes computational
+resources on already well-reconstructed areas—we developed an
+adaptive refinement strategy that identifies and specifically improves
+problematic viewpoints while maintaining global efficiency.
+Crude View Selection. We implement two complementary strategies for identifying crude viewpoints that require refinement:
+1. PSNR-based Detection. We track the PSNR of each rendered
+view and compare it against an exponentially weighted moving average (EMA) to identify statistical outliers:
+PSNR𝑖 < (1 + 𝛾) · EMAPSNR ,
+(13)
+where 𝛾 starts at 0.05 and gradually decays to 0.02 during training
+to become more selective as optimization progresses. The EMA is
+updated with momentum 0.4 to balance responsiveness and stability:
+EMAPSNR = 0.4 · PSNRcurrent + 0.6 · EMAPSNR .
+(14)
+𝑝∈ {XY,XZ,YZ,XT,YT,ZT}
+This decomposition provides several advantages over direct 4D parameterization: (1) significantly reduced memory footprint (2) natural handling of temporal correlations, and (3) efficient gradient flow
+during optimization. A compact MLP 𝜙 𝑑 integrates these features:
+𝑓 𝑑 = 𝜙 𝑑 ( 𝑓 ℎ ),
+(10)
+where 𝜙 𝑑 is a shallow network for computational efficiency. Separate
+deformation decoders predict position, rotation, and scale changes:
+Δ𝜇 = 𝜑 𝑥 ( 𝑓 𝑑 ),
+Δ𝑟 = 𝜑𝑟 ( 𝑓 𝑑 ),
+Δ𝑠 = 𝜑 𝑠 ( 𝑓 𝑑 )
+(11)
+where 𝜑 𝑥 , 𝜑𝑟 , and 𝜑 𝑠 are single-layer MLPs that output 3D position
+offsets, quaternion rotations, and 3D scale factors, respectively.
+The final deformed Gaussian values are (𝜇′ , 𝑟 ′ , 𝑠′ ) = (𝜇+Δ𝜇, 𝑟 +
+Δ𝑟, 𝑠 + Δ𝑠), while color and opacity remain unchanged to prevent
+error propagation, a design choice that emerged from our analysis of
+training stability in dynamic scenarios.
+Selective Deformation Strategy. Through extensive experimentation, we discovered that deforming all five Gaussian properties
+(position, opacity, color, scale, rotation) leads to training instability and error accumulation. Specifically, we found that appearance
+properties (color and opacity) are highly sensitive to deformation
+errors, causing cascading failures during backpropagation. By keeping these properties fixed and only deforming geometric attributes,
+we maintain stable gradients while still capturing complex motion
+patterns.
+2. Gradient-based Detection. For scenarios where gradient information reveals optimization difficulties not captured by quality metrics, we track the gradient magnitude of viewspace points and identify
+views with abnormally high gradients indicating convergence issues:
+∥∇Lview ∥ > (1 + 𝛾) · EMAgrad .
+(15)
+This dual-criteria approach ensures robust detection across different
+failure modes—quality-based detection captures rendering artifacts
+while gradient-based detection identifies optimization instabilities.
+Identified viewpoints are added to a refinement stack with associated metadata including failure type (quality vs. gradient), severity
+score, and temporal consistency flags. Views appearing consecutively in multiple frames receive higher priority for refinement.
+Adaptive Quality Enhancement. For crude views, we apply specialized training in a dedicated third stage (14k iterations) that focuses
+computational resources exclusively on problematic areas:
+1. Focused Training. Only crude viewpoints from the adaptive
+camera list are used for training, with sampling probability weighted
+by severity scores. This concentrates gradient updates on areas that
+need improvement most, avoiding dilution of learning signals from
+well-performing regions.
+2. Adjusted Thresholds. We use more aggressive densification
+parameters specifically tuned for challenging views: These lower
+thresholds encourage more frequent Gaussian splitting and pruning
+in problematic regions.
+3. Enhanced Gaussian Generation. The reduced thresholds facilitate creation of additional Gaussians in regions with complex motion
+patterns, fine-grained occlusions, or temporal discontinuities. New
+PSNR(dB) ↑
+MS-SSIM↑
+Times↓
+FPS↑
+Memory (MB)↓
+Nerfies [13]
+3D-GS* [4]
+Scaffold-GS* [9]
+HyperNeRF [14]
+TiNeuVox-B [15]
+22.2
+19.7
+20.7
+22.4
+24.3
+0.803
+0.68
+0.688
+0.814
+0.836
+∼ hours
+40 mins
+35 mins
+32 hours
+18 mins**
+<1
+55
+55
+<1
+1
+21,558**
+4D-GS [5]
+GAGS [16]
+Ours w/o Refinement
+Ours
+25.2
+24.26
+25.8
+28.5
+0.845
+0.83
+0.846
+0.872
+25 mins**
+120 mins**
+10 mins†
+13 mins†
+34
+11
+45
+44
+4,500**
+6,875**
+3,050
+3,050
+Model
+* : The methods are trained on randomly sampled timestamps from all frames, without temporal modeling.
+**: The training time and memory is re-evaluated by us on a single RTX 4090 GPU.
+†: Training time includes 3k initialization iterations (approximately 2 minutes).
+GT
+HyperNeRF
+TiNeuVox
+3D-GS
+4D-GS
+Ours
+Fig. 2: Visual comparisons of the proposed method on the HyperNeRF dataset with other methods. The proposed method achieves
+better rendering results. Best viewed at 4× zoom.
+GT
+Scaffold GS
+GAGS
+4D-GS
+Ours
+Table 1: Quantitative results on the HyperNeRF [14] VRIG dataset,
+rendered at a resolution of 960×540. The best and second best
+results are highlighted in red and yellow, respectively. Our method
+performed the best compared to other methods, while using the least
+memory and training time.
+PSNR(dB) ↑
+D-SSIM↓
+Time↓
+FPS↑
+NeRFPlayer [17]
+HyperReel [18]
+HexPlane [10]
+KPlanes [12]
+Im4D [19]
+MSTH [20]
+30.69
+31.10
+31.70
+31.63
+32.58
+32.37
+0.034
+0.036
+0.014
+0.015
+6 hours
+9 hours
+12 hours
+1.8 hours
+28 mins
+20 mins
+0.045
+2.0
+0.2
+0.3
+5
+2
+4D-GS(CVPR’24) [5]
+4D-GS(ICLR’24) [21]
+Ex4DGS[6]*
+Ours**
+31.15
+31.91
+32.11
+33.12
+0.016
+0.015
+0.015
+0.021
+32 mins
+105 mins
+36 mins
+25 mins
+34
+114
+25
+43
+Model
+* :The training time and FPS is evaluated by us on a single RTX-4090.
+** :We introduced gradient-selection selection in view refinement stage
+which improves the metrics.
+Table 2: Quantitative results on the Neu3D [22] dataset. Note:
+rendering resolution is set to 1,352×1,014.
+Gaussians inherit temporal features from nearby anchors and undergo
+immediate deformation field training to capture local dynamics.
+This targeted approach enhances overall quality and temporal
+consistency without computational overhead on well-performing areas, achieving 0.5-1.2 dB PSNR improvements on challenging viewpoints while maintaining global rendering efficiency.
+4. EXPERIMENTS
+Fig. 3: Visualization of the Neu3D dataset compared with other
+methods. From the visual illustration shown in the top and bottom
+left, the proposed method strikes a balance while the others either
+perform worse on the hand or the spinach in the pan. More rendering
+videos can be found in the supplementary materials. Best viewed at
+4× zoom.
+4.2. Evaluation Results
+Quantitative Results. To assess the quality of novel view synthesis,
+we conducted benchmarking against several state-of-the-art methods
+in the field. The results are summarized in Table 1 and Table 2.
+On HyperNeRF, our method achieves 28.5 PSNR while using the
+least memory (3,050 MiB) and fastest training time (13 minutes).
+On Neu3D, we maintain competitive quality (33.12 PSNR) with
+real-time rendering at 43 FPS—an order of magnitude faster than
+Im4D (5 FPS) and MSTH (2 FPS). This combination of high quality,
+minimal memory footprint, and real-time performance makes our
+approach ideal for practical deployment.
+Qualitative Results. The qualitative results of our study, compared
+with several other methods, are shown in Fig. 2 and Fig. 3. These
+results demonstrate the effectiveness of our approach. With reduced
+training time, rendering time, and memory consumption, our method
+still produces competitive qualitative results compared to previous
+methods. In some cases, especially those with smaller movements,
+we manage to produce more detailed images as presented in Fig. 4.
+4.1. Experimental Setup
+Setup. We set 𝑘 = 10 Gaussians per Neural Voxel and feature dimension 𝑓𝑣 ∈ R32 . HexPlane grids use resolution [64, 64, 64, 150]
+for DyNeRF and [64, 64, 64, 25] for HyperNeRF with scale multipliers [1, 2]. Training consists of 3k initialization iterations, 14k main
+training, and 14k view refinement iterations.
+Implementation Details. We use Adam optimizer with learning
+rates: Gaussian offsets (0.01), color MLP (0.008), opacity MLP
+(0.002), rotation/scaling MLPs (0.004), HexPlane grids (0.0016),
+deformation MLPs (0.00016). All rates decay to 1/10 initial values
+by iteration 14,000.Loss weights: 𝜆 𝑣𝑜𝑙 = 0.015 for volume regularization and 𝜆 𝑡 𝑣 = 0.0002 for total variation loss. Densification
+threshold: 𝜏𝑔 = 0.0002 (coarse) to 0.0001 (refinement); opacity
+threshold: 𝜏𝛼 = 0.05 to 0.03.
+Dataset. HyperNeRF [14]: 1-2 cameras with straightforward motion. Neu3D [22]: 15-20 static cameras with complex motion.
+COLMAP initialization from first frame (Neu3D) or 200 random
+frames (HyperNeRF), yielding 5,000-20,000 initial points for voxel
+grid initialization.
+4.3. Ablation Study
+Loss Design. We present the ablation studies in Table 3 to highlight
+the differences in quantitative results regarding Volume regularization and Total Variation Loss. We also rendered images specifically
+focused on Volume regularization, as it had a significant impact on
+the qualitative results. As shown in Fig. 5 without the volume regularization term L 𝑣𝑜𝑙 , we observe large Gaussians floating in front of
+the camera, causing the blurry effect on the image.
+Selective Deformation Strategy. A key design choice in our method
+is the selective deformation of Gaussian properties. Table 5 demonstrates the impact of this strategy. When deforming all properties
+(including color and opacity), training becomes unstable and quality
+degrades. Our selective approach, which only deforms geometric
+properties (position, scale, rotation), maintains stable training while
+achieving better results.
+View Refinement. We observed that some viewpoints were not
+reconstructed accurately, which we attribute to inconsistencies in the
+Gaussians. From Table 4, the view refinement effectively enhances
+Ours
+Deformation Strategy
+PSNR
+MS-SSIM
+Training Stability
+All Properties
+Geometric Only (Ours)
+Appearance Only
+No Deformation
+26.42
+29.51
+24.18
+22.31
+0.81
+0.92
+0.73
+0.71
+Unstable
+Stable
+Stable
+Stable
+Table 5: Ablation study on selective deformation strategy. Deforming only geometric properties achieves the best balance between
+quality and training stability.
+4DGS
+Fig. 4: Continuous Frames on HyperNeRF Dataset compared with
+4DGS. Top: Ours, Bottom: 4DGS. The proposed method deliver a
+better rendering results with more details than 4DGS, which can be
+seen in the top right. Best viewed at 4× zoom.
+Loss
+Metrics
+L 𝑣𝑜𝑙
+L𝑡 𝑣
+PSNR
+MS-SSIM
+✓
+✓
+✓
+✓
+22.73
+25.58
+24.89
+29.51
+0.67
+0.76
+0.78
+0.92
+Fig. 6: Left: w/o. view refinement. Right:with view refinement.
+Best viewed at 4× zoom.
+Table 3: Comparison of PSNR, SSIM for ablation studies with Volume regularization and Total Variation Loss on HyperNeRF-Chicken
+without gradient-based detection.
+Metrics
+Ours w/o. HexPlane
+Ours w/o. Refinement
+Ours w/o. View dependent sorting
+Ours w/o. Gradient-Based Detection
+Ours
+PSNR
+MS-SSIM
+22.31
+28.61
+29.31
+29.51
+31.28
+0.71
+0.88
+0.91
+0.92
+0.94
+Table 4: Comparison of PSNR and SSIM for ablations on
+HyperNeRF-Chicken.
+(4,500 MiB), and 56% vs. GaGS (6,875 MiB). This enables deployment on consumer hardware with limited GPU resources.
+Training Time. Our model completes training in 17 minutes with
+refinement (13 minutes without), achieving 94% speedup vs. HyperNeRF (32 hours), 32% vs. 4D-GS (25 minutes), and 89% vs.
+GaGS (120 minutes). This enables rapid deployment in real-time
+interactive environments.
+4.5. Limitations
+Though our approach achieves rapid convergence and yields real-time
+rendering in many scenarios, a few key challenges remain.
+Large Motions. The absence of initial points and inaccuracies in
+camera poses make it challenging to optimize the Gaussians effectively. Although incorporating view refinement has improved this
+issue, further enhancements in motion estimation are still required.
+Popping Artifacts. Although the view-dependent sorting solves
+the “static” part of the popping artifact, it isn’t entirely eliminated.
+Further enhancements in voxel representation and 3D Gaussians’
+rasterizing process are needed to completely remove the artifacts.
+5. CONCLUSION
+Fig. 5: Left: with 𝐿 𝑣𝑜𝑙 Right: w/o. 𝐿 𝑣𝑜𝑙 .
+image quality by refining consistency across viewpoints, as illustrated
+in Fig. 6, resulting in more visually appealing outcomes.
+4.4. Memory and Speed Analysis
+Memory Usage. Our method requires only 3,050 MiB, achieving
+86% reduction vs. TiNeuVox-B (21,558 MiB), 32% vs. 4D-GS
+We introduced 4D Neural Voxel Splatting (4D-NVS), a method for
+real-time dynamic scene rendering that extends voxel representations
+to the temporal domain. By decoupling spatial structure from temporal dynamics through neural Gaussians and deformation fields, our
+approach achieves superior rendering quality with memory reduction and computational efficiency. 4D-NVS opens new avenues for
+real-time dynamic visualization and interactive scene manipulation
+across various applications.
+Compliance with Ethical Standards. This research was conducted
+with the open datasets. It doesn’t require ethical approval.
+6. REFERENCES
+[1] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik,
+Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng, “NeRF:
+Representing scenes as neural radiance fields for view synthesis,” in Proc. Eur. Conf. Comput. Vis. (ECCV), 2020, pp.
+405–421.
+[2] Cheng Sun, Min Sun, and Hwann-Tzong Chen, “Direct voxel
+grid optimization: Super-fast convergence for radiance fields
+reconstruction,” in Proc. IEEE/CVF Conf. Comput. Vis. Pattern
+Recognit. (CVPR), 2022, pp. 5459–5469.
+[3] Thomas Müller, Alex Evans, Christoph Schied, and Alexander
+Keller, “Instant neural graphics primitives with a multiresolution hash encoding,” ACM Trans. Graph., vol. 41, no. 4, pp.
+102:1–102:15, 2022.
+[14] Keunhong Park, Utkarsh Sinha, Peter Hedman, Jonathan T. Barron, Sofien Bouaziz, Dan B. Goldman, Ricardo Martin-Brualla,
+and Steven M. Seitz, “HyperNeRF: A higher-dimensional representation for topologically varying neural radiance fields,”
+ACM Trans. Graph., vol. 40, no. 6, pp. 238:1–238:12, 2021.
+[15] Jiemin Fang, Taoran Yi, Xinggang Wang, Lingxi Xie, Xiaopeng
+Zhang, Wenyu Liu, Matthias Nießner, and Qi Tian, “Fast
+dynamic radiance fields with time-aware neural voxels,” in
+Proc. SIGGRAPH Asia Conf. Papers, 2022, pp. 1–9.
+[16] Zhicheng Lu, Xiang Guo, Le Hui, Tianrui Chen, Min Yang,
+Xiao Tang, Feng Zhu, and Yuchao Dai, “3D geometry-aware
+deformable gaussian splatting for dynamic view synthesis,” in
+Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR),
+2024, pp. 8900–8910.
+[4] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and
+George Drettakis, “3D gaussian splatting for real-time radiance
+field rendering,” ACM Trans. Graph., vol. 42, no. 4, pp. 1–14,
+2023.
+[17] Liangchen Song, Anpei Chen, Zhong Li, Zhang Chen, Lele
+Chen, Junsong Yuan, Yi Xu, and Andreas Geiger, “NeRFPlayer: A streamable dynamic scene representation with decomposed neural radiance fields,” IEEE Trans. Vis. Comput.
+Graph., vol. 29, no. 5, pp. 2732–2742, 2023.
+[5] Guanjun Wu, Taoran Yi, Jiemin Fang, Lingxi Xie, Xiaopeng
+Zhang, Wei Wei, Wenyu Liu, Qi Tian, and Xinggang Wang,
+“4D gaussian splatting for real-time dynamic scene rendering,” in Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit.
+(CVPR), 2024, pp. 20310–20320.
+[18] Benjamin Attal, Jia-Bin Huang, Christian Richardt, Michael
+Zollhöfer, Johannes Kopf, Matthew O’Toole, and Changil Kim,
+“HyperReel: High-fidelity 6-DoF video with ray-conditioned
+sampling,” in Proc. IEEE/CVF Conf. Comput. Vis. Pattern
+Recognit. (CVPR), 2023, pp. 16610–16620.
+[6] Junoh Lee, ChangYeon Won, Hyunjun Jung, Inhwan Bae, and
+Hae-Gon Jeon, “Fully explicit dynamic gaussian splatting,” in
+Proc. Adv. Neural Inf. Process. Syst. (NeurIPS), 2024.
+[19] Haotong Lin, Sida Peng, Zhen Xu, Tao Xie, Xingyi He, Hujun
+Bao, and Xiaowei Zhou, “High-fidelity and real-time novel
+view synthesis for dynamic scenes,” in Proc. SIGGRAPH Asia
+Conf. Papers, 2023, pp. 1–9.
+[7] Yifan Wang, Peishan Yang, Zhen Xu, Jiaming Sun, Zhanhua
+Zhang, Yong Chen, Hujun Bao, Sida Peng, and Xiaowei Zhou,
+“FreeTimeGS: Free gaussian primitives at anytime anywhere
+for dynamic scene reconstruction,” in Proc. IEEE/CVF Conf.
+Comput. Vis. Pattern Recognit. (CVPR), 2025, pp. 21750–
+21760.
+[8] Zhen Xu, Yinghao Xu, Zhiyuan Yu, Sida Peng, Jiaming Sun,
+Hujun Bao, and Xiaowei Zhou, “Representing long volumetric
+video with temporal gaussian hierarchy,” ACM Trans. Graph.,
+vol. 43, no. 6, pp. 1–18, 2024.
+[9] Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin Wang,
+Dahua Lin, and Bo Dai, “Scaffold-GS: Structured 3D gaussians
+for view-adaptive rendering,” in Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), 2024, pp. 20654–20664.
+[10] Ang Cao and Justin Johnson, “HexPlane: A fast representation
+for dynamic scenes,” in Proc. IEEE/CVF Conf. Comput. Vis.
+Pattern Recognit. (CVPR), 2023, pp. 130–141.
+[11] Johannes Lutz Schönberger and Jan-Michael Frahm,
+“Structure-from-motion revisited,” in Proc. IEEE Conf. Comput. Vis. Pattern Recognit. (CVPR), 2016, pp. 4104–4113.
+[12] Sara Fridovich-Keil, Giacomo Meanti, Frederik Rahbæk Warburg, Benjamin Recht, and Angjoo Kanazawa, “K-Planes: Explicit radiance fields in space, time, and appearance,” in Proc.
+IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), 2023,
+pp. 12479–12488.
+[13] Keunhong Park, Utkarsh Sinha, Jonathan T. Barron, Sofien
+Bouaziz, Dan B. Goldman, Steven M. Seitz, and Ricardo
+Martin-Brualla, “Nerfies: Deformable neural radiance fields,”
+in Proc. IEEE/CVF Int. Conf. Comput. Vis. (ICCV), 2021, pp.
+5865–5874.
+[20] Feng Wang, Zilong Chen, Guokang Wang, Yafei Song, and
+Huaping Liu, “Masked space-time hash encoding for efficient
+dynamic scene reconstruction,” in Proc. Adv. Neural Inf. Process. Syst. (NeurIPS), 2023.
+[21] Zeyu Yang, Hongye Yang, Zijie Pan, and Li Zhang, “Real-time
+photorealistic dynamic scene representation and rendering with
+4D gaussian splatting,” in Proc. Int. Conf. Learn. Represent.
+(ICLR), 2024.
+[22] Tianye Li, Mira Slavcheva, Michael Zollhöfer, Simon Green,
+Christoph Lassner, Changil Kim, Tanner Schmidt, Steven Lovegrove, Michael Goesele, Richard Newcombe, et al., “Neural 3D
+video synthesis from multi-view video,” in Proc. IEEE/CVF
+Conf. Comput. Vis. Pattern Recognit. (CVPR), 2022, pp. 5521–
+5531.

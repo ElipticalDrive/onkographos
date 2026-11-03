@@ -1,0 +1,637 @@
+A custom ray-tracing engine for blender that allows the plug in of custom materials and custom ray tracing methods for astrophysically based ray tracing. - Batch Q — #828 GPU blackbody + grid cache; pkg271 volume passes/volume_bounces/corpus/headless; #833 (reported) by HendrikGC02 · Pull Request #838 · HendrikGC02/Astroray
+
+Batch Q — #828 GPU blackbody + grid cache; pkg271 volume passes/volume_bounces/corpus/headless; #833 (reported) by HendrikGC02 · Pull Request #838 · HendrikGC02/Astroray · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+HendrikGC02
+commented
+Sep 19, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Batch Q (volumes part 3). Rebased onto main 93be746c (post-#837); all numbers
+below are measured on the post-#837 build 6d9f253d (.pyd 2026-09-20 12:04),
+RTX 5070 Ti, engine observer CIE 1931 2°. The blackbody table is built at runtime
+from whatever CMF ȳ astroray/spectrum.h exposes, so it followed the rename by
+construction; the CPU gate resolves the Python binding by cie_cmf_ prefix.
+Behaviour change to call out: the addon default volume_bounces = 0 is now
+actually honoured, so every existing Blender volume render changes — single
+scatter plus a Cycles-style terminate-after continuation, instead of the previous
+unlimited multiple scattering. On the corpus scene the smoke crop drops from
+0.0861 (volume_bounces 64, i.e. the old behaviour) to 0.0680 at 0 — 0.79× —
+and Cycles moves by exactly the same factor (0.0874 → 0.0689, 0.79×).
+test_results/batchQ/volume_bounces_before_after_cpu.png is one build, one
+observer, three settings (2 / 0 / 64), so only volume_bounces differs.
+Closes #828.
+#833 is only REPORTED here (the mesh shape is still lowered to its AABB), so it stays open.
+Item 1 — #828 GPU blackbody volume emission, device grid cache, RNG keying
+One shared formula. include/astroray/volume/blackbody_lut.h is a single
+__host__ __device__ luminance-normalised Planck evaluated in log space over
+one ln-T table of the pkg122 photopic integral (2048 entries, 30 K…1e6 K,
+linear interp, 0 below 30 K). The CPU reads the host table; the GPU uploads
+that same vector (gpu_spectral_tables.cu, lazy, only when a medium has
+blackbody). Temperature grids upload as a dense block beside the NanoVDB
+density buffer; the blackbody term is evaluated in gpu_gridVolumeTrack
+under the existing HasGridVolume axis, gated exactly like the CPU
+BoundedMedium::emissionAt.
+CPU defect fixed (found here). normalizedPlanck formed the ratio with a
+FLOAT normaliser: on main it returns NaN for T ≈ 25–140 K (normaliser
+overflows to inf, float(planck) underflows to 0) — the cold rim of any
+temperature grid. A first fix using a per-kelvin memo was itself wrong
+(critic finding): luminance / Cycles intensity was 0.095 @60.5 K, 1.035
+@500.4 K, 0.992 @1234.5 K, with a 7 % step across 500.5 K. With the shared
+table: 1.0004 / 1.0000 / 1.0001 / 1.0000 / 1.0000 at 60.5 / 500.4 /
+1234.5 / 2718.3 / 6543.2 K (tests/test_issue828_blackbody_cpu.py, CPU-only).
+GPU↔CPU parity (tests/test_pkg269_gpu_hetero_parity.py, per-channel ROI mean):
+blackbody slab 1500 K 0.989 / 0.984; slab 3200 K, I 0.7, tint (1,.8,.6)
+0.999 / 0.998 / 1.009; temperature-grid fire with a cold rim 0.998 / 1.002
+(blue channel ~0 at 1800 K, excluded). Renders finite on both backends.
+test_results/batchQ/issue828_fire_{cpu,gpu}.png. The chromatic absorption slab
+also moved closer to Cycles under the new observer: CPU Tr
+0.678 / 0.150 / 0.134 vs Cycles 0.687 / 0.153 / 0.135 (was 0.633 / 0.154 /
+0.134 under 10°).
+Device grid cache. NanoVDB + temperature buffers now ride the Viewport render much slower than F12 and than Cycles; owner observes the scene being re-uploaded to the GPU every frame #801 reuse
+decision; clear_grid_media / set_volume_grid / add_homogeneous_medium
+invalidate it. New last_render_info()["grid_uploads"] counts host→device grid
+copies of the last GPU render, so tests/test_issue828_grid_cache.py gates on
+the driver's own counter (2 on an upload render, 0 on reuse, re-upload after
+each mutation) instead of an image difference that passed on main too.
+192³ density+temperature (56 MB): upload 4.5 ms → reuse 0.8 ms (min-of-7).
+RNG keying (GPU volumes follow-up: blackbody volume emission on the GPU, device-side grid cache, 8-media cap (after #820) #828 review note): the free-flight salts are disjoint bit fields
+— tracker 0xE | bounce(8) | draw(20), shadow 0xD | bounce(8) | medium(3) | draw(17) — so a long flight can no longer alias into another bounce/medium.
+8-media cap: the addon reports it, and only on a GPU render (the CPU
+honours every medium).
+emissionFloor stays on upload: with blackbody on the GPU a density-free
+blackbody medium needs those tentative collisions.
+Item 2 — pkg271: passes, volume_bounces, corpus family, Blender headless
+Pass split gate (tests/test_pkg271_volume_passes.py): a grid smoke lit by
+an off-frame emitter fills both PASS_VOLUME_DIRECT and PASS_VOLUME_INDIRECT
+and Σ(passes) = beauty, rel_L1 6e-6 (CPU) / 2e-6 (GPU); the two volume
+passes carry 100.00 % of a volume-only image.
+volume_bounces was accepted and ignored by the engine ((void)argVolumeBounces),
+contrary to the spec's context line. Now wired on both backends with Cycles
+semantics (max_volume_bounce = volume_bounces + 1; past the cap the
+continuation only attenuates + emits, then ends at the next surface).
+Grid smoke mean 0/2/unlimited: 0.037 / 0.072 / 0.101 (CPU),
+0.037 / 0.072 / 0.101 (GPU); world fog 0 → 4: 0.339 → 0.467 (CPU),
+0.357 → 0.460 (GPU); GPU/CPU at volume_bounces=0 1.003 / 1.007 / 0.997.
+Fire-lit smoke (density-free hot core in the same grid) keeps 32 % of its
+unlimited brightness at 0 bounces — a hard stop would render it black.
+settings_map + coverage_matrix + the matrix generator's evidence set flip
+volume_bounces DROPPED-SILENT → SUPPORTED.
+Corpus volumes family (scene id volumes_smoke): a sun-lit OpenVDB smoke
+plume and a blackbody fire, grids generated deterministically (seeded numpy
+value-noise fBm → Blender openvdb), CC0, committed as assets (206 KB + 405 KB).
+The allocation table gains a volumes family and moves the volume_bounces
+row to it. Manifest tests green (38 + 19). Astroray CPU / Cycles CPU per-crop
+band, 640×360 @128 spp: smoke 0.987 / 0.989 / 0.989, fire 0.989 / 0.986 /
+0.988 at vb=2; 0.987 / 0.988 / 0.989 and 0.990 / 0.989 / 0.989 at vb=0;
+0.985–0.988 at vb=64. (Under the old 10° observer this band was 0.974–0.996.)
+Render times: Cycles CPU ~16 s, Astroray CPU ~9 s, Astroray GPU 0.63 s.
+Contact sheets: benchmarks/reference_corpus/refs/volumes_smoke_* (inspected).
+Blender headless (tests/test_pkg271_blender_volume_headless.py): builds a
+smoke+fire .vdb, imports it as a Volume object, renders F12 on CPU and GPU
+through the staged addon and asserts non-vacuity (finite, not black, spatial
+variation, warm blackbody core). CPU core [0.104, 0.041, 0.024], GPU
+[0.103, 0.040, 0.025], frame-mean ratio 0.994. On main the GPU core is grey
+(the GPU volumes follow-up: blackbody volume emission on the GPU, device-side grid cache, 8-media cap (after #820) #828 gap), so the test discriminates.
+Item 3 — #833 (reported, not fixed)
+A mesh with a volume material is still rendered as its world AABB, but the addon
+now says so: [astroray volume] mesh '<name>' volume rendered as its bounding box
+plus an APPROXIMATED degradation row — unless the mesh IS that box (the #807
+cabinet cubes stay silent). Also new: a linked Principled Volume input (texture /
+attribute node) and a non-empty Color Attribute are reported instead of being
+silently dropped. tests/test_issue833_mesh_volume_bounds.py,
+tests/test_pkg271_volume_degradations.py.
+Item 4 — showcase render
+test_results/batchQ/showcase_volumes_astroray_gpu.png — 1280×720, 1024 spp,
+16.3 s on the RTX 5070 Ti through the addon (domain-warped fBm grids at 192³,
+volume_bounces = 4). Side-by-side with Cycles:
+showcase_volumes_astroray_vs_cycles.png; full-frame mean Astroray/Cycles
+0.992 / 0.994 / 0.994 (post-#837; 0.989 / 1.001 / 0.980 before).
+REG/STACK (cuobjdump)
+Isolated A/B — this branch vs main 030fbd14, both built from the same base
+(the pre-rebase measurement, my code unchanged since except the ABI fixes):
+kernel
+base
+batchQ
+stageShadeBucketedKernel<…> (all 128)
+REG 254
+unchanged, every instantiation
+stageIntersectQueuedKernel<0,0,0,0> (fleet)
+125 / 616
+unchanged
+stageIntersectQueuedKernel<0,1,0,0>
+127 / 616
+unchanged
+stageShadowKernel<*,*,0>
+108–121 / 584–864
+unchanged
+stageVolumeScatterKernel, stageVolumeHeteroScatterKernel
+68 / 88
+unchanged
+stageIntersectQueuedKernel<0,0,0,1> (HasGridVolume)
+134 / 944
+134 / 1024
+stageIntersectQueuedKernel<1,0,0,0> (HasWorldScatter)
+135 / 632
+138 / 632
+stageIntersectQueuedKernel<1,*,0,1>
+138 / 960
+138 / 1040
+stageIntersectQueuedKernel<1,*,1,0>
+158 / 1704
+158 / 1720
+Only world-fog / grid-volume intersect variants moved; no fleet kernel did.
+Post-rebase the only .pyd available for main is still the pre-#843/#844/#839
+binary, so a diff against it mixes Batch P/R/S (IES in NEE, op-VM, lamp radius)
+with this branch and cannot attribute anything: e.g. the volume-scatter kernels
+read 102 / 120 because they call gpu_nee_sample, which Batch P's IES lookup
+also grew. stageShadeBucketedKernel is REG 254 in every instantiation of the
+rebased build, which is the gate that matters. A true attribution needs a main
+baseline build — requested from the lead.
+Tests
+CPU suite on the rebased build (-m cpu -n 8): 2177 passed, 64 skipped,
+10 xfailed. Two test_delegate_process_tree.py failures appear only under
+xdist (they pass serially, 39 passed) and that file is untouched here.
+CPU volume + blackbody gates: 104 passed.
+GPU legs in one locked run: 41 passed — test_pkg269_gpu_hetero_parity,
+test_pkg271_volume_passes, test_issue828_grid_cache,
+test_pkg204_gpu_volume_pass_split, test_pkg199_world_volume_gpu_parity,
+test_issue801_wavefront_scene_cache, test_pkg198_gpu_lightpath_passes.
+Headless pkg271 test: passed against a scratch-staged addon (this branch's
+blender_addon/*.py + the fresh build_cuda .pyd; the test now honours
+ASTRORAY_ADDON_STAGE_DIR). It must be re-run against dist/astroray once the
+addon is restaged at closeout.
+geometry_zoo — re-rendered, and what it exposed
+geometry_zoo authors cycles.volume_bounces = 0, so its committed Astroray leg
+was stale (rendered while the limit was ignored). Re-rendered; VOLUME-crop linear
+means, 960×220 @96 spp:
+Render
+R/G/B
+vs Cycles, same setting
+Cycles @0
+0.1236 / 0.1170 / 0.1170
+—
+Astroray @0
+0.1007 / 0.0933 / 0.0875
+0.81 / 0.80 / 0.75
+Cycles @4
+0.1654 / 0.1624 / 0.1739
+—
+Astroray @4
+0.1299 / 0.1267 / 0.1284
+0.79 / 0.78 / 0.74
+Astroray before this PR (limit ignored)
+0.1318 / 0.1288 / 0.1311
+1.07 / 1.10 / 1.12 vs Cycles @0
+The old leg's agreement was a coincidence — unlimited multiple scattering landing
+near Cycles' single scatter. At MATCHED settings the mesh-volume cabinet is
+20–25 % dark at both 0 and 4 bounces (measured pre-#837), so this is a
+pre-existing bounded-media gap, filed as #860,
+(mesh→AABB lowering, the Volume Scatter/Absorption socket lowering, or the missing
+equiangular sampling for bounded media), not a volume_bounces defect: the
+volumes_smoke GRID scene matches Cycles to 2 % at both settings. Recorded in the
+corpus README as a follow-up; evidence
+test_results/batchQ/geometry_zoo_volume_crop_cycles_main_new.png.
+Divergences recorded (not claimed as parity)
+Past the volume-bounce cap the engine ends at the first non-emissive surface;
+Cycles continues through TRANSPARENT surfaces
+(PATH_RAY_TERMINATE_AFTER_TRANSPARENT). The engine's alpha pass-through is a
+shade-stage BSDF lobe a terminated path never reaches, and transparent_bounces
+is itself unwired (pkg201 park note).
+Both backends return 0 below 30 K (the shared table's floor). At Blackbody
+Intensity 1 that is ≤ (30/T)⁴ of a fire's luminance.
+Only the nearest medium a ray segment enters is tracked (pkg268/269
+behaviour, unchanged here): a second medium further along the same segment is
+skipped — e.g. a fire behind a smoke volume's AABB is invisible through it.
+Worth a follow-up issue; the corpus/showcase scenes place volumes side by side.
+Cycles' total max_bounces also sets terminate-after; the engine's total depth
+ends the path loop (pre-existing).
+Cycles sources were read upstream (github.com/blender/cycles main, 2026-09-20):
+scene/integrator.cpp, kernel/integrator/path_state.h, kernel/types.h,
+kernel/integrator/shade_volume.h. Only the light tree is vendored in-repo.
+Research: .astroray_plan/docs/batchq-volumes-3-research.md.
+Authorized surface
+Spec (pkg271) named: stage_volume_hetero.cu, raytracer.h, settings_map.py,
+exporter.py, manifest.json, plus the three new tests. Actually changed, with
+reasons:
+GPU volumes follow-up: blackbody volume emission on the GPU, device-side grid cache, 8-media cap (after #820) #828 (issue-scoped, not pkg271): blackbody_lut.h (new), volume_emission.*,
+grid_medium.*, gpu_spectral_tables.*, gpu_volume_phase.cuh,
+gpu_wavefront_snapshot.*, gpu_types.h, stage_advance.cu,
+blender_module.cpp (invalidation hooks + grid_uploads).
+pkg271 beyond the spec's list: volume_transport.h (noScatter),
+raytracer.h + stage_advance.cu + gpu_volume_phase.cuh (the
+volume_bounces wiring the spec assumed already existed),
+blender_addon/__init__.py (volume lowering, media-cap report),
+coverage_matrix.json + generate_blender_parity_matrix.py (the SUPPORTED
+flip), scene_library.py + build_corpus.py + the allocation table (the corpus
+family is built by the corpus's own builder convention, not the
+scenes/volumes_smoke.py the spec sketched), test_reference_corpus_manifest.py.
+Docs/evidence: research note, renderer-internals.md, corpus README, pkg271
+spec status, refs/volumes_smoke_*, test_results/batchQ/*.
+Not touched: engine volume stack / mesh voxelisation (Mesh with a volume material renders as its world AABB (icosphere → cube) #833 stays open).
+Build provenance
+Engine numbers come from the .pyd built at 6d9f253d (2026-09-20 12:04), the
+rebase onto main 93be746c (post-#837). Review fixes (ABI-1…5, PARITY-6) are in
+that build. Commits after it are docs/evidence only. The full CPU suite
+(2177 passed) and the non-observer GPU legs (41 passed) were run on the
+immediately preceding build b0ed9e2d, whose only engine delta is the CMF
+accessor rename; the observer-sensitive gates were re-run here.
+🤖 Generated with Claude Code
+HendrikGC02
+mentioned this pull request
+Sep 19, 2026
+Volumes: a ray segment only sees the nearest volume's bounds; volumes behind it are skipped (CPU + GPU)
+#842
+Closed
+HendrikGC02
+added a commit
+that referenced
+this pull request
+Sep 19, 2026
+docs(pkg271): spec Status -> done (PR #838); progress + lessons
+…
+d5c75f9
+```
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+HendrikGC02
+changed the title
+Batch Q — #828 GPU blackbody + grid cache; pkg271 volume passes/corpus/headless; #833 (reported)
+Batch Q — #828 GPU blackbody + grid cache; pkg271 volume passes/volume_bounces/corpus/headless; #833 (reported)
+Sep 19, 2026
+HendrikGC02
+marked this pull request as ready for review
+September 19, 2026 23:46
+HendrikGC02
+force-pushed
+the
+feat/batch-q-volumes-3
+branch
+from
+24bc726 to
+807c34d
+Compare
+September 20, 2026 00:37
+HendrikGC02
+added a commit
+that referenced
+this pull request
+Sep 20, 2026
+docs(pkg271): spec Status -> done (PR #838); progress + lessons
+…
+f8d7d84
+```
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+HendrikGC02
+and others
+added 20 commits
+September 20, 2026 11:38
+feat(batchQ): #833 mesh-volume bounding-box report + #828 GPU 8-media…
+…
+0140a5a
+```
+… cap degradation entry; research note
+
+Addon: a mesh volume lowered to its world AABB now reports
+"[astroray volume] mesh '<name>' volume rendered as its bounding box" plus an
+APPROXIMATED degradation row, unless the mesh is exactly that box (#807 cabinet
+cubes stay silent). More than 8 bounded media -> one IGNORED row (GPU side
+table cap, #828 item 3). Research note covers the #828 GPU blackbody LUT,
+the CPU normalizedPlanck NaN band (25-100 K), RNG keying, and Cycles
+volume_bounces semantics.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+feat(batchQ): #828 GPU blackbody volume emission + device grid cache …
+…
+25ca910
+```
+…+ RNG keying; pkg271 volume_bounces (CPU+GPU)
+
+- GPU blackbody: log-domain device Planck + a 2048-entry ln-T LUT of the pkg122
+  photopic integral (T 30 K..1e6 K, built on the host from the CPU's own double
+  integral, uploaded once to a __device__ array in gpu_spectral_tables.cu); dense
+  temperature grid uploaded beside the NanoVDB density buffer; blackbody term in
+  gpu_gridVolumeTrack under HasGridVolume, gated like BoundedMedium::emissionAt.
+- CPU fix: normalizedPlanck formed the ratio from a FLOAT normaliser -> NaN for
+  T ~ 25-100 K (measured on main). Now a double memo evaluated at the rounded
+  kelvin.
+- Device grid cache: NanoVDB + temperature uploads ride the #801 reuse decision;
+  clear_grid_media / set_volume_grid / add_homogeneous_medium invalidate.
+- RNG salts: disjoint bit fields (tracker bounce(8)|draw(20), shadow
+  bounce(8)|medium(3)|draw(17)); no cross-bounce/medium aliasing.
+
+pkg271 volume_bounces (was accepted and ignored by the engine)
+- Cycles semantics (max_volume_bounce = volume_bounces + 1; past the cap the
+  continuation is PATH_RAY_TERMINATE_AFTER_TRANSPARENT: media only attenuate +
+  emit, a surface adds its emission then ends). Grid/homogeneous media and world
+  fog, CPU + GPU (per_type_bounce byte 3, cap in the grid side table). Default
+  -1 = unlimited = unchanged.
+
+Research: .astroray_plan/docs/batchq-volumes-3-research.md
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+test(batchQ): pkg271 volume passes + volume_bounces gates; #828 GPU b…
+…
+cbd196b
+```
+…lackbody parity + grid-cache tests
+
+- test_pkg271_volume_passes.py: grid-smoke pass split + sum-to-beauty (CPU
+  rel_L1 2.3e-5 on main), volume_bounces output effect (grid + world fog),
+  terminate-after fire-lit smoke at volume_bounces=0, GPU/CPU parity.
+- test_pkg269_gpu_hetero_parity.py: blackbody slab (socket T, tint) and a
+  temperature-grid fire with a cold rim, GPU/CPU +-5 %.
+- test_issue828_grid_cache.py: reuse byte-identity, invalidation by
+  set_volume_grid / clear_grid_media / add_homogeneous_medium, reuse timing.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+test(pkg271): Blender headless Volume object F12 on CPU and GPU (non-…
+…
+9de9627
+```
+…vacuous: variation + warm blackbody core; discriminates the #828 GPU gap on main)
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+feat(pkg271): corpus volumes family (volumes_smoke: OpenVDB smoke + b…
+…
+fa222c9
+```
+…lackbody fire), volume_bounces -> SUPPORTED
+
+- scene_library.build_volumes_smoke_scene + write_volumes_vdbs (seeded numpy
+  value-noise fBm -> Blender openvdb; CC0 synthetic assets, 206 KB + 405 KB).
+- build_corpus: volumes_smoke scene id (family volumes), blend-relative VDB
+  paths, asset rows with sha256.
+- Allocation: volumes family; SOCKET_OVERRIDE moves RenderSettings.volume_bounces
+  from render_settings to volumes (table regenerated).
+- coverage_matrix / generator evidence / settings_map: volume_bounces
+  DROPPED-SILENT -> SUPPORTED (engine honours it, output-effect tested).
+- Manifest tests: 38 + 19 pass incl. volumes_smoke reopen/sha/coverage.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+docs(pkg271): corpus README -- volumes family row, build command, syn…
+…
+de4ca48
+```
+…thetic VDB asset licences
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(#828): explicit clamp in the device LUT index (no reliance on unq…
+…
+c121e77
+```
+…ualified min/max); pkg271 volume lowering reports linked inputs + Color Attribute
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(#828): one CPU/GPU blackbody normaliser (blackbody_lut.h); grid_u…
+…
+72fb403
+```
+…ploads in last_render_info
+
+- include/astroray/volume/blackbody_lut.h: the single __host__ __device__
+  luminance-normalised Planck (log space) over one ln-T table of the photopic
+  integral (2048 entries, 30 K..1e6 K). The CPU normalizedPlanck and the GPU
+  tracker call it on the SAME host-built table (the GPU uploads that vector).
+  Replaces the round-1 per-kelvin memo, which mis-normalised non-integer grid
+  temperatures (luminance/Cycles: 0.095 @60.5 K, 1.035 @500.4 K, 0.992
+  @1234.5 K; 7 % step across 500.5 K) and differed from the GPU below 30 K
+  (critic #4/#5). Both backends now return 0 below 30 K.
+- last_render_info()['grid_uploads']: grid buffers copied host->device by the
+  last GPU render (0 = device grid cache hit), so the #828 cache tests
+  discriminate (critic #7).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(batchQ addon): GPU-only media-cap row; volume_bounces unclamped; …
+…
+4476557
+```
+…drop the blackbody GPU degradation
+
+- #828 item 3: the >8-media row is emitted only when the F12 render resolves
+  to the GPU (the CPU honours every medium) (critic #9).
+- pkg271: volume_bounces reaches the engine as authored (no min(.., depth));
+  output-neutral (the depth loop bounds scatters) (critic #10).
+- #828: BLACKBODY_GPU_DEGRADATION removed -- GPU blackbody matches the CPU.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+test(batchQ): CPU blackbody regression, discriminating grid-cache tes…
+…
+8160390
+```
+…ts, device-aware cap, flipped #828 guard
+
+- test_issue828_blackbody_cpu.py (CPU-only): NaN band 22-200 K finite, 0
+  below 30 K; continuity across 500.5 K; luminance/Cycles = 1 at non-integer T
+  (critic #6; fails on the round-1 build: 0.095 @60.5 K, 1.035 @500.4 K).
+- test_issue828_grid_cache.py: gates on last_render_info()['grid_uploads']
+  (2 on upload, 0 on reuse, re-upload after each media mutation); images
+  compared with a float tolerance (volume accumulation order varies at ulp
+  level); timing min-of-7 (measured 4.4 vs 0.7 ms) (critic #7/#8).
+- test_issue833: media-cap row only on GPU.
+- test_pkg270: BLACKBODY_GPU_DEGRADATION guard flipped (no longer emitted).
+- test_pkg271: fire-lit smoke at density 1 (CPU seed spread 1-1.5 %, was 4.4 %
+  at density 3); parity at 2048 spp. test_pkg269: fire PNGs -> test_results/batchQ.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+docs(batchQ): research note (shared normaliser, upstream Cycles citat…
+…
+1a3a678
+```
+…ions, documented divergences); renderer-internals volume paragraph
+
+Divergences recorded, not claimed as parity: past-limit paths end at the first
+non-emissive surface (Cycles passes transparent surfaces); total max_bounces
+ends the loop; one medium tracked per ray segment (critic #2, #3).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+docs(pkg271): volumes corpus refs + A/B band (Astroray/Cycles 0.97-1.…
+…
+238ff45
+```
+…00 per crop), volume_bounces before/after sheet; headless test stage-dir override
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+docs(pkg271): spec Status -> done (PR #838); progress + lessons
+…
+6b0d4bc
+```
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+docs(batchQ): showcase VDB render (Astroray GPU 1280x720 1024 spp, 16…
+…
+dbca496
+```
+….3 s) + Cycles A/B; GPU volume_bounces before/after sheet
+
+Full-frame mean Astroray/Cycles 0.989/1.001/0.980 on the showcase scene.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+chore(batchQ): clear the ruff findings from the lint gate (import ord…
+…
+67eaa4e
+```
+…er, unused imports, f-strings)
+
+blackbody_lut.h includes <cmath>. Remaining lint findings are a CRLF artifact
+(git-diff-check reads the CR as trailing whitespace on every added line of a
+CRLF file) and cppcheck parsing a new .h as C ('namespace' invalid) -- the same
+finding every existing astroray header would produce on a changed line.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+revert(batchQ): blackbody_lut.h back to <math.h> so HEAD's engine sou…
+…
+4004963
+```
+…rces match the verified .pyd (4802127); the cppcheck .h-as-C finding is unaffected
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(batchQ review): null-guard cached grid pointers (ABI-1), saturate…
+…
+c133a6c
+```
+… the pkg201 per-type counter (ABI-2), hoist the LUT pointer (ABI-3), guard ASTRORAY_BB_HD (ABI-4), fix a stale include comment (ABI-5); clamp the GPU volume cap to 127 (PARITY-6); scripts index + research-note wording (PARITY-7, 1/5/8)
+
+ABI-2 is the one with teeth: pkg201's per-type counter is a byte and the limit is
+not bounded by 255, so a transmission count of 255 would have carried into byte 3
+- pkg271's volume counter and terminate-after flag.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+docs(pkg271): re-render geometry_zoo Astroray leg (volume_bounces now…
+…
+da9d6ab
+```
+… honoured) + matched-setting gap table
+
+The old leg was rendered while volume_bounces was ignored. At matched settings
+Astroray's mesh-volume cabinet is 20-25 % darker than Cycles at BOTH 0 and 4
+bounces (0.81/0.80/0.75 and 0.79/0.78/0.74); the previous 'agreement' was
+unlimited multiple scattering landing near Cycles' single scatter. The grid
+volumes_smoke scene matches Cycles to 2 %, so this is a pre-existing
+bounded-media gap, not a volume_bounces defect. Refs regenerated.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+docs(batchQ): refresh showcase + GPU before/after evidence from the r…
+…
+8cca30e
+```
+…ebased build
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(batchQ): follow #837's observer rename (cieCmf1931_2deg) in the b…
+…
+6d9f253
+```
+…lackbody table; resolve the CMF binding by prefix in the CPU gate
+
+git grep 'cieCmf1964|cie_cmf_1964' over src/include/module/tests is now empty.
+The normaliser table is built from the engine's current observer at runtime, so
+the blackbody luminance numbers move with #837 (re-measured after the build).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+HendrikGC02
+force-pushed
+the
+feat/batch-q-volumes-3
+branch
+from
+2e3971d to
+6d9f253
+Compare
+September 20, 2026 01:39
+This was referenced Sep 20, 2026
+Mesh-bounded volumes render ~0.75-0.81 of Cycles (grid volumes match within 2%)
+#860
+Closed
+test_pkg268_volume_visual overwrites tracked PNGs under test_results/batchF
+#861
+Closed
+docs(batchQ): post-#837 corpus A/B band (0.985-0.990), refreshed refs…
+…
+21e0384
+```
+…, showcase and before/after sheets; #860 reference
+
+Post-#837 (CIE 1931 2 deg) the Astroray/Cycles corpus band tightens to
+0.985-0.990 per crop (was 0.974-0.996 under the 10 deg observer). The
+volume_bounces effect is engine-independent: 0 vs 64 is 0.79x the smoke crop in
+both Astroray and Cycles. The before/after sheet is now one build, one observer,
+three settings (2 / 0 / 64), so only volume_bounces differs.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Hide details
+View details
+HendrikGC02
+merged commit 0888f27
+into
+main
+Sep 20, 2026
+8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+This was referenced Sep 20, 2026
+pkg55 GPU-vs-CPU red divergence reaches the 12 % gate on session_n1_envmap_cornell (11.4 % pre-observer, 9.1 % in 2026-06)
+#862
+Closed
+fix(tests): observer fallout in 6 GPU gates — pkg64 pins re-captured, HDRI dark-channel rule, pkg55 absolute-gap metric (#862)
+#863
+Merged
+HendrikGC02
+added a commit
+that referenced
+this pull request
+Sep 20, 2026
+docs: user/agent docs updated for #837 #839 #838 #843 #844 #850 (obse…
+…
+bca9237
+```
+…rver, GPU IES + emission, lamp radius, volumes, viewport re-sync)
+```
+HendrikGC02
+deleted the
+feat/batch-q-volumes-3
+branch
+October 3, 2026 09:42
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

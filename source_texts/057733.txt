@@ -1,0 +1,2685 @@
+Differentiable Light Transport with Gaussian Surfels via Adapted
+Radiosity for Efficient Relighting and Geometry Reconstruction
+KAIWEN JIANG, University of California, San Diego, United States of America
+JIA-MU SUN, University of California, San Diego, United States of America
+ZILU LI, University of California, San Diego, United States of America
+DAN WANG, University of California, San Diego, United States of America
+TZU-MAO LI, University of California, San Diego, United States of America
+RAVI RAMAMOORTHI, University of California, San Diego, United States of America
+arXiv:2509.18497v2 [cs.GR] 29 Sep 2025
+https://raymondjiangkw.github.io/radiositygs.github.io/
+PSNR : 23.79
+FPS: 515.42
+Plate OF FRUIT
+PSNR : 21.32
+FPS: 515.42
+MSE: 0.0044
+Ground Truth
+Ours
+Global Illumination
+MSE: 0.0109
+GS 3
+Ours
+Direct Illumination
+PSNR : 18.48
+FPS: 118.27
+PSNR: 15.60
+FPS: < 1
+MSE: 0.0151
+MSE: 0.0323
+NRHints
+1
+0
+Fig. 1. We present a differentiable light transport framework with Gaussian surfels as primitives for efficient relighting and geometry reconstruction. Given
+100 images with varying known point light sources, varying viewpoints and random initialization, our method outperforms the baselines GS3 [Bi et al. 2024]
+and NRHints [Zeng et al. 2023] at the test view with unseen viewpoint and lighting conditions, achieving high-quality relighting and extremely fast novel view
+synthesis as evidenced by the PSNR and FPS metrics shown in the top-right corner. In our method, when only direct illumination is considered, the interreflection among fruits and color bleeding effects are compromised, leading to lower view synthesis quality. We calculate the error maps between the rendered
+results and the ground truth using the MSE metric, displayed as insets in the bottom-right corner. The color bar is put at the right. Ours with global illumination
+achieves the lowest MSE, while others contain prominent errors for shadows or indirect illumination effects. We further demonstrate the applications of our
+method in Fig. 2. The metrics are measured on an NVIDIA 6000 Ada GPU. Scene adapted from fresh fruits in a bowl by Sougatadhar16©TurboSquid.
+Radiance fields have gained tremendous success with applications ranging
+from novel view synthesis to geometry reconstruction, especially with the
+advent of Gaussian splatting. However, they sacrifice modeling of material
+reflective properties and lighting conditions, leading to significant geometric ambiguities and the inability to easily perform relighting. One way to
+address these limitations is to incorporate physically-based rendering, but it
+has been prohibitively expensive to include full global illumination within
+the inner loop of the optimization. Therefore, previous works adopt simplifications that make the whole optimization with global illumination effects
+efficient but less accurate. In this work, we adopt Gaussian surfels as the
+primitives and build an efficient framework for differentiable light transport,
+inspired from the classic radiosity theory. The whole framework operates in
+the coefficient space of spherical harmonics, enabling both diffuse and specular materials. We extend the classic radiosity into non-binary visibility and
+Permission to make digital or hard copies of all or part of this work for personal or
+classroom use is granted without fee provided that copies are not made or distributed
+for profit or commercial advantage and that copies bear this notice and the full citation
+on the first page. Copyrights for components of this work owned by others than the
+author(s) must be honored. Abstracting with credit is permitted. To copy otherwise, or
+republish, to post on servers or to redistribute to lists, requires prior specific permission
+and/or a fee. Request permissions from permissions@acm.org.
+© 2025 Copyright held by the owner/author(s). Publication rights licensed to ACM.
+ACM 1557-7368/2025/9-ART
+https://doi.org/10.1145/3763305
+semi-opaque primitives, propose novel solvers to efficiently solve the light
+transport, and derive the backward pass for gradient optimizations, which
+is more efficient than auto-differentiation. During inference, we achieve
+view-independent rendering where light transport need not be recomputed
+under viewpoint changes, enabling hundreds of FPS for global illumination
+effects, including view-dependent reflections using a spherical harmonics
+representation. Through extensive qualitative and quantitative experiments,
+we demonstrate superior geometry reconstruction, view synthesis and relighting than previous inverse rendering baselines, or data-driven baselines
+given relatively sparse datasets with known or unknown lighting conditions.
+CCS Concepts: • Computing methodologies → Rendering.
+ACM Reference Format:
+Kaiwen Jiang, Jia-Mu Sun, Zilu Li, Dan Wang, Tzu-Mao Li, and Ravi Ramamoorthi. 2025. Differentiable Light Transport with Gaussian Surfels via
+Adapted Radiosity for Efficient Relighting and Geometry Reconstruction.
+ACM Trans. Graph. 1, 1 (September 2025), 25 pages. https://doi.org/10.1145/
+3763305
+1
+Introduction
+The success of radiance fields has enabled a broad range of applications ranging from novel view synthesis [Mildenhall et al. 2020]
+to geometry reconstruction [Wang et al. 2021a]. Compared to the
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+2
+•
+Kaiwen Jiang, Jia-Mu Sun, Zilu Li, Dan Wang, Tzu-Mao Li, and Ravi Ramamoorthi
+classic rendering algorithm which parametrizes lighting, geometry,
+materials, etc., the radiance fields directly parametrize the outgoing
+radiance, which greatly simplifies forward and inverse rendering
+and facilitates optimization. Typically, existing popular methods
+represent radiance fields in two distinct ways: 1) neural-based continuous representation (e.g., [Mildenhall et al. 2020; Müller et al.
+2022; Tancik et al. 2023]); 2) kernel-based discrete representation
+(e.g., [Huang et al. 2024b,a; Kerbl et al. 2023]).
+However, despite the success of radiance fields in view synthesis,
+they sacrifice the editability of the underlying materials, increase
+geometric ambiguity, and are unable to perform relighting.
+Observing such limitations, the well-known solution is to incorporate physically-based rendering with global illumination. However,
+it is notoriously costly especially when used in the inner loop of an
+inverse rendering algorithm. Within the neural-based continuous
+representation, representative works (e.g., [Attal et al. 2024; Jin et al.
+2023; Lyu et al. 2022; Srinivasan et al. 2021]) adopt simplifications
+(such as considering only single bounce, ignoring visibility, initializing from radiance fields, etc.) to improve the efficiency. Within the
+kernel-based discrete representation, existing methods (e.g., [Chen
+et al. 2024b; Gao et al. 2024; Jiang et al. 2024; Liang et al. 2024])
+also adopt similar simplifications, including learning the indirect
+illumination as separated outgoing radiances, freezing the geometry
+or binarizing the visibility, to deal with datasets under static illumination conditions. Even for direct illumination, existing works
+usually only solve for far-field light sources, i.e., environment maps.
+A different category of data-driven methods (e.g., [Bi et al. 2024;
+Kuang et al. 2024; Zeng et al. 2023]) proposes to use a neural network to compress all the lighting details using datasets with varying
+illumination conditions, but these methods do not have the full understanding of the light transport and therefore require very densely
+captured OLAT (one light at a time) datasets, with typically more
+than 500 images, for training.
+We address the above-mentioned limitations, presenting the first
+efficient framework using Gaussian surfels [Huang et al. 2024b;
+Jiang et al. 2025] to differentiably calculate the physically based
+light transport for relatively diffuse (but not pure Lambertian) materials and non-emissive volumes. Our method enables applications
+including material editing, relighting and accurate geometry reconstruction as shown in Fig. 2. We solve both direct illumination
+and indirect illumination for near-field and far-field light sources,
+which has not been demonstrated in previous works. As shown in
+Fig. 1, given relatively sparse inputs, physically based differentiable
+rendering significantly boosts the relighting quality compared to
+the data-driven approaches even with the direct illumination only.
+However, only using direct illumination omits relatively subtle but
+still vital indirect illumination effects.
+We choose Gaussian surfels for their efficiency and accurate definition of geometry [Jiang et al. 2025]. Within the context of Gaussian splatting, Zhou et al. [2024] enables the forward light transport
+using ray tracing for 3D Gaussians primitives and several works
+(e.g., [Byrski et al. 2025; Condor et al. 2025; Moenne-Loccoz et al.
+2024; Wu et al. 2025]) enable differentiable ray tracing under the
+radiance fields assumption. However, there are no existing works
+truly solving the differentiable global illumination, especially for
+Gaussian surfels. Even though ray tracing is pervasive, it is costly
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+Original
+(a) Material Editing
+(b) Relighting
+(c)
+Fig. 2. Demonstration of applications enabled by our method. Given the
+original result on the left, our method enables (a) material editing where
+we make the surface more shiny and set the specular albedo to be white,
+(b) relighting, and (c) geometry reconstruction.
+to iteratively traverse the scene and difficult to tradeoff between
+time consumption and variance, which in the end usually requires
+a denoiser. These factors prohibit robust optimization.
+In contrast, the choice of using Gaussian surfels prompts us to
+revisit the classical theory of radiosity [Cohen et al. 1993] and introduce a radiosity-inspired method. Our method turns out to be very
+efficient for solving the light transport between Gaussian surfels,
+while maintaining low variance of gradients for robust optimization. Specifically, since Gaussian surfels are already discrete finite
+elements, we use the finite element radiosity framework that has
+been well-developed in computer graphics in the 1980s and 90s, but
+adapt it in significant ways for volumetric light transport through
+the Gaussian surfel primitives. We also consider differentiable rendering, as needed for the inverse problem, which has not previously
+been considered in a radiosity method.
+We note that light transport in Gaussian surfels is ideally suited to
+a radiosity or finite element method, since no additional discretization step or refinement is needed as in conventional mesh-based
+radiosity. Moreover, visibility is continuous and non-binary, which
+eliminates the need for complicated meshing techniques [Durand
+et al. 1997, 1999; Lischinski et al. 1992]. We are interested in relatively diffuse (but not pure Lambertian) light transport, which can
+be handled by low-order (we use 9 in practice) spherical harmonics
+as in traditional radiosity methods [Sillion et al. 1991]. Therefore,
+view-dependent effects are supported.
+In our particular application, finite element or radiosity approaches
+have the advantage of solving for all Gaussian surfels simultaneously, for which we propose efficient parallel-friendly novel solvers.
+In contrast, in classical path tracing, we solve for each pixel independently and within each pixel, every path is independent from each
+other, leading to sub-optimal convergence speed. Finite element
+or radiosity approaches also support view-independent rendering
+with an iterative solution free of characteristic Monte-Carlo noise
+in ray tracing, which saves the recomputation of light transport
+when viewpoint changes and therefore enables hundreds of FPS
+during inference for global illumination effects as shown in Fig. 1.
+Finally, we also present necessary approximations that facilitate the
+optimization and greatly speed up the whole procedure.
+Our main contributions are summarized as follows:
+• We present a forward rendering framework, inspired from the
+radiosity theory, with both direct illumination and indirect
+illumination for Gaussian surfels (Sec. 5), that supports viewindependent rendering and view-dependent effects.
+Differentiable Light Transport with Gaussian Surfels via Adapted Radiosity for Efficient Relighting and Geometry Reconstruction
+• We deduce efficient gradient calculation for differentiable rendering in our framework (Sec. 6), achieving ∼ 10× speedup
+and significantly less memory footprint than automatic differentiation (Sec. 9.3).
+• We present novel solvers for efficiently solving for global
+illumination (Sec. 7) and useful approximations to facilitate
+the optimization (Sec. 8).
+• We achieve high-quality relighting results with global illumination effects (Figs 1,7) and accurate geometry reconstruction
+(Fig. 8) on common benchmarks.
+2
+Related Work
+Our paper brings together and significantly extends many lines of
+work, including relighting and geometry reconstruction with radiance field methods, differentiable rendering with global illumination,
+and classical radiosity approaches.
+Relighting and geometry reconstruction in radiance fields. Radiance
+fields combined with volume rendering have obtained significant
+success in recent years, which could be traced back to early explorations of view synthesis [Chai et al. 2000; Chen and Williams 1993;
+Gortler et al. 1996; Levoy and Hanrahan 1996; McMillan and Bishop
+1995]. Many works explore the best primitives to represent the radiance fields, including continuous representations such as pure MLPs
+[Barron et al. 2021, 2022; Mildenhall et al. 2020], hash tables [Barron
+et al. 2023; Müller et al. 2022], voxels [Fridovich-Keil et al. 2022; Liu
+et al. 2020], octrees [Yu et al. 2021], triplanes [Chan et al. 2022], etc.
+and discrete representations such as 2D/3D Gaussian kernels [Dai
+et al. 2024; Huang et al. 2024b; Kerbl et al. 2023; Zwicker et al. 2001],
+Epanechnikov kernels [Condor et al. 2025], deformable radial kernels [Huang et al. 2024a], etc. With their powerful capability of view
+synthesis, the next question is regarding relighting and geometry
+reconstruction.
+Relighting is typically solved by integrating physically-based
+rendering, which can be challenging due to its computational complexity. The integration is usually achieved by using ray tracing
+with different simplifications (e.g., [Chen et al. 2024b; Gao et al. 2024;
+Jiang et al. 2024; Liang et al. 2024; Lyu et al. 2022; Saito et al. 2024;
+Srinivasan et al. 2021]), such as limiting the indirect illumination,
+and ignoring, freezing or binarizing the visibility. Jointly training
+with continuous radiance fields (e.g., [Attal et al. 2024; Jin et al.
+2023]) strikes a better balance between accuracy and efficiency, but
+for discrete primitives, efficiently solving the physically-based rendering remains an open problem. Another category of data-driven
+methods (e.g., [Bi et al. 2024; Kuang et al. 2024; Zeng et al. 2023])
+proposes to use neural networks to learn all the lighting details
+using various hints, and then achieve high-quality relighting during test time. However, they require very densely captured OLAT
+(One-Light-At-a-Time) datasets, which may not always be available.
+Compared to them, our method is built upon discrete primitives, i.e.,
+Gaussian surfels, which are well-suited for a different category of
+light transport calculation, i.e., finite element methods or radiosity.
+We do not compromise the indirect illumination or visibility and
+achieve efficient full differentiation.
+•
+3
+Geometry reconstruction from images is also a topic gaining
+broad interest, which could be dated back to multi-view stereo methods (e.g., [Bleyer et al. 2011; Furukawa and Ponce 2010; Goesele et al.
+2007; Hirschmuller 2008; Schönberger et al. 2016; Sun et al. 2003;
+Vu et al. 2012]). Built upon continuous representations of radiance
+fields, some methods propose to define a geometry using distance
+fields (e.g., [Li et al. 2023; Liu et al. 2023; Long et al. 2023, 2022; Miller
+et al. 2024; Wang et al. 2025a, 2021a, 2023, 2025b; Yariv et al. 2021])
+and then convert them into density fields for differentiable volume
+rendering. Built upon the discrete representations of radiance fields,
+many methods propose to approximate a geometry from the density
+fields (e.g., [Chen et al. 2024a; Dai et al. 2024; Guédon and Lepetit
+2024; Huang et al. 2024b; Yu et al. 2024; Zhang et al. 2024a]). Some
+methods [Chen et al. 2024c; Jiang et al. 2025] define a stochastic
+geometry field [Miller et al. 2024] using discrete primitives and then
+convert it into density fields for differentiable volume rendering.
+Zhang et al. [2024b] proposes to differentiate a volumetric perturbation of a surface. However, geometry reconstruction based on
+the radiance fields or the emissive surfaces/volumes assumption dramatically increases the ambiguity of the underlying shape, which is
+most evident on texture-less or heavily shadowed areas. Compared
+to these approaches, our method is based on accurate definition of
+the geometry using Gaussian surfels [Jiang et al. 2025], and enables
+the light transport calculation in the optimization to explain the
+texture-less or heavily shadowed areas. This requires awareness of
+light sources, but allows for more accurate geometry reconstruction.
+Differentiable global illumination. Early approaches of inverse
+(global) illumination (e.g., [Boivin 2002; Nayar et al. 1991; Yu et al.
+1999; Zheng and Chellappa 1991]) often come with various constraints. Recently, differentiating physically-based rendering in ray
+or path tracing, combined with gradient-based optimization, started
+to show promise and generality [Azinovic et al. 2019; Sun et al. 2023;
+Wu et al. 2023a,b; Zhang et al. 2023]. In the case of surface rendering, a main challenge comes from the discontinuous boundaries
+which is addressed by previous work [Bangaru et al. 2020; Li et al.
+2018; Loubet et al. 2019; Xu et al. 2023]. Nimier-David et al. [2020]
+and Vicini et al. [2021] formulate the derivatives of the rendering
+equation as an adjoint integral which could be efficiently calculated.
+Another line of work [Belhe et al. 2024; Fischer and Ritschel 2023;
+Zeltner et al. 2021] proposes tailored importance sampling strategies
+for gradient calculation. Some earlier pioneering work focused on
+volume rendering [Gkioulekas et al. 2016, 2013; Klehm et al. 2014;
+Zhao et al. 2016], while later work [Nimier-David et al. 2022; Zhang
+et al. 2020, 2019, 2021] achieves full optimization of geometry and
+materials and address gradient bias and variance issues.
+However, there has been no existing work that addresses the
+differentiable light transport for discrete primitives. Our differentiation of global illumination is studied using the finite element
+method, different from the established works using ray or path tracing. We deal with continuous non-binary visibility and our method
+therefore is free of the discontinuity issues. We also develop a novel
+derivation to calculate the gradients of geometry and materials in a
+more efficient way than automatic differentiation.
+Radiosity. The computer graphics community has studied realistic
+image synthesis for decades, with the radiosity method [Goral et al.
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+4
+•
+Kaiwen Jiang, Jia-Mu Sun, Zilu Li, Dan Wang, Tzu-Mao Li, and Ravi Ramamoorthi
+1984] introduced as an alternative to ray tracing [Whitted 1980] and
+raster graphics. Both radiosity and ray tracing approaches are later
+reformulated to solve the rendering equation [Kajiya 1986]. Compared to path tracing, which uses Monte-Carlo estimation to iteratively solve the recursive integral from the camera plane, radiosity
+divides the structured geometry into many elements, and explicitly
+models the light transport between elements. The light transport
+is then formulated as a linear system, whose solution solves the
+rendering equation. Notably, the radiosity approach achieves viewindependent rendering in contrast to view-dependent rendering of
+ray tracing. The initial radiosity approach is limited to the Lambertian surfaces [Cohen and Greenberg 1985], while it is later extended
+to non-diffuse surfaces [Immel et al. 1986] as well using two-pass
+methods [Shao et al. 1988; Wallace et al. 1987], spherical harmonics
+[Sillion et al. 1991], etc. Various solvers (such as Jacobi iteration,
+[Cohen et al. 1988]) are introduced to efficiently solve the linear
+system from the shooting or gathering perspective, while hierarchical methods [Aupperle and Hanrahan 1993; Hanrahan et al. 1991]
+are introduced to systematically reduce the complexity. However,
+the radiosity approach is gradually replaced by the ray tracing approach and receives less and less attention over the years due to
+its discontinuity meshing issues for visibility [Durand et al. 1999;
+Lischinski et al. 1992], incapability of handling very complex materials, memory and time complexity of maintaining and solving the
+linear system. Hadadan et al. [2021; 2023; 2022] recently combined
+radiosity with neural networks to effectively solve the rendering
+equation and its differential. We refer the interested readers to Cohen et al. [1993]’s article for a more complete introduction.
+Radiosity and our method are both closely related to point-based
+global illumination [Buchholz and Boubekeur 2012; Bunnell 2005;
+Wang et al. 2013, 2015] that was extensively used in film industry [Christensen 2008] and more recently game industry [Apers
+2024].
+We revisit radiosity due to our need for calculating the light transport among discrete primitives. Many historical limitations do not
+exist in our setup or at least can be alleviated using the modern
+semi-opaque primitives and especially in the context of inverse
+rendering. For example, discontinuity meshing and subdivision are
+no longer required as we have continuous non-binary visibility.
+However, we still face significant challenges. The classic radiosity
+algorithm treats the calculation of geometry relationships (i.e., form
+factors) as a pre-processing step and focuses on a single forward
+rendering. In our case, we need to calculate the forward rendering
+at each optimization step which demands an efficient solver. The
+classic radiosity algorithm is also established based on opaque triangle primitives with binary visibility and needs to be extended for
+Gaussian surfels. A differentiable method for radiosity, especially
+for the backward pass of the radiosity formulation, has also not yet
+been explored for discrete elements. We present a method for light
+transport between Gaussian surfels that address these challenges,
+by extending radiosity to handle transparency, proposing a MonteCarlo solver and combine it with existing radiosity solvers [Cohen
+et al. 1988], derive efficient formulas for the gradient computation,
+and present necessary approximations to significantly improve the
+efficiency while achieving high-quality results.
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+Table 1. Common notations and their meanings. In the text, we will also
+use subscript 𝑖 to denote quantities belonging to the 𝑖 th Gaussian surfel.
+Notation
+a𝑑
+a𝑠
+𝐵
+B𝑐
+𝐸
+E𝑐
+𝑓
+f𝑐
+G
+k
+𝐿𝐼 (o, 𝝎 )
+𝐿𝑂 (o, 𝝎 )
+𝑁
+n
+𝑃
+p
+S = (𝑠𝑢 , 𝑠 𝑣 )
+s
+T = (t𝑢 , t𝑣 )
+t
+𝑉𝑗𝑖
+𝑌𝑙𝑚
+𝛼 (x)
+𝜅
+Λ
+𝝎𝑂
+𝝎𝐼
+3
+Meaning
+Diffuse albedo
+Specular albedo
+Radiative flux, or radiosity
+Coefficients for representing radiosity
+Emission
+Coefficients for representing emission
+Bidirectional reflectance distribution function
+Coefficients for representing BRDF
+Unnormalized 2D Gaussian kernel
+Diffuse specular blending coefficient
+Incident radiance given ray origin o and direction 𝝎
+outgoing radiance given location o and viewing direction 𝝎
+Total number of kernels
+Normal
+Local tangent plane space
+Central point
+Scaling
+Shininess
+Principal tangential directions
+Intersection point between the ray and kernel
+Asymmetric fused decay from 𝑗 th kernel to 𝑖 th kernel
+Spherical Harmonic basis function
+Opacity at location x
+Weighted residual kernel
+Integrated value of residual kernel for normalization
+outgoing direction (pointing outwards)
+In-coming direction (pointing inwards)
+Preliminaries
+We will first discuss the underlying geometry field and then recap the spherical harmonics basis. See Table 1 for notations used
+throughout the paper.
+3.1
+Geometry Field
+Jiang et al. [2025] propose to use an unordered set of 𝑁 Gaussian
+surfels to parametrize a stochastic geometry field [Miller et al. 2024]
+and then convert it into the density field for differentiable rendering
+[Huang et al. 2024b].
+Specifically, the 𝑖 th Gaussian surfel is parametrized by a central
+point p𝑖 , principal tangential directions T𝑖 = (t𝑢𝑖 , t𝑖𝑣 ), and the scaling
+in the tangential directions S𝑖 = (𝑠𝑖𝑢 , 𝑠𝑖𝑣 ), while the normal n𝑖 can be
+derived as the cross product of two principal tangential directions.
+Specifically, these properties define a local tangent plane space 𝑃𝑖
+and an unnormalized 2D Gaussian kernel (known as Gaussian surfel)
+G𝑖 illustrated in Fig. 3 as:
+𝑃𝑖 (𝑢, 𝑣) = p𝑖 + 𝑠𝑖𝑢 t𝑢𝑖 𝑢 + 𝑠𝑖𝑣 t𝑖𝑣 𝑣
+(1)
+1
+G𝑖 (𝑢, 𝑣) = exp(− (𝑢 2 + 𝑣 2 )),
+2
+where 𝑢, 𝑣 denote the coordinates on the local tangent plane.
+Jiang et al. [2025] compose a stochastic geometry field using
+the defined Gaussian surfels each of which is further associated
+with a geometry value and then convert it into the density field for
+rendering with a refined splatting algorithm. Notably, each Gaussian
+Differentiable Light Transport with Gaussian Surfels via Adapted Radiosity for Efficient Relighting and Geometry Reconstruction
+•
+5
+the graphics community to efficiently represent the common spherical rendering-related functions [Cabral et al. 1987; Ramamoorthi
+and Hanrahan 2001; Sillion et al. 1991; Sloan et al. 2002; Westin et al.
+1992].
+We denote the set of real spherical harmonic basis as:
+Y(𝝎) = [𝑌00 (𝝎), 𝑌1,−1 (𝝎), 𝑌10 (𝝎), 𝑌11 (𝝎), ..., 𝑌𝐿𝐿 (𝝎)]𝑇 ,
+Fig. 3. Illustration of the splatting algorithm for rendering when the ray
+intersects with two Gaussian surfels, i.e., the 𝑖 th and 𝑗 th Gaussian surfels.
+We also illustrate the parametrization of a 2D Gaussian surfel in the world
+space.
+which is up to degree 𝐿, and where 𝝎 denotes the evaluation direction. We further define Y(𝝎) = Y(−𝝎).
+For any real spherical function ℎ(𝝎), it can be represented as a
+linear weighted sum of spherical harmonics basis functions:
+ℎ(𝝎) ≈
+𝐿
+∑︁ 𝑙
+∑︁
+𝑐𝑙𝑚 𝑌𝑙𝑚 (𝝎)
+𝑙=0 𝑚=−𝑙
+surfel is associated with a directly learnable outgoing radiance, and
+all Gaussian surfels are ideally sorted based on their intersection
+depth with the ray. In the volume rendering setting, the incident
+radiance is then calculated as:
+𝐿𝐼 (o, 𝝎) =
+𝑁
+∑︁
+𝑖=1
+𝐵𝑖 (t𝑖 , −𝝎)𝛼𝑖 (t𝑖 )
+𝑖Ö
+−1
+(5)
+= [𝑐 00, 𝑐 1,−1, 𝑐 10, 𝑐 11, ..., 𝑐 𝐿𝐿 ] Y(𝝎),
+|
+{z
+}
+coefficient vector
+where we have:
+∫
+(1 − 𝛼 𝑗 (t 𝑗 )),
+ℎ(𝝎)𝑌𝑙𝑚 (𝝎)𝑑𝝎.
+𝑐𝑙𝑚 =
+(2)
+(6)
+S2
+𝑗=1
+where 𝐿𝐼 (o, 𝝎) denotes the incident radiance for ray with origin o
+and direction 𝝎 shooting from the camera plane, t𝑖 denotes the intersection point between the 𝑖 th kernel and the current ray, 𝐵𝑖 (t𝑖 , −𝝎)
+denotes the outgoing radiance of the 𝑖 th kernel at t𝑖 with viewing
+direction −𝝎, and 𝛼𝑖 (t𝑖 ) denotes the calculated footprint value or
+equivalently, opacity, at t𝑖 . Such a rendering formulation is exact
+except for the sorting approximation. An illustration of the splatting
+algorithm of Eqn. (2) and the parametrization of 2D Gaussian surfels
+is given in Fig. 3. Please refer to the paper [Jiang et al. 2025] for
+more details.
+Jiang et al. [2025] then address the problem of geometry reconstruction from a set of images. Given the training views, the corresponding rendered images at those camera positions are supervised
+using the following loss:
+We could also expand a 4D real spherical function, i.e., the reciprocal BRDF 𝑓 , using the spherical harmonics basis. Specifically,
+we could view it as a function mapping from a specific incoming
+direction 𝝎𝐼 into all outgoing directions or equivalently mapping
+from 𝝎𝐼 to a coefficient vector. Therefore, the evaluation of the
+BRDF can be defined as:
+𝑓 (𝝎𝐼 , 𝝎𝑂 ) = f𝑇 (𝝎𝐼 )Y(𝝎𝑂 ),
+L = Lrgb + 𝜆1 Ld + 𝜆2 Ln,
+(3)
+where Lrgb denotes the view synthesis loss [Kerbl et al. 2023], Ld
+denotes the depth distortion loss [Huang et al. 2024b], Ln denotes
+the depth-normal consistency loss [Huang et al. 2024b; Jiang et al.
+2024; Nehab et al. 2005] and 𝜆1 is set specific to the dataset, 𝜆2 =
+0.05.
+In this paper, we address similar tasks, i.e., given a set of images
+with light sources known or unknown, we achieve relighting and geometry reconstruction. Different from Jiang et al. [2025], we deduce
+the outgoing radiance or radiosity from the underlying geometry,
+materials and lighting by differentiable light transport, instead of
+directly formulating the outgoing radiance as learnable variables.
+Spherical Harmonics Representation
+As in previous work [Sillion et al. 1991], we intend to efficiently
+store spherical functions, including BRDF, radiance and emission,
+for each Gaussian surfel, and a popular choice is to use the spherical
+harmonics basis. The spherical harmonics basis is introduced into
+(7)
+where 𝝎𝑂 denotes the viewing direction, and f denotes the function
+mapping from 𝝎𝐼 into a coefficient vector.
+As discussed by Sillion et al. [1991], a BRDF 𝑓 (𝝎𝐼 , 𝝎𝑂 ) which is
+not cosine-weighted and only a function of 𝝎𝐼 · 𝝎𝑂 can be expanded
+using spherical harmonics as:
+𝑓 (𝝎𝐼 , 𝝎𝑂 ) =
+3.2
+(4)
+𝐿
+∑︁ 𝑙
+∑︁
+𝑐𝑙𝑚 𝑌 𝑙𝑚 (𝝎𝐼 )𝑌𝑙𝑚 (𝝎𝑂 ),
+(8)
+𝑙=0 𝑚=−𝑙
+where 𝑐𝑙𝑚 denotes the coefficient for constructing the BRDF and
+specifically, 𝑐𝑙𝑚 = (−1)𝑚 𝑐𝑙0 . Therefore, by combining Eqn. (6) and
+Eqn. (8), we have:
+f 𝑐 = [𝑐 00, 𝑐 1,−1, 𝑐 01, 𝑐 11, ..., 𝑐 𝐿𝐿 ]
+(9)
+f (𝝎𝐼 ) = f 𝑐 × Y(𝝎𝐼 ),
+where f 𝑐 is the coefficient vector that defines the BRDF.
+Generally, expanding the BRDF into the spherical harmonics basis
+is non-trivial. However, there is a closed-form solution [Ramamoorthi and Hanrahan 2001] for the Phong BRDF [Phong 1975] function.
+Notably, as discussed by Mahajan et al. [2008] and Ramamoorthi and Hanrahan [2001], the Phong BRDF also approximates the
+Blinn Phong BRDF [Blinn 1977] and microfacet BRDFs, such as the
+Torrance-Sparrow model [Torrance and Sparrow 1967], when it is
+expanded in the spherical harmonics basis space. Mahajan et al.
+[2008] show that the supported maximum accurate shininess of the
+Phong BRDF using up to 𝐿 degree spherical harmonics is ∼ 15 (𝐿+1) 2 .
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+6
+•
+Kaiwen Jiang, Jia-Mu Sun, Zilu Li, Dan Wang, Tzu-Mao Li, and Ravi Ramamoorthi
+Fig. 4. Overview of our pipeline. As in previous work [Huang et al. 2024b; Jiang et al. 2025; Kerbl et al. 2023], we create a set of 2D Gaussian surfels from
+a sparse set of Structure-from-Motion (SfM) points if available or random points and then perform the optimization and adaptive density control using
+image-space supervision. Differently, we incorporate a differentiable light transport module to determine the outgoing radiance of each Gaussian surfel from
+the underlying geometry, material and light sources.
+4
+Overview
+Our goal is to compute a view-dependent radiance field that consists of Gaussian surfels and spherical harmonic coefficients living
+on them, while accounting for light transport between the surfels.
+Instead of path tracing, which could be noisy and slow in our case,
+we revisit classical radiosity, extend it to handle transparency, and
+derive its differential counterpart. We found that this offers several
+benefits: 1) it significantly simplifies some derivative computations
+and 2) it allows us to adapt radiosity solvers that cache quantities
+within surfels.
+We address the problem of relighting and geometry reconstruction from a set of training images with known or unknown light
+sources. During test time, we perform relighting at the designated
+novel viewpoints and lighting conditions. For geometry reconstruction, we extract the mesh from rendered depth maps of all training
+views using TSDF fusion [Curless and Levoy 1996; Zhou et al. 2018].
+Figure 4 provides an overview of our pipeline. Specifically, we
+initialize from structure-from-motion (SfM) points if available or
+random points, and calculate the outgoing radiance from the underlying geometry, material and lighting conditions, which is denoted
+as “Differentiable Light Transport” and is the core of our method.
+After the Gaussian surfels receive their calculated outgoing radiance, they are then shaded and fed into the differentiable tile-based
+rasterizer for efficient rendering.
+We use exactly the same optimization procedure as in Jiang et al.
+[2025]’s work, which is described in Sec. 3.1, except that we further
+incorporate a masking loss La with weight 0.1 to supervise the
+rendered alpha mapping using the L1 norm compared with the
+ground truth, and an optional per-pixel L2 norm loss Lenv with
+weight 0.05 to regularize the intensity of the optimized environment
+map (if an environment map is used).
+As in previous work [Huang et al. 2024b; Jiang et al. 2025; Kerbl
+et al. 2023], we also use adaptive density control strategies to grow
+the primitives.
+Regarding the differentiable light transport, we will first discuss our forward rendering framework (Sec. 5). Subsequently, we
+present the gradient calculation for our global illumination framework (Sec. 6). Finally, we discuss the solvers for light transport
+(Sec. 7) and the introduced approximations (Sec. 8).
+Due to the different conventions, we use radiosity, and outgoing
+radiance interchangeably in the paper as we also model the directional effects. We also use symbols × and / to denote element-wise
+multiplication and division of vectors for simplicity. When an operator is omitted, it usually means that the operator is (element-wise)
+multiplication, except that it refers to matrix multiplication when
+two operands are a row-vector and a column-vector.
+5
+Forward Rendering
+We will first discuss our representations of geometry, materials,
+emission, outgoing radiance, and lighting. Afterwards, we present
+our framework for forward rendering, including a special case where
+we only consider the direct illumination, and the general case where
+we consider the global illumination.
+5.1
+Geometry, Material, Emission, Outgoing Radiance, and
+Lighting Representations
+Geometry. As discussed in Sec. 3.1, the geometry is represented
+with a stochastic geometry field using the semi-opaque primitives,
+i.e., Gaussian surfels. The visibility is therefore non-binary. We
+disable the self-reflection and treat each primitive as a two-sided
+primitive with both reflective front and non-reflective back faces
+for simplicity.
+Material, Emission and outgoing Radiance. We now introduce our
+first assumption that the material, emission and outgoing radiance
+are constant within the Gaussian surfel support. This assumption
+is also widely adopted in the radiosity theory and the splatting
+algorithm [Huang et al. 2024b; Jiang et al. 2025; Kerbl et al. 2023;
+Zwicker et al. 2001], which naturally suits the discrete representation of geometry.
+Specifically, the 𝑖 th kernel is associated with a reciprocal bidirectional reflectance distribution function (BRDF) 𝑓𝑖 which is a 4D
+function that takes incoming direction and outgoing direction as
+input, and an emission function 𝐸𝑖 and an outgoing radiance function 𝐵𝑖 which take the outgoing direction as input. As discussed in
+Sec. 3.2, the emission 𝐸𝑖 and outgoing radiance 𝐵𝑖 can be represented
+as spherical harmonics:
+𝐸𝑖 (𝝎) = (E𝑐𝑖 )𝑇 Y(𝝎) = Y𝑇 (𝝎)E𝑐𝑖
+(10)
+𝐵𝑖 (𝝎) = (B𝑐𝑖 )𝑇 Y(𝝎) = Y𝑇 (𝝎)B𝑐𝑖 ,
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+Differentiable Light Transport with Gaussian Surfels via Adapted Radiosity for Efficient Relighting and Geometry Reconstruction
+•
+7
+where E𝑐𝑖 and B𝑐𝑖 denote the coefficient vectors for emission and
+radiosity.
+We use a mixture of diffuse and Phong models to represent the
+BRDF. For each 𝑖 th kernel, it is associated with diffuse albedo a𝑑𝑖 ,
+specular albedo a𝑠𝑖 , shininess s𝑖 , and diffuse specular blending coefficient k𝑖 . The BRDF 𝑓𝑖 is defined as:
+a𝑑
+s𝑖 + 1
+𝑓𝑖 (𝝎𝐼 , 𝝎𝑂 ) = k𝑖 𝑖 + (1 − k𝑖 )a𝑠𝑖
+|𝝎𝑟 · 𝝎𝐼 | si ,
+(11)
+𝜋
+2𝜋
+where 𝝎𝑟 denotes the reflected outgoing direction with respect to
+the surface normal. Please refer to Appendix A for the formula of
+the coefficient vector f𝑖𝑐 corresponding to 𝑓𝑖 , using the conclusions
+in Ramamoorthi and Hanrahan [2001]’s work.
+Fig. 5. Illustration of calculating the outgoing radiance for the 𝑖 th kernel in
+Eqn. (16). We omit the emission for simplicity. The 𝑖 th kernel first receives
+radiance from all other kernels in space as the incident radiance, which is
+then converted to the outgoing radiance through the underlying material,
+i.e., BRDF.
+Lighting. We represent all light sources as point light sources
+in the form of special infinitesimal emissive Gaussian surfels for
+simplicity. We also support directional light sources approximately,
+by putting the point light sources far away and disabling the inverse
+square falloff from the light sources to the kernels. Our method can
+also handle environment maps in a similar way. Since we derive
+the derivatives with respect to the emission and position below, our
+method supports the optimization of lighting as well.
+kernel and visibility that is the standard form for Gaussian splatting,
+radiance field, or volumetric rendering.
+Notice that this equation is not recursive and can be directly
+evaluated. The gradient calculation can also be efficiently solved by
+the auto-differentiation.
+5.2
+Direct Illumination
+We first consider a special case where only direct illumination is
+taken into account. For each Gaussian surfel, we only consider the
+incident radiance from the light sources, and the final outgoing
+radiance is a weighted average of the response at all the points
+within the local support 𝑃 of the kernel. This weighted averaging is
+described as a kernel 𝜅, such as Gaussian,
+Uniform, Dirac delta, etc.,
+∫
+with support 𝑃, and we define Λ = 𝑃 𝜅 (x)𝑑x.
+The detailed derivation for direct lighting can be seen as a special
+case of the framework for global illumination that we will discuss
+later. In conclusion, we have the following rendering equation:
+forward rendering eqation (direct illumination)
+B𝑐𝑖 =E𝑐𝑖 +
+𝛼𝑖 (pi )
+×
+Λ𝑖
+
+∑︁ ∫
+𝑗 ∈LS
+
+BRDF
+
+Decay
+(12)
+f (𝝎𝐼 ) ×
+𝑖
+𝑃𝑖 
+Emission
+(Y(𝝎𝐼 )𝑇 E𝑐𝑗 )
+ 
+× 𝑉 (p 𝑗 , x) 𝑑x,
+𝑗𝑖
+ 
+
+where LS denotes the set of light sources.
+In this equation, 𝛼𝑖 (p𝑖 ) is needed as the semi-transparent kernel
+does not absorb all the energy, and we have:
+x − p𝑗
+𝝎𝐼 =
+||x − p 𝑗 || 22
+f𝑖 (𝝎𝐼 ) = f𝑖𝑐 × Y(𝝎𝐼 )
+Discussion. As shown in Fig. 1, partial understanding of full light
+transport, or direct illumination alone can already provide benefits for relatively sparse-view relighting, compared to data-driven
+approaches. Compared to standard direct lighting in ray tracing,
+the direct illumination in our case effectively caches the radiance
+within each kernel, enabling view-independent rendering as with
+the classical radiosity theory. Compared to these previous works
+of relighting with far-field light sources using Gaussian splatting
+(e.g., [Chen et al. 2024b; Gao et al. 2024; Jiang et al. 2024; Liang et al.
+2024]), we do not ignore, freeze or binarize the visibility, support
+both near-field and far-field light sources and derive our rendering
+equation from physically-based rendering to ensure the correctness.
+5.3
+Global Illumination
+We now present our forward rendering model for global illumination.
+Its derivation comes from the rendering equation [Kajiya 1986] and
+relies on an assumption that any two kernels are non-overlapping to
+solve the established forward rendering system using the weighted
+residual form. See Appendix B for more details.
+We cannot directly borrow the classical radiosity equation due to
+our change from fully opaque surface primitives into semi-opaque
+primitives, even though the eventual equation indeed mimics the
+radiosity equation with small but important changes.
+The forward rendering equation is given as:
+B𝑐𝑖 =E𝑐𝑖 +
+𝛼𝑖 (p𝑖 )
+×
+Λ𝑖
+
+𝑁
+∑︁ ∫
+𝑗=1
+∫
+𝑃𝑖
+
+BRDF
+Radiance
+𝑇
+f𝑖 (𝝎𝐼 ) × (Y(𝝎𝐼 )
+𝑃𝑗 
+ 
+B𝑐𝑗 )
+
+Decay
+× 𝑉 (x′, x) 𝑑x′𝑑x,
+𝑗𝑖
+ 
+
+(14)
+(13)
+𝑗Ö
+−1
+|n𝑖 · 𝝎𝐼 |
+𝑉𝑗𝑖 (p 𝑗 , x) =
+𝜅
+(x)
+(1 − 𝛼𝑘 ),
+𝑖
+||x − p 𝑗 || 22
+𝑘=1
+where B𝑐𝑖 , E𝑐𝑖 , f𝑖𝑐 denote the coefficients for constructing the radiosity,
+emission, and BRDF using spherical harmonics. 𝑉𝑗𝑖 represents the
+fused decay component as it includes the angular factor, averaging
+where we have:
+𝝎𝐼 =
+𝑉𝑗𝑖 (x′, x) =
+x − x′
+||x − x′ || 22
+𝑗Ö
+−1
+|n𝑖 · 𝝎𝐼 ||n 𝑗 · 𝝎𝐼 |
+𝜅𝑖 (x)𝛼 𝑗 (x′ )
+(1 − 𝛼𝑘 ),
+2
+′
+||x − x || 2
+𝑘=1
+(15)
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+8
+•
+Kaiwen Jiang, Jia-Mu Sun, Zilu Li, Dan Wang, Tzu-Mao Li, and Ravi Ramamoorthi
+and the meanings of other quantities, such as f𝑖 (𝝎𝐼 ), B𝑐𝑖 , E𝑐𝑖 , f𝑖𝑐 follow
+those in the direct illumination case (Sec. 5.2).
+As discussed before, we treat point light sources as special Gaussian surfels to simplify the framework. Specifically, when the selected
+𝑗 th kernel represents a light source, we do not integrate over the 𝑃 𝑗
+but directly sample its central point as x′ and disable the dot product
+between the normal and incoming direction for the 𝑗 th kernel in
+𝑉𝑗𝑖 . When it represents the directional light, we further disable the
+inverse square falloff in 𝑉𝑗𝑖 . Note that by only selecting 𝑗 within
+the set of light sources, we reach the special case where we only
+consider the direct illumination in Sec. 5.2.
+We further absorb the 𝛼𝑖 (p𝑖 )/Λ𝑖 term into the f𝑖 (𝝎𝐼 ) term to
+simplify the theoretical deduction, and the resulting equation is
+then:
+forward rendering eqation
+B𝑐𝑖 = E𝑐𝑖 +
+𝑁
+∑︁ ∫
+𝑗=1
+𝑃𝑖
+∫
+f𝑖 (𝝎𝐼 )(Y(𝝎𝐼 )𝑇 B𝑐𝑗 )𝑉𝑗𝑖 𝑑x′𝑑x
+(16)
+𝑃𝑗
+This equation resembles the classical radiosity equation [Sillion
+et al. 1991] after absorbing the terms, but the meaning of symbols
+(i.e., f𝑖 , 𝑉𝑗𝑖 ) differs and the visibility is non-binary in our case. Notice
+that this equation is recursive as B𝑐 shows up in both sides of the
+equation, and we will discuss how to solve it later. We provide a
+visualization of this equation in Fig. 5.
+To summarize, we parametrize the geometry and materials using
+Gaussian surfels and derive the analytical formula from the rendering equation for the outgoing radiance. We make the assumptions
+that: 1) The material, emission and outgoing radiance are constant
+within the kernel; 2) There is no overlapping between any two
+Gaussian surfels. After we calculate the outgoing radiance for each
+surfel, we could render the image given an arbitrary viewpoint
+using Eqn. (2), which is implemented as an efficient rasterization
+process [Huang et al. 2024b].
+6
+Gradients for Global Illumination
+For optimization, we need to deduce the partial derivative of the loss
+function L with respect to the underlying geometry, materials, and
+lighting conditions from the partial derivative of the loss function
+with respect to the calculated outgoing radiance, i.e., 𝜕L/𝜕B𝑐𝑖 , which
+comes from the differentiable tile-based rasterizer.
+Compared to using automatic differentiation with techniques
+such as path replay backpropagation [Vicini et al. 2021], we show
+that, by the explicit derivation of gradients, there is a duality between the forward pass and backward pass, which further allows
+non-recursive analytical definitions of gradients, which are accurate and efficient to calculate. The detailed derivation is given in
+Appendix C, with the main results presented here.
+Gradients with respect to the emissions. We first consider the partial derivatives for the emissions, as they will be used in calculating
+other gradients as well. The 𝜕L/𝜕E𝑐𝑖 are given as:
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+gradients with respect to emissions
+𝑁 ∫ ∫
+𝜕L
+1 ∑︁
+𝜕L 𝜕L
+f𝑖 (𝝎𝐼 )(Y(𝝎𝐼 )𝑇 (f 𝑐𝑗 × 𝑐 ))𝑉𝑗𝑖 𝑑x′𝑑x,
+=
++
+𝜕E𝑐𝑖 𝜕B𝑐𝑖
+f𝑖𝑐 𝑗=1 𝑃𝑖 𝑃 𝑗
+𝜕E 𝑗
+where 𝑉𝑗𝑖 = 𝑉𝑖 𝑗 .
+(17)
+Note that this equation closely resembles Eqn. (16), except that
+the decay term is reversed and we are propagating the gradients instead of the emission. This relationship implies the duality between
+forward rendering and gradient calculation, which is analogous to
+previous inverse and differentiable rendering works [Chandraker
+et al. 2011; Nimier-David et al. 2020]. We will further extend this
+duality by deducing the analytical non-recursive formulae for materials and geometry. Therefore, the solvers we develop later will
+generalize to both forward rendering and gradient calculation.
+Gradients with respect to the BRDF. We now consider the partial
+derivatives with respect to the BRDF, or specifically the coefficients
+f 𝑐 . Perhaps surprisingly, 𝜕L/𝜕f 𝑐 can be analytically solved using the
+previously calculated B𝑐 and 𝜕L/𝜕E𝑐 by noticing that B𝑐 represents
+the summation of all possible propagated emissions and 𝜕L/𝜕E𝑐
+represents the summation of all possible propagated gradients. The
+full derivation is given in Appendix C.
+Specifically, we have:
+gradients with respect to materials
+(B𝑐𝑖 − E𝑐𝑖 )
+𝜕L
+𝜕L
+=
+×
+𝜕f𝑖𝑐
+𝜕E𝑐𝑖
+f𝑖𝑐
+(18)
+This equation is an analytical non-recursive accurate closed-form
+solution, which is therefore more efficient than using standard automatic differentiation.
+Gradients with respect to the geometry. The remaining gradients
+are the partial derivatives with respect to the geometric properties
+(i.e., central points, scaling, etc.) from the decay term and directional
+effects. The derivation for their analytical non-recursive forms is
+similar to the derivation of 𝜕L/𝜕f𝑖𝑐 , which is elaborated in Appendix C.
+Without losing generality, we define 𝛽𝑖 as a placeholder for the
+geometric property of the 𝑖 th kernel, such as the p𝑖 , S𝑖 , T𝑖 , 𝑒𝑡𝑐., that
+we want to differentiate through.
+Specifically, from the decay term 𝑉 , the first part of 𝜕L/𝜕𝛽𝑖 is
+given as:
+gradients w.r.t. geometry from the decay term
+𝑇
+𝜕L
+𝑇 𝑐
+𝑁 𝑁 ∫ ∫
+(Y (f𝑏𝑐 × 𝜕E
+𝑐 ))(Y B𝑎 )
+𝜕L ∑︁ ∑︁
+𝑏
+=
+·
+𝜕𝛽𝑖 𝑎=1
+𝑠𝑎𝑢 𝑠𝑎𝑣 𝑠𝑏𝑢 𝑠𝑏𝑣
+𝑃𝑏 𝑃𝑎
+𝑏=1
+𝜕(𝑉𝑎𝑏 𝑠𝑎𝑢 𝑠𝑎𝑣 𝑠𝑏𝑢 𝑠𝑏𝑣 )
+(19)
+𝑑x′𝑑x
+𝜕𝛽𝑖
+This formula for gradients is again analytical and non-recursive,
+but we need to enumerate every pair of kernels as 𝑎 and 𝑏 in Eqn. (19),
+which is costly. In practice, since we should solve the light transport
+in the forward pass, we record each pair of kernels that are visible
+Differentiable Light Transport with Gaussian Surfels via Adapted Radiosity for Efficient Relighting and Geometry Reconstruction
+•
+9
+to each other and only calculate the gradients from these pairs since
+the decay term is non-zero.
+Besides, we also need to take the directional effects into account.
+𝜕L
+The second and last part of 𝜕𝛽
+is given as:
+𝑖
+forward rendering eqation (shooting perspective)
+∫ ∫
+∀𝑗 ∈ {1, 2, ..., 𝑁 }, B𝑐𝑗 ← B𝑐𝑗 +
+f 𝑗 (Y𝑇 B𝑐𝑖 )𝑉𝑖 𝑗 𝑑x′𝑑x
+gradients w.r.t. geometry from directional effects
+We could apply exactly the same progressive refinement algorithm from Cohen et al. [1988]. Specifically, we initialize B𝑐𝑗 as E𝑐𝑗 .
+At each step, we choose a shooting index and then calculate how
+much it emits to all other kernels and update their radiance. If we do
+not use progressive refinement to solve the full solution, we will get
+c𝑐 and remaining unshot radiance
+intermediate calculated radiance B
+𝑖
+𝑐
+th
+𝛿B𝑖 for the 𝑖 kernel.
+The selection of the shooting index is usually heuristic. For example, we could select the index that has the largest intensity of
+unshot outgoing radiance. This corresponds to the sorted order in
+the original progressive refinement method.
+However, simply applying progressive refinement cannot efficiently reach the final converged solution as we can only select
+limited shooting indices at a time while we could have hundreds of
+thousands of Gaussian kernels. We observe that there is a nice property that the solving of remaining radiance given unshot outgoing
+radiance is a recursive formula in the same form as Eqn. (16), i.e.,
+𝑁 ∫ ∫
+𝜕𝝎𝐼 ′
+𝜕L ∑︁
+𝜕L
+′
+=
+[𝑉𝑗𝑖 (Y𝑇 B𝑐𝑗 )(f𝑖𝑐 × 𝑐 )]𝑇 Y (𝝎𝐼 )
+𝑑x 𝑑x
+𝜕𝛽𝑖
+𝜕E
+𝜕𝛽𝑖
+𝑖
+𝑗=1 𝑃𝑖 𝑃 𝑗
++
+𝑁 ∫ ∫
+∑︁
+𝑗=1
+𝑃𝑗
+𝑃𝑖
+𝑇
+[𝑉𝑗𝑖 (Y (f 𝑐𝑗 ×
+𝜕L
+𝜕𝝎𝐼 ′
+))B𝑐𝑖 ]𝑇 Y′ (𝝎𝐼 )
+𝑑x 𝑑x
+𝑐
+𝜕E 𝑗
+𝜕𝛽𝑖
+(20)
+Similarly, this formula is also analytical and non-recursive and
+we only calculate the gradients from kernels that are visible to the
+𝑖 th kernel.
+In conclusion, the gradient calculation in our case is different
+from that in path tracing. We first define the gradients with respect
+to the emissions in Eqn. (17), which is shown to be equivalent to
+a forward pass and also observed by Nimier-David et al. [2020].
+Different from path tracing gradient calculation, we observe that
+the emission derivatives are used in many other derivatives, which
+leads to analytical non-recursive definitions for other derivatives.
+Moreover, the solvers we design later will cache the necessary quantities within the surfels, preventing redundant computation during
+the backward pass.
+We conduct an ablation study in Sec. 9.3 to compare standard autodifferentiation method with our proposed, more efficient gradient
+computation method.
+7
+Solvers for Global Illumination
+After establishing the light transport framework, we develop solvers
+to solve the recursive formulation in Eqn. (16) or Eqn. (17). Typically, in the classical radiosity theory, the recursive formulation is
+transformed into a linear system, and the exact solutions are given
+by solving the linear system. However, maintaining the whole linear
+system using methods such as extended form factors and computing
+the exact solutions is computationally infeasible in our case since
+we need to solve the radiosity system at each optimization step
+where geometry, materials, etc. keep changing. We will first discuss
+the existing solver, i.e., progressive refinement [Cohen et al. 1988],
+and then introduce our Monte-Carlo solver which efficiently finds
+the solutions in an unbiased manner and finally discuss how to
+hybridize these two solvers to improve the efficiency and reduce
+the variance. Due to the duality of the forward pass and gradient
+calculation, we will use the forward pass as the illustrative example
+here without losing generality.
+Progressive Refinement. Cohen et al. [1988] propose the progressive refinement as an iterative solver from the shooting perspective
+for the purpose of interactive rendering. It first initializes the radiosity as the emission, and iteratively selects a kernel and shoots its
+unshot radiance into all other kernels. We first transform Eqn. (16)
+into the shooting perspective, i.e., the 𝑖 th kernel shoots its radiance
+into all other 𝑗 th kernels, as:
+𝑃𝑗
+B𝑟𝑖 =𝛿B𝑐𝑖 +
+𝑁
+∑︁ ∫
+𝑗=1
+𝑃𝑖
+∫
+(21)
+𝑃𝑖
+f𝑖 (Y𝑇 B𝑟𝑗 )𝑉𝑗𝑖 𝑑x′𝑑x,
+(22)
+𝑃𝑗
+where B𝑟𝑗 denotes the remaining radiance in the coefficient space of
+the spherical harmonics basis for the 𝑖 th kernel. And we have the
+final outgoing radiance as:
+c𝑐 + B𝑟𝑖 − 𝛿B𝑐𝑖 .
+B𝑐𝑖 = B
+𝑖
+(23)
+This property allows us to hybridize the progressive refinement
+with other solvers, or specifically the Monte-Carlo solver that we
+will discuss next, to solve the light transport.
+Monte-Carlo Solver. From Eqn. (16), we now apply a one-point
+Monte-Carlo estimator to address the summation in the equation:
+∫ ∫
+1
+f𝑖 (Y𝑇 B𝑐𝑗 )𝑉𝑗𝑖 𝑑x′𝑑x,
+(24)
+B𝑐𝑖 ≈ E𝑐𝑖 +
+Pr[choose 𝑗] 𝑃𝑖 𝑃 𝑗
+where the choice of 𝑗 will be discussed later. The familiar reader
+will recognize that it looks like a standard path-tracing formulation.
+In path tracing, the Monte-Carlo solution is achieved by iteratively
+selecting the next direction, applying Russian roulette, terminating
+at the preset maximum depth, etc. In contrast, instead of iteratively
+selecting the next direction, we iteratively select the next kernel as
+the next event. Due to the discretizations, we are explicitly solving
+and caching the outgoing radiance for all kernels simultaneously,
+which enables us to apply a technique known as off-policy temporal
+difference learning (known as TD(0)) [Sutton and Barto 2018] in the
+reinforcement domain.
+We summarize the Monte-Carlo solver in Alg. 1. Specifically, it
+is still an iterative procedure with time steps 0, 1, ...,𝑇 − 1, where 𝑇
+denotes the maximum time step. At each time 𝑡 ∈ {0, 1, ...,𝑇 − 1},
+we maintain a version of the estimated outgoing radiance for every
+kernel, which is denoted as B𝑐𝑖 (𝑡 ) . Starting from an initial guess that
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+10
+•
+Kaiwen Jiang, Jia-Mu Sun, Zilu Li, Dan Wang, Tzu-Mao Li, and Ravi Ramamoorthi
+Algorithm 1 Monte-Carlo Solver Algorithm
+Input: All Gaussian kernels with their properties, emissions and
+step 𝑇 .
+Output: Estimated outgoing radiance.
+1: ⊲ Initialize sum of all estimations of radiance
+2: ∀𝑖 ∈ {1, 2, . . . , 𝑁 }, S𝑖𝐵 ← 0
+3: ⊲ Initialize sum of the square of all estimations of radiance
+2
+4: ∀𝑖 ∈ {1, 2, . . . , 𝑁 }, S𝑖𝐵 ← 0
+5: ⊲ Initialize number being visited
+6: ∀𝑖 ∈ {1, 2, . . . , 𝑁 }, 𝐷𝑖 ← 0
+7: ⊲ Enumerate each step
+8: for 𝑡 in 1, 2, . . . ,𝑇 do
+9:
+⊲ Select kernels for receiving radiance
+10:
+if 𝑡 ≤ 8 then
+11:
+⊲ Select all kernels
+12:
+{𝑎 1, . . . , 𝑎 𝑁 } ← {1, 2, . . . , 𝑁 }
+13:
+else
+14:
+⊲ Select 𝑁 kernels based on variance
+15:
+{𝑎 1, . . . , 𝑎 𝑁 } ← 𝑆𝑒𝑙𝑒𝑐𝑡𝑆𝑡𝑎𝑟𝑡𝑖𝑛𝑔𝐼𝑛𝑑𝑒𝑥
+16:
+end if
+17:
+⊲ Stochastically find kernels for emitting radiance
+18:
+{𝑏 1, 𝑝 1, . . . , 𝑏 𝑁 , 𝑝 𝑁 } ← 𝑁 𝑒𝑥𝑡𝐸𝑣𝑒𝑛𝑡
+19:
+⊲ Calculate the new estimation
+ of received radiance
+20:
+∀𝑖 ∈ {1, 2, . . . , 𝑁 }, 𝛿𝑖 ← 𝑁 𝐸 𝑎𝑖 , 𝑏𝑖 , 𝑝𝑖 , E𝑐𝑎𝑖 , S𝑏𝐵𝑖 /𝐷𝑏𝑖
+21:
+⊲ Update the sum of all estimations of radiance
+22:
+∀𝑖 ∈ {1, 2, . . . , 𝑁 }, S𝑎𝐵𝑖 ← S𝑎𝐵𝑖 + 𝛿𝑖
+23:
+⊲ Update the sum of the square of all estimations of radiance
+2
+2
+24:
+∀𝑖 ∈ {1, 2, . . . , 𝑁 }, S𝑎𝐵𝑖 ← S𝑎𝐵𝑖 + 𝛿𝑖2
+25:
+⊲ Update the number of being visited
+26:
+∀𝑖 ∈ {1, 2, . . . , 𝑁 }, 𝐷𝑎𝑖 ← 𝐷𝑎𝑖 + 1
+27: end for
+28: ⊲ Calculate the radiance as the average of all estimations
+29: ∀𝑖 ∈ {1, 2, . . . , 𝑁 }, B𝑐𝑖 ← S𝑖𝐵 /𝐷𝑖
+30: return {B𝑐1 , . . . , B𝑐𝑁 }
+∀𝑖 ∈ {1, 2, ..., 𝑁 }, B𝑐𝑖 (0) = 0 (Line 2-6 in Alg. 1), the update rule is
+defined following TD(0) as:
+monte-carlo solver update rule
+B𝑐𝑖 (𝑡 +1) =
+𝑡
+1
+× B𝑐𝑖 (𝑡 ) +
+×
+𝑡 +1
+𝑡 + 1∫ ∫
+(25)
+1
+(𝑡 )
+(E𝑐𝑖 +
+f𝑖 (Y𝑇 B𝑐𝑗 )𝑉𝑗𝑖 𝑑x′𝑑x)
+Pr[choose 𝑗] 𝑃𝑖 𝑃 𝑗
+Effectively, we blend the old estimate of B𝑐𝑖 with the new estimate
+calculated from Eqn. (24) (Line 20 in Alg. 1). It is proven to con𝑡
+1
+verge when the learning rate ( 𝑡 +1
+and 𝑡 +1
+coefficients) satisfies the
+Robbins-Monro condition [1951] and has been used in many-lights
+rendering before [Wang et al. 2021b].
+We update the estimated outgoing radiance simultaneously for
+all selected 𝑁 kernels and all directions (Line 22-26 in Alg. 1) since
+we operate on the coefficient space of the spherical harmonics basis.
+Notice that the update rule is implemented as an average due to
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+the usage of a geometric series as the learning rate for temporal
+difference learning.
+Our update algorithm is parallel-friendly, and the maximum time
+step 𝑇 here is similar to the number of Monte-Carlo samples for a
+pixel in ray tracing. As the iteration increases, the depth of light
+transport also grows, which eliminates the need of setting a maximum depth. In practice, we empirically set 𝑇 = 64 to achieve a
+balance between efficiency and variance. This approach is different
+from radiance caching [Křivánek et al. 2008] as in that case, the
+outgoing radiance needs to be fully independently solved for the
+selected points, and then later used as cached values in the final
+solving procedure. This approach is also different from the iterative
+solution method for linear systems in the classical radiosity. In the
+iterative solution method, the intermediate results cannot be used
+as an unbiased estimation of the final solution, while ours can.
+Next event estimation. We now present the algorithm to choose
+the 𝑗 or, formally, estimate the next event (Line 18 in Alg. 1) for the
+𝑖 th kernel. As is well understood, the probability of choosing the
+kernel 𝑗, denoted as 𝑝 𝑗 , should be proportional to the integral in
+Eqn. (24). The integral can be approximated by removing the BRDF
+response and the expensive transmission term within the decay
+term:
+𝑇
+𝑝 𝑗 ∝ clamp(B𝑐𝑗 (𝑡 ) 𝑌 )
+|
+{z
+}
+how much emit
+|n𝑖 · 𝝎𝐼 ||n 𝑗 · 𝝎𝐼 |
+,
+||p 𝑗 − p𝑖 || 22
+|
+{z
+}
+(26)
+rough estimate of decay
+where clamp(·) denotes clamping the values at three channels (RGB)
+into a single scalar value. In the forward pass, we use the converted
+illumination from the RGB color space, while in the gradient calculation, we use the norm of gradients for all three channels.
+However, we need to estimate the next event for all 𝑁 kernels simultaneously. It is of O (𝑁 2 ) complexity and explicitly constructing
+the probability matrix is costly. In fact, we could sample 𝑗 based on
+𝑝 𝑗 without seeing all the probabilities simultaneously and without
+knowing the normalization factor in advance. Specifically, for the
+𝑖 th kernel, we stream it with the calculated unnormalized 𝑝 𝑗 for
+every other kernel only once and sample 𝑗 ∼ 𝑝 𝑗 . This is known
+as the online streaming weighted sampling and well solved by the
+weighted reservoir sampling [Chao 1982].
+We further improve the computational complexity of the next
+event estimation by taking inspiration from light cuts [Walter et al.
+2005]. The choice of the 𝑖 (Line 10-16 in Alg. 1) can also be flexible
+to improve the efficiency. Please find more details in Appendix D.
+Hybrid Solver. As mentioned, at each step of progressive refinement, the remaining sub-problem of solving outgoing radiance given
+unshot radiances is in itself again a complete light transport problem. Therefore, we could first apply the progressive refinement to
+estimate the outgoing radiance from all light sources to all other kernels, which is conceptually similar to the direct light factorization
+and light tracing, and then apply our Monte-Carlo solver to estimate
+the indirect illumination. This approach is much more efficient and
+has lower variance for a similar compute time, compared to simply
+using the Monte-Carlo solver to estimate the global illumination.
+Differentiable Light Transport with Gaussian Surfels via Adapted Radiosity for Efficient Relighting and Geometry Reconstruction
+•
+11
+∫
+𝑃 𝜅𝑖 𝑑x
+p −p
+where 𝝎𝐼 = | |p 𝑖−p 𝑗| | 2 , 𝑖 Λ𝑖 = 1, and we also have the closed-form
+∫ 𝑖 𝑗 2
+solution for 𝑃 𝛼 𝑗 𝑑x, which is detailed in Appendix E.
+𝑗
+To compensate for the error in the approximation, we further
+assign an optimizable scaling factor 𝜆𝑖 ∈ R+ to each 𝑖 th kernel. We
+now absorb the 𝛼𝑖 term into the f𝑖 (𝝎𝐼 ) term, and Eqn. (27) can be
+simplified as:
+forward rendering eqation (approximated)
+B𝑐𝑖 = E𝑐𝑖 +
+𝑁
+∑︁
+f𝑖 (𝝎𝐼 )(Y(𝝎𝐼 )𝑇 B𝑐𝑗 )𝑉𝑗𝑖 ,
+𝑗=1
+(28)
+𝑗 −1
+Ö
+|n𝑖 · 𝝎𝐼 ||n 𝑗 · 𝝎𝐼 |
+)
+where 𝑉𝑗𝑖 = 𝜆 𝑗 (
+𝛼 𝑗 𝑑x)( (1 − 𝛼𝑘 )
+||p𝑖 − p 𝑗 || 22
+𝑃𝑗
+𝑘=1
+∫
+Fig. 6. Illustration of the sensitivity of outgoing radiance to small geometric
+changes. (a) Due to the constant outgoing radiance assumption, the propagated outgoing radiance for the blue kernel is the averaged response to the
+integral of propagated incoming radiance along all possible directions from
+the light source. Some rays are occluded, while others are not. (b) After a
+small geometric change (rotate and translate a little bit), the visibility for
+different rays could change substantially, which results in an inescapable
+change to the outgoing radiance.
+8
+Approximations
+After establishing the whole framework and the solvers, as illustrated in Fig. 6, we find that, due to our first assumption that the
+material, emission and outgoing radiance are constant within the
+support, the final outgoing radiance of a kernel is the average of
+all possible rays propagating the radiance for that kernel. These
+rays could have a large variance in terms of visibility that is quite
+sensitive to geometric changes. In turn, the final outgoing radiance
+of a kernel is sensitive to small geometric disturbance. This may
+make the optimization of both geometry and material much harder
+since we could optimize the geometry from a set of randomly initialized points, which implies potential strong geometric noise during
+the optimization. Besides, the optimization of the geometry is also
+coupled with that of the material. Therefore, we are motivated to
+look for approximations that can relax the dependency between
+geometry and material while being much more efficient.
+Inspired by Aupperle and Hanrahan [1993], we propose a variancefree and efficient “center-to-center” approximation, which we only
+consider the ray connecting the central points of the Gaussian surfels. In Eqn. (14), we assume that the BRDF term, outgoing radiance
+term and the decay term are almost constant inside the integral:
+∫
+𝑃
+B𝑐𝑖 ≈E𝑐𝑖 + 𝛼𝑖 (p𝑖 ) 𝑖
+∑︁
+𝜅𝑖 𝑑x 𝑁
+Λ𝑖
+∫
+f𝑖 (𝝎𝐼 )(Y(𝝎𝐼 )𝑇 B𝑐𝑗 )(
+𝑗=1
+𝛼 𝑗 (x)𝑑x)
+𝑃𝑗
+(27)
+𝑗Ö
+−1
+|n𝑖 · 𝝎𝐼 ||n 𝑗 · 𝝎𝐼 |
+( (1 − 𝛼𝑘 )
+),
+||p𝑖 − p 𝑗 || 22
+𝑘=1
+In
+∫ the equation, the fused decay term 𝑉𝑗𝑖 is updated to absorb
+𝜆 𝑗 𝑗 𝛼 𝑗 𝑑x terms, so that the gradient calculation and the solvers
+can be easily updated by using the redefined symbols and removing
+the double integrals without altering the general framework.
+9
+Results
+Additional Implementation Details. We set the emissions of all
+kernels except for special kernels representing the light sources to
+be zero to avoid causing ambiguity with the light sources. When
+the light source is unknown, we use an optimizable environment
+map with resolution 16 × 32 approximated by distant point light
+sources without inverse square falloff. The hyperparameters are set
+almost the same as Jiang et al. [2025]’s work. Besides, we observe
+the original densification strategy in [Kerbl et al. 2023] could cause
+significant disruption in the geometry and then view synthesis,
+which makes the optimization diverge. Therefore, we adopt Feng
+et al. [2024]’s strategy to replace the original splitting strategy to
+preserve the geometry as much as possible and take inspiration
+from Diolatzis et al. [2024] to enforce clone-only densification after
+half of the densification procedure. During inference, we double the
+time step in the hybrid solver to solve the light transport.
+The framework is implemented using PyTorch [Paszke et al. 2019]
+and OptiX [Parker et al. 2010]. We conduct our experiments on an
+NVIDIA 6000 Ada GPU. The optimization takes 5 − 10 hours to take
+global illumination into account. In comparison, the optimization
+takes about 20 minutes if only direct illumination is considered.
+Datasets. We evaluate the sparse-view relighting, view synthesis, and geometry reconstruction capabilities of our method using
+ground-truth high dynamic range images for supervision. Specifically, for relighting, we use the “RenderCapture” and “Synthetic”
+datasets of Bi et al. [2024] and four more of our self-made scenes
+featuring rich indirect illumination. Our method currently does
+not support differentiating through the camera parameters, and we
+therefore do not use datasets containing camera errors. We modify
+the datasets of Bi et al. [2024] such that only a small number of
+training images are retained (25, 50 images), while the other ∼ 2000
+images are used for testing. Each image is associated with varying known lighting conditions. This is used to demonstrate the
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+12
+•
+Kaiwen Jiang, Jia-Mu Sun, Zilu Li, Dan Wang, Tzu-Mao Li, and Ravi Ramamoorthi
+Fig. 7. Qualitative comparison of relighting quality on the 12 scenes from “RenderCapture” and “Synthetic” datasets [Bi et al. 2024] and our self-made scenes.
+We label the name of the scene and the number of images used for training at the left-top corner of the ground-truth image, and the PSNR, SSIM, LPIPS
+metrics, resp., on the top for measuring relighting quality of rendered images from different methods. We bold the best metrics and non-obvious differences are
+highlighted by red arrows and insets. Notice that SSIM and LPIPS metrics are less sensitive to shadow errors. The Nefertiti scene is adapted from Nefertiti’s
+bust by C. Yamahata©Sketchfab.
+benefits of having physically-based rendering compared to datadriven methods. In total, there are 24 scenes with known point light
+sources. For view synthesis and geometry reconstruction, we use
+the “Stanford-ORB” [Kuang et al. 2023] dataset, which contains 42
+scenes with unknown environment map as the light source. Notably,
+these datasets do not provide a set of points for initialization, and
+we therefore use randomly initialized points distributed within a
+cube for all baselines.
+Baselines. For relighting alone, we compare with NRHints [Zeng
+et al. 2023] and GS3 [Bi et al. 2024], which are representative of
+NeRF-based and Gaussian-splatting-based methods, respectively.
+For all view synthesis, geometry reconstruction and relighting, we
+compare with methods tailored for objects lit by environment maps,
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+including TensoIR [Jin et al. 2023], GS-IR [Liang et al. 2024], GIGS [Chen et al. 2024b], Relightable3DGS [Gao et al. 2024], and
+GaussianShader [Jiang et al. 2024]. Notably, we do not compare
+with Gaussian splatting methods which support ray tracing as they
+still rely on the radiance fields assumption, and it is non-trivial to
+extend them into full differentiable light transport. We also do not
+compare with Mitsuba3 [Jakob et al. 2022] as it cannot easily solve
+the highly under-constrained inverse problems from scratch which
+are exactly our cases.
+We separately list ours but with only direct illumination effects
+during training and inference as our baseline. We adopt the TSDF
+fusion [Curless and Levoy 1996; Zhou et al. 2018] to extract the mesh
+for all Gaussian-based methods with the same hyperparameters for
+Differentiable Light Transport with Gaussian Surfels via Adapted Radiosity for Efficient Relighting and Geometry Reconstruction
+•
+13
+Fig. 8. Qualitative comparison of geometry reconstruction on the Stanford-ORB dataset [Kuang et al. 2023]. The name of the object is labeled at the left.
+Non-obvious differences are highlighted by red arrows.
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+14
+•
+Kaiwen Jiang, Jia-Mu Sun, Zilu Li, Dan Wang, Tzu-Mao Li, and Ravi Ramamoorthi
+Table 2. Quantitative evaluation of the synthesized relit test image quality
+on the “RenderCapture” and “Synthetic” datasets and our self-made scenes,
+given 25 and 50 training images. The best metrics are emphasized in bold
+and the second best metrics are emphasized by an underline.
+25-view
+50-view
+Method
+PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+GS3 [Bi et al. 2024]
+21.80 0.8607 0.1175 24.67 0.8992 0.0888
+NRHints [Zeng et al. 2023] 23.18 0.9050 0.0871 25.41 0.9273 0.0741
+Ours (Direct Illumination) 24.36 0.8794 0.1085 26.24 0.8982 0.0942
+Ours (Global Illumination) 25.29 0.8950 0.0985 27.43 0.9151 0.0830
+fairness. We mask out the background and apply the masking loss
+for compatible baselines for a fair comparison. For some baselines
+requiring a white background for training, we follow this convention
+while switching the background into a black one for consistent
+demonstration across the paper.
+Table 3. Quantitative evaluation of the novel view synthesis quality and
+geometry reconstruction quality on the Stanford-ORB dataset. The chamfer
+distance is denoted as “CD” (×103 ). The best metrics are emphasized in
+bold and the second best metrics are emphasized by an underline.
+Method
+TensoIR [Jin et al. 2023]
+GS-IR [Liang et al. 2024]
+GI-GS [Chen et al. 2024b]
+Relightable3DGS [Gao et al. 2024]
+GaussianShader [Jiang et al. 2024]
+Ours
+NVS
+SSIM↑
+0.9839
+0.9784
+0.9752
+0.9506
+0.9894
+0.9894
+LPIPS↓
+0.0314
+0.0398
+0.0412
+0.0329
+0.0210
+0.0251
+Geo
+CD↓
+0.503
+0.308
+0.306
+0.280
+0.224
+0.173
+Table 4. Quantitative evaluation of the relighting quality on the StanfordORB dataset. The best metrics are emphasized in bold and the second best
+metrics are emphasized by an underline.
+Method
+GS-IR [Liang et al. 2024]
+GI-GS [Chen et al. 2024b]
+Relightable3DGS [Gao et al. 2024]
+GaussianShader [Jiang et al. 2024]
+Ours
+Metrics. We use the PSNR, SSIM and LPIPS [Zhang et al. 2018]
+error metrics for evaluating the view synthesis quality compared
+against the ground-truth images. We also use the Chamfer distance
+(×103 ), denoted as “CD”, to measure the geometry reconstruction
+quality compared to the ground-truth meshes.
+9.1
+PSNR↑
+33.03
+35.59
+34.78
+28.87
+37.44
+39.30
+PSNR↑
+31.16
+28.73
+28.68
+30.57
+32.72
+Relighting
+SSIM↑ LPIPS↓
+0.9341
+0.0548
+0.9421
+0.0534
+0.9377
+0.0602
+0.9627
+0.0392
+0.9721 0.0365
+Qualitative Comparison
+In terms of relighting, as shown in Fig. 7, ours with global illumination mostly achieves the best relighting quality, as evidenced by the
+PSNR metric. We select test views where indirect illumination is
+obvious if present. Even for the challenging case “Translucent”, ours
+still achieves reasonable results despite a somewhat less translucent appearance than the reference due to the simplified material
+model. For the “HotDog”, “Cup” and “CupPlane” cases, GS3 misses
+the shadows indicated by the red arrows. For the “Tower”, “Egg”
+and “Nefertiti” cases, GS3 produces visible artifacts such as wrongly
+darkened surfaces or incomplete shadows. For the “FurBall”, “MaterialBall”, “PlateOfFruit” and “ComplexBall” cases, NRHints also
+misses the shadows. For “Translucent”, “Fabric” and “ComplexBall”
+cases, NRHints produces visible texture errors indicated by the insets.
+However, SSIM and LPIPS metrics are less sensitive to shadow errors
+and even prefer smooth results occasionally. For the“MaterialBall”
+scene, NRHints has the best SSIM and LPIPS metrics despite visible
+shadow errors. For ‘the ‘Fabric” scene, NRHints synthesizes too
+smooth texture without details, resulting in a low PSNR metric but
+surprisingly high SSIM and low LPIPS metrics. Ours with direct
+illumination cannot synthesize indirect illumination effects while
+being on par with ours with global illumination when the indirect
+illumination is negligible, which will be further elaborated later in
+the ablation study.
+In terms of geometry reconstruction, as shown in Fig. 8, other
+Gaussian-splatting-based methods produce meshes with obvious
+holes or meshes which overfit to the textures, such as words at
+the back of the “Curry” scene. TensoIR sometimes fails to produce
+smooth meshes while exhibiting visible holes or blocky artifacts, as
+evidenced in “Blocks”, “Cactus”, “Gnome” and “Teapot” scenes. In
+contrast, ours produces detailed meshes without cracks or holes.
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+9.2
+Quantitative Comparison
+In terms of relighting, as shown in Table 2, ours with global illumination achieves the best view synthesis quality under unseen
+lighting conditions and viewpoints indicated by the PSNR metrics.
+In terms of SSIM and LPIPS metrics, ours are slightly worse than
+NRHints. We argue that it is because NRHints tends to synthesize
+smooth results due to the underlying continuous representation of
+radiance fields, i.e., MLPs, and SSIM and LPIPS are less sensitive to
+shadow errors, as explained in Sec. 9.1. Ours with direct illumination
+misses the indirect illumination effects, leading to worse metrics
+and significantly worse visual effects when the indirect illumination
+is obvious.
+In terms of novel view synthesis, geometry reconstruction and
+relighting on the Stanford-ORB dataset, as shown in Tables 3, 4,
+ours achieves the best PSNR and chamfer distance metrics across
+baselines, demonstrating the effectiveness of the proposed pipeline.
+On SSIM and LPIPS metrics of novel view synthesis, ours are on par
+with or slightly worse than GaussianShader. However, as discussed
+before, SSIM and LPIPS metrics are less sensitive to shading errors.
+9.3
+Ablation Study
+Approximation. We conduct an ablation study about our proposed
+approximation in Sec. 8. Specifically, we use the “Cup” scene (50
+training images setup) from the RenderCapture dataset [Bi et al.
+2024]. We remove the approximations, and consequently the learnable compensation factors as well, for both training and testing, as
+our baseline. We use Monte-Carlo estimation to estimate the double
+integral and importance sample the x and x′ using the underlying
+Gaussian distributions in Eqn. 16.
+With
+Approximation
+Differentiable Light Transport with Gaussian Surfels via Adapted Radiosity for Efficient Relighting and Geometry Reconstruction
+Without
+Approximation
+Ground Truth
+•
+15
+PSNR: 32.97
+PSNR: 27.14
+Rendered RGB
+Rendered Normal
+Geometry
+Fig. 9. Ablation study on the effects of the proposed approximation. Without the approximation in the second row, the optimization is much harder,
+leading to worse view synthesis quality (the flower is wrongly darker) evidenced by the PSNR metric and noisy geometry reconstruction, compared
+to ours with the approximation in the first row.
+Fig. 11. Comparison between the hybrid solver and Monte-carlo solver for
+the “ComplexBall” scene with ∼ 89K primitives. The variances of rendered
+images with global illumination using different solvers are demonstrated
+by colored heatmaps (colorbar is visualized on the right). The time cost for
+calculating the light transport is labeled at the left-top corner.
+Table 5. Ablation study for batch size in the optimization. We use the novel
+view synthesis and geometry reconstruction tasks on the Stanford-ORB
+dataset for evaluation. The best metrics are emphasized in bold.
+Method
+Ours (Batch size 4)
+Ours (Batch size 1)
+Fig. 10. Another comparison between the direct illumination and global
+illumination using the “ComplexBall” scene from [Zeng et al. 2023] with
+dense training images. Notably, there are still significant visual differences
+between the global illumination result and the direct illumination result.
+As explained in Sec. 8, the optimization of both geometry and
+material is a tricky task, and their mutual strong dependency makes
+it even worse. As shown in Fig. 9, due to the strong dependency and
+noise in both forward rendering and gradient calculation without
+the approximation, the optimization is harder, leading to poorer
+view synthesis quality and geometry reconstruction. In the test set
+of 2000 images, the baseline without approximation achieves 26.44,
+0.9255, 0.0681 for PSNR, SSIM, LPIPS, respectively. In contrast, ours
+achieves 30.01, 0.9542, 0.0430 for PSNR, SSIM, LPIPS, demonstrating
+a significant performance boost by relaxing the dependency between
+the optimization of geometry and material.
+Global illumination versus direct illumination. We conduct comparison between global illumination effects and direct illumination
+effects both qualitatively and quantitatively, as shown in Fig. 7 and
+Table 2. The indirect illumination effects are relatively subtle in the
+object-centric cases but they require efforts to accurately reproduce.
+Qualitatively, in the “HotDog”, “Translucent”, “MaterialBall”, “CupPlane”, “Nefertiti”, “PlateOfFruit” and “ComplexBall” scenes, the
+direct illumination misses the reflected rays, leading to incorrectly
+unlit regions emphasized by red arrows or insets, and therefore compromised relighting quality. We further show another example in
+Fig. 10 using the “ComplexBall” scene from [Zeng et al. 2023] even
+with dense training images (2000 images). Quantitatively, ours with
+PSNR↑
+40.05
+39.30
+NVS
+SSIM↑
+0.9908
+0.9894
+LPIPS↓
+0.0218
+0.0251
+Geo
+CD↓
+0.190
+0.173
+direct illumination also performs worse than ours with global illumination, but the margin is not large because the indirect illumination
+effects are local and subtle.
+Hybrid solver versus Monte-Carlo solver. As discussed before, the
+hybrid solver using progressive refinement and Monte-Carlo solver
+could significantly reduce the variance with slightly more time cost
+compared to the Monte-Carlo solver only. We set up an experiment
+for comparison using the “ComplexBall” scene with a known point
+light source as shown in Fig. 11.
+We use the Monte-Carlo solver and hybrid solver for solving the
+light transport respectively with the same time step 𝑇 = 64. We
+run each solver for 20 times and calculate the variance of these 20
+rendered images, which is visualized as a heatmap. Even in the case
+of having only one point light source, factoring out the direct illumination and then solving the light transport for indirect illumination
+using the hybrid solver performs much better than solving the light
+transport for full global illumination (including direct lighting) using the Monte-Carlo solver. The hybrid solver significantly reduces
+the variance with slightly more time cost, compared to using the
+Monte-Carlo solver. Notably, if we simply use the progressive refinement to solve the whole light transport, we need to theoretically
+spend at least 0.0183s × 100K ≈ 0.5 hour to finally converge.
+We further train the scene with the pure Monte-Carlo solver. Using the Monte-Carlo solver instead of the hybrid solver for training
+decreases the PSNR by 0.25 db on test views, while increasing the
+training time by 35.77%. The higher variance of the Monte-Carlo
+solver introduces more kernels during densification, while achieving
+lower synthesis quality.
+Proposed gradient calculation versus auto-differentiation. We compare the efficiency between the proposed gradient calculation and
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+16
+•
+Kaiwen Jiang, Jia-Mu Sun, Zilu Li, Dan Wang, Tzu-Mao Li, and Ravi Ramamoorthi
+Table 6. Ablation study for the geometry disambiguation using the quantitative evaluation of the geometry reconstruction quality on the Stanford-ORB
+dataset. GFSGS [Jiang et al. 2025] using the spherical harmonics representation for color is labeled as “GFSGS (SH)”, while GFSGS with the latent
+representation for color is labeled as “GFSGS (Latent)”. The best metric is
+emphasized in bold.
+Method
+CD ↓
+GFSGS (SH)
+0.361
+GFSGS (Latent)
+0.273
+PGSR
+0.314
+Ours
+0.173
+Table 7. Illustration of the relighting quality given different number of
+lighting conditions seen during the training (denoted as “# LC”) on the
+“PlateOfFruit” scene.
+Fig. 12. Ablation study for geometry disambiguation. We compare ours
+with geometry reconstruction methods using the radiance fields, i.e., GFSGS
+[Jiang et al. 2025] with latent representation for color and PGSR [Chen et al.
+2024a]. Wrong geometry is emphasized by the red rectangles. We also label
+the chamfer distance (×103 ), denoted as “CD”, under each method and bold
+the best metric.
+the auto-differentiation using PyTorch [Paszke et al. 2019]. Specifically, we still use the “ComplexBall” scene in Fig. 11 with ∼ 89K
+primitives. We use time step 𝑇 = 32 instead of default 64, as otherwise the auto-differentiation would run out of memory. With our
+proposed gradient calculation, our full backward pass takes 0.26s. In
+contrast, auto-differentiation takes 2.34s, and has a 28.25 GB larger
+memory footprint owing to the need for storing operations in the
+forward pass. Therefore, our proposed gradient calculation effectively reduces the time consumption to one tenth, and eliminates
+the need for recording forward-pass operations, to significantly
+reduce the memory footprint. We have also verified the correctness
+of our gradient calculation by comparing the gradients given by our
+method and those given by auto-differentiation.
+We also experiment with removing the proposed gradient calculation for the geometry, i.e., central points, scalings, rotations, etc.,
+in our framework and only use the gradients from the differentiable
+tile rasterizer as it might be the case that the gradients from the
+differentiable tile rasterizer dominate. However, in that case, the
+optimization diverges.
+Use a batch of training images at each optimization step. We conduct quantitative experiments on the Stanford-ORB dataset [Kuang
+et al. 2023] to study the batch optimization enabled by the viewindependent rendering. Specifically, during training, we could only
+propagate the radiance once to calculate the light transport and
+render multiple training images for supervision to greatly speed up
+the training process. We compare ours trained with batch size 4 with
+ours trained with batch size 1. The learning rates are also scaled
+following [Zhao et al. 2024]. As shown in Table 5, ours with batch
+size 4 only spends a bit more than one fourth of the original training
+time due to overhead and the view synthesis quality improves but
+the geometry reconstruction quality is slightly compromised. However, ours with batch size 4 is still better than the baselines shown
+in Table 3.
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+# LC
+PSNR↑
+SSIM↓
+LPIPS↓
+1
+22.70
+0.9038
+0.0894
+2
+23.74
+0.9099
+0.0835
+5
+27.31
+0.9330
+0.0645
+10
+27.69
+0.9341
+0.0644
+50
+27.73
+0.9334
+0.0648
+Geometry disambiguation. We illustrate the effectiveness of enabling the light transport for disambiguating the geometry reconstruction. Specifically, we compare with GFSGS [Jiang et al. 2025]
+and PGSR [Chen et al. 2024a] as representative works for geometry
+reconstruction from a set of calibrated images using radiance fields.
+Even though Chen et al. [2024c]’s work is also a state-of-the-art
+geometry reconstruction method, it requires special initialization
+that is not available by default for training images under varying
+lighting conditions.
+We conduct quantitative and qualitative experiments using the
+Stanford-ORB dataset [Kuang et al. 2023]. As shown in Table 6, ours
+achieves the best geometry reconstruction quality evidenced by
+the lowest chamfer distance metric. Notably, we even beat GFSGS
+with the latent representation, simply using the spherical harmonics
+basis in our method. As shown in Fig. 12, with the explicit light
+transport instead of using the assumption of radiance fields, ours
+avoids geometric errors, including concave or protruding blocks in
+PGSR and in GFSGS with the latent representation for color.
+9.4
+Additional Experiments
+Besides the main experiments we discuss above, we also conduct
+additional experiments to validate our method.
+Reduce the number of different lighting conditions seen in the training. To be compatible with the experiment setup in GS3 [Bi et al.
+2024] and NRHints [Zeng et al. 2023], we use varying lighting condition and varying viewpoint in each training image in the qualitative
+and quantitative comparisons. We further conduct an experiment
+using the “PlateOfFruit” scene with 50 training images to study
+the effects of number of different lighting conditions seen in the
+training. Specifically, we use 1, 2, 5, 10 and 50 different lighting
+conditions and the same test set with 100 images, each of which
+contains a varying lighting condition. As shown in Table. 7, perhaps surprisingly, we find that our model can effectively specify
+the material attributes and achieve competitive results with only 5
+different lighting conditions compared to the full setup where 50
+different lighting conditions are used.
+Differentiable Light Transport with Gaussian Surfels via Adapted Radiosity for Efficient Relighting and Geometry Reconstruction
+•
+17
+Fig. 13. Illustration of optimizing the location of a point light source. Given the source image (on the far left) and the original light source location, we aim to
+match the target image (on the far right) by optimizing the location of a point light source based purely on the image space supervision. The movement of the
+light source during optimization is visualized.
+1.1
+Time cost (sec.)
+1.0
+0.9
+0.8
+0.7
+0.6
+0.5
+0.4
+40000 50000 60000 70000 80000 90000 100000 110000
+Number of primitives
+Fig. 14. Illustration of the relationship between the time cost of calculating
+the full light transport using the hybrid solver and the number of primitives.
+Optimize the location of light source. When using the StanfordORB [Kuang et al. 2023] dataset, we optimize the environment
+maps which demonstrates the optimization of the emissions of light
+sources. Additionally, we demonstrate optimizing the geometric
+property of light sources, i.e., locations, in Fig. 13 using the “MaterialBalls” scene from the RenderCapture dataset [Bi et al. 2024].
+Specifically, we match the target image using only L1 image space
+supervision by optimizing the location of the light source. It also
+demonstrates the capability of our method to continuously change
+the lighting condition.
+Time cost of calculating the light transport versus the number of
+primitives. We study the time cost of calculating the light transport
+using the hybrid solver given different number of primitives. We
+reuse the scenes in the qualitative comparison and plot the relationship in Fig. 14. We identify that the time cost roughly increases
+linearly as the number of primitives increases. However, the time
+cost also depends on the specific distribution of primitives.
+Scene decomposition. Our method has the full understanding of
+light transport and is therefore capable of separating out different
+components of rendering. We use the “CupPlane” scene with nonmetallic and rough materials provided by Zeng et al. [2023]. In
+Fig. 15, we demonstrate the diffuse albedo and shininess components
+separately by passing the diffuse albedo and shininess instead of the
+Fig. 15. Illustration of decomposing a scene into different components
+of rendering. Given the ground truth image, the full rendered result (leftbottom one) matches with it. We are able to decompose it into diffuse albedo
+and shininess components (the brighter the shinier) respectively (first row),
+and direct illumination only and indirect illumination only (second row).
+calculated outgoing radiance into the rasterizer. We also separate out
+the direct illumination effects by running the progressive refinement
+only for 1 step and indirect illumination effects, which is calculated
+as the difference between the full rendering result and the direct
+illumination effects.
+Environment map relighting. We further demonstrate the effectiveness of our method in relighting a scene using environment
+maps. The experiment is still conducted on the “CupPlane” scene.
+As shown in Fig. 16, our approach produces high-quality relit results. As the environment map rotates, the resulting shadows adapt
+accordingly.
+Preliminary experiment on an enclosed box. We provide a preliminary result on a synthetic enclosed box, featuring rich interreflection. Specifically, we make an enclosing box with 7 objects,
+including one star, two cubes, one teapot, donuts, one gear and a
+monkey. We use 100 training images, each of which is associated
+with a different point light source and the cameras are also put
+inside the box. As shown in Fig. 17, ours with direct illumination
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+18
+•
+Kaiwen Jiang, Jia-Mu Sun, Zilu Li, Dan Wang, Tzu-Mao Li, and Ravi Ramamoorthi
+Fig. 16. Illustration of relighting a scene using a sequence of rotated environment maps. The rendered results with global illumination are demonstrated on
+the first row, while the rotated environment maps are displayed on the second row.
+Fig. 17. Comparison between the optimizations using our method with
+direct illumination only and global illumination in terms of the geometry
+reconstruction quality on an enclosed box with objects inside.
+totally fails because the rich inter-reflection could not be handled,
+while ours with global illumination produces reasonable results.
+10
+Conclusions, Limitations and Future Work
+We propose the first work that derives differentiable global illumination on Gaussian surfels, which is an important theoretical development in its own right. Our work enables applications ranging
+from sparse-view relighting, material editing to accurate geometry
+reconstruction. We build the framework on top of the classic radiosity theory and therefore enable view-independent rendering with
+both diffuse and specular effects. Notably, we extend the classic theory into non-binary visibility and semi-opaque primitives, propose
+novel solvers to efficiently solve the global illumination, deduce
+the efficient gradient calculation, and explore approximations to
+improve both efficiency and quality. Our method is also theoretically compatible with advancements in improving the differentiable
+rasterizer used in Gaussian splatting methods (e.g., [Hanson et al.
+2024; Radl et al. 2024]).
+Our method is not without limitations. Even though the optimization should actively search for the best layout of Gaussian surfels,
+under the sparse view setting, the layout may not be optimal to
+catch all the details, evidenced by the shadows of the “FurBall” case
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+Fig. 18. Illustration of a less successful case when the object is too shiny.
+Despite still being better than our baseline, ours exhibits obvious artifacts
+emphasized by the red arrows due to our reliance on finite degree of spherical
+harmonics basis to represent the material.
+in Fig. 7 and jaggy shadows in the accompanying video. Besides,
+extending our framework into scene-level cases will be important
+as they feature more indirect illumination effects but this extension will also raise efficiency challenges and variance issues due to
+complicated occlusion, evidenced by the imperfect geometry reconstruction in Fig. 17. Speeding up our framework while maintaining
+low variance is of great importance in the future. It will also be
+interesting to incorporate more complex material models, such as
+BSDFs or neural materials, to lift the one-sided visibility assumption
+and deal with objects with complex appearance such as the one
+shown in Fig. 18 and the “Translucent” case in Fig. 7.
+We believe that our method paves the way for future explorations
+on efficient and differentiable physically-based rendering using discrete primitives, such as the Gaussian surfels.
+Acknowledgments
+We thank Rama Chellappa, Cheng Peng, Venkataram Sivaram, Haolin
+Lu, and Ishit Mehta for discussions. We thank the anonymous reviewers for detailed comments and suggestions. We also thank
+NVIDIA for GPU gifts. This work was supported in part by the Intelligence Advanced Research Projects Activity (IARPA) via Department
+of Interior/ Interior Business Center (DOI/IBC) contract number
+140D0423C0076. The views and conclusions contained herein are
+Differentiable Light Transport with Gaussian Surfels via Adapted Radiosity for Efficient Relighting and Geometry Reconstruction
+those of the authors and should not be interpreted as necessarily
+representing IARPA, DOI/IBC, or the U.S. Government. We also
+acknowledge support from ONR grant N00014-23-1-2526, NSF grant
+2127544 and 2238839, NSF grants 2100237 and 2120019 for the Nautilus cluster, gifts from Adobe, Google, Qualcomm and Rembrand,
+an NSERC Postdoctoral Fellowship, the Ronald L. Graham Chair
+and the UC San Diego Center for Visual Computing.
+References
+Diede Apers. 2024. Shipping Dynamic Global Illumination in Frostbite. In SIGGRAPH
+Course Notes. Advances in Real-Time Rendering.
+Benjamin Attal, Dor Verbin, Ben Mildenhall, Peter Hedman, Jonathan T Barron,
+Matthew O’Toole, and Pratul P Srinivasan. 2024. Flash cache: Reducing bias in
+radiance cache based inverse rendering. In European Conference on Computer Vision.
+Springer, 20–36.
+Larry Aupperle and Pat Hanrahan. 1993. A hierarchical illumination algorithm for
+surfaces with glossy reflection (SIGGRAPH ’93). 155–162. https://doi.org/10.1145/
+166117.166137
+Dejan Azinovic, Tzu-Mao Li, Anton Kaplanyan, and Matthias Nießner. 2019. Inverse
+path tracing for joint material and lighting estimation. In Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition. 2447–2456.
+Sai Bangaru, Tzu-Mao Li, and Frédo Durand. 2020. Unbiased Warped-Area Sampling
+for Differentiable Rendering. ACM Trans. Graph. 39, 6 (2020), 245:1–245:18.
+Jonathan T Barron, Ben Mildenhall, Matthew Tancik, Peter Hedman, Ricardo MartinBrualla, and Pratul P Srinivasan. 2021. Mip-nerf: A multiscale representation for
+anti-aliasing neural radiance fields. In Proceedings of the IEEE/CVF international
+conference on computer vision. 5855–5864.
+Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter Hedman.
+2022. Mip-nerf 360: Unbounded anti-aliased neural radiance fields. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern recognition. 5470–5479.
+Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter Hedman.
+2023. Zip-NeRF: Anti-Aliased Grid-Based Neural Radiance Fields. ICCV (2023).
+Yash Belhe, Bing Xu, Sai Praveen Bangaru, Ravi Ramamoorthi, and Tzu-Mao Li. 2024.
+Importance sampling brdf derivatives. ACM Transactions on Graphics 43, 3 (2024),
+1–21.
+Zoubin Bi, Yixin Zeng, Chong Zeng, Fan Pei, Xiang Feng, Kun Zhou, and Hongzhi Wu.
+2024. GS3 : Efficient Relighting with Triple Gaussian Splatting. In SIGGRAPH Asia
+2024 Conference Papers.
+Michael Bleyer, Christoph Rhemann, and Carsten Rother. 2011. PatchMatch Stereo Stereo Matching with Slanted Support Windows. In British Machine Vision Conference. https://api.semanticscholar.org/CorpusID:1798946
+James F. Blinn. 1977. Models of light reflection for computer synthesized pictures
+(SIGGRAPH ’77). 192–198.
+Samuel Boivin. 2002. Inverse Rendering from a Single Image. In CGIV 2002: The First
+European Conference on Colour Graphics, Imaging, and Vision.
+Bert Buchholz and Tamy Boubekeur. 2012. Quantized point-based global illumination.
+Computer Graphics Forum (Proc. EGSR) 31, 4 (2012), 1399–1405.
+Michael Bunnell. 2005. Dynamic ambient occlusion and indirect lighting. GPU Gems 2,
+2 (2005), 223–233.
+Krzysztof Byrski, Marcin Mazur, Jacek Tabor, Tadeusz Dziarmaga, Marcin Kądziołka,
+Dawid Baran, and Przemysław Spurek. 2025. RaySplats: Ray Tracing based Gaussian
+Splatting. arXiv preprint arXiv:2501.19196 (2025).
+Brian Cabral, Nelson Max, and Rebecca Springmeyer. 1987. Bidirectional reflection
+functions from surface bump maps (SIGGRAPH ’87). 273–281. https://doi.org/10.
+1145/37401.37434
+Jin-Xiang Chai, Xin Tong, Shing-Chow Chan, and Heung-Yeung Shum. 2000. Plenoptic
+Sampling (SIGGRAPH ’00). 307–318.
+Eric R. Chan, Connor Z. Lin, Matthew A. Chan, Koki Nagano, Boxiao Pan, Shalini De
+Mello, Orazio Gallo, Leonidas Guibas, Jonathan Tremblay, Sameh Khamis, Tero
+Karras, and Gordon Wetzstein. 2022. Efficient Geometry-aware 3D Generative
+Adversarial Networks. In CVPR.
+Manmohan Chandraker, Jiamin Bai, Tian-Tsong Ng, and Ravi Ramamoorthi. 2011. On
+the Duality of Forward and Inverse Light Transport. IEEE Transactions on Pattern
+Analysis and Machine Intelligence 33, 10 (2011), 2122–2128. https://doi.org/10.1109/
+TPAMI.2011.124
+M. T. Chao. 1982. A General Purpose Unequal Probability Sampling Plan. Biometrika
+69, 3 (1982), 653–656. http://www.jstor.org/stable/2336002
+Danpeng Chen, Hai Li, Weicai Ye, Yifan Wang, Weijian Xie, Shangjin Zhai, Nan Wang,
+Haomin Liu, Hujun Bao, and Guofeng Zhang. 2024a. PGSR: Planar-based Gaussian
+Splatting for Efficient and High-Fidelity Surface Reconstruction. arXiv preprint
+arXiv:2406.06521 (2024).
+Hongze Chen, Zehong Lin, and Jun Zhang. 2024b. GI-GS: Global Illumination Decomposition on Gaussian Splatting for Inverse Rendering. arXiv preprint arXiv:2410.02619
+•
+19
+(2024).
+Hanyu Chen, Bailey Miller, and Ioannis Gkioulekas. 2024c. 3D Reconstruction with
+Fast Dipole Sums. arXiv preprint arXiv:2405.16788 (2024).
+Shenchang Eric Chen and Lance Williams. 1993. View interpolation for image synthesis
+(SIGGRAPH ’93). 279–288.
+Per Christensen. 2008. Point-based approximate color bleeding. Pixar Technical Notes
+2, 5 (2008), 6.
+Michael F. Cohen, Shenchang Eric Chen, John R. Wallace, and Donald P. Greenberg. 1988.
+A progressive refinement approach to fast radiosity image generation (SIGGRAPH
+’88). 75–84.
+Michael F. Cohen and Donald P. Greenberg. 1985. The hemi-cube: a radiosity solution
+for complex environments (SIGGRAPH ’85). 31–40.
+Michael F. Cohen, John Wallace, and Pat Hanrahan. 1993. Radiosity and realistic image
+synthesis. Academic Press Professional, Inc., USA.
+Jorge Condor, Sebastien Speierer, Lukas Bode, Aljaz Bozic, Simon Green, Piotr Didyk,
+and Adrian Jarabo. 2025. Don’t Splat your Gaussians: Volumetric Ray-Traced Primitives for Modeling and Rendering Scattering and Emissive Media. ACM Transactions
+on Graphics (2025).
+Brian Curless and Marc Levoy. 1996. A volumetric method for building complex models
+from range images (SIGGRAPH ’96). 303–312.
+Pinxuan Dai, Jiamin Xu, Wenxiang Xie, Xinguo Liu, Huamin Wang, and Weiwei Xu.
+2024. High-quality surface reconstruction using gaussian surfels. In ACM SIGGRAPH
+2024 Conference Papers. 1–11.
+Stavros Diolatzis, Tobias Zirr, Alexander Kuznetsov, Georgios Kopanas, and Anton
+Kaplanyan. 2024. N-Dimensional Gaussians for Fitting of High Dimensional Functions. In ACM SIGGRAPH 2024 Conference Papers (Denver, CO, USA) (SIGGRAPH ’24).
+Association for Computing Machinery, New York, NY, USA, Article 126, 11 pages.
+Frédo Durand, George Drettakis, and Claude Puech. 1997. The visibility skeleton: a
+powerful and efficient multi-purpose global visibility tool (SIGGRAPH ’97). 89–100.
+https://doi.org/10.1145/258734.258785
+Frédo Durand, George Drettakis, and Claude Puech. 1999. Fast and accurate hierarchical
+radiosity using global visibility. ACM Trans. Graph. 18, 2 (April 1999), 128–170.
+Qi-Yuan Feng, Geng-Chen Cao, Hao-Xiang Chen, Qun-Ce Xu, Tai-Jiang Mu, Ralph
+Martin, and Shi-Min Hu. 2024. EVSplitting: An Efficient and Visually Consistent
+Splitting Algorithm for 3D Gaussian Splatting. In SIGGRAPH Asia 2024 Conference
+Papers (Tokyo, Japan) (SA ’24). Association for Computing Machinery, New York,
+NY, USA, Article 35, 11 pages.
+Michael Fischer and Tobias Ritschel. 2023. Plateau-reduced differentiable path tracing.
+In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition.
+4285–4294.
+Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht, and
+Angjoo Kanazawa. 2022. Plenoxels: Radiance Fields without Neural Networks. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition.
+Yasutaka Furukawa and Jean Ponce. 2010. Accurate, Dense, and Robust Multiview
+Stereopsis. IEEE Transactions on Pattern Analysis and Machine Intelligence 32, 8
+(2010), 1362–1376.
+Jian Gao, Chun Gu, Youtian Lin, Zhihao Li, Hao Zhu, Xun Cao, Li Zhang, and Yao
+Yao. 2024. Relightable 3d gaussians: Realistic point cloud relighting with brdf
+decomposition and ray tracing. In European Conference on Computer Vision. Springer,
+73–89.
+Ioannis Gkioulekas, Anat Levin, and Todd Zickler. 2016. An Evaluation of Computational Imaging Techniques for Heterogeneous Inverse Scattering. In Computer
+Vision – ECCV 2016, Bastian Leibe, Jiri Matas, Nicu Sebe, and Max Welling (Eds.).
+Springer International Publishing, Cham, 685–701.
+Ioannis Gkioulekas, Shuang Zhao, Kavita Bala, Todd Zickler, and Anat Levin. 2013.
+Inverse volume rendering with material dictionaries. ACM Transactions on Graphics
+(Proc. SIGGRAPH Asia) 32, 6 (2013), 1–13.
+Michael Goesele, Noah Snavely, Brian Curless, Hugues Hoppe, and Steven M. Seitz. 2007.
+Multi-View Stereo for Community Photo Collections. In 2007 IEEE 11th International
+Conference on Computer Vision. 1–8. https://doi.org/10.1109/ICCV.2007.4408933
+Cindy M. Goral, Kenneth E. Torrance, Donald P. Greenberg, and Bennett Battaile. 1984.
+Modeling the interaction of light between diffuse surfaces (SIGGRAPH ’84). 213–222.
+Steven J. Gortler, Radek Grzeszczuk, Richard Szeliski, and Michael F. Cohen. 1996. The
+lumigraph (SIGGRAPH ’96). 43–54.
+Antoine Guédon and Vincent Lepetit. 2024. SuGaR: Surface-Aligned Gaussian Splatting
+for Efficient 3D Mesh Reconstruction and High-Quality Mesh Rendering. CVPR
+(2024).
+Saeed Hadadan, Shuhong Chen, and Matthias Zwicker. 2021. Neural radiosity. ACM
+Transactions on Graphics (TOG) 40, 6 (2021), 1–11.
+Saeed Hadadan, Geng Lin, Jan Novák, Fabrice Rousselle, and Matthias Zwicker. 2023.
+Inverse global illumination using a neural radiometric prior. In ACM SIGGRAPH
+2023 Conference Proceedings. 1–11.
+Saeed Hadadan and Matthias Zwicker. 2022. Differentiable neural radiosity. arXiv
+preprint arXiv:2201.13190 (2022).
+Pat Hanrahan, David Salzman, and Larry Aupperle. 1991. A rapid hierarchical radiosity
+algorithm. SIGGRAPH Comput. Graph. 25, 4 (July 1991), 197–206.
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+20
+•
+Kaiwen Jiang, Jia-Mu Sun, Zilu Li, Dan Wang, Tzu-Mao Li, and Ravi Ramamoorthi
+Alex Hanson, Allen Tu, Geng Lin, Vasu Singla, Matthias Zwicker, and Tom Goldstein.
+2024. Speedy-Splat: Fast 3D Gaussian Splatting with Sparse Pixels and Sparse
+Primitives. arXiv preprint arXiv:2412.00578 (2024).
+Heiko Hirschmuller. 2008. Stereo Processing by Semiglobal Matching and Mutual
+Information. IEEE Transactions on Pattern Analysis and Machine Intelligence 30, 2
+(2008), 328–341. https://doi.org/10.1109/TPAMI.2007.1166
+Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and Shenghua Gao. 2024b. 2D
+Gaussian Splatting for Geometrically Accurate Radiance Fields. In SIGGRAPH 2024
+Conference Papers. Association for Computing Machinery. https://doi.org/10.1145/
+3641519.3657428
+Yi-Hua Huang, Ming-Xian Lin, Yang-Tian Sun, Ziyi Yang, Xiaoyang Lyu, Yan-Pei
+Cao, and Xiaojuan Qi. 2024a. Deformable Radial Kernel Splatting. arXiv preprint
+arXiv:2412.11752 (2024).
+David S. Immel, Michael F. Cohen, and Donald P. Greenberg. 1986. A radiosity method
+for non-diffuse environments (SIGGRAPH ’86). New York, NY, USA, 133–142.
+Wenzel Jakob, Sébastien Speierer, Nicolas Roussel, Merlin Nimier-David, Delio Vicini,
+Tizian Zeltner, Baptiste Nicolet, Miguel Crespo, Vincent Leroy, and Ziyi Zhang. 2022.
+Mitsuba 3 renderer. https://mitsuba-renderer.org.
+Kaiwen Jiang, Venkataram Sivaram, Cheng Peng, and Ravi Ramamoorthi. 2025. Geometry Field Splatting with Gaussian Surfels. In IEEE Conference on Computer Vision
+and Pattern Recognition (CVPR).
+Yingwenqi Jiang, Jiadong Tu, Yuan Liu, Xifeng Gao, Xiaoxiao Long, Wenping Wang,
+and Yuexin Ma. 2024. Gaussianshader: 3d gaussian splatting with shading functions
+for reflective surfaces. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition. 5322–5332.
+Haian Jin, Isabella Liu, Peijia Xu, Xiaoshuai Zhang, Songfang Han, Sai Bi, Xiaowei Zhou,
+Zexiang Xu, and Hao Su. 2023. Tensoir: Tensorial inverse rendering. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. 165–174.
+James T. Kajiya. 1986. The rendering equation. SIGGRAPH Comput. Graph. 20, 4 (Aug.
+1986), 143–150.
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 2023.
+3D Gaussian Splatting for Real-Time Radiance Field Rendering. ACM Transactions
+on Graphics 42, 4 (July 2023).
+Oliver Klehm, Ivo Ihrke, Hans-Peter Seidel, and Elmar Eisemann. 2014. Property and
+Lighting Manipulations for Static Volume Stylization Using a Painting Metaphor.
+IEEE Transactions on Visualization and Computer Graphics 20, 7 (2014), 983–995.
+Zhiyi Kuang, Yanchao Yang, Siyan Dong, Jiayue Ma, Hongbo Fu, and Youyi Zheng. 2024.
+OLAT Gaussians for Generic Relightable Appearance Acquisition. In SIGGRAPH
+Asia 2024 Conference Papers (Tokyo, Japan) (SA ’24). Association for Computing
+Machinery, New York, NY, USA, Article 13, 11 pages.
+Zhengfei Kuang, Yunzhi Zhang, Hong-Xing Yu, Samir Agarwala, Elliott Wu, and Jiajun
+Wu. 2023. Stanford-ORB: a real-world 3D object inverse rendering benchmark.
+Advances in Neural Information Processing Systems Datasets and Benchmarks Track.
+Jaroslav Křivánek, Pascal Gautron, Sumanta Pattanaik, and Kadi Bouatouch. 2008.
+Radiance caching for efficient global illumination computation. In ACM SIGGRAPH
+2008 Classes (SIGGRAPH ’08). Article 75, 19 pages. https://doi.org/10.1145/1401132.
+1401228
+Marc Levoy and Pat Hanrahan. 1996. Light field rendering (SIGGRAPH ’96). 31–42.
+Tzu-Mao Li, Miika Aittala, Frédo Durand, and Jaakko Lehtinen. 2018. Differentiable
+Monte Carlo ray tracing through edge sampling. ACM Trans. Graph. 37, 6, Article
+222 (Dec. 2018), 11 pages.
+Zhaoshuo Li, Thomas Müller, Alex Evans, Russell H Taylor, Mathias Unberath, MingYu Liu, and Chen-Hsuan Lin. 2023. Neuralangelo: High-Fidelity Neural Surface
+Reconstruction. In IEEE Conference on Computer Vision and Pattern Recognition
+(CVPR).
+Zhihao Liang, Qi Zhang, Ying Feng, Ying Shan, and Kui Jia. 2024. Gs-ir: 3d gaussian splatting for inverse rendering. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition. 21644–21653.
+D. Lischinski, F. Tampieri, and D.P. Greenberg. 1992. Discontinuity meshing for accurate
+radiosity. IEEE Computer Graphics and Applications 12, 6 (1992), 25–39. https:
+//doi.org/10.1109/38.163622
+Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and Christian Theobalt. 2020.
+Neural sparse voxel fields. Advances in Neural Information Processing Systems 33
+(2020), 15651–15663.
+Yu-Tao Liu, Li Wang, Jie Yang, Weikai Chen, Xiaoxu Meng, Bo Yang, and Lin Gao.
+2023. Neudf: Leaning neural unsigned distance fields with volume rendering. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition.
+237–247.
+Xiaoxiao Long, Cheng Lin, Lingjie Liu, Yuan Liu, Peng Wang, Christian Theobalt, Taku
+Komura, and Wenping Wang. 2023. Neuraludf: Learning unsigned distance fields for
+multi-view reconstruction of surfaces with arbitrary topologies. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition. 20834–20843.
+Xiaoxiao Long, Cheng Lin, Peng Wang, Taku Komura, and Wenping Wang. 2022.
+Sparseneus: Fast generalizable neural surface reconstruction from sparse views. In
+European Conference on Computer Vision. Springer, 210–227.
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+Guillaume Loubet, Nicolas Holzschuch, and Wenzel Jakob. 2019. Reparameterizing
+discontinuous integrands for differentiable rendering. ACM Trans. Graph. 38, 6,
+Article 228 (Nov. 2019), 14 pages.
+Linjie Lyu, Ayush Tewari, Thomas Leimkuehler, Marc Habermann, and Christian
+Theobalt. 2022. Neural Radiance Transfer Fields for Relightable Novel-view Synthesis with Global Illumination. In ECCV.
+Dhruv Mahajan, Yu-Ting Tseng, and Ravi Ramamoorthi. 2008. An Analysis of the BRDF
+In-Out Factorization for View-Dependent Relighting. EuroGraphics Symposium on
+Rendering (2008).
+Leonard McMillan and Gary Bishop. 1995. Plenoptic modeling: an image-based rendering system (SIGGRAPH ’95). 39–46.
+Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. 2020. NeRF: Representing Scenes as Neural Radiance Fields
+for View Synthesis. In ECCV.
+Bailey Miller, Hanyu Chen, Alice Lai, and Ioannis Gkioulekas. 2024. Objects as Volumes:
+A Stochastic Geometry View of Opaque Solids. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR). 87–97.
+Nicolas Moenne-Loccoz, Ashkan Mirzaei, Or Perel, Riccardo de Lutio, Janick Martinez Esturo, Gavriel State, Sanja Fidler, Nicholas Sharp, and Zan Gojcic. 2024. 3D
+Gaussian Ray Tracing: Fast Tracing of Particle Scenes. ACM Transactions on Graphics
+(TOG) 43, 6 (2024), 1–19.
+Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. 2022. Instant
+neural graphics primitives with a multiresolution hash encoding. ACM Trans. Graph.
+41, 4 (2022), 102:1–102:15.
+Shree K. Nayar, Katsushi Ikeuchi, and Takeo Kanade. 1991. Shape from interreflections.
+Int. J. Comput. Vision 6, 3 (Aug. 1991), 173–195. https://doi.org/10.1007/BF00115695
+Diego Nehab, Szymon Rusinkiewicz, James Davis, and Ravi Ramamoorthi. 2005. Efficiently combining positions and normals for precise 3D geometry. ACM Trans.
+Graph. 24, 3 (July 2005), 536–543.
+Merlin Nimier-David, Thomas Müller, Alexander Keller, and Wenzel Jakob. 2022. Unbiased inverse volume rendering with differential trackers. ACM Trans. Graph. 41, 4,
+Article 44 (July 2022), 20 pages.
+Merlin Nimier-David, Sébastien Speierer, Benoît Ruiz, and Wenzel Jakob. 2020. Radiative
+backpropagation: an adjoint method for lightning-fast differentiable rendering. ACM
+Trans. Graph. 39, 4, Article 146 (Aug. 2020), 15 pages.
+Steven G. Parker, James Bigler, Andreas Dietrich, Heiko Friedrich, Jared Hoberock,
+David Luebke, David McAllister, Morgan McGuire, Keith Morley, Austin Robison,
+and Martin Stich. 2010. OptiX: a general purpose ray tracing engine. ACM Trans.
+Graph. 29, 4, Article 66 (July 2010), 13 pages.
+Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory
+Chanan, Trevor Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, Alban Desmaison, Andreas Köpf, Edward Yang, Zach DeVito, Martin Raison, Alykhan Tejani,
+Sasank Chilamkurthy, Benoit Steiner, Lu Fang, Junjie Bai, and Soumith Chintala.
+2019. PyTorch: an imperative style, high-performance deep learning library. Curran
+Associates Inc., Red Hook, NY, USA.
+Bui Tuong Phong. 1975. Illumination for computer generated pictures. Commun. ACM
+18, 6 (June 1975), 311–317.
+Lukas Radl, Michael Steiner, Mathias Parger, Alexander Weinrauch, Bernhard Kerbl,
+and Markus Steinberger. 2024. StopThePop: Sorted Gaussian Splatting for ViewConsistent Real-time Rendering. ACM Trans. Graph. 43, 4, Article 64 (July 2024),
+17 pages.
+Ravi Ramamoorthi and Pat Hanrahan. 2001. An Efficient Representation for Irradiance
+Environment Maps (SIGGRAPH ’01). 497–500.
+Herbert Robbins and Sutton Monro. 1951. A Stochastic Approximation Method. The
+Annals of Mathematical Statistics 22, 3 (1951), 400 – 407. https://doi.org/10.1214/
+aoms/1177729586
+Shunsuke Saito, Gabriel Schwartz, Tomas Simon, Junxuan Li, and Giljoo Nam. 2024.
+Relightable gaussian codec avatars. In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition. 130–141.
+Johannes L. Schönberger, Enliang Zheng, Jan-Michael Frahm, and Marc Pollefeys. 2016.
+Pixelwise View Selection for Unstructured Multi-View Stereo. In Computer Vision –
+ECCV 2016, Bastian Leibe, Jiri Matas, Nicu Sebe, and Max Welling (Eds.). Springer
+International Publishing, Cham, 501–518.
+Min-Zhi Shao, Qun-Sheng Peng, and You-Dong Liang. 1988. A new radiosity approach
+by procedural refinements for realistic image sythesis. SIGGRAPH Comput. Graph.
+22, 4 (June 1988), 93–99.
+Françis X. Sillion, James R. Arvo, Stephen H. Westin, and Donald P. Greenberg. 1991.
+A global illumination solution for general reflectance distributions. SIGGRAPH
+Comput. Graph. 25, 4 (July 1991), 187–196.
+Peter-Pike Sloan, Jan Kautz, and John Snyder. 2002. Precomputed radiance transfer for
+real-time rendering in dynamic, low-frequency lighting environments. ACM Trans.
+Graph. 21, 3 (July 2002), 527–536.
+Pratul P. Srinivasan, Boyang Deng, Xiuming Zhang, Matthew Tancik, Ben Mildenhall,
+and Jonathan T. Barron. 2021. NeRV: Neural Reflectance and Visibility Fields for
+Relighting and View Synthesis. In CVPR.
+Differentiable Light Transport with Gaussian Surfels via Adapted Radiosity for Efficient Relighting and Geometry Reconstruction
+Cheng Sun, Guangyan Cai, Zhengqin Li, Kai Yan, Cheng Zhang, Carl Marshall, Jia-Bin
+Huang, Shuang Zhao, and Zhao Dong. 2023. Neural-PBIR reconstruction of shape,
+material, and illumination. In Proceedings of the IEEE/CVF International Conference
+on Computer Vision. 18046–18056.
+Jian Sun, Nan-Ning Zheng, and Heung-Yeung Shum. 2003. Stereo matching using belief
+propagation. IEEE Transactions on Pattern Analysis and Machine Intelligence 25, 7
+(2003), 787–800. https://doi.org/10.1109/TPAMI.2003.1206509
+Richard S. Sutton and Andrew G. Barto. 2018. Reinforcement Learning: An Introduction.
+A Bradford Book, Cambridge, MA, USA.
+Matthew Tancik, Ethan Weber, Evonne Ng, Ruilong Li, Brent Yi, Justin Kerr, Terrance
+Wang, Alexander Kristoffersen, Jake Austin, Kamyar Salahi, Abhik Ahuja, David
+McAllister, and Angjoo Kanazawa. 2023. Nerfstudio: A Modular Framework for
+Neural Radiance Field Development. In ACM SIGGRAPH 2023 Conference Proceedings
+(SIGGRAPH ’23).
+K. E. Torrance and E. M. Sparrow. 1967. Theory for off-specular reflection from roughened
+surfaces. Vol. 57. 1105–1114.
+Delio Vicini, Sébastien Speierer, and Wenzel Jakob. 2021. Path Replay Backpropagation:
+Differentiating Light Paths using Constant Memory and Linear Time. Transactions
+on Graphics (Proceedings of SIGGRAPH) 40, 4 (Aug. 2021), 108:1–108:14. https:
+//doi.org/10.1145/3450626.3459804
+Hoang-Hiep Vu, Patrick Labatut, Jean-Philippe Pons, and Renaud Keriven. 2012. High
+Accuracy and Visibility-Consistent Dense Multiview Stereo. IEEE Transactions on
+Pattern Analysis and Machine Intelligence 34, 5 (2012), 889–901.
+John R. Wallace, Michael F. Cohen, and Donald P. Greenberg. 1987. A two-pass solution to the rendering equation: A synthesis of ray tracing and radiosity methods.
+SIGGRAPH Comput. Graph. 21, 4 (Aug. 1987), 311–320.
+Bruce Walter, Sebastian Fernandez, Adam Arbree, Kavita Bala, Michael Donikian, and
+Donald P. Greenberg. 2005. Lightcuts: a scalable approach to illumination. ACM
+Trans. Graph. 24, 3 (July 2005), 1098–1107.
+Beibei Wang, Jing Huang, Bert Buchholz, Xiangxu Meng, and Tamy Boubekeur. 2013.
+Factorized point based global illumination. Computer Graphics Forum (Proc. EGSR)
+32, 4 (2013), 117–123.
+Beibei Wang, Xiangxu Meng, and Tamy Boubekeur. 2015. Wavelet Point-Based Global
+Illumination. Computer Graphics Forum (Proc. EGSR) 34, 4 (2015), 143–153.
+Fangjinhua Wang, Marie-Julie Rakotosaona, Michael Niemeyer, Richard Szeliski, Marc
+Pollefeys, and Federico Tombari. 2025a. Unisdf: Unifying neural representations
+for high-fidelity 3d reconstruction of complex scenes with reflections. Advances in
+Neural Information Processing Systems 37 (2025), 3157–3184.
+Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku Komura, and Wenping
+Wang. 2021a. NeuS: Learning Neural Implicit Surfaces by Volume Rendering for
+Multi-view Reconstruction. NeurIPS (2021).
+Yiming Wang, Qin Han, Marc Habermann, Kostas Daniilidis, Christian Theobalt, and
+Lingjie Liu. 2023. Neus2: Fast learning of neural implicit surfaces for multi-view
+reconstruction. In Proceedings of the IEEE/CVF International Conference on Computer
+Vision. 3295–3306.
+Yu-Chen Wang, Yu-Ting Wu, Tzu-Mao Li, and Yung-Yu Chuang. 2021b. Learning to
+cluster for rendering with many lights. ACM Trans. Graph. 40, 6, Article 277 (Dec.
+2021), 10 pages. https://doi.org/10.1145/3478513.3480561
+Zimo Wang, Cheng Wang, Taiki Yoshino, Sirui Tao, Ziyang Fu, and Tzu-Mao Li. 2025b.
+HotSpot: Signed Distance Function Optimization with an Asymptotically Sufficient
+Condition. In CVPR.
+Stephen H. Westin, James R. Arvo, and Kenneth E. Torrance. 1992. Predicting reflectance
+functions from complex surfaces (SIGGRAPH ’92). 255–264. https://doi.org/10.1145/
+133994.134075
+Turner Whitted. 1980. An improved illumination model for shaded display. Commun.
+ACM 23, 6 (June 1980), 343–349.
+Haoqian Wu, Zhipeng Hu, Lincheng Li, Yongqiang Zhang, Changjie Fan, and Xin
+Yu. 2023a. Nefii: Inverse rendering for reflectance decomposition with near-field
+indirect illumination. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition. 4295–4304.
+Liwen Wu, Rui Zhu, Mustafa B Yaldiz, Yinhao Zhu, Hong Cai, Janarbek Matai, Fatih
+Porikli, Tzu-Mao Li, Manmohan Chandraker, and Ravi Ramamoorthi. 2023b. Factorized inverse path tracing for efficient and accurate material-lighting estimation. In
+Proceedings of the IEEE/CVF International Conference on Computer Vision. 3848–3858.
+Qi Wu, Janick Martinez Esturo, Ashkan Mirzaei, Nicolas Moenne-Loccoz, and Zan
+Gojcic. 2025. 3DGUT: Enabling Distorted Cameras and Secondary Rays in Gaussian
+Splatting. Conference on Computer Vision and Pattern Recognition (CVPR) (2025).
+Peiyu Xu, Sai Bangaru, Tzu-Mao Li, and Shuang Zhao. 2023. Warped-Area Reparameterization of Differential Path Integrals. ACM Trans. Graph. 42, 6 (2023), 213:1–213:18.
+Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. 2021. Volume rendering of neural
+implicit surfaces. Advances in Neural Information Processing Systems 34 (2021),
+4805–4815.
+Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and Angjoo Kanazawa. 2021.
+Plenoctrees for real-time rendering of neural radiance fields. In Proceedings of the
+IEEE/CVF international conference on computer vision. 5752–5761.
+•
+21
+Yizhou Yu, Paul Debevec, Jitendra Malik, and Tim Hawkins. 1999. Inverse global illumination: recovering reflectance models of real scenes from photographs (SIGGRAPH
+’99). 215–224. https://doi.org/10.1145/311535.311559
+Zehao Yu, Torsten Sattler, and Andreas Geiger. 2024. Gaussian Opacity Fields:
+Efficient High-quality Compact Surface Reconstruction in Unbounded Scenes.
+arXiv:2404.10772 (2024).
+Cem Yuksel. 2019. Stochastic Lightcuts. In High-Performance Graphics (HPG 2019)
+(Strasbourg, France). The Eurographics Association, 27–32. https://doi.org/10.2312/
+hpg.20191192
+Tizian Zeltner, Sébastien Speierer, Iliyan Georgiev, and Wenzel Jakob. 2021. Monte
+Carlo estimators for differential light transport. ACM Trans. Graph. 40, 4, Article 78
+(July 2021), 16 pages.
+Chong Zeng, Guojun Chen, Yue Dong, Pieter Peers, Hongzhi Wu, and Xin Tong. 2023.
+Relighting Neural Radiance Fields with Shadow and Highlight Hints. In ACM SIGGRAPH 2023 Conference Proceedings.
+Baowen Zhang, Chuan Fang, Rakesh Shrestha, Yixun Liang, Xiaoxiao Long, and Ping
+Tan. 2024a. RaDe-GS: Rasterizing Depth in Gaussian Splatting. arXiv preprint
+arXiv:2406.01467 (2024).
+Cheng Zhang, Bailey Miller, Kai Yan, Ioannis Gkioulekas, and Shuang Zhao. 2020.
+Path-Space Differentiable Rendering. ACM Trans. Graph. 39, 4 (2020), 143:1–143:19.
+Cheng Zhang, Lifan Wu, Changxi Zheng, Ioannis Gkioulekas, Ravi Ramamoorthi, and
+Shuang Zhao. 2019. A differential theory of radiative transfer. ACM Trans. Graph.
+38, 6, Article 227 (Nov. 2019), 16 pages.
+Cheng Zhang, Zihan Yu, and Shuang Zhao. 2021. Path-space differentiable rendering
+of participating media. ACM Trans. Graph. 40, 4, Article 76 (July 2021), 15 pages.
+Jingyang Zhang, Yao Yao, Shiwei Li, Jingbo Liu, Tian Fang, David McKinnon, Yanghai
+Tsin, and Long Quan. 2023. Neilf++: Inter-reflectable light fields for geometry
+and material estimation. In Proceedings of the IEEE/CVF International Conference on
+Computer Vision. 3601–3610.
+Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. 2018. The
+unreasonable effectiveness of deep features as a perceptual metric. In Proceedings of
+the IEEE conference on computer vision and pattern recognition. 586–595.
+Ziyi Zhang, Nicolas Roussel, and Wenzel Jakob. 2024b. Many-Worlds Inverse Rendering.
+arXiv preprint arXiv:2408.16005 (2024).
+Hexu Zhao, Haoyang Weng, Daohan Lu, Ang Li, Jinyang Li, Aurojit Panda, and
+Saining Xie. 2024. On scaling up 3d gaussian splatting training. arXiv preprint
+arXiv:2406.18533 (2024).
+Shuang Zhao, Lifan Wu, Frédo Durand, and Ravi Ramamoorthi. 2016. Downsampling
+scattering parameters for rendering anisotropic media. ACM Trans. Graph. 35, 6,
+Article 166 (Dec. 2016), 11 pages.
+Q. Zheng and R. Chellappa. 1991. Estimation of illuminant direction, albedo, and shape
+from shading. IEEE Transactions on Pattern Analysis and Machine Intelligence 13, 7
+(1991), 680–702. https://doi.org/10.1109/34.85658
+Qian-Yi Zhou, Jaesik Park, and Vladlen Koltun. 2018. Open3D: A modern library for
+3D data processing. arXiv preprint arXiv:1801.09847 (2018).
+Yang Zhou, Songyin Wu, and Ling-Qi Yan. 2024. Unified Gaussian Primitives for Scene
+Representation and Rendering. (2024). arXiv:2406.09733
+Matthias Zwicker, Hanspeter Pfister, Jeroen van Baar, and Markus Gross. 2001. EWA
+volume splatting. In Proceedings of the Conference on Visualization ’01 (San Diego,
+California) (VIS ’01). IEEE Computer Society, USA, 29–36.
+A
+BRDF details
+Given the BRDF defined in Eqn. (11), we have the closed-form solutions [Ramamoorthi and Hanrahan 2001] for the coefficient vector
+f 𝑐 as:
+𝑐 00 = 4ka𝑑 + (1 − k)a𝑠
+(s + 1)(s − 1) · · · (s − 𝑙 + 2) 𝑠
+a , when 𝑙 is odd
+(s + 2)(s + 4) · · · (s + 𝑙 + 1)
+s(s − 2) · · · (s − 𝑙 + 2)
+𝑐𝑙𝑚 = (−1)𝑚 (1 − k)
+a𝑠 , when 𝑙 is even
+(s + 3)(s + 5) · · · (s + 𝑙 + 1)
+(29)
+where the specular part of the BRDF is clamped to be 0 at the
+invisible hemisphere, and we use up to 9-degree spherical harmonics
+basis for reasonably glossy materials.
+𝑐𝑙𝑚 = (−1)𝑚 (1 − k)
+B
+Forward rendering details
+We start our derivation from the rendering equation [Kajiya 1986]
+without using the constant assumption for the outgoing radiance,
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+22
+•
+Kaiwen Jiang, Jia-Mu Sun, Zilu Li, Dan Wang, Tzu-Mao Li, and Ravi Ramamoorthi
+while the emission and BRDF are still constant within each kernel.
+We then incorporate the assumption regarding constant outgoing
+radiance within a kernel, and derive the solution to the underlying
+rendering equation using the weighted residual form. We start the
+discussion by assuming that there exists an outgoing direction 𝝎𝑂
+and then eventually generalize the discussion to the coefficient space
+of the spherical harmonics basis discussed above.
+Specifically, from the rendering equation, we know that for the
+𝑖 th kernel:
+∀x ∈ 𝑃𝑖 ,
+∫
+𝐿𝑂 (x, 𝝎𝑂 ) = 𝐸𝑖 (𝝎𝑂 ) + 𝛼𝑖 (x)
+𝑓𝑖 (𝝎𝐼 , 𝝎𝑂 )𝐿𝐼 (x, 𝝎𝐼 )|n𝑖 · 𝝎𝐼 |𝑑𝝎𝐼 ,
+𝛀
+(30)
+where 𝛀 = {𝝎𝐼 : 𝝎𝐼 · n𝑖 < 0} denotes the visible hemisphere, and 𝛼𝑖
+is multiplied because our primitive can be semi-transparent, which
+does not fully absorb all the energy.
+By combining Eqn. (2) and Eqn. (30), we could expand 𝐿𝐼 as:
+∫
+∀x ∈ 𝑃𝑖 , 𝐿𝑂 (x, 𝝎𝑂 ) =𝐸𝑖 (𝝎𝑂 ) + 𝛼𝑖 (x)
+𝑓𝑖 (𝝎𝐼 , 𝝎𝑂 )|n𝑖 · 𝝎𝐼 |
+𝝎
+[
+𝑁
+∑︁
+𝐿𝑂 (t 𝑗 , 𝝎𝐼 )𝛼 𝑗 (t 𝑗 )
+𝑗=1
+𝑗 −1
+Ö
+(1 − 𝛼𝑘 (t𝑘 ))] 𝑑𝝎𝐼
+𝑘=1
+(b)
+(a)
+Fig. 19. Illustration of swapping the integral and the summation in Eqn. 31.
+(a) The incident radiance at the red point is the integral of radiances coming
+from all potential directions. (b) After swapping the integral and the summation, the incident radiance at the red point is the summation of radiances
+coming from all other kernels in space.
+spatially variant 𝛼𝑖 (x) is also approximated by the spatially invariant
+𝛼𝑖 (p𝑖 ). The error of the approximation can be nicely captured by
+the weighted residual form as in the radiosity theory. Specifically,
+we first replace the 𝐿𝑂 on both sides of Eqn. 33 with the defined
+spatially invariant directionally-varying quantity, and define the
+residual for the 𝑖 th kernel as:
+𝑁
+∑︁ ∫
+∀x ∈ 𝑃𝑖 , 𝑟𝑖 (x, 𝝎𝑂 ) = 𝐵𝑖 (𝝎𝑂 ) − 𝐸𝑖 (𝝎𝑂 ) − 𝛼𝑖
+𝑓𝑖 𝐵 𝑗 𝑣 𝑗𝑖 𝑑x′, (34)
+𝑗=1
+|
+{z
+(31)
+We then swap the integral and the summation. The key to interpret it is that, now we are choosing a specific direction first and then
+calculating how much the contribution is from all the kernels given
+that direction. It is equivalent to, say, choosing a specific kernel first
+and then calculating how much contribution it gives. A visualization
+is provided in Fig. 19.
+Therefore, we have:
+𝑁
+∑︁ ∫
+∀x ∈ 𝑃𝑖 , 𝐿𝑂 (x, 𝝎𝑂 ) =𝐸𝑖 (𝝎𝑂 ) + 𝛼𝑖 (x)
+𝑓𝑖 (𝝎𝐼 , 𝝎𝑂 ) 𝐿𝑂 (t 𝑗 , 𝝎𝐼 )
+𝑗=1 𝑃 𝑗 | {z } | {z }
+BRDF Response
+𝛼 𝑗 (t 𝑗 )
+𝑗 −1
+Ö
+𝑘=1
+|
+𝑃𝑗
+}
+𝐿𝐼 (x,𝝎𝐼 )
+Radiance
+|n𝑖 · 𝝎𝐼 ||n 𝑗 · 𝝎𝐼 | ′
+𝑑x ,
+||x − x′ || 22
+{z
+}
+(1 − 𝛼𝑘 (t𝑘 ))
+Decay
+(32)
+where 𝝎𝐼 = (x − x′ )/||x − x′ || 22 . To simplify the notation, we define
+𝑣 𝑗𝑖 (x′, x) as the decay component, which is part of the final fused
+decay component 𝑉𝑗𝑖 we will introduce later. Therefore, we have:
+where input variables of the function are dropped for clarity.
+The weighted residual form is then applied to aggregate the residual for all points on the tangent plane such that:
+𝑁 ∑︁
+𝑁 ∫
+∑︁
+𝜅 𝑗 (x)𝑟𝑖 (x, 𝝎𝑂 )𝑑x = 0,
+(35)
+𝑖=1 𝑗=1
+R3
+where 𝜅 𝑗 is a weighting function that is non-zero only at 𝑃 𝑗 . 𝜅 𝑗
+could be 𝛼 𝑗 again, which is then known as the Galerkin form, or
+other weighting function, such as Gaussian, Dirac delta, etc.
+We then introduce our second and last assumption to easily solve
+Eqn. (35): Any two kernels are non-overlapping.
+This assumption is also adopted in the splatting algorithm [Huang
+et al. 2024b; Kerbl et al. 2023; Zwicker et al. 2001] and ensured by the
+subdivision in the classic radiosity theory. However, this assumption
+could cause energy conservation issues, but we prefer the simplicity
+and, in our inverse rendering applications, the optimization helps
+prevent the energy explosion.
+With this assumption, since 𝜅 𝑗 is only non-zero at 𝑃 𝑗 and 𝑟𝑖 is
+non-zero at 𝑃𝑖 , Eqn. 35 can be simplified as:
+∫
+𝜅𝑖 (x)𝑟𝑖 (x, 𝝎𝑂 )𝑑x = 0,
+(36)
+𝐿𝑂 (x, 𝝎𝑂 ) =𝐸𝑖 (𝝎𝑂 )+
+𝑃𝑖
+which leads to:
+𝛼𝑖 (x)
+𝑁 ∫
+∑︁
+𝑗=1
+𝑓𝑖 (𝝎𝐼 , 𝝎𝑂 )𝐿𝑂 (t 𝑗 , 𝝎𝐼 )𝑣 𝑗𝑖 (x′, x)𝑑x′,
+(33)
+𝑃𝑗
+for all x ∈ 𝑃𝑖 .
+We then incorporate our assumption that the material, emission
+and outgoing radiance are constant within the support. Specifically,
+for the 𝑖 th kernel, we intend to approximate the spatially variant
+directionally-varying outgoing radiance 𝐿𝑂 on the 𝑖 th kernel with
+a spatially invariant directionally-varying quantity, denoted as 𝐵𝑖 ,
+which is still conditioned on the viewing direction. Accordingly, the
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+𝑁
+𝐵𝑖 (𝝎𝑂 ) = 𝐸𝑖 (𝝎𝑂 ) +
+𝛼𝑖 (p𝑖 ) ∑︁
+Λ𝑖 𝑗=1
+∫
+∫
+𝜅𝑖 (x)
+𝑃𝑖
+𝑓𝑖 𝐵 𝑗 𝑣 𝑗𝑖 𝑑x′𝑑x,
+(37)
+𝑃𝑗
+∫
+where Λ𝑖 = 𝑃 𝜅𝑖 (x)𝑑x. Familiar readers should identify the re𝑖
+semblance between this equation and the classical radiosity equation [Sillion et al. 1991] except that every element now is not fully
+opaque. Therefore, only part of the emitted radiance is absorbed.
+Furthermore, the visibility is non-binary, which facilitates the later
+discussed optimization.
+Differentiable Light Transport with Gaussian Surfels via Adapted Radiosity for Efficient Relighting and Geometry Reconstruction
+•
+23
+other gradients as well. From Eqn. (39), we first consider a single
+path (𝑥 1, 𝑥 2, ..., 𝑥𝑙 ) connecting the 𝑖 th and 𝑗 th kernels as shown in
+Fig. 20 (a). We can then derive the partial derivatives for the emission
+for a single path by reversing the forward procedure as explained
+in Fig. 20 (b):
+∫ ∫ ∫
+∫ ∫ ∫
+𝜕L
+𝜕L
+=
+·
+·
+·
+(f𝑖𝑇 𝑐 )
+𝜕E𝑐𝑗
+𝜕B
+𝑃𝑖 𝑃𝑥 1 𝑃𝑥 1
+𝑃𝑥
+𝑃𝑥
+𝑃𝑗
+𝑖
+𝑙
+Fig. 20. Illustration of calculating the partial derivatives with respect to
+the emissions by considering a single path (𝑥 1 , 𝑥 2 , ..., 𝑥𝑙 ) connecting the 𝑖 th
+and 𝑗 th kernels. The arrow denotes the omitted direction for evaluating the
+spherical harmonics Y and BRDF f. (a) In the forward pass, the radiance
+E𝑐𝑗 is emitted from the 𝑗 th kernel along the direction connecting the 𝑗 th
+and 𝑥𝑙th kernels, and is further processed through consecutive decay (𝑉
+term) and BRDF (Y𝑇 f term) to propagate into the 𝑖 th kernel. (b) In the
+backward pass, we need to reverse the forward procedure in (a) to propagate
+𝜕L
+th kernel into the 𝑗 th kernel.
+the weighted gradient f𝑖 × 𝜕B
+𝑐 from the 𝑖
+𝑖
+However, the direction cannot be directly reversed. (c) By noticing that
+Y(𝝎 ) = Y(−𝝎 ) and the reciprocal property of BRDF, i.e., Y𝑇 (𝝎𝑂 )f𝑖 (𝝎𝐼 ) =
+f𝑖𝑇 (−𝝎𝑂 )Y(−𝝎𝐼 ), we could then reverse the direction as well, which in
+turn makes the gradient propagation equivalent to a forward pass except
+that the weighted gradient is propagated instead of the emissions, and the
+asymmetric decay term 𝑉 is also flipped.
+We then convert this equation into the coefficient space of the
+spherical harmonics basis. Specifically, we have:
+𝑁 ∫ ∫
+𝛼𝑖 (p𝑖 ) ∑︁
+B𝑐𝑖 = E𝑐𝑖 +
+[f 𝑐 × Y(𝝎𝐼 )] [Y(𝝎𝐼 )𝑇 B𝑐𝑗 ]𝑉𝑗𝑖 𝑑x′𝑑x
+Λ𝑖 𝑗=1 𝑃𝑖 𝑃 𝑗 𝑖
+𝑁
+= E𝑐𝑖 +
+𝛼𝑖 (p𝑖 ) ∑︁
+Λ𝑖 𝑗=1
+∫ ∫
+𝑃𝑖
+f𝑖 (𝝎𝐼 ) [Y(𝝎𝐼 )𝑇 B𝑐𝑗 ]𝑉𝑗𝑖 𝑑x′𝑑x,
+𝑃𝑗
+(38)
+where 𝑉𝑗𝑖 = 𝜅𝑖 (x)𝑣 𝑗𝑖 . This equation is exactly Eqn. (14).
+C
+Backpropagation details
+We start the analysis by expanding Eqn. (16) into enumerating paths
+connecting kernels:
+∫ ∫ ∫
+∫ ∫ ∫
+𝑁
+∑︁
+∑︁
+B𝑐𝑖 =E𝑐𝑖 +
+···
+𝑗=1
+𝑃𝑖
+all paths 𝑥 1, 𝑥 2, ..., 𝑥𝑙
+connecting 𝑖 and 𝑗
+𝑃𝑥 1
+𝑃𝑥 1
+𝑃𝑥𝑙
+𝑃𝑥𝑙
+𝑃𝑗
+f𝑖 𝑉𝑥 1𝑖 (Y𝑇 f𝑥 1 )𝑉𝑥 2 𝑥 1 (Y𝑇 f𝑥 2 ) · · · 𝑉𝑥𝑙 𝑥𝑙 −1 (Y𝑇 f𝑥𝑙 )𝑉𝑗𝑥𝑙 (Y𝑇 E𝑐𝑗 )𝑑 · · · 𝑑x,
+(39)
+where 𝑙 denotes the length of the path. Notice that each kernel in
+the middle, i.e., 𝑥 1, 𝑥 2, ...𝑥𝑙 , can also be emissive, and this form also
+accounts for their emissions. This form resembles path tracing except that, we explicitly discretize the whole space as a finite number
+of kernels and calculate the light transport among them.
+Gradients with respect to the emissions. We first consider the partial derivatives for the emissions as they will be used in calculating
+𝑙
+𝑉𝑥 1𝑖 (Y𝑇 f𝑥 1 )𝑉𝑥 2 𝑥 1 (Y𝑇 f𝑥 2 ) · · · 𝑉𝑥𝑙 𝑥𝑙 −1 (Y𝑇 f𝑥𝑙 )𝑉𝑗𝑥𝑙 Y𝑑 · · · 𝑑x.
+(40)
+Notice that f𝑖 = f𝑖𝑐 × Y, and Y𝑇 (𝝎𝑂 )f𝑖 (𝝎𝐼 ) = f𝑖𝑇 (−𝝎𝑂 )Y(−𝝎𝐼 )
+due to the reciprocal property of the BRDF. We could rewrite Eqn. 40
+as explained in Fig. 20 (c):
+∫ ∫ ∫
+∫ ∫ ∫
+𝜕L 1
+·
+·
+·
+=
+𝜕E𝑐𝑗 f 𝑐𝑗 𝑃 𝑗 𝑃𝑥 𝑃𝑥
+𝑃𝑥 1 𝑃𝑥 1 𝑃𝑖
+𝑙
+𝑙
+𝜕L
+))𝑑 · · · 𝑑x.
+𝜕B𝑐𝑖
+(41)
+Therefore, by accumulating every such single path and swapping
+𝑖 and 𝑗 for symbol consistency, we have:
+∫ ∫ ∫
+∫ ∫ ∫
+𝑁
+∑︁
+𝜕L 𝜕L
+1 ∑︁
+=
++
+·
+·
+·
+𝜕E𝑐𝑖 𝜕B𝑐𝑖
+f𝑖𝑐 𝑗=1
+𝑃𝑖 𝑃𝑥 1 𝑃𝑥 1
+𝑃𝑥𝑙 𝑃𝑥𝑙 𝑃 𝑗
+𝑥 1, 𝑥 2, ..., 𝑥𝑙
+𝑇
+f 𝑗 𝑉𝑥𝑙 𝑗 (Y f𝑥𝑙 ) · · · 𝑉𝑥 1 𝑥 2 (Y𝑇 f𝑥 1 )𝑉𝑖𝑥 1 (Y𝑇 (f𝑖𝑐 ×
+𝜕L
+))𝑑 · · · 𝑑x,
+𝜕B𝑐𝑗
+(42)
+where 𝑉𝑖 𝑗 = 𝑉𝑗𝑖 . Note that this equation resembles the rewritten
+form (Eqn. (39)) of Eqn. (16), except that the decay term is reversed
+𝜕L
+and we are propagating the weighted gradient f 𝑐𝑗 × 𝜕B
+𝑐 instead of
+f𝑖 𝑉𝑥 1𝑖 (Y𝑇 f𝑥 1 ) · · · 𝑉𝑥𝑙 𝑥𝑙 −1 (Y𝑇 f𝑥𝑙 )𝑉𝑗𝑥𝑙 (Y𝑇 (f 𝑐𝑗 ×
+𝑗
+emission. By converting Eqn. (42) into the form of Eqn. (16), we get
+the exact Eqn. (17). This relationship implies the duality between the
+forward rendering and gradient calculation. We provide a conceptual
+illustration of forward and backward pass in Fig. 21 (a) and (b).
+Gradients with respect to the BRDF. From Eqn. (39), we could also
+derive the partial derivative with respect to the f𝑖𝑐 . 𝜕L/𝜕f𝑖𝑐 should
+accumulate the gradients from every path which passes through
+the 𝑖 th kernel. We now present a high-level derivation of such gradients. As shown in Fig. 21 (c), the contribution to the gradients
+from each path can be roughly described as the product of the propagated weighted gradient from the end kernel and the propagated
+emissions from the start kernel. Or, for each propagated weighted
+gradient, it should multiply with the accumulated propagated emissions from every kernel, or B𝑐𝑗 , ∀𝑗 ∈ {1, 2, ..., 𝑁 } exactly. And, the
+further accumulation of each propagated weighted gradient leads
+to the exact definition of 𝜕L/𝜕E𝑐𝑖 . Namely, we have:
+𝑁 ∫ ∫
+𝜕L
+𝜕L ∑︁
+=
+×
+Y[𝑉𝑗𝑖 (Y𝑇 B𝑐𝑗 )]𝑑x′𝑑x
+𝜕f𝑖𝑐
+𝜕E𝑐𝑖
+𝑃
+𝑃
+𝑖
+𝑗
+𝑗=1
+(43)
+(B𝑐 − E𝑐 )
+𝜕L
+= 𝑐 × 𝑖 𝑐 𝑖 ,
+𝜕E𝑖
+f𝑖
+which is an analytical non-recursive closed form solution since B𝑐𝑗
+sums all the propagated radiances passing through the 𝑗 th kernel
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+24
+•
+Kaiwen Jiang, Jia-Mu Sun, Zilu Li, Dan Wang, Tzu-Mao Li, and Ravi Ramamoorthi
+Fig. 21. Conceptual illustration of the forward and backward pass for the differentiable light transport. (a) In the forward pass, emission 𝐸 from the light source
+𝜕L
+is propagated in the scene to each kernel to calculate the radiosity B𝑐 . (b) In the backward pass, weighted gradient f 𝑐 × 𝜕B
+𝑐 of each kernel is propagated in
+the scene to calculate the 𝜕 L/𝜕E𝑐 . (c) To calculate the gradient with respect to the “bridge”, or specifically the decay term and the BRDF term between any
+two kernels, we need to consider each path passing through such bridge. We take the 𝜕 L/𝜕f 𝑐 on the bridge connecting the 𝑖 th kernel and the 𝑗 th kernel as an
+𝜕L
+example here. For each path, the gradient can be roughly described as the product of the propagated weighted gradient f 𝑐 × 𝜕B
+𝑐 and the emission 𝐸. Notice
+that, by considering every path, the propagated weighted gradient needs to be multiplied with every propagated emission, which is exactly equivalent to the
+forward pass in (a). Similarly, the propagated emission needs to be multiplied with every propagated weighted gradient, which is exactly equivalent to the
+backward pass in (b). Therefore, the 𝜕 L/𝜕f 𝑐 can be effectively analytically defined using the B𝑐 and 𝜕 L/𝜕E𝑐 calculated in (a) and (b).
+and 𝜕L/𝜕E𝑐𝑖 sums all the propagated weighted gradient passing
+through the 𝑖 th kernel. This equation is then the exact Eqn. (18).
+Gradients with respect to the geometry. The remaining gradients
+are the partial derivatives with respect to the geometric properties
+(i.e., central points, scaling, etc.) from the decay term and directional
+effects. The derivation for their analytical non-recursive forms is
+𝜕L
+similar to the derivation of 𝜕f
+𝑐 . As in the main paper, we define 𝛽𝑖
+𝑖
+as a placeholder for the geometric property of the 𝑖 th kernel that we
+want to differentiate through.
+Similar to the derivation of partial derivatives with respect to
+the f𝑖𝑐 , we first consider every path that passes through a decay
+term 𝑉 that contains the 𝑖 th kernel, and the gradient with respect
+to the decay term is the product of the propagated emissions from
+the start kernel and the propagated weighted gradient from the
+end kernel. For each propagated weighted gradient, it should multiply with the accumulated propagated emissions from every kernel,
+or B𝑐𝑗 , ∀𝑗 ∈ {1, 2, ..., 𝑁 } exactly. And, the further accumulation of
+each propagated weighted gradient leads to the exact definition
+of 𝜕L/𝜕E𝑐𝑖 . Therefore, to calculate the gradients from every path
+passing through the decay term that contains the 𝑖 th kernel, we need
+to enumerate every pair of kernels forming a decay term. We then
+reach Eqn. (19), where the 𝑠𝑎𝑢 𝑠𝑎𝑣 𝑠𝑏𝑢 𝑠𝑏𝑣 term comes from differentiating
+through the integration domain or boundary.
+Besides, we also need to take the directional effects into account.
+The gradients with respect to the direction are similar to the gradients with respect to the decay term, but we only need to enumerate
+every possible pair of kernels, one of which is the 𝑖 th kernel. We
+then reach Eqn. (20), where the gradients are composed of two symmetric terms, which come from evaluating the outgoing radiance
+and BRDF response with respect to a specific direction.
+D
+Monte-Carlo Solver Details
+We further generalize the proposed Monte-Carlo solver in Sec. 7 to
+obtain a more efficient solver. Specifically, there is no constraint that
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.
+the time step needs to be synchronized for all kernels. As we gradually update the estimated outgoing radiance for every kernel, we
+track its variance over time, and perform more steps for kernels with
+high variance. In practice, at each step, we select 𝑁 elements from
+{1, 2, ..., 𝑁 } with replacement and with probability proportional to
+the tracked variance instead of simply using {1, 2, ..., 𝑁 } (Line 15 in
+Alg. 1).
+Besides, we also improve the efficiency of next event estimation
+by grouping kernels into different groups. Formally, we rewrite the
+summation in Eqn. (16) as a double summation:
+B𝑐𝑖 = E𝑐𝑖 +
+∑︁
+∑︁
+∫ ∫
+groups 𝑗 in group 𝑃𝑖
+f𝑖 (𝝎𝐼 ) [Y(𝝎𝐼 )𝑇 B𝑐𝑗 ]𝑉𝑗𝑖 𝑑x′𝑑x,
+𝑃𝑗
+(44)
+where we use K-Means to group kernels into a preset number of
+groups with the averaged central points and normal directions and
+the summed current estimation of outgoing radiance as the proxy
+for importance sampling.
+Therefore, we first sample a group and then sample a kernel
+within that group based on Eqn. (26) for the Monte-Carlo solver.
+This is effectively a very shallow tree with depth 2. By re-writing the
+single summation into double
+summation, the complexity is reduced
+√
+from O (𝑁 2 ) into O (𝑁 𝑁 ). Although the optimal is to rewrite the
+summation into ln(𝑁 ) summations (i.e., tree with depth ln(𝑁 )), we
+find that using double summation already has good performance in
+practice. We note that such an idea is conceptually similar to the
+established many-lights rendering [Walter et al. 2005; Yuksel 2019].
+However, it is different from the established hierarchical methods
+(e.g., [Aupperle and Hanrahan 1993; Hanrahan et al. 1991]) in the
+radiosity theory where they group kernels such that the transmitted
+radiance is approximately identical for every element in the group.
+In our case, we still need to calculate the transmitted radiance for
+every kernel separately due to the non-binary visibility that makes
+the approximation harder.
+Differentiable Light Transport with Gaussian Surfels via Adapted Radiosity for Efficient Relighting and Geometry Reconstruction
+E
+Approximation Details
+In
+∫ the approximation (Sec. 8), we need to evaluate the integral
+𝛼 𝑗 𝑑x. From Jiang et al. [2025],
+𝑃
+𝑗
+1
+𝛼 𝑗 (x) ≈ 1 − exp(−0.03279(𝑔 𝑗 exp(− (𝑢 2 + 𝑣 2 ))) 3.4 ), (45)
+2
+where 𝑢, 𝑣 denote the coordinates of x in the local tangent plane 𝑃 𝑗
+of the 𝑗 th kernel as defined in Eqn. 1.
+•
+25
+Therefore, we could transform the integral of 𝛼 𝑗 over the 𝑃 𝑗 into
+the integral over the local tangent plane as:
+∫
+𝛼 𝑗 (x)𝑑x
+𝑃𝑗
+∫ ∞∫ ∞
+1
+1 − exp(−0.03279(𝑔 𝑗 exp(− (𝑢 2 + 𝑣 2 ))) 3.4 )𝑑𝑢𝑑𝑣
+2
+0
+∫ ∞0
+1
+= 2𝜋𝑠𝑢𝑗 𝑠 𝑣𝑗
+𝑟 (1 − exp(−0.03279(𝑔 𝑗 exp(− 𝑟 2 )) 3.4 ))𝑑𝑟
+2
+0
+∫ ∞
+= 2𝜋𝑠𝑢𝑗 𝑠 𝑣𝑗
+1 − exp(−0.03279𝑔3.4
+𝑗 exp(−3.4𝑥))𝑑𝑥
+0
+∫ ∞
+2𝜋 𝑢 𝑣
+𝑠 𝑠
+1 − exp(−0.03279𝑔3.4
+=
+𝑗 exp(−𝑥))𝑑𝑥
+3.4 𝑗 𝑗 0
+∫ ∞
+2𝜋 𝑢 𝑣
+=
+𝑠 𝑠
+1 − exp(−𝑐 𝑗 exp(−𝑥))𝑑𝑥
+3.4 𝑗 𝑗 0
+∫ 1
+1 − exp(−𝑐 𝑗 𝑦)
+2𝜋 𝑢 𝑣
+=
+𝑠 𝑠
+𝑑𝑦
+3.4 𝑗 𝑗 0
+𝑦
+∫ 𝑐𝑗
+1 − exp(−𝑦)
+2𝜋 𝑢 𝑣
+=
+𝑠 𝑠
+𝑑𝑦
+3.4 𝑗 𝑗 0
+𝑦
+(46)
+∫ 𝑐 𝑗 1−exp(−𝑦)
+𝑑𝑦 is related to a specific
+where 𝑐 𝑗 = 0.03279𝑔3.4
+𝑗 and 0
+𝑦
+function, i.e., the ∫
+exponential integral. Therefore, we have the closedform solution for 𝑃 𝛼 𝑗 𝑑x.
+= 𝑠𝑢𝑗 𝑠 𝑣𝑗
+𝑗
+ACM Trans. Graph., Vol. 1, No. 1, Article . Publication date: September 2025.

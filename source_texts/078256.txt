@@ -1,0 +1,159 @@
+# VolumeSegmenter
+
+An end-to-end proof of concept for filtering large RAW volumes into compact, spatially mapped bricks, organizing them into selectable logical groups, and rendering them in WebGL2.
+
+## Results first
+
+The pipeline substantially reduced stored and GPU-resident voxel data in all five measured datasets. Rendering speed did not consistently improve: the grouped representation was slightly faster for Bonsai, but slower for Foot, Engine, and Kingsnake because sparse lookup and ray-marching overhead can outweigh memory savings.
+
+Measurements were collected on an Apple M4 with 16 GiB unified memory at 640 × 480, sample step 1, and three fixed camera views. Each view used five warmups and 20 asynchronous GPU timer queries. The table reports the median of the three per-view medians. Source and grouped modes ran sequentially with the same transfer function and display cutoff.
+
+| Dataset | Source MiB | Grouped files MiB | Storage reduction | Grouped GPU MiB | Source / grouped GPU ms | Image check |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| Bonsai | 16.00 | 2.65 | 83.5% | 2.73 | 3.41 / 3.23 | 3/3 exact |
+| Foot | 16.00 | 4.08 | 74.5% | 4.14 | 3.55 / 3.99 | 3/3 exact |
+| Engine | 8.00 | 1.72 | 78.5% | 1.80 | 1.96 / 4.01 | 3/3 exact |
+| Kingsnake | 795.00 | 360.39 | 54.7% | 362.06 | 8.47 / 9.65 | 3/3 exact |
+| Woodbranch | 16,384.00 | 719.48 | 95.6% | 745.94 | skipped / 11.78 | MIP only |
+
+The exact image checks compare the source and grouped renderers after applying the same extraction cutoff. They prove that grouping, compact encoding, coordinate reconstruction, and rendering preserve every retained voxel for those views and settings. They do not prove that thresholded-out voxels were semantically unimportant.
+
+Woodbranch demonstrates the main use case: its 16 GiB source volume exceeded the experiment's 1 GiB monolithic allocation budget, while the grouped representation rendered with about 746 MiB of GPU texture data. The source allocation was skipped before execution, so this row is not a measured out-of-memory failure and has no source GPU time.
+
+![Bonsai source and grouped rendering](experiments/grouped-results/bonsai-comparison.png)
+
+Detailed measurements, raw GPU samples, transfer-function settings, environment data, and projection comparisons are in the [complete grouped-volume report](experiments/grouped-results/RESULTS.md).
+
+## What the pipeline does
+
+```mermaid
+flowchart TD
+    A[RAW + dimensions + type + spacing] --> B[Chunked input]
+    B --> C[Explicit intensity cutoff]
+    C --> D[Compact bricks + source coordinates]
+    D --> E[Median-intensity bands + 6-neighbor components]
+    E --> F[Selectable logical groups]
+    F --> G[Dense crop or occupancy-mask encoding]
+    G --> H[Values + masks + indices + metadata]
+    H --> I[Independent decode verification]
+    I --> J[Upload selected groups and release old textures]
+    J --> K[WebGL2 rendering + reference comparison + GPU timing]
+```
+
+1. **Read:** RAW slices or OME-Zarr chunks are processed in batches so the full input and a full label volume do not have to coexist in memory.
+2. **Filter:** The large-volume path applies an explicit intensity cutoff. This is the only lossy step.
+3. **Partition:** Each nonempty brick stores only its local range plus its coordinates in the source volume. Bricks are never expanded back to the full width, height, and depth.
+4. **Group:** Bricks are assigned to median-intensity bands and joined through six-neighbor adjacency. The nine largest components stay separate; smaller components are explicitly pooled by band. Every brick belongs to exactly one group.
+5. **Encode:** The exporter chooses the smaller of a dense crop and an occupancy-mask representation. Masks omit interior empty positions without quantizing or deleting additional retained voxels.
+6. **Verify:** Independent readers check hashes, coordinates, ownership, values, histograms, and three maximum-intensity projections.
+7. **Render:** Logical parent AABBs reference their member bricks. Selecting groups rebuilds resident textures and releases the previous selection. Demand paging, a cache, and level of detail are not implemented yet.
+
+Logical groups are spatial/intensity candidates, not validated tissue classes. Brick-graph connectivity also does not guarantee voxel-level connectivity. The original Skull experiment uses a separate SLIC-candidate path and remains as an algorithm baseline.
+
+## Run the included examples
+
+Run every command from the repository root:
+
+```bash
+cd /Users/jialinghuang/VolumeSegmenter
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-lock.txt
+
+# Download, export, group, and verify Bonsai, Foot, and Engine.
+# Skip this command when the generated outputs already exist.
+python -m pipeline.prepare_examples
+
+# Start the server from the repository root so the UI can access experiment data.
+python -m http.server 8765 --bind 127.0.0.1
+```
+
+Open the [source/grouped-volume comparison](http://127.0.0.1:8765/web/compare_volumes.html?dataset=bonsai) or the [project home page](http://127.0.0.1:8765/).
+
+- Use the dataset menu to switch examples. A menu entry does not guarantee that its generated data exists locally.
+- Drag to rotate and scroll to zoom. The two interactive cameras stay synchronized.
+- Edit the shared transfer function to apply identical colors and opacity to both views.
+- Select logical groups to inspect their individual size, combined storage, and resident GPU data.
+- Live FPS describes both views running together. Use the standalone benchmark for isolated GPU timing.
+- Woodbranch can use a credited published image as a static appearance reference; it cannot be synchronized or used for pixel-level validation.
+- Stop the server with `Ctrl+C` in the terminal.
+
+Python 3.12 or newer is required. On Windows, activate the environment with `.venv\Scripts\activate`.
+
+Large downloads and generated volumes are excluded from Git. Reproduction instructions for Kingsnake and Woodbranch are in [docs/LARGE_VOLUMES.md](docs/LARGE_VOLUMES.md); the original Skull SLIC experiment is documented in [docs/SUPERVOLUMES.md](docs/SUPERVOLUMES.md).
+
+## Process your own RAW volume
+
+The workflow processes files offline and then loads the results in the browser. It does not upload RAW data through the web page. Determine the following values first because RAW files do not carry them:
+
+| Parameter | Requirement |
+| --- | --- |
+| Width, height, depth | Exact voxel dimensions |
+| Data type | `uint8` or little-endian `uint16` (`<u2`) |
+| Layout | X changes fastest, then Y, then Z |
+| Spacing | Physical X/Y/Z voxel spacing; use 1 only when proportions are unknown |
+| Byte size | Must equal width × height × depth × bytes per voxel |
+
+Example for a 256³ `uint8` volume:
+
+```bash
+source .venv/bin/activate
+
+python - <<'PY'
+from pipeline.large_volume import RawSource, export
+from pipeline.group_large_volume import group_volume
+
+source = RawSource(
+    path="data/my_volume.raw",
+    shape=(256, 256, 256),       # D, H, W
+    dtype="uint8",              # Use "<u2" for little-endian uint16.
+    spacing=(1, 1, 1),          # Z, Y, X
+    name="my_volume",
+)
+
+export(
+    source,
+    output="experiments/large-volumes/my_volume32",
+    cutoff=32,                   # Retain source values > 32.
+    save_original=True,          # Saves a full reference and uses more disk space.
+)
+
+group_volume(
+    directory="experiments/large-volumes/my_volume32",
+    output="experiments/large-volumes/my_volume-groups",
+    edges=[96, 160],             # Tune median-intensity bands for the dataset.
+)
+PY
+
+python -m pipeline.verify_large_volume experiments/large-volumes/my_volume32
+python -m pipeline.verify_large_groups \
+  experiments/large-volumes/my_volume-groups \
+  experiments/large-volumes/my_volume32
+```
+
+Cutoffs and intensity-band edges are dataset-specific exploratory parameters. Edges must be strictly increasing, unique, greater than the cutoff, and no greater than the data maximum. Use a new empty output directory for every export because the programs do not overwrite existing results.
+
+After starting the server, open:
+
+```text
+http://127.0.0.1:8765/web/large_volume.html?manifest=../experiments/large-volumes/my_volume-groups/metadata.json
+```
+
+The standalone viewer switches between the source and grouped representations, changes color presets, rotates the camera, and measures three fixed views. Custom datasets are not added automatically to the comparison-page menu. URL parameters such as `manifest`, `input`, and `base` resolve relative to the `web/` directory.
+
+## Repository map
+
+```text
+VolumeSegmenter/
+├── README.md                  Project overview, results, and usage
+├── index.html                 Static-server landing page
+├── requirements*.txt         Dependency ranges and locked versions
+├── pipeline/                  Python processing and experiment code
+├── web/                       HTML and JavaScript renderers
+├── data/                      Input RAW data and historical Skull bricks
+├── configs/                   Skull candidate and seed configurations
+├── tests/                     Numerical, coordinate, and storage checks
+├── docs/                      Method and reproduction guides
+└── experiments/               Measurements, plots, and generated outputs
+```

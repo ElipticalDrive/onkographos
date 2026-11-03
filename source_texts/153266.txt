@@ -1,0 +1,1267 @@
+NURBS Splatting: A Unified Differentiable
+Rendering Framework for Vector Graphics
+Jingye Qiu and Shizhe Zhou⋆
+arXiv:2606.31764v2 [cs.GR] 29 Sep 2026
+Hunan University, Changsha, China
+anicoder@outlook.com, shizhe@hnu.edu.cn
+Abstract. Differentiable rendering of planar rational splines remains
+largely underexplored, despite their widespread use in vector graphics
+and design. Existing differentiable vector renderers primarily focus on
+Bézier curves and rely on analytic rasterization, which can suffer from
+gradient instability and limited flexibility. We propose NURBS Splatting,
+a unified framework that represents planar rational curves as continuous
+Gaussian fields. By sampling Gaussians along the curve parameter domain and inside closed regions, rendering is reformulated as a smooth
+accumulation process with stable gradients. Our method naturally supports long splines, rational weights, non-uniform knots, and closed-region
+filling. We demonstrate its effectiveness in calligraphy reconstruction,
+vectorization frameworks, and long-spline image abstraction, showing
+improved stability and reconstruction quality over existing approaches.
+Keywords: Gaussian Splatting · NURBS · Differentiable Rendering
+1
+Introduction
+Non-Uniform Rational B-Splines (NURBS) [32] are the standard curve and surface representation in CAD and manufacturing. Every major CAD kernel—
+SolidWorks, CATIA, Rhino, Siemens NX—and exchange formats such as STEP
+(ISO 10303) and IGES use NURBS, and isogeometric analysis [16] builds directly on them for finite-element simulation. Their advantage over polynomial
+B-splines is well established: rational weights and non-uniform knots let NURBS
+exactly represent conic sections—circles, ellipses, parabolic arcs—that polynomial splines can only approximate [10,32], while also providing per-control-point
+shape modulation for tighter local geometric control.
+As pixel-based image generation models improve, differentiable rendering offers a promising way to convert these pixel outputs into physical, manufacturable
+vector formats. Because splines are compact and resolution-independent, they
+are highly suited for such tasks. Berio et al . [2], for example, showed that optimizing long smoothing splines can produce high-quality artistic abstractions that
+can be reproduced with robotic pen plotters. However, spline representations
+remain only partially explored in differentiable vector graphics. Current differentiable 2D renderers [23,25] are restricted to B’ezier curves, while Berio et al . [2]
+⋆
+Corresponding author.
+2
+J. Qiu and S. Zhou
+Differentiable
+rasterization
+NURBS Parameters
+Evaluated NURBS
+Sampled Gaussians
+Fig. 1: We optimize NURBS parameters (control points Pi , weights wi , knot intervals
+τi ) by sampling isotropic Gaussians along the curve and interior. These primitives
+are rendered via a differentiable tile-based rasterizer, enabling end-to-end optimization
+through image and geometric losses.
+support B-splines but do not introduce rational weights or non-uniform knots.
+Consequently, differentiable renderers cannot faithfully represent shapes that
+CAD systems natively support—such as exact circular arcs and conic profiles—
+and remain disconnected from the NURBS-based modeling infrastructure that
+industry has relied on for decades.
+We address this with NURBS Splatting. We adaptively sample isotropic
+Gaussians along NURBS curves—positions, widths, and analytical derivatives
+computed via the Cox–de Boor recursion—and inside closed regions via an SDFmodulated grid, then composite them through a tile-based Gaussian splatting
+rasterizer. The pipeline is fully differentiable: image-space losses drive gradients
+back to control points, rational weights, knot intervals, stroke widths, colors,
+and opacities. For filled closed curves, grid-step annealing progressively refines
+spatial resolution during optimization.
+The main contributions of this work are as follows:
+– The first differentiable renderer for NURBS curves in 2D image space, supporting joint optimization of rational weights and non-uniform knot vectors.
+– A Gaussian splatting formulation for both open stroke contours and filled
+closed regions, combining adaptive arc-length sampling with SDF-modulated
+interior fill and grid-step annealing.
+– Evaluation on calligraphy reconstruction, image vectorization, and neural
+image abstraction showing that rational splines improve both quality and
+speed over polynomial baselines.
+2
+Related Work
+2.1
+Differentiable Rendering
+DiffVG [23] pioneered differentiable rasterization, which enabled gradient-based
+optimization of vector images. A variety of applications have since been explored,
+including image vectorization [4,14,28,40], text-guided drawing synthesis [12,37],
+text-to-SVG generation via score distillation [18, 44, 45], semantic typography
+[17], collage generation [41], animation generation [52], sketch refinement [35],
+etc. However, the DiffVG approach relies on per-pixel intersection tests, making
+high-resolution optimization slow and memory-intensive.
+NURBS Splatting
+3
+An alternative line of work uses Gaussian primitives for rendering. In 3D
+vision, Kerbl et al . [21] propose 3D Gaussian Splatting for novel-view synthesis.
+BézierGS [29] and SplineGS [48] further extend this paradigm with spline-based
+motion modeling. The idea has since been adapted to 2D domains. Huang et
+al . [15] introduce 2D Gaussian Splatting for radiance-field reconstruction, collapsing the 3D volume into oriented 2D Gaussian disks to enforce view-consistent
+geometry. Likewise, Zhang et al . [53] present GaussianImage, encoding images
+directly as collections of 2D Gaussians to achieve ultra-fast rendering and compression. In the context of vector graphics, Liu et al . [25] propose Bézier Splatting, which samples 2D Gaussian kernels along Bézier curves and rasterizes via
+a Gaussian-splatting pipeline. These works demonstrate that Gaussian splatting
+is a powerful differentiable primitive for both 3D scene reconstruction and 2D
+vector graphics rendering.
+Notably, all the aforementioned methods employ either polynomial Bézier
+curves or polynomial B-splines as the underlying geometric primitives. To the
+best of our knowledge, no existing differentiable rendering framework supports
+rational spline primitives for 2D image-space optimization.
+2.2
+Non-Uniform Rational B-Splines
+NURBS [32] generalize polynomial B-splines by introducing rational weights
+and non-uniform knot vectors, allowing exact representation of conic sections,
+analytic curves, and flexible free-form shapes. They have become the de facto
+industry standard for modeling curves and surfaces in CAD and graphics. While
+classical algorithms like the Cox–de Boor recursion [6, 7] evaluate and sample
+points for rendering, many modern professional tools employ GPU curve rasterization based on the implicit form of rational Bézier curves obtained from NURBS
+via knot insertion [26]. Beyond geometric modeling, NURBS have found broader
+scientific impact through isogeometric analysis [16], which unifies CAD geometry and finite-element analysis by using NURBS basis functions directly as the
+computational basis.
+Recent work has begun to integrate NURBS into differentiable and learningbased pipelines. Deva Prasad et al . [8] introduce NURBS-Diff, a differentiable
+NURBS layer that provides forward and backward passes through the NURBS
+evaluation process, enabling tasks such as curve and surface fitting, surface offsetting, etc. Worchel and Alexa [42] propose differentiable rendering of parametric
+geometry, including B-spline surfaces, by directly deriving screen-space gradients
+for parametric primitives. Tojo et al . [36] optimize B-spline curves via differentiable rendering for fabricable 3D wire art. On the generative side, SplineGen [54]
+leverages a generative model to fit B-spline surfaces to unorganized point clouds,
+NeuroNURBS [9] learns compact NURBS surface representations for 3D solids,
+and BrepGen [46] employs diffusion models to generate B-rep CAD models whose
+faces are NURBS surfaces. Despite this growing interest, existing differentiable
+and generative NURBS methods predominantly target 3D geometry fitting or
+CAD reconstruction rather than image-based rendering.
+4
+3
+J. Qiu and S. Zhou
+Method
+Our pipeline is illustrated in Fig. 1. We first define NURBS curve primitives with
+learnable control points, rational weights, and knot vectors (Sec. 3.1). Isotropic
+Gaussians are then adaptively sampled along curve contours (Sec. 3.2) or within
+closed filled regions via an SDF-modulated grid (Sec. 3.3). These Gaussians
+are composited through a tile-based splatting rasterizer to produce a differentiable image (Sec. 3.4), and image-space losses drive gradients back to all curve
+parameters (Sec. 3.5). Although we focus on NURBS, our Gaussian sampling
+formulation is generic and readily extends to other parametric primitives.
+3.1
+NURBS Primitives
+Each curve in our system is a NURBS curve of degree p (order k=p+1) with
+n + 1 control points:
+\mathbf {C}(u) = \frac {\sum _{i=0}^{n} N_{i,p}(u)\, w_i \, \mathbf {P}_i}{\sum _{i=0}^{n} N_{i,p}(u)\, w_i}=\frac {\mathbf {S}(u)}{W(u)}, \quad u \in [u_0, u_m],
+(1)
+where {Pi ∈ R2 } are control points, {wi ∈ R+ } are rational weights, and
+{Ni,p (u)} are B-spline basis functions defined over a non-decreasing knot vector
+U = {u0 , u1 , . . . , um }. The basis functions Ni,p (u) are defined by the Cox–de
+Boor recursion [6, 7], which guarantees compact support and C p−1 continuity.
+The curve derivative, needed for arc-length estimation and regularization,
+follows by the quotient rule:
+\label {eq:curve_derivative} \mathbf {C}'(u) = \frac { W(u) \sum _{i=0}^{n} N'_{i,p}(u)\, w_i \, \mathbf {P}_i - \mathbf {S}(u) \sum _{i=0}^{n} N'_{i,p}(u)\, w_i }{W^2(u)},
+(2)
+′
+where the basis-function derivatives Ni,p
+are also obtainable via the Cox–de Boor
+recursion. The arc length used in Sec. 3.2 can be approximated by numerical
+quadrature:
+\label {eq:arc_length} L = \int _{u_p}^{u_{m-p}} \|\mathbf {C}'(u)\|_2 \, du \approx \sum _{j=1}^{N_L} \|\mathbf {C}'(u_j)\|_2 \, \mathrm {\Delta } u.
+(3)
+Rather than optimizing control points and knots directly, we leverage key
+k
+points {Ki }ni=1
+as the primary learnable parameters and derive control points
+and knot vectors from them.
+For open curves, the control points coincide with the key points, and the knot
+vector is clamped at both endpoints with multiplicity k. Only the nk − k + 1
+interior knot intervals {τj > 0} are stored as learnable parameters; the full knot
+vector is reconstructed by prepending and appending p zero-intervals (to enforce
+endpoint multiplicity) and taking a cumulative sum, which inherently guarantees
+monotonicity.
+For closed curves, the control polygon is formed by cyclically wrapping the
+last ⌈p/2⌉ and first ⌊p/2⌋ key points to produce nk + p control points. We store
+NURBS Splatting
+5
+nk core knot intervals; the periodic knot vector is then built by wrapping the
+last p core intervals before and the first p after, followed by a cumulative sum.
+Each curve also carries an RGB color c ∈ [0, 1]3 and an opacity o ∈ [0, 1].
+We extend the control points to R3 by appending a third coordinate encoding
+local stroke width, so evaluating C(u) simultaneously yields position and width
+at parameter u.
+3.2
+Gaussian Sampling on Contours
+Given the knot vector U and control points derived from the key points (Sec. 3.1),
+we adaptively place isotropic Gaussians along each curve with density proportional to arc length.
+We first approximate the arc length L via Eq. (3) using NL uniformly spaced
+parameter samples, then set the number of Gaussians as M = ⌈δc ·L⌉, where δc is
+a user-specified contour density. The M parameter values {uj }M
+j=1 are distributed
+uniformly within the valid knot domain [up , um−p ].
+To evaluate each sample efficiently, we exploit the compact support of Bspline basis functions: at parameter value uj , only the p+1 basis functions whose
+support contains uj are non-zero. The Gaussian center is therefore computed via
+a span-local formulation:
+\boldsymbol {\mu }_j = \frac { \sum _{l=0}^{p} N_{i_j-p+l,p}(u_j)\, w_{i_j-p+l}\, \mathbf {P}_{i_j-p+l} }{ \sum _{l=0}^{p} N_{i_j-p+l,p}(u_j)\, w_{i_j-p+l} },
+(4)
+where ij is the knot span index satisfying uij ≤ uj < uij +1 . This reduces evaluation cost from O(M n) to O(M p) per curve. The local stroke width sj is read
+from the third coordinate of C(uj ); higher-order analytical derivatives, used for
+regularization (Sec. 3.5), are obtained through the same local recursion.
+Each sample is assigned an isotropic Gaussian whose scale depends solely on
+the local stroke width:
+\sigma _{j,x} = \sigma _{j,y} = s_j / \rho , \qquad \theta _j = 0, \qquad o_j = o,
+(5)
+where ρ is a global scale ratio controlling overlap between neighboring Gaussians
+and o is the curve-level opacity from Sec. 3.1. Unlike Bézier Splatting [25], which
+aligns anisotropic Gaussians to the curve tangent, this isotropic formulation
+eliminates rotation estimation and avoids visual artifacts—blurry edges at large
+stroke widths and spikes at high-curvature regions. Because M scales with arc
+length, Gaussian centers remain sufficiently dense that circular kernels provide
+smooth, uniform coverage without directional alignment.
+For open curves, we replicate the first and last Gaussian centers κ times,
+where κ is a fixed number of times proportional to δc , ensuring opaque, welldefined endpoints without additional parameters.
+3.3
+Gaussian Sampling in Regions
+For closed curves marked as filled, we replace contour Gaussians with a dense set
+of interior Gaussian primitives whose opacity is modulated by a differentiable
+signed distance field (SDF).
+6
+J. Qiu and S. Zhou
+We first sample ⌈δb · L⌉ boundary points {bj } along the closed curve in pixel
+coordinates, where δb is a user-specified boundary density and L is the arc length
+from Sec. 3.2. These boundary points define the polyline against which the SDF
+is evaluated.
+Next, we compute the axis-aligned bounding box of the boundary with symmetric padding proportional to its extent, clipped to the canvas. A uniform 2D
+grid at step size h is placed inside this padded box, yielding Q = nx × ny query
+points {qj } in pixel coordinates. A larger h produces a coarser grid with fewer
+Gaussians, trading density for speed; we anneal h during optimization to accelerate early convergence while preserving final detail (Sec. 4.2).
+For each query point qj , we generate an isotropic Gaussian primitive:
+\boldsymbol {\mu }_j = \mathbf {q}_j, \qquad \theta _j = 0, \qquad \sigma _{j,x} = \sigma _{j,y} = \frac {\eta \cdot h}{\rho },
+(6)
+where η is a coverage factor (we use η=1.5) that ensures sufficient overlap between neighboring Gaussians, and ρ is the global scale ratio from Sec. 3.2. The
+base opacity is the product of the curve-level opacity o and a sigmoid soft mask
+derived from the SDF:
+o_j = o \cdot \mathrm {sigmoid}\!\left (\frac {\gamma }{h} \cdot \mathrm {sdf}(\mathbf {q}_j)\right ),
+(7)
+where γ controls the sharpness of the boundary transition, and sdf(qj ) returns
+positive values inside the region and negative values outside, computed with
+respect to the boundary polyline {bj }. Detailed algorithmic steps for computing
+the SDF are provided in the supplementary material.
+Each Gaussian inherits its color from the parent curve. This pixel-space SDF
+formulation scales to large filled shapes while remaining fully differentiable with
+respect to boundary point positions.
+3.4
+Differentiable Splatting Rendering
+Once Gaussian primitives are sampled from NURBS curves, we rasterize them
+using the tile-based Gaussian splatting rasterizer of GaussianImage [53].
+The rasterizer sorts the 2D Gaussians by their stacking order (depth) and
+composites them front-to-back for each pixel. The rendered color I(xn ) at pixel
+xn is obtained by alpha blending the contributions of overlapping Gaussians:
+\mathcal {I}(\mathbf {x}_n) = \sum _{i \in \mathcal {N}} \mathbf {c}_i \, \alpha _i(\mathbf {x}_n) \prod _{j=1}^{i-1} \bigl (1-\alpha _j(\mathbf {x}_n)\bigr ),
+(8)
+where N is the depth-ordered set of Gaussians covering pixel xn , ci is the color
+of the i-th Gaussian, and αi (xn ) is its opacity at that location. Any residual
+transmittance is composited against a predefined background color.
+Since all sampled Gaussians are isotropic with σi,x = σi,y =: σi and θi =
+0 (Secs. 3.2 and 3.3), the covariance reduces to Σ i = σi2 I and the per-pixel
+NURBS Splatting
+7
+Gaussian opacity simplifies to
+\alpha _i(\mathbf {x}_n) = o_i \exp \!\biggl (-\frac {\|\mathbf {x}_n - \boldsymbol {\mu }_i\|^2}{2\,\sigma _i^2}\biggr ),
+(9)
+where oi is the base opacity and µi is the Gaussian center. This formulation
+enables efficient backpropagation of gradients from the image loss through the
+Gaussian parameters to the NURBS control points and weights.
+3.5
+Optimization
+The overall objective combines an image-space reconstruction loss with geometric regularization:
+\mathcal {L} = \mathcal {L}_{\text {img}}(\mathcal {I}, \mathcal {I}^{\ast }) + \lambda _{\text {geo}} \, \mathcal {L}_{\text {geo}},
+(10)
+where I and I ∗ are the rendered and target images, Limg is an image-based loss,
+and Lgeo enforces regularity on the underlying NURBS curves. Gradients propagate from pixels through the Gaussian parameters to NURBS control points
+and weights via the differentiable pipeline above; the specific choice of Limg is
+application-dependent. Below we describe the two regularization terms shared
+across all applications; additional task-specific losses are introduced in Sec. 4.
+Derivative Loss, the squared magnitude of the r-th derivative of a parametric
+curve, is a classical smoothing energy in curve fairing [33]: the second derivative
+relates to curvature, and the third captures its rate of change. We penalize this
+energy averaged over the parameter domain:
+\mathcal {L}_{\text {deriv}}^r(\mathbf {C}) = \frac {1}{u_{\max } - u_{\min }}\int _{u_{\min }}^{u_{\max }} \left \| \frac {d^r \mathbf {C}(u)}{d u^r} \right \|_2^2 \, du,
+(11)
+where r denotes the derivative order. We evaluate this integral using analytical
+derivatives obtained from Eq. (2) during contour sampling (Sec. 3.2), avoiding
+the numerical errors that arise from finite-difference approximations. The total
+loss averages Lrderiv over all curves; following Berio et al . [2], we set r = 3.
+Bounding Box Loss prevents curves from drifting outside the target region.
+We penalize points that violate the image bounding box:
+\mathcal {L}_{\text {bbox}}=\sum _i \varphi (\mathbf {b}_{\min } - \mathbf {P}_i) + \varphi (\mathbf {P}_i - \mathbf {b}_{\max }),
+(12)
+where bmin and bmax are the bounding-box corners, Pi ranges over all sampled
+curve positions, and φ is a soft penalty (ReLU or Softplus) that activates only
+when a point lies outside the permitted region.
+4
+Applications
+We demonstrate the versatility of NURBS Splatting on three representative
+vector-graphics tasks: calligraphy reconstruction (Sec. 4.1), layer-wise image vectorization (Sec. 4.2), and neural image abstraction (Sec. 4.3).
+8
+4.1
+J. Qiu and S. Zhou
+Calligraphy Reconstruction
+In calligraphy, stroke trajectories and their varying widths encode both style and
+meaning. Recovering these as editable vector strokes from raster images is useful
+for font design, digital archiving, and robotic handwriting reproduction.
+Most calligraphy generation methods produce raster images via GANs [43,
+49] or diffusion models [24], discarding stroke structure entirely. Methods that
+output vector outlines as Bézier sequences [34, 38, 39] describe glyphs as closed
+regions, not as strokes with varying width. Classical stroke extraction [5,27] and
+the segmentation method of StrokeStyles [1] do model individual strokes but
+lack end-to-end differentiable optimization in image space.
+Our framework represents each stroke as a NURBS curve with a per-controlpoint width channel. For initialization, we use the line vectorization method of
+Magne and Sorkine-Hornung [30]: a medial axis is extracted from the binarized
+image via the Voronoi diagram method [3], a CNN classifies intersections to
+produce ordered sample points along the axis, and NURBS curves are fit to
+these points with constant initial width.
+The curves are then optimized end-to-end against the raster target with MSE
+loss and geometric regularization:
+\label {eq:calligraphy-loss} \mathcal {L} = \lambda _{\text {MSE}} \mathcal {L}_{\text {MSE}} + \lambda _{\text {deriv}} \mathcal {L}_{\text {deriv}}^3 + \lambda _{\text {bbox}} \mathcal {L}_{\text {bbox}}.
+(13)
+Control point positions, NURBS weights, knot intervals, and per-control-point
+widths are updated jointly, recovering both stroke trajectories and thickness
+variations. Results are presented in Section 5.2.
+4.2
+Layer-wise Image Vectorization
+Ma et al . [28] propose LIVE, a layer-wise vectorization approach that greedily
+adds closed Bézier paths one at a time, each initialized at the region of highest
+reconstruction error and optimized via DiffVG [23]. A distance-weighted loss
+modulates per-pixel gradients based on proximity to the newly added shape
+boundary, concentrating optimization effort where it matters most. We adapt
+LIVE to our framework, replacing the DiffVG rendering backend with NURBS
+Splatting while introducing a grid-step annealing strategy for filled shapes.
+To accelerate convergence without sacrificing fidelity, we anneal the fill grid
+step h from a coarse value (hmax =4) to a fine one (hmin =1) using a cosine
+schedule between iteration fractions tb =0.1 and te =0.8:
+h(t) = h_{\max } + (h_{\min } - h_{\max })\,\frac {1 + \cos (\pi (1 - \phi ))}{2}, \quad t/T \in (t_b, t_e),
+(14)
+where ϕ = (t/T − tb )/(te − tb ) and h is clamped outside the range. The coarse
+grid reduces the number of primitives in the early stages, thereby stabilizing
+large-scale deformations (Fig. 2).
+The overall loss for each round combines a pixel-wise reconstruction term
+with geometric regularization:
+\mathcal {L} = \mathcal {L}_{\text {img}} + \lambda _{\text {deriv}} \mathcal {L}_{\text {deriv}}^3 + \lambda _{\text {xing}} \mathcal {L}_{\text {xing}},
+(15)
+NURBS Splatting
+Iter 0
+Iter 50
+Iter 100
+Iter 150
+Iter 200
+Iter 250
+9
+Iter 299
+Fig. 2: Visualization of grid-step annealing. The grid resolution progressively increases,
+allowing coarse-to-fine optimization.
+Fig. 3: Single-stroke area-filling results. Letters are stylized with different style images;
+digits use coverage loss only (no stylization).
+where Limg is the distance-weighted MSE loss, L3deriv is the third-order derivative
+smoothing loss, and Lxing is a self-crossing penalty adapted from LIVE that penalizes control-point configurations whose consecutive segments reverse winding
+direction. Results are presented in Section 5.3.
+4.3
+Neural Image Abstraction
+Berio et al . [2] apply long smoothing B-splines to generate abstracted vector
+images from raster inputs. Because NURBS generalize polynomial B-splines,
+these applications transfer naturally to our framework while gaining rationalweight flexibility. We demonstrate two representative tasks: single-stroke area
+filling and diffusion-guided image abstraction.
+The Single-Stroke Area Filling task aims to produce a single NURBS curve
+that fills a colored shape given its bitmap image. We initialize a long NURBS
+curve from a TSP route [19] and optimize it with an MSE coverage loss between
+the rendered and target images. Lowering the target opacity reduces curve density in the interior. To enable semantic stylization, we add a term Lstyle based on
+the patch-wise directional CLIP loss of Kwon and Ye [22], which aligns encoded
+features of the rendered curves with those of a reference style image. Geometric
+regularization via L3deriv and Lbbox enforces smoothness and prevents controlpoint drift. Representative results appear in Fig. 3.
+For the Single-Stroke Image Abstraction task, we couple our renderer with
+a diffusion-based Score Distillation Sampling (SDS) pipeline. Following Berio
+et al . [2], the pipeline uses ControlNet [50] with Canny edge detection and IPAdapter [47], guided by the text prompt “A black and white ink drawing.” The
+SDS gradient with respect to NURBS parameters ψ is
+\nabla _{\boldsymbol {\psi }} \mathcal {L}_{\text {SDS}}(\boldsymbol {\psi }) = \mathbb {E}_{t} \left [ w(t) \left (\hat {\boldsymbol \epsilon }(x_t, t, y) - \boldsymbol \epsilon \right ) \frac {\partial g(\boldsymbol {\psi })}{\partial \boldsymbol {\psi }}\right ],
+(16)
+10
+J. Qiu and S. Zhou
+Input
+249.07s
+175.67s
+252.76s
+184.56s
+213.36s
+Berio et al. [2]
+201.84s
+Ours
+217.14s
+Berio et al. [2]
+176.93s
+Ours
+Fig. 4: Image abstraction with semantic stylization. Style images are inset in the bottom corners of the inputs. Our method matches stylization quality while running 1.27×
+faster (single NVIDIA RTX 4090, 512×512, 300 iterations).
+where ϵ̂(xt , t, y) is the predicted denoising direction of the frozen diffusion model
+for a latent xt at time step t, ϵ is the sampled noise, and w(t) is a weighting
+function dependent on t. The final loss combines SDS with geometric regularization L3deriv and Lbbox . As shown in Fig. 4, our method achieves 1.27× faster
+optimization than Berio et al . [2] at comparable stylization quality—even though
+differentiable rendering is not the primary bottleneck of the SDS pipeline and
+NURBS evaluation is more complex than polynomial B-spline evaluation.
+5
+Experiments
+We implement our NURBS Splatting framework in PyTorch. We show general
+comparisons on rendering efficiency, quality, and editability in Sec. 5.1; experiments for our calligraphy reconstruction application are detailed in Sec. 5.2;
+experiments for LIVE are in Sec. 5.3. All experiments are run on a single
+NVIDIA RTX 4090. Code and dataset are available at https://github.com/
+AnicoderAndy/nurbs-splatting.
+5.1
+Efficiency, Quality, and Editability
+Our method shows improved efficiency compared to Berio et al . [2] when the
+number of control points scales, as it avoids matrix multiplication to convert
+the splines. However, the superiority is not seen when rendering with simple
+geometric primitives, comparing our method with Berio et al . [2] and Bézier
+Splatting (BS) [25]. Details are provided in the supplementary material.
+As for rendering quality, we qualitatively compare our method with BS which
+uses anisotropic Gaussian sampling on three diagnostic cases (Fig. 5). For thick
+NURBS Splatting
+BS
+Ours
+BS
+Ours
+BS
+11
+Ours
+Fig. 5: Rendering comparison on three diagnostic cases. Bézier Splatting (BS) shows
+blurred edges on thick strokes (left pair), spike artifacts near high-curvature regions
+(middle pair, local crop), and spikes at filled-region junctions (right pair). Bézier splines
+are equivalently converted to NURBS for fair geometric comparison.
+Table 1: Quantitative comparison of calligraphy reconstruction quality and runtime.
+The baseline is Berio et al . [2]. Best and second-best results are highlighted in bold
+and underline, respectively.
+Method
+MSE↓ PSNR↑ SSIM↑ Hausdorff↓
+Baseline
+Ours
+Ours (δc =30)
+0.0057 24.72 0.9813
+0.0038 26.32 0.9793
+0.0039 26.24 0.9824
+Ours w/o weights 0.0046
+Ours w/o knots
+0.0040
+Ours w/o w & k 0.0042
+25.63
+26.07
+25.92
+0.9777
+0.9789
+0.9785
+F1↑
+Opt. Time (s)
+15.26
+10.69
+11.07
+0.9642
+0.9741
+0.9743
+10.65
+8.73
+9.34
+11.70
+10.98
+11.34
+0.9701
+0.9731
+0.9721
+8.98
+5.63
+5.12
+strokes, BS exhibits severely blurred edges. In the high-curvature case, BS produces spike artifacts due to the discontinuity and instability of Gaussian rotation
+evaluation via atan2. In the filled-region case, BS generates spikes at region junctions caused by incorrect curve interpolation at the shared endpoints of paired
+Bézier curves. Our method resolves all three artifacts through purely isotropic
+Gaussian sampling, consistently yielding sharp boundaries and smooth geometry.
+A major advantage of vector graphics is their editability. The control points
+of optimized NURBS curves from our method provide a clean structure allowing
+manual adjustment. We present a visualization in the supplementary material.
+5.2
+Calligraphy Reconstruction
+We construct a calligraphy benchmark of 192 characters: all 92 Japanese Kana
+and the first 100 characters from General Standard Chinese Characters [31].
+Each character is rasterized from existing fonts [11, 20] to 512×512 images.
+Since, to the best of our knowledge, no existing method performs strokelevel reconstruction of calligraphy, we implement a baseline based on Berio et
+al . [2], which optimizes uniform B-splines. Both methods use identical initialization via medial-axis extraction [30]. We evaluate reconstruction quality using
+standard pixel-level measures (MSE, PSNR, SSIM) and geometry-aware metrics
+(symmetric Hausdorff distance and F1 score on binarized stroke masks).
+12
+J. Qiu and S. Zhou
+GT
+Baseline
+Ours
+GT
+Baseline
+Ours
+Fig. 6: Qualitative comparison of calligraphy reconstruction. Top row: Japanese characters. Bottom row: Chinese characters. Our method better preserves stroke trajectories
+and width variations compared to the baseline [2].
+Table 1 shows the quantitative results averaged over 191 characters. At the
+contour density δc =18, our full method reduces MSE by 33%, improves PSNR by
++1.6 dB, and lowers the Hausdorff distance by 30%, while running 1.2× faster.
+The speed gain stems from the avoidance of the matrix multiplication required
+to convert B-splines into Bézier curves. Gains are most pronounced on Japanese
+Kana (+2.10 dB PSNR), where frequent sharp bends and hooks benefit from nonuniform knot spacing that concentrates basis-function support in high-curvature
+regions. Figure 6 presents qualitative comparisons on representative characters,
+showing that our method more faithfully preserves stroke trajectories and width
+variation than the baseline.
+The default configuration drops slightly in SSIM because isotropic Gaussians
+produce softer boundary transitions than the analytic edge rendering of DiffVG.
+Increasing the sampling density to δc =30 sharpens these boundaries, recovering
+the best SSIM (0.9824) and achieving the highest F1 (0.9743) at only a modest
+increase in optimization time.
+Comparing only uniform polynomial B-splines—the Baseline against our
+“w/o w & k” variant—isolates the effect of the rendering backend: splatting
+yields a 2.1× speedup (5.12 s vs. 10.65 s) while simultaneously improving PSNR
+by +1.2 dB and Hausdorff by 26%. This confirms that the Gaussian rasterization
+pipeline is consistently beneficial even without NURBS-specific parameters.
+Ablation studies (bottom three rows of Tab. 1) isolate the individual contributions of learnable weights and knots. Removing rational weights (“w/o
+weights”) incurs the largest single-component degradation (−0.69 dB PSNR,
++1.01 px Hausdorff relative to the full model), indicating that per-control-point
+weighting is especially valuable for modulating local curvature. Removing knots
+(“w/o knots”) has a smaller effect on reconstruction quality but provides the
+largest time saving (5.63 s). Jointly dropping both (“w/o w & k”) still comfortably outperforms the baseline on all metrics except SSIM, while reducing
+optimization time to roughly half that of the baseline (5.12 s)—offering a strong
+NURBS Splatting
+13
+Table 2: Quantitative comparison on layer-wise image vectorization (100 Noto Emoji
+images at 480×480). Best and second-best results are in bold and underline.
+Method
+MSE↓
+SSIM↑
+LPIPS↓
+Time (s)↓
+Baseline
+Ours
+Ours w/o step
+Ours w/o w & k
+0.0025
+0.0017
+0.0015
+0.0018
+0.9633
+0.9803
+0.9839
+0.9795
+0.0576
+0.0339
+0.0334
+0.0348
+590
+410
+527
+354
+quality–speed trade-off for applications where rational parameterization is unnecessary. Importantly, the benefits of weights and knots are complementary: the
+full model improves +0.25 dB over the next-best single-ablation variant (“w/o
+knots”), confirming that rational weights and non-uniform knots address distinct
+geometric limitations.
+5.3
+Layer-wise Image Vectorization
+Since the original dataset used in LIVE [28] is not publicly available, we construct a new evaluation benchmark using Noto Emoji v1 [13], following their
+protocol. We select 100 representative emojis and rasterize them at a resolution
+of 480×480. We compare our method against the original LIVE [28], which uses
+DiffVG [23] as its rendering backend.
+In each round, both methods initialize a new closed path with 12 key points
+as a circle and optimize for 300 iterations; 10 rounds are run in total, yielding 10
+paths per image. We report standard reconstruction metrics: MSE, SSIM, and
+LPIPS [51], and measure the total optimization time per image.
+Table 2 summarizes quantitative results averaged over 100 emojis. All our
+variants substantially outperform the LIVE baseline on every metric while also
+requiring less optimization time.
+Our full method with the grid-step annealing strategy reduces MSE by 32%,
+improves SSIM by +0.017, and lowers LPIPS by 41%, while achieving a 1.4×
+speedup. Disabling step annealing (“w/o step”) further improves reconstruction
+quality at the cost of longer optimization (527 s), yet remains 11% faster than
+LIVE, indicating that our optimization framework remains computationally efficient even without the annealing strategy. Removing rational weights and knots
+(“w/o w & k”) still outperforms the baseline on all metrics—reducing MSE by
+28%, improving SSIM by +0.016, and lowering LPIPS by 40%—while achieving
+the fastest optimization at 354 s (1.7× speedup), albeit with a smaller quality
+margin than the full model.
+Qualitatively, Fig. 7 demonstrates that our method is more robust to complex topologies, particularly for thin interleaving structures in facial expressions,
+where the DiffVG-based LIVE baseline often exhibits artifacts such as missing
+details and geometric distortions.
+14
+J. Qiu and S. Zhou
+GT
+Baseline
+Ours
+GT
+Baseline
+Ours
+Fig. 7: Qualitative comparison of vector reconstruction. Our method faithfully reconstructs complex facial expressions and fine details where the DiffVG-based baseline
+tends to fail.
+6
+Conclusion
+We presented NURBS Splatting, the first differentiable rendering framework
+capable of optimizing rational B-splines in 2D image space. By representing
+curves and filled regions as continuous Gaussian fields, our method unifies vector
+graphics rendering with gradient-based optimization, allowing joint refinement
+of control points, rational weights, and non-uniform knot vectors. Experiments
+on calligraphy reconstruction and image vectorization demonstrate consistent
+improvements over polynomial baselines, achieving higher reconstruction fidelity.
+Crucially, the ability to optimize rational weights introduces geometric flexibility
+beyond prior differentiable vector graphics methods, narrowing the gap between
+learning-based reconstruction and CAD-standard representations.
+Our current region-filling strategy relies on a heuristic SDF-based grid, which
+provides limited advantages over scanline methods for regular geometries. In addition, although splatting enables efficient rendering, the number of Gaussian
+primitives can grow with curve complexity, potentially increasing memory usage for highly detailed illustrations compared to implicit representations. Future
+work will focus on extending the framework to 3D NURBS surfaces to support
+native CAD geometry, developing a more efficient analytic region-filling algorithm, and exploring integration with generative models to synthesize editable
+vector designs directly from text or images.
+Acknowledgements
+We thank the anonymous reviewers for their valuable feedback and suggestions.
+This work was funded by the National Natural Science Foundation of China,
+No. 62076090; the Huxiang Youth Talent Support Program, Hunan Province,
+China, No. 2020RC3014; and the Natural Science Foundation of Hunan Province,
+China, No. 2022JJ30173.
+NURBS Splatting
+15
+References
+1. Berio, D., Leymarie, F.F., Asente, P., Echevarria, J.: StrokeStyles: Stroke-based
+Segmentation and Stylization of Fonts. ACM Trans. Graph. 41(3), 28:1–28:21 (Apr
+2022). https://doi.org/10.1145/3505246
+2. Berio, D., Stroh, M., Calinon, S., Fol Leymarie, F., Deussen, O., Shamir, A.: Neural
+Image Abstraction using Long Smoothing B-Splines. ACM Trans. Graph. 44(6),
+225:1–225:11 (Dec 2025). https://doi.org/10.1145/3763345
+3. Brandt, J.W., Algazi, V.R.: Continuous skeleton computation by Voronoi diagram.
+CVGIP: Image Understanding 55(3), 329–338 (May 1992). https://doi.org/10.
+1016/1049-9660(92)90030-7
+4. Chakraborty, S., Batra, V., Phogat, A., Jain, V., Ranawat, J.S., Dhingra, S.,
+Wampler, K., Fisher, M., Lukáč, M.: Image Vectorization via Gradient Reconstruction. Comput. Graph. Forum 44(2) (May 2025). https://doi.org/10.1111/
+cgf.70055
+5. Chen, X., Lian, Z., Tang, Y., Xiao, J.: An automatic stroke extraction method using
+manifold learning. In: Peytavie, A., Bosch, C. (eds.) Proceedings of the European
+Association for Computer Graphics: Short Papers. pp. 65–68. EG ’17, Eurographics
+Association, Goslar, DEU (Apr 2017). https://doi.org/10.2312/egsh.20171016
+6. Cox, M.G.: The Numerical Evaluation of B-Splines. IMA Journal of Applied Mathematics 10(2), 134–149 (Oct 1972). https://doi.org/10.1093/imamat/10.2.134
+7. de Boor, C.: On calculating with B-splines. Journal of Approximation Theory 6(1),
+50–62 (Jul 1972). https://doi.org/10.1016/0021-9045(72)90080-9
+8. Deva Prasad, A., Balu, A., Shah, H., Sarkar, S., Hegde, C., Krishnamurthy, A.:
+NURBS-Diff: A Differentiable Programming Module for NURBS. Computer-Aided
+Design 146, 103199 (May 2022). https://doi.org/10.1016/j.cad.2022.103199
+9. Fan, J., Gholami, B., Bäck, T., Wang, H.: NeuroNURBS: Learning Efficient Surface
+Representations for 3D Solids (Nov 2024). https://doi.org/10.48550/arXiv.
+2411.10848
+10. Farin, G.: Curves and Surfaces for CAGD: A Practical Guide. Morgan Kaufmann
+(Sep 2007). https://doi.org/10.1016/B978-1-55860-737-8.X5000-5
+11. Founder Type Foundry: Founder Ouyang Xun Regular Script Font.
+https://www.foundertype.com/index.php/FontInfo/index/id/6583.html, accessed:
+2026-02-28
+12. Frans, K., Soros, L., Witkowski, O.: CLIPDraw: Exploring text-to-drawing synthesis through language-image encoders. In: Koyejo, S., Mohamed, S., Agarwal,
+A., Belgrave, D., Cho, K., Oh, A. (eds.) Advances in Neural Information Processing Systems. vol. 35, pp. 5207–5218. Curran Associates, Inc. (2022). https:
+//doi.org/10.52202/068431-0376
+13. Google Fonts: Noto Emoji. https://github.com/googlefonts/noto-emoji, accessed:
+2026-03-05
+14. Hirschorn, O., Jevnisek, A., Avidan, S.: Optimize & Reduce: A Top-Down Approach for Image Vectorization. Proceedings of the AAAI Conference on Artificial Intelligence 38(3), 2148–2156 (Mar 2024). https://doi.org/10.1609/aaai.
+v38i3.27987
+15. Huang, B., Yu, Z., Chen, A., Geiger, A., Gao, S.: 2D Gaussian Splatting for Geometrically Accurate Radiance Fields. In: ACM SIGGRAPH 2024 Conference Papers. pp. 1–11. SIGGRAPH ’24, Association for Computing Machinery, New York,
+NY, USA (Jul 2024). https://doi.org/10.1145/3641519.3657428
+16
+J. Qiu and S. Zhou
+16. Hughes, T.J.R., Cottrell, J.A., Bazilevs, Y.: Isogeometric analysis: CAD, finite
+elements, NURBS, exact geometry and mesh refinement. Computer Methods in
+Applied Mechanics and Engineering 194(39), 4135–4195 (Oct 2005). https://
+doi.org/10.1016/j.cma.2004.10.008
+17. Iluz, S., Vinker, Y., Hertz, A., Berio, D., Cohen-Or, D., Shamir, A.: Word-AsImage for Semantic Typography. ACM Trans. Graph. 42(4), 151:1–151:11 (Jul
+2023). https://doi.org/10.1145/3592123
+18. Jain, A., Xie, A., Abbeel, P.: VectorFusion: Text-to-SVG by Abstracting PixelBased Diffusion Models. In: 2023 IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR). pp. 1911–1920 (Jun 2023). https://doi.org/10.
+1109/CVPR52729.2023.00190
+19. Kaplan, C.S., Bosch, R.: TSP Art. In: Sarhangi, R., Moody, R.V. (eds.) Renaissance Banff: Mathematics, Music, Art, Culture. pp. 301–308. Bridges Conference,
+Southwestern College, Winfield, Kansas (2005)
+20. Keikan
+&
+Midnight
+Garden:
+Yoppa
+Fude
+Font.
+https://karuk.booth.pm/items/2985842, accessed: 2026-02-28
+21. Kerbl, B., Kopanas, G., Leimkuehler, T., Drettakis, G.: 3D Gaussian Splatting
+for Real-Time Radiance Field Rendering. ACM Trans. Graph. 42(4), 139:1–139:14
+(Aug 2023). https://doi.org/10.1145/3592433
+22. Kwon, G., Ye, J.C.: CLIPstyler: Image Style Transfer with a Single Text Condition.
+In: 2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR). pp. 18041–18050 (Jun 2022). https://doi.org/10.1109/CVPR52688.
+2022.01753
+23. Li, T.M., Lukáč, M., Gharbi, M., Ragan-Kelley, J.: Differentiable vector graphics
+rasterization for editing and learning. ACM Trans. Graph. 39(6), 193:1–193:15
+(Dec 2020). https://doi.org/10.1145/3414685.3417871
+24. Liao, Q., Xia, G., Wang, Z.: Calliffusion: Chinese Calligraphy Generation and Style
+Transfer with Diffusion Modeling (May 2023). https://doi.org/10.48550/arXiv.
+2305.19124
+25. Liu, X., Zhou, C., Zhao, N., Huang, S.: Bézier splatting for fast and differentiable vector graphics rendering. In: Belgrave, D., Zhang, C., Lin, H., Pascanu,
+R., Koniusz, P., Ghassemi, M., Chen, N. (eds.) Advances in Neural Information
+Processing Systems. vol. 38, pp. 51528–51559. Curran Associates, Inc. (2025).
+https://doi.org/10.52202/085713-1717
+26. Loop, C., Blinn, J.: Resolution independent curve rendering using programmable
+graphics hardware. ACM Trans. Graph. 24(3), 1000–1009 (Jul 2005). https://
+doi.org/10.1145/1073204.1073303
+27. Ma, X., Pan, Z., Zhang, F.: The automatic generation of chinese outline font based
+on stroke extraction. Journal of Computer Science and Technology 10(1), 42–52
+(1995). https://doi.org/10.1007/BF02939521
+28. Ma, X., Zhou, Y., Xu, X., Sun, B., Filev, V., Orlov, N., Fu, Y., Shi, H.: Towards
+Layer-wise Image Vectorization. In: 2022 IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR). pp. 16293–16302. IEEE, New Orleans,
+LA, USA (Jun 2022). https://doi.org/10.1109/CVPR52688.2022.01583
+29. Ma, Z., Jiang, J., Chen, Y., Zhang, L.: BézierGS: Dynamic Urban Scene Reconstruction with Bézier Curve Gaussian Splatting. In: 2025 IEEE/CVF International Conference on Computer Vision (ICCV). pp. 25519–25528 (Oct 2025).
+https://doi.org/10.1109/ICCV51701.2025.02367
+30. Magne, T., Sorkine-Hornung, O.: Single-Line Drawing Vectorization. Comput.
+Graph. Forum 44(7), e70228 (2025). https://doi.org/10.1111/cgf.70228
+NURBS Splatting
+17
+31. Ministry of Education of the People’s Republic of China: Table of General Standard
+Chinese Characters (2013)
+32. Piegl, L., Tiller, W.: The NURBS Book (2nd Ed.). Springer-Verlag, Berlin, Heidelberg (1997)
+33. Pottmann, H.: Smooth curves under tension. Computer-Aided Design 22(4), 241–
+245 (May 1990). https://doi.org/10.1016/0010-4485(90)90053-F
+34. Thamizharasan, V., Liu, D., Agarwal, S., Fisher, M., Gharbi, M., Wang, O., Jacobson, A., Kalogerakis, E.: VecFusion: Vector Font Generation with Diffusion.
+In: 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR). pp. 7943–7952 (Jun 2024). https://doi.org/10.1109/CVPR52733.2024.
+00759
+35. Tian, Y., Liu, M., Jiang, H., Tu, Y., Su, D.: SketchRefiner: Text-Guided Sketch
+Refinement Through Latent Diffusion Models. IEEE Transactions on Visualization
+and Computer Graphics 31(12), 10711–10722 (Dec 2025). https://doi.org/10.
+1109/TVCG.2025.3613388
+36. Tojo, K., Shamir, A., Bickel, B., Umetani, N.: Fabricable 3D Wire Art. In: ACM
+SIGGRAPH 2024 Conference Papers. pp. 1–11. SIGGRAPH ’24, Association for
+Computing Machinery, New York, NY, USA (Jul 2024). https://doi.org/10.
+1145/3641519.3657453
+37. Vinker, Y., Pajouheshgar, E., Bo, J.Y., Bachmann, R.C., Bermano, A.H., CohenOr, D., Zamir, A., Shamir, A.: CLIPasso: Semantically-aware object sketching.
+ACM Trans. Graph. 41(4), 86:1–86:11 (Jul 2022). https://doi.org/10.1145/
+3528223.3530068
+38. Wang, Y., Lian, Z.: DeepVecFont: Synthesizing high-quality vector fonts via dualmodality learning. ACM Trans. Graph. 40(6), 265:1–265:15 (Dec 2021). https:
+//doi.org/10.1145/3478513.3480488
+39. Wang, Y., Wang, Y., Yu, L., Zhu, Y., Lian, Z.: DeepVecFont-v2: Exploiting Transformers to Synthesize Vector Fonts with Higher Quality. In: 2023 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR). pp. 18320–18328
+(Jun 2023). https://doi.org/10.1109/CVPR52729.2023.01757
+40. Wang, Z., Huang, J., Sun, Z., Gong, Y., Cohen-Or, D., Lu, M.: Layered Image
+Vectorization via Semantic Simplification. In: 2025 IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR). pp. 7728–7738 (Jun 2025).
+https://doi.org/10.1109/CVPR52734.2025.00724
+41. Wang, Z., Lu, M.: Image-Space Collage and Packing with Differentiable Rendering.
+In: Proceedings of the Special Interest Group on Computer Graphics and Interactive Techniques Conference Conference Papers. Association for Computing Machinery, New York, NY, USA (2025). https://doi.org/10.1145/3721238.3730690
+42. Worchel, M., Alexa, M.: Differentiable Rendering of Parametric Geometry. ACM
+Trans. Graph. 42(6), 232:1–232:18 (Dec 2023). https://doi.org/10.1145/
+3618387
+43. Wu, S.J., Yang, C.Y., Hsu, J.Y.j.: CalliGAN: Style and Structure-aware Chinese
+Calligraphy Character Generator (May 2020). https://doi.org/10.48550/arXiv.
+2005.12500
+44. Xing, X., Wang, C., Zhou, H., Zhang, J., Yu, Q., Xu, D.: DiffSketcher: Text Guided
+Vector Sketch Synthesis through Latent Diffusion Models. In: Oh, A., Naumann,
+T., Globerson, A., Saenko, K., Hardt, M., Levine, S. (eds.) Advances in Neural
+Information Processing Systems. vol. 36, pp. 15869–15889. Curran Associates, Inc.
+(2023). https://doi.org/10.52202/075280-0698
+18
+J. Qiu and S. Zhou
+45. Xing, X., Zhou, H., Wang, C., Zhang, J., Xu, D., Yu, Q.: SVGDreamer: Text
+Guided SVG Generation with Diffusion Model. In: 2024 IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR). pp. 4546–4555 (Jun 2024).
+https://doi.org/10.1109/CVPR52733.2024.00435
+46. Xu, X., Lambourne, J., Jayaraman, P., Wang, Z., Willis, K., Furukawa, Y.: BrepGen: A B-rep Generative Diffusion Model with Structured Latent Geometry. ACM
+Trans. Graph. 43(4), 119:1–119:14 (Jul 2024). https://doi.org/10.1145/3658129
+47. Ye, H., Zhang, J., Liu, S., Han, X., Yang, W.: IP-Adapter: Text Compatible Image
+Prompt Adapter for Text-to-Image Diffusion Models (Aug 2023). https://doi.
+org/10.48550/arXiv.2308.06721
+48. Yoon, J., Han, S., Oh, J., Lee, M.: SplineGS: Learning Smooth Trajectories in
+Gaussian Splatting for Dynamic Scene Reconstruction. In: The Thirteenth International Conference on Learning Representations (2025), https://openreview.
+net/forum?id=tMG6btjBfd, accessed: 2026-06-26
+49. Zeng, J., Chen, Q., Liu, Y., Wang, M., Yao, Y.: StrokeGAN: Reducing Mode
+Collapse in Chinese Font Generation via Stroke Encoding. Proceedings of the AAAI
+Conference on Artificial Intelligence 35(4), 3270–3277 (May 2021). https://doi.
+org/10.1609/aaai.v35i4.16438
+50. Zhang, L., Rao, A., Agrawala, M.: Adding Conditional Control to Text-to-Image
+Diffusion Models. In: 2023 IEEE/CVF International Conference on Computer Vision (ICCV). pp. 3813–3824 (Oct 2023). https://doi.org/10.1109/ICCV51070.
+2023.00355
+51. Zhang, R., Isola, P., Efros, A.A., Shechtman, E., Wang, O.: The Unreasonable
+Effectiveness of Deep Features as a Perceptual Metric. In: 2018 IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 586–595 (Jun 2018).
+https://doi.org/10.1109/CVPR.2018.00068
+52. Zhang, X., Liu, Z., Liu, J., Li, X., Qi, M.: SketchDancing: A Text-Driven Framework for Vector Sketch Animation Generation. In: Proceedings of the 3rd International Workshop on Multimodal and Responsible Affective Computing. pp. 128–
+136. MRAC ’25, Association for Computing Machinery, New York, NY, USA (Oct
+2025). https://doi.org/10.1145/3746270.3760235
+53. Zhang, X., Ge, X., Xu, T., He, D., Wang, Y., Qin, H., Lu, G., Geng, J., Zhang, J.:
+GaussianImage: 1000 FPS Image Representation and Compression by 2D Gaussian Splatting. In: Leonardis, A., Ricci, E., Roth, S., Russakovsky, O., Sattler, T.,
+Varol, G. (eds.) Computer Vision – ECCV 2024. pp. 327–345. Springer Nature
+Switzerland, Cham (2025). https://doi.org/10.1007/978-3-031-72673-6_18
+54. Zou, Q., Zhu, L., Wu, J., Yang, Z.: SplineGen: Approximating unorganized points
+through generative AI. Computer-Aided Design 178, 103809 (Jan 2025). https:
+//doi.org/10.1016/j.cad.2024.103809
+NURBS Splatting
+19
+Supplementary Materials
+S1
+Code and Data Availability
+Code will be made available upon publication at https://github.com/AnicoderAndy/nurbs-splatting.
+All fonts used to construct our dataset are freely available online. However, due to licensing restrictions,
+some of these fonts cannot be redistributed directly. Instead, we will release the source code used for dataset
+construction.
+S2
+Signed Distance Field Evaluation
+The unsigned distance is the minimum Euclidean distance from q to the nearest boundary segment:
+d(\mathbf {q}) = \min _{i} \left \| \mathbf {q} - \mathrm {proj}_{\overline {\mathbf {b}_i \mathbf {b}_{i+1}}}(\mathbf {q}) \right \|_2,
+(S1)
+where projbi bi+1 (q) denotes the closest point on segment bi bi+1 to q, computed by clamping the projection
+parameter to [0, 1]. The sign is determined by the winding number wn(q), which is detached from the
+computation graph to prevent gradient flow through the discrete sign:
+\mathrm {wn}(\mathbf {q}) = \frac {1}{2\pi } \sum _{i=1}^{M} \angle \left ( \mathbf {b}_i - \mathbf {q},\; \mathbf {b}_{i+1} - \mathbf {q} \right ),\\ \mathrm {sdf}(\mathbf {q}) = \sgn \!\big (\mathrm {wn}(\mathbf {q})\big ) \cdot d(\mathbf {q}),
+(S3)
+where sgn (wn) = +1 when wn > 0.5 (inside) and −1 otherwise. This formulation yields positive values inside
+the region and negative values outside, and the smooth unsigned distance provides well-behaved gradients
+near the boundary.
+S3
+Symbols and Settings
+We utilize numerous mathematical symbols throughout the main paper and supplementary material. For
+clarity, we summarize their definitions and default settings in Tab. S1. In this table, “Calligraphy Reconstruction” is abbreviated as “Cal.”, and “Layer-wise Image Vectorization” is abbreviated as “LIVE”.
+Table S1: Symbol definitions and default settings
+Symbol Description
+Default
+NURBS Curve Parameters
+p
+Degree of NURBS curve
+k=p+1 Order of NURBS curve
+n+1
+Number of control points
+nk
+Number of key points
+Pi
+Control points ∈ R2
+wi
+Rational weight per control point
+τj
+Learnable knot interval
+U
+Knot vector
+c
+Curve RGB color ∈ [0, 1]3
+o
+Curve opacity ∈ [0, 1]
+5 (Cal.), 3 (LIVE)
+6 (Cal.), 4 (LIVE)
+Per-curve
+Per-curve; 12 (LIVE init)
+Learnable
+Init. 1.0; clamped to [0.01, 10]
+Init. uniform; clamped to [0, 2]
+Derived from {τj }
+[0, 0, 0] (Cal.)
+1.0
+Gaussian Contour Sampling
+L
+Arc length of the curve
+Computed
+20
+J. Qiu and S. Zhou
+Symbol Description
+NL
+M
+δc
+ρ
+σj
+sj
+κ
+S4
+Default
+Samples for arc-length quadrature
+3 × max(W, H)1
+Number of contour Gaussians
+⌈δc · L⌉
+Contour density2 (samples per px arc length) 10
+Global Gaussian scale ratio
+2.0
+Isotropic Gaussian std. dev.
+sj /ρ
+Local stroke width at parameter uj
+Learnable per control point
+Replication count for endpoint Gaussians
+4
+Interior Fill (Closed Curves)
+δb
+Boundary sample density
+h
+Fill grid step (pixels)
+hmax , hmin Grid-step annealing bounds
+tb , te
+Annealing begin/end fractions
+η
+Coverage factor for fill Gaussians
+γ
+SDF sigmoid sharpness
+Q=nx ×ny Number of interior grid points
+0.5
+1.0
+4.0, 1.0 (LIVE)
+0.1, 0.8 (LIVE)
+1.5
+5.0
+Computed from h
+Differentiable Splatting
+Σi
+Gaussian covariance matrix
+αi (xn ) Per-pixel Gaussian opacity
+I(xn ) Rendered image at pixel xn
+I∗
+Target image
+σi2 I (isotropic)
+Eq. 9 in Sec. 3.4
+—
+—
+SDF Evaluation (Supplementary)
+q
+Query point for SDF evaluation
+bi
+Boundary sample points
+d(q)
+Unsigned distance to boundary
+wn(q) Winding number
+sdf(q) Signed distance field value
+Grid point
+From curve sampling
+Computed
+Computed; detached
+sgn(wn) · d(q)
+Loss Functions and Optimization
+r
+Derivative order for smoothing energy
+Lrderiv r-th order derivative loss
+Lbbox Bounding-box penalty
+Lxing
+Self-crossing penalty
+λMSE MSE loss weight
+λderiv Derivative loss weight
+λbbox Bounding-box loss weight
+λxing
+Crossing loss weight
+3
+—
+—
+—
+1.0 (Cal.)
+1.0 (Cal.)
+5.0 (Cal.)
+0.01 (LIVE)
+Experiments
+We provide additional details on the efficiency test (Sec. S4.1), the editability demonstration (Sec. S4.2),
+the experimental setup and results for our calligraphy reconstruction experiment (Sec. S4.3) and the LIVE
+experiment (Sec. S4.4), as well as further discussion on our comparison with Bézier Splatting (Sec. S4.5).
+S4.1
+Efficiency Test
+We conduct an efficiency test to evaluate the computational performance of our method compared to the
+baseline. Tab. S2 shows the comparison of forward/backward passes and the total time for each method under
+1
+2
+W, H are the width and height of the image.
+δc = 10 is sufficient to capture curve details and reduce blurry edges in our tests. However, we use δc = 18 for
+better quality in calligraphy reconstruction.
+NURBS Splatting
+Backward
+Ours
+Ours
+B.
+B.
+128 7.136 1452 2.495 18.20
+512 7.020 1488 3.313 100.6
+1024 6.943 1426 3.657 223.2
+4096 10.67 1574 8.767 2538
+10 1
+100
+Time (s)
+Forward
+Time (s)
+Res.
+Berio et al.
+Ours
+21
+10 1
+Berio et al.
+Ours
+10 2
+10 2
+26
+29
+212
+26
+Number of Points
+29
+212
+Number of Points
+Fig. S1: Runtime analysis. The table reports the forward and backward execution time (ms) for optimizing a single
+curve with 10,240 key points under different rendering resolutions. The two plots show the forward (middle) and
+backward (right) execution time at 512 × 512 while varying the number of control points (N ).
+Table S2: Speed comparison of forward and backward passes, as well as total time (in ms), under different rendering
+resolutions. All methods render 16 curves. For a fair comparison with the official implementation of Bézier Splatting,
+all curves are cubic (degree 3); open curves use 10 control points, whereas closed curves use 6. Best results are
+highlighted in red and second-best in yellow .
+Ours
+Res.
+Berio et al . [2]
+Bézier Splatting [25]
+Fwd Bwd Total Fwd Bwd Total Fwd Bwd
+Total
+Closed Curves
+128×128 97.42 43.15 140.57 24.69 17.30 41.99 28.27 4.29
+256×256 96.35 38.17 134.52 26.05 25.42 51.47 27.81 5.61
+512×512 96.24 39.00 135.24 38.84 62.15 100.99 27.65 4.22
+1024×1024 95.73 43.52 139.25 45.13 204.49 249.62 27.93 5.56
+32.56
+33.42
+31.87
+33.49
+Open Curves
+128×128 72.69 32.57 105.26 25.23 19.33 44.56 4.53 3.64
+256×256 72.36 32.23 104.59 25.25 27.34 52.59 4.28 3.31
+512×512 74.00 32.33 106.33 40.79 60.38 101.17 4.19 3.22
+1024×1024 74.23 33.92 108.15 41.81 193.41 235.22 4.76 4.53
+8.17
+7.59
+7.41
+9.29
+different resolution settings. It is shown that our method is slightly slower than the baseline methods at lower
+resolutions. Based on the profiling results, we hypothesize that the performance gap primarily stems from
+the evaluation of NURBS, which appears to dominate the overall runtime. Compared with methods based
+on Bézier curves or uniform B-splines, NURBS evaluation is inherently more computationally demanding
+because of its higher computational complexity, making it a likely performance bottleneck. Additionally,
+Bézier Splatting exhibits superior scalability as the number of geometric primitives increases. This advantage
+may be attributed to its representation of all curves as a single fixed-shape tensor, which enables efficient
+batched GPU computation but requires all curves to share the same geometric structure, such as an identical
+number of control points.
+Nevertheless, our method demonstrates promising scalability as the number of control points increases,
+outperforming Berio et al . [2] in terms of efficiency. As shown in Fig. S1, our method exhibits a more
+favorable runtime trend as the number of control points increases. We attribute this advantage to the fact
+that Berio et al . first convert B-spline segments into Bézier curves through Bézier extraction (implemented
+as a sequence of local matrix operations) before evaluation, introducing additional preprocessing overhead.
+In contrast, our method operates directly on the original NURBS representation, eliminating the need for
+such conversions. Consequently, although Bézier extraction has linear complexity with respect to the number
+22
+J. Qiu and S. Zhou
+Fig. S2: Control points of NURBS curves optimized for calligraphy reconstruction.
+of control points, its additional preprocessing cost accumulates as curve complexity increases. By avoiding
+this conversion entirely, our method scales more gracefully with the number of control points.
+S4.2
+Editability Demonstration
+Fig. S2 shows the control points of the NURBS curves optimized for the calligraphy reconstruction task.
+Since mainstream vector graphics editors generally do not support NURBS editing, providing an editing
+demonstration in existing software is impractical. Instead, we visualize the optimized control-point layout,
+which remains compact and interpretable for manual adjustment.
+S4.3
+Calligraphy Reconstruction
+We extract initial curves from the input calligraphy images using SLDVec [30]. Because SLDVec generates
+a dense set of nSLD points per stroke, we downsample each stroke to max(30, 0.01nSLD ) control points to
+improve optimization efficiency. The dataset consists of 192 characters, one of which failed the extraction
+process and was therefore excluded from all experiments.
+Both our method and the Berio et al . [2] baseline optimize degree p=5 curves for 150 Adam iterations.
+We apply cosine learning-rate annealing, decaying the rate to 10% of its initial value. For our method, we set
+the learning rates to 1.5 for control-point positions, 0.2 for stroke widths, and 0.1 for both rational weights
+and knot intervals. We clamp the rational weights to [0.01, 10] and knot intervals to [0, 2]. The baseline uses
+the same position learning rate but a slightly higher width learning rate (0.3), and it does not optimize
+rational weights or knots.
+We weight our objective function components with λMSE =1, λderiv =1, and λbbox =5. The baseline uses
+the DiffVG rasterizer [23] with independently tuned loss weights (λMSE =20, λderiv =3, λbbox =10).
+We evaluate reconstruction quality using pixel-level and stroke-geometry metrics. To measure pixel-level
+fidelity, we compute MSE, PSNR, and SSIM between the rendered output and the ground-truth raster image.
+To evaluate stroke geometry, we binarize the rendered and target images at an intensity threshold of 0.5 to
+extract stroke masks. We then calculate the Hausdorff distance between the edge pixels of these masks, as
+well as the F1 score.
+Tab. S3 reports the detailed quantitative results for this application.
+S4.4
+Layer-wise Image Vectorization
+In our Layer-wise Image Vectorization (LIVE) experiments, we replace the cubic Bézier paths from the
+original LIVE framework [28] with our closed, filled NURBS curves. For the LIVE baseline, we retain all of
+its default hyperparameter settings with the sole exception of the initial circle radius, which we set to 16
+pixels. Our method also uses an initial circle radius of 16 pixels, with our specific hyperparameter settings
+and optimization schedule detailed below.
+Each of our curves is initialized as a circle using 12 key points and a degree of p=3. For the optimization
+process, we train each path addition for 300 Adam iterations. We apply learning rate decay with a ratio of
+0.4 over the course of the iterations. The initial learning rates are set to 2.0 for control-point positions, and
+NURBS Splatting
+23
+Table S3: Quantitative comparison of calligraphy reconstruction quality and runtime. “Ext.” is the time for SLDVec [30] extraction. The baseline is Berio et al . [2]. “Proto. w/o w & k” is our implemented prototype using the same
+contour-sampling strategy as Bézier Splatting [25], which is mentioned in Sec. S4.5. Best results are highlighted in
+red and second-best in yellow .
+Quality Metrics
+Dataset
+Method
+All
+Baseline
+0.0057
+Ours
+0.0038
+Ours (δc =30)
+0.0039
+Ours w/o knot
+0.0040
+Ours w/o weight 0.0046
+Ours w/o w & k 0.0042
+Proto. w/o w & k 0.0168
+24.72
+26.32
+26.24
+26.07
+25.63
+25.92
+18.75
+0.9813
+0.9793
+0.9824
+0.9789
+0.9777
+0.9785
+0.9060
+15.26
+10.69
+11.07
+10.98
+11.70
+11.34
+25.70
+0.9642
+10.65
+0.9741
+8.73
+0.9743
+9.34
+0.9731 13.8 5.63
+0.9701
+8.98
+0.9721
+5.12
+0.8914
+3.94
+Baseline
+0.0075
+Ours
+0.0052
+Ours (δc =30)
+0.0053
+Japanese Ours w/o knot
+0.0055
+Ours w/o weight 0.0064
+Ours w/o w & k 0.0057
+Proto. w/o w & k 0.0226
+23.21
+25.31
+25.28
+24.93
+24.45
+24.84
+17.18
+0.9765
+0.9748
+0.9786
+0.9740
+0.9726
+0.9736
+0.8879
+17.66
+13.93
+14.47
+14.15
+15.45
+14.57
+29.65
+0.9618
+10.66
+0.9712
+7.92
+0.9712
+8.56
+0.9695 13.9 5.27
+0.9657
+8.49
+4.78
+0.9685
+3.81
+0.8697
+Baseline
+0.0040
+Ours
+0.0026
+Ours (δc =30)
+0.0026
+Ours w/o knot
+0.0026
+Ours w/o weight 0.0029
+Ours w/o w & k 0.0027
+Proto. w/o w & k 0.0113
+26.13
+27.26
+27.13
+27.13
+26.72
+26.92
+20.21
+0.9859
+0.9835
+0.9859
+0.9835
+0.9825
+0.9831
+0.9228
+13.03
+7.67
+7.92
+8.03
+8.21
+8.35
+22.03
+0.9665
+10.64
+0.9768
+9.48
+0.9773
+10.06
+0.9764 13.7 5.96
+0.9741
+9.44
+5.44
+0.9755
+0.9115
+4.05
+Chinese
+MSE↓ PSNR↑ SSIM↑ Hausdorff↓
+Runtime (s)
+F1↑
+Ext.
+Opt.
+0.01 for colors, rational weights, knot intervals, and opacities. In addition to the standard reconstruction
+loss, our objective function incorporates a self-crossing penalty formulated in the original LIVE method with
+weight λxing =0.01. Note that the third-order derivative smoothing loss is not activated in this experiment
+because the curve degree is p=3.
+To accelerate the differentiable filling process while preserving fine boundary details, we employ grid-step
+annealing. Within each 300-iteration round, the fill grid step h is cosine-annealed from hmax =4.0 to hmin =1.0
+between 10% and 80% of the iterations (i.e., tb =0.1 and te =0.8).
+Discussion on Performance. Our method achieves both higher efficiency and better reconstruction quality
+than the LIVE baseline. Readers may notice an apparent inconsistency: the results in Sec. S4.1 indicate
+that the Berio et al . baseline (based on DiffVG [23]) is faster than our method, whereas in this experiment
+our approach outperforms the baseline (also based on DiffVG) in both speed and reconstruction quality.
+We believe that two factors contribute to this difference. (a) We employ a customized udf_weight loss
+computation tailored to our framework. Unlike the LIVE baseline, which evaluates the SDF on the CPU,
+our implementation performs this computation on the GPU, resulting in substantially higher efficiency. (b)
+Our step grid annealing strategy partially alleviates the excessive Gaussian generation caused by region
+filling, thereby improving both optimization efficiency and reconstruction performance.
+S4.5
+Discussion on Bézier Splatting
+Bézier Splatting (BS) [25] demonstrates excellent efficiency for vector graphic reconstruction and, to the
+best of our knowledge, remains the current state-of-the-art method in terms of computational performance.
+Nevertheless, its representation is less flexible than ours in several aspects. First, it focuses on vectorization
+tasks and is temporarily not well-suited for other applications. Second, its paired Bézier representation
+24
+J. Qiu and S. Zhou
+Target
+BS Proto.
+Ours
+Target
+BS Proto.
+Ours
+Fig. S3: Qualitative comparison on calligraphy reconstruction against an early prototype utilizing the anisotropic
+Gaussian contour-sampling strategy of Bézier Splatting (BS Proto.). Both BS Proto. and Ours disable weights and
+knots optimization for this comparison. The top row displays Japanese samples, while the bottom row displays Chinese
+examples.
+requires each filled region to consist of pairs of curves. Boundaries with an odd number of segments (e.g., a
+triangle) therefore require an additional dummy point to complete the pairing, introducing an unnecessary
+degree of freedom that may adversely affect gradient-based optimization. Third, as discussed in Sec. S4.1,
+BS requires all curves in a scene to share the same geometric configuration, such as the number of control
+points, whereas our method allows heterogeneous curve representations within a single scene.
+We have included a quantitative comparison of computational performance between our method and BS
+in Sec. S4.1, as well as a qualitative comparison of rendering quality in Sec. 5.1 of the main paper. However,
+we did not include quantitative comparisons on downstream tasks. The reasons are explained below.
+Calligraphy reconstruction. The publicly released BS codebase requires all Bézier curves in a scene to share
+a fixed number of control points. Our calligraphy benchmark, however, contains strokes extracted via SLDVec [30] with varying numbers of control points per stroke, reflecting the inherent complexity differences
+among strokes within a single character. This constraint makes it infeasible to run BS on our dataset without substantial modification of its optimization pipeline. Moreover, BS operates on cubic Bézier curves only
+and does not support B-splines, varying stroke widths, or long splines—all of which are central to our calligraphy formulation. These architectural differences preclude an apples-to-apples comparison under identical
+experimental conditions.
+Nonetheless, to provide a partial reference, we note that an early prototype of our framework employed
+the same contour-sampling strategy as BS (i.e., anisotropic Gaussians aligned to curve tangents). We test
+this prototype on our calligraphy benchmark and the results are included in Tab. S3. As shown in the
+table, while the anisotropic sampling strategy achieves slightly faster optimization due to fewer splats, it
+significantly degrades reconstruction quality, with lower PSNR and higher Hausdorff distances compared to
+our final formulation. Furthermore, as shown in Fig. S3, the BS prototype completely fails to preserve the
+intricate stroke boundaries and varying widths of the original calligraphy.
+Layer-wise image vectorization. The BS authors have not released their code for the layer-wise vectorization
+application described in their paper. Consequently, no compatible implementation is available for us to
+evaluate on our LIVE benchmark.
+Summary. Our qualitative comparison in the main paper, alongside the quantitative evaluation against the
+BS prototype (BS Proto.) in this supplement, demonstrates clear rendering and reconstruction advantages
+of isotropic over anisotropic Gaussian sampling. While a direct quantitative comparison with the official BS
+codebase on downstream tasks is precluded by practical incompatibilities, our proxy experiment confirms
+that anisotropic sampling significantly degrades reconstruction fidelity. We emphasize that our primary
+comparisons—against Berio et al . [2] for calligraphy and against LIVE [28] for vectorization—are conducted
+under fair, controlled conditions with identical initialization and training iterations.

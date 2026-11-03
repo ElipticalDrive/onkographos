@@ -1,0 +1,208 @@
+A realtime 3D engine for Flutter. Contribute to bdero/flutter_scene development by creating an account on GitHub.
+
+Add Texture2D with mipmaps and a texture atlas, and fix image-based lighting by bdero · Pull Request #197 · bdero/flutter_scene · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+bdero
+commented
+Jul 2, 2026
+Copy link
+Copy Markdown
+Owner
+Adds mipmapped, anisotropically filtered textures and a grid texture atlas, and fixes several image-based lighting bugs found while building a textured voxel scene.
+The headline is Texture2D, a texture with generated mipmaps and trilinear plus anisotropic sampling, built from an asset, a ui.Image, or raw pixels. TextureContent chooses how each mip level is filtered (color in linear light, raw data, or renormalized normals) and TextureSampling controls the mip filter, maximum mip level, and anisotropy. The runtime glTF loader now routes its textures through Texture2D, so imported models are mipmapped.
+Breaking change. The material texture slots (baseColorTexture, metallicRoughnessTexture, normalTexture, emissiveTexture, occlusionTexture) now hold a TextureSource instead of a raw gpu.Texture. Assign a Texture2D or a RenderTexture directly, or wrap an existing gpu.Texture in GpuTextureSource.
+New API
+Texture2D, TextureSource, GpuTextureSource, TextureSampling, and TextureContent.
+TextureAtlas and generateSolidColorAtlasPixels for packing a uniform grid of tiles (voxel faces, sprite sheets, terrain); it resolves per-tile UVs and can build a PhysicallyBasedMaterial from its maps.
+Geometric specular antialiasing on PhysicallyBasedMaterial (specularAntiAliasingVariance, specularAntiAliasingThreshold), which widens roughness where the shading normal varies quickly to curb distant specular sparkle.
+Fixes
+The split-sum specular sampled the BRDF integration lookup with its roughness axis flipped, so rough surfaces got mirror-strength reflections and washed out. Fixed.
+Image-based lighting took the shadow-ambient gate and the specular Fresnel term from the normal-mapped normal, which darkened bumpy surfaces under a low sun and made grazing reflections blotchy. Both now use the geometric normal; the reflection direction still follows the normal map.
+normalScale was not applied to the perturbed normal.
+Screen-space reflections now fade out on rough surfaces. The camera depth prepass carries per-pixel roughness, so smooth surfaces still reflect while rough ones stop.
+Testing
+flutter analyze clean; 740 unit tests pass, with new coverage for mipmap generation, texture sampling, and the atlas.
+dart_style (master channel) formatting clean.
+pana 140/160; the two gaps are the pre-existing dartdoc tool crash and the WASM platform sub-check, neither introduced here (this branch adds no dependencies and no dart:io imports).
+Cross-backend smoke matrix (Metal/GLES/Vulkan/WebGL2) still to run before merge.
+bdero
+added 11 commits
+July 1, 2026 23:24
+Add a grid TextureAtlas helper
+…
+737661a
+```
+Add TextureAtlas, a uniform grid atlas that does the UV bookkeeping for
+tiled content (voxel block faces, sprite sheets). It resolves per-tile UV
+bounds (tileBounds) and within-tile coordinates (tileUv) over a
+columns x rows layout, insetting past an optional padding gutter so mip
+sampling does not bleed across tiles. It optionally holds the packed
+glTF metallic-roughness maps and wires them into a PhysicallyBasedMaterial
+via toMaterial. Exported from scene.dart. Pure-Dart UV math with tests.
+```
+Add a placeholder atlas pixel generator
+…
+8c0f9fa
+```
+Add generateSolidColorAtlasPixels, which builds RGBA pixels for a grid
+atlas laid out to match TextureAtlas (same columns/tileSize/padding),
+filling each cell including its padding gutter with a solid tile color so
+tiles never bleed. Serves as a stand-in texture pack for tests and for
+bringing up the atlas path before final art. Exported from scene.dart,
+with unit tests.
+```
+Add Texture2D with mipmaps, trilinear + anisotropic sampling
+…
+1dd16f8
+```
+Introduce a first-class texture surface for materials. Texture2D
+(fromAsset/fromImage/fromPixels) owns a mipmapped GPU texture and its
+sampler; it generates the mip chain on the CPU, downsampled correctly per
+TextureContent (sRGB color averaged in linear light, normals renormalized,
+data averaged directly), and defaults to trilinear + anisotropic sampling.
+Materials now take a TextureSource (implemented by Texture2D, RenderTexture,
+and GpuTextureSource for raw textures) instead of a raw gpu.Texture, so
+sampling state travels with each texture. The runtime importer routes model
+textures through Texture2D, so imported models get mipmaps too.
+
+Wire maxAnisotropy through the web shim + stub SamplerOptions (native
+flutter_gpu already has it), applied on WebGL2 via
+EXT_texture_filter_anisotropic. TextureSampling.maxMipmapLevels caps the
+chain (a texture atlas stops before tiles merge across the gutter).
+
+This is a breaking change to the material texture-slot API, taken while
+flutter_scene is pre-stability. Fixes normal-map and detail aliasing that
+single-mip textures caused. Design in notes; specular-AA is a follow-up.
+```
+Add geometric specular antialiasing to lit materials
+…
+b51d6f5
+```
+Estimate the shading normal's screen-space variance from its derivatives and widen the effective roughness, so a normal map or high-curvature surface stops turning sub-pixel normal detail into shimmering specular highlights. Exposed on PhysicallyBasedMaterial as specularAntiAliasingVariance and specularAntiAliasingThreshold, on by default, and applied to every lit material through the shared lighting uniforms. It only affects the specular lobe, so it does nothing on a fully rough surface (roughness already maxed).
+```
+Apply normalScale to the perturbed normal
+…
+33ce853
+```
+The standard shader packed normal_scale into the uniform but never used it, so PhysicallyBasedMaterial.normalScale had no effect. Attenuate the normal map's tangent-plane components by it (as glTF specifies), so a scale below 1 flattens the perturbation toward the geometric normal.
+```
+Clamp Texture2D mip count and anisotropy to valid ranges
+…
+ac90460
+```
+Two fixes to the sampler and mip setup so valid TextureSampling combinations no longer throw at texture creation or bind time:
+
+- Clamp the generated mip chain to the GPU's fullMipCount (floor(log2(min(w, h)))), which is below the canonical chain length for non-square textures. A full-chain request on such a texture previously overflowed the allowed range and threw.
+
+- Drop anisotropy to 1 when any of the min/mag/mip filters is nearest (for example a mipmaps-off UI texture), since anisotropic filtering requires all-linear filtering and is otherwise rejected.
+```
+Fix inverted roughness axis in the split-sum BRDF LUT lookup
+…
+46e3026
+```
+The image-based specular sampled the BRDF integration LUT with the roughness coordinate inverted, so a rough surface read the mirror end of the table and a smooth surface read the rough end. On matte surfaces at grazing angles this returned a near-total-reflection weight, so they reflected the environment at mirror strength and washed out to a flat, view-dependent sky reflection. Flip the roughness coordinate so the lookup matches the table's layout.
+```
+Gate the shadow-ambient term on the geometric normal
+…
+072678a
+```
+The sun-facing test that gates the cast shadow (and the shadow-ambient darkening derived from it) used the perturbed, normal-mapped normal. On a nearly sun-facing surface under a low sun, the normal map's relief could push the facing term across the terminator per texel, darkening the ambient in patches so a bumpy top face read as if it were in shade. Gate on the geometric normal instead, since whether a surface faces the sun is a property of its geometry, not its normal-map detail. This also keeps the back-face acne guard, which the geometric normal identifies correctly.
+```
+Use the geometric normal for image-based specular energy
+…
+66c72f0
+```
+The split-sum specular energy term (the Fresnel reflectance and the BRDF integration LUT) was evaluated with the normal-mapped view angle. Near grazing the Fresnel and the LUT rise steeply, so sub-pixel normal detail aliased that energy into a blotchy brightness discontinuity on normal-mapped surfaces viewed edge-on. Evaluate it from the geometric normal instead, since the reflected energy is a macro-surface quantity; the reflection direction still uses the perturbed normal, so surface relief in the reflection is preserved.
+```
+Fade screen-space reflections by per-pixel roughness
+…
+e9d3fa2
+```
+Screen-space reflections were applied at a uniform strength regardless of surface roughness, so a rough matte surface got the same sharp reflection as a smooth one. Carry per-pixel roughness through the camera depth prepass (the prepass samples the material's metallic-roughness map, and the normal is octahedral-packed into two channels to free one for roughness), then fade the reflection trace out as roughness rises so only smooth surfaces reflect and rough ones keep the image-based reflection. Adds a reflection-roughness accessor to Material (overridden by the physically based material).
+```
+Document Texture2D, the atlas, and the rendering fixes in the changelog
+6b6dc90
+bdero
+added
+the
+rendering
+Behavior when preparing or drawing geometry to the screen.
+label
+Jul 2, 2026
+argos-ci
+Bot
+commented
+Jul 2, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+The latest updates on your projects. Learn more about Argos notifications ↗︎
+Build
+Status
+Details
+Updated (UTC)
+android_gles (Inspect)
+👍 Changes approved
+1 changed
+Jul 2, 2026, 7:09 AM
+android_vulkan (Inspect)
+👍 Changes approved
+1 changed
+Jul 2, 2026, 7:08 AM
+linux (Inspect)
+👍 Changes approved
+1 changed
+Jul 2, 2026, 7:03 AM
+web (Inspect)
+👍 Changes approved
+1 changed
+Jul 2, 2026, 7:03 AM
+windows (Inspect)
+👍 Changes approved
+1 changed
+Jul 2, 2026, 7:05 AM
+Migrate the sprite and particle examples to TextureSource
+…
+fad7d20
+```
+The material and sprite texture slots now take a TextureSource, so wrap the raw sprite texture in GpuTextureSource in the examples that still passed a gpu.Texture.
+```
+bdero
+marked this pull request as ready for review
+July 2, 2026 07:35
+Hide details
+View details
+bdero
+merged commit 61f4969
+into
+master
+Jul 2, 2026
+13 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+bdero
+deleted the
+bdero/textureatlas
+branch
+July 2, 2026 07:38
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+rendering
+Behavior when preparing or drawing geometry to the screen.
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

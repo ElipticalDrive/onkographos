@@ -1,0 +1,1418 @@
+Tiny EXR image loader/saver library. Contribute to syoyo/tinyexr development by creating an account on GitHub.
+
+Texture toolchain: texcomp (BC/ETC/ASTC/UASTC/xbc7/uni), tir resize, texpipe, envmap by syoyo · Pull Request #254 · syoyo/tinyexr · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+syoyo
+commented
+Jul 4, 2026
+Copy link
+Copy Markdown
+Owner
+Adds a self-contained texture toolchain under tools/ (all pure C11 libraries
+with strict -Werror gates; CLIs do the I/O) plus the vendored Arm astcenc
+backend. 83 commits, ~95 files. Squares with the repo conventions
+(include/+src/+test/, _init() options, Makefile targets).
+What's included
+tools/texcomp — texture block compression
+BC1 / BC3 / BC5 / BC6H / BC7 encoders (BC7: all 8 modes, quick + exhaustive,
+decoder-driven windowed RDO, a public BC7 decoder; optional weighted-PCA
+endpoint seeding). ETC2 / EAC.
+ASTC LDR: all fourteen 2D footprints, 1–4 partitions, dual-plane,
+CEM 0/4/6/8/10/12, integer LSQ refinement, SSE2/SSE4.1/AVX2/NEON kernels
+bit-identical to scalar; the constrained UASTC LDR 19-mode subset.
+ASTC HDR (UASTC HDR 4x4): void-extent + CEM 7 / 11 (single / dual-plane /
+2-subset) + CEM 15 (HDR RGB + HDR alpha), all LSQ-refined.
+xbc7 (supercompressed BC7 = windowed RDO + zstd) and uni (universal
+transcodable intermediate → BC7/BC1/ASTC/ETC2, optional codebook + Zstd KTX2
+mip chain).
+Optional Arm astcenc backend (--encoder arm) — vendored at deps/astcenc
+(Apache-2.0) — also used as the conformance oracle for the ASTC gates.
+tools/resize (tir) — content-aware image resize
+Separable float32 resampling; box/triangle/b-spline/gaussian/mitchell/
+catmull-rom/lanczos2-3/kaiser filters; SSE2/SSE4.1/AVX2/NEON/SVE dispatch;
+HDR anti-ringing/hicomp, normal-map renormalize, mean-preserving heightmaps.
+tools/texpipe — resize-aware texture compression
+Ties tir + texcomp into content-aware mip chains → multi-mip DDS/KTX2; seam-free
+cube + octahedral fixup, Toksvig roughness, per-channel packing, array/volume.
+tools/envmap — IBL projections & lighting representations
+equirect/cube/octahedral resampling, real SH, spherical gaussians, split-sum IBL
+bake, and a PBR validation harness.
+Testing
+make tools-test runs every self-contained pure-C gate (texcomp/resize/texpipe/
+envmap); make tools-test-all adds the astcenc conformance cross-checks. All
+green, including the ASTC LDR/HDR decoders validated bit-exact against astcenc.
+Licensing
+Our code under tools/ is Apache-2.0 (tir is BSD-3-Clause); third-party use is
+credited in each tool's NOTICE.md/README.md and file headers — Arm astcenc
+(Apache-2.0), bcdec (MIT), Basis Universal concepts (Apache-2.0), zstd (BSD),
+stb_image (public domain), and the published algorithms (Karis, Toksvig,
+octahedral survey, SH, spherical gaussians).
+🤖 Generated with Claude Code
+syoyo
+and others
+added 30 commits
+July 2, 2026 09:48
+texcomp: ASTC reference decoder, PSNR harness, conformance + quality …
+…
+e086baa
+```
+…fixes
+
+Adds a self-contained reference ASTC LDR block decoder
+(tools/texcomp/test/astc_ref_decode.h): ISE decode, spec C.2.18 bilinear
+weight infill, partition hash, CEM 0/4/6/8/10/12 decode including the
+endpoint-swap + blue-contract rule. Validated against Arm astcenc-native
+(55-99 dB agreement, i.e. within 1 LSB interpolation rounding).
+
+The decoder exposed and this commit fixes three encoder bugs:
+- CEM 8/12 endpoint pairs could be emitted with sum(lo) > sum(hi); a
+  conformant decoder then swaps + blue-contracts, corrupting the block.
+  Pairs are now emitted in ascending quantized-sum order with exact
+  weight mirroring (weight unquant tables are symmetric).
+- Dual-plane weights were emitted concatenated per plane; the spec
+  requires per-texel interleaving.
+- Partition/dual paths returned unconditionally, overriding better
+  single-partition encodings (e.g. 9.6 dB garbage on two-cluster content
+  that the single path encodes exactly). All paths now compete on
+  reconstruction error; the partition path fits the shared weight grid
+  against per-partition endpoint lines and reports the true quantized
+  reconstruction SSE (verified to match the reference decoder exactly).
+
+New tests: ISE decode(encode(x)) == x property test over all quant
+levels, weight-unquant symmetry, encode->reference-decode round trips
+with per-configuration PSNR floors, solid-image exactness. Partition
+structural tests now use content shaped by actual partition patterns.
+New tools: bench/texcomp_psnr.c + `make texcomp-astc-psnr` quality table.
+
+astc quality (128x128, PSNR dB, reference decoder):
+image      block      fast   medium   normal
+gradient   4x4       43.74    43.98    43.97
+gradient   6x6       43.00    43.37    43.58
+clusters   6x6       99.00    99.00    99.00
+clusters   8x8       21.28    54.15    54.15
+photo      8x8       32.29    32.34    31.54
+alpharamp  6x6       36.65    31.18    30.55
+
+Known bias (next: quantization-aware single-partition scoring + LSQ
+endpoint refinement): medium/normal can still lose to fast on smooth
+content because the single-partition model ignores color quantization.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: heap-allocate the ASTC encode context
+…
+fc01d43
+```
+tc_astc_encode_context carries several MB of partition/decimation caches
+(part2/3/4_cache alone are ~2.2 MB); allocating it on the stack in
+tc_astc_compress_rgba8 overflows common non-glibc thread stacks. Allocate
+once per image call and return TC_ERROR_OUT_OF_MEMORY on failure. The
+texcomp unit tests now run with LeakSanitizer enabled.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: ASTC least-squares endpoint refinement + quantization-aware …
+…
+01b7d51
+```
+…scoring
+
+Single-partition pass 2 now scores every candidate with the endpoints as
+they will actually decode (round-tripped through the color quantizer with
+the emitted CEM's semantics, including base+scale reconstruction) and
+tries replacing the axis-extreme endpoints with the integer least-squares
+solution for the fitted weights (2x2 normal equations, exact rounded
+int64 division; worst-case term < 2^47). The dual-plane path gets the
+same treatment per plane. This makes all encoding paths compete on
+honest reconstruction error, fixing the medium/normal-below-fast
+inversions on smooth content.
+
+astc quality progression at 128x128 (medium quality, PSNR dB):
+             before   after
+gradient 8x8  40.42   40.74   (normal: 31.98 -> 41.01)
+photo    6x6  34.63   39.77
+photo    8x8  32.34   36.79
+alpharamp 6x6 31.18   40.36
+alpharamp 8x8 29.81   37.57
+clusters 12x12 19.98  21.54
+
+Quality levels are now monotonic (fast <= medium <= normal) across the
+whole corpus. PSNR floors raised accordingly; NOTICE.md refreshed.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: per-partition least-squares endpoint refit for ASTC partitions
+…
+b55b1d6
+```
+After the shared weight grid is fitted, each partition's endpoints are
+re-solved by least squares over that partition's texels and accepted
+individually when the quantization-aware reconstruction error improves
+(CEM 8/12 orientation guarded: a refit that would decode blue-contracted
+is rejected since shared weights cannot mirror per partition). The final
+partition error now comes from the same evaluator used for acceptance.
+
+Modest corpus gains on top of the M0 per-partition weight fit, e.g.
+noise 4x4 normal 16.21 -> 16.66 dB, photo 8x8 medium 36.79 -> 36.85 dB.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: dedup ASTC partition cache, linear-pass partition scan
+…
+53a9c66
+```
+Canonicalize (first-appearance relabel) each partition seed's texel map
+and drop duplicates keeping the lowest seed - identical partitionings
+encode identically, and keeping the lowest index preserves the previous
+first-wins selection exactly (byte-identical output, verified via
+unchanged PSNR corpus). The best-partition scan now runs one linear
+texel pass over partition_of_texel instead of gathering through a
+per-partition texel table, which lets the 576-byte gather table per
+cache entry be deleted (~1.7 MB off the encode context).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: scalar restructure of the ASTC weight-fit hot path (SIMD prep)
+…
+7996079
+```
+- Per-block axis extremes are computed once (5 axes) instead of a
+  144-texel scan inside every tc_astc_try_endpoint_axis call (~440
+  calls/block at normal quality); pass 2 also skips channel axes whose
+  extreme texel pair matches the luma axis (identical fit).
+- The per-texel projection division is replaced by a fixed-point
+  reciprocal multiply; the scalar form is now exactly what the SIMD
+  kernels will reproduce (rounding drift <= 1 weight step, corpus PSNR
+  unchanged).
+- Weight grids matching the block footprint (`direct`) skip the
+  scatter/normalize decimation machinery in the axis fit, partition fit
+  and weight infill.
+- The decimation cache is indexed O(1) by grid size (was a linear scan
+  per lookup, ~1.6M lookups per 256x256 image) and color quant selection
+  reads a precomputed [value_count][bit_budget] table in the hot loops.
+
+Quality-2 throughput 0.09 -> 0.12 MPix/s, fast 1.80 -> 2.05 MPix/s on
+the 512x512 bench; PSNR corpus identical.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: hoist ASTC projections out of candidate loops + SIMD kernels
+…
+f56c6db
+```
+The per-texel ideal weights depend only on the endpoint line, never on a
+candidate's weight grid or quantization, so they are now computed once
+per block per axis (pass 1 previously re-projected ~245 times per block,
+the partition and dual paths once per candidate) and each candidate only
+quantizes them onto its grid and scores the reconstruction.
+
+The two dominant loop shapes get SIMD kernels with scalar fallbacks:
+- project: per-texel dot product onto the endpoint line + fixed-point
+  reciprocal weight (SSE2 pmaddwd/pmuludq, NEON vmull)
+- recon+SSE: interpolate/diff/square-accumulate in 16-bit lanes, in a
+  uniform-endpoint form (single-partition scoring) and a per-texel
+  endpoint form (partition fit and scoring)
+All kernels are bit-exact with the scalar forms; a new parity test
+compares whole compressed images byte-for-byte across every available
+backend, and the PSNR corpus is unchanged.
+
+512x512 bench: normal 0.12 -> 0.20 MPix/s, medium 0.23 -> 0.33, fast
+2.05 -> 3.37 (2.2-2.5x over the quality-phase baseline).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: ASTC candidate ranking/caps + 2-partition estimation prefilter
+…
+12c2ae5
+```
+Closes most of the single-thread speed gap to Arm astcenc at matched
+quality tiers (1024x1024 photo-like, 6x6, pure coding time, -j 1):
+
+              coding     PSNR      astcenc ref
+  fast    0.30->0.17 s   47.30 dB  (-fastest 0.045 s / 47.78 dB)
+  medium  1.45->0.65 s   48.43 dB  (-medium  0.095 s / 48.63 dB)
+
+Changes:
+- Block-mode candidates are ranked by weight_bits + weight_count (budget
+  utilization x grid resolution); fast/medium scan only the top 12/32
+  viable candidates (candidates whose color budget cannot fit no longer
+  consume cap slots - that bug cost 5 dB on 12x12 two-color content).
+- Two-partition search: RGBA 2-means (farthest-point init, two Lloyd
+  iterations) produces a block bitmap; seeds are ranked by XOR+popcount
+  mismatch (hardware POPCNT when SSE4.x is present) and only the closest
+  32..96 (scaled by footprint) are exactly variance-scored.
+- Medium quality sweeps all five endpoint axes only for the top 4
+  shortlist entries; the rest rely on least-squares refinement of the
+  luma-axis fit. Fast skips the redundant identity-quantizer evaluation.
+- Ideal-weight quantize/unquant collapsed to per-quant-method LUTs.
+
+Reduced-effort levels trade up to ~1 dB on synthetic corner cases
+(e.g. alpharamp 12x12 medium 27.9 -> 26.8 dB); normal quality is
+unchanged or better (gradient 8x8 normal +1.4 dB from the ranking).
+PSNR floors refreshed; all parity/round-trip/smoke gates green.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: scope astcenc port options for the remaining ASTC speed gap
+…
+880ad61
+```
+Records the measured gap (fast 3.9x, medium 6.8x vs astcenc -j 1), the
+license reality (astcenc is Apache-2.0, notice-preserving inclusion is
+fine inside this BSD-3-Clause tree), and why porting astcenc's
+algorithms into the existing integer C11 encoder is preferable to a
+wholesale port: the float+SIMD-abstraction pipeline would replace the
+bit-exact integer core and its reference-decoder test contract. Lists
+the four portable techniques in priority order and the measured
+dead end (winner-only LSQ).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: port astcenc block-mode percentile tables for candidate ranking
+…
+4fc7013
+```
+Embeds Arm astcenc's empirical block-mode usage percentiles (Apache-2.0,
+generated from Source/astcenc_percentile_tables.cpp; see the notice in
+texcomp_astc_percentiles.inc), reduced to this encoder's deduplicated
+(weight grid, quant, dual) candidate key per 2D footprint. Candidate
+ranking now uses the percentile as the primary key with the previous
+budget-utilization heuristic as tie-break, which lets the reduced-effort
+scan caps drop (fast 12->8, medium 32->20 viable candidates) at equal
+photo quality:
+
+  1024x1024 photo 6x6, single thread, pure coding time:
+    fast    0.176 -> 0.132 s  (47.30 dB, unchanged)
+    medium  0.650 -> 0.561 s  (48.39 vs 48.43 dB)
+  astcenc reference: -fastest 0.045 s / 47.78, -medium 0.095 s / 48.63.
+
+Fast-quality synthetic corner cases give up ~1 dB (clusters 12x12
+fast 16.3 -> 15.25 dB); floors adjusted, medium/normal corpus intact.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: SSE2 kernel for the ASTC least-squares accumulation
+…
+9774c0b
+```
+The normal-equation sums (Saa/Sab/Sbb and per-channel Sap/Sbp) are
+pmaddwd-shaped: quadratic terms accumulate 8 texels per madd, the mixed
+channel terms use sparse [w 0 w 0] operands so madd emits per-channel
+products in separate 32-bit lanes. Partial sums are bounded well inside
+32-bit lanes and the kernel is integer-exact against the scalar loop
+(cross-backend byte-identical parity test passes unchanged).
+
+Medium 0.561 -> 0.512 s on the 1024x1024 photo benchmark (single
+thread); PSNR corpus byte-identical.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: branch-free ASTC weight infill
+…
+b0d8188
+```
+Decimation taps are padded to four entries with zero contributions at
+cache-build time, and the infill loop unquantizes the (at most 64-entry)
+weight grid once instead of per tap, leaving four unconditional
+multiply-adds per texel. Byte-identical output; small win on top of the
+scan caps (medium 2.01 MPix/s single thread).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: record that AVX2-widening the ASTC kernels regressed
+…
+55e335e
+```
+Bit-exact 8-texel AVX2 recon kernels measured slower than the SSE2
+4-texel forms (fast +30%, medium +47%): per-call constant setup is not
+amortized over 36-texel calls. AVX2 needs a block-batched pipeline
+shape, not wider lanes in the current call structure.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: astcenc-like trial counts at fast quality
+…
+1218e52
+```
+With percentile-ranked candidates, fast quality now fits only the top 5
+viable block modes and refines a 2-entry shortlist (astcenc -fastest
+tries a similar handful). 1024x1024 photo, 6x6, single thread, pure
+coding time, ISA-matched SSE2 builds both sides:
+
+  ours fast    0.085 s / 47.16 dB
+  astcenc-sse2 -fastest 0.057 s / 47.78 dB   (1.5x, -0.6 dB)
+  astcenc-avx2 -fastest 0.045 s / 47.78 dB   (1.9x)
+
+Fast-tier synthetic corners give up a further ~0.7 dB (clusters 8x8
+20.55 dB, alpharamp 6x6 31.65 dB); floors adjusted. Medium and normal
+quality are untouched.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: record ISA-matched astcenc standings + medium trial-count an…
+…
+8f42688
+```
+…omaly
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: port astcenc weight-space candidate scoring
+…
+51fae77
+```
+Ports the architecture of astcenc's compute_error_of_weight_set: at the
+fast and medium tiers, block-mode candidates are ranked by the per-texel
+deviation of the infilled quantized weights from the ideal weights (one
+channel-equivalent pass, no endpoint reconstruction), since the
+projection residual and endpoint line are shared by every candidate of
+one line. Exact reconstruction scoring remains for shortlisted
+candidates, the winning partition/dual candidates, and everything at
+normal quality. The estimate must be per-texel: scoring only grid-point
+quantization error misses the decimation loss and mis-ranks coarse
+grids on high-frequency content.
+
+1024x1024 photo, 6x6, single thread, pure coding time (ISA-matched
+SSE2 astcenc in parentheses):
+
+  fast    0.085 -> 0.078 s / 47.14 dB   (-fastest 0.057 s / 47.78)
+  medium  0.538 -> 0.527 s / 48.30 dB   (-medium  0.119 s / 48.63)
+  normal  3.8   -> 3.2  s, corpus floors unchanged
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: trim ASTC medium-tier exact work
+…
+12f96d9
+```
+Prefilter bitmap mismatch only processes the words a footprint uses
+(one for blocks up to 64 texels), and the medium shortlist drops from
+16 to 12 exactly-scored candidates. Medium 0.527 -> 0.474 s at
+48.24 dB (-0.06) on the photo benchmark; corpus floors green.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: port astcenc iterative endpoint/weight refinement
+…
+eb09ab2
+```
+When least-squares endpoints are accepted for a shortlisted candidate,
+the texels are re-projected onto the refined endpoint line, the weights
+refit and the endpoints solved once more (astcenc's iterative
+ideal-endpoints-and-weights loop). This lets the medium shortlist drop
+from 12 to 8 exactly-scored candidates at nearly the same quality:
+
+  medium 0.474 -> 0.400 s / 48.17 dB (was 48.24) on the 1024x1024
+  photo benchmark; astcenc-sse2 -medium 0.119 s / 48.63 for reference.
+  fast stays 0.080 s / 47.14 dB; normal keeps 48.82 dB.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: close out the astcenc algorithm-port plan
+…
+e352547
+```
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: port the Arm astcenc encoder wholesale as a selectable backend
+…
+14ee532
+```
+Vendors the upstream Arm astcenc encoder core (22 translation units,
+Apache-2.0, license preserved at deps/astcenc/LICENSE.txt) and wires it
+into the texcomp CLI through its C-linkage public API: `make texcomp-arm`
+builds `build/texcomp/texcomp-arm`, and `--encoder arm` routes ASTC
+encoding through astcenc (fast/medium/normal -> -fastest/-medium/
+-thorough), while `--encoder tc` (default) keeps the native integer C11
+encoder. The default `make texcomp` build remains pure C11 with no C++.
+Builds select the SSE2 baseline on x86 and NEON on aarch64.
+
+Verified on the 1024x1024 photo benchmark: `--encoder arm` reproduces
+astcenc exactly (medium 48.63 dB), `--encoder tc` unchanged
+(fast 47.14 dB); c11-gate, unit tests and arm-smoke all green.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: multithreaded ASTC encode (tc_astc_options.threads)
+…
+5ae32fd
+```
+Block rows split into per-thread bands, each with a private heap encode
+context and a disjoint output range - no synchronization, and output is
+byte-identical for any thread count (enforced by a new parity test).
+Uses C11 <threads.h> with a serial fallback when the implementation
+defines __STDC_NO_THREADS__; the CLI gains --threads N, and the arm
+backend drives astcenc's own thread pool with N workers.
+
+1024x1024 photo, 6x6, pure coding time, 32 threads vs astcenc default
+(AVX2 build, autodetected 32 threads):
+
+  ours fast    0.013 s (82 MPix/s)   astcenc -fastest 0.0064 s
+  ours medium  0.044 s (24 MPix/s)   astcenc -medium  0.0121 s
+  ours normal  0.252 s
+  --encoder arm reproduces astcenc's default numbers exactly.
+
+Threading scales ~9.5x on 32 cores at medium (per-band context init is
+the residual serial cost).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: share one read-only ASTC context across encode threads
+…
+0658ef4
+```
+Every lazily-filled cache is now built eagerly at context init - all
+decimation grids the footprint can use, the candidate lists for every
+endpoint-end-bit key the quality level requests, and the (previously
+rebuilt per dual-plane block) dual candidate list, which now lives in
+the context. Encoding then only reads the context, so all thread bands
+share a single instance instead of paying ~2.5 MB of partition-cache
+construction each.
+
+32-thread coding time (1024x1024 photo, 6x6):
+  fast   0.013 -> 0.010 s (102 MPix/s; astcenc default -fastest 0.0064)
+  medium 0.044 s (unchanged; bands amortized init already)
+Serial fast also improves 0.085 -> 0.082 s from the cached dual list.
+Output remains byte-identical across thread counts (parity test).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: winner-only iterative refinement + astcenc-style early-outs
+…
+9ae50d1
+```
+Correction: commit eb09ab2 described per-candidate iterative refinement,
+but that edit never actually applied (only its shortlist change landed).
+This commit implements the refinement loop for real, on the pass-2
+winner only: up to two rounds of re-projecting the texels onto the
+refined endpoint line, refitting the weights and re-solving the
+endpoints, accepting while the decoded error improves. The partition
+and dual-plane searches also gained astcenc's early-out: they only run
+when the single-partition error is still meaningful for the tier.
+
+The quality headroom funds harder trial cuts at fast (top 3 candidates,
+2-entry shortlist). 1024x1024 photo, 6x6, pure coding time:
+
+           serial              32 threads   astcenc-sse2 -j1
+  fast    0.079 s / 47.73 dB   0.010 s      -fastest 0.057 s / 47.78
+  medium  0.441 s / 48.31 dB   0.047 s      -medium  0.119 s / 48.63
+  normal  3.70 s  / 48.85 dB
+
+Fast reaches quality parity with astcenc -fastest (-0.05 dB) at 1.4x
+its time; medium closes to -0.32 dB at 3.7x; normal +0.03 dB from the
+iteration. Corpus floors and all parity tests green.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+texcomp: ASTC medium-tier tuning + wasm build support
+…
+7a9dc55
+```
+ASTC encoder (texcomp.c):
+- Expose medium-tier effort as named knobs (scan caps, per-plane
+  selected/full-axis limits, refine rounds, partition err scales,
+  part2 shortlist base/shift), overridable via -D at build time.
+- Separate opaque vs. alpha scan/selection budgets.
+- NEON LSQ-sum and bitmap-mismatch kernels alongside the SSE2/scalar
+  paths; x86 SSE helpers behind TC_X86 guards.
+
+wasm build support:
+- Guard <threads.h> inclusion with !defined(TC_NO_THREADS) in both
+  texcomp.c and texcomp_cli.c so the filesystem-free wasm build links
+  the pure-C encoder with threads disabled.
+- Makefile: texcomp-wasm / texcomp-wasm-simd targets (+ wasm-texcomp
+  aliases) building libtexcomp.a and the C-API / CLI modules for
+  scalar and SIMD wasm.
+
+Validation: texcomp-c11-gate, texcomp-test (ASan+UBSan+LeakSanitizer,
+no leaks), threaded ASTC encode fast/medium/normal x 1/4/8 threads
+clean under LeakSanitizer and byte-identical across thread counts.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+texcomp: raise ASTC PSNR floors to current measured quality
+…
+25d2abc
+```
+The reference-decoder round-trip floors were set against an earlier
+encoder. Re-measured all 48 configs (4 kinds x 4 block sizes x 3
+quality tiers) against the current encoder and lifted the floors to
+lock in the improvements.
+
+Margin policy, now documented in the floor comment:
+- medium/normal (q1/q2): ~0.3 dB below measured — these tiers must not
+  regress, so the floors track quality tightly.
+- fast (q0) synthetic corners: ~0.6 dB, leaving room for the documented
+  up-to-~1 dB effort-level trades in future tuning.
+No floor was lowered. Near-lossless cluster configs stay at 60 dB (the
+99 dB cap is a lossless sentinel; tightening it risks cross-platform
+ref-decoder FP flakiness).
+
+Verified: texcomp-test passes (ASan+UBSan+LeakSanitizer) on x86 and
+under qemu-aarch64, where the parity test also exercises the NEON
+LSQ-sum and bitmap-mismatch kernels byte-identical to scalar.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+texcomp: self-contained CI gate for the vendored astcenc backend
+…
+80ce8eb
+```
+The Arm astcenc backend (deps/astcenc) had no CI hook: the only check,
+texcomp-astc-arm-smoke, shells out to an external astcenc-native binary
+to decode, so it exits 77 (skips) anywhere that binary is absent.
+
+Add texcomp-astc-arm-gate: builds the C++ backend, encodes one
+deterministic image with both the pure-C `tc` encoder and astcenc, and
+cross-checks their PSNR using astcenc's own conformant decoder. No
+external binaries or image assets, so it actually runs in CI and keeps
+the backend compiling + wired up. Asserts both encoders clear a 30 dB
+floor and that astcenc (thorough) does not trail tc (normal); current
+run: tc 36.25 dB, arm 40.37 dB.
+
+Both outputs are decoded with astcenc (unorm8 decode mode) rather than
+the in-tree reference decoder, which only supports the block-mode subset
+`tc` emits, not astcenc's full space.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+texcomp: document blue-contract trial as a measured dead-end
+…
+a633c81
+```
+Prototyped the astcenc-style blue-contract endpoint trial for CEM 8/12
+at quality 2 (score direct vs inverse-contract-preimage encodings with
+tc_astc_recon_sse, keep the better). It is correct and never regresses,
+but the measured gain across a real photo corpus averages ~0.02 dB
+(best real EXR ~0.034 dB at 6x6), below the 0.05 dB keep threshold set
+for this experiment. Reverted the code; recorded the full per-image
+measurement table and the revisit condition (fold into per-candidate
+LSQ quantization rather than a separate emit trial) in the port notes.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+texcomp: characterize the medium-tier gap on real photos
+…
+fcc680e
+```
+Investigated the medium-tier speed/quality gap (task lever #1). The
+value-noise photo1k benchmark that prior numbers relied on substantially
+overstated competitiveness: on real photos (OpenEXR ScanLines, 6x6,
+single thread) our medium trails astcenc-medium by 1.7-4.2 dB and
+astcenc's -fast preset beats our -normal. Verified the gap is real, not
+a decode-mode artifact (our output decodes identically under astcenc
+fp16/unorm8 and the in-tree reference decoder).
+
+The medium quality knobs are saturated: cranking every lever at once
+buys only +0.10 dB on StillLife for 2.2x the time, and the
+partition-scan / part2-shortlist knobs move 0.000 dB. Refinement rounds
+saturate at 2. The scan-cap non-monotonicity is root-caused as a
+proxy-vs-exact-fit selection imperfection (~0.1 dB), not a correctness
+bug. No knob change was worth shipping.
+
+Conclusion recorded in the port notes: the real-content gap is a
+quality-ceiling problem in the partition/dual-plane/endpoint search that
+only the deferred batched-pipeline rewrite can close; knob tuning is
+exhausted and should not be re-swept expecting real-photo gains.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+texcomp: add BC1 (DXT1) and BC3 (DXT5) encoders
+…
+0fbc2c8
+```
+Add two S3TC/DXT codecs alongside the existing BC5/BC6H/BC7/ETC2/EAC/
+ASTC set:
+
+- BC1: opaque 4-colour RGB565 block (8 bytes/block). Endpoints come from
+  the RGB bounding box refined by two least-squares passes over the
+  assigned indices; colour0 > colour1 is enforced for the 4-colour mode,
+  and a single-colour block avoids the punch-through index.
+- BC3: the same colour block (always 4-colour) paired with the existing
+  BC4 alpha-block encoder (tc_encode_bc4_block, reused unchanged).
+
+Public API: tc_bc1/bc3_options{,_init}, tc_bc1/bc3_compressed_size,
+tc_bc1/bc3_compress_rgba8, tc_dds_bc1/bc3_size, tc_dds_write_bc1/bc3_
+memory. The shared DDS writer now takes a block-byte size so BC1's
+8-byte blocks pitch correctly; DXGI formats BC1_UNORM(_SRGB)=71/72,
+BC3_UNORM(_SRGB)=77/78. CLI gains `--format bc1|bc3` (+ dxt1/dxt5
+aliases); wasm exports and the unit tests cover both.
+
+Tests reference-decode the output: a two-cluster block hits strict PSNR
+floors (validates endpoints/index packing), a gradient block exercises
+the interpolated indices, and BC3 alpha round-trips near-exact. Verified
+end-to-end via the CLI (BC1 28.4 dB, BC3 28.4 dB + exact alpha on
+asakusa.png) with valid DX10 DDS headers. C11 gate, ASan/UBSan/LSan
+tests, and the wasm build all pass.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+texcomp: split the monolithic texcomp.c into per-codec files
+…
+8c822a2
+```
+Break the single 6600-line texcomp.c into one translation unit per
+compression type, keeping a small shared core:
+
+- texcomp.c        core: backend/CPU dispatch, options_init, *_compressed_
+                   size, DDS/KTX/ASTC container writers, shared bit/byte/
+                   clamp helpers
+- texcomp_internal.h  arch/SIMD macros (TC_X86, TC_TARGET, TC_CPU_*) and
+                   declarations of the helpers shared across units
+- texcomp_bc1.c / bc3.c / bc5.c / bc6h.c / bc7.c / etc2.c / eac.c / astc.c
+
+Shared low-level helpers (tc_set_bits, tc_luma_u8, tc_clamp_*, tc_wr_u64/
+u24, tc_bswap*, tc_cpu_caps, tc_mul_ovf_size, tc_astc_valid_block) are now
+external and declared in texcomp_internal.h; a few cross-codec primitives
+are shared too (tc_encode_bc4_block for BC3, tc_encode_bc1_color_block for
+BC3, tc_encode_eac_alpha for ETC2-RGBA, tc_bc7_weights4 for BC6H). The
+Makefile builds one object per unit (native, wasm, wasm-simd, arm) via
+pattern rules; the C11 gate syntax-checks every unit.
+
+Pure code motion: encoder output is byte-identical to the previous build
+for all formats (bc1/bc3/bc5/bc6h/bc7/etc2/eac/astc on a real image), and
+the C11 gate, native/arm/wasm builds, and arm PSNR gate all pass.
+
+Note: `make texcomp-test` has a pre-existing, intermittent
+"astc thread parity" failure (a data race on the shared encode context's
+lazily-filled decimation cache). It reproduces identically on the
+pre-refactor monolith (verified) and is unrelated to this split; it is
+fixed in the following commit.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+syoyo
+and others
+added 25 commits
+July 3, 2026 14:02
+texcomp: SIMD the signed (sf16) BC6H selector search too
+…
+fe9ede0
+```
+Vectorize the signed selector search to match the unsigned one (SSE4.1 /
+AVX2 four/eight-wide, NEON four-wide). The wrinkle: the signed error can
+exceed 32 bits -- sign-magnitude values span +/-31743, so a per-channel
+difference reaches 63486 and the three-channel sum reaches ~1.2e10 -- and
+the scalar saturates it at UINT_MAX. The SIMD path reproduces that with
+step-wise unsigned-overflow detection on each partial sum (saturate to
+all-ones when a+b wraps below a), which is exactly equivalent to the
+scalar's int64-sum-then-clamp, so every backend stays bit-identical.
+
+512x512 signed gradient spanning both signs (exercising the saturation):
+scalar 62.0 ms -> SSE4.1 44.4 ms (1.4x) -> AVX2 32.3 ms (1.9x), all
+byte-identical. The parity test now covers both the unsigned and signed
+paths (content spanning both signs). C11 gate, texcomp-test
+(ASan/UBSan/LSan) and wasm pass.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+texcomp: bench full format suite + per-backend BC6H
+…
+d701716
+```
+Extend texcomp_bench to cover BC1, BC3 and ASTC HDR, and bench BC6H per
+SIMD backend (scalar / SSE4.1 / AVX2) for both the unsigned and signed
+paths instead of a single mislabeled "scalar" line -- so the selector-
+search vectorization shows up. Same 512x512 workload as the rest.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+texcomp: relicense our code Apache-2.0 + add third-party attribution
+…
+21b0345
+```
+Relicense the texcomp suite (everything under tools/texcomp/) from
+BSD-3-Clause to Apache-2.0 for our own code: update the SPDX tag in every
+source file and add SPDX+copyright headers to the test files that lacked
+them. Add tools/texcomp/LICENSE (the Apache-2.0 text) and rewrite
+NOTICE.md into a proper licensing + third-party attribution document.
+
+Attributions credited (in NOTICE.md and the relevant file headers):
+  * Arm astcenc (Apache-2.0) -- the optional --encoder arm C++ backend, the
+    conformance oracle, and the source of the CEM 7/11 HDR endpoint
+    pack/unpack ports in texcomp_astc_hdr.c.
+  * bcdec.h (Sergii Kudlai, MIT) -- the corrected BPTC partition/anchor
+    tables in test/bc7_ref_decode.h and the BC6H two-region mode-9
+    partition table + block layout in texcomp_bc6h.c.
+  * Khronos ASTC / BPTC specs -- ISE codec, block-mode/partition/unquant
+    tables and BC6H/BC7 bit layouts (spec data).
+  * Basis Universal (Apache-2.0) -- UASTC LDR/HDR mode subsets; the xbc7
+    idea (not bitstream-compatible).
+  * QuickBC7 / etcpak -- BC7 quick-mode heuristics + API naming.
+  * zstd (BSD) via tinyexr_zstd -- xbc7 container entropy coding (CLI only).
+  * stb_image (public domain) -- CLI PNG loading.
+
+The change is comment/metadata only. C11 gate, texcomp-test, arm/hdr/xbc7
+gates all pass; every texcomp .c/.h now carries an Apache-2.0 SPDX tag and
+none carry BSD-3-Clause.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Merge branch 'release' into texcomp-astc-quality
+9a203f5
+texpipe: resize-aware texture compression (tir + texcomp)
+…
+5acde5b
+```
+New pure-C11 library + CLI (tools/texpipe/) that ties tir (content-aware
+resize) and texcomp (BC/ETC/ASTC block compression) into content-aware mip
+chains serialized to multi-mip / cubemap DDS and KTX2 containers. Neither
+tir nor texcomp is modified; texpipe only composes them.
+
+Delivers all four requested capabilities:
+  - Alpha-aware RGBA resize+compress (tir premultiplied alpha -> BC7/BC3/ASTC).
+  - Alpha-coverage preservation across LODs (Castano): per-mip alpha rescale so
+    alpha-tested coverage matches the base level.
+  - Seam-free cubemap LOD: 6-face input (separate files or cross/strip layouts),
+    per-mip edge + corner fixup (12-edge/8-corner adjacency derived from the
+    GL/D3D cube convention) so adjacent-face borders are bit-identical, with
+    cubemap DDS caps / KTX2 faceCount=6. Documented limit: independent per-block
+    compression can reintroduce a <=1-quant-step seam after encoding.
+  - Normal/height LOD coherence: NORMAL_MAP renormalize (unit-length across
+    LODs) and mean-preserving HEIGHTMAP, plus Toksvig roughness baked from tir's
+    normal_length_out and emitted as a companion EAC_R11 KTX2 mip chain.
+
+Staged API (tp_build_mips -> tp_compress_chain -> tp_write_container, or
+tp_process one-shot) plus leaf helpers for coverage, cube fixup/split and
+Toksvig roughness. Codecs: BC1/3/5/7/6H, ETC2 RGB/RGBA, EAC R11/RG11, ASTC
+LDR (any block), ASTC HDR 4x4.
+
+Make targets: texpipe, texpipe-c11-gate (strict pure-C11, no <stdio.h> outside
+the CLI), texpipe-test (mip geometry, per-mip round-trip PSNR, alpha coverage,
+cube border/corner equality + idempotency, normal unit-length, Toksvig
+monotonicity, heightmap mean preservation, DDS/KTX2 header re-parse).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+envmap: IBL projections + SH/SG, and texpipe octa/packing/array support
+…
+1d989f6
+```
+New tools/envmap/ (pure C11, Apache-2.0) for image-based-lighting
+representations, plus texpipe extensions it builds on. Links tir + texcomp +
+texpipe + libtinyexr3; only the CLI does HDR EXR I/O.
+
+envmap:
+  - Projection conversion equirect <-> cube <-> octahedral (envmap_proj.c):
+    direction<->uv, per-texel solid angle, bilinear sampling, cross-projection
+    resample. Cube convention matches texpipe's face order/orientation, so cube
+    output feeds `texpipe --cube-face` directly.
+  - Real spherical harmonics up to order 4 (envmap_sh.c): project / eval /
+    Hanning window. Order 2 = diffuse-irradiance ambient term.
+  - Spherical gaussians (envmap_sg.c): fit K lobes (Fibonacci axes, shared
+    sharpness, weighted least-squares amplitudes) for compact lighting.
+  - CLI convert/sh/sg; sh/sg also emit an equirect reconstruction EXR.
+
+texpipe extensions:
+  - Octahedral fold-seam fixup (texpipe_octa.c, tp_octa_seam_fixup) + --octa;
+    run as a tp_build_mips post-pass so octahedral env maps stay border-coherent
+    across LODs under BC6H/ASTC-HDR.
+  - Per-channel packed-map rule tp_channel_op[4] (--channel-ops l,l,m,l):
+    MAJORITY thresholds a binary metallic/mask channel so it stays crisp.
+  - KTX2 texture arrays (tp_write_ktx2_array, layerCount).
+
+Make targets: envmap, envmap-c11-gate, envmap-test (projection round-trips
+<1e-6, solid-angle sum=4pi within 0.03%, eq->cube->eq ~87 dB, SH white-furnace +
+SH-4 RMS ~4e-4, SG constant-energy). texpipe-test adds octa fold-border,
+majority-binary and array-layerCount checks. Full flow verified:
+envmap convert --to octa | texpipe --octa --format bc6h -> BC6H KTX2.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+envmap: renderable IBL (GGX prefilter + irradiance + split-sum BRDF LUT)
+…
+d90e2e1
+```
+Phase 1 of the resize+compression+PBR effort. Completes the split-sum inputs a
+PBR shader samples, all from an HDR environment.
+
+envmap_ibl.c:
+  - em_sample_ggx: GGX/Trowbridge-Reitz importance-sampled half-vector.
+  - em_prefilter_specular: roughness-indexed cube levels (level l convolved at
+    roughness l/(N-1)) via GGX importance sampling of the source env.
+  - em_irradiance_cube: cosine-hemisphere convolution (stores E/pi).
+  - em_brdf_lut: Karis split-sum DFG integration LUT (R=scale, G=bias), clamped.
+
+CLI:
+  - `envmap ibl` -> prefiltered specular as a BC6H roughness cube KTX2 (builds a
+    texpipe tp_mip_chain over borrowed em_image face pointers, compresses via
+    tp_compress_chain + tp_write_container; envmap library stays texpipe-free,
+    only the CLI includes texpipe.h).
+  - `envmap irradiance` -> diffuse irradiance BC6H cube KTX2.
+  - `envmap brdflut` -> DFG LUT EXR.
+
+Tests (envmap-test): white-furnace (constant env stays flat at every roughness;
+irradiance mean preserved), prefilter variance at roughness=1 far below
+roughness=0, BRDF A~1 / B~0 at low-roughness/high-NdotV. Gate + end-to-end on an
+HDR EXR verified (BC6H cube KTX2 vk=143, 6 faces, 8 levels).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+envmap: PBR validation harness + reference sphere renderer (Phase 2)
+…
+30798a1
+```
+Completes the recommended "renderable IBL + validation" slice.
+
+- em_shade_point (envmap_ibl.c): split-sum image-based-lighting shade for one
+  surface sample — diffuse = albedo*(1-metallic)*irradiance(N); specular =
+  trilinear prefiltered(R, roughness) * (F0*A + B) with F0 = mix(0.04, albedo,
+  metallic) and (A,B) from the DFG LUT.
+- CLI `envmap shade`: builds the float IBL from an env and renders a lit sphere
+  to an HDR EXR — the offline reference PBR renderer.
+- test_pbr.c + `envmap-pbr-test` target (links libtexcomp): shades a grid of
+  sphere normals under the float IBL with source vs BC7-compressed-then-decoded
+  material, and reports shaded-image PSNR (41 dB, floor 40) plus normal BC7
+  angular error (mean 0.88 deg, max 2.61 deg). This is the compressed-vs-source
+  "does compression hurt the final image" quality gate.
+
+envmap-c11-gate / envmap-test / envmap-pbr-test all pass; reference renders
+verified on an HDR EXR (dielectric + metal spheres).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+texpipe/envmap: shading correctness under minification + PBR-tuned co…
+…
+9e54ec5
+```
+…mpression
+
+Phase 3 (texpipe) - shading correctness under minification:
+  - sRGB-aware albedo resize (opt.srgb_aware / --srgb-resize): decode
+    sRGB->linear, filter in linear light from a per-face linear base, re-encode
+    to sRGB, so a hardware sRGB sampler decodes the correctly filtered value. A
+    black/white checker averages to linear 0.500 (aware) vs 0.214 (naive
+    sRGB-space filtering that darkens albedo mips).
+  - Roughness-variance channel op (TP_CH_ROUGHNESS, --channel-ops ...r...):
+    replace a roughness channel with its RMS sqrt(E[c^2]) (>= plain average) via
+    a resized squared base, so minified roughness rises to cut specular aliasing
+    (test: rms 0.643 > linear 0.510).
+
+Phase 4 (envmap harness) - PBR-tuned compression quality:
+  - BC4/BC5 decoder in the PBR harness + a BC5-vs-BC7 normal-map angular-error
+    comparison: BC5 (2-channel, reconstruct Z) mean 0.35 deg / max 0.99 deg vs
+    BC7 mean 1.39 deg / max 8.00 deg -- proving BC5 is the PBR-correct normal
+    format. Deep encoder work (error-weighted BC7/ASTC metric, YCoCg-R,
+    universal transcode) intentionally deferred as separate encoder projects.
+
+texpipe-c11-gate / texpipe-test / envmap-pbr-test all pass.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+texpipe: displacement + atlas sampling quality (Phase 5)
+…
+808291b
+```
+New texpipe_disp.c:
+  - tp_build_minmax_pyramid: 2-channel (min,max) conservative height pyramid via
+    min/max reduction from the previous level, for parallax-occlusion / relief /
+    cone-step mapping. Stored as BC5 (--minmax). Bounds nest across levels and
+    the coarsest level bounds the whole height field.
+  - tp_dilate: gutter flood -- fills the colour of texels with alpha<threshold
+    from valid neighbours, N passes, so mips/bilinear don't bleed background
+    across atlas/lightmap chart borders (alpha preserved). CLI --dilate N runs
+    it as a base pre-pass. Neighbour validity is frozen at each pass start so
+    background can't propagate mid-pass.
+
+Vector displacement (3-channel float, BC6H/ASTC-HDR path) validated
+mean-preserving (averaging keeps the mean vector -- correct for displacement,
+unlike normals).
+
+Deferred: ripmaps/anisotropic precompute (new container layout), Kaiser
+windowed-sinc filter (tir kernel change), cone-step ratio precompute.
+
+texpipe-c11-gate / texpipe-test pass (minmax bounds nest + cover; dilation
+188/188 gutter texels filled from the disc, alpha preserved; vector-disp mean
+preserved). End-to-end: --minmax -> BC5 9-mip DDS, --dilate -> KTX2.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+tir/texpipe: Kaiser filter, cone-step map, ripmaps, YCoCg (deferred e…
+…
+cce0976
+```
+…fforts)
+
+Clears the achievable, low-risk items from the deferred list.
+
+tir:
+  - TIR_FILTER_KAISER: Kaiser-Bessel windowed sinc (radius 3, beta 8) -- sharp
+    with lower ringing than Lanczos3. Widened validate_options range and the
+    negative-lobe classification to accept it (tir's 777 tests still pass).
+
+texpipe:
+  - tp_build_cone_map: relaxed cone-step ratio per texel for cone-step / relief
+    mapping (library-only; O(n^4), modest resolutions).
+  - tp_build_ripmap: anisotropic (w>>ix, h>>jy) grid for grazing-angle sampling
+    (library-only; no standard container for ripmaps).
+  - YCoCg decorrelation (tp_rgb_to_ycocg / tp_ycocg_to_rgb, opt.ycocg / --ycocg):
+    store colour as YCoCg before compression (shader inverts). Honest result --
+    helps low-bit codecs (BC1), roughly neutral for BC7 which rotates colour
+    internally.
+  - CLI: --filter kaiser, --ycocg.
+
+Tests: cone ratio grows with occluder distance (near 0.06, far 1.0); ripmap 7x7
+cell dims anisotropic; YCoCg round-trip identity + BC7 quality not worse; Kaiser
+finite + mean-preserving. All gates pass.
+
+STILL DEFERRED (genuinely large / risky, not attempted): error-weighted BC7/ASTC
+encoder error metric (deep encoder surgery), universal/transcodable textures.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+texcomp: error-weighted BC7 (pure-C) + ASTC channel weights via astcenc
+…
+3a76149
+```
+Per-channel error weighting for the encoders, done safely.
+
+BC7 (pure-C, texcomp_bc7.c):
+  - tc_bc7_options.channel_weights[4] (uint8). A file-scope tc_bc7_cw[4] scales
+    each channel's squared error in tc_err3/err4/err1. Default all-zero maps to
+    uniform {1,1,1,1}, and the weighted expression is INTEGER-identical to the
+    old sum of squares -- so uniform weights are BYTE-IDENTICAL (texcomp-test
+    unchanged; harness asserts default==uniform). BC7 block encoding is serial,
+    so the file-scope weights are race-free within a call.
+  - Effect is modest since endpoints are luma-selected (not weighted PCA);
+    XY-weighting with Z reconstructed lowers normal angular error 1.624->1.620.
+
+ASTC:
+  - Not hand-rolled: texcomp's ASTC error metric is spread across scalar + SSE2
+    + AVX2 + NEON kernels, and weighting them while keeping SIMD bit-identical
+    risks the conformance gates. Instead wired astcenc's native
+    cw_r/g/b/a_weight through the arm backend (tc_astc_options.channel_weights,
+    honored only by --encoder arm). Verified weighted output differs from
+    unweighted; astcenc builds here.
+
+CLI: texcomp --channel-weights R,G,B,A (BC7 + ASTC-arm); texpipe --bc7-weights
+R,G,B,A (forwarded via opt.bc7.channel_weights). PBR harness adds a weighted-BC7
+normal test + the byte-identical safety check.
+
+Only remaining large deferred item: universal/transcodable textures.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+texcomp: universal transcodable textures (uni intermediate, BC family)
+…
+96147d1
+```
+Encode once, transcode cheaply at load -- the Basis-Universal idea, scoped to
+the frequently-used BC family (no multi-week full-UASTC port).
+
+texcomp_uni.c:
+  - "uni" intermediate: a single-subset block (two RGBA8 endpoints + 16 4-bit
+    weights, 16 bytes/block, UASTC-spirit). tc_uni_compress_rgba8 (bounding-box
+    endpoints + projected weights) / tc_uni_decompress_rgba8.
+  - Cheap direct-pack transcoders (no decode+re-encode search):
+      tc_uni_transcode_bc7 -- self-contained BC7 mode-6 packer (anchor MSB=0
+        swap, one p-bit/endpoint from alpha). Near-lossless w.r.t. the source.
+      tc_uni_transcode_bc1 -- endpoints to RGB565, 4-bit weights to 2-bit
+        indices, c0>c1 swap for 4-colour mode.
+
+Gate (texcomp-uni-gate, uni_gate.c): uni enc/dec 45 dB; uni->BC7 decoded by the
+SHIPPED BC7 decoder scores 52 dB vs the uni reconstruction -- proving the
+hand-written mode-6 packing is decoder-correct and the transcode is near-lossless
+and valid; uni->BC1 40 dB (BC1-class). texcomp-test + c11-gate unchanged.
+
+CLI: `--format uni` writes a "TUNI" container (magic + w,h + blocks); transcode
+via tc_uni_transcode_bc7/bc1.
+
+Deferred: ASTC/ETC mobile transcode targets (need the full UASTC 128-bit block
+layout; ETC's base+modifier structure resists cheap transcode) and KTX2/BasisLZ
+supercompression wiring of the uni stream.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+texcomp: uni mobile transcode targets (ASTC 4x4 + ETC2)
+…
+ee63c07
+```
+Adds the mobile targets to the universal ("uni") intermediate.
+
+  - tc_uni_transcode_astc: ASTC 4x4 via the single-subset UASTC LDR path.
+  - tc_uni_transcode_etc2: ETC2 RGBA.
+
+Honest distinction (documented in the header + source): BC7/BC1 are CHEAP direct
+bit-repacks because they share uni's endpoint-line. ASTC's ISE weight/endpoint
+layout and ETC's base+modifier structure do NOT, so these are RE-ENCODE
+transcoders (decode the intermediate, then encode with the tested, conformant
+encoder). Output is valid and it's still one shipped artifact, but transcode-time
+cost is higher than the BC path -- a purpose-built UASTC block is what makes those
+cheap too. I did not hand-roll the ASTC bitstream (risk of emitting invalid
+blocks); ASTC routes through the UASTC single-subset encoder, which matches uni's
+structure so fidelity is preserved.
+
+Gate (texcomp-uni-gate): uni->ASTC decoded by the reference decoder scores
+55.6 dB vs the uni reconstruction (valid + high fidelity); uni->ETC2 RGBA encodes.
+CLI: `-i x.uni -o out.bin --format bc7|bc1|astc|etc2` transcodes a TUNI container.
+End-to-end verified: one a.uni -> BC7 / BC1 / ASTC / ETC2. texcomp-test +
+c11-gate unchanged.
+
+Deferred (small): KTX2/BasisLZ supercompression of the uni stream; a cheap
+(non-re-encode) ASTC repack.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+texcomp: wire KTX2 Zstd supercompression for the uni stream
+…
+c94cb4c
+```
+The universal ("uni") intermediate can now ship as a KTX2 with
+supercompressionScheme = 2 (Zstandard): vkFormat = UNDEFINED (transcode source),
+a minimal DFD (colourModel 166 = UASTC), and a 1-level index carrying the
+compressed + uncompressed byte lengths. Zstd comes from libtinyexr3
+(tinyexr_zstd_*), so it stays CLI-side and libtexcomp remains dependency-free.
+
+CLI:
+  - `--format uni -o x.ktx2`  -> Zstd-supercompressed KTX2 (`-o x.uni` still
+    writes the raw TUNI container).
+  - `-i x.{uni,ktx2} -o out.bin --format bc7|bc1|astc|etc2` -> transcode; the
+    reader identifies a uni KTX2 by vkFormat==0 && supercompressionScheme==2 and
+    Zstd-decompresses the level before transcoding.
+  - write_uni_ktx2 / read_uni_ktx2 / transcode_uni helpers.
+
+Verified end-to-end: 73040 -> 66170 bytes (Zstd), the KTX2 header parses as a
+spec-valid vkFormat=0 / scheme=2 / 1-level file, and transcoding KTX2->BC7 is
+byte-identical to transcoding the raw uni (round-trip is lossless).
+
+Deferred (small): BasisLZ scheme (we use Zstd), a cheap non-re-encode ASTC
+repack, and uni mip chains (levelCount is 1 today).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+texcomp: uni mip chain support in the KTX2 stream
+…
+37054d8
+```
+`--format uni -o x.ktx2` now writes a full mip chain (was level 0 only).
+
+  - build_mips: 2x2 box-filter chain (from previous level, down to 1x1).
+  - write_uni_ktx2 / read_uni_ktx2 are multi-level: each mip is uni-encoded and
+    Zstd-compressed independently; data is packed smallest-first (KTX2
+    convention) and each level-index entry carries {byteOffset, compressed
+    byteLength, uncompressedByteLength}.
+  - transcode reads every level, transcodes it, and concatenates the block
+    streams (largest mip first). `-o x.uni` still writes a raw level-0 TUNI.
+
+Verified end-to-end: a 330x220 image -> 9 mip levels (down to 1x1); the level
+index parses as spec-valid (each uncompressed length matches the uni block size
+for that mip); transcode -> a 9-level BC7 chain (98272 bytes = sum of per-level
+BC7 sizes); and mip level 0 is byte-identical to the single-level transcode.
+c11-gate + uni-gate unchanged.
+
+The universal pipeline is now complete: encode -> mip'd Zstd-supercompressed
+KTX2 -> transcode to BC7 / BC1 / ASTC / ETC2.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+texcomp: BasisLZ-style codebook supercompression for the uni stream (…
+…
+1e1f0f2
+```
+…Zstd)
+
+Real BasisLZ (KTX2 supercompressionScheme = 1) is the Basis ETC1S codec and its
+own wire format -- it can't be backed by zstd, and faking scheme=1 on non-Basis
+data would produce files no transcoder can read. So this does NOT claim scheme=1;
+it stays scheme=2 (Zstd) and adds the mechanism that actually gives BasisLZ its
+size win: a bounded endpoint + selector codebook.
+
+  - --basis (default codebook cap 2048) / --basis-cap N on `--format uni
+    -o x.ktx2`. encode_uni_basis dedups each block's endpoint and selector
+    fields into codebooks; when distinct patterns exceed the cap, the most
+    frequent are kept and every block is remapped to its nearest entry (byte SSE
+    for endpoints, per-texel 16-weight SSE for selectors). The "UBAS" codebook
+    layer is nested inside the Zstd frame and auto-detected on read, so it uses
+    the zstd already vendored in tinyexr.
+
+Lossy rate knob (asakusa, vs 89 KB plain-Zstd): cap 2048 -> 67 KB @ 26.6 dB,
+1024 -> 50 KB @ 24 dB, 256 -> 23 KB @ 21 dB; a cap above the distinct-block count
+is lossless (transcode byte-identical to plain, proving the codec round-trips).
+It wins big on repetitive content and trades quality on photos -- the same
+character as ETC1S (real Basis softens this with RDO, deferred).
+
+texcomp-c11-gate + uni-gate unchanged. transcode reads the codebook transparently
+(BC7/BC1/ASTC/ETC2).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+texcomp: RDO for the uni codebook (Lloyd refinement + optional rate t…
+…
+8219447
+```
+…erm)
+
+The codebook was seeded with the most-frequent patterns and assigned nearest --
+good but not optimal. This adds rate-distortion optimization:
+
+  - Lloyd / k-means refinement (8 iters): after seeding, iterate assign-to-
+    nearest then recompute each centroid as the mean of its assigned blocks
+    (per-byte for endpoints; per-texel over the 16 unpacked weights, re-packed,
+    for selectors). The entries become optimal representatives.
+  - Optional rate term (--basis-rdo LAMBDA, default 0): the final assignment
+    minimizes distortion + LAMBDA*bits(c), bits from -log2(freq), biasing toward
+    popular entries for a lower-entropy index stream.
+
+Measured (asakusa, same codebook cap, vs pre-RDO nearest-only): cap 2048
+26.6 -> 28.9 dB, cap 1024 24.0 -> 26.8 dB, cap 256 21.0 -> 24.2 dB -- ~+2.3-3.2 dB
+at the same size, purely from Lloyd. The rate term is marginal here (the codebook
+itself dominates the file), so it defaults off. A cap above the distinct-block
+count is still exactly lossless (transcode byte-identical to plain).
+
+texcomp-c11-gate + uni-gate unchanged (added <math.h> for log()).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+tools: complete third-party attribution for texpipe/envmap/uni
+…
+fcc2e38
+```
+The texcomp NOTICE.md already credited astcenc/bcdec/Basis/QuickBC7/zstd/
+stb_image, but the newer texpipe, envmap and uni work shipped without matching
+third-party notices. Fill the gaps (licenses/copyrights in the README and the
+relevant file headers):
+
+  * texpipe/README.md: add a "Third-party notices" section -- stb_image
+    (Sean Barrett, public domain/MIT; bundled and compiled into the CLI),
+    AMD CubeMapGen edge fixup, Toksvig 2005 roughness, octahedral maps, and
+    the tir/texcomp/TinyEXR-core dependency licenses.
+  * envmap/README.md: add a "Third-party notices" section -- envmap ships no
+    third-party code (TinyEXR-core EXR I/O only) but implements published
+    algorithms; credit Karis 2013 (split-sum IBL), Cigolle et al. 2014
+    (octahedral), van der Corput/Hammersley, Ramamoorthi & Hanrahan 2001 /
+    Sloan 2008 (real SH), Wang et al. 2009 (spherical gaussians).
+  * envmap file headers: cite the octahedral survey (envmap_proj.c), the SH
+    references (envmap_sh.c) and the SG reference (envmap_sg.c).
+  * texcomp/NOTICE.md: extend the Basis Universal entry to cover the `uni`
+    universal-transcodable intermediate and its BasisLZ-*style* codebook
+    (explicitly NOT the Basis bitstream / ETC1S codec / scheme=1); note that
+    the uni KTX2 writer uses zstd (scheme 2); add `uni` to the feature list.
+
+Comment/metadata only -- no code changes. texcomp/texpipe/envmap pure-C11
+gates all pass.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+tools: add tools-test / tools-test-all aggregate gate targets
+…
+f1f5ac9
+```
+The per-tool gates (texcomp-*, resize-*, texpipe-*, envmap-*) were only
+invokable individually -- nothing ran them together, so CI had to name each one
+or silently skip them. Add two aggregates:
+
+  * tools-test        -- all self-contained pure-C11 gates: texcomp c11/unit/
+                         uni/xbc7, resize c11/unit, texpipe c11/unit, envmap
+                         c11/unit/pbr. No C++, no astcenc; fast.
+  * tools-test-all    -- tools-test plus the astcenc conformance cross-checks
+                         (texcomp-astc-hdr-gate, texcomp-astc-arm-gate); these
+                         compile the vendored deps/astcenc C++ so they need a
+                         C++ toolchain.
+
+Both added to .PHONY and `make help`. `make tools-test` passes end-to-end.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+tir: SIMD the antiring h_minmax + NEON premult (were scalar on every …
+…
+01c4d81
+```
+…ISA)
+
+`h_minmax` (the anti-ringing per-tap min/max reduction) was scalar on *every*
+backend, so the HDR/RGBA antiring path paid scalar cost even under AVX2/NEON.
+Vectorize the RGBA (ch==4) case as one min/max per tap across the 4 channel
+lanes (min/max are exact -> within the ULP budget):
+
+  * SSE2 `h_minmax_sse2` -- via the cumulative dispatch layering this also
+    covers SSE4.1 and AVX2 (they don't re-override the slot).
+  * NEON `h_minmax_neon`.
+
+Other channel counts stay scalar (a wide load would over-read the last tap).
+
+Also add NEON `premult4`/`unpremult4` (the RGBA premultiply pair NEON lacked,
+so ARM ran them scalar); they preserve alpha and keep filtered RGB where a==0,
+matching the scalar/OIIO behavior bit-for-bit.
+
+Verified within the existing SIMD-vs-scalar parity harness (test_simd_levels,
+err < 1e-5): resize-test 777 pass (avx2, ASan clean), resize-arm-test 715 pass
+(neon under qemu), resize-c11-gate OK.
+
+Deferred (lower ROI / OOB-safety): normalize3 SIMD (AoS xyz gather needs a
+tail-safe 4-pixel deinterleave, and it is not in the parity harness) and the
+SSE2 h_dot[1]/h_dot[2] pre-AVX2 RGB gap.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+tir: document the filter_scale / gaussian_sigma accepted ranges
+…
+a4043ab
+```
+validate_options rejects filter_scale outside (0, 64] and gaussian_sigma
+outside (0, 32] with TIR_ERROR_INVALID_ARGUMENT (tir_core.c:139-143), but the
+header didn't state the upper bounds. Note them. (num_threads' build-flag
+requirement and edge_y WRAP whole-image buffering were already documented.)
+
+Header comment only.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+texcomp: optional weighted-PCA BC7 endpoint seeding (opt-in, keep-best)
+…
+b8893c8
+```
+The BC7 encoder seeds each subset's endpoints from the luma-extremes pixels.
+That axis is wrong when a block's color spread is off the luma axis (chroma
+varying at ~constant luminance). Add a weighted-PCA seed: mean-center the
+subset, power-iterate the (channel-weighted) covariance for the principal axis,
+and take the extreme-projection pixels. tc_build_candidate evaluates the luma
+seed always and, when enabled, the PCA seed too, keeping the lower-error block
+-- monotonic, never worse than before.
+
+MEASURED marginal: real 4x4 blocks rarely carry large off-luma-axis spread and
+BC7's per-texel selector search already compensates, so the gain is ~+0.09 dB
+on a photo (asakusa exhaustive 36.58 -> 36.67; quick 34.24 -> 34.36) and ~0 on
+smooth synthetics, at ~1.7x-2.3x encode cost (the seed doubles per-candidate
+work). Because that cost/benefit is below what belongs on by default, it is
+gated behind a new opt-in flag:
+
+  * tc_bc7_options.pca_endpoints (default 0) -- with it 0, output is
+    byte-identical to before (texcomp-test unchanged; no perf/quality change).
+  * CLI --bc7-pca.
+
+Uses the existing per-channel error weights (tc_bc7_cw) to weight the axis.
+c11-gate, texcomp-test, xbc7-gate, uni-gate all pass; --bc7-pca CLI round-trips.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+texcomp: ASTC HDR alpha endpoint codec (CEM 15 pack/unpack)
+…
+440725d
+```
+ASTC HDR was RGB-only (void-extent + CEM 7/11). Add the endpoint codec for the
+HDR-alpha modes -- faithful scalar ports of astcenc's quantize_hdr_alpha /
+hdr_alpha_unpack (the extra 2 values beyond CEM 11's RGB), plus CEM 15 wrappers
+(HDR RGB direct + HDR alpha = 8 values):
+
+  * tc_astc_hdr_alpha_pack / _unpack -- alpha endpoints in the LNS16 domain,
+    same scale as the RGB endpoints, so tc_astc_lns16_to_sf16 yields fp16.
+    Colour quant is fixed at 256 (level 20) in the HDR path, where quant_color
+    is the identity, so the pack's quantize/reconstruct checks drop out and the
+    delta submode matches astcenc whenever its range check passes. Signed-delta
+    left shift done via unsigned to stay UB-free.
+  * tc_astc_cem15_pack / _unpack = CEM 11 RGB + the alpha codec.
+
+Unit test: round-trips 5 alpha pairs to fp16 within the delta-submode precision
+(flat fallback on far-apart alphas is coarser, as expected); RGB still carries
+through as CEM 11. texcomp-test, c11-gate, and the astcenc hdr cross-check gate
+all pass (existing HDR output unchanged).
+
+This is the validated foundation (matching how CEM 11 landed: endpoint codec
+first, block encoder second). REMAINING for user-facing HDR-alpha output: a
+CEM 15 block encoder (8 values need weight range 6 to fit at quant 256 -- range
+8's 48 weight bits leave only 63 colour bits, one short of 8x8) and an RGBA-HDR
+input entry point (tc_astc_hdr_compress_rgbaf); then an astcenc block-level gate.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+texcomp: ASTC HDR CEM 15 block encoder + RGBA-HDR compress API
+…
+812d67b
+```
+Completes HDR-alpha support on top of the CEM 15 endpoint codec: HDR is no
+longer RGB-only.
+
+  * tc_encode_astc_hdr_cem15_block (texcomp_astc.c): single-subset HDR RGB +
+    HDR alpha 4x4 block. 8 endpoint values at colour quant 256 need 64 colour
+    bits, which forces weight range 6 (QUANT_6, quant_method 4, ~42 weight bits
+    -> 111-42=69 colour bits available); weight range 8 would leave only 63 and
+    the decoder would derive a lower colour quant and corrupt the 8-bit endpoint
+    bytes. RGBA LNS bbox endpoints with 4-channel least-squares refinement
+    (tc_astc_hdr_lsq4); per-texel weight = projection onto the 4D endpoint line.
+  * tc_astc_hdr_compress_rgbaf (public): float RGBA -> ASTC HDR, CEM 15 blocks
+    with an exact FP16 void-extent for constant blocks (now carrying real
+    alpha). Mirrors tc_astc_hdr_compress_rgbf.
+
+Validated by the astcenc conformant decoder in texcomp-astc-hdr-gate: a new
+RGBA gradient case decodes at 54.74 dB across all four channels (alpha
+included), proving the CEM 15 field, the 8-value endpoint stream (6 RGB + 2 HDR
+alpha) and the QUANT_6 weights all assemble correctly. c11-gate, texcomp-test,
+hdr-gate all pass.
+
+Same GOTCHAs as the CEM 11 path handled: memset(out)/memset(weightbuf) before
+the bit-reverse copy, quantize_color_values before ise_encode. Remaining
+(optional): dual-plane CEM 15 for independent alpha; the pure-C HDR reference
+decoder + CLI (--format astc_hdr on a 4-channel EXR) don't yet route alpha.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Copilot
+AI
+review requested due to automatic review settings
+July 4, 2026 18:09
+Copilot started reviewing on behalf of
+syoyo
+July 4, 2026 18:10
+View session
+claude
+Bot
+commented
+Jul 4, 2026
+Copy link
+Copy Markdown
+Review
+Heads up on methodology first: this PR is 56,907 additions across 95 files / 83 commits, adding an entirely new texture toolchain (tools/texcomp, tools/resize, tools/texpipe, tools/envmap) plus a vendored copy of Arm's astcenc. That's roughly on the same order as the entire existing codebase. A true line-by-line audit of that volume isn't realistic in one review pass, so I focused on architecture/integration risk, build/CI wiring, and spot-checks of representative files (bit-packing in texcomp_astc.c, overflow helpers in texcomp.c, Makefile wiring, licensing docs) rather than exhaustively reviewing every codec.
+Scope (the main thing worth discussing before merging)
+Per AGENTS.md, this repo's charter is "the pure-C11 EXR loader/writer under include/exr.h + src/*.c". Everything added here — BC1/3/5/6H/7, ETC2/EAC, ASTC LDR/HDR encoders, a separate image resizer, a texture mip/packing pipeline, and an IBL/envmap baker — has no interaction with EXR reading or writing at all; it's a general-purpose texture-compression project that happens to live under tools/. That's a legitimate, well-engineered body of work on its own merits, but it roughly triples the surface area maintainers of an EXR library now need to reason about (license mix, vendored third-party code, SIMD kernels per ISA, its own CLIs). Worth an explicit maintainer decision on whether this belongs in tinyexr long-term vs. a standalone sibling project, rather than landing as a fait accompli in one PR. If it's going to live here, I'd suggest merging the four tools (texcomp/resize/texpipe/envmap) as separate, smaller PRs so each can actually be reviewed on its own.
+CI gap
+The new Makefile targets (tools-test, tools-test-all, texcomp-*, resize-*, texpipe-*, envmap-*) are extensive and, per the commit messages, were run locally with ASan/UBSan/LeakSanitizer and are "all green." However, none of them appear wired into .github/workflows/*.yml, .travis.yml, or .drone.yml. As it stands, the PR description's test results are a one-time snapshot — nothing will re-run these ~29K lines of new C automatically on future pushes/PRs. Please add at least tools-test to CI in a follow-up, otherwise regressions here will go undetected indefinitely (and the "all green" claim can't be independently verified by reviewers today).
+Things done well
+Build integration is non-invasive: make/make all (the default target) is untouched — every new target is opt-in, so this can't break existing consumers who just build the core library.
+Vendored/ported code is well attributed: tools/texcomp/NOTICE.md clearly documents provenance for astcenc, bcdec table transcriptions, Basis Universal concepts, zstd, and stb_image, each with license and specific-function attribution. That's a good model for a PR this size.
+Overflow-safety discipline carries over from the core library's convention (exr_mul_ovf/exr_add_ovf) — tc_mul_ovf_size in texcomp.c gates the block-count multiply before allocation.
+Real correctness engineering: a from-scratch ASTC reference decoder was written specifically to catch encoder bugs (and per the commit log, did catch three real ones — CEM 8/12 endpoint ordering, dual-plane weight interleaving, and a partition path silently overriding better encodings). SIMD kernels are tested for byte-identical parity against scalar fallbacks, and multithreaded encode is tested for byte-identical output across thread counts (and a real data race in the shared decimation cache was caught and fixed).
+Smaller items
+tools/texcomp is licensed Apache-2.0 while the rest of the repository is BSD-3-Clause (documented as an intentional, compatible choice in NOTICE.md). That's fine legally, but it's worth the maintainer explicitly signing off on carrying a second license in the tree, since it affects downstream redistribution obligations.
+deps/astcenc is vendored as a plain in-tree copy rather than a git submodule, unlike deps/ZFP which is a submodule (.gitmodules). That's an inconsistent vendoring strategy for third-party C++ code and means future upstream security/bug fixes in astcenc have to be manually diffed in rather than tracked via submodule bump.
+The core library has a fuzzing target (make fuzz, libFuzzer + corpus replay under ASan/UBSan/LSan) for hostile EXR input. The new tools' CLIs accept untrusted image files too (PNG via stb_image, DDS/KTX2 output paths) — consider whether an equivalent fuzz target is warranted for texcomp/texpipe given they're new, large, and handle external file formats, even though stb_image itself is already used elsewhere in the repo.
+Given the size, I'd lean toward requesting this be split into reviewable increments (or at minimum getting explicit maintainer agreement on hosting this scope here) before merging as-is, and closing the CI gap so the extensive test suite that was clearly built for this actually runs on an ongoing basis.
+Copilot
+AI
+reviewed
+Jul 4, 2026
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Copilot wasn't able to review this pull request because it exceeds the maximum number of lines (20,000). Try reducing the number of changed lines and requesting a review from Copilot again.
+Hide details
+View details
+syoyo
+merged commit 8b89eea
+into
+release
+Jul 4, 2026
+14 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,210 @@
+Vertex Formats Part 1: Compression – Yosoygames
+Skip to content
+Home » Graphics » Vertex Formats Part 1: Compression
+So, I tweeted
+What I just did: “Switch to SNORM16 for position and multiply the vertex by 64.0 when rendering the player’s cockpit for enough precision” – Me, right now: https://www.youtube.com/watch?v=Tnod9vtB4xA
+And that sparked waaay more attention than I thought. But it also made me realize lots of devs have incomplete information and that tweet feed is an excellent summary of the state of the art vertex loading. So I thought making it into a blogpost.
+The problem, aka “the tradition”
+If we go back to DX7-style (and later the dreaded D3DFVF_ flags) and GL style of storing vertices, it was quite common to see the traditional vertex defined like this:
+```
+struct Vertex
+{
+    float3 position;
+    float3 normal;
+    float2 uv;
+};
+```
+Everything is 32-bit floating point and the vertex is exactly 32-bytes (a magic number for vertices said to speed up rendering)
+Later on, we would add another float4 for the tangent and the bitangent’s sign (now at 48 bytes), and more values if skeleton animation was used for skinning inside the GPU. The result was a big, fat vertex.
+Reducing the vertex size
+Turns out 32-bit floating point is way too much for most user’s needs. If done right a vertex can contain position, normals, tangent, bitangent, UVs in just 18 bytes + 2 of padding (that’s less than half the 48 bytes needed if using full floating point!).
+Turning to 16-bit
+As I said, 32-bit is often too much. So naturally, we resort to 16-bit. There are three flavours: HALF, UNORM and SNORM.
+16-bit HALF
+Wikipedia has an excellent 16-bit half floating point format. Basically consists on the same as 32-bit floating point, but 1 bit for sign, 5 bit for exponent, and 10 bit for the mantissa.
+Pros of 16-bit half:
+Can represent arbitrary numbers in the range [-65520; 65520)
+“It just works” without any additional steps.
+Cons of 16-bit half:
+You get very poor precision.
+Once you’re past 64.0f, precision gets really bad. By the time you’re past 128 objects look blocky like you were in Minecraft.
+Integer numbers past 2048 cannot be represented correctly (first it’s only multiples of 2, then multiples of 4, and so on)
+Definitely not for big meshes
+A sphere of radius 200 in 16-bit half gets really poor precision. Thanks to Sergio Silva Muñoz for the picture
+Because C++ doesn’t have a natural representation for half (and popular CPUs out there don’t either), you’ll have to treat halfs using uint16_t and a conversion routine. Because the code is too long for this post, you can look it up at Ogre’s source code.
+Update: I am being told modern x86 CPUs have hardware half support, AMD since Bulldozer (and Jaguar) and Intel since Ivy Bridge (thanks Sebastian Aaltonen)
+Alliance Airwar uses half for almost all of its meshes, while using SNORM for the cockpit with a multiplication of 64.0f passed to the world matrix for the cockpit. The cockpit required a lot of precision for the buttons, and even if I tried to scale the mesh down, the precision just wasn’t enough. The buttons would constantly “z fight” (it’s not really z fighting) with the panel behind them.
+16-bit SNORM and UNORM
+Other people prefer 16-bit xNORM variants because they tend to give really good precision and it is evenly distributed. The “U” and “S” in UNORM & SNORM stand for Unsigned and Signed respectively.
+In case you’re wondering, 16-bit UNORM is simply (value / 65535.0f). That is, it can only represent values in the range [0; 1] while SNORM can only represent in the range SNORM [-1; 1].
+SNORM has a particularity though: signed integer shorts are in the range [-32768; 32767], meaning that there are more negative numbers than positive ones (excluding the 0 in case you’re counting it as a positive).
+GPUs solve this asymmetry by mapping both the value -32768 and -32767 to -1.0f. Therefore the conversion routines are as follow:
+```
+
+static inline int16 floatToSnorm16( float v )
+{
+	//According to D3D10 rules, the value "-1.0f" has two representations:
+	//  0x1000 and 0x10001
+	//This allows everyone to convert by just multiplying by 32767 instead
+	//of multiplying the negative values by 32768 and 32767 for positive.
+	return static_cast<int16>( clamp( v >= 0.0f ?
+												(v * 32767.0f + 0.5f) :
+												(v * 32767.0f - 0.5f),
+											-32768.0f,
+											 32767.0f ) );
+}
+
+static inline float snorm16ToFloat( int16 v )
+{
+	// -32768 & -32767 both map to -1 according to D3D10 rules.
+	return max( v / 32767.0f, -1.0f );
+}
+```
+So… we have a problem now. 16-bit SNORM can only represent in the range [-1; 1]. So if your mesh is bigger than that, it cannot be represented!
+The solution to that is to simply scale your mesh down to that range, and later scale it back up by the inverse value in the vertex shader.
+Some people choose to use a hard coded value e.g. divide everything by 64.0f and then multiply by 64.0f in the shader, and any mesh larger than that cannot be represented. Other people prefer to compute the AABB first, in order to find the largest value of each axis, and then use that value. This allows to dynamically extend 16-bit SNORM to any mesh regardless of its size (but bigger meshes sacrifice precision quality) while maximizing precision for small ones.
+To avoid the extra multiply in the vertex shader, you can bake the scale factor in the world matrix. So, to summarize:
+Pros:
+Has excellent, uniform precision
+Excellent precision for small meshes
+Cons:
+Needs extra work to make it work on any mesh
+Needs more CPU overhead to bake the scale mesh into the world matrix, or sacrifices GPU overhead to perform the multiply in the VS separately.
+Turning position and UVs into 16-bit
+Before I continue, it is very important that you stick to (u)short2 and (u)short4. Try to avoid short1 & short3. Same goes for half. The reason is simply that short1 and short3 cause too many headaches because of implicit alignment or driver bugs, as GPUs often prefer everything to be at least aligned to 4 bytes (if not more), and short1 and short3 leave your vertex stream unaligned. Even if you were to define a short3 followed by a short1, you still risk yourself to driver bugs or extra padding you weren’t expecting. Some APIs (e.g. Metal) don’t even have short1 & short3 vertex formats.
+OK, back to the post: Position is a natural candidate. So we’ll store it as a half4 or snorm4:
+```
+
+snorm4 position; //.w is unused
+```
+Same happens for UVs. But UVs you need to be more careful: if the UVs are in the usual range [0; 1] then UNORM is best for them. But if they go outside that range you’re going to need extra precautions. If you store them as half and only use the[0; 1] range, beware there’s only 1024 different values between [0.5; 1.0]. That means that for textures whose resolution is larger than 2048×2048, when the UVs > 0.5, they will change in increments bigger than a pixel! Ouch.
+So:
+```
+
+unorm2 uv;
+```
+Dealing with normals
+You could repeat the same process and use 16-bit per component for the normals. Some people even use 8-bit, or use RGB10_A2; which gets them 10 bits and allows them some interesting tricks with the remaining 2 bits.
+However normals often require the tangent for normal mapping and the bitangent (or at least the sign for the cross product). For that, we’ll turn to a totally different encoding: QTangents.
+QTangents is a form of encoding the TBN normals as a quaternion. But it is a special quaternion, in order to store the sign of the bitangent. They exploit the mathematical property of quaternions in which states that Q = -Q
+The sign of bitangent is stored in q.w; so if the bitangent needs a negative sign, q.w is negative by negating Q:
+```
+
+Matrix3 tbn;
+tbn.SetColumn( 0, vNormal );
+tbn.SetColumn( 1, vTangent );
+tbn.SetColumn( 2, vBiTangent );
+
+Quaternion qTangent( tbn );
+qTangent.normalise();
+
+//Make sure QTangent is always positive
+if( qTangent.w < 0 )
+	qTangent = -qTangent;
+
+//If it's reflected, then make sure .w is negative.
+Vector3 naturalBinormal = vTangent.crossProduct( vNormal );
+if( naturalBinormal.dotProduct( vBinormal ) <= 0 )
+	qTangent = -qTangent;
+```
+But we’re not done yet. As Crytek found out, this code is faulty when using SNORM. This is because when qTangent.w is exactly 0, there is no negative 0 for SNORM. Crytek’s solution was to add a bias, so that the sign of the bitangent is negative when q.w < bias, instead of testing q.w < 0. This means that q.w can never be 0. It’s a small precision sacrifice to solve an edge case. The final code thus reads:
+```
+
+Matrix3 tbn;
+tbn.SetColumn( 0, vNormal );
+tbn.SetColumn( 1, vTangent );
+tbn.SetColumn( 2, vBiTangent );
+
+Quaternion qTangent( tbn );
+qTangent.normalise();
+
+//Make sure QTangent is always positive
+if( qTangent.w < 0 )
+	qTangent = -qTangent;
+
+//Bias = 1 / [2^(bits-1) - 1]
+const float bias = 1.0f / 32767.0f;
+
+//Because '-0' sign information is lost when using integers,
+//we need to apply a "bias"; while making sure the Quatenion
+//stays normalized.
+// ** Also our shaders assume qTangent.w is never 0. **
+if( qTangent.w < bias )
+{
+	Real normFactor = Math::Sqrt( 1 - bias * bias );
+	qTangent.w = bias;
+	qTangent.x *= normFactor;
+	qTangent.y *= normFactor;
+	qTangent.z *= normFactor;
+}
+
+//If it's reflected, then make sure .w is negative.
+Vector3 naturalBinormal = vTangent.crossProduct( vNormal );
+if( naturalBinormal.dotProduct( vBinormal ) <= 0 )
+	qTangent = -qTangent;
+```
+Decoding the QTangent from the vertex shader is easy, as it is simple quaternion math:
+```
+
+float3 xAxis( float4 qQuat )
+{
+	float fTy  = 2.0 * qQuat.y;
+	float fTz  = 2.0 * qQuat.z;
+	float fTwy = fTy * qQuat.w;
+	float fTwz = fTz * qQuat.w;
+	float fTxy = fTy * qQuat.x;
+	float fTxz = fTz * qQuat.x;
+	float fTyy = fTy * qQuat.y;
+	float fTzz = fTz * qQuat.z;
+
+	return float3( 1.0-(fTyy+fTzz), fTxy+fTwz, fTxz-fTwy );
+}
+
+float3 yAxis( float4 qQuat )
+{
+	float fTx  = 2.0 * qQuat.x;
+	float fTy  = 2.0 * qQuat.y;
+	float fTz  = 2.0 * qQuat.z;
+	float fTwx = fTx * qQuat.w;
+	float fTwz = fTz * qQuat.w;
+	float fTxx = fTx * qQuat.x;
+	float fTxy = fTy * qQuat.x;
+	float fTyz = fTz * qQuat.y;
+	float fTzz = fTz * qQuat.z;
+
+	return float3( fTxy-fTwz, 1.0-(fTxx+fTzz), fTyz+fTwx );
+}
+
+float4 qtangent = normalize( input.qtangent ); //Needed because of the quantization caused by 16-bit SNORM
+float3 normal = xAxis( qtangent );
+float3 tangent = yAxis( qtangent );
+float biNormalReflection = sign( input.qtangent.w ); //We ensured in C++ qtangent.w is never 0
+float3 vBinormal = cross( normal, tangent ) * biNormalReflection;
+```
+Thus, with QTangents encoding and a snorm4 variable, we can store the entire TBN matrix in just 8 bytes!
+QTangent is not the only encoding. For example Just Cause 2 uses a different approach with longitude and latitude and just 4 bytes.
+Dealing with skinning
+A popular approach for storing vertex weights appears to be either RGBA8 or RGB10_A2, and have the final component derived mathematically, since w3 = 1.0f – w0 – w1 – w2; that leaves the last component of the input data for something else.
+So why should I care about any of this?
+We just lowered the size per vertex by more than a half (pun intended). This is important because:
+It lowers the required memory bandwidth. If you’re on mobile, this means less power consumption.
+Prefers ALU over bandwidth (ALU grows at the rate of Moore’s Law, bandwidth doesn’t)
+Occupies less RAM. If you’re tight on GPU RAM (again, mobile!) this is very important.
+If we go back to our vertex format, it should now look more like this from C++:
+```
+struct Vertex
+{
+    uint16_t position[4];
+    uint16_t qtangent[4];
+    uint16_t uv[2];
+};
+```
+This needs as little as 20 bytes, and position[3] is actually free if your vertex shader assumes it’s 1.0f
+If all else fails and precision is paramount, then you can fallback to using 32-bit. However that should be your last resort, and compression your default.
+If you’re using Ogre 2.1; we support most of this out of the box. Running OgreMeshTool with “-O puq” parameters will optimize the mesh to use half16 for position and UVs, and QTangents. The only feature we don’t support at the moment is calculating the scale for SNORM position and embedding it into the world matrix.
+Don’t miss the next and final entry in this series: Vertex Formats Part 2: Fetch vs Pull
+One thought on “Vertex Formats Part 1: Compression”
+Quite interesting reading!
+The snorm16ToFloat() conversion is supposed to happen transparently. Use R16G16B16A16_SNORM to describe the position vertex attribute and have the HW do the normalization. Is that correct?
+If the above is correct then “Prefers ALU over bandwidth” refers to HW that is using ALU to normalize vertex input. Correct?
+Comments are closed.

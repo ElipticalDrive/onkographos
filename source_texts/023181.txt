@@ -1,0 +1,2315 @@
+Scaling Point-based Differentiable Rendering for
+Large-scale Reconstruction
+Hexu Zhao
+New York University
+New York, NY, USA
+hz3496@nyu.edu
+arXiv:2512.20017v1 [cs.DC] 23 Dec 2025
+Jianhao Huang
+New York University
+New York, NY, USA
+jh9885@nyu.edu
+Ang Li
+Pacific Northwest
+National Laboratory (PNNL)
+Richland, WA, USA
+University of Washington
+Seattle, WA, USA
+ang.li@pnnl.gov
+Xiaoteng Liu
+New York University
+New York, NY, USA
+xiaoteng.liu@nyu.edu
+Youming Deng
+Cornell University
+Ithaca, NY, USA
+ymdeng@cs.cornell.edu
+Jinyang Li
+New York University
+New York, NY, USA
+jinyang@cs.nyu.edu
+Yanfei Li
+Pacific Northwest
+National Laboratory (PNNL)
+Richland, WA, USA
+yanfei.li@pnnl.gov
+Aurojit Panda
+New York University
+New York, NY, USA
+apanda@cs.nyu.edu
+NeRF [5, 62] in terms of both rendering speed and rendered
+image fidelity. Beyond traditional graphics applications in
+gaming and AR/VR[36, 78], PBDR has also been essential to
+build photo-realistic simulators for training autonomous driving and embodied AI [67, 85, 94], and serve as a foundational
+representation for World Models [59, 83].
+Training a PBDR model requires a dataset of images with
+diverse camera views that capture the scene from different
+positions and orientations. Each training iteration renders
+a batch of images according to their camera views and the
+current point parameters, compares the rendered results with
+the actual images, and updates the parameters using the calculated gradients. In order to accurately reconstruct a large
+3D scene at high-resolution [23, 24, 41, 57, 58], one must correspondingly scale the size of the PBDR model, aka the number
+of points. Large models in practice can reach hundreds of millions or even billions of points. The resulting large model size
+and computational load make it impractical to train on a single GPU—or even a single node—within reasonable time and
+memory constraints. Therefore, training must be distributed
+across multiple GPUs.
+Recently, there have been a few distributed PBDR training
+systems [90, 96]. However, they have two major limitations.
+First, existing systems are specialized to a single PBDR algorithm, namely, the very popular 3D Gaussian Splatting [40].
+However, as developing better PBDR algorithms is a very
+active research area, a distributed training system must be
+general to support different algorithms. Second, existing systems randomly partition the model state (aka points) across
+Abstract
+Point-based Differentiable Rendering (PBDR) enables highfidelity 3D scene reconstruction, but scaling PBDR to highresolution and large scenes requires efficient distributed training systems. Existing systems are tightly coupled to a specific
+PBDR method. And they suffer from severe communication
+overhead due to poor data locality. In this paper, we present
+Gaian, a general distributed training system for PBDR. Gaian
+provides a unified API expressive enough to support existing
+PBDR methods, while exposing rich data-access information,
+which Gaian leverages to optimize locality and reduce communication. We evaluated Gaian by implementing 4 PBDR
+algorithms. Our implementations achieve high performance
+and resource efficiency: across six datasets and up to 128 GPUs,
+it reduces communication by up to 91% and improves training
+throughput by 1.50—3.71×.
+1
+Xiwen Min
+New York University
+New York, NY, USA
+xm2336@nyu.edu
+Introduction
+Point-based Differentiable Rendering (PBDR) methods [4,
+9, 31, 33, 40, 53] have recently achieved remarkable breakthroughs in complex scene reconstruction and photorealistic novel view synthesis, which are long-standing challenging tasks in computer graphics. Unlike traditional rendering
+methods, this new approach models a 3D scene using a large
+collection of parameterized “points” (e.g. 3D Gaussian [40])
+and a differentiable rendering pipeline. The parameters of
+each point specifies its 3D position, color, opacity etc and
+are learned through mini-batch gradient descent to achieve
+accurate reconstruction. PBDR methods have been shown
+to outperform previous neural rendering approach such as
+1
+Computation
+GPUs, Gaian attains 12.7× speedup. To the best of our knowledge, we manage to train the largest PBDR point cloud with
+500 million points (29.5 billion parameters), achieving state-ofthe-art reconstruction quality on the MatrixCity dataset [49].
+Finally, we also implement and evaluate a much more complex
+PBDR algorithm for 3D video reconstruction.
+In summary, this paper makes the following contributions:
+• We propose a set of general and easy-to-use programming APIs to support distributed training of a variety
+of PBDR algorithms. Our APIs hide algorithmic details
+from the underlying distribution system to achieve generality while also expose data access pattern to enable
+locality optimization.
+• We build Gaian to support distributed PBDR training.
+We develop a two-stage procedure to optimize locality of access. It consists of offline optimization for the
+partitioning of model state (aka points) and online optimization for assigning compute (aka image rendering)
+to GPUs at each training iteration.
+• We built and evaluated four PBDR algorithms including
+one that performs complex 3D video reconstruction.
+The variety of algorithms demonstrate the generality
+of Gaian’s APIs. Our large-scale evaluations up to 128
+GPUs show that Gaian achieves good training throughput and scalability compared to existing systems.
+• Using Gaian, we train the largest 3D Gaussian splatting
+model to date with up to 500 million points and achieve
+state-of-the-art reconstruction quality.
+Communication
+Rubble
+Ithaca365
+Campus
+BigCity Street
+Sci-Art
+BigCity Aerial
+77.0%
+80.1%
+85.6%
+78.6%
+77.4%
+70.0%
+0
+20
+40
+60
+80
+100
+Figure 1. Communication time as a fraction of each training step time
+in an existing system for distributed 3D Gaussian Splatting [90]. Y-axis
+lists the dataset with its experiment setting given by Table 1.
+GPUs (thus addressing the memory capacity limit), and randomly assign different GPUs to render each image in a training batch. Unfortunately, this strategy requires significant
+data movement, leading to high communication costs: during
+training, each GPU tends to access points stored across all
+GPUs in order to render its images. As shown in Figure 1,
+communication time accounts for 70–85% of each training
+step across different datasets in an existing system [96].
+In this paper, we propose a distributed training system,
+Gaian. It provides a common interface that hides the internal differences between PBDR algorithms while exposing
+those aspects necessary for distribution. Thus, once developers implement a PBDR algorithm using Gaian’s interface, the
+distribution of training can be done transparently.
+Gaian partitions points and the rendering of images across
+GPUs. However, rather than partitioning them randomly like
+existing systems [90, 96], Gaian optimizes the placement of
+points and image rendering to exploit locality of access. Our
+setting for locality optimization differs from other types of
+distributed computation (e.g. big data analytics, distributed
+GNN and recommendation) in important ways (§7): 1) Gaian
+is explicitly aware of PBDR’s access pattern via its programming API, and 2) there exist two forms of spatial locality:
+locality among points and locality between cameras and their
+viewable points. The former remains stable over a relatively
+long time period. To leverage these insights, we develop a twostage optimization strategy that combines offline and online
+optimization. The offline component optimizes the placement
+of points according to the access pattern of images to points
+over the entire dataset. Points likely to be access together are
+assigned to the same GPU to minimize communication. The
+online component that determines how to assign images in
+a training batch to GPUs based the access pattern of images
+within a given batch. As off-the-shelf optimizers are too slow
+for online optimization, we propose an optimizer based on
+Linear Sum Assignment [12] and iterative local search [32].
+We build Gaian and evaluate its performance using six different datasets for up to 128 GPUs. Our experiments show
+that Gaian outperforms the existing system (gsplat [90]) by
+1.50–3.71×. Gaian’s locality-aware distribution reduces communication volume by up to 91%. When scaling from 8 to 128
+2
+Background and Motivation
+2.1 Point-based Differentiable Rendering (PBDR)
+Point-based Differentiable Rendering methods are used
+to reconstruct complex scenes and synthesize novel views
+using a collection of images captured from diverse camera
+views of the scene. It has wide applications ranging from
+AR/VR [78, 86], simulator for robotics and autonomous systems [67, 85, 94] and World Models [59, 83]. Figure 2 shows an
+example of reconstructing a 3D model of the living room using
+multiple 2D images from different camera views. Given the
+room’s 3D model, users can rotate, zoom into, and generate
+a photorealistic image from a new viewpoint never previously captured. Beyond static scenes, some PBDR algorithms
+[50, 82, 89] can also reconstruct dynamic scene that evolves
+over time (aka, 3D Video).
+PBDR models and their rendering. In PBDR methods,
+the scene is modeled as a learnable “point cloud” which is a
+(potentially very large) collection of points whose parameters
+can be optimized through training. Each “point”, which is actually a 3D ellipsoid, has several (parameterized) attributes that
+attempt to capture geometry and appearance smoothly. The
+first PBDR algorithm, 3D Gaussian Splatting (3DGS) [40] uses
+3D Gaussian ellipsoid with five attributes: 3D position, scales,
+rotation, opacity, and color-related spherical harmonics. Since
+then, a large number PBDR algorithms have been proposed
+2
+2D Images
+3D Scene
+B
+B
+A
+A
+Reconstruct
+(a) Random Distribution
+Figure 2. PBDR algorithms are used to reconstruct complex 3D scenes
+using 2D images with different camera views. This example is based a
+dataset in [86].
+(b) Locality-aware Distribution
+Figure 3. Random distribution vs. locality-aware distribution of model
+state and compute.
+with different point types, including 2D Gaussian [33], 3D
+Convex [31], Triangle Mesh [30], Generalized Exponential
+Kernel [27] and many others [4].
+To render an image given a model and a camera view, a
+PBDR algorithm proceeds through several steps. First, as a
+performance optimization, it discards points that lie outside
+of the camera’s field of view (frustum). Then, it projects each
+of the remaining points into the camera’s 2D image plane as
+a “splat”. Lastly, it sorts these view-dependent splats by their
+distance to the camera plane, and the renderer computes the
+color of each pixel front to back, blending the overlapping
+splats until full opacity is reached.
+Training a PBDR model. The rendering of a PBDR algorithm
+is differentiable. This allows point attributes (e.g., position)
+to be optimized via gradient descent by calculating the loss
+between the rendered image and the ground-truth image for
+the image’s camera view. The training process goes as follows. First, we initialize each point using an initial point cloud
+based on COLMAP [72] or LiDAR. Then, training proceeds
+iteratively: at each step, we randomly select a batch of images
+from the training dataset and render according to their camera views using the current point cloud. The rendered images
+are then compared to the corresponding training images to
+compute the loss. Finally, backpropagation is performed to
+calculate the gradients that are used to update the point cloud
+parameters for the next iteration. This standard mini-batch
+SGD training process is augmented with periodic densification, which increases the density of the point cloud by adding
+more points to the model. The training is repeated until convergence.
+2.2 Limitations of existing work and our approach
+Existing works [90, 96] support distributed training for 3D
+Gaussian Splatting [40], the first and most popular PBDR algorithm. These systems partition the point cloud across GPUs.
+Given a batch of training images, each GPU performs point
+culling and splatting for all camera views in the batch using its
+local partition of points. Each GPU is in charge of rendering
+a subset of images in the batch. As some in-frustum points
+needed for rendering an image on a GPU may reside on other
+GPUs, view-dependent splats must be shuffled across GPUs in
+an all-to-all pattern before rendering. Existing systems have
+two major limitations.
+Limitation #1: Lack of programmable support for different PBDR algorithms. The first major limitation of existing
+systems is that they are custom built for one particular PBDR
+algorithm, 3DGS. However, the rapid growth of research on
+PBDR has produced many algorithms [10, 27, 30, 31, 33, 47, 55]
+and more will undoubtedly show up in the future. Thus, it is
+imperative for a distributed training system to provide general support of the whole class of PBDR algorithms instead
+of only 3DGS.
+We address this challenge by building Gaian as a programmable
+training system that can be customized by users to support
+different PBDR algorithms. As all PBDR proceed through the
+same three key steps to cull, splat and render points, Gaian
+provides three corresponding user-defined functions to allow
+full customization of these three steps. This allows the separation of the underlying distributed training system from the
+details of specific PBDR algorithm it supports. Furthermore,
+Gaian’s interface is designed to make explicit the algorithm’s
+data access pattern, aka which parts of the point cloud are accessed by each camera view, which we can exploit to improve
+locality and reduce communication during training.
+Limitation #2: Lack of locality optimization for data
+access. Existing systems randomly distribute points and image rendering to GPUs, resulting in heavy communication
+as in-frustum points reside on remote GPUs and their splats
+must be fetched for rendering. As seen in Figure 1, the time
+spent doing communication can exceed the compute time.
+Although optimizing for locality is a common theme among
+all distributed computation, PBDR presents a unique workload that warrants special care. In particular, our design exploits spatial locality using a two-stage procedure that combines online and offline optimization. (1) Instead of randomly
+assign points to GPUs, we assign points that are likely to be
+accessed together to the same GPU. This step is done offline
+since the optimality of the assignment does not change much
+during training. (2) Instead of randomly assigning camera
+views to GPUs, we prefer to co-locate the rendering of an
+image to the GPU storing the most points needed by the image’s view. However, since the batch of images for a training
+iteration is randomly sampled, greedily assigning each view
+to its most preferred GPU can cause severe load imbalance. In
+order to balance load and reduce communication, we propose
+a speedy online optimization procedure to assign images in
+3
+a batch to GPUs. Figure 3 gives an example to illustrate the
+benefit of Gaian’s locality-aware assignment. The points are
+colored according to which GPU it has been assigned to. As
+shown in Figure 3(b), Gaian’s point assignment takes advantage of spatial locality, and the rendering of view 𝐴 (or 𝐵)
+is assigned to the GPU holding most of the points needed
+by 𝐴 (or 𝐵), resulting in drastic communication reduction
+compared to random distribution (Figure 3(a)).
+3
+1
+1
+2
+3
+2
+3
+Programming PBDR algorithms on Gaian
+This section discusses the programming abstractions (§3.1)
+and provide example PBDR implementations (§3.2).
+Figure 5. Point culling selects the subset of points that fall within the
+camera’s view frustum. The middle shows the point cloud of MatrixCity
+scene [49]. 1 , 2 , and 3 denote different camera views and their
+in-frustum points, shown in yellow, respectively. The right panel zooms
+in to visualize the in-frustum points for view 1 .
+Interface PBDR_program:
+# Compute point ids within the given view’s frustum
+pts_culling(view, PC) → infrustum_ids
+# Transform only infrustum points to view-dependent splats
+pts_splatting(view, PC, infrustum_ids) → SP
+# Render image from view-dependent splats
+image_render(view, SP) → image
+3D video reconstruction algorithms cull both spatial out-offrustum points and temporal non-present points at the camera’s capture time. The pts_splatting function projects each
+3D point to the 2D camera plane, creating view-dependent
+splats, also represented as a dictionary of tensors (SP). Since
+such processing only needs to be done on in-frustum points,
+it takes as the argument infrustum_ids, which has previously
+been returned by pts_culling. The image_render function
+takes as input the camera view and all the view-dependent
+splats (SP), and renders the resulting image. The functions
+pts_splatting and image_render should be differentiable. The
+differentiation is usually done automatically by the underlying ML framework.
+We note that Gaian’s interface exposes a PBDR algorithm’s
+data access pattern from images to points via pts_culling. This
+gives the underlying distribution system valuable information
+to fully optimize for access locality.
+3.2 Example Algorithm Implementations
+We provide an example implementation of the 3DGS algorithm [40] built using Gaian’s abstractions. Additional more
+complex examples including 3D Convex Splatting (3DCX)
+and 4D Gaussian Splatting for 3D video, can be found in Appendix B.
+3DGS. As shown in Figure 6, 3DGS represents each point as
+an anisotropic 3D Gaussian whose point attributes include 3D
+position, per-axis scale, and rotation, opacity and sphericalharmonics for color. For pts_culling, each Gaussian is approximated by a 3D bounding ellipse; Gaussians whose ellipses
+fall completely outside the camera frustum (view.frustum)
+are not returned. For pts_splatting, each in-frustum Gaussian is projected onto the image plane given the camera pose
+(view.pose). The resulting view-dependent attributes including color, scale, and depth, collectively form the intermediate
+per-view splat state SP and returned by the function. We
+omitted the implementation of image_render for brevity.
+Different PBDR algorithms have varying point attributes as
+well as varying implementations of pts_cull and pts_splatting
+(see additional examples in Appendix B). Even for the 3DGS,
+Figure 4. Gaian abstracts a PBDR algorithm using three user-defined
+functions.
+3.1 Abstracting a PBDR algorithm
+Gaian provides a common interface which an algorithm
+developer must use to structure their code to enable distribution. The interface design must strike a fine balance between
+two considerations: (1) it must be general enough to support
+a wide range of PBDR algorithms without revealing much of
+their algorithmic internals to the underlying training system.
+(2) it should also expose sufficient information for the underlying training system to perform distribution and to optimize
+for the locality of access.
+Our interface exposes every Gaian algorithm’s model state,
+aka the point cloud, which is represented as a dictionary of
+tensors that store point attributes. Each tensor has the shape
+𝑆 ×𝑙 where 𝑆 is the number of total points and 𝑙 is number
+of floating point needed to store this attribute. For example, given point cloud state 𝑃𝑜𝑖𝑛𝑡𝑠, the 3D Gaussian Splatting [40] algorithm can use tensor 𝑃𝑜𝑖𝑛𝑡𝑠.𝑥𝑦𝑧 (of shape 𝑆 ×3)
+to store each point’s positions in 3D space and another tensor
+𝑃𝑜𝑖𝑛𝑡𝑠.𝑜𝑝𝑎𝑐𝑖𝑡𝑦 (of shape 𝑆 ×1) to store each point’s opacity.
+After in-frustum points are projected to 2D camera plane,
+the resulting view-dependent splats are also represented as
+a dictionary of tensors, where each tensor’s first dimension
+equals to the number of in-frustum points.
+Gaian’s interface abstracts a PBDR algorithm into three
+user-provided functions: pts_culling, pts_splatting and image_render, as shown in Figure 4. The pts_culling function
+takes as arguments a specific camera view (v) as well as (a
+shard of) the point cloud state (PC), and returns a 1D tensor
+containing the indices of the points that remain after culling.
+The standard implementation of pts_culling, calculates the
+camera view’s frustum and culls those points outside the frustum, as shown by the example in Figure 5. However, some
+algorithms require non-standard pts_culling. For example,
+4
+Algorithm 1 Gaian’s workflow for a training iteration, from
+GPU 𝑘’s perspective
+import gaian
+class GaussianSplatting3D(gaian.PBDRProgram):
+# Attributes in 3DGS model (S points)
+# PC.xyz
+(S, 3) 3D Position of center
+# PC.scale
+(S, 3) Scale along each axis
+# PC.rot
+(S, 4) Rotation of Gaussian ellipse
+# PC.opacity (S, 1) Opacity
+# PC.sh
+(S, 48) Spherical harmonic coeff to model
+view-dependent color
+Input: PC𝑘 : point cloud shard stored on GPU 𝑘.
+𝑏𝑎𝑡𝑐ℎ: batch of images for this training iteration
+Forward Pass:
+1: for all 𝑣 in 𝑏𝑎𝑡𝑐ℎ do
+2:
+𝑖𝑛𝑓 𝑟𝑢𝑠𝑡𝑢𝑚_𝑖𝑑𝑠 [𝑣] 𝑘 ← pts_culling(𝑣.𝑣𝑖𝑒𝑤,PC𝑘 )
+3:
+𝐶 [𝑣] 𝑘 ← len(𝑖𝑛𝑓 𝑟𝑢𝑠𝑡𝑢𝑚_𝑖𝑑𝑠 [𝑣] 𝑘 )
+4:
+𝑆𝑃 [𝑣] 𝑘 ← pts_splatting(𝑣.𝑣𝑖𝑒𝑤,𝑃𝐶𝑘 ,𝑖𝑛𝑓 𝑟𝑢𝑠𝑡𝑢𝑚_𝑖𝑑𝑠 [𝑣] 𝑘 )
+5: end for
+@torch.no_grad()
+def pts_culling(view, PC):
+# Bounding ellipse for each Gaussian
+ellipses ← ComputeBoundEllipse(PC.xyz, PC.scale, PC.rot)
+# isect_mask[i]=true iff ellipses[i] intersects frustum
+isect_mask ← TestIntersectEllipse(ellipses,view.frustum)
+infrustum_ids ← IndicesOfTrue(isect_mask)
+return infrustum_ids
+//A is a |𝑏𝑎𝑡𝑐ℎ|×𝑁 tensor capturing access pattern.
+6: A ← all-gather 𝐶 [·] 𝑘 from all GPUs 𝑘 =1...𝑁
+7: //Image assignment: GPU W[v] is to render v.
+8: 𝑊 ← AssignImages(A)
+9: 𝑆𝑃𝑘 ←all-to-all transfer of 𝑆𝑃 [𝑣] 𝑘 at GPU 𝑘 to GPU 𝑊 [𝑣]
+def pts_splatting(view, PC, infrustum_ids):
+SP ← gaian.EmptyViewDependentSplats()
+# Project 3D Gaussian onto 2D splat given view’s pose
+SP.xy, SP.scale, SP.rot, SP.depth ← Project3DGSTo2D(
+view.pose, PC.xyz[infrustum_ids],
+PC.scale[infrustum_ids], PC.rot[infrustum_ids])
+# Omit some computation
+...
+# Compute view-dependent color
+SP.color ← ComputeColorGivenView(view.pose,
+PC.sh[infrustum_ids])
+return SP
+for all 𝑣 in 𝑏𝑎𝑡𝑐ℎ
+10: 𝑙𝑜𝑠𝑠_𝑡𝑜𝑡𝑎𝑙 ← 0
+11: for all 𝑣 such that 𝑊 [𝑣] =𝑘 do
+12:
+𝑖𝑚𝑎𝑔𝑒 ← image_render(𝑣.𝑣𝑖𝑒𝑤,SP[𝑣] 𝑘 )
+13:
+𝑙𝑜𝑠𝑠 𝑣 ← loss_fn(𝑖𝑚𝑎𝑔𝑒,𝑣.𝑖𝑚𝑎𝑔𝑒)
+14:
+𝑙𝑜𝑠𝑠_𝑡𝑜𝑡𝑎𝑙 ←𝑙𝑜𝑠𝑠_𝑡𝑜𝑡𝑎𝑙 +𝑙𝑜𝑠𝑠 𝑣
+15: end for
+Backward Pass:
+Figure 6. Implement 3DGS with Gaian API.
+16: for all 𝑣 such that 𝑊 [𝑣] =𝑘 do
+17:
+𝐺_𝑖𝑚𝑎𝑔𝑒 ← loss_fn.backward(loss𝑣 )
+18:
+𝐺_𝑆𝑃 [𝑣] 𝑘 ← image_render.backward(𝑣,𝐺_𝑖𝑚𝑎𝑔𝑒)
+19: end for
+20: //reverse all-to-all transfer of 𝑆𝑃𝑘 ’s gradients
+21: 𝐺_𝑆𝑃𝑘 ← all-to-all transfer of 𝐺_𝑆𝑃 [𝑣] 𝑖 at GPU 𝑖=𝑊 [𝑣] to GPU
+there are several interesting variants. For example, one can
+replace the bounding ellipse with a bounding sphere for a
+simpler implementation at the cost of more false positives.
+Conversely, users can calculate a tighter bounding ellipse
+according to [28], which restricts the bound to the higherdensity region of each Gaussian to reduce the number of
+in-frustum points. These example variants can be supported
+easily by modifying pts_culling.
+4
+𝑘 for all 𝑣 in batch
+22: Initialize G_PC𝑘 ← zero tensors
+23: for all 𝑣 in batch do
+24:
+G_PC𝑘 += pts_splatting.backward(
+System Design
+𝑣, 𝐺_𝑆𝑃𝑘 [𝑣], 𝑖𝑛𝑓 𝑟𝑢𝑠𝑡𝑢𝑚_𝑖𝑑𝑠 [𝑣] 𝑘 )
+25: end for
+26: //update point cloud parameters
+27: 𝑃𝐶𝑘 ← AdamUpdate(𝑃𝐶𝑘 ,𝐺_𝑃𝐶𝑘 )
+4.1 Architecture overview
+Gaian employs a hybrid parallelism approach that partitions both the model state (data parallelism) and the rendering
+computation (image/view parallelism) across GPUs. While
+existing systems [96] also adopt a similar distribution strategy, their implementation is tied to a single algorithm. By
+contrast, as Gaian’s programming abstractions expose PBDR
+algorithm’s point cloud as well as the data access pattern
+from images to points, Gaian supports the distribution of all
+algorithms. Equally importantly, as the data access is made
+explicit, Gaian optimizes locality of access through a hybrid offline/online procedure. Figure 7 illustrates the overall system
+architecture. Gaian uses an offline component to assign points
+to GPUs and an online component that assigns each image
+in the current training iteration to be rendered by a GPU.
+Algorithm 1 provides the pseudocode for how Gaian performs a single training iteration from the perspective of GPU
+𝑘. Each GPU 𝑘 stores a shard of point clouds, as determined
+by the Gaian’s offline assignment procedure, which remains
+stable across training iterations. At the start of each iteration,
+all camera views of the current batch is sent to all GPUs. In
+the forward pass (lines 1-15), GPU 𝑘 calculates the subset of
+in-frustum points among its local points (𝑃𝐶𝑘 ) and performs
+view-dependent point splatting for each view in the batch.
+The online rendering placement algorithm then assigns images to GPUs according to the calculated access pattern. For
+each assigned image 𝑣, GPU 𝑘 retrieves the in-frustum viewdependent splats 𝑆𝑃 [𝑣] 𝑖 from every other GPUs 𝑖, performs
+image rendering and calculates loss w.r.t. the corresponding
+ground truth image. The backward pass (lines 16-25) proceeds
+by reversing the computation and communication pattern.
+Lastly, the point cloud parameters are updated using the gradients computed by the backward pass (lines 26-27).
+4.2 Locality Optimization
+Gaian’s two-stage optimization consists of an offline component to optimize the partitioning of model state (§4.2.1) and
+5
+Online
+Offline
+Point
+Cloud
+Posed
+Images
+...
+Network
+Hierarchy
+Input
+Batch
+Batch Size B
+Distributed Executor
+Point Trans.
+Assign Points §4
+Rendering Placement
+𝑆"
+GPU 0
+...
+...
+GPU 1
+GPU 0
+GPU 1
+GPU 0
+GPU 1
+𝑆"
+GPU 1
+...
+𝑆!
+Image Rendering
+𝑆!
+...
+Point Placement
+Shuff.
+GPU 0
+Profiler
+Assign Image Rendering §5
+GPU N-1 𝑆N-1
+GPU N-1
+Iteration 𝑖
+Figure 7. System overview. The offline component assigns points to GPUs (§4.2.1). During training, the online optimizer assigns image rendering to
+GPUs (§4.2.2) based on data-compute locality. Distributed Executor handles the forward and backward pass compute and communication.
+GPU 0
+B
+A
+2
+B
+4
+C
+6
+8
+D
+Image B
+GPU 0
+GPU 1
+1
+(a) Camera Views
+7
+GPU 1
+GPU 0
+GPU 1
+An image vertex’s weight is based on a rendering complexity
+heuristic—measured by the number of points accessed—to
+approximate the computation, memory, and communication
+cost needed to render an image. Graph partitioning is a wellstudied problem in the literature [3, 6, 7, 14, 38, 39, 42, 43],
+allowing us to use the popular off-the-shelf METIS [38] to generate partitions where each partition has relatively balanced
+node weights.
+We augment basic weighted graph partitioning in several
+ways to further improve performance. First, assigning each
+point individually is very expensive when the model state is
+large (with hundreds of millions or even more points). We
+coarsen the assignment by grouping nearby points into a single placement unit. To do so, we sort all points in the point
+cloud using Z-order curves [16] that preserve spatial locality
+by ensuring that points close in 3D space remain close in the
+linear ordering. We then group each contiguous block of 𝐺
+points along the ordering into a single point group, which is
+represented by a single point vertex in the bipartite graph. We
+can adjust the placement granularity by adjusting 𝐺. More
+coarse-grained grouping makes it faster to compute point
+placement but compromises the placement quality. In practice,
+we choose 𝐺 to be 1024—4096 to trade off speed with quality.
+Second, cross-GPU communication is non-uniform with internode communication significantly slower than intra-node
+communication. To account for this, we perform partitioning hierarchically: first, we partition the point cloud across
+machines, assigning one partition to each machine. Then, we
+partition each machine’s points among its local GPUs.
+6
+D
+Image B
+Figure 9. Whole image (the middle figure) vs. image patch placement
+(the right figure).
+5
+C
+Image A
+GPU 1
+A
+4
+5
+7
+Image A
+3
+3
+GPU 1
+B
+2
+A
+1
+Point Storage
+GPU 0
+GPU 0
+an online component to optimize the placement of compute,
+aka image rendering (§4.2.2).
+4.2.1 Offline point placement.A straightforward strategy of assigning points to GPUs is to partition according to
+geometric proximity [46, 51, 57], e.g. using space-partitioning
+data structures (e.g., KD-trees) or spatial clustering methods
+(e.g., k-means [93]). However, doing so is suboptimal as it
+overlooks the fact that data access locality can be heavily
+affected by the camera view: points that are not close to each
+other might nevertheless be seen by the same camera view.
+8
+(b) Partition a Bipartite Graph
+Figure 8. Gaian represents the access pattern of different camera views
+and points as a bipartite graph (a) and partitions the graph to assign
+points to GPUs (b).
+We represent the data access pattern explicitly as a bipartite graph and formulate the problem of point placement as
+a graph partitioning problem. In the bipartite graph, an edge
+connects a point-𝑖 to image-𝑗 if point-𝑖 is in image-𝑗’s frustum,
+as shown in Figure 8a. Graph partitioning assigns vertices into
+different partitions (aka GPUs), an example of which is shown
+in Figure 8b. If an edge spans across different partitions, the
+point’s splat must be communicated between GPUs in order
+to render the corresponding image. Therefore, our objective is
+to minimize the number of cross-partition edges while keeping each part roughly equal in size (i.e., balanced memory
+usage across GPUs). To incorporate the latter load balancing
+constraint, we assign weights to vertices in the bipartite graph.
+6
+in two stages. First, we apply LSA to obtain an initial placement W𝑖𝑛𝑖𝑡 that satisfies the ILP constraints 1d and has low
+total communication volume. Then, we apply local search to
+incrementally adjust W𝑖𝑛𝑖𝑡 to account for the load-balancing
+objectives.
+• Linear Sum Assignment. The objective term 1a and
+constraint 1d together form a linear sum assignment
+(LSA) [12] problem, which can be solved using polynomialtime algorithms such as the Hungarian method [44]
+with time complexity 𝑂 (𝐵 3 ). LSA methods have a faster
+and more predictable runtime than the ILP solver. It also
+finds a strong initial solution that minimizes total communication (equation 1a).
+• Local search. We use local search to iteratively refine the
+initial solution to improve load-balancing objectives.
+In each search step, we swap the GPU assignments
+of two image patches using a greedy steepest-ascent
+strategy. We iteratively perform greedy swapping until
+convergence or a time budget is reached. To avoid getting stuck on plateaus caused by the non-smooth max
+terms, we replace them with 𝑝-norm and use the relaxed
+objective 𝛽 · ∥send∥ 𝑝 +𝛾 · ∥recv∥ 𝑝 +𝛿 · ∥comp∥ 𝑝 , where
+Í𝑁
+𝑝
+∥send∥ 𝑝 = ( 𝑖=𝑘
+send𝑘 )) 1/𝑝 and so on. Appendix C.1
+provides more details.
+We further fine-tune our LSA-based online optimization
+with two important augmentations. First, instead of performing placement at the granularity of entire images, we divide
+each 𝐻 ×𝑊 image into 𝑝 2 patches of size 𝐻𝑝 × 𝑊𝑝 and determine the placement of individual image patches. We typically
+set 𝑝 to a small value 2–8. Using finer-granularity allows for
+more flexible placement, which can result in reduced communication and improved load balance. Ideally, we want to
+co-locate image rendering with most (if not all) of the points
+it accesses; doing so is rarely feasible for a whole image but
+more likely with a smaller image patch. Figure 9 illustrates
+such an example. Also, training for PBDR uses small batch
+sizes [96], 16—64, whole image assignment severely limited
+when scaling to many of GPUs.
+Second, we perform hierarchical images assignment similarly to hierarchical point placement. In particular, we first
+assign image patches across machines. We then assigns a machine’s image patches among its local GPUs. The two levels
+of assignment use different objective coefficients 𝛼, 𝛽, 𝜆, and
+𝛿. For intra-node assignment, we de-prioritize the total communication volume (i.e., by setting 𝛼 to zero), as intra-node
+bandwidth is high.
+4.2.2 Online placement of image rendering.Although
+offline graph partitioning clusters both points and images,
+we only use the partitioning results to assign points and not
+compute. This is because the bipartite graph is constructed
+for all images in the dataset while each training iteration must
+assign the images to render at different GPUs for a randomly
+chosen small batch of images. Therefore, Gaian determines
+how to assign image rendering online during each iteration.
+At each training iteration, every GPU is given the entire batch
+of 𝐵 image patches as input. Each GPU first performs frustum
+culling to determine the subset of points among those stored
+by its local memory for rendering each image patch (Algorithm 1, line 2). All GPUs exchange this information to obtain
+the patch-GPU access pattern matrix, A (Algorithm 1, line 6),
+where A 𝑗,𝑘 captures the number of points needed from GPU
+𝑘 in order to render image patch 𝑗.
+We formulate placement optimization as Integer Linear
+Programming (ILP). Let 𝑊 be the placement solution where
+𝑊 𝑗 denotes the GPU assigned to render image patch 𝑗. Our
+goal is to find the optimal 𝑊 with low communication and
+balanced rendering loads, with the following ILP formulation:
+𝐵
+∑︁
+minimize 𝛼 · − A 𝑗,𝑊 𝑗
+!
+(1a)
+𝑗=1
++𝛽 ·max (send𝑘 ) +𝛾 ·max (recv𝑘 )
+𝑘
+(1b)
+𝑘
++𝛿 ·max (comp𝑘 )
+(1c)
+𝑘
+subject to
+𝐵
+∑︁
+
+ 𝐵
+𝑊 𝑗 =𝑘 = , ∀𝑘 ∈ {1,...,𝑁 }.
+𝑁
+𝑗=1
+(1d)
+In the above formulation, we combine the different optimization objectives linearly using configurable coefficients
+𝛼,𝛽,𝛾,𝛿 to trade off competing objectives. Objective (1a) aims
+to minimize total communication to render the batch of 𝐵
+images. Objective(1b) aims to minimize the
+of send
+ imbalance
+
+Í
+and receive load, where send𝑘 = 𝐵𝑗=1 ( 𝑊 𝑗 ≠𝑘 ·A 𝑗,𝑘 ) 1 and
+
+ Í𝑁
+Í
+recv𝑘 = 𝐵𝑗=1 ( 𝑊 𝑗 =𝑘 · ( 𝑖=1
+A 𝑗,𝑖 − A 𝑗,𝑘 )) capture GPU-𝑘’s
+send and receive load, respectively. Lastly, objective(1c) aims
+to minimize the imbalance
+rendering compute load,
+
+ofÍthe
+Í
+𝑁
+where comp𝑘 = 𝐵𝑗=1 ( 𝑊 𝑗 =𝑘 · 𝑖=1
+A 𝑗,𝑖 ). We also add a set of
+constraints(1d) to ensure that each GPU is assigned exactly
+the same number ( 𝑁𝐵 ) of images. This is necessary to simplify
+system development using MPI.
+A fast optimizer based on Linear Sum Assignment. ILP
+can be solved using standard solvers such as Gurobi [26]. However, these general solvers are slow and have unpredictable
+running time, making them unsuitable for online optimization.
+We develop a fast heuristic online solver using Linear Sum
+Assignment (LSA) with local search [32]. Our solver works
+5
+Implementation
+We implement Gaian with approximately 9K lines of Python,
+3K of CUDA, and 1K of C++. Our system uses gsplat[90] as
+the rendering kernels backend, PyTorch[69] for both training
+and efficient tensor operators, and NCCL[66] for communication. For bipartite graph partitioning, we use METIS [38].
+Our CPU-based online image placement solver using linear
+1 [..] is an indicator function returning 1 if the predicate inside is true and
+zero otherwise
+7
+sum assignment from SciPy[80], and a custom parallel implementation of local search in C++ with OpenMP[8]. We
+highlight two key components of our implementation; others
+are provided in Appendix D.
+Asynchronous online placement. To hide the overhead of
+online assignment, we asynchronously compute image placement on the CPU for future batches while the GPU processes
+the current one. However, computing image placement requires the access pattern (A) which is unavailable for batches
+whose training has not started. To approximate this statistic,
+we use a profiler to collect A for each image patch based on
+information from the previous epochs. Since points evolve
+gradually in training, these serve as reliable approximations
+for future epochs.
+Training dataset storage and loading. To enable efficient
+image loading, we pre-decode the images and store them in
+CPU pinned memory, transferring them to the GPU on demand during each training iteration. However, naively replicating the entire dataset in each machine would lead to CPU
+out-of-memory (OOM) errors, as the training dataset after
+decoding can be very large for high-resolution, large-scale
+scenes, often reaching hundreds of gigabytes. To address this,
+we assign each machine a fraction of the total images, so the
+training dataset is effectively stored in the aggregate CPU
+memory across all machines. During training, each GPU attempts to retrieve the required ground-truth images from
+its local subset. If an image is not found locally, it is fetched
+from another process that holds the corresponding subset
+via communication. The offline bipartite graph partitioning
+(§4.2.1) naturally produces a partitioning of images (in addition to points), which we can adopt here. Since online image
+assignment aim to co-locate camera views with their visible
+points, it is highly likely that a GPU is assigned images that
+already stored locally.
+6
+socket-based messaging (no RDMA), forming a hybrid networking topology. We utilize up to 32 machines, with pointto-point inter-machine bandwidth measured at 88 Gbps in
+one direction. The per-machine bandwidth is evenly divided
+among four GPUs.
+Datasets. We evaluate Gaian using 6 public available datasets
+listed in Table 1 2 . These datasets are all large-scale, with up to
+60,000 images per scene and resolutions as high as 6K. These
+scenes vary in scale, topology, and rendering resolution to
+represent a diverse set of training workloads. The point cloud
+size is determined by the total amount of detail in each scene,
+which depends on both spatial area and image resolution. Increasing 𝑃 improves placement flexibility, but also increases
+optimization time (§4.2.2). Therefore, we set 𝑃=2 for Ithaca
+and BigCity Aerial due to their fast computation; and 𝑃=4 for
+the others, where slower GPU computation allows for better
+overlap. We adjust the batch size (BS) of training images and
+the number of GPUs used for distributed training based on
+the point cloud size and rendering resolution. We classify the
+datasets based on their capture setting. “Rubble”, “Sci-Art”,
+and “BigCity Aerial” are Aerial Datasets, with images collected from drones in a downward-facing view. “Ithaca365”,
+“Campus”, and “BigCity Street” are Street Datasets, captured
+from the ground. For each dataset, if the image poses or the
+initial point cloud is missing, we generate them using Colmap
+[72].
+Applications. We evaluate Gaian on distributed training
+of three types of PBDR methods: 3D Gaussian Splatting (3DGS)[40],
+2D Gaussian Splatting (2DGS)[33], and 3D Convex Splatting
+(3DCX) [31], which use 3D Gaussians, 2D Gaussians, and 3D
+Convex shapes as their point representations, respectively.
+3DGS is the most widely used, while 2DGS offers improved
+geometry reconstruction by using 2D Gaussians to better capture surface. 2DGS and 3DGS share most attributes in their
+model representation. As for rendering pipeline, the main
+difference is that 2DGS has larger view-dependent states (20
+vs. 11), and shows a higher rendering cost. In contrast, 3DCX
+differs significantly from both 3DGS and 2DGS. Instead of
+using position, scale, and rotation to define spatial coverage
+as in Gaussian-based methods, 3DCX defines coverage using
+the positions of its six vertices. Its rendering pipeline and
+hyperparameters are, accordingly, distinct. See Appendix A.1
+for more differences between these methods.
+Baseline. We choose gsplat [90] (v1.4.0) as our baseline, as it
+is the state-of-the-art PBDR training system. gsplat supports
+distributed training for 3DGS, but not for 2DGS or 3DCX. We
+extend gsplat’s 2DGS and 3DCX rendering pipelines with
+distributed training support—a tedious process that requires
+identifying each kernel’s true parallel axis (per-point or perpixel) and manually reconstructing a correct execution order
+in distribution. Unlike Gaian’s locality-aware design, gsplat
+Evaluation
+Our evaluations have the following highlighted results:
+• Gaian outperforms the state-of-the-art training system
+gsplat by 1.50–3.71× across 6 scenes and 3 PBDR methods. Gaian reduces communication volume by up to
+91%.
+• Gaian scales PBDR training to 128 GPUs on MatrixCity
+Aerial, with 12.7× speedup from 8 to 128 GPUs.
+• Gaian enables large model training up to 500M points
+(29.5 billion parameters). To the best of our knowledge,
+this is the largest point cloud that has been successfully
+trained, yielding a new state-of-the-art reconstruction
+quality of 26.75 (test PSNR) on MatrixCity Aerial.
+6.1 Setting and Datasets
+Experimental Setup. We conduct our evaluation on a cluster
+of machines equipped with 4×40GB NVIDIA A100 GPUs and
+an AMD EPYC 7763 CPU per machine. Intra-machine communication uses fully-connected third-generation NVLinks;
+while inter-machine communication relies on Ethernet with
+2“BigCity Street” in this table refers to the bottom subregion within all streets
+of BigCity.
+8
+Scene
+Rubble [79]
+Ithaca365 [15]
+Campus [41]
+BigCity Street [49]
+Sci-Art [52, 79]
+BigCity Aerial [49]
+# Images
+Res.
+PC Size P
+1600
+8200
+20000
+34000
+3600
+60000
+4K
+1K
+1K
+1K
+6K
+1080P
+40M
+48M
+56M
+80M
+200M
+100M
+4
+2
+4
+4
+4
+2
+# GPU
+BS
+16
+16
+16
+16
+32
+32
+16
+16
+16
+16
+32
+64
+topology in Street Datasets, which make point cloud partitioning more challenging for Gaian (see Figure 18 in Appendix E.4).
+Moreover, street-view frustums can span both nearby and
+distant content, compromising the data access locality that
+Gaian leverages. In contrast, Aerial Datasets typically exhibit
+more structured topologies—resembling a 2D plane (see Figure 18)—and each view tends to cover only a small portion
+of the scene (e.g., less than 1% in BigCity Aerial), enabling
+more effective partitioning and communication reduction. In
+addition, the absolute throughput varies significantly across
+scenes due to differences in data access volume, rendering resolution, and load imbalance. For example, scenes with higher
+rendering resolution exhibit lower training throughput.
+Behind the overall performance gains, we further observe
+minimal system overheads, as detailed in Appendix E.3.
+Communication Reduction. To evaluate the data movement savings enabled by Gaian ’s locality-aware distribution,
+we compare the communication volume during training between the baseline and Gaian. Table 2 shows the average reduction in the number of points transferred across machines
+per iteration, achieved by Gaian. Across different scenes and
+applications, we observe communication reductions ranging
+from 53.8% to 91.4%.
+Table 1. Scenes used in our evaluation. We list the number of images,
+which roughly reflects the scene area, and the resolution of training
+images. We also include the Point Cloud size (in Millions), image patch
+factor (P), GPU count, and batch size. Corresponding partitioning
+results are visualized in Figure 18 (Appendix E.4).
+randomly distributes points and rendering tasks across GPUs.
+We encountered training bottlenecks at the dataloader, as
+gsplat streams images from disk and decodes them on the
+CPU by default. To address this, we augment the baseline
+with our efficient dataset loading implementation described
+in Section 5. Finally, both the baseline and Gaian use the same
+rendering kernels provided by gsplat. Both disable automatic
+Python garbage collection during training to prevent irregular
+disturbances, following the practice in [37].
+6.2 Overall Performance
+We first evaluate Gaian on a wide range of scene settings
+from Table 1 and on all 3DGS, 2DGS and 3DCX methods,
+comparing against the baseline. Figure 10 shows the average
+training throughput for each scene–method combination. For
+fairness, we use identical optimization hyperparameters for
+both the baseline and Gaian in each case. Averaged across
+scenes, Gaian outperforms the baseline by 2.30× (from 1.54
+to 3.56×) for 3DGS, 2.50× (from 1.55 to 3.71×) for 2DGS and
+2.23× (from 1.50 to 3.01×) for 3DCX. These runtime statistics
+account for all aspect of training including overhead from
+online image placement and data loading if they are not fully
+overlapped. As such, these speedup numbers provide a holistic
+evaluation of our techniques.
+Gaian achieves better performance by reducing communication volume through improved data locality in distribution,
+and by mitigating both computation and communication load
+imbalance. Gaian yields greater speedup for 2DGS than for
+3DGS. This is because 2DGS has higher communication overhead because its larger view-dependent states than 3DGS
+(20 vs 11 per point), making our communication-reduction
+techniques more effective. Although 3DCX communicates
+even more view-dependent states (29 per point), it yields the
+smallest average speedup. This is due to its distinct rendering pipeline, which shows much longer computation time
+(see their notably lower overall throughputs). As a result, the
+communication-to-computation ratio does not increase, and
+the benefits of communication reduction are limited.
+We observe that the speedups achieved by Gaian vary
+across different scenes. In particular, Gaian ’s locality-aware
+distribution performs better on Aerial Datasets, with an average speedup of 2.89×, compared to 1.80× on Street Datasets.
+This disparity largely arises from their complex and irregular
+Scene
+Rubble
+Ithaca365
+Campus
+BigCity
+Street
+Sci-Art
+BigCity
+Aerial
+3DGS
+2DGS
+3DCX
+82.8%
+82.7%
+83.2%
+89.2%
+84.0%
+80.8%
+54.5%
+58.1%
+53.8%
+57.7%
+55.5%
+54.8%
+89.3%
+89.1%
+89.9%
+89.9%
+89.9%
+91.4%
+Table 2. Inter-machine communication volume reduction achieved by
+Gaian across all scene-method combinations, relative to the baseline.
+These statistics correspond to the experiments presented in Figure 10.
+We observe that the overall performance speedups reported
+in Figure 10 positively correlate with the degree of communication reduction. Taking 3DGS as an example, we achieve
+the highest speedup on Sci-Art (3.56×) with an 89.3% reduction in communication volume, whereas on BigCity Street,
+the lowest speedup (1.54×) corresponds to a 57.7% reduction.
+Because communication is the bottleneck in baseline training
+(see Figure 1), alleviating this core issue leads to significant
+speedup. Moreover, like the overall speedup differences, communication reduction also varies across scenes. Intuitively,
+communication reduction depends on the degree of data access locality during rendering. When each view’s frustum
+covers a compact region, it becomes easier to co-locate the
+necessary data on a single GPU, reducing communication.
+For example, in aerial scenes, all cameras point downward,
+and their captured regions are typically compact. In contrast,
+street-view scenes often involve frustums that extend beyond
+obstacles and capture distant content, resulting in a lower
+data locality, thereby causing more communication.
+The percentage of communication reduction remains almost the same across point types. This is because, although
+9
+Throughput (images/s)
+150
+125
+100
+75
+50
+25
+0
+1250
+3.56x
+Baseline
+Ours
+2.46x
+3.01x
+2.55x
+3DGS 2DGS 3DCX
+Rubble
+2.85x
+750
+3.71x
+2.65x
+2.54x
+1000
+2.68x
+500
+2.01x 2.50x
+250
+3DGS 2DGS 3DCX
+Sci-Art
+0
+2.08x
+1.64x 1.81x
+1.57x
+3DGS 2DGS 3DCX
+3DGS 2DGS 3DCX
+Ithaca365
+Campus
+1.54x 1.55x
+1.50x
+3DGS 2DGS 3DCX
+BigCity Street
+3DGS 2DGS 3DCX
+BigCity Aerial
+100
+1400
+50 100 150
+Render Time (ms)
+100 200 300
+Render Time (ms)
+250 500
+Render Time (ms)
+(a) 3DGS
+(b) 2DGS
+(c) 3DCX
+1200
+60
+800
+40
+600
+Baseline Throughput 20
+Ours Throughput
+Comm. Reduction (%)
+400
+200
+Figure 11. Empirical CDF of rendering time for the Sci-Art dataset
+using 3DGS, 2DGS, and 3DCX.
+80
+1000
+8 16
+32
+64
+# GPUs
+128
+0
+Communication Reduction (%)
+Ours
+(a) Strong scalability. We fix the global batch size to 64 images.
+100
+3000
+Throughput(img/s)
+different point types affect how scene details are represented,
+the global structure of the point cloud stays the same. Consequently, each view accesses points from similar regions
+regardless of point type, leading to comparable data access
+patterns and communication demands.
+Improvement on Rendering Load Balancing. To evaluate Gaian ’s effectiveness in balancing rendering time across
+GPUs, we analyze the Sci-Art dataset, which has the highest
+image resolution among all scenes. Figure 11 presents the
+empirical CDF of rendering times—measured as the sum of
+forward and backward passes with cuda events—collected
+from all GPUs throughout training, comparing 3DGS, 2DGS,
+and 3DCX. We observe that Gaian achieves lower variance
+in rendering time, as evidenced by the steep rise in its CDF
+curve—indicating that most GPUs spend a similar amount of
+time rendering. In contrast, the baseline curves exhibit more
+gradual slopes, reflecting greater variance of rendering time.
+6.3 Throughput Scalability
+We evaluate the throughput scalability of Gaian on BigCity
+Aerial, using 3DGS as the rendering method. Experiments
+are conducted on 8, 16, 32, 64, and 128 GPUs. We assess both
+strong scalability (with a fixed global batch size of 64 images)
+and weak scalability (with a fixed per-GPU batch size of 2
+images), comparing Gaian against the baseline. We also report the reduction in inter-machine communication volume
+achieved by Gaian relative to the baseline and analyze how
+this reduction trends across scales.
+Strong Scalability. As shown in Figure 12a, Gaian consistently outperforms the baseline, achieving over 80% reduction
+2500
+80
+2000
+60
+1500
+40
+1000
+Baseline Throughput 20
+Ours Throughput
+Comm. Reduction (%)
+500
+8 16
+32
+64
+# GPUs
+128
+0
+Communication Reduction (%)
+1.00
+0.75
+0.50
+0.25
+0.00
+Baseline
+Throughput(img/s)
+Cumulative Probability
+Figure 10. Training throughput (images/s) comparison across all scenes in Table 1 using three types of PBDR methods: 3D Gaussian Splatting
+(3DGS), 2D Gaussian Splatting (2DGS), and 3D Convex Splatting (3DCX). The corresponding experimental settings are in Table 1.
+(b) Weak scalability. We fix the per-GPU batch size to 2 images.
+Figure 12. Strong and weak scalability on Bigcity Aerial. We report
+training throughput for both the baseline and Gaian as the number
+of GPUs increases. Additionally, we show the percentage reduction in
+inter-machine communication achieved by Gaian.
+in communication volume along with multi-fold throughput
+gains. The throughput scaling of Gaian diminishes at higher
+GPU counts, as indicated by the decreasing slope of the curve.
+This aligns with Gaian ’s communication reduction trend,
+which also declines with higher GPU counts. As the point
+cloud is split into more partitions (i.e., across more GPUs), the
+length of partition boundaries increases. This causes more
+views to span multiple partitions, which leads to more crossGPU point access and thus higher communication overhead.
+Weak Scalability. Under the weak scalability setting (Figure 12b), Gaian again consistently outperforms the baseline
+by a wide margin. The slope of the throughput curve also
+10
+decreases slightly with scale. Throughput scales better under weak scalability, increasing from 226.9 img/s at 8 GPUs
+(batch size 16) to 2898.5 img/s at 128 GPUs (batch size 256).
+In contrast, under strong scalability (fixed batch size of 64),
+it only rises from 434.7 img/s to 1402.8 img/s.
+6.4 Ablation of Joint Point and Image Placement
+Our locality-aware distribution includes two components—
+point placement (Section 4.2.1) and image rendering placement (Section 4.2.2)—both guided by data locality. We conduct
+an ablation study using the 3DGS method to evaluate their
+individual impact by measuring training throughput after
+disabling each component. Figure 13 shows the results, indicating that locality-aware distribution is effective only when
+both Gaian’s point and image placements are applied.
+Disabling only point assignment reduces Gaian ’s training
+throughput by 33%–52% (BigCity Street and Sci-Art), as points
+are uniformly distributed across GPUs, causing each image
+to access similar amounts of data from all GPUs. This leaves
+little room for reducing data movement through strategic rendering image assignment. Even in this case, the online image
+placement still yields speedups over the baseline on the three
+high-resolution scenes—1.3× on Rubble and 1.74× on SciArt—but shows little to no improvement on lower-resolution
+datasets. This is because online image scheduling helps mitigate load imbalance when rendering high-resolution images
+that are more compute intensive.
+After disabling only the image assignment component,
+Gaian no longer outperforms the baseline. This is expected—
+randomly assigning images fails to exploit data locality, even
+if points have been stored with spatial locality. As a result,
+communication is not reduced and may even become more imbalanced due to uneven point distribution. Due to page limit,
+we report the ablation study of three additional techniques—
+hierarchical assignment, load balancing constraints, and patch
+factor—in Appendix E.2. All three components contribute to
+performance; and even when one is removed, Gaian still has
+significant speedup.
+6.5 Training Larger Models and better PSNR
+Gaian is the first system to successfully train on the full
+MatrixCity BigCity dataset [49] using PBDR, overcoming its
+extreme memory and computational demands. We use PSNR
+(Peak Signal-to-Noise Ratio) to evaluate reconstruction quality; it is a standard image reconstruction metric [4, 40, 62],
+where higher values indicate better fidelity. For the aerial view
+(60K images) in BigCity, Gaian trains a 400M-point model on
+8×4 A100 GPUs, achieving a PSNR of 26.75 on test set and
+a PSNR of 28.60 on training set. For the street view (260K
+images), Gaian trains a 500M-point model on 16×4 A100
+GPUs, reaching a test PSNR of 21.29 and a train PSNR of
+25.38. These models contain 23.6B and 29.5B parameters respectively (based on 3DGS with 59 attributes per point), far
+exceeding single-machine GPU memory limits. This large
+point cloud size is essential for achieving the reconstruction
+quality shown in Figure 14. Reconstruction quality (PSNR)
+improves with model size, as finer details are captured. See
+Appendix E.1 for additional training details.
+6.6 Dynamic Scene Reconstruction for 3D Video
+PBDR can be generalized to reconstruct 3D videos where
+every frame in the video is a static 3D scene viewable from
+arbitrary viewpoints. The required training dataset consists
+of multi-view videos where each frame is annotated not only
+with a camera pose but also with a timestamp. We build a popular video reconstruction algorithm, 4D Gaussian Splatting
+(4DGS) [89], and evaluate its performance. 4DGS extends the
+point type to a 4D Gaussian by adding a temporal dimension.
+Each point possesses attributes that define its lifespan and
+movement, allowing the model to represent scene evolution
+over time. Appendix B shows our 4DGS implementation B.
+The key distinction lies in how 4DGS implements pts_culling.
+In static reconstruction, points are culled solely if they fall
+outside the view frustum; in dynamic reconstruction, points
+are culled if they are either outside the frustum or not present
+at the requested rendering timestamp.
+We evaluate 4DGS using the Corgi dataset [88]. It contains
+24 one-minute videos of the same dynamic scene captured
+from distinct camera positions, which are downsampled to 30
+FPS at 1K resolution for training. Our evaluation uses a model
+with 29M-points, which cannot be trained on a single GPU
+due to out-of-memory (OOM). Gaian enables scalable distributed training. As shown in Figure 15, the number of GPUs
+is increased from 8 to 64, Gaian improves training throughput by 4.42×. Furthermore, compared to random distribution,
+Gaian’s locality optimization significantly improves performance: at 64 GPUs, it yields throughput improvement of 26%
+while reduces inter-machine communication by 48%.
+7
+Related Works
+Distributed 3D Gaussian Splatting Training. Several
+approaches [11, 46, 96] have explored multi-GPU training
+for 3DGS, but their designs are specific to 3DGS and do not
+provide abstractions that generalize to other PBDR. Grendel [96] and gsplat [90] randomly distribute computation in
+both point and image dimensions; Gaian builds on them with
+locality-aware optimization and a general abstraction. Moreover, DoGS [11] relies on asynchronous updates that may
+affect convergence; RetinaGS [46] incurs redundant compute
+and memory through replicated rendering; and CLM [95]
+scales training through CPU offloading at the cost of efficiency. None of these systems report results at the scene scale
+achieved in our work.
+Locality-aware distributed computation and scheduling. Existing systems exploit locality in both classic big-data
+computation and distributed ML training. MapReduce [13]
+on GFS/HDFS [20, 74] assigns map tasks to machines holding their input blocks, while Purlieus [68] further optimizes
+reduce-task placement. Other systems improve locality at the
+cluster scheduler: Delay Scheduling [91] temporarily skips
+11
+Throughput (images/s)
+100
+50
+1250
+Baseline
+w/o Point Placement
+w/o Rendering Placement
+Ours
+150
+78.9
+32.1
+0
+42.7
+29.2
+133.0
+750
+500
+64.9
+37.3
+Rubble
+1137.6
+1000
+35.7
+203.1 249.9 191.8
+250
+0
+Sci-Art
+447.4
+409.0
+110.3 103.4 101.5
+Ithaca365
+Campus
+180.5
+185.3 189.7 167.2
+546.2
+453.8
+285.2
+BigCity Street
+BigCity Aerial
+PSNR
+Figure 13. Ablation study of locality-aware placement evaluated on 3DGS. “w/o Point Placement” randomly places points across GPUs (without
+designs in Section 4.2.1), while still placing image patches with data-compute locality (with designs in Section 4.2.2). “w/o Rendering Placement”
+does the reverse: points are placed with locality, but image patches are assigned randomly.
+28.5
+28.0
+27.5
+27.0
+26.5
+26.0
+25.5
+25.0
+frustum culling precisely identifies the points each view accesses. In distributed ML workloads such as GNNs and DLRMs,
+the training set is also fixed, making data access in principle
+also predictable. However, their data accesses follow a highly
+skewed, power-law distribution [1, 22, 56, 61, 75, 76, 92], so systems primarily optimize locality by placing and caching hot
+items. GNN systems such as Dorylus [77], BGL [56], DistGNN
+[61] and others [54, 75] exploit graph locality by partitioning
+nodes/edges and replicating or caching frequently accessed
+features so that most neighbor lookups remain local. P3 [19] reduces communication by avoiding feature movement rather
+than explicitly placing hotspots, yet its execution remains
+shaped by the same power-law neighborhood structure. For
+DLRM, recent systems mitigate massive, skewed embedding
+tables by keeping hot IDs near trainers. BagPipe [1] uses lookahead caching, Herald [92] applies skew-aware scheduling, and
+HypeReca [29] replicates a small GPU hot set. UGache [76]
+unifies GNN and DLRM by modeling their power-law embedding accesses as a skew-driven locality problem with optimized placement. In contrast, PBDR is fundamentally different: point–view accesses are predictable but not skewed. Locality therefore cannot be captured by hotspot optimizations
+and must instead be exploited over the full, fine-grained geometric visibility structure between points and camera views.
+Distributed Neural Network Training. Many distributed
+training systems target neural networks, including data, tensor, pipeline parallelism [34, 48, 64, 65, 73], and FSDP-style
+methods [71, 97]. Some further support hybrid parallelism
+or automated parallelization [81, 87, 98]. These systems target workloads dominated by regular tensor operations (e.g.,
+GEMM) and dense, regular communication (e.g., AllReduce).
+In contrast, rendering in PBDR training is irregular, with
+sparse, highly non-uniform data access that induces dynamic,
+irregular all-to-all communication.
+Accelerating PBDR. Recent work accelerates 3DGS via specialized hardware or software. GScore [45], ACR [17], GauSPU
+[84], and MetaSapiens [53] introduce custom hardware accelerators, while FlashGS [18], StopthePop [70], BalancedGS [25]
+and TamingGS [60] speed up rendering in software. These
+train PSNR
+test PSNR
+13M
+25M
+50M
+100M
+Point Cloud Size (Million)
+200M
+400M
+Figure 14. Reconstruction quality (PSNR) vs model size with 3DGS on
+the BigCity Aerial scene. All models are trained on 8 machines for 1.5
+million steps.
+Throughput (img/s)
+Communication Reduction (%)
+100
+1200
+80
+1000
+60
+800
+600
+40
+400
+Baseline Throughput 20
+Ours Throughput
+Comm. Reduction (%)
+200
+8
+16
+32
+# GPUs
+64
+0
+Figure 15. Weak scalability of Gaian on 3D video reconstruction, with
+per-GPU batch size fixed at 4.
+jobs without local data; Quincy [35] and Firmament [21] formulate locality-aware scheduling as a minimum-cost flow
+problem for holistic optimization. These approaches place
+computation on a fixed data layout, while complementary
+work modifies data placement itself: Scarlett [2] replicates
+hot HDFS blocks. Gaian follows the same high-level intuition of moving computation closer to data. However, these
+systems only leverage locality at coarse granularities (jobs,
+tasks, or storage blocks). Ray [63] similarly applies locality
+heuristics only at abstract objects and tasks levels. In contrast,
+Gaian optimizes fine-grained locality induced by the geometric visibility between points and camera views in PBDR.
+Moreover, whereas these systems often face unpredictable
+access patterns, PBDR exposes fully predictable access and
+locality: training views are predetermined, and lightweight
+12
+methods accelerate computation itself, whereas Gaian preserves the original kernels and instead reduces communication and load imbalance in distributed training. Our approach
+is complementary, as we can directly leverage their accelerators; and faster computation (e.g., 15.6× in GScore) further
+amplifies communication as the dominant bottleneck, increasing the benefit of our communication-reduction techniques.
+See Appendix F for more related works.
+8
+[11] Yu Chen and Gim Hee Lee. 2024. DOGS: Distributed-Oriented Gaussian
+Splatting for Large-Scale 3D Reconstruction Via Gaussian Consensus.
+In The Thirty-eighth Annual Conference on Neural Information Processing
+Systems. https://openreview.net/forum?id=HAocQ9dSAX
+[12] David F. Crouse. 2016. On implementing 2D rectangular assignment
+algorithms. IEEE Trans. Aerospace Electron. Systems 52, 4 (2016),
+1679–1696. doi:10.1109/TAES.2016.140952
+[13] Jeffrey Dean and Sanjay Ghemawat. 2004. MapReduce: Simplified Data
+Processing on Large Clusters. In OSDI’04: Sixth Symposium on Operating
+System Design and Implementation. San Francisco, CA, 137–150.
+[14] K.D. Devine, E.G. Boman, R.T. Heaphy, R.H. Bisseling, and U.V.
+Catalyurek. 2006. Parallel hypergraph partitioning for scientific
+computing. In Proceedings 20th IEEE International Parallel & Distributed
+Processing Symposium. 10 pp.–. doi:10.1109/IPDPS.2006.1639359
+[15] Carlos A. Diaz-Ruiz, Youya Xia, Yurong You, Jose Nino, Junan Chen,
+Josephine Monica, Xiangyu Chen, Katie Luo, Yan Wang, Marc Emond,
+Wei-Lun Chao, Bharath Hariharan, Kilian Q. Weinberger, and Mark
+Campbell. 2022. Ithaca365: Dataset and Driving Perception under Repeated and Challenging Weather Conditions. arXiv:2208.01166 [cs.CV]
+https://arxiv.org/abs/2208.01166
+[16] J. Dugundji. 1989.
+Topology.
+Wm. C. Brown.
+https:
+//books.google.com/books?id=aXnMPQAACAAJ
+[17] Sankeerth Durvasula, Adrian Zhao, Fan Chen, Ruofan Liang,
+Pawan Kumar Sanjaya, Yushi Guan, Christina Giannoula, and Nandita
+Vijaykumar. 2025. ARC: Warp-level Adaptive Atomic Reduction in
+GPUs to Accelerate Differentiable Rendering. In Proceedings of the 30th
+ACM International Conference on Architectural Support for Programming
+Languages and Operating Systems, Volume 1 (Rotterdam, Netherlands)
+(ASPLOS ’25). Association for Computing Machinery, New York, NY,
+USA, 64–83. doi:10.1145/3669940.3707238
+[18] Guofeng Feng, Siyan Chen, Rong Fu, Zimu Liao, Yi Wang, Tao Liu,
+Zhilin Pei, Hengjie Li, Xingcheng Zhang, and Bo Dai. 2024. FlashGS:
+Efficient 3D Gaussian Splatting for Large-scale and High-resolution
+Rendering. arXiv:2408.07967 [cs.CV] https://arxiv.org/abs/2408.07967
+[19] Swapnil Gandhi and Anand Padmanabha Iyer. 2021. P3: Distributed
+Deep Graph Learning at Scale. In 15th USENIX Symposium on Operating
+Systems Design and Implementation (OSDI 21). USENIX Association, 551–
+568. https://www.usenix.org/conference/osdi21/presentation/gandhi
+[20] Sanjay Ghemawat, Howard Gobioff, and Shun-Tak Leung. 2003. The
+Google file system. In Proceedings of the Nineteenth ACM Symposium
+on Operating Systems Principles (Bolton Landing, NY, USA) (SOSP ’03).
+Association for Computing Machinery, New York, NY, USA, 29–43.
+doi:10.1145/945445.945450
+[21] Ionel Gog, Malte Schwarzkopf, Adam Gleave, Robert N. M. Watson, and
+Steven Hand. 2016. Firmament: Fast, Centralized Cluster Scheduling
+at Scale. In 12th USENIX Symposium on Operating Systems Design
+and Implementation (OSDI 16). USENIX Association, Savannah,
+GA, 99–115. https://www.usenix.org/conference/osdi16/technicalsessions/presentation/gog
+[22] Joseph E. Gonzalez, Yucheng Low, Haijie Gu, Danny Bickson, and Carlos
+Guestrin. 2012. PowerGraph: Distributed Graph-Parallel Computation
+on Natural Graphs. In 10th USENIX Symposium on Operating Systems
+Design and Implementation (OSDI 12). USENIX Association, Hollywood,
+CA, 17–30. https://www.usenix.org/conference/osdi12/technicalsessions/presentation/gonzalez
+[23] Google. 2025. Google Earth. https://earth.google.com/. Accessed:
+2025-04-11.
+[24] Google. 2025. Google Street. https://www.google.com/streetview/.
+Accessed: 2025-04-11.
+[25] Hao Gui, Lin Hu, Rui Chen, Mingxiao Huang, Yuxin Yin, Jin Yang, Yong
+Wu, Chen Liu, Zhongxu Sun, Xueyang Zhang, and Kun Zhan. 2025. Balanced 3DGS: Gaussian-wise Parallelism Rendering with Fine-Grained
+Tiling. arXiv:2412.17378 [cs.CV] https://arxiv.org/abs/2412.17378
+Conclusion
+Gaian addresses key limitations in existing distributed
+PBDR training by introducing a general interface to abstract
+different PBDR algorithms and a novel locality-aware distribution strategy. By carefully optimizing both point placement
+and image assignment through a combination of offline and
+online techniques, Gaian significantly reduces communication overhead. Gaian supports multiple PBDR algorithms,
+scales to hundreds of GPUs, and enables training of unprecedentedly large models—pushing the boundaries of 3D scene
+reconstruction.
+References
+[1] Saurabh Agarwal, Chengpo Yan, Ziyi Zhang, and Shivaram Venkataraman. 2023. Bagpipe: Accelerating Deep Recommendation Model
+Training. In Proceedings of the 29th Symposium on Operating Systems
+Principles (Koblenz, Germany) (SOSP ’23). Association for Computing
+Machinery, New York, NY, USA, 348–363. doi:10.1145/3600006.3613142
+[2] Ganesh Ananthanarayanan, Sameer Agarwal, Srikanth Kandula, Albert
+Greenberg, Ion Stoica, Duke Harlan, and Ed Harris. 2011. Scarlett:
+coping with skewed content popularity in mapreduce clusters. In
+Proceedings of the Sixth Conference on Computer Systems (Salzburg,
+Austria) (EuroSys ’11). Association for Computing Machinery, New
+York, NY, USA, 287–300. doi:10.1145/1966445.1966472
+[3] Konstantin Andreev and Harald Räcke. 2004. Balanced graph
+partitioning. In Proceedings of the Sixteenth Annual ACM Symposium
+on Parallelism in Algorithms and Architectures (Barcelona, Spain)
+(SPAA ’04). Association for Computing Machinery, New York, NY, USA,
+120–124. doi:10.1145/1007912.1007931
+[4] Yanqi Bao, Tianyu Ding, Jing Huo, Yaoli Liu, Yuxin Li, Wenbin Li, Yang
+Gao, and Jiebo Luo. 2025. 3D Gaussian Splatting: Survey, Technologies,
+Challenges, and Opportunities. IEEE Transactions on Circuits and Systems for Video Technology (2025), 1–1. doi:10.1109/TCSVT.2025.3538684
+[5] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan,
+and Peter Hedman. 2022. Mip-NeRF 360: Unbounded Anti-Aliased
+Neural Radiance Fields. CVPR (2022).
+[6] Aydin Buluç, Henning Meyerhenke, Ilya Safro, Peter Sanders, and
+Christian Schulz. 2013. Recent Advances in Graph Partitioning. CoRR
+abs/1311.3144 (2013). arXiv:1311.3144 http://arxiv.org/abs/1311.3144
+[7] U.V. Catalyurek and C. Aykanat. 1999. Hypergraph-partitioning-based
+decomposition for parallel sparse-matrix vector multiplication. IEEE
+Transactions on Parallel and Distributed Systems 10, 7 (1999), 673–693.
+doi:10.1109/71.780863
+[8] Rohit Chandra, Leo Dagum, David Kohr, Ramesh Menon, Dror Maydan,
+and Jeff McDonald. 2001. Parallel programming in OpenMP. Morgan
+kaufmann.
+[9] Guikun Chen and Wenguan Wang. 2024. A Survey on 3D Gaussian
+Splatting. arXiv:2401.03890 [cs.CV]
+[10] Haodong Chen, Runnan Chen, Qiang Qu, Zhaoqing Wang, Tongliang
+Liu, Xiaoming Chen, and Yuk Ying Chung. 2024. Beyond Gaussians: Fast and High-Fidelity 3D Splatting with Linear Kernels.
+arXiv:2411.12440 [cs.CV] https://arxiv.org/abs/2411.12440
+13
+[38] George Karypis. 1998.
+A Software Package for Partitioning
+Unstructured Graphs , Partitioning Meshes , and Computing Fill-Reducing Orderings of Sparse Matrices Version 5 . 0.
+https://api.semanticscholar.org/CorpusID:7458399
+[39] George Karypis and Kirk Schloegel. 2003. Parallel Graph Partitioning and Sparse Matrix Ordering Library Version 4 . 0.
+https://api.semanticscholar.org/CorpusID:9818727
+[40] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George
+Drettakis. 2023. 3D Gaussian Splatting for Real-Time Radiance
+Field Rendering. ACM Transactions on Graphics 42, 4 (July 2023).
+https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/
+[41] Bernhard Kerbl, Andreas Meuleman, Georgios Kopanas, Michael
+Wimmer, Alexandre Lanvin, and George Drettakis. 2024. A Hierarchical 3D Gaussian Representation for Real-Time Rendering
+of Very Large Datasets. ACM Transactions on Graphics (2024).
+https://repo-sam.inria.fr/fungraph/hierarchical-3d-gaussians/
+[42] B. W. Kernighan and S. Lin. 1970. An efficient heuristic procedure for
+partitioning graphs. The Bell System Technical Journal 49, 2 (1970),
+291–307. doi:10.1002/j.1538-7305.1970.tb01770.x
+[43] Andrew V. Knyazev. 2017. On spectral partitioning of signed
+graphs. In International Conference on Scientific Computing.
+https://api.semanticscholar.org/CorpusID:51688813
+[44] Harold W. Kuhn. 2010. The Hungarian Method for the Assignment
+Problem. In 50 Years of Integer Programming 1958-2008 - From the
+Early Years to the State-of-the-Art, Michael Jünger, Thomas M. Liebling,
+Denis Naddef, George L. Nemhauser, William R. Pulleyblank, Gerhard
+Reinelt, Giovanni Rinaldi, and Laurence A. Wolsey (Eds.). Springer,
+29–47. doi:10.1007/978-3-540-68279-0_2
+[45] Junseo Lee, Seokwon Lee, Jungi Lee, Junyong Park, and Jaewoong Sim.
+2024. GSCore: Efficient Radiance Field Rendering via Architectural
+Support for 3D Gaussian Splatting. In Proceedings of the 29th ACM
+International Conference on Architectural Support for Programming
+Languages and Operating Systems, Volume 3 (La Jolla, CA, USA)
+(ASPLOS ’24). Association for Computing Machinery, New York, NY,
+USA, 497–511. doi:10.1145/3620666.3651385
+[46] Bingling Li, Shengyi Chen, Luchao Wang, Kaimin Liao, Sijie Yan, and
+Yuanjun Xiong. 2024. RetinaGS: Scalable Training for Dense Scene
+Rendering with Billion-Scale 3D Gaussians. arXiv:2406.11836 [cs.CV]
+https://arxiv.org/abs/2406.11836
+[47] Haolin Li, Jinyang Liu, Mario Sznaier, and Octavia I. Camps. 2024.
+3D-HGS: 3D Half-Gaussian Splatting. ArXiv abs/2406.02720 (2024).
+https://api.semanticscholar.org/CorpusID:270258290
+[48] Shen Li, Yanli Zhao, Rohan Varma, Omkar Salpekar, Pieter Noordhuis,
+Teng Li, Adam Paszke, Jeff Smith, Brian Vaughan, Pritam Damania,
+and Soumith Chintala. 2020. PyTorch Distributed: Experiences on
+Accelerating Data Parallel Training. In VLDB.
+[49] Yixuan Li, Lihan Jiang, Linning Xu, Yuanbo Xiangli, Zhenzhi Wang,
+Dahua Lin, and Bo Dai. 2023. Matrixcity: A large-scale city dataset for
+city-scale neural rendering and beyond. In ICCV.
+[50] Zhan Li, Zhang Chen, Zhong Li, and Yi Xu. 2024. Spacetime Gaussian
+Feature Splatting for Real-Time Dynamic View Synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR). 8508–8520.
+[51] Jiaqi Lin, Zhihao Li, Xiao Tang, Jianzhuang Liu, Shiyong Liu, Jiayue Liu,
+Yangdi Lu, Xiaofei Wu, Songcen Xu, Youliang Yan, and Wenming Yang.
+2024. VastGaussian: Vast 3D Gaussians for Large Scene Reconstruction.
+In CVPR.
+[52] Liqiang Lin, Yilin Liu, Yue Hu, Xingguang Yan, Ke Xie, and Hui Huang.
+2022. Capturing, Reconstructing, and Simulating: the UrbanScene3D
+Dataset. In ECCV. 93–109.
+[53] Weikai Lin, Yu Feng, and Yuhao Zhu. 2025. <scp>MetaSapiens:</scp>
+Real-Time Neural Rendering with Efficiency-Aware Pruning and
+Accelerated Foveated Rendering. In Proceedings of the 30th ACM
+International Conference on Architectural Support for Programming
+[26] Gurobi Optimization, LLC. 2024. Gurobi Optimizer Reference Manual.
+https://www.gurobi.com
+[27] Abdullah Hamdi, Luke Melas-Kyriazi, Jinjie Mai, Guocheng Qian,
+Ruoshi Liu, Carl Vondrick, Bernard Ghanem, and Andrea Vedaldi. 2024.
+GES: Generalized Exponential Splatting for Efficient Radiance Field
+Rendering. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR). 19812–19822.
+[28] Alex Hanson, Allen Tu, Geng Lin, Vasu Singla, Matthias Zwicker, and
+Tom Goldstein. 2025. Speedy-Splat: Fast 3D Gaussian Splatting with
+Sparse Pixels and Sparse Primitives. In Proceedings of the Computer
+Vision and Pattern Recognition Conference (CVPR). 21537–21546.
+https://speedysplat.github.io/
+[29] Jiaao He, Shengqi Chen, Kezhao Huang, and Jidong Zhai. 2025.
+HypeReca: Distributed Heterogeneous In-Memory Embedding Database for Training Recommender Models. In Proceedings of the 2025 USENIX Annual Technical Conference, USENIX
+ATC 2025, Boston, MA, USA, July 7-9, 2025, Deniz Altinbüken
+and Ryan Stutsman (Eds.). USENIX Association, 1071–1087.
+https://www.usenix.org/conference/atc25/presentation/he-jiaao
+[30] Jan Held, Renaud Vandeghen, Adrien Deliege, Abdullah Hamdi,
+Anthony Cioppa, Silvio Giancola, Andrea Vedaldi, Bernard Ghanem,
+Andrea Tagliasacchi, and Marc Van Droogenbroeck. 2025. Triangle
+Splatting for Real-Time Radiance Field Rendering. arXiv (2025).
+[31] Jan Held, Renaud Vandeghen, Abdullah Hamdi, Adrien Deliege,
+Anthony Cioppa, Silvio Giancola, Andrea Vedaldi, Bernard Ghanem,
+and Marc Van Droogenbroeck. 2024. 3D Convex Splatting: Radiance
+Field Rendering with 3D Smooth Convexes. arXiv:2411.14974 [cs.CV]
+https://arxiv.org/abs/2411.14974
+[32] H.H. Hoos and T. Stützle. 2005.
+Stochastic Local Search:
+Foundations and Applications.
+Elsevier Science.
+https:
+//books.google.com/books?id=3HAedXnC49IC
+[33] Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and Shenghua
+Gao. 2024. 2D Gaussian Splatting for Geometrically Accurate Radiance
+Fields. In Special Interest Group on Computer Graphics and Interactive
+Techniques Conference Conference Papers ’24 (SIGGRAPH ’24). ACM,
+1–11. doi:10.1145/3641519.3657428
+[34] Yanping Huang, Youlong Cheng, Ankur Bapna, Orhan Firat, Dehao Chen, Mia Chen, HyoukJoong Lee, Jiquan Ngiam, Quoc V
+Le, Yonghui Wu, and zhifeng Chen. 2019. GPipe: Efficient Training of Giant Neural Networks using Pipeline Parallelism. In
+NeurIPS. https://proceedings.neurips.cc/paper_files/paper/2019/file/
+093f65e080a295f8076b1c5722a46aa2-Paper.pdf
+[35] Michael Isard, Vijayan Prabhakaran, Jon Currey, Udi Wieder, Kunal
+Talwar, and Andrew Goldberg. 2009. Quincy: fair scheduling for
+distributed computing clusters. In Proceedings of the ACM SIGOPS 22nd
+Symposium on Operating Systems Principles (Big Sky, Montana, USA)
+(SOSP ’09). Association for Computing Machinery, New York, NY, USA,
+261–276. doi:10.1145/1629575.1629601
+[36] Ying Jiang, Chang Yu, Tianyi Xie, Xuan Li, Yutao Feng, Huamin Wang,
+Minchen Li, Henry Lau, Feng Gao, Yin Yang, and Chenfanfu Jiang. 2024.
+VR-GS: A Physical Dynamics-Aware Interactive Gaussian Splatting
+System in Virtual Reality. arXiv preprint arXiv:2401.16663 (2024).
+[37] Ziheng Jiang, Haibin Lin, Yinmin Zhong, Qi Huang, Yangrui Chen,
+Zhi Zhang, Yanghua Peng, Xiang Li, Cong Xie, Shibiao Nong, Yulu
+Jia, Sun He, Hongmin Chen, Zhihao Bai, Qi Hou, Shipeng Yan, Ding
+Zhou, Yiyao Sheng, Zhuo Jiang, Haohan Xu, Haoran Wei, Zhang
+Zhang, Pengfei Nie, Leqi Zou, Sida Zhao, Liang Xiang, Zherui Liu,
+Zhe Li, Xiaoying Jia, Jianxi Ye, Xin Jin, and Xin Liu. 2024. MegaScale:
+scaling large language model training to more than 10,000 GPUs.
+In Proceedings of the 21st USENIX Symposium on Networked Systems
+Design and Implementation (Santa Clara, CA, USA) (NSDI’24). USENIX
+Association, USA, Article 41, 16 pages.
+14
+Languages and Operating Systems, Volume 1 (ASPLOS ’25). ACM,
+669–682. doi:10.1145/3669940.3707227
+[54] Zhiqi Lin, Cheng Li, Youshan Miao, Yunxin Liu, and Yinlong Xu. 2020.
+PaGraph: Scaling GNN training on large graphs via computation-aware
+caching. In Proceedings of the 11th ACM Symposium on Cloud Computing
+(Virtual Event, USA) (SoCC ’20). Association for Computing Machinery,
+New York, NY, USA, 401–415. doi:10.1145/3419111.3421281
+[55] Rong Liu, Dylan Sun, Meida Chen, Yue Wang, and Andrew Feng.
+2025.
+Deformable Beta Splatting.
+arXiv:2501.18630 [cs.CV]
+https://arxiv.org/abs/2501.18630
+[56] Tianfeng Liu, Yangrui Chen, Dan Li, Chuan Wu, Yibo Zhu,
+Jun He, Yanghua Peng, Hongzheng Chen, Hongzhi Chen, and
+Chuanxiong Guo. 2023.
+BGL: GPU-Efficient GNN Training
+by Optimizing Graph Data I/O and Preprocessing. In 20th
+USENIX Symposium on Networked Systems Design and Implementation (NSDI 23). USENIX Association, Boston, MA, 103–118.
+https://www.usenix.org/conference/nsdi23/presentation/liu-tianfeng
+[57] Yang Liu, He Guan, Chuanchen Luo, Lue Fan, Junran Peng, and
+Zhaoxiang Zhang. 2024. CityGaussian: Real-time High-quality
+Large-Scale Scene Rendering with Gaussians. In CVPR.
+[58] Yang Liu, Chuanchen Luo, Zhongkai Mao, Junran Peng, and
+Zhaoxiang Zhang. 2025. CityGaussianV2: Efficient and Geometrically Accurate Reconstruction for Large-Scale Scenes. In The
+Thirteenth International Conference on Learning Representations.
+https://openreview.net/forum?id=a3ptUbuzbW
+[59] Guanxing Lu, Baoxiong Jia, Puhao Li, Yixin Chen, Ziwei Wang, Yansong
+Tang, and Siyuan Huang. 2025. GWM: Towards Scalable Gaussian
+World Models for Robotic Manipulation. Proceedings of International
+Conference on Computer Vision (ICCV) (2025).
+[60] Saswat Subhajyoti Mallick, Rahul Goel, Bernhard Kerbl, Markus
+Steinberger, Francisco Vicente Carrasco, and Fernando De La Torre.
+2024. Taming 3DGS: High-Quality Radiance Fields with Limited
+Resources. In SIGGRAPH Asia 2024 Conference Papers (Tokyo, Japan)
+(SA ’24). Association for Computing Machinery, New York, NY, USA,
+Article 2, 11 pages. doi:10.1145/3680528.3687694
+[61] Vasimuddin Md, Sanchit Misra, Guixiang Ma, Ramanarayan Mohanty, Evangelos Georganas, Alexander Heinecke, Dhiraj Kalamkar,
+Nesreen K. Ahmed, and Sasikanth Avancha. 2021. DistGNN: scalable distributed training for large-scale graph neural networks. In
+Proceedings of the International Conference for High Performance
+Computing, Networking, Storage and Analysis (St. Louis, Missouri)
+(SC ’21). Association for Computing Machinery, New York, NY, USA,
+Article 76, 14 pages. doi:10.1145/3458817.3480856
+[62] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T.
+Barron, Ravi Ramamoorthi, and Ren Ng. 2020. NeRF: Representing
+Scenes as Neural Radiance Fields for View Synthesis. In ECCV.
+[63] Philipp Moritz, Robert Nishihara, Stephanie Wang, Alexey Tumanov, Richard Liaw, Eric Liang, Melih Elibol, Zongheng Yang,
+William Paul, Michael I. Jordan, and Ion Stoica. 2018. Ray: A
+Distributed Framework for Emerging AI Applications. In 13th
+USENIX Symposium on Operating Systems Design and Implementation (OSDI 18). USENIX Association, Carlsbad, CA, 561–577.
+https://www.usenix.org/conference/osdi18/presentation/moritz
+[64] Deepak Narayanan, Aaron Harlap, Amar Phanishayee, Vivek Seshadri,
+Nikhil R Devanur, Gregory R Ganger, Phillip B Gibbons, and Matei
+Zaharia. 2019. PipeDream: generalized pipeline parallelism for DNN
+training. In SOSP.
+[65] Deepak Narayanan, Mohammad Shoeybi, Jared Casper, Patrick
+LeGresley, Mostofa Patwary, Vijay Anand Korthikanti, Dmitri Vainbrand, Prethvi Kashinkunti, Julie Bernauer, Bryan Catanzaro, Amar
+Phanishayee, and Matei Zaharia. 2021. Efficient Large-Scale Language
+Model Training on GPU Clusters Using Megatron-LM. In SOSP.
+[66] NVIDIA. 2021. NCCL: NVIDIA Collective Communications Library.
+https://developer.nvidia.com/nccl.
+[67] NVIDIA Corporation. 2025. NVIDIA Omniverse NuRec. https:
+//docs.nvidia.com/nurec/index.html Accessed: November 30, 2025.
+[68] Balaji Palanisamy, Aameek Singh, Ling Liu, and Bhushan Jain. 2011.
+Purlieus: Locality-aware resource allocation for MapReduce in a
+cloud. In SC ’11: Proceedings of 2011 International Conference for High
+Performance Computing, Networking, Storage and Analysis. 1–11.
+doi:10.1145/2063384.2063462
+[69] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor Killeen, Zeming Lin, Natalia Gimelshein,
+Luca Antiga, Alban Desmaison, Andreas Köpf, Edward Yang, Zach
+DeVito, Martin Raison, Alykhan Tejani, Sasank Chilamkurthy, Benoit
+Steiner, Lu Fang, Junjie Bai, and Soumith Chintala. 2019. PyTorch:
+An Imperative Style, High-Performance Deep Learning Library.
+arXiv:1912.01703 [cs.LG] https://arxiv.org/abs/1912.01703
+[70] Lukas Radl, Michael Steiner, Mathias Parger, Alexander Weinrauch,
+Bernhard Kerbl, and Markus Steinberger. 2024. StopThePop: Sorted
+Gaussian Splatting for View-Consistent Real-time Rendering. ACM
+Trans. Graph. 43, 4, Article 64 (July 2024), 17 pages. doi:10.1145/3658187
+[71] Samyam Rajbhandari, Jeff Rasley, Olatunji Ruwase, and Yuxiong
+He. 2020. ZeRO: Memory Optimizations Toward Training Trillion
+Parameter Models. In SC.
+[72] Johannes Lutz Schönberger and Jan-Michael Frahm. 2016. Structurefrom-Motion Revisited. In Conference on Computer Vision and Pattern
+Recognition (CVPR).
+[73] Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley,
+Jared Casper, and Bryan Catanzaro. 2020. Megatron-LM: Training MultiBillion Parameter Language Models Using Model Parallelism. In SC.
+[74] Konstantin Shvachko, Hairong Kuang, Sanjay Radia, and Robert
+Chansler. 2010. The Hadoop Distributed File System. In Proceedings
+of the 2010 IEEE 26th Symposium on Mass Storage Systems and
+Technologies (MSST) (MSST ’10). IEEE Computer Society, USA, 1–10.
+doi:10.1109/MSST.2010.5496972
+[75] Shihui Song and Peng Jiang. 2022. Rethinking graph data placement
+for graph neural network training on multiple GPUs. In Proceedings
+of the 36th ACM International Conference on Supercomputing (Virtual
+Event) (ICS ’22). Association for Computing Machinery, New York, NY,
+USA, Article 39, 10 pages. doi:10.1145/3524059.3532384
+[76] Xiaoniu Song, Yiwen Zhang, Rong Chen, and Haibo Chen. 2023.
+UGACHE: A Unified GPU Cache for Embedding-based Deep Learning.
+In Proceedings of the 29th Symposium on Operating Systems Principles
+(Koblenz, Germany) (SOSP ’23). Association for Computing Machinery,
+New York, NY, USA, 627–641. doi:10.1145/3600006.3613169
+[77] John Thorpe, Yifan Qiao, Jonathan Eyolfson, Shen Teng, Guanzhou
+Hu, Zhihao Jia, Jinliang Wei, Keval Vora, Ravi Netravali, Miryung
+Kim, and Guoqing Harry Xu. 2021. Dorylus: Affordable, Scalable,
+and Accurate GNN Training with Distributed CPU Servers and
+Serverless Threads. In 15th USENIX Symposium on Operating Systems
+Design and Implementation (OSDI 21). USENIX Association, 495–514.
+https://www.usenix.org/conference/osdi21/presentation/thorpe
+[78] Xuechang Tu, Bernhard Kerbl, and Fernando de la Torre. 2024. Fast
+and Robust 3D Gaussian Splatting for Virtual Reality. In SIGGRAPH
+Asia 2024 Posters (SA ’24). Association for Computing Machinery, New
+York, NY, USA, Article 43, 3 pages. doi:10.1145/3681756.3697947
+[79] Haithem Turki, Deva Ramanan, and Mahadev Satyanarayanan. 2022.
+Mega-NERF: Scalable Construction of Large-Scale NeRFs for Virtual
+Fly-Throughs. In CVPR.
+[80] Pauli Virtanen, Ralf Gommers, Travis E. Oliphant, Matt Haberland,
+Tyler Reddy, David Cournapeau, Evgeni Burovski, Pearu Peterson,
+Warren Weckesser, Jonathan Bright, Stéfan J. van der Walt, Matthew
+Brett, Joshua Wilson, K. Jarrod Millman, Nikolay Mayorov, Andrew
+R. J. Nelson, Eric Jones, Robert Kern, Eric Larson, C J Carey, İlhan Polat,
+Yu Feng, Eric W. Moore, Jake VanderPlas, Denis Laxalde, Josef Perktold,
+Robert Cimrman, Ian Henriksen, E. A. Quintero, Charles R. Harris,
+Anne M. Archibald, Antônio H. Ribeiro, Fabian Pedregosa, Paul van
+15
+Mulbregt, and SciPy 1.0 Contributors. 2020. SciPy 1.0: Fundamental
+Algorithms for Scientific Computing in Python. Nature Methods 17
+(2020), 261–272. doi:10.1038/s41592-019-0686-2
+[81] Minjie Wang, Chien-chin Huang, and Jinyang Li. 2019. Supporting very
+large models using automatic dataflow graph partitioning. In EuroSys.
+[82] Yifan Wang, Peishan Yang, Zhen Xu, Jiaming Sun, Zhanhua Zhang,
+Yong Chen, Hujun Bao, Sida Peng, and Xiaowei Zhou. 2025. FreeTimeGS: Free Gaussian Primitives at Anytime Anywhere for Dynamic
+Scene Reconstruction. In CVPR. https://zju3dv.github.io/freetimegs
+Marble: A Multimodal World Model.
+[83] World Labs. 2025.
+https://marble.worldlabs.ai/
+[84] Lizhou Wu, Haozhe Zhu, Siqi He, Jiapei Zheng, Chixiao Chen,
+and Xiaoyang Zeng. 2024. GauSPU: 3D Gaussian Splatting Processor for Real-Time SLAM Systems. In 2024 57th IEEE/ACM
+International Symposium on Microarchitecture (MICRO). 1562–1573.
+doi:10.1109/MICRO61859.2024.00114
+[85] Ziyang Xie, Zhizheng Liu, Zhenghao Peng, Wayne Wu, and Bolei Zhou.
+2025. Vid2Sim: Realistic and Interactive Simulation from Video for
+Urban Navigation. CVPR (2025).
+[86] Linning Xu, Vasu Agrawal, William Laney, Tony Garcia, Aayush
+Bansal, Changil Kim, Samuel Rota Bulò, Lorenzo Porzi, Peter
+Kontschieder, Aljaž Božič, Dahua Lin, Michael Zollhöfer, and Christian
+Richardt. 2023. VR-NeRF: High-Fidelity Virtualized Walkable Spaces.
+In SIGGRAPH Asia 2023 Conference Papers (SA ’23). ACM, 1–12.
+doi:10.1145/3610548.3618139
+[87] Yuanzhong Xu, HyoukJoong Lee, Dehao Chen, Blake Hechtman,
+Yanping Huang, Rahul Joshi, Maxim Krikun, Dmitry Lepikhin, Andy Ly,
+Marcello Maggioni, Ruoming Pang, Noam Shazeer, Shibo Wang, Tao
+Wang, Yonghui Wu, and Zhifeng Chen. 2021. GSPMD: General and Scalable Parallelization for ML Computation Graphs. In arXiv:2105.04663.
+[88] Zhen Xu, Yinghao Xu, Zhiyuan Yu, Sida Peng, Jiaming Sun, Hujun Bao,
+and Xiaowei Zhou. 2024. Representing Long Volumetric Video with
+Temporal Gaussian Hierarchy. ACM Transactions on Graphics 43, 6
+(November 2024). https://zju3dv.github.io/longvolcap
+[89] Zeyu Yang, Hongye Yang, Zijie Pan, and Li Zhang. 2024. Real-time
+Photorealistic Dynamic Scene Representation and Rendering with
+4D Gaussian Splatting. In International Conference on Learning
+Representations (ICLR).
+gsplat Library.
+[90] Vickie Ye and Angjoo Kanazawa. 2023.
+arXiv:2312.02121 [cs.MS]
+[91] Matei Zaharia, Dhruba Borthakur, Joydeep Sen Sarma, Khaled
+Elmeleegy, Scott Shenker, and Ion Stoica. 2010. Delay scheduling:
+a simple technique for achieving locality and fairness in cluster
+scheduling. In Proceedings of the 5th European Conference on Computer
+Systems (Paris, France) (EuroSys ’10). Association for Computing
+Machinery, New York, NY, USA, 265–278. doi:10.1145/1755913.1755940
+[92] Chaoliang Zeng, Xudong Liao, Xiaodian Cheng, Han Tian, Xinchen
+Wan, Hao Wang, and Kai Chen. 2024. Accelerating neural recommendation training with embedding scheduling. In Proceedings of the 21st
+USENIX Symposium on Networked Systems Design and Implementation
+(Santa Clara, CA, USA) (NSDI’24). USENIX Association, USA, Article
+63, 16 pages.
+[93] Kun Zhang, Weihong Bi, Xiaoming Zhang, Xinghu Fu, Kun peng Zhou,
+and Li Zhu. 2015. A New Kmeans Clustering Algorithm For Point
+Cloud. International Journal of Hybrid Information Technology 8 (2015),
+157–170. https://api.semanticscholar.org/CorpusID:41629780
+[94] Kaifeng Zhang, Shuo Sha, Hanxiao Jiang, Matthew Loper, Hyunjong
+Song, Guangyan Cai, Zhuo Xu, Xiaochen Hu, Changxi Zheng, and
+Yunzhu Li. 2025. Real-to-Sim Robot Policy Evaluation with Gaussian
+Splatting Simulation of Soft-Body Interactions. arXiv preprint
+arXiv:2511.04665 (2025).
+[95] Hexu Zhao, Xiwen Min, Xiaoteng Liu, Moonjun Gong, Yiming Li,
+Ang Li, Saining Xie, Jinyang Li, and Aurojit Panda. 2025. CLM:
+Removing the GPU Memory Barrier for 3D Gaussian Splatting.
+arXiv:2511.04951 [cs.CV] https://arxiv.org/abs/2511.04951
+[96] Hexu Zhao, Haoyang Weng, Daohan Lu, Ang Li, Jinyang Li, Aurojit
+Panda, and Saining Xie. 2025. On Scaling Up 3D Gaussian Splatting
+Training. In The Thirteenth International Conference on Learning
+Representations. https://openreview.net/forum?id=pQqeQpMkE7
+[97] Yanli Zhao, Andrew Gu, Rohan Varma, Liang Luo, Chien-Chin Huang,
+Min Xu, Less Wright, Hamid Shojanazeri, Myle Ott, Sam Shleifer,
+Alban Desmaison, Can Balioglu, Pritam Damania, Bernard Nguyen,
+Geeta Chauhan, Yuchen Hao, Ajit Mathews, and Shen Li. 2023.
+PyTorch FSDP: Experiences on Scaling Fully Sharded Data Parallel.
+arXiv:2304.11277 [cs.DC]
+[98] Lianmin Zheng, Zhuohan Li, Hao Zhang, Yonghao Zhuang, Zhifeng
+Chen, Yanping Huang, Yida Wang, Yuanzhong Xu, Danyang Zhuo,
+Eric P Xing, et al. 2022. Alpa: Automating inter-and Intra-Operator
+parallelism for distributed deep learning. In OSDI.
+16
+A
+Additional Background
+A.1
+Differences in Rendering Across Point Types
+State
+# Elem.
+means2d
+conics
+2
+3
+opacities
+colors
+radii
+depths
+1
+3
+1
+1
+Total
+11
+the components of these view-dependent states in Tables 3a,
+3b, and 3c. Since our techniques primarily target communication reduction—which occurs during the exchange of viewdependent states—the effectiveness of reduction depends on
+the size of these states. Larger view-dependent states result in
+higher communication overhead, offering more opportunities
+for reduction.
+Size Description
+8 B 2D projected position of the Gaussian in camera space
+12 B Encodes the 2D elliptical footprint (conic) of the Gaussian
+in screen space
+4 B Alpha transparency used in blending during rendering
+12 B RGB color used to shade the Gaussian
+4 B Scalar indicating size in screen space, used for LOD and culling
+4 B Depth from the camera; used for depth sorting and visibility
+B
+44 B
+(a) 3D Gaussian Splatting (3DGS).
+State
+# Elem. Size
+Description
+means2d
+ray_transforms
+2
+9
+opacities
+colors
+radii
+depths
+normals
+1
+3
+1
+1
+3
+8 B 2D projected position of the Gaussian in pixel space
+36 B 3×3 affine matrix mapping pixel-space UV to
+splat coordinates (row-major KWH)
+4 B Alpha transparency value for blending the Gaussian
+12 B RGB color used to shade the Gaussian
+4 B Maximum projected radius in pixels for culling/LOD
+4 B Z-depth of the Gaussian center for depth sorting
+12 B Surface normal in camera space for lighting/back-face culling
+Total
+20
+80 B
+import gaian
+class ConvexSplatting3D(gaian.PBDRProgram):
+# Attributes in 3DCX model (S points)
+# PC.vertices (S, 6, 3) Positions of Convex’s six vertices
+# PC.opacity (S, 1)
+Opacity
+# PC.sh
+(S, 48)
+Spherical harmonic coeff to model
+view-dependent color
+@torch.no_grad()
+def pts_culling(view, PC):
+# isect_mask[i]=true iff 3D Convex-i intersects frustum
+isect_mask ← TestIntersectConvex(PC.vertices,
+view.frustum)
+infrustum_ids ← IndicesOfTrue(isect_mask)
+return infrustum_ids
+(b) 2D Gaussian Splatting (2DGS).
+State
+# Elem.
+Size
+Description
+means2d
+normals
+offsets
+opacities
+colors
+radii
+depths
+delta
+sigma
+points view
+2
+12
+6
+1
+3
+1
+1
+1
+1
+1
+8B
+48 B
+24 B
+4B
+12 B
+4B
+4B
+4B
+4B
+4B
+2D projected center of the convex in pixel space
+2D outward normals for each of the 6 projected hull vertices
+Line-offsets for each hull edge in the 2D indicator function
+Alpha transparency for blending the convex splat
+RGB color coefficients for shading
+Projected radius (pixels) for culling
+Z-depth of the convex center for depth sorting
+Smoothness parameter controlling edge curvature (𝛿)
+Sharpness parameter controlling boundary transition (𝜎)
+Number of vertices in the 2D convex hull (≤ 6)
+Total
+29
+Additional Algorithm Implementations
+In this section, we further describe how 3DCX and 4DGS are
+implemented using Gaian ’s API, and how they are different
+from 3DGS.
+def pts_splatting(view, PC, infrustum_ids):
+SP ← gaian.EmptyViewDependentSplats()
+# Project all vertices of each 3D convex shape onto 2D,
+where they may no longer remain convex
+positions_2d, SP.depth ← Project3DCXTo2D(view.pose,
+PC.vertices[infrustum_ids])
+# Recompute the convex hull from the 2D points
+SP.vertices_2d ← Compute2DConvexHull(positions_2d)
+# Omit some computation
+...
+# Compute view-dependent color
+SP.color ← ComputeColorGivenView(view.pose,
+PC.sh[infrustum_ids])
+return SP
+116 B
+(c) 3D Convex Splatting (3DCX).
+Table 3. Comparison of view-dependent states across 3DGS, 2DGS,
+and 3DCX in rendering. These states are exchanged across GPUs in
+distributed training. Each point incurs a state size of 40 B, 80 B, and
+116 B, respectively. For each state, we report the number of elements
+and their size in bytes (B), along with a brief description.
+Figure 16. Implement 3DCX with Gaian API.
+3DCX. As shown in Figure 16, each point in 3DCX is represented as a 3D convex polyhedron defined by six vertices,
+without the scale or rotation parameters used in 3DGS. So, in
+pts_culling, this leads to a different frustum-intersection test.
+In the subsequent pts_splatting stage, pts_splatting projects
+all six vertices of in-frustum 3D convex onto the image plane
+and then recomputes a 2D convex hull as the view-dependent
+states. Moreover, 3DCX shares the opacity and spherical harmonics coefficients used in 3DGS, and these attributes undergo the same transformations during pts_splatting. Finally,
+3DCX produces view-dependent splat state (SP) that differ
+from those of 3DGS; thus they require different image_render
+pipelines. For simplicity, we omit two secondary attributes
+here used for modeling smoothness.
+4DGS. Different from 3DGS and 3DCX, which are used to reconstruct a static scene, 4DGS reconstructs a 3D video where
+the scene evolves over time. In this problem setting, each camera view includes not only a pose (view.pose), but it also has
+Different point types are defined by different attributes.
+For example, to define position, a 3D Gaussian uses xyz (3 ×
+32-bit values) for its center, while a 3D Convex uses 6 vertices,
+each with xyz, totaling 18 × 32-bit values. Moreover, while
+the rendering operations can always be grouped into the APIs
+shown in Figure 4, their specifics vary across methods. In
+3DGS, projecting a 3D Gaussian is just a perspective projection. In contrast, 3DCX needs an extra step: after projecting
+its 6 vertices, it runs a Graham-scan to create a 2D space convex hull. The projection itself can also differ: 3DGS uses a
+simple affine approximation of perspective projection, while
+2DGS models it more accurately, at the expense of increased
+computation and memory usage.
+Rendering operations yield varying view-dependent states
+in different methods. The three methods in our evaluation,
+3DGS, 2DGS, and 3DCX incur view-dependent state sizes of
+11, 20, and 29 elements per point, respectively. We break down
+17
+projection from 4D to 2D and conditions the color computation additionally on the queried time. The resulting viewdependent splat state match those in 3DGS, allowing it to
+reuse 3DGS’ image_render implementation.
+import gaian
+class GaussianSplatting4D(gaian.PBDRProgram):
+# Attributes in 4DGS model (S points)
+### Spatial Attributes
+# PC.xyz
+(S, 3)
+3D Position of center
+# PC.scale
+(S, 3)
+Scale along three spatial axis
+# PC.rot
+(S, 4)
+Rotation of Gaussian ellipse
+### Temporal Attributes
+# PC.t
+(S, 1)
+Center timestep
+# PC.scale_t (S, 1)
+Temporal duration
+# PC.rot_t
+(S, 4)
+Rotation over time
+### Appearence Attributes
+# PC.opacity (S, 1)
+Opacity
+# PC.sh
+(S, 144) Spherical harmonic coeff to model
+both view-dependent and time-dependent color
+C
+Additional Design Details
+C.1 Local Search
+Local Search and Objective Relaxation. We use the Linear
+Sum Assignment (LSA) solution as an initial solution that
+can minimize total communication. Starting from this, we
+apply a local search to further reduce load imbalance without
+significantly increasing communication cost.
+At each step of the search process, we select a pair of images
+and swap their currently assigned GPUs. We adopt a simple
+steepest-ascent strategy, where each step chooses the swap
+that yields the greatest improvement in the below objective
+function. While more advanced algorithms such as Simulated
+Annealing, Tabu Search, or Evolutionary Algorithms are also
+applicable, we find the hill climbing approach to be sufficient
+for our setting. We iteratively perform this swapping step
+until a satisfactory solution is found or the online placement
+time budget is reached.
+Max terms in the original objective function 1 introduce
+non-smoothness and discrete transitions, leading to a rugged
+search landscape with plateaus and sharp jumps. This makes
+local search methods prone to getting stuck in suboptimal regions. Therefore, we smooth the max terms using the 𝑝-norm
+∥ · ∥ 𝑝 . When 𝑝 = ∞, it recovers the maximum, i.e., ∥𝑥 ∥ ∞ =
+Í
+max𝑖 |𝑥𝑖 |; when 𝑝 = 1, it becomes the sum, i.e., ∥𝑥 ∥ 1 = 𝑖 |𝑥𝑖 |.
+Choosing 𝑝 ∈ (1, ∞) balances total and maximum values,
+allowing us to unify total communication and peak send/receive terms in the objective. Finally, we simplify the objectives
+function:
+@torch.no_grad()
+def pts_culling(view, PC):
+# present_mask[i]=1 iff Gaussian-i is present at the
+view’s timestamp
+present_mask ← TestPresent(view.time, PC.t, PC.scale_t)
+# Bounding ellipse at view’s timestamp
+ellipses ← ComputeBoundEllipseAtTime(view.time, PC.xyz,
+PC.scale, PC.rot, PC.t, PC.scale_t, PC.rot_t)
+# isect_mask[i]=true iff ellipses[i] intersects frustum
+isect_mask ← TestIntersectEllipse(view.frustum,ellipses)
+# Compute overlapped indices
+mask = present_mask && isect_mask
+infrustum_ids ← IndicesOfTrue(mask)
+return infrustum_ids
+def pts_splatting(view, PC, infrustum_ids):
+SP ← gaian.EmptyViewDependentSplats()
+# Project 4D Gaussian to 2D splat at view’s pose and time
+SP.xy, SP.scale, SP.rot, SP.depth ← Project4DGSTo2D(
+view.pose, view.time,
+PC.xyz[infrustum_ids], PC.scale[infrustum_ids],
+PC.rot[infrustum_ids], PC.t[infrustum_ids],
+PC.scale_t[infrustum_ids], PC.rot_t[infrustum_ids])
+# Omit some computation
+...
+# Compute color given view’s pose and time
+SP.color ← ComputeColorGivenViewAndTime(view.pose,
+view.time, PC.sh[infrustum_ids])
+return SP
+Figure 17. Implement 4DGS with Gaian API.
+minimize
+a timestamp (view.time) indicating when the view was captured. To model the dynamics, 4DGS replaces the 3D Gaussian
+used in 3DGS with a 4D Gaussian that incorporates time as
+an additional dimension. As shown in Figure 17, it introduces
+PC.t and PC.scale_t to define each point’s presence interval over time; PC.rot_t governs shape deformation across
+time; and its spherical harmonics coefficients expand substantially (144 vs. 48 parameters in 3DGS) to additionally capture
+time-dependent color changes. Despite being a different reconstruction problem, 4DGS can still expose its data-access
+patterns through pts_culling. Specifically, points are culled
+not only when their bounding ellipse does not intersect the
+camera frustum (isect_mask), but also when they are not
+present at the queried view’s timestamp (present_mask). The
+pts_splatting stage follows the same high-level structure as
+in 3DGS: projecting points and evaluating spherical harmonics–based color. The key difference is that 4DGS performs
+𝛽 · ∥send∥ 𝑝 +𝛾 · ∥recv∥ 𝑝 +𝛿 · ∥comp∥ 𝑝 .
+This objective is not only smoother, making optimization
+easier; but it also aligns well with our swapping-based search
+strategy by helping accelerate online image placement. The
+objective can be quickly updated after each swapping step, and
+these swapping trials can be parallelizable (i.e. OpenMP multithreads), both contributing to a faster search. Moreover, early
+stopping allows us to easily control the overall search time.
+Together, these features enable low-latency online placement.
+To set the objective coefficients for local search, Gaian ’s Profiler measures average communication 𝑇comm and average rendering computation times 𝑇comp from previous epochs. It sets
+𝑇
+𝑇comm
+𝛾 = 𝑇commcomp
++𝑇comp and 𝛼 +𝛽 +𝛾 = 𝑇comm +𝑇comp . This prioritizes communication related objectives when communication dominates,
+and prioritizes computation related ones when computation
+dominates. Since local search relaxes the three communication terms into two 𝑝-norms, we only split the weight between
+𝛽 and 𝛾. We empirically choose 𝑝 based on the severity of load
+imbalance—scenes with more irregular topology use a larger
+18
+𝑝 to better reflect imbalance. The choice of 𝑝 is used to capture the effect of 𝛼. Given the current maximum send/receive
+max_recv
+𝑇 comm
+· 𝑇 comm+𝑇
+volumes, the weights are: 𝛽 = max_recv+max_send
+comp
+max_send
+𝑇 comm
+· 𝑇 comm+𝑇
+and 𝛾 = max_recv+max_send
+comp .
+D
+Training a 500 Million-Point Model for the Street View.
+We train a 500 million-point model with Gaian using 64 A100
+GPUs on the MatrixCity Street dataset, which provides 260,000
+images as the training set. We use the dataset’s official test
+set for evaluation and achieve a PSNR of 21.29 on the test
+set and 25.38 on the training set. All of Gaian ’s techniques
+are enabled. Training is conducted for a total of 5,500,000
+image steps. We adopt the selective Adam optimizer. The
+hyperparameter tuning is more complicated, as street-view
+scenes are generally more difficult to reconstruct. We found
+the following settings to be important: we set the far plane
+1
+of the scene scale to exclude distant content, and apply
+to 16
+a radius clip of 3 pixels to discard projected points that are
+too small. Training was stopped after 5,500,000 steps because
+of computational costs, although convergence was not yet
+observed. The gap between training and test PSNR is notably
+larger in the street view than in the aerial view. We suspect
+two contributing factors. First, the training and test sets are
+sampled from different camera trajectories (extrapolation),
+rather than from the same trajectory (interpolation) [49], making generalization more challenging. Second, the MatrixCity
+BigCity Street dataset employs auto-exposure during image
+capture, resulting in varying exposure conditions that require
+additional vision algorithm to properly handle.
+E.2 Additional Ablation Study
+We conduct additional ablation study to evaluate the contribution of three designs of our system across all scenes, using
+3DGS as the rendering method. The three ablation variants
+are defined as follows:
+w/o Hier: Disable hierarchical assignment of points and images in Gaian, which is first assigned between machines, then
+between GPUs within each machine. Instead, the point cloud
+is directly partitioned into the total number of GPU parts,
+with each part assigned to a single GPU.
+w/o Load Bal: Disable the load balance of the point assignment and the image assignment in Gaian.
+w/o Patch: We disable the assignment of patches smaller than
+a full image during training, as described in Section 4.2.2. The
+offline partitioning and online assignment algorithms remain
+the same.
+Additional Implementations
+D.1 Customized Frustum Culling Kernel
+In the original implementation of PBDR training [40, 90],
+the Frustum Culling kernel has a complexity of O (𝐵 × 𝑆),
+where 𝑆 is the total number of points. This is because each
+point must undergo a coordinate transformation for every
+view to determine whether it lies within the frustum. We
+optimize this step by leveraging Z-order linearization. Specifically, we compute an axis-aligned bounding box (AABB) for
+each contiguous block of points (Point Group). For each view,
+we first check whether any of the eight corners of the bounding box falls within the view frustum. If none do, we cull the
+entire Point Group, avoiding per-point checks. This reduces
+the number of culling operations from the number of points
+in a Point Group (e.g., 4096) to just 8 corner checks. Because
+each Point Group is spatially localized, this filtering is highly
+effective. As a result, the time complexity becomes proportional to the total number of in-frustum Point Groups across
+all camera views. Since in-frustum points constitute only a
+small fraction of the entire point cloud, this leads to highly
+efficient frustum culling.
+D.2 Kernels for Rendering Image Patches
+Gaian leverages the rendering kernels from gsplat [90].
+However, the original gsplat kernels are designed to render
+entire images, rather than specific image patches within an
+image. We restrict rendering to specified regions by modifying CUDA kernels throughout the rendering pipeline for all
+3DGS, 2DGS and 3DCX which are used in our evaluation.
+E
+Additional Experiments
+E.1 Training MatrixCity BigCity
+Training 400 Million points model for aerial view. We
+train a 400 million-point model with Gaian using 32 A100
+GPUs on the MatrixCity aerial dataset, which provides 60,000
+images as the training set. We use the dataset’s official test set
+for evaluation and achieve a PSNR of 26.75 on the test set and
+28.60 on the training set. All of Gaian ’s techniques are enabled.
+Due to computational cost, training on Aerial dataset is performed for a total of 150,000 image steps. This number of steps
+is sufficient for smaller models (fewer than 50 million points)
+to converge in terms of PSNR. To ensure a fair comparison in
+the reconstruction quality scaling experiment with respect
+to model size (Figure 14), we use the same number of training
+steps for all model sizes. However, we observe that the 400
+million-point model does not fully converge within 150,000
+steps, and will benefit from extended training. We use the
+default hyperparameters from gsplat, along with the selective
+Adam optimizer specifically designed for PBDR in gsplat.
+Scene
+Rubble
+Ithaca365
+Campus
+BigCity Street
+Sci-Art
+BigCity Aerial
+Baseline
+Ours
+32.13
+203.09
+110.34
+185.28
+37.34
+447.44
+78.90
+466.48
+180.54
+285.18
+133.05
+1137.58
+w/o Hier. w/o Load Bal.
+50.57
+391.83
+125.26
+236.52
+99.90
+918.39
+72.98
+462.92
+168.09
+252.51
+114.04
+1090.98
+w/o Patch
+45.29
+420.78
+135.92
+244.40
+63.61
+950.52
+Table 4. Ablation Study. “w/o Hier.” refers to “Ours” without hierarchical assignment across machines and then across GPUs within each
+machine. “w/o Load Bal.” disables load balancing in both point assignment and image assignment. “w/o Patch” disables splitting images
+into smaller patches for flexible assignment (§4.2.2). Values indicate
+training throughput (images/s).
+19
+Table 4 summarizes the results. We draw two main observations. First, each of the three components contributes
+meaningfully to performance—removing any of them leads
+to reduced throughput. In particular, the “w/o Hier.” and “w/o
+Patch” variants result in larger degradations than “w/o Load
+Bal.”. Specifically, “w/o Hier.” is 16% to 35% slower than our full
+system, while “w/o Patch” is 10% to 52% slower. “w/o Load Bal.”
+shows a smaller impact, with performance reductions ranging
+from 1% to 14%. The relatively modest effect of load balancing
+stems from the fact that communication time dominates the
+overall runtime in our setting. The patching technique has
+an especially high impact for high-resolution scenes such as
+Sci-Art (6K), where cutting these higher-resolution images
+into patches gives more potential for flexible assignment.
+Second, despite the removal of any single technique, our
+system consistently outperforms the baseline much. This is
+largely due to our core locality-aware distribution framework.
+It comprises offline METIS bipartite graph partitioning and
+online linear sum assignment, which together significantly
+reduce communication overhead compared to random distribution strategies—even without the additional optimizations.
+E.3 System Overheads
+Scene
+Rubble
+METIS Time (s)
+Total Time (s)
+3.5
+6.1
+Ithaca365 Campus
+3.7
+6.9
+15.3
+23.9
+BigCity
+Street
+Sci-Art
+BigCity
+Aerial
+31.0
+46.9
+3.8
+6.0
+1.9
+3.4
+in CityGS [57] and VastGS [51], which divide 3DGS point
+clouds along coordinate axes; (2) graphics data structures,
+such as RetinaGS [46], which employs KD-Tree partitioning;
+and (3) clustering techniques like k-means, commonly used
+for general point cloud segmentation [93]. However, manual heuristics are often ineffective for irregular point cloud
+structures. Although more general, graphics data structures
+and clustering methods overlook the role of camera views in
+partitioning and miss optimization opportunities.
+Table 5. Offline point assignment time for each scene in Table 1, including METIS graph partitioning and associated overheads. The resulting
+partitions are visualized in Figure 18(Appendix E.4) and used in the
+experiments in Figure 10.
+Table 5 reports offline point assignment times for experiments in Figure 10. This includes METIS graph partitioning
+and other runtime overheads, with METIS as the primary
+bottleneck. All steps run on a single process and a single GPU.
+Overheads range from 3.4s to 46.9s—less than 1% of total training time. This efficiency stems from the graph size after
+ coars
+ening the point groups §4.2.1, which is reduced to 𝐺𝑆 + 𝐷
+vertices—typically only tens of thousands—making it fast to
+solve. We also observe that partitioning time varies by scene.
+Scenes with more complex topologies and view frustums
+covering larger areas—i.e. Campus and BigCity Street—take
+longer to partition. Moreover, the end-to-end speedups across
+scenes (Figure 10) indicate that online scheduling introduces
+no significant overhead.
+E.4 Visualization of point cloud partition results
+Figure 18 visualizes the point cloud partitions for scenes in
+Table 1 using Gaian. These visualizations also reveal that the
+point clouds are irregular and vary significantly across scenes.
+F
+Additional Related Works
+Point Cloud Partitioning Techniques. Point cloud partitioning is a key component of our system design. Prior work
+has explored several strategies: (1) manual heuristics, as used
+20
+(a) Rubble
+(d) BigCity Street
+(b) Ithaca365
+(e) Sci-Art
+(c) Campus
+(f) BigCity Aerial
+Figure 18. Point Cloud Partition Results. These are the point clouds for the scenes listed in Table 1. Colors indicate the partitioning results, with each
+color representing the point cloud assigned to a different machine. We can also observe the irregular topology present in the scenes. The point clouds
+have been downsampled and resized for easier visualization.
+21

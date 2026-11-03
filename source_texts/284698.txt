@@ -1,0 +1,744 @@
+Contribute to fesoliveira014/c3d.c3l development by creating an account on GitHub.
+
+Sky: accumulate volumetric fog over frames by fesoliveira014 · Pull Request #463 · fesoliveira014/c3d.c3l · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+fesoliveira014
+commented
+Oct 12, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Part of #357. This PR adds temporal accumulation to volumetric fog, behind ViewDesc.fog_temporal (off by default). With the switch off, the view runs the plain inject variant (main's code) and frames are byte-identical to main.
+Change
+Switch and memory
+ViewDesc.fog_temporal: bool. It is off in both constructors and does nothing without volumetric_fog.
+When on, the view keeps a second fog volume, so the volume memory doubles. The formulas in sky.md and views.md say so.
+Inject pass (FOG_SCATTERING)
+Variants. The temporal path is its own shader variant, behind a new TEMPORAL shader flag.
+Three entries (plain, RT shadows, RT shadows with the scene BVH) gain a temporal twin, so there are four pipelines: plain or temporal, atlas or traced.
+A view without the switch runs the plain variant, which is main's code: one thread per froxel, no history.
+Jitter. On the temporal path, each froxel's light and shadow samples are taken at a depth inside its slice: the Halton base-2 point over FOG_TEMPORAL_SAMPLES (16).
+Lamps at two depths. The volumetric lights other than the sun are also evaluated half a slice on (wrapped into the slice), and the two samples are averaged. A lamp's falloff is narrow along depth. Both samples run in one light loop: the second reuses the first sample's cluster cell list and shadow visibility and adds only a falloff and phase term. The sun and the ambient take one sample.
+Reprojection. The froxel centre is projected through the view's previous view-projection and read at its previous slice, from the previous scattering volume, with trilinear filtering.
+A froxel that falls outside the previous frustum or past max_distance takes no history.
+Camera motion reprojects; it does not reject.
+An orthographic view takes neither jitter nor history.
+Clamp. Before the blend, each channel of the history is clamped to the range of this frame's in-scatter at the froxel and at its two depth neighbours in the same column.
+Blend. The clamped history is mixed with the weight FOG_HISTORY_WEIGHT (0.9).
+Exposure. The history's RGB is first multiplied by the ratio of the current pre-exposure to the one it was injected under. Optical depth carries no history and is not scaled.
+Chunked march.
+One temporal thread injects FOG_SCATTERING_CHUNK (8) slices of a column.
+It evaluates each slice once and keeps a rolling window of three for the clamp, reading the slice just outside each end of its chunk. Those slices are never written.
+A $assert checks that every FogQuality slice count is a multiple of the chunk.
+Integration (FOG_INTEGRATION)
+The pass reads the scattering volume and integrates into the other volume. It is in place, as before, when the switch is off.
+History ownership
+The two volumes ping-pong. They swap only when a frame is submitted. An aborted frame neither swaps nor commits.
+The history is valid only if the view's own last submitted frame wrote it.
+A view that skipped a frame, or recorded its volume twice in one frame, injects without history.
+Mirror and clip-plane views keep their own pair.
+Rejection
+History is dropped, and the next frame injects without it, when:
+reset_view_history runs, the view is created or configured (including a resize and a quality change), or the scene changes;
+any HeightFog field, the fog node's height or the frame origin changes;
+the sun turns more than FOG_HISTORY_SUN_DEGREES (0.1°);
+the hash of the volumetric light set changes. It covers position, direction, range, cone, layers, colour, intensity and shadow state (atlas against traced). The pre-exposure is divided out of each intensity, and the sun's direction (plus its colour under an atmosphere) is left to the angle test.
+ABI
+FogVolumeRoot grows from 32 to 128 B. It gains:
+the previous view-projection and camera position;
+the scattering, history and integrated indices;
+flags, jitter and pre_exposure_ratio.
+New constants: FOG_VOLUME_HISTORY, FOG_HISTORY_WEIGHT and FOG_SCATTERING_CHUNK.
+New shader flag: TEMPORAL.
+Example and docs
+sky --fog-temporal. The fog panel gains a "Temporal accumulation" checkbox next to the quality combo. The benchmark header prints fog_temporal=.
+sky.md gains a "Temporal accumulation" section: the jitter, reprojection, blend, clamp with the two lamp samples, rejection, ownership and cost. It states that a light moving every frame gets no convergence.
+Two stale lines are fixed in passing:
+the limits bullet no longer says fog scatters only the sun;
+the sample header line in benchmarking.md now matches the example's, including clouds=.
+Divergences from the brief
+Moving occluders (T3). The brief planned a per-froxel response if trails showed. Trails showed (history without a clamp: trail ratio 0.43), but the response flickered like jitter alone.
+The reviewer adopted variant (c), the depth-only 1×1×3 clamp with the chunked march.
+Under (c), lamp glows narrower than a slice settled dimmer. The owner ruled one bounded round, which adopted the two-depth lamp sample. The table is below.
+Pre-exposure ratio. The history is rescaled by the volume's own remembered factor, not by FrameRoot.pre_exposure_ratio.
+That ratio is 1 unless TAA, motion blur or SSGI keeps a view history, so a view whose only temporal effect was fog did not follow an automatic pre-exposure step.
+Commit e100ca4 fixes this after the first merge with main.
+With a forced factor step, the mean 8-bit difference against off is 0.37 to 0.40 with the fix, against 2.50 at the step frame decaying to 0.5 by frame 14 without it.
+Orthographic views take no jitter and no history: the previous slice is measured from the camera position.
+First frame after a rejection. In lamp scenes it is not identical to off, because the second lamp sample sits half a slice from the first. It stays within the static on-against-off baseline. Sun-only scenes are still identical to off.
+Verification
+All runs are on lavapipe (CPU Vulkan), headless, with validation on, at head 5a6756f against main 013d5bb, unless a row names another head. Lavapipe numbers are environment only.
+Off against main 013d5bb. Frame md5 is identical in all 8 configurations, main view and mirror: noon, twilight_lamps_low, pan_high, valley_low, twilight_lamps_traced, deferred_lamps, taa_pan, novol_noon.
+Unit filters. shader 40/40, abi 1/1, fog 6/6, view 64/64, sky 11/11.
+Render acceptance. All 20 cases matching fog, sky or atmosphere pass, one per run, 0 VUIDs. They do not exercise the temporal path.
+Traced temporal. --fog-temporal --shadows traced --local-lights 8 with validation on: 0 VUIDs. It runs the TEMPORAL + RT_SHADOWS + SCENE_TRACE_BVH variant.
+Build and shaders. build.py --target sky builds and the generated files verify; --regen produces no diff.
+Moving occluder, flicker and glow (T3)
+Columns:
+Flicker: the mean 8-bit difference between consecutive frames, k0→k1 / k1→k2 / k2→k3. Scene: the pan preset at LOW, 640×360.
+Trail: the on/off luminance ratio of the strip behind a 10 m plate moving 0.25 m per frame through the sun shaft, at k24 (k6 / k12 in brackets).
+Glow: the mean luminance of the left lamp's glow patch. Scene: twilight with 8 lamps, LOW, 1280×720, 60 warm frames.
+Variant
+Flicker
+Trail
+Glow
+Head
+Off (no history, no jitter)
+0.000 / 0.000 / 0.000
+1.00
+187.2
+main 013d5bb
+Jitter only
+0.574 / 0.332 / 0.631
+1.01 (0.88 / 0.90)
+161.8 (mean of 16 frames)
+exploration
+History, no clamp
+0.026 / 0.029 / 0.044
+0.43 (0.96 / 0.96)
+169.8
+9d122f8
+Per-froxel response (brief's plan)
+0.543 / 0.303 / 0.593
+1.01 (0.88 / 0.90)
+not measured
+7a5809e
+(a) 3×3 in slice
+0.071 / 0.020 / 0.120
+0.73 (0.94 / 0.93)
+not measured
+exploration
+(b) 3×3×3
+0.026 / 0.028 / 0.044
+0.60 (0.96 / 0.96)
+not measured
+exploration
+(c) depth clamp, one lamp sample
+0.035 / 0.034 / 0.055
+0.87 (0.96 / 0.96)
+136.0
+9d122f8
+(c) + lamps at two depths in one loop, adopted
+0.035 / 0.034 / 0.055
+0.87 (0.96 / 0.96)
+166.2
+5a6756f
+The owner's bounds were glow ≥ 154, k24 trail ≥ 0.8 and every flicker pair ≤ 0.06. The adopted row meets all three, so the soft-clamp fallback was not tried.
+Whole-frame mean luminance: off 87.46, jitter mean 86.13, no clamp 86.42, (c) 84.42, adopted 85.91.
+Flicker in the 8-lamp scene: (c) 0.78 / 0.45 / 1.52, adopted 0.13 / 0.73 / 0.12, no clamp 0.30 / 0.19 / 0.41, jitter only 4.91 / 2.99 / 5.78.
+Lamp glow crops: off; jitter mean of 16 frames; history without a clamp; the depth clamp with one lamp sample; the adopted two-depth sample.
+At k24, the trailing edge of the plate: off, history without a clamp, and history with the clamp (×3 brightness).
+Rejection triggers
+Each value is the mean 8-bit difference of on against off, at LOW, 640×360.
+0.000 means the frame equals off, so the history was dropped.
+The "no-reject" build disables the acceptance test.
+The static on-against-off baseline in the lamp scene is 1.9 to 3.4.
+Trigger
+First frame after
+Later
+Camera cut (reset_view_history)
+k1 0.000
+Moving lamp
+k1 0.000 (no-reject 3.97)
+k6 1.84 (no-reject 5.98, at 9d122f8)
+HeightFog density ×2
+k1 0.000 (no-reject 3.46)
+k2 1.65 (3.22), k6 2.80 (2.69), at baseline
+Sun +5°
+k1 0.000 (no-reject 0.279)
+k3 0.076 (0.259)
+Quality LOW→MEDIUM
+k1 0.000
+k6 0.89
+Resize to 3/4
+k1 0.002 (max 7)
+k6 2.80
+Heads: e100ca4, except where a cell names another. At 9d122f8 the sun step is still identical to off at k1. Cut, quality and resize still match the no-reject build, because they clear the history structurally.
+Abort and skip (T2): an aborted frame followed by a frame equals an uninterrupted run, main view and mirror md5. A skipped view frame rejects history.
+All trigger runs had 0 validation errors.
+Cost, lavapipe (environment only)
+FOG_SCATTERING, sky, 640×360, 8 frames, median of 3 repeats, ms, at 9d122f8 against main 013d5bb.
+No lamps, noon:
+Quality
+main
+off
+on
+LOW
+1.292
+1.288
+1.312
+MEDIUM
+1.665
+1.655
+1.789
+HIGH
+5.367
+5.397
+6.391
+16 lamps of range 400 (every lamp in every cell), all five builds in one session:
+Quality
+main
+off
+on, one lamp sample
+on, two loops (9d122f8)
+on, one loop, adopted
+LOW
+2.743
+2.592
+2.819
+4.268
+2.797
+MEDIUM
+3.986
+3.920
+4.349
+7.172
+4.534
+HIGH
+19.84
+18.42
+21.52
+37.68
+23.27
+On lavapipe, the one-loop form costs within 0 to 8% of one lamp sample, against 1.5× to 1.75× for two loops. Lavapipe cannot show register pressure.
+GPU timings are owed on the RTX 4090.
+Screenshots (lavapipe, LOW, 1280×720, converged after 60 frames, head 9d122f8)
+Sun shaft: off, on, and |off − on| × 8.
+Twilight with 8 lamps: off, on, and |off − on| × 8.
+Remaining work
+Cloud shadows and cloud temporal accumulation follow in later PRs.
+fesoliveira014
+added 10 commits
+October 12, 2026 12:35
+feat(render): accumulate the fog volume over frames
+…
+9397fb5
+```
+ViewDesc.fog_temporal gives a view a second froxel volume. The scattering
+pass jitters each froxel's sample depth with a Halton sequence and blends
+its reprojected value from the previous frame, scaled by the pre-exposure
+ratio, with a weight that drops where the in-scatter changed by more than
+a tolerance. The integration pass writes the other volume, so the two
+ping-pong.
+
+The history is rejected on a camera cut, a configuration, a scene change,
+a change to the height fog or the frame origin, a sun turning more than
+a tenth of a degree, and a change to the hash of the volumetric lights
+and their shadow states. The pair swaps only on a submitted frame, and a
+view that recorded no fog in a submitted frame starts without history.
+With the switch off the volume is unchanged.
+```
+docs(sky): describe temporal fog accumulation
+…
+74ebd23
+```
+The fog volume section gains the jitter, reprojection and blend rules, the
+per-froxel response, every history rejection trigger, the ownership of the
+volume pair, and the doubled memory with the switch on. views.md lists
+ViewDesc.fog_temporal and the doubled volume.
+```
+feat(examples): add a temporal fog switch to the sky example
+…
+7a5809e
+```
+--fog-temporal turns on the fog volume's temporal accumulation for the main
+and mirror views, the fog panel gains a checkbox next to the quality combo,
+and the benchmark header prints the switch.
+```
+feat(render): clamp the fog history to its depth neighbours
+…
+75641f2
+```
+The history is clamped to the range of the current in-scatter at the froxel and
+at the slices in front of and behind it before the blend, replacing the
+per-froxel response. One thread injects a chunk of slices of a column, so each
+froxel is evaluated once and the clamp reads one slice past each end.
+```
+docs(sky): describe the fog history clamp
+5ee4466
+docs(sky): drop the sun-only fog limit
+6c6ec50
+Merge remote-tracking branch 'origin/main' into feat/issue-357-tempor…
+…
+756e159
+```
+…al-fog
+
+# Conflicts:
+#	docs/sky.md
+#	examples/src/sky.c3
+#	shaders/generated/c3d_abi.glsl
+#	src/c3d/render/views.c3
+#	src/c3d/shader/abi.c3
+```
+fix(render): rescale the fog history by its own pre-exposure ratio
+…
+e100ca4
+```
+The view's ratio is 1 unless TAA, motion blur or screen-space GI keep a view
+history, so a fog volume that was the only temporal effect did not follow an
+automatic pre-exposure step. The volume now remembers the factor it was
+injected under and passes the ratio to the inject pass.
+```
+docs(sky): note the clamp's effect on narrow features
+37fcc7f
+docs(benchmarking): match the sky header line
+12212df
+fesoliveira014
+commented
+Oct 12, 2026
+View reviewed changes
+fesoliveira014
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Verdict: HOLD at 12212df
+T1, T2 and T4 are met. With the switch off, output is byte-identical to main on the 4090, and validation is clean. Two items are Required, inline:
+With the switch off (the default), FOG_SCATTERING costs about 50% more than on main.
+The owner has ruled on the lamp-glow loss: one bounded round on the clamp before merge.
+A third Required item is blank lines in record_fog_volume.
+Review
+Ownership (T2). The ping-pong works out:
+Scattering goes to slot ^ 1, integration to slot, and publish swaps only a recorded, submitted frame.
+The next frame's history (the new integrated index) is therefore the previous frame's blended per-froxel scattering. It is read before this frame's integration overwrites it.
+accepts refuses a second recording in the same frame, and discard keeps the committed pair on abort.
+History (T1). RGB only is multiplied by the ratio, and optical depth is analytic.
+A still camera reads the texel it wrote: the grid-centre position gives slice = k + 0.5, which is the texel centre.
+The clamp reads one slice past each chunk end and writes only inside the chunk. The $assert holds the presets to multiples of 8.
+Rejection (T4). The light hash covers volumetric lights and the sun.
+Intensities are divided by pre-exposure (exact for a power of two).
+Shadow state is reduced to on or off, and shadow_first is zeroed.
+The sun direction is left to the 0.1° angle test.
+configure_view, reset_view_history and forget_view_history clear the fog history.
+Pre-exposure ratio (e100ca4). Accepted as it is, at the fog level. Each history carries the factor it was stored under. FrameRoot.pre_exposure_ratio belongs to ViewHistory, whose validity is a different thing, so fixing it there would tie fog to TAA, SSGI and motion blur.
+ABI. FogVolumeRoot is 144 B, and its $assert and twin are updated.
+Owner ruling: narrow features
+The owner chose one bounded round before merge. Your glow compare shows the clamped lamp glow mostly dissolving into haze (136 against a jitter mean of 162).
+The narrow term is the lamp's falloff; the sun and ambient terms are smooth along depth. So the first candidate is to evaluate the local lights at two depths per slice (the jitter and the jitter + ½, averaged). A narrow glow then enters the current range far more often. The cost falls on the local-light loop only, and the box gets more samples.
+A soft clamp, mix(history, clamped, k) with k < 1, is the fallback candidate.
+Adopt the first variant that keeps the glow patch within about 5% of the jitter mean (≥ 154), the trail ratio at k24 ≥ 0.8 and static flicker ≤ 0.06. Report it in the existing T3 table, adding the glow column.
+If neither meets those bounds, keep (c) as it is with the documented limitation, and record the attempt in the change record.
+Native run, RTX 4090
+sky --benchmark, offscreen at 2560 × 1440, -O3. The reference is main 6f34e05, built the same way.
+Switch off, byte identity. Same md5 as main for:
+--volumetric-fog --local-lights 16 --lamp-range 400 (054529ff…);
+--shading deferred --taa --auto-exposure --ssgi --reflections on --volumetric-fog (dbe54ad0…);
+LOW, MEDIUM and HIGH with lamps.
+Cost. FOG_SCATTERING on the main view, twilight segment, medians in ms (lamps: --local-lights 16 --lamp-range 400):
+Quality
+main
+PR, switch off
+PR, switch on
+LOW
+0.090
+0.131
+0.203
+MEDIUM
+0.161
+0.243
+0.390
+HIGH
+0.823
+1.176
+1.492
+MEDIUM, repeated, alternating: main 0.161 / 0.161, PR off 0.242 / 0.245. Without lamps, at noon / twilight: main 0.028 / 0.015, PR off 0.037 / 0.024.
+FOG_INTEGRATION and FOG are unchanged.
+So the switch-off path is 34-57% slower in every configuration, with the bytes identical. See the inline comment.
+Validation, with VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true:
+--volumetric-fog --fog-temporal --local-lights 16 --shading deferred --taa --auto-exposure --clouds;
+--volumetric-fog --fog-temporal --local-lights 16 --shadows traced --fog-quality high.
+Both give 0 VUIDs and 0 hazards.
+Render acceptance at 12212df: 369/369.
+CI on linux and windows passed at 12212df.
+Comment thread
+shaders/fog_scattering.comp.glsl
+Outdated
+FrameRoot frame = FrameRoot(root.frame);
+SkyFogGpu sky = SkyFogGpu(frame.sky_fog);
+// An orthographic view has no camera position to measure the previous distance from.
+bool temporal = (root.flags & FOG_VOLUME_JITTER) != 0u && frame.proj[3][3] == 0.0;
+fesoliveira014
+Oct 12, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Required (performance, default path). With fog_temporal off, the output is byte-identical but FOG_SCATTERING costs 34-57% more than main on the 4090 (MEDIUM with 16 lamps: 0.161 to 0.243 ms, repeated; no lamps: 0.028 to 0.037). The off path runs the same binary as the temporal one: the chunk loop, the rolling window, fog_history with its mat4, and the larger root. Register pressure and lost unrolling cost occupancy even when the branches are not taken. Compile the temporal path as its own variant (a define on FOG_SCATTERING, like the RT-shadow flags) so that the off variant is main's code. Evidence: off-path cost equal to main within noise. I'll re-time it on the 4090. Report the on-path cost again too, since the split may change it.
+Comment thread
+shaders/fog_scattering.comp.glsl
+// The grid centre, not the jittered sample, so a still camera reads the texel it wrote.
+float share = (float(slice) + 0.5) / float(root.slices);
+vec4 history = fog_history(root, sky, origin + direction * (share * share * sky.fog_max_distance));
+vec3 clamped = clamp(history.rgb, min(below, min(radiance, above)), max(below, max(radiance, above)));
+fesoliveira014
+Oct 12, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Required (owner ruling: one bounded round). The glow loss comes from this clamp: when the jitter misses a lamp's narrow falloff, the range of this froxel and its depth neighbours excludes the peak. Try evaluating the local lights at two depths per slice (the jitter and the jitter + ½, averaged), so the current range contains the glow far more often. The sun and ambient terms are smooth along depth and need it less. Fallback candidate: a soft clamp, mix(history, clamped, k). Adopt the first that keeps the glow patch ≥ 154 (about 5% of the jitter mean), the k24 trail ≥ 0.8 and the static flicker ≤ 0.06. Otherwise keep this clamp with the documented limitation, and record the attempt in the change record.
+Comment thread
+src/c3d/render/fog.c3
+Outdated
+next: gpu::sampled_at({ .compute, .fragment_shader }),
+)!;
+}
+bool temporal = record.desc.fog_temporal;
+fesoliveira014
+Oct 12, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Required (readability). record_fog_volume runs straight from the shadow-atlas barrier into choosing the history pair, then uploading the root, then recording the history. Add blank lines before 254 (bool temporal), 262 (Frame* slot) and 281 (if (temporal) history.record(current)).
+fesoliveira014
+added 2 commits
+October 12, 2026 14:24
+perf(render): compile the temporal fog inject as its own shader variant
+…
+37da49b
+```
+The plain variant is the one-thread-per-froxel inject again, so a view without
+fog_temporal no longer pays for the chunk loop, the rolling window and the
+history read. The temporal variant takes the chunk length from the constant and
+the jitter from the root, which drops the jitter flag and the chunk field from
+the root.
+```
+style(render): separate the steps of the fog volume recording
+a1c85ec
+fesoliveira014
+mentioned this pull request
+Oct 12, 2026
+Sky: scale the atmosphere tables to keep twilight out of half's subnormal range
+#464
+Merged
+fesoliveira014
+added 3 commits
+October 12, 2026 14:40
+fix(render): sample the fog's local lights at two depths per slice
+…
+628eb54
+```
+The depth clamp excluded a lamp's narrow falloff whenever the jitter missed it,
+so the glow settled dimmer than the average of the jitter. The temporal inject
+now evaluates the volumetric lights other than the sun at the jitter and half a
+slice on, wrapped into the slice, and averages them.
+```
+docs(sky): rewrap the temporal fog cost bullet
+b9ca8d2
+Merge remote-tracking branch 'origin/main' into feat/issue-357-tempor…
+…
+9d122f8
+```
+…al-fog
+```
+fesoliveira014
+commented
+Oct 12, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Fixes for review 5495531492, at 9d122f8. Each fix is in its own commit. Main 013d5bb is merged (no conflicts; --regen produces no diff).
+Default-path cost (fog_scattering.comp.glsl:105), 37da49b.
+The temporal path is now its own shader variant behind a new TEMPORAL flag: 6 fog_scattering entries and 4 pipelines (plain or temporal, atlas or traced).
+The plain variant is main's code: one thread per froxel, with no chunk loop, rolling window or history read.
+FOG_VOLUME_JITTER and slice_chunk are gone, because the temporal variant always jitters and reads the chunk constant itself. FogVolumeRoot is 128 B.
+Off output is identical to main 013d5bb in 8 configurations, main view and mirror.
+On lavapipe, FOG_SCATTERING with the switch off matches main within noise: LOW 1.288 against 1.292 ms, MEDIUM 1.655 against 1.665 ms, HIGH 5.397 against 5.367 ms (environment only). Please re-time on the 4090, both off and on.
+Glow (fog_scattering.comp.glsl:133), 628eb54. Candidate 1 is adopted.
+Lamps are evaluated at the jitter and at the jitter + ½ wrapped into the slice, and the two samples are averaged. The sun and the ambient keep one sample.
+Results against the bounds:
+glow patch 166.2 against a jitter mean of 161.8 (136.0 before; 187.2 off);
+k24 trail 0.87;
+static flicker 0.035 / 0.034 / 0.055.
+The soft clamp was not needed.
+The cost lands only on the local-light loop. With 16 lamps in every cell, the temporal path costs about 1.5× to 1.8× the one-sample version on lavapipe; without lamps it is within noise.
+sky.md now describes the two-depth sample, and the limitation is removed. The T3 table in the PR body has a glow column.
+Side effect: in lamp scenes the first frame after a rejection is no longer identical to off, because of the second lamp sample. It stays within the static on-against-off baseline. Sun-only scenes are still identical.
+Blank lines (fog.c3), a1c85ec.
+Added before the history pair, the root upload and history.record.
+bool temporal moved up to the pipeline selection.
+Re-checks on 9d122f8:
+unit filters fog 6/6, view 64/64, sky 11/11;
+20 fog/sky/atmosphere acceptance cases, 0 VUIDs;
+--target sky builds;
+T2 abort and skip pass;
+the rejection triggers are re-run.
+The screenshots on screenshots/issue-357 are regenerated at this head.
+fesoliveira014
+commented
+Oct 12, 2026
+View reviewed changes
+fesoliveira014
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Verdict: HOLD at 9d122f8
+The off-path fix works: on the 4090 the plain variant costs what main does, and its frames are byte-identical. Two items are Required, inline:
+Linux CI fails on a stale variant count.
+On the 4090, the two-sample lamp evaluation makes the temporal path 4-5× the cost of the one-sample version.
+What's fixed
+Off path (37da49b). TEMPORAL is a shader flag. The plain variant is main's code with one root field renamed, and FogVolumeRoot is back to 128 B.
+Byte identity: md5 equals main 013d5bb for --volumetric-fog --local-lights 16 --lamp-range 400 (06d546cc…) and for --shading deferred --taa --auto-exposure --ssgi --reflections on --volumetric-fog (2170fdc7…).
+Cost: FOG_SCATTERING on the main view, twilight segment, two alternating runs, medians in ms:
+Quality
+main, 16 lamps
+PR off, 16 lamps
+main, no lamps
+PR off, no lamps
+LOW
+0.089 / 0.090
+0.090 / 0.090
+0.0096
+0.0102
+MEDIUM
+0.162 / 0.162
+0.160 / 0.161
+0.0150
+0.0154
+HIGH
+0.827 / 0.827
+0.829 / 0.828
+0.086
+0.086
+These are equal within noise.
+Glow (628eb54). Your lavapipe numbers meet the owner's quality bounds: glow 166.2 against 161.8, trail 0.87, flicker 0.035 / 0.034 / 0.055. The limitation can come out of sky.md, but see the cost below.
+Blank lines (a1c85ec). Done.
+Validation. With VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true, on --volumetric-fog --fog-temporal --local-lights 16 --shading deferred --taa --auto-exposure and on the traced variant (--shadows traced): 0 VUIDs and 0 hazards.
+Required
+1. CI. Linux fails test_software_trace_variants_declare_no_ray_capability (test/src/test_shader.c3:148) with Assert "software_count == 12" failed. The new TEMPORAL, RT_SHADOWS, SCENE_TRACE_BVH entry is a 13th software-trace variant. The per-entry check inside the loop passes, since the new variant has no ray capability, so only the count is stale. Update it to 13.
+2. Temporal cost with lamps. FOG_SCATTERING, main view, twilight, 16 lamps (--lamp-range 400), medians in ms:
+Quality
+off
+one sample (12212df)
+two samples (9d122f8)
+chunk 4, two samples
+chunk 2, two samples
+LOW
+0.090
+0.203
+0.734
+MEDIUM
+0.161
+0.390
+1.534
+1.646
+2.129
+HIGH
+0.828
+1.492
+8.205
+9.990
+12.474
+The chunk 4 and chunk 2 columns are scratch builds (--regen) that change only FOG_SCATTERING_CHUNK.
+Smaller chunks are slower, so this is not lost parallelism.
+The second sample raises light evaluations per froxel from 1.25 to 2.5, which should roughly double the cost. Instead it costs 3.6-5.5×. That points to the two inlined additional_light_scattering loops inside the chunk loop (register pressure or spills), not to the work itself.
+Without lamps, temporal is 0.0225 / 0.0389 / 0.2242 against off 0.010 / 0.015 / 0.086, which is fine.
+The adoption bounds were about image quality; at 8.2 ms on HIGH this cost isn't shippable either. Target: temporal-on with 16 lamps at most about 2.5× off at MEDIUM and HIGH on the 4090, where the one-sample version was 2.4× and 1.8×. Suggested shape, inline: one light loop that evaluates both depths per light. If the target can't be met, take the owner's fallback: one sample with clamp (c) and the documented limitation.
+CI: linux failed at 9d122f8; windows was still running.
+Comment thread
+shaders/fog_scattering.comp.glsl
+Outdated
+// A lamp's falloff is narrow along depth: a second sample half a slice on keeps its glow in the clamp's range.
+vec3 second_position = origin + direction * mix(start, far, fract(root.jitter + 0.5));
+float second_depth = -(frame.view * vec4(second_position, 1.0)).z;
+lights += additional_light_scattering(frame, sky, root.sun_light, second_position, direction, second_depth);
+fesoliveira014
+Oct 12, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Required (cost). On the 4090 this second additional_light_scattering call takes temporal FOG_SCATTERING with 16 lamps from 0.390 to 1.534 ms at MEDIUM and from 1.492 to 8.205 ms at HIGH. Smaller chunks are slower still, so the work isn't the issue; the doubled inlined light loop is. Evaluate both depths inside one light loop:
+one cluster lookup;
+one visibility per light, from the first sample (the glow's narrowness is the distance falloff, not the shadow);
+two falloff and phase terms, averaged.
+Target: at most about 2.5× the off path at MEDIUM and HIGH with 16 lamps; I'll re-time it. If that can't be met, fall back to one sample with the documented limitation, as the owner allowed.
+Comment thread
+shaders/variants.json
+{ "shader": "fog_scattering", "source": "fog_scattering.comp.glsl", "stage": "comp", "defines": ["RT_SHADOWS", "SCENE_TRACE_BVH"] },
+{ "shader": "fog_scattering", "source": "fog_scattering.comp.glsl", "stage": "comp", "defines": ["TEMPORAL"] },
+{ "shader": "fog_scattering", "source": "fog_scattering.comp.glsl", "stage": "comp", "defines": ["TEMPORAL", "RT_SHADOWS"] },
+{ "shader": "fog_scattering", "source": "fog_scattering.comp.glsl", "stage": "comp", "defines": ["TEMPORAL", "RT_SHADOWS", "SCENE_TRACE_BVH"] },
+fesoliveira014
+Oct 12, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Required (CI). This entry is a 13th SCENE_TRACE_BVH variant. Linux CI fails test_software_trace_variants_declare_no_ray_capability at test/src/test_shader.c3:148 (software_count == 12). The per-entry no-ray-capability check passes; update the count to 13.
+fesoliveira014
+added 2 commits
+October 12, 2026 15:23
+test(shader): count the temporal fog trace variant
+cbac47f
+perf(render): sample both fog lamp depths in one light loop
+…
+5a6756f
+```
+The second depth reuses the first sample's light list and shadow visibility and
+adds only a second falloff and phase term, so the temporal inject runs one
+light loop instead of two. The plain variant keeps its single-sample loop.
+```
+fesoliveira014
+commented
+Oct 12, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Fixes for review 5496077900, at 5a6756f. Each is in its own commit.
+CI (shaders/variants.json:68), cbac47f. The software-trace variant count in test_shader.c3 is now 13. The new TEMPORAL + RT_SHADOWS + SCENE_TRACE_BVH entry declares no ray capability, and the per-entry check passes. No other count in test/ is hard-coded.
+Two-sample cost (fog_scattering.comp.glsl:98), 5a6756f.
+The temporal inject now runs one light loop. It does one select_lights and one shadow visibility per light, both from the first sample.
+It evaluates two sample_light falloff and phase terms through a shared light_in_scatter, then averages them.
+The second sample sits half a slice on and reuses the first sample's cell list; a comment says so.
+The plain variant compiles the same loop without the second sample. Off md5 equals main 013d5bb in 8 configurations, main view and mirror.
+Quality still meets the bounds:
+glow 166.2, against a jitter mean of 161.8;
+k24 trail 0.87;
+static flicker 0.035 / 0.034 / 0.055.
+Lavapipe, 16 lamps in every cell, environment only:
+Quality
+Off
+One sample
+Two loops
+One loop
+MEDIUM
+3.920
+4.349
+7.172
+4.534
+HIGH
+18.42
+21.52
+37.68
+23.27
+Lavapipe cannot show register pressure. Please re-time on the 4090 against the target of at most 2.5× off at MEDIUM and HIGH.
+Checks on 5a6756f:
+filters shader 40/40, abi, fog, view and sky;
+the 20 acceptance cases, 0 VUIDs;
+a traced temporal run with 8 lamps, 0 VUIDs.
+fesoliveira014
+commented
+Oct 12, 2026
+View reviewed changes
+fesoliveira014
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Verdict: MERGE at 5a6756f, once CI is green
+Both Required items from 5496077900 are fixed, and the 4090 meets the cost target.
+CI (cbac47f). The software-trace count is 13, and the new temporal BVH entry passes the no-ray-capability check.
+One light loop (5a6756f). The temporal inject now does, per light:
+one select_lights and one shadow_visibility, taken at the first sample;
+two sample_light falloffs through light_in_scatter, averaged.
+The comment says why the second sample may share the cell list and the visibility. The plain variant compiles the same loop without the second sample, and (phase × radiance) × visibility is unchanged in evaluation order, so its bytes match main.
+RTX 4090
+sky --benchmark, offscreen at 2560 × 1440, -O3. The reference is main 013d5bb, built the same way.
+Byte identity, switch off. md5 equals main for --volumetric-fog --local-lights 16 --lamp-range 400 (06d546cc…) and for --shading deferred --taa --auto-exposure --ssgi --reflections on --volumetric-fog (2170fdc7…).
+Cost. FOG_SCATTERING on the main view, twilight segment, 16 lamps (--lamp-range 400), two alternating runs, medians in ms:
+Quality
+main
+PR off
+PR on
+on / off
+on, previous head
+LOW
+0.090 / 0.090
+0.091 / 0.090
+0.221 / 0.222
+2.45×
+0.734
+MEDIUM
+0.164 / 0.162
+0.163 / 0.163
+0.391 / 0.388
+2.39×
+1.534
+HIGH
+0.828 / 0.830
+0.831 / 0.828
+1.691 / 1.688
+2.04×
+8.205
+Off equals main within noise.
+On is within the 2.5× target at every quality. That is the one-sample cost at MEDIUM, about 0.2 ms more at HIGH, and the glow fix is kept (166.2 against 161.8, trail 0.87, flicker 0.035 / 0.034 / 0.055, on lavapipe).
+Validation. With VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true, on --volumetric-fog --fog-temporal --local-lights 16 --shading deferred --taa --auto-exposure --clouds and --volumetric-fog --fog-temporal --local-lights 16 --shadows traced: 0 VUIDs and 0 hazards.
+Render acceptance at 5a6756f: 369/369.
+Docs. The sky.md cost bullet describes the shared loop as behaviour, with no numbers.
+CI was still running at 5a6756f when I posted this. Merge once linux and windows are green at this head.
+Hide details
+View details
+fesoliveira014
+merged commit 24a91a3
+into
+main
+Oct 12, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+fesoliveira014
+deleted the
+feat/issue-357-temporal-fog
+branch
+October 12, 2026 21:57
+fesoliveira014
+mentioned this pull request
+Oct 13, 2026
+Render: extend volumetric fog, clouds and atmosphere coverage
+#357
+Closed
+8 tasks
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

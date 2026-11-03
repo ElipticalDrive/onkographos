@@ -1,0 +1,1907 @@
+TRANSACTIONS ON PARALLEL AND DISTRIBUTED SYSTEMS, VOL. XX, NO. X, MONTH 2018
+1
+Optimizing Lossy Compression Rate-Distortion
+from Automatic Online Selection between SZ
+and ZFP
+arXiv:1806.08901v2 [cs.DC] 5 Jan 2019
+Dingwen Tao, Member, IEEE, Sheng Di, Senior, IEEE, Xin Liang, Zizhong Chen, Senior, IEEE and Franck
+Cappello, Fellow, IEEE
+Abstract—With ever-increasing volumes of scientific data produced by high-performance computing applications, significantly
+reducing data size is critical because of limited capacity of storage space and potential bottlenecks on I/O or networks in
+writing/reading or transferring data. SZ and ZFP are two leading BSD licensed open source C/C++ libraries for compressed
+floating-point arrays that support high throughput read and write random access. However, their performance is not consistent across
+different data sets and across different fields of some data sets, which raises the need for an automatic online (during compression)
+selection between SZ and ZFP, with minimal overhead. In this paper, the automatic selection optimizes the rate-distortion, an important
+statistical quality metric based on the signal-to-noise ratio. To optimize for rate-distortion, we investigate the principles of SZ and ZFP.
+We then propose an efficient online, low-overhead selection algorithm that predicts the compression quality accurately for two
+compressors in early processing stages and selects the best-fit compressor for each data field. We implement the selection algorithm
+into an open-source library, and we evaluate the effectiveness of our proposed solution against plain SZ and ZFP in a parallel
+environment with 1,024 cores. Evaluation results on three data sets representing about 100 fields show that our selection algorithm
+improves the compression ratio up to 70% with the same level of data distortion because of very accurate selection (around 99%) of
+the bestfit compressor, with little overhead (less than 7% in the experiments).
+Index Terms—Lossy Compression, scientific Data, rate-distortion, compression ratio, high-performance computing
+F
+1
+I NTRODUCTION
+A
+N efficient scientific data compressor is increasingly
+critical to the success of today’s scientific research
+because of the extremely large volumes of data produced by
+today’s high-performance computing (HPC) applications.
+The Community Earth Simulation Model (CESM) [1], [2],
+for instance, produces terabytes of data every day. In the
+Hardware/Hybrid Accelerated Cosmology Code (HACC)
+[3] (a well-known cosmology simulation code), the number
+of particles to simulate could reach up to 3.5 trillion, which
+may produce 60 petabytes of data to store. On the one
+hand, such large volumes of data cannot be stored even
+in a parallel file system (PFS) of a supercomputer, such
+as the Mira [4] supercomputer at Argonne because it has
+only 20 petabytes of storage space. On the other hand, the
+I/O bandwidth may also become a serious bottleneck. The
+memory of extreme-scale systems continues to grow, with
+a factor of 5 or more expected for the next generation of
+systems compared with the current one (e.g., the Aurora
+supercomputer [5] has over 5 PB total memory); however,
+although the Burst Buffer technology [6] can relieve the
+I/O burden to some extent, the bandwidth of PFS is still
+developing relatively slowly compared with the memory
+capacity and peak performance. Hence, storing application
+•
+•
+•
+Dingwen Tao is with the Department of Computer Science, The University
+of Alabama, Tuscaloosa, AL 35487.
+Sheng Di and Franck Cappello are with the Mathematics and Computer
+Science division at Argonne National Laboratory, Lemont, IL 60439.
+Xin Liang and Zizhong Chen are with the Department of Computer
+Science and Engineering at University of California, Riverside, CA 92521.
+data to file systems for postanalysis will take much longer
+than in current systems.
+Error-controlled lossy compressors for scientific data sets
+have been studied for years, because they not only significantly reduce data size but also keep decompressed data
+valid to users. The existing lossy compressors, however,
+exhibit largely different compression qualities depending
+on various data sets because of their different algorithms
+and the diverse features of scientific data. The atmosphere
+simulation (called ATM) in the CESM model, for example,
+has over 100 fields (i.e., variables), each of which may have
+largely different features. We note that various variables or
+data sets work better with different compression techniques.
+For instance, SZ [7], [8], [9] exhibits better compression
+quality than does ZFP [10], [11] on some data sets, whereas
+ZFP is better on others. With the same level of distortion of
+data—peak signal-to-noise ratio (PSNR), for instance—SZ
+exhibits a better compression ratio than does ZFP on 72.8%
+of the fields in the ATM simulation data, while ZFP wins
+on the remaining 27.2% fields. One key question is: Can
+we develop a lightweight online selection method that can
+estimate on the fly the best-fit compression technique for
+any data set, such that the overall compression quality can
+be improved significantly for that application?
+In this work, we propose a novel online selection method
+for optimizing the error-controlled lossy compression quality of structured HPC scientific data in terms of ratedistortion, which is the first attempt to our knowledge.
+The lossy compression quality is assessed mainly by ratedistortion in the scientific data compression community [8],
+[10], [12]. However, designing an effective method that can
+TRANSACTIONS ON PARALLEL AND DISTRIBUTED SYSTEMS, VOL. XX, NO. X, MONTH 2018
+select the best-fit compressor based on rate-distortion is
+challenging because rate-distortion is not a single metric
+for a given data set; rather it involves a series of compression cases with different data distortions and compression
+ratios. Hence, selecting the best-fit compressor based on
+rate-distortion by simply running SZ and ZFP once based
+on sampled data points is impossible. Unlike Lu et al.’s
+work [11], which selects the best compressor based on a
+specific error bound and sampled data points, we have to
+model accurately the principles of the two state-of-the-art
+lossy compressors both theoretically and empirically. This
+is nontrivial because of the diverse data features and multiple complicated compression stages involved in the two
+compressors. Moreover, we must assure that our estimation
+algorithm has little computation cost, in order to keep a high
+overall execution performance for the in situ compression.
+The contributions of this paper are as follows.
+• We conduct an in-depth analysis of the existing lossy
+compression techniques and divide the procedure of
+lossy compression into three stages: lossless transformation for energy compaction; lossy compression for
+data reduction; and lossless entropy encoding, which is
+a fundamental step for the compression-quality estimation.
+• We explore a series of efficient strategies to predict the
+compression quality (such as compression ratio and
+data distortion) for the two leading lossy compressors
+(i.e., SZ and ZFP) accurately. Specifically, we derive
+some formulas and approaches for accurate prediction of PSNR and the number of bits to represent a
+data value on average (i.e., bit-rate) based on in-depth
+analysis of their compression principles with the three
+compression stages.
+• Based on our compression-quality estimation, we develop a novel online method to select the best-fit compressor between SZ and ZFP for each data set, leading
+to the best lossy compression results. We adopt ratedistortion as the selection criterion because it involves
+both compression ratio and data distortion and it has
+been broadly used to assess compression quality in
+many domains [2], [8], [10].
+• We evaluate the performance and compression quality
+of our proposed solution on a parallel system with
+1,024 cores. Experiments on structured data sets from
+real-world HPC simulations show that our solution can
+significantly improve the compression ratio with the
+same level of data distortion and comparable performance. The compression ratio can be improved by up
+to 70% because of a very high accuracy (around 99%) in
+selecting the best compressor in our method. With our
+solution, the overall performance in loading and storing
+data can be improved by 79% and 68% on 1,024 cores,
+respectively, compared with the second-best evaluated
+approach.
+The remainder of this paper is organized as follows. In
+Section 2, we discuss the related work in scientific data
+compression. In Section 3, we introduce the overall architecture of our proposed automatic online selection method. In
+Section 4, we analyze the three critical stages in detail based
+on existing lossy compressors. In Section 5, we discuss how
+2
+to predict the compression quality for SZ and ZFP accurately. In Section 6, we present and analyze the experimental
+results. In Section 7, we provide concluding remarks and a
+brief discussion of future work.
+2
+R ELATED W ORK
+The issue of scientific data compression has been studied for
+years. The data compressors can be split into two categories:
+lossless compressor and lossy compressor.
+Lossless compressors make sure that reconstructed data
+set after decompression is exactly the same as the original data set. Such a constraint significantly limits their
+compression ratio on scientific data, for whatever generic
+byte-stream compressors (such as Gzip [13] and bzip2 [14])
+or whatever floating-point data compressors (such as FPC
+[15] and FPZIP [16]). The reason is that scientific data is
+composed mainly of floating-point values and their tailing
+mantissa bits could be too random to compress effectively
+[17].
+Lossy compression techniques for scientific data sets
+generated by HPC applications also have been studied
+for years, and the existing state-of-the-art compressors include SZ [7], [8], [9], ZFP [10], ISABELA [18], FPZIP [16],
+SSEM [19], VAPOR [20], and NUMARCK [21]. Basically,
+their compression models can be summarized into two
+categories: prediction-based model [8], [16], [18], [21], [22]
+and transform-based model [10], [19]. A prediction-based
+compressor needs to predict data values for each data point
+and encodes the difference between every predicted value
+and its corresponding real value based on a quantization
+method. Typical examples are SZ [7], [8], [9], ISABELA
+[18], and FPZIP [16]. The block transform-based compressor
+transforms original data to another space where the majority
+of the generated data are very small (close to zero), such
+that they can be stored with a certain loss in terms of the
+user’s required error bound. For instance, JPEG [23], SSEM
+[19] and VAPOR [20], and ZFP [10] adopt discrete cosine
+transform, discrete wavelet transform and a customized
+orthogonal transform, respectively.
+Recently, many research studies [7], [8], [9], [10], [11],
+[24], [25], [26], [27], [28], [29] have showed that SZ and
+ZFP are two leading lossy compressors for HPC scientific data. Specifically, SZ predicts each data point’s value
+by its preceding neighbors in the multidimensional space
+and then performs an error-controlled quantization and
+customized Huffman coding to shrink the data size significantly. ZFP splits the whole data set into many small
+blocks with an edge size of 4 along each dimension and
+compresses the data in each block separately by a series of
+carefully designed steps, including alignment of exponent,
+orthogonal transform, fixed-point integer conversion, and
+bit-plane-based embedded coding. For more details, we
+refer readers to [8] and [10] for SZ and ZFP, respectively. Fu
+et al. [30] proposed an on-the-fly lossy compression method
+for a high-performance earthquake simulation. Their lossy
+compression can reduce the memory cost by 50% and
+improve the overall performance 24% on Sunway TaihuLight supercomputer [31]. This on-the-fly lossy compression
+scheme reduces 32-bit floating-point data to 16-bit by using
+an adaptive binary representation. We exclude this approach
+in our work because it is limited compression ratio of 2.
+TRANSACTIONS ON PARALLEL AND DISTRIBUTED SYSTEMS, VOL. XX, NO. X, MONTH 2018
+How to integrate different compression techniques into
+one framework and use their distinct advantages to optimize the compression quality is a challenging topic. Blosc
+[32] is a successful lossless compressor based on multiple
+different lossless compression methods, including FastLZ
+[33], LZ4/LZ4HC [34], Snappy [35], Zlib [36], and Zstandard
+[37]. However, no such a compressor has been designed
+based on different lossy compression techniques for optimizing the rate-distortion, leading to a huge gap for the demand of efficient error-controlled compression on scientific
+data sets. Although Lu et al. [11] model the compression
+performance of SZ and ZFP to select the best compressor
+in-between, they focus only on the compression ratio given
+a specific maximum error. Their method does not model
+and select the best compressor based on statistical metrics
+such as RMSE (root mean square error) or PSNR (a simple
+derivation from RMSE). Such average error metrics are more
+important for visualization of scientific data than is the
+maximum error [2], [38]. Although there are some more
+complex metrics (such as Structural Similarity Index) that
+can also evaluate compression schemes in terms of visual
+quality, for generality and simplicity [39], our research focuses on maximizing PSNR for a given compression ratio, by
+modeling and selecting online the best compressor between
+SZ and ZFP with low performance overhead.
+3
+A RCHITECTURE OF P ROPOSED O NLINE AUTO -
+MATIC S ELECTION M ETHOD FOR L OSSY C OMPRES SION
+Lossy compression can be divided into three stages as
+shown in Figure 1. In Stage I, the original data is transformed to another data domain (e.g., frequency domain)
+by lossless transformations. Here lossless transformation
+means the reconstructed data will be lossless if one transforms the original data and does the corresponding inversetransformation right away. The transformed data is easier
+to compress because of the efficient energy compaction
+[40]. Energy compaction means that the energy is more
+concentrated in some elements of the transformed data
+compared to the distribution of energy in the original data.
+Stage II reduces the data size but also introduces errors.
+The most commonly used techniques for Stage II are vector
+quantization [41] (static quantization) and embedded coding [42] (dynamic quantization). Stage III performs entropy
+coding for further lossless data reduction, and it is sometimes optional. Figure 1 shows four state-of-the-art lossy
+compressors for HPC scientific data and their corresponding
+techniques in each stage.
+Stage I
+(Lossless)
+Prediction
+Block
+Transform
+Stage II
+(Lossy)
+Quantization
+Embedded
+Coding
+Stage III
+(Lossless, Optional)
+Entropy
+Coding
+Fig. 1. Three stages in lossy compression for HPC scientific data.
+We design our online selection method based on the
+analysis of the three critical compression stages. Specifically,
+3
+Performing the selected bestfit lossy compression
+to get the optimal bit-rate distortion
+Fig. 2. Workflow of proposed online, low-overhead selection method for
+lossy compression of HPC scientific data.
+we propose a novel optimization strategy comprising four
+steps as shown in Figure 2. The first step takes the input scientific data sets and performs Stage I’s transformation on the
+sampled data points. The second step uses the transformed
+data points from Step 1 to estimate the compression quality
+(including compression ratio and distortion of data) based
+on our proposed estimation model. The third step selects
+the best-fit lossy compression strategy based on SZ and ZFP.
+The fourth step constructs a lossy compressor and uses it for
+compressing the data set. As confirmed by recent research
+[8], [10], [11], [22], [24], [25], [43], SZ and ZFP are two leading
+lossy compressors for HPC scientific data and can well
+represent prediction-based and transformation-based lossy
+compressors, respectively. Accordingly, our online selection
+method mainly is based on these two state-of-the-art lossy
+compressors without loss of generality.
+In this paper, we adopt a practical in situ model [44] as
+many state-of-the-art lossy compressors (such as ISABELA,
+SZ, and ZFP) use as well. Here in situ means data analysis,
+visualization, and compression happen without first writing
+data to persistent storage. Thus, in the in situ compression
+model, the compression will be conducted after the entire
+computation in each simulation time step such that the
+entire analysis data is already kept in memory. Overall, our
+online method can select the best-fit compressor on-the-fly
+during the in situ compression, aiming at reducing data
+storage and I/O time overheads.
+4
+A NALYSIS OF L OSSLESS T RANSFORMATIONS
+FOR E NERGY C OMPACTION IN S TAGE I
+In this section, we provide an in-depth analysis of the
+impact of Stage I (i.e., prediction-based transformation (PBT)
+and block orthogonal transformation (BOT)) on the overall distortion of data. As presented in Figure 1, Stage I is lossless.
+However, this does not mean that if the data in the transformed domain is changed, the overall distortion level (such
+as mean squared error (MSE)) of the finally reconstructed
+data can stay the same as that of the transformed data. The
+reason is that the data in the new transformed domain will
+be largely different from the original data. Based on an indepth analysis of the two transformation methods in Stage
+I, we prove that the L2 -norm-based error value (e.g, MSE)
+keeps unchanged after the inverse transformation of PBT
+and BOT. This fundamental analysis implies that we can
+TRANSACTIONS ON PARALLEL AND DISTRIBUTED SYSTEMS, VOL. XX, NO. X, MONTH 2018
+Original data
+instead of the original values, in practice, one has to assure
+that the compression and decompression stage have exactly
+the same prediction procedure (including the data values
+used in the prediction method); otherwise, the data loss
+will be propagated during the decompression. Hence, the
+predicted values during the compression must be equal to
+the predicted values during the decompression. That is, we
+have Xpred = X̃pred . Then, we can derive Equation (1)
+based on the following two equations: Xpbt = X − Xpred
+and X̃ = X̃pbt + X̃pred .
+Based on Equation (1), we can easily derive the following
+theorem.
+Predicted values
+with prediction model
+! = ($% , $' , … , $) )
++,-.
+!+,-. = ($%
++,-.
+, $'
++,-.
+, … , $)
+)
+PBT:
+Prediction errors
++/0
++/0
++/0
+!+/0 = ($% , $' , … , $) )
+Decompressed prediction errors
++/0 +/0
++/0
+!1+/0 = ($2% , $2' , … , $2) )
+iPBT:
+with decomp
+predicted values
+Decompressed predicted values
++,-. +,-.
++,-.
+!1+,-. = ($2% , $2' , … , $2) )
+with prediction
+model
+4
+with decomp
+prediction errors
+Theorem 1. The pointwise compression error in the original data
+space is the same as the pointwise compression error in the PBTtransformed data space.
+Decompressed data
+!1 = ($2% , $2' , … , $2) )
+Fig. 3. Prediction-based transformation (PBT) and inverse predictionbased transformation (iPBT).
+predict the overall distortion of the finally decompressed
+data for SZ and ZFP by estimating the data distortion in
+Stage II.
+4.1
+Prediction-Based Transformation (PBT)
+In this subsection, we introduce prediction-based lossy compression, and then we infer that the pointwise compression
+error (i.e., the difference between any original data value
+and its decompressed value) is equal to the error introduced
+by vector quantization or embedded encoding in Stage II.
+In the compression phase of the prediction-based lossy
+compression (as shown in the top subfigure of Figure 3),
+the first step is to predict the value of each data point and
+calculate the prediction errors. We define PBT as the process
+of generating a set of prediction errors (denoted by Xpbt )
+based on the original data set (denoted by X ), data point
+by data point during the compression. The prediction error
+will be quantized or encoded in Stage II.
+During the decompression, one needs to reconstruct the
+prediction errors based on quantization method or embedded encoding and then reconstruct the overall data set by an
+inverse PBT (as presented in the bottom subfigure of Figure
+3). We define the inverse PBT (denoted iPBT) as the procedure of constructing the decompressed data set (denoted
+X̃ ), data point by data point, based on the reconstructed
+prediction errors (denoted X̃pbt ) during the decompression.
+In what follows, we infer that the following equation
+must hold for PBT.
+X − X̃ = Xpbt − X̃pbt
+(1)
+During the compression, the prediction method generally predicts the value of each data point based on the
+data points nearby in space because of the potential high
+consecutiveness of the data set. The Lorenzo predictor [45],
+for example, approximates each data point by the values of
+its preceding adjacent data points. 1 Since the neighboring
+data values to be used to reconstruct each data point during
+the decompression are actually the decompressed values
+1. Lorenzo predictor uses 1 neighbor per data point for 1D data, 3
+neighbors per data point for 2D data, and 7 neighbors per data point
+for 3D data.
+4.2
+Block Orthogonal Transformation (BOT)
+In the following discussion, we first introduce the principle
+of the block orthogonal transformation. We then prove a
+critical feature: the L2 -norm based compression error (such as
+MSE) in the original data space is the same as the compression
+error in the BOT transformed data space.
+Let us first describe the elementwise tensor (matrix)
+norms that we will use in the following discussion. One
+can treat a tensor as a vector and calculate its elementwise
+norm based on a specific vector norm. For example, by using
+vector p-norm, we can define the elementwise Lp norm of a
+tensor X as follow.
+kXkp = kvec(X)kp = (
+P
+xp )1/p
+(2)
+x∈X
+Further, if X is an M × M matrix and we choose p = 2,
+Equation (2) can be simplified to
+kXk2 = (
+M P
+M
+P
+i=1 j=1
+x2ij )1/2 =
+p
+trace(X t · X),
+(3)
+where trace() returns the sum of diagonal entries of a
+square matrix. Equation (3) defines the elementwise L2
+norm (a.k.a. Frobenius norm) of a square matrix.
+Block transformation-based lossy compressors divide
+the entire data set into multiple data blocks and perform
+blockwise transformation at Stage I. Unlike predictionbased transformation, each block transformation has no
+dependency and can be performed independently. Each
+block transformation is composed of several 1D linear transformations that can be performed along each axis within the
+block. For example, in a 2D data array, 1D linear transformation is applied to each row (x-axis) and each column (y axis). Each 1D linear transformation can be calculated as a
+multiplication of the transformation matrix and 1D vector.
+Many lossy compressors adopt orthogonal matrices in
+their transformations. For example, SSEM uses the Haar
+wavelet transform and ZFP uses a self-optimized orthogonal matrix. Here an orthogonal matrix T means its columns
+and rows are orthogonal unit vectors, i.e., T · T t = I , where
+I is the identity matrix. The most significant advantage of
+using orthogonal transformation is the property of L2 -norm
+TRANSACTIONS ON PARALLEL AND DISTRIBUTED SYSTEMS, VOL. XX, NO. X, MONTH 2018
+invariance after transformation, that is,
+p
+kT · Xk2 = trace((T · X)t · (T · X))
+p
+= trace(X t · T t · T · X)
+p
+= trace(X t · X) = kXk2 .
+Lemma 2. Block orthogonal transformation (BOT) preserves the
+L2 norm on any dimenstional data sets.
+(4)
+Based on this property, we can prove that the L2 -normbased compression error in the original data space is the
+same as the compression error in the BOT-transformed data
+space. We will prove it later in this subsection.
+The block size in the BOT-based lossy compressor is
+usually set to the power of 2. ZFP and SSEM, for example,
+set the block size to 4n , where n is the dimension size
+(n = 1, 2, 3). JPEG uses 8 × 8 as the block size in 2D
+image data. In our work, without loss of generality, we
+consider the block size in BOT to be 4n and do not limit the
+dimension n of the data set. Note that here the “dimension”
+represents the dimensionality of each data point rather than
+the number of fields in the data sets.
+Based on prior research [10], the transformation matrix
+of most existing well-known BOTs can be expressed as a
+uniform parametric form as
+
+
+1
+1
+1
+1  c s −s
+T = 1 −1 −1
+2
+s
+c
+1
+−c
+1
+−s
+√
+π
+π
+t c = 2 cos t,
+2
+2
+where t ∈ [0, 1] is a parameter. Specifically, t = 0 and
+t = 14 corresponds to discrete HWT and DCT II, respectively,
+which are two most common transforms. Moreover, t =
+{ π2 tan−1 13 , π2 tan−1 12 , 21 } represents slant transform, highcorrelation transform, and Walsh-Hadamard transform.
+In what follows, we discuss the unified formulas of BOT
+for any dimensional data. We use Tbot to denote the BOT
+and X to denote the data block. X can be represented
+by a 4n tensor (xi1 ···in )4×···×4 where 1 ≤ i1 , · · · , in ≤ 4.
+Since the orthogonal transformation is performed on the 1D
+4 × 1 vector, we need to rearrange X ’s elements to form
+an 4 × 4n−1 matrix and do a matrix-matrix multiplication.
+The n dimensional tensor X can be unfolded along the
+n directions by index mapping. We use D1 -axis, D2 -axis,
+· · · , Dn -axis to denote the n directions. Specifically, the
+unfolding along the k -th direction Dk -axis (1 ≤ k ≤ n)
+will map the tensor element xi1 ···in to the matrix element
+Pk−1
+Pn
+(ik , j), where j = l=1 4l−1 (il − 1) + l=k+1 4l−2 (il − 1).
+We use unf oldD1 (), unf oldD2 (), · · · , unf oldDn () to denote
+the unfolding operations along the D1 -axis, D2 -axis, · · · ,
+Dn -axis, respectively. Accordingly, we can fold the tensor
+from the unfolded matrix by the inverse index mapping,
+denoted by f oldD1 (), f oldD2 (), · · · , f oldDn (). Thus, Tbot
+can be expressed as the following n operations.
+s=
+√
+−c
+5
+Proof. We still denote the orthogonal transformation matrix
+by T . Because the unf oldDk () and f oldDk () are both index
+mapping operations, the values and elementwise norm will
+remain unchanged. Thus, we can write
+kf oldDk (T · unf oldDk (X))k2 = kT · unf oldDk (X)k2 .
+Then, based on Equation (4), we can get
+kT · unf oldDk (X)k2 = kunf oldDk (X)k2 = kXk2 .
+So kf oldDk (T · unf oldDk (X))k2 = kXk2 is held for the k th operation (1 ≤ k ≤ n), which demonstrates that every
+operation in the BOT can keep kXk2 unchanged. Therefore,
+we have proved this theorem.
+We still use X̃ to denote the decompressed block data,
+Xbot to denote the transformed block data in the compression, and X̃bot to denote the decompressed transformed
+block data in the decompression. We have
+Xbot = Tbot (X)
+and
+X̃bot = Tbot (X̃).
+Thus, due to the linearity of Tbot , we have
+Xbot − X̃bot = Tbot (X) − Tbot (X̃) = Tbot (X − X̃).
+2 sin
+1. X = f oldD1 (T · unf oldD1 (X))
+2. X = f oldD2 (T · unf oldD1 (X))
+..
+.
+n. X = f oldDn (T · unf oldDn (X))
+Next, we propose Lemma 2 and Theorem 3 and prove
+them.
+Based on Lemma 2, we have
+kXbot − X̃bot k2 = kTbot (X − X̃)k2 = kX − X̃k2 .
+This equation also holds when X is composed of multiple
+data blocks. That is, we already prove the following theorem.
+Theorem 3. The L2 -norm-based compression error in the original data space is the same as the compression error in the BOTtransformed data space on any dimenstional data sets.
+Note that the reasons that Theorem 3 focuses on L2 norm
+include two aspects: on one hand, the “norm invariance”
+property (as shown in Equation (4)) of BOT only holds for
+L2 norm in terms of the elementwise Lp norms because of
+Equation 3; on the other hand, L2 -norm-based error (such
+as MSE or PSNR) has been considered as one of the most
+critical indicators to assess the overall data distortion in
+literature, because it is closely related to the visual quality
+[46], unlike maximum compression error (i.e., Linf -norm
+based error).
+4.3
+Data Sampling for Compression-Quality Estimation
+In our proposed automatic online selection method, we
+first sample the data points (i.e., Step 1) and then perform
+the transformations on them (i.e., Step 2) in order to estimate the overall compression quality, as shown in Figure
+2. The distance between two data blocks sampled nearby
+will be fixed in the same dimension and different across
+dimensions, such that all sampled blocks can be distributed
+uniformly throughout the entire data set. We use the term
+sampling rate to represent the sampling frequency, which is
+denoted by rsp . In the evaluation section, we present the
+TRANSACTIONS ON PARALLEL AND DISTRIBUTED SYSTEMS, VOL. XX, NO. X, MONTH 2018
+accuracy of our estimation model with respect to different
+sampling rates. Based on our experiments (to be shown
+later), a sampling rate of 5% can provide a good accuracy
+with low performance overhead. Therefore, we choose 5%
+as the default sampling rate in our implementation. Note
+that for PBT, the prediction over the sampled data points is
+actually based on their original real neighbors instead of their
+neighbors in the sampled points. Thus, the sampling process
+for PBT will not introduce additional errors.
+6
+P
+14%
+Pn
+12%
+10%
+Pn-1 Pn+1
+8%
+Pn-2
+6%
+Pn-3
+4%
+2%
+In this section, we provide an in-depth analysis of the lossy
+data reduction in Stage II. We then propose a general estimation model to predict the compression quality (including
+compression ratio and compression error) accurately for
+lossy compressors with vector quantization or embedded
+coding in Stage II based on the theorems derived in Section
+4. After that, we apply our estimation model specifically to
+SZ and ZFP to predict their compression quality (i.e., Step
+2 as shown in Figure 2). We then discuss the implementation details of our proposed online automatic selection
+algorithm.
+(2)
+(2)
+For notation, we use X (2) = {x1 , · · · , xN } to denote
+the transformed data from the original data X . That is, X (2)
+are the input data of Stage II and the output data of Stage I.
+5.1
+Estimation Based on Static Quantization
+Unlike data-dependent quantization approach (such as embedded coding that will be discussed later), static quantization is determined before performing quantization. Vector
+quantization [41] is one of the most popular static quantization methods. It converts X (2) (i.e., prediction errors in PBT
+or transformed data in BOT) to another set of integer values,
+which are easier to compress. Specifically, the value range is
+split into multiple intervals (i.e., quantization bins) based
+on some method, such as equal-size quantization or logscale quantization (discussed later). Then, the compressor
+needs to go through all the transformed data (X (2) ) to
+determine in which bins they are located, and represents
+their values by the corresponding bin indexes, which are
+integer values. During the decompression, the midpoint
+of each quantization bin will be used to reconstruct the
+data that are located in the bin; it is called the estimated
+value (or quantized value) in the following discussion. The
+effectiveness of the data reduction in vector quantization
+depends on the distribution of the transformed data X (2) .
+Moreover, the quantization step introduces errors to X (2) ,
+and such errors will be added to the decompressed data.
+We build a model to estimate the data reduction level
+(e.g., compression ratio) and the data distortion level (e.g.,
+mean squared error), based on a vector quantization method
+with a specific distribution of X (2) . In the following, we
+define some important notations to be used. We denote
+P (x) as the probability density function (PDF) of X (2) , that
+is, X (2) ∼ P (x). Based on our observation, the probability
+distribution of X (2) is symmetric in a large majority of cases.
+The blue area in Figure 4 exemplifies the typical probability
+distribution of the prediction errors generated by the SZ
+Pn+3
+p1
+0%
+5 C OMPRESSION Q UALITY E STIMATION OF L OSSY
+DATA R EDUCTION IN S TAGE II
+Pn+2
+p2n-1
+x
+Fig. 4. Example of the distribution and vector quantization of the prediction errors generated by SZ lossy compressor on one ATM field.
+lossy compressor using the ATM data set. All other tested
+data sets show the same symmetry. Therefore, we assume
+P (x) to be symmetric without loss of generality (i.e., P (i)
+is equal to P (2n − i) as illustrated in Figure 4), and the
+number of vector quantization bins is represented by 2n − 1.
+We denote δi the length of the ith quantization bin, where
+δi = δ2n−i because of the symmetry property.
+5.1.1 Estimation of bit-rate
+Bit-rate is defined as the average number of bits used in
+the compressed data as per value. As discussed previously,
+a large number of transformed data values generated by
+the vector quantization are supposed to gather in a few
+quantization bins. That is, they are represented by a few
+integer bin indexes (Stage II), such that the data size can
+be reduced significantly by entropy encoding (Stage III).
+We combine our discussion for Stage II and Stage III, in
+order to estimate the overall reduction size achieved by the
+quantization.
+Given a number of symbols, an entropy encoding
+method (such as Huffman coding [47] and arithmetic coding
+[48]) can assign a number of bits to represent these symbols
+based on their frequencies. Since Shannon entropy theory
+[49] gives the expected number of bits to represent these
+symbols, we can use the entropy value of the 2n − 1 bins to
+estimate the expected bit rate used to represent all quantized
+values. The estimation equation is shown as follows:
+BR = −
+2n−1
+P
+Pi · log2 Pi ,
+(5)
+i=1
+where Pi is the probability of the ith quantization bin.
+The probability of each bin can be calculated by the
+integral
+R sof its probability density function value. Specifically,
+Pi = sii+1 P (x)dx, where [si , si+1 ) is the i-th quantization
+bin and si+1 − si = δi . Since the integral is relatively
+s +s
+to compute, we use δi · P ( i 2 i+1 ) to approximate
+Rcomplex
+si+1
+P (x)dx. Therefore, the estimation of the bit rate based
+si
+on the X (2) ’s PDF is
+2n−1
+P
+BR = −
+δi P ( si +s2 i+1 ) · log2 (δi P ( si +s2 i+1 )).
+i=1
+To further simply the equation, let mi denote the midpoint of the ith bin, namely, (si + si+1 )/2. Then we have
+BR = −
+2n−1
+P
+δi P (mi ) · log2 (δi P (mi )
+i=1
+=−
+2n−1
+P
+i=1
+P (mi )δi log2 δi −
+2n−1
+P
+i=1
+δi P (mi ) log2 P (mi )),
+(6)
+TRANSACTIONS ON PARALLEL AND DISTRIBUTED SYSTEMS, VOL. XX, NO. X, MONTH 2018
+Pi−1
+where mi = (si + si+1 )/2 = j=1 δj + δi /2. Note that the
+midpoint of the nth bin is 0 (i.e., mn = 0) according to the
+symmetry property.
+Therefore, we can estimate the bit rate value by Equation
+(6) given the probability density function of X (2) . (We
+discuss our method to estimate the X (2) ’s PDF in detail
+later.) Note that the compression ratio can be calculated by
+dividing the number of bits per floating-point value by the
+bit-rate, for example, 32/bit-rate for single-precision data
+and 64/bit-rate for double-precision data.
+5.1.2
+Estimate of compression error
+As proved in Theorem 1 and 3, the PBT and BOT are both
+L2 -norm-preserving transformations. Thus, the L2 -normbased error, such as the mean squared error (MSE), introduced by Stage II stays unchanged after decompression.
+Therefore, we can estimate the L2 -norm based compression
+error by estimating the error of Stage II.
+We denote X̂ (2) as the quantized values of X (2) . The
+MSE between X (2) and X̂ (2) can be calculated by
+M SE(X t , X̃ t ) = EX t [(X t − X̃ t )2 ]
+R +∞
+=
+−∞
+(x − x̃)2 · P (x)dx,
+(7)
+where E[·] represents the expectation. Note that x̂ is a
+step function, since the values in each bin are quantized
+to the same value. Lossy compressors such as NUMARACK
+[21], SSEM [19], and SZ [8] often use the midpoint of the
+quantization bin to approximate the values located in it.
+s +s
+Therefore, x̂ = i 2 i+1 = mi when si ≤ x < si+1 . We can
+further estimate the MSE based on the probability density
+function P (x) and the step function x̂ as follows:
+M SE =
+2n−1 R
+P
+si+1
+i=1
+≈
+(x − x̂)2 · P (x)dx
+2n−1
+P
+i=1
+=
+si
+Rs
+(P (mi ) · sii+1 (x − mi )2 dx)
+2n−1
+2n−1
+Rδ
+P
+P
+1
+(P (mi ) · 0 i (x − δ2i )2 dx) = 12
+δi3 P (mi )
+i=1
+√
+2n−1
+√
+P 3
+1
+M SE
+=(
+δi P (mi )) 2 /(2 3 · V R)
+VR
+i=1
+P SN R = −20 · log10 (N RM SE)
+2n−1
+P 3
+= −10 · (log10 (
+δi P (mi )) − 2 · log10 V R − log10 12),
+distortion quality with the same rate. Generally, the higher
+the rate-distortion curve, the better the lossy compression
+quality. Here the term “rate” means bit rate in bits/value,
+and “distortion” usually adopts PSNR.
+Based on the estimation of bit rate and PSNR proposed above (i.e., Equations (6) and (8)), the rate-distortion
+depends only on δ1 , δ2 , · · · , δ2n−1 , given the probability
+distribution of X (2) . However, it is difficult to optimize
+the 2n − 1 values {δi }2n−1
+for the rate-distortion during
+i=1
+the preparation stage, even if the probability distribution
+is classic distribution, such as Gaussian distribution. In
+the following, we analyze three common, effective vector
+quantization approaches; the analysis can be extended by
+including more vector quantization methods.
+5.1.4
+Detailed analysis of three vector quantization Cases
+• Linear quantization: This is the simplest yet effective
+vector quantization approach, which is adopted by SZ
+lossy compressor. Under this approach, all quantization
+bins have the same length, (i.e., δ1 = · · · = δ2n−1 = δ ).
+On the other hand, the 2n−1 quantization bin can cover
+all the prediction errors as long as the number of bins
+2n−1
+P
+is large enough, hence,
+P (mi ) ≈ 1δ . So, Equations
+i=1
+(6) and (8) can be simplified as follows:
+(8)
+i=1
+where V R represents the value range of the original data
+X (1) . Thus far, we have established the estimation equations
+for bit rate and L2 -norm based compression error. We are
+now ready to derive the estimation of the most significant
+metric: rate-distortion.
+(9)
+P SN Rsz = 20 · log10 (V R/δ) + 10 · log10 12.
+(10)
+i=1
+Equation (10) tells us that the PSNR depends only on
+the unified quantization bin size regardless of the distribution of transformed data from Stage I. For example,
+the SZ lossy compressor sets the bin size δ to twice
+the absolute error bound (i.e., ebabs ) to make sure the
+maximum pointwise compression error within ebabs .
+So, based on Equation (10), our PSNR estimation for
+SZ lossy compressor becomes
+Estimation of rate-distortion
+Rate-distortion is an important metric to compare different
+lossy compressors, such as fixed rate lossy compressors
+(e.g., ZFP) and fixed accuracy lossy compressors (e.g., SZ).
+For fair comparison, people usually plot the rate-distortion
+curve for the different lossy compressors and compare the
+(11)
+Note that ebabs /V R is the value-range-based relative
+error bound [8] (denoted by ebrel ) defined by SZ.
+Unlike the pointwise relative error that is compared
+with each data value, value-range-based relative error
+is compared with value range of each data field. Thus
+our model can estimate the SZ’s PSNR precisely based
+on the value-range-based relative error bound.
+quantization: Log-scale quantization is an
+alternative to the linear quantization, and its bin sizes
+follows a logarithm distribution. Suppose one is using
+2n − 1 bins to quantize X (2) , in order to cover the
+maximum absolute value in X (2) , b is chosen to be
+N
+(2)
+(2)
+(2)
+dlogn (max{|xi |})e. If xi < 0, xi falls into the
+• Log-scale
+i=1
+(2)
+5.1.3
+2n−1
+P
+P (mi ) log2 P (mi ) − log2 δ,
+BRsz = −δ
+P SN Rsz = −20 · log10 (ebabs /V R) + 10 · log10 3.
+i=1
+After that, we can calculate the root mean squared error
+(RMSE), normalized root mean squared error (NRMSE), and
+peak signal-to-noise ratio (PSNR) as follows:
+N RM SE =
+7
+(2)
+(2)
+n − blogb (−xi )c-th bin; if xi = 0, xi falls into the
+(2)
+(2)
+(2)
+nth bin; if xi > 0, xi falls into the n + blogb xi cth bin. Thus, the log-scale quantization uses δn−i =
+bi −bi−1 , δn = 2b, δn+i = bi −bi−1 as the bin size where
+1 ≤ i ≤ n − 1. Compared with linear quantization,
+log-scale quantization usually a has higher PSNR but
+a lower compression ratio. The reason is that log-scale
+TRANSACTIONS ON PARALLEL AND DISTRIBUTED SYSTEMS, VOL. XX, NO. X, MONTH 2018
+quantization assigns a larger number of finer bins to
+the high-frequency (central) regions. Thus, according
+to Equation (7), log-scale quantization’s PSNR can be
+higher than linear quantization. On the other hand, the
+distribution of the interval frequencies with log-scale
+quantization is more even than with linear quantization, leading to a poor entropy encoding result. Hence,
+for various data, it is hard to tell directly which quantization method is better in terms of rate-distortion. The
+most effective way is to compare their rate-distortion
+estimations.
+x1(2)
+x2 (2)
+x3 (2)
+x4(2)
+x5 (2)
+x6 (2)
+x7(2)
+x8 (2)
+x9 (2)
+x10(2)
+x11(2)
+x12(2)
+x13(2)
+x14(2)
+x15(2)
+x16(2)
+• Equal-probability quantization: This vector quantiza-
+tion approach is employed by the NUMARCK lossy
+compressor. This method generates equal probability
+for each quantization interval; hence, δi · P (mi ) ≈
+1
+2n−1 . In this case, the estimation of bit rate equals
+dlog2 (2n − 1)e = 1 + log2 n. It shows that the entropy encoding has no effect on the 2n − 1 intervals
+with the same frequency. The PSNR estimation will
+n
+P
+δi2 ) + 20 · log10 V R + 10 · log10 (6n).
+be −10 · log10 (
+i=1
+The bin size can be estimated by the clustering-based
+approximation approach (proposed by Chen et al. [21]),
+such as the K-means cluster algorithm, whose time
+overhead is expensive.
+5.2
+Estimation Based on Dynamic Quantization
+Dynamic quantization is a data-dependent manner and
+encodes the data progressively. For example, embedded
+coding (EC) [42] is the most commonly used dynamic
+quantization approach. It is the most important part of the
+BOT-based lossy compressors, such as JPEG2000 and ZFP. It
+generates a stream of bits that are put into order based on
+their impact on the error. Many variances of EC have been
+proposed in previous work [50], [51], [52]. As we proved
+in Section 4.2, the L2 -norm based compression error in the
+original data space is equal to the compression error in
+the transformed space, so the bits in the same bit-plane (as
+shown as the blue dash line in Figure 5 should be encoded
+at a time, that is the case for most of the EC variances.
+Figure 5 shows an example with 16 transformed (4×4
+data block) to be encoded. Each datum is represented by
+its binary format. EC starts from the leftmost bit-plane and
+ends at the maximum bit-plane, as shown as the purple dash
+line in the figure. The maximum bit-plane is determined by
+the bit budget or the error bound set by users. For each
+value, EC encodes only its significant bits (i.e., nonzero bits).
+We use a red dashed line to indicate the significant bits for
+the 16 values. The BOT-based transformed data is roughly
+in order (i.e., large values appear ahead of small values).
+We can observe that the red dashed line in Figure 5 exhibits
+a staircase shape. We can use this feature to estimate the
+bit-rate and compression error for embedded coding.
+5.2.1 Estimation of bit-rate
+To estimate the bit-rate after embedded coding, we need to
+estimate the number of significant bits (denoted by nsb ) for
+each value. We also use a sampling approach to make an
+estimation. Specifically, we first sample some data points
+(marked in green in the figure) and count their nsb . After
+8
+Binary Representation
+One
+bit-plane
+Maximum
+bit-plane
+Fig. 5. Illustration of embedded coding scheme used in lossy compression.
+that, we use these sampled data points and their nsb to
+interpolate nsb for the remaining data points. We then
+calculate the average of all nsb (denoted by n̄sb ) and use
+it as the approximate bit-rate value, that is, n̄sb . The key
+reason we can adopt sampling and interpolation is that
+the significant bits of BOT-based transformed data exhibit
+a staircase shape, as discussed previously.
+5.2.2
+Estimation of compression error
+Similar to the estimation of bit-rate, we can estimate the
+compression error, for example, MSE by calculating the MSE
+of all the sampled data points (denoted by M SEsp ). Note
+that after the first step of exponent alignment, different
+blocks may have different exponent offsets and maximum
+bit-planes. Hence, in order to calculate the overall MSE
+for all the sampled data points, each sampled data point’s
+error is calculated by multiplication of its truncated error in
+binary representation and its block’s exponent offset value.
+Finally, we can estimate the overall PSNR by the PSNR of
+the sampled data points: P SN Rsp = −10 · log10 M SEsp +
+20 · log10 V R.
+ec
+We use rsp to denote the sampling rate in Stage I and rsp
+to denote the sampling rate used in embedded coding. We
+ec
+may significantly affect the estimation
+observe that low rsp
+accuracy, but the estimation accuracy is not that sensitive to
+rsp . Thus, as the default setting of our solution, we sample 3
+data points for one 1D data block, 9 data points for one 4 × 4
+2D data blocks, and 16 data points for one 3D 4 × 4 × 4 data
+block. We adopt a low rate for sampling the data blocks such
+that our estimation model can achieve both high estimation
+accuracy and low overhead (illustrated later).
+5.3 Implementation of Proposed Online Selection
+Method
+We develop the automatic online selection method based
+on our proposed estimation model for two leading errorcontrolled lossy compressors. As discussed above, we apply
+our estimation model to both SZ and ZFP to predict their
+compression quality accurately. Specifically, SZ adopts a
+multidimensional prediction model for its PBT in Stage I
+and linear quantization for its vector quantization in Stage
+II. We use Equations (9) and (11) to predict its bit-rate
+and PSNR, respectively. ZFP uses an optimized orthogonal
+TRANSACTIONS ON PARALLEL AND DISTRIBUTED SYSTEMS, VOL. XX, NO. X, MONTH 2018
+transformation for its BOT in Stage I and group-testingbased EC [10] for its EC in Stage II. We use n̂sb and P SN Rsp
+to predict its bit-rate and PSNR, respectively.
+Algorithm 1 Proposed automatic online selection method
+for lossy compression of HPC scientific data sets
+Input: Data fields {Xi }m
+i=1 to compress, user-set error bound ebabs or
+ec .
+ebrel , sampling rate rsp and rsp
+m
+Output: Compressed-byte stream {Ci }m
+i=1 with selection bits {si }i=1 .
+1: for each data field Xi (i = 1, · · · , m) do
+2:
+Set eb = ebabs or ebrel · V R (where V R is the value range of Xi )
+blk
+Sample data points from set Xi blockwise to form subset Xsp
+with sampling rate rsp
+blk pointwise to form subset
+4:
+Sample data points from subset Xsp
+ec with sampling rate r ec
+Xsp
+sp
+ec and
+5:
+Estimate bit-rate of ZFP (i.e., BRzf p ) by n̄sb based on Xsp
+eb
+6:
+Estimate PSNR of ZFP (i.e., P SN Rzf p ) by P SN Rsp
+7:
+Calculate bin size δ based on P SN Rzf p and Equation (10) with
+P SN Rsz = P SN Rzf p
+8:
+Construct approximate probability density function P (·) based
+blk
+on sampled data Xsp
+9:
+Estimate bit-rate of SZ (i.e., BRsz ) by Equation (9) based on P (·)
+and δ
+10:
+if BRsz < BRzf p then
+11:
+Perform SZ compression on Xi with absolute error bound 2 · δ
+12:
+else
+13:
+Perform ZFP compression on Xi with absolute error bound
+eb
+14:
+end if
+15:
+Output compressed bytes Ci and selection bit si (e.g., si = 0
+represents for SZ, si = 1 represents for ZFP)
+16: end for
+3:
+Our online selection method adopts the rate-distortion
+as a criterion to select the best-fit compression technique between SZ and ZFP. Specifically, for each field/variable, our
+solution first estimates ZFP’s bit-rate and PSNR based on a
+given error-bound set by users. Next, it estimates SZ’s bitrate based on the PSNR estimated for ZFP, due to the high
+PSNR estimation accuracy in our model. Then, it selects
+the bestfit compressor with smaller bit-rate estimated and
+performs the corresponding lossy compression, as shown
+in Algorithm 1. Note that the compression errors of ZFP
+follow a Gaussian-like distribution while those of SZ follow
+an uniform-like distribution [26]. Thus, in order to keep the
+same PSNR, ZFP needs a larger error bound as an input
+than does SZ. Accordingly, with P SN Rsz = P SN Rzf p
+(line 7), the calculated absolute error bound for SZ (i.e., 2 · δ )
+is smaller than the absolute error bound (i.e., ebabs ), which
+can guarantee the compression errors to be still bounded by
+ebabs point-wise after decompression.
+6
+E VALUATION R ESULTS AND A NALYSIS
+In this section, we first describe the experimental platform
+and the HPC scientific data sets used for evaluation. We then
+evaluate the accuracy of our estimation model and analyze
+the time and memory overhead of our online selection
+method. We then present the experimental results based on
+a parallel environment with up to 1,024 cores.
+6.1 Experimental Setting and Scientific Simulation
+Data
+We conduct our experimental evaluations on the Blues
+cluster [53] at Argonne Laboratory Computing Resource
+9
+TABLE 1
+Data Sets Used in Experimental Evaluation
+NYX
+ATM
+Hurricane
+Data Source
+Cosmology
+Climate
+Hurricane
+# Fields
+6
+79
+13
+Data Size
+147 GB
+1.5 TB
+62.4 GB
+Example Fields
+baryon density, temperature
+CLDHGH, CLDLOW
+QICE, PRECIP, U, V, W
+Center using 1,024 cores (i.e., 64 nodes, each with two
+Intel Xeon E5-2670 processors and 64 GB DDR3 memory,
+and each processor with 16 cores). The storage system uses
+General Parallel File Systems (GPFS). These file systems
+are located on a raid array and served by multiple file
+servers. The I/O and storage systems are typical high-end
+supercomputer facilities. We use the file-per-process mode
+with POSIX I/O [54] on each process for reading/writing
+data in parallel 2 . We perform our evaluations on various
+single floating-point data sets including 2D ATM data sets
+from climate simulations, 3D Hurricane data sets from the
+simulation of the hurricane Isabela, and 3D NYX data sets
+from cosmology simulation. The details of the data sets
+are described in Table 1. We use SZ-1.4.11 with the default
+mode and ZFP-0.5.0 with the fixed accuracy mode for the
+following evaluations.
+6.2
+Accuracy of Compression-Quality Estimation
+We evaluate our model based on three criteria: average error
+of estimating bit-rate, average error of estimating PSNR,
+and accuracy of selecting the best-fit compression technique
+under different sampling rates. Note that here we use PSNR
+instead of MSE because previous work [8], [10] usually
+adopt PSNR for rate-distortion evaluation.
+Tables 2 and 3 show the average errors of bit-rate and
+PSNR under different sampling rates (i.e., 1%, 5%, and 10%).
+They exhibit that our estimation model has a relatively high
+accuracy in estimating PSNR with low sampling rate. For
+example, for both SZ and ZFP, with 5% sampling rate, the
+average PSNR estimation errors are within 2% for the ATM
+data sets and within 4% for the Hurricane data sets.
+As for the bit-rate estimation, the experiments based on
+ATM and Hurricane data sets show that the bit-rate values
+estimated for SZ are always lower than the real bit-rate
+values after compression, and the estimation error can be up
+to 19% in some cases. The reason is that our model adopts
+the Shannon entropy theory (i.e., Equation (6)) to approximate the bit-rate for SZ. Note that the entropy value is the
+optimal value in theory, while the designed/implemented
+entropy encoding algorithm (such as Huffman encoding)
+may not reach such a theoretical optimum in practice. This
+situation typically happens when the data set has a lot of
+similar values such that it is easy to compress with a high
+compression ratio.
+To address the above issue, we improve the estimation
+accuracy for SZ by introducing a positive offset, which
+is set to 0.5 bits/value based on our experiments using
+real-world simulation data. Tables 2, 3, 4, and 5 present
+the accuracy (average and standard deviation of relative
+estimation error) of the offset-based estimation for SZ and
+2. POSIX I/O performance is close to other parallel I/O performance
+such as MPI-IO [55] when thousands of files are written/read simultaneously on GPFS, as indicated by a recent study [56].
+TRANSACTIONS ON PARALLEL AND DISTRIBUTED SYSTEMS, VOL. XX, NO. X, MONTH 2018
+the original estimation approach for ZFP. We can see that
+our final estimation model can always predict both the
+bit-rate and PSNR accurately for the two compressors. In
+relative terms, the bit-rate estimation errors fall into the
+interval [-8.5%, 7.5%] for SZ. Note that here the negative
+values represent that the estimated values are lower than
+the real values. As for ZFP, the bit-rate estimation errors are
+limited within 5.7% on the ATM data sets and 0.9% on the
+Hurricane data sets, when the sampling rate is higher than
+5%. The PSNR estimation errors vary from -3.5% to -0.6%
+when the sampling rate is set to 5%. Hence, we suggest
+setting the sampling rate to 5% in practice, which also has
+little time cost (presented latter).
+As illustrated in Table 2 and 3, our estimation of bitrate is more accurate for ZFP than SZ in most instances.
+The reason is that we estimate the bit-rate by calculating
+the entropy value (i.e., Equation (5)) for SZ because of the
+Entropy encoding step (Huffman coding) adopted in SZ. As
+mentioned above, entropy value represents an optimal bitrate (or lower bound) in theory, which leads to a certain
+estimation error. The tables also show that our estimation
+of PSNR is more accurate for SZ than ZFP under all the
+tested sampling rates. The key reason is that the symmetric
+distribution of prediction errors in SZ is not related to its
+prediction accuracy, but the staircase shape of transformed
+coefficients in ZFP is highly dependent on its transformation
+efficiency. Therefore, our PSNR modelling based on SZs
+quantization errors is more accurate than that based on ZFPs
+truncation errors. We also note that the standard deviation
+of bit-rate error is much higher for ZFP than SZ on the
+ATM data sets, as shown in Table 4. This is because ZFPs
+block orthogonal transformation may have low decorrelation efficiency on certain fields in the ATM data sets, so
+the transformed coefficients can still have high correlation
+and the staircase shape (as shown in Figure 5) cannot
+be always established on these fields, which can result in
+large bit-rate error fluctuations and relatively high standard
+deviation. In addition, we note that since our proposed
+estimation of PSNR is based on the approach to control the
+maximum L2 -norm-based compression error, the estimated
+PSNRs are always lower than the real PSNRs, leading to
+the negative PSNR errors shown in Table 2 and 3. Finally,
+it is worth noting that the Hurricane data sets have more
+high-compression-ratio variables than the ATM data sets. In
+other words, the Hurricane data sets are relatively easier
+to compress compared with the ATM data sets. Hence,
+using the entropy value (i.e., the optimal value in theory) to
+estimate the bit-rate is more accurate for the Hurricane data
+sets than for the ATM data sets. Consequently, considering
+the 0.5 bits/value offset for SZ, the bit-rate errors are always
+negative on the ATM data sets (as shown in Table 2 while
+positive on the Hurricane data sets (as shown in Table 3).
+In the future work, we can further improve our estimation
+method by introducing the offset unless the data set is
+relatively hard to compress.
+We next evaluate the selection accuracy, which is calculated as the ratio of the number of correct selections
+to the total number of variables or data sets. The correct
+selection means our model make a correct decision by
+selecting the bestfit compression technique. The selection
+accuracy is 98.7% on the Hurricane data sets and 88.3% on
+10
+TABLE 2
+Average Relative Error of Our Estimation Model for Compression
+Quality on 2D ATM Data Sets
+Bit-rate
+PSNR
+rsp = 1%
+SZ
+ZFP
+7.5%
+5.7%
+-2.5% -4.1%
+rsp = 5%
+SZ
+ZFP
+7.4%
+5.7%
+-1.1% -2.0%
+rsp = 10%
+SZ
+ZFP
+7.3%
+5.6%
+-0.6% -1.6%
+TABLE 3
+Average Relative Error of Our Estimation Model for Compression
+Quality on 3D Hurricane data sets
+Bit-rate
+PSNR
+rsp = 1%
+SZ
+ZFP
+-4.5%
+8.0%
+-2.6% -6.3%
+rsp = 5%
+SZ
+ZFP
+-8.5%
+0.9%
+-1.1% -3.5%
+rsp = 10%
+SZ
+ZFP
+-4.6%
+0.9%
+-0.8% -3.1%
+the ATM data sets. In fact, the 1.3% wrong selection brings
+only 0.08% compression-ratio degradation on the Hurricane
+data sets, and the 11.7% wrong selection leads to only 3.3%
+compression-ratio degradation on the ATM data sets, as
+shown in Figure 7. The reason the wrong selections leads
+to little degradation is that almost all the wrong selections
+actually happen only when the two compressors exhibit
+close bit-rates with the same PSNR, such that selecting either
+of them may not affect the final overall compression quality
+by much.
+6.3
+Overhead Analysis
+Next, we analyze the overhead of our automatic online
+selection method with respect to both time and memory.
+6.3.1 Time overhead
+Time overhead comes from two parts: the transformation of
+sampled data points in Step 1 (as shown in Figure 2) and
+the estimation of compression quality in Step 2 (also shown
+in Figure 2). For the first part, the overhead of sampled data
+transformation is scaled linearly with the sampling rate rsp .
+Hence, if we assume Stage I takes a percentage (denoted by
+rstage1 ) of the total compression time, the overhead can be
+expressed as O(rsp · rstage1 · N ), where N is the number
+of data points. For example, rstage1 is up to 60% based on
+our experiments, so the time overhead of the sampled data
+transformation is up to 3% of SZ’s compression time, under
+a default sampling rate of 5%. For the second part, when we
+TABLE 4
+Standard Deviation of Relative Estimation Error for Compression
+Quality on 2D ATM Data Sets
+Bit-rate
+PSNR
+rsp = 1%
+SZ
+ZFP
+8.9% 23.9%
+5.6%
+6.0%
+rsp = 5%
+SZ
+ZFP
+8.8% 23.6%
+3.1%
+4.0%
+rsp = 10%
+SZ
+ZFP
+8.8% 23.5%
+1.5%
+3.8%
+TABLE 5
+Standard Deviation of Relative Estimation Error for Compression
+Quality on 3D Hurricane Data Sets
+Bit-rate
+PSNR
+rsp = 1%
+SZ
+ZFP
+10.4% 11.9%
+2.2%
+5.1%
+rsp = 5%
+SZ
+ZFP
+16.0% 2.0%
+1.2%
+3.3%
+rsp = 10%
+SZ
+ZFP
+10.8% 3.1%
+2.0%
+1.0%
+TRANSACTIONS ON PARALLEL AND DISTRIBUTED SYSTEMS, VOL. XX, NO. X, MONTH 2018
+11
+TABLE 6
+Average Time Overhead for One Field Compared with Compression Time of SZ and ZFP on NYX, ATM, and Hurricane Data Sets
+NYX
+ATM
+Hurricane
+rsp = 1%
+Time (sec.)
+SZ
+1.8 × 10−2
+1.4%
+6.0 × 10−3
+1.5%
+1.6 × 10−2
+1.3%
+ZFP
+1.2%
+1.9%
+1.7%
+rsp = 5%
+Time (sec.)
+SZ
+7.4 × 10−2
+5.6%
+2.0 × 10−2
+4.9%
+7.1 × 10−2
+5.4%
+estimate compression quality, the time complexity is O(n)
+with vector quantization based on Equations (6) and (8),
+where n is the number of quantization bins, which is very
+small in general compared with the data size N . Hence,
+the time overhead complexity with embedded coding is
+ec
+O(rsp · rsp
+· N ). Therefore, the overall time overhead can
+be expressed as O(rsp · N ) with a low constant coefficient,
+ec
+i.e., O(rsp
++ rstage1 ).
+Table 6 shows the time overhead on the NYX, ATM, and
+Hurricane data sets compared with the compression time
+of SZ and ZFP. It illustrates that the time overhead scales
+linearly with the sampling rate, consistent with our analysis.
+6.3.2 Memory overhead
+Memory overhead results from the storage of the approximate probability density function. It can be expressed as
+O(npdf ), where npdf is the number of bins used to represent
+the PDF. Note that although npdf is larger than n, npdf is
+still very small compared with the data size N . Specifically,
+we use 65, 535 quantization bins (i.e., npdf = 655, 35) in our
+evaluation. The dimensions of each field in the ATM and
+Hurricane data sets are 1800 × 3600 and 100 × 500 × 500
+(i.e., N = 6.48 × 106 , 2.5 × 107 ), respectively. Therefore, the
+memory overheads are about 1.0% and 0.3% on the ATM
+and Hurricane data sets, respectively.
+6.4 Analysis of Adaptability between Selection Methods Based on Fixed-PSNR vs. Fixed-Maximum-Error
+We compare our proposed selection method based on fixed
+PSNR to the solution based on fixed maximum error (proposed by Lu et al. [11]) using the NYX, ATM, and Hurricane
+data sets, as shown in Figure 6. Their solution simply
+selects the compressor with the highest compression ratio
+based on a fixed error bound (called selection based on error
+bound). Unlike their work that adopted point-wise relative
+error bound [11], we improved their selection method by
+using the absolute error bound instead, since both SZ and
+ZFP have better rate-distortions when using absolute error
+bound mode rather than using pointwise relative error
+bound mode, as confirmed in the previous studies [25], [43].
+Specifically, for each data field, we set the absolute error
+bound to 10−3 of its value range. Figure 6(a) shows that the
+selection method based on error bound always chooses SZ
+as the best-fit compressor for all the tested fields because
+SZ always leads to the higher compression ratios than ZFP
+does on these fields given a specific error bound. We note
+that ZFP over-preserves the compression error with respect
+to the user-set error bound. Thus, ZFP may have a higher
+PSNR than does SZ, even if its compression ratio is lower.
+Our proposed method is designed to select the compressor
+that has lower bit-rate (i.e., higher compression ratio) with
+the same PSNR (called selection based on rate-distortion), leading to better overall rate-distortion result. Figure 6(b) shows
+ZFP
+4.7%
+6.3%
+7.2%
+rsp = 10%
+Time (sec.)
+SZ
+1.3 × 10−1
+9.8%
+3.8 × 10−2
+9.2%
+1.2 × 10−1
+9.2%
+ZFP
+8.4%
+11.9%
+12.5%
+Hurricane
+ATM
+NYX
+ZFP
+SZ
+Data Fields
+(a) Selection based on error bound
+ZFP
+SZ
+Data Fields
+(b) Selection based on rate-distortion
+Fig. 6. Illustration of different selection methods, i.e., (a) selection based
+on error bound and (b) selection based on rate-distortion, on experimental data sets.
+that our method can select the different best-fit compressors
+based on the rate-distortion for the different fields in the
+tested data sets.
+6.5
+Empirical Performance Evaluation
+We evaluate the overall performance of our proposed solution in parallel. Let us first consider the compression ratio
+improvement achieved by our compressor. Figure 7 shows
+that the compression ratio of SZ, ZFP, and our solution on
+the NYX, ATM, and Hurricane data sets with different error
+bounds. Our solution can outperform both SZ and ZFP
+because our online selection method attempt to select the
+better compression approach for each field in the data sets.
+Note that the optimum bar represents the compression ratios
+in an ideal case assuming that the best-fit compressors can
+always be selected for any fields in the data sets. Specifically,
+the compression ratio of our solution outperforms that of
+the worst solution by 62%, 36%, 19% on the Hurricane data
+sets, by 28%, 38%, 20% on the ATM data sets, and 70%,
+17%, 12% on the NYX data sets with the value-range-based
+relative error bound ebreb of 10−3 , 10−4 , 10−6 , respectively.
+We compare our solution with the worst solution because
+our proposed selection method can almost always select the
+best-fit compressor; however, a user is likely to keep using
+the same, but maybe the worst, compressor for all data sets.
+In Figures 8 and 9, we present the throughputs (in GB/s)
+of storing and loading data to GPFS with different solutions.
+We increase the scale from 1 to 1,024 processes. We set the
+value-range-based relative error bound ebrel to a reasonable
+value 10−4 [8]. We test each experiment five times and
+use their average time to calculate the throughputs. The
+storing and loading throughputs are calculated based on
+the compression/decompression time and I/O time. We
+compare our solution with the other two solutions based on
+SZ and ZFP compressors and a baseline solution. The baseline solution is storing and loading the uncompressed data
+directly without any compression. Figures 8 and 9 illustrate
+that our optimized compressor can achieve the highest stroing and loading throughputs compared with SZ and ZFP.
+TRANSACTIONS ON PARALLEL AND DISTRIBUTED SYSTEMS, VOL. XX, NO. X, MONTH 2018
+ZFP
+Our Solution
+Optimum Solution
+20
+10
+5
+0
+NYX
+ATM
+Hurricane
+(a) ebrel = 10−3
+Avg. Compression Ratio
+ZFP
+Our Solution
+35
+30
+25
+20
+15
+10
+5
+Optimum Solution
+0
+1
+2
+4
+8
+16
+32
+64
+128
+256
+512
+1024
+Number of Processes
+10
+5
+Fig. 8. Throughputs of storing data (compression + I/O) with different
+solutions on the Hurricane data sets (with the same PSNR).
+0
+NYX
+SZ
+ATM
+ZFP
+Hurricane
+= 10−4
+Our Solution
+Optimum Solution
+6
+5
+4
+3
+2
+1
+0
+NYX
+ATM
+Reading
+Data
+ReadingInitial
+Uncompressed
+Data
+ZFP:
+Decompressed
+Data
+ZFP:Decomp
+Decomp++Wrting
+Reading
+Compressed Data
+SZ:
+Decompressed
+Data
+SZ:Decomp
+Decomp++Wrting
+Reading
+Compressed Data
+Our:
+Decompressed
+Data
+Our:Decomp
+Decomp++Wrting
+Reading
+Compressed Data
+60.00
+50.00
+Throughput (GB/s)
+Avg. Compression Ratio
+Our:
+Comp++Writing
+WrtingCompressed
+Compressed
+Our: Comp
+DataData
+15
+(b) ebrel
+Hurricane
+(c) ebrel = 10−6
+Fig. 7. Average compression ratios of SZ, ZFP, and our solution on three
+application datasets (with the same PSNR across compressors on each
+field).
+Our optimized compressor can outperform the second-best
+solution by 68% of the storing throughput and by 79% of
+the loading throughput with 1,024 processes. Our proposed
+solution has higher throughputs because it can achieve
+higher compression ratios than both SZ and ZFP with little
+extra overhead, so the time of writing and reading data is
+reduced significantly, leading to higher overall throughputs.
+Similarly, SZ has higher overall throughputs than ZFP does
+because of achieving a higher overall compression ratio on
+the tested data sets with the same PSNR, although the compression/decompression rates of SZ are lower than those of
+ZFP [8]. We note that the compression/decompression rates
+have a linear speedup with the number of processors (as
+illustrated in Figure 10 in [8]) and more processes will lead
+to higher unexpected I/O contention and data management
+cost by GPFS when writing/reading data simultaneously.
+Hence, we expect that the performance gains of our solution
+compared with SZ and ZFP will further increase with scale
+because of the inevitable bottleneck of the I/O bandwidth.
+7
+ZFP: Comp
+DataData
+ZFP:
+Comp++Writing
+WrtingCompressed
+Compressed
+SZ:
+WrtingCompressed
+Compressed
+SZ:Comp
+Comp ++Writing
+DataData
+40
+15
+SZ
+Writing Initial
+Uncompressed
+Writing
+Data Data
+45
+Througput (GB/s)
+Avg. Compression Ratio
+SZ
+25
+12
+C ONCLUSION
+In this paper, we propose a novel online, low-overhead
+selection method that can select the best-fit lossy compressor
+between two leading compressors, SZ and ZFP, optimizing
+the rate-distortion for HPC data sets, This is the first attempt
+to derive such an approach to the best of our knowledge. We
+40.00
+30.00
+20.00
+10.00
+0.00
+1
+2
+4
+8
+16
+32
+64
+128
+256
+512
+1024
+Number of Processes
+Fig. 9. Throughputs of loading data (decompression + I/O) with different
+solutions on the Hurricane data sets (with the same PSNR).
+develop a generic open-source toolkit/library under a BSD
+license. We evaluate our solution on real-world production
+HPC scientific data sets across multiple domains in parallel
+with up to 1,024 cores. The key findings are as follows.
+• The average error of our estimation with default sam-
+pling rate on bit-rate (i.e., compression ratio) can be
+limited to within 8.5% and 5.7% for SZ and ZFP, respectively.
+• The average error of our estimation with default sampling rate on PSNR (i.e., data distortion) can be limited
+to within 1.1% and 3.5% for SZ and ZFP, respectively.
+• The accuracy of selecting the best-fit compressor with
+default sampling rate is 88.3 ∼98.7%, with little analysis/estimation time overhead (within 5.4% and 7.3% for
+SZ and ZFP, respectively).
+• Our solution improves the compression ratio by
+12∼70% compared with that of SZ and ZFP, with the
+same distortion (PSNR) of the data.
+• The overall performance in loading and storing data
+can be improved by 79% and 68% on 1,024 cores with
+our solution, respectively, compared with the secondbest solution.
+We plan to extend our optimization solution (such as
+estimation model) to more error-controlled lossy compression techniques, including more quantization approaches
+TRANSACTIONS ON PARALLEL AND DISTRIBUTED SYSTEMS, VOL. XX, NO. X, MONTH 2018
+and block-based transformations, to further improve the
+compression qualities for more HPC scientific data sets.
+ACKNOWLEDGMENTS
+This research was supported by the Exascale Computing Project
+(ECP), Project Number: 17-SC-20-SC, a collaborative effort of
+two DOE organizations - the Office of Science and the National
+Nuclear Security Administration, responsible for the planning
+and preparation of a capable exascale ecosystem, including
+software, applications, hardware, advanced system engineering
+and early testbed platforms, to support the nation’s exascale
+computing imperative. The submitted manuscript has been
+created by UChicago Argonne, LLC, Operator of Argonne
+National Laboratory (Argonne). Argonne, a U.S. Department of
+Energy Office of Science laboratory, is operated under Contract
+No. DE-AC02-06CH11357. We acknowledge the computing resources provided by LCRC at Argonne National Laboratory.
+R EFERENCES
+[1]
+Community Earth Simulation Model (CESM), http://www.cesm.
+ucar.edu/, 2018, online.
+[2] A. H. Baker, H. Xu, J. M. Dennis, M. N. Levy, D. Nychka,
+S. A. Mickelson, J. Edwards, M. Vertenstein, and A. Wegener, “A
+methodology for evaluating the impact of data compression on
+climate simulation data,” in Proceedings of the 23rd International
+Symposium on High-Performance Parallel and Distributed Computing.
+ACM, 2014, pp. 203–214.
+[3] S. Habib, A. Pope, H. Finkel, N. Frontiere, K. Heitmann, D. Daniel,
+P. Fasel, V. Morozov, G. Zagaris, T. Peterka et al., “HACC: Simulating sky surveys on state-of-the-art supercomputing architectures,”
+New Astronomy, vol. 42, pp. 49–65, 2016.
+[4] Mira supercomputer, https://www.alcf.anl.gov/mira/, 2018, online.
+[5] Aurora Supercomputer, https://www.alcf.anl.gov/programs/
+aurora-esp, 2018, online.
+[6] N. Liu, J. Cope, P. Carns, C. Carothers, R. Ross, G. Grider,
+A. Crume, and C. Maltzahn, “On the role of burst buffers in
+leadership-class storage systems,” in 2012 IEEE 28th Symposium
+on Mass Storage Systems and Technologies. IEEE, 2012, pp. 1–11.
+[7] S. Di and F. Cappello, “Fast error-bounded lossy hpc data compression with SZ,” in 2016 IEEE International Parallel and Distributed Processing Symposium. IEEE, 2016, pp. 730–739.
+[8] D. Tao, S. Di, Z. Chen, and F. Cappello, “Significantly improving
+lossy compression for scientific data sets based on multidimensional prediction and error-controlled quantization,” in 2017 IEEE
+International Parallel and Distributed Processing Symposium. IEEE,
+2017, pp. 1129–1139.
+[9] X. Liang, S. Di, D. Tao, S. Li, S. Li, H. Guo, Z. Chen, and
+F. Cappello, “Error-controlled lossy compression optimized for
+high compression ratios of scientific datasets,” in Big Data (Big
+Data), 2018 IEEE International Conference on. IEEE, 2018, p. To
+appear.
+[10] P. Lindstrom, “Fixed-rate compressed floating-point arrays,” IEEE
+Transactions on Visualization and Computer Graphics, vol. 20, no. 12,
+pp. 2674–2683, 2014.
+[11] T. Lu, Q. Liu, X. He, H. Luo, E. Suchyta, J. Choi, N. Podhorszki,
+S. Klasky, M. Wolf, T. Liu et al., “Understanding and modeling
+lossy compression schemes on hpc scientific data,” in 2018 IEEE
+International Parallel and Distributed Processing Symposium (IPDPS).
+IEEE, 2018, pp. 348–357.
+[12] D. Tao, S. Di, H. Guo, Z. Chen, and F. Cappello, “Z-checker: A
+framework for assessing lossy compression of scientific data,” The
+International Journal of High Performance Computing Applications, p.
+1094342017737147, 2017.
+[13] P. Deutsch, “GZIP file format specification version 4.3,”
+RFC, vol. 1952, pp. 1–12, 1996. [Online]. Available: https:
+//doi.org/10.17487/RFC1952
+[14] Bzip2, http://www.bzip.org/, 2018, online.
+[15] M. Burtscher and P. Ratanaworabhan, “FPC: A high-speed compressor for double-precision floating-point data,” IEEE Transactions on Computers, vol. 58, no. 1, pp. 18–31, 2009.
+[16] P. Lindstrom and M. Isenburg, “Fast and efficient compression of
+floating-point data,” IEEE Transactions on Visualization and Computer Graphics, vol. 12, no. 5, pp. 1245–1250, 2006.
+13
+[17] L. A. B. Gomez and F. Cappello, “Improving floating point
+compression through binary masks,” in 2013 IEEE International
+Conference on Big Data. IEEE, 2013, pp. 326–331.
+[18] S. Lakshminarasimhan, N. Shah, S. Ethier, S. Klasky, R. Latham,
+R. Ross, and N. F. Samatova, “Compressing the incompressible
+with ISABELA: In-situ reduction of spatio-temporal data,” in
+European Conference on Parallel Processing. Springer, 2011, pp. 366–
+379.
+[19] N. Sasaki, K. Sato, T. Endo, and S. Matsuoka, “Exploration of lossy
+compression for application-level checkpoint/restart,” in 2015
+IEEE International Parallel and Distributed Processing Symposium.
+IEEE, 2015, pp. 914–922.
+[20] VAPOR, https://www.vapor.ucar.edu/, 2018, online.
+[21] Z. Chen, S. W. Son, W. Hendrix, A. Agrawal, W.-k. Liao, and
+A. Choudhary, “NUMARCK: machine learning algorithm for
+resiliency and checkpointing,” in Proceedings of the International
+Conference for High Performance Computing, Networking, Storage and
+Analysis. IEEE Press, 2014, pp. 733–744.
+[22] D. Tao, S. Di, Z. Chen, and F. Cappello, “Exploration of patternmatching techniques for lossy compression on cosmology simulation data sets,” in High Performance Computing - ISC High Performance 2017 International Workshops, DRBSD, ExaComm, HCPM,
+HPC-IODC, IWOPH, IXPUG, Pˆ3MA, VHPC, Visualization at Scale,
+WOPSSS, Frankfurt, Germany, June 18-22, 2017, Revised Selected
+Papers, 2017, pp. 43–54.
+[23] G. K. Wallace, “The JPEG still picture compression standard,” IEEE
+Transactions on Consumer Electronics, vol. 38, no. 1, pp. xviii–xxxiv,
+1992.
+[24] A. Huebl, R. Widera, F. Schmitt, A. Matthes, N. Podhorszki, J. Y.
+Choi, S. Klasky, and M. Bussmann, “On the scalability of data
+reduction techniques in current and upcoming hpc systems from
+an application perspective,” in International Conference on High
+Performance Computing. Springer, 2017, pp. 15–29.
+[25] P. Lindstrom, “Zfp compression ratio and quality,” https:
+//computation.llnl.gov/projects/floating-point-compression/
+zfp-compression-ratio-and-quality/, 2018, online.
+[26] P. Lindstro, “Error distributions of lossy floating-point compressors,” in Joint Statistical Meetings 2017, 2017, pp. 2574–2589.
+[27] X. Liang, S. Di, D. Tao, Z. Chen, and F. Cappello, “An efficient
+transformation scheme for lossy data compression with pointwise relative error bound,” in 2018 IEEE International Conference
+on Cluster Computing (CLUSTER). IEEE, 2018, pp. 179–189.
+[28] A. M. Gok, S. Di, Y. Alexeev, D. Tao, V. Mironov, X. Liang, and
+F. Cappello, “Pastri: Error-bounded lossy compression for twoelectron integrals in quantum chemistry,” in 2018 IEEE International Conference on Cluster Computing (CLUSTER). IEEE, 2018,
+pp. 1–11.
+[29] D. Tao, S. Di, Z. Chen, and F. Cappello, “In-depth exploration of
+single-snapshot lossy compression techniques for n-body simulations,” in Big Data (Big Data), 2017 IEEE International Conference on.
+IEEE, 2017, pp. 486–493.
+[30] H. Fu, C. He, B. Chen, Z. Yin, Z. Zhang, W. Zhang, T. Zhang,
+W. Xue, W. Liu, W. Yin et al., “18.9-pflops nonlinear earthquake
+simulation on sunway taihulight: enabling depiction of 18-hz and
+8-meter scenarios,” in Proceedings of the International Conference
+for High Performance Computing, Networking, Storage and Analysis.
+ACM, 2017, p. 2.
+[31] H. Fu, J. Liao, J. Yang, L. Wang, Z. Song, X. Huang, C. Yang,
+W. Xue, F. Liu, F. Qiao et al., “The sunway taihulight supercomputer: system and applications,” Science China Information Sciences,
+vol. 59, no. 7, p. 072001, 2016.
+[32] Blosc compressor, http://blosc.org/, 2018, online.
+[33] FastLZ, http://fastlz.org/, 2018, online.
+[34] LZ4, http://lz4.github.io/lz4/, 2018, online.
+[35] Snappy, https://google.github.io/snappy/, 2018, online.
+[36] Zlib, http://www.zlib.net/, 2018, online.
+[37] Zstandard, http://facebook.github.io/zstd/, 2018, online.
+[38] J. Woodring, S. Mniszewski, C. Brislawn, D. DeMarle, and
+J. Ahrens, “Revisiting wavelet compression for large-scale climate
+data using jpeg 2000 and ensuring data precision,” in Large Data
+Analysis and Visualization (LDAV), 2011 IEEE Symposium on. IEEE,
+2011, pp. 31–38.
+[39] A. Hore and D. Ziou, “Image quality metrics: Psnr vs. ssim,” in
+Pattern recognition (icpr), 2010 20th international conference on. IEEE,
+2010, pp. 2366–2369.
+TRANSACTIONS ON PARALLEL AND DISTRIBUTED SYSTEMS, VOL. XX, NO. X, MONTH 2018
+[40] H. S. Malvar and D. H. Staelin, “The lot: Transform coding without
+blocking effects,” IEEE Transactions on Acoustics, Speech, and Signal
+Processing, vol. 37, no. 4, pp. 553–559, 1989.
+[41] A. Gersho and R. M. Gray, Vector quantization and signal compression. Springer Science & Business Media, 2012, vol. 159.
+[42] E. Ordentlich, M. Weinberger, and G. Seroussi, “A low-complexity
+modeling approach for embedded coding of wavelet coefficients,”
+in Data Compression Conference, 1998. DCC’98. Proceedings. IEEE,
+1998, pp. 408–417.
+[43] S. Di, D. Tao, and F. Cappello, “An efficient approach to lossy
+compression with pointwise relative error bound,” https://web.
+njit.edu/∼qliu/assets/sc17-drbsd2-shengdi.pdf, 2018, online.
+[44] A. C. Bauer, H. Abbasi, J. Ahrens, H. Childs, B. Geveci, S. Klasky,
+K. Moreland, P. O’Leary, V. Vishwanath, B. Whitlock et al., “In situ
+methods, infrastructures, and applications on high performance
+computing platforms,” in Computer Graphics Forum, vol. 35, no. 3.
+Wiley Online Library, 2016, pp. 577–597.
+[45] L. Ibarria, P. Lindstrom, J. Rossignac, and A. Szymczak, “Outof-core compression and decompression of large n-dimensional
+scalar fields,” in Computer Graphics Forum, vol. 22, no. 3. Wiley
+Online Library, 2003, pp. 343–348.
+[46] S. Guthe and W. Straßer, “Real-time decompression and visualization of animated volume data,” in Visualization, 2001. VIS’01.
+Proceedings. IEEE, 2001, pp. 349–572.
+[47] D. A. Huffman, “A method for the construction of minimumredundancy codes,” Proceedings of the IRE, vol. 40, no. 9, pp. 1098–
+1101, 1952.
+[48] I. H. Witten, R. M. Neal, and J. G. Cleary, “Arithmetic coding for
+data compression,” Communications of the ACM, vol. 30, no. 6, pp.
+520–540, 1987.
+[49] C. E. Shannon, A mathematical theory of communication. ACM, 2001,
+vol. 5, no. 1.
+[50] C.-J. Lian, K.-F. Chen, H.-H. Chen, and L.-G. Chen, “Analysis
+and architecture design of block-coding engine for ebcot in JPEG
+2000,” IEEE Transactions on Circuits and Systems for Video Technology,
+vol. 13, no. 3, pp. 219–230, 2003.
+[51] H.-C. Fang, Y.-W. Chang, T.-C. Wang, C.-J. Lian, and L.-G. Chen,
+“Parallel embedded block coding architecture for JPEG 2000,”
+IEEE Transactions on Circuits and Systems for Video Technology,
+vol. 15, no. 9, pp. 1086–1097, 2005.
+[52] J.-S. Chiang, C.-H. Chang, Y.-S. Lin, C.-Y. Hsieh, and C.-H. Hsia,
+“High-speed EBCOT with dual context-modeling coding architecture for JPEG2000,” in Proceedings of the 2004 International Symposium on Circuits and Systems, 2004. ISCAS’04., vol. 3. IEEE, 2004,
+pp. III–865.
+[53] Blues cluster, https://www.lcrc.anl.gov/systems/resources/
+blues/, 2018, online.
+[54] B. Welch, “Posix io extensions for hpc,” in Proceedings of the 4th
+USENIX Conference on File and Storage Technologies (FAST), 2005.
+[55] R. Thakur, W. Gropp, and E. Lusk, “On implementing mpi-io
+portably and with high performance,” in Proceedings of the sixth
+workshop on I/O in parallel and distributed systems. ACM, 1999, pp.
+23–32.
+[56] A. Turner, “Parallel I/O Performance,” https://www.archer.ac.
+uk/training/virtual/2017-02-08-Parallel-IO/2017 02 ParallelIO
+ARCHERWebinar.pdf, 2017, online.
+Dingwen Tao Dingwen wen Tao received his
+bachelor’s degree in mathematics from University of Science and Technology of China in 2013
+and his Ph.D. degree in computer science from
+University of California, Riverside in 2018. He is
+currently an assistant professor of computer science in The University of Alabama. Prior to this,
+he worked at Brookhaven National Laboratory,
+Argonne National Laboratory, and Pacific Northwest National Laboratory. His research interests include high-performance computing, parallel and distributed systems, big data analytics, resilience and fault
+tolerance, scientific data compression, large-scale machine learning,
+numerical algorithms and software. He has published 15+ peer-reviewed
+papers in top HPC and big data conferences and journals, such as
+IEEE BigData, IEEE IPDPS, IEEE TPDS, ACM HPDC, ACM PPoPP,
+ACM/IEEE SC. Email: tao@cs.ua.edu.
+14
+Sheng Di Sheng Di received his master’s degree
+from Huazhong University of Science and Technology in 2007 and Ph.D. degree from the University of Hong Kong in 2011. He is currently an
+assistant computer scientist at Argonne National
+Laboratory. Dr. Di’s research interest involves
+resilience on high-performance computing (such
+as silent data corruption, optimization checkpoint
+model, and in-situ data compression) and broad
+research topics on cloud computing (including
+optimization of resource allocation, cloud network topology, and prediction of cloud workload/hostload). He is working
+on multiple HPC projects, such as detection of silent data corruption,
+characterization of failures and faults for HPC systems, and optimization
+of multilevel checkpoint models. Email: sdi1@anl.gov.
+Xin Liang Xin Liang received his bachelor’s degree from Peking University in 2014 and will
+receive his Ph.D. degree from University of California, Riverside in 2019. His research interest
+includes parallel and distributed systems, fault
+tolerance, high-performance computing, largescale machine learning, big data analysis and
+quantum computing. Email: xlian007@ucr.edu.
+Zizhong Chen Zizhong Chen received a bachelor’s degree in mathematics from Beijing Normal University, a master’s degree degree in economics from the Renmin University of China,
+and a Ph.D. degree in computer science from
+the University of Tennessee, Knoxville. He is an
+associate professor of computer science at the
+University of California, Riverside. His research
+interests include high-performance computing,
+parallel and distributed systems, big data analytics, cluster and cloud computing, algorithmbased fault tolerance, power and energy efficient computing, numerical
+algorithms and software, and large-scale computer simulations. His
+research has been supported by National Science Foundation, Department of Energy, CMG Reservoir Simulation Foundation, Abu Dhabi
+National Oil Company, Nvidia, and Microsoft Corporation. He received a
+CAREER Award from the US National Science Foundation and a Best
+Paper Award from the International Supercomputing Conference. He
+is a Senior Member of the IEEE and a Life Member of the ACM. He
+currently serves as a subject area editor for Elsevier Parallel Computing
+journal and an associate editor for the IEEE Transactions on Parallel and
+Distributed Systems. Email: chen@cs.ucr.edu.
+Franck Cappello Franck Cappello is the director of the Joint-Laboratory on Extreme Scale
+Computing gathering six of the leading highperformance computing institutions in the world:
+Argonne National Laboratory, National Center
+for Scientific Applications, Inria, Barcelona Supercomputing Center, Julich Supercomputing
+Center, and Riken AICS. He is a senior computer
+scientist at Argonne National Laboratory and an
+adjunct associate professor in the Department of
+Computer Science at the University of Illinois at
+Urbana-Champaign. He is an expert in resilience and fault tolerance for
+scientific computing and data analytics. Recently he started investigating lossy compression for scientific data sets to respond to the pressing
+needs of scientist performing large-scale simulations and experiments.
+His contribution to this domain is one of the best lossy compressors for
+scientific data set respecting user-set error bounds. He is a member of
+the editorial board of the IEEE Transactions on Parallel and Distributed
+Computing and of the ACM HPDC and IEEE CCGRID steering committees. He is a fellow of the IEEE. Email: cappello@mcs.anl.gov.

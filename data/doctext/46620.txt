@@ -1,0 +1,1080 @@
+Voxelizer
+=========
+
+A fast GPU based solid voxelization library written in C.
+
+
+Notes:
+- Only supports Windows at the moment. I plan to add Linux and Mac support eventually.
+- Requires a GPU supporting Opengl 4.2 with the GL_ARB_shader_storage_buffer_object extension. Future versions should include algorithms with less demanding GPU requirements.
+- The only output data structure supported right now is a linked list of the starting and ending voxels for each row and column. Example.c shows how to voxelize a mesh and read the linked list.
+- Input triangle meshes must be watertight, and each vertex component must be in the interval [-1, 1]. Though, the algorithm does not clip the depth component in the voxel grid, so the voxelizer can currently output an infinite number of voxels along the z axis. This is because I have not had a chance to implement this, but some might actually consider this a feature.
+
+### Voxelizer/Example.c
+```
+// Copyright (c) 2014 Kelsey Kurzeja (khkurzeja)
+// This code is licensed under the MIT license (see LICENSE.txt for details)
+
+#include <stdio.h>
+#include "Voxelizer.h"
+#include "Voxelizer_ABuffer.h"
+
+#define VOXEL_GRID_SIZE 256
+
+int main(int argc, char** argv)
+{
+	char strvar[100];
+	int i;
+	int j;
+
+	Voxelizer_ABufferLinkedList *linkedList;
+
+	// make tetrahdron
+	float triSize = .5f;
+	int meshVertCount = 12;
+	float meshVertPositions[] = {
+		-triSize, -triSize, -triSize,  // triangle 1
+		 triSize, -triSize, -triSize,
+		 triSize,  triSize, -triSize,
+
+		-triSize, -triSize, -triSize,  // 2
+		 triSize,  triSize, -triSize,
+		 triSize, -triSize,  triSize,
+
+		-triSize, -triSize, -triSize,  // 3
+		 triSize, -triSize,  triSize,
+		 triSize, -triSize, -triSize,
+
+		 triSize,  triSize, -triSize,  // 4
+		 triSize, -triSize, -triSize,
+		 triSize, -triSize,  triSize
+	};
+
+	Voxelizer *voxelizer = voxelizerCreate(VOXELIZER_ABUFFER, VOXEL_GRID_SIZE, VOXEL_GRID_SIZE, VOXEL_GRID_SIZE);
+	voxelizerSetMesh(voxelizer, meshVertCount, meshVertPositions);
+
+	voxelizerRun(voxelizer);
+	linkedList = voxelizerGetABufferLinkedList(voxelizer);
+
+	// Voxelizer only returns a linked list representing the voxels at the moment.
+	// Until other representations are supported the code below can be used to determine which voxels are in the mesh.
+	for ( j = 0; j < voxelizer->height; j++ )
+	{
+		for ( i = 0; i < voxelizer->width; i++ )
+		{
+			int curPtr = linkedList->headPointers[i + j * voxelizer->width];
+
+			while ( curPtr != -1 && linkedList->nodePointers[curPtr] != -1 )  // make sure there are at least 2 intersections ahead
+			{
+				int startVoxel = linkedList->nodeData[curPtr];                          // include
+				int endVoxel = linkedList->nodeData[linkedList->nodePointers[curPtr]];  // exclude
+				
+				printf("Col: %d, Row: %d - Start voxel: %d, End Voxel: %d\n", i, j, startVoxel, endVoxel);  // every number between start and end voxel represents a voxel in column i, row j
+
+				curPtr = linkedList->nodePointers[linkedList->nodePointers[curPtr]];
+			}
+		}
+	}
+
+	fgets(strvar, 100, stdin); // wait for input
+
+	voxelizerDestroy(voxelizer);
+
+	return 0;
+}
+```
+
+### Voxelizer/Voxelizer.c
+```
+// Copyright (c) 2014 Kelsey Kurzeja (khkurzeja)
+// This code is licensed under the MIT license (see LICENSE.txt for details)
+
+#include <stdio.h>
+#include <stdlib.h>
+#include "Voxelizer.h"
+#include "Voxelizer_ABuffer.h"
+
+int voxelizerCount = 0;
+VoxelizerWindow voxelizerWindow;
+VoxelizerDeviceContext voxelizerDeviceContext;
+VoxelizerContext voxelizerContext;
+
+void voxelizerError(const char *output, int line)
+{
+	if (line == -1)
+		printf("Error: %s\n", output);
+	else
+		printf("Error on line %d: %s\n", line, output);
+	exit(0);
+}
+
+Voxelizer *voxelizerCreate(VoxelizerAlgorithmEnum algorithm, int width, int height, int depth)
+{
+	VoxelizerDeviceContext saveDeviceContext;
+	VoxelizerContext saveContext;
+	Voxelizer *voxelizer = (Voxelizer*)malloc( sizeof(Voxelizer) );
+	if (!voxelizer)
+		voxelizerError("Failed to allocate Voxelizer", __LINE__);
+
+	saveDeviceContext = voxelizerGetCurrentDeviceContext();  // save caller's GL context
+	saveContext = voxelizerGetCurrentContext();
+
+	if (voxelizerCount == 0)
+	{
+		voxelizerWindow = voxelizerCreateWindow();
+		voxelizerInitContext(voxelizerWindow, &voxelizerDeviceContext, &voxelizerContext);  // create GL context
+		voxelizerMakeCurrent(voxelizerDeviceContext, voxelizerContext);  // use voxelizer's GL context to init glew
+		glewInit();
+	}
+	voxelizerCount++;
+
+	voxelizerMakeCurrent(voxelizerDeviceContext, voxelizerContext);  // use voxelizer's GL context
+
+	voxelizer->width = width;
+	voxelizer->height = height;
+	voxelizer->depth = depth;
+
+	// create framebuffer
+	glGenFramebuffers(1, &(voxelizer->framebuffer));
+	glBindFramebuffer(GL_FRAMEBUFFER, voxelizer->framebuffer);
+	
+	glGenTextures(1, &(voxelizer->framebufferColor));
+	glBindTexture(GL_TEXTURE_RECTANGLE, voxelizer->framebufferColor);
+	glTexImage2D(GL_TEXTURE_RECTANGLE, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+	glTexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_RECTANGLE, voxelizer->framebufferColor, 0);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	// create algorithm data
+	voxelizer->algorithm = algorithm;
+	switch (algorithm)
+	{
+	case VOXELIZER_ABUFFER:
+		voxelizer->data = voxelizerCreateABufferData(voxelizer);
+		break;
+	}
+
+	voxelizerMakeCurrent(saveDeviceContext, saveContext);  // restore caller's GL context
+
+	return voxelizer;
+}
+
+void voxelizerDestroy(Voxelizer *voxelizer)
+{
+	VoxelizerDeviceContext saveDeviceContext = voxelizerGetCurrentDeviceContext();  // save caller's GL context
+	VoxelizerContext saveContext = voxelizerGetCurrentContext();
+
+	voxelizerMakeCurrent(voxelizerDeviceContext, voxelizerContext);  // use voxelizer's GL context
+
+	glDeleteTextures(1, &(voxelizer->framebufferColor));
+	glDeleteBuffers(1, &(voxelizer->framebuffer));
+	glDeleteBuffers(1, &(voxelizer->meshVertBuffer));
+
+	switch (voxelizer->algorithm)
+	{
+	case VOXELIZER_ABUFFER:
+		voxelizerDestroyABufferData((Voxelizer_ABufferData*)(voxelizer->data));
+		break;
+	}
+
+	voxelizerCount--;
+	if (voxelizerCount == 0)
+	{
+		voxelizerDestroyContext(voxelizerWindow, voxelizerDeviceContext, voxelizerContext);
+		voxelizerDestroyWindow(voxelizerWindow);
+	}
+	
+	free(voxelizer);
+
+	voxelizerMakeCurrent(saveDeviceContext, saveContext);  // restore caller's GL context
+}
+
+void voxelizerSetMesh(Voxelizer *voxelizer, unsigned int meshVertCount, float *meshVertPositions)
+{
+	VoxelizerDeviceContext saveDeviceContext = voxelizerGetCurrentDeviceContext();  // save caller's GL context
+	VoxelizerContext saveContext = voxelizerGetCurrentContext();
+
+	voxelizerMakeCurrent(voxelizerDeviceContext, voxelizerContext);  // use voxelizer's GL context
+
+	voxelizer->meshVertCount = meshVertCount;
+	voxelizer->meshVertPositions = meshVertPositions;
+
+	glGenBuffers(1, &(voxelizer->meshVertBuffer));
+	glBindBuffer(GL_ARRAY_BUFFER, voxelizer->meshVertBuffer);
+	glBufferData(GL_ARRAY_BUFFER, meshVertCount * 3 * sizeof(float), meshVertPositions, GL_STATIC_DRAW);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), 0);
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+	voxelizerMakeCurrent(saveDeviceContext, saveContext);  // restore caller's GL context
+}
+
+void voxelizerRun(Voxelizer *voxelizer)
+{
+	VoxelizerDeviceContext saveDeviceContext = voxelizerGetCurrentDeviceContext();  // save caller's GL context
+	VoxelizerContext saveContext = voxelizerGetCurrentContext();
+
+	voxelizerMakeCurrent(voxelizerDeviceContext, voxelizerContext);  // use voxelizer's GL context
+
+	switch (voxelizer->algorithm)
+	{
+	case VOXELIZER_ABUFFER:
+		voxelizerRunABuffer(voxelizer);
+		break;
+	}
+
+	voxelizerMakeCurrent(saveDeviceContext, saveContext);  // restore caller's GL context
+}
+```
+
+### Voxelizer/Voxelizer.h
+```
+// Copyright (c) 2014 Kelsey Kurzeja (khkurzeja)
+// This code is licensed under the MIT license (see LICENSE.txt for details)
+
+#pragma once
+#ifndef H_VOXELIZER
+#define H_VOXELIZER
+
+#include <GL\glew.h>
+
+#if _WIN32
+	#include "Voxelizer_Windows.h"
+#endif
+
+typedef enum {VOXELIZER_ABUFFER} VoxelizerAlgorithmEnum;
+
+typedef struct Voxelizer
+{
+	VoxelizerAlgorithmEnum algorithm;
+
+	int width;
+	int height;
+	int depth;
+
+	GLuint framebuffer;
+	GLuint framebufferColor;
+
+	unsigned int meshVertCount;
+	float *meshVertPositions;
+	GLuint meshVertBuffer;
+
+	void *data;  // point to algorithm specific struct
+
+} Voxelizer;
+
+extern int voxelizerCount;
+extern VoxelizerWindow voxelizerWindow;
+extern VoxelizerDeviceContext voxelizerDeviceContext;
+extern VoxelizerContext voxelizerContext;
+
+extern void voxelizerError(const char *output, int line);
+
+Voxelizer *voxelizerCreate(VoxelizerAlgorithmEnum algorithm, int width, int height, int depth);
+void voxelizerDestroy(Voxelizer *voxelizer);
+
+void voxelizerSetMesh(Voxelizer *voxelizer, unsigned int meshVertCount, float *meshVertPositions);
+
+void voxelizerRun(Voxelizer *voxelizer);
+
+#endif
+```
+
+### Voxelizer/VoxelizerTools.c
+```
+// Copyright (c) 2014 Kelsey Kurzeja (khkurzeja)
+// This code is licensed under the MIT license (see LICENSE.txt for details)
+
+#include <stdio.h>
+#include <stdlib.h>
+#include "VoxelizerTools.h"
+
+char* voxelizerReadFile(const char *fileName)
+{
+	FILE *input;
+	long size;
+	char *content;
+
+	fopen_s(&input, fileName, "rb");
+	if (input == NULL) 
+		return NULL;
+ 
+	if (fseek(input, 0, SEEK_END) == -1) 
+	{ 
+		fclose(input); 
+		return NULL; 
+	}
+
+	size = ftell(input);
+	if (size == -1) 
+	{ 
+		fclose(input); return NULL; 
+	}
+	if (fseek(input, 0, SEEK_SET) == -1) 
+	{ 
+		fclose(input); 
+		return NULL; 
+	}
+ 
+	content = (char*) malloc( (size_t) size +1  ); 
+	if (content == NULL) 
+	{ 
+		fclose(input); 
+		return NULL; 
+	}
+ 
+	fread(content, 1, (size_t)size, input);
+	if (ferror(input)) 
+	{
+		free(content);
+		fclose(input);
+		return NULL;
+	}
+ 
+	fclose(input);
+	content[size] = '\0';
+
+	return content;
+}
+
+GLuint voxelizerCreateShader(GLenum shaderType, const char *shaderFile)
+{
+	GLuint shader = glCreateShader(shaderType);
+	const char* fileData = shaderFile;
+	GLint status;
+	GLint infoLogLength;
+	GLchar *infoLog;
+	const char *shaderTypeString = NULL;
+
+	glShaderSource(shader, 1, &fileData, NULL);
+
+	glCompileShader(shader);
+
+	glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
+	if (status == GL_FALSE)
+	{
+		glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &infoLogLength);
+
+		infoLog = (GLchar*) malloc(sizeof(GLchar) * (infoLogLength + 1));
+		glGetShaderInfoLog(shader, infoLogLength, NULL, infoLog);
+
+		switch (shaderType)
+		{
+		case GL_VERTEX_SHADER: shaderTypeString = "vertex"; break;
+		case GL_FRAGMENT_SHADER: shaderTypeString = "fragment"; break;
+		case GL_GEOMETRY_SHADER: shaderTypeString = "geometry"; break;
+		}
+
+		fprintf(stderr, "Compile failure in %s shader:\n%s\n", shaderTypeString, infoLog);
+		free(infoLog);
+	}
+
+	return shader;
+}
+
+GLuint voxelizerCreateProgram(size_t shaderListSize, const GLuint *shaderList)
+{
+    GLuint program = glCreateProgram();
+    size_t iLoop;
+	GLint status;
+	GLint infoLogLength;
+	GLchar *strInfoLog;
+
+    for (iLoop = 0; iLoop < shaderListSize; iLoop++)
+    	glAttachShader(program, shaderList[iLoop]);
+    
+    glLinkProgram(program);
+    
+    glGetProgramiv (program, GL_LINK_STATUS, &status);
+    if (status == GL_FALSE)
+    {
+        glGetProgramiv(program, GL_INFO_LOG_LENGTH, &infoLogLength);
+        
+        strInfoLog = (GLchar*) malloc(sizeof(GLchar) * (infoLogLength + 1));
+        glGetProgramInfoLog(program, infoLogLength, NULL, strInfoLog);
+        fprintf(stderr, "Linker failure: %s\n", strInfoLog);
+        free(strInfoLog);
+    }
+    
+    for (iLoop = 0; iLoop < shaderListSize; iLoop++)
+	{
+        glDetachShader(program, shaderList[iLoop]);
+		glDeleteShader(shaderList[iLoop]);
+	}
+
+    return program;
+}
+
+GLuint voxelizerCreateAndLinkProgram(const char *vertexFileName, const char *fragmentFileName)
+{
+	char *vertexShader = voxelizerReadFile(vertexFileName);
+	char *fragmentShader = voxelizerReadFile(fragmentFileName);
+	GLuint shaders[2];
+	shaders[0] = voxelizerCreateShader(GL_VERTEX_SHADER, vertexShader);
+	shaders[1] = voxelizerCreateShader(GL_FRAGMENT_SHADER, fragmentShader);
+
+	return voxelizerCreateProgram(2, shaders);
+}
+
+void voxelizerInitAtomicCounter(GLuint *atomicCounter, GLint base)
+{
+	GLuint count = 0;
+	glGenBuffers(1, atomicCounter);
+	glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, *atomicCounter);
+	glBufferData(GL_ATOMIC_COUNTER_BUFFER, sizeof(GLuint), &count, GL_DYNAMIC_DRAW);
+	glBindBufferBase(GL_ATOMIC_COUNTER_BUFFER, base, *atomicCounter);
+	glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, 0);
+}
+
+void voxelizerSetAtomicCounter(GLuint atomicCounter, GLuint value)
+{
+	glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, atomicCounter);
+	glBufferSubData(GL_ATOMIC_COUNTER_BUFFER, 0, sizeof(GLuint), &value);
+	glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, 0);
+}
+
+GLuint voxelizerGetAtomicCounter(GLuint atomicCounter)
+{
+	GLuint count;
+	glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, atomicCounter);
+	glGetBufferSubData(GL_ATOMIC_COUNTER_BUFFER, 0, sizeof(GLuint), &count);
+	glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, 0);
+	return count;
+}
+```
+
+### Voxelizer/VoxelizerTools.h
+```
+// Copyright (c) 2014 Kelsey Kurzeja (khkurzeja)
+// This code is licensed under the MIT license (see LICENSE.txt for details)
+
+#pragma once
+#ifndef H_VOXELIZERTOOLS
+#define H_VOXELIZERTOOLS
+
+#include <GL\glew.h>
+
+char* voxelizerReadFile(const char *fileName);
+
+GLuint voxelizerCreateShader(GLenum shaderType, const char *shaderFile);
+GLuint voxelizerCreateProgram(size_t shaderListSize, const GLuint *shaderList);
+GLuint voxelizerCreateAndLinkProgram(const char *vertexFileName, const char *fragmentFileName);
+
+void voxelizerInitAtomicCounter(GLuint *atomicCounter, GLint base);
+void voxelizerSetAtomicCounter(GLuint atomicCounter, GLuint value);
+GLuint voxelizerGetAtomicCounter(GLuint atomicCounter);
+
+#endif
+```
+
+### Voxelizer/Voxelizer_ABuffer.c
+```
+// Copyright (c) 2014 Kelsey Kurzeja (khkurzeja)
+// This code is licensed under the MIT license (see LICENSE.txt for details)
+
+#include <stdio.h>
+#include <stdlib.h>
+#include "Voxelizer_ABuffer.h"
+#include "VoxelizerTools.h"
+
+Voxelizer_ABufferData *voxelizerCreateABufferData(Voxelizer *voxelizer)
+{
+	GLfloat quadVerts[18] = {
+		-1.0f, 1.0f, 0.0f,
+		-1.0f, -1.0f, 0.0f,
+		1.0f, -1.0f, 0.0f,
+
+		-1.0f, 1.0f, 0.0f,
+		1.0f, -1.0f, 0.0f,
+		1.0f, 1.0f, 0.0f
+	};
+	Voxelizer_ABufferData *data = (Voxelizer_ABufferData*) malloc(sizeof(Voxelizer_ABufferData));
+	if (!data)
+		voxelizerError("Failed to allocate Voxelizer_ABufferData", __LINE__);
+
+	data->voxelizer = voxelizer;
+
+	// shader programs
+	data->fragCountProgram = voxelizerCreateAndLinkProgram("shaders/ModelTransform.vert", "shaders/FragCount.frag");
+	data->makeFragListProgram = voxelizerCreateAndLinkProgram("shaders/ModelTransform.vert", "shaders/MakeFragList.frag");
+	data->sortFragListProgram = voxelizerCreateAndLinkProgram("shaders/NoTransform.vert", "shaders/SortFragList.frag");
+
+	// screen quad
+	glGenBuffers(1, &(data->screenQuadBuffer));
+	glBindBuffer(GL_ARRAY_BUFFER, data->screenQuadBuffer);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(quadVerts), quadVerts, GL_STATIC_DRAW);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), 0);
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+	// counter
+	voxelizerInitAtomicCounter(&(data->atomicCounter), 0);
+
+	// shader storage buffer objects
+	glGenBuffers(1, &(data->headPtrSSBO));
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, data->headPtrSSBO);
+	glBufferData(GL_SHADER_STORAGE_BUFFER, voxelizer->width * voxelizer->height * sizeof(GLint), NULL, GL_STATIC_DRAW);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, data->headPtrSSBO);
+
+	glGenBuffers(1, &(data->nodePtrSSBO));
+	glGenBuffers(1, &(data->nodeDataSSBO));
+
+	return data;
+}
+
+void voxelizerDestroyABufferData(Voxelizer_ABufferData *data)
+{
+	GLuint buffers[] = {
+		data->atomicCounter,
+		data->headPtrSSBO,
+		data->nodePtrSSBO,
+		data->nodeDataSSBO
+	};
+	glDeleteBuffers(sizeof(buffers) / sizeof(buffers[0]), buffers);
+
+	glDeleteProgram(data->fragCountProgram);
+	glDeleteProgram(data->makeFragListProgram);
+	glDeleteProgram(data->sortFragListProgram);
+
+	free(data);
+}
+
+void voxelizerRunABuffer(Voxelizer *voxelizer)
+{
+	Voxelizer_ABufferData *data = (Voxelizer_ABufferData*)(voxelizer->data);
+	GLfloat modelTransformMatrix[16] = {
+		1.0f, 0.0f, 0.0f, 0.0f,
+		0.0f, 1.0f, 0.0f, 0.0f,
+		0.0f, 0.0f, 1.0f, 0.0f,
+		0.0f, 0.0f, 0.0f, 1.0f
+	};
+	GLint modelTransformMatrixUniformLocation;
+	GLint bufMask;
+	GLint* headPtrs;
+	int voxelGridSize = voxelizer->width * voxelizer->height;
+	GLint framebufferWidthUniformLocation;
+	int i;
+	
+	glDisable(GL_CULL_FACE);
+	glDisable(GL_DEPTH_TEST);
+	
+	glBindFramebuffer(GL_FRAMEBUFFER, voxelizer->framebuffer);
+	glViewport(0, 0, voxelizer->width, voxelizer->height);
+
+
+	// --- count fragments ---
+	glBindBuffer(GL_ARRAY_BUFFER, voxelizer->meshVertBuffer);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), 0);
+	
+	glUseProgram(data->fragCountProgram);
+
+	voxelizerSetAtomicCounter(data->atomicCounter, 0);
+	
+	// make rotation matrix here
+	
+	modelTransformMatrixUniformLocation = glGetUniformLocation(data->fragCountProgram, "modelTransformMatrix");
+	glUniformMatrix4fv(modelTransformMatrixUniformLocation, 1, GL_FALSE, modelTransformMatrix);
+
+	glDrawArrays(GL_TRIANGLES, 0, voxelizer->meshVertCount);
+	
+	data->fragmentCount = voxelizerGetAtomicCounter(data->atomicCounter);
+
+
+	// --- setup linked list memory ---
+	bufMask = GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT;
+
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, data->headPtrSSBO);
+	headPtrs = (GLint*)glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, voxelizer->width * voxelizer->height * sizeof(GLint), bufMask);
+	for ( i = 0; i < voxelGridSize; i++ )
+		headPtrs[i] = -1;
+	glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, data->nodePtrSSBO);
+	glBufferData(GL_SHADER_STORAGE_BUFFER, data->fragmentCount * sizeof(GLint), NULL, GL_STATIC_DRAW);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, data->nodePtrSSBO);
+
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, data->nodeDataSSBO);
+	glBufferData(GL_SHADER_STORAGE_BUFFER, data->fragmentCount * sizeof(GLint), NULL, GL_STATIC_DRAW);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, data->nodeDataSSBO);
+
+
+	// --- create linked list ---
+	voxelizerSetAtomicCounter(data->atomicCounter, 0);
+
+	glUseProgram(data->makeFragListProgram);
+
+	framebufferWidthUniformLocation = glGetUniformLocation(data->makeFragListProgram, "framebufferWidth");
+	glUniform1i(framebufferWidthUniformLocation, voxelizer->width);
+
+	modelTransformMatrixUniformLocation = glGetUniformLocation(data->makeFragListProgram, "modelTransformMatrix");
+	glUniformMatrix4fv(modelTransformMatrixUniformLocation, 1, GL_FALSE, modelTransformMatrix);
+	
+	glDrawArrays(GL_TRIANGLES, 0, voxelizer->meshVertCount);
+	glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+
+	// --- sort linked list ---
+	glBindBuffer(GL_ARRAY_BUFFER, data->screenQuadBuffer);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), 0);
+
+	glUseProgram(data->sortFragListProgram);
+
+	framebufferWidthUniformLocation = glGetUniformLocation(data->sortFragListProgram, "framebufferWidth");
+	glUniform1i(framebufferWidthUniformLocation, voxelizer->width);
+
+	glDrawArrays(GL_TRIANGLES, 0, 6);
+	glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+}
+
+Voxelizer_ABufferLinkedList *voxelizerGetABufferLinkedList(Voxelizer *voxelizer)
+{
+	Voxelizer_ABufferData *data = (Voxelizer_ABufferData*)(voxelizer->data);
+	Voxelizer_ABufferLinkedList *linkedList;
+	
+	VoxelizerDeviceContext saveDeviceContext = voxelizerGetCurrentDeviceContext();  // save caller's GL context
+	VoxelizerContext saveContext = voxelizerGetCurrentContext();
+	
+	voxelizerMakeCurrent(voxelizerDeviceContext, voxelizerContext);  // use voxelizer's GL context
+
+	linkedList = (Voxelizer_ABufferLinkedList * )malloc(sizeof(Voxelizer_ABufferLinkedList));
+
+	if (!linkedList)
+		voxelizerError("Failed to allocate Voxelizer_ABufferLinkedList", __LINE__);
+
+	linkedList->width = voxelizer->width;
+	linkedList->height = voxelizer->height;
+	linkedList->depth = voxelizer->depth;
+
+	linkedList->fragmentCount = data->fragmentCount;
+
+	linkedList->headPointers = (GLint*) malloc(voxelizer->width * voxelizer->height * sizeof(GLint));
+	if (!linkedList->headPointers)
+		voxelizerError("Failed to allocate A-buffer linked list head pointers", __LINE__);
+
+	linkedList->nodePointers = (GLint*) malloc(data->fragmentCount * sizeof(GLint));
+	if (!linkedList->nodePointers)
+		voxelizerError("Failed to allocate A-buffer linked list node pointers", __LINE__);
+
+	linkedList->nodeData = (GLint*) malloc(data->fragmentCount * sizeof(GLint));
+	if (!linkedList->nodeData)
+		voxelizerError("Failed to allocate A-buffer linked list node data", __LINE__);
+
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, data->headPtrSSBO);
+	glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, voxelizer->width * voxelizer->height * sizeof(GLint), linkedList->headPointers);
+
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, data->nodePtrSSBO);
+	glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, data->fragmentCount * sizeof(GLint), linkedList->nodePointers);
+
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, data->nodeDataSSBO);
+	glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, data->fragmentCount * sizeof(GLint), linkedList->nodeData);
+
+	voxelizerMakeCurrent(saveDeviceContext, saveContext);  // restore caller's GL context
+
+	return linkedList;
+}
+
+void voxelizerDestroyABufferLinkedList(Voxelizer_ABufferLinkedList *linkedList)
+{
+	free(linkedList);
+}
+```
+
+### Voxelizer/Voxelizer_ABuffer.h
+```
+// Copyright (c) 2014 Kelsey Kurzeja (khkurzeja)
+// This code is licensed under the MIT license (see LICENSE.txt for details)
+
+#pragma once
+#ifndef H_VOXELIZER_ABUFFER
+#define H_VOXELIZER_ABUFFER
+
+#include "Voxelizer.h"
+
+typedef struct Voxelizer_ABufferLinkedList
+{
+	int width;
+	int height;
+	int depth;
+
+	int fragmentCount;
+	int *headPointers;
+	int *nodePointers;
+	int *nodeData;
+
+} Voxelizer_ABufferLinkedList;
+
+typedef struct Voxelizer_ABufferData
+{
+	Voxelizer *voxelizer;
+
+	GLuint fragCountProgram;
+	GLuint makeFragListProgram;
+	GLuint sortFragListProgram;
+
+	GLuint screenQuadBuffer;
+
+	GLuint fragmentCount;
+	GLuint atomicCounter;
+	GLuint headPtrSSBO;
+	GLuint nodePtrSSBO;
+	GLuint nodeDataSSBO;
+
+} Voxelizer_ABufferData;
+
+
+Voxelizer_ABufferData *voxelizerCreateABufferData(Voxelizer *voxelizer);
+void voxelizerDestroyABufferData(Voxelizer_ABufferData *data);
+
+void voxelizerRunABuffer(Voxelizer *voxelizer);
+
+Voxelizer_ABufferLinkedList *voxelizerGetABufferLinkedList(Voxelizer *voxelizer);
+void voxelizerDestroyABufferLinkedList(Voxelizer_ABufferLinkedList *linkedList);
+
+#endif
+```
+
+### Voxelizer/Voxelizer_Windows.c
+```
+// Copyright (c) 2014 Kelsey Kurzeja (khkurzeja)
+// This code is licensed under the MIT license (see LICENSE.txt for details)
+
+#include "Voxelizer_Windows.h"
+
+LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+	switch (message)
+	{
+	case WM_CREATE:
+		return 0;
+		
+	case WM_CLOSE:
+		PostQuitMessage(0);
+		return 0;
+		
+	case WM_DESTROY:
+		return 0;
+
+	case WM_KEYDOWN:
+		switch (wParam)
+		{
+		case VK_ESCAPE:
+			PostQuitMessage(0);
+			return 0;
+		}
+		return 0;
+
+	default:
+		return DefWindowProc(hWnd, message, wParam, lParam);		
+	}	
+}
+
+VoxelizerWindow voxelizerCreateWindow()
+{
+	HINSTANCE hInstance;
+	WNDCLASS wc;
+	HWND hWnd;
+
+	hInstance = GetModuleHandle(0);
+
+	wc.style = CS_OWNDC;
+	wc.lpfnWndProc = WndProc;
+	wc.cbClsExtra = 0;
+	wc.cbWndExtra = 0;
+	wc.hInstance = hInstance;
+	wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+	wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+	wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+	wc.lpszMenuName = NULL;
+	wc.lpszClassName = "VoxelizerWindow";
+	RegisterClass(&wc);
+
+	hWnd = CreateWindow( 
+		"VoxelizerWindow", "Voxelizer", 
+		0,
+		0, 0, 100, 100,
+		NULL, NULL, hInstance, NULL 
+	);
+
+	return hWnd;
+}
+
+int voxelizerDestroyWindow(VoxelizerWindow window)
+{
+	int success = DestroyWindow(window);
+	if (success)
+		return 1;
+	else
+		return 0;
+}
+
+void voxelizerInitContext(VoxelizerWindow window, VoxelizerDeviceContext *deviceContext, VoxelizerContext *context)
+{
+	PIXELFORMATDESCRIPTOR pfd;
+	int format;
+	
+	*deviceContext = GetDC(window);
+	
+	// set the pixel format for the device context
+	ZeroMemory(&pfd, sizeof(pfd));
+	pfd.nSize = sizeof(pfd);
+	pfd.nVersion = 1;
+	pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+	pfd.iPixelType = PFD_TYPE_RGBA;
+	pfd.cColorBits = 32;
+	pfd.cDepthBits = 24;
+	pfd.iLayerType = PFD_MAIN_PLANE;
+	format = ChoosePixelFormat(*deviceContext, &pfd);
+	SetPixelFormat(*deviceContext, format, &pfd);
+	
+	*context = wglCreateContext(*deviceContext);  // might want to use wglCreateContextAttribsARB in the future
+}
+
+void voxelizerDestroyContext(VoxelizerWindow window, VoxelizerDeviceContext deviceContext, VoxelizerContext context)
+{
+	wglDeleteContext(context);
+	ReleaseDC(window, deviceContext);
+}
+
+VoxelizerDeviceContext voxelizerGetCurrentDeviceContext()
+{
+	return wglGetCurrentDC();
+}
+
+VoxelizerContext voxelizerGetCurrentContext()
+{
+	return wglGetCurrentContext();
+}
+
+int voxelizerMakeCurrent(VoxelizerDeviceContext deviceContext, VoxelizerContext context)
+{
+	int success = wglMakeCurrent(deviceContext, context);
+	if (success)
+		return 1;
+	else
+		return 0;
+}
+```
+
+### Voxelizer/Voxelizer_Windows.h
+```
+// Copyright (c) 2014 Kelsey Kurzeja (khkurzeja)
+// This code is licensed under the MIT license (see LICENSE.txt for details)
+
+#pragma once
+#ifndef H_VOXELIZER_WINDOWS
+#define H_VOXELIZER_WINDOWS
+
+#include <Windows.h>
+
+typedef HWND VoxelizerWindow;
+typedef HDC VoxelizerDeviceContext;
+typedef HGLRC VoxelizerContext;
+
+VoxelizerWindow voxelizerCreateWindow();
+int voxelizerDestroyWindow(VoxelizerWindow window);
+
+void voxelizerInitContext(VoxelizerWindow window, VoxelizerDeviceContext *deviceContext, VoxelizerContext *context);
+void voxelizerDestroyContext(VoxelizerWindow window, VoxelizerDeviceContext deviceContext, VoxelizerContext context);
+
+VoxelizerDeviceContext voxelizerGetCurrentDeviceContext();
+VoxelizerContext voxelizerGetCurrentContext();
+int voxelizerMakeCurrent(VoxelizerDeviceContext deviceContext, VoxelizerContext context);
+
+#endif
+```
+
+### Voxelizer/shaders/FragCount.frag
+```
+// Copyright (c) 2014 Kelsey Kurzeja (khkurzeja)
+// This code is licensed under the MIT license (see LICENSE.txt for details)
+
+#version 420
+
+layout (depth_any) out float gl_FragDepth; 
+
+layout(binding = 0) uniform atomic_uint counter;
+
+void main() 
+{
+	atomicCounterIncrement(counter);
+	
+	gl_FragColor = vec4(1.0f, 1.0f, 1.0f, 1.0f);
+}
+```
+
+### Voxelizer/shaders/MakeFragList.frag
+```
+// Copyright (c) 2014 Kelsey Kurzeja (khkurzeja)
+// This code is licensed under the MIT license (see LICENSE.txt for details)
+
+#version 420
+
+#extension GL_ARB_shader_storage_buffer_object : enable
+
+layout (depth_any) out float gl_FragDepth; 
+
+uniform int framebufferWidth;
+
+layout(binding = 0) uniform atomic_uint counter;
+
+layout( std430, binding = 1 ) buffer HeadPointer
+{
+	int HeadPointers[];
+};
+
+layout( std430, binding = 2 ) buffer NodePointer
+{
+	int NodePointers[];
+};
+
+layout( std430, binding = 3 ) buffer NodeDatum
+{
+	int NodeData[];
+};
+
+void main() 
+{
+	uint ucount = atomicCounterIncrement(counter);
+	int count = int(ucount);
+	
+	int headPointerIndex = int(gl_FragCoord.x) + int(gl_FragCoord.y) * framebufferWidth;
+	float depth = gl_FragCoord.z;
+	
+	int prevPtr = atomicExchange(HeadPointers[headPointerIndex], count);
+	NodePointers[count] = prevPtr;
+	NodeData[count] = int(depth * framebufferWidth);
+	
+	gl_FragColor = vec4(1.0f);
+}
+```
+
+### Voxelizer/shaders/ModelTransform.vert
+```
+// Copyright (c) 2014 Kelsey Kurzeja (khkurzeja)
+// This code is licensed under the MIT license (see LICENSE.txt for details)
+
+#version 420
+
+in layout(location = 0) vec3 position;
+
+uniform mat4 modelTransformMatrix;
+
+void main() 
+{
+	vec4 v = vec4(position, 1.0f);
+	gl_Position = modelTransformMatrix * v;
+}
+```
+
+### Voxelizer/shaders/NoTransform.vert
+```
+// Copyright (c) 2014 Kelsey Kurzeja (khkurzeja)
+// This code is licensed under the MIT license (see LICENSE.txt for details)
+
+#version 420
+
+in layout(location = 0) vec3 position;
+
+void main() 
+{
+	gl_Position = vec4(position, 1.0f);
+}
+```
+
+### Voxelizer/shaders/SingleColor.frag
+```
+// Copyright (c) 2014 Kelsey Kurzeja (khkurzeja)
+// This code is licensed under the MIT license (see LICENSE.txt for details)
+
+#version 420
+
+void main() 
+{
+	gl_FragColor = vec4(1.0f, 0.0f, 1.0f, 1.0f);
+}
+```
+
+### Voxelizer/shaders/SortFragList.frag
+```
+// Copyright (c) 2014 Kelsey Kurzeja (khkurzeja)
+// This code is licensed under the MIT license (see LICENSE.txt for details)
+
+#version 420
+
+#extension GL_ARB_shader_storage_buffer_object : enable
+
+uniform int framebufferWidth;
+
+layout( std430, binding = 1 ) buffer HeadPointer
+{
+	int HeadPointers[];
+};
+
+layout( std430, binding = 2 ) buffer NodePointer
+{
+	int NodePointers[];
+};
+
+layout( std430, binding = 3 ) buffer NodeDatum
+{
+	int NodeData[];
+};
+
+void main() 
+{
+	int headPointerIndex = int(gl_FragCoord.x) + int(gl_FragCoord.y) * framebufferWidth;
+	
+	int headPtr = HeadPointers[headPointerIndex];
+	if (headPtr == -1)
+		discard;
+	
+	int outerPtr = headPtr;
+	
+	int prevInfLoop = 0;
+	while ( prevInfLoop < 1024 && outerPtr != -1 )
+	{
+		int smallestPtr = outerPtr;
+		int smallestData = NodeData[smallestPtr];
+	
+		int innerPtr = NodePointers[outerPtr];
+		
+		int prevInfLoopInner = 0;
+		while ( prevInfLoopInner < 1024 && innerPtr != -1 )
+		{
+			int innerData = NodeData[innerPtr];
+			if ( innerData < smallestData )
+			{
+				smallestPtr = innerPtr;
+				smallestData = innerData;
+			}
+		
+			innerPtr = NodePointers[innerPtr];
+			
+			prevInfLoopInner++;
+		}
+		
+		if ( smallestPtr != outerPtr )
+		{
+			NodeData[smallestPtr] = NodeData[outerPtr];
+			NodeData[outerPtr] = smallestData;
+		}
+		
+		outerPtr = NodePointers[outerPtr];
+		
+		prevInfLoop++;
+	}
+	
+	// create voxel 3d tex
+	//memoryBarrier();
+	
+	
+	
+    gl_FragColor = vec4(1.0f, 0.0f, 0.0f, 1.0f);
+}
+```

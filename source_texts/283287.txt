@@ -1,0 +1,922 @@
+## Implementierung algorithmischer Optimierungen für Volume-Rendering in Hardware
+
+Entwicklung und Simulation eines Multithreading-Pipeline-Prozessors zur Visualisierung dreidimensionaler Datensätze
+
+Inauguraldissertation zur Erlangung des akademischen Grades eines Doktors der Naturwissenschaften der Universität Mannheim
+
+> vorgelegt von Dipl.-Ing.(FH) Bernd Vettermann aus Bobenheim-Roxheim
+
+
+
+Dekan: Prof. Dr. Matthias Krause, Universität Mannheim Referent: Prof. Dr. Jürgen Hesser, Universität Mannheim Korreferent: Prof. Dr. Peter Fischer, Universität Mannheim
+
+
+
+#### Danksagung
+
+Herrn Prof. Dr. Reinhard Männer möchte ich danken, dass diese Promotion an seinem Lehrstuhl duchgeführt werden konnte.
+
+Dr. Jürgen Hesser hat durch seine Betreuung und ausgiebigen fachlichen Diskussionen erheblich zum Gelingen dieser Arbeit beigetragen. Für diese Unterstützung bedanke ich mich sehr.
+
+Für die vielen Gespräche und gute Zusammenarbeit möchte ich mich bei den Mitgliedern des Lehrstuhls Informatik V, vor allem der FPGA-Gruppe bedanken.
+
+Der Uni-Mannheim gilt mein Dank für die Durchführung und Finanzierung, des aus dieser Arbeit entstandenen Patentes.
+
+Und nicht zuletzt möchte ich Herrn Prof. Dr. Gerhard Albert und Herrn Prof. Dr. Paul danken, dass ich neben meinen Aufgaben, als Laboringenieur an der Hochschule Mannheim im Institut für Entwurf integrierter Schaltkreise, die Möglichkeit hatte, parallel diese Promotion durchzuführen.
+
+
+
+## Zusammenfassung
+
+Diese Arbeit beschäftigt sich mit der Beschleunigung von Volumenvisualisierung. Bei der Volumenvisualisierung, auch englisch Volume-Rendering genannt, wird versucht, dreidimensionale Datensätze in einem anschaulichen zweidimensionalen Bild darzustellen. Da dies sehr hohe Ansprüche an Rechenleistung und Speicher stellt, ist es für einen interaktiven Umgang mit den Daten, zum Beispiel bei der Rotation eines gezeigten Objektes, notwendig, zur Beschleunigung spezielle Hardware-Systeme zu entwickeln.
+
+Es werden zuerst die wichtigsten Algorithmen für die Volumenvisualisierung vorgestellt und bereits existierende Volume-Rendering-Systeme erläutert.
+
+Hauptinhalt dieser Arbeit ist die Beschreibung einer neuartigen Architektur für ein Hardware-System zur Echtzeitvisualisierung dreidimensionaler Datensätze mit dem Ray-Casting-Algorithmus. Bei diesem Algorithmus wird von der Bildebene aus, für jeden Bildpunkt ein Sehstrahl durch das Volumen gelegt. Entlang des Strahlverlaufes wird das Volumen in regelmäßigen Abständen abgetastet und für jeden Abtastpunkt eine Reflexion zum Beobachter bestimmt. Auf dem Weg der Reflexionen zum Beobachter wird eine Absorption berücksichtigt und das Restlicht aller Reflexionen aufsummiert. Die Summe entspricht der Helligkeit und Farbe des Bildpunktes.
+
+Für diesen Algorithmus existieren zur Beschleunigung Optimierungstechniken, die zur Erzeugung eines Bildes, nur die unbedingt notwendigen Teile des Volumendatensatzes aus dem Hauptspeicher auslesen. Für die Echtzeitvisualisierung großer Datensätze ist deshalb eine Umsetzung der Optimierungstechniken in Hardware unbedingt notwendig. Durch sie wird allerdings ein wahlfreier Zugriff auf den Speicher notwendig und der Bearbeitungsablauf ist nicht mehr deterministisch, weshalb bisher existierende Hardware-System auf deren Umsetzung verzichten haben.
+
+In dieser Arbeit wird erstmals ein Verfahren vorgestellt, das diese Optimierungstechniken ohne Verluste in Hardware implementiert. Das Verfahren basiert auf der genauen Abstimmung dreier wesentlicher Teile:
+
+- 1. Einem Pipeline-Prozessor zur parallelen Abarbeitung eines Teilbildes als Multithreading-Architektur. Multithreading bezieht sich hierbei auf den schnellen Wechsel zwischen parallel abzuarbeitenden Sehstrahlen. Hierdurch werden Verzögerungszeiten überbrückt, die bei der Berechnung der Optimierungstechniken und zwischen Adressierung und Datenauslesen des Volumenspeichers entstehen.
+- 2. Einer optimal angepassten Speicherarchitektur, die in den Speicherbausteinen enthaltene Puffer als schnellen Zwischenspeicher (Cache) verwendet und räumlich benachbarte
+
+Volumendaten schneller abrufbar macht.
+
+- 3. Einer Sortiereinrichtung, die Sehstrahlen bevorzugt bearbeitet, die bereits im Zwischenspeicher liegende Daten verwenden, um zeitraubende Seitenwechsel in den Speichern zu minimieren.
+
+Ziel war es, das System auf programmierbaren Logikbausteinen (FPGA) mit externem Hauptspeicher implementierbar zu machen, um es als Beschleunigerkarte in Standard-PCs verwenden zu können.
+
+Die Effizienz der Architektur wurde über eine C++-Simulation nachgewiesen, wogegen die Implementierbarkeit durch eine Hardware-nahe VHDL-Simulation mit anschließender Synthese überprüft wurde.
+
+Die einzelnen Aspekte der Architektur wurden auf mehreren Konferenzen [39,37,38,41] vorgestellt und in der Zeitschrift IEEE Computer & Graphics [42] veröffentlicht. Weiterhin wurde das Verfahren unter der Nummer WO9960527 beim Deutschen Patent- und Markenamt international angemeldet.
+
+## Inhaltsverzeichnis
+
+| 1 | Einleitung .....                                                 | 11 |
+|----------|-------------------------------------------------------------------------|-----------|
+| 2 | Methoden der Volumenvisualisierung .....                         | 14 |
+|          | 2.1 Übersicht.....                                                      | 14        |
+|          | 2.2 Polygon-Rendering.....                                              | 16        |
+|          | 2.3 Volume-Rendering.....                                               | 19        |
+|          | 2.3.1 Allgemeines.....                                                  | 19        |
+|          | 2.3.2 Marching-Cube-Verfahren.....                                      | 19        |
+|          | 2.3.3 Splatting-Verfahren.....                                          | 21        |
+|          | 2.3.4 Ray-Casting-Verfahren.....                                        | 22        |
+|          | 2.3.5 Volume-Ray-Tracing-Verfahren.....                                 | 24        |
+|          | 2.3.6 Vergleich der Volume-Rendering-Verfahren.....                     | 24        |
+| 3 | Optimierungsmöglichkeiten für Volume Rendering .....             | 26 |
+|          | 3.1 Early-Ray-Termination.....                                          | 26        |
+|          | 3.2 Space-Leaping – Distance-Coding.....                                | 26        |
+|          | 3.3 Adaptive-Distance-Sampling-Methode .....                            | 28        |
+|          | 3.4 Datenkohärenz.....                                                  | 29        |
+|          | 3.5 Shear-Warp-Algorithmus.....                                         | 30        |
+|          | 3.6 Variable Auflösung.....                                             | 32        |
+| 4 | Echtzeit-Volume-Rendering Implementierungen .....                | 33 |
+|          | 4.1 Software.....                                                       | 33        |
+|          | 4.2 3D-Texture-Mapping Hardware.....                                    | 34        |
+|          | 4.3 VIRIM.....                                                          | 36        |
+|          | 4.4 VolumePro – Cube-Familie.....                                       | 37        |
+|          | 4.5 Vizard II.....                                                      | 40        |
+|          | 4.6 Race II.....                                                        | 41        |
+| 5 | Ray-Casting-Algorithmus .....                                    | 43 |
+|          | 5.1 Übersicht.....                                                      | 43        |
+|          | 5.2 Klassifizierung.....                                                | 45        |
+|          | 5.2.1 Pre-Klassifikation.....                                           | 45        |
+|          | 5.2.2 Post-Klassifikation.....                                          | 46        |
+|          | 5.3 Beleuchtungsmodelle, Shading.....                                   | 46        |
+|          | 5.3.1 Ambiente Reflexion.....                                           | 46        |
+|          | 5.3.2 Diffuse Reflexion.....                                            | 47        |
+|          | 5.3.3 Spiegelnde Reflexion.....                                         | 48        |
+|          | 5.4 Abtastung, Interpolation und Integration.....                       | 49        |
+|          | 5.4.1 Absorption.....                                                   | 52        |
+|          | 5.5 Compositing.....                                                    | 52        |
+| 6 | Hardware-Implementierung der Rendering-Pipeline .....            | 55 |
+|          | 6.1 Pipeline-Architektur.....                                           | 55        |
+|          | 6.2 Übersicht über die Rendering-Pipeline.....                          | 57        |
+|          | 6.3 Adressgenerierung.....                                              | 58        |
+|          | 6.4 Speicherkontroller.....                                             | 60        |
+|          | 6.5 Interpolation und Gradientenbestimmung.....                         | 60        |
+|          | 6.6 Klassifizierung.....                                                | 65        |
+|          | 6.7 Shading.....                                                        | 67        |
+| 7 | Grundprinzip der Architektur für Optimierungen in Hardware ..... | 71 |
+|          | 7.1 Pipelining – Hazard.....                                            | 71        |
+|          | 7.2 Multithreading zur Steigerung der Auslastung.....                   | 73        |
+|          | 7.3 Au                                                                  |           |
+
+| 7.3.3     | Ausnutzung aktiver SDRAM-Bänke als Zwischenspeicher.....             | 78         |
+|-----------|----------------------------------------------------------------------|------------|
+| 7.4       | Implementierung von Multithreading und Sortierfunktion.....          | 80         |
+| 7.4.1     | Erweiterung des Adressgenerators.....                                | 80         |
+| 7.4.2     | Schaltungsrealisierung der Strahlverwaltung.....                     | 82         |
+| 7.5       | Optimierung der Speicherarchitektur.....                             | 84         |
+| 7.6       | Realisierungsmöglichkeit des Gesamtsystems.....                      | 88         |
+| 7.6.1     | Grundsätzlicher Aufbau.....                                          | 88         |
+| 7.6.2     | Kommunikationsablauf.....                                            | 89         |
+| 7.6.3     | Abschätzung der Kommunikationszeiten.....                            | 90         |
+| 8  | Ausbaufähigkeit der Architektur.....                          | 93  |
+| 8.1       | Distance-Coding .....                                                | 93         |
+| 8.2       | Perspektive.....                                                     | 99         |
+| 8.3       | Erweiterungsmöglichkeiten durch die Anwendungs-Software.....         | 102        |
+| 8.4       | Farbe und zusätzliche Klassifizierung.....                           | 104        |
+| 8.5       | Einbeziehen von Polygondaten.....                                    | 105        |
+| 8.6       | Schatten.....                                                        | 106        |
+| 8.7       | Deformation.....                                                     | 110        |
+| 9  | Ergebnisse und Diskussion.....                                | 113 |
+| 9.1       | C++-Simulation.....                                                  | 113        |
+| 9.1.1     | Übersicht.....                                                       | 113        |
+| 9.1.2     | Untersuchung der Strahlbündelgröße.....                              | 115        |
+| 9.1.3     | Einfluss der Optimierungstechniken auf die Zeilenwechsel.....        | 116        |
+| 9.1.4     | Unterschiedliche Sortierungskriterien.....                           | 120        |
+| 9.1.5     | Untersuchung der Abhängigkeit verschiedener Größen bei Rotation..... | 123        |
+| 9.1.6     | Vergleich unterschiedlicher Speichermodelle.....                     | 128        |
+| 9.1.7     | Unterschiedliche Volumengrößen und Klassifizierung.....              | 130        |
+| 9.2       | VHDL-Simulation.....                                                 | 132        |
+| 9.3       | Syntheseergebnisse.....                                              | 135        |
+| 10 | Ausblick.....                                                 | 138 |
+| 11 | Literaturverzeichnis.....                                     | 140 |
+
+## 1 Einleitung
+
+In nahezu allen wissenschaftlichen Disziplinen kommen mittlerweile bildgebende Verfahren zum Einsatz, die mit Hilfe verschiedener physikalischer Effekte versuchen, die innere Struktur von Objekten erkennbar zu machen. Die bekanntesten sind in der Medizin zu finden. Abbildung 1.1 zeigt beispielsweise einen Computertomograph (CT). Hier werden von allen Seiten Röntgenstrahlen durch die Untersuchungsobjekte geschickt und ihre Abschwächung beim Durchgang gemessen. Daraus können dann Schnittbilder oder auch ein dreidimensionaler Datensatz errechnet werden, dessen Grauwerte in den einzelnen Punkten der Dichte des Objektes entsprechen. Abbildung 1.2 zeigt die CT-Aufnahme eines Herzens.
+
+
+
+Andere wichtige bildgebende Verfahren sind beispielsweise die Sonographie, die mit Ultraschall arbeitet, oder die Magnet-Resonanz-Tomographie (MRT), die durch Nutzung magnetischer Felder den Kernspin der Atome ermittelt und so Rückschlüsse auf unterschiedliches Gewebe zulässt (Abbildung 1.3)
+
+Weitere Beispiele der Volumenvisualisierung findet man in der Geologie, um Erdbodenstrukturen zu visualisieren, oder in der zerstörungsfreien Materialprüfung, um Einschlüsse oder Risse in Untersuchungsobjekten zu erkennen. Und nicht zuletzt findet man Volumenvisualisierung in der Computergrafik. Da die Volumenvisualisierung aber hohe Ansprüche an Rechnerleistung und
+
+Abbildung 1.1: Computertomograph[84]
+
+Speicher stellt, steht sie hier in ihrer Verbreitung erst am Anfang.
+
+Ein steigendes Verlangen an einem interaktiven Umgang mit den Volumendaten und an eine bessere Bildqualität, nicht nur im privaten Bereich, ist zu bemerken. So gibt es Ansätze in der Medizin, eine Operation zuvor am Computer durchzuführen. Hierzu muss man allerdings die Daten des Patienten flüssig am Bildschirm bearbeiten und bewegen können. Mit reinen Software-basierten Methoden erreicht man allerdings nur Wiederholraten von 1-10 Bilder pro Sekunde für relativ kleine Datensätze mit der Dimension 256x256x256 Volumenelementen (2563 ).
+
+
+
+
+
+Die reine Rechenleistung, die für die Visualisierung größerer Bilder und Volumen notwendig ist, könnte durch die immer schneller werdenden Prozessoren und Multiprozessorsysteme zukünftig erreicht werden. Was aber nur sehr viel langsamer zunimmt, ist die Geschwindigkeit, mit der sich die Massenspeicher auslesen lassen. Hier gab es in den letzten Jahren wenig prinzipielle Fortschritte. Zwar wurden neue Speicherschnittstellen entwickelt, die es möglich machen, zwei Datenworte pro Takt auszulesen, indem zur steigenden und fallenden Taktflanke Datenworte abgegriffen werden. Dies ist aber nur beim Lesen großer Blöcke nutzbar, so dass bei einzelnen Leseoperationen doch nur mit einer maximalen Rate von 150•106 Datenworte pro Sekunde gelesen werden können.
+
+Welche Auswirkungen dies bei einer Steigerung der Volumengröße hat, wird deutlich, wenn man die Auslesezeiten eines kompletten Datensatzes mit unterschiedlichen Auflösungen betrachtet. Wenn man eine Ausleserate von 150•106 Datenworte pro Sekunde annimmt benötigt ein 2563
+
+Abbildung 1.2: Schichtbild eines Herzen mit CT aufgenommen[84]
+
+Abbildung 1.3: MRT-Aufnahme eines Schädels[84]
+
+großer Datensatz nur 0.11 Sekunden. Damit würde man etwa 10 Bilder pro Sekunde erzeugen können, was noch einigermaßen flüssig auf dem Bildschirm erscheint. Bei einer weiteren Vergrößerung des Datensatzes auf 5123 , sind es schon 0.89 Sekunden, was etwas mehr als einem Bild pro Sekunde entspricht und bei 10243 kann mit 7 Sekunden pro Bild nicht mehr von Echtzeitvisualisierung gesprochen werden.
+
+Diese großen Datenvolumen können somit nicht in näherer Zukunft mit Standard-Computersystemen mit flüssigen Bildwiederholraten visualisiert werden. Glücklicherweise sind aus den Software-Realisierungen Methoden bekannt, die zur Visualisierung nur die unbedingt notwendigen Teile des Volumens auslesen und leere oder verdeckte Bereiche aussparen.
+
+Um somit das Ziel, große Volumina in Echtzeit zu visualisieren mit der aktuell verfügbaren Technik zu erreichen, benötigt man eine speziell für Volumenvisualisierung ausgelegte Beschleunigungs-Hardware. Diese muss einmal die zuvor genannten Methoden der Software-Realisierungen implementieren und andererseits einen speziell angepassten Volumenspeicher besitzen.
+
+Da es für die Volumenvisualisierung viele Methoden gibt, die unterschiedliche Vor- und Nachteile besitzen, bietet es sich an, zur Realisierung der Methoden auf immer komplexer werdende programmierbare Logikbausteine zurückzugreifen. Dadurch können unterschiedliche Methoden und Algorithmen ohne Hardware-Änderungen ausgetauscht werden. Die programmierbaren Logikbausteine sind unter dem Namen FPGA (Field Programmable Gate Array) bekannt. Die größten zur Zeit verfügbaren Bausteine besitzen über 200000 Logikgatter, zusätzliche Multiplizierer und bis zu 1 MByte internem Speicher, die frei programmierbar verwendet werden können.
+
+Bevor näher auf die Implementierung von Volumenvisualisierung auf FPGAs eingegangen wird, soll erst ein Überblick, der verschieden Möglichkeiten zur Volumenvisualisierung, gegeben werden.
+
+# 2 Methoden der Volumenvisualisierung
+
+#### 2.1 Übersicht
+
+Visualisierung bedeutet im Allgemeinen, abstrakte Daten in eine verständliche Form zu bringen und anschaulich darzustellen. In unserem Fall geht es darum Daten, die dreidimensionale angeordnet sind, computergestützt in ein zweidimensionales Bild zur Darstellung, beispielsweise auf einem Monitor, zu bringen.
+
+Im Normalfall handelt es sich bei 3D-Daten um Punkte, Flächen oder Volumeneinheiten im dreidimensionalen Raum, welchen Eigenschaften wie beispielsweise Farbe, Transparenz, Dichte oder andere physikalische Werte zugeordnet werden.
+
+Vor der Visualisierung der Daten müssen diese erzeugt werden, dieser Vorgang wird als Modellierung bezeichnet. Der Vorgang, aus solchen Modellen Bilder zu erzeugen, wird Rendering oder Rendern genannt.
+
+Die zu visualisierenden Daten müssen nicht auf drei Raumdimensionen mit Eigenschaften beschränkt sein, beispielsweise kann eine zeitliche Abhängigkeit der Daten bestehen. Die nachfolgend beschriebenen Verfahren müssen dann allerdings auf jeden 3D-Datensatz zu jedem Zeitpunkt angewandt werden und können so auf den dreidimensionalen Fall reduziert werden. Die Ergebnisbilder könnten danach zu einem Film zusammengesetzt werden.
+
+Etwas schwieriger ist die Darstellung von mehreren Messwerten an einem bestimmten Punkt im Raum; beispielsweise von meteorologischen Daten oder Strömungsmessungen. Hierfür sehr spezialisierte Verfahren, wie Feature Extraction, die durch verschiedene grafische Darstellungen mehrere Parameter gleichzeitig darzustellen versuchen, werden in dieser Arbeit nicht berücksichtigt. Die hier gezeigten Verfahren können aber trotzdem als Grundlage zur Visualisierung höherdimensionaler Daten verwendet werden.
+
+Abbildung 2.1 erläutert die Zusammenhänge und begriffliche Einteilung verschiedener Visualisierungsverfahren und deren Ein- und Ausgangsdaten.
+
+Die Darstellungen von 3D-Daten werden in 2 Gruppen eingeteilt:
+
+- 1. Oberflächendaten, die in Polygondarstellung vorliegen, d.h. Objekte werden nur durch ihre Oberfläche mit ihren Eigenschaften repräsentiert. Die Oberfläche wird durch ein Maschennetz (polygon mesh) aus Polygonen mit Ecken (vertices) und Kanten (edges)aufgespannt.
+- 2. Volumendaten, die einen Raum als geschichtete Bilder beschreiben. Für jedes
+
+Volumenelement (Voxel) liegt normalerweise ein Wert wie Dichte oder Farbe vor. Mathematisch werden sie als dreidimensionale Skalarfelder bezeichnet.
+
+Die Verfahren, um diese beiden Repräsentationsformen in zweidimensionale Bilder umzuwandeln, lassen sich danach in Polygon-Rendering und Volume-Rendering unterteilen.
+
+Um Volumendaten zu visualisieren gibt es zwei Methoden:
+
+- 1. Indirektes Volume-Rendering (IVR), welches über eine Schwellwertbildung versucht dem Volumenobjekt eine eindeutige Oberfläche zu zuordnen und diese dann in eine
+
+Abbildung 2.1: Zusammenhang zwischen 3D Visualisierungsverfahren und der Datenrepräsentation
+
+
+
+Polygondarstellung umzuwandeln. Ein bekanntes Verfahren dieser Gruppe ist als Marching Cube [21] bekannt. Die Polygondarstellung wird dann mit Polygon-Rendering weiterverarbeitet.
+
+- 2. Direktes Volume-Rendering (DVR) erzeugt das Ergebnisbild ohne den Umweg über Polygon-Rendering.
+
+Je nach Richtung der Verarbeitung bei DVR, ob sequentiell über das Ergebnisbild oder sequentiell durch den Speicher, in dem die Volumendaten abgelegt sind, werden die Verfahren unterschieden. Wird für jedes Pixel im Ergebnisbild eine Berechnung durch die Volumendaten gestartet, spricht man von Image-Order oder Backward-Projection. Den umgekehrten Fall nennt man Object-Order oder Forward-Projection. Hierbei wird die Berechnung für jedes Volumenelement durchgeführt und sein Beitrag zu einem Bereich des Ergebnisbildes ermittelt.
+
+Bei Object-Order-Verfahren kann optimal in Blöcken und unter Ausnutzung von Speicher-Cache-Verfahren auf die Volumendaten zugegriffen werden, wogegen bei Image-Order-Verfahren algorithmische Optimierungen, die Bestandteil dieser Arbeit sind, leichter und mit höherem Wirkungsgrad implementiert werden können. Es werden dabei wahlfrei einzelne Volumenelemente aus dem Speicher gelesen, was mehr Zeit kostet als in Blöcken zu lesen, dafür muss durch die Optimierungen nur ein kleinerer Teil der Daten gelesen werden.
+
+Im Folgenden werden die einzelnen Verfahren innerhalb dieser Einteilungen genauer beschrieben.
+
+### 2.2 Polygon-Rendering
+
+Mit Polygon-Rendering-Verfahren werden Oberflächendaten und Bilder zur grafischen Ausgabe verarbeitet. Abbildung 2.2 zeigt ein Beispiel, das absichtlich grob gestaltet wurde, um die Polygone zu erkennbar zu halten. Grafikkarten aller Hersteller unterstützen einen großen Teil dieser Verfahren direkt in Hardware. Als Schnittstelle zur Hardware dienen Programmbibliotheken, die mit standardisierten Aufrufen (API) unterschiedliche Hardware verdecken. Ein solcher Standard ist das OpenGL Software-Interface [13][14].
+
+
+
+Abbildung 2.3 zeigt die Repräsentation der Polygone in OpenGL mit Vertices, den Eckpunkten der Polygone [32].
+
+Polygone werden als Index in einer Vertex-Liste beschrieben und so in eine für die Grafik-Hardware gut verarbeitbare Form gebracht:
+
+Vertex-Liste:
+
+| $V = (V_1, V_2, V_3, V_4) = ((x_1, y_1, z_1), \dots, (x_4, y_4, z_4))$ | mit $x_i, y_i, z_i$ als Vertexkoordinaten |
+|------------------------------------------------------------------------|-------------------------------------------|
+|                                                                        |                                           |
+
+Polygondefinition:
+
+$$P_n = (V_i, V_j, V_k)$$
+
+Für das Beispiel in Abbildung 2.3 werden die Polygone dann folgendermaßen definiert:
+
+$$P_1=(1, 2, 4)$$
+
+$$P_2 = (4, 2, 3)$$
+
+Abbildung 2.3: Polygon-Darstellung in der Oberflächengrafik
+
+
+
+Abbildung 2.2: Teekanne in Polygondarstellung
+
+Farbdefinitionen, Normalenvektor, Texturkoordinaten oder Materialdefinitionen besitzen.
+
+Die Vertex-Listen und analytisch spezifizierte OpenGL-Primitive (z.B Kreis) werden mit Hilfe von OpenGL-Kommandos zusammen mit reinen Pixel-Daten an die OpenGL-Pipeline übergeben (Abbildung 2.4). Die Daten können direkt verarbeitet oder in einer Display-Liste für späteren Gebrauch zwischengespeichert werden. Die OpenGL-Primitive werden im Evaluator in reine Vertex-Daten umgewandelt, wodurch dann nur noch Vertex-Daten vorliegen. In der nächsten Stufe werden alle räumlichen Transformationen ausgeführt. Bei der Beleuchtungsberechnung werden den Vertices unter Berücksichtigung der Materialdefinitionen neue Farbwerte zugewiesen. Beim Clipping werden die durch die Vertices beschriebenen Objekte an den Begrenzungsebenen abgeschnitten.
+
+Für Pixel-Daten und Texturen gibt es spezielle Pixeloperationen. Texturen sind Bilder, die auf die Oberflächen der Vertex-Objekte abgebildet werden. Texturen werden im Textur-Puffer gespeichert und in der Rasterisierung zusammen mit den Vertex-Daten auf einem Raster, das dem des späteren Bildes entspricht, abgebildet. Jedem Rasterpunkt ist nun außer einem Farbwert auch ein Tiefenwert, als Abstand zum Beobachtungspunkt, zugeordnet; man spricht dann von Fragment-Daten. Die wichtigste der darauf folgenden Fragmentoperationen ist die Lösung des Verdeckungsproblems anhand des Tiefenwertes, welches auch Z-Puffer-Test genannt wird. Hierbei wird entschieden welche Bildpunkte im Vordergrund sind und dargestellt werden müssen.
+
+Abbildung 2.4: OpenGL-Pipeline
+
+
+
+Das Ergebnisbild wird danach in den Bildspeicher geschrieben. Er wird normalerweise als Doppelspeicher verwendet. Während ein Bildspeicher zur aktuellen Anzeige verwendet wird, wird im anderen ein neues Bild gezeichnet und dann umgeschaltet.
+
+#### 2.3 Volume-Rendering
+
+## 2.3.1 Allgemeines
+
+Volume-Rendering ist der Vorgang, dreidimensionale Datenfelder zu visualisieren.
+
+Ist nicht nur die Oberfläche von Objekten interessant, sondern sollen auch Informationen aus dem Inneren erkennbar werden, reicht Polygon-Rendering zur Visualisierung nicht mehr aus.
+
+Die Information kann oft nur schwer als Anzahl von Polygonen mit Eigenschaften dargestellt werden, vielmehr wird das komplette Objekt in einzelne Schichten mit Volumenelementen zerlegt, die meist einen einzelnen Wert, wie etwa seine physikalische Dichte, als Eigenschaft besitzen. Die Beschreibung der Objekte liegt dann als Volumendatensatz, geschichtete Bilder oder mathematisch ausgedrückt als dreidimensionales Skalarfeld vor.
+
+Beispielsweise werden bei medizinischen Untersuchungen mit Computer-Tomografen (CT) Schichtbilder des Körpers gewonnen. Sie werden dem Arzt in herkömmlicher Weise, als nebeneinander liegende Röntgenbilder, zur Verfügung gestellt. Es erfordert allerdings viel Übung und Erfahrung, diese Einzelbilder in Gedanken wieder räumlich zusammenzusetzen. Soll bei einer Operationsplanung z.B. der ungefährlichste Weg durch Gewebe gesucht werden, ist eine computerunterstützte und interaktive Darstellung der zusammengesetzten Schichtbilder, sehr hilfreich.
+
+Die zur Visualisierung dreidimensionaler Datensätze entwickelten Verfahren werden unter dem Begriff Volume-Rendering zusammengefasst.
+
+Im Folgenden wird das Prinzip einiger wichtiger Verfahren für Volume-Rendering erläutert.
+
+## 2.3.2 Marching-Cube-Verfahren
+
+Marching-Cube [21] ist ein indirektes Volume-Rendering-Verfahren (IVR) zur Visualisierung von Isoflächen in Volumendaten. Isoflächen sind Flächen, die entstehen, wenn im dreidimensionalen Raum alle Punkte mit gleichen Werten verbunden werden; beispielsweise alle Punkte gleicher Dichte. Die Isoflächen eines vorgegebenen Wertes werden vom Marching-Cube-Algorithmus aus den Volumendaten extrahiert und in Polygonform dargestellt. Diese können dann durch PolygonRendering visualisiert werden. Die Anzahl der darstellbaren Isoflächen ist nur durch den verfügbaren Speicherplatz begrenzt. Die Qualität des Verfahrens hängt sehr stark von den zu visualisierenden Daten ab, da sich nicht alle Objekte durch Isoflächen darstellen lassen.
+
+Die Volumendaten liegen auf einem gleichmäßigen dreidimensionalen Raster. Der Marching-Cube-Algorithmus unterteilt das Raster in 23 -Subwürfel und überprüft für jeden Würfel, ob der Wert der acht Volumenelemente über oder unter dem vorgegebenen Schwellwert - dem Isowert – liegen. Zwischen zwei Volumenelementen, die über und unter dem Schwellwert liegen, wird ein Eckpunkt der Isofläche angelegt. Der Eckpunkt kann im einfachsten Fall genau in der Mitte zwischen den Volumenelementen liegen; die Bildqualität lässt sich aber um einiges steigern, wenn die genaue Lage durch lineare Interpolation bestimmt wird. In Abbildung 2.5 bedeuten schwarze Volumenelemente, dass sein Wert unter dem Isowert liegt und weiße liegen darüber. Wurde für alle zwölf Kanten der 23 -Subwürfel bestimmt, wo und ob ein Eckpunkt vorhanden ist, spannen diese dann die Polygon-Oberfläche auf.
+
+
+
+Wenn sich das Objekt durch Isoflächen darstellen lässt, hat der Marching-Cube-Algorithmus den Vorteil, dass die Visualisierung mit Standard-Grafikkarten beschleunigt werden kann.
+
+Probleme entstehen bei der Darstellung von nebelförmigen Gebilden ohne definierte Oberfläche, da der Algorithmus dann keine korrekten, zusammenhängende Isoflächen zuordnen kann. Auch ist keine Information über die Dicke einer Schicht zu gewinnen, da nur deren Oberfläche dargestellt wird [1].
+
+Abbildung 2.5: Bestimmung der Isoflächen im 23 Subwürfel
+
+#### 2.3.3 Splatting-Verfahren
+
+Splatting [67] ist ein Direkt-Volume-Rendering-Algorithmus, der als Objekt-Order-Verfahren für jedes Volumenelement den Reflexionsbeitrag zu den Bildpunkten berechnet. Hierzu wird entlang des Sehstrahls von jedem Volumenelement zum Beobachter, der Schnittpunkt mit der Projektionsebene bestimmt. Am Schnittpunkt wird eine dreidimensionale Rekonstruktionsmaske (splat) auf das dort entstehende Bild gelegt. Die einzelnen Werte der Rekonstruktionsmaske werden mit dem Wert des Volumenelementes gewichtet und die einzelnen Beiträge der Maskenelemente zu den, um den Schnittpunkt liegenden, Bildpunkten aufaddiert (Abbildung 2.6).
+
+Bildlich kann man sich die 3D-Rekonstruktionsmaske als Schneeball vorstellen, der auf das Bild geworfen wird. Da die Rekonstruktionsmaske räumlich in allen Richtungen symmetrisch ist, kann sie in einer Richtung integriert werden und zu einer zweidimensionalen Maske (Footprint) vereinfacht werden. Dieser Footprint kann vorberechnet werden und in einer Tabelle abgelegt werden, so dass beim Rendern nur noch eine zweidimensionale Operation ausgeführt werden muss. Der Footprint kann als Textur in einer Standard-Grafikkarte hardwarebeschleunigt mit Texture-Mapping auf die jeweiligen Bildpunkte addiert werden (Compositing). Hierbei wird auch berücksichtigt, dass näher an der Bildebene liegende Volumenelemente, gegenüber weiter hinten liegenden, hervorgehoben werden.
+
+Der ursprüngliche Algorithmus lieferte leider keine gute Bildqualität, allerdings wurden in den letzten Jahren einige Verbesserungen vorgeschlagen, die Aliasing-Effekte und Farbfehler vermindern [59,58,68]. So wurde auch die Kantenerkennung durch die Gewichtung mit dem Gradienten möglich und die Qualität durch Post-Klassifikation stark erhöht [66,65] (siehe Kapitel
+
+
+
+Volumenelementes zum Bild
+
+## 2.3.4 Ray-Casting-Verfahren
+
+Ray-Casting [22] ist ein direktes Volume-Rendering und Image-Order Verfahren. Es wurde für diese Arbeit ausgwählt, da man mit ihm eine sehr gute Bildqualität erreichen kann und algorithmische Optimierungsverfahren einfach zu implementieren sind. Hier folgt eine kurze Erläuterung zum Verständnis. Der genauere mathematische Hintergrund wird in Kapitel 5 gegeben.
+
+Im ersten Abtastungs-Schritt (Abbildung 2.7) werden von jedem Bildpunkt der Projektionsebene (Ergebnisbild) aus, in Sehrichtung des Beobachters, virtuelle Seh- oder Lichtstrahlen (engl. ray) durch das Volumen "geworfen" (engl. cast) und entlang der Strahlen in äquidistanten Abständen Abtastpunkte gesetzt.
+
+Da die Positionen der Abtastpunkte normalerweise nicht auf dem Raster der Volumendaten liegen, müssen die Abtastpunkte aus den umliegenden Werten interpoliert werden, um Artefakte, die sich in Form von Würfeln mit der Seitenlänge des Gitterabstandes im Bild wieder finden, zu vermeiden. Die Sehstrahlen müssen nicht parallel laufen, sondern können, indem sie pyramidenförmig auseinander streben, einen Eindruck von Perspektive vermitteln.
+
+Vor und nach der Interpolation kann eine Klassifizierungsstufe eingebaut werden. Dadurch können den Orginaldaten andere Eigenschaften oder Werte zugewiesen werden. Durch unterschiedliche Gewichtung bestimmter Wertebereiche, können unterschiedliche Details der zu visualisierenden Objekte hervorgehoben werden. Will man beispielsweise bei der CT-Aufnahme eines Kopfes die Schädelknochen sichtbar machen, können niedere Dichtewerte auf Null gesetzt und damit Haut und Muskeln ausgeblendet werden.
+
+Weiterhin gibt es die Möglichkeit, vorab in den Daten, Teile der Volumenobjekte zu kennzeichnen, wie zum Beispiel unterschiedliche Gewebe im Körper, die dann durch die Klassifikation sichtbar oder unsichtbar geschaltet werden können. Man spricht dann von vorsegmentierten Daten.
+
+
+
+Nach der Interpolation und Klassifikation wird im nächsten Schritt, dem Shading (Abbildung 2.8), für jeden Abtastpunkt eine Lichtreflexion in Richtung des Beobachters berechnet. Hierzu wird der Gradient an der Stelle des Abtastpunktes bestimmt. Der Betrag des Gradienten gilt als Wahrscheinlichkeitsmaß für das Vorhandensein einer Oberfläche. Mit ihm wird die Reflexion gewichtet, wodurch Kanten der Objekte besser sichtbar werden.
+
+Die Richtung, in die der Gradient zeigt, entspricht der Oberflächennormale und zeigt senkrecht von der Oberfläche weg. Die Oberflächennormalen wird für die Berechnung einer diffusen und spiegelnden Reflexion benötigt.
+
+Für das reflektierte Licht wird beim Durchgang der Lichtstrahlen durch die Volumenelemente bis zur Projektionsebene eine Absorption, also eine Abschwächung des Lichtes, berücksichtigt, wodurch Kanten, die näher beim Beobachter liegen, heller erscheinen.
+
+Im letzten Schritt, dem Compositing (Abbildung 2.9), werden die Reflexionsbeiträge aller Abtastpunkte entlang eines Sehstrahls aufsummiert. Die Summe entspricht der Helligkeit des Bildpunktes im Ergebnisbild, das auf der Projektionsebene liegt.
+
+Abbildung 2.8: Shading im Ray-Casting-Verfahren.
+
+
+
+
+
+
+
+
+
+#### 2.3.5 Volume-Ray-Tracing-Verfahren
+
+Das Ray-Tracing-Verfahren erweitert Ray-Casting um die Darstellung von Schatten. Es wird im Gegensatz zu Ray-Casting nicht nur eine Absorption für die Reflexionen vom Abtastpunkt zum Beobachter berücksichtigt, sondern auch für das eintreffende Licht, wie in Abbildung 2.10 angedeutet. Damit Schatten entstehen, muss es mindestens eine seitliche Lichtquelle geben.
+
+#### 2.3.6 Vergleich der Volume-Rendering-Verfahren
+
+Im Folgenden sollen die Vor- und Nachteile der gezeigten Volume-Rendering-Verfahren kurz aufgezeigt werden und der geeignetste Algorithmus in Bezug auf allgemeine Verwendbarkeit und Bildqualität ausgewählt werden.
+
+Abbildung 2.10: Ray-Tracing mit einer zusätzlichen Lichtquelle
+
+
+
+Abbildung 2.9: Compositing: Aufsummieren aller Reflexionen
+
+eine Methode aus Volumendaten ein Polygonmodell zu erzeugen. Mit einem Durchgang des Marching-Cube-Verfahrens kann nur eine Oberfläche erzeugt und somit keine semitransparenten Objekte dargestellt werden. Desweiteren können nicht alle Objekte durch exakte Oberflächen dargestellt werden.
+
+Das Splatting-Verfahren erreichte erst durch Forschungsergebnisse in letzter Zeit eine wesentlich bessere Bildqualität. Obwohl für jedes Volumenelement nur 2D-Operationen ausgeführt werden liefern die bekannten Implementierungen allerdings kaum höher Bildwiederholraten, als die von Ray-Casting-Ansätzen. Interessant wird das Splatting-Verfahren, durch die Möglichkeit bessere Interpolationsfilter umzusetzten, als es durch die trilineare Interpolation beim Ray-Casting-Verfahren normalerweise möglich ist.
+
+Das Ray-Casting-Verfahren und mit der Erweiterung um Schatten das Ray-Tracing-Verfahren liefern im Vergleich mit den zuvor genannten Methoden die beste Bildqualität. Sie stellen allerdings auch die größten Anforderungen an die Hardware, will man interaktiv und in Echtzeit Volumenobjekte mit der Ray-Casting-Methode visualisieren.
+
+Für einen 10243 Datensatz mit 16 Bit Auflösung werden 2 GByte Speicher benötigt. Sollen diese mit 30 Bildern pro Sekunde visualisiert werden, muss der Speicher mit einer Datenrate von 60GByte pro Sekunde ausgelesen werden können.
+
+Hinzu kommen etwa 300 Milliarden Instruktionen, wenn man nur 10 Instruktionen pro Volumenelement rechnet.
+
+Dies kann momentan keine Standard Hardware erfüllen. Alleine das einmalige Auslesen eines so großen Datensatzes benötigt mit aktuellen Speichern ohne Parallelisierung mehrere Sekunden. Will man dem Ziel, große Datensätze in Echtzeit zu visualisieren, näher kommen, muss man deshalb versuchen, für die Neuberechnung eines Bildes nur die unbedingt notwendigen Teile der Volumendaten auszulesen. Hierzu gibt es bei den rein Software-basierten Systemen einige Methoden zur Datenreduktion und Beschleunigung, die unter dem Begriff algorithmische Optimierungen zusammengefasst werden.
+
+Existierende Software-Systeme können aber höchstens 2563 -Datensätze in Echtzeit darstellen und erreichen damit etwa 10-20 Bilder pro Sekunde (siehe Kapitel 4.1).
+
+Deshalb müssen spezielle Hardware-Systeme entwickelt werden, die einerseits eine angepasste Speicherarchitektur besitzen und andererseits den Ray-Casting-Algorithmus mit Optimierungen möglichst effektiv unterstützen.
+
+# 3 Optimierungsmöglichkeiten für Volume Rendering
+
+### 3.1 Early-Ray-Termination
+
+Beim Ray-Casting-Verfahren wird beim Durchgang der Sehstrahlen oder Lichtstrahlen durch das Material eine Absorption berücksichtigt (Siehe auch Kapitel 5.4.1). Fällt die Intensität der Strahlen unter einen Schwellwert, wird die weitere Berechnung des Strahles abgebrochen (Abbildung 3.1), da die nachfolgenden Beiträge zum Bildpunkt der Projektionsebene vernachlässigbar sind. Dieses Verfahren wird Early-Ray-Termination genannt [48].
+
+Der Schwellwert kann meist vom Anwender eingestellt werden, um einen Kompromiss zwischen Rechengeschwindigkeit und Genauigkeit der Berechnung zu ermöglichen.
+
+## 3.2 Space-Leaping – Distance-Coding
+
+Leere Bereiche im Volumen liefern beim Ray-Casting-Verfahren keinen Beitrag zu einem Bildpunkt auf der Projektionsebene, deshalb können diese ohne Änderung des Berechnungsergebnisses übersprungen werden (siehe Abbildung 3.2) [30].
+
+Werden beim Ray-Casting-Verfahren zur Betonung der Kanten, die Reflexionen mit dem Gradienten gewichtet (siehe 2.3.4 und 5.5), kann Space-Leaping sogar auf homogene Bereiche erweitert werden. An diesen Stellen ist der Gradient gleich null, wodurch auch die Reflexionen verschwinden und kein Beitrag zum Bild hinzukommt.
+
+Damit der Algorithmus im voraus die leeren Bereiche bestimmen kann, ist eine Vorberechnung notwendig. Leere Bereiche können einmal durch eine hierarchische Repräsentation der Volumendaten als markierte Blöcke dargestellt werden[48,30] oder als Entfernungsangabe zum
+
+Abbildung 3.1: Early-Ray-Termination
+
+
+
+
+
+nächsten nicht leeren Volumenelement innerhalb des Volumedatensatzes. Die Berechnung der Entfernungsangabe ist als Distance-Coding oder Distance-Transform [55,56,16,57] bekannt.
+
+Distance-Coding bestimmt für jedes leere Volumenelement die Sprungdistanz d zum nächsten nicht leeren Volumenelement in der räumlichen Umgebung. Dadurch kann bei der Bildberechnung der nächste Abtastpunkt um diese Distanz in Strahlrichtung weiter geschoben werden, ohne das Ergebnis zu verändern. Da Distance-Coding den Abstand zum nächsten Volumenelement im Raum berechnet, ist die Orientierung des Strahls beliebig.
+
+Der minimale Abstand und die Richtung zweier Abtastpunkte zueinander, wird durch einen Differenzvektor X ,Y ,Z angegeben. Der Betrag des Vektors entspricht der Abtastweite s und ist auf den Gitterabstand a normiert. Die Sprungdistanz wird in Vielfache der Abtastweite umgerechnet, wodurch der nächste Abtastpunkt Pn*1 *X ,Y ,Z sehr einfach berechnet werden kann:
+
+$$\overrightarrow{P_{n+1}} = \overrightarrow{P_n} + \vec{\Delta} d$$
+
+Für die Distanzwerte wird ein getrennter Datensatz angelegt, der genauso strukturiert ist, wie der Volumenspeicher, so dass mit den Koordinaten des Abtastpunktes die zugehörige Sprungdistanz gelesen werden kann. Speicherplatz kann gespart werden, indem die Distanzwerte nicht für jedes Volumenelement, sondern für kleinere Würfel bestimmt werden. Ein Würfel kann dann nur übersprungen werden, wenn er komplett leer ist.
+
+Abbildung 3.3 zeigt die Distanzwerte d in einer Ebene um drei nicht leere Volumenelemente. Die Zahlenwerte geben den minimalen Abstand zu diesen Volumenelementen an. Liegt ein Abtastpunkt zwischen lauter leeren Volumenelementen kann um den zugehörigen Distanzwert weitergesprungen werden.
+
+Abbildung 3.2: Space-Leaping
+
+
+
+| 4 | 3 | 3 | 3 | 3 | 3 | 3 | 3 |
+|---|---|---|---|---|---|---|---|
+| 4 | 3 | 2 | 2 | 2 | 2 | 2 | 2 |
+| 4 | 3 | 2 | 1 | 1 | 1 | 1 | 2 |
+| 4 | 3 | 2 | 1 |   |   | 1 | 2 |
+| 4 | 3 | 2 | 1 | 1 |   | 1 | 2 |
+| 4 | 3 | 2 | 2 | 1 | 1 | 1 | 2 |
+
+Abbildung 3.3: Endergebnis von Distance-Coding: Sprungdistanzen um nicht leere Volumenelemente
+
+#### 3.3 Adaptive-Distance-Sampling-Methode
+
+Während die vorangegangenen Optimierungsmöglichkeiten bei leeren Bereichen (Space-Leaping) und undurchsichtigen Bereichen (Early-Ray-Termination) sehr gut arbeiten, wurde eine Methode unter dem Namen Adaptive Distance-Sampling [41] veröffentlicht. Sie ist zwar aufwändiger, kann aber auch semitransparente Bereiche mit einbeziehen.
+
+Die Sprungweiten in Adaptive-Distance-Sampling, werden so berechnet, dass durch Auslassen von Abtastpunkten ein vorgegebener Fehler bei der Integration nicht überschritten wird. Dabei wird die Opazitätsänderung, zwischen den Abtastpunkten, linear interpoliert und mit den exakt berechneten Werten verglichen. Abbildung 3.4 verdeutlicht dies in einer Dimension. Die schraffierte Fläche stellt die integrierte Funktion über jedes Abtastpunkt dar, während bei der grauen Fläche die beiden mittleren Abtastpunkte ausgelassen wurden. Wird bei der Differenz der beiden Flächen der vorgegebene maximale Fehler nicht überschritten, dürfen die beiden Abtastpunkte übersprungen werden.
+
+Damit die Sprungweiten richtungsunabhängig berechnet werden, muss der Fehler räumlich um jedes Volumenelement eingehalten werden. Bildlich wird um jeden Gitterpunkt ein Kugel immer weiter vergrößert, bis sich gerade keine Gitterpunkte in der Kugel befinden, für die der Fehler zu groß wird. Der Radius der Kugel entspricht dann der richtungsunabhängigen Sprungweite für den Rendering-Algorithmus.
+
+Bei der tatsächliche Berechnung wird die maximale Sprungdistanz beschränkt, so dass nur eine kleine Umgebung um jedes Volumenelement berücksichtigt werden muss. Eine maximale Sprungdistanz von sieben zeigte sich in den Experimenten als ausreichend. Weiterhin kann die Rechnung vereinfacht werden indem der Fehler nur in bestimmten Richtungen überprüft wird. Denkt man sich das Volumenelement im Mittelpunkt eines Würfels, so reichen in den meisten Fällen die drei Hauptachsen und die vier Diagonalen im Würfel zur Überprüfung aus.
+
+Mit der *Adaptive-Distance-Sampling-*Methode können vor allem homogene und nur leicht fluktuierende halbtransparente Regionen übersprungen werden. Die Sprungweiten für leere Bereiche können weiterhin mit dem einfacheren Distance-Coding berechnet werden.
+
+Nachteilig wirkt sich aus, wenn Farbinformation mit verarbeitet wird, dass dann beide, der Fehler der Opazitätsänderung und der der Farbänderung, berücksichtigt werden müssen. Ebenso geht der Geschwindigkeitsvorteil bei verrauschten Datensätzen stark zurück.
+
+#### 3.4 Datenkohärenz
+
+Bei den Volumendaten handelt es sich normalerweise um große Datenmengen, die in dynamischen Speichern abgelegt werden müssen. Diese Speicher sind in Blöcke unterteilt, wobei Zugriffe innerhalb der Blöcke wesentlich schneller von statten gehen, als über verschiedene Blöcke hinweg. Die Blöcke müssen erst bereitgestellt werden, was Zeit kostet und neu zu ladende Blöcke können bereits geladene verdrängen. Für ein optimiertes Rendering-System muss man einen ständigen Wechsel zwischen sich gegenseitig verdrängenden Blöcken vermeiden.
+
+Unter Datenkohärenz versteht man, Daten, die vom Algorithmus kurz nacheinander benötigt werden auch soweit als möglich im gleichen Speicherblock abzulegen. In unserem Fall werden
+
+Abbildung 3.4: Fehlerbestimmung bei der Adaptive Distance-Sampling-Methode
+
+
+
+Daten, die räumlichen nah beieinander liegen, bevorzugt verwendet. Die Daten dürfen deshalb nicht ebenen- oder gar zeilenweise in die Speicherblöcke geladen werden, sondern müssen als möglichst großer Würfel im Speicherblock liegen. Dadurch wird eine Richtungsunabhängigkeit bei der Abarbeitung der Daten gewährleistet.
+
+Würde man in einer höheren Programmiersprache einfach ein dreidimensionales Feld deklarieren und die Volumendaten darin abspeichern, würde dies einer zeilenweisen Anordnung in den Blöcken entsprechen. Bei einer Auslesereihenfolge entlang der Zeilen in X-Richtung würde dies funktionieren, aber in Y- wie in Z-Richtung hätte jeder Lesezugriff ein Neuladen von Blöcken zur Folge.
+
+### 3.5 Shear-Warp-Algorithmus
+
+Der Shear-Warp-Algorithmus ist ein Object-Order-Algorithmus, da er die Volumendaten der Reihenfolge nach abarbeitet. Der Shading- und Compositing-Schritt ist allerdings wieder identisch mit dem Ray-Casting-Algorithmus.
+
+Das Shear-Warp-Verfahren nutzt als Object-Order-Algorithmus die Datenkohärenz optimal aus. Der Datensatz muss nur einmal in der abgespeicherten Reihenfolge ausgelesen werden.
+
+Das Ergebnisbild wird über ein Zwischenbild (intermediate Image) errechnet, das parallel zu der Seite des Datenwürfels liegt, die dem Beobachter am meisten zugewandt ist (siehe Abbildung 3.5). Statt eine 3D-Transformation durchzuführen, wird das Datenvolumen in Schichten parallel zum Zwischenbild zerlegt, die gegeneinander "geschert" (shear) werden.
+
+
+
+Innerhalb dieser Schichten werden durch 2D-Interpolationen die Abtastpunkte entlang von zwischen den Volumenelementen liegenden Linien, den Voxel-Scanlines, bestimmt. Die übereinander liegenden Voxel-Scanlines werden durch Shading und Compositing auf das Zwischenbild projiziert. Das Zwischenbild muss noch entzerrt werden (warp), was wiederum durch 2D-interpoliertes Abtasten geschieht und das Ergebnisbild liefert.
+
+Abbildung 3.6 zeigt die drei wesentlichen Schritte des Shear-Warp-Algorithmus:
+
+- 1. Das Scheren des Volumens und Abtasten der Voxel-Scanlines
+- 2. Die Projizierung und Compositing auf den Image-Scanlines des Zwischenbildes
+- 3. Entzerren durch Neuabtastung des Zwischenbildes
+
+
+
+Als algorithmische Optimierungen gibt es bei Shear-Warp das Run-Length-Encoding, das ähnlich dem Space-Leaping, Sprunginformationen zu den nächsten nicht leeren Volumenelementen ablegt. Im Gegensatz zu Space-Leaping gilt die Sprunginformation aber nur innerhalb einer Voxel-
+
+Abbildung 3.6: Die drei Schritte des Shear-Warp-Algorithmus aus [23]
+
+Scanline. Durch Weglassen der leeren Volumenelemente und Hinzufügen der Sprunginformation kann die Datenmenge etwas reduziert werden, obwohl drei getrennte Datensätze für jede Beobachterrichtung in einer Vorberechnung erzeugt werden müssen. Run-Length-Encoding kann innerhalb der Voxel-Scanline und innerhalb der Image-Scanline angewendet werden. In [23] wird das Verfahren innerhalb der Image-Scanline zwar mit Early-Ray-Termination verglichen, es kann aber nie seine Effizienz erreichen, da es nur auf dem zweidimensionalen Zwischenbild angewendet wird, während Early-Ray-Termination im Volumenbereich arbeitet.
+
+Nachteilig auf die Bildqualität wirken sich einmal die zwei Abtastungsschritte aus, die zu Verwaschungen führen, zum anderen findet bei der Abtastung nur eine lineare Interpolation innerhalb der Ebene, in der die Voxel-Scanlines liegen, statt. In orthogonaler Richtung wird die nächstliegende Ebene (Nearest-Neighbour-Interpolation) verwendet, wodurch Artefakte erzeugt werden. Bei der Rotation des Volumenobjektes ist es daher meist erkennbar, wenn das Zwischenbild auf eine andere Seite des Datenwürfels gelegt wird und es kommt zu einem Flackereffekt.
+
+Wegen dieser Nachteile und der Schwierigkeit Early-Termination in einem Object-Order-Verfahren effizient zu implementieren wurde auf die Umsetzung von Shear-Warp verzichtet.
+
+#### 3.6 Variable Auflösung
+
+Variable Auflösung ist eine einfache Methode bei interaktiven Anwendungen die Rendering-Zeit zu verkürzen. Während der Benutzer ein visualisiertes Objekt bewegt, wird das Volumen nur grob, zum Beispiel mit halber Abtastrate, abgetastet. Dadurch wird nur noch ein Achtel der Abtastpunkte erzeugt, wodurch die Bildwiederholrate erhöht wird. Die geringere Auflösung fällt, während das Objekt bewegt wird, kaum auf, aber die Bewegung wird flüssiger. Erst wenn das Objekt nicht mehr bewegt wird, wird es mit voller Auflösung berechnet.
+
+# 4 Echtzeit-Volume-Rendering Implementierungen
+
+#### 4.1 Software
+
+Es gibt nur wenig Versuche ein Echtzeitsystem für Volume-Rendering in Software auf einer Standard-Hardware zu implementieren. Eines der bekanntesten ist das von Lacroute [24], der den Shear-Warp-Algorithmus [23] (Kapitel 3.5) auf einer 16 Prozessor, Shared Memory, SGI-Challenge mit 13 Hz Bildwiederholfrequenz für einen 1283 Datenwürfel und ein 2562 Bild implementiert hat. Das System erreicht etwa 1 Hz Bildwiederholfrequenz für 2563 Datensätze, allerdings sind dafür einige Vorberechnungen für Run-Length-Decoding notwendig und die Darstellung ist auf Parallelprojektion beschränkt. Eine der letzten Implementierungen des Shear-Warp-Algorithmus erreicht auf einem 3GHz-Pentium IV PC für Datensätze der Größe 256x265x128 etwa 10 Hz Bildwiederholrate[25].
+
+Das UltraVis System [75,76,77] erreicht auf einem HP Kayak XU PC mit zwei 500MHz Pentium III-Prozessoren und 1 GByte Hauptspeicher etwa 2-10 Hz Bildwiederholfrequenz. Die Volumen sind auf 2563 begrenzt. Implementiert wurde ein Ray-Casting-Algorithmus mit trilinearer Interpolation, Space-Leaping und Early-Ray-Termination. Die Geschwindigkeit wird erreicht, indem wichtige Teile des Algorithmus, wie Interpolation und Shading, mit Assembler programmiert wurden, um speziell die SIMDI -Erweiterungen der Intel x86-Architektur auszunutzen. Der begrenzende Faktor des Systems liegt im Datendurchsatz des Hauptspeichers. Deshalb werden die Volumendaten und Parameter so auf den Hauptspeicher verteilt, dass oft verwendete Daten nie aus dem Level 1-Cache des Prozessors verdrängt werden. Als Folge davon muss eine Datenstruktur angelegt werden, die vier mal größerer als der Volumendatensatz ist.
+
+Bildwiederholraten zwischen 1-3 Hz für 2563 -Volumen werden auch in [78] von Roettger präsentiert. Auch hier handelt es sich um einen Ray-Casting-Algorithmus mit Space-Leaping und Early-Ray-Termination. Erreicht wird dies durch Auslagerung großer Teile des Algorithmus auf den Grafikprozessor einer ATI Radeon 9700 Grafikkarte. Die Programme wurden in der Assembler ähnlichen Sprache Pixel Shader 2.0 geschrieben. Durch die Implementierung von Pre-Integration konnte auch eine gut Bildqualität erreicht werden.
+
+In [62] wurde das Splatting-Verfahren auf einer NVIDIA-GeForce4-Grafikkarte implementiert, wobei aber nur für kleiner Volumen (1283 ) interaktive Bildwiederholraten erreicht wurden.
+
+Obwohl die vorgenannten Verfahren auf Grafikkarten implementiert sind, unterscheiden sie sich
+
+I SIMD: **S**ingle **I**nstruction **M**ultiple **D**ata, Befehlssatz mit speziellen Registern zur Verarbeitung großer Integer-Datenmengen (MMX: **M**ulti **M**edia E**x**tension) und Floatingpoint-Datenmengen (SSE: **S**treaming **S**IMD **E**xtension)
+
+deutlich von den im folgenden Kapitel beschriebenen 3D-Texture-Mapping-Verfahren. Dort handelt es sich um Slice-Based, also schichtbasierte Verfahren, während hier die Verfahren strahlweise auf dem Grafikprozessor (GPUI ) implementiert sind. Ein Vergleich beider Verfahren konnte zeigen, dass strahlbasierte Verfahren mit höherer Genauigkeit und somit geringeren Artefakten implementiert werden können als schichtbasierte [61]. Hier stellte sich heraus, dass trotz besserer Umsetzung von Early-Ray-Termination und Space-Leaping, die strahlbasierten Verfahren nur etwa die halbe Bildwiederholrate erreichen, da Sprung- und Schleifenunterstützung auf den Grafikprozessoren zwar seit kurzem vorhanden, aber noch unzureichend ist. Ältere Implementierungen mussten deshalb mit mehrfachen Durchgängen arbeiten[78,79,80].
+
+#### 4.2 3D-Texture-Mapping Hardware
+
+Mit 3D-Texture-Mapping wird unter Ausnutzung des Textur-Puffers von Grafikkarten ein vereinfachter Ray-Casting-Algorithmus implementiert. Der Textur-Puffer wird normalerweise dazu verwendet, bei Polygone-Rendering ein Bild (Textur) auf Polygone zu legen (vgl. Polygon-Rendering Kapitel 2.2 und [13]). Zusätzlich bieten die meisten Grafikkarten auch die Möglichkeit übereinander liegende Texturen miteinander zu verrechnen (Blending). Die Texturen werden hierzu entsprechen der Beobachterrichtung neu abgetastet und Zwischenwerte interpoliert. Das fertige, zusammengesetzte Bild kann dann aus dem Frame-Puffer der Grafikkarte ausgelesen werden. Genau diese Funktionen macht man sich beim 3D-Texturemapping zunutze. Das gesamte Datenvolumen muss hierzu im Textur-Puffer liegen und wird wie beim Ray-Casting neu abgetastet, allerdings sogar schichtweise und nicht strahlweise. Zwischenwerte werden ebenfalls trilinear interpoliert und die Schichten wie beim Compositing überlagert, wie Abbildung 4.1 verdeutlicht. Allerdings und das ist der größte Nachteil, ist direkt in Hardwareunterstützung kein Shading möglich.
+
+Die ersten Implementierungen erreichen zwar bis zu 10 Bilder pro Sekunde für ein 5122 Bild, verzichten aber vollständig auf Shading und verwenden direkt die Dichtewerte des Volumens. Entsprechend schlecht ist dadurch die Bildqualität [70,71]. Durch neue Funktionen auf modernen Grafikkarten, wie Early-Z-Culling lassen sich Beschleunigungsverfahren wie Early-Ray-Termination und Space-Leaping implementieren, wodurch die Bildwiederholrate für Volumen der Größenordnung 2563 auf rund 30 Hz gesteigert werden konnte[63,60].
+
+I GPU: Graphical Processing Unit
+
+
+
+Es wurden verschiedene Möglichkeiten veröffentlicht, die Bildqualität weiter zu verbessern. Einmal kann im gesamten Volumen als Vorberechnung Shading durchgeführt werden. Die Shading-Ergebnisse kommen dann in den Textur-Puffer. Die Abtastung und das Compositing wird in der Grafikkarte ausgeführt. Da das Shading aber richtungsabhängig ist, muss für jedes Bild das Volumen neu berechnet und in den Textur-Puffer geladen werden. Pro Bild wurden Berechnungszeiten von 13.4 Sekunden angegeben [72].
+
+Eine weitere Möglichkeit ist, nur die Abtastung mit der Interpolation von der Hardware berechnen zu lassen und das Shading in Software zu berechnen. Hierzu können nicht nur die Dichtewerte interpoliert werden, sondern auch die drei Komponenten vorberechneter Gradienten, die parallel in identischer Weise in den 4 Kanälen RGBα der Grafikkarte abgelegt werden können. Das Compositing kann wahlweise in Software oder im Frame-Puffer durchgeführt werden, indem die Ergebnisse des Shading wieder in den Textur-Puffer zurückübertragen werden. Da beim Software-Compositing Early-Ray-Termination angewendet werden kann, ist es datenabhängig, welche Version schneller ist. Für größere Bilder (5122 ) benötigen aber beide Methoden mehrere Sekunden pro Bild [69].
+
+Der größte Vorteil von Volume-Texture-Mapping liegt in der gemeinsamen Verarbeitung von Polygon und Volumendaten in der gleichen Hardware. Für interaktive Anwendungen mit größeren Volumen macht allerdings die fehlende Hardwareunterstützung für Shading und Klassifizierung diese Methode unbrauchbar. Allerdings wurden bereits Erweiterungen für Standard-Grafikkarten vorgeschlagen, um diese Lücke zu schließen [73].
+
+Abbildung 4.1: Schichten bei Volume-Texture-Mapping
+
+#### 4.3 VIRIM
+
+VIRIM ist bisher das einzigste System, dass Ray-Tracing in Hardware implementiert [3, 2, 4]. Es ist in der Lage Volumen der Größe 256x256x128, mit 10 Bildern pro Sekunde, mit Perspektive und Schatten zu visualisieren. Es ist modular aufgebaut, wobei immer eine Geometrieeinheit und eine Rendering-Einheit zusammengehören. Alle Module werden über einen VME-Bus von einem Host-Rechner initialisiert und ausgelesen (Abbildung 4.2).
+
+Jede Geometrieeinheit enthält jeweils den kompletten Volumendatensatz und gibt schichtweise interpolierte Abtastpunkte mit zugehörigem X,Y-Gradienten an die Rendering-Einheit weiter. Auf den Z-Gradienten wurde wegen des zu großen Aufwandes für die Zwischenspeicherung der Schichten verzichtet. Durch trapezförmige Abtastung der Schichten ist auch eine perspektivische Darstellung möglich.
+
+Auf der Rendering-Einheit werden mit digitalen Signalprozessoren Absorption, Shading und Compositing berechnet. Die Beschleunigung und Skalierbarkeit des Systems wird erreicht, indem pro Rendering-Einheit acht Prozessoren jeweils eine Schicht des Volumens und somit eine Zeile des Ergebnisbildes berechnen. Damit die Prozessoren unabhängig voneinander arbeiten können, gilt als Einschränkung, dass die Strahlen der Lichtquellen (0° und 45°) in der Ebene der Schichten liegen. Die Objekte sind also immer von vorne und von der Seite beleuchtet.
+
+Da es sich um eine feste, mit diskreten Bauteilen aufgebauten, Geometrieeinheit handelt, können ohne neue Hardware-Entwicklungen keine algorithmischen Optimierungen wie Space-Leaping oder Early-Ray-Termination integriert werden. Wogegen durch die Programmierbarkeit der Rendering-Einheit die Implementierung verschiedener Rendering-Verfahren möglich ist.
+
+Abbildung 4.2: Komponenten des VIRIM-Systems
+
+
+
+#### 4.4 VolumePro – Cube-Familie
+
+VolumePro ist eine PCI-Karte, die zusammen mit einer Grafikkarte vertrieben wird und in Standard-PCs eingebaut werden kann. Mit diesem System können 5123 Volumendaten mit 30 Bildern pro Sekunde visualisiert werden. VolumePro wird von TeraRecon Inc. [11] vertrieben und basiert auf der Cube-4 [8] und EM-Cube-Architektur [9], die in SUNY Stony Brook entwickelt wurden. Kernstück des VolumePro ist der vg500 Rendering-Chip, der 4 parallele Rendering-Pipeline-Prozessoren enthält. Die Rendering-Pipeline blieb zwischen den Cube-Versionen und VolumePro weitgehend konstant. Weiterentwickelt wurden vor allem die Speicherarchitekturen, so konnte der VolumePro 500 erstmals SDRAM-Bausteine verwenden. Die aktuellen VolumePro 1000-Karten arbeiten mit bis zu 4 GByte DDRAM bei 250MHz Takt und maximal zwei vg1000- Bausteinen. Mit dem vg1000 werden noch zusätzlich Oberflächengrafiken unterstützt, die auf der Zusatzgrafikkarte berechnet werden.
+
+Um einen gleichförmigen Datenzugriff zu erreichen, wird das Volumen beim vg500 wie bei Shear-Warp (siehe Kapitel 3.5) in Schichten (Slices) abgetastet, die parallel zu der Würfelseite liegen, die der Projektionsebene am meisten zugewandt ist. Es wird zuerst ein Zwischenbild auf diese Würfelseite abgebildet, das erst in einem zweiten Schritt abgetastet und auf die Projektionsebene entzerrt wird. VolumePro mit dem vg500-Chip übernimmt die Projektion auf die Würfelseite (Shear). Die Entzerrung (Warp) auf die Projektionsebene wird mit Texture-Mapping auf der mitgelieferten Grafikkarte ausgeführt.
+
+Abbildung 4.3 zeigt die Ray-Casting-Pipelines des vg500-Chips, wobei alle Blöcke vier mal vorhanden sind. Aus dem externen Volumenspeicher (Voxel-Memory) wird Schicht um Schicht und Strahl um Strahl jedes Volumenelement einmal pro Bild ausgelesen und den Pipelines zugeführt. Da der Volumenspeicher aus vier parallelen Modulen besteht, können die Daten für die vier Pipelines mit dem gleichen Takt von 125MHz ausgelesen und verarbeitet werden.
+
+Ähnlich wie in Kapitel 7.5 beschrieben, wird das Volumen würfelförmig in den SDRAM-Modulen, Bänken und Zeilen aufgeteilt, so dass keine Zugriffskonflikte entstehen können. Im Gegensatz dazu wird ein 23 -Subwürfel aber nicht auf verschiedene Module aufgeteilt, sondern in einer SDRAM-Zeile abgelegt, um den 23 -Subwürfel im Burst-Modus auslesen zu können. Eine spezielle Schaltung auf dem vg500-Chip sortiert die Volumenelemente der 23 -Subwürfel je nach Beobachterrichtung in die Schichten und verteilt sie auf die vier Ray-Casting-Pipelines.
+
+
+
+Da alle Volumenelemente nur einmal aus dem Volumenspeicher gelesen werden, müssen die umliegenden Werte für die Interpolation und Gradientenberechnung zwischengespeichert werden. Dies geschieht mit Hilfe der Shift-Register, Slice-Fifos und Beam-Fifos in Abbildung 4.3. Über die Shift-Register findet die Übergabe von Daten an die benachbarte Pipeline statt, wobei die vierte Pipeline wieder mit der ersten verbunden ist.
+
+Damit die Chip-internen Fifos nicht zu groß werden, werden die Schichten in X-Richtung auf 32 Voxel begrenzt (Sectioning). Am Ende eines 32-Voxel Abschnittes werden deshalb die Werte nicht mehr von der vierten Pipeline auf die erste übergeben, sondern in ein Section-Memory zur Zwischenspeicherung geschrieben. Beim Beginn eines neuen Abschnittes liest die erste Pipeline aus dem Section-Memory, anstatt aus dem Shift-Register.
+
+Abbildung 4.3: Ray-Casting-Pipeline von VolumePro (aus [10])
+
+
+
+abgewandelte Form, die sich Shear-Image-Order-Ray-Casting[74] nennt. Mit diesem Verfahren kann die 2D-Interpolation des Warp wegfallen, welche eine zusätzliche Verschlechterung der Bilder nach sich zieht. Erreicht wird dies, indem die Strahlen zwar wie beim Ray-Casting-Verfahren von einem Projektionspunkt durch die Bildpixel laufen, aber die Abtastpunkte nicht äquidistant auf den Strahlen liegen, sondern genau auf den Schichten (Slices) wie bei Shear-Warp (Abbildung 4.4). Dadurch kann die gleiche reguläre Auslesereihenfolge, wie beim VolumePro 500 beibehalten werden. Zusätzlich sind jetzt auch perspektivische Darstellungen und Early-Ray-Termination möglich. Für Space-Leaping wird zwar geworben, es handelt sich allerdings nur um ein Aussparen grober Regionen durch Schnittebenen parallel zu den Seiten des Datenwürfels.
+
+Parallel zur Entwicklung des VolumePro wurden Untersuchungen durchgeführt, die Cube-Architektur für Volume-Ray-Tracing anzupassen [27,28] Es wird das gleiche Abarbeitungsprinzip, wie beim Race II-System (Kap. 4.6) vorgeschlagen: eine Mischung zwischen Image-Order und Object-Order, wobei versucht wird einmal geladene Blöcke komplett abzuarbeiten. Der Fokus der Untersuchungen liegt in der Abarbeitungsreihenfolge der Speicherblöcke und Cache-Strategien für das Volume-Ray-Tracing-Verfahren. Es wurde ein theoretisches System mit einem oder mehreren Blockprozessoren (abgeleitet vom vg500-Pipeline-Prozessor), einem DSPI und RDRAMII zugrunde gelegt.
+
+Abbildung 4.4: Shear-Image-Order-Ray-Casting
+
+I DSP: Digitaler Signal Prozessor
+
+II RDRAM: Rambus Dynamic Random Access Memory; pro Kanal 800MB/s Datendurchsatz, 4 Kanäle möglich, siehe auch Kapitel 7.3.1
+
+#### 4.5 Vizard II
+
+VIZARD II ist ein Ray-Casting-System, das in einer Zusammenarbeit der Universität Tübingen und der Philips Research Laboratories in Hamburg entwickelt wurde. Es handelt sich um ein PCI-Board Design, das 2563 Datensätze für ein 2562 Bild mit Wiederholraten von 3 bis 7 Bilder pro Sekunde visualisieren kann [44, 45, 46].
+
+Die Hauptbestandteile des Systems sind neben vier getrennten SDRAM-Speicherbänken mit Standard-DIMM-Sockeln, ein DSP zur Startpunkt und Offsetberechnung der Strahlen und ein Xilinx Virtex FPGA, der die Ray-Processing-Unit aus Abbildung 4.5 enthält.
+
+
+
+Es wurde prinzipiell eine Rendering-Pipeline mit Interpolation, Gradientenberechnung und Shading mit Reflectance-Map wie in Kapitel 6.5 bis 6.7 beschrieben, implementiert. Die von uns in [37] beschriebene Ray-Queue, für einen Multithreading-Ansatz (Kapitel 7.4) wurde mit 9 parallelen Strahlen, allerdings ohne Sortierung, realisiert. Sie wird nur genutzt, um zusätzliche Takte der Adressgenerierung auszugleichen. Early-Ray-Termination findet nur statt, wenn alle 9 Strahlen
+
+Abbildung 4.5: Aufbau der Ray Processing Unit (RPU) von VIZARD II
+
+unter den eingestellten Schwellwert fallen, weshalb auf die Sortierung wegen der Datenkohärenz verzichten werden kann. Space-Leaping wurde nicht implementiert.
+
+VIZARD II kommt mit 4 Speicherbänken aus, da in den 64-Bit breiten SDRAM-Modulen die 32 Bit-Volumendaten in Z-Richtung doppelt eingespeichert werden, so dass mit einem Zugriff immer die 8 Volumenelemente eines 23 -Subwürfels zur Interpolation ausgelesen werden können.
+
+Materialeigenschaften können über den Dichtewerte adressiert, aus einer Tabelle, in Form von Koeffizienten für ambiente, diffuse und spiegelnde Reflexion, mit berücksichtigt werden.
+
+Einfache Gradienten können während der Visualisierung aus den 23 -Subwürfeln errechnet werden. Genauere Gradienten können in einer Vorberechnung bestimmt werden. Das Ergebnis der Vorberechnung wird als Index auf die Einheitsgradienten einer Kugeloberfläche mit den Volumendaten abgespeichertI . Beim Zugriff auf einen 23 -Subwürfel werden somit 8 Verweise auf die 512-Einträge großen Look-Up-TabellenII mit den Gradienten ausgelesen. Der Gradient am Abtastpunkt wird durch getrennte Interpolation der X,Y,Z-Komponente der 8 Gradienten erreicht.
+
+Zur Vermeidung von Artefakten ist in VIZARD II das Pre-Integrations-Verfahren implementiert. Mit ihm werden Integrationsfehler entlang des Strahls reduziert (siehe Kapitel 5.4).
+
+#### 4.6 Race II
+
+Mit dem Race II-System[12] wurde eine Architektur vorgeschlagen, die versucht die Vorteile von Object-Order und Image-Order (vgl. Kap 2.1 ) zu verbinden.
+
+Hierzu wird der Volumenspeicher in 83 -Würfel (VAB: Voxel Access Block) unterteilt. Diese werden von vorne nach hinten (Object-Order ) in einen Zwischenspeicher geladen, von dem aus die weitere Berechnung startet.
+
+Zuerst werden die acht Eckpunkte des VAB auf die Bildebene projiziert (Forward-Projection). Für alle Pixel innerhalb des daraus entstehenden 2D-Abdrucks wird dann ein Image-Order-Ray-Casting-Verfahren innerhalb des VAB durchgeführt (Backward-Projection) (siehe Abbildung 4.6 Step 1 bis 6).
+
+Durch die Zwischenspeicherung der VAB kann der erforderliche Durchsatz des Volumenspeichers gegenüber anderen Image-Order-Systemen stark reduziert werden, da die Daten nur einmal gelesen werden und weitere notwendige Zugriffe nur auf den Zwischenspeicher erfolgen. Dadurch sind auch
+
+I Analog zur Adressierung der Reflexionstabelle in Kapitel 6.7.
+
+II Look-Up-Tabellen (LUT) werden in Hardware durch statische RAM- oder ROM-Speicher realisiert und können komplexe Rechenwerke, beispielsweise für eine mathematische Funktion, ersetzen. Der Parameter der Funktion wird als Adresse an den Speicher gelegt. An der ausgewählten Speicherstelle wird das vorberechnete Ergebnis der Funktion über den Datenbus des Speichers ausgelesen.
+
+größere Umgebungen zur Gradientenberechnung realisierbar.
+
+Durch Doppelpufferung der VAB kann das Laden des nächsten VAB während der Berechnung im Hintergrund stattfinden. Die Berechnungsergebnisse an den Rändern der VAB müssen allerdings zwischengespeichert werden, da sie für die Interpolation und Gradientenberechnung benötigt werden.
+
+Allerdings kann weder Early-Ray-Termination noch Space-Leaping effizient implementiert werden. Da der VAB immer geladen wird, nützt Early-Ray-Termination nur etwas bei Überabtastung. Entsprechend können durch Space-Leaping nur komplette VAB ausgelassen werden, die beim ersten Laden als leer erkannt und markiert werden.
+
+
+
+Abbildung 4.6 Algorithmus des Race II-Systems
+
+# 5 Ray-Casting-Algorithmus
+
+### 5.1 Übersicht
+
+Im Folgenden soll die Rendering Pipeline, wie sie Levoy [22] beschrieben hat, erläutert werden. In der Reihenfolge der Abarbeitung sind einige Modifikationen entwickelt worden, deren Vor- und Nachteile in den nachfolgenden Abschnitten aufgezeigt werden sollen. Levoy trennt strikt die Abarbeitung der Opazität und der Farbe. Opazität ist ein Maß für die Undurchsichtigkeit – das
+
+Gegenteil zur Transparenz. Sie wird vom Benutzer, bei der Klassifizierung, beliebigen Wertenbereichen der Volumendaten zugeordnet. Zum Beispiel können in einer CT-Aufnahme alle Werte unter 1000 auf Null – also völlig transparent – gesetzt werden und darüber linear auf 1 – völlig undurchsichtig – ansteigen. Dadurch sind bei der Visualisierung nur noch die Knochen zu sehen. Die Farbe dagegen wird durch einen Beleuchtungsalgorithmus in Abhängigkeit von lokalen Gradientenvektoren, die als Oberflächennormale interpretiert werden, berechnet. Opazität und Farbe sind somit zusätzliche Werte, die auf zwei getrennten Wegen aus den skalaren Volumendaten gewonnen werden (Abbildung 5.1). Anschließend beginnt bei Levoy der eigentliche
+
+Abbildung 5.1: Rendering Pipeline nach Levoy
+
+
+
+Visualisierungsprozess; es werden Sehstrahlen von jedem Bildpunkt aus durch das Volumen gelegt, und entlang der Strahlen in regelmäßigen Abständen abgetastet. Da die Abtastpunkte normalerweise zwischen den Gitterpunkten der Volumendaten liegen, werden Farbe und die Opazitäten in getrennten Stufen trilinear interpoliert und erst im Compositing miteinander verrechnet, aufaddiert und Farbe und Helligkeit des Bildpunktes bestimmt.
+
+Die in dieser Arbeit verwendete Rendering-Pipeline wurde an einigen Stellen modifiziert. Es wurde zum einen eine zusätzliche Möglichkeit der Klassifizierung nach der Interpolation eingefügt, weshalb man in Bezug auf die Interpolation von Pre- bzw. Post-Klassifikation spricht. Zum Anderen wird der Gradientenvektor aus den Opazitäten gewonnen, also die strikte Trennung zwischen Klassifizierung und Beleuchtung aufgegeben (Abbildung 5.2). Dadurch werden Artefakte vermieden, die entstehen, weil die Gradienten aus den unveränderten Volumendaten gewonnen wurden. Durch die Klassifizierung können die Opazitäten aber derart verändert werden, dass aus
+
+Originaldaten gewonnene Gradienten in die falsche Richtung zeigen. Zum Beispiel können durch Ausblenden bestimmter Dichtewerte neue Kanten entstehen oder verschwinden, die durch die
+
+Abbildung 5.2: Modifizierte Rendering 
+
+
+
+Gradienten aus den Originaldaten nicht angezeigt werden.
+
+Die Gradienten fallen bei der im Kapitel 6.5 erläuterten Interpolationsschaltung quasi kostenlos ab.
+
+Die einzelnen Stufen der Rendering-Pipeline werden in den folgenden Abschnitten erläutert.
+
+#### 5.2 Klassifizierung
+
+Das Volume-Rendering-Verfahren und damit auch der Ray-Casting-Algorithmus werden zur Visualisierung von dreidimensionalen Skalarfeldern verwendet. Bei der Klassifizierung werden den möglichen Skalarwerten Materialeigenschaften zur Visualisierung zugeordnet. Materialeigenschaften sind beispielsweise die Farbe oder die Opazität. Weitere Möglichkeiten sind die Koeffizienten für das Beleuchtungsmodell, welche die Anteile von ambienter, diffuser und spiegelnder Reflexion festlegen. Sie können durch die Klassifikation jedem Skalarwert unterschiedlich zugewiesen werden.
+
+Möglich ist auch eine Segmentierung der Volumendaten. Hierbei werden unabhängig vom Skalarwert die Volumenelemente einer Gruppierung zugeordnet. Die Segmentierung wird vor dem Visualisieren durchgeführt und beim Render-Vorgang die Segmentnummer ausgewertet. Zum Beispiel die Zugehörigkeit des Volumenelementes zu einzelnen Geweben oder Organen, wie Haut, Knochen oder Muskeln, die der Arzt während der Visualisierung sichtbar oder unsichtbar schalten kann. Dann können die Materialeigenschaften den Gruppierungen und nicht direkt den Skalarwerten zugeordnet sein.
+
+In der hier verwendeten Rendering-Pipeline beschränkt sich die Klassifizierung auf die Zuordnung von Opazitäten und Segmentierung. Farbe und Beleuchtungsparameter werden im Kapitel 8 als Erweiterung behandelt.
+
+Je nachdem, ob die Klassifizierung vor oder hinter der Interpolation durchgeführt wird spricht man von Pre- oder Post-Klassifikation. Die jeweiligen Vor- und Nachteile sollen im Folgenden aufgezeigt werden.
+
+## 5.2.1 Pre-Klassifikation
+
+Die Pre-Klassifikation ist vor allem zur Darstellung segmentierter Daten notwendig. Die Klassifikation ordnet den Dichtewerten der Originaldaten eine Opazität im Wertebereich zwischen 0 und 1 zu. Der Benutzer kann normalerweise über die Anwendung in einer Diagrammkurve die Funktion der Zuordnung beliebig einstellen.
+
+werden können, muss dies vor der Interpolation und der Gradientenberechnung geschehen, um die neu entstehenden Kanten richtig darzustellen. Durch die Interpolation kommt es auch zu weichen Übergängen zwischen den Segmenten. Die Interpolation selbst erhält keine Segmentinformation, sie wird durch die Pre-Klassifikation bereits ausgefiltert.
+
+Bei Überabtastung, das heißt, beim Vergrößern des Objektes in Bereiche, in denen das Gitterraster der Originaldaten sichtbar wird, kann im Gegensatz zur Post-Klassifikation das Raster an der Oberfläche würfelförmig sichtbar werden [52].
+
+#### 5.2.2 Post-Klassifikation
+
+Die Post-Klassifikation hat den Vorteil selbst bei starken Vergrößerungen eine glatte Oberfläche zu zeigen, ohne dass das Gitterraster sichtbar wird [52].
+
+Ein Nachteil ist, dass Gradienten die innerhalb der Interpolation berechnet wurden, nicht zu den Opazitäten passen, die durch die Post-Klassifikation entstehen. Es kommt dadurch zu Artefakten. Um diese zu vermeiden, müsste die Gradientenberechnung nachgeschaltet werden. Das macht allerdings sehr große Pufferspeicher notwendig, da die Berechnung alle umliegenden Opazitäten der Nachbarstrahlen benötigt.
+
+## 5.3 Beleuchtungsmodelle, Shading
+
+Beim Ray-Casting-Algorithmus wird für jeden abgetasteten Punkt entlang eines Sehstrahls eine Reflexion zum Beobachter berechnet. Eine naturnahe Berechnung der Lichtverhältnisse einer Szene kann beliebig komplex werden, wenn beispielsweise Mehrfachreflexionen oder unterschiedliche Materialien berücksichtigt werden. Deshalb verwendet man vereinfachte Modelle, die bei minimaler Rechenzeit ein attraktives Ergebnis liefern. Ein weit verbreitetes Beleuchtungsmodell, das diese Eigenschaften besitzt, wurde bereits 1975 von Phong für Oberflächengrafik entwickelt, ist in [32] beschrieben und wird oft als Phong-Shading bezeichnet.
+
+Im Folgenden werden die Bestandteile dieses Beleuchtungmodells beschrieben.
+
+Bei Farbbildern sind die Berechnungen für jeden Farbkanal Rot, Grün, Blau getrennt zu berechnen. Die Koeffizienten, die den Beitrag der einzelnen Reflexionsanteile bestimmen, können pro Farbkanal unterschiedlich sein.
+
+#### 5.3.1 Ambiente Reflexion
+
+Die ambiente Reflexion ist der einfachste Bestandteil des Phong-Shading; er ist unabhängig von der Richtung, in welcher die Lichtquelle oder der Beobachter sich befinden.
+
+Die ambiente Reflexion Ia wird wie folgt berechnet:
+
+$$I_a = I_0 k_a$$
+
+wobei I 0 die Intensität der Lichtquelle an der Oberfläche und k a als Koeffizient den Anteil der Reflexion angibt und im Wertebereich zwischen 0 und 1 liegt.
+
+Man benötigt diesen Bestandteil der Reflexion, um Objektteile, die ansonsten durch Abschattung nicht beleuchtet sind, noch zu erkennen. Es gibt jedoch keinen direkten physikalischen Bezug für diesen Lichtbestandteil. Er kann aber als Approximation von Mehrfachreflexionen gesehen werden. Ambiente Reflexion alleine leuchtet die Objekte völlig gleichmäßig aus, so dass keine Struktur erkennbar ist.
+
+#### 5.3.2 Diffuse Reflexion
+
+Die diffuse Reflexion beleuchtet das Objekt heller, je mehr die Oberfläche in die Richtung der Lichtquelle zeigt. Sie ist unabhängig von der Position des Beobachters und simuliert das Verhalten von matten, nicht spiegelnden Oberflächen. Die Intensität ist proportional zum Cosinus des Winkels zwischen dem Vektor zur Beleuchtungsquelle L und der Oberflächennormalen N . Über den Koeffizienten k d wird der Anteil der diffusen Reflexion eingestellt. I 0 gibt wieder die Intensität der Lichtquelle an:
+
+I d=I 0 k d cos mit cos=N⋅ L ergibt sich
+
+$$I_d = I_0 k_d (\vec{N} \cdot \vec{L})$$
+
+Abbildung 5.3: Diffuse Reflexion
+
+
+
+#### 5.3.3 Spiegelnde Reflexion
+
+Helle Lichtspots auf glatten, spiegelnden Flächen, wie Plastik oder Metalloberflächen werden durch diesen Anteil simuliert. Die Spiegelnde Reflexion ist einmal vom Winkel zwischen der
+
+Beleuchtungsquelle L und der Oberflächennormalen N abhängig, aber auch vom Winkel zwischen dem Beobachtungsvektor V und dem Reflexionsvektor R , der sich geometrisch durch die Rechnung "Einfallswinkel gleich Ausfallswinkel" des Lichtes an der Oberfläche berechnet. Die Größe des Lichtspots wird durch die Potenz n des Cosinus von bestimmt. Für eine ideale Spiegeloberfläche geht n gegen unendlich. Auch der Betrag dieses Anteils wird durch einen Koeffizienten k s und der Intensität der Lichtquelle I 0 gesteuert.
+
+$$I_s = I_0 k_s \cos^n \alpha$$
+
+$$I_s = I_0 k_s (\vec{R} \cdot \vec{V})^n$$
+
+Berechnung von R nach Abbildung 5.4:
+
+$$\vec{R} = \vec{N} \cos \theta + \vec{S}$$
+
+$$\vec{S} = \vec{N} \cos \theta - \vec{L}$$
+ daraus folgt
+
+R=2 N cos− L mit cos=N⋅ L lässt sich R berechnen als
+
+$$\vec{R}=2\vec{N}\cos\theta-\vec{L}$$
+ mit  $\cos\theta=\vec{N}\cdot\vec{L}$  lässt sich  $\vec{R}$  berechnen als
+
+$$\vec{R}=2\vec{N}(\vec{N}\cdot\vec{L})-\vec{L}$$
+
+Für den spiegelnden Lichtanteil mit n=1 ergibt sich:
+
+$$I_s = I_0 k_s (2\vec{N}(\vec{N} \cdot \vec{L}) - \vec{L}) \cdot \vec{V}$$
+
+Abbildung 5.4: Spiegelnde Reflexion
+
+
+
+
+
+### 5.4 Abtastung, Interpolation und Integration
+
+Medizinische Aufnahmen durch CT oder MRT haben nur eine Auflösung von etwa einem Millimeter. Kleinere Strukturen sind somit aus den Daten nicht rekonstruierbar. In Abbildung 5.5 sieht man als Beispiel deutlich, dass die feine Spitze im Maximum der Kurve in den diskreten Volumendaten nicht mehr zu sehen ist.
+
+Ähnliches gilt auch für künstlich erzeugte Volumendaten für die Computergrafik, die immer nur eine endliche Ortsauflösung besitzen.
+
+Abbildung 5.5: Erzeugung der Volumendaten durch einen CT-Scan
+
+Als Eingangsdaten für den jeweiligen Volume-Rendering-Algorithmus stehen nur die diskreten Volumendaten auf einem orthogonalen Gitternetz, wie in Abbildung 5.6 angedeutet zur Verfügung. Dadurch kann aus den Volumendaten auch keine detailliertere Information gewonnen werden.
+
+Abbildung 5.6: Abtastung der diskreten Volumendaten und Interpolation
+
+Bei der Visualisierung mit dem Ray-Casting-Algorithmus werden von einer beliebig im Raum liegenden Projektions- oder Bildebene, virtuelle Sehstrahlen durch das Volumen gesendet. Diese
+
+
+
+
+
+
+
+können perspektivisch auseinander laufen. Entlang der Strahlen werden in gleichmäßigen Abständen Abtastpunkte gesetzt und deren Werte an die weitere Berechnung weitergegeben. Da die Abtastpunkte zwischen den Gitterpunkten der Volumendaten liegen können, muss man sie entweder einem Gitterpunkt zuordnen, oder durch Interpolation einen Mittelwert berechnen.
+
+Die Zuordnung zu einem Gitterpunkt, die auch Nearest-Neighbour-Interpolation genannt wird, entstehen Treppenstufen (Abbildung 5.6). Sie stellt eine eher schlechte Approximation der originalen Dichtefunktion dar. Sie hat den Vorteil, das nur ein Wert ausgelesen werden muss, führt aber zu einer sehr schlechten Bildqualität.
+
+Für den aus der Signaltheorie bekannten Idealfall, die Interpolation mit Hilfe einer sin x x -
+
+Approximationsfunktion oder dem nahe kommenden Filter, müsste eine größere Nachbarschaft zur Berechnung ausgelesen werden, vor allem da die Interpolation in drei Dimensionen durchgeführt werden muss. Da bei Hardware-Realisierungen für Volume-Rendering das Auslesen der Daten den Flaschenhals bilden, kommt dies aber für Echtzeit-Systeme nicht in Frage. Der beste Kompromiss zwischen dem Aufwand für das Auslesen der Umgebung und der Bildqualität ist sicherlich die lineare, oder im dreidimensionalen, eine trilineare Interpolation. Sie benötigt nur die acht um den Abtastpunkt liegenden Datenpunkte.
+
+Die trilineare Interpolation zeigt Artefakte, die vor allem bei starken Vergrößerungen als Kanten an den Rändern der Volumenelemente sichtbar werden. Es gibt Ansätze, die Oberfläche beispielsweise durch eine kubische Interpolation zu glätten [53], allerdings bedeutet das einen wesentlich größeren Rechenaufwand pro Abtastpunkt und erfordert ebenfalls das Einlesen einer größeren Umgebung. Glatte Oberflächen sind für die Computergrafik interessant, in der medizinischen Anwendung ist es aber besser, wenn die Grenzen der Auflösung bei der Visualisierung noch erkennbar bleiben.
+
+Wenn die trilineare Interpolation durch die Hardware vorgegeben ist, was geschieht dann bei Überabtastung der diskreten Volumendaten?
+
+Wie Abbildung 5.7 verdeutlichen soll, bekommt man durch die Interpolation zwar zusätzliche Zwischenwerte, aber es wird keine zusätzliche Information gewonnen. Will man also alle in den Volumendaten enthaltene Details erkennen, würde eine Abtastweite, die dem Gitterraster entspricht, ausreichen. Vor allem reduziert eine Überabtastung erheblich die Bildwiederholrate, da eine Verdopplung der Abtastrate im Raum acht mal so viele Abtastpunkte generiert.
+
+
+
+Es gibt dennoch einige Gründe, die für die Überabtastung sprechen. Einmal wird sie oft angewendet, um eine Vergrößerung eines Ausschnitts zu erhalten, oder um bei perspektivischer Darstellung auch im hinteren Volumenbereich noch alle Volumenelemente mit einzubeziehen.
+
+Ein weiterer Grund, der eine Überabtastung sinnvoll macht, ist eine Verringerung des Fehlers bei der numerischen Integration der Reflexionen entlang des Strahls. In den meisten Realisierungen wird der Einfachheit halber die numerische Integration mit der Rechteckregel verwendet, also alle Reflexionen werden einfach addiert. Wie de Boer in [82] beschreibt, ist der dabei entstehende Fehler nicht unerheblich. Er zeigt sich als Artefakt mit gut sichtbaren regelmäßigen Streifen und kann durch Überabtastung minimiert werden.
+
+Ein anderer Weg sind verbesserte Integrationsverfahren, wie zum Beispiel die lineare Approximation mit der Trapezregel durch Pre-Integration. Dadurch können auch ohne Überabtastung gute Bilder gewonnen werden. Es erfordert aber mehr Berechnungsschritte pro Abtastpunkt und macht als Hardware-Realisierung das Rechenwerk aufwändiger [47]. Das Verfahren kann ohne weiteres auch in der hier vorgestellten Architektur integriert werden. Es realisiert das Trapezverfahren mit Hilfe von Look-Up-Tabellen. Das Shading basiert hier nicht, wie bei der herkömmlichen Methode, auf dem Wert eines Abtastpunktes, sondern zweier aufeinander folgenden Abtastpunkten. Mit beiden Abtastpunkten werden innerhalb des Shadings und der Klassifikation die Look-Up-Tabellen adressiert. In [44] wurde beispielsweise eine Gewichtung für die Korrektur der Gradienten, ein Absorptionsfaktor und die Faktoren für den ambienten, spiegelnden und diffusen Lichtanteil, berücksichtigt. In [78] wurde das Verfahren näher untersucht. Der Autor konnte zeigen, dass durch Pre-Integration alleine nicht alle Artefakte verschwinden. Erst eine zusätzliche vierfache Überabtastung konnte einwandfreie Ergebnisse hervorbringen. Eine noch höhere Überabtastung zeigte keine weitere Verbesserung.
+
+Eine weiter interessante Methode die Dichtefunktion mittels Bézier-Kurven nachzubilden wurde in [25] veröffentlicht, so dass ebenfalls ohne Überabtastung artefaktfreie Bilder entstehen.
+
+#### 5.4.1 Absorption
+
+Beim ursprünglichen Phong-Shading-Beleuchtungsmodel, das für Oberflächengrafiken entwickelt wurde, ist für den spiegelnden und den diffusen Anteil eine Dämpfung der Lichtquelle vorgesehen, die abhängig von der Entfernung zur Lichtquelle ist. Dadurch erscheinen Flächen, die näher an der Lichtquelle liegen, heller. Dies ist für Volumengrafiken nicht praktikabel, da hier Flächen, die näher am Beobachter liegen, hervorgehoben werden sollen. Deshalb wird eine Absorption des Lichtes beim Durchgang durch ein Volumenelement definiert, die proportional zur Opazität des Volumenelementes ist. Je größer also die Opazität ist, um so größer ist die Absorption des Lichtes.
+
+Beim Ray-Casting-Verfahren wird die Absorption beim Durchgang durch die Volumenelemente nur für die Reflexionsanteile zum Beobachter berücksichtigt. Die Lichtquellen beleuchten jedes Volumenelement gleich. Die Reflexion nach dem Durchgang durch ein Volumenelement i wird näherungsweise [22, 32] berechnet durch:
+
+$$I_{i-1}=I_i*(1-O_i)$$
+
+Die Opazität O wurde durch die Klassifikation auf einen Wert zwischen 0 und 1 skaliert. Bei der maximal möglichen Opazität wird das Licht somit schon bei einem Volumenelement vollständig absorbiert.
+
+Zur Modellierung verschiedener Materialeigenschaften kann die Opazität für die einzelnen Farben des Lichtes unterschiedlich sein.
+
+Bilder oder Objekte zu einem Gesamtbild beschrieben [32]. In der Volumengrafik werden die Abtastpunkte entlang eines Lichtstrahls als hintereinander liegende, halbtransparente Bildpunkte betrachtet, die auf gleiche Weise überlagert werden.
+
+Für jeden Abtastpunkt wird zuerst die Gesamtreflexion durch Addition der ambienten, diffusen und spiegelnden Lichtanteile bestimmt:
+
+$$I_{phong} = I_a + I_d + I_s$$
+
+Für die Reflexion des vorhergehenden Abtastpunktes wird die Absorption berechnet und die Reflexion im aktuellen Abtastpunkt wird mit der Opazität gewichtet. Beide werden addiert und ergeben die Gesamtreflexion in Richtung des Beobachters:
+
+$$I_{out,i} = I_{phong,i} O_i + I_{out,i-1} (1 - O_{i-1})$$
+
+Die Integration über alle Abtastpunkte sieht wie folgt aus:
+
+$$I_{ges} = \sum_{i=0}^N \left[ I_{phong,i} O_i \prod_{j=0}^{i-1} (1-O_j) \right]$$
+ wobei  $I_{phong,N} = \text{Hintergrund}$  und  $O_N = 1$ , wodurch der
+
+hinterste Abtastpunkt als undurchsichtig angenommen wird.
+
+Es werden über alle N Abtastpunkte eines Sehstrahls die Reflexionen addiert ( ∑ i=0 N .. ), wobei die Reflexionen, durch die Absorption, beim Durchgang durch das Volumen bis zur Projektionsebene abgeschwächt werden ( ∏ j=0 i−1 .. ).
+
+Vor allem bei medizinischen Anwendungen ist man an der Visualisierung von Übergängen zwischen Geweben interessiert und nicht an den homogenen Bereichen innerhalb.
+
+Um die Übergänge mehr zu betonen kann jede Opazität eines Abtastpunktes mit dem Betrag des Gradienten ∣∇ f i ∣ an dieser Stelle gewichtet werden. Der Betrag des Gradienten kann als Wahrscheinlichkeitsmaß für die Existenz einer Oberfläche angesehen werden:
+
+$$I_{ges} = \sum_{i=0}^N \left[ I_{phong,i} O_i |\nabla f_i| \prod_{j=0}^{i-1} (1-O_j) \right]$$
+
+Levoy [22] macht diese Gewichtung schon während der Klassifizierung und rechnet den Gradienten schon in die Opazität mit ein. Für die Realisierung in Hardware ist dieser Schritt beim Compositing einfacher, da die Klassifizierung durch eine einfache Look-Up-Tabelle (Dichte zu Opazität) umgesetzt werden kann. Eine Look-Up-Tabelle mit der Dichte und den drei Komponenten des Gradienten als Eingangsvektor wäre schwerer realisierbar.
+
+# 6 Hardware-Implementierung der Rendering-Pipeline
+
+#### 6.1 Pipeline-Architektur
+
+Für den Ray-Casting-Algorithmus bauen die Rechenschritte entlang eines Strahls aufeinander auf, da das Ergebnis einer Berechnung für die folgende benötigt wird. Man kann deshalb die Berechnung nicht beschleunigen, in dem man mehrere Rechenwerke parallel verwendet. Zur Beschleunigung muss die Berechnung deshalb in einer Pipeline-Architektur erfolgen.
+
+In einer Pipeline [32] wird die Berechnung in einzelne, synchron ablaufende Stufen unterteilt und durch Register, als Zwischenspeicher, getrennt. In jeder Stufe werden in einer kombinatorischen Schaltung Berechnungen durchgeführt und mit einem Taktsignal das Ergebnis in Register übernommen. Diese Register geben das Ergebnis während des nächsten Taktzykluses an die nächste Pipelinestufe weiter. Die maximale Taktfrequenz orientiert sich an der langsamsten Stufe, weshalb die einzelnen Stufen etwa die gleiche Laufzeit haben sollten.
+
+Da alle Stufen gleichzeitig arbeiten, spricht man bei einer Pipeline von einer zeitlichen Parallelisierung des Arbeitsablaufes.
+
+Kenngrößen einer Pipeline sind Durchsatz und Verzögerung. Der Durchsatz entspricht der Gesamtrate, mit der die Daten verarbeitet werden und die Verzögerung ist die Zeit, die ein Datum für den kompletten Durchlauf benötigt. Falls der Durchsatz nicht ausreicht, müssen die Pipeline-Stufen, soweit möglich, weiter unterteilt werden und zusätzliche Verzögerungsstufen eingebaut werden.
+
+Dies soll am Beispiel einer linearen Interpolationsberechnung, wie sie in Kapitel 6.5 benötigt wird, erläutert werden [34].
+
+Die lineare Interpolation (Abbildung 6.1) hat die Form c=bxa*1−*x . In der Grundform sind eine Addition, eine Subtraktion und zwei Multiplikationen erforderlich. Eine einfache Umstellung
+
+Abbildung 6.1: lineare Interpolation
+
+
+
+#### zu c=ab−a x spart eine Multiplikation.
+
+Abbildung 6.2 zeigt die zugehörige Schaltung, als eine Pipelinestufe. Angenommen, eine Addition benötigt in der Zielhardware 5 ns und eine Multiplikation 15 ns, dann wäre die Gesamtlaufzeit 25 ns. Diese Stufe könnte mit 40 MHz betrieben werden und hätte nur eine Taktperiode Verzögerung.
+
+Soll eine höhere Taktfrequenz erreicht werden, kann man dies durch Einfügen zusätzlicher Register ermöglichen (Abbildung 6.3). Die maximale Taktfrequenz der Schaltung wird durch die langsamste Stufe, in diesem Fall der Multiplizierer mit 15 ns, auf 66 MHz begrenzt. Man nimmt allerdings jetzt in Kauf, dass das zum Eingang passenden Ergebnis erst drei Takte später ausgelesen werden kann; trotzdem wurde der Datendurchsatz entsprechend der Taktfrequenz erhöht.
+
+Alle im Folgenden erläuterten Berechnungsstufen für das Volume-Rendering-Verfahren müssen in dieser Hinsicht auf die erforderliche Taktfrequenz unter Berücksichtigung des zur Verfügung stehenden Platzes optimiert werden. Da dies stark von der Ziel-Hardware und von den dort zur Verfügung stehenden Grundelementen abhängt, werden nur Prinzipschaltbilder ohne Zwischenregister gezeigt.
+
+Abbildung 6.2: Schaltung der linearen Interpolation
+
+
+
+Abbildung 6.3: Schaltung der linearen Interpolation als Pipeline
+
+
+
+## 6.2 Übersicht über die Rendering-Pipeline
+
+In Abbildung 6.4 ist der Ablaufplan der Rendering-Pipeline zu sehen. Die Hardware-Realisierung der einzelnen Komponenten wird im Folgenden beschrieben.
+
+Da in dieser Arbeit das Augenmerk auf der Realisierbarkeit der algorithmischen Optimierungen lag und die Implementierungsmöglichkeit in einer FPGA-Hardware im Vordergrund stand, wird eine möglichst einfache Rendering-Pipeline gewählt. So wurde auf die Implementierung von Farbe verzichtet und die Datenbusbreiten auf ein vertretbares Minimum reduziert und durch die Simulation überprüft.
+
+Abbildung 6.4: Verwendete Rendering-Pipeline
+
+
+
+maximalen Datendurchsatz zu erhalten. Der Speicherkontroller kann über ein Steuersignal die gesamte Abarbeitung unterbrechen, wenn Seitenwechsel oder Refresh-Zyklen der Speicher notwendig werden.
+
+#### 6.3 Adressgenerierung
+
+Die Adressgenerierung muss die Volumenspeicheradressen der acht Volumenelemente eines 23 - Subwürfels (S0-S7) um einen Abtastpunkt bestimmen und an die Speicherkontroller weitergeben. Die Position des Abtastpunktes zwischen den Gitterpunkten der Volumenelemente wird an die Interpolation weitergegeben (siehe Abbildung 6.5). Dies muss fortlaufend entlang eines Sehstrahls für jeden Abtastpunkt ablaufen.
+
+Die Adressgenerierung erhält als Parameter einen dreidimensionalen Startpunkt P(X,Y,Z) des Sehstrahls und einen Differenzvektor Δ(X,Y,Z), der die Richtung des Sehstrahls und dessen Betrag die Abtastweite angibt. Zusätzlich wird noch die Gesamtlänge des Sehstrahls (L) benötigt.
+
+Die drei Koordinaten des Startpunktes und des Differenzvektors können durch binäre Festkommazahlen mit Vorzeichen repräsentiert werden. So wird beispielsweise P(X,Y,Z) dargestellt mit den Bit:
+
+|              | Vorzeichen | Vorkomastellen | Nachkomastellen |
+|--------------|------------|----------------|-----------------|
+| X-Koordinate | vx         | xn             |                 |
+|              |            | ..x0           | x-1..x-m        |
+| Y-Koordinate | vy         | yn             |                 |
+|              |            | ..y0           | y-1..y-m        |
+| Z-Koordinate | vz         | zn             |                 |
+|              |            | ..z0           | z-1..z-m        |
+
+Abbildung 6.5: Prinzipschaltbild des Adressgenerators für einen Strahl
+
+
+
+Die aufeinander folgenden Abtastpunkte werden durch wiederholte Addition des Differenzvektors zum Startpunkt bestimmt. Mit jeder Addition wird der Längenparameter des Sehstrahls dekrementiert, um so ein Abbruchkriterium zu erhalten.
+
+Die Vorkommastellen der Koordinaten des Abtastpunktes bestimmen das erste Volumenelement im Volumenspeicher. In Abbildung 6.5 entspricht dies dem Volumenelement S0. Die anderen 7 Volumenelemente werden durch entsprechende Erhöhung der X-,Y-und Z-Koordinaten bestimmt. Die räumliche Anordnung der Volumenelemente ist in Abbildung 6.6 zu sehen.
+
+Die einzelnen Bit der Vorkommastellen können direkt den Adressbit des Volumenspeichers, wie in Kapitel 7.5 erläutert, zugewiesen werden.
+
+Die drei Nachkommaanteile (x-1..x-m, y-1..y-m, z-1..z-m) entsprechen der Position des Abtastpunktes zwischen den Gitterpunkten des Volumenrasters und werden, zumindest teilweise (8 Bit), an die Interpolation weitergereicht. Zusätzlich werden noch die LSBI der Vorkommastellen (x0 , y0 , z0 ) in der Interpolation benötigt, was in Kapitel 6.5 erläutert wird.
+
+Die Schaltung der Adressgenerierung besteht prinzipiell nur aus Registern, Addierern und einigen Vergleichern.
+
+Die Vergleicher überprüfen, ob der Abtastpunkt sich innerhalb des Volumens befindet und generieren für jede Adresse ein valid-Signal. An den Randgebieten und außerhalb des Volumens können mehrere Koordinaten der acht Volumenelemente ungültig sein. Falls die Anzahl der Vorkommastellen genau auf den Speicher abgestimmt sind, reicht die Überprüfung, ob die Koordinate negativ ist, da dies bei einem Übertrag der Addition ebenfalls vorkommt. Ansonsten müsste auch auf die maximale Dimension des Speichers überprüft werden.
+
+Falls eine der Koordinaten eines Volumenelementes ungültig ist, dürfen keine Daten aus dem Speicher gelesen werden, sondern es muss eine 0 statt eines Speicherwertes zur Berechnung in der Interpolation verwendet werden.
+
+#### Genauigkeitsabschätzung:
+
+Die Busbreiten wurden wie folgt berechnet.
+
+Ein Volumen mit der Größe 10243 soll maximal zweifach überabgetastet werden. Dabei soll der maximale Fehler beim Durchgang durch das gesamte Volumen etwa ein halbes Volumenelement betragen.
+
+Bei zweifacher Überabtastung ist die doppelte Anzahl an Additionen zur Durchquerung des Würfels
+
+I LSB: Least Significant Bit, Bit mit der geringsten Wertigkeit
+
+pro Koordinate notwendig. Ohne die Diagonale des Würfels zu berücksichtigen, wären dies 2048 Additionen.
+
+Soll dabei der Fehler maximal ein halbes Volumenelement betragen, muss die kleinste darstellbare Schrittweite 0.5 2048=244∗10−6 betragen. Daraus kann für die Adressberechnung minimale Genauigkeit als Anzahl der binären Vor- und Nachkommastellen berechnet werden:
+
+Vorkommastellen: log21024=10
+
+Nachkommastellen: ∣log2244∗10−6 ∣=12
+
+Die hohe Genauigkeit der Nachkommastellen ist nur für die rekursiv ausgeführte Addition des Differenzvektors notwendig. Für die Weitergabe an die Interpolation reichen 8 Bit aus.
+
+Die Koordinaten des Startpunktes haben somit eine Breite von 23 Bit, inklusive Vorzeichen.
+
+Beim Differenzvektor genügen 2 Vorkommastellen und ein Vorzeichenbit, da selten mehr als eine vierfache Unterabtastung sinnvoll ist, daher werden für seine Koordinaten 15 Bit benötigt.
+
+### 6.4 Speicherkontroller
+
+Der Speicherkontroller wird hier nur der Vollständigkeit halber im Vorgriff auf Kapitel 7.3.2 erwähnt, in welchem die Funktionsweise von SDRAMI -Bausteinen und die daraus resultierende Arbeitsweise des Kontrollers beschrieben werden.
+
+Für die Realisierung eines Speicherkontrollers für SDRAM-Bausteine in FPGAs gibt es für die größeren FPGA-Bausteine fertige Makrozellen. Diese unterstützen aber nur ein Speichermodul. Für das hier beschrieben Ray-Casting-System sind aber acht getrennt adressierbare Speichermodule notwendig, um die acht Volumenelemente parallel für die Interpolation zur Verfügung stellen zu können.
+
+Es wäre möglich, für die Speicherkontroller einfach acht Makrozellen zu verwenden. Ressourcen schonender ist es allerdings, einen speziellen Kontroller für acht Speichermodule zu entwickeln, da viele Funktionen, wie der Refresh, auf alle Module gleichzeitig angewendet werden können. Nur die Funktionen für Lesen und Schreiben müssen für die acht Module getrennt ausgelegt werden. Die genaue Realisierung des Speicherkontrollers, als VHDL-Beschreibung, ist in [33] einzusehen.
+
+## 6.5 Interpolation und Gradientenbestimmung
+
+I SDRAM: Synchronous Dynamic Random Access Memory

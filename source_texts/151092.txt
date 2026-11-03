@@ -1,0 +1,2660 @@
+TurboGS: Accelerating 3D Gaussian Splatting via Error-Guided
+Sparse Pixel Sampling and Optimization
+Zheng Dong† 1 Daifei Qiu 2 Pinxuan Dai 3 Ke Xu 4 Jiamin Xu 5 Lili He 1 Rynson W.H. Lau 4 Weiwei Xu† 3
+741 s
+arXiv:2606.15924v1 [cs.CV] 14 Jun 2026
+Abstract
+Consumer-level applications require fast optimization of 3D Gaussian Splatting (3DGS) with highfidelity novel view rendering. However, existing
+3DGS acceleration approaches still incur substantial computation on redundant pixels while sacrificing fine details. In this paper, we present TurboGS, an error-guided training framework that accelerates 3DGS by concentrating optimization on
+perceptually informative pixels. TurboGS is built
+upon four core components: (1) a tile-wise sparse
+pixel sampling, which, driven by multi-view reconstruction errors during training, prioritizes
+challenging regions and skips well-reconstructed
+ones to avoid redundant gradient computation;
+(2) a tile-wise structure-aware loss with sparse
+Normalized Cross-Correlation, which provides
+sparse yet effective supervision to preserve fine
+details and stabilize training; (3) an error-driven
+Gaussian density control strategy, which dynamically allocates model capacity and removes redundant primitives; and (4) a tailored hybrid optimizer that couples Hessian-informed updates with
+Adam moment damping to stabilize and improve
+convergence under sparse supervision. Experiments on standard benchmarks demonstrate that
+TurboGS can deliver on par or superior rendering
+quality within 100 seconds (up to ∼10× training
+speedup over vanilla 3DGS).
+23.40 dB
+Speedy-Splat
+0.766
+101 s
+25.24 dB
+0.22M
+Ours
+0.770
+0.57M
+224 s
+24.11 dB
+Taming-3DGS
+0.794
+102 s
+25.76 dB
+0.62M
+Ours
+0.818
+Gaussian Points
+0.85M
+104 s
+21.37 dB
+FastGS
+0.575
+73 s
+22.06 dB
+0.45M
+Ours
+0.580
+0.78M
+Ground
+Truth
+Depth
+Map
+Depth Map
+Gaussian Points
+Park
+PSNR / SSIM / N GS
+Rome
+PSNR / SSIM / N GS
+Flower
+PSNR / SSIM / N GS
+Figure 1. We propose TurboGS, a novel framework that accelerates 3DGS optimization while delivering high-quality novel view
+rendering results with notable details across scene scales.
+strate impressive rendering fidelity, yet require hours to
+days of per-scene optimization. Despite substantial progress
+on acceleration (Muller et al., 2022; Hedman et al., 2021),
+NeRF-style approaches still struggle to simultaneously balance optimization time, memory footprint, and rendering
+quality of high-frequency details. On the other hand, by
+representing scenes with explicit Gaussian primitives, 3D
+Gaussian Splatting (3DGS) (Kerbl et al., 2023) offers fast
+optimization and rendering that achieves NeRF-comparable
+quality. Nonetheless, to satisfy consumer-facing or timesensitive real-world applications, accelerating 3DGS (e.g.,
+with tight computation budgets or under large-scale/fastturnaround settings (Liu et al., 2024; Zhu et al., 2026))
+remains highly desirable.
+1. Introduction
+Novel view synthesis (NVS) is a long-standing and challenging research topic with downstream applications such
+as VR/AR. In recent years, Neural Radiance Fields
+(NeRF) (Mildenhall et al., 2020) and their variants demon-
+Existing 3DGS acceleration methods largely fall into two
+categories. A group of works accelerates the rendering
+and backpropagation procedures via improved rasterization (Hanson et al., 2025a; Feng et al., 2025) or near-secondorder optimizers (Höllein et al., 2025; Lan et al., 2025). The
+other group of methods focuses on controlling the Gaussian primitive complexity (i.e., adaptive density control)
+by scheduling the primitive growth or pruning redundant
+Gaussians (Mallick et al., 2024; Chen et al., 2025; Fang
+& Wang, 2024; Hanson et al., 2025b; Papantonakis et al.,
+2024b; Wang et al., 2024; Baranowski et al., 2026). De-
+1
+Zhejiang Sci-Tech University 2 Malanshan Audio&Video Laboratory 3 CAD&CG Laboratory, Zhejiang University 4 City University of Hong Kong 5 Hangzhou Dianzi University. Correspondence to: Zheng Dong†, Weiwei Xu† <zhengdong@zstu.edu.cn,
+xww@cad.zju.edu.cn>.
+Proceedings of the 43 rd International Conference on Machine
+Learning, Seoul, South Korea. PMLR 306, 2026. Copyright 2026
+by the author(s).
+1
+TurboGS: Accelerating 3D Gaussian Splatting via Error-Guided Sparse Pixel Sampling and Optimization
+4.0 s
+spite their success, as shown in Fig. 1(first row), existing
+approaches typically suffer from (1) substantial redundant
+computation in well-reconstructed regions due to their uniform optimization of pixels: rasterizing and backpropagating dense pixels/tiles per iteration during training; and (2)
+loss of fine details due to their aggressive primitive pruning.
+20.82 dB
+8.0 s
+22.14 dB
+60.0 s
+25.06dB
+73.0 s
+25.27 dB
+TurboGS-Big (more Iters.)
+TurboGS
+To address these problems, we draw inspiration from the
+sparse ray sampling for optimizing NeRF (Mildenhall et al.,
+2020), where focusing on a set of informative rays improves
+efficiency. Analogously, we observe that during 3DGS optimization, residual errors are typically distributed across a
+small subset of difficult pixels (e.g., edges, thin structures,
+and other high-frequency regions), while a large portion of
+pixels quickly becomes low-error and contributes marginal
+gradients. Repeated rasterization in such well-reconstructed
+regions may hinder convergence under a fixed time budget.
+To this end, we ask: can we allocate optimization capacity
+adaptively according to the reconstruction difficulty, instead
+of uniformly over the whole image plane?
+Metric (Avg) on Bicycle (MipNeRF-360 dataset)
+Figure 2. We visualize our intermediate test view rendering results
+(upper part) and training time-PSNR trajectories of existing methods and ours on the Bicycle scene (Yu et al., 2024) (lower part).
+Our method converges faster to better results.
+In this paper, we propose TurboGS, a novel error-guided
+training framework that accelerates 3DGS by focusing optimization on perceptually informative pixels. We first
+propose tile-wise sparse pixel sampling (guided by onlinemaintained multi-view error maps) to prioritize per-iteration
+rasterization and gradient backpropagation on challenging
+regions. Based on the per-tile sparsely sampled pixels, we
+introduce a local structure-aware loss that stabilizes the optimization while preserving fine details, by measuring the
+sparse Normalized Cross-Correlation (NCC). We also propose an error-driven density control mechanism for adaptive
+Gaussian densification and pruning, which improves both
+efficiency and rendering quality by accumulating and leveraging per-Gaussian statistics corresponding to the sparse
+pixel errors. Last, we optimize TurboGS with a new, hybrid
+optimizer that blends Hessian-informed updates with Adam
+moment damping, to achieve stable and fast convergence.
+stable convergence under challenging conditions of sparse,
+non-uniform gradients.
+2. Related Work
+Novel View Synthesis (NVS) attracts significant research
+interest in computer vision and graphics. Neural Radiance
+Fields (NeRF) (Mildenhall et al., 2020) significantly facilitates NVS by implicitly parameterizing scene information via an MLP network, and achieving high-quality image synthesis through volumetric rendering. While NeRFs
+suffer from training overheads, follow-up works combine
+NeRF with explicit or hybrid representations, such as voxels (Fridovich-Keil et al., 2022; Sun et al., 2022), hash
+grids (Muller et al., 2022), point-based formulations (Xu
+et al., 2022), to improve the training or rendering efficiency.
+Alternatively, 3D Gaussian Splatting (3DGS) (Kerbl et al.,
+2023) represents scenes with explicit Gaussian primitives
+and renders images through GPU-friendly rasterization and
+α-compositing, enabling much faster optimization and realtime rendering. Building upon 3DGS, prior works improve
+rendering quality (Hamdi et al., 2024; Lu et al., 2024; Yu
+et al., 2024), enhance surface reconstruction (Guédon &
+Lepetit, 2024; Huang et al., 2024), scale to large scenes or
+high-resolution rendering (Kerbl et al., 2024; Feng et al.,
+2025), and reduce reliance on SfM (Snavely et al., 2006)
+initialization (Ji & Yao, 2025; Pan et al., 2025; Fan et al.,
+2024b). Our TurboGS is inspired by NeRF-style sparse ray
+sampling, where we introduce a tailored principle to 3DGS
+by focusing supervision on informative pixels.
+Extensive experiments on standard benchmarks show that
+TurboGS delivers high-quality rendering results with fine
+details (see Fig. 1(second row)) and converges fast (see
+Fig. 2). In sum, we present the following main contributions:
+• TurboGS, a novel error-guided training framework for
+3DGS that accelerates optimization by dynamically focusing computation on challenging pixels.
+• A tile-wise structure-aware loss based on sparse Normalized Cross-Correlation (NCC) to provide effective supervision from sparse samples, preserving fine details and
+local texture consistency.
+• An error-driven density control strategy that enables targeted densification of challenging regions and pruning of
+redundant Gaussians.
+• A tailored hybrid optimizer that integrates Adam moments
+with Hessian-informed updates, to enable faster and more
+Efficient 3DGS. Recent methods aim to pursue higher efficiency in both training (e.g., density control in Taming3DGS (Mallick et al., 2024)) and rendering (e.g., LoD
+2
+TurboGS: Accelerating 3D Gaussian Splatting via Error-Guided Sparse Pixel Sampling and Optimization
+For a pixel p in view v, 3DGS projects Gaussians to the
+image plane and rasterizes them as 2D splats. Let K(p) be
+the ordered set of Gaussians intersecting pixel p (sorted by
+depth). The rendered color follows alpha compositing:
+X
+Y
+
+Îv (p) =
+Tk (p) αk (p) ck (p), Tk (p) =
+1−αj (p) ,
+structures in Octree-GS (Ren et al., 2025)), while reducing
+the storage overhead induced by large numbers of primitives (Papantonakis et al., 2024a). In contrast, our TurboGS
+allocates the optimization budget over pixels based on reconstruction difficulty and training history.
+Primitive Management (Densification and Pruning). A key
+bottleneck of 3DGS (Kerbl et al., 2023) is the rapid growth
+of Gaussian primitive count, yielding redundancy and slow
+optimization. Recent works control density by refining this
+schedule (Mallick et al., 2024; Hanson et al., 2025a; Chen
+et al., 2025; Kheradmand et al., 2024b; Baranowski et al.,
+2026; Ren et al., 2026), developing stronger pruning criteria (Fan et al., 2024a; Rota Bulò et al., 2024; Fang &
+Wang, 2024), and combining compression with pruning
+for efficiency (Girish et al., 2024). For instance, DashGaussian (Chen et al., 2025) schedules rendering resolution
+with primitive growth, FastGS (Ren et al., 2026) guides
+densification and pruning with multi-view reconstruction
+consistency, HGS (Xu et al., 2026) mines hard Gaussians
+from multi-view positional gradients, 3DGS-MCMC (Kheradmand et al., 2024b) formulates MCMC with SGLD-style
+updates (Brosse et al., 2018; Kheradmand et al., 2024a),
+while Mini-GS (Fang & Wang, 2024) combines depth and
+blurriness cues with splitting and importance-aware pruning.
+In TurboGS, we back-project sparse multi-view pixel errors
+onto Gaussians during rasterization, where the aggregated
+error statistics guide targeted densification and pruning.
+k∈K(p)
+j<k
+(1)
+where αk (p) depends on the projected 2D Gaussian footprint and its opacity. This pipeline is differentiable, enabling
+gradient-based optimization of G.
+Sparse-Pixel Training Setting. Different from vanilla
+3DGS (Kerbl et al., 2023) that rasterizes a dense image
+(or full tiles) for every selected view at each iteration, our
+TurboGS optimizes Gaussian primitives G using a sparse
+set of pixels to reduce redundant computation.
+At iteration t, we first sample a small set of views Vt
+(Sec. 3.4). For each view v ∈ Vt , we then sample a tile-wise
+sparse pixel set Pt,v (Sec. 3.5), where the sampled pixels
+are ordered by their tile indices to match the underlying rasterization schedule. TurboGS executes the standard 3DGS
+training loop only on these sampled pixels, including sparse
+forward rasterization, loss evaluation, and backpropagation.
+To make sparse-pixel training efficient in practice, we introduce modifications to the original rasterization kernels
+via tile-wise pixel mapping and the per-Gaussian backward
+mechanism (Mallick et al., 2024), which restricts computation to the sampled pixel set, i.e., {(v, p) | v ∈ Vt , p ∈
+Pt,v }, while preserving tile-parallel forward execution and
+efficient splat-parallel computation in the backward pass.
+Optimizer and Rasterization Acceleration. Another group of
+recent works improves the efficiency of optimization and rasterization. 3DGS-LM (Höllein et al., 2025) introduces a twostage Adam-to-LM optimization, while stochastic Newtonstyle prioritized per-kernel updates are used in 3DGS2 (Lan
+et al., 2025) for fast convergence. To accelerate training,
+per-splat backward is used in Taming-3DGS (Mallick et al.,
+2024), while StopThePop (Radl et al., 2024), FlashGS (Feng
+et al., 2025), and Speedy-Splat (Hanson et al., 2025a) focus
+on Gaussian–tile pairs with accurate tile intersection. In
+TurboGS, we design an error-guided sparse pixel supervision with a lightweight hybrid solver, which enables more
+efficient optimization and better time–quality tradeoffs.
+3.2. Overview of TurboGS
+Motivated by the observation that, as training progresses,
+only a small subset of pixels remains difficult to reconstruct
+while most become well explained and yield marginal gradients (see the decreasing pixel errors in Fig. 5), TurboGS
+maintains per-pixel statistics to allocate computation to informative pixels throughout training. As shown in Fig. 3
+and Alg. 1, each iteration performs (1) view selection and
+(2) tile-wise sparse pixel sampling guided by pixel error and
+age, followed by (3) sparse pixel rasterization, (4) tile-level
+sparse supervisions, (5) online EMA updates of error and
+age maps, (6) error-driven Gaussian density control, and
+(7) a lightweight hybrid solver for stable sparse training.
+3. Our Proposed Method : TurboGS
+3.1. Preliminary
+3D Gaussian Splatting (3DGS). Given calibrated multiview images {Iv }N
+v=1 with corresponding cameras {Cv },
+and the point cloud derived from the structure-frommotion (SfM) (Snavely et al., 2006) algorithm, 3DGS represents a scene as a set of M anisotropic Gaussian primitives
+G = {gi }M
+i=1 . Each primitive gi is parameterized by geometry and appearance: a 3D center position µi ∈ R3 , a 3D
+covariance Σi ∈ R3×3 (typically via scale si and rotation
+Ri ), an opacity αi ∈ (0, 1), and color coefficients ci .
+3.3. Persistent Pixel-wise Informative Map
+To support error-guided pixel sampling throughout training,
+TurboGS maintains pixel-wise maps for each training view.
+For each view v, we store (i) an error map Ev ∈ RH×W
+that records an online estimate of per-pixel reconstruction
+difficulty, and (ii) an age map Av ∈ NH×W that measures
+how long a pixel has not been sampled. The error map
+3
+TurboGS: Accelerating 3D Gaussian Splatting via Error-Guided Sparse Pixel Sampling and Optimization
+Multi-View Capturing
+Operation Flow
+Baseline 3DGS
+Multi Views
+a b c d e
+Img. a
+Local Details
+Gradient Flow
+3DGS Ours
+View c
+Img. c
+c
+Differentiable Full
+Tile Rasterizer
+L Img.
+gi ∈ G
+qi
+Pixel Loss
+c
+L1 (
+ise
+…
+SH i
+Optimize
+Density
+Error-Driven
+Control
+Density Control
+3D Gaussians
+Err., Idx.
+) + λ . LcS-NCC (
+,
+,
+)
+Preds GTs
+Error-Guided Pixel Sampling
+Err.-Age Mixed Sampling
+View a
+Err.
+Tile Loss
+Pred. GT
+Update
+αi
+ise
+si
+Differentiable
+Pixel Rasterizer
+View a to e
+View e
+.
+μi
+View a
+.
+Gaussians from COLMAP : G
+View Selection
+Img. a to e [Idx.]
+Sparse Pixel Outputs
+Ti
+le
+-w
+SfM Points
+Ti
+le
+-w
+Rome
+TurboGS (Ours)
+Img. e
+…
+Anchor View
+Full Image Rendering
+Projection
+Img. c
+…
+View e
+…
+Error-Prior Imp.
+Sampling
+Age-Prior Stable
+Sampling
+Sampled Pix. : { Err., Age, Idx }
+View a
+View e
+…
+Difficult Tiles
+Reconstructed Error Maps (Pixel-wise)
+Figure 3. TurboGS framework overview. Unlike existing 3DGS (Kerbl et al., 2023; Mallick et al., 2024; Ren et al., 2026) methods
+that rasterize the entire tile in each iteration, TurboGS allocates more attention to pixels that are difficult to reconstruct and reduces
+gradient backpropagation in well-interpreted regions, thereby lowering the rasterization cost per iteration. To achieve this, TurboGS
+records multi-view pixel reconstruction errors and performs tile-wise sparse pixel sampling based on pixel error and age. Built upon this
+sparse sampling scheme, we further incorporate a local structure-aware loss and error-driven density control to preserve fine details.
+View-Error Stack
+VIdx. 0
+Err. 2
+VIdx. 2
+Err. 3
+VIdx. 3
+Err. N-1
+p ∈ Pt,v ,
+(2)
+VIdx. N-1
+VIdx. 0
+view d
+ir.
+d
+M
+Pop
+3
+x.
+ws
+Vie
+VIdx. 1
+VIdx. 2
+VIdx. 3
+1) Pos Distance
+2) Dir. Cos. Distance
+VIdx. N-1
+No Replacement
+Figure 4. View selection in TurboGS. An anchor view is chosen
+based on view errors, followed by geometry-aware sampling of
+K−1 nearby views from a candidate stack. Selected views are
+then removed from the stack to avoid repeated sampling.
+EMA Update of Pixel Errors. We update Ev only at
+sampled locations using an exponential moving average:
+Ev (p) ← (1 − β) Ev (p) + β et,v (p),
+VIdx. 1
+VI
+Anchor View Selection
+and we initialize error map Ev by densely evaluating e0,v (p)
+for each pixel rendered by initial Gaussian G0 .
+Anchor
+Stack Updating
+Repeat Sampling
+pos. dist
+. 10
+VIdx. 1
+dx
+VIdx. 0
+Err. 1
+VI
+Err. 0
+…
+Sparse Pixel Loss as Error Signal. For sampled pixels, we
+compute a per-pixel reconstruction error, as:
+et,v (p) = Ît,v (p) − Iv (p) 1 ,
+Neighbor View Sampling
+…
+promotes exploitation of difficult regions, while the age
+map encourages periodic revisiting of neglected pixels to
+refresh outdated estimates and to avoid over-focusing on a
+small set of persistently high-error locations.
+p ∈ Pt,v , (3)
+where Ω denotes the image domain. We then sample the
+remaining K−1 views without repetition according to a
+geometry-aware distribution that favors nearby cameras with
+similar viewing directions to the selected anchor view:
+and keep other pixels unchanged. This avoids re-estimating
+errors over all pixels at every iteration. Fig. 5 illustrates the
+error map Ev update process during training.
+Pixel Age Update. We increment the age of all pixels
+globally and reset the age of sampled pixels:
+(
+0,
+p ∈ Pt,v ,
+Av (p) ←
+(4)
+Av (p) + 1, otherwise.
+
+
+π(u | v ⋆ ) ∝ exp −λd ∥cu −cv⋆ ∥2 −λθ 1−⟨du , dv⋆ ⟩ ,
+(6)
+where cu and du denote the camera center and unit viewing
+direction of the view u. In practice, we maintain a shuffled
+view stack and draw the K views without replacement
+by popping sampled indices from the stack, which will be
+refilled and reshuffled once fewer than K views remain.
+In practice, we store Ev and Av in contiguous GPU memories, and use half precision for Ev and uint16 for Av .
+3.4. Geometry-Aware View Sampling
+3.5. Tile-Wise Error-Guided Sparse Pixel Sampling
+At iteration t, we sample K views to form a view set Vt As
+shown in Fig. 3 and Fig. 4, we first choose an anchor view
+according to the average error over its full pixels,
+1 X
+Ēv =
+Ev (p),
+v ⋆ = arg max Ēv , (5)
+v
+|Ω|
+We partition each image into several tiles of size S×S (e.g.,
+16×16). For each selected view v at iteration t, TurboGS
+
+samples a fixed number, i.e., Npix = max 1, ⌊rt · S 2 ⌋ of
+pixels within each tile to form Pt,v , where rt denotes the
+pixel sampling rate. We further split Npix into a hard set
+p∈Ω
+4
+TurboGS: Accelerating 3D Gaussian Splatting via Error-Guided Sparse Pixel Sampling and Optimization
+20 s
+Pixel Error
+40 s
+96 s
+Differentiable Pixel Rasterizer
+Per-Tile Pixel Parallelization (Forward)
+Tile-Pixel Parallel
+T0
+Rendering
+T1
+T2
+Err. Col.
+TN Current Tile
+Training …
+Rendering
+20 s
+Rendered Tiles
+82 s
+40 s
+T0
+Tile-Pixel Offsets
+Nvalid
+4
+0
+7
+T2
+Npix = end - start
+Nvalid
+Grid :
+…
+T1
+Block : max(Npix)
+Thread : 1 pixel
+Store for Backward
+…
+P1 P2 P0 P3
+T0 (4 Pix.)
+Tile Indices
+P4 P6 P5
+Sampled_T
+Sampled_ar
+T1 (3 Pix.)
+…
+Per-Gaussian Splat Parallelization on Sparse Pixels (Backward)
+Pixel Error
+26.99 dB
+27.98 dB
+…
+Active Splats
+1
+Share Mem
+(per Warp)
+31
+Pixel States
+32 Gaussians
+per Warp
+Err. Col.
+20 s
+40 s
+T
+for this strip
+Sparse Pixels
+K <= 32 this strip
+Err.
+Figure 5. Visualization of error maps during training. Pixelwise error maps and corresponding renderings over training (upper:
+Amsterdam; lower: Street). As optimization proceeds, pixel errors
+gradually weaken as reconstruction quality improves, and the error
+maps flatten toward predominantly low-frequency residuals.
+Error-Prior Importance Sampling. For a tile τ , we define
+an error-based sampling distribution over its pixels:
+p ∈ τ,
+2
+3
+… 31
+…
+S0
+1
+S1
+S0
+2
+S2
+S1
+S0
+3
+S3
+S2
+S1
+…
+…
+S0
+…
+Diagonal Sweep over Pixels & Warp Shuffle
+sampled pixel indices and rasterize only sparse pixels. For
+the backward pass, following the splat-parallel strategy of
+Taming-3DGS (Mallick et al., 2024), we retrieve sparse
+pixels within each tile through tile-pixel indexing and propagate gradients via warp shuffle only over sampled pixels,
+avoiding dense rasterization replay while preserving efficient gradient accumulation.
+and a stable set, with Nhard = ⌊rhard · Npix ⌉, and Nstable =
+⌊rstable · Npix ⌉, satisfying Nhard + Nstable ≤ Npix .
+Ev (p)
+,
+q∈τ Ev (q) + ϵ
+Cooperative Load
+1
+0
+Figure 6. Pixel rasterization in TurboGS. Forward rasterization
+follows tile-parallel execution by organizing sampled pixels in tile
+order, while the backward pass adopts per-Gaussian splat parallelization to propagate gradients only over sparse sampled pixels.
+Col.
+πE (p | τ, v) = P
+grad
+…
+P0 P1 … PK-1
+82 s
+ar
+0
+Sparse Pixels K = 4
+0
+24.89 dB
+3.7. Sparse Supervision with Tile-Level NCC
+(7)
+Sparse supervision can be unreliable when relying only on
+pixel-wise losses (only ℓ1 loss in Tab. 4 and w/o S-NCC in
+Fig. 11). To better preserve local structures, we introduce a
+tile-level sparse NCC regularization on sampled pixels.
+where Ev (p) is the current error-map value (Sec. 3.3). We
+then draw Nhard hard pixels from the tile τ by multinomial
+sampling based on πE (· | τ, v) without replacement.
+For a tile τ in view v, we compute a sparse Normalized
+Cross-Correlation (NCC) similarity over the sampled pixels
+Pt,v (τ ) and define the tile-wise structure loss:
+Age-Prior Stable Sampling. Let Ht,v (τ ) be the selected
+hard pixels in tile τ . We draw age-prior stable pixels from
+the remaining pixel set, τ \ Ht,v (τ ), as:
+
+St,v (τ ) = TopKp∈τ \Ht,v (τ ) Av (p), Nstable , (8)
+
+LτS-NCC = 1 − NCC Ît,v (Pt,v (τ )), Iv (Pt,v (τ )) .
+where Av (p) is the age map and TopK(·, Nstable ) returns
+the Nstable pixels with the largest ages.
+(9)
+Gradient-Balanced Weighting. Instead of using a fixed
+NCC weight, we balance the loss by the ratio of the average
+gradient norms of the ℓ1 and NCC terms within each tile:
+Finally, the sampled pixels in tile τ are Pt,v (τ
+S) = Ht,v (τ )∪
+St,v (τ ), and the full sampled set is Pt,v = τ Pt,v (τ ).
+
+λτncc = clip
+ḡℓτ1
+
+, 0, 1 ,
+τ
+ḡS-NCC
++ϵ
+h
+i
+τ
+ḡk = Ep∈Pt,v (τ ) ∥∇Î(p) Lτk (p)∥1 ,
+3.6. Differentiable Sparse Pixel Rasterization
+k ∈ {ℓ1 , S-NCC}.
+(10)
+In practice, this is computed in a CUDA kernel, where each
+tile corresponds to one thread block, and ḡkτ is obtained via
+block-level gradient reduction of pixel gradient norm.
+We output sampled pixels in tile order for GPU tile-parallel
+execution and perform differentiable rasterization on Pt,v ,
+to obtain rendered colors Ît,v (p) and Gaussian gradients.
+As illustrated in Fig. 6, the forward pass maintains valid
+sampled tiles and computes tile-wise pixel offsets via prefixsum, enabling each CUDA block (tile) to efficiently access
+Sparse Pixel Supervision. Our sparse pixel supervision is
+5
+TurboGS: Accelerating 3D Gaussian Splatting via Error-Guided Sparse Pixel Sampling and Optimization
+Table 1. Quantitative comparisons with existing improved 3DGS optimization methods. TurboGS completes training within 80
+seconds while achieving competitive rendering quality compared with prior methods. Best, second-best, and third-best results are
+highlighted by best score , second best score , and third best score , respectively. Time is reported in seconds.
+Mip-NeRF 360 (Barron et al., 2022)
+Method
+Tanks & Temples (Knapitsch et al., 2017)
+3DGS
+Taming-3DGS
+Mini-Splatting
+Speedy-Splat
+3DGS-LM
+DashGaussian
+FastGS
+ConeGS
+891
+148
+674
+533
+622
+169
+111
+778
+TurboGS (Ours)
+TurboGS-Big (Ours)
+77 27.57 0.794 0.256 0.64M 153
+168 27.99 0.815 0.224 1.34M 134
+27.55
+27.26
+27.32
+26.95
+27.41
+27.69
+27.51
+27.74
+0.816 0.215 2.73M 199
+0.795 0.259 0.67M 413
+0.822 0.217 0.49M 279
+0.786 0.288 0.32M 983
+0.814 0.220 3.35M 218
+0.817 0.220 2.24M 259
+0.805 0.261 0.38M 1002
+0.823 0.202 0.87M 427
+583
+97
+479
+292
+369
+141
+91
+749
+23.84
+23.77
+23.24
+23.41
+23.57
+24.04
+24.06
+23.88
+GVS
+Besides sparse supervision, TurboGS further adapts the
+Gaussian density using multi-view errors et,v (p) to guide
+densification and pruning. When a Gaussian gi contributes to the pixel p with compositing weight wt,i (p) =
+Tt,i (p) αt,i (p), we accumulate per-Gaussian statistics:
+X
+et,v (p) wt,i (p),
+v,p
+(t)
+Wi
+=
+X
+wt,i (p). (12)
+(t)
+We normalize the accumulated statistics by visibility: ei =
+(t)
+(t)
+(t)
+(t)
+(t)
+Ei /(Wi + ϵ) and di = Di /(Wi + ϵ), and define
+the Gaussian difficulty score as:
+(t)
+λeff = λbase (1 − ρt ),
+FWD
+BWD
+EDC
+GVS
+EPS
+FWD
+BWD
+EDC
+At each iteration, we form a small local equation for each
+Gaussian g and solve it independently. Let mg and vg
+denote the Adam first and second moments for a parameter
+block, and let Jg be the local Jacobian estimated from the
+accumulated gradients. We compute an LM-style update:
+
+√
+J⊤
+(14)
+g Jg + diag( vg + ϵ) ∆g = −mg ,
+(t)
+(t)
+Rome
+Sparse supervision alters the optimization landscape and can
+amplify gradient variance across views and tiles. To improve
+convergence while keeping the update cost lightweight, TurboGS adopts a moment-damped Levenberg-Marquardt (LM)
+solver implemented as per-Gaussian CUDA kernels.
+Similarly, we accumulate a distance term Di by replacing et,v (p) with a pixel-splat distance term Dt,i (p) (i.e.,
+the conic Mahalanobis distance computed from the offset
+between 2D Gaussian projection and the pixel coordinate).
+(t)
+62 30.00 0.900 0.277 0.49M 231
+132 30.26 0.909 0.259 0.69M 216
+3.9. Moment-Damped LM Solver for Sparse Training
+v,p
+si = ei + λeff di ,
+EPS
+0.907 0.238 2.48M 208
+0.903 0.271 0.29M 601
+0.907 0.254 0.35M 364
+0.903 0.268 0.25M 1121
+0.906 0.246 2.89M 218
+0.907 0.248 1.95M 289
+0.905 0.267 0.22M 1144
+0.909 0.238 0.52M 655
+29.85
+29.92
+29.95
+29.55
+29.58
+30.12
+30.06
+30.28
+Figure 7. Per-step runtime breakdown of TurboGS. We report
+the average execution time (ms) of each optimization step on the
+Bicycle and large-scale Rome scenes. Step abbreviations denote
+the corresponding operations in Alg. 1 (Appendix).
+3.8. Error-Driven Density Control
+=
+921
+100
+586
+497
+572
+112
+81
+805
+Bicycle
+In practice, loss evaluation and per-tile gradient statistics
+are efficiently fused in an independent CUDA kernel for fast
+execution with low overhead (see runtime in Fig. 7).
+(t)
+0.853 0.169 1.58M 252
+0.836 0.211 0.32M 612
+0.836 0.202 0.20M 405
+0.820 0.239 0.19M 1138
+0.844 0.185 1.80M 285
+0.851 0.181 1.20M 334
+0.842 0.209 0.24M 1087
+0.853 0.160 0.55M 564
+73 23.79 0.832 0.200 0.58M 170
+146 24.14 0.841 0.181 0.91M 151
+formulated only by the sampled pixels for each tile:
+
+
+
+
+L = Ev∈Vt , p∈Pt,v ℓ1 (p) + Ev∈Vt , τ λτncc LτS-NCC . (11)
+Ei
+Deep Blending (Hedman et al., 2018)
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑
+where the moment vg serves as an diagonal damping to
+stabilize sparse gradients. Each local formulation is solved
+via Cholesky decomposition, resulting in a fully parallel and
+lightweight solver tailored for sparse-pixel training.
+(13)
+where ρt ∈ [0, 1) denotes the training progress. Normaliza(t)
+tion by Wi removes bias toward frequently visible Gaussians, while the distance term emphasizes boundary regions
+that often indicate under-fitting.
+4. Experiments
+We evaluate TurboGS through comparisons with representative improved 3DGS optimization methods and ablations
+of key components. To analyze computational efficiency,
+we further report the runtime breakdown of each optimization step in Fig. 7. Experimental details (GPU and training
+settings) are provided in Sec. B in the appendix.
+Here, different from the density control in FastGS (Ren et al.,
+2026), which relies on post-hoc dense error maps for den(t)
+sification and pruning, TurboGS uses Gaussian scores si
+(t)
+and ei obtained from online sparse pixel statistics, along
+with their percentile thresholds for adaptive density control,
+reducing computational complexity for faster training.
+Datasets and Metrics. We conduct experiments on three
+real-world datasets (i.e., Mip-NeRF 360 (Barron et al.,
+6
+TurboGS: Accelerating 3D Gaussian Splatting via Error-Guided Sparse Pixel Sampling and Optimization
+538s, 30.78dB
+136s, 31.32dB
+134s, 31.68dB
+104s, 31.72dB
+68s, 31.71dB
+511s, 26.68dB
+102s, 26.08dB
+141s, 27.05dB
+86s, 26.50dB
+62s, 26.66dB
+598s, 26.92dB
+223s, 27.43dB
+201s, 27.58dB
+132s, 27.50dB
+84s, 27.23dB
+252s, 21.68dB
+104s, 22.32dB
+151s, 22.25dB
+86s, 22.36dB
+69s, 22.15dB
+444s, 29.05dB
+109s, 29.51dB
+125s, 29.56dB
+86s, 29.48dB
+62s, 29.51dB
+908s, 27.21dB
+Taming-3DGS
+184s, 25.62dB
+322s, 28.07dB
+125s, 26.24dB
+91s, 27.28dB
+Speedy-Splat
+Taming-3DGS
+DashGaussian
+FastGS
+TurboGS (Ours)
+Ground Truth
+Figure 8. Qualitative comparisons with fast 3DGS optimization methods. Results are shown on Mip-NeRF 360 (Barron et al.,
+2022) (Room, Stump and Garden in the first three rows), Tanks & Temples (Knapitsch et al., 2017) (Train in the 4th row), Deep
+Blending (Hedman et al., 2018) (Drjohnson in the 5th row), and BungeeNeRF (Xiangli et al., 2022) (Bilbao in the last row). TurboGS
+better preserves some fine structures and details while achieving the fastest training speed within 100s among the compared methods.
+Table 2. Quantitative comparisons with existing fast 3DGS
+optimization methods. Time is reported in seconds.
+Method
+4.1. Comparison with 3DGS Optimization Methods
+Baselines. We compare TurboGS with representative 3DGS
+optimization methods that target acceleration and primitive control, including Taming-3DGS (Mallick et al., 2024),
+Speedy-Splat (Hanson et al., 2025a), Mini-Splatting (Fang
+& Wang, 2024), FastGS (Ren et al., 2026), ConeGS (Baranowski et al., 2026), DashGaussian (Chen et al., 2025),
+and 3DGS-LM (Höllein et al., 2025), together with vanilla
+3DGS (Kerbl et al., 2023) as a reference.
+BungeeNeRF (Xiangli et al., 2022)
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑
+Taming-3DGS
+DashGaussian
+FastGS
+FastGS-Big
+222
+332
+136
+227
+24.54
+26.55
+24.97
+25.76
+0.792
+0.870
+0.812
+0.853
+0.279
+0.172
+0.256
+0.194
+0.62M
+3.05M
+0.61M
+1.38M
+243
+133
+700
+496
+TurboGS (Ours)
+TurboGS-Big
+101 25.69
+230 26.68
+0.808
+0.863
+0.252 0.84M
+0.180 2.25M
+136
+90
+Quantitative Results. Tab. 1 and Tab. 2 report quantitative
+comparisons. TurboGS consistently achieves the fastest
+training speed across datasets, completing optimization
+within 80 seconds on three real-world benchmarks, corresponding to a 10× ∼ 14× speedup over vanilla 3DGS and
+a 1.2× ∼ 2× speedup over recent fast methods. Despite
+the reduced training cost, TurboGS maintains competitive
+rendering quality, while our TurboGS-Big (with more iterations; see Sec. B) further achieves the best or near-best
+PSNR on multiple benchmarks. We attribute this to the
+error-guided sparse-pixel training scheme, which focuses
+2022), Tanks & Temples (Knapitsch et al., 2017), and Deep
+Blending (Hedman et al., 2018)), one large-scale dataset
+from Google Earth imagery used in BungeeNeRF (Xiangli
+et al., 2022), as well as validations on the OMMO (Lu et al.,
+2023) dataset and the 4K sub-regions of Rubble (Turki et al.,
+2022) dataset. Novel view quality is evaluated using average
+PSNR, SSIM (Wang et al., 2004), and LPIPS (Zhang et al.,
+2018). Training efficiency and compactness are assessed by
+total training time (Time, in seconds), the final number of
+Gaussians (NGS ), and rendering speed (FPS).
+7
+TurboGS: Accelerating 3D Gaussian Splatting via Error-Guided Sparse Pixel Sampling and Optimization
+147 s
+1872 s
+147 s
+COLMAP for Sub-Region 1
+COLMAP for Sub-Region 2
+View 40
+3DGS
+32.24 dB, 0.906
+23.71 dB, 0.770
+1235 s
+3DGS-MCMC
+TurboGS (Ours)
+145 s
+23.67 dB, 0.772
+179 s
+26.88 dB, 0.886
+TurboGS (Ours)
+OMMO Dataset (Lu et al., 2023)
+367 s
+TurboGS (Ours)
+View 19
+145 s
+162 s
+Depth
+27.67 dB, 0.855
+View 51
+30.76 dB, 0.868
+TurboGS (Ours)
+TurboGS (Ours)
+117 s
+TurboGS (Ours)
+32.63 dB, 0.916
+#Views : 57
+#Pts : 62880
+26.81 dB, 0.837
+View 35
+View 0
+Gaussian Points
+TurboGS (Ours)
+#Views : 57
+#Pts : 57561
+View 1
+367 s
+Gaussian Points
+Rendering
+28.47 dB, 0.926
+Sub-Regions of Rubble, 4K reso. (Turki et al., 2022)
+353 s
+#Gau: 2.78M
+Sub-Region 1, Rubble
+Figure 10. 4K Rubble sub-region reconstruction. Independent
+COLMAP initialization (cameras and sparse points), and our efficient 3DGS optimization with high-quality rendering results.
+TurboGS (Ours)
+TurboGS (Ours)
+Figure 9. Large-scale and high-resolution scene reconstruction.
+Results on the large-scale OMMO scene (Lu et al., 2023) and
+representative 4K Rubble (Turki et al., 2022) sub-regions.
+Table 4. Ablation studies of TurboGS. Experiments are conducted on Mip-NeRF 360 (Barron et al., 2022) dataset with vanilla
+3DGS (Kerbl et al., 2023) as the baseline. We progressively add
+core components and replace key modules to isolate their effects.
+Table 3. Quantitative comparisons on the 4K sub-region Rubble (Turki et al., 2022) dataset. Time is reported in seconds.
+Ablated Method
+Time↓
+PSNR↑
+SSIM↑
+LPIPS↓
+NGS ↓
+3DGS
++ Err-SPS.
++ Geo-VS.
++ Sparse-NCC.
++ Err-DP. (Full)
+891
+85
+89
+95
+77
+27.55
+26.58
+26.73
+27.14
+27.57
+0.816
+0.737
+0.743
+0.773
+0.794
+0.215
+0.331
+0.321
+0.279
+0.256
+2.73M
+0.76M
+1.05M
+0.98M
+0.64M
+Err-SPS. → RPS.
+Geo-VS. → RVS.
+Err-DP. → FastGS
+75
+76
+91
+27.10
+27.26
+27.55
+0.780
+0.780
+0.801
+0.276
+0.274
+0.258
+0.56M
+0.47M
+0.60M
+ℓ1 loss (only)
+S-NCC. → S-SSIM.
+92
+86
+27.09
+27.21
+0.761
+0.773
+0.302
+0.287
+0.76M
+0.74M
+Method
+4K Sub-Regions of Rubble (Turki et al., 2022)
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑
+Taming-3DGS
+FastGS
+898 25.45
+614 26.16
+0.733
+0.788
+0.400 0.94M
+0.309 2.90M
+51
+125
+TurboGS (Ours)
+360 26.32
+0.771
+0.284 2.73M
+51
+computation on difficult pixels. Although SSIM and LPIPS
+are slightly lower in some cases, likely because our pixelwise training aligns more closely with PSNR, TurboGS
+achieves a favorable trade-off between speed, quality, and
+model compactness. Unlike 3DGS-LM, which requires over
+32 GB GPU memory, our hybrid optimizer incurs substantially lower computational and memory overhead.
+from sparse pixel sampling that reduces computation proportionally to image resolution. For the 4K Rubble benchmark, we extract three representative 4K sub-region image
+sets and independently run COLMAP for fair comparison.
+For higher-resolution scenes at extreme view scales, storing
+error/age maps may introduce additional overhead, which
+could be alleviated by scalable strategies such as multi-GPU
+partitioning or periodic GPU–CPU memory offloading.
+Qualitative Results. Fig. 8 presents qualitative comparisons across datasets. Despite the shorter training time,
+TurboGS preserves some fine structures and local details
+comparable to or better than prior fast optimization methods.
+This mainly benefits from error-guided sparse sampling and
+density control, which help stabilize training in challenging
+regions. More results are provided in the appendix.
+4.2. Ablation Study
+We conduct ablation studies on the Mip-NeRF 360 (Barron et al., 2022) dataset with vanilla 3DGS (Kerbl et al.,
+2023) as the baseline to analyze the contribution of each
+component in TurboGS. In particular, our ablation design
+jointly considers optimization efficiency and rendering quality, aiming to analyze how different components contribute
+to a balanced trade-off between training speed and visual
+fidelity. Quantitative results are reported in Tab. 4 and Tab. 5,
+with qualitative comparisons shown in Fig. 11.
+Large-Scale and High-Resolution Scenes. Fig. 9 demonstrates the effectiveness of TurboGS on the large-scale
+OMMO scenes (Lu et al., 2023), showing both training
+speedup and improved local details compared with vanilla
+3DGS and 3DGS-MCMC(Kheradmand et al., 2024b).
+Fig. 10 and Tab. 3 further validate the advantage of TurboGS
+for high-resolution (e.g., 4K) training, mainly benefiting
+8
+TurboGS: Accelerating 3D Gaussian Splatting via Error-Guided Sparse Pixel Sampling and Optimization
+973 s
+101 s
+23.42dB (avg)
+Table 5. Optimizer ablation in TurboGS. Results on Mip-NeRF
+360 (Barron et al., 2022), comparing our Moment-LM optimizer
+against the sparse Adam-only version under identical settings.
+25.24dB (avg)
++ Err-SPS. … Err-DP. (Full)
+3DGS (baseline)
+90 s
+Ground Truth
+Optimizer
+69 s
+102 s
+Sparse Adam (only)
+Moment-LM (Ours)
+22.52dB, 0.551
+22.34dB, 0.595
+23.18dB, 0.609
++ Err-SPS. & Geo-VS.
++ Sparse-NCC.
++ Err-DP. (Full)
+24.21dB, 0.72M
+24.47dB, 0.76M
+24.73dB, 0.81M
+Err-SPS. → RPS.
+Geo-VS. → RVS.
+29.50dB
+29.04dB
+S-NCC. → S-SSIM.
+Sparse Adam (only)
+29.42dB
+Ours (Full)
+Rendering
+Rippling
+Artifacts
+LPIPS↓
+NGS ↓
+0.793
+0.794
+0.261
+0.256
+0.64M
+0.64M
+Objective Functions. Using only the ℓ1 loss degrades reconstruction quality. Replacing sparse NCC (“S-NCC.”)
+with sparse SSIM (“S-SSIM.”) slightly increases training
+time and sometimes yields less sharp local structures (the
+4th row in Fig. 11), suggesting that NCC offers more effective structural supervision under sparse training.
+Ground Truth
+Low
+Response
+SSIM↑
+27.52
+27.57
+Gaussian Density Control Strategy. Replacing our density
+control (“Err-DP.”) with the FastGS-style strategy increases
+training time and slightly reduces PSNR ( 8th row in Tab. 4),
+likely due to its reliance on post-hoc full-image error accumulation, which is less efficient in our online sparse setting.
+Figure 11. Qualitative ablation results. Our full model retains
+finer details than ablated variants while reducing training time.
+Results are shown on Park (Wu et al., 2023) dataset (first and third
+rows) and Mip-NeRF 360 dataset (second and 4th rows).
+Error Map
+PSNR↑
+80
+77
+more severe degradation since error-dominant pixels are
+less likely to be prioritized, resulting in less informative
+supervision. These results highlight the importance of our
+pixel-and-view sampling under sparse supervision.
+Ours (Full)
+ref
+Time↓
+Optimization Strategy. As shown in Tab. 5, replacing
+our moment-damped LM with sparse Adam yields slightly
+lower PSNR/SSIM and higher LPIPS under similar training time. Qualitatively, the Adam-only variant produces
+less stable high-frequency details (the 4th row in Fig. 11),
+suggesting that our hybrid optimizer improves stability and
+reconstruction quality under sparse supervision.
+Ground Truth
+Figure 12. Limitations of TurboGS. Examples of subtle rippling
+artifacts in low-frequency regions despite low error-map responses.
+Effect of Adding Key Components. As shown in the first
+five rows of Tab. 4, progressively adding our components
+substantially reduces training time while improving rendering quality. Error-guided sparse pixel sampling (“Err-SPS.”)
+provides most of the acceleration, reducing training time
+from 891 to 85 seconds and NGS from 2.73M to 0.76M.
+However, relying only on sparse-pixel ℓ1 supervision degrades reconstruction quality. Geometry-aware view sampling (“Geo-VS.”) and sparse NCC regularization gradually
+restore rendering quality and enhance local high-frequency
+details. After introducing error-driven density control (“ErrDP.”), the full TurboGS model achieves the best trade-off,
+completing training in 77 seconds while improving PSNR
+by +0.02 dB over the baseline, and reducing NGS to 0.64M.
+As shown in the first two rows of Fig. 11, the full model
+removes distant background artifacts and progressively improves fine structural details with faster convergence.
+5. Conclusion
+In this paper, we have proposed TurboGS, an error-guided
+sparse optimization framework for accelerating 3DGS.
+TurboGS adaptively reallocates computation from wellreconstructed regions to informative pixels by incorporating
+tile-wise sparse pixel sampling with persistent error and
+age maps, geometry-aware view sampling, structure-aware
+sparse supervision, error-driven density control, and a hybrid moment-damped optimizer. Extensive experiments
+demonstrate that TurboGS achieves rapid convergence with
+competitive rendering quality across diverse scenes.
+Despite these advantages, TurboGS still has limitations. As
+shown in Fig. 12, sparse supervision may occasionally introduce subtle rippling artifacts in low-frequency regions with
+weak texture variations (e.g., walls or ceilings), even when
+the error-map response is already low. A possible remedy is
+to incorporate adaptive dense supervision for tiles in such
+regions to better regularize structural consistency. Moreover, extending TurboGS to dynamic scenes further requires
+spatiotemporal sampling and cross-frame error aggregation,
+which we consider an interesting future work.
+Sampling Strategies. Replacing “Err-SPS.” with random
+pixel sampling (“RPS.”), and “Geo-VS.” with random view
+sampling (“RVS.”), both lead to consistent drops in PSNR
+and perceptual metrics (the sixth and seventh rows in Tab. 4).
+Fig. 11 (the third row) also shows that random sampling
+fails to preserve high-frequency details, with “RPS.” causing
+9
+TurboGS: Accelerating 3D Gaussian Splatting via Error-Guided Sparse Pixel Sampling and Optimization
+Impact Statement
+Hanson, A., Tu, A., Lin, G., Singla, V., Zwicker, M., and
+Goldstein, T. Speedy-splat: Fast 3d gaussian splatting
+with sparse pixels and sparse primitives. In CVPR, 2025a.
+This paper focuses on accelerating 3DGS to reduce training
+overhead while improving the trade-off between computational efficiency and novel view synthesis quality. Although
+our work may have broader societal implications, we do not
+foresee any requiring specific discussion at this stage.
+Hanson, A., Tu, A., Singla, V., Jayawardhana, M., Zwicker,
+M., and Goldstein, T. Pup 3d-gs: Principled uncertainty
+pruning for 3d gaussian splatting. In CVPR, 2025b.
+Hedman, P., Philip, J., Price, T., Frahm, J.-M., Drettakis,
+G., and Brostow, G. Deep blending for free-viewpoint
+image-based rendering. ACM TOG, 2018.
+References
+Baranowski, B., Esposito, S., Gschoßmann, P., Chen, A.,
+and Geiger, A. Conegs: Error-guided densification using pixel cones for improved reconstruction with fewer
+primitives. In 3DV, 2026.
+Hedman, P., Srinivasan, P. P., Mildenhall, B., Barron, J. T.,
+and Debevec, P. Baking neural radiance fields for realtime view synthesis. In ICCV, 2021.
+Barron, J. T., Mildenhall, B., Verbin, D., Srinivasan, P. P.,
+and Hedman, P. Mip-nerf 360: Unbounded anti-aliased
+neural radiance fields. In CVPR, 2022.
+Höllein, L., Božič, A., Zollhöfer, M., and Nießner, M. 3dgslm: Faster gaussian-splatting optimization with levenbergmarquardt. In ICCV, 2025.
+Brosse, N., Durmus, A., and Moulines, E. The promises
+and pitfalls of stochastic gradient langevin dynamics. In
+NeurIPS, 2018.
+Huang, B., Yu, Z., Chen, A., Geiger, A., and Gao, S. 2d
+gaussian splatting for geometrically accurate radiance
+fields. In SIGGRAPH, 2024.
+Chen, Y., Jiang, J., Jiang, K., Tang, X., Li, Z., Liu, X., and
+Nie, Y. Dashgaussian: Optimizing 3d gaussian splatting
+in 200 seconds. In CVPR, 2025.
+Ji, B. and Yao, A. Sfm-free 3d gaussian splatting via hierarchical training. In CVPR, 2025.
+Fan, Z., Wang, K., Wen, K., Zhu, Z., Xu, D., and Wang,
+Z. Lightgaussian: Unbounded 3d gaussian compression
+with 15x reduction and 200+ fps. In NeurIPS, 2024a.
+Kerbl, B., Kopanas, G., Leimkühler, T., and Drettakis, G. 3d
+gaussian splatting for real-time radiance field rendering.
+ACM TOG, 2023.
+Fan, Z., Wen, K., Cong, W., Wang, K., Zhang, J., Ding, X.,
+Xu, D., Ivanovic, B., Pavone, M., Pavlakos, G., Wang, Z.,
+and Wang, Y. Instantsplat: Sparse-view gaussian splatting
+in seconds. arXiv:2403.20309, 2024b.
+Kerbl, B., Meuleman, A., Kopanas, G., Wimmer, M., Lanvin, A., and Drettakis, G. A hierarchical 3d gaussian representation for real-time rendering of very large datasets.
+ACM TOG, 2024.
+Fang, G. and Wang, B. Mini-splatting: Representing scenes
+with a constrained number of gaussians. In ECCV, 2024.
+Kheradmand, S., Rebain, D., Sharma, G., Isack, H., Kar, A.,
+Tagliasacchi, A., and Yi, K. M. Accelerating neural field
+training via soft mining. In CVPR, 2024a.
+Feng, G., Chen, S., Fu, R., Liao, Z., Wang, Y., Liu, T., Pei,
+Z., Li, H., Zhang, X., and Dai, B. Flashgs: Efficient
+3d gaussian splatting for large-scale and high-resolution
+rendering. In CVPR, 2025.
+Fridovich-Keil, S., Yu, A., Tancik, M., Chen, Q., Recht, B.,
+and Kanazawa, A. Plenoxels: Radiance fields without
+neural networks. In CVPR, 2022.
+Kheradmand, S., Rebain, D., Sharma, G., Sun, W., Tseng,
+Y.-C., Isack, H., Kar, A., Tagliasacchi, A., and Yi, K. M.
+3d gaussian splatting as markov chain monte carlo. In
+NeurIPS, 2024b.
+Girish, S., Gupta, K., and Shrivastava, A. Eagles: Efficient
+accelerated 3d gaussians with lightweight encodings. In
+ECCV, 2024.
+Knapitsch, A., Park, J., Zhou, Q.-Y., and Koltun, V. Tanks
+and temples: Benchmarking large-scale scene reconstruction. ACM TOG, 2017.
+Guédon, A. and Lepetit, V. Sugar: Surface-aligned gaussian
+splatting for efficient 3d mesh reconstruction and highquality mesh rendering. In CVPR, 2024.
+Lan, L., Shao, T., Lu, Z., Zhang, Y., Jiang, C., and Yang,
+Y. 3dgs2 : Near second-order converging 3d gaussian
+splatting. In SIGGRAPH, 2025.
+Hamdi, A., Melas-Kyriazi, L., Mai, J., Qian, G., Liu, R.,
+Vondrick, C., Ghanem, B., and Vedaldi, A. Ges : Generalized exponential splatting for efficient radiance field
+rendering. In CVPR, 2024.
+Liu, Y., Luo, C., Fan, L., Wang, N., Peng, J., and Zhang, Z.
+Citygaussian: Real-time high-quality large-scale scene
+rendering with gaussians. In ECCV, 2024.
+10
+TurboGS: Accelerating 3D Gaussian Splatting via Error-Guided Sparse Pixel Sampling and Optimization
+Lu, C., Yin, F., Chen, X., Chen, T., Yu, G., and Fan, J. A
+large-scale outdoor multi-modal dataset and benchmark
+for novel view synthesis and implicit scene reconstruction.
+In ICCV, 2023.
+Turki, H., Ramanan, D., and Satyanarayanan, M. Meganerf: Scalable construction of large-scale nerfs for virtual
+fly-throughs. In CVPR, 2022.
+Wang, X., Yi, R., and Ma, L. Adr-gaussian: Accelerating
+gaussian splatting with adaptive radius. In SIGGRAPH
+Asia, 2024.
+Lu, T., Yu, M., Xu, L., Xiangli, Y., Wang, L., Lin, D., and
+Dai, B. Scaffold-gs: Structured 3d gaussians for viewadaptive rendering. In CVPR, 2024.
+Wang, Z., Bovik, A. C., Sheikh, H. R., and Simoncelli,
+E. P. Image quality assessment: from error visibility to
+structural similarity. IEEE TIP, 2004.
+Mallick, S. S., Goel, R., Kerbl, B., Steinberger, M., Carrasco,
+F. V., and De La Torre, F. Taming 3dgs: High-quality
+radiance fields with limited resources. In SIGGRAPH
+Asia, 2024.
+Wu, X., Xu, J., Zhang, X., Bao, H., Huang, Q., Shen,
+Y., Tompkin, J., and Xu, W. Scanerf: Scalable bundleadjusting neural radiance fields for large-scale scene rendering. ACM TOG, 2023.
+Mildenhall, B., Srinivasan, P. P., Tancik, M., Barron, J. T.,
+Ramamoorthi, R., and Ng, R. Nerf: Representing scenes
+as neural radiance fields for view synthesis. In ECCV,
+2020.
+Xiangli, Y., Xu, L., Pan, X., Zhao, N., Rao, A., Theobalt,
+C., Dai, B., and Lin, D. Bungeenerf: Progressive neural
+radiance field for extreme multi-scale scene rendering. In
+ECCV, 2022.
+Muller, T., Evans, A., Schied, C., and Keller, A. Instant
+neural graphics primitives with a multiresolution hash
+encoding. ACM TOG, 2022.
+Xu, Q., Xu, Z., Philip, J., Bi, S., Shu, Z., Sunkavalli, K., and
+Neumann, U. Point-nerf: Point-based neural radiance
+fields. In CVPR, 2022.
+Pan, W., Zhang, X., Zhai, H., Xiang, X. a. H., and Zhang,
+G. Liberated-gs: 3d gaussian splatting independent from
+sfm point clouds. In ICCV, 2025.
+Xu, Q., Cui, J., Yi, X., Wang, Y., Zhou, Y., Ong, Y.-S., and
+Zhang, H. Pushing rendering boundaries: Hard gaussian
+splatting. In AAAI, 2026.
+Papantonakis, P., Kopanas, G., Kerbl, B., Lanvin, A., and
+Drettakis, G. Reducing the memory footprint of 3d gaussian splatting. ACM CGIT, 2024a.
+Yu, Z., Chen, A., Huang, B., Sattler, T., and Geiger, A.
+Mip-splatting: Alias-free 3d gaussian splatting. In CVPR,
+2024.
+Papantonakis, P., Kopanas, G., Kerbl, B., Lanvin, A., and
+Drettakis, G. Reducing the memory footprint of 3d gaussian splatting. Proceedings of the ACM on Computer
+Graphics and Interactive Techniques, 2024b.
+Zhang, R., Isola, P., Efros, A. A., Shechtman, E., and Wang,
+O. The unreasonable effectiveness of deep features as a
+perceptual metric. In CVPR, 2018.
+Radl, L., Steiner, M., Parger, M., Weinrauch, A., Kerbl,
+B., and Steinberger, M. Stopthepop: Sorted gaussian
+splatting for view-consistent real-time rendering. ACM
+TOG, 2024.
+Zhu, H., Liu, Z., Li, X., Wu, A., Zhao, J., Liu, F., Gan, Y.,
+Leng, J., and Feng, Y. Nebula: Enable city-scale 3d gaussian splatting in virtual reality via collaborative rendering
+and accelerated stereo rasterization. In ASPLOS, 2026.
+Ren, K., Jiang, L., Lu, T., Yu, M., Xu, L., Ni, Z., and Dai, B.
+Octree-gs: Towards consistent real-time rendering with
+lod-structured 3d gaussians. IEEE TPAMI, 2025.
+Ren, S., Wen, T., Fang, Y., and Lu, B. Fastgs: Training 3d
+gaussian splatting in 100 seconds. In CVPR, 2026.
+Rota Bulò, S., Porzi, L., and Kontschieder, P. Revising
+densification in gaussian splatting. In ECCV, 2024.
+Schönberger, J. L. and Frahm, J.-M. Structure-from-motion
+revisited. In CVPR, 2016.
+Snavely, N., Seitz, S. M., and Szeliski, R. Photo tourism:
+exploring photo collections in 3d. In SIGGRAPH, 2006.
+Sun, C., Sun, M., and Chen, H. Direct voxel grid optimization: Super-fast convergence for radiance fields reconstruction. In CVPR, 2022.
+11
+TurboGS: Accelerating 3D Gaussian Splatting via Error-Guided Sparse Pixel Sampling and Optimization
+Appendix
+A. TurboGS Optimization Procedure
+Algorithm 1 : TurboGS Training Framework. Steps marked in blue are implemented as custom CUDA kernels / operators /
+buffers; Gray denotes lightweight CPU bookkeeping / value.
+Input
+: Images & cameras (I, C), initial Gaussians G, total training iterations T , sampling view budget range
+[Kmin , Kmax ], other hyper-params Θ
+Output
+: Optimized Gaussians G
+Initialization : E init , E ← Initialize error maps(G, C, I)
+for t ← 0 to T − 1 do
+ρ ← min(1, t/τuntil )
+// per-pixel error buffers (GPU)
+// training progress
+1) Sampling Parameters :
+// non-linear query view budget & pixel sampling rate
+(Kt , rt ) ← query sampling schedule(Kmax , Kmin , E init , Θ, t)
+2) View Selection (GVS) :
+// anchor-by-error, then sampling-by pose/dir distance
+Vt ← geometry aware view sampling(Kt , ρ)
+3) Pixel Sampling (EPS) :
+// tile-wise error-guided sparse pixel sampling
+Pt ← tile wise pixel sampling(Vt , rt , Θ)
+4) Gather GT Color & Error :
+// colors and current errors on sampled pixels
+(c∗ , e∗ ) ← get sampling pixel gt err(Vt , Pt , I, E)
+5) Sparse Forward Rendering (FWD) : o, d ← rasterize forward pixels(Vt , Pt , e∗ )
+6) Sparse Loss & Grads. (L) : (∇c, ∇d, Lpix ) ← calculate l1 sncc grad loss(o, c∗ , d, d∗ (optional))
+7) EMA Error-Map Update (E) : E ← update err statistics EMA(E, Lpix , Vt , Pt )
+8) Gaussian Backward & Screen Properties (BWD) :
+// gradients of Gaussian properties
+∇G ← rasterize backward pixels(∇c, ∇d, G)
+(∇Gscreen , r) ← get gaussian grad screen radii(∇G, G)
+9) Solve Gaussian Updates (∆G) : ∆G ← solve gaussian delta properties(∇G, t, ρ)
+10) Apply Gaussian Update : G ← update gaussian properties(G, ∆G)
+11) Error-Driven Density Control (EDC):
+// adaptive Gaussian densification & pruning
+Back-Projection Pixel Properties to Gaussians :
+// accumulate (err, dist, α) per Gaussian
+eG , DG , αG ← rasterize forward pixels(Vt , Pt , Lpix )
+G ← error driven densify and prune(G, {∇Gscreen , r}, {eG , DG , αG }, t, Θ)
+return G
+Alg. 1 outlines the complete optimization pipeline of TurboGS, illustrating how error-guided sampling and sparse supervision
+are integrated into the 3DGS training loop. We highlight the input-output variable relationships between our sparse sampling,
+sparse supervision, Gaussian property optimization, and error-driven density control. In addition to the core algorithmic
+details already explained in the main paper, we further clarify the details of several steps:
+Adaptive Scheduling of View Budget and Pixel Sampling. TurboGS dynamically adjusts both the sampled view budget
+and tile-wise pixel sampling rate according to reconstruction difficulty and training progress. At iteration t, we first compute
+a normalized error ratio:
+
+
+√ 
+Ēt
+, 0, 1 ,
+ϕ(rt ) = sin π2 rt ,
+rt = clip
+(15)
+Ēinit + ϵ
+where Ēt and Ēinit denote the current and initial mean view errors. The sinusoidal modulation is motivated by the
+observation that reconstruction error drops rapidly in early training and then remains within a narrow range for most
+iterations (see Fig. 2 and Fig. 5). It amplifies sampling variation in this long low-error regime, improving sensitivity to
+subtle reconstruction differences.
+We further define a progress coefficient ρt = 1 − clip(t/τuntil , 0, 1) to gradually anneal sampling after densification. The
+tile-wise pixel sampling rate and sampled view number are jointly scheduled as:
+
+
+
+(t)
+rtile = rmin + (rmax − rmin ) 1 − ρt ϕ(rt ) ,
+Kt = round Kmin + (Kmax − Kmin )e−α(1−ρt ϕ(rt )) ,
+(16)
+12
+TurboGS: Accelerating 3D Gaussian Splatting via Error-Guided Sparse Pixel Sampling and Optimization
+where rmin = λ/Kmax , rmax = λ/Kmin , λ denotes the tile sampling scale, and α controls the transition speed. This design
+allocates more views and denser pixel sampling during difficult stages, while progressively reducing computation and
+shifting from global to more local view exploration as optimization converges.
+Gradient Computation under Sparse Supervision. Under sparse pixel sampling, TurboGS computes gradients by
+combining a pixel-wise Charbonnier ℓ1 term and a tile-level sparse NCC term. For a sampled pixel with prediction x and
+ground truth y, the gradients are:
+
+
+∂ℓ1
+∂ℓNCC
+x
+−
+µ
+x−y
+y
+−
+µ
+x
+y
+,
+,
+− NCC 2
+(17)
+=p
+= − q
+∂x
+∂x
+σx + ϵ
+(x − y)2 + ϵ2
+σ2 σ2 + ϵ
+x y
+where µx , µy and σx2 , σy2 denote the tile-wise mean and variance computed from sampled pixels.
+To stabilize sparse optimization, we adaptively balance the two terms using tile-level gradient statistics:
+
+
+E[|∇ℓ1 |]
+∂L
+∂ℓ1
+∂ℓNCC
+λτncc = clip
+, 0, 1 ,
+=
+− λτncc
+.
+E[|∇ℓNCC |] + ϵ
+∂x
+∂x
+∂x
+(18)
+Details of Our Moment-Damped LM Optimizer. TurboGS adopts a hybrid optimization strategy that combines lightweight
+Levenberg–Marquardt (LM) updates with Adam-style moment damping. For each Gaussian, we partition the parameters
+into two compact blocks: geometry parameters g ∈ R10 (position, scale, rotation) and base appearance parameters a ∈ R4
+(RGB DC and opacity), which are solved independently through small LM systems:
+
+√
+J⊤ J + diag( v + ϵ) ∆ = −m,
+∆θ SH = −η √
+m̂
+v̂ + ϵ
+,
+(19)
+where m and v denote Adam first and second moments, and v serves as an adaptive diagonal damping term. Each LM
+system is efficiently solved via Cholesky decomposition.
+Higher-order spherical harmonic (SH) coefficients are updated separately using Adam to avoid enlarging the LM system size.
+Ignoring SH cross-parameter correlations is a practical trade-off between accuracy and efficiency, since joint optimization
+would substantially increase Jacobian size and memory overhead. Empirically, this hybrid strategy improves stability under
+sparse gradients without noticeable convergence degradation. In practice, LM-based updates and SH optimization are
+executed in two dedicated CUDA kernels for efficient parallelism.
+Convergence Stability under Sparse Optimization. TurboGS adopts a structured sparse
+optimization scheme whose
+PN
+stochastic gradients remain aligned with the dense objective. Let the dense loss be L(θ) = i=1 ℓi (θ) over image pixels i.
+Under sparse sampling set S, the gradient estimator is:
+ĝ =
+1 X
+w(i)∇ℓi (θ),
+|S|
+E[ĝ] =
+N
+X
+p(i)w(i)∇ℓi (θ),
+(20)
+i=1
+i∈S
+where p(i) denotes the sampling probability and w(i) is the importance weight. Under ideal importance sampling with
+w(i) = 1/p(i), the estimator recovers the dense gradient in expectation, i.e., E[ĝ] ∝ ∇L(θ), providing convergence
+consistency while reducing computation.
+In practice, TurboGS combines error-guided hard sampling and age-aware stable sampling, prioritizing informative pixels
+while periodically revisiting under-sampled regions to avoid overly localized supervision. Moreover, the moment-damped
+LM update improves
+optimization stability by introducing adaptive diagonal damping through the Adam second moment,
+√
+J⊤ J + diag( v + ϵ), which improves local conditioning under sparse gradients. Together, these designs lead to stable
+empirical convergence in sparse-pixel optimization.
+B. Implementation Details
+All experiments are conducted on an NVIDIA RTX 5090 GPU, except for 3DGS-LM (Höllein et al., 2025), which is
+evaluated on an NVIDIA RTX PRO 6000 GPU due to its memory requirement exceeding 32 GB. The RTX PRO 6000
+13
+TurboGS: Accelerating 3D Gaussian Splatting via Error-Guided Sparse Pixel Sampling and Optimization
+Table 6. Definition and values of the hyper-parameters Θ in TurboGS.
+H.P.
+Definition
+Value
+T
+τuntil
+τfrom
+Kmax
+Kmin
+λ
+α
+Total training iterations
+Last iteration for densification and pruning
+First iteration for densification
+Maximum sampled views per iteration
+Minimum sampled views per iteration
+Tile pixel sampling scale
+Transition speed of adaptive view scheduling
+∆dens
+∆prune
+ηtopk
+ηfinal
+τgrad
+abs
+τgrad
+ρdense
+Densification interval (iterations)
+Final pruning interval (iterations)
+Fraction for top-k densification
+Fraction retained by final pruning
+Gradient threshold for densification
+Absolute-gradient threshold
+Percent dense
+rhard
+rstable
+–
+Sampling ratio for difficult pixels
+Sampling ratio for long-untrained pixels
+Remaining ratio for mixed sampling
+0.4
+0.3
+0.3
+β
+λbase
+EMA blending ratio for pixel errors
+Base weight of distance-aware Gaussian difficulty
+0.4
+0.8
+5000 (TurboGS, fast), 8000 (TurboGS-Big)
+3500 (TurboGS, fast), 6000 (TurboGS-Big)
+200
+10
+3
+(0, 1]
+3.0
+100 ∼ 350
+500
+0.5 ∼ 0.95
+0.8 ∼ 0.95
+1.0×10−4 ∼ 2.0×10−4
+2.0×10−4 ∼ 4.0×10−4
+0.001 ∼ 0.02
+provides comparable compute throughput (TFLOPS) to the RTX 5090 while offering 96 GB GPU memory. All baselines
+are evaluated using their official implementations under the original 3DGS setting. TurboGS is implemented in CUDA
+and PyTorch, with sparse rasterization, loss and gradient evaluation, and optimization executed as custom CUDA kernels.
+Training hyper-parameters are summarized in Tab. 6.
+C. Ablation on Sampling Hyper-parameters
+Table 7. Ablations on adaptive sampling hyper-parameters. We evaluate the effects of the adaptive view budget (Kmax → Kmin ),
+hard-pixel sampling ratio (rhard ), and error-ratio scheduling function ϕ(rt ) on Mip-NeRF 360 (Barron et al., 2022) under the same setup.
+K
+Time↓
+PSNR↑
+SSIM↑
+LPIPS↓
+NGS ↓
+rhard
+Time↓
+PSNR↑
+SSIM↑
+LPIPS↓
+NGS ↓
+1 (fixed)
+3 (fixed)
+10 ⇒ 3 (Ours)
+10 (fixed)
+81s
+78s
+77s
+121
+26.50
+27.23
+27.57
+27.41
+0.768
+0.787
+0.794
+0.783
+0.282
+0.263
+0.256
+0.263
+1.24M
+0.74M
+0.64M
+0.51M
+0.2
+0.4 (Ours)
+0.6
+0.8
+77s
+77s
+82s
+80s
+27.29
+27.57
+27.33
+27.41
+0.785
+0.794
+0.787
+0.785
+0.266
+0.256
+0.262
+0.264
+0.59M
+0.64M
+0.65M
+0.60M
+(a) Ablation on adaptive view budget
+(b) Ablation on hard-pixel sampling ratio
+Schedule
+Time↓
+PSNR↑
+SSIM↑
+LPIPS↓
+NGS ↓
+Linear
+Exponential
+81s
+79s
+27.35
+27.27
+0.788
+0.783
+0.261
+0.268
+0.63M
+0.55M
+Sinusoidal (Eq. 15, Ours)
+77s
+27.57
+0.794
+0.256
+0.64M
+(c) Ablation on error-ratio scheduling
+We further analyze the sensitivity of TurboGS to key sampling hyper-parameters, including the adaptive view budget,
+hard-pixel sampling ratio (rhard ), and error-ratio scheduling function ϕ(rt ). Results are reported in Tab. 7.
+Effect of Adaptive View Budget. As shown in Tab. 7(a), increasing the number of sampled views improves reconstruction
+quality but incurs higher computation. A very small view budget (K=1) degrades performance due to insufficient multi-view
+constraints, while a large fixed budget (K=10) increases training time without gains. Our adaptive strategy (10→3) achieves
+the best trade-off by gradually shifting from global multi-view consistency to local refinement.
+Effect of Hard-Pixel Sampling Ratio. Tab. 7(b) shows that a small rhard under-samples informative regions, whereas a
+large value reduces sampling diversity and increases cost. We find rhard =0.4 provides a balance between speed and quality.
+14
+TurboGS: Accelerating 3D Gaussian Splatting via Error-Guided Sparse Pixel Sampling and Optimization
+Drjohnson
+Rome
+Sub-Region, Rubble
+Figure 13. Interactive GUI of TurboGS. Real-time rendering and free-viewpoint exploration of reconstructed scenes.
+Effect of Error-Ratio Scheduling. Tab. 7(c) compares different scheduling functions for adaptive sampling. The proposed
+sinusoidal schedule consistently outperforms linear and exponential variants, likely because it amplifies sampling variation
+in the long low-error regime, improving sensitivity to subtle reconstruction differences.
+D. Additional Scene-wise Comparisons and Visualizations
+We provide additional scene-wise evaluations and visualizations. Tab. 8, Tab. 9, Tab. 10, Tab. 11, and Tab. 12 report detailed
+scene-wise quantitative comparisons on Mip-NeRF 360, Tanks & Temples, Deep Blending, BungeeNeRF, and 4K Rubble
+sub-regions, respectively. Fig. 13 presents the interactive GUI of our reconstruction system. Fig. 14 and Fig. 15 visualize
+intermediate optimization results on the large-scale OMMO dataset and 4K Rubble sub-regions, respectively. In addition,
+Fig. 16 shows further qualitative comparisons on representative scenes under matched training time.
+Table 8. Scene-wise quantitative results on Mip-NeRF 360 (Barron et al., 2022) dataset. We report the per-scene comparisons of
+TurboGS and other accelerated or improved 3DGS optimization methods.
+Bicycle
+Method
+Flowers
+Garden
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑
+3DGS
+Taming-3DGS
+Mini-Splatting
+Speedy-Splat
+3DGS-LM
+DashGaussian
+FastGS
+ConeGS
+1069
+139
+524
+584
+727
+225
+100
+694
+25.27
+24.82
+25.20
+24.90
+25.21
+25.38
+24.82
+25.50
+TurboGS (Ours)
+TurboGS-Big (Ours)
+73 25.27 0.716 0.291 0.85M 187
+160 25.66 0.747 0.257 1.87M 147
+73 22.06 0.580 0.387 0.78M 131
+180 22.61 0.630 0.327 2.36M 118
+84 27.23 0.823 0.208 0.75M 166
+154 27.62 0.858 0.155 1.06M 148
+Stump
+Treehill
+Room
+Method
+0.767 0.208 4.91M 105
+0.717 0.294 0.81M 407
+0.772 0.225 0.53M 241
+0.724 0.303 0.61M 777
+0.764 0.219 6.06M 105
+0.771 0.213 4.26M 197
+0.722 0.296 0.48M 1057
+0.782 0.188 1.27M 354
+706
+118
+569
+470
+524
+168
+104
+646
+21.57
+21.10
+21.42
+21.39
+21.49
+21.94
+21.37
+21.55
+0.605 0.336 2.90M
+0.555 0.407 0.57M
+0.625 0.327 0.57M
+0.579 0.395 0.36M
+0.600 0.342 3.60M
+0.617 0.327 2.50M
+0.575 0.388 0.45M
+0.625 0.303 1.00M
+207 1105 27.52 0.868 0.107 4.14M 138
+526 223 27.43 0.858 0.126 1.94M 320
+224 566 26.84 0.847 0.150 0.56M 233
+982 598 26.92 0.834 0.183 0.53M 843
+196 762 27.33 0.865 0.110 5.93M 116
+302 201 27.58 0.863 0.121 2.82M 270
+970 132 27.50 0.847 0.157 0.66M 958
+393 671 27.65 0.870 0.106 1.32M 362
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑
+3DGS
+Taming-3DGS
+Mini-Splatting
+Speedy-Splat
+3DGS-LM
+DashGaussian
+FastGS
+ConeGS
+898
+102
+504
+511
+994
+141
+86
+675
+26.66
+26.08
+27.17
+26.68
+26.70
+27.05
+26.50
+27.19
+TurboGS (Ours)
+TurboGS-Big (Ours)
+62 26.66 0.742 0.279 0.65M 179
+171 27.37 0.784 0.227 2.04M 137
+69 23.18 0.609 0.392 0.69M 164
+114 23.22 0.614 0.368 1.17M 130
+68 31.71 0.915 0.215 0.45M 155
+173 32.15 0.925 0.191 0.95M 137
+Counter
+Kitchen
+Bonsai
+Method
+0.771 0.216 4.29M 156
+0.736 0.292 0.48M 568
+0.806 0.198 0.61M 217
+0.770 0.259 0.51M 876
+0.776 0.218 4.86M 154
+0.783 0.216 3.42M 313
+0.751 0.283 0.35M 1081
+0.804 0.182 1.24M 375
+826
+134
+564
+460
+519
+188
+90
+604
+22.59
+23.03
+22.72
+22.50
+22.55
+23.06
+22.67
+22.65
+0.634 0.326 3.27M 175
+0.625 0.384 0.78M 420
+0.654 0.314 0.57M 218
+0.592 0.443 0.36M 1066
+0.634 0.332 3.80M 179
+0.640 0.319 3.20M 257
+0.674 0.416 0.36M 1040
+0.605 0.351 0.76M 473
+880
+136
+780
+538
+520
+134
+104
+941
+31.62
+31.32
+31.27
+30.78
+31.31
+31.68
+31.72
+32.13
+0.921 0.217 1.30M 234
+0.909 0.249 0.23M 389
+0.921 0.212 0.40M 440
+0.896 0.278 0.12M 1088
+0.915 0.222 1.54M 283
+0.916 0.230 1.04M 245
+0.913 0.239 0.21M 1045
+0.927 0.200 0.47M 524
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑
+3DGS
+Taming-3DGS
+Mini-Splatting
+Speedy-Splat
+3DGS-LM
+DashGaussian
+FastGS
+ConeGS
+836
+156
+896
+538
+504
+139
+116
+991
+29.07
+28.61
+28.61
+28.18
+28.83
+28.95
+29.10
+28.97
+0.909 0.200 1.08M 242 1006 31.28 0.928 0.126 1.59M 202
+0.898 0.223 0.31M 341 179 31.15 0.922 0.141 0.48M 335
+0.905 0.198 0.41M 358 900 31.24 0.926 0.129 0.43M 272
+0.869 0.274 0.10M 1058 589 30.01 0.890 0.202 0.11M 1055
+0.907 0.204 1.21M 300 596 31.30 0.928 0.127 1.82M 239
+0.903 0.209 0.79M 250 197 31.44 0.921 0.141 1.26M 199
+0.900 0.219 0.21M 988 153 31.75 0.925 0.136 0.39M 880
+0.910 0.189 0.56M 410 828 31.68 0.934 0.117 0.74M 410
+TurboGS (Ours)
+TurboGS-Big (Ours)
+85 28.63 0.898 0.204 0.49M 125
+207 29.14 0.906 0.186 0.80M 123
+92 31.55 0.923 0.131 0.59M 148
+191 31.81 0.926 0.127 0.73M 135
+15
+692
+147
+764
+508
+453
+131
+118
+953
+32.35
+31.78
+31.41
+31.18
+31.97
+32.09
+32.15
+32.37
+0.943 0.203 1.07M 332
+0.935 0.219 0.41M 412
+0.939 0.200 0.36M 310
+0.920 0.260 0.13M 1102
+0.941 0.206 1.25M 386
+0.940 0.206 0.84M 295
+0.937 0.212 0.28M 998
+0.947 0.185 0.46M 540
+85 31.82 0.939 0.202 0.55M 122
+162 32.31 0.945 0.176 1.07M 131
+TurboGS: Accelerating 3D Gaussian Splatting via Error-Guided Sparse Pixel Sampling and Optimization
+Table 9. Scene-wise quantitative results over the Tanks & Temples (Knapitsch et al., 2017) dataset.
+Truck
+Method
+Train
+Time↓
+PSNR↑
+SSIM↑
+LPIPS↓
+NGS ↓
+FPS↑
+Time↓
+PSNR↑
+SSIM↑
+LPIPS↓
+NGS ↓
+FPS↑
+3DGS
+Taming-3DGS
+Mini-Splatting
+Speedy-Splat
+3DGS-LM
+DashGaussian
+FastGS
+ConeGS
+625
+90
+527
+332
+424
+130
+96
+740
+25.47
+25.22
+25.05
+25.13
+25.37
+25.84
+25.76
+25.75
+0.884
+0.868
+0.874
+0.868
+0.881
+0.885
+0.877
+0.890
+0.142
+0.184
+0.160
+0.189
+0.152
+0.152
+0.177
+0.116
+2.07M
+0.27M
+0.19M
+0.26M
+2.51M
+1.40M
+0.25M
+0.65M
+231
+659
+329
+1122
+235
+359
+1134
+511
+540
+104
+431
+252
+314
+151
+86
+758
+22.22
+22.32
+21.42
+21.68
+21.77
+22.25
+22.36
+22.01
+0.822
+0.804
+0.799
+0.773
+0.807
+0.818
+0.807
+0.816
+0.196
+0.238
+0.244
+0.289
+0.218
+0.209
+0.240
+0.204
+1.09M
+0.37M
+0.21M
+0.11M
+1.09M
+1.01M
+0.23M
+0.46M
+272
+565
+482
+1153
+335
+309
+1040
+617
+TurboGS (Ours)
+TurboGS-Big (Ours)
+76
+148
+25.43
+25.82
+0.873
+0.883
+0.166
+0.146
+0.75M
+1.16M
+159
+144
+69
+144
+22.15
+22.46
+0.791
+0.799
+0.234
+0.216
+0.41M
+0.65M
+182
+158
+Table 10. Scene-wise quantitative results over the Deep Blending (Hedman et al., 2018) dataset.
+Drjohnson
+Method
+Playroom
+Time↓
+PSNR↑
+SSIM↑
+LPIPS↓
+NGS ↓
+FPS↑
+Time↓
+PSNR↑
+SSIM↑
+LPIPS↓
+NGS ↓
+FPS↑
+3DGS
+Taming-3DGS
+Mini-Splatting
+Speedy-Splat
+3DGS-LM
+DashGaussian
+FastGS
+ConeGS
+1046
+109
+632
+444
+645
+125
+86
+826
+29.45
+29.51
+29.40
+29.05
+28.97
+29.56
+29.48
+29.84
+0.905
+0.903
+0.904
+0.900
+0.903
+0.905
+0.900
+0.905
+0.236
+0.267
+0.257
+0.267
+0.247
+0.247
+0.272
+0.241
+1.84M
+0.40M
+0.38M
+0.31M
+3.48M
+2.53M
+0.25M
+0.61M
+163
+561
+340
+1094
+172
+248
+1137
+610
+795
+91
+539
+549
+498
+99
+76
+783
+30.25
+30.33
+30.49
+30.05
+30.19
+30.67
+30.64
+30.72
+0.910
+0.903
+0.911
+0.907
+0.908
+0.910
+0.911
+0.913
+0.240
+0.276
+0.250
+0.270
+0.246
+0.249
+0.262
+0.235
+3.11M
+0.18M
+0.32M
+0.19M
+2.30M
+1.37M
+0.13M
+0.44M
+252
+640
+387
+1149
+264
+329
+1152
+700
+TurboGS (Ours)
+TurboGS-Big (Ours)
+62
+139
+29.53
+29.78
+0.892
+0.904
+0.285
+0.260
+0.42M
+0.67M
+273
+204
+61
+125
+30.47
+30.73
+0.908
+0.913
+0.270
+0.258
+0.55M
+0.72M
+188
+227
+Table 11. Scene-wise quantitative results over the BungeeNeRF (Xiangli et al., 2022) dataset.
+Amsterdam
+Method
+Bilbao
+Hollywood
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑
+Taming-3DGS
+DashGaussian
+FastGS
+FastGS-Big
+234
+350
+129
+212
+24.45
+26.68
+24.82
+25.81
+0.804 0.257 0.65M
+0.880 0.159 3.17M
+0.816 0.247 0.56M
+0.857 0.191 1.30M
+243
+125
+628
+509
+TurboGS (Ours)
+TurboGS-Big (Ours)
+96 25.40 0.803 0.260 0.69M 150
+236 26.57 0.863 0.184 1.86M 99
+184
+322
+125
+207
+25.62
+28.07
+26.24
+27.11
+0.825 0.246 0.44M
+0.900 0.135 2.75M
+0.846 0.220 0.55M
+0.875 0.170 1.28M
+91 27.28 0.843 0.219 0.76M 145
+227 27.94 0.880 0.168 1.86M 95
+Pompidou
+Method
+278
+126
+766
+549
+198
+347
+143
+232
+23.72
+25.83
+24.22
+24.68
+0.713 0.363 0.55M
+0.843 0.192 3.45M
+0.754 0.317 0.72M
+0.793 0.256 1.41M
+248
+143
+743
+476
+105 24.75 0.745 0.314 0.93M 132
+258 25.78 0.817 0.221 2.51M 85
+Rome
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑
+24.04
+26.44
+24.56
+25.41
+0.830 0.234 0.68M
+0.903 0.124 4.20M
+0.848 0.210 0.73M
+0.877 0.166 1.52M
+Taming-3DGS
+DashGaussian
+FastGS
+FastGS-Big
+230
+409
+150
+227
+271
+127
+609
+511
+TurboGS (Ours)
+TurboGS-Big (Ours)
+112 25.27 0.830 0.225 0.99M 128
+184 26.24 0.883 0.159 2.61M 86
+224
+337
+133
+256
+24.11
+26.69
+24.71
+25.81
+0.794 0.278 0.62M
+0.890 0.151 3.12M
+0.818 0.252 0.61M
+0.861 0.190 1.41M
+242
+130
+578
+433
+102 25.77 0.818 0.244 0.85M 126
+245 26.85 0.874 0.170 2.39M 88
+Table 12. Scene-wise quantitative results on representative sub-regions of the Rubble (Turki et al., 2022) dataset at 4K resolution,
+where COLMAP (Schönberger & Frahm, 2016) is independently performed for each sub-region to ensure fair evaluation.
+Method
+Sub-Region #1 (view 172 to 228)
+Sub-Region #2 (view 58 to 114)
+Sub-Region #3 (view 690 to 746)
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS ↓ FPS↑
+Taming-3DGS
+FastGS
+858 25.34 0.737 0.393 1.00M
+639 26.17 0.791 0.322 1.90M
+53
+87
+925 24.81 0.736 0.399 0.94M 51
+630 25.79 0.799 0.290 3.73M 141
+911 26.18 0.728 0.409 0.86M 50
+574 26.51 0.775 0.315 3.05M 149
+TurboGS (Ours)
+361 26.57 0.776 0.295 2.83M
+50
+367 25.88 0.775 0.273 2.78M
+353 26.73 0.760 0.285 2.44M
+16
+47
+48
+TurboGS: Accelerating 3D Gaussian Splatting via Error-Guided Sparse Pixel Sampling and Optimization
+20 s
+Error Map
+40 s
+80 s
+160 s
+162s (Final)
+Test View
+Rendering
+Rendering
+Depth
+Error Map
+23.26 dB
+Gaussian Points
+0.745
+0.45M
+26.42 dB
+0.846
+0.78M
+27.69 dB
+0.881
+1.65M
+27.97 dB
+0.897
+1.15M
+27.97dB
+0.897
+1.15M
+Final Pruning
+Final Pruning
+20 s
+Error Map
+40 s
+100 s
+180 s
+189s (Final)
+Rendering
+Test View
+Error Map
+Rendering
+24.15 dB
+Test View
+0.682
+0.66M
+26.58 dB
+0.771
+1.61M
+27.62 dB
+0.810
+3.91M
+28.90 dB
+0.843
+2.29M
+29.01dB
+0.845
+2.29M
+Final Pruning
+Final Pruning
+20 s
+Error Map
+40 s
+100 s
+180 s
+192s (Final)
+Rendering
+Test View
+Gaussian Points
+Rendering
+Error Map
+23.80 dB
+Test View
+0.740
+0.44M
+24.14 dB
+0.752
+1.47M
+25.53 dB
+0.792
+3.06M
+25.88 dB
+0.805
+1.53M
+25.93dB
+0.806
+1.53M
+Final Pruning
+Figure 14. Optimization progress on large-scale OMMO scenes. We visualize rendering results, error maps, and training curves at
+representative iterations (e.g., 20s, 40s, 80s, and final), showing progressive reconstruction improvement and convergence behavior.
+17
+TurboGS: Accelerating 3D Gaussian Splatting via Error-Guided Sparse Pixel Sampling and Optimization
+40 s
+Rendering
+80 s
+300 s
+160 s
+361s (Final)
+Test View
+Error Map
+Rendering
+Test View
+Error Map
+20.28 dB
+Depth
+0.501
+0.10M
+22.13 dB
+0.575
+0.30M
+24.88 dB
+0.702
+1.52M
+26.47 dB
+0.774
+2.83M
+26.57 dB
+0.776
+2.83M
+Final Pruning
+40 s
+Rendering
+80 s
+300 s
+160 s
+367s (Final)
+Gaussian
+Poinits
+Error Map
+Test View
+Rendering
+Test View
+Error Map
+20.37 dB
+0.524
+0.10M
+21.07 dB
+0.558
+0.31M
+24.38 dB
+0.703
+1.20M
+25.78 dB
+0.772
+2.82M
+25.88 dB
+0.775
+2.78M
+Final Pruning
+40 s
+Rendering
+80 s
+300 s
+160 s
+353s (Final)
+Test View
+Error Map
+Error Map
+Depth
+Rendering
+20.04 dB
+Test View
+0.534
+0.09M
+23.72 dB
+0.607
+0.25M
+26.00 dB
+0.713
+1.19M
+26.70 dB
+0.759
+2.48M
+26.73 dB
+0.760
+2.44M
+Final Pruning
+Figure 15. Optimization progress on 4K Rubble sub-regions. Representative rendering results and training curves during optimization.
+18
+TurboGS: Accelerating 3D Gaussian Splatting via Error-Guided Sparse Pixel Sampling and Optimization
+23.74dB, 0.686
+3DGS
+22.23dB, 0.564
+ConeGS
+28.04dB, 0.896
+3DGS
+28.51dB, 0.897
+DashGaussian
+20.78dB, 0.553
+3DGS
+21.56dB, 0.590
+DashGaussian
+24.87dB, 0.822
+3DGS-LM
+28.20dB, 0.880
+DashGaussian
+22.843dB, 0.613
+24.62dB, 0.698
+3DGS-LM
+Taming-3DGS
+24.82dB, 0.722
+22.50dB, 0.601
+SpeedySplat
+25.27dB, 0.716
+FastGS
+TurboGS (Ours)
+26.26dB, 0.856
+27.83dB, 0.884
+3DGS-LM
+Taming-3DGS
+29.02dB, 0.900
+Ground Truth
+26.21dB, 0.855
+SpeedySplat
+28.63dB, 0.898
+FastGS
+TurboGS (Ours)
+19.86dB, 0.487
+21.03dB, 0.550
+3DGS-LM
+Taming-3DGS
+21.33dB, 0.574
+Ground Truth
+22.05dB, 0.492
+SpeedySplat
+22.06dB, 0.580
+FastGS
+TurboGS (Ours)
+25.19dB, 0.822
+29.29dB, 0.900
+Taming-3DGS
+SpeedySplat
+Ground Truth
+21.87dB, 0.775
+ConeGS
+29.53dB, 0.892
+30.17dB, 0.900
+FastGS
+TurboGS (Ours)
+Ground Truth
+Figure 16. Additional qualitative comparisons under the same training time budget. We visualize representative results from existing
+fast 3DGS optimization methods at the time when TurboGS finishes optimization, on the Mip-NeRF 360 (Barron et al., 2022) dataset
+(Bicycle, Counter, Flowers) and the Deep Blending (Hedman et al., 2018) dataset (Drjohnson). Cropped patches highlight differences in
+detail reconstruction and visual fidelity.
+19

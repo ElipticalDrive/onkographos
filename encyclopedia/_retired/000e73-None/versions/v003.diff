@@ -1,0 +1,370 @@
+--- v002.md
++++ v003.md
+@@ -1,84 +1,83 @@
+ # Ray Marching with Secant Refinement
++
++
+ ## Overview
+-A procedure to detect surface points along rays by evaluating a neural decoder at proposal points, identifying sign changes in occupancy logits, and refining the depth using a root-finding method [S1, unofficial]. It sets itself apart from its siblings by combining coarse uniform sampling with a specific sign-change detection logic that identifies negative-to-positive transitions, followed by the Secant Method for Surface Depth Refinement to pinpoint the zero-crossing [S1, unofficial]. It builds on [Secant Method for Surface Depth Refinement](996-secant-method-for-surface-depth-refinement.md) [G].
++This method detects surface intersections along camera rays by evaluating a neural occupancy decoder at discrete proposal points, identifying sign changes in the occupancy logits, and refining the depth estimate using the secant method [S1, unofficial]. It differs from standard uniform ray marching by adaptively focusing computation on rays containing a surface transition and using linear interpolation between bracketing points for higher precision than simple bisection [S1, unofficial]. It builds on [Secant Method for Surface Depth Refinement](996-secant-method-for-surface-depth-refinement.md).
++
+ ## How it works
+ **Inputs:**
+-- `ray0`: Origin points, shape $(B, N, 1, 3)$.
+-- `ray_direction`: Direction vectors, shape $(B, N, 1, 3)$.
+-- `c`: Latent codes or context, shape $(B, N, D_c)$.
+-- `decoder`: Neural network function evaluating occupancy.
++- `ray0`: Origin of rays, shape $(B, N, 3)$.
++- `ray_direction`: Direction of rays, shape $(B, N, 3)$.
++- `decoder`: Neural network function $decoder(p, c)$ returning occupancy logits, where $p$ is position and $c$ is context/latent code.
++- `c`: Context/latent code, shape $(B, N, D_c)$.
+ - `depth_range`: Tuple $(d_{min}, d_{max})$ defining the search interval.
+ - `tau`: Probability threshold for occupancy.
+-- `n_steps`: Tuple $(n_{min}, n_{max})$ for sampling the number of steps.
+-- `max_points`: Integer limit for GPU memory management.
+-- `check_cube_intersection`: Boolean flag.
++- `n_steps`: Tuple $(n_{min}, n_{max})$ for sampling the number of proposal steps.
++- `max_points`: Integer limit for GPU memory management during decoder evaluation.
++- `check_cube_intersection`: Boolean flag to intersect proposals with a unit cube.
+ 
+ **Outputs:**
+-- `pt_pred`: Final 3D surface points, shape $(B, N, 1, 3)$.
+-- `d_pred`: Refined depth values, shape $(B, N, 1, 1)$.
+-- `mask`: Boolean mask indicating valid detections, shape $(B, N, 1, 1)$.
++- `d_pred`: Refined depth values, shape $(B, N)$.
++- `pt_pred`: 3D surface points, shape $(B, N, 3)$.
+ 
+ **Data Structures:**
+ - `d_proposal`: Tensor of shape $(B, N, n_{steps}, 1)$ containing linearly spaced depth values.
+-- `val`: Tensor of shape $(B, N, n_{steps}, 1)$ containing the signed distance/occupancy logit minus threshold.
++- `val`: Tensor of shape $(B, N, n_{steps}, 1)$ containing $decoder(p, c) - logit\_tau$.
+ - `sign_matrix`: Tensor of shape $(B, N, n_{steps})$ indicating sign changes.
+-- `cost_matrix`: Tensor of shape $(B, N, n_{steps})$ used for finding the first sign change.
++- `cost_matrix`: Tensor of shape $(B, N, n_{steps})$ used for efficient argmin search.
+ 
+ **Steps:**
+ 
+ 1.  **Threshold Conversion:** Convert the probability threshold $\tau$ to a logit threshold:
+-    $$ logit\_tau = \text{get\_logits\_from\_prob}(\tau) $$
+-    [S1, unofficial] [G] `get_logits_from_prob` is the inverse sigmoid function: $\log(\frac{\tau}{1-\tau})$.
+-
+-2.  **Step Sampling:** Sample the number of steps $n_{steps}$ uniformly from the integer range $[n_{steps}[0], n_{steps}[1]]$ [S1, unofficial].
+-
+-3.  **Proposal Generation:** Create linearly spaced depth proposals $d_{proposal}$ from $depth\_range[0]$ to $depth\_range[1]$ with $n_{steps}$ points, shaped $(B, N, n_{steps}, 1)$ [S1, unofficial].
+-
+-4.  **Cube Intersection (Optional):** If `check_cube_intersection` is true, compute intersection with the unit cube and replace $d_{proposal}$ values inside the cube with cube-intersection depths [S1, unofficial].
+-
+-5.  **Point Computation:** Compute 3D proposal points:
+-    $$ p_{proposal} = ray0 + ray\_direction \cdot d_{proposal} $$
+-    [S1, unofficial]
+-
+-6.  **Decoder Evaluation:** Evaluate the decoder at all proposal points in parallel, splitting into chunks of size `max_points` / `batch_size` to manage GPU memory. Compute:
+-    $$ val = decoder(p, c, only\_occupancy=True) - logit\_tau $$
+-    [S1, unofficial]
+-
+-7.  **Initial Occupancy Mask:** Create a mask for rays where the first point is not occupied:
+-    $$ mask\_0\_not\_occupied = val[:, :, 0] < 0 $$
+-    [S1, unofficial]
++    $$logit\_tau = \text{get\_logits\_from\_prob}(\tau)$$
++    [G] `get_logits_from_prob` is the inverse sigmoid function: $\log(\frac{\tau}{1-\tau})$.
++
++2.  **Sample Steps:** Sample an integer $n_{steps}$ uniformly from the range $[n_{steps}[0], n_{steps}[1]]$.
++
++3.  **Generate Proposals:** Create linearly spaced depth proposals $d_{proposal}$ from $depth\_range[0]$ to $depth\_range[1]$ with $n_{steps}$ points. Shape: $(B, N, n_{steps}, 1)$.
++
++4.  **Cube Intersection (Optional):** If `check_cube_intersection` is true, compute the intersection of the rays with a unit cube centered at the origin. Replace $d_{proposal}$ values that fall inside the cube with the calculated cube-intersection depths.
++
++5.  **Compute Proposal Points:** Calculate the 3D coordinates for all proposals:
++    $$p_{proposal} = ray0 + ray\_direction \cdot d_{proposal}$$
++    Shape: $(B, N, n_{steps}, 3)$.
++
++6.  **Evaluate Decoder:** Evaluate the decoder at all proposal points in parallel. To manage GPU memory, split the evaluation into chunks of size `max_points / batch_size`. Compute the value tensor:
++    $$val = decoder(p, c, only\_occupancy=True) - logit\_tau$$
++    Shape: $(B, N, n_{steps}, 1)$.
++
++7.  **Initial Occupancy Mask:** Create a mask for rays where the first proposal point is not occupied:
++    $$mask\_0\_not\_occupied = val[:, :, 0] < 0$$
+ 
+ 8.  **Sign Change Detection:**
+-    - Compute the sign change matrix:
+-      $$ sign\_matrix = [\text{sign}(val[:, :, :-1] \cdot val[:, :, 1:]), 1] $$
+-      [S1, unofficial]
+-    - Compute the cost matrix to prioritize earlier sign changes:
+-      $$ cost\_matrix = sign\_matrix \cdot [n_{steps}, n_{steps}-1, ..., 1] $$
+-      [S1, unofficial]
+-
+-9.  **First Sign Change Index:** Find the first sign change index:
+-    $$ (values, indices) = \text{argmin}(cost\_matrix) $$
+-    [S1, unofficial] Identify valid sign changes:
+-    $$ mask\_sign\_change = values < 0 $$
+-    [S1, unofficial]
+-
+-10. **Transition Verification:** Identify negative-to-positive transitions:
+-    $$ mask\_neg\_to\_pos = val[batch\_indices, point\_indices, indices] < 0 $$
+-    [S1, unofficial]
+-
+-11. **Combined Mask:** Combine masks for valid depth detection:
+-    $$ mask = mask\_sign\_change \land mask\_neg\_to\_pos \land mask\_0\_not\_occupied $$
+-    [S1, unofficial]
+-
+-12. **Bracket Extraction:** Extract bracketing depths and function values for valid rays:
+-    - $d_{low}, f_{low}$ at `indices`
+-    - $d_{high}, f_{high}$ at `indices + 1` (clamped to $n_{steps}-1$)
+-    [S1, unofficial]
+-
+-13. **Refinement:** Apply the Secant Method for Surface Depth Refinement on the masked rays using $(d_{low}, f_{low})$ and $(d_{high}, f_{high})$ to get $d_{pred}$ [S1, unofficial].
+-
+-14. **Final Point Computation:** Compute final 3D points:
+-    $$ pt_{pred}[mask] = ray0_{masked} + d_{pred} \cdot ray\_direction_{masked} $$
+-    [S1, unofficial]
++    - Compute the sign change matrix. For each adjacent pair of proposals, check if the product of their values is negative (indicating a sign change). Append a column of 1s to maintain dimensions:
++      $$sign\_matrix = [sign(val[:, :, :-1] \cdot val[:, :, 1:]), 1]$$
++      Shape: $(B, N, n_{steps})$.
++    - Compute a cost matrix to find the *first* sign change efficiently. The cost matrix weights earlier indices lower:
++      $$cost\_matrix = sign\_matrix \cdot [n_{steps}, n_{steps}-1, \dots, 1]$$
++      Shape: $(B, N, n_{steps})$.
++
++9.  **Find First Sign Change:**
++    - Find the index of the minimum cost value for each ray:
++      $$(values, indices) = \text{argmin}(cost\_matrix)$$
++    - Identify valid sign changes (where the product was actually negative):
++      $$mask\_sign\_change = values < 0$$
++
++10. **Identify Transition Direction:** Identify rays where the transition is from negative to positive (inside to outside or vice versa depending on convention, but specifically where the lower bound is negative):
++    $$mask\_neg\_to\_pos = val[batch\_indices, point\_indices, indices] < 0$$
++    [G] `batch_indices` and `point_indices` are the flattened indices corresponding to the argmin result.
++
++11. **Combine Masks:** Combine all conditions to determine valid rays for refinement:
++    $$mask = mask\_sign\_change \land mask\_neg\_to\_pos \land mask\_0\_not\_occupied$$
++
++12. **Extract Brackets:** For valid rays, extract the bracketing depths and function values:
++    - Lower bracket: $d_{low} = d_{proposal}[indices]$, $f_{low} = val[indices]$
++    - Upper bracket: $d_{high} = d_{proposal}[indices + 1]$, $f_{high} = val[indices + 1]$
++    - Clamp indices to $n_{steps}-1$ to prevent out-of-bounds access.
++
++13. **Refine Depth:** Apply the Secant Method (or Bisection) on the masked rays using the extracted brackets $(d_{low}, f_{low})$ and $(d_{high}, f_{high})$ to compute the refined depth $d_{pred}$.
++
++14. **Compute Final Points:** Calculate the final 3D surface points for valid rays:
++    $$pt_{pred}[mask] = ray0_{masked} + d_{pred} \cdot ray\_direction_{masked}$$
+ 
+ **Pseudocode:**
+@@ -86,53 +85,66 @@
+ ```python
+ import torch
++import torch.nn.functional as F
++
++def get_logits_from_prob(prob):
++    """Inverse sigmoid."""
++    return torch.log(prob / (1 - prob))
+ 
+ def ray_marching_with_secant_refinement(
+-    ray0, ray_direction, decoder, latent_codes, 
+-    depth_range, tau, n_steps_range, max_points, 
+-    check_cube_intersection=False
++    ray0, ray_direction, decoder, c, 
++    depth_range, tau, n_steps_range, 
++    max_points, check_cube_intersection=False
+ ):
+     """
+-    ray0: (B, N, 1, 3)
+-    ray_direction: (B, N, 1, 3)
+-    latent_codes: (B, N, D_c)
+-    depth_range: (d_min, d_max)
+-    tau: float
+-    n_steps_range: (n_min, n_max)
+-    max_points: int
++    ray0: (B, N, 3)
++    ray_direction: (B, N, 3)
++    c: (B, N, D_c)
++    Returns: d_pred (B, N), pt_pred (B, N, 3)
+     """
+-    B, N, _, _ = ray0.shape
+     device = ray0.device
++    B, N, _ = ray0.shape
+     
+     # 1. Threshold Conversion
+-    logit_tau = torch.log(tau / (1 - tau))
+-    
+-    # 2. Step Sampling
++    logit_tau = get_logits_from_prob(torch.tensor(tau, device=device))
++    
++    # 2. Sample Steps
+     n_steps = torch.randint(n_steps_range[0], n_steps_range[1] + 1, (1,)).item()
+     
+-    # 3. Proposal Generation
++    # 3. Generate Proposals
+     depths = torch.linspace(depth_range[0], depth_range[1], n_steps, device=device)
++    # Shape: (n_steps,) -> (B, N, n_steps, 1)
+     d_proposal = depths.view(1, 1, -1, 1).expand(B, N, -1, 1)
+     
+-    # 4. Cube Intersection (Optional)
++    # 4. Cube Intersection (Simplified placeholder logic)
+     if check_cube_intersection:
+-        # [Comment] Compute intersection with unit cube and replace d_proposal
+-        # values inside the cube with cube-intersection depths.
++        # Compute intersection with unit cube. 
++        # For a unit cube centered at 0, bounds are [-0.5, 0.5].
++        # This step replaces d_proposal values inside the cube.
++        # Implementation depends on specific ray-cube intersection math.
++        # [G] Standard ray-AABB intersection logic required here.
+         pass 
+         
+-    # 5. Point Computation
++    # 5. Compute Proposal Points
++    # ray0: (B, N, 3), d_proposal: (B, N, n_steps, 1), ray_direction: (B, N, 3)
+     p_proposal = ray0.unsqueeze(2) + ray_direction.unsqueeze(2) * d_proposal
+-    
+-    # 6. Decoder Evaluation
+-    chunk_size = max_points // B
+-    val_chunks = []
+-    for i in range(0, n_steps, chunk_size):
+-        end_i = min(i + chunk_size, n_steps)
+-        p_chunk = p_proposal[:, :, i:end_i, :]
+-        p_flat = p_chunk.view(B * N, end_i - i, 3)
+-        c_flat = latent_codes.view(B * N, -1).unsqueeze(1).expand(-1, end_i - i, -1)
+-        occ_logit = decoder(p_flat, c_flat)
+-        occ_logit = occ_logit.view(B, N, end_i - i, 1)
+-        val_chunks.append(occ_logit - logit_tau)
+-    val = torch.cat(val_chunks, dim=2)
++    # Shape: (B, N, n_steps, 3)
++    
++    # 6. Evaluate Decoder
++    # Reshape for chunked evaluation
++    p_flat = p_proposal.view(-1, 3) # (B*N*n_steps, 3)
++    c_flat = c.unsqueeze(2).expand(-1, -1, n_steps, -1).reshape(-1, c.shape[-1]) # (B*N*n_steps, D_c)
++    
++    val_flat = []
++    chunk_size = max_points // B # Approximate chunking strategy
++    
++    for i in range(0, p_flat.shape[0], chunk_size):
++        p_chunk = p_flat[i:i+chunk_size]
++        c_chunk = c_flat[i:i+chunk_size]
++        # decoder returns logits
++        val_chunk = decoder(p_chunk, c_chunk, only_occupancy=True)
++        val_flat.append(val_chunk)
++        
++    val_flat = torch.cat(val_flat, dim=0)
++    val = val_flat.view(B, N, n_steps, 1) - logit_tau
+     
+     # 7. Initial Occupancy Mask
+@@ -140,41 +152,56 @@
+     
+     # 8. Sign Change Detection
+-    product = val[:, :, :-1, 0] * val[:, :, 1:, 0]
+-    sign_product = torch.sign(product)
++    # val[:, :, :-1] shape: (B, N, n_steps-1, 1)
++    # val[:, :, 1:] shape: (B, N, n_steps-1, 1)
++    products = val[:, :, :-1, 0] * val[:, :, 1:, 0]
++    signs = torch.sign(products)
++    # Append 1s to match n_steps
+     ones = torch.ones(B, N, 1, device=device)
+-    sign_matrix = torch.cat([sign_product, ones], dim=2)
++    sign_matrix = torch.cat([signs, ones], dim=2)
++    
++    # Cost matrix: weights earlier indices lower
+     weights = torch.arange(n_steps, 0, -1, device=device).float()
+-    cost_matrix = sign_matrix * weights.unsqueeze(0).unsqueeze(0)
+-    
+-    # 9. First Sign Change Index
++    cost_matrix = sign_matrix * weights
++    
++    # 9. Find First Sign Change
+     values, indices = torch.min(cost_matrix, dim=2)
+     mask_sign_change = values < 0
+     
+-    # 10. Transition Verification
+-    batch_indices = torch.arange(B).unsqueeze(1).expand(B, N)
+-    point_indices = torch.arange(N).unsqueeze(0).expand(B, N)
+-    f_low = val[batch_indices, point_indices, indices, 0]
+-    mask_neg_to_pos = f_low < 0
+-    
+-    # 11. Combined Mask
++    # 10. Identify Transition Direction
++    # Gather values at indices
++    # indices shape: (B, N)
++    # We need to gather from val[B, N, indices, 0]
++    # Use advanced indexing
++    batch_idx = torch.arange(B).view(B, 1).expand(B, N).to(device)
++    point_idx = torch.arange(N).view(1, N).expand(B, N).to(device)
++    
++    val_at_indices = val[batch_idx, point_idx, indices, 0]
++    mask_neg_to_pos = val_at_indices < 0
++    
++    # 11. Combine Masks
+     mask = mask_sign_change & mask_neg_to_pos & mask_0_not_occupied
+     
+-    # 12. Bracket Extraction
+-    d_low = d_proposal[batch_indices, point_indices, indices, 0]
+-    d_high_indices = (indices + 1).clamp(max=n_steps - 1)
+-    d_high = d_proposal[batch_indices, point_indices, d_high_indices, 0]
+-    f_high = val[batch_indices, point_indices, d_high_indices, 0]
+-    
+-    # 13. Refinement (Secant Step)
++    # 12. Extract Brackets
++    # Clamp indices to n_steps - 1
++    indices_clamped = torch.clamp(indices, max=n_steps-1)
++    
++    d_low = d_proposal[batch_idx, point_idx, indices_clamped, 0]
++    f_low = val[batch_idx, point_idx, indices_clamped, 0]
++    
++    d_high = d_proposal[batch_idx, point_idx, indices_clamped + 1, 0]
++    f_high = val[batch_idx, point_idx, indices_clamped + 1, 0]
++    
++    # 13. Refine Depth (Secant Method)
++    # d_new = d_high - f_high * (d_high - d_low) / (f_high - f_low)
++    # Avoid division by zero
+     denom = f_high - f_low
+     denom = torch.where(denom == 0, torch.ones_like(denom), denom)
+     d_pred = d_high - f_high * (d_high - d_low) / denom
+-    d_pred = d_pred.masked_fill(~mask, 0.0)
+-    
+-    # 14. Final Point Computation
+-    pt_pred = torch.zeros_like(ray0)
+-    pt_pred[mask] = ray0[mask] + ray_direction[mask] * d_pred[mask].unsqueeze(-1)
+-    
+-    return pt_pred, d_pred.view(B, N, 1, 1), mask.view(B, N, 1, 1)
++    
++    # 14. Compute Final Points
++    pt_pred = torch.zeros(B, N, 3, device=device)
++    pt_pred[mask] = ray0[mask] + d_pred[mask].unsqueeze(1) * ray_direction[mask]
++    
++    return d_pred, pt_pred
+ ```
+ 
+@@ -185,25 +212,23 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision:** The sign change detection relies on the product of adjacent values. If values are very close to zero, floating-point precision issues may cause false negatives or positives [G].
+-- **Boundaries:** The `d_high` index is clamped to $n_{steps}-1$ to prevent out-of-bounds access [S1, unofficial].
+-- **Degenerate Input:** If no sign change is detected, the mask will be false, and no point will be returned for that ray [S1, unofficial].
++- **Division by Zero:** In the secant step, if $f_{high} \approx f_{low}$, the denominator becomes zero. A guard is required [G].
++- **Index Out of Bounds:** When `indices` is the last step, `indices + 1` may exceed bounds. Clamping is required [S1, unofficial].
++- **No Sign Change:** Rays that do not cross the threshold are masked out and return default values (e.g., zero or NaN depending on implementation).
++- **GPU Memory:** Large batch sizes or high $n_{steps}$ can exceed VRAM. Chunking the decoder evaluation is necessary [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Differentiable Depth Function Forward/Backward Pass](1047-differentiable-depth-function-forward-backward-pass.md)
+-A PyTorch Autograd Function that wraps the ray marching process, allowing gradients to flow through the depth prediction to the decoder parameters and latent code. It sets itself apart by enabling end-to-end training of the neural decoder via backpropagation through the ray marching steps. Choose it when training a neural implicit surface representation [G].
++This method implements a PyTorch Autograd Function that wraps the ray marching process, allowing gradients to flow through the depth prediction to the decoder parameters and latent code.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Dominated by the decoder evaluation at $n_{steps}$ points per ray. $O(B \cdot N \cdot n_{steps})$ [G].
+-- **Memory Complexity:** $O(B \cdot N \cdot n_{steps})$ for storing proposal points and values [G].
+-- **Measured Performance:** Not given in the sources [S1, unofficial].
+-- **Scaling:** Scales linearly with the number of rays and steps. Memory usage is controlled by `max_points` [S1, unofficial].
+-- **Strengths:** Efficient detection of surface crossings using sign changes; refinement provides high accuracy [G].
+-- **Limitations:** Requires a continuous occupancy function; sensitive to the choice of $n_{steps}$ and depth range [G].
+-- **When to use:** When extracting surfaces from neural implicit representations where the decoder provides occupancy logits [S1, unofficial].
+-- **When not:** When the surface is not defined by a zero-crossing of a scalar field [G].
++- **Time Complexity:** Dominated by the decoder evaluation $O(B \cdot N \cdot n_{steps})$. The refinement step is $O(B \cdot N)$.
++- **Memory Complexity:** $O(B \cdot N \cdot n_{steps})$ for storing proposals and values. Mitigated by chunking [S1, unofficial].
++- **Performance:** Depends heavily on the decoder's inference speed and GPU memory bandwidth.
++- **Strengths:** Adaptive sampling reduces unnecessary evaluations on empty space; secant refinement provides sub-pixel accuracy.
++- **Limitations:** Requires sign changes to be detected; fails if the surface is not crossed within the proposal range or if the threshold is not crossed.
+ 
+ ## Background
+-Originated in the context of differentiable volumetric rendering for 3D shape reconstruction [G]. It is used in generating meshes from occupancy processes by detecting surface points along rays [S1, unofficial].
++This method is part of the Differentiable Volumetric Rendering pipeline, specifically used for extracting depth maps from neural implicit representations. It is implemented in the `DepthFunction` class within the `differentiable_volumetric_rendering` repository [S1, unofficial].
+ 
+ ## Sources

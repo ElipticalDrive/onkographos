@@ -1,0 +1,215 @@
+Summary The Möller–Trumbore ray–triangle tests in Aardvark.Base reject a hit when the determinant is within a fixed ±1e-7 (double) / ±1e-4f (float): V3d plane = Vec.Cross(Direction, edge02); double det = Vec.Dot(edge01, plane); if (det >...
+
+Ray–triangle tests reject small triangles: absolute `1e-7` determinant cutoff is not scale-invariant · Issue #169 · aardvark-platform/aardvark.base · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Ray–triangle tests reject small triangles: absolute 1e-7 determinant cutoff is not scale-invariant #169
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Ray–triangle tests reject small triangles: absolute 1e-7 determinant cutoff is not scale-invariant#169
+Copy link
+Description
+haraldsteinlechner
+opened on Oct 7, 2026
+Issue body actions
+Summary
+The Möller–Trumbore ray–triangle tests in Aardvark.Base reject a hit when the determinant
+is within a fixed ±1e-7 (double) / ±1e-4f (float):
+```
+V3d plane = Vec.Cross(Direction, edge02);
+double det = Vec.Dot(edge01, plane);
+if (det > -1e-7 && det < 1e-7) return false;   // "ray ~= parallel / triangle"
+```
+det = edge01 · (Direction × edge02) has units of length² × |Direction|. For a unit
+direction, it is roughly |edge01|·|edge02|·sin(angle), so the cutoff is not a
+parallelism test but a minimum triangle size: any triangle whose edges are shorter than
+≈ √1e-7 ≈ 3.2e-4 model units is never hit, at any angle.
+That is not a precision limit of double. The determinant of such a triangle is computed
+accurately (see Numeric context); only the threshold discards it.
+Affected code (master, cc2c3eb)
+The cutoffs come from two template variables:
+src/Aardvark.Base/Geometry/Types/Ray/Ray3_template.cs:40: eps = isDouble ? "1e-7" : "1e-4f"
+HitsTriangle (l. 394, 436): det check at l. 404, 447
+HitsTrianglePointAndEdges (l. 467, 500): det check at l. 475, 509
+src/Aardvark.Base/Geometry/IntersectionTests_template.cs:47: epsdot = isDouble ? "1E-7" : "1E-4f"
+IntersectsTriangle (l. 2344): det check at l. 2350. Also reached via Intersects(Ray3d, Polygon3d) and IntersectsPolygon.
+IntersectsTrianglePointAndEdges (l. 2382): det check at l. 2386. Reached via Intersects(Ray3d, Triangle3d).
+IntersectsLine (l. 2606, 2645): det check at l. 2617, 2657. Same pattern.
+Downstream, Aardvark.Geometry.Intersection (TriangleSet, IntersectableTriangleSet) and
+PolyMesh call Ray3d.HitsTriangle. So every KdIntersectionTree ray query inherits the
+limit.
+Reproduction (Aardvark.Base 5.3.26 from NuGet)
+```
+#r "nuget: Aardvark.Base, 5.3.26"
+open Aardvark.Base
+
+// a right triangle with legs `edge` in z = 0, and a unit ray straight down through it
+let probe (edge : float) =
+    let p0, p1, p2 = V3d.Zero, V3d(edge, 0.0, 0.0), V3d(0.0, edge, 0.0)
+    let ray = Ray3d(V3d(0.25 * edge, 0.25 * edge, 1.0), -V3d.ZAxis)
+    let det = Vec.Dot(p1 - p0, Vec.Cross(ray.Direction, p2 - p0))
+    let mutable hit = RayHit3d.MaxRange
+    let hits  = ray.HitsTriangle(p0, p1, p2, 0.0, System.Double.MaxValue, &hit)
+    let inter = ray.Intersects(Triangle3d(p0, p1, p2))
+    printfn "edge %-8g  det %-9.3g  HitsTriangle %-5b  Intersects(Triangle3d) %-5b" edge det hits inter
+
+for e in [ 1.0; 1e-2; 1e-3; 3.2e-4; 3.1e-4; 1e-4; 5e-5 ] do probe e
+```
+Output (the ray is perpendicular to the triangle, the best case):
+```
+edge 1         det 1          HitsTriangle true   Intersects(Triangle3d) true
+edge 0.01      det 0.0001     HitsTriangle true   Intersects(Triangle3d) true
+edge 0.001     det 1e-06      HitsTriangle true   Intersects(Triangle3d) true
+edge 0.00032   det 1.02e-07   HitsTriangle true   Intersects(Triangle3d) true
+edge 0.00031   det 9.61e-08   HitsTriangle false  Intersects(Triangle3d) false
+edge 0.0001    det 1e-08      HitsTriangle false  Intersects(Triangle3d) false
+edge 5e-05     det 2.5e-09    HitsTriangle false  Intersects(Triangle3d) false
+```
+The same 5 cm facet, with only the unit changed:
+```
+5 cm facet in metres:     edge 0.05   det 0.0025   HitsTriangle true
+5 cm facet in kilometres: edge 5e-05  det 2.5e-09  HitsTriangle false
+```
+The result also depends on the length of the ray direction, which a parallelism test
+should not do:
+```
+5 cm facet in kilometres, ray direction of length L:
+L 1      HitsTriangle false
+L 100    HitsTriangle true  t 0.01    (t*L = 1)
+L 10000  HitsTriangle true  t 0.0001  (t*L = 1)
+```
+Where we hit it
+PRo3D (planetary science viewer) loads the NASA PDS DART shape models of the asteroid
+Dimorphos (doi:10.26007/er6h-qf14). The OBJs are in kilometres, as is usual for
+small-body shape models:
+model
+facet size
+in file units
+det (unit ray, perpendicular)
+ray picking
+global, 0.98 m
+~1 m
+~1e-3
+~1e-6
+works
+local patch, 5 cm
+~5 cm
+~5e-5
+~2.5e-9
+never hits
+Every KdIntersectionTree query against the 5 cm patch (980 000 triangles) returns no hit:
+mouse picking as well as our analysis ray casts. A model in kilometres with facets finer than
+≈ 30 cm cannot be picked at all.
+Numeric context: double precision is not the limit
+case
+coordinate magnitude
+ulp at that magnitude
+edge
+relative error of p1 - p0
+det ≈ edge²
+Dimorphos patch, km
+~0.1
+1.4e-17
+5e-5
+2.8e-13
+2.5e-9
+Mars surface, m
+~3.4e6
+4.7e-10
+1e-3
+4.7e-7
+1e-6
+Even after the cancellation in p1 - p0, the edges carry 6–13 significant digits. The
+determinant of a 5e-5 triangle is accurate to roughly 1e-12 relative. The absolute 1e-7
+discards it anyway, while a large but nearly parallel triangle passes: a 1000 × 1000 triangle at
+sin = 1e-9 gives det = 1e-3.
+Suggested fix
+Make the cutoff relative to the quantities that det scales with:
+```
+V3d plane = Vec.Cross(Direction, edge02);
+double det = Vec.Dot(edge01, plane);
+// |det| = |edge01| |Direction × edge02| |cos|; compare against the same scale
+double scale = edge01.Length * plane.Length;          // or a cheaper bound, e.g. Norm1 / squared lengths
+if (det.Abs() <= relEps * scale) return false;        // relEps ~ 1e-12 (double), ~1e-6f (float)
+```
+plane.Length already contains |Direction|·|edge02|·sin, so this tests only the angle
+between the ray and the triangle plane, independent of triangle size, units and ray length.
+If the extra square roots matter, comparing squares avoids them:
+```
+if (det * det <= relEps2 * edge01.LengthSquared * plane.LengthSquared) return false;
+```
+Both templates (eps in Ray3_template.cs, epsdot in IntersectionTests_template.cs)
+would need the change; regenerating *_auto.cs then fixes all float/double variants.
+Happy to open a PR along these lines if that direction is acceptable.
+Activity
+haraldsteinlechner commented on Oct 7, 2026
+haraldsteinlechner
+on Oct 7, 2026
+MemberAuthor
+More actions
+PRo3D carries a workaround until this is fixed (it lengthens the ray direction and rescales t); removing it is tracked in pro3d-space/PRo3D#828.
+haraldsteinlechner commented on Oct 7, 2026
+haraldsteinlechner
+on Oct 7, 2026
+MemberAuthor
+More actions
+@luithefirst @hyazinthh could you review this one?
+luithefirst commented on Oct 7, 2026
+luithefirst
+on Oct 7, 2026
+Last edited by luithefirst
+Member
+More actions
+Yes, there is an epsilon constant exclusive for triangle and sphere intersection, while e.g. the sphere test uses __ftype__.Epsilon which is probably also not ideal. Regarding the triangle intersection, Google recommends :
+For float32, a safety threshold of 1e-6 or 1e-7 is mathematically ideal.
+For float64, a safety threshold of 1e-14 or 1e-15 is ideal.
+I would not see any reason not to follow that.
+I also got a hint to an even better solution with an adaptive epsilon that seems to be used in "production-grade ray tracers". It would make the epsilon larger for big coordinates, but I'm not sure how this would play out in the Pro3D scenarios. A deeper review would be needed.
+stefanmaierhofer commented on Oct 7, 2026
+stefanmaierhofer
+on Oct 7, 2026
+Member
+More actions
+Confirmed against cc2c3eb: the perpendicular 5e-5 double triangle misses, including after translation to coordinates around 0.1; increasing direction length restores the hit. A smaller absolute epsilon would only move the unit-dependent cutoff.
+I recommend a cancellation-aware determinant error guard rather than a fixed angular tolerance. With e1 = edge01, e2 = edge02, and d = Direction, use the sum of the magnitudes of the six determinant terms:
+```
+B = |e1.x| (|d.y * e2.z| + |d.z * e2.y|)
+  + |e1.y| (|d.z * e2.x| + |d.x * e2.z|)
+  + |e1.z| (|d.x * e2.y| + |d.y * e2.x|)
+
+reject if |det| <= k * MachineEpsilon * B
+```
+B is the scale in an absolute roundoff-error bound for the cross/dot evaluation. Unlike |e1| * |d × e2|, it includes cancellation inside the cross product. It scales with geometry and direction length, needs no square roots, and does not reject a reliably computed determinant merely because the intersection angle is small. k = 8 is a conservative starting coefficient under the usual no-underflow/overflow error model: approximately 1.8e-15 for double and 9.5e-7 for float. Use Constant<T>.MachineEpsilon, not .NET's T.Epsilon. Validate the coefficient against fixtures; it is not a universal “ideal epsilon”.
+Two pitfalls in the suggested formulation:
+|e1| * |d × e2| is not a pure ray/plane angular denominator. For e1 = X, e2 = Y, d = (0, 1, -1e-13), its normalized determinant is 1; swapping the edges makes it approximately 1e-13. At the proposed double tolerance, winding alone changes the classification. A genuinely angular denominator would be |d| * |e1 × e2|, but that implements a different policy from a numerical-error guard.
+Squaring substantially narrows the usable exponent range. I checked perpendicular float triangles with edges 1e-12 and 1e15: the squared comparison rejects them because both sides become zero or infinity. Avoid squaring unless the kernel is rescaled.
+Apply one consistent guard at all eight sites across the two templates and regenerate both precisions, preserving interval and closest-hit conventions. Reject non-finite determinant/scale values explicitly. This is a conservative filter treating numerically unresolved determinants as misses, not an exact or watertight predicate; full-exponent-range support requires rescaling the kernel. Coordinate quantization is a separate limitation, not something an epsilon based solely on absolute coordinate magnitude can repair.
+Regression coverage should include the translated small-triangle reproduction, geometry/direction scaling with reconstructed hit points, winding and vertex permutations, thin triangles, grazing/parallel/coplanar rays, degeneracy, and existing range/accumulator behavior. Also compare hot-path throughput before accepting the additional arithmetic.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

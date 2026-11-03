@@ -1,0 +1,1250 @@
+The Visual Computer (2026) 42:416
+https://doi.org/10.1007/s00371-026-04593-w
+RESEARCH
+EnvMap-GS: two-stage outdoor Gaussian reconstruction with
+background-to-environment map baking
+Deborah Pintani1 · Ariel Caputo2 · Noah Lewis3 · Marc Stamminger3 · Fabio Pellacini4 · Andrea Giachetti2
+Received: 28 April 2026 / Accepted: 8 June 2026 / Published online: 16 July 2026
+© The Author(s) 2026
+Abstract
+Reconstructing outdoor environments from “inside-out” captures, where a camera moves within a restricted area but looks
+outward, remains challenging due to the presence of both well-textured nearby regions and low-detail distant backgrounds.
+We introduce a two-stage Gaussian Splatting framework that explicitly separates and optimizes these regions, yielding higherfidelity novel view synthesis and allowing the replacement of the distant part with a high-quality, inpainted environment map
+to speedup the rendering process. In stage one, background primitives are initialized within a spherical shell and optimized
+using a loss that combines a background-only photometric term with two geometric regularizers: one constraining Gaussians
+to remain inside the shell, and another one aligning them with local tangential planes. In stage two, foreground Gaussians
+are initialized from a Structure-from-Motion reconstruction, added and refined using the standard rendering loss, while
+the background set remains fixed but contributes to the final image formation. Background Gaussians can be rendered to
+an object-free environment map that is inpainted to fill missing parts and can replace the Gaussian-based background for
+faster rendering. Experiments on diverse outdoor datasets show that our method reduces background artifacts and improves
+perceptual quality of novel view renderings compared to state-of-the-art baselines, including the removal of floaters in the
+navigation region.
+Keywords Outdoor scene reconstruction · 3D Gaussian Spatting · Volume rendering · Environment mapping · View synthesis
+1 Introduction
+Gaussian Splatting (GS) [7] is a popular approach to encode
+light-field information reconstructed from a collection of
+digital images of real-world scenes, to enable high-fidelity,
+real-time rendering of novel views. In this paper, we focus
+on interactive navigation in outdoor environments using
+“inside-out” captures. Unlike traditional “outside-in” captures (which focus on a central object and often ignore the
+B Deborah Pintani
+deborah.pintani@univr.it
+1
+Department of Computer Science, University of Verona,
+Verona, Italy
+2
+Department of Engineering for Innovation Medicine,
+University of Verona, Verona, Italy
+3
+Department of Computer Science,
+Friedrich-Alexander-Universität, Erlangen-Nürnberg,
+Germany
+4
+Department of Physics, Informatics and Mathematics,
+University of Modena and Reggio Emilia, Modena, Italy
+background), our target scenario involves a camera moving within a limited central space while looking outward at
+the broader environment. For such scenes with both nearby
+objects and a far-field background, Gaussian Splatting still
+has some critical issues. In particular, the reconstruction of
+the far field is problematic, manifesting in the presence of
+“floaters”, i.e., large Gaussians distant from scene geometry.
+Many variations of the original approach have been proposed
+to reduce floaters, that work well for nearby objects, but fail to
+improve far-field reconstruction. In our experiments, floaters
+appear in the far field for two main reasons: incorrect initialization and densification choices in the GS algorithm, and
+the limited range of views used during scene optimization.
+In this paper, we address these issues and present a solution
+for the reconstruction of floater-free outdoor environments
+targeting real-time applications. We assume that the user
+can only navigate in a navigation area, which is usually the
+region where training images have been captured. We segment the scene into a foreground area which encapsulates
+the navigation area, where the scene has been recorded from
+multiple directions and it is thus possible to reconstruct fairly
+123
+416
+Page 2 of 14
+well objects with well-localized Gaussians, and a background
+area, for which we represent the related light field with Gaussians that are initialized and constrained in their evolution on
+a distant sphere and are not allowed to grow radially creating
+floaters. The separation of background and foreground area
+is based on the distance from the navigation area’s center, and
+it is performed in the training views’ image spaces, exploiting dense metric depth maps. In the two areas, we initialize,
+with different strategies, two distinct layers of Gaussians. We
+optimize them sequentially, avoiding the creation of floaters
+in the foreground while optimizing the background and optimizing the foreground Gaussians with the background fixed.
+As a side effect, this separation also makes it possible to
+improve render performance significantly by converting the
+background Gaussians to an environment map, enabling realtime rendering also on low-end devices.
+We demonstrate on selected datasets that our method
+improves the quality of novel view synthesis for outdoor environments, especially for views far from training views. We
+also show experimentally that the method is more effective
+than other strategies in reducing floaters in the navigation
+area, and confirm a significant performance increase by
+replacing the far-field by an environment map. The code
+of our pipeline is publicly available at the following URL:
+https://github.com/DebbyX3/EnvMap-GS.
+While our approach is general, it is particularly relevant
+for applications like Virtual Reality (VR) exploration. In VR,
+users expect a seamless sense of presence, which is often broken in traditional Gaussian Splatting by “floaters” or popping
+artifacts when navigating outside the training camera path.
+In conclusion, our main contributions are:
+– a novel variant of Gaussian Splatting that works well
+for outdoor scene reconstruction by explicitly separating
+foreground and background regions in two concentric
+shells of Gaussian primitives optimized sequentially;
+– two geometric loss functions, L shell and L planarity , designed to constrain background Gaussians to a spherical
+shell and encourage tangential alignment;
+– a modified pruning strategy that preserves large, stable
+Gaussians necessary for representing distant scenery;
+– a procedure to convert the external shell into a standard
+environment map, that can be used to speedup rendering.
+2 Related works
+Gaussian Splatting (GS) [7] uses optimized anisotropic
+Gaussian primitives to provide high-fidelity scene reconstructions for real-time novel view synthesis. Beyond objectcentric scenes, recent works have extended GS to handle
+outdoor environments using different approaches to the prob-
+123
+D. Pintani et al.
+lem. Kulhanek et al. identify a relevant issue for outdoor
+scenes, as the Gaussians cannot be created in the sky with
+Structure-from-Motion (SfM) initialization [10]. To overcome this problem, the authors sample points on a sphere
+around the scene and add them to the rest of the points used
+to initialize the Gaussians. Wang et al. adopt another strategy and implement a pipeline with different neural modules
+[21]. They separate the sky from more detailed elements
+in the scene (e.g., buildings) and generate a cubemap to
+render the sky. However, while the resulting sky reconstruction looks visually realistic, in some instances (i.e., sky with
+clouds), it struggles to reproduce images close to the ground
+truth. Cheng et al. introduced GaussianPro, using a different,
+progressive densification strategy to improve robustness in
+texture-poor and large outdoor regions [5]. Liu et al. incorporate homogeneous coordinates into the 3DGS framework,
+providing a unified representation that enhances near and
+distant objects [12].
+Other authors tried to combine points with neural rendering to overcome the limitations of GS, at the cost of not
+being compatible with the standard renderers. Franke et al.
+use a trilinear point splatting scheme blending GS and neural
+rendering, showing effective large-scale landscape rendering
+at real-time rates [6]. Lu et al. use anchor points to distribute local 3D Gaussians and use a network to predict their
+attributes on-the-fly based on viewing direction and distance
+within the view frustum [13].
+Scalability with scene extent has also been the focus of
+much attention. Lin et al. partition large scenes into paralleloptimized volumes, allowing real-time splatting across large
+environments [11]. Ren et al. employ hierarchical levels of
+detail (LoD) via octree structures to adaptively manage rendering fidelity in large landscapes [16]. Kerbl et al. introduce
+a hierarchy of 3D Gaussians to preserve the visual quality
+for extensive scenarios [8]. Zhang et al. reduce the number of Gaussians with optimization-based sparsification[24].
+Pateux et al. enhance fidelity under real-world capture variability with confidence-aware updates and rate-distortion
+densification [14].
+Early NeRF-based methods such as NeRF++ [23] and
+Mip-NeRF 360 [1] pioneered the representation of unbounded
+scenes using inner and outer volumes. We bring a similar philosophy to the 3DGS framework. Despite these
+advances, current GS approaches often rely on dense viewpoint coverage, structured capture, or point priors. Modeling
+distant background regions (e.g., sky, distant mountains,
+etc.) remains challenging. Our method addresses the gaps
+between nearby and distant elements, including but not limited to the sky, by combining “standard” Gaussians within
+a defined foreground depth for detailed local fidelity, with
+a spherical shell of Gaussians to model the background
+elements.
+EnvMap-GS: two-stage outdoor Gaussian…
+Page 3 of 14
+416
+and scene segmentation in foreground and background areas
+and a subsequent two-stage optimization to recover the full
+Gaussian-based representation. The segmentation is shown
+in Figure 1.
+3.1 Pre-processing and scene segmentation
+The first step in our pipeline, summarized in Figure 2,
+processes the input images to prepare the data for both optimization stages.
+3.1.1 Geometric and depth estimation
+Fig. 1 Starting from a collection of photos or a video captured in a limited region (navigation area) of a real environment, we create a Gaussian
+representation of the light field in the environment with two distinct
+sets of primitives. The first set, (background area), is constrained to
+stay within a spherical shell defined by a minimum inner radius Ri
+and a maximum outer radius Ro from the scene center. The second set,
+(foreground area), represents the objects closer to the center than Ri ,
+encapsulating the navigation area
+3 Problem statement and method
+description
+Our pipeline is designed to reconstruct realistic virtual environments from a video (or a sequence of images) captured
+with a camera moving in a restricted area, called the navigation area. It relies on an initial camera pose estimation
+Output A:
+Segmented
+Background Images
+Structure from
+Motion
+Camera poses
+Background Images
+Pass 1:
+Constrained Background Gaussian Optimization
+Environment Map creation
+BG
+Reconstr.
+3D Gaussian
+Splatting
+Camera poses
+Background
+Images
+Shell Constraint
+Planarity Constraint
+Custom Pruning
+Geodesic Sphere
+Point Cloud
+Initialization
+Slit-scan
+Cylindrical Map
++
+Threshold T
+Selection
+We begin by running a Structure-from-Motion pipeline
+(COLMAP [18]) on the input images to obtain camera poses
+and a 3D sparse point cloud. We place the center of our world
+system O at the barycenter of the camera positions, but it can
+also be positioned manually.
+Next, we estimate dense metric depth maps for each image
+of the input set using a metric monocular depth estimation
+method (MMDE). In our experiments, we use the Video
+Depth Anything [4] model, which is optimized for high
+temporal consistency for frames also from video streams.
+However, several effective MMDE methods are available
+and can be used instead [22]. Since these maps are generated independently of the COLMAP reconstruction, we do
+not require a global metric scale alignment.
+Conversion in
+360° Map
+Background
+Reconstruction
+Pass 2:
+Foreground Gaussian Optimization
+Sparse point cloud
+Set of
+frames
+3D Gaussian
+Splatting
+Distance Map from
+Scene Center
+Set of Dense Metric
+Depth Maps
+Monocular
+Metric Depth
+Estimation
+Camera poses
+Full images
+Filtered
+Foreground Points
+Background
+Reconstruction
+Remove
+Background Points
+Standard Loss +
+Pruning based on
+Radius
+Final Scene
+Reconstruction
+AI Inpainting
+Output B:
+Filtered Foreground
+Points
+Fig. 2 Overview of our two-pass pipeline. From a set of input images,
+we compute camera poses, a sparse point cloud, and monocular depth
+maps. Background points are segmented using distance maps and used
+to initialize a geodesic sphere for the first pass of 3D Gaussian Splatting, producing the background reconstruction with custom losses and
+pruning. The second pass reconstructs the full scene by combining
+the background, foreground points, and full images using standard 3D
+Gaussian Splatting with our pruning strategy. Finally, we create an environment map representing the background
+123
+416
+Page 4 of 14
+Using the estimated camera poses, we unproject each pixel
+of the camera-specific depth maps into 3D space. For every
+resulting 3D point, we compute its distance to the scene center O. These distances are stored in image-aligned maps,
+which we refer to as Distance-from-Center (DFC) maps. The
+DFC representation expresses depth information in a common global reference frame, so we can use a single distance
+threshold to separate foreground and background regions
+across all views.
+3.1.2 Foreground - background segmentation
+The separation between foreground and background is based
+on a threshold Ri applied to the DFC maps. While the optimal
+threshold is scene dependent, we found a simple heuristic
+that worked well for all scenes. We estimate the histogram of
+the DFC of the original point cloud, with a binning interval
+of ten meters. We then set the threshold Ri after the first
+interval with a point count less than 2.5% of the reconstructed
+points. Although this heuristic works most often, the user can
+override the result by manually selecting a point. Changing
+the threshold within reasonable ranges does not affect the
+novel view synthesis metrics too much, as we will show in
+Section 4.3 and detail in the Supplementary Materials, but it
+might affect the reconstruction detail of the regions moved
+to the foreground.
+Once the threshold is defined, we generate two datasets
+for the following steps. The first one is a set of Masked Background Images, where the input images are masked to remove
+all foreground pixels, leaving only the background content
+for the first optimization stage. The second is a set of Filtered Foreground Points, where the initial sparse point cloud
+of COLMAP is filtered to keep only the points positioned
+within the distance threshold Ri .
+D. Pintani et al.
+ground points by placing points at the vertices of a finely
+tessellated geodesic dome. We then set the distance of each
+point from the center using the metric distance maps. If the
+distance is larger than Ro , the radius is set precisely to the
+limit value Ro , where ideally we place all the points that
+should be at infinity (e.g., the sky or mountains). If the distance is lower, the radial coordinate of the point is set to a
+random value in the range [Ri , Ro ]. All points are initially
+assigned with view-independent color components equal to
+the average of the RGB values found in the intersection of
+the corresponding rays and the input images.
+It is worth noting that, as we have the radial depth information, we could use this information for the initial positioning.
+We tested this choice, but it does not improve the convergence
+in the outer shell.
+3.2.2 Constrained 3D Gaussian splatting optimization
+In this step, we perform the first stage of our optimization
+approach, which reconstructs the background. The inputs
+are the segmented background images, the background point
+cloud generated in the previous stage, the spheres’ radii, and
+the center of the spherical shell.
+During this pass, the Gaussians are constrained to remain
+inside the spherical shell. To enforce this, we use an additional loss function that penalizes any Gaussian closer to the
+scene center than the inner radius, or farther than the outer
+radius. The penalty acts as a soft barrier and is proportional
+to the squared deviation from the shell boundaries, written
+as:
+1 
+(max(0, pi − O2 − Ro )
+N
+N
+Lshell =
+i=1
++ max(0, Ri − pi − O2 ))2
+(1)
+3.2 Stage 1: background reconstruction
+3.2.1 Initialization of the outer spherical shell
+We represent the background as a spherical shell that surrounds the entire scene. We define it as the area between two
+concentric spheres centered at O (Figure 1). The smaller one
+has radius Ri , which corresponds to the threshold used to separate background from foreground. The radius of the outer
+one, Ro , denotes the maximum limit of the scene, and we
+set its value to guarantee a bounded parallax when viewed
+from different cameras placed in the navigation area. We
+empirically found that a value of 10 times the diameter of
+the navigation area, approximated with the maximum distance between estimated camera positions, is a reasonable
+trade-off.
+Instead of using sparse points from COLMAP, which are
+often unreliable for distant regions, we initialize the back-
+123
+where N is the total number of Gaussians in the scene, pi
+is the position of the i-th Gaussian, O is the center of the
+spherical shell, Ro is the radius of the outer sphere and Ri is
+the radius of the inner sphere.
+We also introduce a planarity loss to discourage the formation of radial spikes, where Gaussians point toward the
+scene’s center. This loss encourages anisotropic Gaussians
+to lie tangentially on a virtual sphere centered in the spherical shell. Specifically, it penalizes Gaussians whose shortest
+axis is not aligned with the radial direction from the center to
+the Gaussian’s position. To compute this loss, we first identify the shortest axis in local coordinates for each Gaussian
+and compute the angle between this axis and the radial vector
+from the scene center to the Gaussian’s position. This formulation discourages Gaussians from forming radial spikes and
+penalizes highly anisotropic Gaussians, while nearly spherical ones are mostly unaffected. More formally, we compute:
+EnvMap-GS: two-stage outdoor Gaussian…
+Lplanarity =
+Page 5 of 14
+N
+
+ pi − O
+smax,i 
+1  
+· (Roti alocal,i ) ·
+1−
+N
+pi − O2
+smin,i + 
+416
+3.3.1 Setup
+i=1
+(2)
+where N is the total number of Gaussians in the scene, pi
+is the position of the i-th Gaussian, O is the center of the
+spherical shell, Roti is the rotation matrix transforming the
+i-th Gaussian from local to global, alocal, i is the basis vector
+in the Gaussian’s local coordinate system corresponding to
+its shortest axis (e.g., (0, 1, 0)T if the y-axis is the shortest) ,
+smax and smin are the maximum and minimum scaling factors
+of the i-th Gaussian, respectively,  is a small constant to
+avoid division by zero.
+Both the shell loss and the planarity loss are added to the
+original rendering loss, each weighted by a corresponding
+coefficient. The final loss can be written as
+L = Lrender + λshell Lshell + λplanarity Lplanarity
+For all our tests, we use the values λshell = 1.0 and λplanarity =
+0.1. The shell loss weight is higher to ensure that the Gaussians placed on the outer shell do not diverge to floaters during
+optimization. The planarity weight is relatively smaller, so
+Gaussians still converge to object surfaces, more slowly during optimization.
+We base this reconstruction on the results of the background
+pass. The background Gaussians are included in the rendering computation to contribute to the final image, but are kept
+fixed during optimization. The foreground is initialized using
+the filtered point cloud generated during the segmentation
+step (Section 3.1.2). During optimization, the foreground
+Gaussians are confined to the spherical volume defined by
+the inner radius Ri . This radius defines the maximum spatial
+extent for foreground elements.
+3.3.2 Optimization
+The foreground Gaussians are optimized using the standard
+3D Gaussian Splatting loss function on the original unmasked
+images. To enforce the boundary defined in the setup, we perform a spatial pruning: any foreground Gaussian that moves
+beyond the inner radius Ri of the background shell is deleted.
+This constraint ensures a clean separation between the two
+layers and prevents the foreground from spreading into the
+background region.
+The final output is a complete scene representation that
+combines the optimized foreground Gaussians with the separately modeled background.
+3.4 Environment map conversion
+3.2.3 Custom pruning
+In the first optimization stage, we also modify the pruning
+logic. The original GS implementation includes a heuristic
+mechanism aimed at deleting large Gaussians, both in screen
+space and world space. However, in our case, this strategy
+can be overly aggressive, particularly for Gaussians representing large and distant background regions. We observed
+that large Gaussians often model these elements well and are
+incorrectly removed by this strategy. To preserve the integrity
+and, more importantly, the numerical stability of the background representation, we disable this size-based pruning
+step. At the same time, we introduce a new pruning strategy
+that deletes Gaussians that are never seen from any camera
+viewpoint. To this end, we count the times each Gaussian
+is rendered, using the indices returned from the rendering
+step. Any Gaussian with a visibility count equal to zero is
+removed. This logic is executed in the same pruning stage as
+in the original code.
+3.3 Stage 2: foreground reconstruction
+The second stage of our pipeline reconstructs the foreground
+on top of the already optimized background reconstructed in
+Section 3.2.
+To extract a high-fidelity environment map from the trained
+background Gaussians, we developed a rendering pipeline
+based on the slit-scan technique. Since the Gaussian Splatting rasterizer is designed for planar perspective projection,
+it cannot natively render a spherical or equirectangular image
+in a single pass without introducing significant geometric distortion at the edges. To overcome this limitation and ensure
+continuity on the horizontal axis, we first generate an environment map sampled on a cylindrical projection and then
+further project it in the commonly-used equirectangular projection, for easy integration in existing renderers.
+3.4.1 Cylindrical slit-scan rendering
+First, we align the scene’s vertical axis to an up-vector of
+[0, 1, 0]. We define a virtual camera positioned in the center
+of the scene. To generate a w × h cylindrical panorama, we
+perform w different rendering passes. For each image column
+i ∈ [0, w−1], the view direction is set to [sin(θi ), 0, cos(θi )],
+with θi = 2π · i/w + π , and the up-vector to [0, 1, 0] to
+maintain a consistent horizontal horizon. The camera has
+a vertical field of view (FoVY ) of 120◦ . To accommodate
+the rasterizer’s internal tile processing, we render a narrow
+vertical strip of 16 pixels width for each angle, and extract the
+central column of pixels. These columns are concatenated
+123
+416
+Page 6 of 14
+to assemble a Cylindrical Perspective Map. This approach
+eliminates horizontal perspective distortion, since the optical
+axis of the camera is always perpendicular to the projection
+plane.
+D. Pintani et al.
+Table 1 Quantitative evaluation showing average similarity scores
+between ground truth and synthesized views for images in the test
+dataset. For our method, the thresholds used for each dataset are: Person
+(30). Fields (80). Plane (40). and Francis (20)
+Ours
+3.4.2 Equirectangular projection and inpainting
+To obtain an equirectangular map, we apply a geometric
+warping transformation. For each pixel (x  , y  ) in the target
+equirectangular image, we map the coordinates back to the
+cylindrical map of the source using the inverse tangent function, normalized by the vertical FoV of the source (120◦ ):
+vsource = tan(φ)/ tan(FoVY /2).
+Since the vertical FoV was limited to 120◦ , the polar
+regions are empty.
+To complete the environment map, we optionally perform
+generative inpainting using Stable Diffusion [17] via the
+Krita Generative AI plugin. Missing sky regions are manually selected and described with the prompt “realistic sky”.
+To avoid seams at the horizontal boundaries, we apply an
+offset and perform a second inpainting pass. To fill the bottom part of the map, which is covered by the foreground
+Gaussians, we paint the regions containing extra elongated
+Gaussians in black. The result is a seamless panoramic image
+suitable for spherical visualization (Figure 8). This inpainting can also fill holes caused by occlusions, though it was
+not needed in our examples.
+4 Experimental results
+We evaluated our framework on four outdoor datasets,
+selected according to our task requirements: (a) captured
+in a relatively constrained camera navigation area, and (b)
+including a foreground region with objects of interest and a
+distant, open background containing a significant portion of
+elements like sky, faraway buildings, or trees.
+It is worth noting that public datasets fitting these requirements are surprisingly scarce. Most outdoor data consist of
+forward facing trajectories (e.g., driving datasets), unconstrained drone flights, or massive large-scale environments.
+These do not reflect the “inside-out”, semi-bounded capture
+style needed for our target. Because scenes with these characteristics are not easily searchable in public repositories, we
+carefully curated three existing ones and captured a custom
+one, which is publicly available for future research at the
+following URL: https://github.com/DebbyX3/EnvMap-GS.
+The chosen datasets are Person and Plane from NerfStudio [19], Francis from Tanks and Temples [9], and Fields,
+specifically captured by us. The latter was recorded with a
+smartphone camera, from which we extracted frames at 2
+FPS, for a total of 602 frames.
+123
+Person
+Fields
+Plane
+Francis
+Avg.
+3DGS
+HiGS
+HoGS
+GauPro
+SSIM ↑
+0.831
+0.812
+0.826
+0.775
+0.836
+PSNR ↑
+29.22
+27.98
+27.11
+27.75
+28.74
+LPIPS ↓
+0.230
+0.252
+0.250
+0.297
+0.234
+n.
+1.7M
+1.4M
+1.9M
+2.2M
+1.9M
+SSIM ↑
+0.760
+0.758
+0.749
+0.713
+0.743
+PSNR ↑
+25.57
+24.52
+23.62
+23.19
+23.19
+LPIPS ↓
+0.231
+0.235
+0.229
+0.299
+0.260
+n.
+2.9M
+2.6M
+2.3M
+2.5M
+4.4M
+SSIM ↑
+0.726
+0.717
+0.710
+0.706
+0.666
+PSNR ↑
+21.66
+20.88
+20.86
+20.53
+18.81
+LPIPS ↓
+0.311
+0.319
+0.326
+0.343
+0.389
+n.
+1.7M
+1.7M
+3.1M
+1.9M
+1.7M
+SSIM ↑
+0.898
+0.903
+0.856
+0.911
+0.886
+PSNR ↑
+29.20
+27.34
+23.18
+28.57
+25.48
+LPIPS ↓
+0.231
+0.219
+0.281
+0.204
+0.257
+n.
+0.8M
+0.6M
+1.5M
+1M
+0.7M
+SSIM ↑
+0.804
+0.797
+0.785
+0.776
+0.783
+PSNR ↑
+26.41
+25.18
+23.69
+25.01
+24.06
+LPIPS ↓
+0.251
+0.257
+0.271
+0.286
+0.285
+n.
+1.7M
+1.7M
+3.1M
+1.9M
+1.7M
+The best metrics for each dataset are in bold
+For our novel view synthesis benchmarking task, each
+sequence was randomly divided into a training set, with 80%
+of the frames, and a test set, with the remaining 20%. For each
+dataset, we optimized the Gaussian environments using our
+pipeline, the official GS code [7], the official Hierarchical GS
+code (HiGS) [8] (τ = 0), the Homogeneous GS code (HoGS)
+[12] and GaussianPro (GauPro) [5]. All methods were initialized with the same point cloud for the training of the
+foreground area. We ran all experiments on a machine with an
+NVIDIA RTX 5090 (32 GB), an AMD Ryzen 9 7900X CPU,
+and 96 GB of RAM. On this machine, our method’s training
+time was approximately 40–50 minutes for both stages.
+Table 1 shows the average similarity metrics comparing
+the ground-truth test images with the corresponding renderings. Our method improves, on average, over prior work
+without increasing the number of Gaussians. More importantly, Figure 6 shows that our method produces significantly
+fewer artifacts.
+In the Person example (first row), our technique results in
+sharp clouds similar to the ground-truth ones (top and green
+box). The only method that provides a similar quality in the
+sky is HoGS, but it creates artifacts around foreground objects
+(red box). HiGS creates a layered image with sharp elements
+EnvMap-GS: two-stage outdoor Gaussian…
+popping up from a smooth background in the intermediate
+regions (yellow box).
+In the Fields dataset (second row), our method produces
+a clean sky, as do 3DGS and HoGS. HiGS and GauPro show
+evident artifacts in the sky (top and yellow box). HoGS
+presents evident artifacts due to floaters on the building
+(green box) and oversmoothed grass in the foreground (red
+box). Moreover, looking at the in-depth comparison in Figure 7, baseline methods suffer from color bleeding, where
+background sky Gaussians leak onto foreground objects (red
+boxes). Our approach prevents this, maintaining sky gradients (white boxes) and preserving the structural integrity of
+distant objects (purple and yellow boxes).
+In the example from the Plane dataset (third row), our
+method and HoGS are the only ones providing a sky similar to ground truth (green box), but, again, HoGS performs
+poorly in the intermediate and close regions, with floaters and
+artifacts (yellow and red boxes). GauPro and 3DGS result in
+heavy artifacts, while HiGS creates an oversmoothed sky
+(green box) and dark floaters in the central region (yellow
+box).
+Finally, on the Francis dataset (bottom row), the advantages of our technique are evident, as it is the only one creating
+a correct visualization of the building on the left (yellow box)
+together with HoGS, which, however, creates artifacts in the
+nearest regions (red box). Our method is also the only one
+that correctly reproduces the color gradient of the GT image
+in the sky.
+Artifacts do not always significantly affect standard quality metrics. For instance, in the Francis example, HiGS has
+the lowest LPIPS score, even though it is heavily affected by
+visual artifacts, because it aggressively optimizes fine details
+in the foreground grass. However, this comes at the cost of
+temporal artifacts like “pop-up” effects and a blurred horizon. In contrast, we prioritize structural stability. While our
+foreground might appear slightly softer than HiGS in static
+snapshots, we believe that for VR navigation, visual stability
+and a clean background are more critical than local highfrequency details that can cause flickering during movement.
+This fact suggests that the evaluation of virtual environments
+reconstructed with light-field representations should not rely
+solely on these metrics, and that different methods could be
+designed for specific applications.
+Another problem of this quantitative evaluation is that the
+test camera poses, randomly selected, are not very different from some of the training poses. This fact makes typical
+issues in 3DGS, such as the presence of floaters in areas that
+should be empty, difficult to detect. However, since we focus
+on navigation tasks, it is not sufficient that the synthesized
+views are good for camera poses similar to the training ones,
+but they need to be suitable for any camera pose in the “navigation” area where the user may want to go exploring the
+scene ( Figure 1). Thanks to the specific design of the opti-
+Page 7 of 14
+(a) 3DGS, novel view
+(b) Ours, novel view
+(c) 3DGS, novel view
+(d) Ours, novel view
+416
+Fig. 3 Comparison of two novel views generated from the Gaussians
+trained on the Francis datasets and rendered with camera parameters
+far from those included in the training set. Standard GS renderings are
+affected by the presence of elongated primitives, which obscure the
+scene elements. Our solution provides artifact-free rendering
+mization, our method guarantees floater-free scenes across
+the navigation area, with significant improvements in user
+immersion. Figures 3 and 4 show this effect clearly: while
+the selection of a camera with position and orientations not
+similar to the training ones makes the other methods affected
+by floaters, our results are clean and realistic.
+Our improvement in reconstruction quality can be easily
+explained by viewing the Gaussians from a distant viewpoint, as done in Figure 5 for the Fields dataset. Our method
+results in a dense background representation and a limited
+number of small and well-localized Gaussians in the middle.
+Other methods (b, c, d, e) create a scattered set of Gaussians, which also determines the sky’s appearance and distant
+objects placed at a short distance from the center, and may
+erroneously represent some background elements in the foreground.
+4.1 Environment maps generation
+Following the pipeline described in Subsection 3.4, we
+generate equirectangular 8K quality (8192 px x 4096 px)
+environment maps for each scene on the dataset, starting from
+the Gaussian background reconstruction. We retain only the
+base spherical harmonic band (SH0) to avoid view-dependent
+artifacts burned into the texture. The results obtained for the
+four datasets tested are shown in Figure 8. We also show
+examples of corresponding novel view renderings created
+with the two sets of Gaussians (FG/BG) and replacing BG
+Gaussians with the environment map. The latter present some
+artifacts due to the parallax of distant objects and are clearly
+not so close to the ground-truth images in distant regions, but
+appear acceptable for VR applications, considering that they
+are floater free and avoiding pop-up effects in navigation.
+123
+416
+Page 8 of 14
+D. Pintani et al.
+(a)
+(b)
+(c)
+(d)
+Fig. 4 Frames from video included in Supplementary Materials, comparing reconstructed scenes using different methods. Even when the camera
+deviates from the original path, our method produces high-quality images without floaters in the scene center
+(a) Our method
+(b) 3DGS
+(c) Hierarchical 3DGS
+(d) HoGS
+(e) GaussianPro
+Fig. 5 Comparison of distant views across methods. Our approach apreserves a spherical environment that is recognizable even from far away,
+while the original (b), hierarchical GS (c) HoGS (d) and GaussianPro (e), tend to collapse into fragmented or distorted structures
+4.1.1 Rendering performance evaluation
+To evaluate the rendering performance of our Gaussian Splatting method, we measured the average frame time and Frames
+per Second (FPS) under two different background settings:
+(i) using Gaussians from the first stage as background, and
+(ii) replacing these Gaussians with an environment map representation.
+All tests were performed on a single camera view. Before
+measuring, the GPU was warmed with 30 preliminary
+frames, and the average metrics were computed over 500
+consecutive frames, disabling gradients to measure inference
+performance only.
+The results, summarized in Table 2, show the total rendering time over 500 frames, FPS, and the average frame
+time for each background configuration. Replacing background Gaussians with an environment map reduces the
+average frame time and increases the throughput, indicating
+that background Gaussians introduce a significant rendering
+overhead even when visually static.
+4.1.2 Unity demo
+To verify the suitability of our method for interactive VR
+navigation, we developed a demo using the Unity Gaussian
+Splatting plugin viewer [15]. We recorded video sequences
+comparing Gaussian environments created with the different methods and also using our Gaussian + Env. map hybrid
+representations. The sequences, available as a Supplemen-
+123
+tary Video, clearly show that our method is effective in the
+removal of floaters.
+Regarding deployment, we validated our application using
+a Meta Quest 3 connected to a PC (with the same hardware
+specifications as described in Section 4), via a high-speed
+link. Currently, the available Unity Gaussian Splatting plugin relies on compute shaders that are not natively supported
+by the mobile VR standalone pipeline (which runs on ARM
+architectures). Therefore, real-time performance is achieved
+by offloading the rendering computation to the PC while
+streaming the output to the VR headset. FPS and metrics
+are shown in the Supplementary Video. This setup ensures
+a consistent frame rate, preventing the latency that typically
+causes motion sickness in VR environments.
+4.2 Quality/performance trade-off
+While replacing background Gaussians with an environment
+map significantly boosts rendering throughput, it introduces
+an inherent trade-off. A static 2D environment map cannot
+reproduce the motion parallax of mid-distance background
+elements when the camera translates. Consequently, standard novel view synthesis metrics (such as PSNR or SSIM)
+computed against ground-truth images inevitably drop. However, during VR navigation, this lack of parallax is barely
+noticeable for objects like the sky or distant mountains, and
+is largely compensated by the benefits of maintaining a stable
+frame rate and the elimination of floaters.
+EnvMap-GS: two-stage outdoor Gaussian…
+Page 9 of 14
+416
+GT
+3DGS (LPIPS:0.326)
+HiGS (LPIPS:0.318)
+HoGS (LPIPS:0.339) GauPro (LPIPS:0.309) Ours (LPIPS:0.299)
+GT
+3DGS (LPIPS:0.214)
+HiGS (LPIPS:0.220)
+HoGS (LPIPS:0.268) GauPro (LPIPS:0.254) Ours (LPIPS:0.211)
+GT
+3DGS (LPIPS:0.376)
+HiGS (LPIPS:0.356)
+HoGS (LPIPS:0.375) GauPro (LPIPS:0.450) Ours (LPIPS:0.350)
+GT
+3DGS (LPIPS:0.268)
+HiGS (LPIPS:0.253)
+HoGS (LPIPS:0.262) GauPro (LPIPS:0.279)
+Ours (LPIPS:0.277)
+Fig. 6 Comparison of novel view syntheses for the four benchmark
+datasets. Enlarged details highlight regions where several methods create artifacts (see text). Our method consistently provides artifact-free
+results for sky and very distant objects. HoGS performs well in the distant regions, but provides relevant artifacts in the closer ones. In this
+context, we use LPIPS because it better reflects perceptual visual quality
+For completeness, a full quantitative evaluation of the
+environment map renderings, detailing this expected metric
+degradation, is provided in the Supplementary Materials.
+the method is to explicitly force the creation of a controlled
+background structure, avoiding the creation of floaters and
+artifacts.
+When the planarity loss Lplanarity is removed, Gaussians
+tend to form radial spikes that point toward the scene’s center.
+This results in a noisier reconstruction and a degradation in
+perceptual quality.
+Turning off the shell loss Lshell relaxes the geometric constraint on the background Gaussians, resulting in a slightly
+increased SSIM compared to the planarity ablation. However, it introduces blurry backgrounds and decreased visual
+fidelity.
+4.3 Ablation studies
+We conducted an ablation study to evaluate the impact of
+additional losses added in the first stage of the optimization
+pipeline on all datasets.
+The results, summarized in Table 3, show a substantial
+decrease in the quality of the novel view when we remove
+the new losses. We expected this effect because the goal of
+123
+416
+Page 10 of 14
+D. Pintani et al.
+GT
+3DGS
+HiGS
+HoGS
+GauPro
+Ours
+Fig. 7 Visual comparison of far-field and background reconstruction
+on the Fields dataset for novel view synthesis. We compare our method
+against other approaches, focusing on distant regions such as the sky
+(white boxes) and mid-distance structures (purple and yellow boxes).
+Baseline methods show Gaussian bleeding where the background sky
+erroneously leaks onto foreground objects (red boxes). In contrast, our
+method better preserves clear sky gradients and keeps the structural
+integrity of distant details
+We also performed an additional experiment to verify how much the results depend on the value of foreground/background threshold, Ri . Figure 9 shows that, for
+the datasets considered, the effect on the Gaussian rendering
+is limited after 20 m. The choice of a different value can be
+done according to the need to preserve parallax effects for
+selected regions, in the case that the background is converted
+to an environment map.
+reconstructions for real-time navigation tasks, for example,
+with user studies in VR environments.
+Due to the explicit separation between the foreground and
+the background, a visual gap might appear at the Ri boundary under some viewing condition. However, this is generally
+only visible when the camera moves outside the intended navigation area. Within the area, where the scene is well covered
+by training views, the overlapping Gaussians mask the transition. In cases where the gap is more noticeable, it could be
+mitigated in future works by using a soft transition, such as
+distance-based alpha blending, or by adding a specific loss
+to better enforce spatial continuity between the two layers.
+Our method is designed for semi-bounded environments
+where the navigation area is well-defined. While the distancebased segmentation is effective for this scenario, its reliability
+in cluttered environments, such as crowded scenes with many
+objects scattered at varying depths, depends on the accuracy
+of the input depth estimation. In these cases, a simple distance
+threshold might be insufficient to distinguish foreground
+from background. We acknowledge this, and suggest that
+future research could address this by incorporating semantic
+segmentation.
+We also plan to create datasets, potentially synthetic,
+with uniformly sampled test views to fairly evaluate immersive reconstruction. Our current implementation uses LDR
+images, but it can be extended to HDR Gaussian frameworks
+[3] or HDR environment maps using learning-based methods
+[2, 20].
+5 Limitations
+Our method shows considerable improvements over prior
+work, but has some limitations. First, it assumes static scenes
+and cannot handle dynamic background objects. Second,
+the threshold-based separation works well for most distant
+scenes, but for mid-distance structures that require parallax
+(e.g., long bridges) a hard threshold might unfit the geometry
+and introduce distortion. A way to mitigate this might be to
+use a multiple spheres approach.
+Dense depth map initialization produces spherical backgrounds that may still contain holes due to missing input
+data. We optionally remove them via image inpainting, but
+we plan to integrate inpainting directly into the Gaussian
+backgrounds.
+Standard metrics for novel view synthesis do not fully
+capture artifacts or their visual impact, and full-image metrics
+dilute the effect of our improvements. In future work, we
+plan to design specific methods to better assess the light-field
+123
+EnvMap-GS: two-stage outdoor Gaussian…
+Environment map
+Page 11 of 14
+With BG Gauss.
+416
+With env. map
+With BG Gauss.
+Environment map
+Environment map
+With env. map
+With BG Gauss.
+With env. map
+With BG Gauss.
+Environment map
+Fig. 8 Left: environment maps estimated from the background Gaussians + inpainting. Right: comparison on example test cameras from
+the datasets used in our experiments between renderings with BG/FG
+With env. map
+Gaussians and with environment maps + FG Gaussians. All maps are
+generated using spherical harmonics of degree 0
+123
+416
+Page 12 of 14
+D. Pintani et al.
+Table 2 Comparison of
+rendering performance between
+background Gaussians and
+environment map. We report
+average frames-per-second ( f s ),
+average time-per-frame (t f ) and
+total number of Gaussians (n g )
+Background Gaussians
+fs
+t f (ms)
+Fields
+Plane
+Francis
+5.965
+1.7M
+354
+2.823
+0.7M
+111.30%
+9.173
+2.8M
+156
+6.411
+2.4M
+43.08%
+Francis
+230
+4.349
+0.8M
+419
+2.387
+0.3M
+82.20%
+Plane
+198
+5.059
+1.7M
+237
+4.219
+1.0M
+19.91%
+SSIM ↑
+0.620
+0.620
+0.831
+PSNR ↑
+23.77
+23.77
+29.22
+LPIPS ↓
+0.315
+0.317
+0.230
+SSIM ↑
+0.629
+0.626
+0.760
+PSNR ↑
+22.50
+22.41
+25.57
+LPIPS ↓
+0.286
+0.291
+0.231
+SSIM ↑
+0.571
+0.569
+0.726
+PSNR ↑
+17.10
+17.06
+21.66
+LPIPS ↓
+0.398
+0.398
+0.311
+SSIM ↑
+0.757
+0.757
+0.898
+PSNR ↑
+22.88
+22.85
+29.20
+LPIPS ↓
+0.281
+0.284
+0.231
+Plane
+Fields
+Francis
+0,32
+LPIPS
+ng
+198
+All losses
+Person
+t f (ms)
+109
+No Lshell
+0,34
+fs
+Fields
+No Lplanarity
+0,36
+ng
+Speedup
+Person
+Table 3 Ablation Study on datasets, evaluating the impact of removing
+losses
+Person
+Environment Map
+0,30
+of the inner shell, which is unaffected by the outer one. This
+overall optimization leads to cleaner results, with considerable improvements in the ability to reconstruct a realistic sky
+and distant objects. We have also shown that the optimized
+outer shell can be exploited to generate environment maps
+that may be useful to simplify the rendering of the scene,
+replacing the more complex Gaussian environment.
+Supplementary Information The online version contains supplementary material available at https://doi.org/10.1007/s00371-026-04593w.
+Author Contributions Deborah Pintani: Conceptualization, Methodology, Software, Validation, Formal analysis, Investigation, Data Curation, Writing Original Draft, Visualization (figures and tables). Ariel
+Caputo: Conceptualization (ideas and directions), Investigation (source
+research), Writing Original Draft (related works and bibliography).
+Noah Lewis: Conceptualization (general ideas), Investigation (experiments), Software, Writing Review & Editing. Marc Stamminger:
+Supervision, Writing Review & Editing. Fabio Pellacini: Supervision,
+Visualization (tables), Writing Review & Editing. Andrea Giachetti:
+Conceptualization (ideas and directions), Supervision, Visualization
+(figures and tables), Writing Original Draft, Writing Review & Editing. All authors read and approved the final manuscript and agree to be
+accountable for all aspects of the work.
+0,28
+0,26
+0,24
+0,22
+10
+20
+30
+40
+50
+60
+70
+80
+DFC Threshold (m.)
+Fig. 9 Novel view synthesis LPIPS scores vs. DFC threshold Ri . The
+variation of the threshold outside the foreground area has a limited effect
+on the similarity to the GT images
+6 Conclusions
+We presented a two-stage/two-shell framework for reconstructing Gaussian environments, particularly suited for outdoor environments with distant objects and sky. Our method
+leverages a segmentation of the image spaces based on the
+remapping of metric depth maps onto a global reference system centered in the “navigation” area, where we want to be
+able to create realistic and novel synthetic views. By optimizing a first set of Gaussians with properly designed losses to
+represent the background and the outer shell, we can avoid the
+creation of floaters, while also improving the reconstruction
+123
+Funding Open access funding provided by Università degli Studi di
+Verona within the CRUI-CARE Agreement. Noah Lewis was supported
+by the Bayerische Forschungsstiftung (Bavarian Research Foundation)
+AZ-1626-24.
+Data Availability The source code and the custom “Fields” dataset produced for this study are publicly available in the EnvMap-GS repository
+at the following URL: https://github.com/DebbyX3/EnvMap-GS Other
+datasets used in this research (Person, Plane, and Francis) are available
+from their respective public repositories: NerfStudio and Tanks and
+Temples. All other data supporting the findings of this study, including
+the Supplementary Video (demonstrating the Unity demo) and the Supplementary Document (containing detailed quantitative evaluations),
+are included within the paper’s Supplementary Information files provided with the submission.
+Declarations
+Conflict of interest The authors declare that they have no conflict of
+interest.
+Open Access This article is licensed under a Creative Commons
+Attribution 4.0 International License, which permits use, sharing, adaptation, distribution and reproduction in any medium or format, as
+long as you give appropriate credit to the original author(s) and the
+EnvMap-GS: two-stage outdoor Gaussian…
+source, provide a link to the Creative Commons licence, and indicate if changes were made. The images or other third party material
+in this article are included in the article’s Creative Commons licence,
+unless indicated otherwise in a credit line to the material. If material
+is not included in the article’s Creative Commons licence and your
+intended use is not permitted by statutory regulation or exceeds the
+permitted use, you will need to obtain permission directly from the copyright holder. To view a copy of this licence, visit http://creativecomm
+ons.org/licenses/by/4.0/.
+References
+1. Barron, J.T., Mildenhall, B., Verbin, D., Srinivasan, P.P., Hedman,
+P.: Mip-nerf 360: unbounded anti-aliased neural radiance fields.
+CVPR, (2022)
+2. Bemana, M., Leimkühler, T., Myszkowski, K., Seidel, H.P.,
+Ritschel, T.: Bracket diffusion: Hdr image generation by consistent ldr denoising. In: Computer Graphics Forum, p. e70086. Wiley
+Online Library (2025)
+3. Cai, Y., Xiao, Z., Liang, Y., Qin, M., Zhang, Y., Yang, X., Liu,
+Y., Yuille, A.L.: Hdr-gs: Efficient high dynamic range novel view
+synthesis at 1000x speed via gaussian splatting. Adv. Neural. Inf.
+Process. Syst. 37, 68453–68471 (2024)
+4. Chen, S., Guo, H., Zhu, S., Zhang, F., Huang, Z., Feng, J., Kang, B.:
+Video depth anything: Consistent depth estimation for super-long
+videos, (2025). arXiv:2501.12375
+5. Cheng, K., Long, X., Yang, K., Yao, Y., Yin, W., Ma, Y., Wang,
+W., Chen, X.: Gaussianpro: 3D gaussian splatting with progressive
+propagation. In: Proceedings of the 41st International Conference
+on Machine Learning, Proceedings of Machine Learning Research,
+vol. 235, pp. 8123–8140. PMLR (2024). https://proceedings.mlr.
+press/v235/cheng24f.html
+6. Franke, L., Rückert, D., Fink, L., Stamminger, M.: Trips: Trilinear
+point splatting for real-time radiance field rendering (2024). https://
+arxiv.org/abs/2401.06003
+7. Kerbl, B., Kopanas, G., Leimkühler, T., Drettakis, G.: 3D gaussian splatting for real-time radiance field rendering. In: ACM
+SIGGRAPH, pp. 1–11 (2023). https://doi.org/10.1145/3597525.
+3630931
+8. Kerbl, B., Meuleman, A., Kopanas, G., Wimmer, M., Lanvin, A.,
+Drettakis, G.: A hierarchical 3D gaussian representation for realtime rendering of very large datasets. ACM Trans. Graph. (2024).
+https://doi.org/10.1145/3658160
+9. Knapitsch, A., Park, J., Zhou, Q.Y., Koltun, V.: Tanks and temples: Benchmarking large-scale scene reconstruction. ACM Trans.
+Graph. 36(4), 1–3 (2017)
+10. Kulhanek, J., Peng, S., Kukelova, Z., Pollefeys, M., Sattler, T.:
+Wildgaussians: 3D gaussian splatting in the wild. In: Proceedings
+of the 38th International Conference on Neural Information Processing Systems, NIPS ’24, Curran Associates Inc, Red Hook, NY,
+USA (2025)
+11. Lin, J., Li, Z., Tang, X., Liu, J., Liu, S., Liu, J., Lu, Y., Wu, X., Xu,
+S., Yan, Y., Yang, W.: Vastgaussian: Vast 3D gaussians for large
+scene reconstruction. In: 2024 IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), pp. 5166–5175 (2024).
+https://doi.org/10.1109/CVPR52733.2024.00494
+12. Liu, X., Huang, Z., Okura, F., Matsushita, Y.: Hogs: Unified near
+and far object reconstruction via homogeneous gaussian splatting.
+In: Proceedings of the Computer Vision and Pattern Recognition
+Conference, pp. 26714–26722. (2025)
+13. Lu, T., Yu, M., Xu, L., Xiangli, Y., Wang, L., Lin, D., Dai, B.:
+Scaffold-gs: Structured 3D gaussians for view-adaptive rendering.
+In: Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pp. 20654–20664. (2024)
+Page 13 of 14
+416
+14. Pateux, S., Gendrin, M., Morin, L., Ladune, T., Jiang, X.: Bogauss:
+Better optimized gaussian splatting (2025). https://arxiv.org/abs/
+2504.01844
+15. Pranckevičius, A.: Gaussian splatting viewer for unity. https://
+github.com/aras-p/UnityGaussianSplatting (2025)
+16. Ren, K., Jiang, L., Lu, T., Yu, M., Xu, L., Ni, Z., Dai, B.: Octreegs: Towards consistent real-time rendering with lod-structured
+3D gaussians. In: IEEE Transactions on Pattern Analysis and
+Machine Intelligence pp. 1–15 (2025). https://doi.org/10.1109/
+TPAMI.2025.3568201
+17. Rombach, R., Blattmann, A., Lorenz, D., Esser, P., Ommer, B.:
+High-resolution image synthesis with latent diffusion models,
+(2021)
+18. Schönberger, J.L., Frahm, J.M.: Structure-from-motion revisited.
+In: Conference on Computer Vision and Pattern Recognition
+(CVPR), (2016)
+19. Tancik, M., Weber, E., Ng, E., Li, R., Yi, B., Wang, T., Kristoffersen, A., Austin, J., Salahi, K., Ahuja, A., Mcallister, D., Kerr, J.,
+Kanazawa, A.: Nerfstudio: A modular framework for neural radiance field development. In: Special Interest Group on Computer
+Graphics and Interactive Techniques Conference Conference Proceedings, SIGGRAPH ’23, p. 1–12. ACM (2023). https://doi.org/
+10.1145/3588432.3591516
+20. Wang, C., Serrano, A., Pan, X., Chen, B., Myszkowski, K., Seidel,
+H.P., Theobalt, C., Leimkühler, T.: Glowgan: Unsupervised learning of hdr images from ldr images in the wild. In: Proceedings of
+the IEEE/CVF International Conference on Computer Vision, pp.
+10509–10519. (2023)
+21. Wang, Y., Wang, J., Gao, R., Qu, Y., Duan, W., Yang, S., Qi,
+Y.: Look at the sky: sky-aware efficient 3D gaussian splatting in
+the wild. IEEE Trans. Visual Comput. Graph. 31(5), 3481–3491
+(2025). https://doi.org/10.1109/TVCG.2025.3549187
+22. Zhang, J.: Survey on monocular metric depth estimation, (2025).
+arXiv:2501.11841 arXiv preprint
+23. Zhang, K., Riegler, G., Snavely, N., Koltun, V.: Nerf++: Analyzing
+and improving neural radiance fields (2020). https://arxiv.org/abs/
+2010.07492
+24. Zhang, Y., Jia, W., Niu, W., Yin, M.: Gaussianspa: An optimizingsparsifying simplification framework for compact and high-quality
+3D gaussian splatting pp, pp. 26673–26682. (2025)
+Publisher’s Note Springer Nature remains neutral with regard to jurisdictional claims in published maps and institutional affiliations.
+Deborah Pintani is a Ph.D. candidate in the Department of Computer Science at the University
+of Verona, Italy, where she also
+received her M.Sc. degree in
+Computer Science and Engineering. Her research interests include
+computer vision, computer graphics, human–computer interaction,
+and virtual and augmented reality. She enjoys exploring new
+approaches to realistic 3D scene
+representation and immersive
+interaction, combining technical
+research with user-centered design.
+123
+416
+Page 14 of 14
+D. Pintani et al.
+Ariel Caputo received her Ph.D.
+degree in Computer Science from
+the University of Verona, Verona,
+Italy, in 2019. She is currently
+a research assistant working at
+the Department of Engineering for
+Innovation Medicine. Her research
+is focused on a variety of HCI topics including interaction design in
+mixed-reality systems and computer graphics.
+Noah Lewis received the M.Sc.
+degree in computer science from
+Friedrich-Alexander-Universität
+Erlangen-Nürnberg (FAU), Erlangen, Germany, in 2024. He is currently working toward the Ph.D.
+degree with the Chair of Visual
+Computing at FAU. His research
+interests include the intersection
+of computer graphics, computer
+vision, and machine learning. He
+is particularly interested in exploring scalable representations for
+radiance fields and point-based
+rendering, with applications in 3D
+scene reconstruction, LiDAR processing, and immersive visualization.
+Marc Stamminger is the chair
+of Visual Computing at FriedrichAlexander-Universität ErlangenNürnberg. His research covers various areas of visual computing,
+such as real-time computer graphics, neural and inverse rendering,
+physical light and microwave simulation, and virtual and augmented
+reality. He has published more
+than 200 papers in leading journals and conference proceedings,
+is associate editor of the “Journal of Computer Graphics Techniques”, was program chair for
+Eurographics, High Performance Graphics, and the Eurographics
+Symposium of Rendering, and participated in the program committees
+of all major computer graphics conferences. He has been elected to the
+Eurographics Executive Committee and currently serves as the Eurographics Professional Board chair.
+123
+Fabio Pellacini is a Full Professor of Computer Science at the
+University of Modena and Reggio Emilia (Italy). Before then,
+his career spanned positions at
+Sapienza University, Dartmouth
+College, Cornell University,
+alongside R&D work at Pixar
+Animation Studios. He holds a
+Ph.D. in Computer Science from
+Cornell University, and a Physics
+degree from the University of
+Parma. His research interests
+focus on combining numerical
+methods and machine learning to
+enable artists to create 3D environments with ease, with a focus on
+the design of shapes and appearance. For his research work, he was
+awarded an NSF CAREER Award and an Alfred P. Sloan Fellowship.
+Andrea Giachetti is a Full Professor of Computer Engineering
+in the Department of Engineering
+for Innovative Medicine (DIMI)
+at the University of Verona, Italy.
+His research interests include
+visual computing, geometry processing, extended reality (XR),
+and human–computer interaction
+(HCI). He has coordinated several
+international research projects in
+these areas and authored more
+than 180 peer-reviewed publications in international journals and
+conference proceedings.

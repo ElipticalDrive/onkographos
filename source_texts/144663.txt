@@ -1,0 +1,268 @@
+Dear All, 
+Similar to Processing intersections in order, I’m trying to process all intersections along a ray while modifying a payload on every hit then collect the hit information in raygen program. Curently, I’m callin…
+
+How to collect all intersections using anyhit？ - OptiX - NVIDIA Developer Forums
+How to collect all intersections using anyhit？
+Gaming and Visualization Technologies
+Visualization
+OptiX
+ray-tracing
+walnut-Ree
+October 9, 2022, 5:05pm
+1
+Dear All,
+Similar to Processing intersections in order, I’m trying to process all intersections along a ray while modifying a payload on every hit then collect the hit information in raygen program. Curently, I’m calling closehit for multiple times for each ray, but the rendering speed is quite limited when the number of triangles in each mesh goes larger.
+I kind of what to try the anyhit approach. i.e. shoting only one ray and modify the anyhit shader to modify the payload of each intersection and collect all payloads in the raygen program.
+However, I’m a newbie to optix, and gets confused about
+What kind of Payload data structure to use as the number of intersections is different for each ray?
+What should I do to modify the Payload in anyhit?
+And especially, how to collect those intersections in raygen so I can write a custom cuda kernel to sort or interpolate between them?
+Can anyone kindly provide some example code blocks?
+Best,
+Ree
+[OptiX] Is it possible to get the all primitive IDs contained by an hit AABB of a ray?
+dhart
+October 10, 2022, 2:53am
+2
+Hi Ree,
+One example along these lines that we’ve published in the past is optixParticleVolumes; it collects multiple hits using the anyhit program, and then sorts the results in t-order back in the raygen program (because anyhit programs are not guaranteed to be called in t-order along a ray). optix_advanced_samples/src/optixParticleVolumes at master · nvpro-samples/optix_advanced_samples · GitHub
+That sample uses OptiX 6, which we don’t recommend using for new projects. But you can study the payload and data handling and sorting process. You can easily do the same thing using OptiX 7.
+Some OptiX 7 SDK amples that demonstrate use of anyhit programs are optixCutouts and optixWhitted.
+As to what should go in your payload and how to modify it, that probably needs a bit more elaborating on what you want to achieve before we can advise how to organize your payload. It is important to understand that asking for all intersections along a ray is fundamentally going to take significantly longer than asking for only the closest hit, so the rendering speed limits you’re seeing with larger meshes and higher numbers of intersections to process along a ray, this is inherent to the problem and you’re likely to have the same issue when using anyhit programs too. Another thing to be aware of is that storing a collection of hits to memory and sorting them afterward will cost considerable performance because of the memory bandwidth needed. The best advice we can give to improve performance would be to discuss and help brainstorm how you might achieve your goals without either storing hit info to memory and/or without having to process all intersections along a ray. Of course, some problems do need all intersections, that’s okay, it’s just helpful to have your expectations match the performance you can achieve.
+–
+David.
+walnut-Ree
+October 10, 2022, 11:28am
+3
+Hi David,
+What I’m actually trying to do is to perform volume rendering on a volumetric mesh (which is basically a tetrahedral mesh aligned with the volume). The density and color values is stored on the vertex on the tet mesh.
+During ray-traced volume rendering, suppose I sample t points on the ray, I need to identify which tet the sampling point belongs to and calculate the barycentric coordinate of the point. Following GitHub - owl-project/tetMeshQueries: Library that demonstrates how to do GPU-accelerated tet-mesh cell location queries using OWL, I build a shared-face geometry, which associates each triangle to its two belonging tets (a front one and a back one), I can optixTrace to find the barycentric coordinate and ray tracing depth D for each intersection and interpolate two neighboring intersections to find the barycentric coordinate of a sample point between those two intersections.
+Currently, I’m using closehit multiple times to collect all intersections with the code below,
+```
+      // call track
+      optixTrace(optixLaunchParams.traversable,
+        origin,
+        rayDir,
+        0.,    // tmin
+        1e20f,  // tmax
+        0.0f,   // rayTime
+        OptixVisibilityMask(255),
+        OPTIX_RAY_FLAG_DISABLE_ANYHIT,//OPTIX_RAY_FLAG_NONE,
+        SURFACE_RAY_TYPE,             // SBT offset
+        RAY_TYPE_COUNT,               // SBT stride
+        SURFACE_RAY_TYPE,             // missSBTIndex 
+        u0, u1);
+
+      // Terminate on __misshit__
+      if (prd.tetID == -1 && prd.depth > 1e15f) { break; }
+
+      // move ray origin to the hit position plus a small value.
+      origin = origin + rayDir * (prd.depth+1e-6f);
+
+      // collect Prd
+      // ...
+    }
+```
+I kind of wondering whether using anyhit to collect the data would be more efficient than using closehit multiple times? Currently my PRD structure looks like follows:
+```
+struct Payload
+  {
+    float4 barycentric;    // barycentric coordinate of the intersection (mapped to belonging tet)
+    int tetID;             // belonging tet id
+    float depth;           // ray depth
+  };
+```
+Any idea? Should I keep the current solution or try anyhit?
+Best,
+Ree
+dhart
+October 10, 2022, 3:59pm
+4
+It’s possible that using an anyhit program could shave off some of the overheads of casting a new ray for every sample, but the big problem with using anyhit for volume rendering is needing the hits to be in t-order, which leaves you adding code with new overheads to either collect data in memory about all the hits, or trying to design an algorithm that can process hits out of order. Neither is easy. So it’s a tradeoff that depends on a lot of factors, and hard to say which one will be better for volumetric mesh rendering without trying both.
+If you have the time, I personally think trying the anyhit approach will be very instructive and help you learn some valuable things about your problem, but I also think it will be difficult to make the anyhit approach be more performant than your existing closest-hit approach. Not impossible, just difficult. So if you want and expect to learn how to do anyhit processing, you’ll have fun, but if you just want it to go faster, it might work or it might be frustrating.
+If you want to save hits into memory and sort them in t-order, you may need to consider approaches where you compress and/or recompute some of your payload information - technically the tetID is the only item you truly need, because you can recompute the barycentric and t-depth later. That would reduce your hit info storage and bandwidth down from 24 bytes per hit to 4 bytes. If you can get away with 2 or 3 bytes per tetID, even better.
+–
+David.
+walnut-Ree
+December 13, 2022, 12:32pm
+5
+Hi David,
+Sorry for bothering you again. After successfully visualizing each hit obtained from the close-hit program (currently using some python bindings and matplotlib, as Fig 1), I ran into a few new issues.
+WeChatWorkScreenshot_575d9143-0e0e-42f5-82d1-829bf99e45c91164×1374 79.8 KB
+Fig 1. Visualization of Layer-based rendering (4 tetrahedrons).
+While the algorithm works fine for simple tetrahedron meshes (as Fig. 1 with 4 tets), it becomes unstable and introduces noises when I tried to double the resolution of the tetrahedron mesh (Fig. 2 highlighted region, with 16 tetrahedron meshes).
+Image_12344×1534 381 KB
+Fig 2. Running closehit for tetrahedron mesh with 16 tets.
+This situation becomes even worse for more complex meshes with 1k+ tetrahedrons.
+Any idea how to fix this? Below is the basic code logic for one layer.
+```
+#define _EPS 1e-6f
+
+extern "C" __global__ void __raygen__rg() {
+    // call track
+    optixTrace(optixLaunchParams.traversable,
+      origin,
+      rayDir,
+      _EPS,    // tmin
+      1e20f,  // tmax
+      0.0f,   // rayTime
+      OptixVisibilityMask(255),
+      OPTIX_RAY_FLAG_DISABLE_ANYHIT,//OPTIX_RAY_FLAG_NONE,
+      0,             // SBT offset
+      0,               // SBT stride
+      0,             // missSBTIndex 
+      u0, u1, u2);
+
+    float depth = __uint_as_float(u0);
+    int tet_id_front = (int)u1;  // ray traverse from front tet to back tet.
+    int tet_id_back = (int)u2;
+
+    // Terminate on __misshit__
+    if (depth > 1e15f) { return; }
+
+    // move ray origin to the hit position plus a small value.
+    new_origin = origin + rayDir * depth;
+
+    // collect result && visualize
+    // ...
+}
+```
+walnut-Ree
+December 13, 2022, 1:21pm
+6
+Additional results:
+WeCom Screenshot_202212132107311920×1855 156 KB
+Fig 1. Tet mesh with 578 vertices and 1536 tets (4264 shared faces) and layered rendering result.
+WeCom Screenshot_202212132110501920×1840 262 KB
+Fig. 2 Tet mesh with 921 verts and 3731 tets layered rendering result.
+Moreover, I also noticed that for complex meshes, after the first __closehit__ run some background geometries occurred to the screen (as in Fig. 2 the green triangles in the background), while I didn’t update/rebuild the acceleration structure at all.
+Do you have any clue why this would happen?
+Best.
+Ree
+droettger
+December 13, 2022, 2:16pm
+7
+I’m trying to understand the noise first.
+You said you build the tetrahedrons from shared triangles, means the triangles are defining the volume boundary between two tetrahedrons.
+That would mean there are no collinear surfaces inside the scene, so each closest hit should really hit the surface boundary exactly once.
+The epsilon (_EPS) on the ray interval start t_min value would otherwise be responsible for that noise because you cannot distinguish coplanar surfaces with a single hit.
+How do the triangles specify which side is the front and which is the back side?
+Means how do you determine which tetrahedron is on the side the ray hit and the other side?
+Or you don’t actually care and only need the intersection distance from last hit to current hit?
+There are two columns of “Tet ID front” with different contents in each row.
+What is that exactly? (Previous hit, current hit? Then the second image should match the first image in the next row, which it doesn’t in Fig 1. of the last post, so that is completely broken.)
+If I understand the visualization correctly, you’re depth peeling tetrahedrons from top to bottom in these image rows and show different attributes.
+Why are there no barycentric coordinates for the first hit? (Black top right image.) You’re not visualizing the triangle barycentrics but what?
+What are the absolute sizes (vertex positions) of these tetrahedrons and the intersection distance of the ray?
+Are the tetrahedrons super tiny and far away?
+That epsilon on the ray t_min is scene size dependent. If it’s too small you will run into self-intersections with the triangle you started from, if it’s too big you might miss the adjacent tetrahedron, especially at the corners of the tetrahedron where the volume is “thin”.
+It’s unclear what the background of your scene is which would result in any data outside the object.
+Have you enclosed your tetrahedron inside some other object? Means is there a miss program and is it ever reached.
+walnut-Ree
+December 13, 2022, 5:17pm
+8
+Hello again,
+Sorry for the duplicated column header. The correct header for the visualization is hit position, front-side tetrahedron ID, back-side tetrahedron id, and barycentric coordinate w.r.t the front-side tetrahedron (we only take the first three bary coord values for visualization).
+For a better understanding of how we identify the front/back side tetrahedron of each triangle face, here is a simple visualization of the shared-face structure.
+Screenshot 2022-12-14 at 00.42.391010×1166 47.1 KB
+For each triangle face f[v_i, v_j, v_k] we follow clock-wise winding order and make sure it’s vertex indices satisfy k>j>i. And the normal direction is calculated by cross(v_j-v_i, v_k-v_i). The front side is coherent with the normal direction, thus tetrahedron T_0 is on the front side of the green triangle while T_1 is on the back side of the green triangle.
+For boundary faces that link to only one tetrahedron, we use -1 to identify the missing side, and thus the tet_id for the first hit is -1 and no barycentric coordinate for a non-existing tetrahedron, this explains why the last colume of the first row is always black.
+For the background triangle, I’m sure that there is nothing outside the object. But I’m not quite sure if I handle the miss program correctly. I returned an extremely large value in the depth field (i.e. 1e20f), and return zero in the ray_gen program if the depth value is larger than 1e15.
+Still have no idea why there are triangles in the background…
+```
+extern "C" __global__ void __miss__ms() { 
+    optixSetPayload_0(__float_as_uint(1e20f)); 
+}
+
+exturn "C"__global__ void __raygen__rg() {
+    optixTrace(
+        ...
+        u0, u1, u2
+    );
+    
+    float depth = __uint_as_float(u0);
+    if (depth > 1e15f) { return; }
+}
+```
+Best,
+Ree
+walnut-Ree
+December 13, 2022, 6:46pm
+9
+Attach a depth visualization. Tracing starts from the camera for the 1st layer then using returned hit position as starting point for remaining layers, thus depth range for the 1st row is larger than the others.
+WeCom Screenshot_202212140242211920×1490 190 KB
+Best,
+Ree
+dhart
+December 13, 2022, 8:59pm
+10
+Hi @walnut-Ree,
+I would recommend pruning down your test data to the smallest scene that reproduces the issues, and try to separate the issues as well. It’s hard to see enough detail with the large meshes to make any educated guesses. Your first example with 16 tets should suffice.
+The first question is the noise. There are typically 3 reasons this happens, and you should take steps to carefully rule each one out. Assume these might be happening even if you don’t think it can, and then prove it doesn’t happen. 1) Your ray may be hitting two co-incident triangles. If so, the order they will be returned (or shaded via closest-hit) is undefined. Furthermore, because of your epsilon t_min, you would process only one of them and then skip over the other one. 2) You hit a triangle, then cast a new ray and, due to numeric precision, hit the same triangle again. If your epsilon is too small, then numeric rounding can put your ray origin randomly on either the closer side or the further side of the triangle, and the close ones can re-intersect. 3) There is random or uninitialized data being used during shading, or there is a mistake communicating values from the hit program back to raygen (e.g., failing to cast the uint payload back to float).
+To rule out #2, you can easily turn up your EPS value and observe what happens. If the noise goes away, then the EPS value was too small. To rule out #1, you could export and inspect your model in a modeling package like Blender, or you could log your ray interactions using an any-hit shader and print out all your depth values along the ray. If you see two or more close or identical depth values, then you know you’ve got coincident faces. If you can prove it’s neither of those, then rule out shading by first removing any variables (for example return a constant solid color if hit - this is also a good way to implicate #1 or #2.)
+For the background triangles, first verify using any-hit or shading that something is actually being hit by a ray for those pixels. If something is being hit, it’s because it is in your BVH. If not, then it could look like triangles because of the way the background shading is being done. Those are the only two possibilities, so you can use that knowledge to go to the next step in verification. One possibility is that you might have vertices in your mesh with unexpected coordinates for some reason. This could happen if you tell OptiX you have more vertices in your vertex buffer than you provide, so check all array bounds. It could also happen if you compute vertices on the fly and some of them blow up and you didn’t notice. This is another good reason to export the mesh and inspect it outside of your application.
+I find it very useful to implement mouse-based debugging, and I think it could help you. You can add a click handler to your application, then set the click coordinates and a boolean debug flag in your optix launch params. Then when you launch, you can print debug output for only the rays where the optix launch id matches your click coords. This makes it easy to limit the debug output to a manageable amount and to have control over which pixel / ray / object you want to inspect. Just to plant a seed in your head, sometimes I will do things like printf the ray and the vertices of all the triangles the ray touches in OBJ format, save the output to a file, and then inspect the result in Blender using OBJ import. This kind of thing is very powerful, and also surprisingly easy to implement.
+–
+David.
+walnut-Ree
+December 14, 2022, 7:17pm
+11
+Hi David,
+Thanks for the detailed advice! I finally identified that the noise is indeed related to the choice of _EPS and the weird background is because after the first depth layer, the ray trace starting points for background pixels are relocated to (0., 0., 0.), thus brings up the unwanted triangle. Succeed by masking background.
+Best.
+Ree
+Related topics
+Topic
+Replies
+Views
+Activity
+Ray-triangles intersection when ray origin is inside multiple triangles
+OptiX
+11
+1503
+July 27, 2021
+How to record hits while traversing a mesh?
+OptiX
+9
+1657
+September 2, 2023
+How to get all the hits using Optix prime?
+OptiX
+10
+4659
+October 4, 2014
+Some questions about ray
+OptiX
+10
+2220
+May 12, 2023
+optixTrace: calculate intersections and max distance
+OptiX
+8
+565
+January 9, 2025
+Mesh artifacts when using anyhit for transparency Optix 7
+OptiX
+9
+2266
+October 13, 2020
+Strange intersection issue
+OptiX
+8
+1286
+October 18, 2018
+Problem with any hit and quantum tunneling (Optix 7.2)
+OptiX
+9
+950
+August 21, 2021
+Some confusion on AnyHit shader in OptiX
+OptiX
+4
+1793
+August 22, 2022
+Questions about any-hit programs
+OptiX
+1
+1168
+March 25, 2014

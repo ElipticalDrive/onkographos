@@ -1,0 +1,99 @@
+I am trying to render the text in my application using a glyph atlas represented as a signed distance field texture, which means a texture which stores the distance to the nearest outline in each pixel.
+This distance field texture is generated from the original binary glyph atlas texture (0 - outside of glyph outline, 1 - inside glyph outline) with this algorithm, which is searching an incremental radius around every pixel in the texture until a pixel with the opposite state is found, then stores the distance at which that pixel was found. Later, all distances are mapped between 0 and 1. 
+ //set size of signed distance field atlas
+atlas.width = binaryAtlasWidth* pDistanceFieldResolution;
+atlas.height = binaryAtlasHeight * pDistanceFieldResolution;
+
+const unsigned int atlasPixelCount = (atlas.width * atlas.height);
+atlas.buffer.resize(atlasPixelCount);
+
+//temporary buffer for the distances of each pixel
+std::vector<float> unmappedBuffer;
+unmappedBuffer.resize(atlasPixelCount);
+//support multisampling
+unsigned int samplesPerOutPixel = ceil(1.0 / pDistanceFieldResolution);
+
+//for mapping the values between 0 and 1 later
+float maxDistance = 0.0;
+float minDistance = 0.0;
+
+for (unsigned int outPixel = 0; outPixel < atlasPixelCount; ++outPixel) {
+    //coordinate of the input sample
+    unsigned int outPixelX = outPixel%atlas.width;
+    unsigned int outPixelY = outPixel/atlas.width;
+
+    float distanceSum = 0.0f;
+
+    for (unsigned int sampleY = 0; sampleY < samplesPerOutPixel; ++sampleY) {
+        for (unsigned int sampleX = 0; sampleX < samplesPerOutPixel; ++sampleX) {
+
+            glm::uvec2 sampleCoord = glm::uvec2(outPixelX * samplesPerOutPixel+ sampleX, outPixelY * samplesPerOutPixel+ sampleY);
+            unsigned int samplePos = sampleCoord.x + sampleCoord.y*binaryAtlasWidth;
+            unsigned char sampleVal = buffer[samplePos];
+            //inital distance is maximum search radius(outside of glyph)
+            float dist = spread;
+            int found = 0;
+            unsigned int rad = 0;
+            while(!found && (rad*(!sampleVal)) < spread_pixels) {
+                //if sampleVal is 1(inside), search until found
+                float radius = (float)rad + 1.0f;
+                unsigned int compareCount = round(2.0f*radius*M_PI);
+                float step = 1.0 / (float)compareCount;
+
+                for (unsigned int t = 0; t < compareCount && !found; ++t) {
+                    float theta = step*(float)t*360.0f;
+                    glm::vec2 compareLocalCoord = glm::vec2(std::cos(theta), std::sin(theta))*radius;
+                    glm::uvec2 compareCoord = sampleCoord + glm::uvec2(compareLocalCoord);
+                    int comparePos = compareCoord.x + compareCoord.y*binaryAtlasWidth;
+                    if (compareCoord.x >= 0 && compareCoord.x < binaryAtlasWidth&& compareCoord.y >= 0 && compareCoord.y < binaryAtlasHeight) {
+
+                        unsigned char compareVal = buffer[comparePos];
+                        if (compareVal != sampleVal ) {
+                            float distance = sqrt(pow(compareLocalCoord.x, 2) + pow(compareLocalCoord.y, 2));
+                            found = 1;
+                            dist = std::min(distance * (1 - (sampleVal * 2)) , dist) ;
+                        }
+                    }
+                }
+                ++rad;
+            }
+            distanceSum += dist;
+        }
+    }
+
+    float avgDistance = distanceSum / (float)(samplesPerOutPixel*samplesPerOutPixel);
+    printf("pixel  %i  of  %i  has  %f  distance\n", outPixel, atlasPixelCount, avgDistance);
+    unmappedBuffer[outPixel] = avgDistance;
+    maxDistance = std::max(maxDistance, avgDistance);
+    minDistance = std::min(minDistance, avgDistance);
+}
+minDistance *= -1.0;
+float diff = maxDistance + minDistance;
+
+//map all values between 0 and 255
+for(unsigned int p = 0; p < atlasPixelCount; ++p) {
+    float toMap = unmappedBuffer[p];
+    float mappedDistance = 1.0f - (toMap + minDistance) / diff;
+    atlas.buffer[p] = mappedDistance * 255;
+}
+ 
+ this algorithm creates these results: 
+ 266 x 183 input texture 
+ 
+ SDF result without downsampling (still 266 x 183) 
+ 
+ SDF result with downsampling (106 x 73) 
+ 
+ Render results with alpha testing on(pass when alpha is greater than 0.5): 
+ no downsampling, nearest filtering 
+ 
+ downsampled, nearest filtering 
+ 
+ no downsampling, linear filtering 
+ 
+ 
+ downsampled, linear filtering 
+ 
+ 
+ I mean, I am getting there, but actually I expected accurate edges as shown in  valves paper . What am i missing for accurate edges?  
+ PS: my fragment shader currently only uses the distance texture value as an alpha value. ( color = vec4(1, 1, 1, distance); ) 

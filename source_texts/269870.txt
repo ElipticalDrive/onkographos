@@ -1,0 +1,170 @@
+A production-grade 3D game engine in C17 and Vulkan 1.3: data-oriented, GPU-driven, built for native 4K at 240 FPS on mid-range hardware. - feat(render): voxel levels for aggregate geometry (ADR-0061, stage 1) by SugalAbubaker · Pull Request #112 · SugalAbubaker/nepheline
+
+feat(render): voxel levels for aggregate geometry (ADR-0061, stage 1) by SugalAbubaker · Pull Request #112 · SugalAbubaker/nepheline · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+SugalAbubaker
+commented
+Oct 26, 2026
+Copy link
+Copy Markdown
+Owner
+Stage 1 of ADR-0061 (the voxel far field the user chose for distant foliage on 2026-10-26). Stacked on #111.
+What
+Where the cluster levels' edge collapses stall on many small closed pieces (the landscape's pine sapling stops at 95,716 triangles; the pines at hundreds of thousands a tree), a group becomes voxels instead, as UE 5.7's Nanite foliage does.
+Records (render/voxel.h):
+32-byte bricks of 4 × 4 × 4 power-of-two cells with a 64-bit mask.
+16-byte voxels, each holding a footprint, albedo and occlusion, roughness and metallic, and a two-sided vMF lobe of normals.
+The footprint has three shapes: a box for a surface, a capsule along a needle's axis, and an ellipsoid inscribed in a box for an aggregate.
+Voxelizer (cluster_voxel.c): 16 × 16 jittered rays per axis per cell measure coverage (the union of the pieces' projections) and look (the rays' first and last hits). The footprint:
+keeps a surface's bounds, so sheets stay watertight;
+gives a needle a capsule between its hits' extremes, with the radius of their spread;
+sizes an aggregate's ellipsoid to the coverages, at a place hashed from the cell.
+Levels (cluster_lod.c):
+Which groups: aggregate groups only, of at least 256 triangles whose pieces average at most 32. They become voxels where the simplification stalls or its quadric error passes the cells'.
+First cells: the finest at least twice the error so far, with at most 4× the triangle count, so the error steps on rather than jumping.
+Coarser voxel levels: each halves its primitives.
+Sources: every level re-voxelizes the triangles where voxels began, each in exactly one cluster.
+C twins: the traversal (Amanatides & Woo over the mask, each shape's intersection), and the shading model's terms:
+the visible lobe as an SG product, with Hill's fitted clamped cosine;
+GGX widened by the lobe;
+SH bands convolved with it.
+The renderer still refuses voxel clusters (vertex_count == 0) until stage 3 draws them. The cooker does not pass a sampler yet (stage 2), so no cooked content changes.
+Measured (test_voxel.c, 17 tests)
+Check
+Result
+Traversal vs. brute force (capsule found by bisection), 25,600 rays, 400 random bricks of every shape
+agrees on every hit
+Diffuse model vs. quadrature
+0.7 % mean error, ≤ 5 % within 60° of the lobe axis, 8.3 % at an 84° grazing view
+Sheet across cells / slanted sheet
+0 of 4,000 / 4,500 rays through
+2,000-needle cloud, 5 directions
+coverage within 9 %
+Single needle, 6 directions
+capsule within 11 % of the needle's coverage; a dot end-on
+Foliage mesh, cuts at 300 m and 1.2 km
+all voxels; 1,778 of 9,216 rays covered vs. level 0's 1,777
+Wavy sheet
+no voxels
+The footprints these replaced, and what each measured, are in the ADR's alternatives.
+Build cost: about 55 µs a triangle on one thread, against 11 for the triangle levels alone. Groups are independent and will become jobs.
+Development and Debug+ASan (38 voxel and cluster-LOD tests) pass, as do all 189 render tests on the RTX.
+Next stages
+Mesh format v3 (VOXB/VOXA), loader checks and fuzzing, the cooker's material sampler.
+The renderer: voxel raster list, raster, voxel resolve.
+Shadow-map casters.
+The landscape measured against §10.4.
+Voxel bottom levels for rays.
+🤖 Generated with Claude Code
+SugalAbubaker
+and others
+added 3 commits
+October 26, 2026 18:33
+feat(render): voxel levels for aggregate geometry, ADR-0061 stage 1
+…
+437e526
+```
+Where the levels' edge collapses stall on many small closed pieces (the
+landscape's pines stop at hundreds of thousands of triangles a tree), a
+group of the cluster hierarchy becomes voxels instead, as Nanite's foliage
+does: bricks of 4 x 4 x 4 cells of a power-of-two size, each occupied cell
+a voxel of what its geometry looks like from outside at the cell's scale.
+
+- Records (render/voxel.h): 32-byte bricks with a 64-bit mask; 16-byte
+  voxels holding a footprint (a box in 32nds of the cell for a surface, a
+  capsule along a needle's axis, an ellipsoid inscribed in a box for an
+  aggregate), albedo and occlusion, roughness and metallic, and a
+  two-sided vMF lobe of normals.
+- The voxelizer (cluster_voxel.c): 16 x 16 jittered rays along each axis
+  of each cell against its triangles measure coverage (the union of the
+  pieces' projections) and look (the rays' first and last hits); the
+  footprint keeps a surface's bounds, gives a needle a capsule between
+  its hits' extremes of the radius of their spread, and sizes an
+  aggregate's ellipsoid to the coverages at a place hashed from the cell.
+- The levels (cluster_lod.c): an aggregate group (pieces of at most 32
+  triangles on average, 256 triangles or more) becomes voxels where its
+  simplification stalls or its quadric error passes the cells'; the first
+  cells are the finest at least twice the error so far with at most four
+  times the triangles' count, coarser voxel groups halve their
+  primitives, and each level voxelizes again the triangles where voxels
+  began, each in one cluster.
+- The traversal's C twin and the shading model's terms: the visible
+  lobe as a spherical Gaussian product with Hill's fitted clamped cosine
+  (0.7 % mean error against quadrature, 5 % within 60 degrees, 8.3 % at
+  grazing views), GGX widened by the lobe, harmonics convolved with it.
+
+Measured: sheets stop every ray through them; a needle cloud keeps its
+coverage within 9 % from every direction tried; a needle's capsule is
+within 11 % of the needle's coverage from six directions; cuts through a
+foliage mesh's voxel levels at 300 m and 1.2 km cover what level 0 covers.
+The renderer refuses voxel clusters until it draws them (stage 3).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(render): the voxelizer builds under GCC and Clang
+…
+e07f4c4
+```
+C17 does not convert a pointer to an array into a pointer to a const
+array (C23 does), which -Wpedantic reports on the voxelizer's 3x3
+parameters: they are no longer const. The voxel tests' float-to-double
+conversions are explicit for -Wdouble-promotion, the one bare isfinite
+is nph_f64_is_finite, and three comments' non-ASCII characters were
+double-encoded.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(render): a few voxels across the mesh's origin still coarsen
+…
+e9a2c19
+```
+A coarser voxel group's cell was the smallest whose occupied cells fit
+half its input primitives, searched by doubling up to 1e30, which failed
+with NPH_RESULT_OVERFLOW for a group of fewer than sixteen voxels across
+the mesh's origin: the grid of every cell size divides each axis at zero,
+so such a group lies in two cells along each axis it crosses however
+large they grow. The landscape's pine sapling, whose trunk stands at the
+origin, failed to cook with voxels this way. Past the sources' reach the
+count falls no further, and the search now takes the first cell past it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+This was referenced Oct 26, 2026
+feat(asset): voxel levels in the mesh format, sampled from the materials (ADR-0061, stage 2)
+#113
+Closed
+Phase 13: streaming and scale (the stack #104–#134, rebased onto main)
+#135
+Merged
+SugalAbubaker
+commented
+Oct 30, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Landed in main by fast-forward with #135: the Phase 13 stack rebased onto main, since main's protection requires linear history (the user's decision of 2026-10-30). This PR's commits are main's 77113d2, 9499789, 4b8a506.
+SugalAbubaker
+closed this
+Oct 30, 2026
+SugalAbubaker
+deleted the
+feature/render-voxel-lod
+branch
+October 30, 2026 07:48
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

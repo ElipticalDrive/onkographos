@@ -1,0 +1,649 @@
+Normal-GS: 3D Gaussian Splatting with
+Normal-Involved Rendering
+Meng Wei1
+Qianyi Wu1 Jianmin Zheng2 Hamid Rezatofighi1 Jianfei Cai1
+Monash Univeristy 2 Nanyang Technological University
+{meng.wei,qianyi.wu,hamid.rezatofighi,jianfei.cai}@monash.edu
+{ASJMZheng}@ntu.edu.sg
+arXiv:2410.20593v1 [cs.CV] 27 Oct 2024
+1
+Abstract
+Rendering and reconstruction are long-standing topics in computer vision and
+graphics. Achieving both high rendering quality and accurate geometry is a challenge. Recent advancements in 3D Gaussian Splatting (3DGS) have enabled
+high-fidelity novel view synthesis at real-time speeds. However, the noisy and
+discrete nature of 3D Gaussian primitives hinders accurate surface estimation.
+Previous attempts to regularize 3D Gaussian normals often degrade rendering
+quality due to the fundamental disconnect between normal vectors and the rendering pipeline in 3DGS-based methods. Therefore, we introduce Normal-GS, a
+novel approach that integrates normal vectors into the 3DGS rendering pipeline.
+The core idea is to model the interaction between normals and incident lighting
+using the physically-based rendering equation. Our approach re-parameterizes
+surface colors as the product of normals and a designed Integrated Directional
+Illumination Vector (IDIV). To save memory usage and simplify the optimization,
+we employ an anchor-based 3DGS to implicitly encode locally-shared IDIVs. Additionally, Normal-GS leverages optimized normals and Integrated Directional
+Encoding (IDE) to accurately model specular effects, enhancing both rendering
+quality and surface normal precision. Extensive experiments demonstrate that
+Normal-GS achieves near state-of-the-art visual quality while obtaining accurate
+surface normals and preserving real-time rendering performance.
+1
+Introduction
+Radiance Fields have emerged as a prominent representation in 3D vision, largely propelled by the
+pioneering advancements of Neural Radiance Fields (NeRF) [1]. Despite their success, NeRFs are
+hindered by prolonged rendering times and cumbersome training processes. Recently, 3D Gaussian
+Splatting (3DGS) has been introduced to represent Radiance Fields using millions of 3D Gaussians,
+each endowed with additional attributes such as opacity and color [2]. 3DGS significantly enhances
+rendering efficiency through CUDA-accelerated rasterization [3], achieving comparable or superior
+fidelity to NeRF-based models. The advantages of 3DGS have garnered significant attention [4],
+prompting numerous studies aiming at enhancing its rendering capabilities [5–7] and improving the
+quality of its underlying geometry [8–10].
+However, a critical issue continues to plague the development of 3DGS: the quality of appearance
+and geometry seemingly oscillates like a seesaw. Efforts to refine the geometry often involve the
+incorporation of regularization techniques [8, 11] or additional geometry supervision [12, 13], which
+may compromise rendering fidelity. Conversely, advancements in appearance modeling, such as the
+integration of implicit networks [6] and sophisticated shading attributes [5, 7], struggle to concurrently
+elevate both appearance and geometry quality. This raises a pertinent question: Is it feasible to achieve
+a high-quality appearance while also capturing precise underlying geometry information in 3DGS?
+Preprint. Under review.
+Figure 1: The "seesaw" characteristic between the rendering quality and the normal accuracy of
+3DGS-based methods. Our Normal-GS is able to efficiently achieve accurate normal estimation
+while preserving competitive rendering quality. Our method successfully captures the normals of the
+cover of the semi-transparent box behind the table.
+Revisiting the classical rendering equation [14], we identify a fundamental issue in the appearancegeometry conflict: the disconnection between surface normals and the rendering process in current
+3DGS methods. Specifically, the existing methods render pixel colors by alpha-blending colored 3D
+Gaussians. The color of each Gaussian is queried by the function value among Spherical Harmonics [15] along the ray direction, which disregards the contributions of surface normals. This oversight
+hampers the ability to achieve a balanced integration of appearance and geometry. Our framework
+draws inspiration from the conventional rendering equation, which incorporates surface normals
+into appearance calculations. Although prior attempts have explored this integration in contexts
+such as inverse rendering [16, 17] and specular appearance modeling [7, 5], they leverage simplified
+model [18] or approximation approaches like split-sum [19] or global environmental map [20, 21]
+to decompose appearance into several individual components with meticulous regularization terms,
+which either compromising in rendering quality or geometric accuracy. This challenge highlights the
+complexity of balancing various components for physically-based rendering, prompting our design
+of a straightforward method to integrate normal information explicitly and simply into Gaussian
+appearance modeling.
+In this work, we propose a normal-involved shading for 3DGS, called Normal-GS, for high-quality
+rendering and accurate normal estimation, while maintaining real-time performance. Our method
+directly accounts for normal contributions in the 3DGS rendering pipeline, enabling gradient signals
+to backpropagate properly to better align 3D Gaussians. Specifically, Normal-GS considers the
+normal and incident lighting interactions at the surface from the physically-based shading perspective
+and explicitly models normals’ contributions for diffuse and specular components. By considering
+the low-frequency nature of the incident light field, we further implicitly model it with MLPs. With
+our strategy, compared with the state-of-the-art (SOTA) 3DGS methods, we achieve competitive
+rendering quality, more accurate normal information, and real-time rendering, see one example
+in Fig. 1. Our contributions are summarized below.
+• We propose a new formulation to involve normal information in appearance modeling for
+3DGS, which strives for a good balance between appearance and geometry modeling.
+• We leverage an effective structure to regularize our framework using anchor-based MLPs,
+without introducing many extra regularization terms and achieving better quality.
+• Extensive experiments demonstrate our framework for obtaining superior view synthesis and
+normal estimation. Our design could serve as a plug-in component for 3DGS approaches.
+2
+Related Works
+Radiance Fields: From Neural Radiance Fields to 3D Gaussian Splatting. Neural Radiance
+Field (NeRF) has significantly influenced the field of 3D vision with its impressive novel view
+synthesis capabilities [1]. NeRF catalyzed advancements in neural rendering, inspiring a multitude of
+subsequent research focused on enhancing rendering quality under complex lighting and material
+conditions [22–24], varying camera distributions [25–27], and scalability for large scenes [28–30].
+2
+However, the implicit representation used in NeRF, which relies on a Multi-layer Perceptron (MLP)
+to compute density and radiance for any given 3D position and ray direction, necessitates extensive
+computations. This inefficiency has spurred efforts to enhance the practicality of NeRF, with notable
+strides made in accelerating its processing efficiency [2, 31, 32].
+Among these advancements, 3D Gaussian Splatting (3DGS) has emerged as a promising solution
+[2]. By explicitly modeling 3D scenes using sets of 3D Gaussians and employing tile-based GPU
+rasterization, 3DGS achieves real-time rendering with competitive quality. Its success has spurred
+applications in areas like 3D generation [33, 34], physical simulation [35], and sparse view reconstruction [36, 37], despite its higher memory requirements for scene representation. Innovations
+such as feature anchoring in Scaffold-GS [6], value pruning and quantization techniques [38–40] and
+mining spatial relationship [41–43] are among the efforts to reduce the memory footprint of 3DGS,
+thereby enhancing storage efficiency and rendering fidelity.
+Geometry and Appearance in 3DGS: From Surface Reconstruction to Inverse Rendering.
+Geometry and appearance are central to 3D reconstruction, and the discrete and explicit nature of
+3DGS can result in noisy underlying geometry [8, 10, 11, 13, 44]. SuGaR [8] was an initial attempt
+to refine mesh extraction from 3DGS, applying regularization to align the Gaussian Splatting with
+the actual surface contours. To better define geometry, capturing normal information is essential,
+leading to innovations like transforming 3DGS into 2D Gaussian Splatting (2DGS) and Gaussian
+Surfels [10, 44]. These methods apply regularization to depth and normal rendering, ensuring that
+the Gaussians are appropriately distributed across surfaces. While these approaches improve surface
+reconstruction, they often sacrifice rendering fidelity in novel view synthesis due to the lack of a clear
+relationship between geometry and appearance [7, 10, 44].
+In appearance modeling, the focus has shifted to inverse rendering for 3DGS, which aims to separate
+scene elements into materials, lighting, and geometries. This inherently unconstrained problem
+challenges traditional rendering equations. Techniques such as Monte Carlo integration, point-based
+ray tracing [17, 45], and baking [16] are employed to handle the complex integrals, often relying
+on simplified models like the Disney Bidirectional Reflectance Distribution Function (BRDF) [18]
+and approximation methods such as split-sum [16, 17, 45, 46] or environmental mapping [7, 46, 47].
+Despite their efforts, these simplifications generally result in lower rendering quality, as reflected in
+reduced Peak Signal-to-Noise Ratios (PSNR) [16, 17, 45], failing to match the original 3DGS.
+It is worth noting that some concurrent works [47, 48] have a similar motivation as ours. [48]
+simultaneously enhance geometry accuracy and rendering quality by incorporating a laborious dualbranch framework, which uses 3DGS for appearance rendering and an implicit neural surface for
+geometry production. While this approach integrates the strengths of each system, it is hampered
+by slower training speeds relative to standalone 3DGS, due to its additional networks for surface
+representation. [47] also distills geometry information from an extra neural implicit surface network
+for deferred rendering. Our solution proposes a new perspective from a rendering standpoint to
+consider geometry and appearance simultaneously without an extra implicit network for the surface.
+3
+Method
+Our goal is to simultaneously enhance both image quality and normal estimation capability of 3DGS,
+while maintaining real-time rendering. To achieve this, we first analyze the existing rendering
+pipeline in 3DGS to identify its limitations in not involving surface normals in color modeling
+(Sec. 3.1). We then design a normal-involved rendering strategy that aligns with the physically
+based rendering equation. Our method effectively models interactions between normals and incident
+lighting, parameterized by the proposed Integrated Directional Illumination Vectors (IDIV) (Sec. 3.2).
+We employ an anchor-based GS to implicitly encode locally shared IDIVs to save memory and aid
+optimization (Sec. 3.3). The training details of our framework are provided in Sec. 3.4.
+3.1
+Preliminary
+3D Gaussian Splatting [2]. 3DGS models scenes using a set of discrete 3D Gaussians, each defined
+by its spatial mean µ and covariance matrix Σ:
+1
+G(p) = exp(− (p − µ)T Σ−1 (p − µ)).
+2
+3
+(1)
+The covariance matrix Σ is parameterized by a scaling matrix S and a rotation matrix R, such that
+Σ = RSS T RT , ensuring it remains positive semi-definite during optimization.
+Each 3D Gaussian is associated with a color c and an opacity α. During rendering, these Gaussians
+are projected (rasterized) onto the image plane, forming 2D Gaussian splats G′ (x), as described in [3].
+The 2D Gaussian splats are sorted from front to back tile-wisely, and α-blending [49] is performed
+for each pixel x to render its color as follows:
+i−1
+X
+Y
+C(x) =
+ci σi
+(1 − σj ), σi = αi G′i (x)
+(2)
+i∈N
+j=1
+where N specifies the number of 2D Gaussian splats covering the current pixel. Heuristic densification
+and pruning strategies [2] are employed to address potential under- and over-reconstruction and
+ensure multi-view consistency in rendered images.
+The color of each Gaussian, c, is represented by Spherical Harmonics (SH) as klm Ylm (ω view ) to
+provide view-dependent effects, where (l, m) is the degree and order of the SH basis Ylm , klm is
+the corresponding SH coefficient, and ω view specifies the viewing direction. 3DGS usually uses a
+P3 Pl
+maximum degree l of 3, formulating c(ωview ) = l=0 m=−l klm Ylm (ωview ).
+In Eq. (2), standard 3DGS treats colors as intrinsic attributes, independent of surface normals. This
+independence prevents surface normals from receiving gradient signals during the backpropagation
+pass when optimizing surface colors. Moreover, this separation significantly undermines our goal of
+simultaneously enhancing image quality and normal estimation capability, since improvements in
+normals cannot contribute to the rendering quality in the forward shading pass of 3DGS.
+3.2
+Normal-Involved Shading Strategy
+Physically Based Rendering. To integrate surface normals into both the backward and forward
+rendering passes of 3DGS effectively, we propose a normal-involved rendering strategy. This strategy
+adopts principles from physically based surface rendering [14] in computer graphics, which models
+the out radiance Lout of a surface point as a function of the incident lighting Lin and normals.
+Specifically, for each 3D point, its out-radiance in the outward direction ωo = −ωview is defined as:
+Z
+c(ωview ) = Lout (ωo ) = LE (ωo ) +
+Lin (ωi )(ωi · n)fr (ωi , ωo ) dωi
+(3)
+Ω+
+where LE is the emitted radiance along the outward direction, the integral is defined over the upper
+hemisphere Ω+ of the surface; ωi is the incident light direction; BRDF fr (·) describes how light is
+reflected from ωi to ωo ; the cosine term (ωi · n) accounts for the light geometric attenuation.
+Integrated directional illumination vectors for Lambertian objects. We first consider a simple
+ideal case where the scene contains only Lambertian objects. For more complex materials, we handle
+them in Sec. 3.4. Given that the diffuse reflection of Lambertian objects is view-independent, the
+complicated BRDF function fr (·) can be reduced to a spatially varying albedo term kD . Omitting the
+emitted radiance LE , the rendering equation accounting for the diffuse reflectance LD becomes:
+Z
+Z
+LD =
+Lin (ωi ) · kD · (ωi · n) dωi = kD
+Lin (ωi )(ωi · n) dωi .
+(4)
+Ω+
+Ω+
+We want to find a way to explicitly re-parameterize LD as a function of normal n, meanwhile avoiding
+complicated integrals to save time. Specifically, we want to represent LD as a dot product between
+n and some illumination vector l. Inspired by the traditional shape-from-shading strategy [50], we
+extract the normal out of Eq. (4):
+Z
+
+LD = kD · n ·
+Lin (ωi )ωi dωi .
+(5)
+Ω+
+By defining a new term called “integrated directional illumination vector (IDIV)” as
+Z
+l=
+Lin (ωi )ωi dωi ,
+(6)
+Ω+
+we model the color for Lambertian objects as the albedo times a dot product between IDIV and the
+surface normal: c = LD = kD · n · l. Compared with the original 3DGS and the method [7] that
+directly use a constant diffuse color, our re-parameterization successfully accounts for the normal’s
+contributions to the diffuse component of surface colors.
+4
+Figure 2: Our normal-involved GS, Normal-GS, reparameterizes the original colors into the diffuse
+and specular components, c = LD + LS (bottom). It models the diffuse component as the dot product
+between the normal vector n and the Integrated Directional Illumination Vector (IDIV) l, and utilizes
+the Integrated Directional Encoding (IDE) [22] to capture view-dependent specular effects. Inherent
+parameters are encoded implicitly by a locally shared anchor Gaussian (left) and decoded using
+MLPs (top). Our method accounts for the contributions of normals to colors, effectively enhancing
+geometry accuracy and rendering quality.
+Analysis. Our re-parameterization of the diffuse color enables the normal vector to be computationally involved in the rendering pass. As such, during backpropagation, by the chain rule, the surface
+color could pass gradient signals to the normal vectors as follows
+dL
+dL dc
+dL
+=
+·
+=
+· (kD · l).
+dn
+dc dn
+dc
+(7)
+Other image-based methods [7, 16, 46] usually optimize a single environment map E and query this
+map using normals to determine diffuse colors. Consequently, their gradients on normals function by
+rotating the 3D Gaussians until the queried environment map color matches the pixel color, making
+the optimization process heavily dependent on the quality of E. These methods assume the existence
+of a global environment map, which may not be valid for general real scenes. In contrast, our
+approach employs IDIVs to capture local incident lighting, eliminating the reliance on such a strong
+assumption and providing a more flexible and accurate framework for optimizing surface normals.
+3.3
+Modeling Locally Shared Integrated Directional Illumination Vectors
+Replacing 3D Gaussian colors c with kD · n · l introduces additional free parameters. Therefore, it is
+necessary to regularize the solution space of the introduced variables kD and l to stabilize the training
+process and avoid overfitting.
+Regularizing the solution space. Xu et al. [50] address solution space constraints from an optimization perspective. They have introduced several regularizers, such as total variation and Laplacian
+terms, to enhance the performance. However, their mesh-based method relies on a connected topology,
+which is incompatible with the discrete and sparse nature of 3D Gaussians. Although k-NN can be
+used to find connected primitives, it severely hampers training speed. Moreover, since 3D Gaussians
+can be semi-transparent, directly applying their methods to our case is unsuitable.
+Instead, we approach the problem from a neural rendering perspective. As observed in [6, 42, 51, 52],
+3D Gaussians with similar textures usually cluster together. A similar situation applies to incident
+lighting, which tends to be locally shared and exhibits low-frequency variations. To avoid the
+redundancy of storing Integrated Directional Illumination Vectors (IDIVs) for each Gaussian and
+capture local coherence, we propose to encode IDIVs with locally shared features and decode
+them using MLPs. An additional advantage of using MLPs to approximate IDIVs is their inherent
+smoothness in function approximations, aligning with our objectives.
+In particular, we employ an anchor-based Gaussian Splatting (GS) method, Scaffold-GS [6], to
+implicitly represent IDIVs using locally shared features f v stored at anchors v and decode them using
+5
+a global MLP, θl (f v ) = {lkv }K
+k=1 , where K IDIVs share a local feature f v . Therefore, we only need
+to learn a compact set of per-anchor local features and use the MLP to generate per-Gaussian IDIVs,
+significantly reducing the dimensionality of the problem. Further details on our model configurations
+can be found in the following Sec. 3.4 and Appendix.
+3.4
+Training Details
+Our method adopts the established 3DGS pipeline [2], which first performs Structure-from-Motion
+[53] on input images to generate sparse points. These points serve as initial 3D Gaussians and are
+optimized to model the scene.
+Defining surface normals on 3D Gaussians. During optimization, 3D Gaussians often exhibit
+flatness around the surface areas, as observed in [5, 7, 45]. For a near-flat Gaussian ellipsoid, its
+shortest axis thus functions as the normal vector. However, the shortest axis of 3D Gaussians does
+not physically represent the actual surface normal. In contrast, implicit radiance fields leverage the
+gradient of densities to naturally approximate surfaces, and the Signed Distance Function (SDF) has
+its gradients as surface normals by definition. To make the shortest axis of 3D Gaussians align with
+the real surface normal, we employ a depth regularized loss term on normals, similar to [7, 10, 44].
+We first render the depth and normal images, {D, N }, using the 3DGS tile-based rasterizer, which is
+achieved by replacing the color term in Eq. 2 with depths and normals of 3D Gaussians, respectively.
+Then we compute the image-space gradients of the depth image ∇(u,v) D and finally perform the
+cross product of the gradients, resulting in ND . The depth regularized loss term on normals is defined
+as LN = 1 − ND · N . Although there are other methods for improving normals, since our primary
+goal is to introduce a normal-involved shading method, we find this self-regularizer is enough for our
+models. Other methods are welcome to be combined with our strategy for future improvements.
+Capturing specular effects. Our derivation on Sec. 3.2 is based on the Lambertian assumption.
+To make our framework more generalizable, similar to our parameterization of the diffuse term, we
+aim to express the specular term, Ls , as a function of the normal vector n. Unlike view-independent
+diffuse colors, specular reflectance is highly sensitive to the view direction due to the complex
+BRDF, fr (ωi , ωo ). Since normal vectors are implicitly involved in the BRDF to capture effects
+such as the Fresnel effect [18], we cannot directly extract the normal vector as we did for IDIVs
+in Sec. 3.2. Inspired by the Ref-NeRF [22], we model the specular component as a function of the
+reflection direction of the viewing direction with surface normals involved: ωr = 2(ωo · n)n − ωo .
+By applying the Integrated Directional Encoding (IDE) [22] on the reflection direction, we have
+LS = θ(ϕIDE (ωr ), n, f v ). The final color of the Gaussian is the summation of LD and LS . More
+details can be found in the Appendix.
+Model architecture. Figure. 2 illustrates the whole process of our method. We follow [6] to define
+a set of anchor Gaussians {v}, where each v is associated with a position xv , a local feature f v , a
+scaling factor sv and k offsets O kv for k nearby 3D Gaussians. Anchor-wise features together with
+global MLPs are employed to predict attributes of 3D Gaussians. We utilize our normal-involved
+rendering to compute surface colors c = LD +LS . Colors are finally gathered following the traditional
+3DGS pipeline, together with rendered normals and depths for self-regularization. The final loss L
+consists of the original photo-metric loss LP used in 3DGS [2], the volume regularization loss Lvol
+used in Scaffold-GS [6] and the self-regularized depth-normal loss LN :
+L = LP + λvol Lvol + λN LN .
+4
+(8)
+Experiments
+We evaluated our Normal-GS method against several state-of-the-art 3DGS-based methods across
+multiple datasets, presenting both qualitative and quantitative results.
+Baselines. We selected the following baseline methods for comparison: 1) 3DGS [2] and ScaffoldGS [6]: These served as the vanilla and baseline methods. 2) GaussianShader (GShader) [7] and
+SpecGaussian [5]: These 3DGS-based methods modeled specular effects and used surface normals.
+Both methods computed the reflected direction ωr of the viewing direction w.r.t the normal. GShader
+6
+Figure 3: Qualitative comparisons of the rendering quality and normal estimation. Our method
+produced clean normals estimation and preserved good rendering quality.
+used ωr to query a learned environment map for shading, while SpecGaussian used ωr to query the
+learned Spherical Gaussians. Additionally, we designed a new baseline method based on ScaffoldGS. In the original Scaffold-GS, anchor features f v were passed into a color MLP to predict 3D
+Gaussian colors. In our new baseline method, we also fed normals into the same color MLP, implicitly
+incorporating normal information. We referred to this baseline method as 3) ScaffoldGS w/ N.
+Datasets and evaluation metrics. We followed the original 3DGS [2] methodology and used the
+NeRF Synthetic [1], Mip-NeRF 360 [26], Tank and Temple [54], and Deep Blending [55] datasets to
+demonstrate the performance of our method. Due to licensing issues, we tested on 7 out of 9 scenes
+in the Mip-NeRF 360 dataset. Following [2, 26], we selected every 8th image for testing and used the
+remaining images for training. We reported PSNR, SSIM, and LPIPS to measure rendering quality
+and the Mean Angular Error (MAE) of normals on the NeRF Synthetic [1] dataset.
+Implementation details. We implemented our method in Python using the PyTorch framework.
+Our rasterization pipeline followed the CUDA-based rasterizer described in [2]. We trained our
+models for 30k iterations, following the settings of baseline methods. Consistent with [2, 6], we set
+λvol = 0.001. For the depth-normal loss, we used λN = 0.01. Because the depth and normals were
+inaccurate at the start of training, we added the depth-normal loss after training for 5k iterations. We
+will release our code after publication. More details were included in the Appendix.
+We tested our method and the baseline methods using their original released implementations with
+default hyperparameters on an NVIDIA RTX 3090 Ti GPU with 24 GB of memory. To obtain normals
+for comparisons, we retrained most of the baseline methods, except for 3DGS, which provided its
+optimized data. For methods without defined normals, such as 3DGS [2] and Scaffold-GS [6], we
+used the shortest axis of 3D Gaussians as normals for evaluation, consistent with ours.
+4.1
+Results
+We first present a comprehensive comparison of rendering quality and normal estimation in Fig.3,
+demonstrating that our method either matches or surpasses state-of-the-art (SOTA) approaches in
+metrics of PSNR/SSIM/LPIPS (Tab.1). Notably, our approach significantly outperforms the baseline
+method (ScaffoldGS) and its variant incorporating normals (ScaffoldGS w/ N) in almost all metrics.
+7
+Table 1: Quantitative comparisons of the rendering quality. Our methods achieve comparable or
+even better results compared with the SOTA approach, SpecGaussian [5]. However, SpecGaussian
+performs much worse in normal estimation, while ours achieves a good balance between geometry
+and appearance quality. † denotes the results quoted from their paper. GShader* fails on the Deep
+Blending scene.
+Mip-NeRF360
+Tanks & Temples
+Deep Blending
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+3DGS
+ScaffoldGS
+ScaffoldGS w/ N
+GShader
+SpecGaussian
+28.691
+29.267
+29.177
+26.060
+29.287
+0.870
+0.869
+0.870
+0.825
+0.864
+0.182
+0.190
+0.192
+0.233
+0.196
+23.142
+24.088
+23.976
+21.262
+24.502
+0.840
+0.851
+0.852
+0.785
+0.855
+0.183
+0.175
+0.176
+0.254
+0.175
+29.405
+30.140
+30.163
+19.159*
+30.114
+0.903
+0.905
+0.905
+0.769*
+0.905
+0.243
+0.256
+0.263
+0.453*
+0.252
+Normal-GS (Ours)
+29.341
+0.869
+0.194
+24.219
+0.854
+0.174
+30.187
+0.910
+0.252
+Method
+†
+Figure 4: b) Our method successfully captures specular effects. c) GShader [7] relying on an
+environment map performs poorly when d) its learned environment map fails. Scenes are taken from
+the Mip-NeRF 360 dataset [26], which have complicated lighting conditions.
+This comparison underscores the limitations of the implicit normal utilization in ScaffoldGS w/N,
+which fails to accurately model appearance. In contrast, our method adopts an explicit modeling of
+color as a function of normals, directly derived from the rendering equation. This explicit integration
+enhances both the forward and backward passes during training, providing clearer cues for the
+network to capture nuanced color details, thereby improving rendering quality.
+Our approach also demonstrates superior rendering performance compared to methods like
+GShader [7], which depend on global environment maps to model specular effects, as evidenced in
+Tab 1. The dependency of normal gradients on environment map quality, described by the equation
+dL
+dL dE
+dN = dE dN [7, 47], often leads to inaccuracies in capturing detailed information, as shown in Fig.4
+and further evidenced by performance issues on challenging datasets like DeepBlending[55] in Tab. 1.
+Our framework’s capability to learn local incident light field attributes tied to distinct anchors in 3D
+space allows for more effective handling of complex lighting effects.
+Although SpecGaussian [5] achieves competitive rendering quality through the use of Spherical
+Gaussian encoding and neural networks, it falls short in accurate normal modeling, as depicted in
+Fig.3. This suggests the insufficiency of relying solely on neural networks for integrating normal
+information into geometric modeling. Our method, with its explicit integration of normals into
+the rendering process, not only maintains high rendering quality but also ensures the accuracy and
+smoothness of normals. Our approach underscores the crucial role of direct geometric involvement in
+the rendering pipeline for achieving both high geometric accuracy and visual fidelity. More results
+are available in Appendix.
+To quantitatively evaluate normal estimation, we conducted tests on the Synthetic-NeRF dataset,
+which includes ground-truth normal data. As shown in Tab 2(a), our method outperforms others
+in the normal Mean Angular Error (MAE) metric. Visual results in Tab 2(b) confirm our method’s
+superior capability in capturing accurate geometry alongside high-fidelity rendering, as highlighted
+in the yellow box, showcasing the effectiveness of our design.
+4.2
+Ablation studies
+Our contributions are significant in two key areas: the integration of Integrated Directional Illumination Vectors (IDIV) and the implementation of an anchor-based regularization design. We
+initially validate the impact of IDIV through an ablation study conducted within a conventional 3DGS
+framework, detailed in Sec. 3.2. Introducing IDIV necessitates additional parameters, requiring the
+adoption of regularization techniques such as Laplacian and Total-Variation loss, referenced in [50].
+8
+Table 2: Comparison on Synthetic-NeRF dataset. (a) The numerical results on normal consistency.
+Our method achieved state-of-the-art results among all methods. (b) We visualized the rendered
+normals for qualitative comparison. Our framework produced the best geometry.
+Normal MAE ↓
+SpecGaussian [5]
+45.98
+ScaffoldGS [6]
+25.56
+GShader [7]
+23.56
+Normal-GS (Ours)
+20.71
+(a) Normal consistency comparision
+(b) Visualization of rendered normals
+Figure 5: Ablation study about our proposed components. The IDIV together with our regularization strategy produces better quality in rendering quality and normal accuracy.
+The outcomes, illustrated in Fig. 5 (a) and (b), demonstrate substantial enhancements in rendering
+quality and the smoothing of normals.
+However, we found that the model’s performance is highly sensitive to the tuning of loss weights. To
+address this, we implemented an anchor-based IDIV regularization strategy in Sec. 3.3 with results
+illustrated in Fig. 5 (c). This approach employs neural networks to model locally shared IDIVs,
+proving to be both robust and efficient in regularizing the solution space. Notably, the simplicity
+yet effectiveness of our final loss term, defined in Eq. 8, underscores the potential of our design to
+enhance both geometric and rendering quality. When considering the specular component, our full
+(Fig. 5 (d)) model achieves superior results.
+5
+Discussions
+Conclusion. We introduce a novel shading technique within the 3D Gaussian Splatting (3DGS)
+framework to improve view synthesis and normal estimation. By integrating Directional Illumination
+Vectors (IDIV) as advanced attributes for color representation and utilizing an anchor-based design
+with a neural MLP for IDIV prediction, our approach achieves a superior balance between rendering
+quality and geometric accuracy. This enhancement not only elevates image fidelity but also ensures
+precise normal estimations, pushing the boundaries of 3DGS technology in real-world applications.
+Limitation and Future Work. We acknowledge existing limitations within our framework. Notably,
+the self-regularized normal loss proves suboptimal for certain outdoor scenes at a distance (as
+observed in the Appendix ??), negatively impacting rendering quality in these regions. This issue
+could potentially be addressed with more sophisticated normal guidance techniques. In future research,
+we plan to delve into a more granular decomposition of the Integrated Directional Illumination Vectors
+(IDIV) and specular components. This exploration aims to enhance capabilities in texture editing and
+relighting, thereby broadening the practical applications of our framework.
+Boarder Impact. As our approaches require per-scene optimization to obtain the 3D model for each
+scene, the computational resources for model training could be a concern for global climate change.
+9
+References
+[1] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng.
+Nerf: Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65
+(1):99–106, 2021.
+[2] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkuehler, and George Drettakis. 3d gaussian splatting
+for real-time radiance field rendering. ACM Transactions on Graphics, 42(4):1–14, August 2023. ISSN
+0730-0301, 1557-7368. doi: 10.1145/3592433.
+[3] M. Zwicker, H. Pfister, J. van Baar, and M. Gross. Ewa volume splatting. In Proceedings Visualization,
+2001. VIS ’01., pages 29–538, 2001. doi: 10.1109/VISUAL.2001.964490.
+[4] Tong Wu, Yu-Jie Yuan, Ling-Xiao Zhang, Jie Yang, Yan-Pei Cao, Ling-Qi Yan, and Lin Gao. Recent
+advances in 3d gaussian splatting. arXiv preprint arXiv:2403.11134, 2024.
+[5] Ziyi Yang, Xinyu Gao, Yangtian Sun, Yihua Huang, Xiaoyang Lyu, Wen Zhou, Shaohui Jiao, Xiaojuan Qi,
+and Xiaogang Jin. Spec-gaussian: Anisotropic view-dependent appearance for 3d gaussian splatting. arXiv
+preprint arXiv:2402.15870, 2024.
+[6] Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin Wang, Dahua Lin, and Bo Dai. Scaffold-gs:
+Structured 3d gaussians for view-adaptive rendering. In 2024 IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR), 2024.
+[7] Yingwenqi Jiang, Jiadong Tu, Yuan Liu, Xifeng Gao, Xiaoxiao Long, Wenping Wang, and Yuexin Ma.
+Gaussianshader: 3d gaussian splatting with shading functions for reflective surfaces. In Conference on
+Computer Vision and Pattern Recognition (CVPR), 2024.
+[8] Antoine Guédon and Vincent Lepetit. Sugar: Surface-aligned gaussian splatting for efficient 3d mesh
+reconstruction and high-quality mesh rendering. In Conference on Computer Vision and Pattern Recognition
+(CVPR), 2024.
+[9] Kai Cheng, Xiaoxiao Long, Kaizhi Yang, Yao Yao, Wei Yin, Yuexin Ma, Wenping Wang, and Xuejin Chen.
+Gaussianpro: 3d gaussian splatting with progressive propagation. arXiv preprint arXiv:2402.14650, 2024.
+[10] Pinxuan Dai, Jiamin Xu, Wenxiang Xie, Xinguo Liu, Huamin Wang, and Weiwei Xu. High-quality surface
+reconstruction using gaussian surfels. In SIGGRAPH 2024 Conference Papers. Association for Computing
+Machinery, 2024. doi: 10.1145/3641519.3657441.
+[11] Hanlin Chen, Chen Li, and Gim Hee Lee. Neusg: Neural implicit surface reconstruction with 3d gaussian
+splatting guidance. arXiv preprint arXiv:2312.00846, 2023.
+[12] Jiahe Li, Jiawei Zhang, Xiao Bai, Jin Zheng, Xin Ning, Jun Zhou, and Lin Gu. Dngaussian: Optimizing
+sparse-view 3d gaussian radiance fields with global-local depth normalization. In Conference on Computer
+Vision and Pattern Recognition (CVPR), 2024.
+[13] Matias Turkulainen, Xuqian Ren, Iaroslav Melekhov, Otto Seiskari, Esa Rahtu, and Juho Kannala. Dnsplatter: Depth and normal priors for gaussian splatting and meshing. arXiv preprint arXiv:2403.17822,
+2024.
+[14] James T Kajiya. The rendering equation. In Proceedings of the 13th annual conference on Computer
+graphics and interactive techniques, pages 143–150, 1986.
+[15] Ernest William Hobson. The theory of spherical and ellipsoidal harmonics. CUP Archive, 1931.
+[16] Zhihao Liang, Qi Zhang, Ying Feng, Ying Shan, and Kui Jia. Gs-ir: 3d gaussian splatting for inverse
+rendering. In Conference on Computer Vision and Pattern Recognition (CVPR), 2024.
+[17] Jian Gao, Chun Gu, Youtian Lin, Hao Zhu, Xun Cao, Li Zhang, and Yao Yao. Relightable 3d gaussian:
+Real-time point cloud relighting with brdf decomposition and ray tracing. In Conference on Computer
+Vision and Pattern Recognition (CVPR), 2024.
+[18] Brent Burley and Walt Disney Animation Studios. Physically-based shading at disney. In Acm Siggraph,
+volume 2012, pages 1–7. vol. 2012, 2012.
+[19] Brian Karis and Epic Games. Real shading in unreal engine 4. Proc. Physically Based Shading Theory
+Practice, 4(3):1, 2013.
+10
+[20] Ned Greene. Environment mapping and other applications of world projections. IEEE computer graphics
+and Applications, 6(11):21–29, 1986.
+[21] Ravi Ramamoorthi and Pat Hanrahan. An efficient representation for irradiance environment maps. In
+Proceedings of the 28th annual conference on Computer graphics and interactive techniques, pages
+497–500, 2001.
+[22] Dor Verbin, Peter Hedman, Ben Mildenhall, Todd Zickler, Jonathan T Barron, and Pratul P Srinivasan.
+Ref-nerf: Structured view-dependent appearance for neural radiance fields. In 2022 IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR), pages 5481–5490. IEEE, 2022.
+[23] Yao Yao, Jingyang Zhang, Jingbo Liu, Yihang Qu, Tian Fang, David McKinnon, Yanghai Tsin, and Long
+Quan. Neilf: Neural incident light field for physically-based material estimation. In European Conference
+on Computer Vision, pages 700–716. Springer, 2022.
+[24] Jingyang Zhang, Yao Yao, Shiwei Li, Jingbo Liu, Tian Fang, David McKinnon, Yanghai Tsin, and Long
+Quan. Neilf++: Inter-reflectable light fields for geometry and material estimation. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision, pages 3601–3610, 2023.
+[25] Jonathan T Barron, Ben Mildenhall, Matthew Tancik, Peter Hedman, Ricardo Martin-Brualla, and Pratul P
+Srinivasan. Mip-nerf: A multiscale representation for anti-aliasing neural radiance fields. In Proceedings
+of the IEEE/CVF International Conference on Computer Vision, pages 5855–5864, 2021.
+[26] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter Hedman. Mip-nerf 360:
+Unbounded anti-aliased neural radiance fields. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 5470–5479, 2022.
+[27] Wenbo Hu, Yuling Wang, Lin Ma, Bangbang Yang, Lin Gao, Xiao Liu, and Yuewen Ma. Tri-miprf:
+Tri-mip representation for efficient anti-aliasing neural radiance fields. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision, pages 19774–19783, 2023.
+[28] Haithem Turki, Deva Ramanan, and Mahadev Satyanarayanan. Mega-nerf: Scalable construction of
+large-scale nerfs for virtual fly-throughs. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pages 12922–12931, 2022.
+[29] Peng Wang, Yuan Liu, Zhaoxi Chen, Lingjie Liu, Ziwei Liu, Taku Komura, Christian Theobalt, and
+Wenping Wang. F2-nerf: Fast neural radiance field training with free camera trajectories. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 4150–4159, 2023.
+[30] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter Hedman. Zip-nerf: Antialiased grid-based neural radiance fields. In Proceedings of the IEEE/CVF International Conference on
+Computer Vision, pages 19697–19705, 2023.
+[31] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and Angjoo Kanazawa. Plenoctrees for real-time
+rendering of neural radiance fields. In Proceedings of the IEEE/CVF International Conference on Computer
+Vision, pages 5752–5761, 2021.
+[32] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives
+with a multiresolution hash encoding. ACM transactions on graphics (TOG), 41(4):1–15, 2022.
+[33] Jiaxiang Tang, Jiawei Ren, Hang Zhou, Ziwei Liu, and Gang Zeng. Dreamgaussian: Generative gaussian splatting for efficient 3d content creation. In The Twelfth International Conference on Learning
+Representations, 2023.
+[34] Taoran Yi, Jiemin Fang, Junjie Wang, Guanjun Wu, Lingxi Xie, Xiaopeng Zhang, Wenyu Liu, Qi Tian,
+and Xinggang Wang. Gaussiandreamer: Fast generation from text to 3d gaussians by bridging 2d and 3d
+diffusion models. In CVPR, 2024.
+[35] Tianyi Xie, Zeshun Zong, Yuxin Qiu, Xuan Li, Yutao Feng, Yin Yang, and Chenfanfu Jiang. Physgaussian:
+Physics-integrated 3d gaussians for generative dynamics. In CVPR, 2024.
+[36] David Charatan, Sizhe Li, Andrea Tagliasacchi, and Vincent Sitzmann. pixelsplat: 3d gaussian splats from
+image pairs for scalable generalizable 3d reconstruction. In Conference on Computer Vision and Pattern
+Recognition (CVPR), 2024.
+[37] Yuedong Chen, Haofei Xu, Chuanxia Zheng, Bohan Zhuang, Marc Pollefeys, Andreas Geiger, Tat-Jen
+Cham, and Jianfei Cai. Mvsplat: Efficient 3d gaussian splatting from sparse multi-view images. arXiv
+preprint arXiv:2403.14627, 2024.
+11
+[38] Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko, and Eunbyung Park. Compact 3d gaussian
+representation for radiance field. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, 2024.
+[39] Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia Xu, and Zhangyang Wang. Lightgaussian:
+Unbounded 3d gaussian compression with 15x reduction and 200+ fps. arXiv preprint arXiv:2311.17245,
+2023.
+[40] Simon Niedermayr, Josef Stumpfegger, and Rüdiger Westermann. Compressed 3d gaussian splatting for
+accelerated novel view synthesis. arXiv preprint arXiv:2401.02436, 2023.
+[41] Wieland Morgenstern, Florian Barthel, Anna Hilsmann, and Peter Eisert. Compact 3d scene representation
+via self-organizing gaussian grids. arXiv preprint arXiv:2312.13299, 2023.
+[42] Yihang Chen, Qianyi Wu, Jianfei Cai, Mehrtash Harandi, and Weiyao Lin. Hac: Hash-grid assisted context
+for 3d gaussian splatting compression. arXiv preprint arXiv:2403.14530, 2024.
+[43] Runyi Yang, Zhenxin Zhu, Zhou Jiang, Baijun Ye, Xiaoxue Chen, Yifei Zhang, Yuantao Chen, Jian
+Zhao, and Hao Zhao. Spectrally pruned gaussian fields with neural compensation. arXiv preprint
+arXiv:2405.00676, 2024.
+[44] Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and Shenghua Gao. 2d gaussian splatting for
+geometrically accurate radiance fields. In SIGGRAPH 2024 Conference Papers. Association for Computing
+Machinery, 2024. doi: 10.1145/3641519.3657428.
+[45] Yahao Shi, Yanmin Wu, Chenming Wu, Xing Liu, Chen Zhao, Haocheng Feng, Jingtuo Liu, Liangjun
+Zhang, Jian Zhang, Bin Zhou, et al. Gir: 3d gaussian inverse rendering for relightable scene factorization.
+arXiv preprint arXiv:2312.05133, 2023.
+[46] Keyang Ye, Qiming Hou, and Kun Zhou. 3d gaussian splatting with deferred reflection. arXiv preprint
+arXiv:2404.18454, 2024.
+[47] Tong Wu, Jia-Mu Sun, Yu-Kun Lai, Yuewen Ma, Leif Kobbelt, and Lin Gao. Deferredgs: Decoupled and
+editable gaussian splatting with deferred shading. arXiv preprint arXiv:2404.09412, 2024.
+[48] Mulin Yu, Tao Lu, Linning Xu, Lihan Jiang, Yuanbo Xiangli, and Bo Dai. Gsdf: 3dgs meets sdf for
+improved rendering and reconstruction. arXiv preprint arXiv:2403.16964, 2024.
+[49] Georgios Kopanas, Julien Philip, Thomas Leimkühler, and George Drettakis. Point-based neural rendering
+with per-view optimization. Computer Graphics Forum (Proceedings of the Eurographics Symposium on
+Rendering), 40(4), June 2021. URL http://www-sop.inria.fr/reves/Basilic/2021/KPLD21.
+[50] Di Xu, Qi Duan, Jianmin Zheng, Juyong Zhang, Jianfei Cai, and Tat-Jen Cham. Shading-based surface
+detail recovery under general unknown illumination. IEEE transactions on pattern analysis and machine
+intelligence, 40(2):423–436, 2017.
+[51] Mingqiao Ye, Martin Danelljan, Fisher Yu, and Lei Ke. Gaussian grouping: Segment and edit anything in
+3d scenes. arXiv preprint arXiv:2312.00732, 2023.
+[52] Evangelos Ververas, Rolandos Alexandros Potamias, Jifei Song, Jiankang Deng, and Stefanos Zafeiriou.
+Sags: Structure-aware 3d gaussian splatting. arXiv preprint arXiv:2404.19149, 2024.
+[53] Johannes Lutz Schönberger and Jan-Michael Frahm. Structure-from-motion revisited. In Conference on
+Computer Vision and Pattern Recognition (CVPR), 2016.
+[54] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and temples: Benchmarking
+large-scale scene reconstruction. ACM Transactions on Graphics, 36(4), 2017.
+[55] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis, and Gabriel Brostow. Deep
+blending for free-viewpoint image-based rendering. ACM Transactions on Graphics (Proc. SIGGRAPH
+Asia), 37(6):257:1–257:15, 2018.
+12

@@ -1,0 +1,1860 @@
+Many-Worlds Inverse Rendering
+ZIYI ZHANG, École Polytechnique Fédérale de Lausanne (EPFL), Switzerland
+NICOLAS ROUSSEL, École Polytechnique Fédérale de Lausanne (EPFL), Switzerland
+WENZEL JAKOB, École Polytechnique Fédérale de Lausanne (EPFL), Switzerland
+arXiv:2408.16005v4 [cs.CV] 29 Apr 2025
+Occlusion
+Shading
+(a) Local perturbation of
+Occlusion
+Shading
+Light path
+Derivative domain
+(b) Non-local perturbation of
+5
+10
+15
+20
+Iter 600
+Geometry optimization states
+Fig. 1. Left: Unlike methods that compute local surface derivatives, as shown in (a), our method models a more general non-local surface perturbation, as
+¯ we extend derivative propagation into space. This
+shown in (b). By treating potential surface patches as conflicting perturbations of a background surface 𝑆,
+allows geometry to emerge in empty regions, with convergence behavior similar to volume rendering—yet without requiring multiple scattering simulations or
+approximating volumetric appearance using surface materials. Right: An example use of many-worlds derivatives reconstructing a triangle mesh embedded in
+a glass block and indirectly observed through a mirror.
+Discontinuous visibility changes remain a major bottleneck when optimizing surfaces within a physically based inverse renderer. Many previous
+works have proposed sophisticated algorithms and data structures to sample
+visibility silhouettes more efficiently.
+Our work presents another solution: instead of differentiating a tentative surface locally, we differentiate a non-local perturbation of a surface.
+We refer to this as a “many-worlds” representation because it models a
+non-interacting superposition of conflicting explanations (“worlds”) of the
+input dataset. Each world is optically isolated from others, leading to a
+new transport law that distinguishes our method from prior work based on
+exponential random media.
+The resulting Monte Carlo algorithm is simpler and more efficient than
+prior methods. We demonstrate that our method promotes rapid convergence, both in terms of the total iteration count and the cost per iteration.
+1
+INTRODUCTION
+Dramatic progress in the area of inverse rendering has led to methods that can fully reverse the process of image formation to reconstruct 3D scenes from 2D images.
+This is usually formulated as an optimization problem: given a
+loss function L and a rendering R (𝜋) of tentative parameters 𝜋, we
+seek to minimize their composition
+𝜋 ∗ = argmin L (R (𝜋)).
+(1)
+𝜋 ∈Π
+Authors’ addresses: Ziyi Zhang, École Polytechnique Fédérale de Lausanne (EPFL),
+Lausanne, Switzerland; Nicolas Roussel, École Polytechnique Fédérale de Lausanne
+(EPFL), Lausanne, Switzerland; Wenzel Jakob, École Polytechnique Fédérale de Lausanne (EPFL), Lausanne, Switzerland.
+The details greatly vary depending on the application, but usually
+L will quantify the difference between the rendering and one or
+more reference images.
+Recent work on this problem is largely based on emissive volume
+reconstruction [Mildenhall et al. 2021; Kerbl et al. 2023]. The term
+“emissive” highlights that this approach does not rely on simulating
+light physics or material reflectance; instead, the volume is treated
+as if it was a natural emitter of light and stores color values representing this emitted radiation. These methods are popular because
+the direct mapping between stored color and observed appearance
+results in well-behaved optimization problems.
+Physically based methods instead seek a more complicated explanation: they simulate emission and scattering inside a general scene
+that can contain essentially anything: surfaces, volumes, physically
+based BRDFs, etc. Interreflection adds dense nonlinear parameter
+dependencies that make this a significantly harder optimization
+problem. It goes without saying that these two approaches do not
+compete: when an emissive volume is an acceptable answer, it should
+always be preferred. This is because it encapsulates material, lighting, geometry and inter-reflection in a unified field representation
+that promotes speedy and stable convergence.
+That said, many applications rely on reconstructions that account
+for indirect cues—such as shadows and interreflections—and aim
+to produce physically meaningful results suitable for downstream
+tasks like relighting and editing. Unfortunately, algorithms designed
+for this harder physical problem are often surprisingly brittle.
+2 •
+Zhang et al.
+A default strategy is to use gradient-based descent to evolve a
+scene representation (e.g., a triangle mesh) in a domain Π containing the target 𝜋 ∗ . It seems only natural that we try to reach this
+goal by evolving compatible models 𝜋𝑖 ∈ Π in this domain, e.g., by
+deforming a tentative surface starting from an initial guess.
+However, in physical light simulation, computing ∇𝜋 L (R (𝜋𝑖 ))
+with automatic differentiation produces incorrect gradients due
+to parameter-dependent discontinuities. Incorporating specialized
+techniques to fix this problem simply leads to the next one: the
+algorithm now outputs sparse gradients on object silhouettes that
+cause convergence to bad local minima. Adding further precondition
+and regularization can help. But even with all of these fixes in place,
+the optimization often still does not work all that well.
+Instead, we consider optimizations on an extended parameter
+space:
+𝜋 ∗, 𝜋˜ ∗ = argmin L ( R̃ (𝜋, ˜
+𝜋)),
+(2)
+𝜋 ∈Π, 𝜋˜ ∈ Π̃
+where R̃ is furthermore parameterized by 𝜋˜ ∈ Π̃ representing features that we are unwilling to accept in the final solution. If the role
+of these “perpendicular dimensions” diminishes over time, then we
+can simply discard 𝜋˜ ∗ at the end and take 𝜋 ∗ to be the solution of
+the original optimization problem.
+The parameter space extension serves two purposes: first, it turns
+a circuitous trajectory through a non-convex energy landscape into
+a more direct route by using the extra degrees of freedom:
+Second, we will choose the extension so that visibility changes in the
+original problem cease to be discontinuous in the extended space,
+which greatly reduces algorithmic complexity.
+Seen from a high level, this isn’t a new idea: numerous works in
+emissive surface reconstruction [Yariv et al. 2021; Wang et al. 2021;
+Miller et al. 2024] have shown that the problem becomes tractable
+when starting from an emissive volume like NeRF. However, taking this idea to the world of physically based rendering (e.g., by
+optimizing a scattering microflake volume) leads to several serious
+problems:
+(1) Speed. Introducing random volumes into a physically based
+renderer requires solving the radiative transfer equation (RTE),
+which involves free-flight sampling and transmittance estimation along every ray segment. In heterogeneous volumes, both
+are computationally expensive iterative processes, making this
+approach significantly slower than surface-based methods.
+(2) Extraction. A separate optimization is required to convert
+converged volumes into optically similar surfaces with BRDFs,
+and the resulting surface is often only an approximation of the
+volume appearance. Prior work related the bulk properties of
+microfacets and microflakes [Dupuy et al. 2016; Miller et al.
+2024], but this insight cannot be used to convert a general
+microflake volume into a surface, nor does it generalize to the
+richness of reflectance models in modern rendering systems.
+Instead of introducing an exponential volume that blends all
+¯
+possible surfaces multiplicatively, we retain a surface (denoted 𝑆)
+and augment it with a spatial representation 𝑆 to model non-local
+perturbations of that surface.
+Consider placing a new surface patch above the original surface. Standard differentiation of a path tracer does not account
+for this type of change, yet it is a valid way to evolve the scene
+representation—one that evolves the surface in a non-local manner.
+Importantly, these non-local perturbations can occur simultaneously along a light path: the optimization of a potential surface
+patch at one location is independent of that at another location.
+This is because these hypothetical surfaces aren’t real (or at least,
+not yet). They constitute different surface possibilities that may or
+may not become part of the final reconstruction. It makes little sense
+for them to affect each other.
+This leads to a new transport law that we refer to as many-worlds
+derivative transport. The term “many-worlds” not only suggests
+a distribution of surfaces but also emphasizes the non-interacting
+nature of different perturbations (“worlds”).
+Differentiation of this model produces dense surface derivatives
+in an extended domain. Since we avoid diffusing values into an
+exponential volume, the optimization remains as efficient as surface
+evolution methods. Finally, mesh extraction is a simple projection
+that discards 𝑆, and all of this is easily incorporated into a physically
+based path tracer.
+Although this paper sometimes refers to the spatial representation 𝑆 as a “volume”, our method should not be interpreted as volume
+reconstruction. Specifically, we never optimize this “volume” 𝑆 to
+¯ Morematch input images; instead, we use it to refine the surface 𝑆.
+over, our method interacts with BRDFs rather than phase functions,
+and has no concept of transmittance in its radiative transfer.
+Our main contribution is a solution to the classic discontinuity
+problem that is algorithmically simpler and computationally more
+efficient than prior methods. We present two derivations that alternatively formulate the central algorithm as either
+• a non-local perturbation of an evolving surface (Section 3), or
+• an extension of the surface derivative domain that removes the
+need for silhouette sampling (Section 4 and Appendix A).
+2
+RELATED WORK AND BACKGROUND
+This section reviews related prior work on inverse rendering of solid
+geometry. The simultaneous disentanglement of geometry, material
+and lighting is orthogonal to the topic of this work.
+2.1
+Physically based inverse rendering
+The physically based approach tries to model all available information in input images by accounting for lighting, materials, and
+interreflection. This leads to several challenges.
+Discontinuities. Analytic differentiation of the rendering equation
+produces a boundary derivative term that is not sampled by primal
+rendering strategies. Consequently, applying automatic differentiation to a rendering algorithm produces incorrect gradients.
+Many-Worlds Inverse Rendering
+Estimating the missing derivative requires sampling rays along
+shape boundaries (i.e., silhouettes). Prior works [Li et al. 2018; Zhang
+et al. 2020; Yan et al. 2022; Zhang et al. 2023a; Xu et al. 2023, 2024]
+have extensively studied the theory and practice of estimating this
+boundary term. Another approach employs reparameterizations to
+convert the boundary contribution to neighboring regions, enabling
+simpler area-based formulations. These methods [Loubet et al. 2019;
+Bangaru et al. 2020] often require tracing auxiliary rays to detect the
+presence of neighboring silhouettes. For geometry representations
+based on signed distance fields (SDFs), specialized algorithms can
+alleviate some of this cost [Vicini et al. 2022; Bangaru et al. 2022;
+Wang et al. 2024].
+While the theory of the boundary term continues to evolve, practical efficiency and robustness remain challenging. Current methods
+still have limitations concerning bias (e.g., specular surfaces) and
+variance (e.g., when multiple silhouettes are in close proximity).
+These methods are difficult to implement, and the cost of boundary
+handling is usually the main bottleneck of the entire optimization.
+Sparse gradients. The derivative of the rendering process can be
+decomposed into two types: the continuous part and the discontinuous part. We refer readers to Figure 4 in Zhang et al.’s work [2023a]
+for an illustration. Since our paper focuses on geometry optimization, we refer to the continuous part as the shading derivative and
+the discontinuous part as the boundary derivative in the following.
+The shading derivative is defined everywhere on the surface
+and primarily affects the surface through its normal and heavily
+depends on the lighting. Adjoint rendering methods [Nimier-David
+et al. 2020; Vicini et al. 2021b] exploit symmetries to compute the
+shading derivative with linear time complexity. Zeltner et al. [2021]
+analyze different strategies for variance reduction in this process.
+The boundary derivative, on the other hand, is only defined on the
+visibility silhouette of the surface. These surface derivatives are
+sparse in two senses:
+(1) A single view only observes a limited subset of all possible
+silhouettes, and a derivative step is likely to introduce a kink
+at this subset. Nicolet et al. [2021] reparameterize meshes on a
+space that promotes smoothness to mitigate this issue.
+(2) The derivatives are only defined on the surface, not throughout the entire 3D space. Although light transport is simulated
+in this larger space, only the neighborhood of a surface can
+use the computed gradients. Regions far from the initial guess,
+must wait until the surface extends to them to receive gradients. Mehta et al. [2023] propose an elegant solution for vector
+graphics in 2D; however, they do not extend their approach to
+define surface derivatives in the entire 3D space.
+The sparsity has two implications: (1) the optimization is slow
+because it needs many iterations to deform the surface to the target
+shape, and (2) a good initial guess is needed, especially when the
+target shape has a complicated topology or self-occlusions.
+Approximations. There is a substantial body of literature on approximating the PBR process to make optimization easier. These
+methods often bypass the discontinuity problem by assuming knowledge of a shape mask (implicitly assuming the shape is directly observable), approximating boundary derivatives [Laine et al. 2020], or
+• 3
+diffusing the rendering process into a higher-dimensional space [Fischer and Ritschel 2023]. Additionally, many methods approximate
+the light transport for efficiency [Zhang et al. 2021a; Jin et al. 2023;
+Zhang et al. 2021b; Boss et al. 2021]. These methods are physically
+inspired and can handle complex scenes, while our theory focuses
+on differentiating a fully physically based rendering process.
+Nimier-David et al. [2022] demonstrate that a physically based
+non-emissive volume can be optimized to fit the input images. These
+methods are more physically accurate than the emissive volume
+methods but do not yield a surface representation in the end.
+2.2
+Emissive volume inverse rendering
+A large body of work based on variants of the NeRF [Mildenhall
+et al. 2021] technique replaces the expensive rendering process with
+an emissive volume, which leads to a fog-like volume that does not
+accurately represent a solid surface.
+Later work [Yariv et al. 2021; Wang et al. 2021; Li et al. 2023; Miller
+et al. 2024] added a surface prior to the volume model by introducing
+an SDF and deriving the volume density from it. The SDF values are
+mapped to volume densities using a distribution function, assuming
+that a ray intersects a stochastic object following a Markov process.
+The variance of the distribution is learnable during optimization: it
+begins with a high-variance distribution, mimicking the NeRF model,
+and gradually reduces to ensure that a surface can confidently be
+extracted.
+These SDF-parameterized volume reconstructions can be seen as
+a blurry version of surface-based methods without indirect effects.
+When the variance is zero, these methods simplify to surface-based
+methods1 . With moderate variance, the effect of a solid object, which
+we can interpret as “terminating a ray at a position with probability
+1”, is diffused to the neighborhood, interpretable as “terminating a
+ray in this neighborhood according to a probability density”.
+2.3
+Surfaces versus volumes
+Several works studied the relationship of surface and volume rendering: Heitz et al. [2016] and Dupuy et al. [2016] describe microfacet surfaces within the framework of random volumes. Vicini
+et al. [2021a] incorporated non-exponential transmittance to account for correlations arising from opaque surfaces. Miller et al. [2024]
+formalize microflake volumes as the relaxation of a stochastic surface model and solve inverse problems using this representation.
+Seyb et al. [2024] recently incorporated a richer set of spatial correlations, producing a forward rendering framework that spans the full
+continuum ranging from pure volume to surface-like interactions.
+3 METHOD
+3.1 Motivation
+Extended parameter space. Our algorithm evolves a surface 𝑆¯ derived from a distribution 𝑆 over potential surfaces. Rather than
+modifying the surface 𝑆¯ directly, we adjust 𝑆, which defines a density field from which 𝑆¯ is extracted—typically as a level set. As the
+¯ allowing indirect
+density field changes, so does the geometry of 𝑆,
+but effective surface optimization. The details of how these spaces
+1 This equivalence is theoretical. In practice, algorithms designed for volume optimiza-
+tion cannot handle such a Dirac-delta density distribution due to discontinuities.
+4
+•
+Zhang et al.
+are defined are orthogonal to our method, and we describe them in
+Appendix C.
+Figure 1b demonstrates the effect of adding a hypothetical surface
+¯ This
+patch (drawn from 𝑆) into a scene containing the surface 𝑆.
+patch modifies how light propagates in the scene, thereby changing
+¯ By adjusting the existence and properties
+the surface rendering of 𝑆.
+(e.g., normals, BRDFs) of such patches, we iteratively improve 𝑆¯ to
+better match the target image.
+¯ optimizing such hypoWe term this a non-local perturbation of 𝑆:
+thetical patches propagates derivatives across the entire domain of
+𝑆, rather than confining updates locally on the surface.
+This isn’t an entirely different approach from prior work: in the
+limiting case where the perturbation position coincides with 𝑆¯ itself, our derivatives exactly match standard surface derivatives in
+physical light simulation [Zhang et al. 2020, Zhang et al. 2023a] (see
+Appendix A for details on this equivalence). This shows that our
+method is a generalization of local surface evolution, extending its
+domain while preserving its geometric meaning.
+Optimization converges when no further perturbation improves
+the match between 𝑆¯ and the target image. At this point, we discard
+¯
+𝑆 and keep 𝑆.
+Throughout the optimization, 𝑆¯ serves as a static background,
+providing base colors for perturbations without being optimized
+itself. For this reason, we also refer to 𝑆¯ as the background surface.
+Conflicting possibilities. Consider a simple case of two non-local
+perturbations along a ray. We shall think of them as competing
+candidates for improving the agreement between the radiance from
+𝑆¯ and the reference image. If the optimization seeks to increase the
+radiance value along the ray (i.e., if 𝜕loss
+𝜕𝐿i is positive), the same information should be propagated to both positions without weighting.
+many-worlds
+linear transmittance
+exponential transmittance
+Fig. 2. Many-worlds derivative transport. The propagated derivative
+at distance 𝑡 is only weighted by the local radiance difference and the
+local occupancy respectively (Equation 6). In contrast to exponential or
+non-exponential (e.g., linear [Vicini et al. 2021a]) volumes, the notion of
+transmittance disappears as it models nonsensical inter-world shadowing.
+¯
+¯
+¯
+¯
+where 𝐿iS (0) B 𝐿iS (y, −𝝎) (incident radiance at y) and 𝐿oS (𝑠) B 𝐿oS (x, 𝝎)
+(outgoing radiance at x) are parameterized by distance.
+For a non-local perturbation candidate at distance 𝑡, we model
+its impact on radiative transport as:
+¯
+𝐿i (0) = 𝛼 (𝑡) 𝐿oS (𝑡) + [1 − 𝛼 (𝑡)] 𝐿oS (𝑠) ,
+|{z}
+|{z}
+perturbed
+(3)
+original
+where 𝛼 (𝑡) ∈ [0, 1] is the probability of a hypothetical surface
+patch existing at 𝑡. The perturbed radiance 𝐿oS (𝑡) computes reflected
+radiance as if the patch were inserted at 𝑡, while the rest of the
+¯
+scene remains 𝑆.
+While this formulation is of little use for physically based rendering, its derivative provides the means to optimize on the extended
+parameter space:
+¯
+𝜕𝜋 𝐿i (0) = 𝜕𝜋 𝛼 (𝑡) [𝐿oS (𝑡) − 𝐿oS (𝑠)] + 𝛼 (𝑡) 𝜕𝜋 𝐿oS (𝑡) .
+Perturbation 1
+Perturbation 2
+Here, it might seem natural to distribute the target update between
+the two positions — say, by scaling it by 12 . However, this weighting
+implicitly assumes the two perturbations compound to refine the
+¯ In reality, they are mutually exclusive possibilities —
+same surface 𝑆.
+once optimization converges, only one will contribute to the final
+radiance, without any kind of blending.
+This principle extends to more than two perturbations: all candidate positions along the ray should receive the same target update,
+as if existing in many worlds that do not interact. Ultimately, the ray
+will intersect only one of these possibilities, which becomes part of
+the final surface.
+The above discussion explains the motivation behind our method
+at an intuitive level. Our next goals are therefore to quantify nonlocal perturbations and derive the derivative transport law.
+3.2
+Many-worlds derivative transport
+Single-world case. Consider a scene containing only the back¯ Radiance along ray (x, y) propagating in direction
+ground surface 𝑆.
+𝝎 remains constant:
+¯
+¯
+𝐿iS (0) = 𝐿oS (𝑠),
+(i) Occlusion
+(4)
+(ii) Shading
+To increase transmitted radiance—that is, if 𝜕𝜋 𝐿i (0) is positive—we
+can:
+(1) Raise the occupancy at 𝛼 (𝑡) if this perturbation is favorable,
+¯
+i.e., 𝐿oS (𝑡) > 𝐿oS (𝑠), or lower it otherwise.
+(2) Increase the reflected radiance 𝐿oS (𝑡), e.g., by altering the normal or BRDF of the hypothetical surface.
+Both operations locally update the distribution 𝑆 at 𝑡.
+Many-worlds case. We now extend to the situation where every
+point along the ray can be considered a potential perturbation. As
+discussed in Section 3.1, we aim to distribute the target update
+uniformly across all possibilities along one segment.
+Similar to basic arithmetic, where a sum 𝑐 = 𝑎 + 𝑏 propagates
+𝜕𝑐 = 1,
+the equal derivative to both 𝑎 and 𝑏 without weighting ( 𝜕𝑎
+1
+not 2 ), we sum radiative contributions from distinct perturbations,
+expressed as the integral form of a radiative transfer equation (RTE)
+along the ray:
+∫ 𝑠
+
+¯
+𝐿i (0) =
+𝛼 (𝑡) 𝐿oS (𝑡) + [1 − 𝛼 (𝑡)] 𝐿oS (𝑠) d𝑡 .
+(5)
+|{z}
+|{z}
+0
+candidate at 𝑡
+background
+Many-Worlds Inverse Rendering
+empty
+filled
+Orientation field
+Fig. 3. Occupancy and orientation fields. The above images visualize
+the contents of an occupancy (𝛼) and orientation (𝜷) field following an
+optimization. The former models the probability of a surface existing at a
+position, while the latter assigns normal directions.
+With orientation
+Without orientation
+Optimization views
+surface
+Occupancy field
+Iteration 20
+Differentiating it yields the many-worlds derivative transport law:
+∫ 𝑠
+
+¯
+𝜕𝜋 𝐿i (0) =
+𝜕𝜋 𝛼 (𝑡) [𝐿oS (𝑡) − 𝐿oS (𝑠)] + 𝛼 (𝑡) 𝜕𝜋 𝐿oS (𝑡) d𝑡 . (6)
+0
+The derivative propagation in Equation 6 lacks transmittance terms
+that would ordinarily model attenuation along the ray (Figure 2).
+This arises from the core principle that distinct worlds must not
+interact.
+The only way in which the background surface 𝑆¯ manifests in this
+¯
+equation is to provide a single baseline radiance value 𝐿oS (𝑠) needed
+to compute a difference of radiance values. As a result, 𝑆¯ does not
+directly receive gradients; yet, it still evolves during optimization
+¯
+as a result of changes in the distribution 𝑆 that dictates 𝑆.
+Parameterization. Equation 6 requires that derivatives be propagated to two quantities in the extended parameter space: the existence probability of a surface patch, and the outgoing radiance
+𝐿oS (x, 𝝎) determined by the surface patch properties.
+Any parameterization of 𝑆 that supports differentiation of these
+quantities is suitable. Our implementation uses an occupancy field
+𝛼 (x) : R3 → [0, 1] and an orientation field 𝜷 (x) : R3 → S 2 (Figure 3).
+The orientation field 𝜷 (x) assigns a normal direction to the surface patch at x. The occupancy field 𝛼 (x) [Mescheder et al. 2019;
+Niemeyer et al. 2020] models the probability
+𝛼 (x) B Pr{x is inside of 𝑆 },
+• 5
+(7)
+and is zero if the patch is interacted from the back side (𝝎 ·𝜷 (x) < 0).
+Anisotropy is crucial for physically based inverse rendering. Figure 4 demonstrates this: assuming a uniform normal distribution for
+surface patches produces incorrect results. This happens because
+the reference scene is surface-based, where light reflection is highly
+anisotropic—a property that isotropic distributions fail to capture.
+This concludes our derivation via non-local surface perturbations.
+To reinforce these results and gain a deeper understanding:
+(1) Appendix A re-derives Equation 6 by analyzing standard surface derivatives and extending them into space.
+(2) Appendix B frames our approach using the mathematical language of random volumes.
+Iteration 200
+Ground truth geometry
+Fig. 4. Importance of the orientation field. We compare reconstructions
+done with and without an orientation field 𝜷. The top row without 𝜷 uses an
+isotropic normal distribution. A lack of orientation information dramatically
+slows down convergence and produces incorrect meshes.
+3.3
+Primal rendering
+Differentiable rendering pipelines normally repeatedly render a primal image, differentiate a loss, and then backpropagate derivatives.
+The previous discussion was only concerned with derivative propagation, and there is thus a question of how to generate a primal
+image of our extended parameter space2 .
+One option is to only render the surface 𝑆¯ and discard other
+potential surfaces. This approach fails in practice—the extended
+parameter space disappears to primal rendering, which leads to
+random optimization behavior in regions distant from the surface.
+For example, in a supposedly empty region, occupancy values along
+the ray will not decay to zero as they may not be involved in the
+loss computation.
+We thus design a primal rendering that incorporates both the
+surface 𝑆¯ and the distribution 𝑆. Recall that the many-worlds principle manifests in Equation 5 as a direct summation of non-local
+perturbations. This summation is not directly suitable for primal
+rendering as it yields unbounded values. Instead, we compute an
+average over all perturbations (not an average over all possible surfaces) by scaling the sum in Equation 5 by a factor of 1/𝑠. Alternative
+designs like stochastically rendering individual perturbations per
+iteration are possible. Experimentally, we found that scaling by
+1/𝑠 is straightforward, exhibits low variance and promotes rapid
+convergence.
+Relation to “radiance field loss”. A recent work [Zhang et al. 2025]
+instantiated our many-worlds framework for radiance field reconstruction, specializing it to the setting of pure emission without
+scattering. This enables several simplifications: (1) radiance values
+are retrieved noise-free from storage (typically a neural network),
+2 In many applications, derivative propagation arises naturally from automatic differen-
+tiation of the primal computation. However, this coupling introduces bias in physically
+based rendering [Nimier-David et al. 2020, Section 3.2], which necessitates separate,
+uncorrelated Monte Carlo simulation of primal rendering and derivative transport.
+6 •
+Zhang et al.
+eliminating the need for BRDF and light integration, (2) ray marching replaces Monte Carlo sampling, and (3) rays are traced from
+fixed pixel centers, so the pixel footprint integral also disappears.
+As a result, there is a 1:1 mapping between surface radiance and
+reference pixel values, allowing individual losses to be defined for
+each potential surface. Since radiance contributions from different
+perturbations are never summed, their method sidesteps the scaling
+factor used in our algorithm. In contrast, this paper targets physically based rendering, where none of these simplifications apply to
+the harder problem of full global illumination.
+4
+DISCUSSION
+Pseudocode. We present one possible implementation of our manyworlds framework in Mitsuba 3 [Jakob et al. 2022].
+The following listing uses a variable mode to distinguish between
+the primal rendering pass and the derivative propagation pass.
+1
+mode = "Primal"
+# Or "Backward"
+2
+3
+4
+5
+6
+def Li(x, 𝝎 ):
+# Pick a segment to interact with a surface patch
+𝑘 mw = ⌊𝑘 max * rand() ⌋
+return Li_k(x, 𝝎 , 𝑘 mw , 0)
+7
+8
+9
+10
+def Li_k(x, 𝝎 , 𝑘 mw , 𝑘 ):
+if 𝑘 > 𝑘 max : # Path length exceeds limit
+return 0
+11
+12
+13
+14
+15
+16
+17
+18
+# Radiance estimate from background surface
+s = ray_intersect(𝑆¯, x, 𝝎 )
+x′ = x + s * 𝝎 # Advance to surface
+𝝎 ′ , 𝑤brdf = sample_brdf(x′ , -𝝎 )
+L_bg = Le(x′ ,-𝝎 ) + Li_k(x′ , 𝝎 ′ , 𝑘 mw , 𝑘 + 1) * 𝑤brdf
+if 𝑘 != 𝑘 mw : # Segment is before/after the sampled segment
+return L_bg
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+# Radiance estimate from sampled surface patch
+t, 𝑤surf = sample_surface(rand(), s)
+if mode == "Primal":
+weight = 𝑤surf / s # Primal pass: not differentiated
+else:
+weight = 𝑤surf # Backward pass: derivative propagation
+x′ = x + t * 𝝎 # Advance to sampled surface
+𝝎 ′ , 𝑤brdf = sample_brdf(x′ , -𝝎 )
+occupancy = 𝛼 (x′ ) # Occupancy at sampled point
+L_fg = Le(x′ ,-𝝎 ) + Li_k(x′ , 𝝎 ′ , 𝑘 mw , 𝑘 + 1) * 𝑤brdf
+return lerp(L_bg, L_fg, occupancy) * weight
+Relation to surface derivatives. Prior work on geometry differentiation have proposed local derivative formulations [Zhang et al. 2020,
+Zhang et al. 2023a] to quantify how small perturbations of a surface
+affect radiative transport across the entire scene in physical light
+simulation.
+Appendix A extends such formulation to measure how tiny changes
+of any hypothetical surface patch within 𝑆 influence radiative transport. This offers a quantitative way to re-derive the many-worlds
+derivative transport law using established theory. We made the
+following observations:
+Fig. 5. Our method refines a surface 𝑆¯ by optimizing a distribution 𝑆 of
+possible surfaces. Each hypothetical surface patch drawn from 𝑆 is independently adjusted to improve the matching between 𝑆¯ and the target image.
+To define the behavior of possible surfaces in space, 𝑆 is parameterized by
+an occupancy field 𝛼 (x) and an orientation field 𝜷 (x).
+(1) Our method does the right thing near the surface: the optimization behavior matches surface differentiation algorithms
+without requiring explicit silhouette sampling.
+(2) Visibility and shading derivatives are combined into a unified
+expression in the extended parameter space. This unification is
+¯ as the two derivatives are defined
+impossible on the surface 𝑆,
+on different domains. Unlike prior work—which required separate algorithms to compute these two types of derivatives—our
+method drastically reduces algorithmic complexity.
+Relation to volume rendering. At a high level, both inverse volume rendering [Nimier-David et al. 2022] and our method can be
+interpreted as optimizing a distribution of surfaces. However, the
+two approaches differ fundamentally in how they interact with this
+distribution: when multiple potential surfaces exist along a ray, how
+do we model their interplay?
+• Exponential volume rendering treats interactions as statistically independent events, leading to a memoryless Poisson
+process where multiple interactions occur, weighted by relative occlusion probabilities [Bitterli et al. 2018].
+• Our method treats interactions as mutually exclusive events,
+ensuring potential surfaces along a ray do not interact via
+shadowing or scattering.
+Consider a distribution 𝑆 modeling a nearly empty scene containing a single infinite plane with an uncertain offset. Within any
+realization of this distribution, light traveling towards this plane
+will scatter exactly once. In contrast, the volume model diffuses the
+ray-surface interaction into a band of microflakes that cause arbitrarily long scattering chains. This not only leads to a significant
+increase in computational cost, but also discombobulates the optical
+interpretation of these interactions: the effect of multiple scattering
+must later be approximated as a surface BRDF, a process that in
+general admits no exact solution and relies on approximation.
+Traditional inverse rendering pipeline (which renders the scene to
+compute a loss) collapses under the mutually exclusive assumption,
+because it would render each potential surface as a separate scene,
+thus unrealistically requiring every potential surface to match the
+reference image. Instead, we optimize potential surfaces by refining
+¯ giving the algorithm a clear
+the rendering of a background surface 𝑆,
+convergence target (Figure 5). Such comparative adjustments lead
+Many-Worlds Inverse Rendering
+to the notion of non-local surface perturbations, and simultaneous
+optimization of all perturbations leads to our many-worlds derivative
+transport.
+5
+RESULTS
+Prior work on physically based inverse rendering often includes
+comparisons of forward derivatives to other competing methods or
+finite difference-based reference derivatives. They reveal the change
+in rendered pixels when perturbing a single scene parameter. However, such a comparison is neither applicable nor meaningful in
+our method: first, our method computes the extended derivative
+on a higher-dimensional domain, which therefore cannot be compared to existing methods. Second, the need for such comparisons is
+motivated by the complexity of formulations that deal with discontinuous visibility, but differentiation our representation is “trivial”
+and therefore not interesting. Because of this, we demonstrate the
+correctness and performance of our method solely through end-toend optimizations.
+All results presented in this paper exclusively use many-worlds
+derivatives and explicitly disable surface derivatives on 𝑆, even for
+the albedo optimization demonstrated in Figure 7.
+Multi-view reconstructions. Figure 6 presents multi-view object
+reconstructions of a known material in various settings using our
+method. All experiments use the Adam optimizer [Kingma and
+Ba 2014]. We found that disabling momentum in the early iterations helped avoid excessive changes while the occupancy field
+was still very far from convergence. Alternatively, a stochastic gradient descent optimizer produces comparable results. During the
+reconstruction, each view is rendered at a 512×512 resolution.
+The last four rows of Figure 6 show reconstructions involving
+perfectly specular surfaces. No prior PBR method could handle such
+scenes: reparameterization-based methods would need to account
+for the extra distortion produced by specular interactions, while
+silhouette segment sampling methods would need to find directional
+emitters through specular chains. Both are complex additional requirements that would be difficult to solve in practice, while the
+problem simply disappears with the many-worlds formulation.
+Albedo reconstruction. This paper primarily focuses on geometry,
+but our method can also be used to optimize materials or lighting.
+Figure 7 presents experiments where we jointly optimize the geometry and albedo texture of an object. We store this spatially varying
+albedo on an additional 3D volume that parameterizes the BSDF of
+the many-worlds representation.
+Benefits of assumption-free geometry priors. Figure 8 compares
+the convergence rate of our method to a technique that evolves an
+SDF using reparameterizations [Vicini et al. 2022]. These experiments demonstrate that our method requires significantly fewer
+iterations because new surfaces can be materialized from the very
+first iteration.
+We use 20 random optimization views, with each view rendered
+at 256×256 pixels. Both methods utilize a geometry grid resolution
+of 1283 . The time required to perform one iteration of the optimization for one view is 0.25 seconds for our method, 0.38 seconds
+for the large sphere initialization and 0.32 seconds for the small
+• 7
+sphere initialization. Our method benefits from the efficiency of
+ray-triangle intersections, whereas the SDF representation relies on
+a more costly iterative sphere tracing algorithm. These measurements also show how sphere tracing slows down with smaller steps
+due to complicated geometry near a ray, as evidenced by the slower
+performance of the larger sphere initialization.
+Optimizing all positions at once. Figure 9 replicates the chair reconstruction experiment of a recent work by Zhang et al. [2023a]
+to demonstrate the benefits of the extended parameter space.
+Interior topological changes. Figure 10 illustrates a limitation of
+our method: it does not robustly handle interior topological changes.
+This issue arises because many-worlds derivatives extend only to
+¯ leaving the interior unsupervised, much like trathe exterior of 𝑆,
+ditional surface evolution methods. When attempting to create a
+hole, we rely on shading derivatives to bend the surface inward,
+which sometimes produces a hole as desired (top row). However,
+optimization like this is sensitive to lighting conditions; as shown
+in the bottom row, a different lighting can cause the optimization
+to stall.
+To address this limitation, Mehta et al. [2023] proposed explicitly
+testing whether creating a cone-shaped hole is beneficial, and Zhang
+et al. [2025] suggested sampling the background surface stochasticity to occasionally permit visibility through high-occupancy regions.
+We leave the exploration of these extensions for future work.
+The sphere initialization is used solely to demonstrate this limitation; with an assumption-free initialization, our method converges
+correctly and more quickly in both lighting conditions.
+Subtractive changes. Figure 11 shows the optimization states for
+an initialization with random geometry. We used 16 optimization
+views and the same setup as in Figure 6. Since the many-worlds derivative extends the surface derivative domain without approximations,
+our method naturally address scenarios that surface derivatives can
+handle—in this case, removing superfluous geometry and deforming
+the rest to reconstruct the desired object.
+Comparison with volume reconstructions. Figure 12 presents results and equal-iteration timings comparing our method to volumebased inversion. For the latter, we set the maximum path depth of
+the underlying volumetric path tracer to 3 interactions, as larger
+values significantly degrade performance without improving visual
+fidelity. All experiments use the same number of samples per pixel,
+and each optimization iteration uses all 12 optimization views. The
+anisotropic volume model uses the SGGX phase function [Heitz et al.
+2015]. The volume models are initially as fast as ours but slow down
+significantly as the volume thickens, which is a consequence of
+iterative steps needed to resolve coupling between different parts of
+the exponential volume. Besides reducing speed, this coupling leads
+to degraded reconstruction quality at equal iteration count. The
+many-worlds approach is algorithmically simpler, produces a better
+result in less time, and directly outputs a mesh with materials that
+are ready to be relit, without the need for additional optimization
+to extract a surface BRDF from phase functions.
+Timings. Table 1 lists the average computation time per gradient
+step and view for several scenes. These timings were measured on an
+Zhang et al.
+Heptoroid
+24 views
+8 •
+15
+25
+40
+100
+Iter 200
+10
+20
+30
+50
+100
+Iter 200
+10
+20
+50
+100
+200
+Iter 300
+10
+15
+20
+25
+100
+Iter 200
+10
+15
+20
+25
+100
+Iter 200
+15
+20
+30
+40
+100
+Iter 400
+Fertility
+16 views
+Neptune
+16 views
+Polyhedra
+24 views
+Deer
+8 views
+Dragon
+24 views
+10
+Optimization views
+Ground truth
+geometry
+Optimization states (re-lit)
+Fig. 6. Multi-view geometry reconstruction. For the Deer scene, all 8 views are behind the object and we only see the front side in the mirror. For
+Polyhedra, Neptune and Fertility, the object is inside a spherical or cubic smooth glass container. The material is known during optimization: the Dragon
+has a rough gold material, Polyhedra and Neptune are made of copper oxide, and others are diffuse.
+Optimization views
+10
+15
+10
+20
+30
+100
+300
+Iter 400
+30
+50
+100
+Iter 400
+Optimization states (re-lit)
+Ground truth
+geometry and texture
+Fig. 7. Material optimization. This experiment demonstrates joint optimization of geometry and an albedo texture. Our method focuses on geometric
+optimization, but it is compatible with more general inverse rendering pipelines that furthermore target material and lighting.
+• 9
+Ours
+Many-Worlds Inverse Rendering
+SDF reparam
+Ours
+SDF reparam
+Ground truth
+1024
+768
+Geometry
+initialization
+Optimization states (re-lit)
+Ground truth geometry
+Optimization views
+Fig. 8. Assumption-free optimization. Prior surface optimization methods require an initial guess, which affects the quality of their output. We compare
+our method to an unbiased surface derivative method (SDF reparameterization [Vicini et al. 2022]) using an initialization with a sphere that is either bigger
+(middle) or smaller (bottom) than the overall size of the target. The experiment shows that the method struggles to reconstruct the target from the smaller
+sphere, while carving it out of the bigger sphere seems more reliable. Our method (top) can optimize without such assumptions, i.e., starting from empty space.
+Projective sampling
+Ours
+Ground truth geometry
+10
+15
+40
+100
+Geometry
+initialization
+20
+30
+35
+Iter 100
+160
+220
+280
+Iter 400
+Optimization states (re-lit)
+Single optimization view
+Fig. 9. The benefit of simultaneously optimizing all positions. We replicate an experiment of Zhang et al. [2023a] with our method to reconstruct a chair
+from a single reference image. The baseline employs preconditioned gradient descent [Nicolet et al. 2021] to locally deform a triangle mesh. In each iteration,
+the pixels rendering the legs propagate gradients to the scene, causing their progressive extrusion in a thin region of overlap between tentative object and the
+chair in the reference image. Derivatives outside of the region of overlap are discarded. Our method observes and uses all gradients starting from the very first
+iteration, enabling faster convergence.
+AMD Ryzen 3970X Linux workstation with an NVIDIA RTX 3090
+graphics card, which our implementation uses to accelerate ray
+tracing. We limited the maximum path depth for every scene to
+a reasonable value. For certain scenes, we also disabled gradient
+estimation for some path segments. For example, in the shape reconstructions inside a glass object, the first ray segment (from the
+camera to the glass interface) and the last ray segment cannot intersect the many-worlds representation.
+6
+CONCLUSION AND FUTURE WORK
+Correct handling of discontinuous visibility during physically based
+inversion of geometry has presented a formidable challenge in recent years. Instead of proposing yet another method to solve this
+challenging problem, many-worlds inverse rendering shows that
+there are completely different ways to approach it. Using a notion
+of non-local perturbations of a surface, our method successfully
+synthesizes complex geometries from an initially empty scene.
+Our work lays the theoretical foundation and validates this theory
+with a first implementation. However, the details of this implementation are still far from optimal and could benefit from various
+enhancements. For example, we derive the local orientation from a
+field that also governs occupancy, which is straightforward but also
+introduces a difficult-to-optimize nonlinear coupling. Extending the
+model with a distribution of orientations would further allow it to
+consider multiple conflicting explanations at every point.
+Reconstructing an object involves a balance between exploration
+to consider alternative explanations in 𝑆 and exploitation to refine
+¯ Our method aggressively
+parameters of the current explanation 𝑆.
+•
+Zhang et al.
+Ours
+10
+Geometry
+initialization
+Optimization states
+Fig. 10. Limitation on handling interior topological changes. Our method extends surface perturbations only to the exterior and does not accommodate
+interior topological changes — such as transforming a sphere into a donut. We demonstrate this using a sphere initialization under two lighting conditions.
+While shading derivatives can sometimes produce correct holes (top row), it could fail under alternative lighting conditions (bottom row).
+Iter 50
+Iter 100
+Iter 200
+Initialization
+Optimization states
+22s
+1m24s
+3m48s
+10m35s
+32s
+2m10s
+6m5s
+16m41s
+Ground truth
+(1/12 views)
+Ours
+Fig. 11. Subtractive changes. Many-worlds derivatives match surface
+derivatives when sampled close to the surface. We initialize the scene with
+dense geometry to demonstrate the robustness of our method against subtractive changes.
+Anisotropic
+Isotropic
+Iter 20
+pursues the exploration phase using a uniform sampling strategy
+but lacks a mechanism to effectively exploit its knowledge. We find
+that it often reconstructs a good approximation of a complex shape
+in as little as 20 iterations, impossibly fast compared to existing
+methods, but then requires 500 iterations for the seemingly trivial
+task of smoothing out little kinks.
+Our implementation of the many-worlds derivative is based on a
+standard physically based path tracer, but previous works on differentiable rendering have shown the benefits of moving derivative
+computation into a separate phase using a local formulation. This
+phase starts the Monte Carlo sampling process where derivatives
+locally emerge (e.g., at edges of a triangle mesh in the case of visibility discontinuities). Integrating the local form of our model with
+occupancy-based sampling could refine the background surface with
+a more targeted optimization of its close neighborhood.
+ACKNOWLEDGMENTS
+This project has received funding from the European Research Council (ERC) under the European Union’s Horizon 2020 research and
+innovation program (grant agreement No 948846).
+REFERENCES
+Sai Bangaru, Michael Gharbi, Tzu-Mao Li, Fujun Luan, Kalyan Sunkavalli, Milos Hasan,
+Sai Bi, Zexiang Xu, Gilbert Bernstein, and Fredo Durand. 2022. Differentiable
+Rendering of Neural SDFs through Reparameterization. In ACM SIGGRAPH Asia 2022
+Conference Proceedings (Daegu, Republic of Korea) (SIGGRAPH Asia ’22). Association
+for Computing Machinery, New York, NY, USA, Article 22, 9 pages. https://doi.org/
+10.1145/3550469.3555397
+11s
+29s
+59s
+1m59s
+Optimization states
+Fig. 12. Comparison with volume reconstructions. We compare reconstruction results using exponential volume inversion and the proposed
+many-worlds approach. Isotropic volumes (top) cannot replicate the surface
+appearance, while anisotropic micro-flakes (middle) perform somewhat
+better. However, simulating for interactions between worlds (e.g. to model
+exponential attenuation) introduces substantial computational overheads
+in both volume reconstruction methods. Extracting the final BSDF and
+surface from the volume poses additional challenges. Our method (bottom)
+produces a high-fidelity surface reconstruction in a small fraction of the
+time.
+Sai Praveen Bangaru, Tzu-Mao Li, and Frédo Durand. 2020. Unbiased warped-area
+sampling for differentiable rendering. ACM Transactions on Graphics (TOG) 39, 6
+(2020), 1–18.
+Benedikt Bitterli, Srinath Ravichandran, Thomas MÃ¼ller, Magnus Wrenninge, Jan
+NovÃ¡k, Steve Marschner, and Wojciech Jarosz. 2018. A radiative transfer framework
+for non-exponential media. ACM Transactions on Graphics (Proceedings of SIGGRAPH
+Asia) 37, 6 (nov 2018), 225:1â€“225:17. https://doi.org/10.1145/3272127.3275103
+Mark Boss, Raphael Braun, Varun Jampani, Jonathan T Barron, Ce Liu, and Hendrik
+Lensch. 2021. Nerd: Neural reflectance decomposition from image collections. In
+Proceedings of the IEEE/CVF International Conference on Computer Vision. 12684–
+12694.
+Jonathan Dupuy, Eric Heitz, and Eugene d’Eon. 2016. Additional Progress Towards the
+Unification of Microfacet and Microflake Theories. In EGSR (EI&I). 55–63.
+Michael Fischer and Tobias Ritschel. 2023. Plateau-Reduced Differentiable Path Tracing.
+In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition.
+4285–4294.
+Many-Worlds Inverse Rendering
+Table 1. We measure the average time needed to optimize one 5122 pixel
+image for different scenes. The reported time covers all overheads including
+the primal rendering pass, the uncorrelated derivative propagation pass,
+the optimizer step and scene update.
+Heptoroid
+Dragon
+Deer
+Polyhedra
+Neptune
+Fertility
+Path
+depth
+AD
+depth
+spp
+grad spp
+time (s)
+2
+2
+4
+4
+5
+5
+2
+2
+2
+2
+3
+3
+128
+128
+128
+64
+256
+256
+32
+32
+32
+32
+32
+32
+0.41
+0.42
+0.75
+1.10
+2.56
+2.06
+Eric Heitz, Jonathan Dupuy, Cyril Crassin, and Carsten Dachsbacher. 2015. The SGGX
+microflake distribution. ACM Transactions on Graphics (TOG) 34, 4 (2015), 1–11.
+Eric Heitz, Johannes Hanika, Eugene d’Eon, and Carsten Dachsbacher. 2016. Multiplescattering microfacet BSDFs with the Smith model. ACM Transactions on Graphics
+(TOG) 35, 4 (2016), 1–14.
+Wenzel Jakob, Adam Arbree, Jonathan T. Moon, Kavita Bala, and Steve Marschner. 2010.
+A radiative transfer framework for rendering materials with anisotropic structure.
+ACM Trans. Graph. 29, 4, Article 53 (jul 2010), 13 pages. https://doi.org/10.1145/
+1778765.1778790
+Wenzel Jakob, Sébastien Speierer, Nicolas Roussel, Merlin Nimier-David, Delio Vicini,
+Tizian Zeltner, Baptiste Nicolet, Miguel Crespo, Vincent Leroy, and Ziyi Zhang. 2022.
+Mitsuba 3 renderer. https://mitsuba-renderer.org.
+Haian Jin, Isabella Liu, Peijia Xu, Xiaoshuai Zhang, Songfang Han, Sai Bi, Xiaowei Zhou,
+Zexiang Xu, and Hao Su. 2023. Tensoir: Tensorial inverse rendering. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. 165–174.
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 2023.
+3D Gaussian Splatting for Real-Time Radiance Field Rendering. ACM Transactions
+on Graphics 42, 4 (July 2023).
+Diederik P. Kingma and Jimmy Ba. 2014. Adam: A Method for Stochastic Optimization.
+CoRR abs/1412.6980 (2014). https://api.semanticscholar.org/CorpusID:6628106
+Samuli Laine, Janne Hellsten, Tero Karras, Yeongho Seol, Jaakko Lehtinen, and Timo
+Aila. 2020. Modular Primitives for High-Performance Differentiable Rendering.
+ACM Transactions on Graphics 39, 6 (2020).
+Tzu-Mao Li, Miika Aittala, Frédo Durand, and Jaakko Lehtinen. 2018. Differentiable
+monte carlo ray tracing through edge sampling. ACM Transactions on Graphics
+(TOG) 37, 6 (2018), 1–11.
+Zhaoshuo Li, Thomas Müller, Alex Evans, Russell H Taylor, Mathias Unberath, MingYu Liu, and Chen-Hsuan Lin. 2023. Neuralangelo: High-fidelity neural surface
+reconstruction. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition. 8456–8465.
+William E. Lorensen and Harvey E. Cline. 1987. Marching cubes: A high resolution
+3D surface construction algorithm. SIGGRAPH Comput. Graph. 21, 4 (aug 1987),
+163–169. https://doi.org/10.1145/37402.37422
+Guillaume Loubet, Nicolas Holzschuch, and Wenzel Jakob. 2019. Reparameterizing
+Discontinuous Integrands for Differentiable Rendering. Transactions on Graphics
+(Proceedings of SIGGRAPH Asia) 38, 6 (Dec. 2019). https://doi.org/10.1145/3355089.
+3356510
+Guillaume Loubet and Fabrice Neyret. 2018. A new microflake model with microscopic
+self-shadowing for accurate volume downsampling. Computer Graphics Forum 37, 2
+(2018), 111–121.
+Ishit Mehta, Manmohan Chandraker, and Ravi Ramamoorthi. 2023. A Theory of
+Topological Derivatives for Inverse Rendering of Geometry. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision. 419–429.
+Lars Mescheder, Michael Oechsle, Michael Niemeyer, Sebastian Nowozin, and Andreas
+Geiger. 2019. Occupancy networks: Learning 3d reconstruction in function space.
+In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition.
+4460–4470.
+Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. 2021. NeRF: representing scenes as neural radiance fields
+for view synthesis. Commun. ACM 65, 1 (dec 2021). https://doi.org/10.1145/3503250
+Bailey Miller, Hanyu Chen, Alice Lai, and Ioannis Gkioulekas. 2024. Objects as Volumes:
+A Stochastic Geometry View of Opaque Solids. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR). 87–97.
+Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. 2022. Instant
+Neural Graphics Primitives with a Multiresolution Hash Encoding. ACM Trans.
+Graph. 41, 4, Article 102 (July 2022), 15 pages. https://doi.org/10.1145/3528223.
+3530127
+•
+11
+Baptiste Nicolet, Alec Jacobson, and Wenzel Jakob. 2021. Large Steps in Inverse Rendering of Geometry. ACM Transactions on Graphics (Proceedings of SIGGRAPH Asia)
+40, 6 (Dec. 2021).
+Michael Niemeyer, Lars Mescheder, Michael Oechsle, and Andreas Geiger. 2020. Differentiable volumetric rendering: Learning implicit 3d representations without 3d
+supervision. In Proceedings of the IEEE/CVF conference on computer vision and pattern
+recognition. 3504–3515.
+Merlin Nimier-David, Thomas Müller, Alexander Keller, and Wenzel Jakob. 2022. Unbiased Inverse Volume Rendering with Differential Trackers. ACM Trans. Graph. 41,
+4, Article 44 (July 2022), 20 pages. https://doi.org/10.1145/3528223.3530073
+Merlin Nimier-David, Sébastien Speierer, Benoît Ruiz, and Wenzel Jakob. 2020. Radiative
+Backpropagation: An Adjoint Method for Lightning-Fast Differentiable Rendering.
+Transactions on Graphics (Proceedings of SIGGRAPH) 39, 4 (July 2020). https://doi.
+org/10.1145/3386569.3392406
+Silvia Sellán and Alec Jacobson. 2022. Stochastic Poisson surface reconstruction. ACM
+Transactions on Graphics (TOG) 41, 6 (2022), 1–12.
+Silvia Sellán and Alec Jacobson. 2023. Neural Stochastic Screened Poisson Reconstruction. ACM Transactions on Graphics (Proc. SIGGRAPH Asia) (2023).
+Dario Seyb, Eugene d’Eon, Benedikt Bitterli, and Wojciech Jarosz. 2024. From microfacets to participating media: A unified theory of light transport with stochastic
+geometry. ACM Transactions on Graphics (TOG) 43, 4 (2024), 1–17.
+J Kenneth Shultis and RB Myneni. 1988. Radiative transfer in vegetation canopies with
+anisotropic scattering. Journal of Quantitative Spectroscopy and Radiative Transfer
+39, 2 (1988), 115–129.
+Jos Stam and Ryan Schmidt. 2011. On the velocity of an implicit surface. ACM
+Transactions on Graphics (TOG) 30, 3 (2011), 1–7.
+Eric Veach. 1997. Robust Monte Carlo Methods for Light Transport Simulation. Ph. D.
+Dissertation. Stanford University, Stanford, CA.
+Delio Vicini, Wenzel Jakob, and Anton Kaplanyan. 2021a. A non-exponential transmittance model for volumetric scene representations. ACM Transactions on Graphics
+(TOG) 40, 4 (2021), 1–16.
+Delio Vicini, Sébastien Speierer, and Wenzel Jakob. 2021b. Path Replay Backpropagation:
+Differentiating Light Paths using Constant Memory and Linear Time. Transactions
+on Graphics (Proceedings of SIGGRAPH) 40, 4 (Aug. 2021), 108:1–108:14. https:
+//doi.org/10.1145/3450626.3459804
+Delio Vicini, Sébastien Speierer, and Wenzel Jakob. 2022. Differentiable signed distance
+function rendering. ACM Transactions on Graphics (TOG) 41, 4 (2022), 1–18.
+Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku Komura, and Wenping
+Wang. 2021. NeuS: Learning Neural Implicit Surfaces by Volume Rendering for
+Multi-view Reconstruction. In Advances in Neural Information Processing Systems,
+M. Ranzato, A. Beygelzimer, Y. Dauphin, P.S. Liang, and J. Wortman Vaughan (Eds.),
+Vol. 34. Curran Associates, Inc., 27171–27183. https://proceedings.neurips.cc/paper_
+files/paper/2021/file/e41e164f7485ec4a28741a2d0ea41c74-Paper.pdf
+Zichen Wang, Xi Deng, Ziyi Zhang, Wenzel Jakob, and Steve Marschner. 2024. A Simple
+Approach to Differentiable Rendering of SDFs. In SIGGRAPH Asia 2024 Conference
+Papers (SA ’24). Association for Computing Machinery, New York, NY, USA, Article
+119, 11 pages. https://doi.org/10.1145/3680528.3687573
+Oliver Williams and Andrew Fitzgibbon. 2006. Gaussian process implicit surfaces. In
+Gaussian Processes in Practice.
+Peiyu Xu, Sai Bangaru, Tzu-Mao Li, and Shuang Zhao. 2023. Warped-Area Reparameterization of Differential Path Integrals. ACM Trans. Graph. 42, 6 (2023), 213:1–213:18.
+P. Xu, S. Bangaru, T.-M. Li, and S. Zhao. 2024. Markov-Chain Monte Carlo Sampling of
+Visibility Boundaries for Differentiable Rendering. In ACM SIGGRAPH Asia 2024
+Conference Proceedings.
+Kai Yan, Christoph Lassner, Brian Budge, Zhao Dong, and Shuang Zhao. 2022. Efficient
+estimation of boundary integrals for path-space differentiable rendering. ACM
+Transactions on Graphics (TOG) 41, 4 (2022), 1–13.
+Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. 2021. Volume rendering of
+neural implicit surfaces. In Thirty-Fifth Conference on Neural Information Processing
+Systems.
+Tizian Zeltner, Sébastien Speierer, Iliyan Georgiev, and Wenzel Jakob. 2021. Monte Carlo
+Estimators for Differential Light Transport. Transactions on Graphics (Proceedings
+of SIGGRAPH) 40, 4 (Aug. 2021). https://doi.org/10.1145/3450626.3459807
+Cheng Zhang, Bailey Miller, Kai Yan, Ioannis Gkioulekas, and Shuang Zhao. 2020.
+Path-Space Differentiable Rendering. ACM Trans. Graph. 39, 4 (2020), 143:1–143:19.
+Kai Zhang, Fujun Luan, Qianqian Wang, Kavita Bala, and Noah Snavely. 2021a. PhySG:
+Inverse Rendering with Spherical Gaussians for Physics-based Material Editing and
+Relighting. In The IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR).
+Xiuming Zhang, Pratul P Srinivasan, Boyang Deng, Paul Debevec, William T Freeman, and Jonathan T Barron. 2021b. Nerfactor: Neural factorization of shape and
+reflectance under an unknown illumination. ACM Transactions on Graphics (ToG)
+40, 6 (2021), 1–18.
+Youjia Zhang, Teng Xu, Junqing Yu, Yuteng Ye, Junle Wang, Yanqing Jing, Jingyi Yu,
+and Wei Yang. 2023b. NeMF: Inverse Volume Rendering with Neural Microflake
+Field. 2023 IEEE/CVF International Conference on Computer Vision (ICCV) (2023).
+12
+•
+Zhang et al.
+Ziyi Zhang, Nicolas Roussel, and Wenzel Jakob. 2023a. Projective Sampling for Differentiable Rendering of Geometry. Transactions on Graphics (Proceedings of SIGGRAPH
+Asia) 42, 6 (Dec. 2023). https://doi.org/10.1145/3618385
+Ziyi Zhang, Nicolas Roussel, Thomas Müller, Tizian Zeltner, Merlin Nimier-David,
+Fabrice Rousselle, and Wenzel Jakob. 2025. Radiance Surfaces: Optimizing Surface
+Representations with a 5D Radiance Field Loss. In ACM SIGGRAPH 2025 Conference
+Proceedings. Association for Computing Machinery, New York, NY, USA, 10 pages.
+A
+EXTENDED SURFACE DERIVATIVES
+Our method extends surface optimization by introducing non-local
+¯ Along each light path, the method
+perturbations to a surface 𝑆.
+tests how potential surfaces could exist at sampled positions as
+¯ By optimizing these hypothetical surfaces, we
+perturbations to 𝑆.
+¯
+effectively explore an extended parameter space 𝑆 to refine 𝑆.
+Previous work [Zhang et al. 2020, Zhang et al. 2023a] established
+the local formulation of surface derivatives, which measures how
+an infinitesimal surface change affects radiative transport in the
+entire scene. We extend their formulation to measure how infinitesimal changes in any hypothetical surface patch within 𝑆 influence
+radiative transport. This provides a quantitative way to rederive
+our method. In this section, we show that the resulting derivatives
+match the many-worlds derivative transport.
+This analysis leads to two critical results:
+• Many-worlds derivatives reduce to conventional surface
+¯
+derivatives (shading and boundary) when evaluated on 𝑆.
+• We unify shading and boundary derivatives into a single
+term in the extended domain, enabling an algorithmically
+simpler implementation.
+Fig. 13. A light path with 𝑛 segments connecting the camera to the emitter.
+and importance. This equation contributes to a measurement—for
+instance an image pixel color 𝐼 —following the path space integral
+[Veach 1997]:
+∫
+𝐼=
+𝑓 ( x̄) d𝜇,
+Ω
+Î
+where d𝜇 = 𝑛𝑖=0 d𝐴(x𝑖 ) is the area product element.
+Without loss of generality, we assume that the emitted radiance
+𝐿𝑒 and the camera model do not depend on the scene parameter
+𝜃 (i.e., detached). Differentiation of the contribution function with
+respect to 𝜃 yields:
+𝑛−1
+𝜕𝑓 ( x̄) ∑︁
+=
+𝑊𝑖 (xk−1, xk )𝐺 (xk−1, xk )
+(9)
+𝜕𝜃
+𝑘=1
+i
+h
+𝜕𝜃 𝑓𝑠 (xk−1, xk, xk+1 )𝐺 (xk, xk+1 ) 𝐿𝑖 (x𝑘+1, x𝑘 ),
+where functions 𝐿𝑖 and 𝑊𝑖 denote incident radiance and importance:
+A.1
+Conventional surface derivatives
+In physically based rendering, surface differentiation involves two
+types of derivatives: the shading derivative and the boundary derivative. The shading derivative applies to the entire visible surface for
+a given viewpoint, primarily affecting appearance through the shading normal and local material properties. In contrast, the boundary
+derivative (corresponding to “occlusion” in Figure 1) is defined only
+along the visibility silhouette curve as seen from a viewpoint. It
+adjusts the object’s visibility contour and is the main driver of shape
+optimization.
+Both derivatives can be expressed as integrals over path space,
+a high-dimensional domain encompassing all possible light paths.
+To simplify our derivation, we write them in the three-point form
+([Veach 1997, Section 8.1]) that isolates the derivative contribution from a single ray segment. While the integral remains highdimensional, this segment-specific form encapsulates most of the
+dimensions within the incident radiance term 𝐿𝑖 and the incident
+importance term 𝑊𝑖 , making the formulation more tractable.
+A.1.1 Shading derivative. Consider the radiance contribution of a
+𝑛-segment light path as illustrated in Figure 13. The measurement
+contribution function is given by:
+𝑓 ( x̄) = 𝑊𝑒 (x0, x1 )𝐺 (x0, x1 )
+(8)
+ 𝑛−1
+
+Ö
+𝑓𝑠 (x𝑖 −1, x𝑖 , x𝑖+1 )𝐺 (x𝑖 , x𝑖+1 ) 𝐿𝑒 (x𝑛 , x𝑛−1 ),
+𝑖=1
+where 𝑓𝑠 is the BSDF function, 𝐺 is the standard geometric term
+including visibility V, and 𝐿𝑒 and 𝑊𝑒 refer to the emitted radiance
+𝐿𝑖 (x𝑘+1, x𝑘 ) = 𝐿𝑒 (x𝑛 , x𝑛−1 )Π𝑛−1
+𝑖=𝑘+1 [𝐺 (x𝑖 , x𝑖+1 ) 𝑓𝑠 (x𝑖 −1 , x𝑖 , x𝑖+1 )],
+−1
+𝑊𝑖 (x𝑘 −1, x𝑘 ) = 𝑊𝑒 (x0, x1 )Π𝑘𝑖=1
+[𝐺 (x𝑖 −1, x𝑖 )𝑓𝑠 (x𝑖 −1, x𝑖 , x𝑖+1 )].
+This gives the three-point form shading derivative of 𝐼 :
+ 
+∫
+𝜕𝐼
+=
+𝜕𝜃 𝑓 ( x̄) d𝜇
+𝜕𝜃 𝑠
+Ω
+∫
+=
+𝑊𝑖 (x𝑘 −1, x𝑘 ) 𝐺 (x𝑘 −1, x𝑘 )
+∫ M×M
+h
+i
+𝜕𝜃 𝐺 (xk, xk+1 )𝑓𝑠 (xk−1, xk, xk+1 ) 𝐿𝑖 (xk+1, xk ) d𝐴(xk+1 )
+M
+|
+{z
+}
+c
+𝜕𝜃 𝐿
+𝑜 (xk , xk−1 )
+d𝐴(xk ) d𝐴(xk−1 ).
+(10)
+The term in the curly bracket is abbreviated as 𝜕𝜃 𝐿b𝑜 (xk, xk−1 ),
+which captures the derivative stemming from only the current interaction at xk . The derivatives from later interactions along the path
+are incorporated in their respective three-point form integrals.
+A.1.2 Boundary derivative. We start from Equation (43) in Zhang
+et al.’s work [2020] to derive the segment-specific boundary derivative integral. The derivation is similar to the one shown in the
+supplementary material of [Zhang et al. 2023a] with a different
+objective—we aim to express the integral such that it is local to
+the boundary segment, rather than to the silhouette point. One can
+alternatively derive the same result starting from Equation (4) in
+[Zhang et al. 2023a].
+Many-Worlds Inverse Rendering
+Fig. 14. Surface boundary derivative. The boundary derivative contains
+a motion term that tracks how fast the boundary segment (xa , xc ) moves
+along the normal direction nb , which is orthogonal to the viewing direction
+𝝎 and the silhouette curve direction tb .
+The original boundary derivative integral, without reparameterization, states that (see Figure 14 for illustration):
+ 
+∫ ∫
+𝜕𝐼
+=
+𝐿𝑑 (xb, xa ) 𝐺 (xa, xc ) 𝑊𝑖 (xa, xc )
+(11)
+𝜕𝜃 𝑏
+M B (xa )
+(𝜕𝜃 xc · nc ) d𝑙 (xc ) d𝐴(xa ),
+where (xa, xc ) form a boundary segment that makes contact with the
+boundary point xb , and the domain B (xa ) is the boundary curve
+on the xc side surface as seen from xa . The function 𝐿𝑑 defines
+radiance difference between the foreground and the background as
+𝐿𝑑 (xb, xa ) = 𝐿𝑜 (xb, 𝝎) − 𝐿𝑖 (xb, −𝝎). The inner product measures
+the motion of xc along its in-surface normal direction nc .
+This integral is already specific to a ray segment, but the motion
+term 𝜕𝜃 xc · nc is a derived quantity from 𝜕𝜃 xb · nb . They are related
+as follows [Zhang et al. 2023a, Supplementary Eq. (9)]:
+𝜕𝜃 xc · nc
+𝑙 ac
+=
+.
+𝜕𝜃 xb · nb 𝑙 ab ∥nb × Nc ∥
+We also change the length measure d𝑙 (xc ) to d𝑙 (xb ) [Zhang et al.
+2023a, Supplementary Eq. (3)]:
+∥𝝎 × tc ∥ ∥nb × Nc ∥ = |𝝎 · Nc |.
+Combining these equations, we obtain:
+ 
+∫ ∫
+|𝝎 · Na | ∥𝝎 × tb ∥
+𝜕𝐼
+=
+𝐿𝑑 (xb, xa )
+𝑊𝑖 (xa, xb ) (12)
+2
+𝜕𝜃 𝑏
+𝑙 ab
+M C (xa )
+(𝜕𝜃 xb · nb ) d𝑙 (xb ) d𝐴(xa ),
+where the boundary domain C(xa ) is the visibility silhouette curve
+on the occluder as seen from xa . Rewriting this result by converting
+the length measure from scene space to hemisphere space, we get:
+ 
+∫ ∫
+𝜕𝐼
+=
+𝐿𝑑 (xb, −𝝎) 𝑊𝑖 (xa, 𝝎) |𝝎 · Na |
+(13)
+𝜕𝜃 𝑏
+M C (xa )
+(𝜕𝜃 𝝎 · nb ) d𝑙 (𝝎) d𝐴(xa ).
+Intuitively, the motion term 𝜕𝜃 𝝎 · nb measures how rapidly the
+occluder moves in the direction perpendicular to the viewing ray.
+This motion is weighted by the radiance difference between the
+13
+Fig. 15. Shading derivatives in many-worlds transport. Along a ray
+segment (xa , xc ), we consider potential interactions with a hypothetical
+surface at xb as a perturbation to the background surface. The shading
+derivatives from all such interactions along the ray segment are accumulated.
+foreground and background, and the derivative arising from this
+motion is transported to the sensor akin to regular radiance [NimierDavid et al. 2020, Section 3.1].
+A.2
+Many-worlds derivatives
+We now extend surface derivatives into the extended domain to also
+quantify how potential surface patches along a ray segment affect
+the radiative transport.
+A.2.1 Shading derivative. We write the shading derivative as an integral over potential surface patches along the ray segment (xa, xc ),
+weighted by the probability of each patch’s existence:
+ 
+∫ 𝑙ac
+∫ 𝑙ac ∫
+𝜕𝐼
+(10)
+𝛼 (𝑡)
+d𝑡 =
+(14)
+𝜕𝜃 𝑠
+0
+0
+M×M𝑡
+h
+i
+𝛼 (𝑡) 𝑊𝑖 (xa, xb ) 𝐺 (xa, xb ) 𝜕𝜃 𝐿b𝑜 (xb, xa ) d𝐴(xb ) d𝐴(xa ) d𝑡,
+where xb is on a hypothetical surface M𝑡 (Figure 15). Note that
+the ray direction may not be perpendicular to the surface normal
+d𝐴(xb ) d𝑡 = d𝑉 (xb )/|𝝎 · Nb |, allowing us to write the integral as:
+∫ ∫
+=
+𝛼 (xb ) 𝑊𝑖 (xa, xb )
+(15)
+R3
+M
+|𝝎 · Na |V (xa ↔ xb ) b
+𝜕𝜃 𝐿𝑜 (xb, xa ) d𝐴(xa ) d𝑉 (xb ).
+2
+𝑙 ab
+d𝑙 (xc ) 𝑙 ac ∥𝝎 × tb ∥
+=
+.
+d𝑙 (xb ) 𝑙 ab ∥𝝎 × tc ∥
+Futhermore, we use the following identity ([Zhang et al. 2023a,
+Supplementary Eq. (10)]):
+•
+By chaging from an area measure to a solid angle measure, we
+can cancel the remaining geometric term and absorb the visibility
+function V to obtain:
+∫ ∫
+=
+𝛼 (xb ) 𝑊𝑜 (xb, −𝝎) 𝜕𝜃 𝐿b𝑜 (xb, −𝝎) d𝝎 d𝑉 (xb ).
+(16)
+R3
+𝑆2
+This derivative has a simple form from which we can identify the
+following properties:
+• It is local to the position xb where the interaction happens.
+• The shading derivative originating from this interaction is
+weighted by the probability of the surface’s existence and
+is uniformly radiated in all directions to be received by the
+sensor.
+A.2.2 Boundary derivative. A challenge in analyzing the boundary
+derivative for hypothetical surfaces is that existing theory from
+prior work only analyzes visibility silhouettes on occluders. This
+becomes problematic as a potential surface patch is not always on
+such a silhouette: its surface normal Nb may not be orthogonal to the
+viewing direction 𝝎. Such a patch still influences radiative transport
+14
+•
+Zhang et al.
+The length measure d𝑙 (𝝎) is in the solid angle domain, and it
+relates to the length measure d𝑙 (xb ) on the surface as
+d𝑙 (𝝎) =
+Fig. 16. Extended form of the surface boundary derivative. For conventional boundary derivatives, the silhouette direction tb is only defined
+on the visibility silhouette. In the extended case, we define it for any surface, allowing silhouette occlusion to be interpreted as probabilistic surface
+existence.
+∥𝝎 × tb ∥
+d𝑙 (xb ).
+𝑙 ab
+(19)
+Using these equations, the extended boundary derivative from
+Equation 13 can be rewritten as:
+ 
+∫ ∫
+𝜕𝐼
+(13)
+=
+𝐿𝑑 (xb, −𝝎) 𝑊𝑖 (xa, 𝝎) |𝝎 · Na |
+𝜕𝜃 𝑏
+M C (xa )
+(𝜕𝜃 𝝎 · nb ) d𝑙 (𝝎) d𝐴(xa )
+∫ ∫
+(17,18)
+=
+𝐿𝑑 (xb, −𝝎) 𝑊𝑖 (xa, 𝝎) |𝝎 · Na |
+M
+C (xa )
+∥nb × mb ∥
+v𝜃 (xb ) d𝑙 (𝝎) d𝐴(xa )
+𝑙 ab
+as it occludes radiance traveling from the background. However, this
+type of occlusion does not occur in local surface evolution, where
+occlusion is restricted to the visibility silhouette.
+We therefore introduce an extended form of the boundary derivative whose value matches the conventional boundary derivative on
+a visibility silhouette curve, but is also well-defined for any surface.
+Does such an extension make sense? Intuitively, the boundary
+derivative examines the color difference between the foreground
+and the background, and the motion term determines if more of
+the foreground or the background should be visible. This concept
+closely mirrors the derivative of occupancy, where adjusting the
+probability of the surface existence decides the visibility balance
+between the surface and the background. From this perspective,
+the “boundary” derivative logically extends to hypothetical surfaces
+with non-tangential ray intersections. Although “boundary” may
+be a misnomer in these cases, we retain the term for consistency
+with existing literature.
+Extended form of surface boundary derivatives. For any surface
+located at xb with normal Nb , we define the extended silhouette
+direction tb as the in-surface direction along which the dot product
+𝝎 · Nb remains constant. The conventional silhouette direction is a
+special case where 𝝎 · Nb = 0.
+Let nb be the viewing direction normal, which is orthogonal to
+both the viewing direction 𝝎 and the extended silhouette direction
+tb (Figure 16). In the extended case, it is important to distinguish
+between the surface normal Nb and the viewing direction normal
+nb . This subtle difference is not present in the conventional case, as
+Nb = nb on the visibility silhouette.
+We denote the local motion at xb as
+v𝜃 (xb ) := 𝜕𝜃 xb · Nb
+(17)
+since it quantifies the rate at which occlusion changes at the interaction point.
+Let mb be a unit vector in the surface such that {tb, Nb, mb }
+forms an orthonormal basis. the motion relates to ray direction 𝝎
+as [Zhang et al. 2023a, Supplementary Eq. (9)]:
+(19)
+∫
+∫
+𝐿𝑑 (xb, −𝝎) 𝑊𝑖 (xa, 𝝎) |𝝎 · Na |
+=
+M
+C (xa )
+∥nb × mb ∥ ∥𝝎 × tb ∥
+v𝜃 (xb ) d𝑙 (xb ) d𝐴(xa ). (20)
+2
+𝑙 ab
+Boundary derivative in many-worlds transport. At each interaction position xb , let d𝑙 (xb ) be the length measure along the extended silhouette direction tb and d𝑛(xb ) be the length measure
+along the surface normal Nb . Together, they define an area element
+d𝐴(xb ) = d𝑙 (xb ) d𝑛(xb ) which quantifies how this patch occludes
+the background.
+Analogous to shading derivatives, we write the many-worlds
+boundary derivative of 𝐼 as an integral over all possible surface
+interactions along the ray segment (xa, xc ):
+∬  
+∫ 𝑙ac ∫
+𝜕𝐼
+(20)
+d𝑛 d𝑡 =
+𝐿𝑑 (xb, −𝝎) 𝑊𝑖 (xa, 𝝎)
+(21)
+𝜕𝜃 𝑏
+0
+M×M𝑡
+∥n × mb ∥ ∥𝝎 × tb ∥
+v𝜃 (xb ) d𝐴(xb ) d𝐴(xa ) d𝑡,
+|𝝎 · Na | b
+2
+𝑙 ab
+The basis {tb, Nb, 𝝎} leads to a volume element
+d𝑉 (xb ) = |𝝎 · mb | d𝑙 (xb ) d𝑛(xb ) d𝑡 .
+Note that mb , nb and Nb are co-planar since they are all orthogonal
+to tb . We therefore obtain an identity [Zhang et al. 2023a, Supplementary Eq. (10)]:
+∥𝝎 × tb ∥ ∥nb × mb ∥ = |𝝎 · mb |.
+(18)
+(23)
+Using these equations, we simplify the boundary derivative as:
+∫ ∫
+|𝝎 · Na |
+(22)
+(21) =
+𝑊𝑖 (xa, 𝝎) 𝐿𝑑 (xb, −𝝎)
+2
+3
+𝑙 ab
+M R
+∥𝝎 × tb ∥ ∥nb × mb ∥
+v𝜃 (xb ) d𝑉 (xb ) d𝐴(xa )
+|𝝎 · mb |
+(23)
+∫
+∫
+𝑊𝑜 (xb, −𝝎) 𝐿𝑑 (xb, −𝝎) v𝜃 (xb ) d𝝎 d𝑉 (xb ).
+=
+R3
+(24)
+S2
+We define the local motion v𝜃 (xb ) within its canonical space:
+v𝜃 (xb ) = 𝜕𝜃 𝛼 (xb ).
+∥n × mb ∥
+𝜕𝜃 𝝎 · nb = b
+𝜕𝜃 xb · Nb .
+𝑙 ab
+(22)
+(25)
+This definition contrasts with prior work that computes the surface
+boundary derivative using an implicit field representation. In those
+Many-Worlds Inverse Rendering
+works, the motion is defined in the scene space, resulting in the
+following Jacobian determinant [Stam and Schmidt 2011]:
+𝜕𝜃 p · N =
+𝜕𝜃 𝛼 (p)
+,
+∥∇𝛼 (p)∥
+(26)
+•
+15
+absorption) along the segment reaching up to the nearest ray-surface
+intersection at 𝑠 = inf {𝑠 ′ | x + 𝑠 ′ 𝝎 ∈ M} or 𝑠 = ∞ if none exists:
+∫ 𝑠
+𝐿i (0) =
+𝑇 (𝑡) [𝜇 s (𝑡) 𝐿s (𝑡) + 𝜇 a (𝑡) 𝐿e (𝑡)] d𝑡 + 𝑇 (𝑠) 𝐿o (𝑠). (29)
+0
+that relates the normal velocity of a surface point p to the derivative of its implicit representation. This Jacobian determinant is not
+required since our method optimize the surface patch directly by
+modifying its occupancy value, rather than locally deforming it. The
+scaling factor in Equation 26 can bias the many-worlds derivative
+by erroneously considering neighboring occupancy values. This is
+more apparent when considering the fact that the gradient norm
+∥∇𝛼 ∥ could be infinitely large near the mean surface or the opposite, it could drop to zero in the case of an initialization where all
+positions share the same occupancy value.
+This yields the final form of the boundary derivative in manyworlds transport:
+∫ ∫
+(25)
+𝑊𝑜 (xb, −𝝎) 𝐿𝑑 (xb, −𝝎) 𝜕𝜃 𝛼 (xb ) d𝝎 d𝑉 (xb ).
+(24) =
+R3
+S2
+The first term models contributions of the volume, while the second
+accounts for a potential surface at 𝑡 = 𝑠, whose outgoing radiance
+𝐿o (𝑠) is attenuated by the medium.
+The functions 𝜇 a (𝑡) and 𝜇 s (𝑡) specify the volume’s absorption and
+scattering coefficient, whose sum gives the extinction 𝜇t = 𝜇a + 𝜇 s .
+The in-scattered radiance
+∫
+𝐿s (𝑡) =
+𝐿𝑖 (𝑡, 𝝎 ′ ) 𝑓𝑝 (𝑡, 𝝎, 𝝎 ′ ) d𝝎 ′
+(30)
+S2
+is the product integral of incident radiance and the phase function 𝑓𝑝 .
+Finally, the transmittance
+ ∫ 𝑡
+
+′
+′
+𝑇 (𝑡) = exp −
+𝜇𝑡 (𝑡 ) d𝑡
+(31)
+0
+(27)
+A.2.3 Many-worlds derivative. Combining Equation 16 and Equation 27, we derive a derivative integral that captures the overall
+impact of non-local surface perturbations:
+∫ ∫
+h
+𝜕𝐼
+=
+𝑊𝑜 (xb, −𝝎) 𝛼 (xb ) 𝜕𝜃 𝐿b𝑜 (xb, −𝝎) +
+𝜕𝜃
+R3 S2
+i
+𝜕𝜃 𝛼 (xb ) 𝐿𝑑 (xb, −𝝎) d𝝎 d𝑉 (xb )
+∫ ∫
+h
+i
+=
+𝑊𝑜 (xb, 𝝎) 𝜕𝜃 𝐿𝑑 (xb, 𝝎) 𝛼 (xb ) d𝝎 d𝑉 (xb ), (28)
+R3
+S2
+where the background surface in the radiance difference function
+𝐿𝑑 is detached. Equation 28 represents the final form of the manyworlds derivative, expressed in an alternative domain but equivalent
+to Equation 6.
+This derivation suggests that our approach is an extension of standard surface evolution methods. Conventional techniques evolve
+surfaces by locally modifying shading properties or adjusting geometry to change occlusion relationships, with such perturbations
+restricted to the surface itself. Instead, we generalize this concept
+by analyzing hypothetical surface patches in space, leading to the
+same well-defined shading and occlusion-based perturbations in an
+extended domain.
+A key challenge in this extension is that any position along a ray
+can now contribute to surface evolution, rather than being restricted
+to a single intersection point. To address this, we adopt the “manyworlds” perspective: treating all possible interactions as mutually
+exclusive events. This ensures that a desired change is uniformly
+applied across all potential interactions.
+B A RANDOM VOLUME PERSPECTIVE
+B.1 Transport in an exponential random volume
+We begin by reviewing light transport in an exponential random
+volume as described by the radiative transfer equation. This equation
+gives the incident radiance 𝐿i along a ray (x, 𝝎), accounting for
+radiative gains (in-scattering, emission) and losses (out-scattering,
+ties everything together: it establishes the connection to particle
+distributions and ensures energy conservation by accounting for
+self-shadowing (or more generally, self-extinction).
+B.2
+Many-worlds transport
+Building on the discussion in Section 3.1, we aim to prevent nonsensical scattering and shadowing between multiple potential surfaces
+along a ray. This can be achieved by modeling the interaction with
+a tenuous volume, whose density is diluted by a factor of 𝜀, which
+reduces the scattering and extinction coefficients 𝜇s and 𝜇 t . This
+low amount of extinction ensures at most one interaction with the
+volume along a ray segment, leading to the following transmittance
+approximation:
+∫ 𝑡
+𝑇 (𝑡) ≈ 1 −
+𝜇𝑡 (𝑡 ′ ) d𝑡 ′,
+(32)
+0
+which follows from 𝑒 −𝑥 ≈ 1 − 𝑥 + 𝑂 (𝑥 2 ). Plugging this into the
+RTE (29) and discarding a second-order term (𝜇 s 𝜇t ∼ 𝜀 2 ) yields the
+approximation 𝐿i (0) ≈ 𝐿𝜀i (0), where the latter is defined as
+∫ 𝑠
+[𝜇 s (𝑡) 𝐿s (𝑡) + 𝜇 a (𝑡) 𝐿e (𝑡) − 𝜇 t (𝑡) 𝐿o (𝑠)] d𝑡 + 𝐿𝑜 (𝑠), (33)
+𝐿𝜀i (0) B
+0
+In other words, a tenuous volume is governed by a linearized RTE,
+where higher-order terms vanish. The superscript 𝜀 refers to quantities with a dilution factor 𝜀.
+To complete this model, we must instill meaning into the terms
+𝜇t , 𝜇 s , and 𝑓𝑝 . Prior work often did so using volumetric analogs of
+microfacet surface models known as microflakes [Jakob et al. 2010].
+Applications include optimization, volumetric level of detail, energyconserving random walks, and neural fields [Heitz et al. 2015, 2016;
+Vicini et al. 2021a; Loubet and Neyret 2018; Zhang et al. 2023b].
+It is worth noting that the theory of microflakes actually builds
+on a more general notion of anisotropic radiative transport [Shultis
+and Myneni 1988; Jakob et al. 2010], which adopts directionally
+varying extinction and scattering coefficients arising from a random
+16
+•
+Zhang et al.
+distribution of oriented particles:
+∫
+𝜇 t (x, 𝝎) = 𝜌 (x)
+𝜎 (𝝎, 𝝎 ′ ) 𝐷 (x, 𝝎 ′ ) d𝝎 ′
+𝑆2
+∫
+𝜇s (x, 𝝎) = 𝜌 (x)
+𝑎(x, 𝝎, 𝝎 ′ ) 𝜎 (𝝎, 𝝎 ′ ) 𝐷 (x, 𝝎 ′ ) d𝝎 ′,
+(34)
+𝑆2
+(35)
+𝑆2
+With these definitions, 𝜇 s reduces to the product of extinction and 𝑎:
+where 𝜌 (x) is the particles’ number density at x, 𝐷 (𝝎) models the
+density of their directional orientations, 𝜎 (𝝎, 𝝎 ′ ) gives the crosssectional area of a single particle with orientation 𝝎 ′ observed from
+direction 𝝎, and 𝑎(x, 𝝎, 𝝎 ′ ) models the particles’ scattering albedo
+(∈ [0, 1]). Microflake theory can then be derived from these expressions by setting 𝜎 (𝝎, 𝝎 ′ ) = 𝜎 |𝝎 · 𝝎 ′ | to model the projected area
+of a facet with surface area 𝜎, and by constructing a phase function
+𝑓𝑝 based on the principle of specular reflection from such a flake.
+However, we do not model a directional distribution 𝐷 (𝝎) in this
+work. Instead, we adopt a far simpler particle model that associates
+a single particle orientation 𝜷 (x) with every point x (Figure 3).
+Since there is only one orientation at x, the distribution 𝐷 collapses to a Dirac delta function: 𝐷 (x, 𝝎) = 𝛿 (𝝎 − 𝜷 (x)), which in
+turn reduces the extinction to a simple product of number density
+and cross-sectional area
+𝜇t (x, 𝝎) = 𝜌 (x) 𝜎 (𝝎, 𝜷 (x)).
+𝜇s (x, 𝝎) = 𝑎(x, 𝝎, 𝜷 (x)) 𝜇 t (x, 𝝎).
+where 𝑜 (x) is the occupancy, i.e., the point-wise discrete probability
+that x is inside 𝑆 (Equation 7). The branch condition encodes an
+important nonreciprocal 3 behavior: light interacting with a backfacing surface presents a nonsensical case, and this term masks
+those parts of the volume.
+The extinction 𝜇 t models the stopping power of the volume. For
+example, the flakes of a microflake volume obstruct light to a lesser
+degree when it propagates nearly parallel to them, and this manifests
+via a foreshortening term |𝝎 · 𝝎 ′ | in the definition of 𝜇 t . This is
+important to obtain a sensible (energy-conserving, reciprocal) model
+because these particles mutually interact. On the other hand, when
+focusing on a single world in a many-worlds representation, light
+stops with probability 1 when it encounters a surface regardless of
+how it is oriented (except for mentioned back-facing case). This is
+why our model does not include a similar foreshortening term. The
+term 𝛼 (x) models the discrete probability of the world within the
+ensemble.
+We define the phase function 𝑓𝑝 of the volume as
+𝑓𝑠 (x, 𝝎, 𝝎 ′ ) |𝜷 (x) · 𝝎 ′ |
+,
+𝑎(x, 𝝎, 𝜷 (x))
+which wraps 𝑓𝑠 , the bidirectional scattering distribution function
+(BSDF) of the many-worlds surface at the point x. This definition
+follows the standard convention that the phase function integrates
+3 This behavior is non-reciprocal because when the medium interacts along 𝝎 (i.e., if
+𝜇𝑡 (x, 𝝎 ) > 0), then the opposite direction is non-interacting (i.e., 𝜇𝑡 (x, −𝝎 ) = 0).
+(39)
+The product of this scattering coefficient and in-scattered radiance
+𝐿s (Equation 30) can be seen to compute an extinction-weighted
+integral of the many-worlds BSDF over projected solid angles:
+∫
+𝜇s (x, 𝝎)𝐿s (x, 𝝎) = 𝜇t (x, 𝝎) 𝐿i (x, 𝝎 ′ ) 𝑓𝑠 (x, 𝝎, 𝝎 ′ ) |𝛽 (x) · 𝝎 ′ | d𝝎 ′ .
+𝑆2
+We further use the sum of the above expression with the absorptionweighted emission to define an extended outgoing radiance function
+𝐿o for points x that lie within the many-worlds representation:
+𝜇 s (x, 𝝎)𝐿s (x, 𝝎) + 𝜇 a (x, 𝝎)𝐿o (x, 𝝎) C 𝜇t (x, 𝝎)𝐿o (x, 𝝎).
+(40)
+Substituting all of these expressions into Equation 33, we obtain
+∫ 𝑠
+𝐿𝜀i (0) = 𝜀
+𝛼 (𝑡) [𝐿o (𝑡) − 𝐿o (𝑠)] d𝑡 + 𝐿𝑜 (𝑠),
+(41)
+0
+(36)
+Here, we do not specifically model the split into a separate number
+density and cross-section. Instead, we define an extinction function
+that directly evaluates their product:
+(
+𝜀 𝑜 (x), if 𝝎 · 𝜷 (x) > 0,
+𝜇t (x, 𝝎) =
+(37)
+0,
+otherwise,
+𝑓𝑝 (x, 𝝎, 𝝎 ′ ) =
+to 1, with absorption handled by other terms. The albedo 𝑎 provides
+the necessary normalization constant:
+∫
+𝑎(x, 𝝎, 𝜷 (x)) =
+𝑓𝑠 (x, 𝝎, 𝝎 ′ ) |𝜷 (x) · 𝝎 ′ | d𝝎 ′ .
+(38)
+where 𝛼 gives the occupancy at 𝑡 and is zero in the back-facing
+(𝜷 (𝑡) · 𝝎 < 0) case.
+This equation quantifies how the many-worlds representation
+modifies light transport along individual path segments. For multisegment paths, we do not model multiple interactions, which would
+introduce second-order derivative terms beyond our scope.
+While Equation 41 captures infinitesimal volumetric effects, our
+many-worlds framework treats each perturbation as a standalone
+alternative world (Section 3.1). Removing the 𝜀 scaling reveals the
+unit perturbation effect:
+∫ 𝑠
+𝐿i (0) =
+𝛼 (𝑡) [𝐿o (𝑡) − 𝐿o (𝑠)] d𝑡 + 𝐿𝑜 (𝑠).
+(42)
+0
+Under differentiation this gives the many-worlds derivative transport in Equation 6.
+C TECHNICAL DETAILS
+C.1 Stochastic surface model
+Our method evolves a surface 𝑆¯ by propagating gradients to a stochastic surface model 𝑆. We outline one possible parameterization of
+a stochastic surface model here [Williams and Fitzgibbon 2006; Sellán and Jacobson 2022; Sellán and Jacobson 2023; Miller et al. 2024;
+Seyb et al. 2024], noting that this is not our contribution and other
+formulations can be used. Our work focuses on the theoretical foundation for optimizing a distribution of surfaces without relying on
+exponential volumes (i.e., ray-surface interactions are mutually exclusive events, rather than statistically independent events), which
+is largely independent of the specific model used.
+An implicit representation Φ(x) of a shape determines whether
+a position x is inside (Φ(x) < 0), outside (Φ(x) > 0), or on the
+boundary (Φ(x) = 0) of a solid. This geometric classification is
+independent of optical properties—for example, points x within a
+refractive material also count as inside (Φ(x) < 0).
+In our case, the scene models a distribution of surfaces, which
+turns Φ(x) into a random variable. The occupancy 𝛼 (x) then gives
+the probability of x being on or inside an object:
+𝛼 (x) = Pr{Φ(x) ≤ 0}.
+(43)
+We model Φ(𝑥) as a Gaussian process (GP). Pointwise evaluations
+of the implicit function are normally distributed:
+Φ(x) ∼ N (𝜇 (x), 𝜎 2 (x)),
+which yields an explicit form of the occupancy:
+"
+!#
+𝜇 (x)
+1
+𝛼 (x) =
+1 − erf √︁
+.
+2
+2𝜎 2 (x)
+(44)
+•
+17
+Reconstructed geometry (re-lit)
+Many-Worlds Inverse Rendering
+Without relative motion
+With relative motion
+Ground truth geometry
+Optimization views
+(45)
+We assume a constant variance 𝜎 2 (x) = 𝜎 2 for all x in this work.
+We also use this representation to assign an orientation to every
+point based on the expected gradient of the implicit function, i.e.,
+𝜷 (x) =
+∇𝜇 (x)
+𝐸 [∇Φ(x)]
+=
+.
+∥𝐸 [∇Φ(x)] ∥
+∥∇𝜇 (x) ∥
+Modeling orientation has a crucial impact on the robustness and
+speed of optimizations (Figure 4).
+A GP also has the property that evaluations Φ(x1 ), Φ(x2 ), . . . follow a joint multivariate normal distribution. Their auto-correlation
+is often described using a kernel that depends on distance, e.g.:
+
+
+corr(Φ(x), Φ(y)) = exp −𝛾 ∥x − y∥ 2
+(46)
+where corr() refers to Pearson’s correlation coefficient. This ensures
+that nearby points become increasingly correlated, making sudden
+jumps in realizations of Φ(x) unlikely.
+Autocorrelation would be a crucial property if our method involved steps such as sampling concrete surface realizations from
+𝑆, or if we consider interaction with potential surfaces at multiple
+different locations, requiring careful modeling of the correlation
+between them. However, our method does not depend on such
+steps. Its sole interaction with 𝑆 is through pointwise evaluations
+¯
+of probabilities, and the extraction of the background surface 𝑆:
+𝑆¯ = {x ∈ R3 | 𝜇 (x) = 0} = {x ∈ R3 | 𝛼 (x) = 1/2}.
+(47)
+Spatial correlation is therefore not a detail that must be modeled in
+our implementation of the algorithm. Other variants of the manyworlds algorithm, for instance those that involve a more general
+directional distribution, require more parameterization of the GP.
+C.2
+Implementation details
+Occupancy and background surface. We query 𝜇 (x) from a gridbased texture using cubic interpolants in our implementation. Alternatively, a neural representation [Müller et al. 2022] could be
+employed for greater flexibility and resolution.
+To simulate interactions with the detached background surface
+¯ we use Marching Cubes [Lorensen and Cline 1987] to extract a
+𝑆,
+triangle mesh from 𝜇 (x), enabling the use of efficient ray-triangle intersection routines. Any other isosurface extraction algorithm could
+in principle be used, since the extraction step and the extracted surface do not need to be differentiable. Our pipeline does not involve
+sphere tracing, delta tracking or other iterative algorithms.
+Fig. 17. Derivative due to relative motion. A diffuse, bumpy torus is
+rendered under uniform environmental lighting with direct illumination.
+The shading derivative is zero everywhere since the lighting is uniform. To
+reconstruct the concave regions of the torus, we propagate derivatives to
+the shading point as a result of the relative motion of the shadow ray.
+Derivative due to relative motion. The analysis in Appendix A
+focuses on derivatives caused by direct perturbations to sampled
+positions along light paths. However, when differentiating a geometry in a path tracer, indirect shading introduces a unique derivative
+that arises from the relative motion of the boundary segment. These
+derivatives are occlusion-induced but are not located on the point
+of occulsion.
+To illustrate, consider the ambient occlusion-style rendering in
+Figure 17. Here, concave regions (e.g., the bumpy torus’s inner valley) never form visible silhouettes from any viewpoint. The color at
+any shading point depends solely on whether sampled shadow rays
+are occluded; in this case, the color depends only on self-occlusion.
+While optimizing visibility contours can reconstruct extruded regions, concave regions receive no gradients—their darker appearance stems from self-occlusion, not normal orientation in this scene.
+To recover these regions, the system must recognize geometric
+equivalences: moving the valley floor inward reduces incoming
+radiance equivalently to moving the valley’s ridge outward. Both
+operations lead to a motion of the boundary segment, which in turn
+affects the shading color.
+This is not a new concept. Reparameterization-based methods account for this by attaching ray origins in nested reparameterization,
+while silhouette segment sampling methods propagate boundary
+derivatives not only to the boundary point but also to the shading point. As shown in Appendix A, our many-worlds approach
+extends surface derivatives into space while preserving their values on the surface. However, this extension does not apply to the
+relative motion derivative because it originates from the fixed background surface 𝑆¯ rather than from the point of interaction. One
+18
+•
+Zhang et al.
+possible solution is to model the background surface as stochastic,
+similar to recent work on radiance field reconstruction [Zhang et al.
+2025]. We leave these extensions for future work. In this experiment, we instead propose a simple approximation to this derivative
+by propagating boundary derivatives also to the shading point. In
+practice, the relative motion derivative rarely affects optimization,
+except when the shading derivative is nearly zero—which is why
+we illustrate this concept using a uniform environmental lighting
+in Figure 17.
+Alternative pamameterization. The derivation in Section 3 discusses the propagation of derivatives to some parameterization of
+the extended parameter space. Our choice of parameterization is
+simple but unnecessarily restrictive.
+For instance, it should be possible to construct versions of this
+framework to model 𝜷 as a normal distribution rather than a single
+normal direction. This could accelerate convergence by allowing
+the optimizer to simultaneously explore a wider range of surface
+orientations. Upon surface extraction, the normal distribution could
+be interpreted as micro-scale surface roughness, which we leave for
+future work.
+Sampling strategy. A detail that must be addressed is how Equation 5 should be sampled in a Monte Carlo renderer. Since we don’t
+know the value of the radiance, a natural choice is to sample other
+terms proportional to their known contribution—in this case, drawing positions proportional to 𝛼 (𝑡). While this is a sensible choice for
+primal rendering, it leads to a chicken-and-egg problem during optimization. Regions with 𝛼 (x) ≈ 0 are essentially never sampled, but
+we must clearly visit them sometimes to even consider the possibility
+of placing a surface there.
+Recall the many-worlds derivative transport in Equation 6:
+∫ 𝑠
+
+¯
+𝜕𝜋 𝐿i (0) =
+𝜕𝜋 𝛼 (𝑡) [𝐿oS (𝑡) − 𝐿oS (𝑠)] + 𝛼 (𝑡) 𝜕𝜋 𝐿oS (𝑡) d𝑡 .
+0
+(i)
+(ii)
+Term (i) of this expression states that the derivative of occupancy
+¯
+along the ray is proportional to 𝐿oS (𝑡) − 𝐿oS (𝑠), which is an unknown
+quantity that must be estimated. Given that there are no remaining
+known factors that could be used to sample 𝑡, the best strategy for
+this derivative is to uniformly pick points along the ray.
+This isn’t a new discovery: Nimier-David et al. [2022] discuss the
+same issue in inverse volume rendering and address it by introducing
+generalizations of volume trackers that sample proportional to pure
+transmittance 𝑇 (𝑡) instead of the default extinction-weighted transmittance 𝜇 t (𝑡)𝑇 (𝑡). Many-worlds transport has no transmittance,
+so the solution ends up being even simpler: a uniform sampling
+strategy suffices.

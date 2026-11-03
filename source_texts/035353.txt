@@ -1,0 +1,136 @@
+Cached chunks stay full detail however far (RETAIN_RADIUS 40 blocks, horizontal only). Mid LOD beyond ~12 blocks: surface-only 4-tile heightfield coloured from top voxels; keep the horizon block mask covering them; then retention can gro...
+
+Simplify cached fine chunks far from the camera into a mid-detail surface · Issue #10 · aaronsb/dwarf-eye · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Simplify cached fine chunks far from the camera into a mid-detail surface #10
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Simplify cached fine chunks far from the camera into a mid-detail surface#10
+Copy link
+Labels
+enhancementNew feature or requestNew feature or requestperformanceSpeed, startup time, frame budgetSpeed, startup time, frame budgetrenderingMeshing, materials, lighting, skyMeshing, materials, lighting, sky
+Description
+aaronsb
+opened on Sep 8, 2026
+Issue body actions
+Cached chunks stay full detail however far (RETAIN_RADIUS 40 blocks, horizontal only). Mid LOD beyond ~12 blocks: surface-only 4-tile heightfield coloured from top voxels; keep the horizon block mask covering them; then retention can grow.
+Wrap task #10
+Reactions are currently unavailable
+Activity
+aaronsb
+added
+enhancementNew feature or requestNew feature or request
+performanceSpeed, startup time, frame budgetSpeed, startup time, frame budget
+renderingMeshing, materials, lighting, skyMeshing, materials, lighting, sky
+on Sep 8, 2026
+aaronsb commented on Sep 8, 2026
+aaronsb
+on Sep 8, 2026
+OwnerAuthor
+More actions
+Plan after walking a long way and back (12878 chunks held, 6233 rendered, 32.6 M triangles, 19 fps; ~5k triangles per chunk, mostly alpha-masked canopy voxels).
+Bands by distance from the camera per chunk column, with hysteresis:
+near (to ~12 blocks): current full detail;
+mid (to ~40): terrain as a one-vertex-per-tile heightfield coloured from the top voxel; trees re-rasterised at a quarter of the voxel resolution, greedy-merged, opaque leaves (no cutout prepass or overdraw); plants and tufts dropped;
+far (to the retention edge): four-tile heightfield with a canopy layer (surface raised by tree height, foliage colour where trees stand);
+beyond: the horizon.
+Instancing: at mid range drop the seed, so a tree is one of a few canonical crowns per species scaled to DF's height and radius; identical mesh+material entities batch in Bevy. The cache holds tiles, not meshes, so every band is re-meshed on demand from what is on disk.
+First step, cheapest and largest: canopy raster resolution and opaque leaves by distance, canopy chunks only. Measure triangles and fps at the same framing before and after.
+aaronsb commented on Sep 8, 2026
+aaronsb
+on Sep 8, 2026
+OwnerAuthor
+More actions
+Engine-side pieces to use rather than build: Bevy's GPU occlusion culling (OcclusionCulling on the camera with the DepthPrepass we already have; two-phase depth-pyramid test per mesh) and VisibilityRange per entity for the near/mid/far swap with dithered crossfade. Choose the band by projected tile size on screen (pixels per tile at that distance), not raw distance, the Nanite rule at chunk granularity. Quake-style precomputed visibility does not fit an open, growing world.
+aaronsb commented on Sep 8, 2026
+aaronsb
+on Sep 8, 2026
+OwnerAuthor
+More actions
+Tree LOD chain, chosen by projected size per tree or chunk: (1) full voxels, cutout leaves; (2) quarter-resolution voxels, opaque leaves (this issue's first step); (3) one canonical crown per species, a few dozen triangles, instanced (#31 builds it for the horizon; the fine bands reuse it); (4) a green box, twelve triangles, instanced; (5) nothing per tree: canopy colour and height baked into the coarse heightfield. Visibility ranges carry stages 1 to 4 as meshes on the same chunk or instance; stage 5 is the heightfield's own.
+aaronsb commented on Sep 8, 2026
+aaronsb
+on Sep 8, 2026
+OwnerAuthor
+More actions
+Stages 1 and 2 landed in 0812f98 (merge of 792bc93): near band = full voxels with cutout leaves, mid band = quarter-resolution opaque voxels merged into one mesh per chunk, swapped by VisibilityRange with the near edge N = h / (2 * 2 px * tan(fov/2)) * 0.25 tile (about 11 blocks at the user's window height), DWARF_EYE_LOD_NEAR override; GPU occlusion culling on the camera (DWARF_EYE_OCCLUSION=0 to disable). Measured from the air on a 3000-chunk forest at 720p: 24.5 M triangles drawn to 4.2 M; fps unchanged there because 720p is not geometry bound. Next: crown and box stages from #31's builders, then the mid terrain heightfield.
+aaronsb commented on Sep 8, 2026
+aaronsb
+on Sep 8, 2026
+OwnerAuthor
+More actions
+User measurement at their window size (the framing that ran at 19 fps with 32.6 M triangles before): 120+ fps with the near/mid bands on main 0812f98.
+aaronsb commented on Sep 8, 2026
+aaronsb
+on Sep 8, 2026
+OwnerAuthor
+More actions
+Half-resolution cutout band added in 37fee9e (merge of 8f2d55e): near 0..N full voxels cutout, mid N..2N half-resolution cutout with strands, far 2N.. quarter-resolution opaque. Transparency holds to about 13.6 blocks at 720p. Band edges are one map over BANDS.
+aaronsb commented on Sep 8, 2026
+aaronsb
+on Sep 8, 2026
+OwnerAuthor
+More actions
+Design (user): LOD as one detail scalar on the L-system rather than hand-built stages. detail in 0..1 maps to raster resolution (4..1 voxels/tile), grammar depth (full..trunk plus one or two crown clusters), leaf cluster count and porosity, with porosity compensated so mean colour and see-through fraction hold along the ramp. The band list becomes samples along the ramp with crossfades between neighbours; the bottom sample at 1 voxel/tile greedy-merged is the box crown, so the manual box builder (crown.rs) becomes a fallback or goes. Every sample is a cached mesh per tree (window) or per preset variant (horizon).
+aaronsb commented on Sep 8, 2026
+aaronsb
+on Sep 8, 2026
+OwnerAuthor
+More actions
+VRAM (user): a finer ramp costs resident meshes per band. Mitigation is residency by distance rather than fewer samples: build a chunk's band mesh lazily when the camera comes within that band's range plus a margin, evict it when the camera leaves (hysteresis), regenerate from the cached skeleton on return. The near band is ~5k triangles per tree against ~1k for the half band and a few hundred for the rest, so far chunks holding only their coarse bands is most of the saving. Horizon variants are per preset and small.
+aaronsb commented on Sep 9, 2026
+aaronsb
+on Sep 9, 2026
+OwnerAuthor
+More actions
+Hand-off softening landed in 65e3f7b (merge of efc0eba): bands near 4 / close 3 / mid 2 / far 1 voxels per tile, crossfades log-spaced across 45% of each gap (28 tiles at the first hand-off, 80 at the last); every coarser cut keeps wood at the near band's width, which is what made coarse crowns darker (bark share 1.4% to 13%), so the mean colour now matches within lighting; far band 18% fewer triangles. Held triangles up ~40% for the extra band, drawn unchanged.
+aaronsb commented on Sep 9, 2026
+aaronsb
+on Sep 9, 2026
+OwnerAuthor
+More actions
+Instancing by type (user question): at full detail it saves worker CPU, upload and VRAM, not frame time; the GPU cost is per triangle and pixel and near trees are already merged per chunk. Frame time there is cutout overdraw and triangle count. Instancing pays from the 1-voxel band outward, where seed variation is invisible: replace per-tree rasters with a few dozen variants per species, instanced and clipped to each tree's DF bounds, cutting held triangles and meshing time for the window's far band as the horizon already does.
+aaronsb commented on Sep 9, 2026
+aaronsb
+on Sep 9, 2026
+OwnerAuthor
+More actions
+Requirement (user): detail is a function of camera distance only, never of data source; the window boundary must not be visible in tree detail. Horizon instances take the same chain as window trees (4/3/2/1 voxels per tile, crown, box) with the same edges and crossfades, per-preset seeded variants at each voxel stage, instanced. GROWN_REACH goes away. In flight with the chain refactor.
+aaronsb commented on Sep 9, 2026
+aaronsb
+on Sep 9, 2026
+OwnerAuthor
+More actions
+Entity cost (measured on the chain merge before batching): 88k horizon entities gave 5 fps at 4.5 M triangles and 16 fps at 240 k, so the per-entity CPU work (visibility ranges, transform propagation, extraction) was the bound, not triangles. In flight: one mesh per region tile per stage. Later, if instance counts grow (ground cover): true GPU instancing, one entity per stage with an instance buffer, a compute shader doing frustum, occlusion and distance tests and writing an indirect draw.
+aaronsb commented on Sep 9, 2026
+aaronsb
+on Sep 9, 2026
+OwnerAuthor
+More actions
+Next session (user): with instancing landed (#34) the LOD can move back out. Experiments in order: DWARF_EYE_LEAF_PIXELS=2 (and 1.5) with the profiler (#35) on to see where the frame goes; the window's 1-voxel band and then its 2-voxel band as instanced variants; blob shadows instanced; the depth-pyramid occlusion test in the cull. Measure each at the two standard framings.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or requestperformanceSpeed, startup time, frame budgetSpeed, startup time, frame budgetrenderingMeshing, materials, lighting, skyMeshing, materials, lighting, sky
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

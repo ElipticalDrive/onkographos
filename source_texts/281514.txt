@@ -1,0 +1,165 @@
+Playstation 2 Static Recompiler & Runtime Tool to make native PC ports - feat(hle): implement sceVu0 macro-mode matrix/vector math library by smmathews · Pull Request #183 · ran-j/PS2Recomp
+
+feat(hle): implement sceVu0 macro-mode matrix/vector math library by smmathews · Pull Request #183 · ran-j/PS2Recomp · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+smmathews
+commented
+Jul 24, 2026
+Copy link
+Copy Markdown
+Contributor
+Problem
+Kernel/Stubs/VU.cpp declares the full sceVu0 macro-mode math surface, but a
+block of the matrix/geometry/clip/lighting entry points are still TODO_NAMED
+stubs. A TODO_NAMED stub aborts the call without ever writing the caller's
+output operand -- it throws std::runtime_error on its first calls, and only
+once its per-name warning budget is exhausted does it suppress to returning -1.
+Any title that links the out-of-line
+libvu0 macro-mode library therefore receives silent garbage for camera
+matrices, model transforms, perspective projection, clipping, and lighting:
+the destination pointer is never written, and the caller feeds stale bytes
+into the transform/GS pipeline. A single unimplemented foundational routine
+(CameraMatrix, RotTransPers, ...) can break an entire scene.
+Change
+Replace the stubbed bodies with a self-contained host-side implementation of
+the documented sceVu0 contract, using the argument/return conventions the
+already-implemented sceVu0 functions in the same file establish: vector/matrix
+operands as guest pointers in the integer arg registers (a0 = destination),
+scalar floats in ctx->f[12]+, results via setReturnS32/output-operand write,
+all through the existing getMemPtr/getConstMemPtr helpers. No new runtime
+state, no threading, no new headers, no ABI or signature change, no VU.h
+change, no interaction with the recompiler or scheduler. Small shared helpers
+(vec/mat read-write, 4x4 multiply, identity/axis-rotation builders, a
+shared perspective-transform core) live in an anonymous namespace, mirroring
+the file's existing structure.
+Functions implemented: MulMatrix, TransMatrix, RotMatrix, InversMatrix,
+CameraMatrix, NormalLightMatrix, LightColorMatrix, DropShadowMatrix,
+ViewScreenMatrix, RotTransPers, RotTransPersN, ClipScreen, ClipScreen3,
+ClipAll, MulVector, ScaleVectorXYZ, DivVector, DivVectorXYZ, InterVector,
+InterVectorXYZ, ClampVector, ecossin.
+InterVector/InterVectorXYZ interpolate as out = at + b(1-t) (the t weight applies to the first
+operand, matching the reference libvu0 behavior these routines mirror); happy to adjust the operand
+convention if the maintainer has a preferred lerp direction.
+Confidence tiers
+High-confidence core (documented, unambiguous math, fully unit-tested):
+MulMatrix, MulVector, TransMatrix, InversMatrix, CameraMatrix, RotMatrix,
+DivVector, DivVectorXYZ, InterVector, InterVectorXYZ, ClampVector,
+ScaleVectorXYZ, LightColorMatrix, NormalLightMatrix, RotTransPers,
+RotTransPersN, ecossin.
+Functional-contract tier: ClipScreen/ClipScreen3/ClipAll provide the
+"nonzero => offscreen" guard-band contract callers depend on, not a bit-exact
+reproduction of the hardware COP2 sticky clip-flag register; ViewScreenMatrix
+handles the near/far reciprocal-difference parameters by formula shape;
+DropShadowMatrix reconstructs the two documented drop-shadow modes. These are
+correct-by-construction for the common call patterns but do not claim
+hardware clip-flag fidelity. If you prefer a strictly-documented-only first
+cut, this tier can be dropped and landed separately.
+ViewScreenMatrix takes nine scalar float parameters: eight in f12..f19 and the ninth as the first
+stack-passed argument at 0($sp), consistent with the eight-FP-argument-register (n32/EABI) convention
+the EE toolchain uses; if your target ABI reserves a GPR home/save area, that single read shifts by
+its size.
+How to verify (no game needed)
+ps2xTest/src/ps2_vu_tests.cpp exercises each routine against its documented
+formula in isolation (build a scratch RDRAM region, set arg registers/floats,
+call the function, compare the destination within a float epsilon):
+```
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_FLAGS=-msse4.1 -DCMAKE_CXX_FLAGS=-msse4.1
+cmake --build build --config Release
+./build/ps2xTest/ps2x_tests
+```
+Representative checks: M . InversMatrix(M) ~ I; MulMatrix(I,A) ~ A and
+MulMatrix(A,I) ~ A; RotMatrix about a single axis matches the existing
+RotMatrixX/Y/Z; RotTransPers equals ApplyMatrix + perspective divide +
+fixed-point convert; the component-wise vector ops against their scalar
+definitions.
+Scope
+Implements the out-of-line libvu0 function ABI only. Inline/pure macro-mode
+COP2 emission is handled by the recompiler's COP2 path and is out of scope.
+No claim about any specific title's end-to-end rendering.
+feat(hle): implement sceVu0 macro-mode matrix/vector math library
+…
+d51abec
+```
+Fill the remaining TODO_NAMED bodies in Kernel/Stubs/VU.cpp so the
+out-of-line libvu0 macro-mode routines write their documented results to
+the caller's output operand instead of leaving guest memory untouched (the
+TODO_NAMED stub throws, or returns -1 once its per-name warning budget is
+spent, and never writes the destination).
+
+Implements the matrix/geometry/clip/lighting entry points:
+CameraMatrix, InversMatrix, MulMatrix, TransMatrix, RotMatrix,
+NormalLightMatrix, LightColorMatrix, DropShadowMatrix, ViewScreenMatrix,
+RotTransPers/RotTransPersN, ClipScreen/ClipScreen3/ClipAll, MulVector,
+ScaleVectorXYZ, DivVector/DivVectorXYZ, InterVector/InterVectorXYZ,
+ClampVector, ecossin. Pure input->output arithmetic over guest memory
+through the existing getMemPtr/getConstMemPtr and getRegU32/ctx->f[]
+accessors already used by the implemented sceVu0 functions in the same
+file. No new runtime state, no signature changes, no VU.h changes.
+
+The clip and view/shadow routines provide the functional contract callers
+rely on (nonzero => offscreen; projection by formula shape) rather than a
+bit-exact reproduction of the COP2 sticky clip-flag register.
+
+Adds ps2xTest/src/ps2_vu_tests.cpp covering each routine against its
+documented formula.
+```
+ran-j
+commented
+Jul 25, 2026
+Copy link
+Copy Markdown
+Owner
+Very interesting on this one, can we use a library called glm ? This will give us smid power without additional workm what do you think?
+smmathews
+commented
+Jul 26, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+So GLM would wrap maybe 5 of the 22 (the component-wise vector ops + Normalize) while the other ~17 stay as-is, and each of those 5 picks up a glm↔guest-float conversion boundary for no measured gain.
+I'd suggest we stick with the tested scalar version now, and if we ever profile the out-of-line path as hot, drop glm::aligned_* in behind the existing read/compute/write wrappers for just those component ops, keeping the semantic ones (Invers/Camera/RotTransPers/clip/light) hand-written.
+I'll try some prototyping and benchmarking to see if I'm wrong.
+smmathews
+commented
+Jul 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+Did some benchmarks: no measurable win, since these are out-of-line setup calls with no real volume to them. It wouldn't simplify the code either: most of these ops have no GLM equivalent, the few that do would just gain conversion glue, and sceVu0's row-vector convention vs GLM's column-major means every matrix op would need an operand-flip wrapper to stay faithful, so I'd rather avoid the dependency.
+smmathews
+marked this pull request as ready for review
+July 26, 2026 17:59
+Hide details
+View details
+ran-j
+merged commit 6970f3a
+into
+ran-j:main
+Jul 28, 2026
+3 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

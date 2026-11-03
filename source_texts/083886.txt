@@ -1,0 +1,155 @@
+Faster conversion of Point Cloud to Occupancy Grid and vice versa Open3D has implemented the voxelization of point clouds. Since Open3D has CUDA bindings, this would speed up converting point clouds to voxel grids. Please refer to Open3D...
+
+Faster conversion of Point Cloud to Occupancy Grid and vice versa · Issue #1 · PW22-SBN-01/kitti_iterator · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Faster conversion of Point Cloud to Occupancy Grid and vice versa #1
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Faster conversion of Point Cloud to Occupancy Grid and vice versa#1
+Copy link
+Assignees
+Description
+AdityaNG
+opened on Oct 31, 2022
+Issue body actions
+Faster conversion of Point Cloud to Occupancy Grid and vice versa
+Open3D has implemented the voxelization of point clouds. Since Open3D has CUDA bindings, this would speed up converting point clouds to voxel grids.
+Please refer to Open3D Voxelization (Occupancy Grid) from Point Cloud
+It is important to note that not all points in the Velodyne point cloud should be used to generate the grid. Only the points in the FOV of the camera must be used. The function transform_points_to_occupancy_grid implements this filter. We must see how we can run this filter in parallel or offload the logic.
+kitti_iterator/kitti_iterator/kitti_raw_iterator.py
+Lines 265 to 346
+in
+e89c5ec
+def transform_points_to_occupancy_grid(self, velodyine_points):
+occupancy_grid = np.zeros(self.occupancy_shape, dtype=np.float32)
+occupancy_mask_2d = np.zeros(self.occupancy_mask_2d_shape, dtype=np.uint8)
+x, y, w, h = self.roi_02
+P_rect = self.calib_cam_to_cam['P_rect_02'].reshape(3, 4)[:3,:3]
+# ans, color = velo3d_2_camera2d_points(velodyine_points, self.R, self.T, P_rect, v_fov=(-24.9, 2.0), h_fov=(-45,45))
+v_fov=(-24.9, 2.0)
+h_fov=(-45,45)
+velodyine_points, c_ = velo_points_filter(velodyine_points, v_fov, h_fov)
+velodyine_points_orig = velodyine_points.copy()
+velodyine_points_camera = []
+RT_ = np.concatenate((self.R, self.T),axis = 1)
+# convert velodyne coordinates(X_v, Y_v, Z_v) to camera coordinates(X_c, Y_c, Z_c)
+for i in range(velodyine_points.shape[1]):
+velodyine_points[:3,i] = np.matmul(RT_, velodyine_points[:,i])
+velodyine_points = np.delete(velodyine_points, 3, axis=0)
+image_points = velodyine_points.copy()
+# print(image_points.shape, velodyine_points.shape)
+# convert camera coordinates(X_c, Y_c, Z_c) image(pixel) coordinates(x,y)
+for i in range(image_points.shape[1]):
+image_points[:,i] = np.matmul(P_rect, image_points[:,i])
+image_points = image_points[::]/image_points[::][2]
+image_points = np.delete(image_points, 2, axis=0)
+# print(image_points.shape, velodyine_points.shape)
+for index in range(image_points.shape[1]):
+img_x, img_y = image_points[:, index]
+x, y, z = velodyine_points[:, index]
+# x, y, z = x, z, y # Half
+# x, y, z = y, x, z # N
+# x, y, z = y, z, x # N
+x, y, z = z, x, -y # Inverted
+# x, y, z = z, y, x
+xv, yv, zv = velodyine_points_orig[:3, index]
+i, j, k = [
+# int((p[0]*self.occ_x//2)//self.grid_x + self.occ_x//2),
+int((x*self.occ_x//2)//self.grid_x)*2,
+int((y*self.occ_y//2)//self.grid_y + self.occ_y//2),
+# int((p[1]*self.occ_y//2)//self.grid_y),
+int((z*self.occ_z//2)//self.grid_z + self.occ_z//2)
+]
+# if (
+# 0 < i < self.occupancy_shape[0] and
+# 0 < j < self.occupancy_shape[1] and
+# 0 < k < self.occupancy_shape[2]
+# ):
+if (
+(0 <= img_x < w and 0 <= img_y < h) and
+0 < i < self.occupancy_shape[0] and
+0 < j < self.occupancy_shape[1] and
+0 < k < self.occupancy_shape[2]
+# 0 < xv < self.grid_x and
+# -self.grid_y < yv < self.grid_y and
+# -self.grid_z < zv < self.grid_z
+):
+velodyine_points_camera.append((x,y,z))
+occupancy_grid[i,j,k] = 1.0
+# occupancy_mask_2d[i,j] = int(min(255, 255*max(0, (k-6)/(15-6))))
+occupancy_mask_2d[i,j] = max(int(min(255, 255*max(0, (k-6)/(15-6)))), occupancy_mask_2d[i,j])
+# velodyine_points_camera = []
+# for index in range(velodyine_points.shape[1]):
+# velodyine_points_camera.append(velodyine_points[:,index])
+velodyine_points_camera = np.array(velodyine_points_camera, dtype=np.float32)
+return {
+'occupancy_grid': occupancy_grid,
+'occupancy_mask_2d': occupancy_mask_2d,
+'velodyine_points_camera': velodyine_points_camera
+}
+Not sure if there is an existing implementation of the Grid to Point Cloud conversation (this conversion is required to render the occupancy grid). I have implemented a version of this in python, do look into the effectiveness and how we might optimize it further.
+kitti_iterator/kitti_iterator/kitti_raw_iterator.py
+Lines 207 to 235
+in
+e89c5ec
+def transform_occupancy_grid_to_points(self, occupancy_grid, threshold=0.5, device=device, skip=3):
+occupancy_grid = occupancy_grid.squeeze()
+# occupancy_grid = torch.tensor(occupancy_grid, device=device)
+def f(xi):
+i, j, k = xi
+x,y,z = [
+(i) * self.grid_x / (self.occ_x/2),
+(j - self.occ_y/2) * self.grid_y / (self.occ_y/2),
+(k - self.occ_z/2) * self.grid_z / (self.occ_z/2)
+]
+if occupancy_grid[i,j,k] > threshold:
+return (x,y,z)
+return (0,0,0)
+# np.array([f(xi) for xi in x])
+final_points = np.array([f(xi) for xi in itertools.product(
+range(0, occupancy_grid.shape[0], skip),
+range(0, occupancy_grid.shape[1], skip),
+range(0, occupancy_grid.shape[2], skip)
+)])
+# final_points = np.fromfunction(lambda xi: f(xi), np.indices(occupancy_grid.shape))
+# final_points = final_points[np.logical_not(
+# np.logical_and(final_points[:,0] == 0, final_points[:,1] == 0, final_points[:,2] == 0,)
+# )]
+# final_points = final_points.cpu().detach().numpy()
+final_points = np.array(final_points, dtype=np.float32)
+return final_points
+Reactions are currently unavailable
+Activity
+AdityaNG
+assigned
+Dhruval360
+on Oct 31, 2022
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+Dhruval360
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

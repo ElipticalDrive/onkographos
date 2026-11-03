@@ -1,0 +1,1042 @@
+DPPE: Dense Pose Estimation in a Plenoxels Environment using Gradient Approximation
+arXiv:2403.10773v1 [cs.RO] 16 Mar 2024
+Christopher Kolios1 , Yeganeh Bahoo1 , and Sajad Saeedi1
+Abstract— We present DPPE, a dense pose estimation algorithm that functions over a Plenoxels environment. Recent
+advances in neural radiance field techniques have shown that it
+is a powerful tool for environment representation. More recent
+neural rendering algorithms have significantly improved both
+training duration and rendering speed. Plenoxels introduced a
+fully-differentiable radiance field technique that uses Plenoptic
+volume elements contained in voxels for rendering, offering
+reduced training times and better rendering accuracy, while
+also eliminating the neural net component. In this work,
+we introduce a 6-DoF monocular RGB-only pose estimation
+procedure for Plenoxels, which seeks to recover the ground
+truth camera pose after a perturbation. We employ a variation
+on classical template matching techniques, using stochastic
+gradient descent to optimize the pose by minimizing errors
+in re-rendering. In particular, we examine an approach that
+takes advantage of the rapid rendering speed of Plenoxels to
+numerically approximate part of the pose gradient, using a
+central differencing technique. We show that such methods are
+effective in pose estimation. Finally, we perform ablations over
+key components of the problem space, with a particular focus
+on image subsampling and Plenoxel grid resolution.
+Project website: https://sites.google.com/view/dppe
+I. INTRODUCTION
+Camera pose estimation involves the prediction of the
+pose of a camera in its environment, with applications
+ranging from robotics to virtual reality headsets [1]. Recent
+developments in pose estimation involve techniques such
+as analysis-by-synthesis [2], and instance-level object pose
+estimation [3], which use a 3D model for training. These
+methods perform well, but the requirement of a detailed 3D
+model limits their applicability for general scenes.
+In the past few years, Neural Radiance Fields (NeRFs) [4]
+have been an active area of interest in computer vision. Given
+a series of images of an object from a variety of perspectives
+as input, once trained, a NeRF can output a rendering of the
+object from a previously-unseen view. Instead of requiring a
+detailed 3D model of an environment, analysis-by-synthesisbased pose estimation can use a set of images to train a
+NeRF, and sample from that trained NeRF. This greatly
+improves the generalizability of such methods. Recent works
+such as iNeRF [5] and BARF [6] have applied analysis-bysynthesis and template matching-based pose estimation to
+NeRF scenes, with strong performance. However, the long
+training time and slow image rendering speed of classical
+NeRF hampers the performance of these methods.
+Several NeRF-based works have improved upon these
+limitations. Some of the most influential among these works
+include Plenoxels [7], Instant Neural Graphics Primitives
+(Instant NGP) [8], and 3D Gaussian Splatting [9]. While
+1 Toronto Metropolitan University, Toronto, Canada
+... emails: {ckolios, bahoo, s.saeedi}@torontomu.ca
+Fig. 1. Qualitative performance of DPPE on a pose from the Lego scene,
+rendered from the current pose estimate (opaque) with the ground-truth
+image (transparent). DPPE starts with the initial perturbed pose (top left),
+then as it runs the pose estimate gets closer to the ground truth (left to right,
+top to bottom).
+each method uses a different mechanism, they all significantly reduce training time, as well as the time it takes to
+render novel views. In particular, Plenoxels discretizes NeRF,
+storing a voxel grid of spherical harmonic coefficients and
+densities, which can be trilinearly interpolated to represent
+a continuous scene. Plenoxels grid “training” is over 100×
+faster than that of NeRF, providing more photorealistic scene
+representations, and quicker rendering as well. Inspired by
+iNeRF [5], and BARF [6], in this paper, we explore the extension of classical pose estimation techniques to a Plenoxels
+environment, which we present as Dense Pose estimation in
+a Plenoxels Environment (DPPE) (See Fig. 1). While iNeRF
+is successful in its pose estimation, the slow rendering time
+of NeRF means that only a subset of rays from each image
+can be rendered at each pose estimation step, for termination
+in a reasonable time frame. In contrast, pose estimation
+algorithms operating over a Plenoxels grid can re-render the
+full image at each step, while still maintaining reasonable
+runtimes. Plenoxels scene rendering is fast enough that
+more than 6 image renders can be performed in the time
+that it would take a single NeRF [4] render. With this in
+mind, traditional approaches from computer graphics that use
+central differencing to estimate image gradients [10], [11]
+can be run over all 6 camera DoF. This image gradient can
+be used in combination with template matching [6], [12] to
+perform pose estimation.
+In our approach, the photometric error between the rendered image and the ground-truth image is computed for each
+epoch and used with the image gradient approximation to
+take the camera pose “step” that minimizes that error. This iterative process is repeated until the error is sufficiently small
+or the epoch max is reached. Similar to NeRF, Plenoxels
+allows for a subset of image rays to be rendered. Following
+iNeRF, we perform ablations on the effect of random ray
+subsampling on pose estimation performance and algorithm
+runtime, and demonstrate the tradeoffs in processing the
+entire image versus a subset of the image. We also examine
+the effect of the Plenoxels grid resolution in this context.
+To summarize, this work makes the following contributions: (1) We show that DPPE can perform 6 DoF camera
+pose estimation, using only a monocular RGB image, a pretrained Plenoxels grid, and a perturbed pose as input. (2) We
+provide comparisons to existing work, and quantitatively and
+qualitatively analyze both the advantages and limitations of
+the proposed method, and (3) We evaluate the effectiveness
+of DPPE on standard test scenes, performing ablations on key
+algorithm characteristics such as grid resolution, and percent
+of image sampled.
+This paper is organized as follows: Sec. II reviews relevant
+literature. Sec. III presents the background. The proposed
+method is detailed in Sec. IV. Experimental results are
+presented in Sec. V. Finally, Sec. VI concludes the paper.
+II. L ITERATURE R EVIEW
+Neural Rendering. NeRF [4] uses a neural network to
+represent a scene in its entirety. To accomplish this, NeRF
+uses a multilayer perceptron (MLP) network, where the
+function to be optimized is one that takes in a single continuous 5D coordinate (consisting of spatial location (x, y, z)
+and viewing direction (θ, ϕ)), and the output is volume
+density and view-dependent emitted radiance (colour) at that
+location. The weights and biases of the NeRF MLP are able
+to represent the entire scene, after training on images from
+that scene. As input, NeRF uses images of an object or scene
+from a variety of known perspectives. Techniques such as
+positional encoding [8], [13] and two-pass rendering have
+been used to improve results. Many works have focused on
+improving upon aspects of NeRF, from render time [7]–[9],
+to scale [14], [15] , to extension to video [16].
+One of the more unique algorithms that improved upon
+NeRF was Plenoxels [7], which uses a 3D voxel grid of
+Plenoptic volume elements to represent an environment. The
+corner of each grid voxel contains a set of spherical harmonic coefficients and densities. Using a slightly-modified
+rendering algorithm, a ray is cast into the scene, with the
+resulting colour of the ray being dependent on the accumulation of colours from points sampled through the voxel
+grid. The spherical harmonics are trilinearly interpolated
+for raycasts. This process is fully-differentiable end-to-end,
+allowing for efficient optimization. Given input images as
+well as their respective camera poses, photometric loss is
+computed along each ray and used to optimize the spherical
+harmonic coefficients and densities. Very recent works such
+as 3D Gaussian Splatting [9] use spherical harmonics in their
+scene representation as well, with the addition of Gaussians.
+Classical Pose Estimation. Pose estimation is a classic
+and long-studied problem in computer vision. Traditional
+pose estimation techniques typically fall into one of two
+categories: sparse, or dense. Sparse methods look to form
+correspondences between sparse sets of landmarks representing key features within an environment. These key features
+are often image textural features, such as SIFT or ORB,
+which represent the variations of contrast within image
+patches and are typically stored in sparse point clouds. The
+formulation of these correspondences to recover camera pose
+is called the Perspective-n-Point problem [17], for which a
+variety of common solutions exist, such as RANSAC PnP.
+One of the most widely-used Structure from Motion (SfM)
+algorithms, COLMAP [18], uses PnP as part of its pipeline.
+Mono-SLAM [19], ORB-SLAM3 [20], and other SLAM
+algorithms [21] also use sparse features as part of their
+localization procedure. Dense pose estimation approaches,
+on the other hand, look to optimize pose by matching within
+complete scene representations. Classical approaches to this
+problem include template matching, and the Lucas-Kanade
+Method [12]. Some SLAM algorithms, such as KinectFusion [22], or ∇-SLAM [23] use such representations. Finally,
+researchers have recently been investigating the use of deep
+learning for pose estimation. For example, convolutional
+neural networks have been used to estimate optical flow for
+the purpose of dense pose estimation, with good results [24].
+Neural Pose Estimation. Very recently, NeRF-based
+scenes have been used as the environment on which pose
+estimation is performed. Recent radiance field-based methods for pose estimation can involve using monocular RGB
+camera data [5], [6], [19], [25]–[27], RGB + Depth (RGBD) data [20], [22], [28]–[30], or even LiDAR [31]. The
+most widely applicable among these methods are those that
+use a singular RGB camera, due to the low cost and ubiquity of regular cameras. There are sparse feature-matching
+approaches that have been used with neural environments,
+such as Orbeez-SLAM [32], as well as dense template
+matching approaches, such as BARF [6]. Notable works in
+the context of SLAM + NeRF include iMAP [28], NICESLAM [29], and NeRF-SLAM [33]. While these SLAM
+works are effective at localization, with the exception of
+NeRF-SLAM, they rely on RGB-D data, which is not always
+available. Many recent works that focus particularly on pose
+estimation use an analysis-by-synthesis approach to take
+advantage of the useful re-rendering capability of NeRFs.
+These works include iNeRF [5], NeRF−− [25], BARF [6],
+and Parallel Inversion of NeRFs [26] (the latter using Instant
+NGP for pose estimation).
+The general framework of such algorithms involves using
+a pre-trained neural scene [5], [26], or doing on-the-fly
+training [6], [25] of a NeRF. Given a pose estimate, a subset
+of rays from the image plane is cast into the scene and the
+network is evaluated, resulting in a set of rendered pixels.
+These rendered pixels on the image plane are then compared
+with the observed pixels from the ground-truth image, and
+a loss term is calculated. This loss is then backpropagated,
+and used to update the current pose estimate. This process is
+Plenoxels
+, πgt
+Plenoxel
+Grid
+×100
+Plenoxels Training
+Pose Estimation*
+, πgt
+Plenoxel Grid
+J = (Igt-Ii)(∂I/∂π)
+πi+1 = πi - αJ
+Iy+1
+Iy-1
+Pose Perturbation*
+×6
+__
+__
+~ ∂I
+∂y ×6
+πi
+, πfinal
+πi+1
+Scene render from πfinal
+Repeat while: ||Igt - Ii||22 > ε, # epochs < # epochs max
+πi = πgt + Δπ
+πi, πgt
+Scene render from πgt
+Δπ = [x, y, z, ω1, ω2, ω3]
+Scene render from
+πgt (transparent),
+and πi (opaque)
+Fig. 2. An illustration of the analysis pipeline. A star indicates a significant contribution of this work towards the module. First, a Plenoxels grid is trained
+for a scene. Then, a ground-truth pose is perturbed, with the extent of perturbation depending on the test being run. The trained Plenoxels grid, ground-truth
+pose, and perturbed pose are passed into the pose estimation process, which outputs the final pose after optimization. The scene can be rendered from any
+pose, to visualize camera position and orientation.
+repeated until the image from the estimate matches with the
+ground truth image, or the algorithm times out. Each work
+contributed something novel to the process - iNeRF [5] investigated the influence of different ray sampling techniques,
+such as random sampling and interest-region sampling, and
+Parallel Inversion of NeRFs [26] used a Monte-Carlo-based
+sampling to help overcome the problem of local minima.
+While there has been plenty of work on NeRF, investigation
+on Plenoxels is very limited - only a single work has
+investigated this [30].
+Teigen et al. introduced a method that performs RGB-D
+SLAM on an environment, using Plenoxels for both mapping
+and tracking [30]. Their tracking formulation is similar to
+that of BARF [6], using an analytic derivative from the trilinear interpolation to minimize photometric loss as a function
+of pose. Our work approaches pose estimation differently
+in two key areas. Firstly, we solely use monocular RGB
+data, whereas [30] requires depth data for their algorithm
+to function. While using depth data for mapping clearly can
+improve performance and assist in regions where there is
+little colour gradient information, it reduces the applicability and accessibility of the approach - depth cameras are
+not always available. Secondly, our work uses a numerical
+approximation of the derivative for the image gradient, as
+opposed to the analytically-derived gradient in [30]. While
+the analytical derivative can be intimately integrated with
+the Plenoxels CUDA code for performance speedup, the
+result is that the method is entangled with the specific
+environment representation (Plenoxels). In contrast, DPPE,
+while here implemented over a Plenoxels grid, could in
+theory be used in any kind of setting in which re-renderings
+are not prohibitively expensive, as the numerical gradient
+approximation technique makes no assumptions regarding
+the underlying scene representation.
+III. BACKGROUND
+Plenoxels. From Plenoxels [7], the colour Ĉ of a rendered
+ray r is given by:
+Ĉ(r) =
+N
+X
+Ti (1 − exp(−σi δi ))ci ,
+(1)
+i=1
+such that σi indicates the opacity of sample i out of N
+total samples, δi indicates the distance between sample i and
+sample i+1, ci indicates the colour of sample i as determined
+by trilinear interpolation of the 8 nearest voxels, and:
+Ti = exp(−
+i−1
+X
+σj δ j ) ,
+(2)
+j=1
+denotes how much light is transmitted through ray r to
+sample i (as opposed to being contributed by preceding
+samples). See: [7], [34] for more details.
+BARF’s Formulation. BARF [6] seeks to optimize both
+camera pose and NeRF weights via a bundle-adjustment
+process. They set up their minimization problem as follows:
+min
+π1 ,...πm ,θ
+M X
+X
+i=1
+|| ˆ
+I(p = (u, v), πi , θ) − I(p)||22 ,
+(3)
+p
+where π1 , ...πm are the series of camera poses, θ is the NeRF
+network weights, M is the number of images, p = (u, v) is
+a vector of pixels in the image, and I and Iˆ are the ground
+truth and scene-rendered images, respectively.
+IV. METHODOLOGY
+In this section, pose representation, the problem setup,
+and rendering are explained. Following this, the proposed
+pose optimization technique is presented. Fig. 2 shows the
+outline of the proposed method. A Plenoxels grid is trained
+in advance, from which a pose is selected. This pose is then
+passed in to DPPE after being perturbed, with the goal of
+recovering that original pose.
+A. Camera Pose Representation
+Camera pose can be represented as some π ∈ SE(3)
+such that it can be decomposed into: π = [πR |πt ] where
+πR ∈ SO(3) is the camera rotation, and πt ∈ R3 is
+the camera translation. SE(3) is the Special Euclidean Lie
+Group, and SO(3) is the Special Orthogonal Lie Group.
+They are ultimately 4 × 4 and 3 × 3 matrices which represent
+the differentiable manifolds of 6 degrees of freedom (rotation
++ translation) or 3 degrees of freedom (rotation only) for
+cameras, respectively. The tangent plane at the identity
+element for these manifolds is called the Lie Algebra, which
+has an associated Cartesian representation. For SO(3), the
+Cartesian representation can be parameterized as:
+3
+ω = (ω1 , ω2 , ω3 ) ∈ R ,
+(4)
+which represents the 3 degrees of freedom of rotation. The
+Lie Algebra will be:
+
+
+0
+−ω3 ω2
+0
+−ω1  = θu ,
+ωˆ= [ω]× =  ω3
+(5)
+−ω2 ω1
+0
+such that u = (x, y, z) is a unit vector representing an
+axis of rotation, and θ is an angle with which to rotate
+about that axis. Hat ( ˆ ) and vee (∨ ) will move a rotation
+from the Cartesian to Lie Algebra representation, and the
+Lie Algebra to Cartesian representation, respectively [35].
+For convenience, we represent our camera poses using a
+full SE(3) camera-to-world matrix, and convert the rotation
+matrix component to axis-angle or Cartesian representation
+via hat and vee as needed for pose optimization steps.
+B. Problem Setup
+Similar to iNeRF [5] and part of BARF [6], our goal is
+to invert a scene representation to recover the ground-truth
+camera pose. In the case of DPPE, the scene is represented
+by a pre-trained Plenoxels grid, which can be rendered from
+via Eq. (1). Therefore, the available inputs are the pre-trained
+Plenoxels grid, the image of a scene Igt from a groundtruth pose πgt , and an initial pose estimate πi , which is a
+camera pose obtained by perturbing the ground truth pose.
+The goal is to output a camera pose πf inal that is as close
+to πgt as possible, via the minimization of photometric error
+between the rendered image Iˆ from the camera pose estimate
+πi , and the ground truth image Igt , for a set of pixels p. The
+optimization problem we are trying to solve is therefore:
+X
+πf inal = min
+|| ˆ
+I(p, πi ) − Igt (p)||22 .
+(6)
+πi
+p
+C. Rendering
+The full image can be used, in which case |p| = W × H,
+where W and H are the width and the height of the image,
+respectively, or a subset of pixels from the image can be used,
+such that p ⊂ I. As image pixels are formed by projecting
+rays from the camera onto an image plane and rendering
+from a scene, the ray associated with a pixel p with image
+coordinates (u, v), assuming a camera pose π = [πR |πt ], is
+given by: r = or + hdr . Here, h ∈ R is the length of the
+ray, or = oπ = πt is the origin of the ray, which starts at the
+camera’s origin, and,
+ u− W 
+2
+ f H
+dr = πR − v− 2  ,
+f
+−1
+(7)
+gives the direction of the ray, assuming a camera focal length
+f . Thus, the rendering can be obtained by casting the rays
+r ∀ pixels p into the Plenoxels grid, such that the rendered
+pixels ˆ
+I(p, πi ) = Ĉ(r), by Eq. (1).
+D. Optimization
+To find the π that minimizes the photometric error between
+the rendered and ground-truth images (Eq. (6)), optimization must be done. Here, we adopt a similar optimization
+technique to that of BARF [6] and classical template matching [12], using the “steepest descent image” defined by:
+J(p, π) =
+N
+X
+∂ Ĉ(V1 , ...VN ) ∂Vi (π) ∂W (xi ; π)
+,
+∂Vi
+∂xi (π)
+∂π
+i=1
+(8)
+such that Vi = [σi ; ci ] is a voxel containing a density σ
+and colour c, xi is a spatial location, and W is a transformation from camera view space to 3D world coordinates,
+for N pixels. Ultimately, this ∂C
+∂π represents the change in a
+rendered pixel colour given a change in camera pose. While
+this could be analytically derived (see [30]), this would tie
+the pose estimation technique to Plenoxels specifically.
+For a more generalizable pose optimization, a numerical
+approximation of Eq. (8) can be determined by comparing
+the change in image from πc ± 1 for all 6 camera DoF
+[x, y, z, ω1 , ω2 , ω3 ], and estimating the gradient via central
+∂C
+≈ [C(πx+1 ) + C(πx−1 )]/2.
+differencing. For example, ∂π
+x
+This method of image gradient estimation is commonly
+used in computer graphics applications [10]. As Plenoxels
+rendering uses CUDA, this re-rendering is faster than other
+NeRF-based approaches. Independent of how Eq. (8) is
+computed, it can be used with stochastic gradient descent
+to compute a pose update step via:
+πc ← πc + α(J(r) · ∆I(r)) ,
+Algorithm 1 Render-Based Plenoxels Pose Estimation
+1: while ||Iˆπc − I||22 > ϵ do
+2:
+r ← set of rays to be cast from current pose πc
+3:
+Iˆπc (r) ← VOLUME R ENDER(r)
+4:
+for all i ∈ [x, y, z, ω1 , ω2 , ω3 ] do
+5:
+Iˆπc (R(i+1) ) ← VOLUME R ENDER(R(i+1) )
+6:
+Iˆπc (R(i−1) ) ← VOLUME R ENDER(R(i−1) )
+7:
+Ji (r) ← [Iˆπc (R(i+1) ) − Iˆπc (R(i−1) )]/2
+8:
+end for
+9:
+∆I(r) ← Iˆπc (r) − I(r)
+10:
+SGD : πc ← πc + α(J(r) · ∆I(r))
+11: end while
+(9)
+TABLE I
+P OSE ESTIMATION ERROR FOR I N E RF [5] AND DPPE ON THE N E RF
+S YNTHETIC DATASET. P ER - DATASET RESULTS ARE PRESENTED AS THE
+AVERAGE OVER 20 PERTURBATIONS . -F ULL INDICATES THAT THE FULL
+IMAGE WAS USED FOR POSE ESTIMATION (640,000 PIXELS ), AND -1%
+INDICATES THAT 1% OF THE IMAGE WAS USED (6,400 PIXELS ).
+Chair Drums Ficus Hotdog Lego Materials Mic Ship Average
+In this section, we begin with an evaluation of the performance of DPPE over the NeRF synthetic dataset [4].
+Additionally, we perform comparisons to iNeRF. This is
+followed by an ablation over key algorithm parameters,
+including pixel sub-sampling and Plenoxel grid resolution.
+Finally, the limitations of the work are considered.
+% of Rotation Errors <5° (↑)
+Method
+iNeRF
+DPPE-full
+DPPE-1%
+V. RESULTS AND DISCUSSION
+0.8
+1
+1
+0.75 0.6
+0.95 0.7
+0.85 0.95
+1
+0.75
+0.9
+0.95
+1
+0.95
+0.7
+0.8
+0.65
+0.55 0.9
+0.85 0.85
+0.8 0.8
+0.78
+0.86
+0.86
+% of Translation Errors <0.2 units (10% of width) (↑)
+iNeRF
+0.7 0.65 0.55
+1
+0.95 0.65 0.55 0.9
+0.74
+DPPE-full 0.7 0.65 0.55 0.35 0.8
+0.5
+0.6 0.35 0.56
+DPPE-1% 0.55 0.65 0.65 0.45 0.8
+0.55 0.55 0.4
+0.58
+iNeRF
+4.95
+DPPE-full 2.43
+DPPE-1% 2.48
+Average Rotation Error (°) (↓)
+3.71 6.30 0.30 0.59 4.85 6.59 1.28
+2.36 3.55 3.98 1.74 3.19 2.44 3.92
+2.61 2.36 3.46 1.89 3.83 2.98 3.67
+3.57
+2.95
+2.91
+iNeRF
+0.31
+DPPE-full 0.17
+DPPE-1% 0.18
+Average Translation Error (units) (↓)
+0.31 0.45 0.02 0.03 0.37 0.32 0.08
+0.17 0.21 0.27 0.12 0.23 0.22 0.27
+0.18 0.17 0.24 0.13 0.21 0.21 0.26
+0.24
+0.21
+0.20
+iNeRF
+13.3
+DPPE-full 63.8
+DPPE-1% 10.7
+Average Time Elapsed (seconds) (↓)
+13.4 12.8 13.3 13.2 13.2 11.8 13.3
+62.5 61.6 77.4 70.2 66.8 62.4 91.9
+10.6 10.6 11.0 10.9 10.7 10.5 11.5
+13.0
+69.6
+10.8
+where πc is the current pose estimate, r is the set of rays
+to render, J(r) is the steepest descent image, ∆I(r) is
+the photometric error between the rendered image and the
+ground truth image for the set of rays, and α is a learning
+rate parameter. Alg. 1 summarizes the proposed method. It
+runs until convergence (line 1).
+Variable r can either be the rays forming a full image, or
+a subset of rays (line 2). For all 6 camera DoF, the scene is
+re-rendered from ± 1 “step” (loop on line 3), and used to
+form a numerical approximation of the image gradient via
+central differencing (line 7). Finally, this is used alongside
+the photometric error of the rays (line 9) to perform an SGD
+step and update the pose estimate (line 10). It should be noted
+that the ±1 for re-rendering in the translational case describes
+a shift in voxel, which has a variable size depending on
+the Plenoxel grid resolution. The grid resolution (which is
+typically a power of 2) is a customizable parameter that
+can be dynamically upsized or downsized when training
+the Plenoxel grid, such that higher resolution results in
+better reconstruction quality at the cost of compute time and
+memory, and vice-versa [7]. For rotation, each re-rendering is
+conducted with a step size of 0.001 radians. For each epoch,
+either a translation step or a rotation step is performed,
+updating the pose estimate’s corresponding 3 DoF. The
+optimization strategy consists of alternation between a single
+rotation step and a single translation step until the maximum
+epoch limit is reached or photometric error drops below an
+error threshold ϵ.
+A. Implementation Details
+All experiments were run on a nVIDIA RTX-4090 GPU
+(24 GB VRAM), with a maximum cutoff of 1000 epochs. Pytorch was used for handling most of the data, with a CUDA
+backend for the SGD step and the Plenoxels rendering. The
+full results generation pipeline is presented in Fig. 2. The
+photometric error cutoff ϵ was set to 2000 (Alg. 1-line 1),
+except for when using 1% of the image, where it was set
+to 0. The learning rate α for the translation is initialized as
+4 and decayed every 100 epochs by 25%, and the rotation
+learning rate is initialized at 5, with the same relative rate of
+decay. These values were manually tuned, but are consistent
+across all datasets and tests.
+B. Synthetic Dataset
+Setting: The NeRF synthetic dataset [4] contains 8 synthetic scenes, with 800 × 800 images captured from a full
+360° around an object, simulated via Blender [36]. Some
+of the objects are realistic simulations of non-Lambertian
+materials, including reflections and transparency. The object
+scenes are known as: Chair, Drums, Ficus, Hotdog, Lego,
+Materials, Mic, and Ship. They offer varying levels of
+complexity, and each presents a unique challenge in the
+context of pose estimation. Exact camera poses, including
+camera intrinsics, are stored. There are 100 training images,
+100 validation images, and 200 test images, with known
+camera poses. NeRF-synthetic was used in the first NeRF
+paper [4], and is commonly used in neural pose estimation
+works, including iNeRF [5], BARF [6], and more [26].
+Joint translation and rotation pose estimation was performed with an initial perturbation of up to 80 pixels (0.2
+units) in each spatial axis, and 5° in each rotational “axis”.
+80 pixels is 10% of the width and height of the image.
+Perturbation was done by starting with the ground truth pose,
+then randomly generating perturbations up to the aforementioned magnitudes, and randomly adding or subtracting those
+perturbations to each of the 6 camera DoF.
+Rotational error (RE) and translation error (TE) are used
+as the evaluation criteria. These metrics are computed for
+a sample of 20 different poses (randomly-selected from
+the validation set) for all scenes for more robust results.
+A rotational success cutoff of RE = 5° (the same as in
+iNeRF [5], Parallel Inversions [26]) is used. The translational
+success cutoff is set to 80 pixels (vs. 5 cm for iNeRF). This
+cutoff corresponds to 10% of the image side length, and is
+selected as it represents a minimal translational difference
+expressed relative to a known image quantity. Real-world
+distances were not available for the selected dataset.
+The Plenoxels grid was trained using the default configurations from Plenoxels [7], such that the grid resolution
+was [256]3 . For comparisons to iNeRF, a NeRF was trained
+from scratch for the synthetic scenes. These were trained
+using the default configuration files from NeRF [4], up to
+200K iterations. It should be emphasized that a completely
+one-to-one comparison between iNeRF [5] and our method
+(DPPE) cannot be made, as they function over different
+scene representation techniques (NeRF [4] and Plenoxels [7],
+respectively). However, as they use the same error metrics
+and have the same goal, it is useful to consider their relative
+performance. To form a more fair comparison, iNeRF’s
+random pixel selection strategy was used. The batch size
+for iNeRF was set to 512 pixels, with full image resolution.
+Given the similar runtimes, iNeRF is most comparable to
+DPPE using 1% of the image (6,400 pixels).
+Results: A summary of the results is presented in Table I.
+While the comparison is not one-to-one due to the different
+scene representation techniques, as the evaluation criteria,
+initial perturbations, start goal, and end goal are the same,
+it is still worthwhile to compare performance. For all scenes
+except Hotdog, Lego, and Ship, DPPE had a lower average
+rotation and translation error. On average, for rotations,
+DPPE had better performance than iNeRF. Translationally,
+while iNeRF had a greater average percent of pose estimations that met the error cutoff, iNeRF’s average translation
+error was higher, due to worse performance translationally
+in all scenes except Hotdog, Lego, and Ship. DPPE using
+the full image for pose estimation took approximately 70
+seconds for full execution, whereas when using only 1%
+of the image the average runtime decreased to 11 seconds.
+DPPE-1% was faster than iNeRF, even though its batch
+size was larger, mostly due to Plenoxels rendering being
+quicker. For DPPE, Hotdog, Materials, and Ship were some
+of the most challenging datasets. As DPPE is reliant on the
+image gradient, for scenes with large regions of uniform
+texture (e.g. the bun of Hotdog, the water of Ship), the
+algorithm struggles. Due to the use of SGD, DPPE can
+sometimes get stuck for scenes with local minima (e.g. the
+grid of Materials), depending on pose initialization. Pose
+error as a function of epoch is shown in Fig. 3. DPPE tends
+to immediately begin with convergence towards the goal,
+whereas iNeRF gets worse before it improves. DPPE tends to
+fail more gracefully than iNeRF - getting stuck in a poor local
+minimum instead of continually getting worse. This can be
+observed from the average vs. median relative performances.
+Additionally, while the rapid initial convergence of DPPE
+is a desirable property (e.g. for integration with SLAM), it
+is unable to reach the small errors that iNeRF sometimes
+finds. Part of the reason for why this may be is due to the
+± 1 sampling step used for image gradient estimation. Since
+the size of each step is kept constant throughout runtime,
+once the algorithm reaches a state in which the error is
+smaller than the resampling step, the gradient approximation
+becomes too coarse to capture the information. Future work
+could investigate the impact of decreasing the step size
+as a function of epoch. Interestingly, the performance of
+TABLE II
+DPPE RESULTS WITH VARIABLE RAY SUBSAMPLING . %I M INDICATES
+THE PERCENT OF PIXELS FROM THE IMAGE RANDOMLY SELECTED FOR
+POSE ESTIMATION . %RE < 5° AND % TE < 0.2 UNITS INDICATE THE
+PERCENT OF ROTATION AND TRANSLATION ERRORS THAT MEET THE
+SUCCESS CRITERIA .
+Im%
+%RE <5°
+(↑)
+%TE <0.2 units
+(↑)
+0.01
+0.25
+0.50
+0.75
+1.00
+0.85
+0.875
+0.85
+0.86
+0.91
+0.575
+0.55
+0.65
+0.56
+0.59
+Avg. RE Avg. TE
+(°) (↓) (units) (↓)
+2.97
+3.15
+2.94
+2.96
+2.82
+0.20
+0.22
+0.19
+0.21
+0.20
+Runtime
+(sec) (↓)
+11.0
+23.0
+45.4
+66.8
+73.1
+TABLE III
+DPPE RESULTS WITH VARIABLE P LENOXEL GRID RESOLUTION . %RE
+< 5°AND %TE < 0.2 UNITS INDICATE THE PERCENT OF ROTATION AND
+TRANSLATION ERRORS THAT MEET THE SUCCESS CRITERIA .
+Resolution
+64
+128
+256
+512
+%RE <5° %TE <0.2 units Avg. RE Avg. TE Runtime
+(↑)
+(↑)
+(°) (↓) (units) (↓) (sec) (↓)
+0.31
+0.56
+0.91
+0.81
+0.18
+0.31
+0.59
+0.69
+7.98
+5.06
+2.82
+2.85
+0.56
+0.36
+0.20
+0.18
+33.1
+47.9
+73.1
+77.8
+DPPE-1% is on-par with DPPE-full. Motivated by this, we
+investigate the effect of ray subsampling in the following
+section.
+C. Pixel Sub-Sampling Ablations
+Setting: As the number of pixels used for sub-sampling
+is an important aspect of pose estimation [5] with significant implications on runtime, we investigate the effect of
+pixel sub-sampling on DPPE. Results were computed on 20
+randomly-perturbed poses from the Chair, Lego, Materials,
+and Ship scenes, via the same techniques and evaluation
+criteria as in Section V-B. The percent of pixels randomly
+sampled from the image includes: 1%, 25%, 50%, 75%, and
+100%, corresponding to: 6,400, 160,000, 320,000, 480,000,
+and 640,000 rays, respectively.
+Results: Results for pixel sub-sampling are summarized
+in Table II. Generally, pose error was similar across all pixel
+sub-samplings. Using the full image resulted in the best
+rotation error, and 50% of the image gave the best translation
+error. The most significant difference between the various
+sub-sampling strategies is in the runtime of the algorithm, for
+which, on average, using 1% of the image for pose estimation
+takes 11 seconds, and using the full image takes 73 seconds.
+As rendering must be performed for ±1∀6 camera DoF for
+every 2 epochs (for the rotation step, then translation step), a
+greater percent of the image rendered for each step results in
+a greater runtime. The occasional improved performance of
+DPPE-1% vs. DPPE-full is a result of the random selection
+of pixels helping the algorithm dodge or escape poor local
+minima by chance. DPPE-1% is a good candidate for use,
+due to its reduced runtime, and good performance.
+7
+6
+5
+4
+3
+2
+1
+0
+1
+Full Image DPPE
+1% Image DPPE
+iNeRF
+Success Criteria
+9
+8
+7
+6
+5
+4
+3
+2
+1
+0
+101 201 301 401 501 601 701 801 901
+1
+0.3
+0.2
+0.1
+0
+0.6
+Median Translation Error
+(units)
+Average Translation Error
+(units)
+0.4
+0.6
+0.5
+0.4
+0.3
+0.2
+0.1
+0
+1
+101 201 301 401 501 601 701 801 901
+Epoch
+Full Image DPPE
+1% Image DPPE
+iNeRF
+Success Criteria
+0.5
+0.4
+0.3
+0.2
+0.1
+0
+1
+0.7
+Epoch
+Full Image DPPE
+1% Image DPPE
+iNeRF
+Success Criteria
+0.5
+Full Image DPPE
+1% Image DPPE
+iNeRF
+0.8
+101 201 301 401 501 601 701 801 901
+Epoch
+0.6
+1
+0.9
+101 201 301 401 501 601 701 801 901
+1
+% of Translation Errors
+> 0.2 units
+8
+10
+% of Rotation Errors > 5°
+Full Image DPPE
+1% Image DPPE
+iNeRF
+Success Criteria
+9
+Median Rotation Error (°)
+Average Rotation Error (°)
+10
+Full Image DPPE
+1% Image DPPE
+iNeRF
+0.9
+0.8
+0.7
+0.6
+0.5
+0.4
+0.3
+0.2
+0.1
+0
+1
+101 201 301 401 501 601 701 801 901
+Epoch
+Epoch
+1
+101 201 301 401 501 601 701 801 901
+Epoch
+Fig. 3. Rotation (top) and translation (bottom) pose error for DPPE. From left to right, pose error is presented as: average, median, and % failures,
+as a function of epoch. DPPE quickly converges towards the success criteria before tapering off, whereas iNeRF starts by getting worse, before rapidly
+converging to a very low error.
+D. Grid Resolution Ablations
+Setting: The resolution of the Plenoxels [7] grid is another
+important parameter, as higher resolution results in more
+clear renderings, at the cost of performance. Additionally,
+as the step-size for translational image gradient estimation
+was set to ± 1 voxel, a lower resolution results in a coarser
+gradient estimate. Results were computed on 20 randomlyperturbed poses from the Chair, Lego, Materials, and Ship
+scenes, with each perturbation being random across resolution. Otherwise, results were computed via the same methods
+as in Section V-B. Grid resolutions of [64]3 , [128]3 , [256]3 ,
+and [512]3 were selected, and a Plenoxels grid was trained
+for each resolution.
+Results: The effect of grid resolution on DPPE pose
+error is presented in Table III. Rotationally, a grid of [256]3
+resulted in the lowest pose error, and translationally a [512]3
+grid was the best. Results were significantly different for
+resolutions of 64 and 128, though 256 and 512 offered
+relatively similar performance. A greater resolution requires
+a more costly render, thereby increasing runtime.
+Additional informal ablations were conducted for the pose
+estimation algorithm, including on the optimization alternation strategy (e.g. 1-rotation-1-translation, 100-rotation-100translation, etc.), and image gradient estimation step-size
+(e.g. ± 0.1, 0.01, 0.001, etc. radians for rotational gradient
+estimation), and the best-performing strategies were used
+uniformly for all experiments.
+E. Limitations and Future Work
+One of the most common issues with DPPE’s optimization
+is that it is vulnerable to local minima, especially in certain
+scenes, such as Materials. An illustration of such a case is
+presented in Fig. 4. To help overcome this, methods such
+as Monte Carlo sampling could be employed, as starting
+Fig. 4. DPPE can be susceptible to local minima. (Left) The scene rendered
+from the pose initialization (opaque) with the ground-truth (transparent).
+(Right) The render of the scene from the final pose estimate, after DPPE.
+As DPPE only considers the local gradient approximation, due to the local
+minimum the pose is misaligned by an entire row.
+with multiple candidate pose initializations has been shown
+to alleviate the local minima issue for neural rendering pose
+estimation [26]. Depth data could also be integrated for this,
+though it would reduce the applicability of the work.
+As this method is theoretically invariant of the scene
+representation technique (other than some implementation
+details such as the gradient estimation step size), it could
+be extended to works such as classical NeRF [4], Instant
+NGP [8] or 3D Gaussian Splatting [9]. An extension to the
+latter, in particular, might be beneficial, as its rendering is
+even faster than that of Plenoxels [9].
+VI. CONCLUSIONS
+In this work, we have introduced DPPE, a 6DoF monocular RGB pose estimation technique that operates over a
+Plenoxels scene representation. DPPE shows comparable
+results with existing neural pose estimation works, with a
+quicker runtime for the DPPE-1% variant. We demonstrate
+that the rapid rendering speed of recent neural rendering
+works can be effectively leveraged to numerically approx-
+imate the image gradient via central differencing. Furthermore, we show that this numerical approximation can be
+used with a modified classical template-matching approach
+to perform pose estimation. Finally, we analyze the effects
+of key algorithm parameters, including ray sub-sampling
+technique and resolution, which indicate that even 1% of
+the image is effective for pose estimation. As DPPE can
+theoretically operate over any neural scene representation,
+future research will look to integrate it with state-of-the-art
+neural rendering techniques, as well as methods for reducing
+the impact of local minima.
+R EFERENCES
+[1] C. Cadena, L. Carlone, H. Carrillo, Y. Latif, D. Scaramuzza, J. Neira,
+I. Reid, and J. J. Leonard, “Past, present, and future of simultaneous
+localization and mapping: Toward the robust-perception age,” IEEE
+Transactions on Robotics, vol. 32, no. 6, pp. 1309–1332, 2016.
+[2] X. Chen, Z. Dong, J. Song, A. Geiger, and O. Hilliges, “Category level
+object pose estimation via neural analysis-by-synthesis,” in Computer
+Vision – ECCV 2020: 16th European Conference, Glasgow, UK,
+August 23–28, 2020, Proceedings, Part XXVI. Berlin, Heidelberg:
+Springer-Verlag, 2020, p. 139–156.
+[3] G. Wang, F. Manhardt, F. Tombari, and X. Ji, “GDR-net: Geometryguided direct regression network for monocular 6d object pose estimation,” in 2021 IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR).
+Los Alamitos, CA, USA: IEEE Computer
+Society, jun 2021, pp. 16 606–16 616.
+[4] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi, and R. Ng, “NeRF: representing scenes as neural radiance fields
+for view synthesis,” Communications of the ACM, vol. 65, no. 1, pp.
+99–106, 2021.
+[5] L. Yen-Chen, P. Florence, J. T. Barron, A. Rodriguez, P. Isola,
+and T.-Y. Lin, “iNeRF: Inverting Neural Radiance Fields for Pose
+Estimation,” 2021 IEEE/RSJ International Conference on Intelligent
+Robots and Systems (IROS), vol. 00, pp. 1323–1330, 2021.
+[6] C.-H. Lin, W.-C. Ma, A. Torralba, and S. Lucey, “BARF: BundleAdjusting Neural Radiance Fields,” 2021 IEEE/CVF International
+Conference on Computer Vision (ICCV), vol. 00, pp. 5721–5731, 2021.
+[7] S. Fridovich-Keil, A. Yu, M. Tancik, Q. Chen, B. Recht, and
+A. Kanazawa, “Plenoxels: Radiance Fields without Neural Networks,”
+2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), vol. 00, pp. 5491–5500, 2022.
+[8] T. Müller, A. Evans, C. Schied, and A. Keller, “Instant neural graphics
+primitives with a multiresolution hash encoding,” ACM Transactions
+on Graphics (TOG), vol. 41, no. 4, pp. 1–15, 2022.
+[9] B. Kerbl, G. Kopanas, T. Leimkühler, and G. Drettakis, “3d gaussian
+splatting for real-time radiance field rendering,” ACM Transactions on
+Graphics, vol. 42, no. 4, July 2023.
+[10] B. Csébfalvi, “Beyond trilinear interpolation,” ACM Transactions on
+Graphics (TOG), vol. 38, no. 4, pp. 1–8, 2019.
+[11] K. W. Pratt, Image Sampling and Reconstruction. John Wiley &
+Sons, Ltd, 2001, ch. 4, pp. 91–120.
+[12] B. D. Lucas and T. Kanade, “An iterative image registration technique
+with an application to stereo vision,” in Proceedings of the 7th
+International Joint Conference on Artificial Intelligence - Volume
+2, ser. IJCAI’81.
+San Francisco, CA, USA: Morgan Kaufmann
+Publishers Inc., 1981, p. 674–679.
+[13] M. Tancik, P. Srinivasan, B. Mildenhall, S. Fridovich-Keil, N. Raghavan, U. Singhal, R. Ramamoorthi, J. Barron, and R. Ng, “Fourier
+Features Let Networks Learn High Frequency Functions in Low
+Dimensional Domains,” in Advances in Neural Information Processing
+Systems, H. Larochelle, M. Ranzato, R. Hadsell, M. Balcan, and
+H. Lin, Eds., vol. 33. Curran Associates, Inc., 2020, pp. 7537–7547.
+[14] J. T. Barron, B. Mildenhall, D. Verbin, P. P. Srinivasan, and P. Hedman,
+“Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields,”
+2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), vol. 00, pp. 5460–5469, 2022.
+[15] M. Tancik, V. Casser, X. Yan, S. Pradhan, B. P. Mildenhall, P. Srinivasan, J. T. Barron, and H. Kretzschmar, “Block-NeRF: Scalable Large
+Scene Neural View Synthesis,” in 2022 IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR), 2022, pp. 8238–
+8248.
+[16] Z. Li, S. Niklaus, N. Snavely, and O. Wang, “Neural scene flow fields
+for space-time view synthesis of dynamic scenes,” in 2021 IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR),
+2021, pp. 6494–6504.
+[17] L. Quan and Z. Lan, “Linear N-point camera pose determination,”
+IEEE Transactions on Pattern Analysis and Machine Intelligence,
+vol. 21, no. 8, pp. 774–780, 1999.
+[18] J. L. Schönberger and J.-M. Frahm, “Structure-from-Motion Revisited,” 2016 IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR), pp. 4104–4113, 2016.
+[19] A. J. Davison, I. D. Reid, N. D. Molton, and O. Stasse, “MonoSLAM:
+Real-Time Single Camera SLAM,” IEEE Transactions on Pattern
+Analysis and Machine Intelligence, vol. 29, no. 6, pp. 1052–1067,
+2007.
+[20] C. Campos, R. Elvira, J. J. G. Rodrguez, J. M. M. Montiel, and J. D.
+Tards, “ORB-SLAM3: An Accurate Open-Source Library for Visual,
+VisualInertial, and Multimap SLAM,” IEEE Transactions on Robotics,
+vol. 37, no. 6, pp. 1874–1890, 2021.
+[21] Z. Dai-xian, “Binocular Vision-SLAM Using Improved SIFT Algorithm,” 2010 2nd International Workshop on Intelligent Systems and
+Applications, pp. 1–4, 2010.
+[22] R. A. Newcombe, A. Fitzgibbon, S. Izadi, O. Hilliges, D. Molyneaux,
+D. Kim, A. J. Davison, P. Kohi, J. Shotton, and S. Hodges, “KinectFusion: Real-time dense surface mapping and tracking,” 2011 10th
+IEEE International Symposium on Mixed and Augmented Reality, pp.
+127–136, 2011.
+[23] K. M. Jatavallabhula, S. Saryazdi, G. Iyer, and L. Paull, “gradSLAM:
+Automagically differentiable SLAM,” arXiv, 2019.
+[24] A. Dosovitskiy, P. Fischer, E. Ilg, P. Hausser, C. Hazirbas, V. Golkov,
+P. V. D. Smagt, D. Cremers, and T. Brox, “FlowNet: Learning
+Optical Flow with Convolutional Networks,” 2015 IEEE International
+Conference on Computer Vision (ICCV), pp. 2758–2766, 2015.
+[25] Z. Wang, S. Wu, W. Xie, M. Chen, and V. A. Prisacariu, “NeRF–:
+Neural Radiance Fields Without Known Camera Parameters,” arXiv,
+2021.
+[26] Y. Lin, T. Müller, J. Tremblay, B. Wen, S. Tyree, A. Evans, P. A.
+Vela, and S. Birchfield, “Parallel Inversion of Neural Radiance Fields
+for Robust Pose Estimation,” 2023 IEEE International Conference on
+Robotics and Automation (ICRA), vol. 00, pp. 9377–9384, 2023.
+[27] D. Maggio, M. Abate, J. Shi, C. Mario, and L. Carlone, “Loc-nerf:
+Monte carlo localization using neural radiance fields,” in 2023 IEEE
+International Conference on Robotics and Automation (ICRA), 2023,
+pp. 4018–4025.
+[28] E. Sucar, S. Liu, J. Ortiz, and A. J. Davison, “iMAP: Implicit Mapping
+and Positioning in Real-Time,” 2021 IEEE/CVF International Conference on Computer Vision (ICCV), vol. 00, pp. 6209–6218, 2021.
+[29] Z. Zhu, S. Peng, V. Larsson, W. Xu, H. Bao, Z. Cui, M. R. Oswald, and
+M. Pollefeys, “NICE-SLAM: Neural Implicit Scalable Encoding for
+SLAM,” 2022 IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), vol. 00, pp. 12 776–12 786, 2022.
+[30] A. L. Teigen, Y. Park, A. Stahl, and R. Mester, “RGB-D Mapping
+and Tracking in a Plenoxel Radiance Field,” IEEE/CVF WACV, pp.
+3342––3351, 2024.
+[31] A. Koval, C. Kanellakis, and G. Nikolakopoulos, “Evaluation of lidarbased 3d slam algorithms in subt environment,” IFAC-PapersOnLine,
+vol. 55, no. 38, pp. 126–131, 2022, 13th IFAC Symposium on Robot
+Control SYROCO 2022.
+[32] C.-M. Chung, Y.-C. Tseng, Y.-C. Hsu, X.-Q. Shi, Y.-H. Hua, J.-F.
+Yeh, W.-C. Chen, Y.-T. Chen, and W. H. Hsu, “Orbeez-SLAM: A
+Real-time Monocular Visual SLAM with ORB Features and NeRFrealized Mapping,” 2023 IEEE International Conference on Robotics
+and Automation (ICRA), vol. 00, pp. 9400–9406, 2023.
+[33] A. Rosinol, J. J. Leonard, and L. Carlone, “NeRF-SLAM: Real-Time
+Dense Monocular SLAM with Neural Radiance Fields,” arXiv, 2022.
+[34] A. Yu, R. Li, M. Tancik, H. Li, R. Ng, and A. Kanazawa, “PlenOctrees
+for Real-time Rendering of Neural Radiance Fields,” 2021 IEEE/CVF
+International Conference on Computer Vision (ICCV), vol. 00, pp.
+5732–5741, 2021.
+[35] J. Solà, J. Deray, and D. Atchuthan, “A micro Lie theory for state
+estimation in robotics,” arXiv, 2018.
+[36] B. O. Community, Blender - a 3D modelling and rendering package,
+Blender Foundation, Stichting Blender Foundation, Amsterdam, 2018.

@@ -1,0 +1,1499 @@
+# Differentiable Rendering
+
+![A neural radiance field of the lego scene, rendered from a full orbit](docs/spin.gif)
+
+Implementations of three building blocks of modern differentiable rendering,
+built up from fitting a single image to training a neural radiance field. Each
+piece is written from scratch in PyTorch and is meant to be read as much as run.
+
+1. **Neural fields** — fitting an image with a SIREN and a ReLU-MLP, including
+   autograd-based gradient and Laplacian supervision.
+2. **Sphere tracing & volume rendering** — two ways of turning an implicit 3D
+   scene into an image.
+3. **NeRF** — a positional-encoded coordinate MLP trained by volume rendering on
+   a Blender-synthetic scene (e.g. `lego`).
+
+```
+neural_fields/   SIREN, ReLU-MLP, autograd operators, single-image training loop
+renderers/       camera rays, sphere tracing, and volume rendering of analytic scenes
+nerf/            positional encoding, NeRF field, dataset loader, volume renderer, trainer
+scripts/         entry points for each part
+```
+
+## Setup
+
+```bash
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt   # install the PyTorch build for your platform
+```
+
+## 1. Neural fields
+
+A neural field maps continuous coordinates to signal values. The SIREN uses sine
+activations (with the paper's initialisation) so it can represent high-frequency
+detail and have well-behaved derivatives; the ReLU-MLP is the baseline. The
+training loop also visualises the field's gradient and Laplacian, computed with
+autograd.
+
+```bash
+python -m scripts.fit_image --model SIREN --steps 1000
+python -m scripts.fit_image --model MLP --steps 2000
+```
+
+The SIREN reaches a sharp reconstruction in ~100 steps that the ReLU-MLP never
+reaches in 2000 — a direct consequence of spectral bias.
+
+## 2. Sphere tracing & volume rendering
+
+Two renderers for an implicit scene. Sphere tracing marches each ray by the
+signed-distance value to find a hard surface hit; volume rendering samples points
+along each ray and alpha-composites their density and colour — the same integral
+the NeRF uses, here on an analytic scene.
+
+```bash
+python -m scripts.render_demos   # writes sphere_tracing.png and volume_rendering.png
+```
+
+## 3. NeRF
+
+A NeRF represents a scene as a function from a 3D point to a colour and a
+density. A point is Fourier-encoded, run through an MLP with a skip connection,
+and the resulting densities/colours along each ray are volume-rendered into a
+pixel. Training minimises the photometric error against posed images.
+
+Download a scene from the NeRF-synthetic dataset and point `--data` at the scene
+directory (the one containing `transforms_train.json`):
+
+```bash
+python -m scripts.train_nerf --data data/nerf_synthetic/lego --iters 20000
+```
+
+Periodic renders and a final 360° orbit (`spin.gif`) are written to `outputs/`.
+Training is fast on a GPU and runs (more slowly) on CPU; results on a small MLP
+are blurred but clearly 3D.
+
+## Notes
+
+- The volume renderer in `nerf/` is the flat ray-batch counterpart of the one in
+  `renderers/` — same compositing integral, batched over randomly sampled rays
+  and with stratified sampling for training.
+- The NeRF field is position-only (no view-dependent effects), which keeps it
+  small enough to train quickly on a single scene.
+
+## References
+
+- Sitzmann et al., *Implicit Neural Representations with Periodic Activation Functions* (SIREN), 2020.
+- Mildenhall et al., *NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis*, 2020.
+
+### nerf/__init__.py
+```
+
+```
+
+### nerf/dataset.py
+```
+"""
+Loader for the NeRF-synthetic ("Blender") dataset layout.
+
+A scene directory looks like:
+
+    <scene>/
+        transforms_train.json
+        transforms_val.json
+        transforms_test.json
+        train/r_0.png, r_1.png, ...
+        ...
+
+Each `transforms_*.json` holds a `camera_angle_x` (horizontal field of view) and
+a list of frames, each with a 4x4 `transform_matrix` (camera-to-world) and a
+`file_path`. Images are RGBA with a transparent background; we composite them
+over white, which is the standard convention for this dataset.
+"""
+
+import json
+import os
+from dataclasses import dataclass
+
+import numpy as np
+import torch
+from torch import Tensor
+
+
+def get_rays(H: int, W: int, focal: float, c2w: Tensor):
+    """Per-pixel ray origins and directions for one Blender camera.
+
+    Uses the OpenGL/Blender camera convention: the camera looks down its local
+    -z axis, with +x right and +y up. Returns origins and directions, both
+    [H, W, 3]; directions are NOT normalised (NeRF integrates in world units of
+    the ray parameter t, which assumes the -1 z-component below).
+    """
+    device = c2w.device
+    j, i = torch.meshgrid(
+        torch.arange(H, device=device, dtype=torch.float32),
+        torch.arange(W, device=device, dtype=torch.float32),
+        indexing="ij",
+    )
+    dirs = torch.stack(
+        [(i - W * 0.5) / focal, -(j - H * 0.5) / focal, -torch.ones_like(i)],
+        dim=-1,
+    )  # [H, W, 3] in camera space
+
+    rays_d = dirs @ c2w[:3, :3].T          # rotate to world space
+    rays_o = c2w[:3, 3].expand(rays_d.shape)
+    return rays_o, rays_d
+
+
+@dataclass
+class NeRFScene:
+    images: Tensor   # [N, H, W, 3] in [0, 1]
+    poses: Tensor    # [N, 4, 4] camera-to-world
+    focal: float
+    H: int
+    W: int
+
+    def to(self, device):
+        self.images = self.images.to(device)
+        self.poses = self.poses.to(device)
+        return self
+
+
+def load_blender_scene(root: str, split: str = "train", downsample: int = 1, white_background: bool = True) -> NeRFScene:
+    """Load one split of a NeRF-synthetic scene into a `NeRFScene`."""
+    try:
+        from PIL import Image
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("Pillow is required to load images: pip install pillow") from exc
+
+    with open(os.path.join(root, f"transforms_{split}.json")) as f:
+        meta = json.load(f)
+
+    images = []
+    poses = []
+    H = W = None
+    for frame in meta["frames"]:
+        path = os.path.join(root, frame["file_path"] + ".png")
+        img = Image.open(path).convert("RGBA")
+        if downsample > 1:
+            img = img.resize((img.width // downsample, img.height // downsample), Image.LANCZOS)
+        arr = np.asarray(img, dtype=np.float32) / 255.0  # [H, W, 4]
+
+        rgb, alpha = arr[..., :3], arr[..., 3:4]
+        if white_background:
+            rgb = rgb * alpha + (1.0 - alpha)  # composite over white
+
+        if H is None:
+            H, W = rgb.shape[:2]
+        images.append(torch.from_numpy(rgb))
+        poses.append(torch.tensor(frame["transform_matrix"], dtype=torch.float32))
+
+    focal = 0.5 * W / np.tan(0.5 * meta["camera_angle_x"])
+    return NeRFScene(
+        images=torch.stack(images),
+        poses=torch.stack(poses),
+        focal=float(focal),
+        H=H,
+        W=W,
+    )
+```
+
+### nerf/field.py
+```
+"""
+The NeRF field: a coordinate MLP that maps a 3D point to a colour and a density.
+
+A position is Fourier-encoded (see `positional_encoding.py`) and passed through
+an MLP with a skip connection that re-injects the encoding partway through --
+the same trunk shape used in the original NeRF. The head emits an RGB colour
+(sigmoid, in [0, 1]) and a non-negative density (softplus).
+
+This implementation is position-only (no view-dependent effects), which keeps
+the model small enough to train on a single scene quickly.
+"""
+
+import torch
+import torch.nn as nn
+from jaxtyping import Float
+from torch import Tensor
+
+from .positional_encoding import PositionalEncoding
+
+
+class NeRFField(nn.Module):
+    def __init__(
+        self,
+        num_octaves: int = 10,
+        hidden_features: int = 256,
+        hidden_layers: int = 4,
+        skip_layer: int = 2,
+    ):
+        super().__init__()
+        self.encoding = PositionalEncoding(num_octaves)
+        d_in = self.encoding.d_out(3)
+        self.skip_layer = skip_layer
+
+        layers = []
+        in_dim = d_in
+        for i in range(hidden_layers):
+            # Re-inject the encoded position at the skip layer.
+            if i == skip_layer:
+                in_dim = hidden_features + d_in
+            layers.append(nn.Linear(in_dim, hidden_features))
+            in_dim = hidden_features
+        self.layers = nn.ModuleList(layers)
+
+        self.density_head = nn.Linear(hidden_features, 1)
+        self.color_head = nn.Linear(hidden_features, 3)
+        self.activation = nn.ReLU()
+
+    def forward(
+        self,
+        points: Float[Tensor, "*batch 3"],
+    ) -> tuple[Float[Tensor, "*batch 1"], Float[Tensor, "*batch 3"]]:
+        """Return (density, color) for each input point."""
+        encoded = self.encoding(points)
+
+        x = encoded
+        for i, layer in enumerate(self.layers):
+            if i == self.skip_layer:
+                x = torch.cat([x, encoded], dim=-1)
+            x = self.activation(layer(x))
+
+        # Softplus keeps density non-negative and differentiable everywhere.
+        density = torch.nn.functional.softplus(self.density_head(x))
+        color = torch.sigmoid(self.color_head(x))
+        return density, color
+```
+
+### nerf/positional_encoding.py
+```
+import torch
+import torch.nn as nn
+from jaxtyping import Float
+from torch import Tensor
+
+
+class PositionalEncoding(nn.Module):
+    """Fourier positional encoding (Mildenhall et al., 2020, Eq. 4).
+
+    Each input channel is encoded with `num_octaves` sine/cosine pairs whose
+    frequencies start at 2*pi and double each octave, letting a coordinate MLP
+    represent high-frequency detail it otherwise could not.
+    """
+
+    def __init__(self, num_octaves: int):
+        super().__init__()
+        self.num_octaves = num_octaves
+
+    def forward(
+        self,
+        samples: Float[Tensor, "*batch dim"],
+    ) -> Float[Tensor, "*batch embedded_dim"]:
+        # Frequency bands: lowest is 2*pi, each subsequent one doubles.
+        freq_bands = 2.0 * torch.pi * (2.0 ** torch.arange(
+            self.num_octaves, device=samples.device, dtype=samples.dtype
+        ))
+
+        # Allocate the encoded output, whose last dim is d_out(input_dim).
+        embedded_dim = list(samples.size())
+        embedded_dim[-1] = self.d_out(samples.size()[-1])
+        embedded_samples = torch.empty(embedded_dim, device=samples.device, dtype=samples.dtype)
+
+        # Interleave sin and cos per frequency. Within each group of
+        # 2 * num_octaves channels, the first num_octaves hold sines and the
+        # next num_octaves hold the matching cosines.
+        for i, freq in enumerate(freq_bands):
+            embedded_samples[..., i:: 2 * self.num_octaves] = torch.sin(samples * freq)
+            embedded_samples[..., i + self.num_octaves:: 2 * self.num_octaves] = torch.cos(samples * freq)
+
+        return embedded_samples
+
+    def d_out(self, dimensionality: int) -> int:
+        return dimensionality * 2 * self.num_octaves
+```
+
+### nerf/rendering.py
+```
+"""
+Differentiable volume rendering for NeRF, in flat ray-batch form.
+
+This is the same alpha-compositing integral used in `renderers/volume_rendering.py`
+for the analytic scenes, written here to operate on a flat batch of rays
+[R, ...] (rather than an [H, W, ...] grid) so we can train on randomly sampled
+rays, and with stratified sampling along each ray.
+"""
+
+import torch
+from torch import Tensor
+
+from .dataset import get_rays
+
+
+def render_rays(
+    field,
+    rays_o: Tensor,       # [R, 3]
+    rays_d: Tensor,       # [R, 3] (unnormalised, Blender convention)
+    near: float,
+    far: float,
+    n_samples: int = 64,
+    perturb: bool = True,
+    white_background: bool = True,
+):
+    """Render a batch of rays to RGB by sampling and alpha-compositing.
+
+    Returns a dict with `rgb` [R, 3], `depth` [R], and `acc` [R] (the total
+    accumulated opacity along each ray).
+    """
+    device = rays_o.device
+    R = rays_o.shape[0]
+
+    # Sample depths, shared structure across rays.
+    t_vals = torch.linspace(0.0, 1.0, n_samples, device=device)
+    z_vals = near * (1.0 - t_vals) + far * t_vals          # [n_samples]
+    z_vals = z_vals.expand(R, n_samples).clone()           # [R, n_samples]
+
+    if perturb:
+        # Stratified sampling: jitter each sample within its bin.
+        mids = 0.5 * (z_vals[:, 1:] + z_vals[:, :-1])
+        upper = torch.cat([mids, z_vals[:, -1:]], dim=-1)
+        lower = torch.cat([z_vals[:, :1], mids], dim=-1)
+        z_vals = lower + (upper - lower) * torch.rand_like(z_vals)
+
+    # Points along each ray: [R, n_samples, 3].
+    points = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., None]
+
+    density, color = field(points.reshape(-1, 3))
+    density = density.view(R, n_samples)                   # [R, n_samples]
+    color = color.view(R, n_samples, 3)                    # [R, n_samples, 3]
+
+    # Distance between adjacent samples, scaled into world units by |rays_d|.
+    dists = z_vals[:, 1:] - z_vals[:, :-1]
+    dists = torch.cat([dists, torch.full_like(dists[:, :1], 1e10)], dim=-1)
+    dists = dists * torch.norm(rays_d[:, None, :], dim=-1)
+
+    alpha = 1.0 - torch.exp(-density * dists)              # [R, n_samples]
+    # Transmittance T_i = product of (1 - alpha_j) for j < i (exclusive cumprod).
+    ones = torch.ones_like(alpha[:, :1])
+    transmittance = torch.cumprod(torch.cat([ones, 1.0 - alpha + 1e-10], dim=-1), dim=-1)[:, :-1]
+    weights = alpha * transmittance                        # [R, n_samples]
+
+    rgb = torch.sum(weights[..., None] * color, dim=-2)    # [R, 3]
+    depth = torch.sum(weights * z_vals, dim=-1)            # [R]
+    acc = torch.sum(weights, dim=-1)                       # [R]
+
+    if white_background:
+        rgb = rgb + (1.0 - acc[..., None])
+
+    return {"rgb": rgb, "depth": depth, "acc": acc}
+
+
+@torch.no_grad()
+def render_image(field, c2w, H, W, focal, near, far, n_samples=64, chunk=4096, white_background=True):
+    """Render a full image from a camera pose, in chunks to bound memory."""
+    rays_o, rays_d = get_rays(H, W, focal, c2w)
+    rays_o = rays_o.reshape(-1, 3)
+    rays_d = rays_d.reshape(-1, 3)
+
+    rgb_chunks = []
+    for start in range(0, rays_o.shape[0], chunk):
+        out = render_rays(
+            field,
+            rays_o[start:start + chunk],
+            rays_d[start:start + chunk],
+            near, far, n_samples,
+            perturb=False,
+            white_background=white_background,
+        )
+        rgb_chunks.append(out["rgb"])
+    return torch.cat(rgb_chunks, dim=0).view(H, W, 3)
+```
+
+### nerf/train.py
+```
+"""
+Train a NeRF on a single Blender-synthetic scene.
+
+The loop is plain stochastic ray training: each step samples a batch of random
+rays from random training images, renders them with `render_rays`, and minimises
+the MSE against the ground-truth pixel colours. Every so often it renders a
+held-out view to disk; at the end it renders a 360-degree orbit and (if imageio
+is available) writes it as a GIF.
+"""
+
+import math
+import os
+
+import numpy as np
+import torch
+
+from .dataset import get_rays, load_blender_scene
+from .field import NeRFField
+from .rendering import render_image, render_rays
+
+
+def pose_spherical(theta_deg: float, phi_deg: float, radius: float) -> torch.Tensor:
+    """Camera-to-world matrix looking at the origin from spherical coordinates."""
+    def trans_t(t):
+        return torch.tensor([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, t], [0, 0, 0, 1]], dtype=torch.float32)
+
+    def rot_phi(phi):
+        return torch.tensor(
+            [[1, 0, 0, 0],
+             [0, math.cos(phi), -math.sin(phi), 0],
+             [0, math.sin(phi), math.cos(phi), 0],
+             [0, 0, 0, 1]], dtype=torch.float32)
+
+    def rot_theta(th):
+        return torch.tensor(
+            [[math.cos(th), 0, -math.sin(th), 0],
+             [0, 1, 0, 0],
+             [math.sin(th), 0, math.cos(th), 0],
+             [0, 0, 0, 1]], dtype=torch.float32)
+
+    c2w = trans_t(radius)
+    c2w = rot_phi(math.radians(phi_deg)) @ c2w
+    c2w = rot_theta(math.radians(theta_deg)) @ c2w
+    # Flip to match the Blender world axes.
+    flip = torch.tensor([[-1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1]], dtype=torch.float32)
+    return flip @ c2w
+
+
+def train_nerf(
+    data_root: str,
+    out_dir: str = "outputs",
+    downsample: int = 2,
+    near: float = 2.0,
+    far: float = 6.0,
+    n_samples: int = 64,
+    rays_per_batch: int = 1024,
+    iters: int = 20000,
+    lr: float = 5e-4,
+    log_every: int = 500,
+    device: str | None = None,
+    seed: int = 0,
+):
+    device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    os.makedirs(out_dir, exist_ok=True)
+
+    scene = load_blender_scene(data_root, "train", downsample=downsample).to(device)
+    H, W, focal = scene.H, scene.W, scene.focal
+    print(f"Loaded {scene.images.shape[0]} images at {H}x{W}, focal {focal:.2f}")
+
+    # Precompute rays for every training pixel: [N, H, W, 3].
+    all_o, all_d = [], []
+    for pose in scene.poses:
+        o, d = get_rays(H, W, focal, pose)
+        all_o.append(o)
+        all_d.append(d)
+    rays_o = torch.stack(all_o).reshape(-1, 3)   # [N*H*W, 3]
+    rays_d = torch.stack(all_d).reshape(-1, 3)
+    target_rgb = scene.images.reshape(-1, 3)      # [N*H*W, 3]
+    n_rays_total = rays_o.shape[0]
+
+    field = NeRFField().to(device)
+    optimizer = torch.optim.Adam(field.parameters(), lr=lr)
+
+    for it in range(iters + 1):
+        idx = torch.randint(0, n_rays_total, (rays_per_batch,), device=device)
+        out = render_rays(field, rays_o[idx], rays_d[idx], near, far, n_samples, perturb=True)
+        loss = torch.nn.functional.mse_loss(out["rgb"], target_rgb[idx])
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        if it % log_every == 0:
+            psnr = -10.0 * math.log10(loss.item())
+            print(f"iter {it:6d} | loss {loss.item():.5f} | psnr {psnr:.2f} dB")
+            img = render_image(field, scene.poses[0], H, W, focal, near, far, n_samples)
+            _save_png(img, os.path.join(out_dir, f"render_{it:06d}.png"))
+
+    render_orbit(field, out_dir, H, W, focal, near, far, n_samples, device)
+    return field
+
+
+def _save_png(img: torch.Tensor, path: str):
+    arr = (img.clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
+    try:
+        from PIL import Image
+        Image.fromarray(arr).save(path)
+    except ImportError:
+        np.save(path.replace(".png", ".npy"), arr)
+
+
+def render_orbit(field, out_dir, H, W, focal, near, far, n_samples, device, n_frames=40, radius=4.0):
+    """Render a full 360-degree orbit and save it as spin.gif (if imageio is available)."""
+    os.makedirs(os.path.join(out_dir, "spin"), exist_ok=True)
+    frames = []
+    for k, theta in enumerate(np.linspace(-180, 180, n_frames, endpoint=False)):
+        c2w = pose_spherical(theta, -30.0, radius).to(device)
+        img = render_image(field, c2w, H, W, focal, near, far, n_samples)
+        arr = (img.clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
+        frames.append(arr)
+        _save_png(img, os.path.join(out_dir, "spin", f"frame_{k:03d}.png"))
+
+    try:
+        import imageio.v2 as imageio
+        imageio.mimsave(os.path.join(out_dir, "spin.gif"), frames, fps=12)
+        print(f"wrote {os.path.join(out_dir, 'spin.gif')}")
+    except ImportError:
+        print("imageio not installed; saved orbit frames only (pip install imageio for the GIF)")
+```
+
+### neural_fields/__init__.py
+```
+
+```
+
+### neural_fields/data.py
+```
+"""
+Data utilities for fitting a neural field to a single image.
+
+A neural field is trained as a regression problem: the input is a pixel
+coordinate in [-1, 1]^2 and the target is that pixel's value. `CoordinateImage`
+turns any image into this (coords, values) form, and `psnr` / `plot_field`
+provide the metric and visualization used during training.
+"""
+
+from typing import Tuple
+
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+
+
+def set_seed(seed: int = 0) -> None:
+    """Seed Python, NumPy and torch for reproducible runs."""
+    import random
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def coordinate_grid(height: int, width: int, dim: int = 2) -> torch.Tensor:
+    """Flattened grid of (x, y) coordinates spanning [-1, 1] on each axis.
+
+    Returns a tensor of shape [height * width, dim], row-major, matching the
+    layout of a flattened image.
+    """
+    axes = [torch.linspace(-1.0, 1.0, steps=s) for s in (height, width)[:dim]]
+    grid = torch.stack(torch.meshgrid(*axes, indexing="ij"), dim=-1)
+    return grid.reshape(-1, dim)
+
+
+def _default_image(height: int, width: int) -> torch.Tensor:
+    """A grayscale test image in [-1, 1], shape [height * width, 1].
+
+    Uses skimage's `astronaut` photograph if available (a standard high-frequency
+    test image), and otherwise falls back to a synthetic radial chirp so the
+    module has no hard dependency on skimage.
+    """
+    try:
+        from skimage.color import rgb2gray
+        from skimage.data import astronaut
+        from skimage.transform import resize
+
+        img = rgb2gray(astronaut())
+        img = resize(img, (height, width), anti_aliasing=True)
+    except Exception:
+        ys, xs = np.meshgrid(
+            np.linspace(-1.0, 1.0, height),
+            np.linspace(-1.0, 1.0, width),
+            indexing="ij",
+        )
+        r = np.sqrt(xs**2 + ys**2)
+        img = 0.5 + 0.5 * np.cos(40.0 * r**2)
+
+    img = torch.from_numpy(np.asarray(img, dtype=np.float32))
+    img = img * 2.0 - 1.0  # [0, 1] -> [-1, 1]
+    return img.reshape(-1, 1)
+
+
+class CoordinateImage(Dataset):
+    """A single image presented as one (coords, values) training example.
+
+    The whole image is one item, so a "batch" is the full-resolution coordinate
+    grid -- neural-field fitting is full-batch gradient descent on one image.
+    """
+
+    def __init__(self, height: int = 256, width: int | None = None, image: torch.Tensor | None = None):
+        super().__init__()
+        self.height = height
+        self.width = width if width is not None else height
+        if image is None:
+            self.values = _default_image(self.height, self.width)
+        else:
+            self.values = image.reshape(-1, image.shape[-1] if image.ndim > 1 else 1)
+        self.coords = coordinate_grid(self.height, self.width, dim=2)
+
+    def __len__(self) -> int:
+        return 1
+
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        if index != 0:
+            raise IndexError("CoordinateImage holds a single image")
+        return self.coords, self.values
+
+    def as_image(self, flat: torch.Tensor) -> torch.Tensor:
+        """Reshape a flat [H*W, C] tensor back to an [H, W] or [H, W, C] image."""
+        flat = flat.detach().cpu()
+        channels = flat.shape[-1]
+        if channels == 1:
+            return flat.view(self.height, self.width)
+        return flat.view(self.height, self.width, channels)
+
+
+def psnr(prediction: torch.Tensor, target: torch.Tensor, value_range: float = 2.0) -> torch.Tensor:
+    """Peak signal-to-noise ratio in dB. `value_range` is the peak-to-peak span."""
+    mse = torch.nn.functional.mse_loss(prediction, target)
+    return 10.0 * torch.log10(value_range**2 / mse)
+
+
+def plot_field(dataset: CoordinateImage, prediction, img_grad, img_laplacian, save_path: str | None = None):
+    """Show the target, the field's reconstruction, and its gradient/Laplacian."""
+    import matplotlib.pyplot as plt
+
+    fig, axs = plt.subplots(ncols=4, figsize=(18, 6))
+    axs[0].imshow(dataset.as_image(dataset.values), cmap="gray")
+    axs[0].set_title("Target")
+    axs[1].imshow(dataset.as_image(prediction), cmap="gray")
+    axs[1].set_title("Reconstruction")
+    axs[2].imshow(dataset.as_image(img_grad.norm(dim=-1, keepdim=True)), cmap="turbo")
+    axs[2].set_title("Gradient magnitude")
+    axs[3].imshow(dataset.as_image(img_laplacian), cmap="turbo")
+    axs[3].set_title("Laplacian")
+    for ax in axs:
+        ax.axis("off")
+    plt.tight_layout()
+    if save_path is not None:
+        plt.savefig(save_path, dpi=120, bbox_inches="tight")
+        plt.close(fig)
+    else:
+        plt.show()
+```
+
+### neural_fields/mlp.py
+```
+"""
+A plain MLP neural field, used as a baseline against the SIREN.
+
+The network maps `in_features`-dimensional coordinates to `out_features`-dimensional
+values with a configurable activation. Layout: a linear + activation block from
+`in_features` to `hidden_features`, then `hidden_layers - 1` linear + activation
+blocks at `hidden_features`, then a final linear layer to `out_features`. All
+layers carry a bias iff `bias` is True; the last layer is always linear.
+"""
+
+import torch
+import torch.nn as nn
+from typing import Tuple
+import jaxtyping
+
+
+class MLP(nn.Module):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        hidden_features: int,
+        hidden_layers: int,
+        bias: bool = True,
+        activation: str = "ReLU",  # any activation in torch.nn, e.g. ReLU/Tanh/GELU
+    ):
+        super().__init__()
+        self.in_features = in_features
+        self.hidden_features = hidden_features
+        self.hidden_layers = hidden_layers
+        self.out_features = out_features
+        self.bias = bias
+        self.activation = activation
+
+        self.net = self.initialize_net()
+
+    def initialize_net(self):
+        """Assemble the MLP as a Sequential, resolving the activation by name."""
+        activation_cls = getattr(nn, self.activation)
+        layers = []
+
+        # First block: in_features -> hidden_features, then activation.
+        layers.append(nn.Linear(self.in_features, self.hidden_features, bias=self.bias))
+        layers.append(activation_cls())
+
+        # Hidden blocks: hidden_features -> hidden_features, then activation.
+        for _ in range(self.hidden_layers - 1):
+            layers.append(nn.Linear(self.hidden_features, self.hidden_features, bias=self.bias))
+            layers.append(activation_cls())
+
+        # Final layer is linear: hidden_features -> out_features.
+        layers.append(nn.Linear(self.hidden_features, self.out_features, bias=self.bias))
+
+        return nn.Sequential(*layers)
+
+    def forward(self, coords: jaxtyping.Float[torch.Tensor, "N D"]) -> Tuple[
+        jaxtyping.Float[torch.Tensor, "N out_features"],
+        jaxtyping.Float[torch.Tensor, "N D"],
+    ]:
+        """Forward pass that also returns gradient-enabled input coordinates.
+
+        Coordinates follow the [-1, 1] convention from `data.py`. The input is
+        cloned with gradients enabled so the output can be differentiated with
+        respect to the coordinates.
+        """
+        coords = coords.clone().requires_grad_(True)
+        outputs = self.net(coords)
+        return outputs, coords
+```
+
+### neural_fields/operators.py
+```
+"""
+Differential operators built on autograd.
+
+Throughout, `y` is the model output and `x` is the model input. Every operator is
+computed with `create_graph=True` so that the result is itself differentiable and
+can be backpropagated through (e.g. to supervise a SIREN on image gradients).
+"""
+
+import torch
+
+
+def gradient(y: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    """Gradient of `y` with respect to `x`.
+
+    `create_graph=True` keeps the gradient in the computation graph so that the
+    forward pass and this backward pass together form a longer differentiable
+    function of `x` -- which is what lets us train on gradient targets.
+    """
+    grad = torch.autograd.grad(
+        outputs=y,
+        inputs=x,
+        grad_outputs=torch.ones_like(y),
+        create_graph=True,
+    )[0]
+    return grad
+
+
+def divergence(y: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    """Divergence of `y` with respect to `x`, taken along the last axis of `y`."""
+    # Sum of the diagonal of the Jacobian.
+    div = 0.0
+    for i in range(y.shape[-1]):
+        grad_i = torch.autograd.grad(
+            outputs=y[..., i],
+            inputs=x,
+            grad_outputs=torch.ones_like(y[..., i]),
+            create_graph=True,
+        )[0]
+        div += grad_i[..., i : i + 1]
+    return div
+
+
+def laplace(y: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    """Laplacian of `y` with respect to `x`, i.e. the divergence of the gradient."""
+    grad = gradient(y, x)
+    return divergence(grad, x)
+```
+
+### neural_fields/siren.py
+```
+"""
+A SIREN neural field (Sitzmann et al., 2020).
+
+The network maps `in_features`-dimensional coordinates (e.g. 2D xy positions) to
+`out_features`-dimensional values (e.g. RGB), using sine activations so that it
+can represent high-frequency detail and have well-behaved derivatives.
+
+Layout: one layer from `in_features` to `hidden_features`, then `hidden_layers`
+layers of `hidden_features` to `hidden_features`, then a final layer to
+`out_features` (linear or sine). A linear final layer always carries a bias.
+"""
+
+import torch
+import torch.nn as nn
+import jaxtyping
+from typing import Tuple
+
+
+class SineLayer(nn.Module):
+    """Linear layer followed by sin(omega_0 * .), with SIREN initialization."""
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool,
+        is_first_layer: bool,
+        omega_0: float,
+    ):
+        super().__init__()
+        self.omega_0 = omega_0
+        self.linear = nn.Linear(in_features, out_features, bias=bias)
+        self.init_weights(is_first_layer, in_features)
+
+    @torch.no_grad()
+    def init_weights(self, is_first_layer: bool, in_features: int):
+        """Weight init from the SIREN paper.
+
+        The first layer sees raw coordinates and uses Uniform(-1/n, 1/n); deeper
+        layers see sine activations and use Uniform(+/- sqrt(6/n) / omega_0), which
+        keeps the pre-activation distribution stable across depth.
+        """
+        if is_first_layer:
+            bound = 1.0 / in_features
+        else:
+            bound = (6.0 / in_features) ** 0.5 / self.omega_0
+        self.linear.weight.uniform_(-bound, bound)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.sin(self.omega_0 * self.linear(x))
+
+
+class SIREN(nn.Module):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        hidden_features: int,
+        hidden_layers: int,
+        bias: bool = True,
+        last_layer_linear: bool = False,
+        first_omega_0: float = 20.0,
+        hidden_omega_0: float = 20.0,
+    ):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.hidden_features = hidden_features
+        self.hidden_layers = hidden_layers
+        self.bias = bias
+        self.last_layer_linear = last_layer_linear
+        self.first_omega_0 = first_omega_0
+        self.hidden_omega_0 = hidden_omega_0
+
+        self.net = self.initialize_net()
+
+    def initialize_net(self):
+        """Assemble the SIREN as a Sequential of sine layers (+ optional linear head)."""
+        layers = []
+        # First layer: in_features -> hidden_features, sees raw [-1, 1] coords.
+        layers.append(
+            SineLayer(
+                in_features=self.in_features,
+                out_features=self.hidden_features,
+                bias=self.bias,
+                is_first_layer=True,
+                omega_0=self.first_omega_0,
+            )
+        )
+
+        # Hidden layers: hidden_features -> hidden_features, see sine activations.
+        for _ in range(self.hidden_layers):
+            layers.append(
+                SineLayer(
+                    in_features=self.hidden_features,
+                    out_features=self.hidden_features,
+                    bias=self.bias,
+                    is_first_layer=False,
+                    omega_0=self.hidden_omega_0,
+                )
+            )
+
+        if self.last_layer_linear:
+            # A linear head always carries a bias; init it like a hidden sine layer.
+            final = nn.Linear(self.hidden_features, self.out_features, bias=True)
+            with torch.no_grad():
+                bound = (6.0 / self.hidden_features) ** 0.5 / self.hidden_omega_0
+                final.weight.uniform_(-bound, bound)
+            layers.append(final)
+        else:
+            layers.append(
+                SineLayer(
+                    in_features=self.hidden_features,
+                    out_features=self.out_features,
+                    bias=self.bias,
+                    is_first_layer=False,
+                    omega_0=self.hidden_omega_0,
+                )
+            )
+
+        return nn.Sequential(*layers)
+
+    def forward(self, coords: jaxtyping.Float[torch.Tensor, "N D"]) -> Tuple[
+        jaxtyping.Float[torch.Tensor, "N out_features"],
+        jaxtyping.Float[torch.Tensor, "N D"],
+    ]:
+        """Forward pass that also returns gradient-enabled input coordinates.
+
+        Coordinates follow the [-1, 1] convention from `data.py`. We clone the
+        input and enable gradients on the copy so that downstream code can take
+        derivatives of the output with respect to the coordinates.
+        """
+        coords = coords.clone().requires_grad_(True)
+        outputs = self.net(coords)
+        return outputs, coords
+```
+
+### neural_fields/train.py
+```
+"""
+Training loop shared by the MLP and SIREN neural fields.
+"""
+
+from typing import Any, Dict
+
+import torch
+
+from .data import CoordinateImage, plot_field, psnr
+from .mlp import MLP
+from .operators import gradient, laplace
+from .siren import SIREN
+
+
+def train(
+    model: str,                  # "MLP" or "SIREN"
+    dataset: CoordinateImage,    # coordinates and pixel values for one image
+    lr: float,
+    total_steps: int,
+    steps_til_summary: int,
+    device: torch.device,
+    plot: bool = True,
+    save_dir: str | None = None,
+    **kwargs: Dict[str, Any],    # model-specific arguments
+):
+    """Full-batch training over a single image.
+
+    Builds the requested model (MLP or SIREN) from `**kwargs` and an Adam
+    optimizer, then takes `total_steps` gradient steps against an MSE
+    reconstruction loss. Every `steps_til_summary` steps it logs MSE/PSNR and
+    (optionally) plots the reconstruction together with its gradient and
+    Laplacian. Returns the loss and PSNR histories.
+    """
+    if model == "MLP":
+        net = MLP(**kwargs)
+    elif model == "SIREN":
+        net = SIREN(**kwargs)
+    else:
+        raise ValueError(f"Model {model!r} not recognized.")
+    net = net.to(device)
+
+    optimizer = torch.optim.Adam(net.parameters(), lr=lr)
+
+    coords, pixels = dataset[0]
+    coords = coords.to(device)
+    pixels = pixels.to(device)
+
+    loss_history = []
+    psnr_history = []
+
+    for step in range(total_steps):
+        # Forward returns (prediction, gradient-enabled input coords).
+        output, coords_grad = net(coords)
+
+        loss = torch.nn.functional.mse_loss(output, pixels)
+        current_psnr = psnr(output, pixels)
+
+        loss_history.append(loss.item())
+        psnr_history.append(current_psnr.item())
+
+        # NOTE: do this BEFORE loss.backward(), which frees the autograd graph
+        # that gradient()/laplace() need to differentiate `output` w.r.t.
+        # `coords_grad`.
+        if step % steps_til_summary == 0:
+            print(f"Step {step:5d} | MSE {loss.item():.6f} | PSNR {current_psnr.item():.2f} dB")
+            if plot:
+                img_grad = gradient(output, coords_grad)
+                img_laplacian = laplace(output, coords_grad)
+                save_path = None if save_dir is None else f"{save_dir}/{model.lower()}_step_{step:05d}.png"
+                plot_field(dataset, output, img_grad, img_laplacian, save_path=save_path)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    return loss_history, psnr_history
+```
+
+### renderers/__init__.py
+```
+
+```
+
+### renderers/camera.py
+```
+"""
+Camera-ray generation shared by the sphere tracer and the volume renderer.
+
+Given a camera-to-world matrix and pinhole intrinsics, this produces one ray
+(origin + unit direction) per pixel. The convention here matches the implicit
+demo scenes: +z points into the scene, +x right, +y down.
+"""
+
+import torch
+
+
+def camera_param_to_rays(c2w, intrinsics, H=128, W=128):
+    """Generate per-pixel rays for a pinhole camera.
+
+    Args:
+        c2w: [4, 4] camera-to-world transform.
+        intrinsics: [fx, fy, cx, cy].
+        H, W: image height and width.
+
+    Returns:
+        ray_origins: [H, W, 3]
+        ray_directions: [H, W, 3]  (unit length)
+    """
+    device = c2w.device
+    fx, fy, cx, cy = intrinsics[0], intrinsics[1], intrinsics[2], intrinsics[3]
+
+    # Pixel-center grid; j indexes rows (y), i indexes columns (x).
+    j, i = torch.meshgrid(
+        torch.arange(H, device=device, dtype=torch.float32),
+        torch.arange(W, device=device, dtype=torch.float32),
+        indexing="ij",
+    )
+
+    x_cam = (i + 0.5 - cx) / fx
+    y_cam = (j + 0.5 - cy) / fy
+    z_cam = torch.ones_like(x_cam)
+    dirs_cam = torch.stack([x_cam, y_cam, z_cam], dim=-1)  # [H, W, 3]
+
+    # Rotate directions into world space with the rotation block of c2w.
+    R = c2w[:3, :3].to(device)
+    ray_directions = dirs_cam @ R.T
+    ray_directions = ray_directions / torch.norm(ray_directions, dim=-1, keepdim=True)
+
+    # All rays share the camera's world position as their origin.
+    origin = c2w[:3, 3]
+    ray_origins = origin.expand(H, W, 3)
+
+    return ray_origins, ray_directions
+```
+
+### renderers/sphere_tracing.py
+```
+"""
+Sphere tracing: rendering an implicit surface defined by a signed distance
+function. Each ray is marched forward by the current SDF value until it lands on
+a surface (SDF ~ 0), then the surface colour is read out.
+"""
+
+import math
+
+import torch
+import torch.nn as nn
+
+from .camera import camera_param_to_rays
+
+
+class TwoSpheres(nn.Module):
+    """A toy SDF scene: two coloured spheres inside the unit cube.
+
+    - Sphere 1: centre (0.5, 0.5, 0.5), radius 0.2, blue.
+    - Sphere 2: centre (0.2, 0.7, 0.3), radius 0.2, green.
+    """
+
+    def forward(self, points_xyz):
+        """points_xyz: [B, 3] -> (sdf [B, 1], color [B, 3])."""
+        device = points_xyz.device
+
+        sphere1_center = torch.tensor([0.5, 0.5, 0.5], device=device)
+        sphere1_radius = 0.2
+        sphere1_dist = torch.norm(points_xyz - sphere1_center, dim=1, keepdim=True) - sphere1_radius
+        sphere1_color = torch.tensor([0.1, 0.4, 0.8], device=device)
+
+        sphere2_center = torch.tensor([0.2, 0.7, 0.3], device=device)
+        sphere2_radius = 0.2
+        sphere2_dist = torch.norm(points_xyz - sphere2_center, dim=1, keepdim=True) - sphere2_radius
+        sphere2_color = torch.tensor([0.2, 0.7, 0.3], device=device)
+
+        sdf = torch.minimum(sphere1_dist, sphere2_dist)
+        color = torch.where(sphere1_dist <= sphere2_dist, sphere1_color, sphere2_color)
+        return sdf, color
+
+
+def sphere_tracing(
+    ray_origins,
+    ray_directions,
+    model,
+    t_near=0.0,
+    t_far=3.0,
+    max_iter=256,
+    epsilon=1e-4,
+):
+    """March each ray by its SDF value until it hits a surface.
+
+    Returns an [H, W, 3] image; pixels whose rays never hit stay black.
+    """
+    device = ray_origins.device
+    H, W, _ = ray_origins.shape
+
+    origins = ray_origins.reshape(-1, 3)
+    directions = ray_directions.reshape(-1, 3)
+    B = origins.shape[0]
+
+    t = torch.full((B, 1), float(t_near), device=device)
+    hit = torch.zeros(B, dtype=torch.bool, device=device)
+    image_flat = torch.zeros(B, 3, device=device)
+
+    for _ in range(max_iter):
+        points = origins + t * directions
+        sdf, color = model(points)
+        sdf = sdf.squeeze(-1)
+
+        # Rays that reach the surface this iteration.
+        newly_hit = (sdf < epsilon) & ~hit & (t.squeeze(-1) < t_far)
+        image_flat[newly_hit] = color[newly_hit]
+        hit = hit | newly_hit
+
+        # Advance only rays that are still marching (conservative half-step).
+        step = 0.5 * sdf.unsqueeze(-1)
+        still_marching = (~hit).unsqueeze(-1)
+        t = t + step * still_marching
+
+        if hit.all() or (t > t_far).all():
+            break
+
+    return image_flat.reshape(H, W, 3)
+
+
+def render_sdf(model, c2w, intrinsics, H=128, W=128, max_iter=256):
+    """Generate rays for a view and sphere-trace the SDF scene."""
+    ray_origins, ray_directions = camera_param_to_rays(c2w, intrinsics, H, W)
+    return sphere_tracing(ray_origins, ray_directions, model, max_iter=max_iter)
+
+
+def demo(save_path="sphere_tracing.png"):
+    import matplotlib.pyplot as plt
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = TwoSpheres().to(device)
+    intrinsics = torch.tensor([75.0, 75.0, 64.0, 64.0], device=device)
+
+    c2w_1 = torch.tensor(
+        [[1.0, 0.0, 0.0, 0.0],
+         [0.0, 1.0, 0.0, 0.0],
+         [0.0, 0.0, -1.0, 2.0],
+         [0.0, 0.0, 0.0, 1.0]],
+        device=device,
+    )
+    theta = math.radians(30)
+    c2w_2 = torch.tensor(
+        [[math.cos(theta), 0.0, math.sin(theta), 0.0],
+         [0.0, 1.0, 0.0, 0.0],
+         [-math.sin(theta), 0.0, math.cos(theta), -1.5],
+         [0.0, 0.0, 0.0, 1.0]],
+        device=device,
+    )
+
+    img_1 = render_sdf(model, c2w_1, intrinsics).detach().cpu().numpy()
+    img_2 = render_sdf(model, c2w_2, intrinsics).detach().cpu().numpy()
+
+    plt.figure(figsize=(8, 4))
+    plt.subplot(1, 2, 1); plt.imshow(img_1); plt.title("View 1"); plt.axis("off")
+    plt.subplot(1, 2, 2); plt.imshow(img_2); plt.title("View 2"); plt.axis("off")
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=120, bbox_inches="tight")
+    print(f"saved {save_path}")
+
+
+if __name__ == "__main__":
+    demo()
+```
+
+### renderers/volume_rendering.py
+```
+"""
+Volume rendering of an implicit scene.
+
+Instead of finding a hard surface (as in sphere tracing), each ray is sampled at
+many depths; every sample contributes a colour weighted by how much light
+reaches it and how opaque it is. This is the same alpha-compositing integral a
+NeRF uses -- here the density/colour field is a fixed analytic scene rather than
+a network.
+"""
+
+import math
+
+import torch
+import torch.nn as nn
+
+from .camera import camera_param_to_rays
+
+
+class FourShapes(nn.Module):
+    """A density+colour field: two spheres and two cubes in the unit cube.
+
+    Density is 100 inside any shape and 0 outside; colour is the shape's colour.
+    """
+
+    def forward(self, points_xyz):
+        """points_xyz: [B, 3] -> (density [B, 1], color [B, 3])."""
+        device = points_xyz.device
+        batch_size = points_xyz.shape[0]
+        color = torch.zeros(batch_size, 3, device=device)
+
+        # 1. Blue sphere.
+        sphere1_center = torch.tensor([0.5, 0.5, 0.5], device=device)
+        sphere1_dist = torch.norm(points_xyz - sphere1_center, dim=1, keepdim=True) - 0.2
+        sphere1_density = (sphere1_dist <= 0).float()
+        sphere1_color = torch.tensor([0.1, 0.4, 0.8], device=device)
+
+        # 2. Red cube.
+        cube1_min = torch.tensor([0.3, 0.3, 0.3], device=device)
+        cube1_max = torch.tensor([0.4, 0.4, 0.7], device=device)
+        inside_cube1 = torch.all((points_xyz >= cube1_min) & (points_xyz <= cube1_max), dim=1, keepdim=True).float()
+        cube1_color = torch.tensor([0.9, 0.2, 0.2], device=device)
+
+        # 3. Green sphere.
+        sphere2_center = torch.tensor([0.2, 0.7, 0.3], device=device)
+        sphere2_dist = torch.norm(points_xyz - sphere2_center, dim=1, keepdim=True) - 0.2
+        sphere2_density = (sphere2_dist <= 0).float()
+        sphere2_color = torch.tensor([0.2, 0.7, 0.3], device=device)
+
+        # 4. Yellow cube.
+        cube2_min = torch.tensor([0.6, 0.1, 0.1], device=device)
+        cube2_max = torch.tensor([0.8, 0.3, 0.3], device=device)
+        inside_cube2 = torch.all((points_xyz >= cube2_min) & (points_xyz <= cube2_max), dim=1, keepdim=True).float()
+        cube2_color = torch.tensor([0.9, 0.8, 0.2], device=device)
+
+        density = torch.maximum(
+            torch.maximum(sphere1_density, inside_cube1),
+            torch.maximum(sphere2_density, inside_cube2),
+        ) * 100.0
+
+        # Paint colours; earlier shapes win on overlap.
+        color_mask = torch.zeros(batch_size, 1, device=device, dtype=torch.bool)
+        for mask, obj_color in [
+            (sphere1_density > 0, sphere1_color),
+            (inside_cube1 > 0, cube1_color),
+            (sphere2_density > 0, sphere2_color),
+            (inside_cube2 > 0, cube2_color),
+        ]:
+            update_mask = mask & ~color_mask
+            if update_mask.any():
+                color[update_mask.squeeze(-1)] = obj_color
+                color_mask = color_mask | update_mask
+
+        return density, color
+
+
+def sample_points_on_rays(ray_origins, ray_directions, num_samples=64, t_near=0.0, t_far=3.0):
+    """Uniformly sample depths along each ray.
+
+    Returns points [H, W, num_samples, 3] and the shared depths ts [num_samples].
+    """
+    device = ray_origins.device
+    ts = torch.linspace(t_near, t_far, num_samples, device=device)
+
+    origins = ray_origins.unsqueeze(2)          # [H, W, 1, 3]
+    directions = ray_directions.unsqueeze(2)    # [H, W, 1, 3]
+    ts_b = ts.view(1, 1, num_samples, 1)        # [1, 1, N, 1]
+    points = origins + ts_b * directions        # [H, W, N, 3]
+    return points, ts
+
+
+def volume_rendering(densities, colors, deltas):
+    """Alpha-composite samples along each ray into a pixel colour.
+
+    Args:
+        densities: [H, W, N, 1]
+        colors:    [H, W, N, 3]
+        deltas:    [N] spacing between adjacent samples.
+
+    Returns:
+        image: [H, W, 3]
+    """
+    device = densities.device
+    H, W, N, _ = densities.shape
+
+    accumulated_color = torch.zeros(H, W, 3, device=device)
+    transmittance = torch.ones(H, W, 1, device=device)
+
+    for i in range(N):
+        sigma_i = densities[:, :, i, :]
+        color_i = colors[:, :, i, :]
+        delta_i = deltas[i]
+
+        alpha_i = 1.0 - torch.exp(-sigma_i * delta_i)   # [H, W, 1]
+        weight_i = transmittance * alpha_i               # T_i * alpha_i
+        accumulated_color = accumulated_color + weight_i * color_i
+        transmittance = transmittance * (1.0 - alpha_i)
+
+    return accumulated_color
+
+
+def render_implicit(model, c2w, intrinsics, H=128, W=128, num_samples=64, t_near=0.0, t_far=3.0):
+    """Render a density/colour field with volume rendering."""
+    ray_origins, ray_directions = camera_param_to_rays(c2w, intrinsics, H, W)
+    points, _ = sample_points_on_rays(ray_origins, ray_directions, num_samples, t_near, t_far)
+
+    H_, W_, N, _ = points.shape
+    densities_flat, colors_flat = model(points.reshape(-1, 3))
+    densities = densities_flat.view(H_, W_, N, 1)
+    colors = colors_flat.view(H_, W_, N, 3)
+
+    delta = (t_far - t_near) / num_samples
+    deltas = delta * torch.ones(N, device=points.device)
+    return volume_rendering(densities, colors, deltas)
+
+
+def demo(save_path="volume_rendering.png", num_samples=256):
+    import matplotlib.pyplot as plt
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = FourShapes().to(device)
+    intrinsics = torch.tensor([75.0, 75.0, 64.0, 64.0], device=device)
+
+    c2w_1 = torch.tensor(
+        [[1.0, 0.0, 0.0, 0.0],
+         [0.0, 1.0, 0.0, 0.0],
+         [0.0, 0.0, -1.0, 2.0],
+         [0.0, 0.0, 0.0, 1.0]],
+        device=device,
+    )
+    theta = math.radians(30)
+    c2w_2 = torch.tensor(
+        [[math.cos(theta), 0.0, math.sin(theta), 0.0],
+         [0.0, 1.0, 0.0, 0.0],
+         [-math.sin(theta), 0.0, math.cos(theta), -1.5],
+         [0.0, 0.0, 0.0, 1.0]],
+        device=device,
+    )
+
+    img_1 = render_implicit(model, c2w_1, intrinsics, num_samples=num_samples).detach().cpu().numpy()
+    img_2 = render_implicit(model, c2w_2, intrinsics, num_samples=num_samples).detach().cpu().numpy()
+
+    plt.figure(figsize=(10, 5))
+    plt.subplot(1, 2, 1); plt.imshow(img_1); plt.title(f"View 1 ({num_samples} samples)"); plt.axis("off")
+    plt.subplot(1, 2, 2); plt.imshow(img_2); plt.title(f"View 2 ({num_samples} samples)"); plt.axis("off")
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=120, bbox_inches="tight")
+    print(f"saved {save_path}")
+
+
+if __name__ == "__main__":
+    demo()
+```
+
+### scripts/fit_image.py
+```
+"""Fit a single image with a SIREN and a ReLU-MLP neural field, and compare.
+
+    python -m scripts.fit_image --model SIREN --steps 1000
+"""
+
+import argparse
+
+import torch
+
+from neural_fields.data import CoordinateImage, set_seed
+from neural_fields.train import train
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", choices=["SIREN", "MLP"], default="SIREN")
+    parser.add_argument("--height", type=int, default=256)
+    parser.add_argument("--steps", type=int, default=1000)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--no-plot", action="store_true")
+    parser.add_argument("--save-dir", default=None)
+    args = parser.parse_args()
+
+    set_seed(0)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dataset = CoordinateImage(height=args.height)
+
+    model_kwargs = dict(in_features=2, out_features=1, hidden_features=256, hidden_layers=3)
+    if args.model == "MLP":
+        model_kwargs["activation"] = "ReLU"
+
+    train(
+        model=args.model,
+        dataset=dataset,
+        lr=args.lr,
+        total_steps=args.steps,
+        steps_til_summary=max(1, args.steps // 5),
+        device=device,
+        plot=not args.no_plot,
+        save_dir=args.save_dir,
+        **model_kwargs,
+    )
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### scripts/render_demos.py
+```
+"""Render the analytic implicit scenes with sphere tracing and volume rendering.
+
+    python -m scripts.render_demos
+"""
+
+from renderers.sphere_tracing import demo as sphere_tracing_demo
+from renderers.volume_rendering import demo as volume_rendering_demo
+
+
+def main():
+    sphere_tracing_demo("sphere_tracing.png")
+    volume_rendering_demo("volume_rendering.png")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### scripts/train_nerf.py
+```
+"""Train a NeRF on a Blender-synthetic scene (e.g. the lego scene).
+
+Download a scene from the NeRF-synthetic dataset and point --data at the scene
+directory (the one containing transforms_train.json):
+
+    python -m scripts.train_nerf --data data/nerf_synthetic/lego --iters 20000
+
+Outputs (periodic renders + a final 360-degree orbit / spin.gif) go to --out.
+"""
+
+import argparse
+
+from nerf.train import train_nerf
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data", required=True, help="scene dir with transforms_*.json")
+    parser.add_argument("--out", default="outputs")
+    parser.add_argument("--downsample", type=int, default=2)
+    parser.add_argument("--iters", type=int, default=20000)
+    parser.add_argument("--rays", type=int, default=1024)
+    parser.add_argument("--samples", type=int, default=64)
+    parser.add_argument("--lr", type=float, default=5e-4)
+    parser.add_argument("--near", type=float, default=2.0)
+    parser.add_argument("--far", type=float, default=6.0)
+    args = parser.parse_args()
+
+    train_nerf(
+        data_root=args.data,
+        out_dir=args.out,
+        downsample=args.downsample,
+        iters=args.iters,
+        rays_per_batch=args.rays,
+        n_samples=args.samples,
+        lr=args.lr,
+        near=args.near,
+        far=args.far,
+    )
+
+
+if __name__ == "__main__":
+    main()
+```

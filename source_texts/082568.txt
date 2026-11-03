@@ -1,0 +1,588 @@
+Ray marching steps along each ray by the SDF distance to the nearest surface, enabling fractals and complex shapes without a single triangle.
+
+Ray Marching – Rendering Without Triangles Using Distance Fields | KipuHub
+Cookies & privacy
+We use essential cookies to run the site (session, security, and your theme/language preferences). With your permission we also load embedded third-party content, such as YouTube videos. Cookie Policy
+Accept all Essential only Preferences
+Skip to content
+Ray Marching
+When a distance function replaces every triangle in the scene
+Author(s):Elier Rodríguez García
+December 14, 2024
+Print / PDF
+Index
+Introduction
+Traditional 3D rendering cuts every surface into triangles and tests each ray against millions of them. It works brilliantly — but geometry that is hard to triangulate, like fractals, smooth organic blends, or infinite repetition, becomes painful or impossible.
+Ray marching takes a different approach. Instead of triangles, you define a scene with a signed distance function (SDF): a formula that, given any point ppp in space, returns the distance from ppp to the nearest surface. Negative inside, positive outside, zero exactly on the surface.
+The rendering loop is remarkably simple. Fire a ray from the camera. At the current position, evaluate the SDF. That value tells you: the nearest surface is at least this far away. Take a step of exactly that size — you cannot possibly overshoot the surface. Repeat. Each step is as large as safety allows, so convergence is fast. When the SDF drops below a tiny threshold ε\varepsilonε, you have hit the surface.
+This technique — called sphere tracing when credited to its 1996 inventor John C. Hart — needs no mesh at all. The scene lives entirely inside a mathematical formula.
+Try It
+The canvas below shows a 2D cross-section of a ray marching scene. The orange dot is the ray origin; the black arrow shows the ray direction. The colored circles are the SDF "safe spheres" — at each step the ray may advance by the radius of the circle centered on the current position, guaranteed not to overshoot the nearest obstacle.
+```
+<!-- <!-- 2D Ray Marching demo: step a ray through a signed distance field (SDF) --> -->
+<div class="toolbar">
+  <span class="label">Scene:</span>
+  <button id="sceneA" type="button" class="scene-btn active">A</button>
+  <button id="sceneB" type="button" class="scene-btn">B</button>
+  <button id="sceneC" type="button" class="scene-btn">C</button>
+</div>
+<canvas id="cv" width="400" height="280" aria-label="2D ray marching visualization showing a ray stepping through a signed distance field"></canvas>
+<div class="status" id="status">Click Step or March All to begin.</div>
+<div class="btns">
+  <button id="btnStep" type="button">Step</button>
+  <button id="btnAll"  type="button">March All</button>
+  <button id="btnReset" type="button" class="ghost">Reset</button>
+</div>
+```
+```
+/* Layout and colors for the 2D ray marching visualization */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, sans-serif; color: #222; background: #fff; }
+.toolbar { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; margin-bottom: .5rem; }
+.label { font-size: .8rem; color: #555; margin-right: .2rem; }
+.scene-btn { font-size: .8rem; padding: .25rem .6rem; border: 1px solid #aaa; border-radius: 5px;
+             background: #f0f0f0; cursor: pointer; }
+.scene-btn.active { background: #1d3557; color: #fff; border-color: #1d3557; }
+canvas { display: block; border: 1px solid #ccc; border-radius: 8px; max-width: 100%; }
+.status { font-size: .9rem; font-weight: 600; margin: .4rem 0; min-height: 1.3em; color: #333; }
+.btns { display: flex; gap: .5rem; flex-wrap: wrap; }
+button { font: 600 14px system-ui, sans-serif; padding: .4rem .85rem;
+         border: 1px solid #1d3557; background: #1d3557; color: #fff;
+         border-radius: 8px; cursor: pointer; }
+button.ghost { background: #fff; color: #1d3557; }
+```
+```
+const fmt = (s, v) => s.replace(/%(\w+)%/g, (_, k) => String(v[k] ?? ''));
+// Ray marching (sphere tracing): at each position evaluate the SDF.
+// The SDF step size = distance to nearest surface => we cannot overshoot.
+
+// Three preset scenes with different circle obstacles
+const SCENES = {
+  A: {
+    // Scene A: three circles of varied size
+    circles: [
+      { x: 220, y: 130, r: 55 },
+      { x: 310, y: 200, r: 35 },
+      { x: 160, y: 220, r: 28 }
+    ],
+    origin: { x: 30, y: 140 },
+    dir:    { x: 1, y: 0.25 }
+  },
+  B: {
+    // Scene B: one large circle, one small, angled ray
+    circles: [
+      { x: 200, y: 140, r: 70 },
+      { x: 340, y: 90,  r: 30 }
+    ],
+    origin: { x: 20, y: 240 },
+    dir:    { x: 0.9, y: -0.55 }
+  },
+  C: {
+    // Scene C: four circles, nearly grazing shot
+    circles: [
+      { x: 130, y: 80,  r: 40 },
+      { x: 260, y: 160, r: 50 },
+      { x: 350, y: 80,  r: 30 },
+      { x: 180, y: 220, r: 25 }
+    ],
+    origin: { x: 20, y: 140 },
+    dir:    { x: 1, y: 0.1 }
+  }
+};
+
+// Evaluate the SDF as the minimum distance to any circle surface
+function sdf(scene, px, py) {
+  let d = Infinity;
+  for (const c of scene.circles) {
+    const dist = Math.hypot(px - c.x, py - c.y) - c.r;
+    if (dist < d) d = dist;
+  }
+  return d;
+}
+
+// Normalize direction vector to unit length
+function normalize(dx, dy) {
+  const len = Math.hypot(dx, dy);
+  return { x: dx / len, y: dy / len };
+}
+
+const CANVAS_W = 400, CANVAS_H = 280;
+const HIT_THRESHOLD = 1.5; // hit if closer than 1.5 px
+const MAX_STEPS = 40;       // safety cap
+const STEP_COLORS = [
+  '#e63946','#f4a261','#e9c46a','#2a9d8f','#457b9d','#6a4c93','#0077b6','#f77f00'
+]; // one color per step for visual clarity
+
+let currentScene = SCENES.A;
+let steps = [];      // array of {x, y, radius, hit} per march step
+let stepIdx = 0;
+let done = false;
+
+function initSteps(scene) {
+  const dir = normalize(scene.dir.x, scene.dir.y);
+  steps = [];
+  let px = scene.origin.x, py = scene.origin.y;
+  let hit = false;
+  // March the ray: each step = SDF value at current position
+  for (let i = 0; i < MAX_STEPS; i++) {
+    const d = sdf(scene, px, py);
+    steps.push({ x: px, y: py, radius: Math.abs(d), hit: d <= HIT_THRESHOLD });
+    if (d <= HIT_THRESHOLD) { hit = true; break; }
+    if (d < 0) break; // inside an obstacle — stop
+    px += dir.x * d;
+    py += dir.y * d;
+  }
+  if (!hit) steps.push({ x: px, y: py, radius: 0, hit: false });
+}
+
+function draw(upToStep) {
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // Draw background
+  ctx.fillStyle = '#f8f9fa';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // Draw scene obstacles (circles)
+  for (const c of currentScene.circles) {
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+    ctx.fillStyle = '#dbe4ee';
+    ctx.fill();
+    ctx.strokeStyle = '#4a6fa5';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
+  const dir = normalize(currentScene.dir.x, currentScene.dir.y);
+  const origin = currentScene.origin;
+
+  // Draw faint ray line
+  if (steps.length > 0) {
+    const last = steps[Math.min(upToStep, steps.length - 1)];
+    ctx.beginPath();
+    ctx.moveTo(origin.x, origin.y);
+    ctx.lineTo(last.x + dir.x * (last.radius + 2), last.y + dir.y * (last.radius + 2));
+    ctx.strokeStyle = '#aaa';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Draw each safe sphere and step dot
+  for (let i = 0; i <= upToStep && i < steps.length; i++) {
+    const s = steps[i];
+    const color = STEP_COLORS[i % STEP_COLORS.length];
+    if (s.radius > 0) {
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.radius, 0, Math.PI * 2);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.2;
+      ctx.globalAlpha = 0.55;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    // Draw step position dot
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+  }
+
+  // Draw ray origin
+  ctx.beginPath();
+  ctx.arc(origin.x, origin.y, 6, 0, Math.PI * 2);
+  ctx.fillStyle = '#ff7b00';
+  ctx.fill();
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Draw direction arrow
+  const ax = origin.x + dir.x * 30, ay = origin.y + dir.y * 30;
+  ctx.beginPath();
+  ctx.moveTo(origin.x, origin.y);
+  ctx.lineTo(ax, ay);
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  const angle = Math.atan2(dir.y, dir.x);
+  const tip = 7;
+  ctx.beginPath();
+  ctx.moveTo(ax, ay);
+  ctx.lineTo(ax - tip * Math.cos(angle - 0.4), ay - tip * Math.sin(angle - 0.4));
+  ctx.lineTo(ax - tip * Math.cos(angle + 0.4), ay - tip * Math.sin(angle + 0.4));
+  ctx.closePath();
+  ctx.fillStyle = '#333';
+  ctx.fill();
+}
+
+function setStatus(t) {
+  document.getElementById('status').textContent = t;
+}
+
+function reset() {
+  initSteps(currentScene);
+  stepIdx = 0;
+  done = false;
+  draw(0);
+  setStatus('Click Step or March All to begin.');
+}
+
+// Advance one ray marching step and update display
+function step() {
+  if (done) return;
+  draw(stepIdx);
+  const s = steps[stepIdx];
+  const total = steps.length;
+  if (s.hit) {
+    setStatus(fmt('Hit surface in %n% step(s)!', { n: stepIdx + 1 }));
+    done = true;
+  } else if (stepIdx >= total - 1) {
+    setStatus(fmt('Ray missed — %n% steps taken.', { n: total }));
+    done = true;
+  } else {
+    setStatus(fmt('Step %n% — safe radius: %r% px', { n: stepIdx + 1, r: s.radius.toFixed(1) }));
+    stepIdx++;
+  }
+}
+
+function marchAll() {
+  const total = steps.length;
+  draw(total - 1);
+  const last = steps[total - 1];
+  if (last.hit) {
+    setStatus(fmt('Hit surface in %n% step(s)!', { n: total }));
+  } else {
+    setStatus(fmt('Ray missed — %n% steps taken.', { n: total }));
+  }
+  stepIdx = total - 1;
+  done = true;
+}
+
+// Wire up scene selector buttons
+['A', 'B', 'C'].forEach(id => {
+  document.getElementById('scene' + id).addEventListener('click', () => {
+    document.querySelectorAll('.scene-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('scene' + id).classList.add('active');
+    currentScene = SCENES[id];
+    reset();
+  });
+});
+
+document.getElementById('btnStep').addEventListener('click', step);
+document.getElementById('btnAll').addEventListener('click', marchAll);
+document.getElementById('btnReset').addEventListener('click', reset);
+
+reset();
+```
+HTML
+CSS
+JS
+Reset
+Copy
+Download .zip
+```
+<!-- <!-- 2D Ray Marching demo: step a ray through a signed distance field (SDF) --> -->
+<div class="toolbar">
+  <span class="label">Scene:</span>
+  <button id="sceneA" type="button" class="scene-btn active">A</button>
+  <button id="sceneB" type="button" class="scene-btn">B</button>
+  <button id="sceneC" type="button" class="scene-btn">C</button>
+</div>
+<canvas id="cv" width="400" height="280" aria-label="2D ray marching visualization showing a ray stepping through a signed distance field"></canvas>
+<div class="status" id="status">Click Step or March All to begin.</div>
+<div class="btns">
+  <button id="btnStep" type="button">Step</button>
+  <button id="btnAll"  type="button">March All</button>
+  <button id="btnReset" type="button" class="ghost">Reset</button>
+</div>
+```
+```
+/* Layout and colors for the 2D ray marching visualization */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, sans-serif; color: #222; background: #fff; }
+.toolbar { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; margin-bottom: .5rem; }
+.label { font-size: .8rem; color: #555; margin-right: .2rem; }
+.scene-btn { font-size: .8rem; padding: .25rem .6rem; border: 1px solid #aaa; border-radius: 5px;
+             background: #f0f0f0; cursor: pointer; }
+.scene-btn.active { background: #1d3557; color: #fff; border-color: #1d3557; }
+canvas { display: block; border: 1px solid #ccc; border-radius: 8px; max-width: 100%; }
+.status { font-size: .9rem; font-weight: 600; margin: .4rem 0; min-height: 1.3em; color: #333; }
+.btns { display: flex; gap: .5rem; flex-wrap: wrap; }
+button { font: 600 14px system-ui, sans-serif; padding: .4rem .85rem;
+         border: 1px solid #1d3557; background: #1d3557; color: #fff;
+         border-radius: 8px; cursor: pointer; }
+button.ghost { background: #fff; color: #1d3557; }
+```
+```
+const fmt = (s, v) => s.replace(/%(\w+)%/g, (_, k) => String(v[k] ?? ''));
+// Ray marching (sphere tracing): at each position evaluate the SDF.
+// The SDF step size = distance to nearest surface => we cannot overshoot.
+
+// Three preset scenes with different circle obstacles
+const SCENES = {
+  A: {
+    // Scene A: three circles of varied size
+    circles: [
+      { x: 220, y: 130, r: 55 },
+      { x: 310, y: 200, r: 35 },
+      { x: 160, y: 220, r: 28 }
+    ],
+    origin: { x: 30, y: 140 },
+    dir:    { x: 1, y: 0.25 }
+  },
+  B: {
+    // Scene B: one large circle, one small, angled ray
+    circles: [
+      { x: 200, y: 140, r: 70 },
+      { x: 340, y: 90,  r: 30 }
+    ],
+    origin: { x: 20, y: 240 },
+    dir:    { x: 0.9, y: -0.55 }
+  },
+  C: {
+    // Scene C: four circles, nearly grazing shot
+    circles: [
+      { x: 130, y: 80,  r: 40 },
+      { x: 260, y: 160, r: 50 },
+      { x: 350, y: 80,  r: 30 },
+      { x: 180, y: 220, r: 25 }
+    ],
+    origin: { x: 20, y: 140 },
+    dir:    { x: 1, y: 0.1 }
+  }
+};
+
+// Evaluate the SDF as the minimum distance to any circle surface
+function sdf(scene, px, py) {
+  let d = Infinity;
+  for (const c of scene.circles) {
+    const dist = Math.hypot(px - c.x, py - c.y) - c.r;
+    if (dist < d) d = dist;
+  }
+  return d;
+}
+
+// Normalize direction vector to unit length
+function normalize(dx, dy) {
+  const len = Math.hypot(dx, dy);
+  return { x: dx / len, y: dy / len };
+}
+
+const CANVAS_W = 400, CANVAS_H = 280;
+const HIT_THRESHOLD = 1.5; // hit if closer than 1.5 px
+const MAX_STEPS = 40;       // safety cap
+const STEP_COLORS = [
+  '#e63946','#f4a261','#e9c46a','#2a9d8f','#457b9d','#6a4c93','#0077b6','#f77f00'
+]; // one color per step for visual clarity
+
+let currentScene = SCENES.A;
+let steps = [];      // array of {x, y, radius, hit} per march step
+let stepIdx = 0;
+let done = false;
+
+function initSteps(scene) {
+  const dir = normalize(scene.dir.x, scene.dir.y);
+  steps = [];
+  let px = scene.origin.x, py = scene.origin.y;
+  let hit = false;
+  // March the ray: each step = SDF value at current position
+  for (let i = 0; i < MAX_STEPS; i++) {
+    const d = sdf(scene, px, py);
+    steps.push({ x: px, y: py, radius: Math.abs(d), hit: d <= HIT_THRESHOLD });
+    if (d <= HIT_THRESHOLD) { hit = true; break; }
+    if (d < 0) break; // inside an obstacle — stop
+    px += dir.x * d;
+    py += dir.y * d;
+  }
+  if (!hit) steps.push({ x: px, y: py, radius: 0, hit: false });
+}
+
+function draw(upToStep) {
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // Draw background
+  ctx.fillStyle = '#f8f9fa';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // Draw scene obstacles (circles)
+  for (const c of currentScene.circles) {
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+    ctx.fillStyle = '#dbe4ee';
+    ctx.fill();
+    ctx.strokeStyle = '#4a6fa5';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
+  const dir = normalize(currentScene.dir.x, currentScene.dir.y);
+  const origin = currentScene.origin;
+
+  // Draw faint ray line
+  if (steps.length > 0) {
+    const last = steps[Math.min(upToStep, steps.length - 1)];
+    ctx.beginPath();
+    ctx.moveTo(origin.x, origin.y);
+    ctx.lineTo(last.x + dir.x * (last.radius + 2), last.y + dir.y * (last.radius + 2));
+    ctx.strokeStyle = '#aaa';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Draw each safe sphere and step dot
+  for (let i = 0; i <= upToStep && i < steps.length; i++) {
+    const s = steps[i];
+    const color = STEP_COLORS[i % STEP_COLORS.length];
+    if (s.radius > 0) {
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.radius, 0, Math.PI * 2);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.2;
+      ctx.globalAlpha = 0.55;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    // Draw step position dot
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+  }
+
+  // Draw ray origin
+  ctx.beginPath();
+  ctx.arc(origin.x, origin.y, 6, 0, Math.PI * 2);
+  ctx.fillStyle = '#ff7b00';
+  ctx.fill();
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Draw direction arrow
+  const ax = origin.x + dir.x * 30, ay = origin.y + dir.y * 30;
+  ctx.beginPath();
+  ctx.moveTo(origin.x, origin.y);
+  ctx.lineTo(ax, ay);
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  const angle = Math.atan2(dir.y, dir.x);
+  const tip = 7;
+  ctx.beginPath();
+  ctx.moveTo(ax, ay);
+  ctx.lineTo(ax - tip * Math.cos(angle - 0.4), ay - tip * Math.sin(angle - 0.4));
+  ctx.lineTo(ax - tip * Math.cos(angle + 0.4), ay - tip * Math.sin(angle + 0.4));
+  ctx.closePath();
+  ctx.fillStyle = '#333';
+  ctx.fill();
+}
+
+function setStatus(t) {
+  document.getElementById('status').textContent = t;
+}
+
+function reset() {
+  initSteps(currentScene);
+  stepIdx = 0;
+  done = false;
+  draw(0);
+  setStatus('Click Step or March All to begin.');
+}
+
+// Advance one ray marching step and update display
+function step() {
+  if (done) return;
+  draw(stepIdx);
+  const s = steps[stepIdx];
+  const total = steps.length;
+  if (s.hit) {
+    setStatus(fmt('Hit surface in %n% step(s)!', { n: stepIdx + 1 }));
+    done = true;
+  } else if (stepIdx >= total - 1) {
+    setStatus(fmt('Ray missed — %n% steps taken.', { n: total }));
+    done = true;
+  } else {
+    setStatus(fmt('Step %n% — safe radius: %r% px', { n: stepIdx + 1, r: s.radius.toFixed(1) }));
+    stepIdx++;
+  }
+}
+
+function marchAll() {
+  const total = steps.length;
+  draw(total - 1);
+  const last = steps[total - 1];
+  if (last.hit) {
+    setStatus(fmt('Hit surface in %n% step(s)!', { n: total }));
+  } else {
+    setStatus(fmt('Ray missed — %n% steps taken.', { n: total }));
+  }
+  stepIdx = total - 1;
+  done = true;
+}
+
+// Wire up scene selector buttons
+['A', 'B', 'C'].forEach(id => {
+  document.getElementById('scene' + id).addEventListener('click', () => {
+    document.querySelectorAll('.scene-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('scene' + id).classList.add('active');
+    currentScene = SCENES[id];
+    reset();
+  });
+});
+
+document.getElementById('btnStep').addEventListener('click', step);
+document.getElementById('btnAll').addEventListener('click', marchAll);
+document.getElementById('btnReset').addEventListener('click', reset);
+
+reset();
+```
+Result
+Console
+Clear
+Click Step to advance one iteration at a time and watch the safe-sphere shrink as the ray closes in on the surface. Click March All to see the full convergence at once. Use Reset to restart from the beginning or try a different scene with the buttons on the right.
+Notice that each step is as large as possible without risk — this is the key efficiency of sphere tracing versus naive fixed-step ray marching.
+The Real Complexity
+Ray marching is elegant, but its performance depends on the quality of the SDF.
+Convergence rate. If the SDF is a true distance (Lipschitz constant ≤1\leq 1≤1), each step reduces the remaining gap by a guaranteed fraction. For a smooth scene the ray typically converges in 20–100 steps, regardless of scene complexity — a striking contrast to the O(n)O(n)O(n) triangle intersection cost.
+The Lipschitz trap. If you combine SDFs carelessly — say, by multiplying them or using non-normalized domain warping — the function can shrink faster than the true distance. The marcher takes baby steps and may never converge within the step budget.
+Over-relaxation. A trick popularized by Inigo Quilez allows steps larger than the strict SDF value when the field is known to be well-behaved, cutting step counts nearly in half for typical scenes.
+Soft shadows and ambient occlusion come nearly for free: sample the SDF a few times along the shadow ray and the ratio of the minimum value to the step distance gives a soft penumbra factor, something triangle renderers must approximate with expensive shadow maps.
+Fractals like the Mandelbulb or the Menger sponge have SDFs that are approximated iteratively. The convergence is slower, but a mesh of equivalent fidelity would require billions of triangles.
+The fundamental limit: ray marching cannot do better than O(log⁡(1/ε))O(\log(1/\varepsilon))O(log(1/ε)) steps near a flat surface — that is the geometric series formed by the successive half-distances as the ray closes in.
+Where It Matters
+The combination of mathematical elegance and GPU-friendliness has made ray marching ubiquitous in modern graphics:
+Real-time shader art: platforms like Shadertoy host thousands of scenes — entire planets, infinite caves, fractal universes — written as a single fragment shader with no mesh data whatsoever.
+Film and TV volumetrics: fog, clouds, and smoke are naturally described by a density SDF. Ray marching through the volume accumulates opacity and color without needing to simulate individual particles.
+Procedural terrain: infinite landscapes defined by noise functions are cheaper to render with ray marching than to tessellate into meshes.
+Medical imaging: CT and MRI data provide a 3D scalar field. Ray marching through it as an implicit surface is a standard visualization technique.
+CSG (Constructive Solid Geometry): boolean operations on shapes (union, intersection, subtraction) are just min⁡\minmin, max⁡\maxmax, and negation on their SDFs — trivial in ray marching, painful in mesh-based workflows.
+Ray marching also connects to compression ideas: a complex shape is "compressed" into a short mathematical formula that the renderer expands on demand per pixel. And the step-until-convergence logic echoes the iterative methods studied in non-convex optimization.
+Conclusion
+Ray marching distills a scene into its mathematical essence: instead of a catalog of triangles, you carry a single function that answers "how far am I from anything?" at any point in space. The marcher uses that answer greedily — step as far as safety allows, ask again, repeat — and arrives at the surface in a handful of iterations.
+The payoff is extraordinary. Fractals with infinite detail, smooth organic blends, fog, fire, and infinite procedural worlds all fall within reach of a few lines of math. What you lose in raw triangle throughput you gain tenfold in geometric expressiveness.
+If you have ever admired a Shadertoy scene running entirely on a GPU with zero mesh data, you were watching sphere tracing at work — one of the most beautiful algorithms in computer graphics, hiding in plain sight inside a distance function.
+Sources: Inigo Quilez – Ray Marching Distance Fields (opens in a new tab), Shadertoy – Classic ray marching example (opens in a new tab)
+Copy link
+X (Twitter) (opens in a new tab)
+LinkedIn (opens in a new tab)
+WhatsApp (opens in a new tab)
+Telegram (opens in a new tab)
+Facebook (opens in a new tab)
+Reddit (opens in a new tab)
+Pinterest (opens in a new tab)
+Bluesky (opens in a new tab)
+Hacker News (opens in a new tab)
+Email (opens in a new tab)
+Show QR code
+Sign in
+Sign in to leave a comment.
+Loading comments...
+https://www.kipuhub.com/en/article/ray-marching/Content licensed under CC BY-NC 4.0.

@@ -1,0 +1,126 @@
+# Volume rendering
+
+> Volume rendering makes images of data that fill space (a density, a material, a temperature sampled through a region) rather than of surfaces alone.
+
+_This introduction was written by Claude._
+
+## What a volume is
+
+A **volume** is a function over 3D space, $f(\mathbf{x})$, usually known only at samples. The commonest case, and the core of this encyclopedia, is a **regular grid**: a 3D array of values in which each cell, a **voxel**, is a small cube. CT and MRI scans, smoke and fluid simulations, cloud textures, Minecraft-style worlds and the occupancy grids of game engines all have this form. A voxel can hold a scalar (density, temperature), a material id, a color, or a single occupancy bit [G].
+
+The same ideas carry over to other sampled fields: **hierarchical and adaptive grids** that store detail only where it is needed (octrees, VDB, adaptive mesh refinement), **unstructured meshes** of tetrahedra and other cells, **implicit fields** such as signed distance functions that are evaluated on demand, and **learned fields** such as neural radiance fields and 3D Gaussians [G].
+
+## Two ways to draw a volume
+
+**Extract a surface, then draw the surface.** Choose a level $f(\mathbf{x}) = c$ (an **isosurface**) or the boundary of the solid voxels, turn it into triangles, and draw them with an ordinary GPU pipeline. Most voxel games and many medical viewers work this way [G].
+
+**Render the volume directly.** Treat the data as a semi-transparent medium and add up its contribution along each viewing ray. This is **direct volume rendering**, introduced in its common form by Levoy [S16] and by Drebin, Carpenter and Hanrahan [S3]. Everything from medical CT viewers to film clouds to neural radiance fields is a variant of it [G].
+
+## The volume rendering integral
+
+Along a ray $\mathbf{x}(t) = \mathbf{o} + t\,\mathbf{d}$ through a medium with extinction coefficient $\sigma(t)$ and emitted color $c(t)$, the color that reaches the eye is [S20]
+
+$$C = \int_0^{D} T(t)\,\sigma(t)\,c(t)\,dt, \qquad T(t) = \exp\!\Big(-\int_0^{t} \sigma(s)\,ds\Big)$$
+
+$T$ is the **transmittance**: the fraction of light from depth $t$ that survives to the eye. Max [S20] surveys this emission–absorption model and its relatives. Renderers approximate the integral by taking samples every $\Delta t$ and **compositing** them, usually front to back so that a ray can stop as soon as it is nearly opaque (early ray termination) [S17, S20]:
+
+$$\alpha_i = 1 - e^{-\sigma_i \Delta t}, \qquad C \leftarrow C + T\,\alpha_i\,c_i, \qquad T \leftarrow T\,(1 - \alpha_i)$$
+
+**Classification** turns raw data values into $\sigma$ and $c$, usually through a **transfer function**: a lookup table from value (and sometimes gradient magnitude) to color and opacity [S13, S16]. The same two formulas drive NeRF and Gaussian splatting; only the source of $\sigma$ and $c$ changes [S21, S12].
+
+## The ten branches
+
+The encyclopedia is a tree. Its root is this page; below it are ten branches, ordered from the data, to the ways of drawing it, to what it is used for.
+
+### 1. [Volume data and representation](#=Volume_data_and_representation)
+How a volume is held in memory. Dense grids are simple but large, so layouts such as bricking and Morton (Z-order) curves keep neighbouring voxels close in memory [G]. Real volumes are mostly empty or uniform, so **sparse structures** store only the occupied parts: [octrees and sparse voxel octrees](#=Sparse_Voxel_Octrees), [sparse voxel DAGs](#=Sparse_Voxel_DAG), which merge identical subtrees (Kämpe, Sintorn and Assarsson [S10]), and [VDB](#=OpenVDB), the shallow, wide tree used in film production (Museth [S23]). The branch also covers value compression, levels of detail, out-of-core streaming of data larger than memory, non-regular meshes, and neural and Gaussian representations [G].
+
+### 2. [Producing volume data](#=Producing_volume_data)
+Where volumes come from: [voxelization](#=Voxelization) of triangle meshes and point clouds, procedural fields built from noise and distance functions, measurement by CT, MRI, microscopy or seismic surveys, and the output of fluid, fire and astrophysics simulations [G].
+
+### 3. [Image-order rendering](#=Image-order_rendering)
+Methods that start from the pixels and cast a ray per pixel. [Volume ray casting](#=Volume_Ray_Casting) samples the volume along the ray, interpolates (usually trilinearly), classifies and composites [S16, S17]. To visit exactly the cells a ray crosses, the [3D DDA](#=3D_DDA) of Amanatides and Woo [S1] keeps, per axis, the distance to the next cell boundary and always steps across the nearest one; this is the inner loop of most voxel ray tracers [G]. Speedups include [empty space skipping](#=Empty_Space_Skipping) and early ray termination (Levoy [S17]). For surfaces, isosurface ray casting stops at the first crossing of a level [G], and [sphere tracing](#=Sphere_Tracing) (Hart [S6]) uses a distance field's value as a safe step size.
+
+### 4. [Object-order rendering](#=Object-order_rendering)
+Methods that walk the volume and project each piece onto the screen. [Splatting](#=Splatting) (Westover [S26]) draws each voxel as a small blurred footprint; [3D Gaussian splatting](#=3D_Gaussian_Splatting) (Kerbl et al. [S12]) applies the same idea to millions of fitted Gaussians. [Shear-warp](#=Shear-Warp) (Lacroute and Levoy [S15]) shears the volume so that its slices line up with the image. Texture slicing draws many blended, view-aligned polygons and was the classic way to run volume rendering on early GPUs [G]. Cell projection draws unstructured meshes one tetrahedron at a time (Shirley and Tuchman [S25]), and Fourier volume rendering computes projections in the frequency domain (Malzbender [S19]).
+
+### 5. [Surface extraction](#=Surface_extraction)
+Turning a volume into a mesh. [Marching Cubes](#=Marching_Cubes) (Lorensen and Cline [S18]) looks up triangles for each cell from the signs at its eight corners; [dual contouring](#=Dual_Contouring) (Ju et al. [S8]) places one vertex per cell and keeps sharp features. Blocky worlds instead emit the visible faces of solid voxels and merge them with [greedy meshing](#=Greedy_Meshing) [G].
+
+### 6. [Light transport in participating media](#=Light_transport_in_participating_media)
+The emission–absorption model above ignores light that scatters inside the medium. Physically based renderers add shadows within the volume, phase functions, and single and multiple scattering, usually solved by Monte Carlo methods such as delta (Woodcock) tracking [S24]; Kajiya and Von Herzen [S9] gave an early formulation and Novák et al. [S24] survey the field. Real-time renderers approximate this with froxel grids (Hillaire [S7]) and [voxel cone tracing](#=Voxel_Cone_Tracing) (Crassin et al. [S2]).
+
+### 7. [Visualization mapping](#=Visualization_mapping)
+Making a picture that explains the data, not only one that looks right. The core tool is the [transfer function](#=Transfer_Function); [multi-dimensional transfer functions](#=Multi-Dimensional_Transfer_Function) also use gradient magnitude and other derived values to separate materials that share a data value (Kindlmann and Durkin [S13]; Kniss, Kindlmann and Hansen [S14]). The branch also covers multi-field, vector and tensor data, illustrative and non-photorealistic styles, and interaction such as clipping and focus-plus-context views [G].
+
+### 8. [Differentiable and inverse volume rendering](#=Differentiable_and_inverse_volume_rendering)
+Running rendering backwards: given images, find the volume that produced them. Because the volume rendering integral is differentiable, its parameters can be fitted by gradient descent [S21]. [Neural radiance fields](#=Neural_Radiance_Fields) (Mildenhall et al. [S21]) fit a network that returns $\sigma$ and $c$ at any point; [Plenoxels](#=Plenoxels) (Fridovich-Keil et al. [S5]) and [Instant NGP](#=Instant_NGP) (Müller et al. [S22]) store the parameters in voxels or hash tables to train far faster. Tomographic reconstruction, as in CT, is the classic inverse problem of the same kind (Feldkamp, Davis and Kress [S4]).
+
+### 9. [Systems and applications](#=Systems_and_applications)
+Where the methods are used, linking back to the branches above: voxel engines and games, film production (VDB pipelines, clouds, fire), scientific and medical visualization, GPU, web and parallel renderers, and volumetric displays and holography [G].
+
+### 10. [Elementary building blocks](#=Elementary_building_blocks)
+The small pieces that volume renderers are built from: ray–box intersection by the slab test (Kay and Kajiya [S11]) and other ray–primitive tests, camera models that generate the rays, and parallel GPU primitives such as atomics, prefix sums, sorting and stream compaction [G].
+
+## Where to start
+
+- **Render a CT scan or a smoke simulation:** [volume ray casting](#=Volume_Ray_Casting), then [transfer functions](#=Transfer_Function) and [empty space skipping](#=Empty_Space_Skipping).
+- **Build a blocky voxel game:** [greedy meshing](#=Greedy_Meshing), then the [voxel engines](#=Systems_and_applications) in branch 9.
+- **Ray trace huge voxel scenes:** [3D DDA](#=3D_DDA) [S1], [sparse voxel octrees](#=Sparse_Voxel_Octrees), then [sparse voxel DAGs](#=Sparse_Voxel_DAG) [S10].
+- **Extract smooth surfaces:** [Marching Cubes](#=Marching_Cubes) [S18], then [dual contouring](#=Dual_Contouring) [S8].
+- **Render clouds and fog:** [light transport in participating media](#=Light_transport_in_participating_media).
+- **Reconstruct a scene from photographs:** [neural radiance fields](#=Neural_Radiance_Fields) [S21], then [3D Gaussian splatting](#=3D_Gaussian_Splatting) [S12].
+
+## Sources
+
+[S1] Amanatides, J. and Woo, A. (1987). A fast voxel traversal algorithm for ray tracing. *Eurographics '87*.
+
+[S2] Crassin, C., Neyret, F., Sainz, M., Green, S. and Eisemann, E. (2011). Interactive indirect illumination using voxel cone tracing. *Computer Graphics Forum (Pacific Graphics 2011)*.
+
+[S3] Drebin, R. A., Carpenter, L. and Hanrahan, P. (1988). Volume rendering. *SIGGRAPH '88*.
+
+[S4] Feldkamp, L. A., Davis, L. C. and Kress, J. W. (1984). Practical cone-beam algorithm. *Journal of the Optical Society of America A*.
+
+[S5] Fridovich-Keil, S., Yu, A., Tancik, M., Chen, Q., Recht, B. and Kanazawa, A. (2022). Plenoxels: radiance fields without neural networks. *CVPR 2022*. https://arxiv.org/abs/2112.05131
+
+[S6] Hart, J. C. (1996). Sphere tracing: a geometric method for the antialiased ray tracing of implicit surfaces. *The Visual Computer*.
+
+[S7] Hillaire, S. (2015). Physically based and unified volumetric rendering in Frostbite. *SIGGRAPH 2015 course: Advances in Real-Time Rendering in Games*.
+
+[S8] Ju, T., Losasso, F., Schaefer, S. and Warren, J. (2002). Dual contouring of Hermite data. *SIGGRAPH 2002*.
+
+[S9] Kajiya, J. T. and Von Herzen, B. P. (1984). Ray tracing volume densities. *SIGGRAPH '84*.
+
+[S10] Kämpe, V., Sintorn, E. and Assarsson, U. (2013). High resolution sparse voxel DAGs. *ACM Transactions on Graphics (SIGGRAPH 2013)*.
+
+[S11] Kay, T. L. and Kajiya, J. T. (1986). Ray tracing complex scenes. *SIGGRAPH '86*.
+
+[S12] Kerbl, B., Kopanas, G., Leimkühler, T. and Drettakis, G. (2023). 3D Gaussian splatting for real-time radiance field rendering. *ACM Transactions on Graphics (SIGGRAPH 2023)*. https://arxiv.org/abs/2308.04079
+
+[S13] Kindlmann, G. and Durkin, J. W. (1998). Semi-automatic generation of transfer functions for direct volume rendering. *IEEE Symposium on Volume Visualization 1998*.
+
+[S14] Kniss, J., Kindlmann, G. and Hansen, C. (2002). Multidimensional transfer functions for interactive volume rendering. *IEEE Transactions on Visualization and Computer Graphics*.
+
+[S15] Lacroute, P. and Levoy, M. (1994). Fast volume rendering using a shear-warp factorization of the viewing transformation. *SIGGRAPH '94*.
+
+[S16] Levoy, M. (1988). Display of surfaces from volume data. *IEEE Computer Graphics and Applications*.
+
+[S17] Levoy, M. (1990). Efficient ray tracing of volume data. *ACM Transactions on Graphics*.
+
+[S18] Lorensen, W. E. and Cline, H. E. (1987). Marching cubes: a high resolution 3D surface construction algorithm. *SIGGRAPH '87*.
+
+[S19] Malzbender, T. (1993). Fourier volume rendering. *ACM Transactions on Graphics*.
+
+[S20] Max, N. (1995). Optical models for direct volume rendering. *IEEE Transactions on Visualization and Computer Graphics*.
+
+[S21] Mildenhall, B., Srinivasan, P. P., Tancik, M., Barron, J. T., Ramamoorthi, R. and Ng, R. (2020). NeRF: representing scenes as neural radiance fields for view synthesis. *ECCV 2020*. https://arxiv.org/abs/2003.08934
+
+[S22] Müller, T., Evans, A., Schied, C. and Keller, A. (2022). Instant neural graphics primitives with a multiresolution hash encoding. *ACM Transactions on Graphics (SIGGRAPH 2022)*. https://arxiv.org/abs/2201.05989
+
+[S23] Museth, K. (2013). VDB: high-resolution sparse volumes with dynamic topology. *ACM Transactions on Graphics*.
+
+[S24] Novák, J., Georgiev, I., Hanika, J. and Jarosz, W. (2018). Monte Carlo methods for volumetric light transport simulation. *Computer Graphics Forum (Eurographics 2018 State of the Art Reports)*.
+
+[S25] Shirley, P. and Tuchman, A. (1990). A polygonal approximation to direct scalar volume rendering. *San Diego Workshop on Volume Visualization 1990*.
+
+[S26] Westover, L. (1990). Footprint evaluation for volume rendering. *SIGGRAPH '90*.

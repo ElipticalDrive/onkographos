@@ -1,0 +1,1129 @@
+afjk.jp home server. Contribute to afjk/afjk.jp development by creating an account on GitHub.
+
+[3DGS] Gaussian Splat ImportとKHR GLB正規化に対応する by afjk · Pull Request #534 · afjk/afjk.jp · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+afjk
+commented
+Aug 20, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+概要
+一般的なGaussian Splat配布形式をSceneSyncへ取り込めるようにし、内部・交換用の標準表現である KHR_gaussian_splatting GLBへ正規化する（[3DGS] PLY / SPZ ImportとGLB変換に対応する #531）
+フォーマットの読み書きはSceneSyncの責務から外し、@playcanvas/splat-transform（MIT）へ委譲する
+あわせて、stale だった issue-526-3dgs-spike の 3DGS 基盤を main ベースへ取り込み、壊れていた fixture を修正する（[3DGS] 技術検証: KHR_gaussian_splatting GLBの描画 #526）
+対象repo
+afjk.jp
+対象area
+scenesync
+変更内容
+1. splat-transformをformat conversion layerとして採用
+当初はSceneSync自前でPLY reader / SPZ reader / 中間表現 SplatCloud / KHR GLB writer を実装していたが、
+3DGSのcodecを保守し続けることはSceneSyncの目的ではなく、実際に渡される形式も増え続けている
+（Insta360 AppはSOG、XGridsはLCC2を出力する。どちらも自前実装では読めなかった）。
+変換を丸ごと @playcanvas/splat-transform に任せ、SceneSync側にはparser / encoderを一切残さない。
+```
+.ply / .spz / .sog / .lcc2 / .lcc / .splat / .ksplat / .zip
+        ↓
+@playcanvas/splat-transform      ← フォーマット変換はすべてここ
+        ↓
+KHR_gaussian_splatting GLB       ← SceneSyncの交換形式
+        ↓
+inspectGaussianSplatGlb()        ← 通す前に検証
+        ↓
+SceneSync既存GLB経路（upload / broadcast / asset cache / SceneDocument / Export）
+```
+.glb（KHR拡張付き）は検証のみでバイト列をそのまま通す。splat-transformにGLB readerは無いので再変換しない。
+2. 対応形式
+拡張子
+形式
+備考
+.ply
+INRIA 3DGS PLY
+binary_little_endian のみ。SuperSplat圧縮PLYも可
+.spz
+Niantic SPZ
+gzip framed / raw どちらも
+.sog
+PlayCanvas SOG bundle
+Insta360 Appの出力
+.lcc2 / .lcc
+XGrids LCC
+ディレクトリ構成なのでzipで受ける
+.splat
+antimatter15 splat
+.ksplat
+Kevin Kwok compressed splat
+.zip
+上記を含むアーカイブ
+中のmanifestで形式を判定
+LCC2は meta.lcc2 + 多数のチャンクという構成なので、フォルダごとzipで固めてドロップする。
+DragDropManager はzipをまずScene Sync Export importerに渡すため、Export zipは従来どおりそちらが処理する。
+複数LODを持つ形式は LOD 0（最も精細）のみ読む。
+3. SceneSync側に残る実装
+html/assets/js/scenesync/loaders/gaussian-splat/
+ファイル
+役割
+splat-transform-adapter.js
+splat-transformを呼ぶ唯一の場所
+splat-format-detect.js
+拡張子 / magic からの形式判定、エラーのserialize（依存ゼロ）
+glb-root-transform.js
+GLBのJSON chunk書き換え（up-axis補正のnode rotation）
+gaussian-splat-file-import.js
+D&D用のFileラッパー、サイズ上限、日本語エラーメッセージ
+gaussian-splat-worker-import.js
+Worker実行とinline fallback
+gaussian-splat-import.worker.js
+Worker entry兼bundleの公開API
+削除:
+```
+ply-splat-reader.js   spz-splat-reader.js
+splat-cloud.js        khr-glb-writer.js       import-gaussian-splat.js
+```
+khr-gaussian-splatting.js（Inspector）は検証専用として残す。二重実装は残していない。
+4. 向きが既定で正しくなった
+splat-transformはGLB出力時にY-down PLY → Y-up glTF の標準変換を焼き込む。旧writerはこれをしていなかった。
+```
+PLY (1, 2, 3)  →  GLB POSITION (-1, -2, 3)
+```
+upAxisCorrection: 'flip-x-180' は残しているが、splatデータは書き換えず glTF node の rotation として書く方針も維持。
+Editorに専用UIは追加せず、上下が逆なら既存のTransform gizmoで直す。
+5. ASCII / big-endian PLY は明示的に拒否する
+splat-transformのPLY readerはヘッダの宣言に関係なくレコードをlittle-endian binaryとして読むため、
+ascii / binary_big_endian を渡すとエラーにならずゼロ値のsplatになる。
+3DGSの学習結果は例外なく binary_little_endian なので実害は無いが、黙って空のシーンを取り込むと原因が分からない。
+ヘッダを見て事前に弾く。
+6. ブラウザへの配り方（vendor bundle）
+静的配信なのでブラウザで import '@playcanvas/splat-transform' は解決できない。CDNには逃げず、
+build時にbundleして html/assets/vendor/ にコミットする（Rapier / Loomletと同じ方式）。
+```
+npm run build:gaussian-splat-worker
+```
+```
+html/assets/vendor/splat-transform/3.3.0/
+  gaussian-splat-import.worker.js   2.35 MB（minified）
+  webp.wasm                         344 KB（SOGのデコードに必要）
+```
+@playcanvas/splat-transform は exact pin（3.3.0）。v3でChunkSource APIに大きな変更があったため
+bundleに1.4MB入る playcanvas（peer依存）も exact pin
+bundleはEditorのモジュールグラフに入らない。splatをドロップしないセッションはダウンロードしない
+buildはsplat-transformが html 出力用に埋め込んでいるSuperSplat viewer（3.03MB、PlayCanvas engineの文字列）を除去する。5.38MB → 2.35MB
+書き換え箇所が見つからなければbuildを失敗させる
+できたbundleで4形式を変換し、KHR Inspectorを通ることを確認してから完了する
+THIRD_PARTY_LICENSES.md を追加し、同梱する @playcanvas/splat-transform / playcanvas / @adobe/spz のMIT noticeを記載した。
+7. Worker経路
+```
+main thread                          worker（vendor bundle）
+  file.arrayBuffer()
+  ── postMessage(transfer) ────────→  convertGaussianSplatToGlb()
+  ←── postMessage(transfer) ────────  glb
+  new File([glb])
+  worker.terminate()
+```
+Workerが作れない場合（module worker非対応、CSPの worker-src）は同じbundleを import() してメインスレッドで変換
+中止は worker.terminate()。splat-transformに協調的キャンセルは無いため、chunk pool / decoder state / 出力バッファをまとめて捨てられるこれが最も確実
+GLBは MemoryFileSystem の可変長スラブ上のviewで返るので、postMessage前にexactサイズへ詰め直してからtransferする
+8. SH degree削減は維持
+maxShDegree: 0|1|2|3。SceneSync独自にSH arrayを切り詰めるのではなく、splat-transformの filterBands を使う。
+500,000 splats / degree 3 のPLY（118.3 MB）:
+maxShDegree
+GLB
+対degree 3
+3（既定）
+114.4 MB
+—
+2
+74.4 MB
+0.65x
+1
+45.8 MB
+0.40x
+0
+28.6 MB
+0.25x
+既定は削減しない。 ロスがある操作なので明示指定時だけ行う。
+9. メモリ
+```
+npm run bench:3dgs-import
+```
+RSS growth は変換前後のpeak RSS差分（/proc/self/clear_refs でリセットした VmHWM）。
+splats
+SH
+format
+source
+GLB
+time
+RSS growth
+200,000
+0
+ply
+13.0 MB
+11.4 MB
+238 ms
+79.4 MB
+200,000
+3
+ply
+47.3 MB
+45.8 MB
+1324 ms
+281.5 MB
+500,000
+3
+ply
+118.3 MB
+114.4 MB
+4399 ms
+706.3 MB
+1,000,000
+0
+ply
+64.9 MB
+57.2 MB
+1524 ms
+293.5 MB
+1,000,000
+3
+ply
+236.5 MB
+228.9 MB
+8240 ms
+1507.4 MB
+1,000,000
+3
+spz
+61.0 MB
+228.9 MB
+6748 ms
+1590.7 MB
+旧実装（自前 SplatCloud に全展開）では 1M / SH3 で RSS 約2.5GB だった。中間表現の膨張が無くなった分だけ減っている。
+「constant memory」ではない。 splat-transformのreaderはchunk単位で読むが、GLB writerにはまだstreaming版が無く、
+writeSource が全体を1つのDataTableにmaterializeしてから書く。ピークは概ね
+source bytes + DataTable(≒GLBサイズ) + 出力バッファ で、GLBサイズの4〜6倍になる。
+重要なのは中間表現で数倍に膨らむ経路が無くなったことであって、メモリが一定になったことではない。
+10. spike基盤の取り込みとfixture修正（#526）
+issue-526-3dgs-spike から Inspector / fixture / smokeページ / 技術検証メモを main ベースへ移した。
+コミットされていた minimal-khr-gaussian-splatting.glb が切り詰められていた（ヘッダ1,832 bytes宣言に対し実体1,781 bytes）ので、
+生成スクリプトで再生成し、ヘッダ長とファイル長の一致を検証するテストを追加した。
+staging で見てほしい点
+D&D Importが入ったので、staging での確認項目は下記「staging確認」を参照。
+変更していないこと
+Three.js のバージョン更新、WebGPURenderer への移行（[3DGS] SceneSync WebでGaussian Splatを描画する #527 の範囲）
+SceneDocument / asset cache / Export への形式別special case。一切追加していない
+既存のGLB / Image / Video / Physics / WebXR 経路
+Gaussian数の削減（decimate / opacity filter / spatial filter / Morton reorder）。adapterで将来足せる設計にはしてあるが、このPRでは行わない
+SOG Export / VR配信用SOG生成（別Issue）
+unbundled SOG（meta.json + 複数WebP）/ streamed SOG（lod-meta.json）を複数ファイルD&Dで受けるUI。zip経由なら通る
+ASCII / big-endian PLY。splat-transform側の対応待ち。SceneSyncでは実装しない
+KHR_gaussian_splatting_compression_spz_2（標準化待ち）
+staging確認
+未確認。実ブラウザでの確認は、CDNに出られない実行環境の制約からローカルの静的サーバー + Chromiumで行った
+（npm run test:e2e:scene-sync-3dgs-worker、9 checks all pass）。
+stagingで見てほしいこと:
+.ply / .spz / .sog / .lcc2.zip をEditorへドロップして、エラーなく配置されること
+Insta360 Appから出力した実 .sog が読めること、splat数が妥当なこと、色がSuperSplatと大きく違わないこと
+向きがおかしくないこと（おかしければTransform gizmoで直せること）
+オブジェクト名が元ファイル名（room.sog）で表示され、uploadは room.glb であること
+配置後にTransform / 同期 / Exportが通常のGLBとして機能すること
+本番/stagingのCSPで module Worker が作れること（worker-src を絞っている場合はinline fallbackに落ちる）
+実描画（Gaussian Splatとしての見た目）はThree.js正式リリース後（#527）。現状のr170では
+「正しい位置に白い点群」として表示される。
+テスト/チェック
+```
+npm run test:3dgs-import   # 89 tests, all pass
+npm run test:3dgs-khr      #  6 tests, all pass
+```
+contract testを中心にした。SceneSyncが保証するのは出てきたGLBの中身であって、splat-transformの内部ではないため。
+検証
+内容
+PLY → GLB
+position / scale（線形）/ opacity（線形alpha）/ SH係数が期待値と一致
+PLY vs SPZ
+同一シーンを2形式で表現し、量子化誤差内で一致すること。PLYはfloat32のlogit/log、SPZは量子化バイト列という独立した経路
+SOG vs PLY
+同上。SOGはMorton順に並び替えるので位置で最近傍対応を取ってから比較
+LCC2（zip）
+変換が通り、splat数とInspectorが期待どおりであること
+compressed PLY / .splat
+追加コストがほぼ無いので対応・検証済み
+vendored bundle
+コミット済みbundleが4形式を変換でき、外部参照を持たないこと
+Three.js標準ローダーとの突き合わせ
+```
+npm run verify:3dgs-threejs
+```
+Three.js dev（r186dev、GS実装入り）に対して実行。splat-transformが書き、three.jsが読むので、
+SceneSyncは入力と期待値を出すだけの独立検証になっている。
+case
+結果
+ply-degree-3 / ply-degree-0
+OK
+spz-degree-1 / spz-degree-3
+OK
+reduced-to-2 / 1 / 0
+OK
+sog
+OK
+lcc2
+OK
+いずれも GLTFGaussianSplatLoaderExtension が GaussianSplat を生成し、PLY / SPZ由来のものは
+splatGeometry から読み戻したposition / color / alphaが元の入力値と一致した。
+実ブラウザWorker smoke
+```
+npm run test:e2e:scene-sync-3dgs-worker
+```
+check
+結果
+Worker constructible（module type）
+PASS
+PLY converts in the Worker
+PASS
+source is transferred（detach確認）
+PASS
+gzip SPZ inflates（DecompressionStream）
+PASS
+SOG decodes（webp.wasm を vendor dir から fetch）
+PASS
+zipped LCC2 decodes
+PASS
+SH degree 3 survives postMessage
+PASS
+full File drop path
+PASS
+bad file reports variant across the boundary
+PASS
+既存スイートの回帰確認
+スイート
+結果
+test:scene-sync-export-import
+198 pass
+test:physics
+68 pass
+test:runtime-schedule
+53 pass
+test:stereo-media
+25 pass
+test:plugins / test:loomlet-runtime
+18 pass each
+test:glb-normalizer
+10 pass
+test:playback-duration
+10 pass
+test:audio-source-controller / test:mesh-blob-fetch / test:editing-state / test:export-behavior-runtime / test:expired-glb-recovery
+all pass
+未実施:
+実Insta360 SOGでの確認（手元に実ファイルが無いため、fixtureはtest用SOGで代替）
+ブラウザ実描画での見た目の一致確認（Three.js正式リリース待ち）
+本番/stagingのCSP下での確認
+リスク
+2.35MBのbundleを新規にコミットする。 vendor配下（Rapier 2.28MBの前例あり）で、
+splatをドロップしないセッションはダウンロードしない。生成は package-lock.json から再現可能
+buildがsplat-transformの配布物を書き換えている（viewer文字列の除去、Emscriptenのenvironment flag）。
+該当箇所が見つからなければbuildを失敗させるので、更新で前提が崩れたら黙って通ることはない
+.zip をGaussian Splat候補として受けるようになった。 Scene Sync Export importerが先に見るため
+Export zipへの影響は無いが、無関係なzipをドロップすると「splatが見つからない」旨のtoastが出る
+向きの既定挙動が変わった（座標変換が入るようになった）。旧実装で取り込み済みのGLBには影響しない
+大容量（1M / SH3）では約8秒・1.5GB。Workerで実行するのでEditorは固まらないが、
+タブのメモリ上限には注意が必要
+KHR_gaussian_splatting は Release Candidate 段階で、attribute名や semantics が変わる可能性がある
+follow-up tasks
+実Insta360 SOGでの最終確認
+本番/stagingのCSPでのWorker確認
+splat-transformにchunk-nativeなGLB writerが入ったらDataTable分のメモリを落とす
+大容量アセットのasset cache / blob経路（[3DGS] 編集・選択・SceneSync同期に対応する #528）
+Optimize for VR（SH削減 / opacity filter / small splat filter / Morton reorder / decimate）。adapterから足せる
+unbundled / streamed SOG の複数ファイルD&D
+SOG Export / VR配信用SOG生成
+merge方針
+期待する merge 方法: squash merge
+merge 後に remote branch を削除する
+Refs #531, #526
+🤖 Generated with Claude Code
+https://claude.ai/code/session_012XVTr9LUT4fWoi7Qg8eUd1
+claude
+added 2 commits
+August 20, 2026 09:20
+Port 3DGS KHR spike foundation onto main
+…
+da4e39d
+```
+Bring the KHR_gaussian_splatting inspector, its Node test, the minimal
+8-splat GLB fixture, the fixture generator and the Three.js native smoke
+page over from the stale issue-526-3dgs-spike branch so the 3DGS work
+sits on current main.
+
+The committed fixture on the spike branch was truncated: its GLB header
+declared 1832 bytes while only 1781 were stored, so parseGlbJson()
+rejected it. Regenerated from scripts/generate-minimal-khr-gaussian-splatting.mjs.
+
+Refs #526
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018Pw3aM2ewzR961GNtWoHuf
+```
+Add PLY / SPZ Gaussian Splat import to KHR GLB
+…
+b583ed1
+```
+SceneSync's interchange representation for Gaussian Splats is a GLB carrying
+KHR_gaussian_splatting. This adds the import side: .ply and .spz captures are
+decoded and normalized to that GLB, so everything downstream only ever sees
+GLB.
+
+New under html/assets/js/scenesync/loaders/gaussian-splat/:
+
+- splat-cloud.js         intermediate representation, in KHR conventions
+- ply-splat-reader.js    INRIA 3DGS PLY (binary LE/BE and ascii)
+- spz-splat-reader.js    Niantic SPZ v1-v3
+- khr-glb-writer.js      SplatCloud to KHR GLB
+- import-gaussian-splat.js  format sniffing entry point
+
+No external dependencies; runs in Node and the browser alike.
+
+Activations are applied at read time so the writer stays conversion-free:
+PLY log scales are exponentiated, opacity logits go through a sigmoid, and
+wxyz quaternions are reordered to xyzw and normalized. Higher order SH is the
+subtle part, since PLY stores f_rest channel-major while KHR splits it into
+one accessor per coefficient.
+
+Coordinate systems are deliberately left alone by default. Neither format
+records which way is up, so guessing would break correctly-oriented assets.
+The optional flip is written as a glTF node rotation, leaving splat data
+byte-faithful and the correction reversible.
+
+Ambiguous inputs fail with a named reason rather than importing as a
+degenerate cloud: plain point clouds, compressed SuperSplat PLYs, list
+properties, sparse f_rest, unsupported SPZ versions and truncated files.
+
+Tested with 47 Node tests, including a cross-format check that the same scene
+encoded as PLY and as SPZ decodes to matching values within quantization
+error, which exercises both decode paths against each other.
+
+Also adds scripts/convert-gaussian-splat.mjs so captures can be converted
+before the drag & drop UI lands, and a 16 splat degree 1 SH fixture in all
+three formats.
+
+Refs #531
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018Pw3aM2ewzR961GNtWoHuf
+```
+afjk
+requested a lite review from Copilot
+August 20, 2026 10:55
+Copilot started reviewing on behalf of
+afjk
+August 20, 2026 10:56
+View session
+Copilot
+AI
+reviewed
+Aug 20, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+SceneSync に Gaussian Splatting アセット（.ply / .spz）を取り込み、内部標準である KHR_gaussian_splatting GLB に正規化するための import/変換基盤と、技術検証用 fixture・smoke ページ・テストを追加するPRです。
+Changes:
+PLY（INRIA）/ SPZ（Niantic v1–v3）を SplatCloud 中間表現へデコードし、KHR_gaussian_splatting GLB を生成する importer / writer を追加
+CLI 変換スクリプトと、fixture 生成スクリプト・fixture README・Three.js native smoke ページを追加
+KHR GLB inspector と、import/変換の整合性を担保する Node.js テストスイートを追加（package.json に test コマンド追加）
+Reviewed changes
+Copilot reviewed 19 out of 23 changed files in this pull request and generated 3 comments.
+Show a summary per file
+File
+Description
+scripts/generate-minimal-khr-gaussian-splatting.mjs
+最小 KHR_gaussian_splatting GLB fixture を生成するスクリプトを追加
+scripts/generate-gaussian-splat-import-fixtures.mjs
+import テスト/スモーク用の PLY/SPZ/GLB fixture 一式を生成するスクリプトを追加
+scripts/convert-gaussian-splat.mjs
+.ply/.spz→KHR GLB 変換 CLI を追加（検証も実施）
+package.json
+3DGS import / KHR inspector の Node test コマンドを追加
+html/scenesync/experiments/fixtures/README.md
+3DGS fixtures の目的・再生成手順を追加
+html/scenesync/experiments/3dgs-three-native-smoke.html
+Three.js native loader で KHR GLB を読み込む smoke ページを追加
+html/assets/js/scenesync/loaders/khr-gaussian-splatting.js
+KHR_gaussian_splatting の JSON/contract 検証用 inspector を追加
+html/assets/js/scenesync/loaders/khr-gaussian-splatting.test.js
+inspector のユニットテストと minimal fixture contract テストを追加
+html/assets/js/scenesync/loaders/gaussian-splat/splat-cloud.js
+importer 中間表現 SplatCloud と SH/quaternion ユーティリティを追加
+html/assets/js/scenesync/loaders/gaussian-splat/test-fixtures.mjs
+PLY/SPZ のソースエンコード fixture builder を追加
+html/assets/js/scenesync/loaders/gaussian-splat/ply-splat-reader.js
+INRIA 3DGS PLY 読み取り（活性化適用・variant reject を含む）を追加
+html/assets/js/scenesync/loaders/gaussian-splat/ply-splat-reader.test.js
+PLY reader の活性化・SH・variant error 等のテストを追加
+html/assets/js/scenesync/loaders/gaussian-splat/spz-splat-reader.js
+SPZ v1–v3 読み取り（gunzip・dequantize・rotation decode 等）を追加
+html/assets/js/scenesync/loaders/gaussian-splat/spz-splat-reader.test.js
+SPZ reader のデコード・エラー・gzip 経路等のテストを追加
+html/assets/js/scenesync/loaders/gaussian-splat/khr-glb-writer.js
+SplatCloud→KHR GLB writer（属性分割・node rotation 補正等）を追加
+html/assets/js/scenesync/loaders/gaussian-splat/import-gaussian-splat.js
+format sniff + reader + writer のエントリポイントを追加
+html/assets/js/scenesync/loaders/gaussian-splat/import-gaussian-splat.test.js
+end-to-end import/round-trip/fixture contract テストを追加
+docs/scene-sync-3dgs-khr-spike.md
+#526 の KHR/Three.js 技術検証メモを追加
+docs/scene-sync-3dgs-import.md
+#531 の import 設計・変換仕様・テスト方針を追加
+💡 Add a code-review agent skill or configure MCP servers for context-aware, tailored reviews. Learn more in the docs.
+Comment thread
+html/assets/js/scenesync/loaders/gaussian-splat/import-gaussian-splat.js
+Outdated
+Comment on lines
++73
+to
++88
+if (format === 'glb') {
+const inspection = inspectGaussianSplatGlb(bytes);
+if (!inspection.hasGaussianSplatting) {
+throw new Error('GLB does not contain a KHR_gaussian_splatting primitive');
+}
+if (inspection.errors.length > 0) {
+throw new Error(`Invalid KHR_gaussian_splatting GLB: ${inspection.errors.join('; ')}`);
+}
+return {
+glb: bytes,
+cloud: null,
+sourceFormat: 'glb',
+splatCount: 0,
+shDegree: 0,
+};
+}
+Comment thread
+html/assets/js/scenesync/loaders/gaussian-splat/import-gaussian-splat.js
+Outdated
+Comment on lines
++46
+to
++52
+// SPZ is gzip framed, but so are other things; only claim it when the name
+// agrees or nothing else matched.
+if (isGzip(bytes)) return 'spz';
+const extension = fileName.toLowerCase().split('.').pop();
+if (extension === 'ply' || extension === 'spz' || extension === 'glb') return extension;
+Comment thread
+html/scenesync/experiments/3dgs-three-native-smoke.html
+Comment on lines
++12
+to
++16
+<script type="importmap">
+{
+"imports": {
+"three": "https://rawcdn.githack.com/mrdoob/three.js/07abea59aa700eed861f23ede39eaf3d892c93a4/build/three.webgpu.js",
+"three/webgpu": "https://rawcdn.githack.com/mrdoob/three.js/07abea59aa700eed861f23ede39eaf3d892c93a4/build/three.webgpu.js",
+Import dropped PLY / SPZ captures as Gaussian Splat GLB
+…
+7a462f1
+```
+Dropping a .ply or .spz on the SceneSync editor now converts it to a
+KHR_gaussian_splatting GLB and hands it to the existing GLB path, so upload,
+broadcast, asset cache and SceneDocument need no 3DGS-specific case.
+
+The conversion lives in gaussian-splat-file-import.js rather than in
+DragDropManager, because drag-drop-manager.js imports three (loaded from a CDN
+importmap, absent from package.json) and so cannot be imported in Node. Keeping
+the logic in a dependency-free module makes it testable.
+
+Failures are reported with a reason the user can act on: a plain point cloud
+PLY, a compressed SuperSplat export and an unsupported SPZ version each get
+their own message rather than a generic load failure. Files above the presence
+server's upload limit are rejected before being read.
+
+The object keeps the dropped file's name for display while the GLB is what
+gets uploaded; the original is recorded in userData.importedFrom.
+
+On the r170 three.js currently pinned in index.html the converted GLB parses
+cleanly into THREE.Points and shows as a 1px white point cloud at the correct
+position and scale, verified against three@0.170.0. Proper splat rendering
+still waits on a three.js release with Gaussian Splatting, at which point the
+same GLB renders correctly with no re-import.
+
+Refs #531
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018Pw3aM2ewzR961GNtWoHuf
+```
+afjk
+commented
+Aug 21, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+D&DでのPLY / SPZ Importを追加しました（commit 7a462f1）。
+変更
+.ply / .spz をEditorにドロップすると、変換後のGLBが通常のGLBと同じ経路に流れます。3DGS専用の同期経路やasset種別は追加していません。
+```
+drop capture.ply
+  → DragDropManager.handleFile()
+  → convertGaussianSplatFileToGlb()      # capture.ply → capture.glb
+  → DragDropManager._loadFile()          # 既存のGLB経路
+  → glbLoader.loadFromFile() → upload → broadcast
+```
+gaussian-splat-file-import.js（新規） — File → 変換後GLB File、サイズ上限、エラーメッセージ
+drag-drop-manager.js — isGaussianSplatFile() 分岐を isGlbFile() の前に追加
+変換ロジックを別モジュールに置いたのは、drag-drop-manager.js が three をimportしており（importmap経由のCDN読み込みで package.json に無い）Nodeからimportできないためです。three非依存のモジュールに切り出すことでテスト可能にしています。
+現在の表示について
+変換後のGLBは、現行のThree.js r170でも正常にパースできることを確認しました。
+実際に three@0.170.0 を入れて GLTFLoader.parse() に通した結果:
+項目
+結果
+パース
+成功（エラーなし）
+生成されるオブジェクト
+THREE.Points + PointsMaterial
+KHR attribute
+khr_gaussian_splatting:* として保持（小文字化）
+見た目
+1px の白い点群（size: 1, sizeAttenuation: false）
+位置・スケール
+正しい
+つまり**現時点でも「正しい位置に白い点群として表示される」**状態になります。Gaussian Splatとしての見た目にはなりませんが、キャプチャの形状は確認でき、Transform / 同期 / Export は通常のGLBとして機能します。
+Three.js が Gaussian Splatting を含む正式版になり WebGPURenderer へ移行すれば（#527）、同じGLBが再Import不要でそのままGaussian Splatとして描画されます。
+また normalizeGlbForSceneSync() は spec/gloss 拡張が無い場合に glTF-Transform のパーサへ渡す前に早期returnするため、KHR_gaussian_splatting GLBが未知拡張として弾かれることはありません（コードを確認済み）。
+エラー表示
+失敗時は原因が分かるメッセージを出します。
+入力
+メッセージ
+通常の点群PLY
+このPLYはGaussian Splatではないようです（通常の点群かメッシュ）…
+圧縮PLY
+圧縮PLY（SuperSplat / PlayCanvas形式）には未対応です…
+未対応SPZバージョン
+未対応のSPZバージョンです…
+サイズ超過
+ファイルが大きすぎます（読み込み前に判定）
+テスト
+```
+npm run test:3dgs-import   # 60 tests（+14）, all pass
+```
+回帰確認: test:scene-sync-export-import 198 pass / test:runtime-schedule 53 pass / test:stereo-media 25 pass / test:plugins 18 pass
+残課題
+変換はメインスレッドで実行しているため、大規模キャプチャではWorker化が必要
+upAxisCorrection をUIトグルとして出す（現状は既定 'none' 固定。DragDropManager の gaussianSplatUpAxisCorrection オプションで変更可能）
+実キャプチャでのメモリ・処理時間の測定
+Generated by Claude Code
+claude
+added 6 commits
+August 21, 2026 08:14
+Run Gaussian Splat conversion in a Worker and cut write cost
+…
+100282a
+```
+Benchmarking the importer at realistic capture sizes showed a million splats
+at SH degree 3 taking 4.4s and peaking at 2.7GB, which would freeze the editor
+and crowd a browser tab's memory ceiling. Two changes follow from that.
+
+Conversion now runs in a module Worker, with the source buffer transferred in
+and the GLB transferred back so neither crosses the boundary twice. Workers
+are not always available -- module worker support and a CSP that permits
+worker-src are both required -- so an inline fallback keeps the drop working.
+The fallback re-reads from the File rather than pre-emptively copying the
+source, which would otherwise double peak memory on every import for a path
+that almost never runs. A failure caused by the file itself is not retried
+inline, since it would only reproduce.
+
+The GLB writer no longer materializes each SH coefficient. buildSplatAttributes
+returns a write callback per attribute and the payload is allocated once and
+written in place, removing fifteen 12MB temporaries and a full copy at degree
+3. Write time for a million splats drops from 3450ms to 2444ms.
+
+Adds scripts/benchmark-gaussian-splat-import.mjs, which releases its synthetic
+splat objects before measuring so the numbers reflect what the browser holds.
+
+Tested with 81 Node tests. The worker client is covered with a stub Worker,
+and the worker module itself is exercised through a self shim so the message
+contract is verified rather than assumed.
+
+Refs #531
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018Pw3aM2ewzR961GNtWoHuf
+```
+Settle orientation handling on gizmo rotation
+…
+7f55113
+```
+Captures that come in upside down are corrected by rotating the placed object
+with the existing TransformControls rather than by an import-time option in
+the UI. Orientation is not specific to Gaussian Splats, the editor already has
+a way to rotate things, and a post-placement rotation rides the existing
+transform sync without a protocol change or a re-upload.
+
+upAxisCorrection stays as a library and CLI option, which is still the right
+tool for batch converting a set of captures to a common orientation.
+
+Refs #531
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018Pw3aM2ewzR961GNtWoHuf
+```
+Verify KHR output against Three.js's own Gaussian Splat loader
+…
+f6694e8
+```
+SceneSync writes KHR_gaussian_splatting GLBs from its own reading of the
+specification, and until now the only thing checking that reading was
+SceneSync's own inspector. Feeding the output to the implementation that will
+consume it is the actual test.
+
+Adds scripts/verify-against-threejs-gaussian-splat.mjs, which converts fixtures
+through the real importer, loads them with GLTFGaussianSplatLoaderExtension and
+compares the decoded splats against the values that went in. It exits 2 with an
+explanation when Three.js has no Gaussian Splatting to test against, so it
+becomes a one-command check the day that ships in a release.
+
+Run against Three.js dev, all five cases pass: PLY at degree 0, 1 and 3,
+binary and ascii, plus SPZ v2 and v3. Each produces a GaussianSplat whose
+positions, colors and alpha match the source, with sphericalHarmonics1..3
+present where expected.
+
+Every convention lines up: SH_C0, the SH0-to-color formula, linear opacity,
+linear scale, xyzw quaternions and the per-degree coefficient counts. The
+loader's hard requirements are all met too -- colorSpace present, ellipse
+kernel, no mixed primitives, and SH bands both complete and contiguous.
+
+Documents the comparison and the finding that Three.js quantizes SH degrees
+1-3 to bytes, so coefficients outside [-1, 1] clamp on their side.
+
+Refs #531, #526, #527
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018Pw3aM2ewzR961GNtWoHuf
+```
+Verify the Gaussian Splat Worker path in a real browser
+…
+c399c9b
+```
+The Node tests cover the Worker client against a stub and the worker module
+against a self shim, but neither touches what actually has to work in
+production: constructing a module Worker from a served URL, transferring
+buffers across the boundary, and inflating gzip inside it.
+
+Adds a smoke page and a Playwright driver that check exactly those. The page
+loads no three.js, so it runs without the CDN importmap the editor needs.
+
+Seven checks pass in Chromium. Two are worth calling out. The transfer check
+asserts the source ArrayBuffer is detached after the call, which is the only
+way to prove the buffer was handed over rather than copied. The error check
+asserts UnsupportedPlyVariantError and its variant survive the boundary,
+exercising the serialize and revive pair against a real structuredClone rather
+than the stub that stands in for it under Node.
+
+The launcher honours PLAYWRIGHT_CHROMIUM_EXECUTABLE so environments that ship
+a Chromium can use it instead of downloading a matching build.
+
+This leaves only the deployed CSP unverified: the smoke serves over a local
+static server with no CSP header, so a production worker-src restriction would
+still send conversion down the inline fallback.
+
+Refs #531
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018Pw3aM2ewzR961GNtWoHuf
+```
+Add maxShDegree to trade spherical harmonics for size
+…
+782b7f7
+```
+SH degree, not splat count, is what sets import size: degree 3 carries 45
+floats per splat against 3 at degree 0. maxShDegree drops bands above a given
+degree at read time, so the intermediate cloud shrinks along with the GLB.
+
+At 500k splats from a degree 3 PLY the GLB goes 112.5MB at degree 3, 72.5MB at
+2, 43.9MB at 1 and 26.7MB at 0. The source buffer is still held, so resident
+memory does not fall proportionally.
+
+The default keeps every band. Reduction is lossy in a way worth being explicit
+about, which corrects an assumption this work was carrying: the spike notes
+recorded that Three.js ignores SH1-3 and that starting from SH0 was therefore
+free. Reading GaussianSplat.js shows otherwise -- createSphericalHarmonicsComputeNode
+evaluates the higher bands against the view direction, so dropping them changes
+how a splat looks as the camera moves. The spike doc now carries that correction.
+
+SPZ needed care: its SH section is sized by the header, so a truncated read has
+to stride over the source layout rather than copy a flat prefix. The tests
+check the second splat specifically, which is what catches getting that wrong.
+
+Reduced output still satisfies Three.js's requirement that SH bands be complete
+and contiguous, since degrees 1..n are always kept. The verification script now
+covers reduction to degree 2, 1 and 0 alongside the existing cases, and all
+eight pass against Three.js dev.
+
+Refs #531
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018Pw3aM2ewzR961GNtWoHuf
+```
+Delegate 3DGS format conversion to @playcanvas/splat-transform
+…
+7144dc1
+```
+SceneSync had grown its own PLY reader, SPZ reader, SplatCloud
+intermediate and KHR GLB writer. Maintaining a 3DGS codec is not what
+SceneSync is for, and the formats people actually hand us keep
+multiplying — Insta360 exports SOG, XGrids exports LCC2, neither of
+which we could read.
+
+Hand the whole job to @playcanvas/splat-transform (MIT), behind one
+adapter. SceneSync's remaining share is: recognise the drop, normalize
+it to a KHR_gaussian_splatting GLB, validate that GLB, and push it down
+the ordinary GLB path. No format parser or encoder is left in the tree.
+
+  .ply .spz .sog .lcc2 .lcc .splat .ksplat .zip
+      -> splat-transform -> KHR GLB -> existing GLB path
+
+Notable consequences:
+
+- Positions now come in the right way up. splat-transform bakes the
+  standard Y-down PLY to Y-up glTF conversion, which the old writer did
+  not. upAxisCorrection stays, still as a node rotation rather than a
+  rewrite of the splats.
+- ASCII and big-endian PLY are refused. splat-transform's reader decodes
+  every record as little-endian whatever the header says, so those would
+  otherwise import as a scene full of zeros. Every trainer writes
+  binary_little_endian.
+- LCC2 is a directory, so it is dropped as a zip; the archive's manifest
+  decides the format. SceneSync export zips still reach their own
+  importer first.
+- 1M splats at SH degree 3 now peaks around 1.5 GB rather than 2.5 GB.
+  It is not constant memory: the GLB writer has no streaming path yet
+  and materializes the scene once, so peak tracks the output size.
+
+The library cannot be bare-imported from a static site, so the build
+bundles it into html/assets/vendor/ alongside Rapier and Loomlet, at a
+version pinned exactly in package.json. The build strips the SuperSplat
+viewer that splat-transform embeds for its html output (3 MB of
+PlayCanvas engine SceneSync never runs), asserts each rewrite still
+matches, and refuses to finish unless the bundle it just produced
+converts all four fixture formats.
+
+Verified against three.js's own GLTFGaussianSplatLoaderExtension: PLY,
+SPZ, SOG and LCC2 all load as GaussianSplat with matching positions,
+colors and SH bands. The Worker path is exercised in Chromium, webp.wasm
+included.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012XVTr9LUT4fWoi7Qg8eUd1
+```
+afjk
+changed the title
+[3DGS] PLY / SPZ ImportとKHR GLB変換に対応する
+[3DGS] Gaussian Splat ImportとKHR GLB正規化に対応する
+Aug 24, 2026
+afjk
+requested a lite review from Copilot
+August 24, 2026 04:22
+Copilot started reviewing on behalf of
+afjk
+August 24, 2026 04:23
+View session
+Copilot
+AI
+reviewed
+Aug 24, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 Changes recommended
+The current drag-and-drop integration does not correctly propagate the originally dropped filename into the synced/broadcast object name (it will still broadcast *.glb), which conflicts with the documented behavior and will be visible across clients.
+Once you've addressed the issues Copilot identified, you can request another Copilot review.
+Review details
+Suppressed comments (1)
+html/assets/js/scenesync/components/drag-drop-manager.js:482
+this.onLoaded(model, file) is invoked with the converted GLB file, so downstream code that uses file.name as the Scene Sync object name/broadcast name will publish *.glb (not the originally dropped *.ply/*.spz/*.sog). This contradicts the stated behavior that the object name should remain the original filename across clients.
+Consider extending the onLoaded contract (or otherwise plumbing displayFile.name) so the broadcast/object name uses the original filename while still uploading the converted GLB bytes.
+```
+      if (this.onLoaded) {
+        await this.onLoaded(model, file);
+      }
+```
+Files reviewed: 34/43 changed files
+Comments generated: 1
+Review effort level: Lite
+Comment thread
+html/assets/js/scenesync/loaders/gaussian-splat/splat-transform-adapter.js
+Comment on lines
++323
+to
++332
+const primitive = inspection.primitives[0];
+const shDegree = countShDegree(primitive?.attributes || {});
+return {
+glb: bytes,
+splatCount: 0,
+shDegree,
+sourceShDegree: shDegree,
+sourceFormat: 'glb',
+};
+}
+Fix the drop path and Worker fallback for splat captures
+…
+f9e2a83
+```
+Three problems found in review of the splat-transform migration.
+
+A zipped LCC2 capture could not actually be dropped on the editor. Every
+ZIP is offered to the Scene Sync Export importer first, and that importer
+claimed ZIPs it could not read — a capture archive got "this ZIP is not a
+Scene Sync Export" and never reached the converter. It now declines a ZIP
+with no scene.json and lets the drop continue; a ZIP that *has* a
+scene.json, broken or not, is still its own. There is now a test through
+DragDropManager.handleFile() rather than only through the converter, so
+the dispatch order is covered where it actually lives.
+
+One corrupt file could also demote the rest of the session to main-thread
+conversion. splat-transform throws ordinary Errors for a truncated SPZ or
+a broken archive, and only UnsupportedSplatInputError was recognised as
+the file's fault, so those were read as Worker trouble: the same bad file
+was converted again on the main thread and the Worker was switched off
+for good. Cancelling did the same thing — an abort started a main-thread
+conversion of the work just cancelled. What matters is whether the Worker
+answered, not what it answered, so that is what the code now asks.
+
+maxShDegree took any number. Trimming only runs when the cap is below the
+file's own degree, so 4 or 99 read as "keep everything" — the opposite of
+the size reduction asked for, with nothing to explain it. Out of range is
+now a RangeError.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012XVTr9LUT4fWoi7Qg8eUd1
+```
+afjk
+commented
+Aug 24, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+レビューありがとうございます。3点とも修正しました（f9e2a83）。
+1. [重要] .lcc2.zip がD&Dできない
+指摘のとおりでした。tryOpenSceneSyncExportFile() は loadExportPackageFromBlob() が
+missing-scene-json を返しても { handled: true } + toast で終了するため、capture zipは
+Gaussian Splat判定に到達していませんでした。
+scene.json を含まないzip（=Scene Sync Exportではないzip）は { handled: false } にして、
+次のImporterへ落とすようにしました。
+```
+if (isZip && result.reason === 'missing-scene-json') {
+  return { handled: false, reason: result.reason };
+}
+```
+scene.json はあるが壊れている場合（invalid-scene-json / invalid-scene-document）は
+Scene Sync Exportのつもりの入力なので、従来どおりExport importerが引き受けます。
+jszip-load-failed / invalid-zip も同様にfall throughさせるか迷いましたが、今回は広げていません。
+理由と、その場合の挙動は末尾に書きます。
+テスト
+html/assets/js/scenesync/components/drag-drop-gaussian-splat.test.js を追加しました。
+DragDropManager.handleFile() を実際に通します。
+drag-drop-manager.js は three をimportしていてNodeから読めないので、
+module.registerHooks() でこのテストファイル内だけ three をstubに差し替えています。
+CDNから注入される JSZip も同様にstubしました。差し替えているのは環境だけで、
+Export importerもGaussian Splat converterも実物です。
+テスト
+内容
+a zipped LCC2 capture dropped on the editor becomes a GLB object
+.lcc2.zip → GLB File → glbLoader.loadFromFile() まで到達し、KHR Inspectorを通る。表示名は ring-gaussian-splats.lcc2.zip、userData.importedFrom.sourceFormat は lcc2
+a Scene Sync Export ZIP still belongs to the export importer
+scene.json を持つzipは従来どおりExport importerが取り、splat変換に流れない
+a .sog capture takes the same path
+.sog も同経路
+a ZIP that is neither an export nor a capture is reported, not loaded
+何も読み込まず、toastで理由が出る
+a capture that is not a ZIP is never offered to the export importer
+.ply はExport importerに渡らない
+Nodeにmodule Workerが無いのでinline fallback経路になり、vendor bundleが直接読まれます。
+実際にコミット済みbundleを通っています。
+エラーメッセージ
+zipがGaussian Splat経路まで来て失敗した場合、それがそのdropの最終回答になるので、
+両方の可能性を書くようにしました。
+```
+このZIPはScene Sync Exportでも、Gaussian Splatのアーカイブでもありませんでした。
+含まれているファイル: notes.txt, thumb.png
+LCC2は meta.lcc2 とチャンクを含むフォルダごと圧縮したものをドロップしてください。
+```
+2. [重要] 壊れたファイル1個でWorkerが永久に無効化される
+こちらも指摘のとおりで、さらに AbortSignalでの中止も同じ経路に落ちていました。
+中止した直後にmain threadで同じ変換を始めてしまう状態でした。
+判定基準を「エラーの型」から「Workerが返事をしたかどうか」に変えました。
+```
+const WORKER_REPLIED = Symbol('gaussian-splat-worker-replied');
+
+// {ok:false} で返ってきた変換エラー、および abort をマークする
+export function isWorkerInfrastructureFailure(error) {
+  return !error?.[WORKER_REPLIED];
+}
+```
+失敗
+inline retry
+Worker無効化
+Workerが {ok:false} を返した（変換エラー全般）
+しない
+しない
+AbortSignalによる中止
+しない
+しない
+new Worker() が例外（CSPなど）
+する
+する
+Workerの error イベント
+する
+する
+isContentError() は名前が実態と合わなくなったので isWorkerInfrastructureFailure() に変えています。
+テストを2本追加しました。
+a plain conversion error from the Worker does not demote the session — 素の Error（truncated SPZ相当）を {ok:false} で返し、再読み込みが0回であること、次のimportでもWorkerが使われることを確認
+aborting does not fall back to a main thread conversion — abort後に rereadSource() が呼ばれないこと
+3. [小] maxShDegree のvalidation
+0..3 の整数以外（undefined を除く）は RangeError にしました。
+-1 / 4 / 99 / 1.5 / '2' / null / NaN を確認するテストを追加しています。
+範囲外を「全SH保持」として通すと、サイズが減らない理由が利用者から見えないのが問題でした。
+undefined はこれまでどおり「指定なし = 削減しない」です。
+判断を保留した点
+jszip-load-failed（CDNからJSZipを取得できない）については、今回 handled: true のままにしました。
+そのままだと、JSZipが読めない環境では .lcc2.zip のD&Dも通らなくなる
+ただしJSZipが読めない環境ではExport zipのimportも元から動かないので、
+「Export zipが動く環境ならcapture zipも動く」という条件は揃っている
+fall throughさせると、その環境で本物のExport zipをドロップしたときに
+Gaussian Splat側のメッセージが出てしまい、かえって分かりにくい
+もう1点、今回は触っていませんが気付いた範囲で共有します。全てのzipが、Gaussian Splat判定の前に
+JSZipで一度フルに読まれます。 数百MBのcapture zipだと、JSZipとsplat-transformのZipReadFileSystemで
+2回読むことになります。実用上問題になるようなら別Issueで、Export判定を中央ディレクトリだけ見る形にするか、
+拡張子で先に振り分けるかを検討したいです。
+確認
+```
+test:3dgs-import              98 pass  (+9)
+test:3dgs-khr                  6 pass
+test:scene-sync-export-import 198 pass
+test:physics                  68 pass
+test:runtime-schedule         53 pass
+test:stereo-media             25 pass
+test:plugins / loomlet-runtime 18 pass each
+test:glb-normalizer / playback-duration 10 pass each
+test:audio-source-controller / editing-state / mesh-blob-fetch / export-behavior-runtime / expired-glb-recovery  all pass
+```
+vendor bundleを再生成し（4形式の変換検証込み）、実ブラウザWorker smokeも9 checks全てPASSしています。
+Generated by Claude Code
+Hide details
+View details
+afjk
+merged commit e393465
+into
+main
+Aug 24, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+afjk
+deleted the
+claude/3dgs-issue-check-wfxr7n
+branch
+August 24, 2026 04:57
+This was referenced Aug 24, 2026
+[SceneSync][3DGS] Unity / GodotのEditor・RuntimeでKHR_gaussian_splatting GLBを扱う
+#539
+Open
+[SceneSync][3DGS] Unity / Godot で KHR_gaussian_splatting GLB を扱う
+#540
+Merged
+afjk
+added a commit
+that referenced
+this pull request
+Aug 25, 2026
+[SceneSync][3DGS] Unity / Godot で KHR_gaussian_splatting GLB を扱う (#540)
+…
+3385e63
+```
+* feat(scenesync): handle KHR_gaussian_splatting GLB in Unity/Godot
+
+Scene Sync の 3DGS 交換形式である KHR_gaussian_splatting GLB を、Unity 版 /
+Godot 版でも Editor / Runtime の両方で扱えるようにする。各エンジンに形式ごとの
+parser は持たせず、SceneSync Web が正規化した GLB を受け取って描画へ回す。
+
+3層構成（Unity / Godot 共通）:
+
+- 検出: GLB の JSON chunk を読んで KHR_gaussian_splatting を判定。判定規則は
+  Web 実装 khr-gaussian-splatting.js と同じ（POINTS mode / 必須 attribute /
+  extensionsUsed 宣言は error、未知の kernel 等は warning）
+- 振り分け: 差し替え可能な backend（UnitySplats / godot-gsplat 想定）へ渡す。
+  未登録なら依存ゼロの点群プレビューへ落とす
+- 描画: backend 側
+
+Editor:
+
+- Unity: GameObject > Scene Sync > Import Gaussian Splat GLB... と
+  [ExecuteAlways] な SceneSyncGaussianSplatSource。シーンを開いた時点で
+  Scene View に表示され、Play モードへ入る必要がない
+- Godot: Project > Tools のメニュー（Undo/Redo 対応）と @tool の
+  SceneSyncGaussianSplatNode3D。視覚ノードは保存せず参照から再構築する
+
+Runtime:
+
+- Unity: DownloadAndCreateObject と LoadGlbFromBytes で分岐。ImportedGlbRoot
+  構造・transform・visibility・physics/Loomlet metadata の扱いは通常 GLB と同じ
+- Godot: import_glb() で分岐。通常 mesh と混在する GLB では mesh 側も従来経路で
+  読み込んで同じ親に付ける
+
+renderer 本体は同梱していない。backend の登録口だけを持つため依存は増えていない。
+
+Tests: godot/tests/test_gaussian_splat_glb.gd（88 assertions、run_all.sh に追加）、
+unity/.../Tests/Editor/SceneSyncGaussianSplatGlbTests.cs
+
+Refs #534, #535
+Refs #539
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013R82PrUZ5cgXk2zjvfWs8Z
+
+* [SceneSync][3DGS] Unity / Godot実renderer backendを追加 (#541)
+
+* feat(scenesync): add native Gaussian renderer backends
+
+* feat(scenesync): add native Gaussian renderer backends
+
+* fix(scenesync): preserve Gaussian recovery state (#542)
+
+---------
+
+Co-authored-by: Claude Opus 5 <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

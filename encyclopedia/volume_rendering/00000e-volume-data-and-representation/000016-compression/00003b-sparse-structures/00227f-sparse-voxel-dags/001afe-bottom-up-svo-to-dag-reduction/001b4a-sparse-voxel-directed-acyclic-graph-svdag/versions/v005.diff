@@ -1,0 +1,188 @@
+--- v004.md
++++ v005.md
+@@ -23,5 +23,4 @@
+ 2.  **Leaf Node (LNODE):**
+     *   Represents a homogeneous subvolume (all passive or all active) or the base resolution [S1].
+-    *   Does not contain child pointers [S1].
+ 
+ **Algorithm (Bottom-Up Reduction):**
+@@ -30,108 +29,86 @@
+ 1.  **Root Construction:** If $N=2$, the root is a leaf node. If $N>2$, the root is an internal node [S1].
+ 2.  **Recursive Build:** For a given grid section:
+-    a.  Check if the section is homogeneous (all voxels identical) or if the base resolution is reached.
+-    b.  If homogeneous/passive: Create a Leaf Node (LNODE). If active, it represents the filled volume; if passive, it is pruned [S1].
+-    c.  If not homogeneous: Create an Internal Node (INODE).
++    a.  Check if the section is homogeneous (all voxels identical) or if the base resolution is reached [S5].
++    b.  If homogeneous/passive: Create a Leaf Node (LNODE). If active, it represents the filled volume; if passive, it is pruned [S5].
++    c.  If not homogeneous: Create an Internal Node (INODE) [S5].
+     d.  For each of the 8 octants:
+         i.  Extract the sub-grid.
+         ii. Recursively build the child node.
+-        iii. If the child is a leaf representing passive voxels, set the corresponding HT in CHNM to 0 and do not add a pointer to PTS.
+-        iv. If the child is active, set HT to 1 and add the pointer to PTS.
++        iii. If the child is a leaf representing passive voxels, set the corresponding HT in CHNM to 0 and do not add a pointer to PTS [S1].
++        iv. If the child is active, set HT to 1 and add the pointer to PTS [S1].
+ 3.  **Common Subtree Merging (CSM):**
+     a.  Generate a unique key for the current subtree configuration (e.g., based on child pointers and structure) [S5].
+     b.  Check a cache of existing nodes. If a node with the same key exists, return the existing node's pointer instead of creating a new one [S5].
+     c.  If not in cache, insert the new node into the cache and return its pointer [S5].
+-4.  **Propagation:** Merging opportunities propagate from leaf nodes upward. Identical subtrees at any level are merged into a single instance, and all parents point to this single instance [S2].
++4.  **Propagation:** Merging opportunities propagate from leaf nodes upward [S2]. Identical subtrees at any level are merged into a single instance, and all parents point to this single instance [S2].
+ 
+ **Pseudocode:**
+ ```python
+-# Data Structures
+ class VoxelNode:
+     is_leaf: bool
+-    value: byte  # 0 for passive, 1 for active (if leaf)
+-    children: array[VoxelNode, 8] # Only valid if not leaf
+-    # In binary layout: CHNM (8 bits), PTS (array of pointers)
++    value: int  # 0 for passive, 1 for active
++    children: list[VoxelNode] # 8 elements, None if leaf
++    chnm: int # 8-bit header tag mask
++    pts: list[VoxelNode] # pointers to active children
+ 
+-class SparseVoxelDAG:
+-    voxel_grid: array[byte, 3]
+-    grid_depth: int = 4
+-    root_node: VoxelNode
+-    subtree_cache: dict[string, VoxelNode]
++def get_octant(grid: list[list[list[int]]], octant_idx: int, size: int) -> list[list[list[int]]]:
++    half = size // 2
++    x0 = (octant_idx & 1) * half
++    y0 = (octant_idx & 2) * half // 2
++    z0 = (octant_idx & 4) * half // 4
++    return [[[grid[z0+z][y0+y][x0+x] for x in range(half)] for y in range(half)] for z in range(half)]
+ 
+-# Helper: Check if all voxels in grid are identical
+-def is_homogeneous(grid: array[byte, 3]) -> bool:
+-    first_value = grid[0, 0, 0]
+-    for voxel in grid:
+-        if voxel != first_value:
+-            return False
++def is_homogeneous(grid: list[list[list[int]]]) -> bool:
++    val = grid[0][0][0]
++    for z in grid:
++        for y in z:
++            for x in y:
++                if x != val: return False
+     return True
+ 
+-# Helper: Extract one of 8 octants from a grid
+-def get_octant(grid: array[byte, 3], octant_index: int, size: int) -> array[byte, 3]:
+-    # octant_index 0-7 maps to x,y,z bits
+-    # xStart = (octant_index & 1) * size
+-    # yStart = (octant_index & 2) * size / 2
+-    # zStart = (octant_index & 4) * size / 4
+-    # Copy data from grid starting at these offsets with dimension size/2
+-    # Implementation detail: Not given in sources [S5]
+-    pass
+-
+-# Helper: Generate unique key for subtree
+-def generate_subtree_key(node: VoxelNode) -> string:
+-    # Concatenate identifiers of children in Morton order
+-    # Implementation detail: Not given in sources [S5]
+-    pass
+-
+-# Main Build Function
+-def build_dag(grid: array[byte, 3], depth: int, size: int) -> VoxelNode:
+-    # 1. Check Cache for Common Subtree Merging
+-    key = generate_subtree_key_placeholder(grid) # Placeholder for key generation logic
+-    if key in subtree_cache:
+-        return subtree_cache[key]
+-
+-    # 2. Determine Node Type
++def build_dag(grid: list[list[list[int]]], depth: int, size: int, cache: dict) -> VoxelNode:
++    # Generate unique key from grid content [G]
++    key = str(tuple(grid[z][y][x] for z in range(size) for y in range(size) for x in range(size)))
++    
++    if key in cache:
++        return cache[key]
++        
++    node = VoxelNode()
+     if depth == 0 or is_homogeneous(grid):
+-        # Create Leaf Node
+-        node = VoxelNode()
+         node.is_leaf = True
+-        node.value = grid[0, 0, 0]
+-        # Note: If homogeneous passive, this node may be pruned in parent CHNM
++        node.value = grid[0][0][0]
++        node.children = [None]*8
++        node.chnm = 0
++        node.pts = []
+     else:
+-        # Create Internal Node
+-        node = VoxelNode()
+         node.is_leaf = False
+-        node.children = [None] * 8
+-        new_size = size / 2
+-        
+-        chnm = 0
+-        pts = []
+-        
++        node.children = [None]*8
++        node.chnm = 0
++        node.pts = []
++        new_size = size // 2
+         for i in range(8):
+             octant = get_octant(grid, i, new_size)
+-            child_node = build_dag(octant, depth - 1, new_size)
+-            
+-            # Determine Header Tag
+-            # If child is leaf and passive (value 0), HT=0, no pointer
+-            # If child is leaf and active (value 1), HT=1, pointer included
+-            # If child is internal, HT=1, pointer included
+-            is_passive_leaf = child_node.is_leaf and child_node.value == 0
+-            
+-            if is_passive_leaf:
+-                # Pruned: HT=0, no pointer added to PTS
+-                pass 
++            child = build_dag(octant, depth - 1, new_size, cache)
++            node.children[i] = child
++            if child.is_leaf and child.value == 0:
++                pass # HT=0, pruned
+             else:
+-                # Active: HT=1, pointer added
+-                chnm |= (1 << i)
+-                pts.append(child_node)
+-            
+-            node.children[i] = child_node
+-        
+-        # Store CHNM and PTS in node structure
+-        node.chnm = chnm
+-        node.pts = pts
++                node.chnm |= (1 << i)
++                node.pts.append(child)
++                
++    cache[key] = node
++    return node
+ 
+-    # 3. Cache and Return
+-    subtree_cache[key] = node
+-    return node
++def trace_ray(node: VoxelNode, origin: list[float], direction: list[float], bounds: list[float]) -> tuple[int, int, int]:
++    # Standard SVDAG ray traversal [G]
++    # 1. Compute ray-box intersection with current node bounds
++    # 2. If no intersection, return None
++    # 3. If leaf: return voxel coordinates if active, else None
++    # 4. If internal: iterate i in 0..7
++    #    if (node.chnm >> i) & 1:
++    #        res = trace_ray(node.pts[i], origin, direction, child_bounds[i])
++    #        if res: return res
++    # 5. Return None
++    pass
+ ```
+ 
+@@ -158,9 +135,9 @@
+ **Time and Memory Complexity:**
+ *   **Memory:** The DAG consumes 8 to 36 bytes per node [S2]. It reduces total memory consumption by up to 38x compared to ESVO and up to 26x compared to a minimal pointer-less SVO [S2].
+-*   **Node Reduction:** In the CRYSPONZA scene, a 576x reduction in node count was achieved. In the HAIRBALL scene, a 28x reduction was achieved despite lacking obvious regularities [S2].
+-*   **Build Time:** Building the DAG for CRYSPONZA at $512^3$ takes 8.4ms total (1.9ms sorting). At $8K^3$, it takes 4.5s total (0.6s sorting). For HAIRBALL at $8K^3$, it takes 40.6s total (4.5s sorting) [S2].
++*   **Node Reduction:** In the CRYSPONZA scene, a 576x reduction in node count was achieved [S2]. In the HAIRBALL scene, a 28x reduction was achieved despite lacking obvious regularities [S2].
++*   **Build Time:** Building the DAG for CRYSPONZA at $512^3$ takes 8.4ms total (1.9ms sorting) [S2]. At $8K^3$, it takes 4.5s total (0.6s sorting) [S2]. For HAIRBALL at $8K^3$, it takes 40.6s total (4.5s sorting) [S2].
+ 
+ **Measured Performance:**
+-*   In the EPICCITADEL scene voxelized to $128K^3$ resolution, the SVDAG stores 19 billion voxels in 945MB of GPU memory. An SVO would require 5.1GB (excluding pointers) [S2].
++*   In the EPICCITADEL scene voxelized to $128K^3$ resolution, the SVDAG stores 19 billion voxels in 945MB of GPU memory [S2]. An SVO would require 5.1GB (excluding pointers) [S2].
+ *   On an NVIDIA GTX680, ray tracing in the sparse voxel DAG achieves 170 MRays/sec for ambient occlusion and 240 MRays/sec for shadows [S2].
+ *   The new encoding (Modisett & Billeter) reduces geometric data size by 13%-18% compared to the original SVDAG [S3].

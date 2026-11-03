@@ -1,0 +1,87 @@
+# ![splashsurf logo](https://raw.githubusercontent.com/InteractiveComputerGraphics/splashsurf/main/logos/logo_small.svg "splashsurf")
+[![On crates.io](https://img.shields.io/crates/v/splashsurf)](https://crates.io/crates/splashsurf)
+[![On PyPI](https://img.shields.io/pypi/v/pysplashsurf)](https://pypi.org/project/pysplashsurf/)
+[![On docs.rs](https://docs.rs/splashsurf_lib/badge.svg)](https://docs.rs/splashsurf_lib)
+[![Commits since last release](https://img.shields.io/github/commits-since/InteractiveComputerGraphics/splashsurf/latest)](https://github.com/InteractiveComputerGraphics/splashsurf)
+[![License: MIT](https://img.shields.io/crates/l/splashsurf)](https://github.com/InteractiveComputerGraphics/splashsurf/blob/main/LICENSE)
+[![Dependency status](https://deps.rs/repo/github/InteractiveComputerGraphics/splashsurf/status.svg)](https://deps.rs/repo/github/InteractiveComputerGraphics/splashsurf)
+[![Rust library & CLI](https://github.com/InteractiveComputerGraphics/splashsurf/actions/workflows/build.yml/badge.svg)](https://github.com/InteractiveComputerGraphics/splashsurf/actions/workflows/build.yml)
+[![Python bindings](https://github.com/InteractiveComputerGraphics/splashsurf/actions/workflows/pysplashsurf_CI.yml/badge.svg)](https://github.com/InteractiveComputerGraphics/splashsurf/actions/workflows/pysplashsurf_CI.yml)
+
+Surface reconstruction library and CLI for particle data from SPH simulations, written in Rust.
+
+This repository contains of the following components:
+ - 🛠️ `splashsurf`: Binary crate with a CLI (command line interface) to quickly run surface reconstructions of SPH particle data files from the terminal. Install with `cargo install splashsurf`.
+ - 🧰 `splashsurf_lib`: Rust library that implements the reconstruction method used by the CLI. Allows integrating the reconstruction procedure directly into other Rust applications. Furthermore, it resembles a framework providing access to individual building blocks to create your own surface reconstruction pipeline.
+ - 🐍 `pysplashsurf`: Bindings to the CLI and library for Python. Install with `pip install splashsurf` and see the [`README`](pysplashsurf/README.md) for more details.
+ - 🎬 `splashsurf_studio`: Blender add-on built on top of the Python bindings for on-the-fly surface reconstruction. Available from the [official Blender extension repository](https://extensions.blender.org/add-ons/splashsurf-studio/).
+
+This page provides an overview of the CLI's features and high-level notes on implementation of the reconstruction method.
+
+<p align="center">
+<img src="example_particles.png" alt="Image of the original particle data" width="32%"> <img src="example_coarse.png" alt="Image of a coarse reconstructed surface mesh" width="32%"> <img src="example_fine.png" alt="Image of a fine reconstructed surface mesh" width="32%">
+</p>
+
+`splashsurf` is a tool designed to reconstruct surface meshes from SPH particle data. 
+The first image illustrates the visualization of a set of particles from an SPH fluid simulation made using [SPlisHSPlasH](https://github.com/InteractiveComputerGraphics/SPlisHSPlasH).
+The particle radius is `0.025`.
+To ensure that the rendering of a fluid does not resemble a ball pit, a surface mesh must be reconstructed from this particle data.
+The second image displays a reconstructed surface mesh of the fluid produced by `splashsurf`, utilizing a "smoothing length" of `2.2` times the particle radius and a cell size of `1.1` times the particle radius.
+The third image showcases a finer reconstruction with a cell size of `0.45` times the particle radius.
+These surface meshes can then be imported into 3D rendering software such as [Blender](https://www.blender.org/) to create stunning water animations.
+The result may resemble the following:
+
+<p align="center">
+<img src="https://raw.githubusercontent.com/w1th0utnam3/w1th0utnam3.github.io/master/splashsurf.gif" alt="Rendered water animation" width="96%">
+</p>
+
+---
+
+**Contents**
+- [The `splashsurf` CLI](#the-splashsurf-cli)
+  - [Introduction](#introduction)
+  - [Domain decomposition](#domain-decomposition)
+    - [Subdomain grid-based decomposition](#subdomain-grid-based-decomposition)
+  - [Notes](#notes)
+  - [Installation](#installation)
+  - [Usage](#usage)
+    - [Recommended settings](#recommended-settings)
+    - [Weighted surface smoothing](#weighted-surface-smoothing)
+    - [Benchmark example](#benchmark-example)
+    - [Sequences of files](#sequences-of-files)
+  - [Input file formats](#input-file-formats)
+    - [VTK](#vtk)
+    - [VTU](#vtu)
+    - [BGEO](#bgeo)
+    - [PLY](#ply)
+    - [XYZ](#xyz)
+    - [JSON](#json)
+  - [Output file formats](#output-file-formats)
+  - [All command line options](#all-command-line-options)
+    - [The `reconstruct` command](#the-reconstruct-command)
+    - [The `convert` subcommand](#the-convert-subcommand)
+  - [Citation](#citation)
+  - [Acknowledgements](#acknowledgements)
+- [License](#license)
+
+
+# The `splashsurf` CLI
+
+The following sections mainly focus on the CLI of `splashsurf`. For more information on the library, see the [corresponding readme](https://github.com/InteractiveComputerGraphics/splashsurf/blob/main/splashsurf_lib) in the `splashsurf_lib` subfolder or the [`splashsurf_lib` crate](https://crates.io/crates/splashsurf_lib) on crates.io.
+
+## Introduction
+
+The `splashsurf` CLI provides a "fast" marching cubes based surface reconstruction for particle data from SPH fluid simulations (e.g., performed with [SPlisHSPlasH](https://github.com/InteractiveComputerGraphics/SPlisHSPlasH)).
+The output of this tool is a (closed) triangle mesh of the fluid's surface.
+At the moment, it supports computing normals on the surface using SPH gradients and interpolating scalar and vector attributes defined on the particles to the surface.
+To get rid of the typical bumps from SPH simulations, it supports a weighted Laplacian smoothing approach [detailed below](#weighted-surface-smoothing).
+As input, it supports reading particle positions from `.vtk`/`.vtu`, `.bgeo`, `.ply`, `.json` and binary `.xyz` (i.e., files containing a binary dump of a particle position array) files.
+Required parameters to perform a reconstruction are the kernel radius (its compact support) and particle radius (to compute the volume of particles) used for the original SPH simulation as well as the marching cubes resolution (a default iso-surface threshold is pre-configured).
+
+## Domain decomposition
+
+A naive dense marching cubes reconstruction allocating a full 3D array over the entire fluid domain quickly becomes infeasible for larger simulations.
+Instead, one could use a global hashmap where only cubes that contain non-zero fluid density values are allocated.
+This approach is used in `splashsurf` if domain decomposition is disabled completely.
+However, a global hashmap does not lead to good cache locality and is not well suited for parallelization (even specialized parallel map implementations like [`dashmap`](https://github.com/xacrimon/dashmap) have their performance limitations).
+To improve on this situation `splashsurf` utilizes a domain decomposition approach.

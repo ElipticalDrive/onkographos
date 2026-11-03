@@ -1,0 +1,369 @@
+A custom ray-tracing engine for blender that allows the plug in of custom materials and custom ray tracing methods for astrophysically based ray tracing. - feat(pkg199-s2b): GPU wavefront dedicated volume-scatter stage (HG in-scatter, fleet-isolated) by HendrikGC02 · Pull Request #619 · HendrikGC02/Astroray
+
+feat(pkg199-s2b): GPU wavefront dedicated volume-scatter stage (HG in-scatter, fleet-isolated) by HendrikGC02 · Pull Request #619 · HendrikGC02/Astroray · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+HendrikGC02
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Owner
+pkg199 Stage 2 — PR 2b: GPU wavefront dedicated volume-scatter stage
+Mirrors the PR-2a CPU homogeneous scattering medium on the GPU wavefront via a
+dedicated stageVolumeScatterKernel scheduled between intersect and shade
+(Option A, coordinator-approved). Branches on top of merged 2a (PR #617).
+Architecture
+intersectPathSlotT runs the cheap free-flight decision (gated on
+mediumScatters); a SCATTER writes the scatter point P to ray_origin,
+applies Tr·σ_s/pdf, returns a -2 sentinel routing the slot to a new volume
+queue; a SURFACE applies Tr/pdf (role-1 replacement, role-1 + role-3-lamp Tr
+gated off).
+stageVolumeScatterKernel (new) drains the volume queue: HG phase NEE
+parked into the shared nee_f/nee_i lanes + shadow queue (so
+stageShadowKernel resolves it unchanged — lane-14 geomDist role-2 Tr +
+clamp), and the HG phase-sampled continuation requeued. stageShadeBucketedKernel
+is never touched → byte-identical by construction (scattered slots never enter
+its bucket).
+GWorldVolume gains scatter (α) + anisotropy (g); uploaded from the renderer.
+Snapshot semantics pinned identically to CPU (P from the pre-update ray).
+Premise correction (documented in the spec): a purely-additive kernel can't sit
+between intersect and shade because intersect owns the surface-commit +
+bucketing, so intersect is mediumScatters-gated; scatter==0 compiles to
+identical Stage-1 behaviour.
+Fleet register isolation — HasWorldScatter if-constexpr axis
+The inline free-flight decision costs +3 REG on stageIntersectQueuedKernel
+(127→130), crossing 128 → 2→1 blocks/SM at 256 threads. A cooled,
+contention-controlled, interleaved A/B (idle + burn-in to 2887 MHz, min-of-11,
+nvidia-smi-verified no compute contention per leg):
+build
+vacuum 256²/128spp/d6
+power
+blocks/SM
+main (3 legs)
+116.4 / 116.7 / 116.9 ms
+153–156 W
+2
+always-present (2 legs)
+120.6 / 120.7 ms
+147 W
+1
+if-constexpr <false> (2 legs)
+117.2 / 117.4 ms
+152 W
+2
+→ the always-present form is a real +3.3% fog-free fleet regression (power-draw
+split confirms the occupancy mechanism, not clock/thermal). Four shave attempts
+(object-free counter-based hash, __noinline__, scatter-math-to-volume-kernel,
+drop-lamp-bound) all stayed at 130 — the +3 is intrinsic to any inline decision.
+Resolution: the established fleet-isolation pattern (pkg178/184/189) —
+template<bool HasWorldScatter> with the decision behind if constexpr. Fleet
+<false> (vacuum + absorption-only fog) compiles it OUT → REG 127 / STACK 616 /
+2 blocks/SM, byte-identical Stage-1, cooled vacuum 117.3 ms = +0.5% vs main
+(within noise). Only scattering fog launches <true> (REG 130). A non-template
+intersectPathSlot forwarder (→<false>) preserves the cross-TU symbol for the
+ReSTIR primary + MIS-audit kernels. Chosen over the spec's Option 2
+(volume-kernel-owns-surface restructure) — same fleet-clean result, far lower
+correctness risk (scattering logic unchanged, only compile-gated).
+Register gates (cuobjdump, native sm_120 .pyd)
+stageShadeBucketedKernel<false,false,false,false>: REG 254 / STACK 3352 /
+CONSTANT[0] 1700 — byte-identical to the pinned fleet baseline.
+stageIntersectQueuedKernel<false> (fleet): REG 127 / STACK 616 (= main's
+127/616; CONST[0] 1696 vs 1680 is the 2 vol-queue pointer params — constant
+memory, not registers/occupancy).
+stageIntersectQueuedKernel<true> (fog only): REG 130 / STACK 632.
+New stageVolumeScatterKernel: REG 64 / STACK 88 / CONST[0] 1382.
+Measured gates (RTX 5070 Ti, 2887 MHz)
+CPU↔GPU god-ray parity: per-channel ratio [1.0044, 0.9972, 0.9978] (~0.5%,
+MC convention); in-scatter adds 5× energy vs the α=0 baseline (0.0397 vs 0.0082).
+α=0 GPU inertness: foggy 0.0083 < clear 0.0293 (absorption, no god-ray leak).
+Forward/back HG on GPU: 1.707 (forward > back).
+Visual: GPU vs CPU god-ray PNGs near-indistinguishable (smooth in-scatter
+halo + floor shafts, no NaN speckle/artifacts) — inspected.
+Stage-1 preserved: all 9 pkg199 world-volume tests pass (Beer-Lambert,
+vacuum byte-identity, ReSTIR fog-contamination guard, sphere-lamp CPU↔GPU
+parity [1.0005,1.0003,1.0003]) — the templating + forwarder didn't touch the
+absorption/ReSTIR paths.
+Regression
+pkg199 Stage 2 GPU+CPU + Stage 1: 19/19.
+Full local sweep tests/ --ignore=tests/wavefront_diff (the CLAUDE.md
+routine exclusion of the long pkg55 wavefront_diff gate): 1981 passed, 70
+skipped, 19 xfailed, 3 xpassed, 0 failed (10m28s).
+Authorized surface
+Spec Stage-2 Specification (GPU wavefront mirror). Changed: src/gpu/wavefront/ stage_advance.cu (volume kernel + intersect template + free-flight helpers),
+src/gpu/wavefront/gpu_wavefront_snapshot.cu (volume-queue plumbing + upload +
+launch flag), include/astroray/gpu_types.h (GWorldVolume fields),
+include/astroray/gpu_wavefront_state.h (launch decls), new GPU test, research
+note + spec. No CPU integrator / shade-kernel changes.
+Build (CUDA, root wrapper, foreground)
+.pyd mtime 2026-08-14 22:56:36 (postdates code HEAD 35f5577 @ 22:49:45),
+sm_120 confirmed via cuobjdump --list-elf. Last 5 lines:
+```
+[pkg183] arch-verify OK: astroray.cp313-win_amd64.pyd embeds sm_120 (embedded=[sm_120])
+[pkg183] running host-only ABI canary (no GPU)...
+[pkg183] canary caps: {'cpu': True, ... 'gpu': True, 'gpu_spectral': True, ...}
+========================================
+Build succeeded
+```
+Follow-up (filed in spec)
+Blender addon UI for the scatter slider (bindings-now, UI-later).
+🤖 Generated with Claude Code
+HendrikGC02
+and others
+added 6 commits
+August 14, 2026 20:35
+feat(pkg199-s2b): GPU wavefront dedicated volume-scatter stage (HG in…
+…
+93bf04d
+```
+…-scatter)
+
+Mirrors the CPU homogeneous scattering medium on the GPU wavefront via a dedicated
+stageVolumeScatterKernel between intersect and shade (Option A, coordinator-approved).
+
+- GWorldVolume gains scatter (α) + anisotropy (g); uploaded from the renderer.
+- intersectPathSlot: cheap free-flight scatter DECISION (gated on mediumScatters =
+  hasVolume && density>0 && scatter>0, same condition as CPU → α=0 byte-identical
+  Stage-1). SCATTER → writes P to ray_origin, applies Tr·σ_s/pdf, returns -2;
+  SURFACE → Tr/pdf (role-1 replacement); role-1 + role-3 lamp Tr gated off in
+  scatter mode. PBRT-v3 HomogeneousMedium::Sample per-channel selection.
+- stageIntersectQueuedKernel routes -2 slots to a new volume queue (d_volQueue/
+  d_volCount, zeroed in regen thread 0).
+- stageVolumeScatterKernel: phase NEE (HG/light MIS) parked into the SHARED
+  nee_f/nee_i lanes + shadow queue (stageShadowKernel resolves it unchanged —
+  geomDist role-2 Tr + clamp), HG phase-sampled continuation requeued. Register-
+  heavy scatter processing lives here, NOT in the REG-254 shade kernel → shade
+  byte-identical by construction.
+- GPU HG helpers gpu_phaseHG/gpu_sampleHG/gpu_worldSigmaT (PBRT-v3 / HG 1941).
+- ReSTIR publishes scatter=0 (bounce-0 direct only, no volume kernel) so its
+  intersectPathSlot never takes the -2 route.
+- Snapshot semantics pinned: scatter point P captured from the pre-update ray,
+  stored as ray_origin, direction left as incoming for woMedium — mirrors CPU.
+- Tests: tests/test_pkg199_stage2_scattering_gpu.py (α=0 GPU inertness, CPU↔GPU
+  god-ray parity, forward/back HG on GPU).
+
+Not yet built/verified: GPU lock protocol; register gates (intersect before/after,
+new kernel footprint) pending the build slot.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+docs(pkg199-s2b): document the gated-intersect premise correction for…
+…
+b6d8b4d
+```
+… the GPU mirror
+
+The spec's 'purely additive dedicated kernel' isn't literally achievable —
+intersectPathSlot owns surface-commit (role-1/emission/lamp) + shade bucketing, so
+intersect must be mediumScatters-gated. Option A as built: cheap decision in
+intersect (-2 sentinel → volume queue), register-heavy processing in the dedicated
+stageVolumeScatterKernel, shade kernel byte-identical, scatter=0 == Stage-1.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+test(pkg199-s2b): ASCII-only GPU test prints (cp1252 console safe)
+…
+939bd1a
+```
+The Windows console is cp1252; f-string prints with Greek/arrow glyphs
+(alpha, theta, ->) raised UnicodeEncodeError mid-test. Replace with ASCII.
+No assertion changes.
+```
+perf(pkg199-s2b): object-free counter-based free-flight sampler (Opti…
+…
+c5c52d1
+```
+…on 3)
+
+Replace the WavefrontRNG object in intersectPathSlot's free-flight decision with
+an inline counter-based hash (PBRT-v4 MixBits + PCG32 SetSequence/XSH-RR, same
+keying as WavefrontRNG::GenerateForDimension, cited) keyed per-bounce on a salt
+disjoint from the shade stream. No held RNG object, no rng_dimension round-trip —
+targets intersect REG <=128 (2 blocks/SM) vs the 130 the object version measured
+(recorded reason: +3 REG crossed 128 → 2->1 blocks/SM → 3.4% fog-free regression).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+perf(pkg199-s2b): HasWorldScatter if-constexpr fleet-isolation axis (…
+…
+35f5577
+```
+…replaces Option 2)
+
+The cooled+bracketed A/B confirmed the always-present free-flight decision costs
++3.3% on fog-free fleet renders (intersect 127->130 REG = 2->1 blocks/SM at 256
+threads; main 116.4-116.9ms @156W/2-blocks vs cycle1 120.6-120.7ms @147W/1-block).
+
+Instead of the risky Option-2 volume-kernel restructure, use the established
+fleet-isolation pattern (pkg178/184/189): template intersectPathSlotT<HasWorldScatter>
++ stageIntersectQueuedKernel<HasWorldScatter>, with the medium free-flight block
+behind if constexpr. The fleet <false> specialization (vacuum + absorption-only
+fog) compiles the block OUT -> back to 127 REG / 2 blocks/SM / byte-identical
+Stage-1. Only scattering fog (scatter>0) launches <true>. A non-template
+intersectPathSlot forwarder (-><false>) preserves the cross-TU symbol for the
+ReSTIR primary + MIS-audit kernels (both scatter=0). Lower correctness risk than
+Option 2: the scattering logic (already gate-verified) is unchanged, only
+compile-gated.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+docs(pkg199-s2b): record cooled A/B + HasWorldScatter if-constexpr re…
+…
+3efb551
+```
+…solution
+
+Cooled+bracketed A/B confirmed +3.3% fog-free fleet regression from the intersect
+127->130 REG (2->1 blocks/SM). Resolved with the pkg178/184/189 fleet-isolation
+pattern: fleet <false> back to REG 127 / byte-identical Stage-1 / +0.5% vs main.
+GPU free-flight uses a cited counter-based hash; CPU/GPU streams independent.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+HendrikGC02
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Pre-merge review (different-model, code audit) — SIGN-OFF (conditional on the hw-619 GPU leg)
+Independent audit of the diff (main...pkg199-s2b), CPU-safe checks only — GPU tests deliberately not run (hw-619 holds the lock). CI is all-green (build-and-test ×2, cuda-syntax-check, changes).
+Step 0 — Authorization: AUTHORIZED, no scope drift
+Every changed file traces to the Stage-2 "GPU wavefront mirror" surface or a coordinator-ratified deviation documented in-spec: gpu_types.h (GWorldVolume α/g fields), gpu_wavefront_state.h (launch decls), stage_advance.cu + gpu_wavefront_snapshot.cu (impl + plumbing), the new GPU test, and the spec/research-note updates recording the premise-correction + HasWorldScatter if-constexpr choice. No CPU integrator change, no shade-kernel change, no CMake/preset, no new public Python binding (set_world_volume's scatter arg is pre-existing from 2a).
+Fleet byte-identity (<false>) — verified structurally
+The medium free-flight decision is behind if constexpr (HasWorldScatter) if (mediumScatters) (stage_advance.cu:408); mediumScatters = HasWorldScatter && … folds to compile-time false in <false>, so the !mediumScatters role-1 (line 502) and role-3-lamp (line 491) gates collapse to their Stage-1 form. PR-body register report (REG 127 / STACK 616 = main) is the empirical confirmation — the HW leg owns that measurement.
+Selection condition mirror: the driver launches <true> on hasWorldVolume && scatter>0 (snapshot.cu:225); the runtime if (mediumScatters) additionally requires density>0. The launch condition is thus slightly broader than the estimator gate, but this is output-safe — a density==0, scatter>0 scene launches <true> yet the runtime gate suppresses all scatter behaviour, so it only costs the 130-REG kernel in a degenerate empty-medium case. Noted, not a hold.
+Non-template intersectPathSlot forwarder → <false> (stage_advance.cu:652). The only two cross-TU callers — the MIS-audit kernel (stage_advance.cu:2234) and the ReSTIR primary (stage_restir.cu:283, forward-decl at :91 matches the forwarder signature exactly) — both route to <false>, and ReSTIR additionally publishes scatter=0 (snapshot.cu:1852). ReSTIR can never reach the -2 scatter path. Double-safe.
+Shade kernel untouched / NEE lane agreement — verified
+No diff hunk modifies stageShadeBucketedKernel; the 5 occurrences in the diff are all comments. Scattered slots return -2 and route to the volume queue before bucketing → byte-identical by construction.
+The volume kernel's phase-NEE park (stage_advance.cu:1708-1745) is lane-for-lane identical to the surface NEE park (lines 1032-1061): lanes 0-2 origin, 3-5 wi, 6 maxDist, 7-10 throughput·ph·scale (phase value replacing the BSDF f), 11-13 dedEmission, 14 geomDist, nee_i 0-3. stageShadowKernel resolves it unchanged — applies L_spec then gpu_worldTransmittanceMW(geomDist) (line 1406-1407), with the dist>=1e18 → Tr=1 distant guard (line 167). This is the occlusion-sentinel convention from the HW-611 regression, correctly reused (lane-14 geomDist, not lane-6 maxDist).
+Algorithm mirror vs merged CPU estimator (raytracer.h) — verified
+Same mediumScatters condition; same per-channel selection (ch = u·kSamples clamped); same free-flight -log(1-ξ)/σ_t[ch]; SCATTER Tr·σ_s/pdf, pdf = avg(σ_t·Tr), σ_s = σ_t·scatter; SURFACE Tr/pdf, pdf = avg(Tr) with the min(t,1e18) cap; phase NEE MIS wt = a²/(a²+b²+1e-8), phase-sampled continuation with bsdfPdfPrev = phasePdf, wasSpecular=false; RR bounce>3 (= CPU rrDepth=3). gpu_phaseHG/gpu_sampleHG are functionally identical to CPU phaseHG/sampleHG (same sign convention). Snapshot semantics match: P from the pre-update ray stored as ray_origin, direction left as incoming so woMedium=-dir. (Minor: the volume-kernel RR hardcodes 3 rather than the kRRDepth constant used elsewhere — value correct.)
+Hash sampler — cited, disjoint
+gpu_freeflightUniform reuses astroray::MixBits (PBRT-v4 src/pbrt/util/hash.h, MurmurHash3 finalizer) + PCG32 (imneme/pcg-c-basic, Apache-2.0), counter-based in the Salmon 2011/Random123 sense — all permissive, no GPL. Keyed on (pixel,sample,seed, salt=0xF0000000 + bounce·2 + {0,1}): two draws per event (channel pick, distance), per-bounce separated, and the 0xF0000000+ salt is disjoint from the shade/volume rng_dimension range (0..~depth), which the free-flight path leaves untouched. CPU/GPU free-flight streams are independent by design; parity is per-channel mean-ratio, not sample-matched — correct for this gate.
+Signature sweep — all call sites updated
+launchStageIntersectQueued (+vol queue/count + has_world_scatter): driver caller snapshot.cu:1592 updated. launchStageRegen (+d_vol_count): both callers (snapshot.cu:1587, :1672 with nullptr) updated; stageRegenKernel zeroes vol_count when non-null. launchStageVolumeScatter new, single caller. No test/mock/audit caller left stale.
+License §6, hygiene
+HG phase / Sample_p / CoordinateSystem / HomogeneousMedium::Sample all cited to PBRT-v3 (BSD); MixBits/PCG32 Apache-2.0. License fence held. No [pkgN-diag]/REMOVE AFTER/XXX DEBUG markers. No CMake/preset touched, no binding added, no gate floor lowered, no test deleted — the diff only adds a test.
+What the HW leg (hw-619) owns
+I did not run GPU: the α=0 inertness, CPU↔GPU god-ray mean-ratio parity, forward/back HG, register-report byte-identity, and visual PNG inspection are GPU-only and are exactly what hw-619 covers. Per the CI-has-no-GPU blindspot, merge should wait on hw-619 green — I am not pre-asserting that PASS.
+Verdict: SIGN-OFF on the code review. No drift, license fence held, fleet isolation and NEE lane agreement structurally sound, algorithm mirrors the merged CPU estimator. Merge gated on the hw-619 GPU leg passing.
+docs(pkg199-s2b): hardware verification 2026-08-14 (PR #619) -- PASS
+…
+8871f36
+```
+Independent HW re-verify on RTX 5070 Ti: register gates exact-match
+(stageShadeBucketedKernel<false,false,false,false> 254/3352/1700,
+stageIntersectQueuedKernel<false> 127/616, <true> 130/632,
+stageVolumeScatterKernel REG 64); all 19 PR test-file assertions reproduce
+claimed numbers verbatim (god-ray parity, fwd/back 1.707, alpha=0 inertness);
+full sweep 2010 passed / 0 failed; visual inspection clean. Perf spot-check
+gap noted: implementer's throwaway A/B script isn't committed, so the exact
+117.3ms/116.8ms figures could not be bit-exact reproduced -- two proxy
+measurements showed no gross-regression signature instead.
+```
+HendrikGC02
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Hardware verification 2026-08-14 -- PASS
+Independent HW re-verification on RTX 5070 Ti (driver 610.47, CUDA 12.8.61, sm_120), full protocol executed with GPU lock held and no contention (1-4 percent util, 37-41C before each leg).
+Build/staleness gate: HEAD 3efb551 is docs-only (0 code changes) on top of the implementer's last code commit 35f5577; the built .pyd (22:56) predates HEAD by ~14 min but is current -- confirmed via diff. No rebuild needed. Canonical astroray.file verified.
+Register gates (cuobjdump -res-usage), ALL EXACT MATCH:
+Kernel
+REG
+STACK
+SHARED
+CONSTANT[0]
+stageShadeBucketedKernel<false,false,false,false>
+254
+3352
+0
+1700
+stageIntersectQueuedKernel (fleet)
+127
+616
+0
+1696
+stageIntersectQueuedKernel
+130
+632
+0
+1696
+stageVolumeScatterKernel
+64
+88
+0
+1382
+Targeted test files (test_pkg199_stage2_scattering_gpu.py + _cpu.py + test_pkg199_world_volume_gpu_parity.py): 19 passed, 0 failed in 10.12s. Headline numbers reproduced verbatim:
+God-ray CPU/GPU parity: ratio=[1.0044, 0.9972, 0.9978]
+Forward/back scatter GPU: ratio=1.707
+alpha=0 GPU inertness: confirmed (clear=[0.0293 0.0294 0.0288] foggy=[0.0083 0.0083 0.0081], no god-ray brightening)
+Perf spot-check -- gap flagged: the spec's own text states the 116.4-120.6ms A/B comparison came from a throwaway diagnostic script not committed to the repo, so the exact 117.3ms-vacuum-vs-116.8ms-main figures could not be bit-exact reproduced this session. Two proxy measurements (burn-in + min-of-9, uncontended) showed no gross-regression signature:
+Canonical wavefront ceiling gate (1024spp contact-sheet): min-of-9 = 1371.87ms, well under the 1.5s pinned ceiling.
+Ad-hoc vacuum scene (256x256, 256spp, r.render() GPU path): min-of-9 = 150.14ms, tight spread (150.1-152.7ms, under 2 percent).
+The authoritative no-regression evidence remains the register-gate byte-identity (stageIntersectQueuedKernel = 127/616, matching pre-PR Stage-1 exactly).
+Visual inspection: god-ray GPU/CPU PNGs consistent with each other and the measured parity; forward-scatter frame visibly brighter/more diffuse than back-scatter (matches 1.707 ratio); fog-dense correctly darkens/desaturates receding spheres vs fog-clear (alpha=0 absorption-only). No NaN speckle, no fireflies, no banding, no mode regression.
+Full sweep (pytest tests/, no --ignore): 2010 passed, 70 skipped, 21 xfailed, 1 xpassed, 0 failed in 665.74s. 0 failed matches the PR's claim; passed count is higher than the claimed 1981 due to intervening main-branch merges (pkg201 #618, pkg190 #615) adding tests, not an effect of this PR. A prior same-session run (predating same-day fix commit 35f5577) showed one unrelated flaky failure (test_no_caster_cost_gate, a pkg64 caustics-cost gate) that did not reproduce on this clean re-run.
+Verdict: PASS. Full evidence appended to the spec's Lessons section (commit 8871f36). Gate/merge decision remains with the architect; the perf-spot-check gap above is reported for that decision, not resolved unilaterally by this verifier.
+Hide details
+View details
+HendrikGC02
+merged commit 793828c
+into
+main
+Aug 14, 2026
+6 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+HendrikGC02
+added a commit
+that referenced
+this pull request
+Aug 15, 2026
+docs: round closeout 2026-08-14 -> 2026-08-15 -- pkg190-followup, pkg…
+…
+8f5d05b
+```
+…198, pkg199-S2, pkg200, pkg201, pkg202
+
+Flip spec Status: lines to done for the 9 PRs merged this round (#615-#623):
+pkg190 follow-up (#615, Object-coord bake guard), pkg200 (#616, F12
+pixel-honour matrix), pkg199 Stage 2 both backends (#617 CPU, #619 GPU --
+real god-rays live on both), pkg201 Stage 1 (#618) + Stage 2 (#623,
+2-of-6 rows shipped, Stage 3 open), pkg202 (#621, legacy sun GPU fix).
+pkg198 was already flipped done in-PR (#622).
+
+Update STATUS.md/ROADMAP.md with the round-closeout entry and rewrite
+NEXT_STAGE_REPORT.md for the next round: pkg203 now dispatchable, pkg201
+Stage 3 unblocked, F-glass/legacy-MIS/volume-pass-split follow-ups noted,
+3 pre-existing UnicodeEncodeError test failures recorded as hygiene (not
+a regression), and the owner's request for a fresh architect-led next
+session surfaced alongside the standing Pillar 4 unpause decision.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+HendrikGC02
+deleted the
+pkg199-s2b
+branch
+October 3, 2026 09:43
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

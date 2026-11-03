@@ -1,0 +1,667 @@
+Marching squares
+All Systems Phenomenal
+Nils' Homepage
+Blog Publications Gallery Teaching About
+Marching squares
+2021-06-16
+Keywords: Geometry processing, 2D, Polygon, Python
+```
+    
+Introduction
+========================================================================
+
+I will begin motivating this post by mentioning that this method has a
+well known analogue in 3D called Marching Cubes.
+Say that you have some scalar field in the form of a
+digital image, in 2D or 3D, and you want to create sets of polygonized
+hypersurfaces at a certain level in this field such that all pixels inside are
+larger or equal to this value. In 3D, using marching cubes, this
+will create triangulated surface meshes and in 2D, using marching squares,
+we get polygonal curves, see Figure [marching].
+
+![Figure [marching]: Example of a 2D scalar field in the shape of a bunny, a thresholded mask and a filled polygon extracted using marching squares shown in blue.](results/bunny-conc.png width=100%)
+
+This is typically used for visualization purposes, as 3D meshes are the most
+common datatype used for traditional 3D rendering, or for reconstruction of
+structures in the data as part of some analysis or to be further processed.
+It could be _i.e._ anatomical structures such as organs or tumors in computed tomography
+images.
+
+!!!
+    **Marching cubes**
+
+    This post is about the 2D method _marching squares_ and not about the more
+    famous method called _marching cubes_, one of the most cited papers in computer graphics,
+    17 000 at the time of writing [#Lorensen87]. The two methods work in exactly the
+    same manner but the problem is, if not exactly harder, naturally more
+    complicated in 3D. Maybe I will write a post about this in the future while
+    also comparing it to more modern methods such as _dual contouring_ [#Ju02] or
+    _flying edges_ [#Schroeder15].
+
+    Marching cubes is how I became familiar with this family of methods
+    as I first used it extensively during a course in scientific visualization.
+    There I applied it to both computed tomography (CT) images and to solutions
+    for electron occupancy probability clouds for the hydrogen atom.
+    Already then I really enjoyed the results the method gave, very smooth
+    3D surfaces that was pleasant to the eye.
+    Later I have primarily used it for medical images, CT and magnetic resonance
+    data.
+
+In this post I will describe my implementation of the marching squares method
+and discuss some details on how certain problems where solved and possible
+improvements left to be done. Along the way I will show the steps of the method and
+some examples.
+
+My implementation largely follows how the method is described on wikipedia,
+[#wikipedia1], but I also suggest you check out the blog post by Philip Rideout
+where an implementation in C is presented along with some nice examples where it
+is used for terrain generation, [#Rideout15].
+
+Method and implementation details
+========================================================================
+Marching squares takes a 2D image and an iso-value as input and outputs a list of
+vertices and edges that form closed polygons.
+The method consists of a number of steps:
+ 1. Applying a threshold using the iso-value.
+ 2. Creating a dual grid of cells with corners at the pixel centers.
+ 3. Creating lists of vertices and edges.
+ 4. Adjusting vertex positions with linear interpolation.
+ 5. Form closed connected polygons from the list of edges.
+All of these steps are described in the following sections but first we will look
+at all the possible versions of the cells of the dual grid we may encounter
+and how they determine what vertices and edges we get for the polygons.
+
+Square cells and binary case number encoding
+-------------------------------------------------------------------------------
+We define a cell as a square with the corners at the pixel centers of the original image.
+The pixels are associated with a binary value indicating whether or not the
+image value was above or below the iso-value such that we can form 16 possible cases
+, where each one of its four corners is associated to one such binary value.
+These 16 cases and the associated vertices and edges are illustrated in Figure [cases].
+The edges are such that the pixels above the threshold lie on the inside of any
+curve they may form and to the left hand side of the edge.
+
+![Figure [cases]: The number of different ways we can combine thresholded pixel values of
+0 or 1 at the four corners of one cell is 16. The edge(s) forming the iso-curve
+added for each such case is shown as a black line while blue indicates the area inside curve.](illustrations/cases.svg width=75%)
+
+The corners are ordered by starting at the lower left and moving around in a
+counter clock-wise manner:
+
+
+![Figure [order]: The vertices of the cells are ordered in a counter-clockwise manner.](illustrations/cell-vertex-order.svg width=40%)
+
+ | Vertex | Binary value when true |
+ |--------|------------------------|
+ |    A   |         0001           |
+ |    B   |         0010           |
+ |    C   |         0100           |
+ |    D   |         1000           |
+
+
+By doing this the binary value formed by the corners correspond to the case
+number, _e.g._ 0001 is 1 and 1100 is 12.
+Some more examples can be seen in the table below.
+$\require{color}$
+$\newcommand{\one}[0]{{\color{red}{1}}}$
+$\newcommand{\zero}[0]{{\color{blue}{0}}}$
+ |  Case  |       A         +       B         +        C        +        D         | Binary value
+ |--------|------------------------------------------------------------------------|-------------
+ |    0   | $\zero \times 0001 + \zero \times 0010 + \zero \times 0100 + \zero \times 1000$  | $\zero \zero \zero \zero$
+ |    5   | $\one  \times 0001 + \zero \times 0010 + \one  \times 0100 + \zero \times 1000$  | $\zero \one  \zero \one$
+ |    9   | $\one  \times 0001 + \zero \times 0010 + \zero \times 0100 + \one  \times 1000$  | $\one  \zero \zero \one$
+ |    14  | $\zero \times 0001 + \one  \times 0010 + \one  \times 0100 + \one  \times 1000$  | $\one  \one  \one  \zero$
+
+In Figure [cases] we can also see that the edges have a direction such that
+the left hand side always points towards the inside, blue area, of the polygon that
+can be formed by joining a bunch of these cells together such that their values
+at the corners line up.
+We create a list of all these combinations of edges and store them at the index of
+their respective case.
+
+Now that we have this figured out we move on to looking at the 2D image at hand.
+
+Step 1: Creating a binary mask by applying a threshold
+-------------------------------------------------------------------------------
+First we create a binary mask from the image by thresholding using the iso-value,
+effectively creating a new, binary, image that will have the value 1 where the
+image had a value below this threshold and otherwise 0.
+
+In the example seen in Figure [step1] we have an image with values
+between 1 and 3. It is then thresholded with a value of 1.5, giving the
+binary image in Figure [step2].
+
+
+
+![Figure [step1]: A 2D scalar field with values indicated by the numbers.](illustrations/step1.svg width=100%)
+![Figure [step2]: After applied thresholding. Black, zero valued, dots indicate pixels with value higher than the threshold. These will be inside the iso-curve.](illustrations/step2.svg width=100%)
+
+
+!!! Warning:
+    **Inverted Mask value convention**
+
+    The wikipedia article for Marching squares uses 1 for pixels inside,
+    values above the iso-value, and 0 on the outside. I first started
+    using this but found that the inverse was a more logical choice when
+    the binary numbers should match the case numbers the way I did it.
+
+Step 2: Creating cell grid and finding case values
+-------------------------------------------------------------------------------
+After we have thresholded the image into 1:s and 0:s, seen as white and black
+dots in Figure [step3], we create a dual mesh where each cell of the mesh is a
+square with one pixel at each corner. This associates each cell with a four
+digit binary code that will give it its case number as described in Section 2.1.
+The cases for all the cells in this example can be seen in Figure [step4].
+
+
+![Figure [step3]: The cells form a grid with vertices at the centers of the original pixels.](illustrations/step3.svg width=100%)
+![Figure [step4]: We use the table in Figure [cases] to identify what case all the cells are.](illustrations/step4.svg width=100%)
+
+
+Step 3: Inserting vertices and edges from the case table
+-------------------------------------------------------------------------------
+Now that each cell has a case value we can use this to insert elements into our lists of
+vertices and edges. This in the form of values from a table that correspond to the edges we see
+in Figure [cases]. After this step we have a set of edges connecting vertices,
+seen as blue lines and square dots, for the first two vertices only, in Figure [step-ind].
+
+The way it is implemented here is we do not insert the vertices themselves as
+positions in 2D just yet. Instead we find along what line between two pixels this new vertex will
+lie, seen as the red array in Figure [step-ind]. We also keep score of how many unique vertices we have encountered so
+far. When we encounter a completely new vertex we store it and increment the number.
+
+The pairs of pixel indices are stored as a key into a table that keeps track of
+what vertex we have already associated to these indices when we encounter them
+again. The indices are always sorted so that the lower one is first in the pair.
+In practice a sparse matrix was used for this but a hash table could be more
+suitable.
+
+![Figure [step-ind]: While constructing the polygons the vertices are stored as pairs of image pixel indices. Their uniqueness is guaranteed by bookkeeping done by the table where already encountered pixel pairs are associated to a stored vertex. Note that only the two first vertices are shown.](illustrations/step-ind.svg width=100%)
+
+
+Step 4: Interpolating vertex positions
+-------------------------------------------------------------------------------
+The vertices will now form a rather jagged and rough looking shape but its
+appearance can be improved by linear interpolation. We also recall that the
+goal is to find an iso-level curve that represents where we enclose a region
+with values larger than a certain iso-level threshold. Each vertex is already
+defined by the positions of two pixels in the original image and the
+interpolation will cause it to find a new position along the edge between them,
+seen as gray lines in Figure [step6].
+
+The interpolation is performed using the iso-value and the two values, $v_{0}$ and
+$v_{1}$, of the pixels in the original image in order to find a value $t$ which we
+use to interpolate between the pixel positions $\mathbf{p}_0$ and $\mathbf{p}_{1}$.
+\begin{equation}
+    t = (\text{iso} - v_{0}) / (v_{1} - v_{0})
+\end{equation}
+
+\begin{equation}
+    \textbf{p} = \mathbf{p}_{0} + t \times (\mathbf{p}_{1} - \mathbf{p}_{0})
+\end{equation}
+
+Where $\textbf{p}$ is the final, interpolated, vertex position.
+
+
+![Figure [step5]: A polygon is formed by inserting edges using the case table.](illustrations/step5.svg width=100%)
+![Figure [step6]: The vertex positions of the polygon are interpolated using the original values of the pixels.](illustrations/step6.svg width=100%)
+
+
+
+Step 5: Using unique vertex position id:s to form closed oriented polygons
+-------------------------------------------------------------------------------
+The vertices of the edges are still associated with two integers that denote the
+two flat array indices of two pixels in the image. Now we will glue these
+edges together to form closed polygons and we use these indices to find edges that fit
+together.
+
+We start with all the non-connected edges and look at its two integer values.
+Then we start going through the rest of the remaining edges and once we find
+one the either has its head at the current tail or its tail at the current head,
+we insert the edge either before or after the list of edges and
+update the tail or head.
+This is done until no such edge is found and we then store this polygon.
+Then we repeat this procedure until no edges remain in the original list.
+
+The result is a set of polygons with consistently numbered edges and
+orientation as seen in Figure [step7].
+Finally we can see the resulting polygon inside the image border
+in Figure [step8].
+
+
+![Figure [step7]: The edges are glued together to form a polygon with a consistent orientation.](illustrations/step7.svg width=100%)
+![Figure [step8]: The final polygon with interpolated vertex positions and blue inside. Original image extents are seen as a black square outline.](illustrations/step8.svg width=100%)
+
+
+!!! Warning:
+    **A word about orientation and the y-axis**
+
+    The common convention when working with images is to use
+    a y-axis that points downwards while for most othe applications
+    it is the opposite. Some caution must be taken because of this
+    and at some points in my own code I explicitly flip it in order
+    to get it correct.
+    Flipping the axis also changes the apparent orientation of the edges.
+
+Handling of some obstacles
+========================================================================
+
+Image border
+-------------------------------------------------------------------------------
+One of the first problems encountered was when the cases put edges at the border
+of the image. Just having the edges there and drawing them as black lines is
+not a problem but if you want to create connected polygons things become
+unnecessarily complicated as the endpoint vertices are dangling.
+
+I started to implement something that would connect the dangling vertices
+with an edge but this would only work if the polygon ended along one
+border. So then I thought that if they where along different borders then
+an additional vertex should be added at the corner along with two edges
+to connect it to the endpoints. Examples such as this can be seen to the
+right as the blue and brown/orange shapes in Figure [padded].
+
+But this is not enough. Imagine we had some elongated shape that intersect
+the border at both ends such as the green, yellow and pink ones in
+Figure [padded], then the polygons should not be joined with their
+own ends in order to close them properly but with a polygon that
+lies next to it.
+
+The solution was quite simple.
+The image and the mask is simply padded, setting all padded mask values
+to one as they are set as outside, along all four borders.
+
+
+![Figure [nonpadded]: The non-padded image gives dangling vertices which leads to non-closed polygons without interior.](results/non-padded.png width=90%)
+![Figure [padded]: By padding the image and the mask after the threshold all polygons can form closed loops.](results/padded.png width=90%)
+
+
+!!! Tip
+    **Deciding when in an algorithm to treat a problem**
+
+    At first I started to attempt treating the border after the edges
+    had been extracted and all polygons had been form. The idea being that
+    of finding pairs of tails and heads of polygonal chains and glueing them
+    together. I first wanted start looking along one border and than treating
+    the slightly more complicated case when ends of a polygon lie along two
+    different borders such that the _iso blob_ covers a corner of the image.
+    
+    This should all be possible to do in theory but the number of possible
+    cases to treat and the book keeping makes it harder than it may seem
+    at first glance.
+
+    In general connected geometrical structures such as these polygonal
+    chains or structured triangular or polygonal meshes in 3D are quite
+    tedious to work with when you want to consistently connect them to each
+    other while at the same time inserting additional vertices and edges.
+
+Ambiguities at saddle points
+-------------------------------------------------------------------------------
+
+
+Saddle points are somewhat ambiguous and depending on how we want to interpret them it will change the final topology of the polygonal chains we finally get from the method.
+
+One way of dealing with this is to add a new _pixel_ at the center of the cell
+which will be given the mean value of the four actual pixels.
+Then it is thresholded and it is decided what new case we get as seen in Figure [amb].
+
+If this is to be done we must replace the old edges from case 5 and 10 with four
+edges and two new vertices.
+This could be done just before or after the interpolation step.
+I never implemented this step primarily because of the additional work
+regarding the new edges and the vertices but I wouldn't except it
+to be that that hard.
+
+![Figure [amb]: Ambiguity for two of the cases can be solved by calculating the average pixel value of the cell and thresholding that as illustrated by the virtual pixel at the center.](illustrations/ambiguity.svg width=90%)
+
+
+
+Python implementation
+========================================================================
+
+**Marching squares**
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Python
+def marchingSquares(image, iso, interpolate=True, pad=True):
+    """
+        The indexed marching squares
+    """
+
+    mask = (image <= iso).astype(np.uint8)
+    if pad:
+        large_mask = np.ones(np.array(mask.shape, dtype=int) + 2, dtype=np.uint8)
+        large_mask[1:-1, 1:-1] = mask
+        mask = large_mask
+
+        large_image = np.ones(np.array(image.shape, dtype=int) + 2, dtype=image.dtype)
+        large_image[1:-1, 1:-1] = image
+        image = large_image
+
+    verts_per_cell = 2*np.ones(16)
+    verts_per_cell[5] = 4
+    verts_per_cell[10] = 4
+    verts_per_cell[0] = 0
+    verts_per_cell[15] = 0
+
+    verts_in_cell = [None]*16
+    verts_in_cell[0] =  []
+    verts_in_cell[1] =  [0, 3]
+    verts_in_cell[2] =  [1, 0]
+    verts_in_cell[3] =  [1, 3]
+
+    verts_in_cell[4] =  [1, 2]
+    verts_in_cell[5] =  [2, 3,
+                         0, 2]
+    verts_in_cell[6] =  [2, 0]
+    verts_in_cell[7] =  [2, 3]
+
+    verts_in_cell[8] =  [3, 2]
+    verts_in_cell[9] =  [0, 2]
+    verts_in_cell[10] = [3, 0,
+                         1, 2]
+    verts_in_cell[11] = [1, 2]
+
+    verts_in_cell[12] = [3, 1]
+    verts_in_cell[13] = [0, 1]
+    verts_in_cell[14] = [3, 0]
+    verts_in_cell[15] = []
+
+    edges_in_cell = [None]*4
+    edges_in_cell[0] = [0, 1]
+    edges_in_cell[1] = [1, 2]
+    edges_in_cell[2] = [2, 3]
+    edges_in_cell[3] = [3, 0]
+
+    cell_vertex_offsets = [None]*4
+    cell_vertex_offsets[0] = [1, 0]
+    cell_vertex_offsets[1] = [1, 1]
+    cell_vertex_offsets[2] = [0, 1]
+    cell_vertex_offsets[3] = [0, 0]
+
+    nr_of_vertices = 0
+    nr_of_edges = 0
+
+    shape = np.array(mask.shape)
+    shape -= 1
+
+    nr_pixels = mask.size
+    vertex_number = 0
+    vertex_indices = []
+    vertex_positions = []
+    edges = []
+    vertex_table = sparse.lil_matrix((nr_pixels, nr_pixels))
+
+    # Assign values to grid depending on the binary mask of thresholded pixels
+    grid = -1*np.ones(shape, dtype=np.uint8)
+    for r in range(grid.shape[0]):
+        for c in range(grid.shape[1]):
+            grid[r,c] = (mask[r,c]<<3) | (mask[r,c+1]<<2) |\
+                        (mask[r+1,c]<<0) | (mask[r+1,c+1]<<1)
+            nr_of_vertices += verts_per_cell[grid[r,c]]
+    nr_of_edges = nr_of_vertices // 2
+
+    # Find the vertices as pairs of indexed positions along the cell grid latice edges.
+    offset = 0
+    for r in range(grid.shape[0]):
+        for c in range(grid.shape[1]):
+            nr_verts = len(verts_in_cell[grid[r,c]])
+            ei = 0
+            edge = [0, 0]
+            for i in range(0, len(verts_in_cell[grid[r,c]])):
+                offset = np.array([r, c])
+                v_index = verts_in_cell[grid[r,c]][i]
+                ce = edges_in_cell[v_index]
+
+                cvo0 = cell_vertex_offsets[ce[0]]
+                cvo1 = cell_vertex_offsets[ce[1]]
+                p0 = offset + cvo0
+                p1 = offset + cvo1
+                pp0 = p0
+                pp1 = p1
+                p0 = toFlatIndex(image, p0[0], p0[1])
+                p1 = toFlatIndex(image, p1[0], p1[1])
+
+                if p1 < p0:
+                    p0, p1 = p1, p0
+                    pp0, pp1 = pp1, pp0
+
+                vertex_index = 0
+                if vertex_table[p0, p1] == 0:
+                    vertex_index = vertex_number + 1
+                    vertex_table[p0, p1] = vertex_index
+                    vertex_indices.append([p0, p1])
+                    vertex_number += 1
+                else:
+                    vertex_index = vertex_table[p0, p1]
+                vertex_index -= 1 # Values stored in sparse matrix offset by 1
+
+                edge[ei] = vertex_index
+                ei = (ei+1) % 2
+                if ei == 0:
+                    edges.append(np.array([edge[0], edge[1]], dtype=int))
+
+    # Find the physical (interpolated) positions of all vertices
+    # Note that here we go from image coordinates which are row, column,
+    # i.e. y, x to physical coordinates with order x, y.
+    for vi in vertex_indices:
+        p0 = np.array(fromFlatIndex(image, vi[0]))
+        p1 = np.array(fromFlatIndex(image, vi[1]))
+        v0 = image[p0[0], p0[1]]
+        v1 = image[p1[0], p1[1]]
+        vp = interpolateVertices(iso, p0, p1, v0, v1, interpolate)
+        vp[0], vp[1] = vp[1], vp[0]
+        if pad:
+            vp[0] -= 1.0
+            vp[1] -= 1.0
+        vertex_positions.append(vp)
+
+    # Put vertices in array instead of list and connect polygons
+    vertices = np.array(vertex_positions)
+    polygons = extractPolygons(edges)
+
+    grid = grid[1:-1, 1:-1]
+    return polygons, vertices, vertex_indices, grid
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Image indexing**
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Python
+def toFlatIndex(image, r, c):
+    return image.shape[1]*r + c
+
+def fromFlatIndex(image, index):
+    r = index // image.shape[1]
+    c = index % image.shape[1]
+    return (r, c)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Construction of connected polygons**
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Python
+def extractPolygons(edges):
+    """
+        Extract connected polygonal chains from set of edges.
+        The polygonal chains are grown in both directions from one starting edge,
+        appending och prepending edges as they are encountered while traversing
+        the list of unconnected edges.
+        The head and tail vertex indices are updated as the chain is grown until
+        no more edges to connect are left.
+        A completed polygonal chain is stored in a list of such polygons.
+    """
+    polygons = []
+    while edges:
+        chain = []
+        e = edges.pop()
+        chain.append(e)
+        tail = e[0]
+        head = e[1]
+        cont = True
+        while cont and edges:
+            e = None
+            index = -1
+            for i, ne in enumerate(edges):
+                t = ne[0]
+                h = ne[1]
+                if head == t:
+                    e = ne
+                    chain.append(e)
+                    head = h
+                    index = i
+                    break
+                elif tail == h:
+                    e = ne
+                    chain.insert(0, e)
+                    tail = t
+                    index = i
+                    break
+                elif head == h:
+                    e = ne
+                    chain.append(e)
+                    head = t
+                    index = i
+                    break
+                elif tail == t:
+                    e = ne
+                    chain.insert(0, e)
+                    tail = h
+                    index = i
+                    break
+            if e is not None:
+                edges.pop(index)
+            else:
+                cont = False
+        polygons.append(chain)
+    return polygons
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Interpolation**
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Python
+def interpolateVertices(iso, p0, p1, v0, v1, interp=True):
+    """
+        Interpolate between two vertices in image coordinates.
+        If binary is True the interpolated becomes equally weighted
+        so the resulting vertex lies precisely in between p0 and p1.
+        Values are converted to float before comparison as arithmetics of them
+        keep the type so e.g. uint8 can under or overflow.
+    """
+
+    v0 = float(v0)
+    v1 = float(v1)
+
+    eps = 1.e-8
+    if abs(v0-v1) < eps or not interp:
+        return 0.5 * (p0+p1)
+
+    if abs(v0 - iso) < eps:
+        return p0
+    elif abs(v1 - iso) < eps:
+        return p1
+
+    t = (iso - v0) / (v1 - v0)
+    p = np.array([0, 0], dtype=np.float)
+    p[0] = p0[0] + t * (p1[0] - p0[0])
+    p[1] = p0[1] + t * (p1[1] - p0[1])
+    return p
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Examples
+========================================================================
+
+Gallery
+-------------------------------------------------------------------------------
+In Figure [example] the results created from a binary image is shown. The image
+was drawn in an image editing software and contains objects of various sizes,
+shapes and topologies.
+
+It should be noted that the objects that overlap or lie on top of each other
+do so just because the algorithm finds the smaller polygons that lie inside of larger
+shapes after they find these larger ones because those cells will be inspected
+first. As such the smaller objects inside will also be rendered afterwards
+and will thus never be obscured.
+It is not because the algorithm actually produces hierarchies of polygons
+in a topologically consistent manner.
+
+![Figure [example]: A black and white image polygonized and colored using marching squares.](results/example.png width=100%)
+
+Metaballs animation
+-------------------------------------------------------------------------------
+Metaballs has been a popular way of creating something to visualize in 3D
+graphics for a long time. It was first presented by Jim Blinn in 1982 [#Blinn82]
+and can still to this day be seen in the computer graphics demo scene. They
+give rise to _sticky_, _gooey_ looking blobs that can be used with different forms of
+shading and rendering techniques.
+I've implemented a version in 2D that is loosely based on the description found
+on wikipedia [#Wikipedia2]. All the parameters was found by trial and error
+as to produce something that is visually interesting.
+
+The metaballs consist of a system of $N$ particles at positions $r_{i}$, and I added a force
+, $f_{i}$, to each particle that both repels and attracts it to the other particles
+so that the system will be given some dynamics.
+
+\begin{align*}
+          & r_{i} = (x_{i},y_{i}) \in \mathbb{R}^{2}, \quad \forall i \in \{1, \dots, N\} \\
+    f_{i}   & = \sum_{j \neq i} (r_{i} - r_{j}) \times d^{3} - (r_{i} - r_{j}) \times d^{2} \\
+    \text{where } d & \text{ is the distance between two points} & \\
+    d     & = \sqrt{ (x_{i} - x_{j})^{2} + (y_{i} - y_{j})^{2} }
+\end{align*}
+
+The particles produce a scalar field as a sum of the contributions from each one.
+
+\begin{equation}
+    U(x,y) = \sum_{i} \frac{1}{(x - x_{i})^{2} + (y - y_{i})^{2}}
+\end{equation}
+
+This function is sampled on a uniform grid as a 2D image that is used as input
+for the marching squares method. In Figure [metaballs] the results of the output
+is shown as system of 8 particles evolve over time.
+
+The particles where initialized at random positions with random velocities
+and their velocity component perpendicular to the walls flip sign if it moves
+outside of the visible box which gives them a bouncy behavior.
+
+![Figure [metaballs]: Animated metaballs. The particles have a repulsive and an attractive force and bounce at the walls.](results/metaballs-animation.mp4 width=75%)
+
+Conclusion
+========================================================================
+
+Marching squares is a rather easy to implement method that can be used
+to create polygons for visualization or further geometry processing.
+Since it operates on images example data can easily be prepared using
+image editing software.
+
+Even my naive implementation in python performs fast enough for typical
+images, _i.e_ 500x500, that I used though the compute time became noticeable once larger
+images where tested.
+
++++++
+
+**Bibliography**:
+
+[#Blinn82]: Blinn, J. F. (1982)
+A generalization of algebraic surface drawing.
+ACM transactions on graphics (TOG), 1(3), 235-256.
+
+[#Ju02]: Ju, T., Losasso, F., Schaefer, S., & Warren, J. (20.
+Dual contouring of hermite data.
+Proceedings of the 29th annual conference on Computer graphics and interactive techniques (pp. 339-346).
+
+[#Lorensen87]: Lorensen, W. E., & Cline, H. E. (1987)
+Marching cubes: A high resolution 3D surface construction algorithm.
+ACM siggraph computer graphics, 21(4), 163-169.
+
+[#Rideout15]: P. Rideout. (2015)
+Marching Squares
+https://prideout.net/marching-squares
+
+[#Schroeder15]: Schroeder, W., Maynard, R., & Geveci, B. (2015)
+Flying edges: A high-performance scalable isocontouring algorithm.
+IEEE 5th Symposium on Large Data Analysis and Visualization (pp. 33-40).
+
+[#Wikipedia1]: Marching squares
+https://en.wikipedia.org/wiki/Marching_squares
+
+[#Wikipedia2]: Metaballs
+https://en.wikipedia.org/wiki/Metaballs
+
+    
+```
+Code for all figures and examples:
+https://bitbucket.org/nils_olovsson/marching_squares/src/master/
+[#]

@@ -1,0 +1,2313 @@
+COMPUTER GRAPHICS forum
+EUROGRAPHICS 2027 / A. Vaxman and E. Garces
+(Guest Editors)
+Volume 46 (2027), Number 2
+Budgeted-GS: Real-Time Large-Scale Gaussian Splatting via
+Factoring LOD
+Haipeng Wang
+arXiv:2610.03162v1 [cs.GR] 2 Oct 2026
+Neusoft
+haipeng_wang@neusoft.com
+Abstract
+3D Gaussian Splatting achieves excellent visual quality with real-time rendering, but at the scale of entire cities it does not fit:
+a trained model carries millions of primitives and gigabytes of memory, and real-time rendering at high quality on a consumer
+GPU remains out of reach. We introduce Budgeted-GS, a post-hoc method that turns any trained 3DGS model into a factoring
+tree, a multi-resolution hierarchy of moment-matched aggregates. After a construction pass of a few seconds, a single quality
+parameter then selects, for each view, the level of detail that fits the memory of the target device, so the same city-scale model
+serves GPUs with widely different memory capacities. When a new scene is to be trained, the same theory applies: instead
+of growing a full-sized model and compressing it afterwards, budget-centered training first measures how many primitives the
+scene needs and then trains the model directly at that size, avoiding the wasted effort of optimizing primitives that are later
+discarded. Both methods are grounded in a measurable capacity floor, a budget–error law derived from optimal transport in
+phase space; selection rules certified by recent covering theorems decide which primitives are redundant. The floor answers
+how many primitives a scene actually needs and how many can safely be given up. We validate the floor on 13 public scenes
+under a preregistered protocol, and exercise both methods from object scenes to an official city capture, rendering it at native
+1920 × 1080, full SH, in real time on one consumer GPU.
+CCS Concepts
+• Computing methodologies → Rendering; Computer graphics;
+1. Introduction
+Real-time radiance-field rendering of captured scenes is now
+routine at object and room scale. 3D Gaussian Splatting
+(3DGS) [KKLD23] represents a scene as a set of anisotropic
+Gaussians rendered by projective splatting with depth-sorted αcompositing. At city scale it does not fit: a trained model carries
+millions of primitives and gigabytes of memory, and real-time rendering at high quality on a consumer GPU remains out of reach.
+The obstacles are structural. At training time the standard recipe is
+to densify a large model and then compress it; the primitives are
+optimized for a different capacity, and the time spent on the removed half is wasted. At deploy time the only degradation mode
+offered by streaming renderers such as Gaussian Point Splatting
+(GPS [RPWM26]) is random subsampling. And beneath both sits
+an unanswered question: nobody can say what the right budget is.
+The question “how many primitives do I need here?” is answered
+by habit, because no principled budget–error floor has been available either at training or deployment time.
+This paper answers it with a rate–distortion theory of rendering
+primitives: a trained model is a point on a rate–distortion curve;
+its primitive count is its budget, its error a function of that budget.
+Preprint.
+The theory has two mathematical halves. The capacity floor, derived from optimal transport in phase space (position × direction,
+where rendering primitives and renderers are both natural objects),
+says that if the scene’s phase-space measure has dps -dimensional
+support, the minimal achievable error with N primitives falls as
+N −2/dps (Zador’s law). The collapse license comes from the 2025
+resolution of the three-dimensional Kakeya set conjecture [WZ25]:
+the Wang–Zahl union-volume estimate, in weighted (continuousopacity) form, certifies that wherever Gaussians locally over-cover
+space, they merge into few representatives with bounded volumetric loss. The floor tells a budget what it can achieve; the license tells
+it where redundancy lives and what may be merged or dropped.
+The floor and the license are operationalized as two methods.
+On the deployment side, the floor’s allocation law (N ∗j ∝ K j s j /d j
+per tile) is realized as a factoring tree (Factoring LOD, Section 5), an octree of scale bands with moment-matched equivalent
+planks, driven by a one-parameter pixel-footprint scheduler. A single trained model sweeps a continuous memory–quality curve instead of a single fixed operating point. On the training side, BudgetCentered Training (BCT, Section 5.1) trains the densifier directly
+at the floor’s knee, so the model is born at the right size instead of
+2 of 28
+H. Wang / Budgeted-GS
+growing huge and being pruned afterwards. Beyond rendering, the
+floor answers how many primitives a scene needs, how much of it
+is redundancy, and how a fixed budget should split across a city.
+Measuring it on 13 public scenes under a preregistered protocol
+shows published compressors lying on an essentially flat frontier.
+Their reported gains come from redundancy, not from proximity
+to capacity (Section 6.1). At city scale the same discipline turns
+real-time. A retrain of the official city model serves the official test
+trajectory at native 1920 × 1080, full SH, on one consumer GPU—
+to our knowledge the first post-hoc, full-SH result on a consumer
+GPU in this regime (Section 6.6).
+Contributions.
+• We introduce Factoring LOD, a post-hoc layer that converts one
+trained model into a factoring tree with a one-parameter scheduler; it renders a city-scale scene at high quality in real time
+within whatever memory the consumer GPU has.
+• We propose Budget-Centered Training, which trains the densifier directly at the floor-located budget; the model is born at the
+right size instead of growing huge and being pruned afterwards;
+it leads the train-then-prune route at every matched budget, in a
+single training run.
+• We establish the theory beneath the problem: a measurable capacity floor that answers, for any city-scale 3DGS scene, how
+many primitives it actually needs, and therefore how many can
+safely be given up.
+2. Related Work
+Rendering large-scale scenes. Every classic representation solved
+scale with its own multiresolution answer. Points: surfel splatting [PZvBG00], QSplat’s sphere hierarchy [RL00], and Potree’s
+out-of-core octree generation [SOW21] stream large point clouds at
+interactive rates. Meshes: progressive meshes [Hop96] introduced
+view-dependent refinement, and Nanite [Kar21] virtualizes micropolygon geometry in production engines. Voxels: sparse voxel octrees [LK10] ray-march gigavoxel volumes. What these systems
+share, a coarse-to-fine hierarchy carrying a per-frame budget, is exactly what a raw 3DGS model [KKLD23] lacks: it is a flat set of
+primitives with no hierarchy at all.
+Data structures for large-scale 3DGS scenes. Inside the 3DGS
+world, the standard answer is a spatial structure coupled to training.
+Octree-GS builds an octree of level-of-detail clusters [RJL∗ 24];
+Scaffold-GS anchors Gaussians on a sparse grid [LYX∗ 24]; multiresolution hash grids organize NeRF-side training [MESK22];
+CityGaussian partitions the scene into blocks with distancebased LOD [LGL∗ 24], following the block decomposition of
+Block-NeRF [TWN∗ 22]; hierarchical 3DGS trains a chunk pyramid [KMK∗ 24]; concurrent efforts pursue out-of-core streaming
+hierarchies [WKR∗ 26] and LOD-aware training [KRM∗ 25]; GPS
+streams an octree with distance shells [RPWM26] (our crossrenderer comparisons use it, Section 5). These structures carry the
+indexing, but the budget lives in the training pipeline: levels and
+blocks are fixed when training ends. Our factoring tree is built
+post-hoc from any model, selects per (leaf, scale-band) instead of
+per block or level, and grounds the selection in measurable redundancy and pixel-footprint criteria (Section 5); Section 6.4 com-
+pares directly against Octree-GS and CityGaussianV2’s runtime
+LOD [LLM∗ 25].
+Quality and memory control for large-scale 3DGS scenes.
+Once a model exists, a large family controls its size: MCMCbased densification [KRS∗ 24] and regularization-based pruning [MGK∗ 24] budget during training; LightGaussian [FWW∗ 24],
+Compact3DGS [LRS∗ 24], RDO-Gaussian [WZH∗ 24], EAGLES [GSG25], RadSplat [NMR∗ 25], PUP 3D-GS [HTS∗ 25],
+and RAP [YYXL26] prune, quantize, distill, or reselect primitives
+after training; 2DGS changes the primitive itself to a surfel for
+surface quality [HYC∗ 24]. All of these act once, at training or
+export time, and expose no runtime memory–quality trade-off
+or error bound. Our budget parameter acts on any trained model
+continuously and renderer-agnostically; LightGaussian’s own
+score, applied post-hoc through our export path, yields a Vanillaflat budget axis to 25% of the primitives on city-scale scenes
+(Section 6.6); and rasterizer accelerators [HTL∗ 25, DLL∗ 26] are
+composable with it: they render the selected set faster, while the
+parameter decides what is selected.
+3. Overview
+Budgeted-GS applies one budget discipline at every stage of a
+scene’s life cycle (Fig. 1). The capacity floor (Section 4) gives, for
+any scene, the minimal achievable rendering error at a primitive
+count N; it is stated as theorems and measured per scene with a
+preregistered protocol (Section 6.1). Two methods spend the budget where the floor says. Budget-Centered Training (Section 5.1)
+reads the floor’s knee N ∗ off the measured curve and trains the
+densifier directly at that budget. Factoring LOD (Section 5) converts any trained model into a factoring tree whose one-parameter
+pixel-footprint scheduler selects, per view, exactly the working set
+that fits the memory at hand. Section 6 reports the experiments. The
+supplementary material carries the proofs.
+4. An optimal-transport theory for 3D Gaussian primitives
+Why should the budget be a design variable, and how should it be
+spent? On real data, reconstruction error falls steeply as the budget
+grows, then flattens into a shallow floor. This section develops a
+theory that predicts where that floor lies: from primitives and rendering at the bottom, through construction and capacity, up to the
+selection rules on top. Concretely, for a quality target Q, the theory
+yields (i) the minimal primitive count a scene requires, (ii) the redundant subset of its primitives, and (iii) the allocation of a fixed
+budget across a city.
+4.1. Rendering as optimal transport in phase space
+Prior work has employed optimal transport in 3DGS only in narrow,
+task-specific roles, including Wasserstein losses between Gaussian
+mixtures [SLZ∗ 25], radial-optimal-transport fitting of structured
+Gaussians [ZCY∗ 24], and capacity control in multi-view stylization [WYW∗ 26]. To our knowledge, we are the first to formulate
+rendering as optimal transport in phase space.
+Definition 1 (Phase space and primitives). P := X × Ω, the product of scene space X ⊂ R3 (the unit ball) and the direction sphere
+Preprint.
+3 of 28
+H. Wang / Budgeted-GS
+Figure 1: Overview: the pipeline in four steps. (a) A trained model is a flat set of raw planks in two scale bands. (b) Factoring builds the leaf
+× scale-band tree of moment-matched equivalent planks. (c) The one-parameter scheduler selects, per view, raw / fine / aggregate content
+by the pixel-footprint threshold t = c · d/ f . (d) The emitted stream feeds any splatting rasterizer; the city-scale payoff is Fig. 4. Illustration
+drawn with AI assistance and verified by the authors.
+Ω = S2 , is phase space; a cell Q = V × C (spatial plank × directional cone) obeys ∆x · ∆ξ ≥ c (the uncertainty bound). A rendering
+primitive is a triple (Q, w, ρ): cell, opacity weight w, value model ρ.
+Three families exist. Point primitives take the limit ∆x → 0. Wave
+primitives are Gaussian wave packets with ∆x∆ξ ≍ c, the family
+of 3DGS surfels and 2DGS plates. Field primitives are continuous
+densities, such as NeRF/SDF. A representation is a parameterized
+measure family {µθ }θ∈Θ on P.
+Definition 2 (Rendering coupling and marginalization). For view v
+and parameters θ, the renderer defines a joint measure πv,θ on P ×
+Pixelv , the pixel grid of view v, with source marginal µθ and pixel
+marginal νv,θ (pixel masses S(p) := νv,θ ({p})); the pixel colour is
+the conditional expectation
+Z
+Iv,θ (p) =
+P
+ρ(x) dπv,θ (x | p).
+(1)
+4.2. An optimal-transport view of 3DGS
+The framework rests on four axioms: every representation induces
+a phase-space distribution µθ ; the renderer is a legal transport and
+the image is its coupling marginal; every construction algorithm’s
+objective is expressible as one transport cost; a single source is
+transported to all view targets. For 3DGS-style compositing, this
+coupling is the familiar compositing rule: πv,θ (p, {i}) ∝ wi (p) =
+αi (p)Ti (p) with Ti = ∏ j<i (1 − α j ). Two problems follow. The first
+is rendering transport: the renderer transports µθ to per-view pixel
+marginals; the second is representation formation: given complexity compF (θ) ≤ N, minimize the transport cost
+Rres (N) = min ∑
+θ
+v
+Z
+P×Pixelv
+c dπv,θ ,
+gt
+c(x, p) := ρ(x) − cv (p)
+2
+.
+(2)
+Gradient training, sampling, meshing, and voxelization are solvers
+of the second problem; their outputs are measured by the transport
+residual (their convergence is proved or cited to classical sources in
+the supplementary material). The bottom layer is one theorem: the
+renderer really is a legal transport, rendering is conditional expectation, and the error splits into a tight three-term chain.
+Theorem 3 (The renderer, the rendering map, and the error chain).
+Preprint.
+Under measurable ray–pixel assignment, bounded transmittanceweighted mass, and Lipschitz regularity, every (v, θ) admits a
+canonical coupling πv,θ with marginals (µθ , νv,θ ), determined by
+the rendering rule and weakly continuous in θ. With projection Jacobian JΠ and footprint kernel G, the pixel probability kernel is
+κv (p, dx) ∝ w(x)G(p − Π(x)) |det JΠ (x)| 1V (x), In the audited lowopacity domain, the pieces combine into a tight three-term chain:
+√
+the operator norm is sharp (∥Pv f ∥L2 (Pixelv ) ≤ µv ∥ f ∥L2 (P) ), the
+blending gap is second-order in the max opacity ε (with multiplic
+′
+ity M(x): |C(x) − L(x)| ≤ K2 M(x)2 ε2 + O K ′ M(x)ε3 ), and
+K′ 2
+ε M 2 2 + εtarget (v),
+2
+L
+(3)
+a tight three-term chain: source gap, blending gap, target map;
+here µv = ∑ p S(p) is the transported mass of view v, ℓv the Lipschitz constant of the target map, K ′ the compositing Lipschitz constant, and measure norms are taken over densities with respect to
+the phase-space reference measure, the source one over the normalized source marginal of the coupling.
+gt
+νv,θ − νv
+L2
+≤
+p
+ℓv ∥µθ − µS ∥L2 +
+Forming a representation under a budget is itself an optimaltransport problem [Kan42,Vil09], and its duality is what makes the
+floor certifiable.
+Theorem 4 (Representation formation as restricted optimal transport). For compositing with normalized coupling π̃ p , the loss decomposes as L(θ) = C(θ) − V(θ): the transport cost C minus the
+conditional variance
+V. For atomic families with quadratic cost,
+R
+inf|supp µθ |≤N mini ∥x − yi ∥2 dµS = W22 -optimal quantization, and
+Lloyd’s algorithm is monotone. The certificate follows: the residual satisfies Rfree (N) ≤ Rres (N) with gap decomposition ∆(θ) =
+∆coupl (θ) + ∆src (θ) ≥ 0; for every dual-feasible (ϕ, ψ) the certificate
+L(θ) ≥
+Z
+P
+ϕ dµθ + ∑ S(p)ψ(p) − V(θ)
+(4)
+p
+lower-bounds achieved error; and with target colour measure νc of
+intrinsic dimension dc ≤ 3, Rfree (N) ≍ Cdc ∥νc ∥dc /(dc +2) N −2/dc .
+4 of 28
+H. Wang / Budgeted-GS
+Figure 2: The measured floor curve (garden, Mip-NeRF 360): budget ladder at four budgets against the −1/2 Zador reference.
+4.3. The capacity floor
+How fast must this residual fall as the budget N grows? Classical
+high-resolution quantization theory [Zad82,GL00] answers exactly
+this, and the rendering instance, whose source is the phase-space
+measure of Definition 1, obeys the same law:
+Theorem 5 (The capacity floor of the rendering instance). Imported from classical high-resolution quantization [Zad82, GL00]
+through the transport formulation above, with the lower bound additionally assuming view completeness (the view set separates the
+source): if the phase-space measure µS has dps -dimensional support with density λ, the minimal achievable rendering error with N
+primitives obeys
+R(N) ≍ Cdps ∥λ∥ dps N −2/dps .
+(5)
+Three supporting results, proved, cited, or labelled as sketches
+in the supplementary material, round out the framework: gradient
+training is a legitimate solver of the restricted-transport problem
+and attains the classical rates of sampling, Lloyd, and meshing;
+cross-view colour agreement is structural, and the new-view error
+is bounded by the training error plus an angular-regularity term;
+and across primitive families on surfaces, triangles achieve N −1 ,
+point-like primitives N −1/2 , and isotropic voxels N −1/4 . One part
+reads as a prediction: the optimal cell is an anisotropic, covarianceellipsoidal atom, exactly what 3DGS fits, and exactly what the
+moment-matched aggregates of the factoring tree (Section 5.2) construct.
+4.4. The selection rules
+dps +2
+On surface scenes the phase-space support is four-dimensional
+(surface position × incident-direction hemisphere), so R(N) ∝
+N −1/2 . For the cartoon class with appearance smoothness p and
+resolution L, RF (N, L)1/2 ≍ C1 KN −1/2 (log N)c + C2 K ′ L−p with
+optimal allocation N ∗ ≍ M p/(p+1) , L∗ ≍ M 1/(2(p+1)) ; width brackets sandwich Rfree
+F ≤ RF ≤ C width.
+The free relaxation of Theorem 4 is target-limited (rate N −2/dc ),
+while this rendering instance is source-limited at N −2/dps with
+dps ≥ dc : the requirement that primitives must render, not merely
+match colours, is what slows the rate. The floor is certifiable rather
+than assumed: the duality chain L + V = C ≥ Cfree ≥ D evaluates,
+per budget and per test view, a lower bound on the achievable error
+(Eq. (4)). It is also measurable, and Section 6.1 reports the curve
+for 13 public scenes.
+The floor is one half of the mathematics; the other half is a set of selection rules, theorems that decide which primitives may be merged
+or dropped at a given budget. Here a rendering primitive is viewed
+geometrically, as a plank (µ, R, h, α): an oriented box centered at µ,
+rotated by R, of half-extents h = 3σ, carrying the opacity α as its
+weight. We state the rules here; the proofs are in the supplementary
+material.
+Definition 6 (Essentially distinct tubes and the convex Wolff
+axioms). Sets U,V ⊂ R3 are essentially distinct if |U ∩V | ≤
+1
+2 max(|U| , |V |); throughout, T is a set of essentially distinct
+δ × δ × 1 tubes in the unit ball, so |T | ≍ δ2 . Following [WZ25]
+(Def. 1.3), T obeys the Katz–Tao convex Wolff axioms with error
+C if
+#{T ∈ T : T ⊂ W } ≤ C |W | |T |−1
+Preprint.
+for every convex W ⊂ R3 ,
+(6)
+H. Wang / Budgeted-GS
+i.e. no convex set concentrates more tubes than its volume admits;
+a Kakeya-type arrangement (one tube per δ-separated direction)
+satisfies (6) with C ≲ 1.
+Theorem 7 (Weighted covering—the collapse license). (i) (Unweighted; [WZ25], Thm. 1.2.) For every ε > 0 there is K > 1 such
+that, for all δ > 0 small: if T satisfies (6) with C ≲ 1 and every a × b × 2 prism contains at most 100abδ−2 tubes of T, and
+Y (T ) ⊂ T has |Y (T )| ≥ λ0 |T |, then
+[
+T ∈T
+Y (T ) ≥ δε λK
+0 ∑ |T | .
+T ∈T
+(ii) (Weighted, rendering form.) If each tube carries Ra weight
+function wT : T → [0, 1] of per-tube mass |T |−1 T wT ≥
+λ(w)
+≳ 1, then the
+:=
+ saturated weighted union volume |U|
+Rw
+R
+min 1, ∑T wT (x) dx obeys |U|w ≳ λ(w)K+1 δε ∑T T wT :
+thresholding costs only constants depending on ε, so the weighted
+form loses nothing beyond the ε-loss of (i).
+Lemma 8 (Scale truncation). For cartoon-class fields, atoms
+whose projected footprint is below the pixel scale can be dropped
+or collapsed with bounded loss.
+Theorem 9 (Adaptive covering rate). For f ∈ CK (piecewise
+C2 /H 2 cartoon fields) there is an N-atom combination of plates
+and tubes with ∥ f − fN ∥L2 ≤ CK N −1/2 (log N)c ; conversely, some
+f ∗ ∈ CK forces every N-atom combination to obey ∥ f ∗ − fN ∥L2 ≥
+c0 K(N log2 N)−1/2 .
+Corollary 10 (Budget allocation). Minimizing the geometric + appearance error C1 KN −1/2 + C2 K ′ L−p under the parameter budget M ≍ N(L + 1)2 yields N ∗ ≍ M p/(p+1) and L∗ ≍ M 1/(2(p+1)) ;
+across scale bands s j = 2 j s0 the band budgets decay exponentially,
+m j ∝ 2− jγ .
+Theorem 7 is the union-volume estimate of Wang–Zahl [WZ25],
+the theorem behind the 2025 resolution of the three-dimensional
+Kakeya set conjecture, reinterpreted with continuous opacity
+weights—to our knowledge the first rendering use of this theory. It certifies when a family of rendering primitives can be collapsed into fewer representatives without forfeiting more than an
+ε-fraction of volumetric mass, and its one-line corollary caps the
+packing density of any convex region at C∆max (T) (the Katz–Tao
+constant of Definition 6), which is what keeps the scale-band decomposition of Section 5 bounded. Together with Zador’s law (5),
+the four statements answer, in order: how much error is unavoidable (the floor), which groups are redundant (collapse), what may
+be dropped outright (truncation), and how a fixed budget should be
+split (allocation). Stated as questions (how many primitives does
+this scene need, how much of it is redundancy, how should a fixed
+budget be split across a city), the theory answers all three; the rest
+of the paper measures the answers and builds methods on them.
+5. Budgeted-GS: training and deployment
+The floor and the selection rules are operationalized two ways: at
+training time, budget-centered training grows the model the floor
+prescribes (Section 5.1); at deployment time, the factoring tree and
+its pixel-footprint scheduler serve, per view, exactly the working
+set that fits the memory at hand (Sections 5.2 and 5.3).
+Both halves of our system follow from one observation: a trained
+Preprint.
+5 of 28
+model is a redundant, multi-scale arrangement of oriented boxes
+(each primitive occupies a box of half-extents h = 3σ weighted by
+its opacity), and budget control means removing that redundancy
+without visible loss. Three principles govern every selection rule in
+this paper; they are the operational form of the theorems stated in
+Section 4.
+The first principle is the collapse license: a group of primitives
+that locally over-covers space, many overlapping boxes of comparable scale in one region, can be merged into a few representatives
+with bounded volumetric loss (Theorem 7; the moment-matching
+counterpart of the optimal-atom prediction, Section 4). This licenses the moment-matched aggregates of the factoring tree and
+opacity-ranked pruning inside redundancy-flagged regions.
+The second is scale truncation: a primitive whose projected footprint is below the pixel scale can be dropped or collapsed with
+bounded image error (Lemma 8; the U2 projection-error regime).
+This licenses the pixel-footprint threshold t = c · d/ f of the scheduler and the stopping rule that freezes density control once pruning
+stops paying for itself.
+The third is budget allocation: under a fixed primitive budget, coarser scale bands deserve exponentially more budget than
+finer ones (Corollary 10; the K j s j /d j law); the same footprint
+rule instantiates this allocation per view. The three principles are
+grounded in recent union-volume estimates for unions of convex
+sets [WZ25] and classical adaptive-approximation rates [DeV98];
+measured error rates on synthetic scenes match the prediction
+within measurement noise.
+5.1. Budget-centered training
+The floor answers “how many primitives do I need at quality Q?”,
+and the answer is also a training prescription. Traditional pipelines
+train a large model and compress it: the primitives are optimized
+for a different capacity, and the training time spent on the removed
+half is wasted. BCT instead locates the knee N ∗ from the measured
+curve (Fig. 2; the budget with the largest steepest-window slope,
+Section 6.1), then trains the MCMC densifier directly at cap = N ∗ :
+the initial primitive count is set to a fixed initial fraction of N ∗ and
+the refine-stop fraction to a second, both scaled by the measured
+redundancy θwaste = Nopt /Nfull .
+Standard 3DGS densification/pruning is driven by positional gradients and opacity. We keep densification but replace the pruning signal by the θ redundancy map (the collapse license; supplementary material): θ is computed per region from the local factoring of the model: regions with high local multiplicity (low θ)
+are over-covered and are exactly where primitives can be removed
+with the smallest approximation loss; pruning inside θ-flagged regions removes primitives by opacity. A rate-based stopping criterion freezes density control once validation improvement falls below ε = 0.5 dB.
+5.2. The factoring tree
+A trained model is frozen, but the hardware it must run on is not:
+the same city has to serve a render farm, a desktop, a laptop, and
+a VR headset, and at the far end it has to render in real time on a
+6 of 28
+H. Wang / Budgeted-GS
+Figure 3: Factoring-tree construction. (a) The trained model is a flat set of raw planks across scale bands. (b) A GPU octree partitions space
+into leaves (pure spatial indexing); within each leaf, planks split into scale bands ℓ = ⌊log2 (s/sbase )⌋. (c) Within each (leaf, band), planks
+are Morton-ordered and cut into consecutive buckets; each bucket is factored: one equivalent plank conserves weighted volume W , centroid
+c∗ , and inertia T ∗ (SH colors enter as weighted first moments). (d) Internal nodes aggregate bottom-up, so every (node, band) owns one
+equivalent plank; raw planks stay available in Morton order for the finest tier.
+consumer GPU. The floor’s allocation law (budget should follow
+K j s j /d j per tile and per view) turns this into a selection problem.
+Concretely, applied per tile j (regularity K j , extent s j , distance d j ),
+Corollary 10 yields the level-selection law
+c2 K j s j ∑k Kk sk /dk
+·
+· occ j .
+dj
+N
+(7)
+with A j (v) the projected screen area of tile j in view v. For uniform regularity it reduces to the classical screen-space-error heuristic and adds what it lacks: rougher tiles draw more budget, occluded
+tiles pay the visibility factor, and the per-tile error is certificateverifiable.
+N ∗j (v) ∝ K j
+q
+Kj sj
+A j (v) ≍
+,
+dj
+e2j ≍
+Given a trained model with N primitives (means µi , rotations Ri ,
+scales σi , opacities αi , SH colors), we first convert each primitive
+to a plank (µ, R, h=3σ, α). The scene bounding box is partitioned
+by a GPU octree (leaf capacity 4096); the structure lives in what its
+nodes store (below), and within each leaf the planks are split into
+scale bands ℓ = ⌊log2 (s/sbase )⌋ where s = max h and sbase is the
+5% quantile of s. Each (leaf, band) group is then factored into at
+most 256 equivalent planks by batch moment matching: within a
+group, planks are ordered by Morton code (spatial locality), split
+into consecutive buckets, and each bucket is replaced by a single
+plank conserving
+W = ∑ αi |Vi |,
+i
+c∗ =
+∑i αi |Vi |µi
+,
+W
+
+T ∗ = ∑ αi |Vi | (µi − c∗ )(µi − c∗ )⊤ + 13 Ri diag(hi )2 R⊤
+i ,
+(8)
+i
+i.e. weighted volume, centroid, and inertia tensor; the equivalent
+plank is (c∗ , R∗ , h∗ , w∗ ) from the eigendecomposition of T ∗ with
+w∗ = W /|V ∗ | ∈ [0, 1] (Fig. 3c). Colors enter as opacity-weighted
+first moments of the SH coefficients (DC and higher bands separately).
+The internal nodes of the octree receive the same treatment
+bottom-up, so every (node, band) has one aggregate plank. The raw
+primitives are retained in Morton order for the finest tier. Construction on multi-million-primitive scenes takes seconds on one GPU,
+and the aggregate representation is 119× smaller than the input
+(supplementary material).
+5.3. The pixel-footprint scheduler
+At render time, for camera position p and focal length f (pixels),
+each (leaf, band) with mean scale s̄ and centroid distance d is assigned to one of three tiers by the threshold t = c · d/ f :
+Preprint.
+H. Wang / Budgeted-GS
+7 of 28
+• raw: members individually resolvable (s̄ ≥ t) ⇒ render the original Gaussians;
+• fine: the cluster resolvable but members not (s̄ < t ≤ h̄, h̄ =
+equivalent-plank scale) ⇒ render the fine equivalent planks;
+• coarse: sub-pixel (h̄ < t) ⇒ render the single aggregate plank of
+the (leaf, band).
+regime: its reported gains ride the redundancy θwaste = Nopt /Nfull
+that the floor makes measurable, not proximity to capacity. The universal (model-free) colour-quantization floor, a lower bound on every representation at budget N computed from test images alone,
+confirms it: all 26 published operating points lie above the band
+(Fig. S4).
+c is a single scalar budget parameter: c=1 means exactly resolvable (the reference tier), larger c progressively collapses sub-cpixel content (scale truncation; supplementary material), and c < 1
+keeps members below the pixel scale (super-resolving regime); on
+distant aerial cameras most bands are already sub-pixel at c=1, and
+our real-time renderer operates at c ≈ 0.3 there (Section 6.6).
+Three questions therefore have checkable answers: certified
+compression headroom (measure the floor once, place any candidate point on it; with our measured estimator looseness folded in,
+headroom is certified on eight published points, up to +1.9 dB);
+when lossless is impossible (the gap decomposition separates structural coupling loss from source capacity); and the right budget: the
+floor knee N ∗ is the budget where the steepest-window slope is
+largest, which is exactly where BCT trains (Section 5.1).
+6. Experiments
+We validate the theory and both methods end to end: the floor itself
+across 13 public scenes, then Budget-Centered Training, then Factoring LOD from object scenes to city scale, closing with ablations
+and efficiency.
+6.1. The floor, measured across 13 scenes
+The floor is measured with a preregistered protocol (criteria frozen
+before data collection; all verdicts frozen before reading results; 3
+fixed seeds; JSON certificates at every stage, supplementary material): on each scene, MCMC training at cap 2 × 106 followed by
+opacity-prune to N and fine-tune yields the empirical floor curve
+R(N) at 9 budgets; the preregistered floor-intactness test asks that
+no scan point crosses the fitted floor by more than log10 (0.8); published operating points are re-anchored to their own baseline at
+matched capacity ratio with a 5% (0.22 dB) tolerance; and a duality certificate lower-bounds the achieved error at every (budget,
+view).
+On a synthetic cartoon control with the same protocol, the
+chord lands directly on Zador’s law (−0.549/ − 0.548/ − 0.551,
+R2 =0.997). On the 13 public scenes (seed 0; 3 seeds on garden/room/bonsai) chord slopes are seed-stable (±0.004–0.011) but
+all fall outside the preregistered band [−0.55, −0.45], a registered
+negative. The reading-window audit explains it: the SfM point
+clouds have TWO-NN intrinsic dimension 1.9–2.05, and the steepest three-band windows reach −0.41 to −0.53 across scenes and
+seeds (bonsai −0.46/ − 0.49/ − 0.53; room −0.469 → −0.496
+when the fine-tune budget is quadrupled), straddling the predicted
+−1/2. Floor intactness holds 13/13; the duality certificate holds at
+every (band, view) on room with tightness 0.28 → 0.03 (Table S10,
+full data in supplementary material).
+The published frontier is flat: every compression method with
+a same-paper (N, PSNR) pair defines a resolution-invariant twopoint trajectory (Fig. S3). Across Compact3DGS and EAGLES on
+all 13 scenes plus Mini-Splatting [FW24] and RadSplat [NMR∗ 25]
+at dataset level, these slopes occupy [−0.28, +0.09] with mean
+−0.04: removing 60–70% of a converged model’s primitives costs
+under 1 dB across the surveyed compressors, while the floor law
+(asymptote −1/2, reached end-to-end on the synthetic control
+and bracketed by our steepest windows) is an order of magnitude
+steeper. Published compression operates deep in the over-budgeted
+Preprint.
+6.2. Training-side results
+The redundancy signal and the stopping rule behave as the floor
+predicts across the synthetic and Mip-NeRF 360 scenes, under the
+same preregistered discipline as the floor study (3 fixed seeds on
+garden/room/bonsai, seed 0 elsewhere; matched near-N runs).
+On the 13-scene study, BCT is faster and better in the sameruler sense at the budgets where it is asked to exceed a train-thenprune point: at the matched compact3DGS room budget, 529k,
+BCT reaches 31.94 ± 0.04 dB (three seeds, re-measured protocol)
+against the published Compact3DGS (30.23 dB; the original high
+draw was 31.20). An earlier protocol generation of the same comparison makes the capacity point directly: two audit runs agree
+on 31.21 dB at cap 670k, where that generation’s prune pipeline
+needs 1M primitives for the same 31.21 dB—BCT spends 33%
+fewer primitives for the same rendering quality. (All Table 1 room
+rows are re-measured under the current protocol; the audit generation is kept protocol-separated.) The same-ruler comparison over
+six scenes (Table 1) is the honest version of this claim: at counter
+BCT beats both published points (+0.24/+0.58 dB) and our prune
+scan (+1.90 dB vs. the 500k scan point), at bonsai 640k it beats
+EAGLES (+0.86), and at kitchen 1131k it beats Compact3DGS
+by +1.70 dB; only at flowers does it stay below the published
+compressors (−0.29/−0.71 dB), while still leading our own prune
+pipeline there (+0.44/+0.65 dB); and at garden both budgets beat
+the published points (+0.24/+0.44 dB). The honest summary: BCT
+leads our train-then-prune pipeline at every matched budget, and it
+now beats the published compressor points on five of six scenes
+(all but flowers). The single loss is diagnostic rather than accidental: flowers is the only scene whose measured knee sits at the
+full scanned budget (θwaste =1.0, Section 6.1)—source-limited, not
+redundancy-limited—so there is nothing for budget selection to
+spend there. Its decisive advantage is budget selection at the floor
+knee (33% fewer primitives at matched quality) plus a single 78minute run instead of the 175-minute train–prune–fine-tune route
+(measured on room: 125 min training at 1M + 50 min prune+finetune). An extension to the outdoor scenes of the study (bicycle,
+stump, treehill), where the published points sit highest above the
+floor, appears in Table S4.
+Table 1 records the tuned variants: in all 7 runs (across three
+scenes and two budgets each, the initial-fraction/stop schedule vari-
+8 of 28
+H. Wang / Budgeted-GS
+ants) the original recipe (SfM init of 100k primitives, refine to convergence) is best or tied, a negative ablation confirming that BCT
+needs no hyper-parameter search, and that the gains above are not
+tuning artifacts. Timing (measured on room, shared A100 under
+neighbor load; ratios are same-card): BCT 78 ± 7 min over three
+seeds; the traditional route for the same budget (train at 1M, prune,
+fine-tune) ≈175 min, 2.2× slower for lower quality (Table 1).
+6.2.1. Outdoor extension
+The same-ruler BCT comparison extended to the three outdoor
+scenes of the study (bicycle, stump, treehill) at the published compressor budgets, plus the frontier reading of the outcome. Protocol identical to Table 1 (seed 0, same eval, original recipe: SfM
+init 100k primitives, refine to convergence). “ours-prune” = the
+matched-budget point of the same-ruler train-then-prune scan of
+Section 6.1 (nearest scan band; interpolated in log N to the tabular
+budget).
+The outdoor extension (Table S4) makes the floor’s practical
+value testable in both directions. BCT, which spends the floor’s
+answer directly at a budget, lands on the same curve as our
+train→prune →fine-tune scan (differences ≤ 0.15 dB); the two
+procedures agree because both consume the budget the floor says
+the scene can carry. The published compressor points at the same
+budgets are 0.8–2.9 dB above that curve. Their gains therefore
+do not come from capacity: on stump, where the published points
+are 2.7–2.9 dB above our measured floor at matched budgets, the
+measured training-time redundancy θwaste fully accounts for the reported gap (frontier analysis, Section 6.1).
+is a pure ranking of an already-trained model, so it applies to any
+primitive set. Table S7 applies it to the trained lego/bonsai/room
+models and the two Mip-NeRF 360 indoor scenes, evaluated by
+the same CityGaussian test protocol that produced the trainingside numbers. On every scene and every budget, the score ranking beats opacity-ordered pruning, the baseline the same protocol
+ships, by +2.7 to +7.9 dB (PSNR), with large margins also in
+SSIM and LPIPS. At 50% the margin costs almost nothing: −0.13
+and −0.54 dB on room and bonsai versus the full model. At 25%
+the loss is substantial (3.1–13.9 dB), which is the expected behavior
+on already-compressed models: these trained models are down to
+36–66% of Vanilla, so they carry less removable redundancy than
+Block_A (where 24% of primitives are invisible from every training
+view and the curve is flat to 25%). The clean division of labor: the
+score export recovers what a post-hoc pass can, and the trainingside BCT is the tool where a fixed quality target must be met.
+The two stages also compose. On room, we build factoring trees
+over two roots, the full model (1.66M primitives) and the budgetcentered model trained at the floor’s knee (529k), and deploy both
+through the same scheduler at a matched budget of ≈520k rendered primitives (34 held-out views, LOD render protocol). The
+BCT-born tree renders 34.19 dB, within 0.16 dB of its own root;
+the full-born tree, collapsed to the same budget, renders 22.83 dB.
+Budget-centered training is thus the correct front end for factoringtree deployment: a model born at the floor’s budget passes through
+the tree essentially unchanged, because it contains almost no redundancy for the tree to lose (per-tier data in the supplementary
+material).
+6.2.2. Budget-aware density control at the ceiling
+6.3. The LOD quality window
+Table S5, Fig. S2, and Fig. S14a: on lego our budget-aware training with the BCT stop rule (Section 5.1) reaches 36.85 dB with
+151k primitives: the same quality as Vanilla with 339k (44% of the
+budget, −0.34 dB), and +0.23 dB over MCMC at a 12% smaller
+budget. The full Pareto curve (Fig. S2) dominates MCMC at every
+tested budget. Perceived, not just measured: Fig. S5 shows the two
+models side by side on a held-out view with the residual amplified 10×; on this view the 151k model is better than Vanilla (24.88
+vs. 21.46 dB; the aggregate mean is −0.34 dB over the full test
+set), and the largest residuals are structural edges rather than texture (mean |∆| = 0.013).
+On garden (Table 2), the residual-proxy adaptive selector recovers
+0.49 dB over the fixed threshold at a comparable primitive count
+(1.05×).
+6.2.3. Generalization
+Table S6 generalizes the stop rule to four further scenes (chair, ship,
+bonsai, room).
+Post-hoc, the redundancy signal keeps its value on the indoor
+scenes (seed-0 runs): pruning the trained model by the BCT stop
+rule dominates random pruning at every matched budget on bonsai and room; e.g. at 70% kept, a 32-view 3DGS re-render of
+the same checkpoints measures 31.10/35.64 dB for θ-pruning vs.
+28.10/29.56 dB random (+3.0/+6.1 dB). Fig. S6 shows the corresponding renders: at matched 70% budget the θ-guided models stay
+close to their full renders, while random pruning visibly degrades
+foliage and edges.
+The contribution-scored export of the score export of Section 5
+On the city-scale model the near-lossless window is even wider
+(Table 3): c=4 renders 68% of the primitives at −0.05 dB (visual
+comparisons: Fig. S12 for the garden tiers, Fig. S10 for the same
+ladder on room). This asymmetry (garden vs. city aerial), quantified
+by the orbit sweep of Fig. S7, matches the theory: the aerial model
+is already tessellated at its training viewing distance, so sub-pixel
+redundancy is exhausted at small c; the surplus is in super-pixel
+collapse. Across the full ladder the single model sweeps a continuous memory–quality curve (Fig. S15); re-rendering the same tiers
+through the GPS renderer reproduces it within 0.5 dB (c=4 is lossless under both renderers), and the ∼20.8 dB operating point costs
+110.6 MB against GPS’s full 1926 MB (17×; same-budget numbers and byte-level accounting in the supplementary material).
+6.4. Comparison with training-coupled LOD
+The most closely related systems are LOD hierarchies coupled to
+training: Octree-GS [RJL∗ 24] trains a multi-level anchor structure and selects levels per view; CityGaussian [LGL∗ 24] and its
+V2 [LLM∗ 25] partition large scenes and load blocks by level
+at runtime. Our layer is complementary by construction: it is
+built post-hoc from any trained model, exposes a continuous budget parameter, and is renderer-agnostic. Recent concurrent work
+Preprint.
+9 of 28
+H. Wang / Budgeted-GS
+scene
+budget
+schedule
+PSNR dB
+ours-prune
+published
+room
+room
+room
+529k
+670k
+1M
+orig
+orig
+orig
+31.94±.04
+31.95
+32.24
+30.14
+31.21 @1M
+31.21
+30.23 (C3DGS)
+31.47 (EAGLES)
+—
+garden
+garden
+1650k
+2209k
+orig
+orig
+27.15±.04
+27.25±.06
+25.98 @1M
+—
+26.91 (EAGLES)
+26.81 (C3DGS)
+bonsai
+bonsai
+601k
+640k
+orig
+orig
+32.13
+32.18
+29.38
+—
+32.08 (C3DGS)
+31.32 (EAGLES)
+counter
+counter
+536k
+560k
+orig
+orig
+28.95±.02
+28.98±.02
+27.05 @500k
+—
+28.71 (C3DGS)
+28.40 (EAGLES)
+flowers
+flowers
+1330k
+1525k
+orig
+orig
+20.58±.02
+20.60±.01
+19.93 @1M
+20.16 @2M
+21.29 (EAGLES)
+20.89 (C3DGS)
+kitchen
+kitchen
+1M
+1131k
+orig
+orig
+31.97±.10
+32.18±.07
+30.60
+—
+30.77 (EAGLES)
+30.48 (C3DGS)
+Table 1: BCT vs. the same-ruler train-then-prune pipeline and published compressor baselines.
+config
+PSNR
+#primitives
+∆PSNR
+full
+LOD c= 1
+LOD c= 2
+LOD c= 4
+adaptive proxies
+29.97
+29.31
+26.89
+22.56
+29.80
+5.78M
+94.4%
+83.0%
+62.4%
+—
+—
+−0.66
+−3.08
+−7.41
+−0.17
+Table 2: garden (Mip-NeRF 360), trajectory views: fixed threshold vs. residual-proxy adaptive selection.
+reaches consumer-GPU city scale by training the LOD itself, outof-core streaming hierarchies [WKR∗ 26] and LoD-aware training [KRM∗ 25], so the axes are complementary rather than competing: their budgets are fixed at training time, ours are chosen per
+deployment on the same trained model. Table S8 frames the headto-head on MatrixCity and makes the structural difference concrete.
+Re-rendering the official Octree-GS Block_all checkpoint (8.01M
+stored anchors, each decoding to 10 neural Gaussians at render
+time) under a held-out split reproduces its level curve (27.23 dB
+at 145k visible anchors, degrading gracefully to 19.5 dB at 29k), a
+trained representation whose level set is fixed at training time. On
+the other side, CityGaussianV2’s runtime LOD cannot be evaluated
+post-hoc on the official Aerial release: its renderer requires a perpartition partitioning file and one trained checkpoint per partition
+block, artifacts of its partitioned training that the published single
+checkpoint does not include. Our post-hoc layer, in contrast, consumes that same 8.56M checkpoint as-is and sweeps the continuous c curve of Table 3 on it. Runtime memory tells the same story:
+while rendering the same Block_all views at 1600 × 900 through
+each side’s official path on the same 4080 SUPER, the VRAM peak
+is 30.4 GiB for Octree-GS (steady-state 15.9 GiB) and 4.4 GiB for
+ours (6.9× lower at peak; Table S8); the decoded-per-frame neural
+representation is intrinsically memory-heavy, independent of the
+fps gap.
+Preprint.
+6.5. Pruning baselines
+The θ+opacity rule’s city-scale behavior is measured on Block_A
+(Table S9): the redundancy signal localizes sacrifice at city scale
+just as it does on lego (Section 6.2.2).
+At matched budgets, Table S9 compares two post-hoc exports
+of the same trained model against LightGaussian [FWW∗ 24],
+RAP [YYXL26], and a faithful single-pass reimplementation of
+PUP 3D-GS’s Fisher sensitivity score [HTS∗ 25] (diagonal Fisher
+over means and scales, applied through the same export path): the
+θ+opacity rule (coverage redundancy) and the contribution-scored
+export of Section 5 (render-aware ranking; the score itself is LightGaussian’s, faithfully reimplemented and applied through our posthoc export path). The score export matches Vanilla exactly at 50%
+and 25% of the primitives and dominates all three baselines on
+all three metrics at 10% (+0.45 dB PSNR over LightGaussian,
++0.80 dB over RAP, +0.37 dB over the PUP score); one 234 s scoring pass, no retraining. The axis extends where no baseline reports
+numbers: 13.49 dB at 5%, 12.97 dB at 2.5%, 12.53 dB at 1.3% of
+the primitives. Absolute Block_A values are low by protocol design
+(DC-only evaluation against real photographs); the table’s purpose
+is the ordering of methods under one identical pipeline, not absolute quality. θ+opacity keeps a complementary role: it is the best
+LPIPS export at every extreme budget (0.547 vs. 0.557 for the score
+export at 10%; 0.601 for RAP), consistent with its design of removing perceptually redundant mass. The score export, in turn, keeps
+street markings and facades legible at 10% where LightGaussian
+blurs and RAP collapses (Fig. S9).
+10 of 28
+H. Wang / Budgeted-GS
+config
+model data
+∆PSNR
+our LOD tiers, rendered by the 3DGS rasterizer:
+full
+28.38
+1240.6 MB
+LOD c= 4
+28.33
+844.1 MB
+LOD c= 8
+26.26
+552.7 MB
+LOD c= 16
+23.72
+288.9 MB
+LOD c= 32
+20.80
+110.6 MB
+LOD c= 64
+17.46
+33.9 MB
+PSNR (med)
+—
+−0.05
+−2.12
+−4.66
+−7.58
+−10.92
+the same LOD tiers rendered through the GPS renderer [RPWM26]:
+full
+28.50
+1926.2 MB
+LOD c= 4
+28.52
+1310.5 MB
+LOD c= 8
+26.88
+858.1 MB
+LOD c= 16
+24.13
+448.6 MB
+LOD c= 32
+20.88
+171.7 MB
+LOD c= 64
+17.38
+52.6 MB
+—
++0.02
+−1.62
+−4.37
+−7.62
+−11.12
+random-subsampling control through the same path:
+random 44.6%
+21.42
+859.3 MB
+random 23.2%
+16.67
+447.3 MB
+random 8.9%
+12.90
+171.7 MB
+−7.08
+−11.83
+−15.60
+Extended metrics, all 154 test views, mean (PSNR/SSIM/LPIPS), 3DGS rasterizer:
+full
+27.71
+1240.6 MB
+—
+LOD c= 8
+26.10 / .747 / .355
+552.7 MB
+−1.61
+LOD c= 16
+23.45 / .693 / .413
+288.9 MB
+−4.26
+LOD c= 32
+20.52 / .627 / .474
+110.6 MB
+−7.19
+LOD c= 64
+17.51 / .548 / .539
+33.9 MB
+−10.20
+Table 3: MatrixCity Aerial: the paired blocks use 24 views and median PSNR; the extended-metrics block uses all 154 test views and the
+mean. Same model, cameras, and GT throughout.
+The scheduler itself emits a standard primitive stream (means,
+quaternions, scales, opacities, SH), consumable by any splatting
+rasterizer; the export pipeline and render-aware scoring are described in the supplementary material.
+6.6. Real-time rendering at city scale
+The two sides of the pipeline compose at city scale on our v3 retrain
+of the official Block_all data (6.89M primitives, full SH; Fig. 4):
+build the factoring tree once, then render interactively under a capacity budget. The same discipline serves deployment: the trained
+MatrixCity Aerial model (8.56M primitives, full SH) renders at
+four memory budgets chosen by the single parameter c at native
+1080p on one RTX 4080 SUPER (c=4/8/16: 1288/824/407 MB
+on 8/4/2 GB-class targets); quality is visually preserved down to
+the 2 GB tier (|∆PSNR| ≤ 0.27 dB vs. full on this held-out view),
+with no retraining or re-export (Fig. 5).
+We verify that the budget semantics carry to an interactive runtime, and we measure where the real-time boundary actually lies
+on our v3 retrain of the official Block_all data (6.89M primitives,
+full SH, 25.43 dB on the official 207-view protocol with the 3DGS
+rasterizer; Table 4). The deployment layer is CP-LOD (coveragepreserving prefix LOD): per frame a leaf-only cut of the factree
+is traversed on GPU, a capacity budget K bounds the material√
+ized working set, Morton-strided subsampling with scale× r and
+r
+opacity 1−(1−α) compensation preserves coverage at any budget
+(Table 4, Fig. 6b). Selection and gather run entirely on GPU—the
+selected prefix is collected straight into the rasterizer buffers with
+no CPU-side collection or host-to-device upload—and the GPU
+selection reproduces the offline reference exactly, so the runtime
+inherits the evaluation semantics measured above; on the official
+207-view trajectory the per-frame selected count changes by a median of ∼1% between consecutive views, and residual popping is
+confined to tier boundaries (Limitations). Three properties matter
+for deployment. First, selection is resolution-invariant by construction: the materialized set is identical at 8002 and 1920 × 1080 at
+every budget (measured equal counts on both); the naive thresholdschedule drift of the tier prototype is gone. Second, the full set renders in real time: at native 1920 × 1080 with full view-dependent
+SH on one RTX 4080 SUPER, the official 207-view test trajectory renders at 71 fps mean (full set, full SH, full coverage; same
+protocol as the 25.43 dB measurement; timing drops the first 10
+frames, and the per-level fps curve is Table S8); the orbit probe
+renders the full 5.99M at 49.5 fps; at 8002 the same full set runs
+79–198 fps. As a commodity-8 GB reference, the DC-only compact path renders the original 19.93M Block_all model at 30.7 fps
+at 8002 on an RTX 3060 Ti (supplementary material). Third, the
+capacity ladder is smooth: at 1080p, 0.34M/0.68M/1.38M/2.59M
+selected render 76.8/65.0/59.0/57.0 fps at 18.1/20.3/21.7/23.4 dB
+self-PSNR against the full render, so the budget–quality trade-off
+is continuous and deploy-time (Fig. S14b).
+The re-rendered official Octree-GS Block_all checkpoint on the
+same 207 views at −0.30 dB resolution-matched model quality
+(25.43 vs. 25.73 dB, Octree-GS renders upsampled to 1080p), both
+sides under each side’s own renderer: our rasterizer is 6.2× faster
+Preprint.
+H. Wang / Budgeted-GS
+11 of 28
+Figure 4: City scale, official Block_all 207-view test trajectory, same view and eval protocol throughout: GT photo; our 6.89M model at
+71 fps; the re-rendered official Octree-GS checkpoint (8.0M anchors, 80M decoded Gaussians) at 11.5 fps.
+Figure 5: One trained MatrixCity Aerial model, four deployment budgets chosen by the single parameter c (all panels: one RTX 4080
+SUPER, native 1080p).
+(71 vs. 11.5 fps). All fps numbers in this subsection are measured
+on the same RTX 4080 SUPER. The fps contrast reflects architecture: the anchor-based checkpoint stores 8.01M anchors (decoding to ∼80M Gaussians, a 2.5 GB model) but renders only a
+LOD-culled ∼0.9M per view and pays a per-frame MLP decode,
+whereas our 6.89M static explicit splats (1.7 GB) feed the rasterizer directly with no decode. In the literature, city-scale interactive rendering has been reported on datacenter GPUs with trainingcoupled, SH-reduced LOD [LGL∗ 24, RJL∗ 24], and more recently
+on consumer GPUs by training the LOD representation itself, outof-core streaming hierarchies [WKR∗ 26] and LoD-aware training [KRM∗ 25], in each case for budgets baked in at training time;
+our layer is the post-hoc counterpart: one already-trained model,
+full SH, and a budget chosen at deploy time on a consumer GPU.
+6.7. Ablations
+On the training side (lego), replacing the redundancy-localizing
+θ map by a random region prior costs 11–13% more primitives
+at the same PSNR; the θ signal’s win is compression, not accuracy. Without the rate-based stopping criterion, the default densification controller over-prunes and loses 0.56 dB; with it, training
+freezes automatically at the sweet spot (step 5000), and a stoponly variant (no θ pruning) still reaches 37.00 dB at 216k (63%
+of vanilla, −0.19 dB), isolating the stopping rule as the accuracycritical component. Hyper-parameter sensitivity is ≤ 0.10 dB. On
+the rendering side, a DC-only tree loses 5 dB systematically (storing opacity-weighted SH first moments for all bands is required),
+and the residual-proxy selection recovers +0.49 dB over the fixed
+threshold at a comparable count (garden, Table 2).
+Preprint.
+6.8. Efficiency
+Construction also fits the desktop GPU for the Block_all trees reported here: on the 10M θ-pruned Block_all tree (full SH moments)
+it peaks at 6.45 GiB on the 8 GB RTX 3060 Ti (2.53 GB output);
+the 7.07M Block_all v2 tree (full SH, 1.87 GB) builds on the same
+consumer card. (The MatrixCity Aerial tree is a one-time offline
+build.)
+7. Limitations
+We evaluate on a single GPU; transparent and occluded-region
+extremes are not covered, and memory streaming (GPS’s native
+regime) remains future work. The proved layer covers the compositing renderer family, atomic and field representations, and
+the consistency functional with matching upper and sharp lower
+bounds; three items remain open—the sharpness of the visibilityexponent bound, SGD trainability of implicit fields at the proved
+N −1/2 rate, and non-compositing renderers such as caustics and
+participating media. The measured −1/2 bracket holds on all 13
+scenes inside the registered reading window (indoor scenes read
+−0.457 ≈ −1/2).
+8. Conclusion
+We began with the obstacle that blocks adoption: city-scale 3D
+Gaussian Splatting scenes do not fit a consumer GPU, and no
+principled answer existed for what could be given up. This paper
+proposed such an answer: a measurable capacity floor for 3DGS
+derived from optimal transport—rendering and training become
+12 of 28
+H. Wang / Budgeted-GS
+operating point
+selected
+fps
+p5 fps
+GPU mem
+capacity K=0.5M
+capacity K=2M
+full set (cap 16M)
+342k
+1.43M
+5.99M
+76.8
+59.0
+49.5
+—
+—
+—
+3.9 GB
+4.3 GB
+7.8 GB
+full set, official 207-view traj.
+K=2M, official 207-view traj.
+full set, 8002
+6.89M
+1.43M
+5.99M
+71.0
+66.2
+79.1–198
+55.2
+42.7
+—
+7.8 GB
+4.3 GB
+—
+∼0.9M/view
+11.5
+—
+—
+Octree-GS full ckpt (207 views)
+Table 4: Interactive deployment on Block_all (v3 retrain, native 1080p).
+Figure 6: Block_all capacity ladder (a) and realtime throughput (b) on the v2 tree (7.07M, SH3).
+transport problems, the Zador law fixes where the floor lies, and
+three selection rules (collapse, truncation, allocation) turn the floor
+into executable permissions. On this foundation we built two methods: budget-centered training grows a model directly at the floor’s
+prescribed budget instead of training large and pruning, and Factoring LOD turns one trained model into a deployment-time knob
+that renders a full city in real time on a consumer GPU across continuous memory budgets. Future work includes memory streaming
+for out-of-core scenes, hysteresis and perceptual validation for tier
+transitions, and extending the phase-space formulation to time and
+to further primitive families. One floor, two methods: deployment
+renders exactly what fits; training grows exactly what the scene
+needs.
+References
+[DDL∗ 24] D ENG X., D IAO C., L I M., Y U R., X U D.: Efficient density control for 3D Gaussian Splatting. arXiv preprint arXiv:2411.10133
+(2024). 21
+[DeV98] D E VORE R. A.: Nonlinear approximation. In Acta Numerica,
+vol. 7. Cambridge University Press, 1998, pp. 51–150. 5, 14, 17
+[DLL∗ 26] D ING J., L IU W., L I Y., WANG Y., L I A., D ING Q., L OU X.,
+Y U J.: SHARP-GS: Scalable high-fidelity accelerated rendering pipeline
+for ultra-high resolution 3D Gaussian splatting. In ACM SIGGRAPH
+2026 Conference Papers (2026). 2
+[FW24]
+FANG G., WANG B.: Mini-Splatting: Representing scenes with a
+constrained number of Gaussians. In European Conference on Computer
+Vision (ECCV) (2024). arXiv:2403.14166. 7
+[FWW∗ 24] FAN Z., WANG K., W EN K., Z HU Z., X U D., WANG Z.:
+LightGaussian: Unbounded 3D Gaussian compression with 15x reduction and 200+ FPS. In Advances in Neural Information Processing Systems (NeurIPS) (2024). arXiv:2311.17245. 2, 9, 19
+[GL00] G RAF S., L USCHGY H.: Foundations of Quantization for Probability Distributions, vol. 1730 of Lecture Notes in Mathematics. Springer,
+2000. 4, 14, 15
+[GSG25] G IRISH S., S HRIVASTAVA A., G UPTA K.: EAGLES: Efficient
+accelerated 3d gaussians with lightweight encodings. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) (2025). 2
+[Hop96] H OPPE H.: Progressive meshes. In Proc. ACM SIGGRAPH
+(1996), pp. 99–108. 2
+[HTL∗ 25] H ANSON A., T U A., L IN G., S INGLA V., Z WICKER M.,
+G OLDSTEIN T.: Speedy-Splat: Fast 3D Gaussian splatting with sparse
+pixels and sparse primitives. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) (2025). arXiv:2412.00578. 2
+[HTS∗ 25] H ANSON A., T U A., S INGLA V., JAYAWARDHANA M.,
+Z WICKER M., G OLDSTEIN T.: PUP 3D-GS: Principled uncertainty
+pruning for 3D Gaussian splatting. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) (2025), pp. 5949–5958.
+arXiv:2406.10219. 2, 9
+[HYC∗ 24] H UANG B., Y U Z., C HEN A., G EIGER A., G AO S.: 2D
+Gaussian Splatting for geometrically accurate radiance fields. In ACM
+SIGGRAPH 2024 Conference Proceedings (2024). 2
+[Kan42]
+Preprint.
+K ANTOROVICH L. V.: On the Translocation of Masses. 1942.
+H. Wang / Budgeted-GS
+Dokl. Akad. Nauk SSSR 37, 199–201 (English transl.: Manag. Sci. 5
+(1958) 1–4). 3
+[Kar21] K ARIS B.: Nanite: A deep dive. In ACM SIGGRAPH 2021
+Courses: Advances in Real-Time Rendering in Games (2021). 2
+[KKLD23] K ERBL B., KOPANAS G., L EIMKÜHLER T., D RETTAKIS G.:
+3D Gaussian Splatting for real-time radiance field rendering. In ACM
+SIGGRAPH 2023 Conference Proceedings (2023). 1, 2
+[KMK∗ 24]
+K ERBL B., M EULEMAN A., KOPANAS G., W IMMER M.,
+L ANVIN A., D RETTAKIS G.: A hierarchical 3D Gaussian representation
+for real-time rendering of very large datasets. ACM Transactions on
+Graphics (SIGGRAPH 2024) 43, 4 (2024). arXiv:2406.12080. 2, 21
+[KRM∗ 25] K ULHÁNEK J., R AKOTOSAONA M.-J., M ANHARDT F.,
+T SALICOGLOU C., N IEMEYER M., S ATTLER T., P ENG S., T OMBARI
+F.: LODGE: Level-of-detail large-scale Gaussian splatting with efficient rendering. In Advances in Neural Information Processing Systems
+(NeurIPS) (2025). arXiv:2505.23158. 2, 9, 11
+[KRS∗ 24] K HERADMAND S., R EBAIN D., S HARMA G., S UN W.,
+T SENG J., I SACK H., K AR A., TAGLIASACCHI A., Y I K. M.: 3D
+Gaussian Splatting as Markov chain Monte Carlo. In Advances in Neural
+Information Processing Systems (NeurIPS) (2024). arXiv:2404.09591.
+2, 21
+[KT59] KOLMOGOROV A. N., T IKHOMIROV V. M.: ε-entropy and εcapacity of sets in functional spaces. Uspekhi Matematicheskikh Nauk
+14, 2 (1959), 3–86. English transl.: Amer. Math. Soc. Transl. 17 (1961)
+277–364. 14
+[LGL∗ 24] L IU Y., G UAN H., L UO C., FAN L., WANG N., P ENG J.,
+Z HANG Z.: CityGaussian: Real-time high-quality large-scale scene rendering with Gaussians. In European Conference on Computer Vision
+(ECCV) (2024). arXiv:2404.01133. 2, 8, 11
+[LK10] L AINE S., K ARRAS T.: Efficient sparse voxel octrees. In Proc.
+ACM SIGGRAPH Symposium on Interactive 3D Graphics and Games
+(I3D) (2010), pp. 55–63. 2
+[LLM∗ 25] L IU Y., L UO C., M AO Z., P ENG J., Z HANG Z.: CityGaussianV2: Efficient and geometrically accurate reconstruction for largescale scenes. In International Conference on Learning Representations
+(ICLR) (2025). arXiv:2411.00771. 2, 8
+13 of 28
+[RL00] RUSINKIEWICZ S., L EVOY M.: QSplat: A multiresolution point
+rendering system for large meshes. In Proc. ACM SIGGRAPH (2000),
+pp. 343–352. 2
+[RPWM26] R IJSDIJK J. A., P ETERS C., W EINMANN M., M ARROQUIM
+R.: Gaussian point splatting. ACM Transactions on Graphics (SIGGRAPH 2026) 45, 4 (2026). doi:10.1145/3811272. 1, 2, 10, 19
+[SLZ∗ 25] S ONG M., L IN X., Z HANG D., L I H., L I X., Q I L.: D2gs:
+Depth-and-density guided gaussian splatting for stable and accurate
+sparse-view reconstruction. arXiv preprint arXiv:2510.08566 (2025). 2
+[SOW21] S CHÜTZ M., O HRHALLINGER S., W IMMER M.: Fast out-ofcore octree generation for massive point clouds. ACM Transactions on
+Graphics 40, 6 (2021). 2
+[TWN∗ 22] TANCIK M., W EBER B., N G E., L I R., Y I K., ET AL .:
+Block-NeRF: Scalable large scene neural view synthesis. In Proc.
+IEEE/CVF CVPR (2022). 2
+[Vil09] V ILLANI C.: Optimal Transport: Old and New, vol. 338 of
+Grundlehren der mathematischen Wissenschaften. Springer, 2009. 3
+[WKR∗ 26] W INDISCH F., KÖHLER T., R ADL L., D’U RSO M.,
+S TEINER M., S CHMALSTIEG D., S TEINBERGER M.: A LoD of Gaussians: Out-of-core training and rendering for seamless ultra-large scene
+reconstruction. In ACM SIGGRAPH 2026 Conference Papers (2026).
+arXiv:2507.01110. 2, 9, 11
+[WYW∗ 26] W EN Z., YANG Y., W U B., Z HOU Y., L ISCHINSKI D.,
+C OHEN -O R D., H UANG H.: Capacity-controlled multi-view stylization of 3d gaussian splatting. arXiv preprint arXiv:2606.26754 (2026).
+ECCV 2026. 2
+[WZ25] WANG H., Z AHL J.: Volume estimates for unions of convex sets,
+and the Kakeya set conjecture in three dimensions, 2025. Thm. 1.2: covering estimate; Def. 1.3: Katz–Tao convex Wolff axioms; shaded unionvolume variant appears as Cor. 1.10 in the current arXiv version. 1, 4, 5,
+16
+[WZH∗ 24] WANG H., Z HU H., H E T., F ENG R., D ENG J., B IAN J.,
+C HEN Z.: End-to-end rate-distortion optimized 3d gaussian representation. In European Conference on Computer Vision (ECCV) (2024).
+arXiv:2406.01597. 2
+[LRS∗ 24] L EE J. C., R HO D., S UN X., KO J. H., PARK E.: Compact 3d gaussian representation for radiance field. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) (2024).
+arXiv:2311.13681. 2
+[YYXL26] YANG K., YANG Q., X U Y., L I Z.: RAP: Fast feedforward rendering-free attribute-guided primitive importance score prediction for efficient 3D Gaussian splatting processing. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) (2026).
+arXiv:2602.19753. 2, 9
+[LYX∗ 24] L U T., Y U M., X U L., X IANGLI Y., WANG L., L IN D., DAI
+B.: Scaffold-GS: Structured 3D Gaussians for view-adaptive rendering.
+In IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR) (2024). arXiv:2312.00109. 2
+[Zad82] Z ADOR P. L.: Asymptotic quantization error of continuous signals and the quantization dimension. IEEE Transactions on Information
+Theory 28, 2 (1982), 139–149. 4, 14
+[MESK22] M ÜLLER T., E VANS A., S CHIED C., K ELLER A.: Instant
+neural graphics primitives with a multiresolution hash encoding. ACM
+Transactions on Graphics 41, 4 (2022). 2
+[MGK∗ 24] M ALLICK S. S., G OEL R., K ERBL B., C ARRASCO F. V.,
+S TEINBERGER M.: Taming 3DGS: High-quality radiance fields with
+limited resources. ACM Transactions on Graphics (SIGGRAPH Asia
+2024) 43, 6 (2024). arXiv:2406.15643. 2, 21
+[NMR∗ 25] N IEMEYER M., M ANHARDT F., R AKOTOSAONA M.-J.,
+O ECHSLE M., D UCKWORTH D., G OSULA R., TATENO K., BATES
+J., K AESER D., N IESSNER M., T OMBARI F.: RadSplat: Radiance
+field-informed Gaussian splatting for robust real-time rendering with
+900+ FPS. In International Conference on 3D Vision (3DV) (2025).
+arXiv:2403.13806. 2, 7
+[PZvBG00] P FISTER H., Z WICKER M., VAN BAAR J., G ROSS M.: Surfels: Surface elements as rendering primitives. In Proceedings of SIGGRAPH (2000). 2
+[RJL∗ 24] R EN K., J IANG L., L U T., Y U M., X U L., N I Z., DAI B.:
+Octree-GS: Towards consistent real-time rendering with LOD-structured
+3D Gaussians. In ACM SIGGRAPH Asia 2024 Conference Papers
+(2024). arXiv:2403.17898. 2, 8, 11
+Preprint.
+[ZCY∗ 24] Z HANG B., C HENG Y., YANG J., WANG C., Z HAO F., TANG
+Y., C HEN D., G UO B.: Gaussiancube: A structured and explicit radiance
+representation for 3d generative modeling. Advances in Neural Information Processing Systems (NeurIPS) (2024). arXiv:2403.19655. 2
+14 of 28
+H. Wang / Budgeted-GS
+The framework definitions and the theorem-chain statements are
+made in Section 4 of the main paper; the proofs the main text
+does not carry live here. The covering formalism behind the design principles, with full proofs of the main-text theorems, is in
+the Background-and-guarantees section; the measurement protocol
+and records behind Section 6.1 of the main paper are in the Measurement appendix; notation is collected in the notation table.
+S1. Proofs for the capacity-floor chain
+The framework definitions and the theorem-chain statements are
+in Section 4 of the main paper; this appendix collects the proofs
+of the load-bearing statements: full proofs for the loss identity, the
+duality certificate, the transport theorem, the Zador construction,
+and the solver-descent and taxonomy statements; proof sketches
+remain only for the visibility-cell rate and the new-view bound;
+the deep imports (Zador’s law, the Wang–Zahl covering estimate,
+DeVore’s width bounds) are cited to their classical sources.
+Loss identity L = C −
+V. For the normalized coupling π̃ p the conR
+ditional expectation ρ dπ̃ p is the rendered colour I(p). Expanding the square in the transport cost and summing over pixels with
+weights S(p),
+Z
+C = ∑ S(p)
+ρ − I(p) + I(p) − cgt (p)
+dπ̃ p
+2
+Z
+= ∑ S(p) ∥ρ − I(p)∥2 dπ̃ p + ∑ S(p) I(p) − cgt (p) ,
+p
+p
+{z
+V
+}
+|
+{z
+L
+}
+R
+the cross term vanishing because ρ dπ̃ p = I(p). Rearranging gives
+L = C − V.
+Certificate part of the representation
+theorem. Kantorovich
+dualR
+
+ity gives Cfree (θ) = supϕ⊕ψ≤c ϕ dµθ + ∑ p S(p)ψ(p) (Fenchel–
+Rockafellar; the constraint set is linear in the source variable), so
+every dual-feasible pair lower-bounds Cfree . The rendering coupling is feasible for the free problem with the same marginals, so
+C(θ) ≥ Cfree (θ). Substituting the loss identity L = C − V proved
+above and rearranging yields the duality-certificate display of the
+main paper.
+Zador law in U5: construction, and imported lower bound.
+Upper bound (construction). Partition the dps -dimensional
+support into cells of diameter ∼ε; cell j has measure m j ≈ λ j εd .
+At the optimum the per-point error is equalized across ocd /(d +2)
+cupied cells, which gives cell j k j ∝ m j ps ps
+points;
+hence
+d /(dps +2)
+N ≍ ∑ j m j ps
+Theorem 1 (Convergence of solvers, and consistency). Gradient descent on L = C − V with L-Lipschitz gradient is monotone and every stationary point satisfies ∇C(θ∗ ) = ∇V(θ∗ ); sampling/Lloyd/meshing attain their classical rates (N −2/d / stationary
+quantizer / N −1 on C2 surfaces). Single-source cross-view colour
+agreement is structural: masked visibility-cell atoms achieve the
+optimal rate max j V j − Ṽ j L2 ≤ CK occ1/2 N −1/2 (log N)c , and the
+new-view error is bounded by the training error plus an angular
+regularity term and the SH/visibility capacity term.
+Theorem 2 (A taxonomy of primitive families). All three primitive families embed in canonical form (Q, w, ρ); point (mass),
+wave (Gaussian plate w = αn 2πσt2 in the limit), field (volume compositing), with voxels/triangles as field discretizations. On surfacedominated scenes,
+Rtri ∼ KN −1 ≪ Rpts/surfel/plates ∼ KN −1/2 (log N)c
+≪ Riso voxels ∼ KN −1/4 .
+2
+p
+|
+read as an injectivity requirement on the target map); the theorem
+statement in the main text carries this hypothesis. The intrinsic
+phase-space support dimension dps , not the ambient dimension,
+governs the rate. On surface scenes dps =4 (surface position ×
+incident-direction hemisphere), giving R ∝ N −1/2 .
+≍ ε−2dps /(dps +2) ∥λ∥dps /(dps +2) ,
+while the total squared error is R ≍ ε2 . Eliminating ε gives
+R(N) ≤ Cdps ∥λ∥dps /(dps +2) N −2/dps for the rendering instance.
+Lower bound (imported, under view completeness). The
+matching lower bound with the sharp constant is Zador’s theorem
+itself [Zad82, GL00]; the entropy route [KT59] gives the cruder
+ε ≥ c N −1/dps on sets of positive density. One bridge is used and
+flagged: Zador bounds the quantization error of the source measure
+µS , and the rendering instance inherits it only if the view set
+separates the source (view completeness, the single-source axiom
+(S1)
+Optimal cells become covariance-ellipsoidal with density ρA ∝
+λdsur /(dsur +2) , where dsur is the surface (content) dimension, distinct
+from the phase-space support dimension dps of the Zador law; on
+surfaces dsur =2, so ρA ∝ λ1/2 .
+Proofs and imports for the two theorems above. Descent and
+stationary balance. On the audited domain C and V are both
+L-smooth, hence so is L = C − V; the descent lemma for the
+gradient step θt+1 = θt − η∇L gives L(θt+1 ) ≤ L(θt ) − η 1 −
+2
+Lη 
+2 ∥∇L(θt )∥ , so the iterates are monotone for η < 2/L and every accumulation point satisfies ∇C = ∇V. Lloyd. For atomic families the loss identity proved
+above applies with counting measures:
+R
+the quantization error mini ∥x − yi ∥2 dµS is minimized alternately
+over the assignment (nearest neighbour) and the centres (centroids),
+each step an exact block minimization, so the iterates are monotone
+and stationary quantizers are fixed points [GL00]. Classical rates.
+The sampling rate N −2/d is Zador’s law [Zad82, GL00]; the meshing rate N −1 on C2 surfaces is the classical finite-element width
+bound [DeV98]. Consistency (structural). All views couple to the
+same source µS and read the same value field v on P; view disagreement can enter only through the direction coordinate of P (carried by v) and the angular truncation of the SH basis, which is the
+stated angular-regularity tail. The visibility-cell rate and the newview bound remain proof sketches: they need the visibility-cell formalism developed in full, which we do not attempt here. Taxonomy.
+The embeddings are explicit: point = Dirac source µθ = ∑i wi δxi ;
+wave = Gaussian packet with the footprint kernel of the transport proof; field = the density case of the same coupling. The
+ranking: value-only atoms on a surface are Zador quantization at
+the content dimension dsur = 2, giving N −1/2 (the plate logarithmic loss is the (log N)c of the adaptive-covering theorem); firstorder elements on C2 surfaces give the width bound N −1 [DeV98];
+isotropic voxels pay the misclassification band: voxels of side h cut
+Preprint.
+H. Wang / Budgeted-GS
+the h-neighbourhood of the surface in ∼h−2 cells,
+√ so a surfaceresolving voxel budget has N ≍ h−2 and error Kh ≍ N −1/4 .
+The ellipsoidal optimum follows the classical point-density law
+ρA ∝ λd/(d+2) [GL00]; the exact cell shape is Gersho-type, proved
+in dimension one and conjectural beyond, and the paper accordingly reads it as a prediction.
+Proof of the transport theorem (Theorem 3 of the main paper).
+(a) Canonical coupling. Let r : P → Pixelv be the measurable
+ray–pixel assignment and define the finite measure
+
+πv,θ A×{p} :=
+Z
+A∩r−1 (p)
+
+w(x) G p−Π(x) |det JΠ (x)| 1V (x) dx,
+with pixel masses S(p) = πv,θ (P × {p}). Both marginals hold
+by construction: the pixel marginal is νv,θ ({p}) = S(p), and the
+source marginal is the phase-space distribution that axiom 1 of
+the main paper assigns to the representation; the atomic case
+µθ = ∑i wi δxi is the same display over counting measure and gives
+the 3DGS instance πv,θ ({xi } × {p}) ∝ wi (p) of the renderingcoupling definition. Weak continuity in θ: the weights and footprints are Lipschitz in θ on the audited domain and dominated by
+the boundedR transmittance-weighted
+mass, so dominated converR
+gence gives f dπv,θ (θk ) → f dπv,θ (θ) for every bounded continuous f along θk → θ (weak convergence; atoms move continuously
+in θ by the Lipschitz regularity). (b) Conditional expectation. Disintegrating πv,θ over its pixel marginal, πv,θ ( dx, p) = S(p) κ̃v (p, dx)
+with κ̃v (p, dx) the normalized kernel displayed in the main paper; the conditional-expectation
+identity is Bayes’ rule for this
+R
+disintegration, Iv,θ (p) = ρ dκ̃v (p, ·). (c) Operator norm, sharp.
+NormalizeR νv to the probability ν̃v = νv /µv (µv = ∑ p S(p)). For
+Pv f (p) = f dκ̃v (p, ·), Jensen and Fubini give
+∥Pv f ∥2L2 (Pixelv ,νv ) = µv
+= µv
+Z
+|Pv f |2 dν̃v ≤ µv
+Z
+f 2 dµ̃θ ,
+ZZ
+f 2 dκ̃v dν̃v
+where µ̃θ := mv /µv is the normalized source marginal of the coupling (mv the source marginal of πv,θ ; in the conservative case of
+(a), mv = µθ and µ̃θ = µθ /µθ (P) with µv = µθ (P)), and the norm
+∥·∥L2 (P) of the theorem is taken with respect to this probability;
+√
+f ≡ 1 attains equality (Pv 1 = 1Pixelv ), so ∥Pv ∥ = µv is sharp. (d)
+Blending gap. On a ray through x write the saturated compositing
+weight C(x) = 1 − ∏ j (1 − α j ) and its linearization L(x) = ∑ j α j .
+Bonferroni’s inequalities give
+
+2
+|C(x) − L(x)| ≤ ∑ α j αk ≤ 12 ∑ α j ≤ 21 M(x)2 ε2 ,
+j<k
+j
+and the next
+order of the product expansion contributes
+
+O M(x)3 ε3 , which the audited domain’s cap on covering multi
+plicity absorbs into the stated O K ′ M(x)ε3 ; carrying colours multiplies by the compositing Lipschitz constant K ′ . (e) Chaining. Degt
+compose νv,θ − νv = Pv (µθ − µS ) + bv + tv , with bv the compositing deviation of (d) and tv the target-map (anti-aliasing) residual;
+the triangle inequality, the sharp bound of (c) transferred through
+the target map (Lipschitz
+constant ℓv , absorbed together with µv
+√
+into the displayed ℓv ), and the bound of (d) yield the three-term
+chain.
+Preprint.
+15 of 28
+S2. Notation and terminology
+S3. Measurement appendix
+Records behind Section 6.1 of the main paper: the preregistered
+protocol and its four checks, stated in plain narrative form below.
+The per-band floor curves, the estimate-bias study, and the downstream uses are archived with the paper’s supplementary artifacts,
+together with all JSON certificates.
+S3.1. Protocol and records
+The floor is only useful if it can be verified on real scenes. The floormeasurement study is preregistered (criteria frozen before data collection) and its verdicts were frozen before reading the data, a discipline mirrored by our other measurements (Appendix S5).
+S3.2. Protocol
+On each scene: (i) scan budgets (MCMC training at cap 2 × 106
+primitives, then opacity-prune to N and fine-tune) to get the empirical floor curve R(N) (9 budgets); (ii) floor intactness: no scan point
+crosses the fitted floor by more than log10 (0.8); (iii) published operating points are placed against the floor, re-anchored to the paper’s
+own baseline at matched capacity ratio, 5% tolerance ≈ 0.22 dB;
+(iv) duality certificates lower-bound achieved error at every (budget, view).
+S4. Background and guarantees
+We collect the formal background behind the design principles of
+Section 4.4 of the main paper: planks and weighted covering, the
+adaptive approximation rate, the optimal budget allocation, and the
+rendering-side error control. Proofs of the weighted-covering theorem, the adaptive-covering-rate theorem and its converse, and the
+derivation of the budget-allocation corollary are given here; the
+rendering-side error-control statements are summarized in the subsection below.
+S4.1. From primitives to planks
+A trained model is a set of planks (µi , Ri , hi , αi ): each primitive
+occupies a box of half-extents hi = 3σi oriented by Ri , carrying
+weight αi . Dropping primitives means replacing one covering by
+a coarser one; the two quantities that decide whether this is safe
+are local covering density (is this region over-covered, i.e. are its
+planks redundant?) and approximation error (how much mass is
+lost per removed plank?). The theorems below answer exactly these
+two questions, which is why the rendering and training sides of
+Sections 6 and 7 of the main paper both reduce to them.
+S4.2. Weighted covering
+Definition 3 (Plank). A plank V is a box in R3 carrying a weight
+wV : V → [0, 1] (effective opacity contribution); |V | is its volume.
+A 3DGS primitive is a plank: center µ, principal axes from its rotation, half-extents h = 3σ (three-sigma convention), weight = opacity.
+16 of 28
+H. Wang / Budgeted-GS
+Symbol
+Meaning
+N
+N∗
+c
+K
+θ
+T∗
+W, c∗
+N ∗j ∝ K j s j /d j
+primitive budget (number of Gaussians)
+floor-knee budget located by the scan
+budget parameter: pixel-footprint threshold t = c · d/ f
+capacity budget (per-frame working-set bound)
+local redundancy factor of a region
+opacity-weighted inertia tensor of a group
+weighted volume and centroid of a group
+per-tile budget allocation law
+plank
+primitive / splat
+anchor
+score export
+our unit of geometric bookkeeping: an oriented box of half-extents h = 3σ with opacity weight
+one Gaussian of the underlying model (used interchangeably; both are rasterized the same way)
+Scaffold-GS-style stored point that decodes to about ten neural Gaussians
+post-hoc pruning by our contribution ranking
+Table S1: Notation used throughout and the small terminology glossary (plank vs. primitive vs. anchor).
+Theorem 4 (Weighted covering). Let T be an essentially distinct family of δ × δ × 1 tubes with weights wT satisfying (i) the
+Katz–Tao density condition ∆max (T) ≲ 1 (unweighted) and (ii)
+λ(w)
+≳ 1. Then the
+|U|w :=
+ saturated weighted union volume
+R
+R
+min 1, ∑T wT (x) dx obeys |U|w ≳ λ(w)K+1 δε ∑T T wT , with
+K = K(ε) the constant of the unweighted estimate: collapsing the
+family forfeits no mass beyond the ε-loss of the unweighted theorem
+and constants depending only on ε.
+The theorem is the Wang–Zahl [WZ25] union-volume estimate
+in its weighted (continuous-opacity) form: the proof below invokes
+their Theorem 1.2, the covering estimate behind the recent resolution of the three-dimensional Kakeya set conjecture (in the current arXiv version of [WZ25] the shaded union-volume variant
+appears as Cor. 1.10). Its role here is to certify when a group of
+primitives can be collapsed into fewer representative planks without forfeiting more than an ε-fraction of volumetric mass. A oneline corollary caps regional over-packing: for every convex W ,
+∑T ⊂W |T | ≤ C∆max (T) |W | (sum the count bound of the density
+condition over tubes contained in W and multiply by |T |), and
+this is what keeps the scale-band decomposition of Section 5.2 of
+the main paper bounded. Both quantities (θ, ∆max ) are computable
+from the factoring algorithm; the θ map used by the training-side
+stop rule (Section 5.1 of the main paper) is exactly this redundancy
+signal.
+Proof (thresholding + union comparison). Step 1 (thresholding).
+Let s0 := λ(w)/2 and Y (T ) := {x ∈ T : wT (x) ≥ s0 }. By layer-cake,
+R
+R1
+λ(w)
+T wT = 0 |{wT > s}| ds, the low part is ≤ s0 |T | = 2 |T |, so the
+λ(w)
+S4.3. Adaptive covering rates
+Theorem 5 (Adaptive covering rate). For f ∈ CK (piecewise
+C2 /H 2 cartoon fields) and a multiscale dictionary of plates
+and tubes,† there is an N-atom combination with ∥ f − fN ∥L2 ≤
+CK N −1/2 (log N)c .
+The construction balances cube atoms (smooth part, error
+−2/3
+−1/2
+CKN0
+) with tangential plates (surface layer, error CKN1
+)
+at the optimal split N0 ≈ N 3/4 , N1 = N − O(N 3/4 ). The same construction with our moment-matched planks achieves the predicted
+rate on synthetic scenes: measured log–log slopes −0.90 to −1.09
+vs. the theoretical −1 (5/5 validation passes; Fig. S1).
+Figure S1: Layer error on five synthetic scenes (sphere, plane,
+multi-surface, concentrated, direction-misaligned): measured log–
+log slopes −0.90 to −1.09 vs. the theoretical −1 (err2 ∼ N −1 ), 5/5
+validation passes.
+Lemma 6 (Scale truncation). For f ∈ CK (piecewise C2 ) and target precision ε, atoms of volume v < vmin := (ε/C6 K)2 can be discarded from any ε-approximation with loss at most ε/2.
+λ(w)
+high part is ≥ 2 |T |; hence |Y (T )| ≥ 2 |T |. Step 2 (mass comR
+R
+parison).
+Pointwise wT ≤ 1Y (T ) +s0 , so T wT ≤ |Y (T )|+ 12 T wT ,
+R
+i.e. T wT ≤ 2|Y (T )|. Step 3 (union comparison). On U(Y ) =
+∪T Y (T ) we have min(1, ∑T wT ) ≥ s0 , so |U|w ≥ s0 |U(Y )|. Step
+4 (invoke the unweighted estimate [WZ25, Thm. 1.2]). (T,Y )
+satisfies the binary hypotheses with λ0 = λ(w)/2, so |U(Y )| ≥
+λ(w)
+δε λK
+0 ∑T |Y (T )|; chaining Steps 2–3 and |Y (T )| ≥ 2 |T | gives
+R
+K+1 ε
+|U|w ≳ λ(w)
+δ ∑T T wT .
+This is the precise permission our scheduler uses: atoms whose
+† Terminology: plates (thin slabs) and tubes are the dictionary atoms of
+the rate proof; the bookkeeping unit of the deployment side (Section 5.2
+of the main paper) is the plank (an oriented box of half-extents h=3σ, Appendix S4.2). The three granularities serve different roles in theory and system and are not identified.
+Preprint.
+H. Wang / Budgeted-GS
+projected footprint is below the pixel scale can be dropped or collapsed with bounded loss, the license for the pixel-footprint threshold t = c · d/ f of Section 5.3 of the main paper, and equivalently
+the license behind the rate-based stopping criterion of the training side (once pruning stops improving the rate, the budget is exhausted). Status: a standard nonlinear-width result [DeV98]; we
+claim no new proof. (The naive per-atom Poincaré oscillation argument fails under the H 1 -only class: if f itself is a fine atom, truncation is invalid; the correct route uses the piecewise-C2 structure,
+the packing-element decomposition, and essential distinctness.)
+Proof of Theorem H (upper bound). For f ∈ CK (piecewise
+C2 /H 2 ): (a) Smooth part. Tile B1 with cubes of diameter s
+(N0 = s−3 ); the second-order Poincaré inequality per cube gives
+−2/3
+error CKN0
+. (b) Surface layer. Cover the s-neighbourhood of
+the C2 surface by N1 = CK/s tangential plates; the misclassifica√
+−1/2
+tion volume gives error ≤ C Ks = CKN1
+. (c) Budget. Balance
+−2/3
+−1/2
+4/3
+N0
+with N1
+: N1 = N0 , i.e. N0 ≈ N 3/4 , N1 = N − O(N 3/4 );
+total error ≤ CKN −1/2 (log N)c . (d) Direction mismatch by β
+degrades scales s < β2 . Our tree realizes the construction with
+moment-matched planks; the (log N)c factor is absorbed by the
+banding (each band’s members have comparable scale).
+Theorem 7 (Rate lower bound). Let D be an essentially distinct
+multiscale plank dictionary in B1 . There exist absolute constants
+c0 > 0 and N0 ≥ 2 such that for every N ≥ N0 there is f ∗ ∈ CK with
+∥ f ∗ − fN ∥L2 ≥ c0 K (N log2 N)−1/2 for every N-atom combination
+fN from D.
+Proof (capacity argument). Step 1 (packing). Take a cartoon field
+whose jump set is a C2 sheet of area ∼K and fragment it into
+∼K/s2 patches of diameter s; for a sign vector σ shift patch
+Q by σQ s along its normal. Every fσ remains in CK (the fragmentation walls add area ∼K), and two configurations differing on a constant fraction of the patches have
+√ squared distance ∼(K/s2 ) s3 = Ks; choosing s ≍ ε2 /K (so Ks ≥ 2ε) gives
+log Mpack ≥ c5 K/s2 ≥ c5 (K/ε)2 . Step 2 (covering). By Lemma 6
+only atoms of volume ≥ vmin matter; essential distinctness caps
+the multiplicity at C0 per (direction cap × scale layer), so the dictionary has ≤ C8 (K/ε)2 log(1/δ) relevant atoms; quantizing the
+√
+N coefficients at step η = ε/(2B1/2 N) gives an ε-net of all
+N-term combinations with log Mcov ≤ C11 N log(NK/ε) (the truncation makes log(1/δ) absorbable). Step 3 (capacity collision).
+Covering forces Mcov ≥ Mpack , i.e. C11 N log(NK/ε) ≥ c5 (K/ε)2 ;
+p
+setting ε∗ = c12 K(N log2 N)−1/2 with c12 = c5 /2C11 contradicts this for all N ≥ N0 (absolute), so some f ∗ admits no Nterm ε∗ -approximation. Step 4 (applicability). Outside the balanced regime the claimed bound is smaller than the diameter of
+CK and the statement holds trivially; c0 is the minimum over the
+two regimes.
+The upper and lower bounds differ only in the power of log N
+(dyadic layer bookkeeping vs. coefficient quantization in the capacity collision); the exact exponent is not pinned down, and no
+functional form used in this paper depends on it.
+Preprint.
+17 of 28
+S4.4. Optimal budget allocation
+Corollary 8 (Budget allocation). Minimizing C1 KN −1/2 +
+C2 K ′ L−p (geometric + appearance error) under the parameter budget M ≍ N(L + 1)2 yields N ∗ ≍ M p/(p+1) and L∗ ≍
+M 1/(2(p+1)) .
+Specialized to a hierarchy with scale bands j = 0, . . . , J whose
+members have characteristic scale s j = 2 j s0 , the allocation assigns band budgets m j ∝ 2− jγ for a scene-dependent γ: coarser
+bands (which cover more volume per plank) receive exponentially more budget. Our scheduler instantiates this allocation per
+view through the pixel-footprint rule (Section 5.3 of the main
+paper): the budget of a band is exactly the set of its members
+whose projected scale exceeds the resolvability threshold. Minimize E(N, L) = C1 KN −1/2 + C2 K ′ L−p under NL2 ≍ M (L ≫ 1).
+Substituting N = M/L2 : E(L) = C1 KM −1/2 L +C2 K ′ L−p ; the firstorder condition gives L∗ = (pC2 K ′ /C1 K)1/(p+1) M 1/(2(p+1)) and
+N ∗ = M/(L∗ )2 , and E ′′ > 0 confirms the unique minimum.
+S4.5. Rendering-side error control
+Replacing primitives by equivalent planks changes the rendered image; the end-to-end certificate bounds this change in the audited
+domain: per-view image error is controlled by the field error transferred through the rendering operator term plus a model-operator
+gap classified by a saturation-front decomposition. In practice we
+do not rely on the (loose) worst-case constants: the tree additionally stores per-cluster residual statistics, geometric spread σgeo and
+SH-residual ratio ρsh , which act as an empirical error proxy for the
+switch decision (Section 5.3 of the main paper). We verify on real
+scenes that the certificate remains valid (never violated in measurements) but loose; this is stated as a limitation (Section 7 of the main
+paper).
+S5. Experimental protocol
+Implementation keys (main paper §5.1–5.2). The training-side
+scan and capped training live in a single script; its configuration
+keys, for reproducibility: BCT_INIT_FRAC (initial primitive count
+as a fraction of the cap N ∗ ), BCT_REFINE_STOP_FRAC (refinestop fraction, both additionally scaled by the measured redundancy
+θwaste ), prune_rate= 0.25 (per-step pruning rate inside θ-flagged
+regions), and agg_cap= 256 (maximum equivalent planks per (leaf,
+band) bucket).
+Data sources. lego/chair/ship: Blender NeRF-Synthetic; garden:
+Mip-NeRF 360 (images_4); MatrixCity Aerial: official CityGaussianV2 pretrained checkpoint (MatrixCity_Aerial.zip, 8,558,267
+Gaussian2D primitives, sh degree 2) and the block-formatted
+dataset (block_1 + block_2, 1,226 frames with images).
+Camera chain (MatrixCity). Poses follow the official pipeline:
+rot_mat in the block transforms.json is camera-to-world; apply
+the OpenGL→COLMAP axis flip (c2w[: 3, 1 : 3]× = −1), then
+w2c = inv(c2w). Resolution: 1.2× downsampling to 1600×900;
+fx = (W /2)/ tan(fov/2) with fov = 45◦ ⇒ fx ≈ 1931.37, cx =
+800, cy = 450. Test views: every 8th frame of the merged sequence
+(154 views; 24-view uniform subset for paired comparisons). GPS
+18 of 28
+H. Wang / Budgeted-GS
+rendering uses the vertical fov 2 arctan(H/2 fx ) = 26.2313◦ (its
+--fovy is vertical). The block transforms.json contains duplicate
+frame_index values (255 duplicates); all cameras are taken from the
+single export (cameras_test.json) to guarantee GT–pose pairing.
+2D→3D conversion. Gaussian2D surfels (σ ∈ R2 ) are converted
+to 3D planks with thickness h3 = 0.02 · min(h1 , h2 ); every comparison cell (full, LOD, GPS, random) uses the same conversion and
+the same renderer (gsplat 1.5.3, or GPS with SH zero-padded to
+degree 3 and scale/opacity in log/logit domain).
+Metrics and hardware. PSNR against GT photographs (LANCZOS downsampled to the protocol resolution); paired subsets report median alongside mean. All GPU work an A100 GPU-80GB
+(GPU 2), CUDA 12.6, PyTorch 2.x, gsplat 1.5.3; GPS commit
+32b1315 with headless EGL patches for server rendering. Memory: model data = fp32 bytes per primitive (152 B gsplat sh2;
+236 B GPS sh3); process peaks via nvidia-smi --query-computeapps (GPS full: 2364 MiB) and torch.cuda.max_memory_allocated
+(LOD cells).
+Random-subsampling control. Global random subset per budget (seed 0, primitive counts matched to the LOD tier averages),
+exported through the identical PLY path and rendered by GPS under the identical camera set.
+City-scale pruning and real-time protocol (Block_all /
+Block_A). Block_all is a 19,932,287-primitive model of the
+merged block_1+block_2 region; Block_A is a 7.94M-primitive
+block model. θ-pruning removes primitives by ascending opacity inside θ-flagged (over-covered) regions to a target count (offline, numpy; identical signal to the training-side pruning step).
+Self-PSNR references are rendered with the same CUDA rasterizer on the A100 (five spherical views at distances 25/12/5 around
+the scene center, fovx =40◦ , 8002 , white background, fp32 before
+RGBA quantization); the quality reference scan (opacity-ranked
+subsets vs. the full model) uses gsplat on both sides. The C++ rasterizer and gsplat disagree by a roughly constant ≈11.6 dB on identical inputs (rasterization implementation differences, independent
+of primitive count), which is why every quality comparison keeps
+the same renderer on both sides. Pruning baselines (LightGaussian,
+RAP) are applied to the same Block_A model at matched primitive counts and evaluated with gsplat (DC-only, 10002 , 5 held-out
+views) against real photographs. The contribution-scored export
+uses the same protocol: renders are produced by a verbatim port of
+the baseline rendering script (validated by reproducing the Vanilla
+anchor exactly: 13.85/0.519/0.553), with SSIM/LPIPS from the
+identical evaluation code. The scoring pass itself is training-viewonly and touches no test view.
+Realtime protocol. Two measurement setups. (a) Interactive city-scale protocol: RTX 4080 SUPER, native
+1920 × 1080, full SH, headless. The official Block_all
+test trajectory is the CityGaussianV2 evaluation split (207
+views; test.txt of block_all_colmap_eval, camera chain transform_matrix · diag(1, 1, −1)); orbit probes use a far view at
+distance 25. The v3 retrained model (6.89M primitives, 1.7 GB)
+is measured on this trajectory (quality on the reference gsplat
+path, speed on both rasterizers), while the capacity-ladder and
+8002 rows use the earlier v2 tree (7.07M) under the identical
+protocol. Timing: our CUDA rasterizer uses stage-summed CUDA
+timings (60-frame window, first 10 dropped); the gsplat reference
+uses torch-synchronized per-frame timing (first 10 dropped);
+Octree-GS is re-rendered on the same 207 views from its official
+checkpoint (its loader natively downsamples to 1600 × 900) with
+CUDA-synchronized per-view averages. (b) Commodity 8 GB
+reference: RTX 3060 Ti, 8002 , DC-only compact path, 30-frame
+headless average, on the original 19.93M Block_all model. The
+rasterizer is derived from an existing splatting-rasterizer codebase,
+while the LOD layer (.factree format, GPU tier selection, gather
+kernels) was implemented for this work.
+Code and data. The tree builder, schedulers (Python reference
+and CUDA), and evaluation scripts will be released upon publication; all theorems used in the main text are proved in Appendices S1
+and S4.
+S6. Seed robustness of Budget-Centered Training
+All Budget-Centered Training rows of Table 1 of the main paper are
+reported as mean±std over three seeds (s0/s1/s2) under a single,
+re-measured protocol (CityGaussian pipeline, MCMC cap at the
+budget, SfM init of 100k atoms, 30k iterations). Per-scene values:
+scene@budget
+s0
+s1
+s2
+mean±std
+counter@536k
+counter@560k
+garden@1650k
+garden@2209k
+kitchen@1M
+kitchen@1131k
+flowers@1330k
+flowers@1525k
+room@529k
+bonsai@601k
+bonsai@640k
+28.93
+28.96
+27.12
+27.26
+31.84
+32.28
+20.56
+20.62
+31.89
+32.13
+32.18
+28.98
+28.99
+27.12
+27.18
+31.99
+32.10
+20.61
+20.59
+32.00
+32.10
+32.11
+28.96
+29.00
+27.21
+27.32
+32.08
+32.16
+20.58
+20.60
+31.94
+32.14
+32.18
+28.95±0.02
+28.98±0.02
+27.15±0.04
+27.25±0.06
+31.97±0.10
+32.18±0.07
+20.58±0.02
+20.60±0.01
+31.94±0.04
+32.12±0.02
+32.15±0.03
+Table S2: Three-seed BCT results (test PSNR, dB, val split of the
+training pipeline). Seed spread is ±0.01–0.10 dB across all eleven
+cells.
+Two protocol notes. (i) Configuration drift. Rows measured
+under an earlier configuration of the same pipeline (published in
+the main table before this re-measurement) read 0.4–1.7 dB lower
+on kitchen and room; the current-protocol values above supersede
+them, and the main-paper table uses exactly these numbers. (ii)
+flowers data. flowers uses the COLMAP-format copy that the floor
+study used (173 images, COLMAP split); the released 360_v2.zip
+does not contain a flowers directory, so the two data sources are not
+interchangeable and we state the source explicitly.
+S7. Run-to-run stability of capped MCMC
+During the seed-completion campaign we observed occasional
+training collapses under capped MCMC (final test PSNR ≈8–
+15 dB instead of ≈30–32 dB, with the loss converged normally):
+2 of 12 runs in one batch (garden@1650k s2, kitchen@1131k s1),
+consistent with the run-to-run nondeterminism already disclosed
+for room@529k in the main table (three-run median ±0.2 dB).
+Same-seed retries recover the expected quality (kitchen@1131k s1:
+Preprint.
+H. Wang / Budgeted-GS
+14.67 on retry). Under the formal pipeline, 0 of 24 runs collapsed.
+Policy: any cell whose three seeds disagree by more than 1 dB is
+re-run once and the median is reported; both policies mirror the
+main-paper footnote for room@529k.
+S8. Tree hyper-parameter sensitivity
+The factoring tree’s two defaults (aggregate cap 256, leaf capacity 4096) were validated by a 3 × 3 sweep on garden (agg_cap ∈
+{128, 256, 512} × leaf ∈ {2048, 4096, 8192}): the full-model sanity PSNR across all nine combinations stays within 20.43–20.66 dB
+(spread 0.23 dB), with the best thickness fraction identical (0.02)
+in every cell. The scheduler defaults are therefore insensitive at the
+model level.
+S9. Timing of BCT vs. the traditional route
+Measured on room@529k (one A100, neighbor jobs present on
+the same device; ratios are same-card): BCT is a single run of
+78 ± 7 min over three seeds. The traditional route for the same budget – train at 1M (125 min, measured), prune to 529k, fine-tune –
+totals ≈175 min, i.e. 2.2× BCT’s wall-clock, while reaching lower
+quality (≈30.5 vs. 31.9 dB under the re-measured protocol). The
+main-paper phrase “one 78-minute run instead of a 175-minute
+train–prune–fine-tune pipeline” refers to this same-card measurement.
+S10. Scheduler enhancements and export
+This section collects the deployment-side enhancements of the
+pixel-footprint scheduler (Section 5.3 of the main paper): adaptive
+selection, the renderer-agnostic export path, and render-aware scoring.
+Engineering notes (moved from the main text). Construction
+of the tree on 8.56M primitives takes 1.5 s with a 19.4 GiB peak on
+an A100 GPU. The compact binary stores raw primitives in Morton order, per-band equivalent planks, and SH first moments of all
+degrees; per frame, the coverage-preserving prefix cut is traversed
+on GPU and the selected prefix is gathered by a per-primitive kernel directly into the rasterizer buffers (fused with SH evaluation
+and opacity compensation), with no CPU-side collection or hostto-device upload: 0.8 ms preprocess including selection+gather on
+the 7.07M tree at 1920 × 1080. The GPU selection reproduces the
+offline Python reference exactly (identical per-view tier counts on
+5/5 views at c=1 and 10/10 at c=8). The DC-only compact path
+stores 3 floats per primitive and selects 13.1M primitives at 3.9 GB
+on 8 GB GPUs. On the official 207-view trajectory at capacity
+K=2M the per-frame selected count changes by a median of 1.1%
+between consecutive views; the large-count outliers coincide with
+view-direction reversals, where the leaves entering or leaving the
+selection are back-facing for the new view and are never rasterized.
+The serial experiment of Section 6.2 of the main paper (room, 34
+held-out views, LOD render protocol) is summarized below; perview data and the script are archived with the paper artifacts.
+For adaptive (scene-content-aware) selection we additionally
+store per cluster two residuals: the geometric spread σgeo =
+Preprint.
+19 of 28
+p
+tr(T ∗ )/W (world units, projected to pixels by σ · f /d) and the
+SH residual ratio ρsh (cluster-internal SH variance vs. global RMS).
+These proxy the switch error analyzed in the error-control section above; on garden they improve the fixed-threshold LOD by
++0.49 dB at a comparable primitive count (1.05×; Table 2 of the
+main paper).
+The scheduler emits a standard primitive stream (means, quaternions, scales, opacities, SH), consumable by any splatting rasterizer (gsplat, CityGaussian, etc.). For cross-renderer evaluation we
+export each tier selection to standard 3DGS PLY files (SH zeropadded to degree 3, scale/opacity in log/logit domain) and render
+them with the GPS renderer [RPWM26] (Section 5.3 of the main
+paper).
+A purely geometric redundancy signal has a blind spot: a primitive can be geometrically redundant yet visually load-bearing (it
+occludes its neighbors, or carries a colour no neighbor reproduces), or geometrically isolated yet invisible (fully occluded in
+every training view). Aggressive pruning exposes exactly this gap:
+a geometry-only score removes primitives that a contribution-aware
+score would keep (Table S7); the underlying occlusion term is an
+open item in the error control of the supplementary material.
+For pure primitive-count budgets, the same export path supports a render-aware ranking. We score every primitive with the
+LightGaussian significance [FWW∗ 24] (the accumulated per-pixel
+T α over all training views, where T is the front-to-back transmittance) via a one-pass forward scan over the training cameras
+(234 s for 4565 views at 7.94M primitives on an RTX 4080 SUPER). Our CUDA accumulation replicates the reference rasterizer’s
+per-pixel semantics exactly (validated by the telescoping identity
+∑i si = ∑ p (1 − Tfinal ), matched to 10−5 relative on random scenes).
+Any budget point is then a top-N re-export of the same trained
+model. On Block_A, 24.3% of the trained primitives score exactly
+zero, never visible from any training view, and the resulting budget
+axis stays at Vanilla quality down to 25% of the primitives (Section 6.5 of the main paper).
+S11. Extended experimental results
+The tables and figures in this section extend the experimental report of Section 6 of the main paper: outdoor BCT runs,
+the lego ceiling study, multi-scene generalization, the trainingcoupled-LOD comparison, Block_A matched-budget pruning, the
+published-frontier and universal-floor figures, and the remaining
+perception/orbit/visual comparisons.
+S11.1. Memory–quality Pareto vs. GPS on MatrixCity
+Fig. S15, Fig. S13, and Table 3 of the main paper establish the
+central claim. (a) A continuous budget–quality curve exists:
+1240 MB → 34 MB at 28.4 → 17.5 dB, near-lossless at c ≤ 4
+(−0.05 dB). (b) Renderer-agnostic: exporting each LOD tier
+to the GPS renderer reproduces the same curve within 0.5 dB,
+and c=4 is lossless under both renderers; the LOD layer carries
+the quality, not the rasterizer. (c) Same-budget dominance over
+random subsampling: at 44.6%/23.2%/8.9% primitive budgets
+the LOD selection beats random subsampling by +5.5/ + 7.5/ +
+20 of 28
+H. Wang / Budgeted-GS
+root model
+tier
+gt-PSNR (dB)
+rendered primitives
+full model
+(1.66M primitives)
+full render
+LOD c=1
+LOD c=2
+LOD c=4
+LOD c=8
+LOD c=16
+34.94
+34.89
+33.29
+30.93
+26.92
+22.83
+1,657,466
+1,654,484
+1,542,467
+1,354,716
+1,003,828
+524,330
+full render
+LOD c=1
+LOD c=2
+LOD c=4
+LOD c=8
+34.35
+34.19
+33.11
+30.04
+25.67
+529,000
+517,599
+455,635
+350,328
+209,254
+budget-centered model
+(529k primitives)
+Table S3: Serial composition on room: both roots deployed through the same tree and scheduler at matched rendered budgets. The budgetcentered root passes through the tree essentially unchanged (−0.16 dB at its own budget), while the full root collapses by 12.1 dB at the
+same count.
+scene
+budget
+schedule
+PSNR dB
+ours-prune
+published
+bicycle
+bicycle
+2222k
+2260k
+orig
+orig
+23.78
+23.72
+23.76
+23.71
+24.77 (C3DGS)
+25.04 (EAGLES)
+stump
+stump
+1732k
+2220k
+orig
+orig
+23.75
+23.86
+23.81
+23.86
+26.46 (C3DGS)
+26.78 (EAGLES)
+treehill
+treehill
+2006k
+1600k
+orig
+orig
+21.85
+21.80
+21.99
+21.90
+22.65 (C3DGS)
+22.69 (EAGLES)
+Table S4: Outdoor extension of Table 1 of the main paper. BCT tracks the same-ruler prune scan within ±0.15 dB on every point (training
+at the budget reproduces the floor family), while the published points sit above it by 0.8–2.9 dB (stump: 2.7–2.9 dB). The offset is not better
+use of the budget: it is the redundancy quantified in Section 6.1 of the main paper (frontier slope ≈ −0.04).
+fers only the full model (visual comparison in Fig. S8). Model data
+is the fp32 splat bytes of the exported per-budget PLY (152 B/prim
+3DGS, 236 B/prim GPS sh3; GPS full process peak 2364 MiB;
+byte layout verified against an exported c=8 PLY).
+Figure S2: lego primitive-budget Pareto: the BCT stop rule dominates the MCMC budget curve; Vanilla is a single point at 339k
+(the W0 baseline of our training-dynamics study).
+8.0 dB (median); at 8.9% random sampling is unusable (12.9 dB)
+while LOD keeps 20.9 dB. (d) Memory: matching the ∼20.8 dB
+operating point needs 110.6 MB (ours) vs. 1926 MB (GPS full),
+17× savings. This comparison holds everything constant except
+the budget mechanism: same trained model, same renderer (GPS),
+same cameras, same GT, and the LOD tier is re-rendered through
+GPS itself (Section 5 of the main paper); the only difference is
+that our axis lets the deployment pick 110.6 MB where GPS ofPreprint.
+21 of 28
+H. Wang / Budgeted-GS
+PSNR drop vs own full model (dB)
+(a) re-anchored trajectories, room
+(b) the field's slopes vs the floor law
+0 0.22 dB tolerance
+1
+2
+3
+4
+5
+our floor estimator (room)
+local tangent @250k (7.14 dB/dec; RMSE slope 0.36)
+6
+Compact3DGS (own-paper baseline pair)
+EAGLES (own-paper baseline pair)
+7
+104
+105
+106
+primitive budget N (log scale)
+theory 1/2 ± 0.07
+Compact3DGS
+EAGLES
+our floor chords
+our steepest windows
+our steepest
+EAGLES
+C3DGS
+our chords
+positive slopes = operating points that beat their
+own baseline (drjohnson/playroom/treehill/stump)
+0.6
+0.5
+0.4
+0.3
+0.2
+0.1 0.0
+0.1
+RMSE-vs-N log-log slope of the two-point trajectory
+Figure S3: The published frontier vs. the floor: (a) room, re-anchored to each paper’s own full model, against the published same-paper
+pairs; (b) the RMSE-vs-N slope of every surveyed two-point trajectory: the surveyed compressors’ slopes cluster near zero (mean −0.04),
+an order of magnitude away from the floor law.
+Figure S4: The universal (model-free) floor: image-only colour quantization vs. every surveyed operating point; all lie above the band.
+Method
+Vanilla 3DGS
+MCMC@171k [KRS∗ 24]
+Taming@94k [MGK∗ 24]
+EDC [DDL∗ 24]
+H3DGS [KMK∗ 24]
+BCT stop-rule (ours)
+#primitives
+PSNR↑
+SSIM
+LPIPS
+vs. Vanilla
+∼339k
+171k
+∼92k
+∼334k
+∼436k
+∼151k
+37.19±0.02
+36.62±0.03
+36.11
+37.18±0.01
+37.39±0.01
+36.85±0.01
+0.9860
+0.9853
+—
+—
+—
+0.9845
+0.0090
+0.0117
+—
+—
+—
+0.0107
+—
+−0.57
+−1.08
+−0.01
++0.20
+−0.34
+Table S5: lego, 3 seeds for PSNR; SSIM/LPIPS at matched near-N runs (per-report protocol). The BCT stop rule (Section 5.1 of the main
+paper) reaches within 0.34 dB of Vanilla quality at 44% of the primitives and beats MCMC at 12% fewer primitives; Taming needs 39%
+fewer primitives but loses 0.74 dB. Density-controller baselines (EDC, H3DGS, our re-runs under the identical protocol) do not expose a
+primitive budget: EDC converges to Vanilla-like counts, H3DGS trades more primitives (+29%) for +0.2 dB; our rule is the only method on
+the budget axis.
+Preprint.
+22 of 28
+H. Wang / Budgeted-GS
+Figure S5: lego perception check: reference, Vanilla, stop-rule 151k, and |diff| × 10 between the two renders. At this single held-out view the
+151k model is +3.4 dB over Vanilla (the full test-set average is −0.34 dB, Table S5); residuals concentrate on structure edges.
+Figure S6: Mip-NeRF 360 indoor scenes, held-out view, 70% budget (gsplat re-render of the same checkpoints; per-view PSNR beneath
+each tile). Top: bonsai; bottom: room. Reference photo; the stop-rule model in full, pruned to 70% by θ guidance vs. random; and the Vanilla
+model pruned the same two ways. The visible gap (foliage on bonsai, sofa on room) is consistent with the test-set margins over random at
+matched budget (+3.0 dB on bonsai, +6.1 dB on room; the per-view margins on this view are larger).
+Figure S7: garden zoom-out orbit (12 radii × 6 azimuths, look-at-center; self-PSNR vs. the full render at the same camera). Adaptive
+selection stays 41–53 dB while its compression saturates at ∼1.4×; the fixed c=2 schedule compresses more (up to 4.7×) but loses fidelity.
+Indoor scenes are near-field: sub-pixel redundancy exhausts quickly, matching the theory and the table above; the right panel shows the
+resulting frame rate.
+Preprint.
+23 of 28
+H. Wang / Budgeted-GS
+Figure S8: MatrixCity Aerial, two held-out views (top/bottom rows), left to right: reference photo, full render, LOD c=16 (23% of primitives,
+−4.7 dB), and LOD c=32 (8.9%, −7.6 dB); the budget parameter removes detail gradually instead of dropping primitives blindly.
+Scene
+Method
+#primitives
+PSNR
+chair
+Vanilla
+stop-rule
+Vanilla
+stop-rule
+Vanilla
+stop-rule
+Vanilla
+stop-rule
+491k
+177k
+259k
+124k
+1258k
+825k
+1108k
+600k
+36.39
+36.06
+32.05
+31.83
+32.64
+32.46±0.09
+32.66
+32.61±0.04
+ship
+bonsai
+room
+% of vanilla budget
+—
+36%
+—
+48%
+—
+66%
+—
+54%
+Table S6: Multi-scene generalization: −0.06 to −0.33 dB at 36–66% of the vanilla budget (34–64% saved). Synthetic scenes (chair, ship)
+and Mip-NeRF 360 indoor scenes (bonsai, room; held-out protocol; 3 seeds for the stop rule on bonsai/room, mean±std, primitive counts
+are seed means).
+Scene
+original
+50% score / opacity
+25% score / opacity
+lego
+bonsai
+room
+36.85
+32.37
+32.56
+29.68 / 25.87
+31.82 / 26.48
+32.42 / 29.71
+22.96 / 20.26
+26.35 / 21.20
+29.48 / 21.62
+Table S7: Contribution-scored vs. opacity-ordered post-hoc pruning (PSNR, dB, matched primitive counts at 50%/25% of the model; CityGaussian test protocol, held-out views). The score export is +2.7 to +7.9 dB better at every scene and budget.
+system
+coupling
+model
+budget axis
+quality @ budget
+fps @ 1080p
+VRAM peak
+Octree-GS
+CG V2 LOD
+Factoring LOD
+training
+training
+post-hoc
+own (8.01M anchors)
+Aerial (8.56M)
+Aerial (8.56M)
+level (5)
+block level
+c (continuous)
+27.23@145k vis. / 19.47@29k vis.
+n/a post-hoc†
+28.4 → 17.5 dB
+22.9 → 5.5
+n/a
+49.5–76.8 (ladder)
+30.4 GiB
+n/a
+4.4 GiB
+Table S8: Training-coupled LOD vs. our post-hoc layer on MatrixCity. Octree-GS: our re-render of the official Block_all checkpoint under
+a 136-view held-out split (levels 0–4; full model = 27.23 dB at 145k visible primitives; authors report 26.99 dB under their own split); perlevel CUDA-synchronized averages 22.95/11.19/6.37/5.50/5.47 fps at levels 0–4, same machine (RTX 4080 SUPER), native 1920 × 1080. Its
+“visible primitives” are anchors: the checkpoint stores 8.01M of them, each decoding to 10 neural Gaussians (∼80M decodable, 2.5 GB),
+while per-view LOD activates only ∼94k anchors (∼0.9M Gaussians); the quality column spans the ends of its level curve (27.23 dB at level
+4). Our row: the official-protocol 207-view trajectory at the full 6.89M set, 71.0 fps mean (p5 55.2) on our CUDA rasterizer (54.3 fps on the
+reference gsplat path), full SH; the capacity ladder spans 49.5–76.8 fps at 1080p (Table 4 of the main paper). † CityGaussianV2’s runtime
+LOD requires partitioned training artifacts (partitions.pt plus one trained checkpoint per partition block) that the officially released single
+Aerial checkpoint does not include (Section 6.4 of the main paper); our layer consumes that same checkpoint directly and spans the measured
+c curve of Table 3 of the main paper. VRAM peak (nvidia-smi sampled at 1600×900, same Block_all views, each side’s official path, RTX
+4080 SUPER 32 GB): Octree-GS transient peak 30.4 GiB (steady-state ≈15.9 GiB) vs. ours 4.4 GiB, 6.9× lower at peak. Ours is the gsplat
+reference path with full SH.
+Preprint.
+24 of 28
+H. Wang / Budgeted-GS
+Figure S9: Block_A at matched budgets (official held-out view, PSNR and primitives below each title): the GT reference and the Vanilla
+anchor on top; below, the three budget rows of Table S9: our score export (highlighted) against LightGaussian, RAP, and the PUP score
+export (our faithful diagonal-Fisher reimplementation) at 50%/25%/10% of the primitives. Note the score export’s flat curve: no visible
+difference from Vanilla down to 25%, and at 10% it keeps street markings legible where LightGaussian blurs and RAP collapses.
+Preprint.
+H. Wang / Budgeted-GS
+25 of 28
+Figure S10: The same factoring-tree LOD on an indoor scene (room, Mip-NeRF 360): one held-out view at c ∈ {1, 4, 8, 16} plus the
+reference (numbers beneath the tiles: PSNR against the full render on this crop). Indoor sub-pixel redundancy saturates quickly, so the
+ladder compresses less than the city-scale case and visible degradation sets in earlier (at c=8 here), consistent with the near-field saturation
+of Fig. S7.
+Figure S11: Where the cross-renderer gap lives (official 207-view protocol, v3 model, native 1920 × 1080, full SH). Three views—a clean
+aerial view (top), a typical street view (middle), and the worst-case haze view (bottom): GT photo, the gsplat reference, our CUDA rasterizer,
+and absolute-difference maps (×10). The ours-vs-gsplat difference concentrates in the low-altitude haze band (giant low-opacity splats),
+while building geometry and upper regions agree; the same concentration appears in both renderers’ GT residuals. This is why every modellevel number in this paper is measured with each side’s reference rasterizer, and our rasterizer is reported on the speed axis (Table 4 of the
+main paper).
+Figure S12: garden, held-out trajectory view: reference photo, full render, full render with DC-only color, and the LOD tiers of Table 2 of the
+main paper. DC-only aggregation costs ∼5 dB (Section 6.7 of the main paper) while the first-moment SH tiers stay close to the full render.
+Preprint.
+26 of 28
+H. Wang / Budgeted-GS
+budget
+method
+#primitives
+PSNR
+SSIM
+LPIPS↓
+100%
+Vanilla
+7.94M
+13.85
+0.519
+0.553
+50%
+50%
+50%
+50%
+50%
+LightGaussian
+RAP
+PUP score export
+score export (ours)
+θ+opacity (ours)
+3.97M
+3.97M
+3.97M
+4.00M
+4.00M
+13.85
+13.80
+13.85
+13.85
+13.44
+0.520
+0.519
+0.519
+0.519
+0.513
+0.552
+0.558
+0.553
+0.553
+0.530
+25%
+25%
+25%
+25%
+25%
+LightGaussian
+RAP
+PUP score export
+score export (ours)
+θ+opacity (ours)
+1.99M
+1.99M
+1.99M
+2.00M
+2.00M
+13.77
+13.58
+13.84
+13.85
+11.14
+0.518
+0.514
+0.519
+0.519
+0.470
+0.550
+0.573
+0.553
+0.553
+0.518
+10%
+10%
+10%
+10%
+10%
+RAP
+PUP score export
+LightGaussian
+score export (ours)
+θ+opacity (ours)
+0.79M
+0.79M
+0.79M
+0.80M
+0.80M
+12.97
+13.40
+13.32
+13.77
+8.63
+0.503
+0.509
+0.511
+0.515
+0.405
+0.601
+0.557
+0.563
+0.557
+0.547
+Table S9: Block_A pruning at matched budgets (gsplat, DC-only, 10002 , 5 held-out views vs. real photos). Absolute values are low because
+evaluation is DC-only against photographs; only relative comparisons are meaningful. The score export (Section 5.3 of the main paper) is
+Vanilla-identical at 50%/25% and dominates PSNR/SSIM at 10%; deeper tiers: 13.49 (5%), 12.97 (2.5%), 12.53 (1.3%). θ+opacity leads
+LPIPS at extreme budgets. PUP row: our single-pass diagonal-Fisher reimplementation of the PUP 3D-GS score (their full pipeline adds
+multi-round finetuning).
+Figure S13: The deploy-time budget axis: continuous (ours) vs. one-model-per-budget (prior work). (a) MatrixCity Aerial: our single model
+sweeps a continuous memory–quality curve; GPS renders the full model only, and Octree-GS’s LOD is baked at training time. (b) Trainingtime budgets (lego): MCMC and Taming produce one fixed-budget model per retrain; the BCT stop rule reaches MCMC-level quality with
+one training run at a smaller budget.
+Preprint.
+27 of 28
+H. Wang / Budgeted-GS
+Figure S14: Quality–budget behaviour across three axes. (a) training-time primitive budgets on lego (measured points, Table S5): at 151k the
+BCT stop rule beats MCMC’s own budget point (171k) with 12% fewer primitives; Vanilla is a single point at 339k. (b) deploy-time capacity
+ladder on MatrixCity Aerial (1080p): self-PSNR rises smoothly with the selected set toward the full-model reference (dashed, vs. GT on this
+view). (c) the deploy-time budget parameter (city scale, gsplat model sizes): one trained model traces a continuous quality–memory curve;
+GPS offers only its full model and Octree-GS is baked at training time.
+Table S10: Floor curves across the 13 public scenes: full-model PSNR, full-range chord slope (registered negative), steepest three-band
+window slope (brackets −1/2), floor intactness (all pass).
+scene
+garden
+room
+bonsai
+bicycle
+counter
+flowers
+kitchen
+stump
+treehill
+train
+truck
+drjohnson
+playroom
+Rfull (dB)
+chord
+steepest
+26.54
+31.59
+32.37
+23.75
+29.27
+20.13
+31.02
+23.85
+21.87
+22.27
+25.22
+28.50
+29.19
+−0.155
+−0.258
+−0.275
+−0.124
+−0.231
+−0.101
+−0.235
+−0.088
+−0.073
+−0.141
+−0.190
+−0.203
+−0.229
+−0.26 ✓
+−0.47 ✓
+−0.49 ✓
+−0.20 ✓
+−0.37 ✓
+−0.15 ✓
+−0.41 ✓
+−0.17 ✓
+−0.12 ✓
+−0.18 ✓
+−0.29 ✓
+−0.31 ✓
+−0.46 ✓
+step
+primitives
+time
+peak GPU
+tree construction
+LOD select + render (per view)
+full render (gsplat, per view)
+8.56M
+0.1–8.6M
+8.56M
+1.5 s
+6–172 ms
+3–13 ms
+19.4 GiB
+3.3–4.5 GiB
+—
+Table S11: Offline evaluation protocol: MatrixCity on an A100 GPU (GPU 2, 80 GB), Python scheduler + gsplat. Tree construction is once
+per model; per-view selection in Python dominates offline LOD latency. The real-time CUDA path removes exactly this cost: 0.8 ms per-frame
+preprocess (selection+gather) included in the 71.0 fps full-set 1080p official trajectory of our CUDA rasterizer (Table 4 of the main paper,
+Section 6.6 of the main paper).
+Preprint.
+28 of 28
+H. Wang / Budgeted-GS
+Figure S15: Memory–quality Pareto on MatrixCity Aerial: our
+LOD curve, the same LOD exports through the GPS renderer, and
+GPS random subsampling.
+Preprint.

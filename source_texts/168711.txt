@@ -1,0 +1,202 @@
+体渲染（Volume Rendering）是NeRF神经场辐射AI模型的基础，与传统渲染使用三角形来显示 3D 图形不同，体渲染使用其他方法，例如体积光线投射 (Volume Ray Casting)。本文介绍体渲染的原理并提供Three.js实现代码，源代码可以从Github下载。
+
+体渲染原理及WebGL实现【Volume Rendering】 - 技术栈
+技术栈
+体渲染原理及WebGL实现【Volume Rendering】
+新缸中之脑2023-08-14 9:25
+体渲染（Volume Rendering）是NeRF神经场辐射AI模型的基础，与传统渲染使用三角形来显示 3D 图形不同，体渲染使用其他方法，例如体积光线投射 (Volume Ray Casting)。本文介绍体渲染的原理并提供Three.js实现代码，源代码可以从Github下载。
+推荐：用 NSDT编辑器 快速搭建可编程3D场景。
+1、体渲染基础
+体渲染是基于图像的方法，通过沿 3D 体积投射光线，将 3D 标量场渲染为 2D 图像。 我们在屏幕上看到的每个像素都是光线穿过立方体并按一定间隔从体素获取强度样本的结果。
+但是我们如何投射光线呢？
+一个简单的选择是使用大小为 (1,1,1) 的 3D 网格立方体，并在两个不同的渲染通道中渲染正面和背面（启用和禁用背面剔除）。
+对于屏幕中生成的每个立方体片段，我们可以创建一条从立方体正面开始并在背面结束的射线。 有了光线的起点和终点，我们就可以开始对体素进行采样，以生成最终的片段颜色。
+标量场表示为包含每个 (x,y,z) 位置处的强度值的体素
+面我们将解释使用 WebGL 和 ThreeJS 实现体渲染的实现步骤。
+2、准备原始文件
+原始文件是非常简单的文件，仅包含体素强度，它们没有标头或元数据，并且通常每个体素具有按 X、Y 和 Z 顺序排列的 8 位（或 16 位）强度值。
+在 OpenGL 或 DirectX 中，我们可以将所有这些数据加载到专门设计的 3D 纹理中，但由于 WebGL 目前不支持存储或采样 3D 纹理，因此我们必须以 2D 纹理可以使用的方式存储它 。 因此，我们可以存储一个 png 图像文件，其中所有 Z 切片一个挨着一个，形成 2D 切片的马赛克。 我开发了一个非常简单的转换器工具，其中包含源代码。 该工具获取原始文件并生成一个 png 图像马赛克，对 alpha 通道中每个体素的强度进行编码（尽管理想的是将 png 存储为 A8 格式只是为了节省一些空间）。
+一旦 png 文件作为 2D 纹理加载到内存中，我们就可以使用我们自己的自定义 SampleAs3DTexture 函数对其进行采样，就好像它是 3D 纹理一样。
+在本文末尾的参考资料部分中查找更多要测试的原始文件。
+3、第一个渲染通道
+在第二步中，我们打算生成用作光线终点的片段。 因此，对于第一个渲染通道，我们不是绘制背面颜色，而是将片段的世界空间位置存储在渲染纹理中，作为 RGB 片段颜色内的 x、y、z 坐标值（此处 RGB 被编码为浮点值）。
+请注意 worldSpaceCoords 如何用于存储立方体背面位置的世界空间位置。
+顶点着色器第一遍：
+复制代码
+```
+varying vec3 worldSpaceCoords;
+ 
+void main()
+{
+//Set the world space coordinates of the back faces vertices as output.
+worldSpaceCoords = position + vec3(0.5, 0.5, 0.5); //move it from [-0.5;0.5] to [0,1]
+gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+}
+```
+片段着色器第一遍：
+复制代码
+```
+varying vec3 worldSpaceCoords;
+ 
+void main()
+{
+//The fragment's world space coordinates as fragment output.
+gl_FragColor = vec4( worldSpaceCoords.x , worldSpaceCoords.y, worldSpaceCoords.z, 1 );
+}
+```
+左：正面颜色坐标 右：背面颜色坐标
+4、第2个渲染通道
+该渲染通道是实际执行体积光线投射的通道，它首先绘制立方体的正面，其中正面的每个点都将是光线起点。
+顶点着色器创建两个输出：投影坐标（片段的 2D 屏幕坐标）和世界空间坐标。
+世界空间坐标将用作光线起点，而投影坐标将用于对存储立方体背面位置的纹理进行采样。
+顶点着色器第二遍：
+复制代码
+```
+varying vec3 worldSpaceCoords;
+varying vec4 projectedCoords;
+ 
+void main()
+{
+worldSpaceCoords = (modelMatrix * vec4(position + vec3(0.5, 0.5,0.5), 1.0 )).xyz;
+gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+projectedCoords = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+}
+```
+第二个渲染通道的片段着色器有点复杂，因此我们将分部分进行介绍。
+在此示例中，光线 R0 到 R4 从立方体的正面片段位置（f0 到 f4）投射，并在背面位置（I0 到 I4）结束
+4.1 获取光线结束位置
+基于上一步的位置，我们对纹理进行采样，得到背面片段的世界空间位置。
+请注意我们如何通过除以 W 将投影坐标转换为 NDC（标准化设备坐标），然后如何将其转换为 0;1 范围，以便将其用作 UV 坐标。 当我们对先前渲染通道中生成的 2D 纹理进行采样时，可以获得光线的结束位置。
+片段着色器第二遍第 1 部分：
+复制代码
+```
+//Transform the coordinates it from [-1;1] to [0;1]
+vec2 texc = vec2(((projectedCoords.x / projectedCoords.w) + 1.0 ) / 2.0,
+((projectedCoords.y / projectedCoords.w) + 1.0 ) / 2.0 );
+ 
+//The back position is the world space position stored in the texture.
+vec3 backPos = texture2D(tex, texc).xyz;
+ 
+//The front position is the world space position of the second render pass.
+vec3 frontPos = worldSpaceCoords;
+ 
+//The direction from the front position to back position.
+vec3 dir = backPos - frontPos;
+ 
+float rayLength = length(dir);
+```
+4.2 设置射线
+有了前面和后面的位置，我们现在可以创建一条从 frontPos 开始并在 backPos 结束的射线。
+片段着色器第二遍第 2 部分
+复制代码
+```
+//Calculate how long to increment in each step.
+float delta = 1.0 / steps;
+ 
+//The increment in each direction for each step.
+vec3 deltaDirection = normalize(dir) * delta;
+float deltaDirectionLength = length(deltaDirection);
+ 
+//Start the ray casting from the front position.
+vec3 currentPosition = frontPos;
+ 
+//The color accumulator.
+vec4 accumulatedColor = vec4(0.0);
+ 
+//The alpha value accumulated so far.
+float accumulatedAlpha = 0.0;
+ 
+//How long has the ray travelled so far.
+float accumulatedLength = 0.0;
+ 
+vec4 colorSample;
+float alphaSample;
+```
+4.3 光线行进
+一旦设置了射线，我们就开始从起始位置行进射线并将射线当前位置向方向推进。
+在每个步骤中，我们都会对纹理进行采样以搜索体素强度。 值得注意的是，体素仅包含强度值，因此到目前为止它们没有任何有关颜色的信息。 每个体素的颜色由变换函数给出。 可以查看 sampleAs3DTexture函数代码来了解变换函数是如何工作的。
+在获得由 sampleAs3DTexture 给出的体素颜色后，将通过 alphaCorrection 参数对其进行校正。 可以在线调整该值并查看不同的结果。
+每次迭代的重要部分是实际的颜色组合，其中根据 alpha 值将累积颜色值添加到先前存储的值之上。 我们还保留了一个 alphaAccumulator，它可以让我们知道何时停止光线行进。
+迭代不断进行，直到满足以下三个条件之一：
+光线传播的距离达到了假定的光线长度。 请记住，射线从 startPos 到 endPos。
+累计alpha值达到100%
+迭代达到最大常数 MAX_STEPS
+最后，片段着色器返回所遍历的体素值的合成结果。
+片段着色器第二遍第 3 部分
+复制代码
+```
+//Perform the ray marching iterations
+for(int i = 0 ; i < MAX_STEPS ; i++)
+{
+//Get the voxel intensity value from the 3D texture.
+colorSample = sampleAs3DTexture( currentPosition );
+ 
+//Allow the alpha correction customization
+alphaSample = colorSample.a * alphaCorrection;
+ 
+//Perform the composition.
+accumulatedColor += (1.0 - accumulatedAlpha) * colorSample * alphaSample;
+ 
+//Store the alpha accumulated so far.
+accumulatedAlpha += alphaSample;
+ 
+//Advance the ray.
+currentPosition += deltaDirection;
+accumulatedLength += deltaDirectionLength;
+ 
+//If the length traversed is more than the ray length, or if the alpha accumulated reaches 1.0 then exit.
+if(accumulatedLength >= rayLength || accumulatedAlpha >= 1.0 )
+break;
+ 
+}
+ 
+gl_FragColor = accumulatedColor;
+```
+如果你可以更改每条射线完成的最大迭代次数，则更改控件中的步骤，并且你可能必须相应地调整 alphaCorrection 值。
+原文链接：体渲染Three.js实现 --- BimAnt
+webgl
+上一篇：Unity-Linux部署WebGL项目MIME类型添加
+下一篇：百度屏蔽词有哪些？其中就有移民关键词指数被屏蔽？
+相关推荐
+Jmyd0123
+1 天前
+WebGL 三维党史馆怎么扛住 720 度全景与移动端弱网？
+webgl·三维数字化
+limit0075
+4 天前
+三维 WebGIS 工具选型：加载、样式、分析、交付，一套界面能做完什么
+android·前端·web3·安卓·webgl
+总要学点什么
+5 天前
+第79篇：数据可视化-模拟迁徙效果——把三十条航线画成会飞的弧
+3d·信息可视化·数据挖掘·数据分析·gis·webgl·cesium
+limit0075
+5 天前
+三维模型悬空与切片偏移的排查顺序
+低代码·3d·arcgis·web3·安卓·webgl
+Sakura_j_h_
+6 天前
+Three.js 单文件离线机械臂工作台：爆炸图、透明外壳与剖面
+前端·机械臂·webgl·three.js·1024程序员节·esbuild
+总要学点什么
+12 天前
+第65篇：地图卷帘控件——点「关闭卷帘」，消失的却是右边那半张地图
+信息可视化·gis·webgl·cesium·空间分析
+总要学点什么
+13 天前
+第63篇：3DTiles-大雁塔模型——190 块瓦片不是八叉树，抬高的却是球心那条法线
+3d·数据挖掘·数据分析·gis·webgl
+Jmyd0123
+17 天前
+3D数字协同设计实训空间技术架构解析：从三维采集到WebGL虚拟展示的全链路实现
+3d·架构·webgl·虚拟实训
+总要学点什么
+17 天前
+第57篇：三维场景演示_基础版——同一秒，播过去和拖过去差出一千多米
+3d·数据挖掘·数据分析·gis·webgl
+总要学点什么
+18 天前
+第55篇：空间分析-剖面分析——红线走大圆，剖面却按经纬直线采样
+前端框架·gis·webgl·cesium·空间分析
+热门推荐
+01如何新建文件夹？ 电脑新建文件夹的4种方法02国内可直接用、免费额度/永久免费的大模型API清单（含 SiliconFlow、火山、阿里、智谱、百度、Kimi、DeepSeek、DMXAPI 等）03GitHub 镜像站点04历年考研数学一、数学二、数学三真题试卷及答案PDF05几个好用的ip纯净度检测网站06昇腾910B系列芯片完全指南：四款型号对比、服务器选型与大模型部署实战07苹果iPA游戏软件资源下载网站08蜘蛛磁力 搜索引擎大全，如何使用蜘蛛磁力查找磁力链接09CVE-2026-91403 高危漏洞预警：Java JSSE 信任链被攻破 全场景修复方案与Linux系统级彻底清理实操10Windows 10/11 如何退出微软账户并改用本地账户登录（含找不到选项的解决方法）

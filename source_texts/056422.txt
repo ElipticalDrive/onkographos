@@ -1,0 +1,2669 @@
+Neural Harmonic Textures for High-Quality
+Primitive Based Neural Reconstruction
+Jorge Condor1,2 , Nicolas Moënne-Loccoz1 , Merlin Nimier-David1 , Piotr
+Didyk2 , Zan Gojcic1 , and Qi Wu1
+1
+arXiv:2604.01204v3 [cs.CV] 9 Jul 2026
+NVIDIA
+{nicolasm,mnimierdavid,zgojcic,qiwu}@nvidia.com
+2
+Università della Svizzera italiana, Lugano, Switzerland
+{jorge.condor,piotr.didyk}@usi.ch
+Fig. 1: Neural Harmonic Textures for novel view synthesis. We attach learnable
+feature vectors (right) to the virtual vertices of bounding tetrahedra encapsulating each
+primitive (center). After harmonic encoding and accumulation along the ray, a small
+neural network decodes the resulting signal into RGB color in a deferred manner (left).
+Source code and further results are available at https://research.nvidia.com/labs/
+sil/projects/neural-harmonic-textures/.
+Abstract. Primitive-based methods such as 3D Gaussian Splatting have
+recently become the state-of-the-art for novel-view synthesis and related
+reconstruction tasks. Compared to neural fields, these representations
+are more flexible, adaptive, and scale better to large scenes. However,
+the limited expressivity of individual primitives makes modeling highfrequency detail challenging. We introduce Neural Harmonic Textures, a
+neural representation approach that anchors latent feature vectors on a
+virtual scaffold surrounding each primitive. These features are interpolated within the primitive at ray intersection points. Inspired by Fourier
+2
+J. Condor et al.
+analysis, we apply periodic activations to the interpolated features, turning alpha blending into a weighted sum of harmonic components. The
+resulting signal is then decoded in a single deferred pass using a small
+neural network, significantly reducing computational cost. Neural Harmonic Textures yield state-of-the-art results in real-time novel view synthesis while bridging the gap between primitive- and neural-field-based
+reconstruction. Our method integrates seamlessly into existing primitivebased pipelines such as 3DGUT, Triangle Splatting, and 2DGS. We further demonstrate its generality with applications to 2D image fitting and
+semantic reconstruction.
+1
+Introduction
+Since the introduction of 3D Gaussian Splatting [27], (Lagrangian) primitivebased approaches have largely displaced (Eulerian) continuous neural radiance
+fields [49, 55, 61] for novel view synthesis [23, 27]. This shift is driven not only
+by significantly improved rendering speed, but also by the structural advantages of explicit representations. Primitive-based methods naturally adapt to
+scene detail, scale more gracefully, and readily support motion, deformation,
+and editing [6, 67]. Furthermore, they align well with feed-forward reconstruction pipelines [35, 78] and closely resemble widely adopted point-map representations [64, 66]. Despite these advantages, the limited expressive power of individual primitives remains a fundamental bottleneck. Geometry and appearance
+are tightly coupled within each primitive, forcing high-frequency spatial detail
+to be represented by increasing the number of primitives, which directly increases memory consumption and hampers rendering speed. Directional appearance modeling is constrained in a similar manner. View-dependent effects are
+typically represented using low-order Spherical Harmonics, which are spectrally
+band-limited and poorly suited for high-frequency phenomena such as sharp
+specular highlights. Alternative angular parametric functions, such as spherical
+Gaussians, spherical Beta kernels [37], and spherical Voronoi [11] increase directional bandwidth, but leave the fundamental coupling between spatial support
+and appearance modeling unchanged. In contrast, neural radiance fields achieve
+high local representational capacity by combining positional encodings such as
+Fourier features [46, 62] or multi-resolution hash grids [49] with a learned multilayer perceptron (MLP) decoding. Recent works [41, 79] attempted to bridge
+both paradigms by employing primitives as acceleration structures for querying
+a global neural field. However, these hybrid approaches inherit key limitations of
+global neural representations, particularly with respect to motion, deformation,
+editability and scalability.
+In this work, we introduce Neural Harmonic Textures, a novel primitivebased neural representation that increases the expressive power of individual
+primitives while retaining the advantages of Lagrangian representations. To this
+end, we reinterpret primitives as both geometric carriers and local positional
+encodings. Specifically, we attach learnable feature vectors to a virtual scaffold
+encapsulating each primitive (e.g., Gaussians or triangles) and interpolate them
+Neural Harmonic Textures
+3
+locally at ray–primitive intersection points. Compared to globally anchored feature representations, our formulation moves with the primitives and therefore
+naturally supports operations such as motion, deformation, and scene editing.
+In prior work, such interpolated features are typically processed by a lightweight
+MLP to decode RGB values, followed by alpha compositing across intersected
+primitives to produce the final color, requiring numerous neural evaluations. Instead, we draw inspiration from the Fourier transform, where a complex signal
+is expressed as a sum of harmonic components (i.e., periodic functions with different amplitudes). We therefore apply periodic functions (sine and cosine) to
+the interpolated feature vectors before compositing them along the ray. Under
+this formulation, the activated features act as frequency components, while the
+primitive opacity modulates their amplitude (Fig. 2). The resulting implicit signal in image space is sufficiently rich to be directly decoded using a lightweight
+MLP in a single evaluation per pixel, in a deferred-shading manner.
+We validate Neural Harmonic Textures on standard novel view synthesis
+benchmarks, achieving state-of-the-art performance among both real-time and
+offline methods (Sec. 5.1). Our proposed formulation is agnostic to the underlying primitive type: triangles, 2D or 3D Gaussians, tetrahedra, and other elements can be used interchangeably, enabling seamless integration into existing
+primitive-based pipelines while significantly increasing their representational capacity (Sec. 5.2). Finally, by abstracting the encoded signal, our approach naturally extends to higher-dimensional signals. Joint modeling of color and semantic
+features becomes possible within a unified local representation, allowing us to
+exploit both spatial and cross-modal correlations for improved efficiency and
+compactness (Sec. 5.2).
+2
+Related Work
+2.1
+Neural Fields
+Neural fields have become a foundational model for representing complex, multiscale signals across a wide range of domains [72], including audio [40], images [43,
+54], 3D geometry [34, 51, 60, 65], radiance fields [46], scientific data [15, 68, 69],
+and volumetric video [14,52]. These methods primarily differ in how they encode
+their inputs and parameterize their outputs. In most formulations, latent features are stored in a compressed representation and subsequently decoded by a
+neural network. This storage can be implicit within the network weights [38, 39,
+46, 48, 53, 56, 62], or explicit through dedicated spatial data structures. Explicit
+representations typically offer improved scalability and performance, though often at increased memory cost. Common examples include voxel grids [43], triplanes [5, 14], point clouds [17], hash grids [49], and meshes [63]. In addition,
+explicit spatial structures are frequently used as acceleration mechanisms to
+skip empty regions and efficiently identify relevant query locations [36, 49, 79].
+More recently, neural fields have been combined with primitive-based methods
+by turning the primitives into tiny neural fields with closed-form antiderivatives,
+enhancing their individual modelling power [83].
+4
+J. Condor et al.
+Beyond the choice of spatial representation, prior work has shown that positional encodings play a crucial role in enabling neural networks to represent highfrequency signals in low-dimensional spatial domains [46, 49, 56, 62]. In contrast
+to globally anchored spatial structures such as hierarchical voxel grids (hashgrid
+encodings), which follow an Eulerian formulation, our approach is Lagrangian.
+We anchor latent feature vectors relative to explicit particles, enabling adaptive
+spatial resolution and naturally supporting explicit motion, deformation, and
+scene editing.
+2.2
+Primitive-based Representations for Neural Reconstruction
+Primitive-based methods have recently gained significant traction for 3D reconstruction and novel view synthesis, largely driven by the success of 3D Gaussian
+Splatting [27]. Numerous extensions have since explored variants of Gaussian
+primitives [9, 10, 24, 32, 37, 47, 67, 70] as well as alternative representations, including Voronoi cells [16], triangle soups [23], and connected meshes [41]. While
+offering high rendering performance, editability, and interpretability, these approaches typically exhibit poor memory scaling when fitting high-frequency detail due to their joint modeling of geometry and appearance.
+Neural field methods, in contrast, aggregate information across the entire
+scene, enabling compact representations. Concurrent work [42, 79] attempts to
+bridge this gap by using geometric primitives as acceleration structures for neural field evaluation. However, these approaches lose some of the advantages of
+purely primitive-based representations, as the learned features remain globally
+anchored (e.g. through hashgrids) and do not follow the primitives under motion
+or deformation. Furthermore, they inherit the limitations of Eulerian encodings,
+namely poor scaling in large scenes and high-frequency detail modelling. In contrast, we propose that geometric primitives themselves, when appropriately parameterized, can serve as an effective positional encoding mechanism, and enable
+more efficient signal decoding (i.e. deferred shading).
+2.3
+Deferred Shading and Texturing in Radiance fields
+Alternatives to direct color evaluation in novel view synthesis have been explored
+to improve expressivity, rendering quality, and efficiency. Early work introduced
+image-based neural deferred shading conditioned on 3D meshes [63]. Later approaches extended this idea to neural radiance fields by baking appearance features into extracted geometry for real-time rendering [7, 22, 74], removing the
+necessity to run neural networks during runtime. However, these methods rely
+on complex multi-stage pipelines that first optimize a global field, then extract
+geometry and bake appearance features. In contrast, our method jointly optimizes primitives and neural appearance from scratch, eliminating the need for a
+separate baking stage while retaining high quality and speed. Deferred shading
+has also been explored in the context of radiance field rendering using neural
+networks as deferred shaders. In Han et al. [19], global feature grids are queried,
+with features accumulated and decoded once in a deferred manner. Similarly,
+Neural Harmonic Textures
+5
+point-based neural renderers have recently mixed local neural decoding with
+deferred shading. Hahlbohm et al. [18] uses point-clouds as query points for a
+global hash-grid encoded feature field, decoded locally using a shallow neural
+network into implicit features. These are splatted to the camera plane and finally rendered through a convolutional neural network. However, the necessity
+of large-bandwidth neural networks to uplift the poor scalability and detail afforded by the spatial encoding made them slow and difficult to train; the former
+requiring guiding networks with regular NeRF-style rendering to steer the optimization, while the latter required expensive perceptual-loss supervision. Earlier
+work on neural point-based graphics [1] and trilinear point splatting [13] also attach local features to discrete primitives and decode them with neural networks.
+Kopanas et al. [31] combine per-point features with deferred shading for reflective content, while closer to our work Feature Splatting [44] also introduced
+per-primitive higher dimensional features to be decoded deferredly. Hybrid mesh
+and surface representations such as NeuMesh [8] and SurRF [77] similarly pair
+local learnable features with neural decoding for appearance modeling. Despite
+the large body of work combining explicit geometry, implicit fields or features
+and neural decoding, leveraging them efficiently without exploding memory or
+computational costs remains a challenge.
+To improve expressivity without global feature grids, several primitive-based
+methods introduce per-primitive textures [4, 25, 59, 71, 73, 81]. In particular, BBSplat [59] and Textured Gaussians [4] further model opacity as a spatially varying texture on each primitive. Generally, however, highly expressive primitives
+complicate optimization and are prone to overfitting, apart from the substantial
+storage cost, which translates as well to slower rendering. Instead, we decouple
+geometry and appearance by pairing local per-particle features with a shared
+lightweight neural decoder, in turn enabling the reduction of queries to the neural field to a single deferred pass. This allows particle density to more closely
+follow geometric complexity rather than being artificially increased to reproduce
+high-frequency appearance.
+3
+Preliminaries
+We review primitive-based radiance fields, primitive-based volume rendering,
+and positional encodings, focusing on the aspects most relevant to our method.
+Primitive-based Radiance Fields. Primitive-based radiance fields represent complex scenes using an unstructured collection of 2D or 3D geometric primitives,
+such as anisotropic Gaussians [27], oriented disks [24], or triangles [23]. In Sec. 4,
+we present our formulation on the example of 3D Gaussian primitives [27, 70]
+whose spatial response function
+\rho (\mathbf {x}) = \exp \!\left (-\frac {1}{2}(\mathbf {x}-\boldsymbol {\mu })^{T}\boldsymbol {\Sigma }^{-1}(\mathbf {x}-\boldsymbol {\mu })\right ), \label {eq:gaussian_kernel}
+(1)
+6
+J. Condor et al.
+is defined by the particle center µ ∈ R3 and covariance matrix Σ ∈ R3×3 . To
+ensure positive semi-definiteness during optimization, the covariance is parameterized as Σ = RSST RT , where R ∈ SO(3) represents rotation and S ∈ R3×3
+encodes scaling. In practice, these parameters are stored as a quaternion q ∈ R4
+and a scale vector s ∈ R3 . Each primitive additionally carries an opacity parameter σ ∈ R and a view-dependent radiance function ϕ(d), commonly represented
+using spherical harmonics. Note that in this case, ϕ(d) depends only on the ray
+direction and not on the spatial position of the intersection point.
+Primitive-based Volume Rendering. Given a camera ray r(τ ) = o + τ d with
+origin o ∈ R3 and direction d ∈ R3 , the rendered ray color c ∈ R3 is obtained
+via volume rendering over the primitives Pc intersecting the ray:
+\mathbf {c}(\mathbf {o},\mathbf {d}) = \sum _{i \in P_c} \phi (\mathbf {d}) \cdot T_i \cdot \alpha _i, \quad T_i = \prod _{j=1}^{i-1} 1 -\alpha _j, \label {eq:transmittance}
+(2)
+where the opacity αi is defined as αi = σi ρi (o + τ d) and Ti is the transmittance.
+Positional Encoding: Neural networks exhibit a natural spectral bias that limits
+their ability to learn high-frequency functions in low-dimensional domains [62].
+Positional encodings mitigate this limitation by mapping low-dimensional spatial and directional coordinates into higher-dimensional representations before
+feeding them into the network [62]. While early approaches relied on fixed frequency encodings [20, 50], modern methods often use parametric encodings that
+store learnable feature vectors in auxiliary spatial data structures, such as grids
+or trees [49, 60]. Query coordinates retrieve and interpolate these features, effectively shifting much of the representational burden from the neural network
+to the encoding itself. This design trades increased memory usage for reduced
+computation: only a small subset of encoding parameters is updated per sample,
+allowing the neural network to remain compact and efficient while significantly
+accelerating convergence and maintaining high reconstruction quality.
+4
+Method
+We present the core components of our approach using 3D Gaussian primitives in
+the context of novel view synthesis, following the formulation of 3DGUT [70]. We
+begin by introducing our primitive-bound feature embedding in Sec. 4.1. Next,
+Sec. 4.2 presents harmonic texturing, which increases per-primitive expressive
+power while preserving the locality and explicit form of the representation. Finally, Sec. 4.3 describes a neural deferred decoding scheme that enables efficient
+signal reconstruction in a single image-space pass. Generalization to other primitive types and additional applications will be discussed in Sec. 5.2. Fig. 2 provides
+a schematic overview of our method.
+3
+Gaussian particles are bounded by ellipsoids in world space, which become spheres
+after whitening. Our virtual bounding tetrahedra are defined in this canonical space.
+Neural Harmonic Textures
+7
+RGB
+Fig. 2: Neural Harmonic Textures applied to novel-view synthesis. We virtually attach
+feature vectors fi to the vertices of tetrahedra inscribing the Gaussian primitives3 . Following 3DGUT [70], we evaluate the point along the ray where the projected Gaussian
+has maximum response. We barycentrically interpolate vertex features at that point,
+and encode them with sine and cosine functions into different channels. These are then
+alpha blended along the rest of the ray, until the resulting sum of harmonics is decoded
+by a shallow MLP in a single image-space pass.
+4.1
+Primitive-bound feature embedding
+Spatial structures such as triplanes [12], voxel grids [58], and multi-resolution
+hash grids [49] are commonly used in neural fields to hold latent feature vectors
+that embed query positions into a higher-dimensional space before decoding the
+signal. Despite their effectiveness, these representations rely on globally defined
+regular grids, which limits their scalability to large scenes or high-frequency
+detail. Moreover, because these structures are fixed in space, they struggle to
+represent scenes undergoing motion, deformation, or editing.
+Instead, we exploit the Lagrangian nature and adaptivity of primitive-based
+representations by anchoring latent features to a virtual scaffold that encapsulates each primitive. Specifically, consider the isosurface ellipsoid defined by
+an anisotropic 3D Gaussian (Eq. (1)) with bounded support, which becomes
+a sphere in canonical space after whitening. We define the virtual tetrahedron
+bounding this sphere and assign a feature vector f j ∈ RNf to each of its four
+vertices (j ∈ {0..3}) (Fig. 3a). For each primitive intersected by a ray, we determine the point p∗ corresponding to the maximum Gaussian response along
+the ray [70]. The feature vector at this location, f , is obtained via barycentric
+interpolation of the vertex features f j . A detailed derivation is provided in the
+supplementary material.
+Compared to globally anchored feature representations, our formulation moves
+with the primitives and therefore naturally supports operations such as motion,
+deformation, or deletion during scene editing.
+J. Condor et al.
+Int
+erp
+ola
+ted
+8
+White
+n
+sin
+c os
+(a) Latent vectors
+(b) Interpolation
+(c) Harmonic decomposition
+Fig. 3: Illustrating our method in 2D. Each primitive is bounded by an ellipsoid in
+world space, which becomes a sphere in whitened canonical space (a). Considering
+a virtual bounding tetrahedron in this canonical space, we attach one N-dimensional
+feature vector f j to each vertex. The primitive’s contribution is evaluated at the point
+of maximum response p∗ of the projected Gaussian along the intersecting ray (b). The
+feature vectors are barycentrically interpolated at p∗ and encoded with sine and cosine
+periodic functions (c).
+4.2
+Harmonic Texturing
+In previous work, feature vectors are typically
+passed through a lightweight neural network to
++1
+-7
++1
++1
+decode the primitive appearance prior to volume rendering, requiring dozens of MLP evaluations per ray to produce the final pixel color [41,
+49, 80]. In 3DGS, color decoding overhead (with-7
+-7
+-1
+out neural networks) is reduced by approximating
+-20
+-10
+-10
+view-dependent color emission once per primitive,
+thereby reducing the complexity from the number of ray–primitive intersections to the number of
+primitives. However, this approximation assumes 0
+-1
+0
++10
+that the signal does not vary spatially within each
+Fig. 4: Harmonic textures.
+primitive, which makes it unsuitable for our representation.
+An alternative strategy is to blend the features along each ray and decode
+the signal in image space, in the spirit of deferred shading [22]. Inspired by the
+Fourier transform, where a complex signal is expressed as a sum of harmonic
+components (i.e., periodic functions of different amplitudes), we encode the interpolated features using periodic functions before blending them along the ray.
+This yields a harmonic decomposition of the signal, which we term Harmonic
+Textures (Fig. 3c). Under this formulation, the interpolation function effectively
+acts as a frequency modulator: large differences between vertex features within a
+primitive produce rapidly oscillating, spatially varying textures. Each primitive
+additionally has a kernel-weighted opacity, which acts as the harmonic amplitude. This behavior is illustrated in the inset Fig. 4 (without the amplitude
+weighting, to better visualize the harmonics).
+Neural Harmonic Textures
+4.3
+9
+Neural Deferred Shading
+The rich high-dimensional signal yielded by the volume rendering of Harmonic
+Textures enables a more efficient decoding strategy. We concatenate the accumulated harmonics with the ray direction d encoded using second-degree spherical
+harmonics SH2 (d) ∈ R9 as done in [49], and decode the final pixel color c using a shallow MLP, without further positional encoding. The resulting rendering
+equation is
+\mathbf {c} = \mathrm {MLP}_\theta \left ( \sum _{i \in \mathcal {G}} \alpha _i \, T_i \begin {bmatrix} \sin (\mathbf {f}_i) \\ \cos (\mathbf {f}_i) \end {bmatrix}, \; k \cdot \mathrm {SH}_2(\mathbf {d}) \right ),
+(3)
+
+
+
+where fi = interpolate fi0 , fi1 , fi2 , fi3 , p∗i denotes the primitive feature interpolated at the point p∗i of maximum response, G is the set of primitives intersected
+by the ray, and αi and Ti correspond to the primitive opacity and accumulated
+transmittance defined in Eq. (2).
+5
+Results
+We present our results for radiance-field novel-view synthesis. Additionally, we
+demonstrate our method on two other reconstruction tasks: semantic scene reconstruction and high-resolution image fitting.
+5.1
+Radiance Field Reconstruction
+Optimization We directly adopt the densification strategy, loss function and
+regularization terms of 3DGS-MCMC [28]. Specifically, they define the regularization terms on primitive opacity and scale as
+\mathcal {R}_{\alpha } = \frac {1}{P}\sum _{i=1}^{P} \alpha _i\,, \qquad \mathcal {R}_{s} = \frac {1}{P}\sum _{i=1}^{P} \lVert \mathbf {s}_i \rVert _1\,,
+(4)
+where P is the number of primitives and si is the scale vector of primitive i. Our
+final loss function is the same as 3DGS-MCMC:
+\mathcal {L} = (1 - \lambda )\,\mathcal {L}_{\mathrm {L}_1} + \lambda \,\mathcal {L}_{\text {D-SSIM}} + \lambda _{\alpha }\,\mathcal {R}_{\alpha } + \lambda _{s}\,\mathcal {R}_{s}\,.
+(5)
+Similarly to the exponential scheduling applied to primitive positions [27], we
+use a cosine annealing scheduler for the feature and MLP learning rates. We also
+apply an Exponential Moving Average (EMA) filter [49] to the MLP weights θ.
+This enhances robustness to noise and avoids overfitting to individual frames:
+\bar {\theta }_{t} \leftarrow \gamma \, \bar {\theta }_{t-1} + (1 - \gamma )\, \theta _{t}\,,
+(6)
+where θ̄t denotes the filtered weights at step t and γ is the decay factor. Finally, we dedicate the last 3000 training iterations to optimize only the feature
+and MLP weights, disabling all regularization terms and freezing all other parameters. We found that this refinement step slightly improves color fidelity,
+particularly in large-scale scenes. Other hyperparameters are included in the
+supplementary material.
+10
+J. Condor et al.
+Implementation We implement our method in gsplat [75], using the 3DGUT [70]
+formulation, to which we add custom CUDA kernels for the forward and backward logic described in Sec. 4. To reduce register pressure, we use half-precision
+memory fetches on feature vectors during rasterization, for both forward and
+backward kernels. Our neural network uses tiny-cuda-nn’s [49] JIT-compiled cooperative vector MLPs, trained and evaluated in half precision (FP16). We apply
+an automatic scaling factor to the loss values in order to improve half-precision
+training stability [45].
+Results We present the results of our method against a number of previous
+works using pure neural fields [2], hashgrid-encoded neural fields [3, 49], pure
+primitive-based methods [23,24,28,37,70] with regular Spherical Harmonics (SH)
+appearance or more complex appearance models [4,11], and closer to us, methods
+mixing primitives (e.g. for acceleration) and neural fields [41,80] (Tab. 1). In this
+table, we use the originally provided JPEG images for proper comparison with
+previous works in MipNeRF360; every other result presented in this section,
+unless otherwise stated, uses gsplat’s default downscaling for all methods tested.
+We measure the performance delta of this choice in the supplementary (Tab. 5).
+We consistently outperform all previous works in a varied set of real datasets [2,
+21, 30]. We include a selection of views in Fig. 6. Our method particularly excels
+at high-frequency detail modelling, capturing specular highlights and reflections
+with superior fidelity.
+In order to isolate the impact of our method, we include a controlled experiment in Tab. 2. We compare between 3DGS-MCMC, 3DGUT-MCMC, and
+different appearance models for the latter: regular SH, current state-of-the-art
+Spherical Voronoi [11] (SV) and ours (NHT). We implement all four under the
+same framework (gsplat), 1M primitives cap, 30k iterations, identical per-scene
+hyperparameters, and the same opacity and scale regularizers. This isolates the
+appearance model from training-schedule choices in Tab. 1. Tab. 2 shows that
+our method consistently outperforms both SH and SV across all benchmarks,
+while using less storage, without sacrificing real-time performance. NHT takes
+around 14.5 minutes to train up to 30k iterations on MipNeRF360 on average (1M primitives, RTX 5090); training times for all methods across datasets
+are reported in the supplementary material (Tab. 2). Per-scene breakdowns and
+more details are provided in the supplementary material (Tabs. 6 and 7). We
+also compare against a close texture-based method (BBSplat [59]) in the supplementary material (Tab. 1). NHT achieves substantially higher quality and faster
+rendering not only at equal memory, but also at equal primitive count.
+Ablations We ablate the design of our method on the MipNeRF360 dataset.
+Optimization choices. Supplementary Tab. 10 isolates the individual contributions of the training strategies: learning rate scheduling, EMA on the MLP
+weights, loss scaling, the color-refinement phase, and opacity and scale regularization.
+Neural Harmonic Textures
+11
+Table 1: Comparison on MipNeRF360 [2], Tanks & Temples [30], and Deep Blending [21], on Neural Field-style methods, primitive-based methods, and mixed neural
+field/primitive-based methods. For the MipNeRF360 datasets, we disable gsplat’s default downscaling and instead train and evaluate directly on the provided JPEGcompressed reference images following prior work. We measure the effect in Tab. 5.
+For our method, we use 64 features per primitive (16 per vertex), with a 128-wide ×
+3 hidden layers MLP, which results in a roughly similar number of total parameters
+as previous primitive-based approaches on average. We use 2M primitives for indoor
+scenes and 5M for outdoors. To regularize training in high-parallax regimes (e.g., indoor
+datasets), we encode the central camera ray rather than the individual ray direction.
+Finally, to ensure similar training epochs, we train indoor datasets longer (45k iterations for ∼ 290 images) than outdoor (25k for ∼ 175 images), following Spherical
+Voronoi [11] (SV). Unlike SV, we do not fine-tune learning rates per dataset. Note that
+convergence of an MLP-based appearance model can be slower than SH-based ones.
+MipNeRF360
+Tanks & Temples
+Deep Blending
+Method
+PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+Instant NGP-Big [49]
+Mip-NeRF 360 [2]
+ZipNeRF [3]
+25.59
+27.60
+28.55
+0.695
+0.788
+0.829
+0.375
+0.275
+0.218
+21.92
+22.22
+23.64
+0.740
+0.754
+0.836
+0.342
+0.290
+0.179
+24.96
+29.40
+–
+0.815
+0.899
+–
+0.459
+0.306
+–
+2DGS [24]
+3DGS-MCMC [28]
+3DGUT-MCMC [28]
+Beta Splatting-MCMC [37]
+Spherical Voronoi [11]
+Triangle Splatting [23]
+Textured Gaussians [4]
+27.22
+27.99
+27.82
+28.12
+28.56
+27.00
+27.35
+0.804
+0.830
+0.826
+0.831
+0.835
+0.808
+0.827
+0.275
+0.229
+0.233
+0.238
+0.228
+0.231
+–
+22.85
+24.46
+24.20
+24.54
+24.80
+23.05
+24.26
+0.827
+0.866
+0.861
+0.866
+0.871
+0.843
+0.854
+0.244
+0.174
+0.180
+0.196
+0.172
+0.191
+–
+29.56
+29.49
+29.87
+29.56
+30.34
+28.92
+28.33
+0.904
+0.912
+0.913
+0.907
+0.914
+0.891
+0.891
+0.325
+0.306
+0.309
+0.316
+0.299
+0.308
+–
+NeST [80]
+26.54
+Radiance Meshes [41]
+27.15
+Neural Harmonic Textures (Ours) 28.74
+0.776
+0.810
+0.834
+0.260
+0.274
+0.216
+–
+23.13
+25.68
+–
+0.851
+0.882
+–
+0.200
+0.141
+–
+29.39
+30.94
+–
+0.901
+0.919
+–
+0.362
+0.302
+Primitive count. Fig. 5 illustrates how reconstruction quality scales with the
+number of primitives, ranging from 1K to 4M. Our method improves over pior
+art across this entire range, excelling particularly in the low primitive count
+regime. For instance, we achieve performance comparable to previous methods
+using 1M primitives with only a third of that amount, offering more flexibility
+in the memory-speed-quality trade-off; Supplementary Fig. 1 shows a side-byside comparison against 3DGUT-MCMC on bonsai with only 10K primitives
+(+3.7 dB PSNR on average). Tabs. 13 and 14 in the supplementary material
+explore the impact of varying the per-primitive feature dimension and the MLP
+architecture, respectively, to illustrate the resulting quality-speed trade-offs.
+Feature encoding. We ablate the choice of feature encoding function applied to
+the interpolated features in the Supplementary Tab. 11, showing how our choice
+of harmonic functions provides the best results.
+5.2
+Other Applications
+Alternative primitive-based methods. We demonstrate the generality of our approach by incorporating Neural Harmonic Textures into 2DGS [24] and Triangle
+12
+J. Condor et al.
+Table 2: Quantitative results of our approach and baselines on the MipNeRF360 [2],
+Tanks & Temples [30], and Deep Blending [21] datasets, comparing our method against
+Spherical Voronoi [11] (SV) and regular SH models. We isolate the effect of our approach by implementing all methods in the same framework (gsplat [76] with its default
+downsampling), using the same number of primitives (1M), training for the same number of iterations (30k), allocating the same number of parameters per primitive for
+appearance (48) and using the same hyperparameters for all scenes. Our method uses
+a 128×3 hidden MLP. All MCMC-based methods share the same opacity and scale
+regularizers from 3DGS-MCMC [28]. We improve reconstruction quality while still
+managing real-time performance (RTX A6000 Ada).
+MipNeRF360
+Tanks & Temples
+Deep Blending
+PSNR↑ SSIM↑ LPIPS↓ FPS↑ PSNR↑ SSIM↑ LPIPS↓ FPS↑ PSNR↑ SSIM↑ LPIPS↓ FPS↑
+3DGS + SH
+27.94
+3DGUT + SH
+27.93
+3DGUT + SV
+28.15
+3DGUT + NHT (Ours) 28.46
+0.829
+0.828
+0.823
+0.830
+0.246
+0.247
+0.248
+0.232
+251
+201
+202
+140
+24.25
+23.99
+24.18
+24.79
+0.861
+0.859
+0.861
+0.875
+Table 3: Generality of NHT: we apply it to different primitive-based representations, evaluated
+on MipNeRF360 [2]. Triangle Splatting methods
+use JPEG references as in its source implementation. We would like to note that our results
+for Triangle Splatting are just a proof-of-concept
+and were not extensively optimized.
+Method
+PSNR↑
+SSIM↑
+LPIPS↓
+Triangle Splatting
+Triangle Splatting + NHT
+27.00
+27.52
+0.808
+0.807
+0.231
+0.227
+2DGS
+2DGS + NHT
+27.48
+28.27
+0.816
+0.820
+0.263
+0.238
+3DGUT-MCMC
+3DGUT-MCMC + NHT
+27.93
+28.46
+0.828
+0.830
+0.247
+0.232
+0.188
+0.192
+0.187
+0.169
+294
+245
+242
+226
+29.98
+30.21
+30.29
+30.88
+0.912
+0.913
+0.912
+0.918
+0.317
+0.318
+0.320
+0.311
+331
+282
+267
+240
+28
+PSNR (dB)
+Method (w/ MCMC)
+26
+24
+NHT (Ours)
+3DGS-MCMC
+3DGUT-MCMC
+22
+20
+1
+10
+100
+1,000
+Primitive Count (thousands)
+Fig. 5: Our method outperforms
+3DGS and 3DGUT at all primitive
+counts. The improvement is particularly pronounced in the lowprimitive regime (≤ 100k), with
+deltas upwards of 2dB of PSNR.
+Splatting [23]. Our method is readily adapted to these 2D primitives by simply
+replacing the bounding tetrahedra with virtual triangles (2DGS) or directly anchoring feature vectors to explicit triangle geometry (Triangle Splatting), therefore using three feature vectors per primitive instead of four. The results are
+shown in Tab. 3, with further details in the Supplementary.
+Semantic field reconstruction. Our method can easily model higher dimensional
+data as well. By simply expanding the decoding head of our MLP, we can fit
+signals of arbitrary dimension. As the rest of the MLP layers remain small, and
+the size of feature vectors remains the same, the model is forced to exploit potential correlations between dimensions. A particularly challenging case is semantic
+scene reconstruction, where fields are upwards of 512-dimensional. 3DGS-based
+methods relying on high-dimensional explicit features generally struggle with
+such scale, even when paired with feature upsampling networks. We thus test
+Neural Harmonic Textures
+3DGUT-MCMC
+Spherical Voronoi
+Ours
+13
+Ground truth
+Fig. 6: Comparison between our and previous works on radiance field reconstruction
+on scenes from MipNeRF360 [2], Tanks and Temples [30]. Our method models high
+frequency detail and view dependent effects to a higher degree than previous works.
+our method on joint novel-view synthesis of RGB radiance and LSEG [33] 512wide semantic features. Due to the limited resolution of LSEG feature maps, we
+render and predict at the RGB resolution, but bilinearly downsample the spatial
+dimension of the resulting feature maps in order to supervise on ground truth
+features. We compare against Feature 3DGS [82], a hybrid method relying on
+128-wide semantic feature vector per primitive plus a CNN to jointly downsample the spatial dimension and upsample the feature dimension of the resulting
+rasterized image up to the full 512 dimensions, and another set of 48 SH basis
+weights for regular RGB color. Results for the aggregated MipNeRF360 dataset
+can be seen in Tab. 4. We afford Feature-3DGS twice our training time budget,
+up to 7K iterations, slightly more than in the original paper (5K), to accommodate for the larger-scale datasets. We further ablate the per-primitive feature
+dimensionality for this task in Tab. 8. Our results show substantial improvement
+over Feature 3DGS, and the capability to easily scale upwards or downwards in
+performance or memory, in a completely detached manner from the nature of
+the data being encoded. It is particularly interesting to note how small the drop
+in RGB quality is, which points to either high correlation among feature vectors
+or excessive free bandwidth in our RGB experiments. Our features can then be
+used in downstream tasks such as scene editing or semantic segmentation.
+14
+J. Condor et al.
+Table 4: Joint RGB and LSEG semantic feature reconstruction on MipNeRF360 [2],
+(RTX A6000 Ada). LSEGP and LSEGC denote PSNR and cosine similarity of the
+512-dim semantic features, respectively. We use 80 features per primitive and a 128×3
+MLP, while Feature 3DGS uses 176 features per primitive, 512×128 CNN and 1.5×
+the number of primitives we use, resulting in an approximately 3× higher memory
+footprint.
+Method
+Feature 3DGS [82]
+Neural Harmonic Textures (Ours)
+RGBPSNR ↑ RGBSSIM ↑ RGBLPIPS ↓ LSEGP ↑ LSEGC ↑
+26.27
+28.16
+0.785
+0.824
+0.262
+0.228
+43.68
+46.90
+0.985
+0.993
+FPS↑
+3.02
+28.11
+2D image reconstruction. Finally, we show results on 2D image fitting. To adapt
+our method to this application, we make two key changes with respect to the
+primitive-based approaches. First, we employ a connected 2D triangle mesh
+topology. This mesh is fully opaque: there is no alpha blending, no Gaussian or
+window kernel, simply interpolation of local features for a given pixel. Second, we
+change our barycentric interpolation to Clough-Tocher cubic interpolation. This
+makes interpolated features continuous over the triangle edges, which removes
+high frequency artifacts. The rest of the architecture is the same as described
+in Sec. 4, and we include further details on the optimization strategy in the Supplementary. We evaluate image reconstruction performance on a new curated
+dataset of high-resolution (45.7 MP) 14-bit HDR RAW images, and compare it
+against Instant NGP [49] and the JPEG-XL encoder [26], which supports highdynamic range. We measure reconstruction quality at two compression ratios
+(10× and 100×), computing PSNR in µ-law transformed space (PSNRµ ), standard in HDR imaging pipelines. We also report metrics on tonemapped images
+(subscript “tm”). Results are shown in Tab. 5. Our method achieves comparable
+pixel-error quality to Instant NGP in both HDR and linear spaces, while substantially reducing perceptual error: at 100× compression, NHT achieves an LPIPS
+of 0.048 compared to 0.078 for Instant NGP, a 38% relative improvement. JPEGXL however still comes out on top, particularly in perceptual metrics, which is to
+be expected given its human-perception-based inductive biases. We can further
+compress our representation by a factor of 3 without noticeable loss in quality
+by aggressively reducing floating point precision of the implicit features, among
+other strategies. We include more details on this in the supplementary.
+6
+Discussion
+Limitations and future work Our method focuses on increasing per-primitive
+expressivity, which has inherent downsides. In particular, our method can overfit
+to individual views in scenarios with very sparse supervision, leading to lower
+novel view synthesis performance. Furthermore, while our method consistently
+achieves 140+ frames per second at inference time, the additional neural decoder
+results in slightly slower rendering than pure 3DGS methods(Tab. 2).
+Neural Harmonic Textures
+15
+Table 5: High-resolution (45.7 MP) 14-bit HDR RAW image fitting, averaged over
+15 images. We report PSNR in µ-law transformed space (PSNRµ ), common in HDR
+pipelines. PSNR, SSIM, and LPIPS are also computed on tonemapped images (subscript “tm”). All methods use the same memory budget per compression ratio.
+PSNRµ ↑ PSNRtm ↑ SSIMtm ↑ LPIPStm ↓
+Ratio Method
+JPEG-XL [26]
+Instant NGP [49]
+NHT (Ours)
+45.31
+37.63
+37.16
+44.66
+38.91
+39.87
+0.994
+0.949
+0.963
+0.001
+0.061
+0.023
+JPEG-XL [26]
+100× Instant NGP [49]
+NHT (Ours)
+38.53
+35.17
+35.06
+35.54
+36.39
+36.43
+0.971
+0.923
+0.927
+0.017
+0.078
+0.048
+10×
+Ours
+Original
+Original
+Instant NGP
+Instant NGP
+Ours
+Ours
+Ours
+Fig. 7: Comparison of our work vs Instant NGP on a 100× compression task. Original
+images are 45.7MP 14-bit HDR RAW files. We achieve substantially superior perceptual
+quality at equal compression and similar training times.
+In future work, we would like to investigate the feasibility of extracting automatic Level of Detail from a finer-grained harmonic decomposition. Given the
+generality of Neural Harmonic Textures, applications beyond novel view synthesis such as radiance caching, neural physically-based rendering and geometric
+reconstruction are also of great interest. Finally, our work opens the possibility
+of removing kernel functions entirely, as we can still propagate derivatives to
+explicit geometry without the spatially decaying opacity function, potentially
+enabling drastic performance gains.
+Conclusion We presented Neural Harmonic Textures, which combine particleanchored feature vectors, harmonic activations, and a single image-space decoding pass to achieve state-of-the-art results in novel view synthesis. Our method
+consistently outperforms baselines across different particle counts, trains rapidly,
+and has high inference performance. Moreover, it is compatible with existing
+deferred-shading rendering pipelines and supports a wide range of applications,
+from lifting semantic fields to high-resolution image reconstruction and beyond.
+Acknowledgements We would like to thank Ruilong Li and Martin Bisson for
+helpful discussions. Jorge Condor and Piotr Didyk acknowledge funding from
+the Swiss National Science Foundation (SNSF, Grant 200502) and an academic
+gift from Meta.
+16
+J. Condor et al.
+References
+1. Aliev, K.A., Sevastopolsky, A., Kolos, M., Ulyanov, D., Lempitsky, V.: Neural
+point-based graphics. In: Computer Vision – ECCV 2020: 16th European Conference, Glasgow, UK, August 23–28, 2020, Proceedings, Part XXII. p. 696–712.
+Springer-Verlag, Berlin, Heidelberg (2020). https://doi.org/10.1007/978- 3030-58542-6_42, https://doi.org/10.1007/978-3-030-58542-6_42
+2. Barron, J.T., Mildenhall, B., Verbin, D., Srinivasan, P.P., Hedman, P.: Mipnerf 360: Unbounded anti-aliased neural radiance fields. In: Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)
+(2022)
+3. Barron, J.T., Mildenhall, B., Verbin, D., Srinivasan, P.P., Hedman, P.: Zip-NeRF:
+Anti-aliased grid-based neural radiance fields. In: Proceedings of the IEEE/CVF
+International Conference on Computer Vision (ICCV) (2023)
+4. Chao, B., Tseng, H.Y., Porzi, L., Gao, C., Li, T., Li, Q., Saraf, A., Huang, J.B.,
+Kopf, J., Wetzstein, G., Kim, C.: Textured gaussians for enhanced 3d scene appearance modeling. In: Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR) (2025)
+5. Chen, A., Xu, Z., Geiger, A., Yu, J., Su, H.: Tensorf: Tensorial radiance fields. In:
+European conference on computer vision. pp. 333–350. Springer (2022)
+6. Chen, Y., Chen, Z., Zhang, C., Wang, F., Yang, X., Wang, Y., Cai, Z., Yang, L.,
+Liu, H., Lin, G.: Gaussianeditor: Swift and controllable 3d editing with gaussian
+splatting. In: Proceedings of the IEEE/CVF conference on computer vision and
+pattern recognition. pp. 21476–21485 (2024)
+7. Chen, Z., Funkhouser, T., Hedman, P., Tagliasacchi, A.: MobileNeRF: Exploiting
+the polygon rasterization pipeline for efficient neural field rendering on mobile
+architectures. In: The Conference on Computer Vision and Pattern Recognition
+(CVPR) (2023)
+8. Chong Bao and Bangbang Yang, Junyi, Z., Hujun, B., Yinda, Z., Zhaopeng, C.,
+Guofeng, Z.: Neumesh: Learning disentangled neural mesh-based implicit field
+for geometry and texture editing. In: European Conference on Computer Vision
+(ECCV) (2022)
+9. Condor, J., Hermann, N., Yurtsever, M.A., Didyk, P.: Gabor fields: Orientationselective level-of-detail for volume rendering (2026), https://arxiv.org/abs/
+2602.05081
+10. Condor, J., Speierer, S., Bode, L., Bozic, A., Green, S., Didyk, P., Jarabo, A.: Don’t
+splat your gaussians: Volumetric ray-traced primitives for modeling and rendering
+scattering and emissive media. ACM Transactions on Graphics 44(1) (2025)
+11. Di Sario, F., Rebain, D., Verbin, D., Grangetto, M., Tagliasacchi, A.: Spherical
+voronoi: Directional appearance as a differentiable partition of the sphere. arXiv
+preprint arXiv:2512.14180 (2025)
+12. Duckworth, D., Hedman, P., Reiser, C., Zhizhin, P., Thibert, J.F., Lučić, M.,
+Szeliski, R., Barron, J.T.: Smerf: Streamable memory efficient radiance fields for
+real-time large-scene exploration (2023)
+13. Franke, L., Rückert, D., Fink, L., Stamminger, M.: Trips: Trilinear point splatting
+for real-time radiance field rendering. Computer Graphics Forum 43(2) (2024).
+https://doi.org/https://doi.org/10.1111/cgf.15012
+14. Fridovich-Keil, S., Meanti, G., Warburg, F.R., Recht, B., Kanazawa, A.: K-planes:
+Explicit radiance fields in space, time, and appearance. In: Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 12479–
+12488 (2023)
+Neural Harmonic Textures
+17
+15. Gadirov, H., Wu, Q., Bauer, D., Ma, K.L., Roerdink, J.B., Frey, S.: Hyperflint:
+Hypernetwork-based flow estimation and temporal interpolation for scientific ensemble visualization. Computer Graphics Forum 44(3), e70134 (2025). https:
+//doi.org/https://doi.org/10.1111/cgf.70134, https://onlinelibrary.
+wiley.com/doi/abs/10.1111/cgf.70134
+16. Govindarajan, S., Rebain, D., Yi, K.M., Tagliasacchi, A.: Radiant foam: Realtime differentiable ray tracing. In: Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR). pp. 4135–4145 (2025)
+17. Govindarajan, S., Sambugaro, Z., Shabanov, A., Takikawa, T., Rebain, D., Sun,
+W., Conci, N., Yi, K.M., Tagliasacchi, A.: Lagrangian hashing for compressed
+neural field representations. In: European Conference on Computer Vision. pp.
+183–199. Springer (2024)
+18. Hahlbohm, F., Franke, L., Kappel, M., Castillo, S., Eisemann, M., Stamminger,
+M., Magnor, M.: INPC: Implicit Neural Point Clouds for Radiance Field Rendering . In: 2025 International Conference on 3D Vision (3DV). pp. 168–178. IEEE
+Computer Society, Los Alamitos, CA, USA (Mar 2025). https://doi.org/10.
+1109/3DV66043.2025.00021, https://doi.ieeecomputersociety.org/10.1109/
+3DV66043.2025.00021
+19. Han, K., Xiang, W., Yu, L.: Volume feature rendering for fast neural radiance field
+reconstruction. In: Oh, A., Naumann, T., Globerson, A., Saenko, K., Hardt, M.,
+Levine, S. (eds.) Advances in Neural Information Processing Systems. vol. 36, pp.
+65416–65427. Curran Associates, Inc. (2023), https://proceedings.neurips.cc/
+paper _ files / paper / 2023 / file / ce182e31662883d4decc84a0255335b6 - Paper Conference.pdf
+20. Harris, D., Harris, S.L.: Digital design and computer architecture. Morgan Kaufmann (2010)
+21. Hedman, P., Philip, J., Price, T., Frahm, J.M., Drettakis, G., Brostow, G.: Deep
+blending for free-viewpoint image-based rendering. ACM Transactions on Graphics
+(Proceedings of SIGGRAPH Asia) 37(6), 257:1–257:15 (2018)
+22. Hedman, P., Srinivasan, P.P., Mildenhall, B., Barron, J.T., Debevec, P.: Baking neural radiance fields for real-time view synthesis. In: Proceedings of the
+IEEE/CVF International Conference on Computer Vision (ICCV) (2021)
+23. Held, J., Vandeghen, R., Deliege, A., Hamdi, A., Rebain, D., Giancola, S., Cioppa,
+A., Vedaldi, A., Ghanem, B., Tagliasacchi, A., et al.: Triangle splatting for realtime radiance field rendering. In: Thirteenth International Conference on 3D Vision
+(3DV) (2025)
+24. Huang, B., Yu, Z., Chen, A., Geiger, A., Gao, S.: 2D Gaussian splatting for geometrically accurate radiance fields. In: ACM SIGGRAPH 2024 Conference Papers
+(2024). https://doi.org/10.1145/3641519.3657428
+25. Huang, Z., Gong, M.: Textured-gs: Gaussian splatting with spatially defined color
+and opacity. arXiv preprint arXiv:2407.09733 (2024)
+26. Joint Photographic Experts Group: JPEG XL image coding system. https://
+jpeg.org/jpegxl/ (2024), accessed: 2024-05-24
+27. Kerbl, B., Kopanas, G., Leimkühler, T., Drettakis, G.: 3D gaussian splatting for
+real-time radiance field rendering. ACM Transactions on Graphics (Proceedings of
+SIGGRAPH) 42(4) (2023)
+28. Kheradmand, S., Rebain, D., Sharma, G., Sun, W., Tseng, Y.C., Isack, H., Kar,
+A., Tagliasacchi, A., Yi, K.M.: 3D gaussian splatting as markov chain monte carlo.
+In: Advances in Neural Information Processing Systems (NeurIPS) (2024)
+29. Kingma, D.P., Ba, J.: Adam: A method for stochastic optimization (2017)
+18
+J. Condor et al.
+30. Knapitsch, A., Park, J., Zhou, Q.Y., Koltun, V.: Tanks and temples: Benchmarking
+large-scale scene reconstruction. ACM Transactions on Graphics (Proceedings of
+SIGGRAPH) 36(4) (2017)
+31. Kopanas, G., Leimkühler, T., Rainer, G., Jambon, C., Drettakis, G.: Neural point
+catacaustics for novel-view synthesis of reflections. ACM Trans. Graph. 41(6) (Nov
+2022). https://doi.org/10.1145/3550454.3555497, https://doi.org/10.1145/
+3550454.3555497
+32. Kulhanek, J., Rakotosaona, M.J., Manhardt, F., Tsalicoglou, C., Niemeyer, M.,
+Sattler, T., Peng, S., Tombari, F.: Lodge: Level-of-detail large-scale gaussian splatting with efficient rendering. arXiv preprint arXiv:2505.23158 (2025)
+33. Li, B., Weinberger, K.Q., Belongie, S., Koltun, V., Ranftl, R.: Language-driven
+semantic segmentation. arXiv preprint arXiv:2201.03546 (2022)
+34. Li, Z., Müller, T., Evans, A., Taylor, R.H., Unberath, M., Liu, M.Y., Lin, C.H.:
+Neuralangelo: High-fidelity neural surface reconstruction. In: Proceedings of the
+IEEE/CVF conference on computer vision and pattern recognition. pp. 8456–8465
+(2023)
+35. Liang, H., Ren, J., Mirzaei, A., Torralba, A., Liu, Z., Gilitschenski, I., Fidler, S.,
+Oztireli, C., Ling, H., Gojcic, Z., Huang, J.: Feed-forward bullet-time reconstruction of dynamic scenes from monocular videos. arXiv preprint arXiv:2412.03526
+(2024)
+36. Liu, L., Gu, J., Lin, K.Z., Chua, T.S., Theobalt, C.: Neural sparse voxel fields. In:
+Advances in Neural Information Processing Systems (NeurIPS) (2020)
+37. Liu, R., Sun, D., Chen, M., Wang, Y., Feng, A.: Deformable beta splatting. In:
+Proceedings of SIGGRAPH Conference Papers (2025)
+38. Lombardi, S., Simon, T., Saragih, J., Schwartz, G., Lehrmann, A., Sheikh, Y.:
+Neural volumes: Learning dynamic renderable volumes from images. ACM Transactions on Graphics (Proceedings of SIGGRAPH) 38(4) (2019)
+39. Lombardi, S., Simon, T., Schwartz, G., Zollhoefer, M., Sheikh, Y., Saragih, J.:
+Mixture of volumetric primitives for efficient neural rendering. ACM Transactions
+on Graphics (Proceedings of SIGGRAPH) 40(4) (2021)
+40. Luo, A., Du, Y., Tarr, M., Tenenbaum, J., Torralba, A., Gan, C.: Learning neural
+acoustic fields. Advances in Neural Information Processing Systems 35, 3165–3177
+(2022)
+41. Mai, A., Hedstrom, T., Kopanas, G., Kontkanen, J., Kuester, F., Barron, J.T.:
+Radiance meshes for volumetric reconstruction. arXiv preprint arXiv:2512.04076
+(2025)
+42. Mai, A., Hedstrom, T., Kopanas, G., Kontkanen, J., Kuester, F., Barron, J.T.:
+Radiance meshes for volumetric reconstruction (2025), https://arxiv.org/abs/
+2512.04076
+43. Martel, J.N.P., Lindell, D.B., Lin, C.Z., Chan, E.R., Monteiro, M., Wetzstein,
+G.: ACORN adaptive coordinate networks for neural scene representation. ACM
+Transactions on Graphics (Proceedings of SIGGRAPH) 40(4) (2021). https:
+//doi.org/10.1145/3450626.3459785, https://doi.org/10.1145/3450626.
+3459785
+44. Martins, T.B., Civera, J.: Feature splatting for better novel view synthesis with
+low overlap. British Machine Vision Conference (BMVC) (2024)
+45. Micikevicius, P., Narang, S., Alben, J., Diamos, G., Elsen, E., Garcia, D., Ginsburg,
+B., Houston, M., Kuchaiev, O., Venkatesh, G., et al.: Mixed precision training.
+arXiv preprint arXiv:1710.03740 (2017)
+Neural Harmonic Textures
+19
+46. Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng,
+R.: NeRF: Representing scenes as neural radiance fields for view synthesis. In:
+Proceedings of ECCV (2020)
+47. Moenne-Loccoz, N., Mirzaei, A., Perel, O., de Lutio, R., Esturo, J.M., State, G.,
+Fidler, S., Sharp, N., Gojcic, Z.: 3d gaussian ray tracing: Fast tracing of particle
+scenes. ACM Transactions on Graphics and SIGGRAPH Asia (2024)
+48. Mujkanovic, F., Nsampi, N.E., Theobalt, C., Seidel, H.P., Leimkühler, T.: Neural
+gaussian scale-space fields. ACM Trans. Graph. 43(4) (Jul 2024). https://doi.
+org/10.1145/3658163, https://doi.org/10.1145/3658163
+49. Müller, T., Evans, A., Schied, C., Keller, A.: Instant neural graphics primitives
+with a multiresolution hash encoding. ACM Trans. Graph. 41(4) (2022)
+50. Müller, T., McWilliams, B., Rousselle, F., Gross, M., Novák, J.: Neural importance
+sampling. ACM Transactions on Graphics (TOG) 38(5), 1–19 (2019)
+51. Park, J.J., Florence, P., Straub, J., Newcombe, R., Lovegrove, S.: Deepsdf: Learning
+continuous signed distance functions for shape representation. In: Proceedings of
+the IEEE/CVF conference on computer vision and pattern recognition. pp. 165–
+174 (2019)
+52. Pumarola, A., Corona, E., Pons-Moll, G., Moreno-Noguer, F.: D-nerf: Neural radiance fields for dynamic scenes. In: Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition. pp. 10318–10327 (2021)
+53. Reiser, C., Peng, S., Liao, Y., Geiger, A.: KiloNeRF: Speeding up Neural Radiance
+Fields with Thousands of Tiny MLPs. In: Proceedings of ICCV (2021)
+54. Saragadam, V., LeJeune, D., Tan, J., Balakrishnan, G., Veeraraghavan, A., Baraniuk, R.G.: Wire: Wavelet implicit neural representations. In: Proceedings of the
+IEEE/CVF conference on computer vision and pattern recognition. pp. 18507–
+18516 (2023)
+55. Sitzmann, V., Martel, J., Bergman, A., Lindell, D., Wetzstein, G.: Implicit neural
+representations with periodic activation functions. Advances in neural information
+processing systems 33, 7462–7473 (2020)
+56. Sitzmann, V., Martel, J.N., Bergman, A.W., Lindell, D.B., Wetzstein, G.: Implicit
+neural representations with periodic activation functions. In: Proc. NeurIPS (2020)
+57. Su, R., Dong, H., Jin, H., Chen, Y., Wang, G., Li, S.: Vertex features for neural global illumination. In: Proceedings of the SIGGRAPH Asia 2025 Conference
+Papers. pp. 1–11 (2025)
+58. Sun, C., Sun, M., Chen, H.: Direct voxel grid optimization: Super-fast convergence
+for radiance fields reconstruction. In: CVPR (2022)
+59. Svitov, D., Morerio, P., Agapito, L., Del Bue, A.: Billboard splatting (bbsplat): Learnable textured primitives for novel view synthesis. arXiv preprint
+arXiv:2411.08508 (2024)
+60. Takikawa, T., Litalien, J., Yin, K., Kreis, K., Loop, C., Nowrouzezahrai, D., Jacobson, A., McGuire, M., Fidler, S.: Neural geometric level of detail: Real-time
+rendering with implicit 3d shapes. In: Proceedings of the IEEE/CVF conference
+on computer vision and pattern recognition. pp. 11358–11367 (2021)
+61. Takikawa, T., Müller, T., Nimier-David, M., Evans, A., Fidler, S., Jacobson, A.,
+Keller, A.: Compact neural graphics primitives with learned hash probing. In:
+SIGGRAPH Asia 2023 Conference Papers. SA ’23, Association for Computing
+Machinery, New York, NY, USA (2023). https://doi.org/10.1145/3610548.
+3618167, https://doi.org/10.1145/3610548.3618167
+62. Tancik, M., Srinivasan, P.P., Mildenhall, B., Fridovich-Keil, S., Raghavan, N., Singhal, U., Ramamoorthi, R., Barron, J.T., Ng, R.: Fourier features let networks learn
+high frequency functions in low dimensional domains. NeurIPS (2020)
+20
+J. Condor et al.
+63. Thies, J., Zollhöfer, M., Nießner, M.: Deferred neural rendering: Image synthesis
+using neural textures. Acm Transactions on Graphics (Proceedings of SIGGRAPH)
+38(4) (2019)
+64. Wang, J., Chen, M., Karaev, N., Vedaldi, A., Rupprecht, C., Novotny, D.: Vggt:
+Visual geometry grounded transformer. In: Proceedings of the Computer Vision
+and Pattern Recognition Conference. pp. 5294–5306 (2025)
+65. Wang, P., Liu, L., Liu, Y., Theobalt, C., Komura, T., Wang, W.: Neus: Learning
+neural implicit surfaces by volume rendering for multi-view reconstruction. arXiv
+preprint arXiv:2106.10689 (2021)
+66. Wang, Y., Zhou, J., Zhu, H., Chang, W., Zhou, Y., Li, Z., Chen, J., Pang, J.,
+Shen, C., He, T.: π 3 : Permutation-equivariant visual geometry learning (2025),
+https://arxiv.org/abs/2507.13347
+67. Wu, G., Yi, T., Fang, J., Xie, L., Zhang, X., Wei, W., Liu, W., Tian, Q., Wang,
+X.: 4D gaussian splatting for real-time dynamic scene rendering. In: Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)
+(2024)
+68. Wu, Q., Bauer, D., Doyle, M.J., Ma, K.L.: Interactive volume visualization via
+multi-resolution hash encoding based neural representation. IEEE Transactions
+on Visualization and Computer Graphics pp. 1–14 (2023). https://doi.org/10.
+1109/TVCG.2023.3293121
+69. Wu, Q., Insley, J.A., Mateevitsi, V.A., Rizzi, S., Papka, M.E., Ma, K.L.: Distributed neural representation for reactive in situ visualization. IEEE Transactions on Visualization and Computer Graphics 31(9), 5199–5214 (2025). https:
+//doi.org/10.1109/TVCG.2024.3432710
+70. Wu, Q., Martinez Esturo, J., Mirzaei, A., Moenne-Loccoz, N., Gojcic, Z.: 3dgut:
+Enabling distorted cameras and secondary rays in gaussian splatting. Conference
+on Computer Vision and Pattern Recognition (CVPR) (2025)
+71. Wurster, S., Zhang, R., Zheng, C.: Gabor splatting for high-quality gigapixel image
+representations. In: ACM SIGGRAPH 2024 Posters. SIGGRAPH ’24, Association
+for Computing Machinery, New York, NY, USA (2024). https://doi.org/10.
+1145/3641234.3671081, https://doi.org/10.1145/3641234.3671081
+72. Xie, Y., Takikawa, T., Saito, S., Litany, O., Yan, S., Khan, N., Tombari, F., Tompkin, J., Sitzmann, V., Sridhar, S.: Neural fields in visual computing and beyond.
+In: Computer graphics forum. vol. 41, pp. 641–676. Wiley Online Library (2022)
+73. Xu, T.X., Hu, W., Lai, Y.K., Shan, Y., Zhang, S.H.: Texture-gs: Disentangling the
+geometry and texture for 3d gaussian splatting editing. In: European Conference
+on Computer Vision. pp. 37–53. Springer (2024)
+74. Yariv, L., Hedman, P., Reiser, C., Verbin, D., Srinivasan, P.P., Szeliski, R., Barron,
+J.T., Mildenhall, B.: BakedSDF: Meshing neural SDFs for real-time view synthesis.
+In: ACM SIGGRAPH 2023 Conference Proceedings (2023)
+75. Ye, V., Li, R., Kerr, J., Turkulainen, M., Yi, B., Pan, Z., Seiskari, O., Ye, J., Hu, J.,
+Tancik, M., Kanazawa, A.: gsplat: An open-source library for gaussian splatting.
+Journal of Machine Learning Research 26(34), 1–17 (2025)
+76. Ye, V., Li, R., Kerr, J., Turkulainen, M., Yi, B., Pan, Z., Seiskari, O., Ye, J., Hu, J.,
+Tancik, M., Kanazawa, A.: gsplat: An open-source library for gaussian splatting.
+Journal of Machine Learning Research 26(34), 1–17 (2025)
+77. Zhang, J., Ji, M., Wang, G., Xue, Z., Wang, S., Fang, L.: Surrf: Unsupervised multiview stereopsis by learning surface radiance field. IEEE Transactions on Pattern
+Analysis and Machine Intelligence 44(11), 7912–7927 (2022). https://doi.org/
+10.1109/TPAMI.2021.3116695
+Neural Harmonic Textures
+21
+78. Zhang, K., Bi, S., Tan, H., Xiangli, Y., Zhao, N., Sunkavalli, K., Xu, Z.: Gs-lrm:
+Large reconstruction model for 3d gaussian splatting. European Conference on
+Computer Vision (2024)
+79. Zhang, X., Chen, A., Xiong, J., Dai, P., Shen, Y., Xu, W.: Neural shell texture
+splatting: More details and fewer primitives. In: Proceedings of the IEEE/CVF
+International Conference on Computer Vision. pp. 25229–25238 (2025)
+80. Zhang, X., Chen, A., Xiong, J., Dai, P., Shen, Y., Xu, W.: Neural shell texture
+splatting: More details and fewer primitives. In: Proceedings of the IEEE/CVF
+International Conference on Computer Vision (ICCV) (2025)
+81. Zhou, J., Huang, Y., Dai, W., Zou, J., Zheng, Z., Kan, N., Li, C., Xiong, H.:
+3dgabsplat: 3d gabor splatting for frequency-adaptive radiance field rendering.
+arXiv preprint arXiv:2508.05343 (2025)
+82. Zhou, S., Chang, H., Jiang, S., Fan, Z., Zhu, Z., Xu, D., Chari, P., You, S., Wang, Z.,
+Kadambi, A.: Feature 3dgs: Supercharging 3d gaussian splatting to enable distilled
+feature fields. In: Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition. pp. 21676–21685 (2024)
+83. Zhou, X., Nguyen, B.H., Magne, L., Golyanik, V., Leimkühler, T., Theobalt, C.:
+Splat the net: Radiance fields with splattable neural primitives. arXiv preprint
+arXiv:2510.08491 (2025)
+Supplementary Material
+Neural Harmonic Textures for High-Quality Primitive
+Based Neural Reconstruction
+Jorge Condor1,2 , Nicolas Moënne-Loccoz1 , Merlin Nimier-David1 , Piotr
+Didyk2 , Zan Gojcic1 , and Qi Wu1
+1
+NVIDIA
+{nicolasm,mnimierdavid,zgojcic,qiwu}@nvidia.com
+2
+Università della Svizzera italiana, Lugano, Switzerland
+{jorge.condor,piotr.didyk}@usi.ch
+1
+Additional Results
+Comparison with BBSplat. Both BBSplat [59] and NHT are primitive-texturing
+methods, but BBSplat uses an explicit per-primitive RGBA grid, whereas NHT
+uses implicit textures obtained by interpolating features from a virtual scaffold
+and decoding them with a shared MLP in a single deferred pass. Tab. 1 compares
+the two on MipNeRF360 across primitive budgets, under both equal-primitive
+and equal-memory settings. NHT achieves substantially higher quality and faster
+rendering not only at equal memory, but also at equal primitive count.
+In Tab. 6 we provide a detailed breakdown of Tab. 2 from the main paper,
+with per-scene results on MipNeRF360, Tanks and Temples and Deep Blending.
+For this comparison, we isolate completely the effect of our method by ensuring
+an even setup for all methods. All four approaches are implemented under the
+same framework (gsplat), trained for 30k iterations, using 1M primitives for all
+scenes, sharing training parameters among all scenes, and limiting to 48 features
+per primitive reserved for appearance. All results presented in this paper compute
+the LPIPs metric using the VGG model with normalized inputs to the range of
+[−1, 1]. Tab. 2 reports the average wall-clock training time per dataset for all
+four methods on an RTX 5090, under this same controlled setup.
+Furthermore, in Tab. 3 we provide another standardized comparison on all
+three benchmarks, only this time we match the same primitive count in each
+scene as the high-quality reported baselines in their respective papers, training
+for the same amount of iterations. We include our method with both 48 and 64
+features per primitive (48F, 64F).
+Training dynamics and overfitting. Fig. 2 shows eval-set PSNR during training on representative MipNeRF360 scenes. Highly expressive primitive appearance models can overfit when training for many epochs relative to dataset size,
+motivating the need to ensure equal training epochs rather than single frame
+iterations in Tab. 1.
+Tab. 7 details the per-scene results of main Tab. 1, which uses our split indoor/outdoor training configuration. This is our higher quality setup, which
+Neural Harmonic Textures — Supplementary
+23
+Table 1: Comparison with BBSplat [59] on MipNeRF360 (average over all 9 scenes).
+We follow BBSplat’s default training strategy and vary only the primitive cap; at 15k
+primitives we allocate 2k to the skybox following their supplement. Memory is reported
+after all compression schemes are applied. For NHT, primitive geometry is stored in
+fp32 and vertex features plus MLP weights in fp16. Performance measured on an A100
+80GB (Ampere).
+BBSplat
+NHT (equal primitives)
+NHT (∼ equal memory)
+Cap
+PSNR↑ LPIPS↓ MB↓ FPS↑ PSNR↑ LPIPS↓ MB↓ FPS↑ PSNR↑ LPIPS↓ MB↓ FPS↑
+15K
+30K
+60K
+160K
+300K
+24.35
+24.95
+26.10
+26.85
+27.09
+0.416
+0.362
+0.294
+0.264
+0.255
+13.2
+25.6
+50.2
+124.6
+215.5
+86.9
+64.3
+55.0
+33.2
+17.3
+24.54
+25.49
+26.40
+27.39
+27.83
+3DGUT-MCMC
+23.97 dB / 0.724 / 0.548
+0.448
+0.403
+0.358
+0.302
+0.273
+2.5
+5.0
+9.9
+26.3
+49.3
+222.2
+214.5
+211.3
+170.3
+137.8
+26.29
+27.03
+27.64
+28.16
+28.36
+0.358
+0.318
+0.283
+0.247
+0.232
+9.0 245.4
+18.1 192.5
+36.3 165.4
+93.8 111.5
+161.6 84.0
+Neural Harmonic Textures (Ours)
+27.63 dB / 0.856 / 0.410
+Fig. 1: Qualitative comparison on MipNeRF360 bonsai with 10K Gaussians. Metrics
+are PSNR / SSIM / LPIPS averages over the test set. NHT recovers substantially more
+detail than 3DGUT-MCMC at equal primitive budget (+3.7 dB PSNR).
+adapts to the different scene scale and dataset sizes of outdoor and indoor
+datasets.
+Effect of reference image format. As noted in Tab. 1, MipNeRF360 images
+are distributed as pre-downscaled, re-compressed JPEG files. The default gsplat
+pipeline downscales and converts these to lossless PNGs before training and evaluation, which removes JPEG compression artifacts from the ground truth. In
+Tab. 5 we compare NHT results under both protocols. Training and evaluating
+directly on the original JPEG references yields slightly lower PSNR (−0.28 dB),
+SSIM (−0.011), and higher LPIPS (+0.014) on average, as JPEG compression
+artifacts in the ground truth lower the effective quality ceiling.
+1.1
+Semantic Reconstruction
+Semantic Reconstruction Details For our semantic reconstruction task, following
+a similar setup to Feature 3DGS [82], we train a joint RGB and LSEG semantic
+24
+J. Condor et al.
+Table 2: Average wall-clock training time (minutes) to reach 30k iterations with 1M
+primitives, measured on an NVIDIA RTX 5090 and averaged per dataset. All methods
+are implemented in the same gsplat [76] framework and use the same hyperparameters
+as in Tab. 2. NHT timings use our fused kernels.
+Method (w/ MCMC)
+MipNeRF360
+Tanks & Temples
+Deep Blending
+3DGS + SH
+3DGUT + SH
+3DGUT + SV
+3DGUT + NHT (Ours)
+6.0
+7.1
+7.7
+14.5
+5.1
+5.8
+6.4
+9.4
+5.2
+6.0
+6.6
+10.6
+Table 3: Standardized comparison on MipNeRF360 [2], Tanks & Temples [30], and
+Deep Blending [21]: 3DGS-MCMC, 3DGUT-MCMC, and ours with 48 and 64 features
+per primitive (48F, 64F). All methods use the same primitive count (matching the
+high-quality preset in 3DGS-MCMC, which replicates the number of primitives in each
+scene from original 3DGS), 30k iterations, and the same hyperparameters across all
+scenes. Extended version of Tab. 2 of the main paper. While our work particularly
+excels at extracting higher quality from less primitives, we still outperform previous
+works at high primitive counts across the board.
+MipNeRF360
+Method
+Tanks & Temples
+Deep Blending
+PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+3DGS-MCMC + SH
+28.21
+3DGUT-MCMC + SH
+28.08
+3DGUT-MCMC + NHT (Ours, 48F) 28.65
+3DGUT-MCMC + NHT (Ours, 64F) 28.68
+0.841
+0.837
+0.834
+0.832
+0.214
+0.218
+0.212
+0.211
+24.46
+24.20
+25.41
+25.64
+0.866
+0.861
+0.878
+0.879
+0.174
+0.180
+0.156
+0.154
+29.49
+29.87
+30.67
+30.69
+0.912
+0.913
+0.918
+0.918
+0.306
+0.309
+0.302
+0.301
+feature field. Joint RGB and LSEG training uses the same approach, densification, and regularization as standard radiance-field training, with the differences
+being in the addition of semantic supervision losses and an expanded decoding head in our MLP. The deferred MLP is extended to predict both RGB (3
+channels) and LSEG features (512 dimensions) via addition of an extra Pytorch
+linear layer. Rendering speed becomes bottlenecked by this linear layer, and
+more efficient fused alternatives or upsampling strategies could be explored in
+the future—we consider this a proof-of-concept implementation.
+The total loss adds an LSEG term to the usual L1 , D-SSIM, opacity and
+scale regularizers terms:
+\mathcal {L}_{\text {LSEG}} = \lambda _{\text {LSEG}}\, \mathcal {L}_{\mathrm {L}_1} \left (\hat {f}, f^* \right ) + \lambda _{\text {cos}}\,\left (1 - \cos (\hat {f}, f^*)\right ),
+(1)
+where fˆ and f ∗ are predicted and ground-truth LSEG feature maps, and cos
+their cosine similarity. We compute these losses at the native LSEG resolution:
+the model renders at RGB resolution (high); then, we bilinearly downsample the
+predicted feature map to match the (lower-resolution) LSEG targets. Tab. 9 lists
+the LSEG-specific hyperparameters used in our final training. We largely kept
+the same configuration from our pure RGB radiance field experiments; further
+tuning for this specific use case may render higher performance.
+Neural Harmonic Textures — Supplementary
+25
+Table 4: Per-scene results for the standardized comparison (Tab. 3). All methods use
+the same primitive count (matching the baseline default), 30k iterations, and the same
+hyperparameters across all scenes.
+3DGS-MCMC + SH
+Scene
+3DGUT-MCMC + SH
+NHT (Ours, 48F)
+NHT (Ours, 64F)
+PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+MipNeRF360 – Outdoor
+0.801
+0.880
+0.808
+0.670
+0.652
+0.183
+0.107
+0.203
+0.310
+0.312
+25.69
+27.84
+27.15
+23.13
+22.25
+0.790
+0.874
+0.802
+0.664
+0.648
+0.193
+0.111
+0.215
+0.313
+0.318
+25.53
+28.33
+27.06
+21.96
+21.90
+0.779
+0.878
+0.788
+0.639
+0.637
+0.202
+0.102
+0.215
+0.311
+0.315
+25.62
+28.23
+27.02
+22.27
+21.77
+0.776
+0.876
+0.786
+0.640
+0.631
+0.202
+0.103
+0.215
+0.308
+0.312
+32.56
+29.53
+32.10
+32.84
+0.939
+0.925
+0.938
+0.955
+0.240
+0.219
+0.136
+0.216
+32.43
+29.55
+31.96
+32.76
+0.939
+0.925
+0.938
+0.955
+0.241
+0.220
+0.136
+0.215
+33.82
+30.80
+33.43
+34.99
+0.945
+0.931
+0.944
+0.963
+0.229
+0.205
+0.127
+0.202
+33.75
+30.92
+33.44
+35.07
+0.946
+0.931
+0.944
+0.962
+0.227
+0.203
+0.124
+0.201
+22.48
+26.43
+0.832
+0.899
+0.221
+0.126
+22.19
+26.21
+0.826
+0.896
+0.229
+0.131
+23.88
+26.94
+0.856
+0.901
+0.198
+0.115
+24.33
+26.96
+0.858
+0.901
+0.194
+0.114
+29.25
+29.72
+0.910
+0.913
+0.310
+0.301
+29.13
+30.60
+0.910
+0.916
+0.315
+0.302
+30.06
+31.28
+0.916
+0.920
+0.308
+0.297
+30.09
+31.28
+0.916
+0.920
+0.306
+0.296
+M360 Outdoor Avg 25.37
+M360 Indoor Avg
+31.76
+M360 Total Avg
+28.21
+24.46
+T&T Avg
+DB Avg
+29.49
+0.762
+0.939
+0.841
+0.866
+0.912
+0.223
+0.203
+0.214
+0.174
+0.306
+25.21
+31.67
+28.08
+24.20
+29.87
+0.756
+0.939
+0.837
+0.861
+0.913
+0.230
+0.203
+0.218
+0.180
+0.309
+24.96
+33.26
+28.65
+25.41
+30.67
+0.744
+0.946
+0.834
+0.879
+0.918
+0.229
+0.191
+0.212
+0.157
+0.302
+24.98
+33.30
+28.68
+25.65
+30.69
+0.742
+0.946
+0.832
+0.879
+0.918
+0.228
+0.189
+0.211
+0.154
+0.301
+bicycle
+garden
+stump
+treehill
+flowers
+25.87
+28.11
+27.32
+23.29
+22.25
+MipNeRF360 – Indoor
+room
+counter
+kitchen
+bonsai
+Tanks & Temples
+train
+truck
+Deep Blending
+drjohnson
+playroom
+Differences to RGB-only training. Aside from the extra output head and loss
+terms, training proceeds as in the main paper: same optimizer, learning-rate
+schedules, EMA on the MLP, and color-refinement phase. The only architectural
+change is the increased output dimension (3 + 512 when fused, or a separate
+512-dim linear layer). We do not use a separate training stage for LSEG; RGB
+and LSEG are optimized jointly from the start.
+PCA visualization. LSEG feature maps are 512-dimensional and therefore not
+directly viewable. For qualitative inspection, we project both ground-truth and
+predicted features to RGB via PCA. The PCA basis is computed from the first
+image, then applied the to all frames. Fig. 3 shows example PCA visualizations.
+They allow a direct visual comparison of semantic structure and show that the
+predicted features align well with the target, while being substantially faster to
+generate and higher resolution than inferring the RGB frame only and running
+the LSEG model to obtain its feature map. Semantic scene reconstruction extracts detail from the multiple training views, improving the granularity of the
+semantic information available for downstream applications.
+Finally, in Tab. 8 we ablate the feature dimensionality for the joint RGB and
+LSEG semantic reconstruction task.
+26
+J. Condor et al.
+bicycle
+25
+NHT (ours)
+Spherical Betas
+Spherical Voronoi
+32
+24
+30
+23
+PSNR
+PSNR
+room
+34
+NHT (ours)
+Spherical Betas
+Spherical Voronoi
+22
+28
+21
+26
+20
+0
+10000 20000 30000 40000 50000 60000 70000
+iteration
+0
+10000 20000 30000 40000 50000 60000 70000
+iteration
+Fig. 2: Eval-set PSNR during training on MipNeRF360 scenes bicycle (outdoors, 194
+images) and room (indoors, 311 images). Overfitting can manifest when scenes are
+sparsely captured and trained for a higher number of epochs.
+Table 5: Effect of reference image format on MipNeRF360 evaluation for NHT (Ours).
+Downscaled PNGs uses gsplat’s default strategy, which downscales and converts the
+provided JPEG references to lossless PNGs before training and evaluation. JPEG
+(original) trains and evaluates directly on the provided JPEG-compressed references
+without any preprocessing. JPEG compression artifacts in the ground truth lower the
+effective quality ceiling, slightly degrading all three metrics.
+2
+References
+PSNR↑
+SSIM↑
+LPIPS↓
+Downscaled PNGs
+JPEG (original)
+29.022
+28.738
+0.8447
+0.8341
+0.2026
+0.2164
+∆
+−0.284
+−0.0106
++0.0138
+Feature interpolation
+For a spatial coordinate p lying on the surface of our topology, or inside of its
+volume, we can compute the feature vector by barycentrically interpolating the
+feature vectors at the vertices of the shape. For example, for a 2D triangle with
+vertices v1 , v2 , v3 , the feature vector f (p) is computed as
+f(\mathbf {p}) = \sum _{i=1}^{n} \alpha _i f_i
+(2)
+where fi are the features at the triangle vertices, and αi are the barycentric coordinates at the evaluated point. In the case of 2D triangles, barycentric weights
+are computed as
+\alpha _i = \frac {A_i}{A}, \quad A = \sum _{j=1}^{n} A_j
+(3)
+Neural Harmonic Textures — Supplementary
+27
+Table 6: Per-scene results on MipNeRF360 [2], Tanks & Temples [30], and Deep
+Blending [21], from Tab. 2. This is the standardized setup limited to 1M primitives,
+30k iterations, same number of appearance features per primitive (48) and same hyperparameters for all scenes, isolating entirely the effect of our approach from other
+variables.
+3DGS-MCMC
+Scene
+3DGUT-MCMC + SH
+3DGUT-MCMC + SV
+3DGUT-MCMC + NHT (Ours)
+PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑
+LPIPS↓
+MipNeRF360 – Outdoor
+0.774
+0.855
+0.788
+0.665
+0.628
+0.246
+0.155
+0.250
+0.366
+0.362
+25.51
+27.21
+26.93
+23.30
+22.07
+0.771
+0.854
+0.789
+0.663
+0.627
+0.250
+0.156
+0.251
+0.368
+0.363
+25.21
+27.48
+25.95
+23.16
+21.76
+0.758
+0.856
+0.757
+0.653
+0.616
+0.255
+0.156
+0.270
+0.371
+0.367
+25.43
+28.04
+26.58
+23.13
+21.60
+0.771
+0.872
+0.772
+0.660
+0.615
+0.243
+0.122
+0.249
+0.340
+0.351
+32.33
+29.48
+31.67
+32.69
+0.938
+0.924
+0.935
+0.953
+0.245
+0.223
+0.144
+0.220
+32.36
+29.47
+31.72
+32.76
+0.937
+0.923
+0.935
+0.953
+0.246
+0.224
+0.144
+0.220
+32.67
+30.69
+32.38
+34.07
+0.939
+0.932
+0.938
+0.959
+0.243
+0.213
+0.140
+0.215
+33.03
+30.83
+32.98
+34.55
+0.943
+0.931
+0.942
+0.961
+0.234
+0.208
+0.132
+0.208
+22.50
+26.00
+0.832
+0.891
+0.224
+0.151
+22.10
+25.88
+0.827
+0.890
+0.231
+0.153
+22.32
+26.04
+0.831
+0.891
+0.223
+0.151
+23.11
+26.48
+0.851
+0.898
+0.202
+0.135
+29.50
+30.45
+0.909
+0.915
+0.320
+0.313
+29.60
+30.82
+0.909
+0.916
+0.321
+0.315
+29.69
+30.89
+0.909
+0.915
+0.321
+0.318
+30.24
+31.52
+0.915
+0.920
+0.317
+0.306
+M360 Outdoor Avg 25.06
+M360 Indoor Avg
+31.54
+M360 Total Avg
+27.94
+T&T Avg
+24.25
+DB Avg
+29.98
+0.742
+0.938
+0.829
+0.861
+0.912
+0.276
+0.208
+0.246
+0.188
+0.317
+25.00
+31.58
+27.93
+23.99
+30.21
+0.741
+0.937
+0.828
+0.859
+0.913
+0.278
+0.209
+0.247
+0.192
+0.318
+24.71
+32.45
+28.15
+24.18
+30.29
+0.728
+0.942
+0.823
+0.861
+0.912
+0.284
+0.203
+0.248
+0.187
+0.320
+24.96
+32.85
+28.46
+24.79
+30.88
+0.738
+0.944
+0.830
+0.875
+0.918
+0.261
+0.196
+0.232
+0.169
+0.311
+bicycle
+garden
+stump
+treehill
+flowers
+25.61
+27.29
+26.93
+23.45
+22.04
+MipNeRF360 – Indoor
+room
+counter
+kitchen
+bonsai
+Tanks & Temples
+train
+truck
+Deep Blending
+drjohnson
+playroom
+where A is the total area of the triangle and Ai is the area of the sub-triangle
+formed by the evaluation point p and the edge opposite to vertex i. For a triangle
+with vertices v1 , v2 , v3 :
+A_1 &= \frac {1}{2} \left \| (\mathbf {v}_2 - \mathbf {p}) \times (\mathbf {v}_3 - \mathbf {p}) \right \|, \nonumber \\ A_2 &= \frac {1}{2} \left \| (\mathbf {v}_3 - \mathbf {p}) \times (\mathbf {v}_1 - \mathbf {p}) \right \|, \nonumber \\ A_3 &= \frac {1}{2} \left \| (\mathbf {v}_1 - \mathbf {p}) \times (\mathbf {v}_2 - \mathbf {p}) \right \|.
+(4)
+For 2D connected triangles, this is similar to vertex features recently introduced in the context of neural global illumination [57]. Our formulation however
+is more general and extends to higher order topologies and disconnected meshes.
+For tetrahedra, barycentric weights are similarly computed as
+\alpha _i = \frac {V_i}{V}, \quad V = \sum _{j=1}^{n} V_j
+(5)
+where V is the total volume of the tetrahedron and Vi is the volume of the subtetrahedron formed by the evaluation point p and the face opposite to vertex i.
+28
+J. Condor et al.
+GT
+Ours
+GT
+Ours
+Fig. 3: LSEG feature PCA visualizations on test views from MipNeRF360. Rows from
+top to bottom: bicycle, garden, bonsai, kitchen. Each pair shows the ground-truth LSEG
+features (GT) alongside our rendered features (Ours). Our method faithfully reconstructs semantic feature maps while preserving sharp boundaries, at higher resolutions,
+and real-time.
+For a tetrahedron with vertices v1 , v2 , v3 , v4 :
+V_1 &= \frac {1}{6} \left \| (\mathbf {v}_2 - \mathbf {p}) \times (\mathbf {v}_3 - \mathbf {p}) \cdot (\mathbf {v}_4 - \mathbf {p}) \right \|, \nonumber \\ V_2 &= \frac {1}{6} \left \| (\mathbf {v}_3 - \mathbf {p}) \times (\mathbf {v}_4 - \mathbf {p}) \cdot (\mathbf {v}_1 - \mathbf {p}) \right \|, \nonumber \\ V_3 &= \frac {1}{6} \left \| (\mathbf {v}_4 - \mathbf {p}) \times (\mathbf {v}_1 - \mathbf {p}) \cdot (\mathbf {v}_2 - \mathbf {p}) \right \|, \nonumber \\ V_4 &= \frac {1}{6} \left \| (\mathbf {v}_1 - \mathbf {p}) \times (\mathbf {v}_2 - \mathbf {p}) \cdot (\mathbf {v}_3 - \mathbf {p}) \right \|.
+(6)
+2.1
+Optimization choices and hyperparameters
+Tab. 10 ablates the individual contributions of the training strategies described
+in the main paper (learning rate scheduling, EMA on the MLP weights, loss
+scaling, color-refinement phase, and opacity and scale regularization). Tab. 12
+lists the full set of hyperparameters and optimization details used for radiance
+field reconstruction.
+Neural Harmonic Textures — Supplementary
+29
+Tab. 11 ablates the encoding function applied to the interpolated features before the decoding MLP. We compare no encoding (identity), a ReLU activation,
+a cosine encoding, and a paired cosine-and-sine encoding.
+3
+2D Image Reconstruction Details
+We provide additional details on the high-resolution HDR image fitting experiment summarized in the main paper. We adapt Neural Harmonic Textures to
+this domain while preserving the core idea: learnable per-vertex features, interpolated per pixel and activated with periodic functions, and decoded by a
+shallow MLP. However, there are a number of differences to the 3D and semantic reconstruction tasks, which we detail below.
+3.1
+Representation
+Triangle mesh. Unlike the volumetric disconnected primitives used in the scene
+reconstruction tasks, the 2D image fitting experiment employs a connected Delaunay triangulation that tiles the image plane without overlap. Every pixel
+belongs to exactly one triangle; there is no alpha blending, no Gaussian kernel,
+and no depth ordering. Vertices can be freely learned and positioned, and carry
+individual learnable feature vectors. Given a query pixel, its containing triangle
+is found via a tile-accelerated rasterizer, and the features at the triangle’s three
+vertices are interpolated to produce a per-pixel feature vector.
+Clough–Tocher C 1 interpolation. Standard barycentric (linear) interpolation
+produces a C 0 feature field: while continuous, the feature gradient is discontinuous across triangle edges. This turns out to be problematic when meshes are
+fully opaque, as it creates high frequency artifacts. Despite being followed by a
+frequency encoding and a nonlinear MLP, these gradient discontinuities manifest
+as visible seam artifacts along every edge.
+To eliminate this, we replace linear interpolation with Clough–Tocher cubic
+interpolation, which constructs a degree-3 Bézier patch on each triangle from
+vertex values and vertex gradients, guaranteeing C 1 continuity everywhere (and
+C ∞ within each triangle). The 10 Bézier control points are:
+c_{300} &= f_0, \quad c_{030} = f_1, \quad c_{003} = f_2, \nonumber \\ c_{210} &= f_0 + \tfrac {1}{3}\,\nabla f_0 \cdot \mathbf {e}_{01}, \quad c_{120} = f_1 - \tfrac {1}{3}\,\nabla f_1 \cdot \mathbf {e}_{01}, \nonumber \\ c_{021} &= f_1 + \tfrac {1}{3}\,\nabla f_1 \cdot \mathbf {e}_{12}, \quad c_{012} = f_2 - \tfrac {1}{3}\,\nabla f_2 \cdot \mathbf {e}_{12}, \nonumber \\ c_{102} &= f_2 + \tfrac {1}{3}\,\nabla f_2 \cdot \mathbf {e}_{20}, \quad c_{201} = f_0 - \tfrac {1}{3}\,\nabla f_0 \cdot \mathbf {e}_{20}, \nonumber \\ c_{111} &= \tfrac {1}{6}\bigl (c_{210}{+}c_{120}{+}c_{021}{+}c_{012}{+}c_{102}{+}c_{201}\bigr ) \nonumber \\ &\quad - \tfrac {1}{6}\bigl (c_{300}{+}c_{030}{+}c_{003}\bigr ), \label {eq:ct_control_points}
+(7)
+where fi and ∇fi are the feature value and gradient at vertex i, and eij = vj −vi .
+30
+J. Condor et al.
+Vertex gradient estimation. The Clough–Tocher scheme requires per-vertex gradients. We estimate these via a per-vertex least-squares fit over the one-ring
+neighborhood: for each vertex v, we gather all neighbor vertices {vj }j∈N (v) and
+solve
+\nabla f_v = \mathbf {A}_v^{-1}\,\mathbf {b}_v, \quad \mathbf {A}_v = \sum _{j} \Delta \mathbf {p}_j\,\Delta \mathbf {p}_j^\top , \quad \mathbf {b}_v = \sum _{j} \Delta f_j\,\Delta \mathbf {p}_j,
+(8)
+where ∆pj = pj − pv and ∆fj = fj − fv . The 2×2 system is solved analytically
+per vertex in a CUDA kernel. This operation is differentiable and computed at
+every forward pass, enabling gradients to flow through the vertex topology.
+Feature encoding and MLP. Feature encoding and MLP decoding are the same
+as in the main scene reconstruction task.
+3.2
+Training
+Pixel sampling. At each iteration, we sample a batch of pixels via stratified
+sampling. Ground-truth values at sub-pixel coordinates are obtained via bilinear
+interpolation on the target image, implemented as a CUDA texture lookup for
+efficiency.
+Optimizers and schedules. We use Adam [29] with separate parameter groups for
+positions (lr = 10−4 ), features (lr = 5 × 10−3 ), and MLP weights (lr = 5 × 10−5 ).
+An exponential decay schedule is applied after 20 000 iterations with a factor of
+0.33 every 10 000 steps, following Instant NGP [49].
+Loss function. We train with a pixel-wise MSE loss in µ-law encoded space. We
+found this to produce better results than using the relative L2 loss suggested in
+the Instant NGP paper. Raw 14-bit sensor values x are transformed as f (x) =
+log(1 + µ x/w)/ log(1 + µ) with µ = 5000 and w = 214 − 1 = 16,383 (the white
+level of 14-bit data). This compresses the dynamic range before supervision,
+placing relatively more emphasis on shadow detail, which is standard in HDR
+imaging pipelines.
+3.3
+Coarse-to-Fine Densification
+Training begins from a sparse mesh initialized via edge-aware sampling: we compute Sobel gradient magnitudes on a downsampled version of the target image
+and sample initial vertex positions proportionally to edge strength, with a small
+uniform floor for coverage. The result is a Delaunay triangulation of the sampled
+points, with boundary vertices ensuring full image coverage.
+The mesh is progressively refined through densification. Every 500 iterations
+(starting at iteration 1 500 and ending at 15 000), we score each triangle by
+\text {score}_t = \overline {\text {DSSIM}}_t \cdot |\text {pixels}_t|^{\alpha },
+(9)
+Neural Harmonic Textures — Supplementary
+31
+where DSSIMt is the mean DSSIM (per-pixel structural dissimilarity) of triangle t and α = 0.75 is the area-weighting exponent. The area weighting prevents repeated splitting of tiny, high-error triangles and distributes vertices more
+evenly in proportion to their spatial impact. Triangles with fewer than 3 pixels
+are excluded from scoring.
+At each densification step, we insert centroid vertices for the top-scoring triangles (up to 0.35×V new vertices, where V is the current count), initialize their
+features by averaging the parent triangle’s vertex features, and re-run Delaunay
+triangulation on the full vertex set. We also detect when the mesh becomes
+degenerate (e.g. due to vertices becoming colinear) and re-mesh, although this
+rarely occurs in practice.
+3.4
+CUDA Rasterizer
+All rasterization and interpolation operations are implemented as custom forward and backward CUDA kernels, supporting both full-image rendering and
+batched pixel-query modes. Training generally takes between 1-3 minutes in an
+RTXA6000 Ada.
+3.5
+Post-Training Compression
+We also briefly explore the use of post-training compression techniques to further
+reduce storage requirements.
+We compress vertex positions to UInt16, vertex features to uniform Int8
+(with a per-channel scale and offset), and MLP weights to FP16. An entropy
+coder (Zstandard, level 19) is applied to the serialized payload. Combining these
+techniques, the resulting images can be compressed by an additional factor of
+approximately 3× beyond the training result, with negligible quality loss. Tab. 15
+summarizes the results of the post-training compression techniques.
+3.6
+Per-Image Results
+Tabs. 16 and 17 provide per-image results for the 2D image fitting experiment at
+10× and 100× compression ratios, respectively. We provide visual comparisons
+in Fig. 7 and Fig. 4. Our method achieves competitive PSNR in both µ-law and
+tonemapped spaces while substantially outperforming Instant NGP in perceptual
+quality (LPIPS). The advantage is most pronounced at high compression ratios,
+where the non-overlapping mesh topology and C 1 feature interpolation avoid the
+ringing and block artifacts that plague hash-grid methods.
+Tab. 18 provides the full set of hyperparameters for the 2D image fitting
+experiment.
+32
+J. Condor et al.
+Table 7: Per-scene results of NHT (Ours) with split training configurations on MipNeRF360 [2], Tanks & Temples [30], and Deep Blending [21]. We adapt primitive count
+and training length per dataset to accommodate different dataset sizes and spatial
+scales, but keep the same learning rates and other hyperparameters. Indoor datasets
+benefit from encoding the central camera ray, instead of per-ray directions, due to their
+high parallax, acting as a regularization on ray orientation. Trained and evaluated on
+the original JPEG-compressed reference images.
+Scene
+PSNR↑
+SSIM↑
+LPIPS↓
+M360 Outdoor (5M, 25k iters, per-ray)
+garden
+bicycle
+stump
+treehill
+flowers
+28.06
+25.53
+27.10
+23.09
+22.08
+0.875
+0.782
+0.797
+0.652
+0.642
+0.108
+0.203
+0.206
+0.298
+0.304
+M360 Indoor (2M, 45k iters, center ray)
+bonsai
+counter
+kitchen
+room
+35.09
+30.83
+33.40
+33.43
+0.957
+0.925
+0.940
+0.936
+0.222
+0.220
+0.138
+0.250
+Tanks & Temples (2.5M, 40k iters, center ray)
+truck
+train
+26.91
+24.45
+0.900
+0.865
+0.112
+0.169
+Deep Blending (2M, 30k iters, center ray)
+drjohnson
+playroom
+30.43
+31.45
+0.918
+0.921
+0.309
+0.296
+M360 Outdoor Avg
+M360 Indoor Avg
+M360 Total
+T&T Avg
+DB Avg
+25.17
+33.19
+28.74
+25.68
+30.94
+0.749
+0.940
+0.834
+0.882
+0.919
+0.224
+0.207
+0.216
+0.141
+0.302
+Table 8: Feature dimensionality ablation for joint RGB + LSEG reconstruction on
+the truck scene (Tanks & Temples). LSEGP and LSEGC denote PSNR and cosine
+similarity of the 512-dim semantic features, respectively. Measured on an RTX A6000
+Ada.
+Dim PSNR↑ SSIM↑ LPIPS↓ LSEGP ↑ LSEGC ↑ FPS↑
+4
+8
+16
+32
+64
+23.81
+25.40
+26.06
+26.34
+26.42
+0.853
+0.876
+0.885
+0.887
+0.887
+0.254
+0.200
+0.178
+0.166
+0.163
+44.33
+47.10
+48.23
+48.68
+48.79
+0.988
+0.994
+0.995
+0.996
+0.996
+76
+75
+72
+72
+70
+Neural Harmonic Textures — Supplementary
+33
+Table 9: LSEG-specific hyperparameters used for joint RGB and semantic feature
+training.
+Parameter
+Value
+LSEG output feature dimension
+LSEG L1 loss weight λLSEG
+LSEG cosine similarity weight λcos
+Per-primitive feature dim. (shared with RGB)
+512
+1.0
+0.1
+80
+Table 10: Ablation study on training strategies. The rows are not additive, i.e. we
+only test one strategy at a time. All experiments on the MipNeRF360 dataset, using
+64 features per primitive and a 128×3 MLP. All MCMC baselines in Tab. 2 already
+use the same opacity regularizer; row E) ablates its removal from NHT. Note that the
+scale regularization (F) does not significantly affect reconstruction quality, but does
+improve render time.
+A)
+B)
+D)
+E)
+F)
+G)
+I)
+Configuration
+PSNR↑
+SSIM↑
+LPIPS (Alex)↓
+Our Model
+28.49
+0.828
+0.153
+No LR Scheduling
+No EMA on MLP Weights
+No Color Refinement Phase
+No Opacity Regularization
+No Scale Regularization
+No Direction Encoding
+No Direction Scaling
+28.37
+28.46
+28.35
+27.85
+28.50
+28.11
+28.35
+0.829
+0.828
+0.827
+0.806
+0.828
+0.816
+0.822
+0.147
+0.152
+0.154
+0.181
+0.153
+0.155
+0.158
+Table 11: Ablating the choice of feature encoding function (MipNeRF360 dataset).
+Encoding
+PSNR↑
+SSIM↑
+LPIPS↓
+None (identity)
+ReLU
+Cosine
+Cosine & Sine
+28.21
+28.19
+28.34
+28.46
+0.819
+0.819
+0.826
+0.830
+0.255
+0.255
+0.234
+0.232
+34
+J. Condor et al.
+Table 12: Hyperparameters and optimization details for radiance field reconstruction
+(MipNeRF360, Tanks & Temples, Deep Blending). Values follow our gsplat implementation [75].
+Training
+Color refinement phase
+Last 3 000 steps (geometry frozen, no reg.)
+Loss & regularization
+SSIM weight λ (D-SSIM vs L1 ) 0.1
+Opacity regularization λα
+0.02
+Scale regularization λs
+0.005
+Learning rates (initial)
+1.6 × 10−4
+5 × 10−3
+5 × 10−2
+1 × 10−3
+1.5 × 10−2
+6.8 × 10−4
+Positions (means)
+Scales
+Opacities
+Quaternions
+Deferred features
+Deferred MLP
+LR schedule
+Positions
+Features & MLP
+Exponential decay (final factor 0.01)
+Cosine annealing (final factor 0.1)
+EMA (deferred MLP)
+Decay γ
+Start step
+0.95
+0
+Appearance (NHT)
+Feature dim. per primitive
+MLP hidden dim. × layers
+View encoding
+16-64
+64 − 128 × 2 − 3
+Spherical harmonics (2nd degree)
+Table 13: Ablating feature count N .
+Measured on an RTXA6000 Ada.
+Table 14: Ablating MLP architecture
+(layer width × hidden layer count). Measured on an RTXA6000 Ada.
+Dim PSNR↑ SSIM↑ LPIPS↓ FPS↑
+4
+8
+16
+24
+32
+48
+64
+80
+27.18
+27.83
+28.22
+28.31
+28.39
+28.43
+28.48
+28.47
+0.809
+0.818
+0.826
+0.828
+0.829
+0.829
+0.828
+0.828
+0.288
+0.261
+0.246
+0.240
+0.237
+0.231
+0.230
+0.227
+165
+156
+142
+134
+133
+116
+105
+98
+Size
+PSNR↑ SSIM↑ LPIPS↓ FPS↑
+16×2
+16×4
+32×2
+32×4
+64×2
+64×4
+128×2
+128×4
+28.16
+28.03
+28.25
+28.23
+28.38
+28.36
+28.47
+28.50
+0.824
+0.820
+0.825
+0.824
+0.827
+0.826
+0.828
+0.828
+0.240
+0.244
+0.238
+0.237
+0.234
+0.233
+0.230
+0.229
+97
+98
+97
+101
+102
+102
+106
+103
+Neural Harmonic Textures — Supplementary
+35
+Table 15: Impact of post-training compression on NHT at 100×. Averages over 15 images. Baseline: uncompressed fp32 features/parameters + fp16 MLP weights. int8 features: uniform 8-bit quantization with per-channel scale/offset. int16 positions: fixedpoint uint16 vertex positions. int8+int16+fp16 : combined quantization (features int8,
+positions int16, MLP fp16). + Zstandard/Brotli: entropy coding on the serialized payload.
+Scheme
+Bytes
+BPP Ratio PSNR↑ (µ) PSNR↑ (lin) PSNR↑ (tm) SSIM↑ (µ) SSIM↑ (tm)
+Baseline
+4,809,236 0.8418 100×
+int8 features
+2,418,189 0.4233 198.4×
+int16 positions
+4,011,138 0.7021 119.6×
+int8+int16+fp16mlp 1,607,793 0.2814 298.4×
++ Zstandard
+1,472,273 0.2577 326.0×
++ Brotli
+1,450,542 0.2539 331.0×
+33.89
+33.85
+33.89
+33.85
+33.85
+33.85
+38.45
+38.33
+38.45
+38.32
+38.32
+38.32
+34.78
+34.71
+34.78
+34.70
+34.70
+34.70
+0.8830
+0.8827
+0.8830
+0.8827
+0.8827
+0.8827
+0.9163
+0.9160
+0.9163
+0.9160
+0.9160
+0.9160
+Table 16: Per-image comparison at 10× compression on our 14-bit HDR RAW dataset
+(45.7 MP). We compare NHT (Ours), Instant NGP [49], and JPEG-XL [26]. All neural
+methods use the same parameter budget. Metrics on tonemapped sRGB images unless
+noted.
+PSNR↑ (µ-law) PSNR↑ (tonemapped) SSIM↑ (tonemapped) LPIPS↓ (tonemapped)
+Image
+NHT NGP JXL NHT NGP
+JXL
+NHT NGP
+JXL
+NHT NGP
+DSC_1012 33.98 34.04 37.70 36.92 37.59
+DSC_1764 40.06 39.04 49.03 43.61 41.73
+DSC_1967 33.60 35.01 41.48 36.50 36.19
+DSC_2172 35.83 36.59 41.74 40.23 38.95
+DSC_2655 41.80 40.91 50.26 44.38 42.73
+DSC_3095 38.07 38.78 46.05 39.83 38.43
+DSC_3351 40.00 42.20 48.40 44.53 42.97
+DSC_4748 33.39 34.68 37.97 37.53 37.08
+DSC_5007 36.09 36.80 47.75 37.46 36.54
+DSC_6718 41.30 40.15 51.27 44.57 41.64
+DSC_6926 31.24 33.15 34.93 33.27 34.28
+DSC_9008 40.78 40.10 49.73 41.93 39.98
+DSC_1658 39.05 38.51 50.39 41.68 39.57
+DSC_4176 35.17 36.89 48.17 36.50 36.64
+DSC_7685 37.11 37.54 44.83 39.08 39.33
+30.38
+32.02
+27.92
+40.31
+55.95
+52.47
+55.37
+31.97
+49.40
+55.28
+27.42
+53.74
+53.53
+50.77
+53.30
+0.97
+0.98
+0.95
+0.97
+0.98
+0.96
+0.98
+0.95
+0.93
+0.98
+0.93
+0.98
+0.97
+0.95
+0.97
+0.96
+0.97
+0.93
+0.95
+0.98
+0.94
+0.98
+0.94
+0.90
+0.97
+0.91
+0.96
+0.95
+0.93
+0.96
+0.99
+0.99
+0.99
+0.99
+1.00
+1.00
+1.00
+0.99
+0.99
+1.00
+0.98
+1.00
+1.00
+1.00
+1.00
+0.0090 0.0137 0.0004
+0.0401 0.1149 0.0012
+0.0108 0.0178 0.0004
+0.0182 0.0317 0.0008
+0.0292 0.0850 0.0008
+0.0184 0.0450 0.0009
+0.0046 0.0179 0.0002
+0.0218 0.0544 0.0010
+0.0250 0.0430 0.0009
+0.0464 0.1345 0.0010
+0.0246 0.0449 0.0022
+0.0111 0.0493 0.0006
+0.0471 0.1445 0.0018
+0.0215 0.0597 0.0006
+0.0184 0.0550 0.0004
+JXL
+Average 37.16 37.63 45.31 39.87 38.91
+44.66
+0.96 0.95
+0.99
+0.0231 0.0608 0.0009
+36
+J. Condor et al.
+Table 17: Per-image comparison at 100× compression (same dataset and setup as
+Tab. 16).
+PSNR↑ (µ-law) PSNR↑ (tonemapped) SSIM↑ (tonemapped) LPIPS↓ (tonemapped)
+Image
+NHT NGP JXL NHT NGP
+JXL
+NHT NGP
+JXL
+NHT NGP
+DSC_1012 31.49 31.65 32.58 33.34 33.51
+DSC_1764 37.41 37.22 41.89 39.95 39.70
+DSC_1967 30.65 31.05 34.25 32.41 32.61
+DSC_2172 32.96 33.31 36.09 35.59 35.90
+DSC_2655 40.30 40.16 43.56 41.74 41.36
+DSC_3095 36.52 35.93 39.03 36.74 35.82
+DSC_3351 40.79 41.23 43.53 42.12 42.51
+DSC_4748 31.05 31.26 32.83 34.23 34.38
+DSC_5007 33.88 34.00 38.84 33.65 33.68
+DSC_6718 38.55 38.68 43.99 40.74 40.19
+DSC_6926 29.48 29.72 30.01 29.91 30.54
+DSC_9008 38.38 38.39 43.15 37.90 37.92
+DSC_1658 36.56 36.45 41.84 37.87 37.29
+DSC_4176 33.49 33.56 38.28 33.60 33.63
+DSC_7685 34.42 34.91 38.10 36.63 36.86
+30.18
+31.89
+27.66
+38.59
+26.05
+43.61
+29.01
+31.47
+36.35
+47.59
+27.02
+34.54
+44.60
+40.03
+44.49
+0.93
+0.96
+0.89
+0.92
+0.98
+0.93
+0.98
+0.91
+0.85
+0.96
+0.87
+0.95
+0.93
+0.90
+0.94
+0.93
+0.96
+0.88
+0.92
+0.98
+0.92
+0.98
+0.91
+0.84
+0.96
+0.86
+0.95
+0.93
+0.89
+0.94
+0.98
+0.98
+0.96
+0.97
+0.99
+0.98
+0.99
+0.96
+0.95
+0.99
+0.93
+0.98
+0.98
+0.97
+0.98
+0.0243 0.0255 0.0065
+0.0552 0.1341 0.0344
+0.0328 0.0341 0.0057
+0.0419 0.0436 0.0182
+0.0396 0.0942 0.0121
+0.0459 0.0663 0.0184
+0.0099 0.0193 0.0020
+0.0516 0.0724 0.0142
+0.0692 0.0729 0.0143
+0.0847 0.1571 0.0362
+0.0587 0.0629 0.0331
+0.0275 0.0514 0.0096
+0.0890 0.1768 0.0489
+0.0521 0.0880 0.0123
+0.0345 0.0681 0.0081
+JXL
+Average 35.06 35.17 38.53 36.43 36.39
+35.54
+0.93 0.92
+0.97
+0.0478 0.0778 0.0183
+Neural Harmonic Textures — Supplementary
+Instant NGP
+NHT (Ours)
+Reference
+42.5 dB / 0.019
+42.1 dB / 0.010
+DSC_3351
+40.2 dB / 0.157
+40.7 dB / 0.085
+DSC_6718
+39.7 dB / 0.134
+39.9 dB / 0.055
+DSC_1764
+30.5 dB / 0.063
+29.9 dB / 0.059
+DSC_6926
+36.9 dB / 0.068
+36.6 dB / 0.035
+DSC_7685
+37
+Fig. 4: Visual comparison at 100× compression. Each cell shows tonemapped
+PSNR (dB) and LPIPS. Our method (NHT) consistently achieves lower LPIPS (better
+perceptual quality) than Instant NGP at comparable or higher PSNR. The images are
+taken from the dataset we curated.
+38
+J. Condor et al.
+Table 18: Hyperparameters and optimization details for the 2D image fitting experiment. The parameter budget (maximum vertices, MLP size) is derived from the target
+compression ratio and image dimensions and bitrate.
+Representation
+Mesh topology
+Delaunay triangulation (shared vertices)
+Interpolation
+Clough–Tocher C 1 cubic
+Feature activation
+SinCos: [sin(f ), cos(f )]
+Feature dim. per vertex
+4-16
+MLP hidden dim. 64 − 128 × 2 − 4 layers
+Training
+Total iterations
+Pixel sampling
+Loss function
+25 000
+Stratified, 160 000 pixels/batch
+MSE
+Learning rates (initial)
+Vertex positions
+Vertex features
+MLP weights
+1 × 10−4
+5 × 10−3
+5 × 10−5
+LR schedule
+All parameters
+Exponential decay:
+η(t) = η0 · 0.33max(0, (t−20k) / 10k)
+Densification
+Strategy
+Schedule
+Growth rate
+Scoring
+Min. triangle size
+Initialization
+Coarse-to-fine Delaunay re-meshing
+Steps 1 500–15 000, every 500 steps
+0.35× current vertex count per step
+DSSIM-based, area-weighted:
+scoret = DSSIMt · |pixelst |0.75
+3 pixels (skip smaller triangles)
+Edge-aware sampling (Sobel)
+HDR pipeline
+Input
+Encoding space
+µ parameter
+White level w
+GT pixel lookup
+14-bit RAW (Nikon NEF), 45.7 MP
+µ-law: f (x) = log(1 + µ x/w)/ log(1 + µ)
+5 000
+214 − 1 = 16 383
+Bilinear interpolation

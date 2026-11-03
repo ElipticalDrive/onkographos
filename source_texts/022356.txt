@@ -1,0 +1,1705 @@
+LA-UR-18-23313 (Accepted Manuscript)
+Persistent Octrees for Parallel Mesh Refinement Through Non-Volatile
+Byte-Addressable Memory
+Nguyen, Bao
+Davis, Marion Kei
+Tan, Hua
+Zhang, Xuechen
+Provided by the author(s) and the Los Alamos National Laboratory (2018-09-06).
+To be published in: IEEE Transactions on Parallel and Distributed Systems
+DOI to publisher's version: 10.1109/TPDS.2018.2867867
+Permalink to record: http://permalink.lanl.gov/object/view?what=info:lanl-repo/lareport/LA-UR-18-23313
+Disclaimer:
+Approved for public release. Los Alamos National Laboratory, an affirmative action/equal opportunity employer, is operated by the Los Alamos
+National Security, LLC for the National Nuclear Security Administration of the U.S. Department of Energy under contract DE-AC52-06NA25396.
+Los Alamos National Laboratory strongly supports academic freedom and a researcher's right to publish; as an institution, however, the
+Laboratory does not endorse the viewpoint of a publication or guarantee its technical correctness.
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2015
+1
+Persistent Octrees for Parallel Mesh Refinement
+through Non-Volatile Byte-Addressable Memory
+Bao Nguyen, Hua Tan, Member, IEEE, Kei Davis, and Xuechen Zhang, Member, IEEE
+Abstract—Adaptive mesh refinement based on octree data structures has enabled efficient simulations of complex physical
+phenomena. Existing meshing algorithms were proposed with the assumption that computer memory is volatile. Consequently, for
+failure recovery, in-core algorithms need to save memory states as snapshots with slow file I/O, while out-of-core algorithms store
+octants on disk for persistence. However, neither was designed to best exploit the unique characteristics of non-volatile
+byte-addressable memory (NVBM). We propose a novel data structure, the Distributed Persistent Merged octree (DPM-octree), for
+both meshing and in-memory storage of persistent octrees using NVBM. DPM-octree is a multi-version data structure that can recover
+from failures using an earlier persistent version stored in NVBM. In addition, we design a feature-directed sampling approach to help
+dynamically transform the DPM-octree layout for reducing NVBM-induced memory write latency. DPM-octree uses parity trees which
+are created using erasure coding and stored in NVBM to support low-latency in-memory octant recovery after data loss. DPM-octree
+has been successfully integrated with the Gerris software for simulation of fluid dynamics. Our experimental results with real-world
+scientific workloads show that DPM-octree scales up to 1.1 billion mesh elements with 1000 processors on the Titan supercomputer.
+Index Terms—Octree, Adaptive Mesh Refinement, Non-volatile Byte-addressable Memory
+F
+1
+I NTRODUCTION
+Octree-based adaptive mesh refinement (AMR) on highperformance computing (HPC) clusters has enabled simulation
+of complex physical phenomena with 3D modeling, e.g., droplet
+ejection in inkjet technology [1], [2], droplet impact on a solid
+surface [3], [4], and rapid boiling flow [5], among very many
+others. Computational scientists seek to run their physics models
+at ever-greater spatial and temporal resolution, and ever-longer
+time scales, with available memory often being the limiting factor
+even on supercomputers [6]. At the same time, it has become
+increasingly difficult to scale DRAM to higher capacities because
+of associated capital costs and power consumption: the power
+consumed by DRAM can be up to 40% of that of the entire HPC
+cluster [7], and DRAM can easily be the dominant hardware cost.
+Further, considering the fact that per-core DRAM capacity has
+been shrinking in recent years, we must seek more cost-effective
+solutions to extend the effective memory capacity available to
+large-scale meshing and visualization using octree data structures.
+The emerging non-volatile, byte-addressable memory (NVBM)
+technologies such as Phase Change Memory (PCM) [8], STTMRAM [9], and Memristor [10] are promising enabling technologies for alleviating these problems.
+However, on the software side, no existing meshing algorithm
+can take full advantage of NVBM. (1) Existing in-core meshing
+algorithms were proposed based on the assumption that computer
+memory is volatile and did not explore the potential benefits of
+non-volatility [11], [12], [13]. For example, Gerris, the exemplar
+targeted in this work, uses an in-core meshing algorithm for simulations of computational fluid dynamics and needs to save memory
+•
+B. Nguyen, H. Tan and X. Zhang are with the School of Engineering and
+Computer Science, Washington State University, Vancouver, WA, 98685.Email: {bao.nguyen, hua.tan, and xuechen.zhang}@wsu.edu.
+•
+K. Davis is with the Los Alamos National Laboratory, Mail Stop B287, Los
+Alamos, NM 87545. E-mail: kei@lanl.gov.
+states to snapshot files for failure recovery [14]. The incurred
+I/O operations can be a severe performance bottleneck and waste
+CPU cycles [15], [16]. (2) Out-of-core meshing algorithms (e.g.,
+Etree [17]) were designed for non-volatile storage media (e.g.,
+solid-state drives and hard disks) on an I/O bus. They should not
+be directly used for meshing on NVBM because an I/O bus is
+much slower than a memory bus. I/O optimization techniques used
+in these algorithms (e.g., data indexing) incur additional memory
+latency which could lessen the benefits of NVBM.
+In this work we propose a novel meshing algorithm that allows
+an octree data structure to be resident in both DRAM and NVBM
+via a memory interface supported by operating systems/runtime,
+where we assume that NVBM is attached to the CPU bus alongside
+DRAM, and the OS/R is able to support dynamic allocation from
+NVBM devices [18], [19]. There are four challenges in the design
+of an NVBM-aware octree because some physical aspects (e.g.,
+write latency and endurance) of NVBM are so much different
+from those of DRAM. Existing solutions have been oblivious to
+these differences.
+The first challenge is that NVBM writes may incur high
+latency. While the read latency of NVBM is comparable to
+DRAM, its write latency is 2.5X greater [20], [21], [22], and octree
+meshing operations can be write-intensive. For the cases related to
+our research on fluid dynamic simulations, memory writes account
+for up to 72%, and 41% on average, of the total number of memory
+accesses. Therefore, placing the octrees in NVBM may expose the
+long write latency to mesh operations and result in significant loss
+of performance and excessive wear on NVBM.
+Second, the existing octree data structure is not durable for
+NVBM. Corruption is likely when updating an octree in NVBM
+in the face of hardware or software failures. For example, if
+an octree node (octant) needs to be refined, we can initialize a
+new octant and then write a pointer linking the two octants. For
+optimization of memory access, CPU cache does not guarantee the
+order of writing the octant and writing the pointer, so the pointer
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2015
+2
+droplet breakup
+R
+6
+1
+2
+6
+3
+4
+7
+5
+8
+9
+10
+1
+9
+10
+7
+8
+4
+5
+2
+3
+DRAM
+(a)
+(b)
+(c)
+Fig. 1: An example of a quadtree mesh.1 (a) Tree representation of a quadtree. R is the root node of the quadtree in DRAM. (b)
+Decomposition of a domain using the quadtree. An element of the domain is represented as a quadrant in the quadtree. Vertices map to
+mesh nodes, which can be anchored nodes (dark colored) or dangling nodes (light colored). (c) A real example of a 3D mesh extracted
+from DPM-octree used for modeling droplet ejection for inkjet printing. After the liquid jet pinches off at the nozzle, the jet eventually
+breaks up into multiple droplets because of capillary instability.
+might be written to NVBM before the new octant is written. A
+failure between the two writes can cause the pointer to link to an
+undefined region in NVBM. Although it is possible to enforce the
+order by issuing mfence and clflush CPU instructions [20], such
+solutions suffer from two major limitations: it is not sufficient to
+provide atomic writes on data larger than 8 bytes, and executing
+these instructions after every write can incur high overhead [23].
+Third, the legacy octree solutions do not handle special pointers linking persistent octants in NVBM and volatile octants in
+DRAM. When a program exits, all the volatile octants should
+become persistent and pointers from the volatile octants to the
+persistent octants should be destroyed. When a program recovers
+from a failure, pointers from the persistent octants to the volatile
+octants should be updated according to the addresses of newly
+allocated memory regions in DRAM. In addition, we need to
+automatically handle such special pointers during failure recovery
+without introducing extra complexity for application developers.
+Last but not least, NVBM only provides data recovery when
+the compute nodes configured with NVBM can be used immediately for restarting failed applications. However, using NVBM
+locally installed on compute nodes cannot guarantee data durability in HPC because the same set of compute nodes may not be
+available when a new set of compute nodes is assigned to serve
+the application when restarted. In this scenario, failed applications
+still need to save the simulation snapshots to disk-based parallel
+file systems for data recovery. We need an octree data structure
+that is fault tolerant without relying on slow disks for recovery.
+We propose a novel multi-version data structure, the distributed persistent merged octree (DPM-octree), for both meshing
+and in-memory storage of persistent versions of octrees. No
+special instructions for enforcing ordering of memory access
+are needed because our algorithms can guarantee that at least
+one version of the octree is consistent while creating a newer
+version. If a failure occurs, the consistent version of the octree is
+accessed for restarting the program. DPM-octree provides orthogonal persistence, with which the persistence of data is handled
+by the system software and is mostly transparent to users. DPMoctree is partitioned so that NVBM-induced memory latencies
+can be effectively hidden. To this end, we propose a featuredirected sampling approach to identify frequently-accessed subdomains using application-level knowledge about data features,
+realized as methods for refinement, coarsening, and solving. In
+addition, we dynamically adjust the size of subtrees in DRAM
+and NVBM to improve memory efficiency according to memory
+utilization as tracked by the operating system. Finally, to support
+in-memory failure recovery with data loss, DPM-octree supports
+fault tolerance with parity trees which are computed online using
+erasure coding schemes.
+Specifically, we make the following contributions.
+•
+•
+•
+•
+We propose a novel multi-version data structure which not
+only effectively extends memory capacity using NVBM,
+but also supports near-instantaneous failure recovery using
+erasure coding and the non-volatility of NVBM.
+We design algorithms using a feature-directed sampling
+approach to detect the condition for initiating transformation of DPM-octree layout to reduce NVBM-induced
+memory write latency and the number of writes to NVBM.
+Via DPM-octree, we support orthogonal persistence for
+applications and provide an easy-to-program interface by
+which users are freed from the error-prone and tedious
+tasks of persistent pointer management.
+We have implemented a software prototype of DPM-octree
+and its algorithms and integrated them with the opensource Gerris flow solver. Our evaluation results with one
+case study on the simulation of droplet ejection validate the
+correctness of the algorithms and show that DPM-octree
+scales up to 1.1 billion elements with 1000 processors on
+the Titan supercomputer.
+The remainder of the paper is organized as follows. Section 2
+introduces octree-based adaptive mesh refinement. Section 3 discusses related work. Section 4 presents the operations of DPMoctree, layout transformation in DPM-octree for efficient data
+access to NVBM, the programming interface of DPM-octree,
+and failure recovery using parity trees. Section 5 discusses the
+integration of DPM-octree with Gerris. Section 6 describes the
+experiments and analyzes the results, and Section 7 concludes.
+2
+BACKGROUND
+The term octree refers to one of a class of tree structures used
+to represent spatial decomposition: binary tree for 1D space,
+quadtree for 2D, octree for 3D, and so on [24]. We focus on the
+octree because it is extremely prevalent in scientific simulation
+1. We use quadtrees to graphically illustrate the concepts, but all techniques
+are designed and implemented for 3D cases using octrees.
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2015
+and analysis work, but the general approach is applicable to
+other dimensionalities. The octree index recursively partitions a
+3D space into 8 sub-regions (also called octants or cells) using
+separators parallel to the coordinate axes. The partitioning stops
+at a granularity that is determined by the simulation. Each internal
+node of an octree has at most 8 entries, each corresponding to one
+of the 8 cells at that level of partitioning granularity. A leaf node in
+an octree only has one entry and corresponds to one cell. Figure 1
+illustrates a quadtree example to represent a decomposed square
+(2D) domain for fluid dynamics simulation.
+The recursive partitioning using an octree may stop at a node
+when a particular condition is met, for example, the difference
+between the minimum and maximum values recorded within
+the volume being less than a target error. This makes octrees
+very useful for representing multi-resolution datasets: regions of
+interest can be partitioned at finer granularity to gain a deeper level
+of detail, while uninteresting or slowly-varying regions can be
+succinctly represented without further refinement. Consequently,
+the octree is widely used with adaptive mesh refinement in largescale simulations of fluid dynamics, which tend to have extremely
+high memory demands.
+Octree meshing is typically composed of five major functionalities: (1) creating a new octree on each processor (Construct),
+(2) adding or deleting octants to refine or coarsen a domain
+(Refine/Coarsen), (3) enforcing a 2:1 size constraint on the entire parallel octree (Balance), (4) redistributing octants among
+processors (Partition), and (5) creating a mesh data structure for
+visualization (Extract). Balance is enforced on the fly to guarantee
+that neighboring pairs of octants’ sizes are within a factor of
+two. Extract is used with data analytics and visualization and is
+typically executed on demand. These routines may require massive
+DRAM space to store unstructured data using a complex pointerbased octree data structure.
+3
+R ELATED W ORK
+To extend memory space using NVBM for memory-intensive
+applications, a wide range of systems and libraries have been
+developed to address performance and consistency issues caused
+by slow (relative to DRAM) writes to NVBM and data corruption
+under failures. Work related to DPM-octree is discussed following.
+3.1
+3
+not mutated until the newer version of data becomes persistent.
+Compared to journaling, this approach requires mutating fewer
+data. However, it is a non-trivial task to maintain the accessibility
+of multiple data versions in persistent data structures. In fact, the
+overhead can be high, overshadowing its benefit, especially when
+data structures mainly reside on slow persistent storage devices,
+e.g., hard disks [30], [29].
+As NVBM emerges with its many attractive features, novel
+persistent data structures have been proposed to explore its byteaddressability and non-volatility. For example, the CDDS Btree was designed to provide both durability and consistency for
+implementation of persistent key-value stores [20]. CDDS B-tree
+is derived from a multi-version B-tree data structure [28]. Other
+researchers have been rethinking the design of the B/B+-tree
+to embrace NVBM technology. For example, the persistent B+Tree [21], [31] and the NV-tree [32] were proposed to reduce
+pointer mutations, which are prone to data corruption. However,
+the octree has unique structure and access patterns making these
+works not directly applicable. DPM-octree is optimized for meshing operations (e.g., refine/coarsen) widely used in AMR applications, while B+-Tree and NV-tree were designed for database
+operations (e.g., insertion).
+To ensure data reliability, scientific applications need to periodically save updates to the main data structures of simulations
+(e.g., octrees [14] and arrays [33]) to snapshot files on a persistent storage medium that can then be used for failure recovery.
+For large-scale scientific applications, parallel I/O for writing
+snapshots can easily overload a disk-based storage system and
+result in a severe performance bottleneck [27], [34], [35]. Simply
+replacing disks with NVBM does not exploit its random byteaddressability [36]. Caulfield et al. studied the benefit of nonvolatile memory on scientific applications [37]. However, they did
+not address any NVBM-specific issues, e.g., data consistency. In
+this paper, DPM-octree is designed to serve two purposes: (1)
+storing persistent versions of data structures in NVBM, and (2)
+effectively extending memory capacity for large-scale meshing. It
+is inspired by a multi-version octree data structure [38]. However,
+our focus on hiding NVBM-induced latency, and providing an
+easy-to-program interface, required changes (e.g., re-layout and
+pointer management) to the design and correspondingly shaped
+our algorithms.
+Durable and Consistent Data Structures
+A simple DRAM-resident octree data structure is ephemeral in the
+sense that the old version is lost when a change is made to the tree,
+leaving only the new one. When an application fails, it is not possible to access the previous versions for recovery. In general, applications designed with tree data structures may use one of three
+techniques to ensure data reliability: journaling [25], employing
+persistent data structures for transactional applications [26], and
+checkpointing for non-transactional applications [27].
+Journaling (write-ahead logging) is used, for example, by
+database systems for updating B/B+-tree data structures. The
+updates are written to log files sequentially before writing to its
+primary location. The logs are used to access an old version of the
+B/B+-tree when transactions fail. The main disadvantage of this
+technique is high I/O overhead because it requires two disk writes
+for every update. Using multi-version data structures/shadow
+paging, applications do not need to maintain separate log files
+for data reliability [28], [29]. Instead, they use copy-on-write to
+perform all updates so that the original version of the data is
+3.2
+AMR using Octree-based Data Structures
+Octree-based AMR has been widely used in simulations of unstructured grids to reduce the cost of mesh partitioning, setup,
+and access [6], [39], [14]. Many existing in-core and out-ofcore algorithms of octree meshing have been implemented. None,
+however, are optimized for NVBM.
+When an octree resides only in DRAM, there are two approaches for in-core octree construction. Tu et al. used a topdown approach for creating a Morton-ordered octree, which is
+optimized for data access locality in octree traversal [11]. Sundar
+et al. used a bottom-up approach for octree construction leading
+to less time to build the tree [12], [13]. In addition, they proposed
+a mesh compression technique to reduce memory overhead and
+the time to perform finite element calculations using the octree.
+However, they focused only on linear octrees, which do not
+store pointers to siblings or neighbors, so their technique is not
+applicable to general flow solvers (e.g., Gerris [40]) because they
+require an implementation of multi-threaded octrees which store
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2015
+such pointers for traversal efficiency. DPM-octree is derived from
+multi-threaded octrees. An end-to-end approach was proposed
+to reduce I/O overhead by providing in-situ data access to inmemory octrees for all major routines of octree meshing, e.g.,
+mesh generation and visualization [41]. All of the existing octree
+data structures for in-core meshing are ephemeral and cannot
+provide durability and consistency when they reside on NVBM.
+For out-of-core meshing, previous work proposed various
+approaches to storing octrees on slow persistent storage media.
+For example, Salmon et al. designed an octree-based out-of-core
+algorithm for solving n-body problems, with octants on disk in
+an order determined by a space-filling curve [42]. Dong et al.
+proposed to use stencil-based user-defined functions for efficiently
+analyzing array data [43]. Recently, the Etree library was designed
+to store octants as pages on disks using a B-Tree for indexing
+the pages [17], [44]. Each octant is assigned a unique key (Zvalue) calculated using its location data and Morton code. An
+octree was also used as an indexing data structure for out-of-core
+visualization [45]. These index-based algorithms are not necessary
+for NVBM because of its short write/read latencies, which are very
+close to those of DRAM and 4-5 orders of magnitude smaller than
+for disk.
+3.3
+Software and Programming Tools for NVBM
+As NVBM is nearing deployment, researchers have been developing various system software and programming tools for it. DPMoctree and its library is the only one specifically designed for
+applications using octrees as the main data structures in memory. In novel database systems/data stores, researchers designed
+optimized B/B+Tree data structures for NVBM [21], [31], [20],
+[32]. These systems can guarantee data reliability and consistency
+without logging, which can be slow because of I/O overhead. For
+log-based database systems, the software overhead can be high for
+writing log files on NVBM, and novel logging approaches have
+been proposed to alleviate this problem [46], [47].
+File systems designed for NVBM can significantly improve
+I/O performance by taking advantage of its low latency and high
+bandwidth [30], [48], [23]. BPFS can guarantee data consistency
+for file systems using a multi-version tree structure to manage
+file blocks [30]. It uses short-circuit shadow paging to reduce the
+overhead of version management of the tree. Instead of using a
+tree structure as in BPFS, SCMFS was designed to utilize the
+memory management component in operating systems to map
+file address to physical address on NVBM [48]. HiNFS focused
+on reducing NVBM-induced write latency, which can be hidden
+from critical paths by delaying writes that are allowed to be
+persisted lazily by file systems [23]. Other software systems have
+been developed to embrace NVBM technology. Whole system
+persistence provides near-instantaneous recovery of in-memory
+state using OS support [49]. Data structures used in memory
+cache software have been enhanced for data consistency [50], [51].
+NVBM has been used in the hypervisors of virtual machines to
+protect them from failure [52].
+Many general libraries and programming interfaces have been
+proposed to provide a persistent abstraction for the development
+of transactional software using NVBM [53], [54], [55], [56]. However, they require the developers to explicitly identify individual
+allocations as persistent or not and track and manage changes to
+these within transactions. DPM-octree is implemented in a library
+supporting non-transactional applications by enabling orthogonal
+4
+persistence [57], [58], and can identify what data needs to be
+persistent and implement persistence for applications.
+3.4
+Fault Tolerance for In-memory Objects
+Providing fault tolerance is important to ensure the correctness and
+progress of long computations in computing systems which may
+suffer data loss. For in-memory objects (e.g., matrices, KVstores,
+and caches), two types of coding schemes have been used to
+provide data redundancy in the corresponding data structures
+(e.g., arrays, B-trees, and hashmaps) for memory-speed failure
+recovery compared to the traditional approaches using disks to
+store application snapshots. In principle, they trade CPU time for
+a reduced amount of data stored in memory.
+For matrix computations, algorithm-based fault tolerance was
+proposed for applications to operate on encoded data [59], [60].
+These methods can detect and correct errors when simple matrix
+operations are performed. For key-value stores, Cocytus uses both
+erasure coding and replication to provide reliable in-memory storage [61]. MemEC uses only erasure coding to provide on-line data
+recovery and strong consistency for small-objects in key-value
+stores [62]. Rashmi et al. designed EC-Cache to provide cluster
+caching with erasure coding to achieve both low latency and high
+reliability [63]. DPM-octree is the only approach that provides inmemory data recovery using Reed-Solomon codes [64] for octreebased algorithms/applications.
+4
+D ESIGN OF DPM- OCTREE
+The design objective of DPM-octree is to effectively utilize
+NVBM for memory extension and failure recovery. This is
+achieved in part by using multi-versions of octrees, as shown in
+Figure 2. In this section, we first present an overview of DPMoctree and then describe its major operations, such as tree building,
+insertion, deletion, traversal, garbage collection, and merging. Further, we discuss how to use a feature-directed sampling approach
+to identify frequently accessed subtrees and their re-layout for
+reducing NVBM-induced write latency. Finally, we describe the
+program interface and how to use it to restart an application that
+has experienced data loss.
+4.1
+Overview
+As shown in Figure 2, DPM-octree is a persistent octree data
+structure that maintains the two latest versions Vi−1 and Vi . Vi−1 is
+a persistent version of the octree saved at the end of the simulation
+time step Ti−1 and resides entirely in NVBM for potential failure
+recovery. Vi is the version of the octree being actively accessed at
+time step Ti . The frequently accessed subtrees C0 of Vi are stored
+in DRAM and the remainder of the tree C1 resides in NVBM. At
+the end of time step Ti , the octants in Vi−1 are marked as deleted.
+Vi is persisted to NVBM and becomes Vi−1 . The marked octants
+are freed from NVBM when garbage collection is executed. C0 is
+inherited by the next Vi .
+DPM-octree supports shared octants between Vi−1 and Vi to
+reduce redundant octants stored in memory, thereby reducing the
+memory footprint and improving memory utilization. We define
+the overlap ratio as the ratio between the number of octants in
+the shaded area and the number of octants in Vi . Our study on the
+simulations of droplet ejection shows that the overlap ratio of Vi−1
+and Vi ranges from 39% to 99% (Figure 3), indicating that a large
+number of spatial domains do not change in adjacent time steps of
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2015
+5
+Vi-1 Vi
+Vi-1
+Vi
+R
+R’
+ViD
+1
+CC11 tree
+tree
+C0 tree
+NVBM
+DRAM
+2
+Memory usage per 1000 octants (KB)
+Overlapping ratio (%)
+80
+26
+60
+24
+40
+22
+20
+20
+0
+0
+18
+20 40 60 80 100 120 140 160
+Time Steps
+Fig. 3: Octant overlap ratio of Vi−1 and the end state of Vi
+and memory usage per 1000 octants over 150 time steps in the
+simulation of droplet ejection.
+the simulation. Figure 3 also shows that in an extreme case, here
+the last time step, the overlap ratio is 99.5%, so the factor increase
+in memory usage using DPM-octree compared to storing a single
+copy of Vi is less than 1.01X.
+4.2
+Operations of DPM-octree
+Inserting and updating an octant. An octant can be inserted into
+either the C0 tree or C1 tree, determined by its location code. If
+it is inserted into C0 in DPM-octree, it will be eventually merged
+out to C1 in NVBM. Inserting an octant into C0 does not incur
+long write latency. However, the size of C0 is constrained by the
+size of DRAM, and we seek to avoid inducing OS page swapping
+by migrating octants of C0 to C1 as necessary. For this purpose,
+we track the available DRAM space, and when it is smaller than
+a threshold thresholdDRAM , the least-frequently-accessed subtree
+will be removed from C0 and merged with C1 .
+If an octant is inserted into C1 in NVBM, multiple copying
+steps might be needed to propagate the updates towards the root.
+An example of inserting octant 11 as a child of octant 9 is
+illustrated in Figure 4(a). For consistency, we do not directly add
+a pointer to octant 9. Instead, we need to create a copy (octant 90 )
+of octant 9. Then octant 11 is linked to its parent octant 90 . Then
+4
+5
+7
+8
+u’
+9
+10
+9’
+(a)
+1
+2
+28
+3
+u
+11
+Fig. 2: An illustration of DPM-octree. Vi−1 and Vi denote the root
+nodes of the octrees operated on time steps i − 1 and i respectively.
+While Vi−1 is entirely stored in NVBM, Vi is partitioned into two
+segments according to data access locality. The C0 tree comprises
+frequently accessed subtrees and is stored in DRAM. ViD is the
+root node of the C0 tree. The C1 tree comprises subtrees that are
+less frequently accessed and is stored in NVBM. Vi−1 and Vi share
+octants (the shaded area) not updated since the completion of Ti−1 .
+Only Vi is visible to applications during a normal execution. Vi−1
+is used for restarting applications following failure.
+100
+6
+3
+Vi-1
+Vi
+R
+R’
+6
+4
+5
+7
+u
+8
+u’
+9
+10
+9’
+10’
+11
+(b)
+Fig. 4: (a) The octree after inserting octant 11; (b) The octree
+after updating octant 10. Note: the dark octants are newly inserted
+octants due to the insertion of octant 11 or updating of octant 10.
+we need to set the parent octant u of octant 9 to point to octant 90 .
+Again, we must create a copy u0 of u and set the initial 4 children
+of octant u0 with their latest values of octant u. Then octant 90 is
+linked to octant u0 . While the updates being propagated to the root
+octant R, a new root node R0 will be created for Vi . We also set up
+pointers to parents if needed.
+For update operations, only octants of C0 and the octants of C1
+not shared with Vi−1 can be updated in place. To update an octant
+shared by Vi and Vi−1 , we need to first create a copy of the octant
+and then update it, as illustrated in Figure 4(b).
+Both insertion and update use a copy-on-write approach to
+recursively create a new version of an octree. In practice, these
+operations can be quite efficient for three reasons. First, C1 only
+serves a small ratio of writes on NVBM during meshing because of
+the dynamic transformation of DPM-octree layout (Section 4.3).
+Second, the insertion/update operations are executed in a batch
+and infrequently, so the overhead of copying octants is amortized.
+Third, unlike in other multi-version persistent data structures [28],
+we only need to track two versions of the octants, significantly
+reducing copying overhead.
+Deletion of an octant. An octant cannot be removed directly
+from Vi−1 . Instead, a copy of its parent octant is created with an
+empty pointer to replace the pointer that linked to the removed
+octant. We can directly delete an octant in C0 because it resides
+in DRAM. However, if an octant needs to be removed from C1
+in NVBM, we only mark the octant as deleted. This does not
+require actual deletion of any octants, and deletion can cause a
+long write latency just as insertion for NVBM. Actual deletion is
+handled by garbage collection (GC). Before GC is executed, the
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2015
+allocated NVBM regions will be not released and can be reused
+for inserting new octants. This optimization reduces the number
+of writes to NVBM and improves efficiency.
+Garbage collection. Because the size of C1 does not decrease
+when octants are deleted and can increase with the creation of its
+parent octants, GC is required before the execution of a new time
+step of a simulation. To ensure efficiency, we track the fraction
+of available NVBM space. When it is smaller than a threshold
+thresholdNVBM , GC is executed on demand. We use a mark-andsweep garbage collector [66]. Specifically, the GC routine starts
+from the child octants of the root node of C1 and deletes octants
+which are marked as deleted and removes references to the octants
+by invalidating the parent pointers to the deleted octants.
+Traversing a DPM-octree. To traverse a DPM-octree we
+need to first identify the root nodes of the tree Vi−1 and Vi ,
+which are stored in two known memory addresses, ADDR(Vi−1 )
+and ADDR(Vi ). As mentioned earlier, Vi−1 is used to restart an
+application and Vi is accessed during its normal execution. Both of
+the trees can be traversed as regular octrees. Therefore, all existing
+in-core algorithms for tree construction, mesh refinement and
+coarsening using the tree, tree balancing, and mesh extraction can
+be easily adapted to the new system with few changes. The major
+difference lies in the implementation of routines for checkpointing
+and failure recovery, which are discussed in detail in Section 4.5.
+Merging of DPM-octree components. The merging routine
+is executed in two scenarios. (1) The size of C0 is large so that
+the remaining DRAM space is smaller than thresholdDRAM . To
+maintain efficiency, a subtree of C0 is trimmed and merged out to
+C1 by inserting new octants or updating existing octants of C1 . (2)
+Simulation of time step i is completed and a persistent point of the
+octree needs to be saved. In this scenario, we need to first merge
+C0 with C1 and then mark all the nodes existing only on Vi−1 as
+deleted. GC routines executed later will delete those octants. At
+the end, we need to swap ADDR(Vi ) and ADDR(Vi−1 ). Only after
+this point does the new persistent data structure becomes available
+and simulation of time step i + 1 can begin. If the applications fail
+during merging, the octants marked as deleted should be recovered
+and used to restart the program. To ensure data consistency, GC is
+disabled during the merging of DPM-octree.
+4.3 Dynamic Transformation of DPM-octree
+Access to data in NVBM may incur high read/write latencies.
+To achieve optimal performance we need to use DRAM to store
+frequently accessed (hot) subtrees and use NVBM to store less
+frequently accessed (cold) ones. Figure 5 depicts a simplified
+octree which resides in both DRAM and NVBM. We use this
+example to demonstrate the importance of dynamic transformation
+of DPM-octree layout. The subdomains denoted by octants 2-5 are
+accessed much more frequently than octants 7-10 at time step i.
+They are hot octants, while octants 1 and 6 are cold. A brute-force
+approach not considering data access patterns might store octants
+2-5 in NVBM as shown in Figure 5(a). This suboptimal layout
+can result in a measured 89% more writes to NVBM for a simple
+refinement operation (e.g., those used in the droplet ejection
+simulation) than for the optimal layout shown in Figure 5(b).
+To alter the layout of DPM-octree we need a mechanism
+to determine when a transformation should occur. We cannot
+simply use the history of octant accesses to predict future access
+pattern because an AMR simulation may compute on two different
+domains in two consecutive time steps. We propose a featuredirected sampling technique for this purpose. The application
+6
+Vi
+R
+ViD
+1
+6
+3
+2
+4
+7
+5
+NVRAM
+8
+9
+10
+DRAM
+(a)
+Vi
+R
+1
+7
+ViD
+6
+8
+9
+NVRAM
+10
+2
+(b)
+3
+4
+5
+DRAM
+Fig. 5: (a) Locality-oblivious layout; (b) Locality-aware layout.
+Note that the dark octants denote subdomains being actively
+accessed.
+features are application-level knowledge and realized as functions
+for octant refinement/coarsening or solver functions traversing an
+octree in computations. These functions are provided as inputs
+to the DPM-octree library for identification of hot octants. We
+consider the additional programming burden imposed on developers to be trivial because those functions already exist and
+the library supporting DPM-octree simply pre-executes them for
+generating application-level hints on data access patterns (e.g.,
+access frequency of subtrees) of the major meshing routines.
+Algorithm 1: Feature-directed octant sampling for layout transformation.
+DRAM and N NVBM : the number of samples from
+Input: Nsample
+sample
+Subtreei in DRAM and Subtree j in NVBM
+respectively.
+func: the pointer to feature functions specified by users.
+Data: SampleSDRAM ={} and SampleSNVBM ={}: the sets
+of selected samples from Subtreei and Subtree j
+respectively.
+// Select samples from subtrees
+DRAM = select samples(Subtree , N DRAM );
+1 SampleS
+i
+NV BM = select samples(Subtree , N NV BM );
+2 SampleS
+j
+// Pre-execute feature functions
+3 for m ∈ SampleSDRAM do
+4
+FreqDRAM
++= f unc(octantm );
+i
+5
+6
+for n ∈ SampleSNVBM do
+BM += f unc(octant );
+FreqNV
+n
+j
+BM /FreqDRAM ) > Ratio
+if (FreqNV
+access then
+i
+j
+8
+tree swap(Subtreei , Subtree j );
+7
+A transformation should be executed only when the access
+frequency of subtree i in NVBM (FreqNVBM
+) is significantly larger
+i
+than the access frequency of subtree j in DRAM (FreqDRAM
+). We
+j
+use the following steps described in Algorithm 1 to predict the
+access frequency of a subtree. (1) Randomly select Nsample octants
+in a subtree. By default, Nsample is set to min(100, Sizeoctant ), where
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2015
+7
+Routine
+Description
+dpmoctree *DPM_create(octree *tree)
+void DPM_persistent(dpmoctree *tree)
+dpmoctree *DPM_restore(void)
+void DPM_delete(dpmoctree *tree)
+create a new DPM-octree; return a pointer to Vi
+create a persistent version of octree
+restore a DPM-octree; return a pointer to Vi
+delete all octants on NVBM and DRAM
+TABLE 1: The program interface of DPM-octree.
+Sizeoctant is the total number of octants in a subtree (Line 1-2). (2)
+Pre-execute feature functions based on the location code or value
+of data associated with the octants. The feature functions return
+1 if the corresponding domain is of interest to the application
+(e.g., the refinement condition is satisfied) and 0 if not (Line 3-6).
+(3) The access frequency of the subtree is computed as the total
+number of 1s returned by the feature functions. We then compute
+the ratio of access (Ratioaccess ) as the ratio of FreqNVBM
+and
+i
+FreqDRAM
+. (4) If Ratioaccess is larger than Ttransform , a predefined
+j
+threshold with default value set empirically in our prototype
+system, the data access pattern is deemed to have changed and
+it is necessary to re-layout DPM-octree (Line 7-8).
+To reduce the overhead of sampling we only carry out the
+transformation detection on subtrees whose size (number of octants) is similar to that of the C0 tree in DRAM. We define the
+subtree level as the level of the root node of a subtree in DPMoctree. The maximum level of a subtree (Lsub ) is constrained by the
+size of DRAM available for C0 . Therefore, Lsub can be determined
+using Equation 1.
+j
+k
+Lsub = Depthoctree − logFanout SizeDRAM
+(1)
+B(0,0)
+B(0,1)
+B(1,1)
+B(2,1)
+B(3,1)
+P(0,1)
+T0
+T1
+T2
+T3
+Tparity
+Fig. 6: An illustration of DPM-octree with erasure coding for
+failure recovery. B(i, h) and P(i, h) are the ith data block or parity
+block at level h. Ti is the subtree stored on node i. Tparity is the
+parity subtree comprising of all the parity blocks.
+recycled by GC asynchronously in the background. In Section 4.5
+we discuss how to recover memory state in an environment where
+the crashed node is not available for serving the same application.
+Using the operations of DPM-octree described in Section 4,
+we developed a library to implement these routines as follows.
+•
+In the equation, Depthoctree is the current depth of DPM-octree,
+Fanout is the number of children a node has (8 for octree),
+and SizeDRAM is the size of DRAM configured for C0 . A larger
+SizeDRAM indicates that we can select and move a subtree with
+more octants. To change the layout of DPM-octree we need
+to swap the subtree having the maximum Ratioaccess in NVBM
+with C0 in DRAM. To further reduce the overhead of layout
+transformation, octants are copied on write incrementally. Dynamic transformation is only triggered after the completion of the
+merging operations.
+4.4
+•
+•
+Program Interface
+We provide orthogonal persistence [57], [58] in the design of
+DPM-octree so that users do not need to control which octants become persistent on NVBM. Octants can be persistent and restored
+simply by calling the program interface (e.g., DPM persistent()
+and DPM restore()) described in Table 1, just as they use legacy
+APIs to create snapshots on block devices, e.g., file systems. As an
+example, we can replace gfs output write() and gfs output read()
+used in Gerris with DPM persistent() and DPM restore(). Essentially, we implement a persistent memory abstraction for octrees
+so that developers can be freed from the tedious and error-prone
+task of NVBM allocation and pointer management at failure
+recovery.
+Creation of persistent versions of octrees and failure recovery
+using these routines are fast because they operate at memorybandwidth speeds. In systems where crashed compute nodes are
+available after rebooting and can be used to serve the failed
+applications, near-instantaneous failure recovery can be achieved
+because DPM-octree simply marks the octants only in Vi as deleted
+and returns the address of Vi−1 for a simulation to access a
+consistent and persistent octree on NVBM. Deleted octants are
+•
+4.5
+DPM create starts from root octant Vi that encloses the
+entire domain and then expands DPM-octree by inserting
+octants. Vi is further partitioned into C0 and C1 .
+DPM persistent merges Vi with Vi−1 and then executes a
+dynamic transformation of the layout of DPM-octree data
+structure. When the crashed node is not available, delta
+octants need to be copied to other compute nodes.
+DPM restore ensures that DPM-octree is identical to
+the most recent consistent version Vi−1 . To achieve this,
+it marks deleted the octants referenced by Vi , but not
+referenced by Vi−1 , and then returns ADDR(Vi−1 ). When
+the crashed node is not available, Vi−1 can be recreated
+from data stored on other compute nodes.
+DPM delete deletes all the octants and enables GC to free
+memory space.
+Failure Recovery using Erasure Coding
+DPM-octree uses Vi−1 stored in NVBM for failure recovery when
+the same set of compute nodes is available after restarting the
+crashed application. When they are not available or data loss
+occurs, DPM-octree can be configured to perform failure recovery
+using parity trees to tolerate one or multiple fail-stop failures of
+compute nodes. The parity trees are created using erasure coding
+schemes [64].
+4.5.1 Parity Creation in DPM-octree
+We extend the DPM-octree data structure to support parity subtrees. Specifically, Vi−1 is partitioned into a set of coding blocks
+B(index, h), where h is the level of the blocks in the partitioned
+tree and index is the block index at level h. For blocks at a level
+h > 0 we create parity blocks {P(index, h)} where index < 4h−1
+using the popular Reed-Solomon Code [64]. The data blocks
+and parity blocks together form coding groups. Blocks in coding
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2015
+Algorithm 2: Create parity subtrees of DPM-octree
+using erasure coding.
+Input: SizeB : coding block size;
+Vi−1 : the root node of DPM-octree in NVBM;
+Fanout: the fanout of DPM-octree.
+Data: BS={}: the sets of coding blocks in Vi−1 .
+// Partition Vi−1 tree according to
+coding block size
+1 BS = tree partition(Vi−1 , SizeB );
+// Identify the block index
+2 for j ∈ BS do
+3
+Index j = identify coding group(Vi−1 , Fanout, BS j );
+// Exchange coding blocks to their
+corresponding parity process
+4 exchange coding block();
+// Create parity blocks
+5 create parity block();
+// Insert the parity blocks to the Vi−1
+6 insert parity block();
+The parity blocks are generated when DPM persistent() is
+called the first time. The parity blocks are updated only with
+the delta of data blocks being exchanged when the function is
+called subsequently. Algorithm 2 describes the process of creating
+parity subtrees using erasure coding. We need to partition the
+Vi−1 tree into coding blocks (Line 1). The block size B is a
+configurable parameter and specified by users. Each data block
+is mapped to a subtree in Vi−1 . The ID of the root node of the
+subtree is used to index its corresponding data block (Lines 2-3).
+The IDs are used later for reconstruction of the DPM-octree in
+the process of failure recovery. After that processes need to send
+data blocks to their corresponding nodes where its parity blocks
+are computed and receive data blocks from other nodes (Line 4).
+The parity blocks are generated using RS(K, N) Reed-Solomon
+coding scheme where K is the number of data blocks and N is the
+total number of blocks (Line 5). Here (K, N) is set to (4,5) and
+(8,9) for quadtrees and octrees, respectively. Finally, the parity
+blocks are inserted to Vi−1 of DPM-octree. For load balancing,
+the parity blocks P(index, h) where index 6= 0 are swapped with
+the data blocks B(index + index ∗ 4h−1 , h) for quadtrees, and with
+B(index + index ∗ 8h−1 , h) for octrees, respectively.
+The coding scheme RS(4,5) and RS(8,9) used in this paper
+can only tolerate the fail-stop of one compute node—the most
+common case—so we assume that all but one of the previously
+used nodes is available for restart. In future work we plan to
+implement other coding schemes to tolerate multiple failed nodes.
+Physics
+Model
+DPM-octree
+Abstraction
+Refinement
+Dynamic
+Transformation
+Failure
+Recovery
+FTT library
+Coarsening
+Data Post-processing
+/Visualization
+Gerris Flow Solver using GFS API
+Data Pre-processing
+groups are stored in separate compute nodes. For the convenience
+of discussion and implementation, every coding group of DPMoctree has four data blocks and one parity block for quadtrees and
+eight data blocks and one parity block for octrees. In general, for a
+quadtree, a parity block P(index, h) is generated using data blocks
+B(4h−1 ∗ 0, h), B(4h−1 ∗ 1, h), B(4h−1 ∗ 2, h), B(4h−1 ∗ 3, h) where
+index < 4h−1 . For an octree, a parity block P(index, h) is generated
+with B(8h−1 ∗ 0, h), B(8h−1 ∗ 1, h), B(8h−1 ∗ 2, h), B(8h−1 ∗ 3, h),
+B(8h−1 ∗ 4, h), B(8h−1 ∗ 5, h), B(8h−1 ∗ 6, h), B(8h−1 ∗ 7, h), where
+index < 8h−1 . We show an example of DPM-octree with parity
+subtrees in Figure 6. The tree is partitioned into a set of blocks
+{B(0, 0), B(0, 1), B(1, 1), B(2, 1), B(3, 1), ...}. The coding group at
+level 1 consists of B(0, 1), B(1, 1), B(2, 1), B(3, 1), and P(0, 1).
+8
+Fig. 7: The architecture of the Gerris software enhanced with
+DPM-octree to use NVBM. The shadowed components indicate
+the new software modules.
+When applications are restarted, multiple processes may be
+launched on each node. The process with minimum rank running on each node is selected as the recovery process, which
+is responsible for communication and parity computation in the
+process of data recovery. The recovery processes perform two
+steps: preparation and subtree recovery.
+Preparation. Recovery processes examine blocks stored in
+local NVBM. They then produce a list of live blocks (block list)
+recording block IDs and exchange the block lists among all the
+recovery processes. Each recovery process creates a global view
+Vi−1 of DPM-octree using the received block lists. Using this
+view, each process knows which blocks are missing and how to
+recover the missing blocks using the available data blocks and
+parity blocks stored in NVBM.
+Data recovery. To reconstruct blocks, every recovery process
+sends messages consisting of block IDs to other processes running
+on the nodes that store the data. When the recovery processes
+receive the messages, they send corresponding blocks in response.
+After receiving the data and parity blocks in a coding group,
+processes either decode them to generate the missing data blocks
+if data blocks are missing [61] or encode the data blocks again to
+generate the missing parity blocks.
+5
+I MPLEMENTATION
+We implement DPM-octree and its auxiliary library in the Gerris
+flow solver to evaluate its correctness, performance, and scalability. Gerris, developed for simulations of surface-tension dominant
+multiphase flows, is one of the most widely used open-source
+Computational Fluid Dynamics (CFD) packages. The code has
+been extensively adopted and validated for a large variety of
+multiphase flows. Gerris uses the Cartesian-mesh-based finite
+volume method to solve the governing equations of multiphase
+flows [67]. It uses MPI-based domain decomposition to achieve
+highly scalable parallelism with load-balancing capability.
+DPM-octree is implemented with 4.5K lines of C++ code.
+The software architecture is shown in Figure 7. We developed
+three new components including DPM-octree abstraction which
+realizes the operations of DPM-octree, dynamic transformation
+for layout optimization of DPM-octree in NVBM, and failure
+recovery which is responsible for persistence management and
+block-based erasure coding. We implemented multiple operations
+of DPM-octree including octant insertion/updating, garbage collection, traversing, merging, and dynamic layout transformation.
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2015
+Read Latency(ns)
+Write Latency(ns)
+Endurance(writes/bit)
+DRAM
+60
+60
+> 1016
+NVBM
+100
+150
+106 − 108
+TABLE 2: Characteristics of DRAM and NVBM. Note: this data
+is based mainly on external sources [20], [21], [22].
+During simulation, these operations are then used by the internal
+functions of Gerris such as ftt cell traverse(), ftt cell neighbor(),
+ftt cell refine(), ftt cell write(), and ftt cell read(). For snapshot management, Gerris uses the POSIX I/O library in
+functions such as gfs simulation read(), gfs output file new(),
+gfs output file open(), and gfs output file close(). We implement another set of functions in Gerris as described in Table 1.
+When NVBM is configured for simulation, these functions are
+called instead of the existing snapshot functions.
+6
+E VALUATION
+We conducted an extensive performance study of DPM-octree to
+experimentally answer the following questions.
+•
+•
+•
+•
+6.1
+What is the time distribution among major routines while
+generating a mesh using DPM-octree?
+Is DPM-octree effective and scalable for real scientific
+workloads with diverse data access patterns?
+What are the performance implications for DPM-octree
+when parameters, such as the size of DRAM configured
+for the C0 tree, are changed?
+How effective is the dynamic transformation of the DPMoctree layout in reducing NVBM writes?
+Experimental Setup
+Emulating NVBM with DRAM. We model NVBM using DRAM
+on computer servers using an emulation-based approach which is
+similar to those in other projects [53], [23], [46], [68]. Specifically,
+our NVBM emulator introduces extra latency for NVBM read and
+write through routines that read from or write to NVBM. The delay
+is determined according to the performance parameters listed in
+Table 2. We create delays using a software spin loop that uses
+the x86 RDTSP instruction to repeatedly read the processor time
+stamp counter until the counter indicates the intended delay [68],
+[23].
+We evaluated the performance of DPM-octree on the Titan
+supercomputer at Oak Ridge National Laboratory. Titan consists
+of 18,688 nodes, each of which is configured with a 16-core
+AMD Opteron 6274 CPU and 32GB memory. Each node runs
+the Cray Linux Environment operating system. All nodes are
+interconnected with a Cray Gemini network.
+Driving Scientific Problem. To evaluate the correctness and
+scalability of DPM-octree-based adaptive meshing algorithms, we
+developed a program to simulate droplet ejection as the driving
+scientific workload [1], [2]. It uses the Cartesian mesh-based finite
+volume method to simulate fluid flow and can accurately predict
+the droplet breakups that happen after the liquid jet pinches off
+a nozzle as shown in Figure 1(c). The jet eventually breaks up
+into multiple droplets due to capillary instability. The accurate
+prediction of droplet breakups in inkjet printing is extremely
+challenging because the solution of singularity at breakup location
+requires mesh resolution of under one micrometer, whereas the
+inkjet device is often at centimeter scale, yielding at least four
+orders of magnitude length difference across the fluid domains.
+9
+The simulation consists of multiple time steps. In the experiments we ran the simulation for 100 time steps. Eight GB of
+DRAM was configured to store the octants of the C0 tree unless
+otherwise stated. This is equivalent to setting thresholdDRAM to
+24GB. We generated meshes of various sizes by adjusting the
+number of mesh elements.
+Octree Implementations. The simulation of the droplet ejection is implemented using three octree implementations. (1) Incore-octree is the existing octree data structure used in the meshing
+algorithm in Gerris. During simulation all octants are stored in
+DRAM. The octree data structure is saved as a snapshot file stored
+on NVBM every 10 time steps and accessed via a file-system
+interface. (2) Out-of-core-octree is the data structure used in the
+Etree library [17] for meshing using slow storage devices. Specifically, all octants are stored on disks and data indexes are created
+to reduce the I/O latency of accessing the octants. We modified the
+Etree library to support parallel meshing over octants across thousands of compute nodes. Further, we use NVBM instead of disks
+to study the performance of Etree in a computing environment
+configured with NVBM. The Etree octants are stored in NVBM
+and accessed via a file-system interface. (3) DPM-octree is the
+data structure described in Section 4 with dynamic transformation
+of DPM-octree layouts during execution to reduce NVBM writes
+by analyzing the locality of octree access. Upon failure it recovers
+the octree from the version stored in local NVBM. (4) DPMoctree (EC) is the DPM-octree data structure with erasure coding
+for failure recovery as described in Section 4.5.
+6.2
+Weak Scaling
+We first study weak scaling of the simulation with three octree
+implementations: in-core-octree, DPM-octree, and out-of-coreoctree. We measure execution time for problem sizes ranging from
+1.2M elements to 1077M elements and the number of processors
+ranging from 1 to 1000.2 The number of elements per processor
+is ∼1M. Because the program uses unstructured meshes, it is
+impossible to guarantee the number of elements per processor to
+be exactly the same over runs at different scales, but we found that
+they differ by no more than 7% overall.
+Figure 8 shows the execution time with DPM-octree compared
+to in-core-octree and out-of-core-octree. We make three observations. (1) None of the implementations exhibit ideal scaling
+because of the communication and tree partitioning overheads.
+As shown in Figure 9, Partition uses zero time (0%) on a single
+processor with 1.2M elements, 13s (19%) for 7.1M elements on
+6 processors, and 1409s (56%) for 1077M elements on 1000
+processors. (2) DPM-octree achieves similar weak scaling as incore-octree. The times for refining and balancing increase as the
+logarithm of problem size. For example, as the problem size is
+increased from 1.2M to 1077M (897X), the time for refining
+octants increases 16X. This suggests that DPM-octree has good
+scalability. DPM-octree (EC) incurs an additional 19% overhead
+on average compared to DPM-octree. (3) Out-of-core-octree exhibits relatively poorer performance because of the overhead of
+the Etree library and file system software. For example, the Etree
+library uses a B-tree for data indexing on disks. However, it may
+incur extra memory latency if the B-tree is used for indexing data
+stored in NVBM.
+2. Mesh extraction time, e.g., for visualization, is excluded from the execution time because Extract is executed offline or on demand in our research.
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2015
+5000
+300
+In-core
+DPM-octree
+DPM-octree (EC)
+Out-of-core
+250
+Execution Time (sec)
+4000
+Execution Time (sec)
+10
+3000
+2000
+1000
+0
+)
+PE
+00
+10
+M(
+77
+10 2PE)
+1
+(5
+2M
+55 PE)
+74
+(3
+3M
+37
+E)
+8P
+(3
+.9M
+44
+E)
+2P
+(1
+.3M
+14 )
+E
+E)
+6P
+M(
+7.1
+1P
+M(
+1.2
+100%
+150
+100
+50
+200
+Fig. 8: Weak-scaling execution time of the simulation as the
+problem size increases from 1.2M to 1077M elements and the
+number of processors increases from 1 to 1000. We compare the
+execution time with DPM-octree to that with in-core-octree and
+out-of-core-octree, respectively.
+Construct
+Partition
+Refine&Coarsen
+200
+300
+400
+500 600 700
+Processors
+(a)
+Construct
+Partition
+Refine&Coarsen
+100%
+Balance
+Persistent
+Garbage collect
+900 1000
+Balance
+Persistent
+Garbage collect
+60%
+40%
+20%
+60%
+0%
+40%
+240PE
+360PE
+480PE 1000PE
+(b)
+20%
+1.2M 7.1M 14.3 44.9 373 552 107
+M
+M 7M
+M
+M
+Fig. 10: Strong scaling with 150M elements. (a) Execution time
+of the simulation with DPM-octree compared to ideal speedup. (b)
+Execution time breakdown across major simulation routines.
+600
+Fig. 9: Execution time breakdown across major simulation routines in the weak scaling study.
+Strong Scaling
+To study strong scaling, the problem size is kept constant and the
+number of processors is increased. Specifically, we fix the problem
+size at 150M elements while increasing the number of processors
+from 240 to 1000. The execution time is shown in Figure 10(a).
+A finding from this figure is that the execution time speedup with
+DPM-octree is close to ideal over this range. The major overhead
+at large scale is tree partitioning. However, no major fluctuation is
+observed in the execution breakdowns as shown in Figure 10(b) as
+we increase the number of processors, indicating that there is no
+scalability issue.
+In addition, we compared the execution time with DPMoctree to that with in-core-octree and out-of-core-octree. Figure 11
+shows the results. We found that (1) the execution times of the
+three schemes decreased linearly as the number of processors is
+increased from 240 to 1000 because fewer mesh domains need to
+be computed per processor, and (2) the performance gap between
+in-core-octree and DPM-octree is reduced. For example, when the
+number of processors is 240, the speedup using in-core-octree is
+48%, and reduces to 36% when the number of processors is 1000.
+This is because, with fewer octants assigned to each processor,
+In-core
+DPM-octree
+DPM-octree (EC)
+Out-of-core
+500
+Execution Time (sec)
+6.3
+800
+80%
+80%
+0%
+PM-octree
+Ideal speedup
+400
+300
+200
+100
+0
+240PE
+360PE
+480PE
+1000PE
+Fig. 11: Execution time of the simulation with fixed problem size
+(150M elements) and varying number of processors from 240 to
+1000 for DPM-octree, in-core-octree, and out-of-core-octree.
+more octants can be stored in the C0 tree in DRAM, so it is
+more likely that the simulation with DPM-octree could achieve
+performance comparable to in-core-octree.
+6.4
+Effect of DRAM Size
+Memory size is inversely correlated to the number of octants
+stored in NVBM. We can vary the memory size to influence
+the merging frequency of the C0 tree in DRAM and the C1
+1000
+1000
+800 781.4
+800
+600
+400
+233.5
+200
+0
+180.8
+172.1
+89.1
+Out
+P
+P
+PMPMIn-c
+-of- M-octr M-Oct
+Oct
+Oct
+ore
+core ee
+ree(
+ree(
+ree(
+(1G
+2GB
+4GB
+8GB
+B)
+)
+)
+)
+tree in NVBM to study the effect on the execution time of the
+simulation with DPM-octree. In the following experiments we ran
+the simulation with different DRAM sizes to determine whether
+the execution time is substantially affected by the DRAM size.
+The generated mesh has 6.75M elements and over 100 processors.
+The maximum DRAM demand is 20GB for simulation with incore-octree.
+We vary the size of DRAM configured for the C0 tree of DPMoctree from 1GB, 2GB, 4GB, and 8GB. As shown in Figure 12,
+the execution time of the simulation is decreased from 233.5s to
+89.1s when the DRAM for the C0 tree is increased from 1GB to
+8GB. When DRAM size is small the C0 tree needs to be frequently
+merged with the C1 tree. Specifically, C0 and C1 were merged 491
+times when DRAM size is 1GB. However, as the DRAM size
+increases, more octants can be stored in C0 in DRAM, resulting in
+fewer merging operations and fewer NVBM accesses. When the
+DRAM size is 8GB, the C0 tree only needs to be merged with the
+C1 tree at the end of each time step.
+Figure 12 yields two more observations. (1) When DRAM is
+large enough to store the Vi tree the execution time with DPMoctree is very close to that with in-core-octree because of the
+snapshot overhead: the simulation with in-core-octree needs to
+write all octants to NVBM for persistence, while DPM-octree
+only needs to write new and updated octants to NVBM. (2)
+When the DRAM size is 1GB, the performance with DPM-octree
+is still significantly better than that with out-of-core-octree for
+three reasons. First, the octants of out-of-core-octree are not byteaddressable. To improve I/O performance the minimum I/O unit is
+a page (4KB), which consists of multiple octants. Second, it takes
+multiple memory accesses to search the data index to find the page
+where an octant is located. Third, out-of-core-octree is designed
+as a linear octree. Its balancing operation is very time-consuming
+because no pointers to neighbor octants are maintained in its data
+structure. Therefore, for a single octant, it needs to search all 26
+neighbors, resulting in very high I/O overhead when balancing an
+octree of millions of octants.
+Effectiveness of Dynamic Transformation
+The dynamic transformation of a DPM-octree layout can reduce
+the number of writes to NVBM by moving frequently accessed
+.5
+915
+W/O Transformation
+W/ Transformation
+.1
+689
+600
+400
+.4
+200
+85.7
+Fig. 12: Execution times of the simulation with out-of-core-octree,
+DPM-octree with different DRAM sizes (1GB, 2GB, 4GB, and
+8GB) configured for its C0 tree, and in-core-octree.
+6.5
+11
+Execution Time (sec)
+Execution time (sec)
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2015
+0
+2
+49. 48.1
+0
+79. 65.4
+1.19M
+3.75M
+.7
+117 93.0
+6.75M
+187
+.1
+131
+22.5M
+224M
+Fig. 13: Execution time with and without the dynamic transformation of a DPM-octree layout.
+(hot) subtrees from NVBM to DRAM. The hot subtrees are
+identified using the feature-directed sampling approach described
+in Section 4.3. We next study the effect of the dynamic transformation on the effectiveness of DPM-octree. We ran the simulation
+with the number of mesh elements ranging from 1.19M, 3.75M,
+6.75M, 22.5M, to 224M. The meshes are generated on 100
+processors. Figure 13 shows the execution time of the simulation
+with and without the dynamic transformation.
+When the mesh size is small, the octants that are frequently accessed in the hot subtrees can be stored in DRAM. Therefore, the
+execution time (48.1s) with the dynamic transformation scheme is
+almost the same as that without it. When we increase the mesh
+size to 224M elements, the dynamic transformation reduces the
+execution time from 915.5s to 689.1s (24.7%) and the number
+of writes to NVBM by 31%. Here the C0 tree in DRAM can
+store only 7% of the octants. When the simulation needs to refine
+octants stored in NVBM, its higher read/write latency results in
+reduced performance. When dynamic transformation is enabled,
+the features (e.g., location predicates for mesh refinement) are
+used to determine the hot subtrees and replace the less frequently
+accessed subtrees in DRAM with the hot ones. The octant copy
+overhead is well offset by reducing writes to NVBM. Thus
+the dynamic transformation generates a more NVBM-friendly
+layout and thereby effectively reduces the execution time of the
+simulation.
+6.6
+Failure Recovery
+Next we compare the time to restart the simulation after failures
+with in-core-octree, DPM-octree, DPM-octree (EC) and out-ofcore-octree. We use the local Kamiak cluster [69] hosted at
+Washington State University for the experiments because we need
+to control when and where failures occur. Kamiak includes 87
+20-core Intel Xeon E5-2660 and E5-2680 processors running
+Redhat Linux with kernel 3.10.0. All nodes are interconnected
+with a 56 GB/s InfiniBand network. In the experiments, we fix
+the problem size to be 6.75M elements and run the simulation
+with 100 processes. We kill the processes at time step 20 and then
+restart the simulation. We measure the restart time in the following
+two scenarios. Scenario I: the same set of compute nodes is used to
+serve simulations after restarting. In this scenario, erasure coding
+is disabled because no persistent data is lost and DPM-octree can
+use the version stored in NVBM to recover the octree. Scenario II:
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2015
+Execution Time (sec)
+100
+80
+3
+89. 5.0
+8
+DPM_persistent
+DPM_restore
+60
+40
+The problem size is fixed at 150M elements while the number of
+processes is increased from 240 to 1000. We used 64KB block
+size in encoding and decoding. Table 3 shows the results. We
+observe that both persistent and restore time are decreased as the
+number of processes is increased. This is because fewer blocks are
+transferred in data encoding and decoding.
+7
+20
+0
+12
+0
+11. 10.5
+0.25KB
+1KB
+7.4 7.0
+6.1 5.9
+6.2 5.9
+4KB
+16KB
+64KB
+Fig. 14: Execution time of DPM persistent() and DPM restore()
+with different block sizes.
+a new compute node is used to serve the simulation, replacing one
+of the crashed nodes, demonstrating the use of DPM-octree (EC).
+In scenario I, with out-of-core-octree, the program can immediately access octants in NVBM because Etree is essentially an
+octant database and can guarantee data consistency after failures.
+The time to restart the simulation is 42.9s with in-core-octree
+and 2.1s with DPM-octree. DPM-octree only needs to mark the
+octants in Vi as deleted and returns Vi−1 for the simulation to
+access the consistent octree. In contrast, the program with in-coreoctree needs to read all the data from the snapshot file stored in
+the NVBM-based file system.
+In scenario II, we first study the average execution time of
+DPM persistent() and DPM restore() when DPM-octree (EC) is
+used. Figure 14 shows the results. The key observation is that
+execution times are very sensitive to the block size. For example,
+when the block size is increased from 256 bytes to 64 KB, the
+execution times of DPM persistent() is decreased from 89.3s to
+6.2s. When the block size is 256 bytes, octant transfer time
+accounts for 99% of total execution time of the function. When the
+block size is 64 KB, data blocks and parity blocks can be much
+more efficiently exchanged among processes, reducing the octant
+transfer time to 1.2s. Second, we measure the program restart time
+using DPM-octree (EC) with 64 KB block size and compare it to
+that of in-core-octree. We did not compare it to out-of-core-octree
+because octants stored in the Etree database are not replicated and
+therefore cannot be recovered from failures with data loss in this
+scenario. The time for in-core-octree is the same as that in the first
+scenario because snapshot files are read from a shared parallel file
+system, which does not suffer from failures of compute nodes. The
+time with DPM-octree is 5.9s for recovering the lost octants using
+the parity subtrees compared to 42.9s for in-core-octree.
+Persistent time (s)
+Restore time (s)
+240PE
+16.9
+16.1
+360PE
+14.7
+14.0
+480PE
+10.6
+10.1
+1000PE
+8.6
+8.2
+TABLE 3: Time spent on DPM persistent() and DPM restore()
+on Titan with 64KB block size when the number of processes is
+increased from 240 to 1000.
+We have described the design and implementation of the DPMoctree data structure for large-scale simulations using octrees.
+It not only effectively extends memory capacity using NVBM
+but also supports near-instantaneous failure recovery via erasurecoding schemes and the non-volatility of NVBM. Furthermore, to
+make the algorithms truly effective, the layout of DPM-octree is
+dynamically transformed according to the octant access frequency
+obtained using a feature-directed sampling approach. Finally, it
+supports orthogonal persistence for applications and provides an
+easy-to-program interface by which users are freed from the errorprone and tedious tasks of persistent pointer management. A software prototype of DPM-octree was developed and integrated with
+Gerris, and a real-world flow simulation program was developed
+using DPM-octree to simulate droplet ejection in inkjet printing.
+Our experimental results show that simulations implemented using
+DPM-octree have good scalability up to 1.1 billion elements on
+1000 processors on the Titan supercomputer.
+As future work, we plan to (1) conduct a deep analysis of the
+effect of layout transformation on the wear leveling of NVBM,
+(2) test DPM-octree with other flow solvers and simulations
+requiring adaptive mesh refinement using the octree data structure,
+and (3) enhance the data structure to recover from any of its
+previous versions, and generalize the erasure coding scheme to
+accommodate multiple simultaneous compute node failures.
+ACKNOWLEDGMENTS
+We are grateful to the anonymous reviewers. This research was
+supported by US National Science Foundation under CRII ACI
+1565338. This work was also funded in part by the US Department
+of Energy Exascale Computing Program. Los Alamos National
+Laboratory is operated by Los Alamos National Security LLC
+for the US Department of Energy under contract DE-AC5206NA25396.
+R EFERENCES
+[1]
+[2]
+[3]
+[4]
+[5]
+[6]
+Fianlly, we study the execution time of DPM persistent() and
+DPM restore() on Titan. To emulate the failures we instrumented
+the code so that processes that are deemed to have failed call
+DPM restore() to recovery their octrees using the parity blocks.
+C ONCLUSIONS
+[7]
+S. D. Hoath, Fundamentals of inkjet printing: the science of inkjet and
+droplets. Wiley-VCH Verlag GmbH &Co, 2016.
+H. Tan, E. Torniainen, D. P. Markel, and R. N. K. Browning, “Numerical
+simulation of droplet ejection of thermal inkjet printheads,” International
+Journal for Numerical Methods in Fluids, vol. 77, pp. 544–570, Mar.
+2015.
+A. Yarin, “Drop impact dynamics: Splashing, spreading, receding, bouncing,” Annual Review of Fluid Mechanics, vol. 38, no. 1, pp. 159–192,
+2006.
+C. Josserand and S. Thoroddsen, “Drop impact on a solid surface,”
+Annual Review of Fluid Mechanics, vol. 48, no. 1, pp. 365–391, 2016.
+C. P.V., Liquid-vapor phase-change phenomena. CRC press, New York,
+2008.
+A. Langer, J. Lifflander, P. Miller, K. C. Pan, L. V. Kalé, and P. Ricker,
+“Scalable algorithms for distributed-memory adaptive mesh refinement,”
+in Computer Architecture and High Performance Computing (SBACPAD), 2012 IEEE 24th International Symposium on, 2012, pp. 100–107.
+J. S. Vetter and S. Mittal, “Opportunities for nonvolatile memory systems
+in extreme-scale high-performance computing,” Computing in Science
+Engineering, vol. 17, no. 2, pp. 73–82, 2015.
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2015
+[8]
+G. W. Burr, M. J. Breitwisch, M. Franceschini, D. Garetto, K. Gopalakrishnan, B. Jackson, B. Kurdi, C. Lam, L. A. Lastras, A. Padilla et al.,
+“Phase change memory technology,” Journal of Vacuum Science &
+Technology B, vol. 28, no. 2, pp. 223–262, 2010.
+[9] D. Apalkov, A. Khvalkovskiy, S. Watts, V. Nikitin, X. Tang, D. Lottis,
+K. Moon, X. Luo, E. Chen, A. Ong, A. Driskill-Smith, and M. Krounbi,
+“Spin-transfer torque magnetic random access memory (stt-mram),” J.
+Emerg. Technol. Comput. Syst., vol. 9, no. 2, May 2013.
+[10] J. J. Yang and R. S. Williams, “Memristive devices in computing system:
+Promises and challenges,” J. Emerg. Technol. Comput. Syst., vol. 9, no. 2,
+May 2013.
+[11] T. Tu, D. R. O’Hallaron, and O. Ghattas, “Scalable parallel octree meshing for terascale applications,” in Supercomputing, 2005. Proceedings of
+the ACM/IEEE SC 2005 Conference, Nov 2005, pp. 4–4.
+[12] H. Sundar, R. S. Sampath, and G. Biros, “Bottom-up construction and
+2: 1 balance refinement of linear octrees in parallel,” SIAM Journal on
+Scientific Computing, vol. 30, no. 5, pp. 2675–2708, 2008.
+[13] H. Sundar, R. S. Sampath, S. S. Adavani, C. Davatzikos, and G. Biros,
+“Low-constant parallel algorithms for finite element simulations using
+linear octrees,” in Supercomputing, 2007. SC ’07. Proceedings of the
+2007 ACM/IEEE Conference on, 2007, pp. 1–12.
+[14] S. Popinet, “Gerris: a tree-based adaptive solver for the incompressible euler equations in complex geometries,” Journal of Computational
+Physics, vol. 190, no. 2, pp. 572 – 600, 2003.
+[15] X. Zhang, S. Jiang, and K. Davis, “Making resonance a common case:
+A high-performance implementation of collective i/o on parallel file
+systems,” in Parallel Distributed Processing, 2009. IPDPS 2009. IEEE
+International Symposium on, 2009, pp. 1–12.
+[16] X. Zhang, K. Davis, and S. Jiang, “itransformer: Using ssd to improve
+disk scheduling for high-performance i/o,” in Parallel Distributed Processing Symposium (IPDPS), 2012 IEEE 26th International, 2012, pp.
+715–726.
+[17] T. Tu, J. Lopez, and D. O’Hallaron, “The Etree library: A system
+for manipulating large octrees on disk,” Carnegie Mellon School of
+Computer Science, Tech. Rep. CMU-CS-03-174, July 2003.
+[18] “pmem.io: Persistent memory programming,” http://pmem.io/nvml/.
+[19] B. V. Essen, H. Hsieh, S. Ames, and M. Gokhale, “Di-mmap: A high
+performance memory-map runtime for data-intensive applications,” in
+High Performance Computing, Networking, Storage and Analysis (SCC),
+2012 SC Companion:, 2012, pp. 731–735.
+[20] S. Venkataraman, N. Tolia, P. Ranganathan, and R. H. Campbell,
+“Consistent and durable data structures for non-volatile byte-addressable
+memory,” in Proceedings of the 9th USENIX Conference on File and
+Stroage Technologies, ser. FAST’11, 2011.
+[21] S. N. Shimin Chen, Phillip B. Gibbons, “Rethinking database algorithms
+for phase change memory,” in CIDR’11: 5th Biennial Conference on
+Innovative Data Systems Research, 2011.
+[22] B. C. Lee, E. Ipek, O. Mutlu, and D. Burger, “Architecting phase change
+memory as a scalable dram alternative,” in Proceedings of the 36th
+Annual International Symposium on Computer Architecture, ser. ISCA
+’09, 2009.
+[23] J. Ou, J. Shu, and Y. Lu, “A high performance file system for non-volatile
+main memory,” in Proceedings of the Eleventh European Conference on
+Computer Systems, ser. EuroSys ’16, 2016.
+[24] D. P. Mehta and S. Sahni, Handbook of Algorithms and Data Structures.
+Chapman and Hall/CRC, 2004.
+[25] R. Hagmann, “Reimplementing the cedar file system using logging and
+group commit,” in Proceedings of the Eleventh ACM Symposium on
+Operating Systems Principles, ser. SOSP ’87, 1987.
+[26] J. R. Driscoll, N. Sarnak, D. D. Sleator, and R. E. Tarjan, “Making data
+structures persistent,” J. Comput. Syst. Sci., vol. 38, no. 1, Feb. 1989.
+[27] J. Bent, G. Gibson, G. Grider, B. McClelland, P. Nowoczynski, J. Nunez,
+M. Polte, and M. Wingate, “Plfs: A checkpoint filesystem for parallel
+applications,” in Proceedings of the Conference on High Performance
+Computing Networking, Storage and Analysis, ser. SC ’09, 2009.
+[28] P. J. Varman and R. M. Verma, “An efficient multiversion access structure,” IEEE Transactions on Knowledge and Data Engineering, vol. 9,
+no. 3, pp. 391–409, May 1997.
+[29] C. Mohan, “Repeating history beyond aries,” in Proceedings of the 25th
+International Conference on Very Large Data Bases, ser. VLDB ’99,
+1999.
+[30] J. Condit, E. B. Nightingale, C. Frost, E. Ipek, B. Lee, D. Burger, and
+D. Coetzee, “Better i/o through byte-addressable, persistent memory,”
+in Proceedings of the ACM SIGOPS 22Nd Symposium on Operating
+Systems Principles, ser. SOSP ’09, 2009, pp. 133–146.
+[31] S. Chen and Q. Jin, “Persistent b+-trees in non-volatile main memory,”
+Proc. VLDB Endow., vol. 8, no. 7, Feb. 2015.
+13
+[32] J. Yang, Q. Wei, C. Chen, C. Wang, K. L. Yong, and B. He, “Nvtree: Reducing consistency cost for nvm-based single level systems,”
+in Proceedings of the 13th USENIX Conference on File and Storage
+Technologies, ser. FAST’15, 2015.
+[33] W. X. Wang, Z. Lin, W. M. Tang, W. W. Lee, S. Ethier, J. L. V.
+Lewandowski, G. Rewoldt, T. S. Hahm, and J. Manickam, “GyroKinetic simulation of global turbulent transport properties in tokamak
+experiments,” Physics of Plasmas, vol. 13, no. 9, p. 092505, 2006.
+[34] X. Zhang, K. Davis, and S. Jiang, “IOrchestrator: Improving the performance of multi-node I/O systems via inter-server coordination,” in
+Proceedings of the ACM/IEEE International Conference for High Performance Computing, Networking, Storage, and Analysis (SC’10), 2010.
+[35] X. Zhang, K. Davis, and S. Jiang, “Qos support for end users of i/ointensive applications using shared storage systems,” in Proceedings of
+the ACM/IEEE International Conference for High Performance Computing, Networking, Storage, and Analysis (SC’11), 2011.
+[36] S. Kannan, A. Gavrilovska, K. Schwan, and D. Milojicic, “Optimizing
+checkpoints using nvm as virtual memory,” in Parallel Distributed
+Processing (IPDPS), 2013 IEEE 27th International Symposium on, 2013,
+pp. 29–40.
+[37] A. M. Caulfield, J. Coburn, T. Mollov, A. De, A. Akel, J. He, A. Jagatheesan, R. K. Gupta, A. Snavely, and S. Swanson, “Understanding
+the impact of emerging non-volatile memories on high-performance,
+io-intensive computing,” in Proceedings of the 2010 ACM/IEEE International Conference for High Performance Computing, Networking,
+Storage and Analysis, ser. SC ’10, 2010.
+[38] Q. Shi and J. JaJa, “Isosurface extraction and spatial filtering using persistent octree (pot),” IEEE Transactions on Visualization and Computer
+Graphics, vol. 12, no. 5, pp. 1283–1290, Sept 2006.
+[39] E. Kim, J. Bielak, O. Ghattas, and J. Wang, “Octree-based finite element
+method for large-scale earthquake ground motion modeling in heterogeneous basins,” AGU Fall Meeting Abstracts, Dec. 2002.
+[40] S. Popinet, “Gerris flow solver,” http://gfs.sourceforge.net/wiki/index.
+php/Main Page.
+[41] T. Tu, H. Yu, L. Ramirez-Guzman, J. Bielak, O. Ghattas, K. l. Ma, and
+D. R. O’Hallaron, “From mesh generation to scientific visualization: An
+end-to-end approach to parallel supercomputing,” in SC 2006 Conference, Proceedings of the ACM/IEEE, Nov 2006.
+[42] J. Salmon and M. S. Warren, “Parallel, out-of-core methods for nbody simulation,” in Proceedings of the Eigth Conference on Parallel
+Processing for Scientific Computing, ser. SIAM’97, 1997.
+[43] B. Dong, K. Wu, S. Byna, J. Liu, W. Zhao, and F. Rusu, “Arrayudf: Userdefined scientific data analysis on arrays,” in Proceedings of the 26th
+International Symposium on High-Performance Parallel and Distributed
+Computing, ser. HPDC ’17, 2017.
+[44] T. Tu and D. R. O’Hallaron, “A computational database system for
+generatinn unstructured hexahedral meshes with billions of elements,”
+in Supercomputing, 2004. Proceedings of the ACM/IEEE SC2004 Conference, 2004, pp. 25–25.
+[45] S.-K. Ueng, C. Sikorski, and K.-L. Ma, “Out-of-core streamline visualization on large unstructured meshes,” IEEE Transactions on Visualization and Computer Graphics, vol. 3, no. 4, pp. 370–380, 1997.
+[46] J. Huang, K. Schwan, and M. K. Qureshi, “Nvram-aware logging in
+transaction systems,” Proc. VLDB Endow., vol. 8, no. 4, Dec. 2014.
+[47] W.-H. Kim, J. Kim, W. Baek, B. Nam, and Y. Won, “Nvwal: Exploiting
+nvram in write-ahead logging,” in Proceedings of the Twenty-First
+International Conference on Architectural Support for Programming
+Languages and Operating Systems, ser. ASPLOS ’16, 2016.
+[48] X. Wu and A. L. N. Reddy, “Scmfs: A file system for storage class
+memory,” in Proceedings of 2011 International Conference for High
+Performance Computing, Networking, Storage and Analysis, ser. SC ’11,
+2011.
+[49] D. Narayanan and O. Hodson, “Whole-system persistence,” in Proceedings of the Seventeenth International Conference on Architectural Support for Programming Languages and Operating Systems, ser. ASPLOS
+XVII, 2012.
+[50] X. Wu, F. Ni, L. Zhang, Y. Wang, Y. Ren, M. Hack, Z. Shao, and S. Jiang,
+“Nvmcached: An nvm-based key-value cache,” in Proceedings of the 7th
+ACM SIGOPS Asia-Pacific Workshop on Systems, ser. APSys ’16, 2016.
+[51] D. Schwalb, M. Dreseler, M. Uflacker, and H. Plattner, “Nvc-hashmap:
+A persistent and concurrent hashmap for non-volatile memories,” in
+Proceedings of the 3rd VLDB Workshop on In-Memory Data Mangement
+and Analytics, ser. IMDM ’15, 2015, pp. 4:1–4:8.
+[52] V. A. Sartakov and R. Kapitza, “Nv-hypervisor: Hypervisor-based persistence for virtual machines,” in 2014 44th Annual IEEE/IFIP International
+Conference on Dependable Systems and Networks, 2014.
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2015
+[53] H. Volos, A. J. Tack, and M. M. Swift, “Mnemosyne: Lightweight
+persistent memory,” SIGPLAN Not., vol. 47, no. 4, pp. 91–104, Mar.
+2011.
+[54] J. Coburn, A. M. Caulfield, A. Akel, L. M. Grupp, R. K. Gupta, R. Jhala,
+and S. Swanson, “Nv-heaps: Making persistent objects fast and safe with
+next-generation, non-volatile memories,” SIGPLAN Not., vol. 46, no. 3,
+Mar. 2011.
+[55] J. Coburn, A. Caulfield, L. Grupp, A. Akel, and S. J. Swanson, “Nvtm: A
+transactional interface for next-generation non-volatile memories,” 2009.
+[56] A. Kolli, S. Pelley, A. Saidi, P. M. Chen, and T. F. Wenisch, “Highperformance transactions for persistent memories,” in Proceedings of
+the Twenty-First International Conference on Architectural Support for
+Programming Languages and Operating Systems, ser. ASPLOS ’16,
+2016.
+[57] M. P. Atkinson and O. P. Buneman, “Types and persistence in database
+programming languages,” ACM Comput. Surv., vol. 19, no. 2, Jun. 1987.
+[58] J. Guerra, L. Marmol, D. Campello, C. Crespo, R. Rangaswami, and
+J. Wei, “Software persistent memory,” in Presented as part of the 2012
+USENIX Annual Technical Conference (USENIX ATC 12), 2012.
+[59] K.-H. Huang and J. A. Abraham, “Algorithm-based fault tolerance for
+matrix operations,” IEEE Transactions on Computers, vol. C-33, no. 6,
+pp. 518–528, 1984.
+[60] P. Wu, Q. Guan, N. DeBardeleben, S. Blanchard, D. Tao, X. Liang,
+J. Chen, and Z. Chen, “Towards practical algorithm based fault tolerance
+in dense linear algebra,” in Proceedings of the 25th ACM International
+Symposium on High-Performance Parallel and Distributed Computing,
+ser. HPDC ’16, 2016, pp. 31–42.
+[61] H. Chen, H. Zhang, M. Dong, Z. Wang, Y. Xia, H. Guan, and B. Zang,
+“Efficient and available in-memory kv-store with hybrid erasure coding
+and replication,” ACM Trans. Storage, vol. 13, no. 3, Sep. 2017.
+[62] M. M. T. Yiu, H. H. W. Chan, and P. P. C. Lee, “Erasure coding for
+small objects in in-memory kv storage,” in Proceedings of the 10th
+ACM International Systems and Storage Conference, ser. SYSTOR ’17.
+New York, NY, USA: ACM, 2017, pp. 14:1–14:12. [Online]. Available:
+http://doi.acm.org/10.1145/3078468.3078470
+[63] K. V. Rashmi, M. Chowdhury, J. Kosaian, I. Stoica, and K. Ramchandran,
+“Ec-cache: Load-balanced, low-latency cluster caching with online
+erasure coding,” in Proceedings of the 12th USENIX Conference
+on Operating Systems Design and Implementation, ser. OSDI’16.
+Berkeley, CA, USA: USENIX Association, 2016, pp. 401–417. [Online].
+Available: http://dl.acm.org/citation.cfm?id=3026877.3026909
+[64] I. S. Reed and G. Solomon, “Polynomial codes over certain finite fields,”
+Journal of the Society for Industrial and Applied Mathematics, vol. 8,
+no. 2, pp. 300–304, 1960.
+[65] A. Silberschatz, P. B. Galvin, and G. Gagne, Operating System Concepts,
+8th ed. Wiley Publishing, 2008.
+[66] H.-J. Boehm and M. Weiser, “Garbage collection in an uncooperative
+environment,” Softw. Pract. Exper., vol. 18, no. 9, Sep. 1988.
+[67] S. Popinet, “An accurate adaptive solver for surface-tension-driven interfacial flows,” Journal of Computational Physics, vol. 228, no. 16, pp.
+5838–5866, 2009.
+[68] H. Volos, S. Nalli, S. Panneerselvam, V. Varadarajan, P. Saxena, and
+M. M. Swift, “Aerie: Flexible file-system interfaces to storage-class
+memory,” in Proceedings of the Ninth European Conference on Computer
+Systems, ser. EuroSys ’14, 2014.
+[69] “The Kamiak Cluster at WSU,” https://hpc.wsu.edu.
+Bao Nguyen Bao Nguyen is a graduate student
+in the School of Engineering and Computer Science at Washington State University Vancouver.
+His research interests include file and storage
+system and high-performance computing.
+14
+Hua Tan Dr. Hua Tan is an assistant professor
+in School of Engineering and Computer Science
+at Washington State University Vancouver. His
+current research interests include Inkjet-based
+Additive Manufacturing, Microfluidics, Computational Fluid Dynamics, and High-Performance
+Computation. He obtained Ph.D. in Mechanical
+Engineering from the University of WisconsinMilwaukee in 2010, and Master and Bachelor
+Degree from Wuhan University of Technology in
+2005 and 2000, respectively.
+Kei Davis received the MS degree in computation from the University of Oxford and PhD in
+computing science from the University of Glasgow. He is currently a research scientist at the
+Los Alamos National Laboratory. His research
+interests include the areas of programming languages, operating systems, and parallel computing.
+Xuechen Zhang Xuechen Zhang received the
+M.S. and the Ph.D. in Computer Engineering
+from Wayne State University. He is currently an
+assistant professor in the School of Engineering
+and Computer Science at Washington State University Vancouver. His research interests include
+the areas of file and storage systems and highperformance computing. He is a member of the
+IEEE and ACM.

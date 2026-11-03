@@ -1,0 +1,185 @@
+Web space mission visualization — SPICE-accurate geometry, TLE tracking, planetary terrain, and a 3D renderer - Clip sensor FOV geometry at physical surface intersections (#27) by AaronPlave · Pull Request #174 · AaronPlave/cosmolabe
+
+Clip sensor FOV geometry at physical surface intersections (#27) by AaronPlave · Pull Request #174 · AaronPlave/cosmolabe · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+AaronPlave
+commented
+Oct 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Closes #27.
+Sensor frustums used to be one uniformly scaled cone/pyramid running to the catalog range or the target's center. A body hid the cone only from the current viewpoint, so rotating the camera exposed geometry that should have stopped at the surface. The FOV is now a perimeter of rays from the instrument, each ending at the nearest eligible physical surface hit and otherwise at the maximum visualization range.
+surface/FovClipper (pure, no renderer state):
+Samples the perimeter: around ellipses, and along every edge of polygons.
+Adaptive bisection at hit/miss and body-to-body transitions.
+Between two missing samples, one probe ray at the closest approach to each candidate, found in the reference ellipsoid's scaled space. This is exact for reference shapes however short the interval, so a grazing body whose limb crosses only mid-interval is found.
+Hit-hit smoothing driven by range deviation, i.e. the surface bending, not the outline's own curvature.
+Nearest hit across all bodies.
+surface/ReferenceEllipsoidSurface: analytic PhysicalSurface for body radii, tagged reference-shape so it is never presented as terrain.
+surface/ResidentTerrainSurface: bounded query over resident decoded tiles through the shared GlobeTileSurface path. Results are always partial/coarse.
+Fallback rule: only unavailable falls through to the reference shape. A complete mesh's miss is authoritative, so the Define shared physical-surface queries and independent imagery contracts #148 concave fixture keeps its hole.
+SensorFovClipping (renderer-owned):
+Resolves visible Globe bodies' surfaces and body-fixed frames each frame.
+Memoizes per sensor while epoch, origin and resident terrain are unchanged.
+Caps terrain triangle tests per frame, checked per sensor. Sensors past the cap use the reference shape for that frame, flagged fallback.
+SensorFrustum only builds geometry: side faces, perimeter, side lines, no end cap.
+CpuMeshSurface: allocation-free intersection loop with identical results, about 5× faster.
+SPICE outlines: RECTANGLE/POLYGON bounds drive the drawn perimeter when the frustum is SPICE-oriented.
+Defaults and diagnostics: clipping is on by default. clipSensorsToSurfaces / setSensorClipping(false) show the raw FOV. getSensorClipSummary reports bodies, surface source (reference/terrain/mesh), coarse and fallback.
+Scope: viewer clipping covers solid Globe bodies (reference ellipsoid, plus resident streamed terrain). Irregular Mesh bodies such as 67P are supported by the pure clipper and its tests, but not yet integrated into the viewer. That is tracked in #175, together with the BVH the #148 ADR anticipates. No catalog changes: range remains a maximum visualization range.
+Performance (Node, real marshub tiles): a terrain-clipped sensor costs ~1 ms/frame, down from ~15.8 ms before review. 20 terrain sensors cost ~5.7 ms/frame in total, with terrain work capped at ~3 ms. Reference-only clipping costs ~0.1–0.3 ms per sensor.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_016uw8divwkkkRvNxWed6qKe
+Clip sensor FOV geometry at physical surface intersections (#27)
+…
+755eab8
+```
+Sensor frustums used to be one uniformly scaled cone/pyramid running to the
+catalog range or the target's center, so a body hid the cone only from the
+current viewpoint and rotating the camera exposed geometry that should have
+stopped at the surface. The FOV is now a perimeter of rays from the
+instrument, each ending at the nearest eligible physical surface hit and
+otherwise at the maximum visualization range.
+
+- surface/FovClipper: pure perimeter sampling (ellipses around the limb,
+  polygons along every edge) with adaptive bisection at hit/miss and
+  body-to-body transitions, a bounding-cone probe so a small body crossing
+  the middle of an edge between two missing samples is found, and
+  curvature-bounded smoothing of hit-hit chords. Nearest hit across bodies.
+- surface/ReferenceEllipsoidSurface: analytic PhysicalSurface for body radii,
+  tagged 'reference-shape' so it is never presented as terrain.
+- surface/ResidentTerrainSurface: bounded query over resident decoded tiles
+  through the shared GlobeTileSurface path; always partial/coarse.
+- Only 'unavailable' falls through to the reference shape; a complete mesh's
+  miss is authoritative, so the #148 concave fixture keeps its hole.
+- SensorFovClipping (renderer-owned) resolves visible solid globes' surfaces
+  and body-fixed frames each frame and memoizes per sensor while epoch,
+  origin and resident terrain are unchanged. SensorFrustum only builds
+  geometry: side faces, perimeter, side lines, no end cap.
+- SPICE RECTANGLE/POLYGON bounds now drive the drawn perimeter when the
+  frustum is SPICE-oriented.
+- Clipping is on by default; clipSensorsToSurfaces / setSensorClipping(false)
+  show the raw FOV, and getSensorClipSummary reports bodies, surface source
+  (reference/terrain/mesh), coarse and fallback for diagnostics.
+
+No catalog changes: `range` remains a maximum visualization range.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016uw8divwkkkRvNxWed6qKe
+```
+AaronPlave
+commented
+Oct 9, 2026
+View reviewed changes
+AaronPlave
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review of #174: the architecture aligns well with #27 (pure surface resolver, renderer-owned candidate selection, SPICE polygon bounds, provenance, and useful tests). However, I found one blocking correctness issue plus a significant playback-performance risk. Please address these before merging.
+Blocking — missed grazing surface intersections: hiddenBetween assumes an interval shorter than a body's angular radius cannot hide an intersection between two misses. This is false; a grazing body can hit the midpoint while the endpoints miss. See the inline deterministic reproduction and requested regression test.
+Playback cost: The resident-terrain path calls the linear triangle-scanning CpuMeshSurface for every perimeter ray/refinement, with the memoization invalidated each advancing epoch. Please profile real Mars terrain and several active sensors during playback and either accelerate queries or bound/degrade the terrain pass until it is safe.
+Scope clarity: The renderer filters out Mesh bodies, so only the standalone clipper tests support concave meshes; the live viewer cannot yet clip an FOV at 67P/other irregular bodies. This is acceptable for #27's explicit reference-first scope, but please document and track the renderer integration.
+I would also do a manual smoke check rotating the camera behind a grazing FOV and running an instrument over loaded Mars terrain during time playback.
+CI on head 755eab8 is green, but that doesn't cover the grazing counterexample.
+Comment thread
+packages/three/src/surface/FovClipper.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+packages/three/src/surface/ResidentTerrainSurface.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+packages/three/src/SensorFovClipping.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+AaronPlave
+mentioned this pull request
+Oct 9, 2026
+Clip sensor FOVs at rendered irregular (Mesh) bodies
+#175
+Open
+claude
+added 2 commits
+October 9, 2026 01:19
+Address review: exact grazing probe, bounded terrain cost (#174)
+…
+4f05a47
+```
+- FovClipper: between two missing perimeter samples, cast one probe ray at
+  the closest approach to each candidate, found by golden-section search in
+  the candidate's reference-ellipsoid scaled space (where it is a unit
+  sphere). Replaces the "interval shorter than the body's angular radius
+  cannot hide a hit" early-out, which missed grazing bodies whose limb
+  crosses only mid-interval (reviewer's 10°/3° counterexample, now a
+  regression test, plus an exact rotated-ellipsoid case).
+- Hit-hit smoothing measures range deviation instead of chord sag, so it
+  follows the surface bending away rather than the FOV outline's own
+  curvature; flat-on FOVs are no longer split 32 -> 128 rays.
+- CpuMeshSurface: allocation-free scalar Möller–Trumbore loop, identical
+  tolerances and results (~5x faster).
+- SensorFovClipping: per-frame terrain triangle budget, checked per sensor
+  so a perimeter is never part terrain / part reference. Sensors past it
+  use the reference shape for that frame (flagged fallback, not cached).
+- Document that viewer clipping covers Globe bodies only; irregular Mesh
+  bodies are tracked in #175.
+
+Measured on the real marshub fixture tiles: a terrain-clipped sensor went
+from ~15.8 ms to ~1 ms per frame; 20 terrain sensors cost ~5.7 ms per frame
+in total, with terrain work capped around 3 ms.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016uw8divwkkkRvNxWed6qKe
+```
+Merge origin/main into claude/magical-einstein-ghqalh
+…
+347f1a3
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016uw8divwkkkRvNxWed6qKe
+```
+Hide details
+View details
+AaronPlave
+merged commit 507f856
+into
+main
+Oct 15, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+AaronPlave
+deleted the
+claude/magical-einstein-ghqalh
+branch
+October 15, 2026 19:34
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

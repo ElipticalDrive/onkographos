@@ -1,0 +1,311 @@
+A friend of mine, Arthur, is developing a voxel-based game and found himself having to deal with large volumes of data. Unlike 2½D games where the map is essentially a 2D expanse with occasional relief, his game allows the definition of things in full (discrete) 3D. To avoid loading the entire map in memory, he…
+
+Compressing Voxel Worlds | Harder, Better, Faster, Stronger
+Harder, Better, Faster, Stronger
+Explorations in better, faster, stronger code.
+Home
+About the author
+About this blog
+Compressing Voxel Worlds
+A friend of mine, Arthur, is developing a voxel-based game and found himself having to deal with large volumes of data. Unlike 2½D games where the map is essentially a 2D expanse with occasional relief, his game allows the definition of things in full (discrete) 3D.
+To avoid loading the entire map in memory, he made the wise design decision of making his world tile-based, so that it can, simultaneously, reduce the working set as well as having an essentially open map, by loading only a small set of visible world blocks at all time. So together we took a look at compressing these world blocks, and it turned out that we can do a lot with fairly simple algorithms and VLCs.
+The Voxel World. Image (c) Arthur Ouellet
+The world blocks are composed of 16×16×128 voxels, each being a 1×1×1 unit of stuff, notably air where there’s “nothing” and dirt for generic soil-stuff. There can be an (countably) infinite number of other stuff types, but in the current implementation, there are only 16 different stuffs.
+A first observation reveals that the data is composed of a first large blob of stuff, several 16×16 tiles thick, followed by a small number of transition 16×16 tiles, with the remainder being air, filled “to the top”. This structure begs to be exploited to yield high compression ratios.
+Arthur first proposed to use RLE on a 16×16 tile level; and stack the results. His idea was to use “all counts” RLE (as discussed here) using fixed codes, something like a byte for the run count, and a byte to introduce the tile type. His experiments showed that the compression ratio using this method were in the 8: to 10:1 range. I then proposed to have a code for an entire tile, for example “tile full of X stuff”, which would encode in a byte an entire tile, yielding for the world block a maximum compression of 256:1, but more realistically, it was around 40:1 because the mixed tiles (those not composed of only one type of stuff) were still using a lot of bits to be encoded.
+Those first results used fixed length codes, and we know that, if the distribution is really skewed, fixed lengths codes will lose to variable length codes that are adapted to encode a particular, skewed, distribution. In our case, we had two distinct distributions, one for the runs, the number of consecutive voxels filled with the same stuff, and a distribution for the stuff types, dominated by air and dirt.
+*
+* *
+So I decided to treat the world block as a linear series of voxels rather than a stack of 16×16 tiles; and I reimplemented my RLE compression using auto-trigger (also described previously) a variant that monitors the repetitions before deciding in its own to go into run mode. This avoids using bits in regions were there are too many transitions to encode runs anyway, at the cost of having a few extra uncoded voxels before a run. Let me illustrate how auto-trigger RLE works. Let’s say we have this sequence:
+aaaaaabcdefggggggg
+With a classical “all counts” RLE coder, we’d code the above as the (rather wasteful)
+(a,6)(b,1)(c,1)(d,1)(e,1)(f,1)(g,7)
+where each (s,c) is a symbol followed by a count. This method works well when there are many long repeats and very few series of non-repeats. Auto-trigger RLE with a repeat count of 2 would encode the sequence as
+aa(4)bcdefgg(5)
+Where (c) is the repeat count. The repeat count does not need to be introduced by a guard bit or anything, after two repeat, the codec knows it has to read a count. Of course, it can misfire, for example with something like aabbcc, the codec would have to encode aa(0)bb(0)cc(0) which is, clearly, quite wasteful. If it happens too often, then maybe the solution is to pick another repeat value (say 3). The first implementation just printed out voxel stuff types and run lengths and the first series of runs gave me the important information I needed: the distribution of stuff types and the distribution of the run-lengths.
+As we surmised earlier, there’s mainly air and dirt for stuff, and trace amounts of other things such as trees, bricks, etc, leading to the following stuff-code:
+Code
+Stuff
+00
+Air
+01
+Dirt
+1+4 bits
+16 other
+stuff types
+This code is uniquely decodable because it is a prefix code, that is, a code for which no prefix part of a code is a code by itself. A simple way of understanding this property is to consider that decoding these types of code is like walking down a binary tree: you read a zero, you go down left, you read a one, you go down right, and if you reach a leaf in the tree, you’ve completed the decoding of a symbol. You’re not allowed to stop at an internal node, only at a leaf. The tree corresponding to the previous code would look like:
+Examining the run-lengths, we can see a very skewed distribution, with most of its values smaller than 16, almost all smaller than 50, and with trace amounts (one or two per block) of runs in the 10000–20000 range. This suggests a code that favors short runs. For example, something like:
+Code
+Runs
+0+4 bits
+0–15
+10+6 bits
+16–79
+11+15 bits
+80–32847
+And as 32747 exceeds the number of voxels in a world block, we’re OK to encode any lengths found in a world block. A tree-view of the previous code gives:
+Now, the compressor uses a trigger of 2, the variable length code for voxels and the variable length code for runs. Let us examine its performance now.
+*
+* *
+The sample of the world I have has 250 world blocks, each at 32KB uncompressed. As a reality check, we will use bzip2 (v.1.0.5 on my system) with -9 (compress harder, everything enabled in the codec). While bzip may not be state of the art, it still serves as a good reference because, in addition of being easily available, it will compare a simple RLE codec with a rather complex compression stack, and we’ll see how well we’re doing compression-wise.
+The results are shown for the auto-trigger(2) RLE codec with fixed, 4 bits, codes for the voxels (showing that the VLCs for the voxels are also useful), and for the auto-trigger(2) RLE codec with VLCs for both voxels and runs; both compared to bzip -9. The first graph shows a distribution of resulting bytes per world block, by algorithm:
+The second graph shows the distributions of the resulting file sizes in more detail. Each curve represents the results from an algorithm, sorted, independently by algorithm, from the smallest to the largest file sizes. This type of graph does not allow to compare directly the results of the algorithms for a specific world block, but does allow to see which line is generally under or over another.
+From the curves, we see that the codec that uses both VLCs is faring generally better than the codec using VLCs only for runs, with possibly a few exceptions where using a fixed 4-bits code for voxels seems to be better than using the VLC (that could be explained, for example, by blocks with a lot of “exotic” stuff types) and that, in some cases, RLE beats bzip, but that in general, bzip does about 30% better.
+Looking at the compression ratios, we see that we have in some case almost 1000:1 (964:1 exactly) and some around 50:1 (48:1); with a good average of 123:1. Of course, bzip yields a much better average compression at 157:1, or about 30% better.
+*
+* *
+The encoder is a bit larger, but the decoder is simple, and that is what may matter most in a game setting where the content is created once (and any effort can be invested in compression) but read many times (and as little effort must be invested in decompression). This is a typical asymmetric compression, where it’s more difficult to compress than to decompress (although, in this particular case, not by much). So the decoder looks like:
+```
+
+////////////////////////////////////////
+void decode_rle_autotrig( slice out_voxels[128], const char * buffer )
+ {
+  uint8_t * linear_voxels = out_voxels[0][0];
+
+  size_t bit_offset=0, byte_offset=0;
+  size_t auto_run=0;
+  int last=-1;
+
+  while (byte_offset < 16*16*128)
+   {
+    uint8_t this_tile = decode_tile_vlc(buffer,bit_offset);
+
+    linear_voxels[byte_offset]=this_tile;
+    byte_offset++;
+
+    if (this_tile==last)
+     {
+      auto_run++;
+      if (auto_run==2)
+       {
+        // then there's a run!
+        size_t run_length=decode_run_vlc(buffer,bit_offset);
+        std::memset(linear_voxels+byte_offset,this_tile,run_length);
+        byte_offset+=run_length;
+        auto_run=0;
+       }
+      else
+       ; // not a run yet
+     }
+    else
+     auto_run=0;
+
+    last=this_tile;
+   }
+ }
+```
+(Of course the whole thing was unit-tested to ensure that the compression is lossless and that the codec is capable of compressing correctly every world block.) (Note the empty else above that does nothing except introduce a comment. While this serves no “programmatical” purposes, it does lift an ambiguity for the reader.) (Enough with the parentheses already.) The above code uses std::memset to paint voxels efficiently at decompression and limits the bit-fiddling to the two functions decode_tile_vlc and decode_run_vlc, which limit the impacts of the VLCs for this particular codec (we can change either or both with no effect on the algorithm).
+*
+* *
+The next step would be to use predictive coding, like I did for the Pokémon data set. In this case, we are dealing with terrain, and the internal structures of the data makes it “terrain-like”, and we might be able to exploit that to gain extra compression (although since we’re already at >120:1, that’d be acharmement) by analyzing terrain curves and, using a trick similar to what I used for the Pokémon bitmaps, transform the input from voxel-list to rank-prediction-list and gain more compression by having longer runs of correctly predicted voxels.
+But maybe that’s for a next iteration. Or not.
+*
+* *
+Thanks to Arthur for this fun problem and for the screen-shot of his voxel-based world game-thingie. Arthur Ouellet can be reached at arthur@pwel.org
+Share this:
+Share on Reddit (Opens in new window)
+Reddit
+Share on X (Opens in new window)
+X
+More
+Share on Facebook (Opens in new window)
+Facebook
+Email a link to a friend (Opens in new window)
+Email
+Like Loading...
+Related
+This entry was posted on Tuesday, March 22nd, 2011 at 4:40 am and is filed under algorithms, bit twiddling, C-plus-plus, data compression, data structures, Design, programming. You can follow any responses to this entry through the RSS 2.0 feed.
+You can leave a response, or trackback from your own site.
+9 Responses to Compressing Voxel Worlds
+Erik Winkels says:
+23/03/2011 at 4:46 am
+I’ve been working on voxel worlds as well but haven’t even gotten to the point of having to think about compression my world blocks.
+Anyway, what about lossy compression? I can imagine there being instances where it isn’t that important for the information to be 100% correct. For example, expanses of water or underground. I wouldn’t care whether a gold vein or some dirt underground would be a little different upon decompression.
+Reply
+Steven Pigeon says:
+23/03/2011 at 16:39 pm
+I suppose you could get lossy for generated content (or even store whatever parameters the model needs for the generation) but not for user-modified terrain. I guess the players would be quite unhappy to see their modifications disappear of change on save.
+Reply
+Erik Winkels says:
+23/03/2011 at 17:00 pm
+Again, it depends. For carefully crafted terrain it’s a no-no but for explosions and the subsequent craters it might be acceptable.
+Reply
+Steve Hanov says:
+25/03/2011 at 6:56 am
+This is a well-studied problem since voxels are used for medical data. Your problem is similar since you have only a few colours instead of many levels of gray.
+One method that springs to mind is a wavelet tree.
+See http://scholar.google.ca/scholar?q=compression+of+voxels&hl=en&btnG=Search&as_sdt=1%2C5&as_sdtp=on
+Reply
+Steven Pigeon says:
+25/03/2011 at 17:28 pm
+Yes. I have tried wavelet-based approaches a while ago (not for medical data, but for some other voxel data) and it is indeed the way to go if you have continous-ish data and high resolution (or conversely, features are large compared to voxel size).
+I wonder how much more compression we could get by having larger tiles and 3D wavelets ?
+Reply
+Algorithme de compression avec VLC - Blog Info STH says:
+28/03/2011 at 10:30 am
+[…] initiale. L’article est intéressant et je vous invite à poursuivre votre lecture sur son blog. Partager :Digg Posté dans Programmation par Arthur le 26 mars 2011 Tags: 3d, compression, […]
+Reply
+Huffman Codes « Harder, Better, Faster, Stronger says:
+17/05/2011 at 9:36 am
+[…] time ago, I presented a piece on compressing voxel worlds and I just realized that I discussed different types of variable length codes quite a few times, […]
+Reply
+Voxel compression – QBE Engine says:
+02/11/2019 at 12:49 pm
+[…] my previous post I mentioned I would take a look at compression. I found this interesting article about voxel compression which talks about something called RLE compression. I was actually thinking of compressing my data […]
+Reply
+Saving space with Huffman trees – QBE Engine says:
+29/12/2019 at 7:09 am
+[…] Example of a simple Huffman tree (source) […]
+Reply
+Leave a Reply Cancel reply
+Follow Harder, Better, Faster, Stronger on WordPress.com
+Le Tweet
+Tweets by steven_pigeon
+Recent Posts
+Bresenham’s Pie
+Binary Trees are optimal… except when they’re not.
+Fixed-Points
+Mirror, Mirror on the Tripod, Who’s the Fairest of them All?
+Møre Lïtbørd
+Categories
+Archives
+March 2022
+July 2021
+August 2020
+July 2020
+June 2020
+May 2020
+March 2020
+January 2020
+November 2019
+August 2019
+July 2019
+February 2019
+August 2018
+July 2018
+June 2018
+May 2018
+April 2018
+March 2018
+February 2018
+January 2018
+December 2017
+November 2017
+October 2017
+September 2017
+May 2017
+April 2017
+March 2017
+February 2017
+January 2017
+December 2016
+November 2016
+October 2016
+September 2016
+April 2016
+March 2016
+February 2016
+January 2016
+December 2015
+November 2015
+October 2015
+September 2015
+June 2015
+May 2015
+April 2015
+March 2015
+February 2015
+January 2015
+December 2014
+November 2014
+October 2014
+September 2014
+June 2014
+May 2014
+April 2014
+March 2014
+February 2014
+January 2014
+December 2013
+November 2013
+October 2013
+September 2013
+August 2013
+July 2013
+June 2013
+May 2013
+April 2013
+March 2013
+February 2013
+January 2013
+August 2012
+July 2012
+June 2012
+May 2012
+April 2012
+March 2012
+February 2012
+January 2012
+December 2011
+November 2011
+October 2011
+September 2011
+August 2011
+July 2011
+June 2011
+May 2011
+April 2011
+March 2011
+February 2011
+January 2011
+December 2010
+November 2010
+October 2010
+September 2010
+August 2010
+July 2010
+June 2010
+May 2010
+April 2010
+March 2010
+February 2010
+January 2010
+December 2009
+November 2009
+October 2009
+September 2009
+August 2009
+July 2009
+June 2009
+May 2009
+April 2009
+March 2009
+February 2009
+January 2009
+December 2008
+November 2008
+October 2008
+September 2008
+August 2008
+Blogroll
+DebugFailure
+Dr Frankenstein's Lab
+LostWebSite
+Occasionnally Sane
+Ofek’s Visual C++ stuff
+RSS
+RSS Feed
+Blog at WordPress.com.
+Comment
+Reblog
+Subscribe
+Subscribed
+Harder, Better, Faster, Stronger
+Have a WordPress.com account? Log in now.
+Harder, Better, Faster, Stronger
+Copy shortlinkView post in Reader
+Manage subscriptionsSign upLog in
+Report this content
+Collapse this bar
+Loading Comments...
+%d

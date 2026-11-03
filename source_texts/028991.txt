@@ -1,0 +1,632 @@
+Introduction
+3D Gaussian splatting is a technique that answers this question: given a dataset of pictures of a scene, how can I reconstruct it in 3D? This is achieved using a machine learning algorithm that, for many different camera angles, does the following: render the scene, compare it to the picture taken at the same camera angle, and update the scene to reduce the difference between the rendered image and the ground truth. However, unlike traditional 3D renderers, 3DGS does not use triangles as primitives, but objects called Gaussian splats, making the rendering algorithm unique to 3DGS.
+
+3D Gaussian Splatting in a Weekend | Benjamin Feldman
+Introduction
+Loading a 3DGS scene
+Adding color: spherical harmonics
+The Gaussian distribution
+Reparameterizing the 3D Gaussian distribution
+Rendering a splat
+A note on differentiability
+Projecting the centroid
+Projecting the covariance matrix
+Model
+View
+Projection
+Drawing the 2D Gaussian distribution
+Building the bounding quad
+Placing the quad: the vertex shader
+Drawing the quad: the fragment shader
+Sorting splats
+Conclusion
+Appendix
+Covariance factorization with rotation and scaling
+Linear transformations of Gaussian vectors
+References
+Citation
+Introduction#
+3D Gaussian splatting is a technique that answers this question: given a dataset of pictures of a scene, how can I reconstruct it in 3D? This is achieved using a machine learning algorithm that, for many different camera angles, does the following: render the scene, compare it to the picture taken at the same camera angle, and update the scene to reduce the difference between the rendered image and the ground truth. However, unlike traditional 3D renderers, 3DGS does not use triangles as primitives, but objects called Gaussian splats, making the rendering algorithm unique to 3DGS.
+In this post, I aim to show how 3D Gaussian splatting works by building a simplified renderer from scratch, in ~1000 lines of code. The main motivation is to build intuition on the 3DGS math. It is recommended to understand the basics of linear algebra, probability theory and computer graphics.
+The renderer is written in C++ and OpenGL. All code is available on GitHub, but I tried to make this tutorial general enough that you can reproduce it using any graphics engine (WebGPU, Metal, DirectX…). At the end of the tutorial, we’ll be able to render a Gaussian scene like this, in real time:
+I’ve also included interactive WebGPU visualizations that you can navigate with WASD and the mouse.
+This article covers only rendering, not training. However, there are technical decisions in the 3DGS renderer Kerbl et al. 2023 that are tightly coupled to the training pipeline (differentiability, positive semi-definite covariance preservation) that we’ll highlight.
+Loading a 3DGS scene#
+First, we need a scene to render. At the time of this article, good 3DGS scenes are still hard to find, but thankfully Supersplat recently made it possible to download splats from their website, so this is what we’ll be doing. We’ll use this plate of tomatoes scene because it’s fairly lightweight (only ~200k splats), but feel free to use any scene you like. Just be aware that the renderer we’re building is not really optimized for large scenes.
+Then, we’re going to load the Gaussian splat scene we downloaded from Supersplat. This lets us check that the scene is oriented correctly, and more importantly, gives us a first look at what a splat actually is. The typical format is .ply, for which I’ve included a custom loader in ply_loader.h. The loader parses the .ply file into an array of GaussianSplat objects, wrapped in a Scene:
+```
+constexpr int SH_COUNT = 16;
+constexpr int SH_CHANNEL_COUNT = 3;
+constexpr int SH_FLOAT_COUNT = SH_COUNT * SH_CHANNEL_COUNT;
+
+struct GaussianSplat {
+    glm::vec3 centroid = glm::vec3(0.0f);
+    float opacity = 0.0f;
+    std::array<float, SH_FLOAT_COUNT> sphericalHarmonics = {};
+    std::array<float, 3> scale = {0.0f, 0.0f, 0.0f};
+    std::array<float, 4> rotation = {1.0f, 0.0f, 0.0f, 0.0f};
+};
+
+struct Scene {
+    std::vector<GaussianSplat> splats;
+};
+```
+Let’s break this down:
+centroid is the position of the splat in world-space coordinates. This differs from the usual graphics Model-View-Projection pipeline where model data is represented in model space. Therefore, there won’t be any Model matrix in the 3DGS pipeline, only a View matrix (3D world-space -> 3D camera-space) and a projection matrix (3D camera space -> 2D screen space).
+scale and rotation describe the geometry of the splat, but we’ll get back to this later
+opacity and sphericalHarmonics describe the visibility and color of the splat, but we’ll also get back to this later
+In a trained 3DGS scene, these values are optimized during training by
+rendering the splats from known camera views, comparing the result to the training photos, and
+backpropagating the image error into each splat’s centroid, scale, rotation, opacity, and color
+coefficients.
+As a first sanity-check, let’s load our 3DGS scene and draw each splat centroid using GL_POINTS (e.g. as a point cloud):
+```
+Scene scene = loadPly("scene.ply");
+
+std::vector<glm::vec3> centroids;
+centroids.reserve(scene.splats.size());
+
+for (const GaussianSplat& splat : scene.splats) {
+    centroids.push_back(splat.centroid);
+}
+
+GLuint vao = 0;
+GLuint vbo = 0;
+glGenVertexArrays(1, &vao);
+glGenBuffers(1, &vbo);
+
+glBindVertexArray(vao);
+glBindBuffer(GL_ARRAY_BUFFER, vbo);
+glBufferData(GL_ARRAY_BUFFER,
+             centroids.size() * sizeof(glm::vec3),
+             centroids.data(),
+             GL_STATIC_DRAW);
+
+glEnableVertexAttribArray(0);
+glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr);
+
+glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(centroids.size()));
+```
+Adding color: spherical harmonics#
+Now that we have our point cloud, let’s add color! One thing that makes 3DGS look so good is that it captures view-dependent color: shiny objects, highlights, and small reflections change as the camera moves. This is achieved by storing color as spherical harmonics (SH), rather than as a single RGB value. This lets each splat have a color that depends on the viewing direction, which is useful for glossy materials.
+I’m not going to go deep on SH here, but the intuition is fairly simple: it’s a way to express any function on a sphere using basis functions, a bit like Fourier series. This allows us to have a function $\mathrm{rgb}(\theta, \phi)$ that, for each splat, outputs its RGB color at direction $(\theta, \phi)$.
+It’s defined like this:
+$$
+\mathrm{rgb}(\theta, \phi) =
+\sum_{\ell=0}^{L}\sum_{m=-\ell}^{\ell}
+c_{\ell m}Y_{\ell m}(\theta,\phi)
+$$
+where $Y_{\ell m}$ are the SH basis functions and $c_{\ell m}$ are the RGB coefficients stored in the splat.
+For a deeper visual explanation of SH, I recommend Visual Notes on Spherical Harmonics.
+To recover RGB for a given camera view, we take the normalized direction from the camera to the
+splat centroid, evaluate the SH basis in that direction, multiply each basis value by the stored RGB
+coefficient, sum the result, then apply a +0.5 bias (so a zero-centered SH output lands around mid-grey instead of black) and clamp to [0, 1].
+In shader terms, the operation is basically:
+```
+vec3 rgb = vec3(0.5);
+for (int i = 0; i < 16; ++i) {
+    rgb += shCoefficient[i] * shBasis(i, direction);
+}
+rgb = clamp(rgb, 0.0, 1.0);
+```
+Our actual shader writes the SH basis functions out explicitly instead of using a loop, but this is too verbose to fit in here.
+We now have a colored point cloud. You can already see how the colors change based on the viewing direction!
+The Gaussian distribution#
+Let’s leave point clouds and get into actual splats! But for that we need to do a bit of math.
+The main mathematical concept in 3D Gaussian splatting is… Gaussians! While I don’t intend this
+article to serve as a probability course, I do think it’s important to keep a few elements
+in mind about the Gaussian distribution.
+You’ve likely encountered the 1D Gaussian, which is a probability distribution parameterized by its mean $\mu\in\mathbb{R}$
+and its standard deviation $\sigma \geq 0$:
+$$
+p(x) = \frac{1}{\sigma\sqrt{2\pi}}\exp\left(-\frac{(x-\mu)^2}{2\sigma^2}\right)
+$$
+$\sigma$
+$\mu$
+$x$
+$p(x)$
+A one-dimensional Gaussian
+A 1D Gaussian centered at its mean; standard deviation controls
+the width of the bell.
+A 1D Gaussian with mean $\mu$ and variance $\sigma^2$
+This distribution can also be extended to 2 or 3 dimensions. For a $d$-dimensional Gaussian, the probability density function is:
+$$
+p(x) =
+\frac{1}{\sqrt{(2\pi)^d|\Sigma|}}
+\exp\left(-\frac{1}{2}(x-\mu)^\top\Sigma^{-1}(x-\mu)\right)
+$$
+In 3D, $\mu$ is now a 3D vector, called the centroid. This is our GaussianSplat.centroid that we loaded earlier. The geometric interpretation of $\mu$ is simply the splat’s position in world space. Our standard deviation $\sigma$ becomes a $3\times 3$ positive semi-definite matrix $\Sigma$, called the covariance matrix.
+In general, if we want to talk about a Gaussian with mean $\mu$ and covariance $\Sigma$, we write $\mathcal{N}(\mu,\Sigma)$. The $\mathcal{N}$ stands for the normal distribution, another name for the Gaussian distribution.
+And here’s what it looks like in 2D and 3D:
+$x$
+$y$
+$\mu$
+$e_1$
+$e_2$
+A 2D Gaussian as contour ellipses
+In 2D the iso-density contours of the Gaussian are concentric
+ellipses around its mean.
+The iso-density contours of a 2D Gaussian are concentric ellipses that
+are implied from the eigenvectors and eigenvalues of $\Sigma$
+$\mu$
+$y$
+$x$
+$z$
+A 3D Gaussian as an ellipsoid
+In 3D the same Gaussian becomes an ellipsoid floating in world
+space.
+A 3D Gaussian is similar to what we have in the 2D case: iso-density
+surfaces are ellipsoids
+We can already understand how 3D Gaussian splatting works:
+Start from a 3D Gaussian distribution $\mathcal{N}(\mu, \Sigma)$.
+Project it into 2D space so it becomes a 2D Gaussian distribution $\mathcal{N}(\mu_{2D}, \Sigma_{2D})$.
+Draw the ellipse resulting from $(\mu_{2D}, \Sigma_{2D})$.
+$\mathcal{N}(\mu, \Sigma)$
+$\mathcal{N}(\mu_{2D}, \Sigma_{2D})$
+The 3DGS rendering pipeline
+Project a 3D Gaussian to a 2D Gaussian, then rasterize the 2D
+footprint to pixels.
+3D Gaussian
+project
+2D Gaussian
+rasterize
+pixels
+The splat lives as a probability distribution in 3D, gets projected to a
+2D distribution in screen space, and only at the very end becomes pixels
+Do this for every single splat in our scene and that’s how we render a 3DGS scene! There are, however, a few tricky parts in this.
+The main idea to understand at this stage is that in steps 1 and 2, we are not dealing with concrete geometric objects, like we would with a triangle in rasterization. Instead, we’re dealing with probability distributions, which only become drawable geometry in the final step. This might seem a bit abstract at this point, but we’ll get to it!
+Reparameterizing the 3D Gaussian distribution#
+A covariance matrix has to be symmetric and positive semi-definite (PSD). Intuitively, this means it can stretch space along some axes, but it cannot create a negative variance. This matters because the covariance controls the ellipsoid’s size and orientation.
+The 3D Gaussian distribution is parameterized by $\mu\in\mathbb{R}^3$ and $\Sigma\in S_+^3$, the set of $3\times 3$ symmetric positive semi-definite matrices.
+An important property of $\Sigma$ is that there exists a rotation matrix $R$ and a scaling matrix $S$ such that:
+$$\Sigma = RS(RS)^\top$$
+See the appendix for why this is the case.
+We can also see this result the other way around: for any rotation matrix $R$ and scaling matrix $S$, $\Sigma = RS(RS)^\top$ is guaranteed to be a covariance matrix.
+This compact primitive is part of why 3DGS is practical: the geometry of each splat is described with a centroid, three scales, and a rotation, so the training code has only a few geometry parameters to optimize per splat.
+Remember our GaussianSplat struct? It’s using exactly this representation, with the scale and rotation members, not a full $3 \times 3$ covariance matrix!
+scale is three log-space floats. After applying exp(scale), they become the diagonal values of the scaling matrix $S$.
+rotation is four floats encoding a quaternion, which is a compact way to store the rotation matrix $R$. I won’t cover quaternions in detail here, but there are a lot of good resources online.
+Why does this matter? Remember that a 3DGS scene is created via a training loop, where each Gaussian’s parameters are updated by backpropagating the error between the rendered image at a specific camera angle and the ground truth image. If during one update we directly change the entries of $\Sigma$, nothing guarantees that the updated matrix is still PSD, so it would not be a covariance matrix anymore. But if we update the scale and rotation parameters, we know that the reconstructed $\Sigma$ will be a covariance matrix.
+Rendering a splat#
+As we’ve just seen, our graphics primitive is a probability distribution. Unlike points or triangles, we cannot directly draw such a primitive using a standard raster pipeline.
+A naive way to put our splat on screen would be to sample points from the distribution, and draw those points.
+This would look like a cloud of random dots: dense near the centroid, sparse near the edges.
+The problem with this approach is that it is inefficient and noisy: for each splat, we would need to generate enough random samples to make the ellipse look smooth, and the result would still flicker unless we used a lot of samples.
+We’ve already stated the key idea in 3DGS rendering: take this 3D probability distribution, project it onto 2D screen space, and only then draw it as an ellipse that approximates the distribution. This is the beautiful idea of 3DGS: until the very end of the pipeline we’re only dealing with probability distributions, and it’s only at the last step, once we’re in 2D, that we materialize this distribution as something we can actually render.
+A note on differentiability#
+The original 3DGS renderer is designed to be differentiable, because it is used during training. This tutorial renderer is display-only, but the math we’re about to use comes from that constraint: keep the splat smooth, project it as a distribution, and only turn it into pixels at the end.
+Projecting the centroid#
+Projecting the Gaussian’s centroid from world space to screen space is very straightforward, since it’s just a single point in 3D space.
+We want to apply the Model-View-Projection transforms. As stated before, 3DGS scenes are already in world space, so the Model matrix is just the identity matrix (meaning we can skip the Model transform).
+We then apply the View matrix to move it into camera space, and the Projection matrix plus perspective divide to move it onto the screen. We end up with $\mu_{2D}\in\mathbb{R}^2$, a 2D vector in screen space.
+Projecting the covariance matrix#
+The goal of this part is to go from a covariance matrix living in 3D world space to a 2D covariance matrix living in screen space. This is the core of 3DGS rendering!
+The first step is to reconstruct the 3D covariance matrix $\Sigma$ from the quaternion and scaling
+matrix. As seen earlier, we have $\Sigma = RS(RS)^\top$.
+```
+glm::mat3 buildCovariance(const GaussianSplat& splat) {
+    glm::quat q(splat.rotation[0], splat.rotation[1],
+                splat.rotation[2], splat.rotation[3]);
+    glm::mat3 R = glm::mat3_cast(glm::normalize(q)); // quaternion -> 3x3 rotation
+
+    glm::vec3 sigma(std::exp(splat.scale[0]),
+                    std::exp(splat.scale[1]),
+                    std::exp(splat.scale[2]));
+    glm::mat3 S = glm::mat3(sigma.x, 0.0f,    0.0f,   // diagonal scale matrix
+                            0.0f,    sigma.y, 0.0f,
+                            0.0f,    0.0f,    sigma.z);
+    glm::mat3 RS = R * S;
+    return RS * glm::transpose(RS); // Sigma = (RS)(RS)^T
+}
+```
+Now comes the fun part: how do we project $\Sigma$ into screen space? Again, we want to apply the standard MVP pipeline to it.
+Model#
+As mentioned earlier, the Gaussian splat is already defined in world space, so the Model matrix is the identity.
+View#
+The next step in the MVP pipeline is the View matrix. The standard view matrix combines the rotation and translation that we get from glm::lookAt():
+$$
+V =
+\begin{pmatrix}
+r_x & r_y & r_z & -\mathbf{r}\cdot\mathbf{p} \\
+u_x & u_y & u_z & -\mathbf{u}\cdot\mathbf{p} \\
+-f_x & -f_y & -f_z & \mathbf{f}\cdot\mathbf{p} \\
+0 & 0 & 0 & 1
+\end{pmatrix}
+$$
+where $\mathbf{r}$, $\mathbf{u}$, and $\mathbf{f}$ are the camera’s right, up, and forward axes, and $\mathbf{p}$ is the camera position.
+Translation does not affect covariance, since covariance describes spread around the centroid rather than absolute position. For this reason, we only keep the rotation component of the view matrix and apply it to the covariance matrix. Mathematically, this means keeping the $3\times3$ top-left block of the view matrix:
+$$
+M = V_{3\times 3} =
+\begin{pmatrix}
+r_x & r_y & r_z \\
+u_x & u_y & u_z \\
+-f_x & -f_y & -f_z
+\end{pmatrix}
+$$
+```
+glm::mat4 viewMatrix =
+    glm::lookAt(cameraPosition, cameraPosition + cameraForward, cameraUp);
+
+// Extract the 3x3 rotation block of the view matrix (drop the translation column).
+glm::mat3 M = glm::mat3(viewMatrix);
+
+// Transform covariance to eye space: Sigma' = M Sigma M^T
+glm::mat3 Sigma_eye = M * Sigma * glm::transpose(M);
+```
+At this point, we have transformed our Gaussian distribution so that it goes from world space to eye space, i.e. in front of the camera.
+We have $\Sigma’ = M\Sigma M^\top$.
+Wait, why are we doing $\Sigma’ = M\Sigma M^\top$? Why isn’t it simply $\Sigma’ = M\Sigma$, like we usually do in graphics pipelines? The reason has to do with the fact that we’re manipulating probability distributions and not concrete 3D objects.
+Indeed, when we say we are applying $M$ to the Gaussian distribution, what we mean is that we’re applying linear transformations to all random vectors that follow this distribution.
+If $X \sim \mathcal{N}(\mu, \Sigma)$ is a random vector that follows a Gaussian distribution, we have, for any matrix $A$, the following:
+$$AX \sim \mathcal{N}(A\mu, A\Sigma A^\top)$$
+The proof is in the appendix.
+Therefore, the covariance of the transformed vector $AX$ is $\Sigma’ = M\Sigma M^\top$, which is why the covariance of the splat in eye space is $M\Sigma M^\top$.
+Projection#
+The next step in the graphics pipeline is perspective projection. The goal is to find a function $f$ that projects the 3D Gaussian in camera space to a 2D Gaussian in screen space.
+On top of performing a perspective projection, $f : \mathbb{R}^3 \rightarrow \mathbb{R}^2$ has to be linear in order to satisfy
+$$
+f(X) \sim \mathcal{N}(\mu_{2D}, \Sigma_{2D})
+$$
+i.e. the projected distribution is still a 2D Gaussian. Linearity is key: it is what lets us keep
+using only a mean and a covariance after projection. If the projection were fully non-linear, the
+projected shape would no longer be exactly Gaussian, and a single 2D covariance matrix would not be
+enough to describe the splat on screen.
+The catch is that perspective projection is not linear. Given a point $(x_e, y_e, z_e)$ in camera space projected onto the near plane at $z = n$, it is computed as
+$$
+x_p = -\frac{n x_e}{z_e}, \qquad y_p = -\frac{n y_e}{z_e}, \qquad z_p = -\left\lVert (x_e, y_e, z_e)^\top \right\rVert
+$$
+(see songho.ca for details)
+The division by $z_e$ is what makes this non-linear, so the projected distribution would not be Gaussian in general.
+The idea, which originally comes from 2001 EWA Volume Splatting, is to linearize the projection locally using its first-order Taylor expansion around $\mu_c$, the centroid in camera space:
+$$
+f(x) \approx f(\mu_c) + J(\mu_c)(x - \mu_c)
+$$
+where $J$ is the Jacobian of the perspective projection evaluated at $\mu_c$. This gives a good local linear approximation that is valid in a neighborhood of the centroid, which is exactly where most of the Gaussian’s mass lives.
+The Jacobian evaluated at $\mu_c = (x_c, y_c, z_c)$ is:
+$$
+J = \begin{pmatrix} -\frac{f_x}{z_c} & 0 & \frac{f_x x_c}{z_c^2} \\ 0 & -\frac{f_y}{z_c} & \frac{f_y y_c}{z_c^2} \\ 0 & 0 & 0 \end{pmatrix}
+$$
+where $f_x$ and $f_y$ are the focal lengths in pixels, derived from the OpenGL projection matrix entries $p_{00}$ and $p_{11}$:
+$$
+f_x = p_{00} \frac{W}{2}, \qquad f_y = p_{11} \frac{H}{2}
+$$
+with $p_{00} = \frac{1}{\text{aspect}\times\tan(\text{fov}/2)}$ and $p_{11} = \frac{1}{\tan(\text{fov}/2)}$ (again, see songho.ca for the full derivation).
+The zero last row is not a coincidence: it reflects the fact that we discard the $z$ component when projecting to 2D, and it is precisely what lets us extract the top-left $2 \times 2$ block later to obtain $\Sigma_{2D}$.
+Remember: we’re still working at the distribution level. We’re not projecting the $\Sigma$ matrix directly, but rather projecting the random vectors that follow this distribution. Since $J$ is our linear approximation of $f$, and since for any matrix $A$:
+$$AX \sim \mathcal{N}(A\mu, A \Sigma A^\top)$$
+and the constant offset in the Taylor approximation changes only the mean, not the covariance, we have:
+$$
+f(X) \approx \mathcal{N}\left(f(\mu_c), J\Sigma_{\text{eye}}J^\top\right)
+$$
+Combining with the view transform $M$ from the previous step, the full projected covariance is:
+$$\Sigma_{2D} = J M \Sigma (JM)^\top$$
+Since the last row of $J$ is zero (we’re dropping the $z$ component), we extract the top-left $2 \times 2$ block to get the final 2D covariance matrix.
+We now have a fully projected distribution in 2D space, $\mathcal{N}(\mu_{2D}, \Sigma_{2D})$, where:
+$$
+\mu_{2D} = \operatorname{viewport}\left(\frac{P V \mu}{w}\right),
+\qquad
+\Sigma_{2D} = \left(J V_{3\times3}\right)\Sigma\left(J V_{3\times3}\right)^\top
+$$
+where $P$ is the projection matrix, $V$ is the view matrix, $w$ is the homogeneous coordinate before the perspective divide, and $J$ is evaluated at the centroid in camera space.
+Drawing the 2D Gaussian distribution#
+We now have $\mathcal{N}(\mu_{2D}, \Sigma_{2D})$, so how do we draw it on screen?
+A naive approach would be to evaluate the probability density function at every pixel; this is something that is done in differentiable point splatting methods Yifan et al. 2019, but it’s very slow: most pixels have a negligible contribution from any given splat, and you’d be paying the evaluation cost regardless.
+The solution from the original 3DGS paper is to build a rectangle (known as a quad) around the splat and only shade the fragments inside it, coloring each one using the spherical harmonics like we did earlier.
+Building the bounding quad#
+We want to build a quad that fits “most” of the values taken by the Gaussian distribution. We’ll use properties of covariance matrices (again!).
+Since $\Sigma_{2D}$ is symmetric positive semi-definite, we have closed-form eigenvalues:
+$$
+\lambda_{1,2} = \frac{\mathrm{tr}(\Sigma_{2D})}{2} \pm \sqrt{\frac{\mathrm{tr}(\Sigma_{2D})^2}{4} - \det(\Sigma_{2D})}
+$$
+and unit eigenvectors $e_1 = v_1/\lVert v_1\rVert$ where $v_1 = (\Sigma_{12}, \lambda_1 - \Sigma_{11})$, and $e_2 = (e_{1,2}, -e_{1,1})$ by orthogonality. These define the principal axes of the Gaussian ellipse; the eigenvalues give the squared spread along each axis.
+$\mu_{2D}$
+$\sqrt{\lambda_1}e_1$
+$\sqrt{\lambda_2}e_2$
+$3\sigma$ outer support
+Eigenvectors of the projected covariance
+The eigenvectors give the screen-space ellipse axes; the
+eigenvalues give the squared spread along those axes.
+Eigen-decomposition of the $2 \times 2$ covariance gives the ellipse's
+principal axes (eigenvectors $e_1, e_2$) and squared spreads
+(eigenvalues $\lambda_1, \lambda_2$)
+Along $e_i$, the Gaussian value at distance $t$ is $\exp\left(-t^2 / 2\lambda_i\right)$. We’re going to draw splats using a $3\sigma$ radius. In one dimension, about 99.7% of the mass of a Gaussian lies within three standard deviations of the mean; here we apply that idea independently along the two principal axes of the projected ellipse. It is not an exact 2D probability statement, but it gives a practical cutoff where the Gaussian contribution is already tiny.
+We therefore define the two half-axes of the bounding quad as:
+$$
+b_1 = 3\sqrt{\lambda_1}e_1, \qquad b_2 = 3\sqrt{\lambda_2}e_2
+$$
+The exact cutoff is an implementation choice; here we’re using $3\sigma$ to match the original 3DGS paper.
+The quad is the parallelogram spanned by $b_1$ and $b_2$, made of two triangles. Its four corners are parameterized by template coordinates $p \in \lbrace(-1,-1), (1,-1), (1,1), (-1,1)\rbrace$.
+$(-1, 1)$
+$(1, 1)$
+$(1, -1)$
+$(-1, -1)$
+$b_1$
+$b_2$
+$\mu_{2D}$
+Building the splat bounding quad
+The shared template quad is stretched by the pixel-space
+half-axes to produce the screen-space quad.
+template quad
+screen-space quad
+The shared $[-1, 1]^2$ template quad is stretched and rotated by the
+pixel-space half-axes $b_1 = 3\sqrt{\lambda_1}e_1$ and $b_2 =
+3\sqrt{\lambda_2}e_2$
+Placing the quad: the vertex shader#
+An interesting implementation detail is that we do not just write the projected centroid to gl_Position and stop there. We first compute its normalized device coordinates (NDC), then offset the four quad vertices around it:
+$$
+\text{clip} = P \cdot M_{\text{view}} \cdot \mu = (x_c, y_c, z_c, w_c)^\top
+$$
+$$
+\text{ndc} = \left(\frac{x_c}{w_c}, \frac{y_c}{w_c}, \frac{z_c}{w_c}\right) \in [-1,1]^3
+$$
+We compute this manually rather than relying on gl_Position directly, because we need the NDC coordinates to position the quad. Each vertex is offset from the centroid by its corner displacement $\Delta_{ab} = a b_1 + b b_2$ (with $a, b \in \lbrace -1,1\rbrace$). Since $\Delta_{ab}$ is in pixels, we convert to NDC via:
+$$
+\Delta_{\text{ndc}} = \left(\frac{\Delta_x}{W/2}, \frac{\Delta_y}{H/2}\right)
+$$
+giving the final vertex position:
+$$
+p_{\text{clip}} = \left(c_{\text{ndc},x} + \Delta_{\text{ndc},x}, c_{\text{ndc},y} + \Delta_{\text{ndc},y}, c_{\text{ndc},z}, 1.0\right)
+$$
+$(-1, 1)$
+$(1, 1)$
+$(1, -1)$
+$(-1, -1)$
+$b_1$
+$b_2$
+$c_{\mathrm{ndc}}$
+Placing the quad around the projected centroid
+After projecting the centroid to NDC, each quad vertex is offset
+by a pixel-space combination of the half-axes, converted to NDC.
+The projected centroid becomes $c_{\mathrm{ndc}}$; each of the four quad
+vertices is then offset from it by a corner-specific combination of
+$b_1$ and $b_2$, converted from pixels to NDC
+The quad is flat, so $z$ is the same for all four vertices. We set $w = 1.0$ because we already performed the perspective divide manually. The vertex shader also passes $(p_x, p_y)$ as a varying, so each fragment receives its interpolated position within the quad.
+```
+// Per-vertex (shared unit quad)
+layout(location = 0) in vec2 quadCorner; // (-1,-1), (1,-1), (-1,1), (1,1)
+
+// Per-splat instance attributes
+layout(location = 1) in vec3 splatCentroid; // `centroid` is a GLSL keyword
+layout(location = 2) in float opacity;
+layout(location = 3) in vec3 scale;
+layout(location = 4) in vec4 rotation;
+
+out vec2 splatCoord;
+out vec3 splatColor;
+out float splatOpacity;
+
+uniform mat4 view;
+uniform mat4 projection;
+uniform vec2 viewportSize; // (W, H) in pixels
+
+void main() {
+    vec4 clip = projection * view * vec4(splatCentroid, 1.0);
+    vec3 centerCamera = vec3(view * vec4(splatCentroid, 1.0));
+    vec3 ndc = clip.xyz / clip.w;
+
+    // Build Sigma = RS(RS)^T from exp(scale) and rotation,
+    // then project it with Sigma_2D = J M Sigma (JM)^T.
+    mat3 covariance2D = projectCovarianceToScreen(centerCamera, buildCovariance3D());
+
+    float a = covariance2D[0][0] + 0.3;
+    float b = covariance2D[1][0];
+    float d = covariance2D[1][1] + 0.3;
+
+    // Closed-form eigen-decomposition of the 2x2 covariance.
+    float determinant = a * d - b * b;
+    float mid = 0.5 * (a + d);
+    float radius = sqrt(max(mid * mid - determinant, 0.0));
+    float lam1 = max(mid + radius, 0.01);
+    float lam2 = max(mid - radius, 0.01);
+    vec2 e1 = abs(b) > 0.00001 ? normalize(vec2(b, lam1 - a))
+                               : (a >= d ? vec2(1.0, 0.0) : vec2(0.0, 1.0));
+    vec2 e2 = vec2(-e1.y, e1.x);
+
+    // 3-sigma principal half-axes in pixels.
+    vec2 b1 = 3.0 * sqrt(lam1) * e1;
+    vec2 b2 = 3.0 * sqrt(lam2) * e2;
+
+    // Vertex offset converted from pixels to NDC.
+    vec2 deltaPixel = quadCorner.x * b1 + quadCorner.y * b2;
+    vec2 deltaNdc = deltaPixel / (viewportSize * 0.5);
+
+    gl_Position = vec4(ndc.xy + deltaNdc, ndc.z, 1.0);
+    splatCoord = quadCorner;
+    splatColor = evaluateSphericalHarmonics();
+    splatOpacity = 1.0 / (1.0 + exp(-opacity));
+}
+```
+Drawing the quad: the fragment shader#
+A fragment at template position $(p_x, p_y)$ sits at screen position $x = c + p_x b_1 + p_y b_2$. Its distances to the centroid along the two principal axes are:
+$$
+d_1 = 3\sqrt{\lambda_1}p_x, \qquad d_2 = 3\sqrt{\lambda_2}p_y
+$$
+Letting $D = \mathrm{diag}(\lambda_1, \lambda_2)$ and $d = (d_1, d_2)^\top$, the Gaussian value at this fragment is:
+$$
+G(p_x, p_y) = \exp\left(-\tfrac{1}{2}d^\top D^{-1} d\right) = \exp\left(-\frac{1}{2}\left(\frac{d_1^2}{\lambda_1} + \frac{d_2^2}{\lambda_2}\right)\right)
+$$
+We drop the $1/\sqrt{2\pi|\Sigma|}$ normalization from the Gaussian density, since we only care about the decay from 0 to 1, and not the absolute probability. Substituting $d_i = 3\sqrt{\lambda_i}p_i$:
+$$
+G(p_x, p_y) = \exp\left(-4.5(p_x^2 + p_y^2)\right)
+$$
+A quick sanity check: $G(0,0) = 1$ (center, fully opaque) and $G(\pm 1, \pm 1) = e^{-9} \approx 0$ (corners, nearly transparent). The final fragment output is:
+$$
+\text{fragment} = \left(\mathrm{rgb}, \alpha_{\text{base}}\exp(-4.5(p_x^2+p_y^2))\right)
+$$
+where $\mathrm{rgb}$ comes from the SH color reconstruction and $\alpha_{\text{base}}$ is sigmoid(opacity).
+```
+in vec2 splatCoord;
+in vec3 splatColor;
+in float splatOpacity;
+
+out vec4 FragColor;
+
+void main() {
+    // G(px, py) = exp(-4.5(px^2 + py^2)).
+    // Derived by substituting d_i = 3*sqrt(lambda_i)*p_i
+    // into exp(-d_i^2 / (2*lambda_i)).
+    float power = -4.5 * dot(splatCoord, splatCoord);
+    if (power < -9.0)
+        discard; // exp(-9) is nearly transparent
+
+    float alpha = min(0.99, splatOpacity * exp(power));
+    if (alpha < 0.001)
+        discard;
+
+    FragColor = vec4(splatColor, alpha);
+}
+```
+```
+struct GpuGaussian {
+    glm::vec3 centroid;
+    float opacity;
+    std::array<float, 3> scale;
+    std::array<float, 4> rotation;
+};
+
+// Upload unit quad geometry (shared across all splats).
+static const glm::vec2 quadCorners[] = {
+    {-1.0f, -1.0f},
+    { 1.0f, -1.0f},
+    {-1.0f,  1.0f},
+    { 1.0f,  1.0f},
+};
+
+GLuint vao, quadVBO, splatVBO;
+glGenVertexArrays(1, &vao);
+glBindVertexArray(vao);
+
+glGenBuffers(1, &quadVBO);
+glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
+glBufferData(GL_ARRAY_BUFFER, sizeof(quadCorners), quadCorners, GL_STATIC_DRAW);
+glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+glEnableVertexAttribArray(0);
+
+// Upload per-splat instance data (locations 1..4 bound with divisor = 1).
+glGenBuffers(1, &splatVBO);
+glBindBuffer(GL_ARRAY_BUFFER, splatVBO);
+glBufferData(GL_ARRAY_BUFFER, gpuGaussians.size() * sizeof(GpuGaussian),
+             gpuGaussians.data(), GL_DYNAMIC_DRAW);
+// ... glVertexAttribPointer + glVertexAttribDivisor(loc, 1) for each attribute ...
+
+// Draw all splats in a single call.
+glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)gpuGaussians.size());
+```
+At this point, the scene starts to look good, but something is still wrong: some splats are blended in the wrong order. Since every splat is translucent, the order in which fragments are blended
+changes the final color; we need some kind of sorting.
+Sorting splats#
+The final step in our 3DGS renderer is to sort splats. In a regular rasterizer, visibility is often
+handled with depth testing. In 3DGS this is not enough, because splats are translucent: a pixel can
+receive color from several splats along the same ray, so rejecting everything behind the closest fragment would be wrong.
+The official 3DGS renderer uses a tile-based CUDA rasterizer with GPU sorting and front-to-back blending. This is out of scope for this tutorial.
+Instead, each frame we sort the splats by camera-space depth on the CPU, upload that sorted order to the GPU, and then draw them back-to-front with standard alpha blending. This is obviously less efficient than the official method, but works fine for scenes that are not too large.
+In OpenGL camera space, the camera looks down the negative $z$ axis, so farther splats have a more
+negative $z$. Sorting by increasing camera-space z gives us far-to-near order:
+```
+struct SplatSortEntry {
+    float cameraZ = 0.0f;
+    std::size_t splatIndex = 0;
+};
+
+void sortSplatsBackToFront(const Scene& scene,
+                           const glm::mat4& view,
+                           std::vector<SplatSortEntry>& sortEntries) {
+    sortEntries.resize(scene.splats.size());
+
+    for (std::size_t i = 0; i < scene.splats.size(); ++i) {
+        glm::vec4 cameraCentroid = view * glm::vec4(scene.splats[i].centroid, 1.0f);
+        sortEntries[i] = {cameraCentroid.z, i};
+    }
+
+    std::sort(sortEntries.begin(), sortEntries.end(),
+              [](const SplatSortEntry& a, const SplatSortEntry& b) {
+                  return a.cameraZ < b.cameraZ; // far first
+              });
+}
+```
+Then, each frame, rebuild the upload arrays in that order:
+```
+glm::mat4 view = camera.getViewMatrix();
+
+sortSplatsBackToFront(scene, view, sortEntries);
+
+sortedGaussians.resize(scene.splats.size());
+sortedSphericalHarmonics.resize(scene.splats.size() * SH_FLOAT_COUNT);
+
+for (std::size_t outputIndex = 0; outputIndex < sortEntries.size(); ++outputIndex) {
+    const GaussianSplat& splat = scene.splats[sortEntries[outputIndex].splatIndex];
+    sortedGaussians[outputIndex] = makeGpuGaussian(splat);
+    std::copy(splat.sphericalHarmonics.begin(), splat.sphericalHarmonics.end(),
+              sortedSphericalHarmonics.begin() + outputIndex * SH_FLOAT_COUNT);
+}
+
+uploadSortedSplats(buffers, sortedGaussians, sortedSphericalHarmonics);
+
+glDisable(GL_DEPTH_TEST);
+glEnable(GL_BLEND);
+glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4,
+                      static_cast<GLsizei>(scene.splats.size()));
+```
+This is good enough for this tutorial scene, but it will be fairly slow for large scenes.
+This is what the final result looks like:
+Conclusion#
+We have built a full display-only renderer for a trained 3DGS scene: load the PLY, draw centroids, reconstruct view-dependent SH color, rebuild the 3D covariance, project it to a 2D covariance, draw each splat as a screen-space quad, and finally sort translucent splats so blending behaves.
+This is still a deliberately simple renderer. The original paper’s CUDA rasterizer is much more sophisticated, especially around tiling, sorting, and compositing. But the core idea is already here: a 3DGS scene is rendered by projecting smooth 3D distributions into 2D.
+Hope you liked it! The code is on GitHub.
+Also feel free to give me some feedback on X: @b__feldman
+Appendix#
+Covariance factorization with rotation and scaling#
+By design, covariance matrices are symmetric positive semi-definite (PSD).
+Symmetric means that $\Sigma_{ij}=\Sigma_{ji}$, and PSD means that $x^\top \Sigma x \ge 0 \quad \forall x \in \mathbb{R}^3$.
+According to the spectral theorem, such matrices are diagonalizable in an orthonormal basis, meaning they can be written as:
+$$
+\Sigma = R \Lambda R^\top
+$$
+where $R$ is an orthogonal matrix and $\Lambda$ is a diagonal matrix with non-negative values (i.e. a scaling matrix), $\Lambda = \operatorname{diag}\left(\lambda_1, \lambda_2, \ldots, \lambda_m\right)$.
+If we define $S=\Lambda^{1/2}$ where
+$$
+\Lambda^{1/2} = \operatorname{diag}\left(\sqrt{\lambda_1}, \sqrt{\lambda_2}, \ldots, \sqrt{\lambda_m}\right)
+$$
+we can rewrite
+$$
+\Sigma = RS(RS)^\top
+$$
+where $R$ is orthogonal and $S$ is a scaling matrix. We can choose $R$ to be a rotation: if $\det R=-1$, flip the sign of one eigenvector column of $R$. Since $\Lambda$ is unchanged, the covariance represented by the factorization is unchanged, but the determinant sign changes.
+Linear transformations of Gaussian vectors#
+Let $X \sim \mathcal{N}(\mu, \Sigma)$ be a Gaussian random vector and let $Y = AX$, where $A$
+is a linear transform. Linearity of expectation gives:
+$$
+\mathbb{E}[Y] = \mathbb{E}[AX] = A\mathbb{E}[X] = A\mu
+$$
+For the covariance:
+$$
+\begin{aligned}
+\mathrm{Cov}(Y) &= \mathbb{E}\left[(Y - A\mu)(Y - A\mu)^\top\right] \\
+&= \mathbb{E}\left[A(X-\mu)(X-\mu)^\top A^\top\right] \\
+&= A\mathbb{E}\left[(X-\mu)(X-\mu)^\top\right] A^\top \\
+&= A\Sigma A^\top
+\end{aligned}
+$$
+So:
+$$
+AX \sim \mathcal{N}(A\mu, A\Sigma A^\top)
+$$
+References#
+Kerbl, B., Kopanas, G., Leimkühler, T., and Drettakis, G. (2023). 3D Gaussian Splatting for Real-Time Radiance Field Rendering. ACM Trans. Graph., 42(4).
+Zwicker, M., Pfister, H., van Baar, J., and Gross, M. (2001). EWA Volume Splatting. IEEE Visualization.
+Yifan, W., Serena, F., Wu, S., Öztireli, C., and Sorkine-Hornung, O. (2019). Differentiable Surface Splatting for Point-Based Geometry Processing. ACM Trans. Graph., 38(6).
+Citation#
+Cited as:
+Feldman, Benjamin. (May 2026). “3D Gaussian Splatting in a Weekend”. bfeldman.me. https://bfeldman.me/3dgs-weekend/.
+Or:
+```
+@article{feldman2026gs,
+  title   = "3D Gaussian Splatting in a Weekend",
+  author  = "Feldman, Benjamin",
+  journal = "bfeldman.me",
+  year    = "2026",
+  month   = "May",
+  url     = "https://bfeldman.me/3dgs-weekend/"
+}
+```

@@ -1,0 +1,182 @@
+I need to perform 3D volume rendering on 3D medical ultrasound image dataset, and found a sample code from Nvidia GPU-gem ( https://developer.nvidia.com/gpugems/gpugems/part-vi-beyond-triangles/chapter-40-applying-real-time-shading-3d-ultrasound )
+The code runs fine on my dataset, below is an example of rendered images from a 3D human heart image dataset at different angles : 
+ 
+ 
+ 
+ 
+ As you can see, the rendered image does reflect the 3D structure of the original 3D dataset, however, fence-like artifact is obvious on the rendered images, level of the artifact varies with different viewing angle, the first image is the most obvious while the 4nd image is less obvious. 
+ I have tried to interpolate the original 3D dataset by 2X using "cubic" interpolation(for example, if dimension of the original dataset is 100x100x100, I interpolated the dataset to 200x200x200), but found no help on the fence-like artifact. 
+ The sample code use OpenGL + Cg(C for graphics :  https://developer.nvidia.com/cg-toolkit ) to implement the 3D volume rendering, and below is some of the sample code for reference, I am not familiar with OpenGL or even Cg, it would be really appreciated if someone is familiar with this and is able to give me some suggestion, thanks. 
+ int main(int argc, char** argv)
+{
+    glutInit(&argc, argv);
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
+    glutInitWindowSize(640, 480);
+    glutInitWindowPosition(100, 100);
+    glutCreateWindow(argv[0]);
+    
+    if (glutExtensionSupported("GL_EXT_texture3D")) {
+        cerr << "GL_EXT_texture3D supported!" << endl;
+        glTexImage3DEXT    = (PFNGLTEXIMAGE3DEXTPROC)wglGetProcAddress("glTexImage3DEXT");
+        glTexSubImage3DEXT = (PFNGLTEXSUBIMAGE3DEXTPROC)wglGetProcAddress("glTexSubImage3DEXT");
+    }
+    else {
+        cerr << "GL_EXT_texture3D unsupported!" << endl;
+        exit(0);
+    }
+    
+    Init();
+    glutDisplayFunc(Display);
+    glutReshapeFunc(Reshape);
+    glutIdleFunc(Idle);
+    glutKeyboardFunc (Keyboard);
+    
+    InitializeGPU();
+    
+    glutMainLoop();
+    
+    QuitGPU();
+
+    return 0; 
+}
+
+ 
+ 
+void Init(void)
+{    
+   //ReadVolumes("../Data/US/", "Baby.lst");
+   //ReadVolumes("../Data/US/GPU_Gem_Cardiac_lbbb_rotate/", "Cardiac.lst");
+   ReadVolumes(Volume_path,list_name);
+   InitColorMap();
+
+   glClearColor (0.0, 0.0, 0.0, 0.0);
+   glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+   // Generate the 1D ColorMap
+   glGenTextures(1, &GL_ColorMap);
+   glBindTexture(GL_TEXTURE_1D, GL_ColorMap);
+   glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+   glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+   glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+   glTexImage1D(GL_TEXTURE_1D, 0, GL_RGBA, ColorMapLength, 0, GL_RGBA, GL_UNSIGNED_BYTE, ColorMapArray);
+
+   // Generate the ultrasound texture
+   glGenTextures(1, &GL_USTexture);
+   glBindTexture(GL_TEXTURE_3D, GL_USTexture);
+   glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+   glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+   glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT);
+   glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+   glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+   glTexImage3DEXT(GL_TEXTURE_3D, 0, GL_RGBA, iWidth, iHeight, iDepth, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, NULL);
+
+   glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+   glEnable(GL_BLEND);
+   
+   // Enable clip planes
+   glEnable(GL_CLIP_PLANE0);
+   glEnable(GL_CLIP_PLANE1);
+
+   glEnable(GL_CLIP_PLANE2);
+   glEnable(GL_CLIP_PLANE3);
+
+   glEnable(GL_CLIP_PLANE4);
+   glEnable(GL_CLIP_PLANE5);
+
+   SetDisplayList();
+}
+
+ 
+ void InitializeGPU(void)
+{
+    // Create Cg Context
+    Context = cgCreateContext();
+    CheckCgError();
+
+    InitializeVertexProgram();
+    cgGLEnableProfile(vProfile);
+    CheckCgError();
+    cgGLBindProgram(vProgram);
+    CheckCgError();
+
+
+    char Source_p = 1;
+    // To load the Cg source code, comment out the following line.
+    //Source_p = 0;
+    InitializeFragmentProgram(Source_p);
+    cgGLEnableProfile(fProfile);
+    CheckCgError();
+    cgGLBindProgram(fProgram);
+    CheckCgError();
+    cgGLEnableTextureParameter(ColorMap);
+    CheckCgError();
+    cgGLEnableTextureParameter(USTexture);
+    CheckCgError();
+}
+ 
+ and below is the vertex shader and fragment shader written in Cg 
+ void VertexProgram(in float4 Position   : POSITION,
+                   out float4 hPosition : POSITION,
+                   out float4 hTex0     : TEX0,
+                   out float hClip0     : CLP0,
+                   out float hClip1     : CLP1,
+                   out float hClip2     : CLP2,
+                   out float hClip3     : CLP3,
+                   out float hClip4     : CLP4,
+                   out float hClip5     : CLP5,
+                   uniform float4 ZoomFactor,
+                   uniform float4 Pyramid,
+                   uniform float4 ClipPlane0,
+                   uniform float4 ClipPlane1,
+                   uniform float4 ClipPlane2,
+                   uniform float4 ClipPlane3,
+                   uniform float4 ClipPlane4,
+                   uniform float4 ClipPlane5,
+                   uniform float4x4 ModelView,
+                   uniform float4x4 ModelViewProj)
+{
+  // Compute the clip-space position
+  hPosition = mul(ModelViewProj, Position);
+
+  // Remove the zoom factor from the position coordinates
+  Position  = Position * ZoomFactor;
+
+  // Compute the texture coordinates using the Cartesian grid
+  hTex0     = mul(ModelView, Position);
+
+  // Save original texture coordinates
+  float4 hTex0_Orig = hTex0 - float4(0.5, 0.5, 0.0, 0.0);
+
+  // Compute the scale for the texture coordinates in the
+  // pyramidal grid
+  hTex0.w   = Pyramid.x + hTex0.z*Pyramid.y;
+
+  // Adjust for the texture coordinate offsets
+  hTex0.x   = hTex0.x - 0.5 + 0.5*hTex0.w;
+
+  // Clip pyramidal volume
+  hClip0    =  dot(hTex0_Orig, ClipPlane0);
+  hClip1    =  dot(hTex0_Orig, ClipPlane1);
+  hClip2    =  dot(hTex0_Orig, ClipPlane2);
+  hClip3    =  dot(hTex0_Orig, ClipPlane3);
+  hClip4    =  dot(hTex0_Orig, ClipPlane4);
+  hClip5    =  dot(hTex0_Orig, ClipPlane5);
+}
+ 
+ void FragmentProgram(in float4 inTex : TEXCOORD0,
+                     out float4 sColor0 : COLOR0,
+                     const uniform sampler3D USTexture,
+                     const uniform sampler1D ColorMap)
+{
+  // Pre-multiply 'r' coordinate with the scale
+  inTex.yz = inTex.yz * inTex.ww;
+
+  // Projective 3D texture lookup
+  float val = tex3Dproj(USTexture, inTex.yzxw);
+
+  // Colormap look up
+  sColor0 = tex1D(ColorMap, val);
+  
+}
+ 
+ Thanks ! 

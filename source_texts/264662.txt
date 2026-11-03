@@ -1,0 +1,965 @@
+Inverse Neural Rendering for Explainable Multi-Object Tracking
+Julian Ost1 *
+1
+arXiv:2404.12359v1 [cs.CV] 18 Apr 2024
+Mario Bijelic1,2
+Tanushree Banerjee1 *
+Princeton University
+Abstract
+2
+Felix Heide1,2
+Torc Robotics
+disciplines, from robotics to health, and effective in operating at real-time rates, this approach also comes with several
+limitations: (i) Networks trained on data captured with a
+specific camera/geography generalize poorly, (ii) they typically rely on high-dimensional internal feature representations which are often not interpretable, making it hard to
+identify and reason about failure cases, and, (iii) it is challenging to enforce 3D geometrical constraints and priors
+during inference.
+Today, most methods for image understanding tasks rely
+on feed-forward neural networks. While this approach has
+allowed for empirical accuracy, efficiency, and task adaptation via fine-tuning, it also comes with fundamental disadvantages. Existing networks often struggle to generalize
+across different datasets, even on the same task. By design,
+these networks ultimately reason about high-dimensional
+scene features, which are challenging to analyze. This
+is true especially when attempting to predict 3D information based on 2D images. We propose to recast 3D multiobject tracking from RGB cameras as an Inverse Rendering
+(IR) problem, by optimizing via a differentiable rendering
+pipeline over the latent space of pre-trained 3D object representations and retrieve the latents that best represent object instances in a given input image. To this end, we optimize an image loss over generative latent spaces that inherently disentangle shape and appearance properties. We
+investigate not only an alternate take on tracking but our
+method also enables examining the generated objects, reasoning about failure situations, and resolving ambiguous
+cases. We validate the generalization and scaling capabilities of our method by learning the generative prior exclusively from synthetic data and assessing camera-based 3D
+tracking on the nuScenes and Waymo datasets. Both these
+datasets are completely unseen to our method and do not
+require fine-tuning. Videos and code are available here† .
+We focus on multi-object tracking as a task that must
+tackle all these challenges. Accurate multi-object tracking
+is essential for safe robotic planning. While approaches
+using LiDAR point clouds (and camera image input) are
+successful as a result of the explicitly measured depth
+[12, 15, 17, 20–23], camera-based approaches to 3D multiobject tracking have only been studied recently [13, 14, 24–
+31]. Monocular tracking methods, typically consisting of
+independent detection, 3D dynamic models, and matching
+modules, often struggle as the errors in the distinct modules
+tend to accumulate. Moreover, wrong poses in the detections can lead to ID switches in the matching process.
+We propose an alternative approach that recasts visual
+inference problems as inverse rendering (IR) tasks, jointly
+solving them at test time by optimizing over the latent space
+of a generative object representation. Specifically, we combine object retrieval through the inversion of a rendering
+pipeline and a learned object model with a 3D object tracking pipeline. This approach allows us to simultaneously
+reason about an object’s 3D shape, appearance, and threedimensional trajectory from monocular image input only.
+The location, pose, shape, and appearance parameters corresponding to the anchor objects are then iteratively refined via test-time optimization to minimize the distance between their corresponding generated objects and the given
+input image. Rather than directly predicting scene and object attributes, we optimize over a latent object representation to synthesize image regions that best explain the observed image. We match the inverse-rendered objects then
+be matched by comparing their optimized latents.
+1. Introduction
+The most successful image understanding methods today
+employ feed-forward neural networks for performing vision
+tasks, including segmentation [1–3], object detection [4–
+10], object tracking [11–17] and pose estimation [18, 19].
+Typically, these approaches learn network weights using
+large labeled datasets. At inference time, the trained network layers sequentially process a given 2D image to make
+a prediction. Despite being a successful approach across
+Our method hinges on an efficient rendering pipeline
+and generative object representation at its core. While
+* Indicates equal contribution.
+† https://light.princeton.edu/inverse- rendering- tracking/
+1
+the approach is not tied to a specific object representation, we adopt GET3D [32] as the generative object prior,
+that is only trained on synthetic data to synthesize textured meshes and corresponding images with an efficient
+differentiable rendering pipeline. Note that popular implicit
+shape/object representations do either not support classspecific priors [33, 34], or require expensive volume sampling [35].
+The proposed method builds on the inductive geometry
+priors embedded in our rendering forward model, solving
+different several tasks simultaneously. Our method refines
+object pose as a byproduct, merely by learning to represent
+objects of a given class. Recovering object attributes as a result of inverse rendering also provides interpretability “for
+free”: once our proposed method detects an object at test
+time, it can extract the parameters of the corresponding representation alongside the rendered input view. This ability
+allows for reasoning about failure cases.
+We validate that the method naturally exploits 3D geometry priors and generalizes across unseen domains and
+unseen datasets. After training solely on simulated data,
+we test on nuScenes [36] and Waymo [37] datasets, and although untrained, we find that our method outperforms both
+existing dataset-agnostic multi-object tracking approaches
+and dataset-specific learned approaches [13] when operating on the same detection inputs. In summary, we make the
+following contributions.
+• We introduce an inverse rendering method for 3Dgrounded monocular multi-object tracking. Instead of
+formulating tracking as a feed-forward prediction problem, we propose to solve an inverse image fitting problem
+optimizing over the latent embedding space of generative
+scene representations.
+• We analyze the single-shot capabilities and the interpretability of our method using the generated image produced by our method during test-time optimization.
+• Trained only on synthetic data, we validate the generalization capabilities of our method by evaluating on unseen automotive datasets, where the method compares favorably to existing methods when provided the same detection inputs.
+Specific challenges include highly dynamic scenes with partial or full occlusions, changes in appearance, and varying
+illumination conditions [38–40]. In this section, we first
+review classical tracking methods and deep detection and
+association methods. Following, we review 3D scene representations and inverse rendering.
+3D Object Tracking. An extensively investigated line of
+work proposes tracking by detection, i.e., to solve the task
+by first detecting scene objects and then learning to find
+the associations between the detected objects over multiple frames [41–47]. In addition to association, 3D tracking
+requires the estimation of object pose. Since directly predicting 3D object pose is challenging [48], most existing
+3D tracking methods rely on some explicit depth measurements in the form of Lidar point clouds [15, 49, 50], hybrid
+camera-lidar measurements [48] or stereo information[28,
+51]. Weng et al. [16] proposed a generic tracking method
+that combines a 3D Kalman filter and the Hungarian algorithm for matching on an arbitrary object detector.
+Only recent work [13, 14, 24–26] tackles monocular 3D
+tracking. Hu et al. [24] relies on similarity across different
+viewpoints to learn rich features for tracking. DEFT [14]
+jointly trains the feature extractor for detection and tracking
+using the features to match objects between frames. In contrast, Marinello et al. [26] use an off-the-shelf tracker and
+enhance image features with 3D motion and bounding box
+information. Zhou et al. [13] rely on a minimal input of two
+frames and predicted heatmaps to perform simultaneous detection and tracking. Some 3D tracking methods rely on
+motion models [52–54] such as the Kalman Filter [55]. Recent methods also make use of optical flow predictions [56],
+learned motion models metrics [29], long short-term memory modules (LSTM) [14, 24, 26] and more recently transformer modules [30, 31]. All the above methods rely on
+a feed-forward image encoder backbone to predict object
+features. Departing from this approach, we propose a multiobject tracking method that directly optimizes a consistent
+three-dimensional reconstruction of objects and 3D motion
+via an inverted graphics pipeline.
+3D Scene Representations, Generation and Neural Rendering. A growing body of work addresses joint 3D reconstruction and detection from monocular cameras. Existing methods have exploited different geometrical priors [57] for this task, including meshes [58], points [59],
+wire frames [60], voxels [61] CAD models or implicit functions [62] signed distance functions (SDFs) [63]. Early
+approaches in neural rendering represent the scene explicitly by, e.g., encoding texture or radiance on the estimated
+scene geometry [64] or using volumetric pixels (Voxels)
+[65]. Other methods represent 3D scenes implicitly. This
+includes the successful NeRF method [34] and variants that
+have been extended to dynamic scenes [62, 66, 67]. To al-
+Scope and Limitations While facilitating inverse rendering, the iterative optimization in our method makes
+it slower than classical object-tracking methods based on
+feed-forward networks. We hope to address this limitation in the future by accelerating the forward and backward
+passes with adaptive level-of-detail rendering techniques.
+2. Related Work
+Object Tracking is a challenging visual inference task that
+requires the detection and association of multiple objects.
+2
+Figure 1. Inverse Rendering for Monocular Multi-Object Tracking. For each detection, we initialize the embedding codes of an object
+generator zS for shape and zT for texture. The generative object prior model is frozen and only embedding codes, pose, and size of each
+object instance are optimized through inverse rendering to best fit the image observation. Inverse-rendered texture and shape embeddings
+and refined object locations are provided to the matching stage to match predicted states of tracked objects of the past and new observations.
+Matched and new tracklets are updated, and unmatched tracklets are ultimately discarded before predicting states in the next step.
+low the handling of semi-transparent objects, these representation models refrain from explicitly representing object
+surfaces. Signed distance fields represent surfaces of watertight objects as a zero level-set [33, 68, 69] modeling a
+Signed Distance Function (SDF). Adding textures to surface models allows for disentangling object shape from appearance [70, 71]. In recent years ideas from generative
+imaging models, such as GANs [72, 73], VAEs and diffusion models [74, 75] have been applied to the 3D domain [32, 35, 69, 76]. Generative models can either be
+used for pure generation [35] or provide prior knowledge
+for downstream tasks. Starting from a good prior can drastically improve the efficiency of inverse tasks, such as IR.
+While Gina3D [35] provides a prior on in-the-wild objects
+its volumetric rendering pipeline adds another layer of complexity sampling the full volume. We therefore rely on
+GET3D [32] generating a mesh as a prior object model and
+renders through rasterization, profiting from from graphic
+pipelines optimized over decades.
+tion that best models the observed image.
+To the best of our knowledge, we present the first method
+that employs an inverse rendering approach for multi-object
+3D tracking, without any feed-forward prediction of object
+features – only given 2D image input.
+3. Tracking by Inverse Rendering
+We cast object tracking as a test-time inverse rendering
+problem that fits generated multi-object scenes to the observed image frames. First, we discuss the proposed scene
+representation we fit. Next, we devise our rendering-based
+test-time optimization at the heart of the proposed tracking approach. The full tracking pipeline is illustrated in
+Fig. 1. We employ an object-centric scene representation.
+We model the underlying 3D scene for a frame observation
+as a composition of all object instances without the background scene.
+3.1. Scene Generation
+Object Prior. To represent a large, diverse set of instances
+per class, we define each object instance o as a sample from
+a distribution O over all objects in a class, that is
+O ∼ f (o) ,
+(1)
+Inverse Rendering. Inverse rendering methods conceptually “invert” the graphics rendering pipeline, which generates images from 3D scene descriptions, and instead estimates the 3D scene properties, i.e., geometry, lighting,
+depth, and object poses based on input images. Recent
+work [77–79] successfully achieved joint optimization of
+a volumetric model and unknown camera poses from a set
+of images merely by back-propagating through a rendering
+pipeline. Another area of inverse rendering focuses on material and lighting properties [80–82], to find a representa-
+where f is a learned function over a known prior object distribution. Here, the prior distribution is modeled by a differentiable generative 3D object model op = G (zp ), that maps
+a latent embedding zp to an object instance op , the object p.
+In particular, the latent space comprises two disentangled
+spaces z S and z T for shape S and texture T .
+3
+For in-the-wild images, Ic is not just composed of sampled object instances but other objects and the scene background. Since our goal for tracking is the reconstruction of
+all object instances of specific object classes, a naı̈ve ℓ2 image matching objective of the form ∥Ic − Iˆc ∥2 is noisy and
+challenging to solve with vanilla stochastic gradient descent
+methods. To tackle this issue, we optimize visual similarity
+in the generated object regions instead of the full image. We
+optimize only on rendered RGB pixels and minimize
+
+
+LRGB = ∥ Ic − Iˆc ◦ M̂Ic ∥2 ,
+X
+
+(4)
+with M̂Ic = min
+Mc,p , 1 .
+Given an object-centric camera projection Pc = Kc T,
+where Kc is the camera intrinsic matrix, a transformation
+T = [R|t] to camera c that is composed of rotation R and
+translation t, a differentiable rendering method R (op , c),
+such as rasterization for meshes or volumetric rendering for
+neural fields, this renders an image Ic,p , a 2D observation
+of the 3D object op . While our method is general, implementation details of the generator and rendering method are
+provided in the implementation section.
+Scene Composition. We model a multi-object scene as a
+scene graph composed of transformations in the edges and
+object instances in the leaf nodes, similar to Ost et al. [62].
+Object poses are described by the homogeneous transformation matrix Tp ∈ R4x4 with the translation tp and orientation Rp in the reference coordinate system. The camera
+pose Tc ∈ R4x4 is described in the same reference coordinate system. The relative transformation of the camera c
+and each object instance p can be computed through edge
+traversal in the scene graph as
+
+Tc,p = diag
+1
+sp
+
+Tp T−1
+c ,
+The mask of all foreground/object pixels M̂Ic is computed
+as the sum over all object masks Mc,p in the frame rendered
+by camera c. We employ a learned perceptual similarity
+metric [83] (LPIPS) on object-centered image patches, that
+is
+
+
+Lperceptual = LPIPSpatch Ic , Iˆc,p .
+(5)
+(2)
+The combined loss function of our method is
+where the factor sp is a scaling factor along all axes to allow a shared object representation of a unified scale. This
+canonical object scale is necessary to represent objects of
+various sizes, independent of the learned prior on shape and
+texture. The object centric projection Pc,p = Kc Tc,p is
+used to render the RGB image Ic,p ∈ RH×W ×3 and mask
+H×W
+Mc,p ∈ [0, 1]
+for each object/camera pair.
+Individual rendered RGB images are ordered by object
+distance ∥tc,p ∥, such that p = 1 is the shortest distance to c.
+Using the Hadamard product of the non-occluded mask γp
+all No , object images are composed into a single image
+LIR = LRGB + λLperceptual ,
+Iˆc =
+No
+X
+which we optimize by refining the latent codes of shape and
+appearance, position, rotation, and scale, leading to
+ẑS,p , ẑT,p , ŝp t̂p , R̂p = arg min (LIR ) .
+γp = max
+Mc,p −
+p
+X
+!
+Mc,q
+, 0H×W
+Optimization. To solve Eq. 6, we propose an optimization schedule, that first optimizes a coarse color, and then
+jointly optimizes the shape and the positional state of each
+object. As the backbone of the learned perceptual loss, we
+use a pre-trained VGG16 [84] and utilize individual output
+feature map similarities at different points of the optimization. We find that color and other low-dimensional features
+are represented in the initial feature maps and those are better guidance for texture than high-dimensional features as
+outputs of the later blocks. These features have a more informative signal for shape and object pose. We use the average of the first and second blocks in the optimization for
+zT , while the combined perceptual similarity loss guides
+the optimization of zT and the pose.
+We initialize all object embeddings with the same fixed
+values inside the embedding space, take two optimization
+steps solely on color utilizing the described loss, and then
+(3)
+!
+(7)
+Instead of using vanilla stochastic gradient descent methods, we propose an alternating optimization schedule of
+distinct properties that includes aligning zS before zT , to
+reduce the number of total optimization steps. A detailed
+implementation and validation of all design choices of the
+optimization are presented in the Supplementary Material.
+R (G (zS,p , zT,p ) , Pc,p ) ◦ γp , where
+k=1
+(6)
+,
+q=1
+where instance masks are generated in the same fashion.
+3.2. Inverse Multi-Object Scene Rendering.
+We invert the differentiable rendering model defined in
+Eq. 3 by optimizing the set of all object representations in
+a given image Ic with gradient-based optimization. We assume that, initially, each object op is placed at a pose T̂c,p
+and scaled with ŝp near its underlying location. We represent object orientations in their respective Lie algebraic
+form so(3). We further sample an object embedding ẑS,p
+and ẑT,p in the respective latent embedding space.
+4
+Tracked t0
+Tracked t1
+Tracked t2
+Tracked t3
+Parking lot
+Clutter
+Urban
+Suburban
+Input t0
+Figure 2. Tracking via Inverse Neural Rendering on nuScenes [36]. From left to right, we show (i) observed images from diverse scenes
+at timestep k = 0; (ii) an overlay of the optimized generated object and its 3D bounding boxes at timestep k = 0, 1, 2 and 3. The color of
+the bounding boxes for each object corresponds to the predicted tracklet ID. We see that even in such diverse scenarios, our method does
+not lose any tracks and performs robustly across all scenarios, although the dataset is unseen.
+freeze the color for the joint optimization of the shape and
+pose. We regularize out-of-distribution generations with
+ing pipeline for multi-object scenes. The resulting location,
+rotation, and scale lead to the observation vector
+Lembed = αT zT + (1 − αT )zavg
++ αS zS + (1 − αS )zavg
+T
+S
+(8)
+that minimizes a weighted distance in each dimension with
+respect to the average embedding zS or zT respectively. For
+optimization, we use the ADAM optimizer [85]. The final
+loss function combines the RGB, perceptual cost and the
+regularization with λ = 10, αT = 0.7 and αS = 0.7 of
+Eq. 6 and Eq. 8. We freeze color after two steps of optimization and optimize the shape and scale for three more
+steps, adding translation and rotation only in the last two
+steps.
+yk = [tk , sk , ψk ].
+(9)
+Prediction. While not confined to a specific dynamics
+model, we use a linear state-transition model A, for the objects state xk = [x, y, z, s, ψ, w, h, l, x′ , y ′ , z ′ ]k , and a forward prediction using a Kalman Filter [55], a vanilla approach in 3D object tracking [16]. An instantiated object in
+k-1 can be predicted in frame k as
+x̂k|k−1 = Ax̂k−1|k−1
+and Pk|k−1 = APk−1|k−1 AT + Q,
+3.3. 3D MOT via Inverse Rendering
+(10)
+with the predicted a priori covariance matrix modeling the
+uncertainty in the predicted state.
+Next, we describe the proposed method for tracking multiple dynamic objects with the inverse rendering approach
+from above. The approach tracks objects in the proposed
+representation across video frames and is illustrated in
+Fig. 1. For readability, we omit p and the split of z into
+zS and zT in the following.
+Interpretable Latent Matching. In the matching stage, all
+optimal object representations op in frame k are matched
+with tracked and lost objects from k − 1. Objects are
+matched based on appearance and location with a weighted
+affinity score
+Initial Object and Pose Estimation. Common to tracking
+methods, we initialize with a given initial 3D detection on
+image Ic,k , and we set object location tk = [x, y, z]k , scale
+sk = max(wk , hk , lk ) using the detected bounding box dimensions and heading ψk in frame k. We then find an optimal representation zk , and a refined location and rotation of
+each object o via the previously introduced inverse render-
+A = wIoU AIoU,3D + wz Az + wc Dcentroid ,
+(11)
+where AIoU,3D is the IoU of the 3D boxes computed over
+the predictions of tracked object predictions xk|k−1 and refined observations. Here, the object affinity Az is computed
+as the cosine distance of tracked object latent embeddings z.
+5
+Tracked t0
+Tracked t1
+Tracked t2
+Tracked t3
+Urban
+Highway
+Input t0
+Figure 3. Without changing the model or training on the dataset, our proposed method can generalize well to the Waymo Open Driving
+Dataset [37]. Similar to Fig 2, from left to right, we show (i) observed images from diverse scenes from the dataset at timestep k = 0; (ii)
+an overlay of the closest generated object and predicted 3D bounding boxes at timestep k = 0, 1, 2 and 3. The color of the bounding boxes
+for each object corresponds to the predicted tracklet ID. Our method does not lose any tracks even on a different unseen dataset in diverse
+scenes, validating that the approach generalizes.
+3.4. Implementation Details
+In addition to that the Euclidean distance between the center Dcentroid adds additional guidance. We add no score for
+unreasonable distant tracked objects and detections.
+We compute the best combination of tracked and detected objects using the Hungarian algorithm [86], again
+a conventional choice in existing tracking algorithms.
+Matched tracklet and object pairs are kept in the set of
+tracked objects and the representation of the corresponding detections is discarded, while unmatched detections are
+added as new objects. Unmatched tracklets are set to lost
+with a lost frame counter of one. Objects that were not detected in previous frames are set to tracked and their counter
+is reset to 0. Objects with a lost frame count higher than
+lifespan Nlif e , or outside of the visible field, are removed.
+Representation Model. We employ the GET3D [32] architecture as object model G. Following StyleGAN [72, 73]
+embeddings zT and zS are mapped to intermediate style
+embeddings wS and wT in a learned W-space, which we
+optimize over instead of Z-space. Style embeddings condition a generator function that produces tri-planes representing object shapes as Signed Distance Fields (SDFs)
+and textures as texture fields. We deliberately train our
+generator on synthetic data only, see experiments below.
+Differentiable marching tetrahedra previously introduced in
+DMTet [88] extract a mesh representation and Images are
+rendered with a differentiable rasterizer [89].
+Track and Embedding Update. In the update step, we
+refine each object embedding z and motion model yk given
+the result of the matching step. Embeddings are updated
+through an exponential moving average
+2
+zk,EM A = βzk +(1−β)zk−1,EM A with β =
+(12)
+T −1
+Computational Cost. Each IR optimization step in our implementation takes ∼ 0.3 seconds per frame. The generation and gradient computation through the generator determines the computational cost of the method. However, we note that the rendering pipeline, contributing
+the majority of the computational cost of the generator,
+has not been performance-optimized and can be naively
+parallelized when implemented in lower-level GL+CUDA
+graphics primitives.
+over all past observations of the object, where T is the number of observed time steps of the respective instance. The
+observation yk is used to update the Kalman filter. The optimal Kalman gain
+Kk = Pk|k−1 HT (HPk|k−1 HT + R)−1
+(13)
+4. Experiments
+is updated to minimize the residual error of the predicted
+model and the observation. The observation yk is used to
+estimate the object state as
+and with
+x̂k|k = x̂k|k−1 + Kk (yk − Hx̂k|k−1 )
+(14)
+Pk = Pk|k−1 − Kk HPk|k−1
+(15)
+In the following, we assess the proposed method. Having trained our generative scene model solely on simulated data [90], we test the generalization capabilities on the
+nuScenes [36] and Waymo [37] dataset – both are unseen by
+the method. We analyze generative outputs of the test-time
+optimization and compare them against existing 3D multiobject trackers [13, 16, 24, 29, 31] on camera-only data.
+the a posteriori of the covariance matrix is updated.
+6
+Training
+Data Unseen
+×
+×
+×
+✓
+× (CP)
+✓ (CP)
+✓ (CP)
+Method
+PF-Track [30]
+QTrack [29]
+QD-3DT [24]
+QD-3DT [24] (trained on WOD)
+CenterTrack [13]
+AB3DMOT [16]
+Inverse Neural Rendering (ours)
+AMOTA ↑
+AMOTP (m) ↓
+Recall ↑
+MOTA ↑
+Modality
+0.622
+0.692
+0.425
+0.000
+0.202
+0.387
+0.413
+0.916
+0.753
+1.258
+1.893
+1.195
+1.158
+1.189
+0.719
+0.760
+0.563
+0.226
+0.313
+0.506
+0.536
+0.558
+0.596
+0.358
+0.000
+0.134
+0.284
+0.321
+Camera
+Camera
+Camera
+Camera
+Camera
+Camera
+Camera
+Table 1. Quantitative Evaluation for Camera-only Multi-Object Tracking. Quantitative results on “cars” in the test split of the
+nuScenes tracking dataset [36]. Our IR-based tracker outperforms AB3DMOT [16] on all metrics and CenterTrack [13] on accuracy. All
+three methods use the same detection backbone for fair comparison, while only CenterTrack requires end-to-end training on the dataset.
+Additional results show on-par performance of our method with QD-3DT [24] trained on nuScenes [36]. QD-3DT trained on the Waymo
+Open Dataset (WOD) does not generalize to nuScenes and does not achieve competitive results. Only very recent transformer-based
+methods, such as PF-Track [30] and the metric learning approach of Q-Track [29] achieve a higher score. However, these methods require
+end-to-end training on each dataset. “CP” denotes here the vision-only version of CenterPoint [87] was used for object detection. Bold
+denotes best and underlined second best for methods that did not train on the dataset or use the same detection backbone.
+4.1. Single-Shot Object Retrieval and Matching
+stage detect-and-track methods, we use CenterPoint [15] as
+the detection method. We compare to CenterTrack [13] as
+an established learning-based baseline, and present results
+of the very recent PFTrack [30], a transformer-based tracking method, Qtrack [29] as a metric learning method, and
+QD-3DT [24] as an LSTM-based state tracker combined
+with image feature matching. Of all learning-based methods, only CenterTrack [13] allows us to evaluate tracking
+performance with identical detections. Finally, we compare
+to AB3DMOT [16] that builds on an arbitrary 3D detection
+algorithm and combines it with a modified Kalman filter to
+track the state of each object. AB3DMOT [16] and the proposed method are the only methods that are data-agnostic
+in the sense that they have not seen the training dataset.
+For a fair evaluation of these generalization capabilities in
+learning-based methods, we include another version of QD3DT solely trained on the Waymo Open Dataset [37] and
+evaluate on nuScenes [36]. We discuss the findings in the
+following.
+Although trained only on general object-centric synthetic
+data, ShapeNet [90], our method is capable of fitting a sample from the generative prior to observed objects in real
+datasets that match the vehicle type, color, and overall appearance closely, effectively making our method datasetagnostic. We analyze the generations during optimization
+in the following.
+Optimization. Given an image observation and coarse detections, our method aims to find the best 3D representation, including pose and appearance, solely through inverse
+rendering. In Fig. 4 we analyze this iterative optimization
+process, following a scheduled optimization as described in
+Sec. 3.4. We observe that the object’s color is inferred in
+only two steps. Further, we can observe that even though
+the initial pose is incorrect, rotation and translation are optimized jointly through inverse rendering together with the
+shape and scale of the objects, recovering from sub-optimal
+initial guesses. The shape representation close to the observed object is reconstructed in just 5 steps.
+Validation on nuScenes. Tab. 1 reports quantitative results
+on the test split of the nuScenes tracking dataset [36] on
+the car object class for all six cameras. We list results for
+the multi-object tracking accuracy (MOTA) [91] metric, the
+AMOTA [16] metric, average multi-object tracking precision (AMOTP) [16] and recall of all methods. First, we
+evaluate a version of QD-3DT [24] that has been trained
+on the Waymo Open Dataset [37] (WOD) but tested on
+nuScenes. This experiment is reported in row four of Tab. 1
+and confirms that recent end-to-end detection and tracking
+methods do not perform well on unseen data (see qualitative
+results in the Supplementary Material). Moreover, perhaps
+surprisingly, even when using use the same vision-only detection backbone as in our approach, the established endto-end trained baseline CenterTrack [13], which has seen
+4.2. Evaluation
+To provide a fair comparison of 3D multi-object tracking
+methods using monocular inputs, we compare against existing methods by running all our evaluations with the method
+reference code. We only evaluate methods, that consider
+past frames, but have no knowledge about future frames,
+which is a different task. While our method does not store
+the full history length of all images, we allow such memory techniques for other methods. We only consider purely
+mono-camera-based tracking methods.We note that, in contrast to our method, most baseline methods we compare to
+are finetuned on the respective training set. For all two7
+Input Frame
+Initial Guess
+Texture Fitting
+Object Pose Fitting
+Shape Fitting
+Input frame is faded for visibility.
+Figure 4. Optimization Process. From left to right, we show (i) the observed image, (ii) the rendering predicted by the initial starting
+point latent embeddings, (iii) the predicted rendered objects after the texture code is optimized (iv) the predicted rendered objects after the
+translation, scale, and rotation are optimized, and (v) the predicted rendered objects after the shape latent code is optimized. The ground
+truth images are faded to show our rendered objects clearly. Our method is capable of refining the predicted texture, pose, and shape over
+several optimization steps, even if initialized with poses or appearance far from the target – all corrected through inverse rendering.
+(i) Input Frame
+the dataset, performs worse than our method. Our IR-based
+method outperforms the general tracker AB3DMOT [16].
+When other methods are given access to the dataset, recent learning-based methods such as the end-to-end LSTMbased method QD-3DT [24] perform on par. Only the most
+recent transformer-based methods such as PF-Track [30]
+and the QTrack [29], which employ a quality-based association model on a large set of learned metrics, such as heat
+maps and depth, achieve higher scores. Note again, that
+these methods, in contrast to the proposed method, have
+been trained on this dataset and cannot be evaluated independently of their detector performance.
+(ii) INR 3D Generation
+(iii) INR BEV Layout
+Figure 5. Layout Generation Through Inverse Rendering.
+From left to right, we show (i) observed image from a single camera for two scenes, (ii) test-time optimized inverse rendered (IR)
+objects of class “car”, and (iii) Bird’s Eye View (BEV) layout of
+the scene. In the BEV layout, black boxes represent ground truth,
+and the colored boxes represent predicted BEV boxes. The bottom
+shows a zoomed-in region at a 60 m distance (see BEV layout).
+Even in this setting, our method recovers the coarse appearance,
+shape of the objects, pose, and size,
+We visualize the rendered objects predicted by our tracking method in Fig. 2. We show an observed image from
+a single camera at time step k = 0, followed by rendered objects overlaid over the observed image at time
+step k = 0, 1, 2 and 3 along with their respective bounding
+boxes, with color-coded tracklets. We see that our method
+does not lose any tracks in challenging scenarios in diverse
+scenes shown here, from dense urban areas to suburban traffic crossings, and handles occlusions and clutter effectively.
+By visualizing the rendered objects as well as analyzing the
+loss values, our method allows us to reason about and explain success and failure cases effectively, enabling explainable 3D object tracking. The rendered output images provide interpretable inference results that explain successful
+or failed matching due to shadows, appearance, shape, or
+pose. For example, the blue car in the IR inference in Fig. 5
+top row was incorrectly matched due to an appearance mismatch in a shadow region. A rendering model including
+ambient illumination may resolve this ambiguity, see further discussion in the Supplementary Material.
+representation that can be directly ingested by downstream
+planning and control tasks, or simulation methods to train
+downstream tasks. As such, the method also allows us to
+reason about the scene by leveraging the 3D information
+provided by our predicted 3D representations. The 3D locations, object orientations, and sizes recovered from such
+visualizations can not only enable us to explain the predictions of our object tracking method, especially in the presence of occlusions or ID switches but also be used in other
+downstream tasks that require rich 3D understanding, such
+as planning.
+Validation on Waymo. Next, we provide qualitative results
+from the 3D tracking on the validation set of WOD [37] in
+Fig. 3. The only public results on the provided test set are
+presented in QD-3DT [24], which may indicate it fails on
+this dataset. While the size of the dataset and its variety
+is of high interest for all autonomous driving tasks, Hu et
+al. [24] conclude that vision-only test set evaluation is not
+representative of a test set developed for surround view lidar
+data on partial unobserved camera images only. As such,
+we provide here qualitative results in Fig. 3, which validate
+Interpretation. Fig 5 shows the inverse rendered scene
+graphs in isolation and birds-eye-view tracking outputs on
+a layout level. Our method accurately recovers the object
+pose, instance type, appearance, and scale. As such, our approach directly outputs a 3D model of the full scene, i.e.,
+layout and object instances, along with the temporal history of the scene recovered through tracking – a rich scene
+8
+Table 2. Ablation Experiments.
+(a) Input Frame
+(b) Full (ours)
+5. Conclusion
+(c) No Schedule
+We investigate inverse neural rendering as an alternative
+to existing feed-forward tracking methods. Specifically,
+we recast 3D multi-object tracking from RGB cameras as
+an inverse test-time optimization problem over the latent
+space of pre-trained 3D object representations that, when
+rendered, best represent object instances in a given input
+image. We optimize an image loss over generative latent
+spaces that inherently disentangle shape and appearance
+properties. This approach to tracking also enables examining the reconstructed objects, reasoning about failure situations, and resolving ambiguous cases – rendering object
+layouts and loss function values provides interpretability
+“for free”. We validate that the method has high generalization capabilities, and without seeing a dataset, outperforms
+existing tracking methods’ generalization capabilities. In
+the future, we hope to investigate not only object detection
+with inverse rendering but broad, in-the-wild object class
+identification via conditional generation methods – unlocking analysis-by-synthesis in vision with generative neural
+rendering.
+Input frame is faded for visibility.
+(a) Effect of Optimization Schedule. (a) observed image, (b) optimized
+generations using the proposed schedule in Sec. 3, (c) optimized generations using no schedule. This supports the quantitative to the left.
+Method
+LIR & Lembed - Eq.8
+LIR - Eq.6
+Lperceptual - Eq. 5
+LRGB - Eq. 4
+No Schedule
+AMOTA ↑
+0.112
+0.103
+0.100
+N/A
+0.102
+Recall ↑
+0.264
+0.236
+0.251
+N/A
+0.224
+MOTA↑
+0.113
+0.112
+0.101
+N/A
+0.110
+(b) Optimization Schedule and Loss Components. Ablations were run
+on a small subset of the nuScenes [36] validation set. LRGB fails due to
+the optimizer fitting objects to the background instead, increasing the size
+of each object resulting in out of memory.
+References
+[1] J. Long, E. Shelhamer, and T. Darrell, “Fully convolutional networks for semantic segmentation,” in Proceedings of the IEEE conference on computer vision
+and pattern recognition, pp. 3431–3440, 2015. 1
+[2] Y. Li, H. Qi, J. Dai, X. Ji, and Y. Wei, “Fully convolutional instance-aware semantic segmentation,” in
+Proceedings of the IEEE conference on computer vision and pattern recognition, pp. 2359–2367, 2017.
+[3] L.-C. Chen, G. Papandreou, I. Kokkinos, K. Murphy, and A. L. Yuille, “Semantic image segmentation with deep convolutional nets and fully connected
+crfs,” arXiv preprint arXiv:1412.7062, 2014. 1
+[4] S. Ren, K. He, R. Girshick, and J. Sun, “Faster rcnn: Towards real-time object detection with region
+proposal networks,” Advances in neural information
+processing systems, vol. 28, 2015. 1
+[5] R. Girshick, “Fast r-cnn,” in Proceedings of the
+IEEE international conference on computer vision,
+pp. 1440–1448, 2015.
+[6] J. Redmon, S. Divvala, R. Girshick, and A. Farhadi,
+“You only look once: Unified, real-time object detection,” in Proceedings of the IEEE conference on
+computer vision and pattern recognition, pp. 779–788,
+2016.
+[7] W. Liu, D. Anguelov, D. Erhan, C. Szegedy, S. Reed,
+C.-Y. Fu, and A. C. Berg, “Ssd: Single shot multibox
+detector,” in European conference on computer vision,
+pp. 21–37, Springer, 2016.
+that the method achieves tracking of similar quality on all
+datasets, providing a generalizing tracking approach. We
+show that our method does not lose tracks on Waymo scenes
+in diverse conditions.
+4.3. Ablation Experiments
+As ablation experiments, we analyze the optimization
+schedule, the INR loss function components, and the
+weights of the tracker, applying them to a subset of scenes
+from the nuScenes validation set. We deliberately select
+this smaller validation set due to its increased difficulty.The
+top row of Tab. 2b lists the quantitative results from our
+ablation study of the optimization scheduler. Our findings
+reveal a crucial insight: the strength of our method lies not
+in isolated loss components but in their synergistic integration. Specifically, the amalgamation of pixel-wise, perceptual, and embedding terms significantly enhances AMOTA,
+MOTA, and Recall metrics.
+Moreover, the absence of an optimization schedule led to
+less robust matching as quantitative and qualitative results
+in Tab. 2a reveal. However, the core efficacy of our tracking method remained intact as indicated in the last row of
+Tab. 2b. This nuanced understanding underscores the importance of component interplay in our method.
+9
+[8] J. Ku, M. Mozifian, J. Lee, A. Harakeh, and S. L.
+Waslander, “Joint 3d proposal generation and object
+detection from view aggregation,” in 2018 IEEE/RSJ
+International Conference on Intelligent Robots and
+Systems (IROS), pp. 1–8, IEEE, 2018.
+[9] C. R. Qi, W. Liu, C. Wu, H. Su, and L. J. Guibas,
+“Frustum pointnets for 3d object detection from rgbd data,” in Proceedings of the IEEE conference on
+computer vision and pattern recognition, pp. 918–927,
+2018.
+[10] Y. Zhou and O. Tuzel, “Voxelnet: End-to-end learning
+for point cloud based 3d object detection,” in Proceedings of the IEEE conference on computer vision and
+pattern recognition, pp. 4490–4499, 2018. 1
+[11] S. Sharma, J. A. Ansari, J. K. Murthy, and K. M.
+Krishna, “Beyond pixels: Leveraging geometry and
+shape cues for online multi-object tracking,” in 2018
+IEEE International Conference on Robotics and Automation (ICRA), pp. 3508–3515, IEEE, 2018. 1
+[12] A. Kim, A. Ošep, and L. Leal-Taixé, “Eagermot: 3d
+multi-object tracking via sensor fusion,” in 2021 IEEE
+International Conference on Robotics and Automation
+(ICRA), pp. 11315–11321, IEEE, 2021. 1
+[13] X. Zhou, V. Koltun, and P. Krähenbühl, “Tracking objects as points,” in European Conference on Computer
+Vision, pp. 474–490, Springer, 2020. 1, 2, 6, 7
+[14] M. Chaabane, P. Zhang, J. R. Beveridge, and
+S. O’Hara, “Deft: Detection embeddings for tracking,” arXiv preprint arXiv:2102.02267, 2021. 1, 2
+[15] T. Yin, X. Zhou, and P. Krahenbuhl, “Center-based 3d
+object detection and tracking,” in Proceedings of the
+IEEE/CVF conference on computer vision and pattern
+recognition, pp. 11784–11793, 2021. 1, 2, 7
+[16] X. Weng, J. Wang, D. Held, and K. Kitani, “3d multiobject tracking: A baseline and new evaluation metrics,” in 2020 IEEE/RSJ International Conference on
+Intelligent Robots and Systems (IROS), pp. 10359–
+10366, IEEE, 2020. 2, 5, 6, 7, 8
+[17] Z. Pang, Z. Li, and N. Wang, “Simpletrack: Understanding and rethinking 3d multi-object tracking,”
+arXiv preprint arXiv:2111.09621, 2021. 1
+[18] C. Wang, D. Xu, Y. Zhu, R. Martı́n-Martı́n, C. Lu,
+L. Fei-Fei, and S. Savarese, “Densefusion: 6d object
+pose estimation by iterative dense fusion,” in Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pp. 3343–3352, 2019. 1
+[19] Y. Xiang, T. Schmidt, V. Narayanan, and D. Fox,
+“Posecnn: A convolutional neural network for 6d
+object pose estimation in cluttered scenes,” arXiv
+preprint arXiv:1711.00199, 2017. 1
+[20] Z. Liu, H. Tang, A. Amini, X. Yang, H. Mao, D. Rus,
+and S. Han, “Bevfusion: Multi-task multi-sensor
+fusion with unified bird’s-eye view representation,”
+arXiv, 2022. 1
+[21] X. Weng, Y. Wang, Y. Man, and K. M. Kitani,
+“Gnn3dmot: Graph neural network for 3d multiobject tracking with 2d-3d multi-feature learning,” in
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 6499–6508,
+2020.
+[22] Y. Chen, Z. Yu, Y. Chen, S. Lan, A. Anandkumar,
+J. Jia, and J. M. Alvarez, “Focalformer3d: Focusing
+on hard instance for 3d object detection,” in Proceedings of the IEEE/CVF International Conference on
+Computer Vision, pp. 8394–8405, 2023.
+[23] B. Xuyang, Z. Hu, X. Zhu, Q. Huang, Y. Chen, H. Fu,
+and C.-L. Tai, “TransFusion: Robust Lidar-Camera
+Fusion for 3d Object Detection with Transformers,”
+CVPR, 2022. 1
+[24] H.-N. Hu, Y.-H. Yang, T. Fischer, T. Darrell, F. Yu, and
+M. Sun, “Monocular quasi-dense 3d object tracking,”
+IEEE Transactions on Pattern Analysis and Machine
+Intelligence, 2022. 1, 2, 6, 7, 8
+[25] J. Wu, J. Cao, L. Song, Y. Wang, M. Yang, and
+J. Yuan, “Track to detect and segment: An online
+multi-object tracker,” in Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition, pp. 12352–12361, 2021.
+[26] N. Marinello, M. Proesmans, and L. Van Gool,
+“Triplettrack: 3d object tracking using triplet embeddings and lstm,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, pp. 4500–4510, 2022. 2
+[27] P. Nguyen, K. G. Quach, C. N. Duong, N. Le, X.-B.
+Nguyen, and K. Luu, “Multi-camera multiple 3d object tracking on the move for autonomous vehicles,”
+in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 2569–2578,
+2022.
+[28] M. Gladkova, N. Korobov, N. Demmel, A. Ošep,
+L. Leal-Taixé, and D. Cremers, “Directtracker: 3d
+multi-object tracking using direct image alignment
+and photometric bundle adjustment,” arXiv preprint
+arXiv:2209.14965, 2022. 2
+[29] J. Yang, E. Yu, Z. Li, X. Li, and W. Tao, “Quality
+matters: Embracing quality clues for robust 3d multiobject tracking,” arXiv preprint arXiv:2208.10976,
+2022. 2, 6, 7, 8
+[30] Z. Pang, J. Li, P. Tokmakov, D. Chen, S. Zagoruyko,
+and Y.-X. Wang, “Standing between past and future:
+Spatio-temporal modeling for multi-camera 3d multiobject tracking,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, 2023. 2, 7, 8
+10
+[31] S. Wang, Y. Liu, T. Wang, Y. Li, and X. Zhang,
+“Exploring object-centric temporal modeling for efficient multi-view 3d object detection,” arXiv preprint
+arXiv:2303.11926, 2023. 1, 2, 6
+[32] J. Gao, T. Shen, Z. Wang, W. Chen, K. Yin, D. Li,
+O. Litany, Z. Gojcic, and S. Fidler, “Get3d: A generative model of high quality 3d textured shapes learned
+from images,” in Advances In Neural Information Processing Systems, 2022. 2, 3, 6
+[33] J. J. Park, P. Florence, J. Straub, R. Newcombe, and
+S. Lovegrove, “Deepsdf: Learning continuous signed
+distance functions for shape representation,” in Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition (CVPR), June 2019. 2, 3
+[34] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi, and R. Ng, “Nerf: Representing
+scenes as neural radiance fields for view synthesis,”
+2020. 2
+[35] B. Shen, X. Yan, C. R. Qi, M. Najibi, B. Deng,
+L. Guibas, Y. Zhou, and D. Anguelov, “Gina-3d:
+Learning to generate implicit neural assets in the
+wild,” in Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR),
+pp. 4913–4926, June 2023. 2, 3
+[36] H. Caesar, V. Bankiti, A. H. Lang, S. Vora, V. E.
+Liong, Q. Xu, A. Krishnan, Y. Pan, G. Baldan, and
+O. Beijbom, “nuscenes: A multimodal dataset for autonomous driving,” in Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition, pp. 11621–11631, 2020. 2, 5, 6, 7, 9
+[37] P. Sun, H. Kretzschmar, X. Dotiwalla, A. Chouard,
+V. Patnaik, P. Tsui, J. Guo, Y. Zhou, Y. Chai, B. Caine,
+et al., “Scalability in perception for autonomous driving: Waymo open dataset,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp. 2446–2454, 2020. 2, 6,
+7, 8
+[38] A. Yilmaz, O. Javed, and M. Shah, “Object tracking:
+A survey,” Acm computing surveys (CSUR), vol. 38,
+no. 4, pp. 13–es, 2006. 2
+[39] Y. Wu, J. Lim, and M.-H. Yang, “Online object tracking: A benchmark,” in Proceedings of the IEEE conference on computer vision and pattern recognition,
+pp. 2411–2418, 2013.
+[40] A. W. Smeulders, D. M. Chu, R. Cucchiara, S. Calderara, A. Dehghan, and M. Shah, “Visual tracking: An
+experimental survey,” IEEE transactions on pattern
+analysis and machine intelligence, vol. 36, no. 7,
+pp. 1442–1468, 2013. 2
+[41] M. D. Breitenstein, F. Reichlin, B. Leibe, E. KollerMeier, and L. Van Gool, “Robust tracking-bydetection using a detector confidence particle filter,”
+in 2009 IEEE 12th International Conference on Computer Vision, pp. 1515–1522, IEEE, 2009. 2
+[42] Z. Kalal, K. Mikolajczyk, and J. Matas, “Trackinglearning-detection,” IEEE transactions on pattern
+analysis and machine intelligence, vol. 34, no. 7,
+pp. 1409–1422, 2011.
+[43] A. Bewley, Z. Ge, L. Ott, F. Ramos, and B. Upcroft,
+“Simple online and realtime tracking,” in 2016 IEEE
+international conference on image processing (ICIP),
+pp. 3464–3468, IEEE, 2016.
+[44] P. Bergmann, T. Meinhardt, and L. Leal-Taixe,
+“Tracking without bells and whistles,” in Proceedings
+of the IEEE/CVF International Conference on Computer Vision, pp. 941–951, 2019.
+[45] N. Wojke, A. Bewley, and D. Paulus, “Simple online
+and realtime tracking with a deep association metric,”
+in 2017 IEEE international conference on image processing (ICIP), pp. 3645–3649, IEEE, 2017.
+[46] N. Wojke and A. Bewley, “Deep cosine metric learning for person re-identification,” in 2018 IEEE Winter Conference on Applications of Computer Vision
+(WACV), pp. 748–756, IEEE, 2018.
+[47] J. Cao, X. Weng, R. Khirodkar, J. Pang, and
+K. Kitani, “Observation-centric sort: Rethinking
+sort for robust multi-object tracking,” arXiv preprint
+arXiv:2203.14360, 2022. 2
+[48] K. Huang and Q. Hao, “Joint multi-object detection
+and tracking with camera-lidar fusion for autonomous
+driving,” in 2021 IEEE/RSJ International Conference
+on Intelligent Robots and Systems (IROS), pp. 6983–
+6989, IEEE, 2021. 2
+[49] A. Dewan, T. Caselitz, G. D. Tipaldi, and W. Burgard, “Motion-based detection and tracking in 3d lidar scans,” in 2016 IEEE international conference
+on robotics and automation (ICRA), pp. 4508–4513,
+IEEE, 2016. 2
+[50] C. Álvarez-Aparicio, Á. M. Guerrero-Higueras, F. J.
+Rodrı́guez-Lera, J. Ginés Clavero, F. Martı́n Rico, and
+V. Matellán, “People detection and tracking using lidar
+sensors,” Robotics, vol. 8, no. 3, p. 75, 2019. 2
+[51] A. Osep, W. Mehner, M. Mathias, and B. Leibe,
+“Combined image-and world-space tracking in traffic scenes,” in 2017 IEEE International Conference
+on Robotics and Automation (ICRA), pp. 1988–1995,
+IEEE, 2017. 2
+[52] S. Scheidegger, J. Benjaminsson, E. Rosenberg,
+A. Krishnan, and K. Granström, “Mono-camera 3d
+multi-object tracking using deep learning detections
+and pmbm filtering,” in 2018 IEEE Intelligent Vehicles Symposium (IV), pp. 433–440, IEEE, 2018. 2
+[53] S. Chen, “Kalman filter for robot vision: a survey,”
+IEEE Transactions on industrial electronics, vol. 59,
+no. 11, pp. 4409–4420, 2011.
+11
+[54] H. T. Nguyen and A. W. Smeulders, “Fast occluded
+object tracking by a robust appearance filter,” IEEE
+transactions on pattern analysis and machine intelligence, vol. 26, no. 8, pp. 1099–1104, 2004. 2
+[55] R. E. Kalman, “A new approach to linear filtering and
+prediction problems,” 1960. 2, 5
+[56] J. Luiten, T. Fischer, and B. Leibe, “Track to reconstruct and reconstruct to track,” IEEE Robotics and
+Automation Letters, vol. 5, no. 2, pp. 1803–1810,
+2020. 2
+[57] J. Mao, S. Shi, X. Wang, and H. Li, “3d object detection for autonomous driving: A review and new outlooks,” arXiv preprint arXiv:2206.09474, 2022. 2
+[58] D. Beker, H. Kato, M. A. Morariu, T. Ando, T. Matsuoka, W. Kehl, and A. Gaidon, “Monocular differentiable rendering for self-supervised 3d object detection,” in European Conference on Computer Vision,
+pp. 514–529, Springer, 2020. 2
+[59] J. Ku, A. D. Pon, and S. L. Waslander, “Monocular 3d object detection leveraging accurate proposals and shape reconstruction,” in Proceedings of the
+IEEE/CVF conference on computer vision and pattern
+recognition, pp. 11867–11876, 2019. 2
+[60] T. He and S. Soatto, “Mono3d++: Monocular 3d vehicle detection with two-scale 3d hypotheses and task
+priors,” in Proceedings of the AAAI Conference on Artificial Intelligence, vol. 33, pp. 8409–8416, 2019. 2
+[61] Y. Xiang, W. Choi, Y. Lin, and S. Savarese, “Datadriven 3d voxel patterns for object category recognition,” in Proceedings of the IEEE conference on computer vision and pattern recognition, pp. 1903–1911,
+2015. 2
+[62] J. Ost, F. Mannan, N. Thuerey, J. Knodt, and F. Heide,
+“Neural scene graphs for dynamic scenes,” in Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), pp. 2856–
+2865, 2021. 2, 4
+[63] S. Zakharov, W. Kehl, A. Bhargava, and A. Gaidon,
+“Autolabeling 3d objects with differentiable rendering
+of sdf shape priors,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, pp. 12224–12233, 2020. 2
+[64] J. Thies, M. Zollhöfer, and M. Nießner, “Deferred
+neural rendering,” ACM Transactions on Graphics,
+vol. 38, p. 1–12, Jul 2019. 2
+[65] V. Sitzmann, J. Thies, F. Heide, M. Nießner, G. Wetzstein, and M. Zollhöfer, “Deepvoxels: Learning persistent 3d feature embeddings,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2019. 2
+[66] W. Yuan, Z. Lv, T. Schmidt, and S. Lovegrove, “Star:
+Self-supervised tracking and reconstruction of rigid
+objects in motion with neural rendering,” in Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pp. 13144–13152, 2021. 2
+[67] K. Park, U. Sinha, J. T. Barron, S. Bouaziz, D. B.
+Goldman, S. M. Seitz, and R. Martin-Brualla, “Nerfies: Deformable neural radiance fields,” Proceedings
+of the IEEE International Conference on Computer Vision, 2021. 2
+[68] P. Kellnhofer, L. C. Jebe, A. Jones, R. Spicer, K. Pulli,
+and G. Wetzstein, “Neural lumigraph rendering,” in
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 4287–4297,
+2021. 3
+[69] G. Chou, I. Chugunov, and F. Heide, “Gensdf: Twostage learning of generalizable signed distance functions,” in Proc. of Neural Information Processing Systems (NeurIPS), 2022. 3
+[70] F. Xiang, Z. Xu, M. Hasan, Y. Hold-Geoffroy,
+K. Sunkavalli, and H. Su, “Neutex: Neural texture
+mapping for volumetric neural rendering,” in Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pp. 7119–7128, 2021. 3
+[71] L. Koestler, D. Grittner, M. Moeller, D. Cremers, and
+Z. Lähner, “Intrinsic neural fields: Learning functions
+on manifolds,” arXiv preprint arXiv:2203.07967,
+vol. 2, 2022. 3
+[72] T. Karras, S. Laine, and T. Aila, “A style-based generator architecture for generative adversarial networks,”
+in Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pp. 4401–4410,
+2019. 3, 6
+[73] T. Karras, S. Laine, M. Aittala, J. Hellsten, J. Lehtinen, and T. Aila, “Analyzing and improving the image
+quality of stylegan,” in Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition, pp. 8110–8119, 2020. 3, 6
+[74] J. Ho, A. Jain, and P. Abbeel, “Denoising diffusion
+probabilistic models,” Advances in neural information
+processing systems, vol. 33, pp. 6840–6851, 2020. 3
+[75] A. Q. Nichol and P. Dhariwal, “Improved denoising
+diffusion probabilistic models,” in International Conference on Machine Learning, pp. 8162–8171, PMLR,
+2021. 3
+[76] Z. Hao, A. Mallya, S. Belongie, and M.-Y. Liu, “Gancraft: Unsupervised 3d neural rendering of minecraft
+worlds,” arXiv preprint arXiv:2104.07659, 2021. 3
+[77] Z. Wang, S. Wu, W. Xie, M. Chen, and V. A.
+Prisacariu, “Nerf–: Neural radiance fields without known camera parameters,” arXiv preprint
+arXiv:2102.07064, 2021. 3
+[78] L. Yen-Chen, P. Florence, J. T. Barron, A. Rodriguez,
+P. Isola, and T.-Y. Lin, “inerf: Inverting neural radiance fields for pose estimation,” in 2021 IEEE/RSJ In12
+Princeton University — Toyota Technological Institute at Chicago, 2015. 6, 7
+[91] K. Bernardin, A. Elbs, and R. Stiefelhagen, “Multiple
+object tracking performance metrics and evaluation in
+a smart room environment,” in Sixth IEEE International Workshop on Visual Surveillance, in conjunction with ECCV, vol. 90, Citeseer, 2006. 7
+ternational Conference on Intelligent Robots and Systems (IROS), pp. 1323–1330, IEEE, 2021.
+[79] C.-H. Lin, W.-C. Ma, A. Torralba, and S. Lucey,
+“Barf: Bundle-adjusting neural radiance fields,” in
+Proceedings of the IEEE/CVF International Conference on Computer Vision, pp. 5741–5751, 2021. 3
+[80] M. Nimier-David, Z. Dong, W. Jakob, and A. Kaplanyan, “Material and Lighting Reconstruction for
+Complex Indoor Scenes with Texture-space Differentiable Rendering,” in Eurographics Symposium
+on Rendering - DL-only Track (A. Bousseau and
+M. McGuire, eds.), The Eurographics Association,
+2021. 3
+[81] Y.-C. Guo, D. Kang, L. Bao, Y. He, and S.-H. Zhang,
+“Nerfren: Neural radiance fields with reflections,” in
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 18409–
+18418, 2022.
+[82] M. Nimier-David, D. Vicini, T. Zeltner, and W. Jakob,
+“Mitsuba 2: A retargetable forward and inverse renderer,” Transactions on Graphics (Proceedings of
+SIGGRAPH Asia), vol. 38, Dec. 2019. 3
+[83] R. Zhang, P. Isola, A. A. Efros, E. Shechtman, and
+O. Wang, “The unreasonable effectiveness of deep
+features as a perceptual metric,” in Proceedings of
+the IEEE conference on computer vision and pattern
+recognition (CVPR), pp. 586–595, 2018. 4
+[84] K. Simonyan and A. Zisserman, “Very deep convolutional networks for large-scale image recognition,”
+2015. 4
+[85] D. P. Kingma and J. Ba, “Adam: A method for
+stochastic optimization,” CoRR, vol. abs/1412.6980,
+2015. 5
+[86] H. W. Kuhn, “The hungarian method for the assignment problem,” Naval research logistics quarterly,
+vol. 2, no. 1-2, pp. 83–97, 1955. 6
+[87] X. Zhou, D. Wang, and P. Krähenbühl, “Objects as
+points,” in arXiv preprint arXiv:1904.07850, 2019. 7
+[88] T. Shen, J. Gao, K. Yin, M.-Y. Liu, and S. Fidler,
+“Deep marching tetrahedra: a hybrid representation
+for high-resolution 3d shape synthesis,” Advances
+in Neural Information Processing Systems, vol. 34,
+pp. 6087–6101, 2021. 6
+[89] S. Laine, J. Hellsten, T. Karras, Y. Seol, J. Lehtinen, and T. Aila, “Modular primitives for highperformance differentiable rendering,” ACM Transactions on Graphics (TOG), vol. 39, no. 6, pp. 1–14,
+2020. 6
+[90] A. X. Chang, T. Funkhouser, L. Guibas, P. Hanrahan,
+Q. Huang, Z. Li, S. Savarese, M. Savva, S. Song,
+H. Su, J. Xiao, L. Yi, and F. Yu, “ShapeNet: An
+Information-Rich 3D Model Repository,” Tech. Rep.
+arXiv:1512.03012 [cs.GR], Stanford University —
+13

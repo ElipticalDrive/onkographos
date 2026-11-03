@@ -1,0 +1,347 @@
+Texture block compression is a critical component of real-time rendering. Reducing the size of textures saves download time, disk space, memory, and GPU bandwidth. With a few exceptions (pixel art, some UI elements), it’s a reasonable expectation that all textures should be compressed to maximize these benefits.
+It’s important, therefore, to understand how texture block compression works at a high level. What formats work best for base colors versus normal maps versus some arbitrary packed material data?
+
+An Introduction To BCn Texture Compression, Part 1: BC4 | Devfault v2
+Texture block compression is a critical component of real-time rendering. Reducing the size of textures saves download time, disk space, memory, and GPU bandwidth. With a few exceptions (pixel art, some UI elements), it’s a reasonable expectation that all textures should be compressed to maximize these benefits.
+It’s important, therefore, to understand how texture block compression works at a high level. What formats work best for base colors versus normal maps versus some arbitrary packed material data? What tradeoffs can be expected between quality, size, and compression time? That is not the topic of this post; Nathan Reed has an excellent writeup on the various BCn texture formats and there’s no need to duplicate it here.
+Instead, this series is going to dig into the next level of understanding. Sometimes it’s not enough to treat the actual compression process as a black box. Maybe you need to compress textures at runtime on the GPU, or modify the compression to account for a different error term (e.g., error after RGBM decoding). Maybe you need to investigate non-determinism in your texture import pipeline. Or maybe you’re just curious about the techniques involved.
+So you go open up the source of your compression library, and…
+Oh, ew. Weird integer math! Bit twiddling! Vectorization!
+None of these things are bad, of course, and I’d be perfectly comfortable with them in an area of code I was familiar with. They do, however, tend to make it a lot harder to understand what a given block of code is actually doing if you don’t know already. (Which is maybe a lesson to learn about the readability of code in general.)
+When I started trying to learn how block compression worked, I was frustrated at how few resources there were going over the basics. The goal of this series, then, is to outline some of the core algorithms in block compression, in a clearer form. Then, we can build up to some of the common tricks and optimizations. With that understanding, it should be possible to look at a real, production compressor and understand what it is doing.
+BC4
+BC4 is the simplest of the formats, and therefore a good place to start. A BC4 block is 8 bytes, covering 4x4 texels, with two single-channel 8-bit endpoint values as well as 16 3-bit selector values (which are packed tightly together in the remaining 6 bytes.) Written out as a C struct:
+```
+struct bc4_packed_block_t
+{
+    uint8_t endpoint0;
+    uint8_t endpoint1;
+    uint8_t packed_selectors[6];
+};
+```
+Like all BCn formats, BC4 assumes the values in a block can be represented as a gradient. But what does that actually mean? When decoding a block, the endpoints are used to construct an 8-element palette. The selectors for each texel index into this palette to produce the final result.
+For BC4, there are two possible methods for constructing the palette, depending on the relative magnitudes of the endpoints. (The ‘degeneracy breaking’ mentioned in Nathan’s blog post.) Most entries are a linear combination of the two endpoints, although the second mode contains two constant entries as well. Unfortunately, the ordering of entries in this palette is… a little unintuitive:
+palette entry
+8-color mode (endpoint0 > endpoint1)
+6-color mode (endpoint0 <= endpoint1)
+0
+endpoint0
+endpoint0
+1
+endpoint1
+endpoint1
+2
+(endpoint0 * 6 + endpoint1 * 1) / 7
+(endpoint0 * 4 + endpoint1 * 1) / 5
+3
+(endpoint0 * 5 + endpoint1 * 2) / 7
+(endpoint0 * 3 + endpoint1 * 2) / 5
+4
+(endpoint0 * 4 + endpoint1 * 3) / 7
+(endpoint0 * 2 + endpoint1 * 3) / 5
+5
+(endpoint0 * 3 + endpoint1 * 4) / 7
+(endpoint0 * 1 + endpoint1 * 4) / 5
+6
+(endpoint0 * 2 + endpoint1 * 5) / 7
+0
+7
+(endpoint0 * 1 + endpoint1 * 6) / 7
+255
+In practice, BC4 can produce fairly high quality results using only the 8-color mode (i.e., endpoint0 is the maximum.) The later palette can help slightly with blocks that include outlier texels, however.
+Okay, that should be enough background to let us write a simple compressor!
+First, we’ll use a different, unpacked struct during the encoding process itself, just to avoid dealing with all of the bitpacking:
+```
+const int k_texels_per_block = 16;
+
+struct bc4_block_t
+{
+	uint8_t endpoint0;
+	uint8_t endpoint1;
+	uint8_t selectors[k_texels_per_block]; // 3-bit indices
+};
+```
+And a function to pack this into a proper output block:
+```
+bc4_packed_block_t pack_bc4(const bc4_block_t* block)
+{
+	bc4_packed_block_t result = { 0 };
+
+	uint64_t packed_selectors = 0;
+	for (int i = 0; i < _countof(block->selectors); ++i)
+	{
+		assert(block->selectors[i] < 8);
+		packed_selectors |= ((uint64_t)block->selectors[i] << (i * 3));
+	}
+
+	result.endpoint0 = block->endpoint0;
+	result.endpoint1 = block->endpoint1;
+	result.packed_selectors[0] = static_cast<uint8_t>(packed_selectors >> 0);
+	result.packed_selectors[1] = static_cast<uint8_t>(packed_selectors >> 8);
+	result.packed_selectors[2] = static_cast<uint8_t>(packed_selectors >> 16);
+	result.packed_selectors[3] = static_cast<uint8_t>(packed_selectors >> 24);
+	result.packed_selectors[4] = static_cast<uint8_t>(packed_selectors >> 32);
+	result.packed_selectors[5] = static_cast<uint8_t>(packed_selectors >> 40);
+
+	return result;
+}
+```
+Our encode function will take a pointer to the 16 uint8_t values in the block, arranged in row-major order (the caller is required to reorder them from image order):
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+In order to encode the block, we need to find a set of endpoints and selectors that minimize the error across the texels (typically measured as the sum of squared differences between original and decoded values). Choosing different endpoints will (usually) change the ideal selectors chosen. Choosing different selectors will (usually) change the ideal endpoints.
+This search space is large, so a decent approach is to take a reasonable guess at good endpoints and find the optimal selectors for that pair. A common choice is to assume the minimum and maximum values of the block will be close to the ideal endpoints:
+```
+int v_min = in_pixels[0];
+int v_max = in_pixels[0];
+for (int i = 1; i < k_texels_per_block; ++i)
+{
+    int v = in_pixels[i];
+    v_min = std::min(v_min, v);
+    v_max = std::max(v_max, v);
+}
+```
+Now we need to search for the correct selectors. To do this, we compute our palette entries, then search for the best match for each texel (assuming, for now, that we always use the 8-color palette):
+```
+out_result->endpoint0 = static_cast<uint8_t>(v_max);
+out_result->endpoint1 = static_cast<uint8_t>(v_min);
+
+uint8_t palette_entries[8] =
+{
+    static_cast<uint8_t>(v_max),
+    static_cast<uint8_t>(v_min),
+    static_cast<uint8_t>((v_max * 6 + v_min * 1) / 7),
+    static_cast<uint8_t>((v_max * 5 + v_min * 2) / 7),
+    static_cast<uint8_t>((v_max * 4 + v_min * 3) / 7),
+    static_cast<uint8_t>((v_max * 3 + v_min * 4) / 7),
+    static_cast<uint8_t>((v_max * 2 + v_min * 5) / 7),
+    static_cast<uint8_t>((v_max * 1 + v_min * 6) / 7),
+};
+
+for (int i = 0; i < k_texels_per_block; ++i)
+{
+    int v = in_pixels[i];
+
+    // Search for palette entry that minimizes the error:
+    uint8_t best_selector = 0;
+    int best_error = std::abs(v - v_max);
+    for (uint8_t p = 0; p < _countof(palette_entries); ++p)
+    {
+        int error = std::abs(v - palette_entries[p]);
+        if (error < best_error)
+        {
+            best_selector = p;
+            best_error = error;
+        }
+    }
+
+    out_result->selectors[i] = best_selector;
+}
+```
+Tada! A simple BC4 compressor.
+To validate the results, I wrote a quick function to load an image, run the red channel through both our BC4 compressor and the one from rgbcx, decode both blocks, and compare the outputs. The results are not always exactly the same between the two; when a texel value falls directly between two palette entries, there may be two selectors with the same absolute error. So, we often see cases where rgbcx encodes a texel with an error of +6, while the above code encodes it with an error of -6.
+Improving The Simple Compressor
+How do we go about making this trivial BC4 compressor better? Are there simple things we can do to make it faster? What about increasing the quality?
+Of course there are.
+Easy thing first: after we’ve determined the minimum and maximum values in the block, we can trivially detect the case where all values in the block are identical (minimum and maximum are equal.) In that case, there’s no point in computing palette entries and doing an expensive search; we can encode the block directly by placing the value in the first endpoint and setting all selectors to 0. (The value of the other endpoint is irrelevant.) This change doesn’t affect the output, but saves us some time if there are constant blocks in the input:
+```
+if (v_min == v_max)
+{
+    out_result->endpoint0 = static_cast<uint8_t>(v_max);
+    out_result->endpoint1 = static_cast<uint8_t>(v_min);
+    memset(out_result->selectors, 0, sizeof(out_result->selectors));
+    return;
+}
+```
+(A small note here: BC4 and BC5 decode to more than 8 bit precision on the GPU, so if you have higher-precision input textures you could solve for a more precise fit for these blocks, moving the endpoints so that an interpolated palette entry gives a more precise result.)
+The rgbcx BC4 compressor is fast and has decent quality, but only considers the 8-color mode. Can we improve things by using the alternative mode? Let’s try.
+Let’s pull the selector fit out into its own function, which tracks and returns the total squared error across all texels:
+```
+int encode_bc4_fit_selectors_for_palette(
+    const uint8_t* palette_entries,
+    const uint8_t* in_pixels,
+    uint8_t* out_selectors)
+{
+	int total_sq_error = 0;
+	for (int i = 0; i < k_texels_per_block; ++i)
+	{
+		int v = in_pixels[i];
+
+		// Search for palette entry that minimizes the error:
+		uint8_t best_selector = 0;
+		int best_error = std::abs(v - (int)palette_entries[0]);
+		for (uint8_t p = 1; p < 8; ++p)
+		{
+			int error = std::abs(v - (int)palette_entries[p]);
+			if (error < best_error)
+			{
+				best_selector = p;
+				best_error = error;
+			}
+		}
+
+		out_selectors[i] = best_selector;
+		total_sq_error += best_error * best_error;
+	}
+
+	return total_sq_error;
+}
+```
+Then, we compute both palettes, encode the block twice, and take the one with the minimum total error:
+```
+uint8_t interp8_palette[8] =
+{
+    static_cast<uint8_t>(v_max),
+    static_cast<uint8_t>(v_min),
+    static_cast<uint8_t>((v_max * 6 + v_min * 1) / 7),
+    static_cast<uint8_t>((v_max * 5 + v_min * 2) / 7),
+    static_cast<uint8_t>((v_max * 4 + v_min * 3) / 7),
+    static_cast<uint8_t>((v_max * 3 + v_min * 4) / 7),
+    static_cast<uint8_t>((v_max * 2 + v_min * 5) / 7),
+    static_cast<uint8_t>((v_max * 1 + v_min * 6) / 7),
+};
+
+uint8_t interp6_palette[8] =
+{
+    static_cast<uint8_t>(v_min),
+    static_cast<uint8_t>(v_max),
+    static_cast<uint8_t>((v_min * 4 + v_max * 1) / 5),
+    static_cast<uint8_t>((v_min * 3 + v_max * 2) / 5),
+    static_cast<uint8_t>((v_min * 2 + v_max * 3) / 5),
+    static_cast<uint8_t>((v_min * 1 + v_max * 4) / 5),
+    static_cast<uint8_t>(0),
+    static_cast<uint8_t>(255),
+};
+
+uint8_t interp8_selectors[k_texels_per_block];
+int interp8_error = encode_bc4_fit_selectors_for_palette(
+    interp8_palette,
+    in_pixels,
+    interp8_selectors);
+
+uint8_t interp6_selectors[k_texels_per_block];
+int interp6_error = encode_bc4_fit_selectors_for_palette(
+    interp6_palette,
+    in_pixels,
+    interp6_selectors);
+
+if (interp8_error < interp6_error)
+{
+    out_result->endpoint0 = static_cast<uint8_t>(v_max);
+    out_result->endpoint1 = static_cast<uint8_t>(v_min);
+
+    memcpy(out_result->selectors, interp8_selectors, sizeof(interp8_selectors));
+}
+else
+{
+    out_result->endpoint0 = static_cast<uint8_t>(v_min);
+    out_result->endpoint1 = static_cast<uint8_t>(v_max);
+
+    memcpy(out_result->selectors, interp6_selectors, sizeof(interp6_selectors));
+}
+```
+This does improve the quality of the result slightly, but it is very slight. (About a 0.5% improvement in RMSE.) Turns out there’s a reason rgbcx doesn’t bother. We’re also doing two searches per block this way, which is… not great.
+We still have a nice lever to improve performance significantly. Currently, we search the list of palette values for the best match per-texel. However, these palette values are not random, they’re (for the most part) a linear gradient. This is a quantization problem; as long as we’re careful about rounding, we can compute the optimal selectors for a set of endpoints directly instead of searching for them. Fabien Giesen has a short writeup on the math here. Aside from the weirdness of the rounding bias and the need to remap from linear indices to selector order, this seems straightforward.
+Implemented as an alternative to encode_bc4_fit_selectors_for_palette:
+```
+int encode_bc4_fit_selectors_for_endpoints8(
+    int endpoint0,
+    int endpoint1,
+    const uint8_t* in_pixels,
+    uint8_t* out_selectors)
+{
+	// Remap from lerp indices (min/max at ends) to selectors (min/max in first two entries.)
+	// I'm sure there's a bit-twiddling way to do this, but a lookup table is simpler.
+	static const uint8_t k_index_to_selector_lut[8] = { 1, 7, 6, 5, 4, 3, 2, 0 };
+
+	// 8-color mode means endpoint0 is the maximum and endpoint1 is the minimum.
+	assert(endpoint0 > endpoint1);
+	const int range = endpoint0 - endpoint1;
+	const int bias = (range < 8) ? (range - 1) : (range / 2 + 2);
+
+	uint8_t palette[8];
+	encode_bc4_compute_palette8(palette, endpoint0, endpoint1);
+
+	int total_sq_error = 0;
+	for (int i = 0; i < k_texels_per_block; ++i)
+	{
+		int v = in_pixels[i];
+
+		int index = ((v - endpoint1) * 7 + bias) / range;
+		int selector = k_index_to_selector_lut[index];
+		int error = v - palette[selector];
+
+		out_selectors[i] = selector;
+		total_sq_error += error * error;
+	}
+
+	return total_sq_error;
+}
+```
+(The 6-color mode version is similar, except it must also test the error for 0 and 255, picking those selectors when they’re better.)
+This runs noticably faster, and produces the same error. We still need to compute the palette entries in order to compute local error; this is necessary to determine if 6-color mode produces a better output. If we decide to only encode in 8-color mode, we never need to compute the palette entries at all.
+This One Goes To Eleven
+Computing selectors directly is significantly faster. In fact, it improves performance enough that we can turn the quality level all the way up.
+We have two endpoints at 8 bits apiece, and so our total endpoint size is 16 bits. That gives us 65536 possible endpoint pairs. If we want to determine the optimal BC4 encoding for each block, we can exhaustively test the full set of possible pairs, encode the optimal selectors for those endpoints, and take the result with lowest error:
+```
+void encode_bc4_exhaustive(bc4_block_t* out_result, const uint8_t* in_pixels)
+{
+	int best_error = INT_MAX;
+	uint8_t temp_selectors[k_texels_per_block];
+	for (int endpoint0 = 0; endpoint0 < 256; ++endpoint0)
+	{
+		for (int endpoint1 = 0; endpoint1 < 256; ++endpoint1)
+		{
+			if (endpoint0 > endpoint1)
+			{
+				int error = encode_bc4_fit_selectors_for_endpoints8(
+                    endpoint0,
+                    endpoint1,
+                    in_pixels,
+                    temp_selectors);
+				if (error < best_error)
+				{
+					out_result->endpoint0 = static_cast<uint8_t>(endpoint0);
+					out_result->endpoint1 = static_cast<uint8_t>(endpoint1);
+					memcpy(out_result->selectors, temp_selectors, sizeof(temp_selectors));
+					best_error = error;
+				}
+			}
+			else
+			{
+				int error = encode_bc4_fit_selectors_for_endpoints6(
+                    endpoint0,
+                    endpoint1,
+                    in_pixels,
+                    temp_selectors);
+				if (error < best_error)
+				{
+					out_result->endpoint0 = static_cast<uint8_t>(endpoint0);
+					out_result->endpoint1 = static_cast<uint8_t>(endpoint1);
+					memcpy(out_result->selectors, temp_selectors, sizeof(temp_selectors));
+					best_error = error;
+				}
+			}
+		}
+	}
+}
+```
+As you might expect, this is quite slow! I certainly wouldn’t put this in a production pipeline. However, it’s always nice to have a simple, brute force path to The Correct Result. It gives a nice baseline from which to evaluate other options. You could also use this as a fallback in a high-quality compressor, exhaustively encoding blocks that produce high amounts of error.
+Conclusion
+Hopefully this has been a useful introduction to the simplest case of BCn block compression. We’re not quite ready to takle the other formats: there are a number of techniques for improving quality that we should cover first. However, I’ll leave this first post here for now as an overview of the basic technique.
+There is much more to cover even with BC4, so expect a followup post soon discussing how to squeeze out more quality without resorting to brute force.
+Until then, thanks for reading!

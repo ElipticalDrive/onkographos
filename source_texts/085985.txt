@@ -1,0 +1,972 @@
+The Irreden Engine. Contribute to jakildev/IrredenEngine development by creating an account on GitHub.
+
+render: isometric voxel GUI text with per-face colours by jakildev · Pull Request #4588 · jakildev/IrredenEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jakildev
+commented
+Oct 18, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+Reworked per human direction: voxel text is now GUI text, not world-space titles. Each letter is a small isometric voxel block drawn on the GUI trixel canvas with its own colour per face (X / Y / Z), and letters sit side by side along screen-horizontal lines like ordinary text — only each letter is iso, the word never follows an iso path. The world-space builder (IRPrefab::VoxelText, IRText.createVoxel / removeVoxel, the yawed fixture rows and the IRCreationDefault titles) is removed.
+Layout (engine/render/include/irreden/render/voxel_text.hpp): layoutVoxelText(text, VoxelTextStyle, layout, scratch) paints each glyph's unit voxels farthest-first into a per-glyph face map on the triangle lattice (top Z = diamond, X = left side, Y = right side, the roles a world voxel shows at yaw 0), lattice-scales it by voxelSize_, and covers it with same-face rectangles of at most one glyph cell (6×11). Three facings: CAMERA (upright, unsheared), X_FACE, Y_FACE (printed on that face, sheared); depth_ extrudes away from the camera. VoxelFaceColors + shadedVoxelFaceColors(top).
+Rendering — no new shader: each rectangle is one GlyphDrawCommand over a solid cell appended to the font buffer (kSolidCellStart), so voxel text rides the existing GUI text compute dispatch on both backends. Large voxel text can exceed the 8192-command buffer (a size-8 "SCORE 120" lays out 10,252 runs). dispatchGlyphCommands therefore uploads and dispatches the command list in kMaxGlyphCommands chunks instead of truncating it, and TEXT_TO_TRIXEL and dispatchGuiText both use it. expandVoxelTextToCommands colours by face and aligns per line; flat text now shares the same alignedBlockOffset.
+ECS: C_TextStyle gains voxel_ (VoxelTextStyle) and faceColors_; voxel_.voxelSize_ > 0 switches TEXT_TO_TRIXEL to voxel letters, so any creation that already shows free text gets voxel text with no pipeline change. C_TextStyle::voxel(colors, size, facing, depth) factory.
+Lua: C_TextStyle.voxelSize / voxelDepth / voxelFacing / faceX / faceY / faceZ, style:shadeFaces(color), and the IRText.VoxelFacing enum table; out-of-range values raise.
+Save format: C_TextStyle goes to version 3 (voxel style appended); version 2 rows migrate as flat text.
+Kept from the first revision: the 5×7 voxel glyph set (voxel_font.hpp) and the C_FogRevealed binding fix-forward (IRCreationDefault crashed at startup on master without it).
+Fixture: IRShapeDebug --voxel-text-sample — every facing, explicit RGB faces and shaded faces, sizes 1 and 2, a centred two-line block. New render-verify row voxel_text with its macOS reference.
+Docs: docs/design/voxel-text.md rewritten as the GUI contract; one-line pointers in the render prefabs and script CLAUDE.mds.
+Capture (macOS Metal, the blessed reference)
+Top: CAMERA size 2 with shaded gold faces. Middle: X_FACE / Y_FACE size 2 depth 2 with X red, Y green, Z blue. Then CAMERA size 1 shaded, and a centred CAMERA depth-2 block.
+Test plan
+fleet-build --target IrredenEngineTest / IRShapeDebug: exit 0.
+fleet-run IrredenEngineTest at d51756d2c (macOS): 3131 tests ran, [ PASSED ] 3130 tests, 1 skipped (FogCrossSectionTest.SkippedOnNonOpenGLBackend, OpenGL-only). New: VoxelText.* (unit cube is a 2-texel-per-face hexagon; nearer voxels cover farther faces; lattice scale 2 of one voxel equals a built 2×2×2 cube texel for texel; runs tile every face texel exactly once within 6×11; letters advance on one baseline; newlines / unknown chars; command colours, solid cell and even alignment; layout guards fire), LuaTextStyleVoxel.*, SaveSerializers.TextStyle* (voxel round trip, out-of-range rejection, v2 migration), SaveSerializers.SavingAnOutOfRangeVoxelTextStyleAsserts (writer-side mirror of the reader's voxel size / depth ranges), GlyphDispatchTest.CommandListsLongerThanOneDispatchDrawEveryCommand (the real text shader draws 2 × 8192 + 7 commands, each texel's index-encoded colour checked; a single-dispatch control fails from texel 8192).
+python3 scripts/render-verify.py --target IRShapeDebug at d51756d2c (macOS, pool-1): 9 of 148 checks FAIL, all glitch_subject_* and all inherited from master (see criterion 6 below; filed test(macos): re-bless nine glitch_subject shape_debug refs moved by the WIDGET_INPUT focus-request singleton (#4600) #4623). voxel_text:voxel_text_sample PASS at 100.0 % with max_delta 0, and every text row passes.
+cmake -P cmake/run_header_checks_standalone.cmake: clean. lint_comment_refs.py: exit 0. lint_instruction_size.py --against origin/master: nothing introduced. IRMath sweep over the new files: exit 1 (clean).
+Acceptance evidence
+Graded against #4563's 2026-10-20 ## Plan corrections. Every command ran at exact head d51756d2c on macOS (pool-1, Metal).
+Criterion
+Check run
+Observed
+1. Build and startup
+fleet-build --target IrredenEngineTest, --target IRShapeDebug, --target IRCreationDefault; fleet-run --timeout 15 IRCreationDefault
+All three builds exit 0 ([100%] Built target …). The run reports ir-run: RESULT=ALIVE-TIMEOUT exe=IRCreationDefault — ran for 15s without crashing.
+2. Glyph coverage
+fleet-run IrredenEngineTest --gtest_filter='VoxelFont.*'
+[ PASSED ] 5 tests.
+3. Layout
+fleet-run IrredenEngineTest --gtest_filter='VoxelText.*:GlyphDispatchTest.*'
+[ PASSED ] 11 tests. GlyphDispatchTest crosses the 8192-command dispatch boundary twice on the GPU, so every accepted layout reaches the canvas in full.
+4. Lua seam
+fleet-run IrredenEngineTest --gtest_filter='LuaTextStyleVoxel.*:LuaFogRevealedStandalone.*'
+[ PASSED ] 4 tests. (2 suites)
+5. Save format
+fleet-run IrredenEngineTest --gtest_filter='SaveSerializers.TextStyle*:SaveSerializers.SavingAnOutOfRangeVoxelTextStyleAsserts'; inventory read
+[ PASSED ] 8 tests. save_component_inventory.hpp:401: IR_SAVE_OPT_IN_HAND_WRITTEN(IRComponents::C_TextStyle, 3).
+6. Render-verify
+python3 scripts/render-verify.py --target IRShapeDebug; git diff --stat origin/master -- creations/demos/shape_debug/test/references/
+voxel_text:voxel_text_sample PASS 100.0 0 inf. The reference diff lists only macos-debug/voxel_text_sample.png and manifest.json. Totals: 9 of 148 checks FAIL, all glitch_subject_*, and none of them flipped here. The origin/master f6c6f2d63 control fails all nine with identical match / max_delta / PSNR, and the dissolve capture is byte-identical between master and this head. Bisected to fba66f174 (#4600: its WIDGET_INPUT focus-request singleton shifts entity ids, which reseeds the subject glitch salt). Filed #4623. The capture above shows all three facings, explicit and shaded faces, sizes 1 and 2, depth 2, and a centred two-line block, with every word reading left to right.
+7. Docs
+docs/design/voxel-text.md read; grep of both CLAUDE.md pointers; python3 scripts/lint_instruction_size.py --against origin/master; python3 scripts/lint_comment_refs.py
+Decisions 1–7 are present, and the doc links gui-trixel-display.md. engine/prefabs/irreden/render/CLAUDE.md:86 names C_TextStyle::voxel_ and TEXT_TO_TRIXEL. engine/script/CLAUDE.md:183 lists IRText.VoxelFacing under bindLuaText(). The instruction-size lint exits 0 with no introduced offender: engine/script/CLAUDE.md is 220/210, a pre-existing offender, and the edit is line-neutral. The comment-refs lint exits 0.
+Notes for reviewer
+Scope and acceptance criteria are those of render: isometric voxel text for titles — voxel glyphs laid along a path, each letter turned to read as horizontally as the view allows #4563's 2026-10-20 ## Plan corrections, which records the GUI-text redirect and supersedes the earlier corrections.
+Linux/Windows voxel_text_sample references are not blessed yet; extra-run rows skip a missing backend reference until a host blesses it.
+wrapWidth_, fontSize_, textSize_ and color_ do not apply in voxel mode (documented on the field and in the design doc).
+Closes #4563
+🤖 Generated with Claude Code
+jakildev
+added
+fleet:author-claude
+Implementation last authored by Claude; route review to Codex
+fleet:authored-on-macos
+PR was authored and smoke-tested on macOS Metal backend
+labels
+Oct 18, 2026
+evin-mac-claude-app
+Bot
+added
+the
+fleet:reviewing-mac-pool-5
+label
+Oct 18, 2026
+github-actions
+Bot
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+Perf gate
+Head host slug: linux-x86_64-xeon-platinum-8573c-unknown
+perf comparison: 8e87859 → 194f985-ci
+baseline: /home/runner/work/_temp/perf-baseline/history/linux-x86_64-xeon-platinum-8573c-unknown/8e87859c96d0510bdfabd97838c7dafa79fddd53
+head: /home/runner/work/IrredenEngine/IrredenEngine/save_files/perf/194f985dd-ci
+host calibration
+host: linux-x86_64-xeon-platinum-8573c-unknown (matches baseline)
+ref_ms: head 75.46 vs baseline 82.71 (load_factor 0.91×)
+calibration target: 50.00 ms (informational)
+baseline capture: perf-baseline@8e87859c9 (branch tip); master 28cdd71cf, finished 2026-10-15T05:38:21Z, 3.7 d before the head run, ref_ms 82.71
+weighting: raw (class-matched capture; load_factor 0.91× < 1.10×)
+attribution: no measured master improvement between capture master 28cdd71cf and merge base 38aa32acc (50 commits)
+thresholds: regress ≥ 10%, improve ≥ 5%
+voxel cull effectiveness
+cell
+ratio (base→head)
+avg visible
+total
+avg feeder
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+1.000 → 1.000 (+0.0pp)
+262144 → 262144
+262144 → 262144
+0 → 0
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+0.990 → 0.990 (+0.0pp)
+255592 → 255592
+262144 → 262144
+3862 → 3862 (1.000×)
+frame timing (ms)
+cell
+avg
+p99
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+514.27 → 461.48 (-10.3% raw, -1.6% scaled)
+6138.02 → 5683.46 (-7.4%) ↓
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+1578.31 → 1419.13 (-10.1% raw, -1.4% scaled)
+2435.56 → 2269.74 (-6.8%) ↓
+GPU frame timing (ms; separate from stage samples)
+cell
+envelope (base→head)
+buffer spans (base→head)
+coverage (base→head)
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+GPU stage timing (avg ms per sampled invocation)
+cell
+canvasClear
+voxelCompact
+voxelStage1
+voxelCardinalElect
+voxelStage2
+voxelSunFaces
+textToTrixel
+buildLightOcclusionGrid
+computeVoxelAO
+bakeSunShadowMap
+computeSunShadow
+computeLightVolume
+lightingToTrixel
+fogToTrixel
+trixelToFb
+resolvePerAxisScreenDepth
+fbToScreen
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+56.73→56.82
+70.46→62.75 ↓
+56.16→49.02 ↓
+7.83→7.06 ↓
+46.96→40.53 ↓
+7.88→7.34 ↓
+1.46→1.39 ↓
+0.00→0.00
+0.82→0.72 ↓
+0.00→0.00
+16.83→14.93 ↓
+25.94→22.78 ↓
+5.66→5.16 ↓
+1.64→1.50 ↓
+0.18→0.17 ↓
+0.00→0.00
+8.64→7.66 ↓
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+134.24→127.80
+491.33→444.35 ↓
+363.62→323.29 ↓
+6.08→5.72 ↓
+347.50→310.33 ↓
+6.09→5.65 ↓
+1.44→1.36 ↓
+0.00→0.00
+0.64→0.58 ↓
+0.00→0.00
+15.57→14.40 ↓
+12.94→11.64 ↓
+4.87→4.41 ↓
+1.35→1.22 ↓
+0.18→0.17
+0.00→0.00
+7.22→6.49 ↓
+top CPU systems by avg ms (head)
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+SingleVoxelToCanvasFirst
+260.623 → 238.355 (-8.5%) ↓
+RENDER
+ComputeLightVolume
+31.572 → 27.580 (-12.6%) ↓
+RENDER
+ComputeSunShadow
+18.185 → 16.308 (-10.3%) ↓
+RENDER
+CanvasToFramebuffer
+16.700 → 14.914 (-10.7%) ↓
+RENDER
+LightingToTrixel
+12.338 → 11.194 (-9.3%) ↓
+UPDATE
+PropagateTransform
+5.758 → 5.093 (-11.5%) ↓
+RENDER
+FogToTrixel
+5.105 → 4.648 (-9.0%) ↓
+UPDATE
+FogRevealEval
+3.389 → 3.001 (-11.4%) ↓
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+SingleVoxelToCanvasFirst
+1351.039 → 1218.617 (-9.8%) ↓
+RENDER
+ComputeLightVolume
+28.150 → 25.800 (-8.3%) ↓
+RENDER
+CanvasToFramebuffer
+15.324 → 13.811 (-9.9%) ↓
+RENDER
+ComputeSunShadow
+9.306 → 8.415 (-9.6%) ↓
+RENDER
+ComputeVoxelAO
+5.961 → 5.279 (-11.4%) ↓
+UPDATE
+PropagateTransform
+5.724 → 5.069 (-11.4%) ↓
+RENDER
+LightingToTrixel
+4.983 → 4.516 (-9.4%) ↓
+UPDATE
+FogRevealEval
+3.366 → 2.982 (-11.4%) ↓
+jakildev
+commented
+Oct 18, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review — render: isometric voxel text titles facing the camera
+Verdict: needs-fix
+Needs-fix
+creations/demos/default/main_lua.cpp:62 — acceptance criterion 6 requires fleet-run --timeout 15 IRCreationDefault to report RESULT=CLEAN, but this path enters the persistent game loop and the PR body explicitly records that the required command instead ends as ALIVE-TIMEOUT. The demonstrated --auto-screenshot run is useful evidence, but it is a different command and does not satisfy the locked criterion. Either make the specified command exit clean without breaking the demo contract, or obtain a human ## Plan corrections comment accepting the --auto-screenshot substitute before re-requesting review.
+Praise
+The placement implementation keeps the geometry and path rules in pure helpers, while the tests positively pin all eight facing octants, the corrected yaw-45 advance, glyph coverage, Lua validation atomicity, hierarchy removal, and the rendered bent-path layout.
+The three visual references are upright, unmirrored, readable left-to-right, and backed by per-title structural gates rather than screenshot similarity alone.
+Acceptance (issue #4563)
+Criterion
+Grade
+Basis
+1. Build
+met
+The PR evidence reports all three required build targets succeeding; my independent IrredenEngineTest build also completed with fleet-jobs: 20261018T231308Z-build-d51b35 succeeded exit=0.
+2. Glyph coverage
+met
+The evidence and VoxelFont.* tests cover trixel parity, 63 distinct bitmaps, blank Space, lowercase aliases, and fallback behavior.
+3. Placement
+met
+The evidence and VoxelTextPlacement.* / VoxelTextBuild.* tests pin every octant, yaw snapping, scale 1/2 advances, the corrected yaw-45 step, cell alignment, and fixture separation.
+4. Lua seam
+met
+The evidence and LuaVoxelText.* tests build, count, remove, restore the active mask, exercise each path form, and reject malformed input before entity creation.
+5. Render-verify
+met
+The PR reports all 124 checks passing; each of the three new rows contains three nonzero clip gates, and I inspected all three shipped references.
+6. Worked example
+unmet
+The evidence substitutes fleet-run --timeout 30 IRCreationDefault --auto-screenshot 30; the PR notes that the required no-argument 15-second command produces ALIVE-TIMEOUT, not RESULT=CLEAN.
+7. Docs
+met
+The design document captures Decisions 1–8 and the measured mapping; the render-prefab pointer names the binding, builder, glyph header, and contract.
+Validation
+fleet-build --detach --target IrredenEngineTest, followed by terminal wait: succeeded, exit 0.
+fleet-run IrredenEngineTest '--gtest_filter=VoxelFont.*:VoxelTextPlacement.*:VoxelTextBuild.*:LuaVoxelText.*:LuaFogRevealedStandalone.*': 24/24 passed.
+GitHub checks at review time: perf, formatting, headers, instruction size, comments, closes lint, whitespace, and fleet gate pass; linux-build and render-harness-tests are still pending and are not claimed green here.
+🤖 Reviewed by Codex GPT-5 (review-pr skill, opus-class first pass)
+Opus recheck not required (reviewed at opus class).
+jakildev
+added
+fleet:needs-fix
+Fleet reviewer found issues — author must address
+and removed
+fleet:reviewing-mac-pool-5
+labels
+Oct 18, 2026
+evin-mac-claude-app
+Bot
+added
+the
+fleet:amending-mac-pool-1
+label
+Oct 18, 2026
+jakildev
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+NEEDS-DESIGN
+The review's only needs-fix item is acceptance criterion 6 of #4563. As written, the criterion cannot pass, so this PR has nothing to amend for it. A replacement criterion has to come from a ## Plan corrections comment on #4563, because review-acceptance grades only the issue's plan.
+What contradicts the plan. Criterion 6 asks for fleet-run --timeout 15 IRCreationDefault to report RESULT=CLEAN. That cannot happen with this command:
+IRCreationDefault is an interactive demo, and with no arguments it runs IREngine::gameLoop() until the window closes.
+ir-run prints RESULT=CLEAN only when the program exits 0 by itself. A process that is still alive at the deadline always gets RESULT=ALIVE-TIMEOUT (engine/tools/bin/ir-run, the watchdog tail).
+The engine has no exit-after-N-frames or exit-after-N-seconds argument or environment variable. The only self-terminating paths are the capture verbs (--auto-screenshot, --auto-record, --auto-profile).
+So on master, on this head, and for any no-argument interactive demo, the command ends in ALIVE-TIMEOUT.
+The literal command, measured on this head (00ebea55, macOS, fresh fleet-build --target IRCreationDefault):
+```
+$ fleet-run --timeout 15 IRCreationDefault
+[ScriptLog] [info] [voxel-title] letters=13
+[ScriptLog] [info] [voxel-title] letters=9
+ir-run: RESULT=ALIVE-TIMEOUT exe=IRCreationDefault — ran for 15s without crashing, killed by watchdog
+```
+The log half of the criterion is met: 13 and 9 are the non-space counts of "IRREDEN ENGINE" and "VOXEL TEXT". The RESULT=CLEAN half is not.
+Questions
+Which worked-example criterion should render: isometric voxel text for titles — voxel glyphs laid along a path, each letter turned to read as horizontally as the view allows #4563 lock in place of criterion 6?
+Should the fleet get an engine-common exit-after seam (a follow-up issue), so a no-argument smoke run can show teardown health? This PR does not need one.
+Options (my recommendation is A)
+A. Re-word the command to use the capture verb (already met on this head). New text: fleet-run --timeout 30 IRCreationDefault --auto-screenshot 30 reports RESULT=CLEAN, and the log contains [voxel-title] letters=<n> for each title. The demo now honours the engine-common --auto-screenshot (one default_opening shot via appendAutoScreenshotIfRequested). The run exits through teardown, so it is shutdown evidence that ALIVE-TIMEOUT can never provide. The PR body's criterion-6 row already records this run (RESULT=CLEAN, letters 13 and 9).
+B. Keep the command and accept RESULT=ALIVE-TIMEOUT plus the two log lines (already met, numbers above). This is weaker: it proves the titles build and the demo survives 15 s, and nothing about teardown.
+C. Keep the criterion as written. That needs a new self-exit path in an interactive demo, or a new engine-wide exit-after argument. Either is outside this issue's scope (Scope / Out of scope list no such work) and goes against the demos' interactive-by-default convention (creations/demos/CLAUDE.md). If chosen, it should be filed as its own issue and park this PR with Parked-until:.
+Criteria 1–5 and 7 were graded met, and the reviewer re-ran 24/24 of the targeted tests. With A or B, no code change is expected: the next feedback pass only updates the PR body's evidence row to quote the corrected command.
+Parking fleet:design-blocked and releasing the claim. — worker (pool-1, opus)
+jakildev
+added
+fleet:design-blocked
+Worker escalated for architectural input mid-task; architect should respond
+fleet:reviewing-mac-pool-3
+and removed
+fleet:needs-fix
+Fleet reviewer found issues — author must address
+fleet:amending-mac-pool-1
+labels
+Oct 18, 2026
+jakildev
+mentioned this pull request
+Oct 18, 2026
+engine: engine-common --exit-after-frames <N> so any target can prove a clean teardown under fleet-run
+#4589
+Closed
+jakildev
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Architect direction
+Q1 — replacement for acceptance criterion 6: option A. Criterion 6 is re-worded to the capture form. The verbatim replacement is in a ## Plan corrections comment on #4563, because review-acceptance grades from the issue's ## Plan plus its corrections and never reads this comment:
+Worked example: fleet-run --timeout 30 IRCreationDefault --auto-screenshot 30 reports RESULT=CLEAN, and the log contains [voxel-title] letters=<n> for each title, with <n> equal to that title's non-space character count.
+Verified against master before ruling:
+engine/tools/bin/ir-run prints RESULT=CLEAN only when the program exits 0 on its own. A process still alive at --timeout is killed and reported RESULT=ALIVE-TIMEOUT, documented in the script and in FLEET.md § Clean-exit policy as healthy for smoke but saying nothing about shutdown.
+No exit-after or frame-limit seam exists under engine/. The engine-common IRArgs set is --auto-screenshot, --auto-record, --auto-record-realtime, --config-preset, --worker-threads, --window-mode, so a no-argument interactive run cannot reach teardown. The criterion fails on master and on any head: it was mis-authored, not mis-implemented.
+The replacement's mechanism on this head (00ebea5): appendAutoScreenshotIfRequested pushes the capture system when warmup is positive, the system calls IRWindow::closeWindow() after the last shot, gameLoop() returns, main returns 0, ir-run prints CLEAN. Your recorded run (RESULT=CLEAN, letters 13 and 9) is the measurement; this role checks nothing out, so I did not re-run it.
+Rejected B (keep the command, accept ALIVE-TIMEOUT): the policy already says that verdict proves nothing about teardown, and a Lua-driven demo that now owns IRText.createVoxel entities is exactly where a teardown-path check earns its keep. Rejected C (a new self-exit path in this PR): outside the issue's scope and unnecessary once A holds.
+Q2 — engine-common exit-after seam: yes, as an unlabeled follow-up, not a gate on this PR. Filed as #4589: an engine-common --exit-after-frames <N> on IREngine::args() that closes the window through the path the capture verbs already use, so any target proves a clean teardown under fleet-run with no per-target wiring. --auto-screenshot is engine-common only at the parser; on master IRCreationDefault advertised it in --help and did nothing with it, and that is the gap. Human triage decides whether it queues.
+What the resume does. No code change. Update the criterion-6 row of ## Acceptance evidence to quote the corrected command and its RESULT line, re-taken on the final head, and retire the "Criterion 6 deviation" note (there is no deviation now). Keep the --auto-screenshot wiring in main_lua.cpp: the corrections comment folds it into Decision 9's worked example, so it needs no ## Plan departures entry.
+Task-local decision; no docs/design/ page. Read this direction alongside the issue's ## Plan comment and both ## Plan corrections comments before resuming.
+— design-answerer (mac pool-3, fable)
+jakildev
+mentioned this pull request
+Oct 18, 2026
+render: isometric voxel text for titles — voxel glyphs laid along a path, each letter turned to read as horizontally as the view allows
+#4563
+Closed
+jakildev
+added
+fleet:design-unblocked
+Architect responded; worker resumes per the architect comment + updated plan file
+and removed
+fleet:design-blocked
+Worker escalated for architectural input mid-task; architect should respond
+fleet:reviewing-mac-pool-3
+labels
+Oct 18, 2026
+evin-mac-claude-app
+Bot
+added
+the
+fleet:reviewing-mac-pool-1
+label
+Oct 18, 2026
+jakildev
+commented
+Oct 18, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review — render: isometric voxel text titles facing the camera
+Verdict: approve
+Prior-review resolution
+✅ creations/demos/default/main_lua.cpp:62 — the prior acceptance mismatch is resolved at 00ebea556: issue #4563 now replaces criterion 6 with fleet-run --timeout 30 IRCreationDefault --auto-screenshot 30, exactly the clean capture run already recorded in the PR evidence. No source commit was required or landed after the prior review.
+Nits (follow-up)
+The PR body's “Criterion 6 deviation” note is now stale after the plan correction. Retire or reword it so the notes agree with the corrected criterion; this is PR-description cleanup and does not require an amend push.
+Acceptance (issue #4563)
+Criterion
+Grade
+Basis
+1. Build
+met
+The prior review independently built IrredenEngineTest successfully, and the PR records successful builds of all three required targets.
+2. Glyph coverage
+met
+Unchanged from the prior review: the tests cover trixel parity, distinct bitmaps, blank Space, lowercase aliases, and fallback behavior.
+3. Placement
+met
+Unchanged from the prior review: the tests pin every octant, yaw snapping, scale-dependent advances, cell alignment, and fixture separation.
+4. Lua seam
+met
+Unchanged from the prior review: build/count/remove behavior and malformed-input atomicity are covered.
+5. Render-verify
+met
+The PR records all 124 checks passing with nine structural gates, and the shipped references were inspected in the prior review.
+6. Worked example
+met
+The issue's second ## Plan corrections comment replaces the impossible no-argument run with the recorded --auto-screenshot 30 run, which reports both expected letter counts and RESULT=CLEAN.
+7. Docs
+met
+The design contract and render-prefab pointer remain unchanged and the documented lint checks pass.
+Validation
+Delta-scoped re-review: HEAD remains 00ebea556, the same commit pinned by the prior review; no executable-code delta needed re-audit.
+The prior review's terminal build and 24/24 targeted test run remain evidence for this unchanged head.
+GitHub checks at re-review time: every completed check passes; linux-build is still pending and is not claimed green here.
+🤖 Reviewed by Codex GPT-5.6 Sol (review-pr skill, opus-class final pass)
+Opus recheck not required (reviewed at opus class).
+jakildev
+added
+fleet:approved
+Fleet reviewer approved — ready for human merge
+fleet:needs-windows-smoke
+PR needs windows-debug build + smoke-run validation
+and removed
+fleet:reviewing-mac-pool-1
+labels
+Oct 18, 2026
+evin-mac-claude-app
+Bot
+added
+the
+fleet:amending-mac-pool-1
+label
+Oct 18, 2026
+jakildev
+removed
+fleet:design-unblocked
+Architect responded; worker resumes per the architect comment + updated plan file
+fleet:amending-mac-pool-1
+labels
+Oct 18, 2026
+jakildev
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Addressed feedback (architect direction + final review's follow-up nit). No code change, so nothing was pushed and the head is still 00ebea556:
+Re-ran the corrected criterion 6 on this head (macOS, fresh fleet-build --target IRCreationDefault): fleet-run --timeout 30 IRCreationDefault --auto-screenshot 30 gave [voxel-title] letters=13, [voxel-title] letters=9, ir-run: RESULT=CLEAN exe=IRCreationDefault exit=0.
+PR body: the criterion-6 row in ## Acceptance evidence now quotes that re-taken run and cites render: isometric voxel text for titles — voxel glyphs laid along a path, each letter turned to read as horizontally as the view allows #4563's second ## Plan corrections.
+PR body: retired the stale "Criterion 6 deviation" note. A short note on the --auto-screenshot wiring replaces it, folded into Decision 9 per the correction.
+Cleared fleet:design-unblocked. fleet:approved from the 23:37Z review stays, since the reviewed head is unchanged.
+— worker (pool-1, opus)
+evin-desktop-claude-app
+Bot
+added
+the
+fleet:reviewing-windows-pool-1
+label
+Oct 19, 2026
+jakildev
+removed
+the
+fleet:needs-windows-smoke
+PR needs windows-debug build + smoke-run validation
+label
+Oct 19, 2026
+jakildev
+added
+fleet:needs-fix
+Fleet reviewer found issues — author must address
+and removed
+fleet:reviewing-mac-pool-3
+labels
+Oct 20, 2026
+evin-mac-claude-app
+Bot
+added
+the
+fleet:amending-mac-pool-3
+label
+Oct 20, 2026
+jakildev
+removed
+fleet:needs-fix
+Fleet reviewer found issues — author must address
+fleet:design-unblocked
+Architect responded; worker resumes per the architect comment + updated plan file
+labels
+Oct 20, 2026
+This was referenced Oct 20, 2026
+render: capture geometry for depth-preserving shadow queries
+#4621
+Merged
+update: a collision response for moving bodies — bounce, slide and rest on contact normals with per-layer restitution and friction, plus a floor plane
+#4618
+Closed
+test(macos): re-bless nine glitch_subject shape_debug refs moved by the WIDGET_INPUT focus-request singleton (#4600)
+#4623
+Closed
+jakildev
+added
+fleet:changes-made
+Agent addressed human feedback — ready for human re-review
+and removed
+fleet:amending-mac-pool-3
+labels
+Oct 20, 2026
+jakildev
+commented
+Oct 20, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Addressed feedback (03:54Z review and the 03:43Z architect direction). No source change was needed, so the head is still d304b2eb4; only the PR body changed.
+Needs-fix (macOS build, criterion 1): did not reproduce. I built IrredenEngineTest, IRShapeDebug and IRCreationDefault fresh at exact head d304b2eb4 on macOS (pool-3), and all three exit 0. IrredenEngineTest linked cleanly, including the IRWorld / ToolService objects. The review's link failure (20261020T034753Z-build-514415) looks local to that build directory, not caused by this diff. fleet-run --timeout 15 IRCreationDefault reports RESULT=ALIVE-TIMEOUT, as criterion 1 requires.
+Nit (Acceptance evidence): added ## Acceptance evidence, one row per corrected criterion 1–7, each run at the exact head. fleet-pr-body-lint 4563 reports PASS … required=7, present=7.
+Architect direction step 2: done. The "no longer apply as written" note now points to render: isometric voxel text for titles — voxel glyphs laid along a path, each letter turned to read as horizontally as the view allows #4563's 2026-10-20 ## Plan corrections. Closes #4563 is kept.
+Render-verify correction to the earlier body. My run reports 9 of 148 checks FAIL, not "all 148 PASS". voxel_text_sample passes at 100 %. All nine failures are glitch_subject_* rows, and every one is inherited from master. The f6c6f2d63 control fails all nine with identical numbers, and the dissolve capture is byte-identical between master and this head. I bisected it to fba66f174 (creations/launcher: IRLauncher v1 and the ir-launcher supervisor (#4531) #4600): its WIDGET_INPUT focus-request singleton shifts entity ids, which reseeds the subject glitch salt. Filed test(macos): re-bless nine glitch_subject shape_debug refs moved by the WIDGET_INPUT focus-request singleton (#4600) #4623 (agent-approved, no-plan, macOS re-bless). No row flips because of this PR.
+— worker (pool-3, opus)
+evin-mac-claude-app
+Bot
+added
+the
+fleet:reviewing-mac-pool-2
+label
+Oct 20, 2026
+jakildev
+commented
+Oct 20, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review — render: isometric voxel GUI text with per-face colours
+Verdict: needs-fix
+Prior-review resolution
+The prior macOS link failure does not reproduce at the unchanged head d304b2eb4: my fresh IrredenEngineTest build completed successfully, matching the author's follow-up build evidence.
+The PR body now has one exact-head evidence row for each corrected criterion, points to #4563's authoritative GUI-text plan correction, and accurately separates the inherited glitch_subject_* render failures from the passing voxel_text_sample row.
+Needs-fix
+engine/prefabs/irreden/render/systems/system_text_to_trixel.hpp:108 — valid voxel styles can expand past kMaxGlyphCommands, and endTick silently submits only the first 8192 runs. This is reachable well inside the documented voxelSize_ range: an exact-head probe of layoutVoxelText("SCORE 120", {8, 2, CAMERA}, ...) produces 10,252 commands for an 848×264 block, while size 16/depth 1 produces 8,369 commands for just "AB". The omitted commands are the tail of the text, so ordinary strings render partially even though sizes through 16 are accepted by Lua, serialization, and the layout guards. Dispatch the run list in bounded chunks (or otherwise make every accepted style/text combination render completely), and add a regression that crosses the 8192-command boundary rather than only checking that layout generated all runs.
+Praise
+The corrected plan, implementation, tests, and visual reference now describe the same GUI-text feature. The CPU face-map construction and solid-cell reuse keep the feature backend-neutral and avoid adding a shader variant.
+The serializer amendment closes the write-valid/read-invalid hole, and the shipped reference visibly covers all three facings, both face-colour modes, both fixture sizes, depth, and multiline alignment.
+Acceptance (issue #4563)
+Criterion
+Grade
+Basis
+1. Build and startup
+met
+The PR records all three exact-head macOS builds plus the required startup survival. My independent IrredenEngineTest build also completed: fleet-jobs: 20261020T042953Z-build-a87d50 succeeded exit=0.
+2. Glyph coverage
+met
+VoxelFont.* passed and covers parity with the trixel set, uniqueness, blank Space, fallback, and reading order.
+3. Layout
+unmet
+The focused layout assertions pass, but the render handoff truncates valid layouts above 8192 runs; accepted size-8 and size-16 examples lose commands.
+4. Lua seam
+met
+LuaTextStyleVoxel.* and LuaFogRevealedStandalone.* passed.
+5. Save format
+met
+The v3 round trip, invalid-read/write bounds, v2 migration, and v1 migration tests passed.
+6. Render-verify
+met
+The exact-head evidence shows voxel_text_sample passing at 100%; the nine other failures reproduce identically on master and are tracked separately. I inspected the shipped reference at original resolution.
+7. Docs
+met
+The design contract and both instruction pointers match the corrected issue plan; the corresponding CI checks are green.
+Validation
+Exact-head checkout confirmed: d304b2eb4e3cc94ddede78d7d4de606303df6396.
+Fresh macOS build: fleet-jobs: 20261020T042953Z-build-a87d50 succeeded exit=0.
+Focused run: 27/27 passed across VoxelFont.*, VoxelText.*, LuaTextStyleVoxel.*, LuaFogRevealedStandalone.*, and the C_TextStyle save tests.
+git diff --check origin/master...HEAD: clean. All current GitHub checks are complete and green (the approval-swap job is intentionally skipped).
+🤖 Reviewed by Codex GPT-5 (review-pr skill, opus-class final pass)
+Opus recheck not required (reviewed at opus class).
+jakildev
+added
+fleet:needs-fix
+Fleet reviewer found issues — author must address
+and removed
+fleet:changes-made
+Agent addressed human feedback — ready for human re-review
+fleet:reviewing-mac-pool-2
+labels
+Oct 20, 2026
+evin-mac-claude-app
+Bot
+added
+the
+fleet:amending-mac-pool-1
+label
+Oct 20, 2026
+jakildev
+removed
+the
+fleet:needs-fix
+Fleet reviewer found issues — author must address
+label
+Oct 20, 2026
+jakildev
+mentioned this pull request
+Oct 20, 2026
+GUI layout audit: a deterministic overlap and overflow report for widget panels
+#4625
+Closed
+render: dispatch glyph commands in kMaxGlyphCommands chunks
+…
+d51756d
+```
+Voxel text at accepted sizes can expand past the 8192-command
+GlyphDrawCommandBuffer (a size-8 "SCORE 120" lays out 10,252 runs), and
+TEXT_TO_TRIXEL silently submitted only the first 8192, dropping the tail
+of the text. dispatchGlyphCommands now uploads and dispatches the list in
+buffer-sized chunks; both TEXT_TO_TRIXEL and dispatchGuiText use it.
+
+GlyphDispatchTest.CommandListsLongerThanOneDispatchDrawEveryCommand runs
+the real text shader over two full chunks plus a partial one and checks
+every texel's index-encoded colour; a single-dispatch control fails it
+from texel 8192.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+jakildev
+added
+the
+fleet:changes-made
+Agent addressed human feedback — ready for human re-review
+label
+Oct 20, 2026
+jakildev
+commented
+Oct 20, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Addressed feedback (04:33Z review), pushed as d51756d2c:
+Needs-fix (fixed): glyph commands past 8192 were dropped. I confirmed the reviewer's figures with a probe at the head: "SCORE 120" at size 8, depth 2 lays out 10,252 runs (848×264), and "AB" at size 16 lays out 8,369. New IRPrefab::GuiText::dispatchGlyphCommands (gui_text_batch.hpp) uploads the command list and dispatches it in chunks of at most kMaxGlyphCommands, so nothing is truncated. TEXT_TO_TRIXEL::endTick and dispatchGuiText (widget text, which had the same truncate-and-warn) both use it. Re-uploading after a queued dispatch is safe on both backends: GL orders glBufferSubData after earlier reads, and Metal's subData orphans an already-encoded buffer and rebinds the slot. The common case of at most 8192 commands still makes one upload and one dispatch.
+Regression test: GlyphDispatchTest.CommandListsLongerThanOneDispatchDrawEveryCommand (test/render/gpu_compute_dispatch_test.cpp, Metal and GL fixtures). It runs the real c_text_to_trixel shader on 2 × 8192 + 7 one-texel commands, so it crosses two chunk boundaries and ends on a partial chunk. Each command writes a colour encoding its own index, and the test checks every texel on readback. Positive control: limiting the helper to one dispatch makes the test fail with mismatches 8199, first at texel 8192. It ran on the macOS Metal fixture (it did not skip).
+engine/prefabs/irreden/render/CLAUDE.md: "caps glyphs at kMaxGlyphCommands" now reads "dispatches glyphs in kMaxGlyphCommands chunks". The edit is line-neutral, and lint_instruction_size --against origin/master reports nothing introduced.
+Verification at d51756d2c (macOS, pool-1):
+IrredenEngineTest, IRShapeDebug and IRCreationDefault build clean.
+Full suite: 3131 tests ran, 3130 passed, 1 skipped (OpenGL-only).
+fleet-run --timeout 15 IRCreationDefault: RESULT=ALIVE-TIMEOUT.
+render-verify --target IRShapeDebug: every text row and voxel_text_sample pass at 100 %. The same 9 glitch_subject_* rows fail, inherited from master (test(macos): re-bless nine glitch_subject shape_debug refs moved by the WIDGET_INPUT focus-request singleton (#4600) #4623).
+light-verify --if-changed: all PASS.
+format-changed applied.
+The PR body's test plan and acceptance evidence are re-derived at this head, and fleet-pr-body-lint passes with 7/7.
+Not addressed (outside the diff, already on master): expandTextToCommands allocates a fresh std::vector<LineInfo> on every call from the per-entity tick. Simplify's loop scan flagged it, but that code predates this PR.
+— worker (pool-1, opus)
+github-actions
+Bot
+commented
+Oct 20, 2026
+Copy link
+Copy Markdown
+Perf gate
+Head host slug: linux-x86_64-epyc-7763-64-unknown
+perf comparison: 2c54138 → c67182f-ci
+baseline: /home/runner/work/_temp/perf-baseline/history/linux-x86_64-epyc-7763-64-unknown/2c54138d3404d5aaebafdd51f8a272fc508487b9
+head: /home/runner/work/IrredenEngine/IrredenEngine/save_files/perf/c67182fb4-ci
+host calibration
+host: linux-x86_64-epyc-7763-64-unknown (matches baseline)
+ref_ms: head 103.43 vs baseline 103.65 (load_factor 1.00×)
+calibration target: 50.00 ms (informational)
+baseline capture: perf-baseline@2c54138d3 (branch tip); master fba66f174, finished 2026-10-20T02:33:41Z, 0.1 d before the head run, ref_ms 103.65
+weighting: raw (class-matched capture; load_factor 1.00×; no calibration-scaling entry)
+attribution: no measured master improvement between capture master fba66f174 and merge base f6c6f2d63 (2 commits)
+thresholds: regress ≥ 10%, improve ≥ 5%
+voxel cull effectiveness
+cell
+ratio (base→head)
+avg visible
+total
+avg feeder
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+1.000 → 1.000 (+0.0pp)
+262144 → 262144
+262144 → 262144
+0 → 0
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+0.990 → 0.990 (+0.0pp)
+255592 → 255592
+262144 → 262144
+3862 → 3862 (1.000×)
+frame timing (ms)
+cell
+avg
+p99
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+608.09 → 580.32 (-4.6%)
+8918.86 → 9078.90 (+1.8%)
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+1703.66 → 1699.92 (-0.2%)
+2943.74 → 2961.18 (+0.6%)
+GPU frame timing (ms; separate from stage samples)
+cell
+envelope (base→head)
+buffer spans (base→head)
+coverage (base→head)
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+GPU stage timing (avg ms per sampled invocation)
+cell
+canvasClear
+voxelCompact
+voxelStage1
+voxelCardinalElect
+voxelStage2
+voxelSunFaces
+textToTrixel
+buildLightOcclusionGrid
+computeVoxelAO
+bakeSunShadowMap
+computeSunShadow
+computeLightVolume
+lightingToTrixel
+fogToTrixel
+trixelToFb
+resolvePerAxisScreenDepth
+fbToScreen
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+60.81→57.93
+85.57→81.14 ↓
+70.08→66.29 ↓
+13.91→12.56 ↓
+50.24→47.65 ↓
+8.95→8.52
+1.26→1.11 ↓
+0.00→0.00
+0.99→0.92 ↓
+0.00→0.00
+11.96→11.05 ↓
+45.13→42.20 ↓
+7.89→7.72
+1.89→1.77 ↓
+0.18→0.17
+0.00→0.00
+9.11→8.83
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+112.65→112.50
+536.58→534.16
+425.26→425.23
+18.61→18.57
+353.30→353.40
+5.41→5.39
+1.16→1.10
+0.00→0.00
+0.72→0.64 ↓
+0.00→0.00
+10.44→10.84
+19.18→19.11
+6.17→5.94
+1.52→1.35 ↓
+0.17→0.17
+0.00→0.00
+7.28→7.14
+top CPU systems by avg ms (head)
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+SingleVoxelToCanvasFirst
+307.327 → 292.209 (-4.9%)
+RENDER
+ComputeLightVolume
+36.515 → 33.259 (-8.9%) ↓
+RENDER
+ComputeSunShadow
+26.305 → 25.931 (-1.4%)
+RENDER
+LightingToTrixel
+21.887 → 21.201 (-3.1%)
+RENDER
+CanvasToFramebuffer
+17.757 → 16.567 (-6.7%) ↓
+RENDER
+FogToTrixel
+7.138 → 6.939 (-2.8%)
+UPDATE
+PropagateTransform
+6.059 → 5.925 (-2.2%)
+UPDATE
+FogRevealEval
+4.299 → 4.246 (-1.2%)
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+SingleVoxelToCanvasFirst
+1454.963 → 1452.544 (-0.2%)
+RENDER
+ComputeLightVolume
+28.997 → 29.364 (+1.3%)
+RENDER
+CanvasToFramebuffer
+15.598 → 15.229 (-2.4%)
+RENDER
+ComputeSunShadow
+10.214 → 10.092 (-1.2%)
+RENDER
+ComputeVoxelAO
+7.593 → 7.488 (-1.4%)
+RENDER
+LightingToTrixel
+6.483 → 6.246 (-3.7%)
+UPDATE
+PropagateTransform
+5.992 → 6.168 (+2.9%)
+UPDATE
+FogRevealEval
+4.262 → 4.291 (+0.7%)
+jakildev
+commented
+Oct 20, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review — render: isometric voxel GUI text with per-face colours
+Verdict: approve
+Prior-review resolution
+IRPrefab::GuiText::dispatchGlyphCommands now submits the full command list in buffer-sized chunks, and both TEXT_TO_TRIXEL and widget GUI text use the shared helper. The previous valid-style truncation above 8192 commands is resolved.
+The backend handoff is sound: OpenGL command ordering protects each uploaded chunk, while Metal's encoded-buffer tracking orphans and retargets the sticky binding before the next dispatch.
+GlyphDispatchTest.CommandListsLongerThanOneDispatchDrawEveryCommand exercises the real text shader with two full chunks plus seven commands and verifies every destination texel, covering dropped, repeated, or reordered chunks.
+Praise
+The fix removes the same latent truncation from widget text while keeping the normal single-chunk path unchanged.
+The regression test checks the GPU-visible result instead of only counting CPU commands, which directly pins the prior failure mode on both supported backends.
+Acceptance (issue #4563)
+Graded against the superseding 2026-10-20 GUI-text ## Plan corrections.
+Criterion
+Grade
+Basis
+1. Build and startup
+met
+Exact-head d51756d2c evidence records all three required macOS builds exiting 0 and IRCreationDefault surviving 15 seconds with RESULT=ALIVE-TIMEOUT; this review independently rebuilt IrredenEngineTest.
+2. Glyph coverage
+met
+VoxelFont.* covers 63+26 trixel parity, 63 distinct bitmaps, Space-only blankness, ? fallback, and pixel reading order.
+3. Layout
+met
+VoxelText.* covers the required geometry, occlusion, scale equivalence, tiling, baseline/newline/fallback behavior, colours, solid cell, guards, and shading. The prior 8192-command truncation is fixed with a GPU regression crossing two chunk boundaries.
+4. Lua seam
+met
+LuaTextStyleVoxel.*:LuaFogRevealedStandalone.* covers defaults and round trips, face shading, invalid values, and standalone fog-table registration.
+5. Save format
+met
+Version 3 round-trips voxel state, reader and writer bounds are pinned, v2 migrates to flat text, v1 tests remain, and the inventory registers version 3.
+6. Render-verify
+met
+voxel_text:voxel_text_sample passes at 100% against the macOS reference; the nine other failures reproduce identically on master, so no previously passing row flipped. Only the required PNG and manifest changed.
+7. Docs
+met
+The design doc records the seven GUI decisions and links gui-trixel-display.md; both required CLAUDE.md pointers are present, and the instruction-size and comment-reference checks pass.
+Validation
+Exact-head IrredenEngineTest build: fleet-jobs: 20261020T053335Z-build-3fab3c succeeded exit=0.
+Exact-head focused run: GlyphDispatchTest.CommandListsLongerThanOneDispatchDrawEveryCommand passed on macOS Metal (1/1).
+git diff --check origin/master...HEAD: clean.
+GitHub checks at review time: perf, render harness, fleet tests/gate, format, headers, instruction size, comment refs, closes lint, and whitespace pass; linux-build remains in progress and is not claimed green here.
+Cross-host smoke debt is already recorded by fleet:needs-windows-smoke; the authoring label covers macOS Metal.
+🤖 Reviewed by Codex GPT-5 (review-pr skill, opus-class final pass)
+Opus recheck not required (reviewed at opus class).
+jakildev
+commented
+Oct 20, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Cross-host smoke OK on windows (fresh checkout + IRShapeDebug --auto-screenshot 10 — build clean, exit 0, RESULT=CLEAN, 21/21 screenshots saved, no shader compile warnings; build log only carries the pre-existing glad/glcorearb macro-redefinition warnings, and the run logs one runtime tagGpuStage unknown-stage "guiToScreen" warning, not a compile issue).
+This was referenced Oct 20, 2026
+docs: record the world-space voxel-title salvage pointer
+#4634
+Merged
+engine/update: collision response for moving bodies with a floor plane
+#4636
+Merged
+engine: launcher epic — creation catalog, build/run/open from the trixel GUI, asset previews
+#4525
+Open
+scout: wake the merger lane for a conflicting stack root after its parent squash-merges
+#4508
+Closed
+render: deterministic GUI layout audit for widget panels
+#4640
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+fleet:approved
+Fleet reviewer approved — ready for human merge
+fleet:author-claude
+Implementation last authored by Claude; route review to Codex
+fleet:authored-on-macos
+PR was authored and smoke-tested on macOS Metal backend
+fleet:needs-macos-host
+Remaining work needs a macOS host; non-mac panes skip (dispatch, claim, amending-claim)
+fleet:verified-windows
+Cross-host smoke passed on windows-debug
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

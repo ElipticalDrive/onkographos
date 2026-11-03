@@ -1,0 +1,506 @@
+CS infrastructure components for HPC applications. Contribute to llnl/axom development by creating an account on GitHub.
+
+Adds a bump-based Marching Cubes option by kennyweiss · Pull Request #1950 · llnl/axom · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+kennyweiss
+commented
+Aug 13, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Summary
+Our existing Marching Cubes functionality in quest only supports structured (Cartesian) grids, but we have users that want to run Marching Cubes on unstructured quad and hex meshes
+This feature PR adds a bump-based Marching Cubes option to quest to run on structured and unstructured meshes
+The algorithm is policy-based, and runs on cpu, omp, cuda and hip execution spaces
+I left the original MC algorithm in place since it is currently more performant on structured grids
+This is likely due to the new algorithm performing more work. Specifically:
+it welds the vertices of the MC
+it also generates a polygonal MC mesh, but our application requires a triangle mesh, so we currently triangulate the output polygons
+We should instead have an option to use a triangle-based clipping table, which would avoid the extra work
+Also improves the python script that generates Cartesian meshes as input to our MC example, and adds a new script to generate unstructured meshes for the MC example
+Benchmark performance
+Comparing the original ("native") Marching Cubes implementation against the new Bump-based MC
+on hip (rzadams) and cuda (rzvector), using "seq", "cuda" and "hip" execution policies.
+Dataset: $960^3$ over $[0,2\pi]^3$ using gyroid scalar field at scale $(1,1,1)$.
+Marching cubes generates 8,933,625 triangles
+Note that this is a much bigger dataset than we'd typically expect to extract
+For reference, here's a screenshot (from VisIt) of a $256^3$ grid gyroid isosurface with about 630K triangles
+For the timings below, we report inclusive and exclusive timings, as well as the percentage of the exclusive time on GPU, where appropriate
+Seq entries have the form inclusive (exclusive).
+GPU entries have the form inclusive (exclusive; %GPU).
+High-level summary
+Method
+rzadams Seq
+rzadams HIP
+rzvector Seq
+rzvector CUDA
+Native MC
+9.09 s
+5.26 s
+8.63 s
+146.59 ms
+Bump MC
+17.98 s
+821.35 ms
+13.03 s
+166.65 ms
+Bump is around the same time as native for "cuda"
+Bump "hip" is currently several times slower than bump "cuda", but much faster than native "hip"
+The hip timings appear to account for allocation and initialization of large buffers, while the cuda ones don't.
+(speculation) I suspect the latter are optimized away by nvcc but not by hip
+Bump timings use an Umpire QuickPool with an initial 20GB allocation.
+I didn't modify or try to optimized the native approach.
+The expensive native hip runtime is almost definitely due to buffer allocation and initialization and could likely be improved
+The Bump CPU times take about twice as long on the CPU as their native counterpart
+A significant portion of the overhead is due to the welding, which is done in the bump algorithm, but not the native algorithm.
+Detailed native MC extraction
+Annotation section
+rzadams Seq
+rzadams HIP
+rzvector Seq
+rzvector CUDA
+Total
+9.09 s (24.28 ms)
+5.26 s (22.78 ms; 0.0%)
+8.63 s (19.21 ms)
+146.59 ms (0.06 ms; 34.6%)
+Crossing selection
+7.66 s (0 ms)
+5.19 s (0 ms; n/a)
+7.77 s (0 ms)
+139.96 ms (0 ms; n/a)
+- classification
+3.89 s (3.89 s)
+1.08 s (1.08 s; 1.4%)
+4.78 s (4.78 s)
+123.21 ms (123.21 ms; 17.4%)
+- compaction
+3.77 s (3.77 s)
+4.11 s (4.11 s; 0.3%)
+2.99 s (2.99 s)
+16.76 ms (16.76 ms; 90.4%)
+Output construction
+1.405 s (0 ms)
+50.66 ms (0 ms; n/a)
+838.15 ms (0 ms)
+6.56 ms (0 ms; n/a)
+- allocation
+0.07 ms (0.07 ms)
+37.66 ms (37.66 ms; 0.0%)
+0.03 ms (0.03 ms)
+0.48 ms (0.48 ms; 0.0%)
+- Facet generation
+1.41 s (1.41 s)
+13.01 ms (13.01 ms; 52.9%)
+838.12 ms (838.12 ms)
+6.07 ms (6.07 ms; 94.8%)
+Detailed Bump MC extraction
+Annotation section
+rzadams Seq
+rzadams HIP
+rzvector Seq
+rzvector CUDA
+Total
+17.98 s (231.05 ms)
+821.35 ms (24.36 ms; 0.1%)
+13.03 s (81.46 ms)
+166.65 ms (0.51 ms; 10.4%)
+Crossing selection prefilter
+2.18 s (0.09 ms)
+691.33 ms (0.11 ms; 0.0%)
+2.23 s (0.04 ms)
+130.64 ms (0.04 ms; 0.0%)
+- Crossing classification
+n/a
+372.08 ms (372.08 ms; 3.6%)
+n/a
+121.65 ms (121.65 ms; 16.7%)
+- Crossing scan
+n/a
+316.17 ms (316.17 ms; 1.7%)
+n/a
+6.32 ms (6.32 ms; 94.9%)
+- Crossing compaction
+n/a
+2.85 ms (2.85 ms; 98.5%)
+n/a
+2.56 ms (2.56 ms; 99.2%)
+CutField
+15.319 s (536.22 ms)
+78.96 ms (26.49 ms; 4.3%)
+10.645 s (171.58 ms)
+34.48 ms (9.23 ms; 5.6%)
+- Classification and sizing
+5.05 s (5.05 s)
+7.63 ms (7.63 ms; 93.1%)
+3.69 s (3.690 s)
+6.96 ms (6.96 ms; 96.5%)
+- Weld pipeline
+7.46 s (0.01 ms)
+36.90 ms (0.01 ms; 0.0%)
+5.25 s (0.01 ms)
+15.84 ms (0.01 ms; 0.0%)
+- Polygon mesh construction
+2.27 s (2.27 s)
+7.94 ms (7.94 ms; 33.9%)
+1.54 s (1.54 s)
+2.45 ms (2.45 ms; 89.3%)
+- Other CutField work
+536.22 ms (536.22 ms)
+26.49 ms (26.49 ms; 4.3%)
+171.58 ms (171.58 ms)
+9.23 ms (9.23 ms; 5.6%)
+Polygon-to-triangle adaptation
+244.90 ms (244.90 ms)
+26.70 ms (26.70 ms; 4.4%)
+70.47 ms (70.47 ms)
+1.02 ms (1.02 ms; 81.8%)
+kennyweiss
+self-assigned this
+Aug 13, 2026
+kennyweiss
+added
+Quest
+Issues related to Axom's 'quest' component
+GPU
+Issues related to GPU development
+User Request
+Issues related to user requests
+high priority
+Bump
+labels
+Aug 13, 2026
+kennyweiss
+mentioned this pull request
+Sep 1, 2026
+Adds unstructured hex mesh for bump-based marching cubes
+llnl/axom_data#43
+Merged
+kennyweiss
+force-pushed
+the
+feature/kweiss/mc-bump
+branch
+from
+f162f4e to
+5feb576
+Compare
+September 1, 2026 03:07
+kennyweiss
+force-pushed
+the
+feature/kweiss/mc-bump
+branch
+3 times, most recently
+from
+c67ff09 to
+6954642
+Compare
+September 15, 2026 04:36
+kennyweiss
+force-pushed
+the
+feature/kweiss/mc-bump
+branch
+from
+6954642 to
+730cc37
+Compare
+September 18, 2026 18:36
+kennyweiss
+mentioned this pull request
+Sep 23, 2026
+Adds scalar fields to the multidomain structured grids
+llnl/axom_data#44
+Merged
+kennyweiss
+force-pushed
+the
+feature/kweiss/mc-bump
+branch
+2 times, most recently
+from
+d337ed2 to
+1548bf9
+Compare
+September 24, 2026 16:32
+kennyweiss
+marked this pull request as ready for review
+September 24, 2026 16:34
+kennyweiss
+mentioned this pull request
+Sep 24, 2026
+Improves test runtimes with hip 6.x configs
+#1991
+Merged
+kennyweiss
+commented
+Sep 24, 2026
+View reviewed changes
+Comment thread
+src/cmake/AxomMacros.cmake
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+kennyweiss
+force-pushed
+the
+feature/kweiss/mc-bump
+branch
+from
+96ce94d to
+b8074df
+Compare
+September 26, 2026 00:39
+kennyweiss
+requested review from
+Arlie-Capps,
+BradWhitlock,
+bmhan12,
+jcs15c,
+publixsubfan and
+rhornung67
+September 28, 2026 06:14
+This was referenced Sep 29, 2026
+Improves blueprint Cartesian mesh generator script
+#1995
+Merged
+Bugfixes, enhancements and improved Marching Cubes testing
+#1996
+Merged
+kennyweiss
+force-pushed
+the
+feature/kweiss/mc-bump
+branch
+from
+b8074df to
+c8a388a
+Compare
+September 30, 2026 19:28
+kennyweiss
+commented
+Sep 30, 2026
+Copy link
+Copy Markdown
+Member
+Author
+I extracted the python script changes to generate the input mesh and fields for the MC examples in #1995 and rebased against develop.
+quest: Add bump-backed MarchingCubes implementation and labels the ol…
+…
+52c06b2
+```
+…d implementation as legacy
+
+The original implementation only supported structured input meshes.
+This implementation leverages bump's support for both structured
+and unstructured inputs.
+```
+kennyweiss
+and others
+added 23 commits
+October 1, 2026 17:29
+Updates data submodule to include fields in mdmesh examples
+cc44a97
+Improves build/link times on some mir examples by omitting disabled c…
+…
+1d6f5e2
+```
+…onfigs
+```
+Quest: Adds some synchronization points to MC example
+…
+19d6658
+```
+... for better benchmarking.
+Also adds option to skip output of contour.
+```
+Replaces some death tests with slic::ScopedAbortToThrow
+…
+fc5cd24
+```
+The expected messages were not being flushed on tuolumne.
+```
+Adds CLI option to MC example for output path
+e95b43a
+Quest: Fixes regression in cuda -- init-capture not allowed in extend…
+…
+2c0e6a0
+```
+…ed lambda
+```
+Quest/Bump: Adds extra caliper annotations to MC workflow
+19d74cc
+Quest/Bump: Skip initialization for MC arrays that will immediately b…
+…
+fcf0ba8
+```
+…e overwritten
+```
+Quest: Adds option to use a memory pool for MC data
+07d84a7
+Quest: Performance improvements for bump-based MC
+…
+7ac3221
+```
+* Added targeted caliper annotations to track regions using more than 100 ms
+* Reuses crossing flags for scan; offsets array no longer needed
+* Replaces flat index reconstruction w/ multidimensional iteration
+* Scan directly into old-to-new-map array
+* Avoids initializing arrays that will be immediately overwritten
+```
+Quest/Bump: More performance improvements for bump-based MC
+…
+9f9d830
+```
+* Propagates pool allocator to FieldIntersector
+* Adds ArrayOptions::Uninitialized to more arrays that are immediately overwritten
+* Reuses the node-map, avoiding a large temporary allocation
+* Uses bitmask to check vertex labels / cases and to label empty cells
+```
+More optimizations for bump-based MC w/ hip policy
+…
+b2cbf7d
+```
+* Removes reduction/exclusive scan from bump's TableBasedExtractor in favor of inclusive scan
+* Removes crossing-count reduction in MC bump impl.
+  We get the crossing-count and offsets from an inclusive scan.
+* Use uninitialized scan offsets in bump's Unique.
+```
+Quest: Adds option for initial pool size in MC example
+a86aba5
+Quest: Fixes MSVC link error related to too many export symbols from MC
+…
+24dc7a0
+```
+The error was due to the number of exported symbols in the various MC objects
+with our shared library config and `CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS=ON`.
+
+MSVC gave the following link error:
+  LINK : fatal error LNK1189: library limit of 65535 objects exceeded
+
+The fix was to make the MC object a private static library.
+Without the fix, we had 153,966 export symbols. With the fix, we're down to 26,380 symbols.
+```
+Quest: More annotations for MC performance
+c63e724
+Quest: Consolidates policy setup for MC tests
+1819c8a
+Quest: Leverage Marching Cubes testing infrastructure in native, bump…
+…
+f43d4e4
+```
+… and equivalence tests
+
+- Use mctest::buildStridedStructured<3> instead of rolling our own in the Marching Cubes equivalence tests
+- Move the identical explicit-coordinate x-translation helpers from native and Bump into the shared helper
+- Replace Bump’s addStructuredMask3D() with the shared addCellField<3>()
+```
+Quest: Removes unnecessary bump test
+…
+7649150
+```
+It was only testing an internal checker, rather than the actual welding checker checkBlueprintEdgeManifold3D in Bump.
+```
+Quest: Remove custom policy-based allocator logic in favor of the one…
+…
+9cbd2fc
+```
+… from Axom
+```
+Quest: Replaces a function to compute the number of cells with its eq…
+…
+4acd09d
+```
+…uivalent conduit function
+```
+Updates RELEASE-NOTES
+af169d7
+Quest: Fixes MC output for unstructured hex mesh and hip policy
+…
+50888ef
+```
+The underlying Conduit node was no longer available.
+```
+Quest: Fixes MC output for unstructured hex mesh and cuda policy
+…
+626fe53
+```
+The data was on the device and the output functions were expecting it on the host, so copy before saving.
+```
+kennyweiss
+force-pushed
+the
+feature/kweiss/mc-bump
+branch
+from
+c8a388a to
+626fe53
+Compare
+October 2, 2026 04:32
+Bugfix: Only add list of extra marching cubes sources to quest if non…
+…
+9dde16b
+```
+…-empty
+```
+kennyweiss
+commented
+Oct 2, 2026
+Copy link
+Copy Markdown
+Member
+Author
+I extracted changes and tests for the native marching cubes algorithm in #1996 and rebased against develop.
+kennyweiss
+mentioned this pull request
+Oct 2, 2026
+Improves support for strided topologies in Bump
+#2002
+Merged
+kennyweiss
+added 2 commits
+October 20, 2026 09:50
+Merge branch 'develop' into feature/kweiss/mc-bump
+f932ae8
+Bump/Quest: Uses new strided bump functionality in MC
+…
+785d281
+```
+And removes unnecessary changes to bump.
+```
+kennyweiss
+mentioned this pull request
+Oct 22, 2026
+Improves/streamlines Marching Cubes example
+#2020
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+Bump
+GPU
+Issues related to GPU development
+high priority
+Quest
+Issues related to Axom's 'quest' component
+User Request
+Issues related to user requests
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

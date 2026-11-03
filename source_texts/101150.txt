@@ -1,0 +1,1171 @@
+arXiv:2504.09878v1 [cs.CV] 14 Apr 2025
+MCBlock: Boosting Neural Radiance Field Training Speed by
+MCTS-based Dynamic-Resolution Ray Sampling
+Yunpeng Tan∗
+Junlin Hao
+Jiangkai Wu
+Peking University
+Beijing, China
+yunpengtan@stu.pku.edu.cn
+Peking University
+Beijing, China
+2401112126@stu.pku.edu.cn
+Peking University
+Beijing, China
+jiangkai.wu@stu.pku.edu.cn
+Liming Liu
+Qingyang Li
+Xinggong Zhang†
+Peking University
+Beijing, China
+llm@stu.pku.edu.cn
+Peking University
+Beijing, China
+liqingyang@stu.pku.edu.cn
+Peking University
+Beijing, China
+zhangxg@pku.edu.cn
+Abstract
+Neural Radiance Field (NeRF) is widely known for high-fidelity
+novel view synthesis. However, even the state-of-the-art NeRF
+model, Gaussian Splatting, requires minutes for training, far from
+the real-time performance required by multimedia scenarios like
+telemedicine. One of the obstacles is its inefficient sampling, which
+is only partially addressed by existing works. Existing point-sampling
+algorithms uniformly sample simple-texture regions (easy to fit) and
+complex-texture regions (hard to fit), while existing ray-sampling
+algorithms sample these regions all in the finest granularity (i.e.
+the pixel level), both wasting GPU training resources. Actually,
+regions with different texture intensities require different sampling
+granularities. To this end, we propose a novel dynamic-resolution
+ray-sampling algorithm, MCBlock, which employs Monte Carlo
+Tree Search (MCTS) to partition each training image into pixel
+blocks with different sizes for active block-wise training. Specifically, the trees are initialized according to the texture of training
+images to boost the initialization speed, and an expansion/pruning
+module dynamically optimizes the block partition. MCBlock is implemented in Nerfstudio, an open-source toolset, and achieves a
+training acceleration of up to 2.33x, surpassing other ray-sampling
+algorithms. We believe MCBlock can apply to any cone-tracing
+NeRF model and contribute to the multimedia community.
+CCS Concepts
+• Computing methodologies → Image-based rendering.
+Keywords
+view synthesis, 3d reconstruction, reinforcement learning, neural
+radiance field
+∗ Both authors contributed equally to this research.
+† Corresponding author
+Permission to make digital or hard copies of all or part of this work for personal or
+classroom use is granted without fee provided that copies are not made or distributed
+for profit or commercial advantage and that copies bear this notice and the full citation
+on the first page. Copyrights for components of this work owned by others than the
+author(s) must be honored. Abstracting with credit is permitted. To copy otherwise, or
+republish, to post on servers or to redistribute to lists, requires prior specific permission
+and/or a fee. Request permissions from permissions@acm.org.
+Conference acronym ’XX, Woodstock, NY
+© 2025 Copyright held by the owner/author(s). Publication rights licensed to ACM.
+ACM ISBN 978-1-4503-XXXX-X/2018/06
+https://doi.org/XXXXXXX.XXXXXXX
+ACM Reference Format:
+Yunpeng Tan, Junlin Hao, Jiangkai Wu, Liming Liu, Qingyang Li, and Xinggong Zhang. 2025. MCBlock: Boosting Neural Radiance Field Training
+Speed by MCTS-based Dynamic-Resolution Ray Sampling. In Proceedings
+of Make sure to enter the correct conference title from your rights confirmation email (Conference acronym ’XX). ACM, New York, NY, USA, 11 pages.
+https://doi.org/XXXXXXX.XXXXXXX
+1
+Introduction
+3D reconstruction is a core component of multimedia, aiming to
+transform images or videos into spatial representations, enabling
+deeper interpretation environments. Its application usually requires
+real-time performance, such as immersive telepresence, distance
+education, and metaverse. In recent years, a large number of works
+combining deep learning and 3D reconstruction have emerged [10,
+30, 32]. One of these methods is Neural Radiance Field (NeRF) [29],
+which employs differentiable volumetric rendering, resulting in
+novel view synthesis with high fidelity, especially for real-world
+scenes with complex geometry. However, the slow training speed
+of NeRF prohibits its practical use in real-time reconstruction.
+One of the main obstacles to real-time NeRF training is its inefficient sampling strategy. The ray marching rendering algorithm
+employed by NeRF uniformly samples numerous points from the
+vast 3D space, resulting in extremely low rendering speed. Actually,
+3D areas such as air and single-texture objects only require a small
+amount of sampling, since these areas are easy to fit. However, how
+to locate the ineffective sampling and reduce it remains a challenge.
+Existing sampling algorithms can only partially address the issue
+of ineffective sampling. Currently, there are two orthogonal types
+of methods: point sampling and ray sampling. Specifically, pointsampling algorithms [15, 29, 31] concentrate sampling points near
+object surfaces, thus learning finer details on object edges. However, these works sample pixels in a uniform random way (Figure 1a). Pixels from simple-texture image regions require less sampling since these regions are always easy to fit [44]. Inspired by
+this property, ActRay [44] proposes an active ray-sampling algorithm [12, 24, 39, 44] that performs more frequent sampling in hardto-fit pixels (Figure 1b). However, it still needs to constantly sample
+pixels in simple-texture regions to avoid generating floaters during training. PyNeRF [41] applies a coarse-to-fine multi-resolution
+sampling algorithm. During each training stage, it samples blocks
+of the same size, and gradually increases the block size along with
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+Yunpeng Tan, Junlin Hao, Jiangkai Wu, Liming Liu, Qingyang Li, and Xinggong Zhang
+Prob1 = Prob2
+Prob1 < Prob2
+Prob1
+Prob1
+Prob2
+Prob2
+(a) Random Sampling
+(b) Active Sampling
+Size1
+Size1
+Size2
+Size1 = Size2↑
+(c) Multi-Resolution Sampling
+Size1 ≠ Size2
+trade-off between block size and training quality. If the block size
+is too large, it will overlook high-frequency details, leading to a
+decrease in rendering quality. If the block size is too small, it will
+conduct useless training on high-frequency parameters, leading to
+a decrease in training speed.
+To overcome these challenges, we propose MCBlock, a MonteCarlo-Tree-Search-based [9, 23] (MCTS) active dynamic-resolution
+sampling algorithm, where each tree node corresponds to a pixel
+block. In the beginning, we directly initialize a block-tree structure
+considering the texture intensity of training images. During training, to search for the optimal block partition, Monte-Carlo trees
+are dynamically expanded and pruned to simulate block splitting
+and merging.
+In this paper, we make the following contributions:
+Size2
+• We propose a texture-based tree structure initialization to
+get appropriately sized initial blocks.
+• We propose adaptive node expansion/pruning to dynamically search for the optimal block partition along with the
+training process.
+• We evaluate MCBlock using different cone-tracing NeRF
+models and datasets, reaching an acceleration of up to 2.33x.
+We also compare MCBlock with other sampling algorithms,
+demonstrating its superiority and necessity.
+(d) Dynamic-Resolution Sampling
+Figure 1: Different ray-sampling algorithms. Random ray
+sampling (a) samples rays in a uniform random way. Active ray sampling (b) assigns larger sampling probabilities
+for hard-to-fit pixels. (a)(b) together illustrate the singleresolution ray sampling. The coarse-to-fine multi-resolution
+ray sampling (c) samples blocks of the same size at the same
+time, and gradually increases the block size along with training. Dynamic-resolution ray sampling (Ours) (d) samples
+blocks of different sizes according to the image texture and
+the training process.
+training. It aims to use the coarse geometry gained in the fast lowresolution training process to guide the point-sampling algorithm in
+the following high-resolution training process. However, it samples
+easy-to-fit areas as frequently as hard-to-fit areas, causing redundant sampling in easy-to-fit areas (e.g., simple-texture regions), in
+the end deteriorating training efficiency.
+It’s feasible to further improve ray-sampling efficiency by applying different sampling granularities for regions with different
+texture intensities. As shown by cone-tracing NeRFs [2–4, 16, 17],
+training a low-resolution pixel (i.e., a block of high-resolution
+pixels) means training the low-frequency model parameters (Section 3). Besides, simple-texture image regions usually correspond
+to low-frequency 3D space regions, which can be fit using only
+low-frequency model parameters. Thus, for simple-texture regions,
+we only need to sample low-resolution pixels for training. For
+the complex-texture image regions, we still need to sample highresolution pixels to learn the high-frequency details.
+Motivated by this, we propose dynamic-resolution ray sampling,
+which partitions training images into pixel blocks with different
+sizes according to their texture intensities, and trains one simpletexture region as a whole, as shown in Figure 1d. To conduct
+dynamic-resolution sampling, this work has addressed the following technical challenges: First, the initial block size is important for
+training speed, since sampling a huge block as one cone is useless
+for 3D scene reconstruction, while initiating training with highresolution pixels leads to suboptimal efficiency. Second, there’s a
+2 Related Work
+2.1 Neural Radiance Field
+For a scene, Neural Radiance Field (NeRF) [29] applies differentiable
+volumetric rendering to learn a continuous volumetric field which
+is represented as MLPs. Due to the ability of its MLPs to store
+high-frequency information, it can render novel view images with
+higher fidelity, boosting a large number of works like 3D content
+generation [26, 33, 35, 49], illumination modeling [6, 19, 37, 42, 50],
+scene editing [1, 13, 18, 43] and so on. Despite the high rendering
+quality, the slow training speed prevents NeRF from being applied
+to scenarios that require fast reconstruction.
+2.2
+NeRF Training Acceleration
+Currently, the majority of NeRF training acceleration can be categorized into two approaches: 3D representation optimization and
+sampling optimization. The latter can be further divided into pointsampling and ray-sampling algorithms. Also, there are other acceleration tools [47].
+2.2.1 3D Representaion Optimization. Some works propose new
+NeRF models to accelerate the training process. Plenoxels [11],
+Instant-NGP [31], NSVF [28], DVGO [38], TensoRF [8] etc [20, 46].
+use explicit voxel grids or planes to represent a 3D scene, which constrain the gradients in local space, greatly promoting the training
+speed. However, these methods apply random pixel-wise sampling,
+ignoring the different influences brought by training different rays.
+Gaussian Splatting [21] leverages a fast differentiable rasterization pipeline to significantly accelerate both the training and
+rendering processes. During Gaussian sorting, it evenly divides
+each image into large pixel blocks for parallelization but overlooks
+variations in texture intensity, resulting in suboptimal efficiency.
+Specifically, for blocks of the same size, those with more complex
+MCBlock: Boosting Neural Radiance Field Training Speed by MCTS-based Dynamic-Resolution Ray Sampling
+textures contain more Gaussians, which decreases the overall sorting speed. The dynamic resolution of MCBlock can be applied
+here to further accelerate the training and rendering of Gaussian
+Splatting.
+2.2.2 Point-Sampling Algorithms. Point-sampling algorithms [5,
+15, 25, 29, 31, 45, 48] estimate the location of the surface of each ray,
+and sample points near the surfaces, which can focus training on
+the surface details instead of well-trained air space. However, they
+still select training rays in a uniform random way. This leads to
+oversampling of easy-to-fit rays and undersampling of harder-to-fit
+rays, decreasing the training efficiency.
+2.2.3 Ray-Sampling Algorithms. Ray-sampling algorithms operate
+in image space. To form a training batch, they either focus on
+selecting which rays to sample (probabilistic ray sampling), or on
+adjusting the granularity of ray sampling (multi-resolution ray
+sampling).
+Probabilistic Ray Sampling: Most NeRF works sample rays in
+a uniform random way, needlessly conducting massive sampling
+on easy-to-fit rays. ActRay [44] proposes an active sampling algorithm that gives priority to hard-to-fit rays. Specifically, it uses
+its redesigned Upper Confidence Bound (UCB) [36] formula for
+each ray as the sampling probability. Through this ray-sampling
+algorithm, ActRay can reconstruct scenes with finer details and
+illumination effects in the early training stage. Similarly, Soft Mining [22] uses Langevin Monte-Carlo [7, 34](a Stochastic Process
+algorithm) to select training rays for faster reconstruction. But they
+still train the NeRF model in a pixel-wise way, unnecessarily learning high-frequency parameters for simple-texture image regions.
+Motivated by them, we also apply active sampling in MCBlock.
+Multi-Resolution Ray Sampling: The majority of NeRF works
+sample rays at a single resolution for training, training highfrequency information for all image regions without regard to their
+texture intensity. This unnecessarily trains the high-frequency parameters for simple-texture image regions. Since a low-resolution
+pixel can be simply represented as a block of high-resolution pixels, some works employ multi-resolution sampling [2, 37, 41].
+Among them, PyNeRF [41] uses the image coarse-to-fine training,
+using the coarse geometry gained in the fast low-resolution training
+process to guide the point-sampling algorithm in the following highresolution training process. But it equally treats every image region
+and ignores their difference in texture intensity and fitting difficulty.
+Motivated by this insight, we propose the dynamic-resolution
+sampling algorithm, MCBlock.
+3
+Preliminary
+Cone-Tracing NeRF: Actually, each pixel renders one cone region
+in space, but the original NeRF idealizes one pixel as one point and
+casts a ray for each pixel, which leads to "jaggies" when rendering
+low-resolution images. Some works [2–4, 16, 17] use cone tracing
+to solve this problem. For example, Mipnerf [2] casts a cone for each
+pixel, and splits the cone into conical frustums. Its MLPs output the
+colors and densities of frustums instead of points. For each conical
+frustum, Mipnerf encodes it using Integrated Positional Encoding
+(IPE) into a vector of sins and coss, and each term of this vector has
+an additional coefficient. When the pixel area grows, the coefficients
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+of the last terms will approach zero. In this way, a large frustum
+will be encoded into only low-frequency space coordinates, thus
+training only low-frequency information of MLPs, but having no
+influence on the high-frequency information. With this property, we
+cast cones that cover our blocks, training parameters with different
+frequencies according to different block sizes.
+4 Method
+4.1 MCBlock Training Framework
+As introduced above, most NeRF works ignore the fact that different
+image regions need different sampling granularity. For one simpletexture region, we only need to use the entire pixel block for training
+to reconstruct its corresponding low-frequency 3D space. However,
+for the complex-texture region, training of small blocks is required
+to recover the high-frequency details in 3D sprce.
+Inspired by this insight, we propose our MCTS-based dynamicresolution sampling algorithm. Specifically, each training image
+corresponds to a Monte-Carlo quadtree, with each node standing
+for a rectangular pixel block, and its four child nodes standing for
+four evenly divided sub-blocks.
+Figure 2 illustrates our training pipeline. At the beginning of
+training, we initialize the tree structures using color variances of
+training images(Section 4.2). Then all leaf nodes are used to train the
+cone-tracing NeRF model, including loss calculation and gradient
+descent (Section 3). Next, we backpropagate the rendering losses of
+these nodes along the path from each leaf node to its corresponding
+root node and prune some nodes to promote training efficiency
+(Section 4.3). Then, with the updated Monte-Carlo trees, we select
+leaf nodes using UCT as the probability, and expand the selected
+leaf nodes. A subset of the expanded nodes is used for training
+(Section 4.4). "Selection & Expansion", "Leaf node rendering" and
+"Backpropagation & Pruning" will be repeated for many iterations,
+until the model converges.
+4.2
+Tree Structure Initialization
+To skip the time-consuming initialization process of the traditional
+MCTS which starts from only root nodes, we directly initialize
+the tree structures based on the color of training images. For each
+training image, we first treat all the pixels of the image as the
+leaves of the tree. Then, we repeatedly merge neighbor sibling
+nodes. Specifically, for four neighbor sibling nodes, we first add their
+father node 𝑗 into the tree. Then, if they are currently leaf nodes and
+Variance({𝐶𝑝 }𝑝 ∈𝐵 𝑗 ) < 𝜖𝑖𝑛𝑖𝑡 (where 𝐵 𝑗 is the block corresponding
+to node 𝑗, 𝐶𝑝 is the color of pixel 𝑝, and 𝜖𝑖𝑛𝑖𝑡 is a constant threshold),
+they are deleted. The initialization finishes after the root node is
+added. A toy example of the initialized tree structure is shown in
+Figure 3. If the image size is (H, W), the root node stands for the
+whole image, its four child nodes stand for four evenly divided
+sub-blocks with the size of (H/2, W/2), its grandchild nodes stand
+for sub-sub-blocks with the size of (H/4, W/4), and so on. The leaf
+nodes form an initial block partition of the image.
+After initializing the tree structure, all leaf nodes are fed into a
+cone-tracing NeRF model in batches. During this process, we not
+only update the model parameters but also obtain the initial loss
+values of each node. Although we randomly select subsets of leaf
+nodes as training batches, this approach still introduces a sampling
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+Yunpeng Tan, Junlin Hao, Jiangkai Wu, Liming Liu, Qingyang Li, and Xinggong Zhang
+Leaf Node Batch
+Loss
+Leaf Nodes
+Tree Structure Initialization (§4.2)
+Leaf Node Rendering
+Updated Trees
+Selection & Expansion (§4.4)
+Backpropagation & Pruning (§4.3)
+Figure 2: Training pipeline of MCBlock. We first initialize the tree structures using the training images, and render all the
+leaf nodes to get their loss values. From each leaf node to its root node, these loss values are backpropagated, and at the same
+time we prune some leaf nodes. With the updated trees, we select some leaf nodes, expand them, and choose a subset of the
+expanded nodes as a training batch. "Selection & expansion", "Leaf node rendering", and "Backpropagation & pruning" will be
+repeated until the model converges.
+(H,W)
+(H, W)
+Backpropagation
+(H/2,W/2)
+(H/2, W/2)
+(H/4,W/4)
+(H/4, W/4)
+Pruning by Variance
+Figure 3: Tree structure initialization. We initialize the structures of trees according to the texture intensity of training
+images. Regions like the sky have fewer and larger blocks,
+and regions like the trees have more and smaller blocks.
+bias towards regions with complex textures, as these regions are
+divided into more blocks. Thus training these leaf nodes still poses
+higher training efficiency than random pixel-wise sampling.
+4.3
+Backpropagation & Pruning
+4.3.1 UCT Redefinition. First of all, we need to redesign the UCT
+formula. That’s because the UCT formula of the traditional MCTS [9,
+23] can only be applied to scenarios with static reward distribution,
+and the UCB formula of ActRay is only designed for pixels instead
+of blocks, so both of them aren’t suitable for our scenario. To fit
+the block-wise NeRF training scenario, we have redesigned the
+UCT formulas for the leaf nodes and internal nodes separately. We
+design the UCT value 𝑈𝑖 and the loss value 𝐿𝑖 of leaf node 𝑖 as:
+𝑂
+𝑖
+𝑈𝑖 = 𝐿𝑖 ∗ 𝑒 𝜆 ∗ |𝐵𝑖 |, 𝐿𝑖 = ∥𝐶𝐵𝑖 − 𝐶c
+𝐵𝑖 ∥ 2
+(1)
+Node 𝑖 corresponds to block 𝐵𝑖 . The block rendering loss 𝐿𝑖 is
+defined as the MSE between the average color 𝐶𝐵𝑖 of block 𝐵𝑖 and
+its most recently rendered color 𝐶c
+𝐵𝑖 . And it is multiplied by the
+𝑂𝑖
+expired time term 𝑒 𝜆 just like ActRay, where 𝑂𝑖 is the time interval
+since node 𝑖 was last sampled, and 𝜆 is a temperature coefficient
+to control the influence of the expired time term. Considering the
+area of blocks, we add another multiplier |𝐵𝑖 |, i.e. the size (height
+multiplying width) of block 𝐵𝑖 .
+(H/8,W/8)
+Figure 4: Backpropagation & pruning. On the path from each
+leaf node of the batch to its root node, we backpropagate
+the UCT values and the loss values to nodes on the path and
+decide whether to prune their child nodes.
+For an internal node 𝑗, its UCT value 𝑈 𝑗 is defined as the summation of the UCT values of its child nodes 𝐶ℎ 𝑗 , and its loss value
+𝐿 𝑗 is defined as the average of the loss values of its child nodes:
+𝑈𝑗 =
+∑︁
+𝑘 ∈𝐶ℎ 𝑗
+Í
+𝑈𝑘 , 𝐿 𝑗 =
+𝑘 ∈𝐶ℎ 𝑗 𝐿𝑘
+|𝐶ℎ 𝑗 |
+(2)
+4.3.2 Backpropagation. Considering efficiency, we don’t calculate
+UCT values on the spot. Instead, we dynamically update them using
+backpropagation, as shown in Figure /reffig:backpropagation. Given
+the loss values of a batch of leaf blocks, we aim to update the UCT
+value and the loss value of every node. First, we multiply all UCT
+1
+values by 𝑒 𝜆 to simulate the increment of expired time 𝑂. Then, for
+each leaf node that corresponds to a block of the batch, we set its
+UCT value to 𝐿 ∗ |𝐵| (its expired time now becomes 0). Next, we walk
+up from each leaf node to its root node, and reset each encountered
+internal node’s UCT value and loss value according to the formula
+in Section 4.3.1. If batch size is 𝑆𝑏𝑎𝑡𝑐ℎ and image size is 𝑆𝑖𝑚𝑎𝑔𝑒 , this
+process only contains complex operations for log4 (𝑆𝑖𝑚𝑎𝑔𝑒 ) ∗ 𝑆𝑏𝑎𝑡𝑐ℎ
+nodes, and simple multiplications for all nodes, ensuring our high
+efficiency of UCT value maintenance.
+MCBlock: Boosting Neural Radiance Field Training Speed by MCTS-based Dynamic-Resolution Ray Sampling
+(H,W)
+Step1: Selection
+(H/2,W/2)
+(H/4,W/4)
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+a leaf node 𝑗 is among the selected leaf nodes, it is likely to have a
+high rendering loss. So we split its corresponding block evenly into
+four sub-blocks as its four child nodes, trying to detect and finally
+eliminate the high-frequency flaws. To bypass the time-consuming
+calculation of accurate losses of the new nodes, we directly assign
+the UCT value (scaled by the block size) and the loss value of node
+𝑗 to these new nodes. Then we randomly add one of the expanded
+nodes into the training batch for the training iteration.
+Selection and expansion together generate batches of pixel blocks
+for training, and update the tree structures.
+(H/8,W/8)
+Step2: Expansion
+Figure 5: Selection & expansion. Using UCT as probability,
+we choose a root node and walk from the root node to one
+leaf node. Then we expand this node and randomly add one
+of the expanded nodes into the training batch.
+4.3.3 Pruning. Blocks may be split to eliminate high-frequency
+flaws (which will be discussed in Section 4.4.2), but after the elimination, some blocks need to be merged again to improve sampling
+efficiency. We use node pruning to simulate block merging. During
+backpropagation, for each node on the walking path, we also decide
+whether to prune its four child nodes, as shown in Figure 4. In detail,
+for a node 𝑗, after the update of its UCT value and loss value, we
+prune its four child nodes 𝐶ℎ 𝑗 when 𝐶ℎ 𝑗 are all leaf nodes and:
+𝐿𝑗
+< 𝜖𝐿 𝑎𝑛𝑑 Variance({𝐶𝑝 }𝑝 ∈𝐵 𝑗 ) < 𝜖𝐶
+(3)
+𝐿
+Where 𝜖𝐿 and 𝜖𝐶 are thresholds
+Í respectively for the scaled loss
+𝑖 ∈NODES 𝐿𝑖
+and the color variance, and 𝐿 = |NODES|
+is the mean loss value
+of all blocks, designed to eliminate loss scale differences between
+scenes. Compared with block partition only based on color variance,
+loss values change along with training, so they can perceive when
+the high-frequency flaws emerge or vanish, and then split blocks
+to eliminate flaws or merge blocks to promote efficiency.
+Backpropagation updates the values of the tree nodes, and pruning updates the structure of the Monte-Carlo trees.
+4.4
+Selection & Expansion
+4.4.1 Selection. Given the updated trees, to select hard-to-fit blocks
+to accelerate training, we design a parallel selection algorithm. We
+select blocks under the guidance of UCT as shown in Figure 5. To
+select one leaf block, first, we choose one of the root nodes. The
+probability of choosing root 𝑟 is Í 𝑈𝑟 𝑈 where ROOTS is the
+𝑠 ∈ROOTS 𝑠
+set of all root nodes. Then we walk from the chosen root node to a
+particular leaf node. At a certain node 𝑗, for one of its child nodes,
+𝑘
+node 𝑘, the probability of stepping to it is set to 𝑈
+𝑈 𝑗 . This probability
+sampling process enables GPU parallelization of MCTS, without
+any additional information to be maintained like A. Liu et [27].
+4.4.2 Expansion. Due to the lack of supervision of high-frequency
+parameters in simple-texture regions, high-frequency flaws are
+likely to emerge. We can eliminate these flaws by splitting large
+blocks to supervise high-frequency parameters. We use node expansion to simulate block splitting, as shown in Figure 5. Specifically, if
+5 Experiments
+5.1 Implementation Details
+MCBlock is implemented based on Nerfstudio [40], an open-source
+toolset for NeRF. We use the Mipnerf360 dataset [3] and the Blender
+dataset [29], as representatives of real-world datasets and synthetic
+datasets. Besides, variance thresholds 𝜖𝑖𝑛𝑖𝑡 , 𝜖𝐿 and 𝜖𝐶 is respectively
+set to 1e-3, 1e-2 and 1e-4. We use LPIPS as our primary metric,
+because LPIPS can better reflect visual quality than PSNR and SSIM.
+For example, floaters and blurs may not influence PSNR and SSIM,
+which can influence LPIPS a lot.
+Unlike traditional NeRFs which synthesize novel view images in
+a pixel-wise way, we render novel view images in a block-wise
+way. We warp the block partition of the training views to the novel
+view, and with this estimated block partition of the novel view, we
+render the novel view image by rendering blocks instead of pixels.
+This rendering manner can avoid rendering high-frequency flaws
+that aren’t fully eliminated during training, thus reducing artifacts
+like floaters in the weak-texture regions.
+5.2
+Different Datasets
+For each scene of the Mipnerf360 dataset, 78 of images are used for
+training, and the rest 18 are used for testing. Here we use Zipnerf [4]
+as the NeRF model.
+As for the outdoor scenes in the Mipnerf360 dataset, the training images contain many large simple-texture regions such as the
+sky, which requires fewer sampling times for MCBlock to fit. As
+illustrated in Figure 6a, compared with random sampling, MCBlock
+achieves an acceleration of up to 1.66x (at the LPIPS = 0.145 line).
+As for the indoor scenes in the Mipnerf360 dataset, there are
+fewer large simple-texture regions, but MCBlock can still find a
+lot of small simple-texture regions and sample them integrally,
+reaching an acceleration of up to 1.6x (at the LPIPS = 0.035 line)
+(Figure 6b).
+For each scene of the Blender dataset, we use 100 images for
+training and 100 images for testing. Here we use Mipnerf [2] as
+the NeRF model. Due to large background regions, we reach an
+acceleration of up to 2.33x (at the LPIPS = 0.030 line) (Figure 6c).
+Unfortunately, the implementation in the Nerfstudio library does
+not support training Zipnerf on the Blender dataset or training
+Mipnerf on the Mipnerf360 dataset, so we didn’t test these modeldataset combinations.
+Zipnerf + Ours
+Zipnerf
+2
+4 6 8 10 12
+Iterations (1e3)
+(a) Zipnerf on Mip360 Outdoor
+0.14
+0.12
+0.10
+0.08
+0.06
+0.04
+0.02
+Zipnerf + Ours
+Zipnerf
+LPIPS
+0.40
+0.35
+0.30
+0.25
+0.20
+0.15
+0.10
+Yunpeng Tan, Junlin Hao, Jiangkai Wu, Liming Liu, Qingyang Li, and Xinggong Zhang
+LPIPS
+LPIPS
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+2
+4 6 8 10 12
+Iterations (1e3)
+0.150
+0.125
+0.100
+0.075
+0.050
+0.025
+(b) Zipnerf on Mip360 Indoor
+Mipnerf + Ours
+Mipnerf
+1 2 3 4 5 6 7 8
+Iterations (1e4)
+(c) Mipnerf on Blender
+Figure 6: LPIPS results under different datasets and different NeRF models. With the iteration number as the horizontal axis,
+our method can accelerate the training process by up to 2.33x.
+Table 1: The performance of different sampling algorithms, using the Blender dataset as dataset and Mipnerf as NeRF model.
+By applying the point-sampling algorithm of Mipnerf and using MCBlock as the ray-sampling algorithm, we get the best PSNR,
+SSIM, and LPIPS, especially in the early training stages.
+Iteration
+20000
+40000
+60000
+80000
+Method
+LPIPS
+PSNR
+SSIM
+LPIPS
+PSNR
+SSIM
+LPIPS
+PSNR
+SSIM
+LPIPS
+PSNR
+SSIM
+No Strategy
+Point-Sampling
+ActRay
+Multi-Res*
+MCBlock
+ActRay w/ Point-Sampling
+Multi-Res w/ Point-Sampling
+0.076
+0.071
+0.068
+0.076
+0.054
+0.055
+0.069
+28.69
+29.02
+30.23
+28.67
+30.37
+30.89
+29.11
+0.920
+0.926
+0.933
+0.920
+0.935
+0.940
+0.926
+0.054
+0.048
+0.045
+0.056
+0.041
+0.039
+0.049
+30.29
+30.89
+31.64
+30.28
+31.55
+32.39
+30.78
+0.938
+0.944
+0.948
+0.938
+0.947
+0.955
+0.943
+0.047
+0.040
+0.036
+0.046
+0.036
+0.031
+0.040
+30.94
+31.71
+32.31
+30.98
+32.07
+33.20
+31.74
+0.945
+0.952
+0.954
+0.946
+0.952
+0.960
+0.952
+0.041
+0.035
+0.034
+0.041
+0.033
+0.027
+0.035
+31.50
+32.30
+32.66
+31.49
+32.37
+33.58
+32.31
+0.950
+0.956
+0.957
+0.950
+0.954
+0.963
+0.957
+MCBlock w/ Point-Sampling
+0.049
+31.10
+0.942
+0.034
+32.55
+0.955
+0.028
+33.19
+0.960
+0.026
+33.52
+0.962
+*
+Multi-Res stands for multi-resolution ray sampling employed by works like PyNeRF
+Table 2: The performance of different sampling algorithms, using the Mipnerf360 dataset as dataset and Zipnerf as NeRF model.
+Iteration
+2000
+4000
+6000
+8000
+Method
+LPIPS
+PSNR
+SSIM
+LPIPS
+PSNR
+SSIM
+LPIPS
+PSNR
+SSIM
+LPIPS
+PSNR
+SSIM
+Point-Sampling
+ActRay w/ Point-Sampling
+Multi-Res w/ Point-Sampling
+0.169
+0.156
+0.171
+27.34
+27.86
+27.25
+0.786
+0.788
+0.783
+0.114
+0.111
+0.112
+29.04
+29.34
+29.00
+0.846
+0.846
+0.847
+0.094
+0.092
+0.091
+29.82
+30.01
+29.78
+0.869
+0.867
+0.870
+0.083
+0.080
+0.079
+30.32
+30.57
+30.34
+0.881
+0.883
+0.884
+MCBlock w/ Point-Sampling
+0.146
+27.96
+0.791
+0.093
+29.45
+0.848
+0.077
+30.27
+0.873
+0.070
+30.66
+0.884
+5.3
+Different Sampling Algorithms
+In this experiment, we use Mipnerf as the NeRF model and the
+Blender dataset as the dataset. Mipnerf adopts a point-sampling
+algorithm, which uses proposal sampling to guide the final point
+sampling and is orthogonal to any ray-sampling algorithm. We
+apply different ray-sampling algorithms to Mipnerf, respectively
+the active sampling algorithm ActRay [44], the multi-resolution
+sampling algorithm employed by works like PyNeRF [41], and
+our MCBlock. Table 1 shows that MCBlock outperforms all other
+sampling algorithms. Sometimes MCBlock provides slightly lower
+PSNR and SSIM, because MCBlock might render false highlight
+effects while other algorithms render no highlight effects. Results
+of different ray-sampling algorithms on the Mipnerf360 dataset
+with Zipnerf as the NeRF model are provided in Table 2. Additional
+subjective results can be found in supplemental material (Section A).
+Point Sampling (Mipnerf): Although sampling points near
+surfaces can accelerate the training process, applying random ray
+sampling will conduct too much unnecessary sampling in simpletexture regions, leading to a decrease in training speed. Also, solely
+applying ray-sampling strategies isn’t efficient enough. By combining point sampling and ray sampling (like MCBlock), the training
+process can reach the highest efficiency.
+MCBlock: Boosting Neural Radiance Field Training Speed by MCTS-based Dynamic-Resolution Ray Sampling
+Method
+Sampling
+count
+MCBlock
+w/ point sampling
+Rendered
+image
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+Rendered
+image
+Sampling
+count
+Method
+195
+28107
+MCBlock
+w/ point sampling
+ActRay
+w/ point sampling
+516
+26601
+ActRay
+w/ point sampling
+Only
+point sampling
+8262
+8112
+Only
+Point sampling
+Ground Truth Image
+Figure 7: Rendered images and sampling count during 5000 training iterations under the lego scene. On the left, it can be seen
+that compared with ActRay, MCBlock further decreases the sampling count of the background region, but still renders a clean
+background without any floater. On the right, it can be seen that MCBlock spares more sampling times for finer foreground
+details such as clearer bricks of the bucket.
+Active Ray Sampling (ActRay): ActRay assigns larger sampling probabilities for hard-to-fit pixels to learn better details. We
+show the rendered images and the cumulative sampling times of
+MCBlock and ActRay in Figure 7. Although ActRay has decreased
+the sampling frequency of background regions a lot through active
+ray sampling, MCBlock further decreased it by training the large
+blocks of the background in an integrated manner. This spares
+more sampling times to sample the foreground details, enhancing
+the foreground’s sharpness such as the bricks of the bucket. The
+advantage of MCBlock over ActRay shrinks in the later iterations,
+because the loss values are easy to be outdated along with training. The loss propagation strategy of ActRay can help to settle this
+problem, but it may consume additional time (Section 5.6).
+Multi-Resolution Ray Sampling (PyNeRF [41]): To validate
+the multi-resolution ray-sampling algorithm, we train the NeRF
+model using images with 18 resolution for one epoch, images with
+1 resolution for one epoch, images with 1 resolution for one epoch,
+4
+2
+and then original images for the rest. PyNeRF shows that this algorithm can accelerate training by using the model initialized in
+the coarse-grained training stage to guide the fine-grained training
+stage. However, objects from the Blender dataset have simple geometry, which makes it easy to initialize the NeRF model, leading
+to tiny acceleration.
+5.4
+Results After Convergence
+In Table 3 we provide the results after the testing PSNR converges
+(100000 iterations), on the bicycle scene from the Mipnerf360 dataset.
+On testing views, MCBlock achieves results slightly worse than the
+baselines, while at the same time achieving much better results on
+the training views. It’s because the estimated block partition of the
+testing views is not that precise, leading to deterioration in testing
+views. Besides, our main contribution of acceleration focuses on
+Table 3: Results after convergence on the bicycle scene.
+Dataset Split
+Test
+Train
+Method
+PSNR / SSIM / LPIPS
+PSNR / SSIM / LPIPS
+No Strategy
+MCBlock
+28.01 / 0.853 / 0.081
+27.84 / 0.845 / 0.082
+30.02 / 0.917 / 0.081
+30.94 / 0.923 / 0.052
+Table 4: LPIPS of each ablation at each iteration. Removing
+any module leads to a decrease in performance.
+Iteration
+1000
+5000
+Method
+MCBlock
+W/o Initialization
+W/o Block Partition
+W/o Block Selection
+W/o Block Rendering
+9000
+13000
+17000
+0.058
+0.061
+0.062
+0.060
+0.058
+0.052
+0.056
+0.056
+0.054
+0.053
+LPIPS
+0.242
+0.249
+0.243
+0.245
+0.249
+0.082
+0.096
+0.082
+0.093
+0.085
+0.066
+0.071
+0.069
+0.070
+0.068
+the early stages of training, as shown in Table 1, instead of the
+performance after convergence.
+5.5
+Ablation Study
+We evaluate the utilities of four parts of our algorithm, namely the
+texture-based tree structure initialization, the dynamic block
+pruning and expansion (block partition), the UCT-guided block
+selection (block selection), and the block-wise novel view synthesis
+(block rendering). Results are shown in Table 4.
+Tree Structure Initialization Ablation: Without the texturebased tree structure initialization, the MCTS-based training process
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+(a) W/o Block Partition & W/o Block Rendering
+Yunpeng Tan, Junlin Hao, Jiangkai Wu, Liming Liu, Qingyang Li, and Xinggong Zhang
+(b) W/ Block Partition & W/o Block Rendering
+(c) W/ Block Partition & W/ Block Rendering
+Figure 8: Rendered images with different strategy combinations. After applying the block partition strategy, the floaters are
+partially removed. After applying the block rendering strategy, the floaters are completely removed.
+5.6
+Leaf node
+93.7ms
+rendering
+Selection
+0.38ms
+& Expansion
+Additional
+overhead
+(5.90ms)
+Iteration
+Iteration
+Selection 0.49ms
+& Expansion
+(a) Zipnerf Overhead
+0.300
+0.200
+0.1000
+Additional
+overhead
+(1.69ms)
+(b) Mipnerf Overhead
+Mipnerf+Ours
+Mipnerf
+Mipnerf+ActRay
+0.100
+LPIPS
+Zipnerf+Ours
+Zipnerf
+Zipnerf+ActRay
+0.400
+Leaf node
+39.8ms
+rendering
+Backprop
+1.31ms
+& Pruning
+Backprop
+5.41ms
+& Pruning
+LPIPS
+starts from only root nodes. Although in the later training stage, its
+rendering quality gradually catches up, in the beginning, its LPIPS is
+high. It’s because, at the start, training blocks too large for an image
+region can only optimize the extremely low-frequency parameters,
+which is not enough for rendering high-frequency details.
+Block Partition Ablation: Without the block partition strategy,
+we use only the color variance as the partition criterion, which leads
+to a static block partition. In this way, the high-frequency parameters in simple-texture regions are always unsupervised, leading to
+large amounts of high-frequency artifacts in rendered images. As
+illustrated in Figure 8a and Figure 8b, our block partition strategy
+can eliminate some of the floaters in the sky region.
+Block Selection Ablation: Without the block selection strategy,
+we sample the blocks with the same probability. This still possesses
+a sampling bias towards complex-texture regions, because there
+are usually more blocks in complex-texture regions than in simpletexture regions. But among the complex-texture regions, it is close
+to the random sampling, which conducts unnecessary sampling in
+well-trained regions, leading to a decline in training efficiency.
+Block Rendering Ablation: Without the block rendering strategy, we conduct novel view synthesis through pixel-wise rendering
+like most NeRF works. It can be seen in Figure 8b that, although
+the block splitting can eliminate artifacts when rendering training
+images, the faulty parameters remaining in the model result in
+artifacts during novel view synthesis. But rendering simple-texture
+regions with large blocks only uses low-frequency model parameters, which are well-trained during training, leading to artifact-free
+rendered images, as shown in Figure 8c.
+0.075
+0.050
+0.025
+10
+20
+30
+Time(min)
+(c) Zipnerf Acceleration
+0
+50
+100
+Time(min)
+(d) Mipenrf Acceleration
+Figure 9: We measure the time consumption of each procedure of one iteration. We include (a) only 5.9% for the Zipnerf
+model on the bicycle scene and (b) only 4.1% for the Mipnerf
+model on the lego scene. This promises our advantage over
+random selection and ActRay. (c) For the Zipnerf model on
+the bicycle scene, MCBlock can reduce the training time to
+51.3% compared with the random ray selection strategy. (d)
+For the Mipnerf model on the lego scene, MCBlock can reduce the training time to 47.5%.
+Time Consumption
+We measure the time consumption of MCBlock and ActRay implemented in Nerfstudio on a single NVIDIA RTX 4090. The batch
+size is 8192 for Zipnerf and 1024 for Mipnerf. Figure 9a and Figure 9b show that MCBlock only holds a tiny overhead, which only
+accounts for 5.9% of the total iteration time for Zipnerf model and
+4.1% for Mipnerf model.
+This enables MCBlock to keep the training acceleration with the
+time as the horizontal axis. As shown in Figure 9c and Figure 9d,
+it can reduce the time to 47.5% while achieving the same quality.
+However, ActRay even decreases the training speed. There are two
+reasons: First, the loss propagation strategy of ActRay fails under
+outdoor scenes due to inaccurate depth estimation. Second, ActRay
+poses a large additional overhead of 24.8ms (for Zipnerf), which
+accounts for 20.9% of the total iteration time.
+6
+Conclusion
+Limitation: The advantage of MCBlock over other ray-sampling
+algorithms on the training set is much more noticeable than in novel
+view synthesis. That’s because the block-wise rendering strategy
+still slightly relies on the learned geometry. We may employ sparsity
+MCBlock: Boosting Neural Radiance Field Training Speed by MCTS-based Dynamic-Resolution Ray Sampling
+prior like SNeRG [14] to eliminate more high-frequency flaws, and
+apply pixel-wise rendering instead of block-wise rendering.
+We propose an MCTS-based dynamic-resolution ray-sampling
+algorithm, MCBlock, to accelerate NeRF training. It combines active
+sampling and dynamic-resolution sampling to improve the reconstruction quality of complex-texture regions while removing highfrequency artifacts for simple-texture regions. The experiments
+show that MCBlock can accelerate NeRF training by up to 2.33x,
+surpassing other ray-sampling algorithms. We hope MCBlock can
+bring us closer to real-time NeRF applications.
+References
+[1] Chong Bao, Yinda Zhang, Bangbang Yang, Tianxing Fan, Zesong Yang, Hujun
+Bao, Guofeng Zhang, and Zhaopeng Cui. 2023. Sine: Semantic-driven imagebased nerf editing with prior-guided editing field. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition. 20919–20929.
+[2] Jonathan T. Barron, Ben Mildenhall, Matthew Tancik, Peter Hedman, Ricardo
+Martin-Brualla, and Pratul P. Srinivasan. 2021. Mip-NeRF: A Multiscale Representation for Anti-Aliasing Neural Radiance Fields. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision (ICCV). 5855–5864.
+[3] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter Hedman. 2022. Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance
+Fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR). 5470–5479.
+[4] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter
+Hedman. 2023. Zip-NeRF: Anti-Aliased Grid-Based Neural Radiance Fields. In
+Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV).
+19697–19705.
+[5] Juan Luis Gonzalez Bello, Minh-Quan Viet Bui, and Munchurl Kim. 2024. ProNeRF:
+Learning Efficient Projection-Aware Ray Sampling for Fine-Grained Implicit
+Neural Radiance Fields. IEEE Access (2024).
+[6] Mark Boss, Raphael Braun, Varun Jampani, Jonathan T. Barron, Ce Liu, and
+Hendrik Lensch. 2020. NeRD: Neural Reflectance Decomposition from Image
+Collections. https://arxiv.org/abs/2012.03918 (2020).
+[7] Nicolas Brosse, Alain Durmus, and Eric Moulines. 2018. The promises and
+pitfalls of stochastic gradient Langevin dynamics. Advances in Neural Information
+Processing Systems 31 (2018).
+[8] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su. 2022. Tensorf:
+Tensorial radiance fields. In European Conference on Computer Vision. Springer,
+333–350.
+[9] Rémi Coulom. 2007. Efficient Selectivity and Backup Operators in Monte-Carlo
+Tree Search. In Computers and Games, H. Jaap van den Herik, Paolo Ciancarini,
+and H. H. L. M. (Jeroen) Donkers (Eds.). Springer Berlin Heidelberg, Berlin,
+Heidelberg, 72–83.
+[10] Devernay and Faugeras. 1994. Computing differential properties of 3-D shapes
+from stereoscopic images without 3-D models. In 1994 Proceedings of IEEE Conference on Computer Vision and Pattern Recognition. 208–213. doi:10.1109/CVPR.
+1994.323831
+[11] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht,
+and Angjoo Kanazawa. 2022. Plenoxels: Radiance fields without neural networks. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. 5501–5510.
+[12] Kohei Fukuda, Takio Kurita, and Hiroaki Aizawa. 2024. Important Pixels Sampling
+for NeRF Training Based on Edge Values and Squared Errors Between the Ground
+Truth and the Estimated Colors. Proceedings Copyright 102 (2024), 111.
+[13] Ayaan Haque, Matthew Tancik, Alexei Efros, Aleksander Holynski, and Angjoo
+Kanazawa. 2023. Instruct-NeRF2NeRF: Editing 3D Scenes with Instructions. In
+Proceedings of the IEEE/CVF International Conference on Computer Vision.
+[14] Peter Hedman, Pratul P. Srinivasan, Ben Mildenhall, Jonathan T. Barron, and Paul
+Debevec. 2021. Baking Neural Radiance Fields for Real-Time View Synthesis. In
+Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV).
+5875–5884.
+[15] Tao Hu, Shu Liu, Yilun Chen, Tiancheng Shen, and Jiaya Jia. 2022. Efficientnerf
+efficient neural radiance fields. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition. 12902–12911.
+[16] Xin Huang, Qi Zhang, Ying Feng, Xiaoyu Li, Xuan Wang, and Qing Wang. 2023.
+Local implicit ray function for generalizable radiance field representation. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition.
+97–107.
+[17] Brian KS Isaac-Medina, Chris G Willcocks, and Toby P Breckon. 2023. Exact-nerf:
+An exploration of a precise volumetric parameterization for neural radiance
+fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. 66–75.
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+[18] Zhang Jiakai, Liu Xinhang, Ye Xinyi, Zhao Fuqiang, Zhang Yanshun, Wu Minye,
+Zhang Yingliang, Xu Lan, and Yu Jingyi. 2021. Editable Free-Viewpoint Video
+using a Layered Neural Representation. In ACM SIGGRAPH.
+[19] Haian Jin, Isabella Liu, Peijia Xu, Xiaoshuai Zhang, Songfang Han, Sai Bi, Xiaowei
+Zhou, Zexiang Xu, and Hao Su. 2023. Tensoir: Tensorial inverse rendering. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition.
+165–174.
+[20] Yoshio Kato and Shuhei Tarashima. 2024. Plug-and-Play Acceleration of Occupancy Grid-based NeRF Rendering using VDB Grid and Hierarchical Ray
+Traversal. arXiv preprint arXiv:2404.10272 (2024).
+[21] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis.
+2023. 3d gaussian splatting for real-time radiance field rendering. ACM Transactions on Graphics 42, 4 (2023), 1–14.
+[22] Shakiba Kheradmand, Daniel Rebain, Gopal Sharma, Hossam Isack, Abhishek
+Kar, Andrea Tagliasacchi, and Kwang Moo Yi. 2024. Accelerating Neural Field
+Training via Soft Mining. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition. 20071–20080.
+[23] Levente Kocsis and Csaba Szepesvári. 2006. Bandit Based Monte-Carlo Planning.
+In Machine Learning: ECML 2006, Johannes Fürnkranz, Tobias Scheffer, and Myra
+Spiliopoulou (Eds.). Springer Berlin Heidelberg, Berlin, Heidelberg, 282–293.
+[24] Juuso Korhonen, Goutham Rangu, Hamed R Tavakoli, and Juho Kannala. 2025.
+Efficient NeRF Optimization-Not All Samples Remain Equally Hard. In European
+Conference on Computer Vision. Springer, 198–213.
+[25] Liangchen Li and Juyong Zhang. 2024. L0-Sampler: An L0 Model Guided Volume
+Sampling for NeRF. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition. 21390–21400.
+[26] Rui Li, Tobias Fischer, Mattia Segu, Marc Pollefeys, Luc Van Gool, and Federico
+Tombari. 2024. Know Your Neighbors: Improving Single-View Reconstruction
+via Spatial Vision-Language Reasoning. In CVPR.
+[27] Anji Liu, Jianshu Chen, Mingze Yu, Yu Zhai, Xuewen Zhou, and Ji Liu. 2020. Watch
+the Unobserved: A Simple Approach to Parallelizing Monte Carlo Tree Search.
+In International Conference on Learning Representations. https://openreview.net/
+forum?id=BJlQtJSKDB
+[28] Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and Christian Theobalt.
+2020. Neural sparse voxel fields. Advances in Neural Information Processing
+Systems 33 (2020), 15651–15663.
+[29] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi
+Ramamoorthi, and Ren Ng. 2021. NeRF: representing scenes as neural radiance
+fields for view synthesis. Commun. ACM 65, 1 (dec 2021), 99–106. doi:10.1145/
+3503250
+[30] E. Mouragnon, M. Lhuillier, M. Dhome, F. Dekeyser, and P. Sayd. 2006. Real Time
+Localization and 3D Reconstruction. In 2006 IEEE Computer Society Conference
+on Computer Vision and Pattern Recognition (CVPR’06), Vol. 1. 363–370. doi:10.
+1109/CVPR.2006.236
+[31] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. 2022. Instant neural graphics primitives with a multiresolution hash encoding. ACM
+transactions on graphics (TOG) 41, 4 (2022), 1–15.
+[32] Thomas Müller, Fabrice Rousselle, Jan Novák, and Alexander Keller. 2021. Realtime neural radiance caching for path tracing. arXiv preprint arXiv:2106.12372
+(2021).
+[33] Youngju Na, Woo Jae Kim, Kyu Beom Han, Suhyeon Ha, and Sung-eui Yoon. 2024.
+UFORecon: Generalizable Sparse-View Surface Reconstruction from Arbitrary
+and UnFavOrable Data Sets. arXiv preprint arXiv:2403.05086 (2024).
+[34] Radford M Neal et al. 2011. MCMC using Hamiltonian dynamics. Handbook of
+markov chain monte carlo 2, 11 (2011), 2.
+[35] Katja Schwarz, Yiyi Liao, Michael Niemeyer, and Andreas Geiger. 2020. Graf:
+Generative radiance fields for 3D-aware image synthesis. In Advances in Neural
+Information Processing Systems (NeurIPS), Vol. 33.
+[36] Aleksandrs Slivkins et al. 2019. Introduction to multi-armed bandits. Foundations
+and Trends® in Machine Learning 12, 1-2 (2019), 1–286.
+[37] Pratul Srinivasan, Boyang Deng, Xiuming Zhang, Matthew Tancik, Ben Mildenhall, and Jonathan T. Barron. 2020. NeRV: Neural Reflectance and Visibility Fields
+for Relighting and View Synthesis. https://arxiv.org/abs/2012.03927 (2020).
+[38] Cheng Sun, Min Sun, and Hwann-Tzong Chen. 2022. Direct Voxel Grid Optimization: Super-fast Convergence for Radiance Fields Reconstruction. In CVPR.
+[39] Shilei Sun, Ming Liu, Zhongyi Fan, Qingliang Jiao, Yuxue Liu, Liquan Dong, and
+Lingqin Kong. 2024. Efficient ray sampling for radiance fields reconstruction.
+Computers & Graphics 118 (2024), 48–59.
+[40] Matthew Tancik, Ethan Weber, Evonne Ng, Ruilong Li, Brent Yi, Justin Kerr,
+Terrance Wang, Alexander Kristoffersen, Jake Austin, Kamyar Salahi, Abhik
+Ahuja, David McAllister, and Angjoo Kanazawa. 2023. Nerfstudio: A Modular
+Framework for Neural Radiance Field Development. In ACM SIGGRAPH 2023
+Conference Proceedings (SIGGRAPH ’23).
+[41] Haithem Turki, Michael Zollhöfer, Christian Richardt, and Deva Ramanan. 2024.
+Pynerf: Pyramidal neural radiance fields. Advances in Neural Information Processing Systems 36 (2024).
+[42] Dor Verbin, Peter Hedman, Ben Mildenhall, Todd Zickler, Jonathan T Barron,
+and Pratul P Srinivasan. 2022. Ref-nerf: Structured view-dependent appearance
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+for neural radiance fields. In 2022 IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR). IEEE, 5481–5490.
+[43] Can Wang, Menglei Chai, Mingming He, Dongdong Chen, and Jing Liao. 2022.
+Clip-nerf: Text-and-image driven manipulation of neural radiance fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition.
+3835–3844.
+[44] Jiangkai Wu, Liming Liu, Yunpeng Tan, Quanlu Jia, Haodan Zhang, and Xinggong Zhang. 2023. ActRay: Online Active Ray Sampling for Radiance Fields. In
+SIGGRAPH Asia 2023 Conference Papers (Sydney, NSW, Australia) (SA ’23). Article
+97, 10 pages.
+[45] Lizhou Wu, Haozhe Zhu, Jiapei Zheng, Mengjie Li, Yinuo Cheng, Qi Liu, Xiaoyang
+Zeng, and Chixiao Chen. 2024. Hi-NeRF: A Multicore NeRF Accelerator With
+Hierarchical Empty Space Skipping for Edge 3-D Rendering. IEEE Transactions
+on Very Large Scale Integration (VLSI) Systems (2024).
+[46] WeiChen Yang, JinLong Shi, SuQin Bai, Qiang Qian, Zhen Ou, Dan Xu, Xin Shu,
+and YunHan Sun. 2024. Clear-Plenoxels: Floaters free radiance fields without
+neural networks. Knowledge-Based Systems 299 (2024), 112096.
+[47] Silong Yong, Yaqi Xie, Simon Stepputtis, and Katia Sycara. 2024. GL-NeRF: GaussLaguerre Quadrature Enables Training-Free NeRF Acceleration. arXiv preprint
+arXiv:2410.19831 (2024).
+[48] Hye Bin Yoo, Hyun Min Han, Sung Soo Hwang, and Il Yong Chun. 2024. Improving Neural Radiance Fields Using Near-Surface Sampling with Point Cloud
+Generation. Neural Processing Letters 56, 4 (2024), 214.
+[49] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa. 2020. pixelNeRF:
+Neural Radiance Fields from One or Few Images. https://arxiv.org/abs/2012.02190
+(2020).
+[50] Xiuming Zhang, Pratul P Srinivasan, Boyang Deng, Paul Debevec, William T
+Freeman, and Jonathan T Barron. 2021. NeRFactor: Neural Factorization of Shape
+and Reflectance Under an Unknown Illumination. https://arxiv.org/abs/2106.01970
+(2021).
+Yunpeng Tan, Junlin Hao, Jiangkai Wu, Liming Liu, Qingyang Li, and Xinggong Zhang
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+Synthetic
+Indoor
+Outdoor
+MCBlock: Boosting Neural Radiance Field Training Speed by MCTS-based Dynamic-Resolution Ray Sampling
+(a) Random
+(b) Mutli-Resolution
+(c) ActRay
+(d) MCBlock
+(e) GT
+Figure 10: Rendered images with various ray-sampling algorithms: (a) random ray sampling in NeRF [29], (b) coarse-to-fine
+multi-resolution ray sampling [41]. (c) active ray sampling (ActRay) [44], (d) our dynamic-resolution ray sampling (MCBlock)
+and (e) the ground truth. Rows respectively represent one outdoor scene (Outdoor), one indoor scene (Indoor) from the
+Mipnerf360 dataset [3], and one synthetic scene (Synthetic) from the Blender dataset[29]. The proposed dynamic-resolution
+ray-sampling method MCBlock can accelerate the training speed up to 2.33x and render images with finer geometry and
+illumination details under the same training time.
+the coarse-to-fine multi-resolution ray-sampling algorithm of PyNeRF, the active ray-sampling algorithm of ActRay, and the active
+dynamic-resolution ray-sampling algorithm of our MCBlock, and
+A Additional subjective results
+also ground truth images. In the first line, the leaves gradually
+Subjective results can be found in Figure 10. From top to bottom,
+become clearer. In the second line, MCBlock provides finer illumiwe show results of three different types of scenes, respectively the
+nation effects, such as the highlight of the bottle cap. In the third
+"bicycle" scene (an outdoor scene), the "counter" scene (an indoor
+line, MCBlock renders the clearest texture of the microphone cover.
+scene), and the "mic" scene (a synthetic scene). From left to right,
+we show rendered results of the random ray-sampling algorithm,
+Received 20 February 2007; revised 12 March 2009; accepted 5 June 2009

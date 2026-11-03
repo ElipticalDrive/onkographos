@@ -1,0 +1,496 @@
+I am thinking about adding a &quot;mesh&quot; primitive to Radiance, which would be the first new geometric primitive since the system&#39;s inception.  The purpose is to facilitate arbitrary shapes that are inherently complex, minimi&hellip;
+
+primitive plan for meshes - radiance-dev - discourse.radiance-online.org
+Radiance
+Learning resources
+Workshops
+primitive plan for meshes
+radiance-dev
+Greg_Ward1
+February 28, 2003, 3:51pm
+1
+I am thinking about adding a "mesh" primitive to Radiance, which would be the first new geometric primitive since the system's inception. The purpose is to facilitate arbitrary shapes that are inherently complex, minimize the associated memory costs, and improve rendering quality and efficiency. Currently, meshes are represented in memory as individual polygons, each of which incurs an overhead of 76 bytes, plus the space required by N double-precision 3-points, which is 76+3*3*8, or 124 bytes in the typical case of a triangle.
+In a well-constructed t-mesh, each non-boundary vertex has a valence of 6, which means that we can save a lot of memory by sharing vertices rather than repeating them in individual triangles. Furthermore, mesh vertices can be constrained to fit within a bounding box, permitting them to be represented by 32-bit integers rather than 64-bit doubles, which saves another factor of two. We have to add back in some overhead for vertex indexing, but I think I can reduce this to one byte per reference using face grouping -- I'll have to think about it some more. The biggest memory savings, though, comes when we specify vertex normals, which currently requires a separate texfunc primitive with 13 real arguments for each face (132 bytes with overhead).
+Adding it all together, a smoothed t-mesh with 10,000 vertices (small by today's standards) occupies about 5 Mbytes of memory. Moving to a mesh primitive, I should be able to fit the same mesh into about 150K, including acceleration data structures. This means we should be able to render objects over 30 times as complex as before.
+One of the main reasons I never implemented meshes in Radiance is that doing so makes it nearly impossible to leverage the existing ray intersection machinery. With the current arrangement, all the mesh triangles end up in the scene octree (or a local octree if the mesh is instanced), so rays find mesh polygons the same way they find other scene geometry, by traversing an octree. Introducing meshes means instead of encountering of a polygon in the octree, we encounter a mesh comprised of many, many polygons, and we have no idea which of these triangles to test for intersection. Testing them all would is a really bad idea from an efficiency standpoint.
+I've given this a little thought, and I think I've come up with an efficient acceleration structure that I can compute quickly on object load that will enable both mesh/octree and mesh/ray intersection testing. All I need to store is 3 orthonormal images on the mesh bounding box, where each image pixel contains the set of triangles that project onto that position (without hidden surface removal). We traverse the mesh bounding box with a ray using a 3DDA (3-diminetional differential analyzer), computing the intersection of the three orthonormal pixel sets at each 3-D voxel. If a triangle is in all three sets, that means we are within its local bounding box, and should test it for intersection with the ray.
+Another bonus we'll get with this implementation is something Radiance has never had -- local (u,v) coordinates! These can be stored wtih our vertices and made available for patterns and textures through the function language as new variables, Lu and Lv. Their values will be set in the mesh input file, for which I plan to use Wavefront .OBJ, since it already contains pretty much everything we need to specify a mesh without a lot of fluff. Here's the primitive specification I have in mind:
+mod mesh id
+1+ mesh_file.obj [xf ..]
+0
+0+ [smoothing_angle]
+The same mesh file may be used by multiple primitives, and all data will be shared as it is with the instance primitive that bears close resemblance. The optional smoothing_angle parameter sets the angle below which faces with unspecified normals will be automatically smoothed. The default value of 0 means that faces will not be smoothed. A value of 5 would smooth faces with initial surface normals less than 5 degrees apart. Values of 90 or greater would even smooth over sharp corners, which probably isn't a good idea.
+So, why am I writing all this? Well, mostly because I wanted to get some feedback from people before I went to all this trouble. Do we need meshes or not? Is what we have perfectly adequate, or has it been a nuisance all along? Am I going about it all wrong -- e.g., should I be using subdivision surfaces instead of t-meshes? Smoothed meshes are notorious for creating reflection and refraction problems due to inconsistent normals, which was my other excuse for avoiding them all these years.
+Please share your thoughts. I almost posted this to the general mailing list, but thought better of it. If you think it would benefit from a larger forum, I'll reconsider.
+-Greg
+Charles_Ehrlich
+February 28, 2003, 9:18pm
+2
+Two thoughts. Firstly, whatever approach (TMESH or subdivision surfaces) will be a fantastic improvement. I remember our work on the SFO Air Traffic Control tower and the inordinate amount of work I had to go through to simplify the USGS DEM geometry just to fit it into the model.
+Secondly, back when I first requested this feature twelve years ago, I never realized that it was the ray intersection algorithm causing the problem. Although my suggestion sounds like throwing the baby out with the bath water, would it be reasonable to overhaul the entire ray intersection algorithm and use path tracing instead? I'm sure path tracing will have different requirements upon the implementation of a complex surface mesh primitive, and considering that path tracing has already been implemented, this might be a good excuse to take a look at it and see how it works.
+-Chas
+Greg_Ward1
+February 28, 2003, 10:17pm
+3
+Charles Ehrlich wrote:
+Two thoughts. Firstly, whatever approach (TMESH or subdivision surfaces) will be a fantastic improvement. I remember our work on the SFO Air Traffic Control tower and the inordinate amount of work I had to go through to simplify the USGS DEM geometry just to fit it into the model.
+Secondly, back when I first requested this feature twelve years ago, I never realized that it was the ray intersection algorithm causing the problem. Although my suggestion sounds like throwing the baby out with the bath water, would it be reasonable to overhaul the entire ray intersection algorithm and use path tracing instead? I'm sure path tracing will have different requirements upon the implementation of a complex surface mesh primitive, and considering that path tracing has already been implemented, this might be a good excuse to take a look at it and see how it works.
+Technically, path tracing and ray intersection are separable problems. Path tracing addresses how shading is accomplished, including which secondary rays are traced, not how rays are traced (i.e., intersected with scene geometry). We could consider moving to a path tracing solution, but that would involve rewriting the renderer from scratch, and probably wouldn't improve accuracy or efficiency in the end. Path tracing works very well for a particular subset of problems, and has the nice property of being "unbiased," which means it always gets the right answer on average, only the noise gets quite high when it's having trouble. In certain cases, you can't get rid of the noise no matter how many paths you trace -- secondary light sources are a key example where this occurs. We'd no doubt end up building back in many of the features that have evolved in Radiance over the years, perhaps even ending up with something similar to what we have today.
+-Greg
+Georg_Mischler
+February 28, 2003, 10:46pm
+4
+Greg Ward wrote:
+I am thinking about adding a "mesh" primitive to Radiance, which would
+be the first new geometric primitive since the system's inception.
+Oooohhhh....!
+In a well-constructed t-mesh, each non-boundary vertex has a valence of
+6, which means that we can save a lot of memory by sharing vertices
+rather than repeating them in individual triangles.
+Since you're using the t-word, are we necessarily restricted to
+triangles here? The obj format looks like an "n-mesh", allowing
+for faces to reference an arbitrary number of vertices. As long
+as those faces are planar, I think it would be nice to allow that
+as well, and I can't see any obvious reason why your concept
+shouldn't be able to handle the general case.
+Furthermore, mesh
+vertices can be constrained to fit within a bounding box, permitting
+them to be represented by 32-bit integers rather than 64-bit doubles,
+which saves another factor of two. We have to add back in some
+overhead for vertex indexing, but I think I can reduce this to one byte
+per reference using face grouping -- I'll have to think about it some
+more.
+I'm not sure what exactly "face grouping" means in practise, but
+it sounds complicated... Will it still work efficiently for
+irregular geometry? I'm thinking about meshes where the indivual
+faces intersect and stretch all around the bounding box, making
+it impossible to assign each of them to a local region. Or is the
+term invoking the wrong images in my head?
+In general, I wouldn't hesitate to trade a few bytes anymore, if
+we got noticeable performance improvements in return. Cutting
+memory use in half (or better) may still be worth the effort, but
+if it's less than that, then I'd say that RAM is cheap, and time
+is expensive.
+All I need to store is 3 orthonormal images on the mesh
+bounding box, where each image pixel contains the set of triangles that
+project onto that position (without hidden surface removal). We
+traverse the mesh bounding box with a ray using a 3DDA (3-diminetional
+differential analyzer), computing the intersection of the three
+orthonormal pixel sets at each 3-D voxel. If a triangle is in all
+three sets, that means we are within its local bounding box, and should
+test it for intersection with the ray.
+Nice trick. What advantages does it have relative to building a
+sub-octree as for instances? I assume that with many (but not
+all) meshes, most of the voxels would be empty, but you still
+can't reduce their number, while an empty octree branch won't
+contain any further children. Or is it cheaper to traverse voxel
+sets instead of octrees? Since you want to generate them on the
+fly, I guess that at least that is significantly faster.
+Another bonus we'll get with this implementation is something Radiance
+has never had -- local (u,v) coordinates! These can be stored wtih our
+vertices and made available for patterns and textures through the
+function language as new variables, Lu and Lv.
+That might make it tempting to convert "normal" geometry into
+meshes too for certain applications...
+Their values will be
+set in the mesh input file, for which I plan to use Wavefront .OBJ,
+since it already contains pretty much everything we need to specify a
+mesh without a lot of fluff. Here's the primitive specification I have
+in mind:
+mod mesh id
+1+ mesh_file.obj [xf ..]
+0
+0+ [smoothing_angle]
+Looks fine to me.
+I especially like the fact that the obj format will also allow us
+to accept true free form surfaces later...
+Do we need meshes or not?
+For people importing DXF data from programs like Rhino or FormZ,
+they'll be a gift from heaven, even without side benefits like
+local u/v.
+Am I going about it all wrong -- e.g., should I
+be using subdivision surfaces instead of t-meshes?
+I had to look up the term, but... I'm not sure whether meshes vs.
+subdivision surfaces are really equivalent alternatives to each
+other.
+There may be implementation issues on your end that I don't see
+at the moment, but for me the big question is where the geometry
+data actually comes from. In practise, this will be any of the
+standard (or not so standard) CAD programs.
+It should be relatively straightforward for a modelling program
+like trueSpace to generate smoothed meshes from their subdivision
+surfaces on export. But it will be rather hard for any other CAD
+program to generate subdivision surfaces from their more
+traditional mesh data. As far as I am concerned, that would
+settle the question for Radiance.
+Smoothed meshes are
+notorious for creating reflection and refraction problems due to
+inconsistent normals, which was my other excuse for avoiding them all
+these years.
+People modelling optical lenses that way will have to blame
+themselfes for the results...
+-schorsch
+···
+--
+Georg Mischler -- simulations developer -- schorsch at schorsch com
++schorsch.com+ -- lighting design tools -- http://www.schorsch.com/
+Greg_Ward1
+March 1, 2003, 12:31am
+5
+Schorsch writes:
+Since you're using the t-word, are we necessarily restricted to
+triangles here? The obj format looks like an "n-mesh", allowing
+for faces to reference an arbitrary number of vertices. As long
+as those faces are planar, I think it would be nice to allow that
+as well, and I can't see any obvious reason why your concept
+shouldn't be able to handle the general case.
+There are a few problems with N-meshes. First, the vertices can be non-planar. Even slight non-planarity can result in visible cracks under certain conditions. The means for avoid cracking of non-planar geometry are generally not available within a ray-tracer. The second problem with quads and especially poly's with 5 sides or more is that they don't succumb easily to coordinate interpolation for smoothing and (u,v) lookups. Finally, and this is relatively minor, it takes a bit of extra storage and complexity to deal with N-ary polygons, to the point where it doesn't cost much more to break everything into triangles, which is what I plan to do if a quad (or higher) is delivered in the .OBJ file. (The cost of breaking quads into triangles is 1 byte/quad, and the intersection tests don't take much longer -- some people claim it's even faster if you optimize.)
+I'm not sure what exactly "face grouping" means in practise, but
+it sounds complicated... Will it still work efficiently for
+irregular geometry? I'm thinking about meshes where the indivual
+faces intersect and stretch all around the bounding box, making
+it impossible to assign each of them to a local region. Or is the
+term invoking the wrong images in my head?
+I came up with a fairly simple data structure for grouping vertices and faces together so each triangle takes three bytes for the three vertex references. Reference locality is based on face order in the file, and we solve the boundary problem by replicating vertices when we run out of room in a given group. The costs for doing so should be minor relative to the savings. Reading in the .OBJ file is a bit more complicated this way, but we get a savings of about 9 bytes/triangle over a more straightforward representation. This cuts the memory use nearly in half for a mesh without normals or texture coordinates, and 35% or so for a mesh with both normals and uv. Access time is unaffected. Since a big reason for switching to a mesh representation is to cut storage costs so we can handle scanned data and the like, I think it's worth the effort to do a good job of it, provided we don't compromise performance. So, we're agreed on that.
+We traverse the mesh bounding box with a ray using a 3DDA (3-diminetional differential analyzer), computing the intersection of the three orthonormal pixel sets at each 3-D voxel. If a triangle is in all three sets, that means we are within its local bounding box, and should test it for intersection with the ray.
+Nice trick. What advantages does it have relative to building a
+sub-octree as for instances? I assume that with many (but not
+all) meshes, most of the voxels would be empty, but you still
+can't reduce their number, while an empty octree branch won't
+contain any further children. Or is it cheaper to traverse voxel
+sets instead of octrees? Since you want to generate them on the
+fly, I guess that at least that is significantly faster.
+Well, having thought about it some more, I'm starting to waiver on this idea. The scheme I devised is quite a bit more complicated than leveraging the octree traversal code, which I'm starting to believe isn't as impossible as I first thought. I need a way of creating an octree on the fly, or creating a compiled mesh format (and converter) for quick loading. Also, I'm not convinced the 3DDA would be that much faster, if indeed it would be faster, since I'd be computing potentially large set intersections along the path. Such an approach would be sensitive to depth complexity, and in the worst case when densly meshed faces are aligned with the coordinate axes, we could get some really large sets (thousands of faces) that we'd have to intersect in a few places. An octree doesn't suffer this problem, and the existing structure would work as it is. I'm still pondering this.
+Looks fine to me.
+I especially like the fact that the obj format will also allow us
+to accept true free form surfaces later...
+What packages actually output Wavefront's free-form extensions? I do plan on making gensurf optionally output the new mesh format, since it's basically computing a free-form mesh with uv coordinates as it is.
+-Greg
+Charles_Ehrlich
+March 1, 2003, 12:58am
+6
+Greg,
+The following caught my attention:
+I need a way of creating an octree on the fly, or
+creating a compiled mesh format (and converter)
+for quick loading.
+This sounds like it would be useful for scene animations with a stay-in-memory version of the renderer, no?
+-Chas
+Greg Ward <[email protected]> wrote:Schorsch writes:
+Since you're using the t-word, are we necessarily restricted to
+triangles here? The obj format looks like an "n-mesh", allowing
+for faces to reference an arbitrary number of vertices. As long
+as those faces are planar, I think it would be nice to allow that
+as well, and I can't see any obvious reason why your concept
+shouldn't be able to handle the general case.
+There are a few problems with N-meshes. First, the vertices can be
+non-planar. Even slight non-planarity can result in visible cracks
+under certain conditions. The means for avoid cracking of non-planar
+geometry are generally not available within a ray-tracer. The second
+problem with quads and especially poly's with 5 sides or more is that
+they don't succumb easily to coordinate interpolation for smoothing and
+(u,v) lookups. Finally, and this is relatively minor, it takes a bit
+of extra storage and complexity to deal with N-ary polygons, to the
+point where it doesn't cost much more to break everything into
+triangles, which is what I plan to do if a quad (or higher) is
+delivered in the .OBJ file. (The cost of breaking quads into triangles
+is 1 byte/quad, and the intersection tests don't take much longer --
+some people claim it's even faster if you optimize.)
+I'm not sure what exactly "face grouping" means in practise, but
+it sounds complicated... Will it still work efficiently for
+irregular geometry? I'm thinking about meshes where the indivual
+faces intersect and stretch all around the bounding box, making
+it impossible to assign each of them to a local region. Or is the
+term invoking the wrong images in my head?
+I came up with a fairly simple data structure for grouping vertices and
+faces together so each triangle takes three bytes for the three vertex
+references. Reference locality is based on face order in the file, and
+we solve the boundary problem by replicating vertices when we run out
+of room in a given group. The costs for doing so should be minor
+relative to the savings. Reading in the .OBJ file is a bit more
+complicated this way, but we get a savings of about 9 bytes/triangle
+over a more straightforward representation. This cuts the memory use
+nearly in half for a mesh without normals or texture coordinates, and
+35% or so for a mesh with both normals and uv. Access time is
+unaffected. Since a big reason for switching to a mesh representation
+is to cut storage costs so we can handle scanned data and the like, I
+think it's worth the effort to do a good job of it, provided we don't
+compromise performance. So, we're agreed on that.
+We traverse the mesh bounding box with a ray using a 3DDA
+(3-diminetional differential analyzer), computing the intersection of
+the three orthonormal pixel sets at each 3-D voxel. If a triangle is
+in all three sets, that means we are within its local bounding box,
+and should test it for intersection with the ray.
+Nice trick. What advantages does it have relative to building a
+sub-octree as for instances? I assume that with many (but not
+all) meshes, most of the voxels would be empty, but you still
+can't reduce their number, while an empty octree branch won't
+contain any further children. Or is it cheaper to traverse voxel
+sets instead of octrees? Since you want to generate them on the
+fly, I guess that at least that is significantly faster.
+Well, having thought about it some more, I'm starting to waiver on this
+idea. The scheme I devised is quite a bit more complicated than
+leveraging the octree traversal code, which I'm starting to believe
+isn't as impossible as I first thought. I need a way of creating an
+octree on the fly, or creating a compiled mesh format (and converter)
+for quick loading. Also, I'm not convinced the 3DDA would be that much
+faster, if indeed it would be faster, since I'd be computing
+potentially large set intersections along the path. Such an approach
+would be sensitive to depth complexity, and in the worst case when
+densly meshed faces are aligned with the coordinate axes, we could get
+some really large sets (thousands of faces) that we'd have to intersect
+in a few places. An octree doesn't suffer this problem, and the
+existing structure would work as it is. I'm still pondering this.
+Looks fine to me.
+I especially like the fact that the obj format will also allow us
+to accept true free form surfaces later...
+What packages actually output Wavefront's free-form extensions? I do
+plan on making gensurf optionally output the new mesh format, since
+it's basically computing a free-form mesh with uv coordinates as it is.
+-Greg
+···
+_______________________________________________
+Radiance-dev mailing list
+[email protected]
+http://www.radiance-online.org/mailman/listinfo/radiance-dev
+Georg_Mischler
+March 1, 2003, 2:20am
+7
+Greg Ward wrote:
+There are a few problems with N-meshes. First, the vertices can be
+non-planar. Even slight non-planarity can result in visible cracks
+under certain conditions.
+That's obvious, and comparable to what already happens with
+non-planar polygons now.
+The second
+problem with quads and especially poly's with 5 sides or more is that
+they don't succumb easily to coordinate interpolation for smoothing and
+(u,v) lookups.
+Ah, that's an aspect I didn't think about.
+break everything into
+triangles, which is what I plan to do if a quad (or higher) is
+delivered in the .OBJ file.
+Well, if you triangulize internally, that still means we'll
+accept non-triangles as input. This is a good thing, because
+we'll be able to use a lot of existing data unchanged. Many such
+files will have been exported from regular (gridded) meshes, and
+are likely to contain quadrilaterals.
+The data producer will only have to bother with the splitting in
+those case where the direction of the split matters.
+I came up with a fairly simple data structure for grouping vertices and
+faces together so each triangle takes three bytes for the three vertex
+references. Reference locality is based on face order in the file, and
+we solve the boundary problem by replicating vertices when we run out
+of room in a given group.
+So you're simply splitting up the mesh at an arbitrary point,
+into two or more individual meshes. The positive effect will be
+smallest for meshes that have been converted from regular grids,
+because the faces will appear in scanning order and you'll be
+duplicating a relatively large number of vertices along the grid
+lines. For grids with more than 128 columns, you'll actually be
+duplicating almost all vertices (except for the top and bottom
+rows).
+would be sensitive to depth complexity, and in the worst case when
+densly meshed faces are aligned with the coordinate axes, we could get
+some really large sets (thousands of faces) that we'd have to intersect
+in a few places.
+That could happen quite often with topographical models, or with
+certain styles of architecture. In fact, any massive facade with
+windows could end up like that, if I should manage to turn ACIS
+solid modelling entities from Autocad into meshes.
+What packages actually output Wavefront's free-form extensions?
+I have no idea. I just checked the format specs to see what I
+would need to do with Radout and dxf2rad, and saw that it's
+possible. Another positive point is that the format seems to be
+fairly popular, because it is simple and straightforward, and has
+been around for a long time.
+-schorsch
+···
+--
+Georg Mischler -- simulations developer -- schorsch at schorsch com
++schorsch.com+ -- lighting design tools -- http://www.schorsch.com/
+Greg_Ward1
+March 1, 2003, 4:44am
+8
+Schorsch writes:
+So you're simply splitting up the mesh at an arbitrary point,
+into two or more individual meshes. The positive effect will be
+smallest for meshes that have been converted from regular grids,
+because the faces will appear in scanning order and you'll be
+duplicating a relatively large number of vertices along the grid
+lines. For grids with more than 128 columns, you'll actually be
+duplicating almost all vertices (except for the top and bottom
+rows).
+You are right of course. I thought about this a bit more, and some sorting of the data is desirable. An octree would make this fairly simple if we generated it first. Even if the data were organized perfectly, 1/4 of the vertices would still have to be replicated if I subdivide (as I planned) into blocks of 256 vertices. Larger blocks would have a smaller proportion of border vertices, but would require more memory for references, to the point where I may as well give up and use 4 bytes/reference. The other option is to have special ways to index border vertices from another block, and this may solve the problem if I can "sort it out." I'll have to think on it some more, that much is clear.
+-Greg
+Peter_Apian-Bennewi1
+March 1, 2003, 9:43am
+9
+Greg Ward wrote:
+> Looks fine to me.
+> I especially like the fact that the obj format will also allow us
+> to accept true free form surfaces later...
+What packages actually output Wavefront's free-form extensions? I do
+plan on making gensurf optionally output the new mesh format, since
+it's basically computing a free-form mesh with uv coordinates as it is.
+uv coordinates, reading Wavefront at least partially directly, better
+modelling of smooth surfaces, smaller memory footprint - positive.
+Personally, my VRML experiences have not been memory limited so far (160000
+polygons, http://www.pab-opto.de/n/k5/fahrzeug/scene.pic.pc.jpg.stamped ).
+After all, normal interpolation is used to limit the number of polygons in
+the first place. Of course, using a texfunc per polygon is technically not
+compact, but it works (see below). But VRML is typically not as
+polygon-intense as other CAD formats, so my view is limited.
+I wonder whether someone on the general list actually experienced memory
+limits with smooth surfaces, to back up the memory argument.
+Much more annoying than memory consumption is the dysfunctionality of
+texfuncs with glass and trans. Introducing a new "smooth" primitive without
+working support for all materials would be sad, as smooth objects will
+likely include reflectors and transparent surfaces. (despite that normal
+interpolation is slightly off for mirror reflections).
+If it wasn't Greg to mentioned it, I'd pointed out that the limited number
+of primitives is a major advantage of Radiance in terms of extensions and
+validation.
+Is a translator really out of question ? If we're faced with CAD generated,
+cumbersome huge vertex sets for tessellated surfaces, maybe it pays to
+implement one of the common vertex-reorganizing programs used for scanned
+geometry into the translator and boil it down.
+-Peter
+···
+--
+pab-opto, Freiburg, Germany, www.pab-opto.de
+Georg_Mischler
+March 1, 2003, 11:43am
+10
+Greg Ward wrote:
+Schorsch writes:
+> So you're simply splitting up the mesh at an arbitrary point,
+> into two or more individual meshes. The positive effect will be
+> smallest for meshes that have been converted from regular grids,
+> because the faces will appear in scanning order and you'll be
+> duplicating a relatively large number of vertices along the grid
+> lines. For grids with more than 128 columns, you'll actually be
+> duplicating almost all vertices (except for the top and bottom
+> rows).
+You are right of course. I thought about this a bit more, and some
+sorting of the data is desirable. An octree would make this fairly
+simple if we generated it first. Even if the data were organized
+perfectly, 1/4 of the vertices would still have to be replicated if I
+subdivide (as I planned) into blocks of 256 vertices. Larger blocks
+would have a smaller proportion of border vertices, but would require
+more memory for references, to the point where I may as well give up
+and use 4 bytes/reference. The other option is to have special ways to
+index border vertices from another block, and this may solve the
+problem if I can "sort it out." I'll have to think on it some more,
+that much is clear.
+Isn't that rather a side issue of the whole feature anyway?
+It might be worth to just implement it in the straightforward
+way, and only then to look into further optimizations.
+I think that keeping the code reasonably simple should also be a
+design goal, that should only be thrown out for significant gains
+in either speed or memory use. Neither of those seems very
+obvious for the moment in the context of face grouping. Investing
+a lot of thinking and coding into another 20 or 30% after we
+already raised the bar by more than an order of magnitude doesn't
+sound like a priority task to me...
+-schorsch
+···
+--
+Georg Mischler -- simulations developer -- schorsch at schorsch com
++schorsch.com+ -- lighting design tools -- http://www.schorsch.com/
+Jack_de_Valpine
+March 3, 2003, 2:36pm
+11
+Hi All,
+If the question is what packages output Wavefront .obj format, then one would be Rhino from Robert McNeel & Associates (www.rhino3d.com). We have used Rhino succesfully in the past for dealing with complex curved surface modeling and conversion with obj2rad. The resulting octrees do tend to be large. It would certainly great to be able to do more sophisticated texturing on this kind of geometry. I am not sure whether 3DS Max or Viz export .obj?
+-Jack
+Greg Ward wrote:
+[snip out most of the important stuff ;->]
+···
+What packages actually output Wavefront's free-form extensions? I do plan on making gensurf optionally output the new mesh format, since it's basically computing a free-form mesh with uv coordinates as it is.
+-Greg
+Randolph_Fritz
+March 3, 2003, 7:19pm
+12
+I don't know about the free-form extensions, but FormZ outputs OBJ format--I've used it with Radiance. I think it very well might use the extensions; FormZ has an extensive set of tools for modelling curving forms. In few weeks, during spring break, I might be able to make inquiries.
+Randolph
+···
+On Monday, March 3, 2003, at 06:36 AM, Jack de Valpine wrote:
+What packages actually output Wavefront's free-form extensions? I do plan on making gensurf optionally output the new mesh format, since it's basically computing a free-form mesh with uv coordinates as it is.
+Greg_Ward1
+March 3, 2003, 10:48pm
+13
+schorsch writes:
+Isn't that rather a side issue of the whole feature anyway?
+It might be worth to just implement it in the straightforward
+way, and only then to look into further optimizations.
+I think that keeping the code reasonably simple should also be a
+design goal, that should only be thrown out for significant gains
+in either speed or memory use. Neither of those seems very
+obvious for the moment in the context of face grouping. Investing
+a lot of thinking and coding into another 20 or 30% after we
+already raised the bar by more than an order of magnitude doesn't
+sound like a priority task to me...
+Actually, memory use is the central issue in my mind. (Don't take that too literally.) If memory weren't an issue, there'd be no real reason to implement a mesh primitive. The problems that Peter A-B mentions regarding certain material types not working properly with interpolated normals is an embarrassment. In fact, I don't know why this bug stood for so long -- I had a look at the relevant code, and the solution was quite simple. It should be fixed in the upcoming release, due out very shortly!
+My main purpose for implementing meshes is to provide support for very large, complicated geometries, as one might obtain from a laser range scanner, for example. Scanned meshes are required for many archeological reconstructions and other scenes captured from real geometry, and each mesh may contain hundreds of thousands or even millions of triangles. Memory and its influence on virtual memory performance are the main rendering challenges. If I give up on local vertex references in faces, which I may have to unless I can resolve some sticky problems, the memory use doesn't go up by 30% -- it triples! Pointers take the majority of space in a standard mesh representation, and I would like to minimize these expenses any way I can.
+-Greg
+Randolph_Fritz
+March 3, 2003, 11:39pm
+14
+I think it would be valuable for the kind of architectural design that disposes multiple buildings on a relatively large non-urban site, as well. I don't know that anyone's tried that with Radiance.
+Randolph
+···
+On Monday, March 3, 2003, at 02:48 PM, Greg Ward wrote:
+My main purpose for implementing meshes is to provide support for very large, complicated geometries, as one might obtain from a laser range scanner, for example. Scanned meshes are required for many archeological reconstructions and other scenes captured from real geometry, and each mesh may contain hundreds of thousands or even millions of triangles.
+Charles_Ehrlich
+March 3, 2003, 11:48pm
+15
+Greg,
+What about a heirarchical boundary representation? One challenge of optimization is to minimize repeated vertex points, and another is to optimize the ray intersection calculation. Perhaps this idea would address both?
+If the mesh at the top level is idealized as an n-sided polygon surrounding the entire collection of polygons, then as the ray "gets closer," the smaller "rings" of polygons are further resolved into smaller and smaller "idealized" n-sided polygons, until you are only left with one "loop" of triangles or polygons. I'm imagining that a clever data structure could be developed where each successive "loop" of triangles can reference the vertex lists (by index) one level "up" and one level "down" the tree, thereby eliminating duplication. The mesh would have to be pre-processed to order the vertexes accordingly, and would have to assume that all polygons are edge coherent.
+Make any sense? Or am I just not grocking the problem?
+-Chas
+Greg Ward <[email protected]> wrote:schorsch writes:
+Isn't that rather a side issue of the whole feature anyway?
+It might be worth to just implement it in the straightforward
+way, and only then to look into further optimizations.
+I think that keeping the code reasonably simple should also be a
+design goal, that should only be thrown out for significant gains
+in either speed or memory use. Neither of those seems very
+obvious for the moment in the context of face grouping. Investing
+a lot of thinking and coding into another 20 or 30% after we
+already raised the bar by more than an order of magnitude doesn't
+sound like a priority task to me...
+Actually, memory use is the central issue in my mind. (Don't take that
+too literally.) If memory weren't an issue, there'd be no real reason
+to implement a mesh primitive. The problems that Peter A-B mentions
+regarding certain material types not working properly with interpolated
+normals is an embarrassment. In fact, I don't know why this bug stood
+for so long -- I had a look at the relevant code, and the solution was
+quite simple. It should be fixed in the upcoming release, due out very
+shortly!
+My main purpose for implementing meshes is to provide support for very
+large, complicated geometries, as one might obtain from a laser range
+scanner, for example. Scanned meshes are required for many
+archeological reconstructions and other scenes captured from real
+geometry, and each mesh may contain hundreds of thousands or even
+millions of triangles. Memory and its influence on virtual memory
+performance are the main rendering challenges. If I give up on local
+vertex references in faces, which I may have to unless I can resolve
+some sticky problems, the memory use doesn't go up by 30% -- it
+triples! Pointers take the majority of space in a standard mesh
+representation, and I would like to minimize these expenses any way I
+can.
+-Greg
+···
+_______________________________________________
+Radiance-dev mailing list
+[email protected]
+http://www.radiance-online.org/mailman/listinfo/radiance-dev
+Greg_Ward1
+March 11, 2003, 7:51pm
+16
+I checked in a working version of the new obj2mesh program and the my "mesh" primitive implementation. Obj2mesh lives in the src/ot directory, since it's really more of an octree compiler than a translator. I left the possibility there for creating other "mesh compilers," perhaps building off the simple language I used for tmesh2rad or MGF. The main problem with this sort of translation is that there's no recovery of materials, since a mesh must be modified by a single material. I'll probably have to add an option to obj2mesh to pull out geometry by group or material for that reason.
+All the shenanigans to save mesh memory were quite successful. In the simple test I did on an unsmoothed 747 model at least, the memory required by the mesh was less than the memory of the octree scaffolding. For a smoothed mesh with uv coordinates, I expect the octree and the mesh data structures to use about the same amount of memory. The rendering time is also about what it was with the original model, though I plan to do some more testing to confirm this. I expect the rendering of smoothed meshes to be substantially faster, and I'll add a new .OBJ output option to gensurf to verify this.
+Once I add an option to gensurf and do a little more testing, we can make a 3.5 release on CVS!
+-Greg

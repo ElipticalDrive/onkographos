@@ -1,0 +1,270 @@
+Split out of #88, where it was the finding rather than one of the listed items. The number At the export's real resolution (256), on the benchmark's enclosure: simplify 81%, contour 15%, grid 4%, bounds 0%, project 0% and simplification ...
+
+Adaptive contouring: stop generating the 93% of triangles that collapse at zero error · Issue #111 · kmatzen/sinter · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Adaptive contouring: stop generating the 93% of triangles that collapse at zero error #111
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Adaptive contouring: stop generating the 93% of triangles that collapse at zero error#111
+Copy link
+Labels
+enhancementNew feature or requestNew feature or requestperformancePerformance improvementsPerformance improvements
+Description
+kmatzen
+opened on Aug 1, 2026
+Issue body actions
+Split out of #88, where it was the finding rather than one of the listed items.
+The number
+At the export's real resolution (256), on the benchmark's enclosure:
+```
+simplify 81%,  contour 15%,  grid 4%,  bounds 0%,  project 0%
+```
+and simplification takes 1,069,344 triangles down to 50,694.
+So the export spends 15% of its time generating a million triangles and 81% of it throwing 95% of them away. Everything in #88 made both halves of that cheaper; none of it made the million triangles unnecessary.
+Why the obvious fixes do not apply
+Parallelism — QEM edge collapse is inherently sequential. Mesher/export performance: ~22s to export, and bounds re-proved on every edit #88's A4 was measured and gains nothing, partly for this reason.
+Faster simplification — Mesher/export performance: ~22s to export, and bounds re-proved on every edit #88's A1 already took the data structures from JS objects and string keys to typed arrays, for 1.35×. There is no second 1.35× of the same kind available.
+Skipping empty cells — Mesher/export performance: ~22s to export, and bounds re-proved on every edit #88's A2 was measured: ~2%, because empty cells are cheap. The cost is in the cells that have geometry.
+Not decimating — not an option. Decimation is error-bounded at 5% of a voxel and removes 95% of the triangles; without it the STL is twenty times larger for no fidelity gain.
+The proposal
+evaluateCPUWithProgress already builds an octree and already knows which blocks it could not prove empty — that active-block information is returned today and unused beyond a cheap iteration hint. Dual contouring runs on the dense grid underneath it and emits a quad per sign-changing edge, so a flat face 64 voxels across becomes ~8,000 triangles that QEM then collapses back to 2.
+Contouring the octree instead — emitting one vertex per leaf rather than per voxel, with the standard crack-patching between differently-sized neighbours — produces something close to the post-simplification triangle count directly. The interval enclosure that decides subdivision is already sound and already tested, so the octree's structure is trustworthy input.
+Why this is not small
+Crack-patching across level boundaries is the part that goes wrong, and it goes wrong as holes in an exported mesh.
+dualContour's manifold-preserving multi-patch handling (PATCHES, cellBase, the per-edge patch map) all assumes uniform cells.
+The QEF vertex placement and the crease-preservation work in simplify.ts would need to keep working against a non-uniform cell size.
+Gates that already exist
+dualContour.test.ts — watertight, edge-manifold, outward-oriented, two-sheets-in-one-cell, and the crossing-accuracy contract.
+simplify.test.ts — sharp-feature and crease preservation.
+npm run bench with a committed corpus, so the claim is checkable.
+e2e/sdf-parity.spec.ts — unaffected, since this changes the mesher rather than the field.
+Worth doing only if export time is still a complaint after #88's work and the resolution setting from #105. Filed so the finding is not lost.
+Activity
+kmatzen
+added
+enhancementNew feature or requestNew feature or request
+performancePerformance improvementsPerformance improvements
+on Aug 1, 2026
+kmatzen commented on Aug 2, 2026
+kmatzen
+on Aug 2, 2026
+OwnerAuthor
+More actions
+The proposal above does not work, and here is the measurement
+evaluateCPUWithProgress already builds an octree and already knows which blocks it could not prove empty ... Contouring the octree instead — emitting one vertex per leaf rather than per voxel
+I wrote that without checking what the octree's leaves actually are. They are voxels.
+Instrumented subdivide's leaf-size distribution, res 192, Open-Top Enclosure — an object that is essentially six flat faces and some fillets:
+```
+size  64:        2
+size  32:       64
+size  16:      360
+size   8:      884
+size   4:   20,644
+size   2:   74,504
+size   1:  612,032   <-- 86% of all leaves
+```
+612,032 voxel-level leaves, against 602,496 triangles out of the contour. Essentially one-to-one. The octree is already fully subdivided along the entire surface, and it has to be: the stop test at gridEval.ts:110 is enclosure.lo > 0 || enclosure.hi < 0, which asks "might the surface be in this block", not "is the surface curved here". A block straddling a perfectly flat face contains the surface, so the interval contains zero, so it recurses — all the way down.
+So there is no adaptivity in this octree to harvest. "Emit one vertex per leaf" and "emit one vertex per voxel" are the same thing on the case this issue is about. Same failure mode as #88's A2 and A4 and #89's item 7: the issue assumed a structure already carried the information, and it did not.
+What the cost actually is
+Re-profiled while I was in here (res 192, enclosure, 602,496 input triangles):
+```
+quadrics + adjacency + heap seed      971 ms    setup
+collapses at ZERO error             ~3730 ms    602,496 -> 43,848 tris
+collapses within the 5% budget       ~754 ms     43,848 -> 29,856 tris
+```
+93% of the input is collapsed at zero error — those triangles carry no information at all. That part is real and does support this issue's motivation. But it also means the previous framing ("simplification is 81%, make it cheaper") was pointing at the wrong lever, and so was mine.
+#118 took the bookkeeping out of that middle row (1.22× here, output verified bit-identical). What is left is genuine QEF math per neighbour per collapse, so there is no more to win without generating fewer triangles.
+What the work actually is
+Adaptive contouring needs a second subdivision criterion the octree does not currently compute — stop descending when the surface inside the block is well approximated by one plane, i.e. a QEF residual or normal-variation test — and then Ju et al.'s bottom-up node collapse plus the cellProc/faceProc/edgeProc recursion that makes the result crack-free by construction.
+That is a substantially bigger and riskier piece of work than "reuse the octree we already have", which is what this issue currently claims. The gates listed at the bottom are still the right ones, and the failure mode is still silent holes in an exported mesh.
+Retitling and rescoping this rather than leaving the misleading premise in place. Not starting it on the strength of the numbers above alone — the honest next step is a prototype that reports triangle count and watertightness before anything is wired into the export path.
+kmatzen
+changed the title [-]Contour on the octree instead of the dense grid[/-] [+]Adaptive contouring: stop generating the 93% of triangles that collapse at zero error[/+] on Aug 2, 2026
+kmatzen
+added a commit that references this issue on Aug 2, 2026
+Make the simplifier stop re-walking triangles it already collapsed, a…
+...
+560b514
+kmatzen commented on Aug 2, 2026
+kmatzen
+on Aug 2, 2026
+OwnerAuthor
+More actions
+Sizing prototype: the payoff is real, and bigger than I could show earlier
+Built a throwaway prototype that answers the one question worth answering before anyone writes crack-patching: if the octree were collapsed bottom-up by QEF residual (Ju et al. 2002), how many vertices would survive? It builds hermite data per surface cell, merges QEFs up the octree, and collapses a node when one vertex still fits within the same error budget the simplifier uses. It does not produce a mesh — it counts.
+Res 128, error budget voxel * 0.05 (what the exporter uses today):
+preset
+contour today
+adaptive
+reduction
+vs QEM
+rms QEM → adaptive
+Wall Bracket
+64,366
+2,716
+23.7x
+1.31x
+0.0134 → 0.0133
+Open-Top Enclosure
+133,890
+15,410
+8.7x
+2.14x
+0.0145 → 0.0189
+Vent Grid
+184,634
+31,281
+5.9x
+1.69x
+0.0178 → 0.0235
+M3 Standoff
+101,240
+22,016
+4.6x
+2.20x
+0.0059 → 0.0053
+Knob
+93,024
+39,053
+2.4x
+2.99x
+0.0096 → 0.0077
+Fidelity is RMS distance of each mesh's vertices from the true SDF surface, in voxels. Max error was identical to production on every preset, and adaptive came out better than QEM on two of them.
+So the original claim — that this "produces something close to the post-simplification triangle count directly" — holds. It lands within 1.3–3.0x of what QEM achieves, at the same fidelity, without generating the million triangles first.
+A wrong turn worth recording
+My first run of this said the opposite: 3–5x worse than QEM on vertex count and ~10x worse on fidelity, which read as a clear "close this issue".
+That was entirely an artefact of the prototype. It used a single linear interpolation for edge crossings where dualContour.ts uses 4 iterations of Illinois false position, and a gradient epsilon of voxel * 0.5 where production uses min(dx,dy,dz) * 0.01 — 50x too large. The tell was that the reported error did not move at all across a 16x sweep of the collapse budget, which meant it was not coming from collapsing.
+It polluted both metrics at once, and not in the same direction: bad crossings put vertices further from the surface and inflated the QEF residuals that decide whether a node may collapse, so it under-collapsed and looked inaccurate. Fixing the crossings alone took Wall Bracket from 10,548 surviving vertices to 2,716.
+Worth stating plainly because the failure mode is generic: a prototype that approximates the thing it is measuring against will flatter or condemn it for reasons that have nothing to do with the question.
+What is still unproven
+The numbers above are the best case, and the risky part is untouched:
+No topology or manifold checks. A real implementation needs them and they only ever prevent collapses, so true counts are somewhat higher than these.
+No mesh is produced. Crack-patching between differently-sized neighbours — the part that fails as holes in an exported STL — is not prototyped at all. Watertightness is completely unmeasured.
+Vertex-to-surface distance is a lower bound on mesh error: a mesh can have every vertex on the surface and still bulge between them.
+Where that leaves the issue
+The sizing case is now made: the mesher would generate 2.4–23.7x fewer vertices, so simplification — ~80% of export time at res 256 — would receive proportionally less input. That is worth doing.
+The correction from my previous comment stands unchanged: the existing octree carries no adaptivity to harvest (86% of its leaves are single voxels), so this still needs a planarity subdivision criterion plus crack-free cellProc/faceProc/edgeProc recursion. What has changed is that the payoff at the end of that work is now measured rather than assumed.
+Next step, if this is picked up: prototype the crack-free contouring itself and run it against dualContour.test.ts's existing watertight / edge-manifold / outward-oriented gates. Those gates already exist and are the ones that would catch the failure mode.
+kmatzen commented on Aug 2, 2026
+kmatzen
+on Aug 2, 2026
+OwnerAuthor
+More actions
+Prototype passes every gate, and there is a way to do this without crack-patching
+Built the contouring prototype. It passes all of dualContour.test.ts's gates on analytic shapes and on five presets, and it is 1.0–2.4x faster end to end.
+The important part is that it avoids the risk this issue was blocked on.
+Octree vertex clustering instead of adaptive recursion
+Ju et al.'s adaptive dual contouring needs cellProc/faceProc/edgeProc recursion with fiddly index tables, and its failure mode is holes in an exported STL. That is what made this issue "not small".
+That machinery turns out to be avoidable. Quads are already emitted per sign-changing grid edge, each referencing four cells through vertexFor (dualContour.ts:326). If cells inside a collapsed octree node simply hand back the same vertex, connectivity is untouched: there is still exactly one quad per sign-changing edge and neighbouring quads still share endpoints. The output is a quotient of a mesh that was already watertight, so cracks cannot arise by construction — there is nothing to patch.
+Ring corners that collapse together are dropped in place, preserving winding; a ring with fewer than three distinct vertices had no area and is never emitted. That is where the triangle count actually falls — the quad is not removed by a later pass, it is never created.
+The real risk moves from cracks to manifoldness, when two surface sheets land in one node. Handled by never letting a multi-patch cell join a cluster, which is the same reason dualContour splits patches in the first place.
+Gates (same ones production contouring must pass)
+shape
+dualContour
+adaptive
+watertight
+non-manifold
+wound
+max dev
+sphere @32
+3,792 t
+3,672 t
+yes
+0
+out
+0.032 vox
+box @32
+4,800 t
+12 t
+yes
+0
+out
+0.000 vox
+torus @32
+2,720 t
+2,692 t
+yes
+0
+out
+0.082 vox
+The box collapsing to exactly 12 triangles — the minimal cube — with volume exactly 1000.00 for a 10x10x10 box and zero deviation is the result this issue was after. Sphere and torus barely move, correctly: curved surfaces should not collapse at a tight budget.
+Sphere volume is within 0.21% of analytic. All five presets: watertight, 0 non-manifold edges, outward wound, 1.8–13.5x fewer triangles at res 64.
+End-to-end timing (res 128, contour + simplify)
+preset
+today
+adaptive
+speedup
+max dev today → adaptive
+Open-Top Enclosure
+13,699 ms
+5,648 ms
+2.43x
+0.075 → 0.075 vox
+M3 Standoff
+9,875 ms
+4,422 ms
+2.23x
+0.080 → 0.080 vox
+Vent Grid
+17,377 ms
+8,039 ms
+2.16x
+0.081 → 0.081 vox
+Wall Bracket
+6,860 ms
+3,259 ms
+2.10x
+0.054 → 0.054 vox
+Knob
+8,027 ms
+6,150 ms
+1.0–1.44x
+0.027 → 0.031 vox
+Max deviation is identical on four of five. That is the number that matters for a print, and clustering does not move it. RMS is within ~35% either way (better on two presets, worse on three). The final mesh is also smaller at the same max error — Wall Bracket 4,148 → 1,240 triangles, Enclosure 14,420 → 7,188.
+Simplification is still worth running afterwards; it just receives 2–13x less input, which is where the time goes. Knob is the honest worst case: heavily curved, little collapses, roughly break-even.
+Caveats
+The prototype's contour stage is slower than production's (2,863 vs 2,160 ms on Wall Bracket) because clustering is bolted on with Maps and extra passes. All the win currently comes from simplification, so a real implementation should be faster than these numbers, not slower.
+It contains at least one thing that would not survive review: positions.push(...newPos) blows the stack on large meshes.
+Measured at res 64 and 128 only. The export runs at 256, where simplification's share is larger — the win should be bigger there, but that is extrapolation, not measurement.
+Gates run are the existing ones. A production change needs the full suite, the golden images, and the bench corpus.
+Where this leaves the issue
+The approach is viable and the risk is far lower than this issue assumed, because the crack-patching can be skipped entirely. Worth building properly.
+kmatzen
+added a commit that references this issue on Aug 3, 2026
+Stop generating the triangles the simplifier only has to take away (#124
+...
+a381926
+kmatzen commented on Sep 7, 2026
+kmatzen
+on Sep 7, 2026
+OwnerAuthor
+More actions
+Closed by #124 (a381926). Production export now passes a nonzero clustering budget into dualContour, so octree vertex clustering removes planar zero-error triangles before QEM while preserving the existing edge connectivity. The merged coverage includes watertightness, edge-manifoldness, outward winding, volume, isosurface deviation, multi-patch protection, deterministic triangle counts, dense-path identity, and the benchmark corpus. The implementation achieves the issue’s outcome without the crack-patching recursion proposed originally.
+kmatzen
+closed this as completedon Sep 7, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or requestperformancePerformance improvementsPerformance improvements
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,180 @@
+# PSVDAG–SVDAG Conversion Algorithm
+
+Also called: Hierarchical Data Structure conversion, PSVDAG to SVDAG conversion, PSVDAG to SVDAG transformation, Pointerless Sparse Voxel Directed Acyclic Graph to Sparse Voxel Directed Acyclic Graph conversion
+
+## Overview
+The PSVDAG–SVDAG Conversion Algorithm transforms a Pointerless Sparse Voxel Directed Acyclic Graph (PSVDAG) into a Sparse Voxel Directed Acyclic Graph (SVDAG) [S1]. While PSVDAGs use variable-length Labels/Callers and intermittent binary encoding to minimize storage, SVDAGs use constant-length 32-bit pointers and uninterrupted binary sequences to enable efficient rendering and editing [S1]. This conversion replaces the pointerless structure with a pointer-based one, allowing for Child Subtree Merging (CSM) and random access, at the cost of increased memory usage (inflation factor 3.01x–3.70x) [S1].
+
+## How it works
+The algorithm processes the linearized binary representation of the PSVDAG (obtained via depth-first traversal) in a single pass, progressively generating SVDAG nodes [S1]. It performs four main tasks:
+1. Extract PSVDAG internal node binary representations and transform them into compact uninterrupted sequences [S1].
+2. Transform PSVDAG Child Node Masks (CHNM) into SVDAG CHNM, converting 2-bit Header Tags (HT) to 1-bit indicators [*HT] [S1].
+3. Generate child node pointers for SVDAG internal nodes, replacing missing PSVDAG pointers [S1].
+4. Replace PSVDAG Labels and Callers with SVDAG pointers using a Label Transformation Table (LTT) to allow CSM [S1].
+
+### Data Structures
+**SVDAG Internal Node Layout**
+Each SVDAG internal node is stored as a contiguous block of bytes [S1]. The layout is:
+* **CHNM**: 8 bits (1-bit [*HT] for each of the 8 children).
+* **Reserved**: 24 bits (for 32-bit alignment of the CHNM part).
+* **PTS**: Array of pointers, size $1$ to $8$, each 32 bits long.
+
+The total size of an SVDAG internal node in bytes is calculated as:
+$$ SVDAG_{nodesize} = (ACHNC + 2) \times 4 \text{ [B]} $$
+Where $ACHNC$ is the number of active child nodes decremented by 1 (i.e., $ACHNC = \text{ActiveChildren} - 1$) [S1]. In bits, the size is $(ACHNC + 2) \times 32$ [S1].
+
+**Operating Memory Structure**
+During conversion, each node is represented in memory by a 336-bit structure `node`:
+* `adr`: 32-bit target address in the output SVDAG.
+* `achnc`: 8-bit number of active child nodes.
+* `chnm`: 32-bit node CHNM (stores the 8-bit mask).
+* `pts`: Array of 8 pointers, 32-bit each.
+* `ptpt`: 8-bit pointer count (number of pointers actually stored in `pts`) [S1].
+
+An array `nodes` holds one `node` structure for each level of internal nodes [S1].
+
+**Label Transformation Table (LTT)**
+The LTT maps PSVDAG Labels and Callers to SVDAG addresses [S1]. It stores triplets `[level, SIZ, VAL]` mapped to the 32-bit address `adr` assigned to the child node [S1].
+* **Semi-out-of-core**: LTT stored in main memory (RAM) [S1].
+* **Out-of-core**: LTT stored in secondary storage (disk) [S1].
+
+### Parameters
+* `maxl`: Number of node levels in the PSVDAG input. Range: `maxl > 0` [S1].
+* `lmax`: Maximum level index, defined as `maxl - 1`. Leaf nodes are at level `maxl - 1`. Internal nodes are at levels `0` to `maxl - 2` [S1].
+* `nnadr`: Next Node Address. Tracks the next free 32-bit aligned address in the output SVDAG stream. Initialized to 0 [S1].
+* `level`: Current processing level. Initialized to 0 [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Global state
+output_buffer = []
+nnadr = 0
+level = 0
+lmax = maxl - 1
+nodes = [None] * maxl
+LTT = {}
+
+def convert_psvdag_to_svdag(input_stream, maxl):
+    """Main entry point. input_stream: Bit stream of linearized PSVDAG."""
+    global nnadr, level, lmax
+    if maxl == 1:
+        process_leaf_node(input_stream)
+    elif maxl > 1:
+        process_internal_node(input_stream)
+
+def process_leaf_node(stream):
+    """Step 2: Process a leaf node."""
+    global nnadr
+    leaf_bits = read_bits(stream, 8)
+    write_bits(output_buffer, leaf_bits, 8)
+    write_bits(output_buffer, 0, 24)  # Reserved bits
+    nnadr += 4
+
+def process_internal_node(stream):
+    """Step 3: Process an internal node."""
+    global nnadr, level, lmax
+    level += 1
+    current_node = {'adr': 0, 'achnc': 0, 'chnm': 0, 'pts': [0]*8, 'ptpt': 0}
+    nodes[level] = current_node
+
+    achnc_raw = read_bits(stream, 3)
+    current_node['achnc'] = achnc_raw + 1
+    current_node['adr'] = nnadr
+    nnadr += (current_node['achnc'] + 1) * 4
+    current_node['ptpt'] = 0
+    current_node['chnm'] = 0
+
+    while current_node['ptpt'] < current_node['achnc']:
+        ht = read_bits(stream, 2)
+        idx = current_node['ptpt']
+
+        if ht == 0:  # Case 0: HT '00' - Passive Child
+            update_chmn_bit(current_node['chnm'], idx, 0)
+            current_node['ptpt'] += 1
+            # No pointer added, no recursion.
+
+        elif ht == 1:  # Case 1: HT '01' - Active Child / Label
+            update_chmn_bit(current_node['chnm'], idx, 1)
+            current_node['pts'][idx] = nnadr
+            current_node['ptpt'] += 1
+            siz, val = read_label(stream)  # [G] Reads variable-length [siz, val]
+            LTT[(level, siz, val)] = nnadr
+            if level < lmax - 2:
+                process_internal_node(stream)
+            elif level == lmax - 2:
+                process_leaf_node(stream)
+
+        elif ht == 2:  # Case 2: HT '10' - Caller / Shared Child
+            update_chmn_bit(current_node['chnm'], idx, 1)
+            siz, val = read_caller(stream)  # [G] Reads variable-length [siz, val]
+            adr = LTT.get((level, siz, val))
+            current_node['pts'][idx] = adr
+            current_node['ptpt'] += 1
+
+        elif ht == 3:  # Case 3: HT '11' - Active Child / Unique
+            update_chmn_bit(current_node['chnm'], idx, 1)
+            current_node['pts'][idx] = nnadr
+            current_node['ptpt'] += 1
+            if level < lmax - 2:
+                process_internal_node(stream)
+            elif level == lmax - 2:
+                process_leaf_node(stream)
+
+    write_inode(current_node)
+
+def update_chmn_bit(chnm, index, value):
+    if value:
+        chnm |= (1 << index)
+    else:
+        chnm &= ~(1 << index)
+    return chnm
+
+def read_bits(stream, n):
+    """Read n bits from stream. [G]"""
+    pass
+
+def write_bits(buffer, value, n):
+    """Write n bits to buffer. [G]"""
+    pass
+
+def read_label(stream):
+    """Read variable-length Label [siz, val]. [G]"""
+    pass
+
+def read_caller(stream):
+    """Read variable-length Caller [siz, val]. [G]"""
+    pass
+
+def write_inode(node):
+    """Write finalized internal node to output."""
+    write_bits(output_buffer, node['chnm'] & 0xFF, 8)
+    write_bits(output_buffer, 0, 24)
+    for i in range(node['achnc']):
+        write_bits(output_buffer, node['pts'][i], 32)
+```
+
+### Edge Cases and Pitfalls
+* **Intermittent vs. Uninterrupted Encoding**: PSVDAG internal nodes are encoded as intermittent binary sequences (with child nodes inserted), while SVDAG nodes are uninterrupted. The algorithm must compact these sequences during extraction [S1].
+* **HT Mapping**: PSVDAG HT '00' becomes SVDAG [*HT] '0'. PSVDAG HT '01', '10', '11' become SVDAG [*HT] '1'. Omitted HTs in PSVDAG are inserted as [*HT] '0' in SVDAG [S1].
+* **Unique Child Pointer**: For HT '11' (unique child), the address `nnadr` is stored in the node but not kept in operating memory after generation, as it is referenced only once [S1].
+* **Label vs. Caller**: For HT '01' (Label), `nnadr` is stored in both the SVDAG pointer and the LTT. For HT '10' (Caller), the address is retrieved from the LTT [S1].
+* **ACHNC Definition**: $ACHNC$ is the number of active child nodes decremented by 1. This value determines the size of the SVDAG node [S1].
+
+## Operating characteristics
+* **Time Complexity**: The algorithm processes the PSVDAG in a single pass. Performance depends on whether the LTT is in RAM (semi-out-of-core) or disk (out-of-core) [S1].
+* **Memory Complexity**: The algorithm uses a small amount of memory for the `nodes` array (one per level) and the LTT. The LTT size varies by scene complexity [S1].
+* **Measured Performance**:
+  * **Angel Lucy (128³)**: SOoC 0.28s (112 KB/s), OoC 0.30s (106 KB/s) [S1].
+  * **Skull (512³)**: SOoC 0.81s (124 KB/s), OoC 0.85s (118 KB/s) [S1].
+  * **Porsche (512³)**: SOoC 0.44s (129 KB/s), OoC 0.47s (129 KB/s) [S1].
+* **Scaling**: Higher voxelization resolutions lead to smaller inflation rates (memory increase) [S1].
+* **Strengths**: Enables CSM and random access; semi-out-of-core version is faster due to higher data throughput [S1].
+* **Limitations**: SVDAG size is larger than PSVDAG (inflation 3.01x–3.70x) [S1].
+
+## Background
+The PSVDAG–SVDAG Conversion Algorithm was proposed to bridge the gap between the space-efficient but hard-to-access PSVDAG structure and the rendering-friendly SVDAG structure [S1]. The algorithm allows the use of PSVDAG for storage and SVDAG for rendering, converting on the fly or as a preprocessing step [S1]. It is used in volume rendering applications where sparse voxel grids are processed [S1].
+
+## Sources
+[S1] Transforming Hierarchical Data Structures – a PSVDAG–SVDAG Conversion Algorithm, https://doi.org/10.12700/aph.18.8.2021.8.3, fetched 2026-10-30

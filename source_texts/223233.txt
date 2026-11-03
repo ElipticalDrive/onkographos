@@ -1,0 +1,404 @@
+Contribute to ZihanWG/VulkanEngine development by creating an account on GitHub.
+
+Ray-traced sun shadows with ray query, shadow maps as fallback by ZihanWG · Pull Request #59 · ZihanWG/VulkanEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ZihanWG
+commented
+Oct 16, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+On a device with ray query, the main pass can now ask the scene whether the sun is visible instead of reading the cascades or the virtual shadow map: one ray per shaded pixel, from the fragment shader, against a top-level acceleration structure rebuilt each frame from the draw items that cast. Off by default (rayTracedShadows.enabled). The shadow maps stay as the fallback, and on a frame that traces the cascades are skipped unless something else still reads them.
+On Sponza, tracing is 13.0% cheaper per frame than the cascades with the camera still, and skipping the cascades takes off another 9.9% on frames where they would have redrawn (numbers below).
+Full write-up: docs/ray_traced_shadows.md.
+Commits
+Negotiate ray query and wrap acceleration structures. VK_KHR_ray_query, VK_KHR_acceleration_structure and VK_KHR_deferred_host_operations join the optional-extension table, with their feature structs chained into device creation and a row in the capability report. --disable-ray-query declines all three, so a GPU with ray tracing can be created exactly as one without it. A decline is its own outcome in the selection policy. rhi::VulkanAccelerationStructure owns a structure and its storage buffer.
+Trace sun shadows with ray queries. One BLAS per mesh primitive at LOD 0, built at startup; one TLAS, bound once at set 0 binding 16 and rebuilt in place. What casts follows the cascades' rules: opaque items are FORCE_OPAQUE instances, cutouts run the masked shadow pass's own alpha test on each candidate, and blended items cast nothing. The ray-query fragment shader is a second compile of simple_bindless.frag.
+Cast from the skinned mesh by refitting its BLAS. A compute pass skins the demo mesh's positions each frame that traces, and its BLAS is built once and refitted after that.
+Skip the cascades on frames that trace when nothing else reads them. The main pass, the phase-two re-draw, the transparent pass and the skinned draw all run the ray-query shader, so CSMShadowPass and its caster cull are neither declared nor recorded unless volumetric fog, probe capture, the ray-traced comparison view, the VSM cascade-depth view or the new rayTracedShadows.renderCascades setting needs them. The decision is taken once per frame and answers both the graph declaration and the recorder, so the two cannot disagree. The cascade cache commits a resident key only when a cascade is drawn, so turning tracing off redraws only what changed meanwhile. renderCascades exists for the A/B that separates what tracing costs from what skipping saves.
+Bound shadow rays by the scene's extent, not the camera's far plane. The far plane limits which receivers are drawn, not how far away their occluders are, and the TLAS holds casters outside the view: a tall caster further than the far plane along the sun direction would have left a visible receiver lit. The ray now runs the diagonal of the union of every drawn item's world bounds plus the skinned mesh's, with a margin, and invalid bounds fall back to a long ray rather than a zero-length one.
+Sample every frame when measuring, and let a run freeze the scene. The measurement tooling the numbers below depend on. Sponza's MainHDRPass is bimodal frame to frame, and that made the drift gate fail at 11.7% and 4.9%. A per-frame diagnostic showed every frame doing identical work: the slow ones carry about 0.6 ms of GPU time from another process, charged to whichever pass is running. That cannot be fixed in the renderer, so the statistic has to cope with it. --gpu-timings-every-frame (and measure_gpu.py --every-frame) prints timings for every frame, about 11000–12000 samples per 75-second run instead of ~64, with the warm-up dropped by an elapsed stamp on each block. --freeze-animation holds the demo lights, skinned pose and animated transforms still; the scene line then reads sponza+frozen, so a series cannot pool frozen and animated runs. The investigation is in docs/profiling.md.
+Measure ray-traced sun shadows against the cascades on Sponza. The cost section of the doc.
+Cost
+RTX 3080 Ti Laptop, clocks pinned 800/7001, --scene sponza with its animation frozen, 1280x720, p10 over every frame, A/B/A/B with the control repeated.
+Tracing against the cascades. The camera is still, so the cascade cache hits and neither side draws cascades; this compares reading the shadow, one ray against the cascade lookup and its filtering. Control drift 0.04%, 21744 and 24795 samples.
+Pass
+cascades
+traced
+Delta
+Frame total
+5.316
+4.625
+−0.691 (−13.0%)
+MainHDRPass
+4.290
+3.401
+−0.889 (−20.7%)
+RayTracingSceneBuild
+—
+0.233
+traced only
+Skipping the cascades when they would redraw. Both sides trace; A keeps the cascades (renderCascades) with the cascade cache off, so all four redraw every frame, as on any frame the camera moves. Control drift 0.33%, 22126 and 24481 samples.
+Pass
+traced + cascades
+traced
+Delta
+Frame total
+5.177
+4.664
+−0.513 (−9.9%)
+CSMShadowPass
+0.564
+0.000
+−0.564
+ShadowGpuCulling
+0.029
+—
+A only
+MainHDRPass
+3.372
+3.423
++0.051 (+1.5%)
+MainHDRPass moved 0.051 ms the wrong way in the second series although both sides run the same shader. It clears its own control drift, but nothing in the change explains it, so Frame total is the quoted number. A first attempt at the second series moved the camera with --camera-orbit instead; the orbit left the building and the control drifted 2.2%, so it was discarded. The measurement runs are Release, where validation is compiled out, so they say nothing about validation.
+Synchronization
+The graph orders build -> trace through two new buffer accesses on the TLAS storage buffer. Its write mask had no acceleration-structure write bit, so that edge would have emitted no barrier; a test pins it.
+The previous frame's traces and builds are ordered by an explicit barrier at the top of the build, because the graph rebuilds buffer state every frame.
+BLAS writes reach the rays through global barriers, since a ray reads every BLAS the TLAS references and the graph's barrier names only the TLAS buffer.
+Skipping the cascades removes passes from the graph rather than adding any edge.
+Synchronization validation does not see any of these edges. Removing each one and running under --sync-validation reported nothing while the layer's self-test fired. The barriers are pinned instead by an api_dump of the recorded frames and by the graph tests.
+Verification
+RTX 3080 Ti Laptop, Debug with validation, --deterministic, frame 30 at 1280x720. Zero validation errors and a clean render graph backstop in every run.
+Check
+Result
+tracing off, against main
+0/921600 pixels differ
+enabled with --disable-ray-query, against disabled
+0/921600 pixels differ
+only the skinned mesh casting, exposure pinned: ray vs VSM, cascades vs VSM
+1572 vs 4078 pixels differ
+Sponza: ray vs VSM, cascades vs VSM
+1.6% vs 40.7% of pixels differ
+tracing with the cascades skipped, against renderCascades forcing them, on default, sunlit and stress
+0/921600 pixels differ
+ray bounded by the scene's extent, against the far plane, on default, sunlit and stress
+0/921600 pixels differ
+Intel UHD 770 (no ray query)
+extensions reported not exposed, shadow maps in use
+On --scene sunlit and Sponza the traced image agrees with the virtual shadow map and the cascades are the outlier: they miss casters there. That predates this change and is recorded in the doc; this path is what exposed it.
+tools/dev/verify_renderer.sh full passed on Windows at the third commit (690 tests, no MSVC warnings, Release build), and fast passes at the head (693 tests, no warnings). CI is green at the head on Windows, macOS and Linux, ASan/UBSan, clang-format, the lavapipe pixel gates and all six sweep shards.
+Lavapipe takes the traced path. Mesa 25.2.8's lavapipe reports ray query on (max 16777215 instances, scratch alignment 8) alongside the bindless path, and builds the acceleration structures at startup, so it meets every condition tracing needs. The sweep runs three legs on it, all passing: enabled, enabled with both debug views and the cascades rendered, and enabled with --disable-ray-query. Headless CI therefore exercises the traced path on every push, not only the fallback.
+Not in this change
+Turning it on by default. That is a separate decision: it is faster on Sponza, but it also changes the image wherever the cascades miss casters.
+Keeping the TLAS on frames where nothing it holds changed. It is rebuilt every frame that traces: 0.233 ms on Sponza, a third of what tracing saves there.
+Soft shadows. One ray toward a light with no extent.
+The skinned BLAS is refitted, never rebuilt, after its first build.
+Why the cascades miss casters on sunlit and Sponza.
+ZihanWG
+added 3 commits
+October 15, 2026 20:05
+Negotiate ray query and wrap acceleration structures
+…
+1db5dc6
+```
+The first step toward ray-traced sun shadows: the device now takes
+VK_KHR_ray_query, VK_KHR_acceleration_structure and
+VK_KHR_deferred_host_operations when it has them, with their feature
+structs chained into device creation, and reports the result. Nothing
+renders differently yet -- a capture with ray query on and one with it
+declined match at 0/921600 pixels on the RTX 3080 Ti Laptop.
+
+The three rows come from rayQueryExtensionRequests rather than a literal
+in VulkanDevice.cpp, so the table the device is created from is the one
+the tests exercise. The feature structs are queried only for extensions
+the device exposes, and the entry points are checked after creation the
+same way the indirect-count path is.
+
+--disable-ray-query declines all three rows, not only the top one, so a
+GPU with ray tracing can be created exactly as one without it. A decline
+is its own outcome in the selection policy: it propagates to dependents
+like any refusal, but the report says "declined by a startup flag", and
+absence still outranks it, since declining an extension the device lacks
+changed nothing.
+
+VulkanAccelerationStructure owns a structure and its storage buffer and
+destroys them in that order. It is not used yet; the scene build in the
+next step is its first caller.
+
+Run on three device states, each with 0 validation errors: RTX with ray
+query on, RTX with --disable-ray-query, and the Intel UHD 770, which
+reports all three extensions as not exposed.
+```
+Trace sun shadows with ray queries, keeping the shadow maps as fallback
+…
+fa7f9b8
+```
+On a device with ray query the main pass can now ask the scene whether
+the sun is visible: one ray per shaded pixel against a top-level
+acceleration structure rebuilt each frame from the draw items that cast.
+Off by default (rayTracedShadows.enabled); the cascades keep rendering
+underneath, so this step claims no speedup.
+
+What casts follows the cascades' rules on the same draw-item list.
+Opaque items are FORCE_OPAQUE instances; cutouts are FORCE_NO_OPAQUE and
+run the masked shadow pass's own alpha test on each candidate, reached
+through the instance's custom index, which is its frameDataIndex. Blended
+items cast nothing. The skinned mesh is not in the structure yet.
+
+There is one TLAS, bound once into the shared bindless environment set
+at binding 16, and rebuilt in place. The render graph orders build ->
+trace through two new buffer accesses; the previous frame's traces and
+builds are ordered by an explicit barrier at the top of the build,
+because the graph rebuilds buffer state every frame. The graph's write
+mask lacked the acceleration-structure write bit, which would have made
+build -> trace emit no barrier at all; a test pins it now.
+
+Synchronization validation does not see either edge: removing each and
+running under --sync-validation reported nothing while the layer's
+self-test fired. An api_dump shows both barriers recorded where intended.
+
+Verified on an RTX 3080 Ti Laptop with validation on, zero errors in
+every run: tracing off and --disable-ray-query both match the previous
+build at 0/921600 pixels. With every caster isolated out and exposure
+pinned, the only difference from the cascades is the skinned mesh's
+shadow. On --scene sunlit and Sponza the traced image agrees with the
+virtual shadow map (Sponza: 1.6% of pixels differ, against 40.7% for
+the cascades), so the cascades are missing casters there; that predates
+this change and is recorded in docs/ray_traced_shadows.md.
+```
+Cast ray-traced shadows from the skinned mesh by refitting its BLAS
+…
+026f6aa
+```
+The skinned mesh skins in its vertex stage and keeps nothing, so rays had
+no deformed triangles to hit and it cast no ray-traced shadow. A compute
+pass (skin_positions.comp) now writes its skinned positions each frame
+that traces with it shown, from the same half of the same palette as
+simple_skinned.vert, and its BLAS is built from them once and refitted
+after that (ALLOW_UPDATE). It joins the TLAS under the cascades' own
+condition for it, as an opaque instance on the reserved object slot.
+
+Order inside RayTracingSceneBuild: the entry barrier, the pre-skin
+dispatch, a barrier from its writes to the build's reads, the build or
+refit, a global barrier from it to the TLAS build and the rays, then the
+TLAS build. The positions buffer and the BLAS are single and rewritten
+in place, like the TLAS; the entry barrier now names the compute stage
+so the previous refit's reads are ordered against this pre-skin.
+
+That barrier also names the fragment stage now. The graph's barrier
+before the rays covers the TLAS buffer only, while a ray reads every
+BLAS the TLAS references, so the BLASes built at startup were formally
+unordered against the rays in the previous step. Global barriers cover
+them, and the refitted one, instead.
+
+The layout constants move into ray_traced_shadows.glsl, shared by the
+fragment shader's alpha test and the pre-skin dispatch.
+
+Verified on an RTX 3080 Ti Laptop, validation on, zero errors: the
+default scene with tracing off still matches the previous build at
+0/921600 pixels. With only the skinned mesh casting and exposure pinned,
+the traced frame differs from the virtual shadow map on 1572 pixels and
+the cascades on 4078, and the three regions that differ read the same
+under the ray and VSM. An api_dump shows a full build on the first
+traced frame and MODE_UPDATE after it, each after the pre-skin dispatch.
+```
+chatgpt-codex-connector
+Bot
+commented
+Oct 16, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codex Review Summary
+This comment shows the latest Codex review activity on this pull request.
+Review
+Status
+Commit
+Review trigger
+📝 Code Review
+✅ Completed 2026-10-16T02:04:32.503362Z
+026f6aa
+PR opened
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review" or "@codex security review".
+Codex reacts with 👀 while any review is running, comments if it has suggestions, and reacts with 👍 once all reviews finish with no findings.
+chatgpt-codex-connector
+Bot
+reviewed
+Oct 16, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 026f6aacdc
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+src/renderer/RendererFrame.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ZihanWG
+added 4 commits
+October 16, 2026 10:12
+Skip the cascades on frames that trace when nothing else reads them
+…
+984defa
+```
+With ray-traced sun shadows active, the main pass, the phase-two
+re-draw, the transparent pass and the skinned draw all run the
+ray-query shader and never sample the cascade array. The cascades are
+now neither declared nor recorded on such a frame unless fog, probe
+capture, the ray-traced comparison view, the VSM cascade-depth view, or
+the new rayTracedShadows.renderCascades setting needs them.
+
+The decision is latched once per frame after the probe batch is chosen
+and answers both anyCascadeShadowRedrawRequired, which the graph
+declaration reads, and the recorder's per-cascade check, so the two
+cannot disagree. The cascade cache commits a resident key only when a
+cascade is drawn, so a skipped frame leaves the keys describing what
+the image still holds and turning tracing off redraws only what changed.
+
+renderCascades exists for the A/B that separates what tracing costs
+from what skipping saves; it is persisted, swept in CI with the debug
+views, and has a checkbox under Shadows.
+
+Skipping changes no pixel: with tracing on, cascades skipped against
+cascades forced on match at 0/921600 pixels on --scene default, sunlit
+and stress (RTX 3080 Ti Laptop, validation on, zero errors, clean
+render graph backstop).
+```
+Bound shadow rays by the scene's extent, not the camera's far plane
+…
+ced98be
+```
+The shadow ray stopped at the camera's far plane, on the reasoning that
+nothing past it is drawn. That bounds which receivers are drawn, not how
+far away their occluders are, and the TLAS holds every caster whether in
+view or not: a tall caster further than the far plane along the sun
+direction from a visible receiver would have left that receiver lit.
+
+The ray now runs the diagonal of the union of every drawn item's world
+bounds, plus the skinned mesh's, with a margin
+(rayTracedShadowRayLength). Every receiver and every caster lies inside
+those bounds, so no occluder of a shaded pixel can be further away.
+Invalid bounds fall back to a long ray rather than a zero-length one,
+which would light everything.
+
+The presets all fit inside their far planes, so traced captures of
+--scene default, sunlit and stress are unchanged at 0/921600 pixels
+(RTX 3080 Ti Laptop, validation on, zero errors).
+```
+Sample every frame when measuring, and let a run freeze the scene
+…
+c2195bd
+```
+On Sponza at the 800 MHz pin the drift gate failed a cascades-against-
+traced series at 11.7% and 4.9%. MainHDRPass there is bimodal frame to
+frame, and p10 over ~64 once-a-second samples is the 6th or 7th lowest,
+which is where the lower mode runs out.
+
+A per-frame diagnostic showed the two modes are not two workloads. Every
+frame drew the same 67 draw items and 164927 triangles with the same LOD
+histogram and occlusion state, and frame slot did not matter. The slow
+frames carry about 0.6 ms of wall-clock time that lands in whichever pass
+is running: when it misses MainHDRPass, the rest of the frame carries it
+instead. It arrives at the same rate under MAILBOX, IMMEDIATE and FIFO,
+and frames free of it match 1 - 144/169 of the run, the refresh of the
+monitor against the frame rate. Hiding the window changed it without
+removing it. It is another process sharing the GPU, so there is nothing
+in the renderer to fix; the statistic has to cope with it.
+
+--gpu-timings-every-frame prints a compact GPU timings block (elapsed
+time, frame total, the scopes) for every frame, with the full block still
+once a second, so each frame is printed exactly once. measure_gpu.py
+--every-frame passes it through and drops the warm-up by each block's
+elapsed stamp, falling back to counting blocks for older logs. The same
+series now holds its control to 0.04% over ~22000 samples a side.
+
+--freeze-animation holds the demo lights, the skinned pose and animated
+object transforms still while the frame clock runs, so content is not a
+variable. It does not remove the bimodality. The scene line reads
+"+frozen", so the harness refuses to pool a frozen run with an animated
+one.
+```
+Measure ray-traced sun shadows against the cascades on Sponza
+…
+3ab53ee
+```
+RTX 3080 Ti Laptop, clocks pinned 800/7001, Sponza frozen at 1280x720,
+p10 over every frame, A/B/A/B.
+
+Tracing against the cascades, camera still so the cascade cache hits:
+frame total 5.316 -> 4.625 ms (-13.0%), MainHDRPass -20.7%, after paying
+0.233 ms for the TLAS. Control drift 0.04%.
+
+Skipping the cascades when they would redraw (cache off, both sides
+tracing): frame total 5.177 -> 4.664 ms (-9.9%), CSMShadowPass 0.564 ms
+and its caster cull gone. Control drift 0.33%. MainHDRPass moved 0.051 ms
+the wrong way, which the change does not explain, so the frame total is
+the quoted number.
+
+An orbiting-camera version of the second series is recorded as rejected:
+the orbit left the building and the control drifted 2.2%.
+```
+Hide details
+View details
+ZihanWG
+merged commit 122fdb6
+into
+main
+Oct 16, 2026
+13 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+ZihanWG
+mentioned this pull request
+Oct 16, 2026
+Keep the ray-traced TLAS on frames where nothing it holds changed
+#60
+Merged
+ZihanWG
+deleted the
+feature/ray-query-sun-shadows
+branch
+October 18, 2026 02:01
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

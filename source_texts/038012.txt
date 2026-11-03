@@ -1,0 +1,296 @@
+Contribute to fesoliveira014/c3d.c3l development by creating an account on GitHub.
+
+Render: scatter local lights in the volumetric fog volume by fesoliveira014 · Pull Request #458 · fesoliveira014/c3d.c3l · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+fesoliveira014
+commented
+Oct 12, 2026
+Copy link
+Copy Markdown
+Owner
+Part of #357. Local lights now scatter in the volumetric fog volume.
+Change
+Inject shader (fog_scattering.comp.glsl). At each froxel midpoint, the shader runs the same select_lights cluster lookup that surfaces use and loops the selected lights. It skips:
+the sun index, which is already added;
+lights without LIGHT_VOLUMETRIC;
+lights whose sample_light radiance is zero.
+Each remaining light adds albedo × HG(dot(ray, light_dir), fog_anisotropy) × radiance × visibility. Visibility is one zero-normal shadow_visibility sample when light_casts_shadow, and 1 otherwise. Directional lights other than the sun are included.
+Light.volumetric.
+A positive bool. The directional, point and spot constructors set it to true, following the ViewDesc.share_shadows precedent.
+A bare Light{} does not scatter, as the docstring, materials.md and sky.md state.
+It maps to the new LIGHT_VOLUMETRIC bit (abi/c3d.abi, regenerated). LightGpu keeps its size.
+The light inspector gains a checkbox.
+Serialization.
+Light moves to serial version 2, following the FootIk/LodGroup convention. The old layout is kept as a private LightV1 with the old fingerprint, read by read_light_v1 with volumetric = true, and text_default_versions = {1}.
+Checked end to end with throwaway programs. A v1 payload written by main reads back identical with volumetric true, in both binary and text. A v2 round trip keeps volumetric = false.
+Example. sky gains:
+--local-lights N: lamps along the path ahead of the eye-level presets. The first 8 cast shadows; the atlas grows to 32 layers at 1024 when lamps exist.
+--lamp-range and --lamps-in-fog on|off, added for the reproducible cost and opt-out rows below.
+A "Lamps in fog" checkbox.
+Docs. sky.md describes the rule, the cost lever (froxels × lights per cluster), the opt-out and the cluster-grid fallback share; materials.md, serialization.md and benchmarking.md cover the field, version 2 and the new flags. No measurements.
+Behaviour change
+This is intended and default on: scenes with fog and local lights change. The following are byte-identical to main (1280×720, 8 frames, validation on):
+Scene
+Main view
+Mirror
+no lamps, noon
+92c01c8c…
+c1d95e8d…
+no lamps, pan
+61c8e483…
+7508efcc…
+no lamps, valley
+e0e1d21a…
+0e648e91…
+no lamps, twilight
+4a72dde3…
+8c5e27a4…
+6 lamps opted out, twilight
+77e57119…
+same as main with 6 lamps
+6 lamps opted out, pan
+87e3f430…
+same as main with 6 lamps
+Screenshots (lavapipe)
+Twilight, 6 lamps.
+Before (main):
+After:
+Difference ×8:
+Cost (lavapipe, environment only; the reviewer measures at 1440p on the 4090)
+FOG_SCATTERING at noon, 1280×720, MEDIUM, O3. Each figure is the median of three per-run medians, in ms. In layout A, --lamp-range 400 puts every lamp in every cell.
+Layout
+Lights per cell
+Main view
+Mirror
+main, no lamps
+0
+2.80
+1.59
+PR, no lamps
+0
+2.89
+1.59
+A, 4 lamps
+4
+6.13
+2.56
+A, 16 lamps
+16
+10.87
+3.99
+A, 64 lamps (the cluster maximum)
+64
+19.56
+6.15
+A, 64 lamps opted out
+64
+9.89
+3.21
+range 14, 64 lamps
+3-5, plus flat fallback
+8.54
+3.08
+range 14, 64 lamps, far_distance 200 (throwaway build)
+3-5
+5.31
+2.48
+Opt-out still walks the list. Opting a light out saves its radiance and its shadow sample, but not the per-light read. sky.md says so.
+Flat-list fallback. Froxels past the cluster grid fall back to the flat light list. The share was computed on the CPU from the slice and cluster depth mappings, assuming a 60° vertical FOV, near 0.1 and far_distance 100. It is the same for every quality:
+max_distance
+Share of froxels past the grid
+50
+0%
+100
+0%
+200 (default)
+22.6%
+500
+51.0%
+1000
+65.4%
+Another 2.2% fall in front of the near plane at 200. The share matters: raising far_distance to 200 cut the 64-lamp default-range case from 8.1 to 5.3 ms. sky.md states the lever: raise far_distance along with max_distance.
+Verification
+Linux (WSL), lavapipe, headless, validation on.
+Unit filters: fog 6/6, light 22/22, view 64/64, sky 11/11, and describe 38/38.
+Serial targets, all pass:
+Target
+Tests
+serial_core_policy_test
+1
+serial_test
+23
+serial_described_test
+104
+serial_text_test
+25
+serial_order_forward
+2
+serial_order_reverse
+2
+serial_all_test
+2
+Render acceptance: all 26 cases with fog, sky, atmosphere or light in the name, one case per run, 0 VUIDs.
+Shaders: verify passes, 153 stages.
+sky: builds at O3.
+Existing tests edited:
+test_lights.c3: two exact-flags asserts now mask LIGHT_RT_SHADOW, because the constructors set the new bit.
+The core policy test expects Light at version 2.
+No tests were added.
+Not exercised:
+The GUI checkboxes, which were only compile-checked because no display was available.
+Lamp scattering with traced shadows, which is covered only by the shader variants compiling.
+The branch merges main (dense/empty atmospheres) with conflict resolution only.
+Remaining in #357
+Per-view pre-exposure, its own change.
+Temporal fog.
+Above-the-atmosphere viewpoints.
+A volumetric cloud layer.
+Cloud shadows.
+Cloud temporal.
+fesoliveira014
+added 4 commits
+October 12, 2026 09:52
+feat(light): add Light.volumetric as a light flag
+…
+6517980
+```
+The constructors set the field and a zero-initialized Light leaves it off, so
+a bare Light does not scatter in volumetric fog. The renderer packs it as
+LIGHT_VOLUMETRIC in LightGpu.flags and the inspector edits it.
+
+The Light codec moves to version 2 with the new field. Version-1 binary
+payloads read through a legacy layout, and version-1 JSONC takes the
+default, so both read as volumetric.
+```
+feat(render): scatter volumetric lights in the fog volume
+…
+5084ffe
+```
+Each froxel takes the light list of its cluster cell at its midpoint, skips
+the sun and the lights without LIGHT_VOLUMETRIC, and adds the light's radiance
+through the sun's phase function and one shadow sample. A froxel outside the
+cluster grid or in an overflowing cell walks the complete list.
+
+A scene with no light besides the sun, or none that scatter, renders as
+before.
+```
+feat(examples): place lamps along the sky example's path
+…
+e671097
+```
+--local-lights N lines the path with alternating point and spot lamps, the
+first eight shadowed, and selects clustered lights for the main and mirror
+views. --lamp-range sets their range and --lamps-in-fog sets
+Light.volumetric on them; the fog panel gains a "Lamps in fog" checkbox.
+```
+Merge remote-tracking branch 'origin/main' into feat/issue-357-local-…
+…
+ef96ba3
+```
+…lights
+
+# Conflicts:
+#	docs/benchmarking.md
+#	examples/src/sky.c3
+```
+fesoliveira014
+commented
+Oct 12, 2026
+View reviewed changes
+fesoliveira014
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Verdict: MERGE at ef96ba3, once CI is green
+Local lights scatter in the fog volume as approved. A scene without them is byte-identical to main on the 4090, and the cost scales with lights per cell as expected.
+Review
+Shader.
+additional_light_scattering uses the surface's select_lights lookup at the froxel midpoint. It skips the sun (index + 1 == sun_light), lights without LIGHT_VOLUMETRIC, and lights with zero radiance at the midpoint.
+The phase dot(direction, L) matches the sun path's -dot(direction, sun_direction), with L pointing toward the light, so positive anisotropy brightens looking toward a lamp.
+There's one shadow sample with a zero normal for shadowed lights, and the midpoint and view depth are hoisted so the sun and the lamps share them.
+API and serialization.
+Light.volumetric is a positive field the three constructors set, and the docs say a bare Light{} doesn't scatter, per the polarity ruling.
+Light goes to v2 with a LightV1 reader that adds volumetric = true, registered as the v1 binary and text compatibility path. The policy inventory now expects version 2, and the inspector has the checkbox.
+Tests. The two flags == asserts are masked to the bit they check. That's needed, since constructor lights now carry LIGHT_VOLUMETRIC.
+Divergences. Accepted: --lamp-range and --lamps-in-fog (they make the cost rows reproducible), and only the first 8 lamps being shadowed (atlas capacity, documented). The run-cap slip is noted.
+Docs. The 22.6% / 65.4% flat-fallback shares are geometric, from the grid and field of view, not measurements, so they belong in product docs as the lever's explanation.
+RTX 4090, 2560 × 1440, MEDIUM grid
+sky --benchmark 120 --gpu-timings --volumetric-fog, offscreen, -O3. Main view medians in ms. Main is ea03a10.
+Configuration
+FOG_SCATTERING noon
+FOG_SCATTERING twilight
+FOG_INTEGRATION
+main, no lamps
+0.0274
+0.0133
+0.0184
+PR, no lamps
+0.0266
+0.0150
+0.0178
+PR, 4 lamps in every cell (--local-lights 4 --lamp-range 400)
+0.0829
+0.0758
+0.0164
+PR, 16 in every cell
+0.1638
+0.1567
+0.0151
+PR, 64 in every cell
+0.3152
+0.3047
+0.0154
+PR, 64 in every cell, --lamps-in-fog off
+0.1024
+0.0942
+0.0164
+PR, 64 at the default 14 m range
+0.0983
+0.0860
+0.0162
+Byte identity. With no lamps, the final frame's md5 is 72ca1e56e13ddd853d0cfd9469f8b4bd on both main and the PR, using a scratch-only read_render_target dump.
+Cost. Lamps add about 4.5 µs each per froxel pass at 1440p when every lamp reaches every cell. Opting out keeps the list walk, about a third of the full cost at 64. At the default range, 64 lamps cost about what 4 everywhere do.
+Validation. --benchmark 30 --validation --volumetric-fog --local-lights 64 --lamp-range 400 --preset twilight: 0 VUIDs.
+Hide details
+View details
+fesoliveira014
+merged commit 716a3aa
+into
+main
+Oct 12, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+fesoliveira014
+deleted the
+feat/issue-357-local-lights
+branch
+October 12, 2026 16:12
+fesoliveira014
+mentioned this pull request
+Oct 13, 2026
+Render: extend volumetric fog, clouds and atmosphere coverage
+#357
+Closed
+8 tasks
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

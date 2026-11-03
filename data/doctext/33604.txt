@@ -1,0 +1,1684 @@
+This is demonstration code to accompany a <a href="http://www.boristhebrave.com/2018/04/15/marching-cubes-tutorial/">series</a> <a href="http://www.boristhebrave.com/2018/04/15/marching-cubes-3d-tutorial/">of</a> <a href="http://www.boristhebrave.com/2018/04/15/dual-contouring-tutorial/">articles</a> on meshing. Please consult those
+articles for more details.
+
+It covers how to implement 2d / 3d Marching Cubes and Dual Contouring. 
+
+There's also additional code to nicely render the results, but that is not polished for re-use.
+ 
+# Usage
+ 
+Simply import one of `marching_cubes_2d.marching_cubes_2d`, `marching_cubes_3d.marching_cubes_3d`,
+`dual_contour_2d.dual_contour_2d`, `dual_contour_3d.dual_contour_3d`.
+
+Each function takes an evaluation function, `f`, that determines whether a point is inside or outside
+by returning a positive or negative number. The Dual Contouring functions take an additional argument, 
+`f_normal`, that returns the gradient as a `V2` or `V3` object. You can optionally pass the range of values
+to evaluate f over. The cell size is always 1.
+
+The 2d meshing functions return a unordered list of `common.Edge` objects, the 3d ones return a `utils_3d.Mesh` object.
+
+# License
+
+[CC0]([https://wiki.creativecommons.org/wiki/CC0)
+
+### blender_visualize.py
+```
+"""Utility for invoking blender and rending .obj files"""
+
+import subprocess
+import os
+import tempfile
+
+blender_bin = r"C:\Program Files\Blender Foundation\Blender\blender.exe"
+assert os.path.exists(blender_bin)
+
+deg_to_rad = 0.017453292523928
+
+def blender_render(obj_file, output_render):
+        # Create Blender script for scene we want to render
+        script = ""
+        camera = (5.95839, -2.64368, 3.245561), (63.524*deg_to_rad,0.76*deg_to_rad,65.791*deg_to_rad)
+        # Marshall arguments into blender
+        script += "obj_file = {0}\n".format(repr(os.path.abspath(obj_file)))
+        script += "output_render = {0}\n".format(repr(os.path.abspath(output_render)))
+        script += "camera_location = {0}\n".format(repr(camera[0]))
+        script += "camera_rotation = {0}\n".format(repr(camera[1]))
+        # Setup the scene and render it
+        script += """def doit():
+        import bpy
+        # Import obj
+        bpy.ops.scene.new(type='EMPTY')
+        bpy.ops.import_scene.obj("EXEC_DEFAULT", filepath=obj_file)
+        orig_mesh = bpy.context.scene.objects[0]
+
+        # Setup wireframe
+        bpy.context.scene.objects.active = orig_mesh
+        bpy.ops.object.duplicate()
+        bpy.ops.object.modifier_add(type='WIREFRAME')
+        material = bpy.data.materials.new("red")
+        material.diffuse_color = (1.0, 0, 0)
+        material.use_shadeless = True
+        bpy.context.active_object.data.materials.append(material)
+        bpy.context.scene.objects.active.parent = orig_mesh
+
+        # Setup vertices
+        bpy.context.scene.objects.active = orig_mesh
+        bpy.ops.object.particle_system_add()
+        particle_settings = bpy.data.particles["ParticleSettings"]
+        particle_settings.emit_from = 'VERT'
+        particle_settings.show_unborn = True
+        particle_settings.use_emit_random = False
+        particle_settings.render_type = 'OBJECT'
+        particle_settings.physics_type = 'NO'
+        bpy.ops.mesh.primitive_ico_sphere_add(layers=(False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, True))
+        psphere = bpy.context.scene.objects.active
+        particle_settings.dupli_object = psphere
+        psphere.data.materials.append(material)
+
+        # Setup lighting
+        bpy.ops.object.lamp_add(type='POINT', radius=5, location=(5.7, 0.5, 3.5))
+
+        # Setup world
+        my_world = bpy.data.worlds.new("world")
+        bpy.context.scene.world = my_world
+        bpy.context.scene.world.light_settings.use_environment_light = True
+
+        # Setup animation
+        bpy.context.scene.objects.active = orig_mesh
+        #bpy.context.area.type = 'VIEW_3D'
+        #bpy.context.space_data.context = 'OBJECT'
+        orig_mesh.keyframe_insert('rotation_euler',group="Rot")
+        bpy.context.scene.frame_end = 25
+        bpy.context.scene.frame_current = 101
+        bpy.context.object.rotation_euler[2] = 6.28319
+        orig_mesh.keyframe_insert('rotation_euler',group="Rot")
+        curve = bpy.data.actions[0].fcurves[2]
+        curve.keyframe_points[0].interpolation = 'LINEAR'
+        curve.keyframe_points[1].interpolation = 'LINEAR'
+
+
+        # Setup camera and render
+        bpy.ops.object.camera_add(location=camera_location,rotation=camera_rotation)
+        bpy.context.active_object.data.clip_end = 250
+        bpy.context.scene.camera = bpy.context.active_object
+        bpy.context.scene.render.filepath = output_render
+        bpy.context.scene.render.resolution_percentage = 100
+        bpy.context.scene.render.resolution_x = 400
+        bpy.context.scene.render.resolution_y = 400
+        bpy.context.scene.render.alpha_mode = 'TRANSPARENT'
+
+        # Actually render
+        bpy.ops.render.render(write_still=True)
+
+        # Exerimental animation support
+        bpy.data.scenes[1].render.image_settings.file_format = 'H264'
+        bpy.ops.render.render(animation=True)
+        """.strip()+"\n\n"
+        script +="doit()\n"
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+                f.write(script.encode("utf-8"))
+        args = [blender_bin,"-P",f.name]
+        if True:
+            # Start blender in "background mode"
+            args.insert(1, "-b")
+        subprocess.check_call(args)
+
+if __name__=="__main__":
+    blender_render("output.obj", "example.png")
+```
+
+### common.py
+```
+"""Contains utilities common to all meshing methods"""
+
+import settings
+
+class Edge:
+    def __init__(self, v1, v2):
+        self.v1 = v1
+        self.v2 = v2
+
+    def swap(self, swap=True):
+        if swap:
+            return Edge(self.v2, self.v1)
+        else:
+            return Edge(self.v1, self.v2)
+
+def adapt(v0, v1):
+    """v0 and v1 are numbers of opposite sign. This returns how far you need to interpolate from v0 to v1 to get to 0."""
+    assert (v1 > 0) != (v0 > 0), "v0 and v1 do not have opposite sign"
+    if settings.ADAPTIVE:
+        return (0 - v0) / (v1 - v0) * settings.CELL_SIZE
+    else:
+        return 0.5 * settings.CELL_SIZE
+
+def frange(start, stop, step=1):
+    """Like range, but works for floats"""
+    v = start
+    while v < stop:
+        yield v
+        v += step
+```
+
+### dual_contour_2d.py
+```
+"""Provides a function for performing 2D Dual Contouring"""
+
+import math
+
+
+from common import Edge, adapt, frange
+from settings import ADAPTIVE, XMIN, XMAX, YMIN, YMAX, CELL_SIZE
+from utils_2d import V2, make_svg
+from qef import solve_qef_2d
+
+
+def dual_contour_2d_find_best_vertex(f, f_normal, x, y):
+    if not ADAPTIVE:
+        return V2(x+0.5 * CELL_SIZE, y+0.5 * CELL_SIZE)
+
+    # Evaluate
+    x0y0 = f(x + 0.0, y + 0.0)
+    x0y1 = f(x + 0.0, y + CELL_SIZE)
+    x1y0 = f(x + CELL_SIZE, y + 0.0)
+    x1y1 = f(x + CELL_SIZE, y + CELL_SIZE)
+
+    # For each edge, identify where there is a sign change
+    changes = []
+    if (x0y0 > 0) != (x0y1 > 0):
+        changes.append([x + 0, y + adapt(x0y0, x0y1)])
+    if (x1y0 > 0) != (x1y1 > 0):
+        changes.append([x + CELL_SIZE, y + adapt(x1y0, x1y1)])
+    if (x0y0 > 0) != (x1y0 > 0):
+        changes.append([x + adapt(x0y0, x1y0), y + 0])
+    if (x0y1 > 0) != (x1y1 > 0):
+        changes.append([x + adapt(x0y1, x1y1), y + CELL_SIZE])
+
+    if len(changes) <= 1:
+        return None
+
+    # For each sign change location v[i], we find the normal n[i].
+
+    normals = []
+    for v in changes:
+        n = f_normal(v[0], v[1])
+        normals.append([n.x, n.y])
+
+    v = solve_qef_2d(x, y, changes, normals)
+
+    return v
+
+def dual_contour_2d(f, f_normal, xmin=XMIN, xmax=XMAX, ymin=YMIN, ymax=YMAX):
+    """Iterates over a cells of size one between the specified range, and evaluates f and f_normal to produce
+    a boundary by Dual Contouring. Returns an unordered list of Edge objects."""
+    # For each cell, find the the best vertex for fitting f
+    verts = {}
+    for ix, x in enumerate(frange(xmin, xmax, CELL_SIZE)):
+        for iy, y in enumerate(frange(ymin, ymax, CELL_SIZE)):
+            verts[ix, iy] = dual_contour_2d_find_best_vertex(f, f_normal, x, y)
+    # For each cell edge, emit an edge between the center of the adjacent cells if it is a sign changing edge
+    edges = []
+    # Do all the vertical sign changes
+    for ix, x in enumerate(frange(xmin, xmax, CELL_SIZE)):
+        if ix == 0:
+            continue
+        for iy, y in enumerate(frange(ymin, ymax, CELL_SIZE)):
+            y0 = y
+            y1 = y+CELL_SIZE
+            y0_solid = f(x, y0) > 0
+            y1_solid = f(x, y1) > 0
+            if y0_solid != y1_solid:
+                edges.append(Edge(verts[ix - 1, iy], verts[ix, iy]).swap(y0_solid))
+    # Do all the horizontal sign changes
+    for iy, y in enumerate(frange(ymin, ymax, CELL_SIZE)):
+        if iy == 0:
+            continue
+        for ix, x in enumerate(frange(xmin, xmax, CELL_SIZE)):
+            x0 = x
+            x1 = x+CELL_SIZE
+            x0_solid = f(x0, y) > 0
+            x1_solid = f(x1, y) > 0
+            if x0_solid != x1_solid:
+                edges.append(Edge(verts[ix, iy-1], verts[ix, iy]).swap(x0_solid))
+    return edges
+
+
+def circle_function(x, y):
+    return 2.5 - math.sqrt(x*x + y*y)
+
+
+def circle_normal(x, y):
+    l = math.sqrt(x*x + y*y)
+    return V2(-x / l, -y / l)
+
+
+def square_function(x, y):
+    return 2.5 - max(abs(x), abs(y))
+
+
+def square_normal(x, y):
+    if abs(x) > abs(y):
+        return V2(-math.copysign(x, 1), 0)
+    else:
+        return V2(0, -math.copysign(y, 1))
+
+def normal_from_function(f, d=0.01):
+    """Given a sufficiently smooth 2d function, f, returns a function approximating of the gradient of f.
+    d controls the scale, smaller values are a more accurate approximation."""
+    def norm(x, y):
+        return V2(
+            (f(x + d, y) - f(x - d, y)) / 2 / d,
+            (f(x, y + d) - f(x, y - d)) / 2 / d,
+        ).normalize()
+    return norm
+
+
+
+def t_shape_function(x, y):
+    if (x, y) in ((0, 0), (0, 1), (0, -1), (1, 0)):
+        return 1
+    return -1
+
+
+def intersect_function(x, y):
+    y -= 0.3
+    x -= 0.5
+    x = abs(x)
+    #x += x*x / 1000
+    return min(x - y, x + y)
+
+
+__all__ = ["dual_contour_2d"]
+
+if __name__ == "__main__":
+    edges = dual_contour_2d(circle_function, circle_normal)
+    with open("example.svg", "w") as file:
+        make_svg(file, edges, circle_function)
+```
+
+### dual_contour_3d.py
+```
+"""Provides a function for performing 3D Dual Countouring"""
+
+from common import adapt, frange
+from settings import ADAPTIVE, XMIN, XMAX, YMIN, YMAX, ZMIN, ZMAX, CELL_SIZE
+import numpy as np
+import math
+from utils_3d import V3, Quad, Mesh, make_obj
+from qef import solve_qef_3d
+
+
+def dual_contour_3d_find_best_vertex(f, f_normal, x, y, z):
+    if not ADAPTIVE:
+        return V3(x+0.5*CELL_SIZE, y+0.5*CELL_SIZE, z+0.5*CELL_SIZE)
+
+    # Evaluate f at each corner
+    v = np.empty((2, 2, 2))
+    for dx in (0, 1):
+        for dy in (0, 1):
+            for dz in (0,1):
+                v[dx, dy, dz] = f(x + dx * CELL_SIZE, y + dy * CELL_SIZE, z + dz * CELL_SIZE)
+
+    # For each edge, identify where there is a sign change.
+    # There are 4 edges along each of the three axes
+    changes = []
+    for dx in (0, 1):
+        for dy in (0, 1):
+            if (v[dx, dy, 0] > 0) != (v[dx, dy, 1] > 0):
+                changes.append((x + dx * CELL_SIZE, 
+                                y + dy * CELL_SIZE,
+                                z + adapt(v[dx, dy, 0],v[dx, dy, 1])))
+
+    for dx in (0, 1):
+        for dz in (0, 1):
+            if (v[dx, 0, dz] > 0) != (v[dx, 1, dz] > 0):
+                changes.append((x + dx * CELL_SIZE,
+                                y + adapt(v[dx, 0, dz], v[dx, 1, dz]),
+                                z + dz * CELL_SIZE))
+
+    for dy in (0, 1):
+        for dz in (0, 1):
+            if (v[0, dy, dz] > 0) != (v[1, dy, dz] > 0):
+                changes.append((x + adapt(v[0, dy, dz], v[1, dy, dz]),
+                                y + dy * CELL_SIZE,
+                                z + dz * CELL_SIZE))
+
+    if len(changes) <= 1:
+        return None
+
+    # For each sign change location v[i], we find the normal n[i].
+    # The error term we are trying to minimize is sum( dot(x-v[i], n[i]) ^ 2)
+
+    # In other words, minimize || A * x - b || ^2 where A and b are a matrix and vector
+    # derived from v and n
+
+    normals = []
+    for v in changes:
+        n = f_normal(v[0], v[1], v[2])
+        normals.append([n.x, n.y, n.z])
+
+    return solve_qef_3d(x, y, z, changes, normals)
+
+
+def dual_contour_3d(f, f_normal, xmin=XMIN, xmax=XMAX, ymin=YMIN, ymax=YMAX, zmin=ZMIN, zmax=ZMAX):
+    """Iterates over a cells of size one between the specified range, and evaluates f and f_normal to produce
+        a boundary by Dual Contouring. Returns a Mesh object."""
+    # For each cell, find the the best vertex for fitting f
+    vert_array = []
+    vert_indices = {}
+    for ix, x in enumerate(frange(xmin, xmax, CELL_SIZE)):
+        for iy, y in enumerate(frange(ymin, ymax, CELL_SIZE)):
+            for iz, z in enumerate(frange(zmin, zmax, CELL_SIZE)):
+                vert = dual_contour_3d_find_best_vertex(f, f_normal, x, y, z)
+                if vert is None:
+                    continue
+                vert_array.append(vert)
+                vert_indices[ix, iy, iz] = len(vert_array)
+
+    # For each cell edge, emit an face between the center of the adjacent cells if it is a sign changing edge
+    faces = []
+    for ix, x in enumerate(frange(xmin, xmax, CELL_SIZE)):
+        for iy, y in enumerate(frange(ymin, ymax, CELL_SIZE)):
+            for iz, z in enumerate(frange(zmin, zmax, CELL_SIZE)):
+                if x > xmin and y > ymin:
+                    solid1 = f(x, y, z + 0) > 0
+                    solid2 = f(x, y, z + CELL_SIZE) > 0
+                    if solid1 != solid2:
+                        faces.append(Quad(
+                            vert_indices[(ix - 1, iy - 1, iz)],
+                            vert_indices[(ix - 0, iy - 1, iz)],
+                            vert_indices[(ix - 0, iy - 0, iz)],
+                            vert_indices[(ix - 1, iy - 0, iz)],
+                        ).swap(solid2))
+                if x > xmin and z > zmin:
+                    solid1 = f(x, y + 0, z) > 0
+                    solid2 = f(x, y + CELL_SIZE, z) > 0
+                    if solid1 != solid2:
+                        faces.append(Quad(
+                            vert_indices[(ix - 1, iy, iz - 1)],
+                            vert_indices[(ix - 0, iy, iz - 1)],
+                            vert_indices[(ix - 0, iy, iz - 0)],
+                            vert_indices[(ix - 1, iy, iz - 0)],
+                        ).swap(solid1))
+                if y > ymin and z > zmin:
+                    solid1 = f(x + 0, y, z) > 0
+                    solid2 = f(x + CELL_SIZE, y, z) > 0
+                    if solid1 != solid2:
+                        faces.append(Quad(
+                            vert_indices[(ix, iy - 1, iz - 1)],
+                            vert_indices[(ix, iy - 0, iz - 1)],
+                            vert_indices[(ix, iy - 0, iz - 0)],
+                            vert_indices[(ix, iy - 1, iz - 0)],
+                        ).swap(solid2))
+
+    return Mesh(vert_array, faces)
+
+
+def circle_function(x, y, z):
+    return 2.5 - math.sqrt(x*x + y*y + z*z)
+
+
+def circle_normal(x, y, z):
+    l = math.sqrt(x*x + y*y + z*z)
+    return V3(-x / l, -y / l, -z / l)
+
+def intersect_function(x, y, z):
+    y -= 0.3
+    x -= 0.5
+    x = abs(x)
+    return min(x - y, x + y)
+
+def normal_from_function(f, d=0.01):
+    """Given a sufficiently smooth 3d function, f, returns a function approximating of the gradient of f.
+    d controls the scale, smaller values are a more accurate approximation."""
+    def norm(x, y, z):
+        return V3(
+            (f(x + d, y, z) - f(x - d, y, z)) / 2 / d,
+            (f(x, y + d, z) - f(x, y - d, z)) / 2 / d,
+            (f(x, y, z + d) - f(x, y, z - d)) / 2 / d,
+        ).normalize()
+    return norm
+
+__all__ = ["dual_contour_3d"]
+
+if __name__ == "__main__":
+    mesh = dual_contour_3d(circle_function, normal_from_function(circle_function))
+    with open("output.obj", "w") as f:
+        make_obj(f, mesh)
+```
+
+### marching_cubes_2d.py
+```
+"""Provides a function for performing 2D Marching Cubes"""
+
+import math
+
+from common import Edge, adapt, frange
+from settings import XMIN, XMAX, YMIN, YMAX, CELL_SIZE
+from utils_2d import V2, make_svg
+
+
+def marching_cubes_2d_single_cell(f, x, y):
+    """Returns a list of edges that approximate f's boundary for a single cell"""
+
+    # Evaluate
+    x0y0 = f(x            , y )
+    x0y1 = f(x            , y + CELL_SIZE)
+    x1y0 = f(x + CELL_SIZE, y)
+    x1y1 = f(x + CELL_SIZE, y + CELL_SIZE)
+
+    # There are 16 different cases that these points can be inside or outside.
+    # We use binary counting to map the 4 truth values to a number between 0 and 15 inclusive.
+    # It's even more in the 3d case!
+    case = ((1 if x0y0 > 0 else 0) +
+            (2 if x0y1 > 0 else 0) +
+            (4 if x1y0 > 0 else 0) +
+            (8 if x1y1 > 0 else 0))
+
+    # Several of the cases are inverses of each other where solid is non solid and visa versa
+    # They have the same boundary, which cuts down the cases a bit.
+    # But we swap the direction of the boundary, so that edges are always winding clockwise around the solid.
+    # Getting those swaps correct isn't needed for our simple visualizations, but is important in other uses cases
+    # particularly in 3d.
+
+    if case == 0 or case == 15:
+        # All outside / inside
+        return []
+    if case == 1 or case == 14:
+        # Single corner
+        return [Edge(V2(x + 0 + adapt(x0y0, x1y0), y), V2(x + 0, y + adapt(x0y0, x0y1))).swap(case == 14)]
+    if case == 2 or case == 13:
+        # Single corner
+        return [Edge(V2(x + 0, y + adapt(x0y0, x0y1)), V2(x + adapt(x0y1, x1y1), y + CELL_SIZE)).swap(case == 13)]
+    if case == 4 or case == 11:
+        # Single corner
+        return [Edge(V2(x + CELL_SIZE, y + adapt(x1y0, x1y1)), V2(x + adapt(x0y0, x1y0), y + 0)).swap(case == 11)]
+    if case == 8 or case == 7:
+        # Single corner
+        return [Edge(V2(x + adapt(x0y1, x1y1), y + CELL_SIZE), V2(x + CELL_SIZE, y + adapt(x1y0, x1y1))).swap(case == 7)]
+    if case == 3 or case == 12:
+        # Vertical split
+        return [Edge(V2(x + adapt(x0y0, x1y0), y + 0), V2(x + adapt(x0y1, x1y1), y + CELL_SIZE)).swap(case == 12)]
+    if case == 5 or case == 10:
+        # Horizontal split
+        return [Edge(V2(x + 0, y + adapt(x0y0, x0y1)), V2(x + CELL_SIZE, y + adapt(x1y0, x1y1))).swap(case == 5)]
+    if case == 9:
+        # Two opposite corners, copy cases 1 and 8
+        return [Edge(V2(x + 0 + adapt(x0y0, x1y0), y), V2(x + 0, y + adapt(x0y0, x0y1))),
+                Edge(V2(x + adapt(x0y1, x1y1), y + 1), V2(x + CELL_SIZE, y + adapt(x1y0, x1y1)))]
+    if case == 6:
+        # Two opposite corners, copy cases 2 and 4
+        return [Edge(V2(x + CELL_SIZE, y+adapt(x1y0, x1y1)), V2(x+adapt(x0y0, x1y0), y + 0)),
+                Edge(V2(x + 0, y+adapt(x0y0, x0y1)), V2(x + adapt(x0y1, x1y1), y + CELL_SIZE))]
+
+    assert False, "All cases exhausted"
+
+
+def marching_cubes_2d(f, xmin=XMIN, xmax=XMAX, ymin=YMIN, ymax=YMAX):
+    # For each cube, evaluate independently.
+    # If this wasn't demonstration code, you might actually evaluate them together for efficiency
+    edges = []
+    for x in frange(xmin, xmax, CELL_SIZE):
+        for y in frange(ymin, ymax, CELL_SIZE):
+            edges.extend(marching_cubes_2d_single_cell(f, x, y))
+    return edges
+
+
+def circle_function(x, y):
+    return 2.5 - math.sqrt(x*x + y*y)
+
+
+def square_function(x, y):
+    return 2.5 - max(abs(x), abs(y))
+
+
+def t_shape_function(x, y):
+    if (x, y) in ((0, 0), (0, 1), (0, -1), (1, 0)):
+        return 1
+    return -1
+
+__all__ = ["marching_cubes_2d"]
+
+if __name__ == "__main__":
+    edges = marching_cubes_2d(circle_function)
+    with open("example.svg", "w") as file:
+        make_svg(file, edges, circle_function)
+```
+
+### marching_cubes_3d.py
+```
+"""Provides a function for performing 3D Marching Cubes"""
+
+from common import adapt, frange
+from settings import XMIN, XMAX, YMIN, YMAX, ZMIN, ZMAX, CELL_SIZE
+import math
+from utils_3d import V3, Tri, Mesh, make_obj
+
+# My convention for vertices is:
+VERTICES = [
+    (0, 0, 0),
+    (1, 0, 0),
+    (1, 1, 0),
+    (0, 1, 0),
+    (0, 0, 1),
+    (1, 0, 1),
+    (1, 1, 1),
+    (0, 1, 1),
+]
+
+
+# My convention for the edges
+
+EDGES = [
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 0),
+    (4, 5),
+    (5, 6),
+    (6, 7),
+    (7, 4),
+    (0, 4),
+    (1, 5),
+    (2, 6),
+    (3, 7),
+]
+
+# Table driven approach to the 256 combinations. Pro-tip, don't write this by hand, copy mine!
+# See marching_cubes_gen.py for how I generated these.
+# Each index is the bitwise representation of what is solid.
+# Each value is a list of triples indicating what edges are used for that triangle
+# (Recall each edge of the cell may become a vertex in the output boundary)
+cases = [[],
+ [[8, 0, 3]],
+ [[1, 0, 9]],
+ [[8, 1, 3], [8, 9, 1]],
+ [[10, 2, 1]],
+ [[8, 0, 3], [1, 10, 2]],
+ [[9, 2, 0], [9, 10, 2]],
+ [[3, 8, 2], [2, 8, 10], [10, 8, 9]],
+ [[3, 2, 11]],
+ [[0, 2, 8], [2, 11, 8]],
+ [[1, 0, 9], [2, 11, 3]],
+ [[2, 9, 1], [11, 9, 2], [8, 9, 11]],
+ [[3, 10, 11], [3, 1, 10]],
+ [[1, 10, 0], [0, 10, 8], [8, 10, 11]],
+ [[0, 11, 3], [9, 11, 0], [10, 11, 9]],
+ [[8, 9, 11], [11, 9, 10]],
+ [[7, 4, 8]],
+ [[3, 7, 0], [7, 4, 0]],
+ [[7, 4, 8], [9, 1, 0]],
+ [[9, 1, 4], [4, 1, 7], [7, 1, 3]],
+ [[7, 4, 8], [2, 1, 10]],
+ [[4, 3, 7], [4, 0, 3], [2, 1, 10]],
+ [[2, 0, 10], [0, 9, 10], [7, 4, 8]],
+ [[9, 10, 4], [4, 10, 3], [3, 10, 2], [4, 3, 7]],
+ [[4, 8, 7], [3, 2, 11]],
+ [[7, 4, 11], [11, 4, 2], [2, 4, 0]],
+ [[1, 0, 9], [2, 11, 3], [8, 7, 4]],
+ [[2, 11, 1], [1, 11, 9], [9, 11, 7], [9, 7, 4]],
+ [[10, 11, 1], [11, 3, 1], [4, 8, 7]],
+ [[4, 0, 7], [7, 0, 10], [0, 1, 10], [7, 10, 11]],
+ [[7, 4, 8], [0, 11, 3], [9, 11, 0], [10, 11, 9]],
+ [[4, 11, 7], [9, 11, 4], [10, 11, 9]],
+ [[9, 4, 5]],
+ [[9, 4, 5], [0, 3, 8]],
+ [[0, 5, 1], [0, 4, 5]],
+ [[4, 3, 8], [5, 3, 4], [1, 3, 5]],
+ [[5, 9, 4], [10, 2, 1]],
+ [[8, 0, 3], [1, 10, 2], [4, 5, 9]],
+ [[10, 4, 5], [2, 4, 10], [0, 4, 2]],
+ [[3, 10, 2], [8, 10, 3], [5, 10, 8], [4, 5, 8]],
+ [[9, 4, 5], [11, 3, 2]],
+ [[11, 0, 2], [11, 8, 0], [9, 4, 5]],
+ [[5, 1, 4], [1, 0, 4], [11, 3, 2]],
+ [[5, 1, 4], [4, 1, 11], [1, 2, 11], [4, 11, 8]],
+ [[3, 10, 11], [3, 1, 10], [5, 9, 4]],
+ [[9, 4, 5], [1, 10, 0], [0, 10, 8], [8, 10, 11]],
+ [[5, 0, 4], [11, 0, 5], [11, 3, 0], [10, 11, 5]],
+ [[5, 10, 4], [4, 10, 8], [8, 10, 11]],
+ [[9, 7, 5], [9, 8, 7]],
+ [[0, 5, 9], [3, 5, 0], [7, 5, 3]],
+ [[8, 7, 0], [0, 7, 1], [1, 7, 5]],
+ [[7, 5, 3], [3, 5, 1]],
+ [[7, 5, 8], [5, 9, 8], [2, 1, 10]],
+ [[10, 2, 1], [0, 5, 9], [3, 5, 0], [7, 5, 3]],
+ [[8, 2, 0], [5, 2, 8], [10, 2, 5], [7, 5, 8]],
+ [[2, 3, 10], [10, 3, 5], [5, 3, 7]],
+ [[9, 7, 5], [9, 8, 7], [11, 3, 2]],
+ [[0, 2, 9], [9, 2, 7], [7, 2, 11], [9, 7, 5]],
+ [[3, 2, 11], [8, 7, 0], [0, 7, 1], [1, 7, 5]],
+ [[11, 1, 2], [7, 1, 11], [5, 1, 7]],
+ [[3, 1, 11], [11, 1, 10], [8, 7, 9], [9, 7, 5]],
+ [[11, 7, 0], [7, 5, 0], [5, 9, 0], [10, 11, 0], [1, 10, 0]],
+ [[0, 5, 10], [0, 7, 5], [0, 8, 7], [0, 10, 11], [0, 11, 3]],
+ [[10, 11, 5], [11, 7, 5]],
+ [[5, 6, 10]],
+ [[8, 0, 3], [10, 5, 6]],
+ [[0, 9, 1], [5, 6, 10]],
+ [[8, 1, 3], [8, 9, 1], [10, 5, 6]],
+ [[1, 6, 2], [1, 5, 6]],
+ [[6, 2, 5], [2, 1, 5], [8, 0, 3]],
+ [[5, 6, 9], [9, 6, 0], [0, 6, 2]],
+ [[5, 8, 9], [2, 8, 5], [3, 8, 2], [6, 2, 5]],
+ [[3, 2, 11], [10, 5, 6]],
+ [[0, 2, 8], [2, 11, 8], [5, 6, 10]],
+ [[3, 2, 11], [0, 9, 1], [10, 5, 6]],
+ [[5, 6, 10], [2, 9, 1], [11, 9, 2], [8, 9, 11]],
+ [[11, 3, 6], [6, 3, 5], [5, 3, 1]],
+ [[11, 8, 6], [6, 8, 1], [1, 8, 0], [6, 1, 5]],
+ [[5, 0, 9], [6, 0, 5], [3, 0, 6], [11, 3, 6]],
+ [[6, 9, 5], [11, 9, 6], [8, 9, 11]],
+ [[7, 4, 8], [6, 10, 5]],
+ [[3, 7, 0], [7, 4, 0], [10, 5, 6]],
+ [[7, 4, 8], [6, 10, 5], [9, 1, 0]],
+ [[5, 6, 10], [9, 1, 4], [4, 1, 7], [7, 1, 3]],
+ [[1, 6, 2], [1, 5, 6], [7, 4, 8]],
+ [[6, 1, 5], [2, 1, 6], [0, 7, 4], [3, 7, 0]],
+ [[4, 8, 7], [5, 6, 9], [9, 6, 0], [0, 6, 2]],
+ [[2, 3, 9], [3, 7, 9], [7, 4, 9], [6, 2, 9], [5, 6, 9]],
+ [[2, 11, 3], [7, 4, 8], [10, 5, 6]],
+ [[6, 10, 5], [7, 4, 11], [11, 4, 2], [2, 4, 0]],
+ [[1, 0, 9], [8, 7, 4], [3, 2, 11], [5, 6, 10]],
+ [[1, 2, 9], [9, 2, 11], [9, 11, 4], [4, 11, 7], [5, 6, 10]],
+ [[7, 4, 8], [11, 3, 6], [6, 3, 5], [5, 3, 1]],
+ [[11, 0, 1], [11, 4, 0], [11, 7, 4], [11, 1, 5], [11, 5, 6]],
+ [[6, 9, 5], [0, 9, 6], [11, 0, 6], [3, 0, 11], [4, 8, 7]],
+ [[5, 6, 9], [9, 6, 11], [9, 11, 7], [9, 7, 4]],
+ [[4, 10, 9], [4, 6, 10]],
+ [[10, 4, 6], [10, 9, 4], [8, 0, 3]],
+ [[1, 0, 10], [10, 0, 6], [6, 0, 4]],
+ [[8, 1, 3], [6, 1, 8], [6, 10, 1], [4, 6, 8]],
+ [[9, 2, 1], [4, 2, 9], [6, 2, 4]],
+ [[3, 8, 0], [9, 2, 1], [4, 2, 9], [6, 2, 4]],
+ [[0, 4, 2], [2, 4, 6]],
+ [[8, 2, 3], [4, 2, 8], [6, 2, 4]],
+ [[4, 10, 9], [4, 6, 10], [2, 11, 3]],
+ [[11, 8, 2], [2, 8, 0], [6, 10, 4], [4, 10, 9]],
+ [[2, 11, 3], [1, 0, 10], [10, 0, 6], [6, 0, 4]],
+ [[8, 4, 1], [4, 6, 1], [6, 10, 1], [11, 8, 1], [2, 11, 1]],
+ [[3, 1, 11], [11, 1, 4], [1, 9, 4], [11, 4, 6]],
+ [[6, 11, 1], [11, 8, 1], [8, 0, 1], [4, 6, 1], [9, 4, 1]],
+ [[3, 0, 11], [11, 0, 6], [6, 0, 4]],
+ [[4, 11, 8], [4, 6, 11]],
+ [[6, 8, 7], [10, 8, 6], [9, 8, 10]],
+ [[3, 7, 0], [0, 7, 10], [7, 6, 10], [0, 10, 9]],
+ [[1, 6, 10], [0, 6, 1], [7, 6, 0], [8, 7, 0]],
+ [[10, 1, 6], [6, 1, 7], [7, 1, 3]],
+ [[9, 8, 1], [1, 8, 6], [6, 8, 7], [1, 6, 2]],
+ [[9, 7, 6], [9, 3, 7], [9, 0, 3], [9, 6, 2], [9, 2, 1]],
+ [[7, 6, 8], [8, 6, 0], [0, 6, 2]],
+ [[3, 6, 2], [3, 7, 6]],
+ [[3, 2, 11], [6, 8, 7], [10, 8, 6], [9, 8, 10]],
+ [[7, 9, 0], [7, 10, 9], [7, 6, 10], [7, 0, 2], [7, 2, 11]],
+ [[0, 10, 1], [6, 10, 0], [8, 6, 0], [7, 6, 8], [2, 11, 3]],
+ [[1, 6, 10], [7, 6, 1], [11, 7, 1], [2, 11, 1]],
+ [[1, 9, 6], [9, 8, 6], [8, 7, 6], [3, 1, 6], [11, 3, 6]],
+ [[9, 0, 1], [11, 7, 6]],
+ [[0, 11, 3], [6, 11, 0], [7, 6, 0], [8, 7, 0]],
+ [[7, 6, 11]],
+ [[11, 6, 7]],
+ [[3, 8, 0], [11, 6, 7]],
+ [[1, 0, 9], [6, 7, 11]],
+ [[1, 3, 9], [3, 8, 9], [6, 7, 11]],
+ [[10, 2, 1], [6, 7, 11]],
+ [[10, 2, 1], [3, 8, 0], [6, 7, 11]],
+ [[9, 2, 0], [9, 10, 2], [11, 6, 7]],
+ [[11, 6, 7], [3, 8, 2], [2, 8, 10], [10, 8, 9]],
+ [[2, 6, 3], [6, 7, 3]],
+ [[8, 6, 7], [0, 6, 8], [2, 6, 0]],
+ [[7, 2, 6], [7, 3, 2], [1, 0, 9]],
+ [[8, 9, 7], [7, 9, 2], [2, 9, 1], [7, 2, 6]],
+ [[6, 1, 10], [7, 1, 6], [3, 1, 7]],
+ [[8, 0, 7], [7, 0, 6], [6, 0, 1], [6, 1, 10]],
+ [[7, 3, 6], [6, 3, 9], [3, 0, 9], [6, 9, 10]],
+ [[7, 8, 6], [6, 8, 10], [10, 8, 9]],
+ [[8, 11, 4], [11, 6, 4]],
+ [[11, 0, 3], [6, 0, 11], [4, 0, 6]],
+ [[6, 4, 11], [4, 8, 11], [1, 0, 9]],
+ [[1, 3, 9], [9, 3, 6], [3, 11, 6], [9, 6, 4]],
+ [[8, 11, 4], [11, 6, 4], [1, 10, 2]],
+ [[1, 10, 2], [11, 0, 3], [6, 0, 11], [4, 0, 6]],
+ [[2, 9, 10], [0, 9, 2], [4, 11, 6], [8, 11, 4]],
+ [[3, 4, 9], [3, 6, 4], [3, 11, 6], [3, 9, 10], [3, 10, 2]],
+ [[3, 2, 8], [8, 2, 4], [4, 2, 6]],
+ [[2, 4, 0], [6, 4, 2]],
+ [[0, 9, 1], [3, 2, 8], [8, 2, 4], [4, 2, 6]],
+ [[1, 2, 9], [9, 2, 4], [4, 2, 6]],
+ [[10, 3, 1], [4, 3, 10], [4, 8, 3], [6, 4, 10]],
+ [[10, 0, 1], [6, 0, 10], [4, 0, 6]],
+ [[3, 10, 6], [3, 9, 10], [3, 0, 9], [3, 6, 4], [3, 4, 8]],
+ [[9, 10, 4], [10, 6, 4]],
+ [[9, 4, 5], [7, 11, 6]],
+ [[9, 4, 5], [7, 11, 6], [0, 3, 8]],
+ [[0, 5, 1], [0, 4, 5], [6, 7, 11]],
+ [[11, 6, 7], [4, 3, 8], [5, 3, 4], [1, 3, 5]],
+ [[1, 10, 2], [9, 4, 5], [6, 7, 11]],
+ [[8, 0, 3], [4, 5, 9], [10, 2, 1], [11, 6, 7]],
+ [[7, 11, 6], [10, 4, 5], [2, 4, 10], [0, 4, 2]],
+ [[8, 2, 3], [10, 2, 8], [4, 10, 8], [5, 10, 4], [11, 6, 7]],
+ [[2, 6, 3], [6, 7, 3], [9, 4, 5]],
+ [[5, 9, 4], [8, 6, 7], [0, 6, 8], [2, 6, 0]],
+ [[7, 3, 6], [6, 3, 2], [4, 5, 0], [0, 5, 1]],
+ [[8, 1, 2], [8, 5, 1], [8, 4, 5], [8, 2, 6], [8, 6, 7]],
+ [[9, 4, 5], [6, 1, 10], [7, 1, 6], [3, 1, 7]],
+ [[7, 8, 6], [6, 8, 0], [6, 0, 10], [10, 0, 1], [5, 9, 4]],
+ [[3, 0, 10], [0, 4, 10], [4, 5, 10], [7, 3, 10], [6, 7, 10]],
+ [[8, 6, 7], [10, 6, 8], [5, 10, 8], [4, 5, 8]],
+ [[5, 9, 6], [6, 9, 11], [11, 9, 8]],
+ [[11, 6, 3], [3, 6, 0], [0, 6, 5], [0, 5, 9]],
+ [[8, 11, 0], [0, 11, 5], [5, 11, 6], [0, 5, 1]],
+ [[6, 3, 11], [5, 3, 6], [1, 3, 5]],
+ [[10, 2, 1], [5, 9, 6], [6, 9, 11], [11, 9, 8]],
+ [[3, 11, 0], [0, 11, 6], [0, 6, 9], [9, 6, 5], [1, 10, 2]],
+ [[0, 8, 5], [8, 11, 5], [11, 6, 5], [2, 0, 5], [10, 2, 5]],
+ [[11, 6, 3], [3, 6, 5], [3, 5, 10], [3, 10, 2]],
+ [[3, 9, 8], [6, 9, 3], [5, 9, 6], [2, 6, 3]],
+ [[9, 6, 5], [0, 6, 9], [2, 6, 0]],
+ [[6, 5, 8], [5, 1, 8], [1, 0, 8], [2, 6, 8], [3, 2, 8]],
+ [[2, 6, 1], [6, 5, 1]],
+ [[6, 8, 3], [6, 9, 8], [6, 5, 9], [6, 3, 1], [6, 1, 10]],
+ [[1, 10, 0], [0, 10, 6], [0, 6, 5], [0, 5, 9]],
+ [[3, 0, 8], [6, 5, 10]],
+ [[10, 6, 5]],
+ [[5, 11, 10], [5, 7, 11]],
+ [[5, 11, 10], [5, 7, 11], [3, 8, 0]],
+ [[11, 10, 7], [10, 5, 7], [0, 9, 1]],
+ [[5, 7, 10], [10, 7, 11], [9, 1, 8], [8, 1, 3]],
+ [[2, 1, 11], [11, 1, 7], [7, 1, 5]],
+ [[3, 8, 0], [2, 1, 11], [11, 1, 7], [7, 1, 5]],
+ [[2, 0, 11], [11, 0, 5], [5, 0, 9], [11, 5, 7]],
+ [[2, 9, 5], [2, 8, 9], [2, 3, 8], [2, 5, 7], [2, 7, 11]],
+ [[10, 3, 2], [5, 3, 10], [7, 3, 5]],
+ [[10, 0, 2], [7, 0, 10], [8, 0, 7], [5, 7, 10]],
+ [[0, 9, 1], [10, 3, 2], [5, 3, 10], [7, 3, 5]],
+ [[7, 8, 2], [8, 9, 2], [9, 1, 2], [5, 7, 2], [10, 5, 2]],
+ [[3, 1, 7], [7, 1, 5]],
+ [[0, 7, 8], [1, 7, 0], [5, 7, 1]],
+ [[9, 5, 0], [0, 5, 3], [3, 5, 7]],
+ [[5, 7, 9], [7, 8, 9]],
+ [[4, 10, 5], [8, 10, 4], [11, 10, 8]],
+ [[3, 4, 0], [10, 4, 3], [10, 5, 4], [11, 10, 3]],
+ [[1, 0, 9], [4, 10, 5], [8, 10, 4], [11, 10, 8]],
+ [[4, 3, 11], [4, 1, 3], [4, 9, 1], [4, 11, 10], [4, 10, 5]],
+ [[1, 5, 2], [2, 5, 8], [5, 4, 8], [2, 8, 11]],
+ [[5, 4, 11], [4, 0, 11], [0, 3, 11], [1, 5, 11], [2, 1, 11]],
+ [[5, 11, 2], [5, 8, 11], [5, 4, 8], [5, 2, 0], [5, 0, 9]],
+ [[5, 4, 9], [2, 3, 11]],
+ [[3, 4, 8], [2, 4, 3], [5, 4, 2], [10, 5, 2]],
+ [[5, 4, 10], [10, 4, 2], [2, 4, 0]],
+ [[2, 8, 3], [4, 8, 2], [10, 4, 2], [5, 4, 10], [0, 9, 1]],
+ [[4, 10, 5], [2, 10, 4], [1, 2, 4], [9, 1, 4]],
+ [[8, 3, 4], [4, 3, 5], [5, 3, 1]],
+ [[1, 5, 0], [5, 4, 0]],
+ [[5, 0, 9], [3, 0, 5], [8, 3, 5], [4, 8, 5]],
+ [[5, 4, 9]],
+ [[7, 11, 4], [4, 11, 9], [9, 11, 10]],
+ [[8, 0, 3], [7, 11, 4], [4, 11, 9], [9, 11, 10]],
+ [[0, 4, 1], [1, 4, 11], [4, 7, 11], [1, 11, 10]],
+ [[10, 1, 4], [1, 3, 4], [3, 8, 4], [11, 10, 4], [7, 11, 4]],
+ [[9, 4, 1], [1, 4, 2], [2, 4, 7], [2, 7, 11]],
+ [[1, 9, 2], [2, 9, 4], [2, 4, 11], [11, 4, 7], [3, 8, 0]],
+ [[11, 4, 7], [2, 4, 11], [0, 4, 2]],
+ [[7, 11, 4], [4, 11, 2], [4, 2, 3], [4, 3, 8]],
+ [[10, 9, 2], [2, 9, 7], [7, 9, 4], [2, 7, 3]],
+ [[2, 10, 7], [10, 9, 7], [9, 4, 7], [0, 2, 7], [8, 0, 7]],
+ [[10, 4, 7], [10, 0, 4], [10, 1, 0], [10, 7, 3], [10, 3, 2]],
+ [[8, 4, 7], [10, 1, 2]],
+ [[4, 1, 9], [7, 1, 4], [3, 1, 7]],
+ [[8, 0, 7], [7, 0, 1], [7, 1, 9], [7, 9, 4]],
+ [[0, 7, 3], [0, 4, 7]],
+ [[8, 4, 7]],
+ [[9, 8, 10], [10, 8, 11]],
+ [[3, 11, 0], [0, 11, 9], [9, 11, 10]],
+ [[0, 10, 1], [8, 10, 0], [11, 10, 8]],
+ [[11, 10, 3], [10, 1, 3]],
+ [[1, 9, 2], [2, 9, 11], [11, 9, 8]],
+ [[9, 2, 1], [11, 2, 9], [3, 11, 9], [0, 3, 9]],
+ [[8, 2, 0], [8, 11, 2]],
+ [[11, 2, 3]],
+ [[2, 8, 3], [10, 8, 2], [9, 8, 10]],
+ [[0, 2, 9], [2, 10, 9]],
+ [[3, 2, 8], [8, 2, 10], [8, 10, 1], [8, 1, 0]],
+ [[1, 2, 10]],
+ [[3, 1, 8], [1, 9, 8]],
+ [[9, 0, 1]],
+ [[3, 0, 8]],
+ []]
+
+
+def marching_cubes_3d_single_cell(f, x, y, z):
+    # Evaluate f on each vertex of the cube
+    f_eval = [None] * 8
+    for v in range(8):
+        v_pos = VERTICES[v]
+        f_eval[v] = f(x + v_pos[0] * CELL_SIZE,
+                      y + v_pos[1] * CELL_SIZE,
+                      z + v_pos[2] * CELL_SIZE)
+    # Determine which case we are
+    case = sum(2**v for v in range(8) if f_eval[v] > 0)
+    # Ok, what faces do we need (in terms of edges)
+    faces = cases[case]
+
+    def edge_to_boundary_vertex(edge):
+        """Returns the vertex in the middle of the specified edge"""
+        # Find the two vertices specified by this edge, and interpolate between
+        # them according to adapt, as in the 2d case
+        v0, v1 = EDGES[edge]
+        f0 = f_eval[v0]
+        f1 = f_eval[v1]
+        t0 = CELL_SIZE - adapt(f0, f1)
+        t1 = CELL_SIZE - t0
+        vert_pos0 = VERTICES[v0]
+        vert_pos1 = VERTICES[v1]
+        return V3(x + vert_pos0[0] * t0 + vert_pos1[0] * t1,
+                  y + vert_pos0[1] * t0 + vert_pos1[1] * t1,
+                  z + vert_pos0[2] * t0 + vert_pos1[2] * t1)
+
+    output_verts = []
+    output_tris = []
+
+    for face in faces:
+        # For each face, find the vertices of that face, and output it.
+        # We make no effort to re-use vertices between multiple faces,
+        # A fancier implementation might do so.
+        edges = face
+        verts = list(map(edge_to_boundary_vertex, edges))
+        next_vert_index = len(output_verts) + 1
+        tri = Tri(
+            next_vert_index,
+            next_vert_index+1,
+            next_vert_index+2,
+        )
+        output_verts.extend(verts)
+        output_tris.append(tri)
+    return Mesh(output_verts, output_tris)
+
+
+def marching_cubes_3d(f, xmin=XMIN, xmax=XMAX, ymin=YMIN, ymax=YMAX, zmin=ZMIN, zmax=ZMAX):
+    """Iterates over a cells of size one between the specified range, and evaluates f to produce
+        a boundary by Marching Cubes. Returns a Mesh object."""
+    # For each cube, evaluate independently.
+    # If this wasn't demonstration code, you might actually evaluate them together for efficiency
+    mesh = Mesh()
+    for x in frange(xmin, xmax, CELL_SIZE):
+        for y in frange(ymin, ymax, CELL_SIZE):
+            for z in frange(zmin, zmax, CELL_SIZE):
+                cell_mesh = marching_cubes_3d_single_cell(f, x, y, z)
+                mesh.extend(cell_mesh)
+    return mesh
+
+
+def circle_function(x, y, z):
+    return 2.5 - math.sqrt(x*x + y*y + z*z)
+
+
+def make_circle_obj(filename):
+    """Writes an obj file containing a sphere meshed via marching cubes"""
+    mesh = marching_cubes_3d(circle_function)
+    with open(filename, "w") as f:
+        make_obj(f, mesh)
+
+
+def make_cases_obj():
+    """Writes obj files demonstrating the main cases of marching cubes"""
+    import marching_cubes_gen as gen
+    assert CELL_SIZE == 1
+    mesh = Mesh()
+    highlights = Mesh()
+    offset = V3(0, 0, 0)
+    for bits, faces in sorted(gen.BASE_CASES.items()):
+        verts = set(gen.bits_to_verts(bits))
+
+        # Run marching cubes for a just this case
+        def f(x, y, z):
+            vert = gen.VERTICES.index((x, y, z))
+            return 1 if vert in verts else -1
+        case_mesh = marching_cubes_3d_single_cell(f, 0, 0, 0, cell_size=1)
+        case_mesh = case_mesh.translate(offset)
+        mesh.extend(case_mesh)
+
+        # Output the solid verts
+        highlight = Mesh([V3(*gen.VERTICES[v]) for v in verts], [])
+        highlight = highlight.translate(offset)
+        highlights.extend(highlight)
+
+        offset.x += 1.5
+        if offset.x > 6:
+            offset.x = 0
+            offset.y += 1.5
+
+    with open("cases.obj", "w") as f:
+        make_obj(f, mesh)
+    with open("case_highlights.obj", "w") as f:
+        make_obj(f, highlights)
+
+__all__ = ["marching_cubes_3d"]
+
+if __name__ == "__main__":
+    make_circle_obj("output.obj")
+    #make_cases_obj()
+```
+
+### marching_cubes_gen.py
+```
+"""Reggenerates the 256 cases needed for the 3D Marching Cubes look up table. There's no need to run this,
+the values have already been hard coded into marching_cubes_3d"""
+
+# My convention for vertices is:
+VERTICES = [
+    (0, 0, 0),
+    (1, 0, 0),
+    (1, 1, 0),
+    (0, 1, 0),
+    (0, 0, 1),
+    (1, 0, 1),
+    (1, 1, 1),
+    (0, 1, 1),
+]
+
+# My convention for the edges
+
+EDGES = [
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 0),
+    (4, 5),
+    (5, 6),
+    (6, 7),
+    (7, 4),
+    (0, 4),
+    (1, 5),
+    (2, 6),
+    (3, 7),
+]
+
+EDGES_BY_VERTSET = {}
+for e, (v1, v2) in enumerate(EDGES):
+    EDGES_BY_VERTSET[frozenset([v1, v2])] = e
+
+# These are the 15 base cases.
+# Each key is the bitwise representation of what is solid
+# Each value is a list of triples indicating what edges are used for that triangle
+# (Recall each edge of the cell may become a vertex in the output boundary)
+# Copied up rather tediously from http://users.polytech.unice.fr/~lingrand/MarchingCubes/algo.html
+BASE_CASES = {
+    #
+    0b00000000: (),
+    0b00000001: ((8, 0, 3), ),
+    0b00000011: ((8, 1, 3), (8, 9, 1)),
+    0b00000101: ((8, 0, 3), (1, 10, 2)),
+    #
+    0b01000001: ((8, 0, 3), (10, 5, 6)),
+    0b00110010: ((8, 7, 0), (0, 7, 1), (1, 7, 5)),
+    0b01000011: ((8, 1, 3), (8, 9, 1), (10, 5, 6)),
+    0b01001010: ((3, 2, 11), (0, 9, 1), (10, 5, 6)),
+    #
+    0b00110011: ((7, 5, 3), (3, 5, 1)),
+    0b10110001: ((11, 6, 3), (3, 6, 0), (0, 6, 5), (0, 5, 9)),
+    0b01101001: ((11, 8, 2), (2, 8, 0), (6, 10, 4), (4, 10, 9)),
+    0b01110001: ((3, 7, 0), (0, 7, 10), (7, 6, 10), (0, 10, 9)),
+    #
+    0b00111010: ((3, 2, 11), (8, 7, 0), (0, 7, 1), (1, 7, 5)),
+    0b10100101: ((8, 0, 3), (4, 5, 9), (10, 2, 1), (11, 6, 7)),
+    0b10110010: ((8, 11, 0), (0, 11, 5), (5, 11, 6), (0, 5, 1)),
+}
+
+# Normally you can invert the base cases (replace solid with empty and visa versa) to generate more cases
+# But this leads to a problem - such flips in 3d can swap the cube edges from one ambiguous configuration
+# to another.
+#
+#     *-----o          *-----o
+#     |  \  |          | /   |
+#     |   \ |          |/    |
+#     |\    |          |    /|
+#     | \   |          |   / |
+#     o-----*          o-----*
+#
+# This will lead to edges not properly lining up when putting adjacent cells together.
+# To solve this, we specify a few more cases, that are flips of the above, but with a different arrangement of edges
+# See http://users.polytech.unice.fr/~lingrand/MarchingCubes/algo.html
+
+INVERSE_CASES = {
+    255 - 0b00000101: ((3, 2, 8), (8, 2, 10), (8, 10, 1), (8, 1, 0)),
+    255 - 0b01000011: ((6, 8, 3), (6, 9, 8), (6, 5, 9),  (6, 3, 1), (6, 1, 10)),
+    255 - 0b01001010: ((3, 11, 0), (0, 11, 6), (0, 6, 9), (9, 6, 5), (1, 10, 2)),
+    # ?? Docs say these case is needed, but it doesn't appear to be
+    # 255 - 0b01101001: ((8, 11, 4), (4, 11, 6), (9, 10, 2), (9, 2, 0)),
+    # 255 - 0b00111010: ((8, 0, 3), (2, 7, 11), (7, 2, 1), (7, 1, 5)),
+    # ?? Docs say this case is needed, but it looks wrong
+    #255 - 0b10100101: ((3, 2, 11), (0, 9, 1), (6, 10, 5), (7, 4, 8)),
+}
+
+ALL_CASES = BASE_CASES.copy()
+
+# Add INVERSE_CASES to ALL_CASES
+for bits, faces in INVERSE_CASES.items():
+    ALL_CASES[bits] = faces
+
+
+# Most operations are simply vertex permutations
+ROTATE_1 = [
+    1,
+    2,
+    3,
+    0,
+    5,
+    6,
+    7,
+    4,
+]
+ROTATE_2 = [
+    3,
+    2,
+    6,
+    7,
+    0,
+    1,
+    5,
+    4
+]
+ROTATE_3 = [
+    1,
+    5,
+    6,
+    2,
+    0,
+    4,
+    7,
+    3,
+]
+REFLECT = [
+    1,
+    0,
+    3,
+    2,
+    5,
+    4,
+    7,
+    6
+]
+
+def bits_to_verts(n):
+    """Converts from bitwise representation into an array of vertex indices"""
+    return [v for v in range(8) if 2**v & n > 0]
+
+
+def verts_to_bits(vs):
+    """Converts from an array of vertex indices to a bitwise representation"""
+    return sum(2**v for v in vs)
+
+
+def bits_apply(op, n):
+    """Applies a vertex permutation operation to a set of vertices in bitwise representation"""
+    return verts_to_bits(op[v] for v in bits_to_verts(n))
+
+
+def faces_apply(op, faces, flip):
+    """Applies a vertex permutation to a list of faces, optionally flipping the faces"""
+    return [face_apply(op, face, flip) for face in faces]
+
+
+def face_apply(op, face, flip):
+    """Applies a vertex permutation to a list of edges"""
+    edges = [edge_apply(op, edge) for edge in face]
+    if flip: edges = list(reversed(edges))
+    return edges
+
+
+def edge_apply(op, edge):
+    """Applies a vertex permutation to an edge.
+    I.e. it permutes both ends of the edge, and finds the new edge that adjoins the two
+    resulting vertex indices."""
+    vs = frozenset(op[v] for v in EDGES[edge])
+    return EDGES_BY_VERTSET[vs]
+
+
+def compose(*ops):
+    """Applies a series of vertex permutations into a single new permutation"""
+    if len(ops) == 0:
+        return [0, 1, 2, 3, 4, 5, 6, 7]
+    if len(ops) == 1:
+        return ops[0]
+    if len(ops) == 2:
+        op1, op2 = ops
+        return [op2[op1[v]] for v in range(8)]
+    op1 = ops[0]
+    rest = ops[1:]
+    return compose(op1, compose(*rest))
+
+
+def pow(op, n):
+    """Repeats a vertex permutation n times"""
+    return compose(* ([op] * n))
+
+cases = {}
+
+# Brute force try all combinations of operations to generate new entries in cases
+# We try inverting last as all, as we want to prefer using an INVERSE_CASE
+# to doing an invert operation, as explained above
+for invert in (False, True):  # Invert swaps solid for empty and visa versa
+    for r1 in range(4):
+        for r2 in range(4):
+            for r3 in range(4):
+                for refl in range(2):
+                    op = compose(
+                        pow(ROTATE_1, r1),
+                        pow(ROTATE_2, r2),
+                        pow(ROTATE_3, r3),
+                        pow(REFLECT, refl),
+                    )
+                    # Both REFLECT and invert cause faces to flip
+                    flip = invert ^ (refl == 1)
+                    for bits, faces in ALL_CASES.items():
+                        new_bits = bits_apply(op, bits)
+                        if invert:
+                            new_bits = 255 - new_bits
+                        if new_bits not in cases:
+                            new_faces = faces_apply(op, faces, flip)
+                            cases[new_bits] = new_faces
+
+
+# Check that we only reference edges that really are between solid and non solid
+def test1():
+    for bits in range(256):
+        verts = set(bits_to_verts(bits))
+        all_edges = set(edge for face in cases[bits] for edge in face)
+        for edge in all_edges:
+            assert sum(v in verts for v in EDGES[edge]) == 1
+
+
+def faces_to_edge_pairs(faces):
+    return [frozenset([face[i], face[(i + 1) % 3]]) for face in faces for i in range(3)]
+
+
+# Check that each case is manifold (except on the cell boundary)
+def test2():
+    from collections import Counter
+    for bits in range(256):
+        edge_pairs = faces_to_edge_pairs(cases[bits])
+        edge_counts = Counter(edge_pairs)
+        for edge_pair, count in edge_counts.items():
+            # Ok, this edge_pair is used by two faces, forming a continuous surface
+            if count == 2: continue
+            # Find length squared of edge pair
+            def d_midpoint(edge):
+                """Returns the midpoint of the edge, scaled by 2"""
+                v0, v1 = EDGES[edge]
+                v0_pos = VERTICES[v0]
+                v1_pos = VERTICES[v1]
+                return ((x+y) for (x,y) in zip(v0_pos, v1_pos))
+            def length_sq(pos1, pos2):
+                """Returns the square of the length of two positions"""
+                return sum((x-y)**2 for (x,y) in zip(pos1, pos2))
+            edge1, edge2 = edge_pair
+            l2 = length_sq(d_midpoint(edge1), d_midpoint(edge2))
+            if l2 == 2 or l2 == 4:
+                # These are the lengths of the edge_pairs on the boundary
+                continue
+            assert False
+
+
+# Check that every face with the same solid/non-solid pattern also has the same edge pattern
+def test3():
+    CELL_FACES = [
+        [0, 1, 2, 3],
+        [1, 5, 6, 2],
+        [3, 2, 6, 7],
+        [4, 0, 3, 7],
+        [1, 0, 4, 5],
+        [7, 6, 5, 4],
+    ]
+    for cell_face in CELL_FACES:
+        def edge_pair_on_face(edge_pair):
+            return all(v in cell_face for e in edge_pair for v in EDGES[e])
+        edges_by_case = {}
+        for bits in range(256):
+            edge_pairs = faces_to_edge_pairs(cases[bits])
+            sub_bits = verts_to_bits(set(cell_face) & set(bits_to_verts(bits)))
+            sub_edge_pairs = frozenset(filter(edge_pair_on_face, edge_pairs))
+            if sub_bits in edges_by_case:
+                assert edges_by_case[sub_bits] == sub_edge_pairs
+            else:
+                edges_by_case[sub_bits] = sub_edge_pairs
+
+
+if __name__ == "__main__":
+    # Run a few tests that we've generated something sensible
+    test1()
+    test2()
+    test3()
+
+    # Dump out the results
+    import pprint
+    pprint.pprint([cases[i] for i in range(256)])
+```
+
+### qef.py
+```
+import numpy
+import numpy.linalg
+
+from utils_2d import V2
+from utils_3d import V3
+import settings
+
+
+class QEF:
+    """Represents and solves the quadratic error function"""
+    def __init__(self, A, b, fixed_values):
+        self.A = A
+        self.b = b
+        self.fixed_values = fixed_values
+
+    def evaluate(self, x):
+        """Evaluates the function at a given point.
+        This is what the solve method is trying to minimize.
+        NB: Doesn't work with fixed axes."""
+        x = numpy.array(x)
+        return numpy.linalg.norm(numpy.matmul(self.A, x) - self.b)
+
+    def eval_with_pos(self, x):
+        """Evaluates the QEF at a position, returning the same format solve does."""
+        return self.evaluate(x), x
+
+    @staticmethod
+    def make_2d(positions, normals):
+        """Returns a QEF that measures the the error from a bunch of normals, each emanating from given positions"""
+        A = numpy.array(normals)
+        b = [v[0] * n[0] + v[1] * n[1] for v, n in zip(positions, normals)]
+        fixed_values = [None] * A.shape[1]
+        return QEF(A, b, fixed_values)
+
+    @staticmethod
+    def make_3d(positions, normals):
+        """Returns a QEF that measures the the error from a bunch of normals, each emanating from given positions"""
+        A = numpy.array(normals)
+        b = [v[0] * n[0] + v[1] * n[1] + v[2] * n[2] for v, n in zip(positions, normals)]
+        fixed_values = [None] * A.shape[1]
+        return QEF(A, b, fixed_values)
+
+    def fix_axis(self, axis, value):
+        """Returns a new QEF that gives the same values as the old one, only with the position along the given axis
+        constrained to be value."""
+        # Pre-evaluate the fixed axis, adjusting b
+        b = self.b[:] - self.A[:, axis] * value
+        # Remove that axis from a
+        A = numpy.delete(self.A, axis, 1)
+        fixed_values = self.fixed_values[:]
+        fixed_values[axis] = value
+        return QEF(A, b, fixed_values)
+
+    def solve(self):
+        """Finds the point that minimizes the error of this QEF,
+        and returns a tuple of the error squared and the point itself"""
+        result, residual, rank, s = numpy.linalg.lstsq(self.A, self.b, rcond=None)
+        if len(residual) == 0:
+            residual = self.evaluate(result)
+        else:
+            residual = residual[0]
+        # Result only contains the solution for the unfixed axis,
+        # we need to add back all the ones we previously fixed.
+        position = []
+        i = 0
+        for value in self.fixed_values:
+            if value is None:
+                position.append(result[i])
+                i += 1
+            else:
+                position.append(value)
+        return residual, position
+
+
+def solve_qef_2d(x, y, positions, normals):
+    # The error term we are trying to minimize is sum( dot(x-v[i], n[i]) ^ 2)
+    # This should be minimized over the unit square with top left point (x, y)
+
+    # In other words, minimize || A * x - b || ^2 where A and b are a matrix and vector
+    # derived from v and n
+    # The heavy lifting is done by the QEF class, but this function includes some important
+    # tricks to cope with edge cases
+
+    # This is demonstration code and isn't optimized, there are many good C++ implementations
+    # out there if you need speed.
+
+    CELL_SIZE = settings.CELL_SIZE
+
+    if settings.BIAS:
+        # Add extra normals that add extra error the further we go
+        # from the cell, this encourages the final result to be
+        # inside the cell
+        # These normals are shorter than the input normals
+        # as that makes the bias weaker,  we want them to only
+        # really be important when the input is ambiguous
+
+        # Take a simple average of positions as the point we will
+        # pull towards.
+        mass_point = numpy.mean(positions, axis=0)
+
+        normals.append([settings.BIAS_STRENGTH, 0])
+        positions.append(mass_point)
+        normals.append([0, settings.BIAS_STRENGTH])
+        positions.append(mass_point)
+
+    qef = QEF.make_2d(positions, normals)
+
+    residual, v = qef.solve()
+
+    if settings.BOUNDARY:
+        def inside(r):
+            return x <= r[1][0] <= x + CELL_SIZE and y <= r[1][1] <= y + CELL_SIZE
+
+        # It's entirely possible that the best solution to the qef is not actually
+        # inside the cell.
+        if not inside((residual, v)):
+            # If so, we constrain the the qef to the horizontal and vertical
+            # lines bordering the cell, and find the best point of those
+            r1 = qef.fix_axis(0, x + 0).solve()
+            r2 = qef.fix_axis(0, x + CELL_SIZE).solve()
+            r3 = qef.fix_axis(1, y + 0).solve()
+            r4 = qef.fix_axis(1, y + CELL_SIZE).solve()
+
+            rs = list(filter(inside, [r1, r2, r3, r4]))
+
+            if len(rs) == 0:
+                # It's still possible that those lines (which are infinite)
+                # cause solutions outside the box. So finally, we evaluate which corner
+                # of the cell looks best
+                r1 = qef.eval_with_pos((x + 0, y + 0))
+                r2 = qef.eval_with_pos((x + 0, y + CELL_SIZE))
+                r3 = qef.eval_with_pos((x + CELL_SIZE, y + 0))
+                r4 = qef.eval_with_pos((x + CELL_SIZE, y + CELL_SIZE))
+
+                rs = list(filter(inside, [r1, r2, r3, r4]))
+
+            # Pick the best of the available options
+            residual, v = min(rs)
+
+    if settings.CLIP:
+        # Crudely force v to be inside the cell
+        v[0] = numpy.clip(v[0], x, x + CELL_SIZE)
+        v[1] = numpy.clip(v[1], y, y + CELL_SIZE)
+
+    return V2(v[0], v[1])
+
+
+def solve_qef_3d(x, y, z, positions, normals):
+    # The error term we are trying to minimize is sum( dot(x-v[i], n[i]) ^ 2)
+    # This should be minimized over the unit square with top left point (x, y)
+
+    # In other words, minimize || A * x - b || ^2 where A and b are a matrix and vector
+    # derived from v and n
+    # The heavy lifting is done by the QEF class, but this function includes some important
+    # tricks to cope with edge cases
+
+    # This is demonstration code and isn't optimized, there are many good C++ implementations
+    # out there if you need speed.
+
+    CELL_SIZE = settings.CELL_SIZE
+
+    if settings.BIAS:
+        # Add extra normals that add extra error the further we go
+        # from the cell, this encourages the final result to be
+        # inside the cell
+        # These normals are shorter than the input normals
+        # as that makes the bias weaker,  we want them to only
+        # really be important when the input is ambiguous
+
+        # Take a simple average of positions as the point we will
+        # pull towards.
+        mass_point = numpy.mean(positions, axis=0)
+
+        normals.append([settings.BIAS_STRENGTH, 0, 0])
+        positions.append(mass_point)
+        normals.append([0, settings.BIAS_STRENGTH, 0])
+        positions.append(mass_point)
+        normals.append([0, 0, settings.BIAS_STRENGTH])
+        positions.append(mass_point)
+
+    qef = QEF.make_3d(positions, normals)
+
+    residual, v = qef.solve()
+
+    if settings.BOUNDARY:
+        def inside(r):
+            return x <= r[1][0] <= x + CELL_SIZE and y <= r[1][1] <= y + CELL_SIZE and z <= r[1][2] <= z + CELL_SIZE
+
+        # It's entirely possible that the best solution to the qef is not actually
+        # inside the cell.
+        if not inside((residual, v)):
+            # If so, we constrain the the qef to the 6
+            # planes bordering the cell, and find the best point of those
+            r1 = qef.fix_axis(0, x + 0).solve()
+            r2 = qef.fix_axis(0, x + CELL_SIZE).solve()
+            r3 = qef.fix_axis(1, y + 0).solve()
+            r4 = qef.fix_axis(1, y + CELL_SIZE).solve()
+            r5 = qef.fix_axis(2, z + 0).solve()
+            r6 = qef.fix_axis(2, z + CELL_SIZE).solve()
+
+            rs = list(filter(inside, [r1, r2, r3, r4, r5, r6]))
+
+            if len(rs) == 0:
+                # It's still possible that those planes (which are infinite)
+                # cause solutions outside the box.
+                # So now try the 12 lines bordering the cell
+                r1  = qef.fix_axis(1, y + 0).fix_axis(0, x + 0).solve()
+                r2  = qef.fix_axis(1, y + CELL_SIZE).fix_axis(0, x + 0).solve()
+                r3  = qef.fix_axis(1, y + 0).fix_axis(0, x + CELL_SIZE).solve()
+                r4  = qef.fix_axis(1, y + CELL_SIZE).fix_axis(0, x + CELL_SIZE).solve()
+                r5  = qef.fix_axis(2, z + 0).fix_axis(0, x + 0).solve()
+                r6  = qef.fix_axis(2, z + CELL_SIZE).fix_axis(0, x + 0).solve()
+                r7  = qef.fix_axis(2, z + 0).fix_axis(0, x + CELL_SIZE).solve()
+                r8  = qef.fix_axis(2, z + CELL_SIZE).fix_axis(0, x + CELL_SIZE).solve()
+                r9  = qef.fix_axis(2, z + 0).fix_axis(1, y + 0).solve()
+                r10 = qef.fix_axis(2, z + CELL_SIZE).fix_axis(1, y + 0).solve()
+                r11 = qef.fix_axis(2, z + 0).fix_axis(1, y + CELL_SIZE).solve()
+                r12 = qef.fix_axis(2, z + CELL_SIZE).fix_axis(1, y + CELL_SIZE).solve()
+
+                rs = list(filter(inside, [r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12]))
+
+            if len(rs) == 0:
+                # So finally, we evaluate which corner
+                # of the cell looks best
+                r1 = qef.eval_with_pos((x + 0, y + 0, z + 0))
+                r2 = qef.eval_with_pos((x + 0, y + 0, z + CELL_SIZE))
+                r3 = qef.eval_with_pos((x + 0, y + CELL_SIZE, z + 0))
+                r4 = qef.eval_with_pos((x + 0, y + CELL_SIZE, z + CELL_SIZE))
+                r5 = qef.eval_with_pos((x + CELL_SIZE, y + 0, z + 0))
+                r6 = qef.eval_with_pos((x + CELL_SIZE, y + 0, z + CELL_SIZE))
+                r7 = qef.eval_with_pos((x + CELL_SIZE, y + CELL_SIZE, z + 0))
+                r8 = qef.eval_with_pos((x + CELL_SIZE, y + CELL_SIZE, z + CELL_SIZE))
+
+                rs = list(filter(inside, [r1, r2, r3, r4, r5, r6, r7, r8]))
+
+            # Pick the best of the available options
+            residual, v = min(rs)
+
+    if settings.CLIP:
+        # Crudely force v to be inside the cell
+        v[0] = numpy.clip(v[0], x, x + CELL_SIZE)
+        v[1] = numpy.clip(v[1], y, y + CELL_SIZE)
+        v[2] = numpy.clip(v[2], z, z + CELL_SIZE)
+
+    return V3(v[0], v[1], v[2])
+```
+
+### settings.py
+```
+"""Stores some global settings, mostly to save on a lot of repetitive arguments.
+These are mostly of interest for demonstrating different variants of the algorithms as discussed
+in the accompanying article."""
+
+
+# Both marching cube and dual contouring are adaptive, i.e. they select
+# the vertex that best describes the underlying function. But for illustrative purposes
+# you can turn this off, and simply select the midpoint vertex.
+ADAPTIVE = True
+
+# In dual contouring, if true, crudely force the selected vertex to belong in the cell
+CLIP = False
+# In dual contouring, if true, apply boundaries to the minimization process finding the vertex for each cell
+BOUNDARY = True
+# In dual contouring, if true, apply extra penalties to encourage the vertex to stay within the cell
+BIAS = True
+# Strength of the above bias, relative to 1.0 strength for the input gradients
+BIAS_STRENGTH = 0.01
+
+# Default bounds to evaluate over
+XMIN = -3
+XMAX = 3
+YMIN = -3
+YMAX = 3
+ZMIN = -3
+ZMAX = 3
+
+# Size of single cell in grid
+CELL_SIZE = 1
+
+# Small value used to avoid floating point issues.
+EPS = 1e-8
+```
+
+### utils_2d.py
+```
+"""Contains utilities common to 2d meshing methods"""
+
+from settings import XMIN, XMAX, YMIN, YMAX, CELL_SIZE, EPS
+from common import frange
+import math
+
+class V2:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+    def normalize(self):
+        d = math.sqrt(self.x*self.x+self.y*self.y)
+        return V2(self.x / d, self.y / d)
+
+
+def element(e, **kwargs):
+    """Utility function used for rendering svg"""
+    s = "<" + e
+    for key, value in kwargs.items():
+        s += " {}='{}'".format(key, value)
+    s += "/>\n"
+    return s
+
+
+def make_svg(file, edges, f):
+    """Writes an svg file showing the given edges and solidity"""
+    scale = 50
+    file.write("<?xml version='1.0' encoding='UTF-8'?>\n")
+    file.write("<svg version='1.1' xmlns='http://www.w3.org/2000/svg' viewBox='{} {} {} {}'>\n".format(
+        XMIN*scale, YMIN*scale, (XMAX-XMIN)*scale, (YMAX-YMIN)*scale))
+
+    file.write("<g transform='scale({})'>\n".format(scale))
+    # Draw grid
+    for x in frange(XMIN, XMAX, CELL_SIZE):
+        for y in frange(YMIN, YMAX, CELL_SIZE):
+            file.write(element("rect", x=x, y=y, width=CELL_SIZE, height=CELL_SIZE,
+                               style="stroke: grey; stroke-width: 0.02; fill: none"))
+
+    # Draw filled / unfilled circles
+    for x in frange(XMIN, XMAX+CELL_SIZE, CELL_SIZE):
+        for y in frange(YMIN, YMAX+CELL_SIZE, CELL_SIZE):
+            is_solid = f(x, y) > 0
+            fill_color = ("black" if is_solid else "white")
+            file.write(element("circle", cx=x, cy=y, r=0.05,
+                               style="stroke: black; stroke-width: 0.02; fill: " + fill_color))
+    # Draw edges
+    for edge in edges:
+        file.write(element("line", x1=edge.v1.x, y1=edge.v1.y, x2=edge.v2.x, y2=edge.v2.y,
+                           style='stroke:rgb(255,0,0);stroke-width:0.04'))
+
+    # Draw vertices
+    r = 0.05
+    for v in [v for edge in edges for v in (edge.v1, edge.v2) ]:
+        file.write(element("rect", x=(v.x-r), y=(v.y-r), width=2*r, height=2*r,
+                           style='fill: red'))
+
+    file.write("</g>\n")
+    file.write("</svg>\n")
+```
+
+### utils_3d.py
+```
+"""Contains utilities common to 3d meshing methods"""
+
+import math
+
+class V3:
+    """A vector in 3D space"""
+    def __init__(self, x, y, z):
+        self.x = x
+        self.y = y
+        self.z = z
+
+    def normalize(self):
+        d = math.sqrt(self.x*self.x+self.y*self.y+self.z*self.z)
+        return V3(self.x / d, self.y / d, self.z / d)
+
+class Tri:
+    """A 3d triangle"""
+    def __init__(self, v1, v2, v3):
+        self.v1 = v1
+        self.v2 = v2
+        self.v3 = v3
+
+    def map(self, f):
+        return Tri(f(self.v1), f(self.v2), f(self.v3))
+
+
+class Quad:
+    """A 3d quadrilateral (polygon with 4 vertices)"""
+    def __init__(self, v1, v2, v3, v4):
+        self.v1 = v1
+        self.v2 = v2
+        self.v3 = v3
+        self.v4 = v4
+
+    def map(self, f):
+        return Quad(f(self.v1), f(self.v2), f(self.v3), f(self.v4))
+
+    def swap(self, swap=True):
+        if swap:
+            return Quad(self.v4, self.v3, self.v2, self.v1)
+        else:
+            return Quad(self.v1, self.v2, self.v3, self.v4)
+
+
+class Mesh:
+    """A collection of vertices, and faces between those vertices."""
+    def __init__(self, verts=None, faces=None):
+        self.verts = verts or []
+        self.faces = faces or []
+
+    def extend(self, other):
+        l = len(self.verts)
+        f = lambda v: v + l
+        self.verts.extend(other.verts)
+        self.faces.extend(face.map(f) for face in other.faces)
+
+    def __add__(self, other):
+        r = Mesh()
+        r.extend(self)
+        r.extend(other)
+        return r
+
+    def translate(self, offset):
+        new_verts = [V3(v.x + offset.x, v.y + offset.y, v.z + offset.z) for v in self.verts]
+        return Mesh(new_verts, self.faces)
+
+
+def make_obj(f, mesh):
+    """Crude export to Wavefront mesh format"""
+    for v in mesh.verts:
+        f.write("v {} {} {}\n".format(v.x, v.y, v.z))
+    for face in mesh.faces:
+        if isinstance(face, Quad):
+            f.write("f {} {} {} {}\n".format(face.v1, face.v2, face.v3, face.v4))
+        if isinstance(face, Tri):
+            f.write("f {} {} {}\n".format(face.v1, face.v2, face.v3))
+```

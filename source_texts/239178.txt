@@ -1,0 +1,728 @@
+The Irreden Engine. Contribute to jakildev/IrredenEngine development by creating an account on GitHub.
+
+engine/voxel: range-scope cull-bounds invalidation on position + alpha by jakildev · Pull Request #3293 · jakildev/IrredenEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jakildev
+commented
+Sep 11, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+C_VoxelPool cached two derived cull structures behind two evictors. Both derive from the same three inputs (allocated prefix, per-voxel alpha, per-voxel global position), every producer called only the world-AABB one, and markChunkBoundsDirty() had zero callers tree-wide. On a cardinal camera — the default, residualYaw_ == 0 — an in-place position or alpha rewrite froze the iso bounds at the last alloc/dealloc, and the resulting geometry drop was self-latching.
+Collapsed the pair into one range-taking evictor, markCullBoundsDirty(start, count), tracked per 256-slot chunk with independent pending bits for the two consumers (they run on different frames; neither may consume the other's work).
+Completed the trigger set for inputs the position-range channel structurally cannot carry: the active-mask mutators, the GRID inverse arm's deactivated tail, and edits made while C_VoxelSetNew::visible_ is false (visibility gates the pool's active-mask write, not the authored alpha the bounds read).
+queuePositionRange now invalidates before its saturation early-return, and UPDATE_VOXEL_SET_CHILDREN stages a GPU-slotted set's real range with a separate upload flag instead of zeroing start/count — which had silently dropped invalidation for exactly the sets that move most.
+The detached re-voxelize branch consumes the pending set it satisfies. rebuildChunkBounds' m_staticReVoxelizeBound branch re-derives every chunk and returns early; it was returning without consuming the cardinal bits allocateVoxels arms, which made isRangeVisible admit every detached range unconditionally and forever. See "Opus recheck fix" below.
+demos/perf_grid: --auto-profile now reports means, not one frame. Every number it emitted was an n=1 sample (IRTime::renderFrameTimeMs() is a single inter-frame delta; CpuFrameHistogram keeps only the last frame), which is why AC4's third bound could not be settled on the first pass. See "AC4, re-measured" below.
+Phase 0 gate: CONFIRMED (the plan's measure-then-decide fork)
+The 2026-09-10 refutation killed whole-pool eviction at +1.331 ms/frame. The per-chunk rebuild now reduces into a stack-local bound and stores once. Re-running the plan's probe (forced whole-pool rebuild every frame — the worst case, every chunk pending):
+arm
+baseline mean CPU voxelStage1
+probe mean
+added
+static
+0.134 ms
+0.872 ms
++0.738 ms
+moving
+0.159 ms
+0.850 ms
++0.691 ms
+Both inside the ≤1.0 ms / ≤10 % budget, so phase 1 proceeded. Caveat, stated rather than left implicit: these figures predate the instrumentation in this PR and were taken with the old n=1-sample metric, so treat them as the order-of-magnitude gate they were used as. The binding measurement is the AC4 table below, which is properly sampled; it lands the shipped (non-probe) cost at +0.36 ms, comfortably under this worst-case probe.
+Opus recheck fix — the static-bound branch was not consuming its pending set
+The opus recheck was right, and the defect was real: this PR had disabled UPDATE-side culling for detached re-voxelize pools, a pool mode master culled correctly.
+rebuildChunkBounds has three branches. The first, taken when m_staticReVoxelizeBound is set (#1556), assigns every chunk the same iso bound projected from a conservative origin-centered world-AABB, then returns. That bound reads neither position nor alpha, so after it runs no chunk owes a cardinal recompute — but the branch never said so. allocateVoxels arms kCullPendingCardinal for the allocated range, REBUILD_DETACHED_VOXELS' per-tick active-mask writes re-arm it, and nothing on that early-return path clears it. isRangeVisible's Decision-6 rule ("pending ⇒ admit conservatively") therefore answered TRUE for every detached chunk on every frame, permanently.
+The fix is one line plus its rationale: the branch consumes m_pendingCardinalChunks before returning. Only the cardinal bit — ensureChunkWorldBounds is the world bit's sole consumer and this branch never runs it, so the world cache keeps owing its work, preserving the independent-consumer property the rest of the PR establishes.
+Positive control, run rather than asserted. With the one line removed and everything else identical, the three new cases fail and the 15 pre-existing cases pass:
+```
+[  FAILED  ] ChunkBoundsEvictionTest.StaticBoundPoolCullsAfterAllocationArmedThePendingBits
+[  FAILED  ] DetachedCullBoundTest.OffViewportDetachedRangeIsCulledAfterStaticRebuild
+[  FAILED  ] DetachedCullBoundTest.DetachedEditAdmitsOnceThenReturnsToTheOverlapAnswer
+[  PASSED  ] 15 tests.
+```
+So the failure isolates the latch, not a broken bound — and no pre-existing case could have caught it, because none of them take this branch.
+The three cases, in test/ecs/chunk_bounds_eviction_test.cpp:
+Case
+What it pins
+StaticBoundPoolCullsAfterAllocationArmedThePendingBits
+The branch in isolation: allocate, seed, setStaticReVoxelizeBound, rebuild — an off-viewport query must read invisible, an on-bound query visible (so a degenerate/inverted bound can't pass it).
+OffViewportDetachedRangeIsCulledAfterStaticRebuild
+The same property with the bound seeded through production: a DETACHED_REVOXELIZE canvas ticked by REBUILD_DETACHED_VOXELS, which owns the one-time setStaticReVoxelizeBound call and whose tick also re-arms the bits.
+DetachedEditAdmitsOnceThenReturnsToTheOverlapAnswer
+The full lifecycle on this branch: an in-place edit admits conservatively for one tick, and the next rebuild returns the ordinary overlap answer instead of latching.
+The last two run against a real EntityManager + SystemManager pipeline (DetachedCullBoundTest), which also answers the recheck's AC2 note about pool-level-only representation for this path — the detached arm is now exercised through its actual system, not simulated at the component.
+Perf: not re-measured, and here is why rather than an assertion that it doesn't matter. The added work is one walk of m_pendingCardinalChunks (≤ getChunkCount() entries, and empty on any frame with no edit) on a branch IRPerfGrid --mode voxel_set never enters — it has no detached canvas, so m_staticReVoxelizeBound is nullopt and both AC4 arms execute byte-identical code. Re-running an 18-pair A/B would measure the same two binaries' unrelated paths. Detached pools are small by construction: detached_probe's canvases use kProbePoolSize{16, 16, 20} (5,120 slots → 20 chunks at most), so the walk is bounded at a couple of dozen uint8_t clears per canvas per frame.
+engine/prefabs/irreden/voxel/CLAUDE.md's "REBUILD_DETACHED_VOXELS is exempt, by mechanism" bullet asserted the producer-side half and stopped there — which is what made the consumer-side omission invisible to a reader following the doc. It now states both halves: exempt as a producer, obligated as a consumer.
+Test plan
+fleet-build --target IrredenEngineTest clean; fleet-run IrredenEngineTest --gtest_filter='ChunkBoundsEvictionTest.*:DetachedCullBoundTest.*' → 18/18 PASS (16 + 2; re-run at the amended head)
+Full suite fleet-run IrredenEngineTest → 1652 passed, 1 skipped (FogCrossSectionTest.SkippedOnNonOpenGLBackend, expected on a Metal host), 0 failed (re-run at the amended head)
+Positive control for the recheck fix — the same suite with the one-line consumption removed: 3 FAILED / 15 passed, exactly the three new cases
+AC4 re-measured — interleaved paired A/B, 2 independent batches, n=18 matched pairs per arm, each run contributing a 225-frame mean (~4,050 frames per side per arm). All three bounds pass on both arms with the whole 95 % CI below the bound. Detail below.
+IRShapeDebug --auto-screenshot --cull-evict-test → 9/9 GUI-ASSERT ... result=PASS (re-run at the amended head)
+IRDetachedProbe --auto-screenshot → RESULT=CLEAN exit=0, 6/6 shots captured, all five detached solids present (the branch this amend changes, run end to end)
+python3 scripts/render-verify.py --target IRShapeDebug → all 24 checks PASS, every shot byte-identical (match 100.0, max_delta 0, psnr inf) (re-run at the amended head)
+IRShapeDebug --auto-screenshot --gui-test → 30/30 PASS, 0 FAIL (re-run at the amended head)
+cmake -DPROJECT_ROOT=$PWD -P cmake/run_header_checks_standalone.cmake → 580 headers, 0 new baselines (re-run at the amended head)
+git clang-format --diff origin/master → "did not modify any files" (re-run at the amended head)
+AC4, re-measured (addresses the first review's one needs-fix)
+The review was right that the first pass did not establish AC4's third bound. The cause was not sample count — it was that the tool emitted no mean at all. --auto-profile logged IRTime::renderFrameTimeMs(), a single inter-frame delta, and CpuFrameHistogram only ever retains the last frame. So "n=6 runs" was six one-frame samples drawn from a strongly bimodal population (update ticks on a subset of render frames), and adding runs adds one such sample each. Measured here: one run's trailing frame read 7.904 ms where that same run's 225-frame mean was 9.666 ms — an 18 % error from a single sample.
+Fix to the instrument: demos/perf_grid now folds every post-warmup frame into a running mean + stddev and logs Auto-profile mean — frame:… sd:… n:… plus a per-scope mean line, alongside the existing single-frame lines (left intact). Warmup is the first quarter of the window. The commit is demo-local — it touches no engine code, and it was cherry-picked unchanged onto origin/master to build the baseline arm, so both sides are measured by identical instrumentation.
+Fix to the schedule, and it mattered. A block-sequential A/B (all fixed runs, then all baseline runs) reported +10.6 % / +11.6 % — i.e. a fail. An interleaved paired schedule on the same binaries reports +4.97 % / +3.86 %. Between-block drift on this host is large enough to move the answer across the bound, so the sequential result is discarded as confounded, not averaged in. Both binaries live in the same directory as the staged assets and alternate order each round; each round is a matched pair, analysed with a paired t-interval so between-round drift cancels. Reporting both because the disagreement is the methodological point, and a reader who only saw the passing number could not check it.
+Pooled result — n=18 matched pairs per arm, two independent batches (n=10 and n=8) that agree:
+Metric
+arm
+baseline
+fixed
+paired delta
+95 % CI
+CPU voxelStage1
+static
+0.142 ms
+0.502 ms
++0.360 ms
++0.353 … +0.367
+CPU voxelStage1
+moving
+0.141 ms
+0.508 ms
++0.367 ms
++0.356 … +0.378
+CPU update
+static
+1.177 ms
+1.616 ms
++0.438 ms
++0.401 … +0.476
+CPU update
+moving
+1.161 ms
+1.618 ms
++0.457 ms
++0.384 … +0.530
+CPU render
+static
+7.761 ms
+7.762 ms
++0.001 ms
+−0.129 … +0.132
+CPU render
+moving
+8.053 ms
+7.943 ms
+−0.110 ms
+−0.186 … −0.034
+total frame
+static
+8.955 ms
+9.400 ms
++0.445 ms
++0.292 … +0.598
+total frame
+moving
+9.228 ms
+9.584 ms
++0.356 ms
++0.231 … +0.481
+The three gated bounds:
+Bound
+static
+moving
+added voxelStage1 ≤ 1.0 ms
+0.360 ms (CI upper 0.367) — PASS
+0.367 ms (CI upper 0.378) — PASS
+added voxelStage1 ≤ 10 % of baseline frame
+4.02 % (CI upper 4.10 %) — PASS
+3.98 % (CI upper 4.09 %) — PASS
+total mean CPU frame time rise ≤ 10 %
++4.97 % [3.26 %, 6.68 %] — PASS
++3.86 % [2.50 %, 5.22 %] — PASS
+Every CI lies entirely below its bound, so these are passes rather than "not separable".
+These figures were measured at 7c834669 and are carried, not re-run, across the recheck amend. That is a deliberate call with a checkable basis, not an omission: the amend's only executable change is inside the m_staticReVoxelizeBound branch, and IRPerfGrid --mode voxel_set creates no detached canvas, so both AC4 arms run byte-identical code paths. The added cost where the branch is taken is bounded above by one std::vector<std::size_t> walk of at most getChunkCount() entries per call.
+Where the frame cost actually goes — read this, it is the non-obvious part. frame = input + update + render holds exactly in the profile, and voxelStage1 is nested inside render. render is net flat (static +0.001 ms, CI straddling zero; moving −0.110 ms), so the +0.36 ms cull rebuild is absorbed within the render stage — correct bounds mark fewer chunks visible, and the downstream saving offsets the rebuild. The frame-level rise is therefore carried almost entirely by update (+0.44 / +0.46 ms), which is the Decision 6 cost: isRangeVisible is now conservative on pending ranges, so the UPDATE movers stop skipping sets they used to skip incorrectly. AC4's "so moving cost into UPDATE cannot pass" clause is exactly the right thing to check here, and it is satisfied — the UPDATE rise is counted in the total, and the total passes on both arms with room.
+Cross-check against an instrument I did not write. save_files/profile_report.txt already emits Frame time: avg=… p50=… p95=… p99=… over the whole run — an averaged CPU frame time that existed before this PR. On the final baseline run it reads avg=9.31 ms (300 frames, warmup included, max=41.65 ms cold first frame) where the new accumulator read 9.244 ms (225 frames, warmup excluded). The two agree to within the warmup contamination that explains the gap, which is the independent corroboration that the accumulator is summing what it claims to.
+Stating the obvious follow-up, since a reviewer will ask it: if profile_report.txt already had a mean, why add code? Three reasons, and the first is the one that actually mattered here — (1) the report's avg includes the cold prefix, so it is not the steady-state figure a gate wants; (2) it has no row for voxelStage1, which is a profile scope nested inside the render pipeline, not a system row in the per-system table, and AC4 gates on exactly that name; (3) the n=1 Auto-profile stats line was printed in the run's own stdout with no mean beside it, so the trap was placed exactly where the author reads. Putting the mean next to the single-frame line removes the trap at its source rather than relying on the author knowing to go read a different file. The honest version of the first pass's failure is not "the tool had no mean anywhere" — it is "the mean was in a file the workflow never pointed at, and the number in front of the author was n=1".
+Raw rows and the analysis script are reproducible from the commands in the harness; hardware/backend: macOS, Metal, 2560×1440, --mode voxel_set --grid-size 64 --yaw 0, 262,144-slot dense pool, vsync off (glfwSwapInterval(0)).
+Acceptance evidence
+Criterion
+Check run
+Observed
+AC1 Unit tests / positive control: CardinalPositionRewrite, AlphaOnlyPoseSwap, HiddenEditThenReveal; assert mask bits and isRangeVisible; exact bounds/depth vs a fresh forced-rebuild oracle; must fail at 1750ef4ae, and a compile failure is not the control
+Built the suite against master's engine/ with the notify helper set to markChunkWorldBoundsDirty() (master's only producer-side evictor) — it compiles and runs there
+8 of 10 FAIL at 1750ef4ae. e.g. CardinalPositionRewrite: Expected: (after.isoMin_.x) != (before.isoMin_.x), actual: 0 vs 0 and chunk 0 must be visible at the pose its voxels actually occupy (Actual: false). The 2 that pass are the discriminating ones: StaticPoolStillCachesCardinalBounds (the cache-still-caches control) and AllocationReuseAndDeallocationInvalidate (alloc/dealloc is the one trigger master did cover). Cases are named CardinalPositionRewrite / AlphaOnlyPoseSwap / HiddenEditThenReveal per the plan.
+AC2 Trigger/lifecycle: single-bit, unaligned bulk crossing 32-slot words and 256-slot chunks, all-inactive span, alloc growth/reuse/dealloc, shared chunks, zero-length range, edits past the 8192-entry upload saturation, GRID identity without upload + deferred GPU-slot path, cardinal→yaw→cardinal, all four cardinals, independent consumption, and the detached/static-bound branch's own consumption; neighbouring suites green
+fleet-run IrredenEngineTest --gtest_filter='ChunkBoundsEvictionTest.*:DetachedCullBoundTest.*', plus StoreTieSignalTest/VoxelSetEditApiTest/VoxelSetTargetCanvasTest/VoxelSetAnchorTest/GridRotationTest/RebuildDetachedVoxelsGuardTest
+18/18 PASS. SingleBitActivationGrowsChunkBounds, CacheLocality… (unaligned kChunk-3, 70 → exactly 2 chunks), PartialAndEmptyChunksVisitOnlyAllocatedSlots, AllocationReuseAndDeallocationInvalidate, SharedChunkRecomputesFromEverySlot, EditsAfterUploadQueueSaturationStillInvalidate, BoundsInvalidationIsIndependentOfUploadQueue (the GPU-slot / GRID-identity "invalidate without uploading" shape), CardinalYawCardinalRoundTripAndAllCardinals, CardinalAndWorldConsumersArePendingIndependently, plus the three detached-branch cases (two of them ticked through REBUILD_DETACHED_VOXELS in a real SystemManager pipeline rather than represented at pool level). Neighbours: 43/43 PASS (re-run at the amended head).
+AC3 Cache locality / negative control via a permanent test seam (per the plan review's correction 4, not temporary counters): 1024-chunk pool, one notified chunk → exactly that chunk (256 slots); duplicates don't duplicate work; clean same-cardinal call visits zero; cardinal change visits all; empty + partial chunks; no per-voxel telemetry
+ChunkBoundsEvictionTest.CacheLocalityOneNotifiedChunkVisitsOneChunk, PartialAndEmptyChunksVisitOnlyAllocatedSlots, StaticPoolStillCachesCardinalBounds
+PASS. cardinalChunks_ == 1, cardinalSlots_ == 256 after one notification; 0/0 on a clean call; 1024 on a cardinal change; partial tail chunk visits 300 not 512. Seam is consumeCullRebuildCounters(), incremented once per chunk (never per voxel) — O(1) state.
+AC4 Perf gate: both commands, ≥2 runs/arm, same host/build; added CPU voxelStage1 ≤1.0 ms and ≤10 % of that command's baseline mean CPU frame time; total mean CPU frame time not >10 %; 262 144-slot dense control + the sparse work-count proof; partial/absent profile table = failure
+Both plan commands verbatim. Instrument fixed to emit means (see "AC4, re-measured"), then interleaved paired A/B: 2 independent batches, n=18 matched pairs per arm, each run a 225-frame mean. Dense control present (edge=64 (262144 voxels)); sparse work-count proof is AC3's counters. All runs exit 0 with a full profile table.
+All three bounds PASS on both arms, whole 95 % CI below each bound. Added voxelStage1 +0.360 ms static / +0.367 ms moving (≤1.0 ms; 4.02 % / 3.98 % of the baseline frame). Total mean CPU frame time +4.97 % [3.26, 6.68] static, +3.86 % [2.50, 5.22] moving. Measured at 7c834669; carried across the recheck amend because that amend's only executable change is on a branch IRPerfGrid does not enter (reasoning + bound in "Opus recheck fix").
+AC5 Render regression: shape_debug fixture alternating two occupancy poses in existing spans at a fixed cardinal camera, no manual eviction; every step matches its intended pose, neither blend nor preceding pose; must fail with invalidation disarmed; asserts pool-derived state in addition to pixels; render-verify preserves existing references; RESULT=CLEAN
+IRShapeDebug --auto-screenshot --cull-evict-test (new flag); md5 of the three captures; scripts/render-verify.py --target IRShapeDebug; IRDetachedProbe --auto-screenshot for the detached branch; disarmed arm = the same fixture against master's engine/ (it calls no API this PR adds)
+9/9 assertions PASS, RESULT=CLEAN. Pose A and pose-A-again captures are byte-identical (cf05e053…), pose B differs (271f9804…) — each step is its intended pose. Disarmed: all 3 predicates FAIL at shot 1 — liveChunks=[0,1] where the pose wants [6,7] (bounds frozen at the previous pose) and liveChunkRange=culled, i.e. pose B's own chunks dropped. render-verify 24/24 PASS, byte-identical. IRDetachedProbe CLEAN, 6/6 shots, all five detached solids rendered (the branch the recheck amend touches).
+AC5 (cont.) Both-backend smoke
+macOS/Metal only on this host
+Metal run only. Not claiming OpenGL — the PR carries fleet:needs-linux-smoke for the Linux leg.
+Issue AC markChunkBoundsDirty() either has callers or is deleted; no independent zero-caller evictor remains
+git grep -F markChunkBoundsDirty
+Returns only the deprecated forwarder definition. Both old spellings are [[deprecated]] one-line forwarders to markCullBoundsDirty (kept per the Engine API removal rule — the plan's locked Decision 1); the independent evictor is gone. No -Wdeprecated-declarations warnings, confirming zero in-tree callers.
+The disarmed arm, decomposed
+Master's pose-B frame is a genuine mixture, not a lag — the same decomposition the #766 occurrence measured, reproduced here (2560×1440):
+```
+pixels where the two poses AGREE but master's step differs:  25600
+pose-difference mask size:                                  101376
+  master step == pose A there:                               45056
+  master step == pose B there:                               45056
+  master step == neither there:                              11264
+```
+Master's pose-A and pose-A-again captures are byte-identical to this branch's, so the fix changes nothing for the case the cache already handled.
+Perf notes for the reviewer
+Range-scoping buys nothing in this benchmark, by design of the benchmark. IRPerfGrid --mode voxel_set --grid-size 64 fills the whole 262 144-slot pool and UPDATE_VOXEL_SET_CHILDREN rewrites every visible set's positions every tick, so all 1024 chunks are notified every update tick — the plan predicted exactly this. The range-scoping's benefit is proven by AC3's work counts, not by this scene; what this scene measures is the chunk-local reduction, which is what carries the gate (+0.36 ms measured vs the refuted whole-pool +1.331 ms).
+The per-frame samples are bimodal, and that is now handled in the instrument rather than in prose. update ticks on only a subset of render frames, so frames split into rebuild frames and cache-hit frames. The first pass reported an all-frames figure and an update-tick-conditioned figure side by side because a single sample could not span both modes. With --auto-profile now averaging every post-warmup frame, the reported mean is the correctly weighted mixture and the conditioning is no longer needed — the stddev the instrument prints is the spread, not an artifact.
+The third bound is now resolved, not flagged. Both arms pass with the whole 95 % CI below 10 % (+4.97 % static, +3.86 % moving). Two things had to change to get there and both are in this PR's diff or its method: the instrument had to emit a mean at all, and the A/B had to be interleaved rather than block-sequential. The earlier "+10.5 %, I am not claiming this passes" was the honest call on the evidence available then; it is superseded by evidence, not by re-framing.
+Notes for the reviewer
+isRangeVisible is now conservative on pending ranges (the plan's Decision 6). It feeds the UPDATE movers, which run before the render pipeline re-derives bounds; answering from a chunk that already owes a recompute is what latched an edited set off-screen. It cannot feed back: an off-screen set is skipped, so it never writes, so it never becomes pending. Cost is bounded at one extra tick for a set that just changed, and is now quantified: it is the +0.44 / +0.46 ms update rise in the AC4 table, the dominant term in the frame-level delta. The explicit non-claim from Decision 6 still holds — a transform change that an already-stale UPDATE cull rejects before any pool write is a separate defect, not widened into here.
+REBUILD_DETACHED_VOXELS is exempt as a producer; its branch is not exempt as a consumer. It writes pool.getColors(), so a colour-writer sweep finds it, but it returns on the m_staticReVoxelizeBound branch before the cached path (render: detached re-voxelize — GPU scatter fill (P2) #1556) — so adding a producer-side notification there would evict a cache that path never reads. The first draft of this PR stopped at that half-truth and left the branch returning without consuming the bits allocateVoxels arms; the opus recheck caught it. Corrected in the code, in voxel/CLAUDE.md, and covered by three regressions — see "Opus recheck fix" above.
+Producer coverage was swept, not assumed. fleet-rules-sweep --pattern 'getPositionGlobals\(\)' over 950 files: every non-const production accessor is in the two systems this PR wires; the render-side and light-grid uses are const reads.
+One simplify medium finding deliberately not applied. oracleChunkBounds (test) and cullEvictOracle (shape_debug) are ~90 % structural duplicates. I kept both: the independence is load-bearing — an oracle sharing code with the code under test is vacuous — they live in different link targets, and if they ever drift apart at least one gate fails loudly. Factoring them into a shared helper creates exactly the surface a future refactor could wire back into production.
+One simplify deferred finding, also not applied. DetachedCullBoundTest::makeDetachedCanvas shares a ~50 % prefix with RebuildDetachedVoxelsGuardTest::makeCanvas (create canvas → stamp identity quat + reVoxelize_). The two fixtures need different postconditions (bare vs. bound-seeded) and cover different systems; this is parallel-fixture convergence, not a copy-paste miss. Worth revisiting if a third detached-canvas fixture appears.
+Unmeasured residual: resyncActiveMaskFromColors notifies its whole range up front, then its per-voxel setActiveBit/clearActiveBit calls each hit the already-pending early-out (~2 ns each). Neither measured arm exercises that path (yaw 0 ⇒ GRID identity arm, which uses recomputeMaskFromGlobals), so I did not add a non-notifying raw setter on speculation.
+.fleet/plans/issue-1803.md still names markChunkWorldBoundsDirty(). Not stale — the symbol still exists as a forwarder — and out of scope for this PR.
+Open-PR overlap: measured, not predicted — all four trial-merge clean. The plan review predicted a textual conflict with editor: F-1.6 PR-4 — BIRD + TREE, closing the five-entity proof (#766) #3151 on creations/demos/shape_debug/main.cpp; I ran the trial merges rather than repeating the prediction, and there is no textual conflict with any overlapping open PR:
+Open PR
+Shared file(s)
+git merge-tree --write-tree vs the amended head
+#3151
+shape_debug/main.cpp, voxel/CLAUDE.md
+clean
+#3170
+test/CMakeLists.txt
+clean
+#3202
+voxel/CLAUDE.md, component_voxel_set.hpp
+clean
+#3286
+shape_debug/main.cpp, test/CMakeLists.txt, perf_grid/main.cpp
+clean
+#3299
+test/CMakeLists.txt
+clean
+Semantically #3151 is also fine in either merge order: its two hand-rolled evictor pairs become calls to deprecated forwarders that still perform the correct (stronger) eviction, and the tree has no -Werror (verified — the only hit is clang-format --Werror), so the [[deprecated]] attribute cannot break its build. I will not amend the sibling.
+Method note, because it bit me: gh pr list --state open defaults to --limit 30 and this repo has 50 open PRs. The unbounded form silently omitted #3151 and reported a clean overlap check — a false clean. Every query behind this table, including the duplicate-Closes #2830 check, was re-run at --limit 300 with an explicit coverage count (47 PRs with files + 3 with none = 50).
+Re-measured at the amended head, not carried: the recheck amend re-edits voxel/CLAUDE.md, which #3151 and #3202 also touch, so the prior table could not simply be assumed forward. All five trial merges are clean against the new head. The --limit 300 re-query also surfaced a new overlapping PR since the last pass — #3299, on test/CMakeLists.txt — which is why the sweep is re-run rather than inherited.
+Closes #2830
+🤖 Generated with Claude Code
+engine/voxel: range-scope cull-bounds invalidation on position + alpha
+…
+8b85058
+```
+C_VoxelPool caches two derived cull structures — the cardinal chunk iso
+AABBs and the yaw-independent chunk world AABBs — and both are derived
+from the same three inputs: allocated prefix, per-voxel alpha, per-voxel
+global position. They had two separate evictors. Every producer called
+only the world one, and markChunkBoundsDirty() had zero callers
+tree-wide, so on a cardinal camera (the default, residualYaw_ == 0) an
+in-place position or alpha rewrite froze the iso bounds at the last
+alloc/dealloc. Both consumers then dropped live geometry, and the drop
+was self-latching: the movers stopped advancing the CPU mirror, so the
+bounds never became wrong in a way that recovered.
+
+Collapse the pair into one range-taking evictor,
+markCullBoundsDirty(start, count), tracked per 256-slot chunk with
+independent pending bits for the two consumers — they run on different
+frames and neither may consume the other's work. A whole-pool eviction
+was measured at +1.331 ms/frame and refuted the first approach; the
+per-chunk rebuild now reduces into a stack-local bound and stores once,
+which brings the worst case (every chunk pending every frame) to
++0.72 ms static / +0.65 ms moving, inside the 1.0 ms budget.
+
+Completing the trigger set means covering inputs no position range can
+carry: the active-mask mutators (so an activation-only edit grows the
+bound), the GRID inverse arm's deactivated tail, and edits made while
+C_VoxelSetNew::visible_ is false — visibility gates the pool's
+active-mask write, not the authored alpha the bounds read.
+queuePositionRange notifies before its saturation early-return, and
+UPDATE_VOXEL_SET_CHILDREN now stages a GPU-slotted set's real range with
+a separate upload flag rather than zeroing start/count, which had
+silently dropped invalidation for the sets that move most.
+
+Guards: test/ecs/chunk_bounds_eviction_test.cpp (15 cases, incl. a
+cache-locality negative control proving one notified chunk visits one
+chunk) and a flag-gated shape_debug fixture, --cull-evict-test, that
+alternates two occupancy poses in one allocated span at a fixed cardinal
+camera and asserts pool-derived state, not voxel alpha — the shipping
+instance of this bug passed 28/28 CPU occupancy assertions while
+rendering a blend of two poses.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+jakildev
+added
+fleet:author-claude
+Implementation last authored by Claude; route review to Codex
+fleet:authored-on-macos
+PR was authored and smoke-tested on macOS Metal backend
+fleet:needs-linux-smoke
+PR needs linux-debug build + smoke-run validation
+fleet:reviewing-mac-pool-4
+labels
+Sep 11, 2026
+jakildev
+commented
+Sep 11, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review — engine/voxel: range-scope cull-bounds invalidation on position + alpha
+Verdict: needs-fix
+Needs-fix
+engine/prefabs/irreden/voxel/components/component_voxel_pool.hpp:401 — AC4 is not established. The PR's acceptance evidence reports the static arm's frame: result as +10.5%, while the issue requires total mean CPU frame time not to rise by more than 10%; it also says that value is not cleanly separable at the current sample count. Re-run the static and moving arms with enough samples and a mean CPU frame-time metric, then show both are at or below the stated bound (or re-plan if the static arm remains over it).
+Nits (follow-up)
+engine/prefabs/irreden/voxel/components/component_voxel_pool.hpp:448 — trim the investigation-history wording (the refuted “first approach” and its measured value) from the source comment. Keep the durable range/coalescing contract; the measurement belongs in the PR or plan.
+Praise
+The independent cardinal/world pending bits and the per-chunk reductions preserve consumer independence while keeping the cardinal derivation and minDepth_ semantics intact.
+Acceptance (issue #2830)
+Criterion
+Grade
+Basis
+AC1 positive-fire bounds/visibility cases
+met
+ChunkBoundsEvictionTest supplies the named position, alpha, and hidden-edit coverage; the PR evidence records 8/10 meaningful failures on the pre-fix base.
+AC2 lifecycle and consumer independence
+met
+The component records independent pending sets at component_voxel_pool.hpp:846-864; the new suite covers range, saturation, yaw/cardinal, and both-consumer cases.
+AC3 locality and cache negative control
+met
+component_voxel_pool.hpp:496-513 exposes bounded per-chunk counters, and the locality test asserts one notified chunk, clean-cache zero work, partial tail, and cardinal-wide rebuild.
+AC4 dense performance gate
+unmet
+The PR's own static-arm evidence reports +10.5% total CPU frame time by frame: and explicitly says the result is not cleanly separable; that does not demonstrate the required <=10% mean.
+AC5 render regression and both-backend coverage
+unverifiable
+The fixture and its pool-derived assertions are present in creations/demos/shape_debug/main.cpp; Metal evidence is supplied, and the outstanding fleet:needs-linux-smoke label carries the OpenGL lane.
+Test plan the author should run before merge
+Re-run AC4's static and moving perf arms with a mean CPU frame-time measurement and sufficient samples; include the raw/aggregate evidence showing each arm remains within the 10% bound.
+Complete the pending Linux/OpenGL smoke run.
+Reviewed by Codex (sonnet-reviewer role, review-pr skill).
+Opus recheck required: this changes concurrent deferred update bookkeeping and the cull-cache lifecycle.
+jakildev
+added
+fleet:needs-fix
+Fleet reviewer found issues — author must address
+fleet:amending-mac-pool-1
+and removed
+fleet:reviewing-mac-pool-4
+fleet:needs-fix
+Fleet reviewer found issues — author must address
+labels
+Sep 11, 2026
+demos/perf_grid: report --auto-profile means, not a single frame
+…
+7c83466
+```
+AC4 of #2830 gates on "total mean CPU frame time", but every number
+--auto-profile emitted was an n=1 sample: IRTime::renderFrameTimeMs() is
+one inter-frame delta and CpuFrameHistogram keeps only the last frame.
+The per-frame population is strongly bimodal (update ticks on a subset
+of render frames; a bounds-rebuild frame costs several times a cache-hit
+frame), so a single sample reports whichever mode it landed in and
+repeating the run only adds one more such sample.
+
+Accumulate every post-warmup frame into a running mean + stddev and log
+them alongside the existing single-frame lines, which are left intact.
+Warmup is the first quarter of the window -- the single-frame dump was
+implicitly post-warmup by reading only the final frame.
+
+Measured on the static arm: the single sample read frame:7.904ms where
+the 225-frame mean is 9.666ms sd 1.837 -- an 18% error from one sample,
+which is the entire reason AC4's third bound was not separable.
+
+Refs #2830
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+jakildev
+added
+fleet:changes-made
+Agent addressed human feedback — ready for human re-review
+and removed
+fleet:amending-mac-pool-1
+labels
+Sep 11, 2026
+jakildev
+commented
+Sep 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Addressed the review's one needs-fix item (AC4). Summary:
+The needs-fix was right, and the root cause was the instrument, not the sample count. --auto-profile emitted no mean at all: IRTime::renderFrameTimeMs() is a single inter-frame delta and CpuFrameHistogram retains only the last frame. So the previous "n=6 runs" was six one-frame samples from a bimodal population, and adding runs adds one such sample each. Measured directly: one run's trailing frame read 7.904 ms where that same run's 225-frame mean was 9.666 ms.
+Fixed the instrument (demos/perf_grid, one demo-local commit, no engine code): every post-warmup frame folds into a running mean + stddev, logged as Auto-profile mean — frame:… sd:… n:… plus per-scope means. Existing single-frame lines left intact. The commit cherry-picks unchanged onto origin/master, so both arms are measured by identical instrumentation.
+Fixed the schedule, and it changed the answer. A block-sequential A/B reported +10.6 % / +11.6 % — a fail. An interleaved paired A/B on the same two binaries reports +4.97 % / +3.86 %. Between-block drift on this host is large enough to move the verdict across the bound. I am reporting both numbers rather than only the passing one, because the disagreement is the methodological finding and a reader could not otherwise check it.
+Result — n=18 matched pairs per arm, two independent batches (n=10, n=8) that agree, each run a 225-frame mean (~4,050 frames per side per arm):
+Bound
+static
+moving
+added voxelStage1 ≤ 1.0 ms
+0.360 ms — PASS
+0.367 ms — PASS
+added voxelStage1 ≤ 10 % of baseline frame
+4.02 % — PASS
+3.98 % — PASS
+total mean CPU frame time ≤ +10 %
++4.97 % [3.26, 6.68] — PASS
++3.86 % [2.50, 5.22] — PASS
+Every 95 % CI lies entirely below its bound, so these are passes rather than "not separable".
+Worth a look during re-review — where the cost actually lands. frame = input + update + render holds exactly, and voxelStage1 is nested inside render. render is net flat (static +0.001 ms, CI straddling zero; moving −0.110 ms), so the cull rebuild is absorbed within the render stage — correct bounds mark fewer chunks visible and the downstream saving offsets it. The frame-level rise is carried almost entirely by update (+0.44 / +0.46 ms): the Decision 6 isRangeVisible conservatism, now quantified rather than described. AC4's "moving cost into UPDATE cannot pass" clause is exactly the right check here and it is satisfied — that rise is inside the total, and the total passes on both arms.
+Not amended: the ### Nits (follow-up) item at component_voxel_pool.hpp:448 — per REVIEWER-PROTOCOL those ride the next PR on this surface, not this amend.
+Also re-run at the amended head: full suite 1649 passed / 1 skipped / 0 failed, ChunkBoundsEvictionTest 15/15, header checks 580 headers / 0 new baselines, git clang-format --diff origin/master clean. PR body's AC4 row, Test plan and Perf notes all reconciled to these numbers.
+One correction I made to my own draft: I initially wrote that no open PR touches perf_grid/main.cpp. The --limit 300 query says #3286 does. Trial merge is clean and the two edits are in different concerns (#3286 rewires the shot table; this adds the profile accumulator) — body updated to say so.
+Reviewer: the pending fleet:needs-linux-smoke leg is unchanged and still outstanding. — worker
+jakildev
+added
+the
+fleet:reviewing-mac-pool-6
+label
+Sep 11, 2026
+jakildev
+mentioned this pull request
+Sep 11, 2026
+docs/author-pipeline + optimize: a perf gate needs a MEAN metric and an INTERLEAVED A/B — an n=1 metric and a block-sequential schedule each flipped AC4's verdict (coding-improvement)
+#3302
+Closed
+jakildev
+commented
+Sep 11, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review — engine/voxel: range-scope cull-bounds invalidation on position + alpha
+Verdict: approve
+Prior-review resolution
+✅ engine/prefabs/irreden/voxel/components/component_voxel_pool.hpp:401 — AC4 did not establish the total mean CPU-frame-time bound — verified fixed at 7c834669: --auto-profile now emits post-warmup frame and per-scope means/stddev, and the supplied paired static/moving measurements place every CI below the gate.
+Praise
+The amended profiler keeps the existing single-frame diagnostic output while adding the aggregate figures the acceptance criterion actually needs; the focused cache suite still proves the independent pending-consumer and locality contracts.
+Acceptance (issue #2830)
+Criterion
+Grade
+Basis
+AC1 positive control
+met
+Required position, alpha, and hidden-edit cases assert visibility/mask state and the oracle; the evidence records real pre-fix failures.
+AC2 trigger/lifecycle coverage
+met
+The 15-case suite covers range, saturation, shared-chunk, yaw/cardinal, and independent-consumer paths; range notification remains deferred to UPDATE endTick.
+AC3 cache locality
+met
+The permanent counter seam verifies 0 clean work, one notified 256-slot chunk, coalescing, partial tails, and cardinal-wide rebuild.
+AC4 dense performance gate
+met
+The new mean instrumentation matches the claimed output, and both n=18 paired arms report all three bounds below their limits.
+AC5 render regression / backends
+unverifiable
+The fixture and Metal evidence are present; the OpenGL/Linux lane remains correctly tracked by fleet:needs-linux-smoke.
+Test plan the author should run before merge
+Complete the pending Linux/OpenGL smoke run.
+Focused verification: ChunkBoundsEvictionTest.* 15/15 passed; full IrredenEngineTest passed 1,649 tests with the expected Metal-only skip. Header convention checks passed (580 headers).
+Reviewed by Codex (sonnet-reviewer role, review-pr skill).
+Opus recheck required: the PR changes the cull-cache lifecycle and deferred parallel UPDATE handoff.
+jakildev
+added
+fleet:needs-opus-recheck
+Sonnet flagged this PR for Opus recheck before merge
+fleet:reviewing-mac-pool-7
+and removed
+fleet:reviewing-mac-pool-6
+fleet:changes-made
+Agent addressed human feedback — ready for human re-review
+labels
+Sep 11, 2026
+jakildev
+commented
+Sep 11, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Opus recheck — range-scoped cull-bounds invalidation (#2830)
+Verdict: needs-fix
+Blocking finding
+engine/prefabs/irreden/voxel/components/component_voxel_pool.hpp:340 / :558 — the static re-voxelize bound branch assigns valid bounds and returns without consuming the new pending cardinal/world bits. Allocation already arms both bits through markCullBoundsDirty; afterward isRangeVisible sees kCullPendingCardinal and conservatively returns true before consulting the rebuilt static bound. Consequently every allocated detached re-voxelize range remains admitted by the UPDATE cull gate forever, defeating the existing culling path and violating the pending lifecycle's promised “rebuild, then ordinary overlap answer.” This path is outside the submitted AC4 benchmark. Please consume/neutralize the irrelevant pending state in the static-bound branch (or explicitly ignore it under static-bound ownership) and add a regression showing an off-viewport detached range becomes invisible after its static bound is rebuilt.
+Sonnet approved the general range invalidation and flagged only the remaining Linux smoke. On closer read I disagree with the final verdict because the static-bound early return bypasses the new pending-state consumer lifecycle; the render cache stays correct, but UPDATE-side culling is permanently disabled for that existing pool mode.
+Acceptance (issue #2830)
+Criterion
+Grade
+Basis
+AC1
+met
+Position, alpha-swap, hidden-edit, mask, visibility, and depth-oracle coverage is present.
+AC2
+not met
+Main producer wiring is sound, but detached static-bound pools do not complete the pending lifecycle; GRID/deferred-UPDATE behavior is also represented indirectly at pool level rather than exercised through those systems.
+AC3
+met
+Counters prove clean-cache zero work, one-chunk/256-slot locality, coalescing, partial tails, and full cardinal rebuilds.
+AC4
+met
+Submitted paired n=18 static/moving measurements and confidence intervals are below all three gates.
+AC5
+pending
+Metal fixture/render evidence is present; Linux/OpenGL remains externally pending under fleet:needs-linux-smoke.
+Validation
+PR head 7c834669c9a430d4744f24a4e2783de16dccb499 checked out exactly.
+fleet-build --target IrredenEngineTest
+ChunkBoundsEvictionTest.*: 15/15 passed.
+RebuildDetachedVoxelsGuardTest.*: 9/9 passed (current coverage does not assert pending consumption).
+git diff --check origin/master...HEAD
+Reviewed by Codex / GPT-5 (runtime codex; opus-reviewer role, review-pr skill)
+jakildev
+added
+fleet:needs-fix
+Fleet reviewer found issues — author must address
+fleet:amending-mac-pool-4
+and removed
+fleet:needs-opus-recheck
+Sonnet flagged this PR for Opus recheck before merge
+fleet:reviewing-mac-pool-7
+fleet:needs-fix
+Fleet reviewer found issues — author must address
+labels
+Sep 11, 2026
+engine/voxel: consume cardinal pending bits on the static-bound branch
+…
+6348b58
+```
+`rebuildChunkBounds`' detached re-voxelize branch re-derives every chunk's bound from a rotation-independent solid bound, then returned early without consuming the pending set it had just satisfied. `allocateVoxels` arms those bits and nothing else on that branch clears them, so `isRangeVisible`'s admit-on-pending rule answered TRUE forever: the UPDATE-side cull stopped culling detached re-voxelize pools entirely, an existing pool mode master culled correctly.
+
+Consume only the cardinal bit. `ensureChunkWorldBounds` is the world bit's sole consumer and this branch never runs it, so the world cache keeps owing its work.
+
+Three regression cases, two of them driven through REBUILD_DETACHED_VOXELS so the bound is seeded the way production seeds it. Positive control: all three fail with the one line removed, and the 15 pre-existing cases pass either way, so the failure isolates the latch.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+jakildev
+added
+fleet:changes-made
+Agent addressed human feedback — ready for human re-review
+and removed
+fleet:amending-mac-pool-4
+labels
+Sep 11, 2026
+This was referenced Sep 12, 2026
+spatial: chunked 2D field storage — ChunkedField2D, per-chunk summaries, dirty tracking (#2640 C2)
+#3160
+Closed
+scripts/verify: assert the cull freeze, not just the frames it produces
+#3349
+Merged
+jakildev
+added
+fleet:reviewing-mac-pool-4
+and removed
+fleet:changes-made
+Agent addressed human feedback — ready for human re-review
+labels
+Sep 14, 2026
+jakildev
+commented
+Sep 14, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review — engine/voxel: range-scope cull-bounds invalidation on position + alpha (#2830)
+Verdict: approve
+Prior-review resolution
+✅ The Opus recheck's blocking finding — rebuildChunkBounds's detached re-voxelize (m_staticReVoxelizeBound) branch re-derived every chunk's bound but never consumed the cardinal pending bits allocateVoxels arms, so isRangeVisible's admit-on-pending rule answered TRUE forever and the UPDATE-side cull silently stopped culling detached re-voxelize pools — fixed at 6348b5899 by adding dropPendingChunks(m_pendingCardinalChunks, kCullPendingCardinal); before the branch's early return (component_voxel_pool.hpp:372), with only the cardinal bit consumed since ensureChunkWorldBounds (the world-bit's sole consumer) never runs on this branch.
+Verification
+Checked out head 6348b5899d2e78b69e7a9028af27cae286a10e62, matching headRefOid.
+Read the fix diff plus the surrounding rebuildChunkBounds/markCullBoundsDirty machinery in component_voxel_pool.hpp, component_voxel_set.hpp, system_rebuild_grid_voxels.hpp, and system_update_voxel_set_children.hpp. The trigger set now covers every input the two derived caches read (position, alpha, allocation) per .claude/rules/cpp-ecs.md §"A change-gated recompute must trigger on every input its function reads" — markPoolCullBoundsDirty() fires unconditionally from every alpha-touching mutator, including while visible_ is false, and UPDATE_VOXEL_SET_CHILDREN/REBUILD_GRID_VOXELS invalidate the real written range rather than folding a "don't upload" decision into a (0,0) range (the bug the PR body says silently dropped invalidation for the sets that move most).
+engine/prefabs/irreden/voxel/CLAUDE.md's new "Cull-bounds invalidation" section accurately documents the shipped shape, including the exact producer/consumer asymmetry the fix addresses.
+fleet-build --target IrredenEngineTest — clean build.
+fleet-run IrredenEngineTest --gtest_filter='ChunkBoundsEvictionTest.*:DetachedCullBoundTest.*' — 18/18 passed, including the three new regression cases (StaticBoundPoolCullsAfterAllocationArmedThePendingBits, OffViewportDetachedRangeIsCulledAfterStaticRebuild, DetachedEditAdmitsOnceThenReturnsToTheOverlapAnswer).
+git diff --check origin/master...HEAD — clean.
+IRMath::sqrt used correctly in the new perf_grid AutoProfileStat::stddev() (no bare std::sqrt).
+Praise
+The --cull-evict-test fixture in shape_debug/main.cpp asserts on pool-derived cached-bounds state rather than voxel alpha, which is exactly the distinction that let the original #766 occurrence pass 28/28 alpha-occupancy assertions while rendering a blended pose.
+The perf_grid --auto-profile fix (report means over the profiled window instead of a single trailing n=1 frame) is a real methodology improvement independent of the main fix, with the mismeasurement mechanism (bimodal per-frame cost) explained rather than just asserted.
+Test plan the author should run before merge
+Already covered above.
+Keep fleet:needs-linux-smoke outstanding until a Linux/OpenGL pass runs (AC5 in the PR body).
+Escalation: none. This PR already received one Opus recheck (needs-fix) and the fix directly addresses that finding with a positive-control-verified regression test; no new invariant surfaced in the delta.
+🤖 Reviewed by Claude Sonnet 5 (review-pr skill)
+Opus recheck not required.
+jakildev
+added
+fleet:approved
+Fleet reviewer approved — ready for human merge
+and removed
+fleet:reviewing-mac-pool-4
+labels
+Sep 14, 2026
+jakildev
+mentioned this pull request
+Sep 14, 2026
+docs: trim voxel prefab instructions (#3242)
+#3384
+Merged
+7 tasks done
+Hide details
+View details
+jakildev
+merged commit a7477b4
+into
+master
+Sep 14, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+This was referenced Sep 14, 2026
+engine/voxel: re-stage pool-resident voxel sets on canvas teardown
+#3202
+Merged
+docs: trim engine/world/CLAUDE.md to the audit rubric (#3239)
+#3383
+Merged
+fleet: treat a claude usage-wall rejection as a provider event
+#3376
+Merged
+voxel: retire the two by-hand cull-bounds evictions #3151 added — redundant since #3293 moved eviction into resyncDerivedState
+#3389
+Closed
+[Epic] Entity editor Phase 1 — Static voxel authoring (delivers original #213 scope)
+#604
+Closed
+editor: F-1.6 — first authored entities via GUI harness (ant, bird, rock, mushroom, tree)
+#766
+Closed
+prefabs/voxel: trim engine/prefabs/irreden/voxel/CLAUDE.md to the rubric (471 → <200 lines)
+#3242
+Closed
+docs: trim every CLAUDE.md over 200 lines to the audit rubric
+#3234
+Closed
+engine/prefabs/irreden/voxel: trim CLAUDE.md to the rubric (560 → <=200 lines)
+#3403
+Closed
+docs: fix instruction-size ratchet red on master (#3353)
+#3404
+Closed
+engine: sweep issue references out of core engine module and test/ comments
+#3229
+Closed
+fleet: a ratchet violation merges unseen when master is already red or the PR's checks predate the gate — 4 merges on 2026-09-12
+#3354
+Closed
+render: sweep issue references out of engine/render C++ comments
+#3226
+Closed
+render: sweep issue references out of shader comments (engine/render GLSL + Metal)
+#3225
+Closed
+prefabs/render: sweep issue references out of engine/prefabs/irreden/render comments
+#3227
+Closed
+prefabs: sweep issue references out of the remaining prefab module comments
+#3228
+Closed
+creations: sweep issue references out of creations, cmake, tools, and scripts/ comments
+#3233
+Closed
+render: remove comment reference backlog
+#3400
+Merged
+docs/code: sweep issue references out of code comments (comment-refs baseline → 0)
+#3224
+Closed
+jakildev
+added a commit
+that referenced
+this pull request
+Sep 15, 2026
+docs: fix instruction-size ratchet red on master (#3353)
+…
+0391730
+```
+PR #3293 grew engine/prefabs/irreden/voxel/CLAUDE.md from 479 to 569
+lines without updating the instruction-size baseline, red-ing the
+ratchet on master. The originally-filed offenders in #3353
+(docs/agents/FLEET.md, engine/command/CLAUDE.md,
+scripts/fleet/CLAUDE.md) were already fixed by other PRs since this
+issue was filed, so this only addresses the current offender.
+
+Trimmed the clearest incident-narration paragraphs from the file's new
+"Cull-bounds invalidation" section and "Deprecated" table (issue-number
+history a reader doesn't need to act on the invariant), then hand-raised
+the baseline row to the resulting 560 lines — a deliberate raise, not a
+re-seed, since the remaining content is design rationale and gotchas
+that belong in the file per docs/agents/CLAUDE-BASELINE.md, not dumped
+narrative. A full rubric trim toward the 200-line CLAUDE.md cap is
+filed separately as #3403 — this file predates and wasn't part of epic
+judgment than a one-session pass.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+jakildev
+mentioned this pull request
+Sep 18, 2026
+Threading: CPU multithreading for ECS system execution (umbrella design)
+#226
+Closed
+9 tasks done
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+fleet:approved
+Fleet reviewer approved — ready for human merge
+fleet:author-claude
+Implementation last authored by Claude; route review to Codex
+fleet:authored-on-macos
+PR was authored and smoke-tested on macOS Metal backend
+fleet:needs-linux-smoke
+PR needs linux-debug build + smoke-run validation
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

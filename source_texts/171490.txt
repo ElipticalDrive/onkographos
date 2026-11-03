@@ -1,0 +1,1430 @@
+notebook_from_papers
+IEEE VIS Research Topic Evolution (1990–2024)¶
+This notebook implements the recommended visual analytics workflow to reveal
+major research topics in IEEE VIS publications and how they evolved over time.
+Workflow: Progressive Abstraction → Topic Mining → Interactive Steering →
+Cluster-Label-Distribute → Simplify for Trends
+0. Setup & Installation¶
+In [1]:
+```
+# !pip install pandas numpy scikit-learn matplotlib seaborn nltk wordcloud adjustText
+```
+In [2]:
+```
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pathlib import Path
+import warnings
+warnings.filterwarnings('ignore')
+
+# NLP
+import re
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+
+# Topic Modelling
+from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
+from sklearn.decomposition import NMF, LatentDirichletAllocation
+from sklearn.manifold import TSNE
+
+nltk.download('stopwords', quiet=True)
+nltk.download('wordnet', quiet=True)
+nltk.download('omw-1.4', quiet=True)
+
+print("Setup complete.")
+```
+```
+Setup complete.
+```
+1. Data Loading & Exploration¶
+Expects a CSV file with at least columns: Year, Title, Abstract.
+Adjust the file path and column names to match your dataset.
+In [3]:
+```
+# === CONFIGURE THIS ===
+DATA_PATH = "IEEE VIS papers 1990-2024 - Main dataset.csv"  # <-- Adjust path to your dataset
+
+# Load data
+df = pd.read_csv(DATA_PATH)
+
+# --- Normalise column names (handle common variations) ---
+df.columns = df.columns.str.strip().str.lower()
+
+# Map to expected names (adjust if your columns differ)
+COLUMN_MAP = {
+    'year': 'year',
+    'title': 'title',
+    'abstract': 'abstract',
+    # Add mappings if needed, e.g. 'paper title': 'title'
+}
+df = df.rename(columns=COLUMN_MAP)
+
+# Basic validation
+assert 'year' in df.columns, "Column 'year' not found. Adjust COLUMN_MAP."
+assert 'title' in df.columns, "Column 'title' not found. Adjust COLUMN_MAP."
+assert 'abstract' in df.columns, "Column 'abstract' not found. Adjust COLUMN_MAP."
+
+print(f"Dataset shape: {df.shape}")
+print(f"Year range: {df['year'].min()} \u2013 {df['year'].max()}")
+print(f"Sample columns: {list(df.columns[:10])}")
+df.head(3)
+```
+```
+Dataset shape: (3877, 20)
+Year range: 1990 – 2024
+Sample columns: ['conference', 'year', 'title', 'doi', 'link', 'firstpage', 'lastpage', 'papertype', 'abstract', 'authornames-deduped']
+```
+Out[3]:
+conference
+year
+title
+doi
+link
+firstpage
+lastpage
+papertype
+abstract
+authornames-deduped
+authornames
+authoraffiliation
+internalreferences
+authorkeywords
+aminercitationcount
+citationcount_crossref
+pubscited_crossref
+downloads_xplore
+award
+graphicsreplicabilitystamp
+0
+Vis
+2024
+Interactive Design-of-Experiments: Optimizing ...
+10.1109/tvcg.2024.3456356
+http://dx.doi.org/10.1109/TVCG.2024.3456356
+44.0
+53.0
+J
+The optimization of cooling systems is importa...
+Rainer Splechtna;Majid Behravan;Mario Jelovic;...
+Rainer Splechtna;Majid Behravan;Mario Jelović;...
+VRVis Research Center in Vienna, Austria;Virgi...
+10.1109/tvcg.2013.124;10.1109/tvcg.2008.145;10...
+Parameter space exploration
+NaN
+2.0
+29.0
+234.0
+NaN
+NaN
+1
+Vis
+2024
+Towards Dataset-Scale and Feature-Oriented Eva...
+10.1109/tvcg.2024.3456398
+http://dx.doi.org/10.1109/TVCG.2024.3456398
+481.0
+491.0
+J
+Recent advancements in Large Language Models (...
+Sam Yu-Te Lee;Aryaman Bahukhandi;Dongyu Liu;Kw...
+Sam Yu-Te Lee;Aryaman Bahukhandi;Dongyu Liu;Kw...
+University of California, USA;University of Ca...
+10.1109/tvcg.2017.2743858;10.1109/tvcg.2017.27...
+Visual analytics,prompt engineering,,,text sum...
+NaN
+1.0
+65.0
+386.0
+NaN
+NaN
+2
+Vis
+2024
+KNowNEt:Guided Health Information Seeking from...
+10.1109/tvcg.2024.3456364
+http://dx.doi.org/10.1109/TVCG.2024.3456364
+547.0
+557.0
+J
+The increasing reliance on Large Language Mode...
+Youfu Yan;Yu Hou;Yongkang Xiao;Rui Zhang;Qianw...
+Youfu Yan;Yu Hou;Yongkang Xiao;Rui Zhang;Qianw...
+Department of Computer Science and Engineering...
+10.1109/tvcg.2022.3209408;10.1109/tvcg.2023.33...
+Human-AI interactions,knowledge graph,,,conver...
+NaN
+1.0
+60.0
+632.0
+HM
+NaN
+In [4]:
+```
+# Drop rows with missing abstracts
+before = len(df)
+df = df.dropna(subset=['abstract']).copy()
+df = df[df['abstract'].str.strip().str.len() > 50]  # Remove very short abstracts
+print(f"Dropped {before - len(df)} rows with missing/short abstracts. Remaining: {len(df)}")
+```
+```
+Dropped 70 rows with missing/short abstracts. Remaining: 3807
+```
+In [5]:
+```
+# Papers per year
+fig, ax = plt.subplots(figsize=(12, 4))
+df.groupby('year').size().plot(kind='bar', ax=ax, color='steelblue', width=0.8)
+ax.set_title("Number of Papers per Year")
+ax.set_xlabel("Year")
+ax.set_ylabel("Count")
+plt.tight_layout()
+plt.show()
+```
+2. Text Preprocessing (Pattern 1 – Progressive Abstraction, Level 1)¶
+Concatenate title and abstract, clean, tokenise, remove stopwords, and lemmatise.
+In [6]:
+```
+# Combine title + abstract
+df['text'] = df['title'].fillna('') + ' ' + df['abstract'].fillna('')
+
+# Custom stopwords: domain-generic terms that don't help distinguish topics
+CUSTOM_STOPWORDS = {
+    'paper', 'propose', 'proposed', 'approach', 'method', 'methods',
+    'result', 'results', 'show', 'shown', 'use', 'used', 'using',
+    'present', 'presented', 'new', 'novel', 'technique', 'techniques',
+    'based', 'provide', 'system', 'also', 'work', 'problem',
+    'describe', 'described', 'demonstrate', 'demonstrated',
+    'algorithm', 'algorithms', 'however', 'many', 'one', 'two',
+    'first', 'second', 'allow', 'allows', 'well', 'can', 'may',
+    'different', 'several', 'existing', 'within', 'number',
+    'introduction', 'conclusion', 'abstract', 'study', 'studies',
+    'example', 'examples', 'application', 'applications'
+}
+
+stop_words = set(stopwords.words('english')).union(CUSTOM_STOPWORDS)
+lemmatizer = WordNetLemmatizer()
+
+
+def preprocess_text(text):
+    """Clean, tokenise, remove stopwords, lemmatise."""
+    # Lowercase
+    text = text.lower()
+    # Remove non-alphabetic characters (keep spaces)
+    text = re.sub(r'[^a-z\s]', ' ', text)
+    # Tokenise
+    tokens = text.split()
+    # Remove stopwords, short tokens, and lemmatise
+    tokens = [
+        lemmatizer.lemmatize(t)
+        for t in tokens
+        if t not in stop_words and len(t) > 2
+    ]
+    return ' '.join(tokens)
+
+
+df['processed_text'] = df['text'].apply(preprocess_text)
+print("Preprocessing complete.")
+print(f"Example:\n{df['processed_text'].iloc[0][:200]}...")
+```
+```
+Preprocessing complete.
+Example:
+interactive design experiment optimizing cooling optimization cooling system important case cabin battery cooling electric car optimization governed multiple conflicting objective performed across mul...
+```
+3. Topic Extraction (Pattern 11 – Topic Mining)¶
+We use NMF (Non-negative Matrix Factorisation) on TF-IDF features.
+NMF typically produces more coherent topics than LDA for short scientific texts.
+We intentionally over-segment (k=30) to allow merging later.
+In [7]:
+```
+# === PARAMETERS (tune as needed) ===
+N_TOPICS = 30          # Intentionally over-segment; will merge later
+MAX_FEATURES = 5000    # Vocabulary size
+MIN_DF = 5             # Minimum document frequency
+MAX_DF = 0.7           # Maximum document frequency (fraction)
+NGRAM_RANGE = (1, 2)   # Unigrams + bigrams
+```
+In [8]:
+```
+# Build TF-IDF matrix
+tfidf_vectorizer = TfidfVectorizer(
+    max_features=MAX_FEATURES,
+    min_df=MIN_DF,
+    max_df=MAX_DF,
+    ngram_range=NGRAM_RANGE,
+    token_pattern=r'(?u)\b[a-z][a-z]+\b'
+)
+
+tfidf_matrix = tfidf_vectorizer.fit_transform(df['processed_text'])
+feature_names = tfidf_vectorizer.get_feature_names_out()
+
+print(f"TF-IDF matrix: {tfidf_matrix.shape[0]} documents \u00d7 {tfidf_matrix.shape[1]} terms")
+```
+```
+TF-IDF matrix: 3807 documents × 5000 terms
+```
+In [9]:
+```
+# Fit NMF model
+nmf_model = NMF(
+    n_components=N_TOPICS,
+    random_state=42,
+    max_iter=500,
+    init='nndsvda'
+)
+
+W = nmf_model.fit_transform(tfidf_matrix)  # Document-topic matrix
+H = nmf_model.components_                   # Topic-term matrix
+
+print(f"NMF fitting complete. Reconstruction error: {nmf_model.reconstruction_err_:.2f}")
+```
+```
+NMF fitting complete. Reconstruction error: 57.46
+```
+In [10]:
+```
+# Display top terms per topic
+N_TOP_TERMS = 12
+
+
+def display_topics(model, feature_names, n_top=N_TOP_TERMS):
+    """Print top terms for each topic."""
+    topics = []
+    for idx, topic_vec in enumerate(model.components_):
+        top_indices = topic_vec.argsort()[:-n_top - 1:-1]
+        top_terms = [feature_names[i] for i in top_indices]
+        topics.append(top_terms)
+        print(f"Topic {idx:2d}: {', '.join(top_terms)}")
+    return topics
+
+
+print("=" * 70)
+print("TOP TERMS PER TOPIC (inspect for coherence)")
+print("=" * 70)
+topic_terms = display_topics(nmf_model, feature_names)
+```
+```
+======================================================================
+TOP TERMS PER TOPIC (inspect for coherence)
+======================================================================
+Topic  0: data, set, data set, analysis, multivariate, visualization, large, attribute, data analysis, data visualization, exploration, multivariate data
+Topic  1: volume, rendering, volume rendering, ray, volumetric, volume data, casting, volume visualization, hardware, ray casting, object, interactive
+Topic  2: vector, field, vector field, critical point, point, critical, scalar, topology, line, scalar field, topological, grid
+Topic  3: graph, layout, node, edge, graph layout, graph visualization, drawing, node link, link, directed, large graph, diagram
+Topic  4: model, learning, machine, deep, machine learning, learning model, deep learning, modeling, prediction, neural, human, neural network
+Topic  5: visualization, design, information visualization, information, visualization design, research, tool, data visualization, system, designer, software, visualization tool
+Topic  6: flow, vortex, flow visualization, particle, flow field, unsteady, fluid, unsteady flow, motion, visualization, flow map, field
+Topic  7: cell, isosurface, extraction, isosurface extraction, grid, isosurfaces, interpolation, interval, memory, protein, tissue, cube
+Topic  8: document, text, topic, information, word, corpus, collection, text document, content, entity, search, text corpus
+Topic  9: network, social, social network, node, neural, neural network, link, traffic, dynamic network, dynamic, node link, network visualization
+Topic 10: surface, shape, point, curvature, curve, contour, normal, distance, molecular, reconstruction, smooth, surface reconstruction
+Topic 11: chart, bar, bar chart, task, participant, line, value, experiment, comparison, layout, effect, type
+Topic 12: texture, hardware, graphic, texture mapping, mapping, terrain, detail, rendering, graphic hardware, lic, textured, texture map
+Topic 13: tensor, tensor field, field, diffusion, glyph, fiber, diffusion tensor, order tensor, symmetric, degenerate, stress, topological
+Topic 14: uncertainty, uncertainty visualization, ensemble, uncertain, decision, distribution, visualization, uncertainty aware, plot, probability, error, aware
+Topic 15: time, time series, series, time varying, varying, temporal, series data, dynamic, real time, change, real, time step
+Topic 16: mesh, triangle, simplification, vertex, compression, tetrahedral, detail, level, edge, tetrahedral mesh, multiresolution, level detail
+Topic 17: function, transfer function, transfer, opacity, value, volume rendering, direct, volume, contour, direct volume, scalar, volumetric
+Topic 18: simulation, ensemble, parameter, steering, analysis, particle, parameter space, interactive, simulation data, weather, run, computational
+Topic 19: event, sequence, event sequence, pattern, temporal, social, social medium, medium, analysis, temporal event, sequence data, record
+Topic 20: color, palette, association, concept, color palette, assignment, perceptual, map, mapping, color mapping, hue, blending
+Topic 21: tree, node, hierarchy, structure, merge tree, space, merge, hierarchical, contour, contour tree, tree structure, treemaps
+Topic 22: dimensional, high dimensional, projection, high, dimension, dimensional data, space, multidimensional, dimensional space, reduction, dimensionality, coordinate
+Topic 23: image, scene, ray, quality, image analysis, processing, image data, pixel, camera, lighting, image rendering, light
+Topic 24: feature, tracking, vortex, selection, region, extraction, label, feature extraction, interest, feature tracking, analysis, map
+Topic 25: user, interaction, interface, exploration, query, view, visual, search, interactive, information, user interaction, user interface
+Topic 26: analytics, visual, visual analytics, analysis, analyst, tool, process, expert, decision, analytic, task, support
+Topic 27: cluster, clustering, map, trajectory, shape, density, cluster analysis, visual, label, analysis, class, som
+Topic 28: video, sport, player, motion, video visualization, news, game, video data, data video, trajectory, movement, sport video
+Topic 29: display, projector, virtual, object, information, environment, camera, projector display, large, resolution, immersive, multi projector
+```
+In [11]:
+```
+# Assign dominant topic to each paper
+df['dominant_topic'] = W.argmax(axis=1)
+df['topic_weight'] = W.max(axis=1)
+
+# Store full topic distribution for soft assignment
+topic_distributions = pd.DataFrame(
+    W, columns=[f"topic_{i}" for i in range(N_TOPICS)],
+    index=df.index
+)
+
+print("\nPapers per topic:")
+print(df['dominant_topic'].value_counts().sort_index())
+```
+```
+Papers per topic:
+dominant_topic
+0      47
+1     148
+2     119
+3      97
+4     143
+5     381
+6     118
+7      49
+8      60
+9     109
+10    123
+11     89
+12     39
+13     68
+14     63
+15    168
+16    107
+17     70
+18    120
+19    111
+20     64
+21    108
+22    143
+23    182
+24    160
+25    219
+26    325
+27    123
+28     83
+29    171
+Name: count, dtype: int64
+```
+4. Interactive Topic Refinement (Pattern 12 – Model Steering)¶
+Inspect topic similarity, merge near-duplicate topics, remove junk topics,
+and assign human-readable labels.
+In [12]:
+```
+# Visualise topic similarity via cosine similarity heatmap
+from sklearn.metrics.pairwise import cosine_similarity
+
+topic_similarity = cosine_similarity(H)
+
+fig, ax = plt.subplots(figsize=(12, 10))
+sns.heatmap(
+    topic_similarity, annot=False, cmap='YlOrRd',
+    xticklabels=range(N_TOPICS),
+    yticklabels=range(N_TOPICS),
+    ax=ax
+)
+ax.set_title("Topic-Topic Cosine Similarity (identify candidates for merging)")
+plt.tight_layout()
+plt.show()
+```
+In [13]:
+```
+# Show representative papers for each topic (top 3 by weight)
+print("=" * 70)
+print("REPRESENTATIVE PAPERS PER TOPIC")
+print("=" * 70)
+
+for t in range(N_TOPICS):
+    topic_papers = df[df['dominant_topic'] == t].nlargest(3, 'topic_weight')
+    print(f"\n--- Topic {t} ---")
+    print(f"    Terms: {', '.join(topic_terms[t][:8])}")
+    for _, row in topic_papers.iterrows():
+        print(f"    [{row['year']}] {row['title'][:80]}")
+```
+```
+======================================================================
+REPRESENTATIVE PAPERS PER TOPIC
+======================================================================
+
+--- Topic 0 ---
+    Terms: data, set, data set, analysis, multivariate, visualization, large, attribute
+    [2004] Visual Browsing of Remote and Distributed Data
+    [1996] Interactive Exploration and Modeling of Large Data Sets: A Case Study with Venus
+    [2005] Distributed data management for large volume visualization
+
+--- Topic 1 ---
+    Terms: volume, rendering, volume rendering, ray, volumetric, volume data, casting, volume visualization
+    [1993] Fast volume rendering of compressed data
+    [2007] Transform Coding for Hardware-accelerated Volume Rendering
+    [1996] Fast stereo volume rendering
+
+--- Topic 2 ---
+    Terms: vector, field, vector field, critical point, point, critical, scalar, topology
+    [2023] Visualization of Discontinuous Vector Field Topology
+    [2004] Interactive Poster: Illustrating Different Convection Velocities of Turbulent Fl
+    [1998] Feature comparisons of vector fields using Earth mover's distance
+
+--- Topic 3 ---
+    Terms: graph, layout, node, edge, graph layout, graph visualization, drawing, node link
+    [2006] Visual Exploration of Complex Time-Varying Graphs
+    [2010] Visualization of Graph Products
+    [2017] What Would a Graph Look Like in this Layout? A Machine Learning Approach to Larg
+
+--- Topic 4 ---
+    Terms: model, learning, machine, deep, machine learning, learning model, deep learning, modeling
+    [2017] ActiVis: Visual Exploration of Industry-Scale Deep Neural Network Models
+    [2022] SliceTeller: A Data Slice-Driven Approach for Machine Learning Model Validation
+    [2018] Manifold: A Model-Agnostic Framework for Interpretation and Diagnosis of Machine
+
+--- Topic 5 ---
+    Terms: visualization, design, information visualization, information, visualization design, research, tool, data visualization
+    [2018] Design Exposition with Literate Visualization
+    [1997] The structure of the information visualization design space
+    [2020] A Design Space of Vision Science Methods for Visualization Research
+
+--- Topic 6 ---
+    Terms: flow, vortex, flow visualization, particle, flow field, unsteady, fluid, unsteady flow
+    [2011] Straightening Tubular Flow for Side-by-Side Visualization
+    [2007] Virtual Rheoscopic Fluids for Flow Visualization
+    [2014] Origin-Destination Flow Data Smoothing and Mapping
+
+--- Topic 7 ---
+    Terms: cell, isosurface, extraction, isosurface extraction, grid, isosurfaces, interpolation, interval
+    [2024] Cell2Cell: Explorative Cell Interaction Analysis in Multi-Volumetric Tissue Data
+    [1996] Volume Thinning for Automatic Isosurface Propagation
+    [1994] Isosurface generation by using extrema graphs
+
+--- Topic 8 ---
+    Terms: document, text, topic, information, word, corpus, collection, text document
+    [1998] The shape of Shakespeare: visualizing text using implicit surfaces
+    [2016] cite2vec: Citation-Driven Document Exploration via Word Embeddings
+    [1998] TOPIC ISLANDS TM - a wavelet-based text visualization system
+
+--- Topic 9 ---
+    Terms: network, social, social network, node, neural, neural network, link, traffic
+    [2003] Multiscale Visualization of Small World Networks
+    [2006] Balancing Systematic and Flexible Exploration of Social Networks
+    [2003] Visualizing evolving networks: minimum spanning trees versus pathfinder networks
+
+--- Topic 10 ---
+    Terms: surface, shape, point, curvature, curve, contour, normal, distance
+    [2005] Visualizing intersecting surfaces with nested-surface techniques
+    [2009] Interactive Streak Surface Visualization on the GPU
+    [1992] Generalized focal surfaces: a new method for surface interrogation
+
+--- Topic 11 ---
+    Terms: chart, bar, bar chart, task, participant, line, value, experiment
+    [2018] Glanceable Visualization: Studies of Data Comparison Performance on Smartwatches
+    [2014] Four Experiments on the Perception of Bar Charts
+    [2021] Modeling Just Noticeable Differences in Charts
+
+--- Topic 12 ---
+    Terms: texture, hardware, graphic, texture mapping, mapping, terrain, detail, rendering
+    [1993] Geometric clipping using Boolean textures
+    [2023] Perceptually Uniform Construction of Illustrative Textures
+    [1998] Interactive display of very large textures
+
+--- Topic 13 ---
+    Terms: tensor, tensor field, field, diffusion, glyph, fiber, diffusion tensor, order tensor
+    [2002] Volume deformation for tensor visualization
+    [2008] Invariant Crease Lines for Topological and Structural Analysis of Tensor fields
+    [2015] Glyph-Based Comparative Visualization for Diffusion Tensor Fields
+
+--- Topic 14 ---
+    Terms: uncertainty, uncertainty visualization, ensemble, uncertain, decision, distribution, visualization, uncertainty aware
+    [2022] Communicating Uncertainty in Digital Humanities Visualization Research
+    [2002] Visualizing data with bounded uncertainty
+    [2012] Visual Semiotics & Uncertainty Visualization: An Empirical Study
+
+--- Topic 15 ---
+    Terms: time, time series, series, time varying, varying, temporal, series data, dynamic
+    [2015] Sequencing of categorical time series
+    [2005] Importance-driven visualization layouts for large time series data
+    [2012] Matrix-based visual correlation analysis on large timeseries data
+
+--- Topic 16 ---
+    Terms: mesh, triangle, simplification, vertex, compression, tetrahedral, detail, level
+    [1999] Progressive Compression of Arbitrary Triangular Meshes
+    [2003] Large mesh simplification using processing sequences
+    [2003] Real-time refinement and simplification of adaptive triangular meshes
+
+--- Topic 17 ---
+    Terms: function, transfer function, transfer, opacity, value, volume rendering, direct, volume
+    [2001] Interactive volume rendering using multi-dimensional transfer functions and dire
+    [2009] Automatic Transfer Function Generation Using Contour Tree Controlled Residue Flo
+    [1998] Image-based transfer function design for data exploration in volume visualizatio
+
+--- Topic 18 ---
+    Terms: simulation, ensemble, parameter, steering, analysis, particle, parameter space, interactive
+    [2014] Visual Analytics for Complex Engineering Systems: Hybrid Visual Steering of Simu
+    [2019] InSituNet: Deep Image Synthesis for Parameter Space Exploration of Ensemble Simu
+    [2015] Visual Verification of Space Weather Ensemble Simulations
+
+--- Topic 19 ---
+    Terms: event, sequence, event sequence, pattern, temporal, social, social medium, medium
+    [2017] EventThread: Visual Summarization and Stage Analysis of Event Sequence Data
+    [2014] DecisionFlow: Visual Analytics for High-Dimensional Temporal Event Sequence Data
+    [2020] Sequence Braiding: Visual Overviews of Temporal Event Sequences and Attributes
+
+--- Topic 20 ---
+    Terms: color, palette, association, concept, color palette, assignment, perceptual, map
+    [2007] Weaving Versus Blending: a quantitative assessment of the information carrying c
+    [2015] A Linguistic Approach to Categorical Color Assignment for Data Visualization
+    [2004] Paint Inspired Color Mixing and Compositing for Visualization
+
+--- Topic 21 ---
+    Terms: tree, node, hierarchy, structure, merge tree, space, merge, hierarchical
+    [2019] BarcodeTree: Scalable Comparison of Multiple Hierarchies
+    [1998] Reconfigurable disc trees for visualizing large hierarchical information space
+    [2002] Case study: visualizing sets of evolutionary trees
+
+--- Topic 22 ---
+    Terms: dimensional, high dimensional, projection, high, dimension, dimensional data, space, multidimensional
+    [2012] Visual pattern discovery using random projections
+    [2011] Using random projections to identify class-separating variables in high-dimensio
+    [2020] TopoMap: A 0-dimensional Homology Preserving Projection of High-Dimensional Data
+
+--- Topic 23 ---
+    Terms: image, scene, ray, quality, image analysis, processing, image data, pixel
+    [2006] Semantic Image Browser: Bridging Information Visualization with Automated Intell
+    [2000] Uniform frequency images: adding geometry to images to produce space-efficient t
+    [2002] Sea of images
+
+--- Topic 24 ---
+    Terms: feature, tracking, vortex, selection, region, extraction, label, feature extraction
+    [2015] Distribution Driven Extraction and Tracking of Features for Time-varying Data An
+    [2008] Interactive Volume Exploration for Feature Detection and Quantification in Indus
+    [2006] Importance-Driven Focus of Attention
+
+--- Topic 25 ---
+    Terms: user, interaction, interface, exploration, query, view, visual, search
+    [2004] Tracking User Interactions Within Visualizations
+    [2008] Evaluating the relationship between user interaction and financial visual analys
+    [2022] A Unified Comparison of User Modeling Techniques for Predicting Data Interaction
+
+--- Topic 26 ---
+    Terms: analytics, visual, visual analytics, analysis, analyst, tool, process, expert
+    [2012] Examining the Use of a Visual Analytics System for Sensemaking Tasks: Case Studi
+    [2008] Applied visual analytics for economic decision-making
+    [2011] A two-stage framework for designing visual analytics system in organizational en
+
+--- Topic 27 ---
+    Terms: cluster, clustering, map, trajectory, shape, density, cluster analysis, visual
+    [2023] CLAMS: A Cluster Ambiguity Measure for Estimating Perceptual Variability in Visu
+    [2011] DICON: Interactive Visual Analysis of Multidimensional Clusters
+    [2010] Cluster correspondence views for enhanced analysis of SOM displays
+
+--- Topic 28 ---
+    Terms: video, sport, player, motion, video visualization, news, game, video data
+    [2003] Video visualization
+    [2007] Contextualized Videos: Combining Videos with Environment Models to Support Situa
+    [2010] A radial visualization tool for depicting hierarchically structured video conten
+
+--- Topic 29 ---
+    Terms: display, projector, virtual, object, information, environment, camera, projector display
+    [1999] A distributed graphics system for large tiled displays
+    [2002] Scalable alignment of large-format multi-projector displays using camera homogra
+    [2006] Asynchronous Distributed Calibration for Scalable and Reconfigurable Multi-Proje
+```
+4a. Define Topic Merging & Labelling¶
+Instructions: After inspecting the topics above, edit the dictionaries below:
+MERGE_MAP: maps topic indices to a group ID (topics with same group ID will be merged)
+TOPIC_LABELS: human-readable name for each group ID
+EXCLUDE_TOPICS: list of topic indices to drop (junk/incoherent)
+The example below is a template – adjust based on YOUR model's output!
+In [14]:
+```
+# ============================================================
+# EDIT THIS SECTION BASED ON YOUR INSPECTION OF THE TOPICS
+# ============================================================
+
+# Example merge map: {original_topic_id: merged_group_id}
+# Topics assigned to the same group_id will be merged.
+# Start by mapping each topic to itself (no merging), then adjust.
+MERGE_MAP = {i: i for i in range(N_TOPICS)}
+
+# --- Example edits (uncomment and adjust): ---
+# MERGE_MAP[5] = 3    # Merge topic 5 into topic 3
+# MERGE_MAP[12] = 7   # Merge topic 12 into topic 7
+# MERGE_MAP[20] = 15  # Merge topic 20 into topic 15
+
+# Topics to exclude entirely (junk / too generic)
+EXCLUDE_TOPICS = []
+# EXCLUDE_TOPICS = [0, 22]  # Example: exclude topics 0 and 22
+
+# Human-readable labels for merged groups
+# Only need to label the "target" group IDs that remain after merging.
+TOPIC_LABELS = {i: f"Topic {i}" for i in range(N_TOPICS)}
+
+# --- Example labels (uncomment and adjust): ---
+# TOPIC_LABELS[0] = "Volume Rendering"
+# TOPIC_LABELS[1] = "Graph & Network Visualization"
+# TOPIC_LABELS[2] = "Flow Visualization"
+# TOPIC_LABELS[3] = "Information Visualization"
+# TOPIC_LABELS[4] = "Scientific Visualization"
+# TOPIC_LABELS[5] = "Text & Document Visualization"
+# TOPIC_LABELS[6] = "Uncertainty Visualization"
+# TOPIC_LABELS[7] = "Machine Learning for Visualization"
+# TOPIC_LABELS[8] = "User Studies & Evaluation"
+# TOPIC_LABELS[9] = "Geospatial & Cartography"
+# TOPIC_LABELS[10] = "High-Dimensional Data"
+
+print("Merge map and labels defined. Adjust above as needed.")
+```
+```
+Merge map and labels defined. Adjust above as needed.
+```
+In [15]:
+```
+# Apply merging and exclusion
+df['merged_topic'] = df['dominant_topic'].map(MERGE_MAP)
+df = df[~df['dominant_topic'].isin(EXCLUDE_TOPICS)].copy()
+
+# Merge topic distributions
+merged_groups = {}
+for orig, merged in MERGE_MAP.items():
+    if orig not in EXCLUDE_TOPICS:
+        merged_groups.setdefault(merged, []).append(orig)
+
+# Create merged topic weight (sum of component topic weights)
+for group_id, members in merged_groups.items():
+    member_cols = [f"topic_{m}" for m in members]
+    existing_cols = [c for c in member_cols if c in topic_distributions.columns]
+    if existing_cols:
+        topic_distributions[f"merged_{group_id}"] = topic_distributions[existing_cols].sum(axis=1)
+
+# Final label
+df['topic_label'] = df['merged_topic'].map(TOPIC_LABELS)
+
+# Count unique merged topics
+final_topics = sorted(df['merged_topic'].unique())
+print(f"Number of final topics after merging: {len(final_topics)}")
+print("\nFinal topic labels:")
+for t in final_topics:
+    count = (df['merged_topic'] == t).sum()
+    print(f"  {TOPIC_LABELS.get(t, t):40s} ({count} papers)")
+```
+```
+Number of final topics after merging: 30
+
+Final topic labels:
+  Topic 0                                  (47 papers)
+  Topic 1                                  (148 papers)
+  Topic 2                                  (119 papers)
+  Topic 3                                  (97 papers)
+  Topic 4                                  (143 papers)
+  Topic 5                                  (381 papers)
+  Topic 6                                  (118 papers)
+  Topic 7                                  (49 papers)
+  Topic 8                                  (60 papers)
+  Topic 9                                  (109 papers)
+  Topic 10                                 (123 papers)
+  Topic 11                                 (89 papers)
+  Topic 12                                 (39 papers)
+  Topic 13                                 (68 papers)
+  Topic 14                                 (63 papers)
+  Topic 15                                 (168 papers)
+  Topic 16                                 (107 papers)
+  Topic 17                                 (70 papers)
+  Topic 18                                 (120 papers)
+  Topic 19                                 (111 papers)
+  Topic 20                                 (64 papers)
+  Topic 21                                 (108 papers)
+  Topic 22                                 (143 papers)
+  Topic 23                                 (182 papers)
+  Topic 24                                 (160 papers)
+  Topic 25                                 (219 papers)
+  Topic 26                                 (325 papers)
+  Topic 27                                 (123 papers)
+  Topic 28                                 (83 papers)
+  Topic 29                                 (171 papers)
+```
+5. Temporal Distribution (Pattern 4 – Cluster-Label-Distribute)¶
+Compute topic proportions per year and visualise.
+In [16]:
+```
+# Compute yearly topic counts (proportion-based to account for varying publication volume)
+yearly_counts = df.groupby(['year', 'topic_label']).size().unstack(fill_value=0)
+yearly_proportions = yearly_counts.div(yearly_counts.sum(axis=1), axis=0)
+
+print(f"Yearly proportions table: {yearly_proportions.shape}")
+yearly_proportions.tail()
+```
+```
+Yearly proportions table: (35, 30)
+```
+Out[16]:
+topic_label
+Topic 0
+Topic 1
+Topic 10
+Topic 11
+Topic 12
+Topic 13
+Topic 14
+Topic 15
+Topic 16
+Topic 17
+...
+Topic 27
+Topic 28
+Topic 29
+Topic 3
+Topic 4
+Topic 5
+Topic 6
+Topic 7
+Topic 8
+Topic 9
+year
+2020
+0.019108
+0.019108
+0.000000
+0.025478
+0.000000
+0.006369
+0.031847
+0.038217
+0.000000
+0.012739
+...
+0.031847
+0.025478
+0.025478
+0.057325
+0.063694
+0.146497
+0.012739
+0.000000
+0.006369
+0.031847
+2021
+0.000000
+0.009174
+0.000000
+0.073394
+0.000000
+0.009174
+0.027523
+0.045872
+0.009174
+0.009174
+...
+0.055046
+0.055046
+0.009174
+0.036697
+0.128440
+0.174312
+0.018349
+0.000000
+0.009174
+0.018349
+2022
+0.033613
+0.008403
+0.000000
+0.067227
+0.000000
+0.008403
+0.033613
+0.042017
+0.000000
+0.000000
+...
+0.042017
+0.058824
+0.008403
+0.008403
+0.100840
+0.184874
+0.008403
+0.025210
+0.000000
+0.025210
+2023
+0.007519
+0.015038
+0.000000
+0.060150
+0.015038
+0.007519
+0.030075
+0.052632
+0.022556
+0.007519
+...
+0.045113
+0.045113
+0.015038
+0.007519
+0.060150
+0.150376
+0.022556
+0.000000
+0.007519
+0.037594
+2024
+0.000000
+0.000000
+0.008065
+0.088710
+0.000000
+0.000000
+0.024194
+0.024194
+0.008065
+0.000000
+...
+0.016129
+0.040323
+0.008065
+0.056452
+0.072581
+0.153226
+0.008065
+0.008065
+0.032258
+0.016129
+5 rows × 30 columns
+In [17]:
+```
+# Raw (unsmoothed) stacked area chart
+fig, ax = plt.subplots(figsize=(16, 8))
+yearly_proportions.plot.area(ax=ax, alpha=0.8, linewidth=0.5)
+ax.set_title("Topic Proportions Over Time (Raw)", fontsize=14)
+ax.set_xlabel("Year")
+ax.set_ylabel("Proportion of Papers")
+ax.legend(loc='upper left', bbox_to_anchor=(1.01, 1), fontsize=8)
+ax.set_xlim(df['year'].min(), df['year'].max())
+plt.tight_layout()
+plt.show()
+```
+6. Trend Smoothing & Narrative (Pattern 5 – Simplify → Analyse → Restore)¶
+Apply moving-average smoothing to suppress year-to-year fluctuations
+and reveal underlying trends.
+In [18]:
+```
+# === SMOOTHING PARAMETER ===
+WINDOW_SIZE = 5  # 5-year moving average (adjust: 3 for less smoothing, 7 for more)
+
+# Apply rolling mean
+yearly_smoothed = yearly_proportions.rolling(
+    window=WINDOW_SIZE, center=True, min_periods=2
+).mean()
+
+# Drop NaN edges from rolling
+yearly_smoothed = yearly_smoothed.dropna()
+
+print(f"Smoothed data range: {yearly_smoothed.index.min()} \u2013 {yearly_smoothed.index.max()}")
+```
+```
+Smoothed data range: 1990 – 2024
+```
+In [19]:
+```
+# Smoothed stacked area chart (ThemeRiver-style)
+fig, ax = plt.subplots(figsize=(16, 8))
+yearly_smoothed.plot.area(ax=ax, alpha=0.85, linewidth=0.5)
+ax.set_title(
+    f"Topic Proportions Over Time ({WINDOW_SIZE}-Year Moving Average)",
+    fontsize=14
+)
+ax.set_xlabel("Year")
+ax.set_ylabel("Proportion of Papers")
+ax.legend(loc='upper left', bbox_to_anchor=(1.01, 1), fontsize=8)
+ax.set_xlim(yearly_smoothed.index.min(), yearly_smoothed.index.max())
+plt.tight_layout()
+plt.show()
+```
+In [20]:
+```
+# Small-multiple line charts (one per topic) – easier to read individual trends
+n_final_topics = len(yearly_smoothed.columns)
+ncols = 4
+nrows = int(np.ceil(n_final_topics / ncols))
+
+fig, axes = plt.subplots(nrows, ncols, figsize=(16, 3 * nrows), sharex=True, sharey=True)
+axes_flat = axes.flatten()
+
+for idx, topic_name in enumerate(yearly_smoothed.columns):
+    ax = axes_flat[idx]
+    ax.plot(yearly_smoothed.index, yearly_smoothed[topic_name], color='steelblue', linewidth=2)
+    ax.fill_between(yearly_smoothed.index, yearly_smoothed[topic_name], alpha=0.3, color='steelblue')
+    ax.set_title(topic_name, fontsize=9, fontweight='bold')
+    ax.set_ylim(0, yearly_smoothed.values.max() * 1.1)
+    ax.grid(True, alpha=0.3)
+
+# Hide unused subplots
+for idx in range(n_final_topics, len(axes_flat)):
+    axes_flat[idx].set_visible(False)
+
+fig.suptitle(f"Individual Topic Trends ({WINDOW_SIZE}-Year Smoothing)", fontsize=14, y=1.01)
+plt.tight_layout()
+plt.show()
+```
+7. Trend Classification & Summary¶
+In [21]:
+```
+# Classify each topic's trend: Emerging, Declining, Stable
+# Compare average proportion in first third vs. last third of time span
+
+years = yearly_smoothed.index
+n_years = len(years)
+third = n_years // 3
+
+early_period = yearly_smoothed.iloc[:third]
+late_period = yearly_smoothed.iloc[-third:]
+
+trend_summary = []
+for topic_name in yearly_smoothed.columns:
+    early_mean = early_period[topic_name].mean()
+    late_mean = late_period[topic_name].mean()
+    overall_mean = yearly_smoothed[topic_name].mean()
+
+    # Relative change
+    if early_mean > 0:
+        rel_change = (late_mean - early_mean) / early_mean
+    else:
+        rel_change = 1.0 if late_mean > 0 else 0.0
+
+    # Classify
+    if rel_change > 0.3:
+        trend = "\U0001f4c8 Emerging"
+    elif rel_change < -0.3:
+        trend = "\U0001f4c9 Declining"
+    else:
+        trend = "\u27a1\ufe0f Stable"
+
+    # Peak year
+    peak_year = yearly_smoothed[topic_name].idxmax()
+
+    trend_summary.append({
+        'Topic': topic_name,
+        'Early Avg (%)': f"{early_mean * 100:.1f}",
+        'Late Avg (%)': f"{late_mean * 100:.1f}",
+        'Relative Change': f"{rel_change:+.0%}",
+        'Peak Year': int(peak_year),
+        'Trend': trend
+    })
+
+trend_df = pd.DataFrame(trend_summary)
+trend_df = trend_df.sort_values('Trend', ascending=True)
+
+print("=" * 70)
+print("TOPIC TREND SUMMARY")
+print("=" * 70)
+trend_df
+```
+```
+======================================================================
+TOPIC TREND SUMMARY
+======================================================================
+```
+Out[21]:
+Topic
+Early Avg (%)
+Late Avg (%)
+Relative Change
+Peak Year
+Trend
+25
+Topic 5
+11.7
+12.9
++10%
+2023
+➡️ Stable
+5
+Topic 13
+1.3
+1.0
+-21%
+2005
+➡️ Stable
+17
+Topic 24
+3.5
+4.5
++30%
+2013
+➡️ Stable
+15
+Topic 22
+3.9
+3.5
+-11%
+2010
+➡️ Stable
+13
+Topic 20
+2.3
+1.7
+-27%
+1990
+➡️ Stable
+14
+Topic 21
+1.9
+2.6
++38%
+2004
+📈 Emerging
+24
+Topic 4
+2.5
+6.7
++166%
+2020
+📈 Emerging
+23
+Topic 3
+0.3
+2.9
++766%
+2010
+📈 Emerging
+21
+Topic 28
+1.5
+3.3
++126%
+2023
+📈 Emerging
+20
+Topic 27
+1.0
+4.3
++310%
+2019
+📈 Emerging
+19
+Topic 26
+0.6
+12.9
++1973%
+2021
+📈 Emerging
+18
+Topic 25
+4.0
+6.9
++74%
+2024
+📈 Emerging
+28
+Topic 8
+0.6
+1.7
++163%
+2009
+📈 Emerging
+29
+Topic 9
+1.0
+3.1
++196%
+2007
+📈 Emerging
+11
+Topic 19
+1.4
+3.6
++159%
+2015
+📈 Emerging
+10
+Topic 18
+2.3
+3.2
++37%
+2014
+📈 Emerging
+7
+Topic 15
+3.3
+4.6
++39%
+2014
+📈 Emerging
+6
+Topic 14
+0.4
+2.5
++472%
+2020
+📈 Emerging
+3
+Topic 11
+0.3
+5.0
++1857%
+2023
+📈 Emerging
+16
+Topic 23
+8.3
+2.7
+-67%
+1991
+📉 Declining
+9
+Topic 17
+2.1
+0.8
+-60%
+2003
+📉 Declining
+8
+Topic 16
+4.4
+0.8
+-82%
+2000
+📉 Declining
+4
+Topic 12
+2.1
+0.1
+-94%
+1999
+📉 Declining
+22
+Topic 29
+8.0
+2.2
+-73%
+2000
+📉 Declining
+2
+Topic 10
+6.0
+0.7
+-89%
+2003
+📉 Declining
+1
+Topic 1
+8.9
+1.2
+-87%
+1993
+📉 Declining
+26
+Topic 6
+5.3
+2.0
+-61%
+1995
+📉 Declining
+27
+Topic 7
+2.3
+0.6
+-73%
+1996
+📉 Declining
+12
+Topic 2
+6.8
+1.0
+-86%
+1990
+📉 Declining
+0
+Topic 0
+2.0
+0.9
+-53%
+1996
+📉 Declining
+In [22]:
+```
+# Highlight: Top emerging and declining topics
+print("\n\U0001f525 TOP EMERGING TOPICS:")
+emerging = trend_df[trend_df['Trend'] == '\U0001f4c8 Emerging']
+for _, row in emerging.iterrows():
+    print(f"   \u2022 {row['Topic']} ({row['Early Avg (%)']}% \u2192 {row['Late Avg (%)']}%)")
+
+print("\n\u2744\ufe0f TOP DECLINING TOPICS:")
+declining = trend_df[trend_df['Trend'] == '\U0001f4c9 Declining']
+for _, row in declining.iterrows():
+    print(f"   \u2022 {row['Topic']} ({row['Early Avg (%)']}% \u2192 {row['Late Avg (%)']}%)")
+
+print("\n\u2696\ufe0f STABLE PILLARS:")
+stable = trend_df[trend_df['Trend'] == '\u27a1\ufe0f Stable']
+for _, row in stable.iterrows():
+    print(f"   \u2022 {row['Topic']} (peak: {row['Peak Year']})")
+```
+```
+🔥 TOP EMERGING TOPICS:
+   • Topic 21 (1.9% → 2.6%)
+   • Topic 4 (2.5% → 6.7%)
+   • Topic 3 (0.3% → 2.9%)
+   • Topic 28 (1.5% → 3.3%)
+   • Topic 27 (1.0% → 4.3%)
+   • Topic 26 (0.6% → 12.9%)
+   • Topic 25 (4.0% → 6.9%)
+   • Topic 8 (0.6% → 1.7%)
+   • Topic 9 (1.0% → 3.1%)
+   • Topic 19 (1.4% → 3.6%)
+   • Topic 18 (2.3% → 3.2%)
+   • Topic 15 (3.3% → 4.6%)
+   • Topic 14 (0.4% → 2.5%)
+   • Topic 11 (0.3% → 5.0%)
+
+❄️ TOP DECLINING TOPICS:
+   • Topic 23 (8.3% → 2.7%)
+   • Topic 17 (2.1% → 0.8%)
+   • Topic 16 (4.4% → 0.8%)
+   • Topic 12 (2.1% → 0.1%)
+   • Topic 29 (8.0% → 2.2%)
+   • Topic 10 (6.0% → 0.7%)
+   • Topic 1 (8.9% → 1.2%)
+   • Topic 6 (5.3% → 2.0%)
+   • Topic 7 (2.3% → 0.6%)
+   • Topic 2 (6.8% → 1.0%)
+   • Topic 0 (2.0% → 0.9%)
+
+⚖️ STABLE PILLARS:
+   • Topic 5 (peak: 2023)
+   • Topic 13 (peak: 2005)
+   • Topic 24 (peak: 2013)
+   • Topic 22 (peak: 2010)
+   • Topic 20 (peak: 1990)
+```
+8. Detail-on-Demand: Drill into a Specific Topic (Pattern 5 – Restore)¶
+In [23]:
+```
+# Select a topic to drill into
+DRILL_TOPIC = yearly_smoothed.columns[0]  # <-- Change to any topic of interest
+
+print(f"Drilling into: '{DRILL_TOPIC}'")
+print("=" * 70)
+
+topic_papers = df[df['topic_label'] == DRILL_TOPIC].sort_values('year')
+
+# Show papers per 5-year era
+for era_start in range(int(df['year'].min()), int(df['year'].max()) + 1, 5):
+    era_end = era_start + 4
+    era_papers = topic_papers[
+        (topic_papers['year'] >= era_start) & (topic_papers['year'] <= era_end)
+    ]
+    if len(era_papers) > 0:
+        print(f"\n--- {era_start}\u2013{era_end} ({len(era_papers)} papers) ---")
+        # Show top 3 by topic weight
+        for _, row in era_papers.nlargest(3, 'topic_weight').iterrows():
+            print(f"  [{row['year']}] {row['title'][:90]}")
+```
+```
+Drilling into: 'Topic 0'
+======================================================================
+
+--- 1990–1994 (5 papers) ---
+  [1993] Bridging the gap between visualization and data management: A simple visualization managem
+  [1994] Progressive transmission of scientific data using biorthogonal wavelet transform
+  [1992] A characterization of the scientific data analysis process
+
+--- 1995–1999 (11 papers) ---
+  [1996] Interactive Exploration and Modeling of Large Data Sets: A Case Study with Venus Light Sca
+  [1998] Data level comparison of wind tunnel and computational fluid dynamics data
+  [1996] Dual multiresolution HyperSlice for multivariate data visualization
+
+--- 2000–2004 (5 papers) ---
+  [2004] Visual Browsing of Remote and Distributed Data
+  [2004] Compression, Segmentation, and Modeling of Large-Scale Filamentary Volumetric Data
+  [2002] Semotus Visum: a flexible remote visualization framework
+
+--- 2005–2009 (11 papers) ---
+  [2005] Distributed data management for large volume visualization
+  [2005] Parallel sets: visual analysis of categorical data
+  [2008] Interactive Visual Analysis of Set-Typed Data
+
+--- 2010–2014 (2 papers) ---
+  [2012] Exploring cyber physical data streams using Radial Pixel Visualizations
+  [2011] Adaptive Privacy-Preserving Visualization Using Parallel Coordinates
+
+--- 2015–2019 (5 papers) ---
+  [2015] JiTTree: A Just-in-Time Compiled Sparse GPU Volume Data Structure
+  [2016] PowerSet: A Comprehensive Visualization of Set Intersections
+  [2015] AggreSet: Rich and Scalable Set Exploration using Visualizations of Element Aggregations
+
+--- 2020–2024 (8 papers) ---
+  [2020] Data Visceralization: Enabling Deeper Understanding of Data Using Virtual Reality
+  [2022] Data Hunches: Incorporating Personal Knowledge into Visualizations
+  [2023] Dead or Alive: Continuous Data Profiling for Interactive Data Science
+```
+9. Export Results¶
+In [24]:
+```
+# Save results to CSV
+output_dir = Path("output")
+output_dir.mkdir(exist_ok=True)
+
+# Papers with topic assignments
+df[['year', 'title', 'topic_label', 'topic_weight']].to_csv(
+    output_dir / "papers_with_topics.csv", index=False
+)
+
+# Yearly proportions (smoothed)
+yearly_smoothed.to_csv(output_dir / "yearly_topic_proportions_smoothed.csv")
+
+# Trend summary
+trend_df.to_csv(output_dir / "trend_summary.csv", index=False)
+
+print(f"Results saved to '{output_dir}/' directory:")
+print(f"  \u2022 papers_with_topics.csv")
+print(f"  \u2022 yearly_topic_proportions_smoothed.csv")
+print(f"  \u2022 trend_summary.csv")
+```
+```
+Results saved to 'output/' directory:
+  • papers_with_topics.csv
+  • yearly_topic_proportions_smoothed.csv
+  • trend_summary.csv
+```
+10. (Optional) 2-D Topic Map¶
+Visualise topic positions using t-SNE on the topic-term matrix to see
+which topics are semantically close.
+In [25]:
+```
+# t-SNE of topic-term vectors
+if N_TOPICS > 5:
+    perplexity = min(5, N_TOPICS - 1)
+    tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity)
+    topic_coords = tsne.fit_transform(H)
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    scatter = ax.scatter(
+        topic_coords[:, 0], topic_coords[:, 1],
+        s=100, c=range(N_TOPICS), cmap='tab20', alpha=0.8, edgecolors='black'
+    )
+
+    for i in range(N_TOPICS):
+        if i not in EXCLUDE_TOPICS:
+            label = TOPIC_LABELS.get(i, f"T{i}")
+            ax.annotate(
+                label, (topic_coords[i, 0], topic_coords[i, 1]),
+                fontsize=7, ha='center', va='bottom'
+            )
+
+    ax.set_title("Topic Map (t-SNE of topic-term vectors)")
+    ax.set_xlabel("t-SNE 1")
+    ax.set_ylabel("t-SNE 2")
+    plt.tight_layout()
+    plt.show()
+```
+Summary¶
+This notebook implemented the full workflow:
+Step
+Pattern
+What it does
+1–2
+Progressive Abstraction
+Raw text → TF-IDF matrix
+3
+Topic Mining (NMF)
+Extract candidate topics
+4
+Interactive Steering
+Merge/label/exclude topics
+5–6
+Cluster-Label-Distribute
+Topic proportions over time
+7
+Simplify for Trends
+Moving-average smoothing + trend classification
+8
+Restore Detail
+Drill into specific topics/eras
+Next steps:
+Refine MERGE_MAP, TOPIC_LABELS, and EXCLUDE_TOPICS iteratively
+Try different N_TOPICS (20–40) and compare coherence
+Experiment with BERTopic for embedding-based topics
+Add interactive widgets (ipywidgets) for steering without code edits

@@ -1,0 +1,334 @@
+glsl - How many calculations can a GPU do with a given amount of FLOPS? - Stack Overflow
+Collectives™ on Stack Overflow
+Find centralized, trusted content and collaborate around the technologies you use most.
+Learn more about Collectives
+Teams
+Q&A for work
+Connect and share knowledge within a single location that is structured and easy to search.
+Learn more about Teams
+How many calculations can a GPU do with a given amount of FLOPS?
+Ask Question
+Asked
+3 years, 9 months ago
+Modified
+3 years, 9 months ago
+Viewed
+355 times
+0
+I have the following shader rendering voxels using raycasting:
+```
+#version 460
+#extension GL_ARB_separate_shader_objects : enable
+#pragma optionNV(unroll all)
+
+layout(binding = 3, std140) uniform compVarsOb {
+    float time;
+    float phiA;
+    float thetaA;
+    vec3 camPos;
+    float fov;
+    int voxWidth;
+    int voxHeight;
+    int voxDepth;
+} cvo;
+
+
+layout(binding = 2, rgba8) uniform writeonly image2D img;
+
+float hash3(vec2 xy){
+    xy = mod(xy, .19);
+    float h = dot(xy.yyx, vec3(.013, 27.15, 2027.3));
+    h *= h;
+    h *= fract(h);
+    
+    return fract(h);
+}
+
+
+
+
+
+
+//layout(binding = 4) uniform sampler3D voxels;
+
+
+layout(binding = 4, std140) buffer vData{
+    vec4 voxels[];
+};
+
+
+float greaterThan(float a, float b){
+    float d =  a - b;
+    return (1. + (d / abs(d)))/2.;
+}
+
+float lesserThan(float a, float b){
+    float d =  a - b;
+    return (1. - (d / abs(d)))/2.;
+}
+
+float withinBounds(ivec3 li){
+    vec3 l = vec3(li);
+    return greaterThan(l.x, 0.) * lesserThan(l.x, cvo.voxWidth) * greaterThan(l.y, 0.) * lesserThan(l.y, cvo.voxHeight) * greaterThan(l.z, 0.) * lesserThan(l.z, cvo.voxDepth);
+}
+
+
+vec4 quaternionMult(vec4 a, vec4 b){
+    return vec4(a.x * b.x - dot(a.yzw, b.yzw), a.x*b.yzw + b.x*a.yzw + cross(a.yzw, b.yzw));
+}
+
+
+void main()
+{
+    vec2 iResolution = vec2(2560., 1440.);
+    vec2 fragCoord = gl_GlobalInvocationID.xy;
+    ivec2 fragI = ivec2(gl_GlobalInvocationID.xy);
+    
+    vec2 iMouse = vec2(.5);
+
+    vec2 uv = fragCoord/iResolution.xy;
+    ivec2 uvI = ivec2(uv);
+    
+    vec2 muv = iMouse.xy / iResolution.xy;
+    
+    float iTime = cvo.time;
+    
+    vec3 col = vec3(0.);
+    
+    float screenRatio = iResolution.y / iResolution.x;
+    
+    //Setting up the ray directions and other information about the point and camera
+    //##############################################################################
+    
+    
+    //camera direction angles phi (xy plane) and theta (xz plane)
+    float phi = cvo.phiA;//radians(360. * (1. - muv.x));
+    float theta = cvo.thetaA;//radians(180. * (1. - muv.y));
+    
+    //get the camera direction as the basis for the rotation (each ray direction is a rotation of the camera direciton vector)
+    //it is in quarternion form here so its a vec4 instead of a vec3
+    vec4 camD = vec4(0., cos(phi) * sin(theta), sin(phi) * sin(theta), cos(theta));
+    
+    
+    float rad90 = radians(90.);
+    
+    float fov = cvo.fov;
+    
+    float xAng = radians(fov * (.5 - uv.x));
+    //replace "fov" with "(fov + (110. * pow(.5 - uv.x, 2.)))" below to add a counteractment to the fisheye lens effect
+    //it basically counteracts the artifact with quaternions that happens when you rotate by a large angle on one axis then try to rotate on another axis perpendicular, it just rotates around it thus making the new direction lesser
+    float yAng = radians(fov * screenRatio * (uv.y - .5));
+    
+    //get the axes that the quarternions should be based around (perpendicular to the camera plane or dv)
+    vec3 xRotAxis = vec3(cos(phi) * sin(theta - rad90), sin(phi) * sin(theta - rad90), cos(theta - rad90));
+    vec3 yRotAxis = cross(xRotAxis, camD.yzw);//vec3(cos(phi - rad90) * sin(theta), sin(phi - rad90) * sin(theta), cos(theta));
+    
+    //get the quarternions of the ray direction rotations
+    vec4 xQuat = vec4(cos(xAng / 2.), xRotAxis * sin(xAng / 2.));
+    vec4 yQuat = vec4(cos(yAng / 2.), yRotAxis * sin(yAng / 2.));
+    
+    
+    
+    //combine the rotations
+    vec4 compQuat = quaternionMult(yQuat, xQuat);
+    
+    
+    
+    //get the conjugate of the compQuart
+    vec4 conjComp = vec4(compQuat.x, -compQuat.yzw);
+
+    
+    //ray direction
+    vec3 rayD = normalize(quaternionMult(quaternionMult(compQuat, camD), conjComp).yzw);
+    
+    
+    
+    
+    //camera location
+    vec3 cam = cvo.camPos;//vec3(cos(iTime), 0., 0.);
+    
+    
+    //point location and radius
+    //vec3 p = vec3(0., (5. * iTime) + 1., 0.);
+    float pr = .00001;
+    
+    
+
+
+
+    //############################################
+    
+
+
+
+    
+    //hit = 1. means that nothing has been hit or everything has been completely transparent
+    float hit = 1.;
+    vec3 locf = vec3(0.);
+    ivec3 loc = ivec3(0);
+    int locI = 0;
+    vec4 v = vec4(0.);
+
+    for(int i = 0; i < 20; i++){
+        locf = vec3((i * rayD * .4) + cam);
+        loc = ivec3(locf);
+        //adjust loc for the buffer indexing
+        locI = loc.x + loc.y * cvo.voxWidth + loc.z * cvo.voxWidth * cvo.voxHeight;
+
+        //vec4 v = texelFetch(voxels, loc, 0);//;imageLoad(voxels, loc);//texelFetch(voxels, ivec3((i * rayD) + cam), 0);
+        
+        
+
+        v = voxels[locI];// * withinBounds(loc);
+
+        if(locf.x < 0. || locf.x > cvo.voxWidth || locf.y < 0. || locf.y > cvo.voxHeight || locf.z < 0. || locf.z > cvo.voxDepth){
+            v = vec4(0.);
+        }
+
+        col += v.xyz * hit * v.w;
+
+        hit -= v.w;
+
+        if(hit <= 0.){
+            //col = vec3(v.w / 5.);
+            break;
+        }
+         
+        
+    }
+    
+
+    //col = imageLoad(voxels, ivec3(uvI, 1)).xyz;//texelFetch(voxels, ivec3(fragI / 10, 1), 0).xyz;
+    //col = vec3(phi / radians(180.));
+    
+    //col = texture(iChannel0, uv).xyz;
+    
+    //col = voxels[(fragI.x / 10) + (fragI.y / 10) * cvo.voxWidth].xyz;
+
+    //col = vec3(rayD.z);
+
+    imageStore(img, fragI, vec4(col,1.0));
+}
+```
+It produces this:
+The problem is when I change the loop (end of main()) for the amount of voxels I want to iterate over to more than 2 (its at 20 right now), the fps absolutely tanks. Yet I feel that my GPU is capable of way more than 2 iterations of a not so demanding loop, so I'm not sure what is going on.
+I am running on an RTX 2060 Super which here is said to be capable of 7.81 * 10^12 FLOPS. If I'm understanding it correctly, this means that if I want to run a compute shader at 144 fps at 1440p, I would be allowed a total of (7.81 * 10^12)/(144 * 2560 * 1440) FLOPS in my shader. That comes out to about 14712 FLOPS in the compute shader which is way more than I have in my compute shader right now, yet my code only runs at an average of 30 fps when the loop is at 20 iterations. I can only get 144+ fps when I cut the loop down to 1 or 2 iterations (which at that point is basically like not having the loop at all). Are loops just horribly unoptimized for compute shaders? Where am I going wrong?
+glsl
+shader
+vulkan
+compute-shader
+Share
+Improve this question
+Follow
+edited Jul 22, 2021 at 20:17
+Aejjee
+asked Jul 22, 2021 at 19:41
+AejjeeAejjee
+19822 silver badges1515 bronze badges
+4
+"Are loops just horribly unoptimized" Do you know what a non-uniform control flow is?
+– krOoze
+Commented
+Jul 22, 2021 at 20:22
+I didn't, I just looked at some stuff on it and from what I can gather quickly it seems like what you're telling me is that I shouldn't be using voxels[locI] as a buffer, but rather as a uniform buffer. the problem with this is that it won't let me access indices of voxels with a variable when its a uniform buffer.
+– Aejjee
+Commented
+Jul 22, 2021 at 20:35
+My point is that if your loop has 20 iterations, then it obviously gets 20 times slower. But yea, you might also be memory bound by all the random memory access. You load 20x vec4 in pretty uncacheable way per invocation. So that's like 20*2560*1440*144*4*4 = 160 GBps of random nonsequential memory access.
+– krOoze
+Commented
+Jul 22, 2021 at 20:57
+Oh yes I believe you nailed the problem. My GPU has a Memory clock speed of about 14 GBps, which per iteration you showed it would be 8 GBps. My program loses framerate at and after 2 iterations which would be 16 GBps of memory access. No wonder 20 iterations absolutely kills it, its the memory not the computations. Thanks!
+– Aejjee
+Commented
+Jul 22, 2021 at 21:04
+Add a comment
+|
+1 Answer
+1
+Sorted by:
+Reset to default
+Highest score (default)
+Trending (recent votes count more)
+Date modified (newest first)
+Date created (oldest first)
+1
+The flops GPU is capable of is usually calculated given perfect conditions with perfect code. That is, every computation is a Fused Multiply Add, is able to start right after the previous one with data already in cache/registers, and every single core is working. Achieving such conditions is the problem of writing code on GPUs.
+GPUs normally create multiple threads per core in order to reduce penalty from having to wait for memory accesses. Caches are used to work with large bandwith usage, but they are relatively small and they require memory locality(data being stored physically close) for effective usage. Some GPUs have a separate texture cache, abusing which might be wise. Drivers also try to store textures and images in an efficient way, at least by making pixels close by - also close in memory, but potentially using some special hardware.
+In compute shaders, threads are created in large blocks and then assigned to Compute Units (terminology differs between vendors, basically sort of a meta-core, with own cache and a bunch of cores). The size of block a is defined in shader with layout(local_size_x = X​, local_size_y = Y​, local_size_z = Z​) in;, where total number of threads equals to the multiple of the dimensions. Threads within a block can communicate with shared variables (they are usually stored within same space as l1 cache) and synchronise with barrier() and alike. GPUs have multiple compute units, and to make them work multiple blocks should be launched(the values in vkCmdDispatch() are the number of groups launched).
+Threads are also implicitly grouped in SIMD-like groups (nVidia calls it SIMT - single instruction multiple threads). Every thread in one such group performs the same instruction(but there are some differences with newer nVidia cards). In case where an if() or for(), while(), etc. makes only some threads execute a portion of code, part of cores are disabled, potentially wasting performance. Usually they have size of 32 or 64(AMD), so thread blocks should be created as a multiple of that number. Some functionalities of such groups are exposed with subgroup extensions.
+Since you are working with voxels, i'd imagine that using 3D textures or images instead of a buffer may be good for caches. Figuring out how to make threads cooperate and make use of the fast shared memory should also be a good idea.
+Share
+Improve this answer
+Follow
+answered Jul 28, 2021 at 11:47
+user369070user369070
+63511 gold badge66 silver badges1111 bronze badges
+Add a comment
+|
+Start asking to get answers
+Find the answer to your question by asking.
+Ask question
+Explore related questions
+glsl
+shader
+vulkan
+compute-shader
+See similar questions with these tags.
+The Overflow Blog
+Grab bag! On the floor at HumanX
+How self-supervised language revolutionized natural language processing and...
+Featured on Meta
+Updates to advertising guidelines
+Evolving comments: An experiment to encourage engagement and follow-up questions
+Policy: Generative AI (e.g., ChatGPT) is banned
+What We Learned About Follow-up Questions and What's Next
+Related
+22
+How much is run concurrently on a GPU given its numbers of SM's and SP's?
+2
+FLOPS assigned to sqrt in GPU to measure performance and global efficiency
+7
+How many tasks can be executed simultaneously on GPU device?
+4
+How to calculate peak FLOPS in GPGPU hardware?
+4
+GPU FLOPS and FPS
+3
+Estimating the efficiency of GPU in FLOPS (CUDA SAMPLES)
+1
+How many simultaneous read instructions per thread on modern GPU?
+0
+Calculating GPU's maximum flops using OpenCL
+3
+On GPU, is it possible to get more flops by combining double and float operations?
+0
+Maximum number of threads of Vulkan compute shader
+Hot Network Questions
+A single word for dishonestly underselling one's own importance/credentials?
+Using curly braces to process colon-separated variables
+Idiomatic way of generating a unique filename?
+Confusion about conjugation and verb versus adjective versions of the same word
+What is "Induced Atmospheric Vibration"?
+Implement PHMINPOSUW (Packed Horizontal Word Minimum)
+How humid does it have to be for flamethrowers to start experiencing problems?
+Revising part of a manuscript not covered by the referee report
+Find indeterminate limit without using L'hopital's theorems
+Result in opposite direction to hypothesis - one or two-tailed p-value?
+Old YA book about a brown eyed secret elf girl who was a secret experiment by elf terrorists
+Shakespeare's use of the word "excursion"
+Replacement is not working in Table
+Could OLS miss statistically significant coefficient because it's too small?
+How to avoid Apache restarts at midnight?
+Would there always be markers (or some kind of clue) on cells that had been genetically engineered?
+Travelling to US by road by personal car and leaving by personal car
+Which Western countries are looking to cancel procurement/collaboration programs for US weapon systems and how far has that proceeded?
+Doubt regarding center of mass of a cone
+Double underline single label for bird ecology (BTO) notation in QGIS
+How to extend edge of object
+Does Logan age four years (or more), or do they adjust his life clock?
+Help with Abel's sum formula example.
+Spoke tension question
+more hot questions
+Question feed
+lang-c

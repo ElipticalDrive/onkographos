@@ -1,0 +1,264 @@
+Defold is a completely free to use game engine for development of desktop, console, mobile and web games. - Add GPU frustum culling and indirect rendering for instanced models by JCash · Pull Request #13524 · defold/defold
+
+Add GPU frustum culling and indirect rendering for instanced models by JCash · Pull Request #13524 · defold/defold · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+JCash
+commented
+Oct 21, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Instanced models can now be frustum culled and drawn indirectly on the GPU on supported Metal, Vulkan and WebGPU contexts. The renderer retains instance data between frames, uploads changes, and consumes GPU-generated visibility without waiting for CPU readback. Ineligible models, order-dependent passes and unsupported graphics contexts retain CPU culling.
+GPU culling is enabled by default. It can be disabled in game.project; optional asynchronous profiler statistics are disabled by default:
+```
+[render]
+gpu_culling = 1
+```
+Technical changes
+Design: https://docs.google.com/document/d/16CnM1WM1NlloGkhmmCPgbLMdcWAgYCM5endRAF1xNQc/edit?tab=t.0
+Builds on the persistent render-item API in Add a render item API to dmSDK #13469, whose commits are currently included against dev. Components retain item handles, update transforms, bounds and material state through setters, and submit their dispatch each frame. Legacy frame-local SDK APIs remain available and are deprecated; the new lifecycle is documented in the SDK header.
+Adds indexed indirect drawing, storage-buffer views and synchronization on Metal, Vulkan and WebGPU. Capability checks require compute shaders, storage buffers and indirect drawing; OpenGL ES 2/WebGL 1 retain the CPU path.
+Adds persistent GPU batches, compact bounds, dirty uploads and compute visibility compaction. Compatible shader variants fetch transforms through visible instance IDs; other supported layouts use compacted matrices. Visibility statistics are optional and asynchronous.
+Restricts GPU batches to eligible indexed, instanced model layouts and order-independent passes. Skinning, morph targets, dynamic attributes and incompatible render state retain CPU culling. Allocation failures and device limits also fall back to the CPU path.
+Keeps model allocation improvements local: stable chunk allocation, smaller hot component state, shared mesh bounds and cached bone-parent classification.
+Documents the renderer path and adds localized project settings. Design document.
+Validation
+After merging current dev: 110 renderer, 612 gamesys, 69 engine and four focused shader-compiler tests passed, along with two small WebGPU pixel/visible-ID regressions.
+Earlier native coverage passed 14 renderer tests each on Metal and Vulkan/MoltenVK, plus the Metal model integration test. Coverage includes CPU/GPU pixel equivalence, material changes, frame overlap, storage replacement, allocation failure and recovery. Generated SPIR-V validates for Vulkan 1.0.
+With updated Dawn, both 100K WebGPU CPU-culling and GPU-culling diagnostic runs completed and exited normally. GPU mode processed 100K candidates, reported 614 visible instances and used one indirect draw. Windowed, 30 Hz, approximately 0.47-second recordings after population and warmup; no detected GPU errors or new WindowServer reports. The diagnostic build includes tracing and the same isolated duplicate-window-close correction used in the previous failed run. The earlier hang did not reproduce; its root cause remains unproven.
+Historical Metal measurements on Apple M5 Max, before the latest dev/Dawn merge, show all-visible camera-motion model batch preparation falling from 1.112 to 0.067 ms in the 100K mixed-object scene (50K models and 50K sprites). In the full-motion workload, process physical footprint increased from 562.3 to 686.0 MiB; executable machine code increased by 90.6 KiB. These component and cost measurements do not establish a full-frame speedup for the current merged build.
+JCash
+added 22 commits
+October 15, 2026 16:48
+Add persistent render item handles and renderer-owned culling
+…
+641f8f4
+```
+Introduce generation-checked handles with enable, transform, material, batch
+key and sphere/AABB/OBB bounds setters. Cache dispatch membership and material
+tag ranges, update small membership changes incrementally, and retain the
+legacy allocation path for compatibility.
+
+Warn once for each deprecated render-list API. Cover handle lifetime,
+legacy coexistence, typed bounds, ordering, batching and sparse updates.
+```
+Migrate models and sprites to persistent render items
+…
+a1d7ccc
+```
+Register items for component lifetime and update transforms, bounds and
+material metadata through component change paths. Preserve draw eligibility
+when components or individual meshes are toggled and when resources reload.
+
+Update profiling assertions and add lifecycle, culling, pool-compaction and
+material-reload regression coverage.
+```
+Migrate remaining rendering paths to the render item API
+…
+181e5f5
+```
+Use retained items for meshes and reusable handle pools for tilemap regions,
+particle emitters, GUI render objects and text. Migrate debug rendering and
+preserve explicit ordering for GUI, text and debug items.
+
+Replace component culling callbacks with typed bounds. Update particle
+visibility assertions and verify GUI ordering and handle reuse across empty
+frames.
+```
+Expose the render item API in the public SDK
+…
+bf9e34f
+```
+Move render item handles, dispatch registration and item setters into dmsdk/render/render.h. Document ownership, update timing, bounds spaces, ordering and return values using the SDK documentation format.
+
+Put legacy deprecation notices in generated descriptions so they are visible in the published documentation.
+```
+Format render item and component changes
+…
+d3ae46a
+```
+Apply repository formatting to the changed code and align declarations in the affected structs. Preserve runtime behavior and API signatures.
+```
+Document persistent render dispatch state and lifetime
+c7ac8eb
+Use zero as the invalid render item dispatch handle
+184fc5e
+Reset render item bounds with an inverted AABB
+2266c59
+Keep model batching policy out of the render item API
+5413837
+Use a byte comparison for sprite unit scale
+b5c1d20
+Merge latest dev into render-item-api
+1f71e77
+Preserve existing GuiWorld member alignment
+0fb2d21
+Preserve existing formatting around render item changes
+750eb67
+Pack model component allocations into stable chunks
+afce0de
+Reduce model component hot-state footprint
+…
+4051332
+```
+Remove duplicate mesh bounds and the unused component index, group frequently read component fields, and cache rigid bone-parent classification. Keep the existing model pool regression declarations aligned.
+```
+Add indexed indirect drawing to Metal Vulkan and WebGPU
+…
+8cae71a
+```
+Expose compute-written storage buffers for indirect indexed draws and vertex input, with explicit context capabilities and asynchronous snapshots. Own and reload visible-instance shader companions with their parent program. Preserve recorded work across storage replacement and propagate native Metal and Vulkan storage creation failures.
+```
+Compile visible-instance shader variants for GPU model draws
+…
+5488e75
+```
+Generate vertex-fetch companions that load world matrices through compacted instance IDs while preserving material resource bindings. Retain Vulkan 1.0-compatible SPIR-V storage declarations and validate that target in the shader regression. Build standalone compute shaders only for compute-capable targets.
+```
+Cull and render instanced models on the GPU
+…
+38597b2
+```
+Add opt-in GPU frustum culling using persistent compact bounds, dense transforms, cached batch membership and visible-instance IDs or matrix compaction. Submit indexed indirect draws without mandatory readback, and retain CPU culling for unsupported contexts, model layouts and ordered passes. Document the setting and optional asynchronous profiler statistics.
+```
+Test GPU model culling across native graphics backends
+…
+64999b1
+```
+Add manual Metal, Vulkan and WebGPU renderer targets covering compaction, pixels, cached membership, frame overlap and buffer lifetimes. Exercise native Metal and Vulkan allocation failures without exhausting memory. Add real model-component coverage for material eligibility changes and CPU fallback.
+
+Validation: 802 tests passed, including 14 Metal and 14 Vulkan renderer tests, real model integration, existing renderer/gamesys suites and shader tests. Nine rebuilt SPIR-V modules validate for Vulkan 1.0. WebGPU builds and WGSL compilation passes; its earlier runtime hang remains unresolved.
+```
+Enable GPU model culling by default
+0efbfb3
+Localize GPU culling project settings
+a63941e
+Merge dev into gpu-frustum-culling
+…
+ff263c2
+```
+Bring in Dawn v20261016.190333 (67d4d6e). Preserve GPU culling and
+backbuffer-readback capabilities, shared GUI uploads and vector-font support.
+Keep GPU batch capacity aligned with render-object growth and adapt the new
+GUI upload regression to persistent render-item submissions.
+
+Validation: 110 renderer, 612 gamesys, 69 engine and four shader compiler
+tests passed. Two small WebGPU pixel regressions passed against the new Dawn
+with logging and watchdogs, without new WindowServer diagnostics.
+The earlier 100K scene hang has not been retested.
+```
+github-project-automation
+Bot
+added this to Defold backlog
+Oct 21, 2026
+github-project-automation
+Bot
+moved this to Todo
+in Defold backlog
+Oct 21, 2026
+chatgpt-codex-connector
+Bot
+commented
+Oct 21, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codex Review Summary
+This comment shows the latest Codex review activity on this pull request.
+Review
+Status
+Commit
+Review trigger
+📝 Code Review
+✅ Completed 2026-10-21T14:15:17.436928Z
+ff263c2
+PR opened
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review" or "@codex security review".
+Codex reacts with 👀 while any review is running, comments if it has suggestions, and reacts with 👍 once all reviews finish with no findings.
+JCash
+added 5 commits
+October 21, 2026 16:18
+Fix GPU culling builds for Android and release engines
+29ca9cd
+Build GPU culling tests only for enabled graphics adapters
+5fafa43
+Cover GPU culling settings in editor save-data fixture
+0ebbf86
+Merge dev into gpu-frustum-culling
+7f17d2e
+Add DirectX 12 indirect drawing and buffer readback
+ca576a5
+JCash
+added 7 commits
+October 29, 2026 11:07
+Test DirectX 12 compute-driven indirect draws
+5580336
+Name bounding-volume types in the GPU culling shader
+…
+f9abb9c
+```
+Replace numeric volume tags with constants matching the renderer types.
+```
+Use a typed descriptor for the GPU culling shader
+…
+3120524
+```
+Load and release the shader descriptor at each caller. Keep ownership explicit and remove the redundant serialized byte count.
+```
+Let the renderer own GPU instance batches
+…
+94ddab2
+```
+Replace model-world batch bookkeeping with renderer-owned reusable outputs submitted through AddToRender. Cover queued draws, buffer reuse and CPU allocation fallback.
+```
+Keep GPU culling within storage-buffer binding limits
+…
+829c8ec
+```
+Reject unsupported automatic culling and visible-ID programs before backend creation. Preserve backend validation for ordinary shaders, including DX12 read-only storage buffers.
+
+Validation: 225 headless and Metal tests pass; Vulkan and WebGPU test binaries build. DX12 runtime was not retested.
+```
+Drop unrelated GUI indentation from the culling PR
+…
+2653763
+```
+Restore the dev formatting so the GPU frustum culling PR has no GUI diff.
+```
+Merge origin/dev into gpu-frustum-culling
+…
+f832fc2
+```
+Resolve startup, render-parameter and test-registration conflicts while preserving GPU culling and the new inline render execution context.
+
+Validation: 425 tests pass, including engine, render-script, render execution/frame/queue, GPU-culling and Metal model integration tests. Engine and Vulkan/WebGPU test binaries build successfully.
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

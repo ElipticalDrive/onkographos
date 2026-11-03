@@ -1,0 +1,193 @@
+The simplest way to animate. Contribute to algorithmicsimplicity/algan development by creating an account on GitHub.
+
+Path tracer: heterogeneous volumes (DensityGrid), and scatter points that stay put by algorithmicsimplicity · Pull Request #227 · algorithmicsimplicity/algan · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+algorithmicsimplicity
+commented
+Oct 23, 2026
+Copy link
+Copy Markdown
+Owner
+Requested by Algorithmic Simplicity · project thread
+What and why
+The path tracer could fill a closed shell with fog, but only fog of one thickness throughout. That ruled out smoke, clouds and fog that thins at its edges. The roadmap's §4 left "heterogeneous density fields, ratio/delta tracking" as an explicit gap. This PR closes it with a public DensityGrid, passed as MeshPhysicalMaterial(density=...):
+```
+puff = DensityGrid.from_function(
+    lambda p: (1 - p.norm(dim=-1)).clamp(min=0) * DensityGrid.noise(p) * 4
+)
+cloud = Sphere(radius=1.5)
+cloud.set_material(MeshPhysicalMaterial(
+    color=WHITE, transmission=1, ior=1, roughness=0, sigma_s=4, density=puff,
+))
+```
+How it works:
+The grid scales extinction only. It multiplies the material's sigma_s and absorption. Albedo and g stay the material's.
+The box follows its Mob. The samples fill a box in the frame of the Mob set_material was called on: its bounding box by default, or explicit bounds. The box moves, turns and scales with that Mob, and a clone carries its own field.
+Free flights use spectral tracking. They run over a coarse piecewise-constant majorant walked by a 3-D DDA.
+Shadow connections, and flights that may not scatter, use ratio tracking with Russian roulette.
+Fails closed past the step cap. A segment that would need more than 4096 tracking steps is cut off, and the cut is counted in RenderPlan.truncations.medium_tracking.
+The deterministic renderer refuses density grids, as it already refuses homogeneous scattering.
+Two fixes found while building the demo:
+Scatter points inside every volume were being moved, homogeneous fog included. This dates from the distant-camera fix (8048952, Oct 14). The walk's hit_p snap sent everything that wasn't a triangle down the circuit branch, and that included the medium vertex (htype == 3). The vertex's prim is the shell triangle the path entered through. Read as a circuit index, it projected the vertex onto an unrelated plane, so each entry facet's fog came out at its own brightness and the shell's tessellation showed through. The fix is one line: only htype == 0 projects. The slab closed-form tests missed it because a cube's few triangle indices happened to read harmless rows. The new test_a_scatter_point_stays_where_it_was_sampled adds sixteen circles so those indices read real circuit planes. Without the fix it gets 0.004 against a closed form of 0.069; with the fix it is within 0.004.
+DensityGrid.noise overflowed int64 for most seeds, seed 11 for one. The seed is now reduced to 32 bits.
+Rendered output
+Scenes without a density grid render the same as before, except for the scatter-point fix above. Without a grid, the kernel gets an empty volume table and runs the homogeneous code unchanged. A homogeneous fog sphere rendered bit-identically to master before the scatter-point fix went in.
+Homogeneous scattering scenes change on purpose. Their scatter points now stay where they were sampled. No baseline in tests/fast or tests/full_renders contains a scattering medium, so no baseline was regenerated.
+Demo, on CPU at 960×540 and 256 spp with no denoiser: a noise-eroded cloud, a swaying smoke plume and a fog bank thickest at the floor, all lit by one directional light. Each casts a soft shadow, computed by ratio tracking through its grid. The demo is attached in the project thread.
+Verification
+All on CPU (x64, no CUDA here):
+pytest -q --group pre-pr: 2405 passed and 5 failed.
+Two failures were this PR's: the MPS guards flagged the grid's host-side float64 and one clamp below float16's floor. The second commit fixes both, and both now pass.
+The other three are in test_orthographic_render.py, which this PR doesn't touch. Each hit a std::bad_cast launching _compute_samples_per_segment, a stroke kernel. The container had restarted partway through an earlier run, so a half-written kernel cache is the likely cause. All three pass on rerun, as does the pre-PR selection of both files.
+tests/unit_tests/test_pt_volumes.py -- 38 pass. These cover:
+the kernel's interpolant against grid_sample
+the majorant bounding it everywhere, cell walls included
+ratio and spectral tracking against closed-form optical depth for flat and ramped profiles, per RGB channel
+the collision distribution, box clipping, per-frame transforms and the step-cap truncation
+binding, clone and key semantics
+full renders: slab single scattering against the closed form (flat and ramp), absorbing-only extinction, a half-filled cube's fog turning with its Mob, and a turned clone carrying its own field
+tests/unit_tests/test_pt_media.py -- all pass except test_dense_conservative_cube_recovers_constant_environment[1.35]. It gets 0.141 against 0.25 ± 0.015 on master too, with and without this PR. It is not in the pre-PR group and is left for a separate fix.
+Compile time: pt_shade_arena takes about 57 s to compile on CPU, up from about 53 s. There is no template gate, just two more arena arguments.
+Not checked here: CUDA.
+Docs
+renderer_limitations.rst: a new "Density grids" section, a row in the feature table, and the truncation row.
+API reference: DensityGrid has a full NumPy docstring with an .. algan:: example, and is listed in reference_index/rendering.rst.
+MeshPhysicalMaterial's docstring documents density.
+Roadmap §4 has the design, the contracts and the scatter-point bug write-up.
+agent_guidance/rendering.md has notes on how a grid's key and transform reach the kernel, and on medium vertices.
+Generated by Claude Code
+claude
+added 2 commits
+October 23, 2026 14:30
+Path tracer: heterogeneous volumes (DensityGrid) and scatter points t…
+…
+b318388
+```
+…hat stay put
+
+MeshPhysicalMaterial(density=DensityGrid(...)) scales a closed shell's
+sigma_s and absorption by a trilinear 3-D field laid over the box of the Mob
+set_material was called on, so smoke, clouds and fog that thins at its edges
+render in the path tracer. The box moves, turns and scales with that Mob, and
+a clone carries its own field. DensityGrid.from_function and
+DensityGrid.noise (fBm value noise) build fields from box coordinates.
+
+Free flights use spectral tracking (history-aware probabilities) and shadow
+connections ratio tracking with Russian roulette, both over a coarse
+piecewise-constant majorant walked by a 3-D DDA. A segment past 4096 steps is
+fail-closed and counted in RenderPlan.truncations.medium_tracking. The
+deterministic renderer refuses density grids, as it refuses homogeneous
+scattering.
+
+Also fixes scatter points in every medium, homogeneous ones included: since
+8048952 the walk's surface snap sent the medium vertex (htype 3) down the
+circuit branch, projecting it onto whichever circuit plane shared its entry
+triangle's index, so each shell facet printed its own brightness. Only
+htype 0 projects now. And DensityGrid.noise no longer overflows int64 for
+most seeds.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0131VA2PqXY3CfWmD28x9kva
+```
+Keep the density grid's float64 on the host for MPS-friendly mode
+…
+0a82615
+```
+DensityGrid authoring and the owner-frame algebra copy every tensor to the
+CPU before widening it, and the kernel only ever sees float32 tables, so the
+module joins the MPS guard's host-only list. The default box's sliver pad is
+a Python max rather than a clamp below MPS's float16 floor.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0131VA2PqXY3CfWmD28x9kva
+```
+algorithmicsimplicity
+self-assigned this
+Oct 23, 2026
+claude
+and others
+added 2 commits
+October 23, 2026 15:14
+Sort pt_media_taichi's imports (ruff I001)
+…
+a06ffaf
+```
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0131VA2PqXY3CfWmD28x9kva
+```
+Merge branch 'master' into claude/project-thread-aongh2
+9c69bd8
+Hide details
+View details
+algorithmicsimplicity
+merged commit e5f954b
+into
+master
+Oct 23, 2026
+9 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+algorithmicsimplicity
+deleted the
+claude/project-thread-aongh2
+branch
+October 23, 2026 21:38
+algorithmicsimplicity
+pushed a commit
+that referenced
+this pull request
+Oct 23, 2026
+Merge the heterogeneous volumes branch (#227) into the caustics branch
+…
+1be5baa
+```
+Both branches claimed material slot 39 and pt_stats column 4. The density
+volume key keeps slot 39 and the volume tracker column 4, as on #227;
+no_caustic_cast moves to slot 40 (MAT_W 41) and the caustic tallies to
+columns 5-6 (PT_STATS_WIDTH 7). Docs and truncation lists keep both.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0121svPYzLo6fi553CZfPoqS
+```
+algorithmicsimplicity
+pushed a commit
+that referenced
+this pull request
+Oct 23, 2026
+Pass the density-grid tables through caustic chains
+…
+96b74cd
+```
+#227 gave _pt_medium_transmittance the density-grid tables and a
+ratio-tracking seed, and a fourth return (tracking overflow). The caustic
+chain's legs still called it the old way, so every caustic kernel failed
+to compile once both landed. Each leg now tracks a grid from its own
+stream, counts its overflow under medium_tracking, and leaves a
+grid-varied absorbing interior to the medium walk instead of applying the
+homogeneous Beer-Lambert chord on top of it.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0121svPYzLo6fi553CZfPoqS
+```
+algorithmicsimplicity
+mentioned this pull request
+Oct 23, 2026
+Add opt-in shadow caustics to the path tracer (manifold NEE)
+#228
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

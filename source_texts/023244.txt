@@ -1,0 +1,895 @@
+arXiv:2312.13299v2 [cs.CV] 2 May 2024
+1
+Compact 3D Scene Representation via
+Self-Organizing Gaussian Grids
+Wieland Morgenstern1 , Florian Barthel1,2 , Anna Hilsmann1 , and
+Peter Eisert1,2
+1
+Fraunhofer Heinrich Hertz Institute, HHI
+2
+Humboldt University of Berlin
+{first}.{last}@hhi.fraunhofer.de
+Abstract. 3D Gaussian Splatting has recently emerged as a highly
+promising technique for modeling of static 3D scenes. In contrast to
+Neural Radiance Fields, it utilizes efficient rasterization allowing for very
+fast rendering at high-quality. However, the storage size is significantly
+higher, which hinders practical deployment, e.g. on resource constrained
+devices. In this paper, we introduce a compact scene representation organizing the parameters of 3D Gaussian Splatting (3DGS) into a 2D grid
+with local homogeneity, ensuring a drastic reduction in storage requirements without compromising visual quality during rendering. Central to
+our idea is the explicit exploitation of perceptual redundancies present in
+natural scenes. In essence, the inherent nature of a scene allows for numerous permutations of Gaussian parameters to equivalently represent
+it. To this end, we propose a novel highly parallel algorithm that regularly arranges the high-dimensional Gaussian parameters into a 2D grid
+while preserving their neighborhood structure. During training, we further enforce local smoothness between the sorted parameters in the grid.
+The uncompressed Gaussians use the same structure as 3DGS, ensuring
+a seamless integration with established renderers. Our method achieves a
+reduction factor of 17x to 42x in size for complex scenes with no increase
+in training time, marking a substantial leap forward in the domain of 3D
+scene distribution and consumption. Additional information can be found
+on our project page: fraunhoferhhi.github.io/Self-Organizing-Gaussians/
+Introduction
+3D reconstruction and rendering of real-world scenes has been a cornerstone of
+computer vision since its inception. Neural Radiance Fields (NeRFs) [26] and
+3D Gaussian Splatting (3DGS) [15] have recently revolutionized 3D representation and novel-view synthesis. Assessing the efficacy of 3D scene reconstruction
+methods and representations typically involves three important metrics: rendering quality, rendering speed, and storage size. While rendering quality is of
+general importance, rendering speed and storage size play a crucial role especially for real time applications, portability on devices with limited performance
+and memory or, for fast web applications.
+2
+W. Morgenstern et al.
+Fig. 1: Our 3DGS training method allows for high compression of 3DGS attributes
+while maintaining high rendering quality. By sorting the Gaussian features periodically
+into a 2D grid and applying a smoothness loss during scene generation, we significantly
+reduce the storage footprint using state-of-the-art image compression methods.
+NeRF-based rendering methods achieve high rendering quality [1]. However,
+they are costly to train and synthesis speed is slow, as each pixel value is computed by aggregating multiple results from a forward pass through a neural
+network. Recent methods have enabled considerably faster training and inference [7, 30, 37], often, however, at the cost of decreased quality and/or increased
+disk memory for each model. A recent alternative to NeRF is 3D Gaussian
+Splatting (3DGS), explicitly representing the scene with localized 3D Gaussian
+splats [15]. In contrast to NeRFs, 3DGS employs an efficient rasterization algorithm allowing for very fast rendering at high quality. In addition, the representation enables the modeling of consistent object motion in dynamic scenes [24]. On
+the downside, however, the storage size of 3DGS models is significantly higher
+than with NeRFs, because 3DGS stores millions of parameters in a large unorganized list. Such a data structure can take up to several hundred megabytes
+depending on the scene, which hinders practical deployment, e.g. on resource
+constrained devices.
+To address this limitation, we propose a new compact representation based
+on 3DGS, allowing for efficient encoding and storage. We exploit the fact that
+numerous permutations of Gaussian parameters can equivalently represent a
+scene with the same visual quality and arrange the millions of multidimensional
+list entries of 3DGS into a structured 2D grid with increased smoothness for
+efficientencoding.
+In addition, we integrate a smoothness loss into the 3DGS scene optimization
+process to guide the ambiguous arrangements of the splats towards a visually
+equivalent but better compressible parameter set. We finally quantize the param-
+Abbreviated paper title
+3
+eters and encode them by efficient 2D image compression methods, reducing the
+overall file size by a factor of 17x to 42x, without sacrificing rendering quality.
+With our method, we enable novel-view synthesis at high quality, high rendering speed, and with a small storage footprint, bringing high quality 3D scene
+reconstruction and rendering one step closer towards applications on small devices with limited storage capacity or fast web applications.
+Our main contributions are:
+1. We propose a new compact scene representation and training concept for
+3DGS, structuring the high-dimensional features in a smooth 2D grid, which
+can be efficiently encoded using state-of-the-art compression methods.
+2. We introduce an efficient 2D sorting algorithm called Parallel Linear Assignment Sorting (PLAS) that sorts millions of 3DGS parameters on the GPU
+in seconds.
+3. We provide a simple to use interface for compressing and decompressing the
+resulting 3D scenes. The decompressed reconstructions share the structure
+of 3DGS, allowing integration into established renderers.
+4. We efficiently reduce the storage size by a factor of 17x to 42x while maintaining high visual quality
+2
+State of the Art
+We first overview recent advances in 3D reconstruction and representation, before we take a closer look at high dimensional data structuring and sorting.
+2.1
+3D Scene Representation
+Over the past years, 3D scene representation has seen rapid improvements, especially with the advent of deep learning. The general goal is to allow novel-view
+synthesis of 3D objects captured by a number of 2D images. In the following, we
+will give a brief overview of the most relevant technologies and highlight their
+key differences. For a more comprehensive review in this field, please refer to
+Tewari et al . [39].
+Early novel-view synthesis approaches were based on pure image interpolation as for the lightfields [11,20], or reconstructed 3D geometry by means of regular voxel grids [32], point clouds, or meshes. Structure-from-Motion (SfM) and
+Multi-View-Stereo (MVS) were proposed to estimate such representations from
+a set of input images [5, 9, 34]. These methods were the basis for view-synthesis
+approaches guided by explicit representations of the geometry [3, 18, 31]. Also,
+compression of the large 3D point cloud datasets has been addressed [12,29], but
+is typically restricted to simple colored points without additional attributes.
+In recent years, implicit representations have been proposed to represent
+geometry [33]. Especially, Neural Radiance Fields (NeRFs) have revolutionized
+novel-view synthesis [26] by representing a scene volume as a multi-layer perceptron (MLP). This representation allows the visualization of thin structures,
+4
+W. Morgenstern et al.
+semi-transparent surfaces and highly realistic light reflections. In general, NeRFs
+show an outstanding rendering quality, however, they are slow during training
+and inference.
+The success of NeRF has resulted in numerous follow-up methods improving
+rendering quality, e.g. for large scenes [25], or speed [1, 7, 27, 38]. While MipNeRF360 [1] as one of the state-of-the-art approaches achieves an outstanding
+quality, it is still very costly to train and render. Methods focusing on faster
+training and/or rendering exploit spatial data structures and encodings in order
+to accelerate computation, representing the scene as a grid [7], tensors [4], latent
+features [14, 23, 37], hash grids [27] or using vector quantizations [38]. Among
+these, InstantNGP is a widely recognized example, using a smaller MLP to represent density and appearance though the use of a hash table and an occupancy
+grid [27]. Plenoxels estimate explicit spherical harmonics in addition to color and
+density to represent view dependent appearance effects [7]. In order to improve
+the rendering, the values are interpolated from a sparse 3D grid of features using
+trilinear interpolation, resulting in considerably higher rendering speed at the
+cost of lower quality. In addition, the storage size of Plenoxels is high, given that
+the number of elements in the 3D grid grows by O(n3 ).
+Other approaches aiming at real-time rendering involved precomputing and
+storing NeRF’s view-dependent colors and opacities in volumetric data structures [4,8,13,19,40,41] or partitioning the scene into voxels, each represented by
+separate small MLPs. However, these representations suffer from quality degradation and impose substantial graphics memory demands, restricting their application to objects rather than entire scenes. Several methods have been proposed to reduce the required disk space. Among these, Memory-efficient NeRF
+(MERF) [19] and TensoRF [4], share a similar approach, storing the 3D scene
+representation inside lightweight 2D features. Other methods to compress NeRF
+reconstructions use incremental pruning [6], vector quantization [19, 42] or compressed codebook representations [38]. However, these approaches still require
+costly network inference passes for each query point in the scene and are therefore
+not capable of real-time rendering of large scenes.
+Our approach is inspired by a recently proposed approach for 3D scene representation by Kerbl et al . [15] combining the advantages of explicit representations (fast training and rendering) with those of implicit representation (stochastic sampling) by representing the scene by millions of 3D Gaussians, called 3D
+Gaussian Splatting (3DGS). The parameters (3D coordinates, color, size, density,
+orientation, and spherical harmonics) of these Gaussians are optimized using an
+efficient differentiable rasterization algorithm starting from a set of Structurefrom-Motion points to best represent a given 3D scene. The main contribution
+of this approach is a representation that is continuous and differentiable while
+also allowing fast rendering: 3DGS is currently the state-of-the-art approach in
+terms of quality, rendering time, and performance. However, this comes at the
+cost of significantly higher storage requirements, as for each scene, millions of
+high dimensional Gaussians are stored in an unstructured list on disk.
+Abbreviated paper title
+2.2
+5
+Mapping Higher Dimensional Data to 2D Grids
+The ambiguity of ordering of the high dimensional point clouds in approaches like
+3DGS [15] enables optimization of point indices for more efficient representation
+and storage. Grid-based sorting techniques like Self-Organizing Map [16, 17],
+Self-Sorting Map [35, 36], or Fast Linear Assignment Sorting [2], allow mapping
+high-dimensional data points onto a 2D grid, organized by similarity, thereby
+facilitating an efficient compression of the data.
+A self-organizing map (SOM) [16, 17] is a neural network trained using unsupervised learning to produce a low-dimensional (typically two-dimensional),
+discretized representation of the input space of the training samples. Due to the
+sequential nature of the SOM training algorithm, the last input vectors can only
+be assigned to the few remaining unassigned map positions, resulting in isolated
+and poorly positioned vectors within the map. Self-Sorting Maps [35, 36] avoid
+this problem by swapping assigned positions of four input vectors at a time.
+Due to the factorial number of permutations, adding more candidates would be
+computationally too complex. Linear Assignment Sorting (LAS) [2] outperforms
+other sorting methods in terms of speed and sorting quality for non-parallel computations, by swapping all (or several (Fast LAS)) vectors simultaneously using
+a continuously filtered map.
+However, these grid-sorting algorithms, effective for handling thousands of
+items, prove inadequate for our specific application, where we seek to structure millions of Gaussians spread across various dimensions. To overcome this,
+we adapt and expand upon existing sorting methodologies, enabling continuous
+sorting of Gaussian data during training without inflating the training duration.
+Our goal is a new representation and training scheme for 3D Gaussian Splatting with drastically reduced storage requirements while maintaining visual quality during rendering. The idea of our method is to map originally unstructured
+3D Gaussians to a 2D grid in such a way that local spatial relationships are preserved. By mapping all Gaussian parameters (position, color, etc.) to the same
+2D position, we effectively create multiple data layers with the same layout. In
+this 2-dimensional layout, neighboring Gaussians will have similar attribute values, facilitating compression and enabling the storage of the same scene with
+much less disk space.
+3
+Method
+Figure 2 illustrates an outline of our method. Our training introduces two new
+components to the 3DGS framework: a highly-parallel 2D sorting step (Section
+3.1), and an enhanced scene optimization with a local neighborhood loss on the
+2D grid (Section 3.2). The sorting step initializes the optimization process by explicitly organizing the values, establishing an initial smooth local neighborhood
+without requiring a global optimization. Once sorted, our enhanced training incorporates a neighborhood loss, further enforcing local smoothness on the 2D
+grid, while the differentiable renderer of the 3D Gaussian splatting optimizes the
+6
+W. Morgenstern et al.
+Fig. 2: An overview of our novel 3DGS training method. During training, we arrange
+all high dimensional attributes into multiple 2D grids. Those grids are sorted and a
+smoothness regularization is applied. This creates redundancy which help to compress
+the 2D grids into small files using off-the-shelf compression methods.
+Gaussians attributes to accurately represent the scene. Similar to the original
+3DGS approach, Gaussians are pruned from the scene at regular intervals, and
+new Gaussians are added in under-reconstructed parts of the scene. This step is
+called densification. After each densification step, we re-sort all Gaussians into
+the 2D grid. This step re-establishes local neighborhoods after pruning and densification may have disrupted them. The attribute channels cannot be sorted
+individually, as each position on the grid belongs to the same Gaussian splat
+object, as visualized in figure 3. Therefore, the sorting algorithm has to find
+one permutation that satisfies all attributes at once. Otherwise, it would require
+additional storage size to align the attributes of the sorted grids.
+Fig. 3: Visualization of the conversion of 2D attribute grids into Gaussian splat objects.
+Note that the sorted grids have to align. Therefore, they cannot be sorted individually.
+Here, color represents the DC components of the spherical harmonics.
+To store the Gaussian attributes, we leverage off-the-shelf compression methods (described in Section3.4), which can be applied effectively to the wellorganized data.
+3.1
+Sorting High Dimensional Gaussians into 2D Grids
+Traditional grid-sorting algorithms are suitable for thousands of items, yet fall
+short for our application, where even small scenes contain millions of Gaussians
+Abbreviated paper title
+7
+Fig. 4: We sort the Gaussians into a 2D grid with an iterative approach. Gaussians
+are assigned to the position matching closest to a smoothed version of the grid. With
+increasing iterations, we decrease the kernel size and sigma of the 2D gaussian filter.
+across multiple dimensions. To address this, we combine and enhance concepts
+from existing sorting methods discussed in Section 2.2. Our aim is to handle
+the increased data volume and complexity efficiently, while ensuring that regular sorting of Gaussian data during training does not negatively affect training
+time. We call our newly developed algorithm Parallel Linear Assignment Sorting
+(PLAS).
+Our strategy involves an approximation approach to the highly complex assignment problem, inspired by the principles of the Fast Linear Assignment
+Sorting (FLAS) algorithm [2]. We aim to find an optimal balance between computational efficiency and maintaining the accuracy of the spatial relationships
+among the Gaussian attributes. The parallel assignment process is visualized
+with random RGB colors in Figure 4: We initialize our grids by mapping the
+Gaussians to random positions to avoid getting stuck in a local minimum. Subsequently, we perform a low-pass filtering operation on the grid to construct an
+idealized target grid, and re-assign all elements to their best-matching positions
+regarding the smooth target. This process is repeated while decreasing the filter
+size, gradually sorting the grid.
+For each re-assignment, the grid is divided into multiple blocks, which are
+processed independently. The block size β is set as β = ϕ + 1, where ϕ is the
+radius of the Gaussian blur applied to compute the target. We do not create
+blocks smaller than β = 16, as tiny blocks inhibit efficient parallelization. To be
+able to sort across block borders and to cover all borders of the grid when not
+aligned at multiples of the current block size, we shift all blocks by a random
+∆y and ∆x before starting re-assignment.
+After each block-wise linear assignment, we measure the mean L2 distance
+between sorted grid and target grid and compare it to its previous value. If it
+has improved by less than 0.01%, we start with a new random block position.
+When the assignment with the new block positions does not improve the distance
+further (using the same threshold), the radius is reduced by applying ϕ = 0.95ϕ.
+8
+W. Morgenstern et al.
+Fig. 5: All values within each sub-block of the 2D grid are re-assigned in the same
+step. The elements from the block are split into randomly assigned, non-overlapping
+groups of 4. Out of the 24 possible permutations for each 4 elements, the positions that
+have the lowest total distance to the smoothed grid target are chosen.
+We start with a radius ϕ = w2 − 1, where w is the total grid width, and we
+finish the work when the radius value would fall below 1, and the sorting has
+converged.
+Blockwise Linear Assignment: As traditional sorting algorithms do not map
+well to GPU execution, we perform the assignment by swapping four elements
+at a time, as done in Self-Organizing Structured Maps [36]. The groups of four
+are chosen from a random permutation of all elements from a block, using each
+element only once. The random grouping is important for pairing up elements
+with possible exchange targets from different areas within the block. All blocks
+are processed in parallel, and use the same permutation for the grouping. Finally, the new assignment for the groups of four employs a brute-force approach,
+iterating through the cost for all 24 possible permutations to find the optimal
+arrangement of elements. A single re-assignment is visualized in Figure 5.
+Organizing Gaussians into a 2D Grid: The presented algorithm is implemented highly parallel on the GPU, and will organize millions of Gaussians in a
+few seconds. In our application, we normalize all attributes of the Gaussians (coordinates, scale, etc.) independently to the range [0, 1] and then scale them with
+individual weights before calculating the distance of the possible re-assignments.
+We use the activated values for all attributes (e.g. exponentially activated scale),
+as they would be seen by the renderer. At the start of the training, we sort once,
+and continue sorting with each densification step. As the number of Gaussians
+grows over time, so will the the size of the grid. We find the largest square grid
+size that can be completely filled with Gaussians for simplicity, and prune the
+Gaussians with the lowest opacity values that will not fit.
+3.2
+Smoothness Regularization
+2D image compression methods work best if the content exhibits little noise
+and shows smooth structures that can be accurately predicted from neighboring
+values or represented by only a few transform coefficients. To further enforce
+such features in our 2D attribute grids, we employ a smoothness regularization
+on the sorted Gaussians during the training for scene optimization. Here, we
+exploit the fact that different Gaussian configurations can lead to similar visual
+quality while varying in local 2D grid smoothness.
+Abbreviated paper title
+9
+For the regularization, we first create a blurred and thus smoother version
+of the 2D grid by applying a 2D Gaussian filter on all attribute channels. Deviations of the current Gaussian parameters at an original 2D grid position from
+those of the smoothed grid form the additional smoothness loss for training.
+For comparison, we select a Huber loss, as it is less sensitive to outliers than
+MSE. This has shown to improve the compression rate. We add the loss of the
+smoothness regularization to the loss of the 3D Gaussian Splatting algorithm
+using a weight λ. As we propagate the gradient of the smoothness regularization
+through the Gaussian renderer during training, we specifically enforce the 3D
+Gaussian Splatting optimization process to prefer Gaussians that improve the
+quality of the rendering while also considering the respective local smoothness.
+This differentiates our method from compression methods that focus on reducing
+existing data in a pure post-processing step. Instead, we manipulate the data
+during creation to achieve high compression and high visual quality afterwards.
+3.3
+Coordinate space contraction
+We introduce an additional exponential activation for the coordinates x used
+during training, allowing for more relative precision in coordinates in the center
+of the scene:
+x = sign(xlog ) × (exp(|xlog |) − 1)
+(1)
+Some NeRF implementations have used space contraction for unbounded
+scenes, notably Mip-NeRF 360 [1]. We have chosen to use this simpler logarithmic contraction function, which is easily invertible, and in design closer to the
+activation functions for scale and opacity used in 3DGS. It supports unbounded
+values, both negative and positive, as well as 0, all of which are required for the
+cartesian coordinates.
+3.4
+Quantization & Compression
+Once training has finished, we can use off-the-shelf image compression methods
+to store the data on disk. We store the un-activated Gaussian parameters, retaining the activation methods from 3DGS: sigmoid actiation for opacity and
+exponential activation for the scale, and applying our own logarithmic space
+contraction method (see Section 3.3).
+We clip the RGB values (DC values of the spherical harmonics) to the range
+[−2, 4]. Opacity values are clipped to the range [−6, 12], non-DC SH features
+to [−1, 1], rotations to [−1, 2]. These ranges are chosen to cover the 1st to 99th
+percentile of these values across all models from the 360 dataset. All but the
+scaling values are then normalized to the range [0, 1].
+We quantize the different attributes by rounding them to the closest value of a
+linear range of q total values, with qcoords = 214 , qscale = qopacity = qrotation = 26
+and qSH_rest = 25 . We compress the RGB grid with lossy JPEG XL, as an 8-Bit
+image with a quality level of 100. All other attributes are stored as lossless JPEG
+10
+W. Morgenstern et al.
+XL. Our method is not restricted to this particular codec, but could also be used
+with other, existing 2D coding techniques.
+4
+Evaluation
+In the following, we will perform several experiments to compare the quality
+and storage size to state-of-the-art 3D scene representation methods. Our experiments are based off the official 3DGS implementation on GitHub3 . The parallel sorting is implemented in PyTorch and also uses the CUDA backend. An
+evaluation on the runtime performance of the sorting algorithm is given in the
+supplementary material. For our comparisons to prior methods, we select three
+real-world 3D scene reconstruction datasets: Mip-NeRF360, Tanks&Temples and
+Deep Blending and a synthetic dataset: Synthetic-NeRF.
+Dataset
+Mip-NeRF360
+Tanks&Temples
+Deep Blending
+Synthetic-NeRF
+Method/Metric PSNR↑ LPIPS↓ Size↓ PSNR↑ LPIPS↓ Size↓ PSNR↑ LPIPS↓ Size↓ PSNR↑ LPIPS↓ Size
+Plenoxels †
+23.08 0.463 2100 21.08 0.379 2300 23.06 0.510 2700 31.76
+M-NeRF360 † 27.69 0.237 8.6 22.22 0.257 8.6 29.40 0.245 8.6 33.09
+25.30 0.371
+13 21.72 0.330
+13 23.62 0.423
+13 33.18
+INGP-Base †
+INGP-Big †
+25.59 0.331
+48 21.92 0.305
+48 24.96 0.390
+48
+VQ-TensoRF †
+28.20
+3.3
+32.86
+3.6
+3DGS
+27.55 0.222 785 25.54 0.201 454 30.07 0.248 699 33.88 0.031 71.6
+3DGS w/o SH 26.94 0.234 212 25.10 0.210 122 30.24 0.249 191 32.06 0.039 19.4
+Ours
+27.64 0.220 40.3 25.63 0.208 21.4 30.35 0.258 16.8 33.70 0.031 4.1
+Ours w/o SH 27.02 0.232 16.7 25.27 0.217 8.2 30.50 0.261 5.5 31.75 0.040 2.0
+Table 1: A comparison of our method to the default 3DGS with and without spherical
+harmonics (SH) and prior NeRF-based renderer. All sizes are in MB. Results with a †
+are directly copied from [15, 21]. Results for SSIM are included in the supplementary
+material.
+Quantitative results: In Table 1, we compare our method to the default 3D
+Gaussian Splatting algorithm and prior NeRF-based 3D reconstruction methods, reporting the standard PSNR and L-PIPS metrics. Variants marked w/o
+SH are using only the DC part of the spherical harmonics to provide color on
+the Gaussian Splats, and deactivating any view-dependent effects (higher-level
+spherical harmonics).
+We demonstrate that we reduce the average storage size by a factor of 17x to
+42x (depending on the dataset), compared with 3DGS [15], without sacrificing
+visual quality. The highest reduction of 41.6x is observed on the Deep Blending dataset. Training our method with spherical harmonics deactivated yields a
+reduction factor of 127x over vanilla 3DGS while improving in PSNR.
+For some datasets, compared to Mip-NeRF360 [1] and VQ-TensoRF [21], we
+achieve a slightly higher PSNR and slightly lower L-PIPS, but at the same time
+allow for real time rendering and fast training, given the efficient rasterization
+algorithm of 3DGS [15]. Additionally, while Mip-NeRF360 trains one scene for
+several hours, our method only uses 10 to 30 minutes. Most notably, we achieve
+3
+https://github.com/graphdeco-inria/gaussian-splatting
+Abbreviated paper title
+11
+the same training time as 3DGS, even though our method brings some computational overhead compared to the default 3DGS, arising from the periodic sorting
+of Gaussians and the necessity to blur grids for computing the neighbor loss.
+This is due to our parameter configuration enforcing the optimization process to
+create a considerably smaller number of Gaussians. For example, for the Truck
+dataset, our method creates 1.55M Gaussians, whereas the default 3DGS creates 2.58M. For the same reason of the reduced number of Gaussians, our scenes
+render much faster in the 3DGS viewer than the original models. The vanilla
+Truck with 2.58M Gaussians renders at 385 fps with the default settings on the
+same GPU, while our scene with 1.55M Gaussians renders at 515 fps with better
+visual quality.
+Fig. 6: A qualitative comparison across example scenes from all four datasets.
+Qualitative results: The results of the metrics suggest that the rendering quality of our method is very similar to the vanilla 3DGS. This is also demonstrated
+in figure 6, where we directly compare the renderings from different datasets side
+by side. Across all examples we observe very similar quality compared to vanilla
+3DGS. This underlines that our method is able to maintain a high rendering
+quality, while only using a fraction of the storage size.
+Figure 7 displays examples of the sorted 2D grids during the training process.
+Specifically, we show the 2D RGB color grids for thekitchen dataset. We observe
+that the colors of the scenes organize themselves into clusters of similar colors.
+The grids, however, do not appear to be more organized with more iterations.
+12
+W. Morgenstern et al.
+This has two reasons. Firstly, the number of Gaussians grows substantially during
+the training, posing an increasingly more difficult sorting task. And secondly, as
+our method has to sort all attributes at once using the same permutation, isolated
+features, such as the color cannot be organized perfectly.
+Fig. 7: Resulting 2D attribute grids for the color. Until iteration 15000, the number
+of Gaussians grow from about 100k up to 1.5 million.
+4.1
+Smoothness Regularization
+The magnitude of the smoothness regularization λ decides the size of the gradient
+for local smoothness in the 2D attribute grids in relation to the size of the
+gradient of the Gaussian training algorithm. To find a good balance between
+both optimization targets, we tested a series of parameters for λ, see table 2.
+As expected, lower magnitudes for λ result in higher rendering quality, but also
+larger storage size.
+λ PSNR Size in MB
+0.01 24.39
+18.02
+0.05 24.48
+18.35
+0.1 24.18
+17.50
+0.5 24.40
+14.62
+1.0 24.24
+12.43
+1.5 24.02
+10.73
+w/ SH
+w/o SH
+Method
+PSNR Size PSNR Size
+Ours
+25.37 34.3 24.90 17.3
+3DGS Our Compression 21.98 71.7 20.37 44.5
+3DGS .ply
+25.44 624.7 24.89 174.0
+3DGS .ply.zip
+25.44 548.2 24.89 130.8
+Blog Post [28]
+25.05 41.5
+-
+Table 2: Testing different Table 3: Comparison of our method to other 3DGS commagnitudes for the neigh- pression approaches, calculated using the Truck scene from
+bor loss λ.
+Tanks&Temples. Size is in MB.
+4.2
+Synergy of Sorting and Compression
+To validate the effectiveness of the sorting and smoothing during the training, we
+measure the storage size and PSNR of a model that is only compressed after the
+vanilla 3DGS training. The result is shown in table 3 3DGS Our Compression.
+We observe a much lower PSNR compared to our result with sorting and smoothing activated. This underlines that the local smoothness, caused by sorting and
+smoothing, plays a significant role for the success of our approach.
+To put our approach into relation with available compression methods we
+perform two further comparisons in Table 3. Firstly, we simply compress the
+Abbreviated paper title
+13
+3DGS .ply file with a zip compression. And secondly, we compare the results of
+the method developed in the blog post series Making Gaussian Splats smaller
+[28]. As a result, we observe that our method outperforms the .zip compression
+substantially, reducing the storage size by a factor of 16x. For the comparison
+with Making Gaussian Splats smaller, the results are closer, nevertheless, our
+method achieves both higher PSNR and lower storage size.
+It may be possible to encode the Gaussian Splats with conventional point
+cloud compression methods. The popular DRACO algorithm [10] supports encoding additional attributes on top of position and color in theory, but its implementations do not [22]. Thus, a direct comparison is unfortunately not possible.
+Our method’s strength lies in adapting the representation during training to be
+well compressible (see Section 4.2). Using any post-training compression method,
+like DRACO, cannot make use of these gains.
+Name PSNR ↑ SSIM ↑ LPIPS ↓ Size (MB)
+PLY 25.41 0.880
+0.152
+104.89
+NPZ 25.41 0.880
+0.152
+76.10
+JPEG XL lossless 25.41 0.880
+0.152
+66.05
+PNG 16 24.08 0.873
+0.157
+37.00
+EXR 25.36 0.878
+0.154
+30.56
+JPEG XL quantized 25.14 0.870
+0.161
+11.86
+Table 4: The Truck scene, trained with our method, compressed in different formats.
+Marked in bold is the compression method used in our experiments for all datasets.
+4.3
+Choice of compression format
+Table 4 contrasts different compression methods on the Truck scene, without using spherical harmonics. The scene was trained with our parameters and sorted
+into 2D grids. Then we sampled different image and array encoding formats,
+measuring rendering quality and file size.Of the lossless formats, JPEG XL provides the smallest files. Notably, the PLY file when trained with our method
+is of smaller size and of higher quality than training with the default 3DGS
+parameters (which yields 24.90 PSNR at 174 MB). NPZ is using NumPy’s
+save_compressed method to directly store the tensors. JXL ll stores all tensors as lossless JPEG XL images.
+By introducing lossy compression, the file size can be further decreased, with
+different tradeoffs between rendering quality and storage space used. PNG 16
+truncates the value below the 1st and above the 99th percentile (over all 360
+datasets), then normalizes the data to the [0, 1] range and stores them as 32-Bit
+PNGs. EXR stores the values as 32-Bit OpenEXR files with zip compression.
+We have found using JPEG XL with different levels of quantization provides
+the best tradeoff. Even though we are not using spherical harmonics, our chosen compression method is providing close to the same quality as 3DGS with
+spherical harmonics (25.44 PSNR at 615 MB), at a compression rate of 52x.
+14
+W. Morgenstern et al.
+4.4
+Features to 2D Grid
+To convert the millions of Gaussians into a 2D grid, we reshape the list of
+features into a square grid. As the number of Gaussians grows over time from
+the densification process, so will the the size of the grid. For simplicity, we find
+the largest square grid size that can be completely filled with Gaussians, and
+discard the Gaussians with the lowest opacity values that will not fit. Losing up
+to one row and one column of Gaussians does not meaningfully alter the scene:
+In figure 8, we show that the PSNR of a rendered scene is not affected when
+removing up to 30% of Gaussians with the lowest opacity. In contrast, removing
+Gaussians with small scaling, affects the quality of the scene considerably more.
+Fig. 8: Removing the first % of Gaussians, ordered by scaling and opacity from the
+lowest to the highest.
+5
+Conclusion
+We have presented an optimized representation of 3D Gaussian Splatting, targeting efficient compression and storage. This is achieved by a novel, highly
+parallelized sorting strategy that smoothly arranges the high dimensional, initially unordered Gaussian parameter sets in a 2D grid, which can be encoded
+by standard image coding techniques like JPEG XL. In addition, an optimized
+training scheme for the 3D Gaussians with a new smoothness loss leads to splat
+configurations with even higher smoothness in the 2D grid, while still preserving
+the original accuracy of the 3D scene. In spite of the proposed extensions, training time only negligibly changes compared to the original 3DGS approach. With
+the proposed solution, we can reduce the data down to 2% of the original size
+at the same visual quality, enabling the efficient handling of large 3DGS scenes
+in practical applications.
+In future work, we aim to further enhance compression efficiency. Besides an
+adapted weighting of the individual parameters of the smoothness loss, better
+and less correlated representations for rotations, shape and spherical harmonics
+will be investigated. To achieve even better results, it would be interesting to
+perform the quantization during training, which is currently happening only once
+before the compression. The main focus, however, will be on the extension to 4D
+scenes with consideration of temporal dependencies, supporting the strength of
+3D Gaussians in the representation of dynamic scenes.
+Abbreviated paper title
+15
+Acknowledgements
+This work has partly been funded, by the German Federal Ministry for Economic
+Affairs and Climate Action (ToHyVe, grant no. 01MT22002A) and the German
+Research Foundation (3DIL, grant no. 502864329).
+References
+1. Barron, J.T., Mildenhall, B., Verbin, D., Srinivasan, P.P., Hedman, P.: Mip-NeRF
+360: Unbounded anti-aliased neural radiance fields. Proc. IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR) pp. 5460–5469 (2022)
+2. Barthel, K.U., Hezel, N., Jung, K., Schall, K.: Improved evaluation and generation
+of grid layouts using distance preservation quality and linear assignment sorting.
+Computer Graphics Forum 42(1), 261–276 (2023). https://doi.org/10.1111/
+cgf.14718
+3. Chaurasia, G., Duchene, S., Sorkine-Hornung, O., Drettakis, G.: Depth synthesis
+and local warps for plausible image-based navigation. ACM Trans. on Graphics
+32(3) (jul 2013)
+4. Chen, A., Xu, Z., Geiger, A., Yu, J., Su, H.: TensoRF: Tensorial radiance fields.
+In: Proc. European Conference on Computer Vision (ECCV) (2022)
+5. Dellaert, F., Seitz, S., Thorpe, C., Thrun, S.: Structure from motion without correspondence. In: Proc. IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR). vol. 2, pp. 557–564 (2000)
+6. Deng, C.L., Tartaglione, E.: Compressing explicit voxel grid representations: Fast
+NeRFs become also small. In: Proceedings of the IEEE/CVF Winter Conference
+on Applications of Computer Vision (WACV). pp. 1236–1245 (January 2023)
+7. Fridovich-Keil, S., Yu, A., Tancik, M., Chen, Q., Recht, B., Kanazawa, A.: Plenoxels: Radiance fields without neural networks. In: Proc. IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR). pp. 5491–5500 (2022)
+8. Garbin, S.J., Kowalski, M., Johnson, M., Shotton, J., Valentin, J.: FastNeRF: Highfidelity neural rendering at 200fps. In: Proc. IEEE/CVF International Conference
+on Computer Vision (ICCV). pp. 14326–14335 (2021)
+9. Goesele, M., Snavely, N., Curless, B., Hoppe, H., Seitz, S.M.: Multi-view stereo
+for community photo collections. In: Proc. IEEE/CVF International Conference
+on Computer Vision (ICCV). pp. 1–8 (2007)
+10. Google: DRACO. https://google.github.io/draco/, accessed: 2024-03-07
+11. Gortler, S.J., Grzeszczuk, R., Szeliski, R., Cohen, M.F.: The lumigraph. In: Proc.
+of the 23rd Annual Conference on Computer Graphics and Interactive Techniques
+(SIGGRAPH). p. 43–54. SIGGRAPH ’96 (1996)
+12. Graziosi, D., Nakagami, O., Kuma, S., Zaghetto, A., Suzuki, T., Tabatabai, A.:
+An overview of ongoing point cloud compression standardization activities: videobased (v-pcc) and geometry-based (g-pcc). APSIPA Trans. on Signal and Information Processing 9 (april 2020)
+13. Hedman, P., Srinivasan, P.P., Mildenhall, B., Barron, J.T., Debevec, P.: Baking
+neural radiance fields for real-time view synthesis. In: Proc. IEEE/CVF International Conference on Computer Vision (ICCV). pp. 5855–5864 (oct 2021)
+14. Karnewar, A., Ritschel, T., Wang, O., Mitra, N.: ReLU Fields: The little nonlinearity that could. ACM Trans. on Graphics (2022)
+16
+W. Morgenstern et al.
+15. Kerbl, B., Kopanas, G., Leimkuehler, T., Drettakis, G.: 3d gaussian splatting for
+real-time radiance field rendering. ACM Trans. on Graphics 42(4) (jul 2023)
+16. Kohonen, T.: Self-Organized Formation of Topologically Correct Feature Maps.
+Biological Cybernetics 43, 59–69 (1982)
+17. Kohonen, T.: Essentials of the self-organizing map. Neural Networks 37, 52–65
+(2013)
+18. Kopanas, G., Philip, J., Leimkühler, T., Drettakis, G.: Point-based neural rendering with per-view optimization. Computer Graphics Forum (Proc. of the Eurographics Symposium on Rendering) 40(4) (June 2021)
+19. Lee, Y., Yang, L., Fan, D.: Mf-nerf: Memory efficient nerf with mixed-feature
+hash table. ArXiv abs/2304.12587 (2023), https://api.semanticscholar.org/
+CorpusID:258352440
+20. Levoy, M., Hanrahan, P.: Light field rendering. In: Proc. of the 23rd Annual Conference on Computer Graphics and Interactive Techniques (SIGGRAPH). p. 31–42
+(1996)
+21. Li, L., Shen, Z., Wang, Z., Shen, L., Bo, L.: Compressing volumetric radiance
+fields to 1 mb. In: Proc. IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR). pp. 4222–4231. IEEE Computer Society, Los Alamitos, CA,
+USA (jun 2023). https://doi.org/10.1109/CVPR52729.2023.00411
+22. libing64: Issue 757: Generic data gets lost after compression and decompression.
+https://github.com/google/draco/issues/757 (2021), accessed: 2024-03-07
+23. Liu, L., Gu, J., Lin, K.Z., Chua, T.S., Theobalt, C.: Neural sparse voxel fields.
+NeurIPS (2020)
+24. Luiten, J., Kopanas, G., Leibe, B., Ramanan, D.: Dynamic 3d gaussians: Tracking
+by persistent dynamic view synthesis. In: Proc. International Conference on 3D
+Vision (3DV) (2024)
+25. Martin-Brualla, R., Radwan, N., Sajjadi, M.S.M., Barron, J.T., Dosovitskiy, A.,
+Duckworth, D.: NeRF in the Wild: Neural Radiance Fields for Unconstrained
+Photo Collections. In: Proc. IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) (2021)
+26. Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng,
+R.: Nerf: Representing scenes as neural radiance fields for view synthesis. In:
+Proc. European Conference on Computer Vision (ECCV) (2020)
+27. Müller, T., Evans, A., Schied, C., Keller, A.: Instant neural graphics primitives with
+a multiresolution hash encoding. ACM Trans. on Graphics 41(4), 102:1–102:15 (Jul
+2022)
+28. Pranckevičius, A.: Making gaussian splats smaller (Sep 2023), https://arasp.info/blog/2023/09/13/Making-Gaussian-Splats-smaller/
+29. Quach, M., Pang, J., Tian, D., Valenzise, G., Dufaux, F.: Survey on deep learningbased point cloud compression. Frontiers in Signal Processing (feb 2022)
+30. Reiser, C., Szeliski, R., Verbin, D., Srinivasan, P., Mildenhall, B., Geiger, A., Barron, J., Hedman, P.: MERF: Memory-efficient radiance fields for real-time view
+synthesis in unbounded scenes. ACM Trans. on Graphics 42(4) (jul 2023)
+31. Rückert, D., Franke, L., Stamminger, M.: ADOP: Approximate differentiable onepixel point rendering. ACM Trans. on Graphics 41(4) (jul 2022)
+32. Seitz, S., Dyer, C.: Photorealistic scene reconstruction by voxel coloring. International Journal of Computer Vision 35(2) (1999)
+33. Sitzmann, V., Thies, J., Heide, F., Nießner, M., Wetzstein, G., Zollhöfer, M.: Deepvoxels: Learning persistent 3d feature embeddings. In: Proc. IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) (2019)
+Abbreviated paper title
+17
+34. Snavely, N., Seitz, S.M., Szeliski, R.: Photo tourism: Exploring photo collections
+in 3d. ACM Trans. on Graphics 25(3), 835–846 (jul 2006)
+35. Strong, G., Gong, M.: Self-sorting map: An efficient algorithm for presenting multimedia data in structured layouts. IEEE Trans. Multim. 16(4), 1045–1058 (2014)
+36. Strong, G., Jensen, R., Gong, M., Elster, A.C.: Organizing visual data in structured layout by maximizing similarity-proximity correlation. In: Bebis, G., Boyle,
+R., Parvin, B., Koracin, D., Li, B., Porikli, F., Zordan, V.B., Klosowski, J.T.,
+Coquillart, S., Luo, X., Chen, M., Gotz, D. (eds.) ISVC (2). Lecture Notes in
+Computer Science, vol. 8034, pp. 703–713. Springer (2013)
+37. Sun, C., Sun, M., Chen, H.: Direct voxel grid optimization: Super-fast convergence
+for radiance fields reconstruction. In: Proc. IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR) (2022)
+38. Takikawa, T., Evans, A., Tremblay, J., Müller, T., McGuire, M., Jacobson, A.,
+Fidler, S.: Variable bitrate neural fields. ACM Trans. on Graphics (2022)
+39. Tewari, A., Thies, J., Mildenhall, B., Srinivasan, P., Tretschk, E., Yifan, W., Lassner, C., Sitzmann, V., Martin-Brualla, R., Lombardi, S., Simon, T., Theobalt, C.,
+Nießner, M., Barron, J.T., Wetzstein, G., Zollhöfer, M., Golyanik, V.: Advances in
+Neural Rendering. Computer Graphics Forum (EG STAR 2022) (2022)
+40. Yu, A., Li, R., Tancik, M., Li, H., Ng, R., Kanazawa, A.: Plenoctrees for real-time
+rendering of neural radiance fields. In: Proc. IEEE/CVF International Conference
+on Computer Vision (ICCV). pp. 5732–5741 (oct 2021)
+41. Zhang, J., Huang, J., Cai, B., Fu, H., Gong, M., Wang, C., Wang, J., Luo, H., Jia,
+R., Zhao, B., Tang, X.: Digging into radiance grid for real-time view synthesis with
+detail preservation. In: Proc. European Conference on Computer Vision (ECCV).
+p. 724–740 (2022)
+42. Zhong, H., Zhang, J., Liao, J.: VQ-NeRF: Neural reflectance decomposition and
+editing with vector quantization (2023)
+Appendix
+A
+Results for SSIM
+In addition to the results from table 1, we also measure the structural similarity
+index measure (SSIM) in table 1. These results correlate with the PSNR results
+from table 1.
+Dataset
+Mip-NeRF360 Tanks&Temples Deep Blending Synthetic-NeRF
+Method/Metric SSIM↑ Size (MB) SSIM↑ Size (MB) SSIM↑ Size (MB) SSIM↑ Size (MB)
+Plenoxels †
+0.626
+2100
+0.719
+2300
+0.795
+2700
+8.6
+0.759
+8.6
+0.901
+8.6
+M-NeRF360 † 0.792
+INGP-Base †
+0.671
+13
+0.723
+13
+0.797
+13
+0.699
+48
+0.745
+48
+0.817
+48
+INGP-Big †
+VQ-TensoRF †
+0.913
+3.3
+0.960
+3.6
+3DGS
+0.814
+785
+0.866
+454
+0.907
+699
+0.970
+71.6
+212
+0.859
+122
+0.908
+191
+0.962
+19.4
+3DGS w/o SH 0.803
+Ours
+0.814
+40.3
+0.864
+21.4
+0.909
+16.8
+0.969
+4.1
+Ours w/o SH
+0.803
+16.7
+0.857
+8.2
+0.908
+5.5
+0.961
+2.0
+Table 1: A comparison over structural similarity index measure (SSIM) between our
+method, the default 3DGS model and prior NeRF-based methods. Results with a † are
+directly copied from [15, 21]. Our method achieves close to the same SSIM as vanilla
+3DGS, while reducing size with a factor of 17x to 42x, depending on the dataset.
+B
+Parameter Selection
+The 3D Gaussian Splatting (3DGS) algorithm involves many different training
+parameters. In the following, we will give a brief overview on these parameters
+and highlight those we changed for our new training algorithm.
+B.1
+Densification
+To minimize the sorting time during training, we make minimal changes to the
+default parameters of 3DGS, i.e. we reduce the number of Gaussians that are
+created during optimization. To achieve this, we modify the following five parameters:
+– Densification interval ∈ N: Determines how often the densification process
+executed. A low value corresponds to frequent densification, which results in
+a large amount of Gaussians.
+Appendix
+19
+– Densify grad threshold ∈ R: All Gaussians with a larger accumulated gradient
+for the xyz position are split and cloned. A low threshold results in more
+Gaussians generated during training.
+– Densify min opacity ∈ R: This threshold filters all Gaussians with smaller
+opacity during densification. A high value leads to fewer Gaussians.
+– Opacity reset interval ∈ N: Every x steps, the opacity of all Gaussians is set
+to 0.01.
+– Percent dense ∈ R: During the densification process, large Gaussians are
+split into two smaller copies, with 80% of the original size each, while small
+Gaussians are cloned identically. The percent dense parameter specifies the
+threshold at which a Gaussian is classified as small or large. The value, which
+is set between 0 and 1, is multiplied by the extend of the scene and used as
+comparison.
+Parameter / Method
+3DGS
+Ours
+3DGS
+Densification interval
+100
+1000
+Densify grad threshold 2 × 10−4 7 × 10−5
+Densify min opacity
+0.005
+0.1
+Opacity reset interval
+3000
+∞
+Percent dense
+0.01
+0.1
+Smoothness Reg.
+Kernel size
+5
+Sigma
+3
+Overall multiplier λ
+1.0
+Weights
+Position
+0.0
+Color (SH DC)
+0.0
+Opacity
+0.09
+Scaling
+0.0
+Rotation
+0.91
+Sph. Harmonics (rest)
+0.0
+Sorting weights
+Position
+1.0
+Color (SH DC)
+1.0
+Opacity
+0.0
+Scaling
+1.0
+Rotation
+0.0
+Sph. Harmonics (rest)
+0.0
+Table 2: A detailed list of our training parameters compared to the default 3DGS training.
+An opacity reset interval of ∞ denotes that we
+deactivate the opacity reset.
+Table 3: By changing 3DGS default parameters that control the
+densification step, we observe a different number of Gaussians during
+the training. Our method creates
+less Gaussian splats and does not
+apply regular pruning, which happens every 3k steps with the default parameters.
+20
+B.2
+Smoothness Regulation
+The smoothness regularization first blurs the 2D attribute grids and then computes an error term with a Huber loss. This results in new parameters to tune:
+– Kernel size ∈ N: The size of the blur filter. A higher value leads to smoother
+target images.
+– Sigma ∈ R: The standard deviation of the Gaussian blur.
+– Overall multiplier λ ∈ R: A multiplier scaling the loss of the Smoothness
+Regularization before adding it to the loss of 3DGS.
+– Separate multiplier ∈ R: A loss scalar for each of the five 2D attribute grids
+(position, color, opacity, scaling and rotation).
+B.3
+Sorting
+The sorting algorithm that takes place after every densification can be adjusted
+with separate multipliers for each of the 3DGS attributes: position, spherical
+harmonics (DC and rest), opacity, scaling and rotation. In Table 2, we contrast
+the vanilla 3DGS parameters with the ones we chose.
+B.4
+Hyperparameter sensitivity
+We found our current sets of parameters through an iterative search, optimizing
+with the goal to stay close to vanilla 3DGS quality, while minimizing file size.
+Our guideline for the found parameters is the following: position, color and scale
+have a large effect on the PSNR, thus they were selected as the sorting keys.
+Opacity and rotation have a much smaller effect. Therefore, they are smoothed
+in their neighborhoods instead (with neighbors defined by position/color/scale),
+to be compressible.
+We applied the same parameter sets for the evaluation across all datasets,
+including synthetic ones, demonstrating their generalizability. Superior configurations might be uncovered through an exhaustive parameter sweep. We think
+performing this computationally expensive work is best done in future, after
+choosing a more compact representation than the high-dimensional spherical
+harmonics attributes, for view-dependent effects.
+Appendix
+C
+21
+Sorting performance
+In this section, we provide additional measurements of the performance of our
+novel sorting algorithm.
+100
+5
+6
+Break threshold
+10 7
+10 6
+10 5
+10 4
+10 3
+10 2
+FLAS
+7
+8
+1
+10
+Duration [s]
+100
+Fig. 1: Behavior of the sorting algorithm
+under different break thresholds. Decreasing the relative L2 threshold trades off
+additional sorting quality for longer runtime. These values were measured with
+an NVidia RTX 4090 on a random
+512x512x3 grid. In all our training experiments, we fixed this parameter to 10−4 .
+Duration [s]
+Variance of absolute differences (VAD)
+1000
+4
+10
+1
+32
+128
+512
+Side length
+2048
+8192
+Fig. 2: Runtime of the sorting algorithm
+over the side length of the 2D grid. Here
+measured using 3 layers for the grids,
+while there may be up to 14 when sorting Gaussians.
+To demonstrate the effectiveness of our parallel sorting algorithm, we compare it to the state of the art in quality, FLAS [2]. An implementation of SelfSorting Maps [36] was not available to us. We measure runtime and, to estimate
+the quality of the sort, the variance of the absolute differences (VAD) between
+all neighboring values, over all channels. Sorting a random 512x512x3 grid on
+an AMD Ryzen Threadripper PRO 5955WX CPU with FLAS takes 131s and
+achieves a VAD of 3.53. Our algorithm running on an Nvidia RTX 4090 finishes
+in 5.7 seconds after 8015 reorders with a VAD of 4.02 (the shuffled data has a
+VAD of 3607.45). We therefore attain a sorting quality comparable to that of
+FLAS but with a significantly reduced runtime, thanks to our algorithm’s high
+degree of parallelism.
+The parameter that has the largest influence on the grid sorting performance
+is the threshold, which decides whether the relative reduction in L2 distance
+between two iterations should stop sorting with the current configuration, and
+potentially continue with the next permutation or next lower level. Decreasing
+it leads to a higher sorting quality, but the increase in iterations takes additional
+runtime. In Figure 1, we have plotted the sorting quality over the total runtime.
+In Figure 2, we show the runtime performance of the sorting algorithm depending on the input grid size. With the chosen parameters, sorting will usually
+22
+take less than 10 seconds during training. The highest number of Gaussians of
+any of our models over all datasets is the Garden scene with 4.37M Gaussians,
+which requires a grid of a side length of 2091. Thus, even the largest of scenes
+in the used datasets can be sorted in well below a minute.
+Table 3 suggests that the visual quality is drastically reduced when only
+applying sorting and compression after training a vanilla 3D Gaussian Splatting
+model. This can also be observed visually in Figure 3. This underlines that the
+smoothing regularization, which influences the 3DGS training, plays a significant
+role for compressing the attributes efficiently.
+Fig. 3: A comparison between the rendering quality when only applying our compression method to the vanilla 3DGS model without smoothing.

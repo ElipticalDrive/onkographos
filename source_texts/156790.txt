@@ -1,0 +1,134 @@
+I have noticed that when the show 3D is enabled the rendering performance is extremely slow on system without GPU (e.g., CPU only nodes on JetStream). 
+I wouldn’t be too surprised if the volume rendering of the source vo…
+
+3D rendering performance without GPU - Support - 3D Slicer Community
+3D rendering performance without GPU
+Support
+muratmaga
+(Murat Maga)
+July 3, 2024, 12:11am
+1
+I have noticed that when the show 3D is enabled the rendering performance is extremely slow on system without GPU (e.g., CPU only nodes on JetStream).
+I wouldn’t be too surprised if the volume rendering of the source volume of the same segmentation didn’t provide decent performance either, but it did. So when volume rendering (in the GPU rendering option, which should be using software rendering) is using about a dozen or more cores, but in the 3D rendering of the segmentation models the utilization is only 200%, meaning it is only using two cores.
+Is this normal, is there a trick to make the segmentation rendering as perfomant as the volume rendering on CPU only systems?
+@pieper @lassoan @jcfr
+lassoan
+(Andras Lasso)
+July 3, 2024, 3:47am
+2
+VTK’s CPU volume renderer has very low resource needs, because it was developed decades ago, when CPUs were really weak. It uses special computation tricks that makes rendering fast and memory-efficient. Since it does not use any GPU at all, it is just as fast on a computer with or without GPU.
+Rendering of polydata does not use the CPU at all when you just rotate the view around (it may use the CPU a bit when there are more layers, depth sorting, etc.). If there is no graphics hardware then a software OpenGL implementation is used, which simulates a GPU in software, which of course is very inefficient.
+If you find that only 1-2 CPU cores are used for surface rendering then you can experiment with options in your software renderer. Maybe threading in your mesa (or other software renderer) is turned off by default.
+muratmaga
+(Murat Maga)
+July 3, 2024, 8:23pm
+3
+Thanks, I tried adjusting the threading settings on the OS (ubuntu) provided mesa, which had no effect.
+I came across this thread from Kitware about OpenSWR being a lot more perfomant for CPU only systems (ParaView/ParaView And Mesa 3D - KitwarePublic).
+But it looks like it needs to be built from scratch…
+muratmaga
+(Murat Maga)
+October 1, 2024, 6:56am
+4
+Following on this: I managed to build the openSWR on a CPU only system (with 16 cores), and run some basic test. I have made large polydata model from MRHead (supersampled it by 0.5 with isotropic scaling).
+When using the Ubuntu 22.04 provided mesa, full 3D view swinging performance of Slicer (latest preview version) was <1 fps. It never utilized over 200% of CPUs (so two cores).
+With the gallium SWR exposed, performance was about 10fps, utilizing 1400-1500% of the CPU (so 14-15 cores).
+lassoan
+(Andras Lasso)
+October 1, 2024, 12:04pm
+5
+Thanks @muratmaga, this is very useful information! Maybe SWR could be bundled with Slicer in standard factory builds (new VTK feature is to allow switching between different OpenGL implementation at runtime).
+Could you share the model so that we can test it on other systems for comparison?
+muratmaga
+(Murat Maga)
+October 1, 2024, 5:57pm
+6
+https://js2.jetstream-cloud.org:8001/swift/v1/SampleData/Segment_1.ply
+muratmaga
+(Murat Maga)
+October 2, 2024, 3:39pm
+7
+One more data point: Volume rendering in a system without a GPU is more performant using GPU raycasting (and SWR driver) than using CPU raycasting. Seems to scale much efficiently.
+This would be great. I am not sure how applicable this would be mac and windows, but on Linux (where it is more likely to get deployed on cloud without GPUs) is going to make a difference.
+lassoan
+(Andras Lasso)
+October 2, 2024, 5:34pm
+8
+When you use SWR, does GPU volume renderer has any of the usual GPU hardware limitations, such as limited amount of GPU RAM, maximum texture size, …? Or if you use SWR then GPU volume renderer can work with volumes of practically unlimited size?
+muratmaga
+(Murat Maga)
+October 2, 2024, 6:25pm
+9
+Yes, it did generate this error with a large volume:
+```
+Switch to module:  "Data"
+Switch to module:  "Volumes"
+ctkRangeWidget::setSingleStep( 100 ) is outside valid bounds
+Switch to module:  "VolumeRendering"
+ERROR: OpenGL MAX_3D_TEXTURE_SIZE is 2048
+Invalid texture dimensions [1948, 1948, 2952]
+```
+I wonder if 3D_TEXTURE_SIZE is a property than be adjusted at the build time, or change in the code. I simply followed the instructions on openSWR page.
+muratmaga
+(Murat Maga)
+October 2, 2024, 6:27pm
+10
+Sounds it should be possible to modify this if your building your own driver:
+I search for 3D_MAX_TEXTURE in the source tree of mesa, and these are the hits:
+```
+./glext.h:84:#define GL_MAX_3D_TEXTURE_SIZE            0x8073
+./glcorearb.h:447:#define GL_MAX_3D_TEXTURE_SIZE            0x8073
+./gl.h:1483:#define GL_MAX_3D_TEXTURE_SIZE			0x8073
+```
+though not sure 0x8073 refers to. Doesn’t correspond to 2048 in hexadecimal.
+muratmaga
+(Murat Maga)
+October 3, 2024, 4:36am
+12
+Making some more progress: I think this is the place to change the limits on 3D texture dimensions SWR_MAX_TEXTURE_3D_LEVELS:
+I changed the value from 12 to 14, assuming it would provide 8K textures size.
+This worked up to a point. I can resample the MRhead to 2560x2560x130 (4.7GB) and it does render. At which point the rendering speed is acceptable (i get around 3fps) and much better than CpuRaycasting, which I can’t even move interactively, and also GPU rendering quality is better.
+GPU Raycasting:
+image1693×973 89.1 KB
+CPU Raycasting:
+image1697×858 77.1 KB
+However, when I go to 2560x2560x270 (~3.8GB) in MRHead, Slicer crashes without an error. This seems related to texture memory limit, more than the dimension, since it works fine when I keep the volume dimensions the same but cast the data type as unsigned char instead of short.
+There is also this SWR_MAX_TEXTURE_SIZE setting which seems relevant:
+I tried modifying it to be 4096^3, but it still doesn’t seem to make a difference.
+This is as far as I can troubleshoot. Someone who know openGL and C++ needs to dig deeper.
+@lassoan @pieper @jcfr
+pieper
+(Steve Pieper (Isomics, Inc.))
+October 3, 2024, 5:08am
+13
+The comment in the code you linked earlier mentions a limit on total size related to the use of signed int and 32 bit offsets (and that the special CPU instructions have a limit) so you may be hitting a wall with this approach.
+Related topics
+Topic
+Replies
+Views
+Activity
+Volume rendering slow in latest nightlies for MacOS
+Development
+21
+1899
+March 16, 2018
+GPU based volume rendering fails if one dimension is more than 2000px
+Support
+33
+2956
+December 16, 2025
+Which current algorithms of Slicer could be improved by GPU use?
+Feature requests
+8
+216
+September 24, 2024
+Volume Rendering CPU VS GPU
+Support
+1
+1015
+February 9, 2021
+Better GPU will benefit or not VR volume rendering
+Support
+64
+2386
+December 29, 2021

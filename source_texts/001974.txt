@@ -1,0 +1,172 @@
+Here's the science bit. Concentrate.. In the last post I gave an overview of my journey through realtime raytracing and how I ended up with a performant technique that worked in a production setting (well, a demo) and was efficient and useful. Now I'm going go into some more technical details about the approaches I…
+
+real time ray tracing part 2. | direct to video
+direct to video
+May 8, 2013
+real time ray tracing part 2.
+Filed under: compute shader, directx 11, ray tracing, realtime rendering — directtovideo @ 1:08 pm
+Here’s the science bit. Concentrate..
+In the last post I gave an overview of my journey through realtime raytracing and how I ended up with a performant technique that worked in a production setting (well, a demo) and was efficient and useful. Now I’m going go into some more technical details about the approaches I tried and ended up using.
+There’s a massive amount of research in raytracing, realtime raytracing, GPU raytracing and so on. Very little of that research ended up with the conclusions I did – discarding the kind of spatial database that’s considered “the way” (i.e. bounding volume hierarchies) and instead using something pretty basic and probably rather inefficient (regular grids / brick maps). I feel that conclusion needs some explanation, so here goes.
+I am not dealing with the “general case” problem that ray tracers usually try and solve. Firstly, my solution was always designed as a hybrid with rasterisation. If a problem can be solved efficiently by rasterisation I don’t need to solve it with ray tracing unless it’s proved that it would work out much better that way. That means I don’t care about ray tracing geometry from the point of view of a pin hole camera: I can just rasterise it instead and render out GBuffers. The only rays I care about are secondary – shadows, occlusion, reflections, refractions – which are much harder to deal with via rasterisation. Secondly I’m able to limit my use case. I don’t need to deal with enormous 10 million poly scenes, patches, heavy instancing and so on. My target is more along the lines of a scene consisting of 50-100,000 triangles – although 5 Faces topped that by some margin in places – and a reasonably enclosed (but not tiny .. see the city in 5 Faces) area. Thirdly I care about data structure generation time. A lot. I have a real time fully dynamic scene which will change every frame, so the data structure needs to be refreshed every frame to keep up. It doesn’t matter if I can trace it in real time if I can’t keep the structure up to date. Forthly I have very limited scope for temporal refinement – I want a dynamic camera and dynamic objects, so stuff can’t just be left to refine for a second or two and keep up. And fifth(ly), I’m willing to sacrifice accuracy & quality for speed, and I’m mainly interested in high value / lower cost effects like reflections rather than a perfect accurate unbiased path trace. So this all forms a slightly different picture to what most ray tracers are aiming for.
+Conventional wisdom says a BVH or kD-Tree will be the most efficient data structure for real time ray tracing – and wise men have said that BVH works best for GPU tracing. But let’s take a look at BVH in my scenario:
+– BVH is slow to build, at least to build well, and building on GPU is still an open area of research.
+– BVH is great at quickly rejecting rays that start at the camera and miss everything. However, I care about secondary rays cast off GBuffers: essentially all my rays start on the surface of a mesh, i.e. at the leaf node of a BVH. I’d need to walk down the BVH all the way to the leaf just to find the cell the ray starts in – let alone where it ends up.
+– BVH traversal is not that kind to the current architecture of GPU shaders. You can either implement the traversal using a stack – in which case you need a bunch of groupshared memory in the shader, which hammers occupancy. Using groupshared, beyond a very low limit, is bad news mmkay? All that 64k of memory is shared between everything you have in flight at once. The more you use, the less in flight. If you’re using a load of groupshared to optimise something you better be smart. Smart enough to beat the GPU’s ability to keep a lot of dumb stuff in flight and switch between it. Fortunately you can implement BVH traversal using a branching linked list instead (pass / fail links) and it becomes a stackless BVH, which works without groupshared.
+But then you hit the other issue: thread divergence. This is a general problem with SIMD ray tracing on CPU and GPU: if rays executed inside one SIMD take different paths through the structure, their execution diverges. One thread can finish while others continue, and you waste resources. Or, one bad ugly ray ends up taking a very long time and the rest of the threads are idle. Or, you have branches in your code to handle different tree paths, and your threads inside a single wavefront end up hitting different branches continually – i.e. you pay the total cost for all of it. Dynamic branches, conditional loops and so on can seriously hurt efficiency for that reason.
+– BVH makes it harder to modify / bend rays in flight. You can’t just keep going where you were in your tree traversal if you modify a ray – you need to go back up to the root to be accurate. Multiple bounces of reflections would mean making new rays.
+All this adds up to BVH not being all that good in my scenario.
+So, what about a really really dumb solution: storing triangle lists in cells in a regular 3D grid? This is generally considered a terrible structure because:
+– You can’t skip free space – you have to step over every cell along the ray to see what it contains; rays take ages to work out they’ve hit nothing. Rays that hit nothing are actually worse than rays that do hit, because they can’t early out.
+– You need a high granularity of cells or you end up with too many triangles in each cell to be efficient, but then you end up making the first problem a lot worse (and needing lots of memory etc).
+However, it has some clear advantages in my case:
+– Ray marching voxels on a GPU is fast. I know because I’ve done it many times before, e.g. for volumetric rendering of smoke. If the voxel field is quite low res – say, 64x64x64 or 128x128x128 – I can march all the way through it in just a few milliseconds.
+– I read up on the DDA algorithm so I know how to ray march through the grid properly, i.e. visit every cell along the ray exactly once 🙂
+– I can build them really really fast, even with lots of triangles to deal with. To put a triangle mesh into a voxel grid all I have to do is render the mesh with a geometry shader, pass the triangle to each 2D slice it intersects, then use a UAV containing a linked list per cell to push out the triangle index on to the list for each intersected cell.
+– If the scene isn’t too high poly and spread out kindly, I don’t have too many triangles per cell so it intersects fast.
+– There’s hardly any branches or divergence in the shader except when choosing to check triangles or not. All I’m doing is stepping to next cell, checking contents, tracing triangles if they exist, stepping to next cell. If the ray exits the grid or hits, the thread goes idle. There’s no groupshared memory requirement and low register usage, so lots of wavefronts can be in flight to switch between and eat up cycles when I’m waiting for memory accesses and so on.
+– It’s easy to bounce a ray mid-loop. I can just change direction, change DDA coefficients and keep stepping. Indeed it’s an advantage – a ray that bounces 10 times in quick succession can follow more or less the same code path and execution time as a ray that misses and takes a long time to exit. They still both just step, visit cells and intersect triangles; it’s just that one ray hits and bounces too.
+Gratuitous screenshot from 5 Faces
+So this super simple, very poor data structure is actually not all that terrible after all. But it still has some major failings. It’s basically hard limited on scene complexity. If I have too large a scene with too many triangles, the grid will either have too many triangles per cell in the areas that are filled, or I’ll have to make the grid too high res. And that burns memory and makes the voxel marching time longer even when nothing is hit. Step in the sparse voxel octree (SVO) and the brick map.
+Sparse voxel octrees solve the problem of free space management by a) storing a multi-level octree not a flat grid, and b) only storing child cells when the parent cells are filled. This works out being very space-efficient. However the traversal is quite slow; the shader has to traverse a tree to find any leaf node in the structure, so you end up with a problem not completely unlike BVH tracing. You either traverse the whole structure at every step along the ray, which is slow; or use a stack, which is also slow and makes it hard to e.g. bend the ray in flight. Brick maps however just have two discrete levels: a low level voxel grid, and a high level sparse brick map.
+In practice this works out as a complete voxel grid (volume texture) at say 64x64x64 resolution, where each cell contains a uint index. The index either indicates the cell is empty, or it points into a buffer containing the brick data. The brick data is a structured buffer (or volume texture) split into say 8x8x8 cell bricks. The bricks contain uints pointing at triangle linked lists containing the list of triangles in each cell. When traversing this structure you step along the low res voxel grid exactly as for a regular voxel grid; when you encounter a filled cell you read the brick, and step along that instead until you hit a cell with triangles in, and then trace those.
+The key advantage over an SVO is that there’s only two levels, so the traversal from the top down to the leaf can be hard coded: you read the low level cell at your point in space, see if it contains a brick, look up the brick and read the brick cell at your point in space. You don’t need to branch into a different block of code when tracing inside a brick either – you just change the distance you step along the ray, and always read the low level cell at every iteration. This makes the shader really simple and with very little divergence.
+Brick map generation in 2D
+Building a brick map works in 3 steps and can be done sparsely, top down:
+– Render the geometry to the low res voxel grid. Just mark which cells are filled;
+– Run over the whole grid in a post process and allocate bricks to filled low res cells. Store indices in the low res grid in a volume texture
+– Render the geometry as if rendering to a high res grid (low res size * brick size); when filling in the grid, first read the low res grid, find the brick, then find the location in the brick and fill in the cell. Use a triangle linked list per cell again. Make sure to update the linked list atomically. 🙂
+The voxel filling is done with a geometry shader and pixel shader in my case – it balances workload nicely using the rasteriser, which is quite difficult to do using compute because you have to load balance yourself. I preallocate a brick buffer based on how much of the grid I expect to be filled. In my case I guess at around 10-20%. I usually go for a 64x64x64 low res map and 4x4x4 bricks for an effective resolution of 256x256x256. This is because it worked out as a good balance overall for the scenes; some would have been better at different resolutions, but if I had to manage different allocation sizes I ran into a few little VRAM problems – i.e. running out. The high resolution is important: it means I don’t have too many tris per cell. Typically it took around 2-10 ms to build the brick map per frame for the scenes in 5 Faces – depending on tri count, tris per cell (i.e. contention), tri size etc.
+One other thing I should mention: where do the triangles come from? In my scenes the triangles move, but they vary in count per frame too, and can be generated on GPU – e.g. marching cubes – or can be instanced and driven by GPU simulations (e.g. cubes moved around on GPU as fluids). I have a first pass which runs through everything in the scene and “captures” its triangles into a big structured buffer. This works in my ubershader setup and handles skins, deformers, instancing, generated geometry etc. This structured buffer is what is used to generate the brick maps in one single draw call. Naturally you could split it up if you had static and dynamic parts, but in my case the time to generate that buffer was well under 1ms each frame (usually more like 0.3ms).
+Key brick map advantages:
+– Simple and fast to build, much like a regular voxel grid
+– Much more memory-efficient than a regular voxel grid for high resolution grids
+– Skips (some) free space
+– Efficient, simple shader with no complex tree traversal necessary, and relatively little divergence
+– You can find the exact leaf cell any point in space is in in 2 steps – useful for secondary rays
+– It’s quite possible to mix dynamic and static content – prebake some of the brick map, update or append dynamic parts
+– You can generate the brick map in camera space, world space, a moving grid – doesn’t really matter
+– You can easily bend or bounce the ray in flight just like you could with a regular voxel grid. Very important for multi-bounce reflections and refractions. I can limit the shader execution loop by number of cells marched not by number of bounces – so a ray with a lot of quick local bounces can take as long as a ray that doesn’t hit anything and exits.
+Gratuitous screenshot from 5 Faces
+In conclusion: brick maps gave me a fast, efficient way of managing triangles for my real time raytracer which has a very particular use case and set of limitations. I don’t want to handle camera rays, only secondary rays – i.e. all of my rays start already on a surface. I don’t need to handle millions of triangles. I do need to build the structure very quickly and have it completely dynamic and solid. I want to be able to bounce rays. From a shader coding point of view, I want as little divergence as possible and some control over total execution time of a thread.
+I don’t see it taking over as the structure used in Octane or Optix any time soon, but for me it definitely worked out.
+Share this:
+Share on Facebook (Opens in new window)
+Facebook
+Share on X (Opens in new window)
+X
+Like Loading...
+Related
+Comments (14)
+14 Comments »
+Didn’t expect pt.2 so fast! More good reading. Any more parts on the way? 😀
+Lots to think about for me too – like whether working on a platform with no 3D texture support was such a good plan 😉 I guess 2D brick maps would work well enough if the scene is kept fairly flat too, not that there’s enough GPU power to step through a structure and doing lots of intersection tests along the way. Creative solution or a desktop GPU needed…
+Tiled rendering and passing in a list of triangles calculated on the CPU will work, but that doesn’t help reflection + lighting rays. Maybe it’s possible to use the same technique i use for rays in the shader to store triangle lists in a low-res CPU render. I’ll have to try it.
+Comment by Chris Wood (@psonice_cw) — May 8, 2013 @ 3:24 pm
+Reply
+Did you find much speedup by randomizing triangle order, when inserting into the grid? Reducing contention on the linked-lists; kinda the opposite case to vertex cache coherency 🙂
+Great pair of articles, btw. Very interested to hear how your diffuse (AO) tracing develops!
+Comment by iestyn — May 9, 2013 @ 9:27 pm
+Reply
+Not really, but I’m going to have to try it..
+The major problem in theory is the list head contention (i.e. the grid-sized spatial buffer), especially if writing with a mutex. This will be a problem if writing to the same cell from multiple threads at once, particularly inside one wavefront.
+However, I use a pixel shader / geometry shader combination to write triangles into the grid. The way I do this is, I use a 2D render target sized to the width/height of the grid (or well, the two longest axes) and write to that. I flatten the triangle in X, Y and send to pixel shader, but provide the Z depth of the area crossed by the triangle in the grid to the pixel shader too. Then in PS I loop over the z depth. So the rasteriser handles 2 components and the loop handles the 3rd. What this means in practice is that the rasteriser handles thread allocation. Now in theory this already does a good job of avoiding contention for its own benefit – pixels are always written by the ROP in the order they were submitted (its the rules of the GPU..) so there is already some contention management.
+Comment by directtovideo — May 13, 2013 @ 8:09 am
+Reply
+I had a go at this and ran into the issue of some triangles not covering any pixels, and thus not being processed by the fragment shader. Seems like this can happen if the triangle is too small (i.e. far away if using perspective projection, though I guess you’d want to use orthographic here) or if it’s perpendicular to the XY plane.
+Is this something you’ve ran into as well?
+Comment by Chris — April 2, 2014 @ 11:39 am
+You can’t rasterise the triangles directly for that reason. I actually expand them in the geometry shader and do a distance from triangle test in pixel shader to make it work properly.
+Comment by directtovideo — April 2, 2014 @ 4:22 pm
+I didn’t understand it completely, but you are basically blasting your geometry into a spatial structure in a single, millisecond-long, pass?
+I had no intentions to ever touch GPU coding again, but this very much makes me want to.
+Comment by Lord Graga — May 10, 2013 @ 6:45 am
+Reply
+In the end I actually used 2 passes over the geometry because it was faster (less atomics / mutexing required), but it could just as well be in one pass yes. 🙂
+Comment by directtovideo — May 13, 2013 @ 7:39 am
+Reply
+I have a question: what debugging tools do you use when working on complex GPU code? I haven’t touched it in a while, it used to be a very opaque system, difficult to debug. Are there better tools these days?
+Comment by iestyn — May 10, 2013 @ 8:36 am
+Reply
+You know what, I don’t actually use the off the shelf tools much at all. I’ve used PIX a couple of times when I’ve been stuck with a bug early on in development on DX11, but in general – nothing.
+I use GPU time stamp queries to instrument blocks of code; when it comes to debugging compute shaders I generally just “printf” – i.e. I write results into RWStructuredBuffers, copy them back to a staging buffer and lock on CPU, then look at the contents. Sometimes I go further and bind additional buffers just for outputting debug data (e.g. if you hit a certain block of code in a thread). It doesn’t make for the greatest workflow ever but it gives you enough clues. The kind of compute shaders im working with are massively parallel and things can be interdepedent. Just stepping through one invocation of a shader might not get you very far, you need to see the complete results.
+I often just quickly iterate on shaders, changing and reloading and seeing what changed.
+Comment by directtovideo — May 13, 2013 @ 7:44 am
+Reply
+btw. if i remember correctly Marcos Fajardo (of Arnold renderer fame) also used regular grids in favour of hierarchical BVHs in his renderer for quite some time.
+Comment by Armin Jahanpanah — May 10, 2013 @ 9:21 am
+Reply
+Interesting, going to have to read up on that and see why he went that route. Thanks.
+Comment by directtovideo — May 13, 2013 @ 7:44 am
+Reply
+Some details can be found here: http://tog.acm.org/resources/RTNews/html/rtnv23n1.html#art3
+“As far as efficiency goes, he started off with uniform grids (ugrids). They were using a per-object ugrid (storing triangles) and then a global or “root” ugrid (storing objects), so in a sense it was a 2-level hierarchy of ugrids”
+Plus some further elaboration in the following paragraphs (around last quarter of the article).
+Comment by Armin Jahanpanah — May 15, 2013 @ 7:42 am
+… and brick maps are also used by Pixar’s renderman for GI
+Comment by Armin Jahanpanah — May 10, 2013 @ 9:23 am
+Reply
+[…] [6] https://directtovideo.wordpress.com/2013/05/08/real-time-ray-tracing-part-2/ […]
+Pingback by The future of screenspace reflections | Bart Wronski — January 25, 2014 @ 11:09 pm
+Reply
+RSS feed for comments on this post. TrackBack URI
+Leave a Reply Cancel reply
+Pages:
+About
+Demos
+Blogroll
+Evilpaul
+Navis / ASD
+Neil Purvey (Digital Graffiti)
+Steven Tovey (Spuify)
+Categories:
+compute shader
+demoscene
+directx 11
+fluid dynamics
+mesh generation
+meshing
+particles
+ray tracing
+realtime rendering
+signed distance field
+Uncategorized
+Search:
+Archives:
+January 2014
+May 2013
+March 2012
+February 2012
+May 2011
+February 2011
+August 2010
+April 2010
+March 2010
+January 2010
+November 2009
+October 2009
+September 2009
+Meta:
+Create account
+Log in
+RSS
+Comments RSS
+Valid XHTML
+XFN
+WordPress.com
+Blog at WordPress.com.
+Comment
+Reblog
+Subscribe
+Subscribed
+direct to video
+Have a WordPress.com account? Log in now.
+direct to video
+Copy shortlinkView post in Reader
+Manage subscriptionsSign upLog in
+Report this content
+Collapse this bar
+Loading Comments...
+%d
+Create your own website, free on WordPress.com.Create your own website.
+Start free

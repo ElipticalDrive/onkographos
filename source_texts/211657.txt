@@ -1,0 +1,972 @@
+LeJEPA-FGP: Factorized Gaussian Process Regularization for
+Identifiable Joint-Embedding World Models
+Yuan-Hao Wei
+yuan-hao.wei@connect.polyu.hk
+yuanhao.wei1993@gmail.com
+Abstract
+LeJEPA learns representations by combining predictive alignment with isotropic Gaussian regularization, but the rotational symmetry of the Gaussian target leaves learned coordinates identifiable only
+up to orthogonal transformations. We introduce LeJEPA-FGP, a structured extension that replaces
+the pointwise isotropic Gaussian embedding law with a factorized Gaussian-process law over indexed
+representations. Each latent channel follows its own GP covariance kernel across an index such as time,
+space, or pose, while remaining marginally standard Gaussian at each point. We propose FGP-SIGReg,
+a sketched characteristic-function regularizer for matching factorized GP embedding laws. We prove
+that FGP-SIGReg consistently matches finite-dimensional factorized GP distributions. Under GP-OU
+positive-pair transitions, alignment with exact FGP law matching forces the representation into the
+first Wiener chaos, yielding linear recovery of the latent GP path. Under shared index-local encoders,
+distinct covariance kernels reduce the residual ambiguity from orthogonal rotations to signed permutations, while repeated kernels yield block-orthogonal ambiguity. Synthetic GP experiments validate
+signed-permutation recovery under distinct kernels and block recovery under kernel collision.
+1
+Introduction
+Self-supervised representation learning has made substantial progress by training neural networks to
+predict, align, or compare representations across views of the same underlying input. Contrastive and
+non-contrastive joint-embedding methods such as BYOL, SimSiam, Barlow Twins, VICReg, and DINO
+have shown that useful representations can be learned without explicit labels, provided that the training
+objective avoids collapse and encourages nontrivial embedding structure (Grill et al., 2020; Chen and
+He, 2021; Zbontar et al., 2021; Bardes et al., 2022; Caron et al., 2021). Joint-Embedding Predictive
+Architectures (JEPAs) push this principle toward world modeling by predicting latent representations
+rather than reconstructing observations, thereby encouraging abstractions that discard irrelevant pixel-level
+detail while preserving predictable structure (LeCun, 2022; Assran et al., 2023). This perspective is closely
+aligned with the broader world-modeling view of learning compact internal representations that support
+prediction, planning, and generalization (Ha and Schmidhuber, 2018).
+A recent line of work has made this idea more explicit in the LeJEPA framework. LeJEPA combines
+a joint-embedding predictive loss with Sketched Isotropic Gaussian Regularization (SIGReg), which
+constrains the learned embeddings to match an isotropic Gaussian target distribution (Balestriero and
+LeCun, 2025). This formulation is appealing because it replaces several common self-supervised heuristics,
+such as stop-gradient, teacher–student asymmetry, or carefully tuned covariance regularizers, by a direct
+distribution-matching principle. Even more importantly, recent theory shows that alignment together
+with Gaussian regularization can recover the latent variables of a Gaussian world up to an orthogonal
+transformation, thereby giving a mathematical account of when LeJEPA learns a world model (Klindt
+et al., 2026). However, the same isotropic Gaussian law that enables this clean analysis is also invariant
+under arbitrary orthogonal rotations. Thus, pointwise Gaussian regularization can recover a linearly useful
+latent space, but it does not by itself select a factor-aligned coordinate system.
+LeJEPA-FGP: Factorized Gaussian Process Regularization for Identifiable Joint-Embedding World Models
+This paper asks whether the Gaussian target in LeJEPA can be made more structured without losing
+the spectral mechanism that makes the theory work. Our answer is to replace the pointwise isotropic
+Gaussian target by a factorized Gaussian process (FGP) law over indexed representations. The index
+may represent time, spatial position, camera pose, rotation angle, sensor location, or any other coordinate
+along which the world has structured variation. Instead of requiring only that each embedding vector be
+marginally distributed as N (0, Id ), LeJEPA-FGP requires each latent channel to follow its own Gaussian
+process covariance kernel across the index. The target remains Gaussian, but it is no longer rotationally
+symmetric across channels when the kernels are distinct.
+This construction connects LeJEPA to a long line of probabilistic latent-variable models that use
+Gaussian process priors to capture smoothness and structured dependencies. Gaussian processes provide a
+classical nonparametric prior over functions and are fully determined by their finite-dimensional Gaussian
+marginals (Rasmussen and Williams, 2006). In deep generative modeling, GP priors have been incorporated
+into variational autoencoders to model latent dynamics, temporal smoothness, missing-data structure,
+and spatio-temporal correlations (Kingma and Welling, 2014; Casale et al., 2018; Fortuin et al., 2020;
+Jazbec et al., 2020; Bing et al., 2021; Ashman et al., 2020; Zhu et al., 2022). LeJEPA-FGP differs from
+these GP-VAE approaches in its learning principle: it is a deterministic joint-embedding method and
+performs distribution matching in representation space, rather than variational posterior inference through
+a generative decoder.
+The proposed factorized-GP target is also related to identifiability ideas in nonlinear ICA. Classical
+nonlinear ICA is not identifiable without additional structure, but identifiability can be recovered by
+exploiting auxiliary variables, temporal dependencies, nonstationarity, or structured priors (Hyvärinen
+et al., 2019; Khemakhem et al., 2020). Recent spatial nonlinear ICA theory shows that, in the Gaussianprocess limit, independent GP components are identifiable precisely when their covariance kernels are
+distinct (Hälvä et al., 2024). This observation matches the central symmetry of LeJEPA-FGP: if two
+latent channels have the same covariance kernel, rotations within that equal-kernel block preserve the
+target law; if their kernels are distinct, the rotational ambiguity is reduced to signed permutation.
+We make three main contributions. First, we introduce FGP-SIGReg, a structured extension of
+SIGReg that matches random one-dimensional projections after normalizing them by their target GP
+variances. This gives a direct distribution-matching regularizer for factorized GP embedding laws. Second,
+we prove that, under GP-OU positive-pair transitions, alignment plus exact FGP law matching forces the
+learned representation into the first Wiener chaos, so the representation is linear in the latent GP path.
+Third, under shared index-local encoders, we prove that distinct covariance kernels reduce the residual
+ambiguity from arbitrary orthogonal rotations to signed permutations, while repeated kernels yield the
+corresponding block-orthogonal ambiguity. Experiments on synthetic GP signals verify these theoretical
+predictions: LeJEPA-FGP achieves stable source recovery under distinct kernels, while kernel collisions
+produce the predicted block recovery structure.
+2
+Methodology
+To move beyond pointwise representations, we consider latent variables that possess structure along an
+auxiliary index (e.g., time, space, camera pose, or sensor location). Concretely, we model the world as d
+independent latent processes, each equipped with its own covariance kernel. This leads to a factorized
+Gaussian process (FGP) target that generalizes the isotropic Gaussian used in standard LeJEPA.
+2.1
+Indexed latent worlds and factorized GP targets
+Let
+U = {u1 , . . . , uT } ⊂ U
+2
+Yuan-Hao Wei
+be a finite set of indices. The index may represent time, spatial location, camera pose, rotation angle,
+sensor position, or any other auxiliary coordinate along which the world has structure. We assume that
+the true world has d independent latent processes
+zℓ (·) ∼ GP(0, kℓ ),
+ℓ = 1, . . . , d,
+(1)
+We assume throughout that each kℓ is positive definite and normalized as
+∀u ∈ U,
+kℓ (u, u) = 1,
+ℓ = 1, . . . , d.
+(2)
+Thus every pointwise latent coordinate remains standard Gaussian,
+zℓ (u) ∼ N (0, 1),
+(3)
+while the off-diagonal entries of Kℓ (U ) encode the index structure of the ℓ-th latent channel. For a finite
+index set U , define
+Zℓ := zℓ (u1 ), . . . , zℓ (uT )
+⊤
+∈ RT ,
+
+T
+Kℓ (U ) := kℓ (ui , uj ) i,j=1 .
+(4)
+We concatenate channels in channel-major order,
+ZU := (Z1⊤ , . . . , Zd⊤ )⊤ ∈ RN ,
+N = dT.
+(5)
+The finite-dimensional latent law is
+ZU ∼ N (0, ΣK (U )),
+
+ΣK (U ) := diag K1 (U ), . . . , Kd (U ) .
+(6)
+Equivalently,
+pFGP (ZU ) =
+d
+Y
+
+N Zℓ ; 0, Kℓ (U ) .
+(7)
+ℓ=1
+When T = 1 and Kℓ (U ) = [1] for every ℓ, the target in (7) reduces to the standard isotropic Gaussian
+N (0, Id ) used by LeJEPA.
+The observation is generated by an unknown nonlinear map
+XU = G(ZU ),
+(8)
+and a neural encoder Fθ produces an indexed representation
+YU = Fθ (XU ) ∈ RT ×d .
+(9)
+For the population analysis, we study the composed map
+Hθ := Fθ ◦ G,
+YU = Hθ (ZU ).
+(10)
+We first prove path-level results for arbitrary measurable Hθ . We then impose the natural shared-local
+form y(u) = h(x(u)) to derive component-level identifiability.
+3
+LeJEPA-FGP: Factorized Gaussian Process Regularization for Identifiable Joint-Embedding World Models
+2.2
+FGP-SIGReg: structured Gaussian law matching
+The key methodological change is to replace the isotropic Gaussian target of SIGReg by the factorized
+GP target (7). Because the encoder is deterministic, we do not minimize a GP negative log-likelihood. A
+likelihood term such as YU⊤ ΣK (U )−1 YU would pull every deterministic representation toward the prior
+mode 0 and would therefore reintroduce collapse. Instead, we match the distribution of the entire batch of
+indexed representations to the finite-dimensional GP law.
+Let Y ∈ RN denote the vectorized representation of one indexed sample. For any nonzero projection
+vector
+⊤ ⊤
+dT
+a = (a⊤
+aℓ ∈ RT ,
+(11)
+1 , . . . , ad ) ∈ R ,
+its target variance under the FGP law is
+vK (a; U ) := a⊤ ΣK (U )a =
+d
+X
+a⊤
+ℓ Kℓ (U )aℓ .
+(12)
+ℓ=1
+If Y ∼ N (0, ΣK (U )), then
+p
+a⊤ Y
+∼ N (0, 1).
+vK (a; U )
+(13)
+Thus we can reuse the one-dimensional characteristic-function tests of SIGReg after normalizing each
+random projection by its GP target variance. Let
+
+
+
+a⊤ Y
+
+φY,a (t) := E exp it q
+a⊤ ΣK (U )a
+(14)
+be the characteristic function of the normalized projection. The standard normal target characteristic
+function is
+φ0 (t) = exp(−t2 /2).
+(15)
+For a projection distribution ν with full support on the unit sphere and a positive frequency weight w,
+define the population FGP-SIGReg objective
+LFGP-SIG (Y ; U ) := Ea∼ν
+Z
+2
+2
+φY,a (t) − e−t /2 w(t) dt.
+(16)
+R
+Empirical estimator. Given a batch {Yn }B
+n=1 , sample M random projections am and Q frequencies tq .
+Define
+
+
+B
+⊤
+X
+1
+a m Yn
+.
+φbm (tq ) =
+exp itq q
+(17)
+B n=1
+⊤
+a Σ (U )a + ε
+m
+K
+m
+The empirical regularizer is
+Q
+LbFGP-SIG =
+X X
+2
+B M
+2
+w(tq ) φbm (tq ) − e−tq /2 .
+M Q m=1 q=1
+(18)
+The factor B is optional but useful because it places the statistic on the classical goodness-of-fit scale.
+Proposition 2.1 (FGP-SIGReg generalizes SIGReg). If T = 1 and Kℓ (U ) = [1] for every ℓ, then
+ΣK (U ) = Id . Consequently, FGP-SIGReg reduces to ordinary isotropic Gaussian SIGReg after the usual
+normalization of random one-dimensional projections.
+4
+Yuan-Hao Wei
+Proof. For T = 1, a = (a1 , . . . , ad )⊤ and
+vK (a; U ) =
+d
+X
+a2ℓ = ∥a∥22 .
+ℓ=1
+If a is sampled on the unit sphere, vK (a; U ) = 1, so the target one-dimensional projection is exactly
+N (0, 1), which is the SIGReg target.
+Theorem 2.2 (Consistency of FGP-SIGReg). Let ΣK (U ) ≻ 0. Suppose that ν has full support on the
+unit sphere in RdT and w(t) > 0 for Lebesgue-almost every t ∈ R; Gaussian weights satisfy this condition.
+Then
+LFGP-SIG (Y ; U ) = 0 ⇐⇒ Y ∼ N (0, ΣK (U )).
+(19)
+Equivalently, zero FGP-SIGReg matches the factorized GP law
+p(Y ) =
+d
+Y
+N (Yℓ ; 0, Kℓ (U )).
+ℓ=1
+Proof. If Y ∼ N (0, ΣK (U )), then for every nonzero a,
+a⊤ Y
+q
+∼ N (0, 1),
+a⊤ ΣK (U )a
+2
+so φY,a (t) = e−t /2 and the loss is zero.
+Conversely, assume the loss is zero. The integrand in (16) is nonnegative. Since w(t) > 0 for almost
+every t ∈ R, for ν-almost every a we have
+2
+φY,a (t) = e−t /2
+for Lebesgue-almost every t ∈ R. Characteristic functions are continuous, so the equality extends to every
+t ∈ R. Therefore, for ν-almost every a,
+a⊤ Y ∼ N (0, a⊤ ΣK (U )a).
+By continuity in a and full support of ν, the same statement holds for every a ∈ RdT . The Cramér–Wold
+device then implies
+Y ∼ N (0, ΣK (U )).
+2.3
+The LeJEPA-FGP objective
+For sample n and view v, let
+Yn,v,U = Fθ (Xn,v,U ) ∈ RT ×d
+(20)
+be the indexed embedding. Let V be the number of views and let Vg ≤ V be the number of global views.
+The multi-view predictive target is the mean of global-view embeddings,
+Vg
+1 X
+Yn,v,U .
+Vg v=1
+(21)
+X 1 V
+X
+1 B
+2
+Mn,U − Yn,v′ ,U F .
+B n=1 V v′ =1
+(22)
+Mn,U :=
+The prediction loss is
+LFGP
+pred =
+5
+LeJEPA-FGP: Factorized Gaussian Process Regularization for Identifiable Joint-Embedding World Models
+Algorithm 1 FGP-SIGReg for one view and one finite index set U
+Require: Embeddings Y ∈ RB×T ×d ; kernels K1 (U ), . . . , Kd (U ); projections M ; frequencies {tq }Q
+q=1 .
+⊤ )⊤ for m = 1, . . . , M .
+1: Sample am = (a⊤
+,
+.
+.
+.
+,
+a
+m,1
+m,d
+2: for m = 1, . . . , M do
+P
+3:
+Compute vm = dℓ=1 a⊤
+m,ℓ Kℓ (U )am,ℓ .
+4:
+for n = 1, . . . , B do
+ √
+Pd
+⊤
+5:
+Compute sn,m =
+ℓ=1 am,ℓ Yn,:,ℓ / vm + ε.
+6:
+end for
+7:
+for q = 1, . . . , Q do
+P
+8:
+φbm (tq ) = B −1 B
+n=1 exp(itq sn,m ).
+9:
+end for
+10: end for
+P
+bm (tq ) − exp(−t2q /2)|2 .
+11: return MBQ
+m,q w(tq )|φ
+A GP-whitened variant is also possible:
+∥Y ∥2Σ−1 :=
+K
+d
+X
+Yℓ⊤ Kℓ (U )−1 Yℓ ,
+(23)
+ℓ=1
+which is useful in the stability theorem below. The training objective is
+LLeJEPA-FGP = (1 − λ)LFGP
+pred +
+X
+
+λ V
+LbFGP-SIG {Yn,v,U }B
+n=1 ; U .
+V v=1
+(24)
+When T = 1 and all Kℓ = [1], (24) is the LeJEPA objective with SIGReg.
+2.4
+Exact population theory: alignment forces first-chaos GP representations
+We now prove the population identifiability result. The proof is a finite-dimensional GP version of the
+Hermite/Mehler spectral argument used for Gaussian LeJEPA. The main difference is that the isotropic
+covariance I is replaced by the block GP covariance ΣK (U ).
+Assumption 2.3 (GP-OU positive pairs). For a fixed finite index set U , positive pairs are generated by
+the stationary Gaussian transition
+ZU+ = ρZU +
+q
+1 − ρ2 ΞU ,
+ΞU ∼ N (0, ΣK (U )),
+ΞU ⊥⊥ ZU ,
+(25)
+with 0 < ρ < 1.
+The transition (25) preserves the FGP law because ZU+ ∼ N (0, ΣK (U )). It is the path-level analogue
+of an Ornstein–Uhlenbeck transition.
+Definition 2.4 (Population alignment loss). For a measurable map H : RdT → RdT , define
+h
+i
+Lalign (H) := E ∥H(ZU+ ) − H(ZU )∥22 .
+(26)
+Theorem 2.5 (LeJEPA-FGP path-linear identifiability). Let ZU ∼ N (0, ΣK (U )) with ΣK (U ) ≻ 0, and
+let ZU+ be generated by (25). Let H : RdT → RdT be measurable and suppose the exact FGP-SIGReg
+constraint holds:
+H(ZU ) ∼ N (0, ΣK (U )).
+(27)
+6
+Yuan-Hao Wei
+Then
+
+(28)
+AU ΣK (U )A⊤
+U = ΣK (U ).
+(29)
+Lalign (H) ≥ 2(1 − ρ) Tr ΣK (U ) .
+Equality holds if and only if
+H(ZU ) = AU ZU
+a.s.,
+Equivalently,
+AU = ΣK (U )1/2 QΣK (U )−1/2
+for some Q ∈ O(dT ).
+(30)
+Proof. Write Σ = ΣK (U ) and N = dT for readability. Whiten the latent path:
+W = Σ−1/2 ZU ,
+W ∼ N (0, IN ).
+(31)
+The positive pair becomes a standard Gaussian OU transition:
+W + = ρW +
+q
+1 − ρ2 E,
+E ∼ N (0, IN ),
+E ⊥⊥ W.
+(32)
+Define the whitened representation
+R(W ) := Σ−1/2 H(Σ1/2 W ).
+(33)
+By (27), R(W ) ∼ N (0, IN ), hence ER(W ) = 0 and Cov(R(W )) = IN .
+Let Hα (W ) denote the normalized multivariate Hermite basis for L2 (N (0, IN )), indexed by multiindices α ∈ NN . Since each component Ri has zero mean, it admits the expansion
+Ri (W ) =
+X
+c(i)
+α Hα (W ).
+(34)
+|α|≥1
+For each degree m ≥ 1, define the coefficient Gram matrix
+Cm ∈ RN ×N ,
+(Cm )ij :=
+X
+(j)
+c(i)
+α cα .
+(35)
+|α|=m
+Each Cm is positive semidefinite. Orthogonality of Hermite polynomials and Cov(R(W )) = IN give
+X
+Cm = IN .
+(36)
+i
+(37)
+m≥1
+Mehler’s formula for the OU transition gives
+h
+E Hα (W + )Hβ (W ) = ρ|α| 1{α = β}.
+Therefore the whitened cross-covariance is
+h
+i
+C := E R(W + )R(W )⊤ =
+X
+ρm Cm .
+(38)
+m≥1
+Since 0 < ρ < 1, for every m ≥ 2 we have ρm < ρ. Combining (36) and (38),
+ρIN − C =
+X
+(ρ − ρm )Cm ⪰ 0.
+(39)
+m≥2
+Now expand the alignment loss:
+h
+Lalign (H) = E ∥H(ZU+ ) − H(ZU )∥22
+h
+i
+(40)
+i
+= 2 Tr(Σ) − 2E H(ZU+ )⊤ H(ZU )
+(41)
+= 2 Tr(Σ) − 2 Tr(ΣC).
+(42)
+7
+LeJEPA-FGP: Factorized Gaussian Process Regularization for Identifiable Joint-Embedding World Models
+By (39) and Σ ≻ 0,
+Tr(ΣC) ≤ ρ Tr(Σ),
+(43)
+which proves (28).
+It remains to characterize equality. Equality in (42) requires
+
+Tr Σ(ρIN − C) = 0.
+(44)
+Since Σ ≻ 0 and ρIN − C ⪰ 0, this implies ρIN − C = 0. From (39), and because every coefficient ρ − ρm
+is strictly positive for m ≥ 2, we must have
+m ≥ 2.
+Cm = 0,
+(45)
+Thus the Hermite expansion (34) contains only degree-one terms. Therefore
+R(W ) = QW
+(46)
+for some matrix Q. Since R(W ) ∼ N (0, IN ), QQ⊤ = IN , hence Q ∈ O(N ). Transforming back,
+H(ZU ) = Σ1/2 QΣ−1/2 ZU .
+(47)
+Setting AU = Σ1/2 QΣ−1/2 gives AU ΣA⊤
+U = Σ.
+Conversely, any map of the form H(ZU ) = AU ZU with AU ΣA⊤
+U = Σ satisfies the FGP law and yields
+h
+i
+E H(ZU+ )⊤ H(ZU ) = ρ Tr(Σ),
+(48)
+so it achieves the lower bound.
+Corollary 2.6 (The learned representation has the same GP-OU world transition). At any exact optimum
+of Theorem 2.5, the representation YU = H(ZU ) satisfies
+YU+ | YU ∼ N ρYU , (1 − ρ2 )ΣK (U ) .
+
+(49)
+Proof. At the optimum, YU = AU ZU and AU ΣK A⊤
+U = ΣK . Therefore
+YU+ = AU ZU+
+(50)
+= ρAU ZU +
+= ρYU +
+q
+1 − ρ2 AU ΞU
+q
+eU ,
+1 − ρ2 Ξ
+(51)
+(52)
+e U = AU ΞU ∼ N (0, ΣK (U )) and Ξ
+eU ⊥
+where Ξ
+⊥ YU .
+2.5
+From path linearity to factor identifiability
+Theorem 2.5 proves that exact LeJEPA-FGP cannot learn a nonlinear scrambling of the latent GP path.
+However, by itself it still allows every covariance-preserving path transform
+G(ΣK ) := {AU ∈ RdT ×dT : AU ΣK (U )A⊤
+U = ΣK (U )}.
+(53)
+To obtain component-level identifiability, we use the fact that practical joint-embedding encoders are
+shared across indices: the same encoder is applied to each frame, patch, pose, or location.
+8
+Yuan-Hao Wei
+Assumption 2.7 (Shared index-local observation and encoder). For every u ∈ U, observations are
+generated pointwise by an injective mixing map
+x(u) = g(z(u)),
+z(u) = (z1 (u), . . . , zd (u)) ∈ Rd ,
+(54)
+and the representation is produced by a shared pointwise encoder
+y(u) = f (x(u)).
+(55)
+Thus the composed representation is
+r := f ◦ g.
+y(u) = r(z(u)),
+(56)
+Assumption 2.8 (Nondegenerate finite grids). For every finite U considered, ΣK (U ) ≻ 0. Moreover, for
+every ui ∈ U , the conditional covariance of ZU \{ui } given z(ui ) is positive definite on the coordinates not
+deterministically implied by z(ui ).
+Lemma 2.9 (Locality removes cross-index mixing). Under Assumptions 2.7–2.8, suppose that for a finite
+grid U the path representation is linear,
+YU = AU ZU
+a.s.
+(57)
+and each row block Y (ui ) is a measurable function only of z(ui ). Then each Y (ui ) is a linear function of
+z(ui ) alone. If the same encoder r is used for every ui and the one-point marginal distribution is the same
+for every ui , there exists a single matrix A ∈ Rd×d such that
+y(u) = Az(u)
+a.s. for every u ∈ U.
+(58)
+Proof. Write the ith pointwise output block of AU ZU as
+Y (ui ) = Bi z(ui ) + Ci Z−i ,
+(59)
+where Z−i stacks all latent variables at indices other than ui . By locality, Y (ui ) is measurable with respect
+to z(ui ). For jointly Gaussian variables,
+Z−i = E[Z−i | z(ui )] + Ri ,
+(60)
+where Ri is a Gaussian residual independent of z(ui ). Hence
+
+Y (ui ) = Bi + Ci Li z(ui ) + Ci Ri
+(61)
+for a linear conditional-mean matrix Li . The first term is measurable with respect to z(ui ), while Ci Ri
+is independent of z(ui ). For the sum to be measurable with respect to z(ui ), the independent residual
+term must be almost surely constant. Since it has mean zero, it must be zero. By the nondegeneracy
+ei z(ui ).
+assumption, this implies Ci = 0 on all non-deterministic residual directions. Thus Y (ui ) = B
+Because the same function r is used at every index and the one-point marginal law of z(u) is N (0, Id )
+for all u, the linear map representing r is the same almost everywhere under the common marginal
+ei = A for all i, proving (58).
+distribution. Therefore B
+We now show that distinct factorized kernels remove the rotation ambiguity.
+Theorem 2.10 (Distinct-kernel identifiability). Assume the conditions of Theorem 2.5 and Assumption 2.7.
+Suppose the exact optimum is shared index-local, so that
+A ∈ Rd×d .
+y(u) = Az(u),
+9
+(62)
+LeJEPA-FGP: Factorized Gaussian Process Regularization for Identifiable Joint-Embedding World Models
+Assume that the target kernels {k1 , . . . , kd } are linearly independent as functions on U × U and that the
+target kernel list equals the true kernel list up to a permutation. Then
+A = P D,
+(63)
+where P is a permutation matrix and D = diag(±1, . . . , ±1) is a sign matrix. If the output channel order
+is fixed to the true kernel order, then P = Id and A = D.
+Proof. By (62), for output channels a, b and indices u, v,
+Cov(ya (u), yb (v)) = Cov
+d
+X
+Aar zr (u),
+r=1
+=
+d
+X
+d
+X
+!
+Abs zs (v)
+(64)
+s=1
+Aar Abr kr (u, v),
+(65)
+r=1
+where we used independence of the latent GP channels. The FGP target requires output channels to be
+independent with prescribed kernels. If the output order is fixed, then
+Cov(ya (u), yb (v)) = δab ka (u, v).
+(66)
+Combining (65) and (66) gives
+d
+X
+Aar Abr kr (u, v) = δab ka (u, v)
+for all u, v.
+(67)
+r=1
+By linear independence of {kr }dr=1 , the coefficients of each kernel must match. Setting a = b in (67) gives
+A2aa = 1,
+A2ar = 0
+(r ̸= a),
+(68)
+so row a has exactly one nonzero entry, equal to ±1, in the fixed-order case. Repeating for every row
+yields A = D.
+If the output order is not fixed, the same coefficient comparison shows that each output row selects
+exactly one true kernel, no two rows can select the same kernel because A must be invertible, and the
+selected coefficient has magnitude one. Therefore A = P D.
+Corollary 2.11 (Repeated kernels give block rotations). Suppose the kernels are partitioned into groups
+G1 , . . . , Gm such that
+kr = κj for r ∈ Gj ,
+(69)
+with {κj }m
+j=1 linearly independent across groups. Then the exact ambiguity group is
+A = P diag(Q1 , . . . , Qm ),
+Qj ∈ O(|Gj |),
+(70)
+up to a permutation of equal-kernel groups. Thus identical kernels preserve an orthogonal rotation ambiguity
+inside the corresponding subspace.
+Proof. Equation (67) can now only compare coefficients of distinct group kernels κj . Therefore components
+from different groups cannot mix. Inside a group with common kernel κj , the covariance condition reduces
+to
+AGj ,Gj A⊤
+(71)
+Gj ,Gj = I|Gj | ,
+which is exactly the orthogonal group O(|Gj |).
+10
+Yuan-Hao Wei
+Theorem 2.12 (Main exact identifiability theorem). Let the latent world be a factorized GP as in (1)–(7).
+Let positive pairs satisfy the GP-OU transition (25). Suppose LeJEPA-FGP reaches exact FGP-SIGReg
+and globally minimizes the population alignment loss. Then, for every finite grid U ,
+AU ΣK (U )A⊤
+U = ΣK (U ).
+H(ZU ) = AU ZU ,
+(72)
+If, in addition, the model is shared index-local and the kernels are linearly independent up to permutation,
+then the learned pointwise representation satisfies
+f (g(z(u))) = P D z(u)
+a.s.
+(73)
+If kernels repeat, the signed permutation is replaced by the block-orthogonal ambiguity in Corollary 2.11.
+Proof. The path-linear statement follows directly from Theorem 2.5. Under shared index-locality,
+Lemma 2.9 reduces the path-linear representation to a shared pointwise linear map y(u) = Az(u).
+The factorized covariance constraint then implies signed-permutation recovery by Theorem 2.10, or block
+rotations by Corollary 2.11 when kernels repeat.
+2.6
+Approximate identifiability
+The exact theorem describes the population optimum. We also state a stability result showing that small
+alignment and covariance errors imply closeness to a covariance-preserving linear GP representation.
+For the approximate analysis, use the GP-whitened representation
+R(W ) = ΣK (U )−1/2 H(ΣK (U )1/2 W ),
+W ∼ N (0, IN ),
+(74)
+and the whitened alignment loss
+i
+h
+Lw (R) := E ∥R(W + ) − R(W )∥22 .
+(75)
+Theorem 2.13 (Approximate path-linear identifiability). Assume ER(W ) = 0 and let
+S := Cov(R(W )).
+(76)
+∥S − IN ∥F ≤ ε
+(77)
+Suppose
+and that the whitened alignment loss is within δ of the best linear loss at covariance S:
+Lw (R) ≤ 2(1 − ρ) Tr(S) + δ.
+(78)
+Define
+D :=
+δ
+.
+2ρ(1 − ρ)
+(79)
+Then there exists Q ∈ O(N ) such that
+h
+E ∥R(W ) − QW ∥22 ≤ D + (ε + D)2 .
+i
+(80)
+AU = ΣK (U )1/2 QΣK (U )−1/2
+(81)
+Equivalently, there exists
+such that
+
+E
+ΣK (U )
+−1/2
+H(ZU ) − AU ZU
+ 2
+2
+
+≤ D + (ε + D)2 .
+(82)
+In ordinary Euclidean norm,
+h
+i
+h
+i
+E ∥H(ZU ) − AU ZU ∥22 ≤ λmax (ΣK (U )) D + (ε + D)2 .
+11
+(83)
+LeJEPA-FGP: Factorized Gaussian Process Regularization for Identifiable Joint-Embedding World Models
+Proof. Expand each component of R in the normalized Hermite basis:
+X
+Ri (W ) =
+c(i)
+α Hα (W ).
+(84)
+|α|≥1
+As before, define degree-m Gram matrices Sm by
+X
+(Sm )ij =
+(j)
+c(i)
+α cα .
+(85)
+|α|=m
+Then
+S=
+X
+Sm ,
+E[R(W + )R(W )⊤ ] =
+m≥1
+X
+ρm Sm .
+(86)
+m≥1
+The whitened alignment loss is
+Lw (R) = 2 Tr(S) − 2
+X
+ρm Tr(Sm )
+(87)
+X
+(88)
+m≥1
+= 2(1 − ρ) Tr(S) + 2
+(ρ − ρm ) Tr(Sm ).
+m≥2
+Since ρ − ρm ≥ ρ(1 − ρ) for m ≥ 2, (78) and (88) imply
+X
+m≥2
+Tr(Sm ) ≤
+δ
+= D.
+2ρ(1 − ρ)
+(89)
+Let Rlin (W ) = BW be the degree-one part of R. Then
+BB ⊤ = S1 ,
+E∥R(W ) − Rlin (W )∥22 =
+X
+Tr(Sm ) ≤ D.
+(90)
+m≥2
+Moreover,
+∥BB ⊤ − IN ∥F = ∥S1 − IN ∥F
+≤ ∥S − IN ∥F +
+(91)
+X
+m≥2
+Sm
+(92)
+F
+≤ ε + D.
+(93)
+Let B = U ΛV ⊤ be a singular value decomposition and set Q = U V ⊤ ∈ O(N ). Since ∥B − Q∥2F =
+P
+P
+2
+⊤
+2
+2
+2
+j (λj − 1) and ∥BB − IN ∥F =
+j (λj − 1) , we have
+∥B − Q∥2F ≤ ∥BB ⊤ − IN ∥2F ≤ (ε + D)2 .
+(94)
+Finally, Hermite degrees are orthogonal, so the nonlinear residual and the linear difference (B − Q)W are
+orthogonal in L2 :
+E∥R(W ) − QW ∥22 = E∥R(W ) − BW ∥22 + E∥(B − Q)W ∥22
+≤ D + (ε + D)2 .
+This proves (80). The original-coordinate statement follows from ZU = ΣK (U )1/2 W .
+12
+(95)
+(96)
+Yuan-Hao Wei
+Together, the preceding results show that LeJEPA-FGP changes the role of the Gaussian target in
+joint-embedding learning. Standard LeJEPA uses the isotropic pointwise law
+y(x) ∼ N (0, Id ),
+(97)
+whose symmetry group contains all orthogonal rotations. LeJEPA-FGP instead uses the structured path
+law
+p(y(U )) =
+d
+Y
+
+N yℓ (U ); 0, Kℓ (U ) .
+(98)
+ℓ=1
+The target remains Gaussian, preserving the Hermite spectral mechanism that forces first-chaos linear
+recovery, while the factorized kernels remove the rotational symmetry across latent channels. Consequently,
+isotropic Gaussian LeJEPA recovers
+y = Qz,
+Q ∈ O(d),
+(99)
+whereas LeJEPA-FGP recovers
+y = P Dz
+(100)
+under shared index-locality and distinct kernels. Thus, structured Gaussian regularization turns LeJEPA’s
+linear world-model recovery into factor-identifiable recovery whenever the latent GP channels carry distinct
+covariance structure.
+3
+Experiments
+We evaluate LeJEPA-FGP on controlled synthetic signals generated from latent Gaussian-process factors.
+The experiments test the two qualitative predictions of the theory. First, distinct covariance kernels should
+yield source recovery up to signed permutation. Second, repeated kernels should yield recovery of the
+corresponding latent subspace rather than a unique componentwise alignment. All reported quantitative
+results are averaged over three independent runs.
+Metrics. We evaluate source recovery using the coefficient of determination R2 (h → z), the maximum
+correlation coefficient (MCC) after matching learned channels to true sources, the signed-permutation
+mean squared error, and a cross-kernel error measuring residual cross-channel covariance. Higher values
+are better for R2 and MCC, while lower values are better for signed-permutation MSE and cross-kernel
+error. For the kernel-collision experiment, we also track the within-block energy of the repeated-kernel
+block; this quantity equals one when the learned representation recovers the full repeated-kernel subspace.
+Recovery under distinct kernels. Figure 1a shows that LeJEPA-FGP rapidly converges to near-perfect
+MCC, while pointwise LeJEPA converges to a lower and more variable channel alignment. The final
+quantitative results are summarized in Table 1. With distinct kernels, LeJEPA-FGP achieves an MCC of
+0.9962 ± 0.0002 and a signed-permutation MSE of 0.0076 ± 0.0003, whereas pointwise LeJEPA achieves
+an MCC of 0.9273 ± 0.0324 and a signed-permutation MSE of 0.1453 ± 0.0647. Thus, both methods
+learn informative representations, but the factorized-GP target substantially improves channel-level factor
+recovery.
+Kernel-collision block recovery. The kernel-collision setting tests the boundary case predicted by the
+theory. When two latent factors share the same covariance kernel, LeJEPA-FGP is not expected to identify
+those two components individually; instead, it should recover their shared subspace. This is exactly what
+we observe. Figure 1b shows that the within-block energy converges to one across all three runs. The final
+value is 0.999995 ± 0.000005, indicating almost perfect recovery of the repeated-kernel block.
+13
+LeJEPA-FGP: Factorized Gaussian Process Regularization for Identifiable Joint-Embedding World Models
+Figure 1: Training behavior across independent runs. (a) In the distinct-kernel setting, LeJEPA-FGP
+converges to near-perfect source recovery, while pointwise LeJEPA remains below the upper bound. (b)
+In the kernel-collision setting, the within-block energy of the repeated-kernel block converges to one,
+indicating recovery of the latent subspace predicted by the theory.
+Figure 2: Source recovery across three independent runs. Bars show mean MCC and error bars show
+standard deviation. The y-axis is restricted to the high-recovery regime because MCC is upper-bounded
+by one. LeJEPA-FGP with distinct kernels achieves the highest and most stable componentwise recovery.
+Correlation structure. Figure 3 visualizes the absolute correlation between true sources and learned
+channels. With distinct kernels, the correlation matrix is nearly diagonal, consistent with signedpermutation recovery. Under kernel collision, the repeated-kernel factors form a 2 × 2 high-correlation
+block, while the remaining factors remain individually aligned. This block structure matches the ambiguity
+characterized by the identifiability theorem.
+4
+Conclusion
+We introduced LeJEPA-FGP, a structured extension of LeJEPA that replaces the pointwise isotropic
+Gaussian embedding law with a factorized Gaussian-process law over indexed representations. The key
+idea is to keep the target distribution Gaussian, thereby preserving the Hermite spectral mechanism
+underlying LeJEPA’s linear recovery theory, while enriching the target with channel-wise covariance
+structure. This changes the symmetry of the embedding law: instead of being invariant under arbitrary
+orthogonal rotations, the factorized-GP target distinguishes latent channels through their covariance
+14
+Yuan-Hao Wei
+Table 1: Quantitative verification on synthetic GP signals. Results are reported as mean ± standard
+deviation over three independent runs. For R2 and MCC, higher is better; for signed-permutation MSE
+and cross-kernel error, lower is better.
+Setting
+Method
+Distinct kernels
+Distinct kernels
+Kernel collision
+LeJEPA-FGP
+LeJEPA
+LeJEPA-FGP
+R2 (h → z)
+MCC
+Signed-perm. MSE
+Cross-kernel error
+0.9925 ± 0.0003
+0.9836 ± 0.0046
+0.9946 ± 0.0001
+0.9962 ± 0.0002
+0.9273 ± 0.0324
+0.9470 ± 0.0408
+0.0076 ± 0.0003
+0.1453 ± 0.0647
+0.1061 ± 0.0816
+0.0202 ± 0.0014
+0.2893 ± 0.0614
+0.0188 ± 0.0012
+Figure 3: Absolute correlation between true sources and learned channels. With distinct kernels, LeJEPAFGP recovers a nearly diagonal correlation matrix, corresponding to signed-permutation recovery. Under
+kernel collision, the repeated-kernel components form a 2 × 2 block, while the remaining components are
+individually recovered. This visualizes the block-orthogonal ambiguity predicted by the theory.
+kernels.
+Our theoretical results show that this structured Gaussian regularization yields stronger identifiability.
+First, FGP-SIGReg provides a direct distribution-matching regularizer for factorized GP embedding
+laws through randomly projected characteristic-function matching. Second, under GP-OU positive-pair
+transitions, alignment together with exact FGP law matching forces the learned representation into the
+first Wiener chaos, implying path-linear recovery of the latent GP world. Third, under shared index-local
+encoders, distinct covariance kernels reduce the residual ambiguity to signed permutations, while repeated
+kernels induce the corresponding block-orthogonal ambiguity. In this sense, LeJEPA-FGP turns the linear
+world-model recovery of isotropic Gaussian LeJEPA into factor-identifiable recovery whenever the latent
+channels carry distinct covariance structure.
+The experiments support these predictions on synthetic GP signals. With distinct kernels, LeJEPAFGP consistently recovers the latent factors up to signed permutation and improves channel-level alignment
+relative to pointwise LeJEPA. Under kernel collision, the learned representation recovers the repeated-kernel
+subspace rather than a unique componentwise ordering, matching the block ambiguity predicted by the
+theory. These results show that factorized Gaussian-process regularization provides a principled way to
+inject structured temporal or spatial information into joint-embedding world models while retaining the
+Gaussian foundation of LeJEPA.
+15
+LeJEPA-FGP: Factorized Gaussian Process Regularization for Identifiable Joint-Embedding World Models
+References
+Ashman, M., So, J., Tebbutt, W., Fortuin, V., Pearce, M., and Turner, R. E. (2020). Sparse gaussian
+process variational autoencoders. arXiv preprint arXiv:2010.10177.
+Assran, M., Duval, Q., Misra, I., Bojanowski, P., Vincent, P., Rabbat, M., LeCun, Y., and Ballas, N.
+(2023). Self-supervised learning from images with a joint-embedding predictive architecture. arXiv
+preprint arXiv:2301.08243.
+Balestriero, R. and LeCun, Y. (2025). LeJEPA: Provable and scalable self-supervised learning without the
+heuristics. arXiv preprint arXiv:2511.08544.
+Bardes, A., Ponce, J., and LeCun, Y. (2022). VICReg: Variance-invariance-covariance regularization for
+self-supervised learning. International Conference on Learning Representations.
+Bing, S., Fortuin, V., and Rätsch, G. (2021). On disentanglement in gaussian process variational
+autoencoders. arXiv preprint arXiv:2102.05507.
+Caron, M., Touvron, H., Misra, I., Jégou, H., Mairal, J., Bojanowski, P., and Joulin, A. (2021). Emerging
+properties in self-supervised vision transformers. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, pages 9650–9660.
+Casale, F. P., Dalca, A. V., Saglietti, L., Listgarten, J., and Fusi, N. (2018). Gaussian process prior
+variational autoencoders. In Advances in Neural Information Processing Systems, volume 31.
+Chen, X. and He, K. (2021). Exploring simple siamese representation learning. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 15750–15758.
+Fortuin, V., Baranchuk, D., Rätsch, G., and Mandt, S. (2020). GP-VAE: Deep probabilistic time series
+imputation. arXiv preprint arXiv:1907.04155.
+Grill, J.-B., Strub, F., Altchë, F., Tallec, C., Richemond, P. H., Buchatskaya, E., Doersch, C., Ávila Pires,
+B., Guo, Z. D., Azar, M. G., Piot, B., Kavukcuoglu, K., Munos, R., and Valko, M. (2020). Bootstrap
+your own latent: A new approach to self-supervised learning. Advances in Neural Information Processing
+Systems, 33:21271–21284.
+Ha, D. and Schmidhuber, J. (2018). World models. arXiv preprint arXiv:1803.10122.
+Hälvä, H., So, J., Turner, R. E., and Hyvärinen, A. (2024). Identifiable feature learning for spatial data
+with nonlinear ICA. In Proceedings of The 27th International Conference on Artificial Intelligence and
+Statistics, volume 238 of Proceedings of Machine Learning Research.
+Hyvärinen, A., Sasaki, H., and Turner, R. E. (2019). Nonlinear ICA using auxiliary variables and
+generalized contrastive learning. In Proceedings of the 22nd International Conference on Artificial
+Intelligence and Statistics, volume 89 of Proceedings of Machine Learning Research, pages 859–868.
+Jazbec, M., Pearce, M., and Fortuin, V. (2020). Factorized gaussian process variational autoencoders.
+arXiv preprint arXiv:2011.07255.
+Khemakhem, I., Kingma, D. P., Monti, R. P., and Hyvärinen, A. (2020). Variational autoencoders and
+nonlinear ICA: A unifying framework. In Proceedings of the 23rd International Conference on Artificial
+Intelligence and Statistics, volume 108 of Proceedings of Machine Learning Research, pages 2207–2217.
+Kingma, D. P. and Welling, M. (2014). Auto-encoding variational bayes. In International Conference on
+Learning Representations.
+16
+Yuan-Hao Wei
+Klindt, D., LeCun, Y., and Balestriero, R. (2026). When does LeJEPA learn a world model? arXiv
+preprint arXiv:2605.26379.
+LeCun, Y. (2022). A path towards autonomous machine intelligence. OpenReview. Position paper.
+Rasmussen, C. E. and Williams, C. K. I. (2006). Gaussian Processes for Machine Learning. MIT Press.
+Zbontar, J., Jing, L., Misra, I., LeCun, Y., and Deny, S. (2021). Barlow twins: Self-supervised learning
+via redundancy reduction. In Proceedings of the 38th International Conference on Machine Learning,
+volume 139 of Proceedings of Machine Learning Research, pages 12310–12320.
+Zhu, H., Rodas, C. B., and Li, Y. (2022). Markovian gaussian process variational autoencoders. arXiv
+preprint arXiv:2207.05543.
+17

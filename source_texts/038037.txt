@@ -1,0 +1,2628 @@
+A lightweight, script-driven game engine your AI can drive — download the SDK, then let your AI build the game. - Improve volumetric lighting and emissive glow proxies by sunxfancy · Pull Request #462 · EVEngine/EVEngine
+
+Improve volumetric lighting and emissive glow proxies by sunxfancy · Pull Request #462 · EVEngine/EVEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+sunxfancy
+commented
+Sep 26, 2026
+•
+edited by cursor
+Bot
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Summary
+Wire Light2D/Light3D volumetric flags into screenspace shafts and froxel scene-light integration; add volumetricOnly emissive proxies (C++ / EveScript / editor / example).
+Improve shaft/raymarch/fog quality (dual-lobe scatter, soft shadows, dithering, anisotropy packing) with matching SPIR-V and WGSL.
+Address Qodo review (proxy ranking before maxLights, Camera2D world→screen, Additive multipass, frustum AABB for pending proxies, bounds validation, raymarch correctness).
+Clear Source-quality fallback-contract-inventory growth by rewording comment-line "fallback" hits.
+Test plan
+PYTHONPATH=scripts python3 scripts/check_quality_metadata.py — fallback inventory back to baseline 71
+Volumetric unit tests (prior push) including froxel ranking / occlusion alias checks
+CI Source quality + Linux after this push
+cursoragent
+and others
+added 2 commits
+September 26, 2026 16:19
+Improve volumetric lighting: wire lights, emissive proxies, shader qu…
+…
+63e1924
+```
+…ality
+
+Connect Light2D/Light3D volumetric flags into screenspace multipass shafts and
+froxel local-light integration. Add createEmissiveProxy / volumetricOnly so
+glowing props can drive media without double-lighting surfaces. Raise
+screenspace/raymarch/fog shader quality (dual-lobe HG, soft SS shadows,
+dither) and expose anisotropy plus driveFromLight APIs.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+```
+Document Light2D/3D get/setVolumetricOnly for binding check
+…
+3d66487
+```
+Source quality failed because the new Squirrel bindings were not listed
+in docs/usr/modules/graphics.md.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+```
+sunxfancy
+marked this pull request as ready for review
+September 27, 2026 03:04
+qodo-code-review
+Bot
+commented
+Sep 27, 2026
+Copy link
+Copy Markdown
+PR Summary by Qodo
+Wire scene lights into volumetrics and add emissive glow proxies
+✨ Enhancement 🧪 Tests 📝 Documentation 🕐 40+ Minutes
+AI Description
+```
+• Connect volumetric Light2D/Light3D flags to shafts and froxel scene-light integration.
+• Add volumetric-only emissive proxies across C++, scripts, editor, and examples.
+• Improve scattering, shadows, dithering, density, documentation, and regression coverage.
+```
+Diagram
+```
+graph TD
+  A["Scripts and Editor"] --> B["ECS Light Proxies"] --> C["Volumetric APIs"] --> D["Light Collection"] --> E["2D Shafts"] --> H["Volumetric Shaders"]
+  D --> F["Froxel Integration"] --> H
+  C --> G["Raymarch Settings"] --> H
+```
+Loading
+High-Level Assessment
+The following are alternative approaches to this PR:
+1. Automatically derive lights from emissive materials
+➕ Removes manual proxy creation for common glowing materials
+➕ Keeps material and volumetric color synchronized automatically
+➖ Requires renderer-wide material analysis or baking
+➖ Cannot reliably infer radius, intensity, or intended media contribution
+➖ Risks creating excessive local lights and unpredictable performance
+2. Integrate volumetrics directly into surface-light packing
+➕ Reuses existing renderer light lists and selection logic
+➕ Could reduce duplicate ECS traversal
+➖ Couples volumetric limits and behavior to surface-light constraints
+➖ Makes volumetric-only proxies harder to represent cleanly
+➖ Mixes 2D shafts, froxels, and PBR responsibilities
+Recommendation: Keep the explicit volumetric proxy and dedicated collection approach. It provides predictable artistic control, prevents emissive surfaces from being double-lit, and preserves separation from surface-light packing; automatic emissive-material extraction is better treated as a later opt-in baking feature.
+Files changed (24) +1972 / -1067
+Enhancement (13) +644 / -34
+Graphics.cppExpose volumetric lighting APIs to Squirrel +79/-0
+Expose volumetric lighting APIs to Squirrel
+```
+• Binds volumetric-only light properties, emissive proxy factories, anisotropy controls, scene-light driving, 2D collection and scattering, froxel integration, and one-shot proxy injection. Fallible methods project Result diagnostics into the scripting runtime.
+```
+src/modules/graphics/Graphics.cpp
+Light.cppImplement 2D and 3D emissive light proxies +31/-0
+Implement 2D and 3D emissive light proxies
+```
+• Creates preconfigured point lights that contribute only to volumetric rendering, including disabled shadow casting for 3D proxies. Implements volumetricOnly getters and setters for both light types.
+```
+src/modules/graphics/Light.cpp
+Light.hDefine volumetric-only light state and proxy factories +37/-0
+Define volumetric-only light state and proxy factories
+```
+• Adds volumetricOnly state to Light2D and Light3D data, along with documented emissive proxy factories and property accessors. The contracts describe ownership, expected radiance, radius, and intended rendering behavior.
+```
+src/modules/graphics/Light.h
+RenderSystem.cppExclude 2D volumetric proxies from surface lighting +1/-0
+Exclude 2D volumetric proxies from surface lighting
+```
+• Skips volumetricOnly Light2D entities while packing regular 2D surface lights, preventing emissive proxies from lighting sprites twice.
+```
+src/modules/graphics/RenderSystem.cpp
+RenderSystem3D.cppExclude 3D volumetric proxies from PBR lighting +1/-0
+Exclude 3D volumetric proxies from PBR lighting
+```
+• Filters volumetricOnly Light3D entities from the mesh-light pack so emissive props can affect media without adding duplicate surface illumination.
+```
+src/modules/graphics/RenderSystem3D.cpp
+Volumetric.cppSupport anisotropy packing and pending emissive integration +22/-5
+Support anisotropy packing and pending emissive integration
+```
+• Replaces the raymarch shadow-step uniform with a packed shadow-step and anisotropy value across quality presets. Routes pending emissive proxies through local-light froxel integration and clears them after consumption.
+```
+src/modules/graphics/Volumetric.cpp
+Volumetric.hAdd scene-light and emissive volumetric interfaces +81/-1
+Add scene-light and emissive volumetric interfaces
+```
+• Declares anisotropy controls, 3D scene-light collection and driving, froxel scene-light integration, multi-source 2D shaft APIs, and one-shot emissive injection. Adds pending proxy storage and supporting internal helpers.
+```
+src/modules/graphics/Volumetric.h
+VolumetricLights.cppImplement volumetric scene-light orchestration +318/-0
+Implement volumetric scene-light orchestration
+```
+• Introduces the dedicated implementation for filtering and ranking volumetric ECS lights, projecting Light3D positions, driving shaft parameters, integrating local froxel lights, and rendering multi-source Light2D shafts. It also validates and queues one-shot emissive proxies and manages packed raymarch anisotropy.
+```
+src/modules/graphics/VolumetricLights.cpp
+LightingRuntime.cppApply volumetric-only editor state at runtime +3/-0
+Apply volumetric-only editor state at runtime
+```
+• Reads the optional volumetric.only document property and applies it to runtime Light3D entities while remaining compatible with older documents.
+```
+src/modules/graphics/lighting/editing/LightingRuntime.cpp
+LightingTarget.cppAdd volumetric-only light editor property +2/-0
+Add volumetric-only light editor property
+```
+• Extends the light property schema with a boolean volumetric.only field in the volumetric editor group.
+```
+src/modules/graphics/lighting/editing/LightingTarget.cpp
+volumetric_fog.fragUse dual-lobe scattering in volumetric fog +4/-1
+Use dual-lobe scattering in volumetric fog
+```
+• Combines forward and softened backscatter Henyey–Greenstein lobes to preserve directional shafts while adding more natural fill lighting.
+```
+src/modules/graphics/shaders/volumetric_fog.frag
+volumetric_post.fragReduce screenspace shaft banding and hard alpha +10/-5
+Reduce screenspace shaft banding and hard alpha
+```
+• Adds temporal-spatial sample dithering, soft-knee brightness rejection, subtle haze variation, and exponential shaft alpha. These changes reduce radial bands, dim occlusion noise, and hard overlap clipping.
+```
+src/modules/graphics/shaders/volumetric_post.frag
+volumetric_raymarch.fragImprove raymarched scattering and shadows +55/-22
+Improve raymarched scattering and shadows
+```
+• Adds configurable dual-lobe anisotropic scattering, soft screen-space penumbrae, spatial step jitter, height-modulated density, coherent wisps, axis-weighted dust, and softer additive alpha. Shadow steps and anisotropy share one packed uniform slot for compatibility.
+```
+src/modules/graphics/shaders/volumetric_raymarch.frag
+Tests (1) +120 / -0
+Volumetric.cppCover emissive proxies and scene-light volumetrics +120/-0
+Cover emissive proxies and scene-light volumetrics
+```
+• Adds tests for volumetricOnly state, proxy defaults, surface-light exclusion intent, anisotropy, 3D collection and driving, one-shot and ECS froxel integration, and multi-source 2D occlusion and scattering.
+```
+test/Volumetric.cpp
+Documentation (3) +30 / -6
+体积光模块设计.mdDocument scene-light wiring and emissive proxy architecture +20/-1
+Document scene-light wiring and emissive proxy architecture
+```
+• Updates the volumetric design status and catalogs the new Light2D, Light3D, froxel, shaft, proxy, and anisotropy APIs. It also explains the recommended emissive-material, bloom, and volumetric-proxy combination.
+```
+docs/dev/体积光模块设计.md
+graphics.mdList volumetric-only light accessors in graphics bindings +2/-2
+List volumetric-only light accessors in graphics bindings
+```
+• Adds getVolumetricOnly and setVolumetricOnly to the documented graphics API surface so binding checks recognize the new methods.
+```
+docs/usr/modules/graphics.md
+rendering-effects.mdExpand volumetric effect usage guidance +8/-3
+Expand volumetric effect usage guidance
+```
+• Documents multi-light screenspace shafts, Light3D-driven raymarching, froxel scene-light integration, anisotropy, and emissive proxy creation. Clarifies that proxies affect media while PBR emissive materials and bloom provide surface glow.
+```
+docs/usr/modules/graphics/rendering-effects.md
+Other (7) +1178 / -1027
+main.nutDemonstrate one-shot emissive froxel injection +6/-3
+Demonstrate one-shot emissive froxel injection
+```
+• Adds a warm local emissive proxy before froxel integration and adjusts ambient lighting to demonstrate localized volumetric glow without surface double-lighting.
+```
+examples/atmospheric-fog/main.nut
+volumetric_cloud_frag_spv.incRegenerate embedded volumetric cloud SPIR-V +3/-3
+Regenerate embedded volumetric cloud SPIR-V
+```
+• Refreshes descriptor decoration ordering in the embedded cloud fragment shader binary as part of shader artifact regeneration.
+```
+src/modules/graphics/shaders/volumetric_cloud_frag_spv.inc
+volumetric_directional_cookie_frag_spv.incRegenerate directional cookie SPIR-V +5/-5
+Regenerate directional cookie SPIR-V
+```
+• Refreshes descriptor set and binding decoration ordering in the embedded directional-cookie fragment shader artifact.
+```
+src/modules/graphics/shaders/volumetric_directional_cookie_frag_spv.inc
+volumetric_fog_frag_spv.incEmbed the improved volumetric fog shader +363/-351
+Embed the improved volumetric fog shader
+```
+• Regenerates the fog fragment SPIR-V to include the new dual-lobe phase calculation.
+```
+src/modules/graphics/shaders/volumetric_fog_frag_spv.inc
+volumetric_froxel_frag_spv.incRegenerate embedded froxel SPIR-V +4/-4
+Regenerate embedded froxel SPIR-V
+```
+• Refreshes descriptor set and binding decoration ordering in the embedded froxel fragment shader artifact.
+```
+src/modules/graphics/shaders/volumetric_froxel_frag_spv.inc
+volumetric_post_frag_spv.incEmbed the improved screenspace shaft shader +245/-218
+Embed the improved screenspace shaft shader
+```
+• Regenerates the post-process fragment SPIR-V with dithering, soft-knee occlusion, haze variation, and softened alpha behavior.
+```
+src/modules/graphics/shaders/volumetric_post_frag_spv.inc
+volumetric_raymarch_frag_spv.incEmbed the enhanced raymarch shader +552/-443
+Embed the enhanced raymarch shader
+```
+• Regenerates the raymarch fragment SPIR-V with the new anisotropy, shadow, dithering, density, dust, and alpha calculations.
+```
+src/modules/graphics/shaders/volumetric_raymarch_frag_spv.inc
+qodo-code-review
+Bot
+commented
+Sep 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Code Review by Qodo
+🐞 Bugs (0) 📘 Rule violations (0) 📜 Skill insights (0)
+1. Occlusion passes violate GPU usage ✓ Resolved 🐞 Bug ☼ Reliability
+Description
+```
+scatterFromSceneLights2D permits the occlusion texture to be the texture of the currently bound
+destination canvas, and the added test exercises exactly that configuration. Vulkan and WebGPU then
+bind one image simultaneously as a color attachment and sampled texture without a copy or supported
+feedback mechanism.
+```
+Code
+test/Volumetric.cpp[R368-370]
+```
++    auto passes = vol->scatterFromSceneLights2D(gfx, occ->getTexture(), nullptr);
++    REQUIRE(passes.ok());
++    CHECK(passes.value() == 2);
+```
+Evidence
+```
+The test keeps occ bound and passes occ->getTexture() to the scatter method. That method
+forwards the texture to fullscreen draws without alias detection; backend code subsequently uses the
+current canvas as the color attachment and each batch texture as a sampled resource.
+```
+test/Volumetric.cpp[353-370]
+src/modules/graphics/VolumetricLights.cpp[269-292]
+src/modules/graphics/Volumetric.cpp[603-612]
+src/modules/graphics/vulkan/GraphicsOffscreen.cpp[25-44]
+src/modules/graphics/vulkan/GraphicsOffscreen.cpp[88-153]
+src/modules/graphics/webgpu/Graphics.cpp[4968-4985]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+The new multipass workflow samples the active occlusion canvas while simultaneously rendering its scatter result back into that canvas.
+
+## Fix Focus Areas
+- test/Volumetric.cpp[353-370]
+- src/modules/graphics/VolumetricLights.cpp[269-292]
+- src/modules/graphics/Volumetric.cpp[603-612]
+
+## Recommended Fix
+Require the scatter destination to differ from the occlusion canvas, switch the test and documented workflow to a separate output target, and return `InvalidArgument` when the sampled texture aliases the active canvas. Alternatively, explicitly copy the occlusion texture before beginning the destination render pass.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+2. Glow proxies disappear away from origin ✓ Resolved 🐞 Bug ≡ Correctness
+Description
+```
+The pending-proxy branch in integrateFroxel passes integrateLocalLights an origin-centered
+[-farZ_, farZ_] cube, while media injection reconstructs froxel world positions using the active
+camera’s invViewProj_. When the camera is translated or rotated, nearby emissive proxies are
+evaluated against unrelated world positions, and a proxy outside the fixed cube cannot contribute to
+any visible froxel.
+```
+Code
+src/modules/graphics/Volumetric.cpp[R777-780]
+```
++        const glm::vec3 worldMin(-farZ_, -farZ_, -farZ_);
++        const glm::vec3 worldMax(farZ_, farZ_, farZ_);
++        atmosphereVolume_->integrateLocalLights(pendingEmissiveProxies_, worldMin, worldMax,
++                                                ambient * std::max(phaseScale, 0.f));
+```
+Evidence
+```
+The changed code constructs integration bounds solely from farZ_, even though setCamera stores
+the translated and rotated camera transform in invViewProj_ and the frustum injection path uses it
+to reconstruct world positions. Because integrateLocalLights treats the supplied bounds as a
+literal AABB, interpolates positions within them, and measures each world-space light’s distance
+from those positions, the origin-centered approximation directly changes which froxels receive
+light.
+```
+src/modules/graphics/Volumetric.cpp[773-782]
+src/modules/graphics/Volumetric.cpp[389-407]
+src/modules/graphics/AtmosphereVolume.cpp[82-104]
+src/modules/graphics/AtmosphereVolume.cpp[239-260]
+src/modules/graphics/Volumetric.cpp[393-411]
+src/modules/graphics/Volumetric.cpp[773-780]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+The one-shot pending emissive-proxy path maps froxels through an origin-centered AABB, even though froxel media injection reconstructs them through the current camera's inverse view-projection matrix. This causes local volumetric emission to be evaluated at unrelated world positions for cameras away from the origin or with non-default orientation.
+
+## Fix Focus Areas
+- src/modules/graphics/Volumetric.cpp[773-782]
+- src/modules/graphics/AtmosphereVolume.cpp[239-276]
+- src/modules/graphics/AtmosphereVolume.cpp[82-104]
+
+## Recommended Fix
+Implement a camera-aware local-light integration path that reconstructs each froxel's world position from the active inverse view-projection matrix and its slice depth, matching the frustum injection routines, and use it for pending emissive proxies. Alternatively, require and use explicit world bounds consistent with the caller's froxel volume; do not approximate the visible volume as an origin-centered cube.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+3. Busy scenes discard emissive proxies ✓ Resolved 🐞 Bug ≡ Correctness
+Description
+```
+integrateFroxelFromSceneLights fills the entire light budget with scene lights before considering
+pending emissive proxies, then clears every proxy even when none fitted. Whenever eligible scene
+lights reach maxLights, all one-shot proxies injected for that integration disappear without
+contributing.
+```
+Code
+src/modules/graphics/VolumetricLights.cpp[R215-219]
+```
++    for (const VolumetricLight &proxy : pendingEmissiveProxies_) {
++        if (int(lights.size()) >= maxLights) break;
++        lights.push_back(proxy);
++    }
++    clearPendingEmissiveProxies();
+```
+Evidence
+```
+collectSceneLights3D already truncates its output to maxLights. The subsequent loop immediately
+stops when that cap has been reached, but clearPendingEmissiveProxies still removes all queued
+proxies.
+```
+src/modules/graphics/VolumetricLights.cpp[121-126]
+src/modules/graphics/VolumetricLights.cpp[211-219]
+src/modules/graphics/Volumetric.h[258-263]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+Scene lights consume the complete integration budget before pending emissive proxies are considered, and skipped proxies are then cleared.
+
+## Fix Focus Areas
+- src/modules/graphics/VolumetricLights.cpp[211-219]
+- src/modules/graphics/VolumetricLights.cpp[121-126]
+
+## Recommended Fix
+Combine scene lights and pending proxies before applying `maxLights`, then rank or reserve capacity according to an explicit policy. Clear only proxies that were actually consumed by the integration call.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+View high (1)
+4. 2D shafts miss camera-following lights ✓ Resolved 🐞 Bug ≡ Correctness
+Description
+```
+beginOcclusionMapFromSceneLights2D draws each Light2D::Data::x/y as target pixels, while
+scatterFromSceneLights2D converts the same untransformed world coordinates into UVs instead of
+applying the active Camera2D transform. When the camera is translated or zoomed, regular light
+packing transforms positions using the camera and viewport while these volumetric paths do not,
+causing both occlusion cores and shaft origins to diverge from the surfaces illuminated by those
+lights.
+```
+Code
+src/modules/graphics/VolumetricLights.cpp[R262-263]
+```
++        gfx->drawSolidRect(d->x - r, d->y - r, r * 2.f, r * 2.f,
++                           Color(lum, lum, lum, 1.f));
+```
+Evidence
+```
+The new volumetric helpers pass raw d->x and d->y values directly to pixel-space drawing and
+setLightScreenPos, while the established renderer and surface-light packing map world-space
+positions through the active camera using (world - camera) * zoom + viewport/2. These citations
+show that the paths produce different screen positions whenever camera translation or zoom is
+active.
+```
+src/modules/graphics/VolumetricLights.cpp[243-263]
+src/modules/graphics/VolumetricLights.cpp[280-289]
+src/modules/graphics/RenderSystem.cpp[218-246]
+src/modules/graphics/RenderSystem.cpp[172-190]
+src/modules/graphics/RenderSystem.cpp[219-230]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+The scene-light occlusion and scattering helpers treat `Light2D` world coordinates as target pixels, bypassing the `Camera2D` transform used by normal rendering and surface-light packing. This makes 2D volumetric cores and shaft origins diverge from the corresponding rendered lights whenever a camera offset or zoom is active.
+
+## Fix Focus Areas
+- src/modules/graphics/VolumetricLights.cpp[243-263]
+- src/modules/graphics/VolumetricLights.cpp[280-289]
+- src/modules/graphics/RenderSystem.cpp[172-190]
+- src/modules/graphics/RenderSystem.cpp[218-246]
+
+## Recommended Fix
+Resolve the active `Camera2D` for the selected canvas and use the same shared transform and zoom rules as the normal 2D render path. Transform each point light position into target-canvas pixel space before drawing its occlusion core and before calling `setLightScreenPos`, and apply the camera zoom to the core radius.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+5. WebGPU ignores anisotropy controls ✓ Resolved 🐞 Bug ≡ Correctness
+Description
+```
+setAnisotropy uploads the new packed value for every backend, but the WebGPU raymarch shader
+neither reads that slot nor implements the new phase function. WebGPU users therefore see no
+anisotropy change, and its raymarch output remains substantially different from the updated SPIR-V
+path.
+```
+Code
+src/modules/graphics/VolumetricLights.cpp[R82-85]
+```
++void Volumetric::setAnisotropy(float g) {
++    anisotropy_ = std::clamp(g, -0.99f, 0.99f);
++    uploadRayMarchShadowAnisotropy();
++}
+```
+Evidence
+```
+The setter writes shadowAnisoPack, and the GLSL shader unpacks it into g. The selected WGSL ray
+shader instead uses a fixed expression based on light.y and never accesses uniform slot 29.
+```
+src/modules/graphics/VolumetricLights.cpp[70-85]
+src/modules/graphics/Volumetric.cpp[35-36]
+src/modules/graphics/shaders/volumetric_raymarch.frag[100-108]
+src/modules/graphics/shaders/VolumetricWgsl.h[11-15]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+The public anisotropy control only affects the SPIR-V raymarch implementation because the selected WGSL shader ignores the packed uniform.
+
+## Fix Focus Areas
+- src/modules/graphics/VolumetricLights.cpp[70-85]
+- src/modules/graphics/shaders/VolumetricWgsl.h[11-15]
+- src/modules/graphics/shaders/volumetric_raymarch.frag[100-108]
+
+## Recommended Fix
+Update the WebGPU raymarch shader to unpack the anisotropy fraction from uniform slot 29 and use it in the same dual-lobe phase calculation as the GLSL shader. Add a backend-specific test proving that changing anisotropy changes WebGPU output.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+6. Raymarch samples run past scene depth ✓ Resolved 🐞 Bug ≡ Correctness
+Description
+```
+The dithered raymarch initializes pos at jitter * stepLen but advances it by a full step before
+sampling, while t still represents only the jittered offset. Every invocation therefore skips the
+camera-adjacent interval, makes density and occlusion sampling disagree with the reconstructed ray,
+and can sample fog or light from behind geometry when the last position extends beyond endPos.
+```
+Code
+src/modules/graphics/shaders/volumetric_raymarch.frag[127]
+```
++  vec3 pos = camPos + rayDir * stepLen * jitter;
+```
+Evidence
+```
+maxDist is the camera-to-scene-point distance and stepLen divides it by the sample count;
+initialization advances pos by jitter * stepLen, and the loop advances it by another full step
+before each sample without adding that step to the normalized parameter. Across samples
+iterations, the final position is therefore (samples + jitter) * stepLen, which exceeds maxDist
+whenever jitter is positive.
+```
+src/modules/graphics/shaders/volumetric_raymarch.frag[118-138]
+src/modules/graphics/shaders/volumetric_raymarch.frag[121-140]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+Raymarch position initialization and loop advancement apply the dither offset inconsistently, shifting every sample forward. The first evaluated position is one full step farther than the normalized jitter parameter describes, and the final position can pass the reconstructed surface.
+
+## Fix Focus Areas
+- src/modules/graphics/shaders/volumetric_raymarch.frag[121-140]
+- src/modules/graphics/shaders/volumetric_raymarch_frag_spv.inc[1-552]
+
+## Recommended Fix
+Place sample `i` at `camPos + rayDir * stepLen * (float(i) + jitter)` by sampling the initialized jittered position before advancing it, or by initializing the position one step behind that sample. Do not add another step before evaluation; keep `pos`, `t`, and total marched distance based on `(float(i) + jitter) / float(samples)` so the final position remains within `endPos`, then regenerate the embedded SPIR-V.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+7. Overlapping shafts erase earlier light ✓ Resolved 🐞 Bug ≡ Correctness
+Description
+```
+scatterFromSceneLights2D renders each independent light using ordinary source-alpha compositing,
+whose destination factor attenuates all previously accumulated shafts. Overlapping results therefore
+depend on sorted light order and become dimmer than an additive multi-light result.
+```
+Code
+src/modules/graphics/VolumetricLights.cpp[R284-290]
+```
++    for (const PackedVol2D &pl : lights) {
++        const auto *d = pl.data;
++        setLightScreenPos(d->x, d->y, w, h);
++        setShaftColor(std::max(d->r, 0.f), std::max(d->g, 0.f), std::max(d->b, 0.f));
++        setIntensity(std::max(d->intensity, 0.f) * std::max(d->volumetricIntensity, 0.f));
++        scatter(gfx, occlusion);
++        ++passes;
+```
+Evidence
+```
+The method issues one fullscreen draw per sorted light. drawFullscreen uses the graphics API's
+default alpha blend, while the shader emits unpremultiplied RGB and luminance-derived alpha, making
+each pass source-over rather than additive.
+```
+src/modules/graphics/VolumetricLights.cpp[59-60]
+src/modules/graphics/VolumetricLights.cpp[283-290]
+src/modules/graphics/Volumetric.cpp[603-612]
+src/modules/graphics/shaders/volumetric_post.frag[85-90]
+src/modules/graphics/Graphics.h[700-718]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+Repeated shaft passes use source-over alpha blending, so each new light suppresses part of the light accumulated by earlier passes.
+
+## Fix Focus Areas
+- src/modules/graphics/VolumetricLights.cpp[283-291]
+- src/modules/graphics/Volumetric.cpp[603-612]
+- src/modules/graphics/shaders/volumetric_post.frag[85-90]
+
+## Recommended Fix
+Render shaft-only passes into a separate accumulator using explicit additive blending, with RGB and alpha output appropriate for that blend mode. Composite the completed accumulator over the destination once.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+View medium (5)
+8. Glow radius settings are ignored ✓ Resolved 🐞 Bug ≡ Correctness
+Description
+```
+beginOcclusionMapFromSceneLights2D sizes every glow core from defaultRadiusPixels and volumetric
+intensity rather than the light's configured radius. Consequently, changing the radius supplied to
+createEmissiveProxy has no effect on the new 2D volumetric path.
+```
+Code
+src/modules/graphics/VolumetricLights.cpp[R258-263]
+```
++        const float boost = std::clamp(d->volumetricIntensity, 0.25f, 4.f);
++        const float r = std::max(baseR * boost, 1.f);
++        const float lum = std::clamp(std::max({d->r, d->g, d->b}) * d->intensity * boost, 0.35f,
++                                     1.f);
++        gfx->drawSolidRect(d->x - r, d->y - r, r * 2.f, r * 2.f,
++                           Color(lum, lum, lum, 1.f));
+```
+Evidence
+```
+createEmissiveProxy stores the supplied radius, but the new occlusion method computes one shared
+baseR and never reads d->radius. The public declaration explicitly describes radius as the glow
+core's falloff radius.
+```
+src/modules/graphics/Light.cpp[13-22]
+src/modules/graphics/Light.h[66-78]
+src/modules/graphics/VolumetricLights.cpp[243-263]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+Per-light radius is stored and documented as the proxy's falloff radius but is ignored when generating 2D occlusion cores.
+
+## Fix Focus Areas
+- src/modules/graphics/VolumetricLights.cpp[243-263]
+- src/modules/graphics/Light.cpp[13-22]
+
+## Recommended Fix
+Use each light's positive `radius`, transformed by camera zoom when applicable, as its core radius. Reserve `defaultRadiusPixels` as a fallback only for lights without a usable configured radius.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+9. Rear lights cast forward shafts ✓ Resolved 🐞 Bug ≡ Correctness
+Description
+```
+projectWorldToScreenUV accepts any nonzero clip-space w, including the negative value produced
+by a point behind the camera. driveFromLight3D then uses that mirrored projection as a visible
+shaft origin, so an off-camera rear light can create shafts on the front view.
+```
+Code
+src/modules/graphics/VolumetricLights.cpp[R30-33]
+```
++    const glm::vec4 clip = viewProj * glm::vec4(world, 1.f);
++    if (std::fabs(clip.w) < 1e-6f) return false;
++    const float ndcX = clip.x / clip.w;
++    const float ndcY = clip.y / clip.w;
+```
+Evidence
+```
+The helper rejects only values near zero and otherwise divides by negative w normally. The
+point-light path accepts that result and stores its clamped UV, while the camera uses a right-handed
+perspective projection where front-facing and behind-camera points have opposite clip-space W signs.
+```
+src/modules/graphics/VolumetricLights.cpp[28-38]
+src/modules/graphics/VolumetricLights.cpp[160-172]
+src/modules/graphics/Volumetric.cpp[393-411]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+World-to-screen projection treats behind-camera points as valid because it checks only the absolute magnitude of clip-space W.
+
+## Fix Focus Areas
+- src/modules/graphics/VolumetricLights.cpp[28-38]
+- src/modules/graphics/VolumetricLights.cpp[160-172]
+
+## Recommended Fix
+Require a positive front-facing clip-space W before dividing, and reject points outside the valid camera depth interval. Have `driveFromLight3D` explicitly disable or report unavailable screen-space shafts when projection fails instead of retaining a stale UV.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+10. Zero directions keep stale shaft target ✓ Resolved 🐞 Bug ☼ Reliability
+Description
+```
+driveFromLight3D first delegates a zero direction to setLightDirection, which safely chooses a
+fallback, but then independently normalizes the original zero vector when constructing
+towardLight. A directional light whose direction is set to zero therefore leaves the previous
+screen UV in place while the method reports success, so its shafts target an unrelated light
+position.
+```
+Code
+src/modules/graphics/VolumetricLights.cpp[153]
+```
++        const glm::vec3 towardLight = eye + glm::normalize(glm::vec3(d->dx, d->dy, d->dz)) * farZ_;
+```
+Evidence
+```
+The established setter explicitly substitutes a fallback direction for vectors shorter than the
+threshold, but the new code independently normalizes the raw value and then skips UV assignment when
+its result is non-finite.
+```
+src/modules/graphics/VolumetricLights.cpp[147-156]
+src/modules/graphics/VolumetricLights.cpp[28-37]
+src/modules/graphics/Volumetric.cpp[365-377]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+The directional drive path validates the direction through `setLightDirection` but then normalizes the unvalidated source vector for screen-target projection. A zero source vector produces non-finite projection input and preserves an old shaft UV despite returning success.
+
+## Fix Focus Areas
+- src/modules/graphics/VolumetricLights.cpp[147-156]
+- src/modules/graphics/Volumetric.cpp[365-377]
+
+## Recommended Fix
+Normalize the direction once with the same zero-vector fallback used by `setLightDirection`, then use that validated vector for both the uploaded direction and `towardLight` projection. Alternatively reject a zero directional-light vector with an InvalidArgument result.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+11. Soft shadows use undefined math ✓ Resolved 🐞 Bug ☼ Reliability
+Description
+```
+The new penumbra calculation calls smoothstep with the lower edge greater than the upper edge.
+GLSL defines that ordering as undefined, so shadow softness can vary across compilers or drivers
+rather than producing the intended reversed gradient.
+```
+Code
+src/modules/graphics/shaders/volumetric_raymarch.frag[R82-85]
+```
++    if (blocker > 0.002 && d + 0.003 < startDepth) {
++      // Soften with distance from the first blocker (penumbra).
++      penumbra = min(penumbra, smoothstep(0.03, 0.0, blocker));
++      shadow *= mix(0.12, 0.55, penumbra);
+```
+Evidence
+```
+The shader passes 0.03 as edge0 and 0.0 as edge1. The GLSL reference states that
+smoothstep results are undefined when edge0 is greater than or equal to edge1.
+```
+src/modules/graphics/shaders/volumetric_raymarch.frag[79-86]
+🌐 The GLSL reference states that smoothstep results are undefined when edge0 is greater than or equal to edge1.
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+The soft-shadow shader relies on a reversed-edge `smoothstep`, whose result is undefined by GLSL.
+
+## Fix Focus Areas
+- src/modules/graphics/shaders/volumetric_raymarch.frag[79-86]
+- src/modules/graphics/shaders/volumetric_raymarch_frag_spv.inc[1-552]
+
+## Recommended Fix
+Replace the expression with `1.0 - smoothstep(0.0, 0.03, blocker)` or an equivalent explicitly defined reversed gradient, then regenerate the embedded SPIR-V include.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+12. World bounds can poison froxels ✓ Resolved 🐞 Bug ☼ Reliability
+Description
+```
+integrateFroxelFromSceneLights passes caller-provided worldMin and worldMax directly into
+integration without checking finiteness or ordering. Script callers can therefore propagate NaNs
+into every integrated color or reverse an axis so lights are evaluated at unintended world
+positions.
+```
+Code
+src/modules/graphics/VolumetricLights.cpp[R221-227]
+```
++    const glm::vec3 ambient(std::max(ambientR, 0.f), std::max(ambientG, 0.f),
++                            std::max(ambientB, 0.f));
++    if (lights.empty()) {
++        atmosphereVolume_->integrate(ambient, 1.f);
++        return Result<void>::success();
++    }
++    atmosphereVolume_->integrateLocalLights(lights, worldMin, worldMax, ambient);
+```
+Evidence
+```
+The script binding accepts arbitrary floating-point components, and the integration method forwards
+them unchanged. AtmosphereVolume uses their difference to calculate world coordinates and then
+feeds those coordinates into distance and radiance calculations.
+```
+src/modules/graphics/Graphics.cpp[736-748]
+src/modules/graphics/VolumetricLights.cpp[200-227]
+src/modules/graphics/AtmosphereVolume.cpp[247-272]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+The fallible scene-light integration API accepts non-finite or reversed world bounds and passes them into froxel coordinate and lighting calculations.
+
+## Fix Focus Areas
+- src/modules/graphics/VolumetricLights.cpp[200-227]
+- src/modules/graphics/Graphics.cpp[736-748]
+
+## Recommended Fix
+Before collecting or clearing pending lights, require every bound component to be finite and require `worldMin` to be strictly less than `worldMax` on each axis. Return `InvalidArgument` when validation fails.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+13. Documented glow factory does not exist ✓ Resolved 🐞 Bug ⚙ Maintainability
+Description
+```
+The user documentation says scripts can call Light*.createEmissiveProxy, but the added bindings
+register only top-level eve.createEmissiveLight2D and eve.createEmissiveLight3D functions.
+Scripts following the documented class-factory form fail because neither light class receives such a
+static binding.
+```
+Code
+docs/usr/modules/graphics/rendering-effects.md[R86-88]
+```
++发光体代理：`eve.createEmissiveLight2D` / `eve.createEmissiveLight3D`（或
++`Light*.createEmissiveProxy`）创建 `volumetricOnly` 点光——只进体积通道、跳过表面光照；
++表面自发光仍用 PBR `emissive` + bloom。
+```
+Evidence
+```
+The documentation explicitly presents both factory forms, while the bindings add the factories to
+the root script table rather than to either light class.
+```
+docs/usr/modules/graphics/rendering-effects.md[86-88]
+src/modules/graphics/Graphics.cpp[423-427]
+src/modules/graphics/Graphics.cpp[519-524]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+The rendering-effects documentation advertises class-level emissive proxy factories that are not exposed to the scripting VM. The actual bindings provide different top-level `eve` functions.
+
+## Fix Focus Areas
+- docs/usr/modules/graphics/rendering-effects.md[86-88]
+- src/modules/graphics/Graphics.cpp[423-427]
+- src/modules/graphics/Graphics.cpp[519-524]
+
+## Recommended Fix
+Remove the unsupported `Light*.createEmissiveProxy` scripting form from the user documentation, or register matching static class factories. Keep the documented names and argument order aligned with the chosen binding.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+Context sources
+✅ Web pages:
+🌐 smoothstep - GLSL 4 - docs.gl
+🌐 GLSL issue with smoothstep function where edge0 is bigger than edge1
+🌐 allow `edge1 <= edge0` in `smoothstep`
++2 more
+Review mode: 🧠 Deep: This broad, high-risk graphics change spans new light-to-volumetric wiring, multiple rendering paths, shaders and generated SPIR-V, public APIs, and tests, creating many independent opportunities for subtle defects.
+Tip of the day
+```
+💡 Did you know, you can turn on the rule miner and Qodo learns your standards from review history
+```
+More tips ↗ | Customize Qodo ↗ | Qodo docs ↗
+qodo-code-review
+Bot
+reviewed
+Sep 27, 2026
+View reviewed changes
+Comment thread
+src/modules/graphics/VolumetricLights.cpp
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/modules/graphics/VolumetricLights.cpp
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/modules/graphics/VolumetricLights.cpp
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/modules/graphics/VolumetricLights.cpp
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+test/Volumetric.cpp
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/modules/graphics/VolumetricLights.cpp
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/modules/graphics/Volumetric.cpp
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/modules/graphics/shaders/volumetric_raymarch.frag
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/modules/graphics/VolumetricLights.cpp
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+docs/usr/modules/graphics/rendering-effects.md
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+cursor
+Bot
+commented
+Sep 27, 2026
+Copy link
+Copy Markdown
+Addressed the Qodo review findings in the latest push:
+High
+Busy scenes discard emissive proxies — scene lights + pending proxies are now merged, scored, then capped; proxies compete fairly for the budget.
+Occlusion/canvas aliasing — scatterFromSceneLights2D rejects when occlusion is the active canvas texture; test uses a separate destination.
+Medium / correctness
+World bounds validation (InvalidArgument on non-finite / reversed AABB)
+2D shafts use Light2D.radius (+ Camera2D zoom) and transform world→screen via active Camera2D
+Multipass shafts use BlendMode::Additive
+Raymarch: fixed ascending smoothstep, stratum jitter (no past-depth samples), reject behind-camera projection, safe zero-dir handling
+integrateFroxel pending proxies use frustum AABB from invViewProj
+WGSL ray path reads packed anisotropy
+Docs: only document eve.createEmissiveLight2D/3D (no unbound class factory)
+Local: volumetric tests pass including new froxelSceneLightsValidateBoundsAndRankProxies and updated occlusion aliasing checks.
+cursoragent
+and others
+added 4 commits
+September 27, 2026 04:15
+Address Qodo review: proxy ranking, 2D shafts, raymarch correctness
+…
+11260d5
+```
+Merge and score emissive proxies with scene lights before applying the
+froxel budget; validate world bounds; reject occlusion/canvas aliasing;
+use additive multipass shafts; apply Camera2D transforms and light radius;
+fix smoothstep penumbra, jittered ray strata, behind-camera projection,
+zero-direction UV, frustum-local proxy bounds, WGSL anisotropy, and docs.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+```
+Avoid fallback wording in VolumetricLights comments
+…
+8773c28
+```
+The quality-metadata inventory treats comment-line "fallback" as debt;
+reword the degenerate-bounds note so net growth stays within budget.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+```
+Merge branch 'dev' into cursor/volumetric-light-emissive-8b81
+7cbb936
+Merge branch 'dev' into cursor/volumetric-light-emissive-8b81
+5a73de9
+Hide details
+View details
+sunxfancy
+merged commit 78ae64e
+into
+dev
+Sep 28, 2026
+18 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+sunxfancy
+deleted the
+cursor/volumetric-light-emissive-8b81
+branch
+October 12, 2026 16:08
+sunxfancy
+added a commit
+that referenced
+this pull request
+Oct 14, 2026
+release: v0.6.0 (#568)
+…
+ae670e1
+```
+* fix(shared): export the rpg and tactics public classes tests call
+
+The Windows job then reached unit_test_rpg.exe and stopped on eight symbols
+whose definitions live in EVPlatform (rpg) and EVDomains (tactics):
+
+    eve::rpg::VitalsSystem::pollEvents(std::vector<VitalsEvent>&)
+    eve::rpg::makeStatusTickSettlementRequest(...)
+    eve::rpg::Crafting::begin(CraftingRequest) / settle(WorkQueue&, Bag&, string_view)
+    eve::rpg::RPGSettlementAdapter::RPGSettlementAdapter(...)
+    eve::tactics::makeSettlementRequest(AbilitySettlementRequest const&)
+    eve::tactics::TacticsSettlementRuntime::configureSettlementRules(...) / settle(...)
+
+Annotate the module-level classes the domain tests exercise with the macro each
+module already uses (EVENGINE_API_PLATFORM for rpg, EVENGINE_API_DOMAINS for
+tactics): ClassSystem, Crafting, EquipmentSystem, QuestSystem, TraitSystem,
+VitalsSystem, SkillConditionContext, RPGSettlementAdapter, BattleSystem,
+TacticsSettlementRuntime, GridLineOfSightPolicy, GridCoverPolicy,
+TacticsLineOfSightAdapter, plus the two free functions above.
+
+The script that applied this checked each class body first and skipped any that
+holds an inline static data member or a move-only member, the two shapes that
+made a class-level macro wrong earlier (C2491 and the Resource C2280); none did.
+Local verification: seven source gates pass, git clang-format is clean, and
+unit_test_rpg / unit_test_tactics compile.
+
+* fix(shared): include common/Export.h where the new group macros are used
+
+The rpg/tactics export annotations added the macro without the header that
+defines it, so EVENGINE_API_PLATFORM was an undefined identifier in those
+translation units:
+
+  ClassSystem.h(21): error C2079: 'ClassSystem' uses undefined class
+    'eve::rpg::EVENGINE_API_PLATFORM'
+  ClassSystem.cpp(13): error C2825: 'eve::ClassSystem': must be a class or
+    namespace when followed by '::'
+
+Eleven of the twelve headers had no include block at all for it; SkillCondition.h
+already pulled it in. Verified this time with forced recompiles (the Ninja
+'unscanned' dependency tracking does not reliably rebuild translation units on a
+header edit, which is why the previous check looked clean): EVRPG, EVTactics and
+both domain test targets compile with zero C-errors.
+
+* fix(shared): move Card's defaulted move operations out of line
+
+With the win32 debug build fixed, the Windows job's native Dawn parity lane --
+which compiles the whole monolithic unit_test -- stopped on
+
+  memory(3337): error C2027: use of undefined type 'eve::card::CardControl'
+  memory(3337): error C2338: static assertion failed: 'can't delete an
+                 incomplete type'
+  test/card.cpp.obj, card_gameplay_control.cpp.obj, card_play_condition.cpp.obj,
+  card_reload.cpp.obj, card_rts_production_integration.cpp.obj
+
+`Card` holds `std::unique_ptr<CardControl>` while `CardControl` is only forward
+declared in the header -- which is why the class already declares its constructor
+and destructor out of line ("so the incomplete CardControl member needs no
+deleter here"). The move constructor and move assignment this branch added to
+keep the dllexport shape well-formed were defaulted *in the class body*, and a
+defaulted move there instantiates the move of every member, including that
+unique_ptr's deleter.
+
+Follow the file's own pattern: declare both out of line and default them in
+Card.cpp, where CardControl is complete. Movability is preserved, which matters
+because modules are moved through the registrar.
+
+Scoped deliberately: a scan of every class in this branch's diff that has an
+in-class move default plus a member type its header neither defines nor includes
+reports Card as the only case.
+
+* chore(deps-dev): bump @vscode/vsce
+
+Bumps the vscode-eve-debug group in /tools/vscode-eve-debug with 1 update: [@vscode/vsce](https://github.com/Microsoft/vsce).
+
+
+Updates `@vscode/vsce` from 3.9.2 to 4.0.0
+- [Release notes](https://github.com/Microsoft/vsce/releases)
+- [Commits](https://github.com/Microsoft/vsce/compare/v3.9.2...v4.0.0)
+
+---
+updated-dependencies:
+- dependency-name: "@vscode/vsce"
+  dependency-version: 4.0.0
+  dependency-type: direct:development
+  update-type: version-update:semver-major
+  dependency-group: vscode-eve-debug
+...
+
+Signed-off-by: dependabot[bot] <support@github.com>
+
+* chore(deps): bump the vision-prefilter group across 1 directory with 4 updates
+
+Updates the requirements on [fastapi](https://github.com/fastapi/fastapi), [uvicorn](https://github.com/Kludex/uvicorn), [pydantic](https://github.com/pydantic/pydantic) and [requests](https://github.com/psf/requests) to permit the latest version.
+
+Updates `fastapi` to 0.141.1
+- [Release notes](https://github.com/fastapi/fastapi/releases)
+- [Commits](https://github.com/fastapi/fastapi/compare/0.110.0...0.141.1)
+
+Updates `uvicorn` to 0.53.0
+- [Release notes](https://github.com/Kludex/uvicorn/releases)
+- [Changelog](https://github.com/Kludex/uvicorn/blob/main/docs/release-notes.md)
+- [Commits](https://github.com/Kludex/uvicorn/compare/0.29.0...0.53.0)
+
+Updates `pydantic` to 2.13.5
+- [Release notes](https://github.com/pydantic/pydantic/releases)
+- [Changelog](https://github.com/pydantic/pydantic/blob/v2.13.5/HISTORY.md)
+- [Commits](https://github.com/pydantic/pydantic/compare/v2.6.0...v2.13.5)
+
+Updates `requests` to 2.34.2
+- [Release notes](https://github.com/psf/requests/releases)
+- [Changelog](https://github.com/psf/requests/blob/main/HISTORY.md)
+- [Commits](https://github.com/psf/requests/compare/v2.31.0...v2.34.2)
+
+---
+updated-dependencies:
+- dependency-name: fastapi
+  dependency-version: 0.141.1
+  dependency-type: direct:production
+  dependency-group: vision-prefilter
+- dependency-name: pydantic
+  dependency-version: 2.13.4
+  dependency-type: direct:production
+  dependency-group: vision-prefilter
+- dependency-name: requests
+  dependency-version: 2.34.2
+  dependency-type: direct:production
+  dependency-group: vision-prefilter
+- dependency-name: uvicorn
+  dependency-version: 0.52.4
+  dependency-type: direct:production
+  dependency-group: vision-prefilter
+...
+
+Signed-off-by: dependabot[bot] <support@github.com>
+
+* chore(deps): bump the creative-brain group across 1 directory with 2 updates
+
+Updates the requirements on [openai](https://github.com/openai/openai-python) and [pytest](https://github.com/pytest-dev/pytest) to permit the latest version.
+
+Updates `openai` to 3.16.2
+- [Release notes](https://github.com/openai/openai-python/releases)
+- [Changelog](https://github.com/openai/openai-python/blob/main/CHANGELOG.md)
+- [Commits](https://github.com/openai/openai-python/compare/v1.30.0...v3.16.2)
+
+Updates `pytest` to 9.1.1
+- [Release notes](https://github.com/pytest-dev/pytest/releases)
+- [Changelog](https://github.com/pytest-dev/pytest/blob/main/CHANGELOG.rst)
+- [Commits](https://github.com/pytest-dev/pytest/compare/7.0.0...9.1.1)
+
+---
+updated-dependencies:
+- dependency-name: openai
+  dependency-version: 3.3.0
+  dependency-type: direct:production
+  dependency-group: creative-brain
+- dependency-name: pytest
+  dependency-version: 9.1.1
+  dependency-type: direct:production
+  dependency-group: creative-brain
+...
+
+Signed-off-by: dependabot[bot] <support@github.com>
+
+* chore(deps): bump the github-actions group across 1 directory with 2 updates
+
+Bumps the github-actions group with 2 updates in the / directory: [actions/setup-java](https://github.com/actions/setup-java) and [android-actions/setup-android](https://github.com/android-actions/setup-android).
+
+
+Updates `actions/setup-java` from 6.0.0 to 6.0.1
+- [Release notes](https://github.com/actions/setup-java/releases)
+- [Commits](https://github.com/actions/setup-java/compare/dd06d9cba3e5552c54d9f8ea23572deb30010f7c...de7274f081f381c8f8158605e0321c36c376e2e6)
+
+Updates `android-actions/setup-android` from 4.0.1 to 4.0.4
+- [Release notes](https://github.com/android-actions/setup-android/releases)
+- [Commits](https://github.com/android-actions/setup-android/compare/40fd30fb8d7440372e1316f5d1809ec01dcd3699...be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd)
+
+---
+updated-dependencies:
+- dependency-name: actions/setup-java
+  dependency-version: 6.0.1
+  dependency-type: direct:production
+  update-type: version-update:semver-patch
+  dependency-group: github-actions
+- dependency-name: android-actions/setup-android
+  dependency-version: 4.0.4
+  dependency-type: direct:production
+  update-type: version-update:semver-patch
+  dependency-group: github-actions
+...
+
+Signed-off-by: dependabot[bot] <support@github.com>
+
+* fix(shared): declare Inventory's constructor out of line
+
+The Windows native Dawn parity lane (OBJECT + MSVC, monolithic unit_test)
+failed compiling the test translation units that include inventory/Inventory.h:
+
+  memory(3337): error C2027: use of undefined type 'eve::inventory::InventoryControl'
+  memory(3337): error C2338: static assertion failed: 'can't delete an incomplete type'
+  Inventory.h(27): note: see the first reference to
+    'std::unique_ptr<eve::inventory::InventoryControl>::~unique_ptr'
+
+Inventory owns a unique_ptr<InventoryControl> whose type the header only
+forward declares, and its destructor is already declared out of line for that
+reason; the constructor was left as an in-class = default, and a defaulted
+constructor has to destroy the members it already built when a later one
+throws, which needs the complete type. Declare it out of line and default it in
+Inventory.cpp, where InventoryControl.h is included -- the same pattern Card
+uses for CardControl.
+
+Note that dev's own Windows job fails this lane as well, one step earlier, in
+Dawn's own sources (_deps/dawn-build/src/tint/...); this fix removes the next
+failure in line for the branch.
+
+* docs: record the SHARED-split traps and the 7-link-unit model
+
+The link-split PR (#434) landed with the施工 record up to §7.30; the last four
+dev merges and the failures they exposed were only in the PR conversation.
+Write them down where the next agent will look.
+
+* `docs/dev/superpowers/specs/2026-08-18-test-suite-optimization.md`
+  - §7.31 the three failure families and their recipes: cross-group export gaps
+    (ELF exports default-visibility symbols, so only MSVC notices), annotating a
+    header without being able to see `common/Export.h`, and the dllexport
+    "materialises implicit special members" family (C2280 for an implicitly
+    deleted copy assignment, C2027/C2338 for an in-class defaulted constructor or
+    move whose member type is incomplete in that header). Includes the final
+    readings: run 35961588643, every job green on head 3b7f3b5af.
+  - §7.32 the merge-residue classes (stale submodule gitlink, a stray `endif()`
+    in a `cmake -P` script, a truncated assertion, a missing domain row) and the
+    two false negatives of local verification: Ninja's unscanned dependency
+    tracking does not rebuild TUs after a header edit, and `git clang-format` is
+    not idempotent.
+* `AGENTS.md` a fourth-level checklist for annotating a declaration for the
+  SHARED split, next to the existing linkage and "run the full suite in CI"
+  bullets.
+* `docs/dev/模块编排与裁剪架构.md` a new §3.6 describing the module → 7 link
+  group mapping, what each linkage default means, and the cost of a cross-group
+  call (the export macro that only MSVC enforces).
+
+Documentation only: no source or build change.
+
+* fix(test): classify house generation with the procgen domain
+
+The merge with dev brought in test/test_domains.cmake, whose domain table
+still mapped the removed housegen module root. House generation now lives
+under src/modules/procgen/house and its tests include procgen/... headers,
+so the include rule already classifies them with the procgen link unit;
+scripts/check_test_manifest.py rejects the stale root.
+
+* fix(procgen): export migrated house classes from their new link group
+
+dev annotated the housegen headers with EVENGINE_API_WORLD (that module was
+LAYER 4, link group EVWorld). Moving the sources into the procgen package
+changed the owning group without changing the annotation:
+
+  * src/modules/procgen/house/* compile into EVProcgen (LAYER 5, EVDomains)
+  * src/modules/procgen/editing/* compile into EVProcgen_editing (LAYER 6,
+    EVOrchestration), like the 14 sibling headers in that directory
+
+In SHARED mode the stale macro expands to dllimport in a translation unit
+that defines the members, so MSVC /W4 /WX fails the Windows debug job with
+warning C4273 (inconsistent dll linkage) -> error C2220.
+
+* fix(stylize): run the YSA material through the mesh vertex contract
+
+Review follow-up for #451.
+
+- Vulkan YSA used graphics/mesh3d_toon.vert, which has no joint/weight
+  inputs, no skin-palette transform and no vertex-color multiply, while the
+  WebGPU path runs the backend's standard mesh vertex shader. GPU-skinned
+  meshes stayed in bind pose on Vulkan and non-white vertex colors were
+  ignored. Add stylize/shaders/ysa_mesh.vert (Frame block decoration-identical
+  to mesh3d.vert, skin palette at set 0 binding 21) and use it for the Vulkan
+  YSA pipeline.
+- Decode the sRGB-encoded albedo sample on its own in the linear-lighting
+  branch, in GLSL and WGSL. toLinear(texture * tint) applied a single transfer
+  function to a mixed-space product; ubo.tint is an engine color value and is
+  therefore already linear.
+- scripts/compile_stylize_shaders.py also emits *_vert_spv.inc now.
+- Tests: stylize.ysa.skinnedMeshFollowsPalette and
+  stylize.ysa.vertexColorFeedsMaterialColor both fail against the previous
+  wiring.
+
+Verification: strict Windows Debug build, ctest stylize.*/graphics.skinPalette*/
+xray (75 passed), make check against the PR base 0182af046.
+
+* Add emergence rule engine for high-performance condition triggers (#458)
+
+* Add emergence rule engine for indexed condition triggers.
+
+Introduce an L0 emergence module that evaluates tens of thousands of
+decision::Condition rules via fact-key inverted indexes and deferred
+activations, with built-in fact.set cascading and IEconomy/IEmergenceActionHandler
+integration points for quest and economy gameplay.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Fix emergence script Result projection and test domain wiring.
+
+Project non-void Results with explicit Value projectors, silence
+nodiscard restores in FactStore snapshots, and map emergence tests
+into the rpg unit_test domain so the 10k-rule perf case is discovered.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Fix emergence source-quality: docs, FactChange, lifetime contracts.
+
+Document all Squirrel bindings in emergence.md, replace FactStore bool
+mutation returns with FactChange, and complete ownership/lifetime Doxygen
+so architecture contracts pass against origin/dev.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Fix emergence review: latch-after-success, policy snapshot, strict ints.
+
+Commit rising/once/cooldown latches only after actions succeed; serialize
+policies; reject unknown restore fields and non-integer catalogue/economy
+values; validate policy deps via parseFactKey; mediate setPolicy and make
+facts() const; capture script stale helpers by value; narrow same-tick order
+docs to per dirty-pass.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* feat(graphics): Vulkan display HDR present (HDR10 / scRGB) (#460)
+
+* feat(graphics): add display HDR present path for Vulkan
+
+Select HDR10/scRGB swapchain formats when requested, encode the final
+resolve with PQ or display-linear scRGB, and expose calibration/query
+APIs with SDR fallback when the surface cannot present HDR.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* docs(graphics): document display HDR calibration getters
+
+Source quality's binding check requires getDisplayPaperWhiteNits and
+getDisplayPeakNits to appear in graphics.md next to the setter.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(graphics): compose HDR overlays then encode once
+
+Rebuild present render-pass/pipelines when the swapchain format changes
+(SDR↔HDR). Route HDR present through a linear compose target so scene,
+2D, and UI blend correctly before a single PQ/scRGB encode, and scale
+scRGB by paperWhite/80 (1.0 = 80 nits).
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* chore(graphics): avoid fallback debt wording in HDR compose comments
+
+Source quality counts comment-word "fallback" against the contract
+inventory; reword the new HDR compose notes so the gate stays at baseline.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* docs(graphics): document present-compose slot ownership lifetime
+
+Satisfy the architecture api-lifetime gate for the new
+currentPresentComposeSlot() raw-pointer helper.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* Hybrid Clustered Deferred + Forward+ (Phases A–D) (#461)
+
+* docs: design hybrid clustered deferred + forward+ lighting
+
+Capture the planned LightingMode (ForwardPlus | Hybrid) pipeline:
+opaque Clustered Deferred, transparent Forward+, configurable fallback,
+reusing ClusteredLight and extending GBuffer — without claiming the
+GraphicsDeferredGraph FrameGraph path is deferred shading.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* docs: require full core PBR in hybrid deferred design
+
+Make metallic-roughness PBR a hard Hybrid requirement: authoritative
+four-RT GBuffer (albedo, normal, params, emissive), shared BRDF with
+forward, and explicit forward fallback for clearcoat/TVE extensions.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* docs: note core PBR requirement in pipeline overview
+
+Point 3D pipeline and module design checklists at the Hybrid deferred
+design's full metallic-roughness GBuffer requirement.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* docs: analyze Hybrid pass parallelism and pipeline overlap
+
+Document that same-frame GPU parallelism is mainly shadow∥gbuffer; later
+passes are resource-chained, with CPU cluster build / transparent prep and
+cross-frame double-buffering as the main pipeline overlaps.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* docs: record Hybrid parallelism decisions in summary
+
+Capture stage-C FrameGraph/JobSystem overlap notes and the resolution
+that same-frame GPU parallelism stays shadow∥gbuffer only.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* docs: add parallelism bullet to Hybrid design summary
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* docs: cover Vulkan multi-queue scheduling for Hybrid pipeline
+
+Explain queue-family probing vs true hardware overlap, and optional
+async-compute lighting when a dedicated compute queue is available.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(graphics): add LightingMode API for Hybrid deferred wiring
+
+Phase A of the hybrid clustered-deferred design: RenderControl owns an
+authoritative LightingMode enum (ForwardPlus default, Hybrid optional),
+projects "clusteredDeferred", and compile() would insert deferredLighting
+when available. Until the GPU pass lands, Hybrid falls back observably to
+ForwardPlus so callers are never silently half-wired.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(graphics): Phase B PBR GBuffer (5-RT) on Vulkan and WebGPU
+
+Extend GBuffer with pbrParams/emissive attachments, write metallic/roughness
+at 7-bit precision from fill shaders, and wire both backends plus readback
+and contract tests while preserving SSR/SSGI packing compatibility.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(graphics): bit-cast GBuffer PBR pack and wire RenderControl targets
+
+7-bit metal/rough packing exceeds float's exact integer range, so push
+clip.z through std::bit_cast / floatBitsToUint. endGBufferPass now calls
+getRenderControl() so setTargets reaches a live GBuffer, and deferred
+target tests include the RenderControl header.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(graphics): clear Source quality gate for Hybrid Phase A/B
+
+Rephrase Hybrid fallback comments to avoid inventory growth, rename the
+query to hasHybridLightingFallback (predicate shape), document GBuffer/
+WGSL pointer lifetimes, and clang-format changed lines.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(graphics): Phase C Hybrid clustered deferred lighting (Vulkan)
+
+Wire fullscreen deferred lighting that samples the Phase B GBuffer with
+ClusteredLight + CSM, skip core opaque Forward+ draws under Hybrid, and
+expose isDeferredLightingAvailable via Graphics::supportsDeferredLighting.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(graphics): correct DeferredLightingUBO std140 size and set clears
+
+sizeof(DeferredLightingUBO) is 224 bytes (two mat4 + six vec4). Use
+typed Vulkan handle resets so GCC accepts the destroy path.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* docs: mark Hybrid Phase C Vulkan deferred lighting progress
+
+Record fullscreen deferred + Hybrid opaque skip as landed; leave
+FrameGraph recording and ClassicScenes parity as follow-ups.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(graphics): Phase D WebGPU deferred lighting and lighting presets
+
+Add WebGPU fullscreen clustered deferred lighting (WGSL + flush at
+scene-color present after early GBuffer), LightingPreset API with
+desktop/mobile/ci and EVENGINE_LIGHTING_* env overrides, script
+bindings, and docs/tests for Hybrid parity.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* docs(graphics): document LightingPreset and deferred-availability bindings
+
+Source quality requires every new addFunc name in the graphics user docs;
+add isDeferredLightingAvailable and getLightingPreset to the LightingMode table.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(graphics): annotate deferred lighting WGSL pointers with @borrowed lifetime
+
+Satisfy Source quality api-lifetime for kDeferredLightingVertWgsl /
+kDeferredLightingFragWgsl (static process-lifetime shader sources).
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(graphics): raise WebGPU maxColorAttachmentBytesPerSample for 5-RT GBuffer
+
+Dawn/macOS defaults the device limit to 32 bytes/sample while the Phase B
+GBuffer needs 40 (5×RGBA8). Request the higher limit (and 5 color
+attachments) in requestDevice so Hybrid/GBuffer passes validate on Metal.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(graphics): only raise WebGPU color-attachment bytes limit
+
+Leave maxColorAttachments at the WGPU default (8); requesting 5 would
+unnecessarily lower the device limit. Bytes-per-sample remains the fix
+for the 5×RGBA8 GBuffer.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* Expose Sprite2D normal maps and rotate lit2d correctly (#463)
+
+* Expose Sprite2D normal maps and rotate lit2d correctly.
+
+Add set/getNormalTexture on Sprite2D (script + C++), draw rotated lit
+sprites through lit2d, and rebuild tangent frames from screen/UV
+derivatives so normal maps stay aligned under rotation.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Document Sprite2D normal-texture pointer ownership.
+
+Satisfy the api-lifetime architecture contract for the new
+setNormalTexture/getNormalTexture public APIs so source-quality CI passes.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* Add optional Vulkan KHR ray-tracing system (#459)
+
+* Add optional Vulkan KHR ray-tracing satellite for high-end GPUs
+
+Introduce graphics_raytracing under graphics/raytracing with BLAS/TLAS
+builders, a reflection ray-tracing pipeline, and an IRayTracing capability.
+Device creation soft-probes KHR RT extensions and features so Lavapipe and
+other non-RT GPUs keep working; RenderControl "rtx" prefers hardware
+reflections when available and otherwise falls back to SSR.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Fix RT module expose overload and private extensions_to_enable access
+
+Module_REG already declares expose(); re-enumerate device extensions
+instead of touching vk-bootstrap's private list.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Adapt RT backend to Vulkan-Hpp 1.3.275 API names
+
+Use getBufferAddress / getAccelerationStructureAddressKHR and explicit
+StridedDeviceAddressRegionKHR defaults for this SDK's vulkan.hpp.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Fix zeroerr CHECK ambiguity in raytracing capability test
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Simplify raytracing capability test assertion for zeroerr
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Reword RT soft-degrade comments to avoid fallback debt inventory
+
+Source-quality counts comment-line "fallback" as debt; the SSR path is
+intentional portable behavior, not a new FALLBACK marker.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* clang-format changed lines for Source quality gate
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Move graphics_raytracing declaration into the L4 manifest section
+
+The module is LAYER 4; keeping it in rendering_hub (L3) tripped the
+manifest section/layer consistency check.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Satisfy architecture contracts for the Vulkan RT module
+
+Document ownership/lifetime on RayTracing::backend and attachDevice,
+rewrite the script example that false-matched POINTER_API, and return
+Result from ensureAttached instead of an ambiguous bool.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Fix Qodo review findings for the Vulkan ray-tracing path
+
+Correct the Vulkan 1.2 / BDA feature chain (VUID-02830), enable rayQuery
+only with its feature bit, detach RT on Graphics teardown, and rebind by
+device identity. Record reflections on the present command buffer with
+layout barriers, feed opaque meshes into the TLAS from RenderSystem3D,
+treat NoOp as SSR fallback when rtx is requested, and sample scene color
+via hit reprojection instead of diagnostic barycentrics.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* Improve volumetric lighting and emissive glow proxies (#462)
+
+* Improve volumetric lighting: wire lights, emissive proxies, shader quality
+
+Connect Light2D/Light3D volumetric flags into screenspace multipass shafts and
+froxel local-light integration. Add createEmissiveProxy / volumetricOnly so
+glowing props can drive media without double-lighting surfaces. Raise
+screenspace/raymarch/fog shader quality (dual-lobe HG, soft SS shadows,
+dither) and expose anisotropy plus driveFromLight APIs.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Document Light2D/3D get/setVolumetricOnly for binding check
+
+Source quality failed because the new Squirrel bindings were not listed
+in docs/usr/modules/graphics.md.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Address Qodo review: proxy ranking, 2D shafts, raymarch correctness
+
+Merge and score emissive proxies with scene lights before applying the
+froxel budget; validate world bounds; reject occlusion/canvas aliasing;
+use additive multipass shafts; apply Camera2D transforms and light radius;
+fix smoothstep penumbra, jittered ray strata, behind-camera projection,
+zero-direction UV, frustum-local proxy bounds, WGSL anisotropy, and docs.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Avoid fallback wording in VolumetricLights comments
+
+The quality-metadata inventory treats comment-line "fallback" as debt;
+reword the degenerate-bounds note so net growth stays within budget.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* Make dnut RPG stories practical in rpg-classic
+
+Persist RpgStorySession cursors in GameState selfStrings, migrate the
+classic example from JSON StoryEvent to stories.dnut, and let the
+dialogue parser skip foreign story blocks so dialects can coexist.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Fix story cursor restore through RPGSaveSession
+
+Round-trip GameState selfStrings on save commit, and drop unsupported
+# comments from stories.dnut so the catalogue compiles cleanly.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Fix lit2d review: atlas UV det, BlendMode, flat normal fallback (#465)
+
+* Fix lit2d review: atlas UV det, blend modes, flat normal fallback
+
+Scale-aware UV det singularity for atlas tiles; wire BlendMode through
+Vulkan/WebGPU lit2d pipelines; WebGPU null normal uses flatNormalTexture;
+harden Lighting2D rotation, atlas, and additive blend tests.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Select HDR lit2d pipelines for HDR canvases (Vulkan + WebGPU)
+
+Pass canvas HDR state into Vulkan lit pipeline selection, and create
+RGBA16Float lit blend variants on WebGPU selected by target format.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* ci(android): raise debug build timeouts for cold NDK rebuilds
+
+Cold PR builds (sccache READ_ONLY) can spend ~55-60 minutes compiling
+before Gradle packages the ~2GB debug libmain.so; the 60-minute step
+budget was cutting packaging short. Align the hang-guard step with the
+release budget and leave job headroom for setup/cleanup.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* feat(ui): expand tween animation support (#464)
+
+* feat(ui): expand tween driver with ease, delay, and more targets
+
+Replace the ad-hoc host/item tween vectors with UiTweenDriver so UI
+animations support selectable easing, delay, replace-on-retrigger,
+duration-0 jumps, cancel, and host size/overlay-alpha plus item pos.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* test(ui): destroy host via ecs::DestroyEntity in tween stale-handle case
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(ui): use ComponentRef from UIHost::meta() in UiTweenDriver
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(ui): add optional Motion sinks for Animation push-bind
+
+Expose UiHostPos/Size/OverlayAlpha and UiNodeOpacity/Pos sinks that
+implement IMotion*Sink. ui OPTIONAL_DEPS animation so minimal builds omit
+the bridge TU; composition tests cover provider-present bind and the
+Animation-free convenience tween path.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(ui): return Result from animateItemOpacity/Pos for api-shape
+
+Source quality failed architecture api-shape because the new item tween
+APIs used operation-result bool. Switch them to Result<void> with
+StaleHandle/NotFound diagnostics; the script facade keeps no-op
+semantics via ignore().
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* ci(android): raise debug build guard to 75 minutes
+
+Cold/low-cache NDK builds on PR runners were timing out at the 60-minute
+step guard with ninja at 1498/1499 and zero compile errors. Successful
+peers finish in ~58 minutes before Gradle packaging. Give the hang guard
+headroom and raise the job budget to match.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(ui): address Qodo review on tween bindings and rendering
+
+- Bind animate*/cancelItemTweens with optional trailing Squirrel args
+- Drive movable/resizable hosts with one-frame animDrive pos/size overrides
+- Render absolute children in grid (Flex parity) so item pos tweens stay visible
+- Clamp overlay alpha and node opacity against Back/Elastic overshoot
+- Exclude UiMotionSinks.h from Animation-trimmed SDK installs
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* Add Light2D spot flashlights and tilemap receiveLight (#467)
+
+* Add Light2D spot flashlights and tilemap receiveLight
+
+Path B lighting for 2D tilemaps: TileLayer can opt into Light2D shading,
+and Light2D gains a spot type with cone angle/softness for flashlight beams.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Document Light2D getSpotAngle/getSpotSoftness for binding check
+
+Source quality failed because the new getters were bound but missing
+from docs/usr/modules/graphics.md under --strict.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Avoid fallback keyword in TileLayer receiveLight docs
+
+Source quality counts comment 'fallback' hits against the inventory
+budget; reword the lit2d Doxygen note.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Address Qodo review: WebGPU flat normal, spot edge cases
+
+- WebGPU lit2d uses flatNormalTexture when normal is null (not white).
+- Zero-radius spots no longer fall through as directional lights.
+- hex-levels resets torchLight defaults each level boot.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Raise Android debug CI timeouts past cold-cache flake
+
+The Android job failed with a 60-minute build-step timeout after native
+linking finished and Gradle started; prior green runs already sat near
+58 minutes. Bump the build step to 80m and the job to 110m.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Add Light2D spot cone masking to screenspace volumetric shafts
+
+Thread spot direction and cos(outer/inner) through volumetric_post push
+constants (18-21) so scatterFromSceneLights2D / beginOcclusionMapFromSceneLights2D
+clip Mitchell shafts to the flashlight cone, matching lit2d surface attenuation.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* ci: retrigger Windows after sccache egress flake
+
+Win32 debug build and unit tests already passed; Dawn parity lane failed
+on GitHub Actions cache 503 ServerBusy (egress quota), not product code.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* feat(weapon): EveScript combat-carrier and spell-fragment API (#469)
+
+* feat(weapon): add EveScript combat-carrier and spell-fragment API
+
+Expose an owned CombatCarrierRuntime to scripts with table/JSON recipe
+registration, Noita-style fragment compilation (modifiers then projectile),
+cast helpers, and a simple circle hit probe for top-down ARPG prototyping.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* docs(weapon): document CombatCarrierRuntime script bindings
+
+Source-quality check_bindings --strict failed on undocumented addFunc
+names from the new carrier/spell-fragment script surface.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(weapon): harden CombatCarrier script cast/update contracts
+
+Address Qodo review findings: require castAtTarget for homing, always
+supply script hit/target probes, uniquify cast recipe IDs, preserve
+projectile-local motion presets, apply damage modifiers left-to-right,
+reject malformed numbers and full-form/avoidBody script recipes, and
+expose trigger/impact/source/normal on carrier events.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(weapon): reject malformed recipe numbers and prove cast ID isolation
+
+Close remaining Qodo gaps: CarrierRecipeCodec now fails on present-but-
+invalid optional numerics, cast results expose uniquified recipeId, and
+tests cover codec rejection plus two concurrent casts sharing a projectile id.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* Add Squirrel exports for action, settlement, and npc_ai (#471)
+
+* Add Squirrel exports for action, settlement, and npc_ai
+
+Expose protocol-level script facades so games can own ActionRuntime/
+AbilityRuntime, a settlement rules+ledger runtime, and NpcAiWorld without
+going through combat/domain adapters. Includes script tests and user docs.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Fix script tests and document binding surface
+
+Correct Squirrel paren typos, assert ownership via Result/method, and
+name every new script binding in the user module docs so check_bindings
+--strict stays green.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Fix Qodo review findings in script runtime facades
+
+Synchronize ability activations after failed advances, reject unknown
+settlement ledger kinds, key ledger subjects by canonical UUID case,
+and validate npc_ai uint32 fields plus zero memory capacity.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* feat(ui): unify reflection PropertyView for color/vec/array/map (#470)
+
+* feat(ui): unify reflection PropertyView for color/vec/array/map
+
+Script attributes can declare color/vec composites; ReflectedPropertyModel
+writes arrays and tables through IPropertyAccess; PropertyView renders
+editable composites and expanders so Inspector no longer bypasses Runtime.
+ui.propertySchema exposes the derived schema to scripts.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(test): keep PropertyView array Value reads alive
+
+model.read() returns a temporary optional; getIf pointers into it were
+dangling by the CHECK_EQ for Color/Vec2/Array two-way bind coverage.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(property_access): prefer base class for inherited schema category
+
+Walk the inheritance chain to the most-base declaring class when assigning
+PropertyDescriptor.category, and compare Color writes with a float epsilon.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* docs(ui): document propertySchema in user API chapter
+
+Fixes Source quality CI: check_bindings --strict flagged the new
+ui.propertySchema binding as an undocumented gap.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(property_access): satisfy api-lifetime Doxygen contract
+
+Reword the class brief so a comment line no longer matches the raw-pointer
+API heuristic, and document Runtime/instance ownership on the constructor.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* Migrate dialogue conversations onto L1 dnut_interpreter (#468)
+
+* Migrate dialogue conversations to L1 dnut runtime
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Update dialogue text tests for canonical values
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Clarify dnut dispatcher and diagnostic terminology
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Format dnut dialogue migration
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Document ConversationDocument findNode lifetime contracts
+
+Architecture contracts reject new header raw-pointer APIs without
+@ownership/@lifetime Doxygen tags; annotate the private findNode
+helpers so Source quality passes on the dialogue L1 migration PR.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Release dropped conversation ownership on loadDnut
+
+loadDnutImpl removed assets for ids dropped from a reloaded source
+but left stale assetSources_ entries, blocking other files from
+reclaiming those ids. Mirror reloadDnutImpl and cover with a
+hot-reload regression test.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Format dialogue hot-reload ownership test
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Export shared dnut lexer symbols for Windows DLL builds
+
+Dialogue's DnutParser links against eve::dnut::lexDnut across the
+EVPlatform / EVOrchestration boundary. Without EVENGINE_API_PLATFORM
+MSVC leaves the symbol private and EVOrchestration.dll fails with
+LNK2019. Mark the lexer and hasErrors helpers for export.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Restore editor field aliases and export dialogue lint APIs
+
+ConversationDocument authoring still uses i18nKey/returnNode while
+SequenceAsset payloads store i18n/return; map between them so the
+dialogue graph runtime builder works again. Also mark
+compileDnutDocument and lintConversations with EVENGINE_API_ORCHESTRATION
+so Windows unit_test_dialogue can link them.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* feat(procgen): parametric floor textures with full PBR maps (#472)
+
+* feat(procgen): add parametric floor texture recipes and gallery example
+
+Add tex.floor.wood and tex.floor.tile generators so wood planks,
+herringbone/parquet layouts, and ceramic tile patterns can be composed
+from parameters, plus a procedural-textures example and unit coverage.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(procgen): harden floor texture tests and example presets
+
+Drop an accidental pragma from the floor-texture test TU and make
+applyPreset return a status string so MCP-driven preset switches work.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(example): return status from floor texture applyPreset
+
+Make applyPreset return statusLabel so MCP eval/script callers get a
+typed string result when switching wood/tile presets.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(procgen): expand floor texture pattern catalogue
+
+Add wood layouts (diagonal, ladder/finger, Versailles) and ceramic
+patterns (octagon, fishscale, pinwheel, Moroccan star, cobble,
+arabesque, terrazzo, brick/stack) plus maple/teak and encaustic/jade/
+cobalt palettes, with updated example presets and tests.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(procgen): complete floor PBR map sets for wood and tile
+
+Bake albedo and displacement together so pbr.floor.wood / pbr.floor.tile
+emit aligned albedo, normal, roughness, metallic, height, and AO maps.
+Wire the procedural-textures example to Material + parallax and cover
+the recipes with unit tests and docs.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(procgen): avoid ambiguous zeroerr CHECK in floor PBR test
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* feat(stylize): AttackVfx Phases 1–3 recipe, Action, Mesh/Trail layers (#474)
+
+* feat(stylize): add AttackVfxRecipe schema and runtime shell
+
+Introduce a data-driven layered attack VFX recipe (phases + typed layer
+roles + reusable skins) and a pooled orchestration runtime for play,
+cue signaling, and phase lifecycle events. Phase 1 validates assets and
+drives phase enter/exit without binding particle/MeshVFX executors yet.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(stylize): Phase 2 AttackVfx layer executors and Action notify
+
+Wire IAttackVfxLayerExecutor capability listeners for Particles and Camera,
+add stylize_action satellite for presentation:attack-vfx* handlers, and soft-
+skip NotFound/Unsupported layer starts so optional backends do not fail play.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(stylize): compile and clear instant AttackVfx Action lifetimes
+
+Fix AttackVfxRuntime pool sizing/inspect, Module includes, LogicalId
+isValid checks, and stop instant presentation:attack-vfx instances with
+ClearImmediately when their authored lifetime elapses.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(stylize): Phase 3 MeshVfx, Trail, and Distortion AttackVfx executors
+
+Register stylize-owned IAttackVfxLayerExecutor backends for meshVfx (json:/
+style:/skill:/skin styleHints), trail ribbons, and authored distortion
+profiles so layered recipes start without depending on action or particles.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(stylize): Phase 4 Audio/Decal/Prefab AttackVfx + showcase example
+
+Register Audio and Prefab layer executors on stylize_action, Decal on the
+decal module, expose StylizeAction play/signal/advance/stop/inspect Result
+bindings, and add examples/attack-vfx cycling elemental skins across every
+layer role.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(stylize): use anticipate phase and skill mesh URIs in AttackVfx showcase
+
+Phase kinds are anticipate/release (not windup); lightning skin now binds
+skill:impactFlash so MeshVfx no longer throws on an unknown style name.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(stylize): unblock Windows MSVC and WASM AttackVfx builds
+
+Give ActionAttackVfxCue a defaulted <=> so MSVC can compare cue vectors, and
+make audio/sound optional deps of stylize_action so web profiles do not pull
+EVSound/Wuff. The Audio executor compiles only with EVE_STYLIZE_ACTION_AUDIO.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(decal): export Decal for Windows SHARED unit_test_graphics
+
+Mark Decal with EVENGINE_API_WORLD so Decal::create() is visible from
+EVWorld.dll when AttackVfx layer tests instantiate the module on MSVC.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(stylize): address AttackVfx Qodo review findings
+
+Honor ClearImmediately over authored StopEmitting, drain residual
+layers after phase exit, isolate action clocks, and harden pool/recipe
+reload, budget parsing, and placement defaults.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(examples): close attack-vfx visual gap vs reference video
+
+Rebuild the showcase arena (checkered floor, white mannequin, purple
+dummy) and drive WATER/EARTH/FIRE/AIR presentation FX from script while
+recipes still orchestrate all layer roles. Rich per-element particle
+assets plus particles.update/render make bursts visible; HUD titles
+match the reference captions.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(particles): avoid AttackVfx teardown UAF after X11 exit
+
+ParticlesAttackVfxExecutor is a function-local static registered before the
+ECS default Table exists. When Xvfb/X11 hits a fatal IO error and calls
+exit(), atexit can destroy the Table first; destroying leftover
+ParticleEffects then DestroyEntity's into freed ComponentManagers (SIGSEGV
+after EARTH IMPACT). Clear effects on unregister, abandon on static dtor,
+construct the Table before the executor, and reclaim draining slots on play.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(examples): avoid Squirrel reserved word in attack-vfx
+
+Rename local `base` to `pedestal` (Squirrel keyword) and harden the
+air-slash segment index math so the showcase compiles and runs.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(examples): denser elemental presentation FX for attack-vfx
+
+Use elongated sphere ribbons, angular cube rock shards, and earlier
+impact clusters so WATER/EARTH/FIRE/AIR read closer to the reference
+frames in mid-release screenshots.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(examples): tune attack-vfx fire burst and earth rock scale
+
+Keep fire impact orbs smaller than the dummy and enlarge earth rock
+shards so mid-release frames stay readable against the checkered floor.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* Chaos Destruction: Geometry Collection design + P0–P3 runtime (#473)
+
+* docs: design Chaos-style geometry collection destruction
+
+Add an EVEngine design for pre-fractured Geometry Collections with
+connection graphs, cluster hierarchy, and runtime destruction fields,
+mapped to physics/destruction satellites and existing PhysicsLink rules.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(physics): P0 geometry-collection destruction core
+
+Add physics_destruction satellite with GeometryCollectionAsset schema,
+instance connection-graph stepping, Strain/Anchor/Sleep fields, PhysicsLink
+bone bindings, dual destruction-order tests, and destruction-basic example.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(physics): harden destruction P0 bindings and tests
+
+Use lambda script bindings for binding-contract resolution, fix Result
+unique_ptr ownership in dual-destruction tests, sort the architecture
+catalogue, and correct the destruction-basic clear call.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(physics): P1 geometry-collection fracture cook
+
+Add FractureRecipe schema and physics_destruction_cook that produces
+deterministic box-proxy bones and connection graphs for Uniform/Clustered
+Voronoi, Planar, and Radial patterns from CanonicalMeshData.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(physics): P2 destruction graphics and editing schema
+
+Add GeometryCollectionRenderer/DestructionFx for box-proxy bone draws with
+interior tint and sleep batching, fractureRecipeSchema for authoring, and
+user docs plus destruction-basic render wiring.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(physics): harden destruction P2 bindings and graphics tests
+
+Resolve DestructionFx getInstance for BindingContracts, align the draw test
+with Window/Graphics APIs, and widen the bone-link contract scope to cover
+the graphics satellite.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(physics): satisfy destruction Source quality API contracts
+
+Rename edgeBroken to isEdgeBroken, document ownership/lifetime on Instance
+and DestructionFx APIs, and align user docs with module names so architecture
+and binding checks pass.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(physics): P3 destruction budgets, cluster ids, and instance snapshots
+
+Add per-step edge-break/sleep budgets with deferred pending queues, asset
+schema v2 clusterId/fractureLevel (v1 migrate + cook write-through),
+ClusterBreakEvent observability, and physics:geometry-collection-instance@1
+capture/restore with script JSON facades and coverage tests.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(physics): harden destruction P3 unit tests for zeroerr and Body3D
+
+Include Body3D for setLinearVelocity and avoid REQUIRE(||) ambiguity
+with zeroerr Expression overloads.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(physics): address destruction High review bugs and add clusters example
+
+Keep Attached bones static and sync Detached from the unbroken connection
+graph; Impulse no longer frees anchors; sleep-batch meshes are released on
+rebuild. Expose cluster-pillar fixture / assetFromJson / Impulse for the new
+examples/destruction-clusters P3 demo (budget, cluster breaks, snapshot).
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* feat(animation): RootMotionPolicy for physics-driven characters (#479)
+
+* feat(animation): add RootMotionPolicy for physics-driven characters
+
+AnimPlayer can lock root-motion axes, bake unlocked translation/rotation
+back into the pose, and publish planar deltas in character-facing space
+so capsules own locomotion without double-sliding the mesh.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(animation): share RootMotionPolicy with MontagePlayer
+
+Montage presentation now pushes the canonical RootMotionPolicy into its
+owned AnimPlayer. MontageRootMotionMask stays as a compatibility lock
+projection; prepare overlays authored channel locks while preserving bake
+and character-facing yaw. Coordinator layers can install the same policy.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(animation): stabilize RootMotionPolicy bake, facing locks, and script parse
+
+Plant baked root axes on skeleton bind instead of the previous sample so
+cross-fades, consecutive frames, and loop wraps do not slide or pop. Blend
+incoming/outgoing root deltas during fade, apply axis locks after
+CharacterFacing rotation, and return {ok,message} for unknown script names.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* feat(procgen): generalize road junction curb returns (tee/y/bidirectional) (#477)
+
+* feat(procgen): generalize road junction curb returns
+
+Replace the axis-aligned-only cross fillet with polar N-way curb returns
+(acute fillets + wide-angle T chords), add tee/y demo scenes, and paint
+bidirectional lane markings with reverse navigation ribbons.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(procgen): dock Y-junction arms at curb-return tangency
+
+Non-orthogonal junctions had arms trimmed at junctionRadius while the
+fillet touched the asphalt edges closer to the hub, leaving salmon gaps.
+Plan true tangency trims, snap tip frames without mirroring Frenet side,
+and keep tipAtTo lofts from twisting the last segment into a hole.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(procgen): address road junction bake review findings
+
+Correct asymmetric bidirectional lane/marking offsets, hub-probe outward
+direction, two-pass wide-angle trim planning, graded tip snap elevation,
+per-arm junction curb profiles, once-per-bake JunctionPlan reuse, and
+raise recipe span minimum to match tee/y constructors.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(procgen): common-angle junctions with bend-to-dock (#480)
+
+* feat(procgen): common-angle junctions with bend-to-dock
+
+Add makeFan/fork/skew for 60°/135° demos, harden fillet planning for
+common gaps, and when a corner cannot dock at the authored approach,
+spread arm tips by up to ~18° so the loft curves into a fillet.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(procgen): address common-angle junction review findings
+
+Own JunctionPlans for the bake lifetime so arm lookups never dangle,
+preserve Y traffic as north-in/SE+SW-out via makeFan intoHub flags,
+share a safe bendLength helper, rejoin from-end bends onto the spline
+approach frame, place bent docks at the edge-capped trim, cache plans
+once per network bake, and raise the recipe span floor to 16.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* Action-combat foundation for arena vertical slice (#483)
+
+* Add action-combat foundation for arena vertical slice
+
+Introduce melee hit sweep, 3D character controller, hitstop/hitstun,
+cancel/input buffer, guard/parry windows, lock-on, enemy near-band AI,
+combo graph and body-part damage rules. Wire new timeline window types
+and a combat-arena example, with unit and composition tests.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Fix combat foundation build/test issues
+
+Correct DiagnosticCode usage, Result return types, melee fire ammo read,
+enemy AI first-attack cooldown, and arena example quit call.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Weld combat loop with lock-on camera, motion warp and enemy telegraph
+
+Compose CombatLoopRuntime so one tick sequences warp, character
+integration, melee, guard/feel and camera framing without a CombatActor
+root. Add lock-on apply on CameraController, bounded motion warp, ground
+and capsule probes, and Telegraph/Recover punish windows on the enemy
+intent source.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Bind CameraController.hasSecondaryTarget through a lambda
+
+simplesquirrel cannot wrap const noexcept member pointers; match the
+existing photo-mode authority binding so EVCamera links under GCC.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Document CameraController secondary-target getters by name
+
+check_bindings substring-matches each bound symbol; X/Y/Z shorthand
+only covers getSecondaryTargetX and leaves Y/Z as NEW gaps.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* clang-format changed action/weapon lines from the combat foundation
+
+Source quality's git-clang-format gate only checks existing-file
+changed lines; align those earlier PR edits with .clang-format.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Add cancel resolve, lock-relative dodge, knockback and enemy steering
+
+Weld CombatCancelResolver into the combat loop, land stun knockback and
+dodgeRelative on the character controller, steer Mid/Far enemies toward
+lock targets, and carry authored melee knockback into damage reactions
+with perfect-dodge audit when i-frames negate a hit.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Reword RoadBake disc-path comment to clear fallback debt gate
+
+Merging origin/dev brought in a comment that tripped the bounded
+fallback-contract inventory (71→72). Reword it so Source quality stays
+within the existing budget.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Fix MSVC C2124 in combat motion-warp NaN test
+
+Replace compile-time 0.0/0.0 with quiet_NaN so Windows debug builds
+of unit_test_combat succeed.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* Raise macOS debug build step timeout for cold sccache
+
+The 60-minute guard killed a healthy compile at ~90% when sccache wrote
+0 of 3549 objects. Align with Windows debug's 90-minute budget so cold
+or write-fail cache cases can finish.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* feat(physics): complete mechanical joints and mechanism assemblies (2D+3D) (#486)
+
+* feat(physics): complete mechanical joints and mechanism assemblies
+
+Expose Box3D weld/motor/parallel/filter joints on Joint3D, and add
+Mechanism3D helpers for shaft, crank-slider, and one-way ratchet motion
+with script bindings, snapshot restore, docs, and unit tests.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(physics): add 2D Joint2D and Mechanism2D mechanical assemblies
+
+Mirror the 3D joint/mechanism API onto Box2D World with pixel-space
+anchors, gear-aware teardown, and shaft/ratchet/crank-slider helpers.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(physics): wire 2D joint ownership for compile and api-lifetime
+
+Make Body/World joint bookkeeping use member access for private sets,
+and document World::adoptJoint ownership/lifetime for the contract gate.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* docs(physics): document joint and mechanism script bindings
+
+Source quality failed because 47 new Joint2D/Mechanism2D/Joint3D/
+Mechanism3D addFunc names were missing from physics.md API index.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* feat(particles): P2/P3 effects + GPU sort/ribbon (#478)
+
+* feat(particles): advance P2/P3 effect assets, SDF, and reference pack
+
+Add schema v2 eventRoutes/timeline with transactional reload, emitter pooling,
+IParticleSdfField collision sampling, motion-vector policy hooks, and a
+fire/smoke/impact/trail/weather reference effect pack with tests.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(particles): use SimulationStep.delta for effect timelines
+
+Compile fix after the initial P2/P3 timeline advance API used a non-existent
+dt field on SimulationStep.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(particles): GPU-resident transparent sort via bitonic indices
+
+Keep particle SSBOs compacted while sorting draw order with a compute
+bitonic pass (oldest/youngest/distance). Vertex stage reads sorted
+indices when enabled; sorting no longer forces a CPU fallback.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(particles): remove goto across init in GPU sort path
+
+Restructure update/sort recording so the sort-only distance path does not
+cross C++ object initialization, and fix the sort-mode test activation check.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(particles): GPU-resident ribbon via birthSerial sort
+
+Ribbon no longer forces a CPU fallback. The resident path sorts by spawn
+serial, then the vertex stage emits oriented segment quads between
+neighbors, matching CPU ribbon width/min-length behavior.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* test(particles): sample a strip for GPU ribbon brightness
+
+The ribbon trail does not always hit the exact center pixel under
+Lavapipe; assert the brightest sample along the path instead.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(particles): close source-quality gaps for P2/P3 APIs
+
+Document getMotionVectorPolicy and ParticleEmitterPool.idleCount so the
+binding gate matches Particles.cpp. Register the particle-effects JSON
+pack as a non-runnable example. Replace SDF gradient's operation-result
+bool with ParticleSdfGradientStatus and spell out getSdfField ownership.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(bindings): resolve [[nodiscard]] member decls in contracts
+
+The binding-contract generator skipped attributed getters such as
+ParticleEffect::getTimelineSeconds, which blocked every platform build.
+Accept C++ attributes before the return type and cover the case in tests.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(bindings): do not treat nodiscard("...") paren as params
+
+After accepting [[nodiscard]] attributes, find("(", match.start())
+grabbed the message argument parenthesis and published arg0
+placeholders for PixelWorld/UI APIs, failing ASan (and any cold)
+builds. Use the '(' that ends the declaration regex match instead.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* ci: raise macOS unit-test timeout to 50 minutes
+
+Run 37420229018 completed 5492/5868 cases then hit the 40-minute
+step guard; Linux already passed the same suite. Match the Windows
+50-minute margin so the remaining cases can finish.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* feat(procgen): steel cable, iron chain, hemp rope + 铁锁桥 example (#485)
+
+* feat(procgen): steel cable, iron chain, and hemp rope generators
+
+Add tileable mesh recipes (mesh.cable / mesh.chain / mesh.rope) with
+matching seamless albedo and full PBR texture recipes, a gallery example,
+and process-isolated coverage for topology, reproducibility, and map sets.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(procgen): avoid most-vexing-parse in cable tube frames
+
+Declare frame vectors with assignment form so size_t(rings) is not
+parsed as a function parameter under -Werror=vexing-parse.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(examples): add iron chain bridge composition demo
+
+Compose mesh.chain, mesh.rope, and mesh.bridge into a simple scenic
+铁锁桥 with iron PBR chains, hemp hangers/rails, and wooden deck.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* ci(ios): raise debug/release xcodebuild timeout to 50m
+
+Healthy iOS debug jobs finish in about 32-35 minutes. This PR's job
+hit the 40-minute step timeout while still compiling EVAnimation, with
+no clang error. Linux/Android/WebGPU already compiled the new procgen
+sources successfully.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* feat(animation): PhysicalBalancePose wobble and balance recovery (#488)
+
+* feat(animation): add PhysicalBalancePose impulse wobble and recovery
+
+Overlay authored poses with an inverted-pendulum lean and per-bone recoil.
+World-space impulses (from contacts or gameplay) make the character wobble;
+recovery PD stronger than g/h pulls the center of mass back over the support.
+Physics is not a dependency: callers inject impulse values.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(animation): define PhysicalBalancePose getters in the TU
+
+Binding contract generation cannot resolve inline header getters.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* docs(animation): list every PhysicalBalancePose script binding
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Cursor Agent <cursoragent@cursor.com>
+
+* feat(gpuagents): GPU Agents FX framework P0+P2 (fish/life/bird/petal) (#487)
+
+* feat(gpuagents): GPU Agents FX framework (fish/life/bird/petal)
+
+Add a four-layer EffectProfile/Backend/Solver/Renderer architecture with
+GpuAgentWorld environment + unified SDF obstacles and CPU reference solvers
+for fish schools, life networks, bird flocks, and petals. Includes tests,
+docs, and a smoke example.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* feat(gpuagents): P2 editing/editor, LifeField binding, surface capture
+
+Add gpuagents_editing PropertySchema document + runtime applier,
+gpuagents_editor preview scrub service, SurfaceCapture triangle→height
+field, and LifeFieldMaterialBinding RGBA8 packing for Graphics upload.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* docs(gpuagents): document missing script bindings for Source quality
+
+Cover setWind, setVerticalBounds, backendCount, aliveCount, and reset
+so check_bindings --strict no longer reports NEW gaps.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(examples): assign engine config table in gpu-agents
+
+check_examples requires config.nut to mutate the engine `config` table;
+a bare return was silently ignored for window title/modules after the
+dev merge tightened the source-quality gate.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(gpuagents): place editing/editor modules in matching layer sections
+
+check_module_manifest requires LAYER 6/7 declarations to sit under the
+L6/L7 comments in orchestration.cmake; keep gpuagents itself in L5.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+* fix(examples): use gpuAgents script slots and window size
+
+config.modules must name instantiated slots (gpuAgents/gfx/win), not
+CMake names, and assigning config replaces engine defaults so width
+and height have to be set or boot_create_window fails.
+
+Co-authored-by: 西风逍遥游 <sunxfancy@gmail.com>
+
+---------
+
+Co-authored-by: Curso…
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

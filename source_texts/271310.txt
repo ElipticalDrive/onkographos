@@ -1,0 +1,262 @@
+Open-source deep-learning framework for building, training, and fine-tuning deep learning models using state-of-the-art Physics-ML methods - BVH: compute Morton codes by shift-and-mask bit spreading by peterdsharpe · Pull Request #2055 · NVIDIA/physicsnemo
+
+BVH: compute Morton codes by shift-and-mask bit spreading by peterdsharpe · Pull Request #2055 · NVIDIA/physicsnemo · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+peterdsharpe
+commented
+Oct 6, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Description
+Closes #2054
+_compute_morton_codes now interleaves bits for 1–3 spatial dimensions with a few whole-tensor shift-and-mask steps, on every device. Each quantized coordinate's bits are spread D positions apart in five steps; the dimensions are then shifted by 0, 1 and 2 and summed. Their bits do not overlap, so the sum is a bitwise OR. The generic per-bit loop remains for D ≥ 4.
+On CUDA, the function used to materialize every bit of every quantized coordinate at once: bits with shape (N, D, n_bits) and dtype int64 (504 B per point in 3D), then bits << shifts, a second tensor of the same size. BVH.from_mesh calls it on the cell centroids, so the build peaked at 1100 B per cell above the baseline (55 GB at 50M cells), while the finished BVH keeps 120 B per cell. In an earlier sweep at 29e400cf8, which has the same _compute_morton_codes, a 300M-cell build ran out of memory on a 277 GiB GB300. ClusterTree.from_points calls the same function.
+The first commit on this branch processed those bits in chunks of 2^21 rows. That bounded the temporary, but at its peak two chunks were alive, it launched five kernels per chunk, and it was no faster. The spreading version needs no loop. Its temporaries are a few (N, D) int64 arrays (72 B per point in 3D) for any N, and every call makes the same 29 kernel launches. The Morton step is 2× faster at 1M points and about 4× faster from 10M points up. Quantization is unchanged, so the codes, and so every BVH field, are bit-identical.
+End-to-end, for the case that motivated this (a 50M-cell surface mesh with 100k on-surface query points), mesh.sample_data_at_points(q) with default arguments builds a BVH on every call. On a GB300 its peak drops from 55.0 GB to 17.0 GB above the mesh (PyTorch's reserved memory: 60.1 GB to 27.1 GB), and the call takes 86 ms instead of 111 ms.
+Testing
+GPU runs used one NVIDIA GB300 (277 GiB) on Linux aarch64 with Python 3.13.16 and PyTorch 2.13.0+cu130. They compared upstream main 354896ae7, the chunked first commit 3c53ddf4d, and this branch. Times are medians of 15 calls after a warm-up, with torch.cuda.synchronize() around each call. Peak is max_memory_allocated above the pre-call baseline.
+_compute_morton_codes on random 3D points (float32):
+Points
+main
+chunked
+this branch
+main peak
+chunked peak
+this branch peak
+100k
+0.34 ms
+0.37 ms
+0.44 ms
+1040 B/pt
+544 B/pt
+72 B/pt
+1M
+0.93 ms
+0.98 ms
+0.44 ms
+1040 B/pt
+544 B/pt
+72 B/pt
+10M
+7.21 ms
+7.28 ms
+1.96 ms
+1040 B/pt
+243 B/pt
+72 B/pt
+50M
+35.79 ms
+35.85 ms
+9.05 ms
+1040 B/pt
+74 B/pt
+72 B/pt
+100M
+71.46 ms
+71.53 ms
+17.95 ms
+1040 B/pt
+53 B/pt
+72 B/pt
+At 50M points in 2D: 34.56 ms on main, 6.20 ms here (48 B/pt). In 1D: 33.73 ms on main, 1.11 ms here (24 B/pt). Kernel launches per 3D call: 19 on main and 19 chunked at 100k points; 79 on main and 111 chunked at 50M points; 29 here at both sizes. At 100k points it is about 0.1 ms slower than main, because it makes 10 more launches; from 1M points up it is faster. Codes equal main's in every case.
+BVH.from_mesh on torus meshes (all 7 BVH fields torch.equal to main):
+Cells
+main time
+this branch time
+main peak
+this branch peak
+1.0M
+10.43 ms
+10.89 ms
+1101 B/cell
+340 B/cell
+10.0M
+19.07 ms
+15.98 ms
+1100 B/cell
+340 B/cell
+50.0M
+80.29 ms
+53.52 ms
+1100 B/cell
+340 B/cell
+The remaining 340 B per cell comes from other BVH.from_mesh buffers, not from the Morton step.
+Tests in test/mesh/spatial/test_bvh.py:
+TestMortonCodes::test_codes_match_per_bit_interleave[cpu|cuda, float32|float64, D=1..4]: 500 random points. The codes equal a reference that quantizes the same way and then sets one bit of one axis at a time.
+TestMortonCodes::test_cuda_peak_memory_is_linear_in_points: 65,536 points in 3D. The peak must stay below 128 B per point (measured: 72 B per point). Materializing every bit as int64 needs 504 B per point.
+Commands:
+```
+# GB300: 509 passed
+python -m pytest test/mesh/spatial test/mesh/sampling -q
+# CPU only (CUDA tests skip): 28 passed, 13 skipped
+python -m pytest test/mesh/spatial/test_bvh.py -q -k Morton
+# all hooks passed
+pre-commit run --files physicsnemo/mesh/spatial/bvh.py test/mesh/spatial/test_bvh.py CHANGELOG.md
+```
+Checklist
+I am familiar with the Contributing Guidelines.
+New or existing tests cover these changes.
+The documentation is up to date with these changes.
+The CHANGELOG.md is up to date with these changes.
+An issue is linked to this pull request.
+If I am implementing a new model or modifying any existing model, I have followed the Models Implementation Coding Standards.
+BVH: chunk the CUDA Morton-code bit interleave over rows
+…
+3c53ddf
+```
+On CUDA, _compute_morton_codes materialized every bit of every quantized
+coordinate at once as an (N, D, n_bits) int64 tensor, plus a shifted
+copy of the same size: about 1 kB per point. BVH.from_mesh therefore
+peaked at 1100 B per cell (55 GB at 50M cells) and ran out of memory on
+a 277 GiB GB300 at 300M cells.
+
+Process the interleave in chunks of 2^21 rows and apply the mask and
+shift in place, so the temporary stays near 1 GB. Quantization still
+uses the global minimum and extent, so codes are bit-identical. On a
+GB300 the BVH.from_mesh peak drops to 340 B per cell with unchanged
+build time.
+
+Signed-off-by: Peter Sharpe <peterdsharpe@gmail.com>
+```
+copy-pr-bot
+Bot
+commented
+Oct 6, 2026
+Copy link
+Copy Markdown
+This pull request requires additional validation before any workflows can run on NVIDIA's runners.
+Pull request vetters can view their responsibilities here.
+Contributors can view more details about this message here.
+github-actions
+Bot
+commented
+Oct 6, 2026
+Copy link
+Copy Markdown
+Contributor
+CODEOWNERS review map
+Current for commit 3c53ddf4d15c. An approval covers every file listed for that owner; one owner is sufficient for shared files.
+⏳ @peterdsharpe — 2 file(s)
+physicsnemo/mesh/spatial/bvh.py
+test/mesh/spatial/test_bvh.py
+No CODEOWNER
+CHANGELOG.md
+Comment /codeowners-info to refresh.
+greptile-apps
+Bot
+commented
+Oct 6, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+[Medium risk] Optimizes memory usage in spatial index construction on GPU.
+The PR appears safe to merge, with a non-blocking fix needed to meet the stated temporary-memory bound.
+Findings
+Two chunks stay in memory ▶
+Summary
+CUDA Morton codes now run in row chunks and apply masks and shifts in place. CPU behavior and quantization stay unchanged.
+Adds CUDA tests for chunk boundaries and reduced peak memory.
+Updates the changelog.
+The previous chunk remains alive during the next allocation, so the bit arrays peak near 2 GB rather than the stated 1 GB.
+Reviews (1) · Last reviewed commit: "BVH: chunk the CUDA Morton-code bit inte..."
+greptile-apps
+Bot
+reviewed
+Oct 6, 2026
+View reviewed changes
+Comment thread
+physicsnemo/mesh/spatial/bvh.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+BVH: compute Morton codes by shift-and-mask bit spreading
+…
+9c190dc
+```
+For 1-3 spatial dimensions, spread each quantized coordinate's bits D
+positions apart with five whole-tensor shift-and-mask steps, then
+combine the dimensions. This replaces the CUDA row-chunk loop, which
+still materialized every bit as int64 (504 B per point in 3D, with two
+chunks alive at the peak) and launched five kernels per 2^21 rows. The
+generic per-bit loop remains for D >= 4. Codes are bit-identical.
+
+On a GB300, the temporaries are 72 B per point in 3D, and a call makes
+29 kernel launches for any N. At 50M points the Morton step takes
+9.1 ms instead of 35.8 ms on main, and BVH.from_mesh at 50M cells takes
+53.5 ms instead of 80.3 ms, with its peak unchanged at 340 B per cell.
+
+Signed-off-by: Peter Sharpe <peterdsharpe@gmail.com>
+```
+peterdsharpe
+changed the title
+BVH: compute CUDA Morton codes in chunks of rows to bound memory
+BVH: compute Morton codes by shift-and-mask bit spreading
+Oct 7, 2026
+Merge branch 'main' into pr/bvh-morton-memory
+7ced4e4
+peterdsharpe
+commented
+Oct 7, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+/ok to test 7ced4e4
+coreyjadams
+approved these changes
+Oct 7, 2026
+View reviewed changes
+coreyjadams
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This whole thing is some black magic, @peterdsharpe .
+peterdsharpe
+added this pull request to the merge queue
+Oct 7, 2026
+Hide details
+View details
+Merged
+via the queue into
+NVIDIA:main
+with commit cfa4c5b
+Oct 7, 2026
+13 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+peterdsharpe
+deleted the
+pr/bvh-morton-memory
+branch
+October 7, 2026 21:41
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

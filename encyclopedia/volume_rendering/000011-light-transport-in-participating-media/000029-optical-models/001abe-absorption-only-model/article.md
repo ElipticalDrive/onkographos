@@ -1,0 +1,106 @@
+# Absorption-only model
+
+Also called: Pure absorption, Absorption Model, Absorption-only homogeneous volume rendering, X-ray model, X-ray attenuation model, Attenuation model, Extinction model, Cold black particle model, Single monochromatic absorption-only homogeneous volume
+
+## Overview
+
+The absorption-only model computes light attenuation through a participating medium that absorbs all intercepted light without scattering or emitting [S1, S3]. It solves for radiance decay along a ray, effectively simulating a cloud of black smoke or X-ray projection [S3, S4]. Unlike the [Emission-Absorption Model](927-emission-absorption-model.md), it assumes zero scattering ($\sigma_s = 0$) and surfaces that only emit light without reflecting or transmitting [S2].
+
+## How it works
+
+### Inputs and Outputs
+*   **Inputs**: Camera geometry and screen position [S2]. Random number generator state for sampling [S2]. Scene definition containing emissive surfaces [S2]. Homogeneous volume absorption coefficient $\sigma_a$ [S2]. Particle density $\rho$ and projected area $A$ for microscopic derivation of $\sigma_a$ [S3].
+*   **Outputs**: Radiance $L$ for each pixel [S2].
+
+### Data Structures
+*   **Ray**: Defined by origin $\mathbf{p}(0)$ and direction $\omega$ [S2].
+*   **Intersection**: Contains distance $t_{\text{hit}}$ to the surface and surface emission radiance $L_e$ [S2].
+*   **Volume Properties**: $\sigma_a$ (units: $1/\text{length}$) [S2]. $\tau(s)$ extinction coefficient at distance $s$ [S3].
+
+### Formulas
+The radiative transfer equation simplifies to an ordinary differential equation describing intensity decay [S1]:
+$$ \frac{d}{dt} L_1(\mathbf{p}(t), \omega) = -\sigma_a L_1(\mathbf{p}(t), \omega) $$
+Alternatively, using particle density $\rho(s)$ and projected area $A$ [S1, S3, S4]:
+$$ \frac{dI}{ds} = -\rho(s) A I(s) = -\tau(s) I(s) $$
+where $\tau(s) = \rho(s)A$ is the extinction coefficient [S3].
+
+The closed-form solution for the radiance $L$ observed at the camera (ray origin) from a surface hit at distance $t_{\text{hit}}$ is [S2]:
+$$ L_1(\mathbf{p}(0), \omega) = \exp(-\sigma_a t_{\text{hit}}) L_e(\mathbf{p}(t_{\text{hit}})) $$
+Or generally, for intensity $I(s)$ at distance $s$ from an initial intensity $I_0$ [S1, S3, S4]:
+$$ I(s) = I_0 \exp\left(-\int_0^s \tau(t) dt\right) $$
+The term $T(s) = \exp\left(-\int_0^s \tau(t) dt\right)$ is the transparency of the medium between $0$ and $s$ [S1, S3, S4].
+
+### Parameters
+*   $\sigma_a$: Absorption coefficient. Assumed constant (homogeneous) in the basic implementation [S2].
+*   $\sigma_s$: Scattering coefficient. Set to $0$ [S2].
+*   Ray Differentials: Disabled (set to $0$) in standard implementations to avoid complexity [S2].
+*   Environment Maps: Assumed absent [S2].
+
+### Steps
+1. Sample a primary camera ray for the screen position using a random number generator [S2].
+2. Intersect the ray with the scene primitives to find the closest hit point [S2].
+3. If an intersection exists, calculate the transmittance using the absorption coefficient and distance to the hit point [S2].
+4. Initialize emitted radiance $L_e$ to zero; if the hit surface is emissive, assign its emission radiance [S2].
+5. Return the product of transmittance and $L_e$; if no intersection exists, return zero [S2].
+6. For continuous scalar fields, interpolate $f(X)$ (e.g., trilinear on cubes), map $f(X)$ to $\tau(s)$, and integrate the differential equation along each viewing ray [S1, S4].
+
+### Pseudocode
+The following algorithm computes the radiance for a single pixel [S2]. It assumes a scene with emissive surfaces and a single homogeneous absorbing volume [S2].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_absorption_only(screen_pos, rng, camera_origin, camera_direction, scene_primitives, sigma_a):
+    # [G] Generate primary ray from camera origin through screen position
+    ray_origin = camera_origin
+    ray_direction = normalize(camera_direction + jitter(rng))
+    
+    # [G] Find closest intersection with scene primitives
+    closest_t = float('inf')
+    hit_primitive = None
+    for prim in scene_primitives:
+        t = intersect_ray_primitive(ray_origin, ray_direction, prim)
+        if t is not None and t < closest_t:
+            closest_t = t
+            hit_primitive = prim
+            
+    if hit_primitive is not None:
+        transmittance = exp(-sigma_a * closest_t)
+        Le = hit_primitive.emission_radiance if hit_primitive.is_emissive else 0.0
+        return transmittance * Le
+        
+    return 0.0
+```
+
+### Edge Cases and Pitfalls
+*   **Extinction vs. Voxel Opacity**: Do not confuse the extinction coefficient $\tau$ with voxel opacity $\alpha$. $\alpha$ depends on the path length through the voxel, which varies if the voxel is scaled or viewed diagonally [S1, S4].
+*   **Homogeneity Assumption**: The simple closed-form solution $L = e^{-\sigma_a t} L_e$ relies on $\sigma_a$ being constant [S2].
+*   **Spatial Variation**: For spatially varying density, the integral $\int_0^s \tau(t) dt$ must be evaluated continuously along the viewing ray [S4].
+*   **Monochromatic Assumption**: The basic model assumes a single $\sigma_a$ for all color channels, though $L_e$ can still be colored [S2].
+*   **Thresholding**: For opaque volumes, voxels are thresholded where $f > K$, and front faces are projected using a z-buffer or painter's algorithm [S1, S5].
+
+## Subtopics
+
+### X-ray simulation via ray integration
+A rendering technique that simulates X-ray projection by integrating attenuation along viewing rays, accounting for density between source and film plane [S4]. The transfer function $\tau(f)$ is set as an identity function if $f$ represents X-ray absorption density from Computed Tomography, and rays are integrated to generate simulated X-ray images from arbitrary directions [S4].
+
+## Operating characteristics
+*   **Time Complexity**: Not given in the sources. [S1, S2, S3, S4]
+*   **Memory Complexity**: Not given in the sources. [S1, S2, S3, S4]
+*   **Strengths**: Effective for visualizing density distributions (e.g., bone in X-rays) or occlusion [S3, S4].
+*   **Limitations**: Cannot render volumetric effects like fog glow or subsurface scattering; surfaces do not reflect light, only emit [S2].
+*   **Compositing**: The compositing equation is commutative, allowing regions to be combined in any order [S3].
+*   **When to use**: X-ray simulation, simple occlusion clouds, density distribution visualization [S3, S4].
+*   **When not to use**: Scenes requiring surface reflection, shadows, or volumetric illumination effects [S2].
+
+## Background
+
+The absorption-only model describes a participating medium with cold, perfectly black particles that absorb all intercepted light without scattering or emitting [S1, S3]. It was formalized in the context of optical models for direct volume rendering by Max [S1, S4] and Blinn [S1], who described the "cold black particle" model. The mathematical formulation is analogous to the Beer-Lambert law in physics and neutron absorption cross-sections in transport theory [S5].
+
+## Sources
+
+[S1] [PDF] Optical Models for Direct Volume Rendering - Duke Computer Science, https://courses.cs.duke.edu/spring03/cps296.8/papers/max95opticalModelsForDirectVolumeRendering.pdf, fetched 2026-10-26
+[S2] PDF Volumetric Path Tracing - University of California, San Diego, https://cseweb.ucsd.edu/~tzli/cse272/wi2023/homework2.pdf, fetched 2026-10-30
+[S3] PDF Direct Volume Rendering, https://www.sci.utah.edu/~stevec/classes/cs5630/dvr.pdf, fetched 2026-10-27
+[S4] Optical Models for Direct Volume Rendering - DocsLib, https://docslib.org/doc/3914352/optical-models-for-direct-volume-rendering, fetched 2026-10-27
+[S5] Mathematical models for volume rendering and neutron transport, https://digital.library.unt.edu/ark:/67531/metadc1274949/?q=volume rendering equation, fetched 2026-10-28

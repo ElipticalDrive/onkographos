@@ -1,0 +1,46 @@
+(#) Rendering Algorithm Collaborated by Fan Feng and Mengdi Wang
+We implemented the rendering program used for the final picture step by step, in the following order:
+(1) Participating media path tracer.
+(2) Photon mapping.
+(3) Volumetric photon mapping (beam radiance estimation).
+(4) Volumetric photon mapping with final gathering (not used for rendering).
+(5) A parallel version of (3).
+And (5) is the final program for rendering.
+(##) Skybox
+Our y axis is the z axis in blender and our z axis is the -y axis in blender and our x axis is -x axis in blender. The fov in blender is horizontal when the aspect ratio is larger than one so we need to change it to
+horizontal when we export it out. Blender uses the hfov when aspect ratio is greater than one and uses vfov when aspect ratio is smaller than one, so we changed the python script for exporting the scene.
+(##) Participating Media
+We also verified with all sigma values equal to zero that no volume shown and also all absorption equal to 1 that the sphere appears black.
+(##) Photon Mapping
+We first implemented a surface photon mapping `PathTracerPhoton` in `integrators/path_tracer_photon.cpp`. We design the photon structure to be a derived class of `Sphere`, because at first we chose to use a fixed-radius photon model, therefore every photon is a sphere. Therefore, we can easily build a bounding box hierarchy of photons by adopting the existing code. Apart from the information of `Sphere`, `Photon` stores two additional values: photon power $\Phi_i$ and the incident direction $\omega_i$.
+For this first photon mapping integrator, we implemented the photon sampling algorithm in `Scene` for simplicity. The sampling code consists of two functions: first, `void emit_photons(int N,const float &radius);` keep emitting photons until there are enough valid photons sampled.
+When a photon is sampled, it is traced recursively by the other function `int recursive_photon(Sampler &sampler, const float &radius, const Ray3f &ray, const Vec3f φ, const Vec3f φ_orig,const int more_bounces);`
+In `recursive_photon()` we use the Russian Roulette strategy, trying to keep the photon power near constant. There is a technical issue that in the equations in slides, power $\Phi$ is a scalar, however in our code it's a `Color3f`. To deal with this, we use the method suggested by *Smal, Niklas, and Maksim Aizenshtein. "Real-time global illumination with photon mapping." Ray Tracing Gems. Apress, Berkeley, CA, 2019. 409-436.* : use the largest number in 3 RGB channels as the power.
+The photons are store in a `BBH` hierarchy. And in rendering process, we write a function in `BBH` and `BBHNode` to query photon radiance near a certain point: `Color3f BBHNode::photon_radiance(const HitInfo &hit, const Vec3f &w, const float &r)`. Basically it recursively queries (in the tree hierarchy) every photon that includes point `hit.p`, because every photon has a radius, and calculate the radiance.
+Then, the function `Li()` in the integrator `PathTracerPhoton` calls a recursive function `Color3f recursive_Li(const Scene &scene, Sampler &sampler, const Ray3f &ray, int more_bounces)`, which terminates at the first diffusive material the path landed, and query the radiance near that point.
+At this point, we get some results with severe splotch artifacts, like this:
+When tuning parameters, we realized that the rendering result is highly sensitive to the fixed radius `r`, therefore we decided to switch to the other strategy: k-nearest-neighbors. That is, for some parameter $n$, we query the nearest $n$ photons of some point $x$, and set radius `r_i` to the distance of the farest photon in them. Therefore we need to implement a knn query method in `BBH`. The algorithm is based on a max-heap, that is, a `std::priority_queue`. We push all possible photons in the priority_queue, and pop when its size is larger than $n$. Here "possible" means that if the distance of a bounding box to $x$ is larger than the max distance in the priority_queue, we do not try to search in the subtree rooted at that node.
+However, we didn't write another point-cloud-like photon structure, because we expect that later we will still assign radii to all photons in the volumetric photon mapping, and for simiplicity. Instead, we just set the photon radius to a very small number.
+Finally we obtained a running photon mapping program. However at this point we still have a issue: the result picture is darker than the reference, like this:
+Later we found that the reason of this is that `Material::eval()` function in our code has already taken care of the cosine term. We didn't take this into count, and mulplitied the term again. After fixing this, the photon mapping can generate correct pictures:
+And to validate the correctness of knn search, we change the knn search to a naive algorithm: sort all photons and take the nearest $n$. That naive version generates a exactly same picture, that means our knn search is correct:
+We validate the photon mapping first by the three sphere lights:
+All these results are rendered with 200 photons and 50 nearest photons in estimation. We can see that we lose the highlight under light source, because photon mapping is biased. However, if we compare our three photon mapping pictures, we can see a similar radiance distribution on floor, which proves that our algorithm is consistent.
+Further we validate our result with the Jensen box scene.
+200 photons, 50 in estimation:
+100000 photons, 50 in estimation:
+500000 photons, 500 in estimation:
+The reference picture sampled more rays per pixel, so their result looks more smooth.
+(##) Volumetric photon mapping
+Next we move on to volumetric photon mapping. That is integrator `PathTracerVPT` in `integrator/path_tracer_vpt.cpp`. We move the photon sampling function into `PathTracerVPT` to avoid confusion.
+Instead of a single BBH of surface photons, we need to handle the volumetric photons in addition. Note that for the beam estimation, we need to assign a radius to each volumetric photon. That is done by first storing all volumetric photons in a BBH, then apply a knn search to each of them to decide the radius, and insert the photon with the newly calculated radius to the second BBH.
+The beam radiance estimation is done by performing a ray-BBH intersect query, and summing up the radiance of all intersected photons.
+We can compare the results of volumetric photon mapping against volume path tracer:
+The red ball is filled with participating media. The Volume Photon Mapping is done with 200 photons and 50 in estimation. It's worth to point out that photon mapping is not good at handling background (because background is not sampled), therefore the far regions are darker than the volume path tracer. However, the media is smoother than path tracer, and the radiance level is the same.
+This comparison shows the advantage of volume photon mapping. They're done in approximately the same time. Two algorithms give a similar level of radiance, and the volume photon renders a picture with better quality.
+(##) Final Gathering
+Then we try to implement a final gathering in `FinalGatherVPT`. That is done by slightly modify the `recursive_Li()` function in the integrator. Because we're expecting ~10,000 light sources in our final scene, we can only use material sampling here (light sampling will cost too much time), however the result is not satisfactory. A lot of fireflies emerge from the material sampling:
+So we didn't use this program for final rendering.
+(##) Parallelization
+We use `OpenMP` to parallelize the program. We put all pixel indexes into a vector, and use a `omp for` to iterate in it. The only thing special, is that we need to generate a different sampler for every pixel. This is done by the `seed(seedx,seedy)` function.
+We also parallelized the photon emission part, by parallely tracing multiple photons, and guard the `add_child()` by `omp critical`. The scalability of the parallelized program is good.

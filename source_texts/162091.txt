@@ -1,0 +1,1309 @@
+Heat Kernel Textures
+the Geodesic Gaussians That Do Not Splat
+Simone Foti⋆
+, Caner Korkmaz⋆
+, Stefanos Zafeiriou
+, and Tolga Birdal
+arXiv:2609.07557v1 [cs.CV] 7 Sep 2026
+Imperial College London
+Fig. 1: HKTex: an intrinsic, UV-free texture representation using heat kernels. Left:
+A Riemannian framework constrains kernel movement to the surface, followed by
+manifold-aware controllers that manage kernel shape and density. Evaluation occurs
+within a differentiable ray-tracing pipeline. Right: Final physically based renders.
+Abstract. 3D Gaussian Splatting has recently revolutionised novel view
+synthesis as well as many other 3D vision methods and applications.
+Drawing inspiration from this representation, we now rethink textures
+to overcome the main issues of UV mapping while considerably lowering their memory footprint. Heat Kernel Textures (HKTex) eliminate
+UV unwrapping as well as their persistent issues of wasted UV space,
+seams, distortions, vertex-duplication, and varying resolution. Grounded
+in discrete Riemannian geometry and intrinsically defined on any manifold surface discretised as a triangular mesh, HKTex uses anisotropic
+heat kernels as geodesic equivalents to Gaussians. Like our kernels, also
+the optimisation of their position and the adaptive densification strategies were redefined to operate on the surface of the object to be textureised. Our novel representation is also fully integrated with a physically based renderer and can be optimised either from existing textures
+or multi-view images. Our project page and code are available at circlegroup.github.io/research/HeatKernelTextures.
+Keywords: Gaussian Splatting · Heat Kernel · Texture · Geodesic
+1
+Introduction
+Rendering and representation techniques have evolved exponentially over the
+past decades, but the representation of objects’ appearance is still mostly anchored in the traditional and fundamentally flawed UV-mapping. With this representation, points on the surface of a mesh are mapped onto image planes where
+⋆
+Equal contribution
+2
+Foti et al.
+appearance properties are stored. Not only does this cause visual artifacts like
+seams, varying resolutions, and distortions, but it also incurs additional storage
+costs for saving the UV-coordinates associated with every vertex of a mesh and
+for duplicating vertices on seam lines. Empty UV-mapped regions further exacerbate memory waste. To overcome these limitations, we advocate for a new
+representation intrinsically defined on the surface of the objects and capable of
+lowering the memory footprint, with the potential to benefit games, virtual and
+augmented reality, and visual effects.
+Multiple works have attempted to mitigate UV-related issues, most notably
+through implicit neural representations [19, 26] or coloured point clouds [12, 45,
+46]. While promising, these approaches respectively incur considerable memory footprints, present topology-dependent structures, or require a substantial
+number of primitives. More recently, 3D Gaussian Splatting (3DGS) [18] has
+revolutionised novel view synthesis through a representation that tightly entangles geometry and appearance. However, standard 3DGS operates entirely in
+ambient Euclidean space. When applied to surface texturing, this assumption
+becomes a fundamental flaw: Euclidean optimisation naturally detaches Gaussians from the geometry, and the rigid 3D Gaussians themselves are incapable
+of bending to conform to the underlying manifold. While recent methods [8, 14]
+attempt to align Gaussians to the surface through the introduction of additional
+regularisation losses, the fundamental disconnect remains.
+In contrast, we introduce a truly intrinsic, geodesic representation where the
+texturing primitives natively conform to the existing geometry of a mesh. Instead of operating in ambient 3D space, we replace Euclidean Gaussians with
+anisotropic heat kernels, defining all operations directly on the manifold surface. Specifically, kernel positions are updated through Riemannian geodesic
+optimisation, and our adaptive density controls also respect the manifold using
+the exponential map during kernel splits. To continuously and efficiently evaluate kernels across the surface, we devise new techniques to parametrise kernel
+anisotropies while simultaneously bridging continuous and discrete heat diffusion formulations. Our formulation enables seamless integration into physically
+based rendering pipelines where our textures can be differentiably ray-traced. It
+is important to note that our heat kernels are not splatted, but rather dynamically evaluated at ray intersections occurring during rendering. Without loss
+of generality, we focus this study on albedo texture properties, thus modelling
+how light reflects. We prove that Heat Kernel Textures (HKTex) can compress
+existing UV textures and also be used for inverse rendering from 2D photos, thus
+enabling distortion- and seam-free texture acquisition by construction.
+To summarise, our main contributions are:
+1. A novel intrinsic texture representation grounded in discrete Riemannian geometry that efficiently represents textures without UV-mapping.
+2. A Riemannian optimisation framework that strictly constrains kernel
+movements and momentum to the surface of the mesh.
+3. Manifold-aware density controllers specifically designed to operate alongside physically based rendering and our continuous texture evaluation.
+Heat Kernel Textures
+3
+4. The integration of HKTex into a differentiable PBR pipeline, enabling
+distortion-free texture optimisation from multi-view images.
+2
+Related Work
+Neural Texture Representations. To circumvent the persistent artifacts of
+traditional UV-mapping, substantial effort has been directed towards coordinatebased neural networks to represent surface appearance. Early implicit approaches
+evaluated Multilayer Perceptrons (MLPs) directly on 3D Euclidean coordinates [26]. To improve spatial expressiveness, subsequent methods introduced
+hierarchical or multi-resolution per-vertex feature encodings that are interpolated and fed into MLPs [21]. Other hybrid approaches, such as NeuTex [42],
+attempted to map 3D points to an unfolded 2D space before neural evaluation.
+While these methods reduce reliance on manual UV-unwrapping, they remain
+fundamentally anchored in ambient 3D space or intermediate 2D mappings.
+Closely related to our mathematical foundation are Intrinsic Neural Fields [19],
+which bypass Euclidean coordinates by barycentrically interpolating the eigenvectors of the Laplace-Beltrami Operator (LBO) to condition an MLP. While
+mathematically elegant, MLP-based evaluations remain computationally heavy
+and lack the local, adaptive expressivity of explicit primitives.
+Gaussian Splatting and Explicit Surfaces. Point-based graphics and surface
+splatting have long been utilized for rendering [51], but they have seen a massive resurgence following the introduction of 3D Gaussian Splatting (3DGS) [18].
+The unprecedented speed and visual fidelity of 3DGS have inspired attempts to
+adapt Gaussians to 2D domains, such as replacing image pixels with explicit 2D
+Gaussians [48–50]. To apply this expressive power to 3D meshes, recent works
+have attempted to bridge GS with texture mapping. However, these methods
+typically regress to utilizing UV-parameterizations, either by storing Gaussians
+within the UV-images of a sphere [33] or by splatting within unfolded texture
+spaces [43]. Other advanced hybrid representations, such as Neural Shell Textures [47], use 2D Gaussians to represent local geometry while storing colors
+in multi-resolution hash grids [24]. Crucially, all of these GS-based approaches
+either rely on explicit UV-maps or operate in ambient Euclidean space, meaning their primitives cannot intrinsically bend or conform to general topological
+manifolds.
+Integration with Physically Based Rendering. While 3DGS was designed
+for rapid rasterisation, its integration into ray-traced physically based rendering
+(PBR) is an emerging frontier. Recent works have incorporated Gaussians into
+PBR frameworks for phenomena like particle rendering [10], and extended them
+for complex inverse rendering and relighting tasks [13, 44]. However, these approaches still rely on volumetric clouds of Euclidean primitives. Our work aligns
+with this trajectory but fundamentally shifts the paradigm: rather than rasterising ambient Gaussians, we natively integrate intrinsic, manifold-bound heat
+kernels as a continuous, differentiable texture evaluated directly at ray intersections within a PBR engine.
+4
+3
+Foti et al.
+Background & Notation
+Let M = {X, F} be a manifold mesh with X ∈ RN ×3 = [x1 . . . xN ]⊤ representing
+the positions of the N vertices used to discretise the continuous surface of an
+object, and F ∈ NF ×3 the face matrix indexing how vertices are connected into
+faces. We also group edges in a matrix E ∈ NE×2 . Points on the surface of M
+are defined by the pair p = (f, b), where f ∈ [1, F ] index the face ff ∈ F on
+which a point lies, and b = [bu , bv , bw ]T are its barycentric coordinates on ff .
+The coordinates of p are barycentrically interpolated from the vertex coordinates
+xf,0 , xf,1 , xf,2 of ff as: p = bp (X) = bu xf,0 +bv xf,1 +bw xf,2 . Similarly, barycentric
+interpolation can be used to interpolate any other attribute A ∈ RN ×A defined
+on the vertices of the mesh. The simultaneous barycentric interpolation over
+multiple points P = {pj }Jj=1 , is hereafter indicated as: bP (A) = AP ∈ RP ×A .
+Therefore, bP (X) = XP , which we also represent as P for simplicity.
+Laplace Beltrami Operators. We now briefly introduce the Laplace Beltrami
+operator (LBO) in both its isotropic and anisotropic [2, 22, 40] versions. We
+generally define the Laplacian as L(η, θ) = −MW(η, θ), where M is the diagonal
+mass matrix, whose diagonal entries are proportional to the total area of the faces
+surrounding each vertex [12, 35], and W(η, θ) is the stiffness matrix composed
+of weights:
+\label {eq:stiff_lbo} \scal {w}_{ij} \! = \! \begin {cases} -\frac {1}{2} \Big [ \! \frac {\langle \versor {kj}, \versor {ki}\rangle _{\mat {H}_{\anis , \ang }}}{\sin (\alpha _{ij})} \! + \! \frac {\langle \versor {hj}, \versor {hi}\rangle _{\mat {H}_{\anis , \ang }}}{\sin (\beta _{ij})} \! \Big ] & (i,j) \! \in \! \Edges , \\ - \sum _{k \neq i} \scal {w}_{ik} & i\!=\!j,\\ 0 & \text {else}. \end {cases}
+(1)
+The inner products between the edge versors are weighted by a shear matrix
+Hη,θ = Rθ Uijk Dη UTijk R⊤
+θ . Uijk = [û, v̂, n̂] is the matrix containing a local
+reference frame defined on a face, with n̂ being the normal to the surface and û, v̂
+being the orthogonal components defined on the face —a common choice involves
+using the principal curvatures and setting û = v̂M and v̂ = v̂m . Rθ is the
+1
+rotation matrix rotating the reference frame, and Dη = diag( 1+η
+, 1, 1) is a 3 × 3
+diagonal matrix controlling the anisotropy.
+When η = θ = 0 we have Hη,θ = I,
+thus ⟨êkj , êki ⟩Hη,θ = ê⊤
+kj Hη,θ êki = cos(αij )
+and ⟨êkj , êki ⟩Hη,θ = cos(βij ). This reduces
+Eq. (1) to the traditional isotropic LBO formulation, which we indicate with L = L(0, 0).
+For η, θ ̸= 0 we have the anisotropic LBO
+(ALBO), which we indicate as Lη,θ = L(η, θ).
+The generalised eigendecomposition of the LBO can be written as WΦ =
+MΦΛ, where Φ ∈ RN ×K = [ϕ1 . . . ϕK ]⊤ represents the first K eigenvectors
+defined at the vertices of the mesh, and Λ = diag(λ1 , . . . , λK ) is the diagonal
+matrix containing the eigenvalues. The eigendecomposition of the ALBO follows
+the same procedure to determine the η- and θ-dependent Φη,θ and Λη,θ .
+Heat Kernel Textures
+5
+Heat Diffusion and Kernels. The heat diffusion process over a mesh is mathi ,t)
+, where the vertex-valued scalar
+ematically described as: L u(xi , t) = ∂u(x
+∂t
++
+function u : M × R → R represents how an initial heat distribution over M
+evolves for times t > 0. Indicating with ut the vector obtained by evaluating
+u(xi , t) for all vertices, the solution of the heat equation has the form [9,12,34,37]:
+\label {eq:heat_kernel} \Vec {u}_\tm = e^{-t\mathbf {L}} \Vec {u}_0 \approx \mathbf {\Phi } e^{-t\mathbf {\Lambda }} \mathbf {\Phi }^T \mathbf {M} \Vec {u}_0
+(2)
+When the initial distribution is a delta function, u(xi , 0) = δ(xi ) = δxi , Eq. (2)
+is referred to as heat kernel and it represents how the heat generated by a single
+point source diffuses over the surface. In Euclidean space, it has the explicit
+expression of a Gaussian [36]. Note that while it is possible to simulate the
+diffusion by solving a sparse linear system, the spectral approach we adopt proved
+to be one order of magnitude faster and to scale to high-resolution meshes [34].
+4
+Heat Kernel Textures
+We now detail our HKTex model, which uses arbitrarily positioned heat kernels
+to intrinsically represent textures directly on the surface of manifold meshes.
+Kernel parameters. We define our HKTex as a collection of S optimisable
+
+heat kernels, K = {κs }Ss=1 . Each kernel is parametrised as κ = p⋆ , θ, η, τ, ς, c ,
+where p⋆ is the position of the heat source,
+θ and η are the angle and anisotropy controlling the diffusion process, τ is the threshold
+controlling the scale of the kernel, ς is the parameter controlling the sharpness of its border, and c is the RGB colour. The parameters
+of all K are jointly optimised.
+Normalised heat kernels. In Sec. 3 we have introduced the discrete formulation of heat kernels and diffusion. While this is the gold standard on 3D meshes,
+we seek to break free from the mesh discretisation and represent textures beyond
+vertices. We thus leverage the continuous manifold formulation of heat kernels
+and define how to transform discrete quantities into continuous ones. Anisotropically heat diffusing a Dirac delta function centred in p⋆ for a time t, we have
+the truncated continuous anisotropic heat kernel:
+\label {eq:cont_heat_kernel} h_t\big (\pt , \src \! \mid \ang , \anis \big ) = \sum _{k=1}^K \; e^{-t\aeval _k } \; \aefunc _k\!(\pt ) \; \aefunc _k\!(\src ) \; m^\star ,
+(3)
+where p is any arbitrary point on the surface of M, λη,θ
+is the k-th eigenvalue
+k
+with its corresponding eigenfunction φη,θ
+evaluated
+at
+p
+or p⋆ , and m⋆ is the
+k
+mass at the source.
+Since the physical heat diffusion process conserves energy, as heat spreads,
+the source temperature decreases. Therefore, the size and shape of kernels would
+affect their overall temperature. To stabilise optimisation and make filtering
+6
+Foti et al.
+predictable, we guarantee a maximum temperature of 1.0 at the kernel centre
+by normalising with respect to the post-diffusion source temperature:
+\bar {h}_t\big (\pt \! \mid \src \!, \ang , \anis \big ) = \frac {h_t\big (\pt , \src \! \mid \ang , \anis \big )}{h_t\big (\src \!, \src \! \mid \ang , \anis \big )}.
+(4)
+Biharmonic distance weighting. Heat kernels have a global support across
+the entire surface of the object. While they should decay with distance from
+the heat source, since we adopt a spectral truncation to the K most significant
+frequencies, the kernels suffer from a Gibbs-like phenomenon [30, 31] producing
+spectral ringing artifacts in distant regions (see supplementary materials). To
+suppress these unwanted artifacts and enforce local support, we introduce a Biharmonic distance Gaussian weighting that dampens the contributions of distant
+kernels. We compute the Biharmonic distance [20] using isotropic eigenproperiso
+⋆ 2
+PK (φiso
+k (p)−φk (p ))
+. Then, we weight our normalised
+ties: dBH (p, p⋆ )2 =
+2
+k=1
+(λiso
+k )
+kernels:
+\label {eq:bhd_weighting} \tilde {h}_t(\pt \! \mid \src \!, \ang , \anis ) = \bar {h}_t(\pt \! \mid \src \!, \ang , \anis ) \cdot \exp \! \left ( \! - \frac {d_\text {BH}(\pt , \src )^2}{2\sigma _\text {BH}^2} \right ).
+(5)
+Kernel filtering. h̃t (p | p⋆, θ, η) produces a Gaussian-like geodesic kernel, with
+values in [0, 1], that gradually fades from the source location. Instead of optimising the diffusion time to scale the kernel, we fix t and modulate kernel scale
+(τ ) and sharpness (ς) via a rescaled soft-step filtering function:
+\label {eq:hk_filtering} \alpha ( \pt \! \mid \src \!, \ang , \anis , \thr , \shr ) = \frac {\xi \big ( \tilde {h}_t(\pt \! \mid \src \!, \ang , \anis ) \big ) - \xi (0)}{\xi (1) - \xi (0)}, \quad \text {with} \quad \xi (x) = \sigma \big ( \shr \cdot ( x - \thr ) \big ), (6)
+where σ(·) is a sigmoid function. This filtering preserves the [0, 1] value range
+and provides more control over the kernel appearance, which can now be easily
+scaled down to point-sized dimensions while controlling the rate of signal decay.
+A filtered kernel can now either preserve its characteristic fading appearance or
+transform into a crisp geodesic ellipsoid defined on the surface of the mesh.
+Colour formation. For a given kernel κs ∈ K, we denote its evaluated spatial footprint as αs (p) ≡ α(p | p⋆s , θs , ηs , τs , ςs ). To determine the final texture
+colour C(p) at a surface point p, we need to aggregate the contributions of all
+kernels. Inspired by [49], we select the Kc top-contributing kernels to p. In our
+formulation, this can be achieved by dynamically identifying the kernels with
+the highest αs (p). The local texture is then computed via an alpha-weighted
+partition of unity over these selected kernels (K(p) ⊂ K), which is added as a
+residual to an optimisable global base colour cbase :
+\label {eq:color_formation} C(\pt ) = \rgb _\text {base} + \frac {\sum _{s \in \Hks (\pt )} \alpha _s(\pt ) \; \rgb _s}{\sum _{s \in \Hks (\pt )} \alpha _s(\pt )},
+(7)
+This colour formation paradigm guarantees a controlled blending between locally
+overlapping kernels, while empty regions seamlessly default to the underlying
+base colour.
+Heat Kernel Textures
+4.1
+7
+Parametric Interpolation of the Spectral Bases
+Interpolation of ALBO eigenproperties. Evaluating the continuous
+anisotropic heat kernel in Eq. (3) requires the spectral properties associated
+with a kernel’s specific shape parameters (η, θ). Since constructing and eigendecomposing a unique ALBO for every kernel during an optimisation pipeline is
+computationally prohibitive, we devise a simplified and easily differentiable alternative. We thus discretise the parameter space of angles and anisotropies into
+a half-polar-like grid, where anisotropies are log-scaled to make the space more
+perceptually uniform and prevent high anisotropies from dominating. We associate each grid node (i, j), located at discrete angle θi and log-scaled anisotropy
+sj = ln(1 + ηj ), with its precomputed Φ‡i,j and Λ‡i,j . To evaluate a continuous
+kernel query with parameters (η, θ), we first
+project the queried anisotropy into the same logarithmic space, s = ln(1+η). We then perform a
+binary search to identify the bounding grid cell
+indices i and j such that θi ≤ θ < θi+1 and
+sj ≤ s < sj+1 . Within this cell, we compute the
+θ−θi
+normalized local coordinates: ∆θ = θi+1
+−θi and
+s−s
+j
+. The queried eigenproperties are
+∆s = sj+1 −s
+j
+then efficiently approximated via bilinear interpolation over the four cell corners C = {(a, b) | a ∈ {j, j + 1}, b ∈ {i, i + 1}}:
+\label {eq:eigen_bilinterp} \aEvecs ^\text {q} = \sum _{(a,b) \in \set {C}} w_{a,b} \Evecs _{a,b}^\ddag \qquad \text {and} \qquad \aEvals ^\text {q} = \sum _{(a,b) \in \set {C}} w_{a,b} \Evals _{a,b}^\ddag ,
+(8)
+where the interpolation weights wa,b are derived from the fractional distances
+∆θ and ∆s (i.e., wi,j = (1 − ∆θ)(1 − ∆s), wi+1,j = ∆θ(1 − ∆s), etc.).
+Alignment of precomputed ALBO eigenproperties. When eigendecomposing the precomputed ALBOs, we observe the same permutation, rotations,
+and sign ambiguities that are widely observed in shape matching problems
+(e.g., [27]). Since this behaviour would hinder the correctness of the bilinear
+interpolation in Eq. (8), we introduce an eigenproperties alignment procedure
+during the grid construction and thus ensure that all Φ‡i,j and Λ‡i,j are consistent
+with the Φ and Λ of the isotropic LBO. First, we resolve the permutation switching issue by maximizing the mass-weighted cross-correlation between two sets of
+‡
+eigenvectors: Φref and Φ‡i,j . We compute the correlation matrix C = Φ⊤
+ref MΦi,j
+and apply the Hungarian algorithm to find the optimal assignment matrix Π,
+yielding the permuted eigenvectors Φperm = Φ‡i,j Π. Next, we solve the Orthogonal Procrustes problem minimising the mass-weighted Frobenius distance
+∥Φref −Φperm R∥2M via the Singular Value Decomposition (SVD) of Φ⊤
+perm MΦref .
+The resulting rotation determines Φrot = Φperm R. Finally, we correct the sign
+flips by constructing a diagonal matrix S where Sk,k = sgn((Φ⊤
+ref MΦrot )k,k ).
+The fully aligned spectral basis stored at each grid node is thus obtained as
+Φaligned = Φ‡i,j ΠRS. Eigenvalues are simply reordered according to Π. The
+initial reference eigenvectors are those of the LBO, then we use the last set
+8
+Foti et al.
+aligned during the grid construction. Hereafter, we consider all Φ‡i,j and Λ‡i,j to
+be implicitly aligned for ease of notation.
+4.2
+Spatial Evaluation of Spectral Properties and Masses
+Continuous spatial evaluation. All precomputed spectral properties are
+strictly defined on the vertices of M. Limiting kernel placement and evaluation
+exclusively to these locations would bind our model to the surface discretisation.
+To overcome this limitation and evaluate any vertex-based spectral quantity A
+at an arbitrary continuous location p, we exploit the inherent smoothness of the
+spectral bases. Inspired by [12], we approximate this continuous spatial evaluation via barycentric interpolation: bp (A).
+Biharmonic KNN search. Evaluating the heat equation for all S kernels and
+P target points using Eq. (3), yields an intractable O(P × S) complexity. Because our biharmonic distance weighting (Eq. (5)) forces kernels to decay to zero
+outside a local radius, we can safely prune distant sources. We define a spectral
+embedding at the vertices as Z = Φiso (Λiso )−1 . In this space, Euclidean distance corresponds to the biharmonic distance dBH on the manifold. Using our
+continuous evaluation strategy, we compute these embeddings for kernel sources
+⋆
+and target points as z(p) ≈ bp (Z) and z(p⋆ ) ≈ bp (Z). We then construct a KNearest Neighbours (KNN) graph in this embedded space to dynamically restrict
+the evaluation of each point p to only its Ks nearest sources N (p).
+Local anisotropic evaluation. Once the local subset of sources N (p) is identified, we must evaluate the continuous anisotropic eigenfunctions specifically required by those sources. Rather than computing the basis for all kernels globally,
+we retrieve the queried discrete eigenvectors Φqη,θ corresponding to the specific
+shape parameters (θs , ηs ) of only the Ks neighbouring sources. Applying our continuous evaluation principle, we approximate these source-specific eigenfunctions
+at both the source location p⋆ and the target location p. Specifically, we compute
+η,θ
+q
+η,θ
+η,θ
+q
+⋆
+⋆
+p⋆
+p
+[φη,θ
+1 (p ), . . . , φK (p )] ≈ b (Φη,θ ) and [φ1 (p), . . . , φK (p)] ≈ b (Φη,θ ). This
+dual evaluation allows us to construct the heat kernel between p⋆ and p (Eq. (3)),
+while keeping the computational complexity strictly bounded to O(P × Ks ).
+Mass definition for arbitrary points on M. Finally, evaluating the continuous heat kernel (Eq. (3)) requires the mass m⋆ at the continuous source point
+p⋆ . Since the discrete mass matrix (M) is proportional to vertex areas and thus
+local sampling density, we cannot simply use barycentric interpolations like we
+did for the eigenvectors.We thus formulate a Kernel Density Estimation (KDE)
+approach to correctly estimate the mass of every point based on the density of
+surrounding points (see supplementary materials). While this approach approximates the real mass, we empirically find that assigning a uniform unit mass to
+all sources (m⋆ = 1) is significantly faster and does not deteriorate performance.
+Because the pointwise evaluation depends solely on the source mass as a linear
+scalar (Eq. (3)), during optimisation the other kernel properties can learn to
+compensate for the missing local integration weights.
+Heat Kernel Textures
+4.3
+9
+Optimisation & Density Control
+Geodesic position optimisation. Standard Euclidean optimisation would apply gradient updates directly to the 3D coordinates, inevitably pulling the heat
+kernel sources off the mesh surface. Since sources p⋆ are intrinsically defined on
+M, we must restrict movements exclusively to the surface. We thus formulate a
+Riemannian gradient descent optimiser: each gradient ∇p⋆ L is projected to the
+local tangent plane Tp⋆ M and scaled to define an initial velocity v⋆ . We then
+compute the exponential map Exp(p⋆ , v⋆ ), tracing the geodesic defined by this
+vector to determine the updated kernel position. To accelerate convergence with
+momentum, we parallel transport the accumulated momentum to the new kernel position. Both the exponential map and parallel transport are computed via
+the straightest geodesic algorithm [32], utilising the optimisation-friendly and
+CUDA-parallelised implementation introduced by [38].
+Kernel pruning strategy. Like most Gaussian Splatting techniques, we adaptively control the density of our heat kernels throughout the optimisation process.
+In order to decrease computational overhead and storage costs, we aim to delete
+kernels that contribute little to the final texture. During an accumulation window
+∆prune , we record two metrics for every kernel κs ∈ K: a hit count ν(κs ) indicating how frequently it is selected in the local partition of unity K(p) (Eq. (7)),
+and an energy score ω(κs ) aggregating its filtered weights αs (p). Periodically,
+we prune kernels that are either rarely hit (ν(κs ) < γhit · max({ν(κi )}Si=1 )) or
+energetically weak (ω(κs ) < γenergy ).
+Kernel densification strategy. To capture missing details, we dynamically
+densify kernels based on local reconstruction error. Over an accumulation window ∆error , we compute the spatial error e(p) = ∥c(p)−cGT (p)∥1 and distribute
+it to contributing kernels weighted by their normalised partition of unity, yielding a per-kernel score E(κs ). Kernels exceeding an error threshold γerror are
+densified according to their spatial extent (1 − τs ). Small kernels (1 − τs ≤ γsize )
+are cloned in place, allowing the optimiser to naturally separate them. Large
+kernels (1 − τs > γsize ) are split into two smaller kernels. Crucially, to respect
+manifold constraints during splitting, we displace the new kernels along their
+principal axis using the exponential map provided by [38]. A maximum growth
+ratio γgrowth caps additions per step to ensure stability.
+4.4
+Rendering & Applications
+Physically based rendering. Because our HKTex formulation is continuously
+evaluated across M, it seamlessly integrates into modern physically based rendering (PBR) pipelines. We implement HKTex also as a differentiable texture
+within the Mitsuba3 renderer [16]. During ray tracing, when a ray intersects
+the mesh at an arbitrary continuous point p, the renderer queries the corresponding local subset of kernels K(p) and computes C(p) following Eq. (7). By
+wrapping our PyTorch-based evaluation within Dr.Jit [15], we allow gradients
+10
+Foti et al.
+to backpropagate directly from the rendered image pixels to our intrinsic kernel
+parameters.
+Optimise existing UV-textures. When a ground-truth UV texture is available, we can directly optimise our kernels. At each optimisation step, we uniformly sample a dense set of points p directly on the faces of M, and evaluate
+their colour with C(p). Our HKTex model is then updated by minimizing the
+photometric error with respect to CGT (p), the colour queried from the UV texture at the same location: L = ∥C(p) − CGT (p)∥22 .
+Optimise multi-view images. Our HKTex model can also be optimised from
+multi-view images via the differentiable PBR renderer. In this scenario, we suppose the target mesh to be given alongside a set of camera poses. At each training
+step, we sample V camera views, identify all the rays hitting the mesh across
+views, and select a random subset to provide uniform coverage around the object. Minimising the rendering error against the ground-truth pixels at the ray
+intersections drives the HKTex optimisation.
+5
+Experiments
+5.1
+Data
+We conduct experiments on a curated subset of Objaverse [11]. Since the full
+dataset comprises scraped online assets, mesh quality is not guaranteed. We
+therefore filter for objects that possess LVIS category labels, valid textures, and
+at least one community like and view, while excluding point clouds and animated models. To maintain a reasonable computational overhead, we restrict
+the maximum vertex count to N = 60, 000. To ensure compatibility with our
+HKTex representation, we also define a rigorous geometric filtering: we exclude
+meshes with multiple disconnected components, with non-manifold geometries,
+and with complex internal structures (i.e. models presenting more than 20 intersections on any ray cast from a regular grid defined on the bounding box of
+the object). Finally, since our method is heavily reliant on the eigenfunctions of
+LBO, we reject models where such eigendecomposition fails. After filtering, we
+retain ∼ 3, 000 high-quality models. Note that while having an eigendecomposable LBO is essential, our filtering criteria can be relaxed at the cost of overall
+dataset quality or of separately processing parts of non-manifold and complex
+meshes. When fitting multi-view images, meshes are rendered with their albedos
+as the sole texture map.
+5.2
+Implementation details
+Our HKTex pipeline is built with PyTorch [29], utilizing the GPU version of
+FAISS [17] for the biharmonic distance KNN search and Mitsuba3 [16] with
+Dr.Jit [15] for differentiable ray tracing. Instead of building specialized CUDA
+kernels, we use PyTorch’s Triton code generation [3]. For all meshes, we precompute a 64-dimensional eigendecomposition of the isotropic LBO for calculating
+Heat Kernel Textures
+11
+biharmonic distances, and 256-dimensional eigendecompositions for all the ALBOs in our grid with the cross product of 7 angles and 7 anisotropies. The
+network parameters are initialized as in the following paragraph, and we use a
+projected gradient descent (PGD) algorithm to enforce the correct ranges. For
+all parameters except kernel locations, we use an Adam optimiser with a stepfunction learning rate scheduler for fitting UV-textures and multi-view images.
+To optimize kernel locations, we utilize a geodesic Riemannian-SGD algorithm
+on the GPU using the library from [38]. We run a short Bayesian hyperparameter
+tuning on 5 meshes excluded from the evaluation dataset for both setups using
+Optuna [1] with the Tree-Structured Parzen Estimator [4], and we share the
+exact hyperparameters in our supplementary. We use an importance sampling
+strategy, as detailed in our supplementary material, when fitting UV-textures.
+To render our output images and to perform differentiable ray tracing for inverse
+rendering, we utilize Mitsuba3 [16] with Dr.Jit [15]. We use a path-replay backpropagation (PRB) integrator with a ray depth of 3 for training, and differentiate
+through the ray tracing process to optimize our textures. During inference, we
+only build the KNN database and pre-compute the self-reference heat kernels
+once, reducing computation significantly. We use the tuned hyperparameters to
+set the pruning and densification hyperparameters for both settings.
+Initialisation. We use a uniform sampling strategy based on mesh area to
+first oversample a large number of points on the mesh surface, and then use
+farthest-point sampling to obtain kernel locations and face indices. The kernel
+colours are sampled from a uniform distribution between -1 and 1, with the
+mean subtracted and the mean set to our global base colour. The angles and
+anisotropies are sampled from a uniform distribution between 0 and π and 1 and
+100, respectively. For sharpness and threshold initialization, we sample from the
+beta distributions B(2, 1) and B(10/7, 1), respectively. Then, the sharpnesses are
+scaled and shifted to the range 10-50, and the thresholds to 0.9-1.0 (0.7-1.0 for
+the multi-view rendering case). The parameters are then optimized, as detailed
+before and in the supplementary, using PGD.
+5.3
+Evaluation metrics
+To quantitatively assess textures against the ground truth, we render five distinct
+views for each object and measure image metrics on them. In particular, we compute Mean Squared Errors (MSE) and Peak Signal-to-Noise Ratio (PSNR). To
+evaluate the preservation of structural details and contrast, we use the Structural
+Similarity Index (SSIM) and its multi-scale variant (MS-SSIM). Furthermore,
+we report the Learned Perceptual Image Patch Similarity (LPIPS) to measure
+perceptual quality. Finally, to validate our core claim of memory efficiency, we
+report the total Storage footprint in kilobytes (KB), strictly accounting for all
+intrinsic parameters, network weights, and any topological overheads (e.g., UVcoordinates) required by the baselines. We store with the same formats and
+without method-specific quantizations. Identical zip compression was already
+applied across all methods to provide a fair baseline for comparing intrinsic
+information density.
+12
+Foti et al.
+Original GT
+UV Textures
+LR GT
+UV Textures
+MLP Positional
+Encoding
+InstantNGP
+Intrinsic Neural
+Fields
+ImageGS
+HKTex (ours)
+Fig. 2: Qualitative comparison against SotA methods. With the exception of the GT
+UVTextures, all other methods have similar or bigger storage size. For visual clarity,
+we render only the albedo textures under constant ambient illumination.
+5.4
+Fitting UV-textures
+We first demonstrate our method’s ability to represent existing UV textures
+at a significantly reduced storage cost. We optimise our HKTex against the
+ground truth albedo UV-texture of 313 meshes, arbitrarily selected from our
+curated dataset. We then quantitatively and qualitatively compare against leading state-of-the-art intrinsic texture representations and image-based baselines
+under strictly matched memory budgets.
+For the neural baselines, we implement three multilayer perceptrons (MLPs)
+taking as input different positional encodings of the ray-intersection points.
+Specifically, we evaluate a standard MLP with traditional Fourier positional
+encoding [23], an adaptation of InstantNGP [24] utilizing hash-grid encoding,
+and Intrinsic Neural Fields [19], which barycentrically interpolates the eigenvectors of the LBO. To ensure a fair comparison, we conduct a grid search over the
+network width, depth, and hash-grid size to exactly match the storage cost of
+our optimised HKTex.
+Furthermore, we compare against two explicit 2D baselines: downsampled
+ground-truth images and ImageGS [49] (a 2D Gaussian Splatting approach).
+Crucially, both image-based methods fundamentally rely on UV-mapping. Even
+Heat Kernel Textures
+13
+when the UVmap is provided, the storage of per-vertex UV-coordinates incurs a
+fixed memory overhead that must be accounted for in the total texture budget.
+Consequently, for meshes with high vertex counts, this overhead dominates the
+budget, severely restricting the memory available for the actual texture or 2D
+Gaussians. As shown in Tab. 1, an exact storage match is often impossible for
+these baselines; even when limiting the downsampled texture to a minimum
+resolution of 4 × 4 pixels and ImageGS to just 10 Gaussians, the performance
+penalty is catastrophic for densely sampled meshes (Fig. 2). GT HR GT VTex HKTex
+Finally, we compare against vertex colours directly sampled from the GT UV-textures at the native mesh resolution
+(GT VTex) as well as iteratively subdividing the mesh to
+match our storage budget (HR GT VTex).
+Fig. 3: Comparison
+As reported in Tab. 1, HKTex achieves the lowest stor- with vertex colours.
+age footprint after GT VTex while maintaining competitive reconstruction quality across all metrics. Although LR UV-textures achieve the highest PSNR due
+to directly storing image samples, our representation yields the second best perceptual quality (LPIPS) and the best SSIM, MS-SSIM, and MSE, indicating
+improved preservation of structural details despite using fewer parameters. Neural baselines and HR GT VTex require significantly larger storage budgets to
+achieve almost comparable accuracy, highlighting the efficiency of our geodesic
+heat kernel representations.
+The qualitative comparisons in Fig. 2 further highlight the behaviour of the
+different representations. Neural field baselines tend to oversmooth fine texture
+details, particularly in regions with sharp colour transitions or high-frequency
+patterns (e.g., the frog and raspberry examples). ImageGS occasionally produces noticeable artifacts due to the limited number of splats available under
+the storage constraints, sometimes failing to capture the correct colour distribution. Vertex colours, even when subdivided (Fig. 3), fail to correctly represent
+textures because the vertex positioning is determined by geometry rather than
+texture content. In contrast, HKTex preserves sharper texture boundaries and
+more faithful colour distributions across objects while remaining within the same
+or smaller storage budgets.
+GT
+HKTex
+Fitting Images. To test HKTex’s ability to
+represent high-resolution textures on coarse
+meshes, we fit an image onto a rectangle
+Fig. 4: Image on two triangles.
+made of two triangles. In this special case
+of UV-texture fitting, we found it beneficial to amplify the weighted and normalised kernels as (h̃t )a before filtering them (with a = 30). Nevertheless, a = 1
+is sufficient for most meshes.
+5.5
+Fitting multi-view images
+To demonstrate our method’s ability to optimize multi-view images, we create
+a synthetic training scenario in which, instead of UV textures, we use rendered
+images of the ground-truth UV textures, following the same data setup in UV
+14
+Foti et al.
+Table 1: Quantitative comparison of the UV-texture fitting on 313 meshes from our
+curated subset of Objaverse [11]. HR and LR indicate high and low resolution.
+PSNR
+LPIPS
+SSIM
+MS-SSIM
+MSE
+Render
+(↑)
+(×10−2 , ↓)
+(×10−2 , ↑)
+(×10−2 , ↑)
+(×10−3 , ↓)
+(ms, ↓)
+Storage
+(KB, ↓)
+LR GT UVTextures
+48.4 ±15.2
+GT VTex (N ≈ 7.7k)
+37.9 ±8.5
+HR GT VTex (N ≈ 210k) 45.3 ±5.7
+2.3 ±4.2
+4.0 ±5.0
+1.1 ±1.7
+98.2 ±3.4
+96.8 ±4.2
+98.8 ±2.1
+97.7 ±5.6
+96.1 ±6.6
+99.4 ±1.4
+0.89 ±3.61
+0.94 ±2.33
+0.08 ±0.20
+33.7 ±3.2
+25.4 ±3.1
+50.3 ±49.4
+115.8 ±103.2
+17.3 ±32.6
+179.6 ±89.5
+MLP Pos. Enc.
+InstantNGP [24]
+INFs [19]
+ImageGS [49]
+42.9 ±6.6
+41.3 ±7.4
+42.5 ±6.8
+44.6 ±14.6
+2.3 ±2.5
+3.2 ±3.5
+2.7 ±3.4
+2.9 ±5.4
+98.2 ±2.2
+97.5 ±3.1
+98.0 ±2.7
+97.3 ±5.6
+99.0 ±1.3
+98.2 ±2.7
+98.8 ±1.9
+95.9 ±9.6
+0.15 ±0.30
+0.26 ±0.52
+0.19 ±0.44
+3.65 ±11.95
+90.9 ±35.2
+90.8 ±35.3
+91.4 ±35.3
+NA
+551.3 ±759.6
+473.2 ±714.9
+928.2 ±1,439.8
+115.4 ±93.9
+HKTex (S ≈ 4.8k)
+44.8 ±5.8
+1.3 ±1.6
+98.9 ±1.5
+99.5 ±0.7 0.08 ±0.20 784.7 ±474.3
+96.6 ±12.2
+texture fitting but with a smaller subset of the data. To generate training data,
+we sample rays from random views during training and select a random subset
+to form minibatches at each epoch.
+Similar to the UV fitting setup, we implement two MLP architectures conditioned on different positional encodings, corresponding to the spatially varying
+albedo map. For a fair comparison, these representations are also trained using automatic differentiation and the interoperability between Mitsuba3 and
+PyTorch. The first baseline utilizes traditional positional encodings. The second
+baseline is an adaptation of NVDiffRec [25], with the mesh and environment
+map fixed to the ground-truth mesh and environment map using hash encoding
+and with only the albedo map output. Like in the uv-fitting setting, we also
+conduct a grid search over the width, depth, and the hash-grid size to try to
+match the storage cost of our model.
+As shown in Tab. 2, HKTex consistently outperforms the high-resolution
+vertex colours and neural baselines across all evaluation metrics while requiring
+substantially less storage. In particular, the improvements in LPIPS and SSIM
+indicate that our intrinsic formulation preserves perceptual details and structural
+consistency more effectively during inverse rendering. These results suggest that
+constraining the representation directly to the surface manifold provides a strong
+inductive bias for recovering appearance from sparse multi-view observations.
+While our representation introduces additional evaluation overhead due to
+kernel aggregation and geodesic neighbourhood queries as seen in Table 1, this
+cost is partially amortized in the multi-view setting where ray tracing (with an
+increased depth) dominates the rendering time as seen in Table 2.
+6
+Conclusion
+In this work, we presented HKTex, an intrinsic texture representation that replaces traditional UV-mapped textures with anisotropic heat kernels defined
+directly on the surface manifold. By operating entirely in the intrinsic geometry of the mesh, our formulation eliminates seams, distortions, and redundant
+storage associated with UV parametrisations. Through the use of geodesic heat
+Heat Kernel Textures
+15
+Table 2: Quantitative evaluation of the multi-view rendering on a curated subset of
+162 meshes from Objaverse [11]. NVDiffRec [25] is our adaptation with the ground
+truth mesh and environment map fixed instead of learned, and with only albedo map
+output like our method.
+PSNR
+LPIPS
+SSIM
+MS-SSIM
+MSE
+Render
+Storage
+(↑)
+(×10−2 , ↓)
+(×10−2 , ↑)
+(×10−2 , ↑)
+(×10−3 , ↓)
+(s, ↓)
+(KB, ↓)
+35.75 ±7.76
+36.40 ±6.83
+37.16 ±5.69
+3.7 ±3.8
+3.4 ±3.6
+3.1 ±3.4
+97.2 ±3.1
+97.4 ±2.9
+97.5 ±2.8
+96.8 ±4.9
+97.4 ±3.5
+97.9 ±2.6
+1.55 ±4.83
+0.79 ±2.04
+0.44 ±0.85
+HKTex (S ≈ 3.8k) 37.61 ±4.71
+2.1 ±1.9
+98.3 ±1.6
+98.6 ±1.4 0.30 ±0.53
+MLP Pos. Enc.
+NVDiffRec* [25]
+HR VTex
+0.68 ±0.12 602.71 ±755.89
+0.66 ±0.11 516.12 ±722.66
+0.58 ±0.08 81.06 ±131.16
+1.2 ±0.3
+78.73 ±23.12
+kernels and Riemannian optimisation, our approach maintains strict alignment
+with the underlying surface while enabling continuous appearance evaluation
+within a differentiable physically based renderer. This formulation enables both
+the compression of existing UV textures and the direct reconstruction of surface
+appearance from multi-view imagery, while remaining entirely intrinsic to the
+mesh and independent of any global surface parametrisation. HKTex’s mathematical continuity essentially acts as diffusion curves on surfaces, establishing a
+foundational step toward manifold vector graphics.
+Limitations and future work. Future work may extend the representation
+beyond albedo to additional appearance attributes such as spatially varying
+BSDF parameters. While our current evaluation focuses on albedo textures, each
+kernel could be augmented with additional material parameters (e.g., roughness
+or specular components) and optimized through differentiable rendering with
+Mitsuba3.
+Acknowledgements
+T. Birdal was supported by a UKRI Future Leaders Fellowship [grant number
+MR/Y018818/1]. S. Foti, S. Zafeiriou, and T. Birdal were supported by the
+EPSRC Project GNOMON (EP/X011364/1). S. Foti and S. Zafeiriou were also
+supported by the Turing AI Fellowship MAGAL (EP/Z534699/1).
+References
+1. Akiba, T., Sano, S., Yanase, T., Ohta, T., Koyama, M.: Optuna: A next-generation
+hyperparameter optimization framework (2019), https://arxiv.org/abs/1907.
+10902
+2. Andreux, M., Rodola, E., Aubry, M., Cremers, D.: Anisotropic laplace-beltrami
+operators for shape analysis. In: European conference on computer vision. pp.
+299–312. Springer (2014)
+3. Ansel, J., Yang, E., He, H., Gimelshein, N., Jain, A., Voznesensky, M., Bao, B.,
+Bell, P., Berard, D., Burovski, E., Chauhan, G., Chourdia, A., Constable, W., Desmaison, A., DeVito, Z., Ellison, E., Feng, W., Gong, J., Gschwind, M., Hirsh, B.,
+16
+Foti et al.
+Huang, S., Kalambarkar, K., Kirsch, L., Lazos, M., Lezcano, M., Liang, Y., Liang,
+J., Lu, Y., Luk, C.K., Maher, B., Pan, Y., Puhrsch, C., Reso, M., Saroufim, M.,
+Siraichi, M.Y., Suk, H., Zhang, S., Suo, M., Tillet, P., Zhao, X., Wang, E., Zhou,
+K., Zou, R., Wang, X., Mathews, A., Wen, W., Chanan, G., Wu, P., Chintala,
+S.: Pytorch 2: Faster machine learning through dynamic python bytecode transformation and graph compilation. In: Proceedings of the 29th ACM International
+Conference on Architectural Support for Programming Languages and Operating
+Systems, Volume 2. p. 929–947. ASPLOS ’24, Association for Computing Machinery, New York, NY, USA (2024). https://doi.org/10.1145/3620665.3640366,
+https://doi.org/10.1145/3620665.3640366
+4. Bergstra, J., Bardenet, R., Bengio, Y., Kégl, B.: Algorithms for hyper-parameter
+optimization. In: Shawe-Taylor, J., Zemel, R., Bartlett, P., Pereira, F., Weinberger,
+K. (eds.) Advances in Neural Information Processing Systems. vol. 24. Curran
+Associates, Inc. (2011), https://proceedings.neurips.cc/paper_files/paper/
+2011/file/86e8f7ab32cfd12577bc2619bc635690-Paper.pdf
+5. Burley, B.: Physically Based Shading at Disney. SIGGRAPH 2012 Course Notes
+(2012), https://www.disneyanimation.com/publications/physically-basedshading-at-disney/
+6. Burley, B.: Extending the Disney BRDF to a BSDF with Integrated Subsurface
+Scattering. SIGGRAPH 2015 Course Notes (2015), https://blog.selfshadow.
+com/publications/s2015-shading-course/#course_content
+7. Chaitanya, C.R.A., Kaplanyan, A.S., Schied, C., Salvi, M., Lefohn, A.,
+Nowrouzezahrai, D., Aila, T.: Interactive reconstruction of monte carlo image sequences using a recurrent denoising autoencoder. ACM Trans. Graph. 36(4) (Jul
+2017). https://doi.org/10.1145/3072959.3073601, https://doi.org/10.1145/
+3072959.3073601
+8. Choi, J., Lee, Y., Lee, H., Kwon, H., Manocha, D.: Meshgs: Adaptive mesh-aligned
+gaussian splatting for high-quality rendering. In: Proceedings of the Asian Conference on Computer Vision. pp. 3310–3326 (2024)
+9. Chung, M.K., Qiu, A., Seo, S., Vorperian, H.K.: Unified heat kernel regression
+for diffusion, kernel smoothing and wavelets on manifolds and its application to
+mandible growth modeling in ct images. Medical image analysis 22(1), 63–76
+(2015)
+10. Condor, J., Speierer, S., Bode, L., Bozic, A., Green, S., Didyk, P., Jarabo, A.: Don’t
+splat your gaussians: Volumetric ray-traced primitives for modeling and rendering
+scattering and emissive media. ACM Transactions on Graphics 44(1), 1–17 (2025)
+11. Deitke, M., Schwenk, D., Salvador, J., Weihs, L., Michel, O., VanderBilt, E.,
+Schmidt, L., Ehsani, K., Kembhavi, A., Farhadi, A.: Objaverse: A universe of
+annotated 3d objects. In: Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition. pp. 13142–13153 (2023)
+12. Foti, S., Zafeiriou, S., Birdal, T.: Uv-free texture generation with denoising and
+geodesic heat diffusion. Advances in Neural Information Processing Systems 37,
+128053–128081 (2024)
+13. Gao, J., Gu, C., Lin, Y., Li, Z., Zhu, H., Cao, X., Zhang, L., Yao, Y.: Relightable 3d
+gaussians: Realistic point cloud relighting with brdf decomposition and ray tracing.
+In: European Conference on Computer Vision. pp. 73–89. Springer (2024)
+14. Guédon, A., Lepetit, V.: Sugar: Surface-aligned gaussian splatting for efficient
+3d mesh reconstruction and high-quality mesh rendering. In: Proceedings of the
+IEEE/CVF conference on computer vision and pattern recognition. pp. 5354–5363
+(2024)
+Heat Kernel Textures
+17
+15. Jakob, W., Speierer, S., Roussel, N., Vicini, D.: Dr.jit: A just-in-time compiler for
+differentiable rendering. Transactions on Graphics (Proceedings of SIGGRAPH)
+41(4) (Jul 2022). https://doi.org/10.1145/3528223.3530099
+16. Jakob, W., Speierer, S., Roussel, N., Nimier-David, M., Vicini, D., Zeltner,
+T., Nicolet, B., Crespo, M., Leroy, V., Zhang, Z.: Mitsuba 3 renderer (2022),
+https://mitsuba-renderer.org
+17. Johnson, J., Douze, M., Jégou, H.: Billion-scale similarity search with GPUs. IEEE
+Transactions on Big Data 7(3), 535–547 (2019)
+18. Kerbl, B., Kopanas, G., Leimkühler, T., Drettakis, G.: 3d gaussian splatting for
+real-time radiance field rendering. ACM Trans. Graph. 42(4), 139–1 (2023)
+19. Koestler, L., Grittner, D., Moeller, M., Cremers, D., Lähner, Z.: Intrinsic neural
+fields: Learning functions on manifolds. In: European Conference on Computer
+Vision. pp. 622–639. Springer (2022)
+20. Lipman, Y., Rustamov, R.M., Funkhouser, T.A.: Biharmonic distance. ACM
+Transactions on Graphics (TOG) 29(3), 1–11 (2010)
+21. Mahajan, M., Hofherr, F., Cremers, D.: Meshfeat: Multi-resolution features for
+neural fields on meshes. In: European Conference on Computer Vision. pp. 268–
+285. Springer (2024)
+22. Melzi, S., Rodolà, E., Castellani, U., Bronstein, M.M.: Shape analysis with
+anisotropic windowed fourier transform. In: 2016 Fourth International Conference
+on 3D Vision (3DV). pp. 470–478. IEEE (2016)
+23. Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng,
+R.: Nerf: Representing scenes as neural radiance fields for view synthesis. Communications of the ACM 65(1), 99–106 (2021)
+24. Müller, T., Evans, A., Schied, C., Keller, A.: Instant neural graphics primitives with
+a multiresolution hash encoding. ACM transactions on graphics (TOG) 41(4), 1–15
+(2022)
+25. Munkberg, J., Hasselgren, J., Shen, T., Gao, J., Chen, W., Evans, A., Müller, T.,
+Fidler, S.: Extracting Triangular 3D Models, Materials, and Lighting From Images.
+In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR). pp. 8280–8290 (June 2022)
+26. Oechsle, M., Mescheder, L., Niemeyer, M., Strauss, T., Geiger, A.: Texture
+fields: Learning texture representations in function space. In: Proceedings of the
+IEEE/CVF international conference on computer vision. pp. 4531–4540 (2019)
+27. Ovsjanikov, M., Ben-Chen, M., Solomon, J., Butscher, A., Guibas, L.: Functional
+maps: a flexible representation of maps between shapes. ACM Transactions on
+Graphics (ToG) 31(4), 1–11 (2012)
+28. Parker, S.G., Bigler, J., Dietrich, A., Friedrich, H., Hoberock, J., Luebke, D., McAllister, D., McGuire, M., Morley, K., Robison, A., Stich, M.: Optix: a general purpose
+ray tracing engine. ACM Trans. Graph. 29(4) (Jul 2010). https://doi.org/10.
+1145/1778765.1778803, https://doi.org/10.1145/1778765.1778803
+29. Paszke, A., Gross, S., Massa, F., Lerer, A., Bradbury, J., Chanan, G., Killeen, T.,
+Lin, Z., Gimelshein, N., Antiga, L., Desmaison, A., Köpf, A., Yang, E., DeVito, Z.,
+Raison, M., Tejani, A., Chilamkurthy, S., Steiner, B., Fang, L., Bai, J., Chintala,
+S.: Pytorch: An imperative style, high-performance deep learning library (2019),
+https://arxiv.org/abs/1912.01703
+30. Patané, G.: Star-laplacian spectral kernels and distances for geometry processing
+and shape analysis. In: Computer Graphics Forum. vol. 35, pp. 599–624. Wiley
+Online Library (2016)
+31. Patané, G.: Spectral laplace transform of signals on arbitrary domains. Journal of
+Scientific Computing 96(3), 65 (2023)
+18
+Foti et al.
+32. Polthier, K., Schmies, M.: Straightest geodesics on polyhedral surfaces. In: ACM
+SIGGRAPH 2006 Courses. p. 30–38. SIGGRAPH ’06, Association for Computing
+Machinery, New York, NY, USA (2006). https://doi.org/10.1145/1185657.
+1185664, https://doi.org/10.1145/1185657.1185664
+33. Rai, A., Wang, D., Jain, M., Sarafianos, N., Chen, K., Sridhar, S., Prakash, A.:
+Uvgs: Reimagining unstructured 3d gaussian splatting using uv mapping. In: Proceedings of the Computer Vision and Pattern Recognition Conference. pp. 5927–
+5937 (2025)
+34. Sharp, N., Attaiki, S., Crane, K., Ovsjanikov, M.: Diffusionnet: Discretization agnostic learning on surfaces. ACM Transactions on Graphics (TOG) 41(3), 1–16
+(2022)
+35. Sharp, N., Crane, K.: A laplacian for nonmanifold triangle meshes. In: Computer
+Graphics Forum. vol. 39, pp. 69–80. Wiley Online Library (2020)
+36. Sharp, N., Soliman, Y., Crane, K.: The vector heat method. ACM Transactions on
+Graphics (TOG) 38(3), 1–19 (2019)
+37. Sun, J., Ovsjanikov, M., Guibas, L.: A concise and provably informative multiscale signature based on heat diffusion. In: Computer graphics forum. vol. 28, pp.
+1383–1392. Wiley Online Library (2009)
+38. Verninas, H., Korkmaz, C., Zafeiriou, S., Birdal, T., Foti, S.: Parallelised differentiable straightest geodesics for 3d meshes. In: Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (2026)
+39. Vicini, D., Speierer, S., Jakob, W.: Path replay backpropagation: Differentiating
+light paths using constant memory and linear time. Transactions on Graphics (Proceedings of SIGGRAPH) 40(4), 108:1–108:14 (Aug 2021). https://doi.org/10.
+1145/3450626.3459804
+40. Wardetzky, M., Mathur, S., Kälberer, F., Grinspun, E.: Discrete laplace operators:
+no free lunch. In: Symposium on Geometry processing. vol. 33, p. 37. Aire-la-Ville,
+Switzerland (2007)
+41. Wiersma, R., Philip, J., Hasan, M., Mullia, K., Luan, F., Eisemann, E., Deschaintre, V.: Uncertainty for svbrdf acquisition using frequency analysis. In: Proceedings
+of the Special Interest Group on Computer Graphics and Interactive Techniques
+Conference Conference Papers. pp. 1–12 (2025)
+42. Xiang, F., Xu, Z., Hasan, M., Hold-Geoffroy, Y., Sunkavalli, K., Su, H.: Neutex:
+Neural texture mapping for volumetric neural rendering. In: Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 7119–
+7128 (2021)
+43. Xu, T.X., Hu, W., Lai, Y.K., Shan, Y., Zhang, S.H.: Texture-gs: Disentangling the
+geometry and texture for 3d gaussian splatting editing. In: European Conference
+on Computer Vision. pp. 37–53. Springer (2024)
+44. Ye, K., Gao, C., Li, G., Chen, W., Chen, B.: Geosplatting: Towards geometry
+guided gaussian splatting for physically-based inverse rendering. In: Proceedings
+of the IEEE/CVF International Conference on Computer Vision. pp. 28991–29000
+(2025)
+45. Yuksel, C.: Mesh color textures. In: Proceedings of High Performance Graphics.
+HPG ’17, Association for Computing Machinery, New York, NY, USA (2017).
+https : / / doi . org / 10 . 1145 / 3105762 . 3105780, https : / / doi . org / 10 . 1145 /
+3105762.3105780
+46. Yuksel, C., Keyser, J., House, D.H.: Mesh colors. ACM Transactions on Graphics
+(TOG) 29(2), 1–11 (2010)
+Heat Kernel Textures
+19
+47. Zhang, X., Chen, A., Xiong, J., Dai, P., Shen, Y., Xu, W.: Neural shell texture
+splatting: More details and fewer primitives. In: Proceedings of the IEEE/CVF
+International Conference on Computer Vision. pp. 25229–25238 (2025)
+48. Zhang, X., Ge, X., Xu, T., He, D., Wang, Y., Qin, H., Lu, G., Geng, J., Zhang,
+J.: Gaussianimage: 1000 fps image representation and compression by 2d gaussian
+splatting. In: European Conference on Computer Vision. pp. 327–345. Springer
+(2024)
+49. Zhang, Y., Li, B., Kuznetsov, A., Jindal, A., Diolatzis, S., Chen, K., Sochenov, A.,
+Kaplanyan, A., Sun, Q.: Image-gs: Content-adaptive image representation via 2d
+gaussians. In: Proceedings of the Special Interest Group on Computer Graphics
+and Interactive Techniques Conference Conference Papers. pp. 1–11 (2025)
+50. Zhu, L., Lin, G., Chen, J., Zhang, X., Jin, Z., Wang, Z., Yu, L.: Large images
+are gaussians: High-quality large image representation with levels of 2d gaussian
+splatting. In: Proceedings of the AAAI Conference on Artificial Intelligence. vol. 39,
+pp. 10977–10985 (2025)
+51. Zwicker, M., Pfister, H., Van Baar, J., Gross, M.: Surface splatting. In: Proceedings
+of the 28th annual conference on Computer graphics and interactive techniques.
+pp. 371–378 (2001)
+Heat Kernel Textures
+1
+Supplementary Material
+S.1
+Additional Implementation Details
+Fig. 5: Kernel values at the different stages of the HKTex construction process. Where
+queried points possess only scalar values, we use colourmaps to represent
+ their ranges.
+For ease of notation, we indicate the source heat as h⋆t = ht p⋆, p⋆ | θ, η .
+Visualising heat kernel construction. We here represent the different stages
+described in Sec. 4 and comprising the full kernel construction: truncated continuous anisotropic kernels as well as their normalisation, biharmonic distance
+weighting, filtering, and colour formation. It is interesting to observe the presence of spectral ringing in the early stages; the biharmonic distance weighting
+successfully dampens these distant artifacts, ensuring their amplitudes fall safely
+below the cutoff so that the subsequent filtering step (α) can completely eliminate them.
+Projected Gradient Descent (PGD). To ensure the physical validity and numerical stability of our HKTex model, we bound colours, sharpnesses, thresholds,
+angles, and anisotropies throughout optimisation. Instead of using sigmoid-like
+activation functions which could potentially lead to vanishing gradients, we optimise the parameters while enforcing bounds using Projected Gradient Descent
+(PGD). After every optimiser step, we project the parameters back into their
+valid feasible sets via strict clamping. Specifically, we constrain kernel angles in
+θ ∈ [0, π], sharpnesses to ς ∈ [10, 200], thresholds to τ ∈ [0.3, 1.0 − 10−8 ], and
+anisotropies to η ∈ [1, 200]. The bounds for ς, τ , and η were empirically selected
+by observing the kernel behaviours while traversing their values. Additionally,
+to enable kernels to act as both additive and subtractive high-frequency detail
+layers over the mean base colour, we allow individual kernel colours to optimise within c ∈ [−1, 1]3 , while the global mean colour is strictly clamped to
+cbase ∈ [0, 1]3 .
+Kernel parameter initialisation. For multi-view image fitting, positions are
+uniformly sampled over the surface as described in Sec. 5 and colours are randomly initialised by sampling from a uniform distribution. In UV-texture fitting, 50% of kernel positions are initialised with uniform sampling and 50%
+according to the UV-texture content evaluated by computing image gradients
+like in [49] and transferring the sampled 2D points onto the manifold. This 1 : 1
+ratio of random to image-gradient-based initialisations balances capturing highfrequency details with maintaining sufficient baseline surface coverage. With this
+2
+Foti et al.
+strategy, colours are initially sampled from the UV-texture at the coordinates
+corresponding to the kernel sources.
+Let u ∼ U (0, 1) be uniform random variables sampled for each of the S initial
+kernels. For parameters where a uniform distribution is desirable, we simply scale
+u to the target range. Specifically, kernel angles are initialised as θ = u · π, and
+anisotropies are uniformly sampled in the range [1, 100] via 1.0 + 99.0 · u. Conversely, we found it beneficial to bias the initialisation of sharpness and threshold
+parameters towards their higher values. This geometrically biases the kernels to
+be sharp and highly localised from the very first step, preventing gradient entanglement across overlapping kernels. To achieve this, we sample these parameters
+from Beta distributions. In practice, we implement this efficiently by applying a
+fractional power-skew to u before scaling. The kernel sharpnesses ς are initialised
+in the range [10, 50] using ς = 10 + 40 · u0.5 . Similarly, the evaluation thresholds
+τ are initialised in the range [τmin , 1.0) using τ = τmin + (1.0 − τmin − 10−8 ) · u0.7 ,
+where τmin is a configurable lower bound (set to 0.7 and 0.9 for our UV-texture
+and multi-view fitting experiments, respectively).
+Importance sampling. To ensure we prioritise the optimisation of regions of
+the surface that are harder to optimise for their richness of details, we adopt an
+importance sampling strategy. Before initiating the optimisation procedure, we
+uniformly pre-sample a pool of 10M points on the surface of the mesh. These
+points are used throughout the optimisation to evaluate C(p) as in Eq. (7) and
+assess the photometric loss L(p) against the GT colour CGT (p). During the
+first 250 optimisation steps, samples are uniformly drawn from the pool. After
+this warm-up phase, the errors acting as sampling weight ε(p) associated with
+each point starts to be recorded using an exponential moving average update
+εnew (p) = γεold (p) + (1 − γ)L(p) with decay γ = 0.99. These ε(p) are thus used
+to drive the sampling distribution towards points with higher reconstruction
+errors.
+Mass kernel density estimation. As mentioned in Sec. 4.2, the evaluation of
+Eq. (3) requires the mass m⋆ at the continuous source point p⋆ . While in our
+application, setting it to a unit value does not affect performance, we formulate
+a more general Kernel Density Estimation (KDE) approach for the mass estimation at arbitrary locations on the surface of a mesh. The intuition for the
+KDE mass is that points that cluster closely together should represent a smaller
+fraction of the surface area, while isolated points should represent larger areas.
+We thus start by evaluating the pairwise biharmonic distances [20] between all
+sources. Then, we apply a Gaussian kernel to the pairwise distance matrix D
+and sum across rows to compute the local density (ϱs ) for each source:
+\varrho _s = \sum _{i=1}^\scal {S} \exp \Big (- \frac {\scal {D}_{i,s}^2}{\sigma _m^2}\Big ),
+2
+with σm
+being an adaptive bandwidth computed by taking the median of all nonzero distances. Masses are thus defined as the inverse of the density: m⋆s = ϱ1s .
+Heat Kernel Textures
+3
+Finally, the masses undergo an additional normalisation step enforcing their sum
+to equal the total area of the surface.
+This estimate can also be used for diffusing heat to points that differ from
+the sources. In this case, arbitrary points can be treated as additional sources
+without altering the estimation procedure.
+Visualising heat kernels. In order to visualise the distribution of heat kernels
+over the surface of each mesh, we modify the filtering function introduced in
+Eq. (6) and replace it with a boxcar function. This simple modification allows us
+to trace hollow geodesic ellipsoids. To ease visualisation, we also randomise their
+colour. Although in most cases a high density of kernels is leveraged to fit subtle albedo variations, when uniform colours are present, HKTex can adaptively
+adjust the position and size of kernels by increasing sparsity in such regions (see
+the Earth example in Fig. 2).
+Additional details on kernel splitting. Since the anisotropic heat kernels of
+HKTex are defined with respect to
+the principal curvatures (Sec. 3),
+it is natural to use the same axes
+also during the kernel densification
+strategies requiring a kernel split.
+Like many other quantities encountered thus far, the principal curvaFig. 6: Visualisation of kernel split per- ture of a surface discretised as a
+formed on two kernels.
+mesh is also defined only at vertex
+(1)
+(N ) ⊤
+N ×3
+locations VM ∈ R
+= [v̂M , . . . , v̂M ] . Therefore, the first step requires the
+barycentric interpolation of the principal direction at the old source position:
+⋆
+⋆
+= bpold (VM ). Since the kernel κold centred at p⋆old is rotated according to
+v̂M
+⋆
+its learnable θold , we define a new major axis vector rotating v̂M
+by θold + π/2
+around the face normal (n̂), obtaining:
+split
+\versor [d]{}^\star = \versor [v]{M}^\star \cos \Big (\ang _\text {old} + \frac {\pi }{2}\Big ) + (\versor [n]{} \times \versor [v]{M}^\star ) \sin \Big (\ang _\text {old} + \frac {\pi }{2}\Big ).
+The old kernel is then removed and replaced by two new kernels displaced according to the exponential map computed with [38] in opposite directions along
+this major kernel axis. Specifically, we compute:
+\pt ^{\star (\pm )}_{\text {new}} = \Exp \Big (\src _\text {old}, \pm \, \versor [d]{}^\star (1 - \thr _\text {old}) r_\text {base}\Big ),
+where rbase is a base scaling radius, (1 − τold ) acts as a proportional proxy for
+the kernel’s spatial radius, and the sign used for computing the exponential map
+(±) determines the two new locations.
+Finally, the newly split kernels must be shrunk. Their spatial extents are
+old
+reduced by a factor of 1.6, yielding new thresholds τnew = 1.0 − 1.0−τ
+. Fur1.6
+thermore, the optimiser states (e.g., momentum and variance) for these new
+parameters are strictly zeroed out to prevent the injected kernels from inheriting the extreme gradients that triggered the split.
+4
+Foti et al.
+Additional details on rendering and multi-view optimisation. For multiview optimisation, we instantiate HKTex as a custom differentiable Mitsuba3
+texture [16] and attach it to a Principled BSDF [5, 6] on the target mesh, currently as the albedo texture. During training, we use a perspective camera with a
+sensor capturing images of 256×256 pixels, a constant emitter, and a path-replaybackpropagation (PRB)-style ray integrator (rb_ray) built on top of Mitsuba’s
+PRB integrator [39]. Our implementation of this custom PRB integrator is based
+on the existing extension of [41].
+The multi-view optimisation is organised as a two-level loop: an outer iteration samples a fresh set of camera views and constructs the pool of intersecting
+rays, while the corresponding inner iterations process that pool through successive ray mini-batches and apply the parameter updates. At each outer training
+iteration, we sample a batch of random cameras by uniformly drawing azimuth,
+elevation, and camera distance within the configured bounds. For each sampled
+camera, we then generate one primary ray per pixel and iteratively resample
+until retaining only rays that actually intersect the object. The resulting ray set
+from all views is concatenated, randomly shuffled, and partitioned into minibatches of 1024 rays. This corresponds to a total of 3840 optimisation steps in
+the reported multi-view setting, counting all inner ray-mini-batch updates rather
+than only the outer camera-sampling iterations.
+During optimisation, each selected ray is re-evaluated with configurable gradient samples per pixel (Nspp = 8 are used in our results). When performing
+synthetic training on models with an existing UV texture, the ground-truth images are rendered with the same integrator and then integrated across the same
+samples. Before computing the photometric loss, both prediction and target are
+clipped to [0, 1] and converted from linear radiance to gamma space, matching
+the image-space supervision used in our experiments. During this step, clipping
+can be omitted if the target images use High Dynamic Range (HDR). In the
+reported multi-view setting, we optimise a per-ray photometric loss corresponding to the L1 loss averaged across the ray mini-batch. Formally, let R = {ri }B
+i=1
+be the current mini-batch of intersecting rays, with B = 1024. For each ray ri ,
+Nspp
+the renderer produces Nspp Monte Carlo radiance samples {Li,s }s=1
+, which are
+averaged to obtain the predicted linear RGB colour
+\hat {\mathbf {c}}_i = \frac {1}{N_{\text {spp}}}\sum _{s=1}^{N_{\text {spp}}} \mathbf {L}_{i,s}.
+Denoting by c′i the corresponding target colour, we apply the same image-space
+preprocessing to both prediction and target:
+\tilde {\mathbf {c}}_i = \Gamma \big (\operatorname {clip}(\hat {\mathbf {c}}_i,0,1)\big ), \qquad \tilde {\mathbf {c}}'_i = \Gamma \big (\operatorname {clip}(\mathbf {c}'_i,0,1)\big ),
+where clip(·, 0, 1) is applied channel-wise and Γ (·) denotes a linear-to-gamma
+colour transformation. The ray-training loss is then:
+\Loss _{\text {ray}} = \frac {1}{B} \sum _{i=1}^{B} \left \| \tilde {\mathbf {c}}_i - \tilde {\mathbf {c}}'_i \right \|_1,
+Heat Kernel Textures
+5
+which corresponds to the L1 configuration used in our multi-view experiments.
+For efficiency, the heat-kernel texture queries are evaluated in chunks (typically
+1024 surface points at a time), and for final renderings, we optionally tile the
+image plane (e.g., 32 × 32 crops) to limit GPU memory. We use the OptiX denoiser [7,28] only for the displayed renderings, and not in the ray-based training
+loss itself.
+Note that although we train using synthetic rendered images, the groundtruth target signal could naturally be replaced with screen-space image pixels
+from real photographs to perform multi-view image training. However, because
+our current implementation parametrises only the albedo component of the Principled BSDF, optimising directly against real photographs would cause the model
+to incorrectly “bake” scene lighting, shadows, and view-dependent reflections into
+the diffuse colour. Fully leveraging a Physically Based Rendering (PBR) pipeline
+requires disentangling these effects. While extending our HKTex formulation to
+jointly optimise additional material properties (e.g., roughness, metallic, and
+normal maps) is highly feasible, we currently isolate the albedo fitting using
+synthetic ground truth to ensure physically accurate material reconstruction.
+Hyperparameters and hyperparameter tuning. As mentioned in Sec. 5,
+to identify the best hyperparameters for both our UV and multi-view experiments, we performed a Bayesian hyperparameter optimisation using Optuna [1]
+on 5 meshes from our curated subset of the Objaverse [11]. These meshes were
+excluded from all evaluation sets.
+Our hyperparameter search was formulated as a multi-objective optimisation
+problem, with the Tree-Structured Parzen Estimator [4] minimising both the
+final model storage size and the mean squared errors across 3 rendered views of
+the tuning meshes. Because the optimisation dynamics differ between our tasks,
+we executed separate tuning sweeps for UV-texture fitting and multi-view image
+fitting.
+The search space encompassed over 30 parameters. Continuous variables,
+such as learning rates for the kernel parameters and the density controller thresholds, were sampled from log-uniform distributions. Discrete categorical variables
+were used to select optimal architectural choices, including initialisation strategies, loss functions (e.g., MSE, Smooth L1, L1), and learning rate schedulers
+(Step, Cosine, or none). The final list of hyperparameters is reported in Tab. 3.
+A note on the eigenproperties precomputation. In Sec. 4.1 we detailed
+the precomputation of the ALBO eigenproperties (Φ‡i,j and Λ‡i,j ) on the halfpolar-like grid. While the storage cost of these eigenproperties across all the
+7 × 7 nodes in our grid averages ∼ 370MB per mesh, they are a deterministically computed quantity and they do not need to be stored. We precompute the
+eigendecompositions and cache them once per mesh and reuse them across runs,
+and don’t include the precomputations in the timing. Precomputing the ALBO
+eigendecompositions for the 7 × 7 half-polar grid takes (97.8 ± 286.9)s. Of this,
+the Hungarian method required only (0.05 ± 0.03)s to align the 49 eigenvectors
+Φ‡i,j . This (deterministic) sequential CPU overhead could be significantly optimised via GPU parallelization, making on-device recomputation fast enough
+6
+Foti et al.
+Table 3: Hyperparameter configurations. We report the exact hyperparameters
+used for our UV-texture fitting and multi-view image fitting experiments. All parameters except the Optimisation Steps were dynamically selected from the search space
+via our multi-objective Ray Tune and Optuna optimisation.
+Category
+Parameter
+UV
+Multi-View
+General
+Optimisation Steps
+Batch Size
+Loss Function
+Random:Gradient Init.
+5,000
+4,096 (points)
+MSE
+1:1
+3,840
+1,024 (rays)
+L1
+NA
+Architecture
+Initial Sources (S)
+1,000
+Diffusion Time (t)
+6.25 × 10−2
+Colour Formation k-NN (Kc )
+30
+Sources k-NN (Ks )
+50
+Init. Threshold (τmin )
+0.3
+5,000
+1.11 × 10−6
+20
+50
+0.7
+Mean Colour (cbase )
+Kernel Colours (c)
+Angles (θ)
+Anisotropies (η)
+Thresholds (τ )
+Learning Rates
+Sharpnesses (ς)
+Locations (p⋆ )
+Geodesic Momentum
+Adam Scheduler
+Geodesic Scheduler
+9.61 × 10−4
+1.71 × 10−3
+−3
+6.15 × 10
+3.33 × 10−2
+−2
+9.93 × 10
+1.07 × 10−4
+−3
+4.67 × 10
+3.66 × 10−2
+−3
+1.09 × 10
+1.36 × 10−3
+−3
+1.29 × 10
+1.20 × 10−3
+−2
+9.91 × 10
+6.30 × 10−2
+0.9
+0.0
+StepLR
+StepLR
+StepLR
+Cosine Annealing
+Max Kernels Limit
+Pruning Selection Threshold
+Density Control Pruning Contrib. Threshold
+Densify Error Threshold
+Densify Size Threshold
+5,000
+1.69 × 10−3
+3.42 × 10−2
+2.37 × 10−2
+0.174
+10,000
+2.49 × 10−3
+2.05 × 10−2
+2.38 × 10−2
+0.181
+Heat Kernel Textures
+7
+to completely eliminate the need for transmission while preserving our storage
+benefits. We leave this for a future study.
+A note on the eigenmodes and vertex count dependence. HKTex is influenced by the number of eigenmodes, but K = 256 empirically offered sufficient
+control in our experiments. Kernel size increases when reducing K, but the learnable τ can compensate (see insert).
+Pushing HKTex to the extreme while fitting an image
+on a rectangle made of two triangles (Fig. 4), and thus having K = 3 proves that our method is not constrained by
+the vertex count and can represent textures even at higher
+resolutions than the mesh. Meshes in our test data have
+N ≈ (9.6 ± 19)k vertices, but we outperform alternative methods (Tab. 1) with
+just S ≈ (4.3±0.6)k kernels. 49.8% of the faces on average have no kernels, while
+13.2% have one, but the average number of kernel centres per face is 4.8 ± 7.1,
+and the maximum reaches 70± 123. This proves how our kernels can move where
+they benefit texture quality the most.
+A note on the HKTex editability. While direct editing is non-trivial (a
+limitation shared with GS, where Spherical Harmonics further exacerbate the
+issue), modifications can be achieved by baking the target region to a dense
+point cloud, painting it, and running a brief optimization to update the HKTex
+parameters.
+S.2
+Additional Experiments
+In this section, we perform a comprehensive ablation of the main components
+comprising our method. In addition, we report numerous qualitative results obtained by fitting our method to UVtextures (Fig. 2) as well as additional comparisons against SotA
+methods on both the UV-texture (Figs. 8 and 9) and multi-view image fitting
+settings (Figs. 10 and 11). Our method significantly outperforms other methods
+by producing sharper and more detailed results that are not affected by UVcoordinates overheads. In general, HKTex closely matches the visual quality of
+the original GT textures.
+Table 4: Ablation results on a smaller subset of Objaverse [11] on UV texture fitting.
+Best values are in bold and second-best values are underlined. Arrows indicate whether
+lower or higher is better.
+Model
+PSNR (↑)
+Full Model
+45.05 ± 4.90 0.011 ± 0.010 0.991 ± 0.008 0.996 ± 0.004 0.058 ± 0.082 96.87 ± 11.90 4811 ± 557
+LPIPS (↓)
+SSIM (↑)
+MS-SSIM (↑) MSE (×10−3, ↓) Storage (KB, ↓) Kernels (↓)
+No Error-Based Densification 43.05 ± 5.61 0.020 ± 0.019 0.985 ± 0.015 0.992 ± 0.008 0.104 ± 0.146
+No Pruning
+45.06 ± 4.91 0.011 ± 0.010 0.991 ± 0.008 0.996 ± 0.004 0.058 ± 0.083
+No Density Control
+43.09 ± 5.60 0.020 ± 0.019 0.985 ± 0.015 0.992 ± 0.009 0.102 ± 0.142
+No Colour Formation KNN
+45.04 ± 4.92 0.011 ± 0.010 0.991 ± 0.008 0.996 ± 0.004 0.058 ± 0.080
+No Biharmonic Weighting
+43.99 ± 5.71 0.016 ± 0.015 0.988 ± 0.012 0.994 ± 0.006 0.093 ± 0.154
+No Importance Sampling
+45.13 ± 5.86 0.012 ± 0.022 0.988 ± 0.033 0.993 ± 0.027 0.691 ± 6.148
+No PGD
+44.22 ± 5.10 0.014 ± 0.013 0.989 ± 0.010 0.995 ± 0.005 0.071 ± 0.091
+22.18 ± 1.01
+96.89 ± 11.94
+22.29 ± 0.54
+96.75 ± 11.98
+95.59 ± 9.48
+94.39 ± 18.38
+96.93 ± 12.84
+995 ± 42
+4810 ± 558
+1000 ± 0
+4804 ± 561
+4896 ± 427
+4712 ± 836
+4853 ± 517
+8
+Foti et al.
+Ablation In Table 4, we provide ablation results obtained by removing different components of our HKTex on the UV-texture fitting setting, evaluated on
+a subset of 92 meshes from Objaverse [11], filtered as previously described. The
+rows in Table 4 correspond to removing one component at a time from the full
+model: No Error-Based Densification disables the insertion of new kernels from
+the accumulated reconstruction error, No Pruning disables the pruning step,
+No Density Control removes both densification and pruning, No Colour Formation KNN disables the colour-formation-KNN stage, No Biharmonic Weighting
+disables the distance-based attenuation used to enforce local support, No Importance Sampling replaces our importance sampling with uniform sampling, and
+No PGD removes the projected range constraints on the optimised parameters.
+In this non-PGD variant, bounded geometric parameters are instead enforced
+with sigmoid activations, while kernel colours use a tanh activation.
+Overall, the tuned full model is primarily driven by adaptive kernel insertion
+rather than pruning alone. We observe that removing pruning leaves the final quality almost unchanged, indicating that error-based densification together
+with manifold-aware kernel splitting already provides sufficient adaptivity. By
+contrast, removing error-based densification causes an immediate degradation,
+and removing density control altogether does not recover this loss, confirming
+that adaptive kernel insertion is the dominant density-control mechanism. Disabling the colour-formation-KNN stage yields results that are effectively tied to
+those of the full model, suggesting that this component is not critical for accuracy. However, it can still offer small computational benefits and is therefore left
+as an implementation choice.
+The remaining ablations are also consistent with the intended roles of the
+corresponding components. Removing the biharmonic weighting degrades all image metrics, as expected from its role in suppressing long-range spectral ringing
+and enforcing local support. Removing importance sampling yields competitive
+PSNR but much worse MSE, suggesting that uniform sampling overfits easier
+regions while failing to consistently resolve harder, high-frequency areas. Removing PGD also lowers performance, supporting our decision to constrain kernel
+parameters throughout optimisation explicitly.
+Heat Kernel Textures
+Original GT
+UV Textures
+HKTex (ours)
+HKTex kernels
+Original GT
+UV Textures
+HKTex (ours)
+9
+HKTex kernels
+Fig. 7: Qualitative of our HKTex when fitting UV-textures. Our textures require approximately one order of magnitude less storage than the original GT textures.
+10
+Foti et al.
+Original GT
+UV Textures
+LR GT
+UV Textures
+MLP Positional
+Encoding
+InstantNGP
+Intrinsic Neural
+Fields
+ImageGS
+HKTex (ours)
+Fig. 8: Additional qualitative comparison against SotA methods when fitting UVtextures. With the exception of the GT UVTextures, all other methods have similar
+or bigger storage size.
+Heat Kernel Textures
+Original GT
+UV Textures
+LR GT
+UV Textures
+MLP Positional
+Encoding
+InstantNGP
+Intrinsic Neural
+Fields
+ImageGS
+11
+HKTex (ours)
+Fig. 9: Additional qualitative comparison against SotA methods when fitting UVtextures. With the exception of the GT UVTextures, all other methods have similar
+or bigger storage size.
+12
+Foti et al.
+Original GT
+UV Textures
+MLP Positional
+Encoding
+NVDiffRec
+HKTex (ours)
+Fig. 10: Qualitative comparison against SotA methods when fitting synthetic multiview images. With the exception of the GT UVTextures, all other methods have similar
+or bigger storage size.
+Heat Kernel Textures
+Original GT
+UV Textures
+MLP Positional
+Encoding
+NVDiffRec
+13
+HKTex (ours)
+Fig. 11: Additional qualitative comparison against SotA methods when fitting synthetic multi-view images. With the exception of the GT UVTextures, all other methods
+have similar or bigger storage size.

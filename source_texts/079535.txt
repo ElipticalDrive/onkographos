@@ -1,0 +1,151 @@
+# theme1
+
+Procedural 3D environment generation and CPU image rendering, in TypeScript.
+
+Give it a seed and a theme, and it produces a landscape image: heightfield
+terrain, a resolved water surface, a volumetric cloud layer, atmosphere, and
+either a photoreal or monochrome grade. No GPU, no headless browser, no
+runtime dependencies.
+
+```bash
+bun install
+bun run render -- --seed 3 --theme dusk --out renders/dusk.png
+```
+
+![a generated landscape at dusk](docs/dusk.png)
+
+*Theme `dusk`, seed 3. Nothing here was modelled or painted: the terrain, the
+water, the clouds and the light all come out of a theme file and a number.*
+
+<table>
+<tr>
+<td><img src="docs/alpine.png" alt="alpine"></td>
+<td><img src="docs/monochrome.png" alt="monochrome"></td>
+</tr>
+<tr>
+<td align="center"><code>alpine</code>, seed 3</td>
+<td align="center"><code>monochrome</code>, seed 3</td>
+</tr>
+</table>
+
+
+---
+
+## The one rule
+
+**Generation and rendering are separate.**
+
+A `World` is pure data describing a place. A renderer is one of several ways to
+look at it. Nothing in `src/world` imports anything from `src/render`, and the
+test suite asserts the two renderers agree on where the ground is.
+
+```
+Theme  ──▶  WorldGenerator  ──▶  World (data)
+                                    │
+                    ┌───────────────┴───────────────┐
+                    ▼                               ▼
+           CPU ray marcher                   three.js viewer
+           (renderToPng)                     (public/index.html)
+                    │                               │
+                    ▼                               ▼
+                 PNG image                    interactive scene
+```
+
+The three.js viewer exists to keep this honest. If the world model were secretly
+shaped around ray marching, a completely different renderer could not read it.
+
+## Determinism
+
+The same seed and theme always produce the same world and the same image, byte
+for byte. This is a tested property, not a hope:
+
+```bash
+bun test          # includes: serial and worker output are identical
+```
+
+How it is achieved:
+
+- `Math.random()` is never called. Every random stream comes from
+  `streamSeed(seed, name)`, a 32-bit hash of the parent seed and a stream name.
+- Each subsystem takes its own named stream, so adding a generator cannot shift
+  the numbers any other generator sees.
+- Shading never depends on iteration order or on a shared mutable scratch buffer
+  across tiles. Dither is hashed from the pixel index.
+- The render divides into horizontal tiles that write only their own rows, so the
+  worker pool produces the same bytes as a single thread. There is a test for
+  exactly this.
+- Animation is driven by an explicit `time` parameter, never by a clock.
+
+## Install
+
+Requires [Bun](https://bun.sh) (the worker pool and the test runner are Bun
+flavoured). `three` is a dev dependency used only by the browser viewer.
+
+```bash
+bun install
+```
+
+## Command line
+
+```bash
+bun run render -- [options]              # one image
+bun run render -- themes                 # list the presets
+bun run render -- validate <name>        # check a theme, print warnings
+bun run render -- batch --seeds 1 2 3    # several seeds
+bun run bench                            # performance probe
+bun run serve                            # the three.js viewer
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--seed <n>` | world seed |
+| `--theme <name>` | preset name |
+| `--out <path>` | output PNG |
+| `--width` / `--height` | image size |
+| `--quality` | `preview`, `standard` (default) or `high` |
+| `--camera` | `auto`, `aerial`, `vista`, `ground`, `closeup` |
+| `--fov <deg>` | override the field of view |
+| `--time <s>` | world time, drives waves and cloud drift |
+| `--workers <n>` | worker threads; `1` disables the pool |
+| `--resolution <n>` | terrain grid cells per side |
+| `--set <path=value>` | override any theme field, repeatable |
+| `--no-water`, `--no-clouds`, `--no-shadows`, `--no-reflections` | effect switches |
+| `--monochrome` | force the monochrome look |
+| `--quiet` | print only the output path |
+
+`--set` is the art direction tool. Anything the theme schema accepts can be
+overridden from the shell, with values parsed as JSON:
+
+```bash
+bun run render -- --theme alpine --set terrain.amplitude=900 \
+  --set palette.snowLine=500 --set lighting.sunDirection='{"x":0.5,"y":0.6,"z":-0.6}'
+```
+
+## Library
+
+```ts
+import { defineTheme, generateWorld, renderToPng, PRESETS } from './src/index.ts'
+
+const theme = defineTheme({ ...PRESETS.dusk, name: 'my-dusk' })
+const world = generateWorld({ seed: 7, theme })
+
+console.log(world.terrain.maxHeight, world.water.coverage)
+
+await renderToPng('renders/mine.png', { world, quality: 'high' })
+```
+
+Reuse a world across several renders — generation is the expensive part:
+
+```ts
+const world = generateWorld({ seed: 7, theme })
+
+for (const camera of ['aerial', 'vista', 'ground'] as const) {
+  await renderToPng(`renders/${camera}.png`, { world, camera })
+}
+```
+
+The interesting lower level pieces are all exported: `traceTerrain`,
+`traceShadow`, `skyRadiance`, `marchClouds`, `shadeWater`, `bakeNormals`,
+`shadeTerrainCell`, `encodePng`, and the noise, RNG and colour primitives.
+
+## How an image is made

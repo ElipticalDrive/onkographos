@@ -1,0 +1,1160 @@
+VET: Visual Error Tomography for Point Cloud Completion and
+High-Quality Neural Rendering
+arXiv:2311.04634v1 [cs.CV] 8 Nov 2023
+LINUS FRANKE, Friedrich-Alexander-Universität Erlangen-Nürnberg, Germany
+DARIUS RÜCKERT, Friedrich-Alexander-Universität Erlangen-Nürnberg, Germany and Voxray GmbH, Germany
+LAURA FINK, Friedrich-Alexander-Universität Erlangen-Nürnberg, Germany and Fraunhofer IIS, Germany
+MATTHIAS INNMANN, NavVis GmbH, Germany
+MARC STAMMINGER, Friedrich-Alexander-Universität Erlangen-Nürnberg, Germany
+InstantNGP
+(1.57 fps) Mip-NeRF360
+Ours
+(76.9 fps) Reference
+(0.07 fps)
+Fig. 1. The initial point cloud of the Cherry Tree lacks completeness, with branches and leaves missing. Neural point-based rendering exhibits severe artifacts
+in these regions (left). By applying VET and spawning new points, we can complete the point cloud efficiently. This appearance-driven geometric completion
+improves quality of the neural rendering significantly (middle) thus outperforming state of the art methods (right).
+1
+In the last few years, deep neural networks opened the doors for big advances in novel view synthesis. Many of these approaches are based on
+a (coarse) proxy geometry obtained by structure from motion algorithms.
+Small deficiencies in this proxy can be fixed by neural rendering, but larger
+holes or missing parts, as they commonly appear for thin structures or for
+glossy regions, still lead to distracting artifacts and temporal instability. In
+this paper, we present a novel neural-rendering-based approach to detect
+and fix such deficiencies. As a proxy, we use a point cloud, which allows us
+to easily remove outlier geometry and to fill in missing geometry without
+complicated topological operations. Keys to our approach are (i) a differentiable, blending point-based renderer that can blend out redundant points,
+as well as (ii) the concept of Visual Error Tomography (VET), which allows us
+to lift 2D error maps to identify 3D-regions lacking geometry and to spawn
+novel points accordingly. Furthermore, (iii) by adding points as nested environment maps, our approach allows us to generate high-quality renderings
+of the surroundings in the same pipeline. In our results, we show that our
+approach can improve the quality of a point cloud obtained by structure
+from motion and thus increase novel view synthesis quality significantly. In
+contrast to point growing techniques, the approach can also fix large-scale
+holes and missing thin structures effectively. Rendering quality outperforms
+state-of-the-art methods and temporal stability is significantly improved,
+while rendering is possible at real-time frame rates.
+INTRODUCTION
+Recent advances in neural rendering have shown remarkable results
+on various tasks. Especially the field of novel view synthesis [Tewari
+et al. 2022] has received great attention from researchers around the
+world. Fridovich-Keil et al. [2022] have pointed out that the basis
+of the success comes from a differentiable rendering pipeline. Thus,
+researchers have implemented inverse rendering formulations for
+several scene representations ranging from coordinate networks
+over volumetric data structures to triangle meshes or point clouds
+as geometric proxies.
+In practice, explicit representations such as triangle meshes or
+point clouds are often preferred due to their simplicity to use and
+the possibility to integrate them into existing workflows. Such proxies can be generated using 3D reconstruction techniques on input
+images or video, or using active 3D scanners. To achieve high render
+quality, a high-quality proxy is required. However, this is not always
+available as different capturing modalities fail in different scenarios.
+Multi-view stereo depth estimation cannot reliably estimate featureless, reflective, or transparent surfaces, and often misses small,
+fine structures. Active scanners, such as LIDAR, can handle textureless surfaces, but produce artifcats on dark and glossy surfaces and
+generally exhibit lower resolution. As a result, the proxy geometry
+often is either incomplete or contains outliers.
+In this paper, we propose a method to rectify these issues using a
+pair of cleaning and spawning steps. As proxy we use a point cloud,
+which makes it easy to modify, add, and remove geometry without
+having to adapt topology. Key to our approach is a differentiable
+point renderer that considers and optimizes point transparencies.
+CCS Concepts: • Computing methodologies → Rendering; Image-based
+rendering; Reconstruction.
+Additional Key Words and Phrases: Novel View Synthesis, Neural Rendering,
+Machine Learning, Point Cloud Completion, Computed Tomography
+This is the author’s version of the work. It is posted here for your personal
+use. Not for redistribution. The definitive Version of Record was published
+in SiggraphAsia’23, http://dx.doi.org/10.1145/3610548.3618212
+1
+Linus Franke, Darius Rückert, Laura Fink, Matthias Innmann, and Marc Stamminger
+Points that receive high transparency are considered as outliers and
+can be removed without impact on quality. This cleaning operation
+enables us to improve the proxy point cloud twofold: first, outliers
+from the original proxy, as they appear for instance in reflective
+regions or at object edges, can be removed to clean up the proxy
+and improve render performance. Second, it opens the door for an
+effective spawning operation: We can tentatively add points in likely
+undersampled regions and let the cleaning step discard points that
+do not contribute to better renderings. Thus, the surviving added
+points improve the proxy with the quality of this point completion
+being dependent on the accuracy of the prediction for undersampled
+regions. To identify these critical regions in 3D space, we introduce
+a method we call Visual Error Tomography (VET). Based on the
+output of the neural renderer and the corresponding input images,
+we generate error images and project these back to 3D space using
+computed tomography. With this step, we can reliably identify 3D
+regions, where the original 3D reconstruction generated too few
+points, or no points at all, like at glossy surfaces or thin structures.
+As we show in our results, this step is much more effective than
+point growing approaches [Furukawa et al. 2010; Schönberger et al.
+2016], which tend to generate many unnecessary points, require
+many iterations to fill holes, and fail for thin structures. We also
+show that by spawning (and cleaning) points in a few layers of
+nested environment maps, it is possible to faithfully re-render the
+environment, which improves rendering quality considerably.
+The teaser image (Fig. 1) shows the point cloud for a tree obtained
+from multi-view stereo reconstruction along with the corresponding
+rendering result on the left. In the center, we present the enhanced
+point cloud, which notably enhances the rendering quality with
+other methods failing to reconstruct the fine-grain structure of the
+leafs faithfully. In summary, our key contributions are:
+present on real datasets [Shum and Kang 2000]. Hence, traditional
+methods produce warping artifacts in rendered images especially
+around silhouettes. These warping artifacts can be significantly reduced by replacing blending operation in the warping stage with
+deep neural networks [Hedman et al. 2018; Riegler and Koltun 2020,
+2021]. If no proxy geometry is available, learning-based IBR approaches have been developed that create a multi-plane image representation [Mildenhall et al. 2019; Srinivasan et al. 2019; Tucker
+and Snavely 2020; Zhou et al. 2018] to directly estimate the warp
+field [Flynn et al. 2016; Ganin et al. 2016; Zhou et al. 2016]. A disadvantage of IBR approaches is that all source images must be present
+in memory or quickly fetchable to render a novel view.
+The desired solution to this problem is to generate a compact 3D
+representation of the scene in a preprocessing stage using only the
+source images as an input. After that, novel views can be rendered
+efficiently without the need of all input images. In the last couple of
+years, several 3D scene representations have been proposed, all with
+different advantages and disadvantages [Tewari et al. 2022]. One of
+the most popular scene representations are coordinate networks,
+also known as NeRFs [Mildenhall et al. 2021], since they are memory
+efficient, easy to use, and show excellent results on many datasets.
+However, evaluating and training NeRF is time-consuming due to
+the need to evaluate a large neural network for each 3D sample.
+This has lead to a series of subsequent works further improving
+quality [Barron et al. 2021, 2022, 2023; Martin-Brualla et al. 2021;
+Yu et al. 2021b; Zhang et al. 2020] or run-time [Müller et al. 2022;
+Reiser et al. 2021; Turki et al. 2022; Yu et al. 2021a].
+Next to coordinate networks, other scene representations such
+as sparse voxel grids [Fridovich-Keil et al. 2022], octrees [Rückert
+et al. 2022], tensor factorization [Chen et al. 2022] and triangle
+meshes [Thies et al. 2019] also show strong results on the NVS task.
+Another promising scene representation are point clouds, since
+they can capture arbitrary fine geometric detail and are easy to
+use and modify. Today it is possible to render billions of points in
+real time [Schütz et al. 2022] and simultaneously remove typical
+point-based rendering artifacts using deep neural networks [Meshry
+et al. 2019; Pittaluga et al. 2019; Song et al. 2020] and learned point
+descriptors [Aliev et al. 2020; Rakhimov et al. 2022; Rückert et al.
+2022].
+A key observation to further improve the NVS quality is, that the
+point cloud and camera parameters used in these approaches can be
+optimized using differentiable rendering techniques. In the context
+of point-based graphics, several approaches have been proposed for
+sphere rendering, Gaussian splatting, and point-sample rendering
+[Kerbl et al. 2023; Kopanas et al. 2022, 2021; Lassner and Zollhöfer
+2021; Wiles et al. 2020; Zhang et al. 2022]. A disadvantage of most of
+these approaches is that they do not have a reliable way to remove
+and spawn new points automatically. This hinders rendering quality
+and leads to artefacts, if the initial point cloud is erroneous. To overcome this problem, Xu et al. [2022] have introduced a point growing
+strategy to insert new points close to existing ones. Their approach
+demonstrates improved rendering quality on real datasets. Similarly,
+Kerbl et al. [2023] split large Gaussians in their pipeline to introduce new points. Their point growing strategies however may not
+effectively handle regions where few existing points are available
+for reference, as well as issues with growth criteria selections [Poux
+• A fast differentiable neural point-based rasterizer, capable
+of efficiently handling and optimizing point transparency
+• The concept of Visual Error Tomography, a novel technique
+enabling reliable identification of erroneous 3D regions
+• A pipeline incorporating iterative steps of point spawning
+and cleaning, resulting in the generation of clean and complete proxies, ultimately leading to a significant improvement in rendering quality
+• The faithful visual reconstruction of the environment using
+nested point-based environment maps
+• An evaluation of these methods, showing improved render
+quality particularly in difficult regions
+• An open source implementation of the method located at:
+https://github.com/lfranke/VET
+2
+RELATED WORK
+Novel view synthesis (NVS) is the task of generating new views of a
+scene given a set of input images. For example, one could capture a
+few photographs of an object and then use NVS to generate a video
+with an arbitrary camera trajectory. Many NVS implementations
+make use of image-based rendering techniques by directly warping the colors of several source images to a target view [Chaurasia
+et al. 2013; Debevec et al. 1998]. However, a geometrically correct
+warping requires an accurate proxy geometry, which is often not
+2
+VET: Visual Error Tomography for Point Cloud Completion and High-Quality Neural Rendering
+Feature Image
+Cameras
+Rendered Image
+Photograph
+Neural Renderer
+Diﬀerentiable Point
+Rasterizer with Blending
++
+Positions
+Opacities
+Feature Vectors
+Neural Point Cloud
+Loss
+Visual Error
+Tomography
+σ
+Error Images
+Additional Points
+Forward Evaluation
+Backpropagation
+Fig. 2. Overview of our neural rendering pipeline with visual error tomography. Point descriptors, positions and opacities are optimized via backpropagation,
+which automatically removes outliers during training. After initial convergence, our VET is used to predict missing 3D points from the error images. Following,
+the optimization is resumed until the next convergence. This process is repeated 1-3 times depending on scene complexity.
+et al. 2022] can be present. To this end, Zuo and Deng [2022] propose
+an improved spawning technique, which identifies pixels with large
+rendering error and spawns new points randomly along the ray
+passing these pixels. While this approach allows for reconstruction
+of missing objects, it is worth mentioning that only a limited number of points are placed on the object’s surface. As a consequence,
+the reconstruction process can require thousands of iterations to
+complete and is prone to overfitting if points are spawned to close
+too the cameras.
+Core of our method is visual error tomography (VET), which is
+based on computed tomography (CT). CT reconstructs 3D volumetric
+densities from a series of volumetric projections as obtained by xray imaging [Buzug 2008]. In our pipeline, we use Neural Adaptive
+Tomography (NeAT) [Rückert et al. 2022] for CT reconstruction,
+because this approach can generate sharp, detailed reconstructions,
+and is able to model a non-linear intensity response of ray integrals,
+which is required for our non-physical reconstruction task.
+3
+VET and spawn additional points in the found critical regions. In
+Sec. 5, we provide details about VET and point spawning. The entire
+process is repeated 1 to 3 times until convergence, dependent on
+scene complexity. As a result, we obtain a high-quality point cloud
+of the scene, which can be rendered by a real-time neural rendering
+system in photo-realistic quality.
+4
+POINT CLOUD OPTIMIZATION AND CLEANING
+As initial point cloud we use the result generated by state-of-the-art
+3D reconstruction pipelines such as COLMAP [Schönberger et al.
+2016]. In our examples, we use the densified point cloud, but as we
+show in the evaluation, starting with the sparse point cloud (similar
+to Kerbl et al. [2023]) and relying on our pipeline to fill in missing
+points still produces reasonable results.
+To better represent the environment, previous methods usually
+use environment maps [Rückert et al. 2022; Zhang et al. 2020], recently in the form of multi-sphere images [Fridovich-Keil et al. 2022].
+In the same spirit, we spawn points on four layers of nested spherical environment maps using spherical Fibonacci sampling [Fink
+et al. 2019; Keinert et al. 2015] of 0.5M points. These points are
+optimized and cleaned identically to the original scene points. In
+particular with the opacity bias for unseen points (Sec. 4.3) this
+results in sparse and efficient environment maps and high-quality
+reconstructions of the surrounding.
+OVERVIEW
+Fig. 2 provides an overview of our pipeline. We start with a set of
+photographs, their corresponding poses, and an initial point cloud
+representing the scene. Each point in the cloud is assigned a fourdimensional feature vector and an alpha value denoting opacity.
+A differentiable point rasterizer renders the point cloud to feature
+images in multiple resolutions, which are then passed through a
+neural rendering U-Net to generate the final renderings [Aliev et al.
+2020]. The render loss is used to update point features and opacities via backpropagation. Depending on the initial quality of the
+reconstruction, optimization is performed on point positions and
+camera poses in this stage [Kopanas et al. 2022; Rückert et al. 2022].
+Points with low opacity are identified as outliers and automatically
+removed during the optimization. Further details regarding the differentiable renderer and the cleaning procedure are provided in
+Sec. 4. Remaining image errors indicate missing geometry in the
+proxy. To identify these undersampled regions, we apply our novel
+4.1
+Differentiable Point Rasterizer with Blending
+Our differentiable point-based rasterization approach is based on the
+work of Rückert et al. [2022]. For detailed information on the forward
+and backward pass we refer to the original paper. Our contribution
+to this pipeline is the use of front-to-back alpha blending instead
+of the fuzzy depth-test. To that end, we first render the points to
+per-pixel linked lists, sort these lists by each point’s depth, and
+finally blend the colors front to back by the respective alpha value.
+3
+Linus Franke, Darius Rückert, Laura Fink, Matthias Innmann, and Marc Stamminger
+Error Volume
+Cameras
+Spawned Points
+Point Sampling
+CT Reconstruction
+σ
+σ
+Error Images
+Fig. 3. Visual Error Tomography: starting from error images (left), we apply computed tomography to reconstruct a 3D error volume grid (center). Within each
+voxels, random points are spawned, where the number of spawned points depends on the voxel’s error value (right).
+The final color 𝐶𝑢,𝑣 with alpha blending is defined as
+𝐶𝑢,𝑣 =
+|𝜆
+∑︁|
+𝑇𝑚 · 𝛼𝑚 · 𝑐𝑚
+opacity and encourages the system to remove all dispensable points,
+as unused points will be pushed towards a small opacity value. These
+points are often environment map points, far away outliers or inside
+structures. This bias proves very powerful in reducing point cloud
+size without impacting rendering quality.
+(1)
+𝑚=1
+where 𝜆 is the sorted per-pixel linked list, 𝛼𝑚 the alpha value, and
+𝑐𝑚 the respective color of point 𝑚. The transmission variable 𝑇𝑚
+describes how much light passes through all previous points in the
+list and therefore ensures that points at the end of the list only have
+Î
+a small contribution to the final color: 𝑇𝑚 = 𝑚−1
+𝑖=1 (1 − 𝛼𝑖 ). Since
+Eq. (1) is differentiable, we can integrate this blending approach into
+the rasterization pipeline of Rückert et al. [2022] to optimize the
+alpha value of each point. For a better optimization, alpha is stored
+in the range (−∞, ∞) and only converted to [0, 1] during blending
+using the sigmoid function.
+The rendering is performed four times with progessively lower
+resolutions and these are fed into a multi-scalar U-net with gated
+convolutions followed by a neural camera sensor module, as described by Aliev et al. [2020] and Rückert et al. [2022]. The multipixel rendering is implemented efficiently with a custom CUDA
+per-pixel counting and collection pass [Selgrad et al. 2015] followed
+by fast GPU bitonic sorting [Batcher 1968; Franke et al. 2018]. For
+the backwards pass, only the sorted per-pixel lists have to be stored.
+4.4
+𝛼 = sigmoid ((10 + 𝑓 · 𝑡) · 𝛼 raw ) ,
+Point Cleaning
+POINT SPAWNING VIA VET
+The core of our point spawning step is visual error tomography
+(VET, Sec. 5.1), which allows us to identify incomplete regions of
+the scene (see Fig. 3), where points then are spawned (Sec. 5.2).
+We apply spawning multiple times when the neural rendering has
+converged sufficiently, usually every 200 epochs.
+The previous optimization adapts the opacity of each point. It is
+reasonable to assume that outlier points will receive low or zero
+opacity. We thus determine outliers by introducing a threshold on
+the alpha value. We found that during optimization, a threshold of
+0.3 works well on all tested scenes and gets rid of most outliers,
+while leaving room for variance during training. For faster training,
+we remove points below this threshold every 50 epochs.
+While previous neural point rendering approaches show some
+capability for disregarding outliers, mainly through strong masking
+abilities of gated convolutions, using this explicit optimization of a
+point confidence proves very powerful in removing outliers, which
+are either part of the initial reconstruction, environment spheres,
+or have been added by our spawning step.
+4.3
+(2)
+where 𝑓 is a user defined parameter and 𝑡 the current optimization
+step. After the last iteration, the adjusted sigmoid is almost identical
+to the step function with each point having a binary opacity. For
+the final rendering, we then use only the opaque points without
+alpha blending, achieving high-performance real-time rendering of
+point clouds with 100 millions of points.
+5
+4.2
+Transition to Opaque Point Rendering
+Compared to direct one pixel point rendering with depth testing
+[Schütz et al. 2022], the alpha-based point blending required for
+outlier removal is slower to evaluate. Therefore, if a real-time exploration of the scene is desired, we can smoothly transition our
+system from alpha blending to opaque depth testing during the optimization stage. To this end, we adjust the sigmoid function, which
+encodes the raw alpha values 𝛼 raw , to become more steep over time:
+5.1
+Visual Error Tomography (VET)
+The idea of VET is to compute the per-pixel rendering loss of each
+input image and process these images with a CT reconstruction
+module. The CT system creates a volumetric model that captures
+how much each point in space contributes to the visual error. If the
+CT output for a given 3D point is small, most of the views must
+have a small visual error at its projected pixel. If the CT output is
+large, the visual error at the project pixel coordinates must also be
+large for multiple views.
+Visual errors in neural point rendering often stem from missing
+points, local minima in descriptor optimization, or strong view
+dependency. For all three, spawning primitives at that location is a
+Point Opacity Bias
+In our point cloud optimization process, we add 𝜖 = 10 −7 to the
+opacity gradient of each point. This introduces a small bias to the
+4
+VET: Visual Error Tomography for Point Cloud Completion and High-Quality Neural Rendering
+Table 1. Training and render times on the Garden and Playground scenes.
+The VET reconstruction takes about 15 minutes and is included in our
+training time. Inference measured on an RTX4090, training on an A100.
+way to improve results. For the first two cases, additional points fill
+the incomplete geometry or cause descriptor optimization to take
+additional training impulses. For strong view dependency, adding
+points allows the blended descriptors to create a multi-layer surface
+representation that can approximate view-dependent effects. While
+tackling this is not the explicit contribution of our pipeline (unlike
+e.g. Kopanas et al. [2022]), it does not hinder our VET’s purpose.
+To compute the error volume, we use the state-of-the-art CT reconstruction approach Neural Adaptive Tomography (NeAT) [Rückert et al. 2022]. The major advantage of NeAT is its ability to model
+the non-linear intensity response of ray integrals, which is an essential property for our case because visual error maps inherently do
+not follow Beer-Lambert’s law of photon attenuation. Furthermore,
+the neural regularizer of NeAT prefers high density regions with
+sharp edges instead of large smooth areas. This has provided better
+results for our method and produces sharp and clean error volumes,
+shown for example in Fig. 3.
+For the input images, we smooth the error images 𝐼 with
+𝐼 ′ (𝑥, 𝑦) = clamp(𝐼 (𝑥, 𝑦) ∗ (1 + 𝑙) − 𝑙, 0, 1)
+Method
+InstantNGP (8 spp)
+Mip-NeRF 360
+ADOP
+Ours (Blend)
+Ours (Opaque)
+Render (Garden)
+1046 ms
+38390 ms
+30 ms
+33 ms
+29 ms
+Render (Playground)
+1372 ms
+18240 ms
+15 ms
+23 ms
+13 ms
+dataset [Knapitsch et al. 2017] images were captured with a highquality RGB camera in full-HD and point clouds of 5M to 12M
+points. The Sydney Opera House scene from Lu et al. [2023] has
+2.4M points and an image resolution of 1280 × 676. The Cherry
+Tree was captured by us with a point cloud of 2M points and images of 1500 × 1000. All initial reconstructions were done using
+the COLMAP multi-view stereo pipeline [Schönberger and Frahm
+2016]. Additionally, the Redwood [Choi et al. 2016] dataset is used,
+which is captured with an RGB-D camera, with small image and
+point cloud resolutions. For all experiments and methods, unless
+otherwise noted, 5% of the images (every 20th) were left out of the
+training and used for evaluation.
+(3)
+to focus on high-error regions and ignoring small noise. We use
+𝑙 = 0.3 for our error images.
+We observe that VET works well over the whole scene, including
+inside-out capturing scheme and backgrounds, but we limit the
+volume extent to keep memory costs low, as otherwise we would
+need to increase the output grid size (see next section). For this
+bounding box we use 95% of the inner points of the initial point
+cloud, as COLMAP or LIDAR commonly have extreme outliers,
+which are filtered out with this threshold.
+5.2
+Training
+0.25 h
+36 h
+8h
+16 h
+16 h
+6.2
+Comparison to Related Work
+To evaluate the neural rendering performance of our pipeline we
+have measured the inference quality on several scenes. We compare against state of the art approaches: Three NeRF-based with
+InstantNGP [Müller et al. 2022] (with their larger configuration),
+Mip-NeRF 360 [Barron et al. 2022] and Nerf++ [Zhang et al. 2020],
+a triangle-based approach in Stable View Synthesis [Riegler and
+Koltun 2021] and a point-based approach with ADOP [Rückert et al.
+2022]. Fig. 4 shows a visual comparison on the Tanks&Temples
+dataset, with the quantitative evaluation presented in Tab. 2. On all
+scenes, our method outperforms the compared approaches due to
+our VET-based point cloud completion. Especially noteworthy is
+our approach’s ability to reconstruct fine detail as well as overall
+sharpness. In Fig. 12, we showcase four scenes from the Mip-NeRF
+360 dataset, observing the same characteristics. Here however, our
+PSNR scores tend to be lower than Mip-NeRF 360 as slight errors in
+calibrations and color shifts by the CNN impact this metric proportionally higher while not impacting perceived visual quality [Zuo
+and Deng 2022]. Our rendering times however are significantly
+faster than theirs, as seen in Tab. 1.
+Video results can be found at: https://youtu.be/adH6GyqC4Jk
+Error Volume Point Spawning
+The output of VET is a 5123 voxel grid containing estimated error
+values. After normalizing this grid to the range [0, 1], we spawn
+𝑛 (𝑥,𝑦,𝑧 ) = ⌊𝑒𝑖 (𝑥, 𝑦, 𝑧) · 𝑝 max ⌋ new points, where 𝑒𝑖 is the normalized error value and 𝑝 max the maximum number per voxel. We use
+𝑝 max = 10, which typically leads to 10k - 2000k newly inserted
+points per VET step, but this is highly dependent on the error volume. The positions of the 𝑛 added points are randomly distributed
+in the cell. It is important to note that adding too many or inaccurately placed points is not an issue due to the robust outlier removal
+strategy described in the previous chapter.
+Theoretically, this process converges and progressively fewer
+points are spawned each time, as less and less visual error is represented in the volume. In practice, we spawn points 1-3 times during
+training, after which no further improvement can be observed. Usually, our spawning and cleaning steps result in point clouds with a
+similar amount of points as the initial reconstruction, and thus have
+no significant impact on memory consumption and render times.
+6.3
+Ablation Studies
+6.3.1 Evaluation of the Error Metric used in VET. The VET module
+takes visual error maps as input to compute the error volume. In
+Tab. 3, we show rendering quality with different VET error metrics
+on the tree scene. Overall, using SSIM provides the best results as it
+guides more points to be spawned in thin locations.
+6 EVALUATION
+6.1 Datasets
+6.3.2 Narrowing Factor. In Sec. 4.4, we have introduced a sigmoid
+narrowing factor to smoothly transition the alpha renderer to traditional depth testing. Tab. 4 shows the experiment with different
+values of 𝑓 , with large values impacting quality, as changes are too
+abrupt during training. We therefore recommend 𝑓 = 0.01.
+We have tested our approach on multiple scenes from different
+datasets: The Mip-NeRF 360 dataset [Barron et al. 2022] has dense
+point clouds of 5M to 10M points and image resolutions of around
+2500 × 1600 (half the original capturing). In the Tanks&Temples
+5
+Linus Franke, Darius Rückert, Laura Fink, Matthias Innmann, and Marc Stamminger
+Table 2. Results on the Tanks&Temples dataset. See also Fig. 4 for a visual comparison.
+Method
+LPIPS ↓
+Train
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+NeRF++
+SVS (half res.)
+InstantNGP
+Mip-NeRF 360
+ADOP
+0.434
+0.267
+0.335
+0.355
+0.131
+18.05
+17.44
+20.46
+18.37
+21.44
+0.579
+0.683
+0.644
+0.624
+0.723
+0.441
+0.291
+0.418
+0.271
+0.126
+22.25
+22.12
+18.69
+24.86
+24.85
+Ours
+0.123
+21.67
+0.765
+0.124
+25.49
+InstantNGP
+Mip-NeRF 360
+Playground
+PSNR ↑ SSIM ↑
+LPIPS ↓
+M60
+PSNR ↑
+SSIM ↑
+Lighthouse
+LPIPS ↓ PSNR ↑ SSIM ↑
+0.613
+0.704
+0.518
+0.736
+0.719
+0.360
+0.197
+0.203
+0.189
+0.103
+23.06
+23.74
+24.97
+24.68
+24.91
+0.728
+0.831
+0.797
+0.838
+0.811
+0.386
+0.264
+0.285
+0.235
+0.119
+20.08
+17.14
+22.98
+21.35
+22.27
+0.662
+0.722
+0.728
+0.750
+0.755
+0.768
+0.080
+27.34
+0.875
+0.094
+24.19
+0.808
+ADOP
+Ours
+Ground Truth
+Fig. 4. Comparison to prior work on the Tanks&Temples dataset. Our method is able to reconstruct fine details, remove outliers and improve overall sharpness.
+6.3.3 TV Regularization in VET. The neural CT reconstruction approach uses a total variation (TV) regularizer to smooth the output
+volume. We have tested our pipeline with different TV values and
+found that with a smaller value, more outlier points are spawned.
+However, since these points are cleaned reliably, the difference in
+the final result is only marginal (see Fig. 5). For the remaining experiments we use 𝑡𝑣 = 0.001 as it is a good compromise between
+capturing small details and not spawning too many outliers.
+6.3.4 Point Cleaning. To test the robustness of the outlier cleaning
+strategy, we have ran our pipeline on the Playground scene, where
+we have added one million additional random points around the
+playground items. As shown in Fig. 6 (top) on the right, the final
+point cloud contains almost no visible outliers. On the Opera scene
+(Fig. 6 bottom), this robustness provides great cleanup in water areas,
+where outliers are placed over the water surface through COLMAP’s
+reconstruction.
+6
+VET: Visual Error Tomography for Point Cloud Completion and High-Quality Neural Rendering
+Table 3. Rendering error when
+different visual error metrics are
+used for the VET reconstruction
+on the Cherry Tree scene. L2
+error is processed with 𝑙 = 0.01.
+VET-loss
+use L1
+use L2
+use SSIM
+LPIPS ↓
+0.177
+0.187
+0.162
+PSNR ↑
+21.57
+21.19
+21.88
+Table 4. Sigmoid narrowing factor 𝑓
+used for transitioning to depth-test based
+rendering on the Redwood Chair scene.
+After 400 epochs, the switch was initiated, final result after 600 epochs.
+𝑓
+100
+10 −1
+10 −2
+10 −3
+LPIPS ↓
+0.200
+0.197
+0.186
+0.191
+Table 5. Point opacity bias ablation
+study on the Garden scene (7.8M
+points). Higher bias aggressively removing points while still maintaining low rendering loss.
+PSNR ↑
+18.85
+18.90
+19.66
+19.44
+Bias
+10 −5
+10 −6
+10 −7
+10 −8
+10 −9
+10 −10
+Perceptual Loss
+tv = 0.01
+tv = 0.001
+tv = 0
+VET 1
+VET 2
+Points
+0.2M
+4.3M
+7.3M
+8.0M
+8.9M
+9.6M
+LPIPS ↓
+0.406
+0.186
+0.178
+0.177
+0.178
+0.178
+Table 6. Point cleaning threshold
+on the Garden scene (7.8M points).
+Point clouds can be cleaned aggressively before impacting rendered results.
+PSNR ↑
+20.73
+23.60
+23.70
+23.71
+23.67
+23.67
+𝑇
+0.10
+0.20
+0.30
+0.50
+0.70
+0.90
+0.99
+Points
+10.3M
+9.1M
+7.3M
+6.6M
+5.3M
+2.6M
+0.1M
+LPIPS ↓
+0.176
+0.177
+0.178
+0.179
+0.183
+0.200
+0.446
+PSNR ↑
+23.74
+23.69
+23.70
+23.62
+23.67
+23.44
+19.08
+Table 7. Amount of points spawned compared with rendering losses.
+𝑝𝑚𝑎𝑥
+2
+5
+10
+20
+30
+Garden (Init. 7.8M Points)
+# Points LPIPS ↓ PSNR ↑
+7.0M
+0.181
+23.60
+7.2M
+0.180
+23.69
+7.3M
+0.178
+23.70
+7.8M
+0.177
+23.71
+8.5M
+0.177
+23.73
+Cherry Tree (Init. 2M Points)
+# Points LPIPS ↓ PSNR ↑
+1.7M
+0.295
+18.74
+1.9M
+0.280
+19.39
+4.0M
+0.223
+20.41
+17.3M
+0.182
+21.33
+31.5M
+0.167
+21.88
+Steps
+Table 8. Environment map setup on the Playground scene (12.5M Points).
+Fig. 5. Loss graph for running VET with different values of the TV regularizer.
+Method
+No Environment Map
+1 Textured Sphere
+4 Layered Textured Spheres
+1 Point-based Sphere (init. 0.5M points)
+4 P.-b. Layered Spheres (init. 2.0M points)
+Initial Point Cloud + 1M Outliers
+Point Cloud aer Outlier Removal
+Colmap Point Cloud
+Point Cloud aer Outlier Removal
+# Points
+10.0M
+11.4M
+11.3M
+10.8M
+13.3M
+LPIPS ↓
+0.146
+0.176
+0.181
+0.151
+0.124
+PSNR ↑
+25.34
+24.99
+25.00
+24.59
+25.49
+6.3.7 Number of Spawned Points per Voxel. As described in Sec. 5.2
+we spawn up to 𝑝𝑚𝑎𝑥 points per voxel in the error volume. In Tab. 7,
+the resulting point cloud and the rendering loss is evaluated. We
+found that 𝑝𝑚𝑎𝑥 = 10 works well in most cases and keeps total
+point numbers similar to initial COLMAP reconstructions. Thus we
+use this for all experiments. We note however that for difficult cases
+where COLMAP fails considerably, a high 𝑝𝑚𝑎𝑥 can improve quality
+significantly (e.g. in the cherry tree scene, Fig. 1).
+6.3.8 Environment Map. As described, we use four layered pointbased spheres for our environment map. When compared with
+different common environment map strategies (see Tab. 8), ours
+(four point-based spheres) performs best when compared to one
+point-based sphere or to texture-based environment maps with
+one [Rückert et al. 2022] or four layers [Yu et al. 2021a]. In contrast to
+textured maps, our method tends to be less susceptible to overfitting
+on training view, which in turn improves VET as the error images
+are more meaningful.
+Fig. 6. Ablation study on point cleaning. (Top) 1M random points have been
+added to the Playground scene (left) and progressively cleaned (right). On
+the Opera scene (bottom), COLMAP has placed points originating from the
+water incorrectly on land (left), which our pipeline can fix (right).
+6.3.5 Point Opacity Bias. In Sec. 4.3, we introduced the opacity
+bias for the points. As seen in Tab. 5, as long as the bias is not
+chosen extremely strong, low rendering loss is maintained while
+the amount of points is efficiently lowered. We choose 10 −7 for our
+experiments, however we note that 10 −6 reduces the point cloud
+efficiently while still providing sensible, if slightly worse results.
+6.4
+Point Spawning Accuracy
+While our method does not explicitly try to increase geometric
+accuracy of the input model (but tries to minimize visual loss for
+novel view synthesis), we evaluate this accuracy on two training
+scenes of the popular Tanks&Temples benchmark with their F-score
+based metric [Knapitsch et al. 2017]. As seen in Fig. 7, the point cloud
+is improved by almost 10% compared to COLMAP if the initial dense
+reconstruction is not cleaned (ours-full), thus only VET-spawned
+6.3.6 Point Cleaning Confidence Threshold. In every cleaning step,
+points with confidence below the threshold are removed. As described in Tab. 6, thresholds up to 0.9 still provide reasonable results
+and reduce point cloud size significantly. However, we use 0.3 for
+our experiments as it causes point clouds to be similarly sized as
+the initial COLMAP reconstruction.
+7
+Linus Franke, Darius Rückert, Laura Fink, Matthias Innmann, and Marc Stamminger
+Method
+COLMAP
+Ours
+Ours-full
+Prec. ↑
+0.521
+0.507
+0.512
+Meetingroom
+Rec. ↑ F-score ↑
+0.247
+0.335
+0.253
+0.338
+0.283
+0.365
+Initial Point Cloud
+Prec. ↑
+0.633
+0.631
+0.624
+Barn
+Rec. ↑ F-score ↑
+0.553
+0.591
+0.555
+0.591
+0.679
+0.651
+Refined Point Cloud
+0.335
+0.365
+0.591
+0.651
+Table 9. Comparison with Point-NeRF [Xu et al. 2022] and SNP [Zuo and
+Deng 2022] on their cropped Tanks&Temples dataset.
+Rendering
+Method
+Point-NeRF
+SNP
+Ours
+LPIPS ↓
+0.120
+0.109
+0.024
+Barn (Fig. 9)
+PSNR ↑ SSIM ↑
+29.15
+0.937
+29.80
+0.915
+29.66
+0.939
+Point-NeRF
+Avg. Tanks&Temples
+LPIPS ↓ PSNR ↑ SSIM ↑
+0.080
+29.61
+0.954
+0.079
+29.78
+0.942
+0.026
+29.54
+0.950
+SNP
+Ours
+Fig. 9. Different point spawning novel synthesis methods. Both PointNeRF [Xu et al. 2022] and View Synthesis with Sculpted Neural Points
+(SNP) [Zuo and Deng 2022] use different point spawning strategies with
+growing and error projection. Both however fail to reconstruct fine details,
+as with the leaves of the tree.
+Fig. 7. Geometric accuracy, measured with the F-score metric [Knapitsch
+et al. 2017]. Our approach as described (Ours) provides similar results in
+geometry accuracy as COLMAP, while our approach without cleaning the
+initial point cloud (Ours-full) improves scores by about 10%.
+Point Growing
+VET
+7M Points
+COLMAP Sparse Point Cloud
+4M Points
+Sparse Point Cloud + VET
+Fig. 10. Point cloud of the Cherry Tree enhanced with a point growing
+strategy (left) and our VET (right).
+Neural Rendering
+Neural Rendering
+6.6
+Fig. 8. Starting with COLMAPs sparse reconstruction in our pipeline. Neural rendering without VET (left) converges to LPIPS values of 0.596, with
+VET (right) this improves to 0.341.
+points are potentially removed. Otherwise, with our normal pipeline,
+scores are very similar as geometrically accurate points are spawned,
+but initial correctly placed points might be cleaned if they are not
+important for visual results of our neural renderer.
+6.5
+Comparison to Different Spawning Strategies
+6.6.1 PointNeRF and SNP. In Fig. 9, we compare to two other novel
+view synthesis methods using point cloud augmentations on their
+cropped version of the Tanks&Temples Barn with PointNeRF’s
+train/eval split. PointNeRF [Xu et al. 2022] spawns points via growing and SNP [Zuo and Deng 2022] samples error map regions continuously in space. Both however fail to reconstruct small details
+such as the leaves. This is also reflected in the quantitative measurements in Tab. 9, where PSNR and SSIM scores are similar, while we
+ourperform both in LPIPS scores.
+6.6.2 Point Growing in our Framework. This result matches with
+our observations. A point growing strategy implemented in our
+pipeline instead of VET has the same difficulties while increasing
+point cloud sizes significantly compared to VET, as seen in Fig. 10.
+Furthermore unprojecting pixel errors and summing them into voxels (similar to SNP’s strategy) causes point spawns being scattered
+over larger regions. Solving this either requires thresholding which
+causes details to be missed or requires to use aggressive point cleaning impacting quality. VET however avoids all these problems.
+Sparse Colmap Reconstruction as Input
+We can also skip COLMAP’s dense reconstruction and directly
+work with the sparse reconstruction (similar to Gaussian splatting’s
+pipeline [Kerbl et al. 2023]), thus starting with a point cloud of only
+130K points. In this setup, we augment our pipeline with an additional spawning step after 75 epochs, as this low amount of points
+reaches convergence sooner. As seen in Fig. 8, the resulting point
+cloud and neural rendering provides overall good results.
+8
+VET: Visual Error Tomography for Point Cloud Completion and High-Quality Neural Rendering
+Our Rendering
+Reference
+ACKNOWLEDGMENTS
+The authors thank the anonymous reviewers for their valuable feedback and Lukas Meyer for the Cherry Tree scene. Additionally, we
+thank Stefan Romberg, Michael Gerstmayr and Tim Habigt for the
+fruitful discussions as well as NavVis GmbH for providing datasets
+for testing.
+Linus Franke was supported by the Bayerische Forschungsstiftung (Bavarian Research Foundation) AZ-1422-20. The authors
+gratefully acknowledge the scientific support and HPC resources
+provided by the Erlangen National High Performance Computing Center (NHR@FAU) of the Friedrich-Alexander-Universität
+Erlangen-Nürnberg (FAU) under the NHR project b162dc. NHR funding is provided by federal and Bavarian state authorities. NHR@FAU
+hardware is partially funded by the German Research Foundation
+(DFG) – 440719683.
+Fig. 11. Reflecting Spheres. Our approach can approximate reflections
+after point cloud cleaning.
+6.7
+REFERENCES
+Kara-Ali Aliev, Artem Sevastopolsky, Maria Kolos, Dmitry Ulyanov, and Victor Lempitsky. 2020. Neural point-based graphics. In European Conference on Computer Vision.
+Springer, 696–712.
+Jonathan T. Barron, Ben Mildenhall, Matthew Tancik, Peter Hedman, Ricardo MartinBrualla, and Pratul P. Srinivasan. 2021. Mip-NeRF: A Multiscale Representation for
+Anti-Aliasing Neural Radiance Fields. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision (ICCV). 5855–5864.
+Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter Hedman.
+2022. Mip-nerf 360: Unbounded anti-aliased neural radiance fields. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition. 5470–5479.
+Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter Hedman.
+2023. Zip-NeRF: Anti-Aliased Grid-Based Neural Radiance Fields. arXiv preprint
+arXiv:2304.06706 (2023).
+Kenneth E Batcher. 1968. Sorting networks and their applications. In Proceedings of the
+April 30–May 2, 1968, spring joint computer conference. 307–314.
+T.M. Buzug. 2008. Computed Tomography: From Photon Statistics to Modern Cone-Beam
+CT. Springer. https://books.google.de/books?id=HBfvngEACAAJ
+Gaurav Chaurasia, Sylvain Duchene, Olga Sorkine-Hornung, and George Drettakis.
+2013. Depth synthesis and local warps for plausible image-based navigation. ACM
+Transactions on Graphics (TOG) 32, 3 (2013), 1–12.
+Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su. 2022. TensoRF: Tensorial Radiance Fields. In Computer Vision – ECCV 2022, Shai Avidan, Gabriel Brostow,
+Moustapha Cissé, Giovanni Maria Farinella, and Tal Hassner (Eds.). Springer Nature
+Switzerland, Cham, 333–350.
+Sungjoon Choi, Qian-Yi Zhou, Stephen Miller, and Vladlen Koltun. 2016. A Large
+Dataset of Object Scans. arXiv:1602.02481 (2016).
+Paul Debevec, Yizhou Yu, and George Boshokov. 1998. Efficient view-dependent IBR
+with projective texture-mapping. In EG Rendering Workshop, Vol. 4.
+Laura Fink, Sing Chun Lee, Jie Ying Wu, Xingtong Liu, Tianyu Song, Yordanka Velikova,
+Marc Stamminger, Nassir Navab, and Mathias Unberath. 2019. Lumipath–towards
+real-time physically-based rendering on embedded devices. In Medical Image Computing and Computer Assisted Intervention–MICCAI 2019: 22nd International Conference, Shenzhen, China, October 13–17, 2019, Proceedings, Part V 22. Springer, 673–681.
+John Flynn, Ivan Neulander, James Philbin, and Noah Snavely. 2016. DeepStereo:
+Learning to Predict New Views from the World’s Imagery. In Proceedings of the IEEE
+conference on computer vision and pattern recognition. 5515–5524.
+Linus Franke, Nikolai Hofmann, Marc Stamminger, and Kai Selgrad. 2018. Multi-layer
+depth of field rendering with tiled splatting. Proceedings of the ACM on Computer
+Graphics and Interactive Techniques 1, 1 (2018), 1–17.
+Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht, and
+Angjoo Kanazawa. 2022. Plenoxels: Radiance Fields without Neural Networks.
+In 2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR).
+5491–5500. https://doi.org/10.1109/CVPR52688.2022.00542
+Yasutaka Furukawa, Brian Curless, Steven M Seitz, and Richard Szeliski. 2010. Towards
+internet-scale multi-view stereo. In 2010 IEEE computer society conference on computer
+vision and pattern recognition. IEEE, 1434–1441.
+Yaroslav Ganin, Daniil Kononenko, Diana Sungatullina, and Victor Lempitsky. 2016.
+DeepWarp: Photorealistic Image Resynthesis for Gaze Manipulation. In European
+conference on computer vision. Springer, 311–326.
+Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis, and
+Gabriel Brostow. 2018. Deep blending for free-viewpoint image-based rendering.
+ACM Transactions on Graphics (TOG) 37, 6 (2018), 1–15.
+View Dependent Effects
+While not explicitly modeled in our approach, our blending renderer
+can handle view dependencies relatively well (as seen in Fig. 11)
+by optimizing reflections into multiple point layers. Note however,
+that very good angular coverage during training is necessary and
+explicitly modeled approaches such as Kopanas et al. [2022] may be
+preferable in this use case.
+7
+LIMITATIONS
+We have encountered a few limitations, inherited from the one-pixel
+point rendering [Aliev et al. 2020], which is efficient but produces
+artifacts in rare cases. When the camera gets too close to a surface,
+the neural rendering network is not able to close the holes between
+the points and thus the surface behind the wall becomes visible.
+Furthermore, we have observed some temporal instabilities when
+the camera is moved through the scene slowly, which is a side effect
+of the discrete one-pixel point rendering because points can only
+discretely move from one pixel to the next.
+8
+CONCLUSION
+To conclude this paper, we have proposed a point-based neural rendering pipeline that is able to render photo-realistic novel views and
+can simultaneously refine and complete the input point cloud. Point
+spawning is implemented using our novel VET technique, which
+uses the visual error maps to identify and populate undersampled
+regions of the scene. Outlier points are removed automatically by
+thresholding their opacity value, which is optimized during the training stage. We have shown in several experiments that our pipeline
+produces high-quality point clouds, and outperforms current stateof-the-art neural rendering approaches in quality. The source code
+is available at:
+https://github.com/lfranke/VET
+9
+Linus Franke, Darius Rückert, Laura Fink, Matthias Innmann, and Marc Stamminger
+Vision. Springer, 1–17.
+Pratul P Srinivasan, Richard Tucker, Jonathan T Barron, Ravi Ramamoorthi, Ren Ng, and
+Noah Snavely. 2019. Pushing the Boundaries of View Extrapolation With Multiplane
+Images. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. 175–184.
+Ayush Tewari, Justus Thies, Ben Mildenhall, Pratul Srinivasan, Edgar Tretschk, W Yifan,
+Christoph Lassner, Vincent Sitzmann, Ricardo Martin-Brualla, Stephen Lombardi,
+et al. 2022. Advances in neural rendering. In Computer Graphics Forum, Vol. 41.
+Wiley Online Library, 703–735.
+Justus Thies, Michael Zollhöfer, and Matthias Nießner. 2019. Deferred Neural Rendering:
+Image Synthesis using Neural Textures. ACM Transactions on Graphics (TOG) 38, 4
+(2019), 1–12.
+Richard Tucker and Noah Snavely. 2020. Single-View View Synthesis With Multiplane
+Images. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. 551–560.
+Haithem Turki, Deva Ramanan, and Mahadev Satyanarayanan. 2022. Mega-NeRF:
+Scalable Construction of Large-Scale NeRFs for Virtual Fly-Throughs. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. 12922–12931.
+Olivia Wiles, Georgia Gkioxari, Richard Szeliski, and Justin Johnson. 2020. SynSin:
+End-to-end View Synthesis from a Single Image. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition. 7467–7477.
+Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin Shu, Kalyan Sunkavalli, and
+Ulrich Neumann. 2022. Point-nerf: Point-based neural radiance fields. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. 5438–5448.
+Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and Angjoo Kanazawa. 2021a.
+Plenoctrees for real-time rendering of neural radiance fields. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision. 5752–5761.
+Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa. 2021b. pixelnerf: Neural
+radiance fields from one or few images. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition. 4578–4587.
+Kai Zhang, Gernot Riegler, Noah Snavely, and Vladlen Koltun. 2020. Nerf++: Analyzing
+and improving neural radiance fields. arXiv preprint arXiv:2010.07492 (2020).
+Qiang Zhang, Seung-Hwan Baek, Szymon Rusinkiewicz, and Felix Heide. 2022. Differentiable point-based radiance fields for efficient view synthesis. arXiv preprint
+arXiv:2205.14330 (2022).
+Tinghui Zhou, Richard Tucker, John Flynn, Graham Fyffe, and Noah Snavely. 2018.
+Stereo Magnification: Learning View Synthesis Using Multiplane Images. ACM
+Transactions on Graphics (TOG) 37, 4 (2018), 1–12.
+Tinghui Zhou, Shubham Tulsiani, Weilun Sun, Jitendra Malik, and Alexei A Efros. 2016.
+View Synthesis by Appearance Flow. In European conference on computer vision.
+Springer, 286–301.
+Yiming Zuo and Jia Deng. 2022. View Synthesis with Sculpted Neural Points. arXiv
+preprint arXiv:2205.05869 (2022).
+Benjamin Keinert, Matthias Innmann, Michael Sänger, and Marc Stamminger. 2015.
+Spherical fibonacci mapping. ACM Transactions on Graphics (TOG) 34, 6 (2015), 1–7.
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 2023.
+3D Gaussian Splatting for Real-Time Radiance Field Rendering. ACM Transactions
+on Graphics 42, 4 (2023).
+Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. 2017. Tanks and
+Temples: Benchmarking Large-Scale Scene Reconstruction. ACM Transactions on
+Graphics 36, 4 (2017).
+Georgios Kopanas, Thomas Leimkühler, Gilles Rainer, Clément Jambon, and George
+Drettakis. 2022. Neural point catacaustics for novel-view synthesis of reflections.
+ACM Transactions on Graphics (TOG) 41, 6 (2022), 1–15.
+Georgios Kopanas, Julien Philip, Thomas Leimkühler, and George Drettakis. 2021.
+Point-Based Neural Rendering with Per-View Optimization. Computer Graphics
+Forum (Proceedings of the Eurographics Symposium on Rendering) 40, 4 (June 2021).
+http://www-sop.inria.fr/reves/Basilic/2021/KPLD21
+Christoph Lassner and Michael Zollhöfer. 2021. Pulsar: Efficient Sphere-Based Neural
+Rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR). 1440–1449.
+Chongshan Lu, Fukun Yin, Xin Chen, Tao Chen, Gang Yu, and Jiayuan Fan. 2023. A
+Large-Scale Outdoor Multi-modal Dataset and Benchmark for Novel View Synthesis
+and Implicit Scene Reconstruction. arXiv preprint arXiv:2301.06782 (2023).
+Ricardo Martin-Brualla, Noha Radwan, Mehdi SM Sajjadi, Jonathan T Barron, Alexey
+Dosovitskiy, and Daniel Duckworth. 2021. NeRF in the Wild: Neural Radiance Fields
+for Unconstrained Photo Collections. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition. 7210–7219.
+Moustafa Meshry, Dan B Goldman, Sameh Khamis, Hugues Hoppe, Rohit Pandey,
+Noah Snavely, and Ricardo Martin-Brualla. 2019. Neural rerendering in the wild. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition.
+6878–6887.
+Ben Mildenhall, Pratul P Srinivasan, Rodrigo Ortiz-Cayon, Nima Khademi Kalantari,
+Ravi Ramamoorthi, Ren Ng, and Abhishek Kar. 2019. Local Light Field Fusion:
+Practical View Synthesis With Prescriptive Sampling Guidelines. ACM Transactions
+on Graphics (TOG) 38, 4 (2019), 1–14.
+Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. 2021. Nerf: Representing scenes as neural radiance fields
+for view synthesis. Commun. ACM 65, 1 (2021), 99–106.
+Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. 2022. Instant
+neural graphics primitives with a multiresolution hash encoding. arXiv preprint
+arXiv:2201.05989 (2022).
+Francesco Pittaluga, Sanjeev J. Koppal, Sing Bing Kang, and Sudipta N. Sinha. 2019. Revealing Scenes by Inverting Structure From Motion Reconstructions. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR).
+Florent Poux, C Mattes, Z Selman, and L Kobbelt. 2022. Automatic region-growing
+system for the segmentation of large point clouds. Automation in Construction 138
+(2022), 104250.
+Ruslan Rakhimov, Andrei-Timotei Ardelean, Victor Lempitsky, and Evgeny Burnaev.
+2022. NPBG++: Accelerating Neural Point-Based Graphics. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition. 15969–15979.
+Christian Reiser, Songyou Peng, Yiyi Liao, and Andreas Geiger. 2021. Kilonerf: Speeding
+up neural radiance fields with thousands of tiny mlps. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision. 14335–14345.
+Gernot Riegler and Vladlen Koltun. 2020. Free View Synthesis. In European Conference
+on Computer Vision. Springer, 623–640.
+Gernot Riegler and Vladlen Koltun. 2021. Stable view synthesis. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition. 12216–12225.
+Darius Rückert, Linus Franke, and Marc Stamminger. 2022. Adop: Approximate differentiable one-pixel point rendering. ACM Transactions on Graphics (TOG) 41, 4
+(2022), 1–14.
+Darius Rückert, Yuanhao Wang, Rui Li, Ramzi Idoughi, and Wolfgang Heidrich. 2022.
+NeAT: Neural Adaptive Tomography. ACM Trans. Graph. 41, 4, Article 55 (jul 2022),
+13 pages. https://doi.org/10.1145/3528223.3530121
+Johannes L Schönberger and Jan-Michael Frahm. 2016. Structure-from-motion revisited.
+In Proceedings of the IEEE conference on computer vision and pattern recognition. 4104–
+4113.
+Johannes Lutz Schönberger, Enliang Zheng, Marc Pollefeys, and Jan-Michael Frahm.
+2016. Pixelwise View Selection for Unstructured Multi-View Stereo. In European
+Conference on Computer Vision (ECCV).
+Markus Schütz, Bernhard Kerbl, and Michael Wimmer. 2022. Software Rasterization of
+2 Billion Points in Real Time. arXiv preprint arXiv:2204.01287 (2022).
+Kai Selgrad, Carsten Dachsbacher, Quirin Meyer, and Marc Stamminger. 2015. Filtering
+multi-layer shadow maps for accurate soft shadows. In Computer Graphics Forum,
+Vol. 34. Wiley Online Library, 205–215.
+Harry Shum and Sing Bing Kang. 2000. Review of image-based rendering techniques.
+In Visual Communications and Image Processing 2000, Vol. 4067. SPIE, 2–13.
+Zhenbo Song, Wayne Chen, Dylan Campbell, and Hongdong Li. 2020. Deep Novel
+View Synthesis from Colored 3D Point Clouds. In European Conference on Computer
+10
+VET: Visual Error Tomography for Point Cloud Completion and High-Quality Neural Rendering
+InstantNGP
+Mip-NeRF 360
+ADOP
+Ours
+0.291 / 25.14 / 0.663
+0.207 / 26.16 / 0.739
+0.162 / 23.82 / 0.687
+0.146 / 23.59 / 0.660
+0.374 / 22.64 / 0.545
+0.303 / 23.66 / 0.646
+0.183 / 21.85 / 0.610
+0.152 / 22.14 / 0.647
+0.146 / 28.99 / 0.856
+0.119 / 29.22 / 0.881
+0.144 / 22.90 / 0.761
+0.131 / 23.83 / 0.786
+0.482 / 18.40 / 0.403
+0.247 / 25.86 / 0.716
+0.221 / 23.65 / 0.642
+0.189 / 24.10 / 0.676
+Fig. 12. Comparison on the MipNeRF-360 scenes with the average LPIPS ↓ / PSNR↑ / SSIM↑ scores denoted.
+11
+Ground Truth

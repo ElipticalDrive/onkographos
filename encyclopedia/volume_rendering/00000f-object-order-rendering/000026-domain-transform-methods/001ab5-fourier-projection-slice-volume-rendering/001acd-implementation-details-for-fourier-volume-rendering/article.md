@@ -1,0 +1,151 @@
+# Implementation Details for Fourier Volume Rendering
+
+Also called: Fourier Volume Rendering Implementation, Fourier Volume Rendering with Zero Padding and Tricubic Interpolation, Implementation Details for Fourier Projection-Slice Volume Rendering
+
+## Overview
+This article details the specific algorithmic steps, data structures, and parameter choices required to implement the Fourier Projection-Slice Volume Rendering method [Parent](824-fourier-projection-slice-volume-rendering.md) [S1]. It solves the problem of efficiently generating attenuation-only images (X-ray-like projections) and shaded volume renderings by exploiting the Fourier projection-slice theorem [S1]. What sets this implementation apart from standard digital compositing is the use of frequency-domain slicing and inverse transformation, reducing the per-view complexity from $O(N^3)$ to $O(N^2 \log N)$ [S1].
+
+## How it works
+
+### Inputs and Outputs
+*   **Input:** A 3D voxel volume $V$ of size $N \times N \times N$ (typically $128^3$) [S1].
+*   **Output:** A 2D image $I$ of size $128 \times 128$ [S1].
+
+### Data Structures
+1.  **Preprocessed Volume ($V_{pad}$):** A 3D array of size $N_{pad} \times N_{pad} \times N_{pad}$, where $N_{pad} = \lceil 1.16 N \rceil$ [S1]. The original data occupies the center, surrounded by a 16% zero-margin [S1].
+2.  **3D Spectrum ($\hat{V}$):** The result of the 3D FFT of $V_{pad}$ [S1].
+3.  **Slices:** 2D arrays extracted from $\hat{V}$ corresponding to specific viewing angles [S1].
+
+### Preprocessing Steps
+1.  **Edge Enhancement:** Apply an edge sharpening operator to the input volume $V$ [S1].
+2.  **Nonlinear Windowing:** Apply a nonlinear density range windowing operator to the edge-enhanced data [S1]. This step may be skipped for specific attenuation-only visualizations (e.g., X-ray projections) [S1].
+3.  **Zero Padding:** Surround the processed volume with a margin of zeros equal to 16% of the volume width [S1]. The padded dimension is $N_{pad} = \lceil 1.16 N \rceil$ [S1]. This margin prevents "ghosting" artifacts caused by spectral leakage [S1].
+
+### Precomputation
+1.  **Weighting:** Apply the desired shading or attenuation weighting function $W$ to the preprocessed volume $V_{pad}$ to create a weighted volume $V_w$ [S1].
+2.  **3D FFT:** Compute the 3D Fast Fourier Transform of $V_w$ to obtain the spectrum $\hat{V}$ [S1].
+    *   $\hat{V} = \text{FFT3D}(V_w)$
+
+### Per-View Rendering
+For each viewing direction defined by a normal vector $\mathbf{n}$:
+
+1.  **Slice Extraction:** Extract a 2D slice from the 3D spectrum $\hat{V}$ that corresponds to the projection plane orthogonal to $\mathbf{n}$ [S1]. The slice width equals the spectral width of the volume [S1]. Use a **tricubic interpolating spline** to extract the slice values from the discrete 3D spectrum grid [S1].
+2.  **2D Inverse FFT:** Compute the 2D Inverse Fast Fourier Transform of the extracted slice to obtain a 2D projection in the spatial domain [S1].
+    *   $P = \text{IFFT2D}(\text{Slice}(\hat{V}, \mathbf{n}))$
+3.  **Weighting:** Apply viewing or lighting direction weights to the projection $P$ [S1].
+4.  **Summation:** Sum the weighted projections from all necessary angles (or a single projection for attenuation-only) to produce the final $128 \times 128$ image $I$ [S1].
+    *   $I = \sum P_i$
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def edge_enhance(volume):
+    # [G] Standard edge enhancement applies a spatial filter (e.g., Laplacian)
+    # The exact operator is not specified in the sources.
+    return volume  # Placeholder for spatial convolution [G]
+
+def nonlinear_window(volume, alpha=2.0):
+    # [G] Nonlinear windowing remaps intensity (e.g., power law or sigmoid)
+    # The exact function is not specified in the sources.
+    return np.power(volume, alpha)  # Placeholder for intensity remapping [G]
+
+def apply_weighting(volume, weights):
+    # [G] Weights depend on the shading model (attenuation, diffuse, etc.)
+    return volume * weights
+
+def get_slice_coordinates(view_direction, N_pad):
+    # [G] Maps view_direction to 2D plane coordinates in the frequency grid.
+    # Standard approach computes orthonormal basis vectors u, v orthogonal to view_direction.
+    # The exact geometric mapping is not detailed in the sources.
+    return np.zeros((N_pad, N_pad))  # Placeholder for coordinate mapping [G]
+
+def tricubic_interpolate(spectrum, coords):
+    # [G] Standard tricubic spline interpolation samples the 3D spectrum at coords.
+    # The exact implementation is not detailed in the sources.
+    return np.zeros_like(coords)  # Placeholder for spline interpolation [G]
+
+def apply_view_weights(projection, view_direction):
+    # [G] Applies lighting/attenuation weights based on view direction.
+    # Model-specific weighting is not detailed in the sources.
+    return projection * 0.5  # Placeholder for directional weighting [G]
+
+def fourier_volume_rendering(V, views, weights_3d, image_size=128):
+    N = V.shape[0]
+    margin = int(0.16 * N)
+    N_pad = N + 2 * margin
+    
+    # Initialize padded volume with zeros
+    V_pad = np.zeros((N_pad, N_pad, N_pad), dtype=V.dtype)
+    
+    # Place original data in the center
+    start, end = margin, N + margin
+    V_pad[start:end, start:end, start:end] = V
+    
+    # Preprocessing
+    V_pad = edge_enhance(V_pad)
+    V_pad = nonlinear_window(V_pad)
+    
+    # Precomputation
+    V_weighted = apply_weighting(V_pad, weights_3d)
+    spectrum = np.fft.fftn(V_weighted)
+    
+    # Per-View Rendering
+    final_image = np.zeros((image_size, image_size))
+    for view in views:
+        coords = get_slice_coordinates(view, N_pad)
+        slice_2d = tricubic_interpolate(spectrum, coords)
+        projection = np.fft.ifftn(slice_2d)
+        projection = apply_view_weights(projection, view)
+        final_image += np.real(projection)
+        
+    return final_image
+```
+
+### Parameters
+*   **Zero Padding Margin:** 16% of the volume width [S1].
+*   **Interpolation Method:** Tricubic interpolating spline [S1].
+*   **Input Volume Size:** Typically $128^3$ voxels [S1].
+*   **Output Image Size:** Typically $128 \times 128$ pixels [S1].
+
+### Pitfalls
+*   **Ghosting:** Failing to add the 16% zero-padding margin results in ghosting artifacts due to spectral leakage [S1].
+*   **Interactive Segmentation:** Preprocessing steps (edge sharpening, nonlinear windowing) are applied *before* the 3D FFT [S1]. Changing these operators requires recomputing the entire 3D spectrum, which hinders interactive data segmentation [S1].
+    *   *Mitigation:* If segmentation is linear, it can be handled by precomputing spectra for basis materials (e.g., fat, muscle, bone) and weighting them at image generation time [S1].
+
+## Subtopics
+
+### [Adaptive Frequency Domain Filtering](968-adaptive-frequency-domain-filtering.md)
+An optimization technique for frequency domain volume rendering that selects between a large and a small interpolation filter based on the local spectral energy of the 3D spectrum, reducing interpolation cost while maintaining image quality.
+
+### Pre-FFT Edge Sharpening and Nonlinear Windowing
+This variant highlights the preprocessing stage where edge sharpening and nonlinear density range windowing operators are applied directly to the input volume data before computing the forward 3D Fourier transform [S1]. The key pitfall is that modifying these operators requires recomputing the entire 3D Fourier spectra, which hinders interactive data segmentation if hardwired into the preprocessing pipeline [S1].
+
+## Operating characteristics
+
+*   **Time Complexity:** $O(N^2 \log N)$ per view, avoiding the $O(N^3)$ cost of digital compositing [S1].
+*   **Memory Complexity:** Varies by shading model. 48 MB for simple attenuation models (equation 3.1.4) to 256 MB for complex shading models (equation 3.3.2) for a $128^3$ volume [S1].
+*   **Performance:** On a 36 MHz Silicon Graphics 4D/320 VGX with a sequential C implementation:
+    *   Simple model: ~6 seconds per view (~1.5 seconds per slice) [S1].
+    *   Complex model: >1 minute per view (due to paging) [S1].
+*   **Optimizations:**
+    *   Replacing FFT with Fast Hartley Transform (FHT) halves per-view rendering time and memory requirements [S1].
+    *   Optimizing the filter and trimming zero padding can provide another factor of two speedup [S1].
+    *   Parallelization is possible at fine grain (within FFT) or coarse grain (between slices) [S1].
+    *   Hardware acceleration using video coprocessors or DSPs is amenable, especially with fixed-point frequency spectra [S1].
+*   **Strengths:** Asymptotically faster than conventional volume rendering for very large volumes [S2].
+*   **Limitations:** High constant factor makes it slower than conventional methods for small volumes [S2]. Preprocessing changes require full spectrum recomputation [S1].
+
+## Background
+
+*   **Origin:** The method is based on the Fourier Projection-Slice Theorem, as described by Marc Levoy in "Volume Rendering using the Fourier Projection-Slice Theorem" [S1].
+*   **History:** The implementation was tested on early 1990s hardware (Silicon Graphics 4D/320 VGX) [S1]. The approach was developed to address the high computational cost of traditional volume rendering [S1].
+*   **Usage:** Used for generating attenuation-only projections (X-rays) and shaded volume renderings [S1].
+
+## Sources
+
+[S1] PDF Volume Rendering using the Fourier Projection-Slice Theorem, https://graphics.stanford.edu/papers/fourier/fourier.pdf, fetched 2026-10-27
+[S2] Fourier Projection-Slice Theorem in Volume Rendering, https://www.scribd.com/document/796298963/Marc-Levoy-Volume-rendering-using-the-Fourier-projection-slice-theorem, fetched 2026-10-27 (unofficial)

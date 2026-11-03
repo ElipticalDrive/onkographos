@@ -1,0 +1,3723 @@
+# cuVRender: A CUDA-Accelerated Volume Rendering Engine
+The architecture is designed with a clear separation between **data management** and **computational solving**, enabling modularity, scalability, and easier maintenance.
+
+---
+
+## Demo Results
+
+The current headless demo path can render the Miranda scientific volume from VTI data, Vol2Splat transfer functions, and camera trajectories.
+
+| Miranda TF1 / Frame 0 | Miranda TF1 / Frame 0, Shaded |
+| --- | --- |
+| ![Miranda TF1 Frame 0](results/miranda-tf1-frame0.png) | ![Miranda TF1 Frame 0 Shaded](results/miranda-tf1-frame0-shaded.png) |
+
+| Miranda TF1 / Frame 1 | Script Smoke Render |
+| --- | --- |
+| ![Miranda TF1 Frame 1](results/miranda-tf1-frame1-256.png) | ![Miranda Script Smoke Render](results/miranda-script-smoke.png) |
+
+Reproduce the Miranda demo render with:
+
+```bash
+scripts/render_miranda_demo.sh
+```
+
+You can switch transfer functions and frames without editing code:
+
+```bash
+TF_INDEX=3 FRAME=12 WIDTH=512 HEIGHT=512 scripts/render_miranda_demo.sh
+```
+
+---
+
+## 1. Core Module
+Handles fundamental raymarching-based volume rendering pipeline.
+The **scene** module is responsible for storing and managing all data required for rendering:
+
+| Component           | Responsibility                                                         |
+| ------------------- | ---------------------------------------------------------------------- |
+| `camera`            | Constructs view rays and controls projection/perspective               |
+| `transfer_function` | Handles vector/matrix operations, color mapping, and utility functions |
+| `light`             | Stores and manages lighting parameters for shading models              |
+| `volume`            | Represents volumetric datasets and provides sampling access            |
+
+This separation ensures that scene configuration and dataset preparation are isolated from the rendering computation.
+
+The **solver** module is responsible for executing the rendering process on the GPU:
+
+| Component       | Responsibility                                                          |
+| --------------- | ----------------------------------------------------------------------- |
+| `volume_kernel` | CUDA kernels for volume data sampling, interpolation, and preprocessing |
+| `render_kernel` | CUDA kernels for raymarching and image synthesis based on scene data    |
+
+The solver consumes data from the **scene** and produces the final rendered image.
+
+---
+
+## 2. Host/Device Mirror Design
+
+| 组件   | Host 类型（示例）          | Device 镜像         | 说明                                                 |
+| ---- | -------------------- | ----------------- | -------------------------------------------------- |
+| 相机   | `Camera`             | `DeviceCamera`    | 视线/基向量、位置、垂直视场；提供 `generateRay` 设备侧方法。             |
+| 体数据  | `Volume`             | `DeviceVolume`    | 维度、体素尺寸、原点、值域、密度缩放；字段/梯度绑定为 `cudaTextureObject_t`。 |
+| 传递函数 | `TransferFunction`   | `DeviceTF`        | 1D TF 纹理与域；设备侧 `sample(value)` 返回 `float4`（rgba）。  |
+| 光源   | `std::vector<Light>` | `DeviceLight*`    | 位置/颜色/强度/类型；Scene 负责分配与拷贝到设备端数组。                   |
+| 渲染参数 | `Config`/Scene 字段    | 同步到 `DeviceScene` | 步长、透明度缩放、等值面阈值、模式、裁剪盒等。                            |
+
+### Example: Host and Device Mirror Design
+
+**Host-side: `Volume`**
+```cpp
+class Volume {
+public:
+    struct Description {
+        int3 dim;
+        float3 origin;
+        float3 voxelSize;
+        float2 valueRange;
+        float densityScale;
+    };
+
+    Volume(const Description &desc, const float *hostScalar);
+    ~Volume();
+
+    const Description &getDesc() const;
+    cudaTextureObject_t getFieldTex() const;
+    cudaTextureObject_t getGradTex() const;
+
+    void uploadGradient(const float3 *hostGrad);
+    DeviceVolume toDevice() const;
+
+private:
+    Description m_desc;
+    cudaArray_t m_arrayField = nullptr;
+    cudaTextureObject_t m_fieldTex = 0;
+
+    cudaArray_t m_arrayGrad = nullptr;
+    cudaTextureObject_t m_gradTex = 0;
+};
+```
+
+**Device-side: DeviceVolume**
+The device-side structs are stripped-down representations of host objects, containing only the essential data for kernel execution.
+```cpp
+struct DeviceVolume {
+    cudaTextureObject_t field_tex = 0;
+    cudaTextureObject_t grad_tex = 0;
+
+    int3 dim{0, 0, 0};
+    float3 voxel_size{1.f, 1.f, 1.f};
+    float3 origin{0.f, 0.f, 0.f};
+    float2 value_range{0.f, 1.f};
+    float density_scale{1.f};
+};
+```
+
+# Development Roadmap
+
+| Phase   | Modules                                      | Objectives                                |
+|---------|----------------------------------------------|-------------------------------------------|
+| 🟢 1     | `camera`+`volume_renderer`+`film`+`utils`   | Minimal working CUDA renderer → PNG       |
+| 🟡 2     | `config`+`res_manager`                       | Configurable parameters + data swapping   |
+| 🟠 3     | `interpolator`+`ray`+`light`                 | Improved sampling + lighting              |
+| 🔵 4     | `classifier`, `gui`, `bbox`                  | TF GUI + bounding box optimization        |
+| 🟣 5     | `main_scene`, `implicit_geom`               | Scene management + implicit shapes       |
+
+## Core principles
+
+1. **Two-worlds, one contract**
+   Treat **Host** and **Device** as two separate worlds with a **formal contract** between them. Host owns loading, lifetime, and metadata; Device sees a compact, immutable **snapshot** (struct of POD + texture/surface handles) that’s cheap to pass into kernels.
+
+2. **Data‑oriented over OO**
+   Kernels want contiguous, cache-friendly, trivially-copyable data. Prefer flat POD structs (`DeviceScene`, `DeviceVolume`, `DeviceTF`, `DeviceLight[]`) and texture objects over pointer-rich graphs.
+
+3. **Immutable snapshots, explicit commits**
+   Host objects are editable. Rendering uses a frozen **DeviceScene snapshot** created by `scene.commit()`. No hidden mutations during render. This gives determinism and easy multi-threading.
+
+4. **Descriptors in, handles out**
+   Construction uses **descriptors** (dims, spacing, origin, units, ranges). Upload returns **handles** (texture objects, device pointers) managed by RAII wrappers. Avoid exposing raw arrays.
+
+5. **Clear frames & units**
+   Be explicit about spaces: **Index (i,j,k)**, **Texture (u,v,w in \[0,1])**, **World (x,y,z)**. Store `origin`, `voxelSize`, `dim`, and value units/range. Conversions must be single-line and consistent.
+
+6. **Consistency beats cleverness**
+   One pixel format (`uchar4`), one GL internal format (`GL_RGBA8`), normalized texture coords on by default, linear filtering, border/clamp addressing. Fewer knobs → fewer bugs.
+
+7. **Zero‑copy where it matters**
+   Prefer writing directly to GL texture via surface object or PBO when mature. Until then, one device-to-device blit is fine. Don’t micro-opt prematurely—design for the *option*.
+
+8. **Change tracking (dirty bits)**
+   Every host-side component sets a dirty flag on mutation. `commit()` rebuilds only what changed: TF table? only TF; camera moved? only camera; new volume? rebuild volume block.
+
+9. **Extensibility without recompiling kernels**
+   Leave versioned fields in `DeviceScene` (e.g., `mode`, `opacityScale`, optional `gradTex`), and a `caps`/`flags` bitfield so kernels can branch safely when features exist.
+
+10. **Graceful fallbacks**
+    If optional resources are missing (no gradient texture), kernels switch to finite differences. If no lights, do emission-only. No crashing because a feature wasn’t set.
+
+11. **Async everywhere**
+    Use CUDA streams for uploads and double-buffering for time steps. `commit(stream)` so big 3D copies don’t stall the render stream.
+
+12. **Observability**
+    Build in lightweight stats: GPU mem footprint, array dims, min/max value, step counts, timings. Expose a `SceneDebugInfo`—you’ll need it.
+
+13. **Testability**
+    Make CPU reference samplers for 1D/3D textures and TF mapping. Golden tests for ray-march accumulation and TF application with fixed seeds.
+
+# High-level architecture
+
+* **Host layer**
+
+  * `Volume` (RAII): owns CUDA 3D array + `cudaTextureObject_t`, metadata (dim, spacing, origin, valueRange).
+  * `TransferFunction` (RAII): 1D `float4` table → 1D texture.
+  * `Lights` (RAII): device buffer of `DeviceLight` (small).
+  * `Camera` (host math only): exposes position + orthonormal basis + fov.
+  * **Scene** (or `SceneBuilder`): references components, tracks dirty state, validates, and produces a **DeviceScene snapshot**.
+  * **ResourceManager** (optional): deduplicates identical TFs/volumes, manages lifetimes across scenes.
+
+* **Device layer**
+
+  * `DeviceScene` (POD): `DeviceCamera`, `DeviceVolume`, `DeviceTF`, pointer to `DeviceLight[]`, counts, and render params. No STL, no Eigen, no virtual, no host-only types.
+
+# Scene lifecycle
+
+1. **Build**
+
+   * Set or replace components: `scene.setVolume(vol)`, `scene.setTransferFunction(tf)`, `scene.setLights(lights)`, `scene.setCamera(&cam)`.
+   * Set params: `scene.setRenderParams(step, opacityScale, mode, iso)`; `scene.setClipBox(...)`.
+
+2. **Validate**
+   On `commit()`, check invariants:
+
+   * Volume exists if `mode` requires it.
+   * TF table count > 1, domain valid, finite.
+   * `stepSize` > 0 and relative to min(voxelSize).
+   * Basis vectors orthonormal within tolerance.
+
+3. **Pack**
+
+   * Convert host camera → `DeviceCamera` (float3 only).
+   * Write `DeviceVolume` from `Volume::Desc` + texture handle(s).
+   * Write `DeviceTF` from TF handle + domain.
+   * Attach `DeviceLight*` and count.
+   * Copy to `DeviceScene` **by value** or upload to a device buffer for pointer passing.
+
+4. **Use**
+
+   * Pass `DeviceScene` **by value** to kernels for simplicity and ABI stability.
+   * Alternatively pass a const pointer to a device-side `DeviceScene` for multi-kernel passes.
+
+# API sketch (clean and future-proof)
+
+```cpp
+// Host-side
+class Scene {
+public:
+    // Configuration
+    Scene& setCamera(const Camera* cam);
+    Scene& setVolume(std::shared_ptr<Volume> vol);
+    Scene& setTransferFunction(std::shared_ptr<TransferFunction> tf);
+    Scene& setLights(const Lights* lights);
+    Scene& setRenderParams(float step, float opacityScale, int mode, float iso = 0.f);
+    Scene& setClipBox(float3 mn, float3 mx);
+
+    // Commit: creates an immutable snapshot for kernels
+    // Optionally accepts a CUDA stream for async uploads
+    void commit(cudaStream_t stream = 0);
+
+    // Accessors for rendering
+    const DeviceScene&   snapshotHost()  const; // by-value pass
+    const DeviceScene*   snapshotDevice() const; // pointer pass (optional)
+
+    // Diagnostics
+    SceneDebugInfo debug() const;
+};
+```
+
+Key choices here:
+
+* **Builder-style setters** make composition readable.
+* **`commit()`** is explicit and boundaries are clear. You can render older snapshots while building a new one (double buffering).
+* **`snapshotHost()`** enables passing the whole struct by value to a kernel—fast and simple.
+* **`snapshotDevice()`** lets you store snapshots on GPU for multi-pass pipelines.
+
+# Memory & performance tactics
+
+* **Textures first**: 3D scalar → linear-filtered, normalized coords. TF → linear-filtered 1D `float4`. Gradient is optional 3D `float4`.
+* **Pitch and alignment**: unify pixel buffers to `uchar4`. Keep `DeviceScene` size < 4–8 KB to stay register/cache friendly when passed by value.
+* **Constant memory**: tiny, truly constant things (e.g., mode enums, small LUT sizes) can live in `__constant__`; but a single by-value struct is often good enough and simpler.
+* **Streams**: `commit(streamUpload)`; `render(streamRender)`. For time-varying data, ping-pong volumes/arrays per timestep.
+
+# Extensibility hooks
+
+* **Multi-field volumes**: make `DeviceScene` hold an array of `DeviceVolume` or a small fixed N (e.g., 2–4) and a mapping policy (`combineMode`: emission/absorption fields, bivariate TF, etc.).
+* **AMR / bricked volumes**: add a bricking layer above `Volume` that assembles virtual texture coordinates; `DeviceScene` holds current brick atlas handles.
+* **Masks & cut planes**: extra 3D masks as optional textures; store plane equations for slice/render modes.
+* **Time series**: keep `std::vector<std::shared_ptr<Volume>>` with a `currentTimestep` and prefetch the next into a second snapshot.
+
+# Error handling & UX
+
+* Throw clear exceptions on resource failures with context (dims, bytes, device ID).
+* Make all public methods **no-throw** except `commit()`, where allocation/copy happens.
+* Provide `SceneDebugInfo` with: mem bytes, dims, value range, step size, mode, TF samples, number of lights, and a “valid” bitset.
+
+# What this buys you
+
+* **Determinism** (render uses frozen snapshots).
+* **Simplicity** (flat structs & handles).
+* **Speed** (texture sampling, by-value scene).
+* **Flexibility** (optional features via flags/handles).
+* **Safety** (validation + dirty-bit rebuilds).
+* **Scalability** (streams, double-buffering, multi-field ready).
+
+If you want, I can turn this into a minimal but production-ready `Scene`/`commit()` implementation skeleton with the exact method names you prefer—and a tiny kernel showing how the snapshot is consumed.
+
+### include/bbox.hpp
+```
+
+```
+
+### include/camera.hpp
+```
+#pragma once
+#include <cuda_runtime.h>
+#include <Eigen/Dense>
+#include "ray.hpp"
+#include "device_structs.hpp"
+
+//! host-only, package to to DeviceCamera
+class Camera
+{
+public:
+    Camera(const Eigen::Vector3f &pos,
+           float vertical_fov_degrees,
+           const Eigen::Vector2i &film_res);
+
+    //* Set camera orientation by look-at target
+    void lookAt(const Eigen::Vector3f &target,
+                const Eigen::Vector3f &ref_up);
+
+    void moveTo(const Eigen::Vector3f &pos);
+    void setFrame(const Eigen::Vector3f &position,
+                  const Eigen::Vector3f &forward,
+                  const Eigen::Vector3f &up);
+
+    //* Generate ray through pixel (dx, dy)
+    Ray generateRay(float dx, float dy) const;
+
+    //* Getter
+    Eigen::Vector3f getPosition() const { return position_; }
+    Eigen::Vector3f getForward() const { return forward_; }
+    Eigen::Vector3f getUp() const { return up_; }
+    Eigen::Vector3f getRight() const { return right_; }
+    float getVerticalFov() const { return vertical_fov_deg_; }
+    Eigen::Vector2i getFilmResolution() const { return film_res_; }
+
+    //* Setter
+    void SetFilmResolution(Eigen::Vector2i res) { film_res_ = res; }
+    void SetVerticalFov(float degree) { vertical_fov_deg_ = degree; }
+
+    //* Convert to device representation
+    DeviceCamera toDevice() const;
+
+private:
+    void orthonormalize();
+
+    //* host data
+    Eigen::Vector3f position_{0,
+                              0,
+                              0};
+    Eigen::Vector3f forward_{0, 0, -1};
+    Eigen::Vector3f up_{0, 1, 0};
+    Eigen::Vector3f right_{1, 0, 0};
+    float vertical_fov_deg_ = 45.f;
+    Eigen::Vector2i film_res_{1, 1};
+
+    //* device data
+    DeviceCamera *d_camera;
+};
+```
+
+### include/constant.hpp
+```
+#pragma once
+
+
+/* Constants */
+
+#define PI 3.1415926535897932f
+#define DELTA 1e-4f
+
+#define RGB_CHANNELS 3
+#define RGBA_CHANNELS 4
+
+
+/* Builtin geometry name */
+
+#define BUILTIN_GEOM_GENUS_TWO "genus 2"
+#define BUILTIN_GEOM_WINEGLASS "wineglass"
+#define BUILTIN_GEOM_POROUS_SURFACE "porous surface"
+#define BUILTIN_GEOM_FLAME_HEAT_FIELD "bin/flame.bin"
+#define BUILTIN_GEOM_CT_HEAD "bin/cthead.bin"
+#define BUILTIN_GEOM_MR_BRAIN "bin/mrbrain.bin"
+#define DEFAULT_OPEN_GEOM BUILTIN_GEOM_POROUS_SURFACE
+```
+
+### include/cuda_utils.hpp
+```
+#pragma once
+#include <cuda_runtime.h>
+#include <iostream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+#include <cmath>
+#include <Eigen/Dense>
+
+#define CUDA_CHECK(expr) cudaCheck((expr), #expr, __FILE__, __LINE__)
+
+inline void cudaCheck(cudaError_t e, const char *what, const char *file, int line)
+{
+    if (e != cudaSuccess)
+    {
+        throw std::runtime_error(std::string(what) + ": " + cudaGetErrorString(e) +
+                                 " @ " + file + ":" + std::to_string(line));
+    }
+}
+
+#define CHECK_CUDA_IN_HOST(call)                                             \
+    {                                                                        \
+        cudaError_t err = call;                                              \
+        if (err != cudaSuccess)                                              \
+        {                                                                    \
+            std::cerr << "CUDA Error: " << cudaGetErrorString(err) << " at " \
+                      << __FILE__ << ":" << __LINE__ << "\n";                \
+            exit(1);                                                         \
+        }                                                                    \
+    }
+/**
+ * Unreachable statement
+ */
+
+#define UNREACHABLE                                                            \
+    std::cout << "Error: Unreachable code executed. Exit(-1)..." << std::endl; \
+    exit(-1);
+
+/**
+ * String processing utilities
+ */
+
+namespace StrUtils
+{
+    /* Trim from left */
+    __host__ void ltrim(std::string &s);
+    /* Trim from right */
+    __host__ void rtrim(std::string &s);
+    /* Trim from both left and right */
+    __host__ void trim(std::string &s);
+    /* Starts with */
+    __host__ bool startsWith(const std::string &s, const std::string &prefix);
+};
+
+/**
+ * Mathematical utilities
+ */
+
+/**
+ * Utilities for checking CUDA errors
+ */
+
+#define SINGLE_THREAD                        \
+    if (threadIdx.x != 0 || blockIdx.x != 0) \
+    {                                        \
+        return;                              \
+    }
+
+#define checkCudaErrors(val) checkCuda((val), #val, __FILE__, __LINE__)
+
+__host__ void checkCuda(cudaError_t result, char const *const func, const char *const file, int const line);
+
+template <typename T>
+__host__ T *cudaToDevice(T *h_ptr, int num = 1)
+{
+    T *d_ptr;
+    checkCudaErrors(cudaMallocManaged((void **)&d_ptr, sizeof(T) * num));
+    checkCudaErrors(cudaMemcpy(d_ptr, h_ptr, sizeof(T) * num, cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaDeviceSynchronize());
+    return d_ptr;
+}
+
+/**
+ * Image processing utilities
+ */
+
+namespace ImageUtils
+{
+    /* Performs Gamma correction on x and outputs an integer between 0-255. */
+    __host__ __device__ unsigned char gammaCorrection(float x);
+    /* Converts RGB pixel array to byte array with 4 channels (RGBA) */
+    __global__ void pixelArrayToBytesRGBA(Eigen::Vector3f *pix_arr, unsigned char *bytes, int res_x, int res_y);
+};
+
+namespace MathUtils::Camera
+{
+    static inline float3 f3(const Eigen::Vector3f &v) { return make_float3(v.x(), v.y(), v.z()); }
+}
+
+namespace MathUtils::Kernel
+{
+    __device__ __forceinline__ float3 f3(float x, float y, float z) { return make_float3(x, y, z); }
+    __device__ __forceinline__ float4 f4(float x, float y, float z, float w) { return make_float4(x, y, z, w); }
+    __device__ __forceinline__ float dot3(const float3 &a, const float3 &b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+    __device__ __forceinline__ float3 cross3(const float3 &a, const float3 &b)
+    {
+        return f3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+    }
+    __device__ __forceinline__ float length3(const float3 &v) { return sqrtf(dot3(v, v)); }
+    __device__ __forceinline__ float3 normalize3(const float3 &v)
+    {
+        float l = length3(v);
+        return l > 0.f ? f3(v.x / l, v.y / l, v.z / l) : f3(0, 0, 0);
+    }
+    __device__ __forceinline__ float3 add3(const float3 &a, const float3 &b) { return f3(a.x + b.x, a.y + b.y, a.z + b.z); }
+    __device__ __forceinline__ float3 sub3(const float3 &a, const float3 &b) { return f3(a.x - b.x, a.y - b.y, a.z - b.z); }
+    __device__ __forceinline__ float3 mulS(const float3 &a, float s) { return f3(a.x * s, a.y * s, a.z * s); }
+    __device__ __forceinline__ float3 mulV(const float3 &a, const float3 &b) { return f3(a.x * b.x, a.y * b.y, a.z * b.z); }
+    __device__ __forceinline__ float3 mad3(const float3 &a, float s, const float3 &b)
+    { // a + s*b
+        return f3(a.x + s * b.x, a.y + s * b.y, a.z + s * b.z);
+    }
+    __device__ __forceinline__ float clampf(float x, float lo, float hi) { return fminf(fmaxf(x, lo), hi); }
+
+};
+
+namespace MathUtils::Common
+{
+    /* Clamps the input x to the closed range [lo, hi] */
+    __host__ __device__ float clamp(float x, float lo, float hi);
+    /* Guassian function */
+    __host__ __device__ float Gaussian(float mu, float sigma, float x);
+};
+```
+
+### include/debug_utils.hpp
+```
+#pragma once
+#include <memory>
+#include <vector>
+#include <cmath>
+#include <cstdio>
+#include "volume.hpp"
+#include "transfer_function.hpp"
+
+std::shared_ptr<Volume> makeDummyVolume();
+
+std::shared_ptr<TransferFunction> makeSimpleTF();
+
+__global__ void volumeRenderCheckCUDAGL(DeviceScene ds, uchar4 *out, int w, int h);
+
+__global__ void kernelSampleCenter(DeviceScene ds, uchar4 *out, int w, int h);
+
+__global__ void kernelSliceUV(DeviceScene ds, uchar4 *out, int w, int h);
+
+__global__ void kernelRayHit(DeviceScene ds, uchar4 *out, int w, int h);
+
+__device__ void volumeAABB(const DeviceVolume &vol, float3 &bmin, float3 &bmax);
+
+__device__ bool rayBox(const float3 ro, const float3 rd,
+                       const float3 bmin, const float3 bmax,
+                       float &tnear, float &tfar);
+```
+
+### include/device_structs.hpp
+```
+#pragma once
+#include <cuda_runtime.h>
+
+struct DeviceCamera
+{
+    float3 forward_, up_, right_;
+    float3 position_;
+    float vertical_fov_;
+
+    __device__ void generateRay(int px, int py, int w, int h, float3 &ro, float3 &rd) const;
+};
+
+struct DeviceLight
+{
+    float3 position;
+    float3 color;
+    float intensity;
+    int type;
+};
+
+struct DeviceVolume
+{
+    cudaTextureObject_t field_tex = 0;
+    cudaTextureObject_t grad_tex = 0;
+
+    int3 dim{0, 0, 0};
+    float3 voxel_size{1.f, 1.f, 1.f};
+    float3 origin{0.f, 0.f, 0.f};
+    float2 value_range{0.f, 1.f};
+    float density_scale{1.f};
+};
+
+struct DeviceTF
+{
+    cudaTextureObject_t tf1D = 0;
+    float2 domain{0, 1};
+
+    __device__ float4 sample(float value) const;
+};
+
+struct DeviceScene
+{
+    DeviceCamera d_camera;
+    DeviceVolume d_volume;
+    DeviceTF d_tf;
+    DeviceLight *d_lights = nullptr;
+    int lights_count = 0;
+
+    float step_size = 0.1f;
+    float opacityScale = 1.0f;
+    float isoValue = 0.0f;
+    int mode = 0; // 0 DVR, 1 MIP, 2 ISO...
+    float3 clipMin{-1e9f, -1e9f, -1e9f}, clipMax{+1e9f, +1e9f, +1e9f};
+};
+```
+
+### include/gui.hpp
+```
+#include <vector> // for std::vector
+#include <string> // for std::string
+
+struct GUIState
+{
+    // 渲染参数
+    float step_size = 0.5f;
+    float opacity_scale = 1.0f;
+    int render_mode = 0;
+    float iso_value = 0.5f;
+
+    // 相机参数
+    float camera_pos[3] = {-50.0f, -50.0f, 0.0f};
+    float camera_target[3] = {0.0f, 0.0f, 0.0f};
+    float fov = 45.0f;
+
+    // 光照参数
+    float light_pos[3] = {2.0f, 2.0f, 2.0f};
+    float light_color[3] = {1.0f, 1.0f, 1.0f};
+    float light_intensity = 1.0f;
+
+    // 传输函数参数
+    float tf_points[8] = {0.0f, 0.0f, 0.3f, 0.5f, 0.6f, 0.8f, 1.0f, 1.0f};                          // alpha值
+    float tf_colors[24] = {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1, 1}; // RGB
+
+    // 裁剪框参数
+    float clip_min[3] = {-1000.0f, -1000.0f, -1000.0f};
+    float clip_max[3] = {1000.0f, 1000.0f, 1000.0f};
+
+    // 体积数据参数
+    char volume_path[256] = "";
+    int volume_dims[3] = {256, 256, 256};
+    float volume_spacing[3] = {1.0f, 1.0f, 1.0f};
+    int data_type = 0; // 0: uint8, 1: uint16, 2: float
+    bool volume_loaded = false;
+
+    // 文件浏览器
+    bool show_file_browser = false;
+    std::vector<std::string> available_files;
+};
+class Gui
+{
+};
+```
+
+### include/image_presenter.hpp
+```
+#pragma once
+
+#include <glad/glad.h>
+
+class ImagePresenter
+{
+public:
+    ImagePresenter(int width, int height);
+    ~ImagePresenter();
+
+    void display(GLuint textureID);
+
+private:
+    GLuint vao,
+        vbo;
+    GLuint shaderProgram;
+    int screenWidth, screenHeight;
+    GLuint compileShader(const char *source, GLenum type);
+    GLuint createShaderProgram(const char *vs_src, const char *fs_src);
+};
+```
+
+### include/interpolator.hpp
+```
+
+```
+
+### include/io.hpp
+```
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <cstring>
+#include <limits>
+#include <memory>
+#include <string>
+#include <Eigen/Dense>
+#include "cuda_runtime.h"
+
+#include "volume.hpp"
+#include "transfer_function.hpp"
+
+// 解析命令行参数：
+// 例：
+//   ./CudaSciVis -raw ~/data/engine.raw -dim 256 256 256 -bpp 16 -le 1 -norm 1 -vox 1 1 1 -org 0 0 0 -dens 1.0
+//   ./CudaSciVis -raw head256.raw -dim 256 256 256
+
+struct RawOptions
+{
+    std::string path;
+    int3 dim{0, 0, 0};
+    int bpp = 8;              // 8 or 16-bit
+    bool littleEndian = true; // 16-bit
+    bool normalize = true;    // [0,1]
+    float3 voxelSize{1.f, 1.f, 1.f};
+    float3 origin{0.f, 0.f, 0.f};
+    float densityScale{1.f};
+};
+
+static inline bool hostIsLittleEndian()
+{
+    uint16_t x = 1;
+    return *reinterpret_cast<uint8_t *>(&x) == 1;
+}
+
+static inline uint16_t bswap16(uint16_t v) { return (uint16_t)((v >> 8) | (v << 8)); }
+
+static bool parseRawArgs(int argc, char **argv, RawOptions &opt)
+{
+    for (int i = 1; i < argc; i++)
+    {
+        std::string a = argv[i];
+        auto need = [&](int n)
+        { return i + n < argc; };
+
+        if (a == "-raw" && need(1))
+        {
+            opt.path = argv[++i];
+        }
+        else if (a == "-dim" && need(3))
+        {
+            opt.dim = make_int3(std::stoi(argv[++i]), std::stoi(argv[++i]), std::stoi(argv[++i]));
+        }
+        else if (a == "-bpp" && need(1))
+        {
+            opt.bpp = std::stoi(argv[++i]);
+        }
+        else if (a == "-le" && need(1))
+        {
+            opt.littleEndian = std::stoi(argv[++i]) != 0;
+        }
+        else if (a == "-norm" && need(1))
+        {
+            opt.normalize = std::stoi(argv[++i]) != 0;
+        }
+        else if (a == "-vox" && need(3))
+        {
+            opt.voxelSize = make_float3(std::stof(argv[++i]), std::stof(argv[++i]), std::stof(argv[++i]));
+        }
+        else if (a == "-org" && need(3))
+        {
+            opt.origin = make_float3(std::stof(argv[++i]), std::stof(argv[++i]), std::stof(argv[++i]));
+        }
+        else if (a == "-dens" && need(1))
+        {
+            opt.densityScale = std::stof(argv[++i]);
+        }
+    }
+    if (opt.path.empty())
+        return false; // 没给 -raw 就用 dummy
+    if (opt.dim.x <= 0 || opt.dim.y <= 0 || opt.dim.z <= 0)
+    { // 给了 -raw 但没给维度 => 错
+        std::cerr << "[RAW] Missing or invalid -dim WxHxD.\n";
+        return false;
+    }
+    if (opt.bpp != 8 && opt.bpp != 16)
+    {
+        std::cerr << "[RAW] Only 8 or 16 bits-per-voxel supported.\n";
+        return false;
+    }
+    return true;
+}
+
+static bool readAllBytes(const std::string &p, std::vector<uint8_t> &out)
+{
+    std::ifstream ifs(p, std::ios::binary | std::ios::ate);
+    if (!ifs)
+        return false;
+    std::streamsize size = ifs.tellg();
+    ifs.seekg(0, std::ios::beg);
+    out.resize((size_t)size);
+    return (bool)ifs.read((char *)out.data(), size);
+}
+
+// 实际构建 Volume：把 8/16 位标量转 float，并设置描述信息
+std::shared_ptr<Volume> loadRawVolume(const RawOptions &opt);
+
+struct VtiOptions
+{
+    std::string path;
+    float densityScale = 1.f;
+    bool normalize = false;
+    bool overrideWorldTransform = false;
+    float3 worldOrigin{0.f, 0.f, 0.f};
+    float worldSpacingScale = 1.f;
+};
+
+struct TransformCameraFrame
+{
+    bool valid = false;
+    int width = 0;
+    int height = 0;
+    float verticalFovDegrees = 45.f;
+    Eigen::Vector3f position{0.f, 0.f, 0.f};
+    Eigen::Vector3f forward{0.f, 0.f, -1.f};
+    Eigen::Vector3f up{0.f, 1.f, 0.f};
+    bool hasVolumeWorldTransform = false;
+    float3 volumeWorldOrigin{0.f, 0.f, 0.f};
+    float volumeWorldSpacingScale = 1.f;
+};
+
+std::shared_ptr<Volume> loadVtiVolume(const VtiOptions &opt);
+std::shared_ptr<TransferFunction> loadTransferFunctionConfig(const std::string &path, int samples = 512);
+TransformCameraFrame loadTransformCameraFrame(const std::string &path, int frameIndex);
+```
+
+### include/lights.hpp
+```
+#pragma once
+#include <cuda_runtime.h>
+#include <vector>
+#include "device_structs.hpp"
+
+class Lights
+{
+public:
+    Lights() = default;
+    ~Lights()
+    {
+        if (d_lights)
+            cudaFree(d_lights);
+    }
+    void set(const std::vector<DeviceLight> &lights);
+
+    __host__ __device__ DeviceLight *getDevicePointer() const { return d_lights; }
+    __host__ __device__ int count() const { return m_count; }
+
+private:
+    DeviceLight *d_lights = nullptr;
+    int m_count = 0;
+};
+```
+
+### include/ray.hpp
+```
+#pragma once
+#include <Eigen/Dense>
+#include <float.h>
+
+struct Ray
+{
+    Eigen::Vector3f origin;
+    Eigen::Vector3f direction;
+    float tmin = 0.0f;
+    float tmax = FLT_MAX;
+    Ray(Eigen::Vector3f origin, Eigen::Vector3f direction, float tmin = 0.0f, float tmax = FLT_MAX)
+        : origin(origin), direction(direction), tmin(tmin), tmax(tmax) {}
+};
+```
+
+### include/renderer_kernel.hpp
+```
+#include <cuda_runtime.h>
+#include <device_launch_parameters.h>
+
+#include "device_structs.hpp"
+#include "debug_utils.hpp"
+// ====== Ray-AABB intersection ======
+
+__device__ bool intersectAABB(
+    const float3 &ro, const float3 &rd,
+    const float3 &bmin, const float3 &bmax,
+    float &tmin, float &tmax);
+
+// ====== world to uvw in [0,1]======
+__device__ float3 worldToUVW(const DeviceVolume &vol, const float3 &pWorld);
+
+__device__ __forceinline__ float sampleField(const DeviceVolume &vol, const float3 uvw);
+
+__device__ __forceinline__ float3 sampleGradient(const DeviceVolume &vol, const float3 uvw);
+
+__device__ __forceinline__ float4 sampleTF(const DeviceTF &tf, float value);
+
+__device__ __forceinline__ void compositeFrontToBack(float4 sampleRGBA, float opacityScale, float4 &accum);
+
+__global__ void volumeRendererKernel(const DeviceScene scene,
+                                     uchar4 *output,
+                                     int width, int height);
+
+__global__ void kernelFirstSample(DeviceScene ds, uchar4 *out, int width, int height);
+
+__global__ void kernelMip(const DeviceScene scene, uchar4 *output, int width, int height);
+```
+
+### include/scene.hpp
+```
+// scene.hpp
+#pragma once
+#include <memory>
+#include <optional>
+#include "device_structs.hpp"
+#include "camera.hpp"
+#include "volume.hpp"
+#include "transfer_function.hpp"
+#include "lights.hpp"
+
+struct SceneDebugInfo
+{
+    bool valid = false;
+    int3 dim{0, 0, 0};
+    float3 voxelSize{1, 1, 1};
+    float2 valueRange{0, 1};
+    int tfSize = 0;
+    int lightCount = 0;
+    float stepSize = 0.f;
+    int mode = 0;
+};
+
+class Scene
+{
+public:
+    Scene() = default;
+    ~Scene();
+
+    Scene &setCamera(const Camera *cam);
+    Scene &setLights(const Lights *lights);
+    Scene &setVolume(std::shared_ptr<Volume> volume);
+    Scene &setTransferFunction(std::shared_ptr<TransferFunction> tf);
+    Scene &setRenderParams(float step_size, float opacity_scale, int mode, float iso_value);
+    Scene &setClipBox(float3 clip_min, float3 clip_max);
+
+    //* validation
+    void validateOrThrow() const;
+
+    //* commit snapshoot
+    void commit(cudaStream_t stream);
+
+    const DeviceScene &snapshotHost() const { return m_ds_host; }
+    const DeviceScene *snapshotDevice() const { return m_ds_dev; }
+
+    SceneDebugInfo debug() const;
+
+private:
+    //*  host data manager
+    const Camera *m_cam = nullptr;
+    const Lights *m_lights = nullptr;
+
+    std::shared_ptr<Volume> m_volume;
+    std::shared_ptr<TransferFunction> m_tf;
+
+    //*  rendering parameters
+    float m_stepSize = 0.5f;
+    float m_opacityScale = 1.0f;
+    int m_mode = 0;
+    float m_isoValue = 0.0f;
+    float3 m_clipMin{-1e9f, -1e9f, -1e9f}, m_clipMax{+1e9f, +1e9f, +1e9f};
+
+    //*  device data
+    // snapshoot
+    DeviceScene m_ds_host{};
+    DeviceScene *m_ds_dev = nullptr;
+
+    //*  dirty mark
+    bool m_dirtyCam = true, m_dirtyVol = true, m_dirtyTF = true, m_dirtyLights = true, m_dirtyParams = true;
+};
+
+//! api usage
+// Scene scene;
+// scene.setCamera(&camera)
+//      .setVolume(volumePtr)
+//      .setTransferFunction(tfPtr)
+//      .setLights(&lights)
+//      .setRenderParams(0.5f, 1.0f, /*mode*/0)
+//      .setClipBox(make_float3(-1e9f), make_float3(1e9f));
+// scene.commit(); // 可给stream
+
+// // 渲染
+// auto& ds = scene.snapshotHost();
+// volumeRendererKernel<<<grid,block>>>(ds, d_output, width, height);
+```
+
+### include/transfer_function.hpp
+```
+#pragma once
+#include <cuda_runtime.h>
+#include "device_structs.hpp"
+
+class TransferFunction
+{
+public:
+    TransferFunction() = default;
+    TransferFunction(const float4 *data, int count, float2 domain = {0, 1});
+    ~TransferFunction();
+
+    __device__ float4 sample(float x) const;
+
+    __device__ float4 lookup(float x) const;
+
+    __host__ __device__ cudaTextureObject_t getCudaTex() const { return m_tex; }
+    __host__ __device__ float2 getDomain() const { return m_domain; }
+
+    DeviceTF toDevice() const;
+
+private:
+    int m_count = 0;
+    float2 m_domain = {0, 1};
+    float4 *m_device_table = nullptr;
+    cudaArray_t m_array = nullptr;
+    cudaTextureObject_t m_tex = 0;
+};
+```
+
+### include/volume.hpp
+```
+#pragma once
+
+#include <cuda_runtime.h>
+#include "device_structs.hpp"
+
+class Volume
+{
+public:
+    struct Description
+    {
+        int3 dim{0, 0, 0};
+        float3 origin{0.f, 0.f, 0.f};
+        float3 voxelSize{1.f, 1.f, 1.f};
+        float2 valueRange{0.f, 1.f};
+        float densityScale{1.f};
+    };
+
+    //* hostScalar: float*，大小 dim.x*dim.y*dim.z
+    Volume(const Description &desc, const float *hostScalar);
+    ~Volume();
+
+    const Description &getDesc() const { return m_desc; }
+    cudaTextureObject_t getFieldTex() const { return m_fieldTex; }
+    cudaTextureObject_t getGradTex() const { return m_gradTex; }
+    float3 getVolumeCenter() const;
+
+    void uploadGradient(const float3 *hostGrad);
+
+    DeviceVolume toDevice() const;
+
+private:
+    Description m_desc;
+    cudaArray_t m_arrayField = nullptr;
+    cudaTextureObject_t m_fieldTex = 0;
+
+    cudaArray_t m_arrayGrad = nullptr;
+    cudaTextureObject_t m_gradTex = 0;
+};
+
+//! api usage
+//* cudaArray_t : store volume data
+// host data apply cudaMemcpy3D to cudaArray_t
+//* cudaTextureObject_t : a texture object as volume data accesser
+// bind cudaArray_t to cudaTextureObject_t
+
+//! api usage example
+// 创建3D数组仓库
+//* cudaExtent extent = make_cudaExtent(dim.x, dim.y, dim.z);
+//* cudaArray* m_arrayField;
+//* cudaMalloc3DArray(&m_arrayField, &channelDesc, extent);
+
+// 将CPU数据搬运到GPU仓库
+//* cudaMemcpy3DParms copyParams = {0};
+//* copyParams.srcPtr = make_cudaPitchedPtr(hostData, dim.x*sizeof(float), dim.x, dim.y, dim.z);
+//* copyParams.dstArray = m_arrayField;
+//* copyParams.extent = extent;
+//* copyParams.kind = cudaMemcpyHostToDevice;
+//* cudaMemcpy3D(&copyParams);
+
+//* cudaResourceDesc resDesc = {};
+//* resDesc.resType = cudaResourceTypeArray;
+//* resDesc.res.array.array = m_arrayField; // 绑定仓库
+
+//* cudaTextureDesc texDesc = {};
+//* texDesc.addressMode[0] = cudaAddressModeClamp; // 边界处理方式
+//* texDesc.filterMode = cudaFilterModeLinear;     // 开启插值
+//* texDesc.readMode = cudaReadModeElementType;    // 数据读取方式
+
+//* cudaTextureObject_t m_fieldTex = 0;
+//* cudaCreateTextureObject(&m_fieldTex, &resDesc, &texDesc, NULL);
+
+//* __global__ void volumeRender(cudaTextureObject_t tex, ...) {
+// 自动获得插值后的体素值
+//*    float voxel = tex3D<float>(tex, x, y, z);
+
+// 如果是梯度纹理，可以这样读取法线
+//*     float3 normal = make_float3(
+//*         tex3D<float>(gradTex, x, y, z).x,  // grad_x
+//*         tex3D<float>(gradTex, x, y, z).y,  // grad_y
+//*         tex3D<float>(gradTex, x, y, z).z   // grad_z
+//*     );
+//* }
+
+// 在计算机科学中，**“句柄”（Handle）**这一术语的命名和用法源于其在实际系统中的角色和行为。以下是关于“句柄”命名的精准解释，以及为什么CUDA的`cudaTextureObject_t`被称为句柄：
+
+// ---
+
+// ### **1. 句柄的原始隐喻**
+// **“句柄”**（Handle）直译为“把手”，其命名灵感来源于现实中的物理把手：
+// - **门把手**：你无需知道门的具体构造（木材、金属、铰链机制），只需通过把手即可操作门。
+// - **资源句柄**：程序无需直接操作底层资源（内存地址、硬件设备），只需通过句柄间接访问。
+
+// 这种隐喻完美匹配CUDA纹理对象的设计：
+// - 开发者无需关心纹理数据在显存中的物理布局或硬件细节，只需通过`cudaTextureObject_t`这一“把手”访问数据。
+
+// ---
+
+// ### **2. 句柄的技术定义**
+// 在系统编程中，句柄的核心特征是：
+// | 特性                | 说明                                                                 | CUDA纹理对象示例                                                                 |
+// |---------------------|----------------------------------------------------------------------|---------------------------------------------------------------------------------|
+// | **间接性**          | 不直接暴露资源地址，而是通过中间标识符                               | `cudaTextureObject_t`是整数ID，而非指向`cudaArray`的指针                        |
+// | **抽象性**          | 隐藏底层实现细节（如内存管理、硬件配置）                             | 开发者无需知道纹理数据在显存中的物理排列方式                                    |
+// | **轻量性**          | 通常为整数值或小型结构，复制/传递成本低                              | `sizeof(cudaTextureObject_t) == 4`（32位整数）                                  |
+// | **安全性**          | 通过驱动/运行时验证访问权限                                          | 非法句柄会被CUDA驱动拒绝，而非导致显存非法访问                                  |
+// | **稳定性**          | 底层资源变化时，句柄可保持不变                                       | 更新`cudaArray`数据后，原有`cudaTextureObject_t`仍有效                          |
+
+// ---
+
+// ### **3. 为什么不用“指针”或“智能指针”？**
+// 虽然句柄与指针都用于访问资源，但关键差异在于：
+// | 对比维度          | 指针                          | 智能指针                     | 句柄                          |
+// |-------------------|-------------------------------|------------------------------|-------------------------------|
+// | **直接性**        | 直接暴露内存地址               | 封装指针，但仍有地址语义      | 完全隐藏物理地址               |
+// | **权限控制**      | 可任意算术操作，易越界         | 有限安全保证                 | 必须通过API操作，强制安全访问  |
+// | **硬件关联**      | 无                            | 无                           | 可能绑定硬件配置（如纹理单元） |
+// | **多平台一致性**  | 依赖具体内存模型               | 依赖C++实现                  | 由驱动/运行时统一管理          |
+
+// CUDA选择“句柄”而非“指针”，正是因为需要：
+// - 跨CPU/GPU的异构资源管理
+// - 硬件纹理单元的抽象配置
+// - 避免暴露显存物理地址
+
+// ---
+
+// ### **4. 句柄在CUDA中的典型生命周期**
+// ```mermaid
+// sequenceDiagram
+//     participant CPU
+//     participant Driver
+//     participant GPU
+
+//     CPU->>Driver: cudaCreateTextureObject(&handle)
+//     Driver->>GPU: 分配硬件纹理单元，生成配置ID
+//     Driver-->>CPU: 返回handle (e.g., 0x0001)
+//     CPU->>GPU: 内核调用tex3D(handle, ...)
+//     GPU->>Driver: 通过handle查找配置
+//     Driver->>GPU: 按配置访问数据+硬件加速
+//     GPU-->>CPU: 返回采样结果
+// ```
+
+// ---
+
+// ### **5. 历史与跨平台印证**
+// “句柄”的概念在系统编程中早有先例：
+// - **Windows HGDIOBJ**：GDI对象句柄（如画笔、画布）
+// - **OpenGL GLuint**：纹理/缓冲对象名称（本质是句柄）
+// - **文件描述符**：Unix中访问文件的句柄（如`int fd`）
+
+// CUDA延续了这一设计传统，其纹理句柄与上述案例有相同的设计哲学：
+// - **统一接口**：无论底层是NVIDIA何种GPU架构（Ampere/Pascal），句柄用法一致
+// - **安全隔离**：应用层无法通过句柄破坏驱动状态
+
+// ---
+
+// ### **6. 开发者如何正确理解？**
+// 记住以下要点即可：
+// - **句柄 ≠ 数据**：它只是访问数据的“门票”
+// - **复制句柄 ≈ 复制门票**：新门票仍指向同一场“演出”（数据）
+// - **销毁句柄 ≠ 销毁数据**：只是撕毁门票，演出仍可继续（其他句柄仍有效）
+```
+
+### include/volume_renderer.hpp
+```
+#pragma once
+#include <cuda_runtime.h>
+#include <device_launch_parameters.h>
+#include <iostream>
+
+#include <glad/glad.h>
+
+#include "scene.hpp"
+#include "camera.hpp"
+#include "lights.hpp"
+
+class VolumeRenderer
+{
+public:
+    struct CreateInfo
+    {
+        int width = 1;
+        int height = 1;
+        bool useSurfaceWrite = false; // if true, kernel writes directly to GL texture via surface
+
+        CreateInfo(int w, int h, bool useSurface)
+            : width(w), height(h), useSurfaceWrite(useSurface)
+        {
+        }
+    };
+
+    explicit VolumeRenderer(const CreateInfo &ci);
+    ~VolumeRenderer();
+
+    void render(Scene &scene, bool commitScene = false);
+
+    // Accessors
+    GLuint getResultTexture() const { return glTex_; }
+    int width() const { return width_; }
+    int height() const { return height_; }
+
+    void resize(int newW, int newH);
+
+    void setStream(cudaStream_t stream) { stream_ = stream; }
+    void setUseSurfaceWrite(bool on) { useSurfaceWrite_ = on; }
+    bool useSurfaceWrite() const { return useSurfaceWrite_; }
+
+private:
+    void createGLTexture(int w, int h); // create a gl_rbga8
+    void destoryGLTexture();
+
+    void registerCudaInterop(); // register gl_rbga8 to cuda, get cudaGraphicsResource*）
+    void unregisterCudaInterop();
+
+    void allocDeviceBuffer(); //  allocate device buffer
+    void freeDeviceBuffer();
+
+    void ensureCapacity(int w, int h);
+
+private:
+    int width_, height_;
+    bool useSurfaceWrite_ = false;
+
+    // —— OpenGL texture object
+    GLuint glTex_{0};
+
+    // —— CUDA-GL interop handle, allow cuda to access gl texture
+    cudaGraphicsResource *cudaRes_ = nullptr; // registered gl texture
+
+    // kernal writing buffer
+    uchar4 *d_output_{nullptr}; // device linear buffer
+
+    // Stream (shared for kernel + copies)
+    cudaStream_t stream_ = 0; // default stream
+};
+```
+
+### src/camera.cu
+```
+#include "camera.hpp"
+#include "cuda_utils.hpp"
+#include <cmath>
+
+using MathUtils::Camera::f3;
+
+Camera::Camera(const Eigen::Vector3f &pos,
+               float vertical_fov_degrees,
+               const Eigen::Vector2i &film_res)
+    : position_(pos),
+      vertical_fov_deg_(vertical_fov_degrees),
+      film_res_(film_res)
+{
+    forward_ = Eigen::Vector3f(0, 0, -1);
+    up_ = Eigen::Vector3f(0, 1, 0);
+    right_ = forward_.cross(up_).normalized();
+    orthonormalize();
+}
+
+void Camera::lookAt(const Eigen::Vector3f &target,
+                    const Eigen::Vector3f &ref_up)
+{
+    //* 前向方向
+    Eigen::Vector3f f = (target - position_).normalized();
+    Eigen::Vector3f r = f.cross(ref_up).normalized();
+    Eigen::Vector3f u = r.cross(f).normalized();
+
+    forward_ = f;
+    right_ = r;
+    up_ = u;
+    orthonormalize();
+}
+
+void Camera::moveTo(const Eigen::Vector3f &pos)
+{
+    position_ = pos;
+}
+
+void Camera::setFrame(const Eigen::Vector3f &position,
+                      const Eigen::Vector3f &forward,
+                      const Eigen::Vector3f &up)
+{
+    position_ = position;
+    forward_ = forward;
+    up_ = up;
+    orthonormalize();
+}
+
+Ray Camera::generateRay(float x, float y) const
+{
+    //* (x, y) from [0,film_width] × [0, film_height] to [-1, 1] × [-1, 1] , NDC
+    float u = ((x + 0.5f) / film_res_.x()) * 2.0f - 1.0f;
+    float v = ((y + 0.5f) / film_res_.y()) * 2.0f - 1.0f;
+    //* flip y
+    v = -v;
+
+    float aspect_ratio = static_cast<float>(film_res_.x() / (float)film_res_.y());
+
+    float vertical_fov_rad = vertical_fov_deg_ * (M_PI / 180.0f);
+
+    float half_height = std::tan(vertical_fov_rad / 2.0f);
+    float half_width = aspect_ratio * half_height;
+
+    //* camera space
+    //* The imaging plane (the screen) defaults to the z = -1 plane in camera space
+    //* The ray from the camera origin (0,0,0) to the imaging plane (x', y', -1), defines the direction corresponding to the pixel (u,v).
+    Eigen::Vector3f dir_cam(u * half_width, v * half_height, -1.0f);
+    dir_cam.normalize();
+
+    //* world space
+    Eigen::Vector3f dir_world = right_ * dir_cam.x() + up_ * dir_cam.y() + forward_ * dir_cam.z();
+
+    return Ray(position_, dir_world.normalized());
+}
+
+void Camera::orthonormalize()
+{
+    // Gram-Schmidt
+    forward_.normalize();
+    right_ = forward_.cross(up_);
+    if (right_.squaredNorm() < 1e-12f)
+    {
+        Eigen::Vector3f alt_up = std::abs(forward_.y()) < 0.999f ? Eigen::Vector3f(0, 1, 0)
+                                                                 : Eigen::Vector3f(1, 0, 0);
+        right_ = forward_.cross(alt_up);
+    }
+    right_.normalize();
+    up_ = right_.cross(forward_).normalized();
+}
+
+DeviceCamera Camera::toDevice() const
+{
+    DeviceCamera dc{};
+    dc.position_ = f3(position_);
+    dc.forward_ = f3(forward_.normalized());
+    dc.up_ = f3(up_.normalized());
+    dc.right_ = f3(right_.normalized());
+    dc.vertical_fov_ = vertical_fov_deg_;
+    return dc;
+}
+
+//! api usage
+//* Scene::commit()
+//* if(m_dirty_camera)
+//* {
+//*     m_ds_host.camera = m_cam->toDevice();
+//*     m_dirty_camera = false;
+//* }
+```
+
+### src/cuda_utils.cu
+```
+#include <random>
+#include <algorithm>
+#include "cuda_utils.hpp"
+#include "constant.hpp"
+
+/**
+ * StrUtils namespace
+ */
+
+__host__ void StrUtils::ltrim(std::string &s)
+{
+    s.erase(s.begin(), std::find_if(s.begin(), s.end(), std::not1(std::ptr_fun<int, int>(std::isspace))));
+}
+
+__host__ void StrUtils::rtrim(std::string &s)
+{
+    s.erase(std::find_if(s.rbegin(), s.rend(), std::not1(std::ptr_fun<int, int>(std::isspace))).base(), s.end());
+}
+
+__host__ void StrUtils::trim(std::string &s)
+{
+    ltrim(s);
+    rtrim(s);
+}
+
+__host__ bool StrUtils::startsWith(const std::string &s, const std::string &prefix)
+{
+    return s.find(prefix) == 0;
+}
+
+/**
+ * ImageUtils namespace
+ */
+
+__host__ __device__ unsigned char ImageUtils::gammaCorrection(float x)
+{
+    return (unsigned char)(pow(MathUtils::Common::clamp(x, 0.0, 1.0), 1 / 2.2) * 255);
+}
+
+__global__ void ImageUtils::pixelArrayToBytesRGBA(Eigen::Vector3f *pix_arr, unsigned char *bytes, int res_x, int res_y)
+{
+    int dx = blockIdx.x * blockDim.x + threadIdx.x;
+    int dy = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if ((dx >= res_x) || (dy >= res_y))
+    {
+        return;
+    }
+
+    int i = dy * res_x + dx;
+    /* Byte arrays' +y axes are downward */
+    int j = (res_y - dy) * res_x + dx;
+
+    bytes[j * 4] = ImageUtils::gammaCorrection(pix_arr[i].x());
+    bytes[j * 4 + 1] = ImageUtils::gammaCorrection(pix_arr[i].y());
+    bytes[j * 4 + 2] = ImageUtils::gammaCorrection(pix_arr[i].z());
+    bytes[j * 4 + 3] = 255;
+}
+
+__host__ __device__ float MathUtils::Common::clamp(float x, float lo, float hi)
+{
+    return x < lo ? lo : x > hi ? hi
+                                : x;
+}
+
+__host__ __device__ float MathUtils::Common::Gaussian(float mu, float sigma, float x)
+{
+    if (std::isinf(x) || std::isnan(x))
+    {
+        return 0;
+    }
+    return exp(-pow(x - mu, 2) / (2 * sigma * sigma));
+}
+```
+
+### src/debug_utils.cu
+```
+#include "debug_utils.hpp"
+
+std::shared_ptr<Volume> makeDummyVolume()
+{
+    Volume::Description desc;
+    desc.dim = make_int3(128, 128, 128);
+    desc.origin = make_float3(0, 0, 0);
+    desc.voxelSize = make_float3(1, 1, 1);
+    desc.valueRange = make_float2(0, 1);
+    desc.densityScale = 1.0f;
+
+    std::vector<float> scalars(size_t(desc.dim.x) * desc.dim.y * desc.dim.z);
+    // 生成一个球形密度分布
+    for (int z = 0; z < desc.dim.z; ++z)
+    {
+        for (int y = 0; y < desc.dim.y; ++y)
+        {
+            for (int x = 0; x < desc.dim.x; ++x)
+            {
+                float nx = (x - desc.dim.x * 0.5f) / (desc.dim.x * 0.5f);
+                float ny = (y - desc.dim.y * 0.5f) / (desc.dim.y * 0.5f);
+                float nz = (z - desc.dim.z * 0.5f) / (desc.dim.z * 0.5f);
+                float r = sqrtf(nx * nx + ny * ny + nz * nz);
+                scalars[(z * desc.dim.y + y) * desc.dim.x + x] = std::max(0.f, 1.f - r);
+            }
+        }
+    }
+    return std::make_shared<Volume>(desc, scalars.data());
+}
+
+std::shared_ptr<TransferFunction> makeSimpleTF()
+{
+    // RGBA 梯度：黑->红->黄->白
+    std::vector<float4> table;
+    const int N = 256;
+    table.reserve(N);
+    for (int i = 0; i < N; ++i)
+    {
+        float t = i / (N - 1.f);
+        float3 c = make_float3(t, t * 0.5f + 0.5f * t, t); // 随意的配色
+        float a = t;                                       // 越密越不透明
+        table.push_back(make_float4(c.x, c.y, c.z, a));
+    }
+    auto tf = std::make_shared<TransferFunction>(table.data(), (int)table.size(), make_float2(0, 1));
+    return tf;
+}
+
+__global__ void volumeRenderCheckCUDAGL(DeviceScene ds, uchar4 *out, int w, int h)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= w || y >= h)
+        return;
+    float u = (x + 0.5f) / w, v = (y + 0.5f) / h;
+    out[y * w + x] = make_uchar4((unsigned)(u * 255), (unsigned)(v * 255), 128, 255);
+}
+
+__global__ void kernelSampleCenter(DeviceScene ds, uchar4 *out, int w, int h)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= w || y >= h)
+        return;
+    float s = tex3D<float>(ds.d_volume.field_tex, 0.5f, 0.5f, 0.5f);
+    unsigned char g = (unsigned char)fminf(255.f, fmaxf(0.f, s * 255.f));
+    out[y * w + x] = make_uchar4(0.2 * g, 0.4 * g, 0.6 * g, 255);
+}
+
+__global__ void kernelSliceUV(DeviceScene ds, uchar4 *out, int w, int h)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= w || y >= h)
+        return;
+    float u = (x + 0.5f) / w, v = (y + 0.5f) / h;
+    float s = tex3D<float>(ds.d_volume.field_tex, u, v, 0.5f);
+    unsigned char g = (unsigned char)fminf(255.f, fmaxf(0.f, s * 255.f));
+    out[y * w + x] = make_uchar4(0.2 * g, 0.4 * g, 0.6 * g, 255);
+}
+
+__global__ void kernelRayHit(DeviceScene ds, uchar4 *out, int w, int h)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= w || y >= h)
+        return;
+    float3 ro{}, rd{};
+    ds.d_camera.generateRay(x, y, w, h, ro, rd);
+    float3 bmin{}, bmax{};
+
+    volumeAABB(ds.d_volume, bmin, bmax);
+    float t0, t1;
+    bool hit = rayBox(ro, rd, bmin, bmax, t0, t1);
+    out[y * w + x] = hit ? make_uchar4(0, 255, 0, 255) : make_uchar4(255, 0, 0, 255);
+}
+
+__device__ void volumeAABB(const DeviceVolume &vol, float3 &bmin, float3 &bmax)
+{
+    bmin = vol.origin;
+    float3 size = make_float3(
+        vol.voxel_size.x * (vol.dim.x - 1),
+        vol.voxel_size.y * (vol.dim.y - 1),
+        vol.voxel_size.z * (vol.dim.z - 1));
+
+    bmax = make_float3(bmin.x + size.x, bmin.y + size.y, bmin.z + size.z);
+}
+
+__device__ bool rayBox(const float3 ro, const float3 rd,
+                       const float3 bmin, const float3 bmax,
+                       float &tnear, float &tfar)
+{
+    float3 inv = make_float3(1.0f / rd.x, 1.0f / rd.y, 1.0f / rd.z);
+
+    float3 t0 = make_float3(
+        (bmin.x - ro.x) * inv.x,
+        (bmin.y - ro.y) * inv.y,
+        (bmin.z - ro.z) * inv.z);
+    float3 t1 = make_float3(
+        (bmax.x - ro.x) * inv.x,
+        (bmax.y - ro.y) * inv.y,
+        (bmax.z - ro.z) * inv.z);
+
+    float3 tmin = make_float3(fminf(t0.x, t1.x), fminf(t0.y, t1.y), fminf(t0.z, t1.z));
+    float3 tmax = make_float3(fmaxf(t0.x, t1.x), fmaxf(t0.y, t1.y), fmaxf(t0.z, t1.z));
+    tnear = fmaxf(0.0f, fmaxf(tmin.x, fmaxf(tmin.y, tmin.z)));
+    tfar = fminf(fminf(tmax.x, tmax.y), tmax.z);
+
+    return tnear < tfar;
+}
+```
+
+### src/device_structs.cu
+```
+#include "device_structs.hpp"
+#include <math.h>
+
+__device__ void DeviceCamera::generateRay(int px, int py, int w, int h, float3 &ro, float3 &rd) const
+{
+    // px and py are in [0, w) and [0, h)]] pixel coordinates
+    float u = (px + 0.5f) / float(w); // u ∈ [0.5/w, 1 - 0.5/w] \in [0, 1]
+    float v = (py + 0.5f) / float(h); // v ∈ [0.5/h, 1 - 0.5/h] \in  [0, 1]
+
+    float aspect = float(w) / float(h);
+    float tanHalfFov = tanf(vertical_fov_ * 0.5f * M_PI / 180.0f);
+
+    // sy = [-1, 1] * tan(fov/2); sx =  [-1, 1] * aspect * tan(fov/2)
+    float sx = (2.0f * u - 1.0f) * aspect * tanHalfFov;
+    float sy = (1.0f - 2.0f * v) * tanHalfFov;
+
+    float3 dir = make_float3(
+        forward_.x + sx * right_.x + sy * up_.x,
+        forward_.y + sx * right_.y + sy * up_.y,
+        forward_.z + sx * right_.z + sy * up_.z);
+    float len = rsqrtf(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+    rd = make_float3(dir.x * len, dir.y * len, dir.z * len);
+    ro = position_;
+}
+```
+
+### src/headless_main.cu
+```
+#include <algorithm>
+#include <iostream>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
+#include "camera.hpp"
+#include "cuda_utils.hpp"
+#include "debug_utils.hpp"
+#include "io.hpp"
+#include "lights.hpp"
+#include "renderer_kernel.hpp"
+#include "scene.hpp"
+
+namespace
+{
+struct CliOptions
+{
+    int width = 800;
+    int height = 600;
+    bool widthSet = false;
+    bool heightSet = false;
+    float step = 0.5f;
+    float opacityScale = 1.0f;
+    float densityScale = 1.0f;
+    float isoValue = 0.5f;
+    int mode = 0;
+    int frame = 0;
+    int tfSamples = 512;
+    std::string output = "render.png";
+    std::string vtiPath;
+    std::string tfPath;
+    std::string transformsPath;
+};
+
+bool parseCliArgs(int argc, char **argv, CliOptions &opt)
+{
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string arg = argv[i];
+        auto need = [&](int n)
+        { return i + n < argc; };
+
+        if (arg == "--help" || arg == "-h")
+        {
+            std::cout
+                << "Usage: cuda-volume-renderer-cli [options]\n"
+                << "  --width N          Output width (default: 800)\n"
+                << "  --height N         Output height (default: 600)\n"
+                << "  --step F           Ray-march step size (default: 0.5)\n"
+                << "  --opacity F        Opacity scale (default: 1.0)\n"
+                << "  --density F        Volume density scale (default: 1.0)\n"
+                << "  --iso F            Isosurface threshold (default: 0.5)\n"
+                << "  --mode N           0=DVR, 1=ISO, 2=MIP (default: 0)\n"
+                << "  --output PATH      Output PNG path (default: render.png)\n"
+                << "  --vti PATH         Load Float32 compressed VTI volume\n"
+                << "  --tf PATH          Load Vol2Splat tf_config.json\n"
+                << "  --transforms PATH  Load transforms_train/test.json camera\n"
+                << "  --frame N          Camera frame index for transforms JSON\n"
+                << "  -raw PATH -dim X Y Z [-bpp 8|16] [-le 0|1] [-norm 0|1]\n";
+            return false;
+        }
+        if (arg == "--width" && need(1))
+        {
+            opt.width = std::max(1, std::stoi(argv[++i]));
+            opt.widthSet = true;
+        }
+        else if (arg == "--height" && need(1))
+        {
+            opt.height = std::max(1, std::stoi(argv[++i]));
+            opt.heightSet = true;
+        }
+        else if (arg == "--step" && need(1))
+        {
+            opt.step = std::max(1e-3f, std::stof(argv[++i]));
+        }
+        else if (arg == "--opacity" && need(1))
+        {
+            opt.opacityScale = std::max(0.0f, std::stof(argv[++i]));
+        }
+        else if (arg == "--density" && need(1))
+        {
+            opt.densityScale = std::max(0.0f, std::stof(argv[++i]));
+        }
+        else if (arg == "--iso" && need(1))
+        {
+            opt.isoValue = std::stof(argv[++i]);
+        }
+        else if (arg == "--mode" && need(1))
+        {
+            opt.mode = std::stoi(argv[++i]);
+        }
+        else if (arg == "--output" && need(1))
+        {
+            opt.output = argv[++i];
+        }
+        else if (arg == "--vti" && need(1))
+        {
+            opt.vtiPath = argv[++i];
+        }
+        else if (arg == "--tf" && need(1))
+        {
+            opt.tfPath = argv[++i];
+        }
+        else if (arg == "--transforms" && need(1))
+        {
+            opt.transformsPath = argv[++i];
+        }
+        else if (arg == "--frame" && need(1))
+        {
+            opt.frame = std::max(0, std::stoi(argv[++i]));
+        }
+        else if (arg == "--tf-samples" && need(1))
+        {
+            opt.tfSamples = std::max(2, std::stoi(argv[++i]));
+        }
+    }
+    return true;
+}
+
+std::shared_ptr<Volume> selectVolume(int argc,
+                                     char **argv,
+                                     const CliOptions &cli,
+                                     const TransformCameraFrame &cameraFrame)
+{
+    if (!cli.vtiPath.empty())
+    {
+        VtiOptions vti;
+        vti.path = cli.vtiPath;
+        vti.densityScale = cli.densityScale;
+        if (cameraFrame.hasVolumeWorldTransform)
+        {
+            vti.overrideWorldTransform = true;
+            vti.worldOrigin = cameraFrame.volumeWorldOrigin;
+            vti.worldSpacingScale = cameraFrame.volumeWorldSpacingScale;
+        }
+        return loadVtiVolume(vti);
+    }
+
+    RawOptions raw_opt;
+    if (!parseRawArgs(argc, argv, raw_opt))
+    {
+        return makeDummyVolume();
+    }
+    raw_opt.densityScale = cli.densityScale;
+
+    auto volume = loadRawVolume(raw_opt);
+    if (!volume)
+    {
+        throw std::runtime_error("Failed to load the requested RAW volume.");
+    }
+    return volume;
+}
+
+Camera makeDefaultCamera(const Volume &volume, int width, int height)
+{
+    const auto &desc = volume.getDesc();
+    const float3 center = volume.getVolumeCenter();
+    const float3 extent = make_float3(
+        desc.voxelSize.x * std::max(desc.dim.x - 1, 1),
+        desc.voxelSize.y * std::max(desc.dim.y - 1, 1),
+        desc.voxelSize.z * std::max(desc.dim.z - 1, 1));
+    const float max_extent = std::max(extent.x, std::max(extent.y, extent.z));
+    const Eigen::Vector3f eye(
+        center.x - 1.35f * max_extent,
+        center.y - 0.9f * max_extent,
+        center.z + 0.65f * max_extent);
+
+    Camera cam(eye, 45.0f, Eigen::Vector2i(width, height));
+    cam.lookAt(Eigen::Vector3f(center.x, center.y, center.z), Eigen::Vector3f(0, 1, 0));
+    return cam;
+}
+
+void writePng(const std::string &path, int width, int height, const std::vector<uchar4> &pixels)
+{
+    std::vector<unsigned char> rgba(static_cast<size_t>(width) * height * 4);
+    for (int y = 0; y < height; ++y)
+    {
+        const int src_y = height - 1 - y;
+        for (int x = 0; x < width; ++x)
+        {
+            const uchar4 px = pixels[static_cast<size_t>(src_y) * width + x];
+            const size_t idx = (static_cast<size_t>(y) * width + x) * 4;
+            rgba[idx + 0] = px.x;
+            rgba[idx + 1] = px.y;
+            rgba[idx + 2] = px.z;
+            rgba[idx + 3] = px.w;
+        }
+    }
+
+    if (!stbi_write_png(path.c_str(), width, height, 4, rgba.data(), width * 4))
+    {
+        throw std::runtime_error("Failed to write PNG output to " + path);
+    }
+}
+} // namespace
+
+int main(int argc, char **argv)
+{
+    try
+    {
+        CliOptions cli;
+        if (!parseCliArgs(argc, argv, cli))
+        {
+            return 0;
+        }
+
+        CUDA_CHECK(cudaSetDevice(0));
+
+        TransformCameraFrame cameraFrame;
+        if (!cli.transformsPath.empty())
+        {
+            cameraFrame = loadTransformCameraFrame(cli.transformsPath, cli.frame);
+            if (cameraFrame.valid)
+            {
+                if (!cli.widthSet && cameraFrame.width > 0)
+                    cli.width = cameraFrame.width;
+                if (!cli.heightSet && cameraFrame.height > 0)
+                    cli.height = cameraFrame.height;
+            }
+        }
+
+        auto volume = selectVolume(argc, argv, cli, cameraFrame);
+        auto tf = cli.tfPath.empty()
+                      ? makeSimpleTF()
+                      : loadTransferFunctionConfig(cli.tfPath, cli.tfSamples);
+        Camera cam = makeDefaultCamera(*volume, cli.width, cli.height);
+        if (cameraFrame.valid)
+        {
+            cam.SetFilmResolution(Eigen::Vector2i(cli.width, cli.height));
+            cam.SetVerticalFov(cameraFrame.verticalFovDegrees);
+            cam.setFrame(cameraFrame.position, cameraFrame.forward, cameraFrame.up);
+        }
+
+        Lights lights;
+        std::vector<DeviceLight> host_lights(1);
+        host_lights[0].position = make_float3(2, 2, 2);
+        host_lights[0].color = make_float3(1, 1, 1);
+        host_lights[0].intensity = 1.0f;
+        host_lights[0].type = 0;
+        lights.set(host_lights);
+
+        Scene scene;
+        scene.setCamera(&cam)
+            .setLights(&lights)
+            .setVolume(volume)
+            .setTransferFunction(tf)
+            .setRenderParams(cli.step, cli.opacityScale, cli.mode, cli.isoValue)
+            .setClipBox(make_float3(-1e6f, -1e6f, -1e6f), make_float3(1e6f, 1e6f, 1e6f));
+        scene.commit(0);
+
+        uchar4 *d_output = nullptr;
+        const size_t pixel_count = static_cast<size_t>(cli.width) * cli.height;
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&d_output), pixel_count * sizeof(uchar4)));
+
+        const dim3 block(16, 16);
+        const dim3 grid(
+            (cli.width + block.x - 1) / block.x,
+            (cli.height + block.y - 1) / block.y);
+        volumeRendererKernel<<<grid, block>>>(scene.snapshotHost(), d_output, cli.width, cli.height);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        std::vector<uchar4> host_output(pixel_count);
+        CUDA_CHECK(cudaMemcpy(host_output.data(), d_output, pixel_count * sizeof(uchar4), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaFree(d_output));
+
+        writePng(cli.output, cli.width, cli.height, host_output);
+
+        const SceneDebugInfo info = scene.debug();
+        std::cout << "Rendered " << cli.output
+                  << " at " << cli.width << "x" << cli.height
+                  << " mode=" << cli.mode
+                  << " step=" << cli.step
+                  << " volume=(" << info.dim.x << "," << info.dim.y << "," << info.dim.z << ")\n";
+        return 0;
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "Headless render failed: " << e.what() << "\n";
+        return 1;
+    }
+}
+```
+
+### src/image_presenter.cpp
+```
+#include "image_presenter.hpp"
+#include <iostream>
+
+// 简单顶点 + 纹理坐标
+static const float quadVertices[] = {
+    // pos      // tex coords
+    -1.0f, 1.0f, 0.0f, 1.0f,
+    -1.0f, -1.0f, 0.0f, 0.0f,
+    1.0f, -1.0f, 1.0f, 0.0f,
+
+    -1.0f, 1.0f, 0.0f, 1.0f,
+    1.0f, -1.0f, 1.0f, 0.0f,
+    1.0f, 1.0f, 1.0f, 1.0f};
+
+// 简单着色器代码（你也可以分文件加载）
+const char *vertexShaderSource = R"(
+#version 330 core
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec2 aTexCoord;
+out vec2 TexCoord;
+void main() {
+    TexCoord = aTexCoord;
+    gl_Position = vec4(aPos.xy, 0.0, 1.0);
+}
+)";
+
+const char *fragmentShaderSource = R"(
+#version 330 core
+in vec2 TexCoord;
+out vec4 FragColor;
+uniform sampler2D uTex;
+void main() {
+    FragColor = texture(uTex, TexCoord);
+}
+)";
+
+ImagePresenter::ImagePresenter(int width, int height)
+    : screenWidth(width), screenHeight(height)
+{
+    // 初始化 VAO/VBO
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
+
+    glEnableVertexAttribArray(0); // pos
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void *)0);
+
+    glEnableVertexAttribArray(1); // texcoord
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void *)(2 * sizeof(float)));
+
+    glBindVertexArray(0);
+
+    // 编译 shader
+    shaderProgram = createShaderProgram(vertexShaderSource, fragmentShaderSource);
+}
+
+ImagePresenter::~ImagePresenter()
+{
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(shaderProgram);
+}
+
+void ImagePresenter::display(GLuint textureID)
+{
+    glViewport(0, 0, screenWidth, screenHeight);
+    glUseProgram(shaderProgram);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, textureID);
+    glUniform1i(glGetUniformLocation(shaderProgram, "uTex"), 0);
+
+    glBindVertexArray(vao);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+}
+
+// 编译单个 shader
+GLuint ImagePresenter::compileShader(const char *source, GLenum type)
+{
+    GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &source, nullptr);
+    glCompileShader(shader);
+
+    GLint success;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+    if (!success)
+    {
+        char infoLog[512];
+        glGetShaderInfoLog(shader, 512, NULL, infoLog);
+        std::cerr << "Shader compile error: " << infoLog << std::endl;
+    }
+
+    return shader;
+}
+
+// 链接 shader 程序
+GLuint ImagePresenter::createShaderProgram(const char *vs_src, const char *fs_src)
+{
+    GLuint vs = compileShader(vs_src, GL_VERTEX_SHADER);
+    GLuint fs = compileShader(fs_src, GL_FRAGMENT_SHADER);
+
+    GLuint program = glCreateProgram();
+    glAttachShader(program, vs);
+    glAttachShader(program, fs);
+    glLinkProgram(program);
+
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+
+    return program;
+}
+```
+
+### src/io.cu
+```
+#include "io.hpp"
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <regex>
+#include <sstream>
+#include <stdexcept>
+#include <zlib.h>
+
+namespace
+{
+uint32_t readLE32(const std::vector<uint8_t> &bytes, size_t offset)
+{
+    if (offset + 4 > bytes.size())
+        throw std::runtime_error("Unexpected end of VTI block header");
+    return uint32_t(bytes[offset]) |
+           (uint32_t(bytes[offset + 1]) << 8) |
+           (uint32_t(bytes[offset + 2]) << 16) |
+           (uint32_t(bytes[offset + 3]) << 24);
+}
+
+int base64Value(char c)
+{
+    if (c >= 'A' && c <= 'Z')
+        return c - 'A';
+    if (c >= 'a' && c <= 'z')
+        return c - 'a' + 26;
+    if (c >= '0' && c <= '9')
+        return c - '0' + 52;
+    if (c == '+')
+        return 62;
+    if (c == '/')
+        return 63;
+    return -1;
+}
+
+void skipBase64Whitespace(const std::string &src, size_t &pos, size_t end)
+{
+    while (pos < end && std::isspace(static_cast<unsigned char>(src[pos])))
+        ++pos;
+}
+
+std::vector<uint8_t> decodeBase64Segment(const std::string &src,
+                                          size_t &pos,
+                                          size_t end,
+                                          size_t decodedBytes)
+{
+    std::vector<uint8_t> out;
+    out.reserve(decodedBytes);
+
+    while (out.size() < decodedBytes)
+    {
+        int vals[4] = {0, 0, 0, 0};
+        int pad = 0;
+        for (int i = 0; i < 4; ++i)
+        {
+            skipBase64Whitespace(src, pos, end);
+            if (pos >= end)
+                throw std::runtime_error("Unexpected end of VTI base64 payload");
+
+            const char c = src[pos++];
+            if (c == '=')
+            {
+                vals[i] = 0;
+                ++pad;
+            }
+            else
+            {
+                vals[i] = base64Value(c);
+                if (vals[i] < 0)
+                    throw std::runtime_error("Invalid character in VTI base64 payload");
+            }
+        }
+
+        const uint32_t triple = (uint32_t(vals[0]) << 18) |
+                                (uint32_t(vals[1]) << 12) |
+                                (uint32_t(vals[2]) << 6) |
+                                uint32_t(vals[3]);
+        if (out.size() < decodedBytes && pad < 3)
+            out.push_back(static_cast<uint8_t>((triple >> 16) & 0xff));
+        if (out.size() < decodedBytes && pad < 2)
+            out.push_back(static_cast<uint8_t>((triple >> 8) & 0xff));
+        if (out.size() < decodedBytes && pad < 1)
+            out.push_back(static_cast<uint8_t>(triple & 0xff));
+    }
+
+    return out;
+}
+
+std::string readTextFile(const std::string &path)
+{
+    std::vector<uint8_t> bytes;
+    if (!readAllBytes(path, bytes))
+        throw std::runtime_error("Failed to read file: " + path);
+    return std::string(reinterpret_cast<const char *>(bytes.data()), bytes.size());
+}
+
+bool extractQuotedAttribute(const std::string &text,
+                            const std::string &name,
+                            std::string &out)
+{
+    const std::string needle = name + "=\"";
+    const size_t pos = text.find(needle);
+    if (pos == std::string::npos)
+        return false;
+    const size_t begin = pos + needle.size();
+    const size_t end = text.find('"', begin);
+    if (end == std::string::npos)
+        return false;
+    out = text.substr(begin, end - begin);
+    return true;
+}
+
+std::vector<double> parseNumbers(const std::string &text)
+{
+    std::vector<double> values;
+    const char *p = text.c_str();
+    char *end = nullptr;
+    while (*p)
+    {
+        const double v = std::strtod(p, &end);
+        if (end != p)
+        {
+            values.push_back(v);
+            p = end;
+        }
+        else
+        {
+            ++p;
+        }
+    }
+    return values;
+}
+
+std::vector<double> parseArrayForKey(const std::string &json, const std::string &key)
+{
+    const std::string needle = "\"" + key + "\"";
+    const size_t keyPos = json.find(needle);
+    if (keyPos == std::string::npos)
+        return {};
+    const size_t arrayBegin = json.find('[', keyPos);
+    if (arrayBegin == std::string::npos)
+        return {};
+
+    int depth = 0;
+    for (size_t i = arrayBegin; i < json.size(); ++i)
+    {
+        if (json[i] == '[')
+            ++depth;
+        else if (json[i] == ']')
+        {
+            --depth;
+            if (depth == 0)
+                return parseNumbers(json.substr(arrayBegin, i - arrayBegin + 1));
+        }
+    }
+    return {};
+}
+
+double parseNumberForKey(const std::string &json, const std::string &key, double fallback)
+{
+    const std::string needle = "\"" + key + "\"";
+    const size_t keyPos = json.find(needle);
+    if (keyPos == std::string::npos)
+        return fallback;
+    const size_t colon = json.find(':', keyPos);
+    if (colon == std::string::npos)
+        return fallback;
+    const char *p = json.c_str() + colon + 1;
+    char *end = nullptr;
+    const double value = std::strtod(p, &end);
+    return end == p ? fallback : value;
+}
+
+std::vector<double> parseNthTransformMatrix(const std::string &json, int frameIndex)
+{
+    size_t search = 0;
+    for (int i = 0; i <= frameIndex; ++i)
+    {
+        search = json.find("\"transform_matrix\"", search);
+        if (search == std::string::npos)
+            return {};
+        search += 18;
+    }
+
+    const size_t arrayBegin = json.find('[', search);
+    if (arrayBegin == std::string::npos)
+        return {};
+
+    int depth = 0;
+    for (size_t i = arrayBegin; i < json.size(); ++i)
+    {
+        if (json[i] == '[')
+            ++depth;
+        else if (json[i] == ']')
+        {
+            --depth;
+            if (depth == 0)
+                return parseNumbers(json.substr(arrayBegin, i - arrayBegin + 1));
+        }
+    }
+    return {};
+}
+
+float lerp(float a, float b, float t)
+{
+    return a + (b - a) * t;
+}
+} // namespace
+
+std::shared_ptr<Volume> loadRawVolume(const RawOptions &opt)
+{
+    const size_t voxelCount = (size_t)opt.dim.x * opt.dim.y * opt.dim.z;
+    const size_t expectedBytes = voxelCount * (opt.bpp / 8);
+
+    std::vector<uint8_t> bytes;
+    if (!readAllBytes(opt.path, bytes))
+    {
+        std::cerr << "[RAW] Failed to read file: " << opt.path << "\n";
+        return nullptr;
+    }
+    if (bytes.size() != expectedBytes)
+    {
+        std::cerr << "[RAW] File size mismatch. Expect " << expectedBytes
+                  << " bytes, got " << bytes.size() << " bytes.\n";
+        return nullptr;
+    }
+
+    std::vector<float> scalars(voxelCount);
+    float vmin = std::numeric_limits<float>::max();
+    float vmax = std::numeric_limits<float>::lowest();
+
+    if (opt.bpp == 8)
+    {
+        for (size_t i = 0; i < voxelCount; ++i)
+        {
+            uint8_t v = bytes[i];
+            float f = opt.normalize ? (float)v / 255.f : (float)v;
+            scalars[i] = f;
+            vmin = std::min(vmin, f);
+            vmax = std::max(vmax, f);
+        }
+    }
+    else
+    { // 16-bit
+        const bool hostLE = hostIsLittleEndian();
+        const uint16_t *src = reinterpret_cast<const uint16_t *>(bytes.data());
+        for (size_t i = 0; i < voxelCount; ++i)
+        {
+            uint16_t w = src[i];
+            if (hostLE != opt.littleEndian)
+                w = bswap16(w);
+            float f = opt.normalize ? (float)w / 65535.f : (float)w;
+            scalars[i] = f;
+            vmin = std::min(vmin, f);
+            vmax = std::max(vmax, f);
+        }
+    }
+
+    Volume::Description desc;
+    desc.dim = opt.dim;
+    desc.origin = opt.origin;
+    desc.voxelSize = opt.voxelSize;
+    desc.valueRange = make_float2(vmin, vmax); // 若 normalize==true，通常是 [0,1]
+    desc.densityScale = opt.densityScale;
+
+    std::cout << "[RAW] Loaded " << opt.path << " "
+              << desc.dim.x << "x" << desc.dim.y << "x" << desc.dim.z
+              << " bpp=" << opt.bpp
+              << " range=[" << vmin << ", " << vmax << "]"
+              << " normalize=" << (opt.normalize ? "1" : "0") << "\n";
+
+    return std::make_shared<Volume>(desc, scalars.data());
+}
+
+std::shared_ptr<Volume> loadVtiVolume(const VtiOptions &opt)
+{
+    std::vector<uint8_t> fileBytes;
+    if (!readAllBytes(opt.path, fileBytes))
+        throw std::runtime_error("[VTI] Failed to read file: " + opt.path);
+
+    const std::string file(reinterpret_cast<const char *>(fileBytes.data()), fileBytes.size());
+    const size_t appendedTag = file.find("<AppendedData");
+    if (appendedTag == std::string::npos)
+        throw std::runtime_error("[VTI] Missing AppendedData section");
+
+    const std::string header = file.substr(0, appendedTag);
+    if (header.find("compressor=\"vtkZLibDataCompressor\"") == std::string::npos)
+        throw std::runtime_error("[VTI] Only vtkZLibDataCompressor VTI files are supported");
+    if (header.find("type=\"Float32\"") == std::string::npos)
+        throw std::runtime_error("[VTI] Only Float32 scalar VTI files are supported");
+
+    std::string extentText, originText, spacingText;
+    if (!extractQuotedAttribute(header, "WholeExtent", extentText))
+        throw std::runtime_error("[VTI] Missing WholeExtent");
+    extractQuotedAttribute(header, "Origin", originText);
+    extractQuotedAttribute(header, "Spacing", spacingText);
+
+    const auto extent = parseNumbers(extentText);
+    if (extent.size() != 6)
+        throw std::runtime_error("[VTI] Invalid WholeExtent");
+
+    const int3 dim = make_int3(
+        int(extent[1] - extent[0] + 1),
+        int(extent[3] - extent[2] + 1),
+        int(extent[5] - extent[4] + 1));
+    const size_t voxelCount = size_t(dim.x) * dim.y * dim.z;
+    const size_t expectedBytes = voxelCount * sizeof(float);
+
+    auto originValues = parseNumbers(originText);
+    auto spacingValues = parseNumbers(spacingText);
+    if (originValues.size() != 3)
+        originValues = {0.0, 0.0, 0.0};
+    if (spacingValues.size() != 3)
+        spacingValues = {1.0, 1.0, 1.0};
+
+    size_t pos = file.find('_', appendedTag);
+    const size_t appendedEnd = file.find("</AppendedData>", appendedTag);
+    if (pos == std::string::npos || appendedEnd == std::string::npos)
+        throw std::runtime_error("[VTI] Invalid AppendedData payload");
+    ++pos;
+
+    std::vector<uint8_t> firstHeader = decodeBase64Segment(file, pos, appendedEnd, 12);
+    const uint32_t blockCount = readLE32(firstHeader, 0);
+    const uint32_t blockSize = readLE32(firstHeader, 4);
+    const uint32_t lastBlockSize = readLE32(firstHeader, 8);
+    if (blockCount == 0 || blockSize == 0)
+        throw std::runtime_error("[VTI] Invalid compressed block header");
+
+    std::vector<uint8_t> remainingHeader = decodeBase64Segment(file, pos, appendedEnd, size_t(blockCount) * 4);
+    std::vector<uint32_t> compressedSizes(blockCount);
+    size_t compressedTotalBytes = 0;
+    for (uint32_t i = 0; i < blockCount; ++i)
+    {
+        compressedSizes[i] = readLE32(remainingHeader, size_t(i) * 4);
+        compressedTotalBytes += compressedSizes[i];
+    }
+
+    std::vector<float> scalars(voxelCount);
+    uint8_t *scalarBytes = reinterpret_cast<uint8_t *>(scalars.data());
+    std::vector<uint8_t> compressedPayload = decodeBase64Segment(file, pos, appendedEnd, compressedTotalBytes);
+    size_t outOffset = 0;
+    size_t compressedOffset = 0;
+    for (uint32_t i = 0; i < blockCount; ++i)
+    {
+        const size_t expectedBlockBytes = (i == blockCount - 1 && lastBlockSize != 0)
+                                              ? lastBlockSize
+                                              : blockSize;
+        if (outOffset + expectedBlockBytes > expectedBytes)
+            throw std::runtime_error("[VTI] Decompressed data is larger than expected volume size");
+
+        uLongf dstLen = static_cast<uLongf>(expectedBlockBytes);
+        const int zret = uncompress(scalarBytes + outOffset,
+                                    &dstLen,
+                                    compressedPayload.data() + compressedOffset,
+                                    static_cast<uLong>(compressedSizes[i]));
+        if (zret != Z_OK || dstLen != expectedBlockBytes)
+            throw std::runtime_error("[VTI] zlib failed while decompressing a volume block");
+        outOffset += expectedBlockBytes;
+        compressedOffset += compressedSizes[i];
+    }
+
+    if (outOffset != expectedBytes)
+        throw std::runtime_error("[VTI] Decompressed byte count does not match volume dimensions");
+
+    float vmin = std::numeric_limits<float>::max();
+    float vmax = std::numeric_limits<float>::lowest();
+    for (float v : scalars)
+    {
+        vmin = std::min(vmin, v);
+        vmax = std::max(vmax, v);
+    }
+    if (opt.normalize && vmax > vmin)
+    {
+        const float invRange = 1.0f / (vmax - vmin);
+        for (float &v : scalars)
+            v = (v - vmin) * invRange;
+        vmin = 0.0f;
+        vmax = 1.0f;
+    }
+
+    Volume::Description desc;
+    desc.dim = dim;
+    desc.origin = make_float3(float(originValues[0]), float(originValues[1]), float(originValues[2]));
+    desc.voxelSize = make_float3(float(spacingValues[0]), float(spacingValues[1]), float(spacingValues[2]));
+    if (opt.overrideWorldTransform)
+    {
+        desc.origin = opt.worldOrigin;
+        desc.voxelSize = make_float3(
+            desc.voxelSize.x * opt.worldSpacingScale,
+            desc.voxelSize.y * opt.worldSpacingScale,
+            desc.voxelSize.z * opt.worldSpacingScale);
+    }
+    desc.valueRange = make_float2(vmin, vmax);
+    desc.densityScale = opt.densityScale;
+
+    std::cout << "[VTI] Loaded " << opt.path << " "
+              << dim.x << "x" << dim.y << "x" << dim.z
+              << " range=[" << vmin << ", " << vmax << "]"
+              << " blocks=" << blockCount << "\n";
+
+    return std::make_shared<Volume>(desc, scalars.data());
+}
+
+std::shared_ptr<TransferFunction> loadTransferFunctionConfig(const std::string &path, int samples)
+{
+    const std::string json = readTextFile(path);
+    auto dataRange = parseArrayForKey(json, "data_range");
+    auto controlValues = parseArrayForKey(json, "control_points");
+    if (dataRange.size() < 2 || controlValues.size() < 10 || controlValues.size() % 5 != 0)
+        throw std::runtime_error("[TF] Invalid tf_config.json: " + path);
+
+    struct CP
+    {
+        float x, r, g, b, a;
+    };
+
+    std::vector<CP> cps;
+    for (size_t i = 0; i + 4 < controlValues.size(); i += 5)
+    {
+        cps.push_back(CP{
+            float(controlValues[i + 0]),
+            float(controlValues[i + 1]),
+            float(controlValues[i + 2]),
+            float(controlValues[i + 3]),
+            float(controlValues[i + 4])});
+    }
+    std::sort(cps.begin(), cps.end(), [](const CP &a, const CP &b)
+              { return a.x < b.x; });
+
+    samples = std::max(2, samples);
+    std::vector<float4> table(samples);
+    size_t seg = 0;
+    for (int i = 0; i < samples; ++i)
+    {
+        const float x = i / float(samples - 1);
+        while (seg + 1 < cps.size() && cps[seg + 1].x < x)
+            ++seg;
+
+        const CP &a = cps[seg];
+        const CP &b = cps[std::min(seg + 1, cps.size() - 1)];
+        const float denom = std::max(b.x - a.x, 1e-6f);
+        const float t = std::min(std::max((x - a.x) / denom, 0.0f), 1.0f);
+        table[i] = make_float4(
+            lerp(a.r, b.r, t),
+            lerp(a.g, b.g, t),
+            lerp(a.b, b.b, t),
+            lerp(a.a, b.a, t));
+    }
+
+    std::cout << "[TF] Loaded " << path
+              << " cps=" << cps.size()
+              << " samples=" << samples
+              << " domain=[" << dataRange[0] << ", " << dataRange[1] << "]\n";
+    return std::make_shared<TransferFunction>(
+        table.data(),
+        static_cast<int>(table.size()),
+        make_float2(float(dataRange[0]), float(dataRange[1])));
+}
+
+TransformCameraFrame loadTransformCameraFrame(const std::string &path, int frameIndex)
+{
+    const std::string json = readTextFile(path);
+    const auto matrix = parseNthTransformMatrix(json, std::max(frameIndex, 0));
+    if (matrix.size() != 16)
+        throw std::runtime_error("[CAM] Could not parse transform_matrix frame from " + path);
+
+    TransformCameraFrame out;
+    out.valid = true;
+    out.width = int(parseNumberForKey(json, "w", 0.0));
+    out.height = int(parseNumberForKey(json, "h", 0.0));
+    const double flY = parseNumberForKey(json, "fl_y", 0.0);
+    if (out.height > 0 && flY > 0.0)
+        out.verticalFovDegrees = float(2.0 * std::atan(out.height / (2.0 * flY)) * 180.0 / M_PI);
+
+    out.position = Eigen::Vector3f(float(matrix[3]), float(matrix[7]), float(matrix[11]));
+
+    const Eigen::Vector3f right{float(matrix[0]), float(matrix[4]), float(matrix[8])};
+    const Eigen::Vector3f down{float(matrix[1]), float(matrix[5]), float(matrix[9])};
+    const Eigen::Vector3f forward{float(matrix[2]), float(matrix[6]), float(matrix[10])};
+    (void)right;
+
+    out.forward = forward.normalized();
+    out.up = (-down).normalized();
+
+    const double scale = parseNumberForKey(json, "scale_factor", 0.0);
+    const auto offsets = parseArrayForKey(json, "offset");
+    if (scale > 0.0 && offsets.size() >= 3)
+    {
+        out.hasVolumeWorldTransform = true;
+        out.volumeWorldSpacingScale = float(scale);
+        out.volumeWorldOrigin = make_float3(float(offsets[0]), float(offsets[1]), float(offsets[2]));
+    }
+
+    std::cout << "[CAM] Loaded " << path
+              << " frame=" << frameIndex
+              << " resolution=" << out.width << "x" << out.height
+              << " vfov=" << out.verticalFovDegrees;
+    if (out.hasVolumeWorldTransform)
+    {
+        std::cout << " volume_origin=("
+                  << out.volumeWorldOrigin.x << ","
+                  << out.volumeWorldOrigin.y << ","
+                  << out.volumeWorldOrigin.z << ")"
+                  << " scale=" << out.volumeWorldSpacingScale;
+    }
+    std::cout << "\n";
+    return out;
+}
+```
+
+### src/lights.cu
+```
+#include "lights.hpp"
+#include "cuda_utils.hpp"
+
+void Lights::set(const std::vector<DeviceLight> &lights)
+{
+    const int new_count = static_cast<int>(lights.size());
+    if (d_lights && new_count != m_count)
+    {
+        CUDA_CHECK(cudaFree(d_lights));
+        d_lights = nullptr;
+    }
+
+    m_count = new_count;
+    if (m_count == 0)
+    {
+        if (d_lights)
+        {
+            CUDA_CHECK(cudaFree(d_lights));
+            d_lights = nullptr;
+        }
+        return;
+    }
+    if (!d_lights)
+    {
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&d_lights), sizeof(DeviceLight) * m_count));
+    }
+    CUDA_CHECK(cudaMemcpy(d_lights, lights.data(), sizeof(DeviceLight) * m_count, cudaMemcpyHostToDevice));
+}
+```
+
+### src/main.cu
+```
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+#include <imgui.h>
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_opengl3.h>
+#include <iostream>
+
+#include "image_presenter.hpp"
+#include "scene.hpp"
+#include "volume_renderer.hpp"
+#include "cuda_utils.hpp"
+#include "debug_utils.hpp"
+#include "io.hpp"
+
+const int WINDOW_WIDTH = 800;
+const int WINDOW_HEIGHT = 600;
+
+GLFWwindow *initWindow()
+{
+  if (!glfwInit())
+  {
+    std::cerr << "Failed to initialize GLFW" << std::endl;
+    return nullptr;
+  }
+
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+  glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+
+  GLFWwindow *window = glfwCreateWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "ImGui OpenGL Example", nullptr, nullptr);
+  if (!window)
+  {
+    std::cerr << "Failed to create GLFW window" << std::endl;
+    glfwTerminate();
+    return nullptr;
+  }
+
+  glfwMakeContextCurrent(window);
+  if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
+  {
+    std::cerr << "Failed to initialize GLAD" << std::endl;
+    return nullptr;
+  }
+
+  return window;
+}
+
+void initImGui(GLFWwindow *window)
+{
+  IMGUI_CHECKVERSION();
+  ImGui::CreateContext();
+  ImGuiIO &io = ImGui::GetIO();
+  (void)io;
+
+  ImGui::StyleColorsDark();
+
+  const char *glsl_version = "#version 100";
+  ImGui_ImplGlfw_InitForOpenGL(window, true);
+  ImGui_ImplOpenGL3_Init("#version 330");
+
+  /* Load Fonts */
+  // io.Fonts->AddFontFromFileTTF(
+  //     (resource_manager.getResource("fonts/Roboto-Medium.ttf")).c_str(), 16.0f);
+  // io.Fonts->AddFontDefault();
+}
+
+void shutdownImGui()
+{
+  ImGui_ImplOpenGL3_Shutdown();
+  ImGui_ImplGlfw_Shutdown();
+  ImGui::DestroyContext();
+}
+
+void renderScene(GLuint texID)
+{
+  glClearColor(0.45f, 0.55f, 0.60f, 1.00f);
+  glClear(GL_COLOR_BUFFER_BIT);
+
+  glGenTextures(1, &texID);
+}
+
+void renderImGui()
+{
+  ImGui_ImplOpenGL3_NewFrame();
+  ImGui_ImplGlfw_NewFrame();
+  ImGui::NewFrame();
+
+  ImGui::Begin("Hello, SciVis!");
+  ImGui::Text("Cuda-SciVis.");
+  ImGui::End();
+
+  ImGui::Render();
+  ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+}
+
+int main(int argc, char **argv)
+{
+
+#ifdef DEBUG
+  std::cout << "Debug mode is active!" << std::endl;
+#endif
+
+  GLFWwindow *window = initWindow();
+  if (!window)
+  {
+    fprintf(stderr, "Failed to create GLFW window!\n");
+    return 1;
+  }
+
+  initImGui(window);
+  CUDA_CHECK(cudaSetDevice(0));
+
+  ImagePresenter *presenter = new ImagePresenter(WINDOW_WIDTH, WINDOW_HEIGHT);
+
+  VolumeRenderer::CreateInfo ci{WINDOW_WIDTH, WINDOW_HEIGHT, false};
+  VolumeRenderer *renderer = new VolumeRenderer(ci);
+
+  RawOptions opt;
+  bool useRaw = parseRawArgs(argc, argv, opt);
+  std::shared_ptr<Volume> volume;
+  if (useRaw)
+  {
+    volume = loadRawVolume(opt);
+    if (!volume)
+    {
+      std::cerr << "[RAW] Fallback to dummy volume.\n";
+      volume = makeDummyVolume();
+    }
+  }
+  else
+  {
+    volume = makeDummyVolume();
+  }
+  auto volume_center = volume->getVolumeCenter();
+  auto tf = makeSimpleTF();
+
+  Camera cam(Eigen::Vector3f(-50, -50, 0), /*fov*/ 45.0f, Eigen::Vector2i(WINDOW_WIDTH, WINDOW_HEIGHT));
+  cam.lookAt(Eigen::Vector3f(volume_center.x, volume_center.y, volume_center.z), Eigen::Vector3f(0, 1, 0));
+
+  Lights lights;
+  std::vector<DeviceLight> ls(1);
+  ls[0].position = make_float3(2, 2, 2);
+  ls[0].color = make_float3(1, 1, 1);
+  ls[0].intensity = 1.0f;
+  ls[0].type = 0;
+  lights.set(ls);
+
+  Scene scene;
+  scene.setCamera(&cam)
+      .setLights(&lights)
+      .setVolume(volume)
+      .setTransferFunction(tf)
+      .setRenderParams(/*step*/ 0.5f, /*opacityScale*/ 1.0f, /*mode*/ 0, /*iso*/ 0.5f)
+      .setClipBox(make_float3(-1e3f, -1e3f, -1e3f), make_float3(1e3f, 1e3f, 1e3f));
+  scene.commit(0);
+
+  while (!glfwWindowShouldClose(window))
+  {
+    glfwPollEvents();
+
+    renderer->render(scene);
+
+    glViewport(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
+    glClearColor(0.1f, 0.1f, 0.1f, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    // presenter->display(dbgTex);
+    presenter->display(renderer->getResultTexture());
+
+    glfwSwapBuffers(window);
+  }
+
+  shutdownImGui();
+  glfwDestroyWindow(window);
+  glfwTerminate();
+
+  return 0;
+}
+```
+
+### src/renderer_kernerl.cu
+```
+#include <stdio.h>
+#include "cuda_utils.hpp"
+#include "renderer_kernel.hpp"
+
+using MathUtils::Kernel::add3;
+using MathUtils::Kernel::clampf;
+using MathUtils::Kernel::cross3;
+using MathUtils::Kernel::dot3;
+using MathUtils::Kernel::f3;
+using MathUtils::Kernel::f4;
+using MathUtils::Kernel::length3;
+using MathUtils::Kernel::mad3;
+using MathUtils::Kernel::mulS;
+using MathUtils::Kernel::mulV;
+using MathUtils::Kernel::normalize3;
+using MathUtils::Kernel::sub3;
+
+__device__ __forceinline__ float linearToSRGB(float x)
+{
+    x = fminf(fmaxf(x, 0.f), 1.f);
+    return (x <= 0.0031308f) ? (12.92f * x) : (1.055f * powf(x, 1.f / 2.4f) - 0.055f);
+}
+__device__ __forceinline__ unsigned char toByte(float x)
+{
+    x = fminf(fmaxf(x, 0.f), 1.f);
+    return (unsigned char)(x * 255.f + 0.5f);
+}
+
+__device__ __forceinline__ float safeInvNonZero(float value)
+{
+    const float eps = 1e-6f;
+    if (fabsf(value) < eps)
+        return 1.0f / copysignf(eps, value == 0.0f ? 1.0f : value);
+    return 1.0f / value;
+}
+
+__device__ bool intersectAABB(
+    const float3 &ro, const float3 &rd,
+    const float3 &bmin, const float3 &bmax,
+    float &tmin, float &tmax)
+{
+    float3 inv;
+    inv.x = (fabsf(rd.x) > 1e-8f) ? 1.0f / rd.x : 1e32f;
+    inv.y = (fabsf(rd.y) > 1e-8f) ? 1.0f / rd.y : 1e32f;
+    inv.z = (fabsf(rd.z) > 1e-8f) ? 1.0f / rd.z : 1e32f;
+
+    const float3 t0 = mulV(sub3(bmin, ro), inv);
+    const float3 t1 = mulV(sub3(bmax, ro), inv);
+
+    // 每轴取小/大的那个（进入/离开）
+    const float3 tsm = f3(fminf(t0.x, t1.x), fminf(t0.y, t1.y), fminf(t0.z, t1.z));
+    const float3 tbg = f3(fmaxf(t0.x, t1.x), fmaxf(t0.y, t1.y), fmaxf(t0.z, t1.z));
+
+    // 三轴区间求交
+    tmin = fmaxf(fmaxf(tsm.x, tsm.y), fmaxf(tsm.z, 0.0f)); // 从相机前方（t>=0）开始
+    tmax = fminf(fminf(tbg.x, tbg.y), tbg.z);
+
+    return tmax > tmin;
+}
+// ====== world to uvw in [0,1]======
+__device__ float3 worldToUVW(const DeviceVolume &vol, const float3 &pWorld)
+{
+    //* vol.origin is the min corner of the volume, voxel_size is the size of a voxel, dim is the number of voxels in each direction
+
+#ifdef DEBUG
+    if (vol.dim.x <= 0 || vol.dim.y <= 0 || vol.dim.z <= 0)
+    {
+        printf("Volume dimension is invalid:(%d, %d, %d)\n",
+               vol.dim.x, vol.dim.y, vol.dim.z);
+        return make_float3(0.0f, 0.0f, 0.0f);
+    }
+
+    const float eps = 1e-6f;
+    if (fabs(vol.voxel_size.x) < eps ||
+        fabs(vol.voxel_size.y) < eps ||
+        fabs(vol.voxel_size.z) < eps)
+    {
+        printf("Invalid voxel size: (%.6f, %.6f, %.6f)\n",
+               vol.voxel_size.x, vol.voxel_size.y, vol.voxel_size.z);
+        return make_float3(0.0f, 0.0f, 0.0f);
+    }
+#endif
+
+    float3 inv_voxel = make_float3(
+        safeInvNonZero(vol.voxel_size.x),
+        safeInvNonZero(vol.voxel_size.y),
+        safeInvNonZero(vol.voxel_size.z));
+
+    float3 idx = make_float3(
+        (pWorld.x - vol.origin.x) * inv_voxel.x,
+        (pWorld.y - vol.origin.y) * inv_voxel.y,
+        (pWorld.z - vol.origin.z) * inv_voxel.z);
+
+    // Normalized to [0,1]
+    float3 dimm1 = make_float3(
+        __int2float_rn(vol.dim.x - 1),
+        __int2float_rn(vol.dim.y - 1),
+        __int2float_rn(vol.dim.z - 1));
+
+    float3 uvw = make_float3(
+        fminf(fmaxf(idx.x / dimm1.x, 0.0f), 1.0f),
+        fminf(fmaxf(idx.y / dimm1.y, 0.0f), 1.0f),
+        fminf(fmaxf(idx.z / dimm1.z, 0.0f), 1.0f));
+
+#ifdef DEBUG
+    if (isnan(uvw.x) || isnan(uvw.y) || isnan(uvw.z))
+    {
+        printf("Invalid UVW: pWorld(%.3f,%.3f,%.3f) -> idx(%.3f,%.3f,%.3f)\n",
+               pWorld.x, pWorld.y, pWorld.z, idx.x, idx.y, idx.z);
+    }
+#endif
+    return uvw;
+}
+
+__device__ __forceinline__ float sampleField(const DeviceVolume &vol, const float3 uvw)
+{
+    // volme data is scalar
+    // if normalizedCoordinates=0，modify to "tex3D<float>(vol.field_tex, x, y, z)"
+    return tex3D<float>(vol.field_tex, uvw.x, uvw.y, uvw.z);
+}
+
+__device__ __forceinline__ float3 sampleGradient(const DeviceVolume &vol, const float3 uvw)
+{
+    float4 f4 = tex3D<float4>(vol.grad_tex, uvw.x, uvw.y, uvw.z);
+    return f3(f4.x, f4.y, f4.z);
+}
+
+__device__ __forceinline__ float4 sampleTF(const DeviceTF &tf, float value)
+{
+    // 把 value_range/domain 映射到 [0,1] 采样 1D TF
+    float t = (value - tf.domain.x) / (tf.domain.y - tf.domain.x + 1e-8f);
+    t = clampf(t, 0.f, 1.f);
+    float4 c = tex1D<float4>(tf.tf1D, t);
+    return c;
+}
+
+__device__ __forceinline__ float3 estimateGradient(const DeviceVolume &vol, const float3 uvw)
+{
+    const float hx = 1.0f / fmaxf(float(vol.dim.x - 1), 1.0f);
+    const float hy = 1.0f / fmaxf(float(vol.dim.y - 1), 1.0f);
+    const float hz = 1.0f / fmaxf(float(vol.dim.z - 1), 1.0f);
+
+    const float gx = sampleField(vol, f3(clampf(uvw.x + hx, 0.f, 1.f), uvw.y, uvw.z)) -
+                     sampleField(vol, f3(clampf(uvw.x - hx, 0.f, 1.f), uvw.y, uvw.z));
+    const float gy = sampleField(vol, f3(uvw.x, clampf(uvw.y + hy, 0.f, 1.f), uvw.z)) -
+                     sampleField(vol, f3(uvw.x, clampf(uvw.y - hy, 0.f, 1.f), uvw.z));
+    const float gz = sampleField(vol, f3(uvw.x, uvw.y, clampf(uvw.z + hz, 0.f, 1.f))) -
+                     sampleField(vol, f3(uvw.x, uvw.y, clampf(uvw.z - hz, 0.f, 1.f)));
+    return f3(gx, gy, gz);
+}
+
+__device__ __forceinline__ float3 shadeTFColor(const DeviceVolume &vol,
+                                               const float3 uvw,
+                                               const float3 rd,
+                                               const float3 rgb)
+{
+    const float3 grad = estimateGradient(vol, uvw);
+    const float gradLen = length3(grad);
+    if (gradLen < 1e-5f)
+        return rgb;
+
+    float3 n = mulS(grad, 1.0f / gradLen);
+    const float3 viewDir = normalize3(mulS(rd, -1.0f));
+    if (dot3(n, viewDir) < 0.0f)
+        n = mulS(n, -1.0f);
+
+    const float lambert = fmaxf(dot3(n, viewDir), 0.0f);
+    const float rim = powf(1.0f - lambert, 2.0f);
+    const float shade = 0.56f + 0.38f * lambert + 0.10f * rim;
+    return f3(
+        clampf(rgb.x * shade, 0.f, 1.f),
+        clampf(rgb.y * shade, 0.f, 1.f),
+        clampf(rgb.z * shade, 0.f, 1.f));
+}
+
+__device__ float sampleVolume(const float *volume, int3 dim, float3 pos)
+{
+    float x = pos.x * (dim.x - 1);
+    float y = pos.y * (dim.y - 1);
+    float z = pos.z * (dim.z - 1);
+
+    int x0 = floor(x), x1 = min(x0 + 1, dim.x - 1);
+    int y0 = floor(y), y1 = min(y0 + 1, dim.y - 1);
+    int z0 = floor(z), z1 = min(z0 + 1, dim.z - 1);
+
+    auto at = [&](int xi, int yi, int zi)
+    {
+        return volume[(zi * dim.y + yi) * dim.x + xi];
+    };
+
+    float c000 = at(x0, y0, z0);
+    float c100 = at(x1, y0, z0);
+    float c010 = at(x0, y1, z0);
+    float c110 = at(x1, y1, z0);
+    float c001 = at(x0, y0, z1);
+    float c101 = at(x1, y0, z1);
+    float c011 = at(x0, y1, z1);
+    float c111 = at(x1, y1, z1);
+
+    // trilerp(v000, v100, v010, v110, v001, v101, v011, v111, x, y, z);
+    float dx = x - x0, dy = y - y0, dz = z - z0;
+
+    float c00 = c000 * (1 - dx) + c100 * dx;
+    float c10 = c010 * (1 - dx) + c110 * dx;
+    float c0 = c00 * (1 - dy) + c10 * dy;
+
+    float c01 = c001 * (1 - dx) + c101 * dx;
+    float c11 = c011 * (1 - dx) + c111 * dx;
+    float c1 = c01 * (1 - dy) + c11 * dy;
+
+    c1 = c01 * (1 - dy) + c11 * dy;
+    return c0 * (1 - dz) + c1 * dz;
+}
+__device__ __forceinline__ void compositeFrontToBack_unpremul(
+    float3 rgb, float a, float4 &accum)
+{
+    float oneMinusAaccum = 1.f - accum.w;
+    float3 rgbPremul = make_float3(rgb.x * a, rgb.y * a, rgb.z * a);
+    accum.x += oneMinusAaccum * rgbPremul.x;
+    accum.y += oneMinusAaccum * rgbPremul.y;
+    accum.z += oneMinusAaccum * rgbPremul.z;
+    accum.w += oneMinusAaccum * a;
+}
+
+__device__ __forceinline__ void compositeFrontToBack_premul(float4 sampledPremulRGBA,
+                                                            float opacityScale,
+                                                            float4 &accum)
+{
+    float a_i = clampf(sampledPremulRGBA.w * opacityScale, 0.f, 1.0f);
+    float oneMinusAaccum = 1.0f - accum.w;
+
+    // === Lacc = Lacc + (1 - alphaacc)Li
+    accum.x += oneMinusAaccum * sampledPremulRGBA.x;
+    accum.y += oneMinusAaccum * sampledPremulRGBA.y;
+    accum.z += oneMinusAaccum * sampledPremulRGBA.z;
+    accum.w += oneMinusAaccum * a_i;
+}
+
+//! ===== render kernel ====
+__global__ void volumeRendererKernel(const DeviceScene scene,
+                                     uchar4 *output,
+                                     int width, int height)
+{
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height)
+        return;
+
+    float3 ro, rd;
+    scene.d_camera.generateRay(x, y, width, height, ro, rd);
+    float3 bmin{}, bmax{};
+    volumeAABB(scene.d_volume, bmin, bmax);
+
+    float tmin, tmax;
+    if (!rayBox(ro, rd, bmin, bmax, tmin, tmax))
+    {
+        output[y * width + x] = make_uchar4(0, 0, 0, 255);
+        return;
+    }
+    const float vx = scene.d_volume.voxel_size.x;
+    const float vy = scene.d_volume.voxel_size.y;
+    const float vz = scene.d_volume.voxel_size.z;
+    const float voxelMin = fminf(vx, fminf(vy, vz));
+    float stepWorld = fmaxf(scene.step_size, 1e-4f);
+    float stepInVoxel = stepWorld / fmaxf(voxelMin, 1e-6f);
+
+    float4 accum = f4(0, 0, 0, 0);
+    tmin = fmaxf(tmin, 0.0f);
+    const float terminate = 0.98f;
+    float maxVal = -1e30f;
+    float iso = scene.isoValue;
+
+    // ===  ray march  ===
+    for (float t = tmin; t <= tmax; t += stepWorld)
+    {
+        float3 pWorld = add3(ro, mulS(rd, t));
+        float3 uvw = worldToUVW(scene.d_volume, pWorld);
+
+        if (uvw.x < 0.f || uvw.x > 1.f ||
+            uvw.y < 0.f || uvw.y > 1.f ||
+            uvw.z < 0.f || uvw.z > 1.f)
+            continue;
+
+        float s = sampleField(scene.d_volume, uvw);
+
+        if (scene.mode == 0)
+        { // -- mode 0: volume rendering
+            float4 c = sampleTF(scene.d_tf, s);
+            float sigma = c.w * scene.d_volume.density_scale * scene.opacityScale;
+            float a_i = 1.f - expf(-sigma * stepInVoxel);
+            float3 rgb = make_float3(c.x, c.y, c.z);
+            if (a_i > 1e-4f)
+                rgb = shadeTFColor(scene.d_volume, uvw, rd, rgb);
+            compositeFrontToBack_unpremul(rgb, a_i, accum);
+#ifdef DEBUG
+            if (x == width / 2 && y == height / 2)
+            {
+                printf("a_i=%.3e step=%.3e accum=(%.3e,%.3e,%.3e,%.3e)\n",
+                       a_i, stepWorld, accum.x, accum.y, accum.z, accum.w);
+            }
+#endif
+
+            if (accum.w > terminate)
+                break;
+        }
+        else if (scene.mode == 1)
+        { // -- mode 1: basic isosurface rendering
+            if (s >= iso)
+            {
+                float4 c = sampleTF(scene.d_tf, s);
+                float3 rgb = shadeTFColor(scene.d_volume, uvw, rd, make_float3(c.x, c.y, c.z));
+                output[y * width + x] = make_uchar4(
+                    toByte(linearToSRGB(rgb.x)),
+                    toByte(linearToSRGB(rgb.y)),
+                    toByte(linearToSRGB(rgb.z)),
+                    255);
+                return;
+            }
+        }
+        else if (scene.mode == 2)
+        { // -- mode 2: MIP
+            maxVal = fmaxf(maxVal, s);
+            continue;
+        }
+    }
+
+    // write output
+    float3 color = (accum.w > 1e-6f)
+                       ? make_float3(accum.x / accum.w, accum.y / accum.w, accum.z / accum.w)
+                       : make_float3(0, 0, 0);
+#ifdef DEBUG
+    if (x == width / 2 && y == height / 2)
+    {
+        unsigned char R = toByte(color.x);
+        unsigned char G = toByte(color.y);
+        unsigned char B = toByte(color.z);
+        printf("final color linear=(%.3f,%.3f,%.3f) -> 8bit=(%u,%u,%u)\n",
+               color.x, color.y, color.z, R, G, B);
+    }
+#endif
+
+    if (scene.mode == 0)
+    {
+        // Total light intensity divided by total opacity
+        color = accum.w > 1e-6f ? f3(accum.x / accum.w, accum.y / accum.w, accum.z / accum.w) : f3(0.f, 0.f, 0.f);
+
+        // sRGB 编码后写回
+        output[y * width + x] = make_uchar4(
+            toByte(linearToSRGB(color.x)),
+            toByte(linearToSRGB(color.y)),
+            toByte(linearToSRGB(color.z)),
+            255);
+        return;
+    }
+
+    if (scene.mode == 2)
+    {
+        const float value = fmaxf(maxVal, 0.0f);
+        const float4 c = sampleTF(scene.d_tf, value);
+        output[y * width + x] = make_uchar4(
+            toByte(linearToSRGB(c.x)),
+            toByte(linearToSRGB(c.y)),
+            toByte(linearToSRGB(c.z)),
+            255);
+        return;
+    }
+
+    output[y * width + x] = make_uchar4(0, 0, 0, 255);
+}
+
+__global__ void kernelFirstSample(const DeviceScene scene,
+                                  uchar4 *output,
+                                  int width, int height)
+{
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height)
+        return;
+
+    float3 ro{}, rd{};
+    scene.d_camera.generateRay(x, y, width, height, ro, rd);
+
+    float3 bmin{}, bmax{};
+    volumeAABB(scene.d_volume, bmin, bmax);
+
+    float tmin, tmax;
+    if (!rayBox(ro, rd, bmin, bmax, tmin, tmax))
+    {
+        output[y * width + x] = make_uchar4(0, 0, 0, 255);
+        return;
+    }
+
+    float4 accum = f4(0, 0, 0, 0);
+    float stepWorld = 1e-3f;
+    tmin = fmaxf(tmin, 0.0f);
+
+    // first sample
+    float3 p_in = add3(ro, mulS(rd, tmin + stepWorld));
+    float3 uvw_in = worldToUVW(scene.d_volume, p_in);
+    float s_in = sampleField(scene.d_volume, uvw_in);
+
+    // middle samples
+    float3 p_mid = add3(
+        ro,
+        mulS(rd, (fmaxf(tmin, 0.f) + tmax) * 0.5f));
+    float3 uvw_mid = worldToUVW(scene.d_volume, p_mid);
+    float s_mid = sampleField(scene.d_volume, uvw_mid);
+
+    unsigned char g = (unsigned char)(fminf(1.f, s_mid) * 255);
+    output[y * width + x] = make_uchar4(g, g, g, 255);
+
+    if (x == width / 2 && y == height / 2)
+    {
+        printf("t0=%.4f t1=%.4f t_in=%.4f uvw_in=(%.3f,%.3f,%.3f) s_in=%.4f\n",
+               tmin, tmax, tmin + stepWorld, uvw_in.x, uvw_in.y, uvw_in.z, s_in);
+        printf("t_mid=%.4f uvw_mid=(%.3f,%.3f,%.3f) s_mid=%.4f\n",
+               tmin + (fmaxf(tmin, 0.f) + tmax) * 0.5f, uvw_mid.x, uvw_mid.y, uvw_mid.z, s_mid);
+    }
+
+    return;
+}
+
+__global__ void kernelMip(const DeviceScene scene,
+                          uchar4 *output,
+                          int width, int height)
+{
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height)
+        return;
+    const int idx = y * width + x;
+
+    float3 ro{}, rd{};
+    scene.d_camera.generateRay(x, y, width, height, ro, rd);
+
+    float tmin{}, tmax{};
+    if (!intersectAABB(ro, rd, scene.clipMin, scene.clipMax, tmin, tmax))
+    {
+        output[idx] = make_uchar4(0, 0, 0, 255);
+    }
+    // step size
+    float vx = scene.d_volume.voxel_size.x, vy = scene.d_volume.voxel_size.y, vz = scene.d_volume.voxel_size.z;
+    float step = fmaxf(fminf(vx, fminf(vy, vz)) * scene.step_size, 1e-4f);
+
+    float vmax = 0.f;
+    for (float t = fmaxf(tmin, 0.f); t <= tmax; t += step)
+    {
+        float3 p = make_float3(ro.x + rd.x * t, ro.y + rd.y * t, ro.z + rd.z * t);
+        float3 uvw_in = worldToUVW(scene.d_volume, p);
+        float s_in = tex3D<float>(scene.d_volume.field_tex, uvw_in.x, uvw_in.y, uvw_in.z);
+        vmax = fmaxf(vmax, s_in);
+    }
+    unsigned char g = (unsigned char)(fminf(1.f, vmax) * 255);
+    output[y * width + x] = make_uchar4(g, g, g, 255);
+}
+```
+
+### src/scene.cu
+```
+#include "scene.hpp"
+#include "cuda_utils.hpp"
+#include <Eigen/Dense>
+
+Scene::~Scene()
+{
+    if (m_ds_dev)
+    {
+        CUDA_CHECK(cudaFree(m_ds_dev));
+    }
+}
+Scene &Scene::setCamera(const Camera *cam)
+{
+    m_cam = cam;
+    m_dirtyCam = true;
+    return *this;
+}
+Scene &Scene::setVolume(std::shared_ptr<Volume> vol)
+{
+    m_volume = std::move(vol);
+    m_dirtyVol = true;
+    return *this;
+}
+Scene &Scene::setTransferFunction(std::shared_ptr<TransferFunction> tf)
+{
+    m_tf = std::move(tf);
+    m_dirtyTF = true;
+    return *this;
+}
+Scene &Scene::setLights(const Lights *lights)
+{
+    m_lights = lights;
+    m_dirtyLights = true;
+    return *this;
+}
+Scene &Scene::setRenderParams(float step, float opacityScale, int mode, float iso)
+{
+    m_stepSize = step;
+    m_opacityScale = opacityScale;
+    m_mode = mode;
+    m_isoValue = iso;
+    m_dirtyParams = true;
+    return *this;
+}
+Scene &Scene::setClipBox(float3 clip_min, float3 clip_max)
+{
+    m_clipMin = clip_min;
+    m_clipMax = clip_max;
+    m_dirtyParams = true;
+    return *this;
+}
+void Scene::validateOrThrow() const
+{
+    if (!m_cam)
+        throw std::runtime_error("Scene: No camera set");
+    if (!m_volume)
+        throw std::runtime_error("Scene: No volume set");
+    if (!m_tf)
+        throw std::runtime_error("Scene: No transfer function set");
+
+    if (m_stepSize <= 0.f)
+        throw std::runtime_error("Scene: Invalid step size");
+
+    if (m_volume->getDesc().dim.x <= 0 || m_volume->getDesc().dim.y <= 0 || m_volume->getDesc().dim.z <= 0)
+        throw std::runtime_error("Scene: invalid volume dimensions.");
+}
+void Scene::commit(cudaStream_t stream)
+{
+    validateOrThrow();
+    bool dsDirty = false;
+
+    if (m_dirtyCam)
+    {
+        m_ds_host.d_camera = m_cam->toDevice();
+        m_dirtyCam = false;
+        dsDirty = true;
+    }
+    if (m_dirtyVol)
+    {
+        m_ds_host.d_volume = m_volume->toDevice();
+        m_dirtyVol = false;
+        dsDirty = true;
+    }
+    if (m_dirtyTF)
+    {
+        m_ds_host.d_tf = m_tf->toDevice();
+        m_dirtyTF = false;
+        dsDirty = true;
+    }
+
+    if (m_dirtyLights)
+    {
+        m_ds_host.d_lights = m_lights ? m_lights->getDevicePointer() : nullptr;
+        m_ds_host.lights_count = m_lights ? m_lights->count() : 0;
+        m_dirtyLights = false;
+        dsDirty = true;
+    }
+
+    // Params
+    if (m_dirtyParams)
+    {
+        m_ds_host.step_size = m_stepSize;
+        m_ds_host.opacityScale = m_opacityScale;
+        m_ds_host.mode = m_mode;
+        m_ds_host.isoValue = m_isoValue;
+        m_ds_host.clipMin = m_clipMin;
+        m_ds_host.clipMax = m_clipMax;
+        m_dirtyParams = false;
+        dsDirty = true;
+    }
+
+    if (!m_ds_dev)
+    {
+        CUDA_CHECK(
+            cudaMalloc(reinterpret_cast<void **>(&m_ds_dev), sizeof(m_ds_host)));
+        dsDirty = true;
+    }
+    if (dsDirty)
+    {
+        CUDA_CHECK(
+            cudaMemcpyAsync(m_ds_dev, &m_ds_host, sizeof(m_ds_host), cudaMemcpyHostToDevice, stream));
+    }
+}
+
+SceneDebugInfo Scene::debug() const
+{
+    SceneDebugInfo info{};
+    if (!m_volume || !m_tf)
+        return info;
+    info.valid = true;
+    info.dim = m_volume->getDesc().dim;
+    info.voxelSize = m_volume->getDesc().voxelSize;
+    info.valueRange = m_volume->getDesc().valueRange;
+    info.tfSize = 0; // 若需要可在 TF 中保存 N
+    info.lightCount = m_lights ? m_lights->count() : 0;
+    info.stepSize = m_stepSize;
+    info.mode = m_mode;
+    return info;
+}
+```
+
+### src/transfer_function.cu
+```
+// transfer_function.cpp
+#include "transfer_function.hpp"
+#include "cuda_utils.hpp"
+
+static cudaTextureObject_t make1DTex(cudaArray_t arr)
+{
+    cudaResourceDesc res{};
+    res.resType = cudaResourceTypeArray;
+    res.res.array.array = arr;
+    cudaTextureDesc td{};
+    td.normalizedCoords = 1;
+    td.filterMode = cudaFilterModeLinear;
+    td.addressMode[0] = cudaAddressModeClamp;
+    td.readMode = cudaReadModeElementType;
+    cudaTextureObject_t t = 0;
+    CUDA_CHECK(cudaCreateTextureObject(&t, &res, &td, nullptr));
+    return t;
+}
+
+TransferFunction::TransferFunction(const float4 *table, int count, float2 domain)
+    : m_count(count), m_domain(domain)
+{
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&m_device_table), count * sizeof(float4)));
+    CUDA_CHECK(cudaMemcpy(m_device_table, table, count * sizeof(float4), cudaMemcpyHostToDevice));
+
+    // description of the array storing float4  rgba
+    cudaChannelFormatDesc ch = cudaCreateChannelDesc<float4>();
+
+    // allocate the 1dim cuda array
+    CUDA_CHECK(cudaMallocArray(&m_array, &ch, count, 1, cudaArrayDefault));
+
+    // using cudaMemcpy2DToArray: height = 1
+    CUDA_CHECK(cudaMemcpy2DToArray(m_array, 0, 0, table, count * sizeof(float4),
+                                   count * sizeof(float4), 1, cudaMemcpyHostToDevice));
+
+    // binding cudaArrray_t to a cudaTextureObject_t
+    m_tex = make1DTex(m_array);
+}
+TransferFunction::~TransferFunction()
+{
+    if (m_tex)
+        CUDA_CHECK(cudaDestroyTextureObject(m_tex));
+    if (m_array)
+        CUDA_CHECK(cudaFreeArray(m_array));
+    if (m_device_table)
+        CUDA_CHECK(cudaFree(m_device_table));
+}
+
+// texture query
+__device__ float4 TransferFunction::sample(float x) const
+{
+    float normalized_x = (x - m_domain.x) / (m_domain.y - m_domain.x);
+    return tex1D<float4>(m_tex, normalized_x);
+}
+
+// directly query
+__device__ float4 TransferFunction::lookup(float x) const
+{
+    float normalized_x = (x - m_domain.x) / (m_domain.y - m_domain.x);
+    int idx = min(max(0, (int)(normalized_x * (m_count - 1))), m_count - 1);
+    return m_device_table[idx];
+}
+
+DeviceTF TransferFunction::toDevice() const
+{
+    DeviceTF d_tf{};
+    d_tf.domain = m_domain;
+    d_tf.tf1D = m_tex;
+
+    return d_tf;
+}
+
+//! api usage
+// __global__ void renderKernel(
+//     float *scalar_field,   // input scalar volume
+//     TransferFunction *tf,  // transfer function
+//     uchar4 *output,        // output image
+//     int width, int height, // output image resolution
+//     float data_range       // scalar volume data range
+// )
+// {
+//     int x = blockIdx.x * blockDim.x + threadIdx.x;
+//     int y = blockIdx.y * blockDim.y + threadIdx.y;
+//     if (x >= width || y >= height)
+//         return;
+
+//     float scalar_value = scalar_field[y * width + x];
+//     float normalized = (scalar_value - data_range.x) / (data_range.y - data_range.x);
+
+//!     float4 color = tex1D<float4>(tf->getCudaTex(), normalized);
+
+// }
+```
+
+### src/volume.cu
+```
+#include "volume.hpp"
+#include "cuda_utils.hpp"
+#include <vector>
+
+//! create a 3D texture bind to a 3D volume
+static cudaTextureObject_t make3DTex(cudaArray_t arr, bool normalized = true)
+{
+    cudaResourceDesc resDesc{};
+    resDesc.resType = cudaResourceTypeArray;
+    resDesc.res.array.array = arr;
+
+    cudaTextureDesc texDesc{};
+    texDesc.normalizedCoords = normalized;
+    texDesc.filterMode = cudaFilterModeLinear;
+    texDesc.addressMode[0] = texDesc.addressMode[1] = texDesc.addressMode[2] = cudaAddressModeClamp;
+    texDesc.readMode = cudaReadModeElementType;
+
+    cudaTextureObject_t tex = 0;
+    CUDA_CHECK(cudaCreateTextureObject(&tex, &resDesc, &texDesc, NULL));
+
+    return tex;
+}
+
+Volume::Volume(const Description &desc, const float *hostScalar) : m_desc(desc)
+{
+    cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float>();
+    cudaExtent ext = make_cudaExtent(m_desc.dim.x, m_desc.dim.y, m_desc.dim.z);
+    CUDA_CHECK(cudaMalloc3DArray(&m_arrayField, &channelDesc, ext, cudaArrayDefault));
+
+    cudaMemcpy3DParms cp{};
+    cp.srcPtr = make_cudaPitchedPtr((void *)hostScalar,
+                                    size_t(m_desc.dim.x) * sizeof(float),
+                                    size_t(m_desc.dim.x), size_t(m_desc.dim.y));
+    cp.dstArray = m_arrayField;
+    cp.extent = ext;
+    cp.kind = cudaMemcpyHostToDevice;
+    CUDA_CHECK(cudaMemcpy3D(&cp));
+
+    m_fieldTex = make3DTex(m_arrayField, true);
+}
+void Volume::uploadGradient(const float3 *hostGrad)
+{
+    cudaChannelFormatDesc channeldesc = cudaCreateChannelDesc<float4>();
+    cudaExtent ext = make_cudaExtent(m_desc.dim.x, m_desc.dim.y, m_desc.dim.z);
+    CUDA_CHECK(cudaMalloc3DArray(&m_arrayGrad, &channeldesc, ext, cudaArrayDefault));
+
+    // number of channel must be 1,2,or 4
+    std::vector<float4> tmp(ext.width * ext.height * ext.depth);
+    for (int i = 0; i < ext.width * ext.height * ext.depth; ++i)
+    {
+        tmp[i] = make_float4(hostGrad[i].x, hostGrad[i].y, hostGrad[i].z, 0.f);
+    }
+
+    cudaMemcpy3DParms cp = {};
+    cp.srcPtr = make_cudaPitchedPtr((void *)tmp.data(),
+                                    size_t(m_desc.dim.x) * sizeof(float4),
+                                    size_t(m_desc.dim.x), size_t(m_desc.dim.y));
+    cp.dstArray = m_arrayGrad;
+    cp.extent = ext;
+    cp.kind = cudaMemcpyHostToDevice;
+    CUDA_CHECK(cudaMemcpy3D(&cp));
+
+    m_gradTex = make3DTex(m_arrayGrad, true);
+}
+
+float3 Volume::getVolumeCenter() const
+{
+    return make_float3(
+        m_desc.origin.x + m_desc.voxelSize.x * (m_desc.dim.x - 1) * 0.5f,
+        m_desc.origin.y + m_desc.voxelSize.y * (m_desc.dim.y - 1) * 0.5f,
+        m_desc.origin.z + m_desc.voxelSize.z * (m_desc.dim.z - 1) * 0.5f);
+}
+
+DeviceVolume Volume::toDevice() const
+{
+    DeviceVolume dv{};
+    dv.field_tex = m_fieldTex;
+    dv.grad_tex = m_gradTex; // 可为 0
+    dv.dim = m_desc.dim;
+    dv.voxel_size = m_desc.voxelSize;
+    dv.origin = m_desc.origin;
+    dv.value_range = m_desc.valueRange;
+    dv.density_scale = m_desc.densityScale;
+    return dv;
+}
+
+Volume::~Volume()
+{
+    if (m_fieldTex)
+        CUDA_CHECK(cudaDestroyTextureObject(m_fieldTex));
+    if (m_arrayField)
+        CUDA_CHECK(cudaFreeArray(m_arrayField));
+    if (m_gradTex)
+        CUDA_CHECK(cudaDestroyTextureObject(m_gradTex));
+    if (m_arrayGrad)
+        CUDA_CHECK(cudaFreeArray(m_arrayGrad));
+}
+```
+
+### src/volume_renderer.cu
+```
+#include "scene.hpp"
+#include "volume_renderer.hpp"
+#include "renderer_kernel.hpp"
+#include "debug_utils.hpp"
+#include "cuda_utils.hpp"
+#include "cuda_gl_interop.h"
+
+static void glCreateRGBA8Texture(GLuint &tex, int w, int h)
+{
+    if (!tex)
+        glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    // 分配显存但不上传数据（最后我们要用 CUDA 来写这块内存）
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+VolumeRenderer::VolumeRenderer(const CreateInfo &ci)
+    : width_(ci.width), height_(ci.height), useSurfaceWrite_(ci.useSurfaceWrite)
+{
+    // 1) create gl texture as
+    createGLTexture(width_, height_);
+
+    // 2) register gl texture to cuda
+    registerCudaInterop();
+
+    // 3) allocate device memory for kernel's output
+    if (!useSurfaceWrite_)
+        allocDeviceBuffer();
+}
+
+void VolumeRenderer::createGLTexture(int w, int h) { glCreateRGBA8Texture(glTex_, w, h); }
+
+void VolumeRenderer::destoryGLTexture()
+{
+    if (glTex_)
+    {
+        glDeleteTextures(1, &glTex_);
+        glTex_ = 0;
+    }
+}
+
+void VolumeRenderer::registerCudaInterop()
+{
+    // Register flags:
+    // -WriteDiscard: linear buffered path usage; We write the target texture with full coverage per frame
+    // -SurfaceLoadStore: Needs this flag if you're going to surface
+    unsigned int flags = useSurfaceWrite_ ? cudaGraphicsRegisterFlagsSurfaceLoadStore
+                                          : cudaGraphicsRegisterFlagsWriteDiscard;
+    CUDA_CHECK(cudaGraphicsGLRegisterImage(&cudaRes_, glTex_, GL_TEXTURE_2D, flags));
+}
+
+void VolumeRenderer::unregisterCudaInterop()
+{
+    if (cudaRes_)
+    {
+        CUDA_CHECK(cudaGraphicsUnregisterResource(cudaRes_));
+        cudaRes_ = nullptr;
+    }
+}
+
+void VolumeRenderer::allocDeviceBuffer()
+{
+    if (!d_output_)
+    {
+        CUDA_CHECK(
+            cudaMalloc(reinterpret_cast<void **>(&d_output_), size_t(width_) * size_t(height_) * sizeof(uchar4)));
+    }
+}
+
+void VolumeRenderer::freeDeviceBuffer()
+{
+    if (d_output_)
+    {
+        CUDA_CHECK(cudaFree(d_output_));
+        d_output_ = nullptr;
+    }
+}
+
+VolumeRenderer::~VolumeRenderer()
+{
+    freeDeviceBuffer();
+    unregisterCudaInterop();
+    destoryGLTexture();
+    if (stream_)
+    {
+        cudaStreamDestroy(stream_);
+        stream_ = nullptr;
+    };
+}
+
+void VolumeRenderer::resize(int newW, int newH)
+{
+    if (newW == width_ && newH == height_)
+        return;
+    width_ = newW;
+    height_ = newH;
+
+    unregisterCudaInterop();
+    destoryGLTexture();
+    createGLTexture(width_, height_);
+    registerCudaInterop();
+
+    if (!useSurfaceWrite_)
+    {
+        freeDeviceBuffer();
+        allocDeviceBuffer();
+    }
+}
+void VolumeRenderer::ensureCapacity(int w, int h)
+{
+}
+
+//! [ CUDA Kernel ]
+//!     │
+//!     ↓ (写入)
+//! [ d_output_ ] → (可选) cudaMemcpy → [ cudaRes_ (映射到 glTex_) ] → OpenGL渲染
+//!     │                                   ▲
+//!     └───────────────────────────────────┘ (当 useSurfaceWrite_=true 时直接写入)
+void VolumeRenderer::render(Scene &scene, bool commitScene)
+{
+    if (commitScene)
+        scene.commit(stream_);
+
+    //* cudaRes_ has binded to the gl texture "glTex_" in cudaGraphicsGLRegisterImage()
+    //* cudaGraphicsMapResources 临时将 OpenGL 纹理的控制权转移给 CUDA，
+    //* cudaRes_
+    // 是一个 cudaGraphicsResource*，代表注册好的 OpenGL 资源的“全局句柄”。
+    // 它不直接指向 GPU 像素内存
+    // 只是 CUDA 与 GL 之间的“资源注册对象”，用来做 map/unmap 这样的生命周期管理。
+    // 在注册 (cudaGraphicsGLRegisterImage) 和映射 (cudaGraphicsMapResources) 时用它。
+    //* cudaArray_t dstArray
+    // 是 CUDA 端的真正的图像内存对象句柄，指向这个 GL 纹理在 GPU 上的实际存储（CUDA array）。
+    // 只有在 cudaGraphicsMapResources 之后，调用 cudaGraphicsSubResourceGetMappedArray 才能得到。
+    // 用它才能直接访问像素数据（拷贝、创建 texture/surface 对象等）。
+    // 如果没这个，CUDA kernel 就没办法读写 GL 纹理的存储。
+    CUDA_CHECK(cudaGraphicsMapResources(1, &cudaRes_, stream_));
+    cudaArray_t dstArray = nullptr;
+    CUDA_CHECK(cudaGraphicsSubResourceGetMappedArray(&dstArray, cudaRes_, 0, 0));
+
+    // prepare kernal params, pass by value
+    const DeviceScene &ds = scene.snapshotHost();
+
+    dim3 blockSize(16, 16);
+    dim3 gridSize((width_ + blockSize.x - 1) / blockSize.x,
+                  (height_ + blockSize.y - 1) / blockSize.y);
+
+    if (!useSurfaceWrite_)
+    {
+        ensureCapacity(width_, height_);
+
+        volumeRendererKernel<<<gridSize, blockSize, 0, stream_>>>(ds, d_output_, width_, height_);
+        //  volumeRenderCheckCUDAGL<<<gridSize, blockSize, 0, stream_>>>(ds, d_output_, width_, height_);
+        //  kernelSampleCenter<<<gridSize, blockSize, 0, stream_>>>(ds, d_output_, width_, height_);
+        //  kernelSliceUV<<<gridSize, blockSize, 0, stream_>>>(ds, d_output_, width_, height_);
+        // kernelRayHit<<<gridSize, blockSize, 0, stream_>>>(ds, d_output_, width_, height_);
+        // kernelFirstSample<<<gridSize, blockSize, 0, stream_>>>(ds, d_output_, width_, height_);
+        // kernelMip<<<gridSize, blockSize, 0, stream_>>>(ds, d_output_, width_, height_);
+        CUDA_CHECK(cudaGetLastError());
+
+        // 把线性缓冲拷到 GL 纹理的 cudaArray（设备到设备拷贝）
+        CUDA_CHECK(cudaMemcpy2DToArrayAsync(
+            dstArray,
+            /*wOffset*/ 0, /*hOffset*/ 0,
+            /*src*/ d_output_,
+            /*srcPitch*/ size_t(width_) * sizeof(uchar4),
+            /*widthInBytes*/ size_t(width_) * sizeof(uchar4),
+            /*height*/ size_t(height_),
+            cudaMemcpyDeviceToDevice,
+            stream_));
+    }
+    else
+    {
+    }
+
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    // The CUDA occupation of an OpenGL texture is relieved, allowing OpenGL to use the texture again
+    CUDA_CHECK(cudaGraphicsUnmapResources(1, &cudaRes_, stream_));
+}
+
+//! cuda-opengl interoperation
+//!    [ OpenGL 纹理对象 ] living room
+//    m_output_texture (GLuint)， only belong to OpenGL
+//              │
+//              │ 注册（cudaGraphicsGLRegisterImage）
+//              ▼
+//!  [ CUDA 图形资源句柄 ] key
+//  m_cuda_output_resource (cudaGraphicsResource*) , is not a real CUDA resource, but a handle to the OpenGL texture, establishing the resource sharing channel between OpenGL and CUDA
+//              │
+//              │ 映射后访问（cudaGraphicsSubResourceGetMappedArray）
+//              ▼
+//!    [ CUDA 可写数组视图 ] space behind the opening door
+//    m_cuda_array (cudaArray_t) , cuda view of the OpenGL texture, used for writing data in CUDA kernel
+```

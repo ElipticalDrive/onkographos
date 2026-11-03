@@ -1,0 +1,1836 @@
+Wavelet: Code-based postquantum signatures
+with fast verification on microcontrollers
+Gustavo Banegas1 , Thomas Debris-Alazard1 , Milena Nedeljković2 and
+Benjamin Smith1
+1
+Inria and Laboratoire d’Informatique de l’École polytechnique, Institut Polytechnique de Paris,
+Palaiseau, France,
+gustavo@cryptme.in,thomas.debris@inria.fr,smith@lix.polytechnique.fr
+2
+École polytechnique, Institut Polytechnique de Paris, Palaiseau, France
+milena.nedeljkovic@polytechnique.edu
+Abstract. This work presents the first full implementation of Wave, a postquantum
+code-based signature scheme. We define Wavelet, a concrete Wave scheme at the
+128-bit classical security level (or NIST postquantum security Level 1) equipped
+with a fast verification algorithm targeting embedded devices. Wavelet offers 930byte signatures, with a public key of 3161 kB. We include implementation details
+using AVX instructions, and on ARM Cortex-M4, including a solution to deal with
+Wavelet’s large public keys, which do not fit in the SRAM of a typical embedded
+device. Our verification algorithm is ≈ 4.65× faster then the original, and verifies in
+1 087 538 cycles using AVX instructions, or 13 172 ticks in an ARM Cortex-M4.
+Keywords: Post-quantum Cryptography · Code-based Signature · Fast Verification
+· Implementation · Embedded devices.
+1
+Introduction
+Ensuring the long-term security of constrained devices is a critical, and perennial, problem.
+The secure and efficient implementation of public-key cryptographic algorithms for microcontrollers is vital, but difficult given the constrained resources available on these devices.
+The difficulties are magnified when it comes to implementing post-quantum cryptosystems,
+which generally have much larger keys and more intensive computing requirements than
+their elliptic-curve equivalents.
+In this article, we focus on the problem of implementing post-quantum signature
+schemes with efficient verification on microcontrollers. Our scheme, Wavelet, is a variant
+of Wave [DST19a], a post-quantum trapdoor based on the hardness of problems in coding
+theory. Wave has attractive properties, including simple verification and relatively short
+signatures. In a sea of broken code-based signature schemes (including [BBC+ 13], [PT16],
+[SHM+ 20], and [ABD+ 21]), Wave maintains the promise of high security. Wave also
+presents some interesting practical challenges: for example, the Wave designers recommend
+working over the finite field F3 , which is highly unusual in contemporary cryptographic
+software.
+Author list in alphabetical order; see https://www.ams.org/profession/leaders/culture/
+CultureStatement04.pdf. This work was funded in part by the European Commission through H2020
+SPARTA, https://www.sparta.eu/ and by the French Agence Nationale de la Recherche through ANR
+JCJC COLA (ANR-21-CE39-0011). Generic disclaimer: “Any opinions, findings, and conclusions or
+recommendations expressed in this material are those of the author(s) and do not necessarily reflect the
+views of the funding agencies.”
+2
+Wavelet: Code-based postquantum signatures for microcontrollers
+Wavelet is a signature scheme based on Wave over F3 , but designed for efficient
+verification on constrained devices. Wavelet keys and signatures are easily converted to
+Wave keys and signatures over F3 , and vice versa; in particular, Wavelet inherits its
+security from Wave over F3 . There are two main benefits to Wavelet compared with
+Wave: shorter signatures, and faster verification.
+Wave signatures are already remarkably short, but Wavelet signatures are even
+shorter. We achieve this on two levels: first, we truncate Wave signatures from length n
+(the code length) to length k (the code dimension). This already represents a substantial
+improvement: for our parameters, truncated signatures are one-third shorter. But these
+truncated signatures can be compressed further using minimal-redundancy coding, at
+minimal computational cost.
+The end result is that Wavelet signatures are the shortest among code-based signatures,
+and nearly half the length of Wave signatures for the same code parameters. In practice,
+when targeting the 128-bit classical security level (and NIST postquantum Level 1 security),
+Wavelet signatures fit in under one kilobyte. This is competitive with lattice-based
+postquantum signatures: NIST Round-3 candidates Dilithium [ABD+ ] and Falcon [FHK+ ]
+targeting similar security levels offer 2420- and 666-byte signatures, respectively (see
+Table 1 for a more complete comparison).
+Wavelet’s signature verification is also faster—and not just because the signatures are
+shorter. Indeed, a subtle tweak to the public key allows us to avoid loading or operating
+on nearly half of its data during any given signature verification. This yields an important
+speedup by drastically reducing the number of field operations, but also by reducing the
+impact of memory latency—an effect that is further exaggerated in microcontrollers by
+the fact that the public key is typically too large for the RAM.
+We have put this all into practice with a free and portable C implementation of
+Wavelet for x86_64, with verification on x86_64 (with and without AVX) and on
+Cortex-M4 platforms, targeting the 128-bit security level (and NIST Level 1). This is
+the first full implementation of a Wave signature scheme1 on any platform. We show
+how to use high-speed bitsliced F3 -vector arithmetic to speed Wave systems, and use
+external Flash via QSPI to handle very large public keys (over 3MB). Using this software,
+Wavelet signatures can be verified on an Intel® CoreTM PC in 450µs, and on an ARM
+Cortex-M4 powered board in 402ms.
+Table 1: Size of private/public keys and signatures for postquantum signature schemes.
+Algorithm
+Private Key (B)
+Public Key (B)
+Signature (B)
+Wavelet
+32 or 11043162
+3236327
+930
+Falcon-512 [FHK ]
+Dilithium2 [ABD+ ]
+LMS [MCF19]
+SPHINCS+ -128f [ABB+ ]
+GeMSS [CFMR+ ]
+Picnic3-L1 [CDG+ ]
+1281
+2528
+64
+64
+48
+17
+897
+1312
+60
+32
+14520
+34
+666
+2420
+4756
+17088
+417416
+13802
++
+Organization of the paper Section 2 gives an overview of Wave, defines the Supertubos
+parameters, and explains the improvements that lead to our concrete scheme, Wavelet.
+Section 3 gives detailed versions of the algorithms in Wavelet. Section 4 gives useful binary
+1 A proof-of-concept implementation of the original Wave trapdoor was published with [DST19a]
+at [DST19b], but it cannot be used to sign messages: in particular, it does not include the ternary hash
+function required to hash messages.
+Banegas, Debris-Alazard, Nedeljković, Smith
+3
+representations for ternary keys, describes the efficient compression and decompression
+of Wave and Wavelet signatures, and calculates key and (compressed) signature sizes.
+Section 5 gives details on the implementation of Wavelet in software. Section 6 shows
+the experimental results from our implementation on x86_64 (with and without AVX) and
+Cortex-M4 platforms. We conclude in Section 7, giving perspectives on future development.
+Notation and conventions Vectors and matrices are written in bold. Vectors are in row
+notation. Indices start at 0: if v is a vector in FN
+q , then its components are (v0 , . . . , vN −1 );
+×N
+if H is a matrix in FM
+,
+then
+its
+row
+vectors
+are
+H0 , . . . , HM −1 and Hi,j is its coefficient
+q
+at position (i, j). The Hamming weight of v is |v| := #{0 ≤ i < N | vi 6= 0}. The
+concatenation of u and v is denoted by u k v.
+The set of permutations of {0, . . . , N −1} is denoted by SN . We represent a permutation
+π in SN by the sequence (π(0), . . . , π(N − 1)) (and we warn the reader that this is not
+cycle notation). Permutations act on vector coordinates:
+0
+0
+π(v) := (vπ(0) , . . . , vπ(N −1) ) k (vN , . . . , vN 0 −1 ) for π ∈ Sn and v ∈ FN
+q with N ≥ N .
+×N
+If H is a matrix in FM
+, then π(H) is the matrix with row vectors π(H0 ), . . . , π(HM −1 ).
+q
+To ease analysis, the functions and subroutines in our algorithms do not modify their
+arguments. In practice, we (strongly) recommend implementing them to modify large
+vector and matrix arguments in-place, to save memory. Finally, if E is a finite set, then
+$
+x←
+− E means that x is sampled uniformly at random from E .
+2
+Wave and Wavelet
+We begin with a high-level view of Wave, before explaining the modifications that yield
+Wavelet. This will serve as a high-level tour of our main theoretical results.
+2.1
+Wave
+Wave is a full-domain hash (FDH) signature scheme [BR96, Cor02]. Fix a prime power
+(n−k)×n
+q 6= 2, and let H ∈ Fq
+be a parity-check matrix for a code W = {x ∈ Fnq | xH| = 0}
+of dimension k and length n over Fq . Fix a weight w < n. If W is a random code, then
+for carefully chosen w, the function mapping error vectors e in Fnq of weight w to their
+syndromes s = eH| is a one-way function: inverting it corresponds to decoding a random
+linear code. But if we suppose that W is equipped with a trapdoor allowing us to invert
+the one-way function, then we get the FDH signature scheme of Figure 1.
+Sign(m, sk):
+$
+r←
+− {0, 1}λ
+s ← Hash(m, r)
+e ← InvAlg(s, sk)
+return(e, r)
+Verify(m, (e0 , r), pk = (H, w)):
+s ← Hash(m, r)
+|
+If e0 H == s and |e0 | == w:
+return True
+Else:
+return ⊥
+Figure 1: Code-based signature using FDH paradigm (on a high level). The function
+InvAlg is a “decoder” that inverts the trapdoor, correctly finding an error e with |e| = w.
+The Wave trapdoor is built from two random linear codes U and V of length n/2 and
+dimensions kU and kV , respectively, over Fq . These codes are combined way to form a
+code W of length n and dimension k = kU + kV , using a construction explained in §3.2.
+4
+Wavelet: Code-based postquantum signatures for microcontrollers
+(n−k)×n
+The public key is a parity-check matrix Hpk in Fq
+of the code W ; the private key
+consists of U , V , and data allowing us to map decoding problems into U and V . The
+parameters kU , kV , n, and w are carefully balanced, and the construction of W from U
+|
+and V carefully designed, so that the map e 7→ s = eHpk is a trapdoor: computing a
+solution e of the correct weight w for a given s is cryptographically hard unless we have
+the secret key, in which case we can use the decoding algorithm described in §3.3.
+To construct a signature scheme from this trapdoor, it suffices to let h be the hash of
+a message m with a random salt r; the Wave signature is the pair (e, r). To verify the
+|
+signature, it suffices to check that eHpk is the hash of m and r and that |e| = w.
+The theoretical security of Wave is beyond the scope of this article. Details and proofs
+appear in [DST19a].
+2.2
+Parameters
+The fundamental Wave parameters are a classical security parameter λ, a field size q 6= 2,
+vector space dimensions n, kU , and kV , a Hamming weight w, and a parameter d used
+in the rejection sampling in the signing algorithm. Concrete values for these parameters
+targeting 128-bit classical security and NIST Level 1 postquantum security were specified
+in [DST19a], and are reproduced here in Table 2. We call this parameter set Supertubos.2
+Table 2: General Wave parameters for 128 bits of security.
+Parameters
+Supertubos
+λ
+128
+q
+3
+n
+8492
+w
+7980
+k = kU + kV
+5605 = 3558 + 2047
+d
+81
+Our Wavelet implementation uses Supertubos, and the reader may keep these parameter values in mind to get a concrete picture of Wavelet’s practical improvements.
+The Wavelet algorithms will work with any Wave parameter set with q = 3, though the
+performance of the signature compression algorithm is sensitive to the ratio w/n ≈ 0.94.
+Deriving new parameter sets that may be better suited to constrained evironments (or
+other applications) is left for future work.
+2.3
+Restricting to q = 3
+The description of Wave in [DST19a] defines a trapdoor over a general finite field Fq
+with q 6= 2, but the security analysis focuses on the case q = 3, and parameters are only
+specified for q = 3. The analysis of Wave with q > 3 is an open question.
+While [DST19a] recommends restricting Wave to q = 3, Wavelet explicitly requires
+q = 3. Forcing q = 3 allows several important practical improvements, including
+• shorter signatures through more effective compression, and more compact keypairs;
+• simple field arithmetic and high-speed bitsliced vector operations (see §5.1); and
+• interesting algorithmic optimizations, especially in signature verification.
+Using q = 3 also imposes some interesting practical questions, since the data to be
+signed, and the keys and signatures, must ultimately be encoded in binary. The choice of
+binary encoding for each ternary object is addressed in §4.
+But not all of these problems are a simple matter of data representation. For example:
+Wave is a hash-and-sign signature scheme, and it requires a cryptographic hash function
+{0, 1}∗ → Fn−k
+. No concrete hash function is specified in [DST19a], and indeed we are
+3
+not aware of any standard, high-security hash functions mapping from binary to ternary
+2 See 39.3410294768957,
+-9.36095797386207.
+Banegas, Debris-Alazard, Nedeljković, Smith
+5
+domains. Instead, we must build one from a secure hash functions into a binary domain.
+The construction of a hash function into Fn−k
+is addressed in §3.1.
+3
+2.4
+Truncated signatures and Wavelet public keys
+The Wave public key is a parity-check matrix Hpk for the code W ; but in fact, the basic
+Wave key-generation algorithm always constructs a row-reduced Hpk = (In−k |R) where
+R is a random-looking (n − k) × k matrix over F3 . The verification equations are
+|e| = w
+and
+h = eHpk
+|
+where
+h = Hash(r k m) .
+(1)
+Now let s in Fk3 consist of the last k coordinates of e; let u := h − sR| and e0 := u k s.
+|
+|
+If eHpk = h, then e0 Hpk = h too (indeed, typically e = e0 ), and |e| = |e0 | = |u| + |s|. We
+can therefore transmit (r, s) as the signature instead of (r, e), thus saving n − k elements
+of F3 , and use the verification equation
+|u| + |s| = w
+where
+u = h − sR
+|
+with
+h = Hash(r k m) .
+(2)
+For Supertubos, this reduces the uncompressed signature length—and the work involved in
+the vector-matrix product—by roughly one-third.
+Pk−1
+The verifier needs to compute sR| = i=0 si Ri| , where Ri| is the i-th row of R| .3
+Since the si are in F3 , no multiplication is really required: computing the sum amounts to
+adding Ri| into an accumulator if si = 1, subtracting it if si = 2, and ignoring it completely
+if si = 0. Skipping rows is an important optimization, and not just to minimize field
+operations: loading rows from memory (or external flash) is expensive.
+But the vector s has unusually few 0s. Indeed, |e| = w, which is quite close to n in the
+Wave context, so we expect |s| to be proportionally close to k. At first, this may appear
+frustrating: there are not many rows to skip when computing sR| . However, we can turn
+this imbalance around to create a relatively sparse sum using the following propositions.
+First, for each s in Fk3 , we define a vector ŝ in Fk3 by
+ŝ2i := s2i + s2i+1
+ŝ2i+1 := s2i − s2i+1
+)
+for 0 ≤ i < k/2 ,
+and ŝk−1 := sk−1 if k is odd .
+(3)
+Proposition 1. Let s be a vector in Fk3 , and let ŝ be defined as in (3). Then
+|ŝ| + |s| =
+3
+(k + ) − 3δ
+2
+where
+δ = #{0 ≤ i < k/2 | s2i = s2i+1 = 0}
+and
+
+
+0
+= 1
+
+
+−1
+if k is even;
+if k is odd and sk−1 6= 0;
+if k is odd and sk−1 = 0 .
+Proof. See Appendix D.
+Proposition 1 shows that as |s| grows, |ŝ| shrinks. Indeed, in the limiting case where
+|s| = k, we find |ŝ| = dk/2e. Now we just need to find a way to verify using a vector-matrix
+product involving ŝ instead of s.
+3 One might also compute this as a vector of dot-products between s and the columns of R | ; but when
+using bitsliced arithmetic, it seems harder to exploit the weight of s to reduce the cost of this approach.
+6
+Wavelet: Code-based postquantum signatures for microcontrollers
+(n−k)×k
+Proposition 2. Let R be in F3
+. For every s in Fk3 , if ŝ is defined as in (3), then
+|
+sR = −ŝM
+k×(n−k)
+where M is the matrix in F3
+)
+|
+|
++ R2i+1
+M2i := R2i
+|
+|
+M2i+1 := R2i
+− R2i+1
+for
+(4)
+whose rows are
+0 ≤ i < k/2 ,
+and
+|
+Mk−1 := −Rk−1 if k is odd .
+Proof. See Appendix D.
+Proposition 2 shows that if we replace the public key R with M, then the validation
+equation (2) becomes
+|u| + |s| = w ,
+where u = h + ŝM with h = Hash(r k m) .
+(5)
+Clearly R| can be recovered from M, and s from ŝ, so solving (5) is equivalent to solving (2).
+But ŝ, which can be rapidly computed from s on the fly using (3), has much lower weight
+by Proposition 1: roughly speaking, we expect |s| to be close to k, and so |ŝ| should be
+close to k/2. This lets us compute the product ŝM, and hence verify (5), in much less
+time than (2) (for Supertubos, nearly half); and less time again than that required for the
+equivalent Wave signatures using (1).
+We therefore take M to be the public key in Wavelet; we verify Wavelet signatures
+(r, s) using (5) and (3). Note that we do not replace s with ŝ in the signature: the weight
+condition w = |u| + |s| is simpler than the corresponding condition involving |ŝ|, and in
+any case the weight |s| can be easily computed at the same time as ŝ.
+Remark 1. The mapping s 7→ ŝ can be recognised as the first step in a fast Hadamard
+transform. We might naturally ask if pushing further with the Hadamard transform on s
+would produce even lower weights; it does not. Instead, the weight of the image vector
+creeps back up again. With the Supertubos parameters, the expected |s|/k is ≈ 0.94. One
+step of the fast Hadamard transform gives an expected |ŝ|/k of ≈ 0.55; but the next step
+brings this expected ratio up to ≈ 0.65, and the following step to ≈ 0.67.
+2.5
+Signature compression
+A Wavelet signature is a pair (r, s), with r in {0, 1}2λ and s in Fk3 . We must choose
+a binary encoding of s, and at first glance it would appear that this requires (at least)
+log2 (3)k bits. However, this ignores the fact that s has very high weight, and thus an
+entropy significantly less than log2 (3) ≈ 1.585.
+Concretely, if we use the Supertubos parameters where n = 8492 and w = 7980, then
+the entropy is ≈ 1.268. In theory, then, we can hope to encode s in as few as 1.268k ≈ 7109
+bits. This is better than 1.585k ≈ 8884 bits, and much better than the 1.585n ≈ 13460
+bits for Wave signatures suggested in [DST19a] (“the order of 13 thousand bits”).
+We show in §4.2 that we can approach this level of efficiency using a simple Minimal
+Redundancy (MR) coding. This variable-length coding yields variable-length signatures,
+but on average we can compress s to around 7280 bits.
+3
+Wavelet algorithms
+In this section, we present the details of our hashing, Key Generation, Signing, and
+Verification algorithms. The key generation and signing algorithms are not constanttime, and should only be run in trusted environments. We leave the development of
+countermeasures against side-channel attacks for Wave and Wavelet for future work.
+Banegas, Debris-Alazard, Nedeljković, Smith
+3.1
+7
+Hashing to ternary vectors
+In order to sign any messages, we need to define a hash function into Fn−k
+. The simplest
+3
+option would be to hash into {0, 1}dlog2 (3)(n−k)e using an XOF, view the output as an
+integer, and “ternarize” the result (i.e., read off its 3-adic coefficients) to get the entries of
+the output in Fn−k
+. For realistic parameter sizes, though, this is too slow and intensive: for
+3
+Supertubos, for example, this would mean repeated Euclidean division by 3 on a 4576-bit
+integer. This is inconvenient on a PC, and unrealistic on embedded platforms.
+Our hash function, called Hash (Algorithm 1) combines the following three functions
+to define a cryptographic hash function {0, 1}∗ → Fn−k
+:
+3
+• BinaryHash : {0, 1}∗ → {0, 1}2λ is a cryptographic hash function.
+• Ternarize : {0, 1}∗ × Z≥0 → F∗3 (Algorithm 2) views its input ((x0 , x1 , . . .), τ )
+as the vector of coefficients in the little-endian binary expansion of an integer x,
+together with a length τ , and returns the ternary vector of length τ representing the
+little-endian ternary expansion of x mod 3τ .
+• Expand: {0, 1}2λ → Fτ3 (Algorithm 3) is a pseudorandom function. Expand applies
+an XOF (or a stream cipher) to its input to produce a long stream of pseudorandom
+bytes, which we view as integers in [0, 255]. The non-negative integers less than
+35 = 243 are in bijection with F53 , so if a byte is less than 243 we convert it to
+an element of F53 with Ternarize and concatenate it to the output; otherwise we
+skip the byte. We continue processing bytes until we have produced τ elements
+of F3 (discarding the last few if τ is not a multiple of 5). This process generates
+a distribution of vectors in Fτ3 that is computationally indistinguishable from the
+uniform distribution (with respect to the security parameter).4
+Algorithm 1: Hashing from binary data to ternary vectors for Wavelet. We
+write µ for b2λ/ log2 (3)c.
+Function Hash(x)
+Input: x ∈ {0, 1}∗
+Output: s ∈ Fn−k
+3
+2
+h ← BinaryHash(x)
+3
+t ← Ternarize(h, µ)
+4
+p ← Expand(h, n − k − µ)
+5
+return t k p
+1
+// Hash function {0, 1}∗ → {0, 1}2λ
+// Ternarize: {0, 1}2λ → Fµ3
+// Expand: {0, 1}2λ → F3n−k−µ
+The collision- and preimage-resistance of Hash are derived from the properties of
+BinaryHash. Ternarize transcodes the output of BinaryHash; this composition maintains
+the security of BinaryHash, but is relatively slow to compute. The composition of Expand
+and BinaryHash has weaker preimage and collision resistance, but good pseudorandomness
+properties, and is relatively fast to compute. The concatenation of the two has the security
+of the strong hash, and the good pseudorandomness of both.
+In practice, BinaryHash could be SHA3-512, while the bytestream in Expand could be
+generated with an XOF such as SHAKE-256. This minimises the code size, since both are
+built on the same Keccak permutation, while maintaining appropriate domain separation.
+4 A true uniform distribution on Fτ cannot be produced in this way when τ is large, because there are
+3
+only 22λ possible stream outputs—and even for large λ, the number of possible output vectors is limited
+by the size of the internal state of the XOF or stream cipher used to generate the stream. On the other
+hand, this process has the advantage of being simple and fast.
+8
+Wavelet: Code-based postquantum signatures for microcontrollers
+Algorithm 2: Converting integer values to ternary vectors of a specified length,
+corresponding to the little-endian ternary expansion of the input
+Function Ternarize(x, τ )
+Input: x ≥ 0 and τ > 0
+Pτ
+Output: v ∈ Fτ3 such that x = i=1 vi 3i−1 , where the vi are lifted to {0,1,2}
+2
+(v, t) ← ((), x)
+// v: empty vector over F3
+3
+for 1 ≤ i ≤ τ do
+4
+(v, t) ← (v k (r), q) where (q, r) = (bt/3c, t mod 3)
+1
+5
+return v
+Algorithm 3: Expand a binary seed to a pseudo-random stream of ternary values.
+The random bytestream may be instantiated with an XOF or a stream cipher.
+The expected number of bytes drawn from the stream is (256τ )/(243 × 5) ≈ 0.21τ .
+Function Expand(h, τ )
+Input: h ∈ {0, 1}2λ and τ > 0
+Output: p ∈ Fτ3
+2
+stream = random bytestream seeded with h
+// E.g. secure XOF(h)
+3
+(p, r) ← ((), τ )
+// p: empty vector over F3
+4
+while r > 0 do
+5
+b ← next byte from stream, viewed as an integer in [0, 255]
+6
+if b < 243 then
+7
+(p, r) ← (p k Ternarize(b, min(5, r)), r)
+1
+8
+3.2
+return p
+Key generation
+Algorithm 4 generates a Wavelet keypair. It is essentially the Wave key-generation
+procedure from [DST19a], with the public key transformation at the end. We have made no
+attempt to optimize this procedure beyond the use of bitsliced and vectorized F3 -arithmetic.
+Given an (n/2 − kU ) × kU matrix RU , an (n/2 − kV ) × kV matrix RV , and vectors
+n/2
+a, b, c, and d in F3 , the subroutine ParityCheckUV(RU , RV , a, b, c, d) returns the
+(n − k) × n matrix
+Hsk =
+
+HU D
+−HV C
+
+−HU B
+HV A
+(
+where
+HU := (In/2−kU | RU ) ,
+HV := (In/2−kV | RV ) ,
+and
+A := Diag(a) ,
+B := Diag(b) ,
+C := Diag(c) ,
+D := Diag(d) ;
+here, Diag(x) denotes the n/2 × n/2 diagonal matrix with diagonal entries given by x.
+The auxiliary function GaussElim is given in Algorithm 5. For this function, we need
+to “split” into two functions, that is, in our scheme we use it to generate a submatrix with
+certain rank and for this, we need to have the support as part of our secret key thus we
+changed a little to know which rows are the pivots.
+Algorithm 6 gives the elimination of a single row, for this we check if the element is
+not 0 then we perform the operations. Later, we swap rows to put in the correct “rank”,
+and do the sum and subtraction necessary to just let the (r, j)-th element as not zero.
+Banegas, Debris-Alazard, Nedeljković, Smith
+9
+Algorithm 4: Wavelet Key Generation. This algorithm also serves for classic
+Wave key generation if we stop after Line 11 and return sk and pk = (In−k |R).
+1
+Function KeyGen()
+Parameters: n, w, kU , kV , k
+Output: (sk, pk)
+$
+(n/2−kU )×kU
+$
+(n/2−kV )×kV
+2
+RU ←
+− F3
+3
+RV ←
+− F3
+4
+a←
+− (F3 \{0})
+5
+b←
+− F3
+6
+c←
+− (F3 \{0})
+$
+$
+n/2
+n/2
+$
+n/2
+$
+d ← (di )0≤i<n/2 where di ←
+− F3 \{bi ci a−1
+i } for 0 ≤ i < n/2
+Hsk ← ParityCheckUV(RU , RV , a, b, c, d)
+$
+πsk ←
+Sn
+((In−k | R), πsk ) ← GaussElim(Hsk , πsk )
+sk ← (RU , RV , a, b, c, d, πsk )
+M = 0k×(n−k)
+for 0 ≤ i < (k − 1)/2 do
+// Build first 2bk/2c rows of M = TR|
+|
+|
+M2i ← (R )2i + (R )2i+1
+// Sum of rows
+M2i+1 ← (R| )2i − (R| )2i+1
+// Difference of rows
+7
+8
+9
+10
+11
+12
+13
+14
+15
+if k is odd then
+Mk−1 ← −(R| )k−1
+16
+17
+19
+pk ← M
+return (sk, pk)
+3.3
+Signing
+18
+// Fill in last row if necessary
+// The negative is important
+k×(n−k)
+// M ∈ F3
+Algorithm 7 defines the Wavelet signing process, which is essentially the same as Wave
+signing. We have made no attempt to optimize this procedure beyond the use of bitsliced
+and vectorized F3 -arithmetic.
+The main objective of the Wave signing procedure is to find a vector e ∈ Fn3 such that
+|
+|e| = w ,
+and e(In−k | R) = h
+(6)
+(n−k)×k
+where h is the salted hash of the message to be signed, and R ∈ F3
+is the public
+key. The public key is generated in such a way that
+
+
+HU D −HU B
+(In−k | R) = Sπsk (Hsk ) with Hsk =
+−HV C HV A
+where S is a nonsingular matrix corresponding to the Gaussian elimination putting πsk (Hsk )
+in row-reduced form. Therefore, the solution e in (6) is also a solution of the system
+|
+|
+|
+πsk (Hsk ) e = S−1 h = πsk (Hsk )(h, 0k ) .
+We therefore aim to find some vector e0 such that
+|e0 | = w
+|
+and e0 Hsk = h0
+|
+where h0 := πsk (Hsk )(h, 0k )
+and output e = πsk (e0 ). Using the special structure of Hsk , we see that
+(
+e|U HU = hU ,
+0|
+0
+Hsk e = h ⇐⇒
+e|V HV = hV .
+(7)
+(8)
+10
+Wavelet: Code-based postquantum signatures for microcontrollers
+Algorithm 5: GaussElim
+Input: H ∈ FR×C
+and π ∈ SD with D ≤ C
+3
+Output: H = (IR |M) ∈ FR×C
+where M ∈ F3R×C−R , and π 0 ∈ SD where the first
+3
+R positions are the pivots.
+1 Function GaussElim(H, π)
+2
+pivot ← ()
+3
+nonpivot ← ()
+4
+(r, c) ← (0, 0)
+5
+while r < R and c < D do
+6
+(H, P ) ← ElimSingle(H, r, π(c))
+// Algorithm 6
+7
+if P then
+8
+(pivot, r) ← (pivot k (π(c)), r + 1)
+9
+else
+10
+nonpivot ← nonpivot k (π(c))
+c←c+1
+11
+12
+13
+π ← pivot k nonpivot k (π(c), . . . , π(D − 1))
+return (π 0 (H), π 0 )
+0
+
+
+where h0 = hU k hV and e0 = eU A + eV B k eU C + eV D (note
+that a, b, c, and d
+
+are generated in such a way that (x, y) 7→ xA + yB, xC + yD is a bijection).
+To find e, we solve both linear systems in (8) using the Wave decoder originally
+described in Wave [DST19a]. Pseudocode for the decoder is given in Algorithm 9 in
+Appendix A. There are two main steps:
+1. First, compute any solution eV of the undetermined linear system eV H|V = hV
+2. Then, compute a particular solution eU of the second undetermined linear system.
+For the second step, the Wave decoder uses a generalized version of Prange’s decoder [Pra62]. Roughly speaking, given HU and hU , when solving the linear sys|
+tem eU HU = hU (with n/2 unknowns and n/2 − kU equations), we are free to select values of eU on kU coordinates: let’s say positions (0, . . . , kU − 1) (though these
+kU coordinates can be chosen almost anywhere). Since we are looking for a solution e0 = (eU A + eV B, eU C + eV D) of large weight, the best strategy is to choose
+(eU )0 , . . . , (eU )kU −1 such that
+(eU A + eV B)j 6= 0 and (eU C + eV D)j 6= 0 for all
+0 ≤ j < kU .
+This is always possible over F3 given our choice of A, B, C, and D. The other n − 2kU
+coordinates of e0 will be uniformly distributed over F3 , because they are obtained from
+coordinates of eU that we have no control over when solving the random square linear system.
+Therefore, we typically expect |e0 | = 2kU +2/3(n−2kU ). Choosing w = 2kU +2/3(n−2kU )
+ensures that our decoder will succeed after a polynomial number of steps. Now, by carefully
+choosing kU , our decoder solves a trapdoor problem: finding e of weight w such that
+|
+eHpk = h is hard unless we know the hidden structure (via πsk ) of Hpk .
+Rejection Sampling. The procedure described above has a serious drawback: signatures
+e may leak information about πsk (see [DST17, 5.1]). To avoid this, the outputs of the
+signing algorithm must to be very close to uniformly distributed over words of Hamming
+weight w. By carefully adjusting with some rejection sampling the Hamming weights of
+eV and eU , we can meet this property by still producing solutions of weight w for which it
+is hard to solve the decoding problem for this weight. See [DST19a, 5.1] for more details.
+Banegas, Debris-Alazard, Nedeljković, Smith
+11
+Algorithm 6: Attempted Gaussian elimination on a single column of a matrix.
+Input: H ∈ FR×C
+, row index 0 ≤ r < R, column index 0 ≤ c < C
+3
+Output: (H, P ) where P is True/False if a pivot was/was not found in column c.
+1 Function ElimSingle(H, r, c)
+2
+p←r
+3
+while p < R and Hp,c = 0 do
+// Search for pivot position
+4
+p←p+1
+5
+6
+7
+8
+if p = R then
+return (H, False)
+if Hp,c = 2 then
+H ← NegateRow(H, p)
+// Pivot not found
+// Negate p-th row
+14
+H ← SwapRows(H, p, r)
+// Move pivot to r-th row
+for i in (0, . . . , r − 1, r + 1, . . . , R − 1) do
+if Hi,c = 1 then
+H ← SubtractRow(H, i, r) // Subtract r-th row from i-th row
+else if Hi,c = 2 then
+H ← SumRow(H, i, r)
+// Add r-th row to i-th row
+15
+return (H, True)
+3.4
+Verification
+9
+10
+11
+12
+13
+Algorithm 8 verifies Wavelet signatures (r, s) under public keys M following the derivation
+of §2.4, and using the verification equation (5):
+|u| + |s| = w ,
+where u = h + ŝM with h = Hash(r k m) .
+We iterate over the signature vector s, computing the entries of the sparser vector ŝ on the
+fly using (3), and accumulating the corresponding rows of the public key M. Concretely,
+if w/n is around 0.94 (as it is in Supertubos), then we expect Algorithm 8 to use around
+0.56k row vector operations. Notice that there is only a single pass over the rows of M, so
+Algorithm 8 is compatible with applications where the public key is streamed.
+4
+Encodings for keys and signatures
+4.1
+Basic vector encodings and key sizes
+Mathematically, Wavelet works over F3 ; but in reality, we must operate on binary values.
+In practice, we will work with two binary encodings for vectors over F3 .
+The compact representation views a group of s trits as the coefficients of the ternary
+expansion of an integer in [0, 3s ), and outputs the binary coefficients of the same integer.
+This representation achieves 1.6 bits per trit, or 5 trits per byte5 —which is very close to
+the optimum of log2 (3) ≈ 1.585 bits per trit.
+For efficient F3 -vector arithmetic (see §5), we use a bitsliced representation. On a β-bit
+architecture, we store a group of β trits in a pair of machine words: the i-th trit is encoded
+using the i-th bits of both words. This achieves 2 bits per trit, or 4 trits per byte.
+5 The compact representation packs 5 trits into a byte, or 20 into a 32-bit word, or 40 into a 64-bit
+word; so packing into words yields no improvement in space efficiency. Encoding to and decoding from
+words requires more operations on larger integers, too—so we prefer encoding to simple bytes.
+12
+Wavelet: Code-based postquantum signatures for microcontrollers
+Algorithm 7: The Wavelet signing algorithm. This algorithm also produces
+classic Wave signatures if we stop at Line 7 and return (e, r).
+Function Sign(m, sk)
+Input: m ∈ {0, 1}∗ , sk = (RU , RV , a, b, c, d, πsk )
+Output: e ∈ Fn3 , |e| = w
+2
+Hsk ← ParityCheckUV(RU , RV , a, b, c, d)
+1
+3
+4
+5
+6
+7
+8
+9
+$
+r←
+− {0, 1}2λ
+// salt
+h ← Hash(r k m)
+// syndrome in Fn−k
+3
+|
+x ← (h, 0k )πsk (Hsk )
+// syndrome adjusted for decoding
+y ← Decode(x, RU , RV , a, b, c, d)
+e ← πsk (y)
+// (e, r) = Wave signature
+s ← (en−k , . . . , en−1 )
+// Truncate to last k entries
+return (r, s)
+The public key is essentially a k × (n − k) random matrix over F3 . In theory, it can be
+encoded in log2 (3)k(n − k) ≈ 1.585k(n − k) bits. In practice, the compact representation
+requires 1.6k(n − k) bits, while the bitsliced representation requires ≈ 2k(n − k) bits.
+Technically, the private key can be stored in λ bits, since it suffices to store the seed
+used to randomly generate the matrices RU , RV , a, b, c, and d and the permutation πsk
+in Algorithm 4. However, this means recomputing them every time we sign a message. In
+practice, then, we want to store the “expanded” private key (RU , RV , a, b, c, d, πsk ). The
+matrices RU and RV have sizes ( n2 − kU ) × n2 , and ( n2 − kV ) × n2 , respectively, while a, b,
+c, and d each have length n2 . We therefore need to store (n − k + 4)(n/2) trits, along with
+the permutation πsk , which is a sequence of n integers of size dlog2 (n)e.
+Table 3 summarizes the performance of each encoding, and gives concrete key sizes
+using the Supertubos parameters. We prefer the compact representation for public key
+transmission (to minimize bandwidth), but for local storage we prefer the bitsliced representation: the 20% space overhead is a reasonable price to pay to avoid the cost of
+transcoding from the compact to the bitsliced representation before each vector operation.
+4.2
+Compressed signature encodings
+A Wavelet signature is a pair (r, s), where r is a 2λ-bit salt and s is a vector in Fk3 . As
+we mentioned in §2.5, there are very few 0s in s, so the entropy is relatively low, and we
+can hope to exploit this to compress signatures to substantially less than log2 (3)k bits.
+For Supertubos, the probability that a given entry is 1 is 0.47; the probability of 2 is
+also 0.47; and the probability of 0 is only 0.06. This means 1.267 bits of entropy, which
+is about 20% smaller than log2 (3) ≈ 1.585; theoretically, we can compress an average
+Supertubos Wavelet signature down to 7102 bits (or 888 bytes).
+Simple Huffman encoding [Huf52] brings us close to the theoretical limit, as it takes
+advantage of these frequencies. Huffman coding is a compression technique that uses the
+frequencies of the characters in a source alphabet to generate a binary tree whose leaves
+are the characters. The code for each character is defined by the path from the root to the
+character’s leaf: when take the left edge, we add a 0 to the code, and when we take the
+right edge, we add a 1, or vice-versa. The idea is to build the tree bottom-up, putting the
+least frequent elements first so that they stay on the lower levels, giving them longer codes.
+We will use the slightly more general framework of minimal redundancy prefix codes
+(MR codes) [MT97, Mof19]. We have two versions of the compression algorithm: the first,
+2TMR, takes F23 as its source alphabet (encoding two trits at a time); the second, 3TMR,
+takes F33 as its source alphabet (encoding three trits at a time). Table 4 shows the binary
+Banegas, Debris-Alazard, Nedeljković, Smith
+13
+Algorithm 8: Verification for Wavelet signatures. The entries of ŝ are constructed from s on the fly using (3), and zero entries are skipped.
+Function STVerify(m, σ, M)
+k×(n−k)
+Input: m ∈ {0, 1}∗ , σ = (r, s) ∈ {0, 1}2λ × Fk3 , M ∈ F3
+Output: True or False
+2
+x ← Hash(r k m)
+3
+for 0 ≤ i < (k − 1)/2 do // Handle first 2bk/2c entries of s in pairs
+4
+(ŝ2i , ŝ2i+1 ) ← (s2i + s2i+1 , s2i − s2i+1 ) // (2i, 2i + 1)-th entries of sT
+5
+if ŝ2i = 1 then
+6
+x ← x + M2i
+// Add 2i-th row of M
+7
+else if ŝ2i = 2 then
+8
+x ← x − M2i
+// Subtract 2i-th row of M
+1
+9
+10
+11
+12
+if ŝ2i+1 = 1 then
+x ← x + M2i+1
+else if ŝ2i+1 = 2 then
+x ← x − M2i+1
+17
+if k is odd then
+if sk−1 = 1 then
+x ← x + Mk−1
+else if sk−1 = 2 then
+x ← x − Mk−1
+18
+return |s| + |x| = w
+13
+14
+15
+16
+// Add (2i + 1)-th row of M
+// Subtract (2i + 1)-th row of M
+// Handle last entry if necessary
+Table 3: Binary encodings of vectors over F3 .
+Encoding
+Size
+(bits per trit)
+Rate
+(trits per byte)
+Supertubos key sizes
+Public Expanded private
+(Optimal)
+log2 (3 ) ≈ 1 .585
+≈ 5 .047
+≈ 3131 kB
+≈ 1350 kB
+Compact
+1.6
+5
+≈ 3161 kB
+≈ 1363 kB
+Bitsliced
+2
+4
+≈ 3951 kB
+≈ 1703 kB
+outputs for these encodings, derived using the usual MR code system based on the average
+symbol frequencies for Supertubos Wavelet signatures. Observe that 2TMR and 3TMR
+are prefix-free: no output code is a prefix of any other.
+To compress, we break the signature vector s into a sequence of pairs (or triples), and
+output the concatenation of the corresponding codes. For decompression, we look at our
+input (a sequence of bytes) as a stream of bits; the prefix-free property of the 2TMR and
+3TMR codes allows us to quickly and unambiguously recognise codewords, and output
+the corresponding pairs (or triples) of trits, using the algorithm of [MT97]. The decoding
+algorithm requires a few pre-computed lists for fast lookup; we give the relevant data,
+along with details on the compression and decompression algorithms, in Appendix C.
+Since Huffman and MR coding is variable-length, compressed Wavelet signatures
+have variable length. An extra level of variation is introduced by the fact that the supposed
+symbol probabilities are not exact. For example, while we know that there are exactly
+n − w zeroes in a full-length Wave signature vector, when we move to truncated Wavelet
+signatures the number of zeroes follows a binomial distribution centred on k − wk/n.
+Figure 2 shows the lengths of 22000 random Supertubos Wavelet signatures compressed
+14
+Wavelet: Code-based postquantum signatures for microcontrollers
+Table 4: 2TMR and 3TMR encodings for Supertubos Wavelet signatures
+2TMR
+Pair Code
+Triple
+Code
+3TMR
+Triple Code
+Triple
+Code
+(2, 2)
+(2, 1)
+(1, 2)
+(1, 1)
+(2, 0)
+(1, 0)
+(0, 2)
+(0, 1)
+(0, 0)
+(2, 2, 2)
+(2, 2, 1)
+(2, 1, 2)
+(1, 2, 2)
+(2, 1, 1)
+(1, 2, 1)
+(1, 1, 2)
+(1, 1, 1)
+(2, 2, 0)
+000
+001
+010
+011
+100
+1010
+1011
+1100
+110100
+(2, 0, 2)
+(0, 2, 2)
+(2, 1, 0)
+(2, 0, 1)
+(0, 2, 1)
+(1, 2, 0)
+(1, 0, 2)
+(0, 1, 2)
+(1, 1, 0)
+(1, 0, 1)
+(0, 1, 1)
+(2, 0, 0)
+(0, 2, 0)
+(0, 0, 2)
+(1, 0, 0)
+(0, 1, 0)
+(0, 0, 1)
+(0, 0, 0)
+111110
+1111110
+111111100
+1111111010
+1111111011
+1111111100
+1111111101
+1111111110
+1111111111
+00
+01
+100
+101
+1100
+1101
+1110
+11110
+11111
+110101
+110110
+110111
+111000
+111001
+111010
+111011
+111100
+111101
+with the 2TMR and 3TMR encodings. We see that experimentally, 2TMR-compressed
+Supertubos Wavelet signature vectors fit in 950 bytes on the average (within 5% of the
+theoretical optimum), and almost always less than 970 bytes; 3TMR-compressed Supertubos
+Wavelet signature vectors fit in 910 bytes on the average (within 2.5% of the optimum),
+and almost always less than 930 bytes. Once we have included 32 bytes worth of salt,
+Supertubos Wavelet signatures fit comfortably within one kilobyte.
+Figure 2: Frequencies of 2TMR and 3TMR encoding lengths (in bytes) for 22 000 random
+Supertubos Wavelet signatures.
+5
+Software implementations
+This section describes the techniques we used to put the algorithms of §3 into practice on
+an Intel® CoreTM platform with AVX, and also on an ARM Cortex-M4 platform.
+5.1
+Efficient ternary vector arithmetic
+Our implementation uses the bitsliced F3 -vector arithmetic described in [Coo13]; the
+underlying F3 -arithmetic is the Type-2 representation of [KAT08, §4.2]. We use ⊕, &, |,
+and ¬ to denote logical XOR, AND, OR, and NOT, respectively.
+Banegas, Debris-Alazard, Nedeljković, Smith
+15
+Each element a in F3 is represented using a pair of bits:
+F3 3 a ←→ (ah , al ) ∈ {0, 1}2 ;
+the encoding of [KAT08, §4.2] uses
+0 ←→ (0, 0) ,
+1 ←→ (0, 1) ,
+2 ←→ (1, 1) .
+Additions and subtractions can be computed at a cost of 7 logical operations each using
+the identities
+
+
+(a + b)h , (a + b)l = (al ⊕ bh )&(ah ⊕ bl ) , (al ⊕ bl )|((ah ⊕ bl ) ⊕ bh ) ,
+(9)
+
+
+(a − b)h , (a − b)l = (al ⊕ (bh ⊕ bl ))&(ah ⊕ bl ) , (al ⊕ bl )|(ah ⊕ bh ) ;
+(10)
+pure negations can be computed using
+
+
+(−a)h , (−a)l = ah ⊕ al , al .
+(11)
+This representation lends itself well to bitslicing [Bih97]. Working on a platform with
+β-bit machine words, we break F3 -vectors down into a sequence of subvectors a in Fβ3 ,
+each of which is encoded as a pair of β-bit words:
+
+
+Fβ3 3 a ←→ (ah , al ) := (a0 )h , . . . , (aβ−1 )h , (a0 )l , . . . , (aβ−1 )l .
+The same sequences of logical operations defining the addition, negation, and subtraction
+formulæ above, applied to the machine words ah and al , thus compute addition, negation,
+and subtraction in parallel on β bits at a time.
+AVX instructions. Going further in this direction, many computer architectures have
+special instructions to vectorize logical operations across multiple words. In our x86_64 implementation of verification, we use AVX2 instructions to further speed up the bitsliced F3 vector arithmetic above by moving from β = 64 to β = 256. More precisely, we use Intel® intrinsics including _mm256_xor_si256, _mm256_or_si256, and _mm256_and_si256,
+as well as special instructions to load and store the 256-bit words.
+5.2
+Key Generation
+Algorithm 4 requires a pseudorandom bit generator to sample the matrices, vectors, and
+permutation. In our implementation we use the SHAKE256 XOF, seeded with a λ-bit
+random string (which can be used as a compressed representation of the private key if
+desired). To generate the random permutation in Sn , we construct the list of integers from
+0 to n − 1, and then shuffle it using the modern Fisher-Yates Shuffle algorithm [Knu97].
+We also used SHAKE256 to generate the randomness required in our other algorithms—
+though for security, each of these uses a different random string as initial state.
+5.3
+Signing
+Apart from the use of Hash (Algorithm 1), our signing implementation is heavily based on
+the version of Decode included in the proof-of-concept Wave trapdoor code from [DST19b].
+The implementation of [DST19b] generates trapdoor challenges, using random trits in
+place of hash function output. (Indeed, it neither specifies nor uses a hash function, so it
+cannot be used to sign messages as is.) Apart from some use of bitsliced arithmetic as
+in §5.1 for vector-matrix multiplication, we made absolutely no attempt to optimize or
+improve the signing algorithm.
+16
+Wavelet: Code-based postquantum signatures for microcontrollers
+Indeed, we privileged correctness and safety (and coherence with [DST19a]) over speed
+for signing: any modifications to the original algorithm must be accompanied by a subtle
+and difficult verification of the distributions produced by the decoder. A verified and
+optimized signing algorithm is an important future goal for Wave development.
+For completeness, we include pseudocode for Decode as Algorithm 9 in Appendix A.
+Our implementation uses precomputed tables for the distribution of rejection with SampleV
+and SampleU, but these values could be recomputed on the fly using the parameters
+proposed in Table 2 and in Appendix B.
+To hash into Fn−k
+, our implementation uses Algorithm 1 with SHA3-512 as BinaryHash
+3
+and SHAKE-256 as the XOF in Expand.
+To sign with Algorithm 7, we need to (re)generate the parity-check matrix. While it is
+possible to avoid this by storing the parity check matrix with the private key, this imposes
+an unacceptably high space overhead (this matrix is much bigger than the expanded private
+key, which is already very large).
+Remark 2. We remind the reader that the signing process requires great care. One needs
+to respect the parameters and distributions involved in the rejection sampling to produce
+an output that is statistically indistinguishable from a random word of weight w. Any
+deviation from this distribution could result in an attack on the signature scheme.
+5.4
+Verification
+In Wave, the verification process consist into check the weight of a vector, and compare
+the hash of the message. However, we change this to simplify the verification process.
+In summary, Algorithm 8 consists of a for loop with additions and subtractions of
+vectors. For those operations, we use the efficient ternary vector arithmetic. After the
+loop, we need to check the weight of s and x. To check the weight of a vector using Type
+2 encoding, we only need to count the number of ones in the low part of the encoding,
+that is, given a vector a = (al , ah ) we only need to compute BinaryWeight(al ).
+The Hamming weight, or BinaryWeight function can be implemented by counting the
+number of 1’s in the binary representation of an integer, or in the case the amount of 1 bits
+in the register. The binary weight for AVX2 can be computed using [MKL18]. However, the
+generic code for other architectures needs to be done without AVX instructions. Listing 1
+shows the method for 32-bit words; the technique extends easily to 64-bit words.
+Listing 1: BinaryWeight for 32 bit architetures.
+static uint32_t BinaryWeight ( uint32_t n )
+{
+uint32_t m1 = (~( wave_word ) 0) / 3;
+uint32_t m2 = (~( wave_word ) 0) / 5;
+uint32_t m4 = (~( wave_word ) 0) / 17;
+n -= ( n >> 1) & m1 ;
+n = ( n & m2 ) + (( n >> 2) & m2 ) ;
+n = ( n + ( n >> 4) ) & m4 ;
+n += n >> 8;
+n += n >> 16;
+return n & 0 x7F ;
+}
+5.5
+Cortex-M4 implementation
+Implementing Wavelet verification for an ARM Cortex-M4 platform presents several
+interesting challenges.
+Banegas, Debris-Alazard, Nedeljković, Smith
+17
+QSPI and Flash. Wavelet has relatively compact signatures, but large public keys—
+generally far too large for the RAM available in many small devices. In our case, the
+nRF52840-dev Kit provides 256 kB RAM. However, it also has 64 MB of external QSPI
+(Queued Serial Peripheral Interface) flash memory, which allows reads of up to 16 MB/sec
+using the nrf_drv_qspi_read instruction.6 For this board, therefore, we can flash the
+public key into the external flash and read it later; this is a useful approach for applications
+where a device must verify signatures from a signer known at installation time, e.g. for
+secure software updates.
+While this allows us to get the entire Wavelet public key onto the device, we still
+cannot load the entire matrix into SRAM. In our Cortex-M4 implementation of Algorithm 8
+we load one row at a time, as and when it is used in a computation. To fetch the data we
+have a base address, from which we can easily compute the address for each required row.
+Streaming vs Flashing public keys. Another way to handle big keys is to stream them;
+this approach has been used for other postquantum signatures on Cortex-M4 [GHK+ 21].
+However, as noted in [CC21], this design choice depends on the application. In our case,
+we have two reasons to keep the public key in the flash. First, streaming the data is
+slower: streaming speeds in [GHK+ 21] were around 500 kbits/s, which is slower than QSPI.
+Second, streamed keys require validation, which would complicate and slow verification.
+6
+Experimental results
+In our tests, we ran the code on an Intel® CoreTM i7-10610U processor under Arch Linux
+(Kernel 5.14.11), compiling with GCC version 11.1.0. We counted cycles using cpucycles.h
+from SUPERCOP7 , disabling Turbo Boost and SpeedStep. We first ran our tests 100
+times to clean the cache, then 100 more times to get the average number of cycles.
+Table 5 shows the results of our implementation for KeyGen, Sign, and Wavelet Verification. We also include timings for an implementation of classic Wave verification, based
+on the same underlying arithmetic, for comparison. We implemented both verifications
+twice: once with AVX instructions and one without them. (KeyGen and Sign do not use
+AVX instructions, since we focused on optimizing verification.)
+We also tested verification in a Nordic nRF52840 Development Kit, which provides an
+ARM Cortex-M4 microcontroller running at 64 MHz, with 256 kB RAM, 1 MB flash and
+64 MB of external memory. We compile the code using GNU Arm Embedded Toolchain
+version 11.2.0. We used the timer library provided by Nordic Semiconductors to measure
+running time in ms and in “ticks”. Table 6 presents these results.
+Timings for signature compression and decompression appear in Table 7 (Intel® CoreTM )
+and Table 8 (ARM Cortex-M4). Timings were measured in the same way as above. We
+see that (de)compression times are negligible in comparison with the other operations.
+Our code is available from https://github.com/waveletc/wavelet.
+7
+Conclusion
+This work presents the first complete implementation of the Wave postquantum signature
+scheme. Our variant, Wavelet, includes important optimizations—from the highest level
+to the lowest—yielding much shorter signatures and a much faster verification algorithm.
+To interface this fundamentally ternary signature scheme with the binary world, we
+defined a practical hash function and a highly efficient compression algorithm for signatures,
+6 Function documented at https://infocenter.nordicsemi.com/index.jsp?topic=/com.nordic.
+infocenter.sdk5.v14.2.0/group__nrf__drv__qspi.html.
+7 https://bench.cr.yp.to/supercop.html
+18
+Wavelet: Code-based postquantum signatures for microcontrollers
+Table 5: Wave and Wavelet signature scheme timings on an Intel® CoreTM .
+Operation
+Optimization
+Time (ms)
+Cycles
+Key Generation
+-O3
+3144.00
+7 403 069 461
+Sign
+-O3
+702.77
+1 644 281 062
+Wave Verification
+-O3
+AVX instr
+-O3
+AVX instr
+2.20
+2.19
+1.19
+0.45
+5 098 394
+5 064 048
+2 733 457
+1 087 538
+Wavelet Verification
+Table 6: Wavelet verification time on an ARM Cortex-M4 (nRF52840-DK).
+Operation
+Wavelet Verification_static
+Optimization
+Time (ms)
+Ticks
+-O2s
+402
+13172
+Table 7: Wavelet signature compression and decompression timings on an Intel® CoreTM .
+Encoding
+Operation
+Optimization
+Time (ms)
+Cycles
+2TMR
+Compression
+Decompression
+-O3
+-O3
+0.041
+0.043
+79 529
+81 543
+3TMR
+Compression
+Decompression
+-O3
+-O3
+0.065
+0.057
+126 230
+109 546
+Table 8: Wavelet signature compression and decompression timings on an ARM CortexM4 (nRF52840-DK).
+Encoding
+Operation
+Optimization
+Time (ms)
+Ticks
+2TMR
+Compression
+Decompression
+-O2s
+-O2s
+3
+7
+123
+231
+3TMR
+Compression
+Decompression
+-O2s
+-O2s
+3
+5
+105
+171
+taking advantage of their unusually high weight. This yields even shorter signatures at very
+little cost. For signatures targeting the 128-bit classical security level (and NIST Level 1
+postquantum security), the Supertubos parameter set yields Wavelet signatures that fit in
+less than a kilobyte. Wavelet signatures are therefore the smallest code-based signatures
+at this security level, and are competitive with signatures across other post-quantum
+paradigms.
+We have also demonstrated the feasibility of Wavelet verification on ARM Cortex-M4
+microcontroller platforms. While Wavelet public keys are generally much bigger than
+the available SRAM, our implementation exploits large external flash where it is available.
+While memory access latency remains a major bottleneck, Supertubos Wavelet signatures
+decompress and verify in under half a second on the Nordic nRF52840 Development Kit
+board. Our verification algorithm should also be compatible with streaming public keys,
+similar to the approach of [GHK+ 21], though we have not attempted to implement this.
+Future Work. Our results highlight some interesting outstanding problems, both theoretical and practical. On the theoretical side, Wave for q > 3 needs more analysis.
+Banegas, Debris-Alazard, Nedeljković, Smith
+19
+The derivation of alternative Wave parameter sets—targeting NIST Levels 3 and 5, for
+example, or tuning key and signature sizes for better performance in embedded and other
+environments—is also a priority.
+On the practical side, key generation and signing must be improved and optimized.
+Another crucial problem is to develop a signing algorithm that is secure against side-channel
+attacks, or at least constant-time. For the current signing algorithm, with its complexity
+and dependence on rejection sampling, this is a highly nontrivial problem.
+References
+[ABB+ ]
+Jean-Philippe Aumasson, Daniel J. Bernstein, Ward Beullens, Christoph Dobraunig, Maria Eichlseder, Scott Fluhrer, Stefan-Lukas Gazdag, Andreas
+Hülsing, Panos Kampanakis, Stefan Kölbl, Tanja Lange, Martin M. Lauridsen,
+Florian Mentel, Ruben Niederhagen, Christian Rechberger, Joost Rijneveld,
+Peter Schwabe, and Bas Westerbaan. SPHINCS+ stateless hash-based signatures.
+[ABD+ ]
+Roberto Avanzi, Joppe Bos, Léo Ducas, Eike Kiltz, Tancrède Lepoint, Vadim
+Lyubashevsky, John M. Schanck, Peter Schwabe, Gregor Seiler, and Damien
+Stehle. CRYSTALS/Dilithium. URL: https://pq-crystals.org/. https:
+//pq-crystals.org/.
+[ABD+ 21] Nicolas Aragon, Marco Baldi, Jean-Christophe Deneuville, Karan Khathuria,
+Edoardo Persichetti, and Paolo Santini. Cryptanalysis of a code-based full-time
+signature. Des. Codes Cryptogr., 89(9):2097–2112, 2021.
+[BBC+ 13] Marco Baldi, Marco Bianchi, Franco Chiaraluce, Joachim Rosenthal, and
+Davide Schipani. Using LDGM codes and sparse syndromes to achieve digital
+signatures. In Philippe Gaborit, editor, Post-Quantum Cryptography - 5th
+International Workshop, PQCrypto 2013, Limoges, France, June 4-7, 2013.
+Proceedings, volume 7932 of Lecture Notes in Computer Science, pages 1–15.
+Springer, 2013.
+[Bih97]
+Eli Biham. A fast new DES implementation in software. In Eli Biham, editor,
+Fast Software Encryption, 4th International Workshop, FSE ’97, Haifa, Israel,
+January 20-22, 1997, Proceedings, volume 1267 of Lecture Notes in Computer
+Science, pages 260–272. Springer, 1997.
+[BR96]
+Mihir Bellare and Phillip Rogaway. The exact security of digital signatures
+- how to sign with RSA and Rabin. In Ueli M. Maurer, editor, Advances in
+Cryptology - EUROCRYPT ’96, International Conference on the Theory and
+Application of Cryptographic Techniques, Saragossa, Spain, May 12-16, 1996,
+Proceeding, volume 1070 of Lecture Notes in Computer Science, pages 399–416.
+Springer, 1996.
+[CC21]
+Ming-Shing Chen and Tung Chou. Classic McEliece on the ARM Cortex-M4.
+IACR Trans. Cryptogr. Hardw. Embed. Syst., 2021(3):125–148, 2021.
+[CDG+ ]
+Melissa Chase, David Derler, Steven Goldfeder, Daniel Kales, Jonathan
+Katz, Vladimir Kolesnikov, Claudio Orlandi, Sebastian Ramacher, Christian Rechberger, Daniel Slamanig, Xiao Wang, and Greg Zaverucha. Picnic: A family of post-quantum secure digital signature algorithms. https:
+//eprint.iacr.org/2017/279.
+20
+Wavelet: Code-based postquantum signatures for microcontrollers
+[CFMR+ ] Antoine Casanova, Jean-Charles Faugère, Gilles Macario-Rat, Jacques Patarin,
+Ludovic Perret, and Jocelyn Ryckeghem. GeMSS: A GrEat Multivariate
+Short Signature. URL: https://www-polsys.lip6.fr/Links/NIST/GeMSS.
+html. https://www-polsys.lip6.fr/Links/NIST/GeMSS.html.
+[Coo13]
+Kris Coolsaet. Fast vector arithmetic over F3 . Bulletin of the Belgian Mathematical Society – Simon Stevin, 20(2):329–344, 2013.
+[Cor02]
+Jean-Sébastien Coron. Optimal security proofs for PSS and other signature
+schemes. In Lars R. Knudsen, editor, Advances in Cryptology - EUROCRYPT
+2002, International Conference on the Theory and Applications of Cryptographic
+Techniques, Amsterdam, The Netherlands, April 28 - May 2, 2002, Proceedings,
+volume 2332 of Lecture Notes in Computer Science, pages 272–287. Springer,
+2002.
+[DST17]
+Thomas Debris-Alazard, Nicolas Sendrier, and Jean-Pierre Tillich. The problem
+with the SURF scheme. preprint, November 2017. arXiv:1706.08065.
+[DST19a] Thomas Debris-Alazard, Nicolas Sendrier, and Jean-Pierre Tillich. Wave: A
+new family of trapdoor one-way preimage sampleable functions based on codes.
+In Steven D. Galbraith and Shiho Moriai, editors, Advances in Cryptology ASIACRYPT 2019 - 25th International Conference on the Theory and Application of Cryptology and Information Security, Kobe, Japan, December 8-12,
+2019, Proceedings, Part I, volume 11921 of Lecture Notes in Computer Science,
+pages 21–51. Springer, 2019.
+[DST19b] Thomas Debris-Alazard, Nicolas Sendrier, and Jean-Pierre Tillich. Wave implementation. https://wave.inria.fr/en/implementation/, 2019. Accessed:
+2021-09-14.
+[FHK+ ]
+Pierre-Alain Fouque, Jeffrey Hoffstein, Paul Kirchner, Vadim Lyubashevsky,
+Thomas Pornin, Thomas Prest, Thomas Ricosset, Gregor Seiler, William Whyte,
+and Zhenfei Zhang. Falcon: Fast-Fourier lattice-based compact signatures over
+NTRU. URL: https://falcon-sign.info. https://falcon-sign.info.
+[GHK+ 21] Ruben Gonzalez, Andreas Hülsing, Matthias J. Kannwischer, Juliane Krämer,
+Tanja Lange, Marc Stöttinger, Elisabeth Waitz, Thom Wiggers, and Bo-Yin
+Yang. Verifying post-quantum signatures in 8 kB of RAM. In Jung Hee
+Cheon and Jean-Pierre Tillich, editors, Post-Quantum Cryptography - 12th
+International Workshop, PQCrypto 2021, Daejeon, South Korea, July 20-22,
+2021, Proceedings, volume 12841 of Lecture Notes in Computer Science, pages
+215–233. Springer, 2021.
+[Huf52]
+David A. Huffman. A method for the construction of minimum-redundancy
+codes. Proceedings of the IRE, 40(9):1098–1101, 1952.
+[KAT08]
+Yuto Kawahara, Kazumaro Aoki, and Tsuyoshi Takagi. Faster implementation
+of eta-T pairing over GF(3m ) using minimum number of logical instructions
+for GF(3)-addition. In Steven D. Galbraith and Kenneth G. Paterson, editors,
+Pairing-Based Cryptography - Pairing 2008, Second International Conference,
+Egham, UK, September 1-3, 2008. Proceedings, volume 5209 of Lecture Notes
+in Computer Science, pages 282–296. Springer, 2008.
+[Knu97]
+Donald E. Knuth. The Art of Computer Programming, Volume 2: Seminumerical Algorithms. Addison-Wesley, Boston, third edition, 1997.
+Banegas, Debris-Alazard, Nedeljković, Smith
+21
+[MCF19]
+David McGrew, Michael Curcio, and Scott Fluhrer. RFC 8554: Leighton-Micali
+hash-based signatures. IETF Request for Comments, April 2019.
+[MKL18]
+Wojciech Muła, Nathan Kurz, and Daniel Lemire. Faster population counts
+using AVX2 instructions. The Computer Journal, 61(1):111–120, 2018.
+[Mof19]
+Alistair Moffat. Huffman coding. ACM Computing Surveys, 52(4), August
+2019.
+[MT97]
+Alistair Moffat and Andrew Turpin. On the implementation of minimum
+redundancy prefix codes. IEEE Transactions on Communications, 45(10):1200–
+1207, 1997.
+[Pra62]
+E. Prange. The use of information sets in decoding cyclic codes. IRE Transactions on Information Theory, 8(5):5–9, 1962.
+[PT16]
+Aurélie Phesso and Jean-Pierre Tillich. An efficient attack on a code-based
+signature scheme. In Tsuyoshi Takagi, editor, Post-Quantum Cryptography 7th International Workshop, PQCrypto 2016, Fukuoka, Japan, February 24-26,
+2016, Proceedings, volume 9606 of Lecture Notes in Computer Science, pages
+86–103. Springer, 2016.
+[SHM+ 20] Yongcheng Song, Xinyi Huang, Yi Mu, Wei Wu, and Huaxiong Wang. A codebased signature scheme from the Lyubashevsky framework. Theor. Comput.
+Sci., 835:15–30, 2020.
+22
+A
+Wavelet: Code-based postquantum signatures for microcontrollers
+The Wave decoder
+Algorithm 9 is the Wave decoder, which finds the error vector e with Hamming weight
+w such that eHsk = s. It uses the precomputed data and rejection sampling parameters
+from Appendix B. It uses ElimSingle (Algorithm 6) from key generation, and auxiliary
+functions FreeSetV (Algorithm 10) and FreeSetU (Algorithm 11).
+Algorithm 9: The Wave decoder
+Function Decode(s, RU , RV , a, b, c, d)
+(n/2−kU )×kU
+(n/2−kV )×kV
+n/2
+Input: s ∈ Fn−k
+, RU ∈ F 3
+, RV ∈ F3
+, a, b, c, d ∈ F3
+3
+|
+Output: e ∈ Fn3 such that |e| = w and eHsk = s
+where Hsk = ParityCheckUV(RU , RV , a, b, c, d)
+n/2−kU
+2
+sU ← (s0 , . . . , sn/2−kU −1 )
+// sU ∈ F3
+1
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+n/2−kV
+sV ← (sn/2−kU , . . . , sn−k−1 )
+// sV ∈ F3
+(n/2−kV )×n/2
+H ∈ F3
+H ← (In/2−kV | RV )
+repeat
+` ← SampleV()
+//
+// rejection sampling
+$
+xV ←
+− Fd3
+$ 
+− x ∈ Fk3V −d : |x| = `
+xV0 ←
+
+
+In/2−kV |A , s0 , πV ← FreeSetV(H, sV )
+eV ← πV−1 ((s0 − (xV k xV0 ) A| ) k (xV k xV0 ))
+t ← |eV |
+until AcceptSampleV(t)
+(n/2−k )×n/2
+U
+H ← (In/2−kU | RU )
+// H ∈ F3
+EV ← Support(eV ) // Support(x) = list of coordinates where xi 6= 0
+n/2
+aV ← (b eV k d eV )
+// for x, y ∈ F3 , x y := (xi yi )0≤i≤n/2−1
+repeat
+// rejection sampling
+k6=0 ← SampleU(t)
+
+
+In/2−kU |A , s1 , πU ← FreeSetU(k6=0 , EV , H, sU )
+(zi )0≤i≤n/2−1 ← πU (eV )
+repeat
+$
+xU ←
+− Fd3
+kU −k6=0 −d
+$
+0
+←
+− F3 \{0}
+xU
+00
+← (xj )0≤j<k6=0 where
+xU
+−1
+xj ← abuu zn/2−k6=0 +j + dcuu zn/2−k6=0 +j where u := πU
+(j)
+|
+−1
+0
+00
+0
+00
+eU ← πU ((s1 − (xU k xU k xU ) A ) k (xU k xU k xU
+))
+aU ← (a eU k c eU )
+e ← aV + aU
+until |e| = w
+until AcceptSampleU(m1 (e), t) where
+m1 (x) := #{0 ≤ i ≤ n2 − 1 : xi 6= x n2 +i }
+return e
+The FreeSetV and FreeSetU algorithms are superficially similar, but there are important differences in their input and permutation sampling. In particular, FreeSetU
+uses an auxiliary function RandPermSet(n, k6=0 , (i0 , . . . , it−1 )), which samples a random
+Banegas, Debris-Alazard, Nedeljković, Smith
+23
+permutation π ∈ Sn subject to the constraints
+{π(0), . . . , π(t − k6=0 − 1)} ⊆ (i0 , . . . , it−1 )
+and
+{π(t − k6=0 ), . . . , π(n − k6=0 − 1)} = {1, . . . , n}\{i0 , . . . , it−1 } .
+Algorithm 10: FreeSetV
+(n−k)×n
+Input: H ∈ F3
+, s ∈ Fn−k
+3
+(n−k)×n
+(n−k)×n
+Output: H = (In−k |M) ∈ F3
+where M ∈ F3
+, s ∈ Fn−k
+, π ∈ Sn
+3
+1 Function FreeSetV(H, s)
+2
+repeat
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+$
+π←
+− Sn
+pivot ← ()
+nonpivot ← ()
+(r, c) ← (0, 0)
+while r < n − k and c < n do
+(H k s| , P ) ← ElimSingle(H k s| , r, π(c))
+if P then
+(pivot, r) ← (pivot k (π(c)), r + 1)
+else
+nonpivot ← nonpivot k (π(c))
+c←c+1
+16
+until #nonpivot ≤ d
+π ← pivot k nonpivot k (π(c), . . . , π(n − 1))
+return (π(H), s, π)
+B
+Rejection sampling parameters
+14
+15
+// Algorithm 6
+There are two rejection sampling steps in the signing algorithms of Wave (specifically, in
+the Wave decoder). We split the description of their parameters in two parts: the V -part
+and the U -part. We write
+0
+kV0 := kV − d and kU
+:= kU − d
+where kU , kV and d are given in Table 2.
+The V -part. This first rejection sampling step involves several functions on {0, . . . , n/2},
+namely
+fVrs (i) :=
+1
+q1unif (j)
+max
+0≤j≤n/2
+
+n/2
+unif
+i
+q1 (i) := n  w/2
+w 2
+and
+q1 (i) :=
+i
+X
+t=0
+q1 (j)
+q1unif (i)
+,
+q1 (i)
+i
+X
+p=0
+w+p≡0 mod 2
+ 
+
+i
+n/2 − i
+23p/2 ,
+p (w + p)/2 − i
+0
+n/2−kV
+2i−t
+i−t
+pV (t) ,
+0
+n/2−kV
+
+3
+24
+Wavelet: Code-based postquantum signatures for microcontrollers
+Algorithm 11: FreeSetU
+(n−k)×n
+Input: E ⊆ {0, . . . , n − 1}, k6=0 ∈ {0, . . . #E }, H ∈ F3
+, s ∈ F3n−k
+(n−k)×n
+(n−k)×n
+Output: H = (In−k |M) ∈ F3
+where M ∈ F3
+, s ∈ F3n−k , π ∈ Sn
+1 Function FreeSetU(k6=0 , E , H, s)
+2
+repeat
+3
+π ← RandPerm(n, k6=0 , E )
+4
+pivot ← ()
+5
+nonpivot ← ()
+6
+(r, c) ← (0, 0) while r < n − k and c < n do
+7
+(H k s| , P ) ← ElimSingle(H k s| , r, π(c))
+// Algorithm 6
+8
+if P then
+9
+(pivot, r) ← (pivot k (π(c)), r + 1)
+10
+else
+11
+nonpivot ← nonpivot k (π(c))
+12
+13
+14
+15
+c←c+1
+until #nonpivot ≤ d
+π ← pivot k nonpivot k (π(c), . . . , π(n − 1))
+return (π(H), s, π)
+where the function pV (·) is a system parameter for the V -part of the rejection sampling.
+The U -part. This second rejection sampling step involves several functions on the domain
+{(s, t) : tmin ≤ t ≤ tmax , 0 ≤ s ≤ min(t, n − w), s ≡ w
+where
+tmin := 1953
+and
+tmax := 2745 ;
+1
+q2unif (s, t)
+q2 (s, t)
+these functions are
+fUrs (s, t) :=
+where
+q unif (u,v)
+max 2
+0≤u≤v q2 (u,v)
+(12)
+ n/2−t  3s
+22
+w+s
+−t
+q2unif (s, t) := P t  2n/2−t  3p
+2
+p w+p −t 2
+t
+s
+p
+and
+(mod 2)}
+2
+ n/2−t−k0  3s
+22
+w+s
+2 −t−k0
+q2 (s, t) :=
+
+P t−k6=0 n/2−t−k0  3p pU (k6=0 , t)
+22
+w+p
+p
+t+k0 −n/2≤k6=0 ≤t
+−t−k
+t−k6=0
+s
+X
+U
+0
+k0 =kU
+−k6=0
+p
+2
+0
+where the function pU (·, t) is a system parameter for the U -part.
+Precomputed Data. The values for (pV (t))1≤i≤n/2 and (pU (·, t))tmin ≤t≤tmax used in
+our implementation can be found at https://github.com/waveletc/wavelet in the file
+precomputedData.txt. We precomputed and stored the necessary values of fVrs and
+(fUrs (·, t))tmin ≤t≤tmax to 128-bit precision, to save recomputing fVrs and fUrs each time they
+are called. This requires significant storage; if this is not available, then the values can
+always be computed on the fly using the formulas above.
+Banegas, Debris-Alazard, Nedeljković, Smith
+C
+25
+Signature compression and decompression algorithms
+For efficient signature compression and decompression using 2TMR and 3TMR, we follow
+the algorithms of Moffat and Turpin [MT97]. Tables 9 and 10 give the precomputed arrays
+required by the decompression algorithm. The notation [x] ∗ n means a list consisting of
+the number x, repeated n times.
+Table 9: Pre-computed lists for fast 2TMR decoding using the algorithm of [MT97].
+Code_len
+[2, 2, 3, 3, 4, 4, 4, 5, 5]
+First_symbol
+[0, 0, 0, 2, 4, 7, 10]
+First_code_r
+[0, 0, 0, 4, 12, 30, 32]
+First_code_l
+[0, 0, 0, 16, 24, 30, 32]
+Search_start
+[2] ∗ 16 k [3] ∗ 8 k [4] ∗ 5 k [5] ∗ 3
+Table 10: Pre-computed lists for fast 3TMR decoding using the algorithm of [MT97].
+Code_len
+D
+[3] ∗ 5 k [4] ∗ 3 k [6] ∗ 11 k [7, 9] k [10] ∗ 6
+First_symbol
+[0, 0, 0, 0, 5, 8, 8, 19, 20, 20, 21, 27]
+First_code_r
+[0, 0, 0, 0, 10, 10, 52, 126, 126, 508, 1018, 1024]
+First_code_l
+[0, 0, 0, 0, 640, 832, 832, 1008, 1016, 1016, 1018, 1024]
+Search_start
+[3] ∗ 640 k [4] ∗ 192 k [6] ∗ 176 k [7] ∗ 8 k [9] ∗ 2 k [10] ∗ 6
+Mathematical proofs
+Recall that for each s in Fk3 , the vector ŝ in Fk3 is defined by
+)
+Proof of Proposition 1.
+ŝ2i := s2i + s2i+1
+ŝ2i+1 := s2i − s2i+1
+for 0 ≤ i < k/2 ,
+We want to show that
+|ŝ| + |s| =
+where
+and
+and ŝk−1 := sk−1 if k is odd .
+3
+(k + ) − 3δ ,
+2
+δ = #{0 ≤ i < k/2 | s2i = s2i+1 = 0}
+
+
+0
+= 1
+
+
+−1
+if k is even ,
+if k is odd and sk−1 6= 1 ,
+if k is odd and sk−1 = 0 .
+First, suppose k is even. Breaking ŝ into pairs (ŝ2i , ŝ2i+1 ) for 0 ≤ i < k/2, we have
+• |(ŝ2i , ŝ2i+1 )| = 0 ⇐⇒ |(s2i , s2i+1 )| = 0, and there are δ such pairs;
+• |(ŝ2i , ŝ2i+1 )| = 2 ⇐⇒ |(s2i , s2i+1 )| = 1, and there are k − |s| − 2δ such pairs;
+• |(ŝ2i , ŝ2i+1 )| = 1 ⇐⇒ |(s2i , s2i+1 )| = 2, and there are |s| − k/2 + δ such pairs.
+26
+Wavelet: Code-based postquantum signatures for microcontrollers
+Summing over the pairs, we find
+|ŝ| + |s| = (0 + 0)δ + (2 + 1)(k − |s| − 2δ) + (1 + 2)(|s| − k/2 + δ) = 3k/2 − 3δ .
+If k is odd and sk−1 = 0 then ŝk−1 = sk−1 6= 0, so
+|ŝ| + |s| = |(ŝ0 , . . . , ŝk−2 )| + |(s0 , . . . , sk−2 )| ,
+and applying the even-length argument above to the subvectors yields
+|ŝ| + |s| = 3(k − 1)/2 − 3δ .
+Similarly, if k is odd and sk−1 6= 0, then ŝk−1 = sk−1 6= 0, so
+|ŝ| + |s| = 2 + |(ŝ0 , . . . , ŝk−2 )| + |(s0 , . . . , sk−2 )| ,
+and applying the even-length argument again yields
+|ŝ| + |s| = 2 + 3(k − 1)/2 − 3δ = 3(k + 1)/2 − 3δ .
+(n−k)×k
+Proof of Proposition 2. Let R be in F3
+. We want to show that for every s in Fk3 ,
+if ŝ is defined as above, then
+|
+sR = −ŝM
+k×(n−k)
+where M is the matrix in F3
+)
+|
+|
+M2i := R2i
++ R2i+1
+|
+|
+M2i+1 := R2i
+− R2i+1
+whose rows are
+for 0 ≤ i < k/2 ,
+|
+and Mk−1 := −Rk−1 if k is odd
+(note the minus sign). To show this, we simply sum the identities
+|
+|
+ŝ2i M2i + ŝ2i+1 M2i+1 = −(s2i R2i + s2i+1 R2i+1 ) ,
+for 0 ≤ i < k/2, and add
+|
+ŝk−1 Mk−1 = −sk−1 Rk−1
+if k is odd.

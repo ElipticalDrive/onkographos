@@ -1,0 +1,1055 @@
+A high performance rendering engine implemented in Rust - Voxel planet: chunk trees, a fully destructible planet, and the lighting to show it by Tuafo · Pull Request #327 · Far-Beyond-Pulsar/Helio
+
+Voxel planet: chunk trees, a fully destructible planet, and the lighting to show it by Tuafo · Pull Request #327 · Far-Beyond-Pulsar/Helio · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Tuafo
+commented
+Oct 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Voxel planet: chunk trees, a fully destructible planet, and the lighting to show it
+Goal: voxel terrain of 0.1–1 m cells on planets, planes and infinite planes. Three requirements:
+No visible refinement from the ground to orbit, at any speed.
+Any part of a world can be dug, up to the whole planet.
+Terrain costs under 6 ms of GPU time at 1440p on an RTX 3060.
+The design is in crates/passes/3d/helio-pass-voxel-planet/docs/chunk-trees.md. Why span columns were replaced, and the measurements behind it, are in docs/aaa-architecture.md.
+Chunk trees (replace span columns)
+Data: a planet-wide octree of chunk trees (64-trees of 4³ leaves). Leaves are stored in pages any chunk can use, with surface and subsurface materials, so there is no fragmentation.
+Generation: on the GPU, once per chunk, within the frame's budget. The budget follows both the GPU and the CPU, and grows into what the frame leaves. Cells no cave can carve are skipped.
+Residency: a screen-space cut of the octree that follows an eye from anywhere.
+The drawn cut covers the whole world, so there are no checker holes.
+Tiles out of view are a level coarser.
+A camera dropped from orbit refines in a few frames.
+A tile still refining reads as ground, not as boxes.
+Motion-aware detail: where the eye's motion sweeps a tile's image by flow pixels a frame, its cells may cover 1 + flow / 16 pixels, up to 3. The view's centre, a still camera and turns keep one pixel.
+Rendering:
+Chunk boxes are rasterized and culled on the GPU into the seed's draw list. Rays run only inside one chunk.
+A chunk's box takes the slope of its surface.
+Levels crossfade into each other.
+Rays continue across cube face edges.
+From level 13 on, rays walk the grid's own cells (planes and spheres about the centre), so tiles and faces are watertight from orbit.
+Camera-relative frames:
+The frame's origin snaps to 1,024 m cells.
+Motion vectors stay right when the origin moves.
+On a host's shared device the pass never polls it.
+Edits
+Brushes run from one voxel to planet scale.
+A big edit shows at once, coarse first, then refines.
+Edits apply in layers: recent brushes exact, older small ones sealed into bricks, large ones analytic.
+An edit tree keeps the surfaces edits leave, not their whole history.
+Saves store the layers bit-exact, and memory stays bounded.
+Blasts regenerate within the frame's budget.
+Generation
+Two-rate field: continent- and range-wide octaves are evaluated at lattice nodes and blended.
+Column programs: each level's columns run a compiled column program instead of walking the octave table.
+Speed: 41–43 µs per tile before, 32–34 after (docs/two-rate-field.md). Results stay bit-exact between CPU and GPU.
+Erosion: erosion octaves step their corners and share steering.
+Reproducible benchmark: GEN_BENCH gives deterministic generation timings.
+Look
+Shading at a distance: voxels under a pixel are lit by the heightfield's exact slope, which each leaf stores (leaf_normals). Contour stripes from orbit and bands on mountainsides are gone.
+Material boundaries: where cells are a pixel or less, maria, snowlines and ejecta are filtered by a jittered material lookup that TSR averages.
+Sun and sky: sun shadows and sky visibility are traced through the chunk trees at any distance. Rays rising over every solid cell stop there.
+Lighting and post-processing (engine-wide)
+Reversed-Z depth with no far plane: every pass reads and tests depth this way, and depth is precise to parts in 10⁸ of the distance.
+Sky light from each surface's own sky: the atmosphere pass builds a sky irradiance table (Bruneton-style).
+It covers 16 altitudes by 24 sun cosines, with 6 symmetric L2 harmonics per entry in the local frame.
+It is published as the uniform atmosphere_sky_table, and deferred lighting looks up each pixel's own altitude and sun angle.
+Ground seen from orbit keeps its sky fill, and terrain past the terminator is no longer lit by the eye's daylight. DeferredLight costs 0.60 ms.
+Exposure: a 64-bin histogram of log luminance, which excludes sky and space. It averages the 10th to 90th percentiles.
+Grading:
+Contrast is applied in log2 around middle grey, and saturation around luminance.
+The LUT applies after the tone map, so it no longer clips HDR.
+White balance is Bradford from the Planckian colour temperature, and 6,500 K changes nothing.
+World component (helio_component)
+One description: VoxelTerrainComponent is the whole world, in five categories:
+World: shape, radius or size, voxel size;
+Generation: generator, seed, settings;
+Environment: air;
+Appearance;
+Editing: editable, brush journal.
+Old fields removed: the chunk-domain fields a world never used are gone. Old levels still load, and saving drops the fields.
+Air: Custom, None, Earthlike, Thin or Dense, with density, sky tint and haze.
+AtmosphereComponent::for_air derives the sky on the world's planet.
+None means no sky, so a moon is airless.
+Blueprints: every setting has a getter and a set_* method.
+World cache: cached CPU worlds are keyed by scene and entity.
+Merged with main
+Main's lens pass and buffer view read depth the reversed way: helio_view_depth(proj, d), helio_is_sky, and helio_depth_nearest for a footprint's nearest texel.
+The lens tests write the engine's own depth.
+Main's removal of post-process depth of field and chromatic aberration wins.
+The WGSL validation walk fills both of the fog shader's placeholders.
+Leftovers deleted
+helio-voxel-data: the chunk-batch inbox and publication worker, the generation worker and the generator registry. What remains is a voxel object's chunks, the brush journal, and the shared names (ids.rs).
+Voxel planet:
+span-column level windows (local_outer_radius, edited_top), column_kinds, FaceFrame, time_field, pixel_trace_walks, and the block slope stencil (CPU and WGSL);
+the binary journal file format: snapshots keep its brush records, now record.rs;
+snapshot::covers and PlanetRecipe::from_json;
+PlanetFrame::shadows, which nothing read, so HELIO_VOXEL_FLIGHT_NO_SUN did nothing.
+Docs: span-columns.md and aaa-architecture.md are deleted. chunk-trees.md now says where the build differs from the plan. The lighting audit has a status line.
+Measured (RTX 3060)
+1080p holds, exact levels: ground primary 1.48 ms, sun and sky 2.06 ms; mountain primary 3.10 ms, sun and sky 2.78 ms.
+Mountain view: terrain at 6.60 ms.
+1440p ground view: terrain 9.95 → 5.85 ms once the walk's register regression was removed.
+Pulsar editor descent at 1440p: the largest cell's p95 goes from 7.0 to 2.6 px, and the max from 13.9 to 3.5 px.
+Tests run for this update
+Voxel planet: lib 74, chunks 19 (GPU drawn hits against CPU ray casts), wide products 1.
+Voxel pass graph 8, voxel data 22, deferred light 45, WGSL validation 2, lens 90.
+helio_component lib: 67 pass, including air → sky derivation and loading levels saved with the old fields.
+Through Pulsar#1124:
+engine_backend voxel tests pass, including a script setting every world setting;
+the random-world blueprint passes;
+the editor's voxel and level tests pass.
+Open
+Remaining items from docs/lighting-audit.md:
+Voxel sun visibility on mesh pixels.
+The sun's disc in shadow walks.
+Terrain bounce light.
+A runtime sky reflection cube.
+A regolith BRDF.
+A tangent-centred atmosphere march from space.
+A physical camera.
+Also open:
+Crater and relief scales relative to a body's radius for random worlds.
+Eviction driven by memory pressure.
+🤖 Generated with Claude Code
+Tuafo
+and others
+added 2 commits
+October 9, 2026 02:24
+Voxel planet: layered edits for planetary destruction
+…
+502d309
+```
+Edits are three layers applied in order, recent(baked(large(terrain))):
+the latest 256 brushes stay exact and undoable; older ones seal 64 at a
+time, small brushes into a sparse store of baked cell edits (8^3 bricks
+with majority-vote coarse levels, so accumulated small edits show at any
+distance) and large ones into an analytic log applied under the store
+after being applied over the cells already baked. Order stays exact.
+
+GPU: each column's edit block is self-contained (counts, its large and
+recent brushes inline, then its baked bricks' slots) and owns its brick
+slots, freed with the block. The global brush buffer is gone; binding 5
+is the baked brick pool. The renderer finds history changes by prefix
+hash and regenerates columns holding sealed bricks.
+
+Tests: level-0 cells match every brush replayed in order across seals;
+sealed cell-sized edits show at level 2; a kept renderer matches CPU ray
+casts exactly before and after large brushes seal over baked cells and
+after undo.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge remote-tracking branch 'origin/main' into wip/restore-visual-fixes
+7ea2d51
+Tuafo
+mentioned this pull request
+Oct 9, 2026
+Voxel planets in the editor: chunk-tree terrain, destructible worlds, a world component with air
+Far-Beyond-Pulsar/Pulsar-Native#1124
+Merged
+Tuafo
+self-assigned this
+Oct 9, 2026
+Tuafo
+added this to Pulsar Tracker
+Oct 9, 2026
+Tuafo
+and others
+added 2 commits
+October 9, 2026 11:17
+Voxel edits: saved as layers, undoable seals, bounded memory
+…
+f8c3890
+```
+Persistence: a planet's edits snapshot as their layers (large brushes,
+baked bricks of every level, recent brushes, history hash), keyed by grid
+geometry since baked edits do not depend on the terrain under them. An
+edit journal can start from such a base: saving a level folds all but its
+latest 4096 edits into it, and loading builds the world from the base and
+the listed tail instead of replaying every brush.
+
+Undo: each of the latest 32 seals keeps the columns it replaced, so undo
+reaches 2048 brushes past the recent window without rebuilding the world.
+
+Memory: brush history, seal notices and undo data are bounded windows;
+the baked store is keyed by column (a column's bricks are one lookup,
+not a shard scan), and journals jump to a start index instead of walking.
+Renderers sync baked changes from a bounded change list and fully
+refresh only when they fell behind it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel edits load bit-exact from saved levels
+…
+e59402b
+```
+serde_json's default float parsing is not always exact, so a saved
+level's brush centres could reload an ulp off (and its journal hash
+change). helio-voxel-data enables float_roundtrip; a test saves and
+reloads 2000 edits and compares their bits. A compacted journal saved
+and loaded builds the same world as every edit replayed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Tuafo
+changed the title
+Voxel planet: layered edits for planetary destruction
+Voxel edits: layered, saved as layers, bounded memory
+Oct 9, 2026
+Tuafo
+and others
+added 19 commits
+October 9, 2026 13:25
+Merge remote-tracking branch 'origin/main' into wip/restore-visual-fixes
+565bd88
+Voxel edit memory that scales; WGSL validation that checks what compiles
+…
+2d04353
+```
+Baked edit pool: uniform bricks (the inside of carved or filled regions)
+are stored in their column's edit block and take no slot; the pool
+starts at a thirtieth of its 128 MB budget and grows as destruction
+needs. Edit blocks use a buddy allocator (split on demand, merged on
+release): per-size free lists never merged, fragmenting the buffer until
+blocks stopped fitting and their columns waited forever. Baked slot and
+edit word use feed the LOD pressure like the column pool, and show in
+PlanetStats.
+
+WGSL validation: composed shaders (voxel planet generation/trace/gbuffer
+with the Earth program for both forms, the scene and environment joins,
+volumetric fog) are validated as their crates compile them, from
+functions those crates now build their pipelines with. The pass-local
+transparent.wgsl and transparent_base.wgsl were dead copies (the pass
+composes helio-mats' template) and are removed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Lights load from levels saved before their newer fields
+…
+719a0ef
+```
+A level saved before `shadows.shadow_priority` and `shadow_max_resolution`
+existed no longer decoded its LightComponent: the sun was dropped, so the
+atmosphere and terrain rendered black. The light component and every
+sub-group now default missing fields (as other components do), with a
+test decoding a sun without them and without a whole sub-group.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel terrain: a Cliffs layer of escarpments
+…
+024bf4c
+```
+Inside regions of `scale_km` covering `coverage`, the layers before it
+step into terraces `height_m` tall (whole layers, so treads lie on cell
+boundaries), joined by cliffs over the last `ratio` of each step. Integer
+terracing in 32 bits, identical on CPU (`landform::terrace`) and GPU
+(`landform_terrace`); the riser share rides in the stack layer's kind
+bits. Bounds: a terrace moves a height by less than a step and is not
+Lipschitz, so each level's margin grows by two steps.
+
+Tests: CPU and GPU fields bit-identical with cliffs on a sphere and both
+planes; on land columns of an Earth with cliffs ~88% of heights sit on a
+tread with steep risers between, within the checked bounds; the terrace
+function is flat, monotonic and within a step, also below zero. The
+editor's layer list offers Cliffs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Lock helio-core's validation dev-dependencies
+…
+22799b8
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel brushes: flat-topped boxes
+…
+691cbba
+```
+A cube brush takes an optional `height` (half height along the radial
+axis, metres; 0 is a cube of `radius`), the shape Flatten and Smooth
+stamp. A cube's containment uses its own radial range, which equals its
+radius for every cube, so existing edits resolve identically; hashes
+include the height only when set, so existing histories keep theirs.
+Journal and snapshot records are version 2 (56 bytes, with the height);
+version 1 still reads. VoxelBrushEdit carries the same field.
+
+Tests: boxes in the random replay mix across seals, a version 1 journal
+read back, and flatten-shaped boxes rendering exactly on the GPU.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel edits: a shared brush table, sealing sooner
+…
+a3e8bf5
+```
+Heavily sculpted areas vanished from a few hundred metres up and stopped
+taking edits. Each column's edit block held its brushes inline (12 words
+each), so where hundreds of recent brushes overlapped, every column
+repeated them all and the edit buffer filled: columns waited for blocks
+forever, and the edit pressure drove the LOD coarser, past the levels
+recent brushes draw at. Blocks now reference a shared face brush table
+(one word per brush; distinct brushes stored once, counted per block,
+freed with their last block; the table grows to a 12 MB budget). Recent
+brushes draw only where their cells are finer than them, so the recent
+window shrinks to 64 brushes, sealed 16 at a time into baked cells whose
+coarse levels show accumulated sculpting from any height; 128 seals stay
+undoable (2,112 brushes).
+
+Test: 1,200 spiral digs seen from 60 m to 2.5 km show the pit at every
+height, with nothing pending and bounded edit data.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel walks: edits decide carved cells; altitude over hollows
+…
+5a53906
+```
+A cell's kind is the last edit that removes or adds there, so walks
+(brush rays, surface points, the Smooth tool's nine ground samples) now
+sample the terrain field only where no edit decides the cell. A walk
+down a dug pit used to evaluate the rock and its caves at every carved
+cell: about a thousand cells per sample in a 100 m pit.
+
+ground_height measures from the floor of the hollow below the eye when
+the eye is in air under the generated top (a pit, a tunnel, a cave),
+not a depth below ground it no longer stands on: in a dug pit the camera
+read -114 m and crawled at its slowest speed. The floor is found by a
+walk whose stride grows with the distance walked, refined to the exact
+air-to-solid layer.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+helio_component: box height in its brush edits
+…
+65a7abb
+```
+The flat-topped box field reached VoxelBrushEdit without these three
+literals (helio_component builds only inside Pulsar).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: ray search around a coarse hit, coarse to fine
+…
+ed7dc4e
+```
+raycast_near finds the first solid cell in a window around a renderer
+hit by marching it at the level that drew the hit and narrowing two
+levels at a time, walking at most a few hundred base cells exactly.
+Brush stamps from orbit walked the whole window (kilometres of 0.1 m
+cells) on the render thread, hundreds of milliseconds per stamp. Where
+a finer level has no surface in the window, the coarser hit, the
+surface drawn there, is returned.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: raycast_near samples coarse cells past the shell
+…
+bc3c7dd
+```
+A top-level cell (13 km on Earth) reaches below the terrain's inner
+radius, where its half-cell samples land: skipping points outside the
+shell missed every solid sample from 1e9 m.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: near-range rays exact; coarse march past carved rock
+…
+74a3961
+```
+raycast_near walks windows of up to 2048 base cells exactly (every
+renderer hit drawn with cells up to ~34 m), and on a longer window keeps
+marching where a finer level finds air in the narrowed window: coarse
+levels do not show brushes smaller than their cells, so stamps in a dug
+pit landed on rock that was no longer there. Levels index through
+Cell::at_level.
+
+compact_terrain_journals is removed: saving compacts off the scene lock
+with journals_to_compact and compact_journal.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: span columns plan
+…
+c5d99d2
+```
+The design and phases replacing the single-band column: spans (air,
+solid, lanes, tops, bricks) generated only where a lane can change,
+a natural surface header independent of them, per-level vertical
+windows, and level selection that sees edits.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge Helio main: pass command recording, cached bind groups
+…
+60325ab
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: level windows and the near plane see edits
+…
+29fd52b
+```
+Phase 1 of span columns (docs/span-columns.md).
+
+- local_outer_radius bounds a region by its edited top where edits
+  reach it (Planet::edited_top: a walk down from the highest layer that
+  can be solid, with the edit-first cell kinds walks use), not by the
+  generated terrain. An eye in a 2 km dig turned every fine level on
+  with full windows: 930 000 columns of 0.1 m air. Additions raise the
+  bound only where they are; the planet-wide add top did it everywhere.
+- Windows recompute bounds and replan when the edits change, not only
+  when the eye moves.
+- air_clearance counts Add brushes and baked solid columns near the eye:
+  a near plane a quarter of the height over the generated ground
+  clipped a wall built beside the camera.
+- kind_at: the edit-first cell kind at any level (kind_in at level 0).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: span columns, a fully destructible planet
+…
+5760707
+```
+Phases 2-5 of docs/span-columns.md. A column (an 8x8 footprint of one
+level) no longer stores one band of bricks with solid below and air
+above. Its vertical content is an ordered list of spans: AIR, SOLID,
+LANES (each lane uniform: a crater's wall), TOPS (each lane solid below
+its own top: a dug floor), NATURAL (the generated ground) and BRICKS
+(arbitrary occupancy). Open terrain is one NATURAL span with no table,
+as the heightfield columns were.
+
+Generation evaluates cells only in candidate intervals where some lane
+can change: around each lane's terrain top and evaluated volume, where
+each brush's surface crosses each lane (boxes exactly; balls solved per
+lane along the exact slope of its volume points, with an f32 error
+margin) and at each baked brick. Between them one exact cell per lane
+classifies each gap. The interior of a 2 km dig evaluates its floor,
+not thousands of cells of air: that column evaluation was the 25x
+generation cost, and the band's air bricks were stepped one by one.
+
+Rays cross an AIR span as one box and a lane span lane by lane (one
+radial solve per lane however tall), so carved volume costs like sky.
+
+The natural tops live in the header over a column base (16 bits when
+they spread past a byte), independent of the spans: material depth
+counts from the generated ground at any depth. A dig 400 m deep showed
+grass on its floor near the eye, where the band-relative byte could not
+hold the top.
+
+Each level describes a window of 2048 cells around the eye's layer (a
+3D clipmap); the coarsest level is never clipped, and columns begin at
+the planet's centre (below it a lane's line runs out the antipode).
+
+column_view::ColumnView decodes records as the shaders read them.
+Tests: resident_columns_hold_the_canonical_cells audits every fifth
+resident column cell by cell against Planet::column_kinds on open
+ground, in a pit, on a crater floor 3 km down, and from orbit over a
+planet with a 0.8-radius bite (about 1.4 billion cells, none wrong);
+destroyed_worlds_render_from_orbit checks the bite pixel by pixel and
+a planet removed entirely draws only sky.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: candidates from each lane's own brush sweep
+…
+ee7c896
+```
+Each lane runs the brushes over its line in order as a union of solid
+intervals (a Remove subtracts, an Add unites) and offers only the ends
+of what remains, plus brush ends landing within two margins of the
+set's boundaries (abutting boxes, slivers). Offering both crossings of
+every brush overflowed the candidate list under the 233 overlapping
+2 km stamps of a stroke dragged from orbit, and the fallback evaluated
+one interval from the deepest crossing to the highest, cell by cell.
+
+Candidates are bricks marked in a mask over the column's window (256
+bricks), exact and bounded, its runs the intervals: no list to overflow
+or sort. A BRICKS span sheds its solid bottom and air top bricks as
+spans of their own, crossed as one box.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: a column clips above only where solid lies past its window
+…
+6f56273
+```
+Each lane's brush sweep gives its highest solid layer; the column's is
+its summary top, and the window clips above only when solid lies past
+it. A pit's columns near the eye saw candidates at the old ground far
+above their window (crossings inside dug space) and were clipped there
+with that ground as their summary top: summary blocks no longer skipped
+the pit's air, and primary and sun rays crossed it column by column.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: a dig from orbit costs what open ground costs (test)
+…
+7fa19af
+```
+Inside a stroke of 2 km balls, rays take the steps they take over open
+ground at the same height, no column is clipped and almost none stores
+bricks.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Tuafo
+changed the title
+Voxel edits: layered, saved as layers, bounded memory
+Voxel planet: span columns and layered edits, a fully destructible planet
+Oct 10, 2026
+Tuafo
+and others
+added 2 commits
+October 10, 2026 00:25
+Voxel planet: an edit tree keeps the surfaces edits leave, not their …
+…
+306be5b
+```
+…history
+
+Every column under a long editor session received every brush over it:
+hundreds of overlapping digs filled the GPU's edit words (admission stopped
+with 80k columns pending), cost generation ~40x a column and made picks
+walk hundreds of brushes per cell.
+
+- EditLog's index is a per-face octree whose leaves keep only the brushes
+  that can still change a cell in them: a Remove or Add holding a node
+  replaces what came before (but larger brushes), a Remove or Paint inside
+  space an earlier Remove emptied is left out. Containment is proven with
+  an f64 copy of the volume map and its movement and bend bounds. 400
+  overlapping 2 km digs leave ~20 brushes a column (was ~110).
+- Columns with the same brush list share one edit block; a job's cost
+  counts its brushes.
+- Sealing a large brush over baked bricks fills or skips whole bricks.
+- Picks return the drawn cell (Planet::drawn_hit); raycast_near is gone.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: architecture review; picks exact at level 0 (test)
+…
+8f078c6
+```
+docs/aaa-architecture.md reviews every subsystem against the research
+(Dreams, Claybook, Teardown, Lumen, Aokana, ESVO, 64-trees, kajiya,
+GigaVoxels) with the editor's measured stage costs and the phases that
+follow. The pick test checks the drawn cell and the air cell before it at
+level 0; Cell::at_level, used only by the removed raycast_near, is gone.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Tuafo
+and others
+added 12 commits
+October 14, 2026 02:15
+Voxel planet: voxels under a pixel are lit by the slope, at every level
+…
+b467881
+```
+Every level lit its cells by their faces, each step shadowing the next.
+A coarse level's steps are a cell tall and their shadows long under a
+low sun, so a slope read as stripes, and the stripes changed with every
+switch between levels: the checkered "cardbox" blocks while climbing or
+diving fast, and contour lines from afar. The slope's normal now
+replaces the faces as the voxel (not the cell) shrinks under a pixel,
+the same on both sides of a switch, and sun and sky rays from such a
+face start past the steps until they rise a cell off the slope. Voxels
+a few pixels wide keep their faces and steps.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: slope lighting never makes NaN; levels tint the gbuffer
+…
+d1518d6
+```
+Since voxels under a pixel are lit by the slope, most distant hits take
+the slope's normal. Where it could not be normalised (no slope across
+the cell, or the face's normal opposite it at half weight) it was NaN,
+and one NaN sky sample greyed its whole 4x4 block: grey squares across
+the terrain in 3-5% of the pixels of some frames climbing past 80-200
+km. The normal is now checked so NaN fails, falling back to the face's.
+
+`HELIO_VOXEL_CHUNKS_LEVELS` now colours the published surface by level
+(it only reached the fallback colour), and `=half` colours the left half
+beside the shaded right, to line shading up with the cut.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: generation skips cells no cave can carve
+…
+a84f5db
+```
+A cave opens only between its rock cover and the cave depth (any depth
+over that at a tunnel entrance) in a cave region. Cells of a column
+outside that window keep the surface's bits (out of the lean's band),
+so the scan steps over them instead of evaluating three 3D noises at
+each, or stepping in small clearance steps: the chunks under 45% of the
+earth preset's surface lie mostly in its 6 m cover. Exact (every view
+still matches the CPU's ray casts); chunk columns cost 15% less in a
+3 km/s cruise.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: generation budgets by a batch's fixed and per-tile cost
+…
+7c88243
+```
+The budget divided its milliseconds by each frame's average cost a
+tile, which in the small batches of a flight is mostly the batch's
+fixed part. The cost is now a least-squares line through recent
+batches (fixed + per tile, + per chunk), once their sizes spread, else
+the averages as before.
+
+The flight harness logs its load every 50 frames: interval, the pass's
+CPU stages, and requests, generated and drawn tiles.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: slope lighting costs a few loads, its samples reach
+…
+6d56a86
+```
+Lighting voxels under a pixel by the slope (b467881) made a mountain
+slope's shadows 2.7x dearer at 1080p (1.9 -> 5.2 ms): every sample
+measured its slope from the column tops around it (up to twenty tree
+lookups), and pixels lit by the slope rarely found a sample within four
+of their cells, so each walked to the sun itself.
+
+Cells of a pixel or less now take the slope the hits two pixels around
+make (`screen_ground`: four loads; it spans more than a cell, so the
+slope, not the steps); larger cells still measure their column tops. A
+pixel takes a sample within four of its cells or eight pixels' widths
+(a grazing slope's neighbours lie farther apart than its cells). The
+slope's shadows now cost 2.6 ms, the ground's 1.85 as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel flight: held views settle with the camera's view cone
+…
+0e39c38
+```
+`chunk_settle` and the dig step planned without a view, so out-of-view
+tiles were not a level coarser as in the renderer's pass: at 2560x1440
+a held view never settled (its cut outgrew the chunk slots). They now
+plan with the cone the view sees (`view_cone`).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: a host's draws skip the plain colour target
+…
+41f67a7
+```
+The trace and shadow passes wrote a plain colour for every pixel, which
+only a world drawn alone (tests, harnesses) reads: a host takes the
+published surface. `ChunkWorld::set_plain_colour` (on by default; the
+renderer's pass turns it off), bit 8 of `DrawParams::debug.x`; the debug
+modes are its low byte.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel flight: a layer stack from a file (HELIO_VOXEL_FLIGHT_LAYERS)
+…
+91bb3eb
+```
+A Pulsar level's VoxelTerrainLayersComponent data, so a view the editor
+shows can be held and timed here on the same terrain.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: a hit's shown material is picked after the walk
+…
+bafe27f
+```
+4210acb made the walk's hit read the cell over a chunk's top layer
+from the chunk over it (a hash table probe and the tile's gap) to pick
+the surface's or the subsurface's material. Inlined at every hit site
+inside the walk's loop, that rarely-run code took the loop registers:
+a 1080p mountain's primary rays went 3.07 -> 4.43 ms (bisected). The
+walk now carries the cell's material pair, and the trace picks the
+shown one once its ray has hit (`shown_material`, the same choice).
+Mountain primary 4.49 -> 2.84 ms, its sun and sky 2.07 -> 1.90 ms.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: wanted tiles ranked by what the eye needs now
+…
+b8ccc2f
+```
+Tiles were ranked by their cells' size from the nearer of the eye and
+the prefetch eye (half a second ahead), so a camera that starts moving
+or falls fast sent a burst of tiles the prefetch eye wants ahead of
+those coarse on screen. They are now ranked by the eye's own error
+(in view first, as before); refinement still follows both eyes. A fast
+descent at 1080p: largest cell p95 2.6 -> 2.15 px, max 4.5 -> 3.8 px.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: the coarsest tile in view is reported, with its state
+…
+ede6615
+```
+`Plan::worst` (and `UpdateStats::worst`, the pass's diagnostics line):
+the tile behind `worst_px`, whether its layers are measured, how many
+levels its ranges are guessed, and its children asked for and
+generated: what holds a coarse tile on screen. The flight harness can
+pace its stress frames as a display does (HELIO_VOXEL_STRESS_FPS) and
+fly over a given direction (HELIO_VOXEL_STRESS_AT, a level's spawn).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: plans report their age and the worker's time
+…
+dbcd9bb
+```
+`UpdateStats::plan_age` (frames since the eye the plan in use was made
+for) and `plan_ms` (the worker's planning and eviction), in the pass's
+diagnostics line: how far behind a moving eye the requests are.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Tuafo
+moved this from In Progress
+to Todo
+in Pulsar Tracker
+Oct 14, 2026
+Tuafo
+and others
+added 9 commits
+October 14, 2026 16:57
+Voxel planet: voxel occlusion where voxels are a few pixels wide
+…
+fb33c8a
+```
+The published surface's occlusion looked up the eight voxels around a
+face wherever its cell projects to most of a pixel, which the cut keeps
+every cell near: nearly every pixel paid eight tree lookups for an
+occlusion TSR averages away, and its weight followed the cell's level
+(a term that bands at level switches). It now fades in with the voxel's
+size on screen (1 to 3 pixels, as `hit_face`'s slope lighting); under
+that the sky samples hold the occlusion, and the lookups are skipped.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: generation maps a column once, skips ridges off ranges
+…
+b71bdf9
+```
+Chunk columns took each scanned cell's volume point through the full
+sphere mapping (tangents, a Newton square root, wide products); it is
+the column's domain point scaled by height (`volume_point_half`), the
+same values. Ridge octaves outside a mountain range (its region mask
+and the mask's slope zero, its region octaves all summed) are skipped:
+the layer reaches the height and the steering only times that mask.
+Both exact (the CPU field still matches bit for bit).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: a deterministic generation benchmark
+…
+3416ec4
+```
+`ChunkWorld::regenerate_all` (every resident tile generated again,
+drawn as it is meanwhile) and `FrameTimings::chunks`; the flight
+harness's `HELIO_VOXEL_GEN_BENCH=rounds` settles a held view and
+generates its tiles again in full batches, reporting the GPU's time by
+kernel a tile and a chunk (`GENBENCH`), the same work every run (+-1%):
+tile columns 27.8 us a tile, chunk columns 6.6 and builds 2.8 us a
+chunk on the level's ground view at 1080p.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: a two-rate field and compiled column programs
+…
+cd7a707
+```
+Generation spent most of a tile on its columns, each walking the whole
+octave table and evaluating every octave, the continent- and range-wide
+ones included. Per tile (GENBENCH, RTX 3060): 41-43 us before, 32-34 us
+now, bit-exact between CPU and GPU (docs/two-rate-field.md).
+
+- Two-rate field: octaves 15 shifts or more above a column's level
+  (erosion and craters excepted) are evaluated at nodes, the columns of
+  the level whose indices are multiples of 16 on their face, and blended
+  bilinearly with exact integer weights (high and low bytes summed
+  apart). Ridges carry their noise and gradient; crests are made per
+  column. Within 0.14 cells of the single-rate field at level 0, under
+  0.1 cells elsewhere. TerrainField::height and surface take a Column.
+- Tile node pass: each tile's 7x7 nodes once, in a buffer the tile's
+  columns read; the program interface (terrain_node, terrain_node_word,
+  terrain_column_nodes, generation_node_word) keeps the engine generic.
+- Tile halo pass: the lean lattice's heights past a tile's edges, once a
+  tile instead of once a chunk. Chunk columns no longer run the field;
+  6.6 -> 4.8 us a chunk.
+- Column programs: the table compiled per reference level into the ops
+  its columns run, with their flags and the node words in use. CPU and
+  GPU run the same plan; the per-column table walk was a sixth of a
+  column's GPU time. Columns 23.6 -> 19 us a tile.
+- mul_shr_signed rounds to nearest: one wide multiply, add and shift.
+  Truncation's sign handling was a fifth of the column samples; rounding
+  down biased the ridge envelope's statistics.
+- GENBENCH reports the tile stages apart (nodes, columns, halos).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: cells may be coarser where motion sweeps the image
+…
+a2dd156
+```
+A fast descent wants a screenful of new tiles every halving of its
+height: 64k tiles in 6 s, two seconds of generation at 31 us a tile.
+Where the eye's motion sweeps a tile's image by `flow` pixels a frame
+(its offset's motion across the line of sight), its cells may now cover
+1 + flow / 16 times `lod_pixels`, up to three
+(`PlanConfig::motion_flow`, `motion_max`). The planner ranks requests by
+that allowance too. The view's centre and anything still stays at a
+pixel; turning keeps full detail.
+
+On a 6 s descent at 1440p with 3 ms of generation a frame and a fixed
+time step, the median largest cell over its allowance goes from 5.6-6.1
+to 1.16, and from 5.6-6.1 to 2.9-3.1 px raw. The p95 is unchanged: near
+the ground, ~80 tiles a frame against a queue of ~9000.
+
+Diagnostics:
+- `Plan::worst_wanted` / `UpdateStats::worst_wanted`: the largest cell
+  over its motion allowance.
+- `UpdateStats::shown_tiles` and `evicted_unseen`: 95% of a descent's
+  generated tiles are drawn.
+- `HELIO_VOXEL_STRESS_STEP`: a fixed time step a frame, so stress runs
+  see the same eyes.
+
+docs/research-aaa-planet-terrain.md surveys planet terrain techniques
+(Proland, Outerra, geometry clipmaps, Inigo Quilez, shipped engines,
+far-field shading) and ranks the options for this engine.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: leaves store the heightfield's exact slope
+…
+1312411
+```
+At a distance, cells are about a pixel and a hit's normal came from the
+hit distances two pixels away. On a gentle slope a column's whole-cell
+top makes terraces, so that normal alternated between flat treads and
+one-cell risers: contour stripes across planets seen from orbit, and
+horizontal bands on mountainsides.
+
+`chunk_build_main` now stores with each leaf that holds natural tops the
+heightfield's slope over its columns, from their exact heights (central
+differences a column past each side; two bytes by angle, in
+`leaf_normals` beside `leaf_materials`). "Natural" means every column's
+voxel top there is the heightfield's, so edits and overhangs keep their
+measured normals. `hit_face` lights by it first. The stripes are gone
+and relief shades smoothly at any distance. A mountain view's terrain
+goes from 6.82 to 6.60 ms: one stored load replaces the screen
+measurement. 96 MB at full leaf capacity.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: material boundaries filtered at a distance
+…
+b8cf8a5
+```
+A leaf stores one surface material (its 4x4 columns' vote), so where
+cells are a pixel or less, maria, snowlines and ejecta showed as blocks
+of four pixels. A top face there now takes the surface material at a
+point jittered up to a leaf's width each frame, from the stored leaf of
+the top cell found there. TSR averages the frames into a filtered
+boundary. It costs one leaf lookup and two cell tests, only for those
+pixels.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Sky light from each surface's own sky, not the eye's
+…
+710f0c6
+```
+Ambient light was one L2 harmonic probe integrated from the sky-view
+table at the eye, and every pixel used it. Ground seen from orbit took
+the sky of an eye in space, black above, so sunlit terrain lost its sky
+fill and shadows went black. Terrain past the terminator, or at dusk
+hundreds of kilometres away, took the eye's daylight.
+
+The atmosphere pass now also builds a sky irradiance table
+(`sky_table_kernel`, Bruneton-style): over 16 altitudes by 24 sun
+cosines, the sky and the lit ground below the horizon, through the air,
+for a unit sun. 128 directions an entry, projected on L2 harmonics,
+cosine-convolved, of which the six symmetric about the sun's vertical
+plane are kept, in the local frame. It is published as
+`atmosphere_sky_table`, about 37 KB, a uniform: the deferred pass is at
+its texture limit. Deferred lighting looks up each pixel's own altitude
+and sun angle; above the atmosphere the planet's glow falls with its
+solid angle. At the eye it matches the old probe: a ground view is
+unchanged. The table costs about 0.05 ms in the atmosphere pass.
+
+docs/lighting-audit.md audits the lighting pipeline against AAA
+practice and ranks the remaining work: exposure, airless worlds,
+grading, shadows and reflections.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Post-process: histogram metering without sky, grading that grades
+…
+df93fe8
+```
+Auto exposure averaged the log luminance of every pixel, black space
+included. A planet on black was metered as half void, pushed +4 EV and
+blown out. Metering is now a 64-bin log2-luminance histogram (half an
+EV a bin) per workgroup that skips pixels where nothing was drawn. The
+reduction averages the bins between the 10th and 90th percentiles, as
+UE's histogram metering does. Where nothing is metered (all sky) the
+exposure stays put.
+
+Grading bugs (docs/lighting-audit.md section 1.3):
+- Contrast was a plain multiplier; it is now log2 around middle grey.
+- Saturation was a plain multiplier; it is now a mix with luminance.
+  The level's "saturation 0.85, contrast 1.15" had only scaled the
+  image by 0.98.
+- The grading LUT clamped scene-linear HDR into [0, 1] before the tone
+  curve, and applied the hue shift and lift/gamma/gain twice around a
+  LUT that already holds them. It is now one blend on display-referred
+  colour after tone mapping.
+- White balance multiplied red by 1.54 and blue by 0.65 at its neutral
+  6500 K. It is now Bradford's adaptation from the Planckian white of
+  `white_temp` (tint along green-magenta) to 6500 K's, the identity
+  there.
+
+voxel_flight: `HELIO_VOXEL_FLIGHT_AUTO_EXPOSURE` meters with the look.
+From 400 km at 1440p with ACES, the Earth-like level now reads as an
+orbital photograph instead of a dark plate.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Tuafo
+moved this from Todo
+to In Progress
+in Pulsar Tracker
+Oct 15, 2026
+helio_component: a voxel world is one description, air included
+…
+66f1cdf
+```
+`VoxelTerrainComponent` is now the whole world, in five categories:
+World (shape, radius or size, voxel size), Generation (generator, seed,
+its settings), Environment (air), Appearance and Editing (editable, the
+brush journal). The chunk-domain fields a world never used are gone:
+`domain_mode`, the bounds, `chunk_edge_voxels`, `max_chunk_lod`,
+`lod_scale`, `renderer_id`, `material_ids` and the live sample payload
+store. Sample edits on a world were already brushes in its journal.
+Levels saved with those fields still load, and saving drops the fields.
+
+Air (`VoxelAir`) is Custom (the entity's `AtmosphereComponent` as
+authored), None, Earthlike, Thin (Mars) or Dense (Titan), with density,
+sky tint and haze. `AtmosphereComponent::for_air` derives a preset's
+sky on the world's planet. The planet's placement, radius, ground and sun
+are kept. None is no sky, so a moon is airless.
+
+Every setting is a blueprint method, read and written: `world_shape`,
+`planet_radius`, `plane_size`, `voxel_size`, `seed`, `air`, `air_density`,
+`air_tint_*`, `air_haze` and `is_editable`, each with a `set_*`. Invalid
+values are refused.
+
+Cached CPU worlds are keyed by scene and entity, so worlds in different
+scenes no longer evict each other. Tests running in parallel exposed the
+collision; in the editor, its scene and a play session can share entity
+ids.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Tuafo
+changed the title
+Voxel planet: span columns and layered edits, a fully destructible planet
+Voxel planet: chunk trees, a fully destructible planet, and the lighting to show it
+Oct 15, 2026
+Tuafo
+marked this pull request as ready for review
+October 15, 2026 04:14
+Tuafo
+and others
+added 2 commits
+October 15, 2026 01:36
+Merge Helio main: lens pass, skinned meshes, SceneDB assets
+…
+b0f7d49
+```
+Main's lens pass and buffer view read depth through reversed depth with
+no far plane (`helio_view_depth(proj, d)`, `helio_is_sky`,
+`helio_depth_nearest` for a footprint's nearest texel). The lens tests
+write the engine's own depth (`near / distance`, sky 0). Main's removal
+of post-process depth of field and chromatic aberration wins over this
+branch's reversed-depth port of them. The pass-local
+`transparent_base.wgsl` stays deleted: the pass composes helio-mats'
+template, which has main's skinning. The WGSL walk fills both of the
+fog shader's post-process row placeholders.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Voxel planet: delete what chunk trees left behind
+…
+819dff8
+```
+The span-column design and the chunk-batch publication path left code
+nothing runs:
+
+- helio-voxel-data: the bounded inbox and publication worker, the
+  generation worker and the chunk generator registry. What remains is a
+  voxel object's chunks (keys, samples, revisioned publication,
+  snapshots, the sample edit worker), the brush journal and the shared
+  generator and renderer names (`ids.rs`).
+- Voxel planet: level windows (`local_outer_radius`, `edited_top`),
+  `column_kinds`, `FaceFrame`, `time_field`, `pixel_trace_walks` and its
+  TRACE_BOX hook, the block slope stencil (CPU and WGSL), the binary
+  journal file format (snapshots keep its brush records: `record.rs`),
+  `snapshot::covers`, `PlanetRecipe::from_json`, `Brick::uniform`, and
+  `PlanetFrame::shadows`, which nothing read (`HELIO_VOXEL_FLIGHT_NO_SUN`
+  did nothing). Helpers only tests use are test-only.
+- Deferred lighting: a debug colour for negative voxel sun visibility,
+  which the chunk pass never writes.
+- Docs: span-columns.md and aaa-architecture.md (the removed design);
+  chunk-trees.md says where what was built differs from the plan; the
+  README's file map and material count; the lighting audit's status.
+
+Tests (release unless noted): voxel planet lib 74 (debug), chunks 19,
+wide products 1, voxel pass graph 8, voxel data 22, deferred light 45,
+WGSL validation 2.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Hide details
+View details
+Tuafo
+merged commit 2714269
+into
+main
+Oct 15, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+github-project-automation
+Bot
+moved this from In Progress
+to Pending Release
+in Pulsar Tracker
+Oct 15, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,161 @@
+Summary Investigate and expose surface-aware densification strategies for Gaussian splatting models, replacing or augmenting the default gradient-threshold clone/split/prune heuristics with geometry-informed variants that produce better ...
+
+feat(training): Surface-aware Gaussian densification strategies · Issue #15 · hummat/mini-mesh · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+feat(training): Surface-aware Gaussian densification strategies #15
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+feat(training): Surface-aware Gaussian densification strategies#15
+Copy link
+Labels
+P3: backlogNice to have, no timelineNice to have, no timelineenhancementNew feature or requestNew feature or requestgaussian-splatGaussian Splatting methodsGaussian Splatting methodsresearchRequires literature review / experimentalRequires literature review / experimentaltrainingTraining modelsTraining models
+Milestone
+Phase 3: Research & Integration
+Description
+hummat
+opened on Feb 4, 2026
+Issue body actions
+Summary
+Investigate and expose surface-aware densification strategies for Gaussian splatting models, replacing or augmenting the default gradient-threshold clone/split/prune heuristics with geometry-informed variants that produce better surfaces.
+Context: The 3DGS survey (Chen & Wang) and surface reconstruction survey (Xu et al., PeerJ CS) both emphasize that densification heuristics are critical for surface quality. The default 3DGS strategy optimizes for photometric quality, not geometric accuracy — producing floaters, overlapping Gaussians, and poor surface locality.
+Motivation
+Default splatfacto densification:
+Accumulates view-space positional gradients
+Clones if gradient > threshold AND Gaussian is small
+Splits if gradient > threshold AND Gaussian is large
+Prunes if opacity < threshold
+This works for novel view synthesis but fails for surface reconstruction because:
+Floaters: Gaussians can "explain" appearance from wrong positions if they're at the right depth from enough views
+Overlapping blobs: Multiple Gaussians stacked along a ray look photometrically correct but have no surface meaning
+Under-densification at surfaces: Gradient threshold doesn't distinguish "needs more Gaussians here for geometry" from "needs more for appearance"
+Several papers propose better strategies:
+GOF: Per-pixel gradient norms (arXiv:2404.10772)
+Instead of accumulating the gradient of the loss w.r.t. projected position (which cancels across pixels), GOF accumulates the norm of individual pixel gradients:
+```
+M = Σᵢ ‖(dL/dpᵢ)(dpᵢ/dx)‖
+```
+This better identifies blurred/under-reconstructed regions where individual pixels disagree about where the Gaussian should be.
+PGSR: Absolute gradient magnitude (arXiv:2406.06521)
+Uses AbsGS — absolute gradient magnitude rather than standard view-space gradient. Better captures geometric detail because it doesn't lose information through gradient cancellation.
+GaussianPro: Progressive propagation (arXiv:2402.14650)
+Uses patch matching + multi-view photometric consistency to propagate depth/normal from well-reconstructed regions to under-reconstructed ones:
+Renders depth/normal maps from current Gaussians
+Propagates values via homography to neighboring pixels using NCC consistency
+Back-projects pixels where rendered depth diverges from propagated depth → new Gaussians
+Planar loss: normal consistency + scale regularization to flatten Gaussians
+Specifically addresses texture-less surfaces where SfM provides no initialization. Achieves +1.15dB PSNR on Waymo.
+Scaffold-GS: Anchor-based structured densification (arXiv:2312.00109)
+Replaces flat Gaussian soup with a hierarchical structure:
+Sparse voxel grid of anchor points with learnable features
+Each anchor spawns k=10 neural Gaussians via lightweight MLPs
+Growing: Add anchors where neural Gaussians have high averaged gradients, at multiple voxel resolutions
+Pruning: Remove anchors whose Gaussians consistently have low accumulated opacity
+Volume regularization: Penalizes product of Gaussian scales to minimize overlap
+Result: 10× storage reduction, better multi-scale behavior, more structured geometry.
+DN-Splatter: Depth/normal-guided init (arXiv:2403.17822)
+Rather than changing densification itself, DN-Splatter improves the starting point:
+Initialize from back-projected sensor depth (1M points) instead of sparse SfM (~10K points)
+Pre-align Gaussian orientations to point cloud normals
+This front-loads the geometric information that densification would otherwise need to discover
+Proposed Design
+Approach: Configurable densification via nerfstudio
+Nerfstudio's splatfacto already parameterizes densification. The changes needed are:
+Expose existing knobs as mini-mesh config flags:
+```
+--densify-grad-thresh 0.0002    # default, tune per method
+--densify-size-thresh 0.01      # split threshold
+--cull-alpha-thresh 0.1         # prune threshold
+--cull-scale-thresh 10.0        # max Gaussian scale
+```
+Add depth-distortion loss (from 2DGS/GOF) — concentrates Gaussians at surfaces:
+```
+L_dist = Σᵢⱼ wᵢwⱼ|zᵢ - zⱼ|
+```
+Already implemented in gsplat for 2DGS; needs exposure in splatfacto config.
+Add normal consistency loss — aligns Gaussian normals with depth gradients:
+```
+L_normal = 1 - n̂ · ∇D/|∇D|
+```
+Available in DN-Splatter and 2DGS; needs forwarding through config.
+Add planar/scale regularization (from GaussianPro) — flattens Gaussians against surfaces:
+```
+L_planar = β·L_normal + γ·L_scale
+```
+Weights: β=0.001, γ=100 (per GaussianPro).
+Dense initialization option — use dense depth maps (from sensor, mono predictor, or SDF mesh) instead of sparse SfM:
+```
+--init-points dense           # back-project depth maps
+--init-points mesh:path.ply   # sample from mesh (#14)
+```
+What stays in nerfstudio vs mini-mesh
+nerfstudio: Any actual training loop changes (new loss terms, modified densification kernel). May already be available in gsplat/community methods.
+mini-mesh: Config exposure, flag routing, documentation of which settings work for surface reconstruction vs view synthesis.
+Alternatives Considered
+Scaffold-GS full integration: Would require significant nerfstudio refactoring (anchor data structure, MLP spawning, hierarchical voxel grid). Worth tracking but too invasive for now. Better as a separate nerfstudio method.
+Custom CUDA densification kernel: Implement GOF-style per-pixel gradient norms directly. High effort, marginal gain over simpler approaches (depth distortion + normal consistency get most of the benefit).
+No changes, rely on method-specific implementations: Let each method (2DGS, DN-Splatter, etc.) handle its own densification. This is the fallback — works but doesn't help vanilla splatfacto users who want better geometry.
+Tasks
+Audit current splatfacto densification params and what's configurable
+Add depth distortion loss flag (check if gsplat already exposes this)
+Add normal consistency loss flag
+Add planar/scale regularization flag (GaussianPro-style)
+Create config presets for surface-quality splatfacto (e.g., config/splatfacto-surface*.sh)
+Add dense initialization support (--init-points dense/mesh:path)
+Benchmark: default splatfacto vs surface-tuned splatfacto on a test scene (Chamfer, F-score)
+Document tuning guide in docs/methods_and_models.md
+References
+Survey papers
+3DGS Survey (Chen & Wang) — Densification analysis, Sec. 3
+Surface Reconstruction Survey (Xu et al., PeerJ CS) — Regularization strategies
+Method papers
+GOF — Per-pixel gradient norms densification
+PGSR — AbsGS gradient strategy
+GaussianPro — Progressive propagation + planar regularization
+Scaffold-GS — Anchor-based hierarchical densification
+DN-Splatter — Dense depth init + geometric losses
+2DGS — Depth distortion + normal consistency losses
+Mip-Splatting — Anti-aliasing constraints on Gaussians
+Related Issues
+feat(pipeline): Support Gaussian-based surface reconstruction methods #13 — GS-based surface reconstruction (this issue provides the training-level knobs those methods need)
+feat(pipeline): Hybrid SDF→Gaussian pipeline for fast rendering of SDF geometry #14 — Hybrid SDF→GS pipeline (mesh-based init is a key densification strategy)
+feat(docker): Add gsplat to Docker image to avoid runtime compilation #8 — gsplat in Docker (prerequisite for gsplat-level features)
+Activity
+hummat
+added
+enhancementNew feature or requestNew feature or request
+trainingTraining modelsTraining models
+on Feb 4, 2026
+hummat
+added
+gaussian-splatGaussian Splatting methodsGaussian Splatting methods
+researchRequires literature review / experimentalRequires literature review / experimental
+P3: backlogNice to have, no timelineNice to have, no timeline
+on Feb 15, 2026
+hummat
+added this to the Phase 3: Research & Integration milestone on Mar 16, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+P3: backlogNice to have, no timelineNice to have, no timelineenhancementNew feature or requestNew feature or requestgaussian-splatGaussian Splatting methodsGaussian Splatting methodsresearchRequires literature review / experimentalRequires literature review / experimentaltrainingTraining modelsTraining models
+Projects
+No projects
+Milestone
+Phase 3: Research & IntegrationNo due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

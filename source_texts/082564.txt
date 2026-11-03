@@ -1,0 +1,234 @@
+Ray Marching and Signed Distance Fields
+
+#### Further Graphics
+
+
+
+
+
+#### GPU Ray-tracing
+
+
+
+Ray tracing 101: "Choose the color of the pixel by firing a ray through and seeing what it hits."
+
+> Ray tracing 102: "Let the pixel make up its own mind."
+
+
+
+
+
+
+
+#### GPU Ray-tracing
+
+
+
+- 1. Use a minimal vertex shader (no transforms) - all work happens in the fragment shader
+- 2. Set up OpenGL with minimal geometry, a single quad
+- 3. Bind coordinates to each vertex, let the GPU interpolate coordinates to every pixel
+- 4. Implement raytracing in GLSL:
+  - a. For each pixel, compute the ray from the eye through the pixel, using the interpolated coordinates to identify the pixel
+  - b. Run the ray tracing algorithm for every ray
+
+vec3 getRayDir( vec3 camDir, vec3 camUp, vec2 texCoord) { vec3 camSide = normalize( cross(camDir, camUp)); vec2 p = 2.0 \* texCoord - 1.0; p.x \*= iResolution.x / iResolution.y; return normalize( p.x \* camSide + p.y \* camUp + iPlaneDist \* camDir); }
+
+// Window dimensions uniform vec2 iResolution; // Camera position uniform vec3 iRayOrigin; // Camera facing direction uniform vec3 iRayDir; // Camera up direction uniform vec3 iRayUp; // Distance to viewing plane uniform float iPlaneDist; // 'Texture' coordinate of each // vertex, interpolated across // fragments (0,0) → (1,1) in vec2 texCoord;
+
+#### GPU Ray-tracing
+
+
+
+Hit traceSphere(vec3 rayorig, vec3 raydir, vec3 pos, float radius) { float OdotD = dot(rayorig - pos, raydir); float OdotO = dot(rayorig - pos, rayorig - pos); float base = OdotD \* OdotD - OdotO + radius \* radius; if (base >= 0) { float root = sqrt(base); float t1 = -OdotD + root; float t2 = -OdotD - root; if (t1 >= 0 || t2 >= 0) { float t = (t1 < t2 && t1 >= 0) ? t1 : t2; vec3 pt = rayorig + raydir \* t; vec3 normal = normalize(pt - pos); return Hit(pt, normal, t); } } return Hit(vec3(0), vec3(0), -1); }
+
+#### GPU Ray-tracing: Sphere
+
+# An alternative to raytracing: Ray-marching
+
+An alternative to classic ray-tracing is ray-marching, in which we take a series of finite steps along the ray until we strike an object or exceed the number of permitted steps.
+
+
+
+- Also sometimes called ray casting
+- Scene objects only need to answer, "has this ray hit you? y/n"
+- Great solution for data like height fields
+- Unfortunately…
+  - often involves many steps
+  - too large a step size can lead to lost intersections (step over the object)
+  - an if() test in the heart of a for() loop is very hard for the GPU to optimize
+
+# GPU Ray-marching: Signed distance fields
+
+Ray-marching can be dramatically improved, to impressive realtime GPU performance, using signed distance fields:
+
+
+
+- 1. Fire ray into scene
+- 2. At each step, measure distance field function: d(p) = [distance to nearest object in scene]
+- 3. Advance ray along ray heading by distance d, because the nearest intersection can be no closer than d
+
+This is also sometimes called 'sphere tracing'. Early paper: 
+
+float sphere(vec3 p, float r) { return length(p) - r; } float cube(vec3 p, vec3 dim) { vec3 d = abs(p) - dim; return min(max(d.x, max(d.y, d.z)), 0.0) + length(max(d, 0.0)); } float cylinder(vec3 p, vec3 dim) { return length(p.xz - dim.xy) - dim.z; } float torus(vec3 p, vec2 t) { vec2 q = vec2( length(p.xz) - t.x, p.y); return length(q) - t.y;
+
+## Signed distance fields
+
+An SDF returns the minimum possible distance from point p to the surface it describes.
+
+The sphere, for instance, is the distance from p to the center of the sphere, minus the radius.
+
+Negative values indicate a sample inside the surface, and still express absolute distance to the surface.
+
+
+
+### Raymarching signed distance fields
+
+vec3 raymarch(vec3 pos, vec3 raydir) { int step = 0; float d = getSdf(pos); while (abs(d) > 0.001 && step < 50) { pos = pos + raydir \* d; d = getSdf(pos); // Return sphere(pos) or any other step++; } return (step < 50) ? illuminate(pos, rayorig) : background; }
+
+### Visualizing step count
+
+Final image Distance field
+
+
+
+
+
+
+
+#### Combining SDFs
+
+We combine SDF models by choosing which is closer to the sampled point.
+
+- Take the union of two SDFs by taking the min() of their functions.
+- Take the intersection of two SDFs by taking the max() of their functions.
+- The max() of function A and the negative of function B will return the difference of A - B.
+
+
+
+By combining these binary operations we can create functions which describe very complex primitives.
+
+## Combining SDFs
+
+
+
+
+
+Taking the min(), max(), etc of two SDFs yields a sharp discontinuity. Interpolating the two SDFs with a smooth polynomial yields a smooth distance curve, blending the models:
+
+
+
+
+
+
+
+
+
+#### Blending SDFs
+
+float smin(float a, float b) { float k = 0.2; float h = clamp(0.5 + 0.5 \* (b - a) / k, 0, 1); return mix(b, a, h) - k \* h \* (1 - h); }
+
+Sample blending function (Quilez)
+
+### Transforming SDF geometry
+
+To rotate, translate or scale an SDF model, apply the inverse transform to the input point within your distance function.
+
+Ex:
+
+This renders a sphere centered at (0, 3, 0).
+
+More prosaically, assemble your local-to-world transform as usual, but apply its inverse to the pt within your distance function.
+
+float sphere(vec3 pt, float radius) { return length(pt) - radius; } float f(vec3 pt) { return sphere(pt - vec3(0, 3, 0)); }
+
+### Transforming SDF geometry
+
+
+
+float fScene(vec3 pt) { // Scale 2x along X mat4 S = mat4( vec4(2, 0, 0, 0), vec4(0, 1, 0, 0), vec4(0, 0, 1, 0), vec4(0, 0, 0, 1)); // Rotation in XY float t = sin(time) \* PI / 4; mat4 R = mat4( vec4(cos(t), sin(t), 0, 0), vec4(-sin(t), cos(t), 0, 0), vec4(0, 0, 1, 0), vec4(0, 0, 0, 1)); // Translate to (3, 3, 3) mat4 T = mat4( vec4(1, 0, 0, 3), vec4(0, 1, 0, 3), vec4(0, 0, 1, 3), vec4(0, 0, 0, 1)); pt = (vec4(pt, 1) \* inverse(S \ R \* T)**).xyz; return sdSphere(pt, 1); }
+
+### Transforming SDF geometry
+
+
+
+The previous example modified 'all of space' with the same transform, so its distance functions retain their local linearity.
+
+We can also apply non-uniform spatial distortion, such as by choosing how much we'll modify space as a function of where in space we are.
+
+float fScene(vec3 pt) { pt.y -= 1; float t = (pt.y + 2.5) \ sin(time); return sdCube(vec3( pt.x \ cos(t) - pt.z \* sin(t), pt.y / 2, pt.x \* sin(t) + pt.z \* cos(t)), vec3(1)); }
+
+### Find the normal to an SDF
+
+Finding the normal: local gradient
+
+The distance function is locally linear and changes most as the sample moves directly away from the surface. At the surface, the direction of greatest change is therefore equivalent to the normal to the surface.
+
+Thus the local gradient (the normal) can be approximated from the distance function.
+
+float d = getSdf(pt); vec3 normal = normalize(vec3( getSdf(vec3(pt.x + 0.0001, pt.y, pt.z)) - d, getSdf(vec3(pt.x, pt.y + 0.0001, pt.z)) - d, getSdf(vec3(pt.x, pt.y, pt.z + 0.0001)) - d));
+
+
+
+#### SDF shadows
+
+
+
+Ray-marched shadows are straightforward: march a ray towards each light source, don't illuminate if the SDF ever drops too close to zero.
+
+Unlike ray-tracing, soft shadows are almost free with SDFs: attenuate illumination by a linear function of the ray marching near to another object.
+
+
+
+float shadow(vec3 pt) { vec3 lightDir = normalize(lightPos - pt); float kd = 1; int step = 0; for (float t = 0.1; t < length(lightPos - pt) && step < renderDepth && kd > 0.001; ) { float d = abs(getSDF(pt + t \* lightDir)); if (d < 0.001) { kd = 0; } else { kd = min(kd, 16 \* d / t); } t += d; step++; } return kd; } of the shadow as its
+
+## Soft SDF shadows
+
+
+
+By dividing d by t, we attenuate the strength source is further from the illuminated point.
+
+#### Repeating SDF geometry
+
+
+
+If we take the modulus of a point's position along one or more axes before computing its signed distance, then we segment space into infinite parallel regions of repeated distance. Space near the origin 'repeats'.
+
+With SDFs we get infinite repetition of geometry for no extra cost.
+
+float fScene(vec3 pt) { vec3 pos; pos = vec3(mod(pt.x + 2, 4) - 2, pt.y, mod(pt.z + 2, 4) - 2); return sdCube(pos, vec3(1)); }
+
+#### Repeating SDF geometry
+
+
+
+
+
+- sdSphere(4, 4) = √(4\*4+4\*4) - 1 = ~4.5
+- sdSphere( ((4 + 2) % 4) - 2, 4) = √(0\*0+4\*4) - 1 = 3
+- sdSphere( ((4 + 2) % 4) - 2, ((4 + 2) % 4) - 2) = √(0\*0+0\*0) - 1 = -1 // Inside surface
+
+float sphere(vec3 pt, float radius) { return length(pt) - radius;
+
+}
+
+## SDF - Live demo
+
+
+
+#### Recommended reading
+
+Seminal papers:
+
+- John C. Hart, "Sphere Tracing: A Geometric Method for the Antialiased Ray Tracing of Implicit Surfaces",
+- John C. Hart et al., "Ray Tracing Deterministic 3-D Fractals", 
+
+Special kudos to Inigo Quilez and his amazing blog:
+
+- 
+- 
+
+Other useful sources:
+
+- Johann Korndorfer, "How to Create Content with Signed Distance Functions", 
+- Daniel Wright, "Dynamic Occlusion with Signed Distance Fields", 
+- 9bit Science, "Raymarching Distance Fields", [http://9bitscience.blogspot.co.uk/2013/07/raymarching-distance-fields\\_14.html](http://9bitscience.blogspot.co.uk/2013/07/raymarching-distance-fields_14.html)

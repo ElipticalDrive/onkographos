@@ -1,0 +1,1178 @@
+# Volume-Rendering
+Implementing the volume ray casting algorithm using Python and OpenGL.
+
+Volume rendering is a computer graphics technique used to construct 3D images from this type of volumetric data. 
+Although volume rendering is commonly used to analyze medical scans, it can also be used to create 3D scientific visualizations in academic disciplines such as geology, archeology, and molecular biology.
+
+NOTE: In OpenGL, a color can be represented as a strip of 8-bit unsigned values (r, g, b), where r, g, and b are in the range [0, 255].
+It can also be represented as a 32-bitfloating-point value (r, g, b), where r, g, and b are in the range [0.0, 1.0]. These representations are equivalent. 
+For example, the red color (255, 0, 0) in the former is the same as (1.0, 0.0, 0.0) in the latter.
+
+# Back-Face Culling
+In OpenGL, when you draw a primitive like a quad, the order in which you
+specify the vertices is important. By default, OpenGL assumes an ordering of
+GL_CCW, or counterclockwise. For a primitive with counterclockwise ordering,
+the normal vector will point “out” of the polygon. This becomes relevant when
+you try to draw geometry with closed areas, such as a cube. To optimize your
+rendering, you cannot draw invisible sides by turning on OpenGL back-face
+culling to compute the dot product of your view direction vector with the normal
+vector of the polygon. For back-facing polygons, the dot product will be negative,
+and those faces can be dropped. OpenGL also provides an easy way to
+do the inverse—cull the front-faces, which is what you use in your algorithm.
+
+For understanding glTexParameter():https://registry.khronos.org/OpenGL-Refpages/gl4/html/glTexParameter.xhtml
+
+For understanding glTexImage3D():https://registry.khronos.org/OpenGL-Refpages/gl4/html/glTexImage3D.xhtml
+
+# RayCube
+The color cube has six faces, each of which can each be drawn as two triangles for a total of 6×6, or 36, vertices. But rather than specify all 36 vertices, you specify the cube’s eight vertices and then define the triangles using an indices array.
+
+For understanding glVertexAttribPointer():https://registry.khronos.org/OpenGL-Refpages/gl4/html/glVertexAttribPointer.xhtml
+
+For understanding glTexImage2D():https://registry.khronos.org/OpenGL-Refpages/gl4/html/glTexImage2D.xhtml
+
+For understanding glFramebufferTexture2D():https://registry.khronos.org/OpenGL-Refpages/es2.0/xhtml/glFramebufferTexture2D.xml
+
+For understanding glBindRenderbuffer():https://registry.khronos.org/OpenGL-Refpages/es2.0/xhtml/glBindRenderbuffer.xml
+
+For understanding glRenderbufferStorage():https://registry.khronos.org/OpenGL-Refpages/gl4/html/glRenderbufferStorage.xhtml
+
+For understanding glFramebufferRenderbuffer():https://registry.khronos.org/OpenGL-Refpages/gl4/html/glFramebufferRenderbuffer.xhtml
+
+To understand the concept of face-culling:https://learnopengl.com/Advanced-OpenGL/Face-culling
+
+For understanding gl_Position():https://registry.khronos.org/OpenGL-Refpages/gl4/html/gl_Position.xhtml
+
+To understand orthographic & perspective projections:https://www.cprogramming.com/tutorial/opengl_projections.html
+
+# Slice-Render vertex shader
+Because you are slicing perpendicular to the x direction, you want a slice parallel to the yz plane. The 3D vertices coming in to the vertex shader also double as the 3D texture coordinates because they are in the range [0, 1], so the texture coordinates are given as (f, Vx, Vy), where f is the fraction of the slice number in the direction of the x-axis and where Vx and Vy are the vertex coordinates. Unfortunately, the resulting image will appear upside down because the OpenGL coordinate system has its origin at the bottom left, with the y direction pointing up; this is the reverse of what you want. To resolve this problem, you change the texture coordinate t to (1 – t) and use (f, Vx, 1 − Vy).
+
+# Volrender
+I’m choosing not to pass in the glfw.KEY values directly and using a dictionary to convert these to character values instead, because it’s good practice to reduce dependencies in source files. Currently, the only file in this project that depends on GLFW is volrender.py. If you were to pass GLFW-specific types into other code, they would need to import and depend on the GLFW library, but if you were to switch to yet another OpenGL windowing toolkit, the code would become messy.
+
+### glutils.py
+```
+import OpenGL
+from OpenGL.GL import *
+from OpenGL.GL.shaders import *
+
+import numpy, math
+import numpy as np
+
+from PIL import Image  
+
+def loadTexture(filename):
+    """load OpenGL 2D texture from given image file"""
+    img = Image.open(filename) 
+    imgData = numpy.array(list(img.getdata()), np.int8)
+    texture = glGenTextures(1)
+    glPixelStorei(GL_UNPACK_ALIGNMENT,1)
+    glBindTexture(GL_TEXTURE_2D, texture)
+    glPixelStorei(GL_UNPACK_ALIGNMENT,1)
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, img.size[0], img.size[1], 
+                 0, GL_RGBA, GL_UNSIGNED_BYTE, imgData)
+    glBindTexture(GL_TEXTURE_2D, 0)
+    return texture
+
+def perspective(fov, aspect, zNear, zFar):
+    """returns matrix equivalent for gluPerspective"""
+    fovR = math.radians(45.0)
+    f = 1.0/math.tan(fovR/2.0)
+    return numpy.array([f/float(aspect), 0.0,   0.0,                0.0, 
+                        0.0,        f,   0.0,                0.0, 
+                        0.0, 0.0, (zFar+zNear)/float(zNear-zFar),  -1.0, 
+                        0.0, 0.0, 2.0*zFar*zNear/float(zNear-zFar), 0.0], 
+                       numpy.float32)
+
+def ortho(l, r, b, t, n, f):
+    """returns matrix equivalent of glOrtho"""
+    return numpy.array([2.0/float(r-l), 0.0, 0.0, 0.0,
+                        0.0, 2.0/float(t-b), 0.0, 0.0,
+                        0.0, 0.0, -2.0/float(f-n), 0.0,
+                        -(r+l)/float(r-l), -(t+b)/float(t-b), 
+                        -(f+n)/float(f-n), 1.0], 
+                       numpy.float32)
+
+def lookAt(eye, center, up):
+    """returns matrix equivalent of gluLookAt - based on MESA implementation"""
+    # create an identity matrix
+    m = np.identity(4, np.float32)
+
+    forward = np.array(center) - np.array(eye)
+    norm = np.linalg.norm(forward)
+    forward /= norm
+    
+    # normalize up vector
+    norm = np.linalg.norm(up)
+    up /= norm
+
+    # Side = forward x up 
+    side = np.cross(forward, up)
+    # Recompute up as: up = side x forward 
+    up = np.cross(side, forward)
+
+    m[0][0] = side[0]
+    m[1][0] = side[1]
+    m[2][0] = side[2]
+ 
+    m[0][1] = up[0]
+    m[1][1] = up[1]
+    m[2][1] = up[2]
+ 
+    m[0][2] = -forward[0]
+    m[1][2] = -forward[1]
+    m[2][2] = -forward[2]
+
+    # eye translation
+    t = np.identity(4, np.float32)
+    t[3][0] += -eye[0]
+    t[3][1] += -eye[1]
+    t[3][2] += -eye[2]
+    
+    return t.dot(m)
+
+def translate(tx, ty, tz):
+    """creates the matrix equivalent of glTranslate"""
+    return np.array([1.0, 0.0, 0.0, 0.0, 
+                     0.0, 1.0, 0.0, 0.0, 
+                     0.0, 0.0, 1.0, 0.0, 
+                     tx, ty, tz, 1.0], np.float32)
+
+def compileShader2(source, shaderType):
+    """Compile shader source of given type
+    source -- GLSL source-code for the shader
+    shaderType -- GLenum GL_VERTEX_SHADER, GL_FRAGMENT_SHADER, etc,
+    returns GLuint compiled shader reference
+    raises RuntimeError when a compilation failure occurs
+    """
+    if isinstance(source, str):
+        print('string shader')
+        source = [source]
+    elif isinstance(source, bytes):
+        print('bytes shader')
+        source = [source.decode('utf-8')]
+        
+    shader = glCreateShader(shaderType)
+    glShaderSource(shader, source)
+    glCompileShader(shader)
+    result = glGetShaderiv(shader, GL_COMPILE_STATUS)
+    
+    if not(result):
+        # TODO: this will be wrong if the user has
+        # disabled traditional unpacking array support.
+        raise RuntimeError(
+            """Shader compile failure (%s): %s"""%(
+                result,
+                glGetShaderInfoLog( shader ),
+                ),
+            source,
+            shaderType,
+            )
+    return shader
+
+def loadShaders(strVS, strFS):
+    """load vertex and fragment shaders from strings"""
+    # compile vertex shader
+    shaderV = compileShader([strVS], GL_VERTEX_SHADER)
+    # compiler fragment shader
+    shaderF = compileShader([strFS], GL_FRAGMENT_SHADER)
+    
+    # create the program object
+    program = glCreateProgram()
+    if not program:
+        raise RuntimeError('glCreateProgram faled!')
+
+    # attach shaders
+    glAttachShader(program, shaderV)
+    glAttachShader(program, shaderF)
+
+    # Link the program
+    glLinkProgram(program)
+
+    # Check the link status
+    linked = glGetProgramiv(program, GL_LINK_STATUS)
+    if not linked:
+        infoLen = glGetProgramiv(program, GL_INFO_LOG_LENGTH)
+        infoLog = ""
+        if infoLen > 1:
+            infoLog = glGetProgramInfoLog(program, infoLen, None);
+        glDeleteProgram(program)
+        raise RuntimeError("Error linking program:\n%s\n", infoLog);
+    
+    return program
+```
+
+### makedata.py
+```
+"""
+Program to create test volumetric data sets.
+"""
+
+import sys, os
+import numpy as np
+from PIL import Image
+
+def makeSphereCuboid():
+    """create a volume with a sphere and a cuboid inside"""
+    Nx, Ny, Nz = 256, 256, 256
+    Nx2, Ny2, Nz2 = int(Nx/2), int(Ny/2), int(Nz/2)
+    # fill with zeros
+    a = np.zeros(Nx*Ny*Nz, np.uint8).reshape(Nx, Ny, Nz)
+    # set data
+    for k in range(Nz):
+        for j in range(Ny):
+            for i in range(Nx):
+                # inside cuboid?
+                if abs(i-Nx2) < 40 and abs(j-Ny2) < 30 and abs(k-Nz2) < 20:
+                    a[i][j][k] = min(2*(-Nx2 + 40 + i), 255)
+                else:
+                    # inside sphere?
+                    if ((i-Nx2)*(i-Nx2) + (j-Ny2)*(j-Ny2) + 
+                        (k-Nz2)*(k-Nz2)) < 100*100:
+                        a[i][j][k] = 50
+    # create dir if not exists                
+    imgDir = 'sphere-cuboid'
+    if not os.path.exists(imgDir):
+        os.makedirs(imgDir)
+    # write images
+    for i in range(Nz):
+        # create image from data
+        im = Image.fromarray(a[i])
+        # save file
+        fileName = os.path.join(imgDir, 'sphere-cuboid%03d.png' % i)
+        im.save(fileName)
+
+# main() function
+def main():
+  # use sys.argv if needed
+  print('running makedata...')
+  makeSphereCuboid()
+
+# call main
+if __name__ == '__main__':
+  main()
+```
+
+### raycast.py
+```
+# Volume Ray Casting
+"""
+This module has the classed and methods related to Volume rendering using the Ray Casting method.
+"""
+
+import OpenGL
+from OpenGL.GL import *
+from OpenGL.GL.shaders import *
+
+import numpy as np
+import math, sys 
+
+import raycube, glutils, volreader
+
+# The Vertex Shader
+
+strVS = """
+#version 330 core
+
+layout(location = 1) in vec3 cubePos;
+layout(location = 2) in vec3 cubeCol;
+
+uniform mat4 uMVMatrix;
+uniform mat4 uPMatrix;
+
+out vec4 vColor;
+
+void main()
+{    
+    // set position
+    gl_Position = uPMatrix * uMVMatrix * vec4(cubePos.xyz, 1.0);
+
+    // set color
+    vColor = vec4(cubeCol.rgb, 1.0);
+}
+"""
+strFS = """
+#version 330 core
+
+in vec4 vColor;
+
+uniform sampler2D texBackFaces;
+uniform sampler3D texVolume;
+uniform vec2 uWinDims;
+
+out vec4 fragColor;
+
+void main()
+{
+    // start of ray
+    vec3 start = vColor.rgb;
+
+    // calculate texture coords at fragment, which is a 
+    // fraction of window coords
+    vec2 texc = gl_FragCoord.xy/uWinDims.xy;
+
+    // get end of ray = back-face color
+    vec3 end = texture(texBackFaces, texc).rgb;
+
+    // calculate ray direction
+    vec3 dir = end - start;
+
+    // normalized ray direction
+    vec3 norm_dir = normalize(dir);
+
+    // the length from front to back is calculated and 
+    // used to terminate the ray
+    float len = length(dir.xyz);
+
+    // ray step size
+    float stepSize = 0.01;
+
+    // X-Ray projection
+    vec4 dst = vec4(0.0);
+       
+    // step through the ray
+    for(float t = 0.0; t < len; t += stepSize) {
+
+        // set position to end point of ray
+        vec3 samplePos = start + t*norm_dir;
+
+        // get texture value at position
+        float val = texture(texVolume, samplePos).r;
+        vec4 src = vec4(val);
+
+        // set opacity
+        src.a *= 0.1; 
+        src.rgb *= src.a;
+        
+        // blend with previous value
+        dst = (1.0 - dst.a)*src + dst;		
+            
+        // exit loop when alpha exceeds threshold
+        if(dst.a >= 0.95)
+            break;
+    }
+        
+    // set fragment color
+    fragColor =  dst;   
+}
+"""
+class Camera:
+    """helper class for viewing"""
+    def __init__(self):
+        self.r = 1.5
+        self.theta = 0
+        self.center = [0.5, 0.5, 0.5]
+        self.eye = [0.5 + self.r, 0.5, 0.5]
+        self.up = [0.0, 0.0, 1.0]
+
+    def rotate(self, clockWise):
+        """rotate eye by one step"""
+        if clockWise:
+            self.theta = (self.theta + 5) % 360
+        else:
+            self.theta = (self.theta - 5) % 360
+        # recalculate eye
+        self.eye = [0.5 + self.r*math.cos(math.radians(self.theta)), 
+                    0.5 + self.r*math.sin(math.radians(self.theta)), 
+                    0.5]
+
+class RayCastRender:
+    """class that does Ray Casting"""
+
+    def __init__(self, width, height, volume):
+        """RayCastRender constructor"""
+        
+        # create RayCube object
+        self.raycube = raycube.RayCube(width, height)
+        
+        # set dims
+        self.width = width
+        self.height = height
+        self.aspect = width/float(height)
+
+        # create shader
+        self.program = glutils.loadShaders(strVS, strFS)
+        # texture(to set the OpenGL 3D texture and dimensions)
+        self.texVolume, self.Nx, self.Ny, self.Nz = volume
+        
+        # initialize camera
+        self.camera = Camera()
+    
+    def draw(self):
+
+        # build projection matrix
+        pMatrix = glutils.perspective(45.0, self.aspect, 0.1, 100.0)
+       
+        # modelview matrix
+        mvMatrix = glutils.lookAt(self.camera.eye, self.camera.center, 
+                                  self.camera.up)
+        # render
+        
+        # generate ray-cube back-face texture
+        texture = self.raycube.renderBackFace(pMatrix, mvMatrix)
+        
+        # set shader program
+        glUseProgram(self.program)
+
+        # set window dimensions
+        glUniform2f(glGetUniformLocation(self.program, b"uWinDims"),
+                    float(self.width), float(self.height))
+
+        # texture unit 0 - back-faces of cube
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, texture)
+        glUniform1i(glGetUniformLocation(self.program, b"texBackFaces"), 0)
+        
+        # texture unit 1 - 3D volume texture
+        glActiveTexture(GL_TEXTURE1)
+        glBindTexture(GL_TEXTURE_3D, self.texVolume)
+        glUniform1i(glGetUniformLocation(self.program, b"texVolume"), 1)
+
+        # draw front face of cubes
+        self.raycube.renderFrontFace(pMatrix, mvMatrix, self.program)
+    
+        #self.render(pMatrix, mvMatrix)
+
+    def keyPressed(self, key):
+        if key == 'l':
+            self.camera.rotate(True)
+        elif key == 'r':
+            self.camera.rotate(False)
+            
+    def reshape(self, width, height):
+        self.width = width
+        self.height = height
+        self.aspect = width/float(height)
+        self.raycube.reshape(width, height)
+
+    def close(self):
+        self.raycube.close()
+```
+
+### raycube.py
+```
+# Generating Rays
+"""
+Generates texture that has the cube/ray computation.
+"""
+
+import OpenGL
+from OpenGL.GL import *
+from OpenGL.GL.shaders import *
+
+import numpy, math, sys 
+import volreader, glutils
+
+strVS = """
+#version 330 core
+layout(location = 1) in vec3 cubePos;
+layout(location = 2) in vec3 cubeCol;
+uniform mat4 uMVMatrix;
+uniform mat4 uPMatrix;
+out vec4 vColor;
+void main()
+{
+    // set back face color
+    vColor = vec4(cubeCol.rgb, 1.0); 
+    
+    // transformed position
+    vec4 newPos = vec4(cubePos.xyz, 1.0);
+    
+    // set position
+    gl_Position = uPMatrix * uMVMatrix * newPos; 
+}
+"""
+strFS = """
+#version 330 core
+in vec4 vColor;
+out vec4 fragColor;
+void main()
+{
+    fragColor = vColor;
+}
+"""
+# Defining the Color Cube Geometry
+class RayCube:
+    """class used to generate rays used in ray casting"""
+    
+    def __init__(self, width, height):
+        """RayCube constructor"""
+
+        # set dims
+        self.width, self.height = width, height
+
+        # create shader
+        self.program = glutils.loadShaders(strVS, strFS)
+
+        # cube vertices
+        vertices = numpy.array([
+                0.0, 0.0, 0.0, 
+                1.0, 0.0, 0.0, 
+                1.0, 1.0, 0.0, 
+                0.0, 1.0, 0.0, 
+                0.0, 0.0, 1.0,
+                1.0, 0.0, 1.0, 
+                1.0, 1.0, 1.0, 
+                0.0, 1.0, 1.0 
+                ], numpy.float32)
+        # cube colors
+        colors = numpy.array([
+                0.0, 0.0, 0.0, 
+                1.0, 0.0, 0.0,
+                1.0, 1.0, 0.0, 
+                0.0, 1.0, 0.0,
+                0.0, 0.0, 1.0,
+                1.0, 0.0, 1.0, 
+                1.0, 1.0, 1.0, 
+                0.0, 1.0, 1.0 
+                ], numpy.float32)
+
+        # individual triangles
+        indices = numpy.array([ 
+                4, 5, 7, 
+                7, 5, 6,
+                5, 1, 6, 
+                6, 1, 2, 
+                1, 0, 2, 
+                2, 0, 3,
+                0, 4, 3, 
+                3, 4, 7, 
+                6, 2, 7, 
+                7, 2, 3, 
+                4, 0, 5, 
+                5, 0, 1
+                ], numpy.int16)
+        
+        self.nIndices = indices.size
+
+        # set up vertex array object (VAO)
+        self.vao = glGenVertexArrays(1)
+        glBindVertexArray(self.vao)
+
+        #vertex buffer
+        self.vertexBuffer = glGenBuffers(1)
+        glBindBuffer(GL_ARRAY_BUFFER, self.vertexBuffer)
+        glBufferData(GL_ARRAY_BUFFER, 4*len(vertices), vertices, GL_STATIC_DRAW)
+ 
+        # vertex buffer - color
+        self.colorBuffer = glGenBuffers(1)
+        glBindBuffer(GL_ARRAY_BUFFER, self.colorBuffer)
+        glBufferData(GL_ARRAY_BUFFER, 4*len(colors), colors, GL_STATIC_DRAW);
+    
+        # index buffer
+        self.indexBuffer = glGenBuffers(1)
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.indexBuffer);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, 2*len(indices), indices, 
+                     GL_STATIC_DRAW)
+        
+        # enable attrs using the layout indices in shader
+        aPosLoc = 1
+        aColorLoc = 2
+
+        # bind buffers:
+        glEnableVertexAttribArray(1)
+        glEnableVertexAttribArray(2)
+    
+        # vertex
+        glBindBuffer(GL_ARRAY_BUFFER, self.vertexBuffer)
+        glVertexAttribPointer(aPosLoc, 3, GL_FLOAT, GL_FALSE, 0, None)
+
+        # color
+        glBindBuffer(GL_ARRAY_BUFFER, self.colorBuffer)
+        glVertexAttribPointer(aColorLoc, 3, GL_FLOAT, GL_FALSE, 0, None)
+
+        # index
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.indexBuffer)
+        
+        # unbind VAO
+        glBindVertexArray(0)
+
+        # FBO
+        self.initFBO()
+
+# Rendering the Back-Faces of the Cube
+    def renderBackFace(self, pMatrix, mvMatrix):
+        """renders back-face of ray-cube to a texture and returns it"""
+        # render to FBO
+        glBindFramebuffer(GL_FRAMEBUFFER, self.fboHandle)
+        # set active texture
+        glActiveTexture(GL_TEXTURE0)
+        # bind to fbo1 texture
+        glBindTexture(GL_TEXTURE_2D, self.texHandle)
+
+        # render cube with face culling enabled
+        self.renderCube(pMatrix, mvMatrix, self.program, True)
+        
+        # unbind texture
+        glBindTexture(GL_TEXTURE_2D, 0)
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        glBindRenderbuffer(GL_RENDERBUFFER, 0)
+
+        # return texture id 
+        return self.texHandle
+
+# Rendering the Front-Faces of the Cube
+    def renderFrontFace(self, pMatrix, mvMatrix, program):
+        """render front face of ray-cube"""
+        # no face culling
+        self.renderCube(pMatrix, mvMatrix, program, False)
+
+# Rendering the Whole Cube
+    def renderCube(self, pMatrix, mvMatrix, program, cullFace):
+        """render cube use face culling if flag set"""
+        
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        
+        # set shader program
+        glUseProgram(program)
+        
+        # set proj matrix
+        glUniformMatrix4fv(glGetUniformLocation(program, b'uPMatrix'), 
+                           1, GL_FALSE, pMatrix)
+
+        # set modelview matrix
+        glUniformMatrix4fv(glGetUniformLocation(program, b'uMVMatrix'), 
+                           1, GL_FALSE, mvMatrix)
+ 
+        # enable face culling
+        glDisable(GL_CULL_FACE)
+        if cullFace:
+            glFrontFace(GL_CCW)
+            glCullFace(GL_FRONT)
+            glEnable(GL_CULL_FACE)
+
+        # bind VAO
+        glBindVertexArray(self.vao)
+
+        # animated slice
+        # using glDrawElements() because you’re using an index array to render the cube, rather than a vertex array
+        glDrawElements(GL_TRIANGLES, self.nIndices, 
+                       GL_UNSIGNED_SHORT, None)
+
+        # unbind VAO
+        glBindVertexArray(0)
+
+        # reset cull face
+        if cullFace:
+            # disable face culling
+            glDisable(GL_CULL_FACE)
+# The Resize Handler
+    def reshape(self, width, height):
+        self.width = width
+        self.height = height
+        self.aspect = width/float(height)
+        # recreate FBO
+        self.clearFBO()
+        self.initFBO()
+# Creating the Frame Buffer Object
+    def initFBO(self): 
+        # create frame buffer object
+        self.fboHandle = glGenFramebuffers(1)
+        # create texture
+        self.texHandle = glGenTextures(1)    
+        # create depth buffer
+        self.depthHandle = glGenRenderbuffers(1)
+
+        # bind
+        glBindFramebuffer(GL_FRAMEBUFFER, self.fboHandle)
+    
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, self.texHandle)
+    
+        # Set a few parameters to handle drawing the image at 
+        # lower and higher sizes than original
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR) 
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        
+        # set up texture
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, self.width, self.height, 
+                     0, GL_RGBA, GL_UNSIGNED_BYTE, None)
+        
+        # bind texture to FBO
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, 
+                               GL_TEXTURE_2D, self.texHandle, 0)
+        
+        # bind
+        glBindRenderbuffer(GL_RENDERBUFFER, self.depthHandle)
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 
+                              self.width, self.height)
+    
+        # bind depth buffer to FBO
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, 
+                                  GL_RENDERBUFFER, self.depthHandle)
+        # check status
+        status = glCheckFramebufferStatus(GL_FRAMEBUFFER)
+        if status == GL_FRAMEBUFFER_COMPLETE:
+            pass
+            #print "fbo %d complete" % self.fboHandle
+        elif status == GL_FRAMEBUFFER_UNSUPPORTED:
+            print("fbo %d unsupported" % self.fboHandle)
+        else:
+            print("fbo %d Error" % self.fboHandle)
+            
+        glBindTexture(GL_TEXTURE_2D, 0)
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        glBindRenderbuffer(GL_RENDERBUFFER, 0)
+        return
+    
+    def clearFBO(self):
+        """clears old FBO"""
+        # delete FBO
+        if glIsFramebuffer(self.fboHandle):
+            glDeleteFramebuffers(int(self.fboHandle))
+    
+        # delete texture
+        if glIsTexture(self.texHandle):
+            glDeleteTextures(int(self.texHandle))
+            
+
+    def close(self):
+        """call this to free up OpenGL resources"""
+        glBindTexture(GL_TEXTURE_2D, 0)
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        glBindRenderbuffer(GL_RENDERBUFFER, 0)
+    
+        # delete FBO
+        if glIsFramebuffer(self.fboHandle):
+            glDeleteFramebuffers(int(self.fboHandle))
+    
+        # delete texture
+        if glIsTexture(self.texHandle):
+            glDeleteTextures(int(self.texHandle))
+
+        # delete render buffer
+        """
+        if glIsRenderbuffer(self.depthHandle):
+            glDeleteRenderbuffers(1, int(self.depthHandle))
+            """
+        # delete buffers
+        """
+        glDeleteBuffers(1, self._vertexBuffer)
+        glDeleteBuffers(1, &_indexBuffer)
+        glDeleteBuffers(1, &_colorBuffer)
+        """
+```
+
+### slicerender.py
+```
+"""
+This module has the classed and methods related to X Y Z slice rendering of a Volumetric data set.
+"""
+
+import OpenGL
+from OpenGL.GL import *
+from OpenGL.GL.shaders import *
+import numpy, math, sys 
+
+import volreader, glutils
+
+# vertex shader
+
+strVS = """
+# version 330 core
+
+in vec3 aVert;
+
+uniform mat4 uMVMatrix;
+uniform mat4 uPMatrix;
+uniform float uSliceFrac;
+uniform int uSliceMode;
+
+out vec3 texcoord;
+
+void main() {
+  // X-slice?
+  if (uSliceMode == 0) {
+    texcoord = vec3(uSliceFrac, aVert.x, 1.0-aVert.y);
+  }
+  // Y-slice?
+  else if (uSliceMode == 1) {
+    texcoord = vec3(aVert.x, uSliceFrac, 1.0-aVert.y);
+  }
+  // Z-slice
+  else {
+    texcoord = vec3(aVert.x, 1.0-aVert.y, uSliceFrac);
+  }
+
+  // calculate transformed vertex
+  gl_Position = uPMatrix * uMVMatrix * vec4(aVert, 1.0); 
+}
+"""
+
+# fragment shader
+strFS = """
+# version 330 core
+
+in vec3 texcoord;
+
+uniform sampler3D tex;
+
+out vec4 fragColor;
+
+void main() {
+
+  // look up color in texture
+  vec4 col = texture(tex, texcoord);
+  // Because you read in your texture only as the red channel, you use col.rrra
+  fragColor = col.rrra;
+}
+"""
+# 2D Slicing
+class SliceRender:
+    # slice modes
+    XSLICE, YSLICE, ZSLICE = 0, 1, 2
+
+    def __init__(self, width, height, volume):
+        """SliceRender constructor"""
+        self.width = width
+        self.height = height
+        self.aspect = width/float(height)
+
+        # slice mode
+        self.mode = SliceRender.ZSLICE
+
+        # create shader
+        self.program = glutils.loadShaders(strVS, strFS)
+
+        glUseProgram(self.program)
+
+        self.pMatrixUniform = glGetUniformLocation(self.program, b'uPMatrix')
+        self.mvMatrixUniform = glGetUniformLocation(self.program, 
+                                                  b"uMVMatrix")
+
+        # attributes
+        self.vertIndex = glGetAttribLocation(self.program, b"aVert")
+ 
+        # set up vertex array object (VAO)
+        self.vao = glGenVertexArrays(1)
+        glBindVertexArray(self.vao)
+
+        # define quad vertices 
+        vertexData = numpy.array([ 0.0, 1.0, 0.0, 
+                                   0.0, 0.0, 0.0, 
+                                   1.0, 1.0, 0.0,
+                                   1.0, 0.0, 0.0], numpy.float32)
+        # vertex buffer
+        self.vertexBuffer = glGenBuffers(1)
+        glBindBuffer(GL_ARRAY_BUFFER, self.vertexBuffer)
+        glBufferData(GL_ARRAY_BUFFER, 4*len(vertexData), vertexData, 
+                     GL_STATIC_DRAW)
+        # enable arrays
+        glEnableVertexAttribArray(self.vertIndex)
+        # set buffers 
+        glBindBuffer(GL_ARRAY_BUFFER, self.vertexBuffer)
+        glVertexAttribPointer(self.vertIndex, 3, GL_FLOAT, GL_FALSE, 0, None)
+
+        # unbind VAO
+        glBindVertexArray(0)
+
+        # load texture
+        self.texture, self.Nx, self.Ny, self.Nz = volume
+
+        # current slice index
+        self.currSliceIndex = int(self.Nz/2);
+        self.currSliceMax = self.Nz;
+    
+    
+    def reshape(self, width, height):
+        self.width = width
+        self.height = height
+        self.aspect = width/float(height)
+
+    def draw(self):
+        # clear buffers
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        # build projection matrix
+        pMatrix = glutils.ortho(-0.6, 0.6, -0.6, 0.6, 0.1, 100.0)
+        # modelview matrix
+        mvMatrix = numpy.array([1.0, 0.0, 0.0, 0.0, 
+                                0.0, 1.0, 0.0, 0.0, 
+                                0.0, 0.0, 1.0, 0.0, 
+                                -0.5, -0.5, -1.0, 1.0], numpy.float32)        
+        # use shader
+        glUseProgram(self.program)
+        
+        # set proj matrix
+        glUniformMatrix4fv(self.pMatrixUniform, 1, GL_FALSE, pMatrix)
+
+        # set modelview matrix
+        glUniformMatrix4fv(self.mvMatrixUniform, 1, GL_FALSE, mvMatrix)
+
+        # set current slice fraction
+        glUniform1f(glGetUniformLocation(self.program, b"uSliceFrac"), 
+                    float(self.currSliceIndex)/float(self.currSliceMax))
+        # set current slice mode
+        glUniform1i(glGetUniformLocation(self.program, b"uSliceMode"), 
+                    self.mode)
+        
+        # enable texture
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_3D, self.texture)
+        glUniform1i(glGetUniformLocation(self.program, b"tex"), 0)
+
+        # bind VAO
+        glBindVertexArray(self.vao)
+        # draw
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
+        # unbind VAO
+        glBindVertexArray(0)
+
+    # A User Interface for 2D Slicing
+    def keyPressed(self, key):
+        """key press handler"""
+        if key == 'x':
+            self.mode = SliceRender.XSLICE
+            # reset slice index
+            self.currSliceIndex = int(self.Nx/2)
+            self.currSliceMax = self.Nx
+        elif key == 'y':
+            self.mode = SliceRender.YSLICE
+            # reset slice index
+            self.currSliceIndex = int(self.Ny/2)
+            self.currSliceMax = self.Ny
+        elif key == 'z':
+            self.mode = SliceRender.ZSLICE
+            # reset slice index
+            self.currSliceIndex = int(self.Nz/2)
+            self.currSliceMax = self.Nz
+        elif key == 'l':
+            self.currSliceIndex = (self.currSliceIndex + 1) % self.currSliceMax
+        elif key == 'r':
+            self.currSliceIndex = (self.currSliceIndex - 1) % self.currSliceMax
+            
+    def close(self):
+        pass
+```
+
+### volreader.py
+```
+# first commit
+# Some of the topics covered in this project:
+# • Using GLSL for GPU computations
+# • Creating vertex and fragment shaders
+# • Representing 3D volumetric data and using the volume ray casting algorithm
+# • Using numpy arrays for 3D transformation matrices
+
+# There are various ways to render a 3D data set. In this project, you’ll use the volume ray casting method, 
+# which is an image-based rendering technique used to generate the final image from the 2D slice, pixel by pixel.
+
+# You’ll begin by generating a 3D texture from the volumetric data read in from the file. 
+# Next you’ll look at a color cube technique for generating rays from the eye that point into the volume, 
+# which is a key concept in implementing the volume ray casting algorithm. You’ll look at how to define
+# the cube geometry as well as how to draw the back- and front-faces of this cube. 
+# You’ll then explore the volume ray casting algorithm and the associated vertex and fragment shaders. 
+# Finally, you’ll learn how to implement 2D slicing of the volumetric data.
+
+# The first step is to read the volumetric data from a folder containing images
+"""
+Utilities for reading 3D volumetric data as a 3D OpenGL texture.
+"""
+
+import os
+import numpy as np
+from PIL import Image
+
+import OpenGL
+from OpenGL.GL import *
+
+from scipy import misc
+
+def loadVolume(dirName):
+    """read volume from directory as a 3D texture"""
+    # list images in directory
+    files = sorted(os.listdir(dirName))
+    print('loading mages from: %s' % dirName)
+    imgDataList = []
+    count = 0
+    width, height = 0, 0
+    for file in files:
+        file_path = os.path.abspath(os.path.join(dirName, file))
+        try:
+            # read image
+            img = Image.open(file_path)
+            imgData = np.array(img.getdata(), np.uint8)
+
+            # check if all are of the same size
+            if count is 0:
+                width, height = img.size[0], img.size[1] 
+                imgDataList.append(imgData)
+            else:
+                if (width, height) == (img.size[0], img.size[1]):
+                    imgDataList.append(imgData)
+                else:
+                    print('mismatch')
+                    raise RuntimeError("image size mismatch")
+            count += 1
+            #print img.size            
+        except:
+            # skip
+            print('Invalid image: %s' % file_path)
+
+    # load image data into single array
+    depth = count
+    data = np.concatenate(imgDataList)
+    print('volume data dims: %d %d %d' % (width, height, depth))
+
+    # load data into 3D texture
+    texture = glGenTextures(1)
+    glPixelStorei(GL_UNPACK_ALIGNMENT,1)
+    glBindTexture(GL_TEXTURE_3D, texture)
+    glTexParameterf(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+    glTexParameterf(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+    glTexParameterf(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE)
+    glTexParameterf(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+    glTexParameterf(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_RED, 
+                 width, height, depth, 0, 
+                 GL_RED, GL_UNSIGNED_BYTE, data)
+    #return texture
+    return (texture, width, height, depth)
+
+
+# load texture
+def loadTexture(filename):
+    img = Image.open(filename)
+    img_data = np.array(list(img.getdata()), 'B')
+    texture = glGenTextures(1)
+    glPixelStorei(GL_UNPACK_ALIGNMENT,1)
+    glBindTexture(GL_TEXTURE_2D, texture)
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, img.size[0], img.size[1], 
+                 0, GL_RGBA, GL_UNSIGNED_BYTE, img_data)
+    return texture
+```
+
+### volrender.py
+```
+"""
+A Ray Casting Volume Renderer for medical data visualization.
+"""
+
+import sys, argparse, os
+from slicerender import *
+from raycast import *
+import glfw.GLFW as glfw
+
+class RenderWin:
+    """GLFW Rendering window class"""
+    def __init__(self, imageDir):
+        
+        # save current working directory
+        cwd = os.getcwd()
+
+        # initialize glfw - this changes cwd
+        glfw.glfwInit()
+        
+        # restore cwd
+        os.chdir(cwd)
+
+        # version hints
+        glfw.glfwWindowHint(glfw.GLFW_CONTEXT_VERSION_MAJOR, 3)
+        glfw.glfwWindowHint(glfw.GLFW_CONTEXT_VERSION_MINOR, 3)
+        glfw.glfwWindowHint(glfw.GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE)
+        glfw.glfwWindowHint(glfw.GLFW_OPENGL_PROFILE, glfw.GLFW_OPENGL_CORE_PROFILE)
+
+        # make a window
+        self.width, self.height = 512, 512
+        self.aspect = self.width/float(self.height)
+        self.win = glfw.glfwCreateWindow(self.width, self.height, b"volrender")
+        # make context current
+        glfw.glfwMakeContextCurrent(self.win)
+        
+        # initialize GL
+        glViewport(0, 0, self.width, self.height)
+        glEnable(GL_DEPTH_TEST)
+        glClearColor(0.0, 0.0, 0.0, 0.0)
+
+        # set window callbacks
+        glfw.glfwSetMouseButtonCallback(self.win, self.onMouseButton)
+        glfw.glfwSetKeyCallback(self.win, self.onKeyboard)
+        glfw.glfwSetWindowSizeCallback(self.win, self.onSize)
+
+        # load volume data
+        self.volume =  volreader.loadVolume(imageDir)
+        # create renderer
+        self.renderer = RayCastRender(self.width, self.height, self.volume)
+
+        # exit flag
+        self.exitNow = False
+    def onMouseButton(self, win, button, action, mods):
+        #print 'mouse button: ', win, button, action, mods
+        pass
+
+    def onKeyboard(self, win, key, scancode, action, mods):
+        #print 'keyboard: ', win, key, scancode, action, mods
+        # ESC to quit
+        if key == glfw.GLFW_KEY_ESCAPE:
+            self.renderer.close()
+            self.exitNow = True
+        else:
+            if action == glfw.GLFW_PRESS or action is glfw.GLFW_REPEAT:
+                if key == glfw.GLFW_KEY_V:
+                    # toggle render mode
+                    if isinstance(self.renderer, RayCastRender):
+                        self.renderer = SliceRender(self.width, self.height, 
+                                                    self.volume)
+                    else:
+                        self.renderer = RayCastRender(self.width, self.height, 
+                                                      self.volume)
+                    # call reshape on renderer
+                    self.renderer.reshape(self.width, self.height)
+                else:
+                    # send key press to renderer
+                    keyDict = {glfw.GLFW_KEY_X : 'x', glfw.GLFW_KEY_Y: 'y', 
+                               glfw.GLFW_KEY_Z: 'z', 
+                               glfw.GLFW_KEY_LEFT: 'l', glfw.GLFW_KEY_RIGHT: 'r'}
+                    try:
+                        self.renderer.keyPressed(keyDict[key])
+                    except:
+                        pass
+
+    def onSize(self, win, width, height):
+        #print 'onsize: ', win, width, height
+        self.width = width
+        self.height = height
+        self.aspect = width/float(height)
+        glViewport(0, 0, self.width, self.height)
+        self.renderer.reshape(width, height)
+
+    def run(self):
+        # start loop
+        while not glfw.glfwWindowShouldClose(self.win) and not self.exitNow:
+            # render
+            self.renderer.draw()
+            # swap buffers
+            glfw.glfwSwapBuffers(self.win)
+            # wait for events
+            glfw.glfwWaitEvents()
+        # end
+        glfw.glfwTerminate()
+
+# main() function
+def main():
+  print('starting volrender...')
+  # create parser
+  parser = argparse.ArgumentParser(description="Volume Rendering...")
+  # add expected arguments
+  parser.add_argument('--dir', dest='imageDir', required=True)
+  # parse args
+  args = parser.parse_args()
+
+  # create render window
+  rwin = RenderWin(args.imageDir)
+  rwin.run()
+
+# call main
+if __name__ == '__main__':
+  main()
+```

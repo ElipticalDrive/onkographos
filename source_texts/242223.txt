@@ -1,0 +1,700 @@
+A physically-based path tracer in safe Rust, USD-native, capable of rendering production datasets like Moana and ALab. - MIS for shadow-linked lights: the link twin by doubleailes · Pull Request #239 · doubleailes/Crust
+
+MIS for shadow-linked lights: the link twin by doubleailes · Pull Request #239 · doubleailes/Crust · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+doubleailes
+commented
+Oct 8, 2026
+Copy link
+Copy Markdown
+Owner
+Implements the OpenSpec change mis-for-shadow-linked-lights (proposal, design, delta spec and tasks are in the branch's first commit).
+Why
+A light whose collection:shadowLink excludes occluders was sampled by NEE alone at continuous vertices: a bounce ray is stopped by occluders the light's shadow rays ignore, so the two strategies disagreed on visibility. That dropped the half of MIS that keeps glossy reflections quiet. On ALab the shadow-linked distant sun was 66% of the frame's firefly variance.
+What changes
+Link twin (tracer/path.rs, link_twin): at a continuous surface, volume or enclosure vertex, after the bounce direction is drawn, each restricted non-dome light is intersected analytically along it (LightShape::hits, LightKind::found_along). A shadow ray with the light's own mask then tests NEE's visibility, crossings and volumes included. The result is weighted as a bounce hit on the light would be and routed as a crossed light for LPEs (C.*[LO] stays the beauty bit for bit).
+One owner: the ordinary bounce collects nothing from such a light under any strategy (LightList::bounce_skips). NEE uses its normal MIS weight. light, bsdf and MIS now estimate one image.
+Unchanged: restricted domes stay NEE-only, and delta vertices still see the physical occluders (documented gaps).
+CRUST_LINK_TWIN=0 restores the NEE-only estimator for A/B. It's documented in docs/architecture.md and the site.
+trace_path / advance_pixel are monomorphised on TWINS, so scenes without a twinned light run an integrator with no twin code.
+Measurements
+ALab frame 1004, 256 spp, --light-samples 4 --light-selection learned, two seeds:
+lgt_sun_distant direct-glossy variance 3 551 → 100 (−97%).
+Frame variance −34%; worst pixel noise 39 → 25.
+Render time +2.3% (bench_ab.sh, n = 3), against a +5% budget.
+Means agree: the old estimator reads low at 256 spp (heavy tail) and converges to the new one at 1024.
+Linked glossy test scene:
+Before: bsdf gave 0.0037 against light's 0.808.
+After: all three strategies agree (sphere and distant light), and power-MIS variance is −73%.
+Goldens: all 35 unlinked samples are bit-identical (check_images.sh). light_linking.usda moves by relMSE 2.5e-9, against 3e-3 between seeds.
+Instructions: cornellbox +0.014% (callgrind, 2 spp). A runtime guard instead of the const generic cost +0.23%.
+Full numbers and method are in docs/alab_profile.md ("Shadow-linked lights and their noise") and openspec/specs/lighting/design.md § Shadow linking.
+Tests
+analytic_light_hits_match_the_kernel: analytic vs kernel hits for sphere, rect and affine sphere/disk/cylinder.
+every_strategy_agrees_on_a_shadow_link_that_matters, mis_is_whole_again_for_a_shadow_linked_light and a_restricted_dome_stays_nee_only replace power_mis_matches_nee_only_for_a_shadow_linked_light.
+The LPE bitwise, partition and light/bsdf-agreement tests now also run on a linked scene.
+cargo fmt, clippy (stable and pinned nightly), and cargo test --workspace in debug and release all pass.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01QmaqaKLefbXcboe6iByuqE
+qodo-code-review
+Bot
+commented
+Oct 8, 2026
+Copy link
+Copy Markdown
+Contributor
+PR Summary by Qodo
+Restore MIS for shadow-linked lights with bounce-side link twins
+🐞 Bug fix ✨ Enhancement 🧪 Tests 📝 Documentation ⚙️ Configuration changes 🕐 40+ Minutes
+AI Description
+```
+• Give restricted non-dome lights a bounce-side estimate that matches their shadow-link visibility,
+ restoring MIS on glossy surfaces.
+• Keep restricted domes NEE-only, preserve delta behavior, and provide CRUST_LINK_TWIN=0 for
+ comparison.
+• Add geometry, strategy, and LPE tests; document lower variance and limited render-time cost.
+```
+Diagram
+```
+graph TD
+  Importer["USD link importer"] --> List["Restricted light list"] --> Vertex["Continuous vertex"] --> Support{"Light along bounce?"} --> Shadow["Masked shadow ray"] --> MIS["MIS contribution"] --> Output["Beauty and LPE"]
+  NEE["NEE contribution"] --> MIS
+```
+Loading
+High-Level Assessment
+The following are alternative approaches to this PR:
+1. Keep restricted lights NEE-only and increase light samples
+➕ Avoids new light intersections and bounce-side visibility work.
+➖ Leaves glossy fireflies largely unresolved; measured extra samples cost more render time.
+2. Continue bounce rays past excluded blockers
+➕ Could avoid a fresh ray in some paths.
+➖ Stochastic cutout and thin-wall crossings would not match NEE transmittance; correcting them requires another light-masked visibility walk.
+Recommendation: Use the PR's fresh, light-masked shadow ray: it matches NEE's visibility while analytic support tests limit rays to directions reaching a light. Retain the documented NEE-only dome exception, since testing every dome direction would be costly.
+Files changed (25) +1732 / -151
+Enhancement (7) +246 / -23
+lib.rsExport light-hit result types +4/-3
+Export light-hit result types
+```
+• Re-exports 'FoundAlong' and 'ShapeHits' through the core crate API.
+```
+crates/crust-core/src/lib.rs
+area.rsResolve area-light emission along a ray +31/-2
+Resolve area-light emission along a ray
+```
+• Dispatches analytic shape hits and reports emitting points with their radiance and NEE density, omitting non-emitting sides.
+```
+crates/crust-core/src/light/area.rs
+kind.rsQuery light support along a bounce direction +36/-1
+Query light support along a bounce direction
+```
+• Routes area-light hits and distant-light cone hits into a shared result while leaving domes without a twin; adds a dome predicate.
+```
+crates/crust-core/src/light/kind.rs
+mod.rsDefine the directional light-hit result +14/-1
+Define the directional light-hit result
+```
+• Introduces 'FoundAlong' with distance, emitted radiance, and optional competing NEE density, and exports shape-hit results.
+```
+crates/crust-core/src/light/mod.rs
+rect.rsIntersect rectangular light surfaces analytically +20/-1
+Intersect rectangular light surfaces analytically
+```
+• Adds a ray–parallelogram hit test for either side of a rectangular light.
+```
+crates/crust-core/src/light/rect.rs
+shape.rsAdd analytic intersections for area-light shapes +116/-0
+Add analytic intersections for area-light shapes
+```
+• Adds bounded, ordered shape hits for spheres, disks, cylinder walls, and affine placements, with roots and near bounds aligned to the tracing kernel.
+```
+crates/crust-core/src/light/shape.rs
+mod.rsDispatch specialized integrators for twinned scenes +25/-15
+Dispatch specialized integrators for twinned scenes
+```
+• Detects twinned lights once per pass and dispatches a 'TWINS'-specialized pixel and path tracer, avoiding twin call sites in other scenes.
+```
+crates/crust-core/src/tracer/mod.rs
+Bug fix (3) +323 / -42
+list.rsSeparate restricted lights from NEE-only lights +63/-4
+Separate restricted lights from NEE-only lights
+```
+• Tracks restricted masks and precomputes twinned-light indices. Adds ownership checks that prevent the ordinary bounce from collecting a twinned light.
+```
+crates/crust-core/src/light/list.rs
+light_links.rsClassify imported shadow links for twin eligibility +25/-3
+Classify imported shadow links for twin eligibility
+```
+• Records restricted shadow masks separately from NEE-only status. Keeps restricted domes, or every restricted light when the switch is off, NEE-only.
+```
+crates/crust-core/src/scene/usd_import/light_links.rs
+path.rsRestore matched bounce-side and NEE estimates +235/-35
+Restore matched bounce-side and NEE estimates
+```
+• Adds the link twin at continuous surface and phase vertices, using analytic hits, light-masked transmittance, MIS weights, and LPE routing. Prevents ordinary bounce hits and escapes from double-owning twinned lights and preserves distinct sampler domains.
+```
+crates/crust-core/src/tracer/path.rs
+Tests (4) +458 / -67
+tests.rsCompare analytic light hits against the tracing kernel +140/-0
+Compare analytic light hits against the tracing kernel
+```
+• Tests hit agreement and distances across rect, sphere, and affine sphere, disk, and cylinder geometry using many sampled rays.
+```
+crates/crust-core/src/light/tests.rs
+light_linking.rsVerify linked-light strategy agreement and variance +208/-21
+Verify linked-light strategy agreement and variance
+```
+• Replaces the former NEE-only assertion with glossy sphere and distant-light strategy comparisons, a MIS variance check, and a restricted-dome regression. Updates assertions to distinguish restricted from NEE-only lights.
+```
+crates/crust-core/tests/light_linking.rs
+lpe.rsExercise LPE accounting with a shadow-linked key +105/-44
+Exercise LPE accounting with a shadow-linked key
+```
+• Adds an excluded blocker and linked key to LPE scenes, then checks beauty equivalence, partition sums, and per-expression agreement between light-only and BSDF-only renders.
+```
+crates/crust-core/tests/lpe.rs
+usd_scene.rsAssert imported sample light is twinned +5/-2
+Assert imported sample light is twinned
+```
+• Checks that the sample's restricted sphere light is listed as twinned rather than NEE-only.
+```
+crates/crust-core/tests/usd_scene.rs
+Documentation (10) +698 / -19
+alab_profile.mdRecord ALab shadow-link noise and cost measurements +75/-2
+Record ALab shadow-link noise and cost measurements
+```
+• Documents the two-seed measurement method, before-and-after light-group variance, convergence observations, and render-time impact.
+```
+docs/alab_profile.md
+architecture.mdDocument the link-twin environment switch +1/-0
+Document the link-twin environment switch
+```
+• Adds 'CRUST_LINK_TWIN' to the environment-switch reference with its default and NEE-only fallback behavior.
+```
+docs/architecture.md
+.openspec.yamlRegister the spec-driven change +2/-0
+Register the spec-driven change
+```
+• Adds schema and creation metadata for the OpenSpec change.
+```
+openspec/changes/mis-for-shadow-linked-lights/.openspec.yaml
+design.mdDescribe estimator decisions and trade-offs +231/-0
+Describe estimator decisions and trade-offs
+```
+• Records the visibility-matching approach, analytic support choice, estimator ownership, dome exception, performance risks, and considered alternatives.
+```
+openspec/changes/mis-for-shadow-linked-lights/design.md
+proposal.mdPropose MIS for restricted shadow-linked lights +94/-0
+Propose MIS for restricted shadow-linked lights
+```
+• States the glossy-noise problem, desired matched estimators, scope, exceptions, and affected renderer components.
+```
+openspec/changes/mis-for-shadow-linked-lights/proposal.md
+spec.mdSpecify shadow-link estimator requirements +85/-0
+Specify shadow-link estimator requirements
+```
+• Defines strategy agreement at non-delta vertices, the restricted-dome and delta exceptions, and behavioral scenarios for visibility and variance.
+```
+openspec/changes/mis-for-shadow-linked-lights/specs/lighting/spec.md
+tasks.mdTrack implementation and validation work +110/-0
+Track implementation and validation work
+```
+• Records completed geometry, integrator, LPE, test, documentation, and ALab measurement tasks.
+```
+openspec/changes/mis-for-shadow-linked-lights/tasks.md
+design.mdUpdate the lighting design record for link twins +76/-15
+Update the lighting design record for link twins
+```
+• Explains the new estimator, its ownership and cost, measured variance reductions, and remaining dome and delta limitations.
+```
+openspec/specs/lighting/design.md
+limitations.mdNarrow documented shadow-link limitations +5/-2
+Narrow documented shadow-link limitations
+```
+• Clarifies that restricted domes remain NEE-only and delta paths still observe physical occluders.
+```
+site/content/docs/architecture/limitations.md
+environment-variables.mdExplain CRUST_LINK_TWIN to site readers +19/-0
+Explain CRUST_LINK_TWIN to site readers
+```
+• Documents the default MIS behavior, the NEE-only fallback, unchanged unlinked scenes, and the dome exception.
+```
+site/content/docs/reference/environment-variables.md
+Other (1) +7 / -0
+config.rsAdd the link-twin environment switch +7/-0
+Add the link-twin environment switch
+```
+• Adds an enabled-by-default 'link_twin' setting and reads 'CRUST_LINK_TWIN' so the previous NEE-only estimator remains available for comparison.
+```
+crates/crust-core/src/config.rs
+doubleailes
+and others
+added 2 commits
+October 8, 2026 12:51
+Propose MIS for shadow-linked lights
+…
+4d97dd7
+```
+A light whose shadowLink excludes occluders is sampled by NEE alone at
+continuous vertices, which removes the half of MIS that keeps glossy
+reflections quiet. On ALab frame 1004 this is the distant sun's direct
+glossy fireflies: restoring MIS (blockers deactivated) cuts them 97%,
+while more light samples barely move them.
+
+The change gives each restricted non-dome light a bounce-side twin: a
+shadow ray along the sampled bounce direction with the light's own
+shadow mask, MIS-combined with NEE. Restricted domes stay NEE-only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QmaqaKLefbXcboe6iByuqE
+```
+MIS for shadow-linked lights: the link twin
+…
+9423afd
+```
+A light whose shadowLink excludes occluders was sampled by NEE alone at
+continuous vertices, because a bounce ray is stopped by occluders its
+shadow rays ignore. Each restricted non-dome light now gets a link twin:
+after the bounce direction is drawn, the light is intersected
+analytically along it (LightShape::hits, LightKind::found_along) and a
+shadow ray with the light's own mask tests NEE's visibility there. The
+twin is weighted as a bounce hit would be and MIS-combined with NEE; the
+ordinary bounce collects nothing from such a light under any strategy,
+so light, bsdf and MIS estimate one image. Restricted domes stay
+NEE-only, delta vertices are unchanged, and CRUST_LINK_TWIN=0 restores
+the NEE-only estimator.
+
+- ALab frame 1004, 256 spp: lgt_sun_distant direct-glossy variance
+  3 551 -> 100 (-97%), frame variance -34%, render time +2.3%.
+- Linked glossy test scene: bsdf 0.0037 -> agrees with light and power;
+  power variance -73%.
+- trace_path is monomorphised on TWINS, so unlinked scenes run no twin
+  code: cornellbox +0.014% instructions, every unlinked sample
+  bit-identical.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QmaqaKLefbXcboe6iByuqE
+```
+qodo-code-review
+Bot
+commented
+Oct 8, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Code Review by Qodo
+🐞 Bugs (0) 📘 Rule violations (0) 🔗 Cross-repo conflicts (0) 📜 Skill insights (0)
+1. A restricted dome set through the API loses half its light ✓ Resolved
+Description
+```
+LightList::set_links builds twinned from restricted && !nee_only and only debug-asserts
+nee_only ⇒ restricted. It never requires a restricted dome to be nee_only, so a LightLinks
+with a restricted dome and nee_only = false (the default the new field suggests) puts the dome in
+twinned_lights. Then bounce_skips makes the bounce collect nothing from it and NEE weights it
+with light_weight (not 1), but LightKind::found_along returns nothing for a dome. So the bounce
+side's share of the dome's light is silently lost: the image comes out darker, with no warning, and
+TWINS is switched on for no benefit.
+```
+Code
+crates/crust-core/src/light/list.rs[R534-541]
+```
++        debug_assert!(
++            (0..n).all(|i| !links.nee_only[i] || links.restricted[i]),
++            "NEE-only implies restricted"
++        );
++        self.twinned = (0..n)
++            .filter(|&i| links.restricted[i] && !links.nee_only[i])
++            .map(|i| i as u32)
++            .collect();
+```
+Relevance
+●●● Strong
+```
+Public light-list APIs are expected to reject or safely handle inconsistent inputs, not silently
+lose contributions.
+```
+PR-#145
+PR-#224
+ⓘ Recommendations generated based on similar findings in past PRs
+Evidence
+```
+Only the importer forces nee_only = dome || !twin (light_links.rs). set_links is public and
+LightLinks has public fields (the lpe test builds one by hand). found_along handles
+LightKind::Dome(_) => {}, bounce_skips returns true for restricted && !nee_only, and
+volume_nee/surface_light_sample use weight 1.0 only when nee_only. The dome's twinned/bounce
+share therefore has no estimator at all.
+```
+crates/crust-core/src/light/list.rs[534-541]
+crates/crust-core/src/light/list.rs[605-610]
+crates/crust-core/src/light/kind.rs[55-69]
+crates/crust-core/src/scene/usd_import/light_links.rs[419-425]
+crates/crust-core/src/tracer/path.rs[2215-2222]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+`LightList::set_links` accepts a restricted dome with `nee_only = false`. That dome becomes 'twinned', but its twin finds nothing (`found_along` ignores domes), so its bounce-side share is lost (energy loss) whenever `LightLinks` is built outside the importer.
+
+## Fix Focus Areas
+- crates/crust-core/src/light/list.rs[525-542]
+- crates/crust-core/src/light/list.rs[80-94]
+
+## Recommended Fix
+In `set_links`, before computing `twinned`, set `links.nee_only[i] = true` for every `i` where `links.restricted[i] && self.lights[i].is_dome()` (or assert it with a hard `assert!`). Document on `LightLinks::nee_only` that it is enforced. This keeps the importer and programmatic users on one rule.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+2. Two-sided sphere lights lose far-side light ✗ Dismissed
+Description
+```
+AreaLight::found_along assigns the sphere’s cone-sampling PDF to both ray intersections, although
+NEE’s cone sampler can produce only the near-side point. When a two-sided, shadow-linked sphere is
+transparent to shadow rays, its far-side emission receives a competing-strategy MIS weight despite
+having no NEE counterpart, so power and balance renders underestimate that contribution.
+```
+Code
+crates/crust-core/src/light/area.rs[R188-192]
+```
++            f(FoundAlong {
++                distance: t,
++                radiance,
++                pdf: self.pdf_at_point(from, point),
++            });
+```
+Relevance
+●●● Strong
+```
+Sphere sampling precedents accept mismatched support/PDF behavior; far-side points need an unopposed
+or absent NEE PDF.
+```
+PR-#145
+PR-#147
+ⓘ Recommendations generated based on similar findings in past PRs
+Evidence
+```
+Sphere intersections return near and far roots, and the new callback evaluates both emitting points.
+The cone sampler constructs points only on the near cap, but its PDF ignores the queried point; the
+twin therefore MIS-weights a far hit against a light sample that cannot occur. Two-sided emissive
+materials and light-source geometry without a shadow-mask bit are supported by the repository.
+```
+crates/crust-core/src/light/shape.rs[350-355]
+crates/crust-core/src/light/shape.rs[185-219]
+crates/crust-core/src/light/area.rs[180-193]
+crates/crust-core/src/tracer/path.rs[1936-1945]
+crates/crust-core/src/material/emissive.rs[28-38]
+crates/crust-core/src/scene/usd_import/attrs.rs[41-69]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+A two-sided sphere light can emit at its far intersection, but sphere cone sampling cannot select that point. The link twin incorrectly gives the far hit a competing NEE PDF and downweights it.
+
+## Fix Focus Areas
+- crates/crust-core/src/light/area.rs[180-193]
+- crates/crust-core/src/light/shape.rs[350-355]
+- crates/crust-core/src/tracer/path.rs[1936-1945]
+
+## Recommended Fix
+For sphere hits outside the cone sampler’s point support, return no competing PDF so the twin applies the unopposed weight. Cover transparent, two-sided spheres, including affine spheres, in a regression test.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+3. Sphere lights can be counted twice ✗ Dismissed
+Description
+```
+link_twin accumulates every result from LightKind::found_along, while area lights enumerate all
+shape intersections and sphere shapes return both quadratic roots. A bounce direction through a
+two-sided sphere or cylinder can therefore add front and rear emission with separate MIS weights,
+although the ordinary bounce reaches only the nearest surface, producing an over-counted twin
+estimate.
+```
+Code
+crates/crust-core/src/tracer/path.rs[R1936-1941]
+```
++        light.found_along(from, dir, |found| {
++            // `bounce_emission_weight_at`'s weight, for this point.
++            let weight = match found.pdf {
++                Some(pdf) if pmf > 0.0 => {
++                    let light_pdf = lights.density(pdf, pmf, nee_count).max(1e-6);
++                    strategy.bounce_weight(bounce_pdf, light_pdf)
+```
+Relevance
+●●● Strong
+```
+Enumerating both sphere roots with identical NEE PDFs creates a correctness issue; related sphere
+sampling mismatches were accepted.
+```
+PR-#145
+PR-#147
+ⓘ Recommendations generated based on similar findings in past PRs
+Evidence
+```
+The link-twin callback invokes found_along and computes a contribution for each result.
+AreaLight::found_along iterates all shape hits, while sphere shapes add both near and far roots,
+so one direction can produce multiple separately weighted emission contributions instead of the
+nearest bounce-visible surface alone.
+```
+Rule 2297498: Route all MIS weights through the shared SamplingStrategy
+crates/crust-core/src/tracer/path.rs[1936-1941]
+crates/crust-core/src/tracer/path.rs[1966-1968]
+crates/crust-core/src/light/area.rs[180-192]
+crates/crust-core/src/light/shape.rs[350-356]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+The link twin accumulates every intersection returned by an area light, but sphere and cylinder lights can return multiple intersections along one bounce direction. This can count multiple emitting surfaces for one bounce even though the ordinary bounce reaches only the nearest surface.
+
+## Fix Focus Areas
+- crates/crust-core/src/tracer/path.rs[1936-1972]
+- crates/crust-core/src/light/area.rs[180-195]
+- crates/crust-core/src/light/shape.rs[350-356]
+
+## Recommended Fix
+Restrict the link-twin estimate to the nearest valid light-surface intersection for each light and direction, matching the surface reached by the ordinary bounce. Preserve the existing shadow-transmittance and MIS weighting for that single intersection, and add a regression test for a two-sided sphere or cylinder light traversed by a bounce direction.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+View medium (1)
+4. Light-linking tests bypass tracing ✗ Dismissed
+Description
+```
+The new every_strategy_agrees_on_a_shadow_link_that_matters and
+mis_is_whole_again_for_a_shadow_linked_light tests emit diagnostics with eprintln! instead of
+tracing macros. Running these regression tests reaches non-tracing diagnostic output at the
+per-strategy and variance reporting sites.
+```
+Code
+crates/crust-core/tests/light_linking.rs[634]
+```
++            eprintln!("{s}: mean {mean:.5} ± {err:.5} (blocked: {:.5})", blocked.0);
+```
+Relevance
+●●● Strong
+```
+The repository enforces tracing-only diagnostics, making these new eprintln calls a straightforward
+compliance fix.
+```
+ⓘ Recommendations generated based on similar findings in past PRs
+Evidence
+```
+The compliance rule requires diagnostic and operational logging in modified Rust files to use
+tracing macros only. The changed test lines use eprintln! to report per-strategy statistics and
+variance results.
+```
+Rule 2230649: Use only tracing for application logging in Rust
+crates/crust-core/tests/light_linking.rs[634-634]
+crates/crust-core/tests/light_linking.rs[675-675]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+The light-linking regression tests use `eprintln!` for diagnostic output, violating the requirement that Rust diagnostic and operational logging use `tracing` macros only.
+
+## Fix Focus Areas
+- crates/crust-core/tests/light_linking.rs[634-634]
+- crates/crust-core/tests/light_linking.rs[675-675]
+
+## Recommended Fix
+Replace both `eprintln!` calls with the appropriate `tracing` macro, preserving the existing formatted diagnostic fields and messages.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+5. Design record gives the wrong depth for the test scene ✓ Resolved
+Description
+```
+The new 'Measured' paragraph says the linked glossy test scene renders at depth 1.
+glossy_linked_scene actually renders at depth 2, so that the first bounce can escape to the
+distant sun rather than end on the depth-capped lookup. Someone reproducing the numbers at depth 1
+would get a twin that never collects the sun, because link_twin skips lights at infinity when
+escapes is false.
+```
+Code
+openspec/specs/lighting/design.md[R554-557]
+```
++  - **Measured** on the linked glossy test scene (`glossy_linked_scene` in
++    `tests/light_linking.rs`: rough metal 0.15, a sphere light behind a ball its link
++    excludes, 16², 64 spp, depth 1, clamp off, 4 seeds). Before (the twin off): light
++    0.808, bsdf **0.0037**, power 0.808 mean luminance, and power's two-seed variance
+```
+Relevance
+●●● Strong
+```
+The design record contradicts the test's actual depth, and recent documentation accuracy findings
+were accepted.
+```
+PR-#184
+PR-#188
+ⓘ Recommendations generated based on similar findings in past PRs
+Evidence
+```
+The test explicitly picks depth 2 and explains why; the design record says depth 1.
+```
+crates/crust-core/tests/light_linking.rs[552-556]
+crates/crust-core/src/tracer/path.rs[1928-1933]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+The lighting design record says the linked glossy test scene renders at depth 1. The test uses depth 2.
+
+## Fix Focus Areas
+- openspec/specs/lighting/design.md[554-557]
+
+## Recommended Fix
+Change "depth 1" to "depth 2". Add a note that depth 2 lets the first bounce escape to a light at infinity.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+Context sources
+✅ Compliance rules (platform): 127 rules
+✅ Cross-repo context — repo relationships
+Explored: repo: doubleailes/openqmc-rs (sha: f695f95b) — View relationship
+Review mode: Auto: 🧠 Deep: Large, bug-dense renderer change spans independent geometry, MIS, linking, volumes, and tests.
+Tip of the day
+```
+💡 Did you know, you can keep summaries lean with Findings visible per group, which tucks the rest behind a View link
+```
+More tips ↗ | Customize Qodo ↗ | Qodo docs ↗
+qodo-code-review
+Bot
+reviewed
+Oct 8, 2026
+View reviewed changes
+Comment thread
+crates/crust-core/tests/light_linking.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/crust-core/src/tracer/path.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/crust-core/src/light/area.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/crust-core/src/light/list.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+openspec/specs/lighting/design.md
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+doubleailes
+force-pushed
+the
+mis-for-shadow-linked-lights
+branch
+from
+ca3dc8b to
+9423afd
+Compare
+October 8, 2026 10:57
+doubleailes
+and others
+added 2 commits
+October 8, 2026 13:01
+Address the Qodo review of mis-for-shadow-linked-lights
+…
+023e8b1
+```
+- LightList::set_links makes every restricted dome NEE-only, whoever
+  built the links: a dome has no link twin, so a twinned one lost its
+  bounce side's share of the light. The importer already did this; a
+  programmatic LightLinks did not. Pinned by
+  a_restricted_dome_is_nee_only_whoever_builds_the_links.
+- The lighting design record gives the glossy test scene's real depth
+  (2, so the first bounce may escape to a light at infinity).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QmaqaKLefbXcboe6iByuqE
+```
+Merge branch 'main' into mis-for-shadow-linked-lights
+5f49c7e
+Hide details
+View details
+doubleailes
+merged commit 5cab43e
+into
+main
+Oct 8, 2026
+15 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+doubleailes
+deleted the
+mis-for-shadow-linked-lights
+branch
+October 8, 2026 11:09
+doubleailes
+mentioned this pull request
+Oct 8, 2026
+Diagnose how to render a scene faster or cleaner (add-diagnostic-command)
+#242
+Merged
+5 of 6 tasks
+doubleailes
+added a commit
+that referenced
+this pull request
+Oct 8, 2026
+Archive mis-for-shadow-linked-lights and sync lighting spec
+…
+50463c7
+```
+The lighting spec's "Shadow linking" and "Known gaps" requirements are
+replaced by the change's delta: the bounce sees a restricted light
+through its link's visibility and is MIS-combined with NEE, a
+shadow-linked dome stays NEE-only, three new scenarios. The change
+(implemented in #239) moves to
+openspec/changes/archive/2026-10-08-mis-for-shadow-linked-lights/.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QS2nmSXhc4Y3Jrb7skwrSV
+```
+This was referenced Oct 13, 2026
+lighting: excluded glass transmits nothing more from a shadow-linked light
+#299
+Open
+Make the QMC sampler a render setting; materials take numbers, not a sampler
+#300
+Merged
+Add --light-selection tree: a light BVH for NEE (opt-in)
+#314
+Merged
+This was referenced Oct 22, 2026
+Adopt Arnold's .tx convention
+#373
+Merged
+MaterialX leaves on BSDL, layered as testrender layers them (adopt-osl-bsdl-closures)
+#379
+Merged
+Hydra render delegate: crust in usdview (hydra-render-delegate)
+#381
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

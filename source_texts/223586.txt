@@ -1,0 +1,548 @@
+Contribute to CEAD-group/threejs-viewer development by creating an account on GitHub.
+
+Point clouds: per-point time windows + streamed octree LOD (#79) by tdamsma · Pull Request #80 · CEAD-group/threejs-viewer · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+tdamsma
+commented
+Jul 3, 2026
+Copy link
+Copy Markdown
+Contributor
+Implements both halves of #79 for the in-RAM tier, plus the decision doc that settles the architecture (plans/points-octree-lod.md, synthesized from five prior-art surveys: Potree ecosystem, formats/Python tooling, LOD techniques, encoding/compression, GPU efficiency).
+1. Per-point time-window visibility
+add_points(birth_times=, removal_times=) — optional (N,) lifetimes; the vertex shader shows a point only while birth_time <= t < removal_time, culling by pushing gl_Position outside the clip volume (pre-raster, zero fragment cost — Potree's GPS-time-filter trick via onBeforeCompile + customProgramCacheKey). Expresses the out-of-order appearance/removal that draw_range's buffer-prefix reveal cannot. NaN/±inf ends = unbounded (mapped to ±FLT_MAX Python-side; GLSL NaN compares are undefined).
+Scrub time drivers: set_points_time(id, t) (streaming) and the new point_times animation channel (Animation.set_point_time_data, Frame(point_times=...)) — dragging the animation slider scrubs points in/out.
+t=0
+t=5
+t=9.5
+A 1-unit-wide birth/removal band sweeps a 40×20 grid; the NaN-unbounded bottom rows persist. At t=9.5 every windowed point is gone.
+2. Streamed octree LOD
+add_points(lod=True | {node_capacity, point_budget, refine_pixels, max_depth, seed}):
+Build (Python, points_lod.py): Potree-style additive sampled octree — every node owns a seeded pseudo-random sample of its cube, time-stratified over birth/removal so the time filter thins every LOD level uniformly (sampled real points, never aggregated rollups: any merged voxel would fabricate a lifetime belonging to no real point). Per-node vertex order Morton-sorted + 128-batch shuffled (Schütz 2021, up to ~4× raster throughput).
+Transport: one WS header + a 40 B/node binary hierarchy (bounds, count, [min birth, max removal), BFS topology). Node payloads are lazy callable blob-store providers — each GET /points_lod_<uuid>/<i> quantizes + packs a numpy slice on demand; nothing materialized up front. Payload: normalized int16 xyz over the node cube (free GPU dequant via normalized attribute + node transform; ints stay GPU-resident, unlike Potree's CPU float decode) + u8 rgb + f32 times.
+Viewer runtime: per-frame priority traversal (max-heap on projected node size) — refine while ≥ refine_pixels, hard stop at point_budget (default 1.5M), ≤6 concurrent node fetches, LRU eviction past ~3× budget, per-node frustum culling, and per-node time culling (a node whose window misses the scrub time is neither drawn nor fetched). The group shares one scrub-time uniform, so set_points_time/point_times drive LOD clouds identically to flat ones. draw_range is a documented no-op on LOD clouds (buffer order is per-node Morton).
+far view, t=8 (656k pts, level ≤3)
+zoomed, t=8 (1.49M ≤ 1.5M budget, level 4 streamed in)
+far view, t=60 (only NaN bedrock left)
+2M-point wavy sheet: growth front + eroded trailing edge at t=8; zooming streams 54→102 nodes under the budget; at t=60 nodes time-cull out (95 visible of 114 loaded) and the shader keeps only bedrock.
+Bugs caught by verification before landing
+Child octree cubes never shrank (quarter * 2.0 for the child half) — every node got the root-sized cube, inflating projected sizes (everything refined) and exploding tree depth to max_depth. Regression test asserts half == root_half / 2^level.
+8× coarse-node point-size boost produced giant occluding sprites near the camera (coarse ancestors render close-up under additive refinement) — capped at 2×, √2 per level.
+Testing
+342 tests pass: 15 new builder/protocol tests (permutation/tiling/cube-halving/topology/time-stratification/quantization round-trip/blob lifecycle), 10 new Phase-1 protocol/animation tests, 3 new Playwright tests (shader compile watchdog, point_times channel from the playhead, LOD streaming within budget + time-cull-out).
+End-to-end headless-Chromium verification scripts with the screenshots above.
+Out of scope (Phase 3, blueprinted in the plan doc)
+Public node_provider hook for the ~1B provider-synthesized tier (the callable-blob mechanism already supports it), u16 time quantization (needs an immortal-flag sentinel), optional blue-noise sampling, Morton-radix builder speedup (current: ~1M pts/s, fine to ~20M).
+Closes #79.
+🤖 Generated with Claude Code
+tdamsma
+and others
+added 4 commits
+July 3, 2026 10:19
+Plan: octree LOD + per-point time-window visibility for add_points (#79)
+…
+3345107
+```
+Decision doc synthesized from five prior-art surveys (Potree ecosystem,
+formats/Python tooling, LOD techniques, encoding/compression, GPU
+efficiency). Settles: provider-built Potree-style sampled octree (bricks
+stay a provider-side detail), own node protocol over the existing sidecar,
+time-stratified pseudo-random sampling, quantized node payload (13 B/pt),
+shader time-window cull, three-phase rollout.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Per-point time-window visibility for add_points (#79 Phase 1)
+…
+26ef397
+```
+add_points(birth_times=, removal_times=): optional (N,) per-point
+lifetimes; the vertex shader shows a point only while
+birth_time <= t < removal_time, culling by shoving gl_Position outside
+the clip volume (pre-raster, zero fragment cost). Expresses out-of-order
+appearance/removal that draw_range's buffer-prefix reveal cannot.
+NaN/±inf map to ±FLT_MAX Python-side (GLSL NaN compares are undefined).
+
+Scrub time t is a per-cloud uniform shared by reference into every
+compiled program (incl. the EDL depth pre-pass), driven by:
+- set_points_time(id, t) — streaming / one-off scrubs
+- the new point_times animation channel (Animation.set_point_time_data,
+  Frame(point_times=...)) — the animation slider scrubs points in/out
+
+Verified end-to-end with headless-Chromium screenshots: a birth/removal
+band sweeps across a grid while NaN-unbounded control rows persist.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Octree LOD tier for add_points: streamed, budgeted, time-aware (#79 P…
+…
+9c3c6c4
+```
+…hase 2)
+
+add_points(lod=True | {node_capacity, point_budget, refine_pixels,
+max_depth, seed}) reorders the cloud into a Potree-style additive sampled
+octree (points_lod.py): each node owns a seeded pseudo-random sample of
+its cube, time-stratified over birth/removal so the time filter thins
+every LOD level uniformly; per-node vertex order is Morton-sorted then
+128-batch shuffled (Schütz 2021).
+
+Transport: one WS header + a 40 B/node binary hierarchy blob (bounds,
+count, [min birth, max removal), BFS first_child/child_mask); node
+payloads are synthesized on demand by lazy callable blob-store providers
+(quantize + pack a numpy slice per GET) — the full per-node payload set
+is never materialized. Payload: normalized int16 xyz over the node cube
+(free GPU dequant via normalized attribute + node transform, ints stay
+GPU-resident) + u8 rgb + f32 times.
+
+Viewer: per-frame max-heap traversal by projected node size — refine
+while >= refinePixels, stop at the point budget (default 1.5M), fetch
+missing wanted nodes (<= 6 concurrent), LRU-evict past ~3x budget.
+Per-node explicit bounds (frustum culling); nodes whose time window
+misses the scrub time are skipped for draw AND fetch. The group shares
+one scrub-time uniform, so set_points_time / point_times channels drive
+LOD clouds identically to flat ones. draw_range is a documented no-op on
+LOD clouds.
+
+Fixed during verification: child octree cubes were allocated at the
+parent's size (never shrank) — inflated projected sizes refined
+everything and blew tree depth; regression-tested (half = root/2^level).
+Coarse-node point-size boost capped at 2x (sqrt(2)/level) after 8x
+produced giant occluding sprites near the camera.
+
+Example 27: tunable-N (argv) wavy sheet — LOD streaming under budget +
+build/erosion fronts scrubbed by the animation slider, NaN bedrock
+persists. Verified end-to-end with headless-Chromium screenshots and
+LOD stats (54 nodes/656k pts far -> 102 nodes/1.49M pts <= 1.5M budget
+zoomed; level 3 -> 4 refinement; full time-cull-out past last removal).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Add verification screenshots for #79 (time window + octree LOD)
+…
+9554f33
+```
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Copilot
+AI
+review requested due to automatic review settings
+July 3, 2026 09:39
+Copilot started reviewing on behalf of
+tdamsma
+July 3, 2026 09:40
+View session
+Copilot
+AI
+reviewed
+Jul 3, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Adds two major capabilities to the point-cloud pipeline to support large animated voxel/point fields: (1) per-point time-window visibility driven by a scrub-time uniform (and new point_times animation channel), and (2) an opt-in streamed octree LOD path built on the Python side and traversed/fetched budgeted in the viewer.
+Changes:
+Extend add_points with birth_times/removal_times, plus set_points_time and an animation point_times channel to scrub visibility in-shader.
+Implement Python-side additive sampled octree builder + lazy HTTP node payload providers, and viewer-side per-frame priority traversal/fetch/LRU eviction under a point budget.
+Add protocol, unit, and browser tests; include an architecture/decision document and a runnable example.
+Reviewed changes
+Copilot reviewed 12 out of 18 changed files in this pull request and generated 5 comments.
+Show a summary per file
+File
+Description
+tests/test_protocol.py
+Validates binary layout/flags and finite-time sanitization for time-window attributes; adds set_points_time tests.
+tests/test_points_lod.py
+New unit tests for octree builder invariants, hierarchy packing, payload quantization, and client integration.
+tests/test_browser.py
+New Playwright coverage for shader compile, point_times scrubbing, and LOD streaming/budget/time-culling behavior.
+tests/test_animation.py
+Adds Animation.set_point_time_data and Frame.point_times serialization tests.
+src/threejs_viewer/viewer/viewer.js
+Implements shader patching for time windows, new point_times channel apply, streamed points LOD traversal/fetch/eviction, and new message handlers.
+src/threejs_viewer/viewer.html
+Mirrors viewer runtime changes for the standalone HTML viewer bundle.
+src/threejs_viewer/points_lod.py
+New numpy octree builder + hierarchy/node payload packing.
+src/threejs_viewer/client.py
+Adds API surface (birth_times, removal_times, lod, set_points_time), LOD blob-store plumbing, and time sanitization.
+src/threejs_viewer/animation.py
+Adds point_times support to frames and a convenience binary-channel setter.
+plans/points-octree-lod.md
+Architecture/decision doc describing the chosen LOD + time-window design and future phases.
+examples/27_points_octree_lod.py
+End-to-end demo combining LOD streaming with time-window scrubbing.
+CLAUDE.md
+Updates project behavior documentation to include time windows, point_times, and octree LOD.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+src/threejs_viewer/viewer/viewer.js
+Comment on lines
++7399
+to
++7418
+const timeCulled = hasTime &&
+(uTime < nodes.tmins[i] || uTime >= nodes.tmaxs[i]);
+if (!timeCulled) {
+const cnt = nodes.counts[i];
+if (used + cnt > lod.budget) break;
+used += cnt;
+wanted[i] = 1;
+wantedList.push(i);
+}
+const fc = nodes.firstChild[i];
+if (fc !== POINTS_LOD_NO_CHILD) {
+const mask = nodes.childMask[i];
+let slot = fc;
+for (let k = 0; k < 8; k++) {
+if (mask & (1 << k)) {
+lodHeapPush(heap, { i: slot, px: pxOf(slot) });
+slot++;
+}
+}
+}
+Comment thread
+src/threejs_viewer/viewer.html
+Comment on lines
++8506
+to
++8525
+const timeCulled = hasTime &&
+(uTime < nodes.tmins[i] || uTime >= nodes.tmaxs[i]);
+if (!timeCulled) {
+const cnt = nodes.counts[i];
+if (used + cnt > lod.budget) break;
+used += cnt;
+wanted[i] = 1;
+wantedList.push(i);
+}
+const fc = nodes.firstChild[i];
+if (fc !== POINTS_LOD_NO_CHILD) {
+const mask = nodes.childMask[i];
+let slot = fc;
+for (let k = 0; k < 8; k++) {
+if (mask & (1 << k)) {
+lodHeapPush(heap, { i: slot, px: pxOf(slot) });
+slot++;
+}
+}
+}
+Comment thread
+src/threejs_viewer/viewer/viewer.js
+Comment on lines
++9140
+to
++9148
+const hasBirth = !!data.hasBirthTimes;
+const hasRemoval = !!data.hasRemovalTimes;
+/** @param {number} byteOff */
+const readTimeBlock = (byteOff) => {
+const buf = new ArrayBuffer(numPoints * 4);
+new Uint8Array(buf).set(rawData.subarray(byteOff, byteOff + numPoints * 4));
+return new Float32Array(buf);
+};
+let timeOffset = positionBytes + (data.hasVertexColors ? numPoints * 3 : 0);
+Comment thread
+src/threejs_viewer/viewer.html
+Comment on lines
++10247
+to
++10255
+const hasBirth = !!data.hasBirthTimes;
+const hasRemoval = !!data.hasRemovalTimes;
+/** @param {number} byteOff */
+const readTimeBlock = (byteOff) => {
+const buf = new ArrayBuffer(numPoints * 4);
+new Uint8Array(buf).set(rawData.subarray(byteOff, byteOff + numPoints * 4));
+return new Float32Array(buf);
+};
+let timeOffset = positionBytes + (data.hasVertexColors ? numPoints * 3 : 0);
+Comment thread
+src/threejs_viewer/client.py
+Outdated
+Comment on lines
++1138
+to
++1139
+if lod:
+self._add_points_lod(
+tdamsma
+and others
+added 3 commits
+July 3, 2026 11:58
+Example 27: keep serving nodes + frame LOD clouds before nodes stream
+…
+35f2edf
+```
+Running the example showed an empty viewer: the script exited after
+wait_for_assets (killing the node-serving process — a LOD cloud streams
+from Python on demand), and the sheet sat at x [0,40] outside the default
+camera view with nothing to frame (the viewer has no auto-framing, and
+both bounds walks only see real geometry, so an empty LOD group
+contributed nothing to F/Home framing or near-far).
+
+- Example: cloud centered on the origin; wait_for_assets(disconnect=False)
+  + keep-alive loop with a Ctrl+C note; docstring explains that t=0 shows
+  nothing until the (autoplaying) build front advances.
+- Viewer: LOD groups carry userData.lodRootBox (root octree cube);
+  updateSceneBounds and _collectFrameableBounds union it, so resetView/F
+  and near-far see the full advertised extent even before any node
+  payload lands.
+
+Verified headless with the default camera (no manual positioning): cloud
+visible while building, F frames the whole sheet mid-stream, budget still
+respected (1.02M <= 1.5M).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Octree build ~2.4x faster: one global time-sorted candidate order
+…
+de4ea6f
+```
+The builder re-sorted every interior node's candidates by time
+(lexsort) — the root alone re-sorted all N points. Boolean-mask
+partitioning preserves relative order, so sort once globally (time +
+random tiebreak, or a plain random permutation without strat times) and
+every node's candidate list inherits it; the stratified sample becomes a
+pure strided pick. 10M points: ~19.7s -> ~8.3s build, 2M: 2.9s -> 1.2s.
+Stratification quality unchanged (root-sample time quantiles still match
+the full cloud).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Document time windows + octree LOD in README and DESIGN
+…
+677e657
+```
+README: feature bullets + a usage section (time-window scrub via
+set_points_time / point_times channel, lod=True with the keep-alive
+caveat, composition note, pointer to example 27). DESIGN: the new wire
+messages (add_points_binary time blocks, set_points_time, add_points_lod)
+and the pull-based node transport (40 B hierarchy records, on-demand GET
+per node, lazy blob-store providers, additive refinement + LRU).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+tdamsma
+mentioned this pull request
+Jul 3, 2026
+Camera pose API: get_camera / set_camera
+#81
+Closed
+tdamsma
+and others
+added 2 commits
+July 3, 2026 12:30
+frameObject: include LOD root bounds (frame_object works on LOD clouds)
+…
+4861769
+```
+frame_object / double-click framing used only streamed node geometry;
+before the first payload lands an LOD group framed to an empty box.
+Union the hierarchy's root cube like the other two bounds walks.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Clarify draw_range vs the two LOD systems; warn on LOD-cloud draw_range
+…
+ba5f7bc
+```
+The generic CLAUDE.md draw_range bullet said "point clouds" support
+set_draw_range unqualified, contradicting the octree-LOD bullet (which
+correctly says LOD clouds ignore it — per-node Morton buffer order makes
+a prefix spatially meaningless; the time window is the mechanism, and
+the only one that can express out-of-order removal). Spell out the
+contrast with tube LOD, which *does* keep draw_range via the arc-length
+remap. The viewer now also warns once per LOD cloud when a draw_range
+is sent at it, instead of silently no-oping.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+tdamsma
+mentioned this pull request
+Jul 4, 2026
+Points LOD grid fast-path (external-producer Morton API) + EDL auto-enable/tuning
+#82
+Merged
+Address Copilot review: budget continue, payload bounds check, lod={}
+…
+307076b
+```
+- LOD traversal: a node that exceeds the remaining point budget no
+  longer aborts the whole heap walk (break -> continue); its subtree is
+  skipped (children without the parent's coarse sample leave density
+  holes) but smaller branches elsewhere still fill the budget.
+- add_points_binary validates the full expected payload size (positions
+  + optional colors/birth/removal blocks) before parsing — a truncated
+  payload previously zero-padded the trailing time blocks into wrong
+  birth/removal values silently.
+- add_points: lod={} ("all defaults") now enables LOD instead of
+  falling through to the flat path via dict truthiness; regression test.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+tdamsma
+commented
+Jul 5, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+All three Copilot findings addressed in 307076b:
+Budget break under-fill — the traversal now continues past a node that exceeds the remaining budget (skipping its subtree, since children without the parent's coarse sample leave density holes) and keeps popping, so smaller branches elsewhere still fill the budget.
+Payload bounds — add_points_binary validates the full expected byte count (positions + optional colors/birth/removal blocks) before parsing; a truncated payload now fails loudly instead of silently zero-padding the time blocks.
+lod={} falsey — explicit is not None and is not False check; an empty options dict enables LOD with defaults (regression-tested).
+Stacked branches (#81, #82) rebased on top; full suite green (364 tests incl. browser).
+tdamsma
+added a commit
+that referenced
+this pull request
+Jul 5, 2026
+Changelog: 0.0.40 — point-cloud time windows, streamed octree LOD,
+…
+7f4e85d
+```
+grid fast-path, EDL auto-enable/tuning, camera pose API
+
+Describes the final state of the #80 -> #81 -> #82 stack; added on the
+top branch so it lands after everything it documents.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+tdamsma
+mentioned this pull request
+Jul 6, 2026
+Camera pose get/set, frame-a-box, generic scene pick, and controls enable/disable
+#77
+Closed
+Hide details
+View details
+tdamsma
+merged commit 3985431
+into
+main
+Jul 6, 2026
+5 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+tdamsma
+deleted the
+points-octree-lod-time
+branch
+July 6, 2026 19:00
+tdamsma
+mentioned this pull request
+Jul 6, 2026
+Camera pose API: get_camera / set_camera
+#83
+Merged
+tdamsma
+added a commit
+that referenced
+this pull request
+Jul 6, 2026
+Changelog: 0.0.40 — point-cloud time windows, streamed octree LOD,
+…
+26401d9
+```
+grid fast-path, EDL auto-enable/tuning, camera pose API
+
+Describes the final state of the #80 -> #81 -> #82 stack; added on the
+top branch so it lands after everything it documents.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+tdamsma
+added a commit
+that referenced
+this pull request
+Jul 6, 2026
+Points LOD grid fast-path (external-producer Morton API) + EDL auto-e…
+…
+37db9c0
+```
+…nable/tuning (#82)
+
+* Grid Morton fast-path for points LOD + EDL auto-enable/tuning
+
+Two additions serving the mill-sim voxel-carve demo (drafted in another
+session; reviewed, benchmarked, docs + tests completed here):
+
+Grid fast-path (points_lod.build_points_octree_grid, lod={"grid": ...}):
+for lattice-aligned clouds, build the same additive sampled octree from
+one global uint64 Morton code + one sort — every octree cell at every
+level is a contiguous range of the sorted array, octants split by
+searchsorted, no per-node re-partition or sort. Benchmarked 4x faster
+than the float builder at 8.1M lattice points (1.1s vs 4.4s), identical
+node structure. Sampling is spatial (strided over Morton order);
+strat_times is accepted but ignored — carve removal times are spatially
+correlated, and skipping the time sort keeps the build bit-reproducible
+for external producers. Producers (mill-sim's Rust kernel) can pre-supply
+codes/order/n_bits and skip the two super-linear stages; the bit-exact
+contract is docs/points-lod-grid-api.md with grid_morton_codes() as the
+Python reference. Gated on the caller's grid promise: the bit-slice
+octant test only matches the float pos>centre test for cell-centred
+points. Also per-cloud lod={"size_boost_max": k} (wire: sizeBoostMax).
+
+EDL: auto-enables the first time a point cloud is added (unlit point
+quads read as a washed-out sheet without a depth cue), suppressed once
+the user pins the state (Shift+D, set_depth_cue(edl=...), or the new
+set_edl(enabled, strength=, radius=)) — including an explicit OFF.
+set_depth_cue grows edl_strength/edl_radius; tuning survives composer
+rebuilds and can be set before the composer exists.
+
+Review pass: fixed class name in the producer doc, documented both
+features in CLAUDE.md, added a browser test (auto-enable fires, pinned
+OFF survives a second cloud, tuning reaches the shader uniforms), and
+clarified the size-unit semantics in the add_points docstring.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+* Changelog: 0.0.40 — point-cloud time windows, streamed octree LOD,
+grid fast-path, EDL auto-enable/tuning, camera pose API
+
+Describes the final state of the #80 -> #81 -> #82 stack; added on the
+top branch so it lands after everything it documents.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+* Address Copilot review: order bounds check + docstring accuracy
+
+- build_points_octree_grid: explicitly reject negative / >= N order
+  indices with a ValueError before the permutation check (negative
+  indices would silently wrap via numpy; large ones raised IndexError).
+- add_points docstring: describe size under attenuation as an
+  approximate world-space extent (1/depth falloff, viewport-scaled),
+  not exact world units; and correct the grid fast-path note — grid
+  node samples are strided spatial subsamples, not time-stratified
+  (matches CLAUDE.md and the builder's documented behavior).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+---------
+
+Co-authored-by: Claude Fable 5 <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

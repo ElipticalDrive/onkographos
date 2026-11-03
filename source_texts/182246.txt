@@ -1,0 +1,141 @@
+NeRF from Scratch | Zongze Li
+Overview
+The goal of this project was to understand NeRF at the implementation level rather than
+treat it as a black box. I built the core pipeline from scratch in PyTorch, covering camera-ray
+construction, stratified sampling, multi-frequency positional encoding, neural field prediction,
+differentiable volume rendering, and optimization.
+DatasetNeRF Synthetic · Lego
+FrameworkPyTorch
+RepresentationContinuous 5D Radiance Field
+ObjectiveRendered RGB Reconstruction
+Method & Implementation
+The implementation follows the central NeRF idea: map spatial position and viewing direction
+to volumetric density and view-dependent color, then render pixels through differentiable
+alpha compositing.
+1
+Input ViewsRGB images + camera poses
+2
+Ray GenerationPixels → world-space rays
+3
+SamplingStratified samples along each ray
+4
+EncodingMulti-frequency positional features
+5
+NeRF MLPPredict RGB + density
+6
+RenderingComposite samples into a view
+Scene Representation
+Positional Encoding & NeRF MLP
+3D positions and viewing directions are expanded with multi-frequency sinusoidal features.
+An 8-layer MLP with a skip connection predicts volumetric density and view-dependent RGB color.
+View core implementation
+```
+class PositionalEncoding(nn.Module):
+    def __init__(self, num_frequencies):
+        super().__init__()
+        self.freq_bands = 2.0 ** torch.linspace(
+            0., num_frequencies - 1, num_frequencies
+        )
+
+    def forward(self, x):
+        out = [x]
+        for freq in self.freq_bands:
+            out += [torch.sin(x * freq), torch.cos(x * freq)]
+        return torch.cat(out, dim=-1)
+
+class NeRFMLP(nn.Module):
+    def __init__(self, pos_L=10, dir_L=4, depth=8, width=256):
+        super().__init__()
+        self.pos_encoder = PositionalEncoding(pos_L)
+        self.dir_encoder = PositionalEncoding(dir_L)
+        self.skips = [4]
+```
+Camera & Geometry
+Camera-Aware Views & World-Space Rays
+Camera poses are represented with camera-to-world transforms. Pixel coordinates are converted
+into normalized world-space ray directions, providing the geometric backbone for rendering.
+View ray-generation implementation
+```
+def get_rays(H, W, focal, c2w):
+    i, j = torch.meshgrid(
+        torch.linspace(0, W - 1, W),
+        torch.linspace(0, H - 1, H),
+        indexing='ij'
+    )
+
+    dirs = torch.stack([
+        (i.t() - W * 0.5) / focal,
+        -(j.t() - H * 0.5) / focal,
+        -torch.ones_like(i.t())
+    ], dim=-1)
+
+    rays_d = torch.sum(dirs[..., None, :] * c2w[:3, :3], dim=-1)
+    rays_d = rays_d / torch.norm(rays_d, dim=-1, keepdim=True)
+    rays_o = c2w[:3, 3].expand(rays_d.shape)
+```
+Sampling & Rendering
+Stratified Sampling & Differentiable Volume Rendering
+Samples are drawn along each camera ray, evaluated by the neural field, and composited with
+transmittance-aware alpha weights. This converts per-sample color and density into a rendered pixel
+while preserving gradients through the rendering process.
+Optimization
+Random-Ray Training Loop
+Training uses randomly sampled rays rather than repeatedly rendering full-resolution images,
+reducing compute during experimentation. Adam optimizes an RGB reconstruction objective through
+the differentiable rendering pipeline.
+View optimization loop
+```
+model = NeRFMLP().to(device)
+optimizer = torch.optim.Adam(model.parameters(), lr=5e-4)
+
+rays_o, rays_d = get_rays(H, W, focal, c2w)
+rays_o = rays_o.reshape(-1, 3)
+rays_d = rays_d.reshape(-1, 3)
+
+indices = torch.randperm(rays_o.shape[0])[:1024]
+batch_ro = rays_o[indices]
+batch_rd = rays_d[indices]
+
+rgb_map, depth_map = render_rays(model, batch_ro, batch_rd)
+loss = F.mse_loss(rgb_map, target_rgb)
+
+optimizer.zero_grad()
+loss.backward()
+optimizer.step()
+```
+Experiments & Results
+Evaluation focuses on optimization behavior, reconstruction quality, and the contribution of
+high-frequency positional encoding.
+400 × 400Image Resolution
+4096Rays per Batch
+20KTraining Steps
+5e-4Learning Rate
+AdamOptimizer
+Training Dynamics & Reconstruction Quality
+MSE loss decreases steadily while PSNR rises into the mid-20 dB range, indicating stable convergence
+and progressively improved reconstruction quality. Late-stage PSNR fluctuations suggest diminishing
+gains as training approaches saturation.
+Positional Encoding Ablation
+Removing positional encoding causes the model to collapse toward low-frequency, heavily blurred
+reconstructions. Multi-frequency encoding substantially improves recovered scene geometry and
+fine-grained appearance.
+Novel-View Visualization
+A 360° rendered camera orbit can be added here as qualitative evidence of learned scene consistency
+once the inference GIF is generated.
+Discussion & Limitations
+What mattered most
+Camera geometry: coordinate conventions and ray directions had to be correct before network behavior was meaningful.
+High-frequency detail: direct coordinates produced overly smooth reconstructions; positional encoding was critical.
+Compute: random-ray training and lower-resolution previews made iteration more practical.
+Current limitations
+The implementation focuses on the coarse stratified-sampling stage.
+Hierarchical importance sampling from the original NeRF remains a natural extension.
+Late-stage reconstruction gains diminish as optimization approaches saturation.
+Connection to the original NeRF paper.
+This project follows the core formulation introduced by Mildenhall et al. (2020):
+a continuous 5D neural scene representation queried along camera rays and rendered with differentiable
+volume rendering. The emphasis here is implementation-level understanding of the core pipeline.
+Conclusion
+The project showed how tightly geometry, representation, sampling, rendering, and optimization interact
+in neural scene reconstruction. A NeRF is not just an MLP: the full geometric and differentiable-rendering
+pipeline must work coherently before a meaningful scene representation emerges.

@@ -1,0 +1,133 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,5 @@
+ # EWA Splatting
+ 
+-Also called: EWA Splatting Approximation, EWA Volume Splatting, Elliptical Weighted Average Splatting, GPU accelerated surface splatting, Point rendering with texture filtering, Surface Splatting
++Also called: Elliptical Weighted Average Splatting, Surface Splatting, GPU accelerated surface splatting, Point rendering with texture filtering
+ 
+ ## Overview
+@@ -7,9 +7,9 @@
+ 
+ ## How it works
+-**Inputs:** A set of $N$ 3D Gaussians, each defined by weight $w_i$, mean position $\boldsymbol{\mu}_i$ (in camera space), and $3 \times 3$ covariance matrix $\boldsymbol{\Sigma}_i$. Camera projection matrix $\mathbf{P}$ and view matrix $\mathbf{W}$.
+-**Outputs:** A 2D image with accumulated color and depth.
++**Inputs:** A set of $N$ 3D Gaussians, each defined by weight $w_i$, mean position $\boldsymbol{\mu}_i$ (in camera space), and $3 \times 3$ covariance matrix $\boldsymbol{\Sigma}_i$ [G]. Camera projection matrix $\mathbf{P}$ and view matrix $\mathbf{W}$ [G].
++**Outputs:** A 2D image with accumulated color and depth [G].
+ 
+ **Data Structures:**
+-*   **Surfel:** Vertex buffer layout (stride 64 bytes):
++*   **Surfel:** Vertex buffer layout (stride 64 bytes) [S2]:
+     *   Offset 0: `center` (vec3, 3 floats)
+     *   Offset 12: `tangent_u` (vec3, 3 floats)
+@@ -18,7 +18,7 @@
+     *   Offset 48: `color_rgba` (vec4, 4 unsigned bytes)
+ *   **Uniforms:**
+-    *   `UniformBufferParameter`: `color` (vec3, offset 0), `shininess` (float, offset 12), `radius_scale` (float, offset 16), `ewa_radius` (float, offset 20), `epsilon` (float, offset 24). Total 8 floats.
+-    *   `UniformBufferFrustum`: 6 frustum planes (vec4).
+-    *   `UniformBufferRaycast`: `projection_matrix_inv` (mat4), `viewport` (vec4).
++    *   `UniformBufferParameter`: `color` (vec3, offset 0), `shininess` (float, offset 12), `radius_scale` (float, offset 16), `ewa_radius` (float, offset 20), `epsilon` (float, offset 24). Total 8 floats [S2].
++    *   `UniformBufferFrustum`: 6 frustum planes (vec4) [S2].
++    *   `UniformBufferRaycast`: `projection_matrix_inv` (mat4), `viewport` (vec4) [S2].
+ 
+ **Steps:**
+@@ -26,15 +26,16 @@
+ 1.  **Frustum Culling:** Extract 6 frustum planes from the projection matrix. A splat is visible if its bounding sphere intersects the view frustum [S2].
+     ```python
+-    # Extract frustum planes from projection matrix P
++    # Extract 6 frustum planes from projection matrix P (4x4 list of lists)
+     frustum_planes = []
+     for i in range(6):
+-        sign = -1.0 if (i % 2) == 0 else 1.0
++        sign = -1.0 if i % 2 == 0 else 1.0
+         row_idx = i // 2
+-        plane = P.row(3) + sign * P.row(row_idx)
+-        plane = plane / plane[0:3].norm()
++        plane = [P[3][j] + sign * P[row_idx][j] for j in range(4)]
++        norm = (plane[0]**2 + plane[1]**2 + plane[2]**2)**0.5
++        plane = [x / norm for x in plane]
+         frustum_planes.append(plane)
+     ```
+ 
+-2.  **2D Gaussian Projection (EWA):** Project the 3D Gaussian to 2D screen space to determine the splat's shape and position.
++2.  **2D Gaussian Projection (EWA):** Project the 3D Gaussian to 2D screen space to determine the splat's shape and position [S1].
+     *   Compute the Jacobian $\mathbf{J}$ of the perspective projection, approximated by first-order Taylor expansion at the Gaussian mean $\boldsymbol{\mu}$ [S1]:
+         $$ \mathbf{J} = \begin{pmatrix} 1/\mu_2 & 0 & -\mu_0/\mu_2^2 \\ 0 & 1/\mu_2 & -\mu_1/\mu_2^2 \\ \mu_0/l & \mu_1/l & \mu_2/l \end{pmatrix} $$
+@@ -42,13 +43,14 @@
+     *   Compute the projected 2D covariance $\boldsymbol{\Sigma}'$ [S1]:
+         $$ \boldsymbol{\Sigma}' = \mathbf{J} \mathbf{W} \boldsymbol{\Sigma} \mathbf{W}^T \mathbf{J}^T $$
+-        where $\mathbf{W}$ transforms to camera space (identity if already in camera space).
+-    *   The projected 2D Gaussian is $\mathcal{G}_2^n(\mathbf{p}, w_i, \boldsymbol{\mu}'_i, \boldsymbol{\Sigma}'_i)$. The weight $w$ is preserved across projection [S1].
++        where $\mathbf{W}$ transforms to camera space [S1].
++    *   The projected 2D Gaussian is $\mathcal{G}_2^n(\mathbf{p}, w_i, \boldsymbol{\mu}'_i, \boldsymbol{\Sigma}'_i)$ [S1]. The weight $w$ is preserved across projection [S1].
+ 
+ 3.  **Sorting:** Sort all visible Gaussians by their view-space depth (z-coordinate of $\boldsymbol{\mu}_i$) from front to back [S1].
+ 
+-4.  **Rasterization (Two-Pass with Soft Z-Buffer):**
++4.  **Rasterization (Three-Pass with Soft Z-Buffer):**
++    *   **Bandlimiting Prefilter:** Generate a 1D Gaussian filter kernel with $\sigma^2 = 0.1$ (using $\sigma = 0.316228$) to avoid frequencies higher than the Nyquist frequency [S2].
+     *   **Pass 1 (Visibility/Depth):**
+-        *   Bind FBO, clear color and depth.
+-        *   Render splats as point sprites.
++        *   Bind FBO, clear color and depth buffers [S2].
++        *   Render splats as point sprites [S3].
+         *   Set `gl_PointSize` based on the projected radius $r$ [S3]:
+             $$ s = h \cdot \cot\left(\frac{\theta_{fov}}{2}\right) \cdot \frac{r}{w_{clip}} $$
+@@ -57,11 +59,11 @@
+             $$ z_{surface} = z_{center} - \sqrt{r^2 - x^2 - y^2} $$
+             where $x, y$ are fragment coordinates relative to splat center [S3].
+-        *   Push depth back by $\varepsilon$ (default $1.0 \times 10^{-3}$) before writing to define a thin depth slab [S3].
+-        *   Discard fragments outside the unit disk.
++        *   Push depth back by $\varepsilon$ before writing to define a thin depth slab [S3].
++        *   Discard fragments outside the unit disk [S3].
+         *   Write only depth; mask off color [S3].
+     *   **Pass 2 (Attribute Blending):**
+-        *   Disable depth writes. Disable depth testing.
++        *   Disable depth writes and depth testing [S3].
+         *   Set blending to pure additive (`GL_ONE`, `GL_ONE`) [S3].
+-        *   Rasterize splats again.
++        *   Rasterize splats again [S3].
+         *   For each fragment, compare its depth against the depth texture from Pass 1. Discard fragments falling behind the $\varepsilon$ slab [S3].
+         *   Accumulate attributes with weight $w = w_{radial} \cdot w_{depth}$ [S3]:
+@@ -69,5 +71,5 @@
+             *   Depth falloff: $w_{depth} = \frac{z_{surface} - z_{frag}}{\varepsilon}$, where $z_{frag}$ is current fragment depth [S3].
+     *   **Pass 3 (Normalization/Shading):**
+-        *   Render a full-screen quad.
++        *   Render a full-screen quad [S3].
+         *   Compute weighted average color and normal [S3]:
+             $$ \mathbf{c} = \frac{\sum_i w_i \mathbf{c}_i}{\sum_i w_i}, \quad \mathbf{n} = \frac{\sum_i w_i \mathbf{n}_i}{\lVert \sum_i w_i \mathbf{n}_i \rVert} $$
+@@ -75,8 +77,11 @@
+ 
+ **Parameters:**
+-*   `m_epsilon`: Numerical stability/depth slab thickness, default $1.0 \times 10^{-3}$ [S2].
++*   `m_epsilon`: Epsilon value for numerical stability and soft z-buffer depth blending precision, default $1.0 \times 10^{-3}$ [S2]. Defines the thickness of the thin depth slab around the visible surface [S3].
+ *   `m_radius_scale`: Scale factor for splat radius, default $1.0$ [S2].
+ *   `m_ewa_radius`: Radius for EWA filter approximation, default $1.0$ [S2].
+ *   `sigma2`: Gaussian filter kernel variance, $0.316228^2 \approx 0.1$ [S2].
++*   `m_shininess`: Shininess value for Phong splatting, default $8.0$ [S2].
++*   `m_smooth`: Boolean flag that enables depth and normal texture attachment on the FBO, and enables blending/smoothing in the finalization pass [S2].
++*   `m_multisample`: Boolean flag that enables multisampling [S2].
+ 
+ **Pitfalls:**
+@@ -85,4 +90,5 @@
+ *   Weyrich et al.'s method yields NDC coordinates, preventing frustum culling, and fails if the projected ellipse becomes a parabola/hyperbola [S2].
+ *   EWA filter requires soft z-buffer to be active; otherwise, it is disabled [S2].
++*   Depth mask is explicitly disabled during splatting when soft z-buffer is enabled to allow alpha blending to accumulate depth correctly [S2].
+ 
+ ## Subtopics
+@@ -101,6 +107,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ for projection and sorting, $O(P \cdot K)$ for rasterization where $P$ is pixels covered and $K$ is splats per pixel.
+-*   **Memory Complexity:** $O(N)$ for Gaussian storage, $O(W \cdot H)$ for FBOs.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Strengths:** Hole-free reconstruction, efficient rasterization, avoids expensive volume integration [S2].
+ *   **Limitations:** Assumes no overlap; continuous extinction is ignored [S1]. Approximation errors in extreme foreshortening [S2].
+@@ -108,5 +114,5 @@
+ 
+ ## Background
+-EWA Splatting originated from the need to render point-sampled surfaces without aliasing or holes. It was formalized by Zwicker et al. (2001) as "Surface Splatting," using Elliptical Weighted Average (EWA) filters to project object-space reconstruction filters to screen space [S2]. It builds on [Gaussian Splatting](946-gaussian-splatting.md) by providing the rasterization backend for 3D Gaussian primitives, approximating the volumetric integral via 2D projections [S1].
++EWA Splatting originated from the need to render point-sampled surfaces without aliasing or holes [S2]. It was formalized by Zwicker et al. (2001) as "Surface Splatting," using Elliptical Weighted Average (EWA) filters to project object-space reconstruction filters to screen space [S2]. It builds on [Gaussian Splatting](946-gaussian-splatting.md) by providing the rasterization backend for 3D Gaussian primitives, approximating the volumetric integral via 2D projections [S1].
+ 
+ ## Sources

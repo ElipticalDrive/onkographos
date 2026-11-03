@@ -1,0 +1,1866 @@
+Gaussian Splat Renderer for the Godot Engine. Contribute to klausi3D/godotGS development by creating an account on GitHub.
+
+gaussian_splatting: shrink the GaussianSplatNode3D inspector 78% — foldable overview, layer grid, storage-only asset arrays (#836, #834) by klausi3D · Pull Request #838 · klausi3D/godotGS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+klausi3D
+commented
+Aug 5, 2026
+Copy link
+Copy Markdown
+Owner
+First slice of the inspector rework. Addresses #836 and #834. Base 3737b038345, risk class R1.
+Deliberately the mechanical subset only — no property is regrouped, renamed, reordered or removed. The regrouping needs owner decisions (what belongs on the default surface, what happens to stats/*, where debug lives, one node or two) and is slice 2.
+Result
+EditorInterface.get_inspector().get_v_scroll_bar().max_value, geometry logged and identical across runs:
+Node
+default before
+default after
+unfolded before
+unfolded after
+GaussianSplatNode3D
+1610
+351 (−78 %)
+3033
+2675
+SphereEffector3D
+251
+251
+1500
+1145 (−355)
+GaussianSplatDynamicInstance3D
+1572
+351
+2971
+2613
+MeshInstance3D (control)
+469
+469
+1593
+1593
+GPUParticles3D (control)
+641
+641
+2288
+2288
+The default inspector goes from 3.4× MeshInstance3D to 0.75×. The two built-in controls are byte-identical before and after — that is the harness validity check, not decoration: without it a global editor change would look like a win.
+These absolute numbers differ from #836's (3033 vs 3912 unfolded; 1593 vs 589 for MeshInstance3D). Same metric, same requested window, but the inspector dock was 195 px wide at editor scale 0.75 in this session, so text wrapping differs. Before/after is same-harness and holds; the ratio to #836's session does not.
+The six changes
+Layer-mask hint — PROPERTY_HINT_FLAGS → PROPERTY_HINT_LAYERS_3D_RENDER on rendering/scene_effector_layer_mask and SphereEffector3D.layer_mask. A 16-row vertical checkbox column becomes the compact grid every built-in VisualInstance3D uses. −355 px on the effector alone.
+13 asset arrays → PROPERTY_USAGE_STORAGE — see verification below. This is the root cause of the INTERNAL WARNING: [GaussianSplatAsset] get_*() called on unloaded asset toasts on scene load: the editor enumerates the property list and calls every getter.
+Overview block foldable — parse_begin() added a plain VBoxContainer, so ~1700 px of telemetry had no fold arrow at all. Now an EditorInspectorSection, collapsed by default. Contents unchanged.
+Debug suppression derived, not listed — the hand-written list named 11 of 12 debug/* properties and forgot debug/overlay_opacity. The node declares ADD_GROUP("Debug", "debug/"), so parse_property() now returns p_path.begins_with("debug/"): the prefix that defines the group defines the suppression set. A hand-maintained list guarding an invariant is the defect shape this repo keeps rediscovering.
+TTR() on editor literals — correct hygiene, but it does not fix the mixed-language display; see below.
+Deprecation surfaced — doc-class deprecated= (which already makes the Create Node dialog show a deprecation icon and tooltip, editor/gui/create_dialog.cpp:413-418) plus a node configuration warning.
+Verification that (2) is not a removal
+#712 in this repo broke saved scenes by removing a ClassDB property, so this was checked rather than reasoned about. GDScript harness run against both binaries:
+baseline (master 3737b03): 81 PASS / 13 FAIL — every failure PROPERTY_USAGE_EDITOR clear (usage=6). The check discriminates.
+after: 94 PASS / 0 FAIL (usage=2).
+Each of the 13 is still callable via its bound getter, still returns the same value via Object.get("data/…"), still appears in get_property_list(), and still round-trips through ResourceSaver.save / ResourceLoader.load with identical element counts and identical first/last elements — up to 1.8 M elements. All 13 were PROPERTY_USAGE_DEFAULT before; none was already storage-only.
+Two things the brief asked for that turned out to be wrong
+GDREGISTER_INTERNAL_CLASS was NOT applied — it would break existing scenes.
+ClassDB::instantiate() calls _instantiate_internal(p_class), whose p_exposed_only parameter defaults to true (core/object/class_db.h:227). register_internal_class() sets exposed = false (:261), so instantiation hits ERR_FAIL_COND_V_MSG(!ti->exposed, nullptr, …) and returns null; PackedScene (scene/resources/packed_scene.cpp:260) then substitutes a MissingNode/Node3D placeholder. For a compatibility shim whose entire purpose is keeping saved scenes loadable, that is fatal. It also removes the class from GDScript type resolution and the GDExtension/Mono API dumps.
+Delivered the non-breaking half instead. GDREGISTER_VIRTUAL_CLASS would hide it from Create Node while keeping exposed = true, but it changes class_get_default_property_value and therefore what gets written to scene files — an owner decision, not a mechanical fix. Static evidence, not runtime-verified (the macro is used nowhere in this tree).
+Verified after the change: can_instantiate = true, the scene node still loads as GaussianSplatDynamicInstance3D, and the warning list now carries the deprecation text.
+TTR() does not fix the German/English mixing — reproduced, not argued.
+Editor locale forced to German on both binaries: before and after are identical (Neu laden beside Force Update, Vorschau beside Bounds, Balanciert beside Performance). Cause: main/main.cpp:4468 sets the editor tree root's translation domain to godot.editor, so every Control auto-translates through the same catalogue TTR() uses. Wrapping is correct hygiene and a display no-op. The real fix is getting module strings into the editor catalogue, or AUTO_TRANSLATE_MODE_DISABLED on the block — both design calls for slice 2.
+GaussianSplatDebugHUD was left alone: its doc says it is created and managed by GaussianSplatNode3D and it is only ever memnew'd in C++, never ClassDB::instantiate'd. It is internal, not deprecated — marking it deprecated= would put a false statement in shipped docs.
+Known cosmetic residue
+debug/overlay_opacity now has no editor UI at all. It is suppressed with its 11 siblings, but the Debug Visualization block has no opacity control. Still settable from script and scene files. Adding a slider means changing the block's contents, which this slice excludes.
+An empty "Debug" group header remains (~20 px, no fold arrow), visible in the screenshot. Godot creates the section before the plugin can veto the last property; removing it needs _validate_property on the node — slice 2.
+Guards and evidence
+Check
+Result
+run_module_tests.py --guard-only
+exit 0, all guards PASS
+check_doc_classes_complete.py
+PASS 33/33
+xmllint --schema doc/class.xsd on the changed XML
+validates
+lane coverage
+PASS 831 registered case(s); 86 stranded, all declared; "no STRICT lane" back to 387, unchanged from base, after retagging the new cases into the strict GaussianSplatting [Editor] lane
+full doctest A/B (excl. RequiresGPU)
+base 1937 cases / 9 failed vs HEAD 1939 / 9 failed — failure sets byte-identical, only in HEAD: [], only in BASE: []. All 9 pre-existing.
+mutation proof
+fixes reverted with the new tests present → both cases RED (CHECK( 6 == 10 ) ×4, CHECK( 4 == 0 ) ×13); restored → 58/58 GREEN
+Screenshots: crop_BEFORE_Splat_default.png vs crop_AFTER_Splat_default.png (telemetry wall vs collapsed > Gaussian Splat Overview), cmp_before_effector.png vs cmp_after_effector.png (checkbox column vs layer grid), cmp_after_tree2.png (deprecation warning). All 2560×1600 via PrintWindow, non-black (distinct ≈ 700).
+Co-Authored-By: Claude Opus 5 (1M context) noreply@anthropic.com
+Generated with Claude Code
+gaussian_splatting: shrink the GaussianSplatNode3D inspector - foldab…
+…
+dabadc3
+```
+…le overview, layer-mask grid, storage-only asset arrays (#836, #834)
+
+Slice 1 of the editor-UI work: the unambiguous mechanical subset only. No
+property is regrouped, renamed, reordered or removed.
+
+- Layer masks (#836): `GaussianSplatNode3D.rendering/scene_effector_layer_mask`
+  and `SphereEffector3D.layer_mask` used PROPERTY_HINT_FLAGS with an explicit
+  "Layer 1..Layer 16" list, which the inspector renders as a 16-row vertical
+  checkbox column. Both now use PROPERTY_HINT_LAYERS_3D_RENDER, matching
+  VisualInstance3D::layers (scene/3d/visual_instance_3d.cpp:188). Bit semantics
+  are unchanged. Measured: -355 px on SphereEffector3D.
+
+- Asset bulk arrays (#834): the 13 GaussianSplatAsset `data/*` arrays were
+  PROPERTY_USAGE_DEFAULT, so the editor enumerated them and called every getter -
+  the direct cause of the "get_*() called on unloaded asset" warning stack on
+  scene load. They are now PROPERTY_USAGE_STORAGE, matching the four
+  `data/streaming_*` siblings in the same file. This is not a removal:
+  serialization and script access (bound getters plus Object::get/set) are
+  unchanged; only editor display is dropped.
+
+- Overview block (#836): `parse_begin()` added a bare VBoxContainer, so ~1700 px
+  of telemetry had no fold arrow at all and could not be collapsed. It is now an
+  EditorInspectorSection, foldable and collapsed by default (setup() reads the
+  per-object fold state, which defaults to folded). Its contents are unchanged.
+
+- Debug suppression list (#836): `parse_property()` restated 11 of the 12
+  `debug/*` property names and had drifted - it missed `debug/overlay_opacity`,
+  leaving the bottom "Debug" group holding one orphan ~1700 px from its
+  siblings. The set is now derived from the `debug/` group prefix that
+  ADD_GROUP declares, so it cannot drift again.
+
+- TTR() on module editor-facing literals in the inspector plugins.
+
+- GaussianSplatDynamicInstance3D: `deprecated=` in the doc XML (so the editor
+  shows the deprecation banner and the Create Node dialog flags it) and a node
+  configuration warning, so scenes that already contain one say so in the scene
+  tree instead of only in the Output log.
+
+Measured with the inspector's v_scroll_bar.max_value, window 2544x1561 client,
+inspector dock 195x1409, editor scale 0.75, identical before and after:
+
+  node                          default   default   unfolded  unfolded
+                                 before     after     before     after
+  GaussianSplatNode3D               1610       351       3033      2675
+  SphereEffector3D                   251       251       1500      1145
+  GaussianSplatDynamicInstance3D    1572       351       2971      2613
+  MeshInstance3D (control)           469       469       1593      1593
+  GPUParticles3D (control)           641       641       2288      2288
+
+The default-state GaussianSplatNode3D inspector drops 78%, from 3.4x
+MeshInstance3D's to 0.75x. The two built-in control nodes are byte-identical
+before and after, which is the harness validity check.
+
+Tests: two new ClassDB/PropertyInfo cases in test_gaussian_splat_node.h lock in
+the layer-mask hint and the storage-only-but-present asset arrays.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+chatgpt-codex-connector
+Bot
+reviewed
+Aug 5, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: dabadc3a5e
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+modules/gaussian_splatting/editor/gaussian_inspector_plugins.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+gaussian_splatting: keep the debug/overlay_opacity slider in the insp…
+…
+9423d29
+```
+…ector (#836)
+
+Slice 1 (dabadc3) replaced parse_property()'s hand-written 11-name
+suppression list with a derived `debug/` prefix check. That is the right shape
+for eleven of the twelve debug properties - parse_begin() draws a custom control
+for each of them - but it also consumed debug/overlay_opacity, which has no
+custom replacement. The net effect was a regression: enabling the performance or
+LOD overlay left no way to tune its blend strength from the inspector, while the
+property stayed documented (GaussianSplatNode3D.xml:665) and script-visible.
+
+parse_property() now suppresses `debug/` *except* debug/overlay_opacity, with
+the reason recorded at the site: it is a single exception because that property
+has no replacement, not a re-introduced hand-maintained list, and it may only be
+folded back into the plain prefix check once parse_begin() grows an opacity
+slider of its own. Adding that slider changes the overview block's contents, so
+it belongs to slice 2, not here.
+
+Also recorded at the site: EditorInspector only prunes empty sections inside
+`if (!current_favorites.is_empty())` (editor/inspector/editor_inspector.cpp:4500,
+:4623), so suppressing a group's last member leaves a memberless group header
+behind rather than removing it. The slice-1 inspector tree confirms this - it
+carried a "Debug" EditorInspectorSection with zero EditorProperty children.
+Restoring the property gives the group a member again, so no _validate_property
+workaround is needed.
+
+Test: a new [GaussianSplatting][Editor] case walks GaussianSplatNode3D's own
+property list and asserts every editor-visible `debug/` property is consumed by
+parse_property() except debug/overlay_opacity, which must not be - plus that no
+property outside the group is consumed. The expected sets are derived from the
+node, not restated, so a debug property added later is covered automatically.
+Mutation-proven: reverting the exception turns it RED (47 assertions, 1 failed,
+"debug/overlay_opacity keeps its default slider").
+
+Re-measured with the slice-1 harness (inspector v_scroll_bar.max_value, window
+2544x1561, inspector dock 195x1409, editor scale 0.75):
+
+  node                          default   default   unfolded  unfolded
+                                 slice 1     +fix     slice 1      +fix
+  GaussianSplatNode3D                351      351        2675      2726
+  SphereEffector3D                   251      251        1145      1145
+  GaussianSplatDynamicInstance3D     351      351        2613      2664
+  MeshInstance3D (control)           469      469        1593      1593
+  GPUParticles3D (control)           641      641        2288      2288
+
+The default state is unchanged - the restored slider sits inside a group that is
+collapsed by default - so slice 1's 78% default-inspector reduction stands. The
+unfolded state grows by exactly one 51 px slider row on the two affected nodes.
+Both built-in control nodes are identical to slice 1's numbers, which is the
+harness validity check.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+klausi3D
+commented
+Aug 5, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Round 2 — the finding is fixed, and the control node caught a harness fault
+Commit 9423d296855.
+The fix
+gaussian_inspector_plugins.cpp:890 — the predicate is now p_path.begins_with("debug/") && p_path != "debug/overlay_opacity", with the reason recorded at the site: the node declares 12 debug/* properties, parse_begin() builds a control for 11 (each enumerated in the comment) and none for overlay_opacity, so this is a single exception because it has no replacement — not a reintroduced hand list. The comment forbids simplifying it back to a bare prefix check and names the condition under which that becomes correct (once parse_begin() grows its own slider).
+A slider was not added to the overview block: that changes the block's contents, which slice 1 excludes by design. It belongs in slice 2.
+Test
+New [GaussianSplatting][Editor] case that walks GaussianSplatNode3D's own property list — nothing restated — and asserts every editor-visible debug/ property is consumed except overlay_opacity, that nothing outside the group is consumed, plus anti-vacuity counters. 47 assertions. Mutation-proven: reverting the exception and rebuilding goes RED with debug/overlay_opacity keeps its default slider.
+Re-measured
+node
+default (slice 1)
+default (+fix)
+unfolded (slice 1)
+unfolded (+fix)
+GaussianSplatNode3D
+351
+351
+2675
+2726
+SphereEffector3D
+251
+251
+1145
+1145
+GaussianSplatDynamicInstance3D
+351
+351
+2613
+2664
+MeshInstance3D (control)
+469
+469
+1593
+1593
+GPUParticles3D (control)
+641
+641
+2288
+2288
+Default unchanged — the slider sits in a group collapsed by default. Unfolded grows by exactly one 51 px row on the two affected nodes. Both control nodes match slice 1 exactly, so the harness did not move.
+The control node earned its place
+The first measurement run came back with everything ~1.256× larger (Splat 441, Mesh 589). Cause: a killed editor had truncated %APPDATA%\Godot\editor_settings-4.5.tres, dropping the display scale to Auto = 1.0.
+The MeshInstance3D control caught it — a number that must not move, moved. Without it, the run would have reported a plausible-looking regression against code that had not changed.
+interface/editor/display_scale is now pinned so the harness is reproducible, and everything was re-measured. Note that is a user-global settings file, edited outside the repo — flagged rather than left silent.
+The empty Debug header does NOT self-heal — measured
+EditorInspector's "clean up empty sections" pass lives inside if (!current_favorites.is_empty()) (editor/inspector/editor_inspector.cpp:4500, cleanup at :4623), so with no favorited properties an emptied group header survives.
+Confirmed empirically: the slice-1 dump has 13 sections / 31 editor properties with a Debug section holding zero EditorProperty children (visible=true); the fixed build is 13 sections / 32 properties, and the only diff between the dumps is the added Overlay Opacity row.
+So slice 2 does not need _validate_property for this — the group has a member again — but if it ever suppresses all twelve, it will need to hide the group explicitly. Recorded in the code comment so that is not rediscovered.
+Guards
+run_module_tests.py --guard-only → exit 0. Full [GaussianSplatting][Editor] batch: 17/17 cases, 145/145 assertions. Binary verified by mtime on every build; Runner.Worker confirmed empty before each.
+Screenshot: shot_AFTER/crop_top.png — the Debug group with its fold arrow and the Overlay Opacity 0.3 slider restored, between Color Grading and the Node3D category. Captured with a non-maximising variant, since maximising reflows the dock and would have invalidated the comparison.
+This was referenced Aug 5, 2026
+GaussianSplatWorld3D silently renders nothing when a GaussianSplatNode3D shares the scene (single-route-per-frame, warning only)
+#788
+Open
+gaussian_splatting: make debug overlays work on a shared renderer instead of silently forcing them off (#831, #832)
+#839
+Merged
+klausi3D
+commented
+Aug 6, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@codex review
+Round 2 (9423d296855) is not yet reviewed — the last review targeted dabadc3a5eb. The new commit is the debug/overlay_opacity exception at gaussian_inspector_plugins.cpp:890 plus its test case.
+chatgpt-codex-connector
+Bot
+commented
+Aug 6, 2026
+Copy link
+Copy Markdown
+Codex Review: Didn't find any major issues. Breezy!
+Reviewed commit: 9423d29685
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+klausi3D
+commented
+Aug 6, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Independent local review (Codex CLI, read-only) of round 2 — one High finding
+The GH bot has not re-reviewed 9423d296855, so round 2 was reviewed locally against git diff dabadc3a5eb..9423d296855.
+Confirmed correct: the exception itself. debug/overlay_opacity is declared with an editor-visible range hint (gaussian_splat_node_3d.cpp:272), and returning false for that exact path lets the default slider render. The new test genuinely discriminates — without the exception parse_property() returns true and CHECK_MESSAGE(!handled) fails — and it derives names from get_property_list() rather than restating the 11-name inventory. Static count confirms the numbers: one ADD_GROUP("Debug", "debug/") at :236, 12 debug/* ADD_PROPERTY declarations (:239-284), 11 custom-control paths in parse_begin(). git diff --check clean.
+High — suppression is fail-open for a 13th debug/* property
+gaussian_inspector_plugins.cpp:890 suppresses every new debug/* property except opacity regardless of whether parse_begin() supplies a replacement control. The new test encodes the same predicate (test_gaussian_splat_node.h:3057-3080): a 13th property would be counted, expected to be handled, and pass — it never establishes that a corresponding custom control exists.
+This is the exact shape of the bug round 2 is fixing. Round 1 replaced a hand-written list with a bare prefix check and overlay_opacity lost its UI; round 2 patched that instance rather than the shape. Fail-safe direction: opt properties into suppression from the set of controls parse_begin() actually builds, leaving newly declared properties visible by default until a replacement exists.
+Related caveat — verified as pre-existing, not introduced here
+"parse_begin() builds controls for 11" is a source-level count, not a runtime guarantee: four controls are omitted when the renderer is shared (:566, :655), while parse_property() suppresses them unconditionally. In any multi-node scene those four properties therefore have no UI at all — no custom control and no default row.
+Checked against master before attributing it: the pre-existing hand-written list at master:856-860 already names show_tile_grid, show_density_heatmap, show_performance_hud and show_residency_hud. The hole predates this PR; this PR does not widen it.
+It is closed by #839, which removes the conditional omission so the controls stay available while shared (gs/831-overlay-wiring:559-562, 590-594). That also makes the fail-safe registry above straightforward to implement, since the set of built controls stops being conditional.
+Not run: the C++ test — the available binary predates it (built from dabadc3a5).
+Hide details
+View details
+klausi3D
+merged commit d9d2dfd
+into
+master
+Aug 6, 2026
+16 of 17 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+klausi3D
+deleted the
+gs/ui-slice1-inspector
+branch
+August 6, 2026 09:43
+klausi3D
+added a commit
+that referenced
+this pull request
+Aug 6, 2026
+gaussian_splatting: converge the overlay union at 1->0 nodes, notify …
+…
+4aaed17
+```
+…nodes of renderer-side HUD writes, make debug suppression fail-safe (#831, #832 round 3)
+
+Codex round 2 raised two new findings; a local review of the just-merged #838
+raised a third. All three are cases where a debug control exists in state but
+never reaches the screen, and all three are permanent (not merely deferred).
+
+Thread B -- the 1 -> 0 node transition. When the LAST GaussianSplatNode3D leaves
+while a GaussianSplatWorld3D submission keeps the shared renderer alive,
+_on_renderer_peer_set_changed() ran with p_include_self=false and an empty peer
+set: it dropped the per-renderer memo and nothing else. A memo is only consulted
+by the next push, and with zero nodes left there is no next push, so the departed
+node's tile-grid / heatmap / HUD request stayed rendered on the world submission
+indefinitely. This is distinct from the round-2 3 -> 2 fix, which still had a
+peer to delegate the recompute to. Fixed with
+GaussianSplatNodeDebugHelper::reconcile_debug_overlay_union_for_renderer(): a
+renderer-addressed push seeded from nothing rather than from a node, so the empty
+node set yields the all-false union that is the correct answer. Memoized, so when
+peers do remain and have already pushed the identical union it costs one compare.
+
+Thread C -- a renderer-side HUD write never reaches the node.
+GaussianSplatRenderer::set_debug_show_device_boundaries() /
+set_debug_show_texture_states() (and their perf/residency siblings) are bound to
+script, so node.get_renderer().set_debug_show_device_boundaries(true) is a
+supported way to turn a HUD section on. The write landed in the renderer's
+DebugState and stopped there: those setters have no node callback, and the node
+is what creates the GaussianSplatDebugHUDLayer. Under UPDATE_MODE_MANUAL the
+node's per-frame apply never runs either, so the HUD lines existed in renderer
+stats with nothing on screen, forever. Fixed with
+GaussianSplatSceneDirector::notify_renderer_debug_hud_sources_changed(), a
+callback the node layer installs at module init -- renderer/ deliberately does
+not include nodes/, and the director is the only layer that already maps a
+renderer to its nodes. It fires when GaussianSplatRenderer::is_debug_hud_source_active()
+flips; that predicate is new and is now the SINGLE definition of "this renderer
+wants a HUD", read both by the four setters and by
+GaussianSplatNode3D::_update_debug_hud_visibility(), which used to restate the
+same four-way OR inline.
+
+Inspector debug suppression -- fail-safe instead of name-based. #838 replaced a
+drifted hand-written list with `begins_with("debug/")`, which ate
+debug/overlay_opacity (no replacement control exists for it), then patched that
+by special-casing the one name. The instance was fixed; the shape was not. The
+predicate still asserted "suppressed" from the property's NAME with no connection
+to whether a replacement control exists, so a 13th debug/* property would have
+silently lost its inspector UI -- and #838's test would still have passed,
+because it encoded the same name predicate. parse_property() now suppresses only
+what parse_begin() actually built a control for: every control in the Debug
+Visualization block is created through _add_debug_toggle() /
+_add_debug_option_button(), which take the replaced property as a required
+argument and record it. The default is therefore VISIBLE. debug/overlay_opacity
+is no longer a special case; it simply has no entry, for the same reason any
+future property without a control has none. This is much simpler here than it was
+on #838 because this branch already removed the shared-renderer conditional
+omission, so the built-control set is unconditional.
+
+Tests (modules/gaussian_splatting/tests/test_gaussian_splat_node.h), all
+mutation-proven RED against the unfixed tree and GREEN with the fix:
+
+- [Node][SceneTree][RequiresGPU] "Overlay union clears when the last node leaves
+  a world-held renderer" -- 7 assertions, 2 fail without the fix (tile grid still
+  true immediately AND after 5 MANUAL frames). Asserts the preconditions that
+  make the case meaningful: instance_count 1 -> 0 with a live world submission.
+- [Node][SceneTree][RequiresGPU] "Manual-mode node draws the HUD for a
+  renderer-side debug flag write" -- 15 assertions, 5 fail without the fix. Also
+  covers the texture-states sibling, and that dropping one of two active sources
+  does not tear the control down.
+- [Editor] "Inspector suppresses a debug/ property only when it built a
+  replacement control" -- replaces #838's case. It names no property: it derives
+  the property set from the node's own property list and the control set from
+  GS_DEBUG_REPLACEMENT_META on the controls parse_begin() actually constructed,
+  and asserts they agree. Proven discriminating by declaring a throwaway 13th
+  debug/* property with no control: GREEN with the registry, RED under #838's
+  predicate on exactly the fail-safe assertion -- while 16 replayed #838
+  assertions all passed in that same state.
+
+Renderer release gate manifest: test_count 142 -> 144, sha256 recomputed. The
+delta was enumerated by NAME against the branch's committed HEAD (+2 added,
+0 removed, 0 renamed), not inferred from the total.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+klausi3D
+added a commit
+that referenced
+this pull request
+Aug 6, 2026
+gaussian_splatting: converge the overlay union at 1->0 nodes, notify …
+…
+d4318be
+```
+…nodes of renderer-side HUD writes, make debug suppression fail-safe (#831, #832 round 3)
+
+Codex round 2 raised two new findings; a local review of the just-merged #838
+raised a third. All three are cases where a debug control exists in state but
+never reaches the screen, and all three are permanent (not merely deferred).
+
+Thread B -- the 1 -> 0 node transition. When the LAST GaussianSplatNode3D leaves
+while a GaussianSplatWorld3D submission keeps the shared renderer alive,
+_on_renderer_peer_set_changed() ran with p_include_self=false and an empty peer
+set: it dropped the per-renderer memo and nothing else. A memo is only consulted
+by the next push, and with zero nodes left there is no next push, so the departed
+node's tile-grid / heatmap / HUD request stayed rendered on the world submission
+indefinitely. This is distinct from the round-2 3 -> 2 fix, which still had a
+peer to delegate the recompute to. Fixed with
+GaussianSplatNodeDebugHelper::reconcile_debug_overlay_union_for_renderer(): a
+renderer-addressed push seeded from nothing rather than from a node, so the empty
+node set yields the all-false union that is the correct answer. Memoized, so when
+peers do remain and have already pushed the identical union it costs one compare.
+
+Thread C -- a renderer-side HUD write never reaches the node.
+GaussianSplatRenderer::set_debug_show_device_boundaries() /
+set_debug_show_texture_states() (and their perf/residency siblings) are bound to
+script, so node.get_renderer().set_debug_show_device_boundaries(true) is a
+supported way to turn a HUD section on. The write landed in the renderer's
+DebugState and stopped there: those setters have no node callback, and the node
+is what creates the GaussianSplatDebugHUDLayer. Under UPDATE_MODE_MANUAL the
+node's per-frame apply never runs either, so the HUD lines existed in renderer
+stats with nothing on screen, forever. Fixed with
+GaussianSplatSceneDirector::notify_renderer_debug_hud_sources_changed(), a
+callback the node layer installs at module init -- renderer/ deliberately does
+not include nodes/, and the director is the only layer that already maps a
+renderer to its nodes. It fires when GaussianSplatRenderer::is_debug_hud_source_active()
+flips; that predicate is new and is now the SINGLE definition of "this renderer
+wants a HUD", read both by the four setters and by
+GaussianSplatNode3D::_update_debug_hud_visibility(), which used to restate the
+same four-way OR inline.
+
+Inspector debug suppression -- fail-safe instead of name-based. #838 replaced a
+drifted hand-written list with `begins_with("debug/")`, which ate
+debug/overlay_opacity (no replacement control exists for it), then patched that
+by special-casing the one name. The instance was fixed; the shape was not. The
+predicate still asserted "suppressed" from the property's NAME with no connection
+to whether a replacement control exists, so a 13th debug/* property would have
+silently lost its inspector UI -- and #838's test would still have passed,
+because it encoded the same name predicate. parse_property() now suppresses only
+what parse_begin() actually built a control for: every control in the Debug
+Visualization block is created through _add_debug_toggle() /
+_add_debug_option_button(), which take the replaced property as a required
+argument and record it. The default is therefore VISIBLE. debug/overlay_opacity
+is no longer a special case; it simply has no entry, for the same reason any
+future property without a control has none. This is much simpler here than it was
+on #838 because this branch already removed the shared-renderer conditional
+omission, so the built-control set is unconditional.
+
+Tests (modules/gaussian_splatting/tests/test_gaussian_splat_node.h), all
+mutation-proven RED against the unfixed tree and GREEN with the fix:
+
+- [Node][SceneTree][RequiresGPU] "Overlay union clears when the last node leaves
+  a world-held renderer" -- 7 assertions, 2 fail without the fix (tile grid still
+  true immediately AND after 5 MANUAL frames). Asserts the preconditions that
+  make the case meaningful: instance_count 1 -> 0 with a live world submission.
+- [Node][SceneTree][RequiresGPU] "Manual-mode node draws the HUD for a
+  renderer-side debug flag write" -- 15 assertions, 5 fail without the fix. Also
+  covers the texture-states sibling, and that dropping one of two active sources
+  does not tear the control down.
+- [Editor] "Inspector suppresses a debug/ property only when it built a
+  replacement control" -- replaces #838's case. It names no property: it derives
+  the property set from the node's own property list and the control set from
+  GS_DEBUG_REPLACEMENT_META on the controls parse_begin() actually constructed,
+  and asserts they agree. Proven discriminating by declaring a throwaway 13th
+  debug/* property with no control: GREEN with the registry, RED under #838's
+  predicate on exactly the fail-safe assertion -- while 16 replayed #838
+  assertions all passed in that same state.
+
+Renderer release gate manifest: test_count 142 -> 144, sha256 recomputed. The
+delta was enumerated by NAME against the branch's committed HEAD (+2 added,
+0 removed, 0 renamed), not inferred from the total.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+klausi3D
+added a commit
+that referenced
+this pull request
+Aug 6, 2026
+gaussian_splatting: converge the overlay union at 1->0 nodes, notify …
+…
+61da62c
+```
+…nodes of renderer-side HUD writes, make debug suppression fail-safe (#831, #832 round 3)
+
+Codex round 2 raised two new findings; a local review of the just-merged #838
+raised a third. All three are cases where a debug control exists in state but
+never reaches the screen, and all three are permanent (not merely deferred).
+
+Thread B -- the 1 -> 0 node transition. When the LAST GaussianSplatNode3D leaves
+while a GaussianSplatWorld3D submission keeps the shared renderer alive,
+_on_renderer_peer_set_changed() ran with p_include_self=false and an empty peer
+set: it dropped the per-renderer memo and nothing else. A memo is only consulted
+by the next push, and with zero nodes left there is no next push, so the departed
+node's tile-grid / heatmap / HUD request stayed rendered on the world submission
+indefinitely. This is distinct from the round-2 3 -> 2 fix, which still had a
+peer to delegate the recompute to. Fixed with
+GaussianSplatNodeDebugHelper::reconcile_debug_overlay_union_for_renderer(): a
+renderer-addressed push seeded from nothing rather than from a node, so the empty
+node set yields the all-false union that is the correct answer. Memoized, so when
+peers do remain and have already pushed the identical union it costs one compare.
+
+Thread C -- a renderer-side HUD write never reaches the node.
+GaussianSplatRenderer::set_debug_show_device_boundaries() /
+set_debug_show_texture_states() (and their perf/residency siblings) are bound to
+script, so node.get_renderer().set_debug_show_device_boundaries(true) is a
+supported way to turn a HUD section on. The write landed in the renderer's
+DebugState and stopped there: those setters have no node callback, and the node
+is what creates the GaussianSplatDebugHUDLayer. Under UPDATE_MODE_MANUAL the
+node's per-frame apply never runs either, so the HUD lines existed in renderer
+stats with nothing on screen, forever. Fixed with
+GaussianSplatSceneDirector::notify_renderer_debug_hud_sources_changed(), a
+callback the node layer installs at module init -- renderer/ deliberately does
+not include nodes/, and the director is the only layer that already maps a
+renderer to its nodes. It fires when GaussianSplatRenderer::is_debug_hud_source_active()
+flips; that predicate is new and is now the SINGLE definition of "this renderer
+wants a HUD", read both by the four setters and by
+GaussianSplatNode3D::_update_debug_hud_visibility(), which used to restate the
+same four-way OR inline.
+
+Inspector debug suppression -- fail-safe instead of name-based. #838 replaced a
+drifted hand-written list with `begins_with("debug/")`, which ate
+debug/overlay_opacity (no replacement control exists for it), then patched that
+by special-casing the one name. The instance was fixed; the shape was not. The
+predicate still asserted "suppressed" from the property's NAME with no connection
+to whether a replacement control exists, so a 13th debug/* property would have
+silently lost its inspector UI -- and #838's test would still have passed,
+because it encoded the same name predicate. parse_property() now suppresses only
+what parse_begin() actually built a control for: every control in the Debug
+Visualization block is created through _add_debug_toggle() /
+_add_debug_option_button(), which take the replaced property as a required
+argument and record it. The default is therefore VISIBLE. debug/overlay_opacity
+is no longer a special case; it simply has no entry, for the same reason any
+future property without a control has none. This is much simpler here than it was
+on #838 because this branch already removed the shared-renderer conditional
+omission, so the built-control set is unconditional.
+
+Tests (modules/gaussian_splatting/tests/test_gaussian_splat_node.h), all
+mutation-proven RED against the unfixed tree and GREEN with the fix:
+
+- [Node][SceneTree][RequiresGPU] "Overlay union clears when the last node leaves
+  a world-held renderer" -- 7 assertions, 2 fail without the fix (tile grid still
+  true immediately AND after 5 MANUAL frames). Asserts the preconditions that
+  make the case meaningful: instance_count 1 -> 0 with a live world submission.
+- [Node][SceneTree][RequiresGPU] "Manual-mode node draws the HUD for a
+  renderer-side debug flag write" -- 15 assertions, 5 fail without the fix. Also
+  covers the texture-states sibling, and that dropping one of two active sources
+  does not tear the control down.
+- [Editor] "Inspector suppresses a debug/ property only when it built a
+  replacement control" -- replaces #838's case. It names no property: it derives
+  the property set from the node's own property list and the control set from
+  GS_DEBUG_REPLACEMENT_META on the controls parse_begin() actually constructed,
+  and asserts they agree. Proven discriminating by declaring a throwaway 13th
+  debug/* property with no control: GREEN with the registry, RED under #838's
+  predicate on exactly the fail-safe assertion -- while 16 replayed #838
+  assertions all passed in that same state.
+
+Renderer release gate manifest: test_count 142 -> 144, sha256 recomputed. The
+delta was enumerated by NAME against the branch's committed HEAD (+2 added,
+0 removed, 0 renamed), not inferred from the total.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+klausi3D
+mentioned this pull request
+Aug 6, 2026
+gaussian_splatting: fail closed on resize()->ptrw() writes in core + persistence (#798)
+#805
+Merged
+klausi3D
+added a commit
+that referenced
+this pull request
+Aug 8, 2026
+gaussian_splatting: converge the overlay union at 1->0 nodes, notify …
+…
+60736ad
+```
+…nodes of renderer-side HUD writes, make debug suppression fail-safe (#831, #832 round 3)
+
+Codex round 2 raised two new findings; a local review of the just-merged #838
+raised a third. All three are cases where a debug control exists in state but
+never reaches the screen, and all three are permanent (not merely deferred).
+
+Thread B -- the 1 -> 0 node transition. When the LAST GaussianSplatNode3D leaves
+while a GaussianSplatWorld3D submission keeps the shared renderer alive,
+_on_renderer_peer_set_changed() ran with p_include_self=false and an empty peer
+set: it dropped the per-renderer memo and nothing else. A memo is only consulted
+by the next push, and with zero nodes left there is no next push, so the departed
+node's tile-grid / heatmap / HUD request stayed rendered on the world submission
+indefinitely. This is distinct from the round-2 3 -> 2 fix, which still had a
+peer to delegate the recompute to. Fixed with
+GaussianSplatNodeDebugHelper::reconcile_debug_overlay_union_for_renderer(): a
+renderer-addressed push seeded from nothing rather than from a node, so the empty
+node set yields the all-false union that is the correct answer. Memoized, so when
+peers do remain and have already pushed the identical union it costs one compare.
+
+Thread C -- a renderer-side HUD write never reaches the node.
+GaussianSplatRenderer::set_debug_show_device_boundaries() /
+set_debug_show_texture_states() (and their perf/residency siblings) are bound to
+script, so node.get_renderer().set_debug_show_device_boundaries(true) is a
+supported way to turn a HUD section on. The write landed in the renderer's
+DebugState and stopped there: those setters have no node callback, and the node
+is what creates the GaussianSplatDebugHUDLayer. Under UPDATE_MODE_MANUAL the
+node's per-frame apply never runs either, so the HUD lines existed in renderer
+stats with nothing on screen, forever. Fixed with
+GaussianSplatSceneDirector::notify_renderer_debug_hud_sources_changed(), a
+callback the node layer installs at module init -- renderer/ deliberately does
+not include nodes/, and the director is the only layer that already maps a
+renderer to its nodes. It fires when GaussianSplatRenderer::is_debug_hud_source_active()
+flips; that predicate is new and is now the SINGLE definition of "this renderer
+wants a HUD", read both by the four setters and by
+GaussianSplatNode3D::_update_debug_hud_visibility(), which used to restate the
+same four-way OR inline.
+
+Inspector debug suppression -- fail-safe instead of name-based. #838 replaced a
+drifted hand-written list with `begins_with("debug/")`, which ate
+debug/overlay_opacity (no replacement control exists for it), then patched that
+by special-casing the one name. The instance was fixed; the shape was not. The
+predicate still asserted "suppressed" from the property's NAME with no connection
+to whether a replacement control exists, so a 13th debug/* property would have
+silently lost its inspector UI -- and #838's test would still have passed,
+because it encoded the same name predicate. parse_property() now suppresses only
+what parse_begin() actually built a control for: every control in the Debug
+Visualization block is created through _add_debug_toggle() /
+_add_debug_option_button(), which take the replaced property as a required
+argument and record it. The default is therefore VISIBLE. debug/overlay_opacity
+is no longer a special case; it simply has no entry, for the same reason any
+future property without a control has none. This is much simpler here than it was
+on #838 because this branch already removed the shared-renderer conditional
+omission, so the built-control set is unconditional.
+
+Tests (modules/gaussian_splatting/tests/test_gaussian_splat_node.h), all
+mutation-proven RED against the unfixed tree and GREEN with the fix:
+
+- [Node][SceneTree][RequiresGPU] "Overlay union clears when the last node leaves
+  a world-held renderer" -- 7 assertions, 2 fail without the fix (tile grid still
+  true immediately AND after 5 MANUAL frames). Asserts the preconditions that
+  make the case meaningful: instance_count 1 -> 0 with a live world submission.
+- [Node][SceneTree][RequiresGPU] "Manual-mode node draws the HUD for a
+  renderer-side debug flag write" -- 15 assertions, 5 fail without the fix. Also
+  covers the texture-states sibling, and that dropping one of two active sources
+  does not tear the control down.
+- [Editor] "Inspector suppresses a debug/ property only when it built a
+  replacement control" -- replaces #838's case. It names no property: it derives
+  the property set from the node's own property list and the control set from
+  GS_DEBUG_REPLACEMENT_META on the controls parse_begin() actually constructed,
+  and asserts they agree. Proven discriminating by declaring a throwaway 13th
+  debug/* property with no control: GREEN with the registry, RED under #838's
+  predicate on exactly the fail-safe assertion -- while 16 replayed #838
+  assertions all passed in that same state.
+
+Renderer release gate manifest: test_count 142 -> 144, sha256 recomputed. The
+delta was enumerated by NAME against the branch's committed HEAD (+2 added,
+0 removed, 0 renamed), not inferred from the total.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+klausi3D
+added a commit
+that referenced
+this pull request
+Aug 8, 2026
+gaussian_splatting: converge the overlay union at 1->0 nodes, notify …
+…
+c7cf6b6
+```
+…nodes of renderer-side HUD writes, make debug suppression fail-safe (#831, #832 round 3)
+
+Codex round 2 raised two new findings; a local review of the just-merged #838
+raised a third. All three are cases where a debug control exists in state but
+never reaches the screen, and all three are permanent (not merely deferred).
+
+Thread B -- the 1 -> 0 node transition. When the LAST GaussianSplatNode3D leaves
+while a GaussianSplatWorld3D submission keeps the shared renderer alive,
+_on_renderer_peer_set_changed() ran with p_include_self=false and an empty peer
+set: it dropped the per-renderer memo and nothing else. A memo is only consulted
+by the next push, and with zero nodes left there is no next push, so the departed
+node's tile-grid / heatmap / HUD request stayed rendered on the world submission
+indefinitely. This is distinct from the round-2 3 -> 2 fix, which still had a
+peer to delegate the recompute to. Fixed with
+GaussianSplatNodeDebugHelper::reconcile_debug_overlay_union_for_renderer(): a
+renderer-addressed push seeded from nothing rather than from a node, so the empty
+node set yields the all-false union that is the correct answer. Memoized, so when
+peers do remain and have already pushed the identical union it costs one compare.
+
+Thread C -- a renderer-side HUD write never reaches the node.
+GaussianSplatRenderer::set_debug_show_device_boundaries() /
+set_debug_show_texture_states() (and their perf/residency siblings) are bound to
+script, so node.get_renderer().set_debug_show_device_boundaries(true) is a
+supported way to turn a HUD section on. The write landed in the renderer's
+DebugState and stopped there: those setters have no node callback, and the node
+is what creates the GaussianSplatDebugHUDLayer. Under UPDATE_MODE_MANUAL the
+node's per-frame apply never runs either, so the HUD lines existed in renderer
+stats with nothing on screen, forever. Fixed with
+GaussianSplatSceneDirector::notify_renderer_debug_hud_sources_changed(), a
+callback the node layer installs at module init -- renderer/ deliberately does
+not include nodes/, and the director is the only layer that already maps a
+renderer to its nodes. It fires when GaussianSplatRenderer::is_debug_hud_source_active()
+flips; that predicate is new and is now the SINGLE definition of "this renderer
+wants a HUD", read both by the four setters and by
+GaussianSplatNode3D::_update_debug_hud_visibility(), which used to restate the
+same four-way OR inline.
+
+Inspector debug suppression -- fail-safe instead of name-based. #838 replaced a
+drifted hand-written list with `begins_with("debug/")`, which ate
+debug/overlay_opacity (no replacement control exists for it), then patched that
+by special-casing the one name. The instance was fixed; the shape was not. The
+predicate still asserted "suppressed" from the property's NAME with no connection
+to whether a replacement control exists, so a 13th debug/* property would have
+silently lost its inspector UI -- and #838's test would still have passed,
+because it encoded the same name predicate. parse_property() now suppresses only
+what parse_begin() actually built a control for: every control in the Debug
+Visualization block is created through _add_debug_toggle() /
+_add_debug_option_button(), which take the replaced property as a required
+argument and record it. The default is therefore VISIBLE. debug/overlay_opacity
+is no longer a special case; it simply has no entry, for the same reason any
+future property without a control has none. This is much simpler here than it was
+on #838 because this branch already removed the shared-renderer conditional
+omission, so the built-control set is unconditional.
+
+Tests (modules/gaussian_splatting/tests/test_gaussian_splat_node.h), all
+mutation-proven RED against the unfixed tree and GREEN with the fix:
+
+- [Node][SceneTree][RequiresGPU] "Overlay union clears when the last node leaves
+  a world-held renderer" -- 7 assertions, 2 fail without the fix (tile grid still
+  true immediately AND after 5 MANUAL frames). Asserts the preconditions that
+  make the case meaningful: instance_count 1 -> 0 with a live world submission.
+- [Node][SceneTree][RequiresGPU] "Manual-mode node draws the HUD for a
+  renderer-side debug flag write" -- 15 assertions, 5 fail without the fix. Also
+  covers the texture-states sibling, and that dropping one of two active sources
+  does not tear the control down.
+- [Editor] "Inspector suppresses a debug/ property only when it built a
+  replacement control" -- replaces #838's case. It names no property: it derives
+  the property set from the node's own property list and the control set from
+  GS_DEBUG_REPLACEMENT_META on the controls parse_begin() actually constructed,
+  and asserts they agree. Proven discriminating by declaring a throwaway 13th
+  debug/* property with no control: GREEN with the registry, RED under #838's
+  predicate on exactly the fail-safe assertion -- while 16 replayed #838
+  assertions all passed in that same state.
+
+Renderer release gate manifest: test_count 142 -> 144, sha256 recomputed. The
+delta was enumerated by NAME against the branch's committed HEAD (+2 added,
+0 removed, 0 renamed), not inferred from the total.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+klausi3D
+added a commit
+that referenced
+this pull request
+Aug 9, 2026
+gaussian_splatting: make debug overlays work on a shared renderer ins…
+…
+a04472a
+```
+…tead of silently forcing them off (#831, #832) (#839)
+
+* gaussian_splatting: make debug overlays work on a shared renderer instead of silently forcing them off (#831, #832)
+
+Four of the six user-reachable debug overlays -- tile grid, density heatmap,
+performance HUD, residency HUD -- were forced false whenever the renderer was
+shared, which is every scene with more than one splat node. The checkbox stayed
+ticked, the project setting stayed true, the node property read back true, and
+the renderer reported false, with no warning anywhere. Measured on a frozen
+baseline (Engine.time_scale = 0) at 8 nodes / 1 shared renderer: 0.00 % pixels
+changed for all four.
+
+WHY THE SUPPRESSION EXISTED
+85c7e1a ("scope node debug overlays to sole renderer owners") added it because
+the push was last-writer-wins across peers: N nodes each believed they owned one
+renderer-wide debug state. #667 later found the follow-on bug -- a legally
+written flag survived a peer joining while _validate_property hid the property
+on BOTH nodes, so the user could not turn it off -- and fixed convergence, but
+kept the forced-false writes.
+
+WHY UNION INSTEAD
+These four are whole-frame diagnostics owned by the renderer, not per-node
+appearance. Their node-local default is READ FROM and WRITTEN BACK TO a single
+project setting (rendering/gaussian_splatting/debug/show_*), so they were never
+per-node values; there is nothing to arbitrate. The push is now the union over
+every node bound to the renderer, which is order-independent and idempotent, so
+any peer may compute it and the settings-owner lease is not needed for them.
+Painterly stays gated -- it IS per-node appearance -- and _validate_property
+still hides painterly/* and the renderer-wide quality knobs.
+
+The HUD control is the one genuine per-node conflict: with the flag unioned,
+all N nodes would spawn a control and stack N identical overlays in the same
+corner. _update_debug_hud_visibility now also requires the settings-owner lease,
+which is already unique per renderer, so exactly one node draws it. Measured:
+the perf HUD costs the same 19.20 % at 1 node and at 8.
+
+ROOT CAUSE OF THE BOUND-SETTER NO-OPS (#831, second half)
+Isolated, not inferred: reading the flag back in the same frame and again one
+frame later shows same_frame=true, f+1=false. apply_renderer_debug_settings()
+re-asserted the node's four flags from update_splats() on EVERY frame, so any
+GaussianSplatRenderer::set_debug_show_*() call was reverted one frame after it
+was made. show_tile_bounds was unaffected precisely because the node does not
+re-assert it. The push is now edge-triggered against the last union pushed to
+that renderer, so an unchanged node leaves a renderer-side write alone. The memo
+is keyed by renderer ObjectID, NOT per node: a per-node memo goes stale the
+moment a peer -- or this node re-entering the tree after a detach -- writes a
+different union, and would then suppress a push that is genuinely needed (both
+failure modes were caught by the GPU harness before this landed).
+
+- show_projection_issues reached the UBO but tile_rasterizer_compute.glsl read
+  only debug_flags.x/.z, never .w, and compute raster is the DEFAULT path. The
+  diagnostic color is extracted into gs_projection_debug_color() in
+  tile_raster_common.glsl and used by both raster paths so they cannot drift
+  apart again. 0.00 % -> 100.00 %.
+- show_device_boundaries / show_texture_states emitted their HUD sections from
+  INSIDE the show_performance_hud block, and were wired to the overlay (not HUD)
+  invalidation variant so toggling them never set hud_dirty. Both fixed; they
+  also count as HUD sources for the control's visibility, otherwise un-nesting
+  them would still render nothing.
+
+MEASURED, % pixels changed vs a frozen baseline (noise floor 0.0000 %):
+
+                          1 node              >=2 nodes (8, one renderer)
+  flag                    before    after     before    after
+  show_tile_grid   node    21.44     21.44      0.00     16.50
+  show_tile_grid   api      0.00     21.44      0.00     16.50
+  show_density_hm  node    100.00    100.00     0.00    100.00
+  show_density_hm  api       0.00    100.00     0.00    100.00
+  show_perf_hud    node     19.20     19.20     0.00     19.20
+  show_perf_hud    api       0.00     19.20     0.00     19.20
+  show_residency   node      1.25      1.25     0.00      1.25
+  show_residency   api       0.00      1.25     0.00      1.25
+  show_tile_bounds api      21.44     21.44    16.50     16.50
+  show_projection  api       0.00    100.00     0.00    100.00
+  (controls: show_overflow_tiles / show_white_albedo / show_shadow_opacity
+   unchanged at 100.00 / 99.87-95.49 / 100.00)
+
+Captured two independent ways, as the red team did: in-engine
+Viewport.get_texture().get_image() readback, and PrintWindow
+(PW_RENDERFULLCONTENT) on the live window, which shows the heatmap rendering at
+8 shared nodes (30.37 % of the letterboxed window = the whole viewport band).
+
+TESTS
+- "Shared renderer hides node-local debug settings ..." RENAMED to "Shared
+  renderer unions node-local debug overlay requests and keeps the property
+  editable" and rewritten: it pinned the behaviour this change deliberately
+  replaces. It now pins that one peer's request reaches the renderer, that
+  clearing one peer does not clear it while another still requests it, that
+  clearing the last one does, and that the property stays editable on both.
+- New case: "Node debug apply does not revert a renderer-side debug flag write".
+- test_integration.cpp gains device-boundary / texture-state HUD assertions.
+- Both new/renamed cases FAIL rather than environment-skip (#595): a skip is
+  scored as a PASS, and these run only in the [RequiresGPU] harness where the
+  precondition always holds. environment_skip_baseline.json shrinks 383 -> 382
+  and the declared inventory follows; the ratchet only tightens.
+- renderer_release_gate_manifest.json RequiresGPU snapshot 139 -> 140 with a
+  recomputed sha256; running_in_a_named_batch 71 -> 72 (NodeSceneTree 22 -> 23
+  cases, 285 -> 297 assertions, measured).
+
+Not in scope and deliberately untouched: the dead flags (show_resolve_input/
+_output, show_splat_coverage, show_lod_spheres, the inert preview modes) and
+inspector property placement. The inspector plugin's own overlay CheckButtons
+are un-gated here only because leaving them hidden behind a label that says the
+toggles are "unavailable" would be a false claim once they work.
+
+Evidence: NodeSceneTree 23/23 cases, 297/297 asserts; Integration,
+RendererPipeline, OutputCompositor batches green; run_module_tests.py
+--guard-only exit 0; full headless lanes 26/26, 748 tests, exit 0.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* gaussian_splatting: drive the debug-overlay union from the peer-set change, not from the shared-ness boolean (#831, #832 round 2)
+
+Codex filed two findings against c5b5db4. Both are REAL, and both are worse
+than the caveat the PR body flagged: that caveat said such cases "self-heal
+within one frame". Under UPDATE_MODE_MANUAL they never self-heal, because
+update_splats() -- and therefore the whole per-frame apply -> push route -- is
+gated off (process_gaussian_render's UPDATE_MODE_MANUAL arm sets should_update
+= false, and set_update_mode does set_process(false) on the no-manager path).
+The PR body has been corrected.
+
+FINDING 1 -- the HUD owner was never told a peer changed a HUD flag
+The four overlay flags are unioned across the renderer's peers, but the HUD
+CONTROL is deliberately drawn by exactly one node -- the settings-owner lease
+holder -- so that N peers do not stack N identical overlays in the same corner.
+A NON-owner peer that enabled show_performance_hud / show_residency_hud
+therefore did all of: set the renderer-wide flag, call
+_update_debug_hud_visibility on ITSELF, and get refused by the very ownership
+check that keeps the control unique. The lease holder was never notified. Flag
+enabled, nothing on screen.
+
+Fix: push_debug_overlay_union() now fans HUD reconciliation out to every node
+bound to the renderer -- and only when the union actually CHANGED, so the
+memoized per-frame path stays free and the #831 edge trigger is untouched. The
+holder among the peers creates the control; the rest are a no-op.
+
+FINDING 2 -- the union was recomputed on a boolean that does not move
+The union is a function of the SET of nodes bound to the renderer. The only
+thing that recomputed it on a peer change was _converge_shared_renderer_state,
+which is edge-triggered on _is_renderer_shared_with_other_content -- a BOOLEAN.
+A peer set going 3 -> 2 (or 2 -> 3) leaves that boolean at true, so every
+remaining peer returned early at the unchanged-state check and nobody dropped
+the departed node's request. If the node that left was the sole requester, the
+renderer kept rendering an overlay no live node asks for.
+
+Fix: a new _on_renderer_peer_set_changed() is the one place that reacts to
+"the node set for this renderer changed", called from BOTH
+_register_shared_renderer and _unregister_shared_renderer -- i.e. from the
+actual peer-change notification rather than from another special case bolted
+onto the shared-ness boolean. It drops the edge-trigger memo ONCE, up front,
+addressed by RENDERER rather than by node: the observer may be the node that is
+leaving, which is no longer allowed to push. Every remaining peer then
+recomputes; the first writes the fresh union and the rest memoize against it,
+so this costs exactly one renderer write, not one per peer.
+
+_converge_shared_renderer_state keeps its own invalidation for the shared-ness
+flips that are NOT peer-set changes (a world submission appearing/disappearing
+on the renderer); its comment now says so.
+
+MUTATION PROOF
+Both cases were written first and run against the UNFIXED tree (production
+reverted, tests kept, full relink verified by binary mtime):
+
+  RED  2 cases | 0 passed | 2 failed, 18 assertions | 14 passed | 4 failed
+    - Manual-mode HUD owner ...: CHECK(node_has_debug_hud_control(node_a))
+      false immediately AND false after 5 MANUAL frames  (finding 1, and the
+      proof it is permanent rather than deferred)
+    - Manual-mode peers recompute ...:
+      CHECK_FALSE(renderer->is_debug_show_tile_grid()) still true immediately
+      AND still true after 5 MANUAL frames  (finding 2, same)
+  GREEN 2 cases | 2 passed | 0 failed, 18 assertions | 18 passed | 0 failed
+
+Both new cases FAIL rather than environment-skip (#595) and both use
+guard-then-return instead of REQUIRE-then-deref (#656: disable_exceptions=True
+means REQUIRE does not abort). Both guard the project settings they write
+(ProjectSettingGuard) because an editor build persists the debug flags and every
+later-constructed node seeds its default from them.
+
+The HUD control is observed structurally, not through a new test hook:
+_ensure_debug_hud_control adds a CanvasLayer child named
+"GaussianSplatDebugHUDLayer" and _destroy_debug_hud_control removes it.
+
+Same harness, same frozen baseline (Engine.time_scale = 0), noise floor
+0.0000 %. Re-measured on the round-2 binary at 1 node and at 8 nodes / 1 shared
+renderer; every row is BIT-IDENTICAL to the numbers in the PR body:
+
+  flag                     1 node    8 nodes
+  show_tile_grid    node   21.4370   16.5013
+  show_tile_grid    api    21.4370   16.5013
+  show_density_hm   node  100.0000  100.0000
+  show_density_hm   api   100.0000  100.0000
+  show_perf_hud     node   19.2024   19.2024
+  show_perf_hud     api    19.2024   19.2024
+  show_residency    node    1.2511    1.2511
+  show_residency    api     1.2511    1.2511
+  show_tile_bounds  api    21.4370   16.5013
+  show_projection   api   100.0000  100.0000
+  (controls show_overflow_tiles / show_white_albedo / show_shadow_opacity also
+   identical; __clobber_probe__ still same_frame=true f+1/f+2/f+10=true, so the
+   forced re-push on a peer-set change does not reintroduce the #831 clobber)
+
+GUARD BOOKKEEPING -- tightening only, nothing weakened
+- renderer_release_gate_manifest.json: RequiresGPU test_count 140 -> 142
+  (exactly two cases ADDED, zero renamed, zero removed), sha256 RECOMPUTED via
+  check_renderer_release_gates.py _requires_gpu_snapshot(). Both carry
+  [Node][SceneTree] so both MATCH the NodeSceneTree batch filter; neither is
+  deferred, so deferred_count stays 2 and unbatched_backlog stays 66.
+  running_in_a_named_batch 72 -> 74, MEASURED as NodeSceneTree 23/23 -> 25/25
+  cases (297 -> 315 assertions).
+- test_gpu_harness_deferred_contract.py: MEASURED_WALL_SECONDS stays 153. The
+  batch measured 99.2-125.5 s here, BELOW the constant, and lowering it would
+  weaken this guard's own 1.5x headroom requirement. Only the stale docstring
+  ("22 cases / 285 assertions", already stale before this PR) was corrected.
+
+EVIDENCE
+- GPU harness, all 14 batches: 74/74 cases, 8306/8306 assertions, exit 0
+  (NodeSceneTree 25/25, 315/315, 99.2 s wall vs a 300 s budget)
+- headless lanes: 26 lanes, 748 tests, 2 113 918 assertions, exit 0
+- run_module_tests.py --guard-only: exit 0
+- binary verified relinked by mtime after every build, not by exit code
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* gaussian_splatting: converge the overlay union at 1->0 nodes, notify nodes of renderer-side HUD writes, make debug suppression fail-safe (#831, #832 round 3)
+
+Codex round 2 raised two new findings; a local review of the just-merged #838
+raised a third. All three are cases where a debug control exists in state but
+never reaches the screen, and all three are permanent (not merely deferred).
+
+Thread B -- the 1 -> 0 node transition. When the LAST GaussianSplatNode3D leaves
+while a GaussianSplatWorld3D submission keeps the shared renderer alive,
+_on_renderer_peer_set_changed() ran with p_include_self=false and an empty peer
+set: it dropped the per-renderer memo and nothing else. A memo is only consulted
+by the next push, and with zero nodes left there is no next push, so the departed
+node's tile-grid / heatmap / HUD request stayed rendered on the world submission
+indefinitely. This is distinct from the round-2 3 -> 2 fix, which still had a
+peer to delegate the recompute to. Fixed with
+GaussianSplatNodeDebugHelper::reconcile_debug_overlay_union_for_renderer(): a
+renderer-addressed push seeded from nothing rather than from a node, so the empty
+node set yields the all-false union that is the correct answer. Memoized, so when
+peers do remain and have already pushed the identical union it costs one compare.
+
+Thread C -- a renderer-side HUD write never reaches the node.
+GaussianSplatRenderer::set_debug_show_device_boundaries() /
+set_debug_show_texture_states() (and their perf/residency siblings) are bound to
+script, so node.get_renderer().set_debug_show_device_boundaries(true) is a
+supported way to turn a HUD section on. The write landed in the renderer's
+DebugState and stopped there: those setters have no node callback, and the node
+is what creates the GaussianSplatDebugHUDLayer. Under UPDATE_MODE_MANUAL the
+node's per-frame apply never runs either, so the HUD lines existed in renderer
+stats with nothing on screen, forever. Fixed with
+GaussianSplatSceneDirector::notify_renderer_debug_hud_sources_changed(), a
+callback the node layer installs at module init -- renderer/ deliberately does
+not include nodes/, and the director is the only layer that already maps a
+renderer to its nodes. It fires when GaussianSplatRenderer::is_debug_hud_source_active()
+flips; that predicate is new and is now the SINGLE definition of "this renderer
+wants a HUD", read both by the four setters and by
+GaussianSplatNode3D::_update_debug_hud_visibility(), which used to restate the
+same four-way OR inline.
+
+Inspector debug suppression -- fail-safe instead of name-based. #838 replaced a
+drifted hand-written list with `begins_with("debug/")`, which ate
+debug/overlay_opacity (no replacement control exists for it), then patched that
+by special-casing the one name. The instance was fixed; the shape was not. The
+predicate still asserted "suppressed" from the property's NAME with no connection
+to whether a replacement control exists, so a 13th debug/* property would have
+silently lost its inspector UI -- and #838's test would still have passed,
+because it encoded the same name predicate. parse_property() now suppresses only
+what parse_begin() actually built a control for: every control in the Debug
+Visualization block is created through _add_debug_toggle() /
+_add_debug_option_button(), which take the replaced property as a required
+argument and record it. The default is therefore VISIBLE. debug/overlay_opacity
+is no longer a special case; it simply has no entry, for the same reason any
+future property without a control has none. This is much simpler here than it was
+on #838 because this branch already removed the shared-renderer conditional
+omission, so the built-control set is unconditional.
+
+Tests (modules/gaussian_splatting/tests/test_gaussian_splat_node.h), all
+mutation-proven RED against the unfixed tree and GREEN with the fix:
+
+- [Node][SceneTree][RequiresGPU] "Overlay union clears when the last node leaves
+  a world-held renderer" -- 7 assertions, 2 fail without the fix (tile grid still
+  true immediately AND after 5 MANUAL frames). Asserts the preconditions that
+  make the case meaningful: instance_count 1 -> 0 with a live world submission.
+- [Node][SceneTree][RequiresGPU] "Manual-mode node draws the HUD for a
+  renderer-side debug flag write" -- 15 assertions, 5 fail without the fix. Also
+  covers the texture-states sibling, and that dropping one of two active sources
+  does not tear the control down.
+- [Editor] "Inspector suppresses a debug/ property only when it built a
+  replacement control" -- replaces #838's case. It names no property: it derives
+  the property set from the node's own property list and the control set from
+  GS_DEBUG_REPLACEMENT_META on the controls parse_begin() actually constructed,
+  and asserts they agree. Proven discriminating by declaring a throwaway 13th
+  debug/* property with no control: GREEN with the registry, RED under #838's
+  predicate on exactly the fail-safe assertion -- while 16 replayed #838
+  assertions all passed in that same state.
+
+Renderer release gate manifest: test_count 142 -> 144, sha256 recomputed. The
+delta was enumerated by NAME against the branch's committed HEAD (+2 added,
+0 removed, 0 renamed), not inferred from the total.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* gaussian_splatting: elect a HUD owner that does not need the renderer's scene data, and stop peer reconciliation from clobbering renderer-side overlay writes (#831, #832 round 4)
+
+Codex round 3 filed three threads. Two are real; the third was already fixed in
+round 3 and is reported rather than resolved. Both real findings live in the one
+configuration rounds 2 and 3 never tested: a GaussianSplatWorld3D submission and
+a GaussianSplatNode3D sharing a renderer.
+
+Thread 1 -- a world-backed shared renderer had NO eligible HUD owner. Rounds 2/3
+made the HUD control unique per renderer by giving it to the settings-owner lease
+holder. GaussianSplatRenderer::apply_world_submission_contract() installs the
+WORLD's GaussianData as the renderer's scene data, and
+GaussianSplatNodeRendererHelper::can_apply_renderer_settings() rejects (and
+releases) any node whose data is not that data. On such a renderer the lease is
+unowned and unclaimable, so enabling performance / residency / device-boundary /
+texture-state HUD flags succeeded on the renderer while every node refused or
+destroyed the control: flag on, screen empty, permanently (UPDATE_MODE_MANUAL
+never runs the per-frame apply that would otherwise re-evaluate).
+
+Fixed with a HUD-specific unique-owner election,
+GaussianSplatNodeDebugHelper::can_own_debug_hud() / _elect_debug_hud_owner().
+Eligibility is only "live, in the tree, in a world, bound to this renderer" --
+hosting a CanvasLayer of renderer-wide statistics does not require owning the
+renderer's scene data. It is an election, not a second lease: a pure function of
+(settings owner, director registration order, eligibility), so there is no claim
+to release and no lifetime to manage, and every node computes the same answer.
+That last property is load-bearing -- the round-2 fan-out evaluates the toggling
+node before the owner, so a first-come lease would have moved the HUD to the
+wrong node. The settings owner is preferred rather than required, so the HUD does
+not move on renderers that already had a holder.
+
+Thread 2 -- a renderer-side overlay write was clobbered by peer reconciliation,
+introduced by round 3's own fix. _on_renderer_peer_set_changed() dropped the
+per-renderer edge-trigger memo up front, and _converge_shared_renderer_state()
+did the same on a shared-ness flip (which is precisely a world submission
+appearing or disappearing). Dropping it turns the following recompute into an
+UNCONDITIONAL write of the node-only union, so a bound-API
+GaussianSplatRenderer::set_debug_show_density_heatmap(true) made while every
+node's own request is false was overwritten by the next join or leave -- the same
+clobber #831 part 2 removed from the per-frame path, re-entered through the
+peer-set and world hooks.
+
+The memo is not a cache of "the union we think is current"; it is the record of
+what the union machinery last AUTHORED on this renderer, and that record stays
+true across a peer-set change. Fixed by removing both invalidations and nothing
+else: the existing compare writes when, and only when, the union actually moves.
+This does not weaken the round-2 (3 -> 2) or round-3 (1 -> 0) convergence -- in
+both the recomputed union genuinely differs from the authored record, so the
+compare still writes, and both committed tests stay green. It suppresses only the
+write that would have re-asserted an unchanged union over somebody else's value.
+
+Thread 3 was VERIFIED already fixed by round 3
+(GaussianSplatNode3D::_on_renderer_peer_set_changed ->
+reconcile_debug_overlay_union_for_renderer, with its committed test green in this
+round's batch); no code was written for it and the thread is left open for human
+disposition.
+
+Two [GaussianSplatting][Node][SceneTree][RequiresGPU] cases added, both built on
+the world-plus-node configuration and both holding UPDATE_MODE_MANUAL so the
+per-frame apply cannot be the thing that rescues them: "World-backed shared
+renderer still has a node that draws the HUD" (which also asserts hud_controls ==
+1 across two peers, and that the HUD re-elects when its owner leaves) and
+"Renderer-side overlay write survives peer-set changes on a world-held renderer"
+(1 -> 0 leave, 0 -> 1 -> 2 joins, 2 -> 1 leave, plus a check that a node toggle is
+still authoritative when the union actually moves).
+
+Each fix was mutation-proven in its own build, and each mutation fails only its
+own test: reverting thread 1 gives 5/13 RED including "hud_controls 0 == 1" --
+not the wrong node drawing the HUD, nobody drawing it -- while the thread-2 test
+stays 11/11 green; reverting thread 2 gives 5/11 RED, all of them
+is_debug_show_density_heatmap() at the peer-set transitions, while the thread-1
+test stays 13/13 green.
+
+Release-gate manifest requires_gpu_test_snapshot 144 -> 146, enumerated by name
+against d4318bec196: 2 added, 0 removed, 0 renamed -- strictly additive.
+NodeSceneTree 27/27 -> 29/29 cases, 337 -> 361 assertions, rc=0, zero_assert=0.
+Wall times this round are CONTENDED (a CI job was live on the shared self-hosted
+runner throughout) and are reported as a budget check only, not as a cost signal.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* gaussian_splatting: make the debug-overlay authored record per-component, so a node toggling one flag stops clobbering the other three (#831, #832 round 5)
+
+Codex round 4 filed one finding, and it is the third round running where the fix
+was right in DIRECTION but too coarse in GRANULARITY. Round 3 stopped the
+per-frame push from clobbering a renderer-side write; round 4 stopped the
+peer-set hooks from dropping the memo; this is the same defect one level down.
+
+The memo compare was made on the whole GSDebugOverlayRequest while the write
+block rewrote all FOUR flags. So a bound-API
+GaussianSplatRenderer::set_debug_show_density_heatmap(true), taken while every
+node's own heatmap request is false, was reverted as COLLATERAL the moment any
+node toggled an unrelated flag such as show_tile_grid: the aggregate compare
+fell through (the tile grid genuinely moved) and set_debug_show_density_heatmap(false)
+went out with it. That is #831 part 2's clobber, one component over.
+
+VERIFIED before fixing: mutation-proven RED on this tree with the new tests and
+no fix -- 8 of 24 assertions fail, and every one of them is an
+is_debug_show_density_heatmap() / is_debug_show_residency_hud() read on a
+component no node ever authored.
+
+Fixed by making the authored record PER COMPONENT. New file-local helper
+_commit_debug_overlay_union() compares and writes each of the four flags against
+its own last authored value, and BOTH paths now go through it -- the
+node-relative push (push_debug_overlay_union) and the renderer-addressed
+reconcile (reconcile_debug_overlay_union_for_renderer) -- so the two cannot
+drift apart again the way rounds 2-4 kept discovering.
+
+An ABSENT record is treated as an all-false authored record rather than
+"unknown": the renderer's own defaults for all four are false
+(RenderDebugState), so a renderer nobody has pushed to has been authored
+all-false by construction. That closes the same hole at the
+memo-establishment boundary -- the very first push on a renderer now writes only
+the components it actually turns on, and can no longer clobber a renderer-side
+write made before any node registered. The HUD fan-out is now conditioned on
+"at least one component was actually written" rather than "the request differs".
+
+This is a strict narrowing of what the union machinery writes, not a loosening
+of node control: every component a node genuinely authors is still written on
+BOTH edges, including the retraction to false when the last requesting node
+leaves (round 3's 1 -> 0 convergence), and that is asserted directly rather than
+assumed.
+
+Two [GaussianSplatting][Node][SceneTree][RequiresGPU] cases added, both holding
+UPDATE_MODE_MANUAL so the per-frame apply cannot be what rescues them, and both
+re-asserting after 5 frames so the state is proven settled rather than early:
+
+- "Renderer-side overlay flag survives a node toggling a different overlay
+  flag" (push path): renderer-side heatmap write, tile-grid toggled on both
+  edges, a second peer joining and toggling its own residency HUD, and a final
+  proof that the heatmap is still fully controllable once a node authors it.
+- "Union reconcile at the last node retracts only what the nodes authored"
+  (reconcile path): at the single 1 -> 0 event the node-authored tile grid must
+  go false AND the renderer-authored residency HUD must stay true. A
+  whole-request write can satisfy only one of the two, which is what makes the
+  case discriminating in both directions at once.
+
+NodeSceneTree 29/29 -> 31/31 cases, 361 -> 385 assertions, rc=0, zero_assert=0.
+The committed round-2/3/4 cases that pin the earlier clobbers all stay green.
+
+Release-gate manifest requires_gpu_test_snapshot 146 -> 148, ENUMERATED BY NAME
+against the branch's committed HEAD 57f67d895cf: 2 added, 0 removed, 0 renamed
+-- strictly additive. coverage_snapshot requires_gpu_total 146 -> 148 and
+running_in_a_named_batch 78 -> 80.
+
+Wall time this round is CONTENDED (a CI job was live on the shared self-hosted
+runner throughout) and is reported as a budget check only, not a cost signal.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* gaussian_splatting: elect one debug-HUD owner per viewport, not per renderer, so every viewport on a shared World3D can show the HUD (#831, #832 round 6)
+
+Codex review round 5 filed one finding, the same shape as rounds 3/4/5 one
+level further out: the fix was right, its KEY was too coarse.
+
+Rounds 2-5 made the debug HUD control unique per RENDERER. A
+GaussianSplatRenderer is shared per World3D
+(gaussian_splat_node_helpers.cpp: director->get_shared_renderer(owner.get_world_3d().ptr())),
+and a SubViewport inherits its parent's World3D unless it opts into
+use_own_world_3d (scene/main/viewport.cpp: Viewport::find_world_3d() walks to
+the parent). Two default-configured SubViewports therefore resolve the SAME
+renderer and entered ONE renderer-wide election. The HUD control is a
+CanvasLayer parented to the elected node, and
+CanvasLayer::_notification(NOTIFICATION_ENTER_TREE) attaches it to
+Node::get_viewport() (scene/main/canvas_layer.cpp:169-180), so exactly one
+viewport got the HUD and every other viewport rendering the same world had
+none, with no way to ask for one.
+
+Both cited mechanisms were read before any code was changed; the finding is
+confirmed, not accepted on assertion.
+
+Fixed by keying the election on (renderer, viewport) instead of renderer
+alone: _elect_debug_hud_owner() and _node_can_host_debug_hud() take the asking
+node's Viewport and skip peers that live elsewhere, and can_own_debug_hud()
+passes owner.get_viewport().
+
+This REFINES the uniqueness invariant rather than relaxing it. The peer walk,
+the settings-owner preference, the director registration order and every other
+eligibility term are unchanged, so N peers inside ONE viewport still elect
+exactly one owner. The renderer-wide fan-out
+(_notify_debug_hud_dirty_for_renderer) stays renderer-addressed on purpose: it
+must reach nodes in every viewport, and each recipient now answers the
+per-viewport question.
+
+Test: one [GaussianSplatting][Node][SceneTree][RequiresGPU] TEST_CASE added,
+"Each viewport sharing one world renderer gets exactly one debug HUD". Two
+SubViewports on one World3D; TWO splat nodes in the first viewport (so "exactly
+one per viewport" is a real constraint there, not trivially satisfied) and one
+in the second. It FAILs rather than skips if the three nodes do not in fact
+share a renderer or do not in fact sit in the intended viewports, so it cannot
+go vacuous. It asserts one-HUD-per-viewport on the node-driven route, again
+after 5 UPDATE_MODE_MANUAL frames so the state is proven settled rather than
+early, again on the renderer-side set_debug_show_device_boundaries() route, and
+once more after the first viewport's elected owner leaves so the two elections
+are shown to be independent.
+
+Mutation-proven: RED on the unfixed tree with 4 of 20 assertions failing, every
+one of them a hud_in_b == 1 / node_has_debug_hud_control(node_b1) read on the
+second viewport; GREEN with the fix at 20/20.
+
+No prior invariant regressed. The five that rounds 2-5 pin were re-run, not
+assumed: NodeSceneTree 32/32 cases 401/401 assertions, WorldSceneTree 5/5
+55/55, SceneDirectorSceneTree 14/14 206/206, RendererSceneTree 1/1 16/16, all
+rc=0, zero_assert=0. The full headless guard + lane suite passes (26 lanes, 751
+tests, 2114036 assertions).
+
+Release-gate manifest: test_count 148 -> 149, running_in_a_named_batch 80 -> 81,
+sha256 recomputed via check_renderer_release_gates.py _requires_gpu_snapshot().
+The delta was ENUMERATED BY NAME against the branch's committed HEAD
+(560bed1ab10) with the guard's own regex and file walk: 1 added, 0 removed,
+0 renamed -- a strict tightening. The 80 -> 81 was MEASURED on both sides by
+building committed HEAD and running the batch there (31/31 381/381 -> 32/32
+401/401), not inferred. Round 5's recorded 385-assertion baseline predates this
+branch's rebase onto master 993a945bd4b; 381 is a fresh measurement of the same
+31 cases on the rebased HEAD, so the delta is +1 case / +20 assertions and the
+discrepancy is the rebase.
+
+Wall times (179.0 s baseline, 208.7 s after) were taken with self-hosted-runner
+CI jobs live on the same box. They are CONTENDED and are a budget check only,
+not a per-case cost signal.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* gaussian_splatting: include renderer-bound data-less nodes in the debug overlay union (#831, #832 round 7)
+
+_register_shared_renderer() returns before _register_instance_in_director()
+when a node has no splat asset, no renderer_data and no runtime asset. Such a
+node is still BOUND to the world's shared renderer -- ensure_renderer() only
+requires is_inside_world(), and get_shared_renderer() creates the renderer
+lazily with no data -- and it still owns the four renderer-wide overlay
+properties.
+
+The overlay union sourced its peer set solely from
+collect_instance_node_ids_for_renderer(), so two such nodes each saw an EMPTY
+peer list, each seeded the union from its own four flags, and whichever pushed
+last retracted the other's request. Measured: node A enables the tile grid,
+node B then enables the heatmap, and the renderer ends at tile_grid=false. That
+is last-writer-wins -- the exact defect #831 exists to remove -- surviving in
+the one node shape the director cannot see.
+
+Track the binding in the node layer instead of registering data-less nodes as
+director instances: an instance record is RENDER content (culling, LOD,
+transforms, instance store, get_instance_count_for_renderer(), which gates the
+shared-content painterly path), and promoting a data-less node to one in order
+to fix a diagnostic flag would change behaviour far outside this contract. The
+binding such a node does have is its `renderer` Ref, and that is what is
+recorded -- written only by ensure_renderer() (bind) and
+_unregister_shared_renderer() (unbind). The unbind must be explicit: during
+NOTIFICATION_EXIT_TREE the departing node still reports is_inside_tree() ==
+true, because Node::_propagate_exit_tree clears the flag only after the
+notification returns, so an eligibility filter alone cannot drop it -- the same
+reason the director's walk removes the instance record first.
+
+Both union walks (push_debug_overlay_union and the addressed-by-renderer
+reconcile) now share one peer collection, which unions the director's records
+with the bound-but-unregistered nodes and re-validates every added node against
+the eligibility the director's own registration enforces (alive, in tree, in a
+world, still bound to THIS renderer).
+
+Mutation-proven by a new [Node][SceneTree][RequiresGPU] case built on exactly
+the reported scenario -- two data-less in-tree nodes sharing a renderer, A
+enables the tile grid, B enables the heatmap, BOTH flags asserted on the
+renderer. Pre-fix: 15/19 assertions pass and exactly the four cross-peer ones
+fail, so every premise (shared renderer resolved, director instance count == 0,
+a lone data-less node already drives the renderer) is demonstrably reached.
+Post-fix: 19/19.
+
+No invariant from rounds 2-6 regresses: NodeSceneTree 33/33 cases, 420/420
+assertions; WorldSceneTree 5/5, 55/55; SceneDirectorSceneTree 14/14, 206/206;
+headless run_module_tests.py 26 lanes, exit 0. Adding a peer can only turn a
+union component ON, and the per-component authored-memo commit is untouched, so
+the round-4/5 renderer-side-write contracts are unaffected. The HUD election is
+deliberately NOT changed here: data-less HUD ownership is a separate open
+thread, and the node-less shared-world viewport thread stays deferred.
+
+Manifest re-pinned with the repo's own functions, never hand-edited:
+_requires_gpu_snapshot -> (152, aaf716d6b6e0...), _batch_membership -> 84;
+sha256_last_changed_by now describes THIS change instead of the rebase re-pin.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* gaussian_splatting: tie the renderer binding record's lifetime to the renderer Ref, not to node content (#831, #832 round 8)
+
+Round 7 dropped the node-layer binding record from
+GaussianSplatNode3D::_unregister_shared_renderer(). That function removes the
+DIRECTOR'S CONTENT record, and content-lifecycle paths reach it on a node that
+is still bound and still in the tree:
+
+  set_splat_asset(null)
+    -> _clear_asset()
+    -> GaussianSplatNodeAssetHelper::clear_asset()
+    -> _unregister_shared_renderer()
+
+(and GaussianSplatNodeRendererHelper::upload_asset_to_renderer() when there is
+nothing left to upload). The node keeps the same valid `renderer` Ref and stays
+in the tree and in the world, yet it was erased from BOTH halves of the overlay
+union -- the director dropped the instance record, round 7's hook dropped the
+binding record -- and ensure_renderer() does not re-run on that path. The
+clear's own reconcile walk then retracted the node's still-live overlay request
+immediately, and a peer's next push confirmed the retraction, so the
+per-component authored memo (round 5) legitimately cleared that component on the
+renderer.
+
+This is the third shape of one defect: a node that is renderer-bound but missing
+from the overlay union. Round N found data-less nodes were never registered;
+this one found that clearing content evicts an already-registered node. Fix the
+invariant, not the instance:
+
+  A node has a record in g_renderer_bound_nodes for exactly as long as it is
+  BOUND to that renderer. The record's lifetime tracks the node's `renderer`
+  Ref and NOTHING ELSE -- created when the node binds a renderer, removed only
+  when it unbinds (drops the Ref, leaves the tree, leaves the world, rebinds
+  elsewhere). It is entirely INDEPENDENT of whether the node currently has
+  content.
+
+The invariant is now stated in full at the record's definition in
+gaussian_splat_node_helpers.cpp, together with the complete set of writes that
+satisfy it, and is cross-referenced from both declarations and from
+_unregister_shared_renderer().
+
+Mechanically:
+
+- BIND stays where it was: GaussianSplatNodeRendererHelper::ensure_renderer(),
+  the only place `owner.renderer` is ever assigned.
+- UNBIND moves to a new GaussianSplatNode3D::_unbind_renderer_binding_record(),
+  called from NOTIFICATION_EXIT_TREE, NOTIFICATION_EXIT_WORLD and
+  NOTIFICATION_PREDELETE -- and from nowhere else. In PREDELETE it runs before
+  `renderer.unref()`, the only place the Ref is released, so the Ref still names
+  the renderer to forget (round 7's call ran after the unref and was a no-op).
+- _unregister_shared_renderer() no longer touches the record at all, so no
+  future content-lifecycle path can reintroduce this.
+
+The unbind stays an explicit call rather than something derived from node state:
+during NOTIFICATION_EXIT_TREE the departing node still reports
+is_inside_tree() == true, because Node::_propagate_exit_tree clears that flag
+only after the notification returns.
+
+Mutation proof (round-7 behaviour restored in place, test unchanged): 22/25
+assertions pass and exactly three fail -- the probe that the clear's own
+reconcile retracted the live request, the reviewer's discriminator (a peer
+enables the heatmap and BOTH flags must be set), and the proof the damage
+survives a full frame -- with every premise assertion still passing, so the
+branch is demonstrably reached. Post-fix 25/25.
+
+The new case deliberately defers `node_a->get_renderer()` until after the
+discriminator: get_renderer() calls _ensure_renderer(), which re-registers the
+binding record and would repair the eviction before it could be observed.
+
+Evidence:
+- NodeSceneTree GPU batch 34/34 cases, 445/445 assertions.
+- WorldSceneTree 5/5, SceneDirectorSceneTree 14/14, RendererSceneTree 1/1
+  (54/54 cases, 722/722 assertions across the four SceneTree batches).
+- run_module_tests.py: all guards PASSED, 25 lanes passed, 0 failures.
+- tests/ci pytest: 727 passed.
+- Live overlay matrix (8 nodes, one shared renderer):
+  __clobber_probe__ same_frame=true f+1=true f+2=true f+10=true, identical to
+  the round-4 run, and all ten overlay flags still reach the renderer with
+  hud_controls=1 for the two HUD flags.
+
+docs/reference/renderer_release_gate_manifest.json is re-pinned: 152 -> 153
+cases, 84 -> 85 in a named batch, recomputed with
+check_renderer_release_gates._requires_gpu_snapshot and
+test_gpu_harness_deferred_contract._batch_membership, never hand-edited.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* gaussian_splatting: re-pin the RequiresGPU snapshot after rebasing onto the merged #798 series (#831, #832)
+
+Master gained #805/#806/#808/#828, so the snapshot conflicted again. The values
+are computed, not merged -- neither side of the conflict describes the rebased
+tree.
+
+Recomputed with the repo's own functions:
+  check_renderer_release_gates._requires_gpu_snapshot  -> (154, 8a89696a7371...)
+  test_gpu_harness_deferred_contract._batch_membership -> 86 in a named batch
+
+deferred_count and unbatched_backlog unchanged at 2 and 66, and
+sha256_last_changed_by describes THIS re-pin rather than the previous one.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* gaussian_splatting: project the debug HUD into viewports that render the shared world but hold no splat node (#831, #832 round 9, #847)
+
+Round 6 elects one debug-HUD owner per VIEWPORT rather than per renderer, so
+every viewport on a shared World3D can show the HUD. But the candidate set it
+elects from is `director->collect_instance_node_ids_for_renderer()` -- the
+renderer's SPLAT NODES -- and a node is only ever considered for the viewport it
+itself lives in. A SubViewport that inherits its parent's World3D
+(Viewport::find_world_3d() walks to the parent) and holds only a Camera3D
+therefore RENDERS the splats -- their render instances live in the world's
+scenario, so any camera on that world sees them -- while electing ObjectID() for
+its own HUD. That is the ordinary secondary-camera / minimap case, and it had no
+HUD and no way to ask for one.
+
+Fix: keep the round-6 election exactly as it is and fill only the gap it leaves.
+A viewport that HAS an eligible splat node keeps its own elected owner and is
+never projected into; a viewport with none gets a HUD from a single
+renderer-wide PROJECTOR, elected by the same function with the viewport
+constraint dropped. Native and projected HUDs are therefore mutually exclusive
+per viewport BY CONSTRUCTION -- a non-empty election is the skip condition -- so
+"exactly one HUD per viewport" is preserved rather than re-derived.
+
+The HUD is projected, not re-homed: CanvasLayer::set_custom_viewport() lets a
+layer parented under the projector attach itself to another viewport's canvas.
+Ownership stays where rounds 2-8 put it (a GaussianSplatNode3D owns, updates and
+destroys the control) and no node is added to anybody else's subtree. The
+alternative shape -- HUD ownership on the renderer or the viewport -- was
+rejected: GaussianSplatRenderer is a RefCounted with no place in the scene tree,
+so it would still need a node-side agent to host the CanvasLayer, and it would
+have to re-derive the per-viewport uniqueness round 6 already establishes. A
+strictly larger diff for the same result.
+
+"Renders the world" is required to mean "has an active Camera3D", not merely
+"resolves that World3D": every default-configured SubViewport inherits the
+parent's World3D, including the ones used purely to render 2D/UI into a texture,
+and those draw no splats at all. The tree walk is gated on
+GaussianSplatRenderer::is_debug_hud_source_active(), the same short-circuit
+_update_debug_hud_visibility() already uses before can_own_debug_hud().
+
+Lifetime: a projected CanvasLayer holds a raw Viewport* (CanvasLayer::vp) that it
+dereferences on its own NOTIFICATION_EXIT_TREE, so the layer must go down while
+its target viewport is still alive. Node::tree_exiting fires before the
+viewport's own EXIT_TREE (scene/main/node.cpp _propagate_exit_tree), which is the
+last moment that holds; the projector connects there one-shot. Leaving the tree
+tears every projected HUD down, and the collection requires
+is_inside_tree() && is_inside_world(), so a node on its way out can only ever
+remove projected HUDs, never create one.
+
+Mutation-proven by
+"[GaussianSplatting][Node][SceneTree][RequiresGPU] A camera-only SubViewport
+sharing the world gets a debug HUD and no viewport gets two". It counts HUDs from
+each VIEWPORT's side (CanvasLayer::get_viewport() RID) rather than from any node,
+because node_has_debug_hud_control() cannot see a HUD parented under a node in a
+different viewport. Early-returning from
+GaussianSplatNodeDebugHelper::collect_debug_hud_projection_viewports() fails
+exactly the three camera-only-viewport counts while 16 of 19 assertions still
+pass -- including is_debug_hud_source_active() and the round-6 "exactly one HUD
+in the hosted viewport" invariant, so the RED run demonstrably reaches the branch
+-- and 19/19 pass with the fix. All resolve/repair calls (get_renderer(), which
+runs _ensure_renderer()) are ordered BEFORE the HUD is enabled so they cannot
+silently repair the observed state (the round-8 vacuity trap).
+
+Evidence: GPU harness NodeSceneTree 36/36 cases 469/469 assertions,
+WorldSceneTree 5/5 55/55, SceneDirectorSceneTree 14/14 206/206, all SUCCESS.
+Module tests 26 lanes PASS (759 tests). All 14 static CI guards pass; tests/ci
+unittest suite 903 tests OK.
+
+Manifest re-pinned by RECOMPUTING with the repo's own functions:
+check_renderer_release_gates._requires_gpu_snapshot -> (155,
+adbbc531eb625e0ec3031674b947d3c88af1c0ff9fe726d2252000e7e6d3f4b6),
+test_gpu_harness_deferred_contract._batch_membership -> 87. The new case carries
+the [Node][SceneTree][RequiresGPU] tag order so it matches the NodeSceneTree
+filter and is not an orphan; deferred_count and unbatched_backlog unchanged at 2
+and 66.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* gaussian_splatting: park projected debug-HUD layers under a host node so teardown never unparents from a blocked node (#831, #832 round 10, #847, #848)
+
+Round 9 tears a projected HUD down from its target viewport's `tree_exiting` and
+parented the CanvasLayer to the projector node. Both halves are individually
+correct and together they are a use-after-free.
+
+Node::_propagate_exit_tree() (scene/main/node.cpp) raises data.blocked on a node
+BEFORE recursing into its children and lowers it only after that loop, so at the
+instant a node emits `tree_exiting` every STRICT ANCESTOR of it is blocked.
+Node::remove_child() ERR_FAIL_CONDs on data.blocked > 0 -- and so does the
+remove_child() that NOTIFICATION_PREDELETE performs on memdelete()'s behalf. When
+the target SubViewport is a DESCENDANT of the projector (a minimap or secondary
+camera parented under the splat node is the ordinary case), the unparent AND the
+free are both refused while the layer is freed anyway, leaving a pointer to freed
+memory in the projector's data.children -- which the rest of the teardown then
+traverses (_propagate_exit_tree walks that same map) or memdeletes a second time
+(PREDELETE's kill-children loop).
+
+The same shape is reachable without any nesting: _destroy_projected_debug_hud()
+and _destroy_debug_hud_control() also run from a peer's exit-time reconcile
+fan-out (_notify_debug_hud_dirty_for_renderer,
+GaussianSplatNodeDebugHelper::reconcile_debug_overlay_union_for_renderer), where
+this node can be a strict ancestor of the peer that is leaving. That second path
+predates round 9 on the native HUD control.
+
+Fix, safe by construction rather than by ordering: the projected layers hang off
+a dedicated child node, `GaussianSplatProjectedDebugHUDs`, whose only children
+are CanvasLayers this node creates. No Viewport and no peer node can ever be a
+descendant of it, so it is never a strict ancestor of anything whose
+`tree_exiting` reaches the teardown, so it is never blocked when that teardown
+runs, so remove_child() on it always succeeds. The one operation that still
+touches `this` -- adding and removing the host -- is confined to a creation path
+that checks whether add_child() was refused (and then records nothing, so the
+next reconcile retries) and to NOTIFICATION_EXIT_TREE, where
+_propagate_exit_tree() has already lowered this node's own data.blocked.
+
+Rejected alternatives: deferring the free (queue_free) still needs the layer
+severed from the dying viewport first -- CanvasLayer dereferences its raw
+Viewport* on its own EXIT_TREE -- and rebinding it to this node's viewport in the
+meantime attaches a second HUD canvas to a viewport that already has one, which
+is a transient violation of the round-6 invariant. Re-homing the layer into the
+target viewport's own subtree injects a node into somebody else's scene.
+
+Ownership is unchanged: a GaussianSplatNode3D still owns, updates and destroys
+every HUD control, and the projected layer still lives in the projector's own
+subtree -- one level deeper.
+
+Additionally, _detach_and_free_debug_hud_node() is now the single free path for
+every debug-HUD node (native layer and control included). It refuses to memdelete
+a node whose parent declined to unparent it and reports loudly instead, so a
+future mistake in the structure above degrades to a leak rather than to a silent
+use-after-free.
+
+Finding 2 (reconcile reach) is deliberately NOT fixed here and is filed as #848,
+with the limitation stated at collect_debug_hud_projection_viewports(). The
+obvious trigger, SceneTree::tree_changed, is emitted from inside
+_propagate_enter_tree()/_propagate_exit_tree() -- precisely the data.blocked
+windows this commit had to make the teardown safe against -- so it needs a
+deferred, coalesced reconcile point, which is a design change to the trigger and
+not a patch.
+
+Mutation-proven by
+"[GaussianSplatting][Node][SceneTree][RequiresGPU] A projected debug HUD
+unparents safely when its target SubViewport is nested under the projector".
+It asserts the safety property, not the implementation: (1) the parent that
+remove_child() will be called on is not an ancestor of the target viewport --
+that being exactly the condition under which it is blocked -- and (2) taking the
+nested viewport out of the tree emits no engine error, observed through a scoped
+ErrorHandlerList, because a refused remove_child() is an ERR_FAIL_COND_MSG and
+its emission can be read without touching the freed memory it leaves behind.
+Restoring round 9's `add_child(projected.layer)` fails exactly those two
+assertions (2 captured errors) while the other 8 of 10 still pass -- including
+the round-6 per-viewport counts and the round-9 "the nested viewport HAS a
+projected HUD" premise, so the RED run demonstrably reaches the branch -- and the
+unmutated RED run additionally segfaults during teardown, which is the corruption
+itself. 10/10 pass with the fix. All resolve/repair calls (get_renderer(), which
+runs _ensure_renderer()) are ordered BEFORE the HUD is enabled (round-8 vacuity
+trap), and HUD counts are taken from the viewport's side (CanvasLayer::get_viewport()
+RID).
+
+Evidence: GPU harness NodeSceneTree 37/37 cases 479/479 assertions, WorldSceneTree
+5/5 55/55, SceneDirectorSceneTree 14/14 206/206, all SUCCESS. Module tests 26
+lanes, 25 passed / 0 failed (759 tests). All 14 static CI guards pass; tests/ci
+unittest suite 903 tests OK.
+
+Manifest re-pinned by RECOMPUTING with the repo's own functions:
+check_renderer_release_gates._requires_gpu_snapshot -> (156,
+012b6b1627eed411abc7f1cb045f1fc66ed9b057bcd6bd4db545851fc22b2a60),
+test_gpu_harness_deferred_contract._batch_membership -> 88. The new case carries
+the [Node][SceneTree][RequiresGPU] tag order so it matches the NodeSceneTree
+filter and is not an orphan; deferred_count and unbatched_backlog unchanged at 2
+and 66.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* gaussian_splatting: keep the debug-HUD pointer when the unparent is refused so blocked teardowns stop accumulating layers (#831, #832 round 11)
+
+Round 10 made _detach_and_free_debug_hud_node() return false instead of
+memdelete()ing a node whose parent refused to unparent it, which turns a
+use-after-free into a recoverable refusal. But four of its five callers then
+nulled their pointer unconditionally, so the refused node was stranded: still
+parented, still bound to the viewport's canvas, owned by nobody.
+
+For the node's own HUD that is reachable, not hypothetical.
+Node::remove_child() does data.blocked++ around p_child->_set_tree(nullptr), so
+a node is blocked for the whole of a departing child's _propagate_exit_tree() --
+including the NOTIFICATION_EXIT_TREE in which that child runs
+_unregister_shared_renderer() ->
+GaussianSplatNodeDebugHelper::reconcile_debug_overlay_union_for_renderer() ->
+_update_debug_hud_visibility() on every remaining peer. When the remaining peer
+is the departing node's own parent, and the departing node was the only holder
+of the HUD request, the parent tears its HUD down while it cannot unparent
+anything. The control's parent is the layer (not blocked) so it goes down; the
+layer's parent is the node itself, so it does not. Dropping the pointer there
+meant the next enable built a SECOND GaussianSplatDebugHUDLayer beside the
+abandoned one -- once per blocked teardown, unbounded.
+
+_destroy_projected_debug_hud_host() already kept its pointer on refusal, so this
+was an internal inconsistency. All five call sites now share one contract:
+`false` means "still parented, still yours".
+
+  - _destroy_debug_hud_control(): keeps control and layer on refusal, and only
+    attempts the layer once the control is gone -- the control is parented UNDER
+    the layer, so freeing the layer while a retained control is still its child
+    would free that control through PREDELETE's kill-children loop and dangle
+    the retained pointer.
+  - _destroy_projected_debug_hud(): same, and it only erases the map record once
+    nothing survived. The record is what makes a retry possible;
+    _update_projected_debug_huds() drives both directions off that map, so a
+    retained entry comes back through the teardown on the next reconcile
+    (unblocked by then), and an entry whose viewport is still wanted is rebuilt
+    from scratch rather than re-armed on top of leftovers whose tree_exiting
+    connection the refused pass already dropped. Unreachable by construction via
+    the round-10 host; changed so a mistake in that construction cannot compound.
+  - _destroy_projected_debug_hud_host(): now declines while the map is non-empty,
+    because the projected layers are the host's children and freeing it would
+    take a retained one with it.
+
+No deferred retry is needed. The retained layer is reused by the next enable
+(so the residue never exceeds one node) and freed by the next teardown that runs
+outside a blocked window, which the test asserts explicitly.
+
+Also corrects the fail-safe's own ERR_PRINT, which said "leaking it": with every
+caller retaining, that is no longer what happens.
+
+Test: "[GaussianSplatting][Node][SceneTree][RequiresGPU] A refused native HUD
+teardown reuses its layer instead of accumulating abandoned ones". The peer is
+deliberately DATA-LESS -- the director never registers such a node (round 7) and
+_elect_debug_hud_owner() enumerates the director's instances, so the peer can
+never win the HUD election while still counting in the overlay union, which pins
+"the peer requests, the parent draws" without depending on iteration order. It
+counts the node's CanvasLayers on the viewport (CanvasLayer::get_viewport() RID)
+rather than its HUD controls, because an abandoned layer is EMPTY and
+Node::_validate_child_name() renames the duplicate to
+"@GaussianSplatDebugHUDLayer@N" -- so both existing observables report healthy
+while the leak grows.
+
+Mutation-proven: reverting gaussian_splat_node_3d.cpp to the round-10 head
+(bdc243525ef) fails exactly the three accumulation counts (2 == 1 after one
+refused teardown, 3 == 1 after two, 2 == 0 for the layers that never go away)
+while 13 of 16 assertions still pass -- including is_debug_hud_source_active(),
+the round-6 "exactly one HUD per viewport" count, and the premise that at least
+one unparent was actually REFUSED, so the RED run demonstrably reaches the
+branch. 16/16 pass with the fix.
+
+Evidence (RTX 3090, Vulkan, dev build):
+  - NodeSceneTree batch 38/38 cases, 495/495 assertions, 137 s wall (300 s
+    budget); WorldSceneTree 5/5, 55 assertions; SceneDirectorSceneTree 8/8,
+    87 assertions.
+  - tests/ci/run_module_tests.py: 26 lanes, 25 passed, 0 failures (the one
+    advisory-red lane, GPU Memory Stream no-coverage, is pre-existing).
+  - 16 CI guards run individually, all pass.
+
+Manifest re-pinned by RECOMPUTING with the repo's own functions
+(check_renderer_release_gates._requires_gpu_snapshot -> (157, 763c5528...),
+test_gpu_harness_deferred_contract._batch_membership -> 89): 156 -> 157
+[RequiresGPU] cases, 88 -> 89 in a named batch. deferred_count and
+unbatched_backlog unchanged at 2 and 66.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* gaussian_splatting: drop the projected debug-HUD capability, keep the teardown fail-safe it exposed (#831, #832 round 12, #847, #848)
+
+Rounds 1-8 fixed debug overlays on a shared renderer and were reviewed to zero
+threads and mergeable at b1321ba076b. Round 9 then added a NEW capability on top:
+projected debug HUDs via CanvasLayer::set_custom_viewport(), so a viewport that
+renders the shared world but contains no splat node still gets a HUD (#847).
+
+Three consecutive review rounds have since found a lifetime defect in that new
+code, and only in that new code:
+
+  - round 10: use-after-free when the target SubViewport is a descendant of the
+    projector -- Node::_propagate_exit_tree() blocks every strict ancestor, so
+    both the unparent and the free are refused while the free happens anyway;
+  - round 11: a permanent, accumulating leak when the detach is refused and the
+    caller discards the pointer;
+  - round 12: _destroy_projected_debug_hud() disconnects the viewport's
+    tree_exiting signal but retains both pointers, and the null-control-only
+    retry then re-arms the control WITHOUT restoring the signal, so the viewport
+    can finish deletion while the CanvasLayer and the map record are still
+    registered against it.
+
+A defect per round in scene-tree lifetime handling, in a diagnostics-only
+feature the base PR does not need. This removes it. The capability is not
+abandoned: #847 tracks projecting a HUD into a splat-node-less viewport and #848
+tracks the viewport-topology reconcile trigger it needs, so it can come back as
+its own change with its own review budget rather than as a rider on this one.
+
+REMOVED
+  GaussianSplatNode3D::_update_projected_debug_huds(),
+  _create_projected_debug_hud(), _destroy_projected_debug_hud(),
+  _destroy_projected_debug_huds(), _ensure_projected_debug_hud_host(),
+  _destroy_projected_debug_hud_host(), _on_projected_hud_viewport_exiting();
+  the ProjectedDebugHUD struct with its projected_debug_huds map and
+  projected_debug_hud_host pointer; the "GaussianSplatProjectedDebugHUDs" host
+  node and its "GaussianSplatProjectedDebugHUDLayer<id>" children;
+  GaussianSplatNodeDebugHelper::collect_debug_hud_projection_viewports(); the
+  nullptr-viewport relaxation of _node_can_host_debug_hud() and
+  _elect_debug_hud_owner() that elected the renderer-wide projector; every
+  CanvasLayer::set_custom_viewport() call in the module; the Viewport
+  tree_exiting hookups for projection targets; and the two [RequiresGPU] cases
+  that existed solely to pin projection behaviour,
+  "[GaussianSplatting][Node][SceneTree][RequiresGPU] A camera-only SubViewport
+  sharing the world gets a debug HUD and no viewport gets two" and
+  "[GaussianSplatting][Node][SceneTree][RequiresGPU] A projected debug HUD
+  unparents safely when its target SubViewport is nested under the projector",
+  plus the test helper find_debug_hud_layer_in_viewport() that had no other
+  caller.
+
+  gaussian_splat_node_helpers.cpp and gaussian_splat_node_helpers.h are now
+  byte-identical to b1321ba076b.
+
+KEPT, and this is the important half
+  1. _detach_and_free_debug_hud_node() and its refuse-to-free-a-still-parented-
+     node fail-safe. Round 10 established that the blocked-parent hazard is
+     reachable with NO nesting at all, through the peer exit-time reconcile
+     fan-out: _notify_debug_hud_dirty_for_renderer ->
+     GaussianSplatNodeDebugHelper::reconcile_debug_overlay_union_for_renderer()
+     -> peer->_update_debug_hud_visibility() -> _destroy_debug_hud_control().
+     Node::remove_child() holds data.blocked++ across the departing child's
+     whole _propagate_exit_tree(), so when the remaining peer is the departing
+     node's own parent, that parent cannot unparent its own HUD layer. That path
+     PREDATES round 9 and is independent of projection; deleting the fail-safe
+     with the feature would reintroduce a pre-existing use-after-free.
+  2. Round 11's retention-on-refusal for the native path in
+     _destroy_debug_hud_control(): the pointer is kept when the unparent is
+     refused, and the layer is only freed once the control it parents is gone,
+     so a blocked teardown leaves one reusable node instead of one more
+     abandoned GaussianSplatDebugHUDLayer per cycle. Its case,
+     "[GaussianSplatting][Node][SceneTree][RequiresGPU] A refused native HUD
+     teardown reuses its layer instead of accumulating abandoned ones", stays,
+     as do the helpers it reads through -- count_node_canvas_layers_in_viewport(),
+     count_debug_hud_controls_in_viewport() and ScopedEngineErrorCapture.
+  3. All seven rounds-2-to-8 invariants and every case pinning them, untouched.
+
+Manifest re-pinned by RECOMPUTING with the repo's own functions, never by hand:
+check_renderer_release_gates._requires_gpu_snapshot -> (155,
+b96b5660714e449d8c8d2ca9ea2c9e6e7a61610d6de6fdc7f18df619c28cc60d),
+test_gpu_harness_deferred_contract._batch_membership -> 87 in a named batch.
+157 -> 155 and 89 -> 87: both removed cases carried the
+[Node][SceneTree][RequiresGPU] tag order and ran in NodeSceneTree, so the
+batched count drops by exactly the same 2; neither was an orphan and neither was
+waived, so deferred_count and unbatched_backlog are unchanged at 2 and 66.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+---------
+
+Co-authored-by: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+This was referenced Sep 17, 2026
+GaussianSplatAsset exposes 13 multi-million-element arrays as editor properties, causing the on-load warning spam
+#834
+Closed
+Issue-ledger audit 2026-09-17: all 281 open issues classified against master; 32 closed
+#1021
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,2008 @@
+# Jax-Volumetric-Renderer
+A Jax based renderer for plenoxels, work in progress...
+
+<p>
+  <img src="https://github.com/szat/Jax-Volumetric-Renderer/assets/5555551/5a6c8778-d64f-4852-8280-39b1cee3e350"
+ width="300" height="200" />
+  <img src="https://github.com/szat/Jax-Volumetric-Renderer/assets/5555551/16f4c186-9292-4215-a78c-ea03be6ccd33"
+ width="200" height="200" />
+    <img src="https://github.com/szat/Jax-Volumetric-Renderer/assets/5555551/78dc14d3-1902-4c0f-9b2a-d1d9568659cf"
+ width="200" height="200" />
+  
+This is an ongoing project on Plenoxels, for didactic purposes, from this paper: https://alexyu.net/plenoxels/
+
+I am attempting to make a fast renderer in Jax, but using only a 8gb GPU. The full models as are 512x512x512, but we render only
+128x128x128, more is possible but requires more batching and potentially some other tricks like voxel partitionning. 
+
+## Usage:
+- The main work loop is in renderer_script.py, you will have to replace the relative paths so that the script can find the weights to the model.
+- The best is to run in the interpreter, there are a few calls to Open3d just to visualize what is happening, but actually not necessary.
+- The end result is in the end in an image buffer. 
+
+## Other small things I've done to make things fit in memory:
+- Work in float16
+- Render one channel at a time
+- Find the silhouette of the model to be rendered
+
+## Things I've tried but did not work out:
+- Used Octrees, they just don't work with Jax due to memory coalescence.
+
+Need to download the model weights from here: 
+https://drive.google.com/drive/folders/128yBriW1IG_3NJ5Rp7APSTZsJqdJdfc1
+
+## To have all the requirements installed, you need:
+- Jax
+- Opencv
+- Numpy
+- Open3d, just to visualize some stuff. 
+
+## Tips to install Jax:
+- Follow the steps on the website: https://jax.readthedocs.io/en/latest/installation.html
+- If you work in Pycharm, first launch the virtual env from the terminal, then launch Pycharm from the same terminal
+- If you call both TF2 or Torch as you call Jax (or even import them) you will likely run out of memory. They don't like each other.
+
+## TODO: 
+- Figure out where the random black dots are coming from on the render
+- Provide install script
+- Make python install wheel
+- Work on the optimization/training steps
+- Get a GPU with more VRAM
+
+## Bloopers:
+  
+<p>
+  <img src="https://github.com/szat/Jax-Volumetric-Renderer/assets/5555551/bb131ec4-68b6-4b45-a08e-65b68a22c5b9"
+ width="200" height="200" />
+  <img src="https://github.com/szat/Jax-Volumetric-Renderer/assets/5555551/a9614103-b6e9-42af-927c-d9e281cd85c6"
+ width="200" height="200" />
+  <img src="https://github.com/szat/Jax-Volumetric-Renderer/assets/5555551/99521272-81b3-4155-92e4-81ff14ede436"
+ width="200" height="200" />
+  <img src="https://github.com/szat/Jax-Volumetric-Renderer/assets/5555551/d3e98ddc-608a-4020-9be9-095ee28f54f0"
+ width="200" height="200" />
+    </p>
+
+<p>
+  <img src="https://github.com/szat/Jax-Volumetric-Renderer/assets/5555551/acc4034c-0e94-4870-819c-ebcfc9857b5a"
+ width="200" height="200" />
+  <img src="https://github.com/szat/Jax-Volumetric-Renderer/assets/5555551/49772b83-79c4-439d-b865-a2a6731b549d"
+ width="200" height="200" />
+    <img src="https://github.com/szat/Jax-Volumetric-Renderer/assets/5555551/acbae107-d3cb-4b41-bf59-d23b428a3edd"
+ width="200" height="200" />
+  <img src="https://github.com/szat/Jax-Volumetric-Renderer/assets/5555551/972565ad-d358-4359-a2e5-160ee6ef6a96"
+ width="200" height="200" />
+</p>
+
+### jax_helpers.py
+```
+from jax import grad, jit, vmap
+import jax.numpy as jnp
+import numpy as np
+
+def trilinear_interpolation_to_vmap(vecs, links, values_compressed):
+    xyz = vecs
+    xyz_floor = jnp.floor(xyz)
+    xd, yd, zd = xyz - xyz_floor
+    x0, y0, z0 = xyz_floor.astype(int)
+
+    l000 = links[x0, y0, z0]
+    l100 = links[x0+1, y0, z0]
+    l010 = links[x0, y0+1, z0]
+    l001 = links[x0, y0, z0+1]
+    l110 = links[x0+1, y0+1, z0]
+    l011 = links[x0, y0+1, z0+1]
+    l101 = links[x0+1, y0, z0+1]
+    l111 = links[x0+1, y0+1, z0+1]
+
+    v000 = values_compressed[l000]
+    v100 = values_compressed[l100]
+    v010 = values_compressed[l010]
+    v001 = values_compressed[l001]
+    v110 = values_compressed[l110]
+    v011 = values_compressed[l011]
+    v101 = values_compressed[l101]
+    v111 = values_compressed[l111]
+
+    tmpX = 1 - xd
+    tmpY = 1 - yd
+    tmpZ = 1 - zd
+    a000 = tmpX * tmpY
+    a100 = xd * tmpY
+    a010 = tmpX * yd
+    a110 = xd * yd
+    weights = jnp.array([a000, a010, a100, a110])
+
+    coeff = jnp.array([v000, v001, v010, v011, v100, v101, v110, v111])
+    weights = weights[:, None]
+    if coeff.ndim == 1:
+        coeff = coeff[:, None]
+
+    out = jnp.sum(weights * coeff[[0, 2, 4, 6], :], axis=0) * tmpZ + jnp.sum(weights * coeff[[1, 3, 5, 7], :], axis=0) * zd
+    out = out[None, :]
+    return out
+
+jit_trilinear_interp = jit(vmap(trilinear_interpolation_to_vmap, in_axes=(0, None, None)))
+
+def trilinear_interpolation_to_vmap_no_links(vecs, data):
+    xyz = vecs
+    xyz_floor = jnp.floor(xyz)
+    xd, yd, zd = xyz - xyz_floor
+    x0, y0, z0 = xyz_floor.astype(int)
+
+    v000 = data[x0, y0, z0]
+    v100 = data[x0+1, y0, z0]
+    v010 = data[x0, y0+1, z0]
+    v001 = data[x0, y0, z0+1]
+    v110 = data[x0+1, y0+1, z0]
+    v011 = data[x0, y0+1, z0+1]
+    v101 = data[x0+1, y0, z0+1]
+    v111 = data[x0+1, y0+1, z0+1]
+
+    tmpX = 1 - xd
+    tmpY = 1 - yd
+    tmpZ = 1 - zd
+    a000 = tmpX * tmpY
+    a100 = xd * tmpY
+    a010 = tmpX * yd
+    a110 = xd * yd
+    weights = jnp.array([a000, a010, a100, a110])
+
+    coeff = jnp.array([v000, v001, v010, v011, v100, v101, v110, v111])
+    weights = weights[:, None]
+    if coeff.ndim == 1:
+        coeff = coeff[:, None]
+
+    out = jnp.sum(weights * coeff[[0, 2, 4, 6], :], axis=0) * tmpZ + jnp.sum(weights * coeff[[1, 3, 5, 7], :], axis=0) * zd
+    out = out[None, :]
+    return out
+
+jit_trilinear_interp_no_links = jit(vmap(trilinear_interpolation_to_vmap_no_links, in_axes=(0, None)))
+
+def rotation_align(from_vec, to_vec):
+    assert from_vec.shape == to_vec.shape, "from_vec and to_vec need to be of the same shape"
+    if from_vec.ndim == 1:
+        v = np.cross(from_vec, to_vec)
+        # c = np.einsum('ij,ij...->i...', from_vec, to_vec)
+        c = np.dot(from_vec, to_vec)
+        if np.all(v == np.zeros(3)) and c > 0:
+            return np.eye(3)
+        if np.all(v == np.zeros(3)) and c < 0:
+            return -np.eye(3)
+        k = 1.0 / (1.0 + c)
+        return np.array([[v[0]**2 * k + c,    v[0]*v[1]*k - v[2], v[0]*v[2]*k + v[1]],
+                         [v[0]*v[1]*k + v[2], v[1]**2 * k + c,    v[1]*v[2]*k - v[0]],
+                         [v[0]*v[2]*k - v[1], v[1]*v[2]*k + v[0], v[2]**2 * k + c   ]])
+    if from_vec.ndim == 2:
+        v = np.cross(from_vec, to_vec)
+        c = np.einsum('ij,ij...->i...', from_vec, to_vec)
+        k = 1.0 / (1.0 + c)
+        out = np.array([[v[:, 0]**2 * k + c,    v[:, 0]*v[:, 1]*k - v[:, 2], v[:, 0]*v[:, 2]*k + v[:, 1]],
+                         [v[:, 0]*v[:, 1]*k + v[:, 2], v[:, 1]**2 * k + c,    v[:, 1]*v[:, 2]*k - v[:, 0]],
+                         [v[:, 0]*v[:, 2]*k - v[:, 1], v[:, 1]*v[:, 2]*k + v[:, 0], v[:, 2]**2 * k + c   ]])
+        out = np.einsum('ijk->kij', out) # rearrange dimensions
+        bool_flag_identity = np.all(v == np.zeros(3), axis=1) * c > 0
+        bool_flag_reverse = np.all(v == np.zeros(3), axis=1) * c < 0
+        out[bool_flag_identity] = np.eye(3)
+        out[bool_flag_reverse] = -np.eye(3)
+        return out
+
+class Camera:
+    def __init__(self,
+                 origin=np.zeros(3),
+                 orientation=np.array([0, 0, 1]),
+                 dist_plane=1,
+                 length_x=0.640,
+                 length_y=0.480,
+                 pixels_x=640,
+                 pixels_y=480):
+        self.origin = origin
+        self.orientation = orientation
+        self.dist_plane = dist_plane
+        self.length_x = length_x
+        self.length_y = length_y
+        self.pixels_x = pixels_x
+        self.pixels_y = pixels_y
+
+def get_camera_vectors(camera: Camera):
+    z = np.array([0, 0, 1])
+    x = np.array([1, 0, 0])
+    y = np.array([0, 1, 0])
+
+    # Put into world coordinates
+    R = rotation_align(z, camera.orientation)
+    z = np.dot(R, z)
+    x = np.dot(R, x)
+    y = np.dot(R, y)
+
+    # Camera template
+    z = z * camera.dist_plane
+    x = x * camera.length_x
+    y = y * camera.length_y
+    return z, x, y
+
+def get_camera_rays(camera: Camera):
+    z, x, y = get_camera_vectors(camera)
+    tics_x = np.expand_dims(np.linspace(-1, 1, camera.pixels_x), 1)
+    tics_y = np.expand_dims(np.linspace(-1, 1, camera.pixels_y), 1)
+
+    xx = tics_x * x
+    yy = tics_y * y
+    xx = np.expand_dims(xx, 0)
+    yy = np.expand_dims(yy, 1)
+    rays = xx + yy
+    zz = np.expand_dims(z, [0, 1])
+    rays = rays + zz
+    rays = rays / np.expand_dims(np.linalg.norm(rays, axis=2), 2)
+    return rays
+
+SH_C0 = 0.28209479177387814
+SH_C1 = 0.4886025119029199
+SH_C2 = np.array([
+    1.0925484305920792,
+    -1.0925484305920792,
+    0.31539156525252005,
+    -1.0925484305920792,
+    0.5462742152960396
+])
+SH_C3 = np.array([
+    -0.5900435899266435,
+    2.890611442640554,
+    -0.4570457994644658,
+    0.3731763325901154,
+    -0.4570457994644658,
+    1.445305721320277,
+    -0.5900435899266435
+])
+SH_C4 = np.array([
+    2.5033429417967046,
+    -1.7701307697799304,
+    0.9461746957575601,
+    -0.6690465435572892,
+    0.10578554691520431,
+    -0.6690465435572892,
+    0.47308734787878004,
+    -1.7701307697799304,
+    0.6258357354491761,
+])
+
+MAX_SH_BASIS = 10
+
+def eval_sh_bases_mine(dirs):
+    """
+    Evaluate spherical harmonics bases at unit directions,
+    without taking linear combination.
+    At each point, the final result may the be
+    obtained through simple multiplication.
+
+    :param basis_dim: int SH basis dim. Currently, 1-25 square numbers supported
+    :param dirs: np.ndarray (..., 3) unit directions
+
+    :return: np.ndarray (..., basis_dim)
+    """
+    basis_dim = 9
+    result = np.empty([dirs.shape[0], basis_dim], dtype=dirs.dtype)
+    result[..., 0] = SH_C0
+    if basis_dim > 1:
+        x, y, z = dirs[:, 0], dirs[:, 1], dirs[:, 2]
+        result[..., 1] = -SH_C1 * y
+        result[..., 2] = SH_C1 * z
+        result[..., 3] = -SH_C1 * x
+        if basis_dim > 4:
+            xx, yy, zz = x * x, y * y, z * z
+            xy, yz, xz = x * y, y * z, x * z
+            result[..., 4] = SH_C2[0] * xy
+            result[..., 5] = SH_C2[1] * yz
+            result[..., 6] = SH_C2[2] * (2.0 * zz - xx - yy)
+            result[..., 7] = SH_C2[3] * xz
+            result[..., 8] = SH_C2[4] * (xx - yy)
+
+            if basis_dim > 9:
+                result[..., 9] = SH_C3[0] * y * (3 * xx - yy)
+                result[..., 10] = SH_C3[1] * xy * z
+                result[..., 11] = SH_C3[2] * y * (4 * zz - xx - yy)
+                result[..., 12] = SH_C3[3] * z * (2 * zz - 3 * xx - 3 * yy)
+                result[..., 13] = SH_C3[4] * x * (4 * zz - xx - yy)
+                result[..., 14] = SH_C3[5] * z * (xx - yy)
+                result[..., 15] = SH_C3[6] * x * (xx - 3 * yy)
+
+    return result
+
+def eval_sh_bases_mine2(dirs):
+    """
+    Evaluate spherical harmonics bases at unit directions,
+    without taking linear combination.
+    At each point, the final result may the be
+    obtained through simple multiplication.
+
+    :param basis_dim: int SH basis dim. Currently, 1-25 square numbers supported
+    :param dirs: np.ndarray (..., 3) unit directions
+
+    :return: np.ndarray (..., basis_dim)
+    """
+    basis_dim = 9
+    result = jnp.empty(basis_dim, dtype=dirs.dtype)
+    result.at[0].set(SH_C0)
+    x, y, z = dirs[0], dirs[1], dirs[2]
+    result.at[1].set(-SH_C1 * y)
+    result.at[2].set(SH_C1 * z)
+    result.at[3].set(-SH_C1 * x)
+    xx, yy, zz = x * x, y * y, z * z
+    xy, yz, xz = x * y, y * z, x * z
+    result.at[4].set(SH_C2[0] * xy)
+    result.at[5].set(SH_C2[1] * yz)
+    result.at[6].set(SH_C2[2] * (2.0 * zz - xx - yy))
+    result.at[7].set(SH_C2[3] * xz)
+    result.at[8].set(SH_C2[4] * (xx - yy))
+    return result
+
+
+# http://psgraphics.blogspot.com/2016/02/new-simple-ray-box-test-from-andrew.html
+def intersect_ray_aabb(ray_origin, ray_inv_dir, box_min, box_max):
+    # considers the boundary of the volume as NON intersecting, if tmax <= tmin then NO intersection
+    if ray_origin.ndim == 1:
+        ray_origin = np.expand_dims(ray_origin, 0)
+        ray_inv_dir = np.expand_dims(ray_inv_dir, 0)
+    tmin = np.ones(len(ray_origin)) * -np.inf
+    tmax = np.ones(len(ray_origin)) * np.inf
+    t0 = (box_min - ray_origin) * ray_inv_dir
+    t1 = (box_max - ray_origin) * ray_inv_dir
+    tsmaller = np.nanmin([t0, t1], axis=0)
+    tbigger = np.nanmax([t0, t1], axis=0)
+    tmin = np.max([tmin, np.max(tsmaller, axis=1)], axis=0)
+    tmax = np.min([tmax, np.min(tbigger, axis=1)], axis=0)
+    return tmin, tmax
+```
+
+### jax_mipmap.py
+```
+import copy
+import time
+
+import jax.lax
+import numpy as np
+from trilinear_interpolation import *
+from sampling_branch import intersect_ray_aabb
+from spherical_harmonics import eval_sh_bases_mine
+import open3d as o3d
+from copy import deepcopy
+import jax.numpy as jnp
+from jax import lax
+import numpy as np
+from jax import grad, jit, vmap
+
+def create_sphere(radius, center):
+    x = []
+    y = []
+    z = []
+    for i in range(2000):
+        u = np.random.normal(0, 1)
+        v = np.random.normal(0, 1)
+        w = np.random.normal(0, 1)
+        norm = (u * u + v * v + w * w) ** (0.5)
+        xi, yi, zi = u / norm, v / norm, w / norm
+        x.append(xi)
+        y.append(yi)
+        z.append(zi)
+
+    x = np.array(x)
+    y = np.array(y)
+    z = np.array(z)
+
+    out = np.vstack([x, y, z]).T
+    out *= radius
+    out += center
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(out)
+    return pcd
+
+def create_line(start, end, nb):
+    x = np.linspace(start[0], end[0], nb)
+    y = np.linspace(start[1], end[1], nb)
+    z = np.linspace(start[2], end[2], nb)
+    out = np.vstack([x, y, z]).T
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(out)
+    return pcd
+
+def create_bbox(side=256):
+    # Create the x, y, and z coordinates using meshgrid
+    x, y, z = np.meshgrid(np.arange(side), 0, 0, indexing='ij')
+    coords = np.stack([x, y, z], axis=-1)
+    coords = coords.reshape([-1, 3])
+
+    x, y, z = np.meshgrid(np.arange(side), side, 0, indexing='ij')
+    coords_ = np.stack([x, y, z], axis=-1)
+    coords_ = coords_.reshape([-1, 3])
+    coords = np.vstack([coords, coords_])
+
+    x, y, z = np.meshgrid(np.arange(side), 0, side, indexing='ij')
+    coords_ = np.stack([x, y, z], axis=-1)
+    coords_ = coords_.reshape([-1, 3])
+    coords = np.vstack([coords, coords_])
+
+    x, y, z = np.meshgrid(np.arange(side), side, side, indexing='ij')
+    coords_ = np.stack([x, y, z], axis=-1)
+    coords_ = coords_.reshape([-1, 3])
+    coords = np.vstack([coords, coords_])
+
+    x, y, z = np.meshgrid(0, np.arange(side), 0, indexing='ij')
+    coords_ = np.stack([x, y, z], axis=-1)
+    coords_ = coords_.reshape([-1, 3])
+    coords = np.vstack([coords, coords_])
+
+    x, y, z = np.meshgrid(side, np.arange(side), 0, indexing='ij')
+    coords_ = np.stack([x, y, z], axis=-1)
+    coords_ = coords_.reshape([-1, 3])
+    coords = np.vstack([coords, coords_])
+
+    x, y, z = np.meshgrid(0, np.arange(side), side, indexing='ij')
+    coords_ = np.stack([x, y, z], axis=-1)
+    coords_ = coords_.reshape([-1, 3])
+    coords = np.vstack([coords, coords_])
+
+    x, y, z = np.meshgrid(side, np.arange(side), side, indexing='ij')
+    coords_ = np.stack([x, y, z], axis=-1)
+    coords_ = coords_.reshape([-1, 3])
+    coords = np.vstack([coords, coords_])
+
+    x, y, z = np.meshgrid(0, 0, np.arange(side), indexing='ij')
+    coords_ = np.stack([x, y, z], axis=-1)
+    coords_ = coords_.reshape([-1, 3])
+    coords = np.vstack([coords, coords_])
+
+    x, y, z = np.meshgrid(side, 0, np.arange(side), indexing='ij')
+    coords_ = np.stack([x, y, z], axis=-1)
+    coords_ = coords_.reshape([-1, 3])
+    coords = np.vstack([coords, coords_])
+
+    x, y, z = np.meshgrid(0, side, np.arange(side), indexing='ij')
+    coords_ = np.stack([x, y, z], axis=-1)
+    coords_ = coords_.reshape([-1, 3])
+    coords = np.vstack([coords, coords_])
+
+    x, y, z = np.meshgrid(side, side, np.arange(side), indexing='ij')
+    coords_ = np.stack([x, y, z], axis=-1)
+    coords_ = coords_.reshape([-1, 3])
+    coords = np.vstack([coords, coords_])
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(coords)
+    return pcd
+
+def mipmap_compute(mat):
+    xdim, ydim, zdim = mat.shape
+
+    levels = jnp.log2(xdim).astype(int)# add 1 for the root node
+    mipmap = []
+
+    occupancy_mat = np.zeros(mat.shape)
+    occupancy_mat[mat > 0] = 1
+    nb_of_pts = occupancy_mat.sum()
+    data = jnp.array(occupancy_mat.astype(jnp.float32))
+
+    data = data[None, :, :, :, None]
+    kernel_list = []
+    dn_list = []
+    for i in range(levels):
+        kernel = jnp.ones([2**i, 2**i, 2**i])[:, :, :, jnp.newaxis, jnp.newaxis]
+        dn = lax.conv_dimension_numbers(data.shape, kernel.shape, ('NHWDC', 'HWDIO', 'NHWDC'))
+        kernel_list.append(kernel)
+        dn_list.append(dn)
+
+    for i in range(levels):
+        dn = dn_list[i]
+        kernel = kernel_list[i]
+        out = lax.conv_general_dilated(data,  # lhs = image tensor
+                                       kernel,  # rhs = conv kernel tensor
+                                       (2**i, 2**i, 2**i),  # window strides
+                                       'SAME',  # padding mode
+                                       (1, 1, 1),  # lhs/image dilation
+                                       (1, 1, 1),  # rhs/kernel dilation
+                                       dn)  # dimension_numbers
+        mipmap.append(out[0, :, :, :, 0])
+        print("Finished level i = " + str(i))
+
+    mipmap.append(jnp.array([[[nb_of_pts]]]))
+    return mipmap
+
+def filter_over_sphere(grid, center, radius):
+    xn, yn, zn = grid.shape
+    x, y, z = np.meshgrid(np.arange(xn), np.arange(yn), np.arange(zn), indexing='ij')
+    x = x - center[0]
+    y = y - center[1]
+    z = z - center[2]
+    norm = x**2 + y**2 + z**2
+    mask = norm < radius**2
+    return mask
+
+def is_inside_box(points, box_min, box_max):
+    """
+    Check if points are inside the given box.
+
+    Parameters:
+    points (ndarray): An array of shape (n, 3) representing n points in 3D space.
+    box_min (tuple): A tuple (x_min, y_min, z_min) representing the minimum corner of the box.
+    box_max (tuple): A tuple (x_max, y_max, z_max) representing the maximum corner of the box.
+
+    Returns:
+    ndarray: A boolean array where each element indicates whether the corresponding point is inside the box.
+    """
+    x_inside = (points[:, 0] >= box_min[0]) & (points[:, 0] <= box_max[0])
+    y_inside = (points[:, 1] >= box_min[1]) & (points[:, 1] <= box_max[1])
+    z_inside = (points[:, 2] >= box_min[2]) & (points[:, 2] <= box_max[2])
+    return x_inside & y_inside & z_inside
+
+
+def viz_mipmap(mipmap, level, total_width, ray_ori = np.zeros(3), ray_end = np.ones(3)*256, touched = []):
+    import open3d as o3d
+    import open3d.visualization as vis
+    import numpy as np
+
+    bbox = create_bbox(total_width)
+    nb_bins = 2**level
+    assert nb_bins == len(mipmap[level])
+    box_width = 256 / (2**level)
+
+    box = o3d.geometry.TriangleMesh.create_box(box_width, box_width, box_width)
+    box.compute_triangle_normals()
+
+    geoms = []
+    grid = mipmap[level]
+    for i in range(2**level):
+        for j in range(2 ** level):
+            for k in range(2 ** level):
+                if grid[i, j, k] != 0:
+                    box = o3d.geometry.TriangleMesh.create_box(box_width, box_width, box_width)
+                    box.translate(np.array([box_width*i, box_width*j, box_width*k]))
+                    box.compute_triangle_normals()
+                    occ = grid[i, j, k] / box_width**4
+                    mat_box = vis.rendering.MaterialRecord()
+                    mat_box.shader = 'defaultLitTransparency'
+                    mat_box.base_color = [0.5, 0.5, 0.5, occ]
+                    mat_box.base_roughness = 0.0
+                    mat_box.base_reflectance = 0.0
+                    mat_box.base_clearcoat = 1.0
+                    mat_box.thickness = 1.0
+                    mat_box.transmission = 1.0
+                    mat_box.absorption_distance = 10
+                    mat_box.absorption_color = [0.5, 0.5, 0.5]
+                    name = 'box_'+str(i)+'_'+str(j)+'_'+str(k)
+                    geoms.append({'name':name, 'geometry':box, 'material':mat_box})
+
+    for i in range(len(touched)):
+        ori = touched[i]
+        box = o3d.geometry.TriangleMesh.create_box(box_width, box_width, box_width)
+        box.translate(ori * box_width)
+        box.compute_triangle_normals()
+        mat_box = vis.rendering.MaterialRecord()
+        mat_box.shader = 'defaultLitTransparency'
+        occ = 1
+        mat_box.base_color = [1, 0, 0, occ]
+        mat_box.base_roughness = 1.0
+        mat_box.base_reflectance = 0.0
+        mat_box.base_clearcoat = 1.0
+        mat_box.thickness = 1.0
+        mat_box.transmission = 0.5
+        mat_box.absorption_distance = 10
+        mat_box.absorption_color = [1, 0, 0]
+        name = 'box_touch' + str(i)
+        geoms.append({'name': name, 'geometry': box, 'material': mat_box})
+
+    line = create_line(ray_ori, ray_end, nb_bins * 4)
+    geoms.append({'name': 'bbox', 'geometry': bbox})
+    geoms.append({'name': 'line', 'geometry': line})
+    return geoms
+
+def create_occupancy_voxels(density_matrix):
+    mat = density_matrix
+    occupancy_mat = np.zeros(mat.shape)
+    occupancy_mat[mat > 0] = 1
+    data = jnp.array(occupancy_mat.astype(jnp.float32))
+    data = data[None, :, :, :, None]
+    kernel = jnp.ones([2, 2, 2])[:, :, :, jnp.newaxis, jnp.newaxis]
+    dn = lax.conv_dimension_numbers(data.shape, kernel.shape, ('NHWDC', 'HWDIO', 'NHWDC'))
+    out = lax.conv_general_dilated(data,  kernel, (1, 1, 1), 'SAME', (1, 1, 1), (1, 1, 1), dn)
+    out = out[0, :, :, :, 0]
+    mask = np.array(out == 8)
+    return mask.astype(int)
+
+def check_table(table, next_table):
+    shift = np.array([[0, 0, 0], [0, 0, 1], [0, 1, 0], [1, 0, 0], [0, 1, 1], [1, 1, 0], [1, 0, 1], [1, 1, 1]])
+    for i in range(len(table)):
+        for j in range(8):
+            if table[i, j] != -1:
+                xyz = table[i, -3:] * 2
+                idx_next = int(table[i, j])
+                xyz_next = next_table[idx_next, -3:]
+                xyz = xyz + shift[j]
+                np.testing.assert_almost_equal(xyz, xyz_next)
+    return True
+
+def make_table_last(grid):
+    x, y, z = np.where(grid)
+    table = np.ones([len(x), 3]) * -1
+    table[:, 0] = x
+    table[:, 1] = y
+    table[:, 2] = z
+    return table
+
+def make_table(grid_coarse, grid_fine):
+    grid = grid_fine
+    x, y, z = np.where(grid)
+    idx = jnp.arange(0, grid.sum())
+    tmp = np.ones_like(grid) * -1
+    tmp[grid] = idx
+    grid = tmp
+    for i in range(len(x)):
+        assert grid[x[i], y[i], z[i]] == i
+
+    grid_000 = grid[0::2, 0::2, 0::2]
+    grid_001 = grid[0::2, 0::2, 1::2]
+    grid_010 = grid[0::2, 1::2, 0::2]
+    grid_100 = grid[1::2, 0::2, 0::2]
+    grid_011 = grid[0::2, 1::2, 1::2]
+    grid_110 = grid[1::2, 1::2, 0::2]
+    grid_101 = grid[1::2, 0::2, 1::2]
+    grid_111 = grid[1::2, 1::2, 1::2]
+
+    mask_coarse = grid_coarse.flatten()
+    f_000 = grid_000.flatten()
+    f_001 = grid_001.flatten()
+    f_010 = grid_010.flatten()
+    f_100 = grid_100.flatten()
+    f_011 = grid_011.flatten()
+    f_110 = grid_110.flatten()
+    f_101 = grid_101.flatten()
+    f_111 = grid_111.flatten()
+
+    f_000 = f_000[mask_coarse]
+    f_001 = f_001[mask_coarse]
+    f_010 = f_010[mask_coarse]
+    f_100 = f_100[mask_coarse]
+    f_011 = f_011[mask_coarse]
+    f_110 = f_110[mask_coarse]
+    f_101 = f_101[mask_coarse]
+    f_111 = f_111[mask_coarse]
+
+    table = np.ones([mask_coarse.sum(), 8+3]) * -1
+    table[:, 0] = f_000
+    table[:, 1] = f_001
+    table[:, 2] = f_010
+    table[:, 3] = f_100
+    table[:, 4] = f_011
+    table[:, 5] = f_110
+    table[:, 6] = f_101
+    table[:, 7] = f_111
+    x, y, z = np.where(grid_coarse) # coarse
+    table[:, 8] = x
+    table[:, 9] = y
+    table[:, 10] = z
+    # table[:,11] = level
+    return table
+
+def ray_mipmap_intersect_forloop(ray_ori, ray_inv_dir, tables_list, max_level):
+    cube_touched_idx = [0]
+    new_list = []
+    cube_ori_list = []
+    for level in range(max_level+1):
+        table = tables_list[level]  # from mipmap 2 to mipmap 3
+        cube_size = 256 / (2 ** level)
+        print(len(cube_touched_idx))
+        for i in cube_touched_idx:
+            cube_ori = table[i, -3:] * cube_size
+            cube_end = cube_ori + cube_size
+            tn, tf = intersect_ray_aabb(ray_ori, ray_inv_dir, cube_ori, cube_end)
+            if tn <= tf:
+                if level == max_level:
+                    cube_ori_list.append(table[i, -3:])
+                    mask = table[i, :8] != -1
+                    idx = table[i, :8][mask]
+                    idx = idx.astype(int)
+                    new_list += idx.tolist()
+                else:
+                    mask = table[i, :8] != -1
+                    idx = table[i, :8][mask]
+                    idx = idx.astype(int)
+                    new_list += idx.tolist()
+        cube_touched_idx = new_list
+        new_list = []
+    return cube_ori_list
+
+
+def ray_mipmap_intersect_vectorized(ray_ori, ray_inv_dir, tables_list, max_level):
+    cube_touched_idx = np.array([0])
+    for level in range(max_level+1):
+        table = tables_list[level]  # from mipmap 2 to mipmap 3
+        cube_size = 256 / (2 ** level)
+        tn = np.zeros_like(cube_touched_idx)
+        tf = np.zeros_like(cube_touched_idx)
+        cube_ori = table[cube_touched_idx, -3:] * cube_size
+        cube_end = cube_ori + cube_size
+
+        for it in range(len(cube_touched_idx)):
+            tn[it], tf[it] = intersect_ray_aabb(ray_ori, ray_inv_dir, cube_ori[it], cube_end[it])
+
+        mask = tn <= tf
+        cube_touched_idx = cube_touched_idx[mask]
+        table = table[cube_touched_idx]
+        mask = table[:,:8] != -1
+        idx = table[:, :8][mask]
+        idx = idx.astype(int)
+        new_list = idx
+
+        if level == max_level:
+            return table[:, -3:]
+
+        cube_touched_idx = new_list
+    return table[:, -3:]
+
+# do all the lines and use jit?
+# table is of fixed size per grid
+def ray_grid_intersect(ray_ori, ray_inv_dir, table, level):
+    cube_size = 256 / (2 ** level)
+    idx_list = []
+    for i in range(len(table)):
+        cube_ori = table[i, -3:] * cube_size
+        cube_end = cube_ori + cube_size
+        tn, tf = intersect_ray_aabb(ray_ori, ray_inv_dir, cube_ori, cube_end)
+        if tn <= tf:
+            idx_list.append(i)
+    return table[idx_list, -3:]
+
+def check_in_grid(pts, grid):
+    pts = np.array(pts)
+    grid = np.array(grid).astype(int)
+    for i in range(len(pts)):
+        pt = pts[i]
+        flag = grid[int(pt[0]), int(pt[1]), int(pt[2])]
+        if flag != 1:
+            print("not equal at ith={} position ({}, {}, {})".format(i, int(pt[0]), int(pt[1]), int(pt[2])))
+        # fals = jnp.array([False])
+        # if flag == fals:
+        #
+
+def viz_line_intersection(level, total_width, ray_ori=np.zeros(3), ray_end=np.ones(3) * 256, touched=[]):
+        import open3d as o3d
+        import open3d.visualization as vis
+        import numpy as np
+
+        bbox = create_bbox(total_width)
+        nb_bins = 2 ** level
+        box_width = 256 / (2 ** level)
+
+        box = o3d.geometry.TriangleMesh.create_box(box_width, box_width, box_width)
+        box.compute_triangle_normals()
+
+        geoms = []
+
+        for i in range(len(touched)):
+            ori = touched[i]
+            box = o3d.geometry.TriangleMesh.create_box(box_width, box_width, box_width)
+            box.translate(ori * box_width)
+            box.compute_triangle_normals()
+            mat_box = vis.rendering.MaterialRecord()
+            mat_box.shader = 'defaultLitTransparency'
+            occ = 0.2
+            mat_box.base_color = [1, 0, 0, occ]
+            mat_box.base_roughness = 1.0
+            mat_box.base_reflectance = 0.0
+            mat_box.base_clearcoat = 1.0
+            mat_box.thickness = 1.0
+            mat_box.transmission = 0.5
+            mat_box.absorption_distance = 10
+            mat_box.absorption_color = [1, 0, 0]
+            name = 'box_touch' + str(i)
+            geoms.append({'name': name, 'geometry': box, 'material': mat_box})
+
+        line = create_line(ray_ori, ray_end, nb_bins * 4)
+        geoms.append({'name': 'bbox', 'geometry': bbox})
+        geoms.append({'name': 'line', 'geometry': line})
+        return geoms
+
+
+
+def check_k_table(k_table, g_table, g_table_level):
+    voxel_size = 256 / (2 ** g_table_level)
+    for i in range(len(k_table)):
+        cube_ori = k_table[i, 6:9]
+        cube_row = k_table[i, -1]
+        cube_pos = g_table[int(cube_row), -3:]
+        np.testing.assert_almost_equal(cube_pos * voxel_size, cube_ori)
+
+
+def init_k_table(rays_ori, rays_inv, init_g_table):
+    nb_rays = len(rays_inv)
+    rays_id = np.arange(0, nb_rays)
+    level = 0
+    g_table = init_g_table  # from mipmap 2 to mipmap 3
+    cube_size = 256 / (2 ** level)
+    cube_ori = g_table[0, -3:] * cube_size
+    cube_end = cube_ori + cube_size
+
+    nb_compute = nb_rays # assume we check root intersection first
+    k_table = np.zeros([nb_compute, 3 + 3 + 3 + 3 + 1 + 1])
+    k_table[:, -2] = rays_id
+    k_table[:, -1] = 0  # voxel id / row id
+    k_table[:, 0:3] = rays_ori
+    k_table[:, 3:6] = rays_inv
+    k_table[:, 6:9] = cube_ori
+    k_table[:, 9:12] = cube_end
+    return k_table
+
+def init_k_table_jax(rays_ori, rays_inv, init_g_table):
+    nb_rays = len(rays_inv)
+    rays_id = jnp.arange(0, nb_rays)
+    level = 0
+    g_table = init_g_table  # from mipmap 2 to mipmap 3
+    cube_size = 256 / (2 ** level)
+    cube_ori = g_table[0, -3:] * cube_size
+    cube_end = cube_ori + cube_size
+
+    nb_compute = nb_rays # assume we check root intersection first
+    k_table = jnp.zeros([nb_compute, 3 + 3 + 3 + 3 + 1 + 1])
+    k_table = k_table.at[:, -2].set(rays_id)
+    k_table = k_table.at[:, -1  ].set(0)  # voxel id / row id
+    k_table = k_table.at[:, 0:3 ].set(rays_ori)
+    k_table = k_table.at[:, 3:6 ].set(rays_inv)
+    k_table = k_table.at[:, 6:9 ].set(cube_ori)
+    k_table = k_table.at[:, 9:12].set(cube_end)
+    return k_table
+
+
+def next_k_table(k_table, g_table, level):
+    shift = np.array([[0, 0, 0], [0, 0, 1], [0, 1, 0], [1, 0, 0], [0, 1, 1], [1, 1, 0], [1, 0, 1], [1, 1, 1]])
+    tmp = []
+    voxel_size = 256 / (2 ** level)
+    sub_voxel_size = voxel_size / 2
+    for i in range(len(k_table)):
+        k_row = k_table[i, :]
+        voxel_id = int(k_row[-1])
+        voxel_pos = g_table[voxel_id][-3:] * voxel_size
+        mask_alive_sub_voxels = g_table[voxel_id][:8] != -1
+        sub_voxel_row = g_table[voxel_id][:8][mask_alive_sub_voxels]
+        sub_voxel_ori = voxel_pos + shift[mask_alive_sub_voxels] * sub_voxel_size
+        sub_voxel_end = sub_voxel_ori + sub_voxel_size
+        r_ori = k_row[0:3]
+        r_inv = k_row[3:6]
+        r_id = k_row[-2]
+        next_k = np.zeros([len(sub_voxel_row), 3 + 3 + 3 + 3 + 1 + 1])
+        next_k[:, :3] = r_ori
+        next_k[:, 3:6] = r_inv
+        next_k[:, -2] = r_id
+        next_k[:, 6:9] = sub_voxel_ori
+        next_k[:, 9:12] = sub_voxel_end
+        next_k[:, -1] = sub_voxel_row
+        tmp.append(next_k)
+    return np.concatenate(tmp)
+
+
+def next_k_table_vec(k_table, g_table, level):
+    shift = np.array([[0, 0, 0], [0, 0, 1], [0, 1, 0], [1, 0, 0], [0, 1, 1], [1, 1, 0], [1, 0, 1], [1, 1, 1]])
+    tmp = []
+    voxel_size = 256 / (2 ** level)
+    sub_voxel_size = voxel_size / 2
+    for i in range(len(k_table)):
+        k_row = k_table[i, :]
+        voxel_id = int(k_row[-1])
+        voxel_pos = g_table[voxel_id][-3:] * voxel_size
+        mask_alive_sub_voxels = g_table[voxel_id][:8] != -1
+        sub_voxel_row = g_table[voxel_id][:8][mask_alive_sub_voxels]
+        sub_voxel_ori = voxel_pos + shift[mask_alive_sub_voxels] * sub_voxel_size
+        sub_voxel_end = sub_voxel_ori + sub_voxel_size
+        r_ori = k_row[0:3]
+        r_inv = k_row[3:6]
+        r_id = k_row[-2]
+        next_k = np.zeros([len(sub_voxel_row), 3 + 3 + 3 + 3 + 1 + 1])
+        next_k[:, :3] = r_ori
+        next_k[:, 3:6] = r_inv
+        next_k[:, -2] = r_id
+        next_k[:, 6:9] = sub_voxel_ori
+        next_k[:, 9:12] = sub_voxel_end
+        next_k[:, -1] = sub_voxel_row
+        tmp.append(next_k)
+    return np.concatenate(tmp)
+
+
+def intersect_ray_aabb_jax(ray_origin, ray_inv_dir, box_min, box_max):
+    t0 = (box_min - ray_origin) * ray_inv_dir
+    t1 = (box_max - ray_origin) * ray_inv_dir
+    tsmaller = jnp.nanmin(jnp.vstack([t0, t1]), axis=0)
+    tbigger = jnp.nanmax(jnp.vstack([t0, t1]), axis=0)
+    tmin = jnp.max(jnp.array([-jnp.inf, jnp.max(tsmaller)]))
+    tmax = jnp.min(jnp.array([jnp.inf, jnp.min(tbigger)]))
+    return tmin, tmax
+```
+
+### o3d_helpers.py
+```
+import open3d as o3d
+import numpy as np
+
+def visualize_3d_points(points):
+    """
+    Visualizes a set of 3D points.
+
+    Args:
+    points (np.ndarray): NumPy array of shape (n, 3) representing 3D points.
+    """
+    # Ensure the input is a NumPy array
+    if not isinstance(points, np.ndarray):
+        raise ValueError("The input points must be a NumPy array.")
+
+    # Ensure the shape of the array is correct
+    if points.shape[1] != 3:
+        raise ValueError("The input array must have a shape of (n, 3).")
+
+    # Create a point cloud object
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+
+    # Visualize the point cloud
+    o3d.visualization.draw_geometries([pcd])
+```
+
+### renderer_script.py
+```
+import copy
+import os
+import sys
+sys.path.append('.')
+import cv2
+import numpy as np
+from jax_helpers import *
+import open3d as o3d
+from jax_mipmap import *
+from o3d_helpers import *
+
+model_name = "lego"
+path_to_weigths = f"/home/adrian/Documents/Nerf/256_to_512_fasttv/{model_name}/ckpt.npz"
+img_size = 800
+batch_size = 1024*4
+nb_samples = 512
+nb_sh_channels = 3
+size_model = 128
+device = "cuda"
+
+# Try to render now only with one channel???
+data = np.load(path_to_weigths, allow_pickle=True)
+# Access data arrays using keys
+npy_radius = data['radius']
+npy_center = np.float16(data['center'])
+npy_links = data['links']
+npy_density_data = np.float16(data['density_data'])
+npy_sh_data = np.float16(data['sh_data'])
+npy_basis_type = data['basis_type']
+
+mask_sphere = filter_over_sphere(npy_links, np.ones(3)*(512/2), 512/2-10)
+npy_links[~mask_sphere] = 0
+
+# kill one voxel for simplicity and indexing
+npy_density_data[0] = -999
+npy_sh_data[0] = -999
+npy_links[npy_links < 0] = 0
+
+# Here we take only one channel npy_sh_data[:,:,:,:9]
+npy_density_data = npy_density_data[npy_links[::4, ::4, ::4]]
+npy_sh_data = npy_sh_data[npy_links[::4, ::4, ::4]]
+npy_sh_data_c1 = npy_sh_data[:,:,:,:9]
+npy_sh_data_c2 = npy_sh_data[:,:,:,9:18]
+npy_sh_data_c3 = npy_sh_data[:,:,:,18:]
+
+origin = np.array([size_model + 20., size_model + 20., size_model + 20.])
+orientation = np.array([-1., -1., -1.])
+orientation = orientation / np.linalg.norm(orientation)
+camera = Camera(origin=origin, orientation=orientation, dist_plane=2, length_x=1, length_y=1,
+                pixels_x=img_size, pixels_y=img_size)
+rays_cam = get_camera_rays(camera)
+rays_origins = np.tile(origin, (img_size*img_size, 1)).astype(np.float32)
+rays_dirs = rays_cam.reshape((img_size*img_size, 3)).astype(np.float32)
+box_min = np.zeros(rays_origins.shape)
+box_max = np.ones(rays_origins.shape)*(size_model - 2)
+ray_inv_dirs = 1. / rays_dirs
+tmin, tmax = intersect_ray_aabb(rays_origins, ray_inv_dirs, box_min, box_max)
+sh_mine = eval_sh_bases_mine(rays_dirs)
+
+mask = np.ones([800, 800])
+mask = mask == 1
+mask = mask.flatten()
+
+mask = tmin < tmax
+valid_rays_origins = rays_origins[mask]
+valid_rays_dirs = rays_dirs[mask]
+valid_tmin = tmin[mask]
+valid_tmin = valid_tmin[:, None]
+valid_tmax = tmax[mask]
+valid_tmax = valid_tmax[:, None]
+valid_sh = sh_mine[mask]
+
+x = np.concatenate((valid_rays_origins, valid_rays_dirs, valid_tmin, valid_tmax, valid_sh), axis=1)
+x = np.float16(x)
+
+colors = np.zeros([800*800, 3])
+max_dt = np.max(tmax - tmin)
+nb = 100
+step_size = 0.5
+delta_scale = 1/128
+
+tics = np.float16(np.arange(0.05, 0.95, step=1/nb_samples))
+tics = jnp.array(tics)
+
+nb_samples = 2 * npy_density_data.shape[0]
+tics = jnp.float16(jnp.arange(0.05, 0.95, step=1 / nb_samples))
+
+# could be done once on a inbetween grid
+def mean3d_to_vmap_no_links(vecs, data):
+    xyz = vecs
+    xyz_floor = jnp.floor(xyz)
+    x0, y0, z0 = xyz_floor.astype(int)
+
+    v000 = data[x0, y0, z0]
+    v100 = data[x0+1, y0, z0]
+    v010 = data[x0, y0+1, z0]
+    v001 = data[x0, y0, z0+1]
+    v110 = data[x0+1, y0+1, z0]
+    v011 = data[x0, y0+1, z0+1]
+    v101 = data[x0+1, y0, z0+1]
+    v111 = data[x0+1, y0+1, z0+1]
+
+    tmp = jnp.array([v000, v100, v010, v001, v110, v011, v101, v111])
+    return jnp.mean(tmp)
+
+mean3d_no_links = jit(vmap(mean3d_to_vmap_no_links, in_axes=(0, None)))
+
+def silhouette(x, npy_density_data):
+    ori = x[:3]
+    dir = x[3:6]
+    tmin = x[6:7]
+    tmax = x[7:8]
+    samples = (tmax - tmin) * tics + tmin
+    tmp = jnp.matmul(samples[:, None], dir[None, :])
+    tmp = jnp.add(tmp, ori[None, :])
+    sample_points_in = tmp
+
+    out = mean3d_no_links(sample_points_in, npy_density_data)
+    sample_point_idx = jnp.argmax(out > -999)
+    out = sample_points_in[sample_point_idx]
+    return out
+
+silhouete = jit(vmap(silhouette, in_axes=(0, None)))
+
+front = silhouete(x, npy_density_data)
+front = np.array(front)
+
+visualize_3d_points(front)
+
+mask_box = is_inside_box(front, 10*np.ones(3), (size_model-10)*np.ones(3))
+front = front[mask_box]
+
+visualize_3d_points(front)
+
+x = x[mask_box]
+
+line_end = front + x[:, 3:6] * 5
+line_start = front + x[:, 3:6] * (-1)
+
+line_end = line_end[::43]
+line_start = line_start[::43]
+
+# Define multiple points for the lines
+line_points =  np.vstack([line_start, line_end])
+lines = []
+for i in range(len(line_end)):
+    lines.append([i, i+len(line_end)])
+
+# # Create a LineSet object
+line_set = o3d.geometry.LineSet()
+line_set.points = o3d.utility.Vector3dVector(line_points)
+line_set.lines = o3d.utility.Vector2iVector(lines)
+line_set.paint_uniform_color([0, 1, 0])  # Red color for the line
+
+pcd = o3d.geometry.PointCloud()
+pcd.points = o3d.utility.Vector3dVector(front)
+
+o3d.visualization.draw_geometries([pcd, line_set])
+
+tics = jnp.float16(jnp.arange(0, 1, step=1 / 50))
+xx = x
+xx[:, :3] = front
+def render_slim_c1(xxx, npy_data_in):
+    f = xxx[:3]
+    ray_start = f + xxx[3:6] * 0
+    dir = xxx[3:6]
+    my_sh_in = xxx[8:]
+
+    samples = tics * 50
+    tmp = jnp.matmul(samples[:, None], dir[None, :])
+    tmp = jnp.add(tmp, ray_start[None, :])
+
+    sample_points_in = tmp
+    interp = jit_trilinear_interp_no_links(sample_points_in, npy_data_in)
+    interp = np.squeeze(interp)
+    interp_sh_coeffs = interp[:, 1:][None, :, :]
+    interp_opacities = interp[:, :1][None, :, :]
+    interp_opacities = jnp.clip(interp_opacities, a_min=0.0, a_max=100000)
+    deltas = (samples[1:] - samples[:-1])
+
+    interp_sh_coeffs = interp_sh_coeffs.reshape(1, tics.shape[0], 1, 9)
+    interp_opacities = interp_opacities.reshape(1, tics.shape[0], 1)
+    interp_harmonics = interp_sh_coeffs * my_sh_in[None, None, None, :]
+
+    interp_opacities = jnp.squeeze(interp_opacities)
+
+    deltas_times_sigmas = - deltas * interp_opacities[:-1]
+
+    cum_weighted_deltas = jnp.cumsum(deltas_times_sigmas)
+    cum_weighted_deltas = jnp.concatenate([jnp.zeros(1, dtype='float16'), cum_weighted_deltas[:-1]])
+
+    samples_colors = jnp.clip(jnp.sum(interp_harmonics, axis=3) + 0.5, a_min=0.0, a_max=100000)
+    samples_colors = samples_colors[0]  # here this needs changing
+    deltas_times_sigmas = jnp.squeeze(deltas_times_sigmas)
+    tmp1 = jnp.exp(cum_weighted_deltas)
+    tmp2 = 1 - jnp.exp(deltas_times_sigmas)
+    rays_color = jnp.sum(tmp1[:, None] * tmp2[:, None] * samples_colors[:-1], axis=0)
+    out = rays_color
+    return out
+
+render_slim_jit_c1 = jit(vmap(render_slim_c1, in_axes=(0, None)))
+
+def render_wrapper(x, npy_density_data, npy_sh_data):
+    npy_data = np.concatenate((npy_density_data, npy_sh_data), axis=3)
+
+    batch_size = 50000
+    batch_nb = jnp.ceil(len(x) / batch_size)
+
+    tmp_rgb_slim = []
+    for i in range(int(batch_nb - 1)):
+        res = render_slim_jit_c1(x[i * batch_size: (i + 1) * batch_size], npy_data)
+        res.block_until_ready()
+        tmp_rgb_slim.append(res)
+
+    res = render_slim_jit_c1(x[int((batch_nb - 1) * batch_size):], npy_data)
+    tmp_rgb_slim.append(res)
+    colors_c1_slim = np.concatenate(tmp_rgb_slim)
+
+    complete_colors_slim = np.zeros((rays_origins.shape[0], 1))
+
+    tmp_mask = np.zeros_like(mask)
+    tmp_mask[mask] = 1
+    tmp_mask[tmp_mask == 1] = mask_box
+    complete_colors_slim[tmp_mask] = colors_c1_slim
+    complete_colors_slim[complete_colors_slim > 1] = 1
+    complete_colors_slim[complete_colors_slim < 0] = 0
+
+    img_slim = complete_colors_slim.reshape([800,800,1])
+    return img_slim
+
+img_c1 = render_wrapper(xx, npy_density_data, npy_sh_data_c1)
+img_c2 = render_wrapper(xx, npy_density_data, npy_sh_data_c2)
+img_c3 = render_wrapper(xx, npy_density_data, npy_sh_data_c3)
+
+import cv2
+img = np.concatenate([img_c1, img_c2, img_c3], axis=2)
+img = (img * 255).astype(np.uint8)
+img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+```
+
+### sampling_branch.py
+```
+import numpy as np
+from trilinear_interpolation import *
+
+# xdim, ydim, zdim = 10, 10, 10
+# dx, dy, dz = 1, 1, 1
+# nb_rays = 5
+# nb_samples = 7
+# nb_cameras = 6
+# cameras = np.random.rand(nb_cameras, 6) # position and orientation
+
+# http://psgraphics.blogspot.com/2016/02/new-simple-ray-box-test-from-andrew.html
+def intersect_ray_aabb(ray_origin, ray_inv_dir, box_min, box_max):
+    # considers the boundary of the volume as NON intersecting, if tmax <= tmin then NO intersection
+    if ray_origin.ndim == 1:
+        ray_origin = np.expand_dims(ray_origin, 0)
+        ray_inv_dir = np.expand_dims(ray_inv_dir, 0)
+    tmin = np.ones(len(ray_origin)) * -np.inf
+    tmax = np.ones(len(ray_origin)) * np.inf
+    t0 = (box_min - ray_origin) * ray_inv_dir
+    t1 = (box_max - ray_origin) * ray_inv_dir
+    tsmaller = np.nanmin([t0, t1], axis=0)
+    tbigger = np.nanmax([t0, t1], axis=0)
+    tmin = np.max([tmin, np.max(tsmaller, axis=1)], axis=0)
+    tmax = np.min([tmax, np.min(tbigger, axis=1)], axis=0)
+    return tmin, tmax
+
+
+def rays_to_samples(rays, spacing, box_top, box_bottom):
+    rays_ori = rays[:, :3]
+    rays_dir = rays[:, 3:]
+    rays_dir = rays_dir / np.expand_dims(np.linalg.norm(rays_dir, axis=1), 1)
+    rays_inv = 1/rays_dir
+    tmin, tmax = intersect_ray_aabb(rays_ori, rays_inv, box_bottom, box_top)
+    mask = tmin < tmax
+    rays = rays[mask]
+    tmin = tmin[mask]
+    tmax = tmax[mask]
+    tics = []
+    for i in range(len(tmin)):
+        tics.append(np.arange(tmin[i], tmax[i], spacing))
+    samples = []
+    for i, t in enumerate(tics):
+        ori = rays_ori[i]
+        dir = rays_dir[i]
+        ori = np.expand_dims(ori, axis=1)
+        dir = np.expand_dims(dir, axis=1)
+        samples.append((ori + t * dir).T)
+    return samples, rays
+
+
+def samples_to_interpolation_coeffs(samples, dx=1.0, dy=1.0, dz=1.0):
+    coefs = []
+    origin = np.zeros(3)
+    for s in samples:
+        coefs.append(trilinear_coefficients(s, origin, dx, dy, dz))
+    return coefs
+
+
+# rays = np.random.rand(nb_rays, 3) # rays * xyz (orientation)
+# samples = np.random.rand(nb_rays, nb_samples, 3) # rays * samples per ray * xyz (position)
+# interp_coefs = np.random.rand(nb_rays, nb_samples, 8) # constant at a point
+# spherical_harmonics = np.random.rand(nb_rays, 9) # constant on a ray
+# grid = np.random.rand(xdim, ydim, zdim, 9*3) # 3*9=27 sh coefficients at every vertex
+# opacity = np.random.rand(xdim, ydim, zdim) # one opacity value at every vertex
+#
+# # rays -> samples
+# # rays -> spherical_harmonics
+# # samples -> interp_coefs
+# # grid(sample) -> 8 x 27 coefs of the spherical harmonics at the surrounding corners
+# # <grid(sample), interp_coefs> -> inner prod, values per harmonic at sample
+# # sum up inner prod * opacity along ray to get value
+# # we want to optimize on the values in grid, so we want the derivative w.r.t. the values in grid, which is a_iS(r)
+# output = np.random.rand(nb_rays, 3) # rgb per ray
+```
+
+### spherical_harmonics.py
+```
+# import os, sys
+# import numpy as np
+# # import imageio as im
+# import cv2  # resize images with float support
+# from scipy import ndimage  # gaussian blur
+# import time
+# import math
+import numpy as np
+
+from scipy.special import sph_harm
+
+K_CONST = np.array([0.28209479, 0.48860251, 0.48860251, 0.48860251, 1.09254843,
+       1.09254843, 0.31539157, 1.09254843, 0.54627422])
+
+
+# My code
+def sh_cartesian(xyz):
+    # K = np.array([(1 / 2) * np.sqrt(1 / np.pi),
+    #               np.sqrt(3 / (4 * np.pi)), np.sqrt(3 / (4 * np.pi)), np.sqrt(3 / (4 * np.pi)),
+    #               (1 / 2) * np.sqrt(15 / np.pi), (1 / 2) * np.sqrt(15 / np.pi), (1 / 4) * np.sqrt(5 / np.pi),
+    #               (1 / 2) * np.sqrt(15 / np.pi), (1 / 4) * np.sqrt(15 / np.pi)])
+    K = K_CONST
+    if xyz.ndim == 1:
+        r = np.linalg.norm(xyz)
+        xyz = xyz / r
+        x, y, z = xyz[0], xyz[1], xyz[2]
+        vec = np.array([1, y, z, x, x * y, y * z, 3 * z ** 2 - 1, x * z, x ** 2 - y ** 2])
+        return vec * K
+    else:
+        r = np.linalg.norm(xyz, axis=1)
+        r = np.expand_dims(r, 1)
+        xyz = xyz / r
+        x, y, z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
+        ones = np.ones(x.shape)
+        vec = np.vstack([ones, y, z, x, x * y, y * z, 3 * z ** 2 - 1, x * z, x ** 2 - y ** 2]).T
+        return vec * K
+
+
+# My code
+def sh_spherical(theta, phi):
+    root3 = np.sqrt(3 / np.pi)
+    root5 = np.sqrt(15 / np.pi)
+    K = np.array([0.5 * np.sqrt(1 / np.pi),
+                  0.5 * root3,
+                  0.5 * root3,
+                  0.5 * root3,
+                  0.5 * root5,
+                  0.5 * root5,
+                  0.25 * np.sqrt(5 / np.pi),
+                  0.5 * root5,
+                  0.25 * root5])
+
+    x = np.sin(theta) * np.cos(phi)
+    y = np.sin(theta) * np.sin(phi)
+    z = np.cos(theta)
+    ones = np.ones(x.shape)
+    legendre = np.array([ones, y, z, x, x * y, y * z, 3 * z * z - 1, x * z, x * x - y * y]).T
+    res = legendre * K
+    if res.shape == (9,):
+        res = np.expand_dims(res, 0)
+    return res
+
+
+# From the book "Gritty Details", translated from C++ using ChatGPT
+def K(l, m):
+    temp = ((2.0 * l + 1.0) * np.math.factorial(l - m)) / (4.0 * np.pi * np.math.factorial(l + m))
+    return np.sqrt(temp)
+
+
+def P(l, m, x):
+    pmm = 1.0
+    if m > 0:
+        somx2 = np.sqrt((1.0 - x) * (1.0 + x))
+        fact = 1.0
+        for i in range(1, m + 1):
+            pmm *= (-fact) * somx2
+            fact += 2.0
+    if l == m:
+        return pmm
+    pmmp1 = x * (2.0 * m + 1.0) * pmm
+    if l == m + 1:
+        return pmmp1
+    pll = 0.0
+    for ll in range(m + 2, l + 1):
+        pll = ((2.0 * ll - 1.0) * x * pmmp1 - (ll + m - 1.0) * pmm) / (ll - m)
+        pmm = pmmp1
+        pmmp1 = pll
+    return pll
+
+
+def SH(l, m, theta, phi):
+    sqrt2 = np.sqrt(2.0)
+    cos = np.cos
+    sin = np.sin
+    if m == 0:
+        return K(l, 0) * P(l, m, np.cos(theta))
+    elif m > 0:
+        return (-1) ** m * sqrt2 * K(l, m) * cos(m * phi) * P(l, m, np.cos(theta))
+    else:
+        return (-1) ** m * sqrt2 * K(l, -m) * sin(-m * phi) * P(l, -m, np.cos(theta))
+
+
+def sh_gritty_book(theta, phi):
+    return np.array(
+        [SH(0, 0, theta, phi), SH(1, -1, theta, phi), SH(1, 0, theta, phi), SH(1, 1, theta, phi), SH(2, -2, theta, phi),
+         SH(2, -1, theta, phi), SH(2, 0, theta, phi), SH(2, 1, theta, phi), SH(2, 2, theta, phi)])
+
+
+# From ChatGPT using scipy, IT SEEMS THETA AND PHI ARE REVERSED HERE
+def real_sph_harm_scipy(l, m, theta, phi):
+    if m > 0:
+        return (-1) ** m * np.sqrt(2) * np.real(sph_harm(m, l, theta, phi))
+    elif m < 0:
+        return (-1) ** m * np.sqrt(2) * np.imag(sph_harm(-m, l, theta, phi))
+    else:
+        return np.real(sph_harm(0, l, theta, phi))
+
+
+# IT SEEMS THETA AND PHI ARE REVERSED HERE
+def real_sph_harm_vec_scipy(theta, phi):
+    Y00 = real_sph_harm_scipy(0, 0, theta, phi)
+    Y1m = real_sph_harm_scipy(1, -1, theta, phi)
+    Y10 = real_sph_harm_scipy(1, 0, theta, phi)
+    Y1p = real_sph_harm_scipy(1, 1, theta, phi)
+    Y2m2 = real_sph_harm_scipy(2, -2, theta, phi)
+    Y2m1 = real_sph_harm_scipy(2, -1, theta, phi)
+    Y20 = real_sph_harm_scipy(2, 0, theta, phi)
+    Y2p1 = real_sph_harm_scipy(2, 1, theta, phi)
+    Y2p2 = real_sph_harm_scipy(2, 2, theta, phi)
+    return np.array([Y00, Y1m, Y10, Y1p, Y2m2, Y2m1, Y20, Y2p1, Y2p2])
+
+
+## From the svox paper
+SH_C0 = 0.28209479177387814
+SH_C1 = 0.4886025119029199
+SH_C2 = np.array([
+    1.0925484305920792,
+    -1.0925484305920792,
+    0.31539156525252005,
+    -1.0925484305920792,
+    0.5462742152960396
+])
+SH_C3 = np.array([
+    -0.5900435899266435,
+    2.890611442640554,
+    -0.4570457994644658,
+    0.3731763325901154,
+    -0.4570457994644658,
+    1.445305721320277,
+    -0.5900435899266435
+])
+SH_C4 = np.array([
+    2.5033429417967046,
+    -1.7701307697799304,
+    0.9461746957575601,
+    -0.6690465435572892,
+    0.10578554691520431,
+    -0.6690465435572892,
+    0.47308734787878004,
+    -1.7701307697799304,
+    0.6258357354491761,
+])
+
+MAX_SH_BASIS = 10
+
+def eval_sh_bases_mine(dirs):
+    """
+    Evaluate spherical harmonics bases at unit directions,
+    without taking linear combination.
+    At each point, the final result may the be
+    obtained through simple multiplication.
+
+    :param basis_dim: int SH basis dim. Currently, 1-25 square numbers supported
+    :param dirs: np.ndarray (..., 3) unit directions
+
+    :return: np.ndarray (..., basis_dim)
+    """
+    basis_dim = 9
+    result = np.empty([dirs.shape[0], basis_dim], dtype=dirs.dtype)
+    result[..., 0] = SH_C0
+    if basis_dim > 1:
+        x, y, z = dirs[:, 0], dirs[:, 1], dirs[:, 2]
+        result[..., 1] = -SH_C1 * y
+        result[..., 2] = SH_C1 * z
+        result[..., 3] = -SH_C1 * x
+        if basis_dim > 4:
+            xx, yy, zz = x * x, y * y, z * z
+            xy, yz, xz = x * y, y * z, x * z
+            result[..., 4] = SH_C2[0] * xy
+            result[..., 5] = SH_C2[1] * yz
+            result[..., 6] = SH_C2[2] * (2.0 * zz - xx - yy)
+            result[..., 7] = SH_C2[3] * xz
+            result[..., 8] = SH_C2[4] * (xx - yy)
+
+            if basis_dim > 9:
+                result[..., 9] = SH_C3[0] * y * (3 * xx - yy)
+                result[..., 10] = SH_C3[1] * xy * z
+                result[..., 11] = SH_C3[2] * y * (4 * zz - xx - yy)
+                result[..., 12] = SH_C3[3] * z * (2 * zz - 3 * xx - 3 * yy)
+                result[..., 13] = SH_C3[4] * x * (4 * zz - xx - yy)
+                result[..., 14] = SH_C3[5] * z * (xx - yy)
+                result[..., 15] = SH_C3[6] * x * (xx - 3 * yy)
+
+    return result
+
+
+# def eval_sh_bases(basis_dim : int, dirs : torch.Tensor):
+#     """
+#     Evaluate spherical harmonics bases at unit directions,
+#     without taking linear combination.
+#     At each point, the final result may the be
+#     obtained through simple multiplication.
+#
+#     :param basis_dim: int SH basis dim. Currently, 1-25 square numbers supported
+#     :param dirs: torch.Tensor (..., 3) unit directions
+#
+#     :return: torch.Tensor (..., basis_dim)
+#     """
+#     result = torch.empty((*dirs.shape[:-1], basis_dim), dtype=dirs.dtype, device=dirs.device)
+#     result[..., 0] = SH_C0
+#     if basis_dim > 1:
+#         x, y, z = dirs.unbind(-1)
+#         result[..., 1] = -SH_C1 * y;
+#         result[..., 2] = SH_C1 * z;
+#         result[..., 3] = -SH_C1 * x;
+#         if basis_dim > 4:
+#             xx, yy, zz = x * x, y * y, z * z
+#             xy, yz, xz = x * y, y * z, x * z
+#             result[..., 4] = SH_C2[0] * xy;
+#             result[..., 5] = SH_C2[1] * yz;
+#             result[..., 6] = SH_C2[2] * (2.0 * zz - xx - yy);
+#             result[..., 7] = SH_C2[3] * xz;
+#             result[..., 8] = SH_C2[4] * (xx - yy);
+#
+#             if basis_dim > 9:
+#                 result[..., 9] = SH_C3[0] * y * (3 * xx - yy);
+#                 result[..., 10] = SH_C3[1] * xy * z;
+#                 result[..., 11] = SH_C3[2] * y * (4 * zz - xx - yy);
+#                 result[..., 12] = SH_C3[3] * z * (2 * zz - 3 * xx - 3 * yy);
+#                 result[..., 13] = SH_C3[4] * x * (4 * zz - xx - yy);
+#                 result[..., 14] = SH_C3[5] * z * (xx - yy);
+#                 result[..., 15] = SH_C3[6] * x * (xx - 3 * yy);
+#
+#                 if basis_dim > 16:
+#                     result[..., 16] = SH_C4[0] * xy * (xx - yy);
+#                     result[..., 17] = SH_C4[1] * yz * (3 * xx - yy);
+#                     result[..., 18] = SH_C4[2] * xy * (7 * zz - 1);
+#                     result[..., 19] = SH_C4[3] * yz * (7 * zz - 3);
+#                     result[..., 20] = SH_C4[4] * (zz * (35 * zz - 30) + 3);
+#                     result[..., 21] = SH_C4[5] * xz * (7 * zz - 3);
+#                     result[..., 22] = SH_C4[6] * (xx - yy) * (7 * zz - 1);
+#                     result[..., 23] = SH_C4[7] * xz * (xx - 3 * yy);
+#                     result[..., 24] = SH_C4[8] * (xx * (xx - 3 * yy) - yy * (3 * xx - yy));
+#     return result
+```
+
+### trilinear_interpolation.py
+```
+import numpy as np
+
+
+def trilinear_interpolation(xyz, color, origin=np.zeros(3), dx=1.0, dy=1.0, dz=1.0):
+    # Normalize, transform into origin = (0,0,0) and dx = dy = dz = 1
+    # Case when only 1 entry to interpolate, want shape [3, nb]
+    if len(xyz.shape) == 1:
+        xyz = np.expand_dims(xyz, axis=1)
+        xyz = xyz.T
+    # if len(origin.shape) == 1:
+    #     origin = np.expand_dims(origin, axis=1)
+
+    xyz = xyz - origin
+    xyz = xyz / np.array([dx, dy, dz]) #, dtype=float), axis=1)
+
+    xyz_floor = np.floor(xyz)
+    diff = xyz - xyz_floor
+
+    xd, yd, zd = diff[:, 0], diff[:, 1], diff[:, 2]
+    xyz_floor = xyz_floor.astype(int)
+    x0, y0, z0 = xyz_floor[:, 0], xyz_floor[:, 1], xyz_floor[:, 2]
+    tmp = 1 - xd
+
+    x_zeros = np.zeros(x0.shape, dtype=int)
+    x_zeros[xd >= 0] +=1
+    x1 = x0 + x_zeros
+
+    y_zeros = np.zeros(y0.shape, dtype=int)
+    y_zeros[yd >= 0] +=1
+    y1 = y0 + y_zeros
+
+    z_zeros = np.zeros(z0.shape, dtype=int)
+    z_zeros[zd >= 0] +=1
+    z1 = z0 + z_zeros
+
+    tmp = np.expand_dims(tmp, 1)
+    xd = np.expand_dims(xd, 1)
+    yd = np.expand_dims(yd, 1)
+    zd = np.expand_dims(zd, 1)
+
+    c00 = color[x0, y0, z0] * tmp + color[x1, y0, z0] * xd
+    c01 = color[x0, y1, z0] * tmp + color[x1, y1, z0] * xd
+    c10 = color[x0, y0, z1] * tmp + color[x1, y0, z1] * xd
+    c11 = color[x0, y1, z1] * tmp + color[x1, y1, z1] * xd
+
+    # c00 = c[x0, y0, z0] * tmp + c[x0 + 1, y0, z0] * xd
+    # c01 = c[x0, y0 + 1, z0] * tmp + c[x0 + 1, y0 + 1, z0] * xd
+    # c10 = c[x0, y0, z0 + 1] * tmp + c[x0 + 1, y0, z0 + 1] * xd
+    # c11 = c[x0, y0 + 1, z0 + 1] * tmp + c[x0 + 1, y0 + 1, z0 + 1] * xd
+
+    tmp = 1 - yd
+    c0 = c00 * tmp + c10 * yd
+    c1 = c01 * tmp + c11 * yd
+
+    color = c0 * (1 - zd) + c1 * zd
+
+    if len(color.shape) == 1:
+        color = np.expand_dims(color, axis=1)
+    return color
+
+
+def trilinear_coefficients(xyz, origin=np.zeros(3), dx=1.0, dy=1.0, dz=1.0):
+    # Normalize, transform into origin = (0,0,0) and dx = dy = dz = 1
+    # Case when only 1 entry to interpolate, want shape [3, nb]
+    if len(xyz.shape) == 1:
+        xyz = np.expand_dims(xyz, axis=1)
+        xyz = xyz.T
+    # if len(origin.shape) == 1:
+    #     origin = np.expand_dims(origin, axis=1)
+
+    xyz = xyz - origin
+    xyz = xyz / np.array([dx, dy, dz]) #, dtype=float), axis=1)
+
+    xyz_floor = np.floor(xyz)
+    diff = xyz - xyz_floor
+
+    xd, yd, zd = diff[:, 0], diff[:, 1], diff[:, 2]
+
+    tmpX = 1 - xd
+    tmpZ = 1 - zd
+    tmpY = 1 - yd
+    a000 = tmpX * tmpY * tmpZ
+    a100 = xd * tmpY * tmpZ
+    a010 = tmpX * yd * tmpZ
+    a110 = xd * yd * tmpZ
+    a001 = tmpX * tmpY * zd
+    a101 = xd * tmpY * zd
+    a011 = tmpX * yd * zd
+    a111 = xd * yd * zd
+
+    avec = np.array([a000, a001, a010, a011, a100, a101, a110, a111]).T
+    # avec = np.array([a000, a100, a010, a110, a001, a101, a011, a111])
+    return avec.T
+
+def trilinear_interpolation_dot(xyz, c, origin=np.zeros(3), dx=1.0, dy=1.0, dz=1.0):
+    # Normalize, transform into origin = (0,0,0) and dx = dy = dz = 1
+    # Case when only 1 entry to interpolate, want shape [3, nb]
+    if len(xyz.shape) == 1:
+        xyz = np.expand_dims(xyz, axis=1)
+        xyz = xyz.T
+    # if len(origin.shape) == 1:
+    #     origin = np.expand_dims(origin, axis=1)
+
+    xyz = xyz - origin
+    xyz = xyz / np.array([dx, dy, dz]) #, dtype=float), axis=1)
+
+    xyz_floor = np.floor(xyz)
+    diff = xyz - xyz_floor
+
+    xd, yd, zd = diff[:, 0], diff[:, 1], diff[:, 2]
+    xyz_floor = xyz_floor.astype(int)
+    x0, y0, z0 = xyz_floor[:, 0], xyz_floor[:, 1], xyz_floor[:, 2]
+
+    # a000 = -xd * yd * zd + xd * yd + xd * zd - xd + yd * zd - yd - zd + 1
+    # a100 = xd * yd * zd - xd * yd - xd * zd + xd
+    # a010 = xd * yd * zd - xd * yd - yd * zd + yd
+    # a110 = xd * yd - xd * yd * zd
+    # a001 = xd * yd * zd - xd * zd - yd * zd + zd
+    # a101 = xd * xd - xd * yd * zd
+    # a011 = yd * zd - xd * yd * zd
+    # a111 = xd * yd * zd
+
+    tmpX = 1 - xd
+    tmpZ = 1 - zd
+    tmpY = 1 - yd
+    a000 = tmpX * tmpY * tmpZ
+    a100 = xd * tmpY * tmpZ
+    a010 = tmpX * yd * tmpZ
+    a110 = xd * yd * tmpZ
+    a001 = tmpX * tmpY * zd
+    a101 = xd * tmpY * zd
+    a011 = tmpX * yd * zd
+    a111 = xd * yd * zd
+
+    # cvec = np.array([c[x0, y0, z0],
+    #                  c[x0 + 1, y0, z0],
+    #                  c[x0, y0 + 1, z0],
+    #                  c[x0 + 1, y0 + 1, z0],
+    #                  c[x0, y0, z0 + 1],
+    #                  c[x0 + 1, y0, z0 + 1],
+    #                  c[x0, y0 + 1, z0 + 1],
+    #                  c[x0 + 1, y0 + 1, z0 + 1]])
+
+    x_zeros = np.zeros(x0.shape, dtype=int)
+    x_zeros[xd > 0] +=1
+    x1 = x0 + x_zeros
+
+    y_zeros = np.zeros(y0.shape, dtype=int)
+    y_zeros[yd > 0] +=1
+    y1 = y0 + y_zeros
+
+    z_zeros = np.zeros(z0.shape, dtype=int)
+    z_zeros[zd > 0] +=1
+    z1 = z0 + z_zeros
+
+    # c00 = c[x0, y0, z0] * tmp + c[x1, y0, z0] * xd
+    # c01 = c[x0, y1, z0] * tmp + c[x1, y1, z0] * xd
+    # c10 = c[x0, y0, z1] * tmp + c[x1, y0, z1] * xd
+    # c11 = c[x0, y1, z1] * tmp + c[x1, y1, z1] * xd
+
+
+    cvec = np.array([c[x0, y0, z0], c[x0, y0, z1],
+                     c[x0, y1, z0], c[x0, y1, z1],
+                     c[x1, y0, z0], c[x1, y0, z1],
+                     c[x1, y1, z0], c[x1, y1, z1]])
+
+    avec = np.array([a000, a001, a010, a011, a100, a101, a110, a111])
+    # avec = np.array([a000, a100, a010, a110, a001, a101, a011, a111])
+
+    res = np.einsum('ij,ij...->j...', avec, cvec)
+
+    if len(res.shape) == 1:
+        res = np.expand_dims(res, axis=1)
+    return res
+
+
+def trilinear_interpolation_short(vecs, values, origin, delta_voxel):
+    # Normalize, transform into origin = (0,0,0) and dx = dy = dz = 1
+    # Case when only 1 entry to interpolate, want shape [3, nb]
+    xyz = vecs - origin
+    xyz = xyz / delta_voxel
+
+    xyz_floor = np.floor(xyz)
+    diff = xyz - xyz_floor
+
+    xd, yd, zd = diff[:, 0], diff[:, 1], diff[:, 2]
+    xyz_floor = xyz_floor.astype(int)
+    x0, y0, z0 = xyz_floor[:, 0], xyz_floor[:, 1], xyz_floor[:, 2]
+    tmpX = 1 - xd
+    tmpY = 1 - yd
+    tmpZ = 1 - zd
+    a000 = tmpX * tmpY
+    a100 = xd * tmpY
+    a010 = tmpX * yd
+    a110 = xd * yd
+
+    weights = np.array([a000, a010, a100, a110])
+    coeff = np.array([values[x0, y0, z0], values[x0, y0, z0 + 1],
+                         values[x0, y0 + 1, z0], values[x0, y0 + 1, z0 + 1],
+                         values[x0 + 1, y0, z0], values[x0 + 1, y0, z0 + 1],
+                         values[x0 + 1, y0 + 1, z0], values[x0 + 1, y0 + 1, z0 + 1]])
+
+    weights = weights[:, :, None]
+    if tmpZ.ndim == 1 and zd.ndim == 1:
+        tmpZ = tmpZ[:, None]
+        zd = zd[:, None]
+
+    return np.sum(weights * coeff[[0, 2, 4, 6]], axis=0) * tmpZ + np.sum(weights * coeff[[1, 3, 5, 7]], axis=0) * zd
+
+
+def trilinear_interpolation_shuffle(vecs, links, values_compressed, origin=np.zeros(3), delta_voxel=np.ones(3)):
+    # Normalize, transform into origin = (0,0,0) and dx = dy = dz = 1
+    # Case when only 1 entry to interpolate, want shape [3, nb]
+    if vecs.ndim == 1:
+        vecs = vecs[None, :]
+
+    dims = values_compressed.shape[1]
+    nb_samples = vecs.shape[0]
+    res = np.zeros([nb_samples, dims])
+
+    xyz = vecs - origin
+    xyz = xyz / delta_voxel
+    xyz_floor = np.floor(xyz)
+    diff = xyz - xyz_floor
+    xd, yd, zd = diff[:, 0], diff[:, 1], diff[:, 2]
+
+    xyz_floor = xyz_floor.astype(int)
+    x0, y0, z0 = xyz_floor[:, 0], xyz_floor[:, 1], xyz_floor[:, 2]
+
+    l000 = links[x0, y0, z0]
+    l100 = links[x0+1, y0, z0]
+    l010 = links[x0, y0+1, z0]
+    l001 = links[x0, y0, z0+1]
+    l110 = links[x0+1, y0+1, z0]
+    l011 = links[x0, y0+1, z0+1]
+    l101 = links[x0+1, y0, z0+1]
+    l111 = links[x0+1, y0+1, z0+1]
+
+    # I think can do away with the mask trick by setting stuff at index 0 to 0
+    mask_l000 = l000 >= 0
+    mask_l100 = l100 >= 0
+    mask_l010 = l010 >= 0
+    mask_l001 = l001 >= 0
+    mask_l110 = l110 >= 0
+    mask_l011 = l011 >= 0
+    mask_l101 = l101 >= 0
+    mask_l111 = l111 >= 0
+
+    mask = mask_l000 & mask_l100 & mask_l010 & mask_l001 & mask_l110 & mask_l011 & mask_l101 & mask_l111
+
+    l000 = l000[mask]
+    l100 = l100[mask]
+    l010 = l010[mask]
+    l001 = l001[mask]
+    l110 = l110[mask]
+    l011 = l011[mask]
+    l101 = l101[mask]
+    l111 = l111[mask]
+
+    v000 = values_compressed[l000]
+    v100 = values_compressed[l100]
+    v010 = values_compressed[l010]
+    v001 = values_compressed[l001]
+    v110 = values_compressed[l110]
+    v011 = values_compressed[l011]
+    v101 = values_compressed[l101]
+    v111 = values_compressed[l111]
+
+    xd = xd[mask]
+    yd = yd[mask]
+    zd = zd[mask]
+
+    tmpX = 1 - xd
+    tmpY = 1 - yd
+    tmpZ = 1 - zd
+    a000 = tmpX * tmpY
+    a100 = xd * tmpY
+    a010 = tmpX * yd
+    a110 = xd * yd
+    weights = np.array([a000, a010, a100, a110])
+
+    coeff = np.array([v000, v001, v010, v011, v100, v101, v110, v111])
+
+    weights = weights[:, :, None]
+    if tmpZ.ndim == 1 and zd.ndim == 1:
+        tmpZ = tmpZ[:, None]
+        zd = zd[:, None]
+
+    out = np.sum(weights * coeff[[0, 2, 4, 6]], axis=0) * tmpZ + np.sum(weights * coeff[[1, 3, 5, 7]], axis=0) * zd
+    res[mask] = out
+    return res
+
+def trilinear_interpolation_shuffle_zero(vecs, links, values_compressed, origin=np.zeros(3), delta_voxel=np.ones(3)):
+    # Normalize, transform into origin = (0,0,0) and dx = dy = dz = 1
+    # Case when only 1 entry to interpolate, want shape [3, nb]
+    if vecs.ndim == 1:
+        vecs = vecs[None, :]
+
+    dims = values_compressed.shape[1]
+    nb_samples = vecs.shape[0]
+    res = np.zeros([nb_samples, dims])
+
+    xyz = vecs - origin
+    xyz = xyz / delta_voxel
+    xyz_floor = np.floor(xyz)
+    diff = xyz - xyz_floor
+    xd, yd, zd = diff[:, 0], diff[:, 1], diff[:, 2]
+
+    xyz_floor = xyz_floor.astype(int)
+    x0, y0, z0 = xyz_floor[:, 0], xyz_floor[:, 1], xyz_floor[:, 2]
+
+    l000 = links[x0, y0, z0]
+    l100 = links[x0+1, y0, z0]
+    l010 = links[x0, y0+1, z0]
+    l001 = links[x0, y0, z0+1]
+    l110 = links[x0+1, y0+1, z0]
+    l011 = links[x0, y0+1, z0+1]
+    l101 = links[x0+1, y0, z0+1]
+    l111 = links[x0+1, y0+1, z0+1]
+
+    v000 = values_compressed[l000]
+    v100 = values_compressed[l100]
+    v010 = values_compressed[l010]
+    v001 = values_compressed[l001]
+    v110 = values_compressed[l110]
+    v011 = values_compressed[l011]
+    v101 = values_compressed[l101]
+    v111 = values_compressed[l111]
+
+    tmpX = 1 - xd
+    tmpY = 1 - yd
+    tmpZ = 1 - zd
+    a000 = tmpX * tmpY
+    a100 = xd * tmpY
+    a010 = tmpX * yd
+    a110 = xd * yd
+    weights = np.array([a000, a010, a100, a110])
+
+    coeff = np.array([v000, v001, v010, v011, v100, v101, v110, v111])
+
+    weights = weights[:, :, None]
+    if tmpZ.ndim == 1 and zd.ndim == 1:
+        tmpZ = tmpZ[:, None]
+        zd = zd[:, None]
+
+    out = np.sum(weights * coeff[[0, 2, 4, 6]], axis=0) * tmpZ + np.sum(weights * coeff[[1, 3, 5, 7]], axis=0) * zd
+    return out
+
+def trilinear_interpolation_shuffle_boundary(vecs, links, values_compressed, origin=np.zeros(3), delta_voxel=np.ones(3)):
+    # Normalize, transform into origin = (0,0,0) and dx = dy = dz = 1
+    # Case when only 1 entry to interpolate, want shape [3, nb]
+    if vecs.ndim == 1:
+        vecs = vecs[None, :]
+
+    dims = values_compressed.shape[1]
+    nb_samples = vecs.shape[0]
+    res = np.zeros([nb_samples, dims])
+
+    xyz = vecs - origin
+    xyz = xyz / delta_voxel
+    xyz_floor = np.floor(xyz)
+    diff = xyz - xyz_floor
+    xd, yd, zd = diff[:, 0], diff[:, 1], diff[:, 2]
+
+    xyz_floor = xyz_floor.astype(int)
+    x0, y0, z0 = xyz_floor[:, 0], xyz_floor[:, 1], xyz_floor[:, 2]
+
+    l000 = links[x0, y0, z0]
+    l100 = links[x0+1, y0, z0]
+    l010 = links[x0, y0+1, z0]
+    l001 = links[x0, y0, z0+1]
+    l110 = links[x0+1, y0+1, z0]
+    l011 = links[x0, y0+1, z0+1]
+    l101 = links[x0+1, y0, z0+1]
+    l111 = links[x0+1, y0+1, z0+1]
+
+    # These are not all the same masks, since sometimes we are on the boundary
+    mask_l000 = l000 >= 0
+    mask_l100 = l100 >= 0
+    mask_l010 = l010 >= 0
+    mask_l001 = l001 >= 0
+    mask_l110 = l110 >= 0
+    mask_l011 = l011 >= 0
+    mask_l101 = l101 >= 0
+    mask_l111 = l111 >= 0
+
+    # These would be the points strictly inside the boundary
+    # mask = mask_l000 & mask_l100 & mask_l010 & mask_l001 & mask_l110 & mask_l011 & mask_l101 & mask_l111
+
+    # The or operator gives the boundary
+    mask = mask_l000 | mask_l100 | mask_l010 | mask_l001 | mask_l110 | mask_l011 | mask_l101 | mask_l111
+
+    # We did a hack that the first entry of values_compressed is just set to 0, so the links that are in the boundary
+    # but not in the link set (indices negative) are instead set to index 0, corresponding to value vector 0 in grid
+    l000[mask & ~mask_l000] = 0
+    l100[mask & ~mask_l100] = 0
+    l010[mask & ~mask_l010] = 0
+    l001[mask & ~mask_l001] = 0
+    l110[mask & ~mask_l110] = 0
+    l011[mask & ~mask_l011] = 0
+    l101[mask & ~mask_l101] = 0
+    l111[mask & ~mask_l111] = 0
+
+    l000 = l000[mask]
+    l100 = l100[mask]
+    l010 = l010[mask]
+    l001 = l001[mask]
+    l110 = l110[mask]
+    l011 = l011[mask]
+    l101 = l101[mask]
+    l111 = l111[mask]
+
+    v000 = values_compressed[l000]
+    v100 = values_compressed[l100]
+    v010 = values_compressed[l010]
+    v001 = values_compressed[l001]
+    v110 = values_compressed[l110]
+    v011 = values_compressed[l011]
+    v101 = values_compressed[l101]
+    v111 = values_compressed[l111]
+
+    xd = xd[mask]
+    yd = yd[mask]
+    zd = zd[mask]
+
+    tmpX = 1 - xd
+    tmpY = 1 - yd
+    tmpZ = 1 - zd
+    a000 = tmpX * tmpY
+    a100 = xd * tmpY
+    a010 = tmpX * yd
+    a110 = xd * yd
+    weights = np.array([a000, a010, a100, a110])
+
+    coeff = np.array([v000, v001, v010, v011, v100, v101, v110, v111])
+
+    weights = weights[:, :, None]
+    if tmpZ.ndim == 1 and zd.ndim == 1:
+        tmpZ = tmpZ[:, None]
+        zd = zd[:, None]
+
+    out = np.sum(weights * coeff[[0, 2, 4, 6]], axis=0) * tmpZ + np.sum(weights * coeff[[1, 3, 5, 7]], axis=0) * zd
+    res[mask] = out
+    return res
+
+
+# import jax.numpy as jnp
+# def trilinear_jax(vecs, links, values_compressed, origin=jnp.zeros(3), delta_voxel=jnp.ones(3)):
+#     xyz = vecs - origin
+#     xyz = xyz / delta_voxel
+#     xyz_floor = jnp.floor(xyz)
+#     diff = xyz - xyz_floor
+#     xd, yd, zd = diff[0], diff[1], diff[2]
+#     xyz_floor = xyz_floor.astype(int)
+#     x0, y0, z0 = xyz_floor[0], xyz_floor[1], xyz_floor[2]
+#     l000 = links[x0, y0, z0]
+#     l100 = links[x0 + 1, y0, z0]
+#     l010 = links[x0, y0 + 1, z0]
+#     l001 = links[x0, y0, z0 + 1]
+#     l110 = links[x0 + 1, y0 + 1, z0]
+#     l011 = links[x0, y0 + 1, z0 + 1]
+#     l101 = links[x0 + 1, y0, z0 + 1]
+#     l111 = links[x0 + 1, y0 + 1, z0 + 1]
+#     v000 = values_compressed[l000]
+#     v100 = values_compressed[l100]
+#     v010 = values_compressed[l010]
+#     v001 = values_compressed[l001]
+#     v110 = values_compressed[l110]
+#     v011 = values_compressed[l011]
+#     v101 = values_compressed[l101]
+#     v111 = values_compressed[l111]
+#     tmpX = 1 - xd
+#     tmpY = 1 - yd
+#     tmpZ = 1 - zd
+#     a000 = tmpX * tmpY
+#     a100 = xd * tmpY
+#     a010 = tmpX * yd
+#     a110 = xd * yd
+#
+#     weights = jnp.array([a000, a010, a100, a110])
+#     coeff = jnp.array([v000, v001, v010, v011, v100, v101, v110, v111])
+#     weights = jnp.expand_dims(weights, 1)
+#
+#     out = jnp.sum(weights * coeff[jnp.array([0, 2, 4, 6])], axis=0) * tmpZ + jnp.sum(
+#         weights * coeff[jnp.array([1, 3, 5, 7])], axis=0) * zd
+#     return out
+```

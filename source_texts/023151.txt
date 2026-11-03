@@ -1,0 +1,966 @@
+arXiv:2206.05344v1 [cs.GR] 10 Jun 2022
+Differentiable Rendering of Neural SDFs through Reparameterization
+SAI PRAVEEN BANGARU, MIT CSAIL, USA
+MICHAËL GHARBI, Adobe Research, USA
+TZU-MAO LI, UC San Diego, USA
+FUJUN LUAN, Adobe Research, USA
+KALYAN SUNKAVALLI, Adobe Research, USA
+MILOŠ HAŠAN, Adobe Research, USA
+SAI BI, Adobe Research, USA
+ZEXIANG XU, Adobe Research, USA
+GILBERT BERNSTEIN, MIT CSAIL & UC Berkeley, USA
+FRÉDO DURAND, MIT CSAIL, USA
+(b) IDR [Yariv 2020] with
+additional mask supervision
+(not used in our pipeline)
+optimized RGB optimized depth
+IDR
+(a) multi-view
+dataset
+(c) our warp-reparameterized
+inverse SDF renderer
+ours
+(d) our reconstructions
+Fig. 1. We propose a novel method to correctly differentiate a neural SDF renderer by reparameterizing the pixel integral. Direct application of automatic
+differentiation to the renderer fails because of discontinuities like silhouette boundaries. In this work we show that, by carefully designing a discontinuityaware warp function V (𝑢; 𝜃 ) to reparameterize the pixel domain, we can remove these discontinuities, and the reparameterized integral is amenable to
+automatic differentiation. We demonstrate the benefits of our method on inverse rendering problems. Starting from a multiview dataset of real photos (a),
+our reparameterized renderer (c) can optimize a neural SDF that closely matches the input data, and generalizes to novel views. Our renderer matches or
+outperforms prior SDF renderers [Yariv et al. 2020] (b), while doing away with their need for additional geometric supervision in the form of per-view masks,
+which can be unreliable for real-world data. We show additional surface reconstructions obtained with our inverse renderer in (d).
+We present a method to automatically compute correct gradients with respect
+to geometric scene parameters in neural SDF renderers. Recent physicallybased differentiable rendering techniques for meshes have used edge-sampling
+to handle discontinuities, particularly at object silhouettes, but SDFs do not
+have a simple parametric form amenable to sampling. Instead, our approach
+builds on area-sampling techniques and develops a continuous warping function for SDFs to account for these discontinuities. Our method leverages the
+distance to surface encoded in an SDF and uses quadrature on sphere tracer
+points to compute this warping function. We further show that this can be
+done by subsampling the points to make the method tractable for neural
+SDFs. Our differentiable renderer can be used to optimize neural shapes
+from multi-view images and produces comparable 3D reconstructions to
+Authors’ addresses: Sai Praveen Bangaru, MIT CSAIL, USA, sbangaru@mit.edu; Michaël
+Gharbi, Adobe Research, USA, mgharbi@adobe.com; Tzu-Mao Li, UC San Diego, USA,
+tzli@ucsd.edu; Fujun Luan, Adobe Research, USA, fluan@adobe.com; Kalyan Sunkavalli,
+Adobe Research, USA, sunkaval@adobe.com; Miloš Hašan, Adobe Research, USA,
+mihasan@adobe.com; Sai Bi, Adobe Research, USA, sbi@adobe.com; Zexiang Xu, Adobe
+Research, USA, zexu@adobe.com; Gilbert Bernstein, MIT CSAIL & UC Berkeley, USA,
+gilbo@berkeley.edu; Frédo Durand, MIT CSAIL, USA, fredo@mit.edu.
+recent SDF-based inverse rendering methods, without the need for 2D segmentation masks to guide the geometry optimization and no volumetric
+approximations to the geometry.
+1
+INTRODUCTION
+Differentiable rendering algorithms have become crucial tools in
+solving challenging inverse problems [Zhao et al. 2020], thanks to
+their ability to compute the derivatives of images with respect to
+arbitrary scene parameters. Naive differentiation of rendering algorithms does not handle discontinuities caused by visibility changes
+and object boundaries correctly. Previous work has observed that
+the discontinuities can be handled by properly handling the Dirac
+delta signals, and derived algorithms for explicit geometry representations like triangle meshes [Li et al. 2018; Zhang et al. 2020].
+On the other hand, implicit representations like signed distance
+fields (SDFs) are appealing since they do not require the initialized
+geometry to have the right topology. Recent work has demonstrated
+the use of SDFs—usually parameterized using multi-layer perceptron networks—for the task of reconstructing shape and surface
+2 • Sai Praveen Bangaru, Michaël Gharbi, Tzu-Mao Li, Fujun Luan, Kalyan Sunkavalli, Miloš Hašan, Sai Bi, Zexiang Xu, Gilbert Bernstein,
+and Frédo Durand
+reflectance from images. However, these methods either require additional geometric supervision such as segmentation masks [Yariv
+et al. 2020; Zhang et al. 2021b] or make approximations to the geometry using volumetric models [Oechsle et al. 2021; Yariv et al. 2021]
+that limit their applicability.
+In this paper, we derive an algorithm to automatically compute
+correct gradients with respect to geometric scene parameters in
+neural SDF renderers. Previous methods that rely on silhouette
+sampling are not directly applicable to SDFs since direct sampling of
+boundaries of implicit functions is challenging. Instead, we build on
+the reparameterization approaches [Bangaru et al. 2020; Loubet et al.
+2019], which removes discontinuities through reparameterization
+while preserving the integral values. These methods do not require
+explicit sampling along discontinuities. Previous reparameterization
+methods focused on triangle meshes, and require new derivation
+for reparameterizing SDF rendering.
+Specifically, we construct a silhouette-aware reparameterization
+similar to that of Loubet et al. [2019], but following the equivalent
+unbiased warp definition that Bangaru et al. [2020] used to produce
+correct gradients for triangle-meshes. We leverage the fact that
+SDFs naturally encode the distance to the surface, and develop a
+practical algorithm that uses a quadrature on sphere tracing [Hart
+1996] samples to construct a reparameterization that removes the
+discontinuities. We further show that this can be computed using
+only a subset of sphere tracing samples, reducing computational
+burden of the backward pass for bulky neural SDFs1 .
+Our algorithm produces correct geometry gradients for SDFs.
+It does away with the segmentation masks and depth guidance
+required by previous techniques [Yariv et al. 2020], without making
+a volumetric approximation to the geometry [Oechsle et al. 2021;
+Yariv et al. 2021]. We show that our differentiable renderer can be
+used to optimize neural shapes from multi-view images, with no
+additional information beyond the RGB data and the corresponding
+camera parameters. Our focus is on occlusion discontinuities, so the
+rest of the paper assumes a differentiable shading model.
+2 RELATED WORK
+We focus on work that recover the latent 3D scene from images
+through differentiable rendering. We categorize them by the type
+of scene representation.
+Meshes. To account for discontinuities, earlier work focused on
+approximating the derivatives of mesh rendering by smoothing
+the geometry [de La Gorce et al. 2011; Kato et al. 2018; Liu et al.
+2019; Loper and Black 2014; Rhodin et al. 2015]. Alternatively, some
+work derived correct analytical derivatives under simplified assumptions [Arvo 1994; Zhou et al. 2021]. Li et al. [2018] noticed that the
+differentiation of discontinuities caused by the visibility and geometric boundaries lead to Dirac delta signals, and can be integrated
+by the pixel antialiasing integral or the rendering equation. They
+proposed an edge sampling algorithm to explicitly sample the Dirac
+1 We only became aware of the concurrent work "Differentiable Signed Distance Func-
+tion Rendering" [Vicini et al. 2022] a week before submission. They use a warping
+reparameterization similar to ours that also builds on Bangaru et al. [2020], but focus
+on voxelized SDFs. We show that reparameterization works with neural SDFs. Our
+method also uses a more efficient ‘top-k’ weighting scheme.
+delta on triangle mesh silhouettes. Importance sampling the silhouettes can be difficult, therefore Loubet et al. and Bangaru et
+al. [2020; 2019] later proposed to convert the silhouette integral into
+an area integral. Loubet et al. formulated the conversion using a
+reparametrization, and derived an approximated reparametrization
+to remove discontinuities. Bangaru et al. built on Loubet et al.’s work
+and derived an unbiased estimator by showing the equivalence between the reparametrization and divergence theorem. On the other
+hand, Zhang et al. [2020] showed that directly sampling silhouette
+in path-space [Veach 1998] can also be done efficiently. Directly
+sampling the silhouette for SDFs is difficult. Our work extends the
+reparametrization approach to handle SDFs, including approximate
+SDFs defined by neural networks.
+Level sets and signed distance fields. A level set defines a surface
+using the roots of a 3D implicit function. A signed distance field is
+a specific kind of level set where the implicit function defines the
+distance of a 3D point to the surfaces, where the sign is negative
+when the point is inside the object. SDFs can be represented using
+polynomials [Blinn 1982], voxels [Izadi et al. 2011], or neural networks [Park et al. 2019]. Differentiable rendering for SDFs has been
+discussed in computer vision and used for 3D surface reconstruction [Jiang et al. 2020; Kellnhofer et al. 2021; Niemeyer et al. 2020;
+Yariv et al. 2020; Zhang et al. 2021b], but currently methods all ignore the discontinuities when differentiating and require 2D object
+masks to converge. An alternative way to render the signed distance
+field is to convert it to another format such as a thin participating
+medium [Oechsle et al. 2021; Wang et al. 2021; Yariv et al. 2021], a
+mesh [Remelli et al. 2020], or a point cloud [Cole et al. 2021]. These
+methods all introduce approximation. Instead, we focus on deriving
+accurate gradients without approximation.
+Volumes. A scene can also be represented as participating media
+instead of solid surfaces. Gkioulekas et al. [2013] pioneered the use
+of differentiable volume rendering for inverse problems. Zhang et
+al. [2019; 2021c] tackled discontinuities at volumetric boundaries.
+Recently, there has been a surging interest in using volumetric
+representations—parameterized either as discretized grids or neural
+networks—for view synthesis [Liu et al. 2020; Lombardi et al. 2019;
+Mildenhall et al. 2020; Xie et al. 2022]. These volumetric representations allow for a trivially differentiable rendering model and can
+achieve high-quality novel view synthesis and appearance acquisition [Bi et al. 2020a,b]. However, it is still a challenge to extract
+high-quality surface geometry from these methods, and while the
+trade-offs between surface and volume representations is an interesting research topic, we focus on surface representations.
+Light transport. In addition to handling discontinuities, recent
+work also studies the reduction of variance and memory consumption for Monte Carlo rendering [Nimier-David et al. 2020; Vicini
+et al. 2021; Zeltner et al. 2021; Zhang et al. 2021a]. Earlier rendering
+work used derivatives for forward rendering [Li et al. 2015; Luan
+et al. 2020; Ramamoorthi et al. 2007; Ward and Heckbert 1992]. Our
+work is largely orthogonal to these.
+Differentiable Rendering of Neural SDFs through Reparameterization •
+(b) sphere tracer points
+(a) naive rendering with
+2D visibility discontinuities
+(c) continuous
+boundary-consistent warp
+weighted
+mean along
+ray
+3
+(d) our reparameterized
+integrand
+warp
+side view
+of scene
+Fig. 2. Overview. Without proper case a SDF rendering pipeline is discontinuous, which means there are points 𝑢 where the rendering function 𝐿 (𝑢; 𝜃 ) is not
+differentiable in 𝜃 , highlighted in red (a). Our method uses intermediate points from a sphere tracer (b) applied to an SDF 𝑓 , to compute a warp function V (c).
+Using this warp, we reparameterize the integration domain to avoid discontinuities (d), which allows us to compute correct gradients of the rendering equation.
+The key to achieving this is to design the warp V so it is continuous in 𝑢 everywhere, and satisfies some consistency criterion on the geometric boundaries.
+discontinuities:
+3 METHOD
+Our method computes the correct gradient of a rendering function
+(i.e. the pixel integral of the radiance function on the camera image
+plane) with respect to geometric parameters, in the presence of
+primary visibility discontinuities, for scenes where the geometry is
+represented by a signed distance field 𝑓 , parameterized by 𝜃 (e.g.,
+the weights of neural network). Our approach builds on Bangaru
+et al. [2020]. We show how to extend their warp function to SDFs
+in order to reparameterize an intractable boundary integral. We
+summarize the necessary background in § 3.1. We then derive a
+warp function for SDFs that is continuous and boundary consistent
+(§ 3.2) as an integral along camera rays, and show how to compute it
+via quadrature using sphere tracer points (§ 3.3). In Section 3.4, we
+finally give an unbiased approximation for this warp that is tractable
+for use with neural SDFs, and we show the criteria of unbiasedness
+and a sketch of proof. Section 3.5 provides details on how to use our
+approach to solve inverse rendering problems.
+3.1
+Background: boundary-aware warping
+Without loss of generality, assume a box pixel filter, so that U ⊂ R2
+is the image plane region corresponding to the pixel of interest. Let
+𝐿(𝑢; 𝜃 ) denote the radiance along the ray from 𝑢 ∈ U, a point on
+the image plane, and denote 𝜃 ∈ R𝑁 the vector of geometric scene
+parameters (e.g. neural network weights). In matrix expressions
+below, we will assume vector quantities (𝑢, 𝑥, 𝜃 ) to be row vectors,
+and gradients with respect to 𝜃 to be column vectors.
+We aim to compute the gradient of the rendering integral 𝐼 with
+respect to parameters 𝜃 :
+𝜕𝜃 𝐼 =
+𝜕
+𝜕𝜃
+∫
+U
+𝐿(𝑢; 𝜃 )𝑑𝑢.
+(1)
+Primary visibility discontinuities make the radiance function nondifferentiable along occlusion boundaries (Fig. 3). Denoting Usil (𝜃 ) ⊂
+U the set of object silhouettes, for a point 𝑢 sil ∈ Usil , the radiance
+𝐿(𝑢 sil ; 𝜃 ) is discontinuous in 𝜃 . This makes naive automatic differentiation methods applied to the Monte Carlo sampling of 𝐼 produce
+incorrect gradients since they ignore the Dirac delta that arises from
+the differentiation.
+Li et al.[2019; 2018] and Zhang et al. [2019] showed that Eq. (1)
+can be split into two terms: an interior integral, for contributions
+away from the discontinuities; and a boundary integral, along the
+𝜕𝜃 𝐼 =
+∫
+𝜕
+𝐿(𝑢; 𝜃 )𝑑𝑢 + 𝐼 sil .
+𝜕𝜃
+U
+(2)
+The second integral 𝐼 sil is harder to compute because sampling the
+boundary is generally technically difficult. This is particularly true
+for SDFs whose surface boundaries admit no easy parametric form.
+We will not cover boundary sampling in detail, since we will not
+use it; instead, we will use a result from Bangaru et al. [2020], who
+showed, using the divergence theorem, that this boundary term can
+be turned into an integral over the interior U \ Usil (𝜃 ), which is
+easier to sample:
+∫
+𝐼 sil =
+∇𝑢 · (𝐿(𝑢; 𝜃 )V (𝑢; 𝜃 )) 𝑑𝑢.
+(3)
+U\Usil (𝜃 )
+Here ∇𝑢 · is the divergence operator, and V (𝑢; 𝜃 ) ∈ R𝑁 ×2 is a
+warping function required to satisfy two properties:
+(1) continuity: V (·; 𝜃 ) is continuous on U, and
+(2) boundary consistency: V agrees with the derivative of the
+discontinuity points when 𝑢 approaches the discontinuity.
+That is, lim𝑢→𝑢sil V (𝑢; 𝜃 ) = 𝜕𝜃 𝑢 sil for 𝑢 sil ∈ Usil (𝜃 ).
+Bangaru et al. further show that the area integral is equivalent to
+applying the change of variable [Loubet et al. 2019] 𝑢 ↦→ 𝑇 (𝑢, 𝜃 ) =
+𝑢 + (𝜃 − 𝜃 0 )V (𝑢; 𝜃 ) in Eq. (1), where 𝜃 0 is the point at which the derivative is computed but 𝜕𝜃 𝜃 0 = 0. Applying the reparameterization
+we obtain:
+∫
+𝜕𝜃 𝐼 =
+𝜕𝜃 [𝐿(𝑇 (𝑢, 𝜃 ), 𝜃 ) |det (𝜕𝑢𝑇 (𝑢, 𝜃 ))|] d𝑢.
+(4)
+U
+Expanding 𝑇 and using Eq. (3), one can show that Eq. (4) indeed
+computes 𝜕𝜃 𝐼 . Intuitively, the reparameterization 𝑇 moves each
+point on the boundary locally at the velocity of their derivatives,
+essentially removing the discontinuities, while the determinant term
+accounts for the change of measure.
+The main goal of this paper is to derive a suitable form for V (𝑢; 𝜃 )
+for SDFs, that can be tractably computed, so that we can evaluate
+Eq. (4) using Monte Carlo estimation.
+Rendering. To render an SDF 𝑓 and compute 𝐿(𝑢; 𝜃 ), we need to
+find the closest intersection point 𝑥 (𝑢, 𝑡) ∈ R3 such that 𝑓 (𝑥; 𝜃 ) =
+0, where 𝑡 is the distance along the primary ray associated with
+pixel location 𝑢. To find the intersection distance, we use sphere
+tracing [Hart 1996], which applies a fixed-point iteration to generate
+a sequence of points 𝑥𝑛 ∈ T (𝑢), such that lim𝑛→∞ 𝑥𝑛 = 𝑥.
+4 • Sai Praveen Bangaru, Michaël Gharbi, Tzu-Mao Li, Fujun Luan, Kalyan Sunkavalli, Miloš Hašan, Sai Bi, Zexiang Xu, Gilbert Bernstein,
+and Frédo Durand
+2D pixel space
+side view of the 3D scene
+Fig. 3. As geometric parameters 𝜃 vary, visibility creates discontinuities
+in the rendering function 𝐿 (𝑢; 𝜃 ) which traditional automatic differentiation cannot handle (left). These discontinuities correspond to continuous
+changes in our SDF representation 𝑓 (𝑥; 𝜃 ) (right). We compute the derivative 𝜕𝜃 𝑢𝑠𝑖𝑙 of a pixel-space silhouette point w.r.t. the geometry parameters
+𝜃 by computing the derivative 𝐺 (𝑥; 𝜃 ) of the corresponding 3D scene point
+𝑥, and projecting it onto the screen space U through the inverse Jacobian.
+3.2
+Continuous boundary-consistent warp for SDFs
+In this section, we construct an idealized warp function V int that
+satisfies the continuity and boundary-consistency conditions of Section 3.1. First, we derive the boundary gradient 𝜕𝜃 𝑢 sil with which the
+warp should agree at silhouette points (§ 3.2.1). We then smoothly
+extrapolate this gradient using a weighted integral along the primary ray passing through 𝑢, to obtain our warp function (§ 3.2.2).
+We show necessary and sufficient conditions on the weighs to make
+the warp continuous and boundary-consistent (§ 3.2.3).
+3.2.1 Boundary consistency for implicit functions. The boundary
+consistency condition in Section 3.1, requires that, at a discontinuity
+point 𝑢 sil the warp agrees with 𝜕𝜃 𝑢 sil . The derivation proposed by
+Bangaru et al. [2020] does not apply directly to implicit surfaces,
+so we derive this boundary derivative using the implicit function
+theorem. Specifically, the derivative of a scene point 𝑥 ∈ R3 on the
+surface, i.e., 𝑓 (𝑥; 𝜃 ) = 0, w.r.t. parameters 𝜃 ∈ R𝑁 is given by:
+𝜕 𝑓 𝜕𝑥 𝑓 𝑇
+𝐺 (𝑥; 𝜃 ) := 𝜕𝜃 𝑥 = − 𝜃
+∈ R𝑁 ×3 .
+∥𝜕𝑥 𝑓 ∥ 2
+(5)
+The above directly follows from the implicit function theorem applied to 𝑓 (𝑥; 𝜃 ) = 0. To get the derivative in pixel coordinates
+𝜕𝜃 𝑢 = 𝜕𝜃 𝑥 · 𝜕𝑥 𝑢 ∈ R𝑁 ×2 , we need to project this derivative by the
+Jacobian 𝜕𝑥 𝑢 ∈ R3×2 , which for a perspective camera can be easily
+derived by hand. For more generality, we can obtain this Jacobian
+as the pseudo-inverse † of the forward Jacobian:
+𝜕𝑥 𝑢 = (𝜕𝑢 𝑥 (𝑢, 𝑡)) † .
+(6)
+Taken together, the derivative at a silhouette point 𝑢 sil , with
+corresponding 3D position 𝑥 sil = 𝑥 (𝑢 sil, 𝑡 sil ), is then:
+𝜕𝜃 𝑢 sil = 𝐺 (𝑥 sil ; 𝜃 ) 𝜕𝑥 𝑢.
+(7)
+Figure 3 illustrates the geometric configuration.
+3.2.2 Extending to a smooth warp V int (𝑢; 𝜃 ) by integration along
+the ray. Now that we have an expression for the warp at silhouette points, we extend it to all points, by smoothing this term in
+a consistent manner. Our method takes advantage of the fact that
+our implicit SDF 𝑓 (𝑥; 𝜃 ) is continuous in 3D space and achieves
+the smoothing by convolving along the ray (Fig. 4 (b)). This avoids
+casting expensive additional rays which are needed by Bangaru
+et al. [2020], and also propagates gradients to points in free space
+(a) warped-area sampling
+(b) ours
+Fig. 4. (a) Warped-area sampling uses additional random rays around the
+primal ray and averages 𝜕𝜃 𝑥 (𝑢; 𝑡 ) using boundary-aware harmonic weights.
+(b) Our method instead takes a weighted average along the ray, repurposing
+the SDF 𝑓 into weights 𝑆 (𝑥) −𝛾 .
+near the boundary points. This can have a stabilizing effect on the
+optimization of neural SDFs, as noted by Oechsle et al. [2021] and
+Wang et al. [2021]; note that, while they adapt a volumetric rendering model to achieve better convergence, we do so while computing
+correct boundary gradients for a surface-based representation.
+Our proposed warp function smoothly extends Eq. (7) to nonboundary points as follows:
+∫ 𝑡0
+𝑤 (𝑥 (𝑢, 𝑡)) 𝐺 (𝑥; 𝜃 ) 𝜕𝑥 𝑢 𝑑𝑡
+int
+V (𝑢; 𝜃 ) = 𝑡 =0 ∫ 𝑡
+,
+(8)
+0
+𝑤 (𝑥 (𝑢, 𝑡)) 𝑑𝑡
+𝑡 =0
+with 𝑡 0 the distance to the closest intersection, 𝑡 0 = ∞ when the ray
+does not intersect.
+3.2.3 Choice of weights. In order to satisfy the boundary consistency criteria, the weights need to asymptotically satisfy the limit:
+lim ∫ 𝑡
+0
+𝑢→𝑢 sil
+𝑡 ′ =0
+𝑤 (𝑥 (𝑢, 𝑡))
+𝑤 (𝑥 (𝑢, 𝑡 ′ )) 𝑑𝑡 ′
+= 𝛿 (𝑡 − 𝑡 sil ),
+(9)
+where 𝛿 is the Dirac delta operator.
+From Eq. (9), we see that our weights have to depend on some
+notion of distance to the silhouette. For an implicit function 𝑓 that
+is at least 𝐶 1 continuous, the following constraints implicitly characterize the silhouette points [Gargallo et al. 2007]:
+𝑓 (𝑥 (𝑢, 𝑡); 𝜃 ) = 0,
+𝜕𝑥 𝑓 (𝑥 (𝑢, 𝑡); 𝜃 )𝑇 𝜕𝑡 𝑥 (𝑢, 𝑡) = 0.
+(10)
+The first condition requires the point to be on the surface, and the
+second condition requires the SDF gradient to be perpendicular
+to ray direction [Hertzmann 1999]. We can use these equations to
+build a silhouette characteristic function S(𝑥), which takes value
+0 whenever 𝑥 is a silhouette point, and is continuous everywhere.
+Specifically, we define:
+S(𝑥) = |𝑓 (𝑥; 𝜃 )| + 𝜆𝑑 𝜕𝑥 𝑓 (𝑥; 𝜃 )𝑇 𝜕𝑡 𝑥 ,
+(11)
+𝑤 (𝑥) = S(𝑥) −𝛾 , 𝛾 > 2.
+(12)
+where 𝜆𝑑 > 0. This characteristic function is similar to the boundary
+test function used by Bangaru et al. [2020] for meshes. However,
+unlike their boundary test, S(𝑥) is defined everywhere in the SDF’s
+3D domain, not just the surface points. This allows us to use these
+weights for our integral along any ray.
+Our final harmonic weights are given by:
+For 𝛾 > 2, our weights satisfy the limit in Eq. (9). Intuitively, this is
+because the 𝑤 (𝑥) → 𝛿 (𝑥 − 𝑥 sil ) as 𝑥 → 𝑥 sil . See our supplementary
+material for a discussion of correctness, and derivation of 𝛾 > 2.
+Differentiable Rendering of Neural SDFs through Reparameterization •
+(a) harmonic weight
+(b) quadrature approximation
+5
+(c) top-k subset weight
+SDF and
+weight profile
+unnormalized
+weight
+normalized
+weight
+Fig. 5. Weight visualization. A contour plot of a sample 2D SDF (first row). We use an orthographic camera for illustration, so camera rays are parallel to the
+horizontal axis. We show our three weighting schemes in unnormalized (second row) and normalized (third row) form. Our proposed harmonic weights (a) for
+𝛾 = 4.0, 𝜆𝑑 = 1𝑒 − 1 are well approximated by a trapezoidal quadrature on the sphere tracer points (b). The blank regions with no weight can be excluded from
+the computation, which leads to our proposed our proposed top-𝑘 subset weights (c), for 𝑘 = 8. This reduces both the compute and memory burden of the
+backward pass. We visualize the weight in a symlog plot, values are linear in [0, 101 ] and [0, 10−3 ] for the unnormalized and normalized weights, respectively.
+Fig. 5(a) shows our weight distribution along the ray for all 𝑢 in
+a 1D example sphere tracer.
+3.3
+Estimating the warp through its quadrature V 𝑞
+We now have a clear form for our warp function that can be used
+to reparameterize and differentiate the rendering function. Unfortunately, the asymptotical sharpness of our weights required to obtain
+a valid warp, also makes the integral (8) very difficult to sample. For
+𝑢 close to the silhouette Usil , the weights become very concentrated
+near the surface boundary, presenting a tricky integrand if we were
+to uniformly sample along the ray.
+Careful importance sampling of areas near the boundary could
+remedy this, but there is unfortunately no straightforward way
+to implement this: the weight distribution depends heavily on the
+configuration of silhouettes near 𝑢, dictated by the SDF.
+Our approach foregoes stochastic sampling altogether. We construct a trapezoidal quadrature on the series of intermediate points
+𝑥𝑛 ∈ T (𝑢) generated by the sphere tracer, shown in Fig. 5(b). This
+quadrature estimator for the warp is given by:
+Í
+𝑞
+𝑥𝑖 ∈ T (𝑢) 𝑤 (𝑥𝑖 ) 𝐺 (𝑥; 𝜃 ) 𝜕𝑥 𝑢
+Í
+V 𝑞 (𝑢; 𝜃 ) =
+,
+𝑞
+𝑥𝑖 ∈ T (𝑢) 𝑤 (𝑥𝑖 )
+(13)
+(𝑡𝑖−1 − 𝑡𝑖+1 )
+𝑞
+where 𝑤 (𝑥𝑖 ) = 𝑤 (𝑥𝑖 )
+,
+2
+and 𝑡𝑖 is the distance along the ray to sphere tracer point 𝑥𝑖 . Assuming the underlying SDF 𝑓 (𝑥; 𝜃 ) is 𝐶 1 continuous, the intermediate
+points of the sphere tracer are continuous at all 𝑢 ∉ Usil . By composition of continuous functions, V 𝑞 (·; 𝜃 ) is also continuous.
+Our quadrature warp V 𝑞 satisfies the continuity and boundary
+consistency condition (§3.1). Since we apply trapezoidal quadrature,
+V 𝑞 (𝑢; 𝜃 ) is in general a biased estimator of integral V int (𝑢; 𝜃 ). However, the two terms are equal in the limit as 𝑢 approaches the silhouette, i.e., for 𝑢 sil ∈ Usil , lim𝑢→𝑢sil V 𝑞 (𝑢; 𝜃 ) = lim𝑢→𝑢sil V int (𝑢; 𝜃 ),
+and since the right-hand side is boundary consistent, so is our quadrature warp V 𝑞 . See supplemental for a sketch proof of correctness.
+3.4
+Top-𝑘 subset weighting 𝑤¯ 𝑘 to reduce memory use
+For complex SDFs such as a neural network, our quadrature warp
+V q has the caveat that it requires back-propagating through every
+sphere tracer point. Previous work like IDR [Yariv et al. 2020] do not
+have this issue since their (biased) gradient is only computed at the
+intersection point, and they exclude other points from the gradient
+computation. Our approach, on the other hand, uses a weighted
+sum, so we cannot discard intermediate points.
+However, as shown in Fig. 5(b), the vast majority of sphere tracer
+points have negligible weight, and most of the mass is concentrated
+close to the silhouette. We exploit this by only using the subset
+of points with the highest weight in our warp estimation. That is,
+instead of using all of 𝑇 (𝑢), we can instead use a top-k subset 𝑇𝑘 (𝑢).
+Selecting the top-𝑘 weights requires adjusting them to ensure that
+they remain continuous. For a subset size of 𝑘, our weights are2 :
+𝑤¯ 𝑘 (𝑥) =
+
+
+𝑤 q (𝑥) − min 𝑤 q (𝑥),
+
+
+0
+
+𝑥 ∈𝑇𝑘 (𝑢)
+if 𝑥 ∈ 𝑇𝑘 (𝑢)
+otherwise.
+(14)
+The weights 𝑤¯ 𝑘 (𝑥) still produce a continuous warp field (see
+supplemental for a sketch of proof). Intuitively, even though the set
+of points change as a function of 𝑢, whenever this change occurs,
+the points that swap in or out of the set always have weight 0.
+3.5
+Inverse Rendering Details
+In this section, we briefly discuss some details that make our inverse
+rendering pipeline tractable.
+2 Note that even though we consider the top 𝑘 weights, only 𝑘 − 1 weights actually
+have a non-zero contribution to the 𝜃 -derivative.
+Pixel sampling. Similar to Yariv et al. [2020] and other neural
+methods, we sample a subset of pixels for each iteration since it
+can be computationally prohibitive to trace the entire image when
+using a deep neural representation. However, unlike Yariv et al.
+[2020], which works with a single ray at the center of the pixel, our
+approach must integrate the spatially-varying warp V over each
+pixel. We achieve this by Monte-Carlo sampling within each pixel.
+Appendix A discusses how we incorporate pixel filters.
+Multi-level optimization. Since we only use a subset of pixels, the
+likelihood of sampling a pixel with silhouette gradient is fairly low.
+For unbiased derivatives, only pixels that are partially covered by a
+surface have a non-zero boundary contribution. This is in contrast
+to approximate derivatives (e.g., [Liu et al. 2019], [Yariv et al. 2020])
+that have a wider spatial footprint. To alleviate this issue, we use a
+multi-scale pyramid of the target image throughout our optimization
+to help with gradient stability.
+Initialization. We use the geometric network initialization [Atzmon and Lipman 2020] which approximately produces a spherical
+SDF. We also initializes the weights of the positional encoding layer
+to 0 [Yariv et al. 2020]. We found this subtle modification implicitly
+enforces a coarse-to-fine mechanism that yields significantly better
+generalization to novel views.
+Eikonal constraint. We represent our SDF 𝑓 using a neural network, which does not necessarily satisfy the distance property. We
+adopt the Eikonal regularization loss [Gropp et al. 2020] to explicitly
+enforce this. In-spite of the additional loss, 𝑓 is still an approximation of an SDF, and therefore we pad our weights with a small 𝜖 in
+order to avoid infinities.
+4 RESULTS
+4.1 Ground truth gradient comparions
+We first evaluate the correctness of our gradient by visualizing gradients on three different scenes (illustrated in Fig. 6). For Torus—a
+analytical torus model textured with a diffuse Perlin noise albedo—
+we visualize the gradients w.r.t the outer radius (distance from the
+SANTA
+Network architecture. For our inverse rendering results, we use
+the network architecture shown in Fig. 11 of Yariv et al. [2020]. Since
+our method is slightly more memory-intensive (even with top-𝑘
+subset weights), we reduce the width of the SDF network to 256
+channels per layer. In this architecture, the shading network predicts
+the final radiance based on the position, viewing direction and a
+geometric feature vector. However, in contrast to NeRF [Mildenhall
+et al. 2020]-like methods, the shading network is only evaluated at
+surface points. We use 6-levels of positional encoding on the input
+position 𝑥 to allow the network to reconstruct fine geometry.
+KITTY
+Implementation. Our method requires 3 nested derivative passes
+to (i) compute normals 𝜕x 𝑓 , (ii) compute Jacobian of the transformation 𝜕𝑢𝑇 and (iii) to compute derivatives of the full pipeline
+𝜕𝜃 [𝐿(𝑇 (𝑢, 𝜃 )) |det (𝜕𝑢𝑇 (𝑢, 𝜃 ))|]. We use the Python JAX automatic
+differentiation system [Bradbury et al. 2018], which supports nested
+forward+backward differentiation. We use forward-mode for (i) and
+(ii), and reverse-mode for (iii).
+TORUS
+6 • Sai Praveen Bangaru, Michaël Gharbi, Tzu-Mao Li, Fujun Luan, Kalyan Sunkavalli, Miloš Hašan, Sai Bi, Zexiang Xu, Gilbert Bernstein,
+and Frédo Durand
+Naive
+Finite difference
+Ours
+Fig. 6. Gradient quality. We compare the image gradients computed
+naïvely without reparameterization [Yariv et al. 2020] and with our method
+against the “ground truth” gradient computed with finite differences for
+three scenes. Our method properly handles boundary discontinuities both
+due to object edges (in purple insets) and self-occlusions (in green insets).
+center to the center of the ring). (Santa and Kitty) are 3D models that we represent as neural SDFs. We take the parameters of
+the neural SDF from an intermediate iteration during an inverse
+rendering optimization, and visualize the gradient w.r.t the bias
+parameter of the last layer output (i.e. the level set perturbation).
+We also compute the gradient without reparameterization; this is
+similar to the gradient used in previous SDF-based inverse rendering methods [Yariv et al. 2020]. Note that the interior gradient is
+largely unaffected by reparameterization, with the gradient at the
+silhouettes being the largest benefit of our method, especially at
+self-occlusions. In the next subsection, we show that this boundary
+gradient is critical and without it, the inverse rendering diverges.
+4.2
+Comparisons against IDR
+We compare our reconstructions against the SDF-based inverse
+rendering method of IDR [Yariv et al. 2020]. IDR does not correctly
+account for the boundary term of gradient of the rendering integral
+and requires additional supervision, in the form of accurate 2D
+segmentation masks. We implement IDR in our pipeline to ensure
+that the only difference is our reparameterization. We use the same
+network architecture for both methods (See Sec. 3.5 for details),
+and report results after roughly 25,000 network updates. Note that
+our method uses more samples (2 in the interior + 4 on each pixel
+boundary) since we use a Monte-Carlo approach to estimate the
+warp. IDR only requires one sample, fixed at the center of the pixel.
+Figure 7 shows that, on three synthetic scenes (Santa, Kitty
+and Duck), our method without any 2D masks supervision obtains
+comparable depth and RGB reconstruction as IDR with (perfect)
+mask supervision. We also show reconstructions of a captured real
+7
+dragon
+pony
+duck
+kitty
+santa
+Differentiable Rendering of Neural SDFs through Reparameterization •
+Input image
+IDR Radiance
+IDR Depth
+Ours Radiance
+Ours Depth
+Ours 3D geometry
+Fig. 7. Neural SDF reconstruction. We compare with IDR [Yariv et al. 2020] on three synthetic scenes (top three rows) and two real captured scene (bottom
+rows). IDR requires 2D mask supervision, without which it completely diverges. Thanks to our accurate gradient computation, our reconstructions are on par
+with IDR, without requiring any additional supervision beyond the input images and camera poses. In fact, on the real scenes, our reconstructions (without
+masks) outperform IDR with masks (see the head of the pony, or the legs, tails and wings of the dragon) because of errors in automatic 2D segmentation.
+scene (Pony from Bi et al. [2020b]). Here, we provide IDR with 2D
+masks derived from a COLMAP reconstruction, which has errors.
+As a result, our reconstruction outperforms IDR on this scene.
+We also tried to compare with IDR without mask supervision.
+In most cases, IDR without masks diverges completely because
+of the lack of gradients from the silhouette. This is similar to the
+observation made by Oechsle et al. [2021].
+4.3
+Ablation study: Subset size
+Our top-k weighting scheme reduces the memory footprint of our
+optimization, but this comes at a cost. The smaller 𝑘, the sharper
+the weight landscape. This can cause high variance that can impede
+the optimization of fine details. We explore this through an ablation
+study on the Santa dataset, varying 𝑘 shown below. We use 36
+views for this study, and report results after 20, 000 network updates.
+Details are resolved for 𝑘 ≥ 14.
+8 • Sai Praveen Bangaru, Michaël Gharbi, Tzu-Mao Li, Fujun Luan, Kalyan Sunkavalli, Miloš Hašan, Sai Bi, Zexiang Xu, Gilbert Bernstein,
+and Frédo Durand
+𝑘=4
+5
+𝑘=8
+𝑘 = 15
+𝑘 = 22
+CONCLUSION
+We have presented a novel method to correctly differentiate neural
+SDFs. Unlike prior work that relies on accurate masks or biased
+approximations of the boundary gradients, we reparameterize the
+pixel coordinates with discontinuity-aware transformation such that
+geometric derivatives exist everywhere and can be correctly computed via standard automatic differentiation. We have validated the
+correctness of our approach by comparing our gradients with finite
+difference ground truth, and demonstrated superior optimization
+convergence comparing state-of-the-art neural SDF baseline.
+While we have focused on primary visibility in this work, our formulation can be extended to global light transport. In particular, we
+expect to be able to model light rays and jointly optimize for geometry (represented as an SDF) as well as surface reflectance (instead
+of the radiance we are currently reconstructing) and illumination.
+Modeling full global light transport (interreflections) with neural
+SDFs will require extensions or approximations to be computationally tractable. Finally, inverse rendering under unknown, natural
+illumination is ill-posed and it would be interesting to explore geometry, material and illumination priors that can be combined with
+our differentiable rendering formulation.
+ACKNOWLEDGMENTS
+This work was partially completed during an internship at Adobe
+Research and subsequently funded by the Toyota Research Institute
+and the National Science Foundation (NSF 2105806).
+Differentiable Rendering of Neural SDFs through Reparameterization •
+REFERENCES
+James Arvo. 1994. The Irradiance Jacobian for Partially Occluded Polyhedral Sources.
+In SIGGRAPH. ACM Press/Addison-Wesley Publishing Co., 343–350.
+Matan Atzmon and Yaron Lipman. 2020. SAL: Sign Agnostic Learning of Shapes
+From Raw Data. In IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR).
+Sai Bangaru, Tzu-Mao Li, and Frédo Durand. 2020. Unbiased Warped-Area Sampling
+for Differentiable Rendering. ACM Trans. Graph. 39, 6 (2020), 245:1–245:18.
+Sai Bi, Zexiang Xu, Pratul P. Srinivasan, Ben Mildenhall, Kalyan Sunkavalli, Milos
+Hasan, Yannick Hold-Geoffroy, David J. Kriegman, and Ravi Ramamoorthi. 2020a.
+Neural Reflectance Fields for Appearance Acquisition. CoRR abs/2008.03824 (2020).
+Sai Bi, Zexiang Xu, Kalyan Sunkavalli, Milos Hasan, Yannick Hold-Geoffroy, David
+Kriegman, and Ravi Ramamoorthi. 2020b. Deep Reflectance Volumes: Relightable
+Reconstructions from Multi-View Photometric Images. In Proceedings of the European
+Conference on Computer Vision (ECCV).
+James F Blinn. 1982. A generalization of algebraic surface drawing. ACM Trans. Graph.
+1, 3 (1982), 235–256.
+James Bradbury, Roy Frostig, Peter Hawkins, Matthew James Johnson, Chris Leary,
+Dougal Maclaurin, George Necula, Adam Paszke, Jake VanderPlas, Skye WandermanMilne, and Qiao Zhang. 2018. JAX: composable transformations of Python+NumPy
+programs. http://github.com/google/jax
+Forrester Cole, Kyle Genova, Avneesh Sud, Daniel Vlasic, and Zhoutong Zhang. 2021.
+Differentiable surface rendering via non-differentiable sampling. In International
+Conference on Computer Vision. 6088–6097.
+Martin de La Gorce, David J Fleet, and Nikos Paragios. 2011. Model-based 3D hand
+pose estimation from monocular video. IEEE Trans. Pattern Anal. Mach. Intell. 33, 9
+(2011), 1793–1805.
+Pau Gargallo, Emmanuel Prados, and Peter Sturm. 2007. Minimizing the reprojection
+error in surface reconstruction from images. In International Conference on Computer
+Vision. 1–8.
+Ioannis Gkioulekas, Shuang Zhao, Kavita Bala, Todd Zickler, and Anat Levin. 2013.
+Inverse Volume Rendering with Material Dictionaries. ACM Trans. Graph. 32, 6 (nov
+2013), 162:1–162:13.
+Amos Gropp, Lior Yariv, Niv Haim, Matan Atzmon, and Yaron Lipman. 2020. Implicit
+Geometric Regularization for Learning Shapes. In Proceedings of Machine Learning
+and Systems 2020. 3569–3579.
+John C Hart. 1996. Sphere tracing: A geometric method for the antialiased ray tracing
+of implicit surfaces. The Visual Computer 12, 10 (1996), 527–545.
+Aaron Hertzmann. 1999. Introduction to 3D Non-Photorealistic Rendering: Silhouettes
+and Outlines. In SIGGRAPH Course Notes. Course on Non-Photorelistic Rendering,
+Stuart Green (Ed.). ACM Press/ACM SIGGRAPH, New York.
+Shahram Izadi, David Kim, Otmar Hilliges, David Molyneaux, Richard Newcombe,
+Pushmeet Kohli, Jamie Shotton, Steve Hodges, Dustin Freeman, Andrew Davison,
+et al. 2011. KinectFusion: real-time 3D reconstruction and interaction using a moving
+depth camera. In symposium on User interface software and technology. 559–568.
+Yue Jiang, Dantong Ji, Zhizhong Han, and Matthias Zwicker. 2020. SDFDiff: Differentiable rendering of signed distance fields for 3D shape optimization. In Computer
+Vision and Pattern Recognition. 1251–1261.
+Hiroharu Kato, Yoshitaka Ushiku, and Tatsuya Harada. 2018. Neural 3D Mesh Renderer.
+In Computer Vision and Pattern Recognition. IEEE, 3907–3916.
+Petr Kellnhofer, Lars C Jebe, Andrew Jones, Ryan Spicer, Kari Pulli, and Gordon Wetzstein. 2021. Neural lumigraph rendering. In Computer Vision and Pattern Recognition.
+4287–4297.
+Tzu-Mao Li. 2019. Differentiable Visual Computing. Ph.D. Dissertation. Massachusetts
+Institute of Technology. Advisor(s) Durand, Frédo.
+Tzu-Mao Li, Miika Aittala, Frédo Durand, and Jaakko Lehtinen. 2018. Differentiable
+Monte Carlo Ray Tracing through Edge Sampling. ACM Trans. Graph. (Proc. SIGGRAPH Asia) 37, 6 (2018), 222:1–222:11.
+Tzu-Mao Li, Jaakko Lehtinen, Ravi Ramamoorthi, Wenzel Jakob, and Frédo Durand.
+2015. Anisotropic Gaussian Mutations for Metropolis Light Transport through
+Hessian-Hamiltonian Dynamics. ACM Trans. Graph. (Proc. SIGGRAPH Asia) 34, 6
+(2015), 209:1–209:13.
+Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and Christian Theobalt. 2020.
+Neural Sparse Voxel Fields. NeurIPS (2020).
+Shichen Liu, Tianye Li, Weikai Chen, and Hao Li. 2019. Soft Rasterizer: A Differentiable
+Renderer for Image-based 3D Reasoning. International Conference on Computer
+Vision (2019).
+Stephen Lombardi, Tomas Simon, Jason Saragih, Gabriel Schwartz, Andreas Lehrmann,
+and Yaser Sheikh. 2019. Neural Volumes: Learning Dynamic Renderable Volumes
+from Images. ACM Trans. Graph. 38, 4, Article 65 (July 2019), 65:1–65:14 pages.
+Matthew M. Loper and Michael J. Black. 2014. OpenDR: An Approximate Differentiable
+Renderer. In European Conference on Computer Vision, Vol. 8695. ACM, 154–169.
+Guillaume Loubet, Nicolas Holzschuch, and Wenzel Jakob. 2019. Reparameterizing
+discontinuous integrands for differentiable rendering. ACM Trans. Graph. (Proc.
+SIGGRAPH Asia) 38, 6 (2019), 228.
+9
+Fujun Luan, Shuang Zhao, Kavita Bala, and Ioannis Gkioulekas. 2020. Langevin Monte
+Carlo Rendering with Gradient-based Adaptation. ACM Trans. Graph. (Proc. SIGGRAPH) 39, 4 (2020).
+Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. 2020. NeRF: Representing Scenes as Neural Radiance Fields
+for View Synthesis. In European Conference on Computer Vision.
+Michael Niemeyer, Lars Mescheder, Michael Oechsle, and Andreas Geiger. 2020. Differentiable volumetric rendering: Learning implicit 3D representations without 3D
+supervision. In Computer Vision and Pattern Recognition. 3504–3515.
+Merlin Nimier-David, Sébastien Speierer, Benoît Ruiz, and Wenzel Jakob. 2020. Radiative
+Backpropagation: An Adjoint Method for Lightning-Fast Differentiable Rendering.
+ACM Trans. Graph. (Proc. SIGGRAPH) 39, 4 (July 2020). https://doi.org/10.1145/
+3386569.3392406
+Michael Oechsle, Songyou Peng, and Andreas Geiger. 2021. UNISURF: Unifying Neural
+Implicit Surfaces and Radiance Fields for Multi-View Reconstruction. In International
+Conference on Computer Vision (ICCV).
+Jeong Joon Park, Peter Florence, Julian Straub, Richard Newcombe, and Steven Lovegrove. 2019. DeepSDF: Learning continuous signed distance functions for shape
+representation. In Computer Vision and Pattern Recognition. 165–174.
+Ravi Ramamoorthi, Dhruv Mahajan, and Peter Belhumeur. 2007. A First-order Analysis
+of Lighting, Shading, and Shadows. ACM Trans. Graph. 26, 1 (2007), 2.
+Edoardo Remelli, Artem Lukoianov, Stephan Richter, Benoît Guillard, Timur Bagautdinov, Pierre Baque, and Pascal Fua. 2020. MeshSDF: Differentiable iso-surface
+extraction. In Advances in Neural Information Processing Systems, Vol. 33. 22468–
+22478.
+Helge Rhodin, Nadia Robertini, Christian Richardt, Hans-Peter Seidel, and Christian
+Theobalt. 2015. A Versatile Scene Model with Differentiable Visibility Applied to
+Generative Pose Estimation. In International Conference on Computer Vision. IEEE,
+765–773.
+Eric Veach. 1998. Robust Monte Carlo Methods for Light Transport Simulation. Ph.D.
+Dissertation. Stanford University. Advisor(s) Guibas, Leonidas J.
+Delio Vicini, Sébastien Speierer, and Wenzel Jakob. 2021. Path replay backpropagation:
+differentiating light paths using constant memory and linear time. ACM Trans.
+Graph. (Proc. SIGGRAPH) 40, 4 (2021).
+Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku Komura, and Wenping
+Wang. 2021. NeuS: Learning Neural Implicit Surfaces by Volume Rendering for
+Multi-view Reconstruction. In Advances in Neural Information Processing Systems.
+Greg Ward and Paul Heckbert. 1992. Irradiance Gradients. In Eurographics Workshop
+on Rendering. Eurographics Association, 85–98.
+Yiheng Xie, Towaki Takikawa, Shunsuke Saito, Or Litany, Shiqin Yan, Numair Khan,
+Federico Tombari, James Tompkin, Vincent Sitzmann, and Srinath Sridhar. 2022.
+Neural Fields in Visual Computing and Beyond. Comput. Graph. Forum. State of the
+Art Report (2022).
+Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. 2021. Volume rendering of neural
+implicit surfaces. In Advances in Neural Information Processing Systems.
+Lior Yariv, Yoni Kasten, Dror Moran, Meirav Galun, Matan Atzmon, Basri Ronen, and
+Yaron Lipman. 2020. Multiview Neural Surface Reconstruction by Disentangling
+Geometry and Appearance. Advances in Neural Information Processing Systems 33
+(2020).
+Tizian Zeltner, Sébastien Speierer, Iliyan Georgiev, and Wenzel Jakob. 2021. Monte Carlo
+estimators for differential light transport. ACM Trans. Graph. (Proc. SIGGRAPH) 40,
+4 (2021).
+Cheng Zhang, Zhao Dong, Michael Doggett, and Shuang Zhao. 2021a. Antithetic
+Sampling for Monte Carlo Differentiable Rendering. ACM Trans. Graph. (Proc.
+SIGGRAPH) 40, 4 (2021).
+Cheng Zhang, Bailey Miller, Kai Yan, Ioannis Gkioulekas, and Shuang Zhao. 2020.
+Path-Space Differentiable Rendering. ACM Trans. Graph. (Proc. SIGGRAPH) 39, 6
+(2020), 143:1–143:19.
+Cheng Zhang, Lifan Wu, Changxi Zheng, Ioannis Gkioulekas, Ravi Ramamoorthi, and
+Shuang Zhao. 2019. A differential theory of radiative transfer. ACM Trans. Graph.
+(Proc. SIGGRAPH Asia) 38, 6 (2019), 227.
+Cheng Zhang, Zihan Yu, and Shuang Zhao. 2021c. Path-Space Differentiable Rendering
+of Participating Media. ACM Trans. Graph. (Proc. SIGGRAPH) 40, 4 (2021), 76:1–76:15.
+Kai Zhang, Fujun Luan, Qianqian Wang, Kavita Bala, and Noah Snavely. 2021b. PhySG:
+Inverse rendering with spherical gaussians for physics-based material editing and
+relighting. In Computer Vision and Pattern Recognition. 5453–5462.
+Shuang Zhao, Wenzel Jakob, and Tzu-Mao Li. 2020. Physics-Based Differentiable
+Rendering: From Theory to Implementation. In ACM SIGGRAPH 2020 Courses. Article
+14, 30 pages.
+Yang Zhou, Lifan Wu, Ravi Ramamoorthi, and Ling-Qi Yan. 2021. Vectorization for
+Fast, Analytic, and Differentiable Visibility. ACM Trans. Graph. 40, 3 (2021).
+10 • Sai Praveen Bangaru, Michaël Gharbi, Tzu-Mao Li, Fujun Luan, Kalyan Sunkavalli, Miloš Hašan, Sai Bi, Zexiang Xu, Gilbert
+Bernstein, and Frédo Durand
+Unbounded space
+Interior
+Boundary
+Ours
+(Box filter)
+Bangaru 2020 and Loubet 2019
+(Gaussian filter)
+Fig. 8. On the left, existing methods [Bangaru et al. 2020; Loubet et al. 2019]
+use an unbounded Gaussian filter to avoid the need to handle the boundary
+of the pixel filter U𝑏 , but this comes at the cost of increased variance in
+the interior due to the derivative of the Gaussian weights. On the right, our
+method uses a box filter and explicitly removes the discrepancy in the warp
+field V through a boundary integral over U𝑏 .
+A
+PIXEL BOUNDARY SAMPLING
+In Eqn. 3, we use a box which implies the pixel domain U is bounded.
+An implication of this is that we must also consider the boundaries
+of the pixel filter support (denoted by U𝑏 ⊂ R2 ) as discontinuities
+in Usil . Previously, to avoid this additional complexity, Bangaru
+et al. [2020] used a Gaussian filter that has infinite support. We have
+found that this introduces extra variance due to the variation in the
+pixel filters in the divergence.
+We instead keep the box filter as well as exclude the pixel boundary from the area integral Usil . This means that Eqn. 3 is no longer
+valid since the product (𝐿V) does not vanish smoothly at the pixel
+filter boundary Ub . We must instead rewrite the integral domain
+as an unbounded space U∞ . We can further split the unbounded
+integral into two parts, one inside the pixel filter domain U and one
+outside (we omit parentheses here for brevity)
+∫
+∫
+𝐼 sil =
+∇ · (𝐿V) +
+∇ · (𝐿V) .
+(15)
+U\Usil
+( U∞ \U)\Ub
+We can then use the divergence theorem on the second area integral
+to turn it into a boundary integral over Ub
+∫
+∮
+𝐼 sil =
+∇ · (𝐿V) −
+𝐿 (V · n𝑏 ) ,
+(16)
+U\Usil
+Ub
+where n𝑏 is the outward pointing normal of the pixel filter boundary, and the negative sign comes from the fact that we consider
+regions outside of the pixel filter instead of inside. Unlike silhouette
+boundaries in Usil , U𝑏 is easy to sample since it only contains axisaligned line segments of equal length. Fig. 8 illustrates the difference
+between using a smooth unbounded filter and using a box filter with
+pixel boundary sampling.
+arXiv:2206.05344v1 [cs.GR] 10 Jun 2022
+Differentiable Rendering of Neural SDFs through
+Reparameterization: Supplementary Material
+1
+Correctness Sketch of V q
+To show that V q is valid we need to show that it is (i) Continuous and (ii)
+Boundary consistent. Here, we show that our weights are correct for an ideal
+C1 continuous SDF and for an ideal sphere tracer T (u). Here, T (u) denotes the
+infinite series of points generated by the sphere tracer. Note that, in general,
+none of these points will actually satisfy f (x) = 0 since an ideal sphere tracer
+never reaches the surface of an ideal SDF. Instead we will deal in limits. That
+is, limn→∞ f (xn ) = 0, xn ∈ T (u)
+Assumption 1 (General Position Assumption). For a given u, there
+exist no two points xi , xj ∈ T (u), i 6= j such that both f (xi ) = f (xj ) and
+∂x f (xi ) = ∂x f (xj ).
+Lemma 1.1 (Spherical Lower Bound). There is an -neighbourhood around
+every 3D silhouette point xsil , such that the SDF f (x) can be lower bounded by
+the SDF of a sphere with some fixed radius rl
+Since we can choose both  and rl , we can reduce the former and increase the
+latter until this lemma is satisfied. The only way this scheme fails is if the
+curvature of the surface is 0 at xsil . That cannot be the case, because then the
+surface would be a plane parallel to the ray direction, which means all points
+along the ray contradict Assumption 1
+Lemma 1.2 (Weight Lower Bound). For a quadrature point along the
+silhouette ray that is distance δ away from the silhouette point, the weights can
+be lower bounded.
+q
+q
+δ
+lim wq (x(u, tsil − δ)) ≥ ( rl2 + δ 2 − rl + p 2
+)−γ · ( rl2 + δ 2 − rl ) (1)
+u→Usil
+rl + δ 2
+Fig. 1 illustrates the slice of the sphere SDF that contains the center of the
+sphere and the ray direction.
+For a point δ away from the silhouette point, the
+p
+sphere SDF at f (x) is rl2 + δ 2 − rl . Using the property
+p of similar triangles,
+the dot product of the normal with the direction is δ/ rl2 + δ 2 .
+1
+Figure 1: Circle SDF Bound
+Lemma 1.3 (Unboundedness of the Lower Bound). For γ > 2, the
+lower bound in Lemma 1.2 is unbounded in the limit δ → 0
+q
+q
+δ
+(2)
+lim ( rl2 + δ 2 − rl + λd · p 2
+)−γ · ( rl2 + δ 2 − rl ) = ∞
+δ→0
+rl + δ 2
+To see this, notice that the limit above can be written as
+p
+rl2 + δ 2 − rl
+γ .
+lim 
+δ→0 p
+δ
+2
+2
+rl + δ − rl + λd · √ 2 2
+(3)
+rl +δ
+Taking the Taylor expansion at δ = 0, for the numerator we have:
+q
+δ2
+rl2 + δ 2 − rl =
++ O(δ 4 ).
+2rl
+For the denominator we have:
+!γ
+q
+δ
+δγ
+2
+2
+rl + δ − rl + λd · p 2
+=
++ O(δ γ+1 )
+rl
+rl + δ 2
+(4)
+(5)
+Substituting, we have that the ratio is asymptotically equivalent to:
+δ2
+δ 2−γ
+4
+4−γ
+)
+2rl + O(δ )
+2rl + O(δ
+=
+,
+γ
+1
+δ
+γ+1
+)
+rl + O(δ)
+rl + O(δ
+2
+(6)
+which diverges as long as γ > 2 .
+Lemma 1.4 (Kronecker Delta Behaviour). For a ray exactly at the silhouette, the limiting point of the sphere tracer is assigned all the weight, given
+γ > 2 and λd > 0
+lim
+w(q) (xn (u; t))
+=1
+(q) (x(u; t0 )) · dt0
+xi ∈T (u) w
+lim P
+u→Usil n→∞
+(7)
+We can show this through contradiction. Since the number of sphere tracer
+points are countably infinite, let’s consider some point xi ∈ T (u) that is not
+the limiting point. From 1.4 and 1.3, since T (u) is an infinite series, we can
+(q)
+w (xi )
+necessarily find a point xj , j > i such that w
+(q) (x ) < p for any p > 0 Therefore,
+j
+in the limit of n → ∞, the normalized weight of xi is 0.
+This is true for every point xi ∈ T (u) that is not the limiting point itself.
+Thus, our weights become a discrete version of delta (i.e. the Kronecker delta)
+on the limiting point.
+Since the limiting point of T (usil ) is xsil , it follows from the form of our
+quadrature weights that, limu→Usil V q (u) = G(x(u, tsil ); θ)T ∂x u. That is, V q is
+boundary consistent.
+2
+Correctness Sketch of top-k weights w̄k
+Since Tk (u) always contains the k points with the largest weights, boundary
+consistency follows from the correctness of V (q) . However, continuity is nontrivial since the discrete set of points in Tk (u) can change as u changes. We
+also only need to consider continuity at non-silhouette points since the resulting
+warp field is never evaluated exactly at silhouette points.
+Lemma 2.1 Top-K Weight Continuity The weights of the set Tk (u) are
+continuous for all u 6∈ Usil
+We analyze the weights of the points in the set Tk (u) under two separate
+cases
+1. Case 1: The indices of points in Tk (u) change in the infinitesimal neighbourhood around u.
+First, note that because of Assumption 1, no two points in T (u) (and Tk (u)
+by extension) can have the same weight. Thus, in an infinitesimally-small
+neighbourhood, we can assume that there is only one xi ∈ Tk (u) that is
+replaced with a new point xj ∈ T (u), xj 6∈ Tk (u), as we perturb u. In this
+neighbourhood, we can assert that:
+wq (xi ) = wq (xj )
+3
+We can also note that
+wq (xi ) =
+min
+xm ∈Tk (u)
+wq (xm )
+because by definition of the top-k subset, only the smallest weight is
+swapped out of the set. However, remember that, from our definition
+of top-k weights, because we shift every weight by the smallest weight, the
+smallest weight in the subset is zero, i.e.:
+wk (xi ) = wk (xj ) = 0
+Therefore, because both the swapped points xi and xj have a weight of 0,
+the weights of Tk (u) are continuous in the neighbourhood of u.
+2. Case 2: The order of points in Tk (u) remain constant in the infinitesimal
+neighbourhood around u.
+Since the points are at the same position in the original series T (u) and
+their weights are continuous, it follows that the weights of points in the
+subseries Tk (u) are also continuous.
+4

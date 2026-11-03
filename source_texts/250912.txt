@@ -1,0 +1,700 @@
+自动日报已完成并写入 GS/3DGS notebook。
+
+[查看完整报告](https://github.com/ArchitectureWorld/3dgs-pano/blob/main/notebook/GS-3DGS/daily/2026-10-04.md)
+
+---
+schema: architectureworld/gs-intelligence/v1
+window_start_utc: 2026-10-03T07:24:09Z
+window_end_utc: 2026-10-04T07:38:11Z
+generated_at_utc: 2026-10-04T07:38:11Z
+item_count: 68
+---
+
+# Gaussian Splatting（GS/3DGS）技术情报｜2026-10-04
+
+**统计窗口：** 2026-10-03T07:24:09Z — 2026-10-04T07:38:11Z  
+**运行方式：** 每日自动增量；如发生停跑，则从上一份报告末端连续补齐，不丢失中间日期。
+
+## 执行摘要
+
+本轮保留 **68** 项去重后的有效线索：真正新增论文 **0** 项、实质论文修订 **0** 项、代码/版本/项目更新 **68** 项。
+排序优先级为原始论文与正式发布，其次是实质代码更新；媒体与社区转发不会压过原始来源。
+
+## 今日最重要的5项更新
+
+| 排名 | 内容 | 类型 | 来源 | 成熟度 | 工程优先级 |
+|---:|---|---|---|---|---|
+| 1 | [Improve training efficiency (#554) * Reduce the SH second moment off the compact gradient Adam's second moment for the SH coefficients is a mean over each splat's coefficients. It was computed by squaring the dense [N, coeffs, 3] gradient and summing that away, which writes a full-size tensor the reduce reads once. burn will not fuse an elementwise prologue into a reduce, so both kernels pay full bandwidth: 53 MB a step at 139k splats, 1.15 GB at 3M. The gather is a row permutation with a zero row, so the reduction commutes with it. Reducing the compact rows and gathering the small result gives the same numbers, checked against the dense reduction in a test. Also moves the refine housekeeping after the optimizer step, so nothing sits between the backward's gathers and the step that consumes them. * Improve noise fusion and use native Burn memory APIs * Keep Burn wasm-compatible and trim fusion tests * Fix macOS linking and drop the standalone SH moment test](https://github.com/ArthurBrussee/brush/commit/64b8533863338907cba2485c1c95325b82e5765d) | 代码实质更新 | GitHub · ArthurBrussee/brush | E2 | P1 |
+| 2 | [Let burn fuse the training step, and cubecl do the scans (#546) * Bump burn to 1414c8a1 and cubecl to 359770be Adapts to two autodiff changes: Backward::prepare now takes NodeGuards from tensor.node(), and the tensor's primitive moves out through into_primitive(). Tensor::require_grad now panics on a non-autodiff device, so the redundant calls in Splats::from_raw and with_sh_degree go; the Param wrapper carries the training state and applies it on train(). Fusion custom-op types come from burn_fusion::custom, which drops the direct burn-ir dependency. * Use cubecl's cube count helper and drop the refine percentile readback calculate_cube_count_elemwise spreads a 1D dispatch across the grid from the device's real per-dimension limit, replacing brush-cube's hardcoded 65535 sqrt tiling. Refine also read every splat's screen size back to the host each time only to log percentile stats; that readback is gone. * Share one fusion custom-op helper across brush-render and brush-loss brush-loss had a generic register_custom closure helper while brush-render hand-wrote three near-identical Operation impls with manual output handle construction. The helper moves to brush-render's burn_glue, generalised to N inputs and M outputs, and all six custom ops use it. brush-loss no longer needs burn-ir directly. * Keep test splats on the inner device between step and refine The trainer-guard tests fed autodiff splats from step straight into refine and back, so refine rebuilt the parameters as derived graph nodes rather than leaves. Burn now rejects reusing a consumed tape; mirror the training loop, which lifts inner splats for each step. * Move scans into a shared brush-scan crate One cube-wide exclusive scan (plane scan, then one plane scans the per-plane totals, serial fallback for narrow planes) now serves both the radix sort, which had four inline copies of it, and the device-wide prefix sum, which used a Hillis-Steele shared-memory scan with sixteen barriers per block. The prefix sum now scans 1024 elements per cube with four per thread and recurses on block totals. * Time only the kernels in the sort and scan benches Both benches uploaded the inputs and read the full outputs inside the timed closure, so at 70M elements they measured half a gigabyte of transfers. Upload once outside and force completion by reading back a single element. * Commit the lockfile for the scan bench dev-dependency * Rebuild the min-scale fold with cat so burn fuses it burn's fusion explorer stops optimizing at a slice_assign and runs the rest of the sync segment one kernel per op, which made fold_min_scale about 19 launches every training step and several times per refine. Building the packed transforms with cat instead fuses the fold into 7 launches. * Reduce the SH second moment with one multi-dim sum sum_dims keeps the trailing dims at size 1, so the flatten and reshape around the old single-dim sum go away. Launch count is unchanged; the reduce simply no longer needs the reshape that stopped burn's fusion explorer. * Fold the Mip-Splatting floor inside the projection kernels The floor was folded into scales and opacity on the host with burn ops before every render, and its autodiff backward differentiated through slices, costing ~17 launches a step plus two zero-filled [N,10] buffers. The projection kernels now take the per-splat floor directly: the forward applies sqrt(s² + f²) and the opacity compensation, the backward chains through (s/s')² and the compensation's dependence on the raw scales. A [1] tensor means no floor. Finite differences check the new backward (a mutation of the compensation term fails it) and the kernel floor matches the host bake to 1e-5. 134 → 117 launches per training step on garden. * Write compact gradients and gather them lazily in the optimizer The projection backward wrote dense, zero-filled gradient buffers over every splat although only visible ones get values. It now writes one row per visible splat (zeros for those that didn't contribute) and the kernels also emit the inverse compact index. The render backward registers each gradient as select(compact, inverse) * visible, which burn's fusion keeps lazy, so Adam's own fused kernel does the gather: every splat still takes its step, four dense fills and dense writes are gone, and gradient reads shrink to the visible rows. The forward also emits each splat's floored opacity, so the trainer's noise gate no longer re-runs the min-scale fold every step. * Reduce the image loss inside the kernel and feed it the RGBA render The loss kernels now take the rendered [H, W, C] image directly (no RGB slice or layout copies) and, for training, sum each 16x16 tile in-kernel into [4, tiles] partials instead of writing a per-pixel map that burn then reduced in three passes. The backward takes the gradient per tile rather than per pixel, so the mean's broadcast gradient is never materialised, and it writes the RGBA gradient directly instead of zero-filling and slice-assigning an alpha channel. Alpha matching is an explicit config flag now. Tests check the tile partials against the per-pixel map and the backward against finite differences. 115 → 103 launches per training step on garden. * Fix rustdoc links after the loss and floor changes * Pre-shape the visibility masks so the gradient gathers fuse A reshape of the mask in the render backward ended burn's fusion block between the gather and the mask multiply, so the gathered transform and SH gradients were materialised dense and multiplied in a second pass. The masks are now shaped at render time (a free view), and the two per-step constant tensors (LR scaling row, loss weights) are built at their final shape for the same reason. * Upload the per-step constants before the render A host upload makes burn execute its pending fusion stream, so the LR scaling row and loss weights are now created at the top of the step rather than between the backward and the optimizer. * Crunch down the bump follow-ups Shared scale-floor helper for the three projection kernels, a zero row in front of the compact gradients so the render backward is a single gather, an explicit has_min_scale flag instead of a shape convention, channel weights inside the loss kernel so image_loss returns the scalar and the alpha plane only launches when matching, LR scaling built on the device, register_custom in brush-cube, and the sort sharing the scan crate's block constants. Stale comments and duplicated bench helpers cleaned up. * Shrink the follow-ups: share what was still duplicated - One block-scan helper in brush-scan behind the device-wide prefix sum and both radix-sort scan kernels, which each carried their own copy of the transposed load, serial scan and add-back. - One LossOps forward method with a reduce flag instead of separate map and partials methods across three backend impls. - Splats::folded() behind opacities(), scales() and bake_min_scale(). - render_bind registers its outputs by group instead of naming all nine four times over; launch sites build their cube dim once. - rasterize_bwd returns the gradient buffer rather than a one-field struct. - Loss tests share a readback helper, and the finite-difference probe weights tiles directly instead of deriving a 3x3 neighbourhood. * Update rustls to 0.23.45 for RUSTSEC-2026-0285 cargo-deny's advisory check started failing on a TLS 1.3 handshake issue in rustls 0.23.43, which reaches us through rerun. Patch bump, lockfile only.](https://github.com/ArthurBrussee/brush/commit/993c3a23dd91983394de8cae968d0c7a42ae7ca4) | 代码实质更新 | GitHub · ArthurBrussee/brush | E2 | P1 |
+| 3 | [Guard degenerate train lengths and add growth_start_iter and min_scale_factor (#541) The LR decay exponent 1/iters is undefined for total_train_iters <= 1, so hold the LR there, and the refine schedule divides by max(1) so a zero-length run no longer poisons opacities with NaN. growth_start_iter gates gradient-driven growth on iter >= start && iter < stop (default 0, clamped to the stop iteration). The Mip-Splatting MIN_SCALE_FACTOR constant becomes the min_scale_factor config field, default 0.1.](https://github.com/ArthurBrussee/brush/commit/ed9f18ee2b319289a6020a1745e1487d6a03a265) | 代码实质更新 | GitHub · ArthurBrussee/brush | E2 | P2 |
+| 4 | [Add PSNR helpers to brush_loss (#540) psnr_from_mse floors the MSE at 1e-10 so identical images report 100 dB instead of infinity, and psnr(a, b) wraps it for two [H, W, 3] images. Eval used to inline the formula with no floor.](https://github.com/ArthurBrussee/brush/commit/3d22a286e592ba6f49a4fd0b116eceb937340f86) | 代码实质更新 | GitHub · ArthurBrussee/brush | E2 | P2 |
+| 5 | [Invert KB4 fov on the rising branch and cap the render cull at the fold (#538) * Invert KB4 fov on the rising branch and cap the render cull at the fold A fitted Kannala-Brandt polynomial is only monotone up to its first stationary point, and real ultrawide fits fold well inside the hemisphere. Newton seeded at the target could settle on the far branch and report a far too wide fov, which then let the angular cull through splats that project mirrored with radii several times the image. * Cap the RT8 Jacobian radius at the image corner The per-axis clamp box still admits its corner, where the RT8 rational polynomial leaves its calibrated range and the fixed-point inverse diverges. Corner splats got a Jacobian orders of magnitude too large and leaked alpha into the frame. Add lim_r, the undistorted radius of the same-margin image corner, and scale the clamped coordinate by min(1, lim_r / r) in the forward Jacobian, mirrored in the VJP as a constant surrogate.](https://github.com/ArthurBrussee/brush/commit/1d4f3a4cc9a33e1dc1bb654d69f42c0ea3a386ef) | 代码实质更新 | GitHub · ArthurBrussee/brush | E2 | P2 |
+
+## 分类详述
+
+### [Improve training efficiency (#554) * Reduce the SH second moment off the compact gradient Adam's second moment for the SH coefficients is a mean over each splat's coefficients. It was computed by squaring the dense [N, coeffs, 3] gradient and summing that away, which writes a full-size tensor the reduce reads once. burn will not fuse an elementwise prologue into a reduce, so both kernels pay full bandwidth: 53 MB a step at 139k splats, 1.15 GB at 3M. The gather is a row permutation with a zero row, so the reduction commutes with it. Reducing the compact rows and gathering the small result gives the same numbers, checked against the dense reduction in a test. Also moves the refine housekeeping after the optimizer step, so nothing sits between the backward's gathers and the step that consumes them. * Improve noise fusion and use native Burn memory APIs * Keep Burn wasm-compatible and trim fusion tests * Fix macOS linking and drop the standalone SH moment test](https://github.com/ArthurBrussee/brush/commit/64b8533863338907cba2485c1c95325b82e5765d)
+
+- **主题：** 训练与优化
+- **来源：** GitHub · ArthurBrussee/brush
+- **发布时间/更新时间：** 2026-10-03T14:47:42Z
+- **更新判定：** 代码实质更新
+- **核心内容：** Improve training efficiency (#554) * Reduce the SH second moment off the compact gradient Adam's second moment for the SH coefficients is a mean over each splat's coefficients. It was computed by squaring the dense [N, coeffs, 3] gradient and summing that away, which writes a full-size tensor the reduce reads once. burn will not fuse an elementwise prologue into a reduce, so both kernels pay full bandwidth: 53 MB a step at 139k splats, 1.15 GB at 3M. The gather is a row permutation with a zero row, so the reduction commutes with it. Reducing the compact rows and gathering the small result gives the same numbers, checked against the dense reduction in a test. Also moves the refine housekeeping after the optimizer step, so nothing sits between the backward's gathers and the step that consumes them. * Improve noise fusion and use native Burn memory APIs * Keep Burn wasm-compatible and trim fusion tests * Fix macOS linking and drop the standalone SH moment test
+- **成熟度：** E2
+- **是否开源：** 是
+- **开发价值：** 适合进入训练速度、显存、收敛稳定性和画质的A/B基准。
+- **局限：** 单次提交或版本说明不等于端到端收益，需在目标GPU、数据集和完整管线中复测。
+- **代码仓库：** https://github.com/ArthurBrussee/brush
+
+### [Let burn fuse the training step, and cubecl do the scans (#546) * Bump burn to 1414c8a1 and cubecl to 359770be Adapts to two autodiff changes: Backward::prepare now takes NodeGuards from tensor.node(), and the tensor's primitive moves out through into_primitive(). Tensor::require_grad now panics on a non-autodiff device, so the redundant calls in Splats::from_raw and with_sh_degree go; the Param wrapper carries the training state and applies it on train(). Fusion custom-op types come from burn_fusion::custom, which drops the direct burn-ir dependency. * Use cubecl's cube count helper and drop the refine percentile readback calculate_cube_count_elemwise spreads a 1D dispatch across the grid from the device's real per-dimension limit, replacing brush-cube's hardcoded 65535 sqrt tiling. Refine also read every splat's screen size back to the host each time only to log percentile stats; that readback is gone. * Share one fusion custom-op helper across brush-render and brush-loss brush-loss had a generic register_custom closure helper while brush-render hand-wrote three near-identical Operation impls with manual output handle construction. The helper moves to brush-render's burn_glue, generalised to N inputs and M outputs, and all six custom ops use it. brush-loss no longer needs burn-ir directly. * Keep test splats on the inner device between step and refine The trainer-guard tests fed autodiff splats from step straight into refine and back, so refine rebuilt the parameters as derived graph nodes rather than leaves. Burn now rejects reusing a consumed tape; mirror the training loop, which lifts inner splats for each step. * Move scans into a shared brush-scan crate One cube-wide exclusive scan (plane scan, then one plane scans the per-plane totals, serial fallback for narrow planes) now serves both the radix sort, which had four inline copies of it, and the device-wide prefix sum, which used a Hillis-Steele shared-memory scan with sixteen barriers per block. The prefix sum now scans 1024 elements per cube with four per thread and recurses on block totals. * Time only the kernels in the sort and scan benches Both benches uploaded the inputs and read the full outputs inside the timed closure, so at 70M elements they measured half a gigabyte of transfers. Upload once outside and force completion by reading back a single element. * Commit the lockfile for the scan bench dev-dependency * Rebuild the min-scale fold with cat so burn fuses it burn's fusion explorer stops optimizing at a slice_assign and runs the rest of the sync segment one kernel per op, which made fold_min_scale about 19 launches every training step and several times per refine. Building the packed transforms with cat instead fuses the fold into 7 launches. * Reduce the SH second moment with one multi-dim sum sum_dims keeps the trailing dims at size 1, so the flatten and reshape around the old single-dim sum go away. Launch count is unchanged; the reduce simply no longer needs the reshape that stopped burn's fusion explorer. * Fold the Mip-Splatting floor inside the projection kernels The floor was folded into scales and opacity on the host with burn ops before every render, and its autodiff backward differentiated through slices, costing ~17 launches a step plus two zero-filled [N,10] buffers. The projection kernels now take the per-splat floor directly: the forward applies sqrt(s² + f²) and the opacity compensation, the backward chains through (s/s')² and the compensation's dependence on the raw scales. A [1] tensor means no floor. Finite differences check the new backward (a mutation of the compensation term fails it) and the kernel floor matches the host bake to 1e-5. 134 → 117 launches per training step on garden. * Write compact gradients and gather them lazily in the optimizer The projection backward wrote dense, zero-filled gradient buffers over every splat although only visible ones get values. It now writes one row per visible splat (zeros for those that didn't contribute) and the kernels also emit the inverse compact index. The render backward registers each gradient as select(compact, inverse) * visible, which burn's fusion keeps lazy, so Adam's own fused kernel does the gather: every splat still takes its step, four dense fills and dense writes are gone, and gradient reads shrink to the visible rows. The forward also emits each splat's floored opacity, so the trainer's noise gate no longer re-runs the min-scale fold every step. * Reduce the image loss inside the kernel and feed it the RGBA render The loss kernels now take the rendered [H, W, C] image directly (no RGB slice or layout copies) and, for training, sum each 16x16 tile in-kernel into [4, tiles] partials instead of writing a per-pixel map that burn then reduced in three passes. The backward takes the gradient per tile rather than per pixel, so the mean's broadcast gradient is never materialised, and it writes the RGBA gradient directly instead of zero-filling and slice-assigning an alpha channel. Alpha matching is an explicit config flag now. Tests check the tile partials against the per-pixel map and the backward against finite differences. 115 → 103 launches per training step on garden. * Fix rustdoc links after the loss and floor changes * Pre-shape the visibility masks so the gradient gathers fuse A reshape of the mask in the render backward ended burn's fusion block between the gather and the mask multiply, so the gathered transform and SH gradients were materialised dense and multiplied in a second pass. The masks are now shaped at render time (a free view), and the two per-step constant tensors (LR scaling row, loss weights) are built at their final shape for the same reason. * Upload the per-step constants before the render A host upload makes burn execute its pending fusion stream, so the LR scaling row and loss weights are now created at the top of the step rather than between the backward and the optimizer. * Crunch down the bump follow-ups Shared scale-floor helper for the three projection kernels, a zero row in front of the compact gradients so the render backward is a single gather, an explicit has_min_scale flag instead of a shape convention, channel weights inside the loss kernel so image_loss returns the scalar and the alpha plane only launches when matching, LR scaling built on the device, register_custom in brush-cube, and the sort sharing the scan crate's block constants. Stale comments and duplicated bench helpers cleaned up. * Shrink the follow-ups: share what was still duplicated - One block-scan helper in brush-scan behind the device-wide prefix sum and both radix-sort scan kernels, which each carried their own copy of the transposed load, serial scan and add-back. - One LossOps forward method with a reduce flag instead of separate map and partials methods across three backend impls. - Splats::folded() behind opacities(), scales() and bake_min_scale(). - render_bind registers its outputs by group instead of naming all nine four times over; launch sites build their cube dim once. - rasterize_bwd returns the gradient buffer rather than a one-field struct. - Loss tests share a readback helper, and the finite-difference probe weights tiles directly instead of deriving a 3x3 neighbourhood. * Update rustls to 0.23.45 for RUSTSEC-2026-0285 cargo-deny's advisory check started failing on a TLS 1.3 handshake issue in rustls 0.23.43, which reaches us through rerun. Patch bump, lockfile only.](https://github.com/ArthurBrussee/brush/commit/993c3a23dd91983394de8cae968d0c7a42ae7ca4)
+
+- **主题：** 训练与优化
+- **来源：** GitHub · ArthurBrussee/brush
+- **发布时间/更新时间：** 2026-10-03T14:47:42Z
+- **更新判定：** 代码实质更新
+- **核心内容：** Let burn fuse the training step, and cubecl do the scans (#546) * Bump burn to 1414c8a1 and cubecl to 359770be Adapts to two autodiff changes: Backward::prepare now takes NodeGuards from tensor.node(), and the tensor's primitive moves out through into_primitive(). Tensor::require_grad now panics on a non-autodiff device, so the redundant calls in Splats::from_raw and with_sh_degree go; the Param wrapper carries the training state and applies it on train(). Fusion custom-op types come from burn_fusion::custom, which drops the direct burn-ir dependency. * Use cubecl's cube count helper and drop the refine percentile readback calculate_cube_count_elemwise spreads a 1D dispatch across the grid from the device's real per-dimension limit, replacing brush-cube's hardcoded 65535 sqrt tiling. Refine also read every splat's screen size back to the host each time only to log percentile stats; that readback is gone. * Share one fusion custom-op helper across brush-render and brush-loss brush-loss…
+- **成熟度：** E2
+- **是否开源：** 是
+- **开发价值：** 适合进入训练速度、显存、收敛稳定性和画质的A/B基准。
+- **局限：** 单次提交或版本说明不等于端到端收益，需在目标GPU、数据集和完整管线中复测。
+- **代码仓库：** https://github.com/ArthurBrussee/brush
+
+### [Guard degenerate train lengths and add growth_start_iter and min_scale_factor (#541) The LR decay exponent 1/iters is undefined for total_train_iters <= 1, so hold the LR there, and the refine schedule divides by max(1) so a zero-length run no longer poisons opacities with NaN. growth_start_iter gates gradient-driven growth on iter >= start && iter < stop (default 0, clamped to the stop iteration). The Mip-Splatting MIN_SCALE_FACTOR constant becomes the min_scale_factor config field, default 0.1.](https://github.com/ArthurBrussee/brush/commit/ed9f18ee2b319289a6020a1745e1487d6a03a265)
+
+- **主题：** 训练与优化
+- **来源：** GitHub · ArthurBrussee/brush
+- **发布时间/更新时间：** 2026-10-03T14:47:42Z
+- **更新判定：** 代码实质更新
+- **核心内容：** Guard degenerate train lengths and add growth_start_iter and min_scale_factor (#541) The LR decay exponent 1/iters is undefined for total_train_iters <= 1, so hold the LR there, and the refine schedule divides by max(1) so a zero-length run no longer poisons opacities with NaN. growth_start_iter gates gradient-driven growth on iter >= start && iter < stop (default 0, clamped to the stop iteration). The Mip-Splatting MIN_SCALE_FACTOR constant becomes the min_scale_factor config field, default 0.1.
+- **成熟度：** E2
+- **是否开源：** 是
+- **开发价值：** 适合进入训练速度、显存、收敛稳定性和画质的A/B基准。
+- **局限：** 单次提交或版本说明不等于端到端收益，需在目标GPU、数据集和完整管线中复测。
+- **代码仓库：** https://github.com/ArthurBrussee/brush
+
+### [Add PSNR helpers to brush_loss (#540) psnr_from_mse floors the MSE at 1e-10 so identical images report 100 dB instead of infinity, and psnr(a, b) wraps it for two [H, W, 3] images. Eval used to inline the formula with no floor.](https://github.com/ArthurBrussee/brush/commit/3d22a286e592ba6f49a4fd0b116eceb937340f86)
+
+- **主题：** 训练与优化
+- **来源：** GitHub · ArthurBrussee/brush
+- **发布时间/更新时间：** 2026-10-03T14:47:42Z
+- **更新判定：** 代码实质更新
+- **核心内容：** Add PSNR helpers to brush_loss (#540) psnr_from_mse floors the MSE at 1e-10 so identical images report 100 dB instead of infinity, and psnr(a, b) wraps it for two [H, W, 3] images. Eval used to inline the formula with no floor.
+- **成熟度：** E2
+- **是否开源：** 是
+- **开发价值：** 适合进入训练速度、显存、收敛稳定性和画质的A/B基准。
+- **局限：** 单次提交或版本说明不等于端到端收益，需在目标GPU、数据集和完整管线中复测。
+- **代码仓库：** https://github.com/ArthurBrussee/brush
+
+### [Let burn generate the Fusion plumbing (#553) * Bump burn to 7bc513b7 for generated Fusion impls WgpuDevice::DefaultDevice became WgpuDevice::default(). * Let burn generate the Fusion impls for the loss and backward ops burn #5673 generates the lazy Fusion implementation from the extension trait: annotate each method with the shape and dtype of its outputs, or a metadata function for struct outputs, and the macro registers the custom op and defers the backend call. Five of our six custom ops qualify, which retires both hand-written Fusion impls. render is the exception: it is async and sizes its outputs from a mid-pipeline readback, so its shapes cannot be known before execution. * Update burn, and drop what the update makes redundant burn merged AutodiffModule into Module, so the imports collapse to one trait. With the loss and backward ops on generated Fusion impls, the register_custom helper has a single caller left: it moves from brush-cube into brush-render next to it, and brush-cube loses its burn-fusion dependency. Three windows crates no longer resolve to two versions, so their cargo-deny skips go too. * Use burn's OperationFn, and trim comments burn ships a closure-to-Operation adapter, so our ClosureOp goes. Also measured whether the render's custom op can go entirely: binding its outputs as Init tensors works and leaves training steps at 104 launches, but an Init makes burn execute the pending queue, which unfuses the refine step from 894 launches to 1538. Kept the custom op, noted why. * Trim the comments around the fusion glue * Bind the render's outputs as Init tensors, dropping the last custom op Measured over ten refines the two are the same: 29,614 launches against 29,616, with every refine step matching. The 894-to-1538 gap I saw earlier came from a 40-iteration run that profiled a single refine, so it was first-time fusion exploration, not the Init path. register_custom and its type aliases go with it. * Drop the glue the extension migration orphaned wrap_wgpu_float, unwrap_ad_wgpu_float, unwrap_ad_wgpu_int, wrap_ad_wgpu_float and the AutodiffMain alias had no callers left: the generated Dispatch impls do that wrapping now. Two bridges stay, for the brush-js readback and the trainer's gt upload. * Pin the gradient gathers down with a fusion test burn's FusionInspector reports which operations it fused, so assert the compact-to-dense expansion stays one fused kernel per parameter. It also corrects the record: burn does not fold those gathers into the optimizer's kernel. Each runs as its own single-op ElementWise block, so a dense gradient per parameter is still written once, without a zero-fill. * Correct the comment on what burn fuses](https://github.com/ArthurBrussee/brush/commit/fe6d411730a4f5f191dcd1d8f27378ab8e911c78)
+
+- **主题：** 训练与优化
+- **来源：** GitHub · ArthurBrussee/brush
+- **发布时间/更新时间：** 2026-10-03T14:47:42Z
+- **更新判定：** 代码实质更新
+- **核心内容：** Let burn generate the Fusion plumbing (#553) * Bump burn to 7bc513b7 for generated Fusion impls WgpuDevice::DefaultDevice became WgpuDevice::default(). * Let burn generate the Fusion impls for the loss and backward ops burn #5673 generates the lazy Fusion implementation from the extension trait: annotate each method with the shape and dtype of its outputs, or a metadata function for struct outputs, and the macro registers the custom op and defers the backend call. Five of our six custom ops qualify, which retires both hand-written Fusion impls. render is the exception: it is async and sizes its outputs from a mid-pipeline readback, so its shapes cannot be known before execution. * Update burn, and drop what the update makes redundant burn merged AutodiffModule into Module, so the imports collapse to one trait. With the loss and backward ops on generated Fusion impls, the register_custom helper has a single caller left: it moves from brush-cube into brush-render next to it, and brush-c…
+- **成熟度：** E2
+- **是否开源：** 是
+- **开发价值：** 适合进入训练速度、显存、收敛稳定性和画质的A/B基准。
+- **局限：** 单次提交或版本说明不等于端到端收益，需在目标GPU、数据集和完整管线中复测。
+- **代码仓库：** https://github.com/ArthurBrussee/brush
+
+### [Train in metres with a units_per_meter dataset option (#545) * Train in metres with a units_per_meter dataset option LoadDatasetConfig::units_per_meter (default 1) divides camera positions and any initial splat means by the factor on load (log scales shift by ln), so training runs in metres and metric thresholds mean the same thing on a millimetre scan as on a COLMAP scene. Every export path multiplies back: the ply checkpoints and the app's export button. Adds three small helpers: Splats::scaled multiplies means, shifts log scales and scales the min-scale floor; Splats::concat joins two sets of the same SH degree into fresh params and drops the floor for the next refine to recompute; Camera::with_pinhole returns a copy with the lens model swapped for a pinhole. * Drop Splats::concat](https://github.com/ArthurBrussee/brush/commit/38185dedaf8143988a31a64c1f27c2323b1febdf)
+
+- **主题：** 训练与优化
+- **来源：** GitHub · ArthurBrussee/brush
+- **发布时间/更新时间：** 2026-10-03T14:47:42Z
+- **更新判定：** 代码实质更新
+- **核心内容：** Train in metres with a units_per_meter dataset option (#545) * Train in metres with a units_per_meter dataset option LoadDatasetConfig::units_per_meter (default 1) divides camera positions and any initial splat means by the factor on load (log scales shift by ln), so training runs in metres and metric thresholds mean the same thing on a millimetre scan as on a COLMAP scene. Every export path multiplies back: the ply checkpoints and the app's export button. Adds three small helpers: Splats::scaled multiplies means, shifts log scales and scales the min-scale floor; Splats::concat joins two sets of the same SH degree into fresh params and drops the floor for the next refine to recompute; Camera::with_pinhole returns a copy with the lens model swapped for a pinhole. * Drop Splats::concat
+- **成熟度：** E2
+- **是否开源：** 是
+- **开发价值：** 适合进入训练速度、显存、收敛稳定性和画质的A/B基准。
+- **局限：** 单次提交或版本说明不等于端到端收益，需在目标GPU、数据集和完整管线中复测。
+- **代码仓库：** https://github.com/ArthurBrussee/brush
+
+### [Split the settings popup into collapsible sections (#544) draw_settings now delegates to draw_training, draw_model, draw_dataset, draw_process and draw_rerun, each under a collapsible heading. Training and Model start open, the rest closed. The LOD sliders move under Model and the random seed text box is dropped from Process.](https://github.com/ArthurBrussee/brush/commit/8cd59d399a9f4e26690b5406d9655a06658bae2b)
+
+- **主题：** 训练与优化
+- **来源：** GitHub · ArthurBrussee/brush
+- **发布时间/更新时间：** 2026-10-03T14:47:42Z
+- **更新判定：** 代码实质更新
+- **核心内容：** Split the settings popup into collapsible sections (#544) draw_settings now delegates to draw_training, draw_model, draw_dataset, draw_process and draw_rerun, each under a collapsible heading. Training and Model start open, the rest closed. The LOD sliders move under Model and the random seed text box is dropped from Process.
+- **成熟度：** E2
+- **是否开源：** 是
+- **开发价值：** 适合进入训练速度、显存、收敛稳定性和画质的A/B基准。
+- **局限：** 单次提交或版本说明不等于端到端收益，需在目标GPU、数据集和完整管线中复测。
+- **代码仓库：** https://github.com/ArthurBrussee/brush
+
+### [Improve viewer rendering and training efficiency (#556)](https://github.com/ArthurBrussee/brush/commit/1388f74c6fe0236f68ee4915564bf00e9d2e3747)
+
+- **主题：** 训练与优化
+- **来源：** GitHub · ArthurBrussee/brush
+- **发布时间/更新时间：** 2026-10-03T14:47:42Z
+- **更新判定：** 代码实质更新
+- **核心内容：** Improve viewer rendering and training efficiency (#556)
+- **成熟度：** E2
+- **是否开源：** 是
+- **开发价值：** 适合进入训练速度、显存、收敛稳定性和画质的A/B基准。
+- **局限：** 单次提交或版本说明不等于端到端收益，需在目标GPU、数据集和完整管线中复测。
+- **代码仓库：** https://github.com/ArthurBrussee/brush
+
+### [Size CLI progress from the emitted train config (#542) The step progress bar was sized from the base CLI config, which is wrong once a dataset's args.txt is merged in. Create it empty and size it on TrainMessage::TrainConfig, and read eval_every from the same message. Warnings print with {error:#} so the anyhow context chain shows, and main.rs builds the tokio runtime before build_process.](https://github.com/ArthurBrussee/brush/commit/0c79cdbd4216d9cfbee1245f1336fcc0030cee60)
+
+- **主题：** 训练与优化
+- **来源：** GitHub · ArthurBrussee/brush
+- **发布时间/更新时间：** 2026-10-03T14:47:42Z
+- **更新判定：** 代码实质更新
+- **核心内容：** Size CLI progress from the emitted train config (#542) The step progress bar was sized from the base CLI config, which is wrong once a dataset's args.txt is merged in. Create it empty and size it on TrainMessage::TrainConfig, and read eval_every from the same message. Warnings print with {error:#} so the anyhow context chain shows, and main.rs builds the tokio runtime before build_process.
+- **成熟度：** E2
+- **是否开源：** 是
+- **开发价值：** 适合进入训练速度、显存、收敛稳定性和画质的A/B基准。
+- **局限：** 单次提交或版本说明不等于端到端收益，需在目标GPU、数据集和完整管线中复测。
+- **代码仓库：** https://github.com/ArthurBrussee/brush
+
+### [Honor the training seed across random sampling (#529) * Honor the training seed across sampling * Remove redundant sampling test](https://github.com/ArthurBrussee/brush/commit/ab5504e2303781810e8fae8cf618d83462207872)
+
+- **主题：** 训练与优化
+- **来源：** GitHub · ArthurBrussee/brush
+- **发布时间/更新时间：** 2026-10-03T14:47:42Z
+- **更新判定：** 代码实质更新
+- **核心内容：** Honor the training seed across random sampling (#529) * Honor the training seed across sampling * Remove redundant sampling test
+- **成熟度：** E2
+- **是否开源：** 是
+- **开发价值：** 适合进入训练速度、显存、收敛稳定性和画质的A/B基准。
+- **局限：** 单次提交或版本说明不等于端到端收益，需在目标GPU、数据集和完整管线中复测。
+- **代码仓库：** https://github.com/ArthurBrussee/brush
+
+### [MrNeRF/LichtFeld-Studio](https://github.com/MrNeRF/LichtFeld-Studio)
+
+- **主题：** 训练与优化
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-04T07:37:10Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** Train, inspect, edit, automate, and export 3D Gaussian Splatting scenes from a single native application.
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合进入训练速度、显存、收敛稳定性和画质的A/B基准。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/MrNeRF/LichtFeld-Studio
+
+### [harry7557558/spirula-studio](https://github.com/harry7557558/spirula-studio)
+
+- **主题：** 训练与优化
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-04T05:01:40Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** Cross-vendor 3D Gaussian Splatting trainer - video to splat to mesh, Vulkan or CUDA.
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合进入训练速度、显存、收敛稳定性和画质的A/B基准。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/harry7557558/spirula-studio
+
+### [Scale viewer fly speed with the scene size (#543) * Scale viewer fly speed with the scene size ProcessMessage::SplatsUpdated carries scene_scale, the median extent of the percentile bounding box, computed on load, at trainer init, and after each refine. The camera controller multiplies move speed by it, with the base changed from 25 to 6 and shift from x4 to x6. * Lower the base fly speed to 3](https://github.com/ArthurBrussee/brush/commit/87f1d76c24c35f322034c7388bb4aa8b4fd2cfce)
+
+- **主题：** 训练与优化
+- **来源：** GitHub · ArthurBrussee/brush
+- **发布时间/更新时间：** 2026-10-03T14:47:42Z
+- **更新判定：** 代码实质更新
+- **核心内容：** Scale viewer fly speed with the scene size (#543) * Scale viewer fly speed with the scene size ProcessMessage::SplatsUpdated carries scene_scale, the median extent of the percentile bounding box, computed on load, at trainer init, and after each refine. The camera controller multiplies move speed by it, with the base changed from 25 to 6 and shift from x4 to x6. * Lower the base fly speed to 3
+- **成熟度：** E2
+- **是否开源：** 是
+- **开发价值：** 适合进入训练速度、显存、收敛稳定性和画质的A/B基准。
+- **局限：** 单次提交或版本说明不等于端到端收益，需在目标GPU、数据集和完整管线中复测。
+- **代码仓库：** https://github.com/ArthurBrussee/brush
+
+### [Default nerfstudio frames to .png before the existence check (#539) Blender and NeRF-synthetic transforms reference frames as ./train/r_0 with no extension. The loader only assumed .png after checking the file existed, so every such frame failed the check and was skipped.](https://github.com/ArthurBrussee/brush/commit/63c1c94a8a446284c96239adb3933bc38c762696)
+
+- **主题：** 训练与优化
+- **来源：** GitHub · ArthurBrussee/brush
+- **发布时间/更新时间：** 2026-10-03T14:47:42Z
+- **更新判定：** 代码实质更新
+- **核心内容：** Default nerfstudio frames to .png before the existence check (#539) Blender and NeRF-synthetic transforms reference frames as ./train/r_0 with no extension. The loader only assumed .png after checking the file existed, so every such frame failed the check and was skipped.
+- **成熟度：** E2
+- **是否开源：** 是
+- **开发价值：** 适合进入训练速度、显存、收敛稳定性和画质的A/B基准。
+- **局限：** 单次提交或版本说明不等于端到端收益，需在目标GPU、数据集和完整管线中复测。
+- **代码仓库：** https://github.com/ArthurBrussee/brush
+
+### [Keep splat params trainable across train() lifts (#534)](https://github.com/ArthurBrussee/brush/commit/5853e334e9fef7ef37ce968ecc283ad300a13076)
+
+- **主题：** 训练与优化
+- **来源：** GitHub · ArthurBrussee/brush
+- **发布时间/更新时间：** 2026-10-03T14:47:42Z
+- **更新判定：** 代码实质更新
+- **核心内容：** Keep splat params trainable across train() lifts (#534)
+- **成熟度：** E2
+- **是否开源：** 是
+- **开发价值：** 适合进入训练速度、显存、收敛稳定性和画质的A/B基准。
+- **局限：** 单次提交或版本说明不等于端到端收益，需在目标GPU、数据集和完整管线中复测。
+- **代码仓库：** https://github.com/ArthurBrussee/brush
+
+### [shadygm/Lichtfeld-Densification-Plugin](https://github.com/shadygm/Lichtfeld-Densification-Plugin)
+
+- **主题：** 训练与优化
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-03T19:56:26Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** Dense initialization plugin for LichtFeld Studio that converts sparse reconstructions into dense point clouds for improved Gaussian Splatting quality and convergence.
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合进入训练速度、显存、收敛稳定性和画质的A/B基准。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/shadygm/Lichtfeld-Densification-Plugin
+
+### [iwoodsawyer/GaussianSplatting](https://github.com/iwoodsawyer/GaussianSplatting)
+
+- **主题：** 训练与优化
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-03T17:33:05Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** This example shows how-to train and generates 2D images using a minimal implementation of 3D Gaussian splatting in Matlab using Deep Learning Toolbox.
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合进入训练速度、显存、收敛稳定性和画质的A/B基准。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/iwoodsawyer/GaussianSplatting
+
+### [AAH20/spatial-intelligence-3dgs-kernel](https://github.com/AAH20/spatial-intelligence-3dgs-kernel)
+
+- **主题：** 训练与优化
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-03T18:08:54Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** Zero-dependency Spatial Intelligence & 3D Gaussian Splatting kernel solving NP-hard submodular knapsack pruning, robust SE(3) pose graph bundle adjustment, occlusion culling, and topological mesh decimation.
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合进入训练速度、显存、收敛稳定性和画质的A/B基准。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/AAH20/spatial-intelligence-3dgs-kernel
+
+### [MarcelRogge/occlusion-aware-3dgs](https://github.com/MarcelRogge/occlusion-aware-3dgs)
+
+- **主题：** 训练与优化
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-03T14:10:38Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** Occlusion-Aware Densification for 3D Gaussian Splatting (ACCV 2026).
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合进入训练速度、显存、收敛稳定性和画质的A/B基准。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/MarcelRogge/occlusion-aware-3dgs
+
+### [LiuJF1226/Mono4DGS-HDR](https://github.com/LiuJF1226/Mono4DGS-HDR)
+
+- **主题：** 动态与4D
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-04T05:24:04Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** [ICLR 2026] Mono4DGS-HDR: High Dynamic Range 4D Gaussian Splatting from Alternating-exposure Monocular Videos
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 可用于动态场景、Avatar、时序重建或可编辑运动表示预研。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/LiuJF1226/Mono4DGS-HDR
+
+### [JiongJiongJiong2/JiongJiongJiong2](https://github.com/JiongJiongJiong2/JiongJiongJiong2)
+
+- **主题：** 动态与4D
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-04T03:20:46Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** A passionate developer and also a CS student. I'm currently working on Some prototypes about new generation UX design, mobile 3D reconstructing, and research about 3D reconstructing (mesh splatting, faster 3DGS, 4DGS), and harness structure in AI agents.
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 可用于动态场景、Avatar、时序重建或可编辑运动表示预研。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/JiongJiongJiong2/JiongJiongJiong2
+
+### [samaust/Experiments_4DGS](https://github.com/samaust/Experiments_4DGS)
+
+- **主题：** 动态与4D
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-04T00:30:16Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** Experiments with 3D and 4D Gaussian Splatting
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 可用于动态场景、Avatar、时序重建或可编辑运动表示预研。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/samaust/Experiments_4DGS
+
+### [francoisbarge8/recon4d](https://github.com/francoisbarge8/recon4d)
+
+- **主题：** 动态与4D
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-03T16:51:46Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** 3D/4D reconstruction from monocular video: depth, point tracking, SfM and dynamic 3D Gaussian splatting in PyTorch, with a procedural ground-truth benchmark
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 可用于动态场景、Avatar、时序重建或可编辑运动表示预研。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/francoisbarge8/recon4d
+
+### [francoisb12/recon4d](https://github.com/francoisb12/recon4d)
+
+- **主题：** 动态与4D
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-03T15:14:58Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** 3D/4D reconstruction from monocular video: depth, point tracking, SfM and dynamic 3D Gaussian splatting in PyTorch, with a procedural ground-truth benchmark
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 可用于动态场景、Avatar、时序重建或可编辑运动表示预研。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/francoisb12/recon4d
+
+### [animu-sphere/hydra-merlin](https://github.com/animu-sphere/hydra-merlin)
+
+- **主题：** 压缩与轻量化
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-04T06:34:11Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** A lightweight, host-neutral raster renderer for USD Hydra, powered by Vulkan and Metal.
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合评估Web、移动端、流传输、存储成本和LOD管线。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/animu-sphere/hydra-merlin
+
+### [Strawboardnationaldebtceiling9560/kakeya-3d](https://github.com/Strawboardnationaldebtceiling9560/kakeya-3d)
+
+- **主题：** 压缩与轻量化
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-04T07:26:28Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** Formalizes the 3D Kakeya conjecture in Lean 4, proving every compact set with unit segments in all directions has Hausdorff dimension three.
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合评估Web、移动端、流传输、存储成本和LOD管线。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/Strawboardnationaldebtceiling9560/kakeya-3d
+
+### [yimingjiang216-alt/sfm-3dgs-pipeline](https://github.com/yimingjiang216-alt/sfm-3dgs-pipeline)
+
+- **主题：** 压缩与轻量化
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-03T16:37:50Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** Image -> COLMAP SfM -> 3D Gaussian Splatting -> novel view synthesis pipeline. Integration and environment debugging; COLMAP and 3DGS are upstream projects.
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合评估Web、移动端、流传输、存储成本和LOD管线。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/yimingjiang216-alt/sfm-3dgs-pipeline
+
+### [ZhangAoCanada/3Dviewer](https://github.com/ZhangAoCanada/3Dviewer)
+
+- **主题：** 几何/材质/光照
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-04T04:36:38Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** just another 3D viewer for popular 3D representations, including 3DGS, mesh, point cloud, ...
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 可用于提升表面、法线、材质、反射或重照明能力。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/ZhangAoCanada/3Dviewer
+
+### [m-kim/orion](https://github.com/m-kim/orion)
+
+- **主题：** 几何/材质/光照
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-04T01:27:55Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** 3DGS viewer and relighter
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 可用于提升表面、法线、材质、反射或重照明能力。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/m-kim/orion
+
+### [zhuhaozoo/harmonyos-3d-wallpaper](https://github.com/zhuhaozoo/harmonyos-3d-wallpaper)
+
+- **主题：** 几何/材质/光照
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-03T08:58:23Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** Proven pipeline: single photo → 3D image wallpaper on HarmonyOS. On-device depth estimation → depth-mesh multi-view synthesis → Spatial Recon Kit (3DGS) reconstruction. Real-device verified; technical archive included.
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 可用于提升表面、法线、材质、反射或重照明能力。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/zhuhaozoo/harmonyos-3d-wallpaper
+
+### [luohongk/Embodied-AI-Daily](https://github.com/luohongk/Embodied-AI-Daily)
+
+- **主题：** SLAM与重建
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-03T19:51:23Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** 📚这个仓库是在arxiv上收集的有关VLN，VLA，World Model，SLAM，Gaussian Splatting,非线性优化等相关论文。每天都会自动更新！issue区域是最新10篇论文
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合相机定位、在线建图、工程测绘和大场景重建验证。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/luohongk/Embodied-AI-Daily
+
+### [darshmenon/rosnav](https://github.com/darshmenon/rosnav)
+
+- **主题：** SLAM与重建
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-03T15:41:51Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** Full-stack ROS 2 autonomous navigation: Nav2, SLAM Toolbox, RTAB-Map & ORB-SLAM3 VSLAM, Gazebo Harmonic, Docker, multi-robot fleet coordination, collaborative loop closure, coordinated frontier exploration, MPPI controller, behavior trees, waypoint following & Gaussian Splatting capture on Humble/Jazzy.
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合相机定位、在线建图、工程测绘和大场景重建验证。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/darshmenon/rosnav
+
+### [Tirzst5779/ML-Sharp-QNN](https://github.com/Tirzst5779/ML-Sharp-QNN)
+
+- **主题：** SLAM与重建
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-04T07:24:05Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** Run Apple's SHARP 3D Gaussian Splatting on Android via Qualcomm QNN HTP for instant, offline single-image 3D reconstruction on Snapdragon devices.
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合相机定位、在线建图、工程测绘和大场景重建验证。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/Tirzst5779/ML-Sharp-QNN
+
+### [koroltony/UCLA_Gateway_Plaza_3DGS](https://github.com/koroltony/UCLA_Gateway_Plaza_3DGS)
+
+- **主题：** SLAM与重建
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-04T07:30:29Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** 3DGS Reconstruction of UCLA Gateway Plaza from unstaged outdoor scene video
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合相机定位、在线建图、工程测绘和大场景重建验证。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/koroltony/UCLA_Gateway_Plaza_3DGS
+
+### [sexya3624/InsertAny3D](https://github.com/sexya3624/InsertAny3D)
+
+- **主题：** SLAM与重建
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-04T07:25:40Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** Insert 3D objects into Unity scenes via multi-view geometric alignment and generated Gaussian Splatting assets with accurate pose estimation.
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合相机定位、在线建图、工程测绘和大场景重建验证。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/sexya3624/InsertAny3D
+
+### [enhansome/enhansome-NeRF-and-3DGS-SLAM](https://github.com/enhansome/enhansome-NeRF-and-3DGS-SLAM)
+
+- **主题：** SLAM与重建
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-04T02:43:20Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** 近期活跃的GS相关仓库。
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合相机定位、在线建图、工程测绘和大场景重建验证。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/enhansome/enhansome-NeRF-and-3DGS-SLAM
+
+### [Enndee/ComfyUI_Meridian_for_Gaussian_Splatting](https://github.com/Enndee/ComfyUI_Meridian_for_Gaussian_Splatting)
+
+- **主题：** SLAM与重建
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-03T21:06:22Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** This Repo utilizes the Meridian project and VGGT to create custom camera paths for static images. Minimax H3 is used to create plausible completions of missing parts of the picture. Afterwards GLOMAP/COLMAP is used to prepare a dataset for Gaussian Splatting. A custom node is able to automatically call Lichtfeld for the splatting process.
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合相机定位、在线建图、工程测绘和大场景重建验证。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/Enndee/ComfyUI_Meridian_for_Gaussian_Splatting
+
+### [Stabilize min-scale folding and eval paths (#528) The fold_min_scale log-space opacity compensation fix was authored by Debashish Sahu (@debsahu) in PR #522. He identified and diagnosed the underflow bug, validated it on real data, and wrote the fix. Arthur Brussee incorporated that fix in #528 without preserving its attribution. This history correction credits Debashish as author of the fix. The separate eval-path changes and different regression test were added during integration in #528. No source changes were made as part of this attribution correction. Original-PR: https://github.com/ArthurBrussee/brush/pull/522 Original-Commit: ed5163df39df67a2595f06f375adc8ab0db515a1](https://github.com/ArthurBrussee/brush/commit/5c63666e49bc0e34b778e2ecd742f9d26ad8a4ae)
+
+- **主题：** 编辑与生成
+- **来源：** GitHub · ArthurBrussee/brush
+- **发布时间/更新时间：** 2026-10-03T14:47:42Z
+- **更新判定：** 代码实质更新
+- **核心内容：** Stabilize min-scale folding and eval paths (#528) The fold_min_scale log-space opacity compensation fix was authored by Debashish Sahu (@debsahu) in PR #522. He identified and diagnosed the underflow bug, validated it on real data, and wrote the fix. Arthur Brussee incorporated that fix in #528 without preserving its attribution. This history correction credits Debashish as author of the fix. The separate eval-path changes and different regression test were added during integration in #528. No source changes were made as part of this attribution correction. Original-PR: https://github.com/ArthurBrussee/brush/pull/522 Original-Commit: ed5163df39df67a2595f06f375adc8ab0db515a1
+- **成熟度：** E2
+- **是否开源：** 是
+- **开发价值：** 可用于对象提取、语义分层、内容编辑和生成式资产工作流。
+- **局限：** 单次提交或版本说明不等于端到端收益，需在目标GPU、数据集和完整管线中复测。
+- **代码仓库：** https://github.com/ArthurBrussee/brush
+
+### [ryamabra/vgrep3d](https://github.com/ryamabra/vgrep3d)
+
+- **主题：** 编辑与生成
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-04T04:35:33Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** Open-source open-vocabulary 3D object detection in Gaussian Splat scenes using SigLIP 2 semantic feature fields. Built with gsplat + Modal.
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 可用于对象提取、语义分层、内容编辑和生成式资产工作流。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/ryamabra/vgrep3d
+
+### [Invert KB4 fov on the rising branch and cap the render cull at the fold (#538) * Invert KB4 fov on the rising branch and cap the render cull at the fold A fitted Kannala-Brandt polynomial is only monotone up to its first stationary point, and real ultrawide fits fold well inside the hemisphere. Newton seeded at the target could settle on the far branch and report a far too wide fov, which then let the angular cull through splats that project mirrored with radii several times the image. * Cap the RT8 Jacobian radius at the image corner The per-axis clamp box still admits its corner, where the RT8 rational polynomial leaves its calibrated range and the fixed-point inverse diverges. Corner splats got a Jacobian orders of magnitude too large and leaked alpha into the frame. Add lim_r, the undistorted radius of the same-margin image corner, and scale the clamped coordinate by min(1, lim_r / r) in the forward Jacobian, mirrored in the VJP as a constant surrogate.](https://github.com/ArthurBrussee/brush/commit/1d4f3a4cc9a33e1dc1bb654d69f42c0ea3a386ef)
+
+- **主题：** 实时渲染与展示
+- **来源：** GitHub · ArthurBrussee/brush
+- **发布时间/更新时间：** 2026-10-03T14:47:42Z
+- **更新判定：** 代码实质更新
+- **核心内容：** Invert KB4 fov on the rising branch and cap the render cull at the fold (#538) * Invert KB4 fov on the rising branch and cap the render cull at the fold A fitted Kannala-Brandt polynomial is only monotone up to its first stationary point, and real ultrawide fits fold well inside the hemisphere. Newton seeded at the target could settle on the far branch and report a far too wide fov, which then let the angular cull through splats that project mirrored with radii several times the image. * Cap the RT8 Jacobian radius at the image corner The per-axis clamp box still admits its corner, where the RT8 rational polynomial leaves its calibrated range and the fixed-point inverse diverges. Corner splats got a Jacobian orders of magnitude too large and leaked alpha into the frame. Add lim_r, the undistorted radius of the same-margin image corner, and scale the clamped coordinate by min(1, lim_r / r) in the forward Jacobian, mirrored in the VJP as a constant surrogate.
+- **成熟度：** E2
+- **是否开源：** 是
+- **开发价值：** 适合Web、移动端、VR/AR与实时Viewer的性能验证。
+- **局限：** 单次提交或版本说明不等于端到端收益，需在目标GPU、数据集和完整管线中复测。
+- **代码仓库：** https://github.com/ArthurBrussee/brush
+
+### [Keep prefix sums within WebGPU limits (#527)](https://github.com/ArthurBrussee/brush/commit/2f4fb85812799f6f39dbe77667c6eeef05c12918)
+
+- **主题：** 实时渲染与展示
+- **来源：** GitHub · ArthurBrussee/brush
+- **发布时间/更新时间：** 2026-10-03T14:47:42Z
+- **更新判定：** 代码实质更新
+- **核心内容：** Keep prefix sums within WebGPU limits (#527)
+- **成熟度：** E2
+- **是否开源：** 是
+- **开发价值：** 适合Web、移动端、VR/AR与实时Viewer的性能验证。
+- **局限：** 单次提交或版本说明不等于端到端收益，需在目标GPU、数据集和完整管线中复测。
+- **代码仓库：** https://github.com/ArthurBrussee/brush
+
+### [MrNeRF/awesome-3D-gaussian-splatting](https://github.com/MrNeRF/awesome-3D-gaussian-splatting)
+
+- **主题：** 实时渲染与展示
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-04T04:41:54Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** Curated list of papers and resources focused on 3D Gaussian Splatting, intended to keep pace with the anticipated surge of research in the coming months.
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合Web、移动端、VR/AR与实时Viewer的性能验证。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/MrNeRF/awesome-3D-gaussian-splatting
+
+### [longxiang-ai/awesome-gaussians](https://github.com/longxiang-ai/awesome-gaussians)
+
+- **主题：** 实时渲染与展示
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-04T03:21:42Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** This repository tracks the latest advancements in 3D Gaussian Splatting from Arxiv, with daily automated updates. Stay up-to-date with cutting-edge research in this exciting field!
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合Web、移动端、VR/AR与实时Viewer的性能验证。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/longxiang-ai/awesome-gaussians
+
+### [jaccen/Awesome-Gaussian-Skills](https://github.com/jaccen/Awesome-Gaussian-Skills)
+
+- **主题：** 实时渲染与展示
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-04T00:24:23Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** 图形学与3DGS、空间智能持续更新论文；AI Agent Skills for 3D Gaussian Splatting, NeRF & Computer Graphics Research. 800+ methods, 25categories, 12skills. OpenClaw / Claude Code compatible.
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合Web、移动端、VR/AR与实时Viewer的性能验证。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/jaccen/Awesome-Gaussian-Skills
+
+### [LostBeard/SpawnScene](https://github.com/LostBeard/SpawnScene)
+
+- **主题：** 实时渲染与展示
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-04T07:09:42Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** Create interactive 3D Gaussian Splat scenes from a single photo entirely in your browser.
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合Web、移动端、VR/AR与实时Viewer的性能验证。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/LostBeard/SpawnScene
+
+### [Voluma-ai/vlam](https://github.com/Voluma-ai/vlam)
+
+- **主题：** 实时渲染与展示
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-03T15:29:06Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** VLAM! - A WebGPU Gaussian Splat viewer for three.js
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合Web、移动端、VR/AR与实时Viewer的性能验证。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/Voluma-ai/vlam
+
+### [kamyy/ai-gaussian-splatter](https://github.com/kamyy/ai-gaussian-splatter)
+
+- **主题：** 实时渲染与展示
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-04T06:20:59Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** Upload multi-angle photos of a physical object, get back a real-time 3D Gaussian Splat viewable and shareable in-browser
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合Web、移动端、VR/AR与实时Viewer的性能验证。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/kamyy/ai-gaussian-splatter
+
+### [invitro-dampproofcourse822/TripoSplat](https://github.com/invitro-dampproofcourse822/TripoSplat)
+
+- **主题：** 实时渲染与展示
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-03T07:34:47Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** Generate high-quality 3D Gaussians from a single 2D image for asset creation, AR, VR, and game development.
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合Web、移动端、VR/AR与实时Viewer的性能验证。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/invitro-dampproofcourse822/TripoSplat
+
+### [Kral-35/on-device-3d-scanner](https://github.com/Kral-35/on-device-3d-scanner)
+
+- **主题：** 实时渲染与展示
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-04T07:25:59Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** Turn 8 photos into a 3D scan on-device, no cloud, LiDAR, or ARKit needed.
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合Web、移动端、VR/AR与实时Viewer的性能验证。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/Kral-35/on-device-3d-scanner
+
+### [Archerkattri/Archerkattri](https://github.com/Archerkattri/Archerkattri)
+
+- **主题：** 实时渲染与展示
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-04T06:21:12Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** Research portfolio — certified/calibrated ML systems: 3DGS confidence (AURA), splat registration (splatreg), certified planning (CERT-FLOW), diffusion caching (HiCache++), robot action-interface adaptation (ActionShift/ActionABI)
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合Web、移动端、VR/AR与实时Viewer的性能验证。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/Archerkattri/Archerkattri
+
+### [guoPhineas/SpatialScenesKit](https://github.com/guoPhineas/SpatialScenesKit)
+
+- **主题：** 实时渲染与展示
+- **来源：** GitHub Search
+- **发布时间/更新时间：** 2026-10-04T05:18:44Z
+- **更新判定：** 新项目/近期活跃
+- **核心内容：** Displays Apple ml-sharp 3D Gaussian Splat PLY files in SwiftUI apps.
+- **成熟度：** E1
+- **是否开源：** 是
+- **开发价值：** 适合Web、移动端、VR/AR与实时Viewer的性能验证。
+- **局限：** 近期活跃或可演示不代表工程稳定，应核对许可、测试、维护者活跃度和可复现性。
+- **代码仓库：** https://github.com/guoPhineas/SpatialScenesKit
+
+### [junha12345/3DGS_object_removal](https
+
+> Issue正文已截断，请打开notebook查看完整报告。

@@ -1,0 +1,80 @@
+Filed from the 2026-10-04 audit double-check (record N-9), audited at ae5554978ed86a24e2a7331a9a188ce381a01482 (master). Code reading only, no reproduction yet (needs-runtime-proof). Plan item P0-13. What is wrong GaussianSplatNode3D and...
+
+Nodes mutate RendererRD::GaussianSplatStorage (non-thread-safe RID_Owner holding a Ref) directly from the scene thread while render_scene reads it on the render thread (thread_model=2) · Issue #1161 · klausi3D/godotGS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Nodes mutate RendererRD::GaussianSplatStorage (non-thread-safe RID_Owner holding a Ref) directly from the scene thread while render_scene reads it on the render thread (thread_model=2) #1161
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Nodes mutate RendererRD::GaussianSplatStorage (non-thread-safe RID_Owner holding a Ref) directly from the scene thread while render_scene reads it on the render thread (thread_model=2)#1161
+Copy link
+Labels
+area:coreCore data structuresCore data structuresarea:rendererRendering pipelineRendering pipelineauditFound during architecture auditFound during architecture auditbugSomething isn't workingSomething isn't workingpriority:P1High priorityHigh priority
+Description
+klausi3D
+opened on Oct 4, 2026
+Issue body actions
+Filed from the 2026-10-04 audit double-check (record N-9), audited at ae5554978ed86a24e2a7331a9a188ce381a01482 (master). Code reading only, no reproduction yet (needs-runtime-proof). Plan item P0-13.
+What is wrong
+GaussianSplatNode3D and GaussianSplatWorld3D bypass the RenderingServer command queue and call GaussianSplatStorage::gaussian_set_renderer / gaussian_set_aabb / gaussian_set_casts_shadow / gaussian_free directly from NOTIFICATION_ENTER_TREE / EXIT_TREE, transform updates and destructors. The storage is mutable RID_Owner<GaussianSplat> gaussian_owner; with the default THREAD_SAFE = false, and GaussianSplat holds a plain Ref<GaussianSplatRenderer>. RendererSceneRenderRD::render_scene iterates the splats on the render thread and calls gaussian_get_renderer() (get_or_null plus a Ref copy).
+Ordering makes EXIT_TREE worse: rs->instance_set_base(render_instance, RID()) is a QUEUED command that lands after the DIRECT gaussian_free(gaussian_base), so the in-flight frame's cull list can still name a base RID whose storage slot is being destructed.
+Every other RD storage setter in Godot goes through the server command queue for exactly this reason.
+Evidence
+servers/rendering/renderer_rd/storage_rd/gaussian_splat_storage.h:54 -- mutable RID_Owner<GaussianSplat> gaussian_owner;
+servers/rendering/renderer_rd/storage_rd/gaussian_splat_storage.cpp:66-80 -- unguarded splat->renderer = p_renderer; / return splat->renderer;
+modules/gaussian_splatting/nodes/gaussian_splat_node_3d.cpp:2444-2450, :2459-2468, :2485-2488 -- direct calls from node code
+modules/gaussian_splatting/nodes/gaussian_splat_world_3d.cpp:755-775 -- same pattern
+servers/rendering/renderer_rd/renderer_scene_render_rd.cpp:1507 -- gaussian_get_renderer(gaussian_rid) on the render thread
+How it is reached
+rendering/driver/threads/thread_model = 2, which the starter template ships (docs/development/known-public-alpha-limitations.md:583-585); the limitations page records that no CI lane renders a splat node in that mode. Scene change or queue_free of a node while the render thread is inside render_scene.
+Consequence
+From spurious Condition "!splat" is true errors and a dropped frame up to a torn Ref pointer or reference() on a destructed object (use-after-free at scene switch). allocate_rid() growing the owner's chunk table on the main thread while the render thread indexes it is also unsynchronised. Same family as #1077/#1133, not covered by them.
+Direction (not a patch recipe)
+Route every storage mutation through the render thread (FUNC-queued RenderingServer methods or call_on_render_thread, keeping the order unset base -> clear renderer -> free), and independently harden the storage (RID_Owner<GaussianSplat, true>, guarded Ref swap). Add the windowed thread_model = 2 lane that renders a real node and frees it mid-run (#1148).
+Blind spots
+Not reproduced; a TSAN build or a provoked free-during-render run is the smallest experiment.
+Reactions are currently unavailable
+Activity
+klausi3D
+added
+bugSomething isn't workingSomething isn't working
+priority:P1High priorityHigh priority
+area:rendererRendering pipelineRendering pipeline
+area:coreCore data structuresCore data structures
+auditFound during architecture auditFound during architecture audit
+on Oct 4, 2026
+klausi3D
+added a commit that references this issue on Oct 5, 2026
+servers+gaussian_splatting: route GaussianSplatStorage mutations thro…
+...
+f393a48
+klausi3D
+added a commit that references this issue on Oct 14, 2026
+gaussian_splatting: harden audited render, streaming and CI contracts (…
+...
+d4ab7a7
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area:coreCore data structuresCore data structuresarea:rendererRendering pipelineRendering pipelineauditFound during architecture auditFound during architecture auditbugSomething isn't workingSomething isn't workingpriority:P1High priorityHigh priority
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

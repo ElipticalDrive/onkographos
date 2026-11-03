@@ -1,0 +1,583 @@
+c++ - Faster tetrahedron-tetrahedron intersection - Stack Overflow
+Collectives™ on Stack Overflow
+Find centralized, trusted content and collaborate around the technologies you use most.
+Learn more about Collectives
+Stack Internal
+Knowledge at work
+Bring the best of human thought and AI automation together at your work.
+Explore Stack Internal
+Faster tetrahedron-tetrahedron intersection
+Ask Question
+Asked
+7 years, 9 months ago
+Modified
+7 years, 9 months ago
+Viewed
+2k times
+3
+For one project of mine I require reliable detection of intersection between two tetrahedrons in 3D space. I do not need the points/lines/faces just to know if intersection is present or not. Touching is considered intersection too but common triangle face is not considered as intersection. After quite a struggle to achieve this as fast as possible my solution boiled to this horribility:
+let have tetrahedrons v0,v1
+each tetrahedron has 4 triangles t[4] where each triangle has 3 points p0,p1,p2 and normal vector n.
+compute planes of all 4 sides of both tetrahedrons
+so any point p on plane is given by equation
+```
+dot(p,n) + d = 0
+```
+where n is normal of the plane. As that is known this boils to computing d
+```
+D0[i] = -dot(v0.t[i].p0,v0.t[i].n)
+D1[i] = -dot(v1.t[i].p0,v1.t[i].n)
+i = { 0,1,2,3 }
+```
+for each triangle of each tetrahedron
+test any combination of triangle vs triangle intersection between v0,v1
+so just loop between all 16 combinations and use triangle vs triangle intersection.
+The triangle v0.t[i] vs triangle v1.t[j] intersection boils down to this:
+compute intersection between planes
+this is obviously ray (for non parallel planes) so simple cross product of the plane normals will give the ray direction
+```
+dir = cross(v0.t[i].n,v1.t[j].n)
+```
+now it is just matter of finding intersection point belonging to both planes. Exploiting determinant computation directly from the cross product of the normals the ray computation is like this:
+```
+// determinants
+det=vector_len2(dir);
+d0=D0[i]/det;
+d1=D1[j]/det;
+// position
+pos = d0*cross(dir,v1.t[j].n) + d1*cross(v0.t[i].n,dir);
+```
+for more info see:
+SO/SE: Line of intersection between two planes
+Wolfram: Plane-Plane Intersection
+compile signed distance intervals of triangle ray intersection for each triangle
+so simply compute intersection between ray and each edge line of triangle remembering min and max distance from pos. We do not need the actual point just the scalar distance from pos which is the parameter returned by line/ray intersection.
+check if ranges of both triangles overlaps or not
+if overlaps than v0,v1 intersect ... if no overlap occurs for all of the 16 tests than v0,v1 does not intersect.
+As you can see it is a lot of stuff to compute. My linear algebra and vector math knowledge is very limited to things I use so there is a high chance there might be much better approach for this. I tried a lot of things to ease up this without any luck (like using bbox,bsphere, using more simple test exploiting that both ray and triangle edges are on the same plane etc) but the result was either slower or even wrong (not counting edge cases correctly).
+Here my actual C++ implementation:
+```
+//---------------------------------------------------------------------------
+bool tetrahedrons::intersect_lin_ray(double *a0,double *a1,double *b0,double *db,double &tb)
+    {
+    int i0,i1;
+    double da[3],ta,q;
+    vector_sub(da,a1,a0); ta=0.0; tb=0.0; i0=0; i1=1;
+         if (fabs(da[i0])+fabs(db[i0])<=_zero) i0=2;
+    else if (fabs(da[i1])+fabs(db[i1])<=_zero) i1=2;
+    q=(da[i0]*db[i1])-(db[i0]*da[i1]);
+    if (fabs(q)<=_zero) return 0;       // no intersection
+    // intersection ta,tb parameters
+    ta=divide(db[i0]*(a0[i1]-b0[i1])+db[i1]*(b0[i0]-a0[i0]),q);
+    tb=divide(da[i0]*(a0[i1]-b0[i1])+da[i1]*(b0[i0]-a0[i0]),q);
+    if ((ta<0.0)||(ta>1.0)) return 0;   // inside line check
+    return 1;
+    }
+//---------------------------------------------------------------------------
+bool tetrahedrons::intersect_vol_vol(_vol4 &v0,_vol4 &v1)   // tetrahedron v0 intersect tetrahedron v1 ?
+    {
+    int i,j,_ti,_tj;
+    _fac3 *f0,*f1;
+    double pos[3],dir[3],p[3],det,D0[4],D1[4],d0,d1,t,ti0,ti1,tj0,tj1;
+    // planes offset:  dot(p,v0.t[i].n)+D0[i] = 0  ,  dot(p,v1.t[j].n)+D1[j] = 0
+    for (i=0;i<4;i++)
+        {
+        D0[i]=-vector_mul(pnt.pnt.dat+fac.dat[v0.t[i]].p0,fac.dat[v0.t[i]].n);
+        D1[i]=-vector_mul(pnt.pnt.dat+fac.dat[v1.t[i]].p0,fac.dat[v1.t[i]].n);
+        }
+    // plane plane intersection -> ray
+    for (i=0;i<4;i++)
+     for (j=0;j<4;j++)
+        {
+        f0=fac.dat+v0.t[i];
+        f1=fac.dat+v1.t[j];
+        // no common vertex
+        if ((f0->p0==f1->p0)||(f0->p0==f1->p1)||(f0->p0==f1->p2)) continue;
+        if ((f0->p1==f1->p0)||(f0->p1==f1->p1)||(f0->p1==f1->p2)) continue;
+        if ((f0->p2==f1->p0)||(f0->p2==f1->p1)||(f0->p2==f1->p2)) continue;
+        // direction
+        vector_mul(dir,f0->n,f1->n);
+        det=vector_len2(dir);
+        if (fabs(det)<=_zero) continue; // parallel planes?
+        d0=D0[i]/det;
+        d1=D1[j]/det;
+        // position
+        vector_mul(p,dir,f1->n); vector_mul(pos,p,d0);
+        vector_mul(p,f0->n,dir); vector_mul(p,p,d1);
+        vector_add(pos,pos,p);
+        // compute intersection edge points
+        _ti=1; _tj=1;
+        if (intersect_lin_ray(pnt.pnt.dat+f0->p0,pnt.pnt.dat+f0->p1,pos,dir,t)){ if (_ti) { _ti=0; ti0=t; ti1=t; } if (ti0>t) ti0=t; if (ti1<t) ti1=t; }
+        if (intersect_lin_ray(pnt.pnt.dat+f0->p1,pnt.pnt.dat+f0->p2,pos,dir,t)){ if (_ti) { _ti=0; ti0=t; ti1=t; } if (ti0>t) ti0=t; if (ti1<t) ti1=t; }
+        if (intersect_lin_ray(pnt.pnt.dat+f0->p2,pnt.pnt.dat+f0->p0,pos,dir,t)){ if (_ti) { _ti=0; ti0=t; ti1=t; } if (ti0>t) ti0=t; if (ti1<t) ti1=t; }
+        if (intersect_lin_ray(pnt.pnt.dat+f1->p0,pnt.pnt.dat+f1->p1,pos,dir,t)){ if (_tj) { _tj=0; tj0=t; tj1=t; } if (tj0>t) tj0=t; if (tj1<t) tj1=t; }
+        if (intersect_lin_ray(pnt.pnt.dat+f1->p1,pnt.pnt.dat+f1->p2,pos,dir,t)){ if (_tj) { _tj=0; tj0=t; tj1=t; } if (tj0>t) tj0=t; if (tj1<t) tj1=t; }
+        if (intersect_lin_ray(pnt.pnt.dat+f1->p2,pnt.pnt.dat+f1->p0,pos,dir,t)){ if (_tj) { _tj=0; tj0=t; tj1=t; } if (tj0>t) tj0=t; if (tj1<t) tj1=t; }
+        if ((_ti)||(_tj)) continue;
+        if ((ti0>=tj0)&&(ti0<=tj1)) return 1;
+        if ((ti1>=tj0)&&(ti1<=tj1)) return 1;
+        if ((tj0>=ti0)&&(tj0<=ti1)) return 1;
+        if ((tj1>=ti0)&&(tj1<=ti1)) return 1;
+        }
+    return 0;
+    };
+//---------------------------------------------------------------------------
+```
+It is a part of a much larger program. The _zero is just threshold for zero based on min detail size. _fac3 is triangle and _vol4 is tetrahedron. Both points and triangles are indexed from pnt.pnt.dat[] and fac.dat[] dynamic lists. I know is weird but there is a lot going on behind it (like spatial subdivision to segments and more to speed up the processes which is this used for).
+the vector_mul(a,b,c) is a=cross(b,c) and a=dot(b,c) product (which depends on c if it is vector or not).
+I would rather avoid any precomputed values for each triangle/tetrahedron as even now the classes holds quite a lot of info already (like parent-ship, usage count etc). And as I am bound to Win32 the memory is limited to only around 1.2 GB so any additional stuff will limit the max size of mesh usable.
+So what I am looking for is any of these:
+some math or coding trick to speed current approach if possible
+different faster approach for this
+I am bound to BDS2006 Win32 C++ and would rather avoid using 3th party libs.
+[Edit1] sample data
+Here is tetrahedronized pointcloud as a sample data for testing:
+```
+double pnt[192]=    // pnt.pnt.dat[pnt.n*3] = { x,y,z, ... }
+    {
+    -0.227,0.108,-0.386,
+    -0.227,0.153,-0.386,
+    0.227,0.108,-0.386,
+    0.227,0.153,-0.386,
+    0.227,0.108,-0.431,
+    0.227,0.153,-0.431,
+    -0.227,0.108,-0.431,
+    -0.227,0.153,-0.431,
+    -0.227,0.108,0.429,
+    -0.227,0.153,0.429,
+    0.227,0.108,0.429,
+    0.227,0.153,0.429,
+    0.227,0.108,0.384,
+    0.227,0.153,0.384,
+    -0.227,0.108,0.384,
+    -0.227,0.153,0.384,
+    -0.023,0.108,0.409,
+    -0.023,0.153,0.409,
+    0.023,0.108,0.409,
+    0.023,0.153,0.409,
+    0.023,0.108,-0.409,
+    0.023,0.153,-0.409,
+    -0.023,0.108,-0.409,
+    -0.023,0.153,-0.409,
+    -0.318,0.210,0.500,
+    -0.318,0.233,0.500,
+    0.318,0.210,0.500,
+    0.318,0.233,0.500,
+    0.318,0.210,-0.500,
+    0.318,0.233,-0.500,
+    -0.318,0.210,-0.500,
+    -0.318,0.233,-0.500,
+    -0.273,-0.233,0.432,
+    -0.273,0.222,0.432,
+    -0.227,-0.233,0.432,
+    -0.227,0.222,0.432,
+    -0.227,-0.233,0.386,
+    -0.227,0.222,0.386,
+    -0.273,-0.233,0.386,
+    -0.273,0.222,0.386,
+    0.227,-0.233,0.432,
+    0.227,0.222,0.432,
+    0.273,-0.233,0.432,
+    0.273,0.222,0.432,
+    0.273,-0.233,0.386,
+    0.273,0.222,0.386,
+    0.227,-0.233,0.386,
+    0.227,0.222,0.386,
+    -0.273,-0.233,-0.386,
+    -0.273,0.222,-0.386,
+    -0.227,-0.233,-0.386,
+    -0.227,0.222,-0.386,
+    -0.227,-0.233,-0.432,
+    -0.227,0.222,-0.432,
+    -0.273,-0.233,-0.432,
+    -0.273,0.222,-0.432,
+    0.227,-0.233,-0.386,
+    0.227,0.222,-0.386,
+    0.273,-0.233,-0.386,
+    0.273,0.222,-0.386,
+    0.273,-0.233,-0.432,
+    0.273,0.222,-0.432,
+    0.227,-0.233,-0.432,
+    0.227,0.222,-0.432,
+    };
+
+struct _fac3 { int p0,p1,p2; double n[3]; };
+
+_fac3 fac[140]= // fac.dat[fac.num] = { p0,p1,p2,n(x,y,z), ... }
+    {
+     78, 84, 96, 0.600,-0.800,-0.000,
+     72, 84, 96, -0.844,-0.003,-0.537,
+     72, 78, 84, -0.000,1.000,-0.000,
+     72, 78, 96, -0.000,-0.152,0.988,
+      6, 84, 96, -0.859,0.336,-0.385,
+      6, 78, 96, 0.597,-0.801,0.031,
+      6, 78, 84, 0.746,-0.666,0.000,
+      6, 72, 96, -0.852,-0.006,-0.523,
+      6, 72, 84, -0.834,0.151,-0.530,
+     78, 84,147, 0.020,1.000,-0.000,
+     72, 84,147, -0.023,-1.000,-0.015,
+     72, 78,147, -0.000,1.000,0.014,
+     78, 96,186, 0.546,-0.776,0.316,
+      6, 96,186, -0.864,0.067,-0.500,
+      6, 78,186, 0.995,0.014,-0.104,
+     78, 84,186, 0.980,-0.201,0.000,
+      6, 84,186, -0.812,0.078,-0.578,
+     72, 96,186, -0.865,-0.011,-0.501,
+      6, 72,186, -0.846,0.071,-0.529,
+      6, 84,147, -0.153,-0.672,-0.724,
+      6, 72,147, -0.222,-0.975,-0.024,
+     84,135,147, 0.018,1.000,-0.013,
+     78,135,147, -0.311,0.924,0.220,
+     78, 84,135, 0.258,0.966,-0.000,
+     72,135,147, -0.018,1.000,0.013,
+     72, 78,135, -0.000,0.995,0.105,
+     96,132,186, -0.000,-1.000,-0.000,
+     78,132,186, 0.995,-0.087,-0.056,
+     78, 96,132, 0.081,-0.256,0.963,
+     84,132,186, 0.976,-0.209,-0.055,
+     78, 84,132, 0.995,-0.101,0.000,
+     84,147,186, -0.190,-0.111,-0.975,
+      6,147,186, -0.030,-0.134,0.991,
+      0, 96,186, -0.587,-0.735,-0.339,
+      0, 72,186, 0.598,0.801,-0.031,
+      0, 72, 96, -0.992,-0.087,-0.092,
+     72,147,186, -0.675,-0.737,-0.044,
+    135,147,189, 0.000,1.000,-0.000,
+     84,147,189, -0.018,0.980,-0.197,
+     84,135,189, 0.126,0.992,-0.007,
+     81, 84,135, -0.183,0.983,-0.023,
+     78, 81,135, -0.930,-0.000,0.367,
+     78, 81, 84, 1.000,-0.000,0.000,
+    105,135,147, -0.000,1.000,0.000,
+     72,105,147, -0.126,0.992,0.007,
+     72,105,135, 0.018,0.980,0.197,
+     72, 81,135, -0.036,0.996,-0.082,
+     72, 78, 81, -0.000,-0.000,1.000,
+     96,120,132, -0.000,-1.000,-0.000,
+     78,120,132, 0.685,-0.246,0.685,
+     78, 96,120, -0.000,-0.152,0.988,
+    132,180,186, -0.000,-1.000,0.000,
+     84,180,186, 0.000,-0.152,-0.988,
+     84,132,180, 0.995,-0.101,-0.000,
+    147,150,186, 0.101,0.010,0.995,
+     84,150,186, -0.100,-0.131,-0.986,
+     84,147,150, -0.190,-0.019,-0.982,
+     96,114,186, 0.000,-1.000,0.000,
+      0,114,186, -0.584,-0.729,-0.357,
+      0, 96,114, -0.991,0.134,0.000,
+      0,147,186, -0.144,-0.058,-0.988,
+      0, 72,147, -0.926,-0.374,-0.052,
+     72, 96,114, -0.995,-0.101,0.000,
+      0, 72,114, -0.993,-0.077,-0.093,
+     75,147,189, -0.001,1.000,-0.012,
+     75,135,189, 0.018,1.000,-0.001,
+     75,135,147, -0.016,-1.000,0.012,
+    147,159,189, -0.000,1.000,-0.000,
+     84,159,189, -0.000,0.985,-0.174,
+     84,147,159, -0.025,-0.999,-0.025,
+     81,135,189, -0.274,0.962,0.015,
+     81, 84,189, 0.114,0.993,-0.023,
+     75,105,147, -0.115,-0.993,0.006,
+     75,105,135, 0.017,-0.983,0.181,
+     72, 75,147, -0.999,-0.000,-0.051,
+     72, 75,105, 0.599,-0.000,0.801,
+     81,105,135, -0.009,0.996,-0.093,
+     72, 81,105, -0.036,0.991,0.127,
+    120,126,132, -0.000,-1.000,-0.000,
+     78,126,132, 0.995,-0.101,-0.000,
+     78,120,126, -0.000,-0.152,0.988,
+      0,150,186, 0.101,-0.000,0.995,
+      0,147,150, -0.000,-0.000,1.000,
+    144,150,186, 0.000,-1.000,0.000,
+     84,144,186, -0.091,-0.133,-0.987,
+     84,144,150, -0.000,0.249,0.968,
+    147,150,159, -0.705,-0.071,-0.705,
+     84,150,159, -0.125,-0.100,-0.987,
+    114,150,186, 0.000,-1.000,0.000,
+      0,114,150, -0.998,-0.000,-0.059,
+     72,114,147, -0.995,-0.088,-0.052,
+      0,114,147, -0.906,-0.365,-0.215,
+     93,147,189, -0.009,-0.996,-0.093,
+     75, 93,189, 0.020,1.000,0.000,
+     75, 93,147, -0.237,-0.971,-0.000,
+     75, 81,189, -0.000,1.000,-0.012,
+     75, 81,135, -0.000,-0.995,0.096,
+     93,159,189, -0.000,-0.987,-0.160,
+     93,147,159, -0.069,-0.995,-0.069,
+     84, 93,189, 0.036,0.991,-0.127,
+     84, 93,159, -0.036,-0.993,-0.113,
+     84, 87,189, -0.599,-0.000,-0.801,
+     81, 87,189, -0.120,0.993,-0.000,
+     81, 84, 87, 1.000,0.000,0.000,
+     75, 81,105, -0.000,-0.987,0.160,
+     72, 93,147, -0.183,-0.983,-0.023,
+     72, 75, 93, -1.000,0.000,-0.000,
+     72, 75, 81, 0.000,-0.000,1.000,
+    114,147,150, -0.993,-0.100,-0.059,
+    144,162,186, 0.000,-1.000,0.000,
+     84,162,186, -0.000,-0.152,-0.988,
+     84,144,162, -0.600,0.800,0.000,
+    144,150,159, 0.000,0.101,0.995,
+     84,144,159, -0.125,-0.087,-0.988,
+    144,147,159, -0.707,0.000,-0.707,
+    144,147,150, -0.000,0.000,1.000,
+     93,114,147, 0.732,-0.587,-0.346,
+     72, 93,114, -0.995,-0.100,-0.002,
+     81, 93,189, 0.022,1.000,-0.014,
+     75, 81, 93, -0.000,1.000,0.000,
+     93,144,159, 0.582,-0.140,-0.801,
+     93,144,147, -0.930,0.000,0.367,
+     87, 93,189, -0.000,0.987,0.160,
+     84, 87, 93, -0.000,0.000,-1.000,
+     84, 93,144, -0.009,-0.238,-0.971,
+     81, 87, 93, -0.000,1.000,0.000,
+    114,144,150, -0.000,-1.000,-0.000,
+    114,144,147, -1.000,0.000,-0.000,
+     93,144,162, -0.995,-0.096,0.000,
+     84, 93,162, -0.005,-0.145,-0.989,
+     93,114,144, -0.995,-0.096,0.000,
+     72,114,144, -0.995,-0.101,-0.000,
+     72, 93,144, -0.995,-0.097,-0.002,
+     90,144,162, -0.995,-0.101,0.000,
+     90, 93,162, 0.834,0.000,-0.552,
+     90, 93,144, -0.930,0.000,0.367,
+     84, 90,162, 0.000,-0.152,-0.988,
+     84, 90, 93, 0.000,0.000,-1.000,
+     72, 90,144, -0.995,-0.101,-0.000,
+     72, 90, 93, -1.000,0.000,-0.000,
+    };
+
+struct _vol4 { int p0,p1,p2,p3,t[4]; double s[4]; };
+
+_vol4 vol[62]=  // vol.dat[vol.num] = { p0,p1,p2,p3,t[0],t[1],t[2],t[3],s[0],s[1],s[2],s[3], ... }
+    {
+     72, 78, 96, 84,   0,  1,  2,  3, 1,1,1,1,
+     78, 84, 96,  6,   4,  5,  6,  0, 1,1,1,-1,
+     72, 84, 96,  6,   4,  7,  8,  1, -1,1,1,-1,
+     72, 78, 84,147,   9, 10, 11,  2, 1,1,1,-1,
+      6, 78, 96,186,  12, 13, 14,  5, 1,1,1,-1,
+      6, 78, 84,186,  15, 16, 14,  6, 1,1,-1,-1,
+      6, 72, 96,186,  17, 13, 18,  7, 1,-1,1,-1,
+      6, 72, 84,147,  10, 19, 20,  8, -1,1,1,-1,
+     78, 84,147,135,  21, 22, 23,  9, 1,1,1,-1,
+     72, 78,147,135,  22, 24, 25, 11, -1,1,1,-1,
+     78, 96,186,132,  26, 27, 28, 12, 1,1,1,-1,
+     78, 84,186,132,  29, 27, 30, 15, 1,-1,1,-1,
+      6, 84,186,147,  31, 32, 19, 16, 1,1,-1,-1,
+     72, 96,186,  0,  33, 34, 35, 17, 1,1,1,-1,
+      6, 72,186,147,  36, 32, 20, 18, 1,-1,-1,-1,
+     84,135,147,189,  37, 38, 39, 21, 1,1,1,-1,
+     78, 84,135, 81,  40, 41, 42, 23, 1,1,1,-1,
+     72,135,147,105,  43, 44, 45, 24, 1,1,1,-1,
+     72, 78,135, 81,  41, 46, 47, 25, -1,1,1,-1,
+     78, 96,132,120,  48, 49, 50, 28, 1,1,1,-1,
+     84,132,186,180,  51, 52, 53, 29, 1,1,1,-1,
+     84,147,186,150,  54, 55, 56, 31, 1,1,1,-1,
+      0, 96,186,114,  57, 58, 59, 33, 1,1,1,-1,
+      0, 72,186,147,  36, 60, 61, 34, -1,1,1,-1,
+      0, 72, 96,114,  62, 59, 63, 35, 1,-1,1,-1,
+    135,147,189, 75,  64, 65, 66, 37, 1,1,1,-1,
+     84,147,189,159,  67, 68, 69, 38, 1,1,1,-1,
+     84,135,189, 81,  70, 71, 40, 39, 1,1,-1,-1,
+    105,135,147, 75,  66, 72, 73, 43, -1,1,1,-1,
+     72,105,147, 75,  72, 74, 75, 44, -1,1,1,-1,
+     72,105,135, 81,  76, 46, 77, 45, 1,-1,1,-1,
+     78,120,132,126,  78, 79, 80, 49, 1,1,1,-1,
+    147,150,186,  0,  81, 60, 82, 54, 1,-1,1,-1,
+     84,150,186,144,  83, 84, 85, 55, 1,1,1,-1,
+     84,147,150,159,  86, 87, 69, 56, 1,1,-1,-1,
+      0,114,186,150,  88, 81, 89, 58, 1,-1,1,-1,
+      0, 72,147,114,  90, 91, 63, 61, 1,1,-1,-1,
+     75,147,189, 93,  92, 93, 94, 64, 1,1,1,-1,
+     75,135,189, 81,  70, 95, 96, 65, -1,1,1,-1,
+    147,159,189, 93,  97, 92, 98, 67, 1,-1,1,-1,
+     84,159,189, 93,  97, 99,100, 68, -1,1,1,-1,
+     81, 84,189, 87, 101,102,103, 71, 1,1,1,-1,
+     75,105,135, 81,  76, 96,104, 73, -1,-1,1,-1,
+     72, 75,147, 93,  94,105,106, 74, -1,1,1,-1,
+     72, 75,105, 81, 104, 77,107, 75, -1,-1,1,-1,
+      0,147,150,114, 108, 89, 91, 82, 1,-1,-1,-1,
+     84,144,186,162, 109,110,111, 84, 1,1,1,-1,
+     84,144,150,159, 112, 87,113, 85, 1,-1,1,-1,
+    147,150,159,144, 112,114,115, 86, -1,1,1,-1,
+     72,114,147, 93, 116,105,117, 90, 1,-1,1,-1,
+     75, 93,189, 81, 118, 95,119, 93, 1,-1,1,-1,
+     93,147,159,144, 114,120,121, 98, -1,1,1,-1,
+     84, 93,189, 87, 122,101,123, 99, 1,-1,1,-1,
+     84, 93,159,144, 120,113,124,100, -1,-1,1,-1,
+     81, 87,189, 93, 122,118,125,102, -1,-1,1,-1,
+    114,147,150,144, 115,126,127,108, -1,1,1,-1,
+     84,144,162, 93, 128,129,124,111, 1,1,-1,-1,
+     93,114,147,144, 127,121,130,116, -1,-1,1,-1,
+     72, 93,114,144, 130,131,132,117, -1,1,1,-1,
+     93,144,162, 90, 133,134,135,128, 1,1,1,-1,
+     84, 93,162, 90, 134,136,137,129, -1,1,1,-1,
+     72, 93,144, 90, 135,138,139,132, -1,1,1,-1,
+    };
+```
+the p? are point indexes 0,3,6,9... from pnt the n is normal s is sign of normal (in case triangle is shared so normals point the same way) and t[4] are indexes of triangles 0,1,2,3,... from fac.
+And here a sample test:
+```
+bool tetrahedrons::vols_intersect()                     // test if vol[] intersects each other
+    {
+    int i,j;
+    for (i=0;i<vol.num;i++)
+     for (j=i+1;j<vol.num;j++,dbg_cnt++)
+      if (intersect_vol_vol(vol.dat[i],vol.dat[j]))
+        {
+        linc=0x800000FF;
+        if (intersect_vol_vol(vol.dat[j],vol.dat[i])) linc=0x8000FFFF;
+        lin_add_vol(vol.dat[i]);
+        lin_add_vol(vol.dat[j]);
+        return 1;
+        }
+    return 0;
+    }
+```
+where dbg_cnt is counter of intersection tests. For this mesh I got this results:
+```
+tests | time
+------+-------------
+18910 | 190-215 [ms]
+```
+I called the vols_intersect test 10 times to make the measurements long enough. Of coarse none of placed tetrahedrons in this dataset will intersect (leading to highest time). In the real process (too big to post) which lead to this mesh are the count like this:
+```
+intersecting        5
+non intersecting 1766
+all tests        1771
+```
+c++
+3d
+geometry
+vectormath
+tetrahedra
+Share
+Improve this question
+Follow
+edited Mar 4, 2018 at 10:25
+asked Mar 3, 2018 at 9:21
+Spektre
+52.3k1212 gold badges125125 silver badges413413 bronze badges
+11
+Have you tried Separating axes method? It is rather fast (you have only 8 axes). geometrictools.com/Documentation/MethodOfSeparatingAxes.pdf
+MBo
+–
+MBo
+2018-03-03 10:13:59 +00:00
+Commented
+Mar 3, 2018 at 10:13
+it is used for something similar to quick hull so any newly added tetrahedron can intersect none some or even all of the tetrahedrons already placed. But none of the tetrahedrons already placed are intersecting
+Spektre
+–
+Spektre
+2018-03-03 21:01:07 +00:00
+Commented
+Mar 3, 2018 at 21:01
+This is merely a hunch - but have you considered Dirk Gregorius' modified SAT algorithm? There's a sample implementation of it on GitHub.
+meowgoesthedog
+–
+meowgoesthedog
+2018-03-03 21:07:25 +00:00
+Commented
+Mar 3, 2018 at 21:07
+@Spektre Are you sure that your algorithm covers all corner cases (like parallel faces and the case where one tetrahedron is completely enclosed in the other)? I am a bit doubting. Your approach is already very similar to the Separating Axis Test that MBo suggested and I would recommend going there. However ...
+Nico Schertler
+–
+Nico Schertler
+2018-03-04 07:28:15 +00:00
+Commented
+Mar 4, 2018 at 7:28
+@MBo ... you will need 24 tests for SAT-testing two tetrahedra: 4 normals of the first tetrahedron, 4 normals of the second tetrahedron, and 16 cross products of all normal pairs from both tetrahedra that account for separation by edges.
+Nico Schertler
+–
+Nico Schertler
+2018-03-04 07:28:17 +00:00
+Commented
+Mar 4, 2018 at 7:28
+|
+Show 6 more comments
+Related questions
+14
+Triangle Triangle Intersection in 3d-Space
+1
+Given three points on a tetrahedron, Find the 4th
+40
+Set of efficient 3D intersection algorithms
+Related questions
+14
+Triangle Triangle Intersection in 3d-Space
+1
+Given three points on a tetrahedron, Find the 4th
+40
+Set of efficient 3D intersection algorithms
+3
+Tetrahedron edge test
+0
+Tetrahedron height vertices
+1
+Polyhedron/sphere-ray intersection determination?
+1
+Testing tetrahedron-triangle intersection
+1
+Implementing a tetrahedra - ray intersection test
+1
+tetgen library- tetrahedralize without convex hull
+4
+Given a point and a large number of tetrahedrons, how to efficiently determine in which tetrahedron the point is
+Load 7 more related questions
+Show fewer related questions
+0
+Sorted by:
+Reset to default
+Highest score (default)
+Trending (recent votes count more)
+Date modified (newest first)
+Date created (oldest first)
+Know someone who can answer? Share a link to this question via email, Twitter, or Facebook.
+Start asking to get answers
+Find the answer to your question by asking.
+Ask question
+Explore related questions
+c++
+3d
+geometry
+vectormath
+tetrahedra
+See similar questions with these tags.
+The Overflow Blog
+You’re probably underutilizing your GPUs
+Lightning-as-a-service for agriculture
+Featured on Meta
+Chat room owners can now establish room guidelines
+Policy: Generative AI (e.g., ChatGPT) is banned
+Linked
+19
+Line of intersection between two planes
+Hot Network Questions
+Why does JavaScript use autoboxing?
+How to turn 90 degree curved UV to vertical or horizontal square grid?
+Old movie about the child Jesus, who is seeing his own future as he walks through Jerusalem
+Did around 50% of sailors die from scurvy on long voyages?
+Why did I freeze to death even though I had cold resistance?
+Can a magnetic loop antenna be used to communicate through a perfect metal container?
+A subset of a rectangle that 'blocks' every curve that goes from right to left must connect upper and lower sides
+Simple current source with bjt
+Blind Spot Regarding the Correlation Coefficient
+Creating a spiral
+Do customizable blank-slate protagonists limit the narrative potential of action RPGs?
+Define Min and Max Values in Geometry Nodes Relatively to Another Mesh
+Bridge Edge Loops not working between 2 clearly defined Edge Loops
+What physical changes to the mouth would cause problems with articulation?
+How to use an iPad as an external monitor with Mac mini 6.1 (Late 2012) for installing Ubuntu?
+How to run a command in a terminal only if the previous commands succeed?
+How should I apply Cure Wounds to a Find Steed mount?
+how to define an expandable key-value command?
+Fool a program it has a pty of specific size
+Dual nationality citizen registering for EES in Switzerland
+The Airbus A320 that pitched down due to solar radiation recently. Why did that happen? I thought the computers vote the corrupted one out and ignore?
+Any concerns using blown-in cellulose without blower in a small cavity between cathedral ceiling and roof?
+stim: why would order of CNOT operations affect detectors
+Sort this puzzle out
+more hot questions
+Question feed
+lang-cpp

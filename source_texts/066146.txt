@@ -1,0 +1,1759 @@
+Path Guiding Using Spatio-Directional Mixture Models
+A. Dodik1 & M. Papas2 & C. Öztireli3 & T. Müller4
+arXiv:2111.13094v2 [cs.GR] 28 Dec 2021
+1 Facebook†
+2 Disney Research|Studios
+3 University of Cambridge
+Müller et al.
+(a) Illustration of SDMMs
+4 NVIDIA
+SDMM (Ours)
+(b) Rendering of Y ET A NOTHER B OX
+PPG
+Radiance
+Product
+MAPE:
+render time:
+speedup vs. PPG at equal MAPE:
+0.560
+1.3m
+1.00×
+0.068
+2.4m
+15.46×
+0.050
+5.2m
+9.23×
+Reference
+Figure 1: (a) Illustration of our 5D spatio-directional mixture model (SDMM) that approximates incident radiance. (b) Rendering of a scene
+with difficult spatio-directionally varying illumination: a tiny light source is shining upwards onto a glossy ceiling that indirectly illuminates
+the scene. We compare path guiding results with and without product sampling using an additional mixture that approximates the BSDF.
+Abstract
+We propose a learning-based method for light-path construction in path tracing algorithms, which iteratively optimizes and
+samples from what we refer to as spatio-directional Gaussian mixture models (SDMMs). In particular, we approximate incident
+radiance as an online-trained 5D mixture that is accelerated by a kD-tree. Using the same framework, we approximate BSDFs
+as pre-trained nD mixtures, where n is the number of BSDF parameters. Such an approach addresses two major challenges in
+path-guiding models. First, the 5D radiance representation naturally captures correlation between the spatial and directional
+dimensions. Such correlations are present in e.g. parallax and caustics. Second, by using a tangent-space parameterization of
+Gaussians, our spatio-directional mixtures can perform approximate product sampling with arbitrarily oriented BSDFs. Existing
+models are only able to do this by either foregoing anisotropy of the mixture components or by representing the radiance field
+in local (normal aligned) coordinates, which both make the radiance field more difficult to learn. An additional benefit of the
+tangent-space parameterization is that each individual Gaussian is mapped to the solid sphere with low distortion near its center
+of mass. Our method performs especially well on scenes with small, localized luminaires that induce high spatio-directional
+correlation in the incident radiance.
+CCS Concepts
+• Computing methodologies → Ray tracing; Mixture models; • Mathematics of computing → Sequential Monte Carlo
+methods; Expectation maximization; Bayesian computation;
+1. Introduction
+Path tracing is used to synthesize photorealistic images in a wide
+variety of settings, such as movie production, product and architecture visualization, and, more recently, video games. The efficiency
+of path tracing is a product of two factors: (i) the rate at which paths
+† Research completed prior to joining Facebook.
+are traced and (ii) how well the distribution of traced paths matches
+the actual distribution of light throughout the virtual scene. The key
+challenge is thus to devise an algorithm that accurately samples the
+distribution of light while at the same time remaining performant.
+Adaptive importance sampling techniques (usually referred to as
+“path guiding” in the specific context of rendering) present a promising approach to this problem – instead of relying on heuristics,
+A. Dodik & M. Papas & C. Öztireli & T. Müller / Path Guiding Using Spatio-Directional Mixture Models
+ω
+they use information gathered during rendering to learn a sampling
+distribution which better suits the scene at hand.
+Our method belongs to the class of path-guiding techniques which
+represent factors of the rendering integrand using mixture models.
+In contrast to prior works which use 2D directional mixture models [VKŠ*14; HEV*16], our method includes additional parameters
+of the rendering equation as further dimensions of the mixture model.
+Specifically, we propose representing
+• incident radiance (Li ) using a 5D Gaussian mixture model, and
+• BSDFs ( fs ) using nD Gaussian mixture models,
+ω
+ω
+x0
+x
+x1
+(a) Scene setup
+x0
+x1
+x
+(b) Vorba et al. [VKŠ*14]
+ω
+ω
+where n is the number of parameters of the BSDF.
+The first benefit of such an aproach is that a 5D mixture model
+naturally captures spatio-directional correlation (e.g. parallax) of the
+incident radiance Li (ωi , x). While recent work focuses on parallax
+as a specific instance of spatio-directional correlation, it effetively
+demonstrates the importance of accurately capturing it during path
+tracing [RHL20]. Additionally, we found nD mixture models to
+be well-suited for compactly representing parametric BSDFs, as
+they both vary smoothly as a function of their parameters in most
+cases [HES*18]. Such a parametric BSDF representation is desirable, because it avoids the need of pre-computing multiple distinct
+BSDF models for every encountered material configuration. Lastly,
+after both models have been trained, we can perform closed-form
+product sampling.
+In this paper, we describe solutions to overcome three challenges
+that would otherwise make the use of higher-dimensional mixture
+models difficult:
+Product sampling with mixed-orientation Gaussians. In order
+to compute the product of Gaussian distributions, they must live
+in the same coordinates. Herholz et al. [HEV*16] achieve this by
+parameterizing incident radiance Li as well as the BSDFs fs as 2D
+directional distributions in the shading frame, where the surface normal always points towards (0, 0, 1). This approach is not possible
+for us, because Li is approximated by a global 5D spatio-directional
+mixture model, where all mixture components must share the same
+(global) coordinate frame. For product sampling, we must therefore
+rotate the mixture into the shading frame on-the-fly for every sampling decision. Such a rotation inherently introduces distortion due
+to the non-linear change of variables induced by changing the 2D parameterization of the solid sphere. To minimize this distortion near
+the center of mass of each Gaussian, we (i) adopt a tangent-space parameterization [Pen06; STM14] as a substitute for commonly used
+parameterizations (e.g. cylindrical), and (ii) we propose to transform
+covariance matrices via a first-order Taylor approximation of the
+change of variables to further reduce the remaining distortion.
+x0
+x1
+x
+(c) Practical Path Guiding [MGN17]
+x0
+x1
+x
+(d) Ours
+Figure 2: Comparison of our representation with previous work. In
+(a) we visualize a 2D incident radiance field with one spatial and
+one angular dimension (x, ω). The two points x0 and x1 are directly
+illuminated by an area light. (b) to (d) visualize how the incident
+radiance field is represented as a function of x and ω in previous
+and our work. In this setup, (b) approximate the angular variation of
+incident radiance with two 1D GMMs at discrete spatial positions,
+(c) discretize both dimensions in a 2D adaptive hierarchical data
+structure and finally, our method in (d) represents the entire spatioangular domain with a 2D GMM which captures the correlation
+between the dimensions.
+tion maximization (EM) algorithm and only conditioning on-the-fly
+for each sampling decision.
+Scaling towards thousands of mixture components. The aforementioned conditioning is the conceptual equivalent to looking up
+a 2D distribution in a higher-dimensional cache such as done by
+Vorba et al. [VKŠ*14]. When done with brute force, its cost scales
+linearly with the number of mixture components. It is therefore an
+expensive operation that needs acceleration through an appropriate
+data structure, especially when the high-dimensional mixture consists of thousands of components, which is needed to represent a
+function as complicated as the incident radiance. We use a continually evolving kD-tree over the conditional dimensions (e.g. the 3
+spatial dimensions of incident radiance) to accelerate the on-the-fly
+conditioning operation to practical speed.
+To summarize, the contributions of this paper include
+Training of conditional distributions. In path guiding, we are interested in 2D importance-sampling distributions. Thus, when representing incident radiance Li (ωi , x) as a 5D distribution p(ωi , x), we
+ultimately only make use of the 2D conditioned distribution p(ωi | x).
+The same holds true for BSDFs. Unfortunately, the optimization of
+conditional distributions is highly non-linear and difficult [SPK05].
+Instead of attacking this difficulty head-on, we side-step it by optimizing our high-dimensional joint distributions using the expecta-
+• the use of spatio-directional mixture models for approximating
+the incident radiance and BSDFs in product path guiding, which
+is made practical by
+• a directional tangent-space parameterization that admits low distortion under rotation, and
+• a kD-tree acceleration data structure for efficient on-the-fly conditioning and EM training.
+A. Dodik & M. Papas & C. Öztireli & T. Müller / Path Guiding Using Spatio-Directional Mixture Models
+2. Related Work
+Existing approaches to importance sampling the rendering integral
+range from analytic techniques, such as bi-directional path construction [LW93], Markov chain sampling [Vea97], multiple importance
+sampling [VG95], and BSDF models [HD14; WMLT07], to datadriven techniques, such as path guiding.
+Path guiding. “Path guiding” techniques apply principles of adaptive importance sampling by iteratively
+1. tracing an initial set of paths,
+2. fitting an approximate radiance or product model to these paths,
+3. and then using the model to importance sample further paths.
+Such techniques were pioneered by Jensen [Jen95], who rasterized a
+photon map into hemispherical grids for importance sampling, and
+Lafortune and Willems [LW95], who quantized radiance estimates
+into a spatio-directional 5D tree that can be used both as a control
+variate and for importance sampling. More recently, path-guiding
+techniques surged in popularity after Vorba et al. [VKŠ*14] demonstrated that unidirectional path guiding can match bi-directional techniques in terms of sample quality—a boon to production rendering,
+which heavily relies on unidirectional tracing. Consequently, many
+production renderers support path guiding nowadays [VHH*19].
+In our work, we adopt several breakthroughs of recent works
+on path guiding. We perform reinforcement-learning-style iterated
+rendering [DK18; MGN17], where the rendering iterations are combined with an inverse-variance weighting [Mül19]. Furthermore,
+we use a spatial acceleration tree structure that adapts to the sample density [HZE*19], and we train Gaussian mixture models to
+approximate incident radiance [VKŠ*14] within the leaves of that
+spatial tree. Lastly, we train another Gaussian mixture model to
+approximate BSDFs and we perform closed-form sampling of the
+product between the BSDF and the radiance models [HEV*16].
+Spatio-directional effects. Initial path-guiding approaches modeled spatio-directional correlations implicitly by subdividing
+space [LW95; Jen95; VKŠ*14; HP02; DK18; MGN17]. More
+explicit modeling of such correlations came with primary sample space [ZZ19; MMR*19; GBBE18] and path space approaches [RHJD18], reprojection-based techniques [RHL20] as
+well as attempts at directly representing the full 5D radiance or
+7D product using neural networks [MMR*19; MRNK20]. Our approach is most similar to the latter category—we also explicitly
+model the 5D radiance field—but rather than using neural networks
+we use a mixture of 5D Gaussians. It is worth contrasting our datadriven 5D mixtures to the reprojected 2D mixtures of Ruppert et
+al. [RHL20]. Reprojection constitutes an accurate closed-form solution when its underlying assumptions are valid, i.e. when the
+perceived origin is near-diffuse and the intermediate transport is
+spatially linear. This is the case with emitters that are for example
+directly visible from the shading location or hidden behind flat mirrors or thin sheets of dielectrics. However, when these assumptions
+are violated, e.g. in caustics caused by curved specular reflectors,
+the data-driven approach is the more general one (see Figure 12).
+Admittedly, such cases are rare in practice and do not result in complete failure—additional mixture components can compensate for
+erroneous reprojection—yet we believe the two approaches can be
+benefitially combined in the future.
+Mixture models. Mixture models have a long and successful history for various uses in computer graphics. Thus, for brevity, we
+will focus only on work that utilizes mixture models within the
+context of path guiding. Hey et al. [HP02] were the first to propose
+a mixture model for path guiding: a mixture of cone-shaped distributions seeded by a photon map. Vorba et al. [VKŠ*14] proposed
+to use a Gaussian mixture due to its ability to approximate sparse
+radiance estimates using the expectation maximization (EM) optimization algorithm. They used an appproach similar to the general
+adaptive importance sampling algorithm called mixture population
+Monte Carlo, by Cappé et al. [CDG*08]. Later approaches exploited
+the closed-form product of Gaussian mixtures to perform product
+sampling with the BSDF, where the BSDF is approximated by an
+auxiliary Gaussian [HEV*16] or skewed Gaussian [HES*18] mixture. Alternatively, mutivariate Gaussians can also parameterize the
+distribution of entire paths [RHJD18], elegantly capturing spatiodirectional correlations. However, the high-dimensional space of
+paths is difficult to cover densely, constraining the approach to those
+paths whose interactions are near-specular and thereby have a low
+effective dimensionality.
+Similarly to Gaussian mixtures, mixtures of von Mises-Fisher
+distributions can also represent incident radiance, the BSDF (or
+phase function), and their product [HZE*19; RHL20]. Von MisesFisher distributions have the key advantage that their domain is
+the solid sphere S2 rather than Euclidean space, enabling their use
+without a spherical parameterization that could introduce unwanted
+distortion. For path guiding, an additional crucial benefit of living in
+S2 is that they can be trivially rotated, permitting product sampling
+between a world-space radiance representation and a local-space
+BSDF (or phase function) representation.
+Our method seeks the same property for product sampling: the
+ability to rotate the mixture model freely in S2 . However, we also desire the ability to model anisotropy with few mixture components as
+well as the ability to condition on additional Euclidean dimensions,
+e.g. the 3 spatial dimensions in the 5D spatio-directional radiance
+distribution. These requirements disqualify the isotropic von MisesFisher distributions, as well as other possible spherical candidates,
+such as the Bingham distribution [Bin74] (undesirable symmetry) or
+anisotropic spherical Gaussians [XSD*13] (difficult conditioning).
+Instead, we rely on a tangent-space Gaussian mixture model [Pen06;
+STM14], which we will describe in detail in Section 3.1.
+3. Methodology
+We are interested in using Monte Carlo integration to solve the
+reflection integral
+Z
+Ls (ωo , x) =
+S2
+Li (ωi , x) fs (ωi , ωo , φ(x)) cos(γ) dωi ,
+(1)
+where ωo is the reflected direction, ωi is the direction of incident
+radiance, γ is its angle with the surface normal, x is the shading
+location, and φ(x) are the parameters of the BSDF at that location.
+In order to improve the efficiency of said Monte Carlo integration,
+we would like to importance sample according to a probability
+density function (PDF) that is approximately proportional to the
+integrand, i.e. our goal is to find
+p(ωi | ωo , x) ∝ Li (ωi , x) fs (ωi , ωo , φ(x)) cos(γ) .
+(2)
+A. Dodik & M. Papas & C. Öztireli & T. Müller / Path Guiding Using Spatio-Directional Mixture Models
+N (0, Σ1 )
+N (0, Σ2 )
+Tangent spaces. We define the tangent space at some mean vector
+µ, as a circular 2D parameterization of the surface of the sphere (see
+Figure 3b): one can map from the µ-centered tangent space to the
+sphere and back, using the so-called log and exp maps, which are
+each other’s inverse:
+0
+ν
+µ1
+µ2
+µ
+ν = logµ (ω) , ω = expµ (ν) .
+ω
+(a) Mixture setup
+(b) Tangent space parameterization
+Figure 3: (a) A 2-component example of a tangent-space Gaussian
+mixture model. Each Gaussian component is parameterized by a
+unit-length mean vector µk , pointing to its position on the sphere,
+and a covariance matrix Σk describing the Gaussian’s shape in the
+corresponding tangent space of the sphere. (b) The µ-centered tangent space is a circular 2D parameterization of the surface of the
+sphere. World-space directions ω are transformed to tangent-space
+directions ν and back via ν = logµ (ω) and ω = expµ (ν).
+We approach this goal by decomposing it into two sub-goals: (i)
+learning the incident radiance Li as a 5D Gaussian mixture model
+and (ii) learning the BSDFs fs as nD Gaussian mixture models,
+where n is the total number of dimensions of ωi , ωo , and φ:
+pLi (ωi , x) ∝ Li (ωi , x)
+p fs (ωi , ωo , φ) ∝ fs (ωi , ωo , φ(x)) cos(γ) .
+(3)
+In the following we will assume that ω ∈ S2 is a direction vector
+and ν ∈ R2 is a coordinate in a tangent space with kνk < π. In this
+case, we can use the azimuthal equidistant projection to define our
+log and exp maps, same as Simo-Serra et al. [STM14]:
+!|
+ωy
+ωx
+logµ (ω) =
+,
+,
+sinc(cos−1 (ωz )) sinc(cos−1 (ωz ))
+(7)
+ω = Rµ ω ,
+
+|
+expµ (ν) = R−1
+νu sinc(kνk), νv sinc(kνk), cos(kνk) ,
+µ
+(8)
+where Rµ is the rotation matrix that rotates µ to (0, 0, 1) and sinc is
+the unnormalized sinc function.
+The crucial property that justifies the use of exponential and
+logarithm maps is that the length of the shortest path (i.e. shortest
+geodesic) connecting µ with any ω along the manifold (e.g. sphere)
+equals the distance between the origin of the tangent space at µ and
+the corresponding ν † . This property enables the optimization of
+tangent-space Gaussians using the expectation maximization (EM)
+algorithm [STM14], which we will describe in Section 3.2.
+(4)
+We then approximately sample according to Equation (2) by
+conditioning the approximations pLi and p fs on (ωo , x, φ(x)) and
+then computing their closed-form product distribution, i.e.
+p(ωi | ωo , x) ∝ pLi (ωi | x) p fs (ωi | ωo , φ(x)) .
+(6)
+Density evaluation. Given the parameters µ and Σ of a spherical
+tangent-space Gaussian, its density in tangent space is the regular
+bi-variate Gaussian density, centered at the tangent space’s origin:
+
+ √
+1 | −1 
+(9)
+pt (ν) := e− 2 ν Σ ν 2π det Σ .
+(5)
+Next, we will discuss each of these steps in detail.
+3.1. Tangent-Space Gaussian Mixtures
+Since we represent incident radiance using a spatio-directional 5D
+mixture model as opposed to caches that are associated with geometric surfaces, we are forced to adopt a global “world-space” parameterization of the incident radiance. In order to compute product
+sampling between world-space radiance and a locally parameterized
+BSDF, we must be able to rotate the mixtures to the same coordinate
+frame. To this end, we build upon spherical tangent-space Gaussian
+mixture models [Pen06; STM14]. For example, in a tangent-space
+model on a sphere with K mixture components, the k-th Gaussian is
+parameterized by a 3D world-space unit-length mean vector µk ∈ S2
+and a 2×2 tangent-space covariance matrix Σk ∈ R2×2 . The mean
+vector µk determines the tangent space that the covariance matrix
+Σk lives in; see Figure 3a for an illustration.
+Crucially, this representation can be rotated into any local shading
+frame for product sampling: one simply rotates the mean vectors µk
+to the local frame and applies the azimuthal part of the rotation to
+the covariance matrices Σk .
+Its density with respect to the solid-angle measure, which we need
+for importance sampling of directions in path tracing, is in turn
+obtained through a change of variables:
+p
+pΩ (ω) = pt (ν) | det G| ,
+(10)
+where G is the matrix representation of the metric tensor of the
+tangent space. Specifically, it is the 2×2 matrix G = J | J, where
+J is the 3×2 Jacobian matrix of the the exponential map, expµ ,
+evaluated at ν.‡ We provide the closed form of the Jacobian matrix
+in Appendix A.
+Thus, the solid-angle density of a mixture of K tangent-space
+Gaussians is
+K
+p(ω) := ∑ πk pΩ
+k (ω) ,
+(11)
+k=1
+† Note that, for spheres, this property holds as long as kνk < π, or, more
+generally, ν does not cross the cut locus at µ
+‡ The use of the metric tensor in a change of variables generalizes the wellknown use of the absolute determinant of the Jacobian matrix to the case of
+transforming between manifolds; in our case, we are mapping from a 2D
+tangent space to 3D unit vectors.
+A. Dodik & M. Papas & C. Öztireli & T. Müller / Path Guiding Using Spatio-Directional Mixture Models
+where πk is the weight of the k-th mixture component, such that
+∑k πk = 1, and pΩ
+k (ω) is its solid-angle density.
+Sampling. Sampling of a tangent-space mixture is simple compared to evaluating its density. It consists of three steps: (i) sample
+the mixture component index k proportional to πk , then (ii) sample
+the tangent-space direction ν ∝ ptk (ν), and lastly (iii) convert the
+sampled ν to world space by evaluating ω = expµk (ν).
+Special care must be taken in step (ii), since the bijectivity of the
+azimuthal equidistant projection breaks down at the radius π: due
+to the equidistance property, the projection reaches the antipodal
+point of µk at the radius π. Therefore, for the purpose of Monte
+Carlo integration using the density defined in Equation (11), if the
+sampled ν lies outside the radius π, the sample must be discarded.
+Note that all bounded parameterizations of the sphere (e.g. cylindrical coordinates) require discarding samples that lie outisde of
+their domain. In fact, the tangent space formulation has an advantage
+in this regard, because the center of mass of each Gaussian is located
+in the center of its tangent space, leading to only a vanishingly small
+number of discarded samples in practice (on average 0.021%).
+Additional dimensions. When we want a tangent-space Gaussian
+mixture to admit additional, Euclidean dimensions, e.g. the position
+x when approximating incident radiance as pLi (ωi , x) ∝
+∼ Li (ωi , x),
+the above equations stay almost exactly the same.
+then computing from that mini-batch a triplet of sufficient statistics
+(0) (1) (2)
+(Sk , Sk , Sk ) for each mixture component k. From these sufficient statistics we then compute the updated mixture parameters,
+(π̂k , µ̂k , Σ̂k ).
+Given a mini-batch of samples x1 , . . . , xM ∈ RD with corresponding Monte Carlo weights w1 , . . . , wM ∈ R, the sufficient statistics
+are computed as weighted sums
+(0)
+Sk =
+M
+|
+∑ wi Ski xi xi
+∑M w S x
+∑M
+(1)
+(2)
+i wi Ski
+, Sk = i Mi ki i , Sk = i M
+,
+M
+∑i wi
+∑i wi
+∑i wi
+π pt (xi )
+Ski := k t k
+,
+(12)
+p (xi )
+and, thereafter, the updated parameters (π̂k , µ̂k , Σ̂k ) are computed as
+(1)
+(0)
+π̂k =
+Sk
+, µ̂k =
+(0)
+∑K
+i Si
+(2)
+Sk
+Sk
+Sk
+Sk
+, Σ̂k =
+(0)
+(0)
+− µ̂k µ̂|
+k .
+(13)
+Unfortunately, a derivation of the above equations is beyond the
+scope of this paper. We refer to detailed descriptions of mini-batch
+EM based on sufficient statistics [Dod20; NFM20].
+Sufficient statistics in tangent spaces. When the mixture components are defined in tangent space, special care must be taken when
+(1)
+computing the first- and second-moment sufficient statistics Sk and
+(2)
+Sk . Given a mini-batch of direction vectors ωi ∈ S2 , i ∈ {1, . . . , M},
+(1)
+In this case, Equation (9) becomes the general multi-variate Gaussian distribution, and the exponential and logarithm maps of the
+Euclidian dimensions are defined as translations by their mean
+vector. For example, the 3D world-space position is mapped to its
+tangent space as logµ (x) := x − µx , where µx is the mean of the
+Gaussian distribution in 3D world space. By representing Euclidean
+dimensions in their own tangent space, all dimensions—regardless
+of whether they are spherical or Euclidean—can be treated using
+the same tangent-space formulae.
+the first-moment sufficient statistic Sk of the k-th component must
+be computed in the corresponding µk -centered tangent-space coordinates νi = logµk (ωi ) and, subsequently, the updated mean vector µ̂k
+must be computed by translating back from the µk -centered tangentspace to world space:
+
+
+∑M w S ν
+(1)
+(1)  (0)
+(14)
+Sk = i Mi ki i , µ̂k = expµk Sk Sk .
+∑i wi
+3.2. Learning of Conditional Mixture Models using EM
+case, because the statistic Sk determines the updated covariance
+matrix Σ̂k , which must be centered around µ̂k , not µk . Formally:
+Only after the updated mean vector µ̂k has been computed can the
+(2)
+second-moment sufficient statistic Sk be computed. This is the
+(2)
+We are ultimately interested in obtaining the conditional 2D
+importance-sampling distributions pLi (ωi | x) and p fs (ωi | ωo , φ).
+However, directly optimizing the conditional distributions turns
+out to be difficult [SPK05]. Therefore, we instead optimize the corresponding joint distributions pLi (ωi , x) and p fs (ωi , ωo , φ), and subsequently condition them on-the-fly during rendering using standard
+closed-form Gaussian conditioning. To optimize the joint distributions, we utilize the well established expectation maximization (EM)
+algorithm. The following paragraphs briefly introduce EM and then
+focus on our adaptations to make it compatible with tangent-space
+Gaussian mixtures.
+Mini-batch expectation maximization. We use the mini-batch
+variant of EM [Dod20; NFM20] due to its online training capability§ .
+Mini-batch EM operates by repeatedly sampling a mini-batch of M
+samples from a Gaussian mixture parameterized by (πk , µk , Σk ) and
+§ We discuss an alternative option, stepwise EM [CM09; Cap11; VKŠ*14],
+in Section 6.
+(2)
+Sk =
+|
+∑M
+(2)  (0)
+i wi Ski ν̂i ν̂i
+, Σ̂k = Sk Sk
+w
+∑M
+i
+i
+(15)
+where ν̂i = logµ̂k (ωi ) and Ski must use updated densities w.r.t. to
+the µ̂k -centered tangent space. Note, that the subtraction of µ̂k µ̂|
+k
+(2)
+is missing (c.f. Equation (13)), because Sk was computed in the
+already µ̂k -centered tangent space.
+As previously stated in Section 3.1, additional Euclidean dimensions, such as the 3D position x, can also be treated with the new
+formulae if the log and exp maps map them to their respective
+tangent space by translating them by their mean vector.
+3.3. Efficient Conditioning and EM
+After the joint distribution pLi (ωi , x) has been optimized using EM,
+we seek to efficiently condition it on x on-the-fly during rendering
+to be able to importance sample pLi (ωi | x). However, the computational cost of conditioning is linear in the number of mixture
+A. Dodik & M. Papas & C. Öztireli & T. Müller / Path Guiding Using Spatio-Directional Mixture Models
+SDMM
+(a) Single mixture
+DMM
+Global
+kD-tree
+kD-tree
+0.219
+15h
+0.225
+3.0m
+0.427
+1.9m
+(b) Mixture partitioned by kD-tree
+Figure 4: Illustrations of the spatial components of our model. In (a)
+we visualize a small fraction of the mixture components within a
+single model and their spatial overlap. Due to the high amount of
+overlap, the computational requirements of updating and querying
+the model can be linear to the total number of components. By using
+a kD-tree spatial subdivision scheme (b) we can significantly reduce
+these computational requirements while still capturing correlations
+within a leaf node.
+components, and our 5D Gaussian mixtures require thousands of
+components to cover the incident radiance field well. Thus, when
+done naïvely for all thousands of components, conditioning is exceedingly expensive.
+The key observation that makes conditioning tractable is that only
+those mixture components whose spatial mean component µxk is in
+close proximity to x meaningfully affect the conditional distribution
+pLi (ωi | x). Conditioning can thus be accelerated by only operating
+on a local neighborhood of mixture components.
+The EM algorithm, like conditioning, also suffers from an O(K)
+cost and can therefore also be accelerated by operating independently on local neighborhoods of Gaussians. At first, it may seem
+like restricting EM to local neighborhoods might destroy the desirable properties of spatio-directional mixtures, but this is a largely
+incorrect notion. It merely prevents individual mixture components
+from covering large spatial regions, which is rarely appropriate in
+high-fidelity virtual scenes. Most importantly, it does not remove
+the key ability of spatio-directional mixtures to accurately model
+spatio-directional correlations such as parallax within their neighborhoods.
+To partition our 5D Gaussian mixture components into local
+neighborhoods, we adopt the spatial kD-tree partitioning scheme
+proposed by Herholz et al. [HZE*19]. We subdivide and collapse
+the kD-tree according to the number of observed samples within
+each leaf—same as Herholz et al.—and within each leaf, we place
+16 of our 5D mixture components, as illustrated in Figure 4b. Given
+a query position x, conditioning is thus only performed on the
+16 Gaussians found within the kD-tree’s leaf node at x. Likewise,
+given a mini-batch of spatio-directional samples for EM training,
+the samples are partitioned into their respective kD-tree leaves and
+mini-batch EM is applied to each leaf independently.
+In Figure 5 we demonstrate that using the kD-tree yields the
+desired performance benefits without compromising on the quality
+benefits of the spatio-directional radiance representation.
+MAPE:
+render time:
+Figure 5: Subdividing our spatio-directional mixture model by a kDtree (middle) unlocks similarly low noise as using a single global
+mixture (left) at a fraction of the cost—one that is comparable
+to placing purely directional mixtures in the same kD-tree (right).
+All mixture models use a total of roughly 16000 components and
+were rendered with 1024spp. Additional comparisons of spatiodirectional versus directional mixtures are available in the supplementary material.
+3.4. Product Sampling from Mixed-Orientation Gaussians
+After conditioning pLi (ωi | x) and p fs (ωi | ωo , φ), the last step is
+computing their product distribution such that it can be importance
+sampled (for the details of how p fs is conditioned in practice, please
+see Section 4.1).
+To do so, we must first rotate both mixtures into the same coordinate frame, which is achieved by applying the appropriate rotation
+matrix to the mean vectors µk of either the incident-radiance or the
+BSDF distribution. In the following, we will assume that such a
+rotation has already been performed and the two distributions are in
+the same directional coordinate frame.
+To compute the product distribution of the radiance approximation pLi (ωi | x) and the BSDF approximation p fs (ωi | ωo , φ), one has
+to compute the product between each pair of mixture components.
+Let us consider a single such pair, where one component is parameterized by (µ1 , Σ1 ) and the other component is parameterized by
+(µ2 , Σ2 ).
+To compute the product of these two components, they must be
+expressed within the same tangent space. Without loss of generality,
+we choose to parameterize the second component in the µ1 -centered
+tangent space.
+Mapping covariances to other tangent spaces. In the µ1 -centered
+tangent space, the second mean vector µ2 is easily expressed using
+the exp-map as expµ1 (µ2 ), but the question of how Σ2 should transform from one tangent space to the other is more difficult to answer.
+The most naïve approach would be to simply leave it unchanged,
+which we found to be too inaccurate; see Figure 6b. The correct
+approach, on the other hand, would be to re-fit the covariance matrix
+through EM in the new tangent space, which would be impractically
+slow to do for each sampling decision.
+Tangent space
+World space
+A. Dodik & M. Papas & C. Öztireli & T. Müller / Path Guiding Using Spatio-Directional Mixture Models
+(a) Before EM
+(b) After EM (naïve Σ)
+(c) After EM (accurate Σ)
+(d) After EM (first-order Σ)
+Figure 6: Various approaches to updating the covariance matrix Σ of a tangent-space Gaussian distribution with mean µ to a mini-batch of
+samples. We visualize the Gaussian distribution as well as the mini-batch in world space (top row) and in the µ-centered tangent space (bottom
+row). (a) The state of the Gaussian distribution prior to the EM step. (b) When Σ is naïvely updated using the regular EM equations (12) and (13),
+it admits an incorrect shape due to the distortion of mapping from the tangent space centered around the old mean µ to the one centered around
+the new mean µ̂. (c) Updating Σ in the tangent space centered around the new mean µ̂ as per Equation (15) results in an accurate fit but is
+computationally costly, because the mini-batch must be transformed into the µ̂-centered tangent space first. (d) Updating Σ using the regular
+EM equations (same as (b)) and subsequently transforming it into the µ̂-centered tangent space using our first-order approximation from
+Equation (17) results in an accurate fit with much lower cost.
+actually linear, so we propose setting J to a local linear approximation—the Jacobian matrix—of logµ1 expµ2 . We demonstrate the
+accuracy of this approach in Figure 6d, where we compute J as
+J := Jlogµ (expµ2 (0)) Jexpµ (0) with Jlog and Jexp being defined in
+2
+1
+Appendix A.
+expµ1
+logµ1
+Thus, the product distribution of a pair of components defined by
+(µ1 , Σ1 ) and (µ2 , Σ2 ) can be approximated in the µ1 -centered tangent
+space as the product of the following two Gaussian distributions:
+
+
+N 0, Σ1 ⊗ N logµ1 (µ2 ), JΣ2 J | ,
+(17)
+mult.
+(16)
+Figure 7 illustrates this procedure. Here, it is worth pointing out
+that the approximation error of our proposed covariance transformation JΣ2 J | only applies to the second mixture component. Thus, in
+practice, however small the approximation error may be, one could
+choose the second mixture component to be the one where the error
+is most tolerable. Alternatively, one might consider the computational cost of computing JΣ2 J | . In our case, due to our usage of
+SIMD vectorization, it is benefitial to choose the second mixture
+to be the one with fewer components, enabling us to vectorize over
+the components of the first mixture. We obtained the best overall
+efficiency by setting the first mixture to the incident radiance and
+the second mixture to the BSDF.
+If this mapping was linear, it could be represented by a 2×2 matrix
+J and the correct transformation of the covariance matrix could
+be computed efficiently as JΣ2 J | . However, the mapping is not
+Efficient tangent-space covariance update. The first-order approximation that enables accurate product sampling can also be
+used improve performance: in Section 3.2, we state that the updated
+Figure 7: The product of two tangent-space Gaussians that are parameterized by (µ1 , Σ1 ) and (µ2 , Σ2 ) is computed in the µ1 -centered
+tangent space according to Equation (17). Then, samples for path
+guiding can be drawn and mapped to world-space by the expµ1 -map.
+We aim for a middle ground by considering the R2 7→ R2 mapping
+from one tangent space to the other:
+ν1 = logµ1 expµ2 (ν2 )
+A. Dodik & M. Papas & C. Öztireli & T. Müller / Path Guiding Using Spatio-Directional Mixture Models
+covariance matrix Σ̂ must be computed in the tangent space centered
+around the newly computed mean µ̂ as opposed to the previous mean
+µ; see Equation (15). This computation is expensive, because every
+data point in the mini batch as well as its corresponding probability density must be mapped into the µ̂-centered tangent space. We
+side-step this expensive computation by computing Σ̂ in the original µ-centered tangent space and then approximately transforming
+it into the µ̂-centered tangent space using the same first-order approximation that we use in Equation (17) for product sampling. In
+Figure 6, we visually demonstrate the accuracy of this approach.
+4. Implementation in a Renderer
+As mentioned in Section 3, our algorithm requires us to train both a
+BSDF model p fs (ωi , ωo , φ) as well a model of the incident radiance
+pLi (ωi , x). In this section, we detail these procedures.
+4.1. BSDF Learning
+Our approach to BSDF learning allows us, in theory, to fit a single
+nD mixture model to each type of BSDF that the renderer supports,
+where n is the number of BSDF parameters. For each sampling
+decision we can then specialize the previously learned general BSDF
+models by conditioning them on-the-fly on their parameters φ(x)
+at the shading location x. This way, we avoid a scene-specific precomputation of BSDFs, as well as opaquely handle both spatiallyuniform and spatially-varying BSDFs.
+In practice, to keep the number of dimensions manageable, we
+limit ourselves to isotropic BSDFs. Our model has not been tested
+on anisotropic BSDFs. It might be necessary to increase the number
+of Gaussian components to represent such models, which would be
+computationally prohibitive for our current approach. One could use
+a kD-tree over the BSDF parameter space, similar to the one we use
+over the spatial dimensions of incident radiance, or an alternative
+pruning framework, such as that of Herholz et al. [HES*18]; see the
+discussion in Section 6 for more details.
+BSDF input sampling. A BSDF mixture model is fitted by repeatedly sampling batches of BSDF inputs and then applying mini-batch
+EM to the mixture model. Random BSDF parameters φ as well as
+the spherical coordinates of the outgoing direction ωo are sampled
+uniformly. Subsequently, ωi is sampled using the BSDF’s built-in
+importance sampling routine and mini-batch EM is applied.
+Pruning before product sampling. Since product sampling requires computing the product distribution between each pair of
+mixture components within the BSDF and the incident-radiance
+model, the computational cost of product sampling can grow quadratically in the number of overall mixture components. To suppress this
+quadratic growth, we employ a simple but effective strategy: after
+conditioning the BSDF model on its parameters, we perform product
+sampling using only the two resulting BSDF mixture components
+with largest magnitude.
+4.2. Online Learning of the Radiance During Path Tracing
+Path tracing of an N-spp image is performed in a fixed number of
+iterations that compute 4 spp each. The i-th iteration is importance
+sampled (i.e. path guided) using the product of the current state
+piLi of the incident-radiance model and the pre-computed BSDF
+distribution p fs , each conditioned on-the-fly on the local shading
+parameters (see Sections 3.3 and 3.4). The purpose of dividing
+path tracing into iterations is to facilitate periodic refinement of
+the incident-radiance model: after each iteration, the kD-tree is
+adapted to the path distribution and a subsequent mini-batch EM step
+is performed to produce a better distribution pi+1
+Li for importance
+sampling in the next iteration.
+Spatial component of the radiance distribution. Our 5D SDMMs should learn pLi (ωi , x) = pLi (ωi | x)pLi (x). However, during
+rendering, we only have access to pLi (ωi | x) in closed form. The
+spatial distribution of samples, pLi (x), is defined by the ray-tracing
+procedure and is not known in a general setting. While it would be
+possible to approximate the spatial distribution using a k-nearestneighbor estimate, and then use that estimate to approximate the
+correct Monte Carlo weights in Eq. 12 [Dod20], we have found
+the computational overhead of this approach to overshadow any
+possible gains due the quality of the learned distribution. Instead,
+in our work, we assume a uniform distribution within each kD-tree
+leaf node. In practice, this assumption becomes increasingly correct
+as the size of the kD-tree leaf nodes decreases during training.
+Refinement of the spatial kD-tree. During each iteration, we collect the encountered path vertices such that at the end of the iteration,
+each kD-tree leaf contains a list of all vertices that were located
+within it. If the number of path vertices M in any leaf is larger than
+a threshold c, that leaf is subdivided along the axis with the largest
+variation of vertex positions, where the subdivision plane is located
+at the mean position along that axis [HZE*19]. After subdivision,
+the vertices are redistributed into the two new leaves, which are then
+further subdivided recursively until they have fewer than c vertices.
+The mixture model from the parent node is copied into the newly
+created leaves—the subsequent EM procedure will adapt each copy
+to the different light distributions in each leaf. We empirically found
+c = 16000 to yield good results, which is of similar magnitude as
+the subdivision constant used in PPG [MGN17].
+Mini-batch EM fitting. Before the next iteration starts, we select
+all leaves that accumulated M ≥ 16 vertices—for numeric stability—
+and independently apply a single mini-batch EM step to each of
+them, where the mini-batch consists of all M vertices contained in
+the respective leaf node. The vertices are subsequently cleared. The
+EM step follows the procedure outlined in Section 3.2, where each
+vertex’s incident-radiance estimate corresponds to its weights w, and
+its spatial and directional coordinates correspond to Euclidean and
+tangent-space dimensions, respectively.
+Note, that the EM step can be computed in parallel across all leaf
+nodes, because the mixtures are independent from each other.
+Early stopping of training. Our incident-radiance mixture model
+converges to a good guiding distribution relatively early in the rendering process. Thus, we stop the mini-batch EM training after the
+first 1/4th of the rendering budget is exhausted to avoid its cost.
+During the last 3/4ths of the rendering budget, our mixture model
+is no longer trained and merely used for guiding.
+A. Dodik & M. Papas & C. Öztireli & T. Müller / Path Guiding Using Spatio-Directional Mixture Models
+4.3. Robust EM Optimization of the Incident-Radiance PDF
+While the EM algorithm is theoretically elegant and converges
+quickly, it is prone to get stuck in undesirable local minima, making
+it unstable in our online-learning setting. The instability becomes
+worse when operating on noisy Monte Carlo weights, which are
+common in rendering when estimating incident radiance (e.g. “fireflies”). We therefore found it paramount to employ the following
+array of regularization techniques to robustify the EM training of
+our incident radiance approximation.
+Initialization. We aim at initializing the Gaussian mixture such
+that it evenly covers the 5D domain (no “clumping”) to prevent
+EM from converging to a local optimum that misses a mode of Li .
+To this end, and to avoid lock contention, prior to rendering, the
+kD-tree is pre-subdivided 3 times at the center of each axis, resulting
+in a regular 8×8×8 tesselation of the scene’s bounding box. After
+each render iteration, the we split the kD-tree and distribute the
+collected samples to the newly created leaf nodes. If a leaf node is
+uninitialized and contains at least 16 path vertices, we initialize a
+mixture model containing 16 Gaussians inside of that leaf node. If a
+leaf node contains fewer than 16 samples, the initialization of the
+corresponding mixture model is postponed until 16 samples were
+received to ensure stability in noisy scenes.
+After 16 vertices were received, initialization consists of the following three steps. First, a slightly modified k-means++ [AV07]
+scheme is applied to the vertices to select 2 spatial coordinates x1 , x2
+that lie on a geometric surface, have a minimum distance from each
+other (if possible), and that roughly follow the spatial distribution
+of radiance; see Appendix C for details. Then, at each one of the 2
+chosen positions, 8 Gaussians are initialized whose directional mean
+components ω1 , . . . , ω8 cover the sphere roughly evenly. Formally,
+the set of initial mean vectors is {x1 , x2 } × {ω1 , . . . , ω8 }.
+Third, the covariance matrix at each mean vector (x, ω) is initialized to satisfy the following desired properties. It should be
+• isotropic in the tangent plane of the surface at x and in the ωcentered directional tangent space, and
+• flat along the surface normal at x.
+To this end, in the tangent plane, the covariance matrix’s radius is
+set to be proportional to the size of the leaf node containing it, and
+inversely proportional to the number of distinct spatial coordinates
+in the mixture (in our case 2). In contrast, we make the covariance
+matrix as thin as possible along the direction of the surface normal,
+to avoid mixing samples from close-by surfaces facing each other. In
+the remaining ω-centered tangent space dimensions, the covariance
+matrix’s radius is inversely proportional to the number of distinct
+directional coordinates in the mixture model, i.e. 8. See Appendix B
+for the mathematical details of this procedure.
+Averaging of sufficient statistics across minibatches. In Section 3.2, we described the computation of a per-mixture-component
+triplet of sufficient statistics (S(0) , S(1) , S(2) ) as sample averages
+over mini batches. In practice, such sample averages are often too
+noisy to be directly useful for EM optimization. Thus, similar to previous work [CM09; Cap11; VKŠ*14], we additionally average the
+sufficient statistics across mini batches using the Robbins-Monroe
+algorithm [RM51], which ensures that EM converges under mild
+(i)
+assumptions¶ . Let Ŝk, j be the averaged sufficient statistics of the kth
+mixture component after processing the j-th mini batch; they are
+computed as
+(i)
+(i)
+(i)
+Ŝk, j = (1 − η j ) · Ŝk, j−1 + η j · Sk ,
+(18)
+where η j controls the strength of averaging. While any sequence
+∞ 2
+η j that satisfies ∑∞
+j η j = ∞ ∧ ∑ j η j < ∞ makes EM converge in
+theory, we adopt the sequence η j = (β j + 1)−α inspired by common
+practice [CM09; Cap11; VKŠ*14; NFM20]. We set α = 0.5 as done
+in previous work, β = 0.1 to achieve a long tail (averaging over
+many iterations to reduce noise).
+Special care must be taken when averaging the second-moment
+sufficient statistics in tangent spaces. The second-moment statistic
+of the current mini batch S(2) is defined in the tangent space centered
+about the current mean vector µ j , whereas the previously computed
+(2)
+statistic Ŝ j−1 is defined in the tangent space centered about the
+(i)
+previous mean-vector µ j−1 . Thus, prior to averaging, Ŝ j−1 must first
+be transformed into the µ j -centered tangent space. To this end, we
+use the same first-order approximation that we use in Equation (17),
+resulting in the following modified update rule for the tangent-space
+components of the second-moment sufficient statistics:
+(2)
+(2)
+Ŝ j = η j · J Ŝ j−1 J | + (1 − η j ) · S(2) .
+(19)
+In the above equation, J is the Jacobian matrix of logµ j−1 expµ j at 0.
+Lastly, same as Vorba et al. [VKŠ*14], we also apply the RobbinsMonroe averaging scheme (with the same sequence η j ) to the approximate normalization factor that is used in the M-step.
+Maximum a-posteriori EM. To learn incident radiance, we use
+maximum a-posteriori (MAP) EM, which is an extension of the
+maximum-likelihood EM algorithm that we outlined in Section 3.2.
+Unlike maximum-likelihood EM, MAP EM takes “prior” information about the mixture parameters (πk , µk , Σk ) into account. Such
+prior information regularizes the optimization by biasing EM towards solutions that resemble a chosen prior distribution. Following
+Gauvain and Lee [GL94], we choose a prior Dirichlet distribution
+over the weights πk and a prior inverse Wishart distribution over the
+covariances Σk (no prior is used over µk ). This formulation results
+in a closed-form MAP EM optimization that matches maximumlikelihood EM, except for the following modifications to the tangentspace update formulae of the mixture weights π̂k and the covariance
+matrices Σ̂k :
+(0)
+π̂k =
+β j q + Sk
+(0)
+Kβ j q + ∑K
+i Si
+(2)
+, Σ̂k =
+β j B + Sk
+(0)
+β j a + Sk
+.
+(20)
+The scalars q, a and the matrix B parameterize the prior distributions and β j progressively downscales the strength of the priors as
+the training step j increases. This downscaling is a consequence
+of adding more samples to a Bayesian estimator, and in practice
+¶ The assumptions include a uniform bound on S(i) , which is not necessarily
+met in rendering. Nonetheless, we observe stable behavior in practice.
+A. Dodik & M. Papas & C. Öztireli & T. Müller / Path Guiding Using Spatio-Directional Mixture Models
+removes the bias introduced by the prior distributions when sufficiently many data points have been observed for a robust maximum
+likelihood estimate.
+We choose the prior parameters
+−4
+q = 1/K , a = 5/K , B = a diag (0.1, 0.1, 1, 1, 1) × 10
+, (21)
+where the first two entries on the diagonal of B are responsible
+for regularizing the directional tangent-space dimensions ν and
+the remaining entries are responsible for the spatial dimensions
+x—hence their different scale.
+The relatively large Dirichlet prior q ensures that each mixture
+component is weighted roughly equally in the early stages of the
+optimization, whereas the relatively large Wishart prior parameter a
+ensures that the covariance matrix does not fluctuate too strongly due
+(0)
+to initially chosen mixture weights. Since Si is roughly inversely
+proportional to the number of mixture components K, we include
+a division by K in our definitions of q and a. The effect is that the
+relative prior strength per mixture component is constant.
+Our choice of a small Wishart prior parameter B serves the purpose of preventing the covariance matrices from collapsing when
+few samples are available, e.g. onto a firefly. Other than that (e.g. as
+(0)
+soon as Sk is sufficiently large), the small value of B does not noticeably restrict the shape of the learned covariance matrices. Thus,
+accurately tailoring the spatial components of B to the scene scale
+is usually not necessary. Nonetheless, we normalize x to span the
+range [0, 1]3 within the scene’s bounding box, and make the initialization of the covariance matrices proportional to the size of the
+kD-tree leaf nodes containing them. In extreme cases, such as an
+expansive outdoor environment, it could possibly be necessary to
+also additionally scale the spatial components of B by the size of
+the corresponding kD-tree leaf node. We experimented with such an
+approach, but had difficulties in making it work well across all our
+scenes due to numerical instabilities.
+5. Results
+We implemented our method within the Mitsuba renderer [Jak10],
+making heavy use of SIMD vectorization via Enoki [Jak19] for
+computations pertaining to our mixture models. Our reference implementation will be released publicly upon publication of this work.
+All images in these section were generated at a resolution of
+640×360 pixels, using 1024 samples per pixel, on an Intel Xeon
+W-2135 CPU with 12 cores and 64 GB RAM. The reference images
+were rendered with standard path tracing using a very large sample
+count that was chosen for each scene such that the reference image
+has no visible left-over noise. All comparisons have next-event
+estimation and Russian roulette disabled and the number of path
+vertices is bounded to 10.
+We compare our method with the improved version [Mül19] of
+“Practical Path Guiding” (PPG) [MGN17] as well as with parallaxaware von Mises-Fisher mixtures [RHL20] trained on radiance
+(VMM radiance).
+When comparing with PPG, we disable PPG’s learning of the
+BSDF selection probability to ensure a fair comparison to our work,
+which does not currently have this feature, but could be extended
+with it. Instead, we use the fixed BSDF sampling fraction of 50% for
+PPG and for our radiance-based guiding scheme (SDMM radiance),
+and 30% for our product-based guiding scheme (SDMM product).
+Like PPG, our method automatically chooses when to terminate
+training based on the overall rendering budget and is designed to
+include all iterations—training and rendering—in the final image.
+The implementation of Ruppert et al. [RHL20], however, has distinct
+training and rendering components, which puts it at a disadvantage
+in online-training comparisons. Therefore, in addition to comparing
+with Ruppert et al. [RHL20] at equal sample counts (Table 1 and
+Figure 9) in an online-training setting, we provide an equal trainingand rendering time comparison in Table 2 and Figure 10.
+Online training comparisons. In Table 1 and Figure 9 we compare
+PPG, radiance-based VMMs, and our method with (SDMM product)
+and without (SDMM radiance) product guiding, on 12 virtual scenes
+that have varied illumination characteristics. For each method and
+scene, we report the mean absolute percentage error (MAPE), the
+render time, and the speedup vs. PPG at reaching the lowest common
+MAPE value. MAPE is defined as N1 ∑N
+i=1 |vi − v̂i |/(v̂i + ε), where v̂i
+is the value of the i-th pixel in the reference image, vi is the value of
+the i-th rendered pixel, and ε = 0.01 prevents near-black pixels from
+dominating the metric. A 2× smaller MAPE loosely corresponds to
+4× faster rendering.
+A common trend of our approach is that it achieves the lower persample error than PPG in all scenes and achieves slightly lower error
+than radiance-based VMMs in 8 our of 12 scenes. Product-based
+guiding further reduces the error, but at great computational cost.
+As expected, our method performs well when there exists a large
+degree of spatio-directional correlation in the incident radiance,
+e.g. as induced by small, local luminaires in the B OOKSHELF, the
+C ORNELL B OX, the WATER C AUSTIC, and the Y ET A NOTHER
+B OX scenes; see the insets in Figure 9.
+However, the computational overhead of our technique is significantly larger than that of PPG and VMMs. Taking the render time
+into account and comparing time to equal error, our radiance- and
+product-based guiding approaches only outperform PPG in 6 out
+of 12 scenes, with our radiance- and product-based guiding performing competitively with each other. In Figure 8, we reinforce
+this observation by plotting MAPE against render time and against
+the number of samples per pixel. We report additional metrics and
+false-color error visualizations in our supplementary HTML-based
+results viewer.
+Offline training comparisons. To provide a fair equal-time ecomparison with Ruppert et al. [RHL20], we match their experimental
+setup where each method trains and renders for a fixed, equal time;
+see Table 2 and Figure 10. We have made no attempt to fine-tune our
+method to this paradigm, and no attempt to modify their method to
+include training iterations into the final image. Instead, we use both
+methods as-is, and compare the images generated after training has
+been terminated in both methods. To ensure fairness, we disabled
+the inverse-variance based combination of iterations for our method
+and instead weigh all samples equally.
+We note that Ruppert et al. [RHL20] outperform our algorithm
+on the majority of the scenes. Their algorithm is significantly faster
+A. Dodik & M. Papas & C. Öztireli & T. Müller / Path Guiding Using Spatio-Directional Mixture Models
+Table 1: Comparison of our method (SDMM radiance & product) with practical path guiding (PPG) [Mül19] and parallax-aware von
+Mises-Fisher mixtures (VMM radiance) [RHL20] using the respective authors’ implementations. We rendered each scene with 1024 spp,
+where the training and rendering stages of each method (except for PPG) were allotted 252 and 772 spp. We report mean absolute percentage
+error (MAPE), render time, and the speedup vs. PPG at reaching the lowest common MAPE value. For Ruppert et al., we omit the speedup due
+to their separation of training and rendering. Instead, we report equal-time results in Figure 10. The best entries are highlighted in bold letters.
+Our radiance-based method (SDMM radiance) achieves lower error than PPG and on average similar error as radiance-based VMMs, but at the
+cost of increased render time. Incorporating the product (SDMM product) reduces MAPE further while again increasing the render time.
+BATHROOM
+B EDROOM
+B OOKSHELF
+B OTTLE
+C ORNELL B OX
+G LOSSY K ITCHEN
+N ECKLACE
+S WIMMING P OOL
+T ORUS
+V EACH D OOR
+WATER C AUSTIC
+Y ET A NOTHER B OX
+[Mül19]
+[RHL20]
+PPG
+VMM radiance
+0.192
+0.060
+0.132
+0.274
+0.069
+0.316
+0.187
+0.076
+0.078
+0.221
+0.549
+0.560
+4.2m
+3.2m
+4.6m
+3.3m
+1.1m
+2.8m
+1.1m
+2.1m
+1.1m
+2.1m
+1.8m
+1.3m
+(1.0×)
+(1.0×)
+(1.0×)
+(1.0×)
+(1.0×)
+(1.0×)
+(1.0×)
+(1.0×)
+(1.0×)
+(1.0×)
+(1.0×)
+(1.0×)
+0.148
+0.062
+0.105
+0.152
+0.044
+0.250
+0.127
+0.079
+0.085
+0.286
+0.639
+0.080
+Ours
+SDMM radiance
+3.1m
+2.7m
+3.4m
+2.5m
+43s
+1.9m
+1.1m
+2.0m
+1.1m
+1.5m
+1.9m
+1.1m
+0.161
+0.054
+0.111
+0.205
+0.026
+0.205
+0.181
+0.068
+0.073
+0.188
+0.379
+0.068
+SDMM product
+0.115
+0.051
+0.085
+0.171
+0.020
+0.151
+0.157
+0.058
+0.072
+0.122
+0.370
+0.050
+6.5m (0.9×)
+4.5m (0.9×)
+6.6m (1.0×)
+4.3m (1.8×)
+1.6m (3.2×)
+4.4m (1.7×)
+1.5m (0.8×)
+2.9m (0.9×)
+1.5m (0.9×)
+3.6m (0.8×)
+2.6m (2.8×)
+2.4m (15.5×)
+12m
+7.1m
+11m
+9.5m
+2.2m
+11m
+2.7m
+4.0m
+2.0m
+8.3m
+3.8m
+5.2m
+(0.9×)
+(0.7×)
+(1.0×)
+(1.3×)
+(3.2×)
+(1.3×)
+(0.8×)
+(1.0×)
+(0.8×)
+(0.8×)
+(2.4×)
+(9.2×)
+Bedroom
+Bookshelf
+Bottle
+Cornell Box
+Bathroom
+Glossy Cornell Box
+Glossy Kitchen
+Necklace
+Swimming Pool
+Torus
+Veach Door
+Water Caustic
+MAPE
+1
+.1
+MAPE
+1
+.1
+16
+512
+1024 16
+512
+spp
+1024 16
+512
+spp
+1024 16
+512
+spp
+1024 16
+512
+spp
+1024 16
+512
+1024
+spp
+spp
+Bathroom
+Glossy Cornell Box
+(a) MAPE vs. samples per pixel
+Bedroom
+Bookshelf
+Bottle
+Cornell Box
+MAPE
+1
+.1
+50
+100
+150
+100
+Glossy Kitchen
+Necklace
+200
+50
+100
+150
+Swimming Pool
+200
+20
+40
+60
+40
+60
+Torus
+100
+200
+50
+100
+Veach Door
+20
+40
+Water Caustic
+60
+MAPE
+1
+.1
+50
+100
+seconds
+150
+20
+40
+60
+50
+seconds
+100
+seconds
+PPG
+SDMM radiance
+20
+seconds
+seconds
+50
+100
+seconds
+SDMM product
+(b) MAPE vs. render time
+Figure 8: We analyze the convergence behavior of our radiance- and product-based guiding algorithms by plotting MAPE (a) against the
+number of samples per pixel and (b) against the render time. (a) At equal sample counts, our algorithms consistently outperform PPG. (b)
+However, at equal render time, we are mostly on par with PPG due to our larger computational overhead. In scenes with strong spatio-directional
+correlation in the incident radiance, our algorithm significantly outperforms PPG (C ORNELL B OX, B OOKSHELF, WATER C AUSTIC, Y ET
+A NOTHER B OX, G LOSSY K ITCHEN).
+A. Dodik & M. Papas & C. Öztireli & T. Müller / Path Guiding Using Spatio-Directional Mixture Models
+VMM radiance
+SDMM radiance
+SDMM product
+MAPE:
+render time:
+speedup vs. PPG at equal MAPE:
+0.132
+4.6m
+1.000
+0.105
+3.4m
+—
+0.111
+6.6m
+1.005
+0.085
+11m
+0.965
+MAPE:
+render time:
+speedup vs. PPG at equal MAPE:
+0.316
+2.8m
+1.000
+0.250
+1.9m
+—
+0.205
+4.4m
+1.731
+0.151
+11m
+1.303
+MAPE:
+render time:
+speedup vs. PPG at equal MAPE:
+0.076
+2.1m
+1.000
+0.079
+2.0m
+—
+0.068
+2.9m
+0.917
+0.058
+4.0m
+0.981
+MAPE:
+render time:
+speedup vs. PPG at equal MAPE:
+0.221
+2.1m
+1.000
+0.286
+1.5m
+—
+0.188
+3.6m
+0.795
+0.122
+8.3m
+0.789
+MAPE:
+render time:
+speedup vs. PPG at equal MAPE:
+0.549
+1.8m
+1.000
+0.639
+1.9m
+—
+0.379
+2.6m
+2.818
+0.370
+3.8m
+2.416
+Reference
+WATER C AUSTIC
+V EACH D OOR
+S WIMMING P OOL
+G LOSSY K ITCHEN
+B OOKSHELF
+PPG
+Figure 9: Visual comparison of the same experimental setup as in Table 1. For Ruppert et al., we omit the speedup due to their separation of
+training and rendering. Instead, we report equal-time results in Figure 10. Our radiance-based method (SDMM radiance) consistently achieves
+lower error than PPG and on average similar error as radiance-based VMMs. Incorporating the product (SDMM product) reduces the error
+further. However, the computational overhead of our methods is larger than that of the other methods, leading to VMMs performing best at
+equal time. As expected, our methods perform better when the incident radiance exhibits significant spatio-directional correlation (WATER
+C AUSTIC, B OOKSHELF, and G LOSSY K ITCHEN) and performs worse in the opposite case, e.g. environment lighting in the S WIMMING P OOL.
+A. Dodik & M. Papas & C. Öztireli & T. Müller / Path Guiding Using Spatio-Directional Mixture Models
+Table 2: Comparison of radiance-based VMMs [RHL20] with our
+SDMMs at equal training and rendering time. For both methods, we
+report mean absolute percentage error (MAPE) as well as training +
+rendering time. Due to their much lower computational cost, VMMs
+produce lower error than SDMMs on most scenes.
+than ours, meaning that it is able to render far more samples in
+the same time compared as ours. Thus, even though the quality of
+learned mixture models is comparable—as evidenced by the equal
+sample count comparison Figure 9—their method is more practical
+in most of our test scenes.
+Ruppert et al. [RHL20] SDMM Radiance (Ours)
+Quality of the guiding distribution. In Figure 11, we visualize
+the learned spatio-directional mixture model in 3 scenes. For each
+scene, we show the 2D distributions obtained by conditioning the
+mixture model on 2 indicated spatial locations. The mixture model
+is not only accurate, but it also captures high-frequency spatiodirectional correlation, which we illustrate in our supplementary
+video by smoothly varying the spatial coordinate that the model is
+conditioned on.
+BATHROOM
+B EDROOM
+B OOKSHELF
+B OTTLE
+C ORNELL B OX
+G LOSSY K ITCHEN
+N ECKLACE
+S WIMMING P OOL
+T ORUS
+V EACH D OOR
+WATER C AUSTIC
+Y ET A NOTHER B OX
+0.104 1.8m + 4.7m
+0.054 1.4m + 3.0m
+0.080 1.8m + 4.8m
+0.116 1.1m + 3.2m
+0.032 31s + 1.1m
+0.176 1.1m + 3.3m
+0.115 27s + 1.0m
+0.073 55s + 2.0m
+0.078 34s + 59s
+0.182 1.0m + 2.6m
+0.515 37s + 2.0m
+0.056 36s + 1.8m
+0.179 1.8m + 4.7m
+0.059 1.4m + 3.0m
+0.121 1.8m + 4.8m
+0.213 1.1m + 3.2m
+0.029 31s + 1.1m
+0.224 1.1m + 3.3m
+0.183 27s + 1.0m
+0.073 55s + 2.0m
+0.074 34s + 59s
+0.206 1.0m + 2.6m
+0.395 37s + 2.0m
+0.070 36s + 1.8m
+Ruppert et al. SDMM (Ours)
+Reference
+MAPE:
+0.104
+0.179
+training + rendering time: 1.8m + 4.7m 1.8m + 4.7m
+training + rendering spp: 508 + 1480
+252 + 772
+MAPE:
+0.054
+0.059
+training + rendering time: 1.4m + 3.0m 1.4m + 3.0m
+training + rendering spp: 428 + 1112
+252 + 772
+6. Discussion and Future Work
+Mini-batch EM versus stepwise EM. Stepwise EM [CM09],
+later extended to robustly handle weighted samples by Vorba et
+al. [VKŠ*14], is an alternative online EM algorithm that could be
+used instead of mini-batch EM to train SDMM. The difference between the two algorithms is the frequency of the Robbins-Monroe
+update of the sufficient statistics Equation (18): in stepwise EM, the
+update is performed per sample, whereas in mini-batch EM, it is
+performed per mini-batch.
+Because the aforementioned update is expensive in tangent spaces
+(due to Equation (19)), we prefer using mini-batch EM. Another
+argument in favor of mini-batch EM is that stepwise EM unduly
+weights earlier samples within the same batch higher due to them
+experiencing the Robbins-Monroe update earlier, despite them being
+sampled from the same distribution. This uneven averaging of the
+sufficient statistics of the batch unnecessarily increases the variance
+of the optimization.
+Practicality of SDMM. Compared with PPG [Mül19; MGN17],
+we demonstrated superior equal-sample-count error of both our
+radiance- and product-based guiding approaches. However, the computational overhead of our Mitsuba implementation results in better
+overall efficiency on only a subset of the scenes. Compared with
+VMMs [RHL20], the difference is even larger: while we achieve
+similar error at equal sample counts, their lower computational cost
+leads to better efficiency than ours in most scenes. The practicality
+of spatio-directional mixture models is thus limited and further research into efficient implementations and approximations is needed.
+To this end, we believe there are a promising number of optimizations that can still be made, such as automatic pruning of the
+product mixture [HEV*16]. Finally, the computational bottleneck
+may shift when more complex scenes are rendered, since the cost of
+ray tracing and shading will be larger.
+MAPE:
+0.515
+training + rendering time: 37s + 2.0m
+training + rendering spp: 436 + 1592
+0.395
+37s + 2.0m
+252 + 772
+Figure 10: Visual comparison of the same experimental setup as in
+Table 2 for three selected scenes.
+Combination with Reprojection. While our data-driven approach
+of learning 5D mixtures may seem in contrast with the reprojection
+of 2D mixtures [RHL20], we believe that the two approaches are
+not mutually exclusive. In particular, there are situations in which
+the reprojection heuristic breaks down. Lensing effects are one
+such example, in which the appropriate hemispherical movement is
+actually the reverse of what reprojection would predict; we show an
+A. Dodik & M. Papas & C. Öztireli & T. Müller / Path Guiding Using Spatio-Directional Mixture Models
+B EDROOM
+PPG
+SDMM
+B OOKSHELF
+DMM
+PPG
+SDMM
+Y ET A NOTHER B OX
+DMM
+PPG
+SDMM
+DMM
+Figure 11: Learned directional PDFs, conditioned on two spatial locations per scene, visualized as false-color images in spherical coordinates.
+We compare our learned distributions (SDMM) with those learned by PPG and by a purely directional version of our mixture model (DMM). As
+expected, the SDMMs produce sharper distributions than the spatially marginalized DMMs without exhibiting discretization artifacts like PPG
+does—especially in the difficult Y ET A NOTHER B OX scene. Zooming in is recommended. The SDMMs also smoothly capture high-frequency
+spatio-directional correlation, which we illustrate in our supplementary video by smoothly varying the queried spatial coordinate.
+VMM radiance [RHL20]
+MAPE: 0.172
+SDMM radiance (Ours)
+MAPE: 0.130
+Figure 12: While the parallax heuristic of Ruppert et al. [RHL20] is
+cheap and accurate in most situations, certain effects, such as lensing,
+can not only result in non-linear parallax, but even invert its direction.
+Such effects are rarely relevant in practice, but we nonetheless show
+one such occurrence: the caustic in the Y ET A NOTHER B OX scene.
+The lower noise of our method at an equal number of samples is
+indicative of a locally more accurate fit to incident radiance.
+example in Figure 12. While lensing effects occur relatively rarely
+in practice, this example demonstrates one the benefits of using a
+data-driven approach compared to hand-crafted hauristics. Thus, we
+believe that one could use 5D mixtures to learn an offset on top of
+the reprojections of Ruppert et al. [RHL20], fixing the rare special
+cases where the assumptions of the reprojection are incorrect.
+Computational implications of tangent spaces. Although product sampling is enabled by parameterizing each Gaussian in its own
+tangent space, such a per-Gaussian parameterization necessitates
+the on-the-fly computation of numerous changes of variables: a
+change of variables is needed whenever multiple Gaussians interact, regardless of whether this interaction amounts to conditioning,
+product sampling, or EM optimization. Despite the optimizations
+that we already perform, these changes of variable are the computational bottleneck of our implementation. Thus, the efficiency of
+our method could be greatly improved by coming up with means to
+reduce the number of changes of variables, e.g. through a different
+mixture model, or to compute them more efficiently.
+Alternative acceleration structures The choice of placing our
+Gaussians within a kD-tree was motivated by the intractable
+quadratic cost of using a single global mixture; see also Figure 5.
+Alternatively, the quadratic cost could also be mitigated by ignoring
+Gaussians whose density is below a threshold, e.g. by placing the
+Gaussians in a BVH, where the bounding volumes contain a large
+percentage of each Gaussians’ mass. However, such an approach
+maintains two disadvantages over our kD-tree approach: first, using a global mixture may lead to Gaussians that cover significant
+portions of the scene, which result in quadratic cost regardless of acceleration structure. And second, thresholding the size of Gaussians
+without introducing large error is non-trivial, because the conditioning step may amplify small densities unpredictably. We implemented
+a prototype and experimentally confirmed these difficulties [Dod20].
+Extensions. Our implementation does not perform a number of
+well-established extensions to path-guiding techniques to facilitate
+a simple comparison with previous work. When using our algorithm
+in practice, such orthogonal extensions should, however, be used.
+First, next-event estimation (NEE) should be performed and the
+learned guiding distribution should be optimized to complement
+NEE [MMR*19]. In the context of Gaussian mixtures, Ruppert et
+al. [RHL20] describe an appropriate modification to the Monte Carlo
+samples that the model is trained on. Second, the BSDF sampling
+fraction should be learned [Mül19] as opposed to set to a fixed
+constant. Third, adjoint-driven Russian roulette and splitting [VK16]
+should be performed.
+A. Dodik & M. Papas & C. Öztireli & T. Müller / Path Guiding Using Spatio-Directional Mixture Models
+Furthermore, there are also mixture-specific techniques that could
+conceivably enhance our algorithm. For example, careful splitting
+and merging of mixture components could simultaneously increase
+our model capacity as well as escape local minima in the EM optimization [RHL20]. We suspect that the splitting might only be
+necessary along the directional dimensions of the SDMMs, since
+the kD-tree data-structure already performs spatial splitting.
+High-dimensional mixtures. We demonstrated the ability of Gaussian mixtures to directly approximate the 5D incident radiance as
+well as certain nD BSDF models. However, the BSDF models that
+we used were relatively simple, never exceeding n = 5. In the future, we would like to investigate the use of higher-dimensional
+mixtures to capture additional variation, such as found in the 10D
+Disney BSDF [Bur12], or additional dimensions in the incident
+radiance, such as the wavelength in spectral rendering. Such higherdimensional mixtures need advanced data structures and a form
+of sparsity to combat the curse of dimensionality—a good starting
+point is likely the manifold framework of Herholz et al. [HES*18].
+Hanika (N ECKLACE), Miika Aittala, Samuli Laine, and Jaakko
+Lehtinen (V EACH D OOR), Olesya Jakob (T ORUS), Ondřej Karlík
+(S WIMMING P OOL), SlykDrako (B EDROOM), and Tiziano Portenier
+(BATHROOM, B OOKSHELF). Lastly, we thank Markus Gross for
+enabling and supporting this research.
+This work was supported by a UKRI Future Leaders Fellowship
+[grant number G104084].
+References
+[AV07] A RTHUR, DAVID and VASSILVITSKII, S ERGEI. “K-Means++: The
+Advantages of Careful Seeding”. Proceedings of the Eighteenth Annual
+ACM-SIAM Symposium on Discrete Algorithms. SODA ’07. New Orleans,
+Louisiana: Society for Industrial and Applied Mathematics, 2007, 1027–
+1035. ISBN: 9780898716245 9.
+[Bin74] B INGHAM, C HRISTOPHER. “An Antipodally Symmetric Distribution on the Sphere”. The Annals of Statistics 2.6 (1974), 1201–1225. ISSN:
+00905364. URL: http://www.jstor.org/stable/2958339 3.
+[Bit16] B ITTERLI, B ENEDIKT. Rendering resources. https://benediktbitterli.me/resources/. 2016 15.
+[Bur12] B URLEY, B RENT. “Physically-Based Shading at Disney”. 2012 15.
+Non-linear spatio-directional dependencies. Our spatiodirectional Gaussians explicitly model correlations (i.e. linear
+relationships) between the 5 dimensions of the incident radiance
+field. One example of such a linear relationship if parallax. However,
+the spatio-directional dimensions often also depend on each other
+non-linearly, which can not be modeled by Gaussian covariance
+matrices. A mixture of more sophisticated distributions may thus
+exhibit more accurate fits with fewer mixture components.
+7. Conclusion
+We demonstrated the feasibility of using spatio-directional mixture
+models for path guiding. In particular, we showed that a tangentspace parameterization of Gaussians enables product sampling
+among a 5D mixture that approximates incident radiance and nD
+mixtures that approximate the BSDFs. The use of thousands of mixture components—a necessity for accurately modeling the intricate
+radiance field—was made practical by a kD-tree data structure.
+[Cap11] C APPÉ, O LIVIER. “Online Expectation-Maximisation”. Mixtures:
+Estimation and Applications. Ed. by M ENGERSEN, K., T ITTERINGTON,
+M., and ROBERT, C. P. Wiley, Aug. 2011, 1–53. URL: https://hal.
+archives-ouvertes.fr/hal-00532968 5, 9.
+[CDG*08] C APPÉ, O LIVIER, D OUC, R ANDAL, G UILLIN, A RNAUD, et al.
+“Adaptive Importance Sampling in General Mixture Classes”. Statistics
+and Computing 18.4 (2008). Removed misleading comment in Section
+2, 447–459. DOI: 10.1007/s11222-008-9059-x. URL: https:
+//hal.archives-ouvertes.fr/hal-00180669 3.
+[CM09] C APPÉ, O LIVIER and M OULINES, E RIC. “On-line expectationmaximization algorithm for latent data models”. Journal of the Royal Statistical Society: Series B (Statistical Methodology) 71.3 (June 2009), 593–
+613. ISSN: 1467-9868. DOI: 10 . 1111 / j . 1467 - 9868 . 2009 .
+00698 . x. URL: http : / / dx . doi . org / 10 . 1111 / j . 1467 9868.2009.00698.x 5, 9, 13.
+[DK18] DAHM, K EN and K ELLER, A LEXANDER. “Learning Light Transport the Reinforced Way”. Monte Carlo and Quasi-Monte Carlo Methods.
+Ed. by OWEN, A RT B. and G LYNN, P ETER W. Springer International
+Publishing, 2018, 181–195. ISBN: 978-3-319-91436-7 3.
+[Dod20] D ODIK, A NA. “Path Guiding using a Spatio-Directional Mixture
+Model”. 2020 5, 8, 14.
+The tangent-space Gaussian mixture performed remarkably well
+in our experiments, making us hopeful that it can become an alternative to von Mises-Fisher mixtures, featuring anisotropy in addition
+to rotational symmetry.
+[GBBE18] G UO, J ERRY J INFENG, BAUSZAT, PABLO, B IKKER, JACCO,
+and E ISEMANN, E LMAR. “Primary Sample Space Path Guiding”. Eurographics Symposium on Rendering - Experimental Ideas & Implementations. Ed. by JAKOB, W ENZEL and H ACHISUKA, T OSHIYA. The
+Eurographics Association, 2018. ISBN: 978-3-03868-068-0 3.
+As for data-driven 5D spatio-directional mixtures: they achieve
+competetive results to previous work in equal sample count comparisons, but are outperformed by other spatio-directional models that
+recover spatio-directional correlation from reprojection [RHL20].
+Nonetheless, data-driven SDMMs help in the cases where reprojection is inaccurate, such as lensing effects by curved, specular
+geometries. This makes us hopeful that—if the overhead can be
+further reduced—SDMMs can become a practical tool on a practitioner’s toolbelt, e.g. by combining them with reprojection.
+[GL94] G AUVAIN, J EAN -L UC and L EE, C HIN -H UI. “Maximum a posteriori estimation for multivariate Gaussian mixture observations of Markov
+chains”. IEEE Trans. Speech Audio Process. 2 (1994), 291–298 9.
+[HD14] H EITZ, E RIC and D’E ON, E UGENE. “Importance Sampling
+Microfacet-Based BSDFs using the Distribution of Visible Normals”.
+Computer Graphics Forum 33.4 (July 2014), 103–112. DOI: 10.1111/
+cgf.12417. URL: https://hal.inria.fr/hal-00996995 3.
+Acknowledgments
+[HES*18] H ERHOLZ, S EBASTIAN, E LEK, O SKAR, S CHINDEL, J ENS, et al.
+“A Unified Manifold Framework for Efficient BRDF Sampling based on
+Parametric Mixture Models”. Eurographics Symposium on Rendering Experimental Ideas & Implementations. Ed. by JAKOB, W ENZEL and
+H ACHISUKA, T OSHIYA. The Eurographics Association, 2018. ISBN: 9783-03868-068-0 2, 3, 8, 15.
+We thank Marco Manzi for creating Figure 2 and Alex Keller for
+valuable feedback. We also thank the following people for providing
+scenes that appear in our figures: Benedikt Bitterli [Bit16], Johannes
+[HEV*16] H ERHOLZ, S EBASTIAN, E LEK, O SKAR, VORBA, J I ŘÍ, et al.
+“Product Importance Sampling for Light Transport Path Guiding”. Computer Graphics Forum (2016). ISSN: 1467-8659. DOI: 10.1111/cgf.
+12950 2, 3, 13.
+A. Dodik & M. Papas & C. Öztireli & T. Müller / Path Guiding Using Spatio-Directional Mixture Models
+[HP02] H EY, H EINRICH and P URGATHOFER, W ERNER. “Importance Sampling with Hemispherical Particle Footprints”. Proceedings of the 18th
+Spring Conference on Computer Graphics. SCCG ’02. Budmerice, Slovakia: ACM, 2002, 107–114. ISBN: 1-58113-608-0. DOI: 10.1145/
+584458 . 584476. URL: http : / / doi . acm . org / 10 . 1145 /
+584458.584476 3.
+[HZE*19] H ERHOLZ, S EBASTIAN, Z HAO, YANGYANG, E LEK, O SKAR, et
+al. “Volume Path Guiding Based on Zero-Variance Random Walk Theory”.
+ACM Trans. Graph. 38.3 (June 2019), 25:1–25:19. ISSN: 0730-0301. DOI:
+10.1145/3230635. URL: http://doi.acm.org/10.1145/
+3230635 3, 6, 8.
+[Jak10] JAKOB, W ENZEL. Mitsuba Renderer. http://www.mitsubarenderer.org. 2010 10.
+[Jak19] JAKOB, W ENZEL. Enoki: structured vectorization and differentiation on modern processor architectures. https://github.com/mitsubarenderer/enoki. 2019 10.
+[Jen95] J ENSEN, H ENRIK WANN. “Importance Driven Path Tracing using the Photon Map”. Rendering Techniques. Vienna: Springer Vienna,
+1995, 326–335. ISBN: 978-3-7091-9430-0. DOI: 10.1007/978- 37091- 9430- 0_31. URL: http://dx.doi.org/10.1007/
+978-3-7091-9430-0_31 3.
+[LW93] L AFORTUNE, E RIC P. and W ILLEMS, Y VES D. “Bi-Directional
+Path Tracing”. Compugraphics ’93. Alvor, Portugal, 1993, 145–153 3.
+[LW95] L AFORTUNE, E RIC P. and W ILLEMS, Y VES D. “A 5D Tree to
+Reduce the Variance of Monte Carlo Ray Tracing”. Proc. EGWR. June
+1995, 11–20 3.
+[MGN17] M ÜLLER, T HOMAS, G ROSS, M ARKUS, and N OVÁK, JAN. “Practical Path Guiding for Efficient Light-Transport Simulation”. Computer
+Graphics Forum 36.4 (June 2017), 91–100. ISSN: 1467-8659. DOI: 10.
+1111/cgf.13227. URL: http://dx.doi.org/10.1111/cgf.
+13227 2, 3, 8, 10, 13.
+[MMR*19] M ÜLLER, T HOMAS, M CWILLIAMS, B RIAN, ROUSSELLE,
+FABRICE, et al. “Neural Importance Sampling”. ACM Trans. Graph.
+38.5 (Oct. 2019), 145:1–145:19. ISSN: 0730-0301. DOI: 10 . 1145 /
+3341156. URL: http://doi.acm.org/10.1145/3341156 3,
+14.
+[MRNK20] M ÜLLER, T HOMAS, ROUSSELLE, FABRICE, N OVÁK,
+JAN, and K ELLER, A LEXANDER. “Neural Control Variates”.
+arXiv:2006.01524 (June 2020) 3.
+[Mül19] M ÜLLER, T HOMAS. ““Practical Path Guiding” in Production”.
+ACM SIGGRAPH Courses: Path Guiding in Production, Chapter 10.
+Los Angeles, California: ACM, 2019, 18:1–18:77. DOI: 10 . 1145 /
+3305366.3328091 3, 10, 11, 13, 14.
+[NFM20] N GUYEN, H IEN D., F ORBES, F LORENCE, and M C L ACHLAN,
+G EOFFREY J. “Mini-batch learning of exponential family finite mixture
+models”. Statistics and Computing 30.4 (Jan. 2020), 731–748. ISSN:
+1573-1375. DOI: 10.1007/s11222- 019- 09919- 4. URL: http:
+//dx.doi.org/10.1007/s11222-019-09919-4 5, 9.
+[Pen06] P ENNEC, X AVIER. “Intrinsic Statistics on Riemannian Manifolds:
+Basic Tools for Geometric Measurements”. Journal of Mathematical
+Imaging and Vision 25.1 (2006), 127. DOI: 10.1007/s10851-0066228- 4. URL: https://doi.org/10.1007/s10851- 0066228-4 2–4.
+[RHJD18] R EIBOLD, F LORIAN, H ANIKA, J OHANNES, J UNG, A LISA, and
+DACHSBACHER, C ARSTEN. “Selective Guided Sampling with Complete
+Light Transport Paths”. ACM Trans. Graph. 37.6 (Dec. 2018). ISSN: 07300301. DOI: 10.1145/3272127.3275030. URL: https://doi.
+org/10.1145/3272127.3275030 3.
+[RHL20] RUPPERT, L UKAS, H ERHOLZ, S EBASTIAN, and L ENSCH, H EN DRIK P. A. “Robust Fitting of Parallax-Aware Mixtures for Path Guiding”.
+ACM Trans. Graph. 39.4 (July 2020). ISSN: 0730-0301. DOI: 10.1145/
+3386569 . 3392421. URL: https : / / doi . org / 10 . 1145 /
+3386569.3392421 2, 3, 10, 11, 13–15.
+[RM51] ROBBINS, H ERBERT and M ONRO, S UTTON. “A Stochastic Approximation Method”. The Annals of Mathematical Statistics 22.3
+(1951), 400–407. ISSN: 00034851. URL: http://www.jstor.org/
+stable/2236626 9.
+[SPK05] S ALOJÄRVI, JARKKO, P UOLAMÄKI, K AI, and K ASKI, S AMUEL.
+“Expectation Maximization Algorithms for Conditional Likelihoods”.
+Proceedings of the 22nd International Conference on Machine Learning. ICML ’05. Bonn, Germany: Association for Computing Machinery, 2005, 752–759. ISBN: 1595931805. DOI: 10.1145/1102351.
+1102446. URL: https : / / doi . org / 10 . 1145 / 1102351 .
+1102446 2, 5.
+[STM14] S IMO -S ERRA, E DGAR, T ORRAS, C ARME, and M ORENO N OGUER, F RANCESC. “Geodesic Finite Mixture Models”. Proceedings of
+the British Machine Vision Conference. BMVA Press, 2014. DOI: http:
+//dx.doi.org/10.5244/C.28.91 2–4.
+[Vea97] V EACH, E RIC. “Robust Monte Carlo methods for light transport
+simulation”. PhD thesis. Stanford, CA, USA, Dec. 1997. ISBN: 0-59190780-1 3.
+[VG95] V EACH, E RIC and G UIBAS, L EONIDAS J. “Optimally Combining
+Sampling Techniques for Monte Carlo Rendering”. Proc. SIGGRAPH.
+1995, 419–428. ISBN: 0-89791-701-4. DOI: 10 . 1145 / 218380 .
+218498. URL: http : / / doi . acm . org / 10 . 1145 / 218380 .
+218498 3.
+[VHH*19] VORBA, J I ŘÍ, H ANIKA, J OHANNES, H ERHOLZ, S EBASTIAN,
+et al. “Path Guiding in Production”. ACM SIGGRAPH Courses. Los Angeles, California: ACM, 2019, 18:1–18:77. DOI: 10.1145/3305366.
+3328091 3.
+[VK16] VORBA, J I ŘÍ and K ŘIVÁNEK, JAROSLAV. “Adjoint-Driven Russian Roulette and Splitting in Light Transport Simulation”. ACM Trans.
+Graph. 35.4 (July 2016) 14.
+[VKŠ*14] VORBA, J I ŘÍ, K ARLÍK, O ND ŘEJ, Š IK, M ARTIN, et al. “On-line
+Learning of Parametric Mixture Models for Light Transport Simulation”.
+ACM Trans. Graph. 33.4 (Aug. 2014) 2, 3, 5, 9, 13.
+[WMLT07] WALTER, B RUCE, M ARSCHNER, S TEPHEN R., L I, H ONG SONG, and T ORRANCE, K ENNETH E. “Microfacet Models for Refraction
+through Rough Surfaces”. Proceedings of the 18th Eurographics Conference on Rendering Techniques. EGSR’07. Grenoble, France: Eurographics Association, 2007, 195–206. ISBN: 9783905673524 3.
+[XSD*13] X U, K UN, S UN, W EI -L UN, D ONG, Z HAO, et al. “Anisotropic
+Spherical Gaussians”. ACM Transactions on Graphics 32.6 (2013), 209:1–
+209:11 3.
+[ZZ19] Z HENG, Q UAN and Z WICKER, M ATTHIAS. “Learning to Importance Sample in Primary Sample Space”. Computer Graphics Forum 38.2
+(2019), 169–179. DOI: 10.1111/cgf.13628 3.
+Appendix A: Jacobian Matrices
+The Jacobian matrices of the µ-centered logµ and expµ maps can be
+derived by differentiating Equations (7) and (8), resulting in
+
+
+ωz −Jlogµ
+J
+0
+ω
+x (1−ω ω )J
+ logµ
+
+z
+z
+logµ
+
+Rµ (22)
+Jlogµ (ω) =
+
+
+ωz −Jlogµ
+0
+Jlogµ ωy
+(1−ωz ωz )Jlogµ
+
+Jexpµ (ν) = R−1
+µ
+Jlogµ =
+sinc kνk + ν2x Jexpµ
+sinc kνk + νy νx Jexp
+µ
+−νx sinc kνk
+
+sinc kνk + νx νy Jexpµ
+sinc kνk + νy Jexpµ  ,
+−νy sinc kνk
+(23)
+cos kνk − sinc kνk
+1
+, Jexpµ =
+,
+kνk2
+sinc(cos−1 (ωz ))
+(24)
+A. Dodik & M. Papas & C. Öztireli & T. Müller / Path Guiding Using Spatio-Directional Mixture Models
+where ω = Rµ ω and Rµ is the rotation matrix that rotates µ to
+(0, 0, 1). We use the unnormalized sinc function.
+Appendix B: Covariance Initialization
+Given an initial 5D mean-vector (x, ω) of a Gaussian mixture component, we wish to initialize its covariance matrix such that it is
+• isotropic in the tangent plane of the surface at x and in the tangent
+space around ω, and
+• flat along the surface normal at x.
+To this end, we let 90% of the mass of each Gaussian to be contained
+within a certain radius, rst in the surface’s tangent plane, and rn along
+the normal. More concretely, we compute the initial spatial 3 × 3
+part of the covariance matrix as
+Σx =
+rst2 ssT + rst2 ttT + rn2 nnT
+χ23
+−1
+,
+(25)
+(0.9)
+where s, t, n form the basis of the local coordinate frame at the se−1
+lected point and χ23 is the inverse cumulative distribution function
+of the chi-square distribution. We empirically found good results
+with the values rn = 3 · 10−2 , and rst = 2 · d2 , where d is the length
+of the longest side of the leaf node containing the Gaussian and the
+division by 2 is due to the number of distinct spatial mean vectors
+in the mixture.
+The initial directional 2 × 2 part Σω of the covariance matrix,
+living in the ω-centered tangent space, is set to be isotropic and
+inversely proportional to the number of directional Gaussian components at a spacial location (in our case 8), with the diagonal entries
+being equal to σ2 = 2π
+8 , resulting in the full covariance matrix
+ ω
+
+Σ
+0
+Σ=
+.
+(26)
+0 Σx
+Appendix C: Modified k-means++ Algorithm
+The modification to the original k-means++ algorithm consists of
+defining a custom distance metric D(xi , x j ) between spatial positions
+xi and x j that takes their surface normals ni and n j into account, as
+well as defining a custom resampling probability p++ (xi ) that takes
+the corresponding Monte Carlo weight wi of the sample at xi into
+account.
+Our custom distance metric extends the spatial euclidean distance
+by the geodesic distance between normals:
+
+2
+dist(xi , x j )2 = cos−1 (ni · n j ) / π + kxi − x j k2 ,
+(27)
+where the division by π normalizes geodesic distances to the range
+[0, 1]. Additionally, we enforce a poisson-disk distribution of points
+by setting the distance to zero within pre-defined spatial and spherical radii Tx and Tn :
+(
+dist(xi , x j ) if kxi − x j k > Tn ∨ cos−1 (ni · n j ) > Tx ,
+D(xi , x j ) =
+0
+otherwise .
+(28)
+We empirically choose Tn = 0.2 and Tx = 1.6 × 10−3 .
+Building on top of the custom distance metric, we extend the
+resampling probability p++ (xi ) with the Monte Carlo weight wi by
+multiplying the distance to the closest neighbor x j by the clamped
+Monte Carlo weight in the interval [W0 ,W1 ]:
+p++ (xi ) = clamp(wi ,W0 ,W1 ) min D(xi , x j ) .
+j6=i
+(29)
+The clamping to the interval [W0 ,W1 ] serves the double-purpose
+of allowing zero-valued (black) samples to contribute when fewer
+than 3 radiance-carrying samples are nearby, as well as preventing fireflies from dominating other samples. We empirically found
+W0 = 10−1 and W1 = 3 to work well.

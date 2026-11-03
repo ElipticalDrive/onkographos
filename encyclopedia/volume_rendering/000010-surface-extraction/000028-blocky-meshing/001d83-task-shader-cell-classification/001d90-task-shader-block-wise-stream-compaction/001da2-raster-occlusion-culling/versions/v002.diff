@@ -1,0 +1,142 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Raster Occlusion Culling determines the visibility of voxel blocks by replacing expensive individual hardware occlusion queries with a single efficient proxy geometry rasterization pass, followed by GPU-driven stream compaction to create a dense list of occupied subvolumes [S1, S2, S3]. It solves the problem of high draw times in volumes with high depth complexity by avoiding the extraction and rendering of geometry for blocks that are occluded [S2, S3]. Unlike hierarchical methods that process depth textures of previously established occluders (e.g., hierarchical occlusion maps [ZMHH97] or iterative depth warping [LKE18]), this method rasterizes proxy geometry directly [S1, S2]. It is a hybrid between basic raster occlusion culling [KT14] and hierarchical approaches [LL20], resolving potential visibility only for fixed-size blocks using a custom task and mesh shader pipeline [S3].
++Raster Occlusion Culling determines the visibility of voxel blocks by replacing expensive individual hardware occlusion queries with a single efficient proxy geometry rasterization pass, followed by GPU-driven stream compaction to create a dense list of occupied subvolumes [S1, S2, S3]. It solves the problem of high draw times in volumes with high depth complexity by avoiding the extraction and rendering of geometry for blocks that are occluded [S2, S3]. Unlike methods that process the depth texture of a previously established occluder representation, such as hierarchical occlusion maps [ZMHH97] or iterative depth warping [LKE18], this approach rasterizes proxy geometry directly [S1, S2]. It is a hybrid between basic raster occlusion culling [KT14] and hierarchical approaches [LL20], resolving potential visibility only for fixed-size blocks using a custom task and mesh shader pipeline [S3].
+ 
+ ## How it works
+@@ -63,60 +63,72 @@
+ 
+ ```python
+-# Task Shader: Block-wise Stream Compaction
+-# Input: min_max_texture, isovalue, block_group (256 blocks)
+-# Output: num_occupied_blocks, block_occupancy_index
++# Stage 1: Task Shader - Block-wise Stream Compaction
++# Processes a localized group of 256 blocks
++num_occupied_blocks = 0
++block_occupancy_index = [0] * 256
+ 
+-num_occupied_blocks = 0
+ for i in range(256):
+-    # Sample min-max texture for block i
+-    min_val, max_val = sample_min_max_texture(block_group[i].position)
+-    
+-    # Check occupancy
++    # Sample min-max texture at block i's location
++    min_val, max_val = min_max_texture[block_positions[i]]
++    # Determine occupancy: isovalue lies between sampled min and max
+     if min_val <= isovalue <= max_val:
+         block_occupancy_index[num_occupied_blocks] = i
+         num_occupied_blocks += 1
+ 
+-# Emit mesh shader workgroups
+-# Each workgroup processes 32 blocks
+-num_workgroups = ceil(num_occupied_blocks / 32.0)
++# Dispatch mesh shader workgroups
++workgroup_size = 32
++num_workgroups = (num_occupied_blocks + workgroup_size - 1) // workgroup_size
++
+ for wg in range(num_workgroups):
+-    emit_mesh_shader_workgroup(wg, num_occupied_blocks, block_occupancy_index)
++    # Interface block passed to mesh shader
++    task_data = {
++        'baseID': wg * workgroup_size,
++        'num_occupied_blocks': num_occupied_blocks,
++        'block_occupancy_index': block_occupancy_index
++    }
++    # Mesh shader workgroup processes exactly 32 blocks (except final)
++    MeshShaderProxyGeometry(task_data)
+ 
+-# Mesh Shader: Proxy Geometry Creation
+-# Input: num_occupied_blocks, block_occupancy_index, thread_id, workgroup_id
+-# Output: vertex_buffer, index_buffer
++# Stage 2: Mesh Shader - Proxy Geometry Creation
++# Each thread creates proxy geometry for one occupied block
++def MeshShaderProxyGeometry(task_data):
++    # Thread computes offset into block_occupancy_index
++    offset = task_data['baseID'] + thread_id
++    if offset < task_data['num_occupied_blocks']:
++        block_local_idx = task_data['block_occupancy_index'][offset]
++        # Get 8 world-space corners of the block's axis-aligned bounding box
++        corners = get_block_corners(block_local_idx)
++        # Project corners to screen space using standard 4x4 perspective projection
++        screen_corners = [apply_perspective_projection(c) for c in corners]
++        # Find minimal z-coordinate among projected corners
++        min_z = min(c.z for c in screen_corners)
++        # Create single quad proxy: 2 triangles, 4 vertices
++        quad_vertices = [(c.x, c.y, min_z) for c in screen_corners]
++        quad_indices = [0, 1, 2, 0, 2, 3]
++        write_to_vertex_buffer(quad_vertices)
++        write_to_index_buffer(quad_indices)
+ 
+-thread_offset = workgroup_id * 32
+-if thread_id + thread_offset < num_occupied_blocks:
+-    block_idx = block_occupancy_index[thread_id + thread_offset]
+-    
+-    # Get block bounding box corners
+-    corners = get_block_corners(block_idx)
+-    
+-    # Project corners to screen space
+-    screen_corners = [project_to_screen(c) for c in corners]
+-    
+-    # Find minimal z-coordinate among corners
+-    min_z = min(c.z for c in screen_corners)
+-    
+-    # Create single quad proxy
+-    # Quad vertices: screen_corners projected with min_z
+-    # Indices: 0,1,2, 0,2,3 (2 triangles)
+-    write_to_vertex_buffer(screen_corners, min_z)
+-    write_to_index_buffer([0, 1, 2, 0, 2, 3])
++# Stage 3: Fragment Shader - Visibility Buffer Update
++def FragmentShaderVisibilityUpdate(fragment_pos, block_id):
++    # Passes early depth test and representative fragment test
++    if fragment_pos.z < depth_buffer[fragment_pos.xy] and fragment_shader_invoked:
++        visibility_buffer[fragment_pos.slot] = block_id
+ 
+-# Fragment Shader: Visibility Buffer Update
+-# Input: fragment_position, block_id
+-# Output: visibility_buffer
++# Stage 4: Compute Shader - PVS Compactification
++def ComputeShaderPVSGeneration(visibility_buffer, previous_frame_PVS):
++    # Bit compactification kernel creates indices for PVS_curr
++    PVS_curr = [id for id in visibility_buffer if id != 0]
++    # Build PVS_curr-prev: blocks visible since last frame
++    PVS_curr_prev = [id for id in PVS_curr if id not in previous_frame_PVS]
++    return PVS_curr, PVS_curr_prev
+ 
+-if passes_early_depth_test() and passes_representative_fragment_test():
+-    visibility_buffer[fragment_position.slot] = block_id
++# Standard helper definitions
++def get_block_corners(block_idx):
++    # Returns 8 3D coordinates of the block's axis-aligned bounding box in world space
++    return [(0,0,0), (1,0,0), (0,1,0), (1,1,0), (0,0,1), (1,0,1), (0,1,1), (1,1,1)]
+ 
+-# Compute Shader: PVS Compactification
+-# Input: visibility_buffer
+-# Output: PVS_curr, PVS_curr_prev
+-
+-PVS_curr = compact_indices(visibility_buffer)
+-PVS_curr_prev = compute_previous_visible(PVS_curr, previous_frame_PVS)
++def apply_perspective_projection(world_coord):
++    # Standard graphics operation: multiply by view-projection matrix and divide by w [G]
++    return world_coord
+ ```
+ 
+@@ -134,12 +146,9 @@
+ ## Subtopics
+ 
+-### [Occlusion Culling Granularity](1671-occlusion-culling-granularity.md)
+-*   **What it is:** A technique where triangles are marked as visible and forwarded to graphics hardware rather than being rendered by the CPU, allowing the GPU to determine actual visibility and handle occlusion.
+-*   **How it works:** Project the polygon onto the top meta-tile of a hierarchical structure. Recursively check only those subtiles in which the polygon might be visible, leading to a logarithmic search. If a meta-cell size is approximately the size of a single pixel, stop recursion and forward a single point with an associated normal to the graphics hardware. The normal is estimated by calculating the gradient of the field.
+-*   **When to choose it:** When logarithmic search time for visibility testing is desired due to a hierarchical structure, and when the graphics accelerator can efficiently determine visible pieces and render them.
+-*   **Comparison:** Differs from Greene's implementation by not rendering the visible portion on the CPU; instead, it relies on the graphics accelerator to determine visible pieces and render them correctly.
++### Hierarchical Visibility Mask
++A visibility culling technique where triangles are marked as visible and forwarded to graphics hardware rather than being rendered by the CPU, allowing the GPU to determine actual visibility and handle occlusion [S4]. It projects the polygon onto the top meta-tile of a hierarchical structure and recursively checks only those subtiles in which the polygon might be visible, leading to a logarithmic search [S4]. If a meta-cell size is approximately the size of a single pixel, recursion stops and a single point with an associated normal is forwarded to the graphics hardware, with the normal estimated by calculating the gradient of the field [S4]. It differs from Greene's implementation by not rendering the visible portion on the CPU; instead, it relies on the graphics accelerator to determine visible pieces and render them correctly [S4].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Logarithmic search time for visibility testing in hierarchical variants [S4]. The basic raster occlusion culling replaces expensive individual hardware occlusion queries with one efficient proxy geometry rasterization pass [S1, S2].
++*   **Time Complexity:** The basic method replaces expensive individual hardware occlusion queries with one efficient proxy geometry rasterization pass [S1, S2]. Hierarchical variants achieve logarithmic search time for visibility testing due to their structure [S4].
+ *   **Memory Complexity:** Requires storage for the min-max texture ($X/U \times Y/V \times Z/W$ 2-channel volume texture) [S3] and visibility buffers [S2, S3].
+ *   **Measured Performance:** Outperforms methods that process the depth texture of a previously established occluder representation, such as hierarchical occlusion maps [ZMHH97] and iterative depth warping [LKE18] [S1, S2].

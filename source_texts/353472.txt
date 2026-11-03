@@ -1,0 +1,842 @@
+Latest Posts | Developerblog – Johannes Jendersie | Content Generators & Demos | Page 4
+This weekend I wrote a simply labyrinth generator for Pathfinder. It is surprisingly easy to get interesting systems. Much easier than trees!
+The first and most important decision I made was to use a voxel grid. To create a mesh immediately would cause problems with self intersections. So my idea was to create a volume texture and just set voxels to solid, corridor, stairs, ... After that one could use a standard extraction of implicit surfaces (Marching Cubes or Dual Contouring). I decided to use a specialised generator to hold the amount of triangles low.
+Without the special case of stairs the idea is very simple: For each non-solid voxel sample its 6 neighbours. If there is a solid voxel there must be a wall on that side - create a quad.
+Component Generator
+The generator must fill the voxel grid with meaningful values now. Since I would like to have corridors and rooms and no natural shapes it is sufficient to use very large voxels where one single voxels is already a corridor/room.
+I divided the generator itself into two parts: The single components to describe a certain structure and a recursive method to create the full labyrinth. Each of the component generators return a position where further creations could be attached. My generator uses 3 basic elements:
+Corridors: Just set a line of voxels to "Corridor". A corridor has a random length in [2,10].
+Chambers: Create a larger empty volume centered at the entrance.
+Stairs: Create two diagonal voxels of type stair. The problem here is the triangulation. There should be a slope between two floors but so far only axis aligned triangles are generated. I introduced a shearing for the stair voxels. So far so good but the resulting corridor will cross solid voxels (see image). That itself is no problem, but if an other structure intersects there this will cause an ugly triangle inside the room. To overcome this a stair structure locks its surrounding as solid.
+An much easier approach would be to create vertical corridors and insert stairs as extra objects. It is a design decision that I would like to have these slopes.
+The recursive part is doing the following thing: Chose one of the structures probabilistically. If it is "corridors" create 1-3 corridors, otherwise create exactly one of the chosen structure. Continue recursion at each returned attachment point. To stop the recursion a counter is decreased in each step. It does not directly count the recursion depth. Instead it is decreased by the number of created sub-structures. So if there are 3 corridors the counter is decreased faster to stop the recursion earlier. This should stabilize the "size" of the result. For a really stable size-controll-factor it would be necessary to divide the remaining number through the number of sub calls. On that way one could exactly create n structures where n is given in advance.
+It should be said that the generator can create labyrinths of where different complexity. In the described approach floors are generated in each voxel grid level. There are many points where the structures intersect vertically. It is possible to jump down into the floor below and there are even circles in 3D where the common rule "always touch the wall with the same hand" does not succeed to leave the labyrinth. To make things easier I create stairs of length two so one voxel level is always skipped. Due to chambers it is still possible that there are vertical intersections but they are rare.
+In conclusion it was a very good idea to use voxels in the first place. In feature I might use the component based generator approach for other things. One could even think of something hierarchically. For each substructure one can just ignore everything else and concentrate on a meaningful result.
+At the end of 2012 and in January this year I played around with volumetric clouds. My first clouds I introduced in a rush where just big billboards with a value noise texture. I was relatively satisfied until a friend of mine came up with an improved billboard based approach in the game Skytides. He used Fourier Opacity Maps to compute volumetric shadowing. By the way this technique is very nice to get shadows for particles and other alpha blended objects. Now I was interested in real volumetric clouds in a real time context.
+My first idea was to use ellipsoids and write a closed form ray casting which should be done in real time. Together with some noise they should form up single clouds. In the end the number of ellipsoids was limited and the quality bad.
+So what comes next?
+Ray tracing seemed to be the only promising step. I found some interesting stuff about cellular automatons for clouds by Dobashi. Nishita and co. So I tried to implement a ray marching on an integer texture where each bit is a voxel. In each voxel the boundary hit point to the next voxel can be computed in closed form too. This idea guaranteed an optimal step width but creates a very blocky look. I used dithering and interpolation which produced good quality results but was slow or too few detailed.
+The last algorithm's results you see in the title bar of this page. It is so simple in its basics that you will hang me. The trick to get rid of block artefacts is to use fuzzy values and a linear sampler!
+I use a standard ray marching (a for loop in the pixel shader) on a volume texture filled with a value noise. To animate the clouds I just move the texture around and sample twice at different locations.
+To get clouds you need several rays: the fist ray accumulates the alpha values along the view direction. To get a volumetric lightning a ray into the lights direction is casted at each point which is not totally transparent. It took me some time to find a proper accumulation of alpha values. Assuming where 1 means an opaque value than must be computed per step on the ray. is the amount of background shining through the clouds. Finally the alpha value of a cloud is . There are different reasons to stop the ray casting:
+The scene depth is reached (this makes things volumetric - of course the scene depth buffer is required)
+The view distance is exceeded
+is close to 0
+If you wanna have a good visual appearance this is enough! Stop reading her implement it and you will be done in a few hours.
+Now comes the part of making things fast.
+1. One ray into light direction per pixel on the primary ray - REALLY?
+Yes! But no complete ray. I used a constant length ray of 6 steps. One might use the same alpha accumulation technique but just summing the density produces good results. The thing why this can work fast is to have relatively dense clouds. The primary ray is stifled after a few steps once it reaches a cloud. So there are not more light-castings than relevant.
+2. What step size to choose?
+The bigger the steps the fewer samples are necessary and everything gets faster and uglier. But in distance a small stepping ray is an overkill. I found a linear increasing step width ok.
+3. Obviously clouds are smooth. They are so smooth you can put a 5x5 Gaussian filter onto it without seeing any difference. So why compute so many pixels with so expensive ray marching?
+This part is the hardest and the reason for the "Offscreen Particles" in the title. All the nice things implemented so far could be computed on a 4 or 8 times smaller texture and than sampled up to screen size. I do not have screen shots of the upcoming problems when sampling alpha textures up but the GPU Gems 3 article has.
+My solution works with only two passes the cloud pass and the upsampling. It is even not necessary to sample the z-buffer down.
+The first pass renders the clouds to a small offscreen texture. It just fetches a single depth value at the current pixel position * 4 + 1.5. The 1.5 is more or less the centre of the represented area and must be changed if an other scaling factor than 4 is chosen. The output is: (Light intensity, Cloud Alpha, Sampled Z). The last component is the key. It remembers the actually used depth for later.
+During the upsampling the linear interpolated texel from the cloud texture is taken. In case that (abs(Scene Z - Sampled Z) > threshold) the value taken from the clouds is not representative for the scenes pixel. This happens only at edges where we would get the artefacts. Now I take the 8 neighbourhood samples and search for the one with the smallest deviation from the scene depth. The so chosen representative is very likely a good approximation. There is no guarantee to find a better pixel but subjectively all artefacts are released. You might find some if directly searching for them. If someone has an idea how to do a more elegant search than you see in the shader below, please let me know.
+In the following shader I used a doubled view distance and a distortion to get a better horizon. There also might be other not explained noise from other experiments.
+cloud shader
+C++
+#version 330
+layout(std140) uniform Transformation {
+mat4 mView;
+mat4 mProjection;
+mat4 mViewProjection;
+mat4 mInverseViewProjection;
+vec3 vCameraPos;
+vec3 vCameraDir;
+float fNearClipPlane;
+vec3 vCameraUp;
+float fFarClipPlane;
+};
+layout(pixel_center_integer) in vec4 gl_FragCoord;
+in vec3 vs_WorldPos;
+uniform vec4 u_vParameter; // (Voxel Density, Noise Threshold, 1-Noise Threshold, Scale)
+uniform vec2 u_fPlanes; // Lower and upper volume limit
+uniform vec2 u_vHighToVolume; // MAD transformation from World.y to [-1, 1] in the volume
+uniform vec3 u_vColorBright;
+uniform vec3 u_vColorDark;
+uniform vec3 u_vWind1;
+uniform vec3 u_vWind2;
+uniform sampler3D u_Noise;
+uniform sampler2D u_Depth;
+const vec3 c_vLight = vec3( 0.707106, 0.707106, 0.0 );
+out vec4 fs_Color;
+// Density function.
+float DensityFunction( vec3 _vPos )
+{
+float fDensity = _vPos.y * u_vHighToVolume.x + u_vHighToVolume.y;
+fDensity = fDensity*fDensity;
+fDensity = - u_vParameter.y - fDensity*u_vParameter.z;
+float fAlpha = u_vParameter.x * max( 0, texture( u_Noise, _vPos * u_vParameter.w + u_vWind1 ).r + fDensity );
+fAlpha *= u_vParameter.x * max( 0, texture( u_Noise, _vPos.yxz * u_vParameter.w + u_vWind2 ).r + fDensity );
+return fAlpha;
+}
+// The ray marcher differs from the main one:
+// - stop after n steps, no depth test
+// - no alpha testing
+// - no call of lightocclusion
+float lightocclusion( vec3 _vPos, vec3 _vDir )
+{
+float fDens = 1.0;
+for( int i=0; i<6; ++i)
+{
+// Next pos first - starting at the already sampled point.
+float fLen = 1.3; // A little bit larger (light tends to produce less artefacts)
+_vPos += _vDir * fLen;
+fDens += DensityFunction( _vPos );
+}
+return fDens;
+}
+// Main ray marching function
+// The step length is dynamic and depends linearly on depth.
+vec3 density( vec3 _vPos, vec3 _vDir, vec3 _vLight, float _fZ )
+{
+vec3 vRes = vec3( 1, 0, length( _vPos - vCameraPos ) ); // density, light and final depth
+float fRefY = _vDir.y;
+while( (_fZ > vRes.z) && ((_vPos.y-0.0001) < u_fPlanes.y) )
+{
+float fStepWidth = 0.6 + 0.006 * vRes.z;
+float fLen = min( _fZ-vRes.z, fStepWidth );
+float fAlpha = DensityFunction( _vPos ) * fLen;
+// Make clouds more transparent in the depth (instead of depth fog)
+fAlpha *= 1.0 - vRes.z / (2*fFarClipPlane);
+// Lightning
+if( fAlpha > 0.0001 )
+{
+vRes.y += fAlpha/lightocclusion( _vPos, _vLight ) * vRes.x;
+vRes.x *= 1 - fAlpha;
+// "Alphatesting"
+if( vRes.x < 0.004 ) return vec3( 0, vRes.y, vRes.z );
+}
+// 1 Use this line(s) to get a spherical effect at horizon
+_vDir.y = fRefY + 0.25 * max(0,vRes.z - fFarClipPlane) / fFarClipPlane;
+vRes.z += fLen;
+_vPos += _vDir * fLen;
+}
+return vRes;
+}
+void main(void)
+{
+// Calculate the ray from camera through the cloud volume
+vec3 vDir = vs_WorldPos - vCameraPos;
+vDir = normalize( vDir );
+// The position is at least 4 times fNearClipPlane away from the camera (stability of plane transformation)
+// But ray should start at near plane.
+vec3 vStart = vs_WorldPos - 3.0f * fNearClipPlane * vDir;
+// Project into volume if outside y range
+float fMaxDist = fFarClipPlane-fNearClipPlane;
+float fProjDist = ( - max( vStart.y-u_fPlanes.y, 0 )) / vDir.y;
+if( u_fPlanes.x-vStart.y > 0 && vDir.y < -0.01 ) fProjDist = fMaxDist;
+vStart = vStart + fProjDist * vDir;
+// Where to end?
+ivec2 vTex = ivec2(gl_FragCoord.x*4+1.5, gl_FragCoord.y*4+1.5);
+float fZ = texelFetch( u_Depth, vTex, 0 ).r;
+// Compute linear depth from OpenGL projection
+float f_n = fFarClipPlane - fNearClipPlane;
+fZ = (- fFarClipPlane * fNearClipPlane / (fZ*f_n-fFarClipPlane));
+fZ = ( ( fZ >= fFarClipPlane ) ? (fFarClipPlane*2) : fZ );
+// If the ray hits the cloud volume
+vec3 vRes = density( vStart, vDir, c_vLight, fZ );
+fs_Color.r = vRes.y;
+fs_Color.g = (1-vRes.x);
+// The 0.5 is due to the fact that I compute clouds up to viewdistance*2
+fs_Color.z = 0.5 * fZ / fFarClipPlane;
+}
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+52
+53
+54
+55
+56
+57
+58
+59
+60
+61
+62
+63
+64
+65
+66
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+77
+78
+79
+80
+81
+82
+83
+84
+85
+86
+87
+88
+89
+90
+91
+92
+93
+94
+95
+96
+97
+98
+99
+100
+101
+102
+103
+104
+105
+106
+107
+108
+109
+110
+111
+112
+113
+114
+115
+116
+117
+118
+119
+120
+121
+122
+123
+124
+125
+126
+127
+128
+129
+#version 330
+layout(std140) uniform Transformation {
+mat4 mView;
+mat4 mProjection;
+mat4 mViewProjection;
+mat4 mInverseViewProjection;
+vec3 vCameraPos;
+vec3 vCameraDir;
+float fNearClipPlane;
+vec3 vCameraUp;
+float fFarClipPlane;
+};
+layout(pixel_center_integer) in vec4 gl_FragCoord;
+in vec3 vs_WorldPos;
+uniform vec4 u_vParameter; // (Voxel Density, Noise Threshold, 1-Noise Threshold, Scale)
+uniform vec2 u_fPlanes; // Lower and upper volume limit
+uniform vec2 u_vHighToVolume; // MAD transformation from World.y to [-1, 1] in the volume
+uniform vec3 u_vColorBright;
+uniform vec3 u_vColorDark;
+uniform vec3 u_vWind1;
+uniform vec3 u_vWind2;
+uniform sampler3D u_Noise;
+uniform sampler2D u_Depth;
+const vec3 c_vLight = vec3( 0.707106, 0.707106, 0.0 );
+out vec4 fs_Color;
+// Density function.
+float DensityFunction( vec3 _vPos )
+{
+float fDensity = _vPos.y * u_vHighToVolume.x + u_vHighToVolume.y;
+fDensity = fDensity*fDensity;
+fDensity = - u_vParameter.y - fDensity*u_vParameter.z;
+float fAlpha = u_vParameter.x * max( 0, texture( u_Noise, _vPos * u_vParameter.w + u_vWind1 ).r + fDensity );
+fAlpha *= u_vParameter.x * max( 0, texture( u_Noise, _vPos.yxz * u_vParameter.w + u_vWind2 ).r + fDensity );
+return fAlpha;
+}
+// The ray marcher differs from the main one:
+// - stop after n steps, no depth test
+// - no alpha testing
+// - no call of lightocclusion
+float lightocclusion( vec3 _vPos, vec3 _vDir )
+{
+float fDens = 1.0;
+for( int i=0; i<6; ++i)
+{
+// Next pos first - starting at the already sampled point.
+float fLen = 1.3; // A little bit larger (light tends to produce less artefacts)
+_vPos += _vDir * fLen;
+fDens += DensityFunction( _vPos );
+}
+return fDens;
+}
+// Main ray marching function
+// The step length is dynamic and depends linearly on depth.
+vec3 density( vec3 _vPos, vec3 _vDir, vec3 _vLight, float _fZ )
+{
+vec3 vRes = vec3( 1, 0, length( _vPos - vCameraPos ) ); // density, light and final depth
+float fRefY = _vDir.y;
+while( (_fZ > vRes.z) && ((_vPos.y-0.0001) < u_fPlanes.y) )
+{
+float fStepWidth = 0.6 + 0.006 * vRes.z;
+float fLen = min( _fZ-vRes.z, fStepWidth );
+float fAlpha = DensityFunction( _vPos ) * fLen;
+// Make clouds more transparent in the depth (instead of depth fog)
+fAlpha *= 1.0 - vRes.z / (2*fFarClipPlane);
+// Lightning
+if( fAlpha > 0.0001 )
+{
+vRes.y += fAlpha/lightocclusion( _vPos, _vLight ) * vRes.x;
+vRes.x *= 1 - fAlpha;
+// "Alphatesting"
+if( vRes.x < 0.004 ) return vec3( 0, vRes.y, vRes.z );
+}
+// 1 Use this line(s) to get a spherical effect at horizon
+_vDir.y = fRefY + 0.25 * max(0,vRes.z - fFarClipPlane) / fFarClipPlane;
+vRes.z += fLen;
+_vPos += _vDir * fLen;
+}
+return vRes;
+}
+void main(void)
+{
+// Calculate the ray from camera through the cloud volume
+vec3 vDir = vs_WorldPos - vCameraPos;
+vDir = normalize( vDir );
+// The position is at least 4 times fNearClipPlane away from the camera (stability of plane transformation)
+// But ray should start at near plane.
+vec3 vStart = vs_WorldPos - 3.0f * fNearClipPlane * vDir;
+// Project into volume if outside y range
+float fMaxDist = fFarClipPlane-fNearClipPlane;
+float fProjDist = ( - max( vStart.y-u_fPlanes.y, 0 )) / vDir.y;
+if( u_fPlanes.x-vStart.y > 0 && vDir.y < -0.01 ) fProjDist = fMaxDist;
+vStart = vStart + fProjDist * vDir;
+// Where to end?
+ivec2 vTex = ivec2(gl_FragCoord.x*4+1.5, gl_FragCoord.y*4+1.5);
+float fZ = texelFetch( u_Depth, vTex, 0 ).r;
+// Compute linear depth from OpenGL projection
+float f_n = fFarClipPlane - fNearClipPlane;
+fZ = (- fFarClipPlane * fNearClipPlane / (fZ*f_n-fFarClipPlane));
+fZ = ( ( fZ >= fFarClipPlane ) ? (fFarClipPlane*2) : fZ );
+// If the ray hits the cloud volume
+vec3 vRes = density( vStart, vDir, c_vLight, fZ );
+fs_Color.r = vRes.y;
+fs_Color.g = (1-vRes.x);
+// The 0.5 is due to the fact that I compute clouds up to viewdistance*2
+fs_Color.z = 0.5 * fZ / fFarClipPlane;
+}
+C++
+#version 330
+layout(std140) uniform Transformation {
+mat4 mView;
+mat4 mProjection;
+mat4 mViewProjection;
+mat4 mInverseViewProjection;
+vec3 vCameraPos;
+vec3 vCameraDir;
+float fNearClipPlane;
+vec3 vCameraUp;
+float fFarClipPlane;
+};
+uniform vec2 u_vCloudRes;
+uniform vec3 u_vColorCloudBright;
+uniform vec3 u_vColorCloudDark;
+uniform sampler2D u_Clouds;
+uniform sampler2D u_Scene;
+uniform sampler2D u_Depth;
+in vec2 vs_TexCoord0;
+in vec3 vs_WorldPos;
+out vec4 fs_Color;
+// ------------------------------------------------
+// SKY
+// ------------------------------------------------
+const vec3 AdditonalSunColor = vec3(1.0, 0.98, 0.8)/2.5;
+const vec3 LowerHorizonColour = vec3(0.815, 1.141, 1.54)/3;
+const vec3 UpperHorizonColour = vec3(0.986, 1.689, 2.845)/3;
+const vec3 UpperSkyColour = vec3(0.16, 0.27, 0.63);//*0.8;
+const vec3 GroundColour = vec3(0.31, 0.41, 0.7)*0.8;
+const vec3 LightDirection = vec3( 0.707106, 0.707106, 0.0 );
+const float LowerHorizonHeight = -0.4;
+const float UpperHorizonHeight = -0.1;
+const float SunAttenuation = 2;
+vec3 ComputeSkyColor( in vec3 ray )
+{
+vec3 color;
+// background
+vec3 vExtraColor = u_vColorCloudDark * 1.3;
+float heightValue = ray.y; // mirror..
+if(heightValue < LowerHorizonHeight)
+color = mix(GroundColour, LowerHorizonColour, (heightValue+1) / (LowerHorizonHeight+1));
+else if(heightValue < UpperHorizonHeight)
+color = mix(LowerHorizonColour, vExtraColor, (heightValue-LowerHorizonHeight) / (UpperHorizonHeight - LowerHorizonHeight));
+else
+color = mix(vExtraColor, UpperSkyColour, (heightValue-UpperHorizonHeight) / (1.0-UpperHorizonHeight));
+// Sun
+float angle = max(0, dot(ray, LightDirection));
+color += (pow(angle, SunAttenuation) + pow(angle, 10000)*10) * AdditonalSunColor;
+return color;//min(vec3(1,1,1), color);
+}
+void main()
+{
+// Sample the cloud from low res picture (with 4 neighbourhood),
+// the scene and the depth
+vec3 vColorCloud0 = texture( u_Clouds, vs_TexCoord0 ).rgb;
+vec3 vColorScene = texture( u_Scene, vs_TexCoord0 ).rgb;
+float fZ = texture( u_Depth, vs_TexCoord0 ).r;
+// Transform Z and test again (this removes artefacts where clouds overlay
+// the scene).
+float f_n = fFarClipPlane - fNearClipPlane;
+fZ = 0.5 * (- fNearClipPlane / (fZ*f_n-fFarClipPlane));
+// Is it a background pixel?
+vec3 vRay = vs_WorldPos - vCameraPos;
+vec3 vBackColor = ComputeSkyColor( normalize( vRay ) );
+if( fZ >= 0.49999 )
+{
+vColorScene = vBackColor;
+fZ *= 2;
+} else
+{
+// depth fog
+vColorScene = mix( vColorScene, GroundColour, 2*fZ );
+vColorScene = mix( vColorScene, vBackColor, 4*fZ*fZ );
+}
+// Has current pixel totaly wrong depth?
+vec2 vLightDensity = vColorCloud0.rg;
+float fZError = abs(fZ - vColorCloud0.z);
+if( fZError > 0.01 )
+{
+// Choose the cloud sample, which has the best fitting depth.
+ivec2 vCloudTex = ivec2( u_vCloudRes * vs_TexCoord0 );
+vec3 vColorCloud1 = texelFetch( u_Clouds, vCloudTex+ivec2(-1, 0), 0 ).rgb;
+vec3 vColorCloud2 = texelFetch( u_Clouds, vCloudTex+ivec2( 1, 0), 0 ).rgb;
+vec3 vColorCloud3 = texelFetch( u_Clouds, vCloudTex+ivec2( 0,-1), 0 ).rgb;
+vec3 vColorCloud4 = texelFetch( u_Clouds, vCloudTex+ivec2( 0, 1), 0 ).rgb;
+vec3 vColorCloud5 = texelFetch( u_Clouds, vCloudTex+ivec2( 1, 1), 0 ).rgb;
+vec3 vColorCloud6 = texelFetch( u_Clouds, vCloudTex+ivec2( 1,-1), 0 ).rgb;
+vec3 vColorCloud7 = texelFetch( u_Clouds, vCloudTex+ivec2(-1, 1), 0 ).rgb;
+vec3 vColorCloud8 = texelFetch( u_Clouds, vCloudTex+ivec2(-1,-1), 0 ).rgb;
+vec4 vZEs = abs( vec4( fZ - vColorCloud1.z, fZ - vColorCloud2.z, fZ - vColorCloud3.z, fZ - vColorCloud4.z ) );
+vec4 vZEs2 = abs( vec4( fZ - vColorCloud5.z, fZ - vColorCloud6.z, fZ - vColorCloud7.z, fZ - vColorCloud8.z ) );
+vLightDensity = (vZEs.x < vZEs.y) ? vColorCloud1.rg : vColorCloud2.rg; fZError = min( vZEs.x, vZEs.y );
+vLightDensity = (vZEs.z < fZError) ? vColorCloud3.rg : vLightDensity; fZError = min( vZEs.z, fZError );
+vLightDensity = (vZEs.w < fZError) ? vColorCloud4.rg : vLightDensity; fZError = min( vZEs.w, fZError );
+vLightDensity = (vZEs2.x < fZError) ? vColorCloud5.rg : vLightDensity; fZError = min( vZEs2.x, fZError );
+vLightDensity = (vZEs2.y < fZError) ? vColorCloud6.rg : vLightDensity; fZError = min( vZEs2.y, fZError );
+vLightDensity = (vZEs2.z < fZError) ? vColorCloud7.rg : vLightDensity; fZError = min( vZEs2.z, fZError );
+vLightDensity = (vZEs2.w < fZError) ? vColorCloud8.rg : vLightDensity;
+}
+vec3 vFinalCloudColor = mix( u_vColorCloudDark, u_vColorCloudBright, vLightDensity.r );
+fs_Color.rgb = mix( vColorScene, vFinalCloudColor, vLightDensity.g );
+fs_Color.a = 1;
+}
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+52
+53
+54
+55
+56
+57
+58
+59
+60
+61
+62
+63
+64
+65
+66
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+77
+78
+79
+80
+81
+82
+83
+84
+85
+86
+87
+88
+89
+90
+91
+92
+93
+94
+95
+96
+97
+98
+99
+100
+101
+102
+103
+104
+105
+106
+107
+108
+109
+110
+111
+112
+113
+114
+115
+116
+#version 330
+layout(std140) uniform Transformation {
+mat4 mView;
+mat4 mProjection;
+mat4 mViewProjection;
+mat4 mInverseViewProjection;
+vec3 vCameraPos;
+vec3 vCameraDir;
+float fNearClipPlane;
+vec3 vCameraUp;
+float fFarClipPlane;
+};
+uniform vec2 u_vCloudRes;
+uniform vec3 u_vColorCloudBright;
+uniform vec3 u_vColorCloudDark;
+uniform sampler2D u_Clouds;
+uniform sampler2D u_Scene;
+uniform sampler2D u_Depth;
+in vec2 vs_TexCoord0;
+in vec3 vs_WorldPos;
+out vec4 fs_Color;
+// ------------------------------------------------
+// SKY
+// ------------------------------------------------
+const vec3 AdditonalSunColor = vec3(1.0, 0.98, 0.8)/2.5;
+const vec3 LowerHorizonColour = vec3(0.815, 1.141, 1.54)/3;
+const vec3 UpperHorizonColour = vec3(0.986, 1.689, 2.845)/3;
+const vec3 UpperSkyColour = vec3(0.16, 0.27, 0.63);//*0.8;
+const vec3 GroundColour = vec3(0.31, 0.41, 0.7)*0.8;
+const vec3 LightDirection = vec3( 0.707106, 0.707106, 0.0 );
+const float LowerHorizonHeight = -0.4;
+const float UpperHorizonHeight = -0.1;
+const float SunAttenuation = 2;
+vec3 ComputeSkyColor( in vec3 ray )
+{
+vec3 color;
+// background
+vec3 vExtraColor = u_vColorCloudDark * 1.3;
+float heightValue = ray.y; // mirror..
+if(heightValue < LowerHorizonHeight)
+color = mix(GroundColour, LowerHorizonColour, (heightValue+1) / (LowerHorizonHeight+1));
+else if(heightValue < UpperHorizonHeight)
+color = mix(LowerHorizonColour, vExtraColor, (heightValue-LowerHorizonHeight) / (UpperHorizonHeight - LowerHorizonHeight));
+else
+color = mix(vExtraColor, UpperSkyColour, (heightValue-UpperHorizonHeight) / (1.0-UpperHorizonHeight));
+// Sun
+float angle = max(0, dot(ray, LightDirection));
+color += (pow(angle, SunAttenuation) + pow(angle, 10000)*10) * AdditonalSunColor;
+return color;//min(vec3(1,1,1), color);
+}
+void main()
+{
+// Sample the cloud from low res picture (with 4 neighbourhood),
+// the scene and the depth
+vec3 vColorCloud0 = texture( u_Clouds, vs_TexCoord0 ).rgb;
+vec3 vColorScene = texture( u_Scene, vs_TexCoord0 ).rgb;
+float fZ = texture( u_Depth, vs_TexCoord0 ).r;
+// Transform Z and test again (this removes artefacts where clouds overlay
+// the scene).
+float f_n = fFarClipPlane - fNearClipPlane;
+fZ = 0.5 * (- fNearClipPlane / (fZ*f_n-fFarClipPlane));
+// Is it a background pixel?
+vec3 vRay = vs_WorldPos - vCameraPos;
+vec3 vBackColor = ComputeSkyColor( normalize( vRay ) );
+if( fZ >= 0.49999 )
+{
+vColorScene = vBackColor;
+fZ *= 2;
+} else
+{
+// depth fog
+vColorScene = mix( vColorScene, GroundColour, 2*fZ );
+vColorScene = mix( vColorScene, vBackColor, 4*fZ*fZ );
+}
+// Has current pixel totaly wrong depth?
+vec2 vLightDensity = vColorCloud0.rg;
+float fZError = abs(fZ - vColorCloud0.z);
+if( fZError > 0.01 )
+{
+// Choose the cloud sample, which has the best fitting depth.
+ivec2 vCloudTex = ivec2( u_vCloudRes * vs_TexCoord0 );
+vec3 vColorCloud1 = texelFetch( u_Clouds, vCloudTex+ivec2(-1, 0), 0 ).rgb;
+vec3 vColorCloud2 = texelFetch( u_Clouds, vCloudTex+ivec2( 1, 0), 0 ).rgb;
+vec3 vColorCloud3 = texelFetch( u_Clouds, vCloudTex+ivec2( 0,-1), 0 ).rgb;
+vec3 vColorCloud4 = texelFetch( u_Clouds, vCloudTex+ivec2( 0, 1), 0 ).rgb;
+vec3 vColorCloud5 = texelFetch( u_Clouds, vCloudTex+ivec2( 1, 1), 0 ).rgb;
+vec3 vColorCloud6 = texelFetch( u_Clouds, vCloudTex+ivec2( 1,-1), 0 ).rgb;
+vec3 vColorCloud7 = texelFetch( u_Clouds, vCloudTex+ivec2(-1, 1), 0 ).rgb;
+vec3 vColorCloud8 = texelFetch( u_Clouds, vCloudTex+ivec2(-1,-1), 0 ).rgb;
+vec4 vZEs = abs( vec4( fZ - vColorCloud1.z, fZ - vColorCloud2.z, fZ - vColorCloud3.z, fZ - vColorCloud4.z ) );
+vec4 vZEs2 = abs( vec4( fZ - vColorCloud5.z, fZ - vColorCloud6.z, fZ - vColorCloud7.z, fZ - vColorCloud8.z ) );
+vLightDensity = (vZEs.x < vZEs.y) ? vColorCloud1.rg : vColorCloud2.rg; fZError = min( vZEs.x, vZEs.y );
+vLightDensity = (vZEs.z < fZError) ? vColorCloud3.rg : vLightDensity; fZError = min( vZEs.z, fZError );
+vLightDensity = (vZEs.w < fZError) ? vColorCloud4.rg : vLightDensity; fZError = min( vZEs.w, fZError );
+vLightDensity = (vZEs2.x < fZError) ? vColorCloud5.rg : vLightDensity; fZError = min( vZEs2.x, fZError );
+vLightDensity = (vZEs2.y < fZError) ? vColorCloud6.rg : vLightDensity; fZError = min( vZEs2.y, fZError );
+vLightDensity = (vZEs2.z < fZError) ? vColorCloud7.rg : vLightDensity; fZError = min( vZEs2.z, fZError );
+vLightDensity = (vZEs2.w < fZError) ? vColorCloud8.rg : vLightDensity;
+}
+vec3 vFinalCloudColor = mix( u_vColorCloudDark, u_vColorCloudBright, vLightDensity.r );
+fs_Color.rgb = mix( vColorScene, vFinalCloudColor, vLightDensity.g );
+fs_Color.a = 1;
+}
+All together this runs with >50 fps on my laptop's Intel chip - in full HD:
+Here you will find a description of the collision detection for a whole scene in Pathfinder. The post Collision Detection Basics covers the mathematically detection of object - object contacts. The algorithm shown here is designed to be small and efficient at the same time.
+An outdoor scene in Pathfinder currently has more than a million polygons. Testing them all for collision would cost far too many operations. So the first thing is to think about a representation of objects for which collision detection can be faster. Easy to see is that the spatial resolution of objects must not as high as there visual representation. A cylinder with 10 edges would not look smooth but behaves well in physics. A closed ten-sided cylinder still consists of 36 triangles. Wouldn't it be better to use an analytic solution for a cylinder? Yes, but it would also make things much more complicated. So I decided to represent everything by spheres and triangles only. Beside the simplification in the polygonal representations one can wrap spheres around everything. Just using a sphere for each object and test against each of this bounding spheres was fast enough that it worked for months. But if you wanna have more than one dynamic object this is not enough.
+Common Pruning Approaches
+There are different techniques to exclude many objects even without testing against there bounding spheres. Most times a spatial partitioning tree is used. A very famous one is the octree where the space is subdivided into boxes with 8 subboxes each. The objects of the scene are contained in the leaf-boxes which are not further subdivided. Objects which lie in more than one box have to be stored more than once. This causes overhead in the maintainance of the tree which is why I discarded it. For the same reason I did not choose the kd-tree which splits the space along the 3 dimensions recursively.
+Another nice approach is the Sweep & Prune technique where all objects are protected to an arbitrary number of axis. Each projection is an interval on one axis which may overlap with the intervals of other objects. Only if the intervals for two objects intersect on all axis they can collide. Due to temporal coherence the change in the projections between two frames is very small and can be computed fast. The drawback is that ray-scene intersections test cannot be improved much with this technique. E.g. a ray with a direction of (1,1,1) (diagonal) would have a maximal projection interval in x-, y- and z-axis direction. From that point of view it would collide with everything. Since ray-scene intersections is something I would like to have I discarded Sweep & Prune too.
+My favourite is the hierarchy of bounding volumes. There close objects are grouped and each group has a bounding volume the same way objects already have them. An optimal grouping which creates a balanced binary tree is hard to get, but who says that it must be optimal if it is fast and easy.
+The Sphere Tree in Detail
+Of course - if I represent everything by triangles and spheres the bounding volumes must be spheres. Other things as boxes could have smaller volumes for the same group but a collision with a sphere is so much faster that ~6 test could be done instead. So lets build a binary tree of spheres.
+Construction
+One could wait for all objects and build the tree in one big step (offline approach). A good idea would be to search for the two objects where their bounding sphere is the smallest over all pairs. This would create an optimal tree to exclude approximating half of the space in each step in a tree-search. Such an algorithm would take lots of time and only static geometry can be considered at all.
+The other way is to insert elements directly to the tree (online approach). Each node of the tree has either two children or is a leaf representing some object. To decide in which branch the new leaf should be inserted test which one would have the smaller bounding volume afterwards. This prefers close and small sub-branches. I will test later if this is a well performing condition (but seems to be good in current benchmarks). A possible alternative would be to use the sphere which growth less.
+C++
+SphereTreeNode* AddToSphereTree( SphereTreeNode* _pRoot, SphereTreeNode* _pNewLeaf )
+{
+// Is there is nothing the leaf is the tree.
+if( _pRoot == nullptr ) return _pNewLeaf;
+// If _pRoot is a leaf create a new intermediate node.
+if( _pRoot->IsLeaf() )
+{
+...
+pNewIntermediate->BoundingSphere = MeldSpheres( _pRoot->BoundingSphere, _pNewLeaf->BoundingSphere );
+pNewIntermediate->pChildNodes[0] = _pRoot;
+pNewIntermediate->pChildNodes[1] = _pNewLeaf;
+return pNewIntermediate;
+}
+// Choose one of the two children whichs sphere would be smaller afterwards.
+Sphere S1Prediction = MeldSpheres( _pRoot->pChildNodes[0]->BoundingSphere, _pNewLeaf->BoundingSphere );
+Sphere S2Prediction = MeldSpheres( _pRoot->pChildNodes[1]->BoundingSphere, _pNewLeaf->BoundingSphere );
+if( S1Prediction.fRadius < S2Prediction.fRadius )
+{
+// Add to the left subtree
+_pRoot->pChildNodes[0] = AddToSphereTree( _pRoot->pChildNodes[0], _pNewLeaf );
+} else {
+// Add to the right subtree
+_pRoot->pChildNodes[1] = AddToSphereTree( _pRoot->pChildNodes[1], _pNewLeaf );
+}
+_pRoot->BoundingSphere = MeldSpheres( _pRoot->BoundingSphere, _pNewLeaf->BoundingSphere );
+return _pRoot;
+}
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+SphereTreeNode* AddToSphereTree( SphereTreeNode* _pRoot, SphereTreeNode* _pNewLeaf )
+{
+// Is there is nothing the leaf is the tree.
+if( _pRoot == nullptr ) return _pNewLeaf;
+// If _pRoot is a leaf create a new intermediate node.
+if( _pRoot->IsLeaf() )
+{
+...
+pNewIntermediate->BoundingSphere = MeldSpheres( _pRoot->BoundingSphere, _pNewLeaf->BoundingSphere );
+pNewIntermediate->pChildNodes[0] = _pRoot;
+pNewIntermediate->pChildNodes[1] = _pNewLeaf;
+return pNewIntermediate;
+}
+// Choose one of the two children whichs sphere would be smaller afterwards.
+Sphere S1Prediction = MeldSpheres( _pRoot->pChildNodes[0]->BoundingSphere, _pNewLeaf->BoundingSphere );
+Sphere S2Prediction = MeldSpheres( _pRoot->pChildNodes[1]->BoundingSphere, _pNewLeaf->BoundingSphere );
+if( S1Prediction.fRadius < S2Prediction.fRadius )
+{
+// Add to the left subtree
+_pRoot->pChildNodes[0] = AddToSphereTree( _pRoot->pChildNodes[0], _pNewLeaf );
+} else {
+// Add to the right subtree
+_pRoot->pChildNodes[1] = AddToSphereTree( _pRoot->pChildNodes[1], _pNewLeaf );
+}
+_pRoot->BoundingSphere = MeldSpheres( _pRoot->BoundingSphere, _pNewLeaf->BoundingSphere );
+return _pRoot;
+}
+The MeldSpheres function computes the smallest sphere containing the initial two. If one is inside the other the result it the outer sphere. The resulting spheres could be larger than necessary to bound all contained objects. This overhead means that a search could test some spheres two much but statistically this will have no effect.
+C++
+void MeldSpheres( Sphere& _S1, const Sphere& _S2 )
+{
+Vec3 vC = _S2.vCenter - _S1.vCenter;
+float fDist = len( vC );
+// The outer radius is the distance of the reference sphere center and the
+// new sphere edge which is on the opposide side of the seconds sphere's center.
+float fOuterRadius = max( _S1.fRadius, _S2.fRadius - fDist );
+float fRadius = 0.5f * ( max( fDist + _S2.fRadius, _S1.fRadius ) + fOuterRadius );
+// Move to new center
+_S1.vCenter = _S1.vCenter + vC * ((fRadius - fOuterRadius)/(fDist+0.000001f));
+_S1.fRadius = fRadius;
+}
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+void MeldSpheres( Sphere& _S1, const Sphere& _S2 )
+{
+Vec3 vC = _S2.vCenter - _S1.vCenter;
+float fDist = len( vC );
+// The outer radius is the distance of the reference sphere center and the
+// new sphere edge which is on the opposide side of the seconds sphere's center.
+float fOuterRadius = max( _S1.fRadius, _S2.fRadius - fDist );
+float fRadius = 0.5f * ( max( fDist + _S2.fRadius, _S1.fRadius ) + fOuterRadius );
+// Move to new center
+_S1.vCenter = _S1.vCenter + vC * ((fRadius - fOuterRadius)/(fDist+0.000001f));
+_S1.fRadius = fRadius;
+}
+Detection
+How to search for collisions in sphere tree? That is really easy! Take any geometry your basic collision test functions support and test recursively. If the current object collides with the sphere of the tree search in both children if possible. Otherwise we have a collision with a leaf i.e. with the bounding sphere of a certain object. Now the collision test between sphere and object must be performed e.g. on triangle level. Therefore the reference to the object is stored in the leaf node.
+Now one last optimization should be mentioned. I have always spoken of objects, but what happens with large objects as terrains? They would always cause a triangle-level check if used as whole object. One option would be to split the terrain into more small parts. I used a much simpler version - an object in a tree leaf is either a sphere or a constant amount (2) of triangles. Once in a leaf the rest of the collision detection are two further primitive tests!
+The switch from the brute force object-object test to the sphere tree saved ~2 milliseconds per frame (on my laptop with Core i5 3rd gen) while having one dynamic object.

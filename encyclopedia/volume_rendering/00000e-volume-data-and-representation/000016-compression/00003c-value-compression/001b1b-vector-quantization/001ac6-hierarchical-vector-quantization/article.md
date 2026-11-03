@@ -1,0 +1,125 @@
+# Hierarchical Vector Quantization
+
+Also called: HVQ Compression, HVQ rendering, Hierarchical Vector Quantization for Volume Rendering
+
+## Overview
+Hierarchical Vector Quantization (HVQ) is a lossy compression algorithm for volumetric data that achieves around 20:1 compression ratio with minimal artifacts, specifically designed to allow GPU-based decompression and rendering [S2, S3]. Unlike wavelet-based methods that require serial CPU decompression before transfer, HVQ encodes data into an RGB index texture, enabling parallel, on-the-fly decoding directly on the graphics chip to minimize CPU-to-GPU data transfer [S2, S3].
+
+## How it works
+**Inputs:** Static or time-varying volumetric scalar data sets [S2, S3].
+**Outputs:** Compressed file (`.l3vq`) containing headers, codebooks, and index textures; rendered volume images [S2, S3].
+
+**Data Structures:**
+*   **Codebook A:** 256 entries, each 64-dimensional (representing `Difference Level 0`) [S2].
+*   **Codebook B:** 256 entries, each 8-dimensional (representing `Detail Level 0`) [S2].
+*   **Index Texture:** RGB texture where each color component is an 8-bit index into Codebook A or B [S3].
+*   **RGB Triplets:** Stored in the file header, one triplet per block ($D_x'/4 \times D_y'/4 \times D_z'/4$) [S2].
+*   **Decomposed Block Layout (Main Memory):** Top: `Difference Level 0` (Array of size 64); Middle: `Detail Level 0` (Array of size 8); Bottom: `Detail Level 1` (Single variable, the overall mean) [S2].
+
+**Parameters:**
+*   **Block Size ($B$):** $4^3$ (64 voxels) is the fundamental unit for decomposition [S2, S3].
+*   **Codebook Size:** 256 entries (8-bit indices) [S2].
+*   **Dictionary Size ($D$):** 4096 for Chameleon/Supernova, 2048 for Turbulence [S1].
+*   **Interpolation:** Nearest neighbor only during rendering [S3].
+
+**Algorithm Steps:**
+
+1.  **Preprocessing (Resampling):** If the original dimensions $D_x, D_y, D_z$ are not powers of two, re-sample the volume to the closest power-of-two dimensions (e.g., $60 \times 120 \times 79 \to 64 \times 128 \times 128$) using trilinear interpolation [S2]. Let the new dimensions be $D_x', D_y', D_z'$ [S2].
+2.  **Preprocessing (Temporal Difference):** For time-varying data, exploit time redundancy by subtracting consecutive time-step volumes: $S_{t+1}' - S_t'$, where $S_t'$ is the re-sampled data at time $t$ [S2].
+3.  **Hierarchical Decomposition:** Divide the difference volume into $4^3$ blocks [S2]. For each block, perform a multiresolution decomposition [S2]:
+    *   **Step 3.1 (Detail Level 0):** Divide the $4^3$ block into 8 disjoint $2^3$ blocks [S2]. Compute the mean value of each $2^3$ block to form `Detail Level 0` (a down-sampled $2^3$ block) [S2].
+    *   **Step 3.2 (Difference Level 0):** Store the differences between the original 64 samples in the $4^3$ block and their corresponding mean values from `Detail Level 0` in an array of size 64 [S2]. The mapping index for location $(x, y, z)$ in the $4^3$ block is $idx = x + 4 \times y + 16 \times z$, where $x, y, z \in [0, 3]$ [S2].
+    *   **Step 3.3 (Detail Level 1):** Apply the mean-computation process to the `Detail Level 0` block ($2^3$) [S2]. This yields one overall mean value for the entire $4^3$ block (`Detail Level 1`) and 8 difference values (samples in `Detail Level 0` relative to its mean) [S2].
+    *   **Step 3.4 (Memory Optimization):** Replace the values in `Detail Level 0` with the 8 differences from Step 3.3 to save memory space [S2].
+4.  **Vector Quantization (Encoding):** Perform covariance analysis at each resolution level [S3]. Execute a relaxation step to minimize residual distortions [S3]. Compute sets of representative values (codewords) at varying resolution levels [S3]. Encode each vector (the decomposed block components) using a codebook [S2]. Each vector is represented by an 8-bit index [S2]. The resulting indices form the RGB index texture [S3].
+5.  **File Format (`.l3vq`):** The binary file structure is: 1. Flag (8-bit): Endianness indicator [S2]. 2. Integer size (bytes): Machine-independent integer size [S2]. 3. Mode (variable): 1 if compressed from difference of two time steps, 0 if original data [S2]. 4. Dimensions: `sizeX`, `sizeY`, `sizeZ` storing $D_x'/4 \times D_y'/4 \times D_z'/4$ respectively [S2]. 5. `scaleDiff0`: Largest absolute value in `Difference Level 0` [S2]. 6. `scaleDetl0`: Largest absolute value in `Detail Level 0` [S2]. 7. Codebook A: 256 $\times$ 64 bytes [S2]. 8. Codebook B: 256 $\times$ 8 bytes [S2]. 9. RGB Triplets: $D_x'/4 \times D_y'/4 \times D_z'/4$ triplets [S2].
+6.  **GPU Decoding and Rendering:** Load the index texture and codebooks into GPU memory [S3]. Access the compressed data stream and decode on a per-fragment basis using the Pixel Shader API (DirectX9-level or OpenGL GL ARB fragment program extension) [S3]. Use the RGB components of the index texture to look up codewords from the dependent 2D textures holding Codebook A and B [S3]. Employ the early z-test to discard fragments before they enter the fragment program, specifically discarding shader execution for fragments likely to decode empty space [S3].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def mean(arr):
+    """Compute arithmetic mean of a list of numbers."""
+    return sum(arr) / len(arr)
+
+def encode_block(block_4x4x4):
+    """
+    Decomposes a 4x4x4 block (64 voxels) into three levels.
+    Returns: (diff_level_0, detail_level_0_diffs, detail_level_1_mean)
+    """
+    # Step 3.1: Create Detail Level 0 (8 values)
+    detail_level_0 = []
+    for i in range(0, 4, 2):
+        for j in range(0, 4, 2):
+            for k in range(0, 4, 2):
+                sub_block = block_4x4x4[i:i+2, j:j+2, k:k+2]
+                detail_level_0.append(mean(sub_block))
+    
+    # Step 3.2: Create Difference Level 0 (64 values)
+    diff_level_0 = []
+    for x in range(4):
+        for y in range(4):
+            for z in range(4):
+                block_idx = (x // 2) * 4 + (y // 2) * 2 + (z // 2)
+                diff_val = block_4x4x4[x, y, z] - detail_level_0[block_idx]
+                diff_level_0.append(diff_val)
+                
+    # Step 3.3 & 3.4: Create Detail Level 1 (1 value) and Detail Level 0 Diffs (8 values)
+    detail_level_1_mean = mean(detail_level_0)
+    detail_level_0_diffs = [v - detail_level_1_mean for v in detail_level_0]
+        
+    return diff_level_0, detail_level_0_diffs, detail_level_1_mean
+
+def decode_block(diff_l0, det_l0_diffs, det_l1_mean, codebook_a, codebook_b):
+    """
+    Reconstructs a 4x4x4 block from quantized codewords and the mean.
+    Returns: List of 64 reconstructed voxel values.
+    """
+    # Reconstruct Detail Level 0 means from Level 1 mean and Level 0 diffs
+    detail_level_0_means = [det_l1_mean + d for d in det_l0_diffs]
+    
+    # Reconstruct original 4x4x4 block
+    reconstructed = []
+    for x in range(4):
+        for y in range(4):
+            for z in range(4):
+                idx = x + 4 * y + 16 * z
+                block_idx = (x // 2) * 4 + (y // 2) * 2 + (z // 2)
+                voxel_val = detail_level_0_means[block_idx] + diff_l0[idx]
+                reconstructed.append(voxel_val)
+    return reconstructed
+
+def find_nearest_codeword(vector, codebook):
+    """Find the index of the closest codeword in the codebook (Euclidean distance)."""
+    min_dist = float('inf')
+    best_idx = 0
+    for i, codeword in enumerate(codebook):
+        dist = sum((v - c) ** 2 for v, c in zip(vector, codeword))
+        if dist < min_dist:
+            min_dist = dist
+            best_idx = i
+    return best_idx
+```
+
+**Edge Cases and Pitfalls:**
+*   **Interpolation:** Trilinear interpolation is not natively supported because linear interpolation within codebooks is not possible [S3]. It can be approximated by decoding 8 adjacent neighbors in the shader, but this slows performance considerably [S3].
+*   **Sparsity:** Highly sparse data (>99% identical blocks) allows for lossless compression, but most volumetric data is not highly sparse, limiting the applicability of lossless VQ variants [S2].
+*   **Precision:** Elements in difference/detail arrays are typically 8 bits [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Quantization is accelerated by exploiting temporal coherence, achieving performance gains up to a factor of 3 for sequence quantization [S3]. The proposed scheme is 40 times faster than the Open Source vector quantization toolbox QccPack [S3].
+*   **Memory Complexity:** The compressed data size is significantly smaller than the original. For a 256^3 dataset (16 MB), HVQ encodes it into 0.78 MB [S3]. The memory overhead during decomposition in main memory is approximately 14% larger than the original data before quantization [S2].
+*   **Measured Performance:** Rendering 256^3 uncompressed dataset: 11 fps on ATI 9700 [S3]. Rendering 70 MB compressed sequence (1.4 GB source): 24 fps on ATI 9700 [S3]. Time-varying data: 24 fps for shock wave simulation (89 steps, 256^3) and 16 fps for vortex flow simulation (100 steps, 128^3) [S3]. For sparse data sets with empty space skipping, performance is similar or better than rendering uncompressed data sets [S3].
+*   **Compression Ratios:** Chameleon: 0.63 bps [S1]. Supernova: 0.17 bps [S1]. Turbulence: 0.71 bps [S1]. Visible Human: 25.29:1 ratio, 26.02 dB SNR [S3]. Engine: 20.38:1 ratio, 21.87 dB SNR [S3]. Skull: 20.84:1 ratio, 11.70 dB SNR [S3].
+*   **Strengths:** Minimizes CPU-GPU data transfer; allows rendering of data sets that do not fit in texture memory; parallel GPU decompression; good fidelity at reasonable compression rates compared to region encoding [S2, S3].
+*   **Limitations:** Rendering performance drops to roughly 1/3 and 1/2 of standard 3D texture based rendering for tested data sets [S3]; restricted to nearest neighbor interpolation [S3]; quantization artifacts if compression ratio is pushed too high (e.g., 4^3 region encoding yields better ratio but significant artifacts) [S3].
+
+## Background
+Hierarchical Vector Quantization was proposed by Jens Schneider and Rüdiger Westermann at the Technical University Munich [S3]. The method builds on vector quantization theory and aims to address the limitation of limited texture memory in graphics hardware by allowing direct decoding and rendering on the GPU [S3]. It is comparable to wavelet-based compression in fidelity but offers the advantage of parallel GPU decompression [S2].
+
+## Sources
+[S1] Real-time Deblocked GPU Rendering of Compressed Volumes, https://doi.org/10.2312/vmv.20141290, fetched 2026-10-26
+[S2] A system for real-time rendering of compressed time-varying volume data, https://doi.org/10.7939/r3041m, fetched 2026-10-26
+[S3] Compression Domain Volume Rendering, https://www.cs.cit.tum.de/fileadmin/w00cfj/cg/Research/Publications/2003/Compression_Domain_Volume_Rendering/vis03-vq.pdf, fetched 2026-10-26

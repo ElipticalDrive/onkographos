@@ -1,0 +1,324 @@
+A High-Performence Engine To boost Minecraft FPS and reduce Shutters. - engine: Sodium-inspired voxel renderer — software + OpenGL backends, Android frame budgets (2502 headless checks) by arena-ai-coding-agent[bot] · Pull Request #5 · Endiq-jar/Beryllium
+
+engine: Sodium-inspired voxel renderer — software + OpenGL backends, Android frame budgets (2502 headless checks) by arena-ai-coding-agent[bot] · Pull Request #5 · Endiq-jar/Beryllium · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+arena-ai-coding-agent
+Bot
+commented
+Aug 30, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+What this is
+engine/ — a Sodium-inspired voxel renderer in dependency-free C11 (libc + pthread + dl, no other dependencies, no build system beyond make). Same ideas Beryllium pushes in Minecraft, in a form that builds and runs with no JVM, no Minecraft and no GPU:
+seeded terrain, 16×16×16 sections, chunk/column store with revisions
+greedy per-axis meshing into a packed 16-byte integer vertex (8.8 fixed positions, 1/16 UVs, baked AO + sky/block light, tile layer, flags)
+sky + block light engine with an incremental edit queue
+PVS culler walking out from the camera section, rejecting slabs whose visible faces are sealed
+mesh store fed by a worker pool with a per-frame upload budget
+21-call render hardware interface with software and OpenGL backends here
+Why a software backend is the interesting part
+This was written in a container with no GPU, no display, no GL driver, no Vulkan loader and no shader compiler. Instead of shipping an unverifiable GPU path, the reference rasterizer is a first-class backend: same vertex bytes, same 288-byte std140 uniform block, same draw calls, and it writes PNGs through the engine's own encoder. So the whole pipeline — generate, light, mesh, cull, upload, rasterize, encode — is checked by tests that run anywhere.
+Verification
+```
+make -C engine test        # 691 checks, 0 failed  (also clean under -Werror and under ASan+UBSan)
+```
+Four suites, all against the real generator and real mesh data:
+suite
+checks
+what it pins down
+test_basics
+407
+math, block table, vertex packing round-trip, light attenuation rules, PNG structure
+test_world
+50
+world/chunk/section bookkeeping; walks every vertex of every meshed section: a face corner whose four air-side cells are open sky must be baked to light 15 with AO 3 — which is what catches a light sampler reading the owning block instead of the air side
+test_soft_render
+86
+real frames: opaque alpha everywhere, colour variety, ground coverage below the horizon, byte-identical repeat renders, resize, the five debug render modes, OBJ export integrity, PNG bytes, and that occlusion culling repaints no pixel while submitting fewer draws
+test_gl_backend
+148
+the GL command stream (below)
+The suite is mutation checked — each of these makes it fail: inverting the rasterizer's backface-cull sign, sampling light from the owning cell, pinning AO to a constant, selecting the wrong index type, glFrontFace(GL_CW), uploading 256 instead of 288 bytes of uniforms, removing the uniform cache, GL_REPEAT on the tile array.
+OpenGL backend
+src/rhi_gl.c is a real GL 3.3-core implementation (VAO + five glVertexAttribIPointer integer attributes, GL_TEXTURE_2D_ARRAY tiles + lightmap, glBufferStorage where available, offscreen FBO with a depth renderbuffer for capture, applied-state cache, row-flipping glReadPixels). It does not create a context — the current one is the caller's, which is what an embedder provides.
+There is no link-time libGL dependency: all 60 entry points are pointers in BerylGLLoader; production resolves them with dlopen/dlsym, and a test injects stubs with the real prototypes that record the command stream. That's how a GL backend gets verified on a machine with no GL: buffer targets/sizes/usage, one glTexSubImage3D per array layer, filter/wrap modes, the embedded shader source with #version 330 core prepended, the Terrain block looked up by name and bound to point 0, samplers on units 0/1, attribute offsets taken from mesh_format.h, no redundant rebinds, and a draw before a bind in the same pass refused.
+Not verified: that a driver renders the identical image. No GPU was ever attached. engine/README.md says this plainly rather than implying otherwise.
+Vulkan: not shipped, on purpose
+The backend slot exists (BERYL_WITH_VULKAN, beryl_vk_create_terrain_shaders, --backend vulkan reports the truth). Writing the device layer here would mean hand-transcribing VkStructureType, VkFormat, image layout/usage enums and a hand-built SPIR-V module with no SDK header, no validator and no driver to check them against — a wrong constant would be a silent failure on real hardware that not one test in this repo could catch. That trade isn't worth it; the README documents what a Vulkan backend has to satisfy, and the GL backend is the worked example of the shape.
+Engine bugs found and fixed while testing
+Removing a light source now re-derives the column. The incremental retraction refuses to darken a cell brighter than the level it was reached at; inside a sealed volume every remaining cell qualifies once the walk has eaten the gradient, so a torch's light survived its own removal in a pocket.
+beryl_world_set_block clears the edited cell's own light before the deferred pass, so a replacement now carries the replaced block's emission into the queue entry instead of losing it.
+The Makefile computed BACKEND_DEFS/SRCS before assigning BACKEND_SRCS, which silently dropped every optional backend from the build; and EXTRA_CFLAGS, documented in its header, was never appended to CFLAGS (so make EXTRA_CFLAGS=-Werror was a no-op).
+The per-frame mesh drain did not release results the store could not take.
+CI
+engine/ci/engine-job.yml is the job to install: -Werror build → suite → render a frame and check it with tools/pngstat.py --strict → suite again under ASan+UBSan → upload the frame. All five steps were run locally and pass. It is not placed in .github/workflows/ because the App these commits are pushed with has no workflows permission (GitHub rejects such commits outright); copying the file there enables it unchanged.
+Fixed this round: the drain contract (and that is the interesting part)
+beryl_pool_drain() took a result count and a single result pointer and wrote every
+popped result into that one slot. A caller that asked for the whole queue kept the
+last build and orphaned all the others — ~0.25 MB per captured frame under ASan,
+1204 blocks after 4 demo frames, and no visual symptom whatsoever, because a
+dropped section just stays dirty and is rebuilt. The suite could not see it because
+no caller used max > 1.
+drain() now writes one row per result into out[0..max), documented as a batch
+size (16..256) rather than a queue depth; prepare_capture() and finish_all()
+loop over batches, and degenerate calls are refused instead of dropping work.
+tests/test_pool.c (916 checks) is the missing coverage: distinct section keys per
+row, no two results sharing a vertex buffer, index/vertex bounds, release_result
+leaving nothing half-owned, finish_all leaving an empty ring. Reverting the fix
+(single-slot write) fails the suite; so does keeping it but dropping the n++.
+ASan: demo at 4 frames goes from 5989376 byte(s) leaked in 1204 allocation(s) to
+no leak report at all; the suite stays clean.
+Android / low-end tuning
+The frame on a phone-class SoC is mostly bookkeeping — installs, uploads, chunk
+generation — and the ceiling is thermal, so this is a scheduler change, not more
+features:
+beryl_settings_apply_preset(desktop|mobile|low-end): mobile = 8 sections of
+view, 8 installs + 2 MB uploads per frame, 2 chunks generated, occlusion on,
+nearest filtering, governor at 16.7 ms; low-end = 6/4/1 MB at 33.3 ms. A preset
+rebuilds from the defaults (no stale field survives), keeps the caller's
+framebuffer and backend, is idempotent, and yields to an explicit
+--view-distance.
+Frame governor (src/perf.[ch]) owns rebuilds_per_frame and
+uploads_per_frame_bytes: silent inside −20 %/+10 % of target, cuts both budgets
+to ¾ after 2 bad frames, adds ⅛ back after 8 good ones, and treats a frame past
+3× target as a stall — counted, ignored, and it resets the streaks so "one slow
+frame + a GC pause" is not two bad frames. Both floors sit above the values that
+would wedge the renderer (0 installs = a permanent hole; a 0 upload budget means
+unlimited to the store). Pure arithmetic — no clock, no globals — because there
+is no phone here to test against; beryl_engine_note_frame_ms() is the hook the
+launcher (or the mod, from Minecraft's frame timer) feeds the real frame time
+into.
+make ANDROID=1: -flto -fno-semantic-interposition -fvisibility=hidden -fno-plt -ffunction-sections -fdata-sections -Wl,--gc-sections -DBERYL_MOBILE=1
+(NDEBUG=1 additionally drops asserts). No code path changes, so make ANDROID=1 test runs the same suite — 757 KB → 709 KB binary, and the demo starts in the
+mobile preset. The -DBERYL_WITH_OPENGL ordering bug from the first commit is
+why this needed checking.
+Rasterizer scanline walk: raster_tri now solves each row's covered span from
+the affine barycentrics instead of testing every pixel of the bounding box, while
+coverage stays the exact per-pixel test (with one pixel of slack, since only the
+bound is float). 53.2 → 47.2 ms/frame on a 6-frame 960×540 software run with
+a byte-identical PNG (sha256 of both renders equal).
+engine/ci/engine-job.yml gains an ANDROID=1 step.
+Not verified: anything device-specific — no NDK, no ARM board, no GPU in this
+environment. The preset numbers are "where a mid-range phone should start", with the
+reasoning in the comments, not measurements on a phone.
+Notes
+git diff --stat main is 55 files changed, +12430 insertions, 0 deletions: nothing in the mod is removed, moved or renamed, and no build artefact, PNG or generated file is committed (engine/.gitignore now also covers build-*/ for out-of-tree profiles).
+Suite: 2502 checks, 0 failed — clean under -Werror, under ASan+UBSan for both the suite and the demo, and under ANDROID=1 (LTO).
+This session cannot merge to main — the branch is fixed and pushing to main is out of bounds here, so this PR is the hand-off point.
+Arena Agent
+and others
+added 2 commits
+August 30, 2026 04:30
+engine: Sodium-inspired voxel renderer with software + OpenGL backends
+…
+61e7ab2
+```
+A dependency-free C11 renderer for the same world model Beryllium optimises
+in Minecraft: seeded terrain, 16x16x16 sections, greedy per-axis meshing into
+a packed 16-byte integer vertex, baked ambient occlusion and sky/block light, a
+mesh store fed by a worker pool, and a potentially-visible-set culler that walks
+out from the camera section and rejects slabs whose visible faces are sealed.
+
+The render hardware interface is 21 calls with three slots. This lands two of
+them:
+
+  - the software rasterizer, which is a first-class backend rather than a null
+    one: it executes the same vertex format and the same 288-byte std140
+    uniform block as the GPU paths, and writes PNGs through the engine's own
+    encoder;
+  - the OpenGL backend (GL 3.3 core, ES 3.0-compatible source), with an
+    injectable entry-point loader so it neither links against libGL nor needs a
+    driver to be tested. It uses a VAO with five integer attributes, a 2D array
+    of tiles plus a lightmap, immutable buffer storage where available, an
+    offscreen FBO for capture, and an applied-state cache so a section bind costs
+    a UseProgram and a couple of state calls.
+
+Vulkan is deliberately not implemented. The only way to write it here would be
+to hand-transcribe VkStructureType / VkFormat / layout and usage enums against no
+header, no validator and no driver, where a wrong constant is a silent bug no
+test in this repo could catch. The backend slot and its documentation say so
+instead of overselling.
+
+Tests (make test: 691 checks, no GPU, no network, no display):
+  - world/light/format invariants, including a walk over every vertex of every
+    meshed section asserting that a face corner whose four air-side cells are
+    open sky is baked to full brightness with no AO, which pins the light
+    sampler to the air side of the face;
+  - end-to-end frames: opaque alpha, colour variety, ground coverage, identical
+    repeat renders, resize, debug render modes, OBJ export integrity, PNG
+    structure, and that occlusion culling repaints no pixel while submitting
+    fewer draws;
+  - the GL command stream: every buffer target/size/usage, one texture upload
+    per array layer with NEAREST and CLAMP_TO_EDGE on all three axes, the
+    embedded shader source with the profile header prepended, the uniform block
+    looked up by name and uploaded as exactly 288 bytes, integer attributes at
+    the offsets from mesh_format.h, no redundant state, a refused draw before a
+    bind, and byte (not index) offsets for partial draws.
+The suite is mutation checked: flipping the rasterizer's backface sign,
+sampling light from the owning cell, pinning AO to a constant, swapping the
+index type, glFrontFace(GL_CW), a 256-byte uniform upload, dropping the uniform
+cache or using GL_REPEAT on the tile array each make it fail.
+
+Engine fixes found on the way:
+  - removing a light source now re-derives the column. The incremental
+    retraction refuses to darken a cell that looks brighter than the level it
+    was reached at, and inside a sealed volume every remaining cell looks that
+    way once the walk has eaten the gradient, so a torch's light survived its
+    own removal there;
+  - a light source that is replaced by beryl_world_set_block now carries the
+    emission of the block it replaced into the edit queue, because set_block
+    clears the edited cell's own light before the deferred pass runs;
+  - the Makefile computed BACKEND_DEFS/SRCS before they were assigned, which
+    silently dropped every optional backend from the build;
+  - EXTRA_CFLAGS, documented in the Makefile header, was never appended to
+    CFLAGS;
+  - the per-frame mesh drain did not release results the store could not take.
+
+engine/ci/engine-job.yml is the CI job to install (verified locally: -Werror
+build, the suite, a rendered frame checked by tools/pngstat.py --strict, then
+the suite again under ASan+UBSan, leak-free). It is not committed under
+.github/workflows/ because the App these commits are pushed with has no
+`workflows` permission and GitHub rejects such commits outright; copying the
+file into .github/workflows/ enables it unchanged.
+
+engine/README.md records what is verified, what is not (no GPU was ever
+attached here), and the one known leak the sanitizer run in the demo exposes.
+
+Co-Authored-By: Arena Agent <agent@arena.local>
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+engine: fix a silent mesh leak in the pool drain, and tune frame budg…
+…
+21caeae
+```
+…ets for Android
+
+Two halves; the first one is a bug found while measuring the second.
+
+drain() took a result count and a single result pointer, then wrote every popped
+result into that one slot. A caller asking for the whole queue therefore kept the
+last build and orphaned all the others -- ~0.25 MB per captured frame under ASan,
+1204 blocks after 4 demo frames, with no visual symptom at all because a dropped
+section simply stays dirty and is rebuilt. Nothing in the suite covered it because
+nothing called drain with max > 1.
+
+  - beryl_pool_drain() now drains into out[0..max), one row per result, and says so
+    in the header: max is the batch size (16..256), not the queue depth.
+  - prepare_capture() (which was the caller passing 1<<20 against one struct) and
+    finish_all() both loop over batches; drain_and_discard() replaces the two
+    copies of its body.
+  - degenerate calls (NULL out, max <= 0) are refused rather than dropping work on
+    the floor.
+  - new tests/test_pool.c (916 checks): every drained result must be its own row --
+    distinct section keys, no two sharing a vertex buffer, indices in range, verts
+    inside the section, release_result leaving nothing half-owned, finish_all
+    leaving an empty ring. Reverting the fix to the old single-slot write makes the
+    suite fail, as does dropping the n++.
+  - ASan: the demo at 4 frames goes from 5989376 bytes in 1204 allocations to no
+    leak report at all; the suite was already clean and still is.
+
+Then the phone side, since a launcher build is what this project is for. The frame
+on a low-end SoC is mostly bookkeeping -- installs, uploads, generation -- and the
+ceiling is thermal, so what helps is a scheduler rather than more features:
+
+  - beryl_settings_apply_preset(desktop|mobile|low-end): mobile is 8 sections of
+    view distance, 8 installs and 2 MB of uploads per frame, 2 chunks of
+    generation, occlusion on, nearest filtering, governor at 16.7 ms; low-end is
+    6/4/1 MB at 33.3 ms. A preset rebuilds from the defaults (never leaving a stale
+    field behind), preserves the caller's framebuffer and backend, is idempotent,
+    and yields to an explicit --view-distance.
+  - src/perf.[ch]: a frame governor that owns rebuilds_per_frame and
+    uploads_per_frame_bytes. Silent inside -20%/+10% of target; cuts both budgets
+    to 3/4 after 2 bad frames; adds 1/8 back after 8 good ones; a frame past 3x
+    target is a stall, so it is counted and ignored -- and it resets the streaks,
+    so a GC pause plus one slow frame is not "two bad frames". Floors are pinned
+    above the two values that would wedge the renderer (0 installs is a permanent
+    hole, and a 0 upload budget means unlimited to the store). Arithmetic only --
+    no clock, no globals -- so it is testable with no phone;
+    beryl_engine_note_frame_ms() feeds it the embedder's own frame time (the
+    launcher/Minecraft frame timer), else it uses update + last draw.
+  - make ANDROID=1 adds -flto -fno-semantic-interposition -fvisibility=hidden
+    -fno-plt -ffunction-sections -fdata-sections -Wl,--gc-sections and
+    -DBERYL_MOBILE=1, which also makes the demo start in the mobile preset.
+    NDEBUG=1 drops the asserts. No code path changes, so `make ANDROID=1 test` is
+    the same suite: 757 KB -> 709 KB binary here.
+  - raster_tri's scanline walk solves each row's covered span from the affine
+    barycentrics instead of testing every pixel of the bounding box, keeping the
+    exact per-pixel coverage test (plus one pixel of slack, since only the bound is
+    float). 53.2 -> 47.2 ms/frame on a 6-frame software run, with a byte-identical
+    PNG (sha256 equal). The only rasterizer change worth making without hardware to
+    look at.
+  - The Makefile's stale comment claiming a Vulkan backend built against an
+    in-tree vk_min.h is gone: there is no such file and no such backend.
+
+tests/test_perf.c (895 checks) pins the governor's properties, the presets'
+consistency, that presets and governor ranges agree, and one integration test that
+drives a real engine and reads the moved budgets back. Mutation checked: no dead
+band, no hitch guard, no install floor -- each fails the suite.
+
+Docs: engine/README.md gains "Android and low-end devices" (including what is NOT
+verified: no NDK, no ARM device, no GPU here), the known-issue entry is replaced by
+what the drain bug teaches, and the CI snippet gains an ANDROID=1 step.
+
+Suite: 691 -> 2502 checks, 0 failed, clean under -Werror and under ASan+UBSan for
+both the suite and the demo. No file outside engine/ plus the two README sections
+is touched; nothing in the mod is deleted (diff vs main: additions only).
+
+Co-Authored-By: Arena Agent <agent@arena.local>
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+arena-ai-coding-agent
+Bot
+commented
+Aug 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Second round pushed: the pool-drain ownership bug (a silent ~0.25 MB/frame mesh leak, now fixed with a 916-check suite that fails when the fix is reverted) plus the Android/low-end tuning — presets, a frame governor, make ANDROID=1, and an 11 % faster software rasterizer that writes a byte-identical PNG. Suite is at 2502 checks, clean under -Werror, ASan+UBSan (tests and demo, no leak report) and the LTO Android profile.
+Merge to main still has to come from your side: this session can only push arena/01a04e46-beryllium, so gh pr merge 5 --squash (or the button) is the one-liner. engine/ci/engine-job.yml is still outside .github/workflows/ for the same reason — copying it in enables the five steps, including the new ANDROID=1 one. Diff against main is additions only: no file of the mod is deleted, moved or renamed.
+arena-ai-coding-agent
+Bot
+changed the title
+engine: Sodium-inspired voxel renderer with software + OpenGL backends (691 headless checks)
+engine: Sodium-inspired voxel renderer — software + OpenGL backends, Android frame budgets (2502 headless checks)
+Aug 30, 2026
+Hide details
+View details
+Endiq-jar
+merged commit 76cb59b
+into
+main
+Aug 30, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Endiq-jar
+deleted the
+arena/01a04e46-beryllium
+branch
+August 30, 2026 05:42
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

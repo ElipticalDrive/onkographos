@@ -1,0 +1,472 @@
+Contribute to Chamud/3DGS-101 development by creating an account on GitHub.
+
+3DGS-101/textbook/05-alpha-compositing.md at main · Chamud/3DGS-101 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+FilesExpand file tree
+main
+/
+05-alpha-compositing.md
+Copy path
+Blame
+More file actions
+Blame
+More file actions
+Latest commit
+History
+History
+History
+534 lines (419 loc) · 29.8 KB
+main
+/
+05-alpha-compositing.md
+Copy path
+Top
+File metadata and controls
+Preview
+Code
+Blame
+534 lines (419 loc) · 29.8 KB
+Raw
+Copy raw file
+Download raw file
+Outline
+Edit and raw actions
+Chapter 5 — Alpha Compositing & Forward Rendering
+Session goal: take many 2D screen-space Gaussians — each an ellipse with a color and an
+opacity — and blend them into a full image with correct occlusion, so that near objects
+properly cover far ones. By the end you'll have a from-scratch NumPy renderer that sorts splats
+by depth and composites them front-to-back with a running transmittance, and you'll understand
+exactly why the real 3DGS rasterizer does it per-tile on the GPU.
+📐 Prerequisites: Chapter 4 (each Gaussian is now a 2D ellipse with center $\mathbf{x}_i$,
+inverse covariance $\Sigma'^{-1}_i$, color $\mathbf{c}_i$, opacity $\alpha_i$, and a depth $Z_c$).
+🎯 The one sentence to remember: a rendered pixel is a stack of semi-transparent colored glass
+sheets, blended from front to back until no light gets through.
+5.1 A cathedral window made of glass sheets
+Stand inside a cathedral and look at a stained-glass window. Now imagine the window isn't one
+pane but hundreds of small colored glass chips, each partly see-through, layered one behind
+another. The chip nearest your eye tints the light first. Whatever light survives passes to the
+next chip, which tints what's left, and so on. A deep-red chip in front will drown out a pale-blue
+chip behind it — but a faint, barely-there chip in front lets most of the color behind shine
+through.
+That is exactly what rendering a pile of Gaussians is. Each splat is a glass chip: it has a
+color (the tint) and an opacity $\alpha$ (how much it blocks). To find the final color of
+one pixel, we look through the whole stack of chips that cover that pixel, ordered by distance,
+and blend.
+Two facts make this more than a metaphor. First, "how much this splat covers this particular
+pixel" is not a single number per splat — it falls off with distance from the splat's center,
+following its 2D Gaussian shape. Second, the order matters: blending front-to-back and
+back-to-front give the same answer only if you do the algebra right, and one of the two orders
+lets us stop early once the glass has gone fully opaque. 3DGS exploits that.
+🌍 Real-world anchor. This is the same math Photoshop uses to stack layers, the same math
+that composites a CGI dragon over a live-action plate, and the same math NeRF uses along a ray.
+Alpha compositing is one of the most reused ideas in all of graphics. We're just applying it to
+Gaussians.
+5.2 From an ellipse to a per-pixel alpha
+In Chapter 4 each Gaussian became a 2D ellipse in screen space: a center $\mathbf{x}_i = (u_i, v_i)$
+and a $2\times2$ covariance $\Sigma'_i$ describing its stretch and tilt. But an image is made of
+pixels, and we need a single number per pixel: how strongly does splat $i$ affect the pixel at
+$\mathbf{x} = (u, v)$?
+The Gaussian answers that. Evaluate the (unnormalized) 2D Gaussian at the offset from the center:
+$$
+G_i(\mathbf{x}) ;=; \exp!\left(-\tfrac{1}{2},(\mathbf{x} - \mathbf{x}_i)^\top, \Sigma'^{-1}_i, (\mathbf{x} - \mathbf{x}_i)\right)
+$$
+At the very center, $\mathbf{x} = \mathbf{x}_i$, the exponent is 0 and $G_i = 1$. As you walk away
+from the center, the quadratic form in the exponent grows and $G_i$ decays smoothly toward 0. The
+shape of that decay — circular, elongated, tilted — is dictated entirely by $\Sigma'^{-1}_i$. This
+is the "tilted balloon" from the notation guide, now seen head-on as a soft blob on the screen.
+That $G_i(\mathbf{x}) \in (0, 1]$ is a coverage factor. Multiply it by the splat's intrinsic
+opacity $\alpha_i$ and you get the effective per-pixel alpha:
+$$
+\boxed{;\alpha_i(\mathbf{x}) ;=; \alpha_i \cdot G_i(\mathbf{x}) ;=; \alpha_i ,\exp!\left(-\tfrac{1}{2},(\mathbf{x} - \mathbf{x}_i)^\top \Sigma'^{-1}_i (\mathbf{x} - \mathbf{x}_i)\right);}
+$$
+So one splat does not contribute the same alpha everywhere. It's strong (near $\alpha_i$) at its
+center and fades to nothing at its edges. A pixel far outside the ellipse sees $\alpha_i(\mathbf{x}) \approx 0$
+— the splat may as well not be there.
+⚠️ Notation collision, resolved. We use $\alpha_i$ for the splat's stored opacity (one
+scalar, learned during training) and $\alpha_i(\mathbf{x})$ for the effective alpha at a
+specific pixel (opacity times the Gaussian falloff). In compositing formulas below, whenever we
+write $\alpha_i$ inside a per-pixel sum, we mean the effective per-pixel value $\alpha_i(\mathbf{x})$.
+The paper does the same; keep the distinction in your head.
+5.3 Why we must sort by depth
+Blending is order-dependent. Consider two chips over one pixel: a fully opaque red chip and a
+fully opaque blue chip. If red is in front, the pixel is red. If blue is in front, the pixel is
+blue. Same two chips, opposite answers — the only thing that changed is the order. There is no way
+to recover the right image without knowing which splat is nearer the camera.
+"Nearer the camera" is precisely the depth $Z_c$ we computed back in Chapter 1: the splat's
+center transformed into camera space, its $Z_c$ coordinate. Small $Z_c$ = close = drawn first when
+we go front-to-back.
+So before any blending, we sort all splats by $Z_c$. In a full renderer we do this per tile
+(§5.7); in the toy renderer below we do it globally. Either way, sorting is not optional — it is
+the step that turns a bag of splats into a scene with occlusion.
+🐛 Popping artifacts. 3DGS sorts by the splat center's depth, treating each splat as if it
+lived at a single depth even though it's really a 3D blob with extent. When two splats overlap in
+depth and the camera moves, their sort order can suddenly flip, and a splat "pops" from behind to
+in front. Those flickers you sometimes see in 3DGS videos are sort-order flips. Per-splat single
+depth is a speed/quality trade-off, not a law of nature.
+5.4 The "over" operator and where it comes from
+Now the core algebra. Take a foreground color $\mathbf{c}_f$ with alpha $\alpha_f$ placed over a
+background color $\mathbf{c}_b$. What color results?
+Think of $\alpha_f$ as "the fraction of this pixel's light that the foreground emits/blocks." The
+foreground contributes $\alpha_f \mathbf{c}_f$. The remaining fraction $(1 - \alpha_f)$ of the
+light comes from behind, showing the background $\mathbf{c}_b$. Add them:
+$$
+\mathbf{c}_{\text{out}} ;=; \alpha_f \mathbf{c}_f ;+; (1 - \alpha_f),\mathbf{c}_b
+$$
+This is Porter & Duff's over operator, the atom of all compositing. It reads literally as
+"foreground over background." Everything else in this chapter is the over operator applied
+repeatedly down a sorted stack.
+The key quantity hiding in $(1 - \alpha_f)$ is transmittance: the fraction of light that makes
+it through the foreground to reach whatever is behind. One sheet transmits $(1 - \alpha_f)$. Two
+sheets in a row transmit $(1 - \alpha_1)(1 - \alpha_2)$. The transmittances multiply, because
+each sheet independently lets a fraction through. That product is the engine of the next section.
+5.5 Front-to-back compositing with running transmittance
+Line up the sorted splats $i = 1, 2, 3, \dots$ from nearest to farthest. Define the accumulated
+transmittance $T_i$ = the fraction of light that survives all the splats in front of $i$:
+$$
+T_1 = 1, \qquad T_i ;=; \prod_{j < i},(1 - \alpha_j)
+$$
+$T_1 = 1$ because nothing is in front of the first splat — all the light is still available. Each
+subsequent splat sees less light, because the ones ahead of it have absorbed some. The final pixel
+color is every splat's color, weighted by both its own alpha and the light still reaching it:
+$$
+\boxed{;\mathbf{C} ;=; \sum_{i}, \mathbf{c}_i,\alpha_i, T_i, \qquad T_i = \prod_{j&lt;i}(1 - \alpha_j);}
+$$
+In practice we never build that product from scratch each time. We sweep once, front to back,
+carrying a running $T$ that starts at 1 and gets multiplied down:
+$$
+\begin{aligned}
+&T \leftarrow 1, \quad \mathbf{C} \leftarrow \mathbf{0} \\
+&\textbf{for } i = 1, 2, 3, \dots \textbf{ (near} \to \textbf{far):} \\
+&\qquad \mathbf{C} ;\mathrel{+}=; T \cdot \alpha_i \cdot \mathbf{c}_i \\
+&\qquad T ;\mathrel{*}=; (1 - \alpha_i) \\
+&\qquad \textbf{if } T < \epsilon:\ \textbf{break} \quad \text{(fully opaque — nothing behind matters)}
+\end{aligned}
+$$
+Two things to notice. First, this is the boxed formula computed incrementally — after processing
+splat $i$, the running $T$ has become exactly $T_{i+1}$, ready for the next splat. Second, the
+early termination: once $T$ has dropped near 0 (say below $10^{-4}$), the glass has gone
+effectively opaque and no splat behind it can change the pixel. We break. On a real scene with
+dense splats this stops most pixels after only a handful of contributions — a huge speedup that is
+only possible in the front-to-back order.
+Here is transmittance decaying down a stack, drawn out:
+The bar shrinks fast. Splat 4 contributes to only $0.04$ of the pixel — its color is nearly
+invisible under the stack in front of it. That's occlusion, emerging naturally from the running
+product.
+🌍 Foggy layers. Picture driving into successive banks of tinted fog. The first bank you hit
+colors most of your view; by the third or fourth bank so little light gets through that its tint
+barely registers. $T$ is "how clear the air still is." When $T$ hits zero, the road ahead is
+invisible no matter what's out there.
+5.6 A fully worked compositing example (numbers, by hand)
+Let's composite three overlapping splats at a single pixel. Suppose at pixel $\mathbf{x}$ the
+sorted (near→far) effective values are:
+$i$
+depth $Z_c$
+color $\mathbf{c}_i$ (RGB, 0–1)
+effective $\alpha_i(\mathbf{x})$
+1
+2.0
+$(1.0,\ 0.0,\ 0.0)$ red
+0.5
+2
+3.0
+$(0.0,\ 1.0,\ 0.0)$ green
+0.6
+3
+5.0
+$(0.0,\ 0.0,\ 1.0)$ blue
+0.8
+Start: $T = 1$, $\mathbf{C} = (0,0,0)$.
+Splat 1 (red, $\alpha = 0.5$).
+$$\mathbf{C} \mathrel{+}= T,\alpha_1,\mathbf{c}_1 = 1 \cdot 0.5 \cdot (1,0,0) = (0.5,\ 0,\ 0)$$
+$$T \mathrel{*}= (1 - 0.5) = 0.5$$
+Running: $\mathbf{C} = (0.5,\ 0,\ 0)$, $T = 0.5$.
+Splat 2 (green, $\alpha = 0.6$).
+$$\mathbf{C} \mathrel{+}= 0.5 \cdot 0.6 \cdot (0,1,0) = (0,\ 0.30,\ 0)$$
+$$T \mathrel{*}= (1 - 0.6) = 0.5 \cdot 0.4 = 0.20$$
+Running: $\mathbf{C} = (0.5,\ 0.30,\ 0)$, $T = 0.20$.
+Splat 3 (blue, $\alpha = 0.8$).
+$$\mathbf{C} \mathrel{+}= 0.20 \cdot 0.8 \cdot (0,0,1) = (0,\ 0,\ 0.16)$$
+$$T \mathrel{*}= (1 - 0.8) = 0.20 \cdot 0.2 = 0.04$$
+Final: $\mathbf{C} = (0.5,\ 0.30,\ 0.16)$, $T = 0.04$.
+The pixel is a muddy red-leaning color. Red dominates because it was in front with the full
+$T = 1$; blue barely registers ($0.16$) because only $20%$ of the light reached it. The leftover
+$T = 0.04$ is how much background would still show through — if we composite onto a background
+color $\mathbf{c}{\text{bg}}$, we add $T \cdot \mathbf{c}{\text{bg}}$ at the end.
+Sanity check — flip the order. If blue were in front instead ($\alpha=0.8$ first), it would
+grab $0.8$ of the pixel immediately and red/green would fight over the remaining $0.2$. The result
+would be blue-dominant — a completely different color. Order matters; §5.3 was not kidding.
+5.7 Tile-based rasterization (why 3DGS is fast)
+The toy renderer in §5.8 sorts all splats once and, for every pixel, walks the whole sorted list.
+That's correct but wasteful: a splat on the left of the image is tested against pixels on the right
+that it never touches, and a global per-pixel sort would be brutally slow on millions of splats.
+3DGS uses a smarter scheme built for GPUs — tile-based rasterization:
+Split the image into 16×16-pixel tiles. A 1600×1000 image becomes a grid of tiles.
+Assign each splat to the tiles its ellipse overlaps. A splat covering a $30\times30$ pixel
+region touches only ~4 tiles; it's ignored everywhere else. (A splat straddling tiles is
+duplicated into each — cheap.)
+Sort once per tile. Within a tile, sort that tile's splats by depth $Z_c$. Crucially this is
+one sort shared by all $16 \times 16 = 256$ pixels in the tile — not a sort per pixel.
+🌍 How the real kernel pulls this off — one global radix sort. The CUDA implementation
+doesn't run thousands of little per-tile sorts. Instead, each (splat, tile) pair gets a
+64-bit key: the tile ID packed into the high bits, the splat's depth into the low bits.
+One GPU radix sort over all pairs then does two jobs at once: keys sharing a tile ID
+become contiguous (that's the binning), and within each tile ID they land in depth order
+(that's the per-tile sort) — because with the tile in the high bits, the depth bits only ever
+break ties inside a tile. One O(n) sort, both problems solved. That packed key is the
+duplicateWithKeys / SortPairs step you'll meet in the rasterizer source
+(Chapter 9).
+Composite per pixel using the tile's sorted list. Every pixel in the tile runs the
+front-to-back loop of §5.5 over the same ordered list, evaluating each splat's per-pixel alpha
+$\alpha_i(\mathbf{x})$ and terminating early when its own $T$ drops.
+```
+flowchart TD
+    A["🎈 3D Gaussians"] -->|"project (Ch.1) +<br/>EWA splat (Ch.4)"| B["2D ellipses:<br/>xᵢ, Σ'ᵢ, cᵢ, αᵢ, Zc"]
+    B --> C["🗂️ Assign each splat<br/>to overlapping 16×16 tiles"]
+    C --> D["↕️ Sort splats by depth Zc<br/>ONCE per tile"]
+    D --> E["🎨 Per pixel: front-to-back<br/>composite the tile's sorted list<br/>(running T, early-out)"]
+    E --> F["🖼️ Final image ✅"]
+    style F fill:#c8e6c9,color:#000
+```
+Loading
+Why is this so much faster than a global per-pixel sort?
+One sort per tile, not per pixel. 256 pixels share a single sort — a 256× saving on sorting
+work in that tile.
+Locality. Each tile's splat list fits in fast on-chip shared memory; all 256 threads stream
+the same list. GPUs love this.
+Massive parallelism. Tiles are independent, so thousands of tiles composite simultaneously
+across the GPU's cores.
+Early termination compounds. In a dense scene most pixels go opaque after a few splats and
+break, so the average pixel touches far fewer than the tile's full list.
+🌍 Anchor. This tile design is the single biggest reason 3DGS renders in milliseconds where
+NeRF takes seconds. The math (alpha compositing) is old; the tiled GPU scheduling is what made
+it real-time. The reference CUDA rasterizer and libraries like
+gsplat implement exactly this pipeline.
+⚠️ Approximation alert. Per-tile sorting means a splat gets one depth order within a tile,
+even if a huge splat spans a wide depth range. Combined with the per-center depth of §5.3, this
+is why 3DGS occlusion is "mostly right" rather than exact. For photorealistic novel views it's
+more than good enough.
+5.8 A from-scratch NumPy renderer
+Here is a complete, runnable renderer: ten hardcoded 2D Gaussians, each with a center, a $2\times2$
+covariance $\Sigma'$, an RGB color, an opacity, and a depth. It sorts by depth and composites
+front-to-back with an explicit running transmittance, producing correct occlusion (near covers
+far). No graphics library — just NumPy.
+```
+import numpy as np
+
+# ---- Scene: 10 hardcoded 2D Gaussians ----------------------------------
+# Each splat: center (u,v), covariance Sigma' (2x2), color RGB, opacity, depth Zc.
+H = W = 128
+
+def splat(u, v, sx, sy, rot, color, opacity, depth):
+    """Build one splat. sx,sy = ellipse radii (px); rot = tilt in radians."""
+    c, s = np.cos(rot), np.sin(rot)
+    Rm = np.array([[c, -s], [s, c]])
+    Scov = np.diag([sx**2, sy**2])          # axis-aligned covariance
+    Sigma = Rm @ Scov @ Rm.T                 # rotate it -> tilted ellipse
+    return dict(center=np.array([u, v], float),
+                inv=np.linalg.inv(Sigma),    # Sigma'^{-1}, precomputed
+                color=np.array(color, float),
+                opacity=float(opacity),
+                depth=float(depth))
+
+splats = [
+    splat( 40,  40, 22, 12,  0.5, (1.0, 0.1, 0.1), 0.9,  2.0),  # red, near
+    splat( 80,  55, 18, 18,  0.0, (0.1, 0.4, 1.0), 0.8,  4.0),  # blue
+    splat( 60,  70, 30, 10, -0.6, (0.1, 1.0, 0.2), 0.7,  6.0),  # green
+    splat( 95,  95, 15, 25,  0.3, (1.0, 0.8, 0.1), 0.85, 3.0),  # yellow
+    splat( 30,  90, 20, 20,  0.0, (0.8, 0.2, 1.0), 0.6,  8.0),  # purple, far
+    splat(105,  35, 14, 14,  0.0, (0.1, 1.0, 1.0), 0.75, 5.0),  # cyan
+    splat( 55,  30, 25, 15,  1.0, (1.0, 0.5, 0.0), 0.65, 7.0),  # orange
+    splat( 75, 100, 18, 12, -0.3, (1.0, 1.0, 1.0), 0.5,  9.0),  # white, far
+    splat( 20,  55, 12, 22,  0.2, (0.4, 0.9, 0.4), 0.7,  3.5),  # pale green
+    splat( 90,  75, 16, 16,  0.0, (0.9, 0.1, 0.6), 0.8,  4.5),  # magenta
+]
+
+# ---- Sort splats by depth: NEAR (small Zc) first -----------------------
+splats.sort(key=lambda g: g["depth"])
+
+# ---- Pixel grid --------------------------------------------------------
+vv, uu = np.mgrid[0:H, 0:W]                  # v = row, u = col
+pix = np.stack([uu, vv], axis=-1).astype(float)   # (H, W, 2)
+
+# ---- Front-to-back compositing with running transmittance --------------
+background = np.array([0.05, 0.05, 0.08])    # dark navy
+C = np.zeros((H, W, 3))                       # accumulated color
+T = np.ones((H, W))                           # accumulated transmittance, starts at 1
+EPS = 1e-4                                     # early-out threshold
+
+for g in splats:                              # already near -> far
+    d = pix - g["center"]                     # (H, W, 2) offset from center
+    # quadratic form  d^T Sigma'^{-1} d   for every pixel
+    q = np.einsum('...i,ij,...j->...', d, g["inv"], d)
+    G = np.exp(-0.5 * q)                       # 2D Gaussian falloff in (0,1]
+    alpha = g["opacity"] * G                   # effective per-pixel alpha
+    alpha = np.clip(alpha, 0.0, 0.999)         # guard against alpha == 1
+
+    w = alpha * T                              # weight = alpha * light still available
+    C += w[..., None] * g["color"]             # emit this splat's color
+    T *= (1.0 - alpha)                         # absorb: less light for splats behind
+    # (a real renderer would break where T < EPS; here we vectorize over all pixels)
+
+# ---- Composite the remaining transmittance onto the background ---------
+C += T[..., None] * background
+
+img = np.clip(C, 0, 1)
+
+# ---- Show it -----------------------------------------------------------
+import matplotlib.pyplot as plt
+plt.figure(figsize=(5, 5))
+plt.imshow(img)                                # v grows downward -> already correct
+plt.title("10 Gaussians composited front-to-back (near covers far)")
+plt.axis("off")
+plt.show()
+```
+A few implementation notes tie back to the theory:
+splats.sort(key=depth) is §5.3 — near ($\text{small } Z_c$) first, so the front-to-back
+loop is correctly ordered.
+G = np.exp(-0.5 * q) is the per-pixel Gaussian of §5.2; alpha = opacity * G is the
+effective $\alpha_i(\mathbf{x})$.
+w = alpha * T; C += w * color; T *= (1 - alpha) is the exact recurrence of §5.5, run over
+the whole image at once via NumPy broadcasting.
+The final C += T * background uses the leftover transmittance — the same $T = 0.04$ we saw in
+the worked example — to blend in the backdrop.
+🐛 np.clip(alpha, 0, 0.999). If any $\alpha$ hits exactly 1, then $(1-\alpha) = 0$ zeroes
+$T$ forever after — fine for forward rendering, but it makes the gradient vanish in Chapter 6.
+Clamping just under 1 keeps everything well-behaved. Real implementations do the same.
+The real kernel also guards the low end: if a splat's effective per-pixel alpha comes out
+below $1/255 \approx 0.004$, its contribution is skipped entirely — it couldn't change even
+the last bit of an 8-bit pixel, so evaluating it is wasted work (and wasted gradient traffic in
+the backward pass). Between min(0.999, …) above and the 1/255 skip below, a splat only
+participates in a pixel when it can actually matter.
+⚠️ We vectorized instead of break. The math wants an early-out when $T &lt; \epsilon$, but
+that's a per-pixel decision and we're processing all pixels in lockstep with NumPy. On a GPU each
+pixel-thread breaks independently — that's where the speedup lives. Our version does the same
+arithmetic, just without skipping the finished pixels.
+5.9 3DGS vs. NeRF: same math, different sampling
+People often say "NeRF and 3DGS are totally different." At the rendering level, they are
+surprisingly the same — both integrate color along the line of sight using transmittance. What
+differs is what they sample.
+NeRF represents the scene as a continuous field: a neural network (MLP) that, given a 3D point and
+a view direction, returns a color and a density $\sigma$. To render a pixel, NeRF shoots a ray,
+picks many sample points along it (often 64–256), and queries the MLP at each. It then composites
+those samples with the identical transmittance formula:
+$$
+\mathbf{C} = \sum_i \mathbf{c}_i,\alpha_i, T_i, \qquad \alpha_i = 1 - e^{-\sigma_i \delta_i}, \quad T_i = \prod_{j&lt;i}(1-\alpha_j)
+$$
+Look at the structure — it is the boxed equation of §5.5. The transmittance $T_i$, the front-to-back
+product, the weighting by $\alpha_i$: all shared. This is the classic volume rendering equation,
+and both methods inherit it.
+The difference is entirely in the source of the $(\mathbf{c}_i, \alpha_i)$ list:
+NeRF
+3DGS
+Scene representation
+continuous MLP field
+explicit set of Gaussian primitives
+Per-pixel list comes from
+sampling the MLP at many ray points
+the discrete splats that overlap the pixel
+$\alpha_i$ from
+density $\times$ step: $1 - e^{-\sigma_i \delta_i}$
+opacity $\times$ Gaussian: $\alpha_i,G_i(\mathbf{x})$
+Cost per pixel
+hundreds of MLP evaluations
+a few sorted splats (early-out)
+Speed
+seconds/frame
+milliseconds/frame
+```
+flowchart LR
+    subgraph NeRF["🧠 NeRF — sample a continuous field"]
+      R1["ray"] --> S["64–256 sample points"] --> M["query MLP at each<br/>(slow)"] --> CN["composite (T)"]
+    end
+    subgraph GS["🎈 3DGS — composite discrete primitives"]
+      R2["pixel"] --> L["few overlapping splats"] --> SO["sort by depth"] --> CG["composite (T)"]
+    end
+```
+Loading
+So the takeaway: the compositing math is shared heritage; the speed gap is about sampling a
+heavy continuous field versus blending a light discrete one. 3DGS trades the MLP's implicit,
+flexible field for millions of explicit, cheap primitives you can sort and rasterize — and wins
+orders of magnitude in render time.
+Summary
+Each 2D Gaussian becomes a per-pixel alpha $\alpha_i(\mathbf{x}) = \alpha_i,G_i(\mathbf{x})$:
+its stored opacity times the Gaussian falloff $\exp(-\tfrac12 d^\top \Sigma'^{-1} d)$. Strong at
+the center, fading to zero at the edges.
+Compositing is order-dependent, so splats must be sorted by depth $Z_c$ (near→far) first.
+The over operator $\mathbf{c}_{\text{out}} = \alpha_f \mathbf{c}_f + (1-\alpha_f)\mathbf{c}_b$
+is the atom; transmittances multiply down a stack.
+Front-to-back compositing carries a running transmittance $T$ (start 1, multiply by
+$(1-\alpha_i)$ each step): $\mathbf{C} = \sum_i \mathbf{c}_i \alpha_i T_i$. It allows early
+termination when $T \approx 0$.
+Tile-based rasterization (16×16 tiles, assign splats to tiles, sort once per tile, composite
+per pixel) is why 3DGS is real-time on GPUs — a per-tile sort instead of a per-pixel global sort.
+NeRF vs 3DGS share the volume-rendering/transmittance math; NeRF samples a continuous MLP
+(slow), 3DGS composites discrete sorted primitives (fast).
+Review questions
+Try to answer before expanding.
+Why must Gaussians be sorted by depth before compositing?
+answer
+Because alpha compositing (the over operator) is order-dependent: two opaque splats over one
+pixel give the color of whichever is in front, so swapping their order changes the result.
+Correct occlusion — near objects covering far ones — only emerges if we blend in true
+near-to-far order, which is exactly the depth $Z_c$ ordering.
+What does the alpha compositing formula actually compute at each pixel?
+answer
+The final pixel color $\mathbf{C} = \sum_i \mathbf{c}_i \alpha_i T_i$: a weighted sum of every
+overlapping splat's color, where each weight is that splat's *effective* per-pixel alpha
+$\alpha_i$ times the transmittance $T_i = \prod_{j
+What happens if two Gaussians have very different opacities at the same pixel?
+answer
+Whichever is in front sets the tone. A high-opacity front splat absorbs most of the light
+($T$ drops sharply), so the low-opacity splat behind it contributes very little — it's occluded.
+If the low-opacity splat is in front instead, it tints slightly but passes most light through, so
+the high-opacity splat behind still shows strongly. Opacity and order together decide the mix;
+see the §5.6 example where front-red (α=0.5) dominates over back-blue (α=0.8) because blue only
+received $T=0.2$ of the light.
+Why is per-tile rasterization used instead of per-pixel global sorting?
+answer
+Speed on GPUs. A global per-pixel depth sort of millions of splats is prohibitively slow.
+Splitting the image into 16×16 tiles lets us sort each tile's splats *once* and share that single
+sorted list across all 256 pixels in the tile. Tiles are independent (massive parallelism), each
+tile's list fits in fast shared memory (locality), and per-pixel early-out compounds the savings.
+This is the core reason 3DGS renders in real time.
+What's the difference between this and standard NeRF volume rendering?
+answer
+The compositing math is the same volume-rendering equation ($\mathbf{C} = \sum \mathbf{c}_i
+\alpha_i T_i$ with multiplicative transmittance). The difference is the source of the list: NeRF
+*samples a continuous MLP field* at many points along each ray (hundreds of network evaluations
+per pixel → slow), while 3DGS *composites a discrete, sorted set of explicit Gaussian primitives*
+that overlap the pixel (a handful of splats with early-out → fast). Same integral, different (and
+much cheaper) sampling.
+Exercises
+(Core) Run the renderer in §5.8. Confirm the near red/yellow splats visibly cover the far
+purple/white ones. Then reverse the sort (reverse=True, far→near) without fixing the
+compositing math and watch the occlusion invert — far splats now wrongly paint over near ones.
+(Worked example in code) Reproduce §5.6: composite the three splats (red α=0.5, green α=0.6,
+blue α=0.8) at a single pixel with a Python loop carrying $T$, and check you get
+$\mathbf{C} \approx (0.5, 0.30, 0.16)$ with leftover $T = 0.04$.
+(Early-out) Add a per-pixel break: track T as a scalar in a double loop over one pixel's
+sorted splats and stop when T < 1e-4. Count how many splats you skip on the most-occluded
+pixel — that's the speedup the vectorized version hides.
+(Opacity sweep) Take two overlapping splats and sweep the front one's opacity from 0 to 1.
+Plot how much the back splat's color survives in the final pixel. You should see it fall off as
+$(1 - \alpha_{\text{front}})$ — the transmittance curve, felt directly.
+(Tile sketch) Split the 128×128 image into 16×16 tiles. For each tile, compute which splats'
+ellipses overlap it (a cheap bounding-box test on center ± a few std-devs) and print the count.
+Notice most tiles touch only 2–4 splats — the property that makes tiling fast.
+What's next
+You can now render a full, correctly-occluded image from a pile of Gaussians — a complete
+forward pass. But rendering is only half of 3DGS. The whole point is training: nudging every
+splat's position, shape, color, and opacity until the render matches a photograph. That requires
+running this compositing pipeline backwards — computing how the final pixel color changes when
+you wiggle each $\alpha_i$, $\mathbf{c}_i$, or $\Sigma'_i$.
+Chapter 6 — Differentiability & Loss makes this exact renderer
+differentiable: we'll define the loss $\mathcal{L}$ between the render and the target image, then
+push gradients back through the transmittance recurrence to every Gaussian parameter. The break
+and the clip(alpha, 0, 0.999) you saw here will suddenly matter a great deal.
+← Chapter 4 · Index · Chapter 6 →
+You can’t perform that action at this time.

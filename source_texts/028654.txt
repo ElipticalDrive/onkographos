@@ -1,0 +1,1 @@
+A simple ray tracing renderer in C++ that generates a 400x200 PPM image with a red sphere and a gradient blue-to-white background. The program simulates rays from a camera and checks for intersections with the sphere. It outputs the rendered image to a file named `output.ppm`.

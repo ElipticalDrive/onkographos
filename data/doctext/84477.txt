@@ -1,0 +1,86 @@
+My implementation of Voxel Cone Tracing Global Illumination using my custom OpenGL engine (OPEngine). This project was built on top of my Deferred Renderer and it includes all its previous features with the addition of support for real time dynamic revoxelization and mipmapping of the entire scene as well as the conetracing pass.
+
+Voxel Cone Tracing Renderer - Graphics Programming Portfolio
+Otavio Peixoto
+Follow
+Bremen, Germany
+Email
+GitHub
+Resumé
+View Source Code
+My implementation of Voxel Cone Tracing Global Illumination using my custom OpenGL engine (OPEngine). This project was built on top of my deferred renderer and some of the code for voxelization and indirect voxel drawing was based on Conrad Wahlén's work that can be found here. By addapting Conrad's approach, I can voxelize the final scene in real time while generating a sparse voxel list containing all voxels that are filled. This list is then used for drawing the voxelized scene and for unpacking the voxels into a final RGBA texture format.
+Voxelization
+The scene voxelization is done using a geometry shader in order to output the final triangles projected along their dominant axis to maximize the amount of fragments generated to avoid holes on our objects. The geometry shader for dominant axis selection is outlined below:
+```
+float maxComponent = max(normal.x, max(normal.y, normal.z));
+uint ind = maxComponent == normal.x ? 0 : maxComponent == normal.y ? 1 : 2;
+domInd = ind;
+
+for (int i = 0; i < 3; i++)
+{
+  worldPosition = vWorldPos[i];
+  viewPosition = viewMatrix * worldPosition;
+  TexCoords = vTexCoords[i];
+  voxelTexCoord = (gl_in[i].gl_Position.xyz + vec3(1.0f)) * 0.5f;
+
+  if (ind == 0) gl_Position = vec4(gl_in[i].gl_Position.zyx, 1);		
+  else if (ind == 1) gl_Position = vec4(gl_in[i].gl_Position.xzy, 1);
+  else if (ind == 2) gl_Position = vec4(gl_in[i].gl_Position.xyz, 1);
+
+  EmitVertex();
+}
+```
+In addition, the NV_conservative_raster extension was used to guarantee that evert voxel intesected by a triangle is filled.
+In order to revoxelize the scene in real time without artifacts, we must average the fragment colors for the final output. However, this can be problematic since atomic operations are not available by default for the floating point values stored in RGB texture formats. One approach to this is to rely on another extension called NV_shader_atomic_float, but for learning purposes I chose to use a more manual approach like the one mentioned in OpenGL Insights: Octree-Based Sparse Voxelization Using the GPU Hardware Rasterizer by Cyril Crassin and Simon Green. In their approach, the voxel texture is chosen to have an unsigned integer format where the colors are packed. We then use the imageAtomicCompSwap() function to average all fragment contributions:
+```
+uint nextUint = packUnorm4x8(vec4(color.rgb, 1.0 / 255.0f));
+uint prevUint = 0;
+uint curUint = imageAtomicCompSwap(voxel3DData, voxelCoord, prevUint, nextUint);
+
+// atomically average the color
+while(curUint != prevUint) 
+{
+  prevUint = curUint;
+
+  // Unpack newly read value, and counter.
+  vec4 avg = unpackUnorm4x8(curUint);
+  uint count = uint(avg.a * 255.0f);
+  // Calculate and pack new average.
+  avg = vec4((avg.rgb * count + color.rgb) / float(count + 1), float(count + 1) / 255.0f);
+  nextUint = packUnorm4x8(avg);
+
+  curUint = imageAtomicCompSwap(voxel3DData, voxelCoord, prevUint, nextUint);
+}
+```
+Before the final color is stored, a sparse voxel list is also filled in order to issue indirect draw calls when rendering the voxelized scene. Another use of the sparse voxel list is for unpacking the final texture into RGBA8 format. In order to reduce the amount of threads used, we also fill an indirect command buffer for the compute shader so we can only read and write into voxels that are occupied.
+Voxelized scene with direct Illumination
+Conetracing
+After Voxelizing and mipmapping the scene on a simple box filter compute shader, the conetracing pass begins by sampling the Gbuffer to find the starting positions and the direction of the cones. Finally, the accumulated color as well as an estimation of abient occlusion can be obtained as follows:
+```
+// ...
+for(float dist = voxelSize ; dist < maxConeDistance && accum.a < accumThr;) 
+{
+  //coneDiameter = 2.0 * tan(60) = 3.464101615
+  coneDiameter = 3.464101615 * dist;
+  sampleDiameter = max(voxelSize, coneDiameter);
+  sampleLod = log2(sampleDiameter / voxelSize);
+
+  samplePos = startPos + dir * dist;
+
+  sampleValue = textureLod(voxelColorTex, samplePos, sampleLod).rgba;
+
+  accum += (1.0f - accum.a) * sampleValue;
+  opacity = (dist < aoDist) ? accum.a : opacity; 
+
+  dist += sampleDiameter * stepMultiplier;
+}
+
+return vec4(accum.rgb, 1.0f - opacity);
+
+// ...
+```
+On the left we have the ambient occlusion from the conetracing, while on the the middle there is the direct illumination results from deferred shading and on right is the conetraced accumulated color
+Diffuse Indirect Lighting
+The final combination of the direct illumination with the one bounce of diffuse indirect illumination and the ambient occlusion can be seen below:
+Final result
+Scene rendered without Global illumination and no ambient lighting (left) versus scene with one bounce of diffuse indirect illumination from VCTGI

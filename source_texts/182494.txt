@@ -1,0 +1,237 @@
+Build a complete ray-marched scene from scratch in a single GLSL fragment shader: signed distance functions, sphere tracing, normals via the gradient, soft…
+
+Build a Ray Marching SDF Scene in 60 Minutes | 3D…
+1. Setting Up the Full-Screen Shader
+Ray marching needs exactly one draw call: a triangle (or quad)
+covering the whole viewport. All the work happens per-pixel in the
+fragment shader, which reconstructs a camera ray from the pixel's
+normalised device coordinate:
+```
+// Vertex shader: fullscreen triangle, no buffers needed
+void main() {
+  vec2 pos = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+  gl_Position = vec4(pos * 2.0 - 1.0, 0.0, 1.0);
+}
+
+// Fragment shader: build a camera ray per pixel
+uniform vec2 uResolution;
+uniform vec3 uCamPos;
+uniform float uTime;
+
+void main() {
+  vec2 uv = (gl_FragCoord.xy - 0.5 * uResolution) / uResolution.y;
+
+  vec3 ro = uCamPos;                              // ray origin
+  vec3 forward = normalize(-uCamPos);
+  vec3 right   = normalize(cross(forward, vec3(0,1,0)));
+  vec3 up      = cross(right, forward);
+  vec3 rd = normalize(forward + uv.x * right + uv.y * up); // ray direction
+
+  vec3 color = render(ro, rd);
+  fragColor = vec4(color, 1.0);
+}
+```
+Why fragment-only? Every pixel is independent, so
+this maps perfectly onto the GPU's massively parallel SIMD
+architecture — there's no vertex data because there's no
+geometry, just an implicit surface defined by a distance function.
+2. Signed Distance Functions
+A signed distance function (SDF) takes a point
+in space and returns the shortest distance to a surface —
+positive outside, zero on the surface, negative inside. The most
+common primitives (from Inigo Quilez's canonical list):
+```
+float sdSphere(vec3 p, float r) {
+  return length(p) - r;
+}
+
+float sdBox(vec3 p, vec3 b) {
+  vec3 q = abs(p) - b;
+  return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
+}
+
+float sdPlane(vec3 p, float height) {
+  return p.y - height; // infinite ground plane
+}
+
+float sdTorus(vec3 p, vec2 t) { // t = (major radius, minor radius)
+  vec2 q = vec2(length(p.xz) - t.x, p.y);
+  return length(q) - t.y;
+}
+```
+To place shapes anywhere in the scene, transform the query point
+before evaluating: sdSphere(p - center, r) translates,
+and multiplying p by an inverse rotation matrix
+rotates the shape.
+3. The Sphere Tracing Loop
+Sphere tracing (Hart, 1996) exploits a key
+property of SDFs: the returned distance is a safe radius — no
+surface can possibly be closer than that. So you can step the ray
+forward by exactly that distance every iteration without ever
+overshooting through a thin wall:
+```
+const int   MAX_STEPS = 100;
+const float MAX_DIST  = 100.0;
+const float SURF_DIST = 0.001;
+
+float rayMarch(vec3 ro, vec3 rd) {
+  float dO = 0.0; // distance travelled from origin
+
+  for (int i = 0; i < MAX_STEPS; i++) {
+    vec3  p  = ro + rd * dO;
+    float dS = sceneSDF(p); // distance to nearest surface
+    dO += dS;
+    if (dO > MAX_DIST || dS < SURF_DIST) break;
+  }
+  return dO;
+}
+```
+Step count vs. quality: too few steps
+(MAX_STEPS) causes shapes to "melt" at oblique angles
+where the marcher runs out of budget before reaching the surface.
+100 is a good starting point at 800×600; halve it for mobile GPUs,
+double it for scenes with fine detail (fractals, thin torii).
+4. Combining Shapes: Union, Subtraction, Smooth Blending
+Because SDFs are just numbers, boolean operations become trivial
+min/max operations, and Inigo Quilez's polynomial smooth-min
+replaces the sharp seam of a plain union with an organic blend —
+this is how you sculpt melted, blobby forms (metaballs) cheaply:
+```
+float opUnion(float d1, float d2) { return min(d1, d2); }
+float opSubtract(float d1, float d2) { return max(-d1, d2); }
+float opIntersect(float d1, float d2) { return max(d1, d2); }
+
+// Polynomial smooth minimum (Quilez) — k controls blend radius
+float opSmoothUnion(float d1, float d2, float k) {
+  float h = clamp(0.5 + 0.5 * (d2 - d1) / k, 0.0, 1.0);
+  return mix(d2, d1, h) - k * h * (1.0 - h);
+}
+
+float sceneSDF(vec3 p) {
+  float ground = sdPlane(p, 0.0);
+  float sphere = sdSphere(p - vec3(0, 1, 0), 1.0);
+  float box    = sdBox(p - vec3(2.2, 0.7, 0), vec3(0.7));
+  float blobs  = opSmoothUnion(sphere, box, 0.4);
+  return opUnion(ground, blobs);
+}
+```
+5. Surface Normals via the Gradient
+An SDF is a scalar field, and at the surface, its gradient points
+along the outward normal. Since GLSL has no automatic
+differentiation, we approximate it with the "tetrahedron trick" —
+four SDF evaluations at small offsets around the point, which
+is cheaper than the naive 6-sample central-difference method:
+```
+vec3 calcNormal(vec3 p) {
+  const float h = 0.0001;
+  const vec2 k = vec2(1, -1);
+  return normalize(
+    k.xyy * sceneSDF(p + k.xyy * h) +
+    k.yyx * sceneSDF(p + k.yyx * h) +
+    k.yxy * sceneSDF(p + k.yxy * h) +
+    k.xxx * sceneSDF(p + k.xxx * h)
+  );
+}
+```
+6. Lighting: Diffuse, Specular, and Soft Shadows
+Standard Lambert + Blinn-Phong shading needs only the normal and
+light direction. Shadows come from marching a second ray
+from the surface point toward the light — if it hits anything
+before reaching the light, the point is in shadow:
+```
+// Soft shadows (Quilez): tracks minimum distance/travelled ratio
+float softShadow(vec3 ro, vec3 rd, float mint, float maxt, float k) {
+  float res = 1.0;
+  float t   = mint;
+  for (int i = 0; i < 64 && t < maxt; i++) {
+    float h = sceneSDF(ro + rd * t);
+    if (h < 0.001) return 0.0; // fully occluded
+    res = min(res, k * h / t); // penumbra widens with distance
+    t += h;
+  }
+  return clamp(res, 0.0, 1.0);
+}
+
+vec3 shade(vec3 p, vec3 rd, vec3 lightPos) {
+  vec3 n = calcNormal(p);
+  vec3 l = normalize(lightPos - p);
+  vec3 v = -rd;
+  vec3 h = normalize(l + v);
+
+  float diff = max(dot(n, l), 0.0);
+  float spec = pow(max(dot(n, h), 0.0), 32.0);
+  float shadow = softShadow(p + n * 0.01, l, 0.02, 20.0, 16.0);
+
+  vec3 albedo = vec3(0.75);
+  return albedo * diff * shadow + vec3(1.0) * spec * shadow;
+}
+```
+Why offset by n * 0.01? Starting the
+shadow ray exactly on the surface (distance 0) can immediately
+re-intersect the same surface due to floating-point error — a bug
+known as "shadow acne". Nudging the origin slightly along the
+normal avoids it.
+7. Ambient Occlusion
+Ambient occlusion darkens crevices and contact
+points where nearby geometry would block ambient light. Instead
+of an expensive hemisphere integral, Quilez's cheap approximation
+samples the SDF at increasing steps along the normal and compares
+the actual distance to the ideal unoccluded distance:
+```
+float calcAO(vec3 p, vec3 n) {
+  float occ = 0.0;
+  float sca = 1.0;
+  for (int i = 0; i < 5; i++) {
+    float h = 0.01 + 0.12 * float(i) / 4.0;
+    float d = sceneSDF(p + n * h);
+    occ += (h - d) * sca;
+    sca *= 0.95;
+  }
+  return clamp(1.0 - 3.0 * occ, 0.0, 1.0);
+}
+```
+Multiply this result into the diffuse lighting term (and
+separately into any ambient/sky-light contribution) to add
+contact-shadow depth cheaply — no G-buffer or extra passes
+required, unlike screen-space AO.
+8. The Full Scene
+Assembling every piece into a complete render function:
+```
+vec3 render(vec3 ro, vec3 rd) {
+  vec3 lightPos = vec3(3.0, 5.0, -2.0);
+  float d = rayMarch(ro, rd);
+
+  if (d >= MAX_DIST) {
+    return vec3(0.05, 0.06, 0.09); // sky background
+  }
+
+  vec3 p = ro + rd * d;
+  vec3 n = calcNormal(p);
+  vec3 color = shade(p, rd, lightPos);
+
+  float ao = calcAO(p, n);
+  color *= ao;
+  color += vec3(0.02, 0.03, 0.05) * ao; // faint ambient sky term
+
+  color = pow(color, vec3(1.0 / 2.2)); // gamma correction
+  return color;
+}
+```
+Next steps: add camera rotation with the mouse via
+a rotation matrix on rd, animate a shape's position
+with uTime, or replace sceneSDF with a
+fractal distance estimator (Mandelbulb, Menger sponge) — the
+marching loop stays identical, only the distance function changes.
+Frequently Asked Questions
+What will I learn in this tutorial?
+Build a complete ray-marched scene from scratch in a single GLSL fragment shader: signed distance functions, sphere tracing, normals via the gradient, soft shadows, and ambient occlusion.
+What topics are covered in this tutorial?
+This tutorial covers: Setting Up the Full-Screen Shader, Signed Distance Functions, The Sphere Tracing Loop, Combining Shapes: Union, Subtraction, Smooth Blending, Surface Normals via the Gradient, Lighting: Diffuse, Specular, and Soft Shadows, Ambient Occlusion, The Full Scene.
+How long does this tutorial take?
+This tutorial takes approximately 60 minutes to complete.
+What prerequisites do I need before starting?
+This is a Intermediate-level tutorial — no special preparation beyond basic JavaScript is assumed.
+Related Tutorials
+Build a Crowd Evacuation ABM in ~100 Lines of JavaScript
+Behavior Trees: AI for NPCs · 3D Simulations
+ECS Architecture for Large-Scale Simulations in JavaScript | Tutorial

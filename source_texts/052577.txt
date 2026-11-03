@@ -1,0 +1,213 @@
+A WebGPU engine for creative coding. Contribute to Siroko/kansei development by creating an account on GitHub.
+
+voxel-gi-particles: ray-traced lightbox about twice as fast, same image by Siroko · Pull Request #114 · Siroko/kansei · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Siroko
+commented
+Oct 4, 2026
+Copy link
+Copy Markdown
+Owner
+This makes voxel-gi-particles at rt=on about twice as fast with the same image. It keeps 2 bounces, the same particle count, the same resolution and the same materials. Every change is to the example: no gi core or simulation file is touched.
+Before and after
+Headless Chrome, 1600×800, rt=on, Medium, 2 bounces, 8192 particles. The profiler is on (profile=1), timestamps are unquantized, and vsync is off.
+The "before" build is development plus the same timing and capture hooks. It loaded alternately with this build, page after page, because other sessions share this Mac's GPU.
+Per pass, median of 8 alternating loads:
+before
+after
+frame interval
+5.30 ms
+2.37 ms
+GPU, all passes
+5.28 ms
+2.35 ms
+Renderer/MainPass (walls, spheres, reflection)
+5.08 ms
+2.19 ms
+FluidSim/Substep (per frame)
+0.08 ms
+0.05 ms
+VoxelGI/Splat + Resolve + Mips
+0.08 ms
+0.07 ms
+VoxelGI/ParticleCones
+0.03 ms
+0.03 ms
+VoxelGIParticles/PileTop (new)
+–
+<0.01 ms
+The simulation runs at a fixed 60 Hz, so at these frame rates it runs every second or third frame, and its per-frame average is small. In a contended run it took 0.7–3 ms.
+The main pass by layer, median of 3 alternating rounds (set_layers, set_rt):
+main pass with
+before
+after
+everything
+7.46 ms
+2.77 ms
+ray tracing off
+1.60 ms
+1.03 ms
+no floor reflection
+5.19 ms
+1.94 ms
+walls only
+1.70 ms
+1.14 ms
+particles only
+6.79 ms
+2.76 ms
+The ray tracing (everything − ray tracing off) went from about 5.9 ms to 1.7 ms.
+The floor reflection redraw (everything − no reflection) went from 2.3 ms to 0.8 ms.
+The absolute numbers move with the GPU's other load (this table's run was more contended than the one above). The ratios held in every round.
+What changed (each measured A/B within one page, then kept)
+Depth prepass for the spheres, then shading on equal depth: −27% of the main pass.
+The impostors discard, and that turns off the hidden-surface removal Apple GPUs do for opaque draws. So every sphere of the pile drawn before a nearer one still ran the full shading and ray tracing.
+Now a cheap pass lays the spheres' depth (room_spheres_depth.wgsl). The shading pass (room_spheres_shade.wgsl) uses depth_compare: Equal and no depth write, so it runs only for the nearest sphere of each pixel.
+The position is @invariant, as AGENTS.md asks for a second pass testing against a first.
+The wall cones are traced once: −10%.
+The walls' five short occlusion cones were the first metres of their five light cones.
+splitConeTrace follows gi's voxelConeTrace step for step and also returns the transmittance it had on reaching aoDistance. That is exactly what the short cone returned. So the walls now trace 6 cones a pixel instead of 11.
+The ray walk tests only new cells: −15%.
+The walk steps a 2×2×2 block of grid cells. After a step along one axis, half of the block was tested the step before.
+Now it tests only the 4 cells on the leading side.
+The walk stops above the pile: −7%.
+A 64-thread compute pass (pile_top.wgsl) takes the highest sorted particle centre each frame.
+Rays are clipped to the slab under it plus the largest radius, so rays leaving the pile upward no longer walk empty cells up to the ceiling.
+One grid-walk call site per bounce level: −10%.
+The mirror and glass branches each called the tracer, so the shader inlined 6 grid walks.
+Now each level loops over its 1 or 2 rays (sphereRays). The shader inlines 2 walks, which holds fewer registers.
+Rows of cells read as ranges: −14%.
+Cells next to each other along x are next to each other in the sorted order too. So each row of the block is one range of particles: up to 4 ranges a step instead of 8 cells.
+The radius rides in the position's w: about −14% (noisier run).
+Each particle's radius share is now written into its position's w, which the fluid keeps through every pass.
+A sphere test is one load. The sorted index is read only for a hit, to skip the sphere the ray leaves.
+Tried and dropped: drawing the walls after the spheres, so the depth test would skip the walls behind the pile, was slower (4.7 vs 4.1 ms, three alternating pairs). The walls are opaque, so the GPU's hidden-surface removal already skips them.
+Same image
+Both builds rendered the same frozen state, and the PNGs were compared pixel by pixel:
+the same seeded pile with floaters (set_positions, which re-sorts the grid without moving the particles);
+set_paused(true), set_cone_jitter(0) and set_temporal_blend(1), so every frame of that state is the same.
+The baseline renders bit-identically across two loads.
+max diff
+mean diff
+pixels differing
+by more than 2 levels
+rt=on
+213/255
+0.042
+0.82%
+0.18% (2335 px)
+lightbox (default)
+239/255
+0.012
+0.38%
+0.04% (483 px)
+Where those pixels are: single pixels on sphere silhouettes. They come from the @invariant position:
+@invariant rounds the clip position a little differently from development, so the silhouette's discard boundary moves by a fraction of a pixel. That flips some rim pixels between the sphere and what is behind it.
+Built without @invariant, the same rt=on comparison drops to 46 pixels (0.004%). Those lie where two overlapping spheres meet at the same 24-bit depth. The old draw kept the first sphere drawn there, and the equal-depth pass keeps the last.
+With the prepass also off, it drops to 3 pixels, by 1/255. So the shading and ray tracing themselves are unchanged.
+@invariant stays because without it the two pipelines may round depth differently on another GPU and leave holes.
+Added for timing and captures
+profile=1 with profile_report(), and set_layers(walls, particles, reflection).
+set_positions and set_cone_jitter.
+window.kansei is now the whole wasm module.
+Tests
+cargo test in the example:
+every shader validates with naga, including pile_top.wgsl (its Grid matches);
+a radius-share bound test;
+the panel test.
+wasm32 release build: no warnings from the example.
+Headless Chrome: no console errors in any of these:
+lightbox, rt=on, rt=on&gi=off, view=indirect, quality=low&rt=on, scene=cornell;
+1 bounce.
+Rebase: on development after Voxel GI M2 (Voxel GI M2: scene meshes voxelized and lit, diffuse GI on screen (gi-box gi=voxel, voxel+ssgi) #111). The only conflict was AGENTS.md. voxelConeTrace, which splitConeTrace mirrors, is unchanged there.
+AGENTS.md:
+the impostor sharp edge is rewritten from what this measured;
+serve examples with Cache-Control: no-store, because Chrome otherwise keeps the old pkg/ from python3 -m http.server across rebuilds.
+perf(voxel-gi-particles): ray-traced lightbox about twice as fast, sa…
+…
+7acb8fd
+```
+…me image
+
+Measured at rt=on, Medium, 2 bounces, 8192 particles: the main pass's GPU
+time drops from 5.1 to 2.2 ms (medians of 8 alternating page loads), with
+the same image at a frozen fluid state.
+
+- A depth prepass for the spheres, then their shading on equal depth: the
+  shading and ray tracing run for the nearest sphere of each pixel, not for
+  every sphere of the pile behind it (discard keeps Apple's hidden surface
+  removal from doing it).
+- The ray walk tests only the 4 cells a step adds to its 2x2x2 block, reads
+  each row of cells along x as one range of the sorted particles, and
+  stops above the pile's top (a 64-thread max over the sorted positions).
+- A sphere's radius share rides in its position's w, which the fluid
+  keeps: a test is one load, and the index is read for hits alone.
+- One call site per walk: the shader inlines 2 walks instead of 6.
+- The walls' occlusion cones are the first metres of their light cones,
+  traced once.
+
+Adds profile=1 with profile_report and set_layers, and set_positions and
+set_cone_jitter for comparing renders of a fixed state.
+```
+vercel
+Bot
+commented
+Oct 4, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+The latest updates on your projects. Learn more about Vercel for GitHub.
+2 Skipped Deployments
+Project
+Deployment
+Actions
+Updated
+kansei
+Ignored
+Preview
+Oct 4, 2026 1:09am UTC
+kansei-fluid
+Ignored
+Preview
+Oct 4, 2026 1:09am UTC
+Hide details
+View details
+Siroko
+merged commit 9760861
+into
+development
+Oct 4, 2026
+3 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Siroko
+mentioned this pull request
+Oct 4, 2026
+Promote development to main: voxel GI M1-M3, ray-traced particles, Rust/WASM examples on the site
+#113
+Merged
+Siroko
+deleted the
+fm/kansei-voxel-gi-rt-perf
+branch
+October 4, 2026 07:31
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

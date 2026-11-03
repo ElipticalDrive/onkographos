@@ -1,0 +1,734 @@
+Non-rasterized real-time game engine. Path-traced every pixel, mesh CSG via Manifold, MetalFX/NRD denoisers. C++23 + Slang shaders cross-compiling to Metal + Vulkan. Apple Silicon (M-series) and NVIDIA RTX. - feat(rhi.software): CPU path tracer foundation + Embree mesh-BVH wiring (session 1 of N) by havokentity · Pull Request #24 · havokentity/demont-engine
+
+feat(rhi.software): CPU path tracer foundation + Embree mesh-BVH wiring (session 1 of N) by havokentity · Pull Request #24 · havokentity/demont-engine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+havokentity
+commented
+May 15, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Brings the previously-vestigial Software backend up to a working CPU path tracer for the analytic-primitive scene, plus lays the Embree groundwork for the triangle-mesh path. First time the Software RHI has produced anything other than a clear-color present.
+This is session 1 of a multi-session port. The mesh path is wired structurally but doesn't render yet (see "Not yet working" below); subsequent sessions will close that gap.
+Working today
+r_backend software boots cleanly and renders the default 3-sphere + 1-plane scene through the CPU path tracer:
+Lambert direct lighting from a procedural sun
+Per-pixel ray gen from the engine's PtPush camera basis
+Shadow rays against the same scene (Embree if TLAS bound, analytic otherwise)
+Inline ACES + sRGB OETF → slot-0 output texture
+HDR pre-tonemap mirror → slot-1 accum texture so the screenshot accum console command works
+Parallelised across rows on std::thread, capped at hw_concurrency - 4 to leave headroom for the engine's JobSystem (CSG bake worker, etc.)
+Embree vendored: v4.4.0, BSD, ARM64/NEON first-class. Triangle geometry only; curves / quads / instance-array / user / grid / point all disabled. Tasking system is INTERNAL so no TBB drag. Builds in C++17 inside a block() scope override (its headers rely on pre-C++17 transitive <type_traits> / <exception> includes that libc++ no longer pulls in automatically under the project's C++23). Consumers stay C++23.
+Software RHI buffers / textures / pipelines now have CPU-side backing storage. WriteBuffer / WriteTexture copy bytes into std::vector<uint8_t> / std::vector<float> per resource; ReadbackTexture copies back so the screenshot console command works.
+CreateBLAS builds an RTCScene with one triangle geometry from the engine's vbuf/ibuf (host-side copy retained for shared-buffer lifetime).
+CreateTLAS builds a top-level RTCScene with instance geometries pointing at each BLAS's scene, transformed by the engine's 3x4 row-major matrix.
+Example render
+Default scene with the gold sphere removed (so the cube would be visible if mesh path were live). Lambert spheres + plane + procedural sky from a single CPU path-tracer dispatch:
+captures/sw_render.png and captures/sw_render_nogold.png in the screenshot block at the bottom of the diff.
+Not yet working / deferred to session 2
+CSG mesh bake doesn't reliably complete under the software backend's CPU load. The bake worker is dispatched via the engine's JobSystem at frame 1; under the Metal / Vulkan backends the GPU does all the path-trace work so the main + JobSystem threads have plenty of headroom. With the CPU tracer running per-frame, the JobSystem worker is sometimes scheduled poorly enough that the bake never publishes its phase = 2 result, so RebuildMeshResources never fires and no Embree BLAS / TLAS gets built. Mitigation (path-tracer thread cap = hw - 4) helps but isn't sufficient. Session 2 options: (a) move CSG bake out of the JobSystem worker pool onto a dedicated thread; (b) yield the path tracer for one frame after kicking the bake; (c) drive the bake synchronously on first frame for the Software backend.
+Metal + dielectric BRDFs, env-map (HDRI) sampling, MIS, accumulator (running mean), denoiser chain, volumetrics, stars + moon, DOF: all the GPU-side features not yet ported to the CPU kernel. Session 2+ scope. The engine's per-frame binds for these (env_map texture, marginal/conditional CDF buffers, etc.) are visible to the kernel via BindState but currently ignored.
+Slang → CPU compilation pipeline: not set up. The kernel is a hand-written C++ port. If maintenance becomes painful, a future session could investigate slangc -target cpu to share source with the Metal/SPIR-V emits.
+Why the "session 1" framing
+The FOLLOW_UPS entry that originally motivated this work (Software backend mesh path (Embree)) implied a smaller scope — "wire Embree into the existing software path tracer." It turned out the existing software path tracer didn't exist — the Software RHI was a 200-line clear-color stub with no kernel, no BSDFs, no accumulator. The mesh path can't be wired into a renderer that doesn't render. So this PR is the foundation; the actual "mesh visible on Software" payoff lands next session.
+I've recorded the per-session split in the PR description so future-self / reviewers can see what's intentionally deferred vs. broken.
+Test plan
+Mac/Metal-debug clean build (Embree vendored + project compiles in 19 binding-clean targets)
+r_backend software boots without crashes, renders the default analytic scene via CPU kernel, writes a usable PPM via screenshot accum
+r_backend metal still works unchanged (PR only adds code under src/rhi_software/ + a single FetchContent block)
+Windows / Vulkan unchanged: Embree builds and links on Windows clang/MSVC the same way; nothing in this PR touches Vulkan code paths. Worth a smoke test on the RTX 5090 to confirm the Vulkan binary still links + runs correctly with Embree in the build graph.
+Session 2 acceptance bar (not in this PR): mesh visible on Software, parity with Metal/Vulkan output to within procedural-sky-approximation differences.
+Risk assessment
+Existing backends: zero diff. PR only adds code under src/rhi_software/ + Embree FetchContent.
+First-time Embree build: takes a few minutes (multi-ISA compile). Cached after first configure.
+Disk space: Embree + build artefacts ~700 MB in _deps. Fine for normal dev machines.
+feat(rhi.software): CPU path tracer foundation + Embree mesh-BVH wiri…
+…
+6d2190e
+```
+…ng (session 1)
+
+Brings the previously vestigial Software backend up to a working
+CPU path tracer for the analytic-primitive scene + lays the Embree
+groundwork for the triangle-mesh path. First time the Software RHI
+has produced anything other than a clear-color present.
+
+Scope landing here (session 1 of a multi-session port):
+
+* Embree vendored via FetchContent. v4.4.0, BSD, ARM64 / NEON
+  builds first-class. Triangle geometry only -- curves / quads /
+  user / instance-array / grid / point all disabled to keep the
+  static lib small. Tasking system is INTERNAL so no TBB drag.
+  Builds in C++17 inside a block() scope override because
+  Embree's headers rely on pre-C++17 transitive includes
+  (<type_traits>, <exception>) that libc++ no longer pulls in
+  automatically under our project-wide C++23. Consumers
+  (pt_rhi_software) keep building in C++23.
+* Software RHI buffers / textures / pipelines now have CPU-side
+  backing storage. The engine's WriteBuffer / WriteTexture copy
+  bytes into std::vector<uint8_t> / std::vector<float> per
+  resource. Internal texture format is always RGBA32F (4 floats
+  per pixel); the present blit converts to BGRA8Unorm at upload
+  time. ReadbackTexture is implemented so the screenshot console
+  command works.
+* BLAS via Embree: CreateBLAS builds an RTCScene with one
+  triangle geometry attached, retains its own copy of the
+  vbuf/ibuf so the engine can drop the source buffers without
+  invalidating the BVH.
+* TLAS via Embree: CreateTLAS builds a top-level RTCScene with
+  instance geometries pointing at each BLAS's scene, transformed
+  by the engine's 3x4 row-major matrix.
+* CPU path tracer (src/rhi_software/SoftwareTracer.{h,cpp}):
+  hand-written port of a Lambert-only subset of PathTrace.slang.
+  Per-pixel ray gen from the engine's PtPush camera basis,
+  closest-hit against analytic sphere+plane prims (linear loop)
+  and against the TLAS via rtcIntersect1, Lambert direct light
+  from a procedural sun + ambient sky, inline ACES + sRGB OETF
+  to the slot-0 output texture, HDR pre-tonemap mirror into the
+  slot-1 accum texture for the screenshot path. Parallelised
+  across rows on std::thread, capped at hardware_concurrency()-4
+  so the engine's JobSystem (CSG bake worker, etc.) doesn't
+  starve.
+* SoftwareDevice constructor reads the layer's drawable size as
+  a fallback when the caller passes width=height=0 (which the
+  engine does when r_backend is set via demont.cfg before the
+  Window is created; the cvar's on_change handler fires at cfg
+  load, which sits before Window::Create in Engine::Init).
+
+Working today:
+* r_backend software renders the default 3-sphere + 1-plane
+  scene through the CPU path tracer with procedural sky + shadow
+  rays. Output visually consistent with the Metal / Vulkan
+  backend's Lambert pass on the same scene (modulo the rough
+  procedural sky; no HDRI sampling yet).
+* screenshot captures/foo.ppm accum reads back the linear-HDR
+  accum data and produces a usable PPM.
+
+Not yet working / deferred to session 2:
+* CSG mesh bake doesn't reliably complete under the software
+  backend's CPU load. The bake worker is dispatched via the
+  engine's JobSystem at frame 1; under the Metal/Vulkan backends
+  the GPU does all the path-trace work so the main + JobSystem
+  threads have plenty of headroom. With the CPU tracer running
+  per-frame, the JobSystem worker is sometimes scheduled poorly
+  enough that the bake never publishes its phase=2 result, so
+  RebuildMeshResources never fires, no Embree BLAS/TLAS gets
+  built, and the mesh path stays silent. Mitigation in place
+  (path-tracer thread cap = hw - 4) helps but isn't sufficient
+  on its own. Session 2 will either: (a) move CSG bake out of
+  the JobSystem worker pool onto a dedicated thread, (b) yield
+  the path tracer for one frame after kicking the bake, or
+  (c) drive the bake synchronously on first-frame for the
+  Software backend.
+* Metal + dielectric BRDFs, env-map (HDRI) sampling, MIS,
+  accumulator (running mean), denoiser chain, volumetrics,
+  stars + moon, DOF: all GPU-side features not yet ported to
+  the CPU kernel. Session 2+ scope; the engine's per-frame
+  binds for these (env_map texture, marginal/conditional CDF
+  buffers, etc.) are visible to the kernel via the BindState
+  but currently ignored.
+
+Builds clean on Mac/Metal (mac-debug). Embree builds in C++17,
+the rest builds in C++23, link cleanly together. No runtime
+regression on the existing Metal / Vulkan paths -- this PR only
+adds code under src/rhi_software/ + a single FetchContent block.
+```
+Copilot
+AI
+review requested due to automatic review settings
+May 15, 2026 12:19
+Copilot started reviewing on behalf of
+havokentity
+May 15, 2026 12:19
+View session
+Copilot
+AI
+reviewed
+May 15, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+This PR turns the Apple-only Software RHI from a clear-color stub into a CPU-rendering backend with CPU-backed resources, a hand-written path tracing kernel, and initial Embree BLAS/TLAS plumbing for future mesh rendering.
+Changes:
+Adds SoftwareTracer CPU path-tracing kernel for analytic primitives, procedural sky lighting, tonemapping, and optional Embree TLAS tracing.
+Expands SoftwareDevice with CPU-backed buffers/textures, readback/upload support, Embree acceleration structures, and Metal texture upload/present.
+Vendors/configures Embree and links it into the software backend.
+Reviewed changes
+Copilot reviewed 6 out of 6 changed files in this pull request and generated 6 comments.
+Show a summary per file
+File
+Description
+src/rhi_software/SoftwareTracer.h
+Declares the software path-trace kernel entry point and documents current CPU-renderer scope.
+src/rhi_software/SoftwareTracer.cpp
+Implements CPU ray generation, analytic primitive tracing, optional Embree tracing, lighting, tonemapping, and row-parallel execution.
+src/rhi_software/SoftwareDevice.h
+Adds CPU-backed resource structs, bind state, Embree handles, and software resource API declarations.
+src/rhi_software/SoftwareDevice.cpp
+Implements software resource backing, Embree BLAS/TLAS creation, CPU dispatch routing, readback/upload, resize handling, and Metal present upload.
+src/rhi_software/CMakeLists.txt
+Adds SoftwareTracer.cpp and links Embree/GLM into the software RHI target.
+cmake/Dependencies.cmake
+Adds FetchContent configuration for Embree and warning suppression for its targets.
+Comments suppressed due to low confidence (4)
+src/rhi_software/SoftwareDevice.cpp:498
+Resizing the backed output texture changes t->data without updating bytes_held_, so CurrentAllocatedBytes() will report the old allocation size after a swapchain resize. Adjust the counter by the old/new byte delta when replacing the vector contents.
+```
+            t->width  = static_cast<std::uint32_t>(w);
+            t->height = static_cast<std::uint32_t>(h);
+            t->data.assign(std::size_t(w) * h * 4, 0.0f);
+```
+src/rhi_software/SoftwareDevice.cpp:549
+When an existing output texture is present but no longer matches the swapchain size, this creates a new sw_output texture and overwrites output_tex_id_ without removing the old texture from textures_ or subtracting its bytes. The stale backing remains allocated for the lifetime of the device if this resize path is taken.
+```
+    TextureDesc d{};
+    d.width  = static_cast<std::uint32_t>(width_);
+    d.height = static_cast<std::uint32_t>(height_);
+    d.format = pt::rhi::TextureFormat::RGBA8_UNORM;
+    d.usage  = pt::rhi::TextureUsage::Storage;
+    d.debug_name = "sw_output";
+    auto handle = CreateTexture(d);
+    output_tex_id_ = handle.id;
+```
+src/rhi_software/SoftwareDevice.cpp:390
+WriteTexture silently truncates oversized uploads and still returns true. The Device API documents this as an entire-texture upload that should fail on size mismatch, so callers may believe env/star/moon texture data was fully uploaded when only a prefix was stored.
+```
+    const std::size_t cap_bytes = t->data.size() * sizeof(float);
+    const std::size_t to_copy   = std::min(size, cap_bytes);
+    std::memcpy(t->data.data(), src, to_copy);
+    return true;
+```
+src/rhi_software/SoftwareDevice.cpp:394
+The dst_offset parameter is ignored, so any partial buffer update writes at byte 0 instead of the requested destination offset. Other backends honor this offset, and the RHI API exposes it as part of WriteBuffer's contract.
+```
+void SoftwareDevice::WriteBuffer(BufferHandle h, const void* src, std::size_t size,
+                                  std::size_t /*offset*/) {
+```
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+src/rhi_software/SoftwareDevice.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+cmake/Dependencies.cmake
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/rhi_software/SoftwareTracer.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/rhi_software/SoftwareDevice.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/rhi_software/SoftwareTracer.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/rhi_software/SoftwareDevice.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+review: address Copilot inline comments on PR #24 (and the mesh now r…
+…
+0384886
+```
+…enders)
+
+Six comments, all legitimate. Comment 1 was the actual bug blocking
+the CSG mesh path -- my session-1 diagnosis (JobSystem starvation)
+was wrong. The real culprit was much simpler: SupportsHardwareRT()
+returning false caused Engine::EnsureMeshUpdated() to early-return
+before ever submitting the bake. After fixing that the bake fires
+on first dispatch, RebuildMeshResources calls my CreateBLAS /
+CreateTLAS, the kernel sees the bound TLAS, and the drilled CSG
+cube renders correctly alongside the analytic spheres.
+
+1. SupportsHardwareRT(): now returns true. Embree gives us a
+   software-emulated BVH + triangle intersection pipeline that's
+   semantically equivalent to hardware RT for the engine's
+   purposes -- the flag literally gates whether the engine builds
+   ASes and binds them, which we want. Added a comment explaining
+   why a 'CPU + Embree' backend reports true for this.
+
+2. CMake: re-enable EMBREE_GEOMETRY_INSTANCE (was OFF in session 1
+   but the TLAS path immediately tries to create
+   RTC_GEOMETRY_TYPE_INSTANCE geometries -- they failed silently
+   without instance support). Embree rebuilds the relevant
+   intersector / builder shards but the binary size delta is tiny
+   for the triangle-only configuration we already have.
+
+3. SoftwareTracer.cpp: read exposure_state[0] (slot 6) and
+   multiply HDR radiance by it before ACES tonemap, matching the
+   GPU paths. Manual r_exposure changes now affect the software
+   render. Auto-exposure still doesn't apply on Software because
+   that GPU dispatch is a no-op here, but the engine seeds
+   exposure_state from r_exposure on the manual path, so manual
+   mode works correctly.
+
+4. SoftwareDevice.cpp: PresentOutput's per-frame
+   std::vector<uint32_t> heap churn replaced with a class-member
+   scratch buffer that resizes only on swapchain growth.
+
+5. SoftwareTracer.cpp: add <cmath> and <algorithm> includes
+   explicitly. The TU was relying on transitive includes through
+   GLM / Embree headers, which is fragile across compiler /
+   stdlib versions.
+
+6. SoftwareDevice.cpp: ReadbackTexture now returns false when
+   dst_size < src_size instead of silently truncating. Lets the
+   screenshot / capture path fail loudly on a non-RGBA32F target
+   rather than process partial bytes as full data.
+
+Side effect of #1: my session-1 PR description's 'CSG mesh bake
+doesn't reliably complete' note was wrong; it's actually reliable
+once the engine knows it should bake. The thread-count cap
+(hw_concurrency - 4) is still useful but not strictly necessary.
+
+Verified by rendering: with r_backend software the default scene
+now shows red Lambert sphere + drilled gold mesh cube + glass
+sphere on the ground plane, all with proper shadows from the
+procedural sun. Mesh hole topology preserved (drilled-through
+spherical cavity visible).
+```
+Copilot started work on behalf of
+havokentity
+May 15, 2026 13:07
+View session
+Copilot started work on behalf of
+havokentity
+May 15, 2026 13:07
+View session
+Copilot started work on behalf of
+havokentity
+May 15, 2026 13:07
+View session
+Copilot started work on behalf of
+havokentity
+May 15, 2026 13:07
+View session
+Copilot finished work on behalf of
+havokentity
+May 15, 2026 13:09
+Copilot finished work on behalf of
+havokentity
+May 15, 2026 13:09
+Copilot started work on behalf of
+havokentity
+May 15, 2026 13:09
+View session
+Copilot finished work on behalf of
+havokentity
+May 15, 2026 13:09
+Copilot started work on behalf of
+havokentity
+May 15, 2026 13:09
+View session
+Copilot finished work on behalf of
+havokentity
+May 15, 2026 13:09
+Copilot finished work on behalf of
+havokentity
+May 15, 2026 13:10
+Copilot finished work on behalf of
+havokentity
+May 15, 2026 13:11
+Hide details
+View details
+havokentity
+merged commit 903dc4b
+into
+main
+May 15, 2026
+8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+havokentity
+deleted the
+feature/software-embree-mesh
+branch
+May 15, 2026 13:13
+havokentity
+mentioned this pull request
+May 15, 2026
+feat(render): physical sun-disc flatten near horizon (Saemundsson refraction)
+#31
+Closed
+5 of 7 tasks
+havokentity
+added a commit
+that referenced
+this pull request
+May 15, 2026
+feat(render): physical sun-disc flatten near horizon (Saemundsson)
+…
+fbc2281
+```
+Atmospheric refraction lifts the sun's lower limb more than its upper
+limb, vertically squashing the apparent disc into an oval as it nears
+the horizon. New cvar r_sun_horizon_flatten (default 1) enables the
+physical effect; 0 keeps a perfect circle. Effect fades to <1% above
+~5 deg elevation, ~19% squish at the horizon (4:5 oval).
+
+CPU side computes the differential via Saemundsson 1986 across the
+real solar disc (~0.265 deg radius), independent of r_sun_size so
+cinematic sun multipliers don't distort the physical ratio. Result
+is pushed via sun_extra.z (was reserved). State transitions on the
+cvar and on entering/leaving the active-refraction band emit
+LOG_INFO lines per the engine's log-on-state-transition convention.
+
+Shader (sunDisc in PathTrace.slang) builds a sun-local horizon frame
+and tests elliptical disc-membership when sun_extra.z < 0.999, with
+a circular fast path otherwise. The squashed oval is fully contained
+inside the original circular cone (vertical radius shrinks; horizontal
+unchanged), so the existing cos(r_deg) gate is a valid superset
+prefilter for both branches. Halo stays circular -- it's at-observer
+scattering rather than source-side refraction, and the gradual
+falloff would hide any anisotropy regardless.
+
+Verified with denoiser-off vertical-luminance profile through the disc
+column at elev=0.3 deg: disc top edge moves down 16 px in flat=1 vs
+flat=0, matching the predicted 16 px (= 18.6% * 173 px disc radius
+half-distributed top/bottom). CPU log confirms vertical-scale=0.814
+at the same elevation.
+
+Software backend's sun is a 2-line procedural-sky stub (PR #24
+session-1) that doesn't model atmospheric refraction; out of scope
+for this change.
+
+Branched from v0.3.14 because Mac is investigating a separate build
+issue on origin/main; rebase before merge.
+```
+This was referenced May 15, 2026
+feat(render): physical sun-disc flatten near horizon (Saemundsson refraction)
+#32
+Merged
+feat(shaders): procedural_raymarched cloud mode alongside pathtraced (#24)
+#214
+Merged
+havokentity
+added a commit
+that referenced
+this pull request
+May 19, 2026
+feat(shaders): procedural_raymarched cloud mode alongside pathtraced (#…
+…
+cfd119f
+```
+…24) (#214)
+
+Adds a Schneider/Decima-style raymarched cloud pre-pass as an alternative
+to the existing inline path-traced cloud march. The two modes coexist;
+the user picks via r_clouds_mode cvar (default "pathtraced", new value
+"procedural_raymarched").
+
+Dual-mode design:
+  pathtraced (default): the existing PathTrace.slang inline cloud march
+    runs unchanged -- bit-for-bit preserved vs pre-#24 main. All Metal
+    goldens regenerate without change (verified clean across 24 cells
+    including bsc_night_clouds + clouds-bearing sky scenes).
+  procedural_raymarched: dedicated CloudsRaymarch compute pre-pass
+    raymarches the cloud layer (32 jittered samples) with 6-step
+    Beer-Lambert light-marching toward sun + moon (exponential growth,
+    Schneider production tuning). Powder term + HG phase. PathTrace.slang
+    gates its inline cloud-density sampling OFF in this mode AND skips
+    the cloud_trans_tex write (the pre-pass owns it). A small
+    CloudsComposite kernel alpha-blends the pre-pass output into the
+    post-denoise HDR using premultiplied alpha.
+
+Push struct layout:
+  PtPush grew by 16 bytes for the clouds_runtime uvec4. The previous
+  Metal push_buf_ was sized at exactly 1024 B; bumped to 2048 B to
+  prevent the trailing 16 B from getting silently truncated by setBytes
+  (manifested as cloud-bearing scenes going pitch-black -- the shader
+  was reading garbage clouds_runtime and corrupting downstream uniform
+  reads through MSL layout reorder). Documented inline.
+
+Plumbing:
+  * Shader: PathTrace.slang reads clouds_runtime.x to gate the inline
+    march; cloud_density_at returns 0 in raymarched mode; the final
+    cloud_trans_tex write is skipped.
+  * Pipelines: CloudsRaymarch + CloudsComposite registered on Metal and
+    Vulkan (resolve()/build_pipeline() entries in Engine + each device).
+    Vulkan keeps the 112B push split + 1024B Frame UBO tail; the new
+    push fits.
+  * Textures: 2x RGBA16F clouds_color ping-pong (temporal EMA history)
+    allocated alongside cloud_trans_tex when denoiser is active. Same
+    lifecycle as the existing denoiser G-buffers; freed and re-created
+    on swapchain resize.
+  * Dispatch: when r_clouds_mode == procedural_raymarched AND clouds_p1.w
+    > 0 AND denoiser is active, CloudsRaymarch fires AFTER PathTrace
+    (overwrites cloud_trans_tex with the raymarch result) and
+    CloudsComposite fires BEFORE StarsComposite (blends clouds into
+    HDR; celestials still see the new cloud_trans for occlusion).
+    All gates off -> zero per-frame cost on the pathtraced path.
+
+Perf (clouds_godrays.cfg, 768x432, 16 frames, Metal + svgf_atrous):
+  pathtraced (baseline): ~6.3s total / ~10s without warm cache
+  procedural_raymarched: ~2.4s total
+  -> 2.6x faster on this scene; the bigger wins land on cloud-heavy
+     compositions where the inline march dominates frame time.
+
+Acceptance:
+  * Build clean: cmake --build build/mac-release --target demont -j 8
+  * Metal goldens all pass (24/24), including bsc_night_clouds which
+    catches the cloud + denoiser path -- pathtraced mode is bit-for-bit
+    preserved.
+  * New golden cell: clouds_raymarched__metal__svgf_atrous (pinned PNG
+    in tests/goldens/Darwin/).
+  * Unit tests: 20/20 pass.
+
+Out of scope (follow-ups):
+  * Visual parity tuning -- the raymarched output is darker than the
+    path-traced version (simpler sun_radiance + no multi-scatter
+    octaves). Architecture is in place; future polish can plumb the
+    analytic atmospheric transmittance + altitude-boost from the path
+    tracer's sun_rad code so the two modes match.
+  * Half-res rendering: CloudsComposite already has nearest-neighbour
+    upsampling support gated on r_clouds_raymarched_resolution_scale
+    < 1.0; bilateral upsample is a quality follow-up.
+  * Temporal EMA wiring is in place (r_clouds_raymarched_temporal_alpha)
+    but defaults to 0 for deterministic goldens; production scenes can
+    crank to 0.7-0.9 for smoother motion.
+
+LOC: ~580 in C++ + 2 new shader files (~350 LOC each).
+```
+havokentity
+mentioned this pull request
+Aug 29, 2026
+planet: real MODIS land cover, modulated by slope and a derived snowline (#300)
+#303
+Merged
+havokentity
+added a commit
+that referenced
+this pull request
+Aug 29, 2026
+planet: real MODIS land cover, modulated by slope and a derived snowl…
+…
+5b168f5
+```
+…ine (#300) (#303)
+
+* feat(planet): real MODIS land cover, modulated by slope and a derived snowline (#300)
+
+The terrain shaded with one albedo and a fixed snowline, so at 6 264 m the
+Himalayas came out uniform white and from orbit the planet was a well-lit
+uniform sphere. This ships a measured albedo raster and replaces the two
+shading shapes sitting on top of it with physical models.
+
+THE DATA. MODIS MCD43A4 v061 Nadir BRDF-Adjusted Reflectance, bands 1/4/3
+(620-670 / 545-565 / 459-479 nm) as R/G/B, baked to a 2048x1024 RGBA8
+equirectangular grid on the DEM's own registration. NASA LP DAAC: no
+copyright, citation requested not required.
+
+MCD43A3/C3 -- the products that are actually albedo rather than nadir-view
+reflectance -- would be better, and the tool implements the path to them,
+but every archive of them is behind a NASA Earthdata Login (measured: 404 /
+302-to-URS / 401 / AccessDenied). Blue Marble was rejected on a checkable
+ground: Stockli et al. 2005 sec. 2.5 applied an unpublished cubic-spline
+contrast enhancement, measured at 0.9x-10.9x varying by band AND site, so
+it cannot be undone -- and #280 has just made that kind of baked-in
+illumination visible. assets/planet/PROVENANCE.md records all of it,
+including what NBAR is NOT.
+
+Validated rather than asserted: median luminance ratio 0.96 against
+published visible-band reflectance at nine sites, area-weighted mean land
+reflectance 0.160, and -- the check a grey sphere cannot pass -- every
+vegetated site has G > R and G > B, every soil site R > G > B, every ice
+site neutral to 15%.
+
+THE TWO MODELS. Both were shapes; both are now derived and cited.
+
+  Slope -> rock exposure now ramps across the measured threshold hillslope,
+  30 deg (Burbank et al. 1996) to 45. The ramp it replaces was zero below
+  SIXTY degrees and did not saturate until 84, so it exposed no rock on any
+  terrain a heightfield can represent. That is why the Himalayas were white:
+  the measured rock fraction at that camera has a median of 0.918.
+
+  Snowline is now the warm-season freezing level -- zonal-mean temperature
+  (North, Cahalan & Coakley 1981) plus half the annual range, over the
+  6.5 K/km environmental lapse rate (ICAO/ISO 2533), anchored at the
+  measured tropical ELA (Kaser & Osmaston 2002). Against published
+  equilibrium-line altitudes at 0/45/60/80 deg it halves the mean error,
+  245 m against 441 m. More importantly it is evaluated at the SHADED POINT
+  rather than at the site, so a globe no longer has one snowline everywhere.
+
+The procedural classification stays, in its proper place: the path for a
+body with no data, and the per-texel fallback wherever the raster has no
+coverage.
+
+A LATENT BUG THIS TRIPPED. MetalDevice.h and VulkanDevice.h each carried a
+bare 2048-byte PushConstants staging array; sizeof(PtPush) reached 2064 and
+BOTH silently dropped the last 16 bytes, so the terrain ignored its new
+raster on two backends with no error anywhere. The header's own comment
+already recorded two earlier instances (#21 mesh motion blur, #24 black
+clouds). The size is now one shared pt::rhi::kMaxPushConstantBytes,
+static_asserted against sizeof(PtPush) in Engine.cpp, and PushConstants()
+logs rather than truncating in silence.
+
+BINDING 47 / ENGINE SLOT 22, both the last available: 37 is GodRays' mask
+texture, 40-45 are reserved by OceanCascades.slang, 46 is #280's LUT, and
+slot 22 is the last entry in every backend's 24-wide table.
+
+TESTS. tests/pt_planet_albedo_test.cpp, 20 cases: container round-trip and
+truncation refusal, the C1 interpolation bound with a plain-bilinear
+negative control, the snowline table against published ELAs, the old slope
+ramp pinned as a failure, the raster's spectral shape and its variation
+(five of ten reflectance deciles populated), and the wire formats across
+five files with occurrence counts and a CRLF case.
+
+GOLDENS. planet_surface's exposure is re-derived by measurement: at 0.01587
+the frame is unclipped but its median is 0.682, so rock and snow both sit in
+the tone curve's shoulder and it reads white whatever it contains. 0.004
+puts the median at 0.314 with 190 distinct luminance levels. planet_aerial,
+planet_lod_seam and orbital_limb are re-pinned for the shading change; a new
+planet_land_orbit cell pins the full disc, where the raster is the point.
+Closes #300
+
+* fix(atmosphere): the medium has a floor -- stop integrating air below the datum (#300)
+
+planet_land_orbit rendered dark with a yellow-brown cast over the whole
+disc. It was not the land cover, not the tone curve and not the sun's
+spectrum -- #280 already made that blue-weighted, which is why a warm disc
+pointed at the surface term rather than at the light.
+
+THE MECHANISM, MEASURED. ptAtmoOpticalDepth clipped its interval to the
+TOP of the shell (#260) and left `max(h, 0)` as its only floor. That clamp
+is not a bound: it charges every sub-datum metre at SEA-LEVEL extinction,
+so the error grows linearly with depth and without limit.
+
+Nothing exercised it until terrain streaming, because before that the
+ground WAS the datum. With terrain on the two radii are chosen on
+different bases -- the atmosphere's datum becomes the SITE's geocentric
+radius (6 373 458.18 m at 27.99 N) while P3's analytic backstop is
+WGS-84 b - 10 935 - 65 (6 345 752.31 m), a constant picked to sit inside
+every chunk everywhere. The backstop is 27 705.87 m below the datum, and
+from orbit the backstop IS the visible planet, every pixel of it.
+
+Read out of the Metal kernel at the sub-solar nadir pixel by writing
+atmosphericTransmittance() to the framebuffer under r_tonemap_op linear:
+
+    tau   R 0.4608   G 0.7597   B 1.4338     shader, as shipped
+    tau   R 0.4632   G 0.7575   B 1.4260     the same rule, on the host
+    tau   R 0.0662   G 0.1468   B 0.2761     the true nadir column
+
+5.2x the optical depth in G and B. And because the excess is Rayleigh --
+lambda^-4 -- it reddens as it dims: transmittance R/B goes 1.23 -> 2.62.
+Both reported symptoms out of one term, which is why brightening the frame
+would have been the wrong fix.
+
+THE FIX IS THE MEDIUM'S OWN DEFINITION, not a tolerance. `b` declares air
+on [ground_radius, top_radius]; the integral now covers the part of the
+ray inside it, via the same ptRayShell every other shell consumer uses.
+What it discards is the air over genuinely sub-datum GROUND, and unlike
+the tail it replaces that is bounded in closed form: the deepest exposed
+land on Earth is the Dead Sea shore at -430 m, i.e. 0.0094 of optical
+depth in green, 0.9% of transmittance -- against an error that was
+previously unbounded.
+
+ptRayShell moves above ptAtmoOpticalDepth. Slang has no forward
+declaration here and Vulkan is not built on macOS (#290), so the ordering
+is pinned as a test rather than proved by the Metal build. The SPIR-V
+lowering was checked by hand rather than assumed: slangc with -target
+spirv -DPT_TARGET_SPIRV over the same module chain emits an 8.86 MB
+module with no diagnostics, and spirv-val accepts it. That retires the
+compile/lowering half of the #290 risk for this change. Pixel correctness
+on Vulkan remains unverified here, as it is for everything else on this
+platform.
+
+THE SAME DEFECT ON THE IN-SCATTER SIDE. The primary-hit aerial-perspective
+march clipped to the shell but passed r_inner = 0, so it marched the same
+27.7 km as a slab of sea-level air -- and being in-scatter it ADDED light.
+Measured at nadir, sub-solar: sigma_s(0) * 27.7 km * P_R(-1) * E =
+(7.4, 21.6, 54.4) W/m^2/sr against a true column in-scatter of
+(2.1, 6.2, 15.7). skyPhysical has carried the ground clamp since #260;
+this march now carries it too, so the two agree about where the air ends.
+
+No image golden moves for that half, and that is the point: every fixture
+with r_sky_mode physical has r_planet_terrain 0, and without terrain the
+analytic body sits AT the datum, so the clamp is a no-op on all nine of
+them. That is the gap the defect lived in. Guarded by a source pin until a
+cell combines the two.
+
+RED-THEN-GREEN. Reverting the mirror reds 18 assertions in "the air column
+ends at the datum, not at the surface it hits"; reverting either shader
+clause reds the source pins. "the clip is a no-op for every ray that starts
+inside the shell" had been pinning the defect -- its downward rays ran
+30 km from 10 km up, straight through the ground -- so its t is now capped
+at the ground crossing, which is what a primary ray actually does, and it
+gains a floor sub-case mirroring its existing ceiling one.
+
+GOLDEN DECOMPOSITION. planet_land_orbit is the only image that moves:
+mean 23.28, max 334.2, 14.19% of pixels -- 4.6x the land-cover ablation
+that cell exists to measure, i.e. the atmosphere bug was a bigger effect
+on the frame than the feature under test. Thresholds re-measured, not
+inherited: the r_planet_land_albedo 0 ablation now moves it by mean 5.011
+with 6.91% bad (unloading the raster gives identical figures), so
+MEAN_DELTA 0.8 keeps 6.3x and FAIL_PERCENT 1 keeps 6.9x. Three repeat
+renders are bit-identical. 205/208 pass; the three failures are the held
+night cells awaiting #280's airglow remainder.
+
+r_exposure 0.05 re-derived against the corrected frame and left alone: it
+sits on the plateau of distinct luminance levels (221) and at the peak of
+both chroma separations, with nothing clipped. Swept and tabulated in the
+fixture header.
+
+TWO THINGS DELIBERATELY NOT DONE HERE, both recorded in the fixture:
+
+  * This cell uses r_sky_mode procedural at 30 000 km -- a sky DOME whose
+    own docstring says the observer is implicitly at ground level. Space
+    renders as (0.0281, 0.0572, 0.1710) of painted sky blue instead of
+    zero, and the aerial-perspective march spans min(primary_t, 60 000 m)
+    outside the physical mode, so from 30 000 km it samples vacuum:
+    r_volumetric_intensity 0 and 5 render this cell BIT-IDENTICALLY. The
+    disc has extinction and no atmosphere. Switching to physical halves
+    the distinct levels the disc carries (221 -> 114) and surfaces the
+    from-orbit magnitude of #280's multiple-scattering table. Measured at
+    nadir, sub-solar, once the slab above is removed: the march returns
+    (8.36, 15.54, 24.93) against a single-scatter Rayleigh backscatter of
+    (2.12, 6.23, 15.71), i.e. the table supplies 3.9x / 2.5x / 1.6x in
+    R / G / B. An r_sky_ground_albedo 0 ablation moves only 3-7% of it, so
+    that is the multiple-scattering term proper and not the ground bounce.
+    Nothing has characterised it from orbit, and this change does not.
+
+  * The ocean has no body colour. Measured on planet_ocean_orbit: with the
+    atmosphere removed the off-glitter water is (1.23, 1.45, 1.64), B/R
+    1.33 -- neutral and near-black -- against (3.86, 8.82, 21.81), B/R
+    5.66 as shipped. All of the blue is atmospheric Rayleigh. P7's
+    in-scatter march is gated on primary_in_water, so a ray refracting in
+    from OUTSIDE gets Beer's law absorption and no scattering: there is no
+    water-leaving radiance for a camera outside the medium. That is a
+    missing term, not a wrong constant, and it is scoped out rather than
+    approximated with a blue albedo.
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

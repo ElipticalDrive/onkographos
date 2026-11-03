@@ -1,0 +1,339 @@
+# sdf-terrain
+Experiment in ray marching, signed distance fields, and procedural terrain generation
+
+### shaders/frag.glsl
+```
+#version 440 core
+
+in vec4 v_Colour;
+
+uniform consts {
+  vec2 u_Resolution;
+};
+
+out vec4 Target0;
+
+const float EPSILON = 0.0001;
+
+float f(float x, float z) {
+  return (sin(x) + sin(z))/4;
+}
+
+vec3 rayDirection(float fieldOfView, vec2 size) {
+  vec2 xy = gl_FragCoord.xy - size / 2.0;
+  float z = size.y / tan(radians(fieldOfView) / 2.0);
+
+  return normalize(vec3(xy, -z));
+}
+
+bool marchRay(vec3 origin, vec3 direction, inout float resT )
+{
+  const float dt = 0.1;
+  const float mint = 0.01;
+  const float maxt = 100.0;
+  
+  for (float t = mint; t < maxt; t += dt)
+  {
+    const vec3 point = origin + direction * t;
+    if (point.y < f(point.x, point.z))
+    {
+        resT = t - 0.5 * dt;
+        return true;
+    }
+  }
+  return false;
+}
+
+vec3 estimateNormal(vec3 point)
+{
+  return normalize(vec3(
+    f(point.x - EPSILON, point.z) - f(point.x + EPSILON, point.z),
+    2.0f * EPSILON,
+    f(point.x, point.z - EPSILON) - f(point.x, point.z + EPSILON)
+  ));
+}
+
+vec3 phongAddForLight(
+  vec3 diffuse_colour,
+  vec3 specular_colour,
+  float shininess,
+  vec3 lightPosition,
+  vec3 lightIntensity,
+  vec3 point,
+  vec3 eye
+) {
+  vec3 n = estimateNormal(point);
+  vec3 l = normalize(lightPosition - point);
+  vec3 r = normalize(eye - point);
+  vec3 v = normalize(reflect(-l, n));
+
+  float dotLN = dot(l, n);
+  float dotRV = dot(r, v);
+
+  if (dotLN < 0.0) {
+    return vec3(0.0, 0.0, 0.0);
+  }
+
+  if (dotRV < 0.0) {
+    return lightIntensity * (diffuse_colour * dotLN);
+  }
+
+  return lightIntensity * (diffuse_colour * dotLN + specular_colour * pow(dotRV, shininess));
+}
+
+vec3 phongIllumination(
+  vec3 ambient_colour,
+  vec3 diffuse_colour,
+  vec3 specular_colour,
+  float shininess,
+  vec3 point,
+  vec3 eye
+) {
+  const vec3 ambientLight = 0.025 * vec3(0.8, 0.8, 0.8);
+  vec3 colour = ambient_colour * ambientLight;
+
+  vec3 lightPosition = vec3(0.0, 20.0, 0.0);
+  vec3 lightIntensity = vec3(0.2, 0.4, 0.4);
+
+  colour += phongAddForLight(
+    diffuse_colour,
+    specular_colour,
+    shininess,
+    lightPosition,
+    lightIntensity,
+    point,
+    eye
+  );
+
+  return colour;
+}
+
+vec3 skyColour() {
+  return vec3(0.6, 0.75, 1.0);
+}
+
+mat4 viewMatrix(vec3 eye, vec3 target, vec3 up) {
+  vec3 f = normalize(target - eye);
+  vec3 s = normalize(cross(f, up));
+  vec3 u = cross(s, f);
+
+  return mat4(
+    vec4(s, 0.0),
+    vec4(u, 0.0),
+    vec4(-f, 0.0),
+    vec4(0.0, 0.0, 0.0, 1)
+  );
+}
+
+void main() {
+  vec3 dir = rayDirection(45.0, u_Resolution);
+  vec3 eye = vec3(40.0, 25.0, 35.0);
+  vec3 target = vec3(0.0, 0.0, 0.0);
+  vec3 up = vec3(0.0, 1.0, 0.0);
+
+  mat4 worldView = viewMatrix(eye, target, up);
+  vec3 worldDir = (worldView * vec4(dir, 0.0)).xyz;
+
+  float t;
+  if (marchRay(eye, worldDir, t)) {
+    // Lighting calculations
+    vec3 point = eye + worldDir * t;
+    
+    vec3 ambient_colour = vec3(0.15, 0.4, 0.15);
+    vec3 diffuse_colour = vec3(0.2, 0.8, 0.2);
+    vec3 specular_colour = vec3(1.0, 1.0, 1.0);
+    float shininess = 5.0;
+
+    vec3 colour = phongIllumination(
+      ambient_colour,
+      diffuse_colour,
+      specular_colour,
+      shininess,
+      point,
+      eye
+    );
+
+    Target0 = vec4(colour, 1.0);
+  }
+  else {
+    Target0 = vec4(skyColour(), 1.0);
+  }
+}
+```
+
+### shaders/vert.glsl
+```
+#version 440 core
+
+in vec2 a_Pos;
+in vec4 a_Colour;
+
+uniform consts {
+  vec2 u_Resolution;
+};
+
+out vec4 v_Colour;
+
+void main() {
+  v_Colour = vec4(a_Colour);
+  gl_Position = vec4(a_Pos, 0.0, 1.0);
+}
+```
+
+### src/main.rs
+```
+#[macro_use]
+extern crate gfx;
+
+extern crate glutin;
+extern crate gfx_window_glutin;
+
+use gfx::Device;
+use gfx_window_glutin as gfx_glutin;
+use gfx::format::{DepthStencil, Srgba8};
+use gfx::traits::FactoryExt;
+
+gfx_defines! {
+    vertex Vertex {
+        pos: [f32; 2] = "a_Pos",
+        colour: [f32; 4] = "a_Colour",
+    }
+
+    constant Uniforms {
+        resolution: [f32; 2] = "u_Resolution",
+    }
+
+    pipeline pipe {
+        vbuf: gfx::VertexBuffer<Vertex> = (),
+        consts: gfx::ConstantBuffer<Uniforms> = "consts",
+        //noise: gfx::TextureSampler<[f32; 4]> = "t_Noise",
+        out: gfx::RenderTarget<Srgba8> = "Target0",
+    }
+}
+
+const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+const INDICES: &[u16] = &[0, 1, 2, 2, 3, 0];
+const RES: [f32; 2] = [1280.0, 800.0];
+const NOISE_TEX_SIZE: usize = 256;
+
+const RECT: &[Vertex] = &[
+    Vertex { pos: [1.0, -1.0], colour: BLACK },
+    Vertex { pos: [-1.0, -1.0], colour: BLACK },
+    Vertex { pos: [-1.0, 1.0], colour: BLACK },
+    Vertex { pos: [1.0, 1.0], colour: BLACK },
+];
+
+const PERMUTATIONS: [u8; 256] = [
+    156, 165, 73, 109, 61, 162, 241, 239, 76, 58, 122, 112, 206, 210, 129, 42, 
+    75, 195, 226, 92, 128, 82, 249, 170, 174, 225, 152, 242, 64, 9, 153, 160, 
+    236, 77, 163, 150, 126, 142, 202, 48, 101, 81, 91, 145, 50, 124, 36, 117, 
+    47, 253, 207, 183, 252, 146, 60, 26, 28, 63, 32, 154, 134, 193, 199, 171, 
+    198, 107, 161, 46, 143, 56, 168, 138, 43, 74, 208, 89, 1, 20, 148, 215, 
+    135, 17, 45, 155, 100, 247, 224, 95, 219, 7, 121, 10, 177, 37, 62, 214, 
+    194, 203, 35, 25, 182, 228, 103, 186, 68, 59, 237, 21, 40, 158, 133, 85, 
+    187, 34, 44, 57, 93, 30, 127, 151, 130, 172, 222, 190, 97, 33, 188, 67, 
+    31, 157, 13, 41, 6, 175, 230, 137, 131, 5, 213, 54, 246, 78, 18, 102, 19, 
+    123, 229, 191, 180, 192, 98, 141, 96, 104, 79, 116, 251, 105, 118, 218, 
+    167, 51, 115, 120, 49, 227, 216, 220, 233, 178, 52, 94, 223, 71, 245, 108, 
+    90, 243, 147, 72, 80, 169, 185, 209, 15, 139, 99, 204, 23, 29, 140, 173, 
+    125, 244, 196, 66, 87, 24, 84, 234, 132, 119, 184, 238, 250, 16, 106, 211, 
+    201, 114, 8, 176, 11, 39, 144, 248, 255, 12, 217, 149, 110, 113, 111, 231, 
+    53, 2, 181, 3, 235, 14, 55, 136, 232, 200, 83, 205, 221, 70, 197, 38, 189, 
+    86, 22, 164, 65, 27, 166, 254, 240, 159, 212, 69, 0, 4, 179, 88,
+];
+
+fn hash(n: usize) -> u8 {
+    return PERMUTATIONS[(n % 0xFF) as usize];
+}
+
+fn generate_texture_point(coord: (usize, usize)) -> u8 {
+    let val = hash(coord.0).wrapping_add(coord.1 as u8);
+    hash(val as usize)
+}
+
+fn generate_texture() -> [[u8; NOISE_TEX_SIZE]; NOISE_TEX_SIZE] {
+    let mut texture: [[u8; NOISE_TEX_SIZE]; NOISE_TEX_SIZE] = 
+        [[0; NOISE_TEX_SIZE]; NOISE_TEX_SIZE];
+    
+    for x in 0..NOISE_TEX_SIZE {
+        for y in 0..NOISE_TEX_SIZE {
+            texture[x][y] = generate_texture_point((x, y));
+        }
+    }
+    texture
+}
+
+fn update_uniforms(window: &glutin::WindowedContext) -> Uniforms {
+    let res = if let Some(dimensions) = window.window().get_inner_size() {
+        [dimensions.width as f32, dimensions.height as f32]
+    } else {
+        RES
+    };
+
+    Uniforms {            
+        resolution: res,
+    }
+}
+
+fn main() {
+    let mut events_loop = glutin::EventsLoop::new();
+    let builder = glutin::WindowBuilder::new()
+        .with_title("SDF")
+        .with_dimensions(glutin::dpi::LogicalSize::new(1280.0, 800.0));
+    let context = glutin::ContextBuilder::new();
+
+    let (window, mut device, mut factory, rtv, mut dtv) = 
+        gfx_window_glutin::init::<Srgba8, DepthStencil>(builder, context, &events_loop)
+            .expect("Failed to create window");
+
+    let mut encoder: gfx::Encoder<_, _> = factory.create_command_buffer().into();
+
+    let pso = factory.create_pipeline_simple(
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vert.glsl")),
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/frag.glsl")),
+        pipe::new(),
+    ).expect("Failed to create pipeline");
+
+    let (vertex_buffer, slice) = 
+        factory.create_vertex_buffer_with_slice(RECT, INDICES);
+
+    let texture_sampler = factory.create_sampler_linear();
+    let texture = generate_texture();
+
+    let mut data = pipe::Data {
+        vbuf: vertex_buffer,
+        consts: factory.create_constant_buffer(1),
+        out: rtv,
+    };
+
+    let mut running = true;
+    while running {
+        events_loop.poll_events(|event| {
+            use glutin::WindowEvent::*;
+            use glutin::VirtualKeyCode::*;
+            match event {
+                glutin::Event::WindowEvent{event, ..} => match event {
+                    KeyboardInput{device_id: _, input} => match input.virtual_keycode {
+                        Some(Escape) => running = false,
+                        _ => (),   
+                    },
+                    CloseRequested => running = false,
+                    Resized(_) => {
+                        gfx_glutin::update_views(&window, &mut data.out, &mut dtv);
+                    },
+                    _ => (),
+                },
+                _ => (),
+            }
+        });
+        let consts = update_uniforms(&window);
+
+        encoder.clear(&data.out, BLACK);
+        encoder.update_constant_buffer(&data.consts, &consts);
+        encoder.draw(&slice, &pso, &data);
+        encoder.flush(&mut device);
+        window.swap_buffers().unwrap();
+        device.cleanup();
+    }
+}
+```

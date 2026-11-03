@@ -1,0 +1,170 @@
+Xodot Game Engine. Contribute to CryDot42/XoDot development by creating an account on GitHub.
+
+Refactor VoxelGI rendering with screen probes and anisotropic mipmaps by CryDot42 · Pull Request #2 · CryDot42/XoDot · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+CryDot42
+commented
+Sep 27, 2026
+Copy link
+Copy Markdown
+Owner
+What problem(s) does this PR solve?
+This PR significantly refactors the VoxelGI rendering system to improve performance and visual quality:
+Screen-space probe integration: Adds screen probe gathering for VoxelGI, allowing probes placed on the depth buffer to trace rays through both screen-space and volumetric data, improving indirect lighting quality.
+Anisotropic mipmap support: Implements anisotropic mipmaps for VoxelGI volumes, storing directional information (6 directions) to improve cone tracing accuracy and reduce artifacts.
+Dynamic object handling: Replaces the previous dynamic map system with a more efficient region-based update approach that only recomputes affected areas when dynamic objects move or change.
+Partial static light updates: Adds support for spreading light computation over multiple frames, reducing per-frame cost while maintaining quality through feedback mechanisms.
+Custom subdivision support: Allows users to specify custom voxel subdivision counts (not just preset values), with automatic snapping to maintain exact mipmap chains.
+Additional information
+Key Changes:
+New Files:
+voxel_gi_screen_probes.glsl: Screen probe tracing shader for VoxelGI
+voxel_gi_mipmap.glsl: Region-based mipmap operations (clear, downsample, anisotropic)
+voxel_gi_sample_inc.glsl: Shared sampling code for anisotropic VoxelGI
+screen_probes_inc.glsl: Shared screen probe structures and utilities
+Modified Core Systems:
+gi.cpp/h: Refactored VoxelGIInstance update logic with new region-based dirty tracking, anisotropic mipmap generation, and partial update support
+voxel_gi.glsl: Added feedback bounce mode and region-based static light computation
+voxel_gi.cpp/h: Added custom subdivision support with snapping
+voxelizer.cpp/h: Added snap_subdiv() utility to ensure mipmap chains remain exact
+Configuration:
+Added project settings for screen probes, anisotropic mipmaps, light update frames, and bounce feedback
+Updated VoxelGI documentation with new properties
+Technical Details:
+Leaf cell indexing: VoxelGI now maintains leaf_x_offsets to efficiently locate and update leaf cells by X coordinate, enabling fast region restoration
+Mipmap count calculation: Distinguishes between octree mipmaps (matching octree levels) and downsampled mipmaps (for non-power-of-2 dimensions)
+Dynamic object tracking: Uses a hash map to track dynamic objects and their bounding boxes, only updating regions that changed
+Feedback mechanism: Supports bounce feedback for spreading light updates across frames without accumulation artifacts
+The refactoring maintains backward compatibility while providing significant performance improvements for scenes with dynamic objects and better visual quality through anisotropic sampling.
+https://claude.ai/code/session_01SsyR1HjiRqSCHs2ZsaYTSU
+claude
+added 5 commits
+September 27, 2026 18:46
+Add screen probes, anisotropic mipmaps and amortized updates to VoxelGI
+…
+34e5d8f
+```
+Dynamic objects:
+- Only the regions of dynamic objects that moved, appeared, went away or
+  are due for a refresh are restored from static voxels and plotted again,
+  instead of re-blitting all static voxels and re-plotting every object.
+  Stationary objects are refreshed once every
+  `rendering/global_illumination/voxel_gi/dynamic_object_refresh_frames`,
+  spread over those frames.
+- Mipmaps of updated regions are rebuilt with a 3D downsample that follows
+  the octree mipmap formula, instead of plotting every level separately.
+- Dynamic object maps are allocated on demand, sized for the largest object.
+
+Screen probes (`rendering/global_illumination/voxel_gi/screen_probes/*`):
+- Probes on a jittered 8 or 16 pixel grid trace 64 rays against the depth
+  buffer, using the previous frame as radiance, and fall back to VoxelGI
+  cone tracing. They are stored as L1 spherical harmonics, filtered,
+  interpolated for every pixel and accumulated over frames with depth and
+  normal rejection. They replace the diffuse VoxelGI cones, reflections
+  still use cone tracing. Only used when SDFGI is off and with one view.
+
+Anisotropic mipmaps (`rendering/global_illumination/voxel_gi/anisotropic_mipmaps`):
+- From mipmap 1 on, light is also stored per axis direction, composited
+  front to back and masked by voxel normals, which reduces leaks through
+  thin walls for narrow cones (screen probes and glossy reflections).
+
+Amortized light and feedback bounces:
+- `rendering/global_illumination/voxel_gi/light_update_frames` spreads the
+  static light computation over several frames, a slice of cells at a time.
+- `rendering/global_illumination/voxel_gi/bounce_feedback` gathers bounces
+  from the previous result over the next updates, for up to 4 bounces.
+
+The renderer also handles octree sizes that are not a power of two:
+mipmaps that match octree levels are written from the octree, and the
+remaining ones are downsampled. A VoxelGI whose texture can't be allocated
+prints an error and contributes nothing instead of failing every frame.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SsyR1HjiRqSCHs2ZsaYTSU
+```
+Allow custom VoxelGI subdivision counts
+…
+7d3123a
+```
+Add `VoxelGI.SUBDIV_CUSTOM` and `VoxelGI.custom_subdiv`, which sets the
+number of voxels along the longest axis between 16 and 1024. Counts that
+are not a power of two are rounded to a multiple of 1/8 of the power of
+two below them (200 becomes 208), which keeps the octree mipmap chain exact
+down to the levels cone tracing needs. The presets bake exactly as before.
+
+The voxelizer bakes into a power of two octree and only creates cells
+within the requested count on each axis. The other axes use the fewest
+cells that cover them while keeping the mipmap chain exact.
+
+A configuration warning is shown when the estimated video memory exceeds
+1 GB. The bake button tooltip now shows the actual cell size (it showed
+half of it), includes mipmaps in its video memory estimate, and no longer
+overflows for large counts.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SsyR1HjiRqSCHs2ZsaYTSU
+```
+Fix screen probe history drifting with a still camera
+…
+45d338b
+```
+The GI pass reconstructs positions at the corner of their pixel, so a
+still camera reprojects every pixel onto the corner of its history texel.
+Filtering the history there mixed each texel with its up-left neighbors,
+which moved the accumulated lighting by half a texel per frame: noise
+flowed down and to the right, and edges left diagonal streaks. At half
+resolution with an odd screen size, the history was also scaled slightly.
+
+Map the reprojected position to history texels in pixel units (halved at
+half resolution) and filter the 4 texels around it, keeping only those of
+the same surface so history no longer leaks across edges when the camera
+moves.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SsyR1HjiRqSCHs2ZsaYTSU
+```
+Fix reflection atlas leaking its cubemap render target
+…
+cb0704d
+```
+`_reflection_atlas_clear()` freed the octahedral reflection texture and the
+depth buffer, but not the cubemap that probes are rendered into, along with
+its 6 face views. Any scene with a ReflectionProbe leaked 7 textures on
+exit, and again whenever the atlas was recreated (size change, or switching
+to real-time updates).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SsyR1HjiRqSCHs2ZsaYTSU
+```
+Merge branch 'master' into claude/brave-albattani-scio2h
+…
+b480893
+```
+Resolve the conflict in doc/classes/ProjectSettings.xml by keeping both the
+VoxelGI screen probe settings and the Landscape streaming cache setting, in
+alphabetical order.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SsyR1HjiRqSCHs2ZsaYTSU
+```
+CryDot42
+merged commit 9a269bd
+into
+master
+Sep 28, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

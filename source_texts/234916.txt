@@ -1,0 +1,493 @@
+A game engine based on Hazel. Contribute to drsnuggles8/OloEngineBase development by creating an account on GitHub.
+
+feat(vg): two-phase occlusion culling so virtual geometry occludes virtual geometry (#682) by drsnuggles8 · Pull Request #692 · drsnuggles8/OloEngineBase · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+drsnuggles8
+commented
+Jul 29, 2026
+•
+edited by coderabbitai
+Bot
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Closes #682.
+Problem
+VirtualClusterCull.comp Hi-Z-tested a pyramid built mid-frame from ScenePass's depth — which structurally can only contain classic-path occluders, because ScenePass draws no virtual geometry. So a VG cluster could never be culled by other virtual geometry, and raster/shading cost scaled with the selected cluster count rather than the visible one.
+Approach
+The cull now runs twice, mirroring InstanceOcclusionCull.comp's reprojected test:
+Phase 1 — full DAG cut + frustum + cone, then a Hi-Z test against the retained previous-frame pyramid. That one is built at the tail of EndScene from the final depth, so it does contain virtual geometry — the whole fix. Bounds reproject through the prior VP (made relative to this frame's render origin, World: large-coordinate support — camera-relative rendering / floating-origin to kill far-from-origin jitter #429) and the instance's PrevTransform. A hit is appended to a compacted reject list (SSBO_VIRTUAL_REJECTED = 44, header + one record per cluster, same shape as the SW work list) rather than dropped.
+Phase-1 survivors draw; BuildCurrentOcclusionHZB rebuilds the pyramid from the now-current depth.
+Phase 2 — one dispatch over the reject list only (2D-flattened, bounded by the GPU-side count), re-testing with the current VP + transform. Frustum/cone/cut are not re-run (UE's bSkipCullFrustum in CULLING_PASS_OCCLUSION_POST). Survivors emit into a second command region and replay through a second MDI.
+The software rasterizer still runs once, after both phases, over the union work list — one dispatch, one resolve, no added cost versus single-phase.
+The safety property, stated plainly: phase 1 may be arbitrarily wrong in the reject direction — reprojection error, camera cut, viewport resize, disocclusion — with no visible consequence, because only a phase-2 reject is final.
+Two design points worth a reviewer's eye
+Phase 2 needs its own command region, not an append. The phase-1 MDI has already read its parameter word by the time phase 2 culls, and the count is absolute with no "start at draw N" parameter — so a shared segment would make the second replay re-issue every phase-1 draw (double raster, doubled overdraw counters). The command / visible / args buffers are sized for two regions, offset by constants the CPU already knows (frame cluster count, frame instance count), so the second MDI names its region with no GPU readback. Pinned by PhaseCommandRegionsAreDisjointAndInBounds.
+Ordering is load-bearing. BuildCurrentOcclusionHZB regenerates s_Data.OcclusionHZB in place — it overwrites the very texture phase 1 reads. VirtualGeometryPass being registered before DeferredGPUOcclusionPass is what keeps previous-frame depth available to it; GetRetainedOcclusionHZB() carries that warning in its declaration.
+Fallbacks
+No retained pyramid (frame 0, HZB culling just enabled, force-disable-culling) → phase 1 degrades to frustum + cone and phase 2 does not run. If the phase-2 pyramid fails to build, phase 2 runs with occlusion off so every reject draws — a reject nobody re-tests is exactly the hole this must not have. Shadow cascades untouched (every new uniform defaults to single-phase). Visible counts stay GPU-side; no new readback on the render path.
+Evidence
+Row of 6 VG statues, camera behind the first (5 hidden purely by other virtual geometry):
+counter
+single-phase
+two-phase
+DAG-cut selected
+59
+59 (unchanged)
+drawn clusters
+54
+28
+SW-raster invocations
+6
+0
+red statue pixels
+12520
+12520
+Live in the editor on VirtualGeometryTest.olo (15 instances, 4860 clusters), A/B'd over MCP:
+counter
+occlusion off
+two-phase
+DAG-cut selected
+1373
+1373 (unchanged)
+drawn clusters
+1328
+970
+SW-raster invocations
+604
+273
+phase-2 recovered
+–
+57
+Visual: a 5-pose sweep (front / right-high / left / above / 180° behind) stepped one frame per pose, so every pose renders against a pyramid from a different viewpoint — the reprojection stress case a stationary-camera test cannot see at all. Within 5% of the identical unculled sweep at every pose, PNG pairs visually identical. Plus the disocclusion frame itself (occluder moved out of frame, capture the very next frame) is pixel-identical to an occlusion-off reference, so there is no one-frame pop. MSAA now runs both modes with two-phase active.
+One trap worth recording
+The live occlusion-on/off diff came back at 1.24% of pixels — 300x the measured frame-to-frame noise floor, which reads exactly like an over-cull. It wasn't. The compute software rasterizer's bit-identical depth ties race benignly and its payload encodes the swList record index, so changing the culled set reshuffles record ordering and flips which triangle wins each tie: thin single-pixel outlines on every silhouette, no missing geometry. Re-running the A/B with swRasterMode=disabled collapsed the diff from 1123 pixels over threshold to 10 (noise floor 5) — a real over-cull would have survived that switch.
+Tests
+New VirtualClusterTwoPhaseOcclusionTest.cpp (shaderpipe/CPU, 6 tests): the phase-1/phase-2 decision model with the single-phase pyramid as an explicit control, disocclusion recovery, camera-cut recovery, PrevTransform reprojection (with a control proving the current transform would decide differently), the two-region arithmetic, and reject-list capacity.
+2 new GPU tests + an MSAA extension in VirtualGeometryVisualEvidenceTest.cpp.
+McpRendererSettingsApply.HZBOcclusionTogglesTheLeverAndReportsPrior.
+Full suite: 5145 passed, 0 failed, 4 pre-existing environmental skips.
+Also in this PR
+An MCP lever, because the verification needed it. There was no way to toggle Hi-Z occlusion culling live, so neither two-phase cull (#431/#486 or this one) could be A/B'd in the editor without a rebuild — CLAUDE.md's mandatory rendering-verification rule was effectively unreachable. olo_renderer_settings_set { setting: 'hzbocclusion', value: 'off'|'on' } joins the existing depthprepass / softshadows levers (~40 lines mirroring them), and phase2Recovered is now reported by olo_virtual_geometry_stats and the Statistics panel. It produced the live numbers above.
+One existing assertion relaxed, deliberately. HiZOcclusionCullsHiddenClustersWithoutRemovingVisibleOnes required that occlusion-on not reduce the drawn-cluster count. That encoded the old VG-blind behaviour: phase 1 now tests a pyramid containing the sphere itself, so the sphere's far side is legitimately self-occluded and the count should fall. Re-anchored on the paired pixel check (the real contract) with a floor to catch a total collapse.
+Lessons in docs/agent-rules/two-phase-occlusion-culling.md (linked from CLAUDE.md): which pyramid phase 1 must test and why; the in-place pyramid overwrite and what it means for pass order; why phase 2 needs its own region; what may safely be missing from the phase-2 pyramid (and the Phase2Recovered != 0 asymmetry that follows from software-rasterized clusters being in phase 1's pyramid but not phase 2's); the self-occlusion effect on count-based assertions; and the noise-floor + one-switch protocol above.
+Unrelated find
+VirtualGeometryStress.olo asserts on load (Submesh index out of range!) because it references Assets/Models/Stanford/xyzrgb_dragon.ply, which the manifest-driven asset fetcher hasn't pulled. Pre-existing and untouched here, but a missing asset arguably shouldn't assert — worth its own issue.
+🤖 Generated with Claude Code
+Summary by CodeRabbit
+New Features
+Added two-phase Hi-Z occlusion culling for virtual geometry, improving disocclusion and camera-movement accuracy.
+Added the hzbocclusion renderer setting with live on/off control.
+Added statistics reporting for clusters recovered during phase two.
+Documentation
+Added guidance covering two-phase occlusion behavior, ordering, fallback handling, and validation.
+Tests
+Added CPU and visual coverage for occlusion, disocclusion, camera cuts, MSAA, and binding validation.
+feat(vg): two-phase occlusion culling so virtual geometry occludes vi…
+…
+b8ae25f
+```
+…rtual geometry (#682)
+
+VirtualClusterCull.comp Hi-Z-tested a pyramid built MID-FRAME from ScenePass's
+depth, which structurally can only contain classic-path occluders. Virtual
+geometry could therefore never occlude other virtual geometry, so raster/shading
+cost scaled with the SELECTED cluster count rather than the VISIBLE one.
+
+The cull now runs twice, mirroring InstanceOcclusionCull.comp's reprojected test:
+
+* Phase 1 keeps the full DAG cut + frustum + cone, then tests the RETAINED
+  previous-frame pyramid — built at the tail of EndScene from the FINAL depth, so
+  it contains virtual geometry. Bounds reproject through the prior VP (made
+  relative to this frame's render origin) and the instance's PrevTransform. A hit
+  is appended to a compacted reject list (SSBO_VIRTUAL_REJECTED = 44) instead of
+  being dropped.
+* Phase-1 survivors draw, BuildCurrentOcclusionHZB rebuilds the pyramid from the
+  now-current depth, and phase 2 re-tests only the reject list with the current
+  VP + transform, emitting into a second command region replayed by a second MDI.
+* The software rasterizer still runs ONCE, after both phases, over the union work
+  list — one dispatch, one resolve, no added cost versus single-phase.
+
+Phase 1 is free to reject wrongly (reprojection error, camera cut, disocclusion):
+only a phase-2 reject is final. With no retained pyramid it degrades to frustum +
+cone and phase 2 does not run; if the phase-2 pyramid fails to build, phase 2 runs
+with occlusion off so every reject draws. Shadow cascades are untouched (every new
+uniform defaults to single-phase). Visible counts stay GPU-side.
+
+Phase 2 needs its own command/visible/args REGION rather than an append: the
+phase-1 MDI has already read its parameter word, so a shared segment would make
+the second replay re-issue every phase-1 draw. The regions are offset by constants
+the CPU already knows, so the second MDI names its region with no readback.
+
+Evidence — row of 6 VG statues, camera behind the first (5 hidden purely by other
+virtual geometry): drawn clusters 54 -> 28, SW-raster invocations 6 -> 0, DAG cut
+unchanged at 59, red statue pixels 12520 -> 12520. Live in the editor on
+VirtualGeometryTest.olo (15 instances, 4860 clusters): drawn 1328 -> 970, SW
+604 -> 273, 57 clusters recovered by phase 2.
+
+Also adds the MCP lever this verification needed: there was no way to toggle Hi-Z
+occlusion live, so neither two-phase cull (#431/#486 or this one) could be A/B'd
+without a rebuild. olo_renderer_settings_set { setting: 'hzbocclusion' } joins the
+existing depthprepass / softshadows levers, and phase2Recovered is reported by
+olo_virtual_geometry_stats and the Statistics panel.
+
+HiZOcclusionCullsHiddenClustersWithoutRemovingVisibleOnes asserted that
+occlusion-on must not reduce the drawn-cluster count. That encoded the old
+VG-blind behaviour: phase 1 now tests a pyramid containing the sphere itself, so
+its far side is legitimately self-occluded and the count should fall. Re-anchored
+on the paired pixel check with a floor to catch a total collapse.
+
+Tests: VirtualClusterTwoPhaseOcclusionTest.cpp (new, 6 CPU tests — the two-phase
+decision model with the single-phase pyramid as a control, disocclusion and
+camera-cut recovery, PrevTransform reprojection, the two-region arithmetic); a
+row-of-statues counter test; a 5-pose moving-camera sweep (one frame per pose, so
+every pose reprojects from a different viewpoint) diffed against the same sweep
+unculled; MSAA both modes with two-phase active; and the MCP lever test.
+
+docs/agent-rules/two-phase-occlusion-culling.md records which pyramid phase 1 must
+test, that BuildCurrentOcclusionHZB overwrites the retained pyramid IN PLACE (so
+pass order decides who still sees previous-frame depth), why phase 2 needs its own
+region, and the noise-floor + one-switch protocol that separated software-raster
+depth-tie noise from a real over-cull.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+coderabbitai
+Bot
+commented
+Jul 29, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Warning
+Review limit reached
+@drsnuggles8, you've reached your PR review limit, so we couldn't start this review.
+Next review available in: 54 minutes
+Enable usage-based reviews in Billing to review now. Otherwise, wait until the next included review is available.
+You're only billed for reviews past your plan's rate limits ($0.25/file).
+How can I continue?
+After more reviews become available, a review can be triggered using the @coderabbitai review command as a PR comment. Alternatively, push new commits to this PR.
+To avoid repeated limits, reduce automatic review volume by pausing incremental auto-reviews earlier, using label-based review opt-in, excluding WIP or generated PR titles, or requesting reviews manually when the PR is ready. If your team needs uninterrupted high-volume reviews, an organization admin can enable usage-based reviews.
+How do review limits work?
+CodeRabbit enforces per-developer PR review limits for each organization. Most developers receive the normal plan review availability.
+For paid Pro and Pro+ PR reviews, CodeRabbit uses adaptive limits for sustained high-volume activity. When a developer's recent PR review activity reaches the 95th percentile or higher among CodeRabbit users, additional reviews become available more gradually as earlier reviews age out of the rolling window.
+Please refer docs for additional details.
+Review details
+⚙️ Run configuration
+Configuration used: Repository UI
+Review profile: ASSERTIVE
+Plan: Pro Plus
+Run ID: a60265c2-b0b0-478c-87fe-cf793b67f615
+📥 Commits
+Reviewing files that changed from the base of the PR and between b8ae25f and 126bac1.
+📒 Files selected for processing (4)
+OloEditor/src/MCP/McpToolsRender.cpp
+OloEngine/tests/Rendering/PropertyTests/VirtualGeometryVisualEvidenceTest.cpp
+OloEngine/tests/Rendering/VirtualClusterTwoPhaseOcclusionTest.cpp
+docs/agent-rules/two-phase-occlusion-culling.md
+📝 Walkthrough
+Walkthrough
+Changes
+Two-phase virtual geometry occlusion culling now uses the previous frame’s retained Hi-Z pyramid for phase one, stores rejected clusters for phase two, and writes phase outputs into separate buffer regions. Runtime controls, statistics, documentation, and CPU/GPU tests were added or updated.
+Virtual geometry occlusion pipeline
+Layer / File(s)
+Summary
+Retained HZB and buffer contracts
+OloEngine/src/OloEngine/Renderer/Renderer3D.*, OloEngine/src/OloEngine/Renderer/VirtualGeometry/VirtualMesh*, OloEngine/src/OloEngine/Renderer/ShaderBindingLayout.h
+Retained Hi-Z inputs, reject-list storage, doubled phase regions, and phase-two statistics are exposed and initialized.
+GPU reject and re-test logic
+OloEditor/assets/shaders/compute/VirtualClusterCull.comp
+Phase one appends occluded clusters to a bounded reject list, while phase two re-tests them against current Hi-Z data and emits survivors using phase-specific offsets.
+Frame execution and phase ordering
+OloEngine/src/OloEngine/Renderer/VirtualGeometry/VirtualGeometryPass.*, docs/agent-rules/two-phase-occlusion-culling.md, CLAUDE.md
+Virtual geometry execution binds retained Hi-Z data, performs phase-one rendering, rebuilds current Hi-Z data, and dispatches phase two before resolving remaining work.
+Runtime control and reporting
+OloEditor/src/MCP/McpRendererSettings.h, OloEditor/src/MCP/McpToolsRender.cpp, OloEditor/src/Panels/StatisticsPanel.cpp
+The hzbocclusion setting toggles renderer culling, and phase-two recovery counts are exposed through MCP statistics and the renderer panel.
+CPU, GPU, and binding validation
+OloEngine/tests/Rendering/*, OloEngine/tests/MCP/*, OloEngine/tests/CMakeLists.txt
+Tests cover phase classification, reprojection, camera cuts, buffer regions, binding slots, MCP behavior, MSAA coverage, disocclusion, and moving-camera visual results.
+Sequence Diagram(s)
+```
+sequenceDiagram
+  participant Renderer3D
+  participant VirtualGeometryPass
+  participant VirtualClusterCull
+  participant VirtualMeshRegistry
+
+  Renderer3D->>VirtualGeometryPass: provide retained previous-frame Hi-Z
+  VirtualGeometryPass->>VirtualClusterCull: dispatch phase-one culling
+  VirtualClusterCull->>VirtualMeshRegistry: write survivors and reject-list records
+  VirtualGeometryPass->>VirtualGeometryPass: rasterize phase-one survivors and rebuild current Hi-Z
+  VirtualGeometryPass->>VirtualClusterCull: dispatch phase-two reject testing
+  VirtualClusterCull->>VirtualMeshRegistry: write recovered survivors to phase-two regions
+```
+Loading
+🚥 Pre-merge checks | ✅ 3 | ❌ 1
+❌ Failed checks (1 inconclusive)
+Check name
+Status
+Explanation
+Resolution
+Linked Issues check
+❓ Inconclusive
+Issue #682 is implemented in code, but screenshot-based visual parity can't be verified because the PNG evidence files were excluded by !**/*.png.
+Please provide reviewable visual evidence or an unfiltered diff for the excluded PNGs so the no-regression screenshot requirement can be confirmed.
+✅ Passed checks (3 passed)
+Check name
+Status
+Explanation
+Description Check
+✅ Passed
+Check skipped - CodeRabbit’s high-level summary is enabled.
+Title check
+✅ Passed
+The title is concise and accurately summarizes the main change: two-phase virtual-geometry occlusion culling.
+Out of Scope Changes check
+✅ Passed
+The PR stays focused on two-phase occlusion, MCP control, stats, docs, and tests; no unrelated code changes are evident.
+Thanks for using CodeRabbit! It's free for OSS, and your support helps us grow. If you like it, consider giving us a shout-out.
+❤️ Share
+X
+Mastodon
+Reddit
+LinkedIn
+Comment @coderabbitai help to get the list of available commands.
+coderabbitai
+Bot
+reviewed
+Jul 29, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 4
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Inline comments:
+In `@docs/agent-rules/two-phase-occlusion-culling.md`:
+- Around line 3-6: Reflow the introductory paragraph so the `#431` issue
+reference is not the first token on a line, while preserving the existing
+wording and references to `VirtualClusterCull.comp`,
+`InstanceOcclusionCull.comp`, and occlusion HZB passes.
+
+In `@OloEditor/src/MCP/McpToolsRender.cpp`:
+- Around line 4065-4068: Update the olo_virtual_geometry_stats cull outputSchema
+near the existing six counter declarations to include the emitted
+phase2Recovered field. Match the schema type and naming convention used by the
+other cull counters so the schema accurately exposes cull.Phase2Recovered.
+
+In
+`@OloEngine/tests/Rendering/PropertyTests/VirtualGeometryVisualEvidenceTest.cpp`:
+- Around line 796-798: Update the SoftwareRasterized drop assertion in the
+virtual geometry visual evidence test to run only when off.SoftwareRasterized is
+greater than zero; preserve the existing comparison and message for nonzero
+baselines, while relying on the preceding drawn-cluster assertion when the
+baseline is zero.
+
+In `@OloEngine/tests/Rendering/VirtualClusterTwoPhaseOcclusionTest.cpp`:
+- Around line 367-380: The test RejectListCapacityCoversTheWorstCase is
+tautological because both values use the same cluster-count sum. Replace the
+expected capacity calculation with the production registry sizing expression and
+assert the worst-case phase-1 reject count against that independently derived
+capacity; otherwise remove this test.
+```
+🪄 Autofix (Beta)
+Fix all unresolved CodeRabbit comments on this PR:
+Push a commit to this branch (recommended)
+Create a new PR with the fixes
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Repository UI
+Review profile: ASSERTIVE
+Plan: Pro Plus
+Run ID: 0e3fd8eb-e5a1-4bef-aec4-ab64da1ecf82
+📥 Commits
+Reviewing files that changed from the base of the PR and between 49691ec and b8ae25f.
+⛔ Files ignored due to path filters (16)
+OloEditor/assets/tests/visual/VirtualGeometry_MSAA_PerSample_TwoPhase.png is excluded by !**/*.png
+OloEditor/assets/tests/visual/VirtualGeometry_MSAA_Resolved_TwoPhase.png is excluded by !**/*.png
+OloEditor/assets/tests/visual/VirtualGeometry_Sweep_OcclusionOff_Above.png is excluded by !**/*.png
+OloEditor/assets/tests/visual/VirtualGeometry_Sweep_OcclusionOff_Behind.png is excluded by !**/*.png
+OloEditor/assets/tests/visual/VirtualGeometry_Sweep_OcclusionOff_Front.png is excluded by !**/*.png
+OloEditor/assets/tests/visual/VirtualGeometry_Sweep_OcclusionOff_Left.png is excluded by !**/*.png
+OloEditor/assets/tests/visual/VirtualGeometry_Sweep_OcclusionOff_RightHigh.png is excluded by !**/*.png
+OloEditor/assets/tests/visual/VirtualGeometry_Sweep_TwoPhase_Above.png is excluded by !**/*.png
+OloEditor/assets/tests/visual/VirtualGeometry_Sweep_TwoPhase_Behind.png is excluded by !**/*.png
+OloEditor/assets/tests/visual/VirtualGeometry_Sweep_TwoPhase_Front.png is excluded by !**/*.png
+OloEditor/assets/tests/visual/VirtualGeometry_Sweep_TwoPhase_Left.png is excluded by !**/*.png
+OloEditor/assets/tests/visual/VirtualGeometry_Sweep_TwoPhase_RightHigh.png is excluded by !**/*.png
+OloEditor/assets/tests/visual/VirtualGeometry_TwoPhase_OccluderRemoved.png is excluded by !**/*.png
+OloEditor/assets/tests/visual/VirtualGeometry_TwoPhase_OccluderRemovedReference.png is excluded by !**/*.png
+OloEditor/assets/tests/visual/VirtualGeometry_TwoPhase_OcclusionOff.png is excluded by !**/*.png
+OloEditor/assets/tests/visual/VirtualGeometry_TwoPhase_OcclusionOn.png is excluded by !**/*.png
+📒 Files selected for processing (20)
+CLAUDE.md
+OloEditor/assets/shaders/compute/VirtualClusterCull.comp
+OloEditor/src/MCP/McpRendererSettings.h
+OloEditor/src/MCP/McpToolsRender.cpp
+OloEditor/src/Panels/StatisticsPanel.cpp
+OloEngine/src/OloEngine/Renderer/Renderer3D.h
+OloEngine/src/OloEngine/Renderer/Renderer3DFrameExecution.cpp
+OloEngine/src/OloEngine/Renderer/ShaderBindingLayout.h
+OloEngine/src/OloEngine/Renderer/VirtualGeometry/VirtualGeometryPass.cpp
+OloEngine/src/OloEngine/Renderer/VirtualGeometry/VirtualGeometryPass.h
+OloEngine/src/OloEngine/Renderer/VirtualGeometry/VirtualMeshGpuData.h
+OloEngine/src/OloEngine/Renderer/VirtualGeometry/VirtualMeshRegistry.cpp
+OloEngine/src/OloEngine/Renderer/VirtualGeometry/VirtualMeshRegistry.h
+OloEngine/tests/CMakeLists.txt
+OloEngine/tests/MCP/McpRendererSettingsTest.cpp
+OloEngine/tests/Rendering/PropertyTests/VirtualGeometryVisualEvidenceTest.cpp
+OloEngine/tests/Rendering/ShaderBindingLayoutTest.cpp
+OloEngine/tests/Rendering/ShaderReflectionBindingTest.cpp
+OloEngine/tests/Rendering/VirtualClusterTwoPhaseOcclusionTest.cpp
+docs/agent-rules/two-phase-occlusion-culling.md
+Comment thread
+docs/agent-rules/two-phase-occlusion-culling.md
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+OloEditor/src/MCP/McpToolsRender.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+OloEngine/tests/Rendering/PropertyTests/VirtualGeometryVisualEvidenceTest.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+OloEngine/tests/Rendering/VirtualClusterTwoPhaseOcclusionTest.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+sonarqubecloud
+Bot
+commented
+Jul 29, 2026
+Copy link
+Copy Markdown
+Quality Gate passed
+Issues
+13 New issues
+0 Accepted issues
+Measures
+0 Security Hotspots
+0.0% Coverage on New Code
+0.0% Duplication on New Code
+See analysis details on SonarQube Cloud
+fix(review): declare phase2Recovered in the MCP schema + de-tautologi…
+…
+126bac1
+```
+…ze the reject-capacity test
+
+Four review findings, all verified against the code:
+
+* `olo_virtual_geometry_stats` emitted `cull.phase2Recovered` but its OutputSchema
+  still declared only the six original counters, so the schema no longer described
+  the payload. Declared it alongside them.
+* `RejectListCapacityCoversTheWorstCase` compared two identical sums of the same
+  cluster counts, so it could never fail. Rewritten as
+  `RejectListAllocationHoldsTheWorstCaseRejectCount`, which re-derives the record
+  capacity from the production byte expression in
+  `VirtualMeshRegistry::EnsureFrameBuffers` (`16 + n * sizeof(VirtualVisibleCluster)`,
+  floored at 1024) and asserts the worst-case phase-1 reject count fits after the
+  header. Verified non-vacuous: dropping the `16u +` makes it fail at n >= 64,
+  which is exactly the silent out-of-bounds write on the fullest frame that the
+  original test claimed to guard.
+* The SW-raster drop assertion in the row-of-statues test ran unconditionally, so a
+  legitimate zero baseline (the projected-radius threshold routing nothing to the
+  software rasterizer for this scene's cluster sizes) failed on `0 < 0`. Guarded on
+  a non-zero baseline; the drawn-cluster assertion covers the total either way.
+* Reflowed the agent-rules intro so the `#431` reference is not the first token on
+  a line.
+
+Full suite: 5145 passed, 0 failed.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+Hide details
+View details
+drsnuggles8
+merged commit 907f2f0
+into
+master
+Jul 30, 2026
+2 of 8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+drsnuggles8
+deleted the
+feature/vg-two-phase-occlusion-682
+branch
+July 30, 2026 06:37
+drsnuggles8
+mentioned this pull request
+Jul 30, 2026
+Renderer/Asset: a missing opt-in asset asserts instead of degrading — VirtualGeometryStress.olo crashes on a fresh clone
+#694
+Closed
+This was referenced Jul 30, 2026
+RHI: add a Vulkan backend alongside OpenGL 4.6 — latest point release only, heap-bindless (no legacy descriptor path)
+#691
+Closed
+Renderer: triangle-level culling in the virtual-geometry raster (backface + sub-sample-miss)
+#712
+Closed
+Renderer: depth-aware cluster culling — active-cluster compaction + 2.5D depth-cell mask
+#722
+Closed
+Editor: observer camera — freeze the render frustum and fly around to inspect culling
+#726
+Closed
+Renderer: Virtual Shadow Maps — sparse page-table directional shadows replacing fixed-res CSM
+#702
+Closed
+Renderer: GPU-to-CPU streaming request feedback (let the cull shader ask for what it needs)
+#719
+Closed
+Renderer: DDGI's infinite-bounce term is silently dead when the probe volume excludes the walls
+#751
+Closed
+coderabbitai
+Bot
+mentioned this pull request
+Aug 16, 2026
+RHI/Vulkan: mesh shaders — replace virtual geometry's software cluster rasteriser where the hardware allows
+#813
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

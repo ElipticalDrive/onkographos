@@ -1,0 +1,1040 @@
+LLM inference in C/C++. Contribute to ggml-org/llama.cpp development by creating an account on GitHub.
+
+Quantization laboratory: new per-tensor codebook quants, quantization recipe generator by pwilkin · Pull Request #19941 · ggml-org/llama.cpp · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+pwilkin
+commented
+Feb 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Inspired but also a bit worried by the discussions over the recent quant proposals, I've decided to try my luck and spent the last few days chugging my AI workhorses to prototype a new quant for llama.cpp. The idea behind the quant was pretty simple: all of the quants in llama.cpp use static, predefined "magic scales" that were determined to be somewhat optimal for quantizing tensors. So I thought - how about we instead create per-tensor scales pre-quantization and then use them for quantizing and dequantizing? That's how the Q3_PT (or "Per Tensor") quantization scheme was born.
+I've tested this quant on Qwen3-4B-Instruct-2507. The imatrix dataset is @bartowski1182 's https://gist.github.com/bartowski1182/82ae9b520227f57d79ba04add13d0d0d, while the KLD and perplexity testing dataset used is @EAddario 's https://huggingface.co/datasets/eaddario/imatrix-calibration combined_all_small with 100 chunks.
+This PR contains, per the recommendations, just the pure CPU reference code and quantization/dequantization code, so obviously any inference using this quant will be painfully slow. However, I've made the KLD and perplexity tests and they show this quant very nicely fills a gap between the Q3_K and IQ4_XS quant types. The "pure" quants mean that they were quantized with --pure, the only exceptions being the embedding and output tensors quantized in Q6_K.
+```
+Pure Q3_PT (4.14 BPW):
+
+====== Perplexity statistics ======
+Mean PPL(Q)                   :   8.492453 ±   0.162877
+Mean PPL(base)                :   7.910885 ±   0.149572
+Cor(ln(PPL(Q)), ln(PPL(base))):  98.29%
+Mean ln(PPL(Q)/PPL(base))     :   0.070938 ±   0.003534
+Mean PPL(Q)/PPL(base)         :   1.073515 ±   0.003794
+Mean PPL(Q)-PPL(base)         :   0.581568 ±   0.031799
+
+====== KL divergence statistics ======
+Mean    KLD:   0.077918 ±   0.001424
+Maximum KLD:  11.143992
+99.9%   KLD:   2.581407
+99.0%   KLD:   0.754867
+95.0%   KLD:   0.287155
+90.0%   KLD:   0.176502
+Median  KLD:   0.026818
+10.0%   KLD:   0.000064
+ 5.0%   KLD:   0.000008
+ 1.0%   KLD:   0.000000
+ 0.1%   KLD:  -0.000003
+Minimum KLD:  -0.000004
+
+====== Token probability statistics ======
+Mean    Δp: -1.397 ± 0.055 %
+Maximum Δp: 86.707%
+99.9%   Δp: 47.203%
+99.0%   Δp: 20.603%
+95.0%   Δp:  7.898%
+90.0%   Δp:  3.461%
+75.0%   Δp:  0.175%
+Median  Δp: -0.010%
+25.0%   Δp: -1.520%
+10.0%   Δp: -8.079%
+ 5.0%   Δp: -14.808%
+ 1.0%   Δp: -35.109%
+ 0.1%   Δp: -76.557%
+Minimum Δp: -99.991%
+RMS Δp    :  8.911 ± 0.141 %
+Same top p: 88.082 ± 0.203 %
+
+
+Pure Q3_K (3.74 BPW):
+====== Perplexity statistics ======
+Mean PPL(Q)                   :   8.710427 ±   0.166650
+Mean PPL(base)                :   7.910885 ±   0.149572
+Cor(ln(PPL(Q)), ln(PPL(base))):  97.19%
+Mean ln(PPL(Q)/PPL(base))     :   0.096281 ±   0.004512
+Mean PPL(Q)/PPL(base)         :   1.101069 ±   0.004968
+Mean PPL(Q)-PPL(base)         :   0.799542 ±   0.041122
+
+====== KL divergence statistics ======
+Mean    KLD:   0.132107 ±   0.002111
+Maximum KLD:  15.814830
+99.9%   KLD:   4.415986
+
+99.0%   KLD:   1.305065
+95.0%   KLD:   0.484199
+90.0%   KLD:   0.303753
+Median  KLD:   0.047635
+10.0%   KLD:   0.000167
+ 5.0%   KLD:   0.000024
+ 1.0%   KLD:   0.000000
+ 0.1%   KLD:  -0.000001
+Minimum KLD:  -0.000004
+
+====== Token probability statistics ======
+Mean    Δp: -2.225 ± 0.071 %
+Maximum Δp: 93.449%
+99.9%   Δp: 59.241%
+99.0%   Δp: 26.743%
+95.0%   Δp:  9.604%
+90.0%   Δp:  4.069%
+75.0%   Δp:  0.118%
+Median  Δp: -0.048%
+25.0%   Δp: -2.567%
+10.0%   Δp: -11.690%
+ 5.0%   Δp: -20.874%
+ 1.0%   Δp: -46.952%
+ 0.1%   Δp: -88.935%
+Minimum Δp: -99.996%
+RMS Δp    : 11.558 ± 0.157 %
+Same top p: 85.353 ± 0.221 %
+
+
+Pure IQ4_XS (4.47 BPW):
+====== Perplexity statistics ======
+Mean PPL(Q)                   :   8.134431 ±   0.155265
+Mean PPL(base)                :   7.910885 ±   0.149572
+Cor(ln(PPL(Q)), ln(PPL(base))):  99.20%
+Mean ln(PPL(Q)/PPL(base))     :   0.027866 ±   0.002414
+Mean PPL(Q)/PPL(base)         :   1.028258 ±   0.002482
+Mean PPL(Q)-PPL(base)         :   0.223546 ±   0.020133
+
+====== KL divergence statistics ======
+Mean    KLD:   0.034250 ±   0.000556
+Maximum KLD:   4.397874
+99.9%   KLD:   1.122081
+
+99.0%   KLD:   0.327840
+95.0%   KLD:   0.126617
+90.0%   KLD:   0.079885
+Median  KLD:   0.012230
+10.0%   KLD:   0.000026
+ 5.0%   KLD:   0.000004
+ 1.0%   KLD:  -0.000000
+ 0.1%   KLD:  -0.000003
+Minimum KLD:  -0.000004
+
+====== Token probability statistics ======
+Mean    Δp: -0.532 ± 0.037 %
+Maximum Δp: 79.007%
+99.9%   Δp: 38.393%
+99.0%   Δp: 15.759%
+95.0%   Δp:  6.221%
+90.0%   Δp:  3.034%
+75.0%   Δp:  0.236%
+Median  Δp: -0.001%
+25.0%   Δp: -0.747%
+10.0%   Δp: -4.781%
+ 5.0%   Δp: -9.166%
+ 1.0%   Δp: -21.191%
+ 0.1%   Δp: -45.913%
+Minimum Δp: -84.406%
+RMS Δp    :  5.931 ± 0.102 %
+Same top p: 91.843 ± 0.171 %
+```
+pwilkin
+requested review from
+CISC,
+JohannesGaessler and
+ggerganov
+as code owners
+February 26, 2026 22:15
+pwilkin
+commented
+Feb 26, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(funny sidenote before any conspiracy theories abound: this quant was originally labeled as IQ3_KL back when the idea was a bit different, but Some Nice People pointed out to me that Somehere Out There there's already a quantization scheme with that name, so I renamed it to avoid any misconceptions)
+github-actions
+Bot
+added
+examples
+python
+python script changes
+ggml
+changes relating to the ggml tensor library for machine learning
+labels
+Feb 26, 2026
+JohannesGaessler
+commented
+Feb 26, 2026
+Copy link
+Copy Markdown
+Contributor
+How are you determining the tables per tensor? Is it a greedy algorithm?
+Also did you do any tests against pre-existing data types to determine whether per-tensor tables are actually better than the static ones we are currently using?
+pwilkin
+commented
+Feb 26, 2026
+Copy link
+Copy Markdown
+Member
+Author
+How are you determining the tables per tensor? Is it a greedy algorithm?
+Also did you do any tests against pre-existing data types to determine whether per-tensor tables are actually better than the static ones we are currently using?
+I'd lie if I said I understand the algorithm perfectly, since I was basically doing a prototyping workshop session with various assistants and my math background for it is, well, suboptimal :) The basis for it is a weighted Lloyd-Max (minimized mean-square error). We normalize values within subblocks, throw them into 8192 bins (gives virtually perfect quality while still being a noticeable speedup on the biggest tensors, probably could decrease to like 2048 but it's still very fast so didn't bother) and we do 300 iterations, stopping early if we have convergence.
+I tried to do a comparison but because the block shape is different than with existing quantization schemes you can't really do a direct one.
+Note that I'm by no means close to an expert on this, so just throwing this out to potentially start a discussion on new optimized quant types.
+pwilkin
+marked this pull request as draft
+February 26, 2026 22:40
+pwilkin
+commented
+Feb 26, 2026
+Copy link
+Copy Markdown
+Member
+Author
+However, if you're interested, I could try doing specifically one of the existing quants with a per-tensor scale construction to see what the relative KLD would be.
+JohannesGaessler
+commented
+Feb 26, 2026
+Copy link
+Copy Markdown
+Contributor
+However, if you're interested, I could try doing specifically one of the existing quants with a per-tensor scale construction to see what the relative KLD would be.
+Yes, I would like to know whether that would be beneficial.
+compilade
+reviewed
+Feb 27, 2026
+View reviewed changes
+Comment thread
+tools/quantize/quantize.cpp
+{ "Q2_K", LLAMA_FTYPE_MOSTLY_Q2_K, " 2.96G, +3.5199 ppl @ Llama-3-8B", },
+{ "Q2_K_S", LLAMA_FTYPE_MOSTLY_Q2_K_S, " 2.96G, +3.1836 ppl @ Llama-3-8B", },
+{ "IQ3_XXS", LLAMA_FTYPE_MOSTLY_IQ3_XXS, " 3.06 bpw quantization", },
+{ "Q3_PT", LLAMA_FTYPE_MOSTLY_Q3_PT, " 3.25 bpw quantization", },
+compilade
+Feb 27, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+How can it be 3.25 bpw if the type is 3.875 bpw?
+pwilkin
+Feb 27, 2026
+Copy link
+Copy Markdown
+Member
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+There are a ton of artifacts here because the first experiment was a completely different quant that turned out to not work :)
+Comment thread
+tools/quantize/quantize.cpp
+Outdated
+} else if (strcmp(argv[arg_idx], "--keep-split") == 0) {
+params.keep_split = true;
+} else if (strcmp(argv[arg_idx], "--keep-split") == 0) {
+params.keep_split = true;
+compilade
+Feb 27, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This duplicates an existing argument. Likely a merge artifact? Or was this meant to handle --threads?
+pwilkin
+Feb 27, 2026
+Copy link
+Copy Markdown
+Member
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Yeah, most likely.
+Comment thread
+tools/quantize/quantize.cpp
+Comment on lines
++163
+to
++165
+printf(" --threads n\n");
+printf(" number of threads to use for cross-tensor parallelization (default: 0, use same as within-tensor)\n");
+printf(" when n > 0, enables parallel quantization of multiple tensors simultaneously\n");
+compilade
+Feb 27, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This argument is not handled. I assume this isn't intended?
+pwilkin
+Feb 27, 2026
+Copy link
+Copy Markdown
+Member
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Yeah, I abandoned this, it's also out-of-scope for this PR.
+Comment thread
+src/llama-quant.cpp
+Outdated
+Comment on lines
++788
+to
++793
+// Determine whether this tensor will be Q3_PT (mirror the pass-2 logic)
+bool quantize = tname.rfind("weight") == tname.size() - 6;
+quantize &= (ggml_n_dims(tensor) >= 2);
+quantize &= tname.find("_norm.weight") == std::string::npos;
+quantize &= tname.find("ffn_gate_inp.weight") == std::string::npos;
+if (!quantize) { continue; }
+compilade
+Feb 27, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This doesn't fully mirror the logic for excluding things to quantize, meaning it will break for recurrent models (like Mamba, RWKV, and others) where some tensors are 2D+, but shouldn't be quantized (so this will produce extra metadata and unnecessary calculations for tensors which aren't quantized to Q3_PT).
+Ideally that logic should be in a single place to make it easier to modify, but I think that will be handled by #19770 with its tensor_allows_quantization function.
+Comment thread
+src/llama-model-loader.cpp
+Outdated
+case LLAMA_FTYPE_MOSTLY_IQ2_S: return "IQ2_S - 2.5 bpw";
+case LLAMA_FTYPE_MOSTLY_IQ2_M: return "IQ2_M - 2.7 bpw";
+case LLAMA_FTYPE_MOSTLY_IQ3_XS: return "IQ3_XS - 3.3 bpw";
+case LLAMA_FTYPE_MOSTLY_Q3_PT: return "Q3_PT - 3.25 bpw";
+compilade
+Feb 27, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The type is 3.875 bpw, no?
+pwilkin
+Feb 27, 2026
+Copy link
+Copy Markdown
+Member
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Yes.
+compilade
+commented
+Feb 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+all of the quants in llama.cpp use static, predefined "magic scales" that were determined to be somewhat optimal for quantizing tensors.
+I think a less confusing explanation would be that the mappings of representable values of current quants are static, while you're proposing a non-linear quant with dynamic levels/steps depending on the tensor (at least from what I understand).
+pwilkin
+commented
+Feb 27, 2026
+Copy link
+Copy Markdown
+Member
+Author
+I think a less confusing explanation would be that the mappings of representable values of current quants are static, while you're proposing a non-linear quant with dynamic levels/steps depending on the tensor (at least from what I understand).
+Yeah, the original version used the name "codebooks" which was maybe better (but also not fully correct).
+pwilkin
+commented
+Feb 27, 2026
+Copy link
+Copy Markdown
+Member
+Author
+@JohannesGaessler aight, here you go :) pure 3.74 bpw quant comparison:
+Quant
+PPL
+KLD
+Q3_K
+8.710427 ± 0.166650
+0.132107 ± 0.002111
+Q3_KPT
+8.527959 ± 0.162299
+0.098768 ± 0.001628
+I've committed the reference code for Q3_KPT as well.
+JohannesGaessler
+reviewed
+Feb 27, 2026
+View reviewed changes
+Comment thread
+ggml/src/ggml-common.h
+Comment on lines
+497
+to
+510
+GGML_TABLE_BEGIN(uint8_t, kmask_iq2xs, 8)
+1, 2, 4, 8, 16, 32, 64, 128
+GGML_TABLE_END()
+GGML_TABLE_BEGIN(uint8_t, ksigns_iq2xs, 128)
+0, 129, 130, 3, 132, 5, 6, 135, 136, 9, 10, 139, 12, 141, 142, 15,
+144, 17, 18, 147, 20, 149, 150, 23, 24, 153, 154, 27, 156, 29, 30, 159,
+160, 33, 34, 163, 36, 165, 166, 39, 40, 169, 170, 43, 172, 45, 46, 175,
+48, 177, 178, 51, 180, 53, 54, 183, 184, 57, 58, 187, 60, 189, 190, 63,
+192, 65, 66, 195, 68, 197, 198, 71, 72, 201, 202, 75, 204, 77, 78, 207,
+80, 209, 210, 83, 212, 85, 86, 215, 216, 89, 90, 219, 92, 221, 222, 95,
+96, 225, 226, 99, 228, 101, 102, 231, 232, 105, 106, 235, 108, 237, 238, 111,
+240, 113, 114, 243, 116, 245, 246, 119, 120, 249, 250, 123, 252, 125, 126, 255,
+GGML_TABLE_END()
+JohannesGaessler
+Feb 27, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I think we misunderstood each other. I understood your idea was to replace these tables with per-tensor tables.
+pwilkin
+Feb 27, 2026
+Copy link
+Copy Markdown
+Member
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Ah, now I get it 😀 aight, will try that too.
+compilade
+Feb 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+(regarding this particular table)
+The ksigns don't actually require a table; the most significant bit is derived from how many other bits are set; there can only be an even number of negative numbers per block in those types. That particular table is likely for speed optimization, but isn't technically necessary.
+llama.cpp/ggml/src/ggml-quants.c
+Lines 3077 to 3096
+in
+ecbcb7e
+int nflip = 0;
+uint8_t s = 0;
+for (int i = 0; i < 8; ++i) {
+if (xb[8*k + i] >= 0) xval[8*k + i] = xb[8*k + i];
+else {
+xval[8*k + i] = -xb[8*k + i]; ++nflip; s |= (1 << i);
+}
+}
+if (nflip%2) {
+int imin = 0; float min = weight[8*k+imin]*xb[8*k+imin]*xb[8*k+imin];
+for (int i = 1; i < 8; ++i) {
+float ax = weight[8*k+i]*xb[8*k+i]*xb[8*k+i];
+if (ax < min) {
+min = ax; imin = i;
+}
+}
+xval[8*k+imin] = -xval[8*k+imin];
+s ^= (1 << imin);
+}
+block_signs[k] = s & 127;
+From what I understand, the per-tensor tables would replace tables like kvalues_iq4nl.
+JohannesGaessler
+Feb 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Ah, now I get it 😀 aight, will try that too.
+Well the more pressing matter is that I don't understand what it is your "per-tensor" format is actually doing from your textual description.
+pwilkin
+Feb 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+All right, I'll try to explain based on the difference between Q3_K and Q3_KPT.
+In Q3_K, you have (in dequantize_row_q3_K):
+```
+*y++ = dl * ((int8_t)((q[l+ 0] >> shift) & 3) - ((hm[l+ 0] & m) ? 0 : 4));
+```
+Here, q is the low bits part of the weight (2 bits) and hm is the high bits (sign) part (1 bit), this gets multiplied by the scale (which is the superblock scale times the respective small block scale).
+All of this uses values from a static distribution of [-4, -3, -2, -1, 0, 1, 2, 3]. Those are the only values that can be the result of this internal computation of ((int8_t)((q[l+ 0] >> shift) & 3) - ((hm[l+ 0] & m) ? 0 : 4)). Thus, the distribution of values inside the tensor is constrained by the interaction of the superblock scale and subblock scales. Once those are fixed, the specific quants can only pick an integer multiplier from -4 to 3.
+Q3_KPT uses this:
+```
+int k_idx = ((q[l + 0] >> shift) & 3) + ((hm[l + 0] & m) ? 4 : 0);
+y[l + 0]  = dl1 * (levels[k_idx] * 7.0f - 4.0f);
+```
+where levels is a float array. So, the distribution of values before scaling is also in the range of [-3, 3] - however, the exact distribution is calculated per tensor to account for that tensor's specific distribution of values. Therefore, instead of having [-4, -3, -2, -1, 0, 1, 2, 3], you might have for example [-3, -1, -0.6, 0, 0.3, 0.6, 1, 3] to account for a symmetric distribution that's more likely to have extreme values and values closer to zero - or even [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5] for a tensor that has only zero-or-positive values since it's a waste of precision to then use negative values at all.
+Does this make any sense? :) (note: this is also a self-study exercise to me, I strongly believe in learning-by-doing, so please excuse if I'm saying something wrong)
+EDIT: @compilade rightly mentioned that the values are from -4 to 3, I got confused by some "super-symetric" quant schemes :)
+pwilkin
+Feb 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Of course as @compilade suggested using float arrays is an efficiency problem, but you can also get a bigger resolution by using int_8 values with a divisor instead, since picking 2^bpw values from 256 is still better resolution than using fixed a fixed preselected set of 2^bpw values.
+compilade
+Feb 27, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+To be clear I suggested (elsewhere) to use int8 values for the q3pt_values, to allow using int8 dot products within the sub-blocks, like the other non-linear quants already do.
+JohannesGaessler
+Feb 27, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Shouldn't Q3_K and Q3_KPT then have the same size though? Or did you use a different format as the base?
+pwilkin
+Feb 27, 2026
+Copy link
+Copy Markdown
+Member
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Q3_K and Q3_KPT do have exactly the same size. The original quant in this thread (Q3_PT) was a result of my attempt to make a completely new quant around 3.25bpw which went haywire and produced a completely new quant as a result, but then since you asked how this would work with existing quant I made a "PT" version of Q3_K (same block structure even, the only difference is in how the dequant algorithm uses the per-tensor scales).
+pwilkin
+Feb 27, 2026
+Copy link
+Copy Markdown
+Member
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+As in:
+```
+-a----        27.02.2026     19:16     1887009952 Qwen_Qwen3-4B-Instruct-2507-Q3_KPT_pure.gguf
+-a----        27.02.2026     18:03     1886997184 Qwen_Qwen3-4B-Instruct-2507-Q3_K_pure.gguf
+```
+The difference in size is exactly the per-tensor distributions which are stored in an array in the GGUF header.
+narinishi
+commented
+Feb 28, 2026
+Copy link
+Copy Markdown
+Just trying to run this against an existing Q8_0 quant (which I understand would yield particularly lossy results) and seeing a segmentation fault. Any idea why that's happening?
+command line ./llama-quantize --allow-requantize LFM2-24B-A2B.Q8_0.gguf Q3_PT
+tail of output
+```
+llama_model_quantize_impl: Q3_PT pass 1 complete.
+[   1/ 428]                    token_embd.weight - [  2048,  65536,      1,      1], type =   q8_0, converting to q6_K .. size =   136.00 MiB ->   105.00 MiB
+[   2/ 428]               token_embd_norm.weight - [  2048,      1,      1,      1], type =    f32, size =    0.008 MiB
+[   3/ 428]               blk.0.attn_norm.weight - [  2048,      1,      1,      1], type =    f32, size =    0.008 MiB
+[   4/ 428]                blk.0.ffn_down.weight - [ 11776,   2048,      1,      1], type =   q8_0, converting to iq4_xs .. size =    24.44 MiB ->    12.22 MiB
+Segmentation fault (core dumped)
+```
+pwilkin
+commented
+Feb 28, 2026
+Copy link
+Copy Markdown
+Member
+Author
+@narinishi will check (but keep in mind this is a very draft solution)
+pwilkin
+commented
+Feb 28, 2026
+Copy link
+Copy Markdown
+Member
+Author
+@narinishi sorry, couldn't reproduce - you should've gotten a warning that you need an imatrix for this quntization, after making an imatrix the quants worked fine for me.
+jubruckne
+commented
+Feb 28, 2026
+Copy link
+Copy Markdown
+@pwilkin since you‘re storing additional per-tensor table in metadata, I wonder if you could make it a bit more flexible by allowing multiple tables per tensor. It could be simply a list of tables along with a stride. That way separate tables for merged qkv or experts would be possible. Or even say a table per N rows…
+pwilkin
+commented
+Feb 28, 2026
+Copy link
+Copy Markdown
+Member
+Author
+@pwilkin since you‘re storing additional per-tensor table in metadata, I wonder if you could make it a bit more flexible by allowing multiple tables per tensor. It could be simply a list of tables along with a stride. That way separate tables for merged qkv or experts would be possible. Or even say a table per N rows…
+Yes, that's the next step - but before that, I want to take a step back and see if actually porting reasonably fast kernels for those tensors is possible. No use having a quantization scheme that takes KLD/PPL off if it's super slow.
+github-actions
+Bot
+added
+the
+testing
+Everything test related
+label
+Feb 28, 2026
+narinishi
+commented
+Feb 28, 2026
+Copy link
+Copy Markdown
+@narinishi sorry, couldn't reproduce - you should've gotten a warning that you need an imatrix for this quntization, after making an imatrix the quants worked fine for me.
+I tried using Bartowski's LiquidAI_LFM2-24B-A2B-bf16.gguf along with LiquidAI_LFM2-24B-A2B-imatrix.gguf from the same repo, both confirmed to have correct hashes, and it still errors out.
+Anything else I might be missing? @pwilkin
+pwilkin
+commented
+Mar 1, 2026
+Copy link
+Copy Markdown
+Member
+Author
+@narinishi I'll try using that exact quant and see if I can reproduce.
+github-actions
+Bot
+added
+the
+Nvidia GPU
+Issues specific to Nvidia GPUs
+label
+Mar 1, 2026
+pwilkin
+commented
+Mar 1, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Author
+Now in the quant laboratory: Q4_DPT. Which is just a fancy name for IQ4_NL with learned kvalues.
+I hacked an extremely ugly CUDA kernel hack to compare the performance effect:
+```
+(venv) ilintar@LinuksowaJaskinia:/media/ilintar/D_SSD/models$ llama-bench -m Qwen_Qwen3-4B-Instruct-2507-IQ4_NL-pure.gguf
+load_backend: loaded BLAS backend from /devel/tools/llama.cpp/build/bin/libggml-blas.so
+ggml_cuda_init: found 2 CUDA devices:
+  Device 0: NVIDIA GeForce RTX 3080, compute capability 8.6, VMM: yes
+  Device 1: NVIDIA GeForce RTX 5060 Ti, compute capability 12.0, VMM: yes
+load_backend: loaded CUDA backend from /devel/tools/llama.cpp/build/bin/libggml-cuda.so
+load_backend: loaded CPU backend from /devel/tools/llama.cpp/build/bin/libggml-cpu-haswell.so
+| model                          |       size |     params | backend    | threads |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
+| qwen3 4B IQ4_NL - 4.5 bpw      |   2.20 GiB |     4.02 B | BLAS,CUDA  |       8 |           pp512 |     5394.70 ± 232.97 |
+| qwen3 4B IQ4_NL - 4.5 bpw      |   2.20 GiB |     4.02 B | BLAS,CUDA  |       8 |           tg128 |        121.56 ± 0.42 |
+
+build: e395d080c (8173)
+(venv) ilintar@LinuksowaJaskinia:/media/ilintar/D_SSD/models$ llama-bench -m Qwen_Qwen3-4B-Instruct-2507-Q4_DPT-pure.gguf
+load_backend: loaded BLAS backend from /devel/tools/llama.cpp/build/bin/libggml-blas.so
+ggml_cuda_init: found 2 CUDA devices:
+  Device 0: NVIDIA GeForce RTX 3080, compute capability 8.6, VMM: yes
+  Device 1: NVIDIA GeForce RTX 5060 Ti, compute capability 12.0, VMM: yes
+load_backend: loaded CUDA backend from /devel/tools/llama.cpp/build/bin/libggml-cuda.so
+load_backend: loaded CPU backend from /devel/tools/llama.cpp/build/bin/libggml-cpu-haswell.so
+| model                          |       size |     params | backend    | threads |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
+| qwen3 4B Q4_DPT - IQ4_NL with learned levels |   2.20 GiB |     4.02 B | BLAS,CUDA  |       8 |           pp512 |     5325.80 ± 271.60 |
+| qwen3 4B Q4_DPT - IQ4_NL with learned levels |   2.20 GiB |     4.02 B | BLAS,CUDA  |       8 |           tg128 |        108.28 ± 0.21 |
+
+build: e395d080c (8173)
+```
+So, not great not terrible I guess.
+The KLD data for the quants:
+```
+IQ4_NL:
+====== Perplexity statistics ======
+Mean PPL(Q)                   :   8.123314 ±   0.155079
+Mean PPL(base)                :   7.910885 ±   0.149572
+Cor(ln(PPL(Q)), ln(PPL(base))):  99.22%
+Mean ln(PPL(Q)/PPL(base))     :   0.026499 ±   0.002381
+Mean PPL(Q)/PPL(base)         :   1.026853 ±   0.002445
+Mean PPL(Q)-PPL(base)         :   0.212429 ±   0.019811
+
+====== KL divergence statistics ======
+Mean    KLD:   0.033115 ±   0.000551
+Maximum KLD:   4.302760
+99.9%   KLD:   1.215412
+99.0%   KLD:   0.304676
+95.0%   KLD:   0.121186
+90.0%   KLD:   0.077289
+Median  KLD:   0.011778
+10.0%   KLD:   0.000026
+ 5.0%   KLD:   0.000003
+ 1.0%   KLD:  -0.000000
+ 0.1%   KLD:  -0.000004
+Minimum KLD:  -0.000004
+
+====== Token probability statistics ======
+Mean    Δp: -0.522 ± 0.036 %
+Maximum Δp: 86.560%
+99.9%   Δp: 36.079%
+99.0%   Δp: 15.386%
+95.0%   Δp:  6.054%
+90.0%   Δp:  2.912%
+75.0%   Δp:  0.234%
+Median  Δp: -0.001%
+25.0%   Δp: -0.724%
+10.0%   Δp: -4.718%
+ 5.0%   Δp: -9.085%
+ 1.0%   Δp: -20.438%
+ 0.1%   Δp: -47.195%
+Minimum Δp: -86.191%
+RMS Δp    :  5.767 ± 0.103 %
+Same top p: 91.992 ± 0.170 %
+
+Q4_DPT:
+
+====== Perplexity statistics ======
+Mean PPL(Q)                   :   8.169248 ±   0.156889
+Mean PPL(base)                :   7.910885 ±   0.149572
+Cor(ln(PPL(Q)), ln(PPL(base))):  99.28%
+Mean ln(PPL(Q)/PPL(base))     :   0.032137 ±   0.002301
+Mean PPL(Q)/PPL(base)         :   1.032659 ±   0.002376
+Mean PPL(Q)-PPL(base)         :   0.258363 ±   0.019745
+
+====== KL divergence statistics ======
+Mean    KLD:   0.030403 ±   0.000630
+Maximum KLD:   8.150362
+99.9%   KLD:   1.044685
+99.0%   KLD:   0.282885
+95.0%   KLD:   0.108604
+90.0%   KLD:   0.068070
+Median  KLD:   0.010477
+10.0%   KLD:   0.000022
+ 5.0%   KLD:   0.000003
+ 1.0%   KLD:  -0.000000
+ 0.1%   KLD:  -0.000003
+Minimum KLD:  -0.000004
+
+====== Token probability statistics ======
+Mean    Δp: -0.354 ± 0.035 %
+Maximum Δp: 96.635%
+99.9%   Δp: 33.628%
+99.0%   Δp: 14.918%
+95.0%   Δp:  6.130%
+90.0%   Δp:  3.110%
+75.0%   Δp:  0.296%
+Median  Δp: -0.000%
+25.0%   Δp: -0.546%
+10.0%   Δp: -4.105%
+ 5.0%   Δp: -7.891%
+ 1.0%   Δp: -20.029%
+ 0.1%   Δp: -48.167%
+Minimum Δp: -91.041%
+RMS Δp    :  5.597 ± 0.110 %
+Same top p: 92.459 ± 0.165 %
+```
+pwilkin
+commented
+Mar 1, 2026
+Copy link
+Copy Markdown
+Member
+Author
+@JohannesGaessler If you have some free time I'd appreciate you taking a look if there's a civilized way to pass the kvalues over to the CUDA kernels (this is the only reason I've included them for this quant specifically).
+JohannesGaessler
+commented
+Mar 1, 2026
+Copy link
+Copy Markdown
+Contributor
+My opinion was and still is that just like with FP8 the per-tensor auxiliary data should live in an optional dedicated ggml_tensor. If we're talking about how to feed such data to CUDA kernels, the way to do it is to allocate shared memory per CUDA block and to copy the auxiliary data from VRAM at the beginning of the kernel. If the auxiliary data is in a separate ggml_tensor it should already be in VRAM. If the auxiliary data is in RAM you will need to create a ggml_cuda_pool_alloc first and cudaMemcpyAsync the data to it. An alternative, hacky approach would be to append the per-tensor data at the end of the tensor after the regular data - long-term that will not work correctly with my tensor parallelism implementation though.
+pwilkin
+commented
+Mar 1, 2026
+Copy link
+Copy Markdown
+Member
+Author
+@JohannesGaessler okay, so my idea for doing that based on your input right now looks like this:
+-> make a new llm_graph_input_i subclass for the per-quantization-type levels
+-> handle per-tensor levels as a view based on the tensor index of the weights
+-> load the levels as inputs during model load
+-> the respective backend injects the levels into the operation as an extra src for MUL_MAT
+Does this make sense?
+pwilkin
+commented
+Apr 7, 2026
+Copy link
+Copy Markdown
+Member
+Author
+IQ3_S is better than Q3_K, it has KLD 0.095485 and same top p 88.010%. Size-wise exactly same as Q3_K.
+pwilkin
+force-pushed
+the
+q3_pt
+branch
+2 times, most recently
+from
+1069823 to
+6c0bec5
+Compare
+April 13, 2026 13:03
+pwilkin
+commented
+Apr 13, 2026
+Copy link
+Copy Markdown
+Member
+Author
+All right, status update:
+rebased on current master
+cleaned up all "failed experiment" data
+added new quant: IQ1_BN - this is supposed to be a "smart" replacement for IQ1_S for very small quantizations
+pwilkin
+force-pushed
+the
+q3_pt
+branch
+4 times, most recently
+from
+75e67ae to
+c53dd44
+Compare
+April 15, 2026 19:29
+github-actions
+Bot
+added
+the
+OpenVINO
+label
+Apr 15, 2026
+pwilkin
+force-pushed
+the
+q3_pt
+branch
+2 times, most recently
+from
+b67ac95 to
+e95c8b5
+Compare
+April 16, 2026 23:11
+github-actions
+Bot
+added
+the
+documentation
+Improvements or additions to documentation
+label
+Apr 18, 2026
+pwilkin
+force-pushed
+the
+q3_pt
+branch
+2 times, most recently
+from
+9bdb48f to
+f026b22
+Compare
+May 2, 2026 15:53
+pwilkin
+force-pushed
+the
+q3_pt
+branch
+from
+f026b22 to
+8d650f1
+Compare
+May 14, 2026 14:22
+pwilkin
+force-pushed
+the
+q3_pt
+branch
+2 times, most recently
+from
+d922579 to
+4de5db4
+Compare
+June 27, 2026 11:43
+github-actions
+Bot
+added
+CUDA
+Related to the CUDA backend
+conversion
+labels
+Jun 27, 2026
+pwilkin
+force-pushed
+the
+q3_pt
+branch
+4 times, most recently
+from
+ea5cf88 to
+123a1bc
+Compare
+July 6, 2026 10:30
+github-actions
+Bot
+added
+the
+OpenCL
+Issues specific to the OpenCL backend
+label
+Jul 6, 2026
+pwilkin
+force-pushed
+the
+q3_pt
+branch
+from
+123a1bc to
+a98a16d
+Compare
+July 10, 2026 08:55
+pwilkin
+force-pushed
+the
+q3_pt
+branch
+from
+a98a16d to
+36265c5
+Compare
+July 17, 2026 19:26
+pwilkin
+force-pushed
+the
+q3_pt
+branch
+from
+36265c5 to
+0a88243
+Compare
+August 17, 2026 10:18
+pwilkin
+changed the title
+[New quant] Q3_PT
+Quantization laboratory: new per-tensor codebook quants, quantization recipe generator
+Aug 18, 2026
+quant laboratory: learned-level quant types, auto-tensor-type, imatri…
+…
+5167bbd
+```
+…x groups
+
+Squash of the q3_pt branch, rebased onto upstream 5202104.
+
+Quant types with per-tensor learned levels/grids: Q3_PT, Q3_KPT, Q2_KPT,
+Q4_DPT, Q2_DPT, IQ2_TQ, IQ3_TQ, IQ1_BN (CPU, CUDA MMQ/MMVQ, BLAS, Vulkan).
+Type traits carry a levels pointer (to_float / vec_dot), stored on the
+tensor as quant_levels and written to / read from GGUF.
+
+llama-quantize: two-pass quantization (pass 1 trains per-tensor levels,
+pass 2 quantizes), imatrix row groups for grouped-matmul weights
+(DeepSeek4 attn_output_a), skip integer id/index and APE tensors.
+
+tools: auto-tensor-type (architecture-aware auto-config + arch
+pre-calibrator, fitting, multisample), capture-layer-data; test
+quant laboratory; analysis scripts.
+
+Rebase notes: the upstream slab-streaming quantize loop is kept; imatrix
+groups replace its per-expert row grouping, the level trainers load whole
+tensors through load_data_range, and the row offset is passed to
+ggml_quantize_chunk so Q2_KPT indexes its per-row level buffer correctly.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HBgKqgJmorcMfgK3FuurMm
+```
+pwilkin
+force-pushed
+the
+q3_pt
+branch
+from
+89ee87b to
+5167bbd
+Compare
+September 7, 2026 12:07
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+conversion
+CUDA
+Related to the CUDA backend
+documentation
+Improvements or additions to documentation
+examples
+ggml
+changes relating to the ggml tensor library for machine learning
+Nvidia GPU
+Issues specific to Nvidia GPUs
+OpenCL
+Issues specific to the OpenCL backend
+OpenVINO
+python
+python script changes
+script
+Script related
+testing
+Everything test related
+Vulkan
+Issues specific to the Vulkan backend
+7 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

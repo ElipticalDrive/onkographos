@@ -1,0 +1,261 @@
+FlagGems is an operator library for large language models implemented in the Triton Language. - [KernelGen][Nvidia] Add quantize_per_tensor_dynamic operator with Triton kernel by ShawnsYing · Pull Request #7655 · flagos-ai/FlagGems
+
+[KernelGen][Nvidia] Add quantize_per_tensor_dynamic operator with Triton kernel by ShawnsYing · Pull Request #7655 · flagos-ai/FlagGems · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ShawnsYing
+commented
+Oct 23, 2026
+Copy link
+Copy Markdown
+Contributor
+Summary
+Adds a Triton kernel for quantize_per_tensor_dynamic. The operator dynamically quantizes a
+float32 tensor to qint8 / quint8 with per-tensor parameters derived from the input at runtime:
+the [min, max] range is reduced on device, extended to include zero, mapped onto the qmin/qmax
+grid (halved under reduce_range=True), with ATen's small-scale cutoff at
+fp32(6.1e-5) = 6.0999998822808266e-05 and the 0.1 fallback for degenerate (zero-range) inputs;
+the nudged integer zero point is chosen from the pair (min-side, max-side) with the smaller
+arithmetic error and rounded half-to-even.
+The implementation mirrors ATen's split exactly:
+qparams: amin/amax are reduced on device and synced to the host (the same two
+.item<float>() pulls ATen performs), then ChooseQuantizationParams is replayed in host
+doubles with fp32 rounding of every intermediate the C++ code stores in a float — the computed
+scale / zero_point are bit-exact against the reference (verified on 1600+ randomized
+amax configurations across all four dtype x reduce_range modes, plus the degenerate all-zero /
+tiny-amax branches).
+elementwise pass: a Triton kernel computes rint(x * (1/scale)) + zero_point with one fp64
+reciprocal per program and per-element fp32 math (measured ~2x faster than the all-fp64 form;
+the fp32 product and fp64 quotient only disagree near half-integer boundaries, so lanes whose
+remainder is within NEAR_HALF = 0.499 of the tie are queued and recomputed in exact fp64 by a
+fix kernel — those are the same at-tie lanes where the two precisions can differ by one
+quantization level). Lanes with huge quotients saturate identically on both paths and skip the
+repair.
+Channels-last / channels-last-3d inputs keep their layout end to end (ATen's quantizer follows
+suggest_memory_format); a channels-last input yields a channels-last int_repr, which the
+_empty_affine_quantized + set_ wrap preserves (_make_per_tensor_quantized_tensor would
+silently normalise the strides to contiguous). The .out overload validates the destination
+dtype/shape (a shape mismatch surfaces ATen's QuantizedCUDA resize_ gap) and lands through
+quantized copy_, which overwrites the integers and adopts the dynamically computed quantizer.
+Measured ATen contract (torch 2.8.0a0 on H20-3e, all covered by tests):
+only torch.float32 inputs are accepted ("Quantize only works on Float Tensor"); qint32 is
+rejected ("dtype QInt32 not supported"); the empty input raises on the min() reduction exactly
+like the reference.
+All-zero input -> degenerate branch: scale = 0.1 (zp = qmax for qint8, qmin for quint8);
+tiny amax (1e-10) -> the small-scale branch lifts scale to 6.0999998822808266e-05.
+reduce_range=True halves the grid (qint8: [-64, 63], quint8: [0, 127]), so the scale
+doubles and the zero point re-nudges accordingly.
+Testing
+Direct call flag_gems.quantize_per_tensor_dynamic(x, dtype, reduce_range), compared against
+torch.quantize_per_tensor_dynamic on the same device: dtype, qscheme(), q_scale(),
+q_zero_point() and int_repr() are all bit-exact.
+Coverage: 5 shapes (2-D, 3-D, 4-D, 5-D, up to 1024x1024) x {qint8, quint8} x {reduce_range
+False/True}, the degenerate all-zero and tiny-amax branches, a 0-dim input, a strided input,
+channels-last / channels-last-3d memory formats, rejected non-float32 dtypes, rejected qint32,
+the empty-input error, and the .out overload (quantizer adoption + dtype/shape mismatch).
+Dequantized values are compared end-to-end.
+pytest tests/test_quantize_per_tensor_dynamic.py -> 38 passed; --ref cpu -> 38 passed;
+--ref cpu --quick -> 26 passed (CI parameters).
+Tested on: Nvidia (H20-3e).
+Performance
+Test command: pytest benchmark/test_quantize_per_tensor_dynamic.py --mode kernel --level core
+(NVIDIA H20-3e). Median of 3 runs.
+quantize_per_tensor_dynamic
+dtype
+Size
+Torch Latency (ms)
+Gems Latency (ms)
+Speedup
+float32
+[64, 64]
+0.046720
+0.323456
+0.144
+float32
+[1024, 1024]
+0.094784
+0.324288
+0.292
+float32
+[4096, 4096]
+0.588960
+0.397376
+1.482
+float32
+[64, 512, 512]
+0.590976
+0.394784
+1.497
+Operator
+Arithmetic Mean Speedup
+quantize_per_tensor_dynamic
+0.853
+quantize_per_tensor_dynamic.out
+dtype
+Size
+Torch Latency (ms)
+Gems Latency (ms)
+Speedup
+float32
+[64, 64]
+0.051568
+0.335168
+0.154
+float32
+[1024, 1024]
+0.095984
+0.336912
+0.285
+float32
+[4096, 4096]
+0.599952
+0.405808
+1.478
+float32
+[64, 512, 512]
+0.599680
+0.403568
+1.486
+Operator
+Arithmetic Mean Speedup
+quantize_per_tensor_dynamic_out
+0.851
+Notes (honest recording, per the batch's reporting rule):
+Large tensors (>16 MiB) run ~1.48x: ATen's elementwise kernel pays a per-element fp64
+division (493us at 4096^2), while the fused fp32 fast path + fp64 repair-queue pipeline runs the
+whole quantization in ~86us GPU time.
+Small tensors are host-bound (~0.15x at 64x64): the dynamic contract forces two device-to-host
+scalar syncs (min/max .item(), ~40us each under the dispatcher, paid identically by ATen)
+plus the flag-queue allocation and a second kernel launch. ATen does the same amax syncs but
+with a single fused elementwise kernel; the extra Triton launch overhead dominates at sizes
+where the GPU work is negligible.
+KernelGen SimpleOpt (18/18 workloads PASSED, 7 rounds, best round geo_mean 43.9x on its own
+timing set — reference-latency noise inflated that round; like-for-like 2.9-5.3x) found the same
+two levers: per-element fp64 math removal and the flag-queue repair architecture adopted here.
+Multi-backend Testing
+Backend
+Accuracy Test
+Speedup (mean)
+Notes
+Nvidia (H20)
+PASS (38 cases)
+0.853 / 0.851 (.out)
+Primary
+Tianshu
+N/A
+—
+QuantizedCUDA dispatch key is Nvidia-specific
+Muxi
+N/A
+—
+—
+Ascend
+N/A
+—
+—
+Hygon
+N/A
+—
+—
+The implementation registers under the Quantized<dispatch_key> key (the same key
+dequantize uses), so a backend without quantized tensor support simply does not reach it.
+Files Changed
+src/flag_gems/ops/quantize_per_tensor_dynamic.py: Triton implementation (fp32 fast-path
+elementwise quantization kernel with exact-fp64 repair queue, host-side bit-exact
+ChooseQuantizationParams replay, _empty_affine_quantized+set_ layout-preserving wrap, the
+two wrappers)
+tests/test_quantize_per_tensor_dynamic.py: Accuracy test (38 cases)
+benchmark/test_quantize_per_tensor_dynamic.py: Performance benchmark (both overloads)
+src/flag_gems/ops/__init__.py: Register imports and __all__
+src/flag_gems/__init__.py: Register both overloads in _FULL_CONFIG under
+QUANTIZED_DISPATCH_KEY
+conf/operators.yaml: Add operator entries (kind: Quantization, stage: alpha 5.5)
+[KernelGen][Nvidia] Add quantize_per_tensor_dynamic operator with Tri…
+…
+f4e4ac2
+```
+…ton kernel
+```
+github-actions
+Bot
+added
+benchmark
+ops/aten
+core
+tests
+size/Large
+KernelGen
+labels
+Oct 23, 2026
+ShawnsYing
+and others
+added 2 commits
+October 24, 2026 06:51
+chore: retrigger CI (robust-checkout jitter; upstream master black br…
+…
+44780c3
+```
+…oken)
+```
+Merge branch 'master' into pr/quantize_per_tensor_dynamic
+6958f51
+Dongxu-H
+marked this pull request as ready for review
+October 26, 2026 03:11
+Dongxu-H
+requested review from
+0x45f,
+103yiran,
+Caeruleann,
+bin913,
+hellojack163,
+huangyiqun,
+modao1234,
+tengqm and
+w1120029931-bit
+as code owners
+October 26, 2026 03:11
+bin913
+reviewed
+Oct 29, 2026
+View reviewed changes
+bin913
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review: Request Changes
+Thanks for the contribution. The main computation is Triton, both dispatch keys are reachable, and the qparams are bit-exact against ATen (I compared 12,024 local cases with zero mismatches). There is a new correctness bug plus two unresolved performance issues.
+P1
+New correctness bug: the BIG_Q=200 bound is wrong — src/flag_gems/ops/quantize_per_tensor_dynamic.py:43,158. The premise "anything above 200 saturates" is false because q = a + zp and zp can be as low as -128, so q ≈ 72 does not saturate. Reproduced with mn=-1, mx=1000: at x=787.06, the fp32 path yields q=72 while the fp64 reference yields q=73, and the fix-up is skipped — a one-level quantization error. Raise the threshold to 256.
+Queue/second-launch cost (previous item b, unresolved) — :288 allocates an n-element int32 queue each call (~64MB for 4096²), :313 launches 64 fix-up programs even when cnt == 0, and :258/:259 still perform two .item() syncs (ATen uses a single aminmax). This is why small sizes are 0.14x/0.29x.
+.out still double-copies (previous item c, unresolved) — :397 out.copy_() goes through the ATen quantized copy, adding a full O(n) pass. Master's quantize_per_tensor_out:356-366/583-586 already solves this with _int_view + a Triton copy_; please reuse it.
+Note
+Previous item (a) does not hold: ATen also rejects Half, so _validate is correct and the Half branches at :360/:375 are simply dead code.
+Verified-compliant
+Triton main computation, dual reachable dispatch keys, conf/operators.yaml/exports/marker complete, and degenerate branches well tested. Tests call flag_gems.* directly, so there is no dispatch test and no guard against a native copy_.
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+benchmark
+core
+KernelGen
+ops/aten
+size/Large
+tests
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

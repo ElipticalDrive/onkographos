@@ -1,0 +1,151 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,5 @@
+ # VDB Volume Rendering with OpenVDB/NanoVDB
+ 
+-Also called: Fixed-rate VDB compression, GPU Volume Rendering with Hierarchical Compression Using VDB, NanoVDB Compression for Volume Rendering, NanoVDB encoding, OpenVDB structure, OpenVDB/NanoVDB rendering, VDB, VDB Data Structure (5-4-3)
++Also called: OpenVDB/NanoVDB rendering, NanoVDB encoding, OpenVDB structure
+ 
+ ## Overview
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-The method consists of two phases: CPU-side compression/conversion and GPU-side rendering.
++The method consists of two phases: CPU-side compression/conversion and GPU-side rendering [S2].
+ 
+ ### Inputs and Outputs
+@@ -14,5 +14,4 @@
+ 
+ ### Data Structures
+-
+ #### OpenVDB Structure (CPU)
+ The standard OpenVDB structure uses a hierarchical layout with three levels of internal nodes and leaf voxels [S3].
+@@ -25,5 +24,4 @@
+ #### NanoVDB Structure (GPU)
+ NanoVDB creates a linear, pointer-free layout optimized for GPU access [S2]. The structure on GPU memory is defined as [S3]:
+-
+ ```rust
+ struct Volume {
+@@ -35,10 +33,9 @@
+ }
+ ```
+-
+ **Node Layout:**
+ Each node (Node5, Node4, Node3) contains [S3]:
+ *   `child_pointer: u32`: Points to the start of $N\_CHILDREN$ child nodes.
+ *   `tile_value: f32`: Value for homogeneous regions.
+-*   `min_value: f32`, `max_value: f32`, `mean_value: f32`: Statistical bounds.
++*   `min_value: f32`, `max_value: f32`, `mean_value: f32`: Statistical bounds [S3].
+ *   `child_mask: [u32; N\_CHILDREN / 32]`: Bitmask indicating validity of child nodes.
+ 
+@@ -71,51 +68,61 @@
+ 
+ ### Pseudocode
++```python
++def compress_volume(volume, W, H, D, quality):
++    # 1. Background Value Identification
++    histogram = compute_histogram(volume)
++    background_idx = argmax(histogram)
++    B = volume.value_at(background_idx)
+ 
+-```python
+-# CPU Compression
+-def compress_volume(volume_data, quality):
+-    # 1. Background Value Identification
+-    histogram = compute_histogram(volume_data)
+-    background_value = get_most_frequent_value(histogram)
++    # 2. Bricking
++    brick_size = 32
++    num_bricks_x = ceil(W / brick_size)
++    num_bricks_y = ceil(H / brick_size)
++    num_bricks_z = ceil(D / brick_size)
++    num_bricks = num_bricks_x * num_bricks_y * num_bricks_z
++
++    # 3. Brick Analysis
++    brick_ranges = []
++    for i in range(num_bricks):
++        lo = i * brick_size
++        hi = (i + 1) * brick_size
++        brick_ranges.append((lo, hi))
++
++    # 4. Brick Sorting (using f2 metric, descending similarity)
++    def similarity(brick_range):
++        lo, hi = brick_range
++        return max(abs(lo - B), abs(hi - B))
++
++    sorted_bricks = sorted(enumerate(brick_ranges), key=lambda x: similarity(x[1]), reverse=True)
++
++    # 5. Voxel Activation
++    openvdb_tree = create_empty_openvdb_tree()
+     
+-    # 2. Bricking
+-    brick_size = 32 # Standard for {3,4,5} layout
+-    bricks = divide_into_bricks(volume_data, brick_size)
++    # Activate extreme corners explicitly to preserve world bounds
++    activate_voxel(openvdb_tree, (0, 0, 0), volume.value_at((0, 0, 0)))
++    activate_voxel(openvdb_tree, (W-1, H-1, D-1), volume.value_at((W-1, H-1, D-1)))
++
++    bricks_to_activate = int(num_bricks * quality)
++    bricks_active = 0
+     
+-    # 3. Brick Analysis & 4. Brick Sorting
+-    def similarity_metric(brick):
+-        lo, hi = min_max(brick)
+-        # Using f2 metric as suggested for better quality
+-        return max(abs(lo - background_value), abs(hi - background_value))
+-    
+-    sorted_bricks = sort(bricks, key=similarity_metric, ascending=True)
+-    
+-    # 5. Voxel Activation
+-    total_bricks = len(sorted_bricks)
+-    num_to_activate = int(total_bricks * quality)
+-    
+-    # Activate from the end (least similar to background)
+-    active_bricks = sorted_bricks[-num_to_activate:]
+-    
+-    # Create sparse OpenVDB structure
+-    openvdb_tree = create_empty_openvdb_tree()
+-    for brick in active_bricks:
+-        activate_brick(openvdb_tree, brick)
+-        
++    # Iterate from the end (least similar to background)
++    for idx, brick_range in reversed(sorted_bricks):
++        if bricks_active >= bricks_to_activate:
++            break
++        for voxel in get_voxels_in_brick(brick_range):
++            activate_voxel(openvdb_tree, voxel, volume.value_at(voxel))
++        bricks_active += 1
++
+     # 6. Finalization
+     prune_tree(openvdb_tree)
+     return openvdb_tree
+ 
+-# GPU Rendering (Conceptual)
+-def render_vdb(nanovdb_gpu_ptr, ray, uniform_grid):
++def render_vdb(nanovdb_ptr, ray, uniform_grid):
+     # 1. Traversal Acceleration
+-    # Use uniform majorant grid for DDA
+     cell = uniform_grid.find_cell(ray.origin)
+     
+     # 2. On-the-Fly Decompression
+-    # NanoVDB accessor handles traversal and decompression
+-    value = nanovdb_sample(nanovdb_gpu_ptr, ray.position)
+-    
+-    # If inactive, returns background value implicitly
++    # NanoVDB accessor/sampler handles traversal and returns value or background [S2]
++    value = nanovdb_sample(nanovdb_ptr, ray.position)
+     return value
+ ```
+@@ -129,9 +136,11 @@
+ *   **Lossless Compression:** At 1:1 rate, the algorithm only activates voxels not considered empty, resulting in an actual size lower than the original even if target reduction is zero [S1].
+ *   **High Compression:** High compression rates may lead to missing features if the transfer function highlights regions deemed 'background' and thus deactivated during compression, resulting in block artifacts [S2].
++*   **Corner Voxels:** The extreme (minimum and maximum) corners of the VDB must be explicitly activated even if they match the background value. If not, OpenVDB excludes them, causing the VDB tree's aspect ratio (world bound size) to differ from the original volume [S1].
++*   **Tile Activation:** Activating a whole tile on a level higher than leaf node level 0 (using `addTile`) sets all voxels in that tile to the same value, providing no additional compression benefit from hierarchical encoding [S1].
+ *   **Animation:** Each animation frame has a unique Node5 vector. Switching frames changes only the starting point of structure traversal [S3].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Rendering performance is competitive with hardware-accelerated 3D texture sampling [S2].
+-*   **Memory Complexity:** Significant memory savings compared to dense textures. For the Galaxy dataset (108 GB raw), VDB achieves 14 GB at 1:8 rate [S1]. NanoVDB overhead is ~10% for large datasets [S2].
++*   **Memory Complexity:** Significant memory savings compared to dense textures [S2]. For the Galaxy dataset (108 GB raw), VDB achieves 14 GB at 1:8 rate [S1]. NanoVDB overhead is ~10% for large datasets [S2].
+ *   **Measured Performance:**
+     *   Galaxy dataset: VDB achieves 34.8 FPS on 1 GPU vs 18.6 FPS for dense textures on 3 GPUs [S1].

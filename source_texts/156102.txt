@@ -1,0 +1,2231 @@
+SA-ResGS: Self-Augmented Residual 3D Gaussian
+Splatting for Next Best View Selection
+Kim Jun-Seong1∗
+Eduardo Pérez-Pellitero3
+arXiv:2601.03024v3 [cs.CV] 5 Jul 2026
+1
+POSTECH
+Tae-Hyun Oh2
+Youngkyoon Jang4∗†
+KAIST 3 Huawei Noah’s Ark Lab
+junseong.kim@postech.ac.kr
+https://saresgs.github.io/
+2
+4
+Rivian
+Abstract. We propose Self-Augmented Residual 3D Gaussian Splatting, a novel framework for stabilizing uncertainty quantification and
+enhancing uncertainty-aware supervision in Next-Best-View selection for
+active scene reconstruction. To efficiently estimate scene coverage, SAResGS generates geometry-consistent Self-Augmented point clouds (SAPoints) via triangulation between observed training views and rasterized
+extrapolated views. To address the lack of learning signals in underrepresented regions within sparse, wide-baseline settings, we introduce the
+first skip-connection-inspired residual learning strategy tailored for 3DGS.
+This mechanism amplifies gradient flow to weakly contributing, highuncertainty Gaussians. Our contributions are threefold: (1) a physically
+grounded, diversified view selection strategy; (2) an uncertainty-aware
+residual supervision scheme that improves gradient flow and learning
+stability; and (3) implicitly debiased uncertainty quantification resulting
+from constrained view selection and residual supervision. Experiments on
+NeRF Synthetic, Mip-NeRF 360, and challenging extended benchmark
+from Deep Blending and Tanks and Temples demonstrate that SA-ResGS
+consistently outperforms state-of-the-art competing methods in both
+reconstruction quality and view selection robustness.
+Keywords: Active Learning · 3D Gaussian Splatting · Next-best-view
+1
+Introduction
+Recent advances in neural rendering, particularly Neural Radiance Fields (NeRFs)
+[38] and 3D Gaussian Splatting (3DGS) [25], have significantly advanced photorealistic scene reconstruction [9, 31, 40, 64], enabling high-fidelity, real-time
+applications across diverse environments [23, 26, 27]. Beyond static scene capture, these methods have also spurred broader interest in tackling complex
+challenges, such as active view selection [5, 61] and uncertainty quantification for
+next-best-view (NBV) selection [22]. Although pre-captured, dense-view training
+∗
+†
+This work was conducted while authors were with Huawei Noah’s Ark Lab in London
+denotes the corresponding author
+2
+K. Jun-Seong et al.
+View Selection Phase
+Training Phase
+Observed Images
+Observed Views
+Uncertainty
+Guided
+Residual
+Training
+(Sec. 3.3)
+Coverage Score
+Estimation
+( Sec. 3.2 )
+Self Augmented
+Point Cloud
+(Sec. 3.1)
+3D Gaussian
+Splatting
+Uncertainty-based
+View Selection
+Prefiltered
+Candidates
+SA-Points
+Candidate Poses
+Update Observed Data
+Fig. 1: Overview of SA-ResGS. The framework alternates between view selection
+and training. At each NBV step, Self-Augmented Points (SA-Points) are generated via
+triangulation between a training view and its extrapolated render, enabling surfaceaware coverage estimation (Sec. 3.1). Candidate views are first physically filtered using
+hash-encoded feature dissimilarity, then ranked by uncertainty quantification scores for
+final selection, encouraging exploration of under-observed regions (Sec. 3.2). During
+training, residual supervision (Sec. 3.3) combines full and uncertainty-intensified renders
+to reinforce gradients toward weakly contributing Gaussians, improving training stability
+and reconstruction quality under sparse views.
+methods can achieve impressive reconstruction quality, in-situ (active) reconstruction—where views are selected and added progressively—remains challenging due
+to artifacts caused by shape-radiance ambiguity, further exacerbated by limited
+training views and the dynamics of the view-addition strategy. Despite the difficulty of reliable uncertainty estimation in this setting, post-hoc methods—such
+as Laplacian-approximation-based, model-agnostic approaches [12, 22]—remain
+promising, as they provide uncertainty signals without changing the rendering
+pipeline. However, we observe that the following challenges have been overlooked:
+– Disregarded physical constraints: Computational uncertainty is often
+misaligned with the physical plausibility of reconstructed geometry.
+– Underutilized supervision: Existing methods rarely convert uncertainty
+into learning signals, leaving weakly contributing Gaussians undersupervised.
+– Performance dependency: Reliability of uncertainty remains coupled with
+training dynamics, especially in early stages with incomplete scene coverage.
+In response to these challenges, we propose SA-ResGS, a Self-Augmented
+Residual 3D Gaussian Splatting framework that stabilizes uncertainty quantification and enhances uncertainty-aware supervision for next-best-view selection in
+progressive scene reconstruction, as shown in Fig. 1. SA-ResGS strategically decouples view selection from heavy reliance on uncertainty estimates that are sensitive
+to internal learning dynamics, thereby promoting more robust, geometry-aware
+surface coverage. Concretely, we first prefilter candidate views using geometric dissimilarity and then apply uncertainty-based scoring within this subset,
+effectively implementing a physically grounded, uncertainty-informed selection
+strategy. To support this process, we construct SA-Points by reconstructing 3D
+point maps from a training view and its rasterized extrapolated views at each
+view-selection step, after training on a fixed number of initial views. We encode
+these SA-Points with a hash-based scene representation to efficiently measure
+SA-ResGS
+3
+similarity between candidate and previously selected views. We then select the
+most dissimilar candidate views to improve coverage of unseen regions.
+While the physically grounded and uncertainty-informed selection strategy
+enhances overall scene coverage, it inadvertently reduces multi-view overlap, since
+more dissimilar views are less likely to observe shared regions, thereby weakening
+multi-view geometric constraints. To counterbalance this effect without sacrificing the benefits of diverse view selection, we introduce a residual supervision
+mechanism that provides additional learning signals targeted at under-optimized
+Gaussians. These Gaussians, which typically correspond to underrepresented
+regions in sparse views [20], are otherwise often overlooked due to their minimal
+contribution to the 3DGS rendering process. Specifically, SA-ResGS additionally
+rasterizes color images using a targeted subset that combines a small fraction
+of the most uncertain Gaussians with a majority of the originally visible ones.
+Inspired by Dropout [42, 50] and Hard Negative Mining [19, 63], this strategy
+acts similarly to ResNet skip connections [17]; it amplifies supervision for underoptimized Gaussians that otherwise receive weak gradients, while remaining fully
+compatible with conventional 3DGS pipelines.
+The main contributions of SA-ResGS are threefold:
+– Physically grounded view selection: We propose a geometry-aware strategy using SA-Points to guide next-best-view selection, enforcing physical
+plausibility and promoting more balanced, coverage-oriented exploration.
+– Residual learning for 3DGS: We introduce the first residual supervision
+framework specifically designed for 3DGS, addressing the vanishing gradient
+problem by reinforcing weakly supervised Gaussians and improving both
+optimization stability and reconstruction quality.
+– Unbiased uncertainty quantification: By jointly improving the view distribution and supervising under-optimized Gaussians, SA-ResGS mitigates
+geometric sparsity and density bias, leading to fairer and more reliable uncertainty estimates throughout training.
+2
+Related Work
+Next-best-view selection. NBV selection originated from the robotics community as a strategy to efficiently guide in-situ scene capture, where the goal is
+to incrementally select viewpoints that maximally reduce reconstruction ambiguity [7, 8, 47]. Classical NBV methods primarily relied on geometric heuristics,
+selecting views based on geometric coverage [10, 14, 15], viewpoint entropy [55],
+or visibility [2, 4, 11, 52]. While subsequent learning-based approaches attempted
+to model scene-specific view policies via reinforcement learning [6, 56], they often
+struggled with cross-scene generalization. More recent efforts explore information theoretic formulations, such as FisherRF [22], offer a principled formulation for uncertainty-based NBV in neural fields. In our work, we build on this
+line [12, 16, 22, 60] by integrating physically grounded geometry priors to stabilize
+early-stage view planning, particularly when minimal visual input is available.
+4
+K. Jun-Seong et al.
+Uncertainty estimation for 3DGS. Quantification of uncertainty plays a
+pivotal role in active 3D reconstruction, particularly for guiding view selection.
+In the context of 3DGS, earlier attempts to estimate uncertainty primarily
+relied on ensemble-based estimates [53] or variational inference [32, 37, 48, 49].
+However, these approaches require redundant multiple inferences or modifications
+to the 3DGS parameters, making them incompatible with the standard training
+and rendering pipelines of 3DGS. To avoid these limitations, recent research
+has shifted toward post-hoc uncertainty estimation [12, 13, 16, 22, 57, 60], which
+extracts uncertainty signals, after training is done, without altering the underlying
+model architecture. Due to its architectural agnostic nature, post-hoc methods
+are increasingly explored across diverse applications [21, 33, 51].
+Representative post-hoc methods, such as FisherRF [22] and BayesRays [12],
+adapted classical Laplacian approximations on 3DGS setting, pioneering Bayesian
+approaches to 3DGS uncertainty estimation. In subsequent work, ActiveViewSelector [57] has introduced image-level rendering quality metrics, and PRIMU [13]
+suggests 3D unprojection of 2D spatial errors to localize regions of high uncertainty. Despite their promise, these existing post-hoc approaches often overlook
+the unique training dynamics inherent to 3DGS. Specifically, these methods
+remain strongly coupled to the density of underlying Gaussians, leading to biased uncertainty estimates in early training stages when geometry is sparse or
+unevenly distributed and often misinterpreting under-observed regions as confident. To mitigate this limitation, we introduce residual learning, assisted by
+physically grounded view selection, enabling more loosely coupled uncertainty estimation during early-stage view selection while emphasizing supervision focused
+on high-uncertainty Gaussians.
+Residual supervision in 3DGS. While accurate uncertainty estimation helps
+localize regions having deficient supervision, it alone is not sufficient to counterbalance under-optimized Gaussians in the 3DGS pipeline. Existing 3DGS methods
+mainly rely on direct photometric losses [25] or external depth priors [35, 62],
+which often fail to sufficiently supervise Gaussians with low opacity or minimal
+rendering contributions. Recent studies, such as pixelSplat [3], PAPR [65], and
+PAPR-in-Motion [44], explicitly discuss the vanishing gradient issue and propose solutions including differentiable parameterization of Gaussians, proximity
+attention-based differentiable rendering, adaptive updates, and activation tuning.
+Despite the various strategies mitigating the vanishing gradient problem,
+prior approaches lack an explicit mechanism to correct weakly supervised Gaussians, leaving the problem largely unresolved due to insufficient gradient signals.
+Although dropout-based approaches [42] help increase gradient diversity, they
+operate stochastically and do not target supervision toward the most uncertain or
+least-updated Gaussians. Our method addresses these limitations by introducing
+the residual supervision strategy for 3DGS. Residual learning, as popularized by
+ResNet [17], has proven effective in mitigating vanishing gradients and improving training stability through skip connections and additive refinement, yet it
+remains underexplored in the context of 3D Gaussian Splatting. We replicate skipconnections among 3D Gaussians along the ray, applying uncertainty-guided ren-
+SA-ResGS
+3D Gaussian Splats
+𝑇"
+𝑇!
+(a) Extrapolated camera
+𝑇!
+Render
+SA-Points 𝑿𝒊
+𝑰𝒓
+3D Lifting
+𝑰𝒆
+𝑇"
++Δt
+Render
+5
+{
+𝑇" ,
+𝑇! }
+(b) Self-Augmented 3D Lifting
+Fig. 2: SA-Points Generation process. (a) The virtual camera pose Te is extrapolated from the reference camera pose Tr by adding translation ∆t. (b) The reference
+image Ir and extrapolated render Ie are then jointly processed by the 3D lifting module
+to reconstruct SA-Points Xi . More details in Suppl. Sec. A.
+dering to intentionally amplify gradients for under-supervised Gaussians—without
+altering the underlying rasterization process.
+3
+Method
+The proposed SA-ResGS framework is illustrated in Fig. 1. Built on the nextbest-view selection method, FisherRF [22] as a baseline, SA-ResGS extends it
+with SA-Points around two core ideas: (1) physically grounded view selection
+with reduced reliance on uncertainty estimates, and (2) residual supervision that
+explicitly strengthens weakly contributing Gaussians, which minimally affect
+rasterized pixels and therefore receive insufficient gradients. Implementation
+details and hyperparameter settings are provided in Suppl. Sec. A.
+3.1
+Generation of Self-Augmented Points
+The physically grounded view selection is enabled by a physically aligned surface
+representation, constructed using SA-Points derived from a single training view.
+The overall SA-Points generation pipeline is visualized in Fig. 2. Given a reference
+image Ir with camera pose Tr = [Rr | tr ], we render an extrapolated image
+Ie from a perturbed pose Te = [Rr | tr + ∆t] using 3DGS. Dense correspondences {(pir , pie )} between Ir and Ie are predicted using the pretrained MASt3R
+model [34], which is robust to moderate viewpoint changes and produces contextually meaningful matches even in the presence of minor geometric distortions.
+SA-Point Xi is triangulated from a 2D correspondences using the projection
+matrices Pr , Pe , derived by Tr , Te , with intrinsic from COLMAP [45, 46].
+However, as triangulation is performed repeatedly during training—while
+the model is still fitting to a sparse and incomplete geometry—rasterized extrapolated images may occasionally contain rendering noise due to inaccurately
+placed Gaussians. To ensure reliable geometry while fully leveraging the generalization capability of MASt3R, we apply reprojection error-based filtering. The
+reprojection error is defined as :
+\varepsilon ^i = \tfrac {1}{2} \left ( \left \| \mathbf {p}_r^i - \pi (\mathbf {P}_r \mathbf {X}^i) \right \|_2 + \left \| \mathbf {p}_e^i - \pi (\mathbf {P}_e \mathbf {X}^i) \right \|_2 \right ),
+(1)
+6
+K. Jun-Seong et al.
+𝑉𝑜𝑏𝑠
+Frustum
+Overlap
+SA-Points
+𝑇𝑟
+𝑇𝑟
+(a) SA-Points for observed views
+2
+𝑇𝑐𝑎𝑛𝑑
+𝑇𝑟
+1
+𝑇𝑐𝑎𝑛𝑑
+1
+𝑉𝑐𝑎𝑛𝑑
+2
+𝑉𝑐𝑎𝑛𝑑
+𝑏𝑜𝑏𝑠
+Hash
+1
+𝑏𝑐𝑎𝑛𝑑
+Dist(
+,
+)
+2
+𝑏𝑐𝑎𝑛𝑑
+Dist(
+,
+)
+(b) Hash feature extraction for candidate views
+(c) Coverage score
+Fig. 3: Physically grounded candidate view selection via surface coverage.
+(a) SA-Points from training views define observed voxels \mathcal {V}_{\text {obs}} . (b) Each candidate view
+generates a binary hash-encoded feature b, via frustum-based visibility estimation.
+(c) Normalized Hamming distance between hash-encoded features quantifies coverage
+dissimilarity, enabling efficient selection of geometrically complementary views without
+rendered images or uncertainty scores.
+where \|\cdot \|_2 is the \ell _2 norm in pixel space, and SA-Points with εi < τ are
+retained. This filtering step discards geometrically inconsistent points while
+preserving accurate SA-Points from dense, context-aware matches, even when
+the extrapolated image is noisier than the original training view. Compared
+to prior methods such as CoMapGS [20] or MP-SfM [43], our triangulation
+pipeline produces scale-consistent, surface-aware geometry from a single image
+by leveraging extrapolated viewpoints rather than requiring multi-view input
+or monocular depth estimates. Also, note that, while we use MASt3R as our
+default 3D lifting module, our framework is modular and compatible to other 3D
+foundational reconstruction methods.1
+3.2
+Physically Grounded View Selection Algorithm
+We present our physically grounded view selection algorithm for next-best-view
+(NBV) selection, illustrated in Fig. 3. As discussed in Sec. 2, NBV selection in 3D
+Gaussian Splatting (3DGS) is particularly challenging due to the tight coupling
+between quality of uncertainty estimation and the quality of reconstructed
+geometry—both are highly sensitive to the sparsity and distribution of Gaussian
+splats. Under sparse-view settings, where reconstruction starts from as few as
+four images and new views are incrementally added every 100 training iterations,
+uncertainty-based NBV strategies often become unreliable. This occurs because
+uncertainty signals are inherently biased or unstable when the geometry is
+incomplete or under-constrained. To address this, we introduce a surface-aware
+guidance mechanism based on SA-Points, which allows view selection to operate
+independently of the computed uncertainty quantification. By decoupling view
+selection from 3DGS internal training dynamics, our method provides more stable
+and physically meaningful candidate views during the early reconstruction, even
+before the model accumulates sufficient confidence to produce reliable uncertainty.
+We begin by discretizing the 3D scene into a voxel grid \mathcal {V} = \{ v_k \}_{k=1}^{K} , where
+each voxel represents a unit volume. The bounding volume of \mathcal {V} is defined by the
+1
+Refer to Secs. 4.1 and 4.3 for evaluation with an alternative, Depth-Anything-v3 [36].
+SA-ResGS
+7
+sparse point cloud obtained via structure-from-motion (SfM). A voxel v_k \in \mathcal {V} is
+marked as observed if it intersects any SA-Point \mathbf {X}^i (Sec. 3.1), forming the subset
+\mathcal {V}_{\text {obs}} \subset \mathcal {V} . To account for potential localization errors and promote coverage
+continuity, we dilate each occupied voxel using a 3D kernel \mathcal {K}_r of radius r :
+\tilde {\mathcal {V}}_{\text {obs}} = \bigcup \nolimits _{v_k \in \mathcal {V}_{\text {obs}}} \mathcal {K}_r(v_k),
+(2)
+where \tilde {\mathcal {V}}_{\text {obs}} denotes the dilated observed region for the current training views.
+For each candidate view j , from the index set of all candidate views C =
+{1, ..., M }, we compute a frustum \mathcal {F}_j \subset \mathcal {V} , defined by the camera intrinsics (field
+of view) and near/far planes estimated from the SfM point distribution. A voxel
+is considered potentially visible from view j if its center lies within the frustum:
+\mathcal {V}_{\text {cand}}^{(j)} = \{ v_k \in \mathcal {V} \mid v_k \in \mathcal {F}_j \}.
+(3)
+To estimate geometric dissimilarity between current coverage and a candidate
+view (Fig. 3), we compute the normalized Hamming distance:
+d_j = \frac {1}{K} \left \| \mathbf {b}_{\text {obs}} \oplus \mathbf {b}_{\text {cand}}^{(j)} \right \|_1,
+(4)
+where \oplus denotes the element-wise XOR operation between binary vectors, and
+\|\cdot \|_1 is the \ell _1 norm (i.e., the number of differing entries). Here, b is a binary
+occupancy vector obtained by mapping voxel coordinates through a fixed random
+hashing function, following the spatial hashing strategy of Instant-NGP [28, 39].
+The resulting value d_j \in [0, 1] measures the proportion of voxels with inconsistent
+occupancy status between the currently observed volume and the candidate view;
+it quantifies the volume of non-overlapping occupancy between the observed
+voxel set and a candidate view’s frustum voxels, i.e., how many newly covered
+voxels a candidate adds. Candidate views are then ranked in descending order
+of their normalized Hamming distances d_j , and the top N\% (e.g., N=20 ) are
+retained as the physically filtered candidate set C ′ = TopN% (C, d).
+We apply uncertainty quantification 2 only within \mathcal {C}' , and finalize view selection via finer-level scoring. This two-stage pipeline follows a coarse-to-fine
+strategy: SA-Points provide an explicit estimate of which regions are already
+observed, and we first select views that maximally expose the remaining unobserved regions to form a stable candidate subset and refines the choice through
+uncertainty-aware reasoning. Restricting uncertainty evaluation to C ′ reduces
+computation by avoiding uncertainty scoring for every candidate view. At the
+same time, as C ′ is pre-filtered to favor views that expose unobserved regions,
+the final selection avoids redundant viewpoints and achieves more balanced scene
+coverage.
+2
+We adopt uncertainty estimation formulation from FisherRF [22], the uncertainty and
+expected-information-gain (EIG) formulation is summarized in Suppl. Sec. A.
+8
+K. Jun-Seong et al.
+Random Dropout
+Uncertain Gaussian
+Majority subset
+𝓖𝒕𝟏
+𝒔𝒖𝒃
+𝓖𝒇𝒖𝒍𝒍
+𝓖𝒕𝟐
+𝒔𝒖𝒃
+𝓖𝒕𝟏
+𝒔𝒖𝒃
+=
++
+(a) Uncertainty-guided sampling
+Residual Update
+(b) Residual Learning Method
+Fig. 4: Residual supervision in 3DGS. Overview of the proposed residual supervision strategy. (a) At each iteration (t1 , t2 ), \mathcal {G}_{\text {sub}} combines random and top-uncertain
+Gaussians; (b) residual supervision in 3DGS mimics ResNet-style skip connections.
+3.3
+Uncertainty-Guided Residual Learning in 3DGS
+We propose the first residual learning framework for 3DGS that emulates skip
+connections to address vanishing gradients in weakly contributing Gaussians, as
+shown in Fig. 4. These Gaussians often receive insufficient supervision due to
+their limited impact on rasterized pixels, particularly in sparse or ambiguous
+regions. While ResNet [17] mitigates similar issues through skip connections,
+such mechanisms are infeasible in 3DGS given the dynamic, view-dependent
+nature of Gaussian properties. Instead, we introduce a rasterizer-agnostic strategy
+that improves gradient flow by generating auxiliary renders emphasizing highuncertainty Gaussians. These renders are supervised with input RGB images,
+forming the basis of the residual supervision scheme described below.
+Residual supervision. To reinforce under-supervised Gaussians, we introduce a
+residual supervision scheme that uses two rendered images from the same training
+view: one rendered with the full Gaussian set Gfull , and another rendered with a
+guided subset Gsub , as shown in Fig. 4(a). We define this subset as:
+\mathcal {G}_{\text {sub}} = \mathcal {G}_{\text {rand}} \cup \mathcal {G}_{\text {uncertain}},
+(5)
+where Grand is a random sample comprising α% of G (e.g., α=90), and Guncertain
+contains the top-β most uncertain Gaussians (e.g., β=10). To estimate uncertainty,
+we analyze two per-Gaussian attributes: opacity and scale. Gaussians with low
+opacity contribute minimally to alpha blending during rasterization, while those
+with large scales blur across pixels and tend to dominate ambiguous or low-texture
+regions. This ranking identifies Gaussians that are both visually suppressed and
+spatially diffuse, making them key targets for correction.
+We compute two rendered images: Ifull from the full Gaussian set Gfull , and
+Isub from the uncertainty-intensified subset Gsub . Each is supervised independently
+against the input image Igt using ℓ1 and SSIM losses:
+\mathcal {L} = \sum _{i \in \{\text {full}, \text {sub}\}} \lambda _i \left [ \mathcal {L}_{\text {rgb}}(I_i, I_{\text {gt}}) + \mathcal {L}_{\text {ssim}}(I_i, I_{\text {gt}}) \right ],
+(6)
+where λfull + λsub = 1, and we simply set both to 0.5. We denote the losses
+for Ifull and Isub as the full loss (Lfull ) and subset loss (Lsub ), respectively.
+SA-ResGS
+9
+This uncertainty-intensified rasterization strategy is conceptually inspired by
+Dropout [42, 50] and Hard Negative Mining [19, 63]. Random sampling of Grand
+provides stochastic diversity, allowing weakly contributing Gaussians to receive
+supervision when dominant ones are excluded. Meanwhile, deterministic inclusion
+of Guncertain ensures consistent gradient flow to persistently under-optimized
+Gaussians. This dual mechanism reinforces learning in uncertain or ambiguous
+regions without modifying the rasterization process, while complementing fullimage supervision to maintain global photometric fidelity.
+To see why the subset branch amplifies supervision for these Gaussians,
+we examine
+induces. For a pixel ray, the full branch renders
+P the gradient it Q
+Cfull = i Ti αi ci with Ti = j<i (1 − αj ). In the residual branch, we exclude
+the Gaussians not selected in Gsub ; for mathematical clarity, this is equivalent
+to masking them with zero opacity in that branch. Considering the effect of
+a single masked Gaussian k in isolation, the modified transmittance becomes
+T̃i = Ti /(1 − αk ) for every later Gaussian i > k. which can be generalized by
+accumulating one such factor per masked Gaussian ahead of i. As T̃i multiplies
+the subset gradient with respect to any parameter θi , the amplification carries
+over to the whole parameter set; we illustrate with the color ci , as the compositing
+map is linear (∂C/∂ci = Ti αi ). For i > k:
+\frac {\partial \mathcal {L}}{\partial c_i} = \lambda _{\mathrm {full}} \frac {\partial \mathcal {L}_{\mathrm {full}}}{\partial C_{\mathrm {full}}} T_i \alpha _i + \lambda _{\mathrm {sub}} \frac {\partial \mathcal {L}_{\mathrm {sub}}}{\partial C_{\mathrm {sub}}} \frac {T_i \alpha _i}{1-\alpha _k}. \label {eq:amplified-grad}
+(7)
+The amplification factor 1/(1 − αk ) grows as the Gaussian k becomes more
+opaque. Intuitively, dropping a high-opacity occluder redirects gradient toward
+previously occluded, weakly contributing Gaussians, the source of our residual
+supervision. By supervising both full and uncertainty-intensified images, we
+promote stronger gradient flow toward uncertain or low-opacity Gaussians without
+compromising photometric quality. This strategy mirrors the effect of residual
+skip connections in ResNet [17] (Fig. 4(b)), enabling more stable convergence and
+reducing overfitting in sparse or wide-baseline training settings. It is particularly
+effective during early next-best-view selection, when reconstruction is sensitive
+to both sparsely initialized regions and supervision bias from limited views.
+4
+Experiments
+Dataset. We evaluate our approach on two benchmark datasets: NeRF-Synthetic
+[38] and Mip-NeRF 360 [1]. Although these datasets span scenes from synthetic
+object-scale setups to real-world outdoor environments with full 360-degree
+coverage, their uniform, curated camera trajectories pose only a limited challenge
+for active view selection, as even simple heuristics (e.g., furthest-distance selection)
+perform reliably under balanced coverage [61]. To address this limitation, we
+curate an extended benchmark with five diverse scenes from Deep Blending [18]
+and Tanks and Temples [29], which introduce unbalanced view distributions and
+varied scene scales that better reflect practical conditions. All experiments use
+10
+K. Jun-Seong et al.
+Table 1: Quantitative results for the Active View Selection. We compare
+our model with (1) Rule-based models (Random, ACP [30]), (2) 2D-based models [5]
+(MUSIQ, CrossScore), and 3D-based model(FisherRF [22]). Results are averaged over 9
+scenes from the Mip-NeRF 360, 7 scenes from NeRF-synthetic dataset and 5 additional
+scenes from the Deep Blending and Tanks and Temples. We conduct four trials for each
+scene and report the average. For further statistics please refer to the Suppl. Sec. I.
+NeRF Synthetic
+Mip-NeRF 360
+Extended Benchmark
+Category
+Method
+Rule-based
+Random
+ACP
+24.847 0.893
+22.718 0.855
+0.117
+0.138
+19.969 0.584
+20.325 0.596
+0.456
+0.449
+19.262 0.699
+19.950 0.718
+0.375
+0.361
+2D-based
+MUSIQ
+CrossScore
+25.237 0.889
+23.746 0.868
+0.119
+0.130
+19.850 0.575
+21.076 0.612
+0.466 18.699 0.688
+0.448 19.942 0.727
+0.391
+0.356
+3D-based
+FisherRF
+25.190 0.892 0.116 20.642 0.595
+Ours (MASt3R) 26.580 0.907 0.110 21.410 0.613
+Ours (DA-v3)
+26.437 0.905 0.111 21.361 0.613
+0.450 19.654 0.711
+0.451 20.401 0.732
+0.449 20.348 0.733
+0.370
+0.361
+0.365
+PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+images at their original resolutions; for further dataset curation details, please
+refer to Suppl. Sec. A.
+Competing Methods. We compare our method quantitatively and qualitatively against several active 3DGS methods that operate solely on RGB images:
+FisherRF (baseline) [22], ACP [30], and random view selection. We also include
+2D-based view selection methods from the Active View Selector framework [57],
+which incorporates two image quality assessment (IQA) models, MUSIQ [24] and
+CrossScore [58], to evaluate perceptual quality. Both models are re-implemented
+following the authors’ official instructions and publicly available code. We additionally compare against earlier methods such as BayesRays [12] and ActiveNeRF [41]
+adapted to 3DGS, results are reported in Suppl. Sec. H
+4.1
+Active View Selection
+Experiment setup. Following the protocol in [22], we adopt the prescribed initial view configurations and view selection schedule. Specifically, each experiment
+starts with four uniformly distributed views, then adds one view every 100 epochs
+until reaching 20 training views (for fewer training views, see Suppl. Sec. G). We
+apply the same active selection strategy across all datasets. For consistency, each
+model is initialized with the same random seed, trained for 20,000 iterations,
+and shares the same COLMAP SfM initialization3 . All other settings remain
+unchanged across experiments, except for the view selection algorithm. Because
+each process includes stochasticity, we repeat all experiments four times and
+report average scores (for details, see Suppl. Sec. I.).
+Novel View Synthesis Results. Quantitative and qualitative results on
+NeRF-Synthetic, Mip-NeRF 360, and the extended benchmark (Deep Blending
+3
+SA-Points are used only for view selection and are not included in the COLMAP SfM
+or 3DGS initialization.
+SA-ResGS
+ACP
+MUSIQ
+CrossScore
+FisherRF
+Ours
+GT
+Playroom
+Truck
+Room
+Counter
+Random
+11
+Fig. 5: Qualitative Comparison of Active View Selection. Reconstruction from
+20 selected views per scene. Our method shows improved completeness and fewer
+artifacts compared to counterparts models. Multi-view visualization and 360° rendering
+is provided in Suppl. Sec. C and Suppl. video.
+and Tanks and Temples) are summarized in Table 1 and Fig. 5. Competing
+methods show limited 3D reconstruction performance, especially in sparsely
+observed regions, primarily due to biased view selection and overfitting induced
+by vanishing gradients. This leads to incomplete reconstructions, characterized
+by floating artifacts and missing geometry (i.e. holes and missing objects). In
+contrast, our method achieves the highest PSNR and SSIM on NeRF-Synthetic
+and Mip-NeRF 360 while maintaining comparable LPIPS performance. The
+smaller LPIPS gains likely stem from smoother color reconstruction in uncertain
+regions, consistent with trends reported in [20]. As also reflected in Table 1,
+variants using DA-v3 as the 3D lifting module show consistent gains over all
+competing methods, indicating our improvements are not tied to specific backbone.
+Consistent with the trends above, results in Table 1 on the extended datasets
+further validate the generalizability of our method. In particular, Deep Blending results show robustness under diverse, real-world-like camera distributions.
+Likewise, numerical improvements on Tanks and Temples indicate stronger scene
+coverage in large outdoor settings, as exemplified by the Truck scene in Fig. 5.
+Even under challenging, realistic view configurations, our model remains superior in reconstruction quality and scene coverage while preserving comparable
+high-frequency details. For multi-view evaluation, we provide visualizations and
+360° rendering results in Suppl. Sec. C and the Suppl. video.
+Camera Distribution Results. To further support these quantitative and
+qualitative trends, we analyze the camera view distributions selected by different
+methods. As illustrated in Fig. 6, competing methods often select clustered
+or redundant viewpoints, leading to uneven scene coverage. This behavior is
+especially evident in FisherRF, whose selections concentrate around high-response
+regions due to its tight coupling with 3DGS training dynamics. In contrast, our
+12
+K. Jun-Seong et al.
+ACP
+MUSIQ
+CrossScore
+FisherRF
+Ours
+Playroom
+Room
+Truck
+Random
+Fig. 6: Selected Camera View Distribution. Visualization of camera poses selected
+by each method on Truck, Playroom scenes from Extended dataset, and Room scene
+from Mip-NeRF 360 dataset. Red frustums indicate the initial views, while green
+frustums denote views added during active selection. Our method produces a more
+uniformly distributed set of viewpoints, while counterpart models exhibit cluttering
+(highlighted by yellow circles), due to its reliance on uncertainty signals entangled with
+3DGS training dynamics. For more visualization please refer to Suppl. Sec. B
+method selects more spatially dispersed and geometrically diverse viewpoints.
+Together, these observations show that our physically grounded view selection and
+uncertainty-aware learning strategy improves reconstruction fidelity and coverage
+consistency. For more camera-distribution results please refer to Suppl. Sec. B
+4.2
+Comparison on Uncertainty Estimation
+Experiment setup. We evaluate how effectively our method improves uncertainty estimation quality. Specifically, we examine whether residual loss and
+self-augmented pre-filtering improve alignment between depth errors and predicted uncertainties under controlled conditions. To measure, we adopt the Area
+Under the Sparsification Error (AUSE) metric, to evaluate uncertainty calibration
+adopted in [12,22,48]. AUSE evaluates how accurately the high-magnitude regions
+of the uncertainty heatmap correspond to the largest actual depth errors.
+Following CF-NeRF [48], we use depth maps from NerfingMVS [59], optimized
+at test time with stereo depth from COLMAP. Experiments are conducted on
+all nine Mip-NeRF 360 scenes under an identical view-selection schedule and
+evaluated on all test views.
+Results. Starting from the baseline (FisherRF† ), adding residual learning on
+a fixed baseline view sequence (‡ +ResGS) reduces AUSE from 0.327 to 0.323.
+Adding prefiltering with SA-Points (‡ +SA-ResGS) further reduces AUSE to
+0.297. These reductions indicate that both residual learning and our prefiltering
+improve uncertainty calibration. Fig. 7 highlights representative miscalibration
+cases, including overconfident predictions in high-error regions and conservative
+Garden
+Bonsai
+Bicycle
+SA-ResGS
+Depth Loss
+0.392
+Uncertainty
+Depth Loss
+0.297
+Uncertainty
+Depth Loss
+0.101
+0.282
+0.227
+0.076
+0.256
+0.179
+0.108
+†
+FisherRF (Avg:0.327)
+‡+ResGS (Avg : 0.323)
+13
+Uncertainty
+†
++SA-ResGS (Avg : 0.297)
+Fig. 7: Uncertainty Comparison. We visualize depth loss with their corresponding
+uncertainty with AUSE metric (lower is better). Highlighted green boxes show that
+†
++SA-ResGS yields better alignment between large depth errors and high uncertainty.
+Please note that ‡ denotes fixed-order view selection, replicating the original selection
+sequence from FisherRF† , whereas † indicates dynamically updated view selection.
+uncertainty in low-error areas. Compared with the baseline, our method reduces
+these ranking mismatches and aligns predicted uncertainty more closely with
+ground-truth depth error.
+We attribute these gains to the complementary roles of residual learning
+and our physically grounded prefiltering strategy. Residual learning stabilizes
+confidence in low-error regions while preserving adaptive refinement in uncertain
+areas via skip connections. Meanwhile, prefiltering promotes more balanced spatial
+coverage during training, reducing localized miscalibration and improving global
+uncertainty–error consistency. Consequently, our model achieves better structural
+and quantitative uncertainty calibration, improving accuracy in uncertaintydriven tasks such as active mapping.
+4.3
+Ablation Studies
+In the following section, we present ablation studies that analyze (1) the effect
+of individual components and (2) the effect of the full loss. Additional ablations
+are provided in Supplementary material. Specifically, we analyze our physically
+grounded view selection algorithm in Suppl. Sec. E and the uncertainty-guided
+residual learning in Suppl. Sec. F . In Suppl. Sec. G , we further study robustness
+to correspondence noise, the hash-encoding size, and selected view-count.
+Effect of individual components. The ablation study in Table 2 highlights
+the individual and synergistic contributions of our proposed SA-ResGS framework.
+While residual learning (ResGS) alone improves reconstruction quality under a
+fixed baseline view sequence (‡ +ResGS), its gains are attenuated when combined
+14
+K. Jun-Seong et al.
+Table 2: Ablation study on Mip-NeRF 360 and Extended dataset. ‡ denotes
+fixed-order view selection, whereas † indicates dynamically updated view selection. We
+conduct four trials for each scene and report the average. Visual comparison is included
+in Suppl. Sec. D , and further statistics in Suppl. Sec. I
+Methods
+3D Lifting
+Our proposed methods
+Sec. 3.2
+Sec. 3.3
+Mip-NeRF 360
+Extended dataset
+PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+FisherRF†
+-
+-
+-
+20.642 0.595
+0.450
+19.490 0.708
+0.373
+‡
++ResGS
+-
+-
+✓
+21.045 0.604
+0.453
+19.602 0.709
+0.378
+†
++ResGS
+-
+-
+✓
+20.732 0.594
+0.461
+19.791 0.715
+0.374
++SA-HashGS
+†
++SA-ResGS
+MASt3R
+MASt3R
+✓
+✓
+✓
+21.093 0.609 0.441 19.702 0.718
+21.410 0.613 0.451 20.401 0.732
+0.363
+0.361
++SA-HashGS
++SA-ResGS
+DA-v3
+DA-v3
+✓
+✓
+✓
+21.076 0.609 0.441 20.025 0.726 0.357
+21.361 0.613 0.449 20.348 0.733 0.365
+†
+†
+†
+with purely dynamic selection († +ResGS). This indicates that training improvements alone are insufficient, especially under large uncertainty quantification
+errors. As shown in Sec. 4.2, our training module effectively aligns predicted uncertainty with actual errors, yet purely uncertainty-driven view selection remains
+vulnerable to biases from internal learning dynamics.
+Our physically grounded prefiltering module († +SA-HashGS) stabilizes view
+selection by restricting the candidate set for Fisher uncertainty. The full configuration († +SA-ResGS) achieves the best performance, demonstrating a synergy
+in which SA-HashGS provides a reliable view sequence that enables residual
+supervision to further improve reconstruction in sparse or ambiguous regions. The
+same trend appears when replacing the 3D lifting module with DA-v3: prefiltering
+consistently stabilizes view selection, and adding ResGS yields further gains.
+Effect of the full loss. To assess the contribution of the Full Loss, we compare
+ResGS with a w/o Full Loss variant (Fig. 8), where Gaussians are updated only
+through the guided subset term (Lsub ) and the default w/ Full Loss setting
+(Lf ull +Lsub ). The w/o Full Loss model tends to oversmooth low-confidence
+regions, causing a loss of high-frequency detail. Without Lf ull reinforcing these
+regions, the subset-only variant cannot preserve or reactivate Gaussians that
+require continued refinement. In contrast, w/ Full Loss prevents under-updated
+Gaussians from collapsing and preserves both global structure and fine details.
+For an ablation on uncertainty-guided sampling, see Suppl. Sec. D , Fig. S10.
+4.4
+Computation Efficiency Analysis
+A key challenge in active view selection is computational cost, as FisherRF computes per-Gaussian Fisher information via backpropagation across all candidate
+views, creating a bottleneck in large-scale datasets. To evaluate this overhead,
+we conduct a runtime analysis on the Bonsai scene using a mid-range GPU (38
+TFLOPS fp32), as summarized in Table 3. SA-ResGS replaces exhaustive Fisher
+SA-ResGS
+15
+w/o Full Loss
+w/ Full Loss
+Fig. 8: Comparison of novel-view renderings with/without the Full Loss.
+We use a pre-selected view order from FisherRF† to ignore view-selection effects. The
+w/o Full Loss (Lsub only) variant exhibits smoothing artifacts, whereas w/ Full Loss
+(Lf ull + Lsub ) preserves scene structure and high-frequency details.
+Table 3: Runtime comparison. Breakdown of temporal training costs in the active
+view selection on Bonsai scene. SA-ResGS introduces additional prefiltering steps but
+reduces total runtime by 40%, with modest increases in GPU memory usage.
+Method
+FisherRF
+Ours
+Active View Selection [s]
+Raster. End-to-end
+MASt3R Triang. Prefilter Fisher Total [s/iter]
+—
+0.40
+—
+1.49
+—
+5.00
+28.00 28.00 0.005
+5.60 12.50 0.027
+32 m 59 s
+19 m 45 s
+GPU
+[K]
+8.0
+10.5
+evaluation with a four-step process: dense correspondence prediction (MASt3R),
+SA-Points triangulation (Triang.), physically grounded prefiltering (Prefilter),
+and Fisher computation on filtered views (Fisher). Despite these additional steps,
+view selection is 55% faster, with only a modest increase in per-iteration cost.
+End-to-end runtime is reduced by 40%. GPU memory usage rises slightly but
+remains within standard limits, supporting scalability and practicality.
+5
+Conclusion
+This paper presents SA-ResGS, a framework that stabilizes uncertainty quantification and enhances uncertainty-aware supervision for next-best-view selection in
+active scene reconstruction. We introduce Self-Augmented Points, reconstructed
+from a training view and a rasterized extrapolated view. These points enable
+physically grounded view selection and help mitigate bias in uncertainty estimates. Furthermore, we propose the first residual learning strategy tailored to
+3D Gaussian Splatting, with an emulated skip connection, enabling effective
+supervision for both uncertain image regions and weakly contributing Gaussian
+splats. This leads to improved photometric reconstruction in novel view synthesis.
+Extensive experiments for NBV selection and novel view synthesis demonstrate
+the effectiveness of SA-ResGS across a range of realistic scenes.
+Acknowledgements. This work was partially supported by Institute of Information & Communications Technology Planning & Evaluation (IITP) grant (No. RS-2026-25518317, Development of AI
+memory mechanism that reflects human cognitive principles), the National Research Foundation of
+Korea (NRF) grant (No. RS-2024-00451947; No. RS-2024-00453301), and the InnoCORE program of
+the Ministry of Science and ICT(26-InnoCORE-01) funded by the Korea government (MSIT).
+16
+K. Jun-Seong et al.
+References
+1. Barron, J.T., Mildenhall, B., Verbin, D., Srinivasan, P.P., Hedman, P.: Mip-nerf
+360: Unbounded anti-aliased neural radiance fields. In: IEEE Conf. Comput. Vis.
+Pattern Recog. (2022)
+2. Bircher, A., Kamel, M., Alexis, K., Oleynikova, H., Siegwart, R.: Receding horizon
+“next-best-view” planner for 3d exploration. In: IEEE Int. Conf. on Robotics and
+Automation (2016)
+3. Charatan, D., Li, S.L., Tagliasacchi, A., Sitzmann, V.: pixelsplat: 3d gaussian
+splats from image pairs for scalable generalizable 3d reconstruction. In: IEEE Conf.
+Comput. Vis. Pattern Recog. (2024)
+4. Chen, L., Zhan, H., Chen, K., Xu, X., Yan, Q., Cai, C., Xu, Y.: Activegamer: Active
+gaussian mapping through efficient rendering. In: IEEE Conf. Comput. Vis. Pattern
+Recog. (2025)
+5. Chen, X., Li, Q., Wang, T., Xue, T., Pang, J.: Gennbv: Generalizable next-best-view
+policy for active 3d reconstruction. In: IEEE Conf. Comput. Vis. Pattern Recog.
+(2024)
+6. Christopher, C., William, J., B., Manfred, H.: Learning the next best view for
+3d point clouds via topological features. In: IEEE Int. Conf. on Robotics and
+Automation (2021)
+7. Connolly, C.I.: The determination of next best views. In: IEEE Int. Conf. on
+Robotics and Automation (1985)
+8. Delmerico, J., Isler, S., Sabzevari, R., Scaramuzza, D.: A comparison of volumetric
+information gain metrics for active 3d object reconstruction. Autonomous Robots
+42(2) (2018)
+9. Dong-Yeon, S., Jun-Seong, K., Byung-Ki, K., Oh, T.H.: Hdr-nsff: High dynamic
+range neural scene flow fields. In: ICLR (2026)
+10. Dunn, E., Frahm, J.M.: Next best view planning for active model improvement. In:
+Brit. Mach. Vis. Conf. (2009)
+11. Feng, Z., Zhan, H., Chen, Z., Yan, Q., Xu, X., Cai, C., Li, B., Zhu, Q., Xu, Y.:
+Naruto: Neural active reconstruction from uncertain target observations. In: IEEE
+Conf. Comput. Vis. Pattern Recog. (2024)
+12. Goli, L., Reading, C., Sellán, S., Jacobson, A., Tagliasacchi, A.: Bayes’ Rays:
+Uncertainty quantification for neural radiance fields. In: IEEE Conf. Comput. Vis.
+Pattern Recog. (2024)
+13. Gottwald, T., Heinert, E., Stehr, P., Galappaththige, C.J., Rottmann, M.: Primu:
+Uncertainty estimation for novel views in gaussian splatting from primitive-based
+representations of error and coverage. In: IEEE Conf. Comput. Vis. Pattern Recog.
+(2026)
+14. Guédon, A., Monasse, P., Lepetit, V.: Scone: surface coverage optimization in
+unknown environments by volumetric integration. In: Adv. Neural Inform. Process.
+Syst. (2022)
+15. Guédon, A., Monnier, T., Monasse, P., Lepetit, V.: Macarons: Mapping and coverage
+anticipation with rgb online self-supervision. In: IEEE Conf. Comput. Vis. Pattern
+Recog. (2023)
+16. Hanson, A., Tu, A., Singla, V., Jayawardhana, M., Zwicker, M., Goldstein, T.: Pup
+3d-gs: Principled uncertainty pruning for 3d gaussian splatting. In: IEEE Conf.
+Comput. Vis. Pattern Recog. (2025)
+17. He, K., Zhang, X., Ren, S., Sun, J.: Deep residual learning for image recognition.
+In: IEEE Conf. Comput. Vis. Pattern Recog. (2016)
+SA-ResGS
+17
+18. Hedman, P., Philip, J., Price, T., Frahm, J.M., Drettakis, G., Brostow, G.: Deep
+blending for free-viewpoint image-based rendering. ACM Trans. Graph. (2018)
+19. Jang, Y., Gunes, H., Patras, I.: Registration-free face-ssd: Single shot analysis
+of smiles, facial attributes, and affect in the wild. Computer Vision and Image
+Understanding 182, 17–29 (2019)
+20. Jang, Y., Pérez-Pellitero, E.: Comapgs: Covisibility map-based gaussian splatting
+for sparse novel view synthesis. In: IEEE Conf. Comput. Vis. Pattern Recog. pp.
+26779–26788 (June 2025)
+21. Jiang, W., Lei, B., Ashton, K., Daniilidis, K.: Multimodal llm guided exploration
+and active mapping using fisher information. In: Int. Conf. Comput. Vis. (2025)
+22. Jiang, W., Lei, B., Daniilidis, K.: Fisherrf: Active view selection and uncertainty
+quantification for radiance fields using fisher informations. In: Eur. Conf. Comput.
+Vis. (2024)
+23. Jun-Seong, K., GeonU, K., Yu-Ji, K., Wang, Y.C.F., Choe, J., Oh, T.H.: Dr. splat:
+Directly referring 3d gaussian splatting via direct language embedding registration.
+In: IEEE Conf. Comput. Vis. Pattern Recog. (2025)
+24. Ke, J., Wang, Q., Wang, Y., Milanfar, P., Yang, F.: Musiq: Multi-scale image
+quality transformer. In: Int. Conf. Comput. Vis. (2021)
+25. Kerbl, B., Kopanas, G., Leimkühler, T., Drettakis, G.: 3d gaussian splatting for
+real-time radiance field rendering. ACM Trans. Graph. (2023)
+26. Kim, G., Youwang, K., Hyoseok, L., Oh, T.H.: Fpgs: Feed-forward semantic-aware
+photorealistic style transfer of large-scale gaussian splatting (2026)
+27. Kim, G., Youwang, K., Oh, T.H.: FPRF: Feed-forward photorealistic style transfer
+of large-scale 3D neural radiance fields. In: AAAI (2024)
+28. Kim, J.S., Kim, M., Kim, G., Oh, T.H., Kim, J.H.: Factorized multi-resolution
+hashgrid for efficient neural radiance fields: Execution on edge-devices. In: IEEE
+Robotics and Automation Letters. IEEE (2024)
+29. Knapitsch, A., Park, J., Zhou, Q.Y., Koltun, V.: Tanks and temples: Benchmarking
+large-scale scene reconstruction. ACM Trans. Graph. 36(4) (2017)
+30. Kopanas, G., Drettakis, G.: Improving NeRF Quality by Progressive Camera
+Placement for Free-Viewpoint Navigation. In: Proceedings of the Vision Modeling
+and Visualization (2023)
+31. Kulhanek, J., Peng, S., Kukelova, Z., Pollefeys, M., Sattler, T.: WildGaussians: 3D
+gaussian splatting in the wild. In: Adv. Neural Inform. Process. Syst. (2024)
+32. Lee, S., Kang, K., Ha, S., Yu, H.: Bayesian nerf: Quantifying uncertainty with
+volume density for neural implicit fields. IEEE Robotics Autom. Lett. (2025)
+33. Lei, B., Jiang, W., Daniilidis, K.: Activegrasp: Information-guided active grasping
+with calibrated energy-based model (2025), arXiv preprint arXiv:2511.12795
+34. Leroy, V., Cabon, Y., Revaud, J.: Grounding image matching in 3d with mast3r.
+In: Eur. Conf. Comput. Vis. (2024)
+35. Li, J., Zhang, J., Bai, X., Zheng, J., Ning, X., Zhou, J., Gu, L.: Dngaussian: Optimizing sparse-view 3d gaussian radiance fields with global-local depth normalization.
+In: IEEE Conf. Comput. Vis. Pattern Recog. (2024)
+36. Lin, H., Chen, S., Liew, J.H., Chen, D.Y., Li, Z., Shi, G., Feng, J., Kang, B.: Depth
+anything 3: Recovering the visual space from any views (2025), arXiv preprint
+arXiv:2511.10647
+37. Lyu, L., Tewari, A., Habermann, M., Saito, S., Zollhöfer, M., Leimküehler, T.,
+Theobalt, C.: Manifold sampling for differentiable uncertainty in radiance fields. In:
+ACM Trans. Graph. (2024)
+18
+K. Jun-Seong et al.
+38. Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng,
+R.: Nerf: Representing scenes as neural radiance fields for view synthesis. In: Eur.
+Conf. Comput. Vis. (2020)
+39. Müller, T., Evans, A., Schied, C., Keller, A.: Instant neural graphics primitives
+with a multiresolution hash encoding. ACM Trans. Graph. (2022)
+40. Niedermayr, S., Stumpfegger, J., Westermann, R.: Compressed 3d gaussian splatting
+for accelerated novel view synthesis. In: IEEE Conf. Comput. Vis. Pattern Recog.
+(2024)
+41. Pan, X., Lai, Z., Song, S., Huang, G.: Activenerf: Learning where to see with
+uncertainty estimation. In: Eur. Conf. Comput. Vis. (2022)
+42. Park, H., Ryu, G., Kim, W.: Dropgaussian: Structural regularization for sparse-view
+gaussian splatting. In: IEEE Conf. Comput. Vis. Pattern Recog. (2025)
+43. Pataki, Z., Sarlin, P.E., Schönberger, J.L., Pollefeys, M.: MP-SfM: Monocular
+Surface Priors for Robust Structure-from-Motion. In: IEEE Conf. Comput. Vis.
+Pattern Recog. (2025)
+44. Peng, S., Zhang, Y., Li, K.: Papr in motion: Seamless point-level 3d scene interpolation. In: IEEE Conf. Comput. Vis. Pattern Recog. (2024)
+45. Schonberger, J.L., Frahm, J.M.: Structure-from-motion revisited. In: IEEE Conf.
+Comput. Vis. Pattern Recog. (2016)
+46. Schönberger, J.L., Zheng, E., Frahm, J.M., Pollefeys, M.: Pixelwise view selection
+for unstructured multi-view stereo. In: Eur. Conf. Comput. Vis. (2016)
+47. Scott, W.R., Roth, G., Rivest, J.F.: View planning for automated three-dimensional
+object reconstruction and inspection. ACM Computing Surveys (CSUR) 35(1)
+(2003)
+48. Shen, J., Agudo, A., Moreno-Noguer, F., Ruiz, A.: Conditional-flow nerf: Accurate
+3d modelling with reliable uncertainty quantification. In: Eur. Conf. Comput. Vis.
+(2022)
+49. Shen, J., Ruiz, A., Agudo, A., Moreno-Noguer, F.: Stochastic neural radiance fields:
+Quantifying uncertainty in implicit 3d representations. In: Int. Conf. on 3D Vis.
+(2021)
+50. Srivastava, N., Hinton, G., Krizhevsky, A., Sutskever, I., Salakhutdinov, R.: Dropout:
+a simple way to prevent neural networks from overfitting. Journal of Machine
+Learning Research (2014)
+51. Strong, M., Lei, B., Swann, A., Jiang, W., Daniilidis, K., III, M.K.: Next best sense:
+Guiding vision and touch with fisherrf for 3d gaussian splatting. In: IEEE Int. Conf.
+on Robotics and Automation (2025)
+52. Sun, Y., Huang, Q., Hsiao, D.Y., Guan, L., Hua, G.: Learning view selection for 3d
+scenes. In: IEEE Conf. Comput. Vis. Pattern Recog. (June 2021)
+53. Sünderhauf, N., Abou-Chakra, J., Miller, D.: Density-aware nerf ensembles: Quantifying predictive uncertainty in neural radiance fields. In: IEEE Int. Conf. on
+Robotics and Automation (2023)
+54. Umeyama, S.: Least-squares estimation of transformation parameters between two
+point patterns (1991)
+55. Vázquez, P.P., Feixas, M., Sbert, M., Heidrich, W.: Viewpoint selection using
+viewpoint entropy. In: Proceedings of the Vision Modeling and Visualization (2001)
+56. Wang, T., Xi, W., Cheng, Y., Han, H., Yang, Y.: Rl-nbv: A deep reinforcement
+learning based next-best-view method for unknown object reconstruction. Pattern
+Recognition Letters (2024)
+57. Wang, Z., Bhalgat, Y., Li, R., Prisacariu, V.A.: Active view selector: Fast and
+accurate active view selection with cross reference image quality assessment (2025),
+arXiv preprint arXiv:2506.19844
+SA-ResGS
+19
+58. Wang, Z., Bian, W., Prisacariu, V.A.: Crossscore: Towards multi-view image evaluation and scoring. In: Eur. Conf. Comput. Vis. (2024)
+59. Wei, Y., Liu, S., Rao, Y., Zhao, W., Lu, J., Zhou, J.: Nerfingmvs: Guided optimization of neural radiance fields for indoor multi-view stereo. In: Int. Conf. Comput.
+Vis. (2021)
+60. Wilson, J., Almeida, M., Mahajan, S., Labrie, M., Ghaffari, M., Ghasemalizadeh,
+O., Sun, M., Kuo, C.H., Sen, A.: Pop-gs: Next best view in 3d-gaussian splatting
+with p-optimality. In: IEEE Conf. Comput. Vis. Pattern Recog. (2025)
+61. Xiao, W., Santa Cruz, R., Ahmedt-Aristizabal, D., Salvado, O., Fookes, C., Lebrat,
+L.: Nerf director: Revisiting view selection in neural volume rendering. In: IEEE
+Conf. Comput. Vis. Pattern Recog. (June 2024)
+62. Xu, W., Gao, H., Shen, S., Rui Peng, J.J., Wang, R.: Mvpgs: Excavating multi-view
+priors for gaussian splatting from sparse input views. In: Eur. Conf. Comput. Vis.
+(2024)
+63. Xuan, H., Stylianou, A., Liu, X., Pless, R.: Hard negative examples are hard, but
+useful. In: Eur. Conf. Comput. Vis. (2020)
+64. Yu, Z., Chen, A., Huang, B., Sattler, T., Geiger, A.: Mip-splatting: Alias-free 3d
+gaussian splatting. In: IEEE Conf. Comput. Vis. Pattern Recog. (June 2024)
+65. Zhang, Y., Peng, S., Moazeni, A., Li, K.: Papr: Proximity attention point rendering.
+In: Adv. Neural Inform. Process. Syst. (2023)
+Supplementary Material for “SA-ResGS:
+Self-Augmented Residual 3D Gaussian Splatting
+for Next Best View Selection”
+Kim Jun-Seong1∗
+Eduardo Pérez-Pellitero3
+1
+POSTECH
+Tae-Hyun Oh2
+Youngkyoon Jang4∗†
+KAIST 3 Huawei Noah’s Ark Lab
+junseong.kim@postech.ac.kr
+https://saresgs.github.io/
+2
+4
+Rivian
+Supplementary Material Overview
+This supplementary document provides additional implementation details and
+results that support and extend the main paper. It is organized as follows:
+Sec. A. Implementation Details
+Sec. B. Camera Distribution Analysis.
+Sec. C. Extended Qualitative Comparisons.
+Sec. D. Extended Qualitative Comparisons on Ablation Studies.
+Sec. E. Ablation study - Physically Grounded View Selection
+Sec. F. Ablation study - Uncertainty-guided Residual Learning
+Sec. G. Robustness and Sensitivity Analysis
+Sec. H. Extended Baseline Comparison
+Sec. I. The Evaluation Statistics
+Sec. J. Supplementary Video Overview.
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+A
+Implementation Details
+In this section, we provide additional details on both the implementation of
+our method and the experiment setup used throughout the paper. We first recap the FisherRF [22] uncertainty and expected-information-gain formulation
+we adopt in uncertainty estimation (Sec. A.1). Sec. A.2 to A.5 describe the
+implementation details of the proposed physically grounded prefiltering, including the SA-Points generation (Sec. 3.1) and coverage estimation and encoding
+(Sec. 3.2). Sec. A.7 and A.8 then present the experiment setup and dataset
+details, respectively.
+∗
+†
+This work was conducted while authors were with Huawei Noah’s Ark Lab in London
+denotes the corresponding author
+SA-ResGS
+A.1
+21
+Adopted Uncertainty Formulation (FisherRF Recap)
+For uncertainty estimation we adopt the mathematical formulation and code
+implementation suggested in FisherRF [22]. Our method does not modify uncertainty estimation part, but restricts the candidate set over which it is evaluated
+(Sec. 3.2) considering physical geometry, and adds residual supervision (Sec. 3.3).
+Let θ denote the 3DGS parameters and let D be the set of all rays cast
+from the training views observed so far. FisherRF approximates the parameter
+posterior p(θ | D) by a Gaussian centered at the trained parameters i.e. Laplacian
+approximation. The precision, inverse covariance, of this Gaussian is denoted H
+and measures how strongly the observations constrain θ. It is computed as the
+Gauss–Newton Hessian of the rendering loss, summed over all observed rays:
+\mathbf {H} \;=\; \sum _{r \in \mathcal {D}} \Big (\tfrac {\partial \hat {C}_r}{\partial \theta }\Big )^{\!\top } \Lambda _r \Big (\tfrac {\partial \hat {C}_r}{\partial \theta }\Big ) \;+\; \epsilon \mathbf {I}.
+(1)
+Here Ĉr is the rendered color of ray r, and ∂ Ĉr /∂θ is its sensitivity to
+the parameters. The weight Λr is the confidence of each color observation;
+following FisherRF, all rays share the same isotropic value, so Eq. (1) of [22]
+reduces to an unweighted squared-error loss. The term ϵI is a small prior added
+by the Laplace approximation that keeps H invertible. Inverting H gives the
+parameter covariance, and propagating it through the rendering Jacobian yields
+the predictive uncertainty of a view, U = (∂ Ĉ/∂θ) H−1 (∂ Ĉ/∂θ)⊤ . For tractability,
+FisherRF does not form H in full but keeps only its diagonal, so that the inverse
+below reduces to an element-wise reciprocal.
+Consider a view v that has not yet been captured i.e. candidate view. If we
+capture it, it would contribute its own information, Hv , computed exactly like H
+but using only the rays of view v. The expected information gain measures how
+much capturing v would reduce the uncertainty we currently hold in H:
+\mathrm {EIG}(v) \;=\; \tfrac {1}{2}\, \log \det \!\big (\mathbf {I} + \mathbf {H}_v\,\mathbf {H}^{-1}\big ),
+(2)
+and the next-best view is v ⋆ = arg maxv EIG(v) (cf. Eq. (3) of [22]). In SA-ResGS,
+this acquisition is evaluated only within the physically grounded candidate subset
+as illustrated in manuscript. We refer to [22] for the complete derivation.
+A.2
+Overview of Physically-grounded View Selection
+Physically grounded view selection begins by constructing Self-Augmented Points
+(SA-Points) via 3D lifting between a training view and its extrapolated view.
+These SA-Points are used to estimate surface occupancy and to encode observed
+geometry into binary voxel features. Candidate views are scored based on their
+voxel-level dissimilarity to the encoded training views, supporting robust coverage
+estimation without relying on early uncertainty signals. In the following, we
+detail (1) extrapolated view generation, (2) Self-Augmented Point (SA-Point)
+generation using MASt3R [34] and triangulation, (3) SA-Point generation using
+Depth-Anything-v3 [36] (DA-v3), and (4) coverage estimation and view frustum
+construction.
+22
+K. Jun-Seong et al.
+A.3
+Extrapolated View Generation
+To synthesize a novel rasterized view while maintaining sufficient scene overlap,
+we perturb the original camera center by ±0.25 units along the x and y axes
+and translate it backward by 0.5 units along the z-axis. This backward-only
+perturbation ensures that the extrapolated view retains a high degree of visibility
+overlap with the original training view, keeping most scene content within the
+shared frustums. As a result, the extrapolated view covers a large portion of
+the original training image while still providing a novel perspective of the same
+surfaces, enabling reliable correspondence estimation for SA-Point generation.
+A.4
+Self-Augmented Points (SA-Points) Generation
+While our framework is modular and compatible with other 3D foundational
+reconstruction models, the manuscript instantiates the pipeline with MASt3R
+followed by triangulation. In this section, we first describe the default MASt3Rbased SA-Points generation procedure used throughout our main experiments.
+Dense Correspondence Matching. We compute dense correspondences between the ground-truth image of the original training view and the rendering
+from the extrapolated view using the pretrained MASt3R model [34] (MASt3R
+ViTLarge_BaseDecoder_512_catmlpdpt_metric), which is robust to moderate
+viewpoint perturbations. As discussed in the manuscript, MASt3R produces
+context-aware dense correspondences by capturing structured scene semantics
+over 16×16 local patches. This property makes it robust to moderate viewpoint
+perturbations, even when the extrapolated rendering contains geometric artifacts.
+As a result, we can extract reliable matches despite local distortions in the
+synthesized view. This enables consistent 3D reconstruction from single-view
+observations augmented with extrapolated viewpoints.
+Triangulation and Reprojection Filtering. To ensure geometric consistency,
+we triangulate 3D points from matched correspondences and filter them based on
+reprojection error. Specifically, we discard points whose bidirectional reprojection
+error exceeds 1-pixel. For computational efficiency, we parallelize the triangulation
+process across multiple CPU threads and subsample correspondence pairs using a
+spatial stride of 5 pixels along both the x and y directions. These filtering strategies
+significantly reduce computation while preserving high-fidelity geometric structure.
+For analysis of reprojection filtering threshold, see Sec. G.
+A.5
+Depth-Anything-v3 Implementation
+To investigate the modularity of our framework, we replace MASt3R with DepthAnything-v3 [36] (DA-v3), a more recent feed-forward model. This alternative
+instantiation preserves the overall physically grounded prefiltering pipeline while
+requiring several additional implementation choices. In the following, we describe
+the DA-v3-based 3D lifting procedure used in our experiments.
+DA-v3-based 3D Lifting. Unlike the default MASt3R-based pipeline, DA-
+SA-ResGS
+23
+v3 directly predicts 3D geometry together with per-point confidence. Since the
+predicted depth points are defined in an independent coordinate system, we align
+them to the COLMAP [45,46] reference frame using the Umeyama algorithm [54],
+following the original DA-v3 pipeline. We found that self-augmentation renders
+remain beneficial in this sparse-view setting. We therefore also incorporate
+extrapolated views for DA-v3-based lifting (see Fig. S1). Unlike MASt3R, DA-v3
+can process multiple images jointly. Our preliminary experiments showed that
+using all eight extrapolated views, i.e. all possible combinations of perturbation
+along the x- and y-axes, provides the best configuration, as shown in Table S1.
+Accordingly, we jointly use all eight extrapolated views together with the training
+view. We use a pretrained DA-v3 model (DA3NESTED-GIANT-LARGE ), and
+filter out depth points with confidence below 1.0 to retain reliable points.
+: Overlapping regions
+(a) Initial Views
+: COLMAP
+: Aligned Pointmap
+Input view only
+Input view + SA
+(b) Point cloud
+Fig. S1: Effect of self-augmentation on DA-v3-based lifting and alignment.
+(a) Initial input-view images used in our experiments. In our experimental setting, the
+initial input views share only small foreground regions, while most distant background
+regions lack mutual observation. (b) Point clouds obtained from DA-v3 predictions,
+visualized after aligning the predicted camera extrinsics to the COLMAP reference frame
+via Umeyama alignment. Without self-augmentation ((b)-left), 3D lifting relies
+only on the original sparse training views, in which only small regions are commonly
+observed. As a result, most image regions provide limited multi-view supervision.
+Because shared geometric evidence is limited, the observed image evidence can often
+be explained by multiple intrinsic–extrinsic parameter combinations, making camera
+estimation ambiguous and weakly constrained. With self-augmentation ((b)-right),
+in contrast, providing the same model with an extrapolated (self-augmented) view,
+which is designed to capture both the foreground and broader background geometry,
+imposes stricter multi-view constraints. The resulting multi-view constraints between the
+training view and its extrapolated counterpart reduce ambiguity in camera parameter
+estimation, constrain the solution to more geometrically plausible configurations, and
+in turn lead to more stable Umeyama alignment.
+A.6
+Coverage Estimation and View Frustum Construction
+Voxel Grid Construction. Given sparse SfM points, we define an axis-aligned
+bounding box (AABB) that covers the entire 3D point cloud. The AABB is
+computed from the minimum and maximum bounds of the reconstructed points.
+24
+K. Jun-Seong et al.
+Table S1: Effect of the number of extrapolated views in the DA-v3 backbone
+for SA-Point generation. Comparison between the default MASt3R-based implementation and the DA-v3-based lifting variant under the active-view reconstruction setting
+on Mip-NeRF 360. For DA-v3, we evaluate configurations with 2, 4, and 8 extrapolated
+views, since the model can process multiple images jointly. Note that the Umeyama
+method fails when only a single extrapolated view is used, as indicated by ✗ in the
+table. The DA-v3 model with eight extrapolated views yields the best performance.
+Backbone
+MASt3R (Ours)
+Depth-Anything-v3
+Depth-Anything-v3
+Depth-Anything-v3
+Depth-Anything-v3
+Extrapolated views PSNR ↑ SSIM ↑ LPIPS ↓
+1
+1
+2
+4
+8
+21.325
+✗
+21.247
+21.254
+21.429
+0.610
+✗
+0.612
+0.612
+0.614
+0.450
+✗
+0.449
+0.450
+0.448
+Initial Occupancy Estimation. We discretize the scene into a voxel grid and
+mark a voxel as occupied if it contains a minimum number of SfM points (2 for
+outdoor scenes, and 5 for indoor cases). To better represent scene geometry, we
+apply N -fold upsampling to the occupied voxels.
+Observed Region Calculation. SA-Points are mapped to their nearest voxels
+to define the observed surface region. To account for possible triangulation errors
+and improve spatial robustness, we apply a 3D dilation operation to the occupied
+voxels. For all cases, a dilation radius of 2 is applied.
+View Frustum Determination. To evaluate candidate views, we define view
+frustums using camera intrinsics and the global maximum bounds computed from
+the SfM point cloud. These frustums ignore visibility constraints but serve as a
+conservative estimate of potential scene coverage. Coverage scores for physically
+grounded view selection are then computed by measuring voxel-level intersections
+between the candidate frustums and the observed surface, represented via a
+hash-encoded voxel occupancy representation.
+A.7
+Experiment Setup
+All models presented in the manuscript, including the ablation variants of our
+proposed method, are trained and evaluated on a single mid-range GPU (38
+TFLOPS fp32). CPU-based components, i.e. SA-Points generation, voxel grid
+processing, and triangulation, are executed across eight threads for efficiency.
+A.8
+Datasets
+We evaluate our method and baselines on three types of datasets: (1) MipNeRF 360 [1], (2) NeRF-Synthetic [38] and (3) Extended next-best-view (NBV)
+benchmark datasets [18, 29]. Mip-NeRF 360 consists of nine real-world scenes
+with dense 360-degree camera coverage, captured across both indoor and outdoor
+scenarios. The NeRF-Synthetic dataset consists of eight object-centric scenes
+with dense 360-degree camera view distributions, rendered in Blender. To ensure
+SA-ResGS
+25
+consistency across datasets, we generated sparse point clouds for all NeRFSynthetic scenes using COLMAP. We note that the Ficus scene fails to reconstruct
+reliably; therefore, we excluded it and evaluated on the remaining scenes.
+While these datasets provide a controlled and well-curated benchmark, their
+uniform view distribution limits the difficulty of NBV evaluation. Such settings
+often make NBV strategies appear less critical, since even simple heuristics (e.g.,
+furthest-distance selection) can perform reliably under balanced coverage [61].
+To address this issue, we additionally construct an Extended NBV benchmark
+by selecting five challenging scenes from Deep Blending [18] and Tanks and Temples [29], characterized by irregular camera trajectories and diverse scene scales.
+This curated set introduces more realistic and unbalanced conditions, offering a
+complementary testbed for evaluating robustness in active view selection.
+These datasets contain large-scale and geometrically complex scenes with
+irregular camera distributions, but their difficulty also means that many methods
+fail outright. To filter such degenerate cases, we trained the FisherRF baseline
+under the standard scheme and retained only scenes where it achieved at least
+17 dB PSNR, ensuring that the comparisons remained fair and informative. This
+procedure produced the following representative scenes: Horse, Truck, Ballroom,
+Ponche, and Playroom. The selected set spans both indoor and outdoor environments and includes highly complex camera distributions (e.g., Ballroom, Ponche,
+and Playroom) that deviate substantially from the curated coverage of Mip-NeRF
+360. These characteristics create more realistic stress tests for NBV strategies by
+introducing occlusions, scale variations, and unbalanced observations. In this section, we provide additional details on both the implementation of our method and
+the experiment setup used throughout the paper. We first recap the FisherRF [22]
+uncertainty and expected-information-gain formulation we adopt in uncertainty
+estimation (Sec. A.1). Sec. A.2 to A.5 describe the implementation details of the
+proposed physically grounded prefiltering, including the SA-Points generation
+(Sec. 3.1) and coverage estimation and encoding (Sec. 3.2). Sec. A.7 and A.8
+then present the experiment setup and dataset details, respectively.
+B
+Camera Distribution Analysis
+To evaluate the effectiveness of our view selection strategy, we compare the
+camera distributions produced by different methods. Fig. S2, S3, and S4 visualize
+these distributions from both bird’s-eye and side perspectives. As discussed in
+the manuscript, FisherRF tends to produce clustered view selections due to its
+tight coupling with the internal 3DGS learning dynamics, as highlighted in the
+semi-transparent yellow regions. In contrast, our method yields a more spatially
+uniform and well-dispersed distribution of viewpoints.
+This distinction is further illustrated in Fig. S5: in the Room scene from
+the Mip-NeRF 360 dataset, FisherRF often selects redundant or near-parallel
+views. Our method instead promotes angular diversity, leading to broader scene
+exploration. A similar trend is observed in the Deep Blending dataset, where our
+approach selects viewpoints over a wider vertical range. These comparisons sup-
+26
+K. Jun-Seong et al.
+port our claim that SA-ResGS facilitates physically grounded and geometrically
+diverse view selection, thereby improving scene coverage.
+SA-ResGS
+ACP
+MUSIQ
+CrossScore
+FisherRF
+Ours
+Garden
+Flowers
+Counter
+Bonsai
+Bicycle
+Random
+27
+Fig. S2: Camera View Distribution on Mip-NeRF 360. Visualization of camera
+poses selected by each method on the Mip-NeRF 360 dataset. Red frustums indicate
+the initial views, while green frustums denote views added during active selection. Our
+method produces a more uniformly distributed set of viewpoints, while both baselines
+exhibit clustered view selections (highlighted by yellow circles), particularly in FisherRF
+due to its reliance on uncertainty signals entangled with 3DGS training dynamics.
+28
+K. Jun-Seong et al.
+ACP
+MUSIQ
+CrossScore
+FisherRF
+Ours
+Treehill
+stump
+Room
+Kitchen
+Random
+Fig. S3: Camera View Distribution on Mip-NeRF 360. Visualization of camera
+poses selected by each method on the Mip-NeRF 360 dataset. Red frustums indicate
+the initial views, while green frustums denote views added during active selection. Our
+method produces a more uniformly distributed set of viewpoints, while both baselines
+exhibit clustered view selections (highlighted by yellow circles), particularly in FisherRF
+due to its reliance on uncertainty signals entangled with 3DGS training dynamics.
+SA-ResGS
+ACP
+MUSIQ
+CrossScore
+FisherRF
+Ours
+Truck
+Ponche
+Playroom
+Random
+29
+Fig. S4: Camera View Distribution on Deep Blending and Tanks & Temples.
+View distributions on additional datasets, following the same color and annotation
+scheme as Fig. S2. Our method maintains broader spatial coverage, while baseline
+methods often exhibit clustering (yellow circles), consistent with the biases observed on
+Mip-NeRF 360.
+FisherRF
+Ours
+Ponche
+Room
+Random
+Fig. S5: Diversity of Selected Views (Zoomed-in Analysis). We highlight the
+spatial diversity of selected camera poses by presenting zoomed-in regions corresponding
+to the boxed areas above. Compared to the baselines, our method selects views from
+a broader range of angles (Room, top) and elevations (Ponche, bottom), resulting in
+more comprehensive scene coverage.
+30
+C
+K. Jun-Seong et al.
+Extended Qualitative Comparisons
+The qualitative results presented in the manuscript are limited by space constraints, which may obscure the full advantages of our method. To address this,
+we provide extended visualizations from multiple test viewpoints. Fig. S6 to S8
+display results from five scenes across the Mip-NeRF 360, Extended dataset, with
+six to eight novel test views per scene. Our method consistently achieves broader
+and more complete scene coverage than FisherRF.
+As discussed in the manuscript, our residual supervision strategy further
+improves geometric consistency and reconstruction robustness, particularly in
+sparse or limited-view scenarios. This is especially beneficial under the standard
+active or next-best-view selection protocol, where training begins with a small
+number of views (e.g., 4) and progressively adds new views, typically one at a time.
+The synergy between physically grounded view selection and residual learning
+enables high-fidelity reconstruction even from limited initial observations. As
+mentioned in Sec. J, we include a supplementary video with 360-degree novel-view
+renderings. We encourage reviewers to watch this video to better appreciate the
+improvements in coverage and structural accuracy provided by SA-ResGS.
+SA-ResGS
+ACP
+MUSIQ
+CrossScore
+FisherRF
+Ours
+GT
+#27
+#12
+#7
+#4
+#3
+Frame #1
+Random
+31
+(a) Playroom scene. Six test-time novel views.
+ACP
+MUSIQ
+CrossScore
+FisherRF
+Ours
+GT
+#29
+#26
+#21
+#17
+#15
+#10
+#5
+Frame #2
+Random
+(b) Bonsai scene. Eight test-time novel views.
+Fig. S6: Qualitative comparison across multiple test-time novel views. Across
+all scenes, our method produces more complete and consistent reconstructions, particularly in occluded or sparsely observed regions (red boxes). In contrast, baseline
+methods (Random, FisherRF) often exhibit missing geometry, blurring, or structural artifacts due to biased or clustered view selections.
+32
+K. Jun-Seong et al.
+ACP
+MUSIQ
+CrossScore
+FisherRF
+Ours
+GT
+#19
+#22
+#24
+#10
+#6
+#5
+#2
+Frame #1
+Random
+(a) Counter scene. Eight test-time novel views.
+ACP
+MUSIQ
+CrossScore
+FisherRF
+Ours
+GT
+#38
+#28
+#25
+#19
+#17
+#15
+#9
+Frame #4
+Random
+(b) Room scene. Eight test-time novel views.
+Fig. S7: Qualitative comparison across multiple test-time novel views. Across
+all scenes, our method produces more complete and consistent reconstructions, particularly in occluded or sparsely observed regions (red boxes). In contrast, baseline methods
+(Random, FisherRF) often exhibit missing geometry, blurring, or structural artifacts
+due to biased or clustered view selections.
+SA-ResGS
+ACP
+MUSIQ
+CrossScore
+FisherRF
+Ours
+GT
+#29
+#20
+#16
+#15
+#11
+#8
+#5
+Frame #3
+Random
+33
+Fig. S8: Qualitative Comparison Across Multiple Test-Time Views (Truck
+Scene). Across all scenes, our method produces more complete and consistent reconstructions, particularly in occluded or sparsely observed regions (red boxes). In contrast,
+baseline methods (Random, FisherRF) often exhibit missing geometry, blurring, or
+structural artifacts due to biased or clustered view selections.
+D
+Extended Qualitative Comparisons on Ablation Studies.
+This section provides additional results that complement the ablation studies in
+the manuscript. We first present qualitative comparisons of the ablation variants
+to illustrate the effect of each component more clearly. We then examine the
+residual learning design under different sampling strategies.
+Qualitative Results for Ablation Studies. Figure S9 compares FisherRF (the
+baseline), ‡ +ResGS, † +SA-HashGS, and † +SA-ResGS on the Room and Counter
+scenes. Here, ‡ +ResGS adds residual supervision with fixed-order view selection,
+while † +SA-HashGS introduces our geometry-aware view prefiltering. The full
+model, † +SA-ResGS, combines both view selection and residual supervision.
+Orange boxes indicate improvements mainly associated with view selection,
+whereas red boxes highlight refinements brought by residual supervision.
+In the Room scene, the baseline FisherRF exhibits missing geometry (i.e.,
+holes) and floating or blurry artifacts near partially occluded regions or thin
+object boundaries. Physically grounded prefiltering († +SA-HashGS) alleviates
+34
+K. Jun-Seong et al.
+FisherRF
+‡+ResGS
+†+SA-HashGS
+†+SA-ResGS
+GroundTruth
+Room
+FisherRF
+‡+ResGS
+†+SA-HashGS
+†+SA-ResGS
+GroundTruth
+Counter
+Fig. S9: Qualitative Self-Comparison for Ablation Study. Results on the Room
+and Counter scenes comparing the baseline (FisherRF) with ablation variants, including
+‡
++ResGS, † +SA-HashGS, and † +SA-ResGS. Orange boxes highlight improvements
+from coverage-guided view selection, while red boxes emphasize the effects of residual
+supervision. Residual learning enhances geometric stability and reduces artifacts (e.g.,
+jittering surfaces), whereas SA-HashGS recovers unobserved regions (e.g., occluded or
+shadowed areas). The full SA-ResGS combines both benefits, yielding the most complete
+and structurally faithful reconstructions.
+missing geometry issues by improving surface coverage through more diverse
+viewpoint selection, filling holes in the baseline result as shown in the orange boxes.
+Residual supervision (‡ +ResGS), in contrast, provides stronger local refinement
+in observed regions, improving sofa edges and reducing floating artifacts on
+SA-ResGS
+35
+the wall and chair, as shown in the red boxes. Combining both, the full model
+(† +SA-ResGS) produces the most complete and visually stable reconstruction.
+Similarly, in the Counter scene, residual supervision (‡ +ResGS) reduces
+floating artifacts and improves under-optimized regions, particularly around the
+shadowed left side of the countertop (first row). Physically grounded prefiltering
+(† +SA-HashGS) mainly improves broader coverage and recovers missing floor
+regions that were previously unseen, as highlighted by the orange boxes. These
+results further support the complementary roles of view selection and residual
+supervision in sparse-view reconstruction. Additional 360-degree renderings for
+these ablation results are included in the supplementary video.
+(a)
+(b)
+(c)
+Fig. S10: Qualitative comparison across ablation variants of the residuallearning design. Starting from the full configuration (c), w/ Full Loss and w/ Subset
+Loss using both uncertainty-guided and random sampling, we remove one component
+at a time: (a) w/o Full Loss while keeping the same Subset Loss, and (b) w/ Full Loss
+but w/ Subset Loss using random sampling only. Red boxes highlight regions where the
+differences are most pronounced.
+Ablation Study on Residual Learning. The residual-learning design can
+be decomposed into two components: Full Loss and uncertainty-guided subset
+sampling.1
+Effect of sampling strategy. In Sec. 4.3 and Fig. 8, we examine the ablation effect of Full Loss; here, we extend that analysis to investigate the effect
+of uncertainty-guided subset sampling, as presented in Fig. S10. For parallel
+comparison, we also include the result already presented in Fig. 8.
+For ease of presentation, we define each ablation variants as (a), (b), and (c),
+and refer to them by these labels. We start from our full configuration model (c),
+w/ Full Loss and w/ Subset Loss using both uncertainty-guided sampling and
+random sampling. We then remove one component at a time to form each variant:
+(a) is w/o Full Loss while keeping the same subset supervision as (c), and (b) is w/
+Full Loss but w/ Subset Loss using random sampling only. For fair comparison,
+the sampling ratio in (b) and (c) is matched by increasing the amount of random
+1
+Note that, Full Loss and Subset Loss is defined in Sec 3.3 of manuscript.
+36
+K. Jun-Seong et al.
+sampling in (b). We also use fixed-order view selection following FisherRF† so
+that the observed differences are not confounded by view-selection effects.
+Comparing (a) and (c) confirms the role of the Full Loss. As shown in Fig.
+8, removing Full Loss leads to over-smoothed renderings and loss of fine details.
+Comparing (b) and (c) further isolates the role of uncertainty-guided subset
+supervision. Even with Full Loss present, random subset supervision alone still
+shows degradation in frequently occluded or under-refined regions, i.e., the
+staircase behind the door and the window-frame region. By enforcing continuous
+gradient flow to under-updated or geometrically unstable Gaussians, particularly
+those that are floating or insufficiently activated, uncertainty-prior sampling
+effectively corrects misaligned geometry and improves reconstruction robustness
+in challenging regions.
+E
+Ablation study - Physically Grounded View Selection
+Pre-filtering criteria. Table S2 compares our coverage-based pre-filtering
+against rule-based (random subset), geometry-based (farthest view selection,
+FVS), and appearance-based (MUSIQ [24], CrossScore [58]) alternatives, keeping
+the uncertainty-based final selection (FisherRF) identical within each pre-filtered
+subset. Our method consistently outperforms these alternatives by explicitly
+reasoning about 3D coverage rather than only promoting spatial or appearance
+diversity. The gains are larger on the extended benchmark, where complex
+geometry and irregular camera distributions make coverage-aware filtering more
+important for identifying under-covered regions.
+Table S2: Comparison of viewpoint pre-filtering criteria. Uncertainty-based
+final selection (FisherRF) is applied within each pre-filtered subset; only the pre-filtering
+criterion differs. Coverage-aware filtering is best on PSNR/LPIPS and competitive on
+SSIM, with larger gains on the extended benchmark.
+Category Pre-filtering
+Mip-NeRF 360
+Extended dataset
+PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+Rule-based Random
+20.975 0.597
+0.459
+19.899 0.729
+0.384
+Geo-based FVS
+21.337 0.611
+0.450 19.649 0.729
+0.383
+Appearance
+MUSIQ
+CrossScore
+20.652 0.594
+21.248 0.607
+0.463
+0.452
+19.179 0.711
+20.109 0.743
+0.398
+0.372
+Coverage
+Ours
+21.410 0.613
+0.451 20.401 0.732
+0.361
+Coverage-only view selection. To isolate the effect of coverage alone, Table S3
+evaluates an SA-Points-only variant that selects the view with the highest SAPoint-based coverage/dissimilarity score, without using any uncertainty signal.
+This variant improves PSNR/SSIM over FisherRF, confirming that SA-Points
+SA-ResGS
+37
+provide useful coverage cues. However, it still underperforms our full method,
+showing that geometry-based coverage is helpful but insufficient; uncertainty still
+provides complementary gains.
+Table S3: Coverage-only (SA-Points-only) view selection vs. the full method.
+The SA-Points-only variant selects the view with the highest SA-Point-based coverage/dissimilarity score, without uncertainty. SA-Points provide useful coverage cues,
+but uncertainty yields complementary gains.
+Methods
+Mip-NeRF 360
+Extended dataset
+PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+FisherRF
+20.642 0.595 0.450 19.654 0.711 0.370
+SA-Points-only 20.802 0.601 0.455 19.727 0.723 0.369
+Ours-Full
+21.410 0.613 0.451 20.401 0.732 0.361
+F
+Ablation study - Uncertainty-guided Residual Learning
+Residual-Learning Design Choices. We analyze two key design choices of
+the residual supervision (Sec. 3.3), summarized in Table S4. First, the sensitivity
+study on β, the ratio of selected uncertain Gaussians (left), shows that residual
+supervision works best at a moderate selection strength but degrades when too
+many Gaussians are selected, which weakens the dropout effect. We use β=10 as
+a robust default: differences across moderate β are small, and this value balances
+dropout strength and stability. Second, the ablation on the attributes used to
+rank uncertain Gaussians (right) shows that using both opacity and scale is
+most effective, validating our design. For a fair comparison, we double β for the
+opacity-only and scale-only variants.
+Table S4: Residual-learning design choices on Mip-NeRF 360. Left: sensitivity
+to the uncertain-Gaussian ratio β. Right: effect of the attributes used to rank uncertain
+Gaussians (β is doubled for the single-attribute variants for a fair comparison). Residual
+supervision works best at a moderate β and degrades when too many Gaussians are
+dropped; using both opacity and scale is most effective.
+β (%) PSNR↑ SSIM↑ LPIPS↓
+0
+5
+10
+20
+30
+G
+21.191 0.609 0.451
+21.387 0.613 0.448
+21.347 0.611 0.450
+21.329 0.610 0.451
+21.215 0.610 0.450
+Attributes
+PSNR↑ SSIM↑ LPIPS↓
+opacity-only
+21.345 0.612
+scale-only
+21.309 0.609
+opacity + scale 21.410 0.613
+0.450
+0.451
+0.451
+Robustness and Sensitivity Analysis
+This section presents additional ablation studies to evaluate the robustness and
+sensitivity of the proposed framework with respect to several design choices.
+38
+K. Jun-Seong et al.
+We examine the effects of correspondence noise, reprojection thresholds, and
+the hash encoding size in the coverage prefilter. Lastly, we evaluate changes in
+reconstruction performance across varying numbers of selected views, to further
+validate the effectiveness of our framework during the active view selection process.
+Robustness to Correspondence Noise. Table S5: Robustness to synthetic
+SA-Points are obtained from 2D dense cor- correspondence noise. PSNR rerespondences used for triangulation, where mains stable under moderate perturbamatching errors directly affect 3D recon- tions (≤ 5 pixels), showing SA-Points
+struction quality and subsequent view se- are resilient to realistic levels of noise.
+lection. To evaluate robustness, we syn- Noise 0.0 0.5 1.0 5.0 10.0
+thetically inject gaussian noise into 2D PSNR 24.441 24.199 24.117 24.311 23.121
+correspondence, ranging from 0.0 to 10.0
+pixels. As shown in Table S5, reconstruction quality remains stable in terms of
+PSNR under moderate noise levels up to 5 pixels, with a 1-pixel reprojection
+filter. Performance degrades noticeably under larger perturbations, indicating
+that the system is affected by 2D correspondence accuracy but still tolerates
+moderate correspondence errors without significant loss.
+We also study the sensitivity to the repro- Table S6: Effect of reprojection
+jection threshold used for correspondence fil- filtering thresholds. A 1-pixel
+tering. To verify this, we vary the reprojection threshold offers the best trade-off
+threshold and measure reconstruction accu- between PSNR and coverage.
+racy and the coverage metric for the Next Best Threshold PSNR SSIM LPIPS Coverage
+0.5
+22.634 0.817 0.332 57.74%
+View selection task. Coverage is measured by
+1.0
+24.441 0.838 0.317 94.11%
+counting the number of observed voxels when
+2.0
+24.244 0.834 0.318 94.89%
+10 views are selected. As shown in Table S6,
+with a tight threshold of 0.5 pixels, many correspondences are filtered out, resulting in reduced coverage and degraded reconstruction quality. At a looser threshold
+of 2.0 pixels, more SA-Points are preserved for coverage estimation; however,
+these points are less accurate, which slightly reduces performance. Among the
+tested values, 1.0 pixel provides the best PSNR–coverage trade-off. Based on this
+observation, we use a 1-pixel reprojection threshold in all experiments.
+Ablation on Hash Encoding Size. To assess
+the sensitivity of the hash-encoded voxel grid used
+in coverage prefiltering, we vary the hash-table size
+from 211 to 219 , as well as a no-collision variant
+implemented with direct indexing. Despite more
+than a 200× difference in hash capacity, the performance remains stable across all settings, with
+only minor variations in PSNR, SSIM, and LPIPS,
+as shown in Table S7. No consistent degradation
+trend is observed as the hash size decreases.
+We attribute this insensitivity to two aspects of
+the pipeline: (1) Only occupied voxels are hashed,
+while empty regions are skipped entirely; because
+Table S7: Effect of hash
+encoding size on coverage prefiltering. Performance comparison across different hash-table sizes for coverage prefiltering.
+Hash size PSNR SSIM LPIPS
+211
+213
+215
+217
+219
+21.555 0.617 0.446
+21.593 0.618 0.446
+21.507 0.616 0.447
+21.261 0.612 0.450
+21.282 0.610 0.451
+No Collision 21.325 0.610 0.450
+SA-ResGS
+39
+occupancy varies widely across scenes, the effective
+load factor of the hash table remains low even for relatively small hash sizes. (2)
+Residual inconsistencies introduced by collisions are further mitigated by the
+subsequent Fisher-based fine selection stage, which provides an additional layer
+of error correction. Together, these results suggest that the coverage prefiltering
+is robust to hash size over a wide range in our benchmark setting.
+Effects of the Number of Selected Table S8: Effect of the number of seViews. Our physically grounded view lected views. Our method yields higher
+selection algorithm (Sec. 3.2 in the PSNR in sparse-view regimes (7–10 views)
+manuscript) is designed to stabilize and continues to improve as more views are
+early training when the geometry is added, highlighting both early stability and
+sparse or unevenly distributed, while long-term scalability.
+Selected Views
+also benefiting from later uncertainty- Methods
+4
+7
+10
+13
+16
+19
+driven refinement. To further examrandom 15.929 16.485 17.573 17.694 18.233 18.400
+ine this effect, we report intermedi- FisherRF 15.985 17.269 18.773 20.188 21.722 22.650
+Ours 15.970 17.606 18.895 20.159 23.229 24.064
+ate results obtained with fewer selected views. Specifically, on the Bonsai scene, we evaluate performance with 4, 7, 10, 13, 16, and 19 selected views
+in Table S8. Under sparse conditions (7 and 10 views), our method outperforms
+FisherRF, demonstrating the benefit of physically grounded filtering in stabilizing early-stage. As more views are added, the initial advantage narrows, but
+new gains appear from 16 views onward, where residual learning further refines
+Gaussians and improves geometry, enabling later performance gains. This trend
+is consistent with the design intuition of our model.
+H
+Extended Baseline Comparison
+Table S9: Additional baseline comparison. BayesRays uses its original Nerfacto
+backbone; ActiveNeRF is adapted to 3DGS in our pipeline. Our method outperforms
+both on Mip-NeRF 360 and the extended benchmark, consistent with the trend reported
+in the FisherRF paper [22].
+Method
+Mip-NeRF 360
+Extended Benchmark
+PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+Nerfacto + BayesRays [12] 15.430 0.466 0.673 17.158 0.565
+3DGS + ActiveNeRF [41] 18.749 0.542 0.474 19.266 0.702
+3DGS + Ours (MASt3R) 21.410 0.613 0.451 20.401 0.732
+0.448
+0.375
+0.361
+Additional baselines. Following the broader baseline set used in FisherRF [22],
+we additionally compare against BayesRays [12] and an ActiveNeRF-style acquisition [41] adapted to 3DGS, as reported in Table S9. BayesRays is reported with
+its original Nerfacto backbone, while ActiveNeRF is adapted to 3DGS in our
+40
+K. Jun-Seong et al.
+pipeline. Our method consistently outperforms both baselines on Mip-NeRF 360
+and the extended benchmark, consistent with the trend reported in the FisherRF
+paper.
+Table S10: Scene-wise quantitative results on the NeRF Synthetic dataset.
+Each subtable reports PSNR, SSIM, and LPIPS, respectively. All values are computed
+over four repeated trials with different random seeds.
+PSNR↑
+Methods
+chair
+random
+ACP
+MUSIQ
+CrossScore
+FisherRF
+drums
+hotdog
+lego
+materials
+mic
+ship
+24.626 ±3.489 20.918 ±1.347 30.397 ±1.161 28.812 ±0.285 20.013 ±0.646 23.813 ±1.236 25.348 ±0.830
+25.989 ±0.219 19.176 ±0.604 24.409 ±0.755 23.474 ±0.104 19.125 ±0.295 22.687 ±0.476 24.168 ±0.726
+27.899 ±0.164 20.948 ±1.108 30.308 ±0.140 28.796 ±0.159 20.268 ±0.433 23.219 ±0.437 25.219 ±0.335
+24.521 ±0.531 18.817 ±0.094 28.799 ±0.661 27.629 ±0.985 18.326 ±0.187 23.011 ±0.378 25.120 ±0.325
+27.066 ±0.981 21.844 ±0.608 30.998 ±0.371 26.108 ±2.142 20.516 ±0.488 24.153 ±0.668 25.645 ±0.408
+Ours (MASt3R) 28.303 ±0.280 22.948 ±0.304 31.195 ±0.166 29.703 ±0.450 21.206 ±0.187 26.267 ±0.271 26.437 ±0.042
+Ours (DA-v3) 28.375 ±0.142 22.906 ±0.185 31.266 ±0.592 29.941 ±0.222 20.818 ±0.452 25.455 ±0.238 26.294 ±0.341
+(a) Average PSNR on NeRF Synthetic dataset
+SSIM↑
+Methods
+chair
+random
+ACP
+MUSIQ
+CrossScore
+FisherRF
+drums
+hotdog
+lego
+materials
+mic
+ship
+0.932 ±0.019 0.878 ±0.018 0.962 ±0.005 0.937 ±0.001 0.814 ±0.014 0.896 ±0.015 0.829 ±0.014
+0.920 ±0.001 0.849 ±0.012 0.920 ±0.007 0.850 ±0.002 0.804 ±0.010 0.860 ±0.005 0.785 ±0.011
+0.940 ±0.003 0.880 ±0.010 0.961 ±0.001 0.938 ±0.002 0.817 ±0.006 0.867 ±0.003 0.820 ±0.013
+0.930 ±0.003 0.826 ±0.008 0.951 ±0.003 0.925 ±0.004 0.776 ±0.007 0.848 ±0.011 0.823 ±0.007
+0.945 ±0.003 0.885 ±0.012 0.965 ±0.002 0.908 ±0.021 0.810 ±0.005 0.898 ±0.007 0.834 ±0.007
+Ours (MASt3R) 0.949 ±0.002 0.903 ±0.004 0.965 ±0.001 0.941 ±0.004 0.826 ±0.010 0.918 ±0.002 0.846 ±0.002
+Ours (DA-v3) 0.950 ±0.001 0.902 ±0.002 0.965 ±0.002 0.944 ±0.002 0.825 ±0.004 0.909 ±0.005 0.843 ±0.005
+(b) Average SSIM on NeRF Synthetic dataset
+LPIPS↓
+Methods
+chair
+random
+ACP
+MUSIQ
+CrossScore
+FisherRF
+drums
+hotdog
+lego
+materials
+mic
+ship
+0.070 ±0.016 0.111 ±0.009 0.068 ±0.004 0.076 ±0.001 0.181 ±0.008 0.108 ±0.008 0.202 ±0.007
+0.075 ±0.002 0.125 ±0.006 0.109 ±0.003 0.121 ±0.002 0.198 ±0.007 0.126 ±0.002 0.213 ±0.006
+0.062 ±0.002 0.109 ±0.007 0.071 ±0.002 0.077 ±0.002 0.190 ±0.005 0.119 ±0.003 0.204 ±0.003
+0.069 ±0.002 0.125 ±0.003 0.088 ±0.004 0.086 ±0.003 0.213 ±0.005 0.123 ±0.003 0.203 ±0.004
+0.059 ±0.002 0.108 ±0.006 0.066 ±0.003 0.093 ±0.011 0.177 ±0.008 0.111 ±0.003 0.199 ±0.003
+Ours (MASt3R) 0.058 ±0.001 0.099 ±0.002 0.066 ±0.001 0.078 ±0.002 0.175 ±0.002 0.095 ±0.002 0.199 ±0.001
+Ours (DA-v3) 0.058 ±0.001 0.100 ±0.001 0.067 ±0.001 0.076 ±0.001 0.178 ±0.004 0.102 ±0.002 0.200 ±0.003
+(c) Average LPIPS on NeRF Synthetic dataset
+SA-ResGS
+41
+Table S11: Scene-wise quantitative results on Mip-NeRF 360. Each subtable
+reports PSNR, SSIM, and LPIPS, respectively. All values are computed over four
+repeated trials with different random seeds.
+PSNR↑
+Methods
+room
+random
+ACP
+MUSIQ
+CrossScore
+FisherRF
+counter
+kitchen
+bonsai
+bicycle
+flowers
+garden
+stump
+treehill
+22.256 ±0.575 20.544 ±0.450 21.908 ±0.671 21.086 ±1.547 18.642 ±0.295 15.916 ±0.583 21.131 ±0.242 20.027 ±0.841 18.211 ±0.401
+21.868 ±0.604 21.390 ±0.382 21.279 ±0.464 22.158 ±0.101 19.290 ±0.213 16.543 ±0.192 21.542 ±0.105 20.575 ±0.339 18.278 ±0.455
+22.057 ±0.097 20.452 ±0.190 22.804 ±0.194 20.088 ±0.375 18.332 ±0.146 16.946 ±0.069 20.736 ±0.245 19.217 ±0.297 18.016 ±0.269
+22.924 ±0.254 22.480 ±0.124 22.994 ±0.117 24.021 ±0.330 18.485 ±0.933 17.222 ±0.221 21.876 ±0.099 21.003 ±0.544 18.681 ±0.596
+22.500 ±0.642 21.613 ±0.110 23.123 ±0.361 23.125 ±0.733 18.715 ±0.153 16.616 ±0.158 21.459 ±0.101 20.230 ±0.316 18.396 ±0.209
+Ours (MASt3R) 24.513 ±0.110 22.742 ±0.029 24.182 ±0.111 24.564 ±0.025 18.182 ±0.116 16.930 ±0.154 22.182 ±0.035 20.605 ±0.224 18.789 ±0.374
+Ours (DA-v3) 24.321 ±0.498 22.608 ±0.172 24.074 ±0.068 23.886 ±0.245 18.520 ±0.217 16.848 ±0.189 22.195 ±0.074 20.576 ±0.303 19.219 ±0.274
+(a) Average PSNR on Mip-NeRF 360
+SSIM↑
+Methods
+room
+random
+ACP
+MUSIQ
+CrossScore
+FisherRF
+counter
+kitchen
+bonsai
+bicycle
+flowers
+garden
+stump
+treehill
+0.782 ±0.017 0.719 ±0.011 0.774 ±0.022 0.758 ±0.037 0.412 ±0.008 0.318 ±0.012 0.578 ±0.008 0.457 ±0.028 0.457 ±0.009
+0.779 ±0.015 0.746 ±0.007 0.757 ±0.010 0.791 ±0.011 0.429 ±0.006 0.334 ±0.005 0.596 ±0.003 0.476 ±0.012 0.458 ±0.008
+0.780 ±0.004 0.723 ±0.006 0.782 ±0.009 0.726 ±0.016 0.400 ±0.003 0.333 ±0.002 0.549 ±0.009 0.423 ±0.011 0.459 ±0.008
+0.811 ±0.004 0.772 ±0.003 0.803 ±0.004 0.836 ±0.002 0.397 ±0.034 0.340 ±0.006 0.593 ±0.006 0.494 ±0.021 0.465 ±0.010
+0.773 ±0.017 0.751 ±0.003 0.790 ±0.007 0.810 ±0.016 0.411 ±0.004 0.331 ±0.005 0.573 ±0.004 0.461 ±0.015 0.457 ±0.006
+Ours (MASt3R) 0.825 ±0.003 0.783 ±0.001 0.822 ±0.002 0.841 ±0.003 0.396 ±0.003 0.334 ±0.003 0.584 ±0.002 0.473 ±0.008 0.457 ±0.004
+Ours (DA-v3) 0.819 ±0.009 0.780 ±0.004 0.821 ±0.004 0.831 ±0.007 0.406 ±0.009 0.333 ±0.001 0.585 ±0.001 0.470 ±0.010 0.471 ±0.006
+(b) Average SSIM on Mip-NeRF 360
+LPIPS↓
+Methods
+room
+random
+ACP
+MUSIQ
+CrossScore
+FisherRF
+counter
+kitchen
+bonsai
+bicycle
+flowers
+garden
+stump
+treehill
+0.357 ±0.009 0.382 ±0.010 0.288 ±0.018 0.364 ±0.024 0.566 ±0.001 0.612 ±0.011 0.417 ±0.002 0.556 ±0.016 0.561 ±0.006
+0.358 ±0.012 0.362 ±0.008 0.303 ±0.008 0.343 ±0.008 0.557 ±0.003 0.598 ±0.003 0.410 ±0.003 0.548 ±0.006 0.563 ±0.008
+0.381 ±0.007 0.384 ±0.004 0.288 ±0.007 0.394 ±0.014 0.579 ±0.002 0.601 ±0.002 0.429 ±0.004 0.573 ±0.005 0.567 ±0.005
+0.354 ±0.003 0.355 ±0.003 0.269 ±0.002 0.318 ±0.003 0.605 ±0.045 0.609 ±0.002 0.418 ±0.006 0.541 ±0.010 0.564 ±0.007
+0.370 ±0.008 0.356 ±0.002 0.278 ±0.005 0.332 ±0.013 0.571 ±0.002 0.603 ±0.003 0.420 ±0.002 0.556 ±0.009 0.562 ±0.003
+Ours (MASt3R) 0.338 ±0.002 0.342 ±0.001 0.277 ±0.043 0.313 ±0.002 0.594 ±0.002 0.618 ±0.002 0.431 ±0.002 0.570 ±0.004 0.574 ±0.003
+Ours (DA-v3) 0.340 ±0.005 0.345 ±0.004 0.255 ±0.004 0.321 ±0.003 0.588 ±0.005 0.620 ±0.002 0.432 ±0.001 0.571 ±0.006 0.567 ±0.003
+(c) Average LPIPS on Mip-NeRF 360
+I
+The Evaluation Statistics
+Active View Selection. Per-scene results for active view selection are reported
+in Table S10, S11, and S12, where each value is reported as the mean and standard
+deviation over four runs with different random seeds. Across the three datasets,
+our method generally achieves stronger PSNR and SSIM than competing methods,
+while remaining competitive on LPIPS. The standard deviations further suggest
+that our method improves stability in active reconstruction. These results support
+the effectiveness of the proposed strategy across diverse input conditions.
+For several scenes in the Extended dataset, such as playroom, ponche, and
+truck, our method exhibits relatively large standard deviations. Although the
+standard deviations in these scenes appear less consistent, closer inspection across
+repeated runs shows that the model maintains strong and stable performance.
+At the same time, the observed variance indicates further room for improvement,
+42
+K. Jun-Seong et al.
+as a small number of runs achieve noticeably larger gains that increase both the
+mean and the overall spread. We attribute this behavior to the stochastic training
+dynamics of our full framework, where physically grounded view selection and
+residual learning with uncertainty-guided Gaussian selection can reinforce each
+other and occasionally yield significant performance boosts. This synergy benefits
+not only training stability but also the stabilization of uncertainty estimation,
+which in turn improves view selection quality. Therefore, we interpret the larger
+variance not as a sign of instability, but as evidence that the proposed method
+remains robust while retaining additional upside for further performance gains.
+We also observe that ACP performs well on several scenes in the Extended
+dataset. This suggests that its rule-based global exploration can be effective
+for certain scene layouts. However, the per-scene analysis also shows that such
+a hand-crafted strategy can suffer noticeable degradation depending on scene
+characteristics. In contrast, our method combines Laplacian-based uncertainty estimation with physically grounded prefiltering. As a result, it achieves more stable
+and consistently strong performance across a wider range of scene configurations.
+Ablation Study. Per-scene ablation results are also summarized in Table S13
+and S14, where all values are reported as the mean and standard deviation over
+four repeated runs. Adding either ResGS or Hash prefiltering to the fixed-view
+setting improves not only the average performance but also the stability of
+training, as evidenced by the reduced standard deviations. This finding suggests
+that both proposed components contribute meaningfully to stabilizing the learning
+process. This trend is consistent with our discussion in the manuscript.
+When ResGS is used alone without any constraint on view selection (‡ ResGS),
+the improvements become noticeably less consistent across scenes and runs. This
+suggests that the benefits of ResGS cannot be fully realized without an appropriate
+view selection mechanism. In contrast, combining it with view selection generally
+yields stronger results than using either component in isolation. These results
+support our discussion in the main manuscript that the proposed components
+are complementary and thus exhibit a synergistic effect in most scenes.
+SA-ResGS
+43
+Table S12: Scene-wise quantitative results on the Extended datasets. Each
+subtable reports PSNR, SSIM, and LPIPS, respectively. All values are computed over
+four repeated trials with different random seeds.
+PSNR↑
+Methods
+ballroom
+random
+ACP
+MUSIQ
+CrossScore
+FisherRF
+horse
+playroom
+ponche
+truck
+16.970 ±0.320 19.119 ±0.513 18.506 ±0.311 19.981 ±0.899 21.737 ±0.451
+17.499 ±0.114 20.147 ±0.252 20.983 ±0.569 21.634 ±0.153 19.487 ±0.401
+16.443 ±0.235 18.693 ±0.206 19.131 ±0.162 18.438 ±0.394 20.793 ±0.169
+18.099 ±0.085 20.354 ±0.119 19.842 ±0.150 19.899 ±0.809 21.517 ±0.525
+17.250 ±0.326 19.834 ±0.396 19.334 ±0.179 19.833 ±0.828 22.017 ±0.096
+Ours (MASt3R) 18.281 ±0.179 20.015 ±0.232 20.689 ±1.105 20.906 ±1.067 22.115 ±0.256
+Ours (DA-v3) 18.216 ±0.133 20.471 ±0.227 20.271 ±0.309 20.727 ±1.111 22.058 ±0.178
+(a) Average PSNR on Extended datasets
+SSIM↑
+Methods
+ballroom
+random
+ACP
+MUSIQ
+CrossScore
+FisherRF
+horse
+playroom
+ponche
+truck
+0.551 ±0.012 0.756 ±0.011 0.679 ±0.012 0.753 ±0.018 0.757 ±0.008
+0.564 ±0.003 0.787 ±0.007 0.772 ±0.007 0.752 ±0.004 0.713 ±0.016
+0.524 ±0.008 0.749 ±0.008 0.700 ±0.005 0.723 ±0.004 0.741 ±0.002
+0.605 ±0.004 0.792 ±0.003 0.724 ±0.004 0.753 ±0.012 0.759 ±0.005
+0.555 ±0.013 0.777 ±0.007 0.709 ±0.006 0.751 ±0.016 0.763 ±0.002
+Ours (MASt3R) 0.614 ±0.007 0.779 ±0.007 0.741 ±0.016 0.765 ±0.013 0.761 ±0.002
+Ours (DA-v3) 0.610 ±0.002 0.791 ±0.005 0.742 ±0.013 0.759 ±0.008 0.761 ±0.002
+(b) Average SSIM on Extended datasets
+Methods
+LPIPS↓
+random
+ACP
+MUSIQ
+CrossScore
+FisherRF
+0.385 ±0.007 0.286 ±0.009 0.348 ±0.011 0.466 ±0.019 0.388 ±0.006
+0.376 ±0.002 0.259 ±0.005 0.449 ±0.005 0.397 ±0.003 0.322 ±0.014
+0.411 ±0.006 0.298 ±0.008 0.338 ±0.003 0.506 ±0.004 0.401 ±0.001
+0.352 ±0.003 0.257 ±0.002 0.318 ±0.003 0.466 ±0.014 0.386 ±0.003
+0.389 ±0.009 0.273 ±0.007 0.324 ±0.004 0.479 ±0.016 0.387 ±0.001
+ballroom
+horse
+playroom
+ponche
+truck
+Ours (MASt3R) 0.350 ±0.005 0.277 ±0.015 0.338 ±0.041 0.437 ±0.031 0.403 ±0.002
+Ours (DA-v3) 0.353 ±0.004 0.272 ±0.004 0.352 ±0.071 0.444 ±0.027 0.404 ±0.002
+(c) Average LPIPS on Extended datasets
+44
+K. Jun-Seong et al.
+Table S13: Scene-wise quantitative results of the ablation study on MipNeRF 360. Each subtable reports PSNR, SSIM, and LPIPS, respectively.
+Methods
+PSNR↑
+3D Lifting
+room
+bonsai
+bicycle
+flowers
+garden
+stump
+treehill
+-
+22.500 ±0.642 21.613 ±0.110 23.123 ±0.361 23.125 ±0.733 18.715 ±0.153 16.616 ±0.158 21.459 ±0.101 20.230 ±0.316 18.396 ±0.209
++ResGS
++ResGS
+-
+23.637 ±0.053 21.694 ±0.097 24.052 ±0.034 23.652 ±0.106 19.278 ±0.041 16.463 ±0.098 21.438 ±0.033 20.630 ±0.013 18.558 ±0.028
+23.295 ±0.170 21.650 ±0.269 23.657 ±0.089 22.501 ±0.329 18.621 ±0.380 16.404 ±0.231 21.506 ±0.102 20.250 ±0.361 18.700 ±0.289
++SA-HashGS
++SA-ResGS
+MASt3R
+MASt3R
+23.998 ±0.313 22.512 ±0.091 23.576 ±0.158 24.157 ±0.097 18.173 ±0.100 16.732 ±0.039 21.944 ±0.231 20.155 ±0.337 18.587 ±0.372
+24.513 ±0.110 22.742 ±0.029 24.182 ±0.111 24.564 ±0.025 18.182 ±0.116 16.930 ±0.154 22.182 ±0.035 20.605 ±0.224 18.789 ±0.374
++SA-HashGS
++SA-ResGS
+DA-v3
+DA-v3
+24.456 ±0.142 22.768 ±0.104 23.726 ±0.093 23.609 ±0.675 17.954 ±0.199 16.378 ±0.149 22.098 ±0.058 20.182 ±0.418 18.513 ±0.277
+24.321 ±0.498 22.608 ±0.172 24.074 ±0.068 23.886 ±0.245 18.520 ±0.217 16.848 ±0.189 22.195 ±0.074 20.576 ±0.303 19.219 ±0.274
+†
+†
+†
+kitchen
+FisherRF†
+‡
+†
+counter
+†
+(a) Average PSNR results for Ablation study on Mip-NeRF 360 dataset
+Methods
+SSIM↑
+3D Lifting
+room
+bonsai
+bicycle
+flowers
+garden
+stump
+treehill
+-
+0.773 ±0.017 0.751 ±0.003 0.790 ±0.007 0.810 ±0.016 0.411 ±0.004 0.331 ±0.005 0.573 ±0.004 0.461 ±0.015 0.457 ±0.006
++ResGS
++ResGS
+-
+0.800 ±0.002 0.754 ±0.002 0.814 ±0.000 0.819 ±0.001 0.426 ±0.001 0.331 ±0.001 0.555 ±0.001 0.472 ±0.000 0.461 ±0.000
+0.788 ±0.004 0.750 ±0.006 0.795 ±0.006 0.799 ±0.010 0.408 ±0.009 0.325 ±0.004 0.560 ±0.004 0.460 ±0.010 0.462 ±0.007
++SA-HashGS
++SA-ResGS
+MASt3R
+MASt3R
+0.820 ±0.005 0.779 ±0.004 0.810 ±0.004 0.836 ±0.002 0.396 ±0.006 0.334 ±0.003 0.594 ±0.012 0.459 ±0.011 0.455 ±0.009
+0.825 ±0.003 0.783 ±0.001 0.822 ±0.002 0.841 ±0.003 0.396 ±0.003 0.334 ±0.003 0.584 ±0.002 0.473 ±0.008 0.457 ±0.004
++SA-HashGS
++SA-ResGS
+DA-v3
+DA-v3
+0.824 ±0.005 0.783 ±0.003 0.812 ±0.004 0.822 ±0.013 0.394 ±0.006 0.333 ±0.002 0.602 ±0.002 0.459 ±0.016 0.457 ±0.007
+0.819 ±0.009 0.780 ±0.004 0.821 ±0.004 0.831 ±0.007 0.406 ±0.009 0.333 ±0.001 0.585 ±0.001 0.470 ±0.010 0.471 ±0.006
+†
+†
+†
+kitchen
+FisherRF†
+‡
+†
+counter
+†
+(b) Average SSIM results for Ablation study on Mip-NeRF 360 dataset
+Methods
+LPIPS↓
+3D Lifting
+room
+bonsai
+bicycle
+flowers
+garden
+stump
+treehill
+-
+0.370 ±0.008 0.356 ±0.002 0.278 ±0.005 0.332 ±0.013 0.571 ±0.002 0.603 ±0.003 0.420 ±0.002 0.556 ±0.009 0.562 ±0.003
++ResGS
++ResGS
+-
+0.354 ±0.001 0.357 ±0.001 0.261 ±0.000 0.326 ±0.000 0.576 ±0.001 0.621 ±0.001 0.443 ±0.001 0.569 ±0.000 0.569 ±0.000
+0.367 ±0.004 0.362 ±0.004 0.279 ±0.007 0.339 ±0.004 0.587 ±0.004 0.627 ±0.004 0.441 ±0.002 0.576 ±0.004 0.570 ±0.004
++SA-HashGS
++SA-ResGS
+MASt3R
+MASt3R
+0.338 ±0.003 0.341 ±0.003 0.263 ±0.003 0.313 ±0.001 0.580 ±0.003 0.603 ±0.004 0.412 ±0.003 0.558 ±0.007 0.564 ±0.007
+0.338 ±0.002 0.342 ±0.001 0.277 ±0.043 0.313 ±0.002 0.594 ±0.002 0.618 ±0.002 0.431 ±0.002 0.570 ±0.004 0.574 ±0.003
++SA-HashGS
++SA-ResGS
+DA-v3
+DA-v3
+0.335 ±0.004 0.337 ±0.003 0.260 ±0.004 0.322 ±0.009 0.580 ±0.002 0.603 ±0.001 0.409 ±0.002 0.559 ±0.009 0.563 ±0.004
+0.340 ±0.005 0.345 ±0.004 0.255 ±0.004 0.321 ±0.003 0.588 ±0.005 0.620 ±0.002 0.432 ±0.001 0.571 ±0.006 0.567 ±0.003
+†
+†
+†
+kitchen
+FisherRF†
+‡
+†
+counter
+†
+(c) Average LPIPS results for Ablation study on Mip-NeRF 360 dataset
+SA-ResGS
+45
+Table S14: Scene-wise quantitative results of the ablation study on the
+Extended datasets. Each subtable reports PSNR, SSIM, and LPIPS, respectively.
+Methods
+PSNR↑
+3D Lifting
+ballroom
+ponche
+truck
+-
+17.075 ±0.197 19.580 ±0.346 19.383 ±0.276 19.447 ±0.508 21.964 ±0.022
++ResGS
++ResGS
+-
+17.181 ±0.044 20.199 ±0.104 19.318 ±0.038 19.150 ±0.155 22.159 ±0.222
+17.781 ±0.313 20.140 ±0.266 19.608 ±0.155 19.127 ±0.242 22.300 ±0.221
++SA-HashGS
++SA-ResGS
+MASt3R
+MASt3R
+17.609 ±0.189 19.106 ±0.306 19.781 ±0.127 19.921 ±0.354 22.095 ±0.173
+18.281 ±0.179 20.015 ±0.232 20.689 ±1.105 20.906 ±1.067 22.115 ±0.256
++SA-HashGS
++SA-ResGS
+DA-v3
+DA-v3
+17.830 ±0.149 20.043 ±0.220 19.885 ±0.196 20.239 ±0.697 22.126 ±0.224
+18.216 ±0.133 20.471 ±0.227 20.271 ±0.309 20.727 ±1.111 22.058 ±0.178
+†
+†
+†
+playroom
+FisherRF†
+‡
+†
+horse
+†
+(a) Average PSNR results for Ablation study on Mip-NeRF 360 dataset
+Methods
+SSIM↑
+3D Lifting
+ballroom
+ponche
+truck
+FisherRF
+-
+0.550 ±0.011 0.758 ±0.035 0.724 ±0.037 0.744 ±0.012 0.763 ±0.001
++ResGS
+†
++ResGS
+-
+0.555 ±0.002 0.785 ±0.001 0.704 ±0.002 0.743 ±0.002 0.758 ±0.002
+0.577 ±0.009 0.780 ±0.007 0.717 ±0.006 0.742 ±0.002 0.760 ±0.002
++SA-HashGS
++SA-ResGS
+MASt3R
+MASt3R
+0.584 ±0.011 0.757 ±0.007 0.726 ±0.002 0.756 ±0.009 0.766 ±0.003
+0.614 ±0.007 0.779 ±0.007 0.741 ±0.016 0.765 ±0.013 0.761 ±0.002
++SA-HashGS
++SA-ResGS
+DA-v3
+DA-v3
+0.594 ±0.006 0.785 ±0.005 0.728 ±0.006 0.760 ±0.007 0.766 ±0.004
+0.610 ±0.002 0.791 ±0.005 0.742 ±0.013 0.759 ±0.008 0.761 ±0.002
+†
+†
+playroom
+†
+‡
+†
+horse
+†
+(b) Average SSIM results for Ablation study on Extended dataset
+Methods
+LPIPS↓
+3D Lifting
+ballroom
+ponche
+truck
+FisherRF
+-
+0.391 ±0.007 0.287 ±0.026 0.312 ±0.028 0.485 ±0.010 0.388 ±0.001
++ResGS
+†
++ResGS
+-
+0.389 ±0.001 0.276 ±0.001 0.335 ±0.001 0.485 ±0.003 0.407 ±0.001
+0.376 ±0.002 0.280 ±0.005 0.328 ±0.005 0.480 ±0.005 0.406 ±0.001
++SA-HashGS
++SA-ResGS
+MASt3R
+MASt3R
+0.363 ±0.008 0.290 ±0.008 0.313 ±0.002 0.463 ±0.007 0.384 ±0.002
+0.350 ±0.005 0.277 ±0.015 0.338 ±0.041 0.437 ±0.031 0.403 ±0.002
++SA-HashGS
++SA-ResGS
+DA-v3
+DA-v3
+0.360 ±0.003 0.266 ±0.004 0.313 ±0.005 0.462 ±0.009 0.382 ±0.004
+0.353 ±0.004 0.272 ±0.004 0.352 ±0.071 0.444 ±0.027 0.404 ±0.002
+†
+†
+playroom
+†
+‡
+†
+horse
+†
+(c) Average LPIPS results for Ablation study on Extended dataset
+46
+J
+K. Jun-Seong et al.
+Supplementary Video Overview
+To complement the static visualizations provided in this document, we include a
+supplementary video that offers dynamic and comprehensive renderings of our
+results. This video is intended to provide a deeper visual understanding of the
+improvements achieved by our proposed SA-ResGS framework across various
+evaluation scenarios. The video includes:
+– Novel View Rendering. We present extended 360-degree novel-view trajectories captured along spiral and circular camera paths, going beyond the
+discrete test views shown in the main paper and supplementary figures. These
+renderings highlight the effectiveness of our physically grounded view selection
+and residual supervision in preserving structural consistency and photometric
+quality across challenging viewpoints.
+– Ablation Study Comparisons. To illustrate the impact of each component,
+we show side-by-side comparisons of different model variants under continuous
+camera movement. These scenes demonstrate robustness and fidelity improvements from residual supervision and surface-aware physically grounded view
+selection, especially in sparse-view or occluded regions.

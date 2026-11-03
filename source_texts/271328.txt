@@ -1,0 +1,275 @@
+Descripción Implementar una estructura de aceleración espacial (BVH u Octree) en GPU, compartida entre múltiples sistemas del engine: ray marching, collision detection, light culling y frustum culling. Motivación Múltiples sistemas neces...
+
+feat(core): Spatial Acceleration Structure — BVH/Octree compartido · Issue #115 · lobinuxsoft/kooch · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+feat(core): Spatial Acceleration Structure — BVH/Octree compartido #115
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+feat(core): Spatial Acceleration Structure — BVH/Octree compartido#115
+Copy link
+Labels
+area:gpuGPU primitives — compute, workgroup, custom systems APIGPU primitives — compute, workgroup, custom systems APIdifficulty:hardTarea compleja, requiere investigaciónTarea compleja, requiere investigaciónenhancementNew feature or requestNew feature or requestnext-sessionContinuar en la próxima sesiónContinuar en la próxima sesiónpriority:criticalBloqueante, debe hacerse primeroBloqueante, debe hacerse primero
+Milestone
+M6: Physics & Collision
+Description
+lobinuxsoft
+opened on Feb 13, 2026
+Issue body actions
+Descripción
+Implementar una estructura de aceleración espacial (BVH u Octree) en GPU, compartida entre múltiples sistemas del engine: ray marching, collision detection, light culling y frustum culling.
+Motivación
+Múltiples sistemas necesitan responder la misma pregunta: "¿qué objetos hay cerca de este punto/ray?" Sin aceleración espacial:
+Ray marching (Ray marching básico (fragment shader) #22): evalúa TODOS los SDFs por paso → O(n)
+Collision detection (Collision detection con SDF #40): chequea TODOS los pares → O(n²)
+Light culling (Point lights (radiales) #27): itera TODAS las luces por fragment → O(n)
+Frustum culling (Hybrid Rendering Pipeline (SDF + Mesh) #91): chequea TODOS los objetos → O(n)
+Con BVH/Octree, todo esto baja a O(log n).
+Arquitectura
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              SPATIAL ACCELERATION STRUCTURE                      │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  BUILD (compute shader, per-frame o cuando cambia la escena)    │
+│  ├── Input: AABBs de todos los objetos (SDF bounds, meshes)     │
+│  ├── Algoritmo: LBVH (Linear BVH) — GPU-friendly, O(n log n)   │
+│  └── Output: BVH buffer (nodos internos + hojas)                │
+│                                                                 │
+│  QUERY (usado por múltiples sistemas)                           │
+│  ├── Ray query  → Ray marching, shadows, physics raycast        │
+│  ├── AABB query → Broadphase collision, frustum culling         │
+│  ├── Point query → Nearest neighbor, spatial lookup             │
+│  └── Sphere query → Range queries, light influence              │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+Opciones de Implementación
+Opción A: BVH (Binary Volume Hierarchy)
+Pros: Mejor para ray queries, GPU-friendly (flat array), bien estudiado
+Contras: Rebuild costoso si la escena cambia mucho
+```
+struct BvhNode {
+    aabb_min: vec3<f32>,
+    left_or_first: u32,   // si es interno: índice hijo izq. Si es hoja: primer objeto
+    aabb_max: vec3<f32>,
+    count: u32,           // 0 = nodo interno, >0 = hoja con N objetos
+}
+
+// Traversal iterativo (sin recursión, GPU-friendly)
+fn bvh_ray_query(ray: Ray, bvh: ptr<storage, array<BvhNode>>) -> HitResult {
+    var stack: array<u32, 32>;
+    var stack_ptr = 0u;
+    stack[0] = 0u; // root
+    stack_ptr = 1u;
+    
+    var closest_hit = HitResult();
+    
+    while stack_ptr > 0u {
+        stack_ptr -= 1u;
+        let node_idx = stack[stack_ptr];
+        let node = bvh[node_idx];
+        
+        if !ray_aabb_intersect(ray, node.aabb_min, node.aabb_max) { continue; }
+        
+        if node.count > 0u {
+            // Hoja: test objetos individuales
+            for (var i = 0u; i < node.count; i++) {
+                test_object(node.left_or_first + i, ray, &closest_hit);
+            }
+        } else {
+            // Interno: push hijos
+            stack[stack_ptr] = node.left_or_first;
+            stack_ptr += 1u;
+            stack[stack_ptr] = node.left_or_first + 1u;
+            stack_ptr += 1u;
+        }
+    }
+    
+    return closest_hit;
+}
+```
+Opción B: Octree
+Pros: Natural para datos volumétricos (voxels, SDF), LOD implícito
+Contras: Más overhead de memoria, traversal más complejo en GPU
+Recomendación
+LBVH (Linear BVH) para la primera iteración:
+Construcción en GPU via Morton codes + radix sort
+Flat array layout (cache-friendly)
+Traversal sin recursión (stack-based)
+Rebuild completo cada frame es viable para escenas dinámicas (~0.5ms para 100K objetos)
+Octree se evalúa después si los datos volumétricos (voxels, SDF 3D textures) lo justifican.
+Tareas
+Estructura BvhNode en GPU buffer (PR-1: layout shipping next subtask)
+Compute shader: calcular Morton codes de los AABBs
+Compute shader: radix sort de Morton codes
+Compute shader: construir BVH desde sorted Morton codes
+Funciones de query: ray, AABB, point, sphere (librería WGSL)
+Integración con ray marching (Ray marching básico (fragment shader) #22) — usar BVH para skip de objetos lejanos
+Integración con broadphase collision (Broadphase con SDF bounds #42)
+Integración con frustum/occlusion culling (Hybrid Rendering Pipeline (SDF + Mesh) #91)
+Refit (actualizar AABBs sin rebuild completo para movimiento pequeño)
+Criterios de Aceptación
+BVH se construye en GPU en <1ms para escenas de 10K objetos
+Ray queries son correctas (same results as brute force)
+Múltiples sistemas usan la misma estructura
+Rebuild vs refit funciona correctamente
+Integración con Otros Sistemas
+Sistema
+Tipo de Query
+Issue
+Ray marching (SDF)
+Ray query → skip SDF instances fuera del path
+#22
+Collision broadphase
+AABB overlap query
+#42
+Physics raycast
+Ray query
+#84
+Light culling
+Sphere query → luces que afectan un cluster
+#27
+Frustum culling
+AABB vs frustum
+#91
+Radiance Cascades
+Ray query → probe tracing
+#114
+SDF Pathtracer
+Ray query → bounce tracing multi-bounce
+#127
+Referencias
+📚 LBVH Construction (Lauterbach et al.)
+📚 Thinking Parallel: BVH Construction on GPU (Karras, NVIDIA)
+📚 BVH Traversal on GPU (Aila & Laine)
+📚 Morton Code / Z-Order Curve
+Dependencias
+Bloqueado por: Buffer management system #8 (buffer management), Entity ID system #13 (entity IDs para references)
+Bloquea: Mejoras de performance en Ray marching básico (fragment shader) #22, Collision detection con SDF #40, Broadphase con SDF bounds #42, Physics Queries System (Raycast, Spherecast, Overlaps) #84, Hybrid Rendering Pipeline (SDF + Mesh) #91, feat(render): SDF Compute Pathtracer — iluminación físicamente correcta #127
+Activity
+Next
+lobinuxsoft
+added
+enhancementNew feature or requestNew feature or request
+priority:criticalBloqueante, debe hacerse primeroBloqueante, debe hacerse primero
+difficulty:hardTarea compleja, requiere investigaciónTarea compleja, requiere investigación
+on Feb 13, 2026
+lobinuxsoft
+added this to the M6: Physics & Collision milestone on Mar 2, 2026
+lobinuxsoft
+added a commit that references this issue on Apr 26, 2026
+docs(research): pivot recommendation to postfix RPN tree (Approach D)
+...
+a18b2cb
+lobinuxsoft
+added
+area:gpuGPU primitives — compute, workgroup, custom systems APIGPU primitives — compute, workgroup, custom systems API
+on Apr 26, 2026
+lobinuxsoft
+added 9 commits that reference this issue on Apr 26, 2026
+feat(world): ChunkId + ChunkState + ChunkData types
+...
+5766710
+fix(world): register StreamingFocus reflected + defer schedule wiring…
+...
+e796ece
+Merge pull request #315 from lobinuxsoft/54-world-streaming-básico
+...
+c1dd4de
+feat(bvh): ome_bvh crate skeleton + Aabb migration
+...
+eeb655b
+feat(bvh): MortonCode 30-bit + BvhNode 32-byte std430 layout
+...
+25ac381
+feat(bvh): LBVH CPU builder + generic Bvh<T: Copy>
+...
+e2ddacb
+feat(bvh): query API — sphere / aabb / point / ray traversal
+...
+148eb30
+Merge pull request #317 from lobinuxsoft/115-featcore-spatial-acceler…
+...
+1cee27e
+fix(world): conservative default LodRingConfig (editor-comfortable)
+...
+5d63c53
+15 remaining items
+Load more
+lobinuxsoft
+added 10 commits that reference this issue on Apr 28, 2026
+docs(book): architecture chapter for BVH-driven raymarch (S12 of #115 …
+...
+35402d9
+Merge pull request #330 from lobinuxsoft/115-featcore-spatial-acceler…
+...
+cfa439c
+refactor(bvh): type-state BuildToken opaque handle for SharedBvhState…
+...
+8bdad6a
+feat(physics): CPU broadphase consumer of multi-consumer BVH
+...
+99c2ded
+feat(render/frustum): GPU-driven frustum cull writing DrawIndexedIndi…
+...
+cfc4827
+feat(bvh): unified rebuild-vs-refit policy + kick lifecycle counters
+...
+3aef78c
+test(bvh,physics,render): S7 AC sweep — sync goldens, AC 116 multi-co…
+...
+ca74712
+refactor(bvh,render/frustum): split state.rs and frustum/tests.rs und…
+...
+c6915c4
+docs(book): multi-consumer BVH architecture chapter for #115 PR-5
+...
+a3b8fb2
+Merge pull request #344 from lobinuxsoft/115-pr5-broadphase-frustum-r…
+...
+8cb3582
+lobinuxsoft commented on Apr 28, 2026
+lobinuxsoft
+on Apr 28, 2026
+OwnerAuthor
+More actions
+Closed via PR #344 (merged to development). PR-5 of #115 — multi-consumer BVH (broadphase #42 + frustum #91 + refit #110) shipped. All 9 task checkboxes + AC 114-117 ticked. 13 follow-ups filed (#331-#343). Architecture docs live at docs/book/src/architecture/bvh-multi-consumer.md. Issue auto-close skipped because development is not the default branch (zombie quirk).
+lobinuxsoft
+closed this as completedon Apr 28, 2026
+lobinuxsoft
+added 3 commits that reference this issue on Apr 29, 2026
+feat(sdf): SparseGrid skeleton — root indices + pool + free list buff…
+...
+608096d
+fix(render): wire SDF entities to BVH end-to-end (closes #351)
+...
+e9eda7a
+fix(render): order-independent BVH cull for SDF raymarch (closes #354)
+...
+68ee866
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area:gpuGPU primitives — compute, workgroup, custom systems APIGPU primitives — compute, workgroup, custom systems APIdifficulty:hardTarea compleja, requiere investigaciónTarea compleja, requiere investigaciónenhancementNew feature or requestNew feature or requestnext-sessionContinuar en la próxima sesiónContinuar en la próxima sesiónpriority:criticalBloqueante, debe hacerse primeroBloqueante, debe hacerse primero
+Projects
+No projects
+Milestone
+M6: Physics & CollisionNo due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

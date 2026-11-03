@@ -1,0 +1,1965 @@
+BlitzGS: City-Scale Gaussian Splatting at Lightning Speed
+Zhongtao Wang†
+Huishan Au†
+*
+Yisong Chen
+Meng Gai
+BlitzGS,39min,PSNR=33.79
+Yilong Li
+Fei Zhu*
+23
+Momen.GS,5h03min,PSNR=31.81
+38 min
+CityGS-X,4h45min,PSNR=20.12
+PSNR (dB)
+22
+BlitzGS,38min,PSNR=24.66
+Mai Su
+Haojie Jin
+Guoping Wang
+21
+BlitzGS (Ours)
+CityGS-X
+HUG
+CityGaussianV1
+CityGaussianV2
+Momentum-GS
+VastGaussian
+Grendel-GS
+Grendel-GS (long)
+20
+arXiv:2605.13794v2 [cs.GR] 11 Aug 2026
+19
+Ground Truth
+Ours
+Baselines
+18
+0
+2
+4
+6
+Training Time (h)
+8
+Figure 1: Left: Qualitative comparison on Rubble (top) and Residence (bottom): ground truth, BlitzGS, and a representative
+large-scale baseline. The PSNR annotated on each panel is for the single displayed view; scene-average PSNR is reported in
+Table 1. Right: Training time vs. PSNR on Residence (4×A6000 GPUs). BlitzGS trains much faster while maintaining high
+quality.
+Abstract
+3D Gaussian Splatting underpins digital twins, simulation, and
+aerial mapping, yet city-scale training stays expensive even on
+multiple GPUs: every iteration must preprocess, communicate,
+and rasterize an overly dense set of primitives. At each step only
+a small fraction contributes to the loss, and the rest add pure
+storage, communication, and rasterization overhead. Existing
+methods target individual costs but not the underlying question:
+which Gaussians to store on each GPU, render for each view,
+and keep after early geometry forms?
+We present BlitzGS, a distributed 3DGS framework that reduces the active Gaussian workload at three coupled levels. At
+the system level, it shards Gaussians across GPUs by index parity rather than spatial blocks, avoiding cross-block redundancy,
+and distributes each render through one cross-GPU exchange
+to the tile owners. At the model level, it controls the population
+from both ends of densification: importance-scoring passes
+prune redundant Gaussians, a lightweight spawn gate withholds candidates predicted not to survive, and the same signal
+reweights density control. At the view level, a distance-based
+LOD gate and an importance-based mask trim each camera’s
+active set. On large-scale benchmarks, BlitzGS matches recent
+baselines in quality while training nearly an order of magnitude
+faster, in tens of minutes.
+1
+Introduction
+City-scale 3D reconstruction has become a foundation for
+applications such as aerial survey inspection, digital twins,
+†
+Zhongtao Wang and Huishan Au contributed equally.
+Yisong Chen and Fei Zhu are the corresponding authors.
+∗
+and simulation assets. These applications often begin with
+thousands of calibrated images, and end up with high-quality
+free-viewpoint novel views. A city-scale reconstruction system needs to build a scene quickly, use multiple GPUs efficiently, and render robustly across a wide range of viewing
+distances. While 3DGS works well on small scenes, it scales
+poorly. The vanilla pipeline becomes too slow to be practical,
+and the resulting model often struggles to preserve distant
+structures and large spatial extents.
+Recent large-scale 3DGS work has addressed this cost from
+several directions, including distributed training (Gao et al.
+2025; Chen and Lee 2024), hierarchical scene partitioning
+with LOD rendering (Kerbl et al. 2024; Ren et al. 2024; Liu
+et al. 2024), and partition-and-merge scaling (Lin et al. 2024;
+Liu et al. 2024; Su et al. 2025). Even with these advances,
+city-scale optimization remains expensive, typically spanning
+several hours across multi-GPU nodes. Training time remains
+a major bottleneck, and existing methods still trade off scene
+quality for training speed.
+The reason is that these methods each accelerate a different
+part of the pipeline but share a common inefficiency. In any
+single iteration of city-scale 3DGS training, only a small
+fraction of the Gaussians contribute to the rendered loss,
+while the rest still incur the full cost of training. Some sit
+on a different GPU from the tile being rendered and must
+be communicated across devices before they can contribute.
+Others are too fine for the current camera and pass through
+projection and rasterization without affecting any pixel. The
+rest are redundant clones from unnecessary densification that
+never actually contribute. The dominant cost of city-scale
+3DGS is therefore not only the size of the Gaussian set, but
+the wasted work on Gaussians that the current step should not
+touch or create.
+Our observation is that fast city-scale reconstruction should
+minimise the number of Gaussians that enter the rendering
+pipeline. Globally, the model should remove redundant cloneand-split leftovers after densification so they do not survive
+into the rest of the training. Locally, each view should activate
+only the scales that are useful for its camera distance, so distant
+or sub-pixel Gaussians do not incur unnecessary rasterization
+cost. Doing this at city scale needs a carefully designed
+importance signal, because aerial scenes contain a few large
+background surfaces alongside the fine facade and roof detail
+that actually matters. The signal must therefore reward how
+much a Gaussian contributes per pixel rather than how many
+pixels it covers, so the background cannot crowd out that
+detail.
+We present BlitzGS, a distributed 3DGS framework that
+reduces the active Gaussian workload at three coupled levels.
+At the system level, it shards Gaussians across GPUs by index
+parity rather than by spatial blocks, so each device holds a
+balanced scene-wide slice free of cross-block visibility waste,
+and distributes each render step through a single cross-GPU
+exchange. At the model level, BlitzGS controls the population
+from both ends of densification, vetoing candidates predicted
+not to survive before they spawn and pruning the redundant
+Gaussians that remain, while the same scoring pass emits
+importance signals that steer density control and view-level
+filtering at no extra cost. At the view level, a distance-based
+LOD gate drops Gaussians too fine for the current camera
+and an importance-based cull skips those with negligible
+cross-view contribution, together trimming each camera’s
+active set. The three levels each reduce a different component
+of the overall cost, namely per-GPU load, global model size,
+and per-view active set, so the same iteration touches fewer
+primitives at every stage of training.
+Across Mill-19, UrbanScene3D, and MatrixCity, BlitzGS
+matches the rendering quality of recent large-scale baselines
+while training city-scale scenes in tens of minutes on four
+A6000 GPUs. As shown in Figure 1, this yields nearly an
+order-of-magnitude training speedup.
+In summary, our contributions are threefold:
+• Insight. A single principle drives fast city-scale 3DGS:
+each operation should process as few Gaussians as possible
+without degrading reconstruction quality.
+• Method. A distributed city-scale pipeline that unifies
+sharding, importance-based simplification, and LOD filtering, and controls the Gaussian population from both
+ends of densification by pruning redundant Gaussians and
+vetoing candidates predicted not to survive before they
+spawn.
+• Experiment. A near-order-of-magnitude training speedup
+over recent city-scale baselines at comparable quality, with
+ablations confirming each level’s contribution.
+2
+2.1
+Related Work
+3D Gaussian Splatting
+3D Gaussian Splatting (3DGS) (Kerbl et al. 2023) represents scenes with explicit anisotropic primitives and differentiable tile-based rasterization, matching neural radiance
+fields (Mildenhall et al. 2021; Müller et al. 2022; Barron et al.
+2022; Fridovich-Keil et al. 2022) in quality at real-time rates,
+yet its training still relies on progressive densification over
+tens of thousands of iterations. Follow-up work improves the
+representation along complementary axes: structured anchor
+or LOD variants (Lu et al. 2024; Ren et al. 2024), antialiasing (Yu et al. 2024), densification and optimization (Ye
+et al. 2024; Zhang et al. 2024; Cheng et al. 2024; Kheradmand
+et al. 2024; Rota Bulò, Porzi, and Kontschieder 2024), geometric fidelity (Huang et al. 2024; Chen et al. 2025a; Guédon and
+Lepetit 2024; Yu, Sattler, and Geiger 2024), and compactness
+via compression or pruning (Lee et al. 2024; Fan et al. 2024b;
+Liu et al. 2025b). These approaches target quality, geometry,
+or storage; BlitzGS instead targets the training workload at
+city scale.
+2.2
+Large-Scale Scene Reconstruction
+Scaling to city-scale captures is commonly handled by decomposition. NeRF systems partition scenes or route samples to
+local models (Tancik et al. 2022; Turki, Ramanan, and Satyanarayanan 2022; Mi and Xu 2023), and 3DGS pipelines follow
+suit: VastGaussian (Lin et al. 2024) uses progressive data partitioning, CityGaussianV1 (Liu et al. 2024) pairs block-wise
+reconstruction with LOD rendering, CityGaussianV2 (Liu
+et al. 2025a) improves geometry and compression, HUG (Su
+et al. 2025) partitions by visibility with hierarchical urban
+Gaussians, and GigaGS (Chen et al. 2024) and LetsGo (Cui
+et al. 2024) extend to high-fidelity surface and LiDAR-assisted
+capture. Such block pipelines must manage overlap, boundary
+consistency, and a final merge. Distributed and hierarchical methods reduce this more directly: RetinaGS (Li et al.
+2024) trains billion-scale models model-parallel, Hierarchical 3DGS (Kerbl et al. 2024) builds a multi-scale hierarchy,
+DOGS (Chen and Lee 2024) uses ADMM-style consensus,
+Momentum-GS (Fan et al. 2025) enforces block consistency
+via momentum self-distillation, and CityGS-X (Gao et al.
+2025) replaces partition-and-merge with a parallel hybrid
+hierarchical representation. By contrast, BlitzGS reduces the
+Gaussian workload per device, per view, and throughout
+training to reach minute-level reconstruction.
+2.3
+Efficient Gaussian Splatting Optimization
+Accelerating 3DGS optimization is an active direction. MiniSplatting (Fang and Wang 2024) and Mini-Splatting2 (Fang
+and Wang 2025) speed up small-scene training through densification and simplification, Taming 3DGS (Mallick et al. 2024)
+steers pruning by importance, InstantSplat (Fan et al. 2024a)
+uses feed-forward initialisation, and Grendel-GS (Zhao et al.
+2025) adds distributed support for larger workloads via largebatch optimization (Yao et al. 2018); a parallel line accelerates
+standard scenes through primitive pruning and resolution
+scheduling (Niemeyer et al. 2025; Hanson et al. 2025a,b;
+Chen et al. 2025b). Closest to us, FastGS (Ren et al. 2025)
+Model Level
+System Level
+SfM Points Input
+View Level
+Rendered
+Image
+For Every
+Train Camera
+(In Specific Iter.)
+View-GS.
+Importance
+Spawn
+Gate
+Sharding
+GPU0
+GPU1 … GPUm
+Densify & Prune
+LOD Structured
+Loss
+Importance
+based filter &
+LOD gate
+Gradient
+GT
+Image
+Figure 2: Pipeline of BlitzGS. The SfM cloud is voxelised at multiple scales, giving each Gaussian an LOD level. Three
+levels of active workload control then cut per-iteration cost at different scopes. The system level shards Gaussians across
+M GPUs non-spatially, so each rank holds a scene-wide slice, and distributes rendering across all ranks. The model level
+interleaves scheduled simplification with density control. Each importance-scoring pass shrinks the population and emits a
+per-(Gaussian, camera) signal that reweights density-control gradients and feeds the view level filter, while a spawn gate withholds
+vetoed candidates, limiting the peak population. The view level trims each camera’s active set with a distance-based LOD gate
+and an importance-driven cull. Training uses an L1+SSIM photometric loss with a scale regulariser on visible Gaussians.
+redesigns density control around multi-view-consistent densification and pruning, reaching around 100-second small-scene
+training; its strict Gaussian-count control mirrors our workload view, which BlitzGS extends to distributed city scale.
+Complementary systems work accelerates the renderer itself
+through rasterization memory reuse (Feng et al. 2025), faster
+gradient-pass atomics (Durvasula et al. 2023), and poppingfree sorting (Radl et al. 2024). These approaches target small
+scenes or kernels; BlitzGS makes workload reduction the
+primary acceleration mechanism at city scale via much more
+efficient pruning. LeGS (Ning et al. 2026) learns density
+control with per-scene reinforcement learning; our gate is
+supervised on lifetime outcomes and transfers across scenes.
+3
+Method
+Given posed aerial images {Iv }Vv=1 and an SfM point cloud,
+BlitzGS reconstructs an explicit 3DGS model under distributed training. We keep the standard 3DGS parameterization throughout. A scene is a set of anisotropic primitives
+G = {gi }N
+i=1 , each storing a center µi , a covariance Σi , an
+opacity αi , and an SH color, rendered by tile-based front-toback alpha compositing and optimized jointly with adaptive
+density control. We recall the formulation and notation in
+Appendix A. What changes at city scale is where the cost lies.
+The dominant expense is no longer the number of images
+but the number of active Gaussians that every iteration must
+project, exchange across devices, rasterize, and update. The
+method therefore follows a single rule: a city-scale optimization should avoid touching Gaussians that are unnecessary
+for the current device, view, or training stage. As shown in
+Figure 2, we instantiate this rule at three coupled levels. The
+system level applies sharding with distributed rendering, the
+model level applies simplification that feeds an importance
+signal back to density control and view filtering, and the view
+level trims by LOD and importance.
+3.1
+System Level Primitive Sharding
+A city-scale model holds hundreds of millions of primitives,
+far more than a single GPU can store and optimize. Partitioning the scene into world-space blocks incurs cross-block
+visibility waste, imbalanced shards, and a final merge (Appendix C). Inspired by (Zhao et al. 2025; Gao et al. 2025),
+BlitzGS shards the global model across M GPUs by index
+parity and distributes every render step across the same GPUs,
+so both storage and per-step compute scale with the GPU
+count.
+Each GPU holds only its shard G (m) (≈ |G|/M Gaussians)
+and optimizer state, and projects only its own Gaussians. The
+rendered image is tiled, with each tile assigned to one GPU.
+A single all-to-all step then routes every projected Gaussian
+to the GPUs owning the tiles it covers, which composite their
+pixels from what they receive. Projection and rasterization are
+thus distributed every step, while the output stays identical to
+a single-GPU renderer on the same set. Two load-balancers
+keep this productive: an index-parity redistribution rebalances
+shard sizes whenever the per-GPU skew exceeds a threshold,
+and a cost-aware tile partition evens out rasterization load.
+3.2
+Model Level Simplification
+System level sharding balances per-iteration work but does
+not reduce the global count |G|. Densification drives |G| well
+above what the final scene needs, which significantly affects
+the training speed regardless of how well the workload is
+sharded. BlitzGS therefore controls the population at the
+model level from both ends of densification. Scheduled simplification passes score each Gaussian by its contribution
+density (the importance score si below) and permanently
+prune the redundant ones (Figure 3). At the other end, a
+lightweight spawn gate vetoes candidates predicted at birth
+not to survive.
+Importance score. An importance-scoring pass is a single
+sweep over all V training views with an instrumented raster-
+candidate spawns
+(clone / split)
+Gaussians survival data
+from other scenes
+rank
+✓
+offline fit
+✓
+Spawn
+veto bottom ρ
+✗
+parent
+ǁ∇ǁ > τ
+Survival
+predictor
+✗
+f(xₑ)
+✗
+✗
+frustum visibility
+is true if
+>0
+contribution visibility
+is significant in v
+is true if
+spawn-time features xₑ:
+Parent {grad, opacity, scale, age, denom, LOD}
+birth iteration, event type
+Do Not Spawn
+Figure 4: The spawn gate. At spawn time, a survival predictor
+fit offline on other scenes scores each clone/split candidate.
+The bottom fraction ρ is vetoed and never instantiated.
+Importance-scoring pass
+aggregates over all views
+Figure 3: Inside one importance-scoring pass. One instrumented sweep over all V views produces three signals at
+once. Per camera v (top), the rasterizerPrecords for each
+Gaussian gi the alpha-weight wi,v =
+p αp Tp and the
+qualifying-pixel count ai,v . It also sets two visibility bits:
+vis
+crad
+i,v (in frustum, radii > 0) and ci,v (wi,v in the view’s top99% mass).
+P Views are then aggregated (bottom). The score
+si = v: ai,v >0 wi,v /(ai,v + ε) drives pruning. The ratio
+rad
+ϕi = cvis
++ ε) reweights density control. The mask
+i /(ci
+Cull ∈ {0, 1}N ×V (complement of cvis ) feeds the view level
+filter.
+izer that bypasses color shading. For each view v and each
+Gaussian gi projected onto pixels in v, the rasterizer records
+the alpha-weight wi,v that gi contributes summed across the
+pixels it touches, and the projected support area ai,v , the
+number of pixels it touches. The P
+pass aggregates these into a
+single per-Gaussian score si = v : ai,v >0 wi,v /(ai,v + ε),
+where ε is a small constant for numerical stability. Dividing
+by the area makes si a per-pixel contribution, rather than a
+raw pixel count, which matters at city scale. Without it, a
+few large background Gaussians would score highly just by
+covering many pixels, and the small Gaussians that carry
+fine detail would be pruned instead. The score is recomputed
+from scratch in each pass, but never updated during regular
+training iterations.
+Scheduled simplification and feedback. We run two passes
+with complementary pruning rules. The first pass (early, at T1 )
+reduces the population by stochastic importance-weighted
+sampling without replacement, drawing a fixed fraction with
+probability proportional to si . High-contribution primitives
+are retained almost every time, while low-scoring primitives are kept only occasionally, primarily safeguarding quality. The second pass (late, at T2 ) applies a deterministic
+cumulative-mass cut that keeps the smallest prefix whose
+summed score reaches 99% of the total, primarily trimming
+the final population. Each pass is followed by an index-parity
+redistribution that rebalances survivors across shards. At no
+extra rendering cost, the same sweep also records two per(Gaussian, view) visibility bits—frustum visibility crad
+i,v and
+contribution visibility cvis
+(w
+lies
+in
+the
+per-view
+top-99%
+i,v
+i,v
+P rad
+P vis
+vis
+mass), with view sums crad
+i =
+v ci,v and ci =
+v ci,v .
+rad
+The ratio ϕi = cvis
+/(c
++
+ε)
+measures
+how
+often
+g
+geni
+i
+i
+uinely contributes when visible. Density control reweights
+the clone-and-split gradient by ϕi , concentrating the remaining densification on consistently-contributing primitives. The
+complementary mask Cull i,v = 1−cvis
+i,v goes to the view level
+filter (Sec. 3.3), flagging Gaussians outside each camera’s
+top-99% mass. One sweep therefore drives all three roles at
+once: shrinking the population, steering densification, and
+selecting each camera’s active subset.
+Spawn gate. Every mechanism so far is reactive: a Gaussian
+is born, optimized, communicated, and rasterized, and only
+then simplified away if it proves redundant. This reactive
+removal leaves the mid-training population peak untouched,
+and that peak sets the per-GPU memory bottleneck. We find
+that in our method, the peak is inflated by late-born Gaussians
+that rarely survive, and their survival is already predictable
+at spawn (See Appendix E). The spawn gate exploits this
+to attack the peak proactively. Rather than grow-then-prune,
+it predicts at birth which densification candidates will not
+survive and refuses to instantiate them. Their optimization,
+communication, and rasterization costs are then never paid.
+The gate filters candidates at each densification event. After
+the standard gradient test selects clone and split candidates, a
+gradient-boosted tree f (xe ) predicts each candidate’s survival
+from features available at spawn time. This predictor is trained
+offline on exact per-Gaussian lifetime labels. The bottom
+fraction by rank (ρ=0.6) is then vetoed (Fig. 4). The gate
+activates only in the late densification window, where survival
+is lowest. As we analyse in Appendix E, the gate is a natural
+fit for our aggressive schedule. Such schedules overproduce
+short-lived spawns, exactly what the gate removes, so it
+reclaims substantial peak memory. Every scene in Sec. 4 uses
+a predictor fit exclusively on other scenes, so no gate sees
+its own data. Appendices E and F report the full supporting
+analysis, including the lifetime measurements, the leave-onescene-out transfer, the rate and onset sensitivity, and the
+oracle-ceiling comparison, where the learned gate captures
+98% of a perfect-foresight oracle’s peak-population cut with
+no measurable quality gap.
+3.3
+View Level Filtering
+The system level sharding distributes primitives across devices
+and the model level simplification trims the global set. At the
+view level, BlitzGS further trims the active set entering each
+render through two complementary filters: a distance-based
+LOD gate and an importance-based per-view culling mask.
+Distance-based LOD gate. Each Gaussian carries an LOD
+label ℓi ∈ {0, . . . , K − 1} attached at multi-resolution voxelisation of the SfM cloud (Ren et al. 2024). The label is
+propagated through density control by a simple inheritance
+rule: clone keeps the parent’s level, split increments by one.
+The level structure therefore remains a stable property of the
+model rather than a render-time-only mask. For a camera
+with centre cv at training iteration t, the renderer estimates
+the finest level resolvable at distance d,
+
+
+
+Lv (d, t) = clamp logf (d0 /d) , 0, Lmax (t) , (1)
+and keeps only Gaussians with equal or lower levels:
+(m)
+L(m)
+: ℓi ≤ Lv (∥µi − cv ∥, t) }. (2)
+v (t) = { gi ∈ G
+d0 is a reference camera-to-scene distance computed from
+the training cameras at initialisation and held fixed, and
+f = 2 is the geometric ratio between consecutive LOD
+levels. Lmax (t) unlocks levels coarse-to-fine on a geometric
+schedule so the LOD set’s ceiling tracks the population that
+has actually formed. The gate itself is disabled throughout
+the density-control window, so masked-out Gaussians do not
+lose densification credit, and engages once density control
+ends. We fall back to the full shard whenever the predicted
+(m)
+ratio |Lv (t)|/|G (m) | is close to one, so as to skip the gate
+when it would barely filter anything.
+Importance-based per-view culling mask. The
+importance-scoring passes of Sec. 3.2 maintain, alongside
+the per-Gaussian score, a bit-packed per-view redundancy
+matrix Cull ∈ {0, 1}N ×V that flags, for every camera, the
+Gaussians whose contribution to that camera fell below the
+per-view top quantile in the most recent sweep. Its rows are
+sharded with the Gaussians and bit-packed, so its footprint is
+negligible. Whenever this mask is available, the main render
+consults the column corresponding to the current camera and
+skips the flagged Gaussians on top of the LOD gate, so the
+per-rank active set actually rasterized for view v becomes
+(m)
+A(m)
+(3)
+v (t) = Lv (t) \ { gi : Cull i,v = 1 }.
+This filter and the LOD gate together apply two independent
+reductions to the per-camera active set: a geometric one driven
+by camera distance, and a contribution-based one driven by
+cross-view importance.
+3.4
+Supervision
+For a mini-batch of B training cameras, each rank supervises
+only the image tiles it owns. The tile losses are reduced across
+ranks, and gradients propagate through both the rasterizer
+and the screen-space routing of Sec. 3.1. The photometric
+term is the standard RGB reconstruction loss
+B
+
+1 X
+Lphoto =
+(1 − λ)∥Iˆb − Ib ∥1 + λ 1 − SSIM(Iˆb , Ib ) ,
+B
+b=1
+(4)
+where λ ∈ [0, 1] blends the L1 and SSIM terms. Following
+common practice in surface-aware 3DGS methods (Chen
+et al. 2025a), we add a regulariser that penalises the smallest
+scale axis of each Gaussian in the visible set V to encourage
+surface-aligned primitives:
+1 X
+L = Lphoto + β Lscale ,
+Lscale =
+min si,j . (5)
+j
+|V|
+i∈V
+Here β weighs the scale regulariser and si,j is the scale
+of gi along its j-th principal axis of the covariance Σi .
+The acceleration in BlitzGS comes from controlling the
+active Gaussian workload, not from auxiliary supervision.
+We therefore keep this objective lightweight and apply it
+consistently across all distributed tiles.
+4
+4.1
+Experiments
+Experimental Protocol
+Datasets. We evaluate on the standard aerial benchmarks
+of large-scale 3DGS reconstruction: Building (1,920 train images) and Rubble (1,678) from Mill-19 (Turki, Ramanan, and
+Satyanarayanan 2022), Residence (2,582) and Sci-Art (3,019)
+from UrbanScene3D (Lin et al. 2022), and the aerial split of
+MatrixCity (5,621) (Li et al. 2023). We follow the train/test
+camera splits released by Mega-NeRF (Turki, Ramanan, and
+Satyanarayanan 2022) and UrbanScene3D, and the official
+aerial split of MatrixCity.
+Baselines and metrics. We compare BlitzGS against representative large-scale 3DGS baselines: VastGaussian (Lin
+et al. 2024), CityGaussianV1 (Liu et al. 2024), CityGaussianV2 (Liu et al. 2025a), HUG (Su et al. 2025), MomentumGS (Fan et al. 2025), CityGS-X (Gao et al. 2025) and GrendelGS (Zhao et al. 2025). We report PSNR, SSIM, and LPIPSVGG for novel-view synthesis on the held-out test cameras,
+together with training time. For baselines with public checkpoints (Lin et al. 2024; Liu et al. 2024), we evaluate quality
+from the official checkpoint and measure training time by
+rerunning their released code on our hardware. The reported
+time covers the full pipeline end to end, including all GPU
+communication overhead.
+Implementation details. All results are produced on
+4×A6000 GPUs with batch size B=4 unless otherwise stated.
+BlitzGS trains for 90k iterations (120k on MatrixCity). The
+two importance-scoring passes run at T1 =16k and T2 =34k,
+the spawn gate is active from iteration 24k at veto rate ρ=0.6,
+and the loss weights are λ=0.2 (L1–SSIM) and β=10 (scale
+regulariser). Further schedule details and baseline configurations are in Appendix B.
+Building
+Method
+Rubble
+Residence
+Sci-Art
+MatrixCity
+PSNR↑ SSIM↑ LPIPS↓
+Time
+PSNR↑ SSIM↑ LPIPS↓
+Time
+PSNR↑ SSIM↑ LPIPS↓
+Time
+PSNR↑ SSIM↑ LPIPS↓
+Time
+PSNR↑ SSIM↑ LPIPS↓
+Time
+VastGaussian (Lin et al. 2024)
+CityGaussianV1 (Liu et al. 2024)
+CityGaussianV2 (Liu et al. 2025a)
+Momentum-GS (Fan et al. 2025)
+HUG (Su et al. 2025)
+CityGS-X (Gao et al. 2025)
+Grendel-GS (paper config) (Zhao et al. 2025)
+Grendel-GS (long iter) (Zhao et al. 2025)
+21.80
+21.55
+22.23
+23.19
+22.35
+22.14
+19.27
+19.50
+0.728
+0.778
+0.759
+0.816
+0.792
+0.816
+0.673
+0.678
+0.225
+0.246
+0.217
+0.193
+0.228
+0.186
+0.326
+0.319
+5h48m
+8h07m
+7h01m
+7h04m
+5h16m
+4h30m
+2h13m
+6h05m
+25.20
+25.77
+24.58
+25.91
+26.42
+24.92
+24.57
+25.26
+0.742
+0.813
+0.767
+0.829
+0.839
+0.831
+0.780
+0.792
+0.264
+0.228
+0.252
+0.197
+0.197
+0.199
+0.251
+0.242
+2h16m
+3h50m
+4h16m
+5h03m
+2h37m
+6h03m
+3h23m
+8h06m
+21.01
+22.00
+21.71
+21.18
+22.33
+21.49
+21.18
+21.32
+0.699
+0.813
+0.780
+0.760
+0.813
+0.828
+0.780
+0.784
+0.261
+0.211
+0.225
+0.248
+0.207
+0.177
+0.223
+0.219
+5h05m
+8h33m
+7h45m
+9h09m
+6h31m
+4h45m
+3h14m
+8h10m
+–
+21.39
+21.49
+20.75
+21.83
+23.31
+22.68
+22.66
+–
+0.837
+0.811
+0.794
+0.846
+0.872
+0.856
+0.851
+–
+0.230
+0.238
+0.266
+0.204
+0.178
+0.188
+0.197
+–
+3h56m
+10h35m
+6h27m
+2h58m
+3h14m
+2h16m
+5h38m
+–
+27.46
+27.23
+28.07
+28.02
+27.02
+23.82
+23.20
+–
+0.865
+0.857
+0.879
+0.883
+0.852
+0.711
+0.693
+–
+0.204
+0.169
+0.183
+0.142
+0.240
+0.420
+0.427
+–
+12h17m
+8h48m
+6h14m
+10h04m
+9h18m
+1h38m
+8h18m
+BlitzGS (Ours)
+23.46
+0.819
+0.207
+39m15s
+27.91
+0.859
+0.194
+37m36s
+22.67
+0.844
+0.184
+37m47s
+22.92
+0.882
+0.169
+34m33s
+26.87
+0.845
+0.256
+1h13m
+Table 1: Quality and reconstruction time on large-scale benchmarks. We compare BlitzGS with baselines on standard novelview synthesis metrics and training time. Per metric and scene, the top three methods are highlighted with red / orange / yellow
+cell backgrounds for 1st / 2nd / 3rd respectively. Dashes (–) mark cells we could not reproduce because the corresponding baseline
+did not release a public checkpoint or training code for that scene. Grendel-GS is shown at two settings (Appendix B).
+Variant
+PSNR↑ it/s↑
+Full BlitzGS
+w/o octree LOD
+w/o importance scoring
+w/o per-view importance mask
+w/o ϕi density-control reweighting
+w/o Pass-1 pruning
+w/o Pass-2 pruning
+w/o spawn gate
+all off
+partition (4×5, 20 blocks)
+partition (5×6, 30 blocks)
+23.46
+23.57
+23.30
+23.32
+23.21
+23.30
+23.43
+23.40
+23.22
+21.43
+22.43
+Time↓
+#GSpk→fn (M)↓
+36.8 39m15s
+8.66→4.65
+31.6 45m32s 10.86→5.96
+22.2 64m05s 10.93→10.93
+34.7 41m44s
+8.66→4.64
+35.9 40m10s
+9.55→4.98
+34.9 41m25s 10.01→4.80
+27.7 51m16s
+8.68→8.67
+35.4 40m48s 10.89→4.96
+19.7 71m46s 13.49→13.48
+– 115m36s
+–→5.37
+– 169m48s
+–→5.43
+Table 2: Component analysis on Building (Mill-19), at
+90k iterations. Each row removes one component from full
+BlitzGS; all off removes all of them. For the two blockpartitioning rows, Time is equivalent wall-clock (split +
+four-GPU makespan + merge), and it/s and global peak are
+undefined for independent per-block training (–). #GS is live
+Gaussians as peak→final. The “w/o Pass-X pruning” variants
+skip only that pass’s population-reduction step, keeping its
+signal computations (si , ϕi , Cull ) intact.
+4.2
+Quality-Speed Comparison
+Table 1 shows that BlitzGS matches the rendering quality
+of recent large-scale 3DGS baselines across both real and
+synthetic aerial scenes while reducing training time by nearly
+an order of magnitude. BlitzGS achieves the best overall
+rendering quality on 4 real-world datasets, and stays competitive on the synthetic MatrixCity scene. Table 2 additionally
+reports peak and final Gaussian counts.
+To make the time-to-quality trade-off explicit, we additionally compare BlitzGS against CityGS-X, Momentum-GS, and
+Grendel-GS on Building. We checkpoint each method at fixed
+iteration intervals and evaluate held-out test PSNR from every
+checkpoint once all runs finish (Figure 6). BlitzGS reaches
+about 23.5 dB in roughly 39 minutes, whereas CityGS-X and
+Momentum-GS keep training for 4–6 more hours. MomentumGS eventually catches up, while CityGS-X plateaus about
+1.3 dB lower. Grendel-GS trains for six hours yet plateaus
+near 19.5 dB, confirming that scaling up distributed training
+without workload reduction does not reach city-scale quality.
+BlitzGS thus matches or surpasses their eventual plateau
+roughly an order of magnitude earlier in wall-clock time.
+Each iteration yields more PSNR per second, consistent with
+the workload model of Sec. 3.
+4.3
+Qualitative Results
+As shown in Figure 5, BlitzGS preserves detail better than
+the baselines while training an order of magnitude faster. Additional comparisons are in Appendix G (Figures 11 and 12).
+4.4
+Ablation Study
+We next examine how each level of workload control influences the speed-quality trade-off. Unless otherwise stated, all
+variants in this section use the default hyperparameters of
+Sec. 3 and toggle only the marked component.
+Table 2 reports the ablation. Removing the importancescoring pass is the most damaging. With no pruning the
+population never shrinks and training takes 63% longer. Removing the octree LOD inflates the final population by 28%.
+The per-view importance mask has only a marginal effect
+once the LOD gate is in place, since the two filters overlap
+on Gaussians outside the camera’s resolvable range. Among
+the model-level mechanisms, removing the ϕi reweighting
+costs 0.25 dB PSNR, confirming its role in concentrating
+densification onto view-contributory primitives. Removing
+Pass 1 pruning (the early stochastic sampling pass at T1 )
+costs 0.16 dB. Removing Pass 2 pruning (the late deterministic 99%-mass cut at T2 ) leaves PSNR nearly unchanged
+but nearly doubles the final population, marking it as the
+long-tail trim. The spawn gate is quality-neutral but trims
+the mid-training peak population by about 20%, lowering
+per-GPU peak memory (Sec. 3.2). Turning off every component at once (all off ) is far slower at similar quality: together
+the components make training about 1.8× faster and the
+model 3× smaller at comparable quality. The last two rows
+of Table 2 replace index-parity sharding with spatial block
+partitioning, all else fixed. Quality stays below BlitzGS, but
+the dominant cost is wasted computation. Each block carries
+a boundary halo of neighbouring Gaussians, so primitives
+are duplicated across blocks and the same work is repeated
+on several GPUs, which surfaces directly as longer training
+time. Non-spatial sharding avoids this by giving every GPU
+one balanced, scene-wide slice (Appendix C).
+The system level is also ablated by sweeping the GPU
+GT
+Ours
+CityGS-X
+Momentum-GS
+Grendel-GS
+Figure 5: Qualitative comparison on two held-out test views from Building (top) and Sci-Art (bottom). Red rectangles mark the
+close-up regions, and red arrows highlight artifacts and blurred detail in the baselines. Additional comparisons are provided in
+Appendix G.
+20
+19
+BlitzGS (Ours)
+CityGS-X
+Momentum-GS
+Grendel-GS
+18
+50
+100
+150
+200
+250
+300
+350
+400
+450
+Training Time (min)
+Figure 6: Test PSNR over training time (Building). BlitzGS
+reaches a competitive PSNR in minutes (dashed line); the
+baselines train for hours, and Grendel-GS plateaus about 4 dB
+lower.
+count (Figure 7). Training time drops monotonically and
+nearly in parallel on both Rubble and the larger Residence,
+reaching 3.3–3.8× speedup at eight GPUs while PSNR stays
+within a tight per-scene band. The scaling shape is thus largely
+independent of the number of input images, consistent with
+the system level workload model. Per-step compute is bounded
+by the per-GPU shard rather than by the number of training
+views. Appendix D gives a per-iteration cost breakdown,
+showing that the all-to-all stays under 7% of iteration time
+and that the speedup is limited by fixed overhead rather than
+communication. This study runs on an 8×A800 (80 GB) node
+due to hardware availability; all other results use the default
+4×A6000 setup.
+5
+Conclusion
+BlitzGS treats fast city-scale 3DGS as active workload control:
+every operation should touch as few Gaussians as possible
+without losing quality. It shards the model by index parity and
+25
+80
+20
+PSNR (dB)
+21
+Training Time (min)
+Test PSNR (dB)
+22
+0
+30
+100
+BlitzGS done
+23
+60
+15
+40
+10
+Rubble (1,678 imgs) Time
+Residence (2,582 imgs) Time
+Rubble PSNR
+Residence PSNR
+20
+0
+1
+2
+3
+4
+5
+5
+Number of GPUs
+6
+7
+8
+0
+Figure 7: Multi-GPU scaling across dataset sizes. Color
+identifies the dataset (Rubble, blue; Residence, red); solid
+lines and filled markers are training time (left axis), dashed
+lines and hollow markers are PSNR (right axis). Time drops
+steadily while PSNR stays flat on both scenes.
+distributes each render (system), controls the population from
+both ends of densification while feeding importance back into
+density control (model), and trims each camera’s active set by
+LOD and importance (view). With only an L1+SSIM loss and
+a scale regulariser, it matches recent large-scale baselines in
+quality while cutting training from hours to tens of minutes.
+Limitations remain. The hard LOD gate can cause mild
+popping at level transitions, and aggressive simplification
+costs some perceptual fidelity on the texture-dense MatrixCity,
+though not on the real aerial scenes. The importance schedule
+also uses fixed checkpoints rather than adapting per scene.
+Finally, BlitzGS assumes the global model fits the combined
+GPU memory. Scenes that exceed it would still need partitionbased pipelines, which we leave to future work.
+References
+Barron, J. T.; Mildenhall, B.; Verbin, D.; Srinivasan, P. P.;
+and Hedman, P. 2022. Mip-nerf 360: Unbounded anti-aliased
+neural radiance fields. In Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition, 5470–
+5479.
+Chen, D.; Li, H.; Ye, W.; Wang, Y.; Xie, W.; Zhai, S.; Wang,
+N.; Liu, H.; Bao, H.; and Zhang, G. 2025a. Pgsr: Planarbased gaussian splatting for efficient and high-fidelity surface
+reconstruction. IEEE Transactions on Visualization and
+Computer Graphics, 31(9): 6100–6111.
+Chen, J.; Ye, W.; Wang, Y.; Chen, D.; Huang, D.; Ouyang,
+W.; Zhang, G.; Qiao, Y.; and He, T. 2024. Gigags: Scaling up planar-based 3d gaussians for large scene surface
+reconstruction. arXiv preprint arXiv:2409.06685.
+Chen, Y.; Jiang, J.; Jiang, K.; Tang, X.; Li, Z.; Liu, X.; and Nie,
+Y. 2025b. Dashgaussian: Optimizing 3d gaussian splatting
+in 200 seconds. In Proceedings of the Computer Vision and
+Pattern Recognition Conference, 11146–11155.
+Chen, Y.; and Lee, G. H. 2024. Dogs: Distributed-oriented
+gaussian splatting for large-scale 3d reconstruction via gaussian consensus. Advances in Neural Information Processing
+Systems, 37: 34487–34512.
+Cheng, K.; Long, X.; Yang, K.; Yao, Y.; Yin, W.; Ma, Y.; Wang,
+W.; and Chen, X. 2024. Gaussianpro: 3d gaussian splatting
+with progressive propagation. In Forty-first International
+Conference on Machine Learning.
+Cui, J.; Cao, J.; Zhao, F.; He, Z.; Chen, Y.; Zhong, Y.; Xu,
+L.; Shi, Y.; Zhang, Y.; and Yu, J. 2024. Letsgo: Large-scale
+garage modeling and rendering via lidar-assisted gaussian
+primitives. ACM Transactions on Graphics (TOG), 43(6):
+1–18.
+Durvasula, S.; Zhao, A.; Chen, F.; Liang, R.; Sanjaya, P. K.;
+and Vijaykumar, N. 2023. Distwar: Fast differentiable rendering on raster-based rendering pipelines. arXiv preprint
+arXiv:2401.05345.
+Fan, J.; Li, W.; Han, Y.; Dai, T.; and Tang, Y. 2025.
+Momentum-GS: Momentum Gaussian self-distillation for
+high-quality large scene reconstruction. In Proceedings of
+the IEEE/CVF International Conference on Computer Vision,
+25250–25260.
+Fan, Z.; Cong, W.; Wen, K.; Wang, K.; Zhang, J.; Ding, X.;
+Xu, D.; Ivanovic, B.; Pavone, M.; Pavlakos, G.; et al. 2024a.
+Instantsplat: Sparse-view gaussian splatting in seconds. arXiv
+preprint arXiv:2403.20309.
+Fan, Z.; Wang, K.; Wen, K.; Zhu, Z.; Xu, D.; and Wang,
+Z. 2024b. Lightgaussian: Unbounded 3d gaussian compression with 15x reduction and 200+ fps. Advances in neural
+information processing systems, 37: 140138–140158.
+Fang, G.; and Wang, B. 2024. Mini-splatting: Representing
+scenes with a constrained number of gaussians. In European
+conference on computer vision, 165–181. Springer.
+Fang, G.; and Wang, B. 2025. Efficient Scene Modeling Via
+Structure-Aware and Region-Prioritized 3D Gaussians. IEEE
+Transactions on Pattern Analysis and Machine Intelligence.
+Feng, G.; Chen, S.; Fu, R.; Liao, Z.; Wang, Y.; Liu, T.; Hu,
+B.; Xu, L.; Pei, Z.; Li, H.; et al. 2025. Flashgs: Efficient
+3d gaussian splatting for large-scale and high-resolution
+rendering. In Proceedings of the Computer Vision and Pattern
+Recognition Conference, 26652–26662.
+Fridovich-Keil, S.; Yu, A.; Tancik, M.; Chen, Q.; Recht, B.;
+and Kanazawa, A. 2022. Plenoxels: Radiance fields without
+neural networks. In Proceedings of the IEEE/CVF conference
+on computer vision and pattern recognition, 5501–5510.
+Gao, Y.; Li, H.; Chen, J.; Zou, Z.; Zhong, Z.; Zhang, D.;
+Sun, X.; and Han, J. 2025. Citygs-x: A scalable architecture
+for efficient and geometrically accurate large-scale scene
+reconstruction. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, 27187–27196.
+Guédon, A.; and Lepetit, V. 2024. Sugar: Surface-aligned
+gaussian splatting for efficient 3d mesh reconstruction and
+high-quality mesh rendering. In Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition, 5354–
+5363.
+Hanson, A.; Tu, A.; Lin, G.; Singla, V.; Zwicker, M.; and
+Goldstein, T. 2025a. Speedy-splat: Fast 3d gaussian splatting
+with sparse pixels and sparse primitives. In Proceedings of
+the Computer Vision and Pattern Recognition Conference,
+21537–21546.
+Hanson, A.; Tu, A.; Singla, V.; Jayawardhana, M.; Zwicker,
+M.; and Goldstein, T. 2025b. Pup 3d-gs: Principled uncertainty pruning for 3d gaussian splatting. In Proceedings of
+the Computer Vision and Pattern Recognition Conference,
+5949–5958.
+Huang, B.; Yu, Z.; Chen, A.; Geiger, A.; and Gao, S. 2024. 2d
+gaussian splatting for geometrically accurate radiance fields.
+In ACM SIGGRAPH 2024 conference papers, 1–11.
+Kerbl, B.; Kopanas, G.; Leimkühler, T.; Drettakis, G.; et al.
+2023. 3d gaussian splatting for real-time radiance field
+rendering. ACM Trans. Graph., 42(4): 139–1.
+Kerbl, B.; Meuleman, A.; Kopanas, G.; Wimmer, M.; Lanvin,
+A.; and Drettakis, G. 2024. A hierarchical 3d gaussian
+representation for real-time rendering of very large datasets.
+ACM Transactions On Graphics (TOG), 43(4): 1–15.
+Kheradmand, S.; Rebain, D.; Sharma, G.; Sun, W.; Tseng,
+Y.-C.; Isack, H.; Kar, A.; Tagliasacchi, A.; and Yi, K. M. 2024.
+3d gaussian splatting as markov chain monte carlo. Advances
+in Neural Information Processing Systems, 37: 80965–80986.
+Lee, J. C.; Rho, D.; Sun, X.; Ko, J. H.; and Park, E. 2024.
+Compact 3D Gaussian Representation for Radiance Field.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition.
+Li, B.; Chen, S.; Wang, L.; Liao, K.; Yan, S.; and Xiong,
+Y. 2024. Retinags: Scalable training for dense scene rendering with billion-scale 3d gaussians. arXiv preprint
+arXiv:2406.11836.
+Li, Y.; Jiang, L.; Xu, L.; Xiangli, Y.; Wang, Z.; Lin, D.;
+and Dai, B. 2023. Matrixcity: A large-scale city dataset for
+city-scale neural rendering and beyond. In Proceedings of
+the IEEE/CVF International Conference on Computer Vision,
+3205–3215.
+Lin, J.; Li, Z.; Tang, X.; Liu, J.; Liu, S.; Liu, J.; Lu, Y.;
+Wu, X.; Xu, S.; Yan, Y.; et al. 2024. Vastgaussian: Vast 3d
+gaussians for large scene reconstruction. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, 5166–5175.
+Lin, L.; Liu, Y.; Hu, Y.; Yan, X.; Xie, K.; and Huang, H. 2022.
+Capturing, reconstructing, and simulating: the urbanscene3d
+dataset. In European Conference on Computer Vision, 93–109.
+Springer.
+Liu, Y.; Luo, C.; Fan, L.; Wang, N.; Peng, J.; and Zhang,
+Z. 2024. Citygaussian: Real-time high-quality large-scale
+scene rendering with gaussians. In European Conference on
+Computer Vision, 265–282. Springer.
+Liu, Y.; Luo, C.; Mao, Z.; Peng, J.; and Zhang, Z. 2025a.
+Citygaussianv2: Efficient and geometrically accurate reconstruction for large-scale scenes. In International Conference
+on Learning Representations, volume 2025, 84324–84341.
+Liu, Y.; Zhong, Z.; Zhan, Y.; Xu, S.; and Sun, X. 2025b.
+Maskgaussian: Adaptive 3d gaussian representation from
+probabilistic masks. In Proceedings of the Computer Vision
+and Pattern Recognition Conference, 681–690.
+Lu, T.; Yu, M.; Xu, L.; Xiangli, Y.; Wang, L.; Lin, D.; and
+Dai, B. 2024. Scaffold-gs: Structured 3d gaussians for viewadaptive rendering. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, 20654–
+20664.
+Mallick, S. S.; Goel, R.; Kerbl, B.; Steinberger, M.; Carrasco,
+F. V.; and De La Torre, F. 2024. Taming 3dgs: High-quality
+radiance fields with limited resources. In SIGGRAPH Asia
+2024 Conference Papers, 1–11.
+Mi, Z.; and Xu, D. 2023. Switch-nerf: Learning scene
+decomposition with mixture of experts for large-scale neural
+radiance fields. In The Eleventh International Conference on
+Learning Representations.
+Mildenhall, B.; Srinivasan, P. P.; Tancik, M.; Barron, J. T.;
+Ramamoorthi, R.; and Ng, R. 2021. Nerf: Representing scenes
+as neural radiance fields for view synthesis. Communications
+of the ACM, 65(1): 99–106.
+Müller, T.; Evans, A.; Schied, C.; and Keller, A. 2022. Instant neural graphics primitives with a multiresolution hash
+encoding. ACM transactions on graphics (TOG), 41(4): 1–15.
+Niemeyer, M.; Manhardt, F.; Rakotosaona, M.-J.; Oechsle,
+M.; Duckworth, D.; Gosula, R.; Tateno, K.; Bates, J.; Kaeser,
+D.; and Tombari, F. 2025. Radsplat: Radiance field-informed
+gaussian splatting for robust real-time rendering with 900+
+fps. In 2025 International Conference on 3D Vision (3DV),
+134–144. IEEE.
+Ning, Z.; Li, X.; Yu, J.; Lu, G.; Wang, Y.; and Pei, W.
+2026. Beyond Heuristics: Learnable Density Control for 3D
+Gaussian Splatting. In Forty-third International Conference
+on Machine Learning.
+Radl, L.; Steiner, M.; Parger, M.; Weinrauch, A.; Kerbl, B.; and
+Steinberger, M. 2024. Stopthepop: Sorted gaussian splatting
+for view-consistent real-time rendering. ACM Transactions
+on Graphics (TOG), 43(4): 1–17.
+Ren, K.; Jiang, L.; Lu, T.; Yu, M.; Xu, L.; Ni, Z.; and
+Dai, B. 2024. Octree-gs: Towards consistent real-time rendering with lod-structured 3d gaussians. arXiv preprint
+arXiv:2403.17898.
+Ren, S.; Wen, T.; Fang, Y.; and Lu, B. 2025. FastGS: Training 3D Gaussian Splatting in 100 Seconds. arXiv preprint
+arXiv:2511.04283.
+Rota Bulò, S.; Porzi, L.; and Kontschieder, P. 2024. Revising
+densification in gaussian splatting. In European Conference
+on Computer Vision, 347–362. Springer.
+Su, M.; Wang, Z.; Au, H.; Li, Y.; Cao, X.; Pan, C.; Chen,
+Y.; and Wang, G. 2025. HUG: Hierarchical Urban Gaussian
+Splatting with Block-Based Reconstruction for Large-Scale
+Aerial Scenes. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, 28839–28848.
+Tancik, M.; Casser, V.; Yan, X.; Pradhan, S.; Mildenhall, B.;
+Srinivasan, P. P.; Barron, J. T.; and Kretzschmar, H. 2022.
+Block-nerf: Scalable large scene neural view synthesis. In
+Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, 8248–8258.
+Turki, H.; Ramanan, D.; and Satyanarayanan, M. 2022. Meganerf: Scalable construction of large-scale nerfs for virtual
+fly-throughs. In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition, 12922–12931.
+Yao, Z.; Gholami, A.; Arfeen, D.; Liaw, R.; Gonzalez, J.;
+Keutzer, K.; and Mahoney, M. 2018. Large batch size training
+of neural networks with adversarial training and second-order
+information. arXiv preprint arXiv:1810.01021.
+Ye, Z.; Li, W.; Liu, S.; Qiao, P.; and Dou, Y. 2024. Absgs: Recovering fine details in 3d gaussian splatting. In Proceedings
+of the 32nd ACM international conference on multimedia,
+1053–1061.
+Yu, Z.; Chen, A.; Huang, B.; Sattler, T.; and Geiger, A.
+2024. Mip-splatting: Alias-free 3d gaussian splatting. In
+Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, 19447–19456.
+Yu, Z.; Sattler, T.; and Geiger, A. 2024. Gaussian opacity
+fields: Efficient adaptive surface reconstruction in unbounded
+scenes. ACM Transactions on Graphics (ToG), 43(6): 1–13.
+Zhang, Z.; Hu, W.; Lao, Y.; He, T.; and Zhao, H. 2024.
+Pixel-gs: Density control with pixel-aware gradient for 3d
+gaussian splatting. In European Conference on Computer
+Vision, 326–342. Springer.
+Zhao, H.; Weng, H.; Lu, D.; Li, A.; Li, J.; Panda, A.; and
+Xie, S. 2025. On scaling up 3d gaussian splatting training.
+In International Conference on Learning Representations,
+volume 2025, 35642–35661.
+A
+3D Gaussian Splatting Preliminaries
+3DGS (Kerbl et al. 2023) represents a scene with a set of
+explicit anisotropic primitives G = {gi }N
+i=1 . Each Gaussian
+stores a center µi , a covariance Σi , an opacity αi , and viewdependent color ci (d) parameterised by spherical harmonics:
+
+
+1
+Gi (x) = exp − (x − µi )⊤ Σ−1
+(x
+−
+µ
+)
+.
+(6)
+i
+i
+2
+Following the standard 3DGS parameterization, the covariance is represented by learnable rotation and scale components.
+For a camera view, Gaussians are projected to screenspace ellipses and rasterized by tile-based front-to-back alpha
+compositing. For pixel p, the rendered color is
+Ĉ(p) =
+X
+i∈N (p)
+Ti (p) αi G′i (p) ci (d),
+Ti (p) =
+Y
+
+1 − αj G′j (p)
+j<i
+(7)
+where N (p) denotes the depth-ordered projected Gaussians
+overlapping the pixel, G′i is the projected 2D Gaussian value,
+and Ti is accumulated transmittance. Training optimizes these
+primitive attributes from posed images and an initial point
+cloud, while adaptive density control periodically clones,
+splits, and prunes Gaussians. In city-scale reconstruction, the
+dominant cost is therefore not only the number of images, but
+also the number of active Gaussians that must be projected,
+exchanged across devices, rasterized, and updated at every
+iteration. BlitzGS is designed around reducing this active
+workload at the system, model, and view levels.
+B
+Additional Implementation Details
+Optimization schedule. Density control runs every 1,000
+steps from iteration 2,000 up to 32,000, with the last event
+at 31,000, straddling the first importance-scoring pass (T1 );
+the LOD gate is disabled inside this window and engaged
+afterwards. After that pass, density-control gradients are
+reweighted by the per-Gaussian visibility factor ϕi for the
+remainder of the density-control window. The remaining
+implementation and hyperparameter details are in our code.
+Baseline configurations. All baselines are run on the same
+4×A6000 hardware, data, test splits, and evaluation resolution as BlitzGS. We evaluate the Grendel-GS baseline at
+two settings. Paper config uses its authors’ released training
+configuration. Long iter extends the schedule—500k iterations on the Mill-19 and UrbanScene3D scenes and 1000k
+on MatrixCity, several times its default budget—to rule out
+under-training as the cause of its low quality. As Table 1
+shows, the extra iterations barely change quality (e.g., Building 19.27→19.50 dB), indicating that Grendel-GS’s deficit
+on these aerial scenes reflects its non-LOD, undistilled representation rather than an insufficient training budget.
+C
+Primitive Sharding vs. Spatial Partitioning
+Figure 8 contrasts our index-parity primitive sharding with
+conventional spatial block partitioning. Block partitioning
+binds each GPU to a fixed world-space region: cameras near
+a block boundary see Gaussians owned by several GPUs,
+so the same view triggers cross-block visibility overlap and
+boundary reassignment, and a final single-GPU merge is
+needed to assemble the full scene. Because scene content
+and camera coverage are rarely uniform, the resulting shards
+are also imbalanced in both storage and compute. BlitzGS
+instead shards one global Gaussian model across GPUs by
+index parity, so every device holds a balanced scene-wide
+slice, and distributes each render step through balanced tile
+allocation. This removes the boundary waste, the imbalance,
+and the merge step, and keeps both storage and per-step
+rendering evenly spread as the GPU count grows.
+Table 3 quantifies this cost on Building (1,920 training
+cameras, 4 GPUs), the scene used for the partition ablation
+in Table 2. We split the scene into a uniform 4×5 (20)
+and 5×6 (30) grid, each block carrying a boundary halo
+of neighbouring Gaussians for cross-block consistency, and
+train the blocks independently across the four GPUs. Because
+camera views straddle block boundaries, each camera is
+assigned to 2.54 blocks on average at 20 blocks and 3.50 at
+30, and 86.8%/95.5% of cameras fall in two or more blocks.
+These counts are geometric, set by the camera poses and
+block boundaries, so they hold for any spatial partition at this
+granularity, not just ours. Because each block also carries a
+boundary halo of neighbouring Gaussians, the overlapping
+blocks re-optimise the same surfaces, wasting computation
+that we quantify in time and model size below. BlitzGS instead
+trains one global model on a single camera stream, so each
+camera enters training once per step with no cross-block
+duplication. Its only distributed cost is the all-to-all exchange
+inside each render step, which Table 5 shows stays under 7%
+of iteration time.
+This redundancy wastes work on two axes. In time, the
+equivalent wall-clock of Table 2 (block split, the four-GPU
+makespan of training all blocks, and the merge) reaches 115.6
+and 169.8 min, about 3 and 4× BlitzGS’s 39 min, dominated
+by the makespan. In model size, Table 4 shows the deeper
+waste: the blocks collectively optimise 23.5M (20 blocks)
+and 34.3M (30 blocks) Gaussians, yet only 5.37M and 5.43M
+survive the merge. Most per-block Gaussians are redundant
+copies of the same surfaces produced by overlapping blocks,
+so 77% and 84% of the optimisation is discarded. Finer partitioning is worse on both axes. This is already the favourable
+case, with each block trained for only 20k iterations. Training
+every block to a full schedule instead costs about 522 min
+and 11.2 h yet moves quality by at most 0.2 dB, so the gap is
+structural redundancy, not an insufficient per-block budget.
+D
+Per-Iteration Cost and Scaling Breakdown
+Cost breakdown. Table 5 decomposes one training iteration
+on Residence as the GPU count grows from one to eight, and
+explains how BlitzGS scales. First, communication is not
+the bottleneck: the all-to-all that routes projected Gaussians
+to their tile owners costs only 3–5 ms per iteration—under
+7% of the total—and does not blow up with the GPU count,
+because each rank exchanges only the splats overlapping its
+own tiles rather than the whole scene. Second, the sub-linear
+end-to-end scaling stems from fixed overhead, not from the
+sharded design: the compute-heavy backward pass scales nearlinearly (113.6 → 25.8 ms from one to eight GPUs), while
+the per-rank data loading, optimizer, and bookkeeping (Other)
+Spatial blocks
+20-block
+30-block
+BlitzGS
+Primitive Sharding
+Full Scene
+Block Partition
+(sharding)
+Block0
+Block1
+Cameras covered (of 1,920)
+1,898
+1,912
+1,920
+Camera assignments
+4,884 (2.54×) 6,720 (3.50×) 1,920 (1.00×)
+Cameras in ≥2 blocks
+1,667 (86.8%) 1,833 (95.5%)
+0 (0%)
+Sharding
+Table 3: Camera coverage under spatial block partitioning
+vs. primitive sharding (Building, 1,920 training cameras,
+4 GPUs). Both partitions use a uniform grid (4×5 and 5×6)
+with boundary halos. Because views straddle block boundaries, each camera is claimed by several blocks; the assignment
+counts are geometric and hold for any spatial partition at this
+granularity. BlitzGS assigns every camera once.
+GPU0
+Block2
+camera
+reassignment
+Imbalanced Spatial Blocks
+Gaussians trained (sum over blocks)
+Merged final model
+Fraction surviving the merge
+30-block
+23.5M
+5.37M
+22.9%
+34.3M
+5.43M
+15.8%
+Table 4: Gaussian survival under spatial block partitioning
+(Building). Each block optimises its own Gaussians, and the
+boundary halos make overlapping blocks model the same
+surfaces, so most per-block Gaussians are duplicates discarded
+at the merge. Finer partitioning wastes more: the 30-block
+split trains 46% more Gaussians than the 20-block one yet
+keeps a smaller fraction. BlitzGS optimises a single global
+model (4.65M final) with no merge discard.
+stay roughly constant at 15–20 ms and come to dominate the
+shrinking iteration. This residual is addressable by GPU-side
+data decoding and is orthogonal to the workload-reduction
+mechanisms that are our focus.
+Memory is sharded, not replicated. Each rank stores only
+its |G|/M shard and its optimizer state, and during rendering
+receives only the projected Gaussians overlapping its own
+tiles—never a full copy of the scene. Per-rank peak memory
+therefore falls as the GPU count rises: on Rubble (Figure 7
+setup) it drops from 17.2 GB at one GPU to 2.9 GB at eight.
+The binding limit is the aggregate capacity across GPUs, as
+noted in our limitations, rather than any single-rank replication
+of the global model.
+Population trajectory. Table 6 traces the global Gaussian
+count through the training schedule on Rubble and MatrixCity, with the spawn gate active as in all main results. Two
+regularities stand out. First, the passes reshape the model
+without capping the peak. The first pass removes 30–34% of
+the population, yet densification rebuilds and then exceeds
+the pre-pass count within a few thousand iterations. Second,
+the population peaks at the last density-control event (iteration 31k) and holds that size until the second pass, which
+removes 41–50% in a single step and fixes the final model.
+The transient peak, not the final size, sets per-GPU memory
+during training, and with the gate active it stays below the
+no-gate peaks of Table 7, consistent with the peak-population
+cuts measured in Appendix F.
+GPU3
+Balanced Tile Allocation
+Boundary Waste
+20-block
+GPU2
+Block3
+overlap from shared
+camera visibility
+GPU1
+Distributed Rendering
+Training Camera
+Boundary Mismatch
+Merge Step
+No Boundary Waste
+Rendered Image
+One Global Model
+Balanced Storage & Rendering
+No Merge
+Figure 8: Primitive sharding vs spatial block partitioning.
+Left: block partitioning binds each GPU to a fixed scene region,
+so cameras near boundaries trigger overlap and reassignment.
+Right: BlitzGS shards one global Gaussian model across
+GPUs by index parity and distributes each render via balanced
+tile allocation, keeping both storage and rendering evenly
+spread.
+GPUs Preproc. Comm. Render Loss Backward Other
+1
+2
+3
+4
+5
+6
+7
+8
+15.8
+9.5
+7.9
+8.3
+9.3
+10.6
+11.4
+13.0
+–
+3.7
+4.2
+3.2
+3.7
+4.2
+4.5
+4.4
+23.2
+13.6
+11.8
+7.9
+6.9
+6.5
+5.9
+5.6
+13.2
+6.9
+5.4
+3.5
+3.1
+2.8
+2.5
+2.3
+113.6
+67.4
+49.3
+40.5
+35.4
+31.0
+28.1
+25.8
+20.2
+17.6
+16.8
+14.9
+16.6
+17.5
+16.3
+16.5
+Total
+186.9
+119.7
+96.3
+79.2
+75.9
+73.6
+69.7
+68.6
+Table 5: Per-iteration cost breakdown (Residence, A800
+80 GB). Wall time in ms for the main training stages as
+the GPU count grows. Comm. is the cross-GPU all-to-all;
+Other pools per-rank data loading, the optimizer step, and
+bookkeeping. Components may not sum exactly to the total
+due to rounding and unlisted minor stages.
+E
+Gaussian Lifetime Measurements
+This appendix reports the measurements that motivate and
+validate the spawn gate of Sec. 3.2: how the population
+overshoots, which Gaussians die, and how predictable their
+survival is at spawn time.
+Population overshoot. Resolving high-fidelity detail calls
+for an aggressive, low-threshold densification schedule that
+grows the Gaussian population large during training, after
+which scheduled simplification passes distil it into a compact
+final model. As a result, the population is at its largest midtraining rather than at the end. Table 7 quantifies this overshoot.
+The peak population reaches roughly twice the final size on
+both Rubble and MatrixCity. This transient peak, rather than
+the final size, dictates the per-GPU memory limits throughout
+the densification window, which is exactly why our spawn
+gate targets the peak rather than the final model.
+Stage
+Rubble
+MatrixCity
+Octree initialization
+1.14M
+2.29M
+Before pass 1 (T1 =16k)
+5.22M
+7.07M
+After pass 1
+3.65M (−30%) 4.69M (−34%)
+Peak, end of densification (31k)
+7.38M
+13.90M
+Before pass 2 (T2 =34k)
+7.38M
+13.90M
+After pass 2 (final)
+4.36M (−41%) 6.91M (−50%)
+Table 6: Gaussian-count trajectory under the full pipeline.
+Global Gaussian count at each stage of the schedule on Rubble
+(90k) and MatrixCity (120k). Percentages give the reduction
+of each simplification pass. The count is fixed after the second
+pass, and the last row equals the final model size.
+Survival to final model (%)
+80
+60
+50
+40
+30
+10
+0
+Peak
+Final
+Peak / Final
+Rubble
+MatrixCity
+8.55M
+18.68M
+4.47M
+8.13M
+1.9×
+2.3×
+Table 7: Population overshoot (no spawn gate). Live Gaussian count at the mid-training peak versus the final model;
+the peak is 1.9–2.3× larger.
+plification pass from iteration 34k to 50k, so the late cohort
+matures before judgment, raises its survival from 19.7% to
+35.9%, but at matched age late-born Gaussians still survive 9
+points less often than earlier cohorts. Late birth is penalized
+twice: late spawns are intrinsically weaker at matched age,
+and younger when examined.
+Spawn gate features and veto. For a spawn candidate with
+parent j at densification step t, we assemble the spawn-time
+feature vector
+
+xj,t = ḡj , αj , s̄j , τj , dj , ℓj , t, 1[split] ,
+(8)
+70
+20
+Scene
+Rubble
+Sci-Art
+Residence
+Building
+Rubble (conservative)
+Init
+2 8k
+8 16k
+16 24k
+Birth cohort (iteration window)
+24 32k
+Figure 9: Survival to the final model by birth cohort. Each
+curve is the fraction of Gaussians born in a given iteration
+window that reach the final model. Under the aggressive densification schedule (four colored scenes) survival falls sharply
+with birth time, collapsing in the last densification window
+(shaded); under a conservative schedule (grey, dashed) it stays
+flat—the survival structure is schedule-induced.
+Lineage instrumentation. To measure per-Gaussian lifetimes exactly, we assign every Gaussian a persistent identifier
+at creation. We log each birth with its spawn-time features
+and parent link, record each death with the mechanism that
+removed it, and carry identifiers through the redistribution
+all-to-all so lineage survives resharding. The record is exact,
+reconciling logged births and deaths with the live population
+at every checkpoint (10.25M births and 5.78M deaths on
+Rubble), and adds no measurable training time. Lineage runs
+are used only offline to fit the gate; no logging runs during
+the gated training reported in this paper.
+Survival structure. Survival to the final model falls with
+birth time (Fig. 9): initialization points survive at 71.5%,
+while only 17–23% of Gaussians born in the last densification window survive, consistently across all four scenes we
+instrumented. Rubble, retrained under a conservative schedule (higher densification threshold), shows flat survival of
+55–60% across cohorts, so the structure is induced by the
+aggressive schedule—exactly the regime that wins quality.
+A delayed-judgment control shows the effect is not merely
+that late spawns are examined young: moving the second sim-
+where ḡj is the view-space positional gradient magnitude
+averaged over the dj views that observed the parent (the same
+signal the densification threshold tests), αj the parent opacity,
+s̄j the mean of the parent’s three scale axes, τj the parent’s
+age in iterations since its own birth, dj the densification
+denominator (the number of views that accumulated gradient
+onto the parent), and ℓj the child’s LOD level—the parent’s
+level for a clone, one level finer for a split. The gradientboosted tree predicts survival pj = f (xj,t ) ∈ [0, 1]. Clones
+and splits form separate candidate sets at each step; within
+a set Ct the gate vetoes the ⌈ρ|Ct |⌉ candidates of lowest
+predicted survival,
+X
+Vt = arg min
+pj ,
+Ct′ = Ct \ Vt ,
+(9)
+S⊆Ct
+j∈S
+|S|=⌈ρ|Ct |⌉
+with ρ = 0.6; only Ct′ is instantiated. Vetoing by rank within
+Ct , rather than thresholding pj at a fixed value, makes the
+gate depend only on the ordering of f , so a single predictor
+transfers across scenes despite large differences in candidate
+volume and score calibration.
+Predictability at birth. The spawn gate is only viable if a
+candidate’s survival is predictable from the features available
+at spawn time; Table 8 shows that it is, and robustly so. When
+each logged spawn is labelled by whether it survives to the
+final model, the gradient-boosted tree predictor of Sec. 3.2
+separates survivors from non-survivors at a held-out AUC
+of 0.748–0.787. This holds on every scene and schedule we
+instrumented, including the conservative schedule and the
+delayed-judgment control, so the signal is not an artifact of
+one configuration. The strongest single spawn feature, parent
+opacity, reaches an AUC of only 0.63–0.66 alone, so the
+predictability is genuinely multivariate. Recall also that every
+experiment in Sec. 4 deploys a predictor fit exclusively on the
+other scenes’ lineage (Sec. 3.2), and the predictability survives
+this restriction. Table 9 lists each deployed predictor’s training
+pool and its transfer. Evaluated on the spawns of the scene it
+never saw, each leave-one-scene-out predictor reaches an AUC
+AUC
+Scene
+Schedule
+Rubble
+aggressive
+Sci-Art
+aggressive
+Residence aggressive
+Building aggressive
+Rubble
+Rubble
+Rubble
+conservative
+short window
+delayed judgment
+Spawns Surv.
+full
+opacity
+9.1M
+3.8M
+8.4M
+11.5M
+40%
+34%
+32%
+38%
+0.780
+0.787
+0.764
+0.772
+0.643
+0.634
+0.636
+0.657
+2.3M
+7.0M
+9.1M
+57% 0.768 0.643
+47% 0.748 0.662
+46% 0.763 0.648
+Table 8: Spawn-time survival predictability. Held-out AUC
+on each lineage-instrumented run: full is the gradient-boosted
+predictor on all spawn-time features; opacity uses the strongest
+single feature (parent opacity) alone as the ranking score,
+on the same held-out spawns. Surv. is the fraction of all
+logged spawns surviving to the final model (all birth cohorts
+pooled, initialization points excluded; per-cohort rates in
+Fig. 9). Conservative raises the densification threshold, short
+window ends densification at 24k instead of 32k, and delayed
+judgment moves the second simplification pass from 34k to
+50k.
+Eval. scene Gate fit on
+AUC
+Rubble
+Sci-Art
+Residence
+Building
+MatrixCity
+0.759
+0.770
+0.750
+0.759
+0.702
+Sci-Art+Residence+Building
+Rubble+Residence+Building
+Rubble+Sci-Art+Building
+Rubble+Sci-Art+Residence
+all four scenes
+Table 9: Deployed gate protocol and transfer. Each evaluation scene is gated by a predictor that never saw its own
+lineage; MatrixCity uses a predictor fit on all four instrumented scenes. AUC is the deployed predictor scored on all
+spawns of a lineage-instrumented run of the evaluation scene;
+the MatrixCity lineage run serves evaluation only and enters
+no training pool.
+of 0.750–0.770, only 0.013–0.021 below the predictor fit on
+that scene’s own lineage (Table 8). Transfer is harder across the
+domain gap to the synthetic MatrixCity, where the deployed
+predictor reaches 0.702; an ungated lineage run of that scene
+nonetheless lands inside the gated replicate band (26.882
+vs. 26.877 ± 0.021), so even this weaker ordering leaves
+quality intact at the deployed rate. Together these establish the
+gate’s premise: survival is predictable at birth, the prediction
+requires learning, and it transfers to unseen scenes. Figure 10
+shows the transfer spatially. Replayed on a scene it never
+saw, the leave-one-scene-out predictor reproduces the spatial
+structure of ground-truth survival (per-region survival rates
+correlate at r=0.84) despite having no positional features.
+Design rationale. The measurements above dictate four
+choices in the gate design (Sec. 3.2). Why learned rather
+than heuristic? The survival structure is schedule-induced
+(Survival structure), so a hand-crafted rule tuned to one regime
+breaks when the schedule changes, and single spawn signals
+such as parent opacity separate far more weakly (Predictability
+ground truth
+(ungated run)
+survives to final model
+dies
+gate prediction
+(fit on other scenes)
+predicted to survive
+predicted to die
+Figure 10: Ground-truth survival vs. gate prediction (Rubble). Each point is a spawn born between iterations 24k and
+30k of an ungated, lineage-instrumented run, plotted at its
+scene location and colored by whether it survives to the final
+model: left, the actual outcome; right, the spawn-time prediction of the leave-one-scene-out gate, rate-matched to the
+true death rate so the panels differ only in where the colors
+fall. Per-region predicted and actual survival rates correlate
+at r=0.84, although the predictor uses no positional features
+and never saw Rubble.
+at birth). The ranking must be survival-correlated so that the
+vetoed fraction falls on non-surviving spawns rather than
+on true survivors, and the learned predictor supplies that
+correlation at a transferred AUC of 0.750–0.770 on scenes it
+never saw (Table 9); the oracle replay confirms that vetoes
+chosen this way carry no measurable end-to-end quality cost
+(Appendix F). A new schedule does require a new predictor,
+but the adaptation is mechanical (collect lineage under the
+new schedule and refit), whereas a heuristic must be rederived by hand for every regime. Why a rank veto rather
+than a probability threshold? The gate’s deliverable is a
+deterministic peak-population cut, and vetoing by rank fixes
+the veto rate at exactly ρ on every scene by construction.
+A fixed threshold instead makes the rate an uncontrolled,
+scene-dependent quantity: a well-calibrated score must track
+each scene’s base survival rate, and these rates differ across
+scenes (Table 8, Surv. column), so the same cutoff removes a
+different fraction of candidates on each. The leave-one-sceneout results confirm exactly the property the rank veto relies
+on. AUC is invariant to any monotone rescaling of the scores,
+so it measures the transfer of the ordering and nothing else
+(Predictability at birth). If per-scene rates prove desirable,
+they should enter as a deliberately chosen ρ (Appendix E.1),
+not as an uncontrolled by-product of calibration. Why the
+late window only? Survival drops sharply after iteration 24k
+(Survival structure), and the sensitivity analysis confirms the
+optimal onset sits at this drop (Appendix E.1). Why decide at
+spawn time rather than later? A later decision would be better
+informed, but it forfeits the deliverable. Delaying the veto by ∆
+iterations leaves each non-surviving spawn allocated for those
+∆ iterations, so the peak-population cut shrinks as the delay
+grows. Waiting all the way to the scheduled simplification
+PSNR
+(dB)
+Peak
+(M)
+P. mem A. mem
+(GB)
+(GB)
+Time
+Veto rate ρ (onset 24k)
+0 (no gate) 23.40 10.89
+0.30
+23.42 9.79
+0.45
+23.46 9.23
+0.60
+23.46 8.66
+0.75
+23.34 8.12
+0.90
+23.24 7.57
+8.2
+7.3
+7.0
+6.6
+6.2
+5.8
+2.2
+2.1
+2.1
+2.0
+1.9
+1.8
+40m47s
+39m59s
+39m55s
+39m15s
+38m23s
+37m41s
+Onset (rate ρ=0.6)
+16k
+23.11
+20k
+23.25
+24k
+23.46
+28k
+23.28
+4.7
+5.7
+6.6
+7.5
+1.6
+1.8
+2.0
+2.1
+35m49s
+37m20s
+39m15s
+39m59s
+6.24
+7.49
+8.66
+9.80
+Table 10: Gate hyperparameter ablation on Building (90k,
+aggressive schedule). Top: veto rate ρ with onset fixed at 24k.
+Bottom: onset with ρ fixed at 0.6. Peak is the mid-training
+live Gaussian count; P. mem and A. mem are per-GPU peak
+and mean allocated memory. The bold row is the deployed
+configuration, common to both panels.
+passes recovers no peak at all, and that endpoint is precisely
+the reactive removal the pipeline already provides. Only a
+spawn-time veto converts a prediction into memory that is
+never allocated (Appendix E.1). It also saves the vetoed
+candidates’ optimization, communication, and rasterization
+costs.
+E.1
+Sensitivity to the Gate Rate and Onset
+The gate exposes two hyperparameters: the veto fraction ρ
+and the onset iteration at which it activates. We vary each on
+Building under the aggressive headline schedule, holding the
+other fixed and changing nothing else (Table 10). The ρ=0.6,
+onset 24k row is the deployed configuration, common to both
+panels.
+The gate is a peak-memory lever. Per-GPU peak memory
+falls monotonically with ρ and tracks the peak population
+almost linearly, while training time falls only 2–8% even as
+the peak falls 10–30%: the reclaimed resource is the transient
+mid-training population peak, not the sustained per-iteration
+cost, consistent with the overshoot analysis (Appendix E).
+Quality is flat through the deployed rate; onset is fixed
+by the survival structure. All veto rates ρ≤0.6 match the
+ungated quality, so vetoing up to 60% of late candidates is
+quality-neutral; a measurable decline appears only at ρ≥0.75.
+We therefore adopt ρ=0.6, the largest reclaim inside the
+flat region. The onset was fixed in advance at the sharp
+late-window drop in survival (Survival structure), and the
+sensitivity analysis confirms it: activating at 16k begins gating
+before the drop (Fig. 9) and loses 0.35 dB, while 28k gains
+nothing in quality yet returns the peak to 9.80M, nearly the
+ungated 10.89M. The deployed 24k is the latest onset that
+still suppresses the overshoot.
+Arm
+PSNR↑ ∆PSNR Peak pop.
+∆peak
+Clean reference (no gate)
+Oracle, uncapped
+Oracle, rate-matched (ρ=0.6)
+Learned gate (LOSO, ρ=0.6)
+27.731
+27.821
+27.704
+27.821
+—
++0.09
+−0.03
++0.09
+9.22M
+7.65M
+7.70M
+7.69M
+—
+−17.0%
+−16.5%
+−16.6%
+Random veto (ρ=0.6)
+27.604
+−0.13
+7.69M
+−16.6%
+Table 11: Oracle ceiling and random floor on Rubble (90k).
+All arms resume from the same 24k checkpoint; numbers are
+comparable within this table only, not against the fresh-run
+tables in the main paper. The last row replaces the learned
+ranking with a random veto at the same rate and onset.
+F
+Oracle-Ceiling Analysis of the Spawn Gate
+This appendix measures the deployed gate against the ceiling
+of what any spawn-time veto can achieve, rather than against
+the floor of not gating at all. The component ablation (Table 2)
+establishes that floor, but cannot say how far the learned predictor sits from the best possible veto, or whether its mistakes,
+the true survivors it discards, cost anything end to end. As
+an empirical ceiling, we construct a perfect-foresight oracle
+veto, with exact knowledge of each spawn’s survival outcome
+in a lookahead run (exact labels, incomplete coverage; replay
+protocol below), and ask how much of that ceiling the deployed predictor captures. The answer (Table 11) is that the
+learned gate matches the ceiling’s quality and captures 98%
+of its peak-population cut at the deployed rate.
+Replay protocol. Multi-GPU training is non-deterministic
+(rasterization atomics), so the same parent may clone in one
+run, split in another, or not densify at all, and a naive oracle
+is ill-defined. All arms therefore branch from a single checkpoint at iteration 24k with identical populations and identical
+persistent identifiers. A lookahead branch trains to 90k ungated with lineage logging and labels every spawn event in
+the gate window (the iterations where the spawn gate is active,
+[24k, 32k); Sec. 3.2) by the key (parent identifier, densification iteration, clone or split): an event is non-surviving if and
+only if none of its children survives to the final model; in the
+lookahead run, 78.8% of the 2.74M spawn events in the gate
+window are non-surviving. The oracle arms replay from the
+same checkpoint, look up each candidate’s key, and veto only
+candidates labeled non-surviving; unrecognized candidates,
+whose exact event never occurred in the lookahead because
+the trajectories drift after the branch, are always kept. The
+measured match rate is 100% at the branch point, 65% by
+the window’s end, and 78% over all candidates in the gate
+window. Since unrecognized candidates are always kept, this
+coverage gap can only make the measured ceiling conservative, mildly understating a true oracle’s, so it does not affect
+the ceiling comparison. A per-cohort cap yields an oracle arm
+rate-matched to the deployed veto fraction ρ=0.6.
+Findings. The table says four things. First, the learned gate
+matches the oracle’s quality and captures 98% of its peakpopulation cut, so better prediction has little room left at
+the deployed rate. Second, every informed veto arm, from
+perfect foresight to the learned gate, reaches the quality
+of ungated training, so the gate’s deliverable is the peak-
+population cut at no quality cost. Third, the rate-matched
+oracle, which never wrongly vetoes a survivor, is on par
+with the learned gate, so the gate’s misclassifications carry
+no visible cost. Fourth, the random veto sits clearly at the
+bottom, 0.22 dB below the learned gate, the one large gap
+in the column: an uninformed cut at the same rate and onset
+costs real quality. The gate is therefore quality-neutral not
+because vetoing this many candidates is inherently safe, but
+because its ranking concentrates the vetoes on spawns that
+would have died anyway. What the ranking demonstrably
+changes is which candidates are removed. A random veto
+discards true survivors at the 21.2% base rate. The learned
+veto, replayed offline on the same lookahead events with
+the transferred predictor of Table 9, discards them at 11.1%,
+roughly half as many wrongly vetoed survivors at the same
+rate. On scenes where more candidates survive, or at higher
+veto rates, an uninformed veto discards correspondingly more
+true survivors, so this deficit is a floor rather than a worst case.
+The robust claims are the label statistics, the peak-population
+cuts that are stable across arms, the parity in quality between
+the informed arms and ungated training, and the random floor.
+G
+Additional Qualitative Comparisons
+Figure 11 compares BlitzGS against recent large-scale baselines on eight held-out test views spanning our benchmark
+scenes, with the ground truth alongside for reference. Figure 12 instead fixes the training budget: every baseline is
+shown at the checkpoint closest to BlitzGS’s wall-clock time
+(≈ 39 minutes), which is the point at which BlitzGS has
+already finished training.
+GT
+Ours
+CityGS-X
+Momentum-GS
+VastGS
+Figure 11: Qualitative comparison on city-scale scenes. Eight held-out test views spanning the benchmark scenes; columns
+show GT, BlitzGS (Ours), CityGS-X, Momentum-GS, and VastGaussian. Red rectangles highlight close-ups where BlitzGS
+preserves detail comparable to or sharper than the baselines.
+GT
+Ours
+CityGS-X (at 39 min)
+Momentum-GS (at 39 min)
+Figure 12: Qualitative comparison at the same training budget (≈ 39 minutes). Each baseline is shown at its checkpoint
+nearest BlitzGS’s wall-clock budget; at this point CityGS-X and Momentum-GS are still under-trained while BlitzGS has finished.

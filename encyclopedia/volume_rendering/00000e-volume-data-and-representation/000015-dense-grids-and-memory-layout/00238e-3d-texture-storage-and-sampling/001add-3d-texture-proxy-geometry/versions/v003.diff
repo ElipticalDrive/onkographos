@@ -1,0 +1,206 @@
+--- v002.md
++++ v003.md
+@@ -1,8 +1,8 @@
+ # 3D Texture Proxy Geometry
+ 
+-Also called: 3D Texture Mapping, 3D Texture Proxy, 3D Texture-Based Volume Rendering, View-port aligned slice projection, nVidia texture shader extension
++Also called: 3D Texture Proxy, 3D Texture-Based Volume Rendering, VR Basado en Texturas 3D, VR con texturas tridimensionales, texturas 3D con planos orientados al plano de proyección
+ 
+ ## Overview
+-3D Texture Proxy Geometry is a GPU-accelerated volume rendering technique where the volumetric dataset is uploaded as a 3D texture object, and polygonal slices parallel to the viewpoint are rasterized and blended back-to-front to form the final image [S1, S2]. It differs from ray casting by using hardware-accelerated texture sampling and interpolation rather than explicit ray marching, and from 2D texture mapping by supporting arbitrary viewing orientations without pre-computing multiple 2D slices [S3]. Unlike ray casting, it cannot skip unseen voxels, rendering all voxels within the view frustum [S1].
++3D Texture Proxy Geometry is a GPU-accelerated volume rendering technique where the volumetric dataset is uploaded as a 3D texture object, and polygonal slices are rasterized and blended back-to-front to form the final image [S1, S2]. It differs from ray casting by relying on hardware-accelerated texture sampling and interpolation rather than explicit ray marching, and from 2D texture mapping by using a single 3D texture to eliminate popping artifacts and support arbitrary viewing orientations without pre-computing multiple 2D slices [S3, S5]. Unlike ray casting, it cannot skip unseen voxels, rendering all voxels within the view frustum [S1].
+ 
+ ## How it works
+@@ -14,8 +14,8 @@
+ 1.  **3D Texture Object:** A GPU texture object storing the volume data.
+     -   **Format:** Depends on data type. For `unsigned short` data, the sampler must be `usampler3D` [S3]. Using `sampler3D` results in all values being 0 [S3].
+-    -   **Dimensions:** Width, Height, Depth. Note: In `glTexImage3D`, the `depth` parameter corresponds to the first dimension of the array. Passing the wrong dimension causes index confusion [S3].
+-    -   **Filters:** `GL_TEXTURE_MIN_FILTER` and `GL_TEXTURE_MAG_FILTER` must be chosen carefully as they affect the interpolation performed by the GPU texture mapping hardware [S2]. Commonly set to `GL_LINEAR` for trilinear interpolation [S3].
++    -   **Dimensions:** Width, Height, Depth. In `glTexImage3D`, the `depth` parameter corresponds to the first dimension of the array. Passing the wrong dimension causes index confusion [S3].
++    -   **Filters:** `GL_TEXTURE_MIN_FILTER` and `GL_TEXTURE_MAG_FILTER` must be chosen carefully as they affect the interpolation performed by the GPU texture mapping hardware [S2]. Linear filtering is used for trilinear interpolation [S3].
+     -   **Wrapping:** Typically `GL_CLAMP_TO_EDGE` to prevent artifacts at boundaries [S3].
+-2.  **View-Port Aligned Slices:** Polygonal meshes representing the intersection of the 3D texture cube with arbitrarily oriented planes parallel to the view plane.
++2.  **View-Port Aligned Slices:** Polygonal meshes representing the intersection of the 3D texture cube with arbitrarily oriented planes [S2].
+ 3.  **Minimum Texture (Optional/Advanced):** A luminance-alpha texture map used in specific dependent texture lookup setups, with the alpha channel set to 1 to allow for the addition of scalar values [S4].
+ 
+@@ -26,5 +26,5 @@
+     -   *Pitfall:* If the volume is too large for texture memory, it must be partitioned into subvolumes swapped in and out during rendering [S1, S2].
+ 3.  **Compute View-Port Aligned Slices:**
+-    -   Calculate polygons formed by the intersection of the 3D texture cube and planes parallel to the view plane [S2].
++    -   Calculate polygons formed by the intersection of the 3D texture cube and arbitrarily oriented planes [S2].
+     -   Traditionally computed by the CPU [S2].
+     -   Can be offloaded to a vertex shader program [S2]. The vertex shader recognizes all 12 edges of a cube as 6 different sets of edges. For each set, it finds at most one coordinate representing the intersecting point of the edge to an arbitrary plane [S2].
+@@ -47,74 +47,85 @@
+ def render_volume(volume_data, camera, transfer_function, width, height, num_slices):
+     # 1. Setup 3D Texture
+-    # Upload volume_data to GPU as GL_TEXTURE_3D
+-    # Note: depth parameter in glTexImage3D corresponds to the first dimension of the array
++    # Upload volume_data to GPU as a 3D texture object.
++    # Dimensions must be powers of two. depth parameter corresponds to the first dimension of the array [S3].
+     texture = create_3d_texture(volume_data)
+-    set_texture_parameters(texture, min_filter=GL_LINEAR, mag_filter=GL_LINEAR)
+-    
++    set_texture_parameters(texture, min_filter="linear", mag_filter="linear") # Linear filtering for trilinear interpolation [S2, S3]
++
+     # 2. Compute View-Port Aligned Slices
+-    # Intersect volume bounding box with planes parallel to view plane
++    # Intersect volume bounding box with arbitrarily oriented planes [S2]
+     slices = compute_view_port_aligned_slices(camera, volume_data.bounds, num_slices)
+-    
+-    # Initialize output image buffers
+-    out_color = zeros((height, width, 3))
+-    out_alpha = zeros((height, width))
+-    
++
++    # Initialize output buffers
++    out_color = [[0.0, 0.0, 0.0] for _ in range(height * width)]
++    out_alpha = [0.0] * (height * width)
++
+     # 3. Render Loop (Back-to-Front)
+     for slice in reversed(slices):
+         # 4. Rasterize Slice
+-        # Project slice vertices to screen space
+         screen_coords = project_to_screen(slice.vertices, camera)
+-        
++        pixels = pixels_covered_by(screen_coords, width, height)
++
+         # 5. Fragment Processing
+-        # For each pixel covered by the slice:
+-        for y, x in pixels_covered_by(screen_coords):
+-            # Compute 3D texture coordinates from slice geometry and camera ray
++        for y, x in pixels:
+             tex_coords = compute_texture_coords(x, y, slice, camera)
+-            
+-            # Fetch scalar value from 3D texture
+             scalar = texture_sample(texture, tex_coords)
+-            
+-            # Apply transfer function
+             color, opacity = transfer_function(scalar)
+-            
+-            # 6. Back-to-Front Blending (Alpha Compositing)
+-            out_alpha[y, x] = out_alpha[y, x] + opacity * (1.0 - out_alpha[y, x])
+-            out_color[y, x] = out_color[y, x] * (1.0 - opacity) + color * opacity
+-            
+-    return out_color
++
++            # 6. Back-to-Front Blending
++            idx = y * width + x
++            out_alpha[idx] = out_alpha[idx] + opacity * (1.0 - out_alpha[idx])
++            out_color[idx] = [
++                out_color[idx][0] * (1.0 - opacity) + color[0] * opacity,
++                out_color[idx][1] * (1.0 - opacity) + color[1] * opacity,
++                out_color[idx][2] * (1.0 - opacity) + color[2] * opacity
++            ]
++
++    return out_color, out_alpha
+ 
+ def create_3d_texture(data):
+-    # Create GL_TEXTURE_3D object
+-    # Upload data, handling dimension mapping carefully
+-    # Return texture reference
+-    pass
++    # Allocate texture memory with smallest power-of-two dimensions containing data [S5]
++    # Fill with zeros, copy data, upload [S5]
++    return {"type": "3D", "data": data}
+ 
+ def set_texture_parameters(texture, min_filter, mag_filter):
+-    # Set GL_TEXTURE_MIN_FILTER and GL_TEXTURE_MAG_FILTER
+-    # Affects interpolation (nearest neighbor or trilinear)
++    # Set interpolation mode: nearest neighbor or linear (trilinear) [S1, S2]
+     pass
+ 
+ def compute_view_port_aligned_slices(camera, bounds, num_slices):
+-    # Intersect bounding box with planes parallel to view plane
+-    # Returns list of polygon meshes
+-    pass
++    # Generate planes arbitrarily oriented to intersect the volume bounding box [S2]
++    # Returns list of polygon meshes representing intersections
++    planes = []
++    for i in range(num_slices):
++        t = i / num_slices
++        planes.append({"normal": camera.view_dir, "dist": bounds.min + t * (bounds.max - bounds.min)})
++    return planes
+ 
+ def project_to_screen(vertices, camera):
+-    # Transform vertices to screen coordinates
+-    pass
++    # Transform vertices to normalized device coordinates
++    return [v.project(camera) for v in vertices]
+ 
+-def pixels_covered_by(screen_coords):
+-    # Return list of (y, x) pixel indices covered by the polygon
+-    pass
++def pixels_covered_by(screen_coords, width, height):
++    # Bounding box rasterization
++    min_x, max_x = int(min(v.x for v in screen_coords)), int(max(v.x for v in screen_coords))
++    min_y, max_y = int(min(v.y for v in screen_coords)), int(max(v.y for v in screen_coords))
++    return [(y, x) for y in range(min_y, max_y + 1) for x in range(min_x, max_x + 1)]
+ 
+ def compute_texture_coords(x, y, slice, camera):
+-    # Compute 3D texture coordinates for the fragment
+-    # Based on ray intersection with slice
+-    pass
++    # Compute 3D texture coordinates from ray intersection with slice
++    ray = camera.ray_at(x, y)
++    t = (slice.dist - dot(ray.origin, slice.normal)) / dot(ray.direction, slice.normal)
++    point = ray.origin + ray.direction * t
++    return point / texture_dimensions # Normalize to [0,1] range [S5]
+ 
+ def texture_sample(texture, coords):
+-    # Sample 3D texture at given coordinates
+-    # Handles interpolation based on filters
+-    pass
++    # Trilinear interpolation at coords [S3]
++    return texture["data"].trilinear(coords)
++
++def transfer_function(scalar):
++    # Map scalar to color and opacity
++    return [1.0, 1.0, 1.0], 0.5
++
++def dot(a, b):
++    return sum(x * y for x, y in zip(a, b))
+ ```
+ 
+@@ -123,4 +134,6 @@
+ -   **Filters:** `GL_TEXTURE_MIN_FILTER` and `GL_TEXTURE_MAG_FILTER` [S2].
+ -   **Texture Memory:** A single 3D texture suffices if memory allows [S3].
++-   **Texture Dimension:** $256^3$ due to OpenGL texture dimension limitations [S5]. The original data volume is copied without resizing; resizing is handled by the GPU [S5].
++-   **Memory Usage:** 16 MiB in main memory for the textures in this implementation [S5].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -129,5 +142,8 @@
+ -   **Dimension Confusion:** In `glTexImage3D`, the `depth` parameter corresponds to the first dimension of the array. Passing the wrong dimension causes index confusion [S3].
+ -   **Unseen Voxels:** All voxels within the slice are rendered; unseen voxels cannot be skipped [S1].
+--   **Hardware Cost:** Early implementations (SGI RealityEngine) were high-end and expensive [S2].
++-   **Center Misalignment:** If the volume does not occupy the entire 3D texture, the volume center does not coincide with the texture center. Translations must be added to the texture matrix to align the volume center with the polygon set center [S5].
++-   **Primitive Size:** Primitives must be large enough to contain the entire volume during any rotation. The minimum size is the diagonal of the volume [S5].
++-   **Performance Degradation:** Increasing primitive size to fit the volume can negatively affect rendering performance unless alpha testing is applied to avoid drawing transparent fragments to the framebuffer [S5].
++-   **Banding Artifacts:** Projection-oriented polygons introduce horizontal or vertical bands depending on the number of polygons used [S5].
+ 
+ ## Subtopics
+@@ -137,12 +153,12 @@
+ 
+ ## Operating characteristics
+--   **Time Complexity:** Linear with respect to the number of pixels and the number of slices [S1, S2]. Performance can be improved by optimization techniques like empty space skipping and occlusion clipping [S2].
+--   **Memory Complexity:** Linear with respect to the volume size, limited by available texture memory [S1, S3].
+--   **Measured Performance:** Li et al. [40] reported an average of 2.8 speedup using optimization techniques like occlusion clipping in fragment programs [S2].
+--   **Scaling:** Performance degrades if the volume exceeds texture memory, requiring swapping [S1]. Scaling to higher resolutions is limited by texture memory and fill rate [S2].
+--   **Strengths:** Hardware-accelerated interpolation, simple implementation, good image quality with trilinear interpolation [S3].
+--   **Limitations:** Cannot skip unseen voxels, limited by texture memory size, requires careful filter selection [S1, S2].
+--   **When to Use:** Suitable for moderate-sized volumes that fit in texture memory, when hardware interpolation is preferred over manual ray marching [S2, S3].
+--   **When Not to Use:** For very large volumes that exceed texture memory, or when skipping unseen voxels is critical for performance [S1].
++-   **Time Complexity:** Not explicitly stated in the sources, but performance scales with pixel count and slice count, with optimizations like occlusion clipping yielding a 2.8× speedup [S2].
++-   **Memory Complexity:** Linear with respect to volume size, constrained by available texture memory [S1, S3].
++-   **Measured Performance:** Li et al. reported an average of 2.8 speedup using optimization techniques like occlusion clipping in fragment programs [S2].
++-   **Scaling:** Scaling to higher resolutions is limited by texture memory, requiring paging or out-of-core techniques for large datasets [S2].
++-   **Strengths:** Hardware-accelerated trilinear interpolation eliminates bands from 2D texturization and supports arbitrary viewing orientations [S3, S5].
++-   **Limitations:** Cannot skip unseen voxels, limited by texture memory size, and projection-oriented polygons may introduce horizontal or vertical bands depending on polygon count [S1, S5].
++-   **When to Use:** Moderate-sized volumes fitting in texture memory, when hardware interpolation is preferred [S2, S3].
++-   **When Not to Use:** Volumes exceeding texture memory capacity, or when skipping unseen voxels is critical for performance [S1].
+ 
+ ## Background
+@@ -156,3 +172,4 @@
+ [S2] A system for real-time rendering of compressed time-varying volume data, https://doi.org/10.7939/r3041m, fetched 2026-10-26
+ [S3] upupming/volume-rendering, https://github.com/upupming/volume-rendering, fetched 2026-10-26 (unofficial)
+-[S4] Hardware-based view-independent cell projection, https://www.semanticscholar.org/paper/Hardware-based-view-independent-cell-projection-Weiler-Kraus/36615d19709bce724437ec3257e43a1916f7de26, fetched 2026-10-29+[S4] Hardware-based view-independent cell projection, https://www.semanticscholar.org/paper/Hardware-based-view-independent-cell-projection-Weiler-Kraus/36615d19709bce724437ec3257e43a1916f7de26, fetched 2026-10-29
++[S5] Texture Mapping Based Volume Rendering, https://www.ciroduran.com/files/Tesis.pdf, fetched 2026-10-29

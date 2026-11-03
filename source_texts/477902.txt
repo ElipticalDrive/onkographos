@@ -1,0 +1,247 @@
+Ray-Tracing Digital Elevation Data in 3D with Povray (Part III) (Shallow Thoughts)
+Ray-Tracing Digital Elevation Data in 3D with Povray (Part III) (Shallow Thoughts)
+Akkana's Musings on Open Source Computing and Technology, Science, and Nature.
+Wed, 17 Jul 2019
+Ray-Tracing Digital Elevation Data in 3D with Povray (Part III)
+This is Part III of a four-part article on ray tracing digital elevation
+model (DEM) data.
+The goal: render a ray-traced image of mountains from a digital
+elevation model (DEM).
+Part I, Get and Understand the Data:
+Working
+with Digital Elevation Models in Python
+Part II, Understand Povray:
+Height Fields in Povray
+Part III, Povray on real DEM data:
+Ray-Tracing Digital Elevation Data in 3D with Povray (this article)
+Part IV, Make a 3D Panorama:
+Making a Panorama from Raytraced DEM Images
+In Part II, I showed how the povray camera position and angle
+need to be adjusted based on the data, and the position of the light
+source depends on the camera position.
+In particular, if the camera is too high, you won't see anything
+because all the relief will be tiny invisible bumps down below.
+If it's too low, it might be below the surface and then you
+can't see anything.
+If the light source is too high, you'll have no shadows, just a
+uniform grey surface.
+That's easy enough to calculate for a simple test image like the one I
+used in Part II, where you know exactly what's in the file.
+But what about real DEM data where the elevations can vary?
+Explore Your Test Data
+For a test, I downloaded some data that includes the peaks I can see
+from White Rock in the local Jemez and Sangre de Cristo mountains.
+```
+wget -O mountains.tif 'http://opentopo.sdsc.edu/otr/getdem?demtype=SRTMGL3&west=-106.8&south=35.1&east=-105.0&north=36.5&outputFormat=GTiff'
+```
+Create a hillshade to make sure it looks like the right region:
+```
+gdaldem hillshade mountains.tif hillshade.png
+pho hillshade.png
+```
+(or whatever your favorite image view is, if not
+pho).
+The image at right shows the hillshade for the data I'm using, with a
+yellow cross added at the location I'm going to use for the observer.
+Sanity check: do the lowest and highest elevations look right?
+Let's look in both meters and feet, using the tricks from Part I.
+```
+>>> import gdal
+>>> import numpy as np
+
+>>> demdata = gdal.Open('mountains.tif')
+>>> demarray = np.array(demdata.GetRasterBand(1).ReadAsArray())
+>>> demarray.min(), demarray.max()
+(1501, 3974)
+>>> print([ x * 3.2808399 for x in (demarray.min(), demarray.max())])
+[4924.5406899, 13038.057762600001]
+```
+That looks reasonable. Where are those highest and lowest points,
+in pixel coordinates?
+```
+>>> np.where(demarray == demarray.max())
+(array([645]), array([1386]))
+>>> np.where(demarray == demarray.min())
+(array([1667]), array([175]))
+```
+Those coordinates are reversed because of the way numpy arrays
+are organized: (1386, 645) in the image looks like
+Truchas Peak (the highest peak in this part of the Sangres), while
+(175, 1667) is where the Rio Grande disappears downstream off the
+bottom left edge of the map -- not an unreasonable place to expect to
+find a low point. If you're having trouble eyeballing the coordinates,
+load the hillshade into GIMP and watch the coordinates reported at the
+bottom of the screen as you move the mouse.
+While you're here, check the image width and height. You'll need it later.
+```
+>>> demarray.shape
+(1680, 2160)
+```
+Again, those are backward: they're the image height, width.
+Choose an Observing Spot
+Let's pick a viewing spot: Overlook Point in White Rock
+(marked with the yellow cross on the image above).
+Its coordinates are -106.1803, 35.827. What are the pixel coordinates?
+Using the formula from the end of Part I:
+```
+>>> import affine
+>>> affine_transform = affine.Affine.from_gdal(*demdata.GetGeoTransform())
+>>> inverse_transform = ~affine_transform
+>>> [ round(f) for f in inverse_transform * (-106.1803, 35.827) ]
+[744, 808]
+```
+Just to double-check, what's the elevation at that point in the image?
+Note again that the numpy array needs the coordinates in reverse order:
+Y first, then X.
+```
+>>> demarray[808, 744], demarray[808, 744] * 3.28
+(1878, 6159.839999999999)
+```
+1878 meters, 6160 feet. That's fine for Overlook Point.
+We have everything we need to set up a povray file.
+Convert to PNG
+As mentioned in Part II,
+povray will only accept height maps as a PNG file, so
+use gdal_translate to convert:
+```
+gdal_translate -ot UInt16 -of PNG mountains.tif mountains.png
+```
+Use the Data to Set Camera and Light Angles
+The camera should be at the observer's position, and povray needs
+that as a line like
+```
+    location <rightward, upward, forward>
+```
+where those numbers are fractions of 1.
+The image size in pixels is
+2160x1680, and the observer is at pixel location (744, 808).
+So the first and third coordinates of location should
+be 744/2160 and 808/1680, right?
+Well, almost. That Y coordinate of 808 is measured from the top,
+while povray measures from the bottom. So the third coordinate is
+actually 1. - 808/1680.
+Now we need height, but how do you normalize that? That's another thing
+nobody seems to document anywhere I can find; but since we're
+using a 16-bit PNG, I'll guess the maximum is 216 or 65536.
+That's meters, so DEM files can specify some darned high mountains!
+So that's why that location <0, .25, 0> line I got
+from the Mapping Hacks book didn't work: it put the camera at
+.25 * 65536 or 16,384 meters elevation, waaaaay up high in the sky.
+My observer at Overlook Point is at 1,878 meters elevation, which
+corresponds to a povray height of 1878/65536. I'll use the same value
+for the look_at height to look horizontally. So now we can
+calculate all three location coordinates: 744/2160 = .3444,
+1878/65536 = 0.0287, 1. - 808/1680 = 0.5190:
+```
+    location <.3444, 0.0287, .481>
+```
+Povray Glitches
+Except, not so fast: that doesn't work. Remember how I mentioned in
+Part II that povray doesn't work if the camera location is at ground
+level? You have to put the camera some unspecified minimum distance
+above ground level before you see anything. I fiddled around a bit and
+found that if I multiplied the ground level height by 1.15 it worked,
+but 1.1 wasn't enough. I have no idea whether that will work in
+general. All I can tell you is, if you're setting location to
+be near ground level and the generated image looks super dark
+regardless of where your light source is, try raising your location a
+bit higher. I'll use 1878/65536 * 1.15 = 0.033.
+For a first test, try setting look_at to some fixed place in
+the image, like the center of the top (north) edge (right .5, forward 1):
+```
+    location <.3444, 0.033, .481>
+    look_at <.5, 0.033, 1>
+```
+That means you won't be looking exactly north, but that's okay, we're
+just testing and will worry about that later.
+The middle value, the elevation, is the same as the camera elevation
+so the camera will be pointed horizontally. (look_at can be at
+ground level or even lower, if you want to look down.)
+Where should the light source be? I tried to be clever and put the
+light source at some predictable place over the observer's right
+shoulder, and most of the time it didn't work. I ended up just
+fiddling with the numbers until povray produced visible terrain.
+That's another one of those mysterious povray quirks. This light
+source worked fairly well for my DEM data, but feel free to experiment:
+```
+light_source { <2, 1, -1> color <1,1,1> }
+```
+All Together Now
+Put it all together in a mountains.pov file:
+```
+camera {
+    location <.3444, 0.0330, .481>
+    look_at <.5, 0.0287, 1>
+}
+
+light_source { <2, 1, -1> color <1,1,1> }
+
+height_field {
+    png "mountains.png"
+    smooth
+    pigment {
+        gradient y
+        color_map {
+            [ 0 color <.7 .7 .7> ]
+            [ 1 color <1 1 1> ]
+        }
+    }
+    scale <1, 1, 1>
+}
+```
+Finally, you can run povray and generate an image!
+```
+povray +A +W800 +H600 +INAME_OF_POV_FILE +OOUTPUT_PNG_FILE
+```
+And once I finally got to this point I could immediately see it was correct.
+That's Black Mesa (Tunyo) out in the valley a little right of center,
+and I can see White Rock
+canyon in the foreground with Otowi Peak on the other side of the canyon.
+(I strongly recommend, when you experiment with this, that you choose a
+scene that's very distinctive and very familiar to you, otherwise you'll
+never be sure if you got it right.)
+Next Steps
+Now I've accomplished my goal: taking a DEM map and ray-tracing it.
+But I wanted even more. I wanted a 360-degree panorama of
+all the mountains around my observing point.
+Povray can't do that by itself, but
+in Part IV, I'll show how to make a series of povray renderings
+and stitch them together into a panorama.
+Part IV,
+Making a Panorama
+from Raytraced DEM Images
+Tags: mapping, GIS, povray, 3D, programming, python
+[ 16:43 Jul 17, 2019
+More mapping |
+permalink to this entry |
+]
+Comments via Disqus:
+blog comments powered by Disqus
+<
+July 2019
+>
+SuMoTuWeThFrSa
+1 2 3 4 5 6
+7 8 910111213
+14151617181920
+21222324252627
+28293031
+Shallow Thoughts blog
+Shallow Thoughts Archives
+(all entries, by category)
+Entries by Tag
+About:
+Feeds:
+RSS 2.0
+| Atom
+@akkana@fosstodon.org on Mastodon
+@akkakk on Twitter (now inactive)
+Shallow Sky Home
+Contact Akkana
+Syndicated on:
+• LinuxChix Live
+• Ubuntu Women
+• Women in Free Software
+• Graphics Planet
+• Ubuntu California
+Powered by PyBlosxom.

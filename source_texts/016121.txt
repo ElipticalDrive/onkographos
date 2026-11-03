@@ -1,0 +1,1587 @@
+COMPUTER GRAPHICS forum
+Eurographics Conference on Visualization (EuroVis) 2025
+W. Aigner, N. Andrienko, and B. Wang
+(Guest Editors)
+Volume 44 (2025), Number 3
+Random Access Segmentation Volume Compression
+for Interactive Volume Rendering
+M. Piochowiak
+, F. Kurpicz
+, and C. Dachsbacher
+Karlsruhe Institute of Technology, Germany
+H01 773.1 GB
+ours: 14.6 GB
+13.2 ms/frame
+AZBA 385.4 MB
+ours: 2.5 MB
+23.8 ms/frame
+C ELLS 4000 MB
+ours: 176.4 MB
+24.7 ms/frame
+F IBER 5693.5 MB
+ours: 90.7 MB
+34.2 ms/frame
+Figure 1: H01, C ELLS, AZBA, and F IBER data sets compressed with our full random access multi-resolution CSGV-R segmentation volume
+compression. Renderings are in FullHD with a static camera and accumulate one indirect ambient occlusion ray per pixel per frame over 256
+frames. The CSGV-R volumes (b = 64 with stop bits) are rendered in the compression domain, accelerated with a voxel cache of 1 GiB size,
+plus an empty space cache except for H01. DDA ray marching accesses the multi-resolution volumes so that 1 voxel approximately maps to one
+pixel in the image. The renderings contain no decompression artifacts from caching or streaming as seen in other techniques.
+Abstract
+Segmentation volumes are voxel data sets often used in machine learning, connectomics, and natural sciences. Their large sizes
+make compression indispensable for storage and processing, including GPU video memory constrained real-time visualization.
+Fast Compressed Segmentation Volumes (CSGV) [PD24] provide strong brick-wise compression and random access at the brick
+level. Voxels within a brick, however, have to be decoded serially and thus rendering requires caching of visible full bricks,
+consuming extra memory. Without caching, accessing voxels can have a worst-case decoding overhead of up to a full brick
+(typically over 32.000 voxels). We present CSGV-R which provide true multi-resolution random access on a per-voxel level. We
+leverage Huffman-shaped Wavelet Trees for random accesses to variable bit-length encoding and their rank operation to query
+label palette offsets in bricks. Our real-time segmentation volume visualization removes decoding artifacts from CSGV and renders
+CSGV-R volumes without caching bricks at faster render times. CSGV-R has slightly lower compression rates than CSGV, but
+outperforms Neuroglancer, the state-of-the-art compression technique with true random access, with 2× to 4× smaller data sets
+at rates between 0.648% and 4.411% of the original volume sizes.
+CCS Concepts
+• Computing methodologies → Rendering; • Information systems → Data compression;
+1. Introduction
+Segmentation volumes are commonly used in various of domains
+such as connectomics, machine learning, or natural sciences. It is
+desirable to exploit the computational resources and parallel processing of GPUs when working with large-scale segmentation volumes,
+but the available GPU memory can quickly become a limiting factor. Working with compressed segmentation volumes could alleviate
+© 2025 The Author(s). Computer Graphics Forum published by Eurographics - The European
+Association for Computer Graphics and John Wiley & Sons Ltd.
+This is an open access article under the terms of the Creative Commons Attribution License, which
+permits use, distribution and reproduction in any medium, provided the original work is properly cited.
+this problem, however, existing compression methods are either not
+suitable for GPU-based processing and rendering, or have significant
+shortcomings, most notably not offering strong compression and
+random access at the same time.
+The state-of-the-art method Fast Compressed Segmentation Volumes (CSGV) [PD24] encodes individual bricks of segmentation
+volumes in a multi-resolution fashion and allows random access on
+2 of 12
+M. Piochowiak, F. Kurpicz & C. Dachsbacher / Random Access Segmentation Volumes for Interactive Volume Rendering
+this level. However, within a brick, voxels can only be decoded from
+a stream of stored operations in a strictly serial manner, prohibiting
+true random access. This has downsides, e.g. for rendering the volumes: First, a cache for decoded bricks is needed which stores many
+more voxels than required and consumes significant memory—up to
+gigabytes in addition to the compressed data. At high rendering resolutions where many bricks are requested at the finest level-of-detail,
+the cache size may easily exceed the available GPU memory. Due to
+diminishing returns of improving compression rates, we suggest that
+novel methods address this dependency on large caches to reduce
+overall rendering memory. Second, there is no feasible way of accessing a voxel if it is not in the cache. For tasks with incoherent random
+single voxel accesses, the decoding overhead would be significant as
+bricks always have to be decoded up to the requested voxel.
+In this paper, we introduce a novel compressed data structure for
+segmentation volumes with true random access to voxels. Building
+on the compact multi-resolution encoding of CSGV, a key component of our Random Access Compressed Segmentation Volumes
+(CSGV-R) is using wavelet tree encodings for indexing the compressed data. Wavelet trees are used in text indexing and related
+fields, and to the best of our knowledge, we are the first to adapt and
+use them in a rendering context. Our data structure does not require
+the serial variable bit-length asymmetric numerical systems (ANS)
+encoding [Dud13] as CSGV, and is thus more GPU-friendly. We
+reduce the implementation and query overhead of our wavelet trees
+to surpass CSGV’s render performance. Our random access removes
+the need for caching on the brick level: we evaluate rendering segmentation volumes without any caching, and with caching individual
+voxels directly. To summarize, our contributions are:
+• a GPU-friendly, true random access and lossless compression
+method for segmentation volumes,
+• an efficient renderer with optional, random access-enabled caching
+of individual voxels (using Cuckoo hashing), and
+• an optimized Huffman-shaped wavelet matrix GPU-shader implementation for indexing compressed volume data.
+2. Related Work and Background
+In the following, we introduce related works from segmentation
+volume compression and visualization, as well as wavelet trees.
+2.1. Segmentation Volume Compression
+A large body of work exists on gray-scale image and volume compression [BTB∗ 22, BRGIG∗ 14]. Such compressors are applied to
+imaging data if it is paired with segmentation volumes [MJB∗ 21].
+But they are rarely directly used for segmentation volumes as compression of those is usually lossless [MHL∗ 17, Goo16, PD24] and
+their content, integer classification labels, behaves different than
+image data. An exception are lossless image compressors like
+PNG [ATAS21]. Lossless general purpose compression, e.g. gzip, is
+used in compressed file formats like hdf5 [HDF] and NIfTI [LM14].
+For binary segmentations, sparse-voxel-octrees [LK10] and directedacyclic-graphs [KSA13] can be applied. For data with more labels, label values and occupancy can be decoupled within local
+bounding boxes [WPD24] but compression rates are limited. Compresso [MHL∗ 17] encodes label regions within small windows as border bit masks and label palettes. Windows can be randomly accessed,
+but strong compression rates are only achieved when additionally
+applying a global LZMA compression, which makes random access
+impossible and is not parallelizable. The Mixture Graph [ATAS21]
+creates a graph-compacted multi-resolution hierarchy of label distributions. The Google Neuroglancer precomputed format [Goo16]
+is a brick-wise encoding storing a palette of labels for each brick
+and a fixed number of bits per voxel indexing into it. This is the
+fastest format, offers true random access down to the voxel level, but
+has sub-par compression rates. CSGV [PD24] is the state-of-the-art
+segmentation volume compressor in terms of compression rates and
+operates brick-wise as well. It encodes a multi-resolution hierarchy
+of labels as a stream of label assignment operation. The stream
+is compressed with an ANS [Dud13] variable bit-length encoding.
+While bricks can be randomly accessed, access within a brick, covering up to several thousand voxels, must happen strictly serially. Our
+multi-resolution segmentation volume compressor is an alternative
+to CSGV that offers random access down to the voxel level as in
+Google Neuroglancer but with compression rates close to CSGV.
+2.2. Segmentation Volume Visualization
+Segmentations are often visualized within labeling or proofreading
+frameworks as 2D slices or rasterized 3D triangle meshes [PHK04,
+BBB∗ 17, BSL18, AABH∗ 16]. Meshing of voxel regions is either
+a preprocess, or only supported for few labels [Lem10, QDB11,
+LC87]. Portable visualization methods are often web based [Goo16,
+BBB∗ 17] while offline rendering may use photorealistic renderers [Ble18,VMM∗ 23] and distributed hardware [MAF07] with longer
+render times and lower accessibility. For large-scale segmentation
+volumes, distant storage formats allow partially streamed access with
+caching [MSL22] as implemented by Google Neuroglancer [Goo16]
+and Webknossos [BBB∗ 17] that both render 2D slices and subset
+3D meshes. Ray marching can be used when voxel data is directly
+rendered instead of meshed representations [ATAS21, PD24]. If
+volumes fit into main memory, renderers on single GPU consumer
+hardware may stream and cache partial volumes from main memory
+to GPU video memory (VRAM) [BAAK∗ 13, BMA∗ 18]. Alternatively, a compressed representation of the volume is stored in VRAM
+to partially decode and cache visible regions in a faster, fully GPUbased pipeline [PD24]. With compression domain rendering, caching
+is not required [WPD24, Goo16]. Werner et al. [WPD24] encode
+label occupancy inside separate bounding boxes, making their compression suitable for hardware accelerated raytracing. The method
+requires sparsity in the data and achieves weaker compression than
+CSGV. The Mixture Graph [ATAS21] solves the problem of color
+filtering, which can only be applied with post-classification transfer functions [EHK∗ 06] for multi-resolution segmentation volumes.
+The Volume Conductor [LAB∗ 24] solves visual clutter in densely
+labeled volumes with label-based visibility management. Volume
+Puzzle [AAAT∗ 22] offers semi-automatic transfer function creation
+for segmentation volumes. Our renderer stores random access compressed volumes in VRAM for a fully GPU-based compression domain rendering pipeline with optional voxel caching.
+2.3. Access and Rank Queries on Bit Vectors
+A bit vector is a text B over the binary alphabet {0, 1}. On bit
+vectors, we are interested in two types of queries: access(i) = B[i]
+© 2025 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+M. Piochowiak, F. Kurpicz & C. Dachsbacher / Random Access Segmentation Volumes for Interactive Volume Rendering
+Y
+X
+Z
+X
+Z
+Y
+|
+=
+X
+|
+X
+0
+1
+|
+X
+Y
+...
+|
+3 of 12
+Y
+X
+X
+X
+Z
+Z
+0
+Y
+Y
+0
+1
+00
+Z
+Z
+000
+X
+X
+X
+4
+5
+6
+Y
+Z
+Z
+Y
+0
+1
+2
+3
+00
+01
+0
+1
+2
+3
+0000
+10
+0
+1
+Figure 2: A wavelet tree that encodes a text T of operations ω ∈ Σ in its conceptual form and as a compressed Huffman-shaped wavelet matrix.
+Wavelet tree traversal for access(8) = T [8] =
+is highlighted in red: Symbols are constructed bit-by-bit from the level-wise bit vectors,
+starting from the top. A bit vector access yields the next bit α which also determines if descending left 0 or right 1 to the next level. A rankα
+determines the read index in the next level. The Huffman-shaped wavelet matrix is a pointer-less memory layout of a wavelet tree. It stores
+symbols as their variable bit-length canonical Huffman-codes (CHC) to compress T . CHC are constructed from the Huffman-tree (right) in
+which frequent symbols have shorter lengths. Our CHC create an efficient tree layout where any 1 bit terminates a character. Thus, no right
+children exist and rank0 queries return the index in the next level if a 0 bit was read in the current level. Note that explicit symbols are added
+for readability only: only the bit vector W and the wavelet tree level start indices W1 . . .W4 within it are stored in memory.
+Z
+and rankα (i) = |{ j < i : B[ j] = α}| for α ∈ {0, 1} which returns the
+number of times α occurred before i. On bit vectors, these queries can
+be answered in constant time [Jac89]. In practice, the currently most
+space-efficient approach maintaining reasonable query performance
+is called flat rank [Kur22]. Flat rank only requires 3.51 % additional
+space. The general idea is to partition the bit vector into blocks and
+to store the number of 1-bits in the bit vector up to each of the blocks
+in an array (see [Kur22] and our supplemental for details) .
+2.4. Wavelet Trees
+Wavelet trees [GGV03] are compressible index data structures
+with applications in text indexing [FM00, GNP20], text compression [GVX11, Mak12], and computational geometry [MN06]. They
+generalize, among others, access and rank queries from binary alphabets to alphabets of size σ and can answer these queries in O(log σ)
+time. We now give a brief overview of wavelet trees along the variants
+in Figure 2. Due to space constraints, we omit some general details
+and refer to the excellent surveys on wavelet trees [GVX11,Mak12].
+Structure of a Wavelet Tree. Each node of the wavelet tree (left
+in Figure 2) represents a subset of the whole text T and has up to
+two children. These subsets contain all characters of T that are in a
+subset of the alphabet, i.e. wavelet trees partition the alphabet, not
+the space of the text. The root at the top considers the entire alphabet
+and thus represents the whole text. Now, the left child of the root
+represents all characters in the lower half of the alphabet and the
+right child represents all characters in the upper half of the alphabet.
+In other words, when the root considers the alphabet Σ = [1, σ],
+the left child considers Σℓ = [1, σ/2] and the right child considers
+Σr = [σ/2 + 1, σ] minus rounding. The remaining nodes are defined
+recursively and we stop at depth ⌈log σ⌉.
+We use bit vectors to represent the characters. If a character is in
+© 2025 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+the lower half of the alphabet, we mark it with a 0-bit. It is marked
+with a 1-bit otherwise. At each node, we only look at characters
+in the subset represented by the node, i.e., the total length of all bit
+vectors on the same level of the tree is always |T |. The red path
+in Figure 2 highlights the query for accessT (8) = T [8] starting at
+position i = 8 in the root node and descending left or right depending
+on the bit α at i. All characters that share the same bit will belong
+to the same node in the next level. Thus, rankα (i) in the current
+node determines the next index in the node in the following level.
+In our example, this descend through the tree iteratively extends
+T
+the bit-prefix of a given character until all bits are known. rankω
+operates similarly: as the same character ω ∈ Σ always ends in the
+same node, a bit vector rank in that node is equal to rankTω . To find
+the node, the direction bit α in level l is not obtained through an
+access but is the l-th bit of the code of ω (see our supplemental for
+details).
+In memory, wavelet trees are not stored using pointers: The
+level-wise wavelet tree concatenates all bit vectors on the same
+level [CKV24]. A more efficient representation is the wavelet matrix [CNP15], which is a level-wise wavelet tree where the nodes on
+the same level have been reordered to save one access and/or rank
+query per level in practice. Since these are only pointer-less memory
+representations of wavelet trees, we always refer to the structure as
+wavelet tree, as is convention in literature.
+Improving Wavelet Tree Queries. However, originally designed
+as an alternative representation of the wavelet tree for large alphabets, the wavelet matrix [CNP15] layout provides also faster queries
+in practice without any disadvantages. Furthermore, because of
+their similarity, all the results for wavelet trees are also applicable to wavelet matrices. There has been further effort to improve
+query performance of wavelet trees (and matrices) using multi-ary
+trees [FMMN07, CKV24] and wavelet forests [HBG∗ 24].
+4 of 12
+M. Piochowiak, F. Kurpicz & C. Dachsbacher / Random Access Segmentation Volumes for Interactive Volume Rendering
+each brick, CSGV first builds a multi-resolution grid of its volume
+by halving b i-times; the resulting elements are denoted as nodes
+(Figure 3). This grid represents [L = log2 (b)] + 1 levels-of-detail
+(LODs) indexed with l ∈ [0, L]. Each node is assigned the most frequent label of its 23 child nodes on the next finer LOD which cover
+the same region in the segmentation volume. The grid nodes are then
+serialized from coarsest to finest LOD and along a Morton Z-order
+curve within an LOD.
+Figure 3: CSGV encodes segmentation volume bricks as a multiresolution grid, here in 2D. Each grid node contains an operation
+determining if it copies the label from a parent
+, neighbor
+, or
+the palette
+. CSGV operates along the serialized operation stream
+(black line). Our random access CSGV-R follows the operations from
+the accessed node up to a palette operation (red arrows).
+Wavelet Tree Construction. Babenko et al. [BGKS15] and Munro
+et al. [MNV16] presented the best √
+sequential construction algorithms that require only O(n log σ/ log n) time. There exists
+a lot more (theoretical and practical) work on the efficient construction of wavelet trees in many different models of computation [Shu20, Shu15, FEFS17, dFdS17, CNS11, Tis11, Kan18, EK19,
+DFK20, DEF∗ 21, DFKT23]. It should be noted that, to the best of
+our knowledge, the only GPU implementation of wavelet trees is by
+NVIDIA as part of their NVBIO library [NPS20].
+Compressing Wavelet Trees. Wavelet trees can easily be compressed. To this end, we can build the wavelet tree for the Huffman
+compressed text [Huf52] (right in Figure 2). This type of wavelet
+tree is called the Huffman-shaped wavelet tree, because the depth
+of the leaves now depends on the length of the codewords of the
+characters represented. These Huffman-shaped wavelet trees require
+only |T |⌈H0 (T )⌉(1 + o(1)) bits of space. Here, H0 (T ) denotes the
+0-th order entropy, i.e., the least amount of space achievable when
+encoding each symbol of the text separately. Note that we cannot
+use Huffman-codes directly, instead we have to use bit-wise negated
+CHC [DEF∗ 21], which do not worsen any theoretical guarantees but
+provide the benefit of smaller codes being lexicographically greater.
+This allows for us to have trees, where the shorter levels are all on the
+right-hand side of the tree, simplifying navigating the tree. For our
+special case in Figure 2, no right children exist at all because of the
+given CHC pattern. Most access queries terminate in early depths.
+Section 3 includes pseudo code for our streamlined access and rank
+queries. In this work, we use wavelet trees to compress our segmentation volume encoding in form of such streamlined Huffman-shaped
+wavelet matrices, supporting random access and rank queries.
+2.5. Fast Compressed Segmentation Volumes
+Segmentation volumes are 3D grids storing integer labels for each
+voxel. Voxels with the same label usually form a contiguous region
+and partition the space into separate object regions. While segmentation volumes may assign multiple labels to a single voxel, we focus
+on the most common case where each voxel v ∈ N3 is assigned to
+exactly one label λ ∈ [0, 232 ). CSGV [PD24] is a brick-wise compression for such volumes: Therefore, the volume is split into equally
+sized bricks of b3 voxels with b = 2i , i ∈ N ; b typically being 16, 32,
+or 64. Each brick is (de-)compressed completely independently. For
+CSGV encodes the grid nodes’ labels along this indexing order
+with one operation per node, and stores a palette of labels. Instead of
+storing the nodes’ indices into the palette explicitly, an index pointer
+i p is initialized to the first palette entry and incremented each time
+the next palette entry is read. The possible operations for a node are
+δ
+copy the label of the parent node,
+copy the label of an axis-aligned neighbor node,
+read the label at i p from the palette and advance i p ,
+re-read the label at i p − 1 from the palette,
+re-read the label at i p − δ from the palette.
+The neighbor operations = { , , } always refer to the neighbor nodes outside of the current 23 voxel block, i.e. neighbors with a
+different parent. If the labels of these neighbors have not yet been
+decoded, their parents are referenced instead (red cross in Figure 3).
+δ requires additionally storing the value δ in the operation stream.
+X
+Y
+Z
+In a plain CSGV Nibble-wise encoding, 3 bits per node suffice
+to store its operation. An additional stop bit is used to mark nodes
+for which all child nodes have the same label. These child nodes
+can be omitted in the encoding stream resulting in an Octree-like
+sparsification. For better compression, CSGV uses a variable bitlength encoding (range ANS encoder [Dud13]) to compress the
+brick’s operation stream. Note that CSGV always decodes a brick
+fully up to a certain LOD: The brick’s operation stream is traversed
+from the coarsest LOD up to the last node of the target LOD. During
+processing of the node operations, the output array temporarily stores
+the labels set by coarser LODs to keep track of parent labels and
+constant regions from stop bits.
+3. Random Access Segmentation Volume Compression
+The ANS stream compression used in CSGV makes random access impossible. Therefore, we will compact the stream of node
+operations T [i] : N 7→ Σ with a Huffman-shaped wavelet tree, which
+enables variable bit-length compression and random access. The
+operation δ in CSGV requires storing the δ values as additional values in the operation stream. As these δ-values increase the number
+of different occurring values in the stream, we omit this operation
+in our CSGV-R and only support the most frequent back reference
+distance δ = 1 that is directly encoded as
+. That is, our alphabet
+is Σ = { , , , , , } with a size of |Σ| = 6.
+X
+Y
+Z
+Variable bit-length compression is beneficial as the operations used
+in CSGV occur in vastly different frequencies. We use Huffmanshaped wavelet trees mapping symbols to bit patterns, their bit-wise
+negated canonical Huffman codes (CHC) [DEF∗ 21]. The CHCs are
+constructed from the Huffman tree, i.e. from the operation frequencies. In CSGV, parent references are the most frequent symbols,
+neighbor references are less frequent, and palette accesses and back
+© 2025 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+M. Piochowiak, F. Kurpicz & C. Dachsbacher / Random Access Segmentation Volumes for Interactive Volume Rendering
+5 of 12
+then excluded in the encoding, resulting in storage akin to Octrees.
+We decouple these stop bits from the operation codes to keep the
+alphabet size and depth of the wavelet trees limited. The stop bits
+S[i] : i 7→ {0, 1} are stored in a separate bit vector that follows after
+the operation list with its own flat rank data structure. We implement
+two variants of CSGV-R, with and without using S.
+Figure 4: Stop bits (red nodes) can create a negative offset within
+the operation stream for a node. Stop bits on coarser levels that are
+in an earlier region along the Z-curve remove (2d )∆L node index
+predecessors. Nodes that are in a removed region must use the index
+of the parent that sets the stop bit instead (red arrow). Numbers
+inside nodes are their Morton codes n inside their LOD.
+Algorithm 1 idx(&n, & ¯l) computes the index of a multi-grid node
+given by its Morton code n in its LOD l¯ within the operation stream.
+n and l¯ are passed by reference. Tl is the stream index of the first
+node in each LOD, S is the stop bit vector.
+Input grid node given as the Morton code n in its LOD l¯
+Output operation stream index of the node
+1: o f f set ← 0
+2: for l¯′ = 0 . . . l¯ do
+¯ ¯′
+3:
+n parent ← ⌊n/23(l−l ) ⌋
+▷ parent node index in its LOD
+S
+4:
+if access (Tl¯′ + n parent − offset) = 1 then
+5:
+l¯ ← l¯′
+6:
+n ← n parent
+▷ Return parent if it sets a stop bit
+7:
+break
+offset ← offset + rankS1 (Tl¯′ + n parent − offset)
+8:
+− rankS1 (Tl¯′ )
+9:
+offset ← 8 · offset
+10: return (Tl¯ + n − offset)
+references occur the least. The pattern is consistent across data sets
+and domains [PD24], which makes it possible to determine Huffman codes once. Conveniently for Huffman coding, the operation
+distribution roughly follows (1/2)1...7 . Figure 2 (right) shows the
+resulting CHCs for our alphabet Σ. The maximum length of a bit
+pattern is 5 which means that our Huffman-shaped wavelet tree uses
+5 levels. Note that the CHCs follow a simple layout, similar to RICE
+coding [RP71] where the number of consecutive 0 bits determines
+the operation. For this reason, our wavelet trees contain no right
+child nodes, i.e. any 1 bit terminates a symbol (Figure 2 middle).
+Wavelet Tree Compression. When compressing a volume brick, we
+first encode its label multi-grid from coarsest to finest level into a list
+of operations as in CSGV. Recall that we do not use δ , and replace
+it by
+instead, possibly creating additional palette entries. The
+operation stream T is subsequently compressed as a Huffman-shaped
+wavelet tree with our hard coded CHCs. We store it as a wavelet
+matrix [CNP15] and refer to its resulting level-wise concatenated bit
+vector as W and to the level start indices inside W as W0 . . .W4 . W is
+constructed with the prefix counting algorithm [DEF∗ 21]. Next to W
+we store a flat rank structure [Kur22] for constant time rank queries.
+Stop Bits. CSGV introduces two variants of each operation where
+a marker stop bit determines if the covered region by a grid node is
+constant in all finer levels. Respective nodes in the finer levels are
+© 2025 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+Brick Headers. The brick headers store the start offset of each
+CSGV LOD within the operation and stop bit lists as T0 . . . TL ,
+the palette size, and the information to query the wavelet matrix.
+The latter includes the number of 1 bits before each level in W as
+Z1 [0] . . . Z1 [4]. Figure 5 shows the final memory layout of a compressed brick not true to scale. Note that the levels of the wavelet
+tree l are not the LODs of the multi-resolution grid l in the CSGV
+encoding. Queries for all CSGV LODs start within the first wavelet
+tree level.
+3.1. Random Access Decoding
+Next we discuss the fundamental differences of the non-random
+access CSGV and our random access CSGV-R. CSGV operates
+serially within a brick: To access the label of a brick node T [i], all
+previous nodes T [ j], j < i must be decoded first. In practice, full
+bricks are decoded up to a certain LOD and cached, and if all of the
+brick’s nodes will be accessed later, costs amortize quickly. However,
+if only few nodes will be accessed, for example due to occlusion in a
+renderer or when a task requires sampling random voxels globally,
+the brick-wise caching poses a significant memory overhead.
+Mainly two reasons make the serial decoding necessary for CSGV:
+The variable bit-length ANS compression makes a direct mapping
+of an operation stream index i to its memory location impossible.
+And no explicit palette indices are stored for
+and instead the
+index is effectively the number of preceding
+in the operation
+stream. Obtaining the i-th operation in T is an access(i) = T [i]
+query. Computing the palette index at operation i where T [i] =
+translates to rank (i) = |{ j < i : T [ j] = }|. Our wavelet tree
+answers both queries in constant time given our constant Σ.
+To resolve parent and neighbor references, CSGV uses the temporary information stored in the partially decoded brick. Random
+accesses are not possible as such a partial decoding does not exist in
+this case. In CSGV-R we instead start at the accessed grid node and
+follow the indirections introduced by
+and
+as a chain of operations from grid node to grid node until either
+or
+is reached
+(red arrows in Figure 3). Then, a rank query returns the index to
+the brick palette at which the label of the accessed node is looked up.
+Grid nodes can either be referred to by their index in the operation
+stream i, or by their coordinate in the grid. In the latter case, the
+coordinate is a tuple of the node’s 1D Morton code n of its coordinate
+within its LOD ¯l. The LOD 0 is the coarsest level consisting of one
+node and L is the finest LOD with b3 nodes. Figure 4 shows n within
+the nodes. Note that the Morton code of the parent of node n is
+⌊n/2d ⌋ where d = 2 in 2D. The operation of a node is obtained as
+access(i) ⇐⇒ access(idx(n, ¯l)). idx returns the operation stream
+¯ idx computes the negative offset from n
+index i for the tuple (n, l).
+to i within a level that occurs because earlier nodes were removed
+by stop bits on coarser levels (Figure 4). Recall that the stop bit
+6 of 12
+M. Piochowiak, F. Kurpicz & C. Dachsbacher / Random Access Segmentation Volumes for Interactive Volume Rendering
+...
+...
+Figure 5: Memory layout of a compressed brick (not true to scale). The LOD operation starts are the indices i at which new CSGV multi-grid
+levels start in T (not to be mistaken for the wavelet matrix level start indices Wl ). The wavelet matrix bit vector W and stop bit vector S are
+accompanied by a flat rank structure for constant time rank queries. The palette of uncompressed labels is stored in reverse order as in CSGV.
+Algorithm 2 Operation Stream Wavelet Matrix access
+Input operation stream index i, wavelet matrix bit vector W
+from brick header: Wl level starts, Z1 [l] = rankW
+1 (Wl )
+Output operation ω = T [i] ∈ { , , , , , }
+1: for l = 0 . . . 4 do
+2:
+bit ← accessW (Wl + i)
+▷ bit vector access
+3:
+if bit = 1 then
+▷ any 1 bit terminates symbol
+4:
+return l
+▷ level = | CHC 0 bits | = ω
+5:
+onesbefore ← rankW
+(W
++
+i)
+−
+Z
+1 [l]
+l
+1
+6:
+i ← i − onesbefore
+7: return 5
+▷ five consecutive 0 bits are
+X
+Y
+Z
+vector S[i] stores for each node i if its covered region is missing in
+the operation stream on all finer levels. rankS1 (i) returns the number
+of 1 bits, i.e., stop bits, before i in S. The brick headers store the
+stream index of the first grid node, n = 0, in each LOD, denoted
+T0 . . . TL . Here, the mapping of a grid node to its index is
+¯
+¯ = T¯ + n − ∑ rankS1 (Pl (n, l))
+¯ · 23(l−l)
+i = idx(n, l)
+l
+Algorithm 3 Operation Stream Wavelet Matrix rank
+Input operation stream index i, wavelet matrix bit vector W
+from brick header: Wl level starts, Z1 [l] = rankW
+1 (Wl )
+Output number of
+in T before i: rank (i)
+1: for l = 0 . . . 4 do
+2:
+onesbefore ← rankW
+1 (Wl + i) − Z1 [l]
+3:
+i ← i − onesbefore
+4: return onesbefore
+Wavelet Matrix Rank. We use an adapted flat rank [Kur22] for
+constant time rank queries on our bit vectors at 5% space overhead
+(details in the supplemental). Wavelet matrix rank only occurs for
+. Our rank implementation collapses from the generalized form
+(cf. [CNP15]) to the efficient implementation shown in Algorithm 3:
+Hardcoding the character’s CHC (00001) removes all branching. A
+generalized wavelet matrix implementation must track where tree
+node intervals start within a level [CNP15]. We can optimize out all
+of this: a single interval exists per level (0l prefix) which starts at the
+level start index Wl in W . We unroll the loop in our implementation.
+l<l¯
+¯ is the index of the (grand-)parent node of n in LOD
+where Pl (n, l)
+¯l. While it initially may seem that Pl introduces a recursion by
+requiring an operation index mapping itself, it can be computed itera¯ as shown in Algorithm 1.
+tively along with the inner sum in idx(n, l)
+¯ can be
+Because all inner operations require constant time, idx(n, l)
+answered in O(L) = O(log b) time.
+3.2. Wavelet Tree Implementation
+On the GPU, our CSGV-R are buffers of concatenated compressed
+bricks, each with the layout from Figure 5. Vulkan buffer device
+addresses allow to pass references to brick bit vectors and headers
+to the decoding functions. Our bit vectors and flat ranks are stored
+as arrays of 64 bit words where the bit index order inside a word
+goes from the least to the most significant bit. Our wavelet trees are
+implemented as Huffman-shaped wavelet matrices as in Figure 2.
+Wavelet Matrix Access. accessW (i) of the i-th bit in a bit vector
+W is computed as (words[i / 64] » (i & 63)) & 1 and
+uses one integer division, one bit shift and two bit-wise ands. Our
+RICE-coding like CHC (Section 3) results in the operation number
+simply being the number of zeros before the first 1 bit in a Huffmanshaped wavelet tree symbol. Additionally, this completely eliminates
+the 1 branch and the tracking of interval starts from the general
+Wavelet Matrix access query [CNP15] as laid out in Algorithm 2.
+4. Rendering of CSGV-R Encoded Volumes
+We implemented a segmentation volume renderer using ray marching
+in Vulkan compute shaders. One thread per pixel marches along a
+ray from the camera through the volume using digital differential
+analyzer (DDA) traversal [AW87]. We access brick LODs so that
+one decoded voxel approximately maps to one pixel in the output
+image. For coarser LODs, the DDA step size is increased accordingly.
+The label of an accessed brick is mapped to opacity and color by a
+transfer function. Opacity values above a threshold are interpreted as
+surface interactions where a local diffuse shading model is evaluated
+and the thread either terminates or continues to pursue an indirect
+shadow or ambient occlusion ray, depending on the shading mode.
+For accessing voxel labels, CSGV caches visible bricks, fully decoded up to an LOD. When their renderer requests a voxel from a
+brick that is not available, the brick is scheduled for decoding in the
+next frame; akin to shading atlas streaming [MVD∗ 18] bricks are
+assigned to free regions in the cache. Our CSGV-R is not dependent
+on a cache and the renderer can directly access voxels from encoded
+bricks. However, as is discussed in section 5.2, operating the rendering completely in the compression domain is slow and should
+thus only be used if memory budgets are strict. For other cases, we
+introduce a voxel cache with variable size to store decoded labels of
+single voxels. It operates without the one frame latency of CSGV as
+voxels not in the cache can be decoded directly.
+© 2025 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+M. Piochowiak, F. Kurpicz & C. Dachsbacher / Random Access Segmentation Volumes for Interactive Volume Rendering
+Figure 6: Cuckoo hashing uses two hash functions h1 (k) and h2 (k)
+mapping keys into distinct positions in two hash tables M1 and
+M2 . When keys are inserted in one table, starting from M1 , ejected
+elements are recursively swapped between their two positions.
+7 of 12
+Figure 7: Insertion of a label λ for voxel v in LOD l with our adapted
+Cuckoo hashing. (λ′ , k′ ) is ejected from its first position and can be
+swapped into its second positions. (λ′′ , k′′ ) cannot be moved to its
+alternative location as it is ejected from its second position.
+4.1. Voxel Caching
+For our optional voxel cache we use a hash map which stores labels
+λ for tuples of voxel coordinates v ∈ N3 (measured in the finest
+resolution) and requested LODs l. We use Cuckoo hashing [PR04]
+to map the tuple (v, l) to positions in the hash map p. Cuckoo hashing defines two hash functions for each element, h1 (k) and h2 (k)
+mapping element keys k to positions in two different hash tables as
+M1 [h1 (k)] and M2 [h2 (k)]. As any element can only be found at either
+of those two positions, the lookup function operates in constant time.
+When inserting an element, it is stored at M1 [h1 (k)]. If this position
+was already occupied by an element k′ , k′ is moved to its second
+location M2 [h2 (k′ )], possibly ejecting another element that is then
+moved from M2 to its other position in M1 and so on (Figure 6). This
+ejection loop continues either until an element is inserted into an unoccupied position, a predetermined loop depth is reached, or a cycle
+is detected (an element is inserted into a position that it occupied
+before). To construct the hash functions, Pagh and Rodler [PR04]
+use an XOR combination of three functions from the (c,k) universal
+family [CW77] given by Dietzfelbinger et al. [DHKP97]:
+ha (x) = (ax mod 232 ) / 232−m
+where a is an odd number and m is the most significant bit (MSB) of
+the power-of-two hash table size. As our query tuples are three or
+four-dimensional, we opt for the pcg family [O’N14, JO20] instead.
+In the original Cuckoo hashing [PR04], the keys in the table must be
+identical to the access tuples. For our tuple (v, l) this would require
+four 32 bit integers. Pagh and Rodler [PR04] propose to store such
+long keys outside the table and smaller pointers to the keys inside
+the table. In the following, we detail our specific approach which
+allows us to use a small hash of the tuple as the key instead.
+CSGV-R Cuckoo Caching. We use one single table M to hold M1
+and M2 at the same time, as discussed by Pagh and Rodler [PR04].
+M is an array storing the label λ and a 32 bit key k to identify hash
+collisions at each position. The first hash function for our method is
+used to determine the first position of a 4D tuple (v, l) in M as
+h1 (v, l) = h19 (s.x) ⊕ h47 (s.y) ⊕ h101 (s.z) mod |M|
+where we compute s = pcg3d(⌊v/2l ⌋ · 2l ) using the pcg3d 3D hash
+function [JO20] (see Figure 7) and ⊕ is a bitwise XOR. Rounding
+voxel coordinates down to powers-of-two forces hash table collisions
+for voxels from different LODs belonging to the same spatial region.
+This is desirable as we will never access different LODs of a region
+at the same time during rendering. Shader vector arithmetic allows
+to compute up to four ha (x) simultaneously. At M[h1 (v, l)], we store
+the voxel’s label λ and the 32 bit key k of the 4D lookup position
+© 2025 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+(v, l). The key is computed with another hash function as
+k = hk (v, l) = h5 (t.x) ⊕ h149 (t.y) ⊕ h61 (t.z) ⊕ h2887 (t.w)
+with t = (pcg4d(⌊v/2l ⌋ · 2l , l) being a 4D vector. We use the MSB
+of k to track if an element is stored at its first (set to 0) or second
+position (set to 1). The alternative hash table position of an element
+is determined with with u = pcg2d(hk (v, l), h1 (v, l)) as
+h̃2 (v, l) = h7 (u.x) ⊕ h31 (u.y) ⊕ h97 (u.x) ⊕ h173 (u.y) mod |M| .
+When an element (λ, k) inserted at p ejects a previous element
+(λ′ , k′ ) for which p is the first position, the ejected element is moved
+to its second position p′ . Given our definition of h̃2 we can compute
+p′ = h2 (k′ , p) with u = pcg2d(k′ , p), set the MSB of k′ to 1 and
+insert (λ′ , k′ ) at p′ . If p already is the second position for (λ′ , k′ ),
+then the element cannot be moved back to its first position since
+the input parameters for h1 are not available. Instead, the element
+is removed until the renderer accesses the associated voxel for the
+element again. Then a cache miss will occur and (λ′ , k′ ) will be reinserted. Note that elements still follow the Cuckoo hashing pattern
+of alternating between their first and second positions, and lookups
+operate in constant time accessing at most both positions. We limit
+the ejection recursion to a depth of 1 to terminate the Cuckoo hashing
+ejection loops earlier and thus limiting thread divergence.
+4.2. Empty Space Caching
+A naive implementation of the above described hashing will suffer
+from the fact that cache space is quickly exceeded if many voxels are
+mapped to transparent by the transfer function. As the ray marcher
+cannot determine if a label is visible before reading it from the cache
+or decoding it, an empty space skipping solution is required to reduce
+the number of accessed voxels. As in CSGV we can easily skip bricks
+which do not contain any visible labels by testing and marking the
+label palettes in another shader before rendering [PD24]. However,
+this is not yet sufficient and we thus add a more fine-granular empty
+space skipping bit vector E that stores one bit for 23 voxels, which
+we refer to as empty block, on the finest LOD of the full volume.
+Each bit in E is 1 if and only if all voxels in that empty block have an
+invisible label. For such invisible empty blocks, E stores only 18 bits
+per voxel, while the hash table M would require 64 bit per invisible
+voxel (32 for λ and 32 for k). Note that for partially visible empty
+blocks, all of its voxels have to be decoded and cached in M.
+We construct E on-the-fly during rendering: It is initialized to
+E = (000 . . . 000)2 and reset whenever the visibility transfer function
+8 of 12
+M. Piochowiak, F. Kurpicz & C. Dachsbacher / Random Access Segmentation Volumes for Interactive Volume Rendering
+Algorithm 4 getLabelOfVoxel(uvec3 v, uint l). We use a Cuckoo
+hashing variant for voxel label caching and an optional empty space
+skipping bit vector (gray). Insertions in E and M are atomic.
+Input voxel coordinate in finest LOD v, accessed LOD l
+Output label λ
+1: if brickInvisible(v/b) then
+▷ brick skipping as in CSGV
+2:
+return INVISIBLE
+▷ b is the brick size
+3: e ← index of v’s empty block in E
+4: if accessE (e) = 1 then
+▷ Check if E marks v invisible
+5:
+return INVISIBLE
+6: p1 ← h1 (v, l)
+▷ ≤ 2 lookups for (v, l) in M
+7: k ← hk (v, l) & (0111 . . . 1111)2
+8: (k1 , λ1 ) ← M[p1 ]
+9: if k1 = k then
+10:
+return λ1
+11: else
+12:
+p2 ← h2 (k, p1 )
+13:
+(k2 , λ2 ) ← M[p2 ]
+14:
+if k2 = (k | (1000 . . . 0000)2 ) then
+15:
+return λ2
+16: λ ← decodeLabel(v, l)
+Data Set
+Voxels
+Labels
+Orig. Size [GB]
+C ELLS
+F IBER
+H01
+AZBA
+1000 × 1000 × 1000
+1579 × 1092 × 1651
+5120 × 6144 × 6144
+470 × 1224 × 670
+1, 067, 196
+26, 372
+1, 296, 889
+204
+4.000 (4B)
+5.694 (2B)
+773.094 (4B)
+0.385 (1B)
+Table 1: Dimensions and sizes of the evaluated segmentation volumes. Bytes per voxel in the uncompressed volume given in ().
+tumor growth simulation. We only show tumor and blood cells,
+but label regions of roughly 103 voxels occupy the volume fully.
+• F IBER [MSJ∗ 22] is an X-ray scan of a fiber reinforced polymer
+with instance segmented glass fibers. Elongated regions span multiple bricks and create complex partial visibility during rendering.
+• H01 is a large subset of the H01 petavoxel fragment of a human
+cerebral cortex [SCJB∗ 24]. It is a typical example of connectomics volumes with larger but complex and interleaving labeled
+structures, and vast volume dimensions.
+• AZBA [KSY∗ 21] is a fully segmented zebrafish brain with characteristics commonly seen in medical data sets: a smaller number
+of labeled regions with a high variation in size. We render it with
+large semi-transparent areas creating high voxel access loads.
+▷ CSGV-R random access
+17: if ¬labelVisible(λ) then
+▷ Check if voxel set fully invisible
+18:
+allInvisible ← True
+19:
+for all v′0 with empty block index e do
+20:
+if labelVisible(decodeLabel(v′0 , 0) then
+21:
+allInvisible ← False
+22:
+if allInvisible then
+23:
+E[e] ← 1
+24:
+return INVISIBLE
+25: M[p1 ] ← (k, λ) ▷ Insert in M, possibly swap ejected (k1 , λ1 )
+26: if (k1 , λ1 ) ̸= ∅ ∧ (k1 & (1000 . . . 0000)2 ) = 0 then
+27:
+p′ ← h2 (k1 , p1 )
+28:
+M[p′ ] ← (k1 | (1000 . . . 0000)2 , λ1 )
+29: return λ
+changes. Algorithm 4 contains our voxel access method, including
+the handling of the optional empty space bit vector E in gray. Putting
+everything together: we decode a voxel (v, l) if v is not inside a
+completely invisible brick not yet marked as empty in E, and not
+stored in the label hash map M. When such a newly decoded voxel
+is not visible, all voxels that share its empty block are decoded as
+well. This is done on the finest LOD regardless of l. If none of them
+is visible, the empty block is marked invisible in E for later accesses.
+Otherwise, M is used to cache the label of (v, l) as before.
+5. Evaluation
+We evaluate the implementation of our method on a system using
+an AMD Ryzen 7 5800x 8-core CPU with 64GB RAM and an RTX
+4070 TI Super GPU with 16GB VRAM at fixed GPU clock speeds.
+We will release the source code of our CSGV-R compression. The
+evaluation data sets are shown in Figure 1 and listed in Table 1:
+• C ELLS [RBS20] is a densely labeled Cellular Potts Model [GG92]
+5.1. Compression Rates
+Table 2 shows results for our CSGV-R compression in different
+configurations and a comparison with CSGV. Larger b improve
+compression rates for both, which is due to the more expensive
+encoding at brick borders and label duplicates in palettes. When not
+using any variable bit-length encoding, the operation stream encodes
+the volumes for a brick size b = 64 with compression rates between
+6.4% and 1% (CSGV Nibble). With the non-random access ANS
+variable bit length coding, improved rates are between 2.8% and
+0.4%, and close to the entropy (CSGV rANS). Our random access
+wavelet matrix compression (CSGV-R+stop bits) yields compression
+between 4.4% and 0.6%. ANS achieves better compression as its
+fractional bit encoding can follow relative symbol frequencies more
+closely. Our Huffman codes encode operations only with an integer
+number of bits. Furthermore, CSGV encodes the combination of
+stop bit and operation code in a single combined symbol while we
+store the stop bits in a separate bit vector to limit wavelet tree depth,
+and thus query times. Encoding the operation stream as a wavelet
+matrix is computationally more expensive than with ANS and results
+in longer compression times. With stop bits, fewer brick nodes exist
+and must be compressed in total which improves timings.
+Comparisons with other segmentation volume compressors are
+shown in (Table 3). General purpose compressors like gzip used in
+the hdf5-format [HDF] achieve sub-par compression results. Compresso achieves strong compression when paired with a global
+LZMA but then random access is not possible. CSGV [PD24]
+achieves strong compression and at least supports random access
+to bricks, however, random voxel access or compression domain
+queries are not supported. Due to its simple brick-wise paletting,
+Neuroglancer [Goo16] is a fast format with random access down to
+the voxel level; however, its compression rates are the worst of all
+evaluated methods. Our CSGV-R with the stop bit vector achieves
+compression rates that are roughly twice of the CSGV rates, but still
+significantly better than Neuroglancer, the only other true random ac© 2025 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+9 of 12
+b
+CSGV Nibble
+CR
+Time (s)
+GB/s
+CSGV rANS
+CR
+Time (s)
+GB/s
+CSGV-R
+CR
+Time (s)
+GB/s
+CSGV-R + stop bits
+CR
+Time (s)
+GB/s
+C ELLS
+16
+32
+64
+6.833%
+6.561%
+6.425%
+2.376
+1.773
+2.473
+1.684
+2.256
+1.618
+3.436%
+2.996%
+2.802%
+2.016
+1.781
+2.412
+1.984
+2.246
+1.658
+6.111%
+5.489%
+5.257%
+3.47
+3.211
+3.858
+1.153
+1.246
+1.037
+5.528%
+4.653%
+4.411%
+2.549
+2.308
+2.919
+1.569
+1.733
+1.37
+F IBER
+16
+32
+64
+2.97%
+2.558%
+2.496%
+3.401
+2.464
+3.883
+1.674
+2.311
+1.466
+1.488%
+0.979%
+0.894%
+3.95
+2.585
+3.978
+1.442
+2.202
+1.431
+9.031%
+8.299%
+8.379%
+8.514
+7.539
+9.299
+0.669
+0.755
+0.612
+2.899%
+1.759%
+1.593%
+4.018
+2.896
+4.338
+1.417
+1.966
+1.313
+H01
+16
+32
+64
+2.83%
+2.608%
+2.566%
+276.978
+228.101
+312.467
+2.791
+3.389
+2.474
+1.616%
+1.361%
+1.31%
+283.78
+231.258
+307.957
+2.724
+3.343
+2.51
+5.005%
+4.449%
+4.336%
+594.828
+539.476
+619.911
+1.3
+1.433
+1.247
+2.644%
+2.005%
+1.882%
+348.655
+279.779
+345.899
+2.217
+2.763
+2.235
+AZBA
+M. Piochowiak, F. Kurpicz & C. Dachsbacher / Random Access Segmentation Volumes for Interactive Volume Rendering
+16
+32
+64
+1.871%
+1.079%
+0.968%
+0.349
+0.279
+0.47
+1.103
+1.383
+0.821
+1.399%
+0.495%
+0.366%
+0.703
+7.532
+0.984
+0.548
+0.051
+0.392
+17.656%
+16.061%
+18.1%
+1.124
+1.023
+1.431
+0.343
+0.377
+0.269
+3.314%
+0.958%
+0.648%
+0.376
+0.292
+0.469
+1.024
+1.319
+0.822
+Table 2: Compression rates of different data sets and brick sizes b and compression times when using 16 threads in parallel. CSGV Nibble uses
+4 plain bit per node, rANS uses range ANS coding with two frequency tables as in [PD24]. We evaluate our CSGV-R with and without using the
+stop bit vector while others always include stop bits. Compression rates are given as compressed size / original size fraction.
+cess format. In some data sets, e.g. AZBA and F IBER, our CSGV-R
+even outperforms Compresso with LZMA.
+5.2. Rendering
+We evaluate our random access CSGV-R in a DDA-ray marching
+renderer with a wide range of configurations. In Table 4 We list
+average render times per frame measured for a camera path around
+the data sets and compare it to CSGV. We use b = 32 except for
+H01 where b = 64. When using a cache during rendering, the cache
+size is 1 GiB except when rendering H01 with CSGV where a larger
+cache is required for which we chose 4 GiB. For shadow and ambient
+occlusion rays, we cast one indirect ray per pixel per frame. Rendering with CSGV-R generally outperforms the brick-serial decoding of
+CSGV, inter alia by not requiring separate caching [MVD∗ 18] and
+decoding shader stages (no cache or voxel cache) which also reduces
+implementation complexity. Further, it reduced the number of unnecessarily decoded voxels and achieves a higher thread coherence
+during decoding. While using stop bits improves compression ratios,
+the additional querying of the stop bit vector for the operation stream
+index computation puts a strain on the decoding performance. Especially for data sets like C ELLS, in which label regions are small and
+few stop bits are set, frame times are almost doubled. The different
+caching and decoding modes are discussed in the following.
+Random Access Decompression. As our CSGV-R compression offers true random access, we can perform rendering without any cache
+(no cache). However, such voxel accesses come at a cost: chasing
+along the operations up to a palette operation, traversing the wavelet
+matrix for each of these access as well as the final palette index
+rank query. As a consequence, caching decoded individual voxels
+(voxel cache) with our voxel hash table and custom Cuckoo hashing
+(Section 4.1) significantly improves performance, in some cases up
+a factor of 5. As a large portion of the voxel cache cells contain
+invisible labels, we introduced the optional empty space bit vector
+that we fill on-the-fly during rendering (voxel cache (es)). While this
+improves render times for C ELLS and AZBA, we measured minimal
+changes for F IBER, and performance even decreases significantly for
+© 2025 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+H01. This is presumably due to the large dimensions of H01 which
+results in many distant memory reads in the longer empty space bit
+vector. Moreover, setting the empty space bit flags requires querying
+23 voxels in the finest and most expensive LOD, while common
+accesses in H01 are usually to coarser and faster accessible LODs.
+Brick-wise Decompression Stage. CSGV only supports caching
+full bricks [PD24], decompressed by a separate shader up to a requested LOD with a one frame latency (brick cache). Cache regions
+for the bricks in their requested LODs are assigned as in shading
+atlas streaming [MVD∗ 18]. The decoding shader must decompress
+bricks serially using one thread per brick, i.e. each thread in a GPU
+wavefront accesses different global memory regions and different
+work loads leading to thread divergence. We implemented an alternative brick-wise decompression shader stage for our CSGV-R where
+one wavefront cooperatively decompresses one brick for CSGV-R
+modes): Threads in the wavefront iterate over output voxels in the requested LOD and read its volume label with random access as usual.
+To further improve performance, the brick’s wavelet tree is copied
+to shared memory before decoding (brick cachec (sm)). For F IBER,
+this cooperative decoding of bricks achieves the fastest rendering.
+5.3. CSGV Caching Overhead and Latency
+While CSGV achieves smaller compressed volumes, it always requires extra memory during rendering for the cache of visible bricks.
+CSGV-R encoded volumes do not have this overhead and can be
+rendered as long as they fit into VRAM. The first time a brick in
+CSGV is accessed, it is not present in the cache. Before it gets
+decompressed, a random sample from the brick palette or the most
+frequent label in the brick (the first palette entry) can be used as
+a placeholder. This, however, results in visible popping artifacts
+(Figure 8). In the worst case, the cache is not large enough to store
+all accessed bricks when rendering a frame. In fact, the CSGV cache
+barely fits all bricks for ambient occlusion configurations. Deeper
+traversal as in path tracing will not allow decoding all visible voxels
+in CSGV. In any case, especially when casting indirect rays for ambient occlusion, the latency of at least one frame reduces the number
+10 of 12
+M. Piochowiak, F. Kurpicz & C. Dachsbacher / Random Access Segmentation Volumes for Interactive Volume Rendering
+data set
+size/#labels
+hdf5
+Compresso
++ LZMA
+Neuroglancer
+CSGV rANS
+CSGV-R
++stop bits
+C ELLS
+4.0GB
+1M labels
+5.7GB
+26K labels
+4.295GB
+5.7K labels
+0.385GB
+204 labels
+7.221%
+21.8s
+3.051%
+47.4s
+3.678%
+18.0s
+2.166%
+7.0s
+8.337%
+33.0s
+26.70%
+139.2s
+2.284%
+19.6s
+88.357%
+9.0s
+2.753%
+138.5s
+5.861%
+654.1s
+0.342%
+53.4s
+1.901%
+47.2s
+13.622%
+10.8s
+3.658%
+11.0s
+3.882%
+6.3s
+2.801%
+1.2s
+2.802%
+15.9s
+0.892%
+19.4s
+1.273%
+9.0s
+0.366%
+2.3s
+5.257%
+25.5s
+8.379%
+61.8s
+4.313%
+23.0s
+18.100%
+9.1s
+4.411%
+17.7s
+1.593%
+18.4s
+1.830%
+9.2s
+0.648%
+1.9s
+F IBER
+H01∗
+AZBA
+Table 3: Comparison of compression rates and single-threaded compression time (excluding file import) of our CSGV-R and other compressors.
+General purpose compressors as gzip in hdf5 do not achieve strong compression for segmentation volumes. Compresso (window size 8, 8, 1)
+offers strong compression when combined with LZMA encoding, but then random access is not possible. CSGV (b = 64) has strong compression
+rates, but only random access on a brick level. Neuroglancer (block size 8) encodes volumes with true random access, but has significantly
+worse compression rates than our method, CSGV-R (b = 64). For H01 we evaluate a representative 10243 sub-volume based on an average gzip
+compressed size as not all our implementations support large chunked volumes. Best random access and overall compression is highlighted.
+local shading
+C ELLS F IBER H01
+CSGV rANS
+CSGV-R
+no stop bits
+CSGV-R+sb
+AZBA
+shadow rays
+C ELLS F IBER H01
+AZBA
+ambient occlusion
+C ELLS F IBER H01
+AZBA
+brick cache
+11.8
+6.0
+4.1
+10.3
+13.1
+7.8
+4.2
+12.4
+18.1
+9.2
+4.8
+17.2
+no cache
+voxel cache
+voxel cache (es)
+brickc cache (sm)
+25.3
+10.1
+5.4
+8.1
+7.6
+6.4
+5.8
+4.5
+-
+19.2
+9.3
+7.9
+9.3
+32.9
+12.8
+6.7
+9.4
+12.7
+9.2
+8.1
+6.4
+-
+25.0
+11.6
+10.0
+11.2
+37.4
+13.2
+8.1
+11.3
+15.4
+11.9
+10.7
+7.4
+-
+31.1
+13.3
+12.2
+13.9
+no cache
+voxel cache
+voxel cache (es)
+brickc cache (sm)
+44.9
+9.7
+6.1
+11.0
+12.8
+6.3
+7.1
+5.6
+6.5
+1.2
+75.8
+22.4
+28.6
+8.8
+8.1
+10.9
+59.5
+12.4
+7.6
+12.3
+22.5
+9.0
+9.9
+7.3
+8.6
+1.3
+79.9
+22.6
+37.9
+10.9
+10.2
+12.9
+70.4
+13.2
+9.4
+14.6
+29.6
+11.9
+13.3
+8.4
+14.1
+1.8
+109.1
+23.6
+47.2
+13.0
+12.6
+16.3
+Table 4: Average milliseconds per frame when rendering a camera path (2649, 1401, 2649, 2070 frames) for C ELLS, F IBER, H01, and AZBA
+with different cache and shading modes. H01 uses b = 64, others b = 32. The cache size is 4 GiB for H01 with CSGV and 1 GiB for others.
+For CSGV-R without stop bits, the compressed H01 does not fit into VRAM. CSGV uses rANS compression and only supports brick caching.
+With shadow rays and ambient occlusion, one secondary ray is cast per frame per pixel after the primary hit. Additional timings are in Table S1.
+CSGV
+brick cache
+CSGV-R
+voxel cache
+Figure 8: The latency of CSGV’s brick cache creates artifacts when
+bricks are not yet decoded and their palette is sampled instead. Our
+CSGV-R always accesses correct labels.
+of valid rendered samples per frame. CSGV-R with no cache or voxel
+caching produces an artifact-free image in the first frame. As direct
+voxel access is always available, the voxel cache does not have to fit
+all visible areas and its size can therefore be chosen freely.
+6. Conclusion
+We presented a full random access and lossless compression for
+segmentation volumes that outperforms the current state-of-the-art
+with random access in terms of compression rates. At the same
+time, its high query performance makes it suitable for GPU-based
+processing as in rendering. Our CSGV-R representation enables a
+variety of voxel access schemes while the CSGV method is limited
+to brick caching which we outperform as well. Our method removes
+rendering artifacts from CSGV while improving render performance
+by a factor of up to 5 and allows us to render segmentation volumes
+with over one million labels and sizes of up to 770 GB on a consumer system. CSGV-R’s limitations are weaker compression rates:
+while not all areas might be decoded at once, CSGV at least fits
+larger volumes into GPU memory. Larger b decrease performance
+disproportionately in CSGV-R as the deeper LOD hierarchies are
+traversed per voxel. CSGV remains preferred for storage and serial
+processing. More generally, we have shown how wavelet trees can
+be leveraged as a random access variable bit-length compression in
+high-performance rendering tasks and how they can be optimized
+for faster queries with domain knowledge. In future work, we want
+to explore how to further improve compression rates of our CSGV-R
+volumes, for example through methods from bit vector compression, while maintaining rendering performance with more adaptive
+multi-resolution empty space skipping and caching.
+Acknowledgements. This work has been supported by the Helmholtz Association (HGF) under the joint research school “HIDSS4Health – Helmholtz
+Information and Data Science School for Health” and the Pilot Program Core
+Informatics. We thank the NIC Research Group Computational Structural
+Biology, Jülich Research Center and the Computed Tomography group, University of Applied Sciences Upper Austria, Campus Wels, for providing data
+sets. Open Access funding enabled and organized by Projekt DEAL.
+© 2025 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+M. Piochowiak, F. Kurpicz & C. Dachsbacher / Random Access Segmentation Volumes for Interactive Volume Rendering
+References
+[AAAT∗ 22]
+AGUS M., A BOULHASSAN A., A L T HELAYA K., P INTORE
+G., G OBBETTI E., C ALÌ C., S CHNEIDER J.: Volume puzzle: visual
+analysis of segmented volume data with multivariate attributes. In Proc.
+IEEE Visualization and Visual Analytics (2022), pp. 130–134. doi:
+10.1109/VIS54862.2022.00035. 2
+[AABH∗ 16]
+A I -AWAMI A. K., B EYER J., H AEHN D., K ASTHURI N.,
+L ICHTMAN J. W., P FISTER H., H ADWIGER M.: Neuroblocks – visual
+tracking of segmentation and proofreading for large connectomics projects.
+IEEE Transactions on Visualization and Computer Graphics 22, 1 (2016),
+738–746. doi:10.1109/TVCG.2015.2467441. 2
+[ATAS21] A L -T HELAYA K., AGUS M., S CHNEIDER J.: The Mixture
+Graph – A Data Structure for Compressing, Rendering, and Querying
+Segmentation Histograms. IEEE Transactions on Visualization and Computer Graphics 27, 2 (2021), 645–655. doi:10.1109/TVCG.2020.
+3030451. 2
+[AW87] A MANATIDES J., W OO A.: A Fast Voxel Traversal Algorithm
+for Ray Tracing. In Proc. Eurographics - Technical Papers (1987),
+Eurographics Association. doi:10.2312/egtp.19871000. 6
+[BAAK∗ 13] B EYER J., A L -AWAMI A., K ASTHURI N., L ICHTMAN J. W.,
+P FISTER H., H ADWIGER M.: Connectomeexplorer: Query-guided visual
+analysis of large volumetric neuroscience data. IEEE Transactions on
+Visualization and Computer Graphics 19, 12 (2013), 2868–2877. doi:
+10.1109/TVCG.2013.142. 2
+[BBB∗ 17] B OERGENS K. M., B ERNING M., B OCKLISCH T., B RÄUN LEIN D., D RAWITSCH F., F ROHNHOFEN J., H EROLD T., OTTO P.,
+R ZEPKA N., W ERKMEISTER T., ET AL .: webKnossos: efficient online 3D data annotation for connectomics. Nature Methods 14, 7 (2017),
+691–694. doi:10.1038/nmeth.4331. 2
+[BGKS15] BABENKO M. A., G AWRYCHOWSKI P., KOCIUMAKA T.,
+S TARIKOVSKAYA T.: Wavelet trees meet suffix trees. In SODA (2015),
+SIAM, pp. 572–591. doi:10.1137/1.9781611973730.39. 4
+[Ble18] B LENDER O. C.: Blender - a 3D modelling and rendering package.
+Blender Foundation, Stichting Blender Foundation, Amsterdam, 2018.
+URL: http://www.blender.org. 2
+[BMA∗ 18]
+B EYER J., M OHAMMED H., AGUS M., A L -AWAMI A. K.,
+P FISTER H., H ADWIGER M.: Culling for extreme-scale segmentation
+volumes: A hybrid deterministic and probabilistic approach. IEEE Transactions on Visualization and Computer Graphics (Proc. IEEE Scientific
+Visualization) 25, 1 (2018). doi:10.1109/TVCG.2018.2864847.
+2
+[BRGIG∗ 14] BALSA RODRÍGUEZ M., G OBBETTI E., I GLESIAS G UITIÁN
+J., M AKHINYA M., M ARTON F., PAJAROLA R., S UTER S.: State-ofthe-Art in Compressed GPU-Based Direct Volume Rendering. Computer
+Graphics Forum 33, 6 (2014), 77–100. doi:https://doi.org/10.
+1111/cgf.12280. 2
+[BSL18] B ERGER D. R., S EUNG H. S., L ICHTMAN J. W.: Vast (volume
+annotation and segmentation tool): Efficient manual and semi-automatic
+labeling of large 3d image stacks. Frontiers in Neural Circuits 12 (2018).
+doi:10.3389/fncir.2018.00088. 2
+[BTB∗ 22] B EYER J., T ROIDL J., B OORBOOR S., H ADWIGER M., K AUF MAN A., P FISTER H.: A Survey of Visualization and Analysis in HighResolution Connectomics. Computer Graphics Forum 41, 3 (2022),
+573–607. doi:https://doi.org/10.1111/cgf.14574. 2
+[CKV24] C EREGINI M., K URPICZ F., V ENTURINI R.: Faster wavelet
+tree queries. In DCC (2024), IEEE, pp. 223–232. doi:10.1109/
+DCC58796.2024.00030. 3
+[CNP15] C LAUDE F., NAVARRO G., P EREIRA A. O.: The wavelet matrix:
+An efficient wavelet tree for large alphabets. Inf. Syst. 47 (2015), 15–32.
+doi:10.1016/j.is.2014.06.002. 3, 5, 6
+[CNS11] C LAUDE F., N ICHOLSON P. K., S ECO D.: Space efficient
+wavelet tree construction.
+In SPIRE (2011), vol. 7024 of Lecture
+Notes in Computer Science, Springer, pp. 185–196. doi:10.1007/
+978-3-642-24583-1_19. 4
+© 2025 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+11 of 12
+[CW77] C ARTER J. L., W EGMAN M. N.: Universal classes of hash
+functions (extended abstract). In Proceedings of the Ninth Annual ACM
+Symposium on Theory of Computing (New York, NY, USA, 1977), STOC
+’77, Association for Computing Machinery, p. 106–112. doi:10.1145/
+800105.803400. 7
+[DEF∗ 21] D INKLAGE P., E LLERT J., F ISCHER J., K URPICZ F., L ÖBEL
+M.: Practical wavelet tree construction. ACM J. Exp. Algorithmics 26
+(2021), 1.8:1–1.8:67. doi:10.1145/3457197. 4, 5
+[dFdS17] DA F ONSECA P. G. S., DA S ILVA I. B. F.: Online construction
+of wavelet trees. In SEA (2017), vol. 75 of LIPIcs, Schloss Dagstuhl
+- Leibniz-Zentrum für Informatik, pp. 16:1–16:14. doi:10.4230/
+LIPIcs.SEA.2017.16. 4
+[DFK20] D INKLAGE P., F ISCHER J., K URPICZ F.: Constructing the
+wavelet tree and wavelet matrix in distributed memory. In ALENEX (2020),
+SIAM, pp. 214–228. doi:10.1137/1.9781611976007.17. 4
+[DFKT23] D INKLAGE P., F ISCHER J., K URPICZ F., TARNOWSKI J.: Bitparallel (compressed) wavelet tree construction. In DCC (2023), IEEE,
+pp. 81–90. doi:10.1109/DCC55655.2023.00016. 4
+[DHKP97]
+D IETZFELBINGER M., H AGERUP T., K ATAJAINEN J., P ENTA reliable randomized algorithm for the closest-pair problem. Journal of Algorithms 25, 1 (1997), 19–51. doi:https:
+//doi.org/10.1006/jagm.1997.0873. 7
+TONEN M.:
+[Dud13] D UDA J.: Asymmetric numeral systems: entropy coding combining speed of huffman coding with compression rate of arithmetic coding. arXiv preprint arXiv:1311.2540 (2013). doi:10.48550/arXiv.
+1311.2540. 2, 4
+[EHK∗ 06] E NGEL K., H ADWIGER M., K NISS J., R EZK -S ALAMA C.,
+W EISKOPF D.: Real-Time Volume Graphics. AK Peters/CRC Press, 2006.
+2
+[EK19] E LLERT J., K URPICZ F.: Parallel external memory wavelet tree
+and wavelet matrix construction. In SPIRE (2019), vol. 11811 of Lecture
+Notes in Computer Science, Springer, pp. 392–406. doi:10.1007/
+978-3-030-32686-9_28. 4
+[FEFS17] F UENTES -S EPÚLVEDA J., E LEJALDE E., F ERRES L., S ECO
+D.: Parallel construction of wavelet trees on multicore architectures.
+Knowl. Inf. Syst. 51, 3 (2017), 1043–1066.
+doi:10.1007/
+s10115-016-1000-6. 4
+[FM00] F ERRAGINA P., M ANZINI G.: Opportunistic data structures with
+applications. In FOCS (2000), IEEE Computer Society, pp. 390–398.
+doi:10.1109/SFCS.2000.892127. 3
+[FMMN07] F ERRAGINA P., M ANZINI G., M ÄKINEN V., NAVARRO G.:
+Compressed representations of sequences and full-text indexes. ACM Trans.
+Algorithms 3, 2 (2007), 20. doi:10.1145/1240233.1240243. 3
+[GG92] G RANER F., G LAZIER J. A.: Simulation of biological cell sorting
+using a two-dimensional extended potts model. Physical review letters 69,
+13 (1992), 2013. doi:10.1103/PhysRevLett.69.2013. 8
+[GGV03] G ROSSI R., G UPTA A., V ITTER J. S.: High-order entropycompressed text indexes. In SODA (2003), ACM/SIAM, pp. 841–850.
+3
+[GNP20] G AGIE T., NAVARRO G., P REZZA N.: Fully functional suffix
+trees and optimal text searching in bwt-runs bounded space. J. ACM 67, 1
+(2020), 2:1–2:54. doi:10.1145/3375890. 3
+[Goo16] G OOGLE I NC .: Neuroglancer. github.com/google/neuroglancer,
+2016. 2, 8
+[GVX11] G ROSSI R., V ITTER J. S., X U B.: Wavelet trees: From theory
+to practice. In CCP (2011), IEEE Computer Society, pp. 210–221. doi:
+10.1109/CCP.2011.16. 3
+[HBG∗ 24] H ONG A., B OUCHER C., G AGIE T., L I Y., Z EH N.: Another
+virtue of wavelet forests. In SPIRE (2024), vol. 14899 of Lecture Notes in
+Computer Science, Springer, pp. 184–191. 3
+[HDF] HDF G ROUP, T HE: Hierarchical Data Format, version 5. https:
+//github.com/HDFGroup/hdf5. 2, 8
+12 of 12
+M. Piochowiak, F. Kurpicz & C. Dachsbacher / Random Access Segmentation Volumes for Interactive Volume Rendering
+[Huf52] H UFFMAN D. A.: A method for the construction of minimumredundancy codes. Proceedings of the IRE 40, 9 (1952), 1098–1101.
+doi:10.1109/JRPROC.1952.273898. 4
+in short glass fibre reinforced polymers using X-ray computed tomography.
+Nondestructive Testing and Evaluation 37, 5 (2022), 582–600. doi:
+10.1080/10589759.2022.2075865. 8
+[Jac89] JACOBSON G.: Space-efficient static trees and graphs. In FOCS
+(1989), pp. 549–554. doi:10.1109/SFCS.1989.63533. 3
+[MSL22] M AITIN -S HEPARD J.,
+L EAVITT L.:
+TensorStore
+for High-Performance,
+Scalable
+Array
+Storage.
+https://research.google/blog/tensorstore-for-high-performance-scalablearray-storage/, 2022. 2
+[JO20] JARZYNSKI M., O LANO M.: Hash functions for gpu rendering.
+Journal of Computer Graphics Techniques (JCGT) 9, 3 (October 2020),
+20–38. 7
+[Kan18] K ANETA Y.: Fast wavelet tree construction in practice. In
+SPIRE (2018), vol. 11147 of Lecture Notes in Computer Science, Springer,
+pp. 218–232. doi:10.1007/978-3-030-00479-8_18. 4
+[KSA13] K ÄMPE V., S INTORN E., A SSARSSON U.: High resolution
+sparse voxel dags. ACM Transactions on Graphics 32, 4 (7 2013). doi:
+10.1145/2461912.2462024. 2
+[KSY∗ 21] K ENNEY J. W., S TEADMAN P. E., YOUNG O., S HI M. T.,
+P OLANCO M., D UBAISHI S., C OVERT K., M UELLER T., F RANKLAND
+P. W.: A 3d adult zebrafish brain atlas (azba) for the digital age. eLife 10
+(11 2021), e69988. doi:10.7554/eLife.69988. 8
+[Kur22] K URPICZ F.: Engineering compact data structures for rank and
+select queries on bit vectors. In SPIRE (2022), vol. 13617 of Lecture
+Notes in Computer Science, Springer, pp. 257–272. doi:10.1007/
+978-3-031-20643-6\_19. 3, 5, 6
+[LAB∗ 24] L ESAR Ž., A LHARBI R., B OHAK C., S TRNAD O., H EINZL
+C., M AROLT M., V IOLA I.: Volume conductor: interactive visibility
+management for crowded volumes. The Visual Computer 40, 2 (2024),
+1005–1020. 2
+[LC87] L ORENSEN W. E., C LINE H. E.: Marching cubes: A high resolution 3d surface construction algorithm. Proc. ACM SIGGRAPH 21, 4 (8
+1987), 163–169. doi:10.1145/37402.37422. 2
+[Lem10] L EMPITSKY V.: Surface extraction from binary volumes with
+higher-order smoothness. In IEEE Computer Society Conference on
+Computer Vision and Pattern Recognition (2010), pp. 1197–1204. doi:
+10.1109/CVPR.2010.5539832. 2
+[LK10] L AINE S., K ARRAS T.: Efficient sparse voxel octrees. In Proc.
+ACM SIGGRAPH Symposium on Interactive 3D Graphics and Games (New
+York, NY, USA, 2010), ACM, p. 55–63. doi:10.1145/1730804.
+1730814. 2
+[LM14] L AROBINA M., M URINO L.: Medical image file formats. Journal
+of digital imaging 27 (2014), 200–206. 2
+[MAF07] M ORELAND K., AVILA L., F ISK L. A.: Parallel unstructured
+volume rendering in ParaView. In Visualization and Data Analysis 2007
+(2007), Erbacher R. F., Roberts J. C., Gröhn M. T., Börner K., (Eds.),
+vol. 6495, International Society for Optics and Photonics, SPIE, p. 64950F.
+doi:10.1117/12.704533. 2
+[Mak12] M AKRIS C.: Wavelet trees: A survey. Comput. Sci. Inf. Syst. 9,
+2 (2012), 585–625. doi:10.2298/CSIS110606004M. 3
+[MHL∗ 17] M ATEJEK B., H AEHN D., L EKSCHAS F., M ITZENMACHER
+M., P FISTER H.: Compresso: Efficient Compression of Segmentation
+Data For Connectomics. In Medical Image Computing and ComputerAssisted Intervention (Cham, 2017), Springer, pp. 781–788. doi:10.
+1007/978-3-319-66182-7_89. 2
+[MJB∗ 21] M INNEN D., JANUSZEWSKI M., B LAKELY T., S HAPSON -C OE
+A., S CHALEK R. L., BALLÉ J., L ICHTMAN J. W., JAIN V.: Denoisingbased image compression for connectomics. bioRxiv (2021). doi:
+10.1101/2021.05.29.445828. 2
+[MN06] M ÄKINEN V., NAVARRO G.: Position-restricted substring searching. In LATIN (2006), vol. 3887 of Lecture Notes in Computer Science,
+Springer, pp. 703–714. 3
+[MNV16] M UNRO J. I., N EKRICH Y., V ITTER J. S.: Fast construction
+of wavelet trees. Theor. Comput. Sci. 638 (2016), 91–97. doi:
+10.1016/j.tcs.2015.11.011. 4
+[MSJ∗ 22]
+M AURER J., S ALABERGER D., J ERABEK M., K ASTNER J.,
+M AJOR Z.: Quantitative investigation of local strain and defect formation
+[MVD∗ 18] M UELLER J. H., VOGLREITER P., D OKTER M., N EFF T.,
+M AKAR M., S TEINBERGER M., S CHMALSTIEG D.: Shading atlas streaming. ACM Transactions on Graphics (Proc. SIGGRAPH) 37, 6 (Dec. 2018).
+doi:10.1145/3272127.3275087. 6, 9
+[NPS20] NVIDIA C ORPORATION , PANTALEONI J., S UBTIL N.: NVBIO.
+https://nvlabs.github.io/nvbio/, 2020. 4
+[O’N14] O’N EILL M. E.: PCG: A Family of Simple Fast SpaceEfficient Statistically Good Algorithms for Random Number Generation. Tech. Rep. HMC-CS-2014-0905, Harvey Mudd College, Claremont, CA, 09 2014.
+URL: https://www.cs.hmc.edu/tr/
+hmc-cs-2014-0905.pdf. 7
+[PD24] P IOCHOWIAK M., DACHSBACHER C.: Fast compressed segmentation volumes for scientific visualization. IEEE Transactions on
+Visualization and Computer Graphics 30, 1 (2024), 12–22.
+doi:
+10.1109/TVCG.2023.3326573. 1, 2, 4, 5, 7, 8, 9
+[PHK04] P IEPER S., H ALLE M., K IKINIS R.: 3d slicer. In 2004 2nd
+IEEE international symposium on biomedical imaging: nano to macro
+(IEEE Cat No. 04EX821) (2004), IEEE, pp. 632–635. 2
+[PR04] PAGH R., RODLER F. F.: Cuckoo hashing. Journal of Algorithms 51, 2 (2004), 122–144. doi:https://doi.org/10.1016/
+j.jalgor.2003.12.002. 7
+[QDB11] Q UEY R., DAWSON P., BARBE F.: Large-scale 3d random polycrystals for the finite element method: Generation, meshing and remeshing.
+Computer Methods in Applied Mechanics and Engineering 200 (04 2011),
+1729–1745. doi:10.1016/j.cma.2011.01.002. 2
+[RBS20] ROSENBAUER J., B ERGHOFF M., S CHUG A.: Emerging tumor
+development by simulating single-cell events. bioRxiv (2020). doi:
+10.1101/2020.08.24.264150. 8
+[RP71] R ICE R., P LAUNT J.: Adaptive variable-length coding for efficient
+compression of spacecraft television data. IEEE Transactions on Communication Technology 19, 6 (1971), 889–897. doi:10.1109/TCOM.
+1971.1090789. 5
+[SCJB∗ 24] S HAPSON -C OE A., JANUSZEWSKI M., B ERGER D. R., P OPE
+A., W U Y., B LAKELY T., S CHALEK R. L., L I P. H., WANG S., M AITIN S HEPARD J., K ARLUPIA N., D ORKENWALD S., S JOSTEDT E., L EAVITT
+L., L EE D., T ROIDL J., C OLLMAN F., BAILEY L., F ITZMAURICE A.,
+K AR R., F IELD B., W U H., WAGNER -C ARENA J., A LEY D., L AU J.,
+L IN Z., W EI D., P FISTER H., P ELEG A., JAIN V., L ICHTMAN J. W.: A
+petavoxel fragment of human cerebral cortex reconstructed at nanoscale
+resolution. Science 384, 6696 (2024), eadk4858. doi:10.1126/
+science.adk4858. 8
+[Shu15] S HUN J.: Parallel wavelet tree construction. In DCC (2015),
+IEEE, pp. 63–72. doi:10.1109/DCC.2015.7. 4
+[Shu20] S HUN J.: Improved parallel construction of wavelet trees and
+rank/select structures. Inf. Comput. 273 (2020), 104516. doi:10.
+1016/j.ic.2020.104516. 4
+[Tis11] T ISCHLER G.: On wavelet tree construction. In CPM (2011),
+vol. 6661 of Lecture Notes in Computer Science, Springer, pp. 208–218.
+doi:10.1007/978-3-642-21458-5_19. 4
+[VMM∗ 23] V ELICKY P., M IGUEL E., M ICHALSKA J. M., LYUDCHIK J.,
+W EI D., L IN Z., WATSON J. F., T ROIDL J., B EYER J., B EN -S IMON Y.,
+ET AL .: Dense 4d nanoscale reconstruction of living brain tissue. Nature
+Methods 20, 8 (2023), 1256–1265. 2
+[WPD24] W ERNER M., P IOCHOWIAK M., DACHSBACHER C.: SVDAG
+Compression for Segmentation Volume Path Tracing. In Vision, Modeling,
+and Visualization (2024), Linsen L., Thies J., (Eds.), The Eurographics
+Association. doi:10.2312/vmv.20241196. 2
+© 2025 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.

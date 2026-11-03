@@ -1,0 +1,10205 @@
+Machine Learning (2026) 115:195
+https://doi.org/10.1007/s10994-026-07114-x
+MZEN: Multi-zoom Enhanced NeRF for 3-D Reconstruction
+with Unknown Camera Poses
+Jong-Ik Park1 · Gary K. Fedder1 · Carlee Joe-Wong1
+Received: 30 October 2025 / Revised: 30 June 2026 / Accepted: 30 June 2026 /
+Published online: 30 July 2026
+© The Author(s) 2026
+Abstract
+Neural Radiance Fields (NeRF) methods excel at 3D reconstruction from multiple 2D
+images, even those taken with unknown camera poses. However, they still miss the finedetailed structures that matter in industrial inspection, e.g., detecting sub-micron defects
+on a production line or analyzing chips with Scanning Electron Microscopy (SEM). In
+these scenarios, the sensor resolution is fixed and compute budgets are tight, so the only
+way to expose fine structure is to add zoomed-in images; yet, this breaks the multi-view
+consistency that pose-free NeRF training relies on. We propose Multi-Zoom Enhanced
+NeRF (MZEN), the first NeRF framework that natively handles multi-zoom image sets.
+MZEN (i) augments the pin-hole camera model with an explicit, learnable zoom parameter that scales the focal length, and (ii) introduces a novel pose estimation strategy:
+wide-field (i.e., zoomed-out) images are used first to establish a global metric frame, and
+the poses of zoomed-in images are then initialized to the nearest wide-field counterpart
+via a zoom-consistent crop-and-match procedure before joint refinement of both poses
+and the NeRF model. Across eight forward-facing scenes—synthetic TCAD models, real
+SEM of micro-structures, and BLEFF objects—MZEN consistently outperforms pose-free
+baselines and even high-resolution variants, boosting PSNR by up to 32%, SSIM by 52%,
+and reducing LPIPS by up to 400%. MZEN, therefore, extends NeRF to real-world factory
+settings, preserving global accuracy while capturing the micron-level details essential for
+industrial inspection.
+Editors: Zahraa S. Abdallah, Annalisa Appice, Przemyslaw Biecek, Andrea Tagarelli.
+Carlee Joe-Wong
+cjoewong@andrew.cmu.edu
+Jong-Ik Park
+jongikp@andrew.cmu.edu
+Gary K. Fedder
+fedder@cmu.edu
+1
+Department of Electrical and Computer Engineering, Carnegie Mellon University, 5000
+Forbes Ave, Pittsburgh, PA, USA
+195 Page 2 of 94
+Machine Learning (2026) 115:195
+Keywords Neural radiance fields · Industrial inspection · Multi-zoom imaging · Pose
+estimation · 3D reconstruction
+1 Introduction
+Neural Radiance Fields (NeRF) have significantly advanced 3D reconstruction and novel
+view synthesis by learning continuous volumetric representations from multiple 2D images
+(Barron et al., 2022; Mildenhall et al., 2021; Müller et al., 2022; Yariv et al., 2021). By
+leveraging differentiable volume rendering, NeRF-based methods generate high-fidelity
+3D representations from sparse image inputs, enabling broad applications like microscopy,
+aerial photography, medical imaging, and semiconductor inspection (Bouchard et al., 2015;
+Gray et al., 2018; Rade et al., 2024; Sakamoto et al., 2022). In microscopy, NeRF offers a
+way to reconstruct volumetric tissue structures and subcellular morphology from limited
+optical views, aiding disease diagnosis and biological research (Sakamoto et al., 2022). In
+semiconductor manufacturing, high-resolution Scanning Electron Microscopy (SEM) combined with NeRF can enable 3D geometric reconstruction of defects for more precise failure
+analysis (Fu et al., 2024; Lee & Lee, 2014).
+Despite these successes, standard NeRF methods rely on two key assumptions: (i) accurate camera poses are known or can be reliably estimated by identifying shared image
+features (Mur-Artal et al., 2015; Schönberger & Frahm, 2016), and (ii) input images are
+captured at similar viewing scales with sufficient overlap to enforce multi-view consistency
+(Barron et al., 2023; Wang et al., 2021). However, both assumptions break down in many
+industrial settings. Real-world datasets often arrive with unknown or highly inaccurate
+camera poses, and the available imagery spans multiple zoom levels ranging from wide
+overviews (for locating targets) to extreme close-ups (for texture fidelity), so that overlapping content is either tiny or entirely absent (Jeong et al., 2021; Lin et al., 2021; Wang et
+al., 2021). In microscopy, for example, pose inaccuracies arise from mechanical drift and
+stage repositioning, while imaging must capture both low-magnification tissue structures
+and high-magnification subcellular details (Bouchard et al., 2015). SEM imaging in semiconductor manufacturing is another example scenario where these challenges arise, as it
+demands precise alignment of micrometer-scale devices with sub-micrometer or nanometer-scale defect inspections across multiple layers (Al Rahman & Mousavi, 2020; Fu et al.,
+2024). A typical SEM workflow begins with a 1 × 105 magnification survey image and then
+zooms to 3 × 105 to inspect suspected defects (Nakamae, 2021). These high-zoom frames
+have almost no overlap with each other, and even small positional shifts can cause significantly greater pose inaccuracies compared to optical imaging since SEM imaging relies on
+electron interactions (Jin & Li, 2015).
+Several NeRF variants have attempted to address camera pose inaccuracies by jointly
+optimizing pose estimation and scene reconstruction (Bian et al., 2023; Chng et al., 2024;
+Jeong et al., 2021; Lin et al., 2021; Wang et al., 2021). Complementary work enhances
+texture fidelity by incorporating anti-aliasing or multi-resolution features, but these methods still assume that all training images share the same zoom level, or at most have minor
+zoom variations (Barron et al., 2021, 2023; Park et al., 2023). In practice, however, images
+captured at high zoom levels often have minimal overlap with one another, since acquisition typically targets selective fine details rather than broad, shared context (Fig. 1), leading
+13
+Machine Learning (2026) 115:195
+Page 3 of 94 195
+Fig. 1 Illustration of multi-zoom imaging. Only high-zoom images can provide fine details, e.g., iris
+patterns and hair. However, the minimal overlap between these images makes camera pose estimation
+challenging
+Fig. 2 Comparison of MZEN vs. traditional NeRF. (Top) The proposed MZEN framework first optimizes
+camera poses (including the learnable zoom scalars) using only the most zoomed-out images; next, each
+zoomed-in view is pose priming by inheriting the pose of its best-matching wide-field counterpart and
+adjusting it while the NeRF weights stay frozen; finally, NeRF parameters and all camera poses are jointly
+refined across the complete multi-zoom set. (Bottom) The traditional NeRF pipeline optimizes both camera poses and NeRF parameters simultaneously across all zoom levels, leading to instability
+to a breakdown of the conventional multi-view consistency assumption in existing NeRF
+methods (Han et al., 2025; Mildenhall et al., 2022) and thus instability in pose optimization.
+Despite these challenges, incorporating combinations of frames at different zoom levels is
+often necessary, since frames that capture wide overviews simultaneously with high resolution are often unavailable: cameras have a fixed pixel count, so arbitrarily high-resolution
+frames cannot be captured on demand (Albanese et al., 2022). Additionally, capturing or
+training on very large images is computationally prohibitive.
+To address these challenges, we propose Multi-Zoom Enhanced NeRF (MZEN), illustrated in Fig. 2. Unlike existing NeRF variants that implicitly assume an identical viewing scale, MZEN introduces a zoom-consistent camera model that explicitly represents
+optical magnification as a learnable scalar in the intrinsic parameters. This reformulation
+allows MZEN to interpret image sets captured at different zoom levels under a physically
+13
+195 Page 4 of 94
+Machine Learning (2026) 115:195
+consistent model. To resolve the pose ambiguity caused by non-overlapping zoomed-in
+frames, MZEN further incorporates a cross-zoom pose registration mechanism. Specifically, MZEN aligns each zoomed-in image with its most compatible wide-field (zoomedout) reference through a zoom-aware crop-and-match test, and then registers the poses of
+the zoomed-out views to those of the zoomed-in views — a process termed pose priming.
+Finally, the poses of the zoomed-in views are refined through optimization. Together, these
+components form the first framework that can natively integrate multi-zoom imagery into
+NeRF-based reconstruction.
+In addition, MZEN adopts a structured three-phase training schedule designed to enable
+pose priming and stabilize optimization:
+Phase A—Global Pose Bootstrapping: optimizes NeRF parameters and camera poses
+only for the most zoomed-out images, whose wide field of view (FoV) defines the global
+frame.
+Phase B—Zoom-in Pose Registration: uses the learned intrinsics to initialize each
+zoomed-in image with the pose of its matched wide-field counterpart, refining only the local
+pose and zoom parameter while freezing the NeRF weights.
+Phase C—Joint Refinement: jointly optimizes all poses, zoom parameters, and NeRF
+weights across every zoom level to recover fine-scale geometry and texture.
+This staged design enables the proposed zoom-consistent formulation to converge reliably by avoiding direct, fully joint pose optimization across all magnifications. In particular,
+it is most effective when (i) the zoomed-out subset contains sufficient overlap to yield a
+stable global pose scaffold in Phase A, and (ii) each zoomed-in view retains enough shared
+content with at least one available wide-field surrogate for reliable pose priming in Phase B.
+Our work makes the following contributions:
+● We introduce the first zoom-consistent camera model for NeRF, treating optical zoom
+as a learnable intrinsic parameter rather than an external crop or scale factor.
+● We develop a cross-zoom pose registration procedure that establishes geometric correspondence between wide-field and zoomed-in images via zoom-aware cropping, enabling pose-free NeRFs to operate on non-overlapping multi-zoom datasets.
+● We present a stable realization of this framework through a three-phase optimization
+routine that progressively aligns, registers, and refines all zoom levels.
+● We introduce the Forward-Facing Multi-Zoom NeRF (FF-MZN) benchmark, comprising (i) micro-scale SEM images of MEMS devices, (ii) four Synopsys Sentaurus
+TCAD test structures (Synopsys, Inc, 2025), and (iii) two scenes from the BLEFF dataset (Wang et al., 2021).
+● We evaluate MZEN on the FF-MZN dataset, achieving gains of up to 32.1 % in Peak
+Signal-to-Noise Ratio (PSNR), 51.9% in Structural Similarity Index Measure (SSIM)
+(Wang et al., 2004), 46.0% in Gradient Similarity Score (GSS), 57.8% in Laplacian
+Similarity Score (LSS), and a 400.0% reduction in Learned Perceptual Image Patch
+Similarity (LPIPS) (Zhang et al., 2018) compared with pose-free NeRF baselines
+(NeRF-- (Wang et al., 2021), BARF (Lin et al., 2021), NoPe-NeRF (Bian et al., 2023),
+Mip-NeRF (Barron et al., 2021), and CamP (Park et al., 2023)).
+MZEN’s qualitative impact is illustrated in Fig. 3, and FF-MZN will be publicly released to
+foster further research on zoom-consistent NeRF reconstruction.
+13
+Page 5 of 94 195
+Machine Learning (2026) 115:195
+Traditional NeRF
+Zoomed-out Views Only
+Traditional NeRF
+All zoom levels
+MZEN After
+Global Pose Bootstrap
+MZEN After
+Joint Refinement
+Ground Truth
+Fig. 3 Novel-view synthesis comparison on two scenes. We render a viewpoint not included in the training set for Synopsys Sentaurus TCAD FinFET (top) and a real MEMS device (bottom). From left to
+right: (i) baseline NoPe-NeRF trained only on zoomed-out views; (ii) baseline trained on all zoom levels
+(severe blur); (iii) NoPe-NeRF + MZEN after global-pose bootstrap (Phase A); (iv) NoPe-NeRF + MZEN
+after joint fine optimization (Phase C); (v) ground truth. Because the ground-truth cameras are unknown,
+the predicted cameras can differ by a small rotation. Only the complete MZEN (config 4) recovers the
+fine detail
+The rest of the paper is organized as follows. Section 2 surveys NeRF methods that
+jointly optimize camera poses, reviews anti-aliasing approaches for high-resolution synthesis, and analyzes their limitations under multi-zoom imaging. Section 3 introduces our
+MZEN framework. Section 4 provides quantitative results across various scenes. Section 5
+discusses computational efficiency and practical constraints, and Sect. 6 concludes with
+future research directions.
+2 Background and Related Work
+Given a set of camera poses Π1 , Π2 , . . . , ΠN corresponding to N observed images of a
+given object, NeRF synthesizes new images of this object through a rendering function,
+optimizing the parameters Θ by minimizing a photometric loss:
+Îi = FΘ (Θ, Πi ), Θ∗ = arg min
+Θ
+N
+Îi (Θ, Πi ) − Ii
+2 ,
+2
+i=1
+where FΘ (Θ, Πi ) maps camera poses to rendered images Îi , and Ii represents the observed
+images in the training dataset.
+NeRF’s reliance on accurate camera poses makes it vulnerable when poses are unknown
+or inaccurate, leading to misalignment, incorrect ray sampling, and geometric distortions
+(Barron et al., 2023; Lin et al., 2021; Wang et al., 2021). Traditional NeRF approaches
+assume known poses, often estimated using Structure-from-Motion (SfM) techniques like
+COLMAP (Schönberger & Frahm, 2016) and Simultaneous Localization and Mapping
+(SLAM) (Mur-Artal et al., 2015). However, these methods struggle with low-texture regions,
+repetitive structures, and degenerate camera motions, resulting in incorrect or incomplete
+reconstructions (She et al., 2024; Van Vlasselaer et al., 2024). Several other works instead
+jointly optimize camera parameters and NeRF representations. In particular, NeRF − −,
+13
+195 Page 6 of 94
+Machine Learning (2026) 115:195
+BARF, SC-NeRF, and NoPe-NeRF refine pose estimation while learning NeRF representations (Bian et al., 2023; Jeong et al., 2021; Lin et al., 2021; Wang et al., 2021).
+NeRF-- (Wang et al., 2021) jointly optimizes camera parameters and NeRF representations. However, their approach remains stable only under small (limited to approximately
+20%) translation and rotation perturbations, as stated in their work. Bundle-Adjusting
+NeRF (BARF) (Lin et al., 2021) refines camera poses using coarse-to-fine positional encoding scheduling, where high-frequency details are gradually introduced during training to
+stabilize optimization. This prevents misalignment in camera poses in the early stages and
+improves reconstruction accuracy. SC-NeRF (Jeong et al., 2021) further enhances pose
+estimation by modeling lens distortions, which standard NeRF models ignore. By optimizing all camera parameters, SC-NeRF improves ray alignment, ensuring that NeRF rays
+correctly correspond to real-world camera projections and reducing errors in datasets with
+optical distortions. NoPe-NeRF (Bian et al., 2023) tackles large pose errors by integrating
+monocular depth priors to stabilize training. It enforces depth consistency using a point
+cloud loss and improves alignment through a surface-based photometric loss, making it
+more robust in unconstrained camera trajectories.
+While these methods improve pose estimation, none of them consider multi-zoom imaging. Zoomed-in images have minimal overlap with zoomed-out views, breaking NeRF’s
+multi-view consistency assumption and causing instability, as shown in our experiments
+(Sect. 4). Therefore, a framework that explicitly models zoom consistency and optimizes
+pose estimation is required for stable training and accurate reconstruction across multiple
+zoom levels. Our MZEN provides such a framework.
+Mip-NeRF (Barron et al., 2021), Zip-NeRF (Barron et al., 2023), and CamP (Park et
+al., 2023) target high-resolution reconstruction by suppressing aliasing by training on a
+multi-resolution pyramid in which every image shares the same FoV. Additionally, MipNeRF combats aliasing by rendering cone trunks instead of rays. Zip-NeRF refines this
+idea for lower memory use. CamP sharpens details further through pose pre-conditioning.
+However, these approaches require large, high-resolution images for the image pyramid
+and rely on Structure-from-Motion (SfM)-supplied poses, which already fulfill multiview consistency. Industrial microscopes, by contrast, have fixed sensors; high-resolution
+frames cannot be captured on demand, and training on gigapixel imagery is computationally
+prohibitive (Albanese et al., 2022). Therefore, real datasets often mix low-magnification
+context shots with tightly zoomed-in detail views whose poses are rarely consistent. In
+summary, prior work is most closely related to MZEN in two directions. Pose-free NeRF
+methods such as NeRF--, BARF, SC-NeRF, and NoPe-NeRF improve camera-pose optimization when poses are unknown or inaccurate, but they still assume that the input images
+share a compatible viewing scale. Anti-aliased and high-resolution NeRF variants such as
+Mip-NeRF, Zip-NeRF, and CamP improve rendering quality or camera conditioning, but
+they rely on consistent fields of view or reliable pose initialization.
+MZEN sidesteps these issues by keeping every frame at native resolution and explicitly
+modeling optical zoom, eliminating the need for high-resolution images or external pose
+initialization.
+13
+Machine Learning (2026) 115:195
+Page 7 of 94 195
+3 Multi-zoom Enhanced NeRF
+Industrial imaging systems-including optical microscopes, digital inspection cameras, and
+SEM-routinely capture the same specimen at multiple optical magnifications to get better
+details. Because the zoom mechanism is mechanical, exact camera calibration is unavailable, and the specimen stage moves only a few microns—conditions under which classical Structure-from-Motion (SfM) fails (Wang et al., 2021). Standard NeRF formulations
+assume fixed or small zoom-level perturbations across all images; when magnification
+changes, these assumptions break down, coupling translation, scale, and focal length in an
+unidentifiable way. As a result, pose-free NeRFs cannot maintain geometric consistency
+across zoom levels.
+To cope with this setting, MZEN introduces a zoom-aware camera model that treats
+optical magnification as a learnable intrinsic parameter and a cross-zoom pose registration
+scheme to align non-overlapping zoomed-in and zoomed-out views. These components are
+optimized through three structured training phases which together enable stable, calibration-free multi-zoom reconstruction. Figure 2 gives an overview of the methodology
+developed below: MZEN uses a zoom-aware camera model, registers poses across zoom
+levels, and then refines the radiance field and camera parameters through the three-phase
+training schedule.
+3.1 Zoom-Consistent Camera Formulation
+We introduce a zoom-consistent camera model that explicitly represents optical magnification as part of the intrinsic parameters. The training set I = {Ik }N
+k=1 is split into the Nout
+most zoomed-out frames (minimal magnification; ξk = 1) with indices i = 1, . . . , Nout , and
+Nin zoomed-in frames (ξk > 1) with indices j = Nout + 1, . . . , N . Each image Îk is rendered as
+Îk = FΘ (Θ, Πk ), Πk = (Rk , tk , f , c, ξk ).(1)
+where NeRF parameters Θ define the radiance field and Πk is the camera pose. Here, each
+image comes with a rough estimate of its zoom parameter ξk : either read from the camera’s
+zoom dial or inferred by comparing the object’s apparent size across views taken from the
+same optical center.
+Extrinsics, rotation Rk ∈ SO(3) and translation tk ∈ R3 , locate the camera in world
+space. Intrinsics, focal length f = (fx , fy ) and principal point c = (cx , cy ), complete the standard pin-hole intrinsics (Park et al., 2023; Wang et al., 2021). Finally, the
+zoom parameter ξk ≥ 1 scales the focal length, giving the effective intrinsic matrix
+Keﬀ
+k = diag(ξk fx , ξk fy , 1). Unlike CamP (Park et al., 2023), which treats the focal length
+of every view as a perturbed parameter, we assume a single base focal length for the camera
+and model per-view magnification with a separate zoom parameter. Thus, all views share
+the same intrinsic focal length, while any variation is captured solely by the learnable zoom
+parameter.
+13
+195 Page 8 of 94
+Machine Learning (2026) 115:195
+3.2 Cross-Zoom Pose Registration
+Assuming that the poses of the most zoomed-out images are reliably estimated from their
+larger FoV, the main challenge arises from zoomed-in views, which have little to no overlap
+with other zoomed-in images. This lack of shared features makes direct correspondencebased alignment infeasible. To bridge this gap, MZEN introduces a cross-zoom registration
+mechanism which establishes geometric correspondence between zoomed-in and the most
+zoomed-out images through a zoom-aware alignment process.
+Every zoomed-in image Ij is accompanied by a zoom parameter ξj > 1. To obtain a
+coarse yet physically plausible initial pose, we search the corresponding zoomed-out image
+set for the view that best matches Ij after accounting for its narrower FoV. Both the intrinsic
+and extrinsic parameters are then pose-primed from this best wide-field surrogate.
+To find the best match for each zoomed-in image j, for each of the most zoomed-out
+images with indices g ≤ Nout , we extract the central 1/ξj crop and bilinearly resize it to the
+native resolution, producing the surrogate view Ĩg→j . We then find the zoomed-out image
+closest to image j:
+g ⋆ (j) = arg min
+1
+g≤Nout HW
+Ij − Ĩg→j 2 ,(2)
+2
+where the mean-squared error is measured in RGB space. We copy the winning zoomed-out
+image’s rotation and translation,
+Fig. 4 Cross-zoom pose registration for an unpaired zoom-in view. Before Phase B pose refinement
+(Eq. 3), MZEN constructs initial pose candidates for each zoomed-in image by taking the central crop
+from each of the most zoomed-out views and resizing it to the zoomed-in resolution. It then computes
+the initial pose from the zoomed-out view that minimizes the RGB MSE in Eq. (2). A directly paired
+wide-field view is not required, as shown by copying the pose Π3 for the zoomed-in image in the upper
+left, which has no directly paired zoomed-out image. In contrast, the upper right, lower right, and lower
+left zoom-in images do have directly paired wide-field views, and thus use the poses from these views
+(Π1 , Π2 , and Π3 , respectively). The pose candidates are then used to initialize Phase B’s pose refinement
+13
+Page 9 of 94 195
+Machine Learning (2026) 115:195
+(A)
+(A)
+(Rj , tj ) ← (Rg⋆ (j) , tg⋆ (j) ),
+and inherit the focal length from Phase A. The zoom parameter is initialized to the dial reading. Note that a zoom-in view need not have a directly paired zoomed-out frame. When such
+a paired view is unavailable, Eq. (2) selects the closest surrogate among the available most
+zoomed-out views, which still yields a reliable initialization in practice (Fig. 4). Indeed, in
+Sect. 4’s experiments, we empirically find that this method works well even when some
+zoomed-in images do not have an exact match to the center of a zoomed-out image.
+A theoretical analysis of the optimization benefits of pose priming is provided in
+Appendix E.
+3.3 Three-Phase Training Schedule
+Simultaneous optimization of NeRF parameters and camera poses across all zoom levels
+is unstable. Moreover, executing the proposed pose priming requires optimized camera
+poses for the zoomed-out images. Therefore, MZEN adopts a structured optimization strategy composed of three phases. In the following subsections, we introduce the loss functions minimized in each phase; any suitable optimization method, e.g., variants of gradient
+descent, can be employed to minimize them.
+3.3.1 Phase A - Global Pose Bootstrap
+We start with the Nout most zoomed-out images whose dial magnification indicates ξ ≈ 1
+. For these frames the zoom parameter is initialized at ξi = 1, while the NeRF parameters
+(A)
+(A)
+Θ(A) , rotations Ri , translations ti , and focal lengths f (A) are randomly initialized.
+With all zoomed-in images withheld, we minimize
+Lcoarse =
+N
+out
+i=1
+(A)
+FΘ(A) Θ(A) , Π(A) − Ii
+2 ,
+i
+2
+where Πi = (Ri , ti , f , c, ξi ). Because every camera now shares the similar FoV, focal
+length and translation can no longer compensate for one another, and the optimizer converges to a single, metric reconstruction. The output is coarse NeRF parameters Θ(A)
+{ (A) }Nout
+and globally consistent poses Πi
+, obtained by the substantial overlap among the
+i=1
+most zoomed-out views. These poses lock the world scale and act as references for Phase B.
+3.3.2 Phase B - Zoom-in Pose Registration
+After performing pose priming as described in Sect. 3.2, we refine the initialized camera
+poses while keeping the coarse NeRF parameters Θ(A) frozen. Each copied pose and its
+corresponding zoom parameter are optimized by minimizing
+Lpose =
+N
+j=Nout +1
+FΘ(A) Θ(A) , Π(B) − Ij
+2 ,(3)
+j
+2
+13
+195 Page 10 of 94
+Machine Learning (2026) 115:195
+(B)
+where Πj = (Rj , tj , f , c, ξj ). The optimization adjusts only (Rj , tj , ξj ); all intrinsics
+copied from the most zoomed-out counterpart surrogate remain fixed.
+After convergence, Phase B produces the provisional full pose set
+{
+(A) }Nout
+i=1
+Π(B) = Πi
+∪
+{
+(B) }N
+,
+j=Nout +1
+Πj
+which seeds the joint fine optimization of Phase C.
+3.3.3 Phase C - Joint Refinement
+The coarse NeRF parameters Θ(A) and the provisional pose set Π(B) provide a good overall reconstruction of the large-scale global geometry, but still miss high-frequency texture.
+In this final stage, we unfreeze the NeRF parameters (initializing Θ(C) = Θ(A) ) and optimize it together with every camera pose parameters, including the zoom parameters {ξk }
+. The loss is
+Lﬁne =
+N
+FΘ(C) Θ(C) , Π(B) − Ik
+2 .
+k
+2
+(4)
+k=1
+Jointly minimizing (4) redistributes remaining discrepancies between geometry and camera
+parameters across zoom levels, sharpening fine details and yielding pixel-accurate poses for
+high-quality novel-view synthesis.
+We detail how modern pose refinement and anti-aliasing modules are incorporated in
+Appendix A, and explain how this framework extends to the special case of 360° surrounding views in Appendix G.
+4 Experimental Evaluation
+In this section, we first discuss the metrics used for evaluating MZEN’s NeRF reconstructions, followed by the datasets, configurations, and training setups. We then present quantitative and qualitative results demonstrating MZEN’s improvements over existing pose-free
+NeRF methods on both synthetic and real forward-facing datasets.
+We also conduct experiments on two 360° scenes (Lego and Hotdog) from the NeRFSynthetic dataset (Mildenhall et al., 2021) to further verify MZEN’s generalization beyond
+forward-facing setups. The corresponding results are presented in Appendix G.
+4.1 Metrics for NeRF Reconstruction
+We use the PSNR, SSIM, and LPIPS to evaluate the quality of a given image’s reconstruction. PSNR and SSIM focus on pixel-wise differences and structural similarity but struggle
+to evaluate fine textures and high-frequency details, particularly in blurry NeRF reconstructions (Fei et al., 2025; Ma et al., 2022; Pambrun & Noumeir, 2015; Setiadi, 2021; Zhang et
+al., 2018). To complement these limitations, LPIPS is sometimes used to assess perceptual
+quality (Zhang et al., 2018). However, LPIPS relies on pre-trained deep networks (we adopt
+13
+Machine Learning (2026) 115:195
+Page 11 of 94 195
+the author-released pre-trained AlexNet backbone (Zhang et al., 2018)), making it nondeterministic and less interpretable for evaluating NeRF reconstructions.
+To complement the existing metrics while addressing these limitations, we employ two
+additional metrics: Gradient Similarity Score (GSS) and Laplacian Similarity Score
+(LSS). GSS directly compares gradient magnitudes, making it sensitive to edge sharpness and faint spatial smearing that standard metrics overlook. LSS measures second-order
+intensity variations, capturing the fidelity of high-frequency texture and surface curvature.
+Implementation details are given in Appendix B.
+4.2 Forward-Facing Multi-zoom NeRF Dataset
+To benchmark multi-zoom reconstruction, we introduce the FF-MZN dataset, which contains eight forward-facing scenes drawn from three sources:
+● TCAD-SIM: four test structures rendered in Synopsys Sentaurus TCAD (Synopsys,
+Inc., 2025);
+● SEM-MEMS: two real micro-electromechanical (MEMS) devices captured with a
+SEM; and
+● BLEFF: two objects from the Blender Forward-Facing dataset (Wang et al., 2021).
+All frames are RGB forward-facing views. TCAD and SEM images have a resolution of
+400 × 400 pixels, while BLEFF images are 390 × 260 pixels.
+TCAD and BLEFF scenes are rendered/photographed at three optical magnifications
+{1×, 2×, 4×}; SEM scenes use {1×, 2×, 3×}. For BLEFF, lower zooms (1×, 2×) are
+created by bicubic down-sampling the 4× render, while the 4× view is a center crop rescaled to the native resolution. This keeps the camera extrinsics identical across zoom levels while providing realistic multi-zoom pairs. After applying this procedure to all BLEFF
+scenes, we select the two whose surface texture vanishes in the 1× view but reappear in the
+zoomed-in images.
+This layout allows us to test whether a method can recover both global structure (from
+the 1× images) and fine detail (from the > 1× images) while maintaining pose consistency.
+FF-MZN therefore offers the first structured benchmark for zoom-consistent NeRF training, as it stresses pose solvers with minimal overlap between high zoomed-in images and
+demands fidelity across three orders of zoom levels. Full acquisition details are provided in
+Appendix F.
+4.3 Evaluation Configurations
+We evaluate MZEN under four experimental configurations to isolate the contribution of
+each MZEN stage:
+● Config 1: Training only with zoomed-out images using a baseline NeRF method without known camera poses. This serves as the primary baseline.
+● Config 2: Training with all zoom levels using a baseline NeRF method without known
+camera poses. In this configuration, we independently optimize the camera poses of all
+images, without using any prior knowledge of the image zoom level. This serves as the
+13
+195 Page 12 of 94
+Machine Learning (2026) 115:195
+secondary baseline.
+● Config 3: MZEN uses only zoomed-out images to perform the global-pose bootstrap.
+This corresponds to Phase A of MZEN and differs from Config 1 by introducing the
+zoom-aware camera formulation with a learnable per-view zoom scalar (initialized at
+ξi = 1 ).
+● Config 4: MZEN runs the full three-phase schedule, including pose priming and joint
+fine optimization, across all zoom levels. This corresponds to the complete MZEN
+framework, through Phase C.
+These configurations illustrate the incremental performance improvements as each MZEN
+component is applied. For Configs 3 and 4, MZEN builds upon existing pose-free NeRF
+backbones (e.g., NeRF--, BARF, NoPe-NeRF, Mip-NeRF, and CamP) by (i) adopting the
+zoom-consistent camera formulation and (ii) applying a structured three-phase optimization
+schedule with cross-zoom pose priming and registration for the zoom-in views before joint
+refinement.
+4.4 Experiment Settings
+For a fair comparison, we allocate an equal computational budget to each setting. Configs
+1 and 3 are trained for the same number of epochs (identical forward and backward passes
+per image), and likewise for Configs 2 and 4. In Config 4, we count the Phase B poseregistration passes—although the NeRF weights are frozen—to match the total calculation
+cost of Config 2. Thus, each input image receives the same overall optimization effort in its
+respective pair (1 vs. 3, 2 vs. 4). Epoch numbers are chosen so that both camera poses and
+NeRF parameters have fully converged in all cases (empirically, training PSNR changes by
+less than 2 % when training is extended).
+We treat the extrinsics and the focal length as unknowns that must be learned during
+training. The zoom value recorded by the camera is used only as an initial guess; it, too, is
+allowed to adjust during the optimization process.
+We use NeRF-- (Wang et al., 2021), BARF (Lin et al., 2021), and NoPe-NeRF (Bian et
+al., 2023) for pose estimation. When using BARF, the first phase leverages BARF’s coarseto-fine encoding. When using NoPe-NeRF, depth supervision is utilized in every phase.
+Mip-NeRF (Barron et al., 2021) and CamP (Park et al., 2023) assume COLMAP-initialized poses (Schönberger & Frahm, 2016), which we could not obtain on the multi-zoom
+FF-MZN dataset. Accordingly, for Mip-NeRF, we keep the NeRF-- backbone but replace
+the standard positional encoding with Mip-NeRF’s Integrated Positional Encoding (IPE),
+and optimize camera poses and scene parameters jointly from scratch. For CamP, we begin
+with the same Mip-NeRF settings, then activate CamP’s pose-preconditioning module after
+a fixed number of epochs and continue training.
+Each scene is uniformly randomly split into an 80 % training set and a 20 % test set.
+Because the split is performed at the image level, the training subset does not necessarily
+contain a perfectly paired wide-field counterpart for every zoomed-in view. This naturally
+produces unpaired zoomed-in instances, consistent with the scenario illustrated in Fig. 4. To
+13
+Machine Learning (2026) 115:195
+Page 13 of 94 195
+ensure a balanced evaluation, we maintain comparable numbers of training images across
+zoom levels within each scene.
+Test poses are obtained by running MZEN’s pose-registration step on the held-out frames
+once training is complete, mirroring the evaluation protocol of NeRF--. All metrics are then
+computed between the rendered test views and the ground-truth images for every configuration. Following the NeRF-- evaluation protocol, we obtain test poses by applying MZEN’s
+pose-registration step to the held-out frames after training. To reduce stochasticity in the
+pose-registration/evaluation pipeline, we repeat testing with three random seeds and report
+mean (± std) in Tables 1 and 2.
+All models are trained on an NVIDIA RTX 4090 GPU. Additional details, including
+learning rates, training epochs, and network architectures, are provided in Appendix A.
+4.5 Quantitative results
+Tables 1 and 2 report average scores over the three zoom levels for all eight scenes in FFMZN. Across the 40 scene–metric combinations in Tables 1 and 2, Config 4 (full MZEN)
+achieves the best overall performance in 39/40 cases, with the only exception occurring on
+FinFET under Mip-NeRF. Figure 5 presents the same main-body results by backbone and
+metric, making the gap between full MZEN and the all-zoom non-MZEN baseline easier to
+inspect across the eight scenes.
+Config 3 (Phase A) trains on the same zoomed-out images as Config 1. On average, it
+slightly improves performance, increasing PSNR by 0.60%, SSIM by 1.0%, GSS by 0.8%,
+and LSS by 1.6%, while reducing LPIPS by 2.0%. This indicates that introducing a learnable zoom scalar does not introduce noticeable noise when no zoomed-in views are present
+(the learned ξ deviates by < 5% from its initial value).
+After Phase C (Config 4), the learned zoom scalars differ from their dial readings by
+5 − 15 %. The deviation increases roughly in proportion to the original magnification–an
+effect similar to the intrinsic-drift reported for CamP (Park et al., 2023). Config 4 boosts
+image fidelity dramatically: PSNR rises by −0.3–32.1 %, SSIM by −0.1–51.9 %, GSS by
+1.1–46.0 %, and LSS by 0.6–57.8 %, while LPIPS drops by 1.1–400 % relative to Config
+1. On the real SEM scenes, the gains remain large (PSNR 12.1–32.1 %, SSIM 7.5–51.9 %
+, LPIPS 21.7–46.0 %, GSS 32.4–57.8 %, LSS 55.1–400.0 %), confirming that MZEN can
+handle industrial imagery for the quality control process as well.
+Config 2 (baseline trained on all zoom levels without any zoom prior) attains aggregate
+scores that are numerically close to Configs 1 and 3; however, it often fails qualitatively,
+producing severe geometric ghosting and color/texture bleeding (Fig. 6). This failure occurs
+because a single joint optimization can cause poses from different magnifications to collapse toward inconsistent (often overlapping) solutions: the pose solver attempts to reconcile wide-field and close-up observations without explicit cross-zoom registration, leading
+to misaligned camera estimates and duplicated structures. In contrast, MZEN mitigates this
+issue through pose priming and the staged three-phase schedule: it stabilizes the wide-field
+pose scaffold (Phase A), registers zoom-in views before full joint refinement (Phase B),
+and only then optimizes all views together (Phase C). This interpretation is further supported by the additional ablations in Appendix D, where removing Phase B or training only
+with zoom-in views consistently degrades performance. Per-zoom quantitative results are
+reported in Appendix C.
+13
+195 Page 14 of 94
+Machine Learning (2026) 115:195
+Our new metrics, GSS and LSS, act as edge- and texture-oriented complements to SSIM.
+Compared with SSIM, both metrics are 2× to 3× more sensitive to the high-frequency
+detail recovered by MZEN.
+All experiments are conducted on the new FF-MZN benchmark. Its controlled magnifications, spanning 1× to 4×, expose the scale gap that breaks conventional NeRF training
+and therefore serve as a testbed for multi-zoom methods.
+5 Discussion
+5.1 Computational Efficiency
+Assume the application demands the detail seen in a 4× optical zoom (the argument extends
+to any magnification). A naïve solution is to capture a single full-FoV image at 4× the
+native linear resolution; the pixel count—and thus the ray count—grows quadratically,
+by 42 = 16×. Training that frame, therefore, costs as much as processing sixteen native
+images, an impractical burden in industrial workflows.
+MZEN instead records all frames at the sensor’s native resolution. To cover the same
+scene area as the high-resolution shot, we keep the 1× view and take sixteen 4× crops,
+1
+= 2 native
+each spanning 1/16 of the FoV. The total pixel budget becomes 1 + 16 × 16
+frames—an 8× reduction in memory and compute versus the naïve capture.
+Large frames also exacerbate aliasing, motivating cone tracing in Mip-NeRF and ZipNeRF (Barron et al., 2021, 2023). Because each MZEN crop is already band-limited to
+the sensor grid, standard ray sampling is sufficient, and no cone integration is needed. The
+staged training schedule further reduces GPU memory: Phase B freezes the NeRF parameters and optimizes only the zoom-in poses, halving the gradient storage for that stage.
+5.2 Constraints
+In addition to the benefits of MZEN, we note several practical constraints. MZEN assumes
+that Phase A can bootstrap a globally consistent pose scaffold from the most zoomed-out
+views. This requires sufficiently many zoomed-out images with strong mutual overlap so
+that pose-free optimization converges to a stable metric reconstruction. If the zoomed-out
+subset is sparse or exhibits limited overlap, Phase A may produce inaccurate global poses,
+which in turn weakens Phase B because pose priming relies on a meaningful wide-field
+reference.
+Cross-zoom registration, which we perform at the beginning of Phase B, is most reliable
+when the region observed in a zoomed-in image is covered by (or lies near the central area
+of) at least one available zoomed-out view. If many zoomed-in images focus on regions far
+from the centers of the captured zoomed-out views (e.g., due to stage drift or off-center targeting), the crop-and-resize surrogate in Eq. (2) can become a weaker approximation, which
+may degrade pose priming quality and make Phase B optimization in Eq. (3) ill-conditioned.
+Nevertheless, when Phase A yields a sufficiently accurate coarse radiance field, Phase B can
+often still recover usable zoomed-in poses by refining from the best available surrogate,
+even in the presence of unpaired views (Fig. 4).
+13
+Table 1 Evaluation on the BLEFF datasets (Round Table and Root) and Synopsys Sentaurus TCAD test-structure dataset (FinFET and Sensor)
+Config
+Round Table
+Root
+PSNR
+SSIM
+LPIPS
+GSS
+LSS
+PSNR
+SSIM
+NeRF– Base
+1 29.08 (± 5.94) 0.884 (± 0.068)
+0.297 (± 0.174)
+0.599 (± 0.159)
+0.689 (± 0.112)
+24.88 (± 5.99) 0.811
+(±
+0.126)
+2 28.16 (± 4.01) 0.854 (± 0.061)
+0.416 (± 0.155)
+0.541 (± 0.085)
+0.629 (± 0.060)
+24.83 (± 2.75) 0.783
+(±
+0.083)
+MZEN 3 28.74 (± 6.60) 0.877 (± 0.081)
+0.300 (± 0.193)
+0.595 (± 0.178)
+0.682 (± 0.126)
+24.83 (± 6.05) 0.810
+(±
+0.128)
+4 35.45 (±2.96) 0.952 (±0.026)
+0.102 (±0.058)
+0.770 (±0.072)
+0.791 (±0.064)
+29.30 (±2.51) 0.899
+(±
+0.062)
+BARF Base
+1 28.59 (± 6.26) 0.876 (± 0.078)
+0.303 (± 0.178)
+0.591 (± 0.163)
+0.684 (± 0.115)
+24.17 (± 6.09) 0.797
+(±
+0.132)
+2 28.37 (± 3.53) 0.856 (± 0.057)
+0.410 (± 0.150)
+0.551 (± 0.080)
+0.633 (± 0.060)
+24.80 (± 2.68) 0.779
+(±
+0.084)
+MZEN 3 29.00 (± 5.79) 0.887 (± 0.068)
+0.281 (± 0.162)
+0.603 (± 0.150)
+0.688 (± 0.109)
+24.57 (± 5.92) 0.802
+(±
+0.129)
+4 35.55 (±2.94) 0.953 (±0.026)
+0.106 (±0.066)
+0.774 (±0.074)
+0.796 (±0.065)
+29.34 (±2.13) 0.897
+(±
+0.057)
+NoPe- Base
+1 29.51 (± 6.06) 0.887 (± 0.071)
+0.289 (± 0.179)
+0.608 (± 0.165)
+0.694 (± 0.116)
+24.82 (± 6.04) 0.811
+NeRF
+(±
+0.127)
+2 28.56 (± 3.57) 0.858 (± 0.061)
+0.382 (± 0.151)
+0.561 (± 0.075)
+0.634 (± 0.061)
+24.65 (± 2.71) 0.783
+(±
+0.076)
+LPIPS
+0.247
+(±
+0.172)
+0.353
+(±
+0.096)
+0.249
+(±
+0.173)
+0.126
+(±
+0.086)
+0.255
+(±
+0.170)
+0.368
+(±
+0.090)
+0.255
+(±
+0.166)
+0.133
+(±
+0.081)
+0.243
+(±
+0.169)
+0.360
+(±
+0.082)
+GSS
+0.683
+(±
+0.154)
+0.619
+(±
+0.089)
+0.685
+(±
+0.152)
+0.797
+(±
+0.072)
+0.672
+(±
+0.151)
+0.611
+(±
+0.088)
+0.682
+(±
+0.148)
+0.796
+(±
+0.064)
+0.689
+(±
+0.151)
+0.619
+(±
+0.086)
+LSS
+0.689
+(±
+0.136)
+0.628
+(±
+0.075)
+0.689
+(±
+0.136)
+0.789
+(±
+0.067)
+0.672
+(±
+0.140)
+0.624
+(±
+0.073)
+0.683
+(±
+0.135)
+0.788
+(±
+0.058)
+0.691
+(±
+0.136)
+0.629
+(±
+0.073)
+Machine Learning (2026) 115:195
+Page 15 of 94 195
+13
+13
+CamP
+MipNeRF
+Config
+0.115 (±0.068)
+4 34.94 (±2.73) 0.948 (±0.025)
+0.293 (± 0.180)
+0.146 (±0.087)
+0.880 (± 0.074)
+MZEN 3 29.04 (± 5.96)
+4 34.09 (±3.56) 0.936 (±0.035)
+0.446 (± 0.160)
+0.851 (± 0.058)
+2 27.56 (± 3.79)
+0.258 (± 0.152)
+0.897 (± 0.061)
+1 30.17 (± 5.38)
+Base
+0.296 (± 0.175)
+0.892 (± 0.065)
+MZEN 3 29.01 (± 5.72)
+0.428 (± 0.162)
+0.852 (± 0.061)
+2 27.84 (± 3.95)
+0.310 (± 0.185)
+0.881 (± 0.071)
+0.117 (±0.070)
+4 35.03 (±2.81) 0.948 (±0.027)
+1 29.04 (± 6.01)
+Base
+LPIPS
+0.303 (± 0.176)
+SSIM
+0.884 (± 0.068)
+Round Table
+PSNR
+MZEN 3 28.94 (± 5.91)
+Table 1 (continued)
+0.728 (±0.090)
+0.598 (± 0.165)
+0.526 (± 0.077)
+0.641 (± 0.143)
+0.760 (±0.067)
+0.604 (± 0.156)
+0.537 (± 0.085)
+0.603 (± 0.163)
+0.759 (±0.072)
+GSS
+0.598 (± 0.156)
+0.759 (±0.079)
+0.681 (± 0.118)
+0.624 (± 0.055)
+0.704 (± 0.107)
+0.783 (±0.059)
+0.693 (± 0.109)
+0.628 (± 0.061)
+0.688 (± 0.116)
+0.785 (±0.064)
+LSS
+0.691 (± 0.110)
+SSIM
+0.808
+(±
+0.128)
+29.59 (±2.29) 0.904
+(±
+0.058)
+24.29 (± 6.35) 0.797
+(±
+0.136)
+24.87 (± 2.63) 0.783
+(±
+0.083)
+24.40 (± 6.22) 0.799
+(±
+0.133)
+29.21 (±2.41) 0.895
+(±
+0.060)
+24.70 (± 6.48) 0.803
+(±
+0.133)
+24.62 (± 2.53) 0.780
+(±
+0.082)
+24.88 (± 6.06) 0.812
+(±
+0.126)
+29.22 (±2.52) 0.894
+(±
+0.061)
+Root
+PSNR
+24.65 (± 6.02)
+LPIPS
+0.249
+(±
+0.170)
+0.118
+(±
+0.081)
+0.256
+(±
+0.174)
+0.370
+(±
+0.096)
+0.253
+(±
+0.167)
+0.134
+(±
+0.091)
+0.249
+(±
+0.172)
+0.375
+(±
+0.095)
+0.247
+(±
+0.173)
+0.132
+(±
+0.091)
+GSS
+0.682
+(±
+0.150)
+0.804
+(±
+0.068)
+0.678
+(±
+0.156)
+0.611
+(±
+0.093)
+0.680
+(±
+0.148)
+0.792
+(±
+0.070)
+0.684
+(±
+0.156)
+0.605
+(±
+0.089)
+0.687
+(±
+0.152)
+0.793
+(±
+0.069)
+LSS
+0.686
+(±
+0.135)
+0.796
+(±
+0.062)
+0.676
+(±
+0.147)
+0.624
+(±
+0.076)
+0.677
+(±
+0.141)
+0.785
+(±
+0.064)
+0.684
+(±
+0.146)
+0.617
+(±
+0.071)
+0.692
+(±
+0.135)
+0.785
+(±
+0.063)
+195 Page 16 of 94
+Machine Learning (2026) 115:195
+0.097 (±0.045)
+4 26.89 (±2.40) 0.926 (±0.035)
+NoPeNeRF
+0.877 (± 0.056)
+0.900 (± 0.044)
+1 23.00 (± 2.39)
+2 24.29 (± 2.32)
+0.081 (±0.034)
+4 26.32 (±2.62) 0.933 (±0.032)
+Base
+0.124 (± 0.059)
+0.898 (± 0.047)
+MZEN 3 24.89 (± 2.61)
+0.150 (± 0.060)
+0.161 (± 0.061)
+0.152 (± 0.065)
+0.902 (± 0.045)
+2 24.26 (± 2.70)
+0.148 (± 0.075)
+0.877 (± 0.062)
+1 23.86 (± 3.31)
+BARF Base
+0.129 (± 0.059)
+0.895 (± 0.049)
+MZEN 3 25.07 (± 2.53)
+0.155 (± 0.066)
+0.900 (± 0.046)
+2 24.13 (± 2.54)
+LPIPS
+0.148 (± 0.073)
+SSIM
+0.891 (± 0.051)
+Table 1 (continued)
+Config
+FinFET
+PSNR
+NeRF– Base
+1 25.16 (± 2.65)
+0.656 (± 0.147)
+0.642 (± 0.130)
+0.752 (±0.118)
+0.685 (± 0.150)
+0.650 (± 0.158)
+0.658 (± 0.166)
+0.752 (±0.117)
+0.686 (± 0.145)
+0.647 (± 0.153)
+GSS
+0.684 (± 0.155)
+0.754 (± 0.097)
+0.733 (± 0.096)
+0.805 (±0.093)
+0.759 (± 0.106)
+0.751 (± 0.103)
+0.739 (± 0.121)
+0.810 (±0.090)
+0.766 (± 0.104)
+0.750 (± 0.100)
+LSS
+0.764 (± 0.110)
+SSIM
+0.892
+(±
+0.067)
+26.06 (± 3.28) 0.875
+(±
+0.072)
+25.23 (± 4.37) 0.870
+(±
+0.077)
+29.21 (±3.82) 0.940
+(±
+0.033)
+28.58 (± 4.07) 0.938
+(±
+0.042)
+26.20 (± 3.25) 0.875
+(±
+0.073)
+27.99 (± 4.16) 0.902
+(±
+0.070)
+30.56 (±3.37) 0.957
+(±
+0.023)
+27.02 (± 3.53) 0.890
+(±
+0.071)
+26.26 (± 3.37) 0.874
+(±
+0.074)
+Sensor
+PSNR
+26.83 (± 3.63)
+LPIPS
+0.172
+(±
+0.123)
+0.243
+(±
+0.164)
+0.215
+(±
+0.149)
+0.103
+(±
+0.069)
+0.122
+(±
+0.091)
+0.249
+(±
+0.174)
+0.161
+(±
+0.128)
+0.085
+(±
+0.056)
+0.177
+(±
+0.132)
+0.246
+(±
+0.175)
+GSS
+0.751
+(±
+0.117)
+0.718
+(±
+0.119)
+0.725
+(±
+0.127)
+0.817
+(±
+0.079)
+0.808
+(±
+0.104)
+0.718
+(±
+0.119)
+0.771
+(±
+0.125)
+0.848
+(±
+0.062)
+0.752
+(±
+0.122)
+0.717
+(±
+0.122)
+LSS
+0.797
+(±
+0.106)
+0.782
+(±
+0.098)
+0.778
+(±
+0.110)
+0.852
+(±
+0.071)
+0.839
+(±
+0.095)
+0.784
+(±
+0.095)
+0.812
+(±
+0.111)
+0.876
+(±
+0.057)
+0.798
+(±
+0.108)
+0.782
+(±
+0.100)
+Machine Learning (2026) 115:195
+Page 17 of 94 195
+13
+SSIM
+0.934 (± 0.032)
+LPIPS
+0.085 (± 0.042)
+GSS
+0.756 (± 0.127)
+LSS
+0.810 (± 0.100)
+Sensor
+PSNR
+27.21 (± 3.56)
+SSIM
+LPIPS GSS LSS
+0.897
+0.167 0.760 0.807
+(±
+(±
+(±
+(±
+0.067) 0.120) 0.114) 0.101)
+0.095 0.821 0.854
+4 29.30 (±2.10) 0.962 (±0.017)
+0.051 (±0.022)
+0.833 (±0.073)
+0.870 (±0.061)
+29.26 (±3.32) 0.943
+(±
+(±
+(±
+(±
+0.030) 0.055) 0.073) 0.067)
+MipBase
+1 26.60 (± 3.05) 0.930 (± 0.035)
+0.093 (± 0.045)
+0.743 (± 0.138)
+0.803 (± 0.103)
+27.74 (± 4.00) 0.908
+0.172 0.767 0.810
+NeRF
+(±
+(±
+(±
+(±
+0.064) 0.130) 0.124) 0.109)
+2 24.29 (± 2.44) 0.904 (± 0.043)
+0.148 (± 0.064)
+0.658 (± 0.146)
+0.755 (± 0.096)
+26.46 (± 3.36) 0.875
+0.244 0.723 0.784
+(±
+(±
+(±
+(±
+0.074) 0.159) 0.121) 0.102)
+MZEN 3 25.14 (± 2.88) 0.903 (± 0.046)
+0.130 (± 0.056)
+0.680 (± 0.152)
+0.762 (± 0.107)
+25.99 (± 3.24) 0.876
+0.212 0.724 0.781
+(±
+(±
+(±
+(±
+0.078) 0.162) 0.128) 0.108)
+0.125 0.810 0.846
+4 26.51 (± 2.10) 0.929 (± 0.031)
+0.092 (±0.039)
+0.751 (±0.108)
+0.808 (±0.081)
+29.15 (±3.69) 0.934
+(±
+(±
+(±
+(±
+0.036) 0.089) 0.083) 0.073)
+CamP Base
+1 26.05 (± 2.62) 0.917 (± 0.039)
+0.116 (± 0.050)
+0.713 (± 0.137)
+0.784 (± 0.100)
+25.93 (± 2.44) 0.892
+0.200 0.738 0.793
+(±
+(±
+(±
+(±
+0.063) 0.125) 0.106) 0.096)
+2 24.13 (± 2.57) 0.897 (± 0.045)
+0.163 (± 0.064)
+0.645 (± 0.154)
+0.745 (± 0.101)
+25.88 (± 3.35) 0.870
+0.262 0.698 0.771
+(±
+(±
+(±
+(±
+0.075) 0.175) 0.133) 0.106)
+MZEN 3 24.59 (± 2.62) 0.898 (± 0.047)
+0.144 (± 0.058)
+0.664 (± 0.146)
+0.753 (± 0.104)
+25.40 (± 3.53) 0.862
+0.228 0.707 0.769
+(±
+(±
+(±
+(±
+0.086) 0.162) 0.134) 0.115)
+0.123 0.806 0.844
+4 26.24 (±2.75) 0.924 (±0.038)
+0.101 (±0.042)
+0.736 (±0.115)
+0.797 (±0.090)
+28.99 (±3.25) 0.931
+(±
+(±
+(±
+(±
+0.037) 0.082) 0.081) 0.071)
+Metrics are averaged over three zoom levels. In LPIPS, lower values are better; in others, higher values are better. MZEN (configuration 4) attains the best score in every
+metric except for one case on FinFET with Mip-NeRF. Best results are bolded
+Table 1 (continued)
+Config
+FinFET
+PSNR
+MZEN 3 26.98 (± 3.06)
+195 Page 18 of 94
+13
+Machine Learning (2026) 115:195
+NoPeNeRF
+0.880 (± 0.050)
+2 20.83 (± 2.26)
+0.969 (± 0.014)
+4 27.49 (± 2.02)
+0.932 (± 0.041)
+0.948 (± 0.032)
+MZEN 3 25.24 (± 2.97)
+1 25.04 (± 3.76)
+0.888 (± 0.045)
+2 22.32 (± 2.32)
+Base
+0.918 (± 0.043)
+1 23.47 (± 3.10)
+0.163 (± 0.076)
+0.104 (± 0.076)
+0.045 (± 0.030)
+0.084 (± 0.062)
+0.145 (± 0.076)
+0.118 (± 0.072)
+0.045 (±0.032)
+4 27.67 (±2.08) 0.963 (±0.022)
+BARF Base
+0.101 (± 0.077)
+0.934 (± 0.039)
+MZEN 3 25.22 (± 3.80)
+0.149 (± 0.077)
+0.892 (± 0.045)
+2 22.10 (± 2.25)
+0.660 (± 0.103)
+0.755 (± 0.119)
+0.842 (± 0.057)
+0.777 (± 0.102)
+0.679 (± 0.104)
+0.729 (± 0.113)
+0.845 (±0.060)
+0.762 (± 0.117)
+0.678 (± 0.100)
+0.741 (± 0.083)
+0.809 (± 0.095)
+0.875 (± 0.049)
+0.819 (± 0.085)
+0.759 (± 0.081)
+0.788 (± 0.092)
+0.878 (±0.052)
+0.815 (± 0.093)
+0.755 (± 0.080)
+SSIM
+0.897
+(±
+0.043)
+19.98 (± 1.72) 0.838
+(±
+0.058)
+22.07 (± 2.36) 0.893
+(±
+0.045)
+25.96 (±0.71) 0.947
+(±
+0.015)
+23.45 (± 2.53) 0.932
+(±
+0.029)
+19.93 (± 1.46) 0.835
+(±
+0.056)
+23.56 (± 2.85) 0.929
+(±
+0.033)
+26.10 (± 0.88) 0.960
+(±
+0.008)
+21.93 (± 2.57) 0.896
+(±
+0.045)
+19.94 (± 1.93) 0.816
+(±
+0.064)
+Table 2 Evaluation on the Synopsys Sentaurus TCAD test-structure dataset (Tower and Pillars) and SEM datasets (Box and Beams)
+Config
+Tower
+Pillars
+PSNR
+SSIM
+LPIPS
+GSS
+LSS
+PSNR
+NeRF– Base
+1 24.98 (± 3.70) 0.929 (± 0.042)
+0.108 (± 0.076)
+0.750 (± 0.119)
+0.808 (± 0.094)
+22.36 (± 2.40)
+LPIPS
+0.103
+(±
+0.045)
+0.175
+(±
+0.050)
+0.109
+(±
+0.048)
+0.051
+(±
+0.010)
+0.081
+(±
+0.041)
+0.181
+(±
+0.044)
+0.084
+(±
+0.047)
+0.044
+(±
+0.007)
+0.110
+(±
+0.049)
+0.178
+(±
+0.059)
+GSS
+0.739
+(±
+0.089)
+0.645
+(±
+0.079)
+0.728
+(±
+0.090)
+0.837
+(±
+0.027)
+0.771
+(±
+0.090)
+0.663
+(±
+0.069)
+0.770
+(±
+0.100)
+0.841
+(±
+0.028)
+0.728
+(±
+0.095)
+0.638
+(±
+0.089)
+LSS
+0.770
+(±
+0.082)
+0.706
+(±
+0.068)
+0.762
+(±
+0.082)
+0.866
+(±
+0.019)
+0.808
+(±
+0.072)
+0.720
+(±
+0.058)
+0.806
+(±
+0.080)
+0.871
+(±
+0.020)
+0.759
+(±
+0.089)
+0.691
+(±
+0.084)
+Machine Learning (2026) 115:195
+Page 19 of 94 195
+13
+13
+CamP
+MipNeRF
+Config
+0.888 (± 0.047)
+0.911 (± 0.042)
+0.950 (± 0.018)
+2 20.93 (± 2.15)
+MZEN 3 22.05 (± 2.70)
+4 25.46 (± 1.70)
+0.955 (± 0.019)
+4 26.28 (± 1.95)
+0.935 (± 0.041)
+0.923 (± 0.041)
+MZEN 3 23.91 (± 2.99)
+1 24.81 (± 3.74)
+0.881 (± 0.049)
+2 21.47 (± 2.50)
+Base
+0.938 (± 0.039)
+1 25.14 (± 3.63)
+0.963 (± 0.021)
+4 27.44 (± 1.96)
+Base
+SSIM
+0.935 (± 0.039)
+Tower
+PSNR
+MZEN 3 25.17 (± 3.80)
+Table 2 (continued)
+0.072 (± 0.033)
+0.134 (± 0.070)
+0.160 (± 0.062)
+0.101 (± 0.074)
+0.064 (± 0.033)
+0.108 (± 0.066)
+0.157 (± 0.080)
+0.102 (± 0.075)
+0.047 (± 0.033)
+LPIPS
+0.102 (± 0.075)
+0.802 (± 0.052)
+0.717 (± 0.099)
+0.659 (± 0.094)
+0.759 (± 0.115)
+0.813 (± 0.058)
+0.737 (± 0.109)
+0.659 (± 0.105)
+0.761 (± 0.115)
+0.843 (± 0.056)
+GSS
+0.757 (± 0.118)
+0.845 (± 0.046)
+0.779 (± 0.081)
+0.743 (± 0.078)
+0.811 (± 0.093)
+0.852 (± 0.051)
+0.793 (± 0.089)
+0.741 (± 0.085)
+0.814 (± 0.092)
+0.876 (± 0.049)
+LSS
+0.812 (± 0.094)
+25.36 (± 1.18)
+21.85 (± 2.11)
+20.17 (± 1.66)
+22.07 (± 2.38)
+25.60 (± 1.06)
+21.63 (± 2.52)
+20.28 (± 1.64)
+22.01 (± 2.49)
+25.56 (± 1.00)
+Pillars
+PSNR
+22.09 (± 2.32)
+SSIM
+0.893
+(±
+0.044)
+0.944
+(±
+0.018)
+0.895
+(±
+0.044)
+0.840
+(±
+0.058)
+0.894
+(±
+0.043)
+0.947
+(±
+0.016)
+0.894
+(±
+0.044)
+0.835
+(±
+0.058)
+0.890
+(±
+0.043)
+0.941
+(±
+0.021)
+LPIPS
+0.109
+(±
+0.047)
+0.054
+(±
+0.014)
+0.107
+(±
+0.048)
+0.162
+(±
+0.044)
+0.110
+(±
+0.047)
+0.053
+(±
+0.011)
+0.102
+(±
+0.041)
+0.166
+(±
+0.040)
+0.110
+(±
+0.042)
+0.054
+(±
+0.010)
+GSS
+0.730
+(±
+0.087)
+0.830
+(±
+0.027)
+0.732
+(±
+0.087)
+0.645
+(±
+0.077)
+0.725
+(±
+0.088)
+0.828
+(±
+0.029)
+0.736
+(±
+0.083)
+0.636
+(±
+0.081)
+0.727
+(±
+0.078)
+0.823
+(±
+0.031)
+LSS
+0.762
+(±
+0.083)
+0.860
+(±
+0.023)
+0.763
+(±
+0.082)
+0.704
+(±
+0.070)
+0.754
+(±
+0.086)
+0.860
+(±
+0.023)
+0.767
+(±
+0.077)
+0.697
+(±
+0.073)
+0.759
+(±
+0.074)
+0.851
+(±
+0.029)
+195 Page 20 of 94
+Machine Learning (2026) 115:195
+NoPeNeRF
+0.802 (± 0.044)
+0.729 (± 0.031)
+2 22.09 (± 0.83)
+0.876 (± 0.006)
+4 27.30 (± 0.50)
+1 23.66 (± 1.11)
+0.789 (± 0.029)
+MZEN 3 23.52 (± 0.18)
+Base
+0.769 (± 0.030)
+2 22.46 (± 0.78)
+0.863 (± 0.016)
+4 26.69 (± 0.48)
+0.762 (± 0.037)
+0.793 (± 0.038)
+MZEN 3 23.58 (± 0.78)
+1 23.11 (± 0.29)
+0.755 (± 0.021)
+2 22.32 (± 0.48)
+BARF Base
+SSIM
+0.803 (± 0.043)
+Table 2 (continued)
+Config
+Box
+PSNR
+NeRF– Base
+1 23.80 (± 1.10)
+0.487 (± 0.057)
+0.347 (± 0.067)
+0.218 (± 0.043)
+0.378 (± 0.039)
+0.380 (± 0.045)
+0.420 (± 0.066)
+0.225 (± 0.037)
+0.362 (± 0.052)
+0.419 (± 0.058)
+LPIPS
+0.349 (± 0.072)
+0.433 (± 0.095)
+0.577 (± 0.095)
+0.711 (± 0.037)
+0.544 (± 0.070)
+0.476 (± 0.113)
+0.532 (± 0.078)
+0.691 (± 0.052)
+0.568 (± 0.087)
+0.475 (± 0.102)
+GSS
+0.568 (± 0.107)
+0.371 (± 0.071)
+0.489 (± 0.111)
+0.668 (± 0.026)
+0.454 (± 0.073)
+0.422 (± 0.093)
+0.429 (± 0.079)
+0.641 (± 0.047)
+0.475 (± 0.094)
+0.402 (± 0.078)
+LSS
+0.484 (± 0.117)
+20.45 (± 2.37)
+20.49 (± 2.44)
+26.11 (± 2.18)
+21.83 (± 3.94)
+20.93 (± 2.53)
+21.17 (± 3.72)
+26.88 (± 1.51)
+22.57 (± 4.34)
+20.24 (± 2.10)
+Beams
+PSNR
+21.80 (± 4.00)
+SSIM
+0.646
+(±
+0.186)
+0.561
+(±
+0.119)
+0.677
+(±
+0.196)
+0.889
+(±
+0.019)
+0.627
+(±
+0.185)
+0.607
+(±
+0.137)
+0.654
+(±
+0.181)
+0.859
+(±
+0.033)
+0.586
+(±
+0.142)
+0.566
+(±
+0.131)
+LPIPS
+0.368
+(±
+0.125)
+0.442
+(±
+0.064)
+0.335
+(±
+0.137)
+0.094
+(±
+0.055)
+0.376
+(±
+0.101)
+0.418
+(±
+0.088)
+0.346
+(±
+0.104)
+0.121
+(±
+0.027)
+0.415
+(±
+0.070)
+0.447
+(±
+0.070)
+GSS
+0.657
+(±
+0.168)
+0.558
+(±
+0.099)
+0.681
+(±
+0.195)
+0.868
+(±
+0.016)
+0.632
+(±
+0.162)
+0.587
+(±
+0.137)
+0.664
+(±
+0.158)
+0.851
+(±
+0.020)
+0.596
+(±
+0.121)
+0.555
+(±
+0.124)
+LSS
+0.618
+(±
+0.185)
+0.491
+(±
+0.103)
+0.654
+(±
+0.203)
+0.850
+(±
+0.018)
+0.589
+(±
+0.176)
+0.534
+(±
+0.144)
+0.624
+(±
+0.177)
+0.829
+(±
+0.021)
+0.540
+(±
+0.134)
+0.490
+(±
+0.133)
+Machine Learning (2026) 115:195
+Page 21 of 94 195
+13
+13
+CamP
+0.747 (± 0.017)
+2 22.00 (± 0.60)
+0.880 (± 0.010)
+4 27.97 (± 0.36)
+0.768 (± 0.024)
+0.801 (± 0.036)
+MZEN 3 24.20 (± 0.75)
+1 22.71 (± 0.61)
+0.751 (± 0.022)
+2 22.08 (± 0.67)
+Base
+0.802 (± 0.039)
+1 23.93 (± 1.04)
+Base
+0.882 (± 0.009)
+4 27.98 (± 0.47)
+MipNeRF
+SSIM
+0.809 (± 0.035)
+Table 2 (continued)
+Config
+Box
+PSNR
+MZEN 3 24.41 (± 0.80)
+0.436 (± 0.046)
+0.395 (± 0.038)
+0.207 (± 0.036)
+0.366 (± 0.046)
+0.436 (± 0.058)
+0.361 (± 0.061)
+0.207 (± 0.034)
+LPIPS
+0.364 (± 0.043)
+0.457 (± 0.094)
+0.516 (± 0.084)
+0.726 (± 0.040)
+0.577 (± 0.079)
+0.457 (± 0.107)
+0.575 (± 0.100)
+0.729 (± 0.036)
+GSS
+0.570 (± 0.080)
+0.393 (± 0.074)
+0.430 (± 0.078)
+0.686 (± 0.033)
+0.486 (± 0.093)
+0.396 (± 0.088)
+0.489 (± 0.110)
+0.691 (± 0.029)
+LSS
+0.485 (± 0.097)
+20.15 (± 2.27)
+20.99 (± 2.59)
+27.01 (± 1.43)
+22.49 (± 4.54)
+20.20 (± 2.22)
+20.45 (± 2.62)
+27.03 (± 1.49)
+Beams
+PSNR
+22.65 (± 4.68)
+0.612
+(±
+0.142)
+0.558
+(±
+0.123)
+0.674
+(±
+0.202)
+0.889
+(±
+0.013)
+0.630
+(±
+0.140)
+0.558
+(±
+0.124)
+SSIM
+0.678
+(±
+0.201)
+0.89 (±
+0.015)
+LPIPS
+0.309
+(±
+0.124)
+0.083
+(±
+0.039)
+0.363
+(±
+0.059)
+0.443
+(±
+0.064)
+0.310
+(±
+0.127)
+0.082
+(±
+0.037)
+0.354
+(±
+0.063)
+0.438
+(±
+0.062)
+GSS
+0.702
+(±
+0.173)
+0.870
+(±
+0.008)
+0.624
+(±
+0.122)
+0.553
+(±
+0.112)
+0.696
+(±
+0.177)
+0.868
+(±
+0.008)
+0.644
+(±
+0.114)
+0.552
+(±
+0.111)
+LSS
+0.669
+(±
+0.191)
+0.852
+(±
+0.007)
+0.560
+(±
+0.146)
+0.488
+(±
+0.117)
+0.660
+(±
+0.195)
+0.849
+(±
+0.008)
+0.589
+(±
+0.124)
+0.487
+(±
+0.117)
+195 Page 22 of 94
+Machine Learning (2026) 115:195
+SSIM
+0.784 (± 0.038)
+LPIPS
+0.377 (± 0.055)
+GSS
+0.552 (± 0.087)
+LSS
+0.461 (± 0.093)
+Beams
+PSNR
+22.80 (± 4.49)
+SSIM
+LPIPS GSS LSS
+0.681
+0.342 0.686 0.660
+(±
+(±
+(±
+(±
+0.201) 0.176) 0.202) 0.208)
+0.087 0.862 0.844
+4 26.43 (± 0.36) 0.856 (± 0.020)
+0.231 (± 0.039)
+0.679 (± 0.060)
+0.626 (± 0.052)
+26.58 (± 1.56) 0.887
+(±
+(±
+(±
+(±
+0.016) 0.029) 0.008) 0.007)
+Metrics are averaged over three zoom levels. In LPIPS, lower values are better; in others, higher values are better. MZEN (configuration 4) attains the best score in every
+metric. Best results are bolded
+Table 2 (continued)
+Config
+Box
+PSNR
+MZEN 3 23.26 (± 0.87)
+Machine Learning (2026) 115:195
+Page 23 of 94 195
+13
+195 Page 24 of 94
+Machine Learning (2026) 115:195
+Fig. 5 Main results for full MZEN and the non-MZEN baselines. For each pose-free NeRF backbone, the
+bars show mean performance over the eight FF-MZN scenes for the all-zoom baseline (Config 2) and full
+MZEN (Config 4). Error bars denote the standard deviation across scenes. Higher values are better for
+PSNR, SSIM, GSS, and LSS; lower values are better for LPIPS.
+Round Table
+Root
+Sensor
+Tower
+Pillars
+Box
+Fig. 6 Collapse of pose optimization when all zoom levels are trained together without MZEN. Bottom:
+A baseline pose-free NeRF trained on all zoom levels jointly (Config 2) suffers from pose collapse: views
+captured at different magnifications are optimized toward inconsistent (and often overlapping) camera
+poses, producing severe geometric ghosting, double edges, and color/texture bleeding. Top: In contrast,
+MZEN (Config 4) prevents this failure by (i) bootstrapping a stable global pose scaffold from the most
+zoomed-out views (Phase A), (ii) priming and refining each zoom-in view from its best wide-field neighbor while freezing the radiance field (Phase B), and (iii) jointly fine-tuning all views after registration
+(Phase C). As a result, camera poses remain zoom-consistent, and fine structures are rendered sharply
+without duplicate contours or streaking
+MZEN is not intended for extreme magnification gaps between zoom levels. Very large
+jumps (e.g., 1× to 100×) can significantly reduce cross-zoom visual correspondence, weakening the assumption that a zoomed-in image can be approximated by a wide-field view. In
+contrast, gradual zoom progressions (e.g., 1× → 3× → 5× → 7×) are more compatible
+with MZEN because adjacent zoom levels preserve more shared structure and enable more
+reliable registration. Handling larger zoom gaps may require intermediate zoom levels, hierarchical multi-stage registration, or more expressive cross-zoom matching (e.g., allowing
+shifted crops or learned alignment), which we leave for future work.
+13
+Machine Learning (2026) 115:195
+Page 25 of 94 195
+6 Conclusion and Future Directions
+We introduced Multi-Zoom Enhanced NeRF (MZEN), the first framework that natively
+handles image sets captured at multiple optical magnifications. MZEN integrates a zoomaware camera model with cross-zoom pose registration and a three-phase training
+schedule that progressively stabilizes pose estimation before refining fine-scale details.
+This formulation enables consistent reconstruction across zoom levels without external
+calibration.
+Experiments on industrial forward-facing datasets—including TCAD-simulated structures, real SEM images, and BLEFF objects—show that MZEN preserves global geometry
+while recovering sub-micron-level detail.
+Promising directions for future work include relaxing the current cross-zoom matching
+assumption to better handle off-center zoom targets (e.g., using shifted crops or learned
+alignment to match zoomed-in and zoomed-out images), extending MZEN to more general
+capture protocols with partial overlap or larger zoom gaps via hierarchical multi-stage registration, and incorporating zoom-aware generative priors for denoising and robust reconstruction in challenging SEM settings.
+Appendix Overview
+This appendix provides supplementary materials that support and extend the results presented in the main paper. It is organized as follows.
+Appendix A: Experiment Settings and Implementation Details
+Technical details of the MZEN framework, including:
+●
+●
+●
+●
+NeRF network architecture, ray projection, and input feature encoding;
+mathematical derivations for extracting inputs from camera parameters;
+baseline adaptations of NeRF--, BARF, NoPe-NeRF, Mip-NeRF, and CamP;
+hyperparameter configurations used in the experimental evaluations.
+Appendix B: Metrics—Gradient Similarity Score and Laplacian Similarity Score
+Full definitions of the Gradient Similarity Score (GSS) and Laplacian Similarity Score
+(LSS), with implementation details.
+Appendix C: Quantitative Evaluation of MZEN Reconstructions at Each Zoom Level
+Per-zoom results (PSNR, SSIM, LPIPS, GSS, LSS) reported separately at 1×, 2×, and
+3−4×, complementing the averages in the main text.
+13
+195 Page 26 of 94
+Machine Learning (2026) 115:195
+Appendix D: Additional Ablation Studies
+Additional targeted ablations that isolate the contribution of key MZEN components beyond
+the main configuration comparisons, including:
+● skipping Phase B (full MZEN without zoom-in pose priming/refinement), and
+● training only with the most zoomed-in images under the same total training budget.We
+report these results on the same eight FF-MZN scenes to quantify the role of cross-zoom
+registration and multi-zoom supervision.
+Appendix E: Theoretical Analysis of Pose Priming
+A formal justification of why copying the wide-field pose (“priming”) from Phase A of
+MZEN accelerates Phase B optimization under standard smoothness conditions.
+Appendix F: Forward-Facing Multi-zoom NeRF (FF-MZN) Dataset
+Documentation of the benchmark, including:
+● imaging workflow, capture hardware, magnification settings, and other optical parameters;
+● the BLEFF zoom-synthesis procedure with down/up-sampling/cropping equations;
+● thumbnails (Figs. 9, 10, 11, 12, 13, 14, 15, 16) of all eight scenes at every zoom level.
+Appendix G: 360° NeRF-Synthetic Dataset Experiments
+Additional experiments on the 360° NeRF-Synthetic dataset (Mildenhall et al., 2021),
+including:
+● analysis of camera-pose estimation challenges under full 360° trajectories;
+● experimental setup and hyperparameter configurations;
+● quantitative and qualitative results demonstrating MZEN’s stability and reconstruction
+fidelity under full-surround viewing conditions.
+A Experiment Settings and Implementation Details
+A.1 Network Architecture and Ray Projection
+We use a compact NeRF architecture, as shown in Table 3, which is designed for efficient
+scene reconstruction (Mildenhall et al., 2021; Wang et al., 2021). The network consists of
+two main input branches:
+● Position Encoding Branch extracts spatial features from the 3D world coordinates of
+sampled points.
+13
+Page 27 of 94 195
+Machine Learning (2026) 115:195
+Table 3 NeRF network
+architecture
+The network takes camera poses
+Π = (R, t, f , c), processes
+them through separate branches,
+and predicts RGB color and
+density. The position encoding
+branch extracts spatial features,
+while the view-dependent
+branch refines color prediction
+Layer
+Input
+Output Description
+Position encoding and feature extraction
+Input Position
+3D position en63
+x = (x,
+coded using positional
+y, z)
+encoding
+Fully Connected (FC) 63
+Extracts spatial features
+192
++ ReLU
+from position encoding
+Fully Connected (FC) 192
+192
++ ReLU
+Fully Connected (FC) 192
+192
++ ReLU
+Fully Connected (FC) 192
+192
++ ReLU
+Branch 1: density estimation
+Fully Connected (FC) 192
+1 (Den- Predicts opacity for
+sity σ ) volume rendering
+Branch 2: view-dependent feature processing
+Fully Connected (FC) 192
+Intermediate feature
+128
+extraction from positional encoding
+Branch 3: view-dependent color prediction
+Input Direction
+3D viewing direction
+d = (dx, 27
+encoded using posidy, dz)
+tional encoding
+Concatenation
+128 +
+Merges spatial and
+155
+27
+directional features
+Fully Connected (FC) 155
+Extracts combined
+64
++ ReLU
+spatial and directional
+features
+Fully Connected (FC) 64
+3
+Predicts color values
+(RGB)
+Final output
+Concatenation
+Final output for volume
+RGB+σ 4
+rendering
+● View-Dependent Branch processes the camera viewing direction to predict realistic
+view-dependent colors.The final output consists of RGB color and density (σ ), which
+are used for volume rendering to reconstruct the scene.
+A.1.1 Derivation of Network Inputs from Camera Parameters
+The NeRF model requires 3D world positions x and viewing directions d, which are derived
+from the camera pose parameters Π = (R, t, f, c).
+A.1.2 Ray Projection from Camera Parameters
+To cast rays into the scene, we use the camera intrinsic matrix K , which maps between 3D
+world coordinates and 2D image space:
+13
+195 Page 28 of 94
+Machine Learning (2026) 115:195
+K=
+[
+fx
+0
+0
+0
+fy
+0
+]
+cx
+cy .
+1
+where:
+● fx , fy are the focal lengths in pixels.
+● (cx , cy ) is the principal point (optical center).For each pixel (i, j), the ray direction in
+camera space is:
+dcam =
+(
+)
+i − cx j − cy
+,
+,1 .
+fx
+fy
+The ray direction in world coordinates is obtained using the camera rotation matrix R:
+dworld = Rdcam .
+The ray origin in world space is given by the camera translation t:
+oworld = t.
+Thus, a ray is parameterized as:
+r(λ) = oworld + λdworld ,
+where λ determines the sampled depth along the ray.
+A.1.3 Extracting Inputs x and d
+To generate 3D position samples along the ray, we use stratified sampling:
+x = oworld + λk dworld ,
+k = 1, ..., N.
+where λk are the sampled depths.
+The viewing direction for each sample is:
+d=
+dworld
+.
+∥dworld ∥
+A.1.4 Encoding Inputs for the Network
+To enhance detail preservation, NeRF applies a positional encoding function γ before passing x and d into the network:
+γ(p) = (sin(20 πp), cos(20 πp), ..., sin(2L πp), cos(2L πp)),
+where L is the number of encoding frequencies.
+13
+(5)
+Page 29 of 94 195
+Machine Learning (2026) 115:195
+A.1.5 Network Processing Flow
+The NeRF model processes these encoded features as follows:
+●
+●
+●
+●
+The position encoding branch extracts scene structure from x.
+The view-dependent branch refines color based on d.
+The density branch estimates opacity σ .
+The final RGB and density outputs are passed to the volume rendering module.This
+structured pipeline ensures efficient and accurate scene reconstruction by systematically
+leveraging camera pose parameters to derive NeRF inputs.
+A.2 Baseline Implementation Details
+Unless stated otherwise, every baseline is trained with the same ray-sampling schedule so
+that performance differences stem from the learning algorithms and not from different render budgets. In particular, we use:
+Nsamples = 128, Lx = 10, Ld = 4,
+● Nsamples is the number of stratified samples drawn per ray between the near and far
+planes [ 0, 1 ] in normalized device coordinates (NDC) space;
+● Lx is the highest frequency of the positional encoding applied to the 3-D sample coordinates x (resulting in 3 × (2Lx + 1) = 63 features in Eq. (5)); and
+● Ld is the highest frequency of the encoding applied to the normalized viewing direction
+d (yielding 3 × (2Ld + 1) = 27 features in Eq. (5)).
+A.2.1 NeRF-- (Wang et al., 2021)
+We follow the original photometric loss, Lphoto = ∥Î − I∥22 , where I ∈ [0, 1]H×W ×3 is the
+ground-truth RGB image and Î is the color rendered by the network along the camera rays.
+A.2.2 BARF (Lin et al., 2021)
+We build BARF on top of the NeRF-- backbone, adding the coarse-to-fine positional-encoding schedule that BARF uses to stabilize early pose optimization. For training step t we
+compute a gating scalar
+
+t < Ts ,
+ 0,[
+( )]
+1
+α(t) =
+1 − cos πs , Ts ≤ t ≤ Te ,
+ 2
+1,
+t > Te ,
+s=
+t − Ts
+,
+Te − Ts
+where we set the start and end points to Ts = 0 and specific Te iterations (see Tables 4, 5,
+6, 7). Level-0 of the positional encoding (the DC and first sin / cos pair) is always active;
+13
+195 Page 30 of 94
+Machine Learning (2026) 115:195
+each higher frequency band is multiplied by the current α(t). Formally, for a 1-D coordinate
+x, the gated encoding is
+[
+γBARF (x, t) = x, sin(20 πx), cos(20 πx), α(t) sin(21 πx), α(t) cos(21 πx),
+]
+. . . , α(t) sin(2L πx), α(t) cos(2L πx) .
+The same gating is applied to the view-direction encoding (Ld = 4). Ray sampling, learning rates, and loss weights match the NeRF-- configuration so that the only difference is the
+BARF-style α(t) schedule.
+A.2.3 NoPe-NeRF (Bian et al., 2023)
+We augment the NeRF-- baseline with the monocular-depth regularizer proposed in NoPeNeRF. For each training image, a dense depth prior Dmono is extracted with the DPTLarge model (Ranftl et al., 2021). Because monocular depths are defined only up to an
+unknown scale and bias, we also use per-image learnable parameters a and b and align the
+rendered NeRF depth D̂ via an affine transform. The resulting loss is
+
+
+
+L = ∥Î − I∥22 + λ D̂ − aDmono + b 1 ,
+photometric
+depth consistency
+λ = 2 × 10−5 .
+The original NoPe-NeRF also includes a point-cloud term and a surface-based photometric
+term, both of which rely on substantial viewpoint overlap. Because the high-zoom images
+in FF-MZN share little or no overlap, we disable those two terms and keep only the monocular-depth regularizer. All other parameters match the NeRF-- configuration.
+A.2.4 Mip-NeRF (Barron et al., 2021)
+Starting from the NeRF-- backbone, we replace the standard positional encoding with Integrated Positional Encoding (IPE). For each conical-frustum sample, the stratified sampler
+of NeRF-- returns a Gaussian footprint N (µ, diag σ 2 ) in 3-D space. Mip-NeRF analytically
+integrates the sinusoidal basis over this Gaussian, yielding the closed forms
+[ −22i−1 σ2
+]
+2i−1 2
+σ
+e
+sin(2i πµ), e−2
+cos(2i πµ) ,
+i = 0, . . . , L − 1,
+(
+)
+(
+)
+which replaces the raw sin 2i πx , cos 2i πx features in the position branch. All other
+parameters match the NeRF-- configuration.
+IPEi (µ, σ 2 ) =
+A.2.5 CamP (Park et al., 2023)
+After a pose-only warm-up of Tw iterations (see Tables 4, 5, 6, 7) using the NeRF-- loss,
+each camera pose pi = (ri , ti ) ∈ R6 is pre-whitened by a 6×6 zero-phase component analysis (ZCA) preconditioner Pi :
+p̂i = piold − η Pi ∇p Lphoto (piold ),
+13
+Page 31 of 94 195
+Machine Learning (2026) 115:195
+with learning rate η . Each Pi is computed once by sampling nr = 256 random
+3-D points, projecting them with the current pose, and forming the covariance
+Σi = (Ji⊤ Ji )/nr + λ diag(Ji⊤ Ji ) + µI, where Ji is the Jacobian of the projection func−1
+tion. The whitening matrix is Pi = Σi 2 = U diag(S −1/2 )U⊤ (SVD of Σi ). We use
+λ = 1 × 10−3 and µ = 1 × 10−4 . All other parameters match the NeRF-- configuration.
+A.3 Hyperparameter Configuration
+Tables 4, 5, 6, 7 list the hyperparameters of each configuration for every scene group. All
+experiments are trained with the Adam optimizer (β1 = 0.9, β2 = 0.999) and the StepLR
+scheduler.
+B Metrics—Gradient Similarity Score and Laplacian Similarity Score
+We complement PSNR/SSIM/LPIPS with two detail-oriented, bounded similarity measures
+defined between a reference image I and a reconstruction Î. Both scores lie in [0, 1], with
+higher values indicating better agreement.
+B. 1 Gradient Similarity Score (GSS)
+GSS measures how well the edge structures in the reconstructed image align with those
+in the reference image by comparing image gradients, which highlight spatial intensity
+changes. A well-reconstructed image should preserve these gradients, ensuring sharp edges
+and consistent structural details.
+NeRF-generated images often suffer from high-frequency noise and aliasing artifacts,
+leading to inconsistent texture rendering (see Fig. 3 for examples). Standard gradient-based
+approaches are highly noise-sensitive, potentially distorting edge assessments (He et al.,
+2012). To improve robustness, we apply a Gaussian-weighted gradient operator (Wang et
+al., 2014), reducing high-frequency noise while enhancing contour detection:
+First, Gaussian smoothing is applied to suppress noise:
+I s = I ∗ Wσ ,
+where Is is the smoothed image, ∗ denotes convolution, and Wσ is the Gaussian kernel,
+( 2 2)
++y
+1
+Wσ (x, y) = 2πσ
+− x 2σ
+, where x, y denote pixel coordinates in the filter window,
+2 exp
+2
+and σ controls the degree of smoothing intensity. A 5 × 5 Gaussian filter is applied to reduce
+noise artifacts and focus on true edge structures. Since convolution with a filter reduces the
+valid output size, we apply zero padding to maintain the original image dimensions.
+The image gradients are then computed using a three-point finite difference scheme:
+∇x I(m, n) = Is (m, n + 1) + Is (m, n − 1) − 2Is (m, n),
+∇y I(m, n) = Is (m + 1, n) + Is (m − 1, n) − 2Is (m, n).
+Using these smoothed gradients, the gradient magnitude is defined as:
+13
+195 Page 32 of 94
+Machine Learning (2026) 115:195
+Table 4 Hyperparameters for the BLEFF scenes (Round Table, Root)
+Round Table
+Image Height (H)
+Image Width (W)
+Mini-Batch Size
+Config 1
+Learning Rate for Camera Poses
+Learning Rate for NeRF Parameters
+Learning Rate Scheduler for Camera Poses
+Learning Rate Scheduler for NeRF Parameters
+Config 2
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Learning Rate for Camera Poses
+Learning Rate for NeRF Parameters
+Learning Rate Scheduler for Camera Poses
+Learning Rate Scheduler for NeRF Parameters
+MZEN (Config
+3/4)
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Phase A
+Phase B
+Phase C
+13
+Learning Rate for Camera Poses
+Learning Rate for NeRF
+Parameters
+Learning Rate Scheduler
+for Camera Poses
+Learning Rate Scheduler
+for NeRF Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Learning Rate for Camera Poses
+Learning Rate for NeRF
+Parameters
+Learning Rate Scheduler
+for Camera Poses
+Learning Rate Scheduler
+for NeRF Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Learning Rate for Camera Poses
+Learning Rate for NeRF
+Parameters
+Learning Rate Scheduler
+for Camera Poses
+Learning Rate Scheduler
+for NeRF Parameters
+390 px
+260 px
+(H + W − 32) × 32
+0.001
+0.001
+0.9×every 100
+epochs
+0.9954×every 10
+epochs
+1000
+200
+200
+0.001
+0.001
+0.9×every 100
+epochs
+0.9954×every 10
+epochs
+2000
+400
+200
+0.001
+0.001
+0.9×every 100
+epochs
+0.9954×every 10
+epochs
+1000
+200
+200
+0.001
+N/A
+0.9×every 100
+epochs
+N/A
+1000
+0
+200
+0.0005
+0.0005
+0.9×every 100
+epochs
+0.9954×every 10
+epochs
+Page 33 of 94 195
+Machine Learning (2026) 115:195
+Table 4 (continued)
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Root
+Image Height (H)
+Image Width (W)
+Mini-Batch Size
+Config 1
+Learning Rate for Camera Poses
+Learning Rate for NeRF Parameters
+Learning Rate Scheduler for Camera Poses
+Learning Rate Scheduler for NeRF Parameters
+Config 2
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Learning Rate for Camera Poses
+Learning Rate for NeRF Parameters
+Learning Rate Scheduler for Camera Poses
+Learning Rate Scheduler for NeRF Parameters
+MZEN (Config
+3/4)
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Phase A
+Phase B
+Phase C
+Learning Rate for Camera Poses
+Learning Rate for NeRF
+Parameters
+Learning Rate Scheduler
+for Camera Poses
+Learning Rate Scheduler
+for NeRF Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Learning Rate for Camera Poses
+Learning Rate for NeRF
+Parameters
+Learning Rate Scheduler
+for Camera Poses
+Learning Rate Scheduler
+for NeRF Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Learning Rate for Camera Poses
+Learning Rate for NeRF
+Parameters
+1000
+0
+200
+390 px
+260 px
+(H + W − 32) × 32
+0.001
+0.001
+0.9×every 100
+epochs
+0.9954×every 10
+epochs
+1500
+300
+300
+0.001
+0.001
+0.9×every 100
+epochs
+0.9954×every 10
+epochs
+2700
+540
+300
+0.001
+0.001
+0.9×every 100
+epochs
+0.9954×every 10
+epochs
+1500
+300
+300
+0.001
+N/A
+0.9×every 100
+epochs
+N/A
+1000
+0
+300
+0.0005
+0.0005
+13
+195 Page 34 of 94
+Machine Learning (2026) 115:195
+Table 4 (continued)
+Learning Rate Scheduler
+for Camera Poses
+Learning Rate Scheduler
+for NeRF Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+√
+G(I(m, n)) =
+Finally, GSS is computed as:
+∇x I(m, n)2 + ∇y I(m, n)2 .
+∑
+ˆ
+m,n |G(I(m, n)) − G(I(m, n))|
+SGSS = 1 − ∑
+0.9×every 100
+epochs
+0.9954×every 10
+epochs
+1500
+0
+300
+ˆ
+m,n (|G(I(m, n))| + |G(I(m, n))|)
+.
+B.2 Laplacian Similarity Score (LSS)
+While GSS evaluates edge sharpness, it does not explicitly measure texture retention or curvature consistency. NeRF-generated images often lose high-frequency details due to volume
+rendering’s averaging effects, leading to over-smoothed textures (see Fig. 3). LSS directly
+addresses this limitation by computing the Laplacian, which detects second-order intensity
+variations to quantify curvature consistency and fine texture preservation. However, the
+Laplacian operator focuses on pixel-wise intensity changes and is highly sensitive to local
+noise fluctuations. To improve the sensitivity of the Laplacian operator, we apply Gaussian
+smoothing, Is = I ∗ Wσ , as done in GSS, suppressing high-frequency noise and allowing
+LSS to focus on meaningful texture rather than pixel-level fluctuations.
+The Laplacian operator is then defined as:
+∆I(m, n) = Is (m + 1, n) + Is (m − 1, n) + Is (m, n + 1) + Is (m, n − 1) − 4Is (m, n).
+Instead of using raw Laplacian values, which are highly sensitive to intensity variations, we
+normalize them by a scaling factor:
+L(I(m, n)) =
+∆I(m, n)
+.
+1 + Is (m, n)
+Here, 1 + Is (m, n) acts as an intensity-dependent normalization term. While the preceding
+Gaussian smoothing primarily reduces noise fluctuations, this normalization helps balance
+edge responses across varying intensity levels, ensuring texture-rich regions are emphasized
+without being dominated by extreme intensity values.
+The Laplacian Similarity Score (LSS) is then defined as:
+∑
+SLSS = 1 − ∑
+ˆ
+m,n |L(I(m, n)) − L(I(m, n))|
+ˆ
+m,n (|L(I(m, n))| + |L(I(m, n))|)
+13
+.
+Page 35 of 94 195
+Machine Learning (2026) 115:195
+Table 5 Hyperparameters for the first TCAD group (FinFET, Sensor)
+FinFET
+Image Height (H)
+Image Width (W)
+Mini-Batch Size
+Config 1
+Config 2
+MZEN (Config
+3/4)
+Learning Rate for Camera Poses
+Learning Rate for NeRF Parameters
+Learning Rate Scheduler for Camera Poses
+Learning Rate Scheduler for NeRF
+Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Learning Rate for Camera Poses
+Learning Rate for NeRF Parameters
+Learning Rate Scheduler for Camera Poses
+Learning Rate Scheduler for NeRF
+Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Phase A
+Learning Rate for
+Camera Poses
+Learning Rate for
+NeRF Parameters
+Learning Rate
+Scheduler for Camera Poses
+Learning Rate
+Scheduler for NeRF
+Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Phase B
+Learning Rate for
+Camera Poses
+Learning Rate for
+NeRF Parameters
+Learning Rate
+Scheduler for Camera Poses
+Learning Rate
+Scheduler for NeRF
+Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Phase C
+Learning Rate for
+Camera Poses
+Learning Rate for
+NeRF Parameters
+400 px
+400 px
+(H + W − 32) × 32
+0.0005
+0.0005
+0.9×every 100 epochs
+0.9954×every 10
+epochs
+1500
+300
+200
+0.0005
+0.0005
+0.9×every 100 epochs
+0.9954×every 10
+epochs
+2700
+540
+200
+0.0005
+0.0005
+0.9×every 100 epochs
+0.9954×every 10
+epochs
+1500
+300
+200
+0.0005
+N/A
+0.9×every 100 epochs
+N/A
+1000
+0
+200
+0.00025
+0.00025
+13
+195 Page 36 of 94
+Machine Learning (2026) 115:195
+Table 5 (continued)
+Learning Rate
+Scheduler for Camera Poses
+Learning Rate
+Scheduler for NeRF
+Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Sensor
+Image Height (H)
+Image Width (W)
+Mini-Batch Size
+Config 1
+Config 2
+MZEN (Config
+3/4)
+13
+Learning Rate for Camera Poses
+Learning Rate for NeRF Parameters
+Learning Rate Scheduler for Camera Poses
+Learning Rate Scheduler for NeRF
+Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Learning Rate for Camera Poses
+Learning Rate for NeRF Parameters
+Learning Rate Scheduler for Camera Poses
+Learning Rate Scheduler for NeRF
+Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Phase A
+Learning Rate for
+Camera Poses
+Learning Rate for
+NeRF Parameters
+Learning Rate
+Scheduler for Camera Poses
+Learning Rate
+Scheduler for NeRF
+Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Phase B
+Learning Rate for
+Camera Poses
+Learning Rate for
+NeRF Parameters
+Learning Rate
+Scheduler for Camera Poses
+0.9×every 100 epochs
+0.9954×every 10
+epochs
+1500
+0
+200
+400 px
+400 px
+(H + W − 32) × 32
+0.0005
+0.0005
+0.9×every 100 epochs
+0.9954×every 10
+epochs
+2000
+400
+400
+0.0005
+0.0005
+0.9×every 100 epochs
+0.9954×every 10
+epochs
+3400
+680
+400
+0.0005
+0.0005
+0.9×every 100 epochs
+0.9954×every 10
+epochs
+2000
+400
+400
+0.0005
+N/A
+0.9×every 100 epochs
+Page 37 of 94 195
+Machine Learning (2026) 115:195
+Table 5 (continued)
+Phase C
+Learning Rate
+Scheduler for NeRF
+Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Learning Rate for
+Camera Poses
+Learning Rate for
+NeRF Parameters
+Learning Rate
+Scheduler for Camera Poses
+Learning Rate
+Scheduler for NeRF
+Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+N/A
+1000
+0
+400
+0.00025
+0.00025
+0.9×every 100 epochs
+0.9954×every 10
+epochs
+2000
+0
+400
+C Quantitative evaluation of MZEN Reconstructions at Each Zoom Level
+To complement the averages in the main paper, we report metrics separately at each zoom
+level. Tables 8, 9, 10, 11, 12, 13, 14, 15 list PSNR, SSIM, LPIPS, GSS, and LSS for every
+dataset and magnification. In PSNR, SSIM, GSS, and LSS, higher values are better; in
+LPIPS, lower values are better.
+config 4 (MZEN, Phase C) is highlighted; it ranks first in 542/600 metric entries across
+120 per-zoom evaluations. At the most zoomed-in level, MZEN (Config 4) substantially
+improves fidelity over all non-MZEN baselines, including up to:
+● Round Table (BLEFF): PSNR 39.2%, SSIM 17.3%, LPIPS 274.0%, GSS 52.1%, LSS
+31.4%.
+● Root (BLEFF): PSNR 44.2%, SSIM 23.6%, LPIPS 184.1%, GSS 38.6%, LSS 34.1%.
+● FinFET (TCAD-SIM): PSNR 34.9%, SSIM 15.4%, LPIPS 91.1%, GSS 54.2%, LSS
+25.1%.
+● Sensor (TCAD-SIM): PSNR 24.0%, SSIM 18.5%, LPIPS 109.5%, GSS 35.1%, LSS
+22.4%.
+● Tower (TCAD-SIM): PSNR 41.5%, SSIM 15.3%, LPIPS 158.8%, GSS 36.8%, LSS
+24.6%.
+● Pillars (TCAD-SIM): PSNR 42.0%, SSIM 22.6%, LPIPS 159.2%, GSS 47.3%, LSS
+38.9%.
+● Box (SEM-MEMS): PSNR 30.1%, SSIM 27.5%, LPIPS 121.7%, GSS 102.7%, LSS
+114.4%.
+● Beams (SEM-MEMS): PSNR 51.0%, SSIM 118.6%, LPIPS 692.1%, GSS 104.8%
+, LSS 141.0%.On the Box and Beams SEM scenes, MZEN (Config 4) attains the top
+score at every magnification. SEM imagery is especially challenging: (i) effective intrinsic drift with magnification and working distance; (ii) signal-to-noise can be low and
+13
+195 Page 38 of 94
+Machine Learning (2026) 115:195
+Table 6 Hyperparameters for the second TCAD group (Tower, Pillars)
+Tower
+Image Height (H)
+Image Width (W)
+Mini-Batch Size
+Config 1
+Config 2
+MZEN (Config 3/4)
+13
+400 px
+400 px
+(H + W − 32) × 32
+Learning Rate for Camera Poses
+0.0005
+Learning Rate for NeRF Parameters
+0.0005
+0.9×every 100 epochs
+Learning Rate Scheduler for Camera Poses
+Learning Rate Scheduler for NeRF Parameters 0.9954×every 10
+epochs
+Training Epochs
+1500
+300
+Te (BARF)
+300
+Tw (CamP)
+Learning Rate for Camera Poses
+0.0005
+Learning Rate for NeRF Parameters
+0.0005
+0.9×every 100 epochs
+Learning Rate Scheduler for Camera Poses
+Learning Rate Scheduler for NeRF Parameters 0.9954×every 10
+epochs
+Training Epochs
+2700
+540
+Te (BARF)
+300
+Tw (CamP)
+Phase A
+Learning Rate for 0.0005
+Camera Poses
+Learning Rate for 0.0005
+NeRF Parameters
+0.9×every 100 epochs
+Learning Rate
+Scheduler for Camera Poses
+0.9954×every 10
+Learning Rate
+Scheduler for
+epochs
+NeRF Parameters
+Training Epochs
+1500
+300
+Te (BARF)
+300
+Tw (CamP)
+Phase B
+Learning Rate for 0.0005
+Camera Poses
+Learning Rate for N/A
+NeRF Parameters
+0.9×every 100 epochs
+Learning Rate
+Scheduler for Camera Poses
+Learning Rate
+N/A
+Scheduler for
+NeRF Parameters
+Training Epochs
+1000
+0
+Te (BARF)
+300
+Tw (CamP)
+Phase C
+Learning Rate for 0.00025
+Camera Poses
+Learning Rate for 0.00025
+NeRF Parameters
+0.9×every 100 epochs
+Learning Rate
+Scheduler for Camera Poses
+Page 39 of 94 195
+Machine Learning (2026) 115:195
+Table 6 (continued)
+Learning Rate
+Scheduler for
+NeRF Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Pillars
+Image Height (H)
+Image Width (W)
+Mini-Batch Size
+Config 1
+Config 2
+MZEN (Config 3/4)
+0.9954×every 10
+epochs
+1500
+0
+300
+400 px
+400 px
+(H + W − 32) × 32
+Learning Rate for Camera Poses
+0.0005
+Learning Rate for NeRF Parameters
+0.0005
+0.9×every 100 epochs
+Learning Rate Scheduler for Camera Poses
+Learning Rate Scheduler for NeRF Parameters 0.9954×every 10
+epochs
+Training Epochs
+1500
+300
+Te (BARF)
+300
+Tw (CamP)
+Learning Rate for Camera Poses
+0.0005
+Learning Rate for NeRF Parameters
+0.0005
+0.9×every 100 epochs
+Learning Rate Scheduler for Camera Poses
+Learning Rate Scheduler for NeRF Parameters 0.9954×every 10
+epochs
+Training Epochs
+2700
+540
+Te (BARF)
+300
+Tw (CamP)
+Phase A
+Learning Rate for 0.0005
+Camera Poses
+Learning Rate for 0.0005
+NeRF Parameters
+0.9×every 100 epochs
+Learning Rate
+Scheduler for Camera Poses
+0.9954×every 10
+Learning Rate
+Scheduler for
+epochs
+NeRF Parameters
+Training Epochs
+1500
+300
+Te (BARF)
+300
+Tw (CamP)
+Phase B
+Learning Rate for 0.0005
+Camera Poses
+Learning Rate for N/A
+NeRF Parameters
+0.9×every 100 epochs
+Learning Rate
+Scheduler for Camera Poses
+Learning Rate
+N/A
+Scheduler for
+NeRF Parameters
+Training Epochs
+1000
+0
+Te (BARF)
+300
+Tw (CamP)
+13
+195 Page 40 of 94
+Machine Learning (2026) 115:195
+Table 6 (continued)
+Phase C
+Learning Rate for
+Camera Poses
+Learning Rate for
+NeRF Parameters
+Learning Rate
+Scheduler for Camera Poses
+Learning Rate
+Scheduler for
+NeRF Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+0.00025
+0.00025
+0.9×every 100 epochs
+0.9954×every 10
+epochs
+1500
+0
+300
+subject to charging/beam blur; (iii) contrast and shading vary non-Lambertianly across
+materials; and (iv) mechanical drift perturbs poses between acquisitions. MZEN’s
+zoom-aware camera model and pose priming place zoomed-in views near their widefield neighbors in pose space, Phase B refines these poses while freezing NeRF weights
+(preventing over-fitting to high-magnification noise), and Phase C jointly optimizes all
+cameras and radiance, reconciling scale and pose across the stack. This staged procedure stabilizes optimization under SEM conditions and yields sharper edges (GSS) and
+richer high-frequency texture (LSS) at all zoom levels compared to non-MZEN baseli
+nes.
+D Additional Ablation Studies
+This appendix reports two additional ablations that isolate (i) the contribution of the pose
+priming/refinement stage (Phase B) and (ii) the benefit of multi-zoom supervision. We evaluate both ablations on the same eight datasets used in the main experimental evaluation
+and use BARF (Lin et al., 2021) as the backbone throughout. Unless stated otherwise, we
+follow the same data splits, total training budget, and hyperparameters as Config 4: MZEN
+in Sect. 4.3.
+D.1 Skipping Phase B: Full MZEN Without Pose Priming (Ablation 1)
+We keep the full MZEN pipeline and all hyperparameters identical to Config 4, except that
+we remove Phase B. Specifically, we run Phase A using only the most zoomed-out views
+to initialize the radiance field and camera poses, and then proceed directly to Phase C for
+joint refinement using all zoom levels. In this ablation, zoomed-in views are introduced in
+Phase C without (i) cross-zoom surrogate matching (central and without (ii) pose priming by
+copying camera poses from the most similar wide-field view. Consequently, zoom-in poses
+are not pre-aligned by Phase B and must be recovered implicitly during the joint optimization of Phase C.
+13
+Page 41 of 94 195
+Machine Learning (2026) 115:195
+Table 7 Hyperparameters for the SEM scenes (Box, Beams)
+Box
+Image Height (H)
+Image Width (W)
+Mini-Batch Size
+Config 1
+Config 2
+MZEN (Config 3/4)
+Learning Rate for Camera Poses
+Learning Rate for NeRF Parameters
+Learning Rate Scheduler for Camera Poses
+Learning Rate Scheduler for NeRF
+Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Learning Rate for Camera Poses
+Learning Rate for NeRF Parameters
+Learning Rate Scheduler for Camera Poses
+Learning Rate Scheduler for NeRF
+Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Phase A
+Learning Rate for
+Camera Poses
+Learning Rate for
+NeRF Parameters
+Learning Rate
+Scheduler for
+Camera Poses
+Learning Rate
+Scheduler for
+NeRF Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Phase B
+Learning Rate for
+Camera Poses
+Learning Rate for
+NeRF Parameters
+Learning Rate
+Scheduler for
+Camera Poses
+Learning Rate
+Scheduler for
+NeRF Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Phase C
+Learning Rate for
+Camera Poses
+Learning Rate for
+NeRF Parameters
+Learning Rate
+Scheduler for
+Camera Poses
+400 px
+400 px
+(H + W − 24) × 24
+0.001
+0.001
+0.9×every 100 epochs
+0.9954×every 10
+epochs
+1000
+200
+200
+0.001
+0.001
+0.9×every 100 epochs
+0.9954×every 10
+epochs
+2000
+400
+200
+0.001
+0.001
+0.9×every 100 epochs
+0.9954×every 10
+epochs
+1000
+200
+200
+0.001
+N/A
+0.9×every 100 epochs
+N/A
+1000
+0
+200
+0.0005
+0.0005
+0.9×every 100 epochs
+13
+195 Page 42 of 94
+Machine Learning (2026) 115:195
+Table 7 (continued)
+Learning Rate
+Scheduler for
+NeRF Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Beams
+Image Height (H)
+Image Width (W)
+Mini-Batch Size
+Config 1
+Config 2
+MZEN (Config 3/4)
+13
+Learning Rate for Camera Poses
+Learning Rate for NeRF Parameters
+Learning Rate Scheduler for Camera Poses
+Learning Rate Scheduler for NeRF
+Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Learning Rate for Camera Poses
+Learning Rate for NeRF Parameters
+Learning Rate Scheduler for Camera Poses
+Learning Rate Scheduler for NeRF
+Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Phase A
+Learning Rate for
+Camera Poses
+Learning Rate for
+NeRF Parameters
+Learning Rate
+Scheduler for
+Camera Poses
+Learning Rate
+Scheduler for
+NeRF Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+Phase B
+Learning Rate for
+Camera Poses
+Learning Rate for
+NeRF Parameters
+Learning Rate
+Scheduler for
+Camera Poses
+Learning Rate
+Scheduler for
+NeRF Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+0.9954×every 10
+epochs
+1000
+0
+200
+400 px
+400 px
+(H + W − 48) × 48
+0.001
+0.001
+0.9×every 100 epochs
+0.9954×every 10
+epochs
+2500
+500
+500
+0.001
+0.001
+0.9×every 100 epochs
+0.9954×every 10
+epochs
+4000
+800
+500
+0.001
+0.001
+0.9×every 100 epochs
+0.9954×every 10
+epochs
+2500
+500
+500
+0.001
+N/A
+0.9×every 100 epochs
+N/A
+1000
+0
+500
+Page 43 of 94 195
+Machine Learning (2026) 115:195
+Table 7 (continued)
+Phase C
+Learning Rate for
+Camera Poses
+Learning Rate for
+NeRF Parameters
+Learning Rate
+Scheduler for
+Camera Poses
+Learning Rate
+Scheduler for
+NeRF Parameters
+Training Epochs
+Te (BARF)
+Tw (CamP)
+0.0005
+0.0005
+0.9×every 100 epochs
+0.9954×every 10
+epochs
+2500
+0
+500
+Skipping Phase B consistently degrades performance relative to full MZEN across all
+eight datasets (Table 16). Compared to this ablated variant, full MZEN (Config 4) achieves
+up to a PSNR increase of 9.1–33.4%, an SSIM increase of 4.0–52.0%, and an LPIPS reduction of 96.3–313.6% (lower is better). The structure-sensitive metrics also improve substantially, with GSS increasing by 16.4–85.6% and LSS increasing by 7.2–97.1%. The gains
+are consistent across datasets, indicating that the effect is robust to domain and capture
+variations.
+The observed degradation is expected from both optimization and identifiability standpoints, especially for high-magnification views with a narrow field-of-view (FOV). Phase B
+is designed to decouple zoom-in pose estimation from radiance-field fitting by freezing the
+NeRF while refining zoom-in poses from a principled initialization (pose priming). When
+Phase B is removed, Phase C must simultaneously (i) estimate accurate zoom-in poses
+from an unprimed (unregistered) initialization and (ii) update the radiance field to satisfy
+multi-view photometric consistency across zoom levels. This coupling makes the objective more ill-conditioned: early pose errors for zoomed-in views induce large reprojection
+mismatches, and the radiance field can partially reduce photometric loss by absorbing these
+mismatches into view-dependent artifacts rather than correcting the underlying camera
+poses. As a result, optimization is more likely to converge to suboptimal local minima with
+compromised geometry and degraded texture consistency, as evidenced by drops in PSNR/
+SSIM and in GSS/LSS.
+D.2 Training Only with the Most Zoomed-in Images (Ablation 2)
+We test whether reconstruction can be learned using only the highest-magnification views
+under the same training budget. Starting from Config 4: MZEN, we restrict training to
+only the most zoomed-in images. To ensure a fair comparison, we keep the total number of
+optimization steps identical to full MZEN by allocating the entire training budget to these
+zoomed-in images. Concretely, we reuse the Phase C optimization settings from Config 4
+(optimizer, ray sampling strategy, and iteration budget), but apply them exclusively to the
+most zoomed-in views.
+Training only with the most zoomed-in images yields the largest degradation relative
+to full MZEN across the eight datasets (Table 16). Compared to this zoom-in-only setting,
+full MZEN (Config 4) achieves up to a PSNR increase of 5.7–22.6%, an SSIM increase
+13
+13
+NoPeNeRF
+0.974 (± 0.000)
+0.930 (± 0.004)
+2 32.98 (± 0.40)
+0.980 (± 0.003)
+4 39.30 (± 0.72)
+1 37.33 (± 0.11)
+0.971 (± 0.001)
+MZEN 3 36.54 (± 0.14)
+Base
+0.925 (± 0.002)
+2 32.82 (± 0.13)
+0.209 (± 0.002)
+0.066 (± 0.000)
+0.036 (± 0.001)
+0.077 (± 0.000)
+0.226 (± 0.003)
+0.077 (± 0.001)
+0.039 (±0.000)
+4 39.26 (±0.78) 0.981 (±0.002)
+0.972 (± 0.002)
+0.070 (± 0.002)
+0.973 (± 0.003)
+MZEN 3 37.11 (± 0.67)
+1 36.79 (± 0.55)
+0.239 (± 0.001)
+0.928 (± 0.002)
+2 33.16 (± 0.21)
+BARF Base
+LPIPS
+0.071 (± 0.001)
+Table 8 Evaluation on the Round Table BLEFF dataset
+Config
+1×Zoomed-in
+PSNR
+SSIM
+NeRF– Base
+1 36.97 (± 0.49) 0.973 (± 0.002)
+0.653 (± 0.005)
+0.820 (± 0.002)
+0.854 (± 0.010)
+0.795 (± 0.003)
+0.652 (± 0.003)
+0.806 (± 0.008)
+0.850 (±0.011)
+0.817 (± 0.009)
+0.646 (± 0.002)
+GSS
+0.810 (± 0.006)
+0.711 (± 0.009)
+0.846 (± 0.002)
+0.867 (± 0.010)
+0.829 (± 0.003)
+0.711 (± 0.004)
+0.834 (± 0.009)
+0.866 (±0.010)
+0.842 (± 0.010)
+0.705 (± 0.004)
+LSS
+0.838 (± 0.007)
+2×Zoomed-in
+PSNR
+SSIM
+25.69 (± 0.69) 0.854
+(±
+0.011)
+27.30 (± 0.02) 0.848
+(±
+0.000)
+25.37 (± 3.47) 0.861
+(±
+0.040)
+34.05 (±0.93) 0.951
+(±
+0.010)
+25.41 (± 0.85) 0.853
+(±
+0.012)
+27.48 (± 0.04) 0.848
+(±
+0.001)
+25.23 (± 2.01) 0.858
+(±
+0.043)
+34.54 (± 0.28) 0.956
+(±
+0.002)
+25.66 (± 0.17) 0.857
+(±
+0.004)
+27.86 (± 0.08) 0.852
+(±
+0.001)
+LPIPS
+0.372
+(±
+0.033)
+0.411
+(±
+0.001)
+0.359
+(±
+0.137)
+0.096
+(±
+0.003)
+0.362
+(±
+0.033)
+0.434
+(±
+0.001)
+0.347
+(±
+0.062)
+0.095
+(±
+0.000)
+0.376
+(±
+0.006)
+0.380
+(±
+0.002)
+GSS
+0.509
+(±
+0.009)
+0.525
+(±
+0.001)
+0.516
+(±
+0.110)
+0.773
+(±
+0.012)
+0.514
+(±
+0.007)
+0.530
+(±
+0.001)
+0.525
+(±
+0.067)
+0.782
+(±
+0.005)
+0.513
+(±
+0.005)
+0.551
+(±
+0.002)
+LSS
+0.628
+(±
+0.005)
+0.612
+(±
+0.001)
+0.627
+(±
+0.064)
+0.788
+(±
+0.021)
+0.631
+(±
+0.005)
+0.612
+(±
+0.001)
+0.631
+(±
+0.046)
+0.804
+(±
+0.005)
+0.633
+(±
+0.001)
+0.618
+(±
+0.003)
+195 Page 44 of 94
+Machine Learning (2026) 115:195
+CamP
+MipNeRF
+Config
+0.921 (± 0.003)
+0.972 (± 0.004)
+0.978 (± 0.001)
+2 32.24 (± 0.28)
+MZEN 3 36.75 (± 0.86)
+4 38.75 (± 0.49)
+0.976 (± 0.005)
+4 38.35 (± 1.42)
+0.973 (± 0.004)
+0.972 (± 0.001)
+MZEN 3 36.55 (± 0.16)
+1 37.17 (± 0.83)
+0.926 (± 0.001)
+2 32.79 (± 0.13)
+Base
+0.973 (± 0.003)
+0.978 (± 0.004)
+1 37.03 (± 0.59)
+Base
+4 38.57 (± 1.24)
+1×Zoomed-in
+PSNR
+SSIM
+MZEN 3 36.80 (± 0.09) 0.973 (± 0.000)
+Table 8 (continued)
+0.049 (± 0.001)
+0.070 (± 0.001)
+0.270 (± 0.003)
+0.068 (± 0.001)
+0.043 (± 0.002)
+0.075 (± 0.000)
+0.252 (± 0.002)
+0.067 (± 0.001)
+0.043 (± 0.002)
+LPIPS
+0.073 (± 0.000)
+0.836 (± 0.005)
+0.811 (± 0.011)
+0.620 (± 0.007)
+0.823 (± 0.010)
+0.834 (± 0.017)
+0.805 (± 0.004)
+0.641 (± 0.003)
+0.818 (± 0.009)
+0.837 (± 0.016)
+GSS
+0.805 (± 0.003)
+0.855 (± 0.006)
+0.836 (± 0.013)
+0.693 (± 0.005)
+0.841 (± 0.013)
+0.848 (± 0.019)
+0.835 (± 0.003)
+0.705 (± 0.003)
+0.841 (± 0.010)
+0.855 (± 0.015)
+LSS
+0.836 (± 0.003)
+2×Zoomed-in
+PSNR
+SSIM
+25.49 (± 0.12) 0.853
+(±
+0.010)
+34.05 (± 0.06) 0.951
+(±
+0.001)
+25.48 (± 0.35) 0.851
+(±
+0.013)
+26.92 (± 0.03) 0.845
+(±
+0.000)
+25.88 (± 1.39) 0.876
+(±
+0.015)
+33.87 (± 0.57) 0.950
+(±
+0.004)
+27.56 (± 0.78) 0.882
+(±
+0.012)
+26.86 (± 0.03) 0.846
+(±
+0.001)
+25.34 (± 0.46) 0.847
+(±
+0.016)
+32.47 (± 0.32) 0.934
+(±
+0.003)
+LPIPS
+0.378
+(±
+0.008)
+0.105
+(±
+0.000)
+0.393
+(±
+0.002)
+0.407
+(±
+0.001)
+0.352
+(±
+0.052)
+0.103
+(±
+0.001)
+0.301
+(±
+0.009)
+0.428
+(±
+0.001)
+0.371
+(±
+0.042)
+0.140
+(±
+0.002)
+GSS
+0.516
+(±
+0.001)
+0.767
+(±
+0.002)
+0.514
+(±
+0.002)
+0.522
+(±
+0.000)
+0.537
+(±
+0.052)
+0.766
+(±
+0.009)
+0.597
+(±
+0.011)
+0.516
+(±
+0.001)
+0.507
+(±
+0.011)
+0.720
+(±
+0.005)
+LSS
+0.633
+(±
+0.004)
+0.792
+(±
+0.002)
+0.629
+(±
+0.007)
+0.610
+(±
+0.001)
+0.646
+(±
+0.024)
+0.786
+(±
+0.011)
+0.663
+(±
+0.017)
+0.611
+(±
+0.001)
+0.618
+(±
+0.009)
+0.749
+(±
+0.007)
+Machine Learning (2026) 115:195
+Page 45 of 94 195
+13
+13
+NoPeNeRF
+0.790 (± 0.004)
+2 24.84 (± 0.23)
+0.921 (± 0.003)
+4 32.82 (± 0.36)
+0.828 (± 0.046)
+0.833 (± 0.016)
+MZEN 3 25.23 (± 1.44)
+1 25.53 (± 3.02)
+0.795 (± 0.000)
+2 24.80 (± 0.00)
+Base
+0.804 (± 0.042)
+0.924 (± 0.004)
+4 33.04 (± 0.37)
+1 23.58 (± 1.57)
+0.797 (± 0.032)
+MZEN 3 23.75 (± 1.49)
+BARF Base
+0.598 (± 0.001)
+0.788 (± 0.001)
+2 24.02 (± 0.01)
+0.558 (± 0.001)
+0.424 (± 0.120)
+0.187 (± 0.001)
+0.419 (± 0.051)
+0.569 (± 0.002)
+0.469 (± 0.046)
+0.172 (± 0.002)
+0.472 (± 0.030)
+LPIPS
+0.448 (± 0.007)
+Table 8 (continued)
+Config
+4×Zoomed-in
+PSNR
+SSIM
+NeRF– Base
+1 24.60 (± 0.06) 0.826 (± 0.002)
+0.480 (± 0.001)
+0.493 (± 0.091)
+0.684 (± 0.004)
+0.488 (± 0.043)
+0.471 (± 0.000)
+0.455 (± 0.029)
+0.685 (± 0.004)
+0.452 (± 0.018)
+0.452 (± 0.001)
+GSS
+0.478 (± 0.005)
+0.573 (± 0.003)
+0.605 (± 0.047)
+0.718 (± 0.006)
+0.604 (± 0.017)
+0.576 (± 0.000)
+0.586 (± 0.026)
+0.720 (± 0.007)
+0.579 (± 0.018)
+0.571 (± 0.000)
+LSS
+0.602 (± 0.002)
+All Zoom Levels
+PSNR
+SSIM
+29.08 (± 5.94) 0.884
+(±
+0.068)
+28.16 (± 4.01) 0.854
+(±
+0.061)
+28.74 (± 6.60) 0.877
+(±
+0.081)
+35.45 (± 2.96) 0.952
+(±
+0.026)
+28.59 (± 6.26) 0.876
+(±
+0.078)
+28.37 (± 3.53) 0.856
+(±
+0.057)
+29.00 (± 5.79) 0.887
+(±
+0.068)
+35.55 (± 2.94) 0.953
+(±
+0.026)
+29.51 (± 6.06) 0.887
+(±
+0.071)
+28.56 (± 3.57) 0.858
+(±
+0.061)
+LPIPS
+0.297
+(±
+0.174)
+0.416
+(±
+0.155)
+0.300
+(±
+0.193)
+0.102
+(±
+0.058)
+0.303
+(±
+0.178)
+0.410
+(±
+0.150)
+0.281
+(±
+0.162)
+0.106
+(±
+0.066)
+0.289
+(±
+0.179)
+0.382
+(±
+0.151)
+GSS
+0.599
+(±
+0.159)
+0.541
+(±
+0.085)
+0.595
+(±
+0.178)
+0.770
+(±
+0.072)
+0.591
+(±
+0.163)
+0.551
+(±
+0.080)
+0.603
+(±
+0.150)
+0.774
+(±
+0.074)
+0.608
+(±
+0.165)
+0.561
+(±
+0.075)
+LSS
+0.689
+(±
+0.112)
+0.629
+(±
+0.060)
+0.682
+(±
+0.126)
+0.791
+(±
+0.064)
+0.684
+(±
+0.115)
+0.633
+(±
+0.060)
+0.688
+(±
+0.109)
+0.796
+(±
+0.065)
+0.694
+(±
+0.116)
+0.634
+(±
+0.061)
+195 Page 46 of 94
+Machine Learning (2026) 115:195
+0.787 (± 0.000)
+0.821 (± 0.042)
+0.897 (± 0.004)
+2 23.58 (± 0.02)
+MZEN 3 25.02 (± 2.68)
+4 31.07 (± 0.33)
+0.918 (± 0.004)
+4 32.60 (± 0.32)
+0.837 (± 0.015)
+0.826 (± 0.001)
+MZEN 3 24.60 (± 0.04)
+1 25.79 (± 1.29)
+0.784 (± 0.001)
+2 23.82 (± 0.02)
+Base
+0.818 (± 0.012)
+1 24.61 (± 0.13)
+Base
+0.250 (± 0.001)
+0.439 (± 0.112)
+0.638 (± 0.001)
+0.405 (± 0.054)
+0.198 (± 0.001)
+0.461 (± 0.008)
+0.624 (± 0.001)
+0.469 (± 0.003)
+MZEN (config 4) attains the best score in every metric. Best results are bolded
+CamP
+MipNeRF
+0.204 (± 0.001)
+4 32.46 (± 0.14)
+0.916 (± 0.001)
+LPIPS
+0.458 (± 0.001)
+Table 8 (continued)
+Config
+4×Zoomed-in
+PSNR
+SSIM
+MZEN 3 24.52 (± 0.00) 0.826 (± 0.000)
+0.628 (± 0.003)
+0.476 (± 0.072)
+0.442 (± 0.000)
+0.504 (± 0.033)
+0.680 (± 0.004)
+0.470 (± 0.001)
+0.447 (± 0.000)
+0.476 (± 0.008)
+0.673 (± 0.003)
+GSS
+0.474 (± 0.002)
+0.674 (± 0.006)
+0.589 (± 0.033)
+0.570 (± 0.000)
+0.607 (± 0.013)
+0.713 (± 0.006)
+0.599 (± 0.001)
+0.568 (± 0.001)
+0.594 (± 0.010)
+0.709 (± 0.003)
+LSS
+0.602 (± 0.001)
+All Zoom Levels
+PSNR
+SSIM
+28.94 (± 5.91) 0.884
+(±
+0.068)
+35.03 (± 2.81) 0.948
+(±
+0.027)
+29.04 (± 6.01) 0.881
+(±
+0.071)
+27.84 (± 3.95) 0.852
+(±
+0.061)
+29.01 (± 5.72) 0.892
+(±
+0.065)
+34.94 (± 2.73) 0.948
+(±
+0.025)
+30.17 (± 5.38) 0.897
+(±
+0.061)
+27.56 (± 3.79) 0.851
+(±
+0.058)
+29.04 (± 5.96) 0.880
+(±
+0.074)
+34.09 (± 3.56) 0.936
+(±
+0.035)
+LPIPS
+0.303
+(±
+0.176)
+0.117
+(±
+0.070)
+0.310
+(±
+0.185)
+0.428
+(±
+0.162)
+0.296
+(±
+0.175)
+0.115
+(±
+0.068)
+0.258
+(±
+0.152)
+0.446
+(±
+0.160)
+0.293
+(±
+0.180)
+0.146
+(±
+0.087)
+GSS
+0.598
+(±
+0.156)
+0.759
+(±
+0.072)
+0.603
+(±
+0.163)
+0.537
+(±
+0.085)
+0.604
+(±
+0.156)
+0.760
+(±
+0.067)
+0.641
+(±
+0.143)
+0.526
+(±
+0.077)
+0.598
+(±
+0.165)
+0.728
+(±
+0.090)
+LSS
+0.691
+(±
+0.110)
+0.785
+(±
+0.064)
+0.688
+(±
+0.116)
+0.628
+(±
+0.061)
+0.693
+(±
+0.109)
+0.783
+(±
+0.059)
+0.704
+(±
+0.107)
+0.624
+(±
+0.055)
+0.681
+(±
+0.118)
+0.759
+(±
+0.079)
+Machine Learning (2026) 115:195
+Page 47 of 94 195
+13
+13
+NoPeNeRF
+Base
+0.279 (± 0.000)
+0.875 (± 0.002)
+2 28.23 (± 0.20)
+0.054 (± 0.000)
+MZEN 3 32.27 (±0.06) 0.963 (±0.000)
+0.045 (± 0.000)
+0.269 (± 0.001)
+0.881 (± 0.002)
+2 28.29 (± 0.21)
+1 32.61 (±0.15) 0.966 (±0.001)
+0.047 (±0.000)
+0.963 (±0.001)
+1 32.08 (± 0.29)
+0.057 (± 0.001)
+0.048 (± 0.001)
+0.960 (± 0.002)
+4 32.45 (± 0.31)
+0.956 (± 0.001)
+0.049 (± 0.000)
+0.966 (±0.001)
+MZEN 3 32.63 (± 0.11)
+4 32.12 (± 0.19)
+0.256 (± 0.000)
+0.883 (± 0.001)
+2 28.42 (± 0.08)
+BARF Base
+LPIPS
+0.046 (±0.000)
+Table 9 Evaluation on the Root BLEFF dataset
+Config
+1×Zoomed-in
+PSNR
+SSIM
+NeRF– Base
+1 32.64 (±0.02) 0.966 (±0.000)
+0.720 (± 0.004)
+0.874 (± 0.003)
+0.857 (± 0.003)
+0.865 (±0.001)
+0.718 (± 0.005)
+0.863 (± 0.005)
+0.863 (± 0.005)
+0.870 (± 0.002)
+0.726 (± 0.002)
+GSS
+0.871 (±0.001)
+0.719 (± 0.006)
+0.863 (± 0.003)
+0.844 (± 0.003)
+0.855 (±0.001)
+0.717 (± 0.007)
+0.852 (± 0.005)
+0.850 (± 0.005)
+0.861 (±0.002)
+0.722 (± 0.002)
+LSS
+0.861 (±0.001)
+2×Zoomed-in
+PSNR
+SSIM
+22.64 (± 0.26) 0.790
+(±
+0.002)
+23.69 (± 0.05) 0.773
+(±
+0.001)
+22.72 (± 0.10) 0.791
+(±
+0.001)
+28.67 (±0.14) 0.917
+(±
+0.001)
+21.30 (± 2.00) 0.759
+(±
+0.048)
+23.71 (± 0.02) 0.767
+(±
+0.000)
+22.20 (± 0.36) 0.769
+(±
+0.018)
+28.44 (±0.08) 0.910
+(±
+0.001)
+22.71 (± 0.05) 0.792
+(±
+0.004)
+23.28 (± 0.09) 0.772
+(±
+0.002)
+LPIPS
+0.252
+(±
+0.003)
+0.332
+(±
+0.002)
+0.252
+(±
+0.003)
+0.091
+(±
+0.000)
+0.288
+(±
+0.051)
+0.360
+(±
+0.001)
+0.279
+(±
+0.020)
+0.105
+(±
+0.001)
+0.250
+(±
+0.004)
+0.338
+(±
+0.001)
+GSS
+0.662
+(±
+0.005)
+0.612
+(±
+0.002)
+0.663
+(±
+0.001)
+0.825
+(±
+0.003)
+0.624
+(±
+0.051)
+0.598
+(±
+0.001)
+0.653
+(±
+0.005)
+0.818
+(±
+0.001)
+0.665
+(±
+0.003)
+0.615
+(±
+0.001)
+LSS
+0.652
+(±
+0.007)
+0.610
+(±
+0.002)
+0.654
+(±
+0.001)
+0.814
+(±
+0.003)
+0.614
+(±
+0.055)
+0.603
+(±
+0.001)
+0.642
+(±
+0.007)
+0.806
+(±
+0.002)
+0.656
+(±
+0.003)
+0.614
+(±
+0.003)
+195 Page 48 of 94
+Machine Learning (2026) 115:195
+CamP
+MipNeRF
+Config
+0.965 (± 0.001)
+0.958 (± 0.002)
+0.969 (±0.001)
+0.882 (± 0.003)
+0.967 (± 0.002)
+0.960 (± 0.002)
+MZEN 3 32.46 (± 0.24)
+4 32.33 (± 0.51)
+1 33.11 (±0.17)
+2 27.95 (± 0.31)
+MZEN 3 32.69 (± 0.39)
+4 32.51 (± 0.39)
+Base
+0.044 (± 0.001)
+0.045 (± 0.000)
+0.277 (± 0.002)
+0.039 (±0.001)
+0.047 (± 0.002)
+0.049 (± 0.000)
+0.274 (± 0.002)
+0.883 (± 0.003)
+2 28.27 (± 0.28)
+0.864 (± 0.006)
+0.872 (± 0.005)
+0.713 (± 0.005)
+0.880 (±0.002)
+0.860 (± 0.007)
+0.867 (± 0.004)
+0.722 (± 0.005)
+0.874 (±0.002)
+0.045 (±0.000)
+1 32.52 (±0.13) 0.967 (±0.000)
+Base
+0.865 (± 0.009)
+0.043 (± 0.001)
+0.961 (± 0.003)
+4 32.47 (± 0.66)
+GSS
+0.868 (± 0.002)
+LPIPS
+0.047 (± 0.000)
+1×Zoomed-in
+PSNR
+SSIM
+MZEN 3 32.40 (± 0.13) 0.965 (± 0.000)
+Table 9 (continued)
+0.851 (± 0.007)
+0.862 (± 0.007)
+0.709 (± 0.008)
+0.871 (±0.002)
+0.849 (± 0.007)
+0.858 (± 0.005)
+0.721 (± 0.007)
+0.863 (±0.002)
+0.852 (± 0.010)
+LSS
+0.857 (± 0.002)
+2×Zoomed-in
+PSNR
+SSIM
+22.55 (± 0.07) 0.787
+(±
+0.002)
+28.91 (±0.08) 0.920
+(±
+0.001)
+21.40 (± 2.05) 0.760
+(±
+0.049)
+23.85 (± 0.10) 0.774
+(±
+0.002)
+21.49 (± 2.14) 0.762
+(±
+0.049)
+28.21 (±0.11) 0.905
+(±
+0.001)
+21.61 (± 2.29) 0.766
+(±
+0.051)
+23.38 (± 0.10) 0.763
+(±
+0.003)
+22.73 (± 0.08) 0.791
+(±
+0.002)
+27.96 (± 0.63) 0.903
+(±
+0.008)
+LPIPS
+0.260
+(±
+0.003)
+0.088
+(±
+0.000)
+0.283
+(±
+0.051)
+0.345
+(±
+0.001)
+0.285
+(±
+0.049)
+0.103
+(±
+0.000)
+0.277
+(±
+0.052)
+0.355
+(±
+0.001)
+0.252
+(±
+0.004)
+0.106
+(±
+0.002)
+GSS
+0.656
+(±
+0.002)
+0.832
+(±
+0.002)
+0.631
+(±
+0.053)
+0.603
+(±
+0.001)
+0.633
+(±
+0.055)
+0.813
+(±
+0.003)
+0.636
+(±
+0.058)
+0.591
+(±
+0.002)
+0.665
+(±
+0.002)
+0.808
+(±
+0.013)
+LSS
+0.648
+(±
+0.002)
+0.820
+(±
+0.002)
+0.618
+(±
+0.057)
+0.604
+(±
+0.003)
+0.620
+(±
+0.059)
+0.801
+(±
+0.003)
+0.623
+(±
+0.063)
+0.593
+(±
+0.003)
+0.655
+(±
+0.003)
+0.795
+(±
+0.016)
+Machine Learning (2026) 115:195
+Page 49 of 94 195
+13
+13
+NoPeNeRF
+0.700 (± 0.002)
+2 22.46 (± 0.19)
+0.826 (± 0.001)
+4 27.47 (± 0.12)
+0.674 (± 0.005)
+0.672 (± 0.006)
+MZEN 3 19.24 (± 0.05)
+1 19.15 (± 0.12)
+0.689 (± 0.006)
+2 22.42 (± 0.27)
+Base
+0.670 (± 0.001)
+0.819 (± 0.003)
+4 26.77 (± 0.22)
+1 19.13 (± 0.11)
+0.673 (± 0.006)
+MZEN 3 19.14 (± 0.24)
+BARF Base
+0.473 (± 0.003)
+0.693 (± 0.002)
+2 22.39 (± 0.08)
+0.463 (± 0.002)
+0.436 (± 0.000)
+0.238 (± 0.001)
+0.433 (± 0.011)
+0.476 (± 0.002)
+0.431 (± 0.019)
+0.238 (± 0.002)
+0.447 (± 0.004)
+LPIPS
+0.444 (± 0.003)
+Table 9 (continued)
+Config
+4×Zoomed-in
+PSNR
+SSIM
+NeRF– Base
+1 19.35 (± 0.16) 0.677 (± 0.001)
+0.523 (± 0.001)
+0.528 (± 0.003)
+0.714 (± 0.002)
+0.527 (± 0.015)
+0.517 (± 0.001)
+0.530 (± 0.016)
+0.703 (± 0.003)
+0.522 (± 0.004)
+0.520 (± 0.000)
+GSS
+0.517 (± 0.003)
+0.553 (± 0.002)
+0.555 (± 0.003)
+0.714 (± 0.002)
+0.553 (± 0.002)
+0.552 (± 0.003)
+0.551 (± 0.001)
+0.703 (± 0.005)
+0.553 (± 0.005)
+0.552 (± 0.002)
+LSS
+0.555 (± 0.002)
+All Zoom Levels
+PSNR
+SSIM
+24.88 (± 5.99) 0.811
+(±
+0.126)
+24.83 (± 2.75) 0.783
+(±
+0.083)
+24.83 (± 6.05) 0.810
+(±
+0.128)
+29.30 (± 2.51) 0.899
+(±
+0.062)
+24.17 (± 6.09) 0.797
+(±
+0.132)
+24.80 (± 2.68) 0.779
+(±
+0.084)
+24.57 (± 5.92) 0.802
+(±
+0.129)
+29.34 (± 2.13) 0.897
+(±
+0.057)
+24.82 (± 6.04) 0.811
+(±
+0.127)
+24.65 (± 2.71) 0.783
+(±
+0.076)
+LPIPS
+0.247
+(±
+0.172)
+0.353
+(±
+0.096)
+0.249
+(±
+0.173)
+0.126
+(±
+0.086)
+0.255
+(±
+0.170)
+0.368
+(±
+0.090)
+0.255
+(±
+0.166)
+0.133
+(±
+0.081)
+0.243
+(±
+0.169)
+0.360
+(±
+0.082)
+GSS
+0.683
+(±
+0.154)
+0.619
+(±
+0.089)
+0.685
+(±
+0.152)
+0.797
+(±
+0.072)
+0.672
+(±
+0.151)
+0.611
+(±
+0.088)
+0.682
+(±
+0.148)
+0.796
+(±
+0.064)
+0.689
+(±
+0.151)
+0.619
+(±
+0.086)
+LSS
+0.689
+(±
+0.136)
+0.628
+(±
+0.075)
+0.689
+(±
+0.136)
+0.789
+(±
+0.067)
+0.672
+(±
+0.140)
+0.624
+(±
+0.073)
+0.683
+(±
+0.135)
+0.788
+(±
+0.058)
+0.691
+(±
+0.136)
+0.629
+(±
+0.073)
+195 Page 50 of 94
+Machine Learning (2026) 115:195
+0.694 (± 0.003)
+0.679 (± 0.005)
+0.820 (±0.001)
+2 22.53 (± 0.14)
+MZEN 3 19.21 (± 0.22)
+4 27.20 (±0.11)
+0.821 (± 0.004)
+4 27.10 (± 0.34)
+0.675 (± 0.005)
+0.670 (± 0.005)
+MZEN 3 19.24 (± 0.09)
+1 19.39 (± 0.26)
+0.692 (± 0.001)
+2 22.49 (± 0.07)
+Base
+0.664 (± 0.012)
+1 18.95 (± 0.24)
+Base
+0.248 (±0.001)
+0.445 (± 0.005)
+0.493 (± 0.003)
+0.429 (± 0.015)
+0.250 (± 0.002)
+0.425 (± 0.014)
+0.491 (± 0.002)
+0.439 (± 0.014)
+MZEN (config 4) attains the best score in every metric. Best results are bolded
+CamP
+MipNeRF
+0.223 (± 0.001)
+4 27.39 (± 0.14)
+0.829 (± 0.002)
+LPIPS
+0.440 (± 0.002)
+Table 9 (continued)
+Config
+4×Zoomed-in
+PSNR
+SSIM
+MZEN 3 19.00 (± 0.11) 0.671 (± 0.003)
+0.707 (±0.002)
+0.523 (± 0.005)
+0.510 (± 0.001)
+0.536 (± 0.014)
+0.704 (± 0.007)
+0.541 (± 0.015)
+0.509 (± 0.001)
+0.528 (± 0.005)
+0.715 (± 0.003)
+GSS
+0.523 (± 0.005)
+0.707 (±0.003)
+0.558 (± 0.003)
+0.550 (± 0.002)
+0.558 (± 0.003)
+0.704 (± 0.009)
+0.554 (± 0.001)
+0.548 (± 0.001)
+0.546 (± 0.010)
+0.715 (± 0.003)
+LSS
+0.551 (± 0.002)
+All Zoom Levels
+PSNR
+SSIM
+24.65 (± 6.02) 0.808
+(±
+0.128)
+29.59 (± 2.29) 0.904
+(±
+0.058)
+24.29 (± 6.35) 0.797
+(±
+0.136)
+24.87 (± 2.63) 0.783
+(±
+0.083)
+24.40 (± 6.22) 0.799
+(±
+0.133)
+29.21 (± 2.41) 0.895
+(±
+0.060)
+24.70 (± 6.48) 0.803
+(±
+0.133)
+24.62 (± 2.53) 0.780
+(±
+0.082)
+24.88 (± 6.06) 0.812
+(±
+0.126)
+29.22 (±2.52) 0.894
+(±
+0.061)
+LPIPS
+0.249
+(±
+0.170)
+0.118
+(±
+0.081)
+0.256
+(±
+0.174)
+0.370
+(±
+0.096)
+0.253
+(±
+0.167)
+0.134
+(±
+0.091)
+0.249
+(±
+0.172)
+0.375
+(±
+0.095)
+0.247
+(±
+0.173)
+0.132
+(±
+0.091)
+GSS
+0.682
+(±
+0.150)
+0.804
+(±
+0.068)
+0.678
+(±
+0.156)
+0.611
+(±
+0.093)
+0.680
+(±
+0.148)
+0.792
+(±
+0.070)
+0.684
+(±
+0.156)
+0.605
+(±
+0.089)
+0.687
+(±
+0.152)
+0.793
+(±
+0.069)
+LSS
+0.686
+(±
+0.135)
+0.796
+(±
+0.062)
+0.676
+(±
+0.147)
+0.624
+(±
+0.076)
+0.677
+(±
+0.141)
+0.785
+(±
+0.064)
+0.684
+(±
+0.146)
+0.617
+(±
+0.071)
+0.692
+(±
+0.135)
+0.785
+(±
+0.063)
+Machine Learning (2026) 115:195
+Page 51 of 94 195
+13
+13
+NoPeNeRF
+0.946 (± 0.003)
+0.956 (± 0.002)
+1 25.82 (± 0.44)
+2 27.38 (± 0.26)
+0.036 (±0.001)
+4 29.80 (±0.19) 0.974 (±0.001)
+Base
+0.045 (± 0.000)
+0.959 (± 0.001)
+MZEN 3 28.36 (± 0.18)
+0.081 (± 0.003)
+0.083 (± 0.003)
+0.073 (± 0.001)
+0.960 (± 0.002)
+2 27.84 (± 0.57)
+0.049 (± 0.001)
+0.959 (± 0.001)
+1 28.23 (± 0.13)
+0.039 (±0.001)
+4 30.03 (±0.68) 0.972 (±0.002)
+BARF Base
+0.053 (± 0.002)
+0.960 (± 0.002)
+MZEN 3 28.43 (± 0.43)
+0.076 (± 0.001)
+0.958 (± 0.001)
+2 27.51 (± 0.10)
+0.821 (± 0.010)
+0.798 (± 0.012)
+0.880 (±0.002)
+0.852 (± 0.004)
+0.828 (± 0.010)
+0.848 (± 0.003)
+0.879 (±0.008)
+0.846 (± 0.009)
+0.823 (± 0.002)
+Table 10 Evaluation on the FinFET Synopsys Sentaurus TCAD test-structure dataset
+Config
+1×Zoomed-in
+PSNR
+SSIM
+LPIPS
+GSS
+NeRF– Base
+1 28.66 (± 0.13) 0.959 (± 0.000)
+0.051 (± 0.000)
+0.846 (± 0.002)
+0.873 (± 0.006)
+0.858 (± 0.010)
+0.915 (±0.003)
+0.889 (± 0.003)
+0.879 (± 0.008)
+0.888 (± 0.002)
+0.915 (±0.008)
+0.891 (± 0.008)
+0.876 (± 0.001)
+LSS
+0.891 (± 0.002)
+2×Zoomed-in
+PSNR
+SSIM
+23.77 (± 0.14) 0.861
+(±
+0.002)
+22.37 (± 0.24) 0.854
+(±
+0.003)
+23.43 (± 0.14) 0.862
+(±
+0.002)
+25.03 (±0.16) 0.898
+(±
+0.001)
+21.38 (± 0.75) 0.827
+(±
+0.014)
+22.62 (± 0.28) 0.858
+(±
+0.004)
+23.15 (± 0.10) 0.856
+(±
+0.001)
+24.43 (±0.19) 0.904
+(±
+0.002)
+20.36 (± 0.38) 0.818
+(±
+0.005)
+22.65 (± 0.09) 0.858
+(±
+0.001)
+LPIPS
+0.188
+(±
+0.002)
+0.229
+(±
+0.005)
+0.180
+(±
+0.001)
+0.138
+(±
+0.000)
+0.203
+(±
+0.017)
+0.222
+(±
+0.004)
+0.167
+(±
+0.000)
+0.108
+(±
+0.003)
+0.218
+(±
+0.005)
+0.219
+(±
+0.003)
+GSS
+0.713
+(±
+0.007)
+0.648
+(±
+0.011)
+0.701
+(±
+0.006)
+0.765
+(±
+0.005)
+0.660
+(±
+0.011)
+0.656
+(±
+0.014)
+0.696
+(±
+0.003)
+0.767
+(±
+0.010)
+0.630
+(±
+0.021)
+0.666
+(±
+0.003)
+LSS
+0.763
+(±
+0.006)
+0.723
+(±
+0.011)
+0.756
+(±
+0.006)
+0.806
+(±
+0.004)
+0.720
+(±
+0.009)
+0.728
+(±
+0.013)
+0.741
+(±
+0.003)
+0.798
+(±
+0.007)
+0.694
+(±
+0.022)
+0.736
+(±
+0.003)
+195 Page 52 of 94
+Machine Learning (2026) 115:195
+CamP
+MipNeRF
+Config
+0.033 (± 0.000)
+0.976 (± 0.000)
+0.959 (± 0.001)
+0.963 (± 0.000)
+0.970 (± 0.001)
+1 30.64 (± 0.04)
+2 27.53 (± 0.28)
+MZEN 3 28.98 (± 0.09)
+4 29.30 (± 0.18)
+0.969 (± 0.002)
+0.954 (± 0.002)
+0.958 (± 0.000)
+0.971 (± 0.000)
+1 29.52 (± 0.41)
+2 27.54 (± 0.36)
+MZEN 3 28.08 (± 0.08)
+4 29.88 (± 0.12)
+Base
+0.052 (± 0.001)
+0.071 (± 0.000)
+0.873 (± 0.002)
+0.828 (± 0.002)
+0.820 (± 0.011)
+0.865 (± 0.006)
+0.050 (± 0.002)
+0.085 (± 0.001)
+0.870 (± 0.003)
+0.848 (± 0.001)
+0.823 (± 0.007)
+0.892 (± 0.001)
+0.912 (±0.001)
+GSS
+0.896 (± 0.003)
+0.043 (± 0.000)
+0.055 (± 0.001)
+0.069 (± 0.001)
+0.024 (±0.001)
+4 31.96 (±0.14) 0.984 (±0.000)
+Base
+LPIPS
+0.029 (± 0.001)
+1×Zoomed-in
+PSNR
+SSIM
+MZEN 3 31.04 (± 0.32) 0.977 (± 0.001)
+Table 10 (continued)
+0.912 (± 0.002)
+0.881 (± 0.001)
+0.871 (± 0.007)
+0.903 (± 0.005)
+0.906 (± 0.001)
+0.894 (± 0.001)
+0.875 (± 0.004)
+0.924 (± 0.000)
+0.940 (±0.001)
+LSS
+0.927 (± 0.003)
+2×Zoomed-in
+PSNR
+SSIM
+25.06 (± 0.45) 0.909
+(±
+0.004)
+27.46 (±0.25) 0.944
+(±
+0.001)
+24.94 (± 0.13) 0.906
+(±
+0.001)
+22.76 (± 0.16) 0.861
+(±
+0.002)
+23.23 (± 0.06) 0.861
+(±
+0.001)
+24.90 (± 0.18) 0.902
+(±
+0.002)
+24.36 (± 0.05) 0.889
+(±
+0.001)
+22.40 (± 0.09) 0.852
+(±
+0.001)
+22.74 (± 0.07) 0.856
+(±
+0.001)
+24.02 (± 0.14) 0.884
+(±
+0.002)
+LPIPS
+0.117
+(±
+0.002)
+0.074
+(±
+0.001)
+0.118
+(±
+0.002)
+0.215
+(±
+0.004)
+0.173
+(±
+0.000)
+0.131
+(±
+0.001)
+0.159
+(±
+0.001)
+0.230
+(±
+0.000)
+0.203
+(±
+0.001)
+0.149
+(±
+0.002)
+GSS
+0.768
+(±
+0.012)
+0.841
+(±
+0.004)
+0.763
+(±
+0.003)
+0.665
+(±
+0.010)
+0.696
+(±
+0.004)
+0.762
+(±
+0.005)
+0.723
+(±
+0.002)
+0.651
+(±
+0.005)
+0.673
+(±
+0.003)
+0.727
+(±
+0.006)
+LSS
+0.805
+(±
+0.012)
+0.868
+(±
+0.003)
+0.799
+(±
+0.003)
+0.734
+(±
+0.009)
+0.746
+(±
+0.002)
+0.800
+(±
+0.004)
+0.774
+(±
+0.002)
+0.724
+(±
+0.004)
+0.739
+(±
+0.002)
+0.768
+(±
+0.005)
+Machine Learning (2026) 115:195
+Page 53 of 94 195
+13
+13
+NoPeNeRF
+0.866 (± 0.001)
+0.887 (± 0.001)
+1 22.83 (± 0.02)
+2 22.84 (± 0.04)
+0.097 (±0.001)
+4 24.74 (±0.13) 0.921 (±0.001)
+Base
+0.159 (± 0.004)
+0.877 (± 0.002)
+MZEN 3 23.15 (± 0.10)
+0.152 (± 0.002)
+0.183 (± 0.001)
+0.161 (± 0.002)
+0.887 (± 0.001)
+2 22.32 (± 0.04)
+0.193 (± 0.002)
+0.115 (±0.001)
+4 25.62 (±0.13) 0.907 (±0.001)
+0.844 (± 0.001)
+0.156 (± 0.002)
+0.862 (± 0.001)
+MZEN 3 23.34 (± 0.07)
+1 21.98 (± 0.02)
+0.160 (± 0.001)
+0.887 (± 0.002)
+2 22.50 (± 0.06)
+BARF Base
+LPIPS
+0.203 (± 0.003)
+Table 10 (continued)
+Config
+4×Zoomed-in
+PSNR
+SSIM
+NeRF– Base
+1 23.04 (± 0.07) 0.853 (± 0.001)
+0.483 (± 0.003)
+0.499 (± 0.001)
+0.608 (±0.005)
+0.507 (± 0.005)
+0.465 (± 0.003)
+0.465 (± 0.003)
+0.611 (±0.001)
+0.512 (± 0.002)
+0.469 (± 0.001)
+GSS
+0.493 (± 0.001)
+0.652 (± 0.003)
+0.648 (± 0.002)
+0.701 (±0.006)
+0.647 (± 0.004)
+0.646 (± 0.002)
+0.610 (± 0.003)
+0.708 (±0.002)
+0.651 (± 0.001)
+0.650 (± 0.001)
+LSS
+0.638 (± 0.003)
+All Zoom Levels
+PSNR
+SSIM
+25.16 (± 2.65) 0.891
+(±
+0.051)
+24.13 (± 2.54) 0.900
+(±
+0.046)
+25.07 (± 2.53) 0.895
+(±
+0.049)
+26.89 (±2.40) 0.926
+(±
+0.035)
+23.86 (± 3.31) 0.877
+(±
+0.062)
+24.26 (± 2.70) 0.902
+(±
+0.045)
+24.89 (± 2.61) 0.898
+(±
+0.047)
+26.32 (±2.62) 0.933
+(±
+0.032)
+23.00 (± 2.39) 0.877
+(±
+0.056)
+24.29 (± 2.32) 0.900
+(±
+0.044)
+LPIPS
+0.148
+(±
+0.073)
+0.155
+(±
+0.066)
+0.129
+(±
+0.059)
+0.097
+(±
+0.045)
+0.148
+(±
+0.075)
+0.152
+(±
+0.065)
+0.124
+(±
+0.059)
+0.081
+(±
+0.034)
+0.161
+(±
+0.061)
+0.150
+(±
+0.060)
+GSS
+0.684
+(±
+0.155)
+0.647
+(±
+0.153)
+0.686
+(±
+0.145)
+0.752
+(±
+0.117)
+0.658
+(±
+0.166)
+0.650
+(±
+0.158)
+0.685
+(±
+0.150)
+0.752
+(±
+0.118)
+0.642
+(±
+0.130)
+0.656
+(±
+0.147)
+LSS
+0.764
+(±
+0.110)
+0.750
+(±
+0.100)
+0.766
+(±
+0.104)
+0.810
+(±
+0.090)
+0.739
+(±
+0.121)
+0.751
+(±
+0.103)
+0.759
+(±
+0.106)
+0.805
+(±
+0.093)
+0.733
+(±
+0.096)
+0.754
+(±
+0.097)
+195 Page 54 of 94
+Machine Learning (2026) 115:195
+0.894 (± 0.001)
+0.886 (± 0.001)
+0.879 (± 0.000)
+0.917 (± 0.001)
+1 24.26 (± 0.10)
+2 22.45 (± 0.07)
+MZEN 3 22.95 (± 0.06)
+4 24.83 (± 0.18)
+Base
+0.100 (±0.002)
+4 25.32 (±0.07) 0.916 (±0.000)
+0.101 (± 0.000)
+0.159 (± 0.002)
+0.175 (± 0.004)
+0.139 (± 0.001)
+0.608 (± 0.005)
+0.491 (± 0.001)
+0.464 (± 0.001)
+0.549 (± 0.002)
+0.620 (±0.002)
+0.497 (± 0.002)
+0.486 (± 0.001)
+0.575 (± 0.004)
+0.745 (±0.018)
+GSS
+0.603 (± 0.001)
+MZEN (config 4) consistently achieves the highest scores. Best results are bolded
+CamP
+0.161 (± 0.002)
+0.885 (± 0.000)
+MZEN 3 23.21 (± 0.09)
+0.159 (± 0.002)
+0.893 (± 0.002)
+2 22.57 (± 0.04)
+0.127 (± 0.001)
+0.906 (± 0.001)
+1 24.21 (± 0.10)
+Base
+0.056 (±0.002)
+4 28.47 (±0.90) 0.959 (±0.004)
+MipNeRF
+LPIPS
+0.107 (± 0.001)
+Table 10 (continued)
+Config
+4×Zoomed-in
+PSNR
+SSIM
+MZEN 3 24.84 (± 0.06) 0.917 (± 0.000)
+0.710 (± 0.007)
+0.641 (± 0.001)
+0.640 (± 0.001)
+0.673 (± 0.002)
+0.719 (±0.001)
+0.648 (± 0.002)
+0.656 (± 0.002)
+0.686 (± 0.003)
+0.803 (±0.024)
+LSS
+0.698 (± 0.002)
+All Zoom Levels
+PSNR
+SSIM
+26.98 (± 3.06) 0.934
+(±
+0.032)
+29.30 (±2.10) 0.962
+(±
+0.017)
+26.60 (± 3.05) 0.930
+(±
+0.035)
+24.29 (± 2.44) 0.904
+(±
+0.043)
+25.14 (± 2.88) 0.903
+(±
+0.046)
+26.51 (± 2.10) 0.929
+(±
+0.031)
+26.05 (± 2.62) 0.917
+(±
+0.039)
+24.13 (± 2.57) 0.897
+(±
+0.045)
+24.59 (± 2.62) 0.898
+(±
+0.047)
+26.24 (± 2.75) 0.924
+(±
+0.038)
+LPIPS
+0.085
+(±
+0.042)
+0.051
+(±
+0.022)
+0.093
+(±
+0.045)
+0.148
+(±
+0.064)
+0.130
+(±
+0.056)
+0.092
+(±
+0.039)
+0.116
+(±
+0.050)
+0.163
+(±
+0.064)
+0.144
+(±
+0.058)
+0.101
+(±
+0.042)
+GSS
+0.756
+(±
+0.127)
+0.833
+(±
+0.073)
+0.743
+(±
+0.138)
+0.658
+(±
+0.146)
+0.680
+(±
+0.152)
+0.751
+(±
+0.108)
+0.713
+(±
+0.137)
+0.645
+(±
+0.154)
+0.664
+(±
+0.146)
+0.736
+(±
+0.115)
+LSS
+0.810
+(±
+0.100)
+0.870
+(±
+0.061)
+0.803
+(±
+0.103)
+0.755
+(±
+0.096)
+0.762
+(±
+0.107)
+0.808
+(±
+0.081)
+0.784
+(±
+0.100)
+0.745
+(±
+0.101)
+0.753
+(±
+0.104)
+0.797
+(±
+0.090)
+Machine Learning (2026) 115:195
+Page 55 of 94 195
+13
+13
+NoPeNeRF
+0.969 (± 0.002)
+0.961 (± 0.002)
+1 31.58 (± 0.48)
+2 30.70 (± 0.56)
+0.016 (±0.001)
+4 34.83 (±0.42) 0.988 (±0.001)
+Base
+0.022 (± 0.000)
+0.979 (± 0.001)
+MZEN 3 33.41 (± 0.24)
+0.056 (± 0.003)
+0.034 (± 0.002)
+0.059 (± 0.003)
+0.962 (± 0.004)
+2 30.47 (± 1.13)
+0.019 (± 0.002)
+0.986 (± 0.004)
+1 33.71 (± 1.51)
+0.021 (±0.000)
+4 34.13 (±0.27) 0.984 (±0.000)
+BARF Base
+0.033 (± 0.000)
+0.971 (± 0.000)
+MZEN 3 30.91 (± 0.07)
+0.064 (± 0.002)
+0.961 (± 0.004)
+2 30.34 (± 0.97)
+0.856 (± 0.008)
+0.886 (± 0.006)
+0.928 (±0.003)
+0.911 (± 0.002)
+0.857 (± 0.018)
+0.921 (± 0.015)
+0.921 (±0.003)
+0.886 (± 0.002)
+0.854 (± 0.016)
+Table 11 Evaluation on the Sensor Synopsys Sentaurus TCAD test-structure dataset
+Config
+1×Zoomed-in
+PSNR
+SSIM
+LPIPS
+GSS
+NeRF– Base
+1 31.59 (± 0.27) 0.971 (± 0.001)
+0.033 (± 0.000)
+0.888 (± 0.004)
+0.899 (± 0.006)
+0.918 (± 0.006)
+0.949 (±0.002)
+0.936 (± 0.002)
+0.899 (± 0.014)
+0.943 (± 0.010)
+0.944 (±0.001)
+0.917 (± 0.001)
+0.897 (± 0.012)
+LSS
+0.920 (± 0.003)
+2×Zoomed-in
+PSNR
+SSIM
+25.17 (± 0.28) 0.890
+(±
+0.003)
+24.43 (± 0.11) 0.869
+(±
+0.002)
+21.29 (± 0.12) 0.837
+(±
+0.001)
+25.67 (±0.31) 0.922
+(±
+0.002)
+27.21 (± 0.41) 0.938
+(±
+0.003)
+24.30 (± 0.22) 0.868
+(±
+0.001)
+26.32 (± 0.19) 0.909
+(±
+0.002)
+27.29 (±0.37) 0.942
+(±
+0.003)
+25.73 (± 0.20) 0.897
+(±
+0.002)
+24.53 (± 0.18) 0.868
+(±
+0.001)
+LPIPS
+0.168
+(±
+0.002)
+0.221
+(±
+0.000)
+0.236
+(±
+0.001)
+0.109
+(±
+0.002)
+0.116
+(±
+0.001)
+0.229
+(±
+0.001)
+0.145
+(±
+0.001)
+0.092
+(±
+0.001)
+0.159
+(±
+0.002)
+0.223
+(±
+0.001)
+GSS
+0.748
+(±
+0.008)
+0.720
+(±
+0.004)
+0.688
+(±
+0.003)
+0.784
+(±
+0.004)
+0.821
+(±
+0.007)
+0.715
+(±
+0.005)
+0.781
+(±
+0.007)
+0.827
+(±
+0.007)
+0.763
+(±
+0.006)
+0.719
+(±
+0.004)
+LSS
+0.794
+(±
+0.008)
+0.778
+(±
+0.004)
+0.748
+(±
+0.003)
+0.821
+(±
+0.004)
+0.849
+(±
+0.008)
+0.774
+(±
+0.005)
+0.819
+(±
+0.006)
+0.854
+(±
+0.006)
+0.806
+(±
+0.006)
+0.779
+(±
+0.003)
+195 Page 56 of 94
+Machine Learning (2026) 115:195
+CamP
+MipNeRF
+Config
+0.022 (±0.002)
+4 33.93 (±0.86) 0.981 (±0.002)
+0.049 (± 0.001)
+0.025 (±0.001)
+0.958 (± 0.001)
+MZEN 3 29.99 (± 0.17)
+4 33.21 (±0.59) 0.980 (±0.001)
+0.066 (± 0.003)
+0.959 (± 0.003)
+2 30.30 (± 0.71)
+0.065 (± 0.001)
+0.964 (± 0.001)
+1 29.11 (± 0.14)
+Base
+0.036 (± 0.002)
+0.964 (± 0.004)
+MZEN 3 30.19 (± 0.30)
+0.072 (± 0.002)
+0.963 (± 0.002)
+2 30.91 (± 0.64)
+0.030 (± 0.000)
+0.980 (± 0.000)
+1 32.97 (± 0.23)
+0.024 (±0.001)
+4 33.57 (±0.24) 0.984 (±0.000)
+Base
+LPIPS
+0.031 (± 0.000)
+1×Zoomed-in
+PSNR
+SSIM
+MZEN 3 31.87 (± 0.54) 0.974 (± 0.002)
+Table 11 (continued)
+0.908 (±0.005)
+0.858 (± 0.003)
+0.851 (± 0.012)
+0.856 (± 0.002)
+0.915 (±0.009)
+0.867 (± 0.004)
+0.866 (± 0.006)
+0.906 (± 0.002)
+0.916 (±0.003)
+GSS
+0.892 (± 0.006)
+0.936 (±0.004)
+0.900 (± 0.002)
+0.897 (± 0.009)
+0.901 (± 0.003)
+0.940 (±0.006)
+0.904 (± 0.001)
+0.905 (± 0.005)
+0.934 (± 0.002)
+0.940 (±0.002)
+LSS
+0.924 (± 0.004)
+2×Zoomed-in
+PSNR
+SSIM
+25.59 (± 0.09) 0.897
+(±
+0.001)
+26.32 (±0.06) 0.924
+(±
+0.001)
+26.02 (± 0.10) 0.913
+(±
+0.001)
+24.45 (± 0.23) 0.867
+(±
+0.001)
+24.71 (± 0.15) 0.880
+(±
+0.003)
+25.95 (± 0.29) 0.916
+(±
+0.001)
+24.93 (± 0.05) 0.894
+(±
+0.001)
+23.96 (± 0.03) 0.863
+(±
+0.001)
+23.94 (± 0.60) 0.865
+(±
+0.004)
+26.17 (±0.08) 0.913
+(±
+0.001)
+LPIPS
+0.162
+(±
+0.002)
+0.114
+(±
+0.001)
+0.157
+(±
+0.001)
+0.222
+(±
+0.001)
+0.191
+(±
+0.007)
+0.128
+(±
+0.001)
+0.181
+(±
+0.001)
+0.251
+(±
+0.000)
+0.212
+(±
+0.008)
+0.132
+(±
+0.001)
+GSS
+0.760
+(±
+0.003)
+0.794
+(±
+0.003)
+0.775
+(±
+0.003)
+0.718
+(±
+0.004)
+0.735
+(±
+0.010)
+0.786
+(±
+0.006)
+0.747
+(±
+0.004)
+0.698
+(±
+0.004)
+0.714
+(±
+0.014)
+0.784
+(±
+0.003)
+LSS
+0.806
+(±
+0.002)
+0.830
+(±
+0.002)
+0.815
+(±
+0.003)
+0.776
+(±
+0.002)
+0.785
+(±
+0.007)
+0.821
+(±
+0.004)
+0.798
+(±
+0.004)
+0.764
+(±
+0.002)
+0.771
+(±
+0.010)
+0.821
+(±
+0.002)
+Machine Learning (2026) 115:195
+Page 57 of 94 195
+13
+13
+NoPeNeRF
+0.806 (± 0.003)
+0.791 (± 0.004)
+1 23.76 (± 0.22)
+2 23.57 (± 0.24)
+0.145 (±0.002)
+4 29.56 (±0.47) 0.942 (±0.002)
+Base
+0.317 (± 0.001)
+0.818 (± 0.002)
+MZEN 3 24.25 (± 0.15)
+0.458 (± 0.001)
+0.337 (± 0.003)
+0.460 (± 0.001)
+0.795 (± 0.002)
+2 23.84 (± 0.07)
+0.230 (± 0.005)
+0.180 (±0.003)
+4 27.83 (±0.47) 0.914 (±0.003)
+0.888 (± 0.007)
+0.376 (± 0.001)
+0.801 (± 0.002)
+MZEN 3 23.48 (± 0.06)
+1 24.82 (± 0.43)
+0.442 (± 0.002)
+0.794 (± 0.003)
+2 23.42 (± 0.18)
+BARF Base
+LPIPS
+0.316 (± 0.002)
+Table 11 (continued)
+Config
+4×Zoomed-in
+PSNR
+SSIM
+NeRF– Base
+1 23.74 (± 0.21) 0.816 (± 0.004)
+0.575 (± 0.006)
+0.606 (± 0.006)
+0.789 (±0.006)
+0.622 (± 0.005)
+0.584 (± 0.003)
+0.683 (± 0.009)
+0.747 (±0.006)
+0.600 (± 0.003)
+0.580 (± 0.003)
+GSS
+0.618 (± 0.006)
+0.669 (± 0.012)
+0.670 (± 0.010)
+0.824 (±0.008)
+0.680 (± 0.007)
+0.680 (± 0.004)
+0.725 (± 0.016)
+0.790 (±0.008)
+0.668 (± 0.003)
+0.671 (± 0.007)
+LSS
+0.677 (± 0.011)
+All Zoom Levels
+PSNR
+SSIM
+26.83 (± 3.63) 0.892
+(±
+0.067)
+26.06 (± 3.28) 0.875
+(±
+0.072)
+25.23 (± 4.37) 0.870
+(±
+0.077)
+29.21 (±3.82) 0.940
+(±
+0.033)
+28.58 (± 4.07) 0.938
+(±
+0.042)
+26.20 (± 3.25) 0.875
+(±
+0.073)
+27.99 (± 4.16) 0.902
+(±
+0.070)
+30.56 (±3.37) 0.957
+(±
+0.023)
+27.02 (± 3.53) 0.890
+(±
+0.071)
+26.26 (± 3.37) 0.874
+(±
+0.074)
+LPIPS
+0.172
+(±
+0.123)
+0.243
+(±
+0.164)
+0.215
+(±
+0.149)
+0.103
+(±
+0.069)
+0.122
+(±
+0.091)
+0.249
+(±
+0.174)
+0.161
+(±
+0.128)
+0.085
+(±
+0.056)
+0.177
+(±
+0.132)
+0.246
+(±
+0.175)
+GSS
+0.751
+(±
+0.117)
+0.718
+(±
+0.119)
+0.725
+(±
+0.127)
+0.817
+(±
+0.079)
+0.808
+(±
+0.104)
+0.718
+(±
+0.119)
+0.771
+(±
+0.125)
+0.848
+(±
+0.062)
+0.752
+(±
+0.122)
+0.717
+(±
+0.122)
+LSS
+0.797
+(±
+0.106)
+0.782
+(±
+0.098)
+0.778
+(±
+0.110)
+0.852
+(±
+0.071)
+0.839
+(±
+0.095)
+0.784
+(±
+0.095)
+0.812
+(±
+0.111)
+0.876
+(±
+0.057)
+0.798
+(±
+0.108)
+0.782
+(±
+0.100)
+195 Page 58 of 94
+Machine Learning (2026) 115:195
+0.421 (± 0.003)
+0.214 (±0.001)
+0.761 (± 0.001)
+MZEN 3 22.27 (± 0.04)
+4 27.57 (±0.34) 0.900 (±0.002)
+0.469 (± 0.001)
+0.787 (± 0.002)
+2 23.37 (± 0.28)
+0.353 (± 0.000)
+0.818 (± 0.001)
+1 23.75 (± 0.05)
+Base
+0.226 (±0.003)
+4 27.56 (±0.48) 0.904 (±0.003)
+0.726 (±0.007)
+0.549 (± 0.003)
+0.544 (± 0.004)
+0.611 (± 0.002)
+0.728 (±0.011)
+0.571 (± 0.015)
+0.586 (± 0.005)
+0.620 (± 0.002)
+0.754 (±0.013)
+GSS
+0.629 (± 0.003)
+MZEN (config 4) consistently achieves the highest scores. Best results are bolded
+CamP
+0.408 (± 0.011)
+0.784 (± 0.010)
+MZEN 3 23.07 (± 0.38)
+0.437 (± 0.002)
+0.793 (± 0.004)
+2 24.02 (± 0.26)
+0.329 (± 0.001)
+0.833 (± 0.001)
+1 24.23 (± 0.11)
+Base
+0.147 (±0.003)
+4 27.89 (±0.65) 0.922 (±0.005)
+MipNeRF
+LPIPS
+0.308 (± 0.001)
+Table 11 (continued)
+Config
+4×Zoomed-in
+PSNR
+SSIM
+MZEN 3 24.17 (± 0.14) 0.819 (± 0.002)
+0.776 (±0.007)
+0.634 (± 0.004)
+0.652 (± 0.004)
+0.680 (± 0.004)
+0.777 (±0.011)
+0.656 (± 0.010)
+0.672 (± 0.008)
+0.682 (± 0.003)
+0.792 (±0.014)
+LSS
+0.690 (± 0.004)
+All Zoom Levels
+PSNR
+SSIM
+27.21 (± 3.56) 0.897
+(±
+0.067)
+29.26 (±3.32) 0.943
+(±
+0.030)
+27.74 (± 4.00) 0.908
+(±
+0.064)
+26.46 (± 3.36) 0.875
+(±
+0.074)
+25.99 (± 3.24) 0.876
+(±
+0.078)
+29.15 (±3.69) 0.934
+(±
+0.036)
+25.93 (± 2.44) 0.892
+(±
+0.063)
+25.88 (± 3.35) 0.870
+(±
+0.075)
+25.40 (± 3.53) 0.862
+(±
+0.086)
+28.99 (±3.25) 0.931
+(±
+0.037)
+LPIPS
+0.167
+(±
+0.120)
+0.095
+(±
+0.055)
+0.172
+(±
+0.130)
+0.244
+(±
+0.159)
+0.212
+(±
+0.162)
+0.125
+(±
+0.089)
+0.200
+(±
+0.125)
+0.262
+(±
+0.175)
+0.228
+(±
+0.162)
+0.123
+(±
+0.082)
+GSS
+0.760
+(±
+0.114)
+0.821
+(±
+0.073)
+0.767
+(±
+0.124)
+0.723
+(±
+0.121)
+0.724
+(±
+0.128)
+0.810
+(±
+0.083)
+0.738
+(±
+0.106)
+0.698
+(±
+0.133)
+0.707
+(±
+0.134)
+0.806
+(±
+0.081)
+LSS
+0.807
+(±
+0.101)
+0.854
+(±
+0.067)
+0.810
+(±
+0.109)
+0.784
+(±
+0.102)
+0.781
+(±
+0.108)
+0.846
+(±
+0.073)
+0.793
+(±
+0.096)
+0.771
+(±
+0.106)
+0.769
+(±
+0.115)
+0.844
+(±
+0.071)
+Machine Learning (2026) 115:195
+Page 59 of 94 195
+13
+13
+NoPeNeRF
+0.979 (± 0.000)
+0.945 (± 0.000)
+1 29.74 (± 0.18)
+2 23.81 (± 0.04)
+0.016 (±0.001)
+4 29.87 (±0.79) 0.986 (±0.001)
+Base
+0.022 (± 0.000)
+0.983 (± 0.001)
+MZEN 3 28.83 (± 0.38)
+0.069 (± 0.000)
+0.024 (± 0.000)
+0.058 (± 0.000)
+0.948 (± 0.000)
+2 25.38 (± 0.09)
+0.038 (± 0.000)
+0.972 (± 0.000)
+1 27.50 (± 0.03)
+0.016 (±0.000)
+4 30.12 (±0.38) 0.986 (±0.001)
+BARF Base
+0.020 (± 0.000)
+0.981 (± 0.000)
+MZEN 3 30.00 (± 0.09)
+0.060 (± 0.000)
+0.952 (± 0.000)
+2 25.07 (± 0.05)
+0.795 (± 0.001)
+0.897 (± 0.002)
+0.905 (±0.007)
+0.893 (± 0.005)
+0.811 (± 0.002)
+0.868 (± 0.002)
+0.910 (±0.006)
+0.901 (± 0.001)
+0.805 (± 0.001)
+Table 12 Evaluation on the Tower Synopsys Sentaurus TCAD test-structure dataset
+Config
+1×Zoomed-in
+PSNR
+SSIM
+LPIPS
+GSS
+NeRF– Base
+1 29.62 (± 0.08) 0.979 (± 0.000)
+0.027 (± 0.000)
+0.893 (± 0.002)
+0.850 (± 0.001)
+0.924 (± 0.002)
+0.931 (±0.006)
+0.917 (± 0.004)
+0.863 (± 0.002)
+0.902 (± 0.001)
+0.935 (±0.004)
+0.928 (± 0.001)
+0.859 (± 0.001)
+LSS
+0.923 (± 0.001)
+2×Zoomed-in
+PSNR
+SSIM
+24.14 (± 0.16) 0.926
+(±
+0.001)
+20.87 (± 0.11) 0.866
+(±
+0.001)
+24.30 (± 0.18) 0.929
+(±
+0.001)
+27.48 (±0.13) 0.967
+(±
+0.001)
+22.25 (± 0.03) 0.910
+(±
+0.000)
+21.18 (± 0.09) 0.856
+(±
+0.001)
+24.90 (± 0.08) 0.952
+(±
+0.000)
+26.90 (±0.13) 0.968
+(±
+0.000)
+24.19 (± 0.09) 0.933
+(±
+0.000)
+19.04 (± 0.06) 0.837
+(±
+0.001)
+LPIPS
+0.097
+(±
+0.001)
+0.151
+(±
+0.001)
+0.088
+(±
+0.001)
+0.034
+(±
+0.001)
+0.112
+(±
+0.001)
+0.143
+(±
+0.001)
+0.067
+(±
+0.000)
+0.035
+(±
+0.001)
+0.093
+(±
+0.000)
+0.180
+(±
+0.001)
+GSS
+0.738
+(±
+0.003)
+0.650
+(±
+0.003)
+0.751
+(±
+0.003)
+0.853
+(±
+0.003)
+0.710
+(±
+0.002)
+0.651
+(±
+0.004)
+0.779
+(±
+0.002)
+0.840
+(±
+0.001)
+0.744
+(±
+0.002)
+0.617
+(±
+0.003)
+LSS
+0.795
+(±
+0.004)
+0.725
+(±
+0.004)
+0.802
+(±
+0.004)
+0.883
+(±
+0.002)
+0.768
+(±
+0.001)
+0.730
+(±
+0.005)
+0.820
+(±
+0.003)
+0.870
+(±
+0.002)
+0.797
+(±
+0.002)
+0.702
+(±
+0.003)
+195 Page 60 of 94
+Machine Learning (2026) 115:195
+CamP
+MipNeRF
+Config
+0.061 (± 0.000)
+0.026 (± 0.000)
+0.025 (±0.000)
+0.083 (± 0.001)
+0.947 (± 0.000)
+0.973 (± 0.000)
+0.979 (± 0.000)
+0.964 (± 0.000)
+0.974 (± 0.001)
+MZEN 3 27.80 (± 0.03)
+4 28.85 (± 0.16)
+1 29.48 (±0.12) 0.982 (±0.000)
+0.950 (± 0.000)
+2 24.78 (± 0.01)
+2 23.76 (± 0.05)
+MZEN 3 25.61 (± 0.07)
+4 27.53 (± 0.23)
+Base
+0.034 (± 0.001)
+0.053 (± 0.000)
+0.035 (± 0.000)
+0.023 (±0.000)
+1 29.66 (±0.36) 0.982 (±0.001)
+Base
+0.015 (±0.001)
+0.986 (±0.001)
+4 29.89 (± 0.29)
+LPIPS
+0.022 (± 0.000)
+1×Zoomed-in
+PSNR
+SSIM
+MZEN 3 29.97 (± 0.23) 0.981 (± 0.001)
+Table 12 (continued)
+0.870 (± 0.005)
+0.841 (± 0.002)
+0.782 (± 0.001)
+0.896 (±0.003)
+0.888 (± 0.003)
+0.873 (± 0.001)
+0.794 (± 0.002)
+0.898 (±0.006)
+0.907 (±0.004)
+GSS
+0.899 (± 0.004)
+0.905 (± 0.004)
+0.882 (± 0.001)
+0.846 (± 0.000)
+0.923 (±0.002)
+0.919 (± 0.002)
+0.906 (± 0.001)
+0.852 (± 0.001)
+0.925 (±0.004)
+0.933 (±0.003)
+LSS
+0.927 (± 0.003)
+2×Zoomed-in
+PSNR
+SSIM
+24.20 (± 0.14) 0.932
+(±
+0.000)
+26.94 (±0.32) 0.965
+(±
+0.001)
+24.35 (± 0.15) 0.938
+(±
+0.000)
+20.16 (± 0.08) 0.848
+(±
+0.000)
+22.68 (± 0.11) 0.917
+(±
+0.000)
+24.76 (±0.33) 0.949
+(±
+0.001)
+23.96 (±0.01) 0.936
+(±
+0.000)
+19.15 (± 0.04) 0.861
+(±
+0.001)
+20.71 (± 0.07) 0.895
+(±
+0.001)
+23.66 (± 0.15) 0.941
+(±
+0.001)
+LPIPS
+0.091
+(±
+0.000)
+0.037
+(±
+0.001)
+0.089
+(±
+0.000)
+0.166
+(±
+0.001)
+0.102
+(±
+0.001)
+0.063
+(±
+0.002)
+0.085
+(±
+0.001)
+0.173
+(±
+0.001)
+0.133
+(±
+0.001)
+0.072
+(±
+0.001)
+GSS
+0.743
+(±
+0.002)
+0.844
+(±
+0.005)
+0.752
+(±
+0.003)
+0.624
+(±
+0.004)
+0.714
+(±
+0.005)
+0.789
+(±
+0.008)
+0.750
+(±
+0.001)
+0.616
+(±
+0.003)
+0.693
+(±
+0.005)
+0.778
+(±
+0.005)
+LSS
+0.797
+(±
+0.003)
+0.875
+(±
+0.005)
+0.804
+(±
+0.003)
+0.706
+(±
+0.004)
+0.770
+(±
+0.005)
+0.827
+(±
+0.007)
+0.800
+(±
+0.000)
+0.703
+(±
+0.003)
+0.755
+(±
+0.005)
+0.821
+(±
+0.005)
+Machine Learning (2026) 115:195
+Page 61 of 94 195
+13
+13
+NoPeNeRF
+0.885 (± 0.000)
+0.857 (± 0.001)
+1 21.19 (± 0.09)
+2 19.63 (± 0.19)
+0.083 (±0.006)
+4 25.70 (±1.36) 0.953 (±0.006)
+Base
+0.162 (± 0.001)
+0.909 (± 0.001)
+MZEN 3 22.01 (± 0.14)
+0.242 (± 0.001)
+0.197 (± 0.002)
+0.234 (± 0.001)
+0.860 (± 0.001)
+2 20.39 (± 0.09)
+0.204 (± 0.002)
+0.086 (±0.002)
+4 25.39 (±0.50) 0.937 (±0.002)
+0.873 (± 0.001)
+0.195 (± 0.001)
+0.891 (± 0.000)
+MZEN 3 21.37 (± 0.02)
+1 20.65 (± 0.11)
+0.237 (± 0.000)
+0.857 (± 0.001)
+2 20.34 (± 0.09)
+BARF Base
+LPIPS
+0.202 (± 0.002)
+Table 12 (continued)
+Config
+4×Zoomed-in
+PSNR
+SSIM
+NeRF– Base
+1 21.19 (± 0.13) 0.881 (± 0.001)
+0.569 (± 0.005)
+0.623 (± 0.004)
+0.782 (±0.039)
+0.658 (± 0.001)
+0.576 (± 0.004)
+0.609 (± 0.004)
+0.773 (±0.013)
+0.632 (± 0.002)
+0.579 (± 0.001)
+GSS
+0.620 (± 0.006)
+0.670 (± 0.007)
+0.706 (± 0.005)
+0.826 (±0.037)
+0.720 (± 0.004)
+0.683 (± 0.006)
+0.693 (± 0.003)
+0.817 (±0.013)
+0.715 (± 0.001)
+0.682 (± 0.003)
+LSS
+0.707 (± 0.007)
+All Zoom Levels
+PSNR
+SSIM
+24.98 (± 3.70) 0.929
+(±
+0.042)
+22.10 (± 2.25) 0.892
+(±
+0.045)
+25.22 (± 3.80) 0.934
+(±
+0.039)
+27.67 (±2.08) 0.963
+(±
+0.022)
+23.47 (± 3.10) 0.918
+(±
+0.043)
+22.32 (± 2.32) 0.888
+(±
+0.045)
+25.24 (± 2.97) 0.948
+(±
+0.032)
+27.49 (±2.02) 0.969
+(±
+0.014)
+25.04 (± 3.76) 0.932
+(±
+0.041)
+20.83 (± 2.26) 0.880
+(±
+0.050)
+LPIPS
+0.108
+(±
+0.076)
+0.149
+(±
+0.077)
+0.101
+(±
+0.077)
+0.045
+(±
+0.032)
+0.118
+(±
+0.072)
+0.145
+(±
+0.076)
+0.084
+(±
+0.062)
+0.045
+(±
+0.030)
+0.104
+(±
+0.076)
+0.163
+(±
+0.076)
+GSS
+0.750
+(±
+0.119)
+0.678
+(±
+0.100)
+0.762
+(±
+0.117)
+0.845
+(±
+0.060)
+0.729
+(±
+0.113)
+0.679
+(±
+0.104)
+0.777
+(±
+0.102)
+0.842
+(±
+0.057)
+0.755
+(±
+0.119)
+0.660
+(±
+0.103)
+LSS
+0.808
+(±
+0.094)
+0.755
+(±
+0.080)
+0.815
+(±
+0.093)
+0.878
+(±
+0.052)
+0.788
+(±
+0.092)
+0.759
+(±
+0.081)
+0.819
+(±
+0.085)
+0.875
+(±
+0.049)
+0.809
+(±
+0.095)
+0.741
+(±
+0.083)
+195 Page 62 of 94
+Machine Learning (2026) 115:195
+0.216 (± 0.000)
+0.110 (±0.002)
+0.872 (± 0.000)
+MZEN 3 19.84 (± 0.03)
+4 25.19 (±0.35) 0.936 (±0.001)
+0.224 (± 0.001)
+0.853 (± 0.000)
+2 19.88 (± 0.02)
+0.193 (± 0.002)
+0.886 (± 0.001)
+1 20.97 (± 0.18)
+Base
+0.102 (±0.003)
+4 25.24 (±0.40) 0.936 (±0.002)
+0.757 (±0.013)
+0.615 (± 0.001)
+0.577 (± 0.001)
+0.631 (± 0.009)
+0.762 (±0.016)
+0.625 (± 0.004)
+0.560 (± 0.007)
+0.633 (± 0.004)
+0.777 (±0.001)
+GSS
+0.629 (± 0.005)
+MZEN (config 4) consistently achieves the highest scores. Best results are bolded
+CamP
+0.188 (± 0.001)
+0.879 (± 0.001)
+MZEN 3 21.25 (± 0.15)
+0.245 (± 0.002)
+0.848 (± 0.002)
+2 19.47 (± 0.28)
+0.194 (± 0.002)
+0.893 (± 0.001)
+1 21.40 (± 0.13)
+Base
+0.088 (±0.000)
+4 25.49 (±0.07) 0.938 (±0.000)
+MipNeRF
+LPIPS
+0.195 (± 0.002)
+Table 12 (continued)
+Config
+4×Zoomed-in
+PSNR
+SSIM
+MZEN 3 21.36 (± 0.09) 0.892 (± 0.001)
+0.809 (±0.012)
+0.699 (± 0.002)
+0.680 (± 0.001)
+0.709 (± 0.010)
+0.812 (±0.013)
+0.703 (± 0.008)
+0.666 (± 0.013)
+0.714 (± 0.006)
+0.821 (±0.001)
+LSS
+0.712 (± 0.006)
+All Zoom Levels
+PSNR
+SSIM
+25.17 (± 3.80) 0.935
+(±
+0.039)
+27.44 (±1.96) 0.963
+(±
+0.021)
+25.14 (± 3.63) 0.938
+(±
+0.039)
+21.47 (± 2.50) 0.881
+(±
+0.049)
+23.91 (± 2.99) 0.923
+(±
+0.041)
+26.28 (±1.95) 0.955
+(±
+0.019)
+24.81 (± 3.74) 0.935
+(±
+0.041)
+20.93 (± 2.15) 0.888
+(±
+0.047)
+22.05 (± 2.70) 0.911
+(±
+0.042)
+25.46 (±1.70) 0.950
+(±
+0.018)
+LPIPS
+0.102
+(±
+0.075)
+0.047
+(±
+0.033)
+0.102
+(±
+0.075)
+0.157
+(±
+0.080)
+0.108
+(±
+0.066)
+0.064
+(±
+0.033)
+0.101
+(±
+0.074)
+0.160
+(±
+0.062)
+0.134
+(±
+0.070)
+0.072
+(±
+0.033)
+GSS
+0.757
+(±
+0.118)
+0.843
+(±
+0.056)
+0.761
+(±
+0.115)
+0.659
+(±
+0.105)
+0.737
+(±
+0.109)
+0.813
+(±
+0.058)
+0.759
+(±
+0.115)
+0.659
+(±
+0.094)
+0.717
+(±
+0.099)
+0.802
+(±
+0.052)
+LSS
+0.812
+(±
+0.094)
+0.876
+(±
+0.049)
+0.814
+(±
+0.092)
+0.741
+(±
+0.085)
+0.793
+(±
+0.089)
+0.852
+(±
+0.051)
+0.811
+(±
+0.093)
+0.743
+(±
+0.078)
+0.779
+(±
+0.081)
+0.845
+(±
+0.046)
+Machine Learning (2026) 115:195
+Page 63 of 94 195
+13
+13
+NoPeNeRF
+Base
+0.955 (± 0.000)
+0.896 (± 0.003)
+1 25.32 (± 0.04)
+2 22.43 (± 0.28)
+0.966 (± 0.002)
+0.103 (± 0.001)
+0.048 (± 0.000)
+0.035 (± 0.002)
+0.030 (±0.001)
+MZEN 3 27.30 (±0.16) 0.971 (±0.001)
+4 26.22 (± 0.54)
+0.123 (± 0.004)
+0.906 (± 0.000)
+2 21.83 (± 0.04)
+0.032 (± 0.002)
+0.969 (± 0.004)
+1 26.71 (± 0.85)
+0.038 (±0.000)
+4 26.42 (±0.20) 0.964 (±0.000)
+BARF Base
+0.049 (± 0.000)
+0.952 (± 0.001)
+MZEN 3 25.19 (± 0.18)
+0.109 (± 0.001)
+0.908 (± 0.002)
+2 22.24 (± 0.14)
+0.745 (± 0.008)
+0.842 (± 0.001)
+0.861 (± 0.009)
+0.885 (±0.002)
+0.750 (± 0.001)
+0.874 (± 0.017)
+0.862 (±0.002)
+0.836 (± 0.004)
+0.746 (± 0.004)
+Table 13 Evaluation on the Pillar Synopsys Sentaurus TCAD test-structure dataset
+Config
+1×Zoomed-in
+PSNR
+SSIM
+LPIPS
+GSS
+NeRF– Base
+1 25.54 (± 0.07) 0.955 (± 0.001)
+0.045 (± 0.001)
+0.844 (± 0.002)
+0.794 (± 0.008)
+0.869 (± 0.000)
+0.889 (± 0.007)
+0.905 (±0.002)
+0.797 (± 0.002)
+0.896 (± 0.013)
+0.890 (±0.002)
+0.865 (± 0.003)
+0.795 (± 0.005)
+LSS
+0.872 (± 0.002)
+2×Zoomed-in
+PSNR
+SSIM
+21.04 (± 0.15) 0.863
+(±
+0.002)
+18.59 (± 0.15) 0.776
+(±
+0.003)
+20.83 (± 0.09) 0.856
+(±
+0.001)
+25.05 (±0.11) 0.929
+(±
+0.001)
+22.30 (± 0.52) 0.919
+(±
+0.006)
+18.65 (± 0.12) 0.780
+(±
+0.005)
+22.26 (± 0.25) 0.916
+(±
+0.003)
+25.36 (±0.86) 0.953
+(±
+0.007)
+20.65 (± 0.09) 0.861
+(±
+0.001)
+19.14 (± 0.10) 0.752
+(±
+0.002)
+LPIPS
+0.117
+(±
+0.002)
+0.201
+(±
+0.001)
+0.120
+(±
+0.001)
+0.053
+(±
+0.001)
+0.085
+(±
+0.005)
+0.201
+(±
+0.001)
+0.086
+(±
+0.003)
+0.047
+(±
+0.003)
+0.123
+(±
+0.001)
+0.198
+(±
+0.001)
+GSS
+0.732
+(±
+0.006)
+0.618
+(±
+0.008)
+0.717
+(±
+0.003)
+0.845
+(±
+0.004)
+0.771
+(±
+0.016)
+0.644
+(±
+0.007)
+0.769
+(±
+0.009)
+0.851
+(±
+0.020)
+0.717
+(±
+0.003)
+0.626
+(±
+0.005)
+LSS
+0.754
+(±
+0.006)
+0.663
+(±
+0.010)
+0.742
+(±
+0.002)
+0.859
+(±
+0.003)
+0.793
+(±
+0.018)
+0.686
+(±
+0.009)
+0.792
+(±
+0.009)
+0.867
+(±
+0.018)
+0.741
+(±
+0.003)
+0.670
+(±
+0.005)
+195 Page 64 of 94
+Machine Learning (2026) 115:195
+CamP
+MipNeRF
+Config
+0.040 (±0.000)
+4 26.09 (±0.07) 0.962 (±0.000)
+0.057 (± 0.001)
+0.041 (±0.001)
+0.946 (± 0.001)
+MZEN 3 24.65 (± 0.13)
+4 25.99 (±0.06) 0.962 (±0.000)
+0.112 (± 0.002)
+0.903 (± 0.001)
+2 22.34 (± 0.17)
+0.052 (± 0.001)
+0.951 (± 0.001)
+1 25.22 (± 0.19)
+Base
+0.052 (± 0.001)
+0.951 (± 0.002)
+MZEN 3 24.94 (± 0.22)
+0.105 (± 0.005)
+0.907 (± 0.001)
+2 22.44 (± 0.11)
+0.047 (± 0.000)
+0.953 (± 0.000)
+1 25.31 (± 0.06)
+0.037 (±0.000)
+4 26.41 (±0.12) 0.964 (±0.001)
+Base
+LPIPS
+0.050 (± 0.001)
+1×Zoomed-in
+PSNR
+SSIM
+MZEN 3 25.18 (± 0.09) 0.950 (± 0.001)
+Table 13 (continued)
+0.855 (±0.001)
+0.824 (± 0.003)
+0.739 (± 0.005)
+0.839 (± 0.003)
+0.855 (±0.002)
+0.832 (± 0.006)
+0.745 (± 0.004)
+0.841 (± 0.002)
+0.861 (±0.002)
+GSS
+0.836 (± 0.003)
+0.883 (±0.001)
+0.854 (± 0.002)
+0.793 (± 0.005)
+0.866 (± 0.004)
+0.885 (±0.001)
+0.861 (± 0.005)
+0.797 (± 0.003)
+0.868 (± 0.001)
+0.889 (±0.001)
+LSS
+0.865 (± 0.002)
+2×Zoomed-in
+PSNR
+SSIM
+20.84 (± 0.09) 0.853
+(±
+0.001)
+24.34 (±0.38) 0.922
+(±
+0.003)
+20.72 (± 0.10) 0.858
+(±
+0.002)
+18.96 (± 0.03) 0.774
+(±
+0.001)
+20.42 (± 0.18) 0.859
+(±
+0.002)
+24.43 (±0.06) 0.927
+(±
+0.002)
+20.82 (± 0.20) 0.856
+(±
+0.003)
+18.85 (± 0.06) 0.770
+(±
+0.002)
+20.62 (± 0.26) 0.851
+(±
+0.004)
+24.06 (±0.26) 0.916
+(±
+0.003)
+LPIPS
+0.123
+(±
+0.001)
+0.056
+(±
+0.002)
+0.116
+(±
+0.001)
+0.182
+(±
+0.001)
+0.122
+(±
+0.001)
+0.057
+(±
+0.001)
+0.110
+(±
+0.000)
+0.188
+(±
+0.001)
+0.121
+(±
+0.002)
+0.060
+(±
+0.001)
+GSS
+0.717
+(±
+0.003)
+0.828
+(±
+0.010)
+0.711
+(±
+0.004)
+0.617
+(±
+0.002)
+0.710
+(±
+0.005)
+0.832
+(±
+0.004)
+0.719
+(±
+0.009)
+0.610
+(±
+0.004)
+0.713
+(±
+0.008)
+0.820
+(±
+0.008)
+LSS
+0.744
+(±
+0.003)
+0.844
+(±
+0.009)
+0.735
+(±
+0.004)
+0.663
+(±
+0.002)
+0.733
+(±
+0.006)
+0.848
+(±
+0.004)
+0.742
+(±
+0.009)
+0.657
+(±
+0.005)
+0.732
+(±
+0.009)
+0.836
+(±
+0.008)
+Machine Learning (2026) 115:195
+Page 65 of 94 195
+13
+13
+NoPeNeRF
+0.871 (± 0.002)
+0.802 (± 0.013)
+1 19.82 (± 0.09)
+2 18.26 (± 0.60)
+0.049 (±0.005)
+4 26.73 (±0.81) 0.961 (±0.006)
+Base
+0.137 (± 0.002)
+0.899 (± 0.000)
+MZEN 3 21.12 (± 0.05)
+0.234 (± 0.004)
+0.160 (± 0.002)
+0.219 (± 0.003)
+0.817 (± 0.004)
+2 19.31 (± 0.09)
+0.127 (± 0.001)
+0.062 (±0.001)
+4 26.40 (±0.33) 0.949 (±0.002)
+0.908 (± 0.000)
+0.159 (± 0.002)
+0.870 (± 0.002)
+MZEN 3 20.19 (± 0.10)
+1 21.35 (± 0.10)
+0.216 (± 0.008)
+0.829 (± 0.008)
+2 19.11 (± 0.41)
+BARF Base
+LPIPS
+0.146 (± 0.001)
+Table 13 (continued)
+Config
+4×Zoomed-in
+PSNR
+SSIM
+NeRF– Base
+1 20.48 (± 0.08) 0.874 (± 0.001)
+0.543 (± 0.024)
+0.625 (± 0.005)
+0.810 (±0.022)
+0.654 (± 0.003)
+0.594 (± 0.007)
+0.667 (± 0.004)
+0.803 (±0.006)
+0.630 (± 0.003)
+0.572 (± 0.014)
+GSS
+0.640 (± 0.004)
+0.610 (± 0.043)
+0.668 (± 0.010)
+0.858 (±0.020)
+0.721 (± 0.002)
+0.678 (± 0.014)
+0.733 (± 0.001)
+0.850 (±0.006)
+0.678 (± 0.005)
+0.661 (± 0.019)
+LSS
+0.685 (± 0.005)
+All Zoom Levels
+PSNR
+SSIM
+22.36 (± 2.40) 0.897
+(±
+0.043)
+19.98 (± 1.72) 0.838
+(±
+0.058)
+22.07 (± 2.36) 0.893
+(±
+0.045)
+25.96 (±0.71) 0.947
+(±
+0.015)
+23.45 (± 2.53) 0.932
+(±
+0.029)
+19.93 (± 1.46) 0.835
+(±
+0.056)
+23.56 (± 2.85) 0.929
+(±
+0.033)
+26.10 (±0.88) 0.960
+(±
+0.008)
+21.93 (± 2.57) 0.896
+(±
+0.045)
+19.94 (± 1.93) 0.816
+(±
+0.064)
+LPIPS
+0.103
+(±
+0.045)
+0.175
+(±
+0.050)
+0.109
+(±
+0.048)
+0.051
+(±
+0.010)
+0.081
+(±
+0.041)
+0.181
+(±
+0.044)
+0.084
+(±
+0.047)
+0.044
+(±
+0.007)
+0.110
+(±
+0.049)
+0.178
+(±
+0.059)
+GSS
+0.739
+(±
+0.089)
+0.645
+(±
+0.079)
+0.728
+(±
+0.090)
+0.837
+(±
+0.027)
+0.771
+(±
+0.090)
+0.663
+(±
+0.069)
+0.770
+(±
+0.100)
+0.841
+(±
+0.028)
+0.728
+(±
+0.095)
+0.638
+(±
+0.089)
+LSS
+0.770
+(±
+0.082)
+0.706
+(±
+0.068)
+0.762
+(±
+0.082)
+0.866
+(±
+0.019)
+0.808
+(±
+0.072)
+0.720
+(±
+0.058)
+0.806
+(±
+0.080)
+0.871
+(±
+0.020)
+0.759
+(±
+0.089)
+0.691
+(±
+0.084)
+195 Page 66 of 94
+Machine Learning (2026) 115:195
+0.153 (± 0.003)
+0.061 (±0.005)
+0.874 (± 0.002)
+MZEN 3 20.27 (± 0.16)
+4 26.05 (±1.29) 0.946 (±0.008)
+0.197 (± 0.002)
+0.831 (± 0.005)
+2 19.31 (± 0.41)
+0.146 (± 0.003)
+0.063 (± 0.005)
+0.874 (± 0.002)
+0.952 (± 0.007)
+4 26.28 (± 1.17)
+0.157 (± 0.002)
+0.199 (± 0.004)
+1 20.18 (± 0.10)
+0.873 (± 0.001)
+MZEN 3 19.53 (± 0.02)
+Base
+0.840 (± 0.004)
+2 19.42 (± 0.24)
+0.156 (± 0.002)
+0.792 (±0.028)
+0.645 (± 0.006)
+0.559 (± 0.012)
+0.649 (± 0.002)
+0.797 (± 0.028)
+0.632 (± 0.002)
+0.574 (± 0.007)
+0.642 (± 0.005)
+0.800 (±0.010)
+GSS
+0.636 (± 0.003)
+MZEN (config 4) consistently achieves the highest scores. Best results are bolded
+CamP
+0.873 (± 0.001)
+1 20.02 (± 0.07)
+Base
+0.069 (±0.003)
+4 25.93 (±0.58) 0.945 (±0.003)
+MipNeRF
+LPIPS
+0.155 (± 0.001)
+Table 13 (continued)
+Config
+4×Zoomed-in
+PSNR
+SSIM
+MZEN 3 20.27 (± 0.06) 0.875 (± 0.001)
+0.836 (±0.030)
+0.690 (± 0.008)
+0.642 (± 0.022)
+0.694 (± 0.006)
+0.845 (± 0.025)
+0.667 (± 0.004)
+0.653 (± 0.014)
+0.686 (± 0.004)
+0.847 (±0.010)
+LSS
+0.677 (± 0.006)
+All Zoom Levels
+PSNR
+SSIM
+22.09 (± 2.32) 0.893
+(±
+0.044)
+25.56 (±1.00) 0.944
+(±
+0.018)
+22.01 (± 2.49) 0.895
+(±
+0.044)
+20.28 (± 1.64) 0.840
+(±
+0.058)
+21.63 (± 2.52) 0.894
+(±
+0.043)
+25.60 (± 1.06) 0.947
+(±
+0.016)
+22.07 (± 2.38) 0.894
+(±
+0.044)
+20.17 (± 1.66) 0.835
+(±
+0.058)
+21.85 (± 2.11) 0.890
+(±
+0.043)
+25.36 (±1.18) 0.941
+(±
+0.021)
+LPIPS
+0.109
+(±
+0.047)
+0.054
+(±
+0.014)
+0.107
+(±
+0.048)
+0.162
+(±
+0.044)
+0.110
+(±
+0.047)
+0.053
+(±
+0.011)
+0.102
+(±
+0.041)
+0.166
+(±
+0.040)
+0.110
+(±
+0.042)
+0.054
+(±
+0.010)
+GSS
+0.730
+(±
+0.087)
+0.830
+(±
+0.027)
+0.732
+(±
+0.087)
+0.645
+(±
+0.077)
+0.725
+(±
+0.088)
+0.828
+(±
+0.029)
+0.736
+(±
+0.083)
+0.636
+(±
+0.081)
+0.727
+(±
+0.078)
+0.823
+(±
+0.031)
+LSS
+0.762
+(±
+0.083)
+0.860
+(±
+0.023)
+0.763
+(±
+0.082)
+0.704
+(±
+0.070)
+0.754
+(±
+0.086)
+0.860
+(±
+0.023)
+0.767
+(±
+0.077)
+0.697
+(±
+0.073)
+0.759
+(±
+0.074)
+0.851
+(±
+0.029)
+Machine Learning (2026) 115:195
+Page 67 of 94 195
+13
+13
+NoPeNeRF
+0.859 (± 0.002)
+0.763 (± 0.001)
+1 25.13 (± 0.20)
+2 23.02 (± 0.07)
+0.246 (±0.001)
+4 26.78 (±0.02) 0.882 (±0.000)
+Base
+0.348 (± 0.002)
+0.826 (± 0.001)
+MZEN 3 23.74 (± 0.04)
+0.412 (± 0.001)
+0.274 (± 0.002)
+0.336 (± 0.001)
+0.809 (± 0.002)
+2 23.38 (± 0.04)
+0.339 (± 0.001)
+0.236 (±0.005)
+4 26.42 (±0.85) 0.876 (±0.006)
+0.810 (± 0.002)
+0.304 (± 0.003)
+0.842 (± 0.002)
+MZEN 3 24.55 (± 0.20)
+1 23.50 (± 0.07)
+0.350 (± 0.002)
+0.782 (± 0.001)
+2 22.74 (± 0.01)
+BARF Base
+LPIPS
+0.272 (± 0.001)
+Table 14 Evaluation on the Box SEM dataset
+Config
+1×Zoomed-in
+PSNR
+SSIM
+NeRF– Base
+1 25.27 (± 0.08) 0.859 (± 0.001)
+0.553 (± 0.005)
+0.690 (± 0.006)
+0.744 (±0.001)
+0.621 (± 0.002)
+0.613 (± 0.002)
+0.627 (± 0.003)
+0.737 (±0.016)
+0.674 (± 0.007)
+0.599 (± 0.004)
+GSS
+0.696 (± 0.002)
+0.463 (± 0.005)
+0.624 (± 0.007)
+0.688 (±0.001)
+0.539 (± 0.003)
+0.540 (± 0.003)
+0.527 (± 0.003)
+0.678 (±0.020)
+0.590 (± 0.008)
+0.500 (± 0.004)
+LSS
+0.628 (± 0.003)
+2×Zoomed-in
+PSNR
+SSIM
+23.08 (± 0.01) 0.786
+(±
+0.000)
+21.69 (± 0.09) 0.739
+(±
+0.003)
+23.38 (± 0.04) 0.778
+(±
+0.001)
+26.83 (±0.16) 0.870
+(±
+0.002)
+22.91 (± 0.04) 0.747
+(±
+0.000)
+21.59 (± 0.09) 0.746
+(±
+0.002)
+23.40 (± 0.01) 0.780
+(±
+0.000)
+27.22 (±0.19) 0.877
+(±
+0.002)
+22.88 (± 0.03) 0.782
+(±
+0.001)
+21.11 (± 0.04) 0.691
+(±
+0.001)
+LPIPS
+0.339
+(±
+0.001)
+0.424
+(±
+0.002)
+0.360
+(±
+0.000)
+0.178
+(±
+0.001)
+0.429
+(±
+0.000)
+0.366
+(±
+0.001)
+0.357
+(±
+0.001)
+0.161
+(±
+0.001)
+0.340
+(±
+0.002)
+0.533
+(±
+0.001)
+GSS
+0.557
+(±
+0.001)
+0.460
+(±
+0.003)
+0.558
+(±
+0.001)
+0.713
+(±
+0.005)
+0.522
+(±
+0.002)
+0.461
+(±
+0.003)
+0.550
+(±
+0.000)
+0.726
+(±
+0.005)
+0.569
+(±
+0.002)
+0.407
+(±
+0.002)
+LSS
+0.465
+(±
+0.002)
+0.384
+(±
+0.007)
+0.459
+(±
+0.002)
+0.666
+(±
+0.006)
+0.414
+(±
+0.002)
+0.398
+(±
+0.007)
+0.454
+(±
+0.001)
+0.683
+(±
+0.006)
+0.472
+(±
+0.003)
+0.344
+(±
+0.003)
+195 Page 68 of 94
+Machine Learning (2026) 115:195
+CamP
+MipNeRF
+Config
+0.216 (±0.000)
+4 27.95 (±0.04) 0.891 (±0.001)
+0.312 (± 0.002)
+0.231 (±0.003)
+0.834 (± 0.002)
+MZEN 3 24.38 (± 0.12)
+4 26.91 (±0.09) 0.878 (±0.001)
+0.379 (± 0.001)
+0.768 (± 0.002)
+2 22.35 (± 0.12)
+0.358 (± 0.015)
+0.797 (± 0.019)
+1 23.29 (± 0.67)
+Base
+0.317 (± 0.002)
+0.849 (± 0.001)
+MZEN 3 25.17 (± 0.19)
+0.363 (± 0.002)
+0.778 (± 0.000)
+2 22.68 (± 0.02)
+0.299 (± 0.001)
+0.853 (± 0.001)
+1 25.32 (± 0.08)
+0.224 (±0.001)
+4 28.03 (±0.19) 0.893 (±0.001)
+Base
+LPIPS
+0.320 (± 0.002)
+1×Zoomed-in
+PSNR
+SSIM
+MZEN 3 25.46 (± 0.26) 0.854 (± 0.003)
+Table 14 (continued)
+0.741 (±0.003)
+0.659 (± 0.004)
+0.572 (± 0.005)
+0.616 (± 0.024)
+0.766 (±0.001)
+0.675 (± 0.006)
+0.589 (± 0.002)
+0.693 (± 0.003)
+0.766 (±0.004)
+GSS
+0.665 (± 0.009)
+0.679 (±0.003)
+0.577 (± 0.005)
+0.487 (± 0.006)
+0.528 (± 0.019)
+0.718 (±0.000)
+0.604 (± 0.007)
+0.509 (± 0.002)
+0.624 (± 0.003)
+0.720 (±0.004)
+LSS
+0.603 (± 0.011)
+2×Zoomed-in
+PSNR
+SSIM
+23.80 (± 0.02) 0.795
+(±
+0.001)
+27.47 (±0.32) 0.881
+(±
+0.003)
+23.16 (± 0.02) 0.785
+(±
+0.000)
+21.21 (± 0.01) 0.729
+(±
+0.001)
+23.56 (± 0.05) 0.785
+(±
+0.001)
+27.59 (±0.11) 0.880
+(±
+0.001)
+22.11 (± 0.04) 0.752
+(±
+0.001)
+21.21 (± 0.09) 0.729
+(±
+0.003)
+22.95 (± 0.02) 0.764
+(±
+0.001)
+26.19 (±0.04) 0.858
+(±
+0.001)
+LPIPS
+0.354
+(±
+0.001)
+0.162
+(±
+0.002)
+0.347
+(±
+0.001)
+0.448
+(±
+0.001)
+0.358
+(±
+0.001)
+0.162
+(±
+0.001)
+0.386
+(±
+0.001)
+0.444
+(±
+0.001)
+0.377
+(±
+0.001)
+0.187
+(±
+0.000)
+GSS
+0.564
+(±
+0.002)
+0.734
+(±
+0.007)
+0.569
+(±
+0.001)
+0.437
+(±
+0.002)
+0.562
+(±
+0.002)
+0.735
+(±
+0.003)
+0.507
+(±
+0.002)
+0.440
+(±
+0.002)
+0.537
+(±
+0.000)
+0.691
+(±
+0.003)
+LSS
+0.470
+(±
+0.002)
+0.696
+(±
+0.010)
+0.472
+(±
+0.001)
+0.366
+(±
+0.002)
+0.462
+(±
+0.003)
+0.695
+(±
+0.003)
+0.409
+(±
+0.004)
+0.369
+(±
+0.004)
+0.443
+(±
+0.001)
+0.639
+(±
+0.003)
+Machine Learning (2026) 115:195
+Page 69 of 94 195
+13
+13
+NoPeNeRF
+0.764 (± 0.001)
+0.733 (± 0.001)
+1 22.97 (± 0.04)
+2 22.15 (± 0.04)
+0.247 (±0.001)
+4 27.89 (±0.12) 0.868 (±0.001)
+Base
+0.430 (± 0.001)
+0.761 (± 0.002)
+MZEN 3 23.43 (± 0.12)
+0.517 (± 0.001)
+0.427 (± 0.001)
+0.437 (± 0.001)
+0.754 (± 0.002)
+2 22.41 (± 0.08)
+0.491 (± 0.001)
+0.261 (±0.000)
+4 26.83 (±0.06) 0.843 (±0.001)
+0.729 (± 0.000)
+0.423 (± 0.001)
+0.758 (± 0.001)
+MZEN 3 22.79 (± 0.04)
+1 22.92 (± 0.02)
+0.484 (± 0.001)
+0.744 (± 0.001)
+2 22.52 (± 0.08)
+BARF Base
+LPIPS
+0.436 (± 0.001)
+Table 14 (continued)
+Config
+3×Zoomed-in
+PSNR
+SSIM
+NeRF– Base
+1 23.06 (± 0.03) 0.764 (± 0.001)
+0.338 (± 0.001)
+0.472 (± 0.001)
+0.663 (±0.003)
+0.460 (± 0.002)
+0.355 (± 0.001)
+0.446 (± 0.000)
+0.624 (±0.001)
+0.473 (± 0.001)
+0.365 (± 0.000)
+GSS
+0.450 (± 0.001)
+0.306 (± 0.001)
+0.371 (± 0.001)
+0.634 (±0.004)
+0.371 (± 0.002)
+0.329 (± 0.003)
+0.346 (± 0.000)
+0.580 (±0.002)
+0.376 (± 0.002)
+0.321 (± 0.002)
+LSS
+0.359 (± 0.001)
+All Zoom Levels
+PSNR
+SSIM
+23.80 (± 1.10) 0.803
+(±
+0.043)
+22.32 (± 0.48) 0.755
+(±
+0.021)
+23.58 (± 0.78) 0.793
+(±
+0.038)
+26.69 (±0.48) 0.863
+(±
+0.016)
+23.11 (± 0.29) 0.762
+(±
+0.037)
+22.46 (± 0.78) 0.769
+(±
+0.030)
+23.52 (± 0.18) 0.789
+(±
+0.029)
+27.30 (±0.50) 0.876
+(±
+0.006)
+23.66 (± 1.11) 0.802
+(±
+0.044)
+22.09 (± 0.83) 0.729
+(±
+0.031)
+LPIPS
+0.349
+(±
+0.072)
+0.419
+(±
+0.058)
+0.362
+(±
+0.052)
+0.225
+(±
+0.037)
+0.420
+(±
+0.066)
+0.380
+(±
+0.045)
+0.378
+(±
+0.039)
+0.218
+(±
+0.043)
+0.347
+(±
+0.067)
+0.487
+(±
+0.057)
+GSS
+0.568
+(±
+0.107)
+0.475
+(±
+0.102)
+0.568
+(±
+0.087)
+0.691
+(±
+0.052)
+0.532
+(±
+0.078)
+0.476
+(±
+0.113)
+0.544
+(±
+0.070)
+0.711
+(±
+0.037)
+0.577
+(±
+0.095)
+0.433
+(±
+0.095)
+LSS
+0.484
+(±
+0.117)
+0.402
+(±
+0.078)
+0.475
+(±
+0.094)
+0.641
+(±
+0.047)
+0.429
+(±
+0.079)
+0.422
+(±
+0.093)
+0.454
+(±
+0.073)
+0.668
+(±
+0.026)
+0.489
+(±
+0.111)
+0.371
+(±
+0.071)
+195 Page 70 of 94
+Machine Learning (2026) 115:195
+0.440 (± 0.001)
+0.276 (±0.000)
+0.753 (± 0.000)
+MZEN 3 22.45 (± 0.03)
+4 26.19 (±0.08) 0.832 (±0.001)
+0.484 (± 0.000)
+0.744 (± 0.001)
+2 22.45 (± 0.06)
+0.442 (± 0.000)
+0.756 (± 0.001)
+1 22.73 (± 0.04)
+Base
+0.244 (±0.001)
+4 28.37 (±0.18) 0.869 (±0.001)
+MZEN (config 4) attains the best score in every metric. Best results are bolded
+CamP
+0.423 (± 0.001)
+0.769 (± 0.001)
+MZEN 3 23.86 (± 0.03)
+0.496 (± 0.000)
+0.745 (± 0.000)
+2 22.35 (± 0.01)
+0.438 (± 0.001)
+0.769 (± 0.001)
+1 23.32 (± 0.03)
+Base
+0.236 (±0.001)
+4 28.44 (±0.17) 0.874 (±0.002)
+MipNeRF
+LPIPS
+0.417 (± 0.001)
+Table 14 (continued)
+Config
+3×Zoomed-in
+PSNR
+SSIM
+MZEN 3 23.98 (± 0.03) 0.777 (± 0.001)
+0.605 (±0.003)
+0.460 (± 0.001)
+0.358 (± 0.001)
+0.425 (± 0.001)
+0.676 (±0.006)
+0.496 (± 0.000)
+0.344 (± 0.000)
+0.463 (± 0.001)
+0.685 (±0.004)
+GSS
+0.480 (± 0.001)
+0.561 (±0.002)
+0.363 (± 0.001)
+0.321 (± 0.001)
+0.352 (± 0.002)
+0.645 (±0.006)
+0.393 (± 0.001)
+0.314 (± 0.001)
+0.372 (± 0.000)
+0.656 (±0.005)
+LSS
+0.382 (± 0.001)
+All Zoom Levels
+PSNR
+SSIM
+24.41 (± 0.80) 0.809
+(±
+0.035)
+27.98 (±0.47) 0.882
+(±
+0.009)
+23.93 (± 1.04) 0.802
+(±
+0.039)
+22.08 (± 0.67) 0.751
+(±
+0.022)
+24.20 (± 0.75) 0.801
+(±
+0.036)
+27.97 (±0.36) 0.880
+(±
+0.010)
+22.71 (± 0.61) 0.768
+(±
+0.024)
+22.00 (± 0.60) 0.747
+(±
+0.017)
+23.26 (± 0.87) 0.784
+(±
+0.038)
+26.43 (±0.36) 0.856
+(±
+0.020)
+LPIPS
+0.364
+(±
+0.043)
+0.207
+(±
+0.034)
+0.361
+(±
+0.061)
+0.436
+(±
+0.058)
+0.366
+(±
+0.046)
+0.207
+(±
+0.036)
+0.395
+(±
+0.038)
+0.436
+(±
+0.046)
+0.377
+(±
+0.055)
+0.231
+(±
+0.039)
+GSS
+0.570
+(±
+0.080)
+0.729
+(±
+0.036)
+0.575
+(±
+0.100)
+0.457
+(±
+0.107)
+0.577
+(±
+0.079)
+0.726
+(±
+0.040)
+0.516
+(±
+0.084)
+0.457
+(±
+0.094)
+0.552
+(±
+0.087)
+0.679
+(±
+0.060)
+LSS
+0.485
+(±
+0.097)
+0.691
+(±
+0.029)
+0.489
+(±
+0.110)
+0.396
+(±
+0.088)
+0.486
+(±
+0.093)
+0.686
+(±
+0.033)
+0.430
+(±
+0.078)
+0.393
+(±
+0.074)
+0.461
+(±
+0.093)
+0.626
+(±
+0.052)
+Machine Learning (2026) 115:195
+Page 71 of 94 195
+13
+13
+NoPeNeRF
+0.675 (± 0.008)
+0.732 (± 0.001)
+1 22.34 (± 0.15)
+2 23.57 (± 0.06)
+0.156 (±0.001)
+4 28.96 (±0.21) 0.898 (±0.001)
+Base
+0.234 (± 0.050)
+0.826 (± 0.076)
+MZEN 3 25.90 (± 2.63)
+0.357 (± 0.000)
+0.390 (± 0.010)
+0.305 (± 0.001)
+0.778 (± 0.001)
+2 24.25 (± 0.09)
+0.271 (± 0.052)
+0.167 (±0.001)
+4 28.62 (±0.69) 0.896 (±0.007)
+0.803 (± 0.080)
+0.187 (± 0.001)
+0.876 (± 0.001)
+MZEN 3 27.55 (± 0.17)
+1 24.95 (± 2.39)
+0.359 (± 0.001)
+0.716 (± 0.007)
+2 23.00 (± 0.28)
+BARF Base
+LPIPS
+0.243 (± 0.068)
+Table 15 Evaluation on the Beams SEM dataset
+Config
+1×Zoomed-in
+PSNR
+SSIM
+NeRF– Base
+1 25.90 (± 2.82) 0.816 (± 0.093)
+0.705 (± 0.002)
+0.635 (± 0.006)
+0.871 (±0.002)
+0.793 (± 0.095)
+0.750 (± 0.002)
+0.769 (± 0.090)
+0.869 (±0.009)
+0.855 (± 0.004)
+0.680 (± 0.008)
+GSS
+0.788 (± 0.112)
+0.654 (± 0.002)
+0.559 (± 0.009)
+0.848 (±0.002)
+0.757 (± 0.125)
+0.707 (± 0.003)
+0.721 (± 0.129)
+0.845 (±0.010)
+0.837 (± 0.004)
+0.621 (± 0.011)
+LSS
+0.751 (± 0.142)
+19.36 (± 0.05)
+21.89 (± 0.03)
+25.14 (±0.09)
+22.25 (± 0.04)
+19.80 (± 0.02)
+21.70 (± 0.03)
+26.53 (±0.15)
+22.61 (± 0.02)
+19.19 (± 0.05)
+2×Zoomed-in
+PSNR
+22.20 (± 0.07)
+SSIM
+0.707
+(±
+0.002)
+0.511
+(±
+0.004)
+0.723
+(±
+0.000)
+0.905
+(±
+0.002)
+0.682
+(±
+0.000)
+0.575
+(±
+0.002)
+0.709
+(±
+0.001)
+0.858
+(±
+0.002)
+0.686
+(±
+0.001)
+0.528
+(±
+0.002)
+LPIPS
+0.343
+(±
+0.001)
+0.467
+(±
+0.000)
+0.315
+(±
+0.001)
+0.051
+(±
+0.000)
+0.360
+(±
+0.000)
+0.447
+(±
+0.000)
+0.340
+(±
+0.001)
+0.113
+(±
+0.001)
+0.349
+(±
+0.000)
+0.468
+(±
+0.001)
+GSS
+0.736
+(±
+0.004)
+0.541
+(±
+0.002)
+0.761
+(±
+0.001)
+0.880
+(±
+0.002)
+0.698
+(±
+0.001)
+0.581
+(±
+0.001)
+0.732
+(±
+0.002)
+0.856
+(±
+0.002)
+0.712
+(±
+0.002)
+0.541
+(±
+0.002)
+LSS
+0.712
+(±
+0.004)
+0.462
+(±
+0.005)
+0.736
+(±
+0.001)
+0.866
+(±
+0.002)
+0.673
+(±
+0.002)
+0.521
+(±
+0.001)
+0.709
+(±
+0.002)
+0.836
+(±
+0.002)
+0.685
+(±
+0.002)
+0.464
+(±
+0.002)
+195 Page 72 of 94
+Machine Learning (2026) 115:195
+CamP
+MipNeRF
+Config
+0.131 (±0.000)
+4 28.87 (±0.17) 0.900 (±0.001)
+0.161 (± 0.001)
+0.125 (±0.001)
+0.883 (± 0.002)
+MZEN 3 28.01 (± 0.30)
+4 28.61 (±0.55) 0.900 (±0.005)
+0.360 (± 0.002)
+0.717 (± 0.003)
+2 23.14 (± 0.13)
+0.298 (± 0.012)
+0.727 (± 0.008)
+1 22.86 (± 0.12)
+Base
+0.161 (± 0.001)
+0.879 (± 0.002)
+MZEN 3 27.68 (± 0.22)
+0.361 (± 0.002)
+0.715 (± 0.002)
+2 23.11 (± 0.05)
+0.323 (± 0.043)
+0.686 (± 0.077)
+1 21.30 (± 2.78)
+0.135 (±0.000)
+4 28.98 (±0.25) 0.901 (±0.002)
+Base
+LPIPS
+0.163 (± 0.000)
+1×Zoomed-in
+PSNR
+SSIM
+MZEN 3 28.07 (± 0.15) 0.882 (± 0.001)
+Table 15 (continued)
+0.870 (±0.006)
+0.867 (± 0.006)
+0.686 (± 0.004)
+0.684 (± 0.010)
+0.872 (±0.002)
+0.861 (± 0.005)
+0.688 (± 0.001)
+0.634 (± 0.091)
+0.873 (±0.003)
+GSS
+0.867 (± 0.003)
+25.62 (±0.25)
+22.74 (± 0.03)
+0.848 (±0.007)
+0.845 (± 0.007)
+19.12 (± 0.03)
+22.56 (± 0.02)
+26.20 (±
+0.000)
+22.58 (± 0.03)
+19.18 (± 0.04)
+22.48 (± 0.06)
+26.31 (±0.13)
+2×Zoomed-in
+PSNR
+22.63 (± 0.04)
+0.631 (± 0.006)
+0.595 (± 0.008)
+0.847 (±0.002)
+0.840 (± 0.005)
+0.632 (± 0.002)
+0.526 (± 0.129)
+0.850 (±0.004)
+LSS
+0.848 (± 0.003)
+SSIM
+0.726
+(±
+0.001)
+0.897
+(±
+0.003)
+0.719
+(±
+0.001)
+0.518
+(±
+0.002)
+0.722
+(±
+0.001)
+0.894
+(±
+0.000)
+0.720
+(±
+0.000)
+0.516
+(±
+0.002)
+0.733
+(±
+0.001)
+0.894
+(±
+0.003)
+LPIPS
+0.318
+(±
+0.001)
+0.055
+(±
+0.001)
+0.330
+(±
+0.001)
+0.460
+(±
+0.000)
+0.316
+(±
+0.000)
+0.057
+(±
+0.000)
+0.328
+(±
+0.001)
+0.456
+(±
+0.001)
+0.302
+(±
+0.000)
+0.062
+(±
+0.001)
+GSS
+0.758
+(±
+0.001)
+0.875
+(±
+0.003)
+0.748
+(±
+0.002)
+0.540
+(±
+0.001)
+0.757
+(±
+0.002)
+0.871
+(±
+0.001)
+0.751
+(±
+0.000)
+0.538
+(±
+0.001)
+0.767
+(±
+0.001)
+0.864
+(±
+0.005)
+LSS
+0.737
+(±
+0.002)
+0.861
+(±
+0.003)
+0.725
+(±
+0.003)
+0.470
+(±
+0.002)
+0.732
+(±
+0.002)
+0.855
+(±
+0.001)
+0.730
+(±
+0.000)
+0.464
+(±
+0.001)
+0.743
+(±
+0.001)
+0.849
+(±
+0.005)
+Machine Learning (2026) 115:195
+Page 73 of 94 195
+13
+13
+NoPeNeRF
+0.398 (± 0.002)
+0.438 (± 0.003)
+1 17.24 (± 0.04)
+2 18.42 (± 0.03)
+0.096 (±0.001)
+4 24.23 (±0.19) 0.822 (±0.004)
+Base
+0.465 (± 0.029)
+0.428 (± 0.008)
+MZEN 3 17.35 (± 0.04)
+0.514 (± 0.001)
+0.506 (± 0.003)
+0.501 (± 0.001)
+0.467 (± 0.008)
+2 18.75 (± 0.12)
+0.496 (± 0.001)
+0.063 (±0.007)
+4 25.49 (±1.01) 0.867 (±0.016)
+0.396 (± 0.004)
+0.503 (± 0.001)
+0.431 (± 0.002)
+MZEN 3 17.54 (± 0.07)
+1 16.86 (± 0.09)
+0.499 (± 0.000)
+0.456 (± 0.003)
+2 18.52 (± 0.05)
+BARF Base
+LPIPS
+0.517 (± 0.021)
+Table 15 (continued)
+Config
+3×Zoomed-in
+PSNR
+SSIM
+NeRF– Base
+1 17.29 (± 0.02) 0.414 (± 0.001)
+0.420 (± 0.002)
+0.441 (± 0.001)
+0.827 (±0.004)
+0.466 (± 0.022)
+0.432 (± 0.003)
+0.429 (± 0.008)
+0.854 (±0.020)
+0.427 (± 0.007)
+0.454 (± 0.003)
+GSS
+0.449 (± 0.005)
+0.351 (± 0.003)
+0.378 (± 0.001)
+0.803 (±0.005)
+0.406 (± 0.024)
+0.375 (± 0.006)
+0.372 (± 0.008)
+0.838 (±0.024)
+0.390 (± 0.007)
+0.390 (± 0.005)
+LSS
+0.390 (± 0.002)
+All Zoom Levels
+PSNR
+SSIM
+21.80 (± 4.00) 0.646
+(±
+0.186)
+20.24 (± 2.10) 0.561
+(±
+0.119)
+22.57 (± 4.34) 0.677
+(±
+0.196)
+26.88 (±1.51) 0.889
+(±
+0.019)
+21.17 (± 3.72) 0.627
+(±
+0.185)
+20.93 (± 2.53) 0.607
+(±
+0.137)
+21.83 (± 3.94) 0.654
+(±
+0.181)
+26.11 (±2.18) 0.859
+(±
+0.033)
+20.49 (± 2.44) 0.586
+(±
+0.142)
+20.45 (± 2.37) 0.566
+(±
+0.131)
+LPIPS
+0.368
+(±
+0.125)
+0.442
+(±
+0.064)
+0.335
+(±
+0.137)
+0.094
+(±
+0.055)
+0.376
+(±
+0.101)
+0.418
+(±
+0.088)
+0.346
+(±
+0.104)
+0.121
+(±
+0.027)
+0.415
+(±
+0.070)
+0.447
+(±
+0.070)
+GSS
+0.657
+(±
+0.168)
+0.558
+(±
+0.099)
+0.681
+(±
+0.195)
+0.868
+(±
+0.016)
+0.632
+(±
+0.162)
+0.587
+(±
+0.137)
+0.664
+(±
+0.158)
+0.851
+(±
+0.020)
+0.596
+(±
+0.121)
+0.555
+(±
+0.124)
+LSS
+0.618
+(±
+0.185)
+0.491
+(±
+0.103)
+0.654
+(±
+0.203)
+0.850
+(±
+0.018)
+0.589
+(±
+0.176)
+0.534
+(±
+0.144)
+0.624
+(±
+0.177)
+0.829
+(±
+0.021)
+0.540
+(±
+0.134)
+0.490
+(±
+0.133)
+195 Page 74 of 94
+Machine Learning (2026) 115:195
+0.561 (± 0.005)
+0.072 (±0.000)
+0.427 (± 0.002)
+MZEN 3 17.65 (± 0.05)
+4 25.51 (±0.09) 0.867 (±0.002)
+0.499 (± 0.001)
+0.440 (± 0.003)
+2 18.20 (± 0.06)
+0.436 (± 0.000)
+0.443 (± 0.002)
+1 17.54 (± 0.03)
+Base
+0.059 (±0.002)
+4 25.97 (±0.57) 0.874 (±0.009)
+MZEN (config 4) attains the best score in every metric. Best results are bolded
+CamP
+0.454 (± 0.024)
+0.420 (± 0.013)
+MZEN 3 17.20 (± 0.21)
+0.507 (± 0.001)
+0.441 (± 0.004)
+2 18.31 (± 0.07)
+0.436 (± 0.001)
+0.432 (± 0.002)
+1 17.56 (± 0.01)
+Base
+0.060 (±0.001)
+4 25.79 (±0.18) 0.870 (±0.002)
+MipNeRF
+LPIPS
+0.448 (± 0.025)
+Table 15 (continued)
+Config
+3×Zoomed-in
+PSNR
+SSIM
+MZEN 3 17.27 (± 0.26) 0.426 (± 0.017)
+0.853 (±0.003)
+0.422 (± 0.007)
+0.431 (± 0.003)
+0.497 (± 0.004)
+0.860 (±0.012)
+0.468 (± 0.020)
+0.430 (± 0.004)
+0.488 (± 0.003)
+0.860 (±0.003)
+GSS
+0.481 (± 0.024)
+0.839 (±0.003)
+0.389 (± 0.004)
+0.365 (± 0.005)
+0.443 (± 0.004)
+0.845 (±0.014)
+0.409 (± 0.017)
+0.364 (± 0.007)
+0.428 (± 0.004)
+0.846 (±0.004)
+LSS
+0.423 (± 0.021)
+All Zoom Levels
+PSNR
+SSIM
+22.65 (± 4.68) 0.678
+(±
+0.201)
+27.03 (±1.49) 0.89
+(±
+0.015)
+20.45 (± 2.62) 0.612
+(±
+0.142)
+20.20 (± 2.22) 0.558
+(±
+0.123)
+22.49 (± 4.54) 0.674
+(±
+0.202)
+27.01 (±1.43) 0.889
+(±
+0.013)
+20.99 (± 2.59) 0.630
+(±
+0.140)
+20.15 (± 2.27) 0.558
+(±
+0.124)
+22.80 (± 4.49) 0.681
+(±
+0.201)
+26.58 (±1.56) 0.887
+(±
+0.016)
+LPIPS
+0.309
+(±
+0.124)
+0.083
+(±
+0.039)
+0.363
+(±
+0.059)
+0.443
+(±
+0.064)
+0.310
+(±
+0.127)
+0.082
+(±
+0.037)
+0.354
+(±
+0.063)
+0.438
+(±
+0.062)
+0.342
+(±
+0.176)
+0.087
+(±
+0.029)
+GSS
+0.702
+(±
+0.173)
+0.870
+(±
+0.008)
+0.624
+(±
+0.122)
+0.553
+(±
+0.112)
+0.696
+(±
+0.177)
+0.868
+(±
+0.008)
+0.644
+(±
+0.114)
+0.552
+(±
+0.111)
+0.686
+(±
+0.202)
+0.862
+(±
+0.008)
+LSS
+0.669
+(±
+0.191)
+0.852
+(±
+0.007)
+0.560
+(±
+0.146)
+0.488
+(±
+0.117)
+0.660
+(±
+0.195)
+0.849
+(±
+0.008)
+0.589
+(±
+0.124)
+0.487
+(±
+0.117)
+0.660
+(±
+0.208)
+0.844
+(±
+0.007)
+Machine Learning (2026) 115:195
+Page 75 of 94 195
+13
+Table 16 Additional ablation results on the same eight FF-MZN scenes. We compare full MZEN (Config 4) against two variants: Ablation 1skippingPhase B(no cross-zoom surrogate matching and no pose priming for zoomed-in views) and Ablation 2training only on the most zoomed-inimagesunder the same total training budget. Metrics are averaged
+over the three zoom levels for each scene. In LPIPS, lower values are better,whereas higher values are better for the other metrics. Best results are bolded
+Dataset
+PSNR
+SSIM
+LPIPS
+GSS
+LSS
+Abla- Abla- MZEN AblaAblaAblaAblaAblaMZEN
+MZEN AblaMZEN AblaMZEN Ablation 1 tion 2
+tion 1
+tion 2
+tion 1
+tion 2
+tion 1
+tion 2
+tion 1
+tion 2
+Round
+35.55
+0.953
+0.106
+0.774
+0.796
+27.75
+29.00
+0.857
+0.887
+0.396
+0.281
+0.537
+0.603
+0.631
+0.688
+Table
+(±2.94)
+(±0.03) (±1.44) (±0.026) (±0.001) (±0.016) (±0.066) (±0.002) (±0.051) (±0.074) (±0.001) (±0.043) (±0.065) (±0.001) (±0.017)
+29.34
+0.897
+0.133
+0.796
+0.788
+Root
+24.07
+24.57
+0.766
+0.802
+0.414
+0.255
+0.574
+0.682
+0.596
+0.683
+(±2.13)
+(±0.16) (±0.05) (±0.057) (±0.002) (±0.006) (±0.081) (±0.000) (±0.011) (±0.064) (±0.001) (±0.015) (±0.058) (±0.001) (±0.002)
+26.32
+0.933
+0.081
+0.752
+0.805
+FinFET
+24.35
+24.89
+0.897
+0.898
+0.159
+0.124
+0.646
+0.685
+0.751
+0.759
+(±2.62)
+(±0.06) (±0.1) (±0.032) (±0.001) (±0.002) (±0.034) (±0.001) (±0.004) (±0.118) (±0.002) (±0.005) (±0.093) (±0.001) (±0.004)
+30.56
+0.957
+0.085
+0.848
+0.876
+Sensor
+25.26
+27.99
+0.859
+0.902
+0.282
+0.161
+0.690
+0.771
+0.767
+0.812
+(±3.37)
+(±0.10) (±0.15) (±0.023) (±0.001) (±0.002) (±0.056) (±0.002) (±0.001) (±0.062) (±0.002) (±0.005) (±0.057) (±0.003) (±0.007)
+27.49
+0.969
+0.045
+0.842
+0.875
+Tower
+20.60
+25.24
+0.873
+0.948
+0.179
+0.084
+0.646
+0.777
+0.734
+0.819
+(±2.02)
+(±0.13) (±0.14) (±0.014) (±0.000) (±0.001) (±0.030) (±0.003) (±0.001) (±0.057) (±0.003) (±0.001) (±0.049) (±0.003) (±0.004)
+26.10
+0.960
+0.044
+0.841
+0.871
+Pillars
+19.99
+23.56
+0.827
+0.929
+0.182
+0.084
+0.657
+0.770
+0.706
+0.806
+(±0.88)
+(±0.40) (±0.05) (±0.008) (±0.007) (±0.000) (±0.007) (±0.005) (±0.002) (±0.028) (±0.012) (±0.003) (±0.020) (±0.023) (±0.002)
+27.30
+0.876
+0.218
+0.711
+0.668
+Box
+20.74
+23.52
+0.699
+0.789
+0.530
+0.378
+0.383
+0.544
+0.339
+0.454
+(±0.50)
+(±0.01) (±0.12) (±0.006) (±0.000) (±0.002) (±0.043) (±0.000) (±0.001) (±0.037) (±0.000) (±0.002) (±0.026) (±0.000) (±0.002)
+26.11
+0.859
+0.121
+0.851
+0.829
+Beams
+20.32
+21.83
+0.565
+0.654
+0.429
+0.346
+0.566
+0.664
+0.498
+0.624
+(±2.18)
+(±0.23) (±0.04) (±0.033) (±0.017) (±0.008) (±0.027) (±0.002) (±0.029) (±0.020) (±0.008) (±0.022) (±0.021) (±0.018) (±0.024)
+195 Page 76 of 94
+13
+Machine Learning (2026) 115:195
+Page 77 of 94 195
+Machine Learning (2026) 115:195
+of 2.2–31.3%, and an LPIPS reduction of 53.1–186.0%. The structure/edge metrics also
+improve, with GSS increasing by 8.4–30.7% and LSS increasing by 6.1–47.1%.
+These results indicate that high-magnification views alone do not provide sufficient
+global constraints to recover stable geometry and consistent appearance under unknown
+poses. Although zoomed-in views contain fine details, they have a narrow FOV and reduced
+inter-view overlap, which weakens the multi-view constraints needed for robust pose estimation and global reconstruction. In particular, limited overlap reduces the strength of photometric multi-view constraints, making relative pose estimation ill-conditioned and more
+sensitive to initialization; moreover, zoomed-in views emphasize local textures but provide
+insufficient global context to anchor coarse geometry, often leading to inconsistent scene
+structure across views. Overall, the consistent gaps across all eight datasets support the core
+MZEN design: wide-field (zoomed-out) views provide a stable scaffold for global pose and
+coarse geometry, while zoomed-in views refine fine details once poses are properly initialized and registered. The ablations show that removing Phase B or removing wide-field
+supervision significantly harms reconstruction quality.
+E Theoretical Analysis of Pose Priming
+In Phase B of MZEN, we aim to determine the camera pose of each zoomed-in image,
+maintaining the NeRF weights constant. Our claim is that pose priming—starting each
+zoomed-in view from the pose of its nearest wide-field (zoomed-out) view—converges
+faster than starting from a random pose.
+Let
+L(Θ, Π) =
+N
+FΘ (Θ, Πk ) − Ik
+2 ,
+2
+k=1
+be the standard NeRF photometric loss (Bian et al., 2023; Wang et al., 2021). Here, Θ
+denotes the NeRF network parameters (MLP weights of the radiance field); Π = {Πj }N
+k=1
+is the set of camera parameters for all N images. FΘ (Θ, Πj ) = Îj ∈ RH×W ×3 is the differentiable volume renderer that synthesizes the RGB image for camera k, and Ij is the
+corresponding ground-truth image. The squared ℓ2 norm is taken over all pixels and color
+channels.
+During Phase B, we freeze the NeRF parameters at Θ = Θ⋆ (learned in Phase A) and,
+for each zoomed-in view j, solve the pose-only problem
+2
+arg min Lj (Πj ) = arg min FΘ⋆ (Θ⋆ , Πj ) − Ij 2 .
+Πj
+Πj
+E.1 Local PL Assumption
+In the full parameter space L is non-convex, but when the NeRF parameters Θ are kept
+fixed in Phase B, and we restrict attention to a small neighborhood of the optimum, it is
+standard to assume L is locally strongly convex in each camera pose Πj . Since Lj is locally
+13
+195 Page 78 of 94
+Machine Learning (2026) 115:195
+strongly convex around its optimum Π⋆j : there exist µ > 0 and L > 0 such that in a neighborhood B(r⋆ ) where
+B(r⋆ ) = Π :
+Π − Π⋆j
+2 < r⋆ .
+We have
+(
+)
+● Polyak-Łojasiewicz (PL) condition: ∥∇Lj (Π)∥22 ≥ 2µ Lj (Π) − L⋆j
+for all
+Π ∈ B(r⋆ );
+● L-Lipschitz gradients: ∥∇Lj (a) − ∇Lj (b)∥2 ≤ L∥a − b∥2 for all a, b ∈ B(r⋆ ).In
+addition, we assume the initialization used to start Phase B lies within B(r⋆ ). This is
+precisely what pose priming is designed to ensure: by copying (R, t) from the nearest
+wide-field view, the initial pose is a small crop-induced perturbation of Π⋆j , making it
+(0)
+plausible that Πj
+∈ B(r⋆ ).
+E.2 Gradient-Descent Rate
+For any stepsize η ∈ (0, 1/L], full-batch gradient descent on the pose variables
+(t+1)
+Πj
+(
+(t)
+(t) )
+= Πj − η ∇Lj Πj
+produces the iterate sequence indexed by the iteration counter t ∈ {0, 1, 2, . . . }.
+Define the excess loss
+(t)
+(t)
+e(t) = Lj − L⋆j ,
+(
+(t) )
+where Lj = Lj Πj
+E.2.1 From Smoothness + PL to Linear Contraction
+L-smoothness of Lj yields the descent lemma (Karimi et al., 2016)
+(t+1)
+Lj
+(t)
+∇L(t)
+2 .
+≤ Lj − η 1 − ηL
+j
+2
+2
+Subtracting L⋆j from both sides gives
+∇L(t)
+2 .
+e(t+1) ≤ e(t) − η 1 − ηL
+j
+2
+2
+(t)
+By the PL inequality, ∥∇Lj ∥22 ≥ 2µ e(t) , hence
+[
+(
+e(t+1) ≤ 1 − 2ηµ 1 − ηL
+2
+1
+Choosing η ≤ 1/L implies 1 − ηL
+2 ≥ 2 , so
+13
+)]
+e(t) .
+.
+Page 79 of 94 195
+Machine Learning (2026) 115:195
+e(t+1) ≤ (1 − ηµ) e(t) .
+Iterating the contraction gives
+( (0)
+(t)
+)
+Lj − L⋆j = e(t) ≤ (1 − ηµ) t e(0) = (1 − ηµ) t Lj − L⋆j ,
+which is the claimed linear (geometric) rate.
+(6)
+E.2.2 Iteration Bound to Reach a Target Accuracy
+We wish to find the smallest T such that e(T ) ≤ ε. Using (6):
+(1 − ηµ)T e(0) ≤ ε
+ε
+T log(1 − ηµ) ≤ log (0) .
+e
+=⇒
+Because log(1 − ηµ) ≈ −ηµ for ηµ ≪ 1 and is always negative, dividing both sides gives
+T ≥
+[ (0) ]
+1
+log e ε .
+ηµ
+(0)
+Taking the ceiling and replacing e(0) by Lj − L⋆j yields the iteration bound
+T =
+⌈
+⌉
+[(
+)/ ]
+1
+(0)
+log Lj − L⋆j ε ,(7)
+ηµ
+E.3 Initial-Error Comparison
+If the pose is drawn with zero-mean noise of variance
+2
+σrand
+,
+then
+(0)
+2
+Lj − L⋆j = O(σrand
+).
+We copy (R, t, f ) from the best wide-field counterpart and incur only crop-misregistration
+error
+δ ≪ σrand ,
+giving
+(0)
+Lj − L⋆j = O(δ 2 ).
+Intuitively, a zoomed-in view is not an arbitrary pose: it is acquired by zooming the same
+physical camera while keeping the optical center almost fixed. This means that its true rota-
+13
+195 Page 80 of 94
+Machine Learning (2026) 115:195
+tion Rj⋆ and translation t⋆j differ from those of its wide-field counterpart by only the tiny
+reframing required to center the crop—a deviation on the order of a few pixels in the image
+plane. Denote this mis-registration by δ . If we naïvely sample a random initial pose, the
+expected Euclidean error in camera space is proportional to the standard deviation σrand
+of the pose prior. By contrast, pose priming copies (Rj , tj , fj ) from the nearest wide-field
+counterpart and therefore starts at a distance O(δ) from the optimum.
+Because the NeRF rendering function is first-order smooth in camera parameters (Zhang
+et al., 2020), the Taylor expansion of the loss around Π⋆j gives
+Lj (Πj ) − L⋆j = 12 (Πj − Π⋆j )⊤ Hj (Πj − Π⋆j ) + O(∥Πj − Π⋆j ∥3 ),
+where Hj ≻ 0 is the local Hessian. Hence, the excess loss scales quadratically with the pose
+2
+) for random initialization but only O(δ 2 ) for pose priming, with δ ≪ σrand
+error: O(σrand
+. Substituting into (7),
+Tseed
+log(δ 2 /ε)
+≪ 1.
+=
+2
+Trand
+log(σrand
+/ε)
+Therefore, pose priming reaches the same loss in far fewer iterations.
+F Forward-Facing Multi-zoom NeRF (FF-MZN) Dataset
+We introduce the Forward-Facing Multi-Zoom NeRF Dataset (FF-MZN), designed for
+evaluating multi-zoom NeRF reconstructions. The dataset consists of eight distinct scene
+categories, covering both real-world objects and Scanning Electron Microscope (SEM)
+imaging:
+● SEM-MEMS (real): two micro-electromechanical-system (MEMS) devices imaged
+with a scanning-electron microscope;
+● TCAD-SIM (synthetic): four semiconductor test structures rendered from Synopsys
+Sentaurus TCAD; and
+● BLEFF (synthetic): two objects from the Blender Forward-Facing (BLEFF) dataset
+(Wang et al., 2021).Every scene is provided at three optical magnifications, where
+1× (survey), 2×, and 4× for TCAD/BLEFF (1×, 2×, and 3× for SEM). All frames
+are RGB and forward-facing; TCAD and SEM images are 400×400 pixels and BLEFF
+images are 390×260 pixels. For every scene, we sample camera extrinsics that remain
+identical across zoom levels to isolate the effect of magnification.
+F.1 SEM Data Acquisition
+SEM images are captured on a FEI Quanta 600 FEG microscope. For two MEMS devices,
+we record the triplet of each view. The zoom dial yields an approximate magnification that
+serves as the initial zoom scalar for Phase A. Mechanical drift measured during the scan
+remains within 1.2-degree rotation and 2.5 µm translation at 1×, providing a realistic poseerror budget.
+13
+Page 81 of 94 195
+Machine Learning (2026) 115:195
+F.2 TCAD Data Acquisition
+The four TCAD scenes comprise the Sentaurus tutorial designs Special Focus: Trench Etching and Special Focus: Lattice Kinetic Monte Carlo, plus two additional structures authored
+for this work. For each scene, the image triplet is rendered with identical extrinsics. All
+images are saved as 8-bit sRGB.
+F.3 BLEFF Data Acquisition
+We select the BLEFF Root and Round Table scenes because their finest structures emerge
+only at high zoom after the process below.
+Let I HR ∈ R1440×1040×3 be the 4× master render. The three zoom levels are derived in
+image space while keeping a single extrinsic Π:
+(
+)
+I (1×) = Resize I HR , 390×260 ,
+(
+)
+I (2×) = Resize Cropc, 720×520 (I HR ), 390×260 ,
+I (4×) = Cropc, 360×260 (I HR ).
+● Cropc,h×w (·) extracts a centred h×w window.
+● Resize(·) rescales the crop back to the native 390×260 resolution using bicubic
+interpolation.Thus, only the 1× view is obtained by a direct down-scale; both zoomedin views (2× and 4×) are generated by cropping and resizing, ensuring realistic magnification while preserving the same camera pose across all three levels.
+Fig. 7 Multi-resolution pyramid. Four versions of the same view are stored at 11 , 12 , 14 , and 18 of the full
+pixel count to combat aliasing
+Figures 7, 8, 9, 10, 11, 12, 13, 14 show triplets from each of the eight scenes contained
+in FF-MZN. For comparison, Fig. 15 visualizes the multi-resolution input pyramid typically
+employed by anti-aliasing NeRF variants such as Mip-NeRF, Zip-NeRF, and CamP (Barron
+et al., 2021, 2023; Park et al., 2023). Unlike FF-MZN (which keeps the FoV constant and
+13
+195 Page 82 of 94
+Machine Learning (2026) 115:195
+Fig. 8 BLEFF Round Table. The first BLEFF scene at three magnifications
+varies optical magnification), these methods down-sample a single full-FoV image to multiple pixel resolutions, so all levels share identical content and camera poses.
+G 360° NeRF-Synthetic Dataset Experiments
+To verify MZEN’s generalization beyond forward-facing configurations, we further evaluate it on two 360° scenes, Lego and Hotdog, from the NeRF-Synthetic dataset (Mildenhall et
+al., 2021). These experiments test whether MZEN remains stable when camera trajectories
+fully encircle the object and viewpoint overlap is uniformly distributed across all azimuths.
+13
+Machine Learning (2026) 115:195
+Page 83 of 94 195
+Fig. 9 BLEFF Root. The second BLEFF scene at three magnifications
+G.1 Pose Estimation Challenges for Full Surrounding Views
+Under 360° trajectories, conventional pose-free NeRF methods suffer from drift and pose
+collapse due to rotational ambiguity and the absence of a fixed reference direction (Cheng et
+al., 2023; Wang et al., 2021). In such cases, translation and focal length parameters can easily
+compensate for one another, leading to unstable optimization and degraded reconstructions.
+Before recent advances, most NeRF frameworks relied on roughly known or pre-initialized camera poses, typically obtained through Structure-from-Motion (SfM) or similar
+geometric preprocessing, to provide a stable starting point for optimization (Barron et al.,
+2022; Lin et al., 2021; Wang et al., 2021). LU-NeRF (Cheng et al., 2023) builds upon this
+13
+195 Page 84 of 94
+Machine Learning (2026) 115:195
+Fig. 10 TCAD FinFET. Synthetic FinFET structure at three magnifications
+paradigm by jointly estimating scene geometry and camera poses directly from unposed
+image collections. It adopts a local-to-global strategy: first training NeRFs on small “miniscenes” to recover local pose and geometry estimates, then synchronizing these into a consistent global coordinate frame before performing joint refinement.
+To address the arbitrary-pose estimation problem, MZEN can be combined with existing pose-initialization frameworks to achieve stable, zoom-consistent reconstruction across
+multiple magnifications. In our 360° experiments, we use the provided camera poses from
+the NeRF-Synthetic dataset as initial estimates and refine them using a delta-pose optimiza-
+13
+Page 85 of 94 195
+Machine Learning (2026) 115:195
+Fig. 11 TCAD Sensor. Synthetic sensor structure at three magnifications
+tion approach (Jeong et al., 2021; Wang et al., 2021). Rather than re-estimating absolute
+poses, we learn incremental updates:
+(
+)
+(0)
+Ri ← exp [∆ri ]× Ri ,
+(0)
+(0)
+(0)
+ti ← ti
++ ∆ti ,
+(8)
+where (Ri , ti ) denote the initial extrinsics, and (∆ri , ∆ti ) are the learnable rotation
+and translation corrections. The operator exp(·) maps a 3-vector to a valid rotation matrix
+in SO(3) via Rodrigues’ formula.
+For intrinsic refinement, we also apply small additive updates to the base focal length:
+13
+195 Page 86 of 94
+Machine Learning (2026) 115:195
+Fig. 12 TCAD Tower. Synthetic test structure at three magnifications
+fx ← fx(0) + ∆fx ,
+fy ← fy(0) + ∆fy .
+(9)
+G.2 Experimental Setup
+Each 360° scene is rendered at three zoom levels (1×, 1.5×, and 2×) following the same
+procedure used for the BLEFF dataset in Appendix F.3. All images have 400 × 400 pixel
+resolutions. We use the same learning rates and hyperparameter configurations as the BLEFF
+“Root” data, summarized in Table 4, but we use different NeRF backbone architectures in
+Table 18. For this dataset, we set fx and fy to share the same focal length, consistent with
+13
+Machine Learning (2026) 115:195
+Page 87 of 94 195
+Fig. 13 TCAD Pillars. Another test structure at three magnifications
+the original data provider (Mildenhall et al., 2021), and fix the near and far ray bounds to 2
+and 6, respectively.
+We evaluate all four configurations (Configs 1—4) defined in Sect. 4.3, maintaining
+identical training schedules and optimization budgets. To construct the training and testing
+sets, we generate 100 training views per zoom level (a total of 300 images) and randomly
+select 80% of the images at each zoom level for training, with the remaining 20% used for
+testing. This setup means that some zoomed-in views do not have corresponding zoomedout counterparts.
+13
+195 Page 88 of 94
+Machine Learning (2026) 115:195
+Fig. 14 SEM Box. Real MEMS sample at three magnifications
+During pose priming, since we initialize camera poses and refine them using the deltapose formulation in Eq. (8), the corresponding delta updates with the initial camera poses
+are transferred together to the matched zoomed-in views after identifying their best-aligned
+zoomed-out counterparts.
+13
+Machine Learning (2026) 115:195
+Page 89 of 94 195
+Fig. 15 SEM Beams. Second real MEMS at three magnifications
+G.3 Experimental Results
+Quantitative results are shown in Table 17, and qualitative results are presented in Fig. 16.
+The quantitative metrics confirm that MZEN consistently achieves higher PSNR, SSIM,
+GSS, and LSS values while reducing LPIPS compared to baseline NeRF variants. The
+qualitative comparisons further show that MZEN, when trained jointly with zoomed-in and
+zoomed-out images, outperforms all other methods by recovering fine textures and maintaining structural accuracy across the entire viewing sphere (see Table 18).
+13
+Table 17 Quantitative evaluation on the 360° NeRF-Synthetic scenes
+Config
+PSNR
+SSIM
+LPIPS
+GSS
+LSS
+Config
+PSNR
+SSIM
+LPIPS
+GSS
+Lego
+Base
+1
+18.29
+0.511
+0.485
+0.375
+0.264
+Hotdog
+Base
+1
+24.11
+0.797
+0.331
+0.588
+2
+17.39
+0.448
+0.525
+0.429
+0.254
+2
+22.06
+0.717
+0.410
+0.568
+MZEN
+3
+18.57
+0.523
+0.482
+0.368
+0.260
+MZEN
+3
+24.23
+0.800
+0.326
+0.603
+4
+18.99
+0.536
+0.445
+0.443
+0.322
+4
+25.41
+0.839
+0.275
+0.673
+MZEN achieves consistently higher PSNR, SSIM, GSS, and LSS scores while reducing LPIPS compared to baseline NeRF variants. Best results are bolded
+LSS
+0.492
+0.421
+0.507
+0.582
+195 Page 90 of 94
+13
+Machine Learning (2026) 115:195
+Page 91 of 94 195
+Machine Learning (2026) 115:195
+Fig. 16 Qualitative comparison on the 360° NeRF-Synthetic scenes (Lego and Hotdog). MZEN produces
+sharper textures and more accurate geometry than pose-free NeRF baselines, even when trained jointly
+on zoomed-in and zoomed-out views
+Table 18 NeRF network
+architecture used for the NeRFSynthetic dataset
+Layer
+Input
+Output
+Position encoding and feature extraction
+Input Position
+x = (x, y,63
+z)
+Fully Connected
+(FC) + ReLU
+All other settings are identical
+to the NeRF network in Table 3,
+except that the input position
+is residually added at the 4th
+layer (Mildenhall et al., 2021).
+The network takes camera poses
+Π = (R, t, f , c), processes
+them through separate branches,
+and predicts RGB color and
+density. The position-encoding
+branch extracts spatial features,
+while the view-dependent
+branch refines color predictions
+63
+192
+Description
+3D position encoded using positional
+encoding
+Extracts spatial features from position
+encoding
+Fully Connected 192
+192
+(FC) + ReLU
+Fully Connected 192 + 3 192
+Residually adds the
+(FC) + ReLU
+input positionx
+Fully Connected 192
+192
+(FC) + ReLU
+Branch 1: density estimation
+Fully Connected 192
+Predicts opacity for
+1(Densityσ )
+(FC)
+volume rendering
+Branch 2: view-dependent feature processing
+Fully Connected 192
+Intermediate fea128
+(FC)
+ture extraction from
+positional encoding
+Branch 3: view-dependent color prediction
+Input Direction
+3D viewing direcd = (dx, 27
+tion encoded using
+dy, dz)
+positional encoding
+Concatenation
+128 + 27 155
+Merges spatial and
+directional features
+Fully Connected 155
+Extracts combined
+64
+(FC) + ReLU
+spatial and directional features
+Fully Connected 64
+Predicts color
+3(RGB)
+(FC)
+values
+Final output
+Concatenation
+Final output for
+RGB+σ 4
+volume rendering
+13
+195 Page 92 of 94
+Machine Learning (2026) 115:195
+Supplementary Information The online version contains supplementary material available at ​h​t​t​p​s​:​/​/​d​o​i​.​o​r​g​
+/​1​0​.​1​0​0​7​/​s​1​0​9​9​4​-​0​2​6​-​0​7​1​1​4​-​x​​​.​​​
+Acknowledgements This work was partially supported by the Carnegie Mellon University Department of
+Electrical and Computer Engineering through the Carnegie Mellon Dean’s Fellowship.
+Author Contributions Jong-Ik Park conducted the literature review, designed and implemented the algorithm, performed the experiments, and wrote the manuscript. Gary K. Fedder defined the research problem
+and contributed to the algorithm design, interpretation of experimental results, and writing of the manuscript.
+Carlee Joe-Wong contributed to the algorithm design, interpretation of experimental results, and writing of
+the manuscript.
+Funding Open Access funding provided by Carnegie Mellon University. This research received no specific
+grant from any funding agency in the public, commercial, or not-for-profit sectors.
+Data Availability No datasets were generated or analysed during the current study.
+Code Availability All code used in this study will be released publicly upon publication to ensure full
+reproducibility.
+Declarations
+Conflict of interest The authors declare no competing interests.
+Open Access This article is licensed under a Creative Commons Attribution 4.0 International License,
+which permits use, sharing, adaptation, distribution and reproduction in any medium or format, as long as
+you give appropriate credit to the original author(s) and the source, provide a link to the Creative Commons
+licence, and indicate if changes were made. The images or other third party material in this article are
+included in the article’s Creative Commons licence, unless indicated otherwise in a credit line to the material.
+If material is not included in the article’s Creative Commons licence and your intended use is not permitted
+by statutory regulation or exceeds the permitted use, you will need to obtain permission directly from the
+copyright holder. To view a copy of this licence, visit http://creativecommons.org/licenses/by/4.0/.
+References
+Abd Al Rahman, M., & Mousavi, A. (2020). A review and analysis of automatic optical inspection and quality monitoring methods in electronics industry. IEEE Access, 8, 183192–183271. ​h​t​t​p​s​:​/​/​d​o​i​.​o​r​g​/​1​0​.​1​1​
+0​9​/​A​C​C​E​S​S​.​2​0​2​0​.​3​0​2​9​1​2​7​​​
+Albanese, A., Nardello, M., Fiacco, G., & Brunelli, D. (2022). Tiny machine learning for high accuracy
+product quality inspection. IEEE Sensors Journal, 23(2), 1575–1583. ​h​t​t​p​s​:​/​/​d​o​i​.​o​r​g​/​1​0​.​1​1​0​9​/​J​S​E​N​.​2​
+0​2​2​.​3​2​2​5​2​2​7​​​
+Barron, J. T., Mildenhall, B., Tancik, M., Hedman, P., Martin-Brualla, R., & Srinivasan, P. P. (2021). MipNeRF: A multiscale representation for anti-aliasing neural radiance fields. In Proceedings of the IEEE/
+CVF International Conference on Computer Vision (pp. 5855–5864). ​h​t​t​p​s​:​/​/​d​o​i​.​o​r​g​/​1​0​.​1​1​0​9​/​I​C​C​V​4​8​
+9​2​2​.​2​0​2​1​.​0​0​5​8​0​​​
+Barron, J. T., Mildenhall, B., Verbin, D., Srinivasan, P. P., & Hedman, P. (2022). Mip-NeRF 360: Unbounded
+anti-aliased neural radiance fields. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (pp. 5470–5479). https://doi.org/10.1109/CVPR52688.2022.00539
+Barron, J. T., Mildenhall, B., Verbin, D., Srinivasan, P. P., & Hedman, P. (2023). Zip-NeRF: Anti-aliased gridbased neural radiance fields. In Proceedings of the IEEE/CVF International Conference on Computer
+Vision (pp. 19697–19705). https://doi.org/10.1109/ICCV51070.2023.01804
+Bian, W., Wang, Z., Li, K., Bian, J.-W., & Prisacariu, V. A. (2023). NoPe-NeRF: Optimising neural radiance
+field with no pose prior. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (pp. 4160–4169). https://doi.org/10.1109/CVPR52729.2023.00405
+13
+Machine Learning (2026) 115:195
+Page 93 of 94 195
+Bouchard, M. B., Voleti, V., Mendes, C. S., Lacefield, C., Grueber, W. B., Mann, R. S., Bruno, R. M., & Hillman, E. M. (2015). Swept confocally-aligned planar excitation (SCAPE) microscopy for high-speed
+volumetric imaging of behaving organisms. Nature Photonics, 9(2), 113–119. ​h​t​t​p​s​:​/​/​d​o​i​.​o​r​g​/​1​0​.​1​0​3​8​/​
+n​p​h​o​t​o​n​.​2​0​1​4​.​3​2​3​​​​
+Cheng, Z., Esteves, C., Jampani, V., Kar, A., Maji, S., & Makadia, A. (2023). LU-NeRF: Scene and pose
+estimation by synchronizing local unposed NeRFs. In Proceedings of the IEEE/CVF International Conference on Computer Vision (pp. 18312–18321). https://doi.org/10.1109/ICCV51070.2023.01679
+Chng, S.-F., Garg, R., Saratchandran, H., & Lucey, S. (2024). Invertible neural warp for NeRF. European
+Conerence on Computer Vision (pp. 405–421). Springer. https://doi.org/10.1007/978-3-031-72643-9_24
+Fei, B., Xu, J., Zhang, R., Zhou, Q., Yang, W., & He, Y. (2025). 3D gaussian splatting as new era: A survey.
+IEEE Transactions on Visualization and Computer Graphics, 31(8), 4429–4449. ​h​t​t​p​s​:​/​/​d​o​i​.​o​r​g​/​1​0​.​1​1​0​
+9​/​T​V​C​G​.​2​0​2​4​.​3​3​9​7​8​2​8​​​​
+Fu, X., Xu, Y., Wang, S., Lu, H., Li, J., Li, Y., Su, H., & Liu, S. (2024). NanoNeRF: Robot-assisted nanoscale
+360° reconstruction with neural radiance field under scanning electron microscope. In IEEE/RSJ International Conference on Intelligent Robots and Systems (pp. 1343–1348). IEEE. ​h​t​t​p​s​​:​/​/​d​o​i​​.​o​r​g​/​​1​0​.​1​​1​0​
+9​/​I​R​O​S​5​8​5​9​2​.​2​0​2​4​.​1​0​8​0​2​5​9​8​​​.​​​
+Gray, P. C., Ridge, J. T., Poulin, S. K., Seymour, A. C., Schwantes, A. M., Swenson, J. J., & Johnston, D. W.
+(2018). Integrating drone imagery into high resolution satellite remote sensing assessments of estuarine
+environments. Remote Sensing, 10(8), 1257. https://doi.org/10.3390/rs10081257
+Han, Y., Yu, T., Yu, X., Xu, D., Zheng, B., Dai, Z., Yang, C., Wang, Y., & Dai, Q. (2025). Super-NeRF:
+View-consistent detail generation for NeRF super-resolution. IEEE Transactions on Visualization and
+Computer Graphics, 31(9), 6053–6066. https://doi.org/10.1109/TVCG.2024.3490840
+He, K., Sun, J., & Tang, X. (2012). Guided image filtering. IEEE Transactions on Pattern Analysis and
+Machine Intelligence, 35(6), 1397–1409. https://doi.org/10.1109/TPAMI.2012.213
+Jeong, Y., Ahn, S., Choy, C., Anandkumar, A., Cho, M., & Park, J. (2021). Self-calibrating neural radiance
+fields. In Proceedings of the IEEE/CVF International Conference on Computer Vision (pp. 5846–5854).
+https://doi.org/10.1109/ICCV48922.2021.00579
+Jin, P., & Li, X. (2015). Correction of image drift and distortion in a scanning electron microscopy. Journal
+of Microscopy, 260(3), 268–280. https://doi.org/10.1111/jmi.12293
+Karimi, H., Nutini, J., & Schmidt, M. (2016). Linear convergence of gradient and proximal-gradient methods
+under the Polyak-Łojasiewicz condition. In Joint European Conference on Machine Learning and Knowledge Discovery in Databases (pp. 795–811). Springer. https://doi.org/10.1007/978-3-319-46128-1_50.
+Lee, Y., & Lee, J. (2014). Accurate automatic defect detection method using quadtree decomposition on SEM
+images. IEEE Transactions on Semiconductor Manufacturing, 27(2), 223–231. ​h​t​t​p​s​:​/​/​d​o​i​.​o​r​g​/​1​0​.​1​1​0​9​
+/​T​S​M​.​2​0​1​4​.​2​3​0​3​4​7​3​​​​
+Lin, C.-H., Ma, W.-C., Torralba, A., & Lucey, S. (2021). BARF: Bundle-adjusting neural radiance fields. In
+Proceedings of the IEEE/CVF International Conference on Computer Vision (pp. 5741–5751). ​h​t​t​p​s​:​/​/​d​
+o​i​.​o​r​g​/​1​0​.​1​1​0​9​/​I​C​C​V​4​8​9​2​2​.​2​0​2​1​.​0​0​5​6​9​​​​
+Ma, L., Li, X., Liao, J., Zhang, Q., Wang, X., Wang, J., & Sander, P. V. (2022). Deblur-NeRF: Neural radiance
+fields from blurry images. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (pp. 12861–12870). https://doi.org/10.1109/CVPR52688.2022.01252
+Mildenhall, B., Hedman, P., Martin-Brualla, R., Srinivasan, P. P., & Barron, J. T. (2022). NeRF in the dark:
+High dynamic range view synthesis from noisy raw images. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (pp. 16190–16199). ​h​t​t​p​s​:​/​/​d​o​i​.​o​r​g​/​1​0​.​1​1​0​9​/​C​V​P​R​
+5​2​6​8​8​.​2​0​2​2​.​0​1​5​7​1​​​
+Mildenhall, B., Srinivasan, P. P., Tancik, M., Barron, J. T., Ramamoorthi, R., & Ng, R. (2021). NeRF: Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65(1), 99–106.
+https://doi.org/10.1145/3503250
+Müller, T., Evans, A., Schied, C., & Keller, A. (2022). Instant neural graphics primitives with a multiresolution
+hash encoding. ACM Transactions on Graphics, 41(4), 1–15. https://doi.org/10.1145/3528223.3530127
+Mur-Artal, R., Montiel, J. M. M., & Tardos, J. D. (2015). ORB-SLAM: A versatile and accurate monocular
+SLAM system. IEEE Transactions on Robotics, 31(5), 1147–1163. ​h​t​t​p​s​:​/​/​d​o​i​.​o​r​g​/​1​0​.​1​1​0​9​/​T​R​O​.​2​0​1​5​
+.​2​4​6​3​6​7​1​​​
+Nakamae, K. (2021). Electron microscopy in semiconductor inspection. Measurement Science and Technology, 32(5), Article 052003. https://doi.org/10.1088/1361-6501/abd96d
+Pambrun, J.-F., & Noumeir, R. (2015). Limitations of the SSIM quality metric in the context of diagnostic
+imaging. In IEEE International Conference on Image Processing (pp. 2960–2963). IEEE. ​h​t​t​p​s​:​/​/​d​o​i​.​o​
+r​g​/​1​0​.​1​1​0​9​/​I​C​I​P​.​2​0​1​5​.​7​3​5​1​3​4​5​​​.​​​​
+Park, K., Henzler, P., Mildenhall, B., Barron, J. T., & Martin-Brualla, R. (2023). CamP: Camera preconditioning for neural radiance fields. ACM Transactions on Graphics (TOG), 42(6), 1–11. ​h​t​t​p​s​:​/​/​d​o​i​.​o​r​g​/​1​0​.​
+1​1​4​5​/​3​6​1​8​3​2​1​​​​
+13
+195 Page 94 of 94
+Machine Learning (2026) 115:195
+Rade, J., Herron, E., Sarkar, S., Sarkar, A., & Krishnamurthy, A. (2024). 3D reconstruction of protein structures from multi-view AFM images using neural radiance fields (NeRFs). In Proceedings of the IEEE/
+CVF Conference on Computer Vision and Pattern Recognition (pp. 8290–8295). ​h​t​t​p​s​​:​/​/​o​p​e​​n​a​c​c​e​​s​s​.​t​​h​
+e​c​v​f​​.​c​o​m​/​c​​o​n​t​e​n​​t​/​C​V​​P​R​2​0​2​​4​W​/​D​L​G​​C​/​h​t​m​​l​/​R​a​​d​e​_​3​D​_​R​e​c​o​n​s​t​r​u​c​t​i​o​n​_​o​f​_​P​r​o​t​e​i​n​_​S​t​r​u​c​t​u​r​e​s​_​f​r​o​m​_​
+M​u​l​t​i​-​v​i​e​w​_​A​F​M​_​I​m​a​g​e​s​_​u​s​i​n​g​_​C​V​P​R​W​_​2​0​2​4​_​p​a​p​e​r​.​h​t​m​l​​​​
+Ranftl, R., Bochkovskiy, A., & Koltun, V. (2021). Vision transformers for dense prediction. In Proceedings
+of the IEEE/CVF International Conference on Computer Vision (pp. 12179–12188). ​h​t​t​p​s​:​/​/​d​o​i​.​o​r​g​/​1​0​.​
+1​1​0​9​/​I​C​C​V​4​8​9​2​2​.​2​0​2​1​.​0​1​1​9​6​​​​
+Sakamoto, H., Nishimura, M., Teplov, A., Leung, G., Ntiamoah, P., Cesmecioglu, E., Kawata, N., Ohnishi,
+T., Kareem, I., & Shia, J. (2022). A pilot study of micro-CT-based whole tissue imaging (WTI) on
+endoscopic submucosal dissection (ESD) specimens. Scientific Reports, 12(1), 9889. ​h​t​t​p​s​:​/​/​d​o​i​.​o​r​g​/​1​0​
+.​1​0​3​8​/​s​4​1​5​9​8​-​0​2​2​-​1​3​9​0​7​-​6​​​
+Schönberger, J. L., & Frahm, J. -M. (2016). Structure-from-motion revisited. In Proceedings of the IEEE/
+CVF Conference on Computer Vision and Pattern Recognition (pp. 4104–4113). ​h​t​t​p​s​:​/​/​d​o​i​.​o​r​g​/​1​0​.​1​1​
+0​9​/​C​V​P​R​.​2​0​1​6​.​4​4​5​​​
+Setiadi, D. R. I. M. (2021). PSNR vs SSIM: Imperceptibility quality assessment for image steganography.
+Multimedia Tools and Applications, 80(6), 8423–8444. https://doi.org/10.1007/s11042-020-10035-z
+She, M., Seegräber, F., Nakath, D., & Köser, K. (2024). Refractive COLMAP: Refractive structure-frommotion revisited. In IEEE/RSJ International Conference on Intelligent Robots and Systems (pp. 12816–
+12823). IEEE. https://doi​.org/10.110​9/IROS58592​.2024.10​802043.
+Synopsys, Inc. (2025). Sentaurus TCAD. Retrieved July 22, 2025, from ​h​t​t​p​s​:​/​/​w​w​w​.​s​y​n​o​p​s​y​​s​.​​​c​o​m​/​m​a​n​u​f​a​
+c​t​u​r​i​n​g​/​t​c​a​d​.​h​t​m​l​​​.​​​​
+Van Vlasselaer, N., Keelson, B., Scafoglieri, A., & Cattrysse, E. (2024). Exploring reliable photogrammetry
+techniques for 3D modeling in anatomical research and education. Anatomical Sciences Education,
+17(3), 674–682. https://doi.org/10.1002/ase.2391
+Wang, M., Zheng, S., Li, X., & Qin, X. (2014). A new image denoising method based on Gaussian filter. In
+International Conference on Information Science, Electronics and Electrical Engineering, (Vol. 1, pp.
+163–167). IEEE. https:​​​//d​oi.​or​g/10​.1109/IN​FOSE​EE.20​14.6948089.
+Wang, Z., Bovik, A. C., Sheikh, H. R., & Simoncelli, E. P. (2004). Image quality assessment: From error
+visibility to structural similarity. IEEE Transactions on Image Processing, 13(4), 600–612. ​h​t​t​p​s​:​/​/​d​o​i​.​
+o​r​g​/​1​0​.​1​1​0​9​/​T​I​P​.​2​0​0​3​.​8​1​9​8​6​1​​​​
+Wang, Z., Wu, S., Xie, W., Chen, M., & Prisacariu, V. A. (2021). NeRF–: Neural radiance fields without
+known camera parameters. arXiv:2102.07064
+Yariv, L., Gu, J., Kasten, Y., & Lipman, Y. (2021). Volume rendering of neural implicit surfaces. Advances in
+Neural Information Processing Systems, 34, 4805–4815.
+Zhang, K., Riegler, G., Snavely, N., & Koltun, V. (2020). NeRF++: Analyzing and improving neural radiance
+fields. arXiv:2010.07492
+Zhang, R., Isola, P., Efros, A. A., Shechtman, E., & Wang, O. (2018). The unreasonable effectiveness of deep
+features as a perceptual metric. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (pp. 586–595). https://doi.org/10.1109/CVPR.2018.00068
+Publisher's Note Springer Nature remains neutral with regard to jurisdictional claims in published maps and
+institutional affiliations.
+13

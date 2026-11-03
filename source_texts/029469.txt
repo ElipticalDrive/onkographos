@@ -1,0 +1,1630 @@
+An efficient header-only C++ package for bounding volume hierarchies, implicit functions, signed distance fields, surface meshes, point clouds, and more! - [DO NOT MERGE] Renderer: ray queries on any shape, a renderer and an SDL2 viewer (1/3) by rmrsk · Pull Request #214 · rmrsk/EBGeometry
+
+[DO NOT MERGE] Renderer: ray queries on any shape, a renderer and an SDL2 viewer (1/3) by rmrsk · Pull Request #214 · rmrsk/EBGeometry · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+rmrsk
+commented
+Oct 22, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Merge order: tier 4. Rendering: to be replaced by a rebuilt renderer PR. See the roadmap, #232.
+Summary
+Note
+First of three stacked pull requests that turn the renderer prototype of #211 into library code: this one (renderer, ray queries, viewer), then the example rewrites (claude/renderer-examples, on top of this), then the ray tape and performance work (claude/renderer-raytape, on top of that). Closes the prototype #211 when merged; follows the direction set in #93.
+Background
+#211 prototyped visualising EBGeometry shapes by rendering their signed distance directly, instead of meshing them (#93), and measured sphere tracing, ray tracing and a hybrid. Its conclusion: ray trace wherever a primitive can answer a ray (meshes through their BVH, analytic shapes in closed form), combine CSG through a ray version of the tape, and sphere trace only what has no ray form. It also asked that examples open a viewer on what they build, with no third-party dependency by default and nothing blocking ctest.
+Solution
+Ray queries on any shape (EBGeometry_Ray.hpp), device-callable:
+firstHit(shape, ray, tMin, tMax): the first crossing of the surface in either direction, with HitT::m_entering saying which way, the finest element the shape names there (the tape's leaf, the mesh's face), an exact flag and, when known, the normal. A ray starting inside the solid reports where it leaves, so a hole seen from within the material, or an inside-out mesh, cannot pass for an outside.
+intersects(shape, a, b): whether a segment crosses the surface (different end signs answer without a march).
+Shapes are sphere traced when their value is a distance or a bound, and stepped and bisected otherwise (Perlin). A march that runs out of steps is HitStatus::Unresolved, never a miss.
+RayForm<S>, a trait a shape type specializes to be ray traced instead. TriMeshSDF has one (pulled forward from the planned third PR after testing the viewer): the ray follows the BVH nearest box first through the new TriangleSoAT/TriangleAoSoA::rayHit() (Möller–Trumbore), exact and with interpolated vertex normals.
+Tape::firstHit() and Tape::intersects() forward to the free functions. Tape::primitiveAt(p) names the leaf of the expression that decides the value at a point (leaves numbered depth first, each occurrence counted, stored in the primitive clause's unused field); signedDistance() is unchanged.
+The renderer (EBGeometry_Render.hpp, namespace Render): Camera (orbit, fit(), lookAt(), +y up), Settings, Image, Stats, Renderer. Diffuse, specular and sky light, shadows, ambient occlusion, a floor, supersampling with a slightly moving light, colour per primitive, and a section plane whose cut faces get their own colour. A surface seen from inside the solid is tinted red and counted. render() runs on std::threads, renderOnDevice() through GPU::transform(); overloads of both can be cancelled. PixelQuery is the trivially copyable per-pixel functor. Ray-traced shapes get ray-cast shadows and occlusion.
+The viewer (EBGeometry_Viewer.hpp): Render::view(shape, argc, argv) opens an SDL2 window, compiled only with EBGEOMETRY_VIEWER=SDL2 (CMake) / VIEWER=SDL2 (make). Without it, with --no-view, or without a display, it prints why and returns, so ctest (which passes --no-view to examples that call it) never waits. Previews adapt their resolution while the camera moves; refinement runs on a background thread and is cancelled when it moves again.
+Examples/MeshSDF ends with view(), on the GPU in a GPU build.
+Armadillo, 960 × 960, 2 × 2 rays per pixel, shadows and occlusion: 174 ms on 24 CPU threads, 82 ms on an RTX A4000 in float (the prototype: 168 ms and 41 ms on the same machine).
+Tests: TestRay, TestRender, new cases in TestTape and TestTriangleSoA, all with [gpu] cases; InstantiateAll covers the new templates. Docs: Rendering.rst (concepts), ImplemRender.rst, the viewer option in ConfigurationOptions.rst, and the updated pages listed in the commits. CI: a Viewer-SDL2 job builds the window and runs what needs no display.
+Side-effects
+The EBGeometry CMake target links Threads::Threads (the installed package finds it), since Renderer::render() uses std::thread.
+HitT, TriangleSoAT and TriangleAoSoA gain members; Tape::Layout gains m_numPrimitives.
+Examples/CMakeLists.txt passes --no-view to any example whose main.cpp calls Render::view(.
+The device path of the renderer is covered by the [gpu] cases and was timed on an RTX A4000. The window itself has been run only under SDL's offscreen video driver (no input) and under ThreadSanitizer; interactive use of the current version still needs a manual check.
+Alternative solutions
+Image files (PNG/PPM) as the dependency-free output: dropped on request; the image stays in memory.
+Sphere tracing only in this PR, with every ray form in the third: tried first, but a mesh took 19 s per full frame and the viewer froze, so the mesh ray form moved here. The general ray tape (CSG crossings, affine maps, sphere tracing inside boxes for operations without a ray form) stays in the third PR, which also replaces this PR's renderer-specific ray-tracing shortcuts (the section plane's ray form, the ray-cast shadow and occlusion branches) with the generic path.
+Performance
+Host comparison: green
+Accepted: -
+72d1c86 against c548641 (origin/dev), 2026-10-22.
+VERDICT: no regression (0 major, 0 minor across 94 cases)
+Performance comparison: 0 major, 0 minor, 0 faster, 0 differ, 0 lost, 94 cases
+base: c548641 (gcc 13.3.0, simd avx2, gpu host, allocator glibc, heap only, freed memory returned before each repetition)
+head: 72d1c86 (gcc 13.3.0, simd avx2, gpu host, allocator glibc, heap only, freed memory returned before each repetition)
+CPU: 12th Gen Intel(R) Core(TM) i9-12900K
+Thresholds: minor >= 3%, major >= 10% slower, and outside the 95% bootstrap interval over the runs
+case
+base
+head
+change
+95% interval
+pool
+verdict
+note
+BVHUnion/spheres/build/float/host
+55.4 ms
+55.7 ms
++0.5%
+[-0.4%, +0.6%]
++0.0%
+~
+BVHUnion/spheres/query-random/float/host
+49.3 ms
+49.5 ms
++0.3%
+[-0.0%, +0.5%]
++0.0%
+~
+BVHUnion/spheres/build/double/host
+64.8 ms
+65.1 ms
++0.5%
+[-0.8%, +1.0%]
++0.0%
+~
+BVHUnion/spheres/query-random/double/host
+54.4 ms
+54.4 ms
++0.0%
+[-0.9%, +2.8%]
++0.0%
+~
+BVHUnion/capsules-diagonal/build/float/host
+61.4 ms
+60.9 ms
+-0.7%
+[-1.3%, +1.4%]
++0.0%
+~
+BVHUnion/capsules-diagonal/query-random/float/host
+71.7 ms
+71.4 ms
+-0.5%
+[-1.0%, +1.0%]
++0.0%
+~
+BVHUnion/capsules-diagonal/build/double/host
+73.9 ms
+74.2 ms
++0.5%
+[-1.2%, +1.2%]
++0.0%
+~
+BVHUnion/capsules-diagonal/query-random/double/host
+80.2 ms
+80.7 ms
++0.7%
+[-0.8%, +2.1%]
++0.0%
+~
+BVHUnion/cylinders-random/build/float/host
+67.2 ms
+67.3 ms
++0.2%
+[-0.4%, +0.7%]
++0.0%
+~
+BVHUnion/cylinders-random/query-random/float/host
+98.4 ms
+98.3 ms
+-0.1%
+[-0.7%, +0.4%]
++0.0%
+~
+BVHUnion/cylinders-random/build/double/host
+82.8 ms
+82.8 ms
++0.0%
+[-0.6%, +0.7%]
++0.0%
+~
+BVHUnion/cylinders-random/query-random/double/host
+111 ms
+111 ms
++0.1%
+[-0.7%, +0.6%]
++0.0%
+~
+TriMeshSDF/w4/build/float/host
+82.5 ms
+82.5 ms
+-0.0%
+[-0.3%, +0.9%]
++0.0%
+~
+TriMeshSDF/w4/query-random/float/host
+243 ms
+244 ms
++0.2%
+[-0.8%, +1.4%]
++0.0%
+~
+TriMeshSDF/w4/build/double/host
+114 ms
+114 ms
++0.1%
+[-0.7%, +0.4%]
++0.0%
+~
+TriMeshSDF/w4/query-random/double/host
+288 ms
+282 ms
+-2.0%
+[-3.1%, +2.1%]
++0.0%
+~
+TriMeshSDF/w8/build/float/host
+70.8 ms
+70.9 ms
++0.1%
+[-1.0%, +0.6%]
++0.0%
+~
+TriMeshSDF/w8/query-random/float/host
+215 ms
+216 ms
++0.1%
+[-1.2%, +1.5%]
++0.0%
+~
+MeshSDF/build/float/host
+96.6 ms
+96.8 ms
++0.2%
+[-0.2%, +0.5%]
++0.0%
+~
+MeshSDF/refit/float/host
+30.7 ms
+30.4 ms
+-0.8%
+[-7.0%, +0.1%]
+-
+~
+MeshSDF/query-random/float/host
+768 ms
+772 ms
++0.5%
+[-0.1%, +1.0%]
++0.0%
+~
+MeshSDF/build/double/host
+118 ms
+119 ms
++0.4%
+[+0.1%, +1.4%]
++0.0%
+~
+MeshSDF/refit/double/host
+44.8 ms
+44.8 ms
++0.1%
+[-6.2%, +1.5%]
+-
+~
+MeshSDF/query-random/double/host
+871 ms
+868 ms
+-0.4%
+[-1.8%, +0.0%]
++0.0%
+~
+PointCloudBVH/uniform/build/float/host
+68.5 ms
+68.7 ms
++0.2%
+[+0.0%, +0.8%]
++0.0%
+~
+PointCloudBVH/uniform/all1nn/float/host
+151 ms
+150 ms
+-0.1%
+[-0.3%, +0.3%]
+-
+~
+PointCloudBVH/uniform/all8nn/float/host
+370 ms
+372 ms
++0.4%
+[-0.2%, +0.7%]
+-
+~
+PointCloudBVH/uniform/closest-random/float/host
+78.2 ms
+77.4 ms
+-1.0%
+[-4.1%, +0.9%]
+-
+~
+PointCloudBVH/uniform/closest-outside-random/float/host
+6.65 ms
+6.74 ms
++1.3%
+[+0.1%, +2.7%]
+-
+~
+PointCloudBVH/uniform/neighbor-morton/float/host
+146 ms
+146 ms
++0.3%
+[-0.0%, +4.2%]
+-
+~
+PointCloudBVH/uniform/neighbors8-morton/float/host
+338 ms
+338 ms
++0.0%
+[-1.7%, +0.5%]
+-
+~
+PointCloudBVH/uniform/closest8-morton/float/host
+184 ms
+183 ms
+-0.1%
+[-0.3%, -0.0%]
+-
+~
+PointCloudBVH/uniform/build/double/host
+81.6 ms
+81.4 ms
+-0.2%
+[-1.2%, +1.4%]
++0.0%
+~
+PointCloudBVH/uniform/all1nn/double/host
+169 ms
+168 ms
+-0.5%
+[-1.5%, +0.4%]
+-
+~
+PointCloudBVH/uniform/all8nn/double/host
+411 ms
+412 ms
++0.0%
+[-0.8%, +0.1%]
+-
+~
+PointCloudBVH/uniform/closest-random/double/host
+88.3 ms
+89.4 ms
++1.2%
+[+0.0%, +9.5%]
+-
+~
+PointCloudBVH/uniform/closest-outside-random/double/host
+7.01 ms
+6.96 ms
+-0.7%
+[-2.9%, +0.4%]
+-
+~
+PointCloudBVH/uniform/neighbor-morton/double/host
+160 ms
+160 ms
+-0.1%
+[-0.9%, +0.2%]
+-
+~
+PointCloudBVH/uniform/neighbors8-morton/double/host
+363 ms
+363 ms
+-0.1%
+[-1.2%, +2.2%]
+-
+~
+PointCloudBVH/uniform/closest8-morton/double/host
+193 ms
+192 ms
+-0.1%
+[-0.5%, +0.4%]
+-
+~
+PointCloudHashGrid/uniform/build/float/host
+11.6 ms
+11.6 ms
++0.2%
+[-5.8%, +0.6%]
++0.0%
+~
+PointCloudHashGrid/uniform/all1nn/float/host
+125 ms
+125 ms
+-0.4%
+[-0.9%, +0.3%]
+-
+~
+PointCloudHashGrid/uniform/all8nn/float/host
+537 ms
+536 ms
+-0.2%
+[-0.6%, +0.3%]
+-
+~
+PointCloudHashGrid/uniform/closest-random/float/host
+153 ms
+153 ms
++0.1%
+[-0.3%, +1.2%]
+-
+~
+PointCloudHashGrid/uniform/closest-outside-random/float/host
+861 ms
+862 ms
++0.1%
+[-0.3%, +0.2%]
+-
+~
+PointCloudHashGrid/uniform/neighbor-morton/float/host
+121 ms
+121 ms
++0.1%
+[-0.1%, +0.2%]
+-
+~
+PointCloudHashGrid/uniform/neighbors8-morton/float/host
+512 ms
+512 ms
+-0.1%
+[-0.3%, +0.1%]
+-
+~
+PointCloudHashGrid/uniform/closest8-morton/float/host
+362 ms
+362 ms
+-0.0%
+[-0.3%, +4.1%]
+-
+~
+PointCloudHashGrid/uniform/build/double/host
+15.2 ms
+15.0 ms
+-1.4%
+[-2.4%, -0.3%]
++0.0%
+~
+PointCloudHashGrid/uniform/all1nn/double/host
+128 ms
+128 ms
+-0.2%
+[-1.2%, +0.5%]
+-
+~
+PointCloudHashGrid/uniform/all8nn/double/host
+562 ms
+563 ms
++0.1%
+[-0.8%, +0.4%]
+-
+~
+PointCloudHashGrid/uniform/closest-random/double/host
+158 ms
+158 ms
+-0.1%
+[-0.5%, +1.0%]
+-
+~
+PointCloudHashGrid/uniform/closest-outside-random/double/host
+957 ms
+961 ms
++0.4%
+[-0.3%, +0.6%]
+-
+~
+PointCloudHashGrid/uniform/neighbor-morton/double/host
+122 ms
+122 ms
++0.2%
+[-0.9%, +0.8%]
+-
+~
+PointCloudHashGrid/uniform/neighbors8-morton/double/host
+519 ms
+519 ms
+-0.0%
+[-0.4%, +0.4%]
+-
+~
+PointCloudHashGrid/uniform/closest8-morton/double/host
+367 ms
+367 ms
+-0.1%
+[-0.3%, +0.2%]
+-
+~
+PointCloudBVH/sphere/build/float/host
+68.2 ms
+67.6 ms
+-0.9%
+[-1.1%, +0.0%]
++0.0%
+~
+PointCloudBVH/sphere/all1nn/float/host
+112 ms
+112 ms
+-0.6%
+[-1.4%, +0.9%]
+-
+~
+PointCloudBVH/sphere/all8nn/float/host
+269 ms
+268 ms
+-0.3%
+[-0.7%, +0.5%]
+-
+~
+PointCloudBVH/sphere/closest-random/float/host
+113 ms
+112 ms
+-0.4%
+[-0.8%, -0.1%]
+-
+~
+PointCloudBVH/sphere/closest-outside-random/float/host
+107 ms
+106 ms
+-0.1%
+[-0.5%, +0.3%]
+-
+~
+PointCloudBVH/sphere/neighbor-morton/float/host
+108 ms
+109 ms
++0.2%
+[-0.5%, +0.7%]
+-
+~
+PointCloudBVH/sphere/neighbors8-morton/float/host
+238 ms
+239 ms
++0.2%
+[-0.4%, +0.7%]
+-
+~
+PointCloudBVH/sphere/closest8-morton/float/host
+193 ms
+193 ms
+-0.0%
+[-0.2%, +0.3%]
+-
+~
+PointCloudBVH/sphere/build/double/host
+80.6 ms
+80.4 ms
+-0.3%
+[-0.9%, +1.0%]
++0.0%
+~
+PointCloudBVH/sphere/all1nn/double/host
+127 ms
+128 ms
++0.2%
+[-0.9%, +0.4%]
+-
+~
+PointCloudBVH/sphere/all8nn/double/host
+305 ms
+306 ms
++0.1%
+[-0.5%, +0.6%]
+-
+~
+PointCloudBVH/sphere/closest-random/double/host
+128 ms
+129 ms
++0.4%
+[-1.1%, +0.9%]
+-
+~
+PointCloudBVH/sphere/closest-outside-random/double/host
+123 ms
+125 ms
++1.0%
+[+0.1%, +59.7%]
+-
+~
+PointCloudBVH/sphere/neighbor-morton/double/host
+120 ms
+119 ms
+-0.8%
+[-1.7%, +0.4%]
+-
+~
+PointCloudBVH/sphere/neighbors8-morton/double/host
+258 ms
+257 ms
+-0.4%
+[-1.3%, +2.1%]
+-
+~
+PointCloudBVH/sphere/closest8-morton/double/host
+201 ms
+201 ms
++0.0%
+[-0.4%, +0.7%]
+-
+~
+PointCloudHashGrid/sphere/build/float/host
+8.89 ms
+10.4 ms
++16.9%
+[-1.8%, +18.4%]
++0.0%
+~
+PointCloudHashGrid/sphere/all1nn/float/host
+149 ms
+143 ms
+-4.0%
+[-4.2%, +4.4%]
+-
+~
+PointCloudHashGrid/sphere/all8nn/float/host
+401 ms
+400 ms
+-0.1%
+[-3.0%, +0.2%]
+-
+~
+PointCloudHashGrid/sphere/closest-random/float/host
+256 ms
+256 ms
+-0.1%
+[-0.6%, +0.9%]
+-
+~
+PointCloudHashGrid/sphere/closest-outside-random/float/host
+334 ms
+335 ms
++0.1%
+[-0.1%, +0.3%]
+-
+~
+PointCloudHashGrid/sphere/neighbor-morton/float/host
+142 ms
+142 ms
+-0.0%
+[-7.9%, +2.8%]
+-
+~
+PointCloudHashGrid/sphere/neighbors8-morton/float/host
+388 ms
+377 ms
+-2.9%
+[-3.1%, +3.2%]
+-
+~
+PointCloudHashGrid/sphere/closest8-morton/float/host
+350 ms
+350 ms
++0.2%
+[-2.1%, +2.4%]
+-
+~
+PointCloudHashGrid/sphere/build/double/host
+12.6 ms
+12.5 ms
+-0.6%
+[-1.3%, +0.0%]
++0.0%
+~
+PointCloudHashGrid/sphere/all1nn/double/host
+146 ms
+146 ms
++0.3%
+[+0.1%, +4.7%]
+-
+~
+PointCloudHashGrid/sphere/all8nn/double/host
+422 ms
+423 ms
++0.2%
+[-0.1%, +2.9%]
+-
+~
+PointCloudHashGrid/sphere/closest-random/double/host
+292 ms
+291 ms
+-0.5%
+[-1.4%, +0.6%]
+-
+~
+PointCloudHashGrid/sphere/closest-outside-random/double/host
+377 ms
+376 ms
+-0.2%
+[-0.6%, +0.3%]
+-
+~
+PointCloudHashGrid/sphere/neighbor-morton/double/host
+143 ms
+149 ms
++4.3%
+[-4.1%, +4.5%]
+-
+~
+PointCloudHashGrid/sphere/neighbors8-morton/double/host
+377 ms
+376 ms
+-0.2%
+[-3.2%, +3.2%]
+-
+~
+PointCloudHashGrid/sphere/closest8-morton/double/host
+349 ms
+347 ms
+-0.4%
+[-4.5%, +0.2%]
+-
+~
+Render/csg/firstHit/float/host
+-
+-
+-
+-
+-
+new
+Render/mesh/firstHit/float/host
+-
+-
+-
+-
+-
+new
+Render/csg/frame/float/host
+-
+-
+-
+-
+-
+new
+Render/csg/firstHit/double/host
+-
+-
+-
+-
+-
+new
+Render/mesh/firstHit/double/host
+-
+-
+-
+-
+-
+new
+Render/csg/frame/double/host
+-
+-
+-
+-
+-
+new
+The probes differ between the sides (each side ran its own): Performance/Render/main.cpp
+Device comparison (CUDA): green
+Accepted: -
+72d1c86 against c548641 (origin/dev), 2026-10-22.
+VERDICT: no regression (0 major, 0 minor across 64 cases)
+Performance comparison: 0 major, 0 minor, 0 faster, 0 differ, 0 lost, 64 cases
+base: c548641 (gcc 13.3.0, simd none, gpu CUDA, allocator glibc, heap only, freed memory returned before each repetition)
+head: 72d1c86 (gcc 13.3.0, simd none, gpu CUDA, allocator glibc, heap only, freed memory returned before each repetition)
+CPU: 12th Gen Intel(R) Core(TM) i9-12900K
+Thresholds: minor >= 3%, major >= 10% slower, and outside the 95% bootstrap interval over the runs
+case
+base
+head
+change
+95% interval
+pool
+verdict
+note
+BVHUnion/spheres/query-morton/float/hostdevice
+392 µs
+393 µs
++0.3%
+[-6.3%, +6.7%]
+-
+~
+device 13.7x faster than the host
+BVHUnion/spheres/query-random/float/hostdevice
+937 µs
+937 µs
+-0.0%
+[-1.2%, +1.8%]
+-
+~
+device 8.5x faster than the host
+BVHUnion/spheres/query-morton/double/hostdevice
+4.42 ms
+4.41 ms
+-0.2%
+[-1.0%, +0.7%]
+-
+~
+device 1.3x faster than the host
+BVHUnion/spheres/query-random/double/hostdevice
+4.54 ms
+4.54 ms
+-0.0%
+[-0.4%, +0.3%]
+-
+~
+device 1.9x faster than the host
+BVHUnion/capsules-diagonal/query-morton/float/hostdevice
+693 µs
+696 µs
++0.5%
+[-0.3%, +1.5%]
+-
+~
+device 10.5x faster than the host
+BVHUnion/capsules-diagonal/query-random/float/hostdevice
+1.59 ms
+1.60 ms
++0.4%
+[-0.6%, +1.1%]
+-
+~
+device 7.0x faster than the host
+BVHUnion/capsules-diagonal/query-morton/double/hostdevice
+6.63 ms
+6.61 ms
+-0.3%
+[-0.7%, +0.3%]
+-
+~
+device 1.1x faster than the host
+BVHUnion/capsules-diagonal/query-random/double/hostdevice
+6.87 ms
+6.87 ms
++0.1%
+[-0.1%, +0.4%]
+-
+~
+device 1.7x faster than the host
+BVHUnion/cylinders-random/query-morton/float/hostdevice
+1.13 ms
+1.11 ms
+-1.1%
+[-1.6%, +0.4%]
+-
+~
+device 11.4x faster than the host
+BVHUnion/cylinders-random/query-random/float/hostdevice
+2.67 ms
+2.67 ms
++0.2%
+[-0.0%, +1.7%]
+-
+~
+device 6.5x faster than the host
+BVHUnion/cylinders-random/query-morton/double/hostdevice
+9.29 ms
+9.29 ms
++0.0%
+[-0.5%, +0.3%]
+-
+~
+device 1.4x faster than the host
+BVHUnion/cylinders-random/query-random/double/hostdevice
+9.87 ms
+9.87 ms
++0.1%
+[-0.5%, +0.2%]
+-
+~
+device 1.9x faster than the host
+TriMeshSDF/w4/query-morton/float/hostdevice
+8.99 ms
+8.94 ms
+-0.5%
+[-1.4%, +1.9%]
+-
+~
+device 10.5x faster than the host
+TriMeshSDF/w4/query-random/float/hostdevice
+22.1 ms
+21.9 ms
+-0.8%
+[-1.8%, +1.7%]
+-
+~
+device 6.5x faster than the host (was 5.4x)
+TriMeshSDF/w4/query-morton/double/hostdevice
+140 ms
+141 ms
++0.0%
+[-0.7%, +3.6%]
+-
+~
+device 0.7x faster than the host
+TriMeshSDF/w4/query-random/double/hostdevice
+263 ms
+263 ms
+-0.2%
+[-2.2%, +2.6%]
+-
+~
+device 0.5x faster than the host
+MeshSDF/query-morton/float/hostdevice
+28.7 ms
+28.8 ms
++0.3%
+[-0.6%, +1.0%]
+-
+~
+device 3.4x faster than the host
+MeshSDF/query-random/float/hostdevice
+68.1 ms
+68.2 ms
++0.2%
+[-0.1%, +0.5%]
+-
+~
+device 2.1x faster than the host
+MeshSDF/query-morton/double/hostdevice
+139 ms
+139 ms
+-0.2%
+[-4.1%, +1.5%]
+-
+~
+device 0.7x faster than the host
+MeshSDF/query-random/double/hostdevice
+230 ms
+230 ms
+-0.2%
+[-3.4%, +4.6%]
+-
+~
+device 0.7x faster than the host
+PointCloudBVH/uniform/closest-morton/float/hostdevice
+784 µs
+783 µs
+-0.2%
+[-1.0%, +0.5%]
+-
+~
+device 10.1x faster than the host
+PointCloudBVH/uniform/closest-random/float/hostdevice
+3.11 ms
+3.10 ms
+-0.3%
+[-1.1%, +0.5%]
+-
+~
+device 4.0x faster than the host
+PointCloudBVH/uniform/neighbor-morton/float/hostdevice
+1.17 ms
+1.16 ms
+-0.1%
+[-0.7%, +0.7%]
+-
+~
+device 8.7x faster than the host
+PointCloudBVH/uniform/neighbors8-morton/float/hostdevice
+11.2 ms
+11.2 ms
++0.2%
+[-1.2%, +0.4%]
+-
+~
+device 2.5x faster than the host
+PointCloudBVH/uniform/closest8-morton/float/hostdevice
+6.63 ms
+6.58 ms
+-0.8%
+[-1.4%, -0.1%]
+-
+~
+device 2.6x faster than the host
+PointCloudBVH/uniform/closest-morton/double/hostdevice
+6.95 ms
+6.94 ms
+-0.2%
+[-1.0%, +0.2%]
+-
+~
+device 1.2x faster than the host
+PointCloudBVH/uniform/closest-random/double/hostdevice
+7.80 ms
+7.74 ms
+-0.7%
+[-2.0%, +0.9%]
+-
+~
+device 1.7x faster than the host
+PointCloudBVH/uniform/neighbor-morton/double/hostdevice
+13.2 ms
+13.2 ms
+-0.0%
+[-14.0%, +0.5%]
+-
+~
+device 0.8x faster than the host
+PointCloudBVH/uniform/neighbors8-morton/double/hostdevice
+25.6 ms
+25.6 ms
+-0.1%
+[-0.7%, +0.3%]
+-
+~
+device 1.1x faster than the host
+PointCloudBVH/uniform/closest8-morton/double/hostdevice
+14.8 ms
+14.7 ms
+-0.4%
+[-1.1%, +0.9%]
+-
+~
+device 1.2x faster than the host
+PointCloudHashGrid/uniform/closest-morton/float/hostdevice
+2.03 ms
+2.03 ms
++0.0%
+[-2.0%, +0.8%]
+-
+~
+device 5.1x faster than the host
+PointCloudHashGrid/uniform/closest-random/float/hostdevice
+5.18 ms
+5.17 ms
+-0.1%
+[-0.4%, +0.6%]
+-
+~
+device 3.0x faster than the host
+PointCloudHashGrid/uniform/neighbor-morton/float/hostdevice
+856 µs
+856 µs
++0.0%
+[-0.6%, +0.4%]
+-
+~
+device 10.1x faster than the host
+PointCloudHashGrid/uniform/neighbors8-morton/float/hostdevice
+11.6 ms
+11.5 ms
+-0.6%
+[-1.9%, +0.8%]
+-
+~
+device 2.9x faster than the host
+PointCloudHashGrid/uniform/closest8-morton/float/hostdevice
+7.40 ms
+7.31 ms
+-1.1%
+[-2.5%, +0.5%]
+-
+~
+device 3.4x faster than the host
+PointCloudHashGrid/uniform/closest-morton/double/hostdevice
+7.63 ms
+7.75 ms
++1.6%
+[-17.5%, +21.0%]
+-
+~
+device 1.4x faster than the host
+PointCloudHashGrid/uniform/closest-random/double/hostdevice
+14.9 ms
+13.9 ms
+-7.1%
+[-14.7%, +7.2%]
+-
+~
+device 1.2x faster than the host (was 1.1x)
+PointCloudHashGrid/uniform/neighbor-morton/double/hostdevice
+3.38 ms
+3.38 ms
+-0.1%
+[-0.9%, +1.1%]
+-
+~
+device 2.6x faster than the host
+PointCloudHashGrid/uniform/neighbors8-morton/double/hostdevice
+24.9 ms
+24.9 ms
+-0.0%
+[-0.9%, +0.7%]
+-
+~
+device 1.4x faster than the host
+PointCloudHashGrid/uniform/closest8-morton/double/hostdevice
+16.8 ms
+16.7 ms
+-0.9%
+[-1.7%, +3.3%]
+-
+~
+device 1.5x faster than the host
+PointCloudBVH/sphere/closest-morton/float/hostdevice
+1.48 ms
+1.48 ms
++0.3%
+[-0.4%, +1.3%]
+-
+~
+device 8.5x faster than the host
+PointCloudBVH/sphere/closest-random/float/hostdevice
+6.43 ms
+6.44 ms
++0.0%
+[-0.7%, +0.5%]
+-
+~
+device 2.9x faster than the host
+PointCloudBVH/sphere/neighbor-morton/float/hostdevice
+1.51 ms
+1.51 ms
++0.2%
+[-11.5%, +13.1%]
+-
+~
+device 5.1x faster than the host
+PointCloudBVH/sphere/neighbors8-morton/float/hostdevice
+5.63 ms
+5.63 ms
++0.1%
+[-1.3%, +1.1%]
+-
+~
+device 3.3x faster than the host
+PointCloudBVH/sphere/closest8-morton/float/hostdevice
+7.57 ms
+7.57 ms
++0.0%
+[-0.3%, +1.2%]
+-
+~
+device 2.5x faster than the host
+PointCloudBVH/sphere/closest-morton/double/hostdevice
+13.2 ms
+13.1 ms
+-1.2%
+[-10.9%, +11.4%]
+-
+~
+device 1.0x faster than the host
+PointCloudBVH/sphere/closest-random/double/hostdevice
+15.6 ms
+15.5 ms
+-0.2%
+[-3.3%, +3.5%]
+-
+~
+device 1.3x faster than the host
+PointCloudBVH/sphere/neighbor-morton/double/hostdevice
+6.51 ms
+6.47 ms
+-0.7%
+[-8.6%, +9.2%]
+-
+~
+device 1.2x faster than the host
+PointCloudBVH/sphere/neighbors8-morton/double/hostdevice
+15.4 ms
+15.5 ms
++0.4%
+[-0.3%, +1.8%]
+-
+~
+device 1.2x faster than the host
+PointCloudBVH/sphere/closest8-morton/double/hostdevice
+18.5 ms
+18.5 ms
+-0.0%
+[-0.6%, +0.4%]
+-
+~
+device 1.0x faster than the host
+PointCloudHashGrid/sphere/closest-morton/float/hostdevice
+6.39 ms
+6.49 ms
++1.5%
+[+0.5%, +2.9%]
+-
+~
+device 2.7x faster than the host
+PointCloudHashGrid/sphere/closest-random/float/hostdevice
+18.2 ms
+18.2 ms
+-0.1%
+[-0.4%, +0.4%]
+-
+~
+device 1.8x faster than the host
+PointCloudHashGrid/sphere/neighbor-morton/float/hostdevice
+1.91 ms
+1.91 ms
++0.2%
+[-10.0%, +11.1%]
+-
+~
+device 6.1x faster than the host
+PointCloudHashGrid/sphere/neighbors8-morton/float/hostdevice
+5.77 ms
+5.82 ms
++0.9%
+[-4.0%, +3.9%]
+-
+~
+device 4.6x faster than the host
+PointCloudHashGrid/sphere/closest8-morton/float/hostdevice
+14.9 ms
+14.9 ms
++0.0%
+[-1.1%, +0.9%]
+-
+~
+device 1.7x faster than the host
+PointCloudHashGrid/sphere/closest-morton/double/hostdevice
+29.0 ms
+28.8 ms
+-0.5%
+[-1.6%, +3.9%]
+-
+~
+device 0.6x faster than the host
+PointCloudHashGrid/sphere/closest-random/double/hostdevice
+58.9 ms
+58.7 ms
+-0.3%
+[-2.2%, +3.0%]
+-
+~
+device 0.7x faster than the host
+PointCloudHashGrid/sphere/neighbor-morton/double/hostdevice
+15.4 ms
+15.4 ms
++0.5%
+[-0.4%, +1.1%]
+-
+~
+device 0.8x faster than the host
+PointCloudHashGrid/sphere/neighbors8-morton/double/hostdevice
+19.8 ms
+20.1 ms
++1.4%
+[-2.1%, +1.8%]
+-
+~
+device 1.4x faster than the host
+PointCloudHashGrid/sphere/closest8-morton/double/hostdevice
+39.8 ms
+39.9 ms
++0.2%
+[-1.6%, +3.3%]
+-
+~
+device 0.6x faster than the host
+Render/csg/firstHit-camera/float/hostdevice
+-
+-
+-
+-
+-
+new
+Render/mesh/firstHit-camera/float/hostdevice
+-
+-
+-
+-
+-
+new
+Render/csg/firstHit-camera/double/hostdevice
+-
+-
+-
+-
+-
+new
+Render/mesh/firstHit-camera/double/hostdevice
+-
+-
+-
+-
+-
+new
+The probes differ between the sides (each side ran its own): Performance/Render/main.cpp
+Reviewer checklist (to be completed by a human)
+The test suite compiles and runs to completion without warnings or errors.
+All relevant new features are documented in the user documentation (Sphinx).
+This contribution does not break existing sections in the user documentation.
+All relevant APIs are documented in the doxygen documentation.
+Appropriate labels have been assigned to this PR.
+New or revised proper licensing and copyright information is in place.
+A PR review has been run using @claude review.
+The continuous integration and testing hooks at GitHub run to completion.
+The performance receipt is current (CI's Performance-receipt passes), and every regression in it is explained.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01EEgm1Bkd2jnCzivvZozRJT
+rmrsk
+and others
+added 14 commits
+October 22, 2026 13:28
+Tape: primitiveAt(), the leaf that decides the value at a point
+…
+3aa98fd
+```
+Each primitive clause now stores its leaf id in its unused m_b: leaves are
+numbered in the order they appear in the expression, depth first, each
+occurrence counted. Tape::primitiveAt(p) runs the evaluator with a
+compile-time switch that carries an id beside every value: unions and
+intersections keep the chosen operand's leaf, smooth ones the more extreme
+operand's, Blur and Mollify their centre tap's, and negation, offsets and
+maps their operand's. getNumPrimitives() counts the leaves.
+
+Without the switch the evaluator carries no ids, so signedDistance() is
+unchanged (same values and timing as dev on a 40-sphere CSG tape). The
+renderer uses primitiveAt() once per hit to colour by primitive.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Ray queries: firstHit() and intersects() on any shape, and on Tape
+…
+5084378
+```
+EBGeometry_Ray.hpp adds RayT, HitT, HitStatus and RayOptions, and two
+device-callable queries over any shape:
+
+- firstHit(shape, ray, tMin, tMax): the first crossing of the surface in
+  either direction, clipped to the shape's box. HitT says where, whether the
+  ray enters or leaves the object there (a ray starting inside reports where
+  it leaves), and the finest element the shape names there: the tape's leaf
+  (primitiveAt()) or the mesh SDF's closest face.
+- intersects(shape, a, b): whether a segment crosses the surface; ends of
+  different sign decide it without a march.
+
+Shapes whose value is a distance or a bound are sphere traced, which never
+steps over the surface; values that are not distances (Perlin) are stepped
+at a fixed length and bisected. A march out of steps is HitStatus::Unresolved,
+never a miss. Tolerances are relative to the box diagonal (or an explicit
+scale for unbounded shapes). Tape::firstHit() and Tape::intersects() forward
+to the free functions.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Render: Camera, Settings, Image and Renderer, rendering any shape
+…
+307a68c
+```
+EBGeometry_Render.hpp renders a shape into an in-memory RGBA image by
+sphere tracing each camera ray with firstHit() and shading the hit:
+diffuse, specular and sky light, soft shadows, ambient occlusion, a
+checkered floor under the shape, and an optional section plane whose cut
+faces get their own colour. Surfaces can be coloured uniformly or by
+primitive (the tape's leaf, the mesh SDF's face). A surface seen from
+inside the solid is lit from the eye's side and tinted red, and Stats
+reports such hits and whether the eye itself is inside the solid, so a
+hole seen from within the material, or an inverted mesh, cannot pass for
+an outside.
+
+PixelQuery is a trivially copyable, device-callable functor per pixel,
+reading the box, scale and floor from the shape itself.
+Renderer::render() runs it on std::thread over rows;
+Renderer::renderOnDevice() runs it through GPU::transform() on a device
+view of the shape. The EBGeometry target now links Threads::Threads (and
+the installed package finds it).
+
+firstHit(): a march that starts on the surface, as it does where a face
+lies on the shape's box, now decides entering or leaving by whether the
+value falls along the ray; the sign just past the start misread oblique
+rays as leaving.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Render::view(): an interactive SDL2 window, opt-in at build time
+…
+c8f59bf
+```
+EBGeometry_Viewer.hpp adds view(shape, argc, argv), with overloads taking
+a camera and settings, and a device view of the shape. The window is
+compiled only under EBGEOMETRY_VIEWER_SDL2, which the new CMake cache
+variable EBGEOMETRY_VIEWER=SDL2 sets (with SDL2::SDL2) for every target of
+the build, as a build-interface setting like the assertions.
+
+view() opens no window, and returns after one line saying why, when the
+program was built without SDL2, when its arguments hold --no-view, when
+there is no X11 or Wayland display, or when SDL cannot start, so programs
+that call it still run unattended.
+
+In the window: drag to orbit, wheel to zoom, S/A/F toggle shadows,
+occlusion and floor, P colours by primitive, X cuts with a section plane
+facing the camera (arrows move it), G switches GPU and CPU, R resets,
+Esc/Q closes. A moving camera is drawn at half resolution without shadows,
+and in full once it rests; the title shows the frame time and whether any
+surface is seen from inside the solid.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Examples/MeshSDF: look at the mesh in the viewer at the end
+…
+87146cb
+```
+The example ends with Render::view(triSDF, argc, argv), which opens a
+window on the mesh when built with the viewer (make VIEWER=SDL2, cmake
+-DEBGEOMETRY_VIEWER=SDL2) and otherwise prints how to build it. Options
+on the command line start with -- and are no longer read as the mesh
+file. The standalone CMake and make builds link Threads and, with
+VIEWER=SDL2, SDL2; the README lists the build lines and the keys.
+
+ctest runs every example whose main.cpp calls Render::view( with
+--no-view, so no test waits on a window.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Performance/Render: firstHit() along camera rays, and a rendered frame
+…
+d973db8
+```
+Cases, in float and double:
+- Render/csg/firstHit: firstHit() along the 512 x 512 camera rays of the
+  classic CSG solid compiled into a Tape;
+- Render/mesh/firstHit: the same for the armadillo as a TriMeshSDF
+  (K = 4, W = 4, SAH), at 96 x 96;
+- Render/csg/frame: one 192 x 192 frame on one thread with shadows and
+  ambient occlusion;
+- */firstHit-camera hostdevice pairs of the two firstHit cases, agreeing
+  when both miss alike or hit within twice the march's tolerance.
+
+The march's parameters are spelled out and recorded; checksums cover
+every t and every pixel. These are the sphere-traced baseline the ray
+tape is to beat. The standalone Performance build links Threads.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Ray queries: name the slab test's distances tNear and tFar
+…
+f1ceec4
+```
+codespell reads tHi as a misspelling.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Docs: rays and rendering, the ray queries, the renderer and the viewer
+…
+d68f6c2
+```
+- Rendering.rst (Concepts): sphere tracing and its fallback for values
+  that are not distances, unresolved queries, entering and leaving
+  crossings and why a surface seen from inside is tinted, section planes,
+  and what a pixel shows.
+- ImplemRender.rst (Implementation): firstHit(), intersects(), HitT,
+  RayOptions, Tape::primitiveAt() and the leaf numbering, Camera,
+  Settings, Renderer, Stats and Render::view().
+- ConfigurationOptions.rst: EBGEOMETRY_VIEWER / VIEWER=SDL2, building by
+  hand, and the Threads link.
+- ImplemCSG.rst, RunningOnGPU.rst, ExampleMeshSDF.rst: the tape's new
+  members, renderOnDevice(), and the example's viewer section.
+- TestingLocally.rst: TestRay and TestRender rows, primitiveAt() in
+  TestTape's.
+- README.md, index.rst, CLAUDE.md: the feature and the header layout.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+CI: Viewer-SDL2, the one lane that compiles the viewer window
+…
+3cdbad2
+```
+Installs libsdl2-dev, configures the debug preset with
+-DEBGEOMETRY_VIEWER=SDL2 and -Werror, builds and runs TestRender, builds
+InstantiateAll, runs the MeshSDF example with --no-view and without a
+display, and builds it with make VIEWER=SDL2. Required by CI-passed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Ray trace TriMeshSDF, and keep the viewer responsive
+…
+a5a031f
+```
+The viewer sphere traced meshes: 19 s per full Armadillo frame on the
+CPU, rendered on the event loop, so the window froze for that long each
+time the camera stopped. Now:
+
+- RayForm<S>, a trait a shape type specializes to be ray traced
+  instead of sphere traced; firstHit() uses it when present. TriMeshSDF
+  has one: the ray follows the BVH, nearest box first, pruned behind the
+  nearest crossing, through TriangleSoAT/TriangleAoSoA::rayHit()
+  (Moller-Trumbore, widened at shared edges), giving an exact hit, the
+  face id, and a normal interpolated from the vertex normals (the new
+  HitT::m_normal).
+- The renderer keeps a ray form under the section plane, takes the
+  normal and the primitive from the hit, and casts hard shadows with one
+  ray for a ray-traced shape; soft shadows march fewer, longer steps.
+  Armadillo, 960^2 with 2x2 rays per pixel, 24 threads: 0.06 s without
+  shadows (was 1.6 s), 1.6 s with shadows and occlusion (was 19 s).
+- Renderer::render() and renderOnDevice() overloads that a flag cancels
+  (between rows on the host, between bands of rows on a device), with a
+  row counter and Stats::m_complete.
+- The viewer previews at a resolution it adapts to about 10-40 ms, and
+  refines on a background thread (full resolution without shadows, then
+  the full settings), cancelled as soon as the camera moves.
+- Examples/MeshSDF passes its device view to view() in a GPU build.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EEgm1Bkd2jnCzivvZozRJT
+```
+Render: occlusion by rays and a moving light; tests and docs for ray …
+…
+d2b50ab
+```
+…tracing
+
+- A ray-traced shape gets ambient occlusion from four short rays around
+  the normal, as the prototype did, instead of five closest-face
+  searches. Armadillo at 960^2 with 2x2 rays, shadows and occlusion:
+  174 ms on 24 CPU threads and 82 ms on an RTX A4000 in float (1.6 s and
+  231 ms before).
+- With supersampling the light moves a little for each of a pixel's
+  rays, softening the edges of hard shadows.
+- TriangleSoAT::rayHit() falls back to the face normal for a triangle
+  given no vertex normals (the unset sentinel overflowed to zero).
+- Tests: rayHit on triangle groups; a TriMeshSDF cube ray traced
+  exactly against a face-by-face reference; a ray-traced mesh cube under
+  the section plane drawn as the sphere-traced box; cancelled renders on
+  the host and the device; the mesh ray form on a device. InstantiateAll
+  covers RayForm<TriMeshSDF> and rendering a mesh.
+- Docs: ray forms, RayForm, cancellable renders, the viewer's
+  refinement, ray-cast shadows and occlusion, and building the example
+  for a GPU in single precision.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EEgm1Bkd2jnCzivvZozRJT
+```
+Merge remote-tracking branch 'origin/dev' into claude/renderer-core
+9f0ab93
+Ray queries: read a node's box through PackedBVH::getBoundingVolume(n…
+…
+5594f7b
+```
+…ode)
+
+Since #194 a PackedBVH node no longer holds its own box.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EEgm1Bkd2jnCzivvZozRJT
+```
+Performance receipt for this pull request (green, host and CUDA)
+…
+407cc53
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EEgm1Bkd2jnCzivvZozRJT
+```
+This was referenced Oct 22, 2026
+[DO NOT MERGE] Renderer prototype: sphere tracing, ray tracing and a hybrid for visualizing shapes (#93)
+#211
+Closed
+[DO NOT MERGE] Examples: every example that builds a shape opens the viewer on it (2/3)
+#215
+Closed
+[DO NOT MERGE] Ray tape: closed-form ray forms, the tape's ray program, a generic renderer (3/3)
+#216
+Closed
+Tape: Blur evaluates differently on a CUDA device than on the host (TestTape [gpu])
+#217
+Closed
+TriangleAoSoA: signed distance has the opposite sign on a CUDA device for one query (TestTriangleSoA [gpu])
+#218
+Closed
+rmrsk
+and others
+added 2 commits
+October 22, 2026 21:17
+Merge remote-tracking branch 'origin/dev' into claude/renderer-core
+…
+72d1c86
+```
+# Conflicts:
+#	Performance/receipt.md
+```
+Performance receipt for this pull request (green, host and CUDA), aga…
+…
+4ff3fb2
+```
+…inst dev at c548641
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EEgm1Bkd2jnCzivvZozRJT
+```
+rmrsk
+mentioned this pull request
+Oct 23, 2026
+Visualization: sphere-traced rendering of shapes and tapes
+#93
+Open
+rmrsk
+changed the title
+Renderer: ray queries on any shape, a renderer and an SDL2 viewer (1/3)
+[DO NOT MERGE] Renderer: ray queries on any shape, a renderer and an SDL2 viewer (1/3)
+Oct 23, 2026
+This was referenced Oct 23, 2026
+Ray tracing functionality
+#228
+Merged
+BVH traversal: one general walk for any query type
+#230
+Merged
+Fused CSG: the builder's operations as types; FiniteRepetition over all copies (#224)
+#229
+Merged
+Roadmap: merge order of the open pull requests
+#232
+Open
+rmrsk
+added a commit
+that referenced
+this pull request
+Oct 25, 2026
+Ray tracing: development document (to be deleted before merge)
+…
+8a2d72e
+```
+RAY_TRACING.md is the live working document for this branch: what is
+reused from the renderer stack (#214-#216), review findings, decisions
+from the interview so far, open questions, scope and progress.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FnaeZk1ThKVcT9ypbex2Vt
+```
+rmrsk
+self-assigned this
+Oct 26, 2026
+rmrsk
+added
+the
+ray tracing
+Affects ray tracing functionality
+label
+Oct 26, 2026
+rmrsk
+mentioned this pull request
+Oct 26, 2026
+Renderer and viewer on the ray queries (renderer step 1)
+#239
+Draft
+9 tasks
+rmrsk
+commented
+Oct 26, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Superseded by #239 (renderer step 1, on the ray queries of #228/#236/#237); the examples (#215's part) follow in step 2. Branch kept.
+rmrsk
+closed this
+Oct 26, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+ray tracing
+Affects ray tracing functionality
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,145 @@
+Contribute to openvdb/nanovdb-editor development by creating an account on GitHub.
+
+SDF surface rendering via HDDA zero-crossing. by swahtz · Pull Request #195 · openvdb/nanovdb-editor · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+swahtz
+commented
+Jun 3, 2026
+Copy link
+Copy Markdown
+Contributor
+Adds a new "NanoVDB Surface (SDF)" render pipeline that renders signed-distance / level-set grids as a shaded opaque isosurface, complementing the existing volumetric ray-march path (editor/editor.slang). Instead of integrating color along the ray, it finds the first iso-crossing of the field via hierarchical DDA (HDDA) traversal, computes a gradient normal, and shades the hit with simple Lambertian lighting.
+The surface finder is built on pnanovdb_hdda_zero_crossing from PNanoVDB.h (HDDA.h's ZeroCrossing GPU port), generalized to work on both FLOAT and ONINDEX grids.
+What changed
+File
+Change
+editor/shaders/editor_surface.slang
+New compute shader implementing the surface render path.
+editor/shaders/editor_surface.slang.json
+New shader-param schema (UI controls + constant-buffer layout).
+editor/PipelineTypes.h
+New pnanovdb_pipeline_type_nanovdb_surface enum value.
+editor/Pipeline.cpp
+Registers the s_nanovdb_surface_descriptor pipeline ("NanoVDB Surface (SDF)").
+How it works
+Per camera ray, editor_surface.slang:
+read_distance — reads the raw signed scalar value generically across grid types:
+FLOAT: direct pnanovdb_read_float.
+ONINDEX: value index from the tree, then a 4-byte read from blind-metadata index 0, reinterpreted with asfloat (this fixes the asuint bit-reinterpret bug that exists in editor.slang's ONINDEX path).
+Mask/other: active-voxel fallback.
+surface_zero_crossing — adapted from pnanovdb_hdda_zero_crossing (enabled via #define PNANOVDB_HDDA). Same adaptive HDDA traversal (ray clip, dim-based level skipping, active-voxel stepping), but the value read goes through read_distance, the test is against an arbitrary isovalue, and the hit t is refined by linear interpolation plus optional trilinear-field bisection (surface_eps).
+surface_normal — normalized gradient of the field via central differences of the trilinearly-sampled distance.
+Shading — Lambertian with ambient. light_dir of (0,0,0) uses a headlight (-rayDir); otherwise a world-space directional light. Output follows the codebase's premultiplied alpha-as-transmittance convention: opaque on hit (alpha = 0), transparent on miss (alpha = 1).
+Resource bindings mirror editor.slang exactly so the existing dispatch_shader_on_nanovdb_array path drives it unchanged. The pipeline descriptor reuses the existing NanoVDBRenderParams init/execute/map/render-method functions; only the default shader differs.
+```
+flowchart TD
+    UI["Properties: render pipeline = NanoVDB Surface (SDF)"] --> Shader["editor_surface.slang :: main"]
+    Shader --> ZC["surface_zero_crossing (HDDA)"]
+    ZC --> Fetch["read_distance: FLOAT or ONINDEX float"]
+    ZC --> Normal["gradient normal (central differences)"]
+    Normal --> Shade["Lambertian + ambient"]
+    Shade --> Out["texture_out: opaque on hit / transparent on miss"]
+```
+Loading
+Grid format support
+PNANOVDB_GRID_TYPE_FLOAT — supported.
+PNANOVDB_GRID_TYPE_ONINDEX with a float value array at blind-metadata index 0 — supported (a FloatGrid is not required).
+Mask grids — limited; the active-only HDDA traversal means a pure binary mask has no sign variation to cross.
+Shader parameters
+Exposed in the Properties panel (editor_surface.slang.json): isovalue, surface_eps, auto_center, ambient, light_dir, surface_color. Field order is arranged so each float4 is 16-byte aligned, matching the tight packing performed by ShaderParams::copy_params_to_buffer.
+Usage
+Select the volume under NanoVDBs and set the render pipeline to "NanoVDB Surface (SDF)" in the Properties panel (this auto-selects editor/editor_surface.slang), or type the shader name directly in the "Shader:" field.
+From the app directly:
+```
+./build/Release/pnanovdbeditorapp --input /path/to/your_sdf.nvdb --shader editor/editor_surface.slang
+```
+SDF surface rendering via HDDA zero-crossing.
+…
+71ee659
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested review from
+areidmeyer,
+fwilliams and
+phapalova
+as code owners
+June 3, 2026 01:16
+areidmeyer
+reviewed
+Jun 3, 2026
+View reviewed changes
+Comment thread
+editor/shaders/editor_surface.slang
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+areidmeyer
+approved these changes
+Jun 3, 2026
+View reviewed changes
+areidmeyer
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Shader looks okay enough to me. Pipeline pieces look fine as well, but Petra knows that better.
+areidmeyer
+reviewed
+Jun 3, 2026
+View reviewed changes
+Comment thread
+editor/shaders/editor_surface.slang
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+and others
+added 2 commits
+June 3, 2026 18:59
+Apply auto-centering offset in SDF surface shader.
+…
+1b4c5e9
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+adjust CI to fork PR and swap shader params to use float3
+…
+ec0150a
+```
+Signed-off-by: Petra Hapalova <phapalova@nvidia.com>
+```
+phapalova
+approved these changes
+Jun 3, 2026
+View reviewed changes
+Hide details
+View details
+phapalova
+merged commit b5289cb
+into
+openvdb:main
+Jun 3, 2026
+35 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

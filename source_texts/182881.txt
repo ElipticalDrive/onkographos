@@ -1,0 +1,415 @@
+Robust iso-surface rendering via interval-arithmetic ray casting for arbitrary implicit geometries - iso-surface-rendering/isoray/tracer/bisection.py at main · narnia-ai-mason/iso-surface-rendering
+
+iso-surface-rendering/isoray/tracer/bisection.py at main · narnia-ai-mason/iso-surface-rendering · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+FilesExpand file tree
+main
+/
+bisection.py
+Copy path
+Blame
+More file actions
+Blame
+More file actions
+Latest commit
+History
+History
+History
+209 lines (169 loc) · 6.26 KB
+main
+/
+bisection.py
+Copy path
+Top
+File metadata and controls
+Code
+Blame
+209 lines (169 loc) · 6.26 KB
+Raw
+Copy raw file
+Download raw file
+Open symbols panel
+Edit and raw actions
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+52
+53
+54
+55
+56
+57
+58
+59
+60
+61
+62
+63
+64
+65
+66
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+77
+78
+79
+80
+81
+82
+83
+84
+85
+86
+87
+88
+89
+90
+91
+92
+93
+94
+95
+96
+97
+98
+99
+100
+101
+102
+103
+104
+105
+106
+107
+108
+109
+110
+111
+112
+113
+114
+115
+116
+117
+118
+119
+120
+121
+122
+123
+124
+125
+126
+127
+128
+129
+130
+131
+132
+133
+134
+135
+136
+137
+138
+139
+140
+141
+142
+143
+144
+145
+146
+147
+148
+149
+150
+151
+152
+153
+154
+155
+156
+157
+158
+159
+160
+161
+162
+163
+164
+165
+166
+167
+168
+169
+170
+171
+172
+173
+174
+175
+176
+177
+178
+179
+180
+181
+182
+183
+184
+185
+186
+187
+188
+189
+190
+191
+192
+193
+194
+195
+196
+197
+198
+199
+200
+201
+202
+203
+204
+205
+206
+207
+208
+209
+"""Level-synchronized bisection tracer — core ray casting algorithm.
+Processes all active rays in lockstep by depth level.
+Each depth: batch inclusion evaluate → exclusion → convergence → bisect.
+See devdocs/algorithms.md Section 4 for details.
+"""
+from __future__ import annotations
+from dataclasses import dataclass
+import numpy as np
+@dataclass
+class TraceResult:
+hit: np.ndarray # (R,) bool
+t: np.ndarray # (R,) float64
+position: np.ndarray # (R, 3) float64
+normal: np.ndarray # (R, 3) float64
+depth_count: np.ndarray # (R,) int
+t_lo: np.ndarray # (R,) float64 — convergence interval lower bound
+t_hi: np.ndarray # (R,) float64 — convergence interval upper bound
+def _intervals_to_3d(
+origins: np.ndarray,
+directions: np.ndarray,
+ray_idx: np.ndarray,
+t_lo: np.ndarray,
+t_hi: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+"""Convert ray-parameter intervals to 3D axis-aligned boxes.
+For each interval, compute the 3D box that encloses the ray segment
+from t_lo to t_hi.
+Returns:
+lo_3d, hi_3d: each (M, 3)
+"""
+o = origins[ray_idx] # (M, 3)
+d = directions[ray_idx] # (M, 3)
+p0 = o + t_lo[:, None] * d # (M, 3)
+p1 = o + t_hi[:, None] * d # (M, 3)
+lo_3d = np.minimum(p0, p1)
+hi_3d = np.maximum(p0, p1)
+return lo_3d, hi_3d
+def bisect_trace(
+origins: np.ndarray,
+directions: np.ndarray,
+t_min: np.ndarray,
+t_max: np.ndarray,
+hit_mask: np.ndarray,
+inclusion_fn,
+f,
+max_depth: int = 40,
+threshold: float = 1e-5,
+) -> TraceResult:
+"""Level-synchronized bisection ray tracing.
+Args:
+origins: (R, 3) ray origins.
+directions: (R, 3) ray directions.
+t_min: (R,) entry t for AABB.
+t_max: (R,) exit t for AABB.
+hit_mask: (R,) bool — rays that hit AABB.
+inclusion_fn: InclusionFunction with evaluate(lo, hi) method.
+f: ImplicitFunction for sign-change verification.
+max_depth: maximum bisection depth.
+threshold: convergence width threshold.
+Returns:
+TraceResult with hit, t, position, normal arrays (flat, R-length).
+"""
+R = origins.shape[0]
+# Result arrays
+result_hit = np.zeros(R, dtype=bool)
+result_t = np.full(R, np.inf, dtype=np.float64)
+result_t_lo = np.full(R, np.inf, dtype=np.float64)
+result_t_hi = np.full(R, np.inf, dtype=np.float64)
+result_depth = np.zeros(R, dtype=np.int32)
+# Initialize active intervals only for rays that hit the AABB
+active_idx = np.where(hit_mask)[0]
+if len(active_idx) == 0:
+return _build_result(
+R, result_hit, result_t, result_t_lo, result_t_hi, result_depth, origins, directions
+)
+ray_idx = active_idx.copy()
+iv_t_lo = t_min[active_idx].copy()
+iv_t_hi = t_max[active_idx].copy()
+for depth in range(max_depth):
+if len(ray_idx) == 0:
+break
+# Step 1: batch inclusion evaluation
+lo_3d, hi_3d = _intervals_to_3d(origins, directions, ray_idx, iv_t_lo, iv_t_hi)
+f_lo, f_hi = inclusion_fn.evaluate(lo_3d, hi_3d)
+# Step 2: exclusion — remove intervals that can't contain zero
+has_zero = (f_lo <= 0.0) & (f_hi >= 0.0)
+ray_idx = ray_idx[has_zero]
+iv_t_lo = iv_t_lo[has_zero]
+iv_t_hi = iv_t_hi[has_zero]
+if len(ray_idx) == 0:
+break
+# Step 3: convergence check
+widths = iv_t_hi - iv_t_lo
+converged = widths < threshold
+if np.any(converged):
+c_ray_idx = ray_idx[converged]
+c_t_lo = iv_t_lo[converged]
+c_t_hi = iv_t_hi[converged]
+c_t_mid = (c_t_lo + c_t_hi) * 0.5
+# Sign-change verification to avoid false hits
+p_lo = origins[c_ray_idx] + c_t_lo[:, None] * directions[c_ray_idx]
+p_hi = origins[c_ray_idx] + c_t_hi[:, None] * directions[c_ray_idx]
+v_lo, _ = f(p_lo)
+v_hi, _ = f(p_hi)
+sign_change = (v_lo * v_hi) <= 0.0
+valid_ray = c_ray_idx[sign_change]
+valid_t = c_t_mid[sign_change]
+valid_depth = np.full(valid_ray.shape, depth + 1, dtype=np.int32)
+valid_t_lo = c_t_lo[sign_change]
+valid_t_hi = c_t_hi[sign_change]
+# Front-to-back: keep only closest hit per ray
+for i in range(len(valid_ray)):
+ri = valid_ray[i]
+if valid_t[i] < result_t[ri]:
+result_hit[ri] = True
+result_t[ri] = valid_t[i]
+result_t_lo[ri] = valid_t_lo[i]
+result_t_hi[ri] = valid_t_hi[i]
+result_depth[ri] = valid_depth[i]
+# Remove converged intervals
+ray_idx = ray_idx[~converged]
+iv_t_lo = iv_t_lo[~converged]
+iv_t_hi = iv_t_hi[~converged]
+if len(ray_idx) == 0:
+break
+# Front-to-back pruning: remove intervals beyond known hits
+keep = iv_t_lo < result_t[ray_idx]
+ray_idx = ray_idx[keep]
+iv_t_lo = iv_t_lo[keep]
+iv_t_hi = iv_t_hi[keep]
+if len(ray_idx) == 0:
+break
+# Clip far end to known hit distance
+iv_t_hi = np.minimum(iv_t_hi, result_t[ray_idx])
+# Step 4: bisect
+t_mid = (iv_t_lo + iv_t_hi) * 0.5
+# Near half (prioritized) + far half
+new_ray_idx = np.concatenate([ray_idx, ray_idx])
+new_t_lo = np.concatenate([iv_t_lo, t_mid])
+new_t_hi = np.concatenate([t_mid, iv_t_hi])
+ray_idx = new_ray_idx
+iv_t_lo = new_t_lo
+iv_t_hi = new_t_hi
+return _build_result(
+R, result_hit, result_t, result_t_lo, result_t_hi, result_depth, origins, directions
+)
+def _build_result(
+R: int,
+hit: np.ndarray,
+t: np.ndarray,
+t_lo: np.ndarray,
+t_hi: np.ndarray,
+depth_count: np.ndarray,
+origins: np.ndarray,
+directions: np.ndarray,
+) -> TraceResult:
+"""Build TraceResult from flat arrays."""
+position = origins + t[:, None] * directions
+# Normal placeholder — will be filled by shader
+normal = np.zeros((R, 3), dtype=np.float64)
+return TraceResult(
+hit=hit,
+t=t,
+position=position,
+normal=normal,
+depth_count=depth_count,
+t_lo=t_lo,
+t_hi=t_hi,
+)
+You can’t perform that action at this time.

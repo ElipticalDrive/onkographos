@@ -1,0 +1,308 @@
+Descripción Pipeline de rendering híbrido que combina ray marching SDF para el mundo con rasterización tradicional para personajes/objetos animados. Lo mejor de ambos mundos. Motivación SDF es excelente para mundos procedurales, terreno,...
+
+Hybrid Rendering Pipeline (SDF + Mesh) · Issue #91 · lobinuxsoft/kooch · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Hybrid Rendering Pipeline (SDF + Mesh) #91
+New issue
+Copy link
+New issue
+Copy link
+Closed as not planned
+Closed as not planned
+Hybrid Rendering Pipeline (SDF + Mesh)#91
+Copy link
+Labels
+area:renderRender pipeline — passes, materials, post-processing, sky, shadowsRender pipeline — passes, materials, post-processing, sky, shadowsdifficulty:hardTarea compleja, requiere investigaciónTarea compleja, requiere investigaciónpriority:highAlta prioridadAlta prioridad
+Milestone
+M5: Mesh to SDF Pipeline
+Description
+lobinuxsoft
+opened on Jan 31, 2026
+Issue body actions
+Descripción
+Pipeline de rendering híbrido que combina ray marching SDF para el mundo con rasterización tradicional para personajes/objetos animados. Lo mejor de ambos mundos.
+Motivación
+SDF es excelente para mundos procedurales, terreno, colisiones. Pero es problemático para personajes animados. La solución es usar ambos.
+Arquitectura
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                   HYBRID RENDER PIPELINE                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Pass 0: GPU Culling & Preparation (compute)                    │
+│  ├── Frustum culling (meshlets y SDF instances)                 │
+│  ├── Occlusion culling (HiZ)                                    │
+│  ├── LOD selection                                              │
+│  └── Output: indirect draw buffers                              │
+│                                                                 │
+│  Pass 1: SDF Ray March                                          │
+│  ├── Input: Camera, SDF Scene                                   │
+│  ├── Process: Ray march mundo completo                          │
+│  └── Output: Color buffer + Depth buffer                        │
+│                                                                 │
+│  Pass 2: Mesh Rasterization                                     │
+│  ├── Input: Skinned meshes, Depth de Pass 1                     │
+│  ├── Process: Vertex skinning + Fragment shading                │
+│  ├── Depth test contra Pass 1 (oclusión correcta)               │
+│  └── Output: Color buffer (composited)                          │
+│                                                                 │
+│  Pass 3: Transparency (opcional)                                │
+│  ├── Partículas, efectos, vidrio                                │
+│  └── Order-independent transparency                             │
+│                                                                 │
+│  Pass 4: Post-processing                                        │
+│  ├── Bloom, Tonemapping                                         │
+│  ├── Anti-aliasing (TAA/FXAA)                                   │
+│  ├── Screen-space effects (SSAO, SSR, SSGI)                     │
+│  └── Output: Final frame                                        │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+Tareas
+Core Pipeline
+Render graph con dependency tracking automático (recursos, passes, barriers)
+Depth buffer compartido entre SDF y mesh passes
+Compositing correcto de ambos mundos
+Soporte para múltiples cámaras
+Async compute (overlap de passes independientes para mejor GPU utilization)
+SDF Pass
+Ray marching optimizado (ya en Ray marching básico (fragment shader) #22)
+Output depth reconstruido desde ray distance
+G-buffer opcional para efectos avanzados
+Mesh Pass
+Integración con skeletal animation (epic(anim): skeletal animation — pose base, a graph composable at runtime, and motion matching #92)
+PBR shading consistente con SDF pass
+Instanced rendering para NPCs duplicados
+GPU-driven rendering con indirect draw calls (draw commands generados por compute)
+Mesh LOD basado en distancia (screen-space error metric)
+Virtual Geometry / Meshlet Pipeline (ver issue dedicada)
+Integrar meshopt para meshlet generation y mesh optimization
+Cluster-based rendering: meshlets de ~64 vértices / ~124 triángulos
+GPU-driven meshlet culling (frustum + backface + occlusion per-cluster)
+LOD continuo sin pop-in (transición gradual entre niveles de detalle)
+Indirect dispatch/draw basado en culling results
+Compositing
+Depth-aware compositing
+Shadow receiving de SDF sobre mesh y viceversa
+Lighting consistente entre ambos
+Render Graph
+El render graph maneja automáticamente las dependencias entre passes y las barriers de sincronización:
+```
+pub struct RenderGraph {
+    passes: Vec<RenderPass>,
+    resources: HashMap<ResourceId, TransientResource>,
+}
+
+impl RenderGraph {
+    pub fn add_pass(&mut self, name: &str, setup: impl FnOnce(&mut PassBuilder)) {
+        // Declara qué recursos lee y escribe cada pass
+        // El graph calcula barriers automáticamente
+    }
+    
+    pub fn compile(&self) -> CompiledGraph {
+        // Topological sort de passes
+        // Merge compatible passes
+        // Insert barriers donde sea necesario
+        // Aliasing de memory para recursos transitorios
+    }
+    
+    pub fn execute(&self, compiled: &CompiledGraph, encoder: &mut CommandEncoder) {
+        // Ejecuta los passes en orden con barriers correctas
+    }
+}
+```
+Beneficios:
+No hay barriers manuales (source de bugs)
+Memory aliasing automático para texturas intermedias (ahorro de VRAM)
+Facilita async compute (el graph detecta passes independientes)
+Meshlet Pipeline (Nanite-inspired)
+Qué es meshopt y por qué usarlo
+meshopt (crate meshopt) es una librería de optimización de meshes que provee:
+Meshlet generation: divide un mesh en clusters de ~64 verts / ~124 tris
+Vertex cache optimization: reordena índices para mejor cache hit rate
+Overdraw optimization: reordena meshlets para minimizar overdraw
+Simplification: genera LODs con error bounds garantizados
+Quantization: comprime vertex data
+Pipeline de Virtual Geometry
+```
+                    OFFLINE (Asset Pipeline)
+┌──────────────────────────────────────────────────────┐
+│  Mesh → meshopt::simplify() → LOD chain              │
+│  LOD chain → meshopt::build_meshlets() → Meshlets    │
+│  Meshlets → Cluster DAG (parent-child relationships)  │
+│  Cluster DAG → GPU buffers                            │
+└──────────────────────────────────────────────────────┘
+
+                    RUNTIME (Per Frame)
+┌──────────────────────────────────────────────────────┐
+│  Compute Pass 0: Instance culling                     │
+│  ├── Frustum cull instances                           │
+│  └── Output: visible instance list                    │
+│                                                       │
+│  Compute Pass 1: Cluster/meshlet selection            │
+│  ├── Per-instance: traverse LOD DAG                   │
+│  ├── Screen-space error metric → select LOD level     │
+│  └── Output: visible meshlet list                     │
+│                                                       │
+│  Compute Pass 2: Meshlet culling                      │
+│  ├── Per-meshlet: frustum + backface + HiZ occlusion  │
+│  └── Output: indirect draw args                       │
+│                                                       │
+│  Render Pass: Draw visible meshlets                   │
+│  ├── Uses indirect draw (GPU-driven)                  │
+│  └── No CPU readback needed                           │
+└──────────────────────────────────────────────────────┘
+```
+Integración con SDF
+El depth buffer del SDF pass se usa como HiZ (Hierarchical-Z) para occlusion culling de meshlets:
+El terreno SDF oculta meshlets detrás de él → se descartan en GPU sin dibujar
+Reducción dramática de overdraw en escenas con terreno complejo
+Ejemplo de Código
+```
+pub struct HybridRenderer {
+    sdf_pass: SdfRenderPass,
+    mesh_pass: MeshRenderPass,
+    post_pass: PostProcessPass,
+    depth_texture: Texture,
+    color_texture: Texture,
+}
+
+impl HybridRenderer {
+    pub fn render(&mut self, world: &World, camera: &Camera) {
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        
+        // Pass 1: SDF world
+        self.sdf_pass.render(
+            &mut encoder, &self.depth_texture,
+            &self.color_texture, world, camera,
+        );
+        
+        // Pass 2: Mesh characters (reads SDF depth for occlusion)
+        self.mesh_pass.render(
+            &mut encoder, &self.depth_texture,
+            &self.color_texture, world, camera,
+        );
+        
+        // Pass 3: Post-process
+        self.post_pass.render(
+            &mut encoder, &self.color_texture, &self.output_texture,
+        );
+        
+        self.queue.submit([encoder.finish()]);
+    }
+}
+```
+```
+// mesh_fragment.wgsl
+@group(0) @binding(0) var depth_from_sdf: texture_depth_2d;
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let sdf_depth = textureLoad(depth_from_sdf, vec2<i32>(in.position.xy), 0);
+    if (in.position.z > sdf_depth) {
+        discard;  // Detrás del terreno SDF
+    }
+    return pbr_shade(in.normal, in.albedo, in.roughness, in.metallic);
+}
+```
+Consideraciones
+Sombras cruzadas
+Personaje proyecta sombra en terreno SDF
+Terreno SDF proyecta sombra en personaje
+Requiere shadow map híbrido o screen-space shadows
+Performance Budget
+GPU culling + LOD selection: ~0.3ms
+SDF pass: ~4-6ms (depende de complejidad de escena)
+Mesh pass: ~2-3ms (con virtual geometry, sin overdraw)
+Post-process: ~1-2ms (SSAO + bloom + TAA)
+Target: <16ms total (60 FPS)
+Crates Recomendados
+Crate
+Propósito
+meshopt
+Meshlet generation, LOD simplification, vertex cache optimization
+encase
+Layout de uniforms para todos los passes (ver #8)
+Referencias
+📚 Render Graphs
+📚 Hybrid Rendering in Games
+📚 wgpu Render Passes
+📚 Nanite - A Deep Dive (SIGGRAPH 2021)
+📚 GPU-Driven Rendering Pipelines (Wihlidal, EA)
+📚 meshopt (Arseny Kapoulkine)
+📚 Visibility Buffer Rendering
+Dependencias
+Bloqueado por: Ray marching básico (fragment shader) #22 (ray marching), Inicializar wgpu context #4 (wgpu context)
+Bloquea: epic(anim): skeletal animation — pose base, a graph composable at runtime, and motion matching #92 (skeletal animation), Jiggle Bones / Secondary Motion #93 (jiggle bones)
+Relacionado: feat(render): SDF Compute Pathtracer — iluminación físicamente correcta #127 (SDF pathtracer — modo Quality alternativo al ray march), feat(render): Temporal Denoiser (SVGF) — pathtracing en tiempo real #128 (denoiser temporal)
+Update — planet-scale + GPU-driven hardening (2026-04-26 ter)
+Post-#307 research sharpens the role of each existing pipeline:
+Pipeline
+Pre-#307
+Post-research
+SkyRenderPass
+backdrop
+unchanged
+RayMarchRenderer
+ALL SDFs
+near-camera only (<1-5 km) — primitives + live edits
+MeshPassRenderer
+glTF assets
+glTF + chunks far-camera baked via Surface Nets from the SDF field
+The hybrid pipeline already exists (3 pipelines coexisting in the same render target since #129 / #235 / #237). What this issue gates is the Surface Nets compute bake that takes a chunk's sparse SDF (#136) + delta tree (#307) and produces vertex / index buffers consumable by the existing MeshPassRenderer. No new pipeline, no rewrite of mesh / raymarch — just routing per chunk: near → raymarch SSBO, far → mesh draw indirect.
+Surface Nets, NOT Dual Contouring — simpler, no Hermite data, no sharp-feature edge cases, supported in Rust (fast-surface-nets crate). Reference: Nick Gildea's chunked terrain work + bonsairobo's deep-dive (https://bonsairobo.medium.com/smooth-voxel-mapping-...).
+No SDF puro raymarching for horizon. Confirmed by research: Dreams, Claybook, no shipping engine ever scaled this way. Sphere tracing collapses past 5 km (f32 precision); mesh bake is the only documented path to planet-scale.
+GPU-driven retained. Meshlet pipeline + indirect draw + HiZ occlusion remain. Surface Nets bake itself is a compute pass — no CPU job.
+Activity
+lobinuxsoft
+added
+priority:highAlta prioridadAlta prioridad
+difficulty:hardTarea compleja, requiere investigaciónTarea compleja, requiere investigación
+on Jan 31, 2026
+lobinuxsoft
+added this to the M5: Mesh to SDF Pipeline milestone on Feb 7, 2026
+lobinuxsoft
+added a commit that references this issue on Apr 26, 2026
+docs(research): pivot recommendation to postfix RPN tree (Approach D)
+...
+a18b2cb
+lobinuxsoft
+added
+area:renderRender pipeline — passes, materials, post-processing, sky, shadowsRender pipeline — passes, materials, post-processing, sky, shadows
+on Apr 26, 2026
+lobinuxsoft
+added a commit that references this issue on Apr 28, 2026
+feat(render/frustum): GPU-driven frustum cull writing DrawIndexedIndi…
+...
+cfc4827
+lobinuxsoft commented on May 2, 2026
+lobinuxsoft
+on May 2, 2026
+OwnerAuthor
+More actions
+Cerrada por pivot de stack 2026-05-02 — SDF raymarching deja de ser render principal del engine. Mesh GPU-driven (Nanite-style) reemplaza la pipeline; SDF queda como authoring tool / brushes para CSG suave (futuro: extracción a mesh vía dual contouring).
+Ver docs/research/stack_decisions_2026-05-02.md para el reasoning completo.
+lobinuxsoft
+closed this as not plannedon May 2, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area:renderRender pipeline — passes, materials, post-processing, sky, shadowsRender pipeline — passes, materials, post-processing, sky, shadowsdifficulty:hardTarea compleja, requiere investigaciónTarea compleja, requiere investigaciónpriority:highAlta prioridadAlta prioridad
+Projects
+No projects
+Milestone
+M5: Mesh to SDF PipelineNo due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

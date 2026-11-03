@@ -1,0 +1,116 @@
+Goal Make splat tools extract.surface complete. It currently hangs indefinitely on any real cloud. Reproduction $ splat tools extract.surface scene.clean.ply scene.glb # 37,284-point cloud (killed after 22 minutes, zero output) Reproduce...
+
+tools extract.surface: hangs indefinitely on real clouds (torch/Open3D OpenMP clash) · Issue #85 · daanrongen/splat · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+tools extract.surface: hangs indefinitely on real clouds (torch/Open3D OpenMP clash) #85
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+tools extract.surface: hangs indefinitely on real clouds (torch/Open3D OpenMP clash)#85
+Copy link
+Labels
+area:adaptersModel and backend adapter workModel and backend adapter workbugSomething isn't workingSomething isn't working
+Description
+daanrongen
+opened on Sep 7, 2026
+Issue body actions
+Goal
+Make splat tools extract.surface complete. It currently hangs indefinitely on any real cloud.
+Reproduction
+```
+$ splat tools extract.surface scene.clean.ply scene.glb     # 37,284-point cloud
+(killed after 22 minutes, zero output)
+```
+Reproduced repeatedly at 33,953, 20,000 and 8,000 points.
+Cause
+The algorithm is not the problem. The same Open3D calls in an isolated process complete in about two seconds:
+```
+n=33953  estimate_normals=0.03s  orient_MST=0.61s  poisson=1.13s  verts=104752
+write .obj 0.89s   write .ply 0.02s   write .gltf 0.06s   write .glb 0.05s
+```
+The trigger is process state. Importing torch before the Open3D call reliably reproduces the hang, together with an internal Open3D error:
+```
+[ERROR] .../PoissonRecon/Src/FEMTree.IsoSurface.specialized.inl (Line 1463) operator()
+```
+That is two OpenMP runtimes in one process: PyTorch bundles libomp, Open3D's Poisson iso-surface extraction is OpenMP-parallel, and the combination deadlocks. OMP_NUM_THREADS=1 and KMP_DUPLICATE_LIB_OK=TRUE were both tried and neither helps.
+splat's CLI always imports torch, because every registry/*.py runs CATALOG = _build_catalog() at module import and those _build_catalog bodies import the torch-backed adapters. The lazy-import comment in registry/gaussian.py describes an intent the module-level call defeats.
+adapters/mesh/poisson.py has 100% line coverage, because the tests use clouds small enough to dodge it. This is the clearest illustration that the current suite measures the wrapper, not the call.
+Scope
+Run Poisson in a subprocess with a timeout. Same shape adapters/render/blender.py already uses for an external tool, and it isolates the OpenMP runtime completely. This is the reliable fix.
+Derive normals from the Gaussians instead of estimating them. PoissonMeshExporter currently throws away scales and rotations and calls estimate_normals() + orient_normals_consistent_tangent_plane() on bare points. Each Gaussian's rotation matrix already has its shortest axis as the surface normal - that is the insight SuGaR/GOF are built on. It is faster, needs no MST orientation pass, and is more accurate for splats.
+Make catalog construction genuinely lazy so splat tools ... never imports torch at all.
+Add progress output; the command currently prints nothing for its entire duration.
+Add a test at a realistic point count (25k+), not just above MIN_POINTS.
+Notes
+Follows #78/#69. The adapter design is sound; only the execution context and the normal estimation need changing.
+Activity
+daanrongen
+added
+bugSomething isn't workingSomething isn't working
+area:adaptersModel and backend adapter workModel and backend adapter work
+on Sep 7, 2026
+daanrongen commented on Sep 7, 2026
+daanrongen
+on Sep 7, 2026
+OwnerAuthor
+More actions
+Escalation: this is not only a CLI hang, it segfaults the test suite.
+Observed once while running the full suite on an unrelated branch:
+```
+Fatal Python error: Segmentation fault
+
+Thread 0x0000000174517000 (most recent call first):
+  File "src/splat/adapters/mesh/poisson.py", line 57 in export
+  File "src/splat/application/tools/extract_surface.py", line 26 in execute
+  File "src/splat/handlers/tools/extract_surface.py", line 21 in handle
+  File "src/splat/http/tools/extract_surface.py", line 25 in extract_surface
+  File ".../threading.py", line 1075 in _bootstrap_inner
+
+Thread 0x00000001f62d2180 (most recent call first):
+  File "tests/http/test_extract_surface.py", line 15 in test_extract_surface_returns_mesh_bytes
+```
+Note the call stack: FastAPI TestClient runs the handler in a worker thread, so Open3D's OpenMP-parallel Poisson runs off the main thread with torch's libomp already loaded. Same two-OpenMP-runtimes root cause as the CLI hang, different symptom.
+It is intermittent - 3 subsequent runs on the same branch and 6 on clean main did not reproduce it - which makes it worse, not better: an intermittent segfault in CI is far harder to diagnose than a reliable hang. It also means the current suite's green status is not evidence this is safe.
+This strengthens the case for the first scope item (run Poisson in a subprocess with a timeout) over the others: it fixes the hang, the segfault, and the thread-safety question in one move, because the OpenMP runtime is then isolated in a process that never imported torch.
+daanrongen commented on Oct 3, 2026
+daanrongen
+on Oct 3, 2026
+OwnerAuthor
+More actions
+Tried to reproduce on current main (macOS arm64, torch 2.14, Python 3.12): a 34,000-point synthetic sphere-shell cloud finishes splat tools extract.surface in about 4s (88k vertices, 170k faces, valid .glb).
+splat tools no longer imports torch (catalogs became lazy in Improve CLI cold start and backend loading #114).
+Importing torch first in the same process, the trigger described above, also completes in about 4.5s.
+So I can't reproduce the hang with current dependency versions and have made no changes. If it still happens for you, the Open3D and torch versions would help. The subprocess isolation and normals-from-Gaussians items are still open as hardening.
+daanrongen commented on Oct 3, 2026
+daanrongen
+on Oct 3, 2026
+OwnerAuthor
+More actions
+Since #114 the CLI no longer imports torch on the extract.surface path, so the reported Open3D/OpenMP clash no longer triggers. Poisson moves behind a mesh stage backend in the tools dissolution issue; reopen if reproduced in splat mcp or splat http.
+daanrongen
+closed this as completedon Oct 3, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area:adaptersModel and backend adapter workModel and backend adapter workbugSomething isn't workingSomething isn't working
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

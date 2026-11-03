@@ -1,0 +1,110 @@
+Experiments with Blender Python. Contribute to doublemover/blendslop development by creating an account on GitHub.
+
+Fix visual-hull coordinate drift and all-true visibility non-invariance · Issue #12 · doublemover/blendslop · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Fix visual-hull coordinate drift and all-true visibility non-invariance #12
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Fix visual-hull coordinate drift and all-true visibility non-invariance#12
+Copy link
+Description
+doublemover
+opened on Oct 23, 2026
+Issue body actions
+Priority: P1 correctness. Scope: shared support construction, not a new fitting algorithm.
+Proven defect
+The dense/chunked visual-hull path queries occupancy at world interval endpoints, then stores the result in a VolumeGrid whose transform represents cell centers. Its calibrated image adapter feeds pixel-center coordinates to a lookup which floors them without the required half-pixel offset. A further ROI clamp rescales the affine map at the camera boundary. Consequently a voxel's stored occupancy need not describe the world coordinate reported for it, and adding an all-true validity mask changes geometry even though the evidence is identical.
+This is present at PR #8 base 926ef4adf9adc0bf2956585416d2de819d9ccd01. The transferred development packet contains identical relevant module text, ignoring CRLF/LF; it is not a defect inferred solely from later uncommitted source.
+Source chain
+reconstruction/point_cloud/hull.py:108-111: any explicit valid_mask, including all-true, dispatches to the hierarchy.
+integration/multi_view/visual_hull.py:525-527 and vectorized sampling at 412-414; reconstruction/point_cloud/hull.py:408-410: linspace(min,max,N) samples interval endpoints.
+reconstruction/point_cloud/hull.py:189-194 wraps those samples in a DenseVolumeGrid.
+volume/contracts.py:138-139,162-164: voxel_size=extent/N; origin=minimum+0.5*voxel_size.
+reconstruction/point_cloud/hull.py:341-344 converts calibrated world coordinates into integer pixel-center coordinates.
+integration/multi_view/visual_hull.py:505-506 floors those coordinates, unlike visibility.point_support, which floors project_vertices(...)+0.5.
+integration/multi_view/visual_hull.py:78-88 clamps the derived image ROI. When projected bounds reach/exceed the viewport, that changes the calibration rather than merely testing visibility.
+reconstruction/adaptive_geometry.py:39-41,61-73 already uses cell centers and unknown-outside-viewport semantics.
+Permalinks: hull dispatch/adapter, legacy projector, voxel transform.
+Reproduction
+Pure Python helper check from blender_blocking/, with existing project dependencies and both the repository root and blender_blocking/ on PYTHONPATH:
+```
+from dataclasses import replace
+import numpy as np
+from reconstruction.types import Bounds2D, Bounds3D
+from reconstruction.targets import make_reconstruction_target
+from reconstruction.point_cloud.hull import visual_hull_grid_from_target
+from reconstruction.visibility import point_support
+
+mask = np.zeros((23, 31), bool)
+mask[4:18, 8:24] = True
+base = make_reconstruction_target(
+    masks_by_view={v: mask for v in ('front', 'side', 'top')},
+    bounds=Bounds3D.from_min_max((-1.,)*3, (1.,)*3))
+base = replace(base, constraints=tuple(
+    replace(c, camera=replace(c.camera, bounds=Bounds2D(-1., -1., 1., 1.)))
+    for c in base.constraints))
+explicit = replace(base, constraints=tuple(
+    replace(c, valid_mask=np.ones_like(c.mask)) for c in base.constraints))
+a = visual_hull_grid_from_target(base, resolution=64, backend='dense')
+b = visual_hull_grid_from_target(explicit, resolution=64, backend='dense')
+indices = np.stack(np.meshgrid(*[np.arange(64)]*3, indexing='ij'), axis=-1).reshape(-1, 3)
+expected, _ = point_support(base, a.transform.index_to_world(indices))
+print(np.count_nonzero(a.to_dense() != b.to_dense()))  # 5947
+print(np.count_nonzero(a.to_dense().ravel() != expected))  # 5947
+print(np.count_nonzero(b.to_dense().ravel() != expected))  # 0
+```
+Additional controlled results:
+Rectangle at 32³: 883 changed voxels; at 64³: 4,858 false positives plus 1,089 false negatives.
+Ring at 64³: 8,675 changed voxels. Chunked and dense agree exactly on all 12 tested fixture/resolution combinations; both agree on the same wrong convention.
+DS50-style 256² masks, fixed ±0.6 viewport, mask-derived box bounds, 64³ support: 246,078 occupied vs 262,144 expected. All expected cell centers are inside the observed masks; 16,066 cells are incorrectly empty.
+Isolated lookup test, foreground column 3, projected u=[2.75,3.25,3.75,4.25]: current hull support=[false,true,true,false]; canonical support=[true,true,false,false]. This bypasses grid sampling and isolates the half-pixel error.
+For domain [-0.75,0.75] with N=8, queried endpoints and reported centers disagree by up to 0.09375 world units, exactly half a cell.
+Probe environment: Python 3.12.14, NumPy 2.5.4, SciPy 1.18.1, Pillow 13.0.0, scikit-image 0.26.0. These are assistant-cloud pure-Python synthetic probes, not repaired/re-fitted DS50 scores or native Blender qualification. Existing 24 projection/pixel/adaptive/DS50 helper tests pass and do not enforce this cross-path invariant.
+Impact and limits
+The all-50 campaign's plain hull, compact hull support and original fitter's target cloud use this dense support route. Correcting it can change all three methods; compare them only after rebuilding their input-derived support under the same version. The original fitter's large interior errors are not established to be caused by this bug. Its 71,471 missing interior input pixels and deadline exhaustion require independent work.
+Implementation plan
+Make VoxelTransform the only generator of query coordinates for dense, chunked, sparse and hierarchy paths. Never attach a different transform after queries.
+Compile each view once into a shared affine world-to-pixel-center map, then use one floor(center+0.5) pixel-cell lookup with an explicit in-viewport mask. Keep legacy endpoint-center cameras as a named adapter, not an implicit branch inside storage backends.
+Remove calibrated-camera normalization through clamped object ROIs. Test out-of-viewport points as unknown, consistently with point_support; do not clamp them to an observed border pixel.
+Keep exact center-query support and conservative footprint support as separately named modes. Storage backend and valid_mask=None vs all-true must not choose different mathematics.
+Reuse compiled per-view affine maps/allowed-mask integral images; evaluate coordinate slabs without dense global point allocations. Preserve chunked/sparse scalability.
+Version support/cache/geometry receipt identities. Do not overwrite the frozen diagnostic50 campaign; run a new version after the contract is fixed.
+Acceptance
+Exact equality to point_support(target, grid.transform.index_to_world(indices)) for nonconservative support across dense/chunked/sparse/hierarchy.
+None/all-true validity, storage backend, chunk size and vectorized/scalar mode produce identical support for the same declared contract.
+Cover non-square images and anisotropic world domains; crops and padding; full-viewport and beyond-viewport search bounds; canonical front/side/top; pixel-boundary ties; one-pixel strips; rings; disconnected masks; unknown pixels and empty evidence.
+Changing only storage never changes mesh world bounds or mesh projection, modulo explicitly documented extraction triangulation differences.
+Conservative mode contains exact support and records its approximation; it must not claim exact pixel agreement.
+All existing helpers plus new metamorphic tests pass; native Blender replay remains a separate qualification.
+Related implementation dependencies
+Validate mask/camera packets deeply and share one calibration factory #15 owns the validated camera/evidence factory consumed by the common projector.
+Add overlap-aware multiresolution support compression and report the fit–complexity frontier #22 should evaluate overlap-aware hull compression only after this support-coordinate contract is corrected, so compression comparisons do not bake in an inconsistent grid.
+Qualify projected topology by evidence role, feature scale and raster operator #17 owns role/scale/operator-qualified projection diagnostics. None of these changes authorizes overwriting frozen diagnostic50 receipts.
+Activity
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

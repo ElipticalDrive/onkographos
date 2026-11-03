@@ -1,0 +1,529 @@
+--- v003.md
++++ v004.md
+@@ -1,331 +1,221 @@
+ # 2D Gaussian Projection with Covariance Stabilization
+ 
+-Also called: 2D Gaussian Projection, 2D Image Generation from 3D Gaussians, 3D Gaussian Splatting Rendering Pipeline, Jacobian Linearization, Perspective Projection of 3D Gaussians, Rasterization of 3D Gaussians, Tsplat projection
++Also called: 2D Gaussian Projection, EWA Projection, Elliptical Weighted Average projection, 2D Covariance Projection, Covariance Projection, Screen-space Gaussian Projection, EWA Splatting Projection, Perspective Projection of 3D Gaussians, Perspective-correct covariance projection
+ 
+ ## Overview
+-This method projects a set of 3D Gaussians onto a 2D image plane to generate a rendered image, solving the problem of efficiently rasterizing volumetric scene representations without explicit ray-marching [S2, unofficial]. It differs from sibling methods like [Ray-marching on 3D Gaussians](1036-ray-marching-on-3d-gaussians.md) by using explicit screen-space splatting with alpha compositing, and from [Row-constant hoisting for Gaussian Splatting Rasterization](1195-row-constant-hoisting-for-gaussian-splatting-rasterization.md) by defining the core projection and covariance stabilization logic rather than just the inner-loop optimization [G]. The key distinction is the linearization of the perspective projection via the Jacobian to approximate the resulting 2D Gaussian, combined with a diagonal epsilon stabilization to ensure numerical invertibility [S1, unofficial, S2, unofficial].
++This method projects a 3D Gaussian primitive, defined by its mean and covariance in world space, onto the 2D image plane to produce a screen-space Gaussian ellipse (splat) for rasterization. It solves the problem of rendering anisotropic, perspective-distorted 3D distributions efficiently by approximating the non-linear perspective projection with a local affine transformation, thereby preserving the Gaussian form in 2D [S1, S3]. Unlike [Gaussian Splatting](946-gaussian-splatting.md) which defines the primitives, this method handles the geometric transformation; it differs from [2D Gaussian Splatting](1456-2d-gaussian-splatting.md) by operating on 3D primitives projected to 2D, rather than native 2D primitives [S3].
+ 
+ ## How it works
+-The method computes the 2D screen-space covariance matrix and its inverse for each 3D Gaussian splat, ensuring numerical stability by adding a small epsilon to the diagonal [S1, unofficial]. Since perspective projection is a nonlinear transform, the result is not an exact 2D Gaussian; the method approximates it by locally linearizing the projection function using its Jacobian at the splat center [S1, unofficial, S2, unofficial].
+-
+-### Inputs and Outputs
+ **Inputs:**
+-*   **Splats:** A collection of $M$ 3D Gaussians. Each splat $i$ is defined by learnable parameters [S2, unofficial]:
+-    *   Center $p_w \in \mathbb{R}^3$ (world coordinates) [S2, unofficial].
+-    *   Rotation $q \in \mathbb{R}^4$ (unit quaternion) [S2, unofficial].
+-    *   Scale $s \in \mathbb{R}^3$ (positive vector) [S2, unofficial].
+-    *   Opacity $\alpha \in [0, 1]$ [S2, unofficial].
+-    *   Spherical Harmonics coefficients $h$ (view-dependent color) [S2, unofficial].
+-*   **Camera:**
+-    *   Rotation $R_{cw} \in SO(3)$ and translation $t_{cw} \in \mathbb{R}^3$ (world-to-camera transform) [S2, unofficial].
+-    *   Intrinsics $K$: focal lengths $f_x, f_y$ and principal point $c_x, c_y$ [S2, unofficial].
+-*   **Parameters:**
+-    *   $\epsilon_{2d}$: Small dilation for covariance stabilization (default 0.3) [S1, unofficial].
+-    *   $l_{max}$: Maximum degree of spherical harmonics (typically 3) [S2, unofficial].
++- 3D Gaussian parameters: mean $\mu \in \mathbb{R}^3$ (world space), rotation quaternion $q$, scale vector $s$, opacity $\alpha$, and spherical harmonic coefficients $h$ for color.
++- Camera parameters: View matrix $V$, Projection matrix $P$, image width $W$, height $H$, focal lengths $f_x, f_y$, principal point $(c_x, c_y)$.
+ 
+ **Outputs:**
+-*   A 2D image (framebuffer) where each pixel $j$ contains an accumulated RGB color $\gamma_j$ [S2, unofficial].
+-
+-### Data Structures
+-The projected splat data structure, stored after projection and sorting, contains [S1, unofficial]:
+-*   `screen`: `Vec2` (pixel center $sx, sy$).
+-*   `depth`: `f32` ($z_c$, positive in front of camera).
+-*   `cov2d_inv`: `Mat2` (inverse 2D covariance matrix).
+-*   `bbox`: `[i32; 4]` (inclusive bounding box $x_0, y_0, x_1, y_1$).
+-*   `color`: `Vec3` (RGB color).
+-*   `opacity`: `f32` (intrinsic opacity $\alpha$).
+-
+-### Steps
+-
+-1.  **Transform to Camera Coordinates:**
+-    Transform the 3D Gaussian center $p_w$ to camera coordinates $p_c$:
+-    $$ p_c = R_{cw} p_w + t_{cw} $$
+-    Let $p_c = (x, y, z)^T$ [S2, unofficial].
+-
+-2.  **Compute 3D Covariance Matrix:**
+-    Construct the 3x3 symmetric positive-definite covariance matrix $\Sigma$ from rotation $q$ and scale $s$:
+-    $$ \Sigma = R S S^T R^T $$
+-    Where $R$ is the rotation matrix derived from $q$:
+-    $$ R = \begin{bmatrix} 1 - 2(q_y^2 + q_z^2) & 2(q_xq_y - q_zq_w) & 2(q_xq_z + q_yq_w) \\ 2(q_xq_y + q_zq_w) & 1 - 2(q_x^2 + q_z^2) & 2(q_yq_z - qxq_w) \\ 2(q_xq_z - q_yq_w) & 2(q_yq_z + qxq_w) & 1 - 2(q_x^2 + q_y^2) \end{bmatrix} $$
+-    And $S$ is the diagonal scale matrix:
+-    $$ S = \begin{bmatrix} s_0 & 0 & 0 \\ 0 & s_1 & 0 \\ 0 & 0 & s_2 \end{bmatrix} $$
+-    $\Sigma$ is stored as a 6-element upper triangular vector $\sigma$ for efficiency [S2, unofficial].
+-
+-3.  **Compute Jacobian of Projection:**
+-    The projection mapping from view space $(x, y, z)$ to pixel coordinates $(u, v)$ is:
+-    $$ u = f_x \frac{x}{z} + c_x, \quad v = f_y \frac{y}{z} + c_y $$
+-    The Jacobian $J$ of this function with respect to $(x, y, z)$ is:
+-    $$ J = \begin{bmatrix} f_x/z & 0 & -f_x x/z^2 \\ 0 & f_y/z & -f_y y/z^2 \end{bmatrix} $$
+-    [S2, unofficial].
+-
+-4.  **Compute 2D Covariance Matrix:**
+-    Project the 3D covariance using the Jacobian and the camera rotation part of the view transform [S2, unofficial]. The 2D covariance $\Sigma'$ is:
+-    $$ \Sigma' = J R_{cw} \Sigma R_{cw}^T J^T $$
+-    The result $\Sigma'$ is a 2x2 symmetric matrix [S2, unofficial]. To ensure numerical stability and positive definiteness, a small epsilon $\epsilon_{2d}$ is added to the diagonal entries:
+-    $$ cov2d_{00} = \Sigma'_{00} + \epsilon_{2d} $$
+-    $$ cov2d_{11} = \Sigma'_{11} + \epsilon_{2d} $$
+-    $$ cov2d_{01} = \Sigma'_{01} $$
+-    [S1, unofficial]. This addition guarantees that $x^T (A^T A + \lambda I) x = \|Ax\|^2 + \lambda \|x\|^2 > 0$, making the matrix strictly positive definite and invertible [S1, unofficial].
+-
+-5.  **Compute Inverse 2D Covariance:**
+-    Calculate the determinant:
+-    $$ det = cov2d_{00} cov2d_{11} - cov2d_{01}^2 $$
+-    If $det \le 0.0$, the splat is degenerate or invalid; return None (cull splat) [S1, unofficial].
+-    Compute the inverse determinant:
+-    $$ inv\_det = 1.0 / det $$
+-    Construct the inverse matrix:
+-    $$ cov2d\_inv = \frac{1}{det} \begin{bmatrix} cov2d_{11} & -cov2d_{01} \\ -cov2d_{01} & cov2d_{00} \end{bmatrix} $$
+-    Explicitly:
+-    $$ cov2d\_inv = \begin{bmatrix} cov2d_{11} \cdot inv\_det & -cov2d_{01} \cdot inv\_det \\ -cov2d_{01} \cdot inv\_det & cov2d_{00} \cdot inv\_det \end{bmatrix} $$
+-    [S1, unofficial].
+-
+-6.  **Compute Screen Position:**
+-    Perform the perspective divide to get screen coordinates $(sx, sy)$:
+-    $$ sx = f_x \frac{x}{z} + c_x $$
+-    $$ sy = f_y \frac{y}{z} + c_y $$
+-    [S1, unofficial, S2, unofficial].
+-
+-7.  **Compute View-Dependent Color:**
+-    Calculate the direction vector $r$ from the camera center to the Gaussian center in world coordinates:
+-    $$ r = \frac{p_w - t_{wc}}{\lVert p_w - t_{wc} \rVert} $$
+-    where $t_{wc}$ is the camera center in world coordinates (inverse of $t_{cw}$ relative to world) [S2, unofficial].
+-    Evaluate the color $c$ using spherical harmonics:
+-    $$ c(r, h) = \sum_{l=0}^{l_{max}} \sum_{m=-l}^{l} h_{lm} Y_l^m(r) $$
+-    [S2, unofficial].
+-
+-8.  **Compute Bounding Box:**
+-    Compute a tight bounding box based on an opacity threshold $\tau$ (e.g., 0.05) [S1, unofficial]. Calculate $k^2$:
+-    $$ k^2 = \min(2.0 \cdot \ln(\frac{\alpha}{\tau}), max\_k2) $$
+-    If $k^2 \le 0.0$, return None [S1, unofficial].
+-    Compute half-widths:
+-    $$ rx_f = \sqrt{k^2 \cdot cov2d_{00}} $$
+-    $$ ry_f = \sqrt{k^2 \cdot cov2d_{11}} $$
+-    If not finite or $< 1.0$, return None [S1, unofficial].
+-    Compute integer bounding box:
+-    $$ x_0 = \lfloor sx - rx_f \rfloor, \quad y_0 = \lfloor sy - ry_f \rfloor $$
+-    $$ x_1 = \lceil sx + rx_f \rceil, \quad y_1 = \lceil sy + ry_f \rceil $$
+-    Clip to framebuffer dimensions $[0, w-1] \times [0, h-1]$ [S1, unofficial]. If $x_0 > x_1$ or $y_0 > y_1$, return None [S1, unofficial].
+-
+-9.  **Sort and Composite:**
+-    Sort all projected splats by depth $z$ (ascending, closest first) [S2, unofficial].
+-    Initialize framebuffer with $(0, 0)$ for $(RGB, \alpha)$ [G].
+-    For each pixel $j$, iterate through splats $i$ that project to it (sorted front-to-back):
+-    $$ \alpha_{ij}' = \exp(-0.5 (u_i - x_j) \Sigma_i'^{-1} (u_i - x_j)^T) \alpha_i $$
+-    $$ \tau_{ij} = \prod_{k=1}^{i-1} (1 - \alpha_{kj}') $$
+-    $$ \gamma_j = \sum_{i \in N} \alpha_{ij}' c_i \tau_{ij} $$
+-    where $N$ is the set of Gaussians projecting to pixel $j$, $u_i$ is the projected center, and $x_j$ is the pixel coordinate [S2, unofficial].
+-
+-### Pseudocode
++- Screen-space mean $\mu_{2D} \in \mathbb{R}^2$.
++- Screen-space covariance matrix $\Sigma_{2D} \in \mathbb{R}^{2 \times 2}$.
++- Inverse covariance (conic) $\Sigma_{2D}^{-1}$.
++- Bounding box for rasterization.
++
++**Data Structures:**
++The projected Gaussian is stored with the following fields [S2]:
++- `screen`: `Vec2` (pixel center $s_x, s_y$).
++- `depth`: `f32` (camera-space $z_c$, positive in front).
++- `cov2d_inv`: `Mat2` (inverse 2D covariance).
++- `bbox`: `[i32; 4]` (inclusive $x_0, y_0, x_1, y_1$).
++- `color`: `Vec3` (RGB).
++- `opacity`: `f32` (in $[0, 1]$).
++
++**Steps:**
++
++1. **Reconstruct 3D Covariance:**
++   Compute the 3D covariance matrix $\Sigma$ from the quaternion $q$ and scale $s$. The rotation matrix $R$ is derived from $q$, and the scale matrix $S$ is diagonal with entries $\exp(s_i)$ [S1, S6]:
++   $$ \Sigma = R S S^\top R^\top $$
++   Where $R$ is:
++   $$ R = \begin{bmatrix} 1 - 2(q_y^2 + q_z^2) & 2(q_xq_y - q_zq_w) & 2(q_xq_z + q_yq_w) \\ 2(q_xq_y + q_zq_w) & 1 - 2(q_x^2 + q_z^2) & 2(q_yq_z - q_xq_w) \\ 2(q_xq_z - q_yq_w) & 2(q_yq_z + q_xq_w) & 1 - 2(q_x^2 + q_y^2) \end{bmatrix} $$
++   And $S = \text{diag}(\exp(s_0), \exp(s_1), \exp(s_2))$ [S6].
++
++2. **Transform to Camera Space:**
++   Transform the mean to camera space: $\mu_c = V_{3\times3} \mu + t_{cw}$ [S6].
++   Transform the covariance to eye space using the rotation block $M = V_{3\times3}$ of the view matrix. Translation is ignored for covariance [S1]:
++   $$ \Sigma_{cam} = M \Sigma M^\top $$
++   This relies on the property that if $X \sim \mathcal{N}(\mu, \Sigma)$, then $AX \sim \mathcal{N}(A\mu, A\Sigma A^\top)$ [S1].
++
++3. **Compute Jacobian of Perspective Projection:**
++   Linearize the perspective projection locally at $\mu_c = (x_c, y_c, z_c)$ using the Jacobian $J$ [S1, S3]:
++   $$ J = \begin{pmatrix} -\frac{f_x}{z_c} & 0 & \frac{f_x x_c}{z_c^2} \\ 0 & -\frac{f_y}{z_c} & \frac{f_y y_c}{z_c^2} \\ 0 & 0 & 0 \end{pmatrix} $$
++   Focal lengths are derived from the projection matrix entries $p_{00}, p_{11}$: $f_x = p_{00} \frac{W}{2}$, $f_y = p_{11} \frac{H}{2}$ [S1].
++
++4. **Project Covariance to 2D:**
++   Compute the unnormalized 2D covariance:
++   $$ \Sigma'_{2D} = J_{2\times3} \Sigma_{cam} J_{2\times3}^\top $$
++   where $J_{2\times3}$ is the top two rows of $J$ [S1, S3].
++
++5. **Covariance Stabilization (Low-Pass Filter):**
++   Add a small epsilon $\epsilon_{2d}$ to the diagonal elements to ensure positive definiteness and prevent singularities or infinitely small Gaussians [S2, S4]:
++   $$ \Sigma_{2D} = \Sigma'_{2D} + \begin{bmatrix} \epsilon_{2d} & 0 \\ 0 & \epsilon_{2d} \end{bmatrix} $$
++   Typical value: $\epsilon_{2d} = 0.3$ [S2]. This guarantees invertibility because $x^T (A^T A + \lambda I) x = \|Ax\|^2 + \lambda \|x\|^2 > 0$ for $\lambda > 0$ [S2].
++
++6. **Compute Screen Mean:**
++   Apply the full MVP transform and perspective divide to get the screen coordinates [S1]:
++   $$ \text{clip} = P \cdot V \cdot \mu = (x_c, y_c, z_c, w_c)^\top $$
++   $$ \mu_{2D} = \left( \frac{x_c}{w_c} \frac{W}{2} + c_x, \frac{y_c}{w_c} \frac{H}{2} + c_y \right) $$
++   Note: Some implementations compute NDC first: $\text{ndc} = (x_c/w_c, y_c/w_c, z_c/w_c)$, then map to pixels [S1].
++
++7. **Compute Inverse Covariance (Conic):**
++   For a symmetric matrix $\begin{bmatrix} a & b \\ b & d \end{bmatrix}$, the inverse is:
++   $$ \det = ad - b^2 $$
++   If $\det \le 0$, cull the splat [S2].
++   $$ \Sigma_{2D}^{-1} = \frac{1}{\det} \begin{bmatrix} d & -b \\ -b & a \end{bmatrix} $$
++   Store as upper triangular vector $(a, b, d)$ for efficiency [S6].
++
++8. **Compute Bounding Box:**
++   Compute eigenvalues $\lambda_{1,2}$ and eigenvectors $e_1, e_2$ of $\Sigma_{2D}$ [S1]:
++   $$ \lambda_{1,2} = \frac{\mathrm{tr}(\Sigma_{2D})}{2} \pm \sqrt{\frac{\mathrm{tr}(\Sigma_{2D})^2}{4} - \det(\Sigma_{2D})} $$
++   $$ v_1 = (\Sigma_{12}, \lambda_1 - \Sigma_{11}), \quad e_1 = \frac{v_1}{\|v_1\|}, \quad e_2 = (e_{1,2}, -e_{1,1}) $$
++   Define half-axes $b_1 = 3\sqrt{\lambda_1}e_1$ and $b_2 = 3\sqrt{\lambda_2}e_2$ (using $3\sigma$ cutoff) [S1].
++   The bounding box is the axis-aligned box containing the parallelogram spanned by $b_1$ and $b_2$ centered at $\mu_{2D}$ [S1].
++
++**Pseudocode:**
+ 
+ ```python
+ import math
+-from typing import List, Tuple, Optional
+-
+-class ProjectedSplat:
+-    def __init__(self, screen: Tuple[float, float], depth: float, cov2d_inv: Tuple[Tuple[float, float], Tuple[float, float]], bbox: Tuple[int, int, int, int], color: Tuple[float, float, float], opacity: float):
+-        self.screen = screen
+-        self.depth = depth
+-        self.cov2d_inv = cov2d_inv
+-        self.bbox = bbox
+-        self.color = color
+-        self.opacity = opacity
+-
+-def project_splat(splat, camera, epsilon_2d=0.3):
+-    p_w = splat.p_w
+-    R_cw = camera.R_cw
+-    t_cw = camera.t_cw
+-    
+-    # 1. Transform to camera coordinates: p_c = R_cw * p_w + t_cw
+-    x = R_cw[0][0]*p_w[0] + R_cw[0][1]*p_w[1] + R_cw[0][2]*p_w[2] + t_cw[0]
+-    y = R_cw[1][0]*p_w[0] + R_cw[1][1]*p_w[1] + R_cw[1][2]*p_w[2] + t_cw[1]
+-    z = R_cw[2][0]*p_w[0] + R_cw[2][1]*p_w[1] + R_cw[2][2]*p_w[2] + t_cw[2]
+-    
+-    # 2. Compute 3D Covariance Sigma = R * S * S^T * R^T
+-    qw, qx, qy, qz = splat.q
+-    R_mat = (
+-        (1 - 2*(qy**2 + qz**2), 2*(qx*qy - qz*qw), 2*(qx*qz + qy*qw)),
+-        (2*(qx*qy + qz*qw), 1 - 2*(qx**2 + qz**2), 2*(qy*qz - qx*qw)),
+-        (2*(qx*qz - qy*qw), 2*(qy*qz + qx*qw), 1 - 2*(qx**2 + qy**2))
+-    )
+-    ss = (splat.s[0]**2, splat.s[1]**2, splat.s[2]**2)
+-    r_diag = (
+-        (R_mat[0][0]*ss[0], R_mat[0][1]*ss[1], R_mat[0][2]*ss[2]),
+-        (R_mat[1][0]*ss[0], R_mat[1][1]*ss[1], R_mat[1][2]*ss[2]),
+-        (R_mat[2][0]*ss[0], R_mat[2][1]*ss[1], R_mat[2][2]*ss[2])
+-    )
+-    sigma = (
+-        (r_diag[0][0]*R_mat[0][0] + r_diag[0][1]*R_mat[1][0] + r_diag[0][2]*R_mat[2][0],
+-         r_diag[0][0]*R_mat[0][1] + r_diag[0][1]*R_mat[1][1] + r_diag[0][2]*R_mat[2][1],
+-         r_diag[0][0]*R_mat[0][2] + r_diag[0][1]*R_mat[1][2] + r_diag[0][2]*R_mat[2][2]),
+-        (r_diag[1][0]*R_mat[0][0] + r_diag[1][1]*R_mat[1][0] + r_diag[1][2]*R_mat[2][0],
+-         r_diag[1][0]*R_mat[0][1] + r_diag[1][1]*R_mat[1][1] + r_diag[1][2]*R_mat[2][1],
+-         r_diag[1][0]*R_mat[0][2] + r_diag[1][1]*R_mat[1][2] + r_diag[1][2]*R_mat[2][2]),
+-        (r_diag[2][0]*R_mat[0][0] + r_diag[2][1]*R_mat[1][0] + r_diag[2][2]*R_mat[2][0],
+-         r_diag[2][0]*R_mat[0][1] + r_diag[2][1]*R_mat[1][1] + r_diag[2][2]*R_mat[2][1],
+-         r_diag[2][0]*R_mat[0][2] + r_diag[2][1]*R_mat[1][2] + r_diag[2][2]*R_mat[2][2])
+-    )
+-
+-    # 3. Compute Jacobian J
+-    fx = camera.fx
+-    fy = camera.fy
+-    inv_z = 1.0 / z
++import numpy as np
++
++def quaternion_to_rotation_matrix(q):
++    """Convert quaternion (w, x, y, z) to 3x3 rotation matrix."""
++    w, x, y, z = q
++    return np.array([
++        [1 - 2*(y*y + z*z), 2*(x*y - z*w),     2*(x*z + y*w)],
++        [2*(x*y + z*w),     1 - 2*(x*x + z*z), 2*(y*z - x*w)],
++        [2*(x*z - y*w),     2*(y*z + x*w),     1 - 2*(x*x + y*y)]
++    ])
++
++def project_gaussian(gaussian, camera):
++    """
++    gaussian: dict with 'mean' (3,), 'q' (4,), 'scale' (3,), 'opacity' (float)
++    camera: dict with 'view' (4x4), 'proj' (4x4), 'W', 'H', 'fx', 'fy', 'cx', 'cy'
++    """
++    # 1. Reconstruct 3D Covariance
++    R = quaternion_to_rotation_matrix(gaussian['q'])
++    S = np.diag(np.exp(gaussian['scale']))
++    Sigma_3d = R @ S @ S.T @ R.T
++    
++    # 2. Transform to Camera Space
++    # Extract 3x3 rotation from view matrix
++    M = camera['view'][:3, :3]
++    Sigma_cam = M @ Sigma_3d @ M.T
++    
++    # Transform mean to camera space
++    mu_cam = M @ gaussian['mean'] + camera['view'][:3, 3]
++    x_c, y_c, z_c = mu_cam
++    
++    # 3. Compute Jacobian
++    # J = [[-fx/z, 0, fx*x/z^2], [0, -fy/z, fy*y/z^2]]
++    inv_z = 1.0 / z_c
+     inv_z2 = inv_z * inv_z
+-    J = (
+-        (fx * inv_z, 0.0, -fx * x * inv_z2),
+-        (0.0, fy * inv_z, -fy * y * inv_z2)
+-    )
+-
+-    # 4. Compute 2D Covariance Sigma' = J * R_cw * Sigma * R_cw^T * J^T
+-    T = (
+-        (R_cw[0][0]*sigma[0][0] + R_cw[0][1]*sigma[1][0] + R_cw[0][2]*sigma[2][0],
+-         R_cw[0][0]*sigma[0][1] + R_cw[0][1]*sigma[1][1] + R_cw[0][2]*sigma[2][1],
+-         R_cw[0][0]*sigma[0][2] + R_cw[0][1]*sigma[1][2] + R_cw[0][2]*sigma[2][2]),
+-        (R_cw[1][0]*sigma[0][0] + R_cw[1][1]*sigma[1][0] + R_cw[1][2]*sigma[2][0],
+-         R_cw[1][0]*sigma[0][1] + R_cw[1][1]*sigma[1][1] + R_cw[1][2]*sigma[2][1],
+-         R_cw[1][0]*sigma[0][2] + R_cw[1][1]*sigma[1][2] + R_cw[1][2]*sigma[2][2]),
+-        (R_cw[2][0]*sigma[0][0] + R_cw[2][1]*sigma[1][0] + R_cw[2][2]*sigma[2][0],
+-         R_cw[2][0]*sigma[0][1] + R_cw[2][1]*sigma[1][1] + R_cw[2][2]*sigma[2][1],
+-         R_cw[2][0]*sigma[0][2] + R_cw[2][1]*sigma[1][2] + R_cw[2][2]*sigma[2][2])
+-    )
+-    U = (
+-        (T[0][0]*R_cw[0][0] + T[0][1]*R_cw[0][1] + T[0][2]*R_cw[0][2],
+-         T[0][0]*R_cw[1][0] + T[0][1]*R_cw[1][1] + T[0][2]*R_cw[1][2],
+-         T[0][0]*R_cw[2][0] + T[0][1]*R_cw[2][1] + T[0][2]*R_cw[2][2]),
+-        (T[1][0]*R_cw[0][0] + T[1][1]*R_cw[0][1] + T[1][2]*R_cw[0][2],
+-         T[1][0]*R_cw[1][0] + T[1][1]*R_cw[1][1] + T[1][2]*R_cw[1][2],
+-         T[1][0]*R_cw[2][0] + T[1][1]*R_cw[2][1] + T[1][2]*R_cw[2][2]),
+-        (T[2][0]*R_cw[0][0] + T[2][1]*R_cw[0][1] + T[2][2]*R_cw[0][2],
+-         T[2][0]*R_cw[1][0] + T[2][1]*R_cw[1][1] + T[2][2]*R_cw[1][2],
+-         T[2][0]*R_cw[2][0] + T[2][1]*R_cw[2][1] + T[2][2]*R_cw[2][2])
+-    )
+-    cov2d_00 = J[0][0]*U[0][0] + J[0][1]*U[1][0] + J[0][2]*U[2][0]
+-    cov2d_01 = J[0][0]*U[0][1] + J[0][1]*U[1][1] + J[0][2]*U[2][1]
+-    cov2d_11 = J[1][0]*U[0][1] + J[1][1]*U[1][1] + J[1][2]*U[2][1]
+-
+-    # 5. Stabilize Covariance
+-    cov2d_00 += epsilon_2d
+-    cov2d_11 += epsilon_2d
+-
+-    # 6. Compute Inverse Covariance
+-    det = cov2d_00 * cov2d_11 - cov2d_01 * cov2d_01
++    J = np.array([
++        [-camera['fx'] * inv_z, 0, camera['fx'] * x_c * inv_z2],
++        [0, -camera['fy'] * inv_z, camera['fy'] * y_c * inv_z2]
++    ])
++    
++    # 4. Project Covariance
++    Sigma_2d_unstable = J @ Sigma_cam @ J.T
++    
++    # 5. Stabilization
++    eps_2d = 0.3
++    Sigma_2d = Sigma_2d_unstable.copy()
++    Sigma_2d[0, 0] += eps_2d
++    Sigma_2d[1, 1] += eps_2d
++    
++    # 6. Compute Screen Mean
++    # Apply full MVP
++    mu_homogeneous = np.array([*gaussian['mean'], 1.0])
++    clip = camera['proj'] @ camera['view'] @ mu_homogeneous
++    w_c = clip[3]
++    ndc_x = clip[0] / w_c
++    ndc_y = clip[1] / w_c
++    
++    screen_x = ndc_x * camera['W'] / 2 + camera['cx']
++    screen_y = ndc_y * camera['H'] / 2 + camera['cy']
++    
++    # 7. Inverse Covariance
++    a, b = Sigma_2d[0, 0], Sigma_2d[0, 1]
++    d = Sigma_2d[1, 1]
++    det = a * d - b * b
++    
+     if det <= 0.0:
+-        return None
++        return None # Cull splat
++        
+     inv_det = 1.0 / det
+-    cov2d_inv = ((cov2d_11 * inv_det, -cov2d_01 * inv_det),
+-                 (-cov2d_01 * inv_det, cov2d_00 * inv_det))
+-
+-    # 7. Screen Position
+-    sx = fx * x * inv_z + camera.cx
+-    sy = fy * y * inv_z + camera.cy
+-
+-    # 8. Bounding Box
+-    threshold = 0.05
+-    alpha = splat.alpha
+-    if alpha <= threshold:
+-        return None
+-    k2_val = 2.0 * math.log(alpha / threshold)
+-    max_k2 = 4.0  # Not given in sources, typical value
+-    k2 = min(k2_val, max_k2)
+-    if k2 <= 0.0:
+-        return None
+-    rx_f = math.sqrt(k2 * cov2d_00)
+-    ry_f = math.sqrt(k2 * cov2d_11)
+-    if not math.isfinite(rx_f) or rx_f < 1.0:
+-        return None
+-    if not math.isfinite(ry_f) or ry_f < 1.0:
+-        return None
+-    x0 = math.floor(sx - rx_f)
+-    y0 = math.floor(sy - ry_f)
+-    x1 = math.ceil(sx + rx_f)
+-    y1 = math.ceil(sy + ry_f)
+-
+-    # 9. Color
+-    t_wc = camera.t_wc
+-    dx = p_w[0] - t_wc[0]
+-    dy = p_w[1] - t_wc[1]
+-    dz = p_w[2] - t_wc[2]
+-    norm = math.sqrt(dx*dx + dy*dy + dz*dz)
+-    if norm == 0:
+-        r = (0, 0, 1)
+-    else:
+-        r = (dx/norm, dy/norm, dz/norm)
+-    # Sources do not provide SH evaluation code; standard real SH basis functions are used here.
+-    color = evaluate_spherical_harmonics(splat.h, r, splat.l_max)
+-
+-    return ProjectedSplat(
+-        screen=(sx, sy),
+-        depth=z,
+-        cov2d_inv=cov2d_inv,
+-        bbox=(x0, y0, x1, y1),
+-        color=color,
+-        opacity=alpha
+-    )
+-
+-def evaluate_spherical_harmonics(h, r, l_max):
+-    # Sources do not provide SH evaluation code; standard real SH basis functions are used here.
+-    return (0.0, 0.0, 0.0)
+-
+-def render(splats, camera, width, height):
+-    projected_splats = []
+-    for s in splats:
+-        p = project_splat(s, camera)
+-        if p is not None:
+-            projected_splats.append(p)
+-    projected_splats.sort(key=lambda p: p.depth)
+-    
+-    fb = [((0.0, 0.0, 0.0), 0.0) for _ in range(width * height)]
+-    
+-    for p in projected_splats:
+-        x0, y0, x1, y1 = p.bbox
+-        x0 = max(0, x0)
+-        y0 = max(0, y0)
+-        x1 = min(width - 1, x1)
+-        y1 = min(height - 1, y1)
+-        if x0 > x1 or y0 > y1:
+-            continue
+-            
+-        sx, sy = p.screen
+-        cov_inv = p.cov2d_inv
+-        color = p.color
+-        alpha = p.opacity
+-        
+-        for py in range(y0, y1 + 1):
+-            for px in range(x0, x1 + 1):
+-                dx = px - sx
+-                dy = py - sy
+-                sd0 = cov_inv[0][0]*dx + cov_inv[0][1]*dy
+-                sd1 = cov_inv[1][0]*dx + cov_inv[1][1]*dy
+-                power = -0.5 * (dx * sd0 + dy * sd1)
+-                alpha_pixel = alpha * math.exp(power)
+-                
+-                idx = py * width + px
+-                fb_rgb, fb_alpha = fb[idx]
+-                tau = 1.0 - fb_alpha
+-                
+-                new_r = fb_rgb[0] + alpha_pixel * color[0] * tau
+-                new_g = fb_rgb[1] + alpha_pixel * color[1] * tau
+-                new_b = fb_rgb[2] + alpha_pixel * color[2] * tau
+-                new_alpha = fb_alpha + alpha_pixel * tau
+-                fb[idx] = ((new_r, new_g, new_b), new_alpha)
+-                
+-    return fb
++    cov2d_inv = np.array([
++        [d * inv_det, -b * inv_det],
++        [-b * inv_det, a * inv_det]
++    ])
++    
++    # 8. Bounding Box (Simplified AABB of 3-sigma ellipse)
++    # Eigen decomposition for bounding box
++    eigenvalues, eigenvectors = np.linalg.eigh(Sigma_2d)
++    # eigenvalues are sorted ascending, so lambda1 is eigenvalues[0]
++    lambda1 = eigenvalues[0]
++    lambda2 = eigenvalues[1]
++    e1 = eigenvectors[:, 0]
++    e2 = eigenvectors[:, 1]
++    
++    b1 = 3.0 * math.sqrt(lambda1) * e1
++    b2 = 3.0 * math.sqrt(lambda2) * e2
++    
++    # Compute corners of the parallelogram
++    corners = [
++        screen_x + b1[0] + b2[0], screen_y + b1[1] + b2[1],
++        screen_x + b1[0] - b2[0], screen_y + b1[1] - b2[1],
++        screen_x - b1[0] + b2[0], screen_y - b1[1] + b2[1],
++        screen_x - b1[0] - b2[0], screen_y - b1[1] - b2[1]
++    ]
++    
++    x_min = min(corners[0::2])
++    x_max = max(corners[0::2])
++    y_min = min(corners[1::2])
++    y_max = max(corners[1::2])
++    
++    # Convert to integer pixel coordinates (inclusive)
++    bbox = [
++        int(math.floor(x_min)),
++        int(math.floor(y_min)),
++        int(math.ceil(x_max)),
++        int(math.ceil(y_max))
++    ]
++    
++    return {
++        'screen': (screen_x, screen_y),
++        'depth': z_c,
++        'cov2d_inv': cov2d_inv,
++        'bbox': bbox,
++        'opacity': gaussian['opacity']
++    }
+ ```
+ 
+ ## Subtopics
+ 
+-### Adaptive Bounding Box Computation
+-Computes a tight bounding box for a 2D Gaussian splat based on an opacity threshold, avoiding the wasteful circular bounding box of the original 3DGS method [S1, unofficial]. It calculates $k^2 = \min(2.0 \cdot \ln(\frac{\alpha}{\tau}), max\_k2)$ and derives half-widths $rx_f = \sqrt{k^2 \cdot cov2d_{00}}$ and $ry_f = \sqrt{k^2 \cdot cov2d_{11}}$ [S1, unofficial]. If the splat opacity is below the threshold or the resulting box is invalid, the splat is culled [S1, unofficial]. This reduces the number of pixels processed during compositing [S1, unofficial].
++### [Adaptive Bounding Box Computation](1206-adaptive-bounding-box-computation.md)
++Computes a tight AABB based on opacity threshold and projected covariance, reducing false-positive tile intersections compared to fixed circular boxes.
++
++### [Render Means](2070-render-means.md)
++Renders each Gaussian as a single pixel at its projected mean, ignoring shape and spread for debugging or minimal rendering.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(M \cdot N)$ in the worst case where $M$ is the number of splats and $N$ is the number of pixels, but effectively $O(M \cdot A)$ where $A$ is the average area of the bounding boxes, due to the tight bounding box culling [S1, unofficial].
+-*   **Memory Complexity:** $O(M + W \cdot H)$ for storing projected splats and the framebuffer [G].
+-*   **Performance:** Highly optimized for rasterization on GPUs and CPUs using tile-based rendering and fast approximate exponentials [S1, unofficial].
+-*   **Strengths:** Real-time rendering capability, view-dependent color via SH, efficient culling [S1, unofficial, S2, unofficial].
+-*   **Limitations:** Approximation error from Jacobian linearization (perspective distortion is not perfectly Gaussian), requires careful tuning of $\epsilon_{2d}$ and opacity thresholds [S1, unofficial, S2, unofficial].
++- **Time Complexity:** $O(M)$ for projection of $M$ Gaussians, plus $O(M \log M)$ for sorting by depth. Rasterization is proportional to the number of pixels covered by splats.
++- **Memory Complexity:** $O(M)$ to store projected Gaussian attributes.
++- **Performance:** Enables real-time rendering of millions of Gaussians (e.g., 134 fps on Mip-NeRF360) by avoiding ray marching [S3].
++- **Strengths:** Closed-form projection allows differentiability and fast GPU/CPU rasterization. The local affine approximation is accurate for small splats [S3].
++- **Limitations:** The linearization error increases for large splats or extreme perspective, potentially causing geometric inaccuracies [S3]. Singularities are handled by stabilization but may introduce slight blurring if $\epsilon_{2d}$ is too large [S2].
+ 
+ ## Background
+-Originated from the "3D Gaussian Splatting" paper by Kerbl et al. (2023), which introduced the representation of scenes as 3D Gaussians for efficient novel view synthesis [S1, unofficial, S2, unofficial]. The projection method described here is the core rasterization technique used in implementations like the unofficial "tsplat" library and the LichtFeld-Studio reference implementation [S1, unofficial, S2, unofficial]. It builds on the mathematical foundation of projecting ellipsoids via Jacobian linearization, a technique common in computer graphics for handling perspective transforms of quadratic surfaces [G].
++The method originates from Elliptical Weighted Average (EWA) splatting, described by Zwicker et al. in 2002 for anti-aliased volume rendering [S3]. It was adapted by Kerbl et al. (2023) for 3D Gaussian Splatting, where it projects 3D Gaussians to 2D ellipses for real-time rasterization [S3]. The stabilization term $\epsilon_{2d}$ is a practical addition to ensure numerical robustness in the inverse covariance computation [S2].
+ 
+ ## Sources
+-[S1] Tsplat – Run Gaussian splatting in your terminal, https://github.com/darshanmakwana412/tsplat, fetched 2026-10-26 (unofficial)
+-[S2] 驚くほどキレイな三次元シーン復元、「3D Gaussian Splatting」を徹底的に解説する, https://qiita.com/scomup/items/d5790da25a846e645de1, fetched 2026-10-29 (unofficial)+[S1] 3D Gaussian Splatting in a Weekend, https://bfeldman.me/3dgs-weekend/, fetched 2026-10-26 (unofficial)
++[S2] Tsplat – Run Gaussian splatting in your terminal, https://github.com/darshanmakwana412/tsplat, fetched 2026-10-26 (unofficial)
++[S3] An Architectural Review of the 3D Gaussian Splatting Rendering Pipeline, https://doi.org/10.5281/zenodo.21739653, fetched 2026-10-26
++[S4] thomasantony/splat, https://github.com/thomasantony/splat, fetched 2026-10-27 (unofficial)
++[S5] metin-yat/mini-splat, https://github.com/metin-yat/mini-splat, fetched 2026-10-28 (unofficial)
++[S6] 驚くほどキレイな三次元シーン復元、「3D Gaussian Splatting」を徹底的に解説する, https://qiita.com/scomup/items/d5790da25a846e645de1, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,147 @@
+# TreeMapper
+![Python](https://img.shields.io/badge/python-3.10+-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Status](https://img.shields.io/badge/status-bachelor's%20thesis-orange)
+
+*Developed in collaboration with [iuFOR](https://iufor.uva.es/) — the Sustainable Forest Management Research Institute of the University of Valladolid (UVa).*
+
+
+TreeMapper is the implementation accompanying my final project in Statistics. Given a `.las` point cloud of a forest plot, it identifies each tree as a separate cluster of points, even when their crowns are intertwined.
+
+The pipeline combines three ideas:
+
+1. **Trunk detection** at ground level with DBSCAN — every cluster is the seed of a tree.
+2. **Topological skeleton** of the cloud via the [Mapper algorithm](https://research.math.osu.edu/tgda/mapperPBG.pdf), which builds a graph that captures the connectivity of the canopy.
+3. **Bottom-up propagation** of tree labels through that graph, followed by weighted KNN extension to the full cloud.
+
+## Example
+
+<p align="center">
+  <img src="assets/before.png" alt="Raw LiDAR point cloud" width="49%">
+  <img src="assets/results_treemapper.png"  alt="Points coloured by tree id" width="49%">
+</p>
+<p align="center"><em>Left: input cloud. Right: per-tree segmentation.</em></p>
+
+---
+
+## Why Mapper?
+
+In a dense forest plot the crowns of neighbouring trees touch and overlap. Purely geometric methods (region growing, watershed on the CHM) tend to either merge close trees or fragment large ones. Mapper sidesteps the problem by reducing the cloud to a graph whose nodes group nearby points and whose edges encode topological adjacency. Propagating labels along that graph respects the actual connectivity of the foliage rather than just Euclidean distance.
+
+---
+
+## Pipeline overview
+
+```
+LAS cloud
+   │
+   ▼
+[1] Read LAS              laspy → DataFrame (X, Y, Z)
+[2] Detect trunks         DBSCAN on the lowest slice of the cloud
+[3] Voxelize              average points inside cubic voxels (default 7 cm)
+[4] Mapper graph          parallel cover + per-cube DBSCAN
+[5] Classify nodes        BFS from trunk seeds, edge pruning, BFS again
+[6] Propagate to full     weighted KNN with confidence threshold
+   │
+   ▼
+classification.csv   (X, Y, Z, tree_id, confidence)
+```
+
+Intermediate artefacts (`voxels.csv`, `node_centroids.csv`, `connections.csv`) are also exported so the graph can be inspected externally (e.g. CloudCompare, Open3D).
+
+---
+
+## Repository layout
+
+```
+TreeMapper/
+├── README.md
+├── LICENSE
+├── .gitignore
+├── requirements.txt
+└── treemapper/              # Package source
+    ├── __init__.py
+    ├── main.py              # CLI entry point
+    └── pipeline.py          # All pipeline stages
+```
+
+At runtime, an `output/` directory is created containing the generated CSVs (voxels, graph geometry, classification).
+
+---
+
+## Installation
+
+Requires Python 3.10+.
+
+```bash
+git clone https://github.com/MartaRguez/TreeMapper.git
+cd TreeMapper
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+---
+
+## Usage
+
+Run from the repository root:
+
+```bash
+python -m treemapper.main --las data3/my_plot.las --output output
+```
+
+All hyperparameters can be overridden from the command line:
+
+```bash
+python -m treemapper.main \
+    --las data3/my_plot.las \
+    --voxel-size 0.05 \
+    --overlap 0.4 \
+    --eps-factor 4 \
+    --weight-connections 0.7 \
+    --weight-xy 0.3
+```
+
+Run `python -m treemapper.main --help` for the full list.
+
+---
+
+## Key parameters
+
+| Parameter | Default | What it controls |
+|-----------|--------:|------------------|
+| `voxel_size` | 0.07 m | Spatial resolution of the voxel grid. Lower = more detail, slower. |
+| `ground_height` | 0.20 m | Slice height used to detect trunks. |
+| `trunk_radius` | 0.30 m | DBSCAN `eps` for trunk clustering. |
+| `n_cubes` (adaptive) | 8 × n_trees | Number of cover elements per axis in Mapper. |
+| `overlap` | 0.40 | Fractional overlap between adjacent cover cubes. |
+| `eps_factor` | 4.0 | Per-cube DBSCAN `eps` is `voxel_size × eps_factor`. |
+| `weight_connections` | 0.7 | Weight of graph-connectivity evidence in node classification. |
+| `weight_xy` | 0.3 | Weight of XY distance to the trunk seed. |
+| `knn_k` | 7 | Neighbours used to propagate labels to the full cloud. |
+| `confidence_threshold` | 0.55 | Below this, a point is marked as noise and re-assigned to its nearest neighbour. |
+
+---
+
+## Output
+
+`output/classification.csv` contains one row per point of the original cloud:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `X`, `Y`, `Z` | float | Original coordinates. |
+| `tree_id` | int | Assigned tree (≥ 0). |
+| `confidence` | float | Soft-vote confidence in `[0, 1]`. |
+
+---
+
+## License
+
+Released under the MIT License — see [`LICENSE`](./LICENSE).
+
+---
+
+## Acknowledgements
+
+This project was developed in collaboration with [iuFOR](https://iufor.uva.es/), the Sustainable Forest Management Research Institute of the University of Valladolid. I'm deeply grateful for the opportunity, for the guidance throughout the project, and for the chance to work alongside such a dedicated team — their expertise and the LiDAR data they provided made this work possible.

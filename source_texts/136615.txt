@@ -1,0 +1,97 @@
+A small multiresolution feature grid plus a tiny MLP decoder that replaces a stack of correlated PBR textures with one compact, GPU-decoded representation. Named channels with their own activation functions, built on new fp16/half-precision support in TSL, and demonstrated on a MeshPhysicalNodeMaterial. The format is material-agnostic.
+
+Neural Texture Compression in Three.jsSkip to content
+Ben is currently available for contract work for 3D & web solutions — reach out.
+A physically-based material is rarely one texture. Base color, normal, roughness, metalness, transmission, emissive: a fully-specified PBR material can be six, eight, ten separate texture maps, each with its own resolution, its own mip chain, its own memory footprint. And those maps are correlated. The edges in a normal map line up with the edges in a roughness map; a metal flake shows up as a coordinated bump in metalness and a highlight in albedo. Ordinary texture compression treats each map as its own unrelated image and throws that correlation away.
+Neural Texture Compression (NTC), the idea behind NVIDIA's 2023 paper of the same name, fits every channel of a material jointly, with one small shared representation, and lets a neural network exploit the correlation ordinary compression ignores. I built an implementation for Three.js: a compact .ntc asset format, a loader, and a decoder that runs directly inside a node material's shader graph. The seven materials in the live example each decode from that representation. This post covers what that representation is, how a .ntc file stores it, how the decoder is implemented, and how the per-texel cost scales.
+Some of the terminology below (MLP, ReLU, latent vector) is covered in more depth in a companion primer on neural network basics.
+What's actually stored#
+An NTC asset is two things: a small multiresolution latent feature grid, and a tiny MLP decoder shared by every channel.
+The feature grid is a mip pyramid of a few stored levels, finest first: the same coarse-to-fine idea as instant-ngp's multiresolution hash encoding, and the NVIDIA paper's Table 1. Default spacing is two mip-halvings between stored levels. A 128-wide source stores [128, 32, 8]. At any LOD the decoder sees one tap from that pyramid, plus the normalized LOD, so the MLP input is C+1C + 1C+1 wide for any number of stored levels. That LOD input is what lets one stored grid reconstruct several physical mips.
+The MLP takes that tap and decodes it into every channel the material needs, in one forward pass. Each channel gets its own named slice of the output and its own activation function, chosen to match its physical range: sigmoid for bounded [0,1] reflectance-like values (albedo, roughness, transmission), tanh for signed [-1,1] vectors (a tangent-space normal offset), softplus for unbounded non-negative HDR values (emission). A material with ten active channels, say a glass with albedo, roughness, metalness, transmission, IOR, thickness, attenuation color and distance, and dispersion, trains all ten through that one shared grid and decoder. The sample materials are about 93KB on disk, almost all of it the uint8 latent pyramid.
+A shared latent representation encodes that correlation once. Independent per-texture compression stores it in every map.
+That joint fit works best when every channel shares the same UV set. One query coordinate produces one latent, and that latent has to describe the same surface point in every map. Separate UV layouts, or a stack that is rotated and scaled relative to the mesh UVs, force the grid to represent several mappings at once. A shared UV transform, learned at training time and applied to the query before the grid lookup, would cover the common case where the whole stack is transformed together. I have not added that yet.
+The quality win is largest on the maps that look worst under block compression. Normals and vector displacement are sensitive to quantization: a block artifact in a normal map shows up as a faceted highlight, and a block artifact in displacement shows up as a stairstep in the silhouette. NTC trains against reconstruction error, so those structured artifacts are what the optimizer is minimizing.
+Each asset names its own channels#
+Each channel is a small descriptor: a key (roughness, normal, dispersion, ...), a width (1 for a scalar, 2 for a tangent-space offset, 3 for a color), an activation function, and a function that knows how to apply a decoded slice onto a target material's matching property. Loading an asset walks its list of active channels and applies each one in turn.
+NTC decodes to whatever named, activated channels this asset was trained against. Adding a new channel type is a new descriptor. The decoder stays the same. I demonstrate it with NTCNodeMaterial, a MeshPhysicalNodeMaterial driven by one shared grid and MLP. The same asset and evaluator can assign decoded channels onto any other NodeMaterial that exposes matching node properties.
+The .ntc file#
+A .ntc file is JSON, tagged format: "three-ntc", currently version 2. Version 2 is a breaking change: stored levels are finest-first, mipsPerLevel and maxLod are required, and the decoder input is fixed at channels + 1. It holds the quantized latent pyramid, the packed MLP, and the channel list that slices the decoder's output into named PBR properties. Gold looks like this, with the binary blobs cut:
+```
+{
+  "format": "three-ntc",
+  "version": 2,
+  "name": "Gold",
+  "latents": {
+    "channelsPerLevel": 4,
+    "wrap": "repeat",
+    "mipsPerLevel": 2,
+    "maxLod": 10,
+    "levels": [
+      { "width": 128, "height": 128, "channels": 4, "dtype": "uint8", "min": -0.87, "max": 0.75, "dataBase64": "…" },
+      { "width": 32, "height": 32, "channels": 4, "dtype": "uint8", "min": -0.70, "max": 0.67, "dataBase64": "…" },
+      { "width": 8, "height": 8, "channels": 4, "dtype": "uint8", "min": -0.63, "max": 0.64, "dataBase64": "…" }
+    ]
+  },
+  "outputChannels": 9,
+  "mlp": {
+    "dtype": "float16",
+    "layout": [
+      { "rows": 5, "cols": 8, "kind": "weight", "activation": "relu" },
+      { "rows": 1, "cols": 8, "kind": "bias" },
+      { "rows": 8, "cols": 8, "kind": "weight", "activation": "relu" },
+      { "rows": 1, "cols": 8, "kind": "bias" },
+      { "rows": 8, "cols": 9, "kind": "weight", "activation": "linear" },
+      { "rows": 1, "cols": 9, "kind": "bias" }
+    ],
+    "dataBase64": "…"
+  },
+  "renderFlags": { "side": 0, "transparent": false },
+  "channels": {
+    "activeKeys": [ "albedo", "roughness", "metalness", "specularIntensity", "specularColor" ],
+    "constantValues": { "opacity": 1, "ior": 1.5 }
+  }
+}
+```
+Each latent level is a uint8 image with its own min / max for dequantization. mipsPerLevel is how many physical mips each stored level covers; maxLod is ceil(log2 R) for the source's largest dimension RRR. The MLP is one float16 blob; mlp.layout says how to slice it into per-layer weight and bias matrices (rows is the input size, cols the output size). The first layer is C+1C + 1C+1 wide: four feature channels plus the normalized LOD. channels.activeKeys are the slices the network produces. Everything else in the PBR vocabulary lives in channels.constantValues and never enters the decoder: a uniform IOR, a zero clearcoat, a default opacity. The loader applies those as TSL literals. If a constant equals the material's own default, it is skipped entirely, so an unused clearcoat does not enable MeshPhysicalNodeMaterial's extra shading branch.
+Mip pyramid#
+A texture aliases as soon as one screen pixel covers more than one texel. Ordinary textures handle that with a mip chain. NTC stores far fewer feature levels than physical mips (the NVIDIA paper's Table 1): each stored level is reused, via the decoder's LOD input, to reconstruct SSS physical mips (S=2S = 2S=2 by default).
+Stored resolutions are finest-first, each SSS mip-halvings coarser than the last:
+rℓ=⌊rℓ−1/2S⌋,r0=Rbase.r_{\ell} = \bigl\lfloor r_{\ell-1} / 2^{S} \bigr\rfloor, \qquad r_{0} = R_{\mathrm{base}}.rℓ​=⌊rℓ−1​/2S⌋,r0​=Rbase​.
+A continuous LOD λ\lambdaλ maps onto one stored level with an open-ended last band:
+ℓ(λ)=clamp(⌊λ/S⌋, 0, L−1).\ell(\lambda) = \mathrm{clamp}\bigl(\lfloor \lambda / S \rfloor,\, 0,\, L-1\bigr).ℓ(λ)=clamp(⌊λ/S⌋,0,L−1).
+Training samples a random integer LOD per batch item and fits that one stored level against the source texture at that mip. Most draws follow the paper's area-weighted ⌊−log⁡4X⌋\lfloor -\log_4 X \rfloor⌊−log4​X⌋ (finer mips have more texels); 5% draw uniformly so the coarsest band still gets gradient. The MLP sees the selected level's tap plus λ/λmax⁡\lambda / \lambda_{\max}λ/λmax​, so it can tell which physical mip inside the band it is reconstructing.
+A GPU mip chain needs every intermediate halving, so at load time each stored level is box-filtered across its band into a single DataTexture with a manual .mipmaps array (LinearMipmapLinearFilter, generateMipmaps: false). The last stored level's band runs down to 1×1.
+Decode is one textureSampleLevel. The GPU bilinear-filters inside the bracketing mips and blends them, the same path an ordinary texture uses. You already paid for a latent fetch; the anti-aliasing comes with it. In the demo that filtering matches a regular mipmapped map.
+At runtime λ\lambdaλ is the screen-space UV footprint, log⁡2\log_2log2​ of the texel derivative, the same quantity hardware mipmapping uses. It is measured on the UV before fract(), so a tile seam does not spike the LOD. NTCNodeMaterial also takes a lodBias (same sign as a sampler LOD bias): a positive value keeps a finer reconstruction longer as the surface recedes. The demo exposes it as a live inspector slider, default 1.
+Neural displacement#
+A vector displacement channel fits in the same MLP as albedo and normals. The vertex shader queries it and offsets the original vertices, and the subdivision vertices, so the mesh silhouette picks up high-frequency shape that a normal map can only fake in the interior of a triangle. Wang et al. (ICLR 2022) use the same split on implicit surfaces, offsetting a coarse SDF along its normals.
+A traditional displacement map is a vec3 per texel, a large extra texture. Displacement shares edges and features with the normal and albedo, so in NTC it is another named slice of a decoder you were already running. The extra cost is a few more output neurons and a vertex-stage evaluate; the grid and most of the network are already paid for. That is also why NTC's savings are largest on normals and displacement: those are the maps where block-compression artifacts are most visible, and the maps whose spatial structure is already in the shared latent.
+Decoding fast: fp16 storage buffers and mat4-packed evaluation#
+None of this is useful if decoding a material costs more than sampling a texture would. Two things make the decoder fast.
+Half precision, where the hardware has it. I added f16 support to TSL and to storage buffers at the same time as building this — half, hvec2/3/4, hmat2/3/4 types that behave like their fp32 counterparts everywhere in TSL, compiling to real WGSL f16 on WebGPU with the shader-f16 feature, and falling back to fp32 everywhere else. The decoder's weight matrices live in a real fp16 storage buffer whenever that feature is available:
+```
+const weights = instancedArray( matrixCount, 'hmat4' ); // real fp16 storage buffer
+```
+Half precision is a well-documented ~2x on every major mobile GPU architecture. Apple's own Metal optimization guidance states that half runs at double rate versus float for vectorized code on Apple GPUs. Arm's GPU Best Practices Guide gives the same ~2x figure for Mali's mediump versus highp across ALU throughput, varying interpolation, and texture sampling. Qualcomm's Adreno Mobile Best Practices docs report the same ~2x for Adreno, down to the hardware detail: Adreno 640 pairs 64-wide FP32 ALUs that need two cycles per wave with 128-wide FP16 ALUs that finish the same wave in one. Three completely different GPU architectures, the same number, for the same underlying reason — halving a value's width roughly doubles how many of it a fixed-width ALU can push through per cycle, and halves the memory traffic for every weight the decoder reads.
+Packed mat4 × vec4 evaluation. Each linear layer's weights are packed into mat4 blocks — four output neurons by four input features per block — and evaluated with a single mat4 * vec4 multiply. Four independent dot(vec4, vec4) calls, one per output neuron, do the same arithmetic as four separate instructions; the packed multiply issues effectively one. That's an architectural ceiling of up to 4x fewer instructions for the multiply. The realized speedup depends on register pressure, occupancy, and memory bandwidth, so I'd treat 4x as a ceiling this technique can approach. Directionally it is the same trick as the fp16 win: fewer, wider operations.
+Between the two, decoding one texel costs a few hundred FLOPs, cheap enough on an average consumer mobile GPU.
+Cost per texel#
+A decode is one hardware trilinear sample plus one MLP forward pass. The stored pyramid is expanded into a GPU mip chain at load time, so that sample is also the anti-aliasing filter.
+Write CCC for channels per stored level, F=C+1F = C + 1F=C+1 for the decoder input (one tap plus normalized LOD), DDD for the number of hidden layers, HHH for hidden width, and OOO for the output width (the sum of active channel sizes). FFF stays C+1C + 1C+1 for any LLL.
+MLP multiply-adds, counting a fused multiply-add as two FLOPs:
+FLOPsMLP=2FH+2(D−1)H2+2HO\mathrm{FLOPs}_{\mathrm{MLP}} = 2 F H + 2 (D - 1) H^{2} + 2 H OFLOPsMLP​=2FH+2(D−1)H2+2HO
+The three terms are the input layer, the hidden-to-hidden layers, and the output layer. Bias and ReLU add a handful of ops per neuron and do not change the scaling.
+Gold is C=4C = 4C=4 so F=5F = 5F=5, with D=2D = 2D=2, H=8H = 8H=8, O=9O = 9O=9:
+2⋅5⋅8+2⋅82+2⋅8⋅9=3522 \cdot 5 \cdot 8 + 2 \cdot 8^{2} + 2 \cdot 8 \cdot 9 = 3522⋅5⋅8+2⋅82+2⋅8⋅9=352
+Plus biases and ReLUs, a few hundred FLOPs per texel. Five inputs pack into two vec4s, so the first layer is two mat4 * vec4 multiplies per output quad.
+Hidden width is the expensive knob. HHH appears linearly in the input and output layers and as H2H^{2}H2 in every hidden-to-hidden layer. Doubling HHH from 8 to 16 more than doubles the work when D≥2D \ge 2D≥2. An extra hidden layer of the same width only adds 2H22 H^{2}2H2. The sample assets use two layers of 8 because of that, and because in my experiments the grid's resolution and level count did more for reconstruction quality than MLP width. A wider network spends its extra capacity re-deriving spatial detail the grid should already be carrying. The grid lookup is one hardware-filtered texture sample; every extra unit of HHH is more matrix-vector work per texel.
+Output width is the other term you can cut. Any channel that is spatially constant should not occupy a decoder slot. Detect those, drop them from OOO, and store the value in channels.constantValues. The gold asset's MLP emits 9 numbers; the rest of MeshPhysicalNodeMaterial's vocabulary is constants.
+Grid storage, uint8, with wℓ×hℓw_{\ell} \times h_{\ell}wℓ​×hℓ​ the spatial size of stored level ℓ\ellℓ:
+bytesgrid=C∑ℓ=0L−1wℓ hℓ\mathrm{bytes}_{\mathrm{grid}} = C \sum_{\ell=0}^{L-1} w_{\ell}\, h_{\ell}bytesgrid​=Cℓ=0∑L−1​wℓ​hℓ​
+The GPU mip chain is rebuilt from those stored levels at load time (box-filtered copies inside each band). Disk still holds only the trained levels. The MLP is float16, two bytes per weight and bias:
+bytesMLP=2(FH+(D−1)H2+HO+DH+O)\mathrm{bytes}_{\mathrm{MLP}} = 2 \bigl( F H + (D-1) H^{2} + H O + D H + O \bigr)bytesMLP​=2(FH+(D−1)H2+HO+DH+O)
+Gold's stored grids are 1282+322+82128^{2} + 32^{2} + 8^{2}1282+322+82 at 4 channels: 69,888 bytes. The MLP is a few hundred float16s. Base64 JSON brings the file to about 93KB.
+What's not here yet#
+Every asset here was trained. Fitting a grid and decoder to a set of source channels is itself a nontrivial GPU training problem, with its own optimizer, quantization, and convergence questions. That's a substantial enough topic for its own writeup. I'll cover the training side in a follow-up.
+PR: (link pending)

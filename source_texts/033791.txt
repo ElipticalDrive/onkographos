@@ -1,0 +1,1056 @@
+PyGS
+P Y GS: L ARGE - SCALE S CENE R EPRESENTATION WITH
+P YRAMIDAL 3D G AUSSIAN S PLATTING
+arXiv:2405.16829v3 [cs.CV] 29 May 2024
+Zipeng Wang & Dan Xu
+Department of Computer Science and Engineering
+The Hong Kong University of Science and Technology (HKUST)
+Clear Water Bay, Kowloon, Hong Kong
+zwang253@connect.hkust-gz.edu.cn, danxu@cse.ust.hk
+A BSTRACT
+Neural Radiance Fields (NeRFs) have demonstrated remarkable proficiency in
+synthesizing photorealistic images of large-scale scenes. However, they are often plagued by a loss of fine details and long rendering durations. 3D Gaussian
+Splatting has recently been introduced as a potent alternative, achieving both highfidelity visual results and accelerated rendering performance. Nonetheless, scaling
+3D Gaussian Splatting is fraught with challenges. Specifically, large-scale scenes
+grapples with the integration of objects across multiple scales and disparate viewpoints, which often leads to compromised efficacy as the Gaussians need to balance between detail levels. Furthermore, the generation of initialization points via
+COLMAP from large-scale dataset is both computationally demanding and prone
+to incomplete reconstructions. To address these challenges, we present Pyramidal
+3D Gaussian Splatting (PyGS) with NeRF Initialization. Our approach represent
+the scene with a hierarchical assembly of Gaussians arranged in a pyramidal fashion. The top level of the pyramid is composed of a few large Gaussians, while
+each subsequent layer accommodates a denser collection of smaller Gaussians.
+We effectively initialize these pyramidal Gaussians through sampling a rapidly
+trained grid-based NeRF at various frequencies. We group these pyramidal Gaussians into clusters and use a compact weighting network to dynamically determine
+the influence of each pyramid level of each cluster considering camera viewpoint
+during rendering. Our method achieves a significant performance leap across multiple large-scale datasets and attains a rendering time that is over 400 times faster
+than current state-of-the-art approaches. Our project page is available at https:
+//wzpscott.github.io/pyramid_gaussian_splatting/.
+1
+I NTRODUCTION
+Neural Radiance Fields (NeRF) Mildenhall et al. (2021) have attracted much attention for 3D scene
+representation. Several studies, including MegaNeRF Turki et al. (2022), BlockNeRF Tancik et al.
+(2022), and SwitchNeRF Zhenxing & Xu (2023), have endeavored to extend NeRF to accommodate larger scenes, such as buildings or entire cityscapes. While these methods offer substantial
+enhancements over the original NeRF Mildenhall et al. (2021), they still tend to favor the learning
+of the scene’s low-frequency elements due to spectral biases Rahaman et al. (2019); Tancik et al.
+(2020) of neural networks, which may result in an inability to capture intricate details. Moreover,
+the rendering process is exceedingly slow, mainly due to the heavy computational demands associated with the extensive sampling required for volumetric rendering. These challenges significantly
+hinder their practicality for real-time applications. Recently, 3D Gaussian Splatting (3DGS) Kerbl
+et al. (2023) has emerged as a notable leap forward in the field of 3D scene modeling, acclaimed for
+its ability to render high-quality images of high resolution in real time. 3DGS Kerbl et al. (2023)
+represents a scene within a collection of 3D Gaussians, each endowed with learnable color and shape
+parameters. 3DGS Kerbl et al. (2023) excels at modeling exceedingly high-frequency details while
+also ensuring that the model size and rendering time grow linearly that aligns with the scene’s size.
+These properties position 3DGS as a compelling alternative to NeRF-based methods for representing
+of large-scale scenes.
+1
+PyGS
+InstantNGP
+MegaNeRF
+SwitchNeRF
+3DGS
+PyGS(Ours)
+13.5FPS
+Train: 5.2h
+PSNR: 17.2
+0.008FPS
+Train: 30.8h
+PSNR: 20.8
+0.007FPS
+Train: 41.5h
+PSNR: 20.9
+124.04FPS
+Train: 9.9h
+PSNR: 19.3
+112.85FPS
+Train: 11.3h
+PSNR: 24.2
+Ground
+Truth
+Figure 1: We significantly enhance the capability of 3D Gaussian Splatting (3DGS) Kerbl et al.
+(2023) to model large-scale scenes while maintaining comparable training and rendering costs. The
+key is a pyramidal Gaussian structure and dynamic weighting of each level’s contribution through
+a gating network. Our method captures extremely high-frequency details and achieves a rendering
+speedup of over 400 times compared to state-of-the-art NeRF-based methods Turki et al. (2022);
+Zhenxing & Xu (2023).
+Nevertheless, the extension of 3D Gaussian Splatting (3DGS) to large-scale scenes, such as urban
+environments, presents a multitude of challenges. While the initial 3DGS framework Kerbl et al.
+(2023) is optimized for small outdoor environments, where the employment of a single-scale Gaussian model is adequate. However, this approach falls short in more extensive scenes. Large-scale
+scenes are characterized by a diverse collection of objects of widely varying sizes and detail levels.
+For example, imposing structures like skyscrapers or bridges may coexist with smaller features such
+as street signs and vegetation. The conventional 3DGS method models the scene with a same set
+of 3D Gaussians for every viewpoint. This approach is not well-equipped to handle the varying
+scales inherent in large-scale scenes and often falls short in representing all the different scales accurately. Additionally, 3DGS Kerbl et al. (2023) depends on COLMAP Schönberger et al. (2016);
+Schönberger & Frahm (2016) to generate sparse point clouds for initializing the algorithm. This
+strategy is generally effective for datasets with a limited size, typically encompassing hundreds of
+images. However, the majority of existing large-scale datasets Turki et al. (2022); Lin et al. (2022);
+Xiangli et al. (2022); Li et al. (2023) consist of thousands of images, capturing spaces that are orders of magnitudes larger. The substantial increase in the volume of data can lead to significant time
+increase in computing initial point clouds via COLMAP. Furthermore, the resulting point clouds
+often lack representations of background elements, such as the sky and distant buildings, due to the
+difficulty in estimating their depth.
+To overcome these challenges, we introduce Pyramidal Gaussian Splatting (PyGS), a novel multiscale 3D Gaussian Splatting framework for large-scale scenes. PyGS parameterizes the scene using
+a hierarchical structure of 3D Gaussians, organized into pyramid levels that represent different levels
+of details. The top level of the pyramid comprises a few large Gaussians that encapsulate general
+scene shape and structure, and the lower levels contain more smaller Gaussians that model finer
+scene details. To initiate the pyramidal Gaussians, we utilize a coarse grid-based NeRF Müller et al.
+(2022), which enables us to rapidly create an initial and rough 3D model of the scene. In contrast
+to COLMAP, which exhibits a marked increase in processing time with larger datasets, grid-based
+NeRF approaches Chen et al. (2022); Müller et al. (2022) demonstrate a performance that is largely
+unaffected by the size of the training set. We subsequently sample the grid-based NeRF to form a
+dense point cloud and generate several subsets of point clouds by sampling the dense one at multiple
+frequencies. These subsets of points serve as the initialization points for the respective levels of the
+proposed pyramidal Gaussian structure.
+2
+PyGS
+When rendering an image, it is desirable to adaptively choose the contribution of each level based
+both on the camera viewpoint and the complexity of the rendered region. For example, when the
+camera is distant or the region is smooth and textureless, the higher-level Gaussians (i.e., fewer
+and larger Gaussians) should be prioritized. Conversely, when the camera is in close proximity
+or the region has complex geometry or textures, the lower levels (i.e., more smaller Gaussians)
+should come into play. To achieve this, we design a compact weighting network that dynamically
+determines the weights of each pyramid level. We group the pyramidal Gaussians into clusters
+with the mini-batched K-means algorithm and use shared weights within each cluster. To more
+effectively capture the nuances of local geometry and texture, we introduce a learnable embedding
+for each cluster. This embedding, along with the camera viewpoint, is input into the weighting
+network, which then computes the weights for the different pyramid levels associated with that
+cluster. Consequently, Gaussians belonging to the same level and cluster are assigned the same
+weight. Additionally, we integrate an appearance embedding for each cluster and a color correction
+network to account for the intricate variations in lighting that can occur across viewpoints.
+In this paper, we present the following contributions: (i) We pioneer the application of 3D Gaussian
+Splatting (3DGS) Kerbl et al. (2023) to large-scale scene modeling, addressing the challenges of
+preserving fine details and reducing the rendering times. (ii) We introduce a novel pyramidal Gaussian splatting framework that effectively captures multi-scale information and adaptively renders
+different levels of scene details based on a specially designed weighting network. (iii) We develop
+an efficient initialization technique utilizing a coarsely trained NeRF, which significantly shortens
+the preprocessing time duration and enhances the performance. (iv) Through extensive experimentation across four large-scale datasets, we demonstrate the superior performance and efficiency of
+our proposed method.
+2
+R ELATED W ORK
+2.1
+L ARGE - SCALE S CENE R EPRESENTATIONS
+Learning digital representations of large-scale scenes, such as buildings and street blocks, has been
+a persistent challenge within the computer vision community. Early efforts Agarwal et al. (2011);
+Frahm et al. (2010); Früh & Zakhor (2004); Pollefeys et al. (2008); Snavely et al. (2006) focused
+on developing robust and parallel systems capable of reconstructing dense 3D geometry from large
+image collections. These methods generally depend on feature matching Lowe (2004) and bundle
+adjustment Agarwal et al. (2010); Triggs et al. (2000) to generate the corresponding camera poses
+and sparse point clouds for each image. To obtain denser representations, the sparse output can be
+refined using dense multiview stereo techniquesGoesele et al. (2007). However, these approaches
+may encounter artifacts and limited texture quality due to scaling issues Tancik et al. (2022).
+Recently, neural radiance fields (NeRF) Mildenhall et al. (2021) have demonstrated significant performance improvements and flexibility in parameterizing 3D scenes. However, the standard NeRF
+may struggle to accurately represent extensive scenes due to limited model capacity. Several studies Turki et al. (2022); Tancik et al. (2022); Zhenxing & Xu (2023) have tackled this issue using a
+divide-and-conquer approach, which involves decomposing the scene into multiple parts and training individual NeRF networks for each part. Although these decomposition-based techniques yield
+better results compared to standard NeRF, they generally require significantly more computational
+resources to capture intricate details in large scenes. For example, Mega-NeRF Turki et al. (2022)
+employs eight sub-networks, each comprising two NeRF networks, to represent a single scene. This
+leads to a complex architecture and increased training and rendering times.
+2.2
+D IFFERENTIABLE P OINT- BASED R ENDERING
+Differentiable point-based rendering techniques Xu et al. (2022); Kerbl et al. (2023) model scenes
+using discrete, unstructured point clouds. Specifically, Point-NeRF Xu et al. (2022) parameterizes
+scenes into point clouds with neural features, allowing for interpolation between neighboring points
+to determine the value at any spatial coordinate. This approach, which uses the same volumetric
+rendering pipeline as NeRF Mildenhall et al. (2021), has been shown to yield superior reconstruction
+quality and reduced training times.
+3
+PyGS
+In a more recent development, 3D Gaussian splatting Kerbl et al. (2023) has been introduced as a
+strong contender to NeRF, offering a scene parameterization through anisotropic Gaussians. 3DGS
+achieves image rendering by efficiently sorting and projecting these Gaussians onto image planes.
+Given that the computational effort for sorting and projection is fixed irrespective of the rendered
+resolution, 3DGS demonstrates a significant advantage in rendering speed, particularly for images of
+high resolution. Despite the impressive performance of 3DGS Kerbl et al. (2023), it faces challenges
+with capturing varying levels of details in expansive scenes and the time-intensive process of initialization using COLMAP Schönberger et al. (2016); Schönberger & Frahm (2016) for large-scale
+datasets. Our approach address those problems by introducing a novel pyramidal Gaussian architecture that dynamically adjusts level weights through a weighting network, coupled by extracting
+initial point clouds from a coarsely trained grid-based NeRF Müller et al. (2022); Chen et al. (2022).
+2.3
+M ULTI - SCALE N EURAL R EPRESENTATIONS
+The concept of multi-scale representations Adelson et al. (1984); Burt & Adelson (1987), has been
+a cornerstone for analyzing and processing images across different levels of resolutions, which has
+inspired the creation of multi-scale neural representations. BACON Lindell et al. (2022) employs
+band-limited constraints to guide the intermediate outputs at each layer, yielding a neural representation that progresses from coarse to fine in an interpretable manner. MINER Saragadam et al.
+(2022) constructs a Laplacian pyramid of neural fields which isolates portions of the signal across
+scales, fostering both sparsity and swift model convergence. In a similar vein, Bungee-NeRF Xiangli et al. (2022) introduces a model expansion strategy that incrementally introduces network layers
+to refine detail capture. Meanwhile, Instant-NGP Müller et al. (2022) adopts a multi-resolution hash
+grid that significantly enhances both training and inference speeds. Despite these advances, a multiscale architectural approach specifically tailored for discrete and unstructured 3D Gaussians remains
+unexplored in the field.
+2.4
+A NTI - ALIASING R ADIANCE F IELDS
+Aliasing presents a notable challenge for radiance fields, particularly when rendering images from
+various viewpoints. MipNeRF Barron et al. (2021) addresses this issue by sampling NeRF with conical frustum volumes rather than infinitesimal points, incorporating an integrated positional encoding
+to alleviate aliasing. Further advancements for grid-based NeRF have also been made to efficiently
+counteract aliasing. PyNeRF Turki et al. (2024) trains multiple radiance fields for different spatial
+resolutions and selects the most suitable field based on the projected sample area. ZipNeRF Barron
+et al. (2023) utilizes a multi-sampling strategy to approximate the average radiance over a conical
+frustum. Tri-MipNeRF Hu et al. (2023) and MipGrid Nam et al. (2024) address the problem using
+pre-filtering. Recent developments have built upon 3DGS Kerbl et al. (2023). MipSplatting Yu et al.
+(2023) combines a 3D smoothing filter with a 2D Mip filter to enhance anti-aliasing capabilities.
+In addition, Multi-scale Gaussian Splatting Yan et al. (2023) adjusts the scale of Gaussian filters in
+the rendering process, merging smaller Gaussians into larger ones for distant views to effectively
+manage aliasing at various distances and scales.
+3
+M ETHOD
+3.1
+P RELIMINARIES
+3D Gaussian Splatting (3DGS) represents scenes as a collection of 3D Gaussians. Each Gaussian is
+characterized by its position, rotation, scale, opacity, and color (represented by a series of spherical
+harmonics). We denote the position, opacity, and color of the i-th Gaussian by xi , αi , and ci ,
+respectively.
+To render an image from a given viewpoint, the Gaussians are projected onto the image plane. They
+are then sorted in accordance with their depth values in the Z-buffer. The color Ĉ rendered for a
+pixel is determined by blending all Gaussians that are projected onto it in order, using the following
+equation:
+N
+i−1
+X
+Y
+Ĉ =
+ci αi
+(1 − αj ).
+(1)
+i=1
+j=1
+4
+PyGS
+Initialization from NeRF
+NeRF
+Network 𝐹𝛷
+Point clouds
+Logits
+3D Gaussians
+Learnable
+embeddings
+Multi-scale Point Clouds
+Clustering & Initialization
+Fast Training
+Images
+Adaptive Rendering
+𝐿𝑜𝑠𝑠
+Projection &
+Rasterization
+Weighting
+Opacity
++
+Pyramidal Gaussians
+Weighting
+Network 𝐹𝛩
+Cluster Emb.
+𝑤1,𝑛
+𝑤2,𝑛
+𝑤3,𝑛
+𝑤4,𝑛
+Color Corr.
+Network 𝐹𝜑
++
+Appearance
+Emb.
+Camera
+Figure 2: Overview of the PyGS Framework. Our framework begins by training a grid-based
+NeRF model to rapidly converge and generate point clouds with varying densities. We then use
+the point clouds from NeRF to initialize a multi-level structure of Pyramidal Gaussians and spatially group these Gaussians into clusters. When rendering an image, a compact weighting network
+computes the contributions of different levels of each cluster, taking into account both the camera
+position and a learnable cluster embedding. Before these Gaussians are projected onto the image
+plane, a color correction network is applied to fine-tune the colors of the Gaussians to accommodate
+complex light changes. For clarity, the illustration shows 3 levels and 4 clusters.
+Neural Radiance Fields (NeRF) and Its Derivatives represent the scene using an implicit function
+FΦ that is typically parameterized by a multilayer perceptron (MLP):
+FΦ (x, d) = (c, σ),
+(2)
+where x is the spatial coordinate, d is the view direction, and c and σ are the predicted color and
+density, respectively. NeRF-based methods Mildenhall et al. (2021); Müller et al. (2022) render
+images by casting rays r(t) from the camera into the scene, sampling points along the rays, and
+aggregating the samples via volume rendering techniques. Certain NeRF-based methods Müller
+et al. (2022); Chen et al. (2022) achieve extremely fast convergence by substituting the MLP with
+efficient data structures such as hash maps or tensor grids.
+3.2
+I NITIALIZATION OF P YRAMIDAL G AUSSIAN FROM N E RF
+Point Cloud Generation from NeRF: The original 3D Gaussian Splatting (3DGS) method Kerbl
+et al. (2023) utilizes COLMAP Schönberger et al. (2016); Schönberger & Frahm (2016) to generate sparse point clouds as an initial step for the algorithm. However, large-scale datasets Turki et al.
+(2022); Lin et al. (2022); Xiangli et al. (2022); Li et al. (2023) are often more than an order of magnitude larger than typical outdoor datasets. The time required for sparse reconstruction with COLMAP
+grows substantially with the size of the dataset. It has also been observed that COLMAP struggles
+to reconstruct points that are distant from the scene’s center, which critically impairs 3DGS’s capacity to model far-away objects. In contrast, grid-based NeRF methods Chen et al. (2022); Müller
+et al. (2022) offer a more efficient and robust approach for point cloud generation that is largely
+independent of the size of the training set.
+Motivated by this insight, we first train a grid-based NeRF model, denoted as FΦ , on the large-scale
+scene. As we only require the NeRF model to capture the scene’s approximate structure, this training
+process can be expedited and completed within approximately 20 minutes. To generate point clouds
+from the trained NeRF model FΦ , we cast rays from the training cameras and sample points at the
+5
+PyGS
+estimated termination point, denoted as ẑ, of each ray. Please refer to the supplementary materials
+for a detailed derivation of the estimated terminations. The position and color of each generated
+point are obtained as:
+xi = o + ẑd,
+ci = FΦ (xi , d),
+(3)
+(4)
+where o and d represent the origin and direction of the ray, respectively. We sample NP points from
+the coarse NeRF to form the point cloud, denoted by P = {(xi , ci ) | 1 ≤ i ≤ NP }.
+Sampling Multi-scale Point Clouds We sample L subsets of points from P with progressively
+increasing sampling frequencies. Specifically, for the l-th subset of points, we randomly select Nl
+points from P . We empirically set Nl = l · N1 , where N1 denotes the number of points in the first
+PL
+and most sparse subset of points. We denote N = l=1 Ni as the total number of selected points.
+Initiating Pyramidal Gaussians: For each subset of points, we initialize 3D Gaussians using the
+same approach in 3DGS Kerbl et al. (2023), details of which can be found in the supplementary
+materials. This leads to a hierarchical structure of 3D Gaussian collections, which we refer to as
+Pyramidal Gaussians, denoted by Gpy = Gl | 1 ≤ l ≤ L, where Gl represents the Gaussians initiated from the l-th sub-cloud. Since the scale of each Gaussian is determined by the average distance
+to its nearest neighbors, the scale of the Gaussians diminishes as the number of initiated points increases. Consequently, the Pyramidal Gaussians Gpy naturally form a multi-scale architecture. The
+higher levels (i.e., smaller l) comprise Gaussians with larger scales, while the lower levels consist of
+Gaussians with smaller scales.
+3.3
+A DAPTIVE R ENDERING
+Cluster-level Weighting: When rendering the Pyramidal Gaussians Gpy , it is crucial to assess the
+contributions from each level of Gaussians adaptively based on the viewpoint. Fig. 3 illustrates
+three different weighting strategies: (a) uniform weighting, which assigns the same weight to all
+Gaussians within the same level; (b) unique weighting, which assigns a distinct weight to each
+Gaussian; and (c) cluster weighting, which groups Gaussians into clusters and assigns a shared
+weight to all members within each cluster.
+Uniformly weighting all Gaussians from the
+same level may not be ideal, as the appropriate
+weight should reflect specific characteristics of
+each Gaussian, such as its distance to the camera and the surrounding geometric complexity.
+(c)
+(a)
+(b)
+Assigning a unique weight to each Gaussian
+could provide a more tailored rendering, but
+Figure 3: Illustration of weighting strategies.
+would also incur a substantial computational
+cost due to the large number of Gaussians involved. We therefore choose a balanced scheme that segments the Pyramidal Gaussians into clusters and attributes each cluster with an unique set of weights. This strategy enables us to consider
+the positional information of the Gaussians while avoiding a significant increase in computational
+demand.
+We employ an efficient mini-batched K-means algorithm Shindler et al. (2011) to establish K centroids from P , denoted as M = {mk | 1 ≤ k ≤ K}, where mk represents the k-th centroid. Note
+that to decrease computational time, we apply the K-means algorithm to only a subset of the point
+cloud. The duration of the K-means algorithm is approximately 30 seconds. For every Gaussian in
+Gpy , we assign it to the nearest centroid from the set M . For the i-th Gaussian in Gl , this assignment
+is represented by:
+kil = NearestNeighbour(M, xli ),
+(5)
+where kil is the index of the closest centroid to the ellipsoid center of the i-th Gaussian in Gl , as
+determined by the Nearest Neighbour algorithm. Here Gaussians from different levels that belong
+to the same cluster also make up a pyramidal architecture that captures a small region near the cluster
+centroid.
+6
+PyGS
+Cluster Embedding: Various attributes of clusters, such as their position, local geometry, and texture, can influence the optimal weights
+for each level. To better capture these cluster information, we equip
+each cluster with a learnable feature, referred to as a cluster embedding
+Ec ∈ RK×D , where K represents the total number of clusters and D is
+the dimension of the feature.
+Weighting Network: We employs a small MLP FΘ to determine the
+level weights for each cluster. The architecture of the weighting network is visualized in Fig 4. For the k-th cluster as viewed from the n-th
+camera, the level weights are computed as follows:
+Softmax
+Linear & ReLU
+×𝟑
+Positional
+Encoding
+Camera
+Cluster
+Position Embedding
+wk,n = Softmax (FΘ (Concat (Ec [k], PE(xcam )))) ∈ RL ,
+(6) Figure 4: Architecture of
+weighting network.
+where Concat(·) denotes the concatenation operation, Ec [k] is the feature
+vector for the k-th cluster, PE represents a positional encoding function Mildenhall et al. (2021), and
+xcam denotes the coordinates of the camera center. The weight corresponding to the l-th level for the
+k-th cluster viewed from the n-th camera is denoted by wk,n [l].
+Appearance-aware Rendering: To render an image, we sort all the Gaussians using the same
+method as presented in 3DGS Kerbl et al. (2023). With a slight abuse of notations, we denote the
+sorted Gaussians as a sequence {gi }N
+i=1 , where gi is the i-th ordered Gaussian. The color, opacity,
+level, and cluster index associated with gi are represented by ci , αi , li , and ki , respectively.
+As large-scale scene modeling frequently encounters challenges stemming from lighting variations
+among different images, prior works such as Turki et al. (2022); Zhenxing & Xu (2023) have considered appearance embedding vectors to impart additional adaptability for handling these variations.
+However, directly incorporating such a strategy into our framework may not be feasible, we have
+devised an effective alternative. We integrate a per-camera appearance embedding Eapp ∈ RNcam ×D
+alongside a compact MLP Fφ to perform per-cluster color correction. Here, Ncam represents the
+total count of cameras. The color correction for the i-th Gaussian is computed as follows:
+∆ci = Fφ (Concat(Ec [ki ], Eapp [n])) ∈ R3 ,
+(7)
+where Ec [ki ] denotes the embedding of the cluster to which the i-th Gaussian belongs, and Eapp [n]
+is the appearance embedding for the n-th camera. The final color for rendering is then determined
+by the following equation:
+N
+i−1
+X
+Y
+(ci + ∆ci ) · wki ,n [li ] · αi
+(1 − wkj ,n [lj ] · αj ),
+(8)
+Ĉ =
+i=1
+j=1
+where ci is the color computed via spherical harmonics, c′i = ci + ∆ci is the adjusted color based
+on the current image, and αi is the opacity of the Gaussian.
+3.4
+O PTIMIZATION
+Similar to the original 3DGS Kerbl et al. (2023), we use a photorealistic loss function for optimization, which is a weighted combination of mean squared error (MSE) and structural similarity index
+measure (SSIM):
+L = λ · MSE(C, Ĉ) + (1 − λ) · SSIM(C, Ĉ),
+(9)
+where λ is a hyperparameter that balances the two loss terms, and C is the ground-truth color of the
+pixel. We use the same splitting and cloning strategies as 3DGS for density control. The newly split
+and cloned Gaussians will be retained within the original level and cluster. In order to preserve the
+multi-scale characteristics throughout the training process, we routinely reassess and reassign the
+levels of Gaussians in accordance with their scales. This ensures that the distribution of Gaussians
+across different levels remains proportionally balanced.
+4
+E XPERIMENTS
+4.1
+E XPERIMENTAL S ETUP
+Dataset: We conduct our experiments on four large-scale scene datasets: Mill19 Turki et al. (2022),
+Urbanscene Lin et al. (2022), MatrixCity Li et al. (2023), and BungeeNeRF Xiangli et al. (2022).
+7
+PyGS
+Table 1: The testing results of our PyGS on four large-scale datasets Turki et al. (2022); Lin et al.
+(2022); Li et al. (2023); Xiangli et al. (2022) Our method gets state-of-the-art accuracy and significant rendering speed boost compared with NeRF-based methods Turki et al. (2022); Zhenxing &
+Xu (2023); Xiangli et al. (2022); Xu et al. (2023) and original 3DGS Kerbl et al. (2023).
+Scene
+Metric
+NeRF
+NeRF++
+MegaNeRF
+SwitchNeRF
+3D-GS(R)
+3D-GS(C)
+PyGS
+Mill19
+Building
+PSNR↑
+SSIM↑
+LPIPS↓
+19.54
+0.525
+0.512
+19.48
+0.520
+0.514
+20.93
+0.547
+0.504
+21.54
+0.579
+0.474
+19.09
+0.562
+0.468
+20.28
+0.647
+0.365
+22.72
+0.729
+0.298
+Mill19
+Rubble
+PSNR↑
+SSIM↑
+LPIPS↓
+21.14
+0.522
+0.546
+20.90
+0.519
+0.548
+24.06
+0.553
+0.516
+24.31
+0.562
+0.496
+23.39
+0.610
+0.467
+24.75
+0.676
+0.343
+25.65
+0.727
+0.320
+Urbanscene
+Residence
+PSNR↑
+SSIM↑
+LPIPS↓
+19.01
+0.593
+0.488
+18.99
+0.586
+0.493
+22.08
+0.628
+0.489
+22.57
+0.654
+0.457
+20.42
+0.689
+0.342
+21.13
+0.744
+0.272
+23.74
+0.789
+0.260
+Urbanscene
+Sci-Art
+PSNR↑
+SSIM↑
+LPIPS↓
+20.70
+0.727
+0.418
+20.83
+0.755
+0.393
+25.60
+0.770
+0.390
+26.52
+0.795
+0.360
+21.41
+0.757
+0.349
+22.11
+0.818
+0.252
+27.82
+0.864
+0.214
+Urbanscene
+Campus
+PSNR↑
+SSIM↑
+LPIPS↓
+21.83
+0.521
+0.630
+21.81
+0.520
+0.630
+23.42
+0.537
+0.618
+23.62
+0.541
+0.609
+14.06
+0.342
+0.745
+21.33
+0.642
+0.552
+24.25
+0.745
+0.432
+(a) Results on Mill19 Turki et al. (2022) and Urbanscene Lin et al. (2022) dataset.
+Scene
+Metric
+NeRF
+InstantNGP
+MipNeRF-360
+GridNeRF
+3D-GS(R)
+3D-GS(C)
+PyGS
+MatrixCity
+Block A
+PSNR↑
+SSIM↑
+LPIPS↓
+23.15
+0.561
+0.649
+27.21
+0.793
+0.376
+26.64
+0.772
+0.406
+25.37
+0.705
+0.478
+23.69
+0.658
+0.514
+27.33
+0.852
+0.225
+27.96
+0.863
+0.214
+MatrixCity
+Block C
+PSNR↑
+SSIM↑
+LPIPS↓
+22.15
+0.590
+0.527
+23.21
+0.788
+0.311
+24.20
+0.759
+0.365
+23.65
+0.741
+0.389
+20.81
+0.5986
+0.4299
+24.34
+0.807
+0.214
+24.77
+0.819
+0.205
+MatrixCity
+Block E
+PSNR↑
+SSIM↑
+LPIPS↓
+23.53
+0.612
+0.534
+26.36
+0.807
+0.335
+26.54
+0.811
+0.338
+24.43
+0.693
+0.468
+22.09
+0.6065
+0.4738
+26.93
+0.8543
+0.189
+27.62
+0.872
+0.181
+(b) Results on MatrixCity Li et al. (2023) dataset.
+Scene
+Metric
+NeRF
+MipNeRF
+BungeeNeRF
+3DGS-R
+3DGS-C
+PyGS
+BungeeNeRF
+56Leonard
+PSNR↑
+SSIM↑
+LPIPS↓
+21.70
+0.636
+0.320
+22.312
+0.689
+0.266
+24.513
+0.815
+0.139
+26.4
+0.847
+0.102
+28.4
+0.904
+0.088
+29.22
+0.944
+0.074
+BungeeNeRF
+Tranamerica
+PSNR↑
+SSIM↑
+LPIPS↓
+22.642
+0.690
+0.318
+22.692
+0.687
+0.327
+24.415
+0.801
+0.192
+24.22
+0.823
+0.231
+26.94
+0.896
+0.148
+27.79
+0.923
+0.108
+(c) Results on BungeeNeRF Xiangli et al. (2022) dataset.
+Mill19 Turki et al. (2022) and Urbanscene Lin et al. (2022) collectively comprise five real-world
+large-scale urban scenes captured by drones. Additionally, we adapt three scenes from the MatrixCity Li et al. (2023) dataset, which is a synthetic city-level dataset generated with Unreal Engine
+5. Furthermore, our method is evaluated on two scenes from BungeeNeRF Xiangli et al. (2022),
+sourced from Google Earth Studio Google (n.d.). These scenes encompass a wide range of scales,
+from very distant to extremely close views. We report main results on all the four chosen datasets
+and conduct analysis experiments on Mill19 Turki et al. (2022) and Urbanscene Lin et al. (2022)
+datasets.
+Baselines: We evaluat our PyGS method against state-of-the-art (SoTA) methods on each dataset.
+For the Mill19 and Urbanscene datasets, we compare PyGS with NeRF Mildenhall et al. (2021),
+NeRF++ Zhang et al. (2020), and two SoTA NeRF-based approaches, namely MegaNeRF Turki
+et al. (2022) and SwitchNeRF Zhenxing & Xu (2023). On the MatrixCity dataset, our comparisons
+include NeRF Mildenhall et al. (2021), InstantNGP Müller et al. (2022), MipNeRF-360 Barron
+8
+PyGS
+MegaNeRF
+SwitchNeRF
+3DGS
+PyGS
+Ground Truth
+(a) The comparison of the rendered images on Mill19 Turki et al. (2022) and Urbanscene Lin et al. (2022)
+dataset.
+GridNeRF
+3DGS
+PyGS
+Ground Truth
+BungeeNeRF
+3DGS
+PyGS
+Ground Truth
+(b) The comparison of the rendered images on BungeeNeRF Xiangli et al. (2022) and MatrixCity Li et al.
+(2023) dataset.
+Figure 5: The comparison of the rendered images from Mega-NeRF Turki et al. (2022), SwitchNeRF Zhenxing & Xu (2023), GridNeRF Xu et al. (2023), BungeeNeRF Xiangli et al. (2022), the
+original 3DGS Kerbl et al. (2023) and our PyGS on four large-scale dataset. Our method exhibits
+finer details and captures tiny structures more effectively than the compared methods. Additionally,
+our approach offers improved background modeling and reduces the presence of floaters when compared to 3DGS. Please zoom in to explore the details.
+et al. (2022), and GridNeRF Xu et al. (2023). For the BungeeNeRF dataset, we benchmark against
+NeRF Mildenhall et al. (2021), MipNeRF Barron et al. (2021), and the dataset’s namesake method,
+BungeeNeRF Xiangli et al. (2022). Furthermore, we compare PyGS with the original 3DGS Kerbl
+et al. (2023) using random points (3DGS-R) and COLMAP points (3DGS-C) for initialization on
+all the four datasets.
+9
+PyGS
+Implementation: In our main experiments, we employ Pyramidal Gaussians with L = 3 levels and
+K = 5000 clusters. We use an instant-NGP Müller et al. (2022) to generate 106 points for each
+scene. The number of initiation points for each level is set to 8 × 105 , 1.6 × 106 , and 3.2 × 106 ,
+respectively. Both the weighting network and the color correction network are configured with 3
+layers, each containing 64 neurons using fully-fused MLP Müller et al. (2022). The dimensions for
+the cluster and appearance embeddings are set to 64. The Adam optimizer Kingma & Ba (2014) is
+employed, with learning rates set at 3 × 10−4 for the networks and 0.1 for the embeddings. We train
+model of each scene for 200,000 iterations on an Nvidia RTX A6000 GPU. The learning rate for
+the Gaussian positions is set to 1.6 × 10−5 , following the recommended practice for 3DGS in large
+scenes Kerbl et al. (2023). We maintain consistency with all other shared hyperparameters from the
+original 3DGS method Kerbl et al. (2023).
+Evaluation Metrics: We quantitatively evaluate our results on novel view synthesis using PSNR and
+SSIM Wang et al. (2004) (higher the better), as well as the VGG implementation of LPIPS Zhang
+et al. (2018) (lower the better).
+4.2
+OVERALL R ESULTS
+We present a qualitative comparison of the baseline methods and our approach in Fig. 5, as well as
+a quantitative analysis in Table 1. Our method outperforms the baseline methods across all evaluated metrics and datasets, achieving significantly higher scores. Our method exhibits a significant
+enhancement in rendering sharp edges and fine details within synthesized views, surpassing stateof-the-art NeRF techniques such as MegaNeRF Turki et al. (2022) and SwitchNeRF Zhenxing & Xu
+(2023), which rely on scene partitioning strategies. Moreover, it outstrips the performance of GridNeRF Xu et al. (2023) in tests conducted on the synthetic MatrixCity dataset Li et al. (2023). Additionally, our approach adeptly addresses the challenges posed by the highly diverse scales within
+the BungeeNeRF dataset Xiangli et al. (2022), yielding superior results compared to the current
+state-of-the-art method, BungeeNeRF itself. We have also noted that, in contrast to the original
+3DGS method Kerbl et al. (2023), our approach proficiently reproduces intricate details, lighting
+effects, and background objects, which are aspects that 3DGS commonly struggles to capture accurately across all tested datasets. Overall, the empirical results confirm that our method sets a new
+benchmark for quality and realism in the field of view synthesis.
+4.3
+M ODEL A NALYSIS
+Besides the main results, we perform analysis experiments to analyze different aspects of our model
+on the Mill19 Turki et al. (2022) dataset.
+Effectiveness of NeRF-based Initialization: As shown in Table 2, we assess the performance of
+our NeRF-based initialization method by comparing it with two alternatives: random initialization
+and COLMAP-based initialization Schönberger et al. (2016); Schönberger & Frahm (2016). For
+the random approach, we generate a set of random points equal in number to our NeRF-based
+initialization method and apply multi-scale sampling. In the case of COLMAP, we utilize the entirety
+of the point cloud produced, given that the output size from COLMAP cannot be predetermined.
+Our NeRF-based initialization method demonstrates superior results in comparison to the other two
+methods. A visual comparison is provided in Fig. 6, where it is evident that grid-based NeRF (i.e.,
+Instant-NGP Müller et al. (2022)) generates denser point clouds with improved geometric details
+and background modeling. This indicates that initializing with a grid-based NeRF captures the
+scene geometry more effectively.
+Weighting Strategies: In Table 2, we compare our adaptive weighting strategy with three alternative approaches. The Random strategy assigns a random weight to each pyramid level. The w/o
+weighting strategy assigns a uniform weight of 1 to all levels. The Top1 strategy renders only the
+level with the highest weight. Our use of a learnable weighting network markedly enhances the
+rendering results compared to both the Random and w/o weighting approaches. Moreover, relying
+solely on the level with the maximum weight, as in the Top1 strategy, leads to instability during
+training and fails to achieve convergence.
+Effectiveness of Color Correction: We further investigate the impact of appearance embedding
+and color correction network in Table 2. Omitting the color correction network leads to a decline in
+10
+PyGS
+COLMAP Initialization
+Instant-NGP Initialization
+Figure 6: Comparison between COLMAP Schönberger et al. (2016); Schönberger & Frahm (2016)
+and Instant-NGP Müller et al. (2022) point clouds. Instant-NGP produces point clouds with better
+modeling of texture and geometry.
+Table 2: The ablation results of initialization, weighting strategies and color correction.
+PSNR↑
+SSIM↑
+LPIPS↓
+FPS↑
+Init.
+Random
+COLMAP
+21.20
+23.00
+0.538
+0.670
+0.513
+0.365
+123.75
+121.62
+Weighting
+Random
+w/o weighting
+Top1
+22.08
+22.50
+12.97
+0.635
+0.674
+0.241
+0.418
+0.357
+0.792
+122.84
+121.02
+147.52
+w/o ColorCorr.
+23.86
+0.701
+0.328
+121.87
+PyGS
+24.18
+0.728
+0.309
+121.35
+performance metrics, underscoring the effectiveness of accounting for variations in lighting across
+different images.
+Impact of Pyramid Levels and Initialization Points: In Table 3, we analyze the impact of the
+pyramid level L and the number of initialization points N . Increasing both L and N results in
+improved rendering quality while causing a modest decrease in rendering speed. This trend aligns
+with expectations, as additional pyramid levels enable the model to capture finer details of the scene,
+and the greater number of initialization points provides a more informed starting point for the model,
+offering an initial advantage for large scene modeling.
+Behaviours of Weighting Network: In Fig. 7, we illustrate the distribution of weights assigned to
+each cluster across different pyramid levels upon projection onto the image plane. The visualization
+reveals that Gaussians at lower levels are particularly effective at capturing smooth objects that are
+nearer to the camera, such as the lake’s surface. In contrast, Gaussians at the upper levels of the
+pyramid demonstrate a greater capacity for representing intricate and distant objects, such as the
+grass and trees.
+Table 3: The impact of number of Table 4: Comparison of time usage of preprocessing, trainpyramid levels and the size of initial- ing and rendering between MegaNeRF Turki et al. (2022),
+3DGS Kerbl et al. (2023) and our PyGS. PyGS takes signifization points.
+icantly less time than other methods.
+L
+N
+PSNR↑
+SSIM↑
+LPIPS↓
+FPS↑
+2
+120k
+240k
+23.51
+23.81
+0.686
+0.685
+0.371
+0.345
+159.6
+159.1
+3
+260k
+560k
+23.97
+24.19
+0.683
+0.728
+0.333
+0.309
+141.9
+124.2
+4
+600k
+1.2m
+24.72
+24.93
+0.734
+0.749
+0.298
+0.287
+117.3
+100.0
+PSNR↑
+SSIM↑
+LPIPS↓
+Pre.(h)
+Train(h)
+FPS
+MegaNeRF
+MegaNeRF-D
+3DGS-R
+3DGS-C
+22.96
+22.34
+21.24
+22.52
+0.588
+0.573
+0.586
+0.661
+0.452
+0.464
+0.467
+0.354
+1:08
+7:35
+30:18
+30:18
+7:42
+11:53
+0.01
+0.252
+128.70
+121.13
+PyGS
+24.19
+0.728
+0.309
+0:18
+13:30
+114.35
+Time Usage: In Table 4, we present a comparison of preprocessing, training, and rendering times
+across different methods, specifically among MegaNeRF Turki et al. (2022), 3DGS Kerbl et al.
+(2023), and our proposal, PyGS. MegaNeRF-D represents an accelerated version of MegaNeRF that
+distills the original MegaNeRF into an Octree-like architecture to improve rendering efficiency. Table 4 illustrates that both 3DGS-R and 3DGS-C achieve a significant speedup in training and rendering while maintaining rendering quality comparable to that of MegaNeRF and MegaNeRF-D. This
+demonstrates the substantial advantages of 3DGS-based methods over those based on NeRF. Our
+11
+PyGS
+Ground Truth
+Level 1
+Level 2
+Level 3
+Figure 7: Visualization of weights of each level predicted by the weighting network.
+approach, PyGS, outperforms the others in all three evaluated image-quality metrics (PSNR, SSIM,
+and LPIPS) while still offering time efficiency on par with the 3DGS methods. This underscores
+the efficacy of our method. It is worth noting that, while 3DGS starting from COLMAP points has
+a marginally shorter training duration than PyGS, it requires several hours to generate point clouds
+using COLMAP. This additional step impacts the overall efficiency of 3DGS negatively.
+5
+C ONCLUSION
+In our study, we enhance the capabilities of the 3DGS framework Kerbl et al. (2023) without significantly increasing the training and rendering costs. We propose a novel pyramidal Gaussian architecture which initializes from a NeRF model. We perform cluster-level weighting by facilitating
+by a compact weighting network and learnable cluster embedding. Our approach achieves notable
+advancements in representing large-scale scenes by effectively addressing inherent multi-scale challenges. However, the modeling of even larger environments requires substantial memory and computational resources. This indicates opportunities for future enhancements through the adoption of
+parallel optimization techniques.
+R EFERENCES
+Edward H Adelson, Charles H Anderson, James R Bergen, Peter J Burt, and Joan M Ogden. Pyramid
+methods in image processing. RCA engineer, 29(6):33–41, 1984.
+Sameer Agarwal, Noah Snavely, Steven M Seitz, and Richard Szeliski. Bundle adjustment in the
+large. In Computer Vision–ECCV 2010: 11th European Conference on Computer Vision, Heraklion, Crete, Greece, September 5-11, 2010, Proceedings, Part II 11, pp. 29–42. Springer, 2010.
+Sameer Agarwal, Yasutaka Furukawa, Noah Snavely, Ian Simon, Brian Curless, Steven M Seitz, and
+Richard Szeliski. Building rome in a day. Communications of the ACM, 54(10):105–112, 2011.
+Jonathan T Barron, Ben Mildenhall, Matthew Tancik, Peter Hedman, Ricardo Martin-Brualla, and
+Pratul P Srinivasan. Mip-nerf: A multiscale representation for anti-aliasing neural radiance fields.
+In Proceedings of the IEEE/CVF International Conference on Computer Vision, pp. 5855–5864,
+2021.
+Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter Hedman. Mip-nerf
+360: Unbounded anti-aliased neural radiance fields. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pp. 5470–5479, 2022.
+Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter Hedman. Zip-nerf:
+Anti-aliased grid-based neural radiance fields. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, pp. 19697–19705, 2023.
+Peter J Burt and Edward H Adelson. The laplacian pyramid as a compact image code. In Readings
+in computer vision, pp. 671–679. Elsevier, 1987.
+Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su. Tensorf: Tensorial radiance
+fields. In European Conference on Computer Vision, pp. 333–350. Springer, 2022.
+Jan-Michael Frahm, Pierre Fite-Georgel, David Gallup, Tim Johnson, Rahul Raguram, Changchang
+Wu, Yi-Hung Jen, Enrique Dunn, Brian Clipp, Svetlana Lazebnik, et al. Building rome on a
+cloudless day. In Computer Vision–ECCV 2010: 11th European Conference on Computer Vision,
+12
+PyGS
+Heraklion, Crete, Greece, September 5-11, 2010, Proceedings, Part IV 11, pp. 368–381. Springer,
+2010.
+Christian Früh and Avideh Zakhor. An automated method for large-scale, ground-based city model
+acquisition. International Journal of Computer Vision, 60:5–24, 2004.
+Michael Goesele, Noah Snavely, Brian Curless, Hugues Hoppe, and Steven M Seitz. Multi-view
+stereo for community photo collections. In 2007 IEEE 11th International Conference on Computer Vision, pp. 1–8. IEEE, 2007.
+Google. Google earth studio. https://www.google.com/earth/studio/, n.d. Accessed:
+2024.3.2.
+Wenbo Hu, Yuling Wang, Lin Ma, Bangbang Yang, Lin Gao, Xiao Liu, and Yuewen Ma. Tri-miprf:
+Tri-mip representation for efficient anti-aliasing neural radiance fields. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision, pp. 19774–19783, 2023.
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3d gaussian splatting for real-time radiance field rendering. ACM Transactions on Graphics, 42(4), 2023.
+Diederik P Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint
+arXiv:1412.6980, 2014.
+Yixuan Li, Lihan Jiang, Linning Xu, Yuanbo Xiangli, Zhenzhi Wang, Dahua Lin, and Bo Dai.
+Matrixcity: A large-scale city dataset for city-scale neural rendering and beyond. arXiv e-prints,
+pp. arXiv–2308, 2023.
+Liqiang Lin, Yilin Liu, Yue Hu, Xingguang Yan, Ke Xie, and Hui Huang. Capturing, reconstructing,
+and simulating: the urbanscene3d dataset. In ECCV, 2022.
+David B Lindell, Dave Van Veen, Jeong Joon Park, and Gordon Wetzstein. Bacon: Band-limited
+coordinate networks for multiscale scene representation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 16252–16262, 2022.
+David G Lowe. Distinctive image features from scale-invariant keypoints. International journal of
+computer vision, 60:91–110, 2004.
+Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and
+Ren Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. Communications
+of the ACM, 65(1):99–106, 2021.
+Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM Transactions on Graphics (ToG), 41(4):1–15,
+2022.
+Seungtae Nam, Daniel Rho, Jong Hwan Ko, and Eunbyung Park. Mip-grid: Anti-aliased grid representations for neural radiance fields. Advances in Neural Information Processing Systems, 36,
+2024.
+Marc Pollefeys, David Nistér, J-M Frahm, Amir Akbarzadeh, Philippos Mordohai, Brian Clipp,
+Chris Engels, David Gallup, S-J Kim, Paul Merrell, et al. Detailed real-time urban 3d reconstruction from video. International Journal of Computer Vision, 78:143–167, 2008.
+Nasim Rahaman, Aristide Baratin, Devansh Arpit, Felix Draxler, Min Lin, Fred Hamprecht, Yoshua
+Bengio, and Aaron Courville. On the spectral bias of neural networks. In International Conference on Machine Learning, pp. 5301–5310. PMLR, 2019.
+Vishwanath Saragadam, Jasper Tan, Guha Balakrishnan, Richard G Baraniuk, and Ashok Veeraraghavan. Miner: Multiscale implicit neural representation. In Computer Vision–ECCV 2022:
+17th European Conference, Tel Aviv, Israel, October 23–27, 2022, Proceedings, Part XXIII, pp.
+318–333. Springer, 2022.
+Johannes Lutz Schönberger and Jan-Michael Frahm. Structure-from-motion revisited. In Conference on Computer Vision and Pattern Recognition (CVPR), 2016.
+13
+PyGS
+Johannes Lutz Schönberger, Enliang Zheng, Marc Pollefeys, and Jan-Michael Frahm. Pixelwise
+view selection for unstructured multi-view stereo. In European Conference on Computer Vision
+(ECCV), 2016.
+Michael Shindler, Alex Wong, and Adam Meyerson. Fast and accurate k-means for large datasets.
+Advances in neural information processing systems, 24, 2011.
+Noah Snavely, Steven M Seitz, and Richard Szeliski. Photo tourism: exploring photo collections in
+3d. In ACM siggraph 2006 papers, pp. 835–846. 2006.
+Matthew Tancik, Pratul Srinivasan, Ben Mildenhall, Sara Fridovich-Keil, Nithin Raghavan, Utkarsh
+Singhal, Ravi Ramamoorthi, Jonathan Barron, and Ren Ng. Fourier features let networks learn
+high frequency functions in low dimensional domains. Advances in Neural Information Processing Systems, 33:7537–7547, 2020.
+Matthew Tancik, Vincent Casser, Xinchen Yan, Sabeek Pradhan, Ben Mildenhall, Pratul P Srinivasan, Jonathan T Barron, and Henrik Kretzschmar. Block-nerf: Scalable large scene neural
+view synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pp. 8248–8258, 2022.
+Bill Triggs, Philip F McLauchlan, Richard I Hartley, and Andrew W Fitzgibbon. Bundle adjustment—a modern synthesis. In Vision Algorithms: Theory and Practice: International Workshop
+on Vision Algorithms Corfu, Greece, September 21–22, 1999 Proceedings, pp. 298–372. Springer,
+2000.
+Haithem Turki, Deva Ramanan, and Mahadev Satyanarayanan. Mega-nerf: Scalable construction
+of large-scale nerfs for virtual fly-throughs. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pp. 12922–12931, 2022.
+Haithem Turki, Michael Zollhöfer, Christian Richardt, and Deva Ramanan. Pynerf: Pyramidal
+neural radiance fields. Advances in Neural Information Processing Systems, 36, 2024.
+Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P Simoncelli. Image quality assessment:
+from error visibility to structural similarity. IEEE transactions on image processing, 13(4):600–
+612, 2004.
+Yuanbo Xiangli, Linning Xu, Xingang Pan, Nanxuan Zhao, Anyi Rao, Christian Theobalt, Bo Dai,
+and Dahua Lin. Bungeenerf: Progressive neural radiance field for extreme multi-scale scene
+rendering. In Computer Vision–ECCV 2022: 17th European Conference, Tel Aviv, Israel, October
+23–27, 2022, Proceedings, Part XXXII, pp. 106–122. Springer, 2022.
+Linning Xu, Yuanbo Xiangli, Sida Peng, Xingang Pan, Nanxuan Zhao, Christian Theobalt, Bo Dai,
+and Dahua Lin. Grid-guided neural radiance fields for large urban scenes. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 8296–8306, 2023.
+Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin Shu, Kalyan Sunkavalli, and Ulrich Neumann. Point-nerf: Point-based neural radiance fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 5438–5448, 2022.
+Zhiwen Yan, Weng Fei Low, Yu Chen, and Gim Hee Lee. Multi-scale 3d gaussian splatting for
+anti-aliased rendering. arXiv preprint arXiv:2311.17089, 2023.
+Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and Andreas Geiger. Mip-splatting: Aliasfree 3d gaussian splatting. arXiv preprint arXiv:2311.16493, 2023.
+Kai Zhang, Gernot Riegler, Noah Snavely, and Vladlen Koltun. Nerf++: Analyzing and improving
+neural radiance fields. arXiv preprint arXiv:2010.07492, 2020.
+Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The unreasonable
+effectiveness of deep features as a perceptual metric. In Proceedings of the IEEE Conference on
+Computer Vision and Pattern Recognition, pp. 586–595, 2018.
+MI Zhenxing and Dan Xu. Switch-nerf: Learning scene decomposition with mixture of experts
+for large-scale neural radiance fields. In The Eleventh International Conference on Learning
+Representations, 2023.
+14

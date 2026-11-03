@@ -1,0 +1,405 @@
+Bugsquad note: This issue has been confirmed several times already. No need to confirm it further. Godot version 3.5.2 RC2 System information Windows 10, Vulkan, RTX 3060 (466.81) Issue description When moving the camera around meshes th...
+
+Z fighting with voxel rendering · Issue #79081 · godotengine/godot · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Z fighting with voxel rendering #79081
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Z fighting with voxel rendering#79081
+Copy link
+Labels
+confirmeddiscussiondocumentationtopic:3dtopic:rendering
+Description
+elvisish
+opened on Jul 5, 2023
+Issue body actions
+Bugsquad note: This issue has been confirmed several times already. No need to confirm it further.
+Godot version
+3.5.2 RC2
+System information
+Windows 10, Vulkan, RTX 3060 (466.81)
+Issue description
+When moving the camera around meshes that are stacked, flashes that appear in strips of the side edge will show.
+Steps to reproduce
+Add a box with a texture that has a lighter side than the facing side.
+Move the camera around to observe the flickering.
+2023-07-05.22-39-42.mp4
+Minimal reproduction project
+broken_seams.zip
+Reactions are currently unavailable
+Activity
+Next
+elvisish commented on Jul 5, 2023
+elvisish
+on Jul 5, 2023
+Author
+More actions
+Some related issues:
+#16337
+#67673
+godotengine/godot-proposals#651
+#27837
+#35067
+Zylann/godot_voxel#510
+Zylann/godot_voxel#96
+👍React with 👍3Reacted by Zireael07, Kristian Nilsen and jdies
+lawnjelly
+added
+discussion
+topic:rendering
+on Jul 6, 2023
+lawnjelly commented on Jul 6, 2023
+lawnjelly
+on Jul 6, 2023
+Last edited by lawnjelly
+Member
+More actions
+I had a look, the problem is as described in some of the topics you linked. There are two issues that typically cause this kind of thing:
+Geometric gaps
+Texture sampling
+In your project, I replaced the texture with a blank unshaded material and the cracks disappeared to me, which suggested texture filtering.
+You appear to be using an atlas texture. Texture sampling in GPUs is subject to numerical error, which can cause crossing boundaries from where you expect (which can be compounded with mipmapping). The solution with a texture atlas is to apply padding around the zone you intend to use, where the colors at the boundary are replicated.
+https://www.google.com/search?q=texture+atlas+padding&oq=texture+atlas+padding
+This same problem occurs in 2D. This is the reason we have UV contract in batching to try and counteract this, but the best recommendation is for users to apply padding in texture atlases. Godot 4 I believe natively supports auto-padding for 2D atlases. The problem also occurs with skinned mesh textures, which is why textures for skinned meshes also need padding applied, and a gap between UV islands.
+This is really a consequence of how GPUs work. There's no easy (and efficient) way of fixing this with atlases except using padding, which is why you will see this same recommendation for other engines.
+lawnjelly
+added
+documentation
+on Jul 6, 2023
+lawnjelly commented on Jul 6, 2023
+lawnjelly
+on Jul 6, 2023
+Member
+More actions
+While I'm not sure this is actionable from a code perspective (a contributor might get around to padding grid atlases, or 2D only as in master), it might be good to add something in the docs as this seems to come around fairly regularly.
+👍React with 👍1Reacted by Zireael07
+elvisish commented on Jul 6, 2023
+elvisish
+on Jul 6, 2023
+Last edited by elvisish
+Author
+More actions
+You appear to be using an atlas texture. Texture sampling in GPUs is subject to numerical error, which can cause crossing boundaries from where you expect (which can be compounded with mipmapping). The solution with a texture atlas is to apply padding around the zone you intend to use, where the colors at the boundary are replicated.
+Here's a version using a texture for a single face and a shader that darkens each wall depending on it's facing direction:
+broken_seams_shader.zip
+It's also exhibits the same issue:
+2023-07-06.08-41-27-00.00.01.543-00.00.07.424.mp4
+The texture I used is just an imported png applied to an albedo (in both cases) and I'm not sure entirely how I'd go about padding it?
+lawnjelly commented on Jul 6, 2023
+lawnjelly
+on Jul 6, 2023
+Last edited by lawnjelly
+Member
+More actions
+Actually, correction, on looking at this case, there does seem to be some interaction with the shader, rather than texture padding. I'm not sure yet, will get back.
+Yes it does seem likely there's something going on in the shader.
+UPDATE:
+This is quite a weird one, and I suspect it is GPU precision issue. What I think is happening is your shader has abrupt shading depending on the normal, in your second project (above post) most of the blocks are near 0 lightness, but occasionally you are getting lines of near 1 lightness appearing. I'm suspecting that the "left / right" faces are occasionally poking through due to numerical error and you are seeing their pixels overwrite the pixels from the front facing ones.
+I'm not absolutely sure on this yet, as float comparisons in shaders can sometimes give borderline quirk results. But outputting the normal as color suggests it is pretty stable.
+EDIT:
+Yes you can also get sparklies in the editor by setting the editor viewport to:
+View Z near 0.01
+View Z far 50000
+I believe this is the same problem, the z values for the side faces are making them occasionally be drawn in front of the front facing faces.
+The term often used for this is "z fighting". Some ideas to help alleviate it:
+Modify your camera near and far to make best use of the z range
+Merge and remove internal walls in your geometry
+I'm not sure offhand what z mode we use for OpenGL (or whether user can change this), just in case it is causing more fighting than necessary, but I have limited time available to look at this today.
+elvisish commented on Jul 6, 2023
+elvisish
+on Jul 6, 2023
+Last edited by elvisish
+Author
+More actions
+Modify your camera near and far to make best use of the z range
+I've been playing with that, but I'm using a frustum camera and it's difficult to get the fov correct while adjusting the near/far, also the far is retro-styled (short draw distance) and near is close as I don't want to clip through walls, and I couldn't find any good setting that worked for those.
+Merge and remove internal walls in your geometry
+I'm using gridmaps so this is impossible, unfortunately.
+lawnjelly commented on Jul 6, 2023
+lawnjelly
+on Jul 6, 2023
+Member
+More actions
+You might also be able to use some hackery to get around this. Some ideas:
+Make the cube in blender, and contract the faces just a tad so they almost match up. This may help z fighting, but in exchange you might get gaps.
+Modify the vertex shader .. if the normal of the vertex in camera space is to the side of the camera (rather than front on), then push the vertex slightly away from the camera.
+elvisish commented on Jul 6, 2023
+elvisish
+on Jul 6, 2023
+Author
+More actions
+Modify the vertex shader .. if the normal of the vertex in camera space is to the side of the camera (rather than front on), then push the vertex slightly away from the camera.
+This might be the easiest to do, since I'm using this shader on all of my walls in the gridmap. I'm not entirely sure how to do this though (I tried some of the other vertex solutions in the threads I linked, but none of them worked, I imagine this would work differently though).
+lawnjelly
+changed the title [-]Mesh edge rendering seam flashes line of edge texture[/-] [+]Z fighting with voxel rendering[/+] on Jul 6, 2023
+Calinou
+added
+topic:3d
+on Jul 6, 2023
+fracteed commented on Jul 7, 2023
+fracteed
+on Jul 7, 2023
+More actions
+I am not sure what workflow you are using, but the best way to get MagicaVoxel meshes into a game engine is to optimise them so that they are "watertight". You then won't get z fighting issues as it is contiguous mesh. There is a blender addon to do this conversion. You will also have a much more performant mesh if you are using lots of voxel meshes.
+https://www.blendermarket.com/products/vox-importer
+elvisish commented on Jul 7, 2023
+elvisish
+on Jul 7, 2023
+Author
+More actions
+I am not sure what workflow you are using, but the best way to get MagicaVoxel meshes into a game engine is to optimise them so that they are "watertight". You then won't get z fighting issues as it is contiguous mesh. There is a blender addon to do this conversion. You will also have a much more performant mesh if you are using lots of voxel meshes. https://www.blendermarket.com/products/vox-importer
+They're not voxels, I'm not sure why the title was changed, I'm just using MeshInstance cubes.
+27 remaining items
+Load more
+Calinou commented on Nov 8, 2023
+Calinou
+on Nov 8, 2023
+Last edited by Calinou
+Member
+More actions
+I don't know how to compile myself, if someone can do it for me I will be more than willing to try it out!
+Which OS are you on?
+You can find instructions for compiling here. Godot is much easier to build than the average C++ project, since it includes all the required libraries in its source tree.
+knil79 commented on Nov 8, 2023
+knil79
+on Nov 8, 2023
+Last edited by knil79
+More actions
+I don't know how to compile myself, if someone can do it for me I will be more than willing to try it out!
+Which OS are you on?
+You can find instructions for compiling here. Godot is much easier to build than the average C++ project, since it includes all the required libraries in its source tree.
+I am on windows 11.
+I am compiling now, but according to git(hub) that line has been uncommented a year ago... at least in the master branch
+https://github.com/godotengine/godot/blame/master/drivers/gles3/shaders/scene.glsl#L299
+EDIT: I have compiled from master, double checked that "invariant gl_Position;" was uncommented, which it was.
+still looks like this
+jdies commented on Nov 9, 2023
+jdies
+on Nov 9, 2023
+Last edited by jdies
+More actions
+Godot 4.1.1
+Win 10
+Vulkan
+Camera near plane 1.0m
+Camera far plane 100.0m
+Grid map cell size: 1x1x1
+Cube mesh size: 1x1x1
+Z fighting happens with box meshes from the engine
+Flicker.mp4
+Replacing the gridmap with multiple box mesh instances has the same issue
+Changing the box mesh to a plane mesh removes the issue
+👍React with 👍3Reacted by Kristian Nilsen, RobTheFiveNine and SyMog
+👀React with 👀2Reacted by Kristian Nilsen and Zireael07
+RobTheFiveNine commented on Nov 17, 2023
+RobTheFiveNine
+on Nov 17, 2023
+Last edited by RobTheFiveNine
+Contributor
+More actions
+As per @jdies last post, I have been experiencing this when using the GridMap with cube tiles, including Godot box meshes with no texture applied. I've noticed it being much more noticeable than in the previous examples provided though.
+example.no_aa.mp4
+I have experienced it in 4.1.1, 4.1.2 and 4.1.3, only tested so far on Ubuntu 23.10.
+Something I have found to notably reduce the effect is anti-aliasing. Specifically, enabling a combination of TA and MSAA x4 almost eliminates it. There is still some flickering if you look closely, but nowhere near as noticeable as without any (see video below for example with TA enabled and MSAA x4):
+example.msaa4x.ta.mp4
+And as per @jdies last post - this doesn't seem to happen when using a plane mesh.
+I have uploaded a sample project here that the above videos were created from: https://github.com/RobTheFiveNine/godot-gridmap-flicker-demo
+👀React with 👀3Reacted by Zireael07, Morné Venter and Eben
+Calinou
+added
+confirmed
+on Nov 17, 2023
+chutchinson commented on Dec 13, 2023
+chutchinson
+on Dec 13, 2023
+Last edited by chutchinson
+Contributor
+More actions
+For those using a texture atlas ("trim sheet"), I solved this problem in my project by contracting UVs by a half-pixel. I did this by attaching a custom script to my GLTF scene(s) that iterates through all mesh resources, modifies the UVs, and overwrites the mesh resources. I do not need antialiasing or multisampling in my project, but even with MSAA enabled there are no seams.
+```
+@tool
+extends EditorScenePostImport
+
+const TEXTURE_SIZE := 256.0
+const TEXEL := 1.0 / TEXTURE_SIZE
+
+func _post_import(scene):
+	var mesh_tool = MeshDataTool.new()
+	_iterate(mesh_tool, scene)
+	return scene
+
+func _iterate(mesh_tool: MeshDataTool, node):
+	if node is MeshInstance3D:
+		_process_mesh(mesh_tool, node.mesh)
+	for child in node.get_children():
+		_iterate(mesh_tool, child)
+	
+func _process_mesh(mesh_tool: MeshDataTool, mesh: ArrayMesh):
+	mesh_tool.create_from_surface(mesh, 0)
+	
+	# iterate over faces one quad at a time
+	for face in range(0, mesh_tool.get_face_count() - 1, 2):
+		_contract_quad(mesh_tool, face)
+	
+	# modify mesh
+	mesh.clear_surfaces()
+	mesh_tool.commit_to_surface(mesh, 0)
+	
+	# overwrite existing mesh resource
+	ResourceSaver.save(mesh, mesh.resource_path, ResourceSaver.FLAG_COMPRESS)
+
+func _contract_quad(mesh: MeshDataTool, face: int):	
+	var uvs = {}
+	var center = Vector2(0.0, 0.0)
+	
+	# iterate over all face (quad) vertices
+	for idx in range(6):
+		var fidx = wrapi(idx / 3, 0, 2)
+		var vidx = wrapi(idx, 0, 3)
+		var vertex = mesh.get_face_vertex(face + fidx, vidx)
+		var uv = mesh.get_vertex_uv(vertex)
+		center += uv * (1.0 / 6.0)
+		uvs[vertex] = uv
+		
+	# compute half-pixel scaling factor
+	const factor = 1.0 - (TEXEL * 0.5)
+	
+	# scale each UV towards the center (contraction)
+	for key in uvs:
+		mesh.set_vertex_uv(key, (uvs[key] - center) * factor + center)
+```
+This script assumes:
+Texture atlas size is 256x256
+Meshes are composed of exactly one surface
+Mesh UVs are composed of quads (2 triangles per face, 6 vertices total)
+Mesh UVs are snapped to pixels
+Mesh resources are saved to individual files (not using inherited scene)
+elvisish commented on Dec 13, 2023
+elvisish
+on Dec 13, 2023
+Author
+More actions
+For those using a texture atlas ("trim sheet"), I solved this problem in my project by contracting UVs by a half-pixel. I did this by attaching a custom script to my GLTF scene(s) that iterates through all mesh resources, modifies the UVs, and overwrites the mesh resources. I do not need antialiasing or multisampling in my project, but even with MSAA enabled there are no seams.
+```
+@tool
+extends EditorScenePostImport
+
+const TEXTURE_SIZE := 256.0
+const TEXEL := 1.0 / TEXTURE_SIZE
+
+func _post_import(scene):
+	var mesh_tool = MeshDataTool.new()
+	_iterate(mesh_tool, scene)
+	return scene
+
+func _iterate(mesh_tool: MeshDataTool, node):
+	if node is MeshInstance3D:
+		_process_mesh(mesh_tool, node.mesh)
+	for child in node.get_children():
+		_iterate(mesh_tool, child)
+	
+func _process_mesh(mesh_tool: MeshDataTool, mesh: ArrayMesh):
+	mesh_tool.create_from_surface(mesh, 0)
+	
+	# iterate over faces one quad at a time
+	for face in range(0, mesh_tool.get_face_count() - 1, 2):
+		_contract_quad(mesh_tool, face)
+	
+	# modify mesh
+	mesh.clear_surfaces()
+	mesh_tool.commit_to_surface(mesh, 0)
+	
+	# overwrite existing mesh resource
+	ResourceSaver.save(mesh, mesh.resource_path, ResourceSaver.FLAG_COMPRESS)
+
+func _contract_quad(mesh: MeshDataTool, face: int):	
+	var uvs = {}
+	var center = Vector2(0.0, 0.0)
+	
+	# iterate over all face (quad) vertices
+	for idx in range(6):
+		var fidx = wrapi(idx / 3, 0, 2)
+		var vidx = wrapi(idx, 0, 3)
+		var vertex = mesh.get_face_vertex(face + fidx, vidx)
+		var uv = mesh.get_vertex_uv(vertex)
+		center += uv * (1.0 / 6.0)
+		uvs[vertex] = uv
+		
+	# compute half-pixel scaling factor
+	const factor = 1.0 - (TEXEL * 0.5)
+	
+	# scale each UV towards the center (contraction)
+	for key in uvs:
+		mesh.set_vertex_uv(key, (uvs[key] - center) * factor + center)
+```
+This script assumes:
+Texture atlas size is 256x256
+Meshes are composed of exactly one surface
+Mesh UVs are composed of quads (2 triangles per face, 6 vertices total)
+Mesh UVs are snapped to pixels
+Mesh resources are saved to individual files (not using inherited scene)
+This looks promising, I'm using a single texture applied to simple MeshInstances in the example, might it be possible this could work using separate textures or must they be atlases?
+eben-vranken commented on Apr 22, 2024
+eben-vranken
+on Apr 22, 2024 · Hidden as off-topic
+show commentMore actions
+Calinou commented on Apr 22, 2024
+Calinou
+on Apr 22, 2024
+Member
+More actions
+@eben-vranken Please don't bump issues without contributing significant new information. Use the 👍 reaction button on the first post instead.
+👍React with 👍1Reacted by Eben
+Calinou
+changed the title [-]Z fighting with voxel rendering[/-] [+]Visible seams/sparkly dots between meshes placed next to each other[/+] on Apr 22, 2024
+Calinou
+changed the title [-]Visible seams/sparkly dots between meshes placed next to each other[/-] [+]Z fighting with voxel rendering[/+] on Apr 22, 2024
+Kurpotato commented on Apr 30, 2024
+Kurpotato
+on Apr 30, 2024
+More actions
+I was searching for solutions to this problem, and found that yesterday there was an article posted about "reverse Z" coming to 4.3:
+https://godotengine.org/article/introducing-reverse-z/
+The technical information goes over my head, but do I understand correctly that this would fix the issue with seams/fireflies?
+Calinou commented on Apr 30, 2024
+Calinou
+on Apr 30, 2024
+Member
+More actions
+I was searching for solutions to this problem, and found that yesterday there was an article posted about "reverse Z" coming to 4.3:
+It might help a little (particularly at long distances), but it won't resolve the issue entirely.
+AThousandShips
+added this to Rendering Issue Triageon Dec 13, 2024
+github-project-automation
+moved this to For team assessment in Rendering Issue Triageon Dec 13, 2024
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+confirmeddiscussiondocumentationtopic:3dtopic:rendering
+Type
+No type
+Projects
+Rendering Issue Triage
+Status
+For team assessment
+Show more project fields
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,311 @@
+A fork of Comfyfluffy Ray-traced renderer for Minecraft 26.2's Vulkan backend. Gameplay focused and highly customizable for aesthetics. Support for other gpus is planned. - Volumetric fog: deterministic froxel-grid volumetric lighting by arena-ai-coding-agent[bot] · Pull Request #1 · Lumitos0-0/LumisCaustica
+
+Volumetric fog: deterministic froxel-grid volumetric lighting by arena-ai-coding-agent[bot] · Pull Request #1 · Lumitos0-0/LumisCaustica · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+arena-ai-coding-agent
+Bot
+commented
+Aug 22, 2026
+Copy link
+Copy Markdown
+Implements a clean from-scratch volumetric fog/volumetric lighting system for the Caustica Fabric ray-traced renderer, designed to prevent a known list of historical artifacts (shimmering outlines, fog swimming, temporal ghosting, depth-jitter confusion, and visibility/extinction mixing).
+Architecture
+Froxel-grid system following Wronski (SIGGRAPH 2014), Hillaire/Frostbite, and Naughty Dog TLOU2 (64 depth slices, exponential Z distribution, XY = render / 8).
+Four compute passes on a single shared descriptor set:
+Inject — per-froxel stable-center world position, world-anchored deterministic density (height + global), Henyey–Greenstein phase, one RT shadow ray per froxel; sun-disk stochastic sampling optional. Writes (inScatteredSource, sigma_t) into fogCurrent.
+Spatial — edge-aware 3×3 XY bilateral filter (world-space distance, density similarity, behind-geometry consistency). No Z blur in the baseline. Writes to fogVolume.
+Temporal — stable-center reprojection against the previous frame's froxel grid using jitter-free prevViewProj and rebase-safe camera delta; 3×3×3 neighborhood min/max clamping; edge / motion / depth / density confidence weighting; per-froxel confidence age tracking. Never rejects history on the basis of stochastic shadow samples. Writes out-of-place into fogCurrent (copied to fogVolume) to avoid intra-dispatch feedback hazards.
+Integrate — per-render-res pixel, exact front-to-back exponential transmittance integration (T = exp(-σ·ds), integ = S·(1−T)/σ with linear fallback for low density), depth-aware (clipped to gDepth), composites L + T·scene back into the RT output before DLSS-RR so fog and surfaces denoise together with manual 2×2 XY bilinear taps and nearest-in-Z sampling of the froxel volume.
+Invariants enforced
+A froxel's temporal identity is its stable center (XY + Z slice + camera/frustum). Jitter is applied only to light samples, never to froxel position or depth.
+One authoritative froxel↔world mapping in common.slang; per-pixel inverse-VP unprojection (no central-axis approximation that breaks off-axis).
+Froxel stores RGB = in-scattered source term, A = extinction σ_t. Visibility is NOT mixed into extinction.
+Density is world-anchored (height + global), not camera-anchored.
+Camera matrices live in a 192-byte triple-buffered host-visible BDA storage buffer; push constants are packed to exactly 128 bytes (Vulkan min-max-guaranteed).
+Grid near/far/distribution/XY-divisor are stable; changes invalidate history. First-frame and resize clears history + confidence images to zero via vkCmdClearColorImage so we never read uninitialized contents.
+Previous-camera offset is computed as camOffset - camDelta (world-space translation in blocks), which is correct across terrain-rebase origin jumps.
+Config
+New settings under caustica.rt.fog.*: enabled, divisor (default 8), depth-slices (64), near (0.25), far (256), global-density, height-density, height-falloff, height-base, anisotropy, history-weight, stochastic-light (default OFF for phased baseline verification).
+Integration points
+RtImage/RtContext: added 3D storage image support (VK_IMAGE_TYPE_3D, VK_IMAGE_VIEW_TYPE_3D, depth field, createStorageImage3D, 3D format/extent feature checks).
+Build hooks: GenerateRtBindings reflects VOLUME descriptors (TLAS @0, fogVolume @1, fogCurrent @2, fogHistory @3, fogHistoryConfidence @4, depthImage @5, outputImage @6); GenerateShaderRecords reflects VolumetricPush; layout probe imports volumetric common and touches one field per type class.
+RtComposite.recordFrame dispatches fog after the world indirect trace + memory barrier and before DLSS-RR evaluate, using the jitter-free frameInvViewProj, mvCurProjView, and mvPushMatrix (captured prev VP), plus per-frame sun direction/angle/radiance derived from the sky LUT look package.
+Phased rollout
+Baseline lands with stochastic-light = false and history-weight = 0.9. Recommended verification order:
+Stable density only (set history-weight = 0): fog stays anchored in caves, no swimming on camera movement.
+Fixed-light RT shadows produce stable god rays without temporal.
+Spatial filter softens noise without edge bleeding.
+Enable temporal with fixed light: noise converges over ~10 frames, no ghosting.
+Enable stochastic-light for sun-disk sampling: noise converges to the same fixed-light solution.
+Tune history clamping / confidence.
+Debug views are plumbed through a debugView push constant (currently 0 = final composite); additional switch cases can be added to integrate.comp without touching descriptors.
+Arena Agent
+and others
+added 8 commits
+August 22, 2026 03:52
+Volumetric fog: froxel-grid volumetric lighting pipeline
+…
+c34d96a
+```
+Adds a clean, deterministic froxel-grid volumetric fog/lighting system
+following Wronski (SIGGRAPH 2014), Hillaire/Frostbite, and TLOU2.
+
+Pipeline (four compute passes):
+ 1. Inject: per-froxel stable-center world position, deterministic
+    height/distance density, Henyey-Greenstein phase, one RT shadow ray
+    per froxel with optional sun-disk stochastic sampling.
+ 2. Spatial: edge-aware 3x3 XY bilateral filter (world-distance,
+    density-similarity, and behind-geometry consistency weights).
+    No Z blur in the baseline.
+ 3. Temporal: stable-center reprojection against previous froxel
+    grid (prevViewProj + prevCamOffset, rebase-safe via camera
+    delta), 3x3x3 neighborhood min/max clamping, edge/motion/depth/
+    density confidence weighting, per-froxel confidence age tracking.
+    Never rejects on stochastic-shadow differences.
+ 4. Integrate: per-render-res pixel, exact front-to-back exponential
+    transmittance integration (T = exp(-sigma_t ds), integ = S(1-T)/sigma_t),
+    depth-aware (clipped to gDepth), composites L + T*scene back into
+    the RT output before DLSS-RR so fog and surfaces denoise together.
+
+Key invariants enforced in the design:
+  - Froxel identity = stable center (XY + Z slice + camera/frustum).
+    Jitter applies only to LIGHT samples, never to froxel position.
+  - One authoritative froxel<->world mapping (common.slang) with
+    per-pixel inverse-VP unprojection (no central-axis approximation).
+  - Froxel stores RGB = in-scattered source term, A = extinction
+    sigma_t. Shadow visibility is NOT mixed into extinction.
+  - Density is world-anchored / deterministic (height + global).
+  - Z distribution is exponential/logarithmic between nearPlane and
+    farPlane; grid parameters are stable and invalidate history on
+    change.
+
+Pipeline integration:
+ - RtContext gains createStorageImage3D + 3D view support in RtImage.
+ - RtComposite wires the fog dispatch after world indirect trace +
+   barrier, before DLSS-RR evaluate. Uses the jitter-free frameInvViewProj,
+   mvCurProjView, and mvPushMatrix (captured prev VP) for matrices, and
+   rebase-safe camera offsets + camDelta for temporal.
+ - Push constants fit exactly 128 bytes (Vulkan min-max guarantee);
+   the three 4x4 matrices live in a host-visible, triple-buffered BDA
+   storage buffer (192 bytes per slot).
+ - Descriptors: TLAS @0, fogVolume/fogCurrent/fogHistory/
+   fogHistoryConfidence @1-4, gDepth @5, outputImage @6. All storage
+   images (no combined-image-samplers); XY bilinear taps in integrate
+   are done manually.
+ - History and history-confidence images are cleared to zero on
+   creation/resize to avoid undefined first-frame reads; temporal
+   writes out-of-place into fogCurrent then copies back to fogVolume
+   to avoid intra-dispatch feedback hazards.
+
+Config (caustica.rt.fog.*):
+  enabled, divisor (8), depth-slices (64), near (0.25), far (256),
+  global-density, height-density, height-falloff, height-base,
+  anisotropy-g, history-weight, stochastic-light (default off for
+  phased baseline verification).
+
+Debug views are plumbed through pc.debugView (currently 0 = final
+composite) for future visualization modes.
+
+Generated-code hooks:
+ - GenerateRtBindings.groovy: VOLUME pipeline resource reflection.
+ - GenerateShaderRecords.groovy: VolumetricPush layout probe.
+ - layout_probe.slang: imports volumetric common and touches one
+   field per type class so Slang reflection doesn't strip fields.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Fix volumetric shader compilation: remove bindings.slang import from …
+…
+c1c0558
+```
+…common.slang
+
+common.slang must NOT import bindings.slang because GenerateRtBindings reflects
+each pipeline by compiling its entry-point shader in isolation; the all-parent-dirs
+-I setup means 'import bindings' can resolve to another pipeline's bindings when
+common is imported by the layout probe (which lives under shaders/layout/ and has no
+volumetric bindings in scope). That caused 'undefined identifier tlas/depthImage'
+errors in the layout-probe reflection pass, and a slangc SIGSEGV downstream.
+
+Fix:
+- common.slang no longer imports bindings; functions that referenced descriptor
+  resources (TraceShadow, SampleSceneDepthLinear) are moved/inlined into the passes
+  that own them, or replaced with parameterized helpers (LinearizeSample) that take
+  ndcZ and per-pixel u,v.
+- inject.comp defines TraceShadow locally (it is the only pass that needs it).
+- spatial/temporal/integrate read depthImage directly via bindings and use
+  LinearizeSample(pc, ndcZ, u, v) with per-pixel u,v.
+- bindings.slang header comment no longer mis-describes matrices as a descriptor.
+- layout_probe.slang imports 'common' (file stem) and touches every VolumetricPush
+  field so Slang reflection doesn't strip any.
+
+Also verified push-constant layout stays at exactly 128 bytes with the split
+froxelSizeX/Y/Z scalar uints.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Tidy size/offset comment in VolumetricPush (no code change)
+…
+9b28f32
+```
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Fix Slang module visibility: mark shared bindings/functions/constants…
+…
+12b36f7
+```
+… public
+
+Slang treats top-level declarations without explicit 'public' as
+module-private when the file is imported as a module. The volumetric
+shaders were hitting 'declaration not accessible' errors for every
+helper function (FroxelCenterWorldSpace, ExtinctionAt, HenyeyGreenstein,
+BlueNoise2, SampleSunDisk, ScatteringSigma, SigmaTFromLuma,
+FroxelCenterViewSpace, etc.) and for every descriptor binding (tlas,
+fogVolume, fogCurrent, fogHistory, fogHistoryConfidence, depthImage,
+outputImage). kEpsilon/kPi constants also needed public visibility.
+
+Also adds the missing import for dev.comfyfluffy.caustica.rt.RtComposite
+that RtVolumetricFog.dispatch() uses to read the monotonic frameCounter().
+
+With these fixes, slangc reflection for generateRtBindings and
+generateShaderRecords should resolve every symbol in the volumetric
+pipeline passes and in layout_probe.slang's probeVolumetricPush().
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Fix Java compilation errors in volumetric fog pipeline
+…
+ff3063c
+```
+Resolves all 10 javac errors from CI:
+
+1. vkCreateComputePipelines requires a VkComputePipelineCreateInfo.Buffer
+   (array), not a single struct. Alloc a buffer of size 1 via
+   VkComputePipelineCreateInfo.calloc(1, stack), matching the pattern used
+   in every other compute pipeline (RtBloomPipeline, RtDisplayPipeline, etc).
+   VkPipelineShaderStageCreateInfo remains a single struct (accepted by
+   .stage() on the create-info element, matching RtBloomPipeline).
+
+2. VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT lives in VK12 (Vulkan 1.2
+   buffer-device-address core feature), not VK10. RtContext.createBuffer
+   already ORs VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT internally;
+   the matrices-buffer usage flag in RtVolumetricFog.ensureMatricesBuffer
+   now uses VK12 to match.
+
+3. VkWriteDescriptorSetAccelerationStructureKHR is imported as a class
+   (org.lwjgl.vulkan.VkWriteDescriptorSetAccelerationStructureKHR), not
+   as a static field of KHRAccelerationStructure. Dropped the erroneous
+   static import and added the regular class import. Kept
+   VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR
+   imported from KHRAccelerationStructure (which IS a static constant).
+
+4. pImageInfo on VkWriteDescriptorSet takes a structured
+   VkDescriptorImageInfo.Buffer view; use VkDescriptorImageInfo.create(
+   img.address(i), 1) (the LWJGL3 factory for a buffer view starting at
+   element i, length 1) instead of computing a raw pointer offset with
+   address + i*SIZEOF. Matches RtBloomPipeline.writeSet usage.
+
+5. WorldPushData.Float4 (generated record) has private fields accessed
+   via x()/y()/z()/w() accessor methods (record components), not direct
+   .x/.y field access. Fixed the four .x/.y reads in RtComposite's fog
+   sun setup (sunAngle=celestial().x(), noonTilt=look1().x(),
+   sunAngularRadius=look1().y(), sunLux=look0().x()).
+
+Also adds the missing import for org.lwjgl.vulkan.VK12 in
+RtVolumetricFog.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Fix Slang int2 cast ambiguity in depthImage.Load()
+…
+0b89664
+```
+Slang's functional-cast parser interpreted int3((int2)depthPx, 0) as
+int3((int2 depthPx, 0)), parsing the parenthesised cast+argument as a
+vector constructor argument list of length 3 with an inner comma
+expression, producing the 'expected vector<int,2>, got vector<int,3>'
+error at the (int2) position.
+
+Fix by declaring depthPx directly as int2 (FroxelXyToDepthPx already
+returns int2) and passing it straight to int3(depthPx, 0), matching the
+exact pattern used in hdr_composite/main.comp.slang:
+
+    int2 pix = int2(tid.xy);
+    float4 ui = sourceImage.Load(int3(pix, 0));
+
+Applied in all three passes that sample gDepth:
+- integrate.comp.slang
+- spatial.comp.slang
+- temporal.comp.slang
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Replace depthImage.Load(int3(...,0)) with subscript access on RWTextu…
+…
+3d7796b
+```
+…re2D
+
+Slang overload resolution on RWTexture2D<float>.Load was parsing
+int3(int2,0) as int3 constructed from a 2-component vector literal
+rather than int3(xy,mip) for the .Load(int3 location, int mip=0)
+overload, producing 'expected vector<int,2>, got vector<int,3>'
+even though the construct should be well-formed.
+
+Switch to the idiomatic subscript operator (used everywhere else in
+the codebase for RWTexture reads, e.g. exposure_hist/main.comp.slang:
+depthImage[guidePix] and all of the fogVolume/fogHistory/fogCurrent
+3D texture accesses):
+  depthImage[int2(px, py)] → returns float directly (R32F), no .x.
+Applied in all three depth-sampling passes: integrate, spatial,
+temporal.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Volumetric fog: redesigned froxel-grid architecture (inject/spatial/t…
+…
+23a6957
+```
+…emporal/integrate)
+
+- Stable froxel centers with exponential Z distribution (128 slices default)
+- 1 shadow ray per froxel with R2 golden-ratio sun-disk sampling
+- 3x3 XY edge-aware spatial filter with per-neighbor depth check
+- Temporal reprojection via stable world-anchored centers, 3x3x3 AABB
+  clamping, confidence/age tracking, depth+edge+motion+density validity
+- True trilinear Z reconstruction in front-to-back exponential integration
+- Depth-aware compositing at render resolution before DLSS-RR
+- 11 debug views (Z-slice, world checker, density, visibility,
+  pre/post-spatial, confidence, disocclusion, integrated, contribution)
+- BDA matrix buffer to keep push constants within 128 bytes
+- Out-of-place temporal writes; explicit image copies between passes
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+arena-ai-coding-agent
+Bot
+closed this
+Aug 22, 2026
+arena-ai-coding-agent
+Bot
+deleted the
+arena/01a02756-lumiscaustica
+branch
+August 22, 2026 18:46
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

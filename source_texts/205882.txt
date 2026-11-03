@@ -1,0 +1,243 @@
+Contribute to kmatzen/sinter development by creating an account on GitHub.
+
+Stop generating the triangles the simplifier only has to take away by kmatzen · Pull Request #124 · kmatzen/sinter · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+kmatzen
+commented
+Aug 3, 2026
+Copy link
+Copy Markdown
+Owner
+Implements the approach prototyped in #111.
+The problem
+Dual contouring emits one vertex per surface cell, so a flat wall 64 voxels across becomes thousands of triangles that QEM then collapses back to two. Profiling put simplification at ~80% of an export at res 256, and 93% of the triangles it removed carried zero error — the mesher undoing its own over-generation.
+Why this is not the risky version
+#111 was filed as "not small" because adaptive dual contouring (Ju et al. 2002) contours the octree directly, needing cellProc/faceProc/edgeProc recursion to stitch differently-sized neighbours — and producing holes in an exported STL when that is wrong.
+None of that machinery is needed. Quads are already emitted per sign-changing grid edge, each referencing four cells through vertexFor. If cells in a collapsed node hand back the same vertex, connectivity is untouched: still one quad per edge, still the same four cells. The result is a quotient of a mesh that was already watertight, so there are no cracks to patch.
+The real risk moves from cracks to manifoldness, when two sheets land in one node. A multi-patch cell never joins a cluster, and stays keyed in place so it fails every node above it too — deliberately more conservative than needed, to keep merged vertices out of regions holding geometry they do not describe.
+Results at res 256 (what exports actually run)
+preset
+before
+after
+triangles
+max deviation
+Wall Bracket
+14,529 ms
+6,550 ms
+16,478 → 3,274
+0.071 → 0.071
+Open-Top Enclosure
+22,884 ms
+14,438 ms
+50,694 → 21,164
+0.046 → 0.046
+Knob
+15,626 ms
+9,474 ms
+68,654 → 58,312
+0.016 → 0.018
+M3 Standoff
+70,504 ms
+6,546 ms
+47,710 → 32,256
+0.077 → 0.077
+Vent Grid
+80,850 ms
+14,614 ms
+104,548 → 70,708
+0.044 → 0.045
+Max deviation — the number that matters for a print — is unchanged on three and moves by 0.001–0.002 of a voxel on the two curved ones. Every output is watertight with zero non-manifold edges.
+Caveat on the timings: these were taken on a machine running other work, and the two largest speedups (M3 Standoff, Vent Grid) have implausibly slow "before" numbers. Treat them as unconfirmed — CI's bench job measures this cleanly, and the interleaved best-of-3 at res 128 gave a steadier 1.5–2.2x. The triangle counts and deviations are deterministic and repeated exactly across runs.
+The win is shape-dependent, which is expected: flat-faced parts collapse a lot, curved ones little. On the bench corpus, enclosure drops 14,420 → 7,494 triangles while patterned barely moves.
+Safety
+Off by default. The dense path is verified bit-identical to main across every preset, with and without the active-block mask — so the geometry suite still asserts against exactly the mesh it always did.
+cluster.test.ts pins the collapse rule, then re-applies dualContour's own gates to the clustered mesh: watertight, edge-manifold, outward-wound, correct enclosed volume, vertices on the isosurface, and the two-sheets-in-one-cell case.
+A 10 mm cube at res 32 comes out as exactly 12 triangles enclosing exactly 1000.00 units of volume, where the dense mesh spends 4,800.
+A sphere is asserted to barely collapse — curvature must not be flattened away.
+Two things found along the way
+The benchmark had drifted from the worker it claims to measure. bench/mesh.bench.ts replicates the export pipeline rather than calling it, and was still timing a stage configuration the exporter no longer used. Budgets now live in budgets.ts and both import them. A benchmark that measures something nobody runs is worse than none, because it is believed.
+Error budget is now split. Clustering gets half the allowance and QEM the other half, because both stages move vertices and their errors add — spending the whole budget in the mesher would let QEM spend it again on top.
+Also filed
+#123 — fitPrimitive costs ~5–9 s per fit, independent of grid resolution. That is a user-facing import cost, and it is also why fitPrimitive.test.ts is repeatedly the first thing to time out under load. Not addressed here.
+🤖 Generated with Claude Code
+Stop generating the triangles the simplifier only has to take away
+…
+cbea030
+```
+Dual contouring emits one vertex per surface cell, so a flat wall 64 voxels
+across becomes thousands of triangles that QEM then collapses back to two.
+Profiling for #111 put simplification at ~80% of an export at res 256, and 93%
+of the triangles it removed carried *zero* error — the mesher undoing its own
+over-generation.
+
+Octree vertex clustering decides, before any triangle exists, which cells can
+share a vertex: a node collapses when one point still fits every hermite sample
+underneath it within the budget.
+
+The reason this is safe is the point of the change. Adaptive dual contouring
+(Ju et al. 2002) contours the octree directly, which needs
+cellProc/faceProc/edgeProc recursion to stitch differently-sized neighbours and
+produces holes in an exported STL when that is wrong — which is why #111 was
+filed as "not small". None of that machinery is needed. Step 2 still emits
+exactly one quad per sign-changing grid edge over the same four cells; only the
+vertex those cells name changes. The output is a quotient of a mesh that was
+already watertight, so there are no cracks to patch.
+
+What clustering can break is manifoldness, when two surface sheets land in one
+node. A cell with more than one patch never joins a cluster, and — deliberately
+more conservative — it stays keyed in place so it fails every node above it too,
+keeping merged vertices out of regions holding geometry they do not describe.
+
+At res 256, the resolution exports actually run at:
+
+  Wall Bracket         14529 -> 6550 ms   16478 -> 3274 tris    maxdev 0.071 -> 0.071
+  Open-Top Enclosure   22884 -> 14438 ms  50694 -> 21164 tris   maxdev 0.046 -> 0.046
+  Knob                 15626 -> 9474 ms   68654 -> 58312 tris   maxdev 0.016 -> 0.018
+  M3 Standoff          70504 -> 6546 ms   47710 -> 32256 tris   maxdev 0.077 -> 0.077
+  Vent Grid            80850 -> 14614 ms  104548 -> 70708 tris  maxdev 0.044 -> 0.045
+
+Max deviation — what matters for a print — is unchanged on three and moves by
+0.001-0.002 of a voxel on the two curved ones. Every output is watertight with
+zero non-manifold edges. The timings were taken on a machine with other work on
+it, so treat the two largest as unconfirmed; CI's bench job measures this
+cleanly. The triangle counts are deterministic.
+
+Off by default, and the dense path is verified bit-identical to before across
+every preset, with and without the active-block mask, so the geometry suite
+still asserts against exactly the mesh it always did.
+
+`cluster.test.ts` covers the collapse rule and then re-applies dualContour's own
+gates to the clustered mesh — watertight, edge-manifold, outward-wound, correct
+enclosed volume, vertices on the isosurface, and the two-sheets-in-one-cell case.
+A 10mm cube at res 32 comes out as exactly 12 triangles enclosing exactly
+1000.00 units of volume, where the dense mesh spends 4800.
+
+The budgets move to `budgets.ts` because the benchmark had already drifted from
+the worker it claims to measure. Clustering gets half the allowance and QEM the
+other half: both stages move vertices and their errors add.
+
+Closes part of #111.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+github-actions
+Bot
+commented
+Aug 3, 2026
+Copy link
+Copy Markdown
+🚀 Preview deployed: https://perf-octree-vertex-clusterin.sinter.pages.dev
+(updates on every push to this PR)
+kmatzen
+commented
+Aug 3, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Clean numbers from CI, replacing the caveated local ones
+The local timings in the description were taken on a contended machine. CI's bench job ran this branch and main on equivalent runners, so this is the measurement to go by.
+Totals
+model
+main
+this PR
+speedup
+triangles
+enclosure
+2,697 ms
+1,225 ms
+2.20x
+14,420 → 7,494
+deep-boolean
+5,942 ms
+4,998 ms
+1.19x
+71,494 → 67,204
+primitive
+1,846 ms
+1,664 ms
+1.11x
+28,906 → 24,512
+patterned
+27,561 ms
+24,805 ms
+1.11x
+60,280 → 59,178
+assembly
+3,951 ms
+3,629 ms
+1.09x
+28,610 → 28,098
+The simplification stage alone, which is what this targets:
+model
+main
+this PR
+enclosure
+2,059 ms
+297 ms
+6.93x
+deep-boolean
+2,898 ms
+1,544 ms
+1.88x
+primitive
+1,526 ms
+1,082 ms
+1.41x
+assembly
+2,123 ms
+1,728 ms
+1.23x
+patterned
+8,292 ms
+6,864 ms
+1.21x
+Correcting the description: the 10.77x on M3 Standoff and 5.53x on Vent Grid were load artifacts, exactly as flagged. The real range on this corpus is 1.09–2.20x overall. My res-256 measurements of 1.58–2.22x on the better-behaved presets line up with CI; the two outliers do not, and should be ignored.
+Contouring gets slower, which is the honest trade:
+```
+             contour: main -> PR
+primitive        282 -> 551 ms
+enclosure        456 -> 729 ms
+assembly         962 -> 1048 ms
+deep-boolean    1555 -> 1889 ms
+patterned       7187 -> 6625 ms   (faster — fewer QEF solves than cells)
+```
+Clustering costs work during contouring and saves more than it costs in simplification. Net positive on every model in the corpus, but the margin on assembly is 9%, which is thin enough to say plainly.
+Why the corpus gains less than the presets: the bench runs below export resolution, so simplification's share of the total is smaller than the ~80% measured at res 256. enclosure — flat-faced, the shape this helps most — is the one that behaves like the res-256 measurements. patterned and assembly are mostly curved and collapse very little, as designed: a sphere has no coplanar cells to merge, and the tests assert it stays dense.
+Hide details
+View details
+kmatzen
+merged commit a381926
+into
+main
+Aug 3, 2026
+6 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+kmatzen
+deleted the
+perf/octree-vertex-clustering
+branch
+August 3, 2026 01:21
+kmatzen
+mentioned this pull request
+Sep 7, 2026
+Adaptive contouring: stop generating the 93% of triangles that collapse at zero error
+#111
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

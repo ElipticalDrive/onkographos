@@ -1,0 +1,518 @@
+Technical Note Not peer-reviewed version
+
+# diffct: Differentiable CT Operators from Circular Orbits to Arbitrary Trajectories
+
+[Yipeng](https://sciprofiles.com/profile/5345455) Sun \* , Linda-Sophie Schneider , Chengze Ye , [Andreas](https://sciprofiles.com/profile/1438996) Maier
+
+Posted Date: 14 October 2026
+
+Keywords: computed tomography; differentiable programming; geometry calibration; CUDA; distributed reconstruction
+
+> Preprints.org is a free multidisciplinary platform providing preprint service that is dedicated to making early versions of research outputs permanently available and citable. Preprints posted at Preprints.org appear in Web of Science, Crossref, Google Scholar, Scilit, Europe PMC, OpenAlex.
+
+
+
+Copyright: This open access article is published under a Creative [Commons](https://creativecommons.org/licenses/by/4.0/) CC BY 4.0 [license,](https://creativecommons.org/licenses/by/4.0/) which permit the free download, distribution, and reuse, provided that the author and preprint are cited in any reuse.
+
+## diffct**: Differentiable CT Operators from Circular Orbits to Arbitrary Trajectories**
+
+Yipeng Sun \, Linda-Sophie Schneider, Chengze Ye and Andreas Maier**
+
+Pattern Recognition Lab, Friedrich-Alexander University Erlangen-Nürnberg, Erlangen, Germany
+
+\* Correspondence: yipeng.sun@fau.de
+
+#### Abstract
+
+diffct implements computed-tomography projection and reconstruction in PyTorch using Numba CUDA kernels. Its native forward model integrates a cell-constant attenuation field along rays defined by per-view acquisition geometry; the backprojector is the matched discrete adjoint. The same model supports parallel, fan and cone beams, non-circular trajectories, and parameterized detector surfaces. This report describes the implementation through release 2.2.1: the geometry and sampling conventions, Siddon traversal, data and first-order geometry derivatives, differentiable analytical FBP/FDK, and execution on one or several GPUs. We derive the ownership and reduction rules for distributed view and spatial partitions and explain how spatial, view and detector blocks extend native operations to CPU-backed and disk-backed data. Experiments include measured walnut conebeam data, synthetic reconstruction and calibration, and a recorded 5123 scaling benchmark. On A100-SXM-64GB GPUs, eight GPUs on two nodes reduce forward projection from 493.05 to 73.18 ms and the amortized cost of a ten-step CGLS solve from 2054.36 to 373.38 ms per iteration. Analytical gathers have their own discrete transposes; differentiability does not make FDK an exact inverse. We distinguish numerical correctness, reconstruction quality and execution cost, and state the limits of each experiment.
+
+Keywords: computed tomography; differentiable programming; geometry calibration; CUDA; distributed reconstruction
+
+#### 1. Introduction
+
+CT software must connect three operations with different mathematical roles: a forward projector predicts measurements, an adjoint maps measurement residuals into image space, and an inverse or approximate inverse reconstructs an attenuation field. Learning and calibration require derivatives of these operations as well. A backprojection that produces a plausible image need not be the transpose required for optimization, and a correct transpose need not reconstruct an image by itself. Keeping these roles separate is the starting point of diffct [1–3].
+
+The first release line used circular-orbit parameters. Arbitrary orbits were subsequently developed through explicit per-view source and detector arrays. The 2.x interface brings these arrays into the released library rather than maintaining a separate mathematical contract for circular and non-circular scans. A circular generator is now one way to construct a trajectory; calibrated poses can be supplied directly. Geometry calibration and curved detector sampling reuse the same ray integrator. For fixed geometry, repeated calls use a configured Projector object, avoiding repeated setup in iterative solvers.
+
+Large reconstructions introduce another constraint. A complete volume and all projections may exceed a GPU's capacity, and sometimes host RAM as well. We retain the cell-constant model when dividing a computation into spatial tiles, view batches and detector rectangles. Distributed execution then assigns ownership of either views or volume slabs. The division is a change in execution and storage, not a different reconstruction model.
+
+This report develops these choices in detail. The mathematical description targets release 2.2.1 at source revision 4ac2e15. Timing measurements have their own version identifiers: the distributed scaling data are from 2.2.0, while the new single-GPU reconstruction examples use the 2.2.1 source. The repository is [https://github.com/sypsyp97/diffct;](https://github.com/sypsyp97/diffct) software releases are available at [https://pypi.](https://pypi.org/project/diffct/) [org/project/diffct/.](https://pypi.org/project/diffct/)
+
+### 2. Related Work
+
+The analytical part follows parallel-beam FBP, circular fan-beam reconstruction, Parker shortscan weighting and the Feldkamp–Davis–Kress cone-beam approximation [2,4,5]. Data completeness remains a property of the acquisition. The Tuy and Smith conditions explain why accepting arbitrary rays is less restrictive than providing exact cone-beam inversion for arbitrary orbits [6,7].
+
+Siddon's grid-plane traversal provides the discrete ray model used here [8]. Separable footprints instead approximate the finite detector-domain footprint of a voxel [9]. These are different discretizations. Historical circular-only diffct releases included separable-footprint options, but the 2.x arbitrary-geometry interface does not expose sf, sf\_tr or sf\_tt backends. A parameterized curved detector still samples one ray per pixel; it does not restore finite-area footprint integration.
+
+ASTRA and TIGRE provide GPU projection, backprojection and iterative reconstruction tools [10,11]. Memory-saving decomposition across multiple GPUs has also been developed in TIGRE [12].
+
+PYRO-NN and LEAP connect CT operators to learning frameworks [13–15]. Geometry-learning work shows how acquisition parameters can be optimized through reconstruction [16]; DRACO addresses differentiable reconstruction for arbitrary CBCT orbits [17]. The present report concentrates on the implemented discrete operators, their derivatives and storage contracts, rather than proposing a new continuous inversion formula. Iterative examples use established least-squares and SIRT methods [18,19]. TV minimization is also established in cone-beam CT [20]; our example uses a smoothed penalized objective and projected Adam updates, rather than the constrained ASD-POCS algorithm.
+
+#### 3. Interface and Numerical Contract
+
+The public native interface is Projector(trajectory, volume\_shape, detector\_shape, ...), followed by project(x) or backproject(y). Construction records shapes, pitches, beam type and execution choices. Geometry without trainable components is cloned; if any trajectory component requires gradients, the geometry is read live on each call and the values needed for backward are saved. Trainable components must therefore be marked before construction. Rebuilding the object is necessary after editing geometry that was configured as fixed.
+
+Native operations return float32 data on the input device. CPU-backed execution still computes on CUDA; it is not a CPU projector. Data gradients are returned in the input dtype. Geometry second derivatives raise an error. Analytical entry points also reject trainable acquisition geometry and isocenter rather than silently returning an incomplete derivative. Table 1 distinguishes these restrictions from the more general native path.
+
+Table 1. Operator contracts in the 2.2.1 interface.
+
+| Operation Derivatives                                 |              | Execution     | and         | geometry           |
+|-------------------------------------------------------|--------------|---------------|-------------|--------------------|
+| Native projection and matched adjoint                 |              |               |             |                    |
+| Image/sinogram derivatives,                           |              |               |             |                    |
+| including second derivatives;                         |              |               |             |                    |
+| first-order trajectory and                            | surface      |               |             |                    |
+|                                                       |              | CUDA kernels; | CPU         | or CUDA tensors;   |
+|                                                       |              | local or      | distributed | execution; flat or |
+|                                                       |              | sampled       | detector    | surfaces           |
+| Analytical FBP/FDK                                    |              |               |             |                    |
+| Sinogram, filter-response                             | and          |               |             |                    |
+| supplied-weight derivatives,                          | including    |               |             |                    |
+| higher derivatives                                    |              |               |             |                    |
+|                                                       |              | Fixed flat    | geometry;   | one CUDA device;   |
+|                                                       |              | complete      | input and   | output tensors     |
+| Slice-windowed helical FDK Filtered data and supplied | slice-weight |               |             |                    |
+|                                                       |              | Fixed axial   | helix;      | approximate        |
+|                                                       |              | inversion;    | default     | weights require    |
+|                                                       |              | full-turn     | coverage    | for every slice    |
+| project_into ,                                        |              |               |             |                    |
+| Numerical output only,                                | without an   |               |             |                    |
+| autograd graph                                        |              |               |             |                    |
+|                                                       |              | Caller-owned  | tensor      | or block store;    |
+|                                                       |              | streamed      | CUDA        | computation        |
+
+#### 4. Acquisition Geometry and Sampling
+
+#### 4.1. Coordinates, Shapes and Physical Units
+
+World coordinates are (x, y) or (x, y, z), while image arrays use (H, W) and volume arrays use (D, H, W), corresponding to (y, x) and (z, y, x). Cone sinograms use (N*views, *U, V), with detector-u before detector-v. There are no implicit batch or channel dimensions. Positions, detector pitches and the isotropic voxel spacing share one physical length unit; direction vectors have unit length.
+
+The volume is centered on the origin. On an axis with N cells and spacing s, voxel i has center (i + 1 2 − N/2)s and faces at (i − N/2)s and (i + 1 − N/2)s. A flat detector uses
+
+$$u_k = \left( k - \frac{U-1}{2} \right) \Delta u, \quad v_\ell = \left( \ell - \frac{V-1}{2} \right) \Delta v. \quad (1)$$
+
+A detector offset belongs in the per-view center, or in the corresponding offset argument of a weighting helper. This half-cell-centered convention is shared by the native and analytical paths. The k − U/2 convention described in the earlier report is obsolete and would move an even-sized detector by half a pixel.
+
+#### 4.2. Parallel, Fan and Cone Rays
+
+For parallel beams, view n stores (dn, on, eu,n), each a two-vector. The unit ray direction dn is orthogonal to the unit detector axis eu,n. Pixel k defines the infinite line
+
+| $\mathbf{r}_{n,k}(t) = \mathbf{o}_n + u_k \mathbf{e}_{u,n} + t \mathbf{d}_n$ | $p_{\text{par}}(n, k) = \int_{\mathbb{R}} f(\mathbf{r}_{n,k}(t)) dt$ | (2) |
+|------------------------------------------------------------------------------|----------------------------------------------------------------------|-----|
+|                                                                              |                                                                      |     |
+
+For fan beams, the tuple is (Sn, Cn, eu,n). For cone beams, it adds ev,n, orthogonal to eu,n. The detector point is
+
+| $D_{n,k,\ell} = C_n + u_k e_{n,n} + v_\ell e_{v,n}$ | $L_{n,k,\ell} = \ D_{n,k,\ell} - S_n\ _2$ | (3) |
+|-----------------------------------------------------|-------------------------------------------|-----|
+|                                                     |                                           |     |
+
+Omitting the v term gives the fan-beam definition. With d*ˆ = (*D − S)/L, both divergent-beam projectors integrate the source-to-pixel segment:
+
+$$Pf = \int_0^L f(S + t\hat{a}) dt. \quad (4)$$
+
+The segment is clipped to the volume box before traversal. Rays do not extend through the detector or behind the source, which matters when either endpoint lies inside the volume. Source and detectorpixel coincidences are invalid. The native flat path rejects detectors viewed edge-on from the source. For stable float32 setup, at least one source or detector-center endpoint must lie within 106 voxel lengths of the volume center, and both must lie within 1015. Sampled divergent surfaces apply the corresponding checks to source and pixel endpoints; positions must remain finite in float32.
+
+#### 4.3. Circular and Non-Circular Trajectories
+
+A circular cone-beam generator, at angle β, uses
+
+$$S(\beta) = (-\text{sid sin } \beta, \text{ sid cos } \beta, 0), \quad (5)$$
+
+| $C(\beta) = ((\text{sdd} - \text{sid}) \sin \beta, -(\text{sdd} - \text{sid}) \cos \beta, 0),$ | (6) |
+|------------------------------------------------------------------------------------------------|-----|
+|------------------------------------------------------------------------------------------------|-----|
+
+| $e_u(\beta) = (\cos \beta, \sin \beta, 0),$ | $e_v = (0, 0, 1),$ | (7) |
+|---------------------------------------------|--------------------|-----|
+|---------------------------------------------|--------------------|-----|
+
+Here sid and sdd are source-to-isocenter and source-to-detector distances. Removing z gives fan geometry. Parallel geometry instead specifies the ray direction directly. A spiral generator adds a monotone axial offset to source and detector centers; saddle and sinusoidal generators modulate heights or radii. Explicit calibrated arrays need not follow any generator. The 3D random helper generates source positions and corresponding detector frames for stress tests; it does not enforce reconstruction completeness.
+
+
+
+Figure 1. Per-view source and detector geometry for parallel, fan and cone beams, with examples of circular and non-circular trajectories. The top row defines the per-view frames and detector points. The bottom row shows circular, sinusoidal-radius, helical and saddle source paths in a common oblique 3D view; axes indicate world coordinates, and markers indicate the path endpoints (coincident for closed paths). Trajectory parameters are illustrative. Detector samples follow the centered convention in Equation (1).
+
+Projection and iterative inversion can use any valid ray set. Whether that set contains enough information to reconstruct an object is a separate question. The geometry arrays do not impose Tuy–Smith completeness or turn circular FDK into an exact non-circular inverse [6,7].
+
+#### 4.4. Parameterized Detector Surfaces
+
+A local surface sampler returns offsets (au, av, an) for each detector pixel. In cone geometry these map to world points as
+
+$$D = C + a_u e_u + a_v e_v + a_n (e_u \times e_v). \quad (8)$$
+
+The normal sign follows the supplied frame. A flat surface has (au, av, an) = (u, v, 0). For the circular frame in Equation (7), cylindrical detector offsets of radius r can be written
+
+| $(a_u, a_v, a_n) = (r \sin(u/r), v, r[\cos(u/r) - 1]).$ | (9) |
+|---------------------------------------------------------|-----|
+|---------------------------------------------------------|-----|
+
+This cylinder is source-centered only when r = sdd in the given circular frame. In 2D, av = 0 and the local normal is (eu,y, −eu,x). Native kernels connect the source to the resulting fan/cone pixel, or pass a parallel ray through it.
+
+The legacy callback receives complete centered physical coordinate grids. The ParameterizedSurface sampler receives centered physical u/v grids restricted to the executing global pixel rectangle, global view indices and explicit parameter snapshots. It generates only the geometry of the executing block. This distinction matters for a per-view surface: constructing all world pixel positions can cost more memory than the projection batch itself. Explicit parameters also let backward reproduce the forward geometry after a caller changes a parameter. The sampler must be pure, mutable geometry must be listed as parameters, and other captured configuration must be immutable. PyTorch differentiates the sampled positions back to those parameters after the native geometry vector–Jacobian product.
+
+Each pixel remains a point sample of a ray. Analytical helpers assume flat detectors. Reusing them on curved measurements requires resampling onto covered rays of a virtual flat detector, with the interpolation error and coverage limitations of that conversion.
+
+#### 5. Siddon Integration and Its Derivatives
+
+#### 5.1. Cell-Constant Discretization
+
+For a ray o + td, an axis-q grid face at b is crossed at t = (b − oq)/dq. After box clipping, ordered crossings t*0 < · · · < *tM divide the ray into segments. The kernel advances to the next face and integrates the value of the traversed cell:
+
+$$(A_{\Theta} x)_j = \sum_{m=0}^{M-1} x_{\text{cell}(m)} (t_{m+1} - t_m) = \sum_i a_{ji} (\Theta) x_i. \quad (10)$$
+
+The coefficients are physical chord lengths. This is exact integration of the cell-constant representation, not interpolation of a continuously varying attenuation field. The implementation needs neither a stored sparse system matrix nor sub-cell quadrature [8]. Numerical setup chooses a nearby ray endpoint where possible to reduce cancellation when the source or detector is far from the volume.
+
+The matched adjoint revisits the same cells and adds ajiyj to each cell. Rays overlap, so these updates use CUDA atomic addition. The defining relation is
+
+$$\langle A_{\Theta} x, y \rangle = \langle x, A_{\Theta}^{\top} y \rangle. \quad (11)$$
+
+It holds for the mathematical discretization; float32 accumulation and different scheduling orders introduce rounding differences. We check these with tolerances rather than requiring bitwise equality.
+
+
+
+Figure 2. Forward ray integration and matched atomic-scatter adjoint. Both paths use the same traversed cells and chord lengths. Highlighted cells show a single ray's nondegenerate face crossings. Forward integration sums cell values times chord lengths; the adjoint scatters a ray value with those same lengths. The data backward pass pairs these kernels; geometry derivatives additionally account for changes in chord lengths.
+
+#### 5.2. Data Autograd and Higher Derivatives
+
+For y = A*Θ*x and z = A ⊤ Θ p, the reverse-mode data backward rules [21] are
+
+$$\nabla \mathcal{L} = A_{\Theta}^{\top} \nabla_{\mathcal{Y}} \mathcal{L}, \quad \nabla \mathcal{P} = A_{\Theta} \nabla_{\mathcal{Z}} \mathcal{L}. \quad (12)$$
+
+For L(x) = 1 2 ∥A*Θ*x − p∥ 2 2 , the gradient is A ⊤ Θ (A*Θ*x − p) and the fixed-geometry Hessian–vector product is A ⊤ Θ A*Θ*v. The PyTorch wrappers express backward using the paired differentiable operators, allowing derivatives through the data backward itself. This supports unrolled optimization and data-domain second derivatives. It does not establish second derivatives with respect to acquisition geometry.
+
+#### 5.3. First-Order Geometry Derivatives
+
+For a divergent ray with endpoints a, b, set D = b − a, L = ∥D∥2 and τ ∈ [0, 1]. Away from changes in crossing order,
+
+$$p = L \sum_m x_m (\tau_{m+1} - \tau_m). \quad (13)$$
+
+At a crossed face Xq = c, τ = (c − aq)/Dq, with derivatives
+
+$$\frac{\partial \tau}{\partial a_q} = \frac{\tau - 1}{D_q}, \quad \frac{\partial \tau}{\partial b_q} = -\frac{\tau}{D_q}. \quad (14)$$
+
+Collecting a crossing's adjacent segments gives a coefficient x*before − *x*after. Entry and exit use zero outside the volume. Endpoint boundaries fixed at *τ = 0 or 1 contribute no face-motion derivative. The endpoint gradient combines these face terms with the length derivative:
+
+$$\nabla p = \left[ \sum_m x_m \Delta \tau_m \right] \nabla L + L \sum_j (x_{\text{before},j} - x_{\text{after},j}) \nabla \tau_j. \quad (15)$$
+
+Chain rules then give source, detector-center, detector-axis and surface-parameter derivatives. The parallel-beam kernel handles its line parameterization separately. A geometry derivative of backprojection uses the same bilinear identity: for fixed incoming image gradient g, ⟨g, A ⊤ Θ p⟩ = ⟨A*Θ*g, p⟩.
+
+The cell-constant model is piecewise differentiable in geometry. At a ray through a cell edge or corner, crossings coincide and the kernel returns a derivative from one adjacent side. A central finite difference averages the two sides and can disagree there without indicating a wrong derivative away from the boundary. We consequently use independent double-precision references and nondegenerate rays for gradient comparisons. Geometry second derivatives are rejected because the implemented first-order rule does not define that higher-order contract.
+
+#### 6. Analytical Reconstruction and Learnable Stages
+
+#### 6.1. Composition and Physical Isocenter
+
+FBP and FDK consist of projection weighting, detector-u filtering, angular quadrature and voxeldriven interpolation. Unlike the matched adjoint, the analytical gather samples filtered projections at a voxel's projected detector coordinate and applies magnification weights. Let nn be the detector normal oriented from source to detector and c the physical isocenter. Define
+
+| $\text{sed}_{\text{d}} = (\mathbf{C}_n - \mathbf{S}_n) \cdot \mathbf{n}_r$ | $\text{sed}_{\text{d}} = (\mathbf{c} - \mathbf{S}_n) \cdot \mathbf{n}_r$ | $U_{\text{d}}(\mathbf{x}) = (\mathbf{x} - \mathbf{S}_n) \cdot \mathbf{n}_r$ | (16) |
+|----------------------------------------------------------------------------|--------------------------------------------------------------------------|-----------------------------------------------------------------------------|------|
+|                                                                            |                                                                          |                                                                             |      |
+
+Using −Sn in place of c − Sn would bind the amplitude to the coordinate origin. The implementation fits source lines along detector normals in least squares and rejects a rank-deficient fit. An explicit physical isocenter is required when this inference is ambiguous, including a single view. For noncircular geometry, supplying the intended physical isocenter is recommended; inference does not require a circular orbit.
+
+The source-to-voxel line meets the detector plane at
+
+| $H_n(x) = S_n + \frac{\text{sdd}_n}{U_n(x)}(x - S_n), \quad u_n = (H_n - C_n) \cdot e_{u,n}, \quad v_n = (H_n - C_n) \cdot e_{v,n}.$ | (17) |
+|--------------------------------------------------------------------------------------------------------------------------------------|------|
+|--------------------------------------------------------------------------------------------------------------------------------------|------|
+
+For a flat detector normal to the central ray, the cosine weights are
+
+$$w_{\text{cos}}^{\text{fan}}(u) = \frac{\text{sdd}}{\sqrt{\text{sdd}^2 + u^2}}, \quad w_{\text{cos}}^{\text{cone}}(u, v) = \frac{\text{sdd}}{\sqrt{\text{sdd}^2 + u^2 + v^2}}. \quad (18)$$
+
+The complete pipeline accounts for detector offsets in these distances. More general fixed geometry can supply its own projection-weight tensor.
+
+#### 6.2. Finite Discrete Ramp and Quadrature
+
+The ramp uses a finite sampled Ram–Lak impulse response in the angular-frequency convention [2]:
+
+| $h[0] = \frac{\pi}{2},$ | $h[k] = \begin{cases} -2/(\pi k^2), & k \text{ odd}, \\ 0, & k \neq 0 \text{ even}. \end{cases}$ | (19) |
+|-------------------------|--------------------------------------------------------------------------------------------------|------|
+|-------------------------|--------------------------------------------------------------------------------------------------|------|
+
+For padded length M, wrapped signed lags define the symmetric kernel. If HM is its discrete Fourier response and W an apodization window, the filtered samples are
+
+$$q = \frac{1}{\Delta u} \text{crop} \left[ \mathcal{F}_M^{-1} \{ H_M W \mathcal{F}_M[\text{pad}(p_w)] \} \right]. \quad (20)$$
+
+The spacing factor occurs once. With the unwindowed response, padding to at least twice the detector width gives linear convolution on the retained samples. Directly sampling |ω| instead gives a different finite filter, including different DC behavior. The finite impulse retains a small positive DC response; forcing it to zero changes the low-frequency reconstruction bias.
+
+Writing ν = 2| f | for normalized sample frequency, the available windows are 1 (Ram–Lak), (1 + cos πν)/2 (Hann), 0.54 + 0.46 cos πν (Hamming), cos(πν/2) (cosine), and sin(πν/2)/(πν/2) (Shepp–Logan, with the limit at zero). Windowing changes the noise–resolution tradeoff rather than the ray model.
+
+Open angle lists use trapezoidal weights
+
+$$\Delta\beta_1 = \frac{\beta_2 - \beta_1}{2}, \quad \Delta\beta_n = \frac{\beta_{n+1} - \beta_{n-1}}{2}, \quad \Delta\beta_N = \frac{\beta_N - \beta_{N-1}}{2}. \quad (21)$$
+
+Periodic scans close the angular interval. Full-turn fan/cone weights include a half-redundancy factor; a uniform full turn therefore integrates to π. Parker weighting handles circular short-scan redundancy before filtering, with the acquisition span controlling the smooth end windows [4]. Parker and quadrature share the same periodic-scan classification. Different decisions near a full turn would apply short-scan weights and the full-turn half factor together, reducing the amplitude twice. The public short-scan path checks the circular orbit, angle order and span, detector-u orientation, and constant detector distance and offset.
+
+For a circular scan with retained angular span B, set δ = max(γ*max,(*B − π)/2) and γ = arctan(u/sdd). After shifting the first angle to zero, the generalized Parker taper is
+
+$$w_P(\beta, \gamma) = \begin{cases} \sin^2\left(\frac{\pi\beta}{4(\delta - \gamma)}\right), & 0 \leq \beta < 2(\delta - \gamma), \\ 1, & 2(\delta - \gamma) \leq \beta \leq \pi - 2\gamma, \\ \sin^2\left(\frac{\pi(\pi + 2\delta - \beta)}{4(\delta + \gamma)}\right), & \pi - 2\gamma < \beta \leq \pi + 2\delta, \\ 0, & \text{otherwise.} \end{cases} \quad (22)$$
+
+At the minimum short scan, δ = *γ*max. For a longer valid short scan the acquired span broadens the tapers. Degenerate endpoint limits are guarded numerically. Full circular scans use unit Parker weights; their half-redundancy factor belongs in the angular quadrature.
+
+#### 6.3. Weighted Gathers and Their Transposes
+
+Let q˜n denote interpolation of filtered data that already include angular weights. Parallel FBP uses the projected coordinate un = (x − on) · eu,n and returns
+
+$$B_{\text{par}}q(\mathbf{x}) = \frac{1}{2\pi} \sum_n \bar{q}_n(u_n). \quad (23)$$
+
+Fan FBP and cone FDK use
+
+$$Bq(x) = \frac{\overline{\text{sd}}}{2\pi\text{sid}} \sum_n \left( \frac{\text{sid}_n}{U_n(x)} \right)^2 \tilde{q}_n(u_n(x), v_n(x)), \quad (24)$$
+
+with the v coordinate omitted for fan beams. The overline is a mean over views. Linear interpolation is used in 2D and bilinear interpolation on the cone detector. Both detector axes need at least two bins. Cone FDK filters along u, never along v. The mean-distance scale reduces to sdd/(2*π*sid) for a circular orbit; the non-circular extension remains an approximation.
+
+For fixed geometry, the gather is a discrete linear map B. Its data gradient is B ⊤g, implemented by scattering the same interpolation coefficients, distance weights and scale. Substituting the Siddon projector A would give a different derivative because B ̸= A ⊤. Ordinary PyTorch autograd differentiates cosine weights, FFT filtering, angular weights and explicit replacement tensors. The complete fbp and fdk functions expose projection\_weights, angular\_weights and filter\_response; a replacement frequency response is the full real-rFFT multiplier in physical units, not an additional window. These APIs return signed float32 CUDA reconstructions. Nonnegative clamping is a caller choice.
+
+#### 6.4. Slice-Windowed Helical Approximation
+
+For an axial helix, source height and unwrapped angle determine a center angle βc(z) for each reconstructed slice. helical\_view\_weights integrates angular sample cells over [βc(z) − π, βc(z) + π], clips the boundary cells fractionally, and includes the half-redundancy factor:
+
+$$w_n(z) = \frac{1}{2} |I_n \cap [\beta_c(z) - \pi, \beta_c(z) + \pi]|, \quad \sum_n w_n(z) = \pi. \quad (25)$$
+
+Here In is the angular cell around view n. Angles, slice centers and interval arithmetic use double precision internally. The default weight generator rejects missing full-turn coverage rather than renormalizing it. Filtering is performed once; each slice then uses its own weights in the native cone analytical gather. Explicit replacement slice weights remain differentiable and replace the entire window and quadrature stage. Supplied weights bypass the default full-turn coverage check and are neither normalized nor clamped; the caller is responsible for their coverage and scale. The supplied angles must still match the axial helix and remain strictly monotone.
+
+This is a slice-windowed FDK approximation on native cone data, not exact helical inversion. It does not implement cone-parallel rebinning or conjugate-ray 3D weights. The path requires an axial helix with radial detector normals, and detector truncation is still possible even with complete angular windows. One launch per slice avoids a view-by-volume weight tensor but adds launch overhead. Like the other analytical APIs, it does not inherit the native projector's curved, streamed or distributed execution.
+
+#### 7. Execution, Memory and Distributed Ownership
+
+#### 7.1. PyTorch and Numba
+
+PyTorch owns tensors and autograd state; Numba compiles and launches the CUDA traversal, scatter and analytical kernels [3,22]. CUDA tensor views expose the same device memory to Numba, avoiding a second tensor allocation for kernel access. External stream handles connect launches to the caller's PyTorch stream. Events protect geometry reuse, buffer reuse and transfers across streams. Selecting the input's CUDA context matters when an operation runs on a device different from the process's current device.
+
+Native cone traversal uses internal layouts suited to kernel access, while the public volume and sinogram axes remain those in Section 4. The execution planner accounts for layout copies as well as nominal inputs. Atomic-scatter accumulation explains why correct runs with different execution orders may disagree in their final float32 bits.
+
+#### 7.2. Spatial, View and Detector Blocks
+
+Let disjoint spatial tiles select columns of A and view/pixel blocks select rows. With Ct inserting local tile t into the global volume and Rb selecting ray block b, define Abt = RbACt . Then
+
+$$(Ax)_b = \sum_t A_{bt}x_t, \quad (A^\top y)_t = \sum_b A_{bt}^\top y_b. \quad (26)$$
+
+Tiles retain global voxel coordinates, including incomplete edge tiles. These equations explain both how a volume too large for one GPU can be processed and why local partial results must be summed. Cutting a ray into disjoint cell groups preserves its cell-constant integral; rounding changes with the addition order.
+
+Projection can traverse space while retaining partial ray batches. Backprojection benefits from retaining a spatial tile's GPU accumulator across all contributing view and pixel batches, then downloading it once. Returning every partial volume to the CPU would repeat transfers and host additions. The planner compares operation-specific orders and slab/block shapes using short pilots on one representative CUDA device after a warmup launch. It divides each measured prefix's elapsed time by its measured launch count and multiplies by the full native launch count to estimate elapsed time. The smallest estimate is selected, with estimated host-to-device plus device-to-host bytes breaking ties. It does not assume that a good projection schedule is also good for backprojection.
+
+CPU inputs always use streamed CUDA work. A CUDA input can use the full-volume path when a conservative additional working set fits; otherwise it streams. View, spatial and detector limits can force a particular decomposition. Pinned slots bound host staging, and separate transfer streams with events allow upload, compute and download to overlap without reusing an unfinished buffer. Capacity admission checks total live buffer bytes, estimated allocator reservation bytes, the largest individual allocation and host geometry workspace separately. The inventory includes geometry, VJP buffers, layout copies, collective staging and cached slots. If the minimum tile/view/pixel batch cannot satisfy these constraints after reducing automatic dimensions, planning raises an error; explicit limits must be reduced by the caller. Available GPU memory is an observation rather than a reservation; allocator fragmentation and concurrent allocations can still prevent a plan from fitting.
+
+The schedule argument accepts auto, spatial, views and window. The last requests a bounded two-tile window; capacity can require a serial spatial fallback. After an instrumented streamed call, last\_execution\_stats records actual copy payloads, native launches and layouts, planned capacity, and pilot metadata. Pilot estimates describe schedule selection, not a measured full-workload time. This attribute is None before execution, after errors and on the uninstrumented full-CUDA path.
+
+Tensor streaming reduces GPU residency, but the complete tensors and their autograd gradients still occupy the input device. To exceed host RAM as well, the caller must use block stores and keep solver state blockwise. This is the purpose of TensorStore, mapped NpyStore arrays and project\_into/backproject\_into. These numerical methods overwrite caller-owned float32 blocks and return the output store without creating an autograd graph. Known aliases and read-only outputs are rejected before writes; a custom store must enforce its own hidden alias constraints.
+
+#### 7.3. View Partitions
+
+One-process multi-GPU execution divides views, launches nonempty shards on several devices and gathers the complete sinogram. Distributed view mode instead retains each rank's sinogram shard and replicates the volume. For rank r, write Ar = RrA. Projection returns Arx, and backprojection uses a SUM reduction:
+
+$$A^\top y = \sum_r A_r^\top y_r. \quad (27)$$
+
+A global least-squares loss is ∑r 1 2 ∥Arx − yr∥ 2 . Each rank supplies its local sum, and native backward sums data and geometry contributions. Using a local mean without accounting for shard sizes would change the global objective when views are unevenly divided.
+
+Conversely, backprojection output is replicated. A loss applied identically to that output on every rank must be divided by the number of ranks. An additional DDP reduction on native image gradients would reduce them a second time. All ranks must make the same collective calls, including ranks with empty view shards. These rules concern mathematical multiplicity, not only launch syntax.
+
+#### 7.4. Spatial Partitions and Disk CGLS
+
+In spatial mode, rank r owns a fixed volume slab, Ar = ACr . The constructor receives the global shape, retained as global\_volume\_shape. Each rank's volume\_slice maps its slab into that global array; volume\_shape and local\_volume\_shape give the required local tensor shape. Empty slabs are valid, and global physical coordinates are preserved. Ray data and projection\_shape are replicated, and forward contributions are summed:
+
+$$Ax = \sum_r A_r x_r, \quad (A^\top y)_r = A_r^\top y. \quad (28)$$
+
+The returned backprojection is local to the owned slab. A replicated projection loss is divided by the number of ranks; a loss on owned backprojection cells is summed. Norms must also respect ownership: sum disjoint volume norms across ranks but count a replicated ray vector once.
+
+Starting from x = 0, CGLS initializes r = y, s = A ⊤r and p = s. The disk CGLS example keeps the volume estimate x, image gradient s, search direction p, residual r and projected direction q in block stores. With s = A ⊤r, one iteration is
+
+$$q = Ap, \quad a = \frac{\langle s, s \rangle}{\langle s, a \rangle}, \quad (29)$$
+
+$$\alpha = \frac{\langle s, s \rangle}{\langle q, q \rangle}, \quad (29)$$
+
+| $x \leftarrow x + ap,$ | $r \leftarrow r - aq,$ | (30) |
+|------------------------|------------------------|------|
+|------------------------|------------------------|------|
+
+| $x \leftarrow x + \alpha p,$ | $r \leftarrow r - \alpha q,$ | (30) |
+|------------------------------|------------------------------|------|
+|------------------------------|------------------------------|------|
+
+$$s' = A^\top r, \quad \gamma = \frac{\langle s', s' \rangle}{\langle s, s \rangle}, \quad p \leftarrow s' + \gamma p. \quad (31)$$
+
+The example uses CGLS, a conjugate-gradient method for the least-squares problem [18]. Inner products accumulate float64 block sums; state updates use float32. The complete q must remain available until the global α is known. Reconstructing it per residual block or discarding it before the norm decision would change the algorithm or add work. Completed-iteration checkpoints store rank-local ownership rather than gathering the full volume. Resume validates partition, ownership, shapes, dtype and scan metadata, then restores the solver state; the requested iteration count is a total target including completed iterations. These metadata do not fingerprint the complete geometry or measurement arrays, which must be supplied unchanged by the caller.
+
+The tensor CGLS example admits all five states x,s, p,r, q together with native pipeline and scratch buffers before allocating them on CUDA. If that working set exceeds the capacity constraints, ranks agree to keep solver state on CPU and execute the native operators through streaming. This solver decision is separate from an individual projector call's admission check; the recorded scaling experiment below retains CUDA state. The disk solver instead keeps vector operations and norm temporaries blockwise. Boundary-coupled regularizers on spatial partitions require caller-managed halo exchange; the supplied SIRT and TV tensor examples do not implement distributed spatial regularization. Tensor autograd and a disk numerical solver are separate interfaces because the latter must bound every vector operation, not just A and A ⊤.
+
+#### 8. Experiments and Numerical Evidence
+
+#### 8.1. Data, Hardware and Metric Definitions
+
+Experiments use synthetic Shepp–Logan phantoms [23] and measured cone-beam projections of a walnut [24]. The new 2.2.1 reconstruction examples use one node with one NVIDIA GeForce RTX 4070 SUPER. The recorded 2.2.0 scaling experiment uses NVIDIA A100-SXM-64GB GPUs in three configurations: one node with one GPU, one node with four GPUs, and two nodes with eight GPUs.
+
+For synthetic references with peak attenuation 1, PSNR = 10 log10(1/MSE), where MSE averages over all reconstructed voxels. A Gaussian projection-noise level of 1% means standard deviation equal to 1% of the largest noiseless projection, not 1% voxel noise. Relative data error is ∥u − *u*ref∥2/∥*u*ref∥2. Speedup divides the one-GPU median by the corresponding multi-GPU median for the same workload. Ground-truth PSNR is not assigned to the measured walnut, for which no independent reference volume is supplied.
+
+#### 8.2. Measured Walnut Reconstruction
+
+The public dataset contains 721 projections acquired at 0.5-degree steps, with source-to-isocenter distance 210.66 mm, source-to-detector distance 553.74 mm and detector pitch 0.050 mm [24]. The distributed derivative corrects the offset rotation axis, bins detector pixels by eight, crops to 256 × 256, keeps every third view, estimates an air level per projection, and computes − log(I/*I*0). The stored 241 views include a repeated full-turn endpoint; reconstruction removes it and uses 240 distinct views. This preprocessing is part of the data interpretation, not a simulated scan.
+
+Figure 3 shows saved 2563 reconstructions of these measured data. FDK uses a Hann window; SIRT uses 200 iterations, CGLS 20, and nonnegative TV-regularized least squares 300 Adam steps with weight 0.3. The display scale is based on the FDK shell's 99.95th percentile and is shared with the iterative target. Images use the same [0, 1] display range, rather than being independently normalized. The saved panels support a visual comparison; they do not establish a ranking against ground truth. A separate 2.2.1 run at 1283 repeats the measured-data pipeline on the single-GPU configuration above.
+
+
+
+
+
+Figure 3. Measured walnut cone-beam data. Top: four measured projection views, transposed into detector-v rows and detector-u columns, in the stored acquisition-row display order (row zero at the top). Bottom: axial and coronal central slices of FDK, SIRT, CGLS and TV reconstructions at 2563 using all 240 distinct views. The projection and reconstruction display ranges are separate; all reconstruction panels share [0, 1]. These saved public example assets were retrieved at source revision 4ac2e15; they are distinct from the synthetic helical experiment. Data: Meaney (2022), CC BY 4.0 [24].
+
+#### 8.3. Synthetic Iterative Reconstruction
+
+The new 2.2.1 experiment uses a 1283 Shepp–Logan phantom, 360 helical cone views, detector shape (384, 256), detector pitch 0.8, and 1% Gaussian projection noise. The source-to-isocenter and source-to-detector distances are 320 and 512 in voxel-length units, with a 38.4-unit axial span over one turn. CGLS runs for 30 iterations, nonnegative SIRT for 200, and TV-regularized nonnegative least squares for 200 Adam steps with TV weight 1. The example FDK wrapper applies clamp\_min(0) before the reported synthetic PSNR is computed.
+
+SIRT starts from x (0) = 0 and applies
+
+$$x^{(k+1)} = \max(0, x^{(k)} + CA^T R(y - Ax^{(k)})). \quad (32)$$
+
+Here R and C are diagonal, with entries Rjj = 1/(A***1)j and Cii = 1/(A ⊤1)i where the respective denominator is positive, and zero otherwise. R normalizes each ray residual by its total intersected length; C normalizes the backprojected update by accumulated voxel sensitivity. The maximum enforces nonnegativity componentwise.
+
+The TV data term is half the mean squared ray residual. The implemented regularizer is
+
+$$\text{TV}(x) = \frac{1}{|\Omega|} \sum_{i \in \Omega} \sqrt{d_x(i)^2 + d_y(i)^2 + d_z(i)^2 + 10^{-6}}, \quad (33)$$
+
+where dx(i), dy(i) and dz(i) are forward one-voxel differences from the same voxel i on the shared cropped domain Ω = {0, . . . , D − 2} × {0, . . . , H − 2} × {0, . . . , W − 2}. These differences are not divided by voxel spacing. Each Adam update [25] is followed by projection onto nonnegative voxel values. Averaging the data and TV terms removes direct scaling with ray and voxel counts, but the TV weight still depends on geometry, resolution, voxel spacing and data scale.
+
+
+
+
+
+Figure 4. New 2.2.1 helical Shepp–Logan reconstruction with 1% Gaussian projection noise at 1283 . Labels give PSNR against the synthetic volume. FDK is the trajectory-array approximate baseline; CGLS, SIRT and TV use the native matched operators. This experiment uses simulated measurements, not measured walnut projections.
+
+#### 8.4. Calibration and Analytical Learning
+
+Figure 5 plots the seven samples of a new 2.2.1 synthetic 643 , 360-view calibration run on one RTX 4070 SUPER and one node. It optimizes per-view angles and a shared detector shift. Across 150 Adam steps, angular RMSE changes from 0.52690 to 0.004058 degrees and detector-shift error from 1.80278 to 0.000193 voxel-length units. At step 25 the projection loss has decreased while angular RMSE has risen to 1.14469 degrees. Reporting both prevents a lower data residual from being mistaken for accurate geometry at every iteration. Samples were captured every 25 steps, including the initial and final states. The initial per-view angle perturbations use seed 7 and nominal standard deviation 0.5 degrees; the true shared detector shift is (1.5, −1.0). Adam learning rates are 10−3 for angles and 5 × 10−2 for shifts.
+
+
+
+Figure 5. New synthetic geometry-calibration samples: projection loss, angular RMSE and detector-shift error. Only the seven recorded samples are marked and connected. Angles and shifts are calibrated variables; this is distinct from learning analytical weights at fixed geometry.
+
+The new fixed-geometry learning experiments instead optimize a frequency-response gain and detector weights for 20 Adam steps on one noisy synthetic sample, with 180 views and seed 7. Table 2 reports before/after PSNR. The manual composed pipeline and complete public API agree exactly at the printed precision for each beam. These are training-sample fits demonstrating gradient flow through filtering and analytical gathers; they do not measure generalization to another phantom or noise realization.
+
+Table 2. New 2.2.1 synthetic and analytical-learning results. All use one RTX 4070 SUPER on one node. PSNR is in dB.
+
+| Noisy Noisy Noisy Noisy | Experiment helical helical helical helical |      | phantom, phantom, phantom, phantom, | FDK CGLS (30) SIRT (200) TV (200) | Initial/baseline 31.01 35.84 32.68 47.47 | Final |
+|-------------------------|--------------------------------------------|------|-------------------------------------|-----------------------------------|------------------------------------------|-------|
+| Learned                 | parallel                                   |      | FBP,                                | 32 2                              | 31.96                                    | 33.81 |
+| Learned                 | fan                                        | FBP, | 32 2                                |                                   | 29.90                                    | 32.86 |
+| Learned                 | cone                                       | FDK, | 32                                  | 3                                 | 30.26                                    | 32.10 |
+
+The new 323 helical-FDK example uses 720 views over four turns, a 96 × 96 detector, pitch 0.8, sid 128 and sdd 204.8, with a 64-unit source-height range. It obtains 32.99 dB. Manual composition and helical\_fdk differ by at most 3.58 × 10−7 , and each slice's angular weights sum to 3.141593. These observations check composition and coverage; they do not prove exact helical inversion.
+
+#### 8.5. Distributed Scaling at 5123
+
+The recorded 2.2.0 benchmark uses a circular 5123 Shepp–Logan volume, 360 views, detector shape (1024, 768), detector pitch 1.25, voxel spacing 1, sid 1280 and sdd 2048. Solver state is float32 on CUDA; CGLS norms accumulate in float64. The distributed partition is by views. No GPU allocator cap is imposed.
+
+For projection and adjoint, three warmups precede seven synchronized wall-time samples. Distributed samples use the slowest rank's elapsed time, with the rank-maximum reduction outside the timed region. The reported statistic is the median. CGLS first warms up for two iterations, then measures three separate ten-iteration solves. Each solve includes initialization; its elapsed time is divided by ten. Thus the CGLS column is an amortized solve cost, not an isolated steady-state iteration.
+
+
+
+Figure 6. Speedup calculated from the medians in Table 3. The adjoint and CGLS scale less than projection for this workload. Dashed lines indicate ideal speedup at each GPU count, not an empirical fit. Raw repeated timing samples accompany the source package.
+
+Table 3. Recorded 2.2.0 benchmark on A100-SXM-64GB GPUs. Medians in milliseconds; parentheses show speedup relative to one GPU. CGLS includes initialization amortized over ten iterations.
+
+| Configuration   | Projection       | Matched adjoint  | CGLS / iteration |
+|-----------------|------------------|------------------|------------------|
+| 1 node, 1 GPU   | 493.05           | 1400.80          | 2054.36          |
+| 1 node, 4 GPUs  | 132.22 (3.73 × ) | 369.29 (3.79 × ) | 547.06 (3.76 × ) |
+| 2 nodes, 8 GPUs | 73.18 (6.74 × )  | 265.87 (5.27 × ) | 373.38 (5.50 × ) |
+
+All ranks pass the benchmark's numerical checks. Across the multi-GPU configurations, relative L2 disagreement with the single-GPU reference is zero for projection, at most 4.15 × 10−7 for the adjoint, and at most 4.46 × 10−7 for CGLS. Normalized adjoint inner-product error is below 3.0 × 10−8 . Ten iterations produce a relative residual of about 0.04349 and PSNR 24.93 dB on every configuration. This workload is larger than the 1283 quality experiment and uses fewer CGLS iterations, so their PSNR values should not be compared as a scaling effect.
+
+The eight-GPU experiment is a two-node run. It establishes cross-node operation for the recorded view-partition workload, not a universal speedup for small arrays or a performance result for spatial partitions, disk stores, geometry learning or analytical FDK. The benchmark records correctness and speed together because a fast distributed computation with a missing reduction would be invalid.
+
+#### 8.6. Numerical Regressions and Validation Boundaries
+
+An independent float64 ray/box reference checks chord lengths rather than reproducing the CUDA traversal. Adjoint tests compare inner products and finite differences check data and geometry derivatives. Execution tests cover nondefault streams, uneven/empty view shards, spatial tails, tiled detector coordinates, parameter mutation and numerical store ownership. A local 2.2.1 run on one RTX 4070 SUPER passed 254 tests in the reconstruction API, analytical autograd, weighting, filter-window and adjoint-inner-product subset. Bounded formal checks address partition and ownership protocols; they complement CUDA runs and do not constitute a proof for arbitrary array sizes or runtime interleavings.
+
+Recorded single-GPU analytical regressions expose why amplitude and quality need separate metrics. Holding the corrected finite ramp fixed, a 330-degree disk scan's center amplitude changes from 1.830670 to 0.999931 after correcting Parker weighting; a 350-degree scan changes from 1.941608 to 0.999931. A 359.92093-degree, 7200-view scan with its endpoint included changes from 0.499966 to 0.999974 when Parker and quadrature share scan classification. Translating fan and cone geometry changes a former amplitude ratio of 1.125000 to 1.000000 after using the physical isocenter. These are saved regression measurements on one RTX 4070 SUPER, not new distributed benchmarks.
+
+Raw RMSE improves in all three cases in Table 4, whereas clamped PSNR does not. The old negative bias was partly hidden by clamping. We therefore do not infer that corrected amplitude resolves aliasing or edge-resolution artifacts. Likewise, the Gaussian-filter regression compares filtered projections with a continuous Fourier integral; its RMSE reduction from 3.77992 × 10−3 to 2.66667 × 10−8 is not an image-reconstruction metric.
+
+Table 4. Saved analytical example errors before and after the weighting/filter repairs. Raw RMSE is measured before nonnegative clamping; PSNR uses clamped reconstructions.
+
+| Beam     | Old raw RMSE | New raw RMSE | Old PSNR | New PSNR |
+|----------|--------------|--------------|----------|----------|
+| Parallel | 0.015880     | 0.014025     | 38.10    | 38.11    |
+| Fan      | 0.024407     | 0.022967     | 34.92    | 34.48    |
+| Cone     | 0.024188     | 0.023069     | 34.10    | 33.96    |
+
+#### 9. Discussion and Limits
+
+The common ray model lets a change of trajectory, detector surface or execution partition reuse the same definition of A and A ⊤. Geometry differentiation then follows movement of the segment boundaries rather than treating calibration as an image-only problem. Analytical reconstruction follows a separate path because its interpolation and distance weighting define a different linear operator, whose transpose is required when filter or detector weights are learned.
+
+The model has specific limits. Cell-constant point-ray sampling does not integrate a pixel footprint and is only piecewise differentiable in geometry. Voxel spacing is isotropic. FDK is approximate away from its favorable circular setting, and the helical extension remains a slice-windowed approximation with coverage and truncation constraints. Analytical geometry gradients, curved detectors and streamed/distributed analytical execution are outside the current analytical contract. These limits guide the choice between native iterative reconstruction and the analytical APIs.
+
+Memory modes also require a choice. View partitions replicate volume state; spatial partitions distribute it but replicate ray batches. Tensor streaming bounds CUDA residency without removing full host tensors or autograd state. Disk numerical operations address that remaining capacity limit only when the solver's norms, updates and checkpoints also operate on blocks. Automatic planning balances measured execution and transfer estimates; it cannot guarantee allocation under arbitrary fragmentation or performance on a different workload.
+
+The experiments cover real projection data, controlled synthetic references, training-sample analytical learning and a recorded cross-node scaling workload. They provide neither a clinical evaluation nor an inter-library performance ranking. A saved visual walnut comparison has no ground-truth PSNR, and a learned filter fitted to one noisy phantom is not evidence of generalization. Performance claims are tied to the reported volume, detector, view count, partition and software release.
+
+#### 10. Conclusion
+
+diffct 2.2.1 provides per-view CT geometry, cell-constant Siddon projection and a matched adjoint, first-order geometry and surface derivatives, and differentiable analytical reconstruction with its own discrete transpose. Spatial, view and pixel blocks preserve the native model while extending its execution to several GPUs and to CPU or disk storage. The recorded 5123 experiment demonstrates cross-node view partitioning with checked numerical parity and up to 6.74× projection speedup on eight GPUs; the reconstruction examples illustrate measured-data use and the distinct gradient contracts. The equations and ownership rules in this report specify what these operations compute and what must remain consistent when they are composed in a solver or learning pipeline.
+
+#### A. Public API and Reproduction
+
+Table 5. Mapping from mathematical operations to public API objects.
+
+| Object          |             | API                                                              |
+|-----------------|-------------|------------------------------------------------------------------|
+| A , A           |             |                                                                  |
+| ⊤               |             | Projector.project , Projector.backproject                        |
+| Per-view        | geometry    |                                                                  |
+|                 |             | circular_trajectory_* , spiral_trajectory_3d ,                   |
+|                 |             | sinusoidal_trajectory_* , saddle_trajectory_3d ,                 |
+|                 |             | random_trajectory_3d , custom_trajectory_* , or explicit tuples  |
+| Detector        | surface     | ParameterizedSurface ; detector_surface argument                 |
+| Complete        | analytical  | inver                                                           |
+|                 |             | fbp , fdk , approximate helical_fdk                              |
+| Composable      | analytical  | stages ramp_filter_1d , angular_integration_weights ,            |
+|                 |             | parker_weights , cosine weights, weighted backprojectors         |
+| Slice-dependent | quadrature  | helical_view_weights , helical_weighted_backproject              |
+| Numerical       | block       | outputs project_into , backproject_into , TensorStore , NpyStore |
+| Execution       | diagnostics | last_execution_stats                                             |
+
+The following native and analytical calls share trajectory arrays, but return different operations:
+
+import math import torch from diffct import Projector, circular\_trajectory\_3d, fdk trajectory = circular\_trajectory\_3d(360, sid=320., sdd=512., device="cpu") A = Projector(trajectory, (128, 128, 128), (192, 128), beam="cone", detector\_spacing=1.) x = torch.ones(A.volume\_shape, device="cuda", requires\_grad=True) y = A.project(x) adjoint = A.backproject(y) angles = torch.arange(360, device="cuda") \* (2 \* math.pi / 360) reconstruction = fdk(y, trajectory, A.volume\_shape, angles, detector\_spacing=1., isocenter=(0, 0, 0))
+
+For single-process multi-GPU execution, supply devices=[0,1,...]. For distributed execution, initialize a caller-owned process group, bind each rank to its CUDA device, and supply distributed=True with partition="views" or partition="space". An optional process\_group selects the collective group. NCCL uses CUDA collective buffers; Gloo uses CPU staging. Use the ownership and loss rules in Sections 7 and 7.3. The six exported low-level projector/backprojector Function wrappers implement the same native maps; the configured Projector supplies planning and ownership metadata.
+
+Run the reconstruction examples from a 2.2.1 source checkout, with the installed diffct package or source import resolving to the matching 2.2.1 implementation:
+
+python examples/walnut\_reconstruction.py --size 128 --figure walnut.png python examples/iterative\_reconstruction.py --size 128 --views 360 \ --trajectory helical --noise 0.01 --figure helical.png python examples/learnable\_reconstruction.py --beam parallel --size 32 python examples/learnable\_reconstruction.py --beam fan --size 32 python examples/learnable\_reconstruction.py --beam cone --size 32 python examples/helical\_fdk.py --size 32 --views 720
+
+The 2.2.0 scaling script is examples/benchmark\_scaling.py; its workload, repeats and CGLS accounting are recorded in Section 8.5. The source package includes the numerical timing samples, calibration samples, regression metrics and saved reconstruction panels used here, identified by source refer-
+
+ences and hashes. The local report checkout regenerates figures with figures/make\_results.py, which reads figures/results/. In the preprint ancillary package, the corresponding copies are anc/make\_results.py and anc/results/. Building the report uses latexmk -pdf template.tex. Dataset-derived panels retain the original CC BY 4.0 attribution [24].
+
+#### References
+
+- 1. Sun, Y. diffct: Differentiable Computed Tomography Reconstruction with CUDA. [https://doi.org/10.5281/](https://doi.org/10.5281/zenodo.14999333) [zenodo.14999333,](https://doi.org/10.5281/zenodo.14999333) 2025. Zenodo software release, [https://doi.org/10.5281/zenodo.14999333.](https://doi.org/10.5281/zenodo.14999333)
+- 2. Kak, A.C.; Slaney, M. Principles of Computerized Tomographic Imaging; Society for Industrial and Applied Mathematics: Philadelphia, PA, 2001. [https://doi.org/10.1137/1.9780898719277.](https://doi.org/10.1137/1.9780898719277)
+- 3. Paszke, A.; Gross, S.; Massa, F.; Lerer, A.; Bradbury, J.; Chanan, G.; Killeen, T.; Lin, Z.; Gimelshein, N.; Antiga, L.; et al. PyTorch: An Imperative Style, High-Performance Deep Learning Library. Advances in Neural Information Processing Systems 2019, 32, 8024–8035.
+- 4. Parker, D.L. Optimal Short Scan Convolution Reconstruction for Fanbeam CT. Medical Physics 1982, 9, 254–257. [https://doi.org/10.1118/1.595078.](https://doi.org/10.1118/1.595078)
+- 5. Feldkamp, L.A.; Davis, L.C.; Kress, J.W. Practical Cone-Beam Algorithm. Journal of the Optical Society of America A 1984, 1, 612–619. [https://doi.org/10.1364/JOSAA.1.000612.](https://doi.org/10.1364/JOSAA.1.000612)
+- 6. Tuy, H.K. An Inversion Formula for Cone-Beam Reconstruction. SIAM Journal on Applied Mathematics 1983, 43, 546–552. [https://doi.org/10.1137/0143035.](https://doi.org/10.1137/0143035)
+- 7. Smith, B.D. Image Reconstruction from Cone-Beam Projections: Necessary and Sufficient Conditions and Reconstruction Methods. IEEE Transactions on Medical Imaging 1985, 4, 14–25. [https://doi.org/10.1109/TMI.](https://doi.org/10.1109/TMI.1985.4307689) [1985.4307689.](https://doi.org/10.1109/TMI.1985.4307689)
+- 8. Siddon, R.L. Fast Calculation of the Exact Radiological Path for a Three-Dimensional CT Array. Medical Physics 1985, 12, 252–255. [https://doi.org/10.1118/1.595715.](https://doi.org/10.1118/1.595715)
+- 9. Long, Y.; Fessler, J.A.; Balter, J.M. 3D Forward and Back-Projection for X-Ray CT Using Separable Footprints. IEEE Transactions on Medical Imaging 2010, 29, 1839–1850. [https://doi.org/10.1109/TMI.2010.2050898.](https://doi.org/10.1109/TMI.2010.2050898)
+- 10. van Aarle, W.; Palenstijn, W.J.; Cant, J.; Janssens, E.; Bleichrodt, F.; Dabravolski, A.; De Beenhouwer, J.; Batenburg, K.J.; Sijbers, J. Fast and Flexible X-Ray Tomography Using the ASTRA Toolbox. Optics Express 2016, 24, 25129–25147. [https://doi.org/10.1364/OE.24.025129.](https://doi.org/10.1364/OE.24.025129)
+- 11. Biguri, A.; Dosanjh, M.; Hancock, S.; Soleimani, M. TIGRE: A MATLAB-GPU Toolbox for CBCT Image Reconstruction. Biomedical Physics & Engineering Express 2016, 2, 055010. [https://doi.org/10.1088/2057-197](https://doi.org/10.1088/2057-1976/2/5/055010) [6/2/5/055010.](https://doi.org/10.1088/2057-1976/2/5/055010)
+- 12. Biguri, A.; Lindroos, R.; Bryll, R.; Towsyfyan, H.; Deyhle, H.; Boardman, R.; Mavrogordato, M.; Dosanjh, M.; Hancock, S.; Blumensath, T. Arbitrarily Large Iterative Tomographic Reconstruction on Multiple GPUs Using the TIGRE Toolbox, 2019, [[arXiv:cs.DC/1905.03748].](http://arxiv.org/abs/1905.03748)
+- 13. Syben, C.; Michen, M.; Stimpel, B.; Seitz, S.; Ploner, S.; Maier, A.K. Technical Note: PYRO-NN: Python Reconstruction Operators in Neural Networks. Medical Physics 2019, 46, 5110–5115. [https://doi.org/10.100](https://doi.org/10.1002/mp.13753) [2/mp.13753.](https://doi.org/10.1002/mp.13753)
+- 14. Kim, H.; Champley, K. Differentiable Forward Projector for X-ray Computed Tomography, 2023, [[arXiv:eess.IV/2307.05801].](http://arxiv.org/abs/2307.05801)
+- 15. Champley, K.; Kim, H. LivermorE AI Projector for Computed Tomography Tasks (LEAP). [https://doi.org/](https://doi.org/10.11578/dc.20230622.3) [10.11578/dc.20230622.3,](https://doi.org/10.11578/dc.20230622.3) 2023. Software release, [https://doi.org/10.11578/dc.20230622.3.](https://doi.org/10.11578/dc.20230622.3)
+- 16. Thies, M.; Wagner, F.; Maul, N.; Folle, L.; Meier, M.; Rohleder, M.; Schneider, L.S.; Pfaff, L.; Gu, M.; Utz, J.; et al. Gradient-Based Geometry Learning for Fan-Beam CT Reconstruction. Physics in Medicine & Biology 2023, 68, 205004. [https://doi.org/10.1088/1361-6560/acf90e.](https://doi.org/10.1088/1361-6560/acf90e)
+- 17. Ye, C.; Schneider, L.S.; Sun, Y.; Thies, M.; Mei, S.; Maier, A.K. DRACO: Differentiable Reconstruction for Arbitrary CBCT Orbits. Physics in Medicine & Biology 2025, 70, 075005. [https://doi.org/10.1088/1361-6560/](https://doi.org/10.1088/1361-6560/adbb50) [adbb50.](https://doi.org/10.1088/1361-6560/adbb50)
+- 18. Paige, C.C.; Saunders, M.A. LSQR: An Algorithm for Sparse Linear Equations and Sparse Least Squares. ACM Transactions on Mathematical Software 1982, 8, 43–71. [https://doi.org/10.1145/355984.355989.](https://doi.org/10.1145/355984.355989)
+- 19. Gregor, J.; Benson, T. Computational Analysis and Improvement of SIRT. IEEE Transactions on Medical Imaging 2008, 27, 918–924. [https://doi.org/10.1109/TMI.2008.923696.](https://doi.org/10.1109/TMI.2008.923696)
+- 20. Sidky, E.Y.; Pan, X. Image Reconstruction in Circular Cone-Beam Computed Tomography by Constrained, Total-Variation Minimization. Physics in Medicine & Biology 2008, 53, 4777–4807. [https://doi.org/10.1088/00](https://doi.org/10.1088/0031-9155/53/17/021) [31-9155/53/17/021.](https://doi.org/10.1088/0031-9155/53/17/021)
+
+- 21. Baydin, A.G.; Pearlmutter, B.A.; Radul, A.A.; Siskind, J.M. Automatic Differentiation in Machine Learning: A Survey. Journal of Machine Learning Research 2018, 18, 1–43.
+- 22. Lam, S.K.; Pitrou, A.; Seibert, S. Numba: A LLVM-Based Python JIT Compiler. In Proceedings of the Proceedings of the Second Workshop on the LLVM Compiler Infrastructure in HPC, 2015, pp. 1–6. [https:](https://doi.org/10.1145/2833157.2833162) [//doi.org/10.1145/2833157.2833162.](https://doi.org/10.1145/2833157.2833162)
+- 23. Shepp, L.A.; Logan, B.F. The Fourier Reconstruction of a Head Section. IEEE Transactions on Nuclear Science 1974, 21, 21–43. [https://doi.org/10.1109/TNS.1974.6499235.](https://doi.org/10.1109/TNS.1974.6499235)
+- 24. Meaney, A. Cone-Beam Computed Tomography Dataset of a Walnut, 2022. Version 1.1.0; CC BY 4.0, [https://doi.org/10.5281/zenodo.6986012.](https://doi.org/10.5281/zenodo.6986012)
+- 25. Kingma, D.P.; Ba, J. Adam: A Method for Stochastic Optimization. In Proceedings of the International Conference on Learning Representations, 2015.
+
+Disclaimer/Publisher's Note: The statements, opinions and data contained in all publications are solely those of the individual author(s) and contributor(s) and not of MDPI and/or the editor(s). MDPI and/or the editor(s) disclaim responsibility for any injury to people or property resulting from any ideas, methods, instructions or products referred to in the content.

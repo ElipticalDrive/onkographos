@@ -1,0 +1,522 @@
+Interactive WebGPU 3D explorer for SDSS, GLADE, and 2MRS galaxy catalogs. - Chunked star octree: Gaia streams from R2 into a GPU pool (v1/v2 A/B behind a format switch) by rulkens · Pull Request #885 · rulkens/skymap
+
+Chunked star octree: Gaia streams from R2 into a GPU pool (v1/v2 A/B behind a format switch) by rulkens · Pull Request #885 · rulkens/skymap · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+rulkens
+commented
+Oct 11, 2026
+Copy link
+Copy Markdown
+Owner
+Gaia streams from R2 as one index object plus content-hashed chunk objects into a fixed-slot GPU pool, drawn by the existing GPU cut. SKST v1 keeps loading behind the source row's format switch, so the v1/v2 A/B runs on one renderer.
+Spec: docs/superpowers/specs/2026-10-10-chunked-star-octree-design.md · Plan: docs/superpowers/plans/2026-10-11-chunked-star-octree.md · builds on preps #871 #872 #873.
+What changed
+Container (src/data/octree/): SKOI index + SKOC chunks, JSON header after the magic, 24 B node rows, columnar records with affine dequantisation. The index header is the chunk manifest; a chunk lists its roots (multi-root packing in Morton order under a 2,048-row bound and the 32,768-record cap).
+Bake (tools/octree/, tools/stars/buildStars.ts): brightness stratification L(M) with flux-conserving blobs, capacity-bounded chunking, one bake per catalog; the per-tier gzip search is gone. Gaia: 975 chunks, index 3,561 rows / 344k records / 2.95 MB.
+Runtime: both formats decode to one StarOctree; the cut draws own records and blobs over a pool with per-slot live-row counts; subtrees of at most 64 records fold to points; a CPU planner (camera/tier change or every 4th frame while unsettled) requests chunks through createTileStreamSubsystem<StarChunk, SlotPool>; picks name a catalog-global record ordinal and snapshot the slot table at the pick draw.
+Deploy: two DATA_FAMILIES rows, one bulk gzip group, fetch-data pulls the chunks an index lists.
+v1 symbols take the Skst mark; the v1 reader and TS tree builder stay for the A/B (deletion candidates at feature-done).
+A/B (medium, merged ms, paired A-B-A-B)
+octree
+v1 skst
+milky-way
+18.1, 17.8
+17.4, 17.0
+star-field, solar-system
+at or below v1
+bytes to settle, medium
+19.9 MB
+30.0 MB
+bytes to settle, large
+32 MB
+75 MB
+planner CPU (harness camera moves every frame)
+0.30 ms
+0.02 ms
+The octree carries all 16.8 M stars where the v1 medium file holds 5.1 M.
+Rulings on the branch
+Slot word deleted (pool-absolute chunk rows); mLim 10; two fade channels; Skst rename; chunk row bound 2,048 + multi-root packing; planner cadence; stars-rs ported later as its own plan. All in the plan's "Rulings made at plan time" and the ledger.
+Open after this PR
+Planner index walk (GPU readback of wanted roots), leaf-instance padding on folded rows, path compression of single-child chains, v1 deletion at feature-done, GLADE and REGALADE on the octree.
+🤖 Generated with Claude Code
+rulkens
+added 30 commits
+October 11, 2026 14:15
+docs(plans): chunked star octree feature plan
+2e3fc67
+docs(spec): drop the per-node slot word, pool-absolute chunk rows
+f380346
+docs(plans): plan rulings from the 2026-10-11 review
+c82b93f
+feat(octree): container types, column and stat registries, layout con…
+…
+c6f6329
+```
+…stants
+```
+feat(octree): encode and decode an octree index or chunk object
+84d957f
+feat(octree): brightness stratification with flux-conserving blobs
+8380250
+feat(octree): capacity-bounded chunking and the catalog writer
+d7a786a
+feat(stars): buildStars bakes one chunked octree per catalog, tier se…
+…
+6c79d72
+```
+…arch gone
+```
+docs(plans): TS bake timing checkpoint run (Task 6)
+75c7a59
+refactor(stars): one runtime shape, StarOctree; the v1 reader takes t…
+…
+c1fec55
+```
+…he Skst mark (Task 7)
+
+Both formats decode to StarOctree (node table + star columns + chunk
+manifest). starOctreeFromSkst adapts SKST v1 (leaf: own records, aggregate:
+blob only, offsets widened to 16 bits); starOctreeFromIndex adapts the v2
+index. Records reach the GPU through packStarGpuRecords' 16/16 + 16/7/6
+words, and vertex.wesl decodes that layout. starOctreeIndex and
+starNodeOriginRelCamMpc take the table and grid instead of a catalog.
+```
+feat(stars): the cut draws own records and blobs over a pool of rows …
+…
+af37967
+```
+…(Task 8)
+
+CutNode bits become level | hasBlob | childrenResident | ownCount; a row
+draws its own records when its parent refines and its blob when it does
+not refine itself, each on its own fade channel. A chunk root refines
+only once its chunk is resident. packStarChunkNodes composes a chunk's
+rows pool-absolute on the CPU, so the shader reads plain indices; the
+CutUniforms head grows to 80 bytes with the index and slot strides.
+```
+feat(stars): pool-sized buffers and chunk residency writes (Task 9)
+…
+69cc66c
+```
+upload(source, octree, slots) sizes every buffer for the index plus
+min(slots, chunks) chunk slots and throws, naming the slot count that
+fits, past the 22-bit row or 26-bit record index. uploadChunk lands a
+chunk's records, rows and zeroed fades before its root's resident bit;
+evictChunk clears the bit before zeroing the rows. The slot commits with
+0 slots until the octree format brings a tier pool size.
+```
+docs(plans): Task 10 perf check run (advisory)
+1951e34
+feat(stars): the row's format picks SKST or the octree index; per-tie…
+…
+5a62784
+```
+…r pool slots (Task 11)
+```
+feat(stars): the chunk stream fills the pool and drives residency wri…
+…
+3175c2b
+```
+…tes (Task 12)
+```
+feat(stars): the CPU chunk planner walks the index; the wake vote hol…
+…
+b29bc8a
+```
+…ds for chunks in flight (Task 13)
+```
+feat(stars): picks name catalog ordinals; pick, selection and the fie…
+…
+006a83d
+```
+…ld-star sphere read resident chunks (Task 14)
+```
+feat(stars): DEV-only chunk facts at settle (Task 15)
+78b703a
+feat(deploy): star octree rows, the chunk collector, the bulk chunk g…
+…
+d6c3687
+```
+…roup and fetch-data chunks (Task 16)
+```
+docs(stars): the octree format, its deploy group and the pool cut's t…
+…
+4a57143
+```
+…raps (Task 17)
+```
+docs(plan): tick the dry run, the real bake, perf and the A/B (Task 18)
+923de2b
+Merge remote-tracking branch 'origin/main' into worktree-chunked-star…
+…
+dc6dde9
+```
+…-octree
+
+# Conflicts:
+#	docs/RENDERER.md
+```
+perf(stars): fold subtrees of at most 64 records into points at the cut
+…
+9b3792d
+```
+Pure L(M) placement gives every childful row a blob, so the sparse
+outskirts around the milky-way pose drew thousands of box-sized glows over
+a handful of stars each. A row whose subtree holds at most 64 records (v1's
+fat-leaf capacity) now refines with its nearest unfolded ancestor, which the
+CPU writes as its parent at upload; the ancestor's refineDelta carries the
+subtree's cost. Format unchanged.
+
+Measured (medium, 60 frames, milky-way, octree): blobs drawn 5756 -> 1240
+(skst 616), MERGED total 22.7 -> 18.0 ms (skst 15.5), star-aggregates
+NEAR0 2.5 -> 1.8 ms (skst 1.4).
+```
+perf(stars): skip a slot's padding rows in the cut by its live row count
+…
+819a72c
+```
+The pool's row stride is the largest chunk's (11,530) while the median
+chunk has ~670 rows, so ~94% of the 1.48 M rows histogram and emit
+visited each frame were zero padding that still cost node and opacity
+reads. A per-slot live-row table, written at land and evict, lets both
+entry points return before touching either buffer; evict no longer
+zeroes the slot's rows, since a landing rewrites them all.
+
+Measured (medium, 60 frames, milky-way, octree): star-cut-compute MERGED
+0.9 -> 0.7 ms, per-layer 0.8 -> 0.5 ms (skst 0.5); drawn instances
+unchanged (178k own, 1240 blobs).
+```
+fix(octree): bound a chunk's rows as well as its records
+…
+4884fd8
+```
+A chunk root now needs its subtree to fit CHUNK_NODE_CAPACITY (4,096)
+rows beside the 32,768-record capacity; over either bound the split
+recurses. The pool's per-slot row stride drops from 11,530 (one sparse
+outlier) to 4,082 on the real Gaia bake: 2,227 chunks (was 2,017), index
+2,545 nodes / 318,133 records (was 2,305 / 314,878), stratified rows and
+records unchanged.
+```
+fix(octree): spec and plan carry the chunk row bound and the measured…
+…
+9b12a92
+```
+… floor
+
+Spec §4 gains the row bound, §2.6 its cap row, §10 the measured answers
+for node count and tiny chunks (the in-format floor grows the index too
+much; sibling packing needs multi-root chunks, left open). Plan ruling 10
+records the 2026-10-11 user ruling and its outcome.
+```
+perf(stars): keep only a pool's worth of chunk requests, walk without…
+…
+698d6b9
+```
+… allocating
+
+Near the Sun ~1,900 chunk roots want to refine while the pool holds 128,
+and every frame the camera moves the planner built, sorted and probed a
+request object for each, and the stream sorted them again. A pool of N
+slots can fund at most N allocations in one update, so the planner keeps
+the N best in a bounded descending list; the walk hoists the camera and
+plane scalars and stacks rows in a typed array; the stream's second sort
+is gone.
+
+Measured (perf:cpu, medium, 120 frames, octree, bounded bake):
+plan:star-catalog solar-system 0.596 -> 0.223 ms, star-field 0.612 ->
+0.228 ms, milky-way 0.070 -> 0.084 ms (noise); skst reads ~0.02.
+```
+feat(octree): pack chunk roots in Morton runs, so one chunk holds sev…
+…
+fa5c698
+```
+…eral roots
+
+One root per chunk left outskirt subtrees as tiny objects: 2,227 chunks at
+a 4,096-row bound, 83 under 10 KB, 85 % pool padding. Roots now pack in
+leaf-key (depth-first) order into chunks under the same row and record
+bounds, and the row bound drops to 2,048. The manifest entry lists its
+roots' index rows; the first root's key names the object. chunkNodeCap is
+the bake's row bound.
+
+Scratch bake: 975 chunks, chunkNodeCap 2,048, 33 % padding, 1 chunk under
+10 KB (9.0 KB), index 3,561 rows / 343,872 records / 2.95 MB.
+```
+feat(octree): land, evict, plan and search chunks that hold several r…
+…
+f425914
+```
+…oots
+
+A landing chunk writes its rows, row count and zeroed fades, then sets
+every root's resident bit with that root's refineDelta (top rows found by
+their parent key); eviction clears every root's bit before the row count.
+The cut keeps the chunk each slot holds instead of one root row. The
+planner offers a chunk once, at its best root's priority, since a repeat
+would fund it twice. The nearest-star search enters a root's own top rows,
+not the chunk's last level, which belongs to one root only. Record
+ordinals stay index records, then chunks in header order.
+
+Drops uploadChunk's previous-root rewrite: the pool fires the evict
+handler before a slot is refilled, so it never ran.
+```
+fix(octree): spec, plan and docs carry multi-root chunks
+…
+714f006
+```
+Spec §2 (manifest roots, chunk table top rows, 2,048-row bound), §4
+(packing step), §5.2/§5.3 (planner once per chunk, every root's resident
+bit), §10 (tiny chunks resolved, measured). Plan ruling 11 (user,
+2026-10-11). DATA.md and RENDERER.md follow.
+```
+rulkens
+added 28 commits
+October 11, 2026 20:32
+feat(stars): the runtime walks into resident chunks, lands nested roo…
+…
+bf79fef
+```
+…ts in their parent's slot and evicts in cascade; picks map through each chunk's record base
+```
+feat(deploy): the chunk collector and fetch-data find nested chunks b…
+…
+0236e6c
+```
+…y reading headers down the tree
+```
+docs(octree): nested chunks in DATA, DEPLOY and RENDERER; spec §10 ca…
+…
+dc3ad4c
+```
+…rries the nested bake's numbers
+```
+fix(stars): the cut's opacity buffer takes COPY_DST, so a landed slot…
+…
+8d753d7
+```
+…'s opacity rows are zeroed instead of rejected
+
+The test device's writeBuffer now throws on a target created without COPY_DST, as WebGPU validation does.
+```
+perf(stars): the planner walks only rows holding a chunk root and ent…
+…
+a9afee8
+```
+…ers only chunks that list chunks; a plan clears only the ids it wrote; the nearest-star descent finds a root's children by key
+
+holdsChunkRoot is folded up each table in starOctreeIndex; StarChunk carries its header's chunks.
+Offline proxy (128 slots, installed bake), star-field no-cull 0.38 -> 0.15 ms/plan, rows popped
+24,719 -> 3,561; milky-way no-cull 0.117 -> 0.015 ms.
+```
+fix(stars): an evicted key's queued fetch is dropped, and the LRU bre…
+…
+e6acc39
+```
+…aks a frame tie by touch order with parents touched after their children
+
+The cold-load churn was not the parent cascade: parents landing late revealed children that
+outranked chunks still queued, which were evicted and fetched anyway. Earth cold load: 157 -> 128
+chunks fetched for 128 resident. SlotPool keeps a touch sequence; the stream touches the walk's
+list reversed. The surface stream clears a dropped key's pending-level row on eviction.
+```
+fix(octree): fetch-data and the chunk collector read only object head…
+…
+ee4766b
+```
+…ers (a ranged GET or a header-sized file read), so --dry-run moves no bodies; a tree that already fits bakes as an index with no chunks instead of STOPping
+```
+refactor(stars): the stream names a chunk's host slot, so the rendere…
+…
+3a72700
+```
+…r no longer searches its slot mirror for the parent; the stream spells the index parent as null; doc lines within the width; plan contract matches the code
+```
+Merge remote-tracking branch 'origin/main' into worktree-chunked-star…
+…
+c4857e9
+```
+…-octree
+
+# Conflicts:
+#	tests/services/engine/selection/composeSelectionRows.test.ts
+```
+docs(backlog): galaxy points and the Milky Way sprite cloud cost the …
+…
+77935f3
+```
+…far view on phones
+```
+perf(stars): one leaf-list entry per own record, so drawn instances e…
+…
+4d02bbc
+```
+…qual records
+
+Rows of one or two records each claimed an 8-instance block, so the far view drew
+~172k leaf instances for ~32k records. An entry is now node | record << 20; the
+spare-instance branch and the stream's block shift are gone. MAX_OWN_COUNT drops
+to 4096 (the bake's largest row holds 1,370) and the pool row cap to 2^20 (large
+tier: 524k rows). The leaf list grows to one u32 per pool record.
+```
+perf(stars): the cut writes a row's fade only when it moved
+…
+eabab37
+```
+emit wrote both opacity channels of every live row every frame; settled rows sit at
+0 or 1, so the write is skipped when the stepped value equals the stored one.
+```
+perf(stars): a moving cut re-cuts every other frame
+…
+7d5df69
+```
+While the cut's inputs move, the planner skips every second histogram/pick/emit:
+the frame still writes the cut uniforms, so the kept lists draw about its own
+eye, and the next cut's fade step spans both frames (its idle clamp doubles). A
+first cut, a frame at rest and a chunk landing or leaving always re-cut.
+```
+Revert "perf(stars): one leaf-list entry per own record, so drawn ins…
+…
+16ce108
+```
+…tances equal records"
+
+This reverts commit 4d02bbc. On the phone (OnePlus 7T) per-record entries cost
+more than the padding they removed: star-cut-compute rose 2.0-2.1 -> 3.2-3.4 ms at
+Earth (emit writes ~336k entries instead of ~46k) while star-catalog did not move
+(padding there is ~10%); the frame interval median was 29.9 vs 29.9 ms at Earth and
+20.9 vs 19.6 ms at Proxima. The padding only matters at the far pose, where the
+phone draws no stars.
+```
+perf(stars): the aggregate glow draws at quarter resolution
+…
+fe0fb47
+```
+STAR_AGGREGATE_DIVISOR 2 -> 4. Near the Sun ~2,300 chunk roots that want to
+refine but whose chunks are not in the pool each draw a box-sized glow (up to
+384 px), so the aggregate pass is fill-bound on a phone: at Earth it measured
+~20 ms at 2, ~11 ms at 3 and ~6 ms at 4 (OnePlus 7T, GPU timings panel), and the
+frame interval median fell 29.9 -> 23.7 ms at Earth and 19.6 -> 16.8 ms at
+Proxima. Side-by-side shots at 2/3/4 show the glow field still reading.
+```
+Revert "perf(stars): the cut writes a row's fade only when it moved"
+…
+ffa378c
+```
+This reverts commit eabab37. Neutral on the phone (OnePlus 7T): star-cut-compute
+read during a drag was 0.6/0.5/0.4/0.5 ms without the gate and 0.6/0.5/0.4/0.4 ms
+with it (Earth and Proxima, two mid-drag panels each), so the branch is not worth
+its two extra lines.
+```
+fix(stars): the chunk plan keeps the limit best chunks, resident or not
+…
+5823ed4
+```
+The stream stamps every touched chunk before it allocates, and the plan touched
+every resident chunk it reached. Once the pool held a set of weaker chunks (after
+a zoom out and back in, or a move), every nearer request was refused for good:
+those areas kept only their brightest stars. The plan now ranks resident and
+wanted chunks together and touches only the residents in the best limit.
+```
+perf(stars): an aggregate past the refine threshold draws at its thre…
+…
+029bc10
+```
+…shold footprint
+
+At Earth ~2,300 of ~3,300 blobs are chunk roots the 128-slot pool cannot hold;
+they drew box-sized glows carrying ~90% of the star-aggregates fill. Capping
+their drawn radius at the size a blob has when it would refine halves the pass
+on the Mac (earth-surface 1.05-1.11 -> 0.46-0.62 ms, star-field 1.4-2.1 ->
+0.8-1.0 ms). The peak keeps the uncapped radius, so the glow only dims.
+```
+refactor(stars): the engine-tuning sliders move from Settings to the …
+…
+ab88bb3
+```
+…Debug panel
+```
+feat(stars): a Debug-panel picker overrides the star octree chunk budget
+1503b32
+feat(stars): the chunk budget resizes the loaded pool without a refet…
+…
+8884961
+```
+…ch and shows a refused size
+```
+docs(stars): the star docs describe the chunked octree, quarter-res g…
+…
+5636d6a
+```
+…lows and the post-plan work
+
+Website facts, DATA-adjacent READMEs and the add-data-source skill follow the shipped v2 octree
+(v1 SKST stays as the alternative). RENDERER.md gains the cut cadence, glow and planner
+ranking entries; the plan and spec record what was built; the backlog gets the follow-ups.
+```
+fix(website): the star-offset fact says 16-bit steps and its test rea…
+…
+0948af5
+```
+…ds the v2 constant
+```
+refactor(stars): drop the unused u10x3/u64 stores, the DEV settle log…
+…
+dfa91f9
+```
+…, emptyStarCatalog, the capacity second route and the planner index param
+```
+docs(backlog): drop three declined star items, file the v1 SKST delet…
+…
+4030339
+```
+…ion as its own PR
+
+User rulings at /feature-done (2026-10-13): delete the v1 path in a follow-up PR; keep the galaxy-ready column stores and family registry; delete the declined tier-switch, GPU-readback and leaf-padding items.
+```
+Merge remote-tracking branch 'origin/main' into worktree-chunked-star…
+…
+7a2d34f
+```
+…-octree
+```
+docs(plan): mark chunked-star-octree complete
+…
+7ed4ed9
+```
+DoD audit READY: 16,970 tests pass, typecheck clean, 111/111 plan boxes, Ground preparation present, no new TODOs, phone smoke by the user 2026-10-13. Deletion audit: safe-now applied in dfa91f9 (src -72, tools -26, tests -24); the v1 SKST deletion is its own PR (backlog). Ledger archived beside the plan.
+```
+refactor(stars): one poolHost built in create, standalone StarPoolHos…
+…
+e57612f
+```
+…t, runtime drops loose requestRender
+```
+rulkens
+marked this pull request as ready for review
+October 13, 2026 17:37
+Hide details
+View details
+rulkens
+merged commit bba9e8e
+into
+main
+Oct 13, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

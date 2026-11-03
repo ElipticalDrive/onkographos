@@ -1,0 +1,201 @@
+Contribute to taojin-6/volumetric_kit_recon development by creating an account on GitHub.
+
+refactor(voxelize): move MeshIntegrator into a voxelize tier on volume alone by taojin-6 · Pull Request #302 · taojin-6/volumetric_kit_recon · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+taojin-6
+commented
+Oct 28, 2026
+Copy link
+Copy Markdown
+Owner
+What
+A move: MeshIntegrator (mesh → SDF voxelisation) leaves tsdf for a new tier, voxelize:
+target volumetric_kit::recon_voxelize, namespace volumetric_kit::recon::voxelize, headers include/volumetric_kit/recon/voxelize/, sources src/volumetric_kit/recon/voxelize/;
+links recon_volume alone, and sits right after volume in src/CMakeLists.txt's tier order (strict dependency rule); the umbrella volumetric_kit::recon includes it;
+its 7 kernels and mesh_scan.glsl move with it, so recon_tsdf now builds only tsdf_integrate.comp and tsdf_clear.comp;
+triangle_common.glsl moves from core/shaders/ to volume/shaders/, beside triangle_candidates.glsl; its other user is voxelize's mesh_integrate.comp;
+tests renamed: recon_tsdf_mesh_integrate{,_exact} → recon_voxelize_mesh_integrate{,_exact} (tests/voxelize_mesh_integrate{,_exact}_test.cpp).
+No forwarding header, no alias namespace, no compatibility shim.
+Why
+The conversion fuses no depth: mesh_integrator.{hpp,cpp} include no tsdf header, and its shaders include only volume GLSL and the closest-point GLSL. It needs the grid, the triangle candidates and recon_core's dispatch helper. In tsdf it made every fusing caller build 7 mesh kernels it never runs, and every mesh caller link the fuser. This is a prep step of the recon split: the voxel layer can leave without depth fusion.
+The move
+git diff -M --stat origin/main...HEAD:
+```
+ AGENTS.md                                          |  9 +-
+ CHANGELOG.md                                       | 13 +++
+ DECISIONS.md                                       | 33 ++++++++
+ DESIGN.md                                          | 95 ++++++++++++----------
+ README.md                                          |  6 +-
+ examples/codec_mesh/CMakeLists.txt                 |  3 +-
+ examples/codec_mesh/main.cpp                       |  8 +-
+ examples/codec_mesh/mesh_sequence.cpp              | 12 +--
+ examples/codec_mesh/mesh_sequence.hpp              | 18 ++--
+ examples/codec_replica/CMakeLists.txt              |  9 +-
+ examples/common/codec_config.hpp                   | 19 +++--
+ examples/fuse_orbbec/CMakeLists.txt                | 12 ++-
+ include/volumetric_kit/recon/codec/encoder.hpp     |  2 +-
+ .../volumetric_kit/recon/io/mesh_normalization.hpp |  2 +-
+ include/volumetric_kit/recon/volume/hash_types.hpp |  3 +-
+ .../recon/volume/triangle_candidates.hpp           |  2 +-
+ .../volumetric_kit/recon/volume/voxel_hash_map.hpp |  9 +-
+ .../recon/{tsdf => voxelize}/mesh_integrator.hpp   | 13 +--
+ src/CMakeLists.txt                                 |  4 +
+ src/volumetric_kit/recon/tsdf/CMakeLists.txt       | 19 +----
+ .../volume/shaders/hash_allocate_triangles.comp    |  6 +-
+ .../recon/volume/shaders/triangle_candidates.glsl  |  8 +-
+ .../{core => volume}/shaders/triangle_common.glsl  |  9 +-
+ src/volumetric_kit/recon/voxelize/CMakeLists.txt   | 71 ++++++++++++++++
+ .../recon/{tsdf => voxelize}/mesh_integrator.cpp   | 51 ++++++------
+ .../recon/{tsdf => voxelize}/shaders/mesh_bin.comp |  0
+ .../shaders/mesh_bin_ranges.comp                   |  0
+ .../shaders/mesh_compact_bins.comp                 |  0
+ .../{tsdf => voxelize}/shaders/mesh_integrate.comp |  4 +-
+ .../{tsdf => voxelize}/shaders/mesh_scan.glsl      |  0
+ .../{tsdf => voxelize}/shaders/mesh_scan_add.comp  |  0
+ .../shaders/mesh_scan_counts.comp                  |  0
+ .../{tsdf => voxelize}/shaders/mesh_scan_sums.comp |  0
+ tests/CMakeLists.txt                               | 59 +++++++-------
+ tests/example_config_test.cpp                      |  9 +-
+ tests/example_mesh_sequence_test.cpp               | 24 +++---
+ tests/shaders/mesh_integrate_reference.comp        |  4 +-
+ tests/test_meshes.hpp                              |  6 +-
+ ....cpp => voxelize_mesh_integrate_exact_test.cpp} | 32 ++++----
+ ...e_test.cpp => voxelize_mesh_integrate_test.cpp} | 86 ++++++++++----------
+ 40 files changed, 398 insertions(+), 262 deletions(-)
+```
+Non-move edits
+CMake: new voxelize/CMakeLists.txt (tsdf's pattern: export header VR_VOXELIZE_API, PRIVATE src/ for core/dispatch.hpp, the 7 kernels embedded); recon_tsdf drops mesh_integrator.cpp and the 7 mesh kernels; src/CMakeLists.txt adds the tier after volume and to the umbrella.
+Includes, paths, namespace: tsdf:: → voxelize:: in the header, source, examples and tests; the two #include lines of triangle_common.glsl follow its move.
+Debug names: the kernels' and buffers' labels take the tier prefix, tsdf_mesh_* → voxelize_mesh_* and tsdf.mesh_* → voxelize.mesh_*, as every tier's do. Nothing tests or documents them.
+Users: codec_mesh (main.cpp, mesh_sequence.{hpp,cpp}), examples/common/codec_config.hpp, example_mesh_sequence_test, example_config_test. Every target that includes codec_config.hpp now links recon_voxelize (it used to reach recon_tsdf through recon_sender): vr_example_mesh, codec_replica, fuse_orbbec, recon_example_config_test, recon_example_codec_report_test.
+Tests: the two test files' namespace alias ts → vx (same width, so nothing reflows) and their OK lines; tests/CMakeLists.txt target, test and COST names.
+Comments: the comments and doc lines that named tsdf::MeshIntegrator, tsdf's mesh_bin.comp or core/shaders/triangle_common.glsl.
+Docs: AGENTS.md and README.md tier diagrams; DESIGN.md target list, tier list and diagram, and a ### voxelize section holding the MeshIntegrator paragraph moved verbatim out of ### tsdf (only its first line changed); DECISIONS.md, a 2026-10-28 entry, plus amendment notes on the 2026-09-27 mesh-to-TSDF entry; CHANGELOG Changed.
+Tests
+The moved tests are unchanged apart from their names. No new behaviour, so no new tests or mutation checks (a port PR).
+Local (Apple M5 Max, macOS, Release, VR_WARNINGS_AS_ERRORS=ON, Assimp + Orbbec SDK 2.10.6, MoltenVK, VKC_TEST_VALIDATION=1, VKC_REQUIRE_VULKAN_DEVICE=1): the whole tree builds with no warnings (codec_mesh, codec_replica, fuse_orbbec included), and the 35 affected tests pass, 0 skipped, with no validation loader failure in the log:
+recon_voxelize_mesh_integrate, recon_voxelize_mesh_integrate_exact, every recon_volume_* (incl. allocate_triangles) and recon_tsdf_*, recon_example_{config,codec_report,mesh_sequence}, recon_subproject_{clean,defaults,glsl,headers} (the headers check compiles voxelize/mesh_integrator.hpp through the umbrella), the codec_replica, codec_mesh and fuse_orbbec config entries, and recon_codec_{replica,mesh}_run.
+CI runs the full suite on every leg.
+Follow-ups
+Consumers outside recon adapt at their next re-pin: volumetric_kit_player's test stream writer (vp_write_stream) links recon_tsdf for MeshIntegrator; it will include voxelize/mesh_integrator.hpp, name voxelize:: and link recon_voxelize.
+vr_example_mesh still links recon_sender (and so the fuser) for the codec stream; splitting the example helpers is a later prep PR.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01AaGoFgDPT8weq8prnaMGYo
+refactor(voxelize): move MeshIntegrator into a voxelize tier on volum…
+…
+7cc5cbf
+```
+…e alone
+
+MeshIntegrator (mesh -> SDF) fuses no depth: it needs the grid, the
+triangle candidates and recon_core's dispatch helper. It moves from tsdf
+to a new tier, voxelize (recon_voxelize, volumetric_kit::recon::voxelize,
+headers under voxelize/), which links recon_volume alone and sits right
+after volume. Its 7 kernels and mesh_scan.glsl move with it, so
+recon_tsdf builds only the fusion kernels. triangle_common.glsl moves
+from core/shaders to volume/shaders, beside its other user,
+triangle_candidates.glsl.
+
+Moved with git mv; the code and kernels are unchanged but for paths,
+includes, the namespace and the tier-prefixed debug names. In-repo users
+follow (codec_mesh, examples/common/codec_config.hpp and the example
+targets that include it, the example tests); the two tests become
+recon_voxelize_mesh_integrate{,_exact}. No forwarding header or alias.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AaGoFgDPT8weq8prnaMGYo
+```
+taojin-6
+self-assigned this
+Oct 28, 2026
+taojin-6
+mentioned this pull request
+Oct 29, 2026
+refactor(examples): the codec helpers include no fusion
+#304
+Open
+Merge origin/main into refactor/voxelize-tier
+…
+79710c5
+```
+Brings in the camera-free volume (#303) and the io split (#301). The
+examples link recon_voxelize beside recon_mesh_io(_assimp); the tier
+diagrams, the volume entry and both changelogs keep every change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AaGoFgDPT8weq8prnaMGYo
+```
+Hide details
+View details
+taojin-6
+merged commit bd63161
+into
+main
+Oct 29, 2026
+9 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+taojin-6
+deleted the
+refactor/voxelize-tier
+branch
+October 29, 2026 00:33
+taojin-6
+added a commit
+that referenced
+this pull request
+Oct 29, 2026
+Merge origin/main into refactor/codec-stream-tier
+…
+049af92
+```
+main gained the io split (#301), the voxelize tier (#302) and the
+camera-free volume (#303). Conflicts resolved: codec_mesh and its
+sequence helpers take voxelize::MeshIntegrator and codec_stream::
+together; the example test's MeshIntegrator is vx::; the tier lists in
+AGENTS.md and DESIGN.md name voxelize, the io targets and codec_stream;
+tests/CMakeLists.txt's comment and COSTs carry both renames; CHANGELOG
+and DECISIONS keep every 2026-10-28 entry, codec_stream's last.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AaGoFgDPT8weq8prnaMGYo
+```
+taojin-6
+mentioned this pull request
+Oct 29, 2026
+refactor(codec_stream): a tier of its own off recon_sender, its frame in halves public
+#305
+Open
+taojin-6
+added a commit
+that referenced
+this pull request
+Oct 29, 2026
+Merge origin/main into refactor/example-helpers-split
+…
+73165cd
+```
+Brings in the camera-free volume (#303), the io split (#301) and the
+voxelize tier (#302). recon_example_config keeps the codec half: its Orbbec
+case lives in recon_example_fuse_config, and its link comment names
+voxelize's MeshSdfParams.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AaGoFgDPT8weq8prnaMGYo
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

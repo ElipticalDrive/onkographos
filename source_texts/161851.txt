@@ -1,0 +1,1513 @@
+1
+Distributed optimization for nonrigid
+nano-tomography
+arXiv:2008.03375v2 [cs.CE] 28 Feb 2021
+Viktor Nikitin, Vincent De Andrade, Azat Slyamov, Benjamin J. Gould, Yuepeng Zhang, Vandana Sampathkumar,
+Narayanan Kasthuri, Doğa Gürsoy, Member, IEEE, Francesco De Carlo
+Abstract—Resolution level and reconstruction quality in nanocomputed tomography (nano-CT) are in part limited by the
+stability of microscopes, because the magnitude of mechanical
+vibrations during scanning becomes comparable to the imaging
+resolution, and the ability of the samples to resist radiation
+induced deformations during data acquisition. In such cases,
+there is no incentive in recovering the sample state at different
+time steps like in time-resolved reconstruction methods, but
+instead the goal is to retrieve a single reconstruction at the
+highest possible spatial resolution and without any imaging
+artifacts. Here we propose a distributed optimization solver
+for tomographic imaging of samples at the nanoscale. Our
+approach solves the tomography problem jointly with projection data alignment, nonrigid sample deformation correction,
+and regularization. Projection data consistency is regulated by
+dense optical flow estimated by Farneback’s algorithm, leading
+to sharp sample reconstructions with less artifacts. Synthetic
+data tests show robustness of the method to Poisson and lowfrequency background noise. We accelerated the solver on multiGPU systems and validated the method on three nano-imaging
+experimental data sets.
+Index Terms—Tomographic reconstruction, ADMM, nonrigid
+alignment, deformation estimation, optical flow
+I. I NTRODUCTION
+Current X-ray imaging instruments demonstrate sub-100 nm
+resolution level in a wide range of fields, including biology,
+medicine, geology, and material sciences [1]–[7]. To reach
+this or even higher resolution levels one needs to address
+various instrument component limitations such as mechanical
+instabilities from scanner, detector, and optic components. At
+the same time, the structure of a sample may change during Xray data acquisition, leading to inconsistent tomographic data,
+further increasing the complexity of the sample reconstruction.
+This is caused not only by the controlled environmental
+conditions for in situ study of dynamic processes, but also
+by the uncontrolled sample deformation due, for example,
+to radiation damage. Severe radiation dose deposition may
+induce not only sample deformation but also ultimate destruction of features. Cryogenic systems like cryojet in most
+cases protect the sample from being destroyed, however, they
+only partially reduce sample deformation while the cold air
+stream induces vibrations. On the other hand, in vacuum
+cryostages typically maintain samples at lower temperatures
+than cryostreams, more efficiently preventing sample deformation without adding vibrations. But such systems compatible
+V. Nikitin, V. De Andrade, B. J. Gould, Y. Zhang, D. Gürsoy, F. De Carlo
+are with Argonne National Laboratory, USA
+A. Slyamov is with the Technical University of Denmark, Denmark
+V. Sampathkumar and N. Kasthuri are with the Unviersity of Chicago, USA
+with tomographic acquisitions are complex, unpractical and
+impose stringent experimental constraints ruling out most of
+in situ experiments [8]–[10].
+To address sample deformation due to radiation damage, a
+number of time-resolved methods have been adopted during
+the last two decades. They demonstrate significant quality
+improvement for time-evolving samples compared to the conventional approach, however, most of them are based on
+additional a priori knowledge about the sample structure and
+motion, and require demanding computational resources for
+reconstructing experimental data in a reasonable time. For
+instance, in [11] we proposed a multi-GPU implementation
+of a method for suppressing motion artifacts by using timedomain decomposition of functions with a basis chosen with
+respect to the motion structure. The method operates with a
+low number of decomposition coefficients that can be used
+to determine the object state continuously in time. Next, the
+approach proposed in [12], [13] is based on estimating local
+structural correlations over multiple time frames and finding
+inner object edges which remain constant in time, followed
+by the patched-based regularization according to the object
+structure. Also, there are methods built upon the concept
+of compressed sensing, which employs sparsity promoting
+algorithms, where the prior knowledge is given in terms of
+spatial-temporal total variation regularization for detecting
+sharp object changes [14], [15].
+Compared to the time-resolved methods above, the use of
+deformation vector fields (DVFs) is an even more common
+approach to model the sample evolution at discrete time
+intervals during scanning. The displacement between volumes
+obtained from two independent sets of projections covering
+180◦ intervals is generally recovered with the Digital Volume
+Correlation (DVC) [16]. This works only if the deformation
+is slow compared to the scan speed, which is the case of
+some fast synchrotron imaging applications [17]–[19]. Faster
+acquisition can be achieved by decreasing exposure times
+and the number of projection angles, however, DVC in this
+case suffers from noise and limited angle artifacts. In medical
+imaging applications, such as the study of heart or lungs,
+the displacement problem is easier to handle because the
+motion is often periodic and standard regrouping of projections
+yields reconstruction for different phases of the cycle [20],
+[21]. However, the quality of reconstruction still suffers from
+the angular undersampling for each sample phase, so as the
+applicability is limited to a concrete deformation process.
+Time-resolved DVC-based algorithms have also been proposed
+to deal with continuous sample deformation during data acqui-
+2
+sition. The method proposed in [22] uses the sensitivity maps
+as the basis functions for representing DVFs, establishing a
+connection between the acquired images and the unknown material parameters. The DVC then operates only with these basis
+functions, allowing for faster deformation estimation. Direct
+material parameter identification provides strong regularization ensuring optimal accuracy and noise robustness. Another
+method [23] is based on the existence of the template sample
+volume recovered from high-quality undeformed projections.
+Further sample motion is recovered by using only a few
+projections per deformation. This approach can be efficiently
+used in dynamic imaging of samples with manual changing
+of temperature or pressure conditions, however, it will fail if
+some deformation happens during acquisition of the template.
+Several advanced methods have been recently proposed
+to address the above issues [24]–[26]. We see two general
+limitations in using these methods for nano-CT applications
+with typically large-scale datasets. First, these methods are
+time-consuming even though they are implemented on GPUs.
+Because it is not feasible to store and process a large number
+of DVFs for modeling rapid object changes, the temporal
+resolution for the DVF estimation is chosen coarsely (e.g., one
+or several time frames for each 180 degrees rotation) [24],
+[27], so as the spatial resolution is decreased by applying
+binning (e.g., 4 × 4) to get faster and more robust DVF estimation [24]. Similarly, the authors in [25] proposing the usage
+of B-splines for DVF estimation directly highlight that downsampling can be carried out to perform GPU computations but
+at the cost of some loss in the displacement field’s accuracy.
+They also employ linear interpolation functions to estimate
+DVFs for time stamps corresponding to the acquisition of each
+projection, and claim that higher accuracy can be achieved
+by considering more complex functions. However, this will
+increase the computational complexity and memory requirements even more. An alternating joint optimization framework
+with computationally efficient DVF estimation was proposed
+in [26]. With this approach the deformation field is estimated
+first for the coarsest scale, then the estimation is propagated
+step-by-step to the finest levels. According to the provided
+performance tests, a multi-threaded CPU implementation of
+the method requires 2-6 h to reconstruct 3003 -5003 volumes
+with 6 alternating outer iterations, where most time is spent
+for DVF estimation even with the proposed efficient strategy.
+Taking into account the computational complexity and ignoring memory requirements these times may scale up to several
+days when considering volumes of twice bigger sizes.
+The second general limitation is that DVF estimation in
+4D may result in many feasible solutions, and smoothness,
+slow-variations or other types of constraints are required to
+limit the solutions to obtain meaningful reconstructions. Most
+algorithms are given without formal study of convergence
+analysis. Often, direct code usage for new experimental data
+results in divergence of the method or in practically unacceptable results. In some cases, parameter adjustment and
+additional preprocessing procedures (binning, filtering, etc.)
+may improve reconstruction quality and make the method
+convergent. DVF-based methods typically operate with many
+parameters including initial and final DVF smoothness levels
+in spatial and temporal variables, regularizer for deformation
+evolution as in [24]; weights κ1 , κ2 , κ3 , κ4 for minimization
+terms as in [26]. However, there is no general guidance on
+how to pick these parameters.
+In most experiments there is no requirement to reconstruct the object state at different time steps as proposed
+by computationally demanding time-resolved reconstruction
+methods, but instead the goal is to have a single reconstruction
+of high quality and resolution. These experiments include
+tomography of biological and medical samples, where X-ray
+dose deposition causes uncontrolled radiation or thermally
+induced deformation [5], [24], [28], [29]. Another application
+area is tomography of geological samples affected by external cooling or heating systems, where the sample structure
+changes depending on the rotation angle and corresponding
+distance to the external device [30], [31]. Even mechanical
+limitations of the rotation stage, such as inaccurate roll/pitch
+angles alignment or vibrations, in fact, create a time-resolved
+tomography problem where only one state needs to be recovered.
+The consistency of projections for different angles can be
+improved by directly translating projection images horizontally or vertically before the tomographic reconstruction [5],
+[32]–[35], or by using iterative re-projection methods based
+on a joint estimation of alignment errors and the object
+function [36]–[38]. These methods work especially well for
+the interlaced angular scanning protocol, in which a full
+tomographic scan is acquired with multiple sample rotations
+where projection angles are mod 2π different and uniformly
+cover the interval [0, 2π) [26], [39]. With this protocol, a
+significant time gap between acquisition of two nearby angles,
+that should give similar data in a static case, allows to estimate
+corresponding shifts by using rigid image registration methods
+like cross-correlation.
+In this work, we propose a generic distributed optimization
+framework based on alternating direction method of multipliers (ADMM) [40] for solving the tomography problem
+jointly with two-dimensional projected deformation estimation
+and regularization. We operate with optical flow applied to
+projection data and not to the object, aiming to improve the
+consistency of projections and recover one pristine image
+of the sample of high quality and resolution. This approach
+is computationally more appealing because 2D optical flow
+estimation is cheaper and can be straightforwardly parallelized
+over projections. The case with three-dimensional optical flow
+applied to the object is computationally demanding and wellsuited for studying the dynamics of the sample, which is,
+however, not required for many nano-CT experiments. The
+proposed ADMM framework is favorable for handling largescale problems because it breaks the whole reconstruction
+problem into algorithmically and computationally manageable
+sub-problems, in this case into three sub-problems: tomographic reconstruction, projected deformation estimation, and
+regularization of the solution. While the tomographic reconstruction and regularization sub-problems are solved using
+standard methods, we employ an optical flow scheme for
+estimating the projected deformation for each projection angle.
+3
+Optical flow is defined as the pattern of apparent motion of
+image objects between two consecutive frames caused by the
+object movement, and is commonly used in computer vision
+for motion tracking algorithms [41]–[43]. We also provide a
+strategy for automatic parameter tuning in the ADMM scheme.
+So the algorithm can be run on different experimental data
+sets without additional adjustments except choosing the regularization constant. To our knowledge, a formal optimization
+framework has never been used for reconstruction problems
+with alignment and deformation corrections. In contrast to conventional re-projection methods relying on empirical studies of
+each sub-problem, the ADMM formulation connects all subproblems and thus demonstrates more favorable convergence
+behavior, see [40] and references therein. By estimating the
+optical flow in each projection image, one can handle a wide
+range of deformation types, even those occurring at fine time
+steps.
+Our implementation is based on Farneback’s algorithm [42]
+and we propose a new multi-resolution scheme for robust and
+accurate estimation of dense optical flow between projections.
+The algorithm can track the points at multiple levels of
+resolution by generating image pyramids, where each level
+has a lower resolution compared to the next (higher) level.
+Besides, in our proposed ADMM model, we solve all subproblems approximately at each ADMM iteration and we use
+the estimates from the previous iteration as the initial guess for
+the next iteration. With these optimizations, processing times
+for the deformation estimation sub-problem are comparable
+to that of the tomography sub-problem, and this strategy,
+combined with our multi-GPU code acceleration, allows processing large experimental data sets in a reasonable time.
+We validated those optimizations both on synthetic and on
+large-scale experimental datasets. Reconstruction results of the
+proposed GPU implementation were compared to the ones
+obtained with a method operating with 3D optical flow [24].
+Its publicly available Matlab GPU-based tomography solver
+with 3D optical flow estimation is available at [44].
+The proposed approach is a formalization and computational
+improvement of the method operating with the Projectionbased Digital Volume Correlation (P-DVC) firstly introduced
+in [23] where the theory was built upon the existence of the
+perfectly recovered initial object state. The authors in [45]
+demonstrate how P-DVC is used to recover sample changes
+based on the initial state with only a few radiographs acquired
+at fixed intervals of time. The ill-posedness of the inverse
+problem is addressed by incorporating an equilibrium-gap
+regularizer, registration is evaluated from the projection-based
+residuals only. In [46] tomographic reconstruction is directly
+coupled with the P-DVC problem in a way that two subproblems are solved sequentially without coordinating variables. In addition, the method involves a multiscale Gaussian
+convolution procedure to properly correct displacements of
+different size and correct finer features. The technique was
+also used in online calibration procedures for cone-beam X-ray
+tomography [47]. The authors claim that their method coupled
+with fast acquisition devices could give access to ultra-fast
+mechanical identification that could not be performed with
+classical means such as 3D or 4D DVC.
+There is a straightforward applicability limitation of the
+proposed method and all methods based on optical flow
+estimation when reconstructing radiation sensitive samples.
+Radiation damage causes not only sample shrinkage and deformation but also destruction of features. With many features
+being destroyed by radiation, it becomes impossible to track
+optical flow between different states and, therefore, improve
+reconstruction quality and resolution.
+Our contribution through this work can be summarized as
+follows:
+Development of a new ADMM-based optimization
+framework for joint tomographic reconstruction, geometrical data alignment, nonrigid sample deformation
+correction, and regularization;
+• Use of a dense optical flow based scheme for jointly
+estimating the deformation fields of the projected images
+for each rotation angle to significantly suppress motion
+artifacts even for very small features;
+• Algorithmic and computational optimizations for processing large-scale data in a reasonable time by use of multiresolution, multi-GPU, and automatic parameter tuning
+strategies;
+• Demonstration of quality and spatial resolution enhancement when processing radiation-sensitive nano-CT experimental data.
+• Comparison of reconstruction quality with an ad hoc
+GPU-based method operating with 3D optical flow.
+•
+This paper is organized as follows. In Section II, we
+formulate the joint tomography problem with deformation
+estimation and regularization, and show how this optimization
+problem can be solved with the ADMM by splitting the whole
+problem into sub-problems. In Section III, we validate our
+approach on synthetic data and compare reconstruction results
+to the conventional method. In Section IV, we provide performance optimization aspects when implementing the proposed
+method. Section V demonstrates reconstruction results for
+nano-tomography experimental data sets. Our conclusions and
+outlook are given in Section VI.
+II. M ETHODS
+In this section, we present the augmented Lagrangian
+formulation of the tomography reconstruction problem with
+deformation estimation and regularization, and show how this
+problem is solved by using ADMM [40] with splitting the
+whole problem by local sub-problems.
+A. Augmented Lagrangian formulation and solution by
+ADMM
+Let u be an object in 3D space and d its projection data
+around a common rotation axis. The projection operator is
+given in terms of the X-ray transform,
+ZZ
+X u(θ, s, z) =
+u(x, y, z)δ(x cos θ + y sin θ − s)dxdy.
+4
+For regularization, we use a common sparsity promoting total
+variation (TV) term defined as
+s
+αk∇uk1 = α
+∂u 2
+∂u 2
+∂u 2
++
++
+∂x
+∂y
+∂z
+,
+1
+where parameter α controls the trade-off between the data
+fidelity and regularization terms. We chose TV regularization
+as an example for suppressing noise and data incompleteness
+artifacts in reconstructions [48], however other sparsity priors
+can be adopted as well. Let Df be the deformation operator
+that maps projections to new coordinates according to a given
+optical flow f = (fsθ , fzθ ) as follows,
+Df ψ(θ, s, z) = ψ(θ, s + fsθ , z + fzθ ).
+Note that in this formulation we apply optical flow to projection data and not to the object. This way we aim at improving
+the consistency of projections to recover one pristine image
+of the sample with less motion artifacts. The case with threedimensional optical flow applied to the object is computationally demanding and well-suited for studying the dynamics of
+the sample, which is not needed for experimental data we deal
+with in this work.
+The tomographic reconstruction problem of recovering object u from data d can be solved by considering the following
+minimization problem,
+1
+min k Df X u − dk22 + αk∇uk1 .
+u,f 2
+We solve the above minimization problem by considering an
+equivalent constraint optimization problem where the augmented Lagrangian method is used to find a solution. By
+introducing auxiliary variables, ψ1 and ψ2 , an equivalent
+problem can be written as a constrained optimization problem,
+min
+u,f,ψ1 ,ψ2
+subject to
+1
+k Df ψ1 − dk22 + αkψ2 k1
+2
+X u = ψ1 ,
+for the original problem. Specifically, the following steps are
+performed in each ADMM iteration k:
+
+uk+1 = arg min Lρ1 ,ρ2 u, ψ1k , ψ2k , λk1 , λk2 , f k ,
+(2)
+u
+
+ψ1k+1, f k+1 = arg min Lρ1 ,ρ2 uk+1 , ψ1 , ψ2k , λk1 , λk2 , f k ,(3)
+ψ1 ,f
+
+k+1
+ψ2 = arg min Lρ1 ,ρ2 uk+1 , ψ1k+1 , ψ2 , λk1 , λk2 , f k+1 , (4)
+ψ2
+
+k+1
+k
+λ1 = λ1 + ρ1 X uk+1 − ψ1k+1 ,
+
+λk+1
+= λk2 + ρ2 ∇uk+1 − ψ2k+1 ,
+2
+for zeros or some adequate initial guess at k = 0. On every
+iteration, Lρ1 ,ρ2 is minimized over each variable sequentially
+by using the most recent updates of other variables. The dual
+variables are then computed with respect to the scaled sum
+of the consensus errors. With dropping terms not affecting
+minimization, the sub-problems (2), (3), and (4) can be written
+as
+ρ1
+uk+1 = λT1 (X u − ψ1k ) + k X u − ψ1k k22
+2
+ρ2
++ λT2 (∇u − ψ2k ) + k∇u − ψ2k k22 , (5)
+2
+1
+k+1 k+1
+2
+T
+ψ1 , f
+= k Df ψ1 − dk2 + λ1 (X uk+1 − ψ1 )
+2
+ρ1
++ k X uk+1 − ψ1 k22 , (6)
+2
+ρ2
+ψ2k+1 = αkψ2 k1 + λT2 (∇uk+1 − ψ2 ) + k∇uk+1 − ψ2 k22 .
+2
+(7)
+In what follows, we show our solution approach to the
+sub-problems in (5), (6), and (7). We refer to them as the
+tomography, deformation estimation, and regularization subproblems, respectively.
+B. Tomography sub-problem
+We express the minimization function for the tomography
+problem in (5) as
+F (u) =
+(1)
+∇u = ψ2 .
+ρ1
+ρ2
+k X u−ψ1k +λk1 /ρ1 k22 + k∇u−ψ2k +λk2 /ρ2 k22 ,
+2
+2
+where the terms not depending on u are dropped. The problem
+is solved by considering the steepest ascent direction ∇u F (u)
+computed as follows,
+The augmented Lagrangian for the problem (1) is defined for
+real variables and is given as
+∇u F (u) = ρ1 X T(X u−ψ1k +λk1 /ρ1 )−ρ2 div(∇u−ψ2k +λk2 /ρ2 ),
+Lρ1 ,ρ2 (u, f,ψ1 , ψ2 , λ1 , λ2 ) =
+1
+k Df ψ1 − dk22 + λT1 (X u − ψ1 ) + αkψ2 k1 +
+2
+ρ1
+ρ2
+k X u − ψ1 k22 + λT2 (∇u − ψ2 ) + k∇u − ψ2 k22 ,
+2
+2
+where the divergence operator div is the adjoint to −∇ and
+the adjoint operator for the X-ray transform, X T , is defined
+as
+ZZ
+T
+X ψ(x, y, z) =
+ψ(θ, s, z)δ(x cos θ + y sin θ − s)dθds.
+where ρ1 , ρ2 > 0 are penalty parameters and λ1 , λ2 denote
+dual variables. We use ADMM to split the minimization
+problem of the augmented Lagrangian into three local subproblems with respect to u, (f, ψ1 ), ψ2 . The sub-problems are
+then coordinated through variables λ1 , λ2 to find a solution
+With the steepest ascent direction, we can construct iterative
+schemes for solving (5) by using methods with different
+convergence rates. Here we employ the Conjugate Gradient
+(CG) method for its faster convergence rate at the expense
+of memory requirements. CG iterations are given as um+1 =
+5
+um + γm ηm , where γm is a step length computed by a linesearch procedure [49] and ηm is the search direction that we
+compute by using the Dai-Yuan formula [50],
+k∇u F (um+1 )k22
+ηm ,
+(∇u F (um+1 )−∇u F (um ))T ηm
+(8)
+where η0 = −∇u F (u0 ). On each ADMM iteration, we solve
+the tomography sub-problem approximately, by using only a
+few number of CG iterations since this strategy in practice
+greatly improves ADMM convergence rates, see review in [40]
+and Section IV. Note that solving the tomography sub-problem
+is always coordinated with solving other sub-problems.
+ηm+1 = −∇u F (um+1 )+
+C. Deformation estimation sub-problem
+The minimization functional for the deformation estimation
+sub-problem in (6) can be expressed as
+ρ1
+1
+F (ψ1 , f ) = k Df ψ1 −dk22 + k X uk+1 −ψ1 +λk1 /ρ1 k22 .
+2
+2
+As for the tomography sub-problem, we aim at solving this
+problem approximately on each ADMM iteration. Therefore,
+we decided not to increase the problem complexity by introducing additional coordinating variables with respect to ψ1 and
+f . Instead, we propose sequential updates of these variables
+while solving the deformation estimation sub-problem. To find
+the optical flow we fix variable ψ1 and solve
+1
+f˜ = arg min k Df ψ1 − dk22 .
+2
+f
+Sparse and dense optical flow estimation methods have been
+proposed by many authors, including Lucas and Kanade [41],
+Farneback [42], Brox [43]. In this work we adopted
+Farneback’s algorithm because it gives accurate dense flow
+estimation, where the density level is controlled through parameters. Moreover, the algorithm allows solving the problem
+approximately (for a few iterations), which is favorable for the
+proposed ADMM scheme and consistent with the tomography
+sub-problem. At the same time, the choice of the method
+generally depends on the application, and other optical flow or
+other types of nonrigid registration algorithms can be applied
+as well.
+Farneback’s algorithm generates an image pyramid, where
+each level has a lower resolution compared to the next (higher)
+level. The scheme can track the points at multiple levels
+of resolution, starting at the lowest level typically given by
+a window size parameter that is close to the image size.
+Increasing the number of pyramid levels enables the algorithm
+to handle larger displacements of points between frames.
+However, the number of computations also increases with
+increasing resolution levels.
+In the proposed reconstruction scheme there is no need
+to consider many pyramids levels for tracking deformation,
+because a level of three to five can capture most of the deformation sizes and types that are visible in real applications.
+Variable ψ1 is updated on each ADMM iteration with the
+usage of the current object approximation uk+1 and dual
+variable λk1 that are typically not very close to final results
+on the first ADMM iterations. Thus at initial iterations it
+makes sense to find optical flow in low resolution with a large
+window size, and gradually increase resolution by decreasing
+the window size with iterations. Moreover, since Farneback’s
+algorithm is an iterative procedure, the optical flow on each
+ADMM iteration can be used as an initial guess for the flow in
+the next iteration to accelerate solution. Therefore, the number
+of iterations in the algorithm can be kept low.
+The problem with respect to variable ψ1 with fixed f ,
+ρ1
+1
+ψ̃1 = arg min k Df ψ1 − dk22 + k X uk+1 − ψ1 + λk1 /ρ1 k22 ,
+2
+2
+ψ1
+is treated as a standard L2 minimization problem with linear
+operators, where the steepest ascent direction is given as
+follows,
+∇ψ1 F (ψ1 ) = DTf (Df ψ1 −d)+ρ1 X T (X uk+1 −ψ1 +λk1 /ρ1 ).
+For a consistent approach with the tomography problem, we
+employ the CG method with the Dai-Yuan search direction (8)
+to find a solution.
+D. Regularization sub-problem
+The minimization functional for the regularization problem
+(7) is given by
+ρ2
+F (ψ2 ) = αkψ2 k1 + k∇uk+1 − ψ2 + λk2 /ρ2 k22 . (9)
+2
+As opposed to the tomography and deformation solvers involving iterative solution approximation, the minimizer for
+F (ψ2 ) can be found explicitly by using the soft-thresholding
+operator [51],
+ψ̃2 =
+∇uk+1 + 2λk2 /ρ2
+max(0, |∇uk+1 +2λk2 /ρ2 |−2α/ρ2 ),
+|∇uk+1 + 2λk2 /ρ2 |
+where, by abuse of notation, we assume element-wise operations for dividing, taking the absolute value, and comparing
+with 0.
+We have considered a sparse prior defined in terms of the
+total variation, which is a common method of choice for
+reconstructing data from noisy and incomplete measurements.
+Although we use TV for regularization, the proposed framework allows the use of any other regularization approach based
+on the experimental conditions. For instance, one can use
+k∇uk2 for decreasing the gradient sparsity level, or consider
+TV modifications such as the Huber variant of the total
+variation prior (HTV) [52], the total generalized variation
+(TGV) [53]. Alternatively, regularization schemes based on
+a sparse data representation [54]–[56] can be adopted for the
+proposed scheme as well.
+Different techniques exist for choosing the regularization
+constant α in (9). The most popular of them include the
+discrepancy principle [57], L-curve criterion [58], and generalized cross-validation [59]. In this work we use the Lcurve criterion since it demonstrates robustness to noise and
+sharp solutions in our applications. The L-curve criterion
+seeks to balance the error components 21 k Df X u − dk22 and
+αk∇uk1 via inspection of the L-curve constructed by using
+logarithms of these two errors. It has two distinctly different
+parts: quite flat (regularization error dominates), and more
+6
+vertical (fidelity error dominates). The region where one part
+changes to another then corresponds to optimal values of the
+regularization parameter α.
+describe the strategy of automatic updating these parameters
+for a faster convergence.
+III. S YNTHETIC DATA TESTS
+E. Convergence note
+The constrained optimization problem (1) is non-convex.
+Unlike the convex case, for which the behavior of ADMM
+has been studied extensively, the convergence of ADMM
+on non-convex problems is always questionable, especially
+when there are also non-smooth functions in the problems.
+The ADMM scheme generally fails on non-convex problems,
+however it has not only demonstrated convergent results in
+many applications but also showed significant performance
+improvement. Indeed, a list of successful applications includea
+phase retrieval [60], 3D ptychography [61], [62], compressed
+sensing [63], background/foreground extraction [64], image
+registration [65]. Most of these applications are far beyond
+the scope of theoretical conditions required for non-convex
+ADMM convergence [66]–[69]. Nevertheless, they are still
+practically used in real data processing.
+For a detailed convergence discussion of the ADMM
+scheme for the minimization problem studied in this paper
+we refer readers to [67]. The authors analyze the following
+problem,
+min
+K
+X
+x1 ,x2 ,...xK
+s.t.
+gk (xk ) + l(x1 , x2 , . . . , xK )
+k=1
+K
+X
+(10)
+Ak xk = 0,
+k=1
+where Ak are linear operators, l(·) is a smooth (possibly nonconvex) function, and each gk can be either a smooth function
+or a convex non-smooth function. The problem (1) has a form
+of (10) if we set variables and functionals as
+x1 = ψ1 ,
+x2 = ψ2 ,
+x3 = u,
+x4 = f,
+1
+g2 (x2 ) = αkx2 k, l(x2 , x4 ) = k Dx4 x2 − dk22 ,
+2
+and the operators in the constraint as
+ 
+ 
+
+
+I
+0
+−X
+A1 =
+, A2 =
+, A3 =
+.
+0
+I
+−∇
+The rate of convergence depends on the choice of the
+ADMM weighting parameters ρ1 , ρ2 . When these parameters
+are well chosen, the method can converge to fairly accurate
+solutions within a few tens of iterations. However, if the
+choice of the parameters is poor, many iterations are typically
+needed for convergence. Note that the case with ρ1 , ρ2 = 0
+corresponds to a standard alternating approach for solving
+the tomography problem with deformation estimation (used,
+for instance, in [24]) where two sub-problems are solved
+sequentially without coordinating L2 -norm terms weighted
+with ρ1 , ρ2 as in (5)-(7), and therefore demonstrates less
+favorable convergence behavior in practice. Heuristics for
+choosing optimal penalty parameters are discussed more in
+detail in [40], and references therein. In Section IV we also
+Fig. 1. Reconstruction of a deforming synthetic object by the ConjugateGradient method with pre-alignment before reconstruction (pCG), and by the
+proposed ADMM scheme with optical flow (OF): a) initial object with an
+example of projection data, b) deformation speed plot, c) orthogonal slices
+through the initial object and reconstructions, d) application of the deformation
+operator Df with the recovered optical flow f to the re-projection data ψ1 :
+misalignment and fidelity terms with respect to the data d acquired at the
+object states marked by colored dots in the plot from b).
+In this section, we validate our approach through simulations. We will compare reconstructions by the standard Conjugate Gradient solver with pre-aligned projection, referred to as
+pCG, and by the proposed ADMM scheme with optical flow,
+referred to as OF. Noise and additional background robustness
+for both methods is analyzed with adding the TV regularization term. TV-regularized versions for both methods, pCG and
+OF, are referred to as pCGTV and OFTV, respectively.
+For validation we generated projection data for a continuously deforming synthetic object represented by a set of tubelike structures of different sizes and orientation, see Fig. 1(a).
+The amount of deformation for a normalized scanning time
+t ∈ [0, 1] is proportional to 1 − exp(−3t), see Fig. 1(b). The
+7
+plot approximates a slowing down process of the object deformation caused by radiation damage during X-ray scanning.
+The deformation was simulated as a smooth random field
+with maximal displacement of 20 pixels (8% of the object
+size in one dimension). In total 384 projections through the
+256×256×256 object were acquired in the interlaced scanning
+mode with 2 object rotations.
+Fig. 1(c) shows reconstruction results comparison for the
+pCG and OF methods. In all presented orthogonal slices
+through the reconstructed object, the OF method suppress deformation artifacts appeared in pCG reconstructions as blurred
+and corrupted ellipses. Note that the OF method recovers not
+the initial object state, but the state which yields a higher
+consistency level of the projection data.
+Projections in the pCG method were pre-aligned with respect to the projections from the first rotation. Instead of
+the conventional cross-correlation approach for alignment, we
+employed Farneback’s algorithm with non-dense optical flow.
+This approach also gives one common (x, y)-shift for all
+pixels in a projection, but it is more robust to noise than the
+cross-correlation approach. Alternatively, one could consider
+dense optical flow for pre-alignment, however, this results
+in even worse reconstructions because interlaced projections
+were acquired for different angles and thus are not supposed
+to be the same up to small features.
+For the OF method, in turn, projections were aligned with
+respect to the re-projection estimate ψ1 , see (1). In Fig. 1(d)
+we show how recovered estimates ψ1 differ from the data d
+acquired at different time steps marked by colored dots in
+Fig. 1(b). We also show that application of the estimated optical flow f to the re-projection ψ1 minimizes the data fidelity
+error d − Df ψ1 . Visualization of the optical flow is done by
+using a colored map where colors define flow directions, and
+color intensities show the amount of deformation.
+The iterative scheme for the pCG method was performed for
+128 iterations, whereas the OF scheme had 64 outer ADMM
+iterations and 4 inner iterations for each tomography and
+deformation estimation sub-problems (using of few inner iterations is a common practice to speed up ADMM). The optical
+flow density level was gradually increased with iterations by
+reducing window sizes in Farneback’s algorithm from 256 to
+32 pixels.
+To check the noise robustness and stability of the proposed
+method to background changes we modified the synthetic
+object from Fig. 1(a) by varying intensities of the tube-like
+structures, as well as adding Poisson noise and low-frequency
+background noise to projection data. We also considered two
+levels of deformation simulated as smooth random fields with
+maximal displacement of 20 and 30 pixels (8% and 12% of the
+object size), and analyzed how the number of angular rotations
+in the interlaced scan affects reconstruction quality. Results
+are given in Fig. 2, where for clarity we present cropped
+z-slices through the reconstructed object. There are several
+observations from this figure. The OF method is more robust
+to Poisson noise and low-frequency background noise than
+the pCG method. Additional TV regularization reduces highfrequency noise in OFTV reconstructions, whereas pCGTV
+reconstructions blur main object features. Next, the lower
+number of projections per rotation in the interlaced scanning
+mode is favorable for the proposed method but not always
+for the conventional method. One can observe straight line
+artifacts in pCG reconstructions for the case with 96 projections per rotation. The artifacts appeared because the alignment
+was done between interlaced projections that are rather more
+different than in the case with 192 and 384 projections.
+We also note that the proposed method partially resolved
+deformation issues for the non-interlaced scanning (1 rotation
+with 384 angles).
+Fig. 2. Reconstruction of a deforming synthetic object from the data with
+Poisson and low-frequency background noise by using the proposed method
+OF, by the conventional pCG, and by their regularized versions, OFTV and
+pCGTV.
+In practice, lowering the number of projections per rotation
+introduces additional overhead for rotating the stage, which
+leads to longer acquisition times and skipping some of the
+deforming sample states. Although the proposed method significantly suppresses motion artifacts, the trade-off between
+the rotation speed and reconstruction quality depends on the
+sample dynamics and needs to be determined experimentally.
+IV. P ERFORMANCE OPTIMIZATION
+In this section we describe optimization aspects for implementing the proposed ADMM scheme in order to use it in
+large-scale experimental data processing.
+Convergence behavior and performance of the scheme were
+optimized with the following aspects. First, on each ADMM
+iteration we propose solving the tomography and deformation estimation sub-problems approximately, by using only
+a few number of inner iterations. In practice, this procedure
+yields more favorable convergence behavior than the one with
+8
+Fig. 3. Convergence plots for the augmented Lagrangian function minimized by the proposed scheme with ninner =1,2,4,8,16,32 inner CG iterations in the
+tomography and deformation estimation sub-problems. Number of global ADMM iterations nADMM = 256/ninner yields the same computational complexity
+level for all cases. Joint iteration is calculated as the product of the ADMM iteration count and ninner .
+TABLE I
+C OMPUTATIONAL TIMES ( IN SECONDS ) OF 1 ADMM ITERATION WITH 4 INNER CG ITERATIONS FOR TOMOGRAPHY AND DEFORMATION ESTIMATION
+SUB - PROBLEMS . T HE GPU SYSTEM FOR TESTING IS BASED ON 4×NVIDIA T ESLA P100.
+Data size
+Deformation estimation
+Tomography
+Total
+(Nθ ×Nz ×N )
+1 GPU
+4 GPU
+1 GPU
+4 GPU
+1 GPU
+4 GPU
+196×128×128
+0.9
+0.7
+0.5
+0.6
+1.4
+1.3
+384×256×256
+2.2
+1.4
+1.6
+1.4
+3.9
+3.0
+17.2
+768×512×512
+12.7
+7.4
+18.3
+8.4
+32.3
+1536×1024×1024
+105
+63
+197
+107
+315
+183
+3072×2048×2048
+897
+598
+1976
+1131
+3001
+1810
+many inner iterations and allows to significantly speed up
+the whole ADMM scheme [61], [62]. In Fig. 3 we present
+convergence results for different number of inner CG iterations
+in the tomography and deformation estimation sub-problems.
+The figure demonstrates convergence plots of the augmented
+Lagrangian function for the schemes having the same computational complexity level in the sense that the product of
+the total number of ADMM iterations and the number of
+inner CG iterations is the same for all schemes. The tests
+were performed for synthetic 10% deformed data used in the
+paper. According to this figure, solving the problem with a low
+number of inner iterations (specifically with 4) demonstrates
+more favorable convergence results compared to other cases.
+Second, we work with normalized and computationally
+optimized operators defined in the paper for constructing
+the ADMM framework. This facilitates the initialization of
+9
+ADMM weighting factors ρ1 and ρ2 in the augmented Lagrangian and optimize line-search computations in the CG
+method for the tomography and deformation estimation subproblems. Additionally, we follow [40] and vary the penalties
+ρ1 , ρ2 on each iteration to improve the convergence rate. With
+this strategy, the update of ρ1 for each iteration k is computed
+as follows
+ρk+1
+=
+1
+
+k
+
+if kψ1k − X uk k22 > 10kρk1 (X uk − X uk−1 )k22 ,
+2ρ1
+k
+ρ1 /2 if kρk1 (X uk − X uk−1 )k2 > 10kψ1k − X uk k2 ,
+
+ k
+ρ1
+otherwise,
+(11)
+where ρ01 = 0.5. Updates for the parameter ρ2 are similar to
+(11); substituting ρ2 for ρ1 , ∇ for X , and ψ2 for ψ1 . Manual
+adjustment of parameters ρ1 , ρ2 for different datasets is not
+needed with this approach. We also optimize evaluation of
+the X-ray transform X since in the proposed framework this
+operator requires a relatively large amount of computational
+resources. Working with the data measured with the interlaced
+angular scanning protocol, the number of angles typically exceeds the object sizes. Therefore, instead of direct summation
+over the lines in computing the X-ray transform we employ the
+Fourier-based method [70]. With this method, the forward and
+adjoint projection operators are evaluated faster by leveraging
+the speed advantage of computing 1D FFTs on regular grids
+with 2D FFTs on irregular grids. For Nθ projections angles
+and N pixels object size in one dimension, the computational
+complexity O(N 3 log N ) of the Fourier-based method is sufficiently lower than the complexity O(N 3 Nθ ) of the direct
+summation over lines. Alternatively, the complexity level can
+be decreased by employing hierarchical decomposition [71] or
+the log-polar-based method [72].
+Third, in combination with gradual increasing optical flow
+resolution with iterations, we also propose a gradual increase
+of the recovered object resolution. Specifically, we perform a
+certain number of iterations for binned data and extrapolate
+the recovered object with optical flow and additional variables
+to a twice dense grid. The result is then used as an initial
+guess for the next set of iterations where the data are less
+binned. Final object and optical flow are both found on
+dense grids without binning. We employed this scheme for
+reconstructing the mouse brain, medical mask, and biological
+samples used in the paper. It was experimentally observed
+that the following strategy for automatic tuning of resolution
+level parameters in the proposed GPU implementation is
+efficient in practice. The number of binning levels is computed as max(1, dlog2 (N/128)e), where N is the minimimum
+between the projection width and height. The initial optical
+flow window size on each binning level should be equal to
+the minimum between the projection width and height after
+binning. Then on each iteration window sizes are decreased
+by a small value (e.g., 1 or 2) depending on the total number
+of requested iterations. The number of iterations per each level
+is calculated in a way that the final optical flow window size
+on a level is twice bigger than the initial window size on the
+next level.
+The last important aspect involves the use of high-
+performance computing resources. Both deformation estimation and tomography problems are data intensive and can be
+parallelized with different data-partitioning methods. Specifically, data for the deformation estimation procedure can
+be partitioned based on the rotation angles, and then each
+angle/partition can independently be processed by using the
+deformation operator. The tomography problem shows similar properties, where parallelization can be accomplished by
+slicing the object across the beam direction.
+In this work, we use GPUs with Nvidia CUDA technology for accelerating computations. CUFFT and NPP libraries
+from CUDA Toolkit 10.1 were used for computing Fourier
+transforms and applying optical flow deformation with high
+accuracy. For fast evaluation of the forward and adjoint
+projection operators by using a Fourier-based method [70]
+we used CUFFT library for performing a batch of 1D and
+2D FFTs on regular grids, and implemented CUDA C++
+raw kernels for convolution-like procedures to interpolate
+data between regular and irregular grids. A multi-GPU implementation of this method can be found at https://github.
+com/nikitinvv/usfftrecon. For optical flow estimation by using
+Farnenack’s algorithm we utilized GPU-accelerated OpenCV
+library. Linear algebra operations in the ADMM schemes were
+implemented in Python using GPU-accelerated CuPy library.
+In Table I we provide computational times of 1 ADMM
+iteration for processing data sets of different sizes. To satisfy
+the Nyquist sampling criterion for tomography, we chose the
+number of angles as 3/2 of the object size in one dimension.
+There are several observations from this table. First, it confirms
+computational complexity O(Nθ N 2 ) and O(N 3 log N ) for the
+deformation estimation and tomography sub-problems, respectively, thus allowing users to estimate the whole processing
+time for other data sizes. Second, the tomographic part of the
+solver is more time-consuming than the deformation part and
+should be used as a key factor for determining processing
+times. However, for the interlaced scanning protocol, where
+the number of angles is typically much higher than the object
+size in one dimension, the deformation part may become
+more computationally demanding and crucial in estimating
+processing times. Finally, we observe that performance gain
+with increasing the number of GPUs is not linear, specifically,
+it does not exceed a factor of 2 when using 4 GPUs compared
+to 1 GPU. This is caused by a huge amount of semi-sequential
+CPU-GPU data transfers. To overcome this problem, one could
+overlap memory transfers and computations with making use
+of CUDA streams. We plan to address this problem, so as
+perform other code optimization, in our further work.
+A multi-GPU implementation of the proposed ADMM
+scheme for solving the tomography problem with projection
+data alignment and regularization is available at https://github.
+com/nikitinvv/tomoalign.
+V. E XPERIMENTAL DATA RECONSTRUCTION
+In the following, we show reconstructions of projection
+data from two nano-tomography experiments conducted at
+the Advanced Photon Source in Argonne National Laboratory
+with the Transmission X-ray Microscope (TXM) of sector
+10
+32-ID [1]. Besides reconstructions by the proposed method
+we also check results obtained by a method operating with
+3D optical flow and used for processing data from nano-CT
+synchrotron tomography experiments [24]. Its Matlab GPUbased implementation is publicly available at [44]. The method
+operates with a set of parameters that need to be tuned
+for getting best quality reconstructions. The parameters list
+includes initial and final DVF smoothness levels in spatial
+and temporal variables, regularizer for deformation evolution,
+number of pixels to describe one pixel of DVF, regularizer
+for preventing amplification of noise in DVF inside of empty
+regions, and mask constants for tomography reconstruction.
+There is no general guidance for choosing some of these
+parameters, therefore we run the solver for many different
+parameter combinations and select best-quality reconstructions
+for demonstration. For additional comparison, our method
+is also tested on synthetic and experimental data available
+through the same source.
+A. Mouse brain data set
+The first experimental data set consists of fragments of a
+mouse somatosensory (S1) cortex containing myelinated axons. All animal procedures were performed in accordance with
+the University of Chicago Institutional Animal Use and Care
+Committee. The sample has been stained with heavy metals
+(osmium, lead) [73] to increase X-ray absorption contrast in
+the projections. After staining, the sample was embedded in
+petropoxy resin to make it more X-ray resistant. In order to
+mitigate sample deformation caused by radiation damage, we
+employed the interlaced scanning protocol with low exposure
+times per projection. Projections were acquired in the stepscan mode at 8 keV with 0.2 s exposure time per projection.
+In total we measured 2880 projections over an angular range
+of 720 degrees. The detector assembly comprises a LuAG:Ce
+scintillator, a 5× long working distance Mitutoyo objective
+lens and a FLIR CCD of the model Grasshopper3 5.0 MP
+Mono USB3 Vision (Sony Pregius IMX250). The CCD chip
+is made of 2448 × 2048 pixels2 with 3.45 µm pixel size. The
+X-ray objective lens of the TXM is a 150 µm large diameter
+50 nm outermost zone width Fresnel zone plate. With a CCD
+located 3.4 m downstream the sample, it offers a magnification
+of 56 and an effective pixel size of 22.3 nm. Since the resolving
+power of the Fresnel zone plate is equal to its outermost
+zone width, we applied 2 × 2 data binning to decrease the
+amount of computations and required memory, and present
+reconstructions with a voxel size of 44.6 nm.
+In Fig. 4 we provide reconstruction results for the mouse
+brain data set by the conventional CG solver (CG), CG solver
+with pre-aligned projections (pCG), the Matlab GPU-based
+solver with 3D deformation estimation [44] (OF 3D), and by
+the proposed ADMM scheme with dense optical flow (OF
+dense), and non-dense optical flow (OF non-dense) equivalent
+to standard (x, y)-shifts of projections. It should be noted
+that the conventional CG-solver is equivalent to the proposed
+ADMM solver without optical flow estimation. In Fig. 4(a)
+we show examples of interlaced projections and misalignment
+between them. Fig. 4(b) presents orthogonal slices through
+reconstructions by different methods. One can observe that
+reconstruction quality for the CG solver is slightly improved
+when projections are prealigned, whereas the proposed method
+demonstrates significant quality improvement and favorable
+for segmentation results. At the same time, reconstruction
+with the dense optical flow gives sharper results than the
+one with non-dense optical flow, resulting in separation of
+even smaller features. We also note that the recovered nondense flow is, in fact, approximately equal to the average
+value of the dense flow, see Fig. 4(c). High quality results
+are also demonstrated by the method based on 3D optical
+flow estimation. Myelinated axons (white circles) are sharp
+and can be easily segmented, although small structures such
+as the ones marked with red arrows in Fig. 4(b) are corrupted.
+Resolution levels were estimated by computing Fourier shell
+correlation (FSC) [74] between reconstructions obtained from
+two independent sets of 1440 projections. According to the
+1/2-bit criterion, the CG and pCG methods demonstrate 195
+nm and 192 nm resolution levels, respectively, which is not
+acceptable for further segmentation procedures. In contrast,
+high-resolution results of the optical flow based methods can
+be used for further data analysis. Demonstrated FSC resolution
+levels for 3D OF, OF non-dense, and OF dense methods are
+151, 152, and 127 nm, respectively. Corresponding FSC plots
+are placed in Fig. 6(a).
+Projections in the OF method with dense and non-dense
+optical flows were aligned jointly with tomographic reconstruction. Resolution for the dense optical flow so as for the
+recovered object was gradually increased during iterations,
+following the strategy described in Section IV. Specifically,
+we performed 96 ADMM iterations with 8 × 8 data binning,
+followed by 48 iterations with 4 × 4 binning, and 24 iterations
+with 2 × 2 binning, where ADMM variables on each binning
+level were extrapolated to the next level sizes. The optical
+flow was computed starting with 256 × 256, 128 × 128 and
+64 × 64 window sizes in Farneback’s algorithm for three binning levels, respectively, along with decreasing these window
+sizes by 2 on each ADMM iteration. So the final iteration for
+the object size 1224×1224×1024 was computed with aligning
+projections by using 12 × 12 (64 − 2 · 24 = 12) window
+size in Farneback’s algorithm. With the proposed scheme, the
+total time for OF reconstruction on 4 Tesla P100 GPUs was
+approximately 3 hours, whereas pCG reconstruction with 128
+iterations with 2 × 2 binning took 2 hours. Reconstruction
+by the method based on 3D optical flow estimation was
+executed in two steps. First, the flow was estimated with 30
+registration iterations for 4×4 binned data (binning is required
+in order to fit data into GPU memory). Each iteration contained
+deformation estimation and 5 iterations of the tomography
+solver by the Simultaneous Algebraic Reconstruction Technique (SART) [75]. In the second step, the recovered flow
+is extrapolated and used for reconstructing data by 30 SART
+iterations with binning 2 × 2 (size of the recovered volume
+is 1224 × 1224 × 1024). The best quality reconstruction was
+obtained for the case with 4 subtomogram blocks representing
+different time frames. The whole reconstruction procedure
+took 4 hours.
+11
+Fig. 4. Reconstruction of the mouse brain absorption contrast data from the 32-ID nano-tomography beamline: a) projection data for interlaced angles and
+misalignment, b) reconstruction by the conventional Conjugate Gradient method (CG), its pre-aligned version (pCG), method with 3D deformation estimation
+(OF 3D), and by the proposed ADMM scheme with dense optical flow (OF dense) and non-dense optical flow (OF non-dense) equivalent to standard (x, y)shifts of projections; Note that the OF 3D method recovers the initial object state, while other methods recover an object state corresponding to better projection
+consistency. Red arrows indicate examples of small structures that are noisy and corrupted in reconstruction by OF 3D, but well resolved with the OF dense
+method. c) Examples of estimated dense and non-dense optical flows.
+B. Filter material for N95 grade medical masks data set
+The second experimental data set is related to the manufacturing of reusable N95 grade filter medium for medical
+masks and respirators. The current N95 filter materials contain
+coarse micrometer size fibers and rely on electrostatic charge
+to remove harmful contaminants from the air. Any washing of
+this material would destroy the electrostatic charge and thereby
+compromise the filters protective nature [76]. However, during
+an epidermic or pandemic (like the COVID-19 pandemic),
+there can be a significant shortfall of medical masks. Thus,
+the design and manufacture of reusable filter media and masks
+would mark a significant advancement in protecting first-line
+medical personnel. Nanofiber-based media fabricated using
+electrospinning technology can be a good candidate in this
+regard due to their finer nanometer-size fibers [77]. Nanotomography is used to characterize in 3D this fine electrospun media in order to understand the influence of medium
+microstructure on the filtration efficiency and to eventually
+optimize medium microstructural configurations to achieve a
+high efficiency of >95%.
+The studied material is exclusively composed of polymer
+fibers showing low attenuation coefficients with hard X-rays.
+Therefore, Zernike phase contrast [78]–[80] has been employed to obtain sufficient imaging contrast on this low absorbing material. It necessitates the use of an optical mechanism
+consisting in a phase ring placed in the back focal plane of the
+Fresnel zone plate. It translates minute variations in phase into
+corresponding changes in amplitude, which can be visualized
+as differences in image contrast. With this technique, low
+absorption contrast samples can be observed and recorded
+in high phase contrast with sharp clarity of minute specimen
+detail.
+Projections were acquired in the interlaced step-scan mode
+at 8 keV with 1 s exposure time per projection. In total we
+measured 700 projections of the size 2448 × 2048 pixels2
+over an angular range of 2520 degrees. 2 × 2 binning has
+been applied to projections, leading to a voxel size of 44.6 nm,
+value slightly inferior the resolving power of the Fresnel zone
+plate with 50 nm outermost width. Unlike with absorption
+contrast, the fiber material appears darker than the surrounding
+air because of the positive phase contrast effect where the
+phase ring selectively advances the phase of the non-diffracted
+beam by π/2.
+In Fig. 5 we provide reconstruction results for the medical
+mask data set by the conventional CG solver with prealignment of projections (pCG), and by the proposed ADMM
+scheme with dense optical flow (OF dense). Since the total
+number of projection angles is low, in order to get noise-free
+results we also equipped OF reconstructions with TV regularization, having the OFTV dense results. Fig. 5(a) shows exam-
+12
+Fig. 5. Reconstruction of the medical mask phase contrast data from the 32-ID nano-tomography beamline: a) projection data for interlaced angles and
+misalignment, b) reconstruction by the conventional Conjugate Gradient method (CG), its pre-aligned version (pCG), method with 3D deformation estimation
+(OF 3D), by the proposed ADMM scheme with dense optical flow (OF dense) and its TV-regularized version (OFTV dense). Note that the OF 3D method
+recovers the initial object state, while other methods recover an object state corresponding to better projection consistency. c) Examples of estimated dense
+optical flows for interlaced projections.
+Fig. 6. Fourier shell correlation (FSC) computed by using reconstructions from two independent sets of projections by the conventional Conjugate Gradient
+method (CG), its pre-aligned version (pCG), method with 3D deformation estimation (OF 3D), and by the proposed ADMM scheme with dense optical flow
+(OF dense) and non-dense optical flow (OF non-dense) for: a) mouse brain sample, b) medical mask sample.
+ples of interlaced projections, so as significant misalignment
+between them. Fig. 5(b) presents orthogonal slices through
+reconstructions by different methods. We observe that the
+conventional method in this case demonstrates completely
+distorted and useless results. However, the proposed OF
+method allows to recover an object state acceptable for further
+data analysis. Additional TV regularization procedure during
+reconstruction helps in suppressing high-frequency noise and
+potentially simplifies further segmentation procedures. The
+method uses the TV term αk∇uk1 (see (1)) with α = 3e−6
+adjusted with using the L-curve criterion [58]. Examples of
+recovered optical flow for different projections in Fig. 5(c)
+confirm non-rigid misalignment of acquired projections. As
+opposed to the brain data, we were not able to obtain high
+quality results for the method based on 3D optical flow
+estimation for any algorithm parameter combinations. This is
+caused by significant changes between interlaced projections
+and angular undersampling for representing one time frame.
+Although the number of projections is too low, for demonstrating quantitative quality improvement we also estimate
+13
+Fig. 7. Reconstruction of publicly available data by the conventional Conjugate Gradient method (CG), method based on 3D optical flow estimation (OF 3D),
+by the proposed ADMM scheme with dense optical flow (OF dense) and its TV-regularized version (OFTV dense): a) biological sample measured with the
+PXCT technique, b) synthetic pillar sample of a porous material. Note that the OF 3D method recovers the initial object state, while other methods recover
+an object state corresponding to better projection consistency.
+resolution levels by computing FSC between reconstructions
+obtained from two independent sets of 350 projections. In this
+case we skip the TV-regularization step in reconstruction to
+avoid correlation of high frequencies. According to the 1/2bit criterion, the 3D OF and OF dense methods demonstrated
+377, and 195 nm resolution levels, respectively, while any correlation of frequencies was not observed for the CG and pCG
+methods even for >500 nm resolution levels, see Fig. 6(b).
+The procedure of gradual increasing resolution during iterations is the same as the one for the brain data set. The
+total time for OF reconstruction on 4 Tesla P100 GPUs was
+1.8 hours, whereas reconstruction by the CG method with 128
+iterations took 1.5 hours. As for the brain data, two steps were
+performed for the method based on 3D optical flow. The flow
+was estimated with 30 registration iterations for 4 × 4 binned
+data. Each iteration contained deformation estimation and 5
+iterations of the tomography solver by the SART method. Then
+the recovered flow is used for reconstructing data by 30 SART
+iterations with no binning. The best quality reconstruction was
+obtained for the case with 3 subtomogram blocks representing
+different time frames. The whole procedure took 1.2 hours.
+ptychographic solver, and used as input for the tomographic
+solver with deformation compensation. In total, there are 380
+projections of the size 544 × 320, where angles are presented
+by three 180 degrees intervals. The unmodified Matlab script
+for 3D optical flow estimation taken from [44] operates with
+4 × 4 data binning for deformation estimation, therefore total
+reconstruction time is low and equal to 1.5 min. In turn, 4 min
+was needed to reconstruct data by the proposed method with
+automatic parameters tuning described in Section IV and dense
+optical flow estimation, although high quality reconstructions
+can be obtained much faster with lower optical flow density.
+Fig. 7(a) presents orthogonal slices through the volumes
+reconstructed by the conventional CG solver (CG), the Matlab
+GPU-based solver with 3D deformation estimation OF 3D,
+the proposed ADMM solver with dense optical flow (OF
+dense), and its regularized version OFTV dense. Significant
+reconstruction quality improvement is demonstrated with both
+OF 3D and OFTV dense methods. Note that reconstructions
+look different because OF 3D recovers the initial object state,
+but OFTV dense recovers a state that corresponds to better
+projection consistency.
+C. Publicly available data
+In this section, we present additional comparison between
+the proposed method and the method based on 3D optical
+flow on two data sets publicly available at [44] and used for
+demonstrating high-quality reconstructions in [24]. The first
+data set was acquired by scanning a biological sample with
+the ptychographic X-ray computed tomography (PXCT) technique [81]. Projections were recovered with a two-dimensional
+The second data set is synthetic. Projections were generated
+for 380 interlaced angles from a simulated pillar of a porous
+material with dimensions of 288 × 288 × 120. Reconstruction
+results are presented in Fig. 7(b). Here we observe that
+the method based on 3D optical flow demonstrates perfect
+results, however, our proposed method fails. Compared to the
+previous data sets considered in this paper, this sample has a
+homogeneous porosity structure with a huge amount of pores.
+Deformation of a small inner structure of the object yields
+insignificant changes in projections. Three-dimensional optical
+14
+flow is more favorable in this case because it operates with two
+separable intensity levels: pores (white) and air (dark). Optical
+flow on projections, in turn, operates with a lot of different
+intensities obtained with summation over rays propagating
+through the object. These intensities are close to each other,
+therefore it is almost impossible to track any motion.
+VI. D ISCUSSIONS AND OUTLOOK
+In this paper, we demonstrated that projection data consistency regulated by dense optical flow inside the ADMM
+scheme can result in reconstructing one object state with
+less artifacts. The proposed scheme does not require any
+explicit prior knowledge about the object structure and motion.
+Moreover, the method has lower computational complexity and
+spends comparable processing time for large-scale experimental data as the conventional CG solver. Interlaced scanning
+with a low number of angles per rotation is favorable for
+the proposed method, however, the number of angles in real
+experiments should be adjusted according to overhead for
+rotating the stage, which affects total acquisition times and
+sample stability.
+The proposed scheme particularly allows for compensating
+deformations occurred while scanning radiation sensitive samples. It should be noted that the scheme as other reconstruction
+schemes operating with optical flow works only when radiation
+damage induce only nondestructive deformations, and cannot
+replace the use of cryogenic systems preventing destruction
+of the sample. In such cases the scheme can be efficiently
+used in combination with these cryogenic systems to improve
+resolution levels in reconstructions.
+We provided a detailed comparison of the proposed ADMM
+scheme to a method based on 3D optical flow estimation.
+First difference is that our scheme improves consistency of
+projections to recover one pristine image of the sample with
+less motion artifacts, while 3D optical flow recovers dynamics
+of the sample at different time steps. Second, there are cases
+where both approaches may fail. For instance, 3D optical flow
+fails whenever deformation between recovered time frames is
+too fast and the number of projections per rotation is low
+(as in the case of reconstructing a filter material sample in
+Section V-B). The proposed projection-based optical flow may
+fail, for instance, whenever the object has a dense structure
+of similar intensities and deformation occurs locally (as in
+the synthetic sample in Section V-C). Third, the case with
+3D optical flow applied to the object is computationally and
+memory demanding because optical flow needs to be estimated
+for 3D volumes. In all provided experimental data, reconstructions with sizes bigger than 1000 in a single dimension, we
+had to apply additional binning and estimate optical flow with
+lower resolution. Reconstruction times are comparable only
+if binning is applied and the total number of tomographic
+iterations is significantly lower for the 3D optical flow based
+method. With our method we were able to operate with the
+data sizes exceeding 2000 in a single dimension, although such
+examples are not presented in this work because experimental
+data from TXM is generally binned before reconstruction in
+order to have voxel sizes close to the resolving power of the
+Fresnel zone plate. Finally, the proposed ADMM scheme has
+favorable convergence behavior. While testing 3D optical flow
+estimation from [44], we observed that for some parameters
+the algorithm diverges. In turn, convergence of the proposed
+ADMM implementation is controlled through coordinating
+terms and automatically tuned weights (λ1 , λ2 , ρ1 , ρ2 in equations (5)-(7)). Such convergence control is missing in many
+ad hoc solutions based on the alternating approach with two
+sub-problems.
+The ADMM framework is extendable with new subproblems and additional data processing procedures. An immediate extension of the proposed scheme could be adding
+a sub-problem for 3D optical flow estimation, and this way
+making it possible to handle all types of the sample deformation. Other procedures that are common in experimental
+data processing workflow may contain, for instance, data
+deblurring [82], [83], denoising and quality enhancement with
+machine learning [84], [85]. Technically, implementation of
+new sub-problems is straightforward by adding new auxiliary
+variables as in (1). It is also possible to prepare a general
+Plug-and-Play ADMM framework (similar to the one proposed
+in [86]) for denoising, where state-of-the-art learning based
+methods can be applied into the scheme only by changing the
+implementation of corresponding models.
+ADMM provides a generic framework by defining the subproblems, but it does not provide a recipe for the solution of
+each sub-problem. For example, instead of using a CG solver,
+the tomography sub-problem can be solved by using secondorder optimization methods with favorable convergence behavior. However, as discussed above, it is known that the
+convergence rate of the ADMM drops significantly when the
+sub-problems are solved exactly or when the convergence
+is achieved. Therefore, first-order or methods like CG are
+often employed in ADMM type solvers, because they provide
+approximate solutions quickly and effectively (e.g. few inner
+iterations instead of 100s of iterations until convergence).
+In addition, in practice second-order methods require heavy
+computation and memory usage, which restricts their use when
+processing large data sets. This was one of the reasons we
+often use gradient-descent or CG for inner ADMM iterations.
+We are also working on developing a joint ptychotomography solver for nano-imaging of dose sensitive samples [61], [62], [87], and a similar ADMM scheme (with
+complex calculus instead of real) can easily be re-purposed
+for another application. As a follow-up step, we plan to merge
+formulations and construct a generic framework for ptychotomography that will also include alignment and deformation
+estimation procedures. We hope that the optical flow based
+nonrigid alignment may be useful in addressing the position
+correction problem [88], which is known as a computationally
+demanding procedure. We also plan to develop a multi-GPU
+implementation on several computing nodes to further extend
+the computational efficiency of the framework.
+ACKNOWLEDGMENTS
+This research used resources of the Advanced Photon
+Source, a U.S. Department of Energy (DOE) Office of Science User Facility operated for the DOE Office of Science
+15
+by Argonne National Laboratory under Contract No. DEAC02-06CH11357. The research was also partly supported
+by the Marie Sklodowska-Curie Innovative Training Network
+MUMMERING (Multiscale, Multimodal, Multidimensional
+imaging for EngineeRING), funded through the EU research
+programme Horizon 2020 and by the European Research
+Council through Consolidator Grant No. 681881.
+R EFERENCES
+[1] V. De Andrade, A. Deriy, M. J. Wojcik, D. Gürsoy, D. Shu, K. Fezzaa,
+and F. De Carlo, “Nanoscale 3D imaging at the advanced photon source,”
+SPIE Newsroom, vol. 10, no. 2.1201604, p. 006461, 2016.
+[2] M. Holler, M. Guizar-Sicairos, E. H. Tsai, R. Dinapoli, E. Müller,
+O. Bunk, J. Raabe, and G. Aeppli, “High-resolution non-destructive
+three-dimensional imaging of integrated circuits,” Nature, vol. 543, no.
+7645, pp. 402–406, 2017.
+[3] M. Holler, J. Raabe, A. Diaz, M. Guizar-Sicairos, R. Wepf, M. Odstrcil,
+F. R. Shaik, V. Panneels, A. Menzel, B. Sarafimov et al., “OMNY—a
+tOMography nano crYo stage,” Review of Scientific Instruments, vol. 89,
+no. 4, p. 043706, 2018.
+[4] S. Müller, P. Pietsch, B.-E. Brandt, P. Baade, V. De Andrade, F. De Carlo,
+and V. Wood, “Quantification and modeling of mechanical degradation
+in lithium-ion batteries based on nanoscale imaging,” Nature communications, vol. 9, no. 1, p. 2340, 2018.
+[5] R. Mizutani, R. Saiga, A. Takeuchi, K. Uesugi, Y. Terada, Y. Suzuki,
+V. De Andrade, F. De Carlo, S. Takekoshi, C. Inomoto et al., “Threedimensional alteration of neurites in schizophrenia,” Translational psychiatry, vol. 9, no. 1, p. 85, 2019.
+[6] D. S. Coburn, E. Nazaretski, W. Xu, M. Ge, C. Longo, H. Xu, K. Gofron,
+Z. Yin, H. H. Chen, Y. Hwu et al., “Design, characterization, and
+performance of a hard x-ray transmission microscope at the National
+Synchrotron Light Source II 18-ID beamline,” Review of Scientific
+Instruments, vol. 90, no. 5, p. 053701, 2019.
+[7] D. Gürsoy and C. Jacobsen, “Multimodal x-ray nanotomography,” MRS
+Bulletin, vol. 45, no. 4, pp. 272–276, 2020.
+[8] Y. Wang, C. Jacobsen, J. Maser, and A. Osanna, “Soft X-ray microscopy
+with a cryo scanning transmission X-ray microscope: II. Tomography,”
+Journal of Microscopy, vol. 197, no. 1, pp. 80–93, 2000.
+[9] A. Haibel, F. Beckmann, T. Dose, J. Herzen, M. Ogurreck, M. Müller,
+and A. Schreyer, “Latest developments in microtomography and nanotomography at PETRA III,” Powder diffraction, vol. 25, no. 2, pp.
+161–164, 2010.
+[10] A. Sorrentino, J. Nicolás, R. Valcárcel, F. J. Chichón, M. Rosanes,
+J. Avila, A. Tkachuk, J. Irwin, S. Ferrer, and E. Pereiro, “MISTRAL: a
+transmission soft X-ray microscopy beamline for cryo nano-tomography
+of biological samples and magnetic domains imaging,” Journal of
+synchrotron radiation, vol. 22, no. 4, pp. 1112–1117, 2015.
+[11] V. V. Nikitin, M. Carlsson, F. Andersson, and R. Mokso, “Fourdimensional tomographic reconstruction by time domain decomposition,” IEEE Transactions on Computational Imaging, vol. 5, no. 3, pp.
+409–419, 2019.
+[12] D. Kazantsev, W. M. Thompson, W. R. Lionheart, G. Van Eyndhoven,
+A. P. Kaestner, K. J. Dobson, P. J. Withers, and P. D. Lee, “4D-CT
+reconstruction with unified spatial-temporal patch-based regularization.”
+Inverse problems and imaging., vol. 9, no. 2, pp. 447–467, 2015.
+[13] D. Kazantsev, E. Guo, A. Kaestner, W. R. Lionheart, J. Bent, P. J. Withers, and P. D. Lee, “Temporal sparsity exploiting nonlocal regularization
+for 4d computed tomography reconstruction,” Journal of X-ray science
+and technology, vol. 24, no. 2, pp. 207–219, 2016.
+[14] H. Wu, A. Maier, R. Fahrig, and J. Hornegger, “Spatial-temporal total
+variation regularization (STTVR) for 4D-CT reconstruction,” in Medical
+Imaging 2012: Physics of Medical Imaging, vol. 8313. International
+Society for Optics and Photonics, 2012, p. 83133J.
+[15] L. Ritschl, S. Sawall, M. Knaup, A. Hess, and M. Kachelrieß, “Iterative
+4D cardiac micro-CT image reconstruction using an adaptive spatiotemporal sparsity prior,” Physics in Medicine & Biology, vol. 57, no. 6,
+p. 1517, 2012.
+[16] B. K. Bay, T. S. Smith, D. P. Fyhrie, and M. Saad, “Digital volume
+correlation: three-dimensional strain mapping using x-ray tomography,”
+Experimental mechanics, vol. 39, no. 3, pp. 217–226, 1999.
+[17] J. Réthoré, N. Limodin, J.-Y. Buffiere, F. Hild, W. Ludwig, and S. Roux,
+“Digital volume correlation analyses of synchrotron tomographic images,” The Journal of Strain Analysis for Engineering Design, vol. 46,
+no. 7, pp. 683–695, 2011.
+[18] S. Keyes, L. Cooper, S. Duncan, N. Koebernick, D. McKay Fletcher,
+C. Scotson, A. Van Veelen, I. Sinclair, and T. Roose, “Measurement
+of micro-scale soil deformation around roots using four-dimensional
+synchrotron tomography and image correlation,” Journal of The Royal
+Society Interface, vol. 14, no. 136, p. 20170560, 2017.
+[19] L. Rossmann, B. Sarley, J. Hernandez, P. Kenesei, A. Köster, J. Wischek,
+J. Almer, V. Maurel, M. Bartsch, and S. Raghavan, “Method for conducting in situ high-temperature digital image correlation with simultaneous
+synchrotron measurements under thermomechanical conditions,” Review
+of Scientific Instruments, vol. 91, no. 3, p. 033705, 2020.
+[20] G.-H. Chen, P. Thériault-Lauzier, J. Tang, B. Nett, S. Leng, J. Zambelli, Z. Qi, N. Bevins, A. Raval, S. Reeder et al., “Time-resolved
+interventional cardiac c-arm cone-beam ct: An application of the piccs
+algorithm,” IEEE transactions on medical imaging, vol. 31, no. 4, pp.
+907–923, 2011.
+[21] O. Taubmann, G. Lauritsch, A. Maier, R. Fahrig, and J. Hornegger, “Estimate, compensate, iterate: joint motion estimation and compensation in
+4-d cardiac c-arm computed tomography,” in International Conference
+on Medical Image Computing and Computer-Assisted Intervention.
+Springer, 2015, pp. 579–586.
+[22] J. Neggers, J. Hoefnagels, M. Geers, F. Hild, and S. Roux, “Timeresolved integrated digital image correlation,” International Journal for
+Numerical Methods in Engineering, vol. 103, no. 3, pp. 157–182, 2015.
+[23] H. Leclerc, S. Roux, and F. Hild, “Projection savings in ct-based digital
+volume correlation,” Experimental Mechanics, vol. 55, no. 1, pp. 275–
+287, 2015.
+[24] M. Odstrcil, M. Holler, J. Raabe, A. Sepe, X. Sheng, S. Vignolini,
+C. G. Schroer, and M. Guizar-Sicairos, “Ab initio nonrigid x-ray
+nanotomography,” Nature communications, vol. 10, no. 1, pp. 1–9, 2019.
+[25] T. De Schryver, M. Dierick, M. Heyndrickx, J. Van Stappen, M. A.
+Boone, L. Van Hoorebeke, and M. N. Boone, “Motion compensated
+micro-CT reconstruction for in-situ analysis of dynamic processes,”
+Scientific reports, vol. 8, no. 1, pp. 1–10, 2018.
+[26] G. Zang, R. Idoughi, R. Tao, G. Lubineau, P. Wonka, and W. Heidrich,
+“Space-time tomography for continuously deforming objects,” 2018.
+[Online]. Available: http://hdl.handle.net/10754/628902
+[27] A. Ruhlandt, M. Töpperwien, M. Krenkel, R. Mokso, and T. Salditt,
+“Four dimensional material movies: High speed phase-contrast tomography by backprojection along dynamically curved paths,” Scientific
+reports, vol. 7, no. 1, p. 6487, 2017.
+[28] E. L. Dyer, W. G. Roncal, J. A. Prasad, H. L. Fernandes, D. Gürsoy,
+V. De Andrade, K. Fezzaa, X. Xiao, J. T. Vogelstein, C. Jacobsen et al.,
+“Quantifying mesoscale neuroanatomy using x-ray microtomography,”
+Eneuro, vol. 4, no. 5, 2017.
+[29] M. Du and C. Jacobsen, “Relative merits and limiting factors for
+x-ray and electron microscopy of thick, hydrated organic materials,”
+Ultramicroscopy, vol. 184, pp. 293–309, 2018.
+[30] M. M. Murshed, S. A. Klapp, F. Enzmann, T. Szeder, T. Huthwelker,
+M. Stampanoni, F. Marone, C. Hintermüller, G. Bohrmann, W. F. Kuhs
+et al., “Natural gas hydrate investigations by synchrotron radiation Xray cryo-tomographic microscopy (SRXCTM),” Geophysical Research
+Letters, vol. 35, no. 23, 2008.
+[31] V. V. Nikitin, G. A. Dugarov, A. A. Duchkov, M. I. Fokin, A. N.
+Drobchik, P. D. Shevchenko, F. De Carlo, and R. Mokso, “Dynamic
+in-situ imaging of methane hydrate formation and self-preservation in
+porous media,” Marine and Petroleum Geology, vol. 115, p. 104234,
+2020.
+[32] K. Dierksen, D. Typke, R. Hegerl, and W. Baumeister, “Towards
+automatic electron tomography II. Implementation of autofocus and lowdose procedures,” Ultramicroscopy, vol. 49, no. 1-4, pp. 109–120, 1993.
+[33] D. Castaño-Dı́ez, A. Al-Amoudi, A.-M. Glynn, A. Seybert, and A. S.
+Frangakis, “Fiducial-less alignment of cryo-sections,” Journal of structural biology, vol. 159, no. 3, pp. 413–423, 2007.
+[34] D. Castaño-Dı́ez, M. Scheffer, A. Al-Amoudi, and A. S. Frangakis,
+“Alignator: a GPU powered software package for robust fiducial-less
+alignment of cryo tilt-series,” Journal of structural biology, vol. 170,
+no. 1, pp. 117–126, 2010.
+[35] M. Hayashida, S. Terauchi, and T. Fujimoto, “Automatic coarsealignment for TEM tilt series of rod-shaped specimens collected with a
+full angular range,” Micron, vol. 41, no. 5, pp. 540–545, 2010.
+[36] D. Gürsoy, Y. P. Hong, K. He, K. Hujsak, S. Yoo, S. Chen, Y. Li, M. Ge,
+L. M. Miller, Y. S. Chu et al., “Rapid alignment of nanotomography data
+using joint iterative reconstruction and reprojection,” Scientific reports,
+vol. 7, no. 1, pp. 1–12, 2017.
+[37] T. Ramos, J. S. Jørgensen, and J. W. Andreasen, “Automated angular and
+translational tomographic alignment and application to phase-contrast
+imaging,” JOSA A, vol. 34, no. 10, pp. 1830–1843, 2017.
+16
+[38] M. Odstrčil, M. Holler, J. Raabe, and M. Guizar-Sicairos, “Alignment
+methods for nanotomography with deep subpixel accuracy,” Optics
+Express, vol. 27, no. 25, pp. 36 637–36 652, 2019.
+[39] K. A. Mohan, S. Venkatakrishnan, J. W. Gibbs, E. B. Gulsoy, X. Xiao,
+M. De Graef, P. W. Voorhees, and C. A. Bouman, “TIMBIR: A method
+for time-space reconstruction from interlaced views,” IEEE Transactions
+on Computational Imaging, vol. 1, no. 2, pp. 96–111, 2015.
+[40] S. Boyd, N. Parikh, E. Chu, B. Peleato, and J. Eckstein, “Distributed
+optimization and statistical learning via the alternating direction method
+of multipliers,” Foundations and Trends in Machine Learning, vol. 3,
+no. 1, pp. 1–122, 2011.
+[41] B. D. Lucas, T. Kanade et al., “An iterative image registration technique
+with an application to stereo vision,” Proceedings of the 7th International conference on Artificial Intelligence, pp. 121–130, 1981.
+[42] G. Farnebäck, “Two-frame motion estimation based on polynomial
+expansion,” in Scandinavian conference on Image analysis. Springer,
+2003, pp. 363–370.
+[43] T. Brox and J. Malik, “Large displacement optical flow: descriptor
+matching in variational motion estimation,” IEEE transactions on pattern
+analysis and machine intelligence, vol. 33, no. 3, pp. 500–513, 2010.
+[44] M. Odstrcil and M. Guizar-Sicairos, “Nonrigid tomography with
+self-consistent estimation of deformation vector field,” Feb. 2019.
+[Online]. Available: https://doi.org/10.5281/zenodo.2578796
+[45] T. Taillandier-Thomas, S. Roux, and F. Hild, “Soft route to 4d tomography,” Physical review letters, vol. 117, no. 2, p. 025501, 2016.
+[46] C. Jailin and S. Roux, “Dynamic tomographic reconstruction of deforming volumes,” Materials, vol. 11, no. 8, p. 1395, 2018.
+[47] C. Jailin, A. Buljac, A. Bouterf, M. Poncelet, F. Hild, and S. Roux, “Selfcalibration for lab-µct using space-time regularized projection-based dvc
+and model reduction,” Measurement Science and Technology, vol. 29,
+no. 2, p. 024003, 2018.
+[48] A. Chambolle and T. Pock, “An introduction to continuous optimization
+for imaging,” Acta Numerica, vol. 25, pp. 161–319, 2016.
+[49] J. Nocedal and S. Wright, Numerical optimization. Springer Science
+& Business Media, 2006.
+[50] Y. H. Dai and Y. Yuan, “A nonlinear conjugate gradient method with a
+strong global convergence property,” SIAM J. Optim., vol. 10, no. 1, pp.
+177–182, 1999.
+[51] D. L. Donoho, “De-noising by soft-thresholding,” IEEE transactions on
+information theory, vol. 41, no. 3, pp. 613–627, 1995.
+[52] P. J. Huber, Robust statistics. John Wiley & Sons, 2004, vol. 523.
+[53] K. Bredies, K. Kunisch, and T. Pock, “Total generalized variation,” SIAM
+Journal on Imaging Sciences, vol. 3, no. 3, pp. 492–526, 2010.
+[54] N.-Y. Lee and B. J. Lucier, “Wavelet methods for inverting the radon
+transform with noisy data,” IEEE transactions on image processing,
+vol. 10, no. 1, pp. 79–94, 2001.
+[55] F. Colonna, G. Easley, K. Guo, and D. Labate, “Radon transform
+inversion using the shearlet representation,” Applied and Computational
+Harmonic Analysis, vol. 29, no. 2, pp. 232–250, 2010.
+[56] P. Cerejeiras, M. Ferreira, U. Kähler, and G. Teschke, “Inversion of the
+noisy radon transform on So (3) by Gabor frames and sparse recovery
+principles,” Applied and Computational Harmonic Analysis, vol. 31,
+no. 3, pp. 325–345, 2011.
+[57] Y.-W. Wen and R. H. Chan, “Parameter selection for total-variationbased image restoration using discrepancy principle,” IEEE Transactions
+on Image Processing, vol. 21, no. 4, pp. 1770–1781, 2011.
+[58] V. Agarwal, “Total variation regularization and L-curve method for the
+selection of regularization parameter,” ECE599, pp. 1–31, 2003.
+[59] G. H. Golub, M. Heath, and G. Wahba, “Generalized cross-validation as
+a method for choosing a good ridge parameter,” Technometrics, vol. 21,
+no. 2, pp. 215–223, 1979.
+[60] Z. Wen, C. Yang, X. Liu, and S. Marchesini, “Alternating direction methods for classical and ptychographic phase retrieval,” Inverse Problems,
+vol. 28, no. 11, p. 115010, 2012.
+[61] S. Aslan, V. Nikitin, D. J. Ching, T. Bicer, S. Leyffer, and D. Gürsoy,
+“Joint ptycho-tomography reconstruction through alternating direction
+method of multipliers,” Optics Express, vol. 27, no. 6, pp. 9128–9143,
+2019.
+[62] V. Nikitin, S. Aslan, Y. Yao, T. Biçer, S. Leyffer, R. Mokso, and
+D. Gürsoy, “Photon-limited ptychography of 3D objects via Bayesian
+reconstruction,” OSA Continuum, vol. 2, no. 10, pp. 2948–2968, 2019.
+[63] R. Chartrand and B. Wohlberg, “A nonconvex admm algorithm for group
+sparsity with sparse groups,” in 2013 IEEE international conference on
+acoustics, speech and signal processing. IEEE, 2013, pp. 6009–6013.
+[64] L. Yang, T. K. Pong, and X. Chen, “Alternating direction method of
+multipliers for a class of nonconvex and nonsmooth problems with
+applications to background/foreground extraction,” SIAM Journal on
+Imaging Sciences, vol. 10, no. 1, pp. 74–110, 2017.
+[65] S. Bouaziz, A. Tagliasacchi, and M. Pauly, “Sparse iterative closest
+point,” in Computer graphics forum, vol. 32, no. 5. Wiley Online
+Library, 2013, pp. 113–123.
+[66] Y. Wang, W. Yin, and J. Zeng, “Global convergence of admm in
+nonconvex nonsmooth optimization,” Journal of Scientific Computing,
+vol. 78, no. 1, pp. 29–63, 2019.
+[67] M. Hong, Z.-Q. Luo, and M. Razaviyayn, “Convergence analysis of
+alternating direction method of multipliers for a family of nonconvex
+problems,” SIAM Journal on Optimization, vol. 26, no. 1, pp. 337–364,
+2016.
+[68] F. Wang, W. Cao, and Z. Xu, “Convergence of multi-block bregman
+admm for nonconvex composite problems,” Science China Information
+Sciences, vol. 61, no. 12, p. 122101, 2018.
+[69] Y. Xu, W. Yin, Z. Wen, and Y. Zhang, “An alternating direction
+algorithm for matrix completion with nonnegative factors,” Frontiers
+of Mathematics in China, vol. 7, no. 2, pp. 365–384, 2012.
+[70] G. Beylkin, “On the fast Fourier transform of functions with singularities,” Applied and Computational Harmonic Analysis, vol. 2, no. 4, pp.
+363–381, 1995.
+[71] A. George and Y. Bresler, “Fast tomographic reconstruction via rotationbased hierarchical backprojection,” SIAM Journal on Applied Mathematics, vol. 68, no. 2, pp. 574–597, 2007.
+[72] F. Andersson, M. Carlsson, and V. V. Nikitin, “Fast algorithms and
+efficient GPU implementations for the Radon transform and the backprojection operator represented as convolution operators,” SIAM Journal
+on Imaging Sciences, vol. 9, no. 2, pp. 637–664, 2016.
+[73] Y. Hua, P. Laserstein, and M. Helmstaedter, “Large-volume en-bloc
+staining for electron microscopy-based connectomics,” Nature communications, vol. 6, no. 1, pp. 1–7, 2015.
+[74] M. Van Heel and M. Schatz, “Fourier shell correlation threshold criteria,”
+Journal of structural biology, vol. 151, no. 3, pp. 250–262, 2005.
+[75] A. H. Andersen and A. C. Kak, “Simultaneous algebraic reconstruction technique (sart): a superior implementation of the art algorithm,”
+Ultrasonic imaging, vol. 6, no. 1, pp. 81–94, 1984.
+[76] D. J. Viscusi, W. P. King, and R. E. Shaffer, “Effect of decontamination
+on the filtration efficiency of two filtering facepiece respirator models,”
+J Int Soc Respir Prot, vol. 24, pp. 93–107, 2007.
+[77] J. Xue, T. Wu, Y. Dai, and Y. Xia, “Electrospinning and Electrospun
+Nanofibers: Methods, Materials, and Applications,” Chem. Rev., vol.
+119, pp. 5298–5415, 2019.
+[78] F. Zernike, “Das phasenkontrastverfahren bei der mikroskopischen
+Beobachtung,” Z. Tech. Physik., vol. 36, pp. 848–851, 1935.
+[79] D. Rudolph, G. Schmahl, and B. Niemann, Amplitude and phase contrast
+in x-ray microscopy. Springer, 1990.
+[80] Z. Su, V. De Andrade, S. Cretu, Y. Yin, M. J. Wojcik, A. A. Franco,
+and A. Demortiere, “X-ray nanocomputed tomography in Zernike phase
+contrast for studying 3D morphology of Li–O2 battery electrode,” ACS
+Applied Energy Materials, 2020.
+[81] M. Dierolf, A. Menzel, P. Thibault, P. Schneider, C. M. Kewish, R. Wepf,
+O. Bunk, and F. Pfeiffer, “Ptychographic x-ray computed tomography
+at the nanoscale,” Nature, vol. 467, no. 7314, pp. 436–439, 2010.
+[82] Y. Liu, Y. Liang, G. Mu, and X. Zhu, “Deconvolution methods for image
+deblurring in optical coherence tomography,” JOSA A, vol. 26, no. 1,
+pp. 72–77, 2009.
+[83] S. Koho, G. Tortarolo, M. Castello, T. Deguchi, A. Diaspro, and
+G. Vicidomini, “Fourier ring correlation simplifies image restoration in
+fluorescence microscopy,” Nature communications, vol. 10, no. 1, pp.
+1–9, 2019.
+[84] D. M. Pelt, K. J. Batenburg, and J. A. Sethian, “Improving tomographic
+reconstruction from limited data using mixed-scale dense convolutional
+neural networks,” Journal of Imaging, vol. 4, no. 11, p. 128, 2018.
+[85] Z. Liu, T. Bicer, R. Kettimuthu, D. Gursoy, F. De Carlo, and I. Foster,
+“TomoGAN: low-dose synchrotron x-ray tomography with generative
+adversarial networks: discussion.” Journal of the Optical Society of
+America. A, Optics, Image Science, and Vision, vol. 37, no. 3, pp. 422–
+434, 2020.
+[86] S. V. Venkatakrishnan, C. A. Bouman, and B. Wohlberg, “Plug-and-play
+priors for model based reconstruction,” in 2013 IEEE Global Conference
+on Signal and Information Processing. IEEE, 2013, pp. 945–948.
+[87] D. Gürsoy, “Direct coupling of tomography and ptychography,” Optics
+letters, vol. 42, no. 16, pp. 3169–3172, 2017.
+[88] F. Zhang, I. Peterson, J. Vila-Comamala, A. Diaz, F. Berenguer, R. Bean,
+B. Chen, A. Menzel, I. K. Robinson, and J. M. Rodenburg, “Translation
+position determination in ptychographic coherent diffraction imaging,”
+Optics express, vol. 21, no. 11, pp. 13 592–13 606, 2013.

@@ -1,0 +1,159 @@
+Set of classes and utilities based on research and software developed at the Computational Visualization Center. - cvc::volslice: port VolumeRover2's view-aligned slice volume renderer by transfix · Pull Request #332 · transfix/libcvc
+
+cvc::volslice: port VolumeRover2's view-aligned slice volume renderer by transfix · Pull Request #332 · transfix/libcvc · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+transfix
+commented
+Sep 4, 2026
+Copy link
+Copy Markdown
+Owner
+Ports volumerover2's OpenGLVolumeRendering "VolumeLibrary" (Thane/Bajaj, UT Austin 2002-2003, arand patches through 2012) — the classic back-to-front view-aligned-slice compositor — as cvc::volslice, the third volume-rendering path in the cvcGL scene graph beside VolumeNode (VTK's GPU raycaster) and VolRenNode (cvc::volren). Same design rules as the volren port: no globals/singletons, injected cvc::app, state tree as the source of truth, faithful sampling model with deviations opt-in and documented. docs/VOLSLICE_API.md is the contract.
+Shape
+cvc::volslice slicing engine — pure geometry, no GL: the 256-case plane/cube clip table transcribed verbatim, the arand slice-count formula N = 2·(10 + max_planes·q³), the 10·max_planes cap, near-plane peel, sub-cube crop. What the legacy read off the GL matrix stack is an explicit local→clip input. Runs in legacy ratio space and maps into the caller's box (uniform scale + translation preserve the algorithm), so slice counts match legacy for any box shape. 14 unit tests against independently derived values (270 default head-on planes, hexagon at the body diagonal, back-to-front ordering...).
+state_settings under <node>.volslice.* — the volren binding pattern key-for-key (seed-suppressed ctor, all-or-nothing re-read, clamp-resources/reject-enums/raw-contract-values), with the shared transfer_function.color/.opacity CSV so one TF editor drives all three renderers.
+cvc::gl::VolSliceNode — one volume per node (VolumeNode's model; the scene composes multiples). Per tick: recompute slices from the live camera × node world transform, rewrite the mesh, sample a normalized R8 3D texture (the legacy UChar coercion — also what WebGL2 can LINEAR-filter) through a 256×1 RGBA LUT in a fragment replacement. Slice texcoords are computed in the vertex shader as an affine map of vertexMC — no tcoord array.
+volslice_bunny demo (native + wasm gallery): the bunny SDF windowed around its zero level set, panel with the VolumeRover2 tunables.
+Dropped, with reasons in the doc: the GL-extension impl zoo (only FragmentProgramARBImpl ever ran in practice), Cg-only shading, RGBA path, blend_mode (legacy shipped exactly one; additive was commented-out dead code and is inexpressible under the sequential pass — not a silent knob), out-of-core stubs.
+One opt-in deviation: opacity_correction — spacing-corrected slice alpha so quality changes sharpness instead of density. Default OFF (faithful).
+Three findings worth reviewer attention
+1. VTK 9's default translucent pass silently breaks slice compositing. vtkRenderer::UseOIT (on by default) is order-independent weighted accumulation — measured rgb=(ONE,ONE) by reading GL blend state during the pass — under which a slice stack averages into an X-ray look. With UseOITOff(), VTK renders translucent geometry with exactly the legacy blend state (SRC_ALPHA/ONE_MINUS_SRC_ALPHA, depth-write off). addToRenderer() flips the renderer and the header documents the scene-wide effect (other translucent actors then depth-sort as props, pre-VTK9 style).
+2. vertexMC is not the true model coordinate. The mapper's AUTO VBO shift-scale re-centers vertex data for boxes offset from the origin and compensates in MCDCMatrix — the demo bunny (box z∈[0,100]) rendered zero pixels while the origin-centered unit-test ball passed, because the texcoord map read a corner of the volume where density 0 → TF alpha 0. Fixed with DISABLE_SHIFT_SCALE; the render test now carries an off-origin-volume regression. Worth knowing for any future vertexMC-derived shader work.
+3. GLES3 sampler precision is a wasm-only compile/precision hazard. sampler3D has no default precision on GLES3 (unqualified = compile error on WebGL2) and sampler2D defaults to lowp — an 8-bit fraction that cannot address the LUT's 1/512-texel centers. Both samplers are declared highp; desktop GLSL takes the qualifiers as no-ops, so the native build catches neither.
+Verification
+volslice_test (14) + volslice_state_test (6): unit + state binding.
+cvcgl_volslice_node: offscreen render test, llvmpipe-friendly — silhouette radius 49.5px vs predicted ~50, plane counts 20/270 matching the formula end-to-end, transform tracking, near-plane dimming, opacity-correction band derived from the measured 8-bit accumulation limit, the OIT flip, and the off-origin regression.
+Full suite: 3086/3086 locally.
+Demo captured native (the gallery thumbnail is a real --png capture at 96³/q=0.7); wasm build exercised by the pages deploy on merge (_wasm_demos + demos.json + DEMOS wired).
+Follow-ups (documented in the API doc)
+Shaded path (on-the-fly gradients from the scene lights), RGBA volumes, and a volumetric-pass custom mapper to restore OIT coexistence.
+transfix
+added 3 commits
+September 4, 2026 12:54
+volslice: port the VolumeRover2 slicing engine as pure geometry
+…
+251741e
+```
+Port of volumerover2's OpenGLVolumeRendering VolumeLibrary (Thane/Bajaj,
+UT Austin 2002-2003): the view-aligned slice sweep and the 256-case
+plane/cube clip table, lifted out of GL entirely. compute_slices() takes
+an explicit local->clip matrix (what the legacy getViewPlane() read from
+the GL matrix stack) plus the volume's local box, and returns
+triangle-fan polygons with 3D texcoords in back-to-front order.
+
+Kept exactly: the arand 6-14-2011 slice-count formula
+N = 2*(10 + max_planes*quality^3), the 10*max_planes per-frame cap, the
+near-plane fraction of the diagonal, the sub-cube texcoord crop, and the
+fan ordering straight out of the EdgeCases table. The aspect-ratio
+normalization is preserved by running the sweep in the legacy ratio
+space and mapping into the caller's box afterwards (uniform scale +
+translation preserve plane parallelism and spacing), so slice counts
+match legacy for any box shape.
+
+Math and TF types are cvc::volren's on purpose -- one mat4 convention
+and one transfer-function model across every libcvc volume renderer.
+
+Unit tests check against independently derived values: the formula's 270
+default head-on planes, quads head-on / hexagon at the body diagonal,
+planarity along the view normal, near-plane cuts on the viewer side,
+cap-stretched spacing, and clamping.
+```
+volslice: state binding, cvcGL VolSliceNode, and render tests
+…
+5ae0247
+```
+state_settings binds every tunable under <node>.volslice following the
+volren pattern (seed-suppressed ctor, all-or-nothing re-read, one apply
+callback), with the shared VolumeNode/volren transfer_function.color/
+.opacity CSV encoding so one editor drives all three renderers.
+
+VolSliceNode is the scene node: per-tick it recomputes the legacy slice
+sweep with the live camera's local->clip matrix and rewrites its mesh via
+setGeometry() (topology changes as planes cross box corners), samples a
+normalized R8 3D texture through a 256x1 RGBA LUT texture in a fragment
+replacement (the legacy ARB dependent lookup, in GLSL), and computes
+slice texcoords in the VERTEX shader as an affine map of vertexMC -- no
+tcoord array, which also sidesteps VTK's texture-conditional tcoord
+plumbing.  R8 (the legacy UChar coercion) rather than R32F because WebGL2
+floats are not LINEAR-filterable without an extension.
+
+The part that took measuring: VTK 9's default translucent pass is
+order-INDEPENDENT (vtkRenderer::UseOIT, rgb=(ONE,ONE) accumulation --
+verified with a GL-state probe during the pass), under which a slice
+stack AVERAGES into an X-ray look instead of compositing.  With
+UseOITOff, VTK renders translucent geometry with exactly the legacy
+blend state (SRC_ALPHA/ONE_MINUS_SRC_ALPHA, depth-write off), so
+addToRenderer() flips its renderer to sequential translucency and the
+header documents the scene-wide effect.  ForceTranslucentOn() is
+required too: no vtkTexture and opacity 1.0 would classify the actor
+opaque (depth writes, no blending at all).
+
+Render test (offscreen, llvmpipe-friendly) asserts the image: silhouette
+radius 49.5px against a predicted ~50, plane counts 20/270 matching the
+arand formula end to end, the silhouette following the node transform,
+near_plane dimming, and the opacity-correction deviation shrinking the
+quality/density coupling -- with the band derived from the measured
+8-bit accumulation limit, not wishful thinking.  A first version of the
+near_plane assertion failed for a physics reason worth keeping in the
+comment: at TF alpha 0.35 even 40% of the sweep saturates the center, so
+the check runs on a low-alpha TF.
+```
+volslice_bunny demo, wasm gallery, and the two silent scene killers
+…
+4866ac4
+```
+The demo: the Stanford bunny's SDF consumed the way the legacy renderer
+consumed data -- windowed into a byte texture around the zero level set
+and colored by a 256-entry TF -- with the VolumeRover2 tunables live in
+the panel (quality, near-plane peel, value window, linear/nearest, and
+the opt-in spacing-corrected opacity). Wired into the wasm gallery
+(demos.json + thumbnail + deploy-pages DEMOS).
+
+Two bugs the unit-scale test scene could not see, found because the demo
+bunny rendered ZERO pixels while the test ball passed:
+
+* vtkOpenGLPolyDataMapper's AUTO VBO shift-scale re-centers vertex
+  coordinates for boxes offset from the origin (the bunny's box spans z
+  in [0,100]) and compensates in MCDCMatrix -- so a shader deriving the
+  volume texcoord from vertexMC reads one corner of the texture, which
+  sampled density 0, which the TF mapped to alpha 0.  The node now sets
+  DISABLE_SHIFT_SCALE, and the render test carries an off-origin-volume
+  regression (silhouette present, displaced along screen-up, still red).
+
+* GLES3 has NO default precision for sampler3D (an unqualified
+  declaration fails to compile on WebGL2) and defaults sampler2D to
+  lowp, whose 8-bit fraction cannot address the LUT's 1/512-texel
+  centers.  Both samplers are now declared highp; desktop GLSL accepts
+  the qualifiers as no-ops, so the native build can catch neither
+  mistake.
+
+docs/VOLSLICE_API.md is the contract: design rules, the state-key map,
+the OIT scene-wide effect, and the fidelity lists (preserved / fixed /
+dropped / the one deviation).
+```
+Hide details
+View details
+transfix
+merged commit 72eda27
+into
+master
+Sep 4, 2026
+9 of 13 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

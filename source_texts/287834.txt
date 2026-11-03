@@ -1,0 +1,186 @@
+First of all, thanks for the great implementation! I've managed to get good results with the code in this repository for frontal scenes but am struggling to have it properly work with 360 captures. Attached is an example capture of a fou...
+
+Poor results for 360 captured scene · Issue #50 · kwea123/nerf_pl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Poor results for 360 captured scene #50
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Poor results for 360 captured scene#50
+Copy link
+Labels
+enhancementNew feature or requestNew feature or request
+Description
+hturki
+opened on Jan 20, 2021
+Issue body actions
+First of all, thanks for the great implementation!
+I've managed to get good results with the code in this repository for frontal scenes but am struggling to have it properly work with 360 captures. Attached is an example capture of a fountain taken from a variety of different angles (and where the camera poses are "ground truth" poses gathered from the simulation): https://drive.google.com/file/d/1FbtrupOXURc0eTDtDOmD1oKZz5e2MIAE/view?usp=sharing
+Below are the results after 6 epochs of training (I've trained for longer but it never converges to anything useful).
+In contrast, other nerf implementations such as https://github.com/google-research/google-research/tree/master/jaxnerf seem to provide more sensible results even after a few thousand iterations:
+I'm using the spherify flag and have tried both with and without the use_disp option. I've also tried setting N_importance and N_samples to match the config of the other NeRF implementation that I tried (https://github.com/google-research/google-research/blob/master/jaxnerf/configs/llff_360.yaml). Would you have any pointers as to where the difference could be coming from?
+Activity
+kwea123 commented on Jan 21, 2021
+kwea123
+on Jan 21, 2021
+Owner
+More actions
+There are two reasons:
+Originally I assumed the 360 images are taken in just one round, but here your data is taken for 3 rounds:
+Hence, the closest depth is computed from the upper cameras (because they are closer to the scene). In this case, the predefined object range
+nerf_pl/datasets/llff.py
+Lines 244 to 245
+in
+748d817
+near = self.bounds.min()
+far = min(8 * near, self.bounds.max()) # focus on central object only
+DOES NOT include the object at all for the images taken at the lower two rounds (because they are farther from the object, and the far value is set too small)!
+Therefore, the model learns a weird 3d structure.
+The second reason is somewhat related to the first. Because I normalize the poses w.r.t. the closest depth,
+nerf_pl/datasets/llff.py
+Lines 208 to 211
+in
+748d817
+scale_factor = near_original*0.75 # 0.75 is the default parameter
+# the nearest depth is at 1/0.75=1.33
+self.bounds /= scale_factor
+self.poses[..., 3] /= scale_factor
+the poses at the lower rounds are not included in the range [-1, 1] (e.g. some has position of value ~50). These large values make the positional embedding fail, because the embedding requires the values to be in range [-1, 1] (or probably larger, [-2, 2] or something, but definitely not 50)
+To solve the issue due to the above two reasons, you can:
+enlarge the far range (in both train and val, test, so 2 places to modify in llff.py), e.g.
+```
+far = self.bounds.max()
+```
+scale down the poses more, e.g.
+```
+scale_factor = near_original*100
+```
+After making the above changes, and use the following command to train
+```
+python train.py --dataset_name llff \
+--root_dir /home/ubuntu/data/nerf_example_data/my/fountain/ \
+--N_importance 64 --img_wh 200 200 \
+--num_epochs 20 --batch_size 1024 \
+--optimizer adam --lr 5e-4 --lr_scheduler cosine \
+--exp_name fountain --spheric_poses
+```
+I get this after one epoch:
+You could do better by training more epochs or increasing number of samples on the ray or increasing the resolution.
+FYI, if you don't use colab, the latest code can be found on the dev branch (you still need to apply the above changes yourself).
+Finally, the other implementation doesn't fail because
+it sets the near and far in the config instead of compute from the script, so it is manually set larger
+it additionally scales the poses according to the largest circle radius here which I didn't think of.
+Let me know if there's still issue (my result is more noisy than I think, I'd like to know if it gets resolved if you train longer at higher resolution)
+👍React with 👍7Reacted by Joan Charmant, thedeoxen, Kevin Chen Zihao, Miso Lee, Jiayao Zhang 张嘉瑶, Kun Wang and ZY-2012
+kwea123
+added
+enhancementNew feature or requestNew feature or request
+on Jan 21, 2021
+hturki commented on Jan 23, 2021
+hturki
+on Jan 23, 2021
+Author
+More actions
+Thanks for the quick reply! I removed the first part (ie: removed the min on "min(8 * near, self.bounds.max())"). I also tried setting the scale factor as follows:
+```
+    if not self.spheric_poses:
+        scale_factor = near_original*0.75 # 0.75 is the default parameter
+                                      # the nearest depth is at 1/0.75=1.33
+    else:
+        scale_factor = np.sqrt(np.mean(np.sum(np.square(distances_from_center))))
+```
+Which gives a scale factor of 87.20806618688762 vs something around 70 for the jaxnerf repo. Is this derivation correct / something that you'd like me to submit a PR for, or should it be further refined to reflect the values of the other repository?
+I also noted that in the suggested command above you are not using the use_disp flag - is that intentional or an oversight/flag that I should indeed be using?
+In terms of further improving the quality of the reconstruction, I've tried using --N_importance and --N_samples flags to values that reflect that of https://github.com/google-research/google-research/blob/master/jaxnerf/configs/llff_360.yaml, but the GPU memory demands seem to be very high, even when using small batch sizes (820) and chunk sizes (1024), and generally slower than the other repo's implementation. With 4 2080Ti GPUs running an epoch seems to take 10 hours and I actually ended up getting a segmentation fault near the end :(
+Epoch 0: 94%|████████████████████████████████████████████████████████████████████████████████████████████████████████▎ | 13578/14441 [9:48:04<37:22, 2.60s/it, loss=0.024, val/psnr=8.02, train/psnr=20.9]Segmentation fault
+And when trying to use 10 2080Ti gpus instead of 4, the initial validation sanity check takes an extremely long time (about 1 hour). Do you have suggestions on what might be happening and how to make things more performant?
+kwea123 commented on Jan 24, 2021
+kwea123
+on Jan 24, 2021
+Owner
+More actions
+I answer the last question first, the validation should run the same time no matter how many gpus are used, maybe there's synchronization problem between the gpus (some run slower than others)?
+hturki commented on Jan 26, 2021
+hturki
+on Jan 26, 2021
+Last edited by hturki
+Author
+More actions
+Re: the slowness with 10 gpus, could this just be due to how long it takes to copy the validation data to the gpus (which is being done sequentially)?
+The more vexing issue to me is the blurriness in the results relative to other implementations like the jaxnerf one. For an easier reproduction, consider the training set at https://drive.google.com/file/d/1QqRfYaKNrH98VGl8GAd9SYds88iNEyM0/view?usp=sharing. Here's the captured poses should be just one orbit unlike the fountain set in the original post.
+Training with a scale factor of 4 (320x180 instead of 1280x720) and the same sample settings (256 coarse and 512 fine samples) trains pretty quickly in both implementations however the quality varies significantly. In this repo I get a low-quality background after 30 epochs even with the default settings, removing the min(8 * near) section you mentioned earlier, manually setting near and far to 0.2 and 100 as in the jaxnerf implementation, training for more epochs than 30, etc:
+Whereas the jaxnerf implementation very quickly converges to a nearly perfect result:
+My full training command is:
+python train.py --dataset_name llff --root_dir /data/airsim_vehicles/hatchback_90_90/train --img_wh 320 180 --num_epochs 100 --batch_size 1024 --optimizer adam --lr 5e-4 --lr_scheduler steplr --decay_step 10 20 --decay_gamma 0.5 --exp_name meta_hatchback_90_90 --num_gpus 4 --N_importance 512 --N_samples 256 --spheric --use_disp --chunk 8192
+kwea123 commented on Jan 27, 2021
+kwea123
+on Jan 27, 2021
+Last edited by kwea123
+Owner
+More actions
+Yes, I just found that using multigpu will slow down when reading the data from the disk because of concurrent reading. If your data is big, it could be better to do one data caching (saving the rays and rgbs into a .npy file) and read them on every gpu just once.
+Honestly when I tried training fountain using jaxnerf, I didn't get better result than mine visually: this is what I get after 105k steps, which took 3hr on my 1 GPU machine. Considering the image size and the training time, I didn't have the impression that this is better.
+Anyway, I will try your hatchback-train next, since it seems more like my assumption on the data.
+Finally, jax's speed might be faster according to the network structure and the computations, it is specific to different libraries. Thanks, I also just learnt it today. However as many blog posts I've read, pytorch wins in the simplicity of its API, and that's also the impression I get when reading the code of jaxnerf.
+kwea123 commented on Jan 27, 2021
+kwea123
+on Jan 27, 2021
+Owner
+More actions
+For the hatchback-train data, it seems the data in poses_bounds.npy is wrong. Namely the image size was saved in W, H, focal order (line 189 in llff.py) while normally it should be in H, W, focal. The original LLFF code didn't change, so I don't know why you get a different order. Btw jaxnerf reads the image size from image files, not by poses_bounds.npy so it doesn't have this problem.
+After inversing the W, H in poses_bounds.npy (inverse columns 4 and 9) and use the code in dev branch without any change, I can successfully train and the result looks decent (just 50k steps ie 10 epochs, the PSNR reached 29.36):
+The number of samples is small for a quick demo:
+```
+python train.py --dataset_name llff --root_dir /home/ubuntu/data/nerf_example_data/my/train/ \
+--N_importance 64 --img_wh 320 180 \
+--num_epochs 20 --batch_size 1024 --optimizer adam --lr 5e-4 --lr_scheduler cosine \
+--exp_name train --spheric_poses
+```
+Btw, from my experiments I didn't find --use_disp to be useful if the scene is small (near and far bounds are close). I think it's only useful if the scene contains a big portion of far background.
+So going back to the fountain example, I still think the bounds and the scale are the problem. I will try your
+```
+scale_factor = np.sqrt(np.mean(np.sum(np.square(distances_from_center))))
+```
+next.
+👍React with 👍2Reacted by Joan Charmant and Kun Wang
+kwea123 commented on Feb 4, 2021
+kwea123
+on Feb 4, 2021
+Owner
+More actions
+The scale_factor = np.sqrt(np.mean(np.sum(np.square(distances_from_center)))) here yields roughly the same result as I commented above...
+To sum up, for fountain scene you'd need to scale the poses fairly largely, and set the far plane farther since it has a large portion of background. The scale_factor could be scale_factor = near_original*100 or scale_factor = np.sqrt(np.mean(np.sum(np.square(distances_from_center)))). And far = self.bounds.max().
+I will not apply these changes to the branches because it will cause the pretrained models to break. Finally, there is nerf++ that better handles this kind of far backgrounds than NeRF that you might want to try.
+kwea123
+closed this as completedon Feb 4, 2021
+Holmes-Alan commented on Oct 25, 2022
+Holmes-Alan
+on Oct 25, 2022
+More actions
+@hturki @kwea123 I used the same code as you for my own 360 scenes for training. The PSNR stuck around 24 dB. The result is blur like this,
+You can see that this is no background that can affect the visual reconstruction. Why cannot I train NeRF to have sharp visual results?
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or request
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

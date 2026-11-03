@@ -1,0 +1,144 @@
+Experimenting with scientific visualization in wgpu for portability (Rust, Python, and web) - VT: per-tile (min,max) metadata + contrast-floor empty-space skip by aganders3 · Pull Request #12 · aganders3/bovista
+
+VT: per-tile (min,max) metadata + contrast-floor empty-space skip by aganders3 · Pull Request #12 · aganders3/bovista · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+aganders3
+commented
+Jun 29, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Forward-ports the tile-level empty-space skip from the stranded phase-3-tile-cached-raymarch branch onto the current multi-atlas VT. Skips raymarch stepping through resident-but-empty tiles — the gap that residency/LOD-walk skipping (which only skips unloaded space) didn't cover.
+Two commits:
+Plumbing (PageTable + VirtualTextureData) — a parallel Rg8Unorm metadata texture (same dims as the page table) holds each resident tile's (min, max) in the contrast-normalised [0,1] range. compute_tile_min_max scans the R16Float chunk at upload. Because the multi-atlas refresh_page_table re-points entries without the tile bytes on hand (a path the original predated), the values are cached in a tile_minmax map mirroring slot_map's lifetime (insert on upload, remove on eviction/scrub) and looked up there — defaulting to (0,1) = "never skip" if absent. No bind group / shader changes → no behavior change on its own.
+Skip (volume.rs + volume_raymarch.wgsl) — metadata bound at group(1) binding 8 (multi-atlas took 0–7), non-filtering Float D2Array. try_lod/sample_vvt now return (value, lod, tile_max), reading .g of the parallel metadata texel on a resident hit. fs_translucent mode 0 jumps to the resolved tile's far boundary (tile_skip_advance, clamped to step_size so grazing rays still progress) when tile_max < contrast_min + ε. Debug modes and the other render modes step verbatim.
+Design notes
+Rendering-side, not residency-side. This never evicts or touches the wanted set — it only changes per-frame stepping. So coupling the threshold to the contrast floor is safe (recomputed every frame, zero re-streaming), and it does not conflict with the roadmap's "empty-tile dropping must be intrinsic, not contrast-relative" rule — that rule governs the separate residency layer.
+Tile-cache deliberately omitted. The old 41e514b also added a per-step tile cache; that was written against the pre-multi-atlas shader and is a separable optimization. Left for a follow-up.
+Verification
+Builds clean on native + wasm; clippy clean.
+Confirmed working in the Python volume rendering example.
+A/B for perf: main (no skip) vs this branch; the mode-3 step heatmap shows where steps go.
+🤖 Generated with Claude Code
+aganders3
+force-pushed
+the
+vt-tile-minmax-skip
+branch
+from
+6d175a2 to
+89feb5b
+Compare
+June 29, 2026 15:30
+aganders3
+and others
+added 3 commits
+June 29, 2026 13:27
+VT: per-tile (min,max) metadata texture next to the page table (port)
+…
+c31da94
+```
+Forward-port of 135f7f2 onto the multi-atlas VT. PageTable gains a parallel
+Rg8Unorm texture (same dims) holding each resident tile's (min,max) in the
+contrast-normalised [0,1] range; PageTable::update writes both textures.
+
+compute_tile_min_max scans the R16Float chunk at upload. Because the
+multi-atlas refresh_page_table re-points entries without the tile bytes on
+hand (a path the original predated), the values are cached in a tile_minmax
+map mirroring slot_map's lifetime (insert on upload, remove on eviction/scrub)
+and looked up there, defaulting to (0,1)="never skip" if absent.
+
+Plumbing only — no bind group / shader changes yet, so no behavior change.
+The skip + tile-cache (port of 41e514b) lands next, adapted to the
+multi-atlas / desired_t raymarch loop.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Volume raymarch: tile-level empty-space skip from metadata texture (p…
+…
+3778a2c
+```
+…ort)
+
+Forward-port of 41e514b's skip onto the multi-atlas / desired_t loop, minus
+the tile-cache rewrite (that was against the pre-multi-atlas shader; the cache
+is a separate follow-up).
+
+- volume.rs: bind the metadata texture at group(1) binding 8 (the next free
+  slot after multi-atlas took 0-7), non-filtering Float D2Array.
+- shader: try_lod/sample_vvt now return (value, lod, tile_max), reading .g of
+  the parallel metadata texel on a resident hit. fs_translucent mode 0 jumps to
+  the resolved tile's far boundary (tile_skip_advance, clamped to step_size so
+  grazing rays still progress) when tile_max < contrast_min + ε. Debug modes and
+  the other render modes step verbatim.
+
+Builds on native + wasm. NOT yet validated on a GPU — cargo check doesn't run
+naga or the shader↔layout match; needs a real run + benchmark.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Volume: runtime empty-space-skip toggle for A/B benchmarking
+…
+4c1565c
+```
+Adds a `skip_empty` flag to VolumeUniforms (repurposing _pad0), wired through
+VolumeCore::set_skip_empty (default on) and exposed in the native volume
+renderer via the `K` key. fs_translucent mode 0 now gates the skip on it.
+
+Lets you A/B the skip within a single build — same resident tiles, same
+camera, just toggle — so a GPU frame capture (Xcode/Instruments) on a sparse
+dataset gives an objective render-pass-time delta. PrepareStats is CPU-only
+and won't reflect the GPU-shader win, so measure the pass, not that line.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+aganders3
+force-pushed
+the
+vt-tile-minmax-skip
+branch
+from
+97e4401 to
+4c1565c
+Compare
+June 29, 2026 17:31
+VT skip: honor it in the step heatmap + expose a web toggle
+…
+812d78a
+```
+The empty-space skip was gated to debug_mode==0, so the mode-3 step heatmap
+stepped verbatim and didn't show the leaping. Apply the skip in mode 3 too, so
+the heatmap faithfully reflects mode-0 traversal (modes 1/2 still step verbatim).
+
+Expose the toggle to the web volume renderer: setSkipEmpty on the volume
+wasm wrappers, plus an "Empty-space leaping" checkbox (default on, Direct-mode
+only — the only mode whose shader reads skip_empty). Toggle it with the step
+heatmap on to watch the skip work.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+aganders3
+mentioned this pull request
+Jun 29, 2026
+slice: unloaded tiles transparent instead of black
+#14
+Closed
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

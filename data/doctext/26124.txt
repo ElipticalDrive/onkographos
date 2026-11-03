@@ -1,0 +1,3445 @@
+# Direct Volume Rendering with Empty Space Skipping using Partitioned Distance Maps
+
+This is an open-source implementation of [Accelerating Transfer Function Update for Distance Map based Volume Rendering](https://arxiv.org/abs/2407.21552).
+
+Please consider citing this work if you use it:
+
+```
+@inproceedings{rauter2024,
+	author = { Rauter, Michael and Zimmermann, Lukas and Zeilinger, Markus },
+	booktitle = { 2024 IEEE Visualization and Visual Analytics (VIS) },
+	title = {{ Accelerating Transfer Function Update for Distance Map based Volume Rendering }},
+	year = {2024},
+	volume = {},
+	ISSN = {},
+	pages = {171-175},
+	abstract = { Direct volume rendering using ray-casting is widely used in practice. By using GPUs and applying acceleration techniques as empty space skipping, high frame rates are possible on modern hardware. This enables performance-critical use-cases such as virtual reality volume rendering. The currently fastest known technique uses volumetric distance maps to skip empty sections of the volume during ray-casting but requires the distance map to be updated per transfer function change. In this paper, we demonstrate a technique for subdividing the volume intensity range into partitions and deriving what we call partitioned distance maps. These can be used to accelerate the distance map computation for a newly changed transfer function by a factor up to 30. This allows the currently fastest known empty space skipping approach to be used while maintaining high frame rates even when the transfer function is changed frequently. },
+	keywords = {Visual analytics;Transfer functions;Graphics processing units;Virtual reality;Rendering (computer graphics);Hardware},
+	doi = {10.1109/VIS55277.2024.00042},
+	url = {https://doi.ieeecomputersociety.org/10.1109/VIS55277.2024.00042},
+	publisher = {IEEE Computer Society},
+	address = {Los Alamitos, CA, USA},
+	month =Oct
+}
+```
+
+![image_renderer](docs/volume_renderings.jpg)
+
+## Features
+
+- extends original work by Deakin and Knackstedt (https://github.com/LDeakin/VkVolume/)
+- GLSL shader for direct volume rendering via raycasting using PDM based ESS
+- GLSL compute shaders for computing partitioned occupancy and distance maps
+- OpenGL-based renderer
+- support for loading volume datasets (SimpleITK supported formats)
+- config.ini file in OML format for specifying many different aspects of the demo, e.g.,
+    - speficy volume dataset and intensity transfer function (2nd TF can be specified and can be used to blend between both)
+    - window size/rendering resolution
+    - set windowed or fullscreen mode
+    - blocksize parameter
+    - number of intensity partitions (= number of PDMs), and special partition for rho_min
+    - first person camera mode (WASD+mouse) or demo mode (rotating volume, fixed camera)
+    - and more...
+- transfer function specification is done in separate .itf file with simple format
+- toggle visualization of volume bounding cube, ESS acceleration structure, gradient information
+
+## Limitations
+- requires an NVIDIA GPU (tested with RTX 4090, RTX 3060 and GTX 1080 TI), does not work with AMD GPUs (shaders seem to compile fine, but rendered image is black - unfortunately, I do not have an AMD GPU available for investigation)
+- transfer function is currently only defined with max 256 control points, TF domain range is stretched to volume intensity range
+
+## Dependencies
+
+- SimpleITK
+- Vulkan SDK (used for spirv compilation of GLSL shaders)
+- dependencies inside the repository:
+    - glad
+    - glfw
+    - glm
+    - toml
+
+
+## Building
+
+
+1. build SimpleITK source (https://github.com/SimpleITK/SimpleITK) using SimpleITK's SuperBuild (see instructions here: https://simpleitk.readthedocs.io/en/master/building.html)
+1. Vulkan is needed for spirv compilation, get it from here: https://vulkan.lunarg.com/
+1. `git clone <this repository>`
+1. use CMake or Visual Studio's integrated CMake build tools to build DVR_ESS_PDM
+
+executable will be built into directory `bin/DVR_ESS_PDM/Release` respectively `bin/DVR_ESS_PDM/Debug`
+    
+## Running
+
+make sure to copy the config file you want to use from the configs folder into the directory of the executable, also make sure that you set config parameters `filename_input_volume` (filepath to volumetric image) and `filetype_input_volume` (SimpleITK input format identifier string).
+
+run using the default `config.ini` file (don't forget to copy it to executable directory):
+```bash
+DVR_ESS_PDM.exe
+```
+or
+```bash
+DVR_ESS_PDM.exe <config_ini_file>
+```
+
+
+### Keyboard Shortcuts
+- keys W,A,S,D [only in first person camera mode] ... move camera forward, backward, left, right
+
+- key 1 ... cycle visualization type:
+  - volume rendering
+  - volume bounding box front face
+  - volume bb back face
+  - ESS acceleration structure (depending on selected ESS type)
+  - voxel gradient
+
+- key 2 ... cycle dithering mode (none, procedurally generated, noise texture [default])
+
+- key 3 ... toggle early ray termination (off, on [default])
+
+- key 4 ... cycle ESS type (none, block ESS, distance ESS [default, PDM method, unless it was deactivated in config-ini file (via `disable_partitioned_distancemap_optimization` option) - in this case distance map will be computed as in paper by Deakin et. al.])
+
+- key 5 ... incorporate light source into volume rendering - how strong should lightsource color be incorporated (light source is not incorporated [default] to max integration in 10 steps)
+
+- key 6 ... cycle gradient type (on the fly computation, precomputed) - initial value set via config-ini file with `precompute_gradient` option, if not set on the fly computation will be default
+
+- key 7 ... enable tricubic texture filtering (off [default], on)
+
+- key 8 ... toggle reusing Normals http://www.marcusbannerman.co.uk/articles/VolumeRendering.html (off [default], on) - has only an effect when light source is incorporated into rendering
+
+- key 9 ... configure diffuse light factor (how much diffuse light is used)  (1.0 [default] in steps of 1.0 up to 10)
+
+- key 0 ... configure specular light factor (how much specular light is used)  (1.0 [default] in steps of 1.0 up to 10)
+
+- key F1 ... if no TF interpolation is just happening and TF1 is not already the active TF, start interpolation to TF1 
+
+- key F2 ... if no TF interpolation is just happening and TF2 is not already the active TF, start interpolation to TF2
+
+### Datasets
+
+volume datasets can be obtained from:
+
+- https://klacansky.com/open-scivis-datasets/
+- http://digimorph.org/
+
+### transfer function file format
+
+text encoded file, formatting:
+```
+applyGammaCorrection:0
+gamma:1.21
+
+x_0=0,a_0,r_0,g_0,b_0
+x_1,a_1,r_1,g_1,b_1
+.
+.
+.
+x_n-1,a_n-1,r_n-1,g_n-1,b_n-1
+x_n=255,a_n,r_n,g_n,b_n
+```
+if applyGammaCorrection is set to 1, gamma correction is applied in shader to transparency contribution of a TF-mapped voxel transparency using gamma value gamma, otherwise gamma is ignored
+list of x_n,a_n,r_n,g_n,b_n the control points of the itf and must be unsigned char values, x_0 must be 0, x_n must be 255, any other x_n needs to be in (0,255) and in order and no duplicates!
+note: did not have the time to extend this to value ranges > [0,255]
+itf is scaled to intensity range of volume
+
+## License
+See [LICENSE](LICENSE).
+for licenses of third-party dependencies used inside this repository, see files in [lib_extern](https://github.com/CalamityMichL/DVR_ESS_PDM/tree/main/libs_extern) subdirectory licensing.
+
+### shaders/combine_PDMs.comp
+```
+/* Copyright Michael Rauter
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#version 460
+
+#pragma shader_stage(compute)
+
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+layout (binding = 0, r8ui) uniform uimage3D dist_in;
+layout (binding = 1, r8ui) uniform uimage3D dist_out;
+layout (binding = 2, r8ui) uniform uimage3D dist1;
+layout (binding = 3, r8ui) uniform uimage3D dist2;
+layout (binding = 4, r8ui) uniform uimage3D dist3;
+layout (binding = 5, r8ui) uniform uimage3D dist4;
+layout (binding = 6, r8ui) uniform uimage3D dist5;
+layout (binding = 7, r8ui) uniform uimage3D dist6;
+
+layout(std140, binding = 0) uniform UBO {
+    int useDistanceValueFromPreviousPass;
+    int numMapsToUse;
+};
+
+void main() {
+    ivec3 pos = ivec3(gl_GlobalInvocationID.xyz);
+
+    const ivec3 dim = imageSize(dist_out);
+    if(any(greaterThanEqual(pos, dim))) return;
+
+    float minDistValue = 255.0f;
+    if (useDistanceValueFromPreviousPass == 1)
+        minDistValue = imageLoad(dist_in, pos).x;
+
+
+    float distValues[6];
+
+    distValues[0] = imageLoad(dist1, pos).x;
+    distValues[1] = imageLoad(dist2, pos).x;
+    distValues[2] = imageLoad(dist3, pos).x;
+    distValues[3] = imageLoad(dist4, pos).x;
+    distValues[4] = imageLoad(dist5, pos).x;
+    distValues[5] = imageLoad(dist6, pos).x;
+
+    for (int i = 0; i<numMapsToUse; i++)
+        minDistValue = min(minDistValue, distValues[i]);
+
+    imageStore(dist_out, pos, ivec4(minDistValue));
+}
+```
+
+### shaders/compute_POM.comp
+```
+/* Copyright Michael Rauter
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#version 460
+
+#pragma shader_stage(compute)
+
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+#if defined(VOLUME_DATATYPE_UNORM8)
+    layout (binding = 0, r8) uniform image3D volume;
+#elif defined(VOLUME_DATATYPE_UNORM16)
+    layout (binding = 0, r16) uniform image3D volume;
+#endif
+
+layout (binding = 1, rgba8) uniform image3D gradient;
+layout (binding = 2, r8ui) uniform uimage3D occupancy_map_partitioned;
+
+layout(std140, binding = 0) uniform UBO {
+    vec4 block_size;
+    float partition_intensity_min;
+    float partition_intensity_max;
+};
+
+const uint OCCUPIED = 0;
+const uint EMPTY = 1;
+
+void main() {
+  const ivec3 dimDst = imageSize(occupancy_map_partitioned).xyz;
+  if(any(greaterThanEqual(gl_GlobalInvocationID, dimDst.xyz))) return;
+
+  const ivec3 dimSrc = imageSize(volume).xyz;
+
+  const ivec3 start = ivec3(gl_GlobalInvocationID.xyz * block_size.xyz);
+  ivec3 end = ivec3(min(dimSrc, start + block_size.xyz));
+
+  ivec3 pos;
+  for (pos.z = start.z; pos.z < end.z; ++pos.z)
+    for (pos.y = start.y; pos.y < end.y; ++pos.y)
+      for (pos.x = start.x; pos.x < end.x; ++pos.x) {
+        float intensityValue = imageLoad(volume, pos).x;
+
+        if ((intensityValue * 255.0f >= partition_intensity_min-0.5f) && (intensityValue * 255.0f <= partition_intensity_max+0.5f)) { // the offset -0.5, 0.5 is used to prevent floating point inaccuracies
+          imageStore(occupancy_map_partitioned, ivec3(gl_GlobalInvocationID), ivec4(OCCUPIED));
+          return;
+        }
+      }
+
+  imageStore(occupancy_map_partitioned, ivec3(gl_GlobalInvocationID), ivec4(EMPTY));
+}
+```
+
+### shaders/compute_distance_map.comp
+```
+/* Copyright Michael Rauter
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * code derived from: https://github.com/LDeakin/VkVolume/blob/master/shaders/distance_map.comp
+ *
+ */
+
+#version 460
+
+#pragma shader_stage(compute)
+
+layout (local_size_x = 8, local_size_y = 8) in;
+
+layout (binding = 0, r8ui) uniform uimage3D dist;
+layout (binding = 1, r8ui) uniform uimage3D dist_swap; // occupancy_map on stage 0
+
+layout(std140, binding = 0) uniform UBO {
+    int stage;
+};
+
+const uint OCCUPIED = 0;
+const uint EMPTY = 1;
+
+uint occupancy_to_max_dist(uint occupancy) {
+  return occupancy == OCCUPIED ? 0 : 255;
+}
+
+void main() {
+    ivec3 pos;
+    if (stage == 0) {
+      pos = ivec3(0, gl_GlobalInvocationID.x, gl_GlobalInvocationID.y);
+    } else if (stage == 1) {
+      pos = ivec3(gl_GlobalInvocationID.x, 0, gl_GlobalInvocationID.y);
+    } else {
+      pos = ivec3(gl_GlobalInvocationID.x, gl_GlobalInvocationID.y, 0);
+    }
+
+    const ivec3 dim = imageSize(dist);
+    if(any(greaterThanEqual(pos, dim))) return;
+
+    if (stage == 0) { // "Transformation 1"
+        // Forward
+        uint gi1jk = occupancy_to_max_dist(imageLoad(dist_swap, ivec3(0, pos.y, pos.z)).x);
+        for (int x = 0; x < dim.x; ++x) {
+          ivec3 p = ivec3(x, pos.y, pos.z);
+          uint gijk = occupancy_to_max_dist(imageLoad(dist_swap, p).x);
+          uint gijk_new = min(gi1jk + 1, gijk);
+          imageStore(dist, p, ivec4(gijk_new));
+          gi1jk = gijk_new;
+        }
+
+        // Backward
+        gi1jk = imageLoad(dist, ivec3(dim.x - 1, pos.y, pos.z)).x;
+        for (int x = dim.x - 2; x >= 0; --x) {
+          ivec3 p = ivec3(x, pos.y, pos.z);
+          uint gijk = imageLoad(dist, p).x;
+          uint gijk_new = min(gi1jk + 1, gijk);
+          imageStore(dist, p, ivec4(gijk_new));
+          gi1jk = gijk_new;
+        }
+    } else if (stage == 1) { // "Transformation 2"
+        for (int y = 0; y < dim.y; ++y) {
+          ivec3 p = ivec3(pos.x, y, pos.z);
+          uint gijk = imageLoad(dist, p).x;
+          uint m_min = gijk;
+          // zigzag out from the voxel of interest, stop as soon as any future voxels
+          // are guaranteed to return a higher distance
+          for (int n = 1; n < m_min && n < 255; ++n) {
+            if (y >= n) {
+              const uint gijnk = imageLoad(dist, ivec3(pos.x, y - n, pos.z)).x;
+              const uint m = max(n, gijnk);
+              if (m < m_min)
+                m_min = m;
+            }
+            if ((y + n) < dim.y && n < m_min) { // note early exit possible
+              const uint gijnk = imageLoad(dist, ivec3(pos.x, y + n, pos.z)).x;
+              const uint m = max(n, gijnk);
+              if (m < m_min)
+                m_min = m;
+            }
+          }
+          imageStore(dist_swap, p, ivec4(m_min));
+        }
+    } else if (stage == 2) { // "Transformation 3"
+        // same as transformation 2 but on the z axis
+        for (int z = 0; z < dim.z; ++z) {
+          ivec3 p = ivec3(pos.x, pos.y, z);
+          uint gijk = imageLoad(dist_swap, p).x;
+          uint m_min = gijk;
+          for (int n = 1; n < m_min && n < 255; ++n) {
+            if (z >= n) {
+              const uint gijnk = imageLoad(dist_swap, ivec3(pos.x, pos.y, z - n)).x;
+              const uint m = max(n, gijnk);
+              if (m < m_min)
+                m_min = m;
+            }
+            if ((z + n) < dim.z && n < m_min) { // note early exit possible
+              const uint gijnk = imageLoad(dist_swap, ivec3(pos.x, pos.y, z + n)).x;
+              const uint m = max(n, gijnk);
+              if (m < m_min)
+                m_min = m;
+            }
+          }
+          imageStore(dist, p, ivec4(m_min));
+        }
+    }
+}
+```
+
+### shaders/compute_gradient_map.comp
+```
+/* Copyright Michael Rauter
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * code derived from:
+ * https://github.com/LDeakin/VkVolume/blob/master/shaders/gradient_map.comp
+ * https://github.com/LDeakin/VkVolume/blob/master/shaders/get_gradient_compute.glsl
+ *
+ */
+
+ #version 460
+
+ #pragma shader_stage(compute)
+
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+#if defined(VOLUME_DATATYPE_UNORM8)
+    layout (binding = 0, r8) uniform image3D volume;
+#elif defined(VOLUME_DATATYPE_UNORM16)
+    layout (binding = 0, r16) uniform image3D volume;
+#endif
+layout (binding = 1, rgba8_snorm) uniform image3D gradient_map;
+
+layout(std140, binding = 0) uniform UBO {
+    float grad_magnitude_modifier;
+};
+
+float getVolumeIntensityValue(ivec3 samplingPos)
+{
+    float voxelValue = imageLoad(volume, samplingPos).x;
+    return voxelValue;
+}
+
+vec3 get_gradient(ivec3 pos, ivec3 dim1) {
+    // Gradient on-the-fly using tetrahedron technique http://iquilezles.org/www/articles/normalsSDF/normalsSDF.htm
+    ivec2 k = ivec2(-1,1);
+    vec3 gradientDir = 0.25 * (
+      k.xyy * getVolumeIntensityValue(clamp(pos + k.xyy, ivec3(0), dim1)).x +
+      k.yyx * getVolumeIntensityValue(clamp(pos + k.yyx, ivec3(0), dim1)).x +
+      k.yxy * getVolumeIntensityValue(clamp(pos + k.yxy, ivec3(0), dim1)).x +
+      k.xxx * getVolumeIntensityValue(clamp(pos + k.xxx, ivec3(0), dim1)).x);
+    return gradientDir;
+}
+
+void main() {
+    const ivec3 dim = imageSize(gradient_map);
+
+    vec3 gradient = get_gradient(ivec3(gl_GlobalInvocationID), dim);
+    float gradient_magnitude = clamp(length(gradient) * grad_magnitude_modifier, 0, 1);
+
+    vec4 gradientMapValue = vec4(normalize(gradient), gradient_magnitude);
+    imageStore(gradient_map, ivec3(gl_GlobalInvocationID), gradientMapValue);
+}
+```
+
+### shaders/compute_occupancy_map.comp
+```
+/* Copyright Michael Rauter
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * code derived from: https://github.com/LDeakin/VkVolume/blob/master/shaders/occupancy_map.comp
+ *
+ */
+
+#version 460
+
+#pragma shader_stage(compute)
+
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+#if defined(VOLUME_DATATYPE_UNORM8)
+    layout (binding = 0, r8) uniform image3D volume;
+#elif defined(VOLUME_DATATYPE_UNORM16)
+    layout (binding = 0, r16) uniform image3D volume;
+#endif
+
+layout (binding = 1, rgba8) uniform image3D gradient;
+layout (binding = 2, rgba8) uniform image2D itf;
+layout (binding = 3, r8ui) uniform uimage3D occupancy_map;
+
+layout(std140, binding = 0) uniform UBO {
+    vec4 block_size;
+    bool useITF2D;
+};
+
+
+const uint OCCUPIED = 0;
+const uint EMPTY = 1;
+
+void main() {
+  const ivec3 dimDst = imageSize(occupancy_map).xyz;
+  if(any(greaterThanEqual(gl_GlobalInvocationID, dimDst.xyz))) return;
+
+  const ivec3 dimSrc = imageSize(volume).xyz;
+
+  const ivec3 start = ivec3(gl_GlobalInvocationID.xyz * block_size.xyz);
+  ivec3 end = ivec3(min(dimSrc, start + block_size.xyz));
+
+  ivec3 pos;
+  for (pos.z = start.z; pos.z < end.z; ++pos.z)
+    for (pos.y = start.y; pos.y < end.y; ++pos.y)
+      for (pos.x = start.x; pos.x < end.x; ++pos.x) {
+        float intensityValue = imageLoad(volume, pos).x;
+
+        float gradientValue = imageLoad(gradient, pos).a;
+        float alpha;
+        if (useITF2D)
+          alpha = imageLoad(itf, ivec2(255*intensityValue, 255*gradientValue)).a;
+        else
+          alpha = imageLoad(itf, ivec2(255*intensityValue, 0)).a;
+
+        if (alpha > 0.0f) {
+          imageStore(occupancy_map, ivec3(gl_GlobalInvocationID), ivec4(OCCUPIED));
+          return;
+        }
+      }
+
+  // Set region as empty
+  imageStore(occupancy_map, ivec3(gl_GlobalInvocationID), ivec4(EMPTY));
+}
+```
+
+### shaders/convert_volume_to_unorm.comp
+```
+/* Copyright Michael Rauter
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+ #version 460
+
+ #pragma shader_stage(compute)
+
+//#extension GL_ARB_shading_language_include : require
+//#extension GL_GOOGLE_include_directive : require
+
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+//layout (binding = 0, r8) uniform image3D volume; // r8 = float unorm
+#if defined(VOLUME_DATATYPE_INT16)
+    layout (binding = 0, r16i) uniform iimage3D volume;
+#elif defined(VOLUME_DATATYPE_UINT16)
+    layout (binding = 0, r16ui) uniform uimage3D volume;
+#elif defined(VOLUME_DATATYPE_UINT8)
+    layout (binding = 0, r8ui) uniform uimage3D volume;
+#endif
+
+#if defined(VOLUME_DATATYPE_OUPUT_UNORM16)
+    layout (binding = 1, r16) uniform image3D output_volume;
+#elif defined(VOLUME_DATATYPE_OUPUT_UNORM8)
+    layout (binding = 1, r8) uniform image3D output_volume;
+#endif
+
+layout(std140, binding = 0) uniform UBO {
+    float minIntensityValue;
+    float maxIntensityValue;
+};
+
+float getVolumeIntensityValue(ivec3 samplingPos)
+{
+    float voxelValue = imageLoad(volume, samplingPos).x;
+#if defined(VOLUME_DATATYPE_INT16) || defined(VOLUME_DATATYPE_UINT16) || defined(VOLUME_DATATYPE_UINT8)
+    float intensityRangeWidth = maxIntensityValue - minIntensityValue + 1.0f;
+    float reciprocalIntensityRangeWidth = 1.0f / intensityRangeWidth;
+    voxelValue = (voxelValue - minIntensityValue) * reciprocalIntensityRangeWidth;
+#endif
+    return voxelValue;
+}
+
+void main() {
+  const ivec3 dim = imageSize(volume);
+  if(any(greaterThanEqual(gl_GlobalInvocationID, dim))) return;
+  float intensityValueAsSNORM = getVolumeIntensityValue(ivec3(gl_GlobalInvocationID));
+  vec4 converted_value = vec4(intensityValueAsSNORM, 0.0f, 0.0f, 0.0f);
+  imageStore(output_volume, ivec3(gl_GlobalInvocationID), converted_value);
+}
+```
+
+### shaders/fs_render_volume.glsl
+```
+/* Copyright Michael Rauter
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * code derived from: https://github.com/LDeakin/VkVolume/blob/master/shaders/volume_render.frag
+ *
+ */
+
+#version 460
+
+#pragma shader_stage(fragment)
+
+precision highp int;
+precision highp float;
+
+layout (location = 1) in vec4 position;
+layout (location = 0) out vec4 out_color;
+
+layout (binding = 0) uniform sampler3D texVolume;
+
+layout (binding = 1) uniform sampler3D texGradient;
+layout (binding = 2) uniform sampler2D texNoise;
+layout (binding = 3) uniform mediump sampler2D texITF;
+layout (binding = 4) uniform mediump usampler3D texOccupancyMap;
+layout (binding = 5) uniform mediump usampler3D texDistanceMap;
+
+layout(std140, binding = 1) uniform UBO {
+    mat4 model;                     // aligned offset 0
+    mat4 view;                      // aligned offset 64
+    mat4 inverseModelView;          // aligned offset 128
+    float sampling_factor;          // aligned offset 192
+    int renderContentType;          // aligned offset 196
+    int ditheringMode;              // aligned offset 200
+    bool earlyRayTermination;       // aligned offset 204
+    int essType;                    // aligned offset 208
+    int gradientType;               // aligned offset 212
+    bool itf_gamma_correction;      // aligned offset 216
+    float gamma;                    // aligned offset 220
+    bool enable_bicubic_filtering;  // aligned offset 224
+    bool reuse_normals;             // aligned offset 228
+    float lightshading_factor;      // aligned offset 232
+    vec3 lightDirection;            // aligned offset 240 // must be memory aligned at 16 * x -> 16*15 == 240
+    float light_ambient_factor;     // aligned offset 252
+    float light_diffuse_factor;     // aligned offset 256
+    float light_specular_factor;    // aligned offset 260
+    float light_specular_shininess; // aligned offset 264
+} ubo;
+
+#define MAX_SEGMENTS 64
+
+// Ray
+struct Ray {
+    vec3 origin;
+    vec3 direction;
+};
+
+// Axis-aligned bounding box
+struct AABB {
+    vec3 max;
+    vec3 min;
+};
+
+// Slab method for ray-box intersection
+void ray_box_intersection(Ray ray, AABB box, out float t_0, out float t_1)
+{
+    vec3 direction_inv = 1.0 / ray.direction;
+    vec3 t_top = direction_inv * (box.max - ray.origin);
+    vec3 t_bottom = direction_inv * (box.min - ray.origin);
+    vec3 t_min = min(t_top, t_bottom);
+    vec2 t = max(t_min.xx, t_min.yz);
+    t_0 = max(0.0, max(t.x, t.y));
+    vec3 t_max = max(t_top, t_bottom);
+    t = min(t_max.xx, t_max.yz);
+    t_1 = min(t.x, t.y);
+}
+
+float getVolumeIntensityValue(vec3 samplingPos, vec3 volumeSize, vec3 texelWidth, bool forceNoTriCubic)
+{
+    if (!ubo.enable_bicubic_filtering || forceNoTriCubic)
+    {
+        float voxelValue = texture(texVolume, samplingPos.xyz).r;
+        return voxelValue;
+    }
+    else
+    {
+        vec3 coord_hg = samplingPos * volumeSize - vec3(0.5f, 0.5f, 0.5);
+        vec3 a = coord_hg - floor(coord_hg);
+
+        vec3 w_0 = (1.0/6.0)*(a*(a*(-a + 3.0) - 3.0) + 1.0);
+        vec3 w_1 = (1.0/6.0)*(a*a*(3.0*a - 6.0) + 4.0);
+        vec3 w_2 = (1.0/6.0)*(a*(a*(-3.0*a + 3.0) + 3.0) + 1.0);
+        vec3 w_3 = (1.0/6.0)*(a*a*a);
+
+        vec3 g_0 = w_0 + w_1;
+        vec3 g_1 = w_2 + w_3;
+        vec3 h_0 = 1 - (w_1/(w_0 + w_1)) + a;
+        vec3 h_1 = 1 + (w_3/(w_2 + w_3)) - a;
+
+        vec3 texCoord000 = samplingPos.xyz + vec3(-texelWidth.x * h_0.x, -texelWidth.y * h_0.y, -texelWidth.z * h_0.z);
+        vec3 texCoord100 = samplingPos.xyz + vec3(+texelWidth.x * h_1.x, -texelWidth.y * h_0.y, -texelWidth.z * h_0.z);
+        vec3 texCoord010 = samplingPos.xyz + vec3(-texelWidth.x * h_0.x, +texelWidth.y * h_1.y, -texelWidth.z * h_0.z);
+        vec3 texCoord110 = samplingPos.xyz + vec3(+texelWidth.x * h_1.x, +texelWidth.y * h_1.y, -texelWidth.z * h_0.z);
+        vec3 texCoord001 = samplingPos.xyz + vec3(-texelWidth.x * h_0.x, -texelWidth.y * h_0.y, +texelWidth.z * h_1.z);
+        vec3 texCoord101 = samplingPos.xyz + vec3(+texelWidth.x * h_1.x, -texelWidth.y * h_0.y, +texelWidth.z * h_1.z);
+        vec3 texCoord011 = samplingPos.xyz + vec3(-texelWidth.x * h_0.x, +texelWidth.y * h_1.y, +texelWidth.z * h_1.z);
+        vec3 texCoord111 = samplingPos.xyz + vec3(+texelWidth.x * h_1.x, +texelWidth.y * h_1.y, +texelWidth.z * h_1.z);
+
+
+        float voxelValue000 = texture(texVolume, texCoord000).r;
+        float voxelValue100 = texture(texVolume, texCoord100).r;
+        float voxelValue010 = texture(texVolume, texCoord010).r;
+        float voxelValue110 = texture(texVolume, texCoord110).r;
+        float voxelValue001 = texture(texVolume, texCoord001).r;
+        float voxelValue101 = texture(texVolume, texCoord101).r;
+        float voxelValue011 = texture(texVolume, texCoord011).r;
+        float voxelValue111 = texture(texVolume, texCoord111).r;
+
+        g_0 = 1.0f - g_0;
+        float l1 = mix(voxelValue000, voxelValue100, g_0.x);
+        float l2 = mix(voxelValue010, voxelValue110, g_0.x);
+        float l3 = mix(voxelValue001, voxelValue101, g_0.x);
+        float l4 = mix(voxelValue011, voxelValue111, g_0.x);
+        float l5 = mix(l1,l2,g_0.y);
+        float l6 = mix(l3,l4,g_0.y);
+        float l7 = mix(l5,l6,g_0.z);
+
+        return l7;
+    }
+}
+
+vec4 getGradient(vec3 samplingPos, vec3 volumeSize, float voxelValue, int gradientType)
+{
+    vec4 gradient;
+    if (gradientType == 0) // on-the-fly approximation of gradient using tetrahedron technique
+    {
+        vec2 k = ivec2(-1.0f, 1.0f);
+        vec3 gradientVec = 0.25*(
+        k.xyy * getVolumeIntensityValue(samplingPos + (k.xyy + 0.5)/vec3(volumeSize), volumeSize, 1.0/volumeSize, true) +
+        k.yyx * getVolumeIntensityValue(samplingPos + (k.yyx + 0.5)/vec3(volumeSize), volumeSize, 1.0/volumeSize, true) +
+        k.yxy * getVolumeIntensityValue(samplingPos + (k.yxy + 0.5)/vec3(volumeSize), volumeSize, 1.0/volumeSize, true) +
+        k.xxx * getVolumeIntensityValue(samplingPos + (k.xxx + 0.5)/vec3(volumeSize), volumeSize, 1.0/volumeSize, true));
+        gradient = vec4(normalize(gradientVec), length(gradientVec));        
+    }    
+    else if (gradientType == 1) // use precomputed gradient
+    {
+        gradient = vec4(normalize(texture(texGradient, samplingPos + 0.5/vec3(volumeSize)).xyz), texture(texGradient, samplingPos + 0.5/vec3(volumeSize)).a);
+    }
+
+    return gradient;
+}
+
+void main()
+{
+    mat4 model = ubo.model;
+    mat4 view = ubo.view;
+    mat4 inverseModelView = ubo.inverseModelView;
+
+    float sampling_factor = ubo.sampling_factor;
+
+    int renderContentType = ubo.renderContentType;
+    int ditheringMode = ubo.ditheringMode;
+    bool earlyRayTermination = ubo.earlyRayTermination;
+    int essType = ubo.essType;
+    float lightshading_factor = ubo.lightshading_factor;    
+    int gradientType = ubo.gradientType;
+    bool reuse_normals = ubo.reuse_normals;
+    bool itf_gamma_correction = ubo.itf_gamma_correction;
+    float gamma = ubo.gamma;
+    vec3 lightDirection = ubo.lightDirection;
+    float light_ambient_factor = ubo.light_ambient_factor;
+    float light_diffuse_factor = ubo.light_diffuse_factor;
+    float light_specular_factor = ubo.light_specular_factor;
+    float light_specular_shininess = ubo.light_specular_shininess;
+
+    ivec2 dimITF = textureSize(texITF, 0).xy;
+
+    vec4 camPosInViewCoords = vec4(view[0][3],view[1][3],view[2][3],1.0f);
+    vec4 camPosInObjectCoords = inverseModelView * camPosInViewCoords;
+    vec3 ray_origin = camPosInObjectCoords.xyz/camPosInObjectCoords.w;
+
+    vec3 bb_bf_positions = position.xyz;
+    vec3 ray_origin_to_bf = bb_bf_positions - ray_origin;
+    vec3 ray_direction = normalize(ray_origin_to_bf);
+
+    float t_0, t_1;
+    vec3 maxBB = vec3(0.5f);
+    vec3 minBB = vec3(-0.5f);
+    Ray casting_ray = Ray(ray_origin, ray_direction);
+    AABB bounding_box = AABB(maxBB, minBB);
+    ray_box_intersection(casting_ray, bounding_box, t_0, t_1);
+
+    vec3 ray_start = (ray_origin + ray_direction * t_0 - minBB) / (maxBB - minBB);
+    vec3 ray_stop = (ray_origin + ray_direction * t_1 - minBB) / (maxBB - minBB);
+
+    vec3 ray = ray_stop - ray_start;
+    float ray_length = length(ray);
+    vec3 ray_dir = normalize(ray);
+
+    if (renderContentType == 1)
+    {
+        out_color = vec4(ray_start, 1.0f); return;
+    }
+    else if (renderContentType == 2)
+    {
+        out_color = vec4(ray_stop, 1.0f); return;
+    }
+
+    // termination of rays (pixels) where the ray is degenerated (e.g. start and endpoint coinciding, ...) - this will prevent performance regressions
+    if (isinf(ray_length) || isnan(ray_length) || ray_length > 1.732051f) // sqrt(3)
+        return;
+
+    ivec3 volumeSize = textureSize(texVolume, 0).xyz;
+    int dim_max = max(max(volumeSize.x, volumeSize.y), volumeSize.z);
+
+    int n_steps = int(ceil(float(dim_max) * ray_length * sampling_factor));
+    vec3 step_vector = normalize(ray_dir) * ray_length / (float(n_steps) - 1.0f);
+    float sampling_factor_inv = 1.0f / sampling_factor;
+
+    // ray "dithering" mode which adds small random substep (either derived from frag coords or from noise texture)
+    float random = 0.0f;
+    if (ditheringMode == 1)
+        random = fract(sin(gl_FragCoord.x * 12.9898 + gl_FragCoord.y * 78.233) * 43758.5453);
+    else if (ditheringMode == 2)
+        random = texture(texNoise, gl_FragCoord.xy / 256).r;
+
+    vec3 samplingPos;
+
+    // Empty space skipping initialization
+    ivec3 dim_distance_map = textureSize(texDistanceMap, 0).xyz;
+    ivec3 dim_distance_map_1 = dim_distance_map - 1;
+    ivec3 block_size = ivec3(ceil(vec3(volumeSize) / vec3(dim_distance_map)));
+    vec3 volume_to_distance_map = vec3(volumeSize) / (vec3(block_size) * vec3(dim_distance_map));
+    vec3 step_dist_texel = step_vector * vec3(volumeSize) / vec3(block_size);
+    vec3 step_dist_texel_inv = 1.0f / step_dist_texel;
+    bool skipping = true;
+    int i_min = 0; // current furthest "occupied" step
+
+    out_color = vec4(0.0f);
+
+    vec4 color = vec4(0.0f);
+    vec4 prevGrad = vec4(0.0f);
+
+    int distance_map_idx = (ray_dir.z < 0 ? 1 : 0) + (ray_dir.y < 0 ? 2 : 0) + (ray_dir.x < 0 ? 4 : 0);
+
+    vec3 volumeSizeF = vec3(volumeSize);
+
+    for (int i = 0; i < n_steps;)
+    {
+        vec3 samplingPos = ray_start + float(i + random) * step_vector;        
+
+        if (essType > 0 && skipping && renderContentType != 3 ) {
+            vec3 pos_distance_map = (volume_to_distance_map * samplingPos);
+            vec3 u = pos_distance_map * vec3(dim_distance_map);
+            ivec3 u_i = ivec3(clamp(floor(u), ivec3(0), dim_distance_map_1));
+            uint dist;
+            if (essType == 1)
+                dist = uint(texelFetch(texOccupancyMap, u_i, 0).x);
+            else if (essType == 2)
+                dist = uint(texelFetch(texDistanceMap, u_i, 0).x);
+            vec3 r = clamp(u_i - u, -1.0, 0.0);
+
+            if (dist > 0u) {
+                vec3 i_delta_xyz = vec3(0);
+                if (essType == 1) // Skip with "block empty space skipping"
+                    i_delta_xyz = (step(0.0f, step_dist_texel_inv) + r) * step_dist_texel_inv;
+                else if (essType == 2) // Skip with "chebyshev empty space skipping"
+                    i_delta_xyz = (step(0.0f, -step_dist_texel_inv) + sign(step_dist_texel_inv) * float(dist) + r) * step_dist_texel_inv;
+
+                int i_delta = max(1, int(ceil(min(min(i_delta_xyz.x, i_delta_xyz.y), i_delta_xyz.z))));
+                i += i_delta;
+            }
+            else
+            {
+                int i_delta_backwards = -int(ceil(sampling_factor));
+                skipping = false;
+                i = max(i + i_delta_backwards, i_min);
+            }
+        }
+        else
+        {
+            float voxelValue = getVolumeIntensityValue(samplingPos.xyz+0.5/volumeSize, volumeSize, 1.0/volumeSize, false);
+
+            vec4 color = texture(texITF, vec2(voxelValue+0.5/dimITF[0], 0.5/dimITF[1])).rgba;
+
+            if (itf_gamma_correction)
+                color.a = pow(color.a, gamma);
+
+            if (lightshading_factor > 0.0)
+            {
+                vec4 gradient = vec4(0.0f);
+
+                gradient = getGradient(samplingPos, volumeSize, voxelValue, gradientType);
+
+                if (reuse_normals)
+                {
+                    //reusing Normals http://www.marcusbannerman.co.uk/articles/VolumeRendering.html
+                    if (gradient.a < prevGrad.a)
+                        gradient.rgb = prevGrad.rgb;
+                    prevGrad = gradient;
+                }
+
+                vec3 normal = - gradient.xyz;
+
+                vec3 light = (inverseModelView * view * vec4(lightDirection,1.0)).xyz;
+
+                float diffuse = (light_diffuse_factor) * max(0.0, min(1.0, dot(normal.rgb, normalize(light))));
+
+                vec3 viewDir    = normalize(ray_origin - samplingPos);
+                vec3 halfwayDir = normalize(light + viewDir);
+                float spec = light_specular_factor * pow(max(dot(normal.rgb, halfwayDir), 0.0), light_specular_shininess);
+
+                color.rgb = (1.0f - lightshading_factor) * color.rgb + color.rgb * lightshading_factor * (spec + diffuse + light_ambient_factor);
+
+                if (renderContentType == 4)
+                {
+                    color = vec4(normal, gradient.a);
+                }
+            }
+
+            if (renderContentType == 3) // render occupancy map, distance map
+            {
+                float dist = 0.0f;
+                        
+                vec3 pos_distance_map = (volume_to_distance_map * samplingPos);
+                vec3 u = pos_distance_map * vec3(dim_distance_map);
+                ivec3 u_i = ivec3(clamp(floor(u), ivec3(0), dim_distance_map_1));                
+                if (essType == 1)
+                    dist = texelFetch(texOccupancyMap, u_i, 0).x;
+                else if (essType == 2)
+                    dist = texelFetch(texDistanceMap, u_i, 0).x;
+                    
+                color = vec4(vec3(dist), dist/dim_max);
+            }
+            
+            color.a = clamp(1.0f * (1.0f - pow(1.0f - color.a, sampling_factor_inv)), 0.0f, 1.0f);
+
+            color.xyz *= color.a;
+
+            out_color = out_color + (1.0f - out_color.a) * color;
+
+            // Early ray termination
+            if (out_color.a > 0.98f && earlyRayTermination) {              
+              out_color.a = 1.0f;
+              break;
+            }
+
+            i_min = i;
+
+            // Move the ray forward
+            ++i;
+        }
+    }
+}
+```
+
+### shaders/vs_render_volume.glsl
+```
+/* Copyright Michael Rauter
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#version 460
+
+#pragma shader_stage(vertex)
+
+layout (location = 0) in vec3 vertexPosition;
+layout (location = 1) out vec4 position;
+
+layout(std140, binding = 0) uniform UBO_vert {
+    mat4 modelViewProjection;
+} ubo_vert;
+
+void main()
+{
+    position = vec4(vertexPosition, 1.0);
+    gl_Position = ubo_vert.modelViewProjection * vec4(vertexPosition, 1.0);
+}
+```
+
+### src/ITF.h
+```
+/* Copyright Michael Rauter
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#pragma once
+
+#include <memory>
+#include <fstream>
+#include <regex>
+#include <format>
+#include <span>
+
+#include "SimpleITK.h"
+
+namespace sitk = itk::simple;
+
+class ITF {
+public:
+	struct SupportPoint {
+		unsigned int x;
+		unsigned int a, r, g, b; // must be int datatype not uchar8, otherwise stringstream will not correctly convert string later
+	};
+	
+private:	
+	std::unique_ptr<sitk::Image> itf_rgba;
+	std::unique_ptr<sitk::Image> itf;
+	bool applyGammaCorrection;
+	float gamma;
+	std::vector<SupportPoint> supportPoints;
+
+	std::vector<std::string> split(const std::string str, const std::string regex_str)
+	{
+		std::regex regexz(regex_str);
+		std::vector<std::string> list(std::sregex_token_iterator(str.begin(), str.end(), regexz, -1),
+			std::sregex_token_iterator());
+		return list;
+	}
+
+public:
+	ITF()
+	{
+		itf_rgba = std::make_unique<sitk::Image>(4,256, sitk::sitkUInt8);
+		itf = std::make_unique<sitk::Image>(256, 256, sitk::sitkUInt32);
+		supportPoints.clear();
+		applyGammaCorrection = false;
+		gamma = 1.0f;
+	}
+
+	void LoadITF(const std::string filepath)
+	{
+		std::fstream filestream;
+
+		filestream.open(filepath, std::ios::in);
+
+		if (!filestream.is_open())
+		{
+			throw std::runtime_error("error in ITF::LoadITF: could not load input file " + filepath + "\n");
+		}
+
+		supportPoints.clear();
+
+		// first parse header
+		std::string line;
+		while (getline(filestream, line))
+		{
+			if (line == "") // an empty line separates the header from the section containing the itf support points
+				break;
+
+			std::vector<std::string> tokens = split(line, ":|\n"); // split string with regex, delimiters being ":" and "\n"
+			if (tokens[0] == "applyGammaCorrection")
+			{
+				std::stringstream ss(tokens[1]);
+				ss >> applyGammaCorrection;
+			}
+				
+			if (tokens[0] == "gamma")
+			{
+				std::stringstream ss(tokens[1]);
+				ss >> gamma;
+			}
+		}
+
+		// now parse section containing the itf support points
+		while (getline(filestream, line))
+		{
+			std::vector<std::string> tokens = split(line, ",|\n"); // split string with regex, delimiters being "," and "\n"
+			if (tokens.size() == 5) // test if line is a support point definition
+			{
+				std::stringstream ss;
+				SupportPoint supportPoint;
+				ss << tokens[0] << ' ' << tokens[1] << ' ' << tokens[2] << ' ' << tokens[3] << ' ' << tokens[4];
+				ss >> supportPoint.x >> supportPoint.a >> supportPoint.r >> supportPoint.g >> supportPoint.b;
+				supportPoints.push_back(supportPoint);
+			}
+		}
+
+		filestream.close();
+
+		// and now fill itf_rgba buffer with correct values
+		for (size_t i = 0; i < supportPoints.size() - 1; i++)
+		{
+			SupportPoint p1 = supportPoints[i];
+			SupportPoint p2 = supportPoints[i+1];
+			SetRangedLinspace(p1.x, p2.x, p1.r, p2.r, p1.g, p2.g, p1.b, p2.b, p1.a, p2.a);
+		}
+	}
+
+	void SaveITF(const std::string filepath, const std::vector<ITF::SupportPoint> supportPoints, bool applyGamma, float gamma)
+	{
+		std::string metadata_string = "applyGammaCorrection:" + std::format("{}", static_cast<int>(applyGamma)) + "\n";
+		metadata_string += "gamma:" + std::format("{}", gamma) + std::string("\n\n"); // {:.2f}
+		
+		std::fstream filestream;
+
+		filestream.open(filepath, std::ios::out);
+		filestream << metadata_string;
+		for (const auto& sp : std::span(supportPoints.begin(), supportPoints.end()))
+		{
+			filestream <<	std::format("{}", sp.x) + "," +
+							std::format("{}", sp.a) + "," +
+							std::format("{}", sp.r) + "," +
+							std::format("{}", sp.g) + "," +
+							std::format("{}", sp.b) + "\n";
+		}
+		filestream.close();
+	}
+
+	void SetSupportPoints(std::vector <SupportPoint> &supportPoints)
+	{
+		this->supportPoints.clear();
+		this->supportPoints = supportPoints;
+
+		// and now fill itf_rgba buffer with correct values
+		for (size_t i = 0; i < supportPoints.size() - 1; i++)
+		{
+			SupportPoint p1 = supportPoints[i];
+			SupportPoint p2 = supportPoints[i + 1];
+			SetRangedLinspace(p1.x, p2.x, p1.r, p2.r, p1.g, p2.g, p1.b, p2.b, p1.a, p2.a);
+		}
+	}
+
+	std::vector <SupportPoint> getSupportPoints() const
+	{
+		std::vector <SupportPoint> retSupportPoints(supportPoints);
+		return retSupportPoints;
+	}
+
+	void SetRangedLinspace(const unsigned int &lb, const unsigned int &rb, const uint8_t& r_start, const uint8_t& r_end, const uint8_t& g_start, const uint8_t& g_end, const uint8_t& b_start, const uint8_t& b_end, const uint8_t& a_start, const uint8_t& a_end)
+	{
+		for (unsigned int i = lb; i <= rb; i++)
+		{
+			float t = (float)(i - lb) / (float)(rb - lb);
+			uint8_t rInterp = (uint8_t)std::round(std::lerp((float)r_start, (float)(r_end), t));
+			uint8_t gInterp = (uint8_t)std::round(std::lerp((float)g_start, (float)(g_end), t));
+			uint8_t bInterp = (uint8_t)std::round(std::lerp((float)b_start, (float)(b_end), t));
+			uint8_t aInterp = (uint8_t)std::round(std::lerp((float)a_start, (float)(a_end), t));
+			itf_rgba.get()->SetPixelAsUInt8(std::vector<unsigned int> {0, i}, rInterp);
+			itf_rgba.get()->SetPixelAsUInt8(std::vector<unsigned int> {1, i}, gInterp);
+			itf_rgba.get()->SetPixelAsUInt8(std::vector<unsigned int> {2, i}, bInterp);
+			itf_rgba.get()->SetPixelAsUInt8(std::vector<unsigned int> {3, i}, aInterp);
+		}
+	}
+
+	void SetFromInterpolatedITFs(const ITF &itf1, const ITF &itf2, float t)
+	{
+		for (unsigned int i = 0; i < 255; i++)
+		{
+			uint8_t r_interp = (uint8_t)std::round(std::lerp((float)itf1.GetMappedRedValue(i), (float)itf2.GetMappedRedValue(i), t));
+			uint8_t g_interp = (uint8_t)std::round(std::lerp((float)itf1.GetMappedGreenValue(i), (float)itf2.GetMappedGreenValue(i), t));
+			uint8_t b_interp = (uint8_t)std::round(std::lerp((float)itf1.GetMappedBlueValue(i), (float)itf2.GetMappedBlueValue(i), t));
+			uint8_t a_interp = (uint8_t)std::round(std::lerp((float)itf1.GetMappedAlphaValue(i), (float)itf2.GetMappedAlphaValue(i), t));
+			itf_rgba->SetPixelAsUInt8(std::vector<unsigned int> {0, i}, r_interp);
+			itf_rgba->SetPixelAsUInt8(std::vector<unsigned int> {1, i}, g_interp);
+			itf_rgba->SetPixelAsUInt8(std::vector<unsigned int> {2, i}, b_interp);
+			itf_rgba->SetPixelAsUInt8(std::vector<unsigned int> {3, i}, a_interp);
+		}
+		gamma = (float)std::lerp((float)itf1.getGamma(), (float)itf2.getGamma(), t);
+		if (gamma > 0.0)
+			applyGammaCorrection = true;
+		else
+			applyGammaCorrection = false;
+	}
+
+	uint8_t GetMappedRedValue(uint32_t intensity) const
+	{
+		return itf_rgba.get()->GetPixelAsUInt8(std::vector<unsigned int> {0, intensity});
+	}
+
+	uint8_t GetMappedGreenValue(uint32_t intensity) const
+	{
+		return itf_rgba.get()->GetPixelAsUInt8(std::vector<unsigned int> {1, intensity});
+	}
+
+	uint8_t GetMappedBlueValue(uint32_t intensity) const
+	{
+		return itf_rgba.get()->GetPixelAsUInt8(std::vector<unsigned int> {2, intensity});
+	}
+
+	uint8_t GetMappedAlphaValue(uint32_t intensity) const
+	{
+		return itf_rgba.get()->GetPixelAsUInt8(std::vector<unsigned int> {3, intensity});
+	}
+
+	uint32_t* GetData() const
+	{
+		for (unsigned int i = 0; i < 255; i++)
+		{
+			uint32_t value =	((uint32_t)itf_rgba->GetPixelAsUInt8(std::vector<unsigned int> {0, i}) << 24) +
+								((uint32_t)itf_rgba->GetPixelAsUInt8(std::vector<unsigned int> {1, i}) << 16) +
+								((uint32_t)itf_rgba->GetPixelAsUInt8(std::vector<unsigned int> {2, i}) << 8) +
+								((uint32_t)itf_rgba->GetPixelAsUInt8(std::vector<unsigned int> {3, i}));
+			itf.get()->SetPixelAsUInt32(std::vector<unsigned int> {i, 0}, value);
+			
+		}
+		return itf.get()->GetBufferAsUInt32();
+	}
+
+	bool getApplyGammaCorrection() const {
+		return(applyGammaCorrection);
+	}
+
+	float getGamma() const {
+		return(gamma);
+	}
+};
+```
+
+### src/LaunchComputeShaders.cpp
+```
+/* Copyright Michael Rauter
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "LaunchComputeShaders.h"
+
+#include "./common/ComputeShaderSpirv.h"
+
+#include <glad/gl.h>
+#include <math.h>
+#include <vector>
+
+#include <glm/vec4.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
+void _ComputeConvertVolumeToSNORM(const GLuint& textureVolume, const VoxelDataType datatype, const VoxelOutputDataType outputDatatype, const float minIntensityValue, const float maxIntensityValue, const GLuint& textureOutputVolume, std::vector<unsigned int>& volumeSize)
+{
+    if (datatype == VoxelDataType::DTYPE_INT16)
+        glBindImageTexture(0, textureVolume, 0, GL_TRUE, 0, GL_READ_ONLY, GL_R16I);
+    else if (datatype == VoxelDataType::DTYPE_UINT16)
+        glBindImageTexture(0, textureVolume, 0, GL_TRUE, 0, GL_READ_ONLY, GL_R16UI);
+    else if (datatype == VoxelDataType::DTYPE_UINT8)
+        glBindImageTexture(0, textureVolume, 0, GL_TRUE, 0, GL_READ_ONLY, GL_R8UI);
+
+    if (outputDatatype == VoxelOutputDataType::DTYPE_UNORM8)
+        glBindImageTexture(1, textureOutputVolume, 0, GL_TRUE, 0, GL_READ_WRITE, GL_R8);
+    if (outputDatatype == VoxelOutputDataType::DTYPE_UNORM16)
+        glBindImageTexture(1, textureOutputVolume, 0, GL_TRUE, 0, GL_READ_WRITE, GL_R16);
+
+    unsigned int ubo_block;
+    glGenBuffers(1, &ubo_block);
+    glBindBuffer(GL_UNIFORM_BUFFER, ubo_block);
+    glBufferData(GL_UNIFORM_BUFFER, 8, NULL, GL_STATIC_DRAW);
+    glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo_block);
+    glBindBufferRange(GL_UNIFORM_BUFFER, 0, ubo_block, 0, 8);
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, 4, &minIntensityValue);
+    glBufferSubData(GL_UNIFORM_BUFFER, 4, 4, &maxIntensityValue);
+    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+    unsigned int numWorkGroups[3] = { (unsigned int)ceil((float)volumeSize[0] / 8), (unsigned int)ceil((float)volumeSize[1] / 8), (unsigned int)ceil((float)volumeSize[2] / 8) };
+    glDispatchCompute(numWorkGroups[0], numWorkGroups[1], numWorkGroups[2]);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+
+    glDeleteBuffers(1, &ubo_block);
+}
+
+void ComputeConvertVolumeToSNORM(const ComputeShaderSpirv& shader_compute_convert_volume_to_SNORM, const GLuint& textureVolume, const VoxelDataType datatype, const VoxelOutputDataType outputDatatype, const float minIntensityValue, const float maxIntensityValue, const GLuint& textureOutputVolume, std::vector<unsigned int>& volumeSize)
+{
+    shader_compute_convert_volume_to_SNORM.use();
+    _ComputeConvertVolumeToSNORM(textureVolume, datatype, outputDatatype, minIntensityValue, maxIntensityValue, textureOutputVolume, volumeSize);
+}
+
+void _ComputeGradientMap(const GLuint& textureVolume, const VoxelOutputDataType outputDatatype, const GLuint& textureGradient, std::vector<unsigned int>& volumeSize, const float& grad_magnitude_modifier)
+{
+    if (outputDatatype == VoxelOutputDataType::DTYPE_UNORM8)
+        glBindImageTexture(0, textureVolume, 0, GL_TRUE, 0, GL_READ_ONLY, GL_R8);
+    if (outputDatatype == VoxelOutputDataType::DTYPE_UNORM16)
+        glBindImageTexture(0, textureVolume, 0, GL_TRUE, 0, GL_READ_ONLY, GL_R16);
+
+    glBindImageTexture(1, textureGradient, 0, GL_TRUE, 0, GL_READ_WRITE, GL_RGBA8_SNORM);
+
+    unsigned int ubo_block;
+    glGenBuffers(1, &ubo_block);
+    glBindBuffer(GL_UNIFORM_BUFFER, ubo_block);
+    glBufferData(GL_UNIFORM_BUFFER, 4, NULL, GL_STATIC_DRAW);
+    glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo_block);
+    glBindBufferRange(GL_UNIFORM_BUFFER, 0, ubo_block, 0, 4);
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, 4, &grad_magnitude_modifier);
+    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+    unsigned int numWorkGroups[3] = { (unsigned int)ceil((float)volumeSize[0] / 8), (unsigned int)ceil((float)volumeSize[1] / 8), (unsigned int)ceil((float)volumeSize[2] / 8) };
+    glDispatchCompute(numWorkGroups[0], numWorkGroups[1], numWorkGroups[2]);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+
+    glDeleteBuffers(1, &ubo_block);
+}
+void ComputeGradientMap(const ComputeShaderSpirv& shader_compute_gradient, const GLuint& textureVolume, const VoxelOutputDataType outputDatatype, const GLuint& textureGradient, std::vector<unsigned int>& volumeSize, const float& grad_magnitude_modifier)
+{
+    shader_compute_gradient.use();
+    _ComputeGradientMap(textureVolume, outputDatatype, textureGradient, volumeSize, grad_magnitude_modifier);
+}
+
+void _ComputeOccupancyMap(const GLuint& textureVolume, const VoxelOutputDataType outputDatatype, const GLuint& textureGradient, const GLuint& textureITF, const GLuint& textureOccupancyMap, const int* sizeOccupancyMap, const unsigned int& reductionBlockSize, const bool& useITF2D)
+{
+    if (outputDatatype == VoxelOutputDataType::DTYPE_UNORM8)
+        glBindImageTexture(0, textureVolume, 0, GL_TRUE, 0, GL_READ_ONLY, GL_R8);
+    if (outputDatatype == VoxelOutputDataType::DTYPE_UNORM16)
+        glBindImageTexture(0, textureVolume, 0, GL_TRUE, 0, GL_READ_ONLY, GL_R16);
+
+    glBindImageTexture(1, textureGradient, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA8);
+    glBindImageTexture(2, textureITF, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA8);
+    glBindImageTexture(3, textureOccupancyMap, 0, GL_TRUE, 0, GL_READ_WRITE, GL_R8UI);
+
+    unsigned int ubo_block;
+    glGenBuffers(1, &ubo_block);
+    glBindBuffer(GL_UNIFORM_BUFFER, ubo_block);
+    glBufferData(GL_UNIFORM_BUFFER, 20, NULL, GL_STATIC_DRAW);
+    glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo_block);
+    glBindBufferRange(GL_UNIFORM_BUFFER, 0, ubo_block, 0, 20);
+    glm::vec4 vecReductionBlockSize = glm::vec4((float)reductionBlockSize, (float)reductionBlockSize, (float)reductionBlockSize, 0.0f);
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, 16, glm::value_ptr(vecReductionBlockSize));
+    int useITF2D_int = (int)useITF2D;
+    glBufferSubData(GL_UNIFORM_BUFFER, 16, 4, &useITF2D_int);
+
+    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+    unsigned int numWorkGroups[3] = { (unsigned int)ceil((float)sizeOccupancyMap[0] / 8), (unsigned int)ceil((float)sizeOccupancyMap[1] / 8), (unsigned int)ceil((float)sizeOccupancyMap[2] / 8) };
+    glDispatchCompute(numWorkGroups[0], numWorkGroups[1], numWorkGroups[2]);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+
+    glDeleteBuffers(1, &ubo_block);
+}
+void ComputeOccupancyMap(const ComputeShaderSpirv& shader_compute_occupancy, const GLuint& textureVolume, const VoxelOutputDataType outputDatatype, const GLuint& textureGradient, const GLuint& textureITF, const GLuint& textureOccupancyMap, const int* sizeOccupancyMap, const unsigned int& reductionBlockSize, const bool& useITF2D)
+{
+    shader_compute_occupancy.use();
+    _ComputeOccupancyMap(textureVolume, outputDatatype, textureGradient, textureITF, textureOccupancyMap, sizeOccupancyMap, reductionBlockSize, useITF2D);
+}
+
+
+void _ComputePOM(const GLuint& textureVolume, const VoxelOutputDataType outputDatatype, const GLuint& textureGradient, const GLuint& texturePartitionedOccupancyMap, const int* sizeOccupancyMap, const unsigned int& reductionBlockSize, const float& partition_intensity_min = 0, const float& partition_intensity_max = 255)
+{
+    if (outputDatatype == VoxelOutputDataType::DTYPE_UNORM8)
+        glBindImageTexture(0, textureVolume, 0, GL_TRUE, 0, GL_READ_ONLY, GL_R8);
+    if (outputDatatype == VoxelOutputDataType::DTYPE_UNORM16)
+        glBindImageTexture(0, textureVolume, 0, GL_TRUE, 0, GL_READ_ONLY, GL_R16);
+
+    glBindImageTexture(1, textureGradient, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA8);
+    // glBindImageTexture(2, textureITF, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA8);
+    glBindImageTexture(2, texturePartitionedOccupancyMap, 0, GL_TRUE, 0, GL_READ_WRITE, GL_R8UI);
+
+    unsigned int ubo_block;
+    glGenBuffers(1, &ubo_block);
+    glBindBuffer(GL_UNIFORM_BUFFER, ubo_block);
+    glBufferData(GL_UNIFORM_BUFFER, 24, NULL, GL_STATIC_DRAW);
+    glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo_block);
+    glBindBufferRange(GL_UNIFORM_BUFFER, 0, ubo_block, 0, 24);
+    glm::vec4 vecReductionBlockSize = glm::vec4((float)reductionBlockSize, (float)reductionBlockSize, (float)reductionBlockSize, 0.0f);
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, 16, glm::value_ptr(vecReductionBlockSize));
+    glBufferSubData(GL_UNIFORM_BUFFER, 16, 4, &partition_intensity_min);
+    glBufferSubData(GL_UNIFORM_BUFFER, 20, 4, &partition_intensity_max);
+
+    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+    unsigned int numWorkGroups[3] = { (unsigned int)ceil((float)sizeOccupancyMap[0] / 8), (unsigned int)ceil((float)sizeOccupancyMap[1] / 8), (unsigned int)ceil((float)sizeOccupancyMap[2] / 8) };
+    glDispatchCompute(numWorkGroups[0], numWorkGroups[1], numWorkGroups[2]);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS); // (GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
+    glDeleteBuffers(1, &ubo_block);
+}
+void ComputePOM(const ComputeShaderSpirv& shader_compute_partitioned_occupancy, const GLuint& textureVolume, const VoxelOutputDataType outputDatatype, const GLuint& textureGradient, const GLuint& texturePartitionedOccupancyMap, const int* sizeOccupancyMap, const unsigned int& reductionBlockSize, const float& partition_intensity_min = 0, const float& partition_intensity_max = 255)
+{
+    shader_compute_partitioned_occupancy.use();
+    _ComputePOM(textureVolume, outputDatatype, textureGradient, texturePartitionedOccupancyMap, sizeOccupancyMap, reductionBlockSize, partition_intensity_min, partition_intensity_max);
+}
+
+void _ComputeDistanceMap(const GLuint& textureOccupancyMap, const GLuint& textureDistanceMap, const GLuint& textureSwap, const int* sizeOccupancyMap)
+{
+    glBindImageTexture(0, textureDistanceMap, 0, GL_TRUE, 0, GL_READ_WRITE, GL_R8UI);
+    glBindImageTexture(1, textureOccupancyMap, 0, GL_TRUE, 0, GL_READ_WRITE, GL_R8UI);
+
+    unsigned int ubo_block;
+    glGenBuffers(1, &ubo_block);
+    glBindBuffer(GL_UNIFORM_BUFFER, ubo_block);
+    glBufferData(GL_UNIFORM_BUFFER, 4, NULL, GL_STATIC_DRAW);
+    glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo_block);
+    glBindBufferRange(GL_UNIFORM_BUFFER, 0, ubo_block, 0, 4);
+
+
+    unsigned int numWorkGroups[3] = { (unsigned int)ceil((float)sizeOccupancyMap[0] / 8), (unsigned int)ceil((float)sizeOccupancyMap[1] / 8), (unsigned int)ceil((float)sizeOccupancyMap[2] / 8) };
+
+    int stage = 0;
+    // Dispatch 1st stage
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, 4, &stage);
+    glDispatchCompute(numWorkGroups[1], numWorkGroups[2], 1);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+
+    // Dispatch 2nd stage
+    glBindImageTexture(1, textureSwap, 0, GL_TRUE, 0, GL_READ_WRITE, GL_R8UI);
+    stage = 1;
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, 4, &stage);
+    glDispatchCompute(numWorkGroups[0], numWorkGroups[2], 1);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+
+    // Dispatch 3rd stage
+    stage = 2;
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, 4, &stage);
+    glDispatchCompute(numWorkGroups[0], numWorkGroups[1], 1);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+
+    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+    glDeleteBuffers(1, &ubo_block);
+}
+void ComputeDistanceMap(const ComputeShaderSpirv& shader_compute_distance, const GLuint& textureOccupancyMap, const GLuint& textureDistanceMap, const GLuint& textureSwap, const int* sizeOccupancyMap)
+{
+    shader_compute_distance.use();
+    _ComputeDistanceMap(textureOccupancyMap, textureDistanceMap, textureSwap, sizeOccupancyMap);
+}
+
+void _CombinePDMs(const GLuint* texturePartitionedDistanceMaps, const GLuint* textureSwapArray, const GLuint& textureIntermediateDistanceMapOutput, int* sizeOccupancyMap, const unsigned int& numIntensityPartitions, const std::vector<bool> partitionedDistanceMapsToUse, const bool& debugOut = false)
+{
+    using namespace std;
+
+    glBindImageTexture(0, textureSwapArray[0], 0, GL_TRUE, 0, GL_READ_WRITE, GL_R8UI);
+    glBindImageTexture(1, textureSwapArray[1], 0, GL_TRUE, 0, GL_READ_WRITE, GL_R8UI);
+    unsigned int numMapsToCombinePerLaunch = 6;
+    unsigned int numMapsToCombineTotal = 0;
+    for (int i = 0; i < partitionedDistanceMapsToUse.size(); i++)
+        numMapsToCombineTotal += partitionedDistanceMapsToUse[i] == true;
+    int numIterations = 0;
+    if (numMapsToCombineTotal > 0)
+        numIterations = (int)ceil((float)(numMapsToCombineTotal) / (float)(numMapsToCombinePerLaunch));
+    unsigned int idxMapProcessed = 0;
+    unsigned int countSkippedMaps = 0;
+    int j = 0;
+    for (; j < numIterations; j++)
+    {
+        glBindImageTexture(0, textureSwapArray[j % 2], 0, GL_TRUE, 0, GL_READ_WRITE, GL_R8UI);
+        glBindImageTexture(1, textureSwapArray[(j + 1) % 2], 0, GL_TRUE, 0, GL_READ_WRITE, GL_R8UI);
+        unsigned int numMapsToUse = std::min(numMapsToCombinePerLaunch, numMapsToCombineTotal - j * numMapsToCombinePerLaunch);
+        for (unsigned int i = 0; i < numMapsToUse; i++)
+        {
+            while (partitionedDistanceMapsToUse[idxMapProcessed] == false)
+            {
+                idxMapProcessed += 1;
+                countSkippedMaps += 1;
+            }
+            glBindImageTexture(2 + i, texturePartitionedDistanceMaps[idxMapProcessed], 0, GL_TRUE, 0, GL_READ_ONLY, GL_R8UI);
+            idxMapProcessed += 1;
+        }
+
+        // glBindImageTexture(2, textureSubdividedDistanceMaps[1], 0, GL_TRUE, 0, GL_READ_ONLY, GL_R8UI)
+
+        unsigned int ubo_block;
+        glGenBuffers(1, &ubo_block);
+        glBindBuffer(GL_UNIFORM_BUFFER, ubo_block);
+        glBufferData(GL_UNIFORM_BUFFER, 8, NULL, GL_STATIC_DRAW);
+        glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo_block);
+        glBindBufferRange(GL_UNIFORM_BUFFER, 0, ubo_block, 0, 8);
+        int useDistanceValueFromPreviousPass = int(j > 0);
+        glBufferSubData(GL_UNIFORM_BUFFER, 0, 4, &useDistanceValueFromPreviousPass);
+        glBufferSubData(GL_UNIFORM_BUFFER, 4, 4, &numMapsToUse);
+        glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+        unsigned int numWorkGroups[3] = { (unsigned int)ceil((float)sizeOccupancyMap[0] / 8), (unsigned int)ceil((float)sizeOccupancyMap[1] / 8), (unsigned int)ceil((float)sizeOccupancyMap[2] / 8) };
+        glDispatchCompute(numWorkGroups[0], numWorkGroups[1], numWorkGroups[2]);
+        glMemoryBarrier(GL_ALL_BARRIER_BITS);
+
+        glDeleteBuffers(1, &ubo_block);
+    }
+
+    if (debugOut == true)
+    {
+        cout << "number of maps to be skipped according to skip struct: " << partitionedDistanceMapsToUse.size() - numMapsToCombineTotal << endl;
+        cout << "number of skipped distance maps due to itf: " << countSkippedMaps + partitionedDistanceMapsToUse.size() - idxMapProcessed << endl;
+    }
+
+    glCopyImageSubData(textureSwapArray[(j) % 2], GL_TEXTURE_3D, 0, 0, 0, 0, textureIntermediateDistanceMapOutput, GL_TEXTURE_3D, 0, 0, 0, 0, int(sizeOccupancyMap[0]), int(sizeOccupancyMap[1]), int(sizeOccupancyMap[2]));
+}
+void CombinePDMs(const ComputeShaderSpirv& shader_combine_distance_maps, const GLuint* texturePartitionedDistanceMaps, const GLuint* textureSwapArray, const GLuint& textureIntermediateDistanceMapOutput, int* sizeOccupancyMap, const unsigned int& numIntensityPartitions, const std::vector<bool> partitionedDistanceMapsToUse, const bool& debugOut = false)
+{
+    shader_combine_distance_maps.use();
+    _CombinePDMs(texturePartitionedDistanceMaps, textureSwapArray, textureIntermediateDistanceMapOutput, sizeOccupancyMap, numIntensityPartitions, partitionedDistanceMapsToUse, debugOut);
+}
+
+
+void _ComputeVoxelHistogram(const GLuint& textureVolume, const VoxelOutputDataType outputDatatype, const GLuint& textureHistogram, std::vector<unsigned int>& volumeSize)
+{
+    if (outputDatatype == VoxelOutputDataType::DTYPE_UNORM8)
+        glBindImageTexture(0, textureVolume, 0, GL_TRUE, 0, GL_READ_ONLY, GL_R8);
+    if (outputDatatype == VoxelOutputDataType::DTYPE_UNORM16)
+        glBindImageTexture(0, textureVolume, 0, GL_TRUE, 0, GL_READ_ONLY, GL_R16);
+    glBindImageTexture(1, textureHistogram, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_R32UI);
+
+    unsigned int numWorkGroups[3] = { (unsigned int)ceil((float)volumeSize[0] / 8), (unsigned int)ceil((float)volumeSize[1] / 8), (unsigned int)ceil((float)volumeSize[2] / 8) };
+    glDispatchCompute(numWorkGroups[0], numWorkGroups[1], numWorkGroups[2]);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+}
+void ComputeVoxelHistogram(const ComputeShaderSpirv& shader_compute_histogram, const GLuint& textureVolume, const VoxelOutputDataType outputDatatype, const GLuint& textureHistogram, std::vector<unsigned int>& volumeSize)
+{
+    shader_compute_histogram.use();
+    _ComputeVoxelHistogram(textureVolume, outputDatatype, textureHistogram, volumeSize);
+}
+```
+
+### src/LaunchComputeShaders.h
+```
+/* Copyright Michael Rauter
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#pragma once
+
+#include "./common/ComputeShaderSpirv.h"
+
+#include <glad/gl.h>
+#include <math.h>
+#include <vector>
+
+#include <glm/vec4.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
+typedef enum VoxelDataType
+{
+    DTYPE_UNORM = 0,
+    DTYPE_INT16 = 1,
+    DTYPE_UINT16 = 2,
+    DTYPE_UINT8 = 3
+} VoxelDataType;
+
+typedef enum VoxelOutputDataType
+{
+    DTYPE_UNORM8 = 0,
+    DTYPE_UNORM16 = 1
+} VoxelOutputDataType;
+
+void _ComputeConvertVolumeToSNORM(const GLuint& textureVolume, const VoxelDataType datatype, const VoxelOutputDataType outputDatatype, const VoxelOutputDataType outputDataType, const float minIntensityValue, const float maxIntensityValue, const GLuint& textureOutputVolume, std::vector<unsigned int>& volumeSize);
+void ComputeConvertVolumeToSNORM(const ComputeShaderSpirv& shader_compute_convert_volume_to_SNORM, const GLuint& textureVolume, const VoxelDataType datatype, const VoxelOutputDataType outputDatatype, const float minIntensityValue, const float maxIntensityValue, const GLuint& textureOutputVolume, std::vector<unsigned int>& volumeSize);
+
+void _ComputeGradientMap(const GLuint& textureVolume, const VoxelOutputDataType outputDatatype, const GLuint& textureGradient, std::vector<unsigned int>& volumeSize, const float& grad_magnitude_modifier);
+void ComputeGradientMap(const ComputeShaderSpirv& shader_compute_gradient, const GLuint& textureVolume, const VoxelOutputDataType outputDatatype, const GLuint& textureGradient, std::vector<unsigned int>& volumeSize, const float& grad_magnitude_modifier);
+
+void _ComputeOccupancyMap(const GLuint& textureVolume, const VoxelOutputDataType outputDatatype, const GLuint& textureGradient, const GLuint& textureITF, const GLuint& textureOccupancyMap, const int* sizeOccupancyMap, const unsigned int& reductionBlockSize, const bool& useITF2D);
+void ComputeOccupancyMap(const ComputeShaderSpirv& shader_compute_occupancy, const GLuint& textureVolume, const VoxelOutputDataType outputDatatype, const GLuint& textureGradient, const GLuint& textureITF, const GLuint& textureOccupancyMap, const int* sizeOccupancyMap, const unsigned int& reductionBlockSize, const bool& useITF2D);
+
+void _ComputePOM(const GLuint& textureVolume, const VoxelOutputDataType outputDatatype, const GLuint& textureGradient, const GLuint& texturePartitionedOccupancyMap, const int* sizeOccupancyMap, const unsigned int& reductionBlockSize, const float& partition_intensity_min, const float& partition_intensity_max);
+void ComputePOM(const ComputeShaderSpirv& shader_compute_partitioned_occupancy, const GLuint& textureVolume, const VoxelOutputDataType outputDatatype, const GLuint& textureGradient, const GLuint& texturePartitionedOccupancyMap, const int* sizeOccupancyMap, const unsigned int& reductionBlockSize, const float& partition_intensity_min, const float& partition_intensity_max);
+
+void _ComputeDistanceMap(const GLuint& textureOccupancyMap, const GLuint& textureDistanceMap, const GLuint& textureSwap, const int* sizeOccupancyMap);
+void ComputeDistanceMap(const ComputeShaderSpirv& shader_compute_distance, const GLuint& textureOccupancyMap, const GLuint& textureDistanceMap, const GLuint& textureSwap, const int* sizeOccupancyMap);
+
+void _CombinePDMs(const GLuint* texturePartitionedDistanceMaps, const GLuint* textureSwapArray, const GLuint& textureIntermediateDistanceMapOutput, int* sizeOccupancyMap, const unsigned int& numIntensityPartitions, const std::vector<bool> partitionedDistanceMapsToUse, const bool& debugOut);
+void CombinePDMs(const ComputeShaderSpirv& shader_combine_distance_maps, const GLuint* texturePartitionedDistanceMaps, const GLuint* textureSwapArray, const GLuint& textureIntermediateDistanceMapOutput, int* sizeOccupancyMap, const unsigned int& numIntensityPartitions, const std::vector<bool> partitionedDistanceMapsToUse, const bool& debugOut);
+
+void _ComputeVoxelHistogram(const GLuint& textureVolume, const VoxelOutputDataType outputDatatype, const GLuint& textureHistogram, std::vector<unsigned int>& volumeSize);
+void ComputeVoxelHistogram(const ComputeShaderSpirv& shader_compute_histogram, const GLuint& textureVolume, const VoxelOutputDataType outputDatatype, const GLuint& textureHistogram, std::vector<unsigned int>& volumeSize);
+```
+
+### src/RenderGeometry.h
+```
+/* Copyright Michael Rauter
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#pragma once
+
+#include <glad/gl.h>
+
+class RenderGeometry {
+public:
+	GLuint VAO_cube = 0;
+	GLuint VBO_cube = 0;
+	GLuint EBO_cube = 0;
+
+private:
+	float cube_vertices[24] = {
+		-0.5f, -0.5f,  0.5f,
+		 0.5f, -0.5f,  0.5f,
+		 0.5f,  0.5f,  0.5f,
+		-0.5f,  0.5f,  0.5f,
+		-0.5f, -0.5f, -0.5f,
+		 0.5f, -0.5f, -0.5f,
+		 0.5f,  0.5f, -0.5f,
+		-0.5f,  0.5f, -0.5f
+	};
+
+	unsigned int cube_indices[36] = {
+		0, 1, 2, 2, 3, 0,
+		5, 4, 7, 7, 6, 5,
+		4, 5, 1, 1, 0, 4,
+		6, 7, 3, 3, 2, 6,
+		5, 6, 2, 2, 1, 5,
+		7, 4, 0, 0, 3, 7
+	};
+
+public:
+	RenderGeometry()
+	{
+		glGenVertexArrays(1, &VAO_cube);
+		glBindVertexArray(VAO_cube);
+
+		glGenBuffers(1, &VBO_cube);
+		glBindBuffer(GL_ARRAY_BUFFER, VBO_cube);
+		glBufferData(GL_ARRAY_BUFFER, 96, cube_vertices, GL_STATIC_DRAW);
+
+		glGenBuffers(1, &EBO_cube);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO_cube);
+		glBufferData(GL_ELEMENT_ARRAY_BUFFER, 144, cube_indices, GL_STATIC_DRAW);
+	}
+
+	~RenderGeometry()
+	{
+		glDeleteVertexArrays(1, &VAO_cube);
+		glDeleteBuffers(1, &VBO_cube);
+		glDeleteBuffers(1, &EBO_cube);
+	}
+};
+```
+
+### src/Volume.h
+```
+/* Copyright Michael Rauter
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#pragma once
+
+#include "SimpleITK.h"
+#include "sitkImageFileReader.h"
+#include "sitkGreaterEqualImageFilter.h"
+#include "sitkLessEqualImageFilter.h"
+#include "sitkAndImageFilter.h"
+#include "sitkStatisticsImageFilter.h"
+
+#include <iomanip>
+
+namespace sitk = itk::simple;
+
+class Volume {
+private:
+	class ProgressUpdate
+		: public sitk::Command
+	{
+	public:
+		ProgressUpdate(const sitk::ProcessObject& po, const Volume& refV)
+			: m_Process(po), refVolume(refV)
+		{}
+
+		void Execute() override
+		{
+			refVolume.PropagateLoadProgress(m_Process.GetName(), m_Process.GetProgress());
+		}
+	private:
+		const sitk::ProcessObject& m_Process;
+		const Volume& refVolume;
+	};
+
+	void (*callbackOnLoadProgress)(const std::string caption, float progress) = nullptr;
+	void (*callbackLoadProgressStart)() = nullptr;
+	void (*callbackLoadProgressStop)() = nullptr;
+
+public:
+	sitk::Image *volume;	
+	sitk::Image *volumeFloat;
+	sitk::Image volumeNative;
+	sitk::Image volumeConverted;
+	sitk::Image volumeUint16;
+
+	double originalMinValue = 0.0;
+	double originalMaxValue = 0.0;
+
+	double minIntensityValue = 0.0;
+	double maxIntensityValue = 0.0;
+
+	Volume(	const std::vector<std::string>& inputImageFileNames,
+			const std::string& strImageIOType = "",
+			void (*funCallbackOnLoadProgress)(const std::string caption, float progress) = nullptr,
+			void (*funCallbackLoadProgressStart)() = nullptr,
+			void (*funCallbackLoadProgressStop)() = nullptr
+		)
+	{
+		if (funCallbackLoadProgressStart != nullptr)
+		{
+			callbackLoadProgressStart = funCallbackLoadProgressStart;
+			funCallbackLoadProgressStart();
+		}
+		if (funCallbackLoadProgressStop != nullptr)
+		{
+			callbackLoadProgressStop = funCallbackLoadProgressStop;
+		}
+		if (funCallbackOnLoadProgress != nullptr)
+		{
+			callbackOnLoadProgress = funCallbackOnLoadProgress;
+		}
+
+		std::unique_ptr<sitk::ImageReaderBase> reader;
+		std::unique_ptr <ProgressUpdate> progressUpdate;
+
+		if (inputImageFileNames.size() == 1)
+		{
+			reader = std::make_unique<sitk::ImageFileReader>();
+			sitk::ImageFileReader* imageFileReader = dynamic_cast<sitk::ImageFileReader*>(reader.get());
+			imageFileReader->SetFileName(inputImageFileNames[0]);
+			imageFileReader->SetOutputPixelType(sitk::sitkUnknown);
+			imageFileReader->SetImageIO("");
+			sitk::ProcessObject *po = dynamic_cast<sitk::ProcessObject*>(imageFileReader);
+			progressUpdate = std::make_unique<ProgressUpdate>(*po, *this);
+			imageFileReader->AddCommand(sitk::sitkProgressEvent, *progressUpdate);
+		}
+		else
+		{
+			reader = std::make_unique<sitk::ImageSeriesReader>();
+			sitk::ImageSeriesReader* imageSeriesReader = dynamic_cast<sitk::ImageSeriesReader*>(reader.get());
+			imageSeriesReader->SetFileNames(inputImageFileNames);
+			sitk::ProcessObject* po = dynamic_cast<sitk::ProcessObject*>(imageSeriesReader);
+			progressUpdate = std::make_unique<ProgressUpdate>(*po, *this);
+			imageSeriesReader->AddCommand(sitk::sitkProgressEvent, *progressUpdate);
+		}
+		volumeNative = reader->Execute();
+
+		std::vector<unsigned int> padding = { 0,0,0 };
+		std::vector<unsigned int> initialVolumeDims = volumeNative.GetSize();
+		for (unsigned int i = 0; i < volumeNative.GetDimension(); i++)
+			padding[i] = initialVolumeDims[i] % 2;
+
+		if (padding[0] > 0 || padding[1] > 0 || padding[2] > 0)
+			volumeNative = sitk::ConstantPad(volumeNative, { 0,0,0 }, padding, 0.0);
+
+		sitk::MinimumMaximumImageFilter minMaxFilter = sitk::MinimumMaximumImageFilter();
+		minMaxFilter.Execute(volumeNative);
+		double highestIntensity = minMaxFilter.GetMaximum();
+		double lowestIntensity = minMaxFilter.GetMinimum();
+
+		volume = &volumeNative;
+		std::vector<std::string> metadata = volume->GetMetaDataKeys();
+		originalMinValue = lowestIntensity;
+		originalMaxValue = highestIntensity;
+		minIntensityValue = lowestIntensity;
+		maxIntensityValue = highestIntensity;
+
+		itk::simple::PixelIDValueEnum pixelID = GetPixelID();
+		if (pixelID == itk::simple::PixelIDValueEnum::sitkFloat32 || pixelID == itk::simple::PixelIDValueEnum::sitkFloat64)
+		{
+			volumeFloat = &volumeNative;
+
+			sitk::SubtractImageFilter subtractImageFilter = sitk::SubtractImageFilter();
+			*volumeFloat = subtractImageFilter.Execute(*volumeFloat, lowestIntensity);
+
+			double intensityRangeSpan = highestIntensity - lowestIntensity + 1;
+
+			double factor = (double)(UINT16_MAX) / intensityRangeSpan;
+			sitk::MultiplyImageFilter multiplyFilter = sitk::MultiplyImageFilter();
+			*volumeFloat = multiplyFilter.Execute(*volumeFloat, factor);
+
+			volumeUint16 = sitk::Cast(*volumeFloat, sitk::PixelIDValueEnum::sitkUInt16);
+
+			volume = &volumeUint16;
+
+			minIntensityValue = 0.0;
+			maxIntensityValue = (double)(UINT16_MAX);
+		}
+
+		if (funCallbackLoadProgressStop != nullptr)
+		{
+			funCallbackLoadProgressStop();
+		}
+	}
+
+	void PermuteAxes(std::vector<unsigned int> order) {
+		*volume = sitk::PermuteAxes(*volume, order);
+	}
+
+	void Flip(std::vector<bool> flipAxes, bool flipAboutOrigin = false) {
+		*volume = sitk::Flip(*volume, flipAxes, flipAboutOrigin);
+	}
+
+	void GetHistogram2(std::vector<uint32_t>& hist, std::vector<uint32_t>& edges)
+	{
+		hist.clear();
+		edges.clear();
+
+		int numBins = 256;
+
+		edges.resize(numBins + 1);
+		for (int i = 0; i < numBins + 1; i++)
+			edges[i] = i;
+
+		hist.resize(numBins);
+
+		for (int i = 0; i < 256; i++)
+		{
+			sitk::GreaterEqualImageFilter ge_filter = sitk::GreaterEqualImageFilter();
+			sitk::LessEqualImageFilter le_filter = sitk::LessEqualImageFilter();
+			double lower = (minIntensityValue + (i/256.0) * (maxIntensityValue - minIntensityValue + 1));
+			double upper = (minIntensityValue + ((i+1)/256.0) * (maxIntensityValue - minIntensityValue + 1));
+			sitk::Image res = ge_filter.Execute(*volume, lower);
+			sitk::Image res2 = le_filter.Execute(*volume, upper);
+
+			sitk::AndImageFilter and_filter = sitk::AndImageFilter();
+			res = and_filter.Execute(res, res2);
+
+
+			sitk::StatisticsImageFilter statisticsFilter = sitk::StatisticsImageFilter();
+			statisticsFilter.Execute(res);
+			double histCount = statisticsFilter.GetSum();
+
+			hist[i] = (uint32_t)histCount;
+		}
+	}
+
+	void GetHistogram(std::vector<uint32_t> &hist, std::vector<uint32_t> &edges)
+	{
+		hist.clear();
+		edges.clear();
+
+		int numBins = 256;
+		
+		edges.resize(numBins + 1);
+		for (int i = 0; i < numBins + 1; i++)
+			edges[i] = i;
+
+		hist.resize(numBins);
+
+		if (callbackLoadProgressStart != nullptr)
+			callbackLoadProgressStart();		
+
+		int progress_percentage = 0;
+		callbackOnLoadProgress("computing voxel histogram", progress_percentage);
+		for (int i = 0; i < volume->GetNumberOfPixels(); i++)
+		{
+			int current_progress = (int)((float)i / (float)volume->GetNumberOfPixels() * 100.0f);
+			if (current_progress > progress_percentage)
+			{
+				progress_percentage = current_progress;
+				callbackOnLoadProgress("computing voxel histogram", progress_percentage);
+			}
+			
+			uint32_t idx;
+			double value;
+			switch (GetPixelID()) {
+			case itk::simple::PixelIDValueEnum::sitkUInt8:
+				value = (double)(volume->GetBufferAsUInt8()[i]);
+				idx = (uint32_t)(value);
+				break;
+			case itk::simple::PixelIDValueEnum::sitkInt8:
+				value = (double)(volume->GetBufferAsInt8()[i]);
+				idx = (uint32_t)((value - minIntensityValue) / (maxIntensityValue - minIntensityValue + 1) * 256);
+				break;
+			case itk::simple::PixelIDValueEnum::sitkUInt16:
+				value = (double)(volume->GetBufferAsUInt16()[i]);
+				idx = (uint32_t)((value - minIntensityValue) / (maxIntensityValue - minIntensityValue + 1) * 256);
+				break;
+			case itk::simple::PixelIDValueEnum::sitkInt16:
+				value = (double)(volume->GetBufferAsInt16()[i]);
+				idx = (uint32_t)((value - minIntensityValue) / (maxIntensityValue - minIntensityValue + 1) * 256);
+				break;
+			case itk::simple::PixelIDValueEnum::sitkFloat32:
+				value = (double)(volume->GetBufferAsFloat()[i]);
+				idx = (uint32_t)((value - minIntensityValue) / (maxIntensityValue - minIntensityValue + 1) * 256);
+				break;
+			}
+
+			hist[idx]++;
+		}
+
+		if (callbackLoadProgressStop != nullptr)
+			callbackLoadProgressStop();
+	}
+
+	void* GetBuffer()
+	{
+		itk::simple::PixelIDValueEnum pixelID = GetPixelID();
+		switch (pixelID)
+		{
+		case itk::simple::PixelIDValueEnum::sitkUInt16:
+			return(volume->GetBufferAsUInt16());
+		case itk::simple::PixelIDValueEnum::sitkInt16:
+			return(volume->GetBufferAsInt16());
+		case itk::simple::PixelIDValueEnum::sitkUInt8:
+			return(volume->GetBufferAsUInt8());
+		default:
+			throw std::exception("unsupported volume data type encountered...");
+		}		
+	}
+
+	void PropagateLoadProgress(const std::string caption, float progress) const
+	{
+		if (callbackOnLoadProgress != nullptr)
+			callbackOnLoadProgress(caption, progress);
+	}
+
+	std::vector<unsigned int> GetVolumeSize() { return(volume->GetSize()); }
+
+	std::vector<double> GetVoxelSize() { return(volume->GetSpacing()); }
+
+	std::vector<double> GetDirection() { return(volume->GetDirection()); }
+
+	itk::simple::PixelIDValueEnum GetPixelID() { return(volume->GetPixelID()); }
+	std::string GetPixelIDTypeAsString() { return(volume->GetPixelIDTypeAsString()); }
+};
+```
+
+### src/DVR_ESS_PDM/DVR_ESS_PDM.cpp
+```
+﻿/* Copyright Michael Rauter
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "SimpleITK.h""
+#include "sitkImageFileReader.h""
+
+#include <memory>
+#include <math.h>
+#include <vector>
+#include <iostream>
+#include <string>
+#include <format>
+#include <windows.h>
+#include <functional>
+
+#include <glad/gl.h>
+#include <GLFW/glfw3.h>
+
+#include "../../libs_extern/toml/toml.hpp"
+
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
+#include "../common/ShaderSpirv.h"
+#include "../common/ComputeShaderSpirv.h"
+#include "../common/TextureHelper.h"
+#include "../common/Camera.h"
+#include "../LaunchComputeShaders.h"
+#include "../RenderGeometry.h"
+#include "../Volume.h"
+#include "../ITF.h"
+
+#define FILENAME_INI "./config.ini"
+#define DEFAULT_FILENAME_INPUT_VOLUME "./volumes/tooth.nrrd"
+#define DEFAULT_FILETYPE_INPUT_VOLUME "NrrdImageIO"
+#define DEFAULT_FILENAME_ITF "./itfs/default.itf"
+#define DEFAULT_BLOCKSIZE 4
+#define DEFAULT_NUM_INTENSITY_PARTITIONS 32
+#define DEFAULT_USE_SPECIAL_PARTITION_FOR_ZERO_INTENSITY false
+#define DEFAULT_NUM_TIMING_ITERATIONS 1
+
+#define DEFAULT_BACKGROUND_COLOR_R 0.0f
+#define DEFAULT_BACKGROUND_COLOR_G 0.0f
+#define DEFAULT_BACKGROUND_COLOR_B 0.0f
+
+#define PI 3.1415927f
+
+std::string inputImageFileName = DEFAULT_FILENAME_INPUT_VOLUME;
+std::string fileformat = DEFAULT_FILETYPE_INPUT_VOLUME;
+std::string filename_itf = DEFAULT_FILENAME_ITF;
+std::string filename_itf2 = DEFAULT_FILENAME_ITF;
+bool force_volume_datatype_unorm8 = false;
+bool precompute_gradient = true;
+bool useFullScreen = false;
+int enableTricubicFiltering = false;
+int reductionBlockSize = DEFAULT_BLOCKSIZE;
+unsigned int numIntensityPartitions = DEFAULT_NUM_INTENSITY_PARTITIONS;
+int numTimingIterations = DEFAULT_NUM_TIMING_ITERATIONS;
+bool useSpecialPartitionForZeroIntensity = DEFAULT_USE_SPECIAL_PARTITION_FOR_ZERO_INTENSITY;
+bool useDemoAndTimingsMode = false;
+double timingPeriodInSec = 10.0;
+float rotationsPerTimingPeriod = 2.0;
+float demoAndTimingsModeCameraDistance = 0.75f;
+float demoAndTimingsModeCameraHeight = 0.0f;
+float demoAndTimingsModeCameraPitch = 0.0f;
+bool disablePartitionedDistanceMapOptimization;
+float itfBlendTime = 3.0f;
+
+int itfInterpolate = 0; // 0...don't interpolate, 1...interpolate to ITF1, 2...interpolate to ITF2
+float t_itfInterpolation = 0.0f;
+
+float initialVolumeRotationX = 0.0f;
+float initialVolumeRotationY = 0.0f;
+float initialVolumeRotationZ = 0.0f;
+
+float background_color_r = DEFAULT_BACKGROUND_COLOR_R;
+float background_color_g = DEFAULT_BACKGROUND_COLOR_G;
+float background_color_b = DEFAULT_BACKGROUND_COLOR_B;
+
+double PCFreq = 0.0;
+__int64 CounterStart = 0;
+
+void StartCounter()
+{
+	LARGE_INTEGER li;
+	if (!QueryPerformanceFrequency(&li))
+		std::cout << "QueryPerformanceFrequency failed!\n";
+
+	PCFreq = double(li.QuadPart) / 1000.0;
+
+	QueryPerformanceCounter(&li);
+	CounterStart = li.QuadPart;
+}
+double GetCounter()
+{
+	LARGE_INTEGER li;
+	QueryPerformanceCounter(&li);
+	return double(li.QuadPart - CounterStart) / PCFreq;
+}
+
+template<class ReturnType, class... Ts>
+ReturnType DoFunctionTimings(void* function, std::string text, int numTimingIterations, const Ts&... args) {
+	reinterpret_cast<ReturnType(*)(Ts...)>(function)(args...);
+	double summedTime = 0.0;
+	for (int i = 0; i < numTimingIterations; i++)
+	{
+		glFlush();
+		glFinish();
+		StartCounter();
+		reinterpret_cast<ReturnType(*)(Ts...)>(function)(args...);
+		glFlush();
+		glFinish();
+		double elapsed_time = GetCounter();
+		summedTime += elapsed_time;		
+	}
+	std::cout << text << " mean computation took (average of " << numTimingIterations << " iterations) " << summedTime / numTimingIterations << " msecs\n";
+}
+
+using namespace std;
+namespace sitk = itk::simple;
+
+Camera cam;
+
+bool moveLeft, moveRight, moveForward, moveBackward = (false, false, false, false);
+double lastTimeMovement, deltaTime = 0.0;
+bool first_mouse = true;
+double lastX, lastY;
+bool first_movement = true;
+
+int window_width = 1280;
+int window_height = 720;
+float fov = 60;
+
+glm::mat4 projection;
+
+struct ShaderParams {
+	int ditheringMode = 2; // 0... dithering off, 1... procedurally generated, 2... noise texture
+	int renderContentType = 0; // 0... volume rendering, 1... volume bounding box front faces, 2... volume bounding box back faces, 3... acceleration structure, 4... voxel gradient (only visualized, if lighting is incorporated into rendering)
+	int essType = 2; // 0... no ess, 1... block ess, 2... distance map based ess
+	int earlyRayTermination = 1;
+	int gradientType = 0; // 0... on-the-fly, 1... use precomputed gradient
+	int reuseNormals = 1;
+	float samplingFactor = 1.0f;
+	float gamma = 1.0f;
+	float lightshadingFactor = 0.0f;
+	float lightDirComponentX = -0.5f;
+	float lightDirComponentY = 1.0f;
+	float lightDirComponentZ = 0.25f;
+	float lightAmbientFactor = 0.2f;
+	float lightDiffuseFactor = 1.0f;
+	float lightSpecularFactor = 1.0f;
+	float lightSpecularShininess = 16.0f;
+};
+ShaderParams shaderParams;
+
+GLuint textureNoise;
+sitk::Image imgNoise;
+
+void UpdateNoiseImage(sitk::Image &imgNoise)
+{
+	uint8_t* bufferNoise = imgNoise.GetBufferAsUInt8();
+	for (unsigned int i = 0; i < imgNoise.GetWidth() * imgNoise.GetHeight(); i++)
+		bufferNoise[i] = rand() % 256;
+}
+
+void WindowResizeCallback(GLFWwindow* window, int width, int height)
+{
+	glViewport(0, 0, width, height);
+	projection = glm::perspective((float)glm::radians(fov), (float)width / (float)height, 0.3f, 100.0f);
+	window_width = width;
+	window_height = height;
+
+	sitk::Image imgNoise = sitk::Image(width, height, sitk::sitkUInt8);
+	UpdateNoiseImage(imgNoise);
+	glBindTexture(GL_TEXTURE_2D, textureNoise);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, width, height, 0, GL_RED, GL_UNSIGNED_BYTE, imgNoise.GetBufferAsUInt8());
+
+	first_mouse = true;
+}
+
+void KeyInputCallback(GLFWwindow* window, int key, int scancode, int action, int mods)
+{
+	if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
+		glfwSetWindowShouldClose(window, 1);
+
+	if (!useDemoAndTimingsMode)
+	{
+		if (key == GLFW_KEY_W && action == GLFW_PRESS)
+			moveForward = true;
+		else if (key == GLFW_KEY_W && action == GLFW_RELEASE)
+			moveForward = false;
+		if (key == GLFW_KEY_S && action == GLFW_PRESS)
+			moveBackward = true;
+		else if (key == GLFW_KEY_S && action == GLFW_RELEASE)
+			moveBackward = false;
+		if (key == GLFW_KEY_A && action == GLFW_PRESS)
+			moveLeft = true;
+		else if (key == GLFW_KEY_A && action == GLFW_RELEASE)
+			moveLeft = false;
+		if (key == GLFW_KEY_D && action == GLFW_PRESS)
+			moveRight = true;
+		else if (key == GLFW_KEY_D && action == GLFW_RELEASE)
+			moveRight = false;
+	}
+
+	if (key == GLFW_KEY_1 && action == GLFW_PRESS)
+		shaderParams.renderContentType = (shaderParams.renderContentType + 1) % 5;
+	if (key == GLFW_KEY_2 && action == GLFW_PRESS)
+		shaderParams.ditheringMode = (shaderParams.ditheringMode + 1) % 3;
+	if (key == GLFW_KEY_3 && action == GLFW_PRESS)
+		shaderParams.earlyRayTermination = (shaderParams.earlyRayTermination + 1) % 2;
+	if (key == GLFW_KEY_4 && action == GLFW_PRESS)
+		shaderParams.essType = (shaderParams.essType + 1) % 3;
+	if (key == GLFW_KEY_5 && action == GLFW_PRESS)
+	{
+		shaderParams.lightshadingFactor = (float)((int)(shaderParams.lightshadingFactor * 10.0f) + 1) / 10.0f;
+		if (shaderParams.lightshadingFactor > 1.0f)
+			shaderParams.lightshadingFactor = 0.0f;
+	}
+	if (key == GLFW_KEY_6 && action == GLFW_PRESS)
+		shaderParams.gradientType = (shaderParams.gradientType + 1) % 2;
+	if (key == GLFW_KEY_7 && action == GLFW_PRESS)
+		enableTricubicFiltering = (enableTricubicFiltering + 1) % 2;
+	if (key == GLFW_KEY_8 && action == GLFW_PRESS)
+		shaderParams.reuseNormals = (shaderParams.reuseNormals + 1) % 2;
+	if (key == GLFW_KEY_9 && action == GLFW_PRESS)
+	{
+		shaderParams.lightDiffuseFactor = shaderParams.lightDiffuseFactor + 1.0;
+		if (shaderParams.lightDiffuseFactor > 10.0f)
+			shaderParams.lightDiffuseFactor = 1.0f;
+	}
+	if (key == GLFW_KEY_0 && action == GLFW_PRESS)
+	{
+		shaderParams.lightSpecularFactor = shaderParams.lightSpecularFactor + 1.0;
+		if (shaderParams.lightSpecularFactor > 10.0f)
+			shaderParams.lightSpecularFactor = 1.0f;
+	}
+	if (key == GLFW_KEY_F1 && action == GLFW_PRESS)
+	{
+		if ((itfInterpolate == 0) && (t_itfInterpolation == 1.0f))
+		{
+			itfInterpolate = 1;
+			t_itfInterpolation = 1.0f;
+		}
+	}
+	if (key == GLFW_KEY_F2 && action == GLFW_PRESS)
+	{
+		if ((itfInterpolate == 0) && (t_itfInterpolation == 0.0f))
+		{
+			itfInterpolate = 2;
+			t_itfInterpolation = 0.0f;
+		}
+	}
+}
+
+void MouseLookCallback(GLFWwindow* window, double xpos, double ypos) {
+
+	if (first_mouse) {
+		lastX = xpos;
+		lastY = ypos;
+		first_mouse = false;
+	}
+
+	double xoffset = xpos - lastX;
+	double yoffset = lastY - ypos;
+
+	lastX = xpos;
+	lastY = ypos;
+
+	cam.ProcessMouseMovement(xoffset, yoffset, true);
+}
+
+void DoMovement() {
+	if (first_movement) {
+		lastTimeMovement = glfwGetTime();
+		first_movement = false;
+		return;
+	}
+
+	if (moveLeft)
+		cam.ProcessKeyboard(Camera::Camera_Movement::LEFT, (float)deltaTime * 1.0f);
+	if (moveRight)
+		cam.ProcessKeyboard(Camera::Camera_Movement::RIGHT, (float)deltaTime * 1.0f);
+	if (moveForward)
+		cam.ProcessKeyboard(Camera::Camera_Movement::FORWARD, (float)deltaTime * 1.0f);
+	if (moveBackward)
+		cam.ProcessKeyboard(Camera::Camera_Movement::BACKWARD, (float)deltaTime * 1.0f);
+	
+	deltaTime = glfwGetTime() - lastTimeMovement;
+	lastTimeMovement = glfwGetTime();
+}
+
+int main(int argc, char* argv[])
+{
+	std::string filenameIniFile = std::string(FILENAME_INI);
+	if (argc > 1)
+		filenameIniFile = std::string(argv[1]);
+
+	toml::table tbl;
+	try
+	{
+		tbl = toml::parse_file(filenameIniFile);
+		if (auto optionalValue = tbl["settings"]["filename_input_volume"].value<string>())
+			inputImageFileName = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["filetype_input_volume"].value<string>())
+			fileformat = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["filename_itf"].value<string>())
+			filename_itf = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["filename_itf2"].value<string>())
+			filename_itf2 = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["initialVolumeRotation"][0].value<float>())
+			initialVolumeRotationX = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["initialVolumeRotation"][1].value<float>())
+			initialVolumeRotationY = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["initialVolumeRotation"][2].value<float>())
+			initialVolumeRotationZ = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["force_volume_datatype_unorm8"].value<bool>())
+			force_volume_datatype_unorm8 = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["precompute_gradient"].value<bool>())
+			precompute_gradient = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["viewport_width"].value<int>())
+			window_width = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["viewport_height"].value<int>())
+			window_height = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["use_fullscreen"].value<bool>())
+			useFullScreen = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["enableTricubicFiltering"].value<int>())
+			enableTricubicFiltering = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["blocksize"].value<int>())
+			reductionBlockSize = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["disable_partitioned_distancemap_optimization"].value<bool>())
+			disablePartitionedDistanceMapOptimization = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["num_intensity_partitions"].value<unsigned int>())
+			numIntensityPartitions = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["use_special_partition_for_zero_intensity"].value<bool>())
+			useSpecialPartitionForZeroIntensity = optionalValue.value();	
+		if (auto optionalValue = tbl["settings"]["use_demo_and_timings_mode"].value<bool>())
+			useDemoAndTimingsMode = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["timing_period_in_sec"].value<double>())
+			timingPeriodInSec = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["rotations_per_timing_period"].value<float>())
+			rotationsPerTimingPeriod = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["demo_and_timings_mode_camera_distance"].value<float>())
+			demoAndTimingsModeCameraDistance = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["demo_and_timings_mode_camera_height"].value<float>())
+			demoAndTimingsModeCameraHeight = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["demo_and_timings_mode_camera_pitch"].value<float>())
+			demoAndTimingsModeCameraPitch = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["num_timing_iterations"].value<int>())
+			numTimingIterations = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["itf_blend_time"].value<float>())
+			itfBlendTime = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["background_color"][0].value<float>())
+			background_color_r = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["background_color"][1].value<float>())
+			background_color_g = optionalValue.value();
+		if (auto optionalValue = tbl["settings"]["background_color"][2].value<float>())
+			background_color_b = optionalValue.value();
+	}
+	catch (const toml::parse_error& err)
+	{
+		std::cerr << "Parsing of ini-file failed:\n" << err << "\n";
+		return 1;
+	}
+
+	try
+	{
+		lastX, lastY = window_width / 2, window_height / 2;
+
+		if (!glfwInit())
+			return(-1);
+
+		GLFWmonitor* glfwMonitor = NULL;
+		if (useFullScreen)
+			glfwMonitor = glfwGetPrimaryMonitor();
+		GLFWwindow* window = glfwCreateWindow(window_width, window_height, "Volume Rendering with C++", glfwMonitor, NULL);
+		glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+		glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
+
+		glfwMakeContextCurrent(window);
+
+		if (!gladLoadGL(glfwGetProcAddress))
+		{
+			throw(std::string("Failed to initialize GLAD"));
+		}
+
+		// load shader render_volume program
+		ShaderSpirv shader_render_volume("shaders/vs_render_volume.spv", "shaders/fs_render_volume.spv");
+		// load compute shaders
+		ComputeShaderSpirv computeshader_convert_volume_to_unorm8_from_int16 = ComputeShaderSpirv("shaders/cs_convert_volume_to_unorm8_from_dtype_int16.spv");
+		ComputeShaderSpirv computeshader_convert_volume_to_unorm16_from_int16 = ComputeShaderSpirv("shaders/cs_convert_volume_to_unorm16_from_dtype_int16.spv");
+		ComputeShaderSpirv computeshader_convert_volume_to_unorm8_from_uint16 = ComputeShaderSpirv("shaders/cs_convert_volume_to_unorm8_from_dtype_uint16.spv");
+		ComputeShaderSpirv computeshader_convert_volume_to_unorm16_from_uint16 = ComputeShaderSpirv("shaders/cs_convert_volume_to_unorm16_from_dtype_uint16.spv");
+		ComputeShaderSpirv computeshader_convert_volume_to_unorm8_from_uint8 = ComputeShaderSpirv("shaders/cs_convert_volume_to_unorm8_from_dtype_uint8.spv");
+		ComputeShaderSpirv computeshader_convert_volume_to_unorm16_from_uint8 = ComputeShaderSpirv("shaders/cs_convert_volume_to_unorm16_from_dtype_uint8.spv");
+		ComputeShaderSpirv computeshader_compute_gradient_map_unorm8 = ComputeShaderSpirv("shaders/cs_compute_gradient_map_dtype_unorm8.spv");
+		ComputeShaderSpirv computeshader_compute_gradient_map_unorm16 = ComputeShaderSpirv("shaders/cs_compute_gradient_map_dtype_unorm16.spv");
+		ComputeShaderSpirv computeshader_compute_occupancy_map_unorm8 = ComputeShaderSpirv("shaders/cs_compute_occupancy_map_dtype_unorm8.spv");
+		ComputeShaderSpirv computeshader_compute_occupancy_map_unorm16 = ComputeShaderSpirv("shaders/cs_compute_occupancy_map_dtype_unorm16.spv");
+		ComputeShaderSpirv computeshader_compute_POM_unorm8 = ComputeShaderSpirv("shaders/cs_compute_POM_dtype_unorm8.spv");
+		ComputeShaderSpirv computeshader_compute_POM_unorm16 = ComputeShaderSpirv("shaders/cs_compute_POM_dtype_unorm16.spv");
+		ComputeShaderSpirv computeshader_compute_distance_map = ComputeShaderSpirv("shaders/cs_compute_distance_map.spv");
+		ComputeShaderSpirv computeshader_combine_PDMs = ComputeShaderSpirv("shaders/cs_combine_PDMs.spv");
+		typedef ComputeShaderSpirv ComputeShaderType;
+		ComputeShaderSpirv* computeshader_compute_gradient_map = NULL;
+		ComputeShaderSpirv* computeshader_compute_occupancy_map = NULL;
+		ComputeShaderSpirv* computeshader_compute_POM = NULL;
+
+		RenderGeometry renderGeometry;
+
+		glClearColor(background_color_r, background_color_g, background_color_b, 1.0f);
+		glEnable(GL_DEPTH_TEST);
+		glEnable(GL_BLEND);
+		glEnable(GL_DEPTH_CLAMP);
+		glEnable(GL_CULL_FACE);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+		// disable vsync
+		glfwSwapInterval(0);
+
+		if (!useDemoAndTimingsMode)
+		{
+			glfwSetCursorPosCallback(window, MouseLookCallback);
+		}
+		glfwSetKeyCallback(window, KeyInputCallback);
+
+		glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+
+		std::vector<std::string> vecInputFileNames{ inputImageFileName };
+		Volume volume(vecInputFileNames);
+
+		vector<unsigned int> volumeSize = volume.GetVolumeSize();
+		vector<double> voxelSize = volume.GetVoxelSize();
+		vector<double> direction = volume.GetDirection();
+		voxelSize[0] *= 0.001;
+		voxelSize[1] *= 0.001;
+		voxelSize[2] *= 0.001;
+
+		itk::simple::PixelIDValueEnum pixelID = volume.GetPixelID();
+		VoxelOutputDataType voxelOutputDataType;
+
+		float minIntensityValue = (float)volume.minIntensityValue;
+		float maxIntensityValue = (float)volume.maxIntensityValue;
+
+		void* data = volume.GetBuffer();
+
+		ITF itf;
+		itf.LoadITF(filename_itf);
+
+		ITF itf2;
+		itf2.LoadITF(filename_itf2);
+
+		ITF itfInterpolated;
+		itfInterpolated.SetFromInterpolatedITFs(itf, itf2, t_itfInterpolation);
+
+		uint32_t* itfData = itfInterpolated.GetData();
+
+		sitk::Image imgNoise = sitk::Image(window_width, window_height, sitk::sitkUInt8);
+		UpdateNoiseImage(imgNoise);
+
+		int sizeOccupancyMap[3] = { 2 * ((int)(ceil((float)volumeSize[0] / (float)reductionBlockSize) + 1) / 2), 2 * ((int)(ceil((float)volumeSize[1] / (float)reductionBlockSize) + 1) / 2), 2 * ((int)(ceil((float)volumeSize[2] / (float)reductionBlockSize) + 1) / 2) };
+
+
+		GLuint textureVolume;
+		GLuint textureTmp;
+		switch (pixelID)
+		{
+		case itk::simple::PixelIDValueEnum::sitkUInt16:
+			if (!TextureHelper::CreateTexture3D(GL_R16UI, volumeSize[0], volumeSize[1], volumeSize[2], GL_RED_INTEGER, GL_UNSIGNED_SHORT, (void*)data, GL_LINEAR, GL_CLAMP_TO_BORDER, &textureTmp))
+				throw std::runtime_error("error creating temporal volume texture");
+
+			if (force_volume_datatype_unorm8)
+			{
+				if (!TextureHelper::CreateTexture3D(GL_R8, volumeSize[0], volumeSize[1], volumeSize[2], GL_RED, GL_UNSIGNED_BYTE, NULL, GL_LINEAR, GL_CLAMP_TO_BORDER, &textureVolume))
+					throw std::runtime_error("error creating volume texture");
+
+				ComputeConvertVolumeToSNORM(computeshader_convert_volume_to_unorm8_from_uint16, textureTmp, VoxelDataType::DTYPE_UINT16, VoxelOutputDataType::DTYPE_UNORM8, minIntensityValue, maxIntensityValue, textureVolume, volumeSize);
+			}
+			else
+			{
+				if (!TextureHelper::CreateTexture3D(GL_R16, volumeSize[0], volumeSize[1], volumeSize[2], GL_RED, GL_UNSIGNED_SHORT, NULL, GL_LINEAR, GL_CLAMP_TO_BORDER, &textureVolume))
+					throw std::runtime_error("error creating volume texture");
+
+				ComputeConvertVolumeToSNORM(computeshader_convert_volume_to_unorm16_from_uint16, textureTmp, VoxelDataType::DTYPE_UINT16, VoxelOutputDataType::DTYPE_UNORM16, minIntensityValue, maxIntensityValue, textureVolume, volumeSize);
+			}
+
+			TextureHelper::DeleteTexture(textureTmp);
+
+			break;
+		case itk::simple::PixelIDValueEnum::sitkInt16:
+			if (!TextureHelper::CreateTexture3D(GL_R16I, volumeSize[0], volumeSize[1], volumeSize[2], GL_RED_INTEGER, GL_SHORT, (void*)data, GL_LINEAR, GL_CLAMP_TO_BORDER, &textureTmp))
+				throw std::runtime_error("error creating temporal volume texture");
+
+			if (force_volume_datatype_unorm8)
+			{
+				if (!TextureHelper::CreateTexture3D(GL_R8, volumeSize[0], volumeSize[1], volumeSize[2], GL_RED, GL_UNSIGNED_BYTE, NULL, GL_LINEAR, GL_CLAMP_TO_BORDER, &textureVolume))
+					throw std::runtime_error("error creating volume texture");
+
+				ComputeConvertVolumeToSNORM(computeshader_convert_volume_to_unorm8_from_int16, textureTmp, VoxelDataType::DTYPE_INT16, VoxelOutputDataType::DTYPE_UNORM8, minIntensityValue, maxIntensityValue, textureVolume, volumeSize);
+			}
+			else
+			{
+				if (!TextureHelper::CreateTexture3D(GL_R16, volumeSize[0], volumeSize[1], volumeSize[2], GL_RED, GL_UNSIGNED_SHORT, NULL, GL_LINEAR, GL_CLAMP_TO_BORDER, &textureVolume))
+					throw std::runtime_error("error creating volume texture");
+
+				ComputeConvertVolumeToSNORM(computeshader_convert_volume_to_unorm16_from_int16, textureTmp, VoxelDataType::DTYPE_INT16, VoxelOutputDataType::DTYPE_UNORM16, minIntensityValue, maxIntensityValue, textureVolume, volumeSize);
+			}
+			TextureHelper::DeleteTexture(textureTmp);
+
+			break;
+		case itk::simple::PixelIDValueEnum::sitkUInt8:
+			if (!TextureHelper::CreateTexture3D(GL_R8UI, volumeSize[0], volumeSize[1], volumeSize[2], GL_RED_INTEGER, GL_UNSIGNED_BYTE, (void*)data, GL_LINEAR, GL_CLAMP_TO_BORDER, &textureTmp))
+				throw std::runtime_error("error creating temporal volume texture");
+
+			if (force_volume_datatype_unorm8)
+			{
+				if (!TextureHelper::CreateTexture3D(GL_R8, volumeSize[0], volumeSize[1], volumeSize[2], GL_RED, GL_UNSIGNED_BYTE, NULL, GL_LINEAR, GL_CLAMP_TO_BORDER, &textureVolume))
+					throw std::runtime_error("error creating volume texture");
+
+				ComputeConvertVolumeToSNORM(computeshader_convert_volume_to_unorm8_from_uint8, textureTmp, VoxelDataType::DTYPE_UINT8, VoxelOutputDataType::DTYPE_UNORM8, minIntensityValue, maxIntensityValue, textureVolume, volumeSize);
+			}
+			else
+			{
+				if (!TextureHelper::CreateTexture3D(GL_R16, volumeSize[0], volumeSize[1], volumeSize[2], GL_RED, GL_UNSIGNED_SHORT, NULL, GL_LINEAR, GL_CLAMP_TO_BORDER, &textureVolume))
+					throw std::runtime_error("error creating volume texture");
+
+				ComputeConvertVolumeToSNORM(computeshader_convert_volume_to_unorm16_from_uint8, textureTmp, VoxelDataType::DTYPE_UINT8, VoxelOutputDataType::DTYPE_UNORM16, minIntensityValue, maxIntensityValue, textureVolume, volumeSize);
+			}
+			TextureHelper::DeleteTexture(textureTmp);
+
+			break;
+		}
+
+		if (force_volume_datatype_unorm8)
+		{
+			voxelOutputDataType = VoxelOutputDataType::DTYPE_UNORM8;
+			computeshader_compute_gradient_map = &computeshader_compute_gradient_map_unorm8;
+			computeshader_compute_occupancy_map = &computeshader_compute_occupancy_map_unorm8;
+			computeshader_compute_POM = &computeshader_compute_POM_unorm8;
+		}
+		else
+		{
+			voxelOutputDataType = VoxelOutputDataType::DTYPE_UNORM16;
+			computeshader_compute_gradient_map = &computeshader_compute_gradient_map_unorm16;
+			computeshader_compute_occupancy_map = &computeshader_compute_occupancy_map_unorm16;
+			computeshader_compute_POM = &computeshader_compute_POM_unorm16;
+		}
+
+		GLuint textureGradient;
+		if (precompute_gradient)
+		{
+			if (!TextureHelper::CreateTexture3D(GL_RGBA8_SNORM, volumeSize[0], volumeSize[1], volumeSize[2], GL_RGBA, GL_BYTE, NULL, GL_LINEAR, GL_CLAMP_TO_EDGE, &textureGradient))
+				throw std::runtime_error("error creating gradient texture");
+		}
+
+		GLuint textureOccupancyMap;
+		if (!TextureHelper::CreateTexture3D(GL_R8UI, sizeOccupancyMap[0], sizeOccupancyMap[1], sizeOccupancyMap[2], GL_RED_INTEGER, GL_UNSIGNED_BYTE, NULL, GL_NEAREST, GL_CLAMP_TO_BORDER, &textureOccupancyMap))
+			throw std::runtime_error("error creating occupany map texture");
+
+		GLuint textureDistanceMap;
+		if (!TextureHelper::CreateTexture3D(GL_R8UI, sizeOccupancyMap[0], sizeOccupancyMap[1], sizeOccupancyMap[2], GL_RED_INTEGER, GL_UNSIGNED_BYTE, NULL, GL_NEAREST, GL_CLAMP_TO_BORDER, &textureDistanceMap))
+			throw std::runtime_error("error creating distance map texture");
+
+		GLuint textureSwapArray[2];
+		if (!TextureHelper::CreateTexture3D(GL_R8UI, sizeOccupancyMap[0], sizeOccupancyMap[1], sizeOccupancyMap[2], GL_RED_INTEGER, GL_UNSIGNED_BYTE, NULL, GL_NEAREST, GL_CLAMP_TO_BORDER, textureSwapArray, 2))
+			throw std::runtime_error("error creating swap textures");
+
+		GLuint textureSwap = textureSwapArray[0];
+
+		unique_ptr<GLuint> texturePOMs(new GLuint[numIntensityPartitions]);
+		if (!TextureHelper::CreateTexture3D(GL_R8UI, sizeOccupancyMap[0], sizeOccupancyMap[1], sizeOccupancyMap[2], GL_RED_INTEGER, GL_UNSIGNED_BYTE, NULL, GL_NEAREST, GL_CLAMP_TO_BORDER, texturePOMs.get(), numIntensityPartitions))
+			throw std::runtime_error("error creating partitioned occupancy map textures");
+
+		unique_ptr<GLuint> texturePDMs(new GLuint[numIntensityPartitions]);
+		if (!TextureHelper::CreateTexture3D(GL_R8UI, sizeOccupancyMap[0], sizeOccupancyMap[1], sizeOccupancyMap[2], GL_RED_INTEGER, GL_UNSIGNED_BYTE, NULL, GL_NEAREST, GL_CLAMP_TO_BORDER, texturePDMs.get(), numIntensityPartitions))
+			throw std::runtime_error("error creating partitioned distance map textures");
+
+		if (!TextureHelper::CreateTexture2D(GL_R8, window_width, window_height, GL_RED, GL_UNSIGNED_BYTE, imgNoise.GetBufferAsVoid(), GL_NEAREST, GL_REPEAT, &textureNoise))
+			throw std::runtime_error("error creating noise texture");
+
+		GLuint textureITF;
+		if (!TextureHelper::CreateTexture2D(GL_RGBA8, 256, 256, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, (void*)itfData, GL_NEAREST, GL_CLAMP_TO_EDGE, &textureITF))
+			throw std::runtime_error("error creating ITF texture");
+
+
+		// execute compute shaders
+		if (precompute_gradient)
+		{
+			ComputeGradientMap(*computeshader_compute_gradient_map, textureVolume, voxelOutputDataType, textureGradient, volumeSize, 1.0);
+			shaderParams.gradientType = 1;
+		}
+
+		ComputeOccupancyMap(*computeshader_compute_occupancy_map, textureVolume, voxelOutputDataType, textureGradient, textureITF, textureOccupancyMap, sizeOccupancyMap, reductionBlockSize, false);
+		void* function = static_cast<void (*)(const ComputeShaderType&, const GLuint&, const VoxelOutputDataType, const GLuint&, const GLuint&, const GLuint&, const int*, const unsigned int&, const bool&)>(&ComputeOccupancyMap);
+		DoFunctionTimings<void, const ComputeShaderType&, const GLuint&, const VoxelOutputDataType, const GLuint&, const GLuint&, const GLuint&, const int*, const unsigned int&, const bool&>(function, "occupancy map", numTimingIterations, *computeshader_compute_occupancy_map, textureVolume, voxelOutputDataType, textureGradient, textureITF, textureOccupancyMap, sizeOccupancyMap, reductionBlockSize, false);
+
+		ComputeDistanceMap(computeshader_compute_distance_map, textureOccupancyMap, textureDistanceMap, textureSwap, sizeOccupancyMap);
+		function = static_cast<void (*)(const ComputeShaderType&, const GLuint&, const GLuint&, const GLuint&, const int*)>(&ComputeDistanceMap);
+		DoFunctionTimings<void, const ComputeShaderType&, const GLuint&, const GLuint&, const GLuint&, const int*>(function, "distance map", numTimingIterations, computeshader_compute_distance_map, textureOccupancyMap, textureDistanceMap, textureSwap, sizeOccupancyMap);
+
+		std::vector<float> intensitiesPartitions_minValues(numIntensityPartitions);
+		for (int i = 0; i < intensitiesPartitions_minValues.size(); i++)
+			intensitiesPartitions_minValues[i] = ceil(i * (float)255 / (float)numIntensityPartitions);
+		std::vector<float> intensitiesPartitions_maxValues(numIntensityPartitions);
+		for (int i = 0; i < intensitiesPartitions_maxValues.size(); i++)
+			intensitiesPartitions_maxValues[i] = floor((i + 1) * (float)255 / (float)numIntensityPartitions);
+
+		if (useSpecialPartitionForZeroIntensity)
+		{
+			int numFreeIntensityPartitions = numIntensityPartitions - (int)(useSpecialPartitionForZeroIntensity); // reduce number of free intensity partitions in case of zero intensity special partition use
+			for (int i = 1; i < intensitiesPartitions_minValues.size(); i++)
+				intensitiesPartitions_minValues[i] = ceil((i - 1) * (float)255 / (float)numFreeIntensityPartitions);
+			for (int i = 1; i < intensitiesPartitions_maxValues.size(); i++)
+				intensitiesPartitions_maxValues[i] = floor((i) * (float)255 / (float)numFreeIntensityPartitions);
+			intensitiesPartitions_minValues[0] = 0;
+			intensitiesPartitions_maxValues[0] = 0;
+			if (numIntensityPartitions > 1)
+				intensitiesPartitions_minValues[1] = 1;
+		}
+
+		std::vector<bool> PDMsToUse(numIntensityPartitions);
+		std::fill(PDMsToUse.begin(), PDMsToUse.end(), false);
+
+		for (int i = 0; i < numIntensityPartitions; i++)
+		{
+			bool useMap = false;
+
+			for (uint32_t intensity = intensitiesPartitions_minValues[i]; intensity <= intensitiesPartitions_maxValues[i]; intensity++)
+			{
+				useMap |= itfInterpolated.GetMappedAlphaValue(intensity) > 0;
+			}
+			PDMsToUse[i] = useMap;
+		}
+
+		ComputePOM(*computeshader_compute_POM, textureVolume, voxelOutputDataType, textureGradient, texturePOMs.get()[0], sizeOccupancyMap, reductionBlockSize, intensitiesPartitions_minValues[0], intensitiesPartitions_maxValues[0]);
+		glFlush();
+		glFinish();
+		StartCounter();
+		for (int i = 0; i < numIntensityPartitions; i++)
+			ComputePOM(*computeshader_compute_POM, textureVolume, voxelOutputDataType, textureGradient, texturePOMs.get()[i], sizeOccupancyMap, reductionBlockSize, intensitiesPartitions_minValues[i], intensitiesPartitions_maxValues[i]);
+		glFlush();
+		glFinish();
+		std::cout << "partitioned occupancy maps computation took " << GetCounter() << " msecs\n";
+
+		ComputeDistanceMap(computeshader_compute_distance_map, texturePOMs.get()[0], texturePDMs.get()[0], textureSwap, sizeOccupancyMap);
+		glFlush();
+		glFinish();
+		StartCounter();
+		for (int i = 0; i < numIntensityPartitions; i++)
+			ComputeDistanceMap(computeshader_compute_distance_map, texturePOMs.get()[i], texturePDMs.get()[i], textureSwap, sizeOccupancyMap);
+		glFlush();
+		glFinish();
+		std::cout << "partitioned distance maps computation took " << GetCounter() << " msecs\n";
+
+		if (!disablePartitionedDistanceMapOptimization)
+		{
+			CombinePDMs(computeshader_combine_PDMs, texturePDMs.get(), textureSwapArray, textureDistanceMap, sizeOccupancyMap, numIntensityPartitions, PDMsToUse, false);
+			function = static_cast<void (*)(const ComputeShaderType&, const GLuint*, const GLuint*, const GLuint&, int*, const unsigned int&, const std::vector<bool>, const bool&)>(&CombinePDMs);
+			DoFunctionTimings<void, const ComputeShaderType&, const GLuint*, const GLuint*, const GLuint&, int*, const unsigned int&, const std::vector<bool>, const bool&>(function, "combining distance maps", numTimingIterations, computeshader_combine_PDMs, texturePDMs.get(), textureSwapArray, textureDistanceMap, sizeOccupancyMap, numIntensityPartitions, PDMsToUse, false);
+		}
+
+		projection = glm::perspective((float)glm::radians(fov), (float)window_width / (float)window_height, 0.3f, 100.0f);
+
+		float physical_size[3] = { (float)volumeSize[0] * (float)voxelSize[0], (float)volumeSize[1] * (float)voxelSize[1], (float)volumeSize[2] * (float)voxelSize[2] };
+		glm::mat4 scaling_cube = glm::scale(glm::mat4(1.0f), glm::vec3(physical_size[0], physical_size[1], physical_size[2]));
+
+		glm::mat4 translation_cube = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, 0.0f));
+
+		glm::mat4 volumeRotationFromSitkDirection = glm::mat4(direction[0], direction[1], direction[2], 0.0, direction[3], direction[4], direction[5], 0.0, direction[6], direction[7], direction[8], 0.0, 0.0, 0.0, 0.0, 1.0);
+
+		glm::mat4 initial_rotation_x = glm::rotate(glm::mat4(1.0f), initialVolumeRotationX / 180.0f * PI, glm::vec3(1.0f, 0.0f, 0.0f));
+		glm::mat4 initial_rotation_y = glm::rotate(glm::mat4(1.0f), initialVolumeRotationY / 180.0f * PI, glm::vec3(0.0f, 1.0f, 0.0f));
+		glm::mat4 initial_rotation_z = glm::rotate(glm::mat4(1.0f), initialVolumeRotationZ / 180.0f * PI, glm::vec3(0.0f, 0.0f, 1.0f));
+
+		glm::mat4 transformation_initial = translation_cube * initial_rotation_z * initial_rotation_y * initial_rotation_x * volumeRotationFromSitkDirection * scaling_cube;
+
+		glm::mat4 custom_rotation_y = glm::mat4(1.0f);
+
+		if (useDemoAndTimingsMode)
+		{
+			cam.SetCameraPos(glm::vec3(0.0f, demoAndTimingsModeCameraHeight, demoAndTimingsModeCameraDistance));
+			cam.SetCameraPitch(demoAndTimingsModeCameraPitch);
+		}
+		glfwSetWindowSizeCallback(window, WindowResizeCallback);
+
+		float samplingFactor = 1.0f;
+		int itf_gamma_correction = (int)itfInterpolated.getApplyGammaCorrection();
+		float gamma = itfInterpolated.getGamma();
+		glm::vec3 lightDirection = glm::vec3(-0.5f, -1.0f, 0.0f);
+
+		unsigned int ubo_vert_block;
+		glGenBuffers(1, &ubo_vert_block);
+		glBindBuffer(GL_UNIFORM_BUFFER, ubo_vert_block);
+		glBufferData(GL_UNIFORM_BUFFER, 64, NULL, GL_STATIC_DRAW);
+		glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo_vert_block);
+		glBindBufferRange(GL_UNIFORM_BUFFER, 0, ubo_vert_block, 0, 64);
+
+		unsigned int ubo_frag_block;
+		glGenBuffers(1, &ubo_frag_block);
+		glBindBuffer(GL_UNIFORM_BUFFER, ubo_frag_block);
+		glBufferData(GL_UNIFORM_BUFFER, 268, NULL, GL_STATIC_DRAW);
+		glBindBufferBase(GL_UNIFORM_BUFFER, 1, ubo_frag_block);
+		glBindBufferRange(GL_UNIFORM_BUFFER, 1, ubo_frag_block, 0, 268);
+
+		glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+		unsigned int loc_shader0_vertexPosition = 0;
+
+		loc_shader0_vertexPosition = glGetAttribLocation(shader_render_volume.ID, "vertexPosition");
+		glEnableVertexAttribArray(loc_shader0_vertexPosition);
+		glVertexAttribPointer(loc_shader0_vertexPosition, 3, GL_FLOAT, GL_FALSE, 12, 0);
+		shader_render_volume.use();
+
+		double currentTime = glfwGetTime();
+
+		double lastTime = glfwGetTime();
+		unsigned int numFramesInCurrentSecond = 0;
+
+		int frameCountSumRenderingTiming = 0;
+		double lastFrameTime = 0.0;
+		double firstMeasuredFrameTimeStart = 0.0;
+
+		while (!glfwWindowShouldClose(window))
+		{
+			glfwPollEvents();
+
+			DoMovement();
+
+			glm::mat4 view = cam.GetViewMatrix();
+
+			float* data = glm::value_ptr(view);
+
+			if (useDemoAndTimingsMode)
+				custom_rotation_y = glm::rotate(glm::mat4(1.0f), (float)glfwGetTime() * (rotationsPerTimingPeriod / (float)timingPeriodInSec) * 2.0f * PI, glm::vec3(0.0f, 1.0f, 0.0f));
+
+			glm::mat4 transformation_cube = translation_cube * custom_rotation_y * transformation_initial;
+			glm::mat4 modelViewProjection = projection * view * transformation_cube;
+
+			glBindVertexArray(renderGeometry.VAO_cube);
+
+			// render back faces of cube and do volume rendering
+			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+			glCullFace(GL_FRONT);
+
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_3D, textureVolume);
+
+			glActiveTexture(GL_TEXTURE1);
+			glBindTexture(GL_TEXTURE_3D, textureGradient);
+
+			glActiveTexture(GL_TEXTURE2);
+			glBindTexture(GL_TEXTURE_2D, textureNoise);
+
+			glActiveTexture(GL_TEXTURE3);
+			glBindTexture(GL_TEXTURE_2D, textureITF);
+
+			glActiveTexture(GL_TEXTURE4);
+			glBindTexture(GL_TEXTURE_3D, textureOccupancyMap);
+
+			glActiveTexture(GL_TEXTURE5);
+			glBindTexture(GL_TEXTURE_3D, textureDistanceMap);
+
+			glm::mat4x4 inverseModelView = glm::inverse(view * transformation_cube);
+
+			glBindBuffer(GL_UNIFORM_BUFFER, ubo_vert_block);
+			glBufferSubData(GL_UNIFORM_BUFFER, 0, 64, glm::value_ptr(modelViewProjection));
+
+			glBindBuffer(GL_UNIFORM_BUFFER, ubo_frag_block);
+			glBufferSubData(GL_UNIFORM_BUFFER, 0, 64, glm::value_ptr(transformation_cube));
+			glBufferSubData(GL_UNIFORM_BUFFER, 64, 64, glm::value_ptr(view));
+			glBufferSubData(GL_UNIFORM_BUFFER, 128, 64, glm::value_ptr(inverseModelView));
+			glBufferSubData(GL_UNIFORM_BUFFER, 192, 4, &samplingFactor);
+			glBufferSubData(GL_UNIFORM_BUFFER, 196, 4, &shaderParams.renderContentType);
+			glBufferSubData(GL_UNIFORM_BUFFER, 200, 4, &shaderParams.ditheringMode);
+			glBufferSubData(GL_UNIFORM_BUFFER, 204, 4, &shaderParams.earlyRayTermination);
+			glBufferSubData(GL_UNIFORM_BUFFER, 208, 4, &shaderParams.essType);
+			glBufferSubData(GL_UNIFORM_BUFFER, 212, 4, &shaderParams.gradientType);
+			glBufferSubData(GL_UNIFORM_BUFFER, 216, 4, &itf_gamma_correction);
+			glBufferSubData(GL_UNIFORM_BUFFER, 220, 4, &gamma);
+			glBufferSubData(GL_UNIFORM_BUFFER, 224, 4, &enableTricubicFiltering);
+			glBufferSubData(GL_UNIFORM_BUFFER, 228, 4, &shaderParams.reuseNormals);
+			glBufferSubData(GL_UNIFORM_BUFFER, 232, 4, &shaderParams.lightshadingFactor);
+			glBufferSubData(GL_UNIFORM_BUFFER, 240, 4, &shaderParams.lightDirComponentX);
+			glBufferSubData(GL_UNIFORM_BUFFER, 244, 4, &shaderParams.lightDirComponentY);
+			glBufferSubData(GL_UNIFORM_BUFFER, 248, 4, &shaderParams.lightDirComponentZ);
+			glBufferSubData(GL_UNIFORM_BUFFER, 252, 4, &shaderParams.lightAmbientFactor);
+			glBufferSubData(GL_UNIFORM_BUFFER, 256, 4, &shaderParams.lightDiffuseFactor);
+			glBufferSubData(GL_UNIFORM_BUFFER, 260, 4, &shaderParams.lightSpecularFactor);
+			glBufferSubData(GL_UNIFORM_BUFFER, 264, 4, &shaderParams.lightSpecularShininess);
+
+			glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+			glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
+
+			glfwSwapBuffers(window);
+
+			currentTime = glfwGetTime();
+
+			if (useDemoAndTimingsMode)
+			{
+				if (lastFrameTime != 0.0)
+				{
+					frameCountSumRenderingTiming++;
+					if (currentTime - firstMeasuredFrameTimeStart >= timingPeriodInSec)
+					{
+						std::cout << "mean rendering time for a single frame over " << timingPeriodInSec << " seconds was " << ((timingPeriodInSec * 1000.0) / (double)frameCountSumRenderingTiming) << " msecs\n";
+						frameCountSumRenderingTiming = 0.0;
+						firstMeasuredFrameTimeStart = currentTime;
+					}
+				}
+				else
+				{
+					firstMeasuredFrameTimeStart = currentTime;
+				}
+			}
+
+			if (itfInterpolate > 0)
+			{
+				if (itfInterpolate == 1)
+				{
+					t_itfInterpolation -= ((currentTime - lastFrameTime)) / itfBlendTime;
+				}
+				if (itfInterpolate == 2)
+				{
+					t_itfInterpolation += ((currentTime - lastFrameTime)) / itfBlendTime;
+				}
+				t_itfInterpolation = std::clamp(t_itfInterpolation, 0.0f, 1.0f);
+				itfInterpolated.SetFromInterpolatedITFs(itf, itf2, t_itfInterpolation);
+				itfData = itfInterpolated.GetData();
+				itf_gamma_correction = (int)itfInterpolated.getApplyGammaCorrection();
+				gamma = itfInterpolated.getGamma();
+
+				GLfloat borderColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+				glBindTexture(GL_TEXTURE_2D, textureITF);
+				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 256, 256, 0, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, itfData);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+				glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+
+				if (!disablePartitionedDistanceMapOptimization)
+				{
+					std::vector<bool> PDMsToUse(numIntensityPartitions);
+					std::fill(PDMsToUse.begin(), PDMsToUse.end(), false);
+					for (unsigned int i = 0; i < numIntensityPartitions; i++)
+					{
+						bool useMap = false;
+
+						for (uint32_t intensity = intensitiesPartitions_minValues[i]; intensity <= intensitiesPartitions_maxValues[i]; intensity++)
+						{
+							useMap |= itfInterpolated.GetMappedAlphaValue(intensity) > 0;
+						}
+						PDMsToUse[i] = useMap;
+					}
+					CombinePDMs(computeshader_combine_PDMs, texturePDMs.get(), textureSwapArray, textureDistanceMap, sizeOccupancyMap, numIntensityPartitions, PDMsToUse, false);
+				}
+				else
+				{
+					ComputeDistanceMap(computeshader_compute_distance_map, textureOccupancyMap, textureDistanceMap, textureSwap, sizeOccupancyMap);
+				}
+				// reset ubo for binding 0, since compute shader used binding for its own ubo
+				glBindBuffer(GL_UNIFORM_BUFFER, ubo_vert_block);
+				glBufferData(GL_UNIFORM_BUFFER, 64, NULL, GL_STATIC_DRAW);
+				glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo_vert_block);
+				glBindBufferRange(GL_UNIFORM_BUFFER, 0, ubo_vert_block, 0, 64);
+				glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+				shader_render_volume.use();
+
+				if (t_itfInterpolation >= 1.0f)
+				{
+					itfInterpolate = 0;
+					t_itfInterpolation = 1.0f;
+				}
+				if (t_itfInterpolation <= 0.0f)
+				{
+					itfInterpolate = 0;
+					t_itfInterpolation = 0.0f;
+				}
+			}
+
+			lastFrameTime = currentTime;
+
+			numFramesInCurrentSecond += 1;
+			if (currentTime - lastTime >= 1.0)
+			{
+				string windowTitle = string("frame drawing took ") + std::format("{:.3f}", 1000.0 / (double)numFramesInCurrentSecond) + string(" ms") +
+					string(" rendering mode: ") + std::format("{}", shaderParams.renderContentType) +
+					string(" dithering mode: ") + std::format("{}", shaderParams.ditheringMode) +
+					string(" early ray termination: ") + std::format("{}", shaderParams.earlyRayTermination) +
+					string(" ess type: ") + std::format("{}", shaderParams.essType) +
+					string(" light shading: ") + std::format("{}", shaderParams.lightshadingFactor) +
+					string(" precompute gradient: ") + std::format("{}", shaderParams.gradientType) +
+					string(" tricubic filtering: ") + std::format("{}", enableTricubicFiltering) +
+					string(" reuse normals: ") + std::format("{}", shaderParams.reuseNormals);
+
+				glfwSetWindowTitle(window, windowTitle.c_str());
+
+				numFramesInCurrentSecond = 0;
+				lastTime = glfwGetTime();
+			}
+		}
+
+		TextureHelper::DeleteTexture(textureVolume);
+		TextureHelper::DeleteTexture(textureGradient);
+		TextureHelper::DeleteTexture(textureDistanceMap);
+		TextureHelper::DeleteTextures(2, textureSwapArray);
+		TextureHelper::DeleteTextures(numIntensityPartitions, texturePOMs.get());
+		TextureHelper::DeleteTextures(numIntensityPartitions, texturePDMs.get());
+
+		glfwDestroyWindow(window);
+
+		glfwTerminate();
+	}
+	catch (const std::exception& err)
+	{
+		std::cerr << "error occured:\n" << err.what() << "\n";
+		return 1;
+	}
+
+	return 0;
+}
+```
+
+### src/common/Camera.h
+```
+/* Copyright Michael Rauter
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * code derived from: https://github.com/JoeyDeVries/LearnOpenGL/blob/master/includes/learnopengl/camera.h
+ *
+ */
+
+#pragma once
+
+#include <glm/glm.hpp>
+#include <glm/vec3.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+
+class Camera {
+public:
+    enum Camera_Movement {
+        FORWARD,
+        BACKWARD,
+        LEFT,
+        RIGHT,
+        UP,
+        DOWN
+    };
+private:
+    glm::vec3 camera_pos;
+    glm::vec3 camera_front;
+    glm::vec3 camera_up;
+    glm::vec3 camera_right;
+    glm::vec3 world_up;
+    double yaw;
+    double pitch;
+public:
+    Camera() {
+        ResetCameraPos();        
+    };
+    ~Camera() {};
+
+    // returns the view matrix calculated using Euler Angles and the LookAt Matrix
+    glm::mat4 GetViewMatrix()
+    {
+        return glm::lookAt(camera_pos, camera_pos + camera_front, camera_up);
+    }
+
+    glm::vec3 GetCameraPos() {
+        return camera_pos;
+    }
+
+    void SetCameraPos(glm::vec3 pos) {
+        camera_pos = pos;
+        UpdateCameraVectors();
+    }
+
+    void SetCameraPitch(float pitch) {
+        this->pitch = pitch;
+        UpdateCameraVectors();
+    }
+
+    void ResetCameraPos() {
+        this->camera_pos = glm::vec3(0.0, 0.0, 2.0);
+        this->camera_front = glm::vec3(0.0, 0.0, -1.0);
+        this->camera_up = glm::vec3(0.0, 1.0, 0.0);
+        this->camera_right = glm::vec3(1.0, 0.0, 0.0);
+        this->world_up = glm::vec3(0.0, 1.0, 0.0);
+        this->yaw = -90.0f;
+        this->pitch = 0.0f;
+    }
+
+    void ProcessKeyboard(Camera_Movement direction, float velocity)
+    {
+        if (direction == FORWARD)
+            this->camera_pos += this->camera_front * velocity;
+        if (direction == BACKWARD)
+            this->camera_pos -= this->camera_front * velocity;
+        if (direction == LEFT)
+            this->camera_pos -= this->camera_right * velocity;
+        if (direction == RIGHT)
+            this->camera_pos += this->camera_right * velocity;
+        if (direction == UP)
+            this->camera_pos += this->camera_up * velocity;
+        if (direction == DOWN)
+            this->camera_pos -= this->camera_up * velocity;
+    }
+
+    void ProcessMouseMovement(double xoffset, double yoffset, bool constrain_pitch = true, float mouse_sensitivity = 0.125f) {
+        xoffset *= mouse_sensitivity;
+        yoffset *= mouse_sensitivity;
+
+        this->yaw += xoffset;
+        this->pitch += yoffset;
+
+        if (constrain_pitch)
+        {
+            if (this->pitch > 85)
+                this->pitch = 85;
+            if (this->pitch < -85)
+                this->pitch = -85;
+        }
+        
+        UpdateCameraVectors();
+    }
+
+private:
+    void UpdateCameraVectors()
+    {        
+        glm::vec3 front;
+        front.x = (float)cos(glm::radians(yaw)) * (float)cos(glm::radians(pitch));
+        front.y = (float)sin(glm::radians(pitch));
+        front.z = (float)sin(glm::radians(yaw)) * (float)cos(glm::radians(pitch));
+        camera_front = glm::normalize(front);        
+        camera_right = glm::normalize(glm::cross(camera_front, world_up));
+        camera_up = glm::normalize(glm::cross(camera_right, camera_front));
+    }
+};
+```
+
+### src/common/ComputeShaderSpirv.h
+```
+/* Copyright Michael Rauter
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * code derived from: https://github.com/JoeyDeVries/LearnOpenGL/blob/master/includes/learnopengl/shader.h
+ *
+ */
+
+#pragma once
+
+#include <glad/gl.h>
+#include <glm/glm.hpp>
+
+#include <string>
+#include <fstream>
+#include <sstream>
+#include <iostream>
+
+class ComputeShaderSpirv
+{
+public:
+    unsigned int ID;
+    // constructor generates the shader on the fly
+    // ------------------------------------------------------------------------
+    ComputeShaderSpirv(const char* computeBinaryPath)
+    {
+        // 1. retrieve the compute source code from computeBinaryPath
+        std::unique_ptr<uint8_t[]> bufferComputeShader;
+        size_t sizeComputeBuffer;       
+        std::ifstream computeShaderFile;        
+        // ensure ifstream objects can throw exceptions:
+        computeShaderFile.exceptions(std::ifstream::failbit | std::ifstream::badbit);
+
+        try
+        {
+            computeShaderFile = std::ifstream(computeBinaryPath, std::ios::in | std::ios::binary | std::ios::ate);
+            if (!computeShaderFile)
+                throw std::ifstream::failure("input spirv compute shader file not found (" + std::string(computeBinaryPath) + ")");
+            sizeComputeBuffer = computeShaderFile.tellg();
+            computeShaderFile.seekg(0, std::ios::beg);
+            bufferComputeShader = std::make_unique<uint8_t[]>(sizeComputeBuffer);
+            computeShaderFile.read((char*)bufferComputeShader.get(), sizeComputeBuffer);
+            computeShaderFile.close();
+        }
+        catch (std::ifstream::failure& e)
+        {
+            std::cout << "ERROR::SHADER::FILE_NOT_SUCCESSFULLY_READ: " << e.what() << std::endl;
+            throw(e);
+        }
+
+        // 2. compile compute shader
+        unsigned int compute;        
+        compute = glCreateShader(GL_COMPUTE_SHADER);
+        glShaderBinary(1, &compute, GL_SHADER_BINARY_FORMAT_SPIR_V_ARB, bufferComputeShader.get(), (GLsizei)sizeComputeBuffer);
+        glSpecializeShader(compute, "main", 0, 0, 0);
+        CheckCompileErrors(compute, "COMPUTE");
+
+        // shader Program
+        ID = glCreateProgram();
+        glAttachShader(ID, compute);
+        glLinkProgram(ID);
+        CheckCompileErrors(ID, "PROGRAM");
+        // delete the shaders as they're linked into our program now and no longer necessary
+        glDeleteShader(compute);
+
+    }
+
+    ~ComputeShaderSpirv() {
+        glDeleteProgram(ID);
+    }
+
+    // activate the shader
+    // ------------------------------------------------------------------------
+    void use() const
+    {
+        glUseProgram(ID);
+    }
+
+private:
+    // utility function for checking shader compilation/linking errors.
+    // ------------------------------------------------------------------------
+    void CheckCompileErrors(GLuint shader, std::string type)
+    {
+        GLint success;
+        GLchar infoLog[1024];
+        if (type != "PROGRAM")
+        {
+            glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+            if (!success)
+            {
+                glGetShaderInfoLog(shader, 1024, NULL, infoLog);
+                std::cout << "ERROR::SHADER_COMPILATION_ERROR of type: " << type << "\n" << infoLog << "\n -- --------------------------------------------------- -- " << std::endl;
+            }
+        }
+        else
+        {
+            glGetProgramiv(shader, GL_LINK_STATUS, &success);
+            if (!success)
+            {
+                glGetProgramInfoLog(shader, 1024, NULL, infoLog);
+                std::cout << "ERROR::PROGRAM_LINKING_ERROR of type: " << type << "\n" << infoLog << "\n -- --------------------------------------------------- -- " << std::endl;
+            }
+        }
+    }
+};
+```
+
+### src/common/ShaderSpirv.h
+```
+/* Copyright Michael Rauter
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * code derived from: https://github.com/JoeyDeVries/LearnOpenGL/blob/master/includes/learnopengl/shader.h
+ *
+ */
+
+#pragma once
+
+#include <glad/gl.h>
+#include <glm/glm.hpp>
+
+#include <string>
+#include <fstream>
+#include <sstream>
+#include <iostream>
+
+class ShaderSpirv
+{
+public:
+    unsigned int ID;
+    // constructor generates the shader on the fly
+    // ------------------------------------------------------------------------
+    ShaderSpirv(const char* vertexBinaryPath, const char* fragmentBinaryPath)
+    {
+        // 1. retrieve the vertex/fragment binary buffer from vertexBinaryPath and fragmentBinaryPath
+        std::unique_ptr<uint8_t[]> bufferVertexShader;
+        std::unique_ptr<uint8_t[]> bufferFragmentShader;
+        size_t sizeVertexBuffer, sizeFragmentBuffer;
+        std::ifstream vShaderFile;
+        std::ifstream fShaderFile;
+        // ensure ifstream objects can throw exceptions:
+        vShaderFile.exceptions(std::ifstream::failbit | std::ifstream::badbit);
+        fShaderFile.exceptions(std::ifstream::failbit | std::ifstream::badbit);
+
+        try
+        {
+            // open files
+            vShaderFile = std::ifstream(vertexBinaryPath, std::ios::in | std::ios::binary | std::ios::ate);
+            if (!vShaderFile)
+                throw std::ifstream::failure("input spirv vertex shader file not found (" + std::string(vertexBinaryPath) + ")");
+            sizeVertexBuffer = vShaderFile.tellg();
+            vShaderFile.seekg(0, std::ios::beg);
+            bufferVertexShader = std::make_unique<uint8_t[]>(sizeVertexBuffer);
+            vShaderFile.read((char*)bufferVertexShader.get(), sizeVertexBuffer);
+            vShaderFile.close();
+
+            fShaderFile = std::ifstream(fragmentBinaryPath, std::ios::in | std::ios::binary | std::ios::ate);
+            if (!fShaderFile)
+                throw std::ifstream::failure("input spirv fragment shader file not found (" + std::string(fragmentBinaryPath) + ")");
+            sizeFragmentBuffer = fShaderFile.tellg();
+            fShaderFile.seekg(0, std::ios::beg);
+            bufferFragmentShader = std::make_unique<uint8_t[]>(sizeFragmentBuffer);
+            fShaderFile.read((char*)bufferFragmentShader.get(), sizeFragmentBuffer);
+            fShaderFile.close();
+        }
+        catch (std::ifstream::failure& e)
+        {
+            std::cout << "ERROR::SHADER::FILE_NOT_SUCCESSFULLY_READ: " << e.what() << std::endl;
+            throw e;
+        }
+
+        // 2. compile shaders
+        unsigned int vertex, fragment;
+        // vertex shader
+        vertex = glCreateShader(GL_VERTEX_SHADER);
+        glShaderBinary(1, &vertex, GL_SHADER_BINARY_FORMAT_SPIR_V_ARB, bufferVertexShader.get(), (GLsizei)sizeVertexBuffer);
+        glSpecializeShader(vertex, "main", 0, 0, 0);
+
+        CheckCompileErrors(vertex, "VERTEX");
+        // fragment Shader
+        fragment = glCreateShader(GL_FRAGMENT_SHADER);
+        glShaderBinary(1, &fragment, GL_SHADER_BINARY_FORMAT_SPIR_V_ARB, bufferFragmentShader.get(), (GLsizei)sizeFragmentBuffer);
+        glSpecializeShader(fragment, "main", 0, 0, 0);
+        CheckCompileErrors(fragment, "FRAGMENT");
+        // shader Program
+        ID = glCreateProgram();
+        glAttachShader(ID, vertex);
+        glAttachShader(ID, fragment);
+        glLinkProgram(ID);
+        CheckCompileErrors(ID, "PROGRAM");
+        // delete the shaders as they're linked into our program now and no longer necessary
+        glDeleteShader(vertex);
+        glDeleteShader(fragment);
+    }
+
+    ~ShaderSpirv() {
+        glDeleteProgram(ID);
+    }
+
+    // activate the shader
+    // ------------------------------------------------------------------------
+    void use() const
+    {
+        glUseProgram(ID);
+    }
+
+private:
+    // utility function for checking shader compilation/linking errors.
+    // ------------------------------------------------------------------------
+    void CheckCompileErrors(GLuint shader, std::string type)
+    {
+        GLint success;
+        GLchar infoLog[1024];
+        if (type != "PROGRAM")
+        {
+            glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+            if (!success)
+            {
+                glGetShaderInfoLog(shader, 1024, NULL, infoLog);
+                std::cout << "ERROR::SHADER_COMPILATION_ERROR of type: " << type << "\n" << infoLog << "\n -- --------------------------------------------------- -- " << std::endl;
+            }
+        }
+        else
+        {
+            glGetProgramiv(shader, GL_LINK_STATUS, &success);
+            if (!success)
+            {
+                glGetProgramInfoLog(shader, 1024, NULL, infoLog);
+                std::cout << "ERROR::PROGRAM_LINKING_ERROR of type: " << type << "\n" << infoLog << "\n -- --------------------------------------------------- -- " << std::endl;
+            }
+        }
+    }
+};
+```
+
+### src/common/TextureHelper.h
+```
+/* Copyright Michael Rauter
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
+
+#pragma once
+
+#include <glad/gl.h>
+#include <glm/glm.hpp>
+
+class TextureHelper {
+public:
+    static GLuint* CreateTexture3D(GLint internalformat, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void* dataArray, GLint filterMode, GLint wrappingMode, GLuint* textureIDs, int numberOfTexturesToCreate = 1)
+    {
+        GLfloat borderColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+
+        glGenTextures(numberOfTexturesToCreate, textureIDs);
+        for (int i = 0; i < numberOfTexturesToCreate; i++)
+        {
+            glBindTexture(GL_TEXTURE_3D, textureIDs[i]);
+            glTexImage3D(GL_TEXTURE_3D, 0, internalformat, width, height, depth, 0, format, type, dataArray);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, wrappingMode);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, wrappingMode);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, wrappingMode);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, filterMode);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, filterMode);
+            glTexParameterfv(GL_TEXTURE_3D, GL_TEXTURE_BORDER_COLOR, borderColor);
+                
+        }
+        return textureIDs;
+    }
+
+    static GLuint* CreateTexture2D(GLint internalformat, GLsizei width, GLsizei height, GLenum format, GLenum type, void* dataArray, GLint filterMode, GLint wrappingMode, GLuint* textureIDs, int numberOfTexturesToCreate = 1)
+    {
+        GLfloat borderColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+
+        glGenTextures(numberOfTexturesToCreate, textureIDs);
+        for (int i = 0; i < numberOfTexturesToCreate; i++)
+        {
+            glBindTexture(GL_TEXTURE_2D, textureIDs[i]);
+            glTexImage2D(GL_TEXTURE_2D, 0, internalformat, width, height, 0, format, type, dataArray);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrappingMode);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrappingMode);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filterMode);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filterMode);
+            glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+
+        }
+        return textureIDs;
+    }
+
+    static GLuint* CreateTexture1D(GLint internalformat, GLsizei size, GLenum format, GLenum type, void* dataArray, GLint filterMode, GLint wrappingMode, GLuint* textureIDs, int numberOfTexturesToCreate = 1)
+    {
+        GLfloat borderColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+
+        glGenTextures(numberOfTexturesToCreate, textureIDs);
+        for (int i = 0; i < numberOfTexturesToCreate; i++)
+        {
+            glBindTexture(GL_TEXTURE_1D, textureIDs[i]);
+            glTexImage1D(GL_TEXTURE_1D, 0, internalformat, size, 0, format, type, dataArray);
+            glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, wrappingMode);
+            glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_T, wrappingMode);
+            glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, filterMode);
+            glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, filterMode);
+            glTexParameterfv(GL_TEXTURE_1D, GL_TEXTURE_BORDER_COLOR, borderColor);
+
+        }
+        return textureIDs;
+    }
+
+    static void DeleteTexture(GLuint textureID)
+    {
+        if (textureID == NULL)
+            return;
+
+        glDeleteTextures(1, &textureID);
+        textureID = NULL;
+    }
+    static void DeleteTextures(GLsizei n, GLuint* textureIDs)
+    {
+        if (textureIDs == NULL)
+            return;
+
+        glDeleteTextures(n, textureIDs);
+
+        for (GLsizei i=0; i < n; i++)
+            textureIDs[i] = NULL;
+    }
+
+};
+```

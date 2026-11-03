@@ -1,0 +1,161 @@
+rx (render experience): a modern game engine. Contribute to Force67/rx development by creating an account on GitHub.
+
+gi: RCGI - radiance-cached global illumination (cascaded light grid, spatial-hash radiance cache, SH final gather; RX_RCGI=1) by Force67 · Pull Request #12 · Force67/rx · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Force67
+commented
+Jul 14, 2026
+Copy link
+Copy Markdown
+Owner
+Optional dynamic-GI mode: RCGI (radiance-cached global illumination), modeled on the GI architecture id Software presented for idTech 8 at SIGGRAPH 2025 ("FAST AS HELL", Tiago Sousa). Off by default — RenderSettings::rcgi / RX_RCGI=1 / debug-overlay checkbox. When enabled it replaces the single DDGI volume + SSGI as the indirect-diffuse path; when disabled there is zero behavior change (no passes scheduled, no history copies).
+Design + implementation notes live in RCGI.md.
+Pipeline
+```
+Light Grid -> Probe Visibility Rays -> World Radiance Cache -> Irradiance Cascades
+     (world side, async compute)                                     |
+                                                                     v
+        Final Gather (1/2 res, 1 rpp, 2-band SH) -> Bilateral Denoise -> Upscale + SH eval + Temporal
+```
+Cascaded world-space light grid — 16³ cells × 4 cascades (32 m doubling), camera-snapped, single dispatch with a two-phase hierarchical cull (groupshared coarse bitmask → per-cell test). Lets ray hits outside the frustum be lit by point/spot lights; the existing froxel cluster grid is frustum-tied.
+World radiance cache — 1M-slot spatial hash (25 cm base cells, distance LOD, linear probing). Probe rays register hit cells; an indirect dispatch shades only the active cells through the bindless tables: sun (shadow ray) + emissive + light-grid lights + previous-frame cascade bounce (multi-bounce). Entries are reused across frames.
+Cascaded irradiance volumes — 16³ probes × 4 cascades (2 m spacing doubling), octahedral irradiance + Chebyshev visibility atlases, one cascade updated per frame, hysteresis + snap reconvergence (DDGI-style, generalized to cascades).
+Final gather — half-res, 1 cosine-weighted ray/pixel, zero shading at the hit: three-level cache fallback (previous-frame screen radiance → world radiance cache → cascades; sky on miss), projected into 2-band SH per pixel.
+Denoise + upscale — separable bilateral gaussian (depth/normal/hitT weights) on the SH at gather res, then a 4-tap bilateral upsample that evaluates the SH with the full-res normal (restores normal-map detail) + temporal filter with per-pixel sample counter and neighborhood clamp.
+World-side passes run on async compute (join before the gather), mirroring the DDGI wiring.
+RX_RCGI_PROBES_ONLY=1 keeps a cascade-only resolve as an A/B debug path.
+Screenshots
+Cornell, final frame:
+DDGI (baseline)
+RCGI
+Isolated indirect channel (RX_DEBUG_VIEW=6). Note the per-pixel contact occlusion at the box bases and the sharper directional bleed from the gather, vs. the flat probe-only interpolation:
+DDGI
+RCGI cascades only (RX_RCGI_PROBES_ONLY=1)
+RCGI full gather chain
+Sponza, final frame (regression check on a real scene):
+DDGI (baseline)
+RCGI
+Performance (NVIDIA GB10, 1920×1011, RX_GPU_TIMINGS=1)
+Stage
+Cost
+World side (light grid + trace + cache shade + blend + border, 1 cascade/frame)
+~0.2 ms (async)
+Gather + denoise (H+V) + upscale + history copy
+~1.2–1.4 ms
+Verification
+Real GPU (vkrun, NVIDIA GB10): --demo cornell, --demo materials, --demo lights, sponza — on, off, --no-rt (silently unavailable), async on/off.
+--validation: zero validation errors from the new passes (on and off); also fixed an M1 vkCmdFillBuffer usage-flag error found along the way.
+Temporal stability: 10-frame static-camera sequence converges (0% pixels >6/255 across a 6-frame gap on wall/floor).
+RX_RCGI unset: no rcgi passes in the frame, baseline screenshot-identical.
+Known follow-ups (tracked in RCGI.md)
+RT reflection bounce still samples the DDGI atlas (black under RCGI).
+Quarter-res gather quality tier; RGB9E5 storage where supported.
+Pre-existing rcgi_args indirect-args barrier warning at the RHI layer (not introduced here).
+🤖 Generated with Claude Code
+Force67
+added 4 commits
+July 13, 2026 22:51
+gi: RCGI world side - cascaded light grid, spatial-hash radiance cach…
+…
+dad5a9a
+```
+…e, irradiance cascades (RX_RCGI=1)
+```
+gi: RCGI screen side - half-res SH final gather, bilateral denoise, t…
+…
+72ae753
+```
+…emporal upscale
+```
+docs: RCGI comparison screenshots (cornell + sponza, ddgi vs rcgi vs …
+…
+8a40fda
+```
+…probes-only)
+```
+docs: document the GI tiers and RCGI rationale in the READMEs
+f1a6925
+Force67
+commented
+Jul 14, 2026
+View reviewed changes
+Force67
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review findings
+P1: Normal shutdown uses a destroyed Device. engine/render/core/renderer.cc:4557-4572 resets device_ without resetting rcgi_. Later, RcgiSystem::~RcgiSystem() at engine/render/gi/rcgi.cc:738-755 destroys resources through its dangling Device&. This affects every RT-capable startup, even when RCGI remains disabled.
+P1: RCGI alone does not trigger a TLAS build. The predicate at engine/render/core/renderer.cc:2428-2429 omits rcgi_active, while both RCGI passes bind the frame TLAS at :2476-2478 and :3290-3292. Disabling the other RT features leaves RCGI tracing against a null or stale TLAS.
+P1: Cache hit payloads can be torn across rays. At engine/render/shaders/gi/rcgi_probe_trace.cs.hlsl:96-124, only the key is atomic; every ray matching the cell independently overwrites the multiword geometry payload. rcgi_cache_shade.cs.hlsl:81-99 can consequently combine instance/geometry data from one ray with primitive/barycentrics from another, potentially causing out-of-bounds geometry reads.
+P1: Buffer clears are not visible to the atomic reads that follow. engine/render/gi/rcgi.cc:423-430 transitions transfer writes only to kComputeWrite. On Vulkan that scope maps exclusively to VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, but InterlockedCompareExchange and InterlockedAdd also read the previous value. The hash keys and active counter may therefore observe uncleared data.
+P1: Three atlas cascades blend undefined memory on first use. engine/render/gi/rcgi.cc:350-359 marks history globally valid after resetting only the current cascade. The remaining cascades subsequently use reset=false, and rcgi_blend.cs.hlsl:89-91 retains 97% of undefined image contents. Cache shading also samples the atlases before their first blend at rcgi.cc:455-469.
+P2: Frame zero publishes cache entries without shading them. At rcgi_probe_trace.cs.hlsl:116-124, zero is both the cleared queued sentinel and a valid frame number, so no entry is queued on frame zero. rcgi_common.hlsli:247-250 nevertheless accepts the published key and returns undefined radiance_ data.
+P2: The world cache has no eviction despite the documented design. rcgi_probe_trace.cs.hlsl:96-104 only accepts empty or matching slots, while rcgi.cc:342-347 clears only after a single-frame camera jump over 32 m. Normal traversal permanently accumulates old cells until eight-step probing increasingly rejects new samples. This contradicts RCGI.md:43-45.
+P2: Disabled RCGI still consumes about 85 MiB and can prevent startup. engine/render/core/renderer.cc:455-465 creates the full RCGI system and light grid on every RT-capable device before checking settings_.rcgi. Any resource or pipeline failure becomes fatal, so the default-off feature can regress startup on memory-constrained devices.
+P2: Screen-resource allocation failure proceeds with invalid images. engine/render/gi/rcgi.cc:305-320 returns void after partial failure, and :579-586 imports all images unconditionally. If only screen_color_hist_ succeeds, the extent fast path also prevents future retries.
+P2: Thin geometry can corrupt temporal history during upscale. At rcgi_upscale.cs.hlsl:64-95, an opaque full-resolution pixel whose four gather representatives are sky leaves mn=1e30 and mx=0. The temporal clamp at :106-115 then receives inverted bounds and can emit non-finite FP16 history values.
+Verification: cmake --build build/linux -j2 succeeded, all 11 CTest tests passed, and git diff --check passed. GPU validation could not run in this environment because VK_KHR_surface is unavailable.
+gi: address RCGI review - shutdown order, TLAS gating, cache atomics,…
+…
+d0b1c35
+```
+… barrier scopes, cascade reset, eviction, lazy init
+```
+Force67
+commented
+Jul 14, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+All 10 findings addressed in d0b1c35. Per finding:
+Shutdown order — rcgi_.reset() now sits with the other GPU-owning systems in Renderer::Shutdown, before device_.reset() (light_grid_ was already torn down earlier). Every RX_UI_SHOT run exercises this path (RequestQuit → Host::Shutdown → renderer_.Shutdown); all verification runs exited 0.
+TLAS gating — the frame's needs-TLAS predicate now includes rcgi_active.
+Torn cache payloads — exactly one ray per cell per frame owns the multiword payload: ownership is claimed via InterlockedExchange on the queued-frame stamp; losers write nothing, so words can no longer interleave across rays. The active-list append stays gated on staleness (≥4 frames), preserving the re-shade amortization. The shade pass additionally bounds-checks instance/geometry/material indices via GetDimensions before any bindless fetch.
+Clear→atomic visibility — added BarrierScope::kComputeReadWrite (types.h + vulkan backend; the scope enum isn't a bitmask, so a combined scope over two barriers) and switched both post-FillBuffer barriers (state_, active_meta_) to it. Audited the light grid: it has no clear→atomic pattern, these were the only two sites.
+Undefined cascade blends — per-cascade validity: each cascade's first blend after creation/teleport runs with reset=true, a validity bitmask travels in RcgiGlobals so SampleRcgiIrradiance returns zero from not-yet-valid cascades (covers the cache-shade bounce term sampling before first blend too), and the atlases are now created with TRANSFER_DST and cleared to black up front.
+Frame-zero sentinel — stamps are frame+1 encoded everywhere (RcgiStampEncode, 0 = never); RcgiCacheLookup rejects key-matched entries whose shaded stamp is still 0, so inserted-but-unshaded cells fall through to the cascade/sky level.
+Eviction — age-based reclamation during the insertion probe: a slot whose queued stamp is older than kRcgiEvictAge (256 frames) is reclaimed via key CAS; the winner zeroes the shaded stamp so stale radiance can't leak. Never-queued (stamp 0) slots are not evictable, to avoid stomping a same-frame half-insert. ABA is documented as tolerated (cache semantics). This matches the RCGI.md design text now.
+Memory when disabled — RCGI + light grid are lazily created on first activation (settings.rcgi && rt_available && !rcgi_ in the settings-apply path); creation failure is non-fatal (logged, feature stays unavailable, failure latched). Created-once — toggling off does not thrash the 85 MiB. Verified via creation log: unset RX_RCGI allocates nothing.
+Partial screen-resource failure — EnsureScreenResources returns bool, tears down partial allocations and clears the cached extent (retry possible); on failure the frame falls back to the probes-only resolve, so no null images are imported.
+Inverted temporal clamp — the all-sky-taps case (weight sum ~0 / mn > mx) is treated as disocclusion: zero irradiance, history counter reset, clamp skipped; final history write is scrubbed through a finite non-negative clamp. Denoise audited — its center tap always contributes, so no equivalent path there.
+Verification: build green, 11/11 ctests, and on the GB10 via vkrun: RX_RCGI unset is bit-identical to the pre-fix baseline (cmp); RCGI-on cornell/materials/lights converge with the bleed intact and no speckle; --no-rt clean; --validation shows zero errors with async off in both states. With async on, the one remaining message is the pre-existing rcgi_args INDIRECT_COMMAND_READ-under-compute-queue issue documented in RCGI.md — it reproduces without these changes and looks like an engine-wide RHI gap (the compute-only stage filter drops DRAW_INDIRECT while keeping the access flag); happy to take that as a follow-up outside this PR. 120-frame temporal sequence stays flat (MAD ≈ 2.4/255, same as baseline).
+RCGI.md gained a "Review fixes" section covering the stamp encoding, eviction policy, lazy creation, per-cascade validity and the async caveat.
+🤖 Generated with Claude Code
+Force67
+merged commit eb15aaa
+into
+main
+Jul 14, 2026
+Force67
+mentioned this pull request
+Jul 14, 2026
+gi: SDF software ray path - RCGI on devices without ray query (RX_RCGI_SW=1)
+#13
+Merged
+Force67
+deleted the
+feature/rcgi
+branch
+September 26, 2026 04:29
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,65 @@
+--- v001.md
++++ v002.md
+@@ -1,19 +1,39 @@
+ # Texture slicing
+ 
+-Also called: Volume slicing, 3D texture slicing, proxy geometry slicing
+ 
+ ## Overview
+-Texture slicing is a hardware-accelerated object-order volume rendering technique that approximates the volume-density function by mapping volumetric data into 2D or 3D textures and slicing the volume with parallel planes (proxy geometry) [S1, S3]. These slices are rasterized and composited back-to-front (or front-to-back) using hardware-supported blending, enabling real-time interactivity by offloading the rendering pipeline to the GPU [S1, S2]. It is distinguished from its siblings by its reliance on texture hardware for both data storage and sampling, whereas Splatting uses point primitives, Shear-warp uses affine transformations, Cell projection renders explicit polygons, Voxel rasterization treats voxels as geometry, and Domain-transform methods operate in frequency or transformed spaces [S3].
++Texture slicing is a hardware-accelerated object-order volume rendering technique that approximates the volume-density function by mapping volumetric data into 2D or 3D textures and slicing the volume with parallel planes (proxy geometry) [S1, S3]. These slices are rasterized and composited back-to-front (or front-to-back) using hardware-supported blending, enabling real-time interactivity by offloading the rendering pipeline to the GPU [S1, S2]. It is distinguished from other object-order methods by its direct use of graphics hardware for both data storage and sampling, avoiding software rendering bottlenecks [S1, S3].
+ 
+ ## Shared principles
+ The family shares a common mechanism: volumetric data is represented as a texture (2D or 3D) in graphics hardware, and the volume is sampled by intersecting it with a set of parallel planes [S1, S3].
+ 
+-1.  **Data Representation**: The scalar volume data is mapped to RGBA values via classification functions and stored in a texture map [S1]. For 3D texture hardware, the data is stored directly in a 3D texture [S1]. For 2D texture hardware, data is represented as stacks of 2D images, often replicated in three axis directions to allow quick construction of geometry for the axis most aligned with the viewpoint [S3].
+-2.  **Proxy Geometry**: A set of parallel planes (proxy geometry) slices the volume [S1, S3].
+-    *   In 3D texture slicing, the proxy geometry consists of parallel polygons orthogonal to the viewing direction (aligned with the image plane) [S3].
+-    *   In 2D texture slicing, the proxy geometry consists of axis-aligned quadrilaterals [S3].
+-3.  **Rendering Order**: The slices are rendered in back-to-front or front-to-back order to correctly accumulate color and opacity [S1, S2, S3].
+-4.  **Compositing**: Hardware-supported blending is used to composite the proxy slices into the final image [S2]. The color and opacity contributions are accumulated during rasterization [S1].
+-5.  **Efficiency**: The method relies on rasterization hardware, making it very fast on modern GPUs [S2]. It is an object-space approach, efficient for modern graphics processors, making it the choice for interactivity [S3].
++1. **Data Representation & Classification**: Scalar volume intensities are mapped to RGBA values via classification functions and stored in a 3D texture map [S1]. The texture dimensions are rounded up to the nearest power of 2 (e.g., 128³ or 256³) to satisfy hardware requirements [S1]. For 2D texture hardware, data is replicated across three axis directions to allow quick geometry construction for the viewpoint-aligned axis [S3].
++2. **View & Bounds Calculation**: The current view direction vector is retrieved [S2]. The minimum and maximum distances of the unit cube vertices are calculated via dot product to determine the slicing bounds [S2].
++3. **Slice Generation**: A set of parallel planes orthogonal to the viewing direction (for 3D textures) or axis-aligned (for 2D textures) is defined to slice the volume [S1, S3]. Texture coordinates are specified at the four corners of each plane [S1].
++4. **Rendering & Compositing**: The planes are rendered back-to-front (or front-to-back) [S1, S2, S3]. The graphics hardware interpolates texture coordinates across each plane, performs texture lookups, and accumulates colors and opacities using linear alpha blending to composite the final image [S1, S3].
++
++```python
++def texture_slicing(volume_data, view_direction):
++    # Map scalar intensities to RGBA via classification functions [S1]
++    rgba_values = [classify(v) for v in volume_data]
++    # Store in 3D texture; dimensions rounded to power of 2 [S1]
++    texture_dims = [next_power_of_2(d) for d in volume_data.shape]
++    # Calculate min/max distance of unit cube vertices via dot product [S2]
++    min_dist = min(dot(v, view_direction) for v in volume_data.vertices)
++    max_dist = max(dot(v, view_direction) for v in volume_data.vertices)
++    # Define parallel planes orthogonal to view direction [S1, S3]
++    planes = []
++    spacing = compute_spacing(texture_dims)
++    for d in range(min_dist, max_dist, spacing):
++        planes.append(Plane(normal=view_direction, distance=d))
++    # Render planes back-to-front [S1, S2, S3]
++    for plane in sorted(planes, key=lambda p: p.distance, reverse=True):
++        # Specify texture coordinates at the four corners of each plane [S1]
++        coords = compute_corners(plane, texture_dims)
++        # Interpolate coordinates across plane, perform texture lookup [S1]
++        color, opacity = interpolate_and_lookup(coords)
++        # Accumulate color and opacity using linear alpha blending [S1]
++        composite(color, opacity)
++```
+ 
+ ## Subtopics
+@@ -25,6 +45,12 @@
+ An algorithm to calculate intersection polygons between a slicing plane and the bounding box of volumetric data, implemented in a vertex shader to offload CPU calculation. It optimizes the generation of the proxy geometry.
+ 
++### Plane Slicing
++A method using regularly spaced slice planes perpendicular to X, Y, or Z axes to slice cells into polygons for rendering [S4]. It slices cells incrementally into polygons on three sets of evenly spaced planes using a marching cubes variant, then groups the polygons for efficient OpenGL rendering [S4]. Scalar values for polygon vertices are normalized to 1D texture coordinates to access transfer functions stored in a texture map [S4]. At rendering time, the set of slices whose axis is closest to the viewing direction is selected and rendered back-to-front with opacity blending [S4]. Progressive refinement is supported by initially rendering a few slices and improving resolution over time, and users may request dynamic slicing perpendicular to any viewing direction [S4]. Several hundred evenly spaced slicing planes are typically used [S4].
++
++### Alpha Dithering via Texture Map
++An optimization using texture-mapped transfer functions to expand the range of allowable opacity values on 8-bit per channel graphics hardware [S4]. It addresses the issue where typical scientific volume renderings require very low per-slice opacities for transparency, which become too small to register as slice density increases [S4]. The texture map is adjusted for the appropriate per-slice opacity whenever the slice plane spacing is changed [S4].
++
+ ## Background
+-Texture slicing was described in 1994 by Wilson et al. as a method using hardware-assisted 3D texture mapping for direct volume rendering [S1, S3]. It was also independently described by Cullip and Neumann, Cabral et al., and Guan and Lipes in 1993-1994 [S3]. The method became widely adopted as 3D texturing hardware became available in consumer-grade graphics accelerators, such as the NVIDIA GeForce3 family released in 2001 [S1]. It is used in applications where interactivity is critical, such as segmentation and medical visualization [S1].
++Texture slicing was described in 1994 by Wilson et al. as a method using hardware-assisted 3D texture mapping for direct volume rendering [S1, S3]. It was also independently described by Cullip and Neumann, Cabral et al., and Guan and Lipes in 1993-1994 [S3]. The method became widely adopted as 3D texturing hardware became available in consumer-grade graphics accelerators, such as the NVIDIA GeForce3 family released in 2001, which supported 128³ volumes, and later GeForce4 cards supporting 256³ volumes [S1]. It is used in applications where interactivity is critical, such as segmentation and medical visualization, though it is constrained by hardware architecture limitations and makes advanced effects like shadows harder to achieve than with ray-casters [S1, S3]. Supporting volume rotation with light from a fixed direction is difficult because the light direction relative to the volume changes as the volume rotates, while the slicing planes and texture mapping are view-dependent [S1]. Wilson's original method estimated depth integration by solving a linear differential equation, but modern implementations use linear mapping to avoid non-linear formulae, allowing polygons to be legally rotated without recalculating texture coordinates at each step [S1].
+ 
+ ## Sources

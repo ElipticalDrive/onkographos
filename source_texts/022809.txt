@@ -1,0 +1,280 @@
+unity - Can I clip a collection of geometry to render only inside a particular worldspace volume? - Game Development Stack Exchange
+Teams
+Q&A for work
+Connect and share knowledge within a single location that is structured and easy to search.
+Learn more about Teams
+Can I clip a collection of geometry to render only inside a particular worldspace volume?
+Ask Question
+Asked
+7 years ago
+Modified
+3 years, 7 months ago
+Viewed
+6k times
+4
+\$\begingroup\$
+I am making a VR app in Unity. I have a giant map that I want to display on a virtual table. The map is too large to fit on the table, and I cannot change its size. (It is a third party asset, and does not easily have that capability.)
+How can I tell the camera not to render the parts of the map that fall off of the table? Perhaps something along the lines of:
+```
+Camera.DoNotRender(new Vector3(100, 0, 0));
+```
+I have been looking into using some MonoBehaviour messages such as OnPreRender, OnRenderObject, etc. But I do not know which one can help me, if any. Ideally, the pixels behind the non-rendered pixels should be rendered, but that is not my priority.
+The map is made up of 100s of little renderers:
+How can I have my Camera not render specific world space pixels?
+unity
+3d
+shaders
+rendering
+transparency
+Share
+Follow
+edited Apr 10, 2017 at 17:23
+DMGregory♦
+134k2222 gold badges242242 silver badges358358 bronze badges
+asked Apr 10, 2017 at 13:00
+Evorlor♦Evorlor
+5,79399 gold badges5555 silver badges9999 bronze badges
+\$\endgroup\$
+6
+\$\begingroup\$
+Is that map asset a 3d mesh or a 2d texture?
+\$\endgroup\$
+– Philipp
+Apr 10, 2017 at 13:28
+\$\begingroup\$
+@Philipp A Map Asset. Made up of 100s of little parts, each with their own renderer. assetstore.unity3d.com/en/#!/content/68889
+\$\endgroup\$
+– Evorlor
+♦
+Apr 10, 2017 at 14:06
+1
+\$\begingroup\$
+The way you'll do this will likely depend on how the asset is being rendered. What kinds of rendering components are in play, meshes/sprites/other? Is it using a custom shader or multiple materials? A picture is often worth a thousand words when asking about graphics problems.
+\$\endgroup\$
+– DMGregory
+♦
+Apr 10, 2017 at 14:06
+\$\begingroup\$
+@DMGregory Edited. It is made up of 100s of little renderers. I think they are all primitives.
+\$\endgroup\$
+– Evorlor
+♦
+Apr 10, 2017 at 14:08
+\$\begingroup\$
+Render it to a texture, then mask that texture with the outline of the table, rendering that to the screen. Exercise for the reader: determine the edge of the table.
+\$\endgroup\$
+– Draco18s no longer trusts SE
+Apr 10, 2017 at 14:26
+|
+Show 1 more comment
+2 Answers
+2
+Sorted by:
+Reset to default
+Highest score (default)
+Date modified (newest first)
+Date created (oldest first)
+6
+\$\begingroup\$
+One way to do this is with the clip function in a shader, which aborts rendering of a pixel if it fails a particular condition.
+This lets you create custom-shaped clipping regions, but it has a downside: by the time you reach the clip test, most of the work of rasterizing the object is already done, so you end up paying a significant amount for the invisible portions of the model that don't actually get drawn in the end.
+Be sure to profile this to determine whether it's an issue in your particular application - it might not be. If it is, there are some additional tricks you can use with depth, stencil, and off-screen buffers to exclude some of the redundant geometry.
+Edit: a neat trick I've just learned is if you introduce a NaN or infinity into a vertex position, you can abort rendering of triangles using that vertex. So this can let you do some of this clipping per-vertex instead of solely per fragment, saving some rasterization costs.
+```
+v.vertex.x /= step(outOfBounds, 0.1f);
+```
+You need a margin like that 0.1f there that's bigger than your typical triangle - otherwise you can have a vertex outside your clipping margin abort a whole triangle that's partly inside the clipping volume.
+Note that this doesn't seem to be an officially documented feature, just something GPUs tend to do 'cause how else are they going to render that triangle? ;)
+Here's an example shader using this approach - use something like this on your map material to achieve the clipping:
+```
+Shader "Custom/ClipVolume" {
+    Properties {
+        _Color ("Color", Color) = (1,1,1,1)
+        _MainTex ("Albedo (RGB)", 2D) = "white" {}
+        _Glossiness ("Smoothness", Range(0,1)) = 0.5
+        _Metallic ("Metallic", Range(0,1)) = 0.0
+
+        // Expose parameters for the minimum x, minimum z,
+        // maximum x, and maximum z of the rendered volume.
+        _Corners ("Min XZ / Max XZ", Vector) = (-1, -1, 1, 1)
+    }
+    SubShader {
+        Tags { "RenderType"="Opaque" }
+        LOD 200
+
+        // Allow back sides of the object to render.
+        Cull Off
+
+        CGPROGRAM
+
+        #pragma surface surf Standard fullforwardshadows
+        #pragma target 3.0
+
+        sampler2D _MainTex;
+
+        struct Input {
+            float2 uv_MainTex;
+            float3 worldPos;
+        };
+
+        half _Glossiness;
+        half _Metallic;
+        fixed4 _Color;
+
+        // Read the min xz/ max xz material properties.
+        float4 _Corners;
+
+        void surf (Input IN, inout SurfaceOutputStandard o) {
+
+            // Calculate a signed distance from the clipping volume.
+            float2 offset;
+            offset = IN.worldPos.xz - _Corners.zw;
+            float outOfBounds = max(offset.x, offset.y);
+            offset = _Corners.xy - IN.worldPos.xz;
+            outOfBounds = max(outOfBounds, max(offset.x, offset.y));
+            // Reject fragments that are outside the clipping volume.
+            clip(-outOfBounds);
+
+            // Default surface shading.
+            fixed4 c = tex2D (_MainTex, IN.uv_MainTex) * _Color;
+            o.Albedo = c.rgb;
+            o.Metallic = _Metallic;
+            o.Smoothness = _Glossiness;
+            o.Alpha = c.a;
+        }
+        ENDCG
+    }
+    // Note that the non-clipped Diffuse material will be used for shadows.
+    // If you need correct shadowing with clipped material, add a shadow pass
+    // that includes the same clipping logic as above.
+    FallBack "Diffuse"
+}
+```
+Here's what it looks like on Unity's "Ethan" model:
+And here it is using the triangle aborting trick above to remove some of the excess geometry outside the clipping volume:
+Share
+Follow
+edited Apr 30, 2017 at 3:21
+answered Apr 10, 2017 at 17:18
+DMGregory♦DMGregory
+134k2222 gold badges242242 silver badges358358 bronze badges
+\$\endgroup\$
+0
+Add a comment
+|
+1
+\$\begingroup\$
+Using Stencils is another simple option
+Stencil lets you use a "mask" to define where the shader is rendered. This is incredibly flexible and easy to modify in the editor.
+here's unity's documentation
+https://docs.unity3d.com/Manual/SL-Stencil.html
+To use it, you'll need to put this in the "mask" shader
+```
+Stencil{
+    Ref 1
+    comp always
+    Pass replace
+}
+```
+and then this in the map render shader
+```
+Stencil{
+    Ref 1
+    comp Equal
+    Pass keep
+}
+```
+This way only pixels viewed "through" the mask will be rendered.
+Share
+Follow
+answered Apr 12, 2017 at 18:24
+ZebramanZebraman
+81955 silver badges66 bronze badges
+\$\endgroup\$
+1
+3
+\$\begingroup\$
+Note that this masking is applied in screen space, rather than worldspace. This can give somewhat odd results in VR, as a bit of content that's drawn for the left eye might, through parallax, find itself outside the stencil when viewed from the right eye. This is usually OK if there's something solid rendered in front of the stencil edge to explain the occlusion (imagine looking out a window frame, or seeing the edge of a screen playing a 3D movie "behind" it), but if the stencil is just hanging in mid-air, or "behind" the clipped content, this can be confusing for the eyes to try to focus on.
+\$\endgroup\$
+– DMGregory
+♦
+Apr 12, 2017 at 18:53
+Add a comment
+|
+You must log in to answer this question.
+Not the answer you're looking for? Browse other questions tagged
+unity
+3d
+shaders
+rendering
+transparency
+.
+The Overflow Blog
+Climbing the GenAI decision tree
+sponsored post
+Diverting more backdoor disasters
+Featured on Meta
+New Focus Styles & Updated Styling for Button Groups
+Upcoming initiatives on Stack Overflow and across the Stack Exchange network
+Linked
+0
+How to create 3D area mask?
+1
+Unity Particles that only show up inside of a rectangular GameObject
+1
+How can I cut a doorway through my wall at runtime?
+1
+Mask not applying to gameobjects in UI layer
+0
+Render only part of mesh that is intersected into inother Mesh in Unity
+0
+Projector screen effect in Unity
+0
+How to highlight intersection between objects?
+Related
+7
+Efficiently culling off-screen objects on a top-down 2D map
+6
+With what projection matrix should I render a portal to a texture?
+3
+How can I determine the pixels covered by a transformed triangle (without drawing it)?
+1
+How should I set camera in Blender for example to render a sprite which can be used in an isometric map?
+2
+How to render multiple displays in Unity
+0
+Unity3D - post-process unwanted on UI
+0
+Unity: How to apply bloom to only some objects in the scene?
+0
+Camera stacking for first-person view weapon in Universal Render Pipeline
+0
+Unity: How to determine and highlight map region under mouse pointer efficiently
+Hot Network Questions
+Determining Bound States from Møller Operator
+How would the existence of sapient "Pet Rocks" affect the economy of a medieval kingdom?
+What words of endearment may I use for describing a misbehaving child?
+Results of invertibility of a matrix involving the Szego kernel
+Linking number and intersection number
+What is the signal sent when the charger is unplugged/plugged
+How does a wireless charger work if there is no transfer of electrons?
+Can falsehood be measured? If so, would it be continuous or discrete?
+Did Goethe say this quote praising the Prophet Muhammed?
+Confusion about overtones and a slow-motion video of a plucked string
+Has anyone ever made a quiet floppy drive?
+Why is this plane flying in circles?
+Why do most philosophers believe in a deterministic formulation of quantum mechanics?
+Late IRA contribution with changing filing status and income limits
+Difference between 織物, 生地 and 布
+Tried to use cig lighter in my 12 volt plug now charger won’t work
+How does the situation in the Gaza Strip affects the voters' view of the two candidates for the US Presidential election?
+Who has the right to examine a will?
+Get cumulative sums in a list without using a for loop
+from a security standpoint why should unused software be deleted?
+How do I fill/fix this small gap between a wall and a wardrobe frame?
+What are some of the legal consequenses of hiring full-time employees on contract basis?
+If a sequence can be broken down into two subsequences that both converge, does the main sequence necessarily converge?
+Is 1/3 included in the sequence 0.3, 0.33, 0.333,...?
+more hot questions
+Question feed
+lang-cs

@@ -1,0 +1,821 @@
+https://doi.org/10.5194/egusphere-2025-6547
+Preprint. Discussion started: 13 February 2026
+c Author(s) 2026. CC BY 4.0 License.
+Volume of Fluid method applied to free surface boundaries in
+numerical geodynamic models
+Timothy Gray1 , Paul Tackley1 , and Taras Gerya1
+1
+Institute of Geophysics, Department of Earth and Planetary Sciences, ETH Zürich, Sonneggstrasse 5, 8092 Zurich,
+Switzerland
+Correspondence: Timothy Gray (timothy.gray@eaps.ethz.ch)
+Abstract. Tracking the evolution of interfaces in numerical geodynamic models, particularly the rock-air/water boundary when
+imposing free surface boundary conditions, presents significant computational challenges. Traditional marker-in-cell methods,
+while widely used in mantle convection codes like StagYY, suffer from inherent noise due to random tracer distributions and
+require high tracer densities for accurate topography resolution, leading to substantial computational costs. This study presents
+5
+the implementation of the Volume of Fluid (VOF) method into StagYY using the open-source gVOF package, offering a
+volume-conservative alternative for interface tracking in geodynamic simulations.
+Two implementations are developed and tested: a basic method with one VOF cell per computational cell, and an improved
+method utilizing subcells with full coupling to the Stokes solver through density and viscosity fields. Both methods employs
+the CLCIR (Conservative Level Contour-based Interface Reconstruction) reconstruction scheme combined with FMFPA (Face-
+10
+Matched Flux Polyhedron Advection) for optimal accuracy. A consolidation approach for translating VOF fields to Eulerian
+surface locations ensures volume conservation and numerical stability.
+Benchmarking in 2D and 3D across multiple geometries demonstrates that while the basic VOF implementation provides
+adequate results for simple 2D cases, the improved method is essential for accurate tracking in complex flows and threedimensional applications. The improved VOF method successfully eliminates topographic noise inherent in tracer-based ap-
+15
+proaches and decouples surface quality from tracer density, enabling high-quality results with reduced computational overhead
+from tracer advection.
+Despite increased computational costs and memory consumption associated with the method, particularly with the improved
+implementation, the VOF method offers distinct advantages including explicit volume conservation, sharp interface representation, and versatility for tracking various geophysical boundaries beyond free surfaces. This work establishes a foundation for
+20
+future applications in sea level modelling, continental margin tracking, and coupled planetary system simulations, advancing
+toward global-scale biogeodynamic modelling.
+1
+Introduction
+Tracking the evolution of interfaces in numerical geodynamic models, and in particular the boundary between rock and air/water that arises when imposing a free surface boundary condition, is a subset of the more general problem of tracking interfaces
+1
+https://doi.org/10.5194/egusphere-2025-6547
+Preprint. Discussion started: 13 February 2026
+c Author(s) 2026. CC BY 4.0 License.
+25
+within multiphase fluid flows. In addressing this challenge, the volume of fluid (VOF) method has emerged as a popular
+approach, characterised by its versatility and volume conservation properties.
+The standard method of tracking the surface interface in the numerical geodynamic codes (e.g. StagYY, Tackley, 2000;
+i3elvis, Gerya and Yuen, 2003, 2007) often involves the use of Lagrangian tracers through the marker-in-cell method. When
+tracking surfaces on the global scale, especially in 3D numerical geodynamic models, computational cells are typically large
+30
+due to computational limitations, with typical global scale models using a vertical resolution of ≈10 km near the surface
+(Coltice et al., 2019). With cells that are large in comparison to the topography one might expect from an Earth-like planet
+(≈ ±10 km), fine sub-grid level resolution is required to accurately resolve topography, which when using the marker-in-cell
+method can be achieved by increasing tracer density. This does not scale well however; a doubling of vertical tracer density
+would involve the use of 4 or 8 times more tracers overall in 2D and 3D models respectively, resulting in significantly increased
+35
+memory consumption and computational cost. This inefficiency motivates alternative methods of tracking free surfaces that are
+independent of tracer density.
+The VOF method offers several distinct advantages. First, it conserves volumes by explicitly tracking volume fractions of
+different fluid phases within each computational cell (López and Hernández, 2022), ensuring that the total volume of rock
+and air remains constant. Second, it explicitly captures sharp interfaces between different fluid phases (Vorobieff and Brebbia,
+40
+2018), providing a clear representation of fluid boundaries and enabling features requiring explicit surface representations
+such as sea level tracking. Third, methodological advances have enabled its generalisation to non-Cartesian grids and complex
+geometries (López and Hernández, 2022), making it suitable for modelling diverse geophysical phenomena.
+Volume of fluid methods are widely used in the CFD community, such as the MULES method in OpenFOAM and ANSYS
+Fluent. In numerical geodynamic modelling, Robey and Puckett (2019) employed a 2D Cartesian VOF method in the com-
+45
+munity code ASPECT. In this work, the open-source package gVOF (López and Hernández, 2022) has been integrated into
+StagYY, primarily for tracking surface interfaces with additional applications for modelling other types of interfaces.
+2
+Methodologies
+The volume of fluid method is based on modelling the colour function, c(x), which is defined by the distribution in space of
+a tracked fluid (Equation 1). For modelling surfaces in numerical geodynamic models this fluid is typically rock, and regions
+50
+without rock are considered air or vacuum.
+c(x) =
+
+
+1
+
+0
+if x ∈ tracked fluid,
+(1)
+otherwise.
+The colour function is advected by a velocity field v from the solution of the Stokes equations at each timestep, satisfying
+the transport equation (López and Hernández, 2022):
+2
+https://doi.org/10.5194/egusphere-2025-6547
+Preprint. Discussion started: 13 February 2026
+c Author(s) 2026. CC BY 4.0 License.
+Figure 1. The colour function is defined throughout the domain as 1 in the tracked fluid, and 0 otherwise.
+∂c
++ v · ∇c = 0.
+∂t
+55
+(2)
+For an incompressible velocity field where ∇ · v = 0, this conserves the colour function c by considering flux cv entering
+and exiting each control volume.
+For the numerical solution, the colour function is discretised by integrating within each computational cell with volume Vi
+to obtain the cellwise volume fraction Ci :
+Ci =
+60
+R
+Vi
+R
+c(x) dV
+Vi
+(3)
+dV
+The volume fraction is 1 in cells completely filled with tracked fluid, 0 in empty cells, and between 0 and 1 in interfacial
+cells (Figure 2).
+Figure 2. The cellwise volume fraction models interfacial cells using partial volume fractions. When using a PLIC (Piecewise Linear Interface
+Calculation) scheme, the interface is a piecewise linear function within each interfacial cell.
+For an incompressible fluid flow with one tracked fluid and no sources or sinks, the total volume remains constant:
+X
+Vi Ci = const.
+(4)
+i∈Ω
+3
+https://doi.org/10.5194/egusphere-2025-6547
+Preprint. Discussion started: 13 February 2026
+c Author(s) 2026. CC BY 4.0 License.
+The PLIC (Piecewise Linear Interface Calculation) method (López et al., 2005) is used to reconstruct the interface within
+65
+each interfacial cell as a piecewise linear function, involving two main steps: interface normal reconstruction and the solution
+of the volume enforcement problem.
+2.1
+Interface reconstruction
+The PLIC method represents the interface as n·x = α where n is the normal vector, x is the position vector, and α is a constant.
+Both n and α must be reconstructed from cellwise volume fractions Ci .
+gVOF implements six reconstruction methods: LSGIR (Least-squares gradient interface reconstruction), LLCIR (Local level
+70
+contour-based interface reconstruction), CLCIR (Conservative level contour-based interface reconstruction), ELCIR (Extended
+level contour-based interface reconstruction), SWIR (Swartz interface reconstruction), and LSFIR (Least squares fit interface
+reconstruction). All methods are implemented for general 3D grids. López and Hernández (2022) conclude that CLCIR, SWIR,
+and LSFIR are preferred for their second-order accuracy, though SWIR is significantly less performant. Following these results,
+75
+the CLCIR method was selected for this work.
+2.2
+Volume enforcement problem
+The volume enforcement problem consists of finding α for a plane with known normal vector n such that the volume beneath
+the plane within a given cell is a specified constant V (López and Hernández, 2008). Analytical solutions exist for both 2D and
+3D Cartesian cases (Scardovelli and Zaleski, 2000), as well as for general polygons and polyhedrons (López and Hernández,
+80
+2008). The inverse problem of finding α from V can be solved numerically using bisection or Newton-Raphson methods (Press,
+2007), or analytically.
+2.3
+Advection
+Advection methods in VOF are classified as split or unsplit. Split methods solve the advection equation directionally, reducing
+it to one-dimensional transport problems but leading to numerical diffusion and lower accuracy (Rider and Kothe, 1998).
+85
+Unsplit methods solve the advection equation in multiple dimensions simultaneously, providing superior interface accuracy
+and conservation properties at higher computational cost (Scardovelli and Zaleski, 1999).
+gVOF implements three unsplit advection routines: FMFPA (Face-Matched Flux Polyhedron Advection), EMFPA (EdgeMatched Flux Polyhedron Advection), and NMFPA (Non-Matched Flux Polyhedron Advection). FMFPA uses velocities at cell
+face centers, making it well-suited for StagYY’s staggered grid where velocities are face-centered. This method was selected
+90
+for all results presented here.
+3
+Implementation in StagYY
+Two variations of the volume of fluid method were implemented in StagYY. In the "basic" method, a VOF method tracks
+cellwise volume fractions using the same grid as the Stokes solver. In the "improved" method, a finer sub-grid is used to track
+4
+https://doi.org/10.5194/egusphere-2025-6547
+Preprint. Discussion started: 13 February 2026
+c Author(s) 2026. CC BY 4.0 License.
+volume fractions, enabling coupling with the Stokes solver through the density and viscosity fields. Following the results of
+95
+(López and Hernández, 2022) and (Esteban et al., 2023), the CLCIR reconstruction method and FMFPA advection method
+were used, with FMFPA being particularly suitable as StagYY velocities are face-centred on the staggered grid.
+3.1
+Basic VOF implementation
+The basic implementation maps one VOF grid cell to one Eulerian cell in StagYY. In non-Cartesian geometries, grid information and velocities stored in spherical coordinates (θ, ϕ) are transformed to Cartesian coordinates for VOF operations.
+100
+3.2
+Improved VOF implementation
+The improved method divides each Eulerian cell into 4 subcells in 2D or 8 subcells in 3D (Figure 3). This provides two key
+advantages: doubled surface resolution (2 or 4 planes per cell in 2D or 3D), and full coupling to the Stokes solver (Section 3.5),
+greatly improving free surface modelling accuracy. The downside is increased computational cost, requiring 4 or 8 times more
+VOF cells.
+Figure 3. In the improved VOF scheme, each computational cell is subdivided into 4 (in 2D) or 8 (in 3D) subcells, providing additional
+resolution at increased computational cost.
+105
+3.3
+Interpolation to the grid
+Two methods were developed to translate the reconstructed VOF interface back to an Eulerian surface representation: sampling
+and consolidation.
+3.3.1
+Consolidation method
+The consolidation method evaluates the total volume of fluid in each column of cells and computes the effective surface height
+110
+if all fluid were consolidated from the bottom. This ensures the average surface height remains constant, as total fluid volume
+is conserved during VOF advection.
+5
+https://doi.org/10.5194/egusphere-2025-6547
+Preprint. Discussion started: 13 February 2026
+c Author(s) 2026. CC BY 4.0 License.
+The consolidation method provides superior results compared to sampling (Figure 4), remaining stable over many timesteps
+without overshoots or undershoots. It also ensures the Eulerian surface representation is volume conservative and avoids entrainment into the air layer at convergent features by preventing cells from "floating" above the surface.
+Surface topography by interpolation method
+Sampling method
+−0.004
+−0.002
+Consolidation method
+0.000
+0.002
+0.004
+Surface topography (dimensionless)
+Figure 4. Comparison of interpolation methods. The sampling method produces overshoots and undershoots near downwellings, while the
+consolidation method remains stable with no loss of accuracy.
+115
+A limitation is that consolidation is unsuitable when tracked fluid may lie above non-tracked fluid (e.g., tracking continental
+margins or plumes), as fluid "falls" to the domain bottom. For such cases, the sampling method must be used.
+3.4
+Tracer unmixing
+During advection, tracers may erroneously cross the surface, causing numerical instability. Two unmixing methods were implemented: tracer bouncing and tracer exchange (Figure 5).
+Figure 5. Two tracer unmixing methods. In bouncing, erroneous tracers are reflected back across the surface. In exchange, they are converted
+to the opposite type.
+6
+https://doi.org/10.5194/egusphere-2025-6547
+Preprint. Discussion started: 13 February 2026
+c Author(s) 2026. CC BY 4.0 License.
+120
+Tracer bouncing reflects erroneous tracers back to their correct side but can create gaps in the tracer field, particularly in
+convergent regions. Tracer exchange directly converts erroneous tracers to the opposite type, avoiding gaps. For air-to-rock
+conversion, a random template rock tracer from the cell below the surface is selected. While not strictly volume conserving
+locally, total tracer mass is preserved on average. The exchange method was used for all results unless noted otherwise.
+3.5
+125
+Density and viscosity coupling
+Coupling the VOF-tracked surface to the Stokes solver involves directly modifying the density and viscosity fields near the
+surface. StagYY uses a staggered grid where variables are located at different points within cells (Figure 6). Density is defined
+at cell centres (pressure P points) and vy points (vz in 3D). Viscosity is defined at P points and stress points (σxy , σxz , σyz ).
+Figure 6. The StagYY staggered-grid stencil in 2D and 3D.
+Volume fractions ϕ are defined at control volumes centred at these locations, representing the fraction of material present (0
+= empty, 1 = full, 0 < ϕ < 1 = partially filled). To modify the density field as used in the z-momentum equation, for example, a
+130
+reference density ρref is multiplied by the appropriate volume fraction:
+ρeff = ρref ϕvy .
+(5)
+This directly incorporates the surface location into the density field. A similar approach applies to viscosities at various locations. These densities and viscosities are directly utilised when solving the Stokes equations on the staggered grid, providing
+feedback to the solver. For example, when solving the z-momentum equation, it is necessary to use values for density and
+135
+viscosity centred around vz points (Figure 7). This is referred to as ρ, η coupling.
+3.5.1
+Obtaining volume fractions
+When using the improved VOF method (Section 3.2), subcells can be combined to obtain volume fractions centred around
+different variables (Figure 8). Similar procedures apply for all required pressure and viscosity locations in 2D and 3D.
+7
+https://doi.org/10.5194/egusphere-2025-6547
+Preprint. Discussion started: 13 February 2026
+c Author(s) 2026. CC BY 4.0 License.
+Figure 7. The ϕvz volume fraction couples the surface location to the density used in the z-momentum equation.
+Figure 8. Volume fractions obtained by combining subcells. Here, the vx volume fraction is obtained in 2D by combining 4 subcells from 2
+neighbouring cells.
+4
+140
+Results
+Results are demonstrated for three configurations: the marker-in-cell method, the basic VOF implementation with one VOF
+cell per computational cell, and the improved VOF implementation with subcells and full coupling to the Stokes solver through
+density and viscosity fields. Benchmarks were run in 2D and 3D to demonstrate efficacy and versatility.
+4.1
+2D benchmarks
+A summary of 2D benchmarks is in Table 1. Unless stated otherwise, the direct Stokes solver was used with 100 tracers per
+145
+cell.
+4.1.1
+2D relaxation benchmark
+The 2D relaxation benchmark (Crameri et al., 2012) considers time-dependent relaxation of an initially non-flat surface with
+topography:
+
+
+2πx
+zinit (x) = 7 cos
+km.
+2800 km
+(6)
+8
+https://doi.org/10.5194/egusphere-2025-6547
+Preprint. Discussion started: 13 February 2026
+c Author(s) 2026. CC BY 4.0 License.
+Table 1. Summary of volume of fluid benchmarks in 2D
+Benchmark
+Geometry
+Resolution
+Description
+2D relaxation
+Cartesian
+512 × 128
+Isostatic relaxation of an initially non-flat surface based on Case
+1024 × 256
+Dynamic topography from a mantle plume based on Case 2 in
+2D plume
+2D scaling
+Cartesian
+Spherical annulus
+Various
+1 in Crameri et al. (2012)
+Crameri et al. (2012)
+Constant viscosity (Ra = 107 ) for performance scaling
+Summary of benchmark setups run in 2D.
+150
+The analytical solution for maximum topography (Ramberg, 1981) is:
+
+
+t
+zmax (t) = 7 exp
+km.
+14.825 ky
+(7)
+The domain is a 2800 × 800 km Cartesian box at 512 × 128 resolution with three layers: 600 km mantle, 100 km lithosphere,
+and 100 km air layer (viscosity 1018 Pa s). Symmetric boundary conditions are at horizontal edges, no-slip at the bottom, and
+free slip at the top. Gravity g = 10 m s−2 . Models ran until t = 100 ky with 500-year timesteps.
+2D relaxation benchmark: comparison of tracking methods
+7
+Maximum topography (km)
+Analytical solution
+Marker-in-cell
+VOF (basic)
+VOF (improved)
+Relaxation time 14.825 ky
+6
+5
+4
+3
+2
+1
+0
+0
+20
+40
+60
+80
+100
+Time (ky)
+Figure 9. Maximum topography evolution. The marker-in-cell method does not converge to the analytical solution due to tracer noise. Both
+VOF implementations closely track the analytical solution, with the improved method showing best agreement.
+155
+Results (Figure 9) show the marker-in-cell method does not converge to the analytical solution at 100 ky due to noise from
+randomly distributed tracers, consistent with Crameri et al. (2012). The improved VOF method tracks the analytical solution
+most closely.
+9
+https://doi.org/10.5194/egusphere-2025-6547
+Preprint. Discussion started: 13 February 2026
+c Author(s) 2026. CC BY 4.0 License.
+4.1.2
+2D plume benchmark
+The 2D plume benchmark (Crameri et al., 2012) models a buoyant plume rising through the mantle over 20 My and the
+160
+resulting dynamic topography. The domain is a 2800 × 850 km Cartesian box at 1024 × 256 resolution with three layers: 600
+km mantle, 100 km lithosphere, and 150 km air (viscosity 1019 Pa s). The plume (radius 100 km) has density 3,200 kg m−3 ,
+100 kg m−3 less than surrounding material. Free slip conditions are at horizontal edges, no-slip at bottom, free slip at top.
+Gravity g = 10 m s−2 .
+No analytical solution exists, but results from multiple models (Crameri et al., 2012) show maximum surface deformation
+165
+of 800-850 m after 20 My.
+2D plume benchmark at 20 My
+1000
+Marker-in-cell
+VOF (basic)
+VOF (improved)
+Topography (m)
+800
+600
+400
+200
+0
+z (km)
+−200
+800
+Sticky air layer
+600
+Lithosphere
+Plume
+400
+Mantle
+200
+0
+0
+500
+1000
+1500
+2000
+2500
+x (km)
+Figure 10. After 20 My, the marker-in-cell and basic VOF methods show significant noise and systematically raised topography compared
+to the improved VOF method.
+Results demonstrate noise in the marker-in-cell method affects both marker-in-cell and basic VOF methods (Figures 10 and
+11). The improved VOF method eliminates noise through ρ, η coupling and produces topography within the expected range.
+The slightly lower topography may result from implicit smoothing.
+4.1.3
+170
+2D performance scaling
+Scaling tests used a non-dimensional spherical model with constant viscosity (Ra=107 ) and 10% sticky air layer (ηrock /ηair =
+103 ) over 5,000 timesteps.
+Figure 12 shows the improved method requires more computational effort at all resolutions, but relative cost decreases with
+resolution, suggesting better efficiency at higher resolutions.
+10
+Maximum topography (m)
+https://doi.org/10.5194/egusphere-2025-6547
+Preprint. Discussion started: 13 February 2026
+c Author(s) 2026. CC BY 4.0 License.
+2D plume benchmark: maximum topography with time
+1000
+800
+600
+400
+Marker-in-cell
+VOF (basic)
+VOF (improved)
+200
+0
+0.0
+2.5
+5.0
+7.5
+10.0
+12.5
+15.0
+17.5
+20.0
+Time (My)
+Figure 11. The marker-in-cell method produces consistently elevated maximum topography as a result of noise. The basic VOF method
+gradually develops noise after 5 My. The improved method remains noise-free, producing topography within 800-850 m, and in close
+agreement with results obtained using a marker chain method [cite lagrangian paper].
+2D performance scaling with resolution
+VOF (basic)
+20.0
+% of total runtime
+17.5
+15.0
+VOF (improved)
+Advection
+Reconstruction
+12.5
+10.0
+7.5
+5.0
+2.5
+0.0
+128x16
+256x32
+512x64
+1024x128
+Resolution
+128x16
+256x32
+512x64
+1024x128
+Resolution
+Figure 12. The improved VOF method requires significantly more computational effort than the basic implementation, but relative cost
+decreases with increasing resolution.
+4.2
+175
+3D benchmarks
+A summary of 3D benchmarks is in Table 2. All models used an iterative multigrid Stokes solver, and 50 Lagrangian tracers
+per cell.
+4.2.1
+3D plume benchmark
+The 3D plume benchmark extends the 2D case to a 1400 × 1400 × 850 km domain at 256 × 256 × 64 resolution. The domain
+width was halved to reduce computational cost. The model consists of 600 km mantle, 100 km lithosphere, and 150 km air.
+180
+The plume is spherical with 100 km diameter. A no-slip boundary condition is at the bottom, free slip on other boundaries.
+Parameters match the 2D case.
+11
+https://doi.org/10.5194/egusphere-2025-6547
+Preprint. Discussion started: 13 February 2026
+c Author(s) 2026. CC BY 4.0 License.
+Table 2. Summary of volume of fluid benchmarks in 3D
+Benchmark
+Geometry
+Resolution
+3D plume
+Cartesian
+3D constant viscosity
+Cartesian
+256 × 256 × 64
+3D scaling
+Cartesian
+64 × 64 × 32
+Various
+Description
+Dynamic topography from a mantle plume
+Constant viscosity (Ra = 107 ) for comparison and performance
+scaling
+Resolution and tracer density dependence tests
+Summary of benchmarks run in 3D.
+3D plume benchmark topography at 20 My
+Marker-in-cell
+0
+50
+VOF (basic)
+100
+VOF (improved)
+150
+200
+250
+300
+Topography (m)
+Figure 13. 3D plume topography after 20 My. The marker-in-cell method exhibits cell-level noise. The basic VOF method produces even
+more noise. The improved VOF method with ρ, η coupling accurately reconstructs topography without noise.
+3D plume benchmark topography cross section
+400
+Marker-in-cell
+VOF (basic)
+VOF (improved)
+Topography (m)
+300
+200
+100
+0
+−100
+0
+200
+400
+600
+800
+1000
+1200
+1400
+x (km)
+Figure 14. Cross section showing pronounced noise in marker-in-cell and basic VOF methods. The improved VOF method captures smallscale variations accurately.
+Results (Figures 13 and 14) show both marker-in-cell and basic VOF methods produce significant topographic noise, more
+pronounced than in 2D. The improved VOF method produces high-quality, noise-free results.
+12
+https://doi.org/10.5194/egusphere-2025-6547
+Preprint. Discussion started: 13 February 2026
+c Author(s) 2026. CC BY 4.0 License.
+4.2.2
+A 64 × 64 × 32 Cartesian box with constant viscosity (Ra=107 ) was used to test surface tracking methods.
+3D surface topography by tracking method
+Marker-in-cell
+−0.004
+VOF (basic)
+−0.002
+VOF (improved)
+0.000
+0.002
+0.004
+Surface topography (dimensionless)
+Figure 15. The marker-in-cell method exhibits topographic noise. The basic VOF method introduces additional noise. The improved VOF
+method eliminates noise entirely.
+1400
+Surface topography distribution (time averaged)
+Marker-in-cell
+VOF (basic)
+VOF (improved)
+1200
+1000
+Density
+185
+3D constant-viscosity model
+800
+600
+400
+200
+0
+−0.005
+−0.004
+−0.003
+−0.002
+−0.001
+0.000
+0.001
+0.002
+0.003
+Surface topography (dimensionless)
+Figure 16. Time-averaged distributions. The basic VOF method performs poorly. The improved VOF method exhibits a steeper peak, indicating superior accuracy.
+Qualitative (Figure 15) and quantitative (Figure 16) analyses show the basic VOF method is unsuitable for 3D without Stokes
+coupling. The improved VOF method eliminates noise entirely.
+4.2.3
+3D scaling tests
+Resolution dependence: Models were tested at four resolutions from 32 × 32 × 16 to 256 × 256 × 128.
+13
+https://doi.org/10.5194/egusphere-2025-6547
+Preprint. Discussion started: 13 February 2026
+c Author(s) 2026. CC BY 4.0 License.
+Surface topography by resolution (VOF improved)
+32x32x16
+64x64x32
+−0.004
+−0.002
+128x128x64
+0.000
+256x256x128
+0.002
+0.004
+Surface topography (dimensionless)
+Figure 17. Smooth topography is consistent across length scales. Higher resolutions resolve greater detail; lower resolutions produce more
+diffuse features.
+Surface topography distribution (time averaged)
+1600
+1400
+Density
+1200
+1000
+32x32x16
+64x64x32
+128x128x64
+256x256x128
+800
+600
+400
+200
+0
+−0.005
+−0.004
+−0.003
+−0.002
+−0.001
+0.000
+0.001
+0.002
+0.003
+Surface topography (dimensionless)
+Figure 18. Median topography increases with resolution due to better-resolved trenches. Mean remains at 0.0. Corrected for variable model
+runtimes.
+190
+Results show smooth topography across all scales (Figure 17). Higher resolutions better resolve trenches, increasing median
+topography while mean remains zero (Figure 18).
+Performance (Figure 19) shows the improved method is expensive at low resolutions (90% of runtime at 32 × 32 × 16) but
+improves to 21% at 256 × 256 × 128.
+Tracer density dependence: Models with varying tracer densities (25 to 500 per cell) were compared.
+195
+Results (Figures 20 and 21) demonstrate surface topography is independent of tracer density. At 64 × 64 × 32 resolution, the
+improved VOF method required 54% of computational effort versus 77% for marker-in-cell at 500 tracers per cell, showing
+performance gains are possible.
+14
+https://doi.org/10.5194/egusphere-2025-6547
+Preprint. Discussion started: 13 February 2026
+c Author(s) 2026. CC BY 4.0 License.
+3D scaling with resolution
+VOF (basic)
+% of total runtime
+100
+VOF (improved)
+100
+80
+80
+60
+60
+40
+40
+20
+20
+0
+Advection
+Reconstruction
+0
+32x32x16
+64x64x32
+128x128x64 256x256x128
+32x32x16
+64x64x32
+Resolution
+128x128x64 256x256x128
+Resolution
+Figure 19. The improved VOF method shows significant cost at low resolutions (90% at 323 ), decreasing to 21% at 2563 .
+Surface topography (VOF improved) by tracer density
+10 TPC
+20 TPC
+−0.004
+50 TPC
+−0.002
+0.000
+100 TPC
+0.002
+500 TPC
+0.004
+Surface topography (dimensionless)
+Figure 20. No qualitative differences when changing tracer density.
+Surface topography distribution (VOF improved, time averaged)
+10 TPC
+20 TPC
+50 TPC
+100 TPC
+500 TPC
+1200
+Density
+1000
+800
+600
+400
+200
+0
+−0.005
+−0.004
+−0.003
+−0.002
+−0.001
+0.000
+0.001
+Surface topography (dimensionless)
+Figure 21. With ρ, η coupling, topography distribution is independent of tracer density.
+15
+0.002
+0.003
+https://doi.org/10.5194/egusphere-2025-6547
+Preprint. Discussion started: 13 February 2026
+c Author(s) 2026. CC BY 4.0 License.
+5
+Summary and discussion
+This study demonstrated the integration of the Volume of Fluid (VOF) method into the geodynamic modelling code StagYY
+200
+using the open-source gVOF package, presenting a robust alternative to traditional marker-in-cell methods for surface tracking
+in geodynamic applications.
+5.1
+Key findings
+The main findings of this study are:
+– The VOF method successfully tracks interfaces in geodynamic models in a volume-conservative manner using the
+CLCIR reconstruction and FMFPA advection methods.
+205
+– The consolidation approach provides the most stable method for translating between the VOF field and Eulerian surface
+locations.
+– A basic VOF implementation (one VOF cell per computational cell) is sufficient for simple 2D setups but inadequate for
+complex flows and 3D applications.
+– An improved VOF scheme using subcells and direct coupling to the Stokes solver through density and viscosity (ρ, η
+210
+coupling) enables accurate sub-cell surface tracking and eliminates dependence on tracer density, producing high-quality,
+noise-free topography.
+– While the improved method requires significant computational resources (10-40% runtime increase), this scales favorably with resolution and is offset by reduced tracer requirements compared to high-density marker-in-cell approaches.
+215
+5.2
+Implementation and performance
+The implementation using gVOF (López and Hernández, 2022) was relatively straightforward and could be applied to other
+geodynamic codes. The ability to extend to non-Cartesian geometries is particularly valuable, as VOF procedures for such
+cases are significantly more complex.
+The critical importance of ρ, η coupling was demonstrated through benchmark comparisons. Without this coupling, the
+220
+basic VOF method performs poorly in 3D, producing more noise than the marker-in-cell method. The improved method’s
+direct coupling of surface location to density and viscosity fields when solving the Stokes equations eliminates tracer-based
+noise entirely and decouples surface quality from tracer density.
+5.3
+Limitations and future improvements
+The primary limitation is computational cost, particularly for the improved method. Advection operations are the largest con225
+tributor, and memory consumption increases significantly due to storage of cell geometry information. Several opportunities
+exist for performance improvement:
+16
+https://doi.org/10.5194/egusphere-2025-6547
+Preprint. Discussion started: 13 February 2026
+c Author(s) 2026. CC BY 4.0 License.
+– Computing volume fractions directly from single VOF cells rather than using subcells
+– Restricting the VOF domain to regions near the surface, excluding deep mantle and high atmosphere cells
+– Simplifying data structures to reduce redundant storage of geometric information
+– Adding additional overlap cells to allow CFL numbers greater than 0.5 with the improved method
+230
+While the method extends to 3D spherical geometry, implementation challenges prevented trivial extension to yin-yang
+geometry, though no theoretical restrictions exist.
+5.4
+Applications and future directions
+Beyond free surface tracking, the VOF method’s volume-conservative nature and explicit interface representation enable several
+235
+promising applications:
+Continental margin tracking: A persistent challenge in global-scale models is the entrainment of continental material into
+the mantle (Coltice et al., 2019). Volume-conservative tracking of continental margins using VOF could maintain continent
+integrity over geological timescales, addressing resolution limitations at subduction zones.
+Alternative free surface solvers: The volume fractions generated by the improved method enable alternative discretizations
+240
+of the Stokes equations that implicitly model free surface boundary conditions without solving within the air layer (Larionov
+et al., 2017), potentially improving multigrid solver performance.
+Coupled planetary systems: High-quality topography generation advances the goal of global-scale models coupling topographic evolution to climate and biological systems. The direct coupling to the Stokes solver enables better representation of
+feedbacks from surface processes to geodynamic evolution, supporting the emerging field of biogeodynamics.
+245
+Other geophysical interfaces: The method’s versatility allows application to the lithosphere-asthenosphere boundary, coremantle boundary, and other interfaces where volume conservation and sharp boundary tracking are critical.
+The VOF method represents a significant advancement in interface tracking for geodynamic models, offering volume conservation, sharp interface representation, and independence from tracer density. Despite computational costs, its scalability with
+resolution and elimination of tracer-based noise make it a valuable tool for high-resolution geodynamic modeling, particularly
+250
+for applications requiring accurate surface representation and coupling to other planetary systems.
+Code availability. The code StagYYFreeSurface (StagYYFS), a testbed code based on StagYY, may be used to produce the benchmark
+results and figures used in this paper. It is archived on Zenodo under the GPLv3 license under https://doi.org/10.5281/zenodo.18096249
+(Tackley and Gray, 2026)
+Author contributions. Timothy Gray: original study design; code and algorithm development; scaling and performance benchmarks; figure
+255
+creation. Paul Tackley: development of StagYY; conceptual input; manuscript review. Taras Gerya: conceptual input; manuscript review.
+17
+https://doi.org/10.5194/egusphere-2025-6547
+Preprint. Discussion started: 13 February 2026
+c Author(s) 2026. CC BY 4.0 License.
+Competing interests. The authors declare that they have no conflict of interest.
+Acknowledgements. This work was supported by Swiss National Science Foundation #192296.
+18
+https://doi.org/10.5194/egusphere-2025-6547
+Preprint. Discussion started: 13 February 2026
+c Author(s) 2026. CC BY 4.0 License.
+References
+Coltice, N., Husson, L., Faccenna, C., and Arnould, M.: What drives tectonic plates?, Science Advances, 5, eaax4295,
+260
+https://doi.org/10.1126/sciadv.aax4295, publisher: American Association for the Advancement of Science Section: Research Article, 2019.
+Crameri, F., Schmeling, H., Golabek, G. J., Duretz, T., Orendt, R., Buiter, S. J. H., May, D. A., Kaus, B. J. P., Gerya, T. V., and Tackley,
+P. J.: A comparison of numerical surface topography calculations in geodynamic modelling: an evaluation of the ‘sticky air’ method,
+Geophysical Journal International, 189, 38–54, https://doi.org/10.1111/j.1365-246X.2012.05388.x, 2012.
+Esteban, A., López, J., Gómez, P., Zanzi, C., Roenby, J., and Hernández, J.: A comparative study of two open-source state-of-the-art geometric
+265
+VOF methods, Computers & Fluids, 250, 105 725, https://doi.org/10.1016/j.compfluid.2022.105725, 2023.
+Larionov, E., Batty, C., and Bridson, R.: Variational stokes: a unified pressure-viscosity solver for accurate viscous liquids, ACM Transactions
+on Graphics, 36, 101:1–101:11, https://doi.org/10.1145/3072959.3073628, 2017.
+López, J. and Hernández, J.: Analytical and geometrical tools for 3D volume of fluid methods in general grids, Journal of Computational
+Physics, 227, 5939–5948, https://doi.org/10.1016/j.jcp.2008.03.010, 2008.
+270
+López, J. and Hernández, J.: gVOF: An open-source package for unsplit geometric volume of fluid methods on arbitrary grids, Computer
+Physics Communications, 277, 108 400, https://doi.org/10.1016/j.cpc.2022.108400, 2022.
+López, J., Hernández, J., Gómez, P., and Faura, F.: An improved PLIC-VOF method for tracking thin fluid structures in incompressible
+two-phase flows, Journal of Computational Physics, 208, 51–74, https://doi.org/10.1016/j.jcp.2005.01.031, 2005.
+Press, W. H.: Numerical Recipes 3rd Edition: The Art of Scientific Computing, Cambridge University Press, ISBN 978-0-521-88068-8,
+275
+google-Books-ID: 1aAOdzK3FegC, 2007.
+Ramberg, H.: Gravity, Deformation, and the Earth’s Crust: In Theory, Experiments, and Geological Application, Academic Press, ISBN
+978-0-12-576860-3, 1981.
+Rider, W. J. and Kothe, D. B.: Reconstructing Volume Tracking, Journal of Computational Physics, 141, 112–152,
+https://doi.org/10.1006/jcph.1998.5906, 1998.
+280
+Robey, J. M. and Puckett, E. G.: Implementation of a Volume-of-Fluid method in a finite element code with applications to thermochemical convection in a density stratified fluid in the Earth’s mantle, Computers & Fluids, 190, 217–253,
+https://doi.org/10.1016/j.compfluid.2019.05.015, 2019.
+Scardovelli, R. and Zaleski, S.: Direct numerical simulation of free-surface and interfacial flow, Annual Review of Fluid Mechanics, 31,
+567–603, https://doi.org/10.1146/annurev.fluid.31.1.567, publisher: Annual Reviews, 1999.
+285
+Scardovelli, R. and Zaleski, S.: Analytical Relations Connecting Linear Interfaces and Volume Fractions in Rectangular Grids, Journal of
+Computational Physics, 164, 228–237, https://doi.org/10.1006/jcph.2000.6567, 2000.
+Tackley, P. and Gray, T.: StagYYFreeSurface (StagYYFS): A testbed for free- surface methods in geodynamical simulations using the finite
+volume (staggered-grid finite difference) discretization., https://doi.org/10.5281/zenodo.18096249, 2026.
+Vorobieff, P. and Brebbia, C. A.: Multiphase Flow: Theory and Applications, WIT Press, ISBN 978-1-78466-311-7, google-Books-ID:
+290
+SIJWDwAAQBAJ, 2018.
+19

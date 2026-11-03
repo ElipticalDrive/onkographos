@@ -1,0 +1,283 @@
+Books, articles, and blog posts tout the wavefront renderer architecture as a way to improve ray tracing performance on GPUs. How well does it perform in practice on M1, M2, and M3 chips? Should you write a wavefront renderer for your hobby project?
+
+Experiments with wavefront ray tracing on Apple silicon // My thought repository
+2025-06-12
+Books, articles, and blog posts present the wavefront renderer architecture as a way to improve ray tracing performance on GPUs. In practice, it’s difficult to find information on whether I should expect performance improvements for my monolithic kernel hobby renderer on Apple’s M1, M2, or M3 chips—the latter having hardware-accelerated ray tracing. On Apple hardware, would switching to a wavefront architecture be a silver bullet yielding better performance?
+There’s only one way to find out: write both a monolithic and a wavefront ray tracer with identical features and measure their performance across different devices. The results were contrary to what I expected: the wavefront renderer isn’t a clear winner, and performance varies significantly between chips.
+What is a wavefront ray tracer?
+The monolithic ray tracer
+A monolithic ray tracer uses a for-loop to calculate the path light takes through a scene, bouncing off multiple surfaces. The following pseudocode summarizes my monolithic ray tracer, which is simple—it supports just one material (with Lambertian reflectance) and samples only one light source: the Sun. The material is a solid color, not a texture, and material evaluation is pure arithmetic.
+```
+ 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+```
+```
+def path_trace(primary_ray, scene_geometry, sky_model, sun_direction):
+    radiance = 0.0
+    throughput = 1.0
+    current_ray = primary_ray
+    
+    for bounce in range(MAX_BOUNCES):
+        intersection = intersect(current_ray, scene_geometry)
+        
+        if intersection.hit:
+            # Intersection data
+            surface_point = intersection.position
+            surface_normal = intersection.normal
+            albedo = intersection.color
+
+            # Direct lighting (sun sampling)
+            light_direction = sample_sun_disk(sun_direction, SOLAR_RADIUS)
+            cosine = dot(surface_normal, light_direction)
+            if cosine > 0 and is_shadow_ray_clear(surface_point, light_direction):
+                sun_radiance = evaluate_sky_model(light_direction, sun_direction)
+                reflectance = cosine * albedo / π
+                pdf = pdf_sun_disk(light_direction)
+                      + pdf_cosine_hemisphere(light_direction)
+                radiance += throughput * sun_radiance * reflectance / pdf
+
+            # Indirect lighting (sampling lambertian reflectance)
+            new_direction = sample_cosine_hemisphere(surface_normal)
+            current_ray = Ray(surface_point, new_direction)
+            cosine = dot(surface_normal, new_direction)
+            reflectance = cosine * albedo / π
+            pdf = pdf_sun_disk(new_direction) + pdf_cosine_hemisphere(new_direction)
+            throughput *= reflectance / pdf
+        else:
+            # Ray hits sky
+            sky_radiance = evaluate_sky_model(current_ray.direction, sun_direction)
+            radiance += throughput * sky_radiance
+            break
+    
+    return radiance
+```
+On a GPU, the for-loop combined with branching execution during intersection testing, lighting, and material evaluation can result in inefficient execution. Physically Based Rendering provides an excellent overview of GPU architecture and the challenges of running a naive monolithic kernel on a GPU.
+Is this particular ray tracer inefficient? Looking at a single frame’s GPU trace reveals these concerning metrics:
+Kernel ALU Inefficiency: 69.5% (percentage of ALU instructions predicated out due to divergent control flow or partial SIMD groups)
+Kernel Occupancy: 20.4% (percentage of shader core resources occupied by the compute kernel)
+From the kernel’s compiler statistics:
+Temporary Registers: 80
+Max Theoretical Occupancy: 41.7%
+Based on this blog post, a register allocation of 80 is high on the GCN platform. It’s a high allocation on ARM as well. Given the theoretical occupancy < 50%, this shader consumes substantial shader core resources on Apple’s hardware too.
+The monolithic renderer contains a huge batch of work being predicated out due to branching control flow. Can a wavefront architecture reduce the register allocation, yielding better occupancy? Could it improve ALU efficiency?
+The wavefront ray tracer
+In a wavefront architecture, the monolithic ray tracer’s loop body is split into its own kernel. Instead of containing a loop, the wavefront kernel is invoked from within a loop. The branches for material and light evaluation can be moved into separate kernels. State transfers between shader invocations by reading and writing to buffers. Jacco Bikker’s article provides a great overview of the tradeoffs in implementing a wavefront renderer.
+The wavefront renderer used in this post adapts the renderer from Bikker’s article with these phases:
+Generate: Appends primary rays into the ray buffer
+Extend and Shade: Intersects rays with the scene, generates the next ray, and generates a shadow ray. Combines phases 2 (extend) and 3 (shade) from the article
+Connect: Intersects the shadow ray with the scene
+Phases 2 and 3 from the article were merged since it yielded better performance than 4 separate kernels. With just one material type and no texture sampling, the increased memory traffic of 4 kernels wasn’t worthwhile. The more granular “Extend” kernel also didn’t significantly reduce register allocation, yielding similar occupancy numbers.
+Here’s pseudocode for the ray extension and connection shaders. The ray generation shader simply appends primary rays to a buffer.
+```
+ 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+```
+```
+def extend_and_shade(input_ray,
+                     scene_geometry,
+                     sky_model,
+                     sun_direction,
+                     output_rays,
+                     shadow_rays,
+                     path_throughput,
+                     path_radiance):
+    intersection = intersect(input_ray, scene_geometry)
+    if intersection.hit:
+        # Intersection data
+        surface_point = intersection.position
+        surface_normal = intersection.normal
+        albedo = intersection.material.color
+
+        # Evaluate light
+        light_direction = sample_sun_disk(sun_direction, SOLAR_RADIUS)
+        cosine = dot(surface_normal, light_direction)
+        if cosine > 0:
+            reflectance = cosine * albedo / π
+            sun_radiance = evaluate_sky_model(light_direction, sun_direction)          
+            pdf = pdf_sun_disk(light_direction) + pdf_cosine_hemisphere(light_direction)
+            shadow_rays.append(ShadowRay(
+                surface_point,
+                light_direction,
+                path_throughput[input_ray.path_index] * reflectance * sun_radiance / pdf,
+                input_ray.path_index
+            ))
+
+        # Evaluate material
+        new_direction = sample_cosine_hemisphere(surface_normal)
+        cosine = dot(surface_normal, new_direction)
+        reflectance = cosine * albedo / π
+        pdf = pdf_sun_disk(new_direction) + pdf_cosine_hemisphere(new_direction)
+        path_throughput[input_ray.path_index] *= reflectance / pdf
+  
+        output_rays.append(Ray(
+            surface_point,
+            new_direction,
+            input_ray.path_index
+        ))            
+    else:
+        # Shade ray miss
+        sky_radiance = evaluate_sky_model(ray.direction, sun_direction)
+        path_radiance[input_ray.path_index] += path.throughput * sky_radiance
+```
+```
+1
+2
+3
+4
+5
+6
+```
+```
+def connect(shadow_ray, scene_geometry, paths):
+    origin = shadow_ray.origin
+    direction = shadow_ray.direction
+
+    if is_shadow_ray_clear(scene_geometry, origin, direction):
+        paths[shadow_ray.path_index].radiance += shadow_ray.radiance
+```
+Time measurements
+Both renderers execute on the GPU using compute shaders. One sample per pixel is gathered in a single compute pass. GPU execution time is measured using Metal’s timestamp counter, sampling at the beginning and end of the compute pass:
+```
+1
+2
+3
+```
+```
+compute_sample_buffer_attachment.sampleBuffer = mtl->compute_timestamp_sample_buffer;
+compute_sample_buffer_attachment.startOfEncoderSampleIndex = 0;
+compute_sample_buffer_attachment.endOfEncoderSampleIndex = 1;
+```
+Compute execution timings are gathered by rendering the following image at a fixed resolution across different devices:
+The scene consists of \(128^3\) voxels. The generated mesh is not optimized, making it a reasonably complex test case despite its simple appearance.
+Performance
+Performance was measured on:
+M1 Pro (MacBook Pro)
+M2 (MacBook Air)
+M3 (iPad Air)
+Here are the timings (lower is better):
+The plot shows distinct performance clusters for each M-series processor:
+M3: Fastest overall—monolithic (~38ms) beats wavefront (~72ms)
+M1 Pro: Wavefront (~141ms) outperforms monolithic (~167ms)
+M2: Slowest overall, with wavefront significantly faster than monolithic
+It’s remarkable that an iPad beats a MacBook Pro. What a time to be alive. However, the M3 iPad’s strong performance isn’t entirely surprising given its hardware-accelerated ray tracing capabilities.
+The wavefront renderer on the M2 shows slightly better efficiency and occupancy compared to the monolithic renderer:
+Kernel ALU Inefficiency: 60.5%
+Kernel Occupancy: 25.4%
+In the GPU timeline, most time is spent in the Extend + Shade phase. The compiler statistics indicate the kernel is smaller than the monolithic kernel, but not significantly so. Other kernels, like “Connect,” have similar register counts.
+Temporary Registers: 68
+Max Theoretical Occupancy: 48.8%
+For the M3, Xcode reports different counters. We can compare the top performance limiters (% of max throughput) across M2 and M3:
+M2 monolithic
+M2 wavefront
+M3 monolithic
+M3 wavefront
+Top performance limiter
+ALU limiter 53.9%
+ALU limiter 51.2%
+Last level cache limiter 42.8%
+Last level cache limiter 49.2%
+Registers
+80
+68 (extend + shade)
+54
+39 (extend + shade)
+Runtime occupancy
+20.4%
+25.4%
+30.6%
+33.9%
+Runtime ALU instructions
+192B
+129B
+23.0B
+21.1B
+At a high level, ray tracing is compute-bound on the M2 and memory-bound on the M3. On the M2, bounding volume hierarchy traversal results in large, ALU-instruction-heavy shaders. The M3 does significantly less work—the ALU instruction count is almost one-tenth of the M2’s—as much work gets offloaded to the ray tracing cores. Interestingly, based on the table, the wavefront renderer on the M3 should be the best performer. But it’s more memory-limited than the monolithic renderer, with a higher memory unit limiter score.
+On a final note: the shaders could be better optimized. The geometry data (triangle positions and normals) uses 32-bit floats naively. This data could be significantly compressed, which may improve M3 performance.
+Which renderer to choose?
+For my hobby renderer, the choice is clear. Since the renderer targets only Apple’s M-series processors, the wavefront code path is launched when an M1 or M2 chip is detected. Otherwise, the monolithic renderer is used.
+A renderer with this feature set appears to be on the borderline of benefiting from a wavefront architecture. More features will introduce more divergence during execution, giving an increasing edge to the wavefront renderer. When more materials and lights are added in the future, it will be necessary to re-evaluate performance.
+References and further reading
+Wavefront Rendering on GPUs
+Wavefront Path Tracing
+What is shader occupancy and why do we care about it?
+Basic facts about GPUs
+Contents

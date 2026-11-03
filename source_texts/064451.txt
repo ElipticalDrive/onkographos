@@ -1,0 +1,1969 @@
+1
+> REPLACE THIS LINE WITH YOUR MANUSCRIPT ID NUMBER (DOUBLE-CLICK HERE TO EDIT) <
+An Energy-Efficient Edge Coprocessor for
+Neural Rendering with Explicit Data Reuse
+Strategies
+Binzhe Yuan, Xiangyu Zhang, Zeyu Zheng, Yuefeng Zhang, Haochuan Wan, Zhechen Yuan, Junsheng Chen,
+Yunxiang He, Junran Ding, Xiaoming Zhang, Chaolin Rao, Wenyan Su, Pingqiang Zhou, Jingyi Yu and Xin Lou
+Abstract—Neural radiance fields (NeRF) have transformed 3D
+reconstruction and rendering, facilitating photorealistic image
+synthesis from sparse viewpoints. This work introduces an explicit
+data reuse neural rendering (EDR-NR) architecture, which
+reduces frequent external memory accesses (EMAs) and cache
+misses by exploiting the spatial locality from three phases,
+including rays, ray packets (RPs), and samples. The EDR-NR
+architecture features a four-stage scheduler that clusters rays on
+the basis of Z-order, prioritize lagging rays when ray divergence
+happens, reorders RPs based on spatial proximity, and issues
+samples out-of-orderly (OoO) according to the availability of onchip feature data. In addition, a four-tier hierarchical RP
+marching (HRM) technique is integrated with an axis-aligned
+bounding box (AABB) to facilitate spatial skipping (SS), reducing
+redundant computations and improving throughput. Moreover, a
+balanced allocation strategy for feature storage is proposed to
+mitigate SRAM bank conflicts. Fabricated using a 40 nm process
+with a die area of 10.5 mm², the EDR-NR chip demonstrates a
+2.41× enhancement in normalized energy efficiency, a 1.21×
+improvement in normalized area efficiency, a 1.20× increase in
+normalized throughput, and a 53.42% reduction in on-chip SRAM
+consumption compared to state-of-the-art accelerators.
+Index Terms—Neural radiance fields (NeRF), 3D rendering,
+spatial locality, spatial skipping (SS), hierarchical marching,
+hardware accelerator.
+I. INTRODUCTION
+N
+eural radiance fields (NeRF) have facilitated
+substantial advancements in photorealistic scene
+reconstruction [1]. While 3D Gaussian Splatting
+(3DGS) enables faster training and interactive rendering on
+high-end GPUs, NeRF offers a smaller memory and bandwidth
+footprint, making it more viable for edge and resource‑limited
+platforms [2].
+Fig. 1 depicts the neural rendering pipeline in hash-based
+NeRF [3]. Once the scene geometry and texture are generated,
+images from arbitrary viewpoints can be synthesized through
+rendering. As the demand for NeRF-based applications
+This work has been submitted to the IEEE for possible publication.
+Copyright may be transferred without notice, after which this version may no
+longer be accessible. This work was partially supported by the Shanghai RisingStar Program (Sailing Project) 23YF1427300. (Co-first author: Xiangyu Zhang.
+Corresponding author: Xin Lou.)
+Input
+Miss
+Sample Points
+Hash Encoding
+Vertex ID
+Camera
+Pose
+5
+7
+Rays
+Hit
+Step 1: Ray Generation
+&& Marching
+Sample Color &&
+Density Calculation
+Spatial
+Location
+Step 2: Sampling
+4
+6
+0
+3
+2
+Interpolation
+Step 3: Feature
+Interpolation
+Rendered Image
+Output
+Step 4: MLP Inference
+Step 5: Volume Rendering
+Fig. 1. The neural rendering pipeline in hash-based NeRF.
+continues to grow [4][5], integrating NeRF into edge devices
+has become increasingly critical. Extensive research has aimed
+to enhance NeRF processing speed and energy efficiency while
+preserving output quality [6]-[21].
+In contrast to GPUs, edge devices are often constrained by
+limited on-chip memory, leading to frequent external memory
+accesses (EMAs) and cache misses. Redundant EMAs
+increases energy consumption and degrade bandwidth
+efficiency. For NeRF, this issue deteriorates from the ray
+marching data flow, where sequential sampling along the same
+ray necessitates frequent voxel data transfers.
+Many NeRF accelerators leverage spatial locality to mitigate
+excessive EMAs [6][7][8][14][17][20]. Adjacent rays are
+clustered to enhance data reuse. Most of these architectures
+employ row-order ray scanning, which is a straightforward
+approach that aligns with the pixel readout sequence of image
+sensors [22]. The row-order scanning simplifies
+implementation, but fails to fully harness spatial locality. This
+constraint stems from row-order scanning preference for
+grouping rays within the same row rather than accounting for
+spatial adjacency across both row and column dimensions.
+Recent studies [6][7] mitigate this constraint by organizing rays
+Binzhe Yuan, Xiangyu Zhang, Zeyu Zheng, Yuefeng Zhang, Haochuan
+Wan, Zhechen Yuan, Junshen Chen, Yunxiang He, Junran Ding, Wenyan Su,
+Pingqiang Zhou, Jingyi Yu and Xin Lou, are with the School of Information
+Science and Technology, Shanghaitech Univeristy, Shanghai, China.
+Xiaoming Zhang, Chaolin Rao, are with the GGU Technology Co., Ltd,
+China.
+2
+> REPLACE THIS LINE WITH YOUR MANUSCRIPT ID NUMBER (DOUBLE-CLICK HERE TO EDIT) <
+into convolution-kernel-like patches, wherein row-order
+scanning is applied. A further challenge associated with ray
+grouping is ray divergence, which happens when rays within
+the same group traverse distinct voxels. The ray divergence
+diminishes ray-level parallelism and data reuse, remaining an
+insufficiently explored challenge in current literature.
+Spatial skipping (SS) [23] has been investigated to enhance
+throughput by bypassing the sampling of empty regions
+[6][8][9][21]. Many implementations predominantly depend on
+voxel-based techniques yet do not explicitly optimize traversal
+path lengths. As a result, even in regions with a high likelihood
+of being empty, the occupancy grid bitmap of the corresponding
+voxels must still be retrieved [6][8]. Moreover, noise may lead
+to the misclassification of voxels as occupied, further
+diminishing the effectiveness of SS. According to [8], empty
+voxels comprise approximately 95–98% of the space. In
+addition, the skipping of empty voxels accounts for 29% of
+rendering cycles and induces pipeline bubbles.
+Irregular memory access during hash table (HT) lookups
+induces SRAM bank conflicts. Many efforts have been put to
+address SRAM bank conflicts [6][8][9]. Reference [6]
+introduces an attention-based hybrid interpolation unit (AHIU),
+which selectively omits vertices that contribute minimally to
+interpolation. Reference [9] presents the vertex-interleaved
+mapping (VIM) technique, which facilitates one-time access to
+all vertex features linked to a voxel. Since vertex features are
+accessed across multiple adjacent voxels, redundant storage of
+these features leads to increased SRAM consumption.
+Motivated by application demands, this paper introduces an
+explicit data reuse neural rendering (EDR-NR) architecture,
+that reduces EMAs overhead, expedites SS, and maintains
+rendering fidelity. The main contributions are as follows.
+1) A four-stage scheduler designed to mitigate redundant
+EMAs by leveraging spatial locality from three phases.
+The four-stage scheduler integrates Z-order ray
+scanning, lag-first ray marching, ray packet (RP)
+clustering, and out-of-order (OoO) sample issuance,
+collectively enhancing on-chip data reuse and alleviating
+parallelism degradation caused by ray divergence.
+2) A four-tier hierarchical RPs marching (HRM)
+methodology, integrated with an axis-aligned bounding
+box (AABB), shortens traversal paths and reduces
+redundant occupancy grid checks.
+3) A balanced bank allocation strategy for the feature cache
+that mitigates bank conflicts, and eliminates redundant
+vertex feature storage.
+The remainder of this paper is organized as follows. Section
+II provides an overview of the operational theory and a
+literature review. Section III discusses the optimization
+techniques. Section IV details the main components of the
+architecture. Section V presents the implementation results and
+a comparative analysis. Finally, Section VI concludes the paper.
+II. BACKGROUND AND RELATED WORK
+A. Instant Neural Graphics Primitives
+Instant neural graphics primitives (Instant-NGP) is a NeRF
+variant that achieves high-quality rendering with remarkable
+efficiency [3]. The rendering pipeline consists of five key stages
+as shown in Fig. 1. Firstly, rays are generated based on camera
+parameters and viewing direction. Secondly, samples are
+extracted along the ray. Thirdly, sample coordinates are
+mapped into high-dimensional feature vectors through
+interpolation. To achieve this, the voxel containing the sample
+is identified, and the indices of the eight vertices for voxel serve
+as keys in a hash function to compute feature addresses. The
+corresponding eight feature vectors are then retrieved from the
+HT and trilinearly interpolated into a single feature vector fsam.
+Fourthly, fsam and the ray direction d after frequency encoding
+go through a multilayer perceptron (MLP) to determine the
+sample color ci and density σi. Finally, the pixel color C(r) for
+ray r is computed by integrating the N samples along the ray:
+𝐶(𝑟) = ∑𝑁
+(1)
+𝑖=1 𝑇𝑖 (1 − 𝑒𝑥𝑝(−𝜎𝑖 𝛿𝑖 ))𝑐𝑖
+where δi represents the distance between consecutive samples
+sami+1 and sami, and the transmittance Ti is given by:
+𝑇𝑖 = 𝑒𝑥𝑝(− ∑𝑖−1
+(2)
+𝑗=1 𝜎𝑗 𝛿𝑗 )
+B. Related Work
+Many studies have leveraged spatial locality to reduce EMAs
+and computational overhead via data reuse. The majority
+utilizes row-order scanning during ray generation and exploits
+ray-level parallelism. For instance, reference [6] proposes
+segmented hashing with spatial pruning (SHSP), resulting in a
+66% reduction in EMAs. Furthermore, reference [6] clusters
+multiple rays into patches, and only stores patch addresses,
+thereby reducing memory usage by 88.3%. Reference [8]
+presents a voxel-centric data flow (VCDF), in which all
+samples within a voxel are generated prior to projection onto
+the image plane, leading to an 88.7% reduction in EMAs.
+Reference [20] processes samples sharing the same block
+identification (ID) within a processing-in-memory group
+(PIMG) and utilizes inter-patch block similarity, achieving a
+75.6% block reuse rate. Reference [17] utilizes radiance
+proximity across rays from adjacent camera views through
+sparse radiance warping (SPARW), reducing radiance
+computations by up to 88%. Reference [14] presents utilizationdriven memory replacement (UDMR), which incorporates a
+four-level pseudo-least-recently-used (P-LRU) strategy,
+reducing memory overhead by 94.6%, EMAs by 77.2%, and
+total computations by 90.9%. Reference [7] leverages temporal
+similarities across frames to reduce the number of pixels
+requiring rendering.
+Recent advancements have significantly enhanced SS and
+improved throughput by bypassing sampling in empty voxels.
+For instance, [8] presents decoupled spatial skipping (DSS) and
+interleaved sampling (IS), which enhance sampling efficiency
+by 3.20× and improve rendering throughput by 2.41×.
+Reference [9] proposes a hierarchical empty space skipping
+(HESS) scheme, whereas reference [21] exploits occupancy
+grid sparsity to compute scene geometry directly. In addition,
+reference [6] removes redundant HT segments in empty space,
+leading to a 5.50× bitmap compression, and utilizes a
+3
+> REPLACE THIS LINE WITH YOUR MANUSCRIPT ID NUMBER (DOUBLE-CLICK HERE TO EDIT) <
+Fine Traversal
+Leaf Traversal
+Micro Traversal
+Width
+Image ¤ ¤ ¤ ¤ ¤ ¤
+Plane ¤ ¤ ¤ ¤ ¤ ¤
+RP
+¤ ¤ ¤ ¤ ¤ ¤ ¤ ¤
+¤ ¤ ¤ ¤ ¤ ¤
+Pixel
+¤ ¤ ¤ ¤ ¤ ¤
+AB
+¤ ¤ ¤ ¤ ¤ ¤
+¤ ¤ ¤ ¤ ¤ ¤ ¤ ¤
+¤ ¤ ¤ ¤ ¤ ¤
+¤ ¤ ¤ ¤ ¤ ¤
+¤ ¤ ¤ ¤ ¤ ¤
+Bounding
+Box
+4 Rays
+in 1 RP
+Coarse
+Voxel
+Fine Sampled Suspended Leaf
+Voxel Rays
+Voxel
+Ray
+Fine
+Voxel
+¤ ¤ ¤ ¤
+Micro
+Voxel
+¤ ¤ ¤ ¤
+Ts
+Ts
+AABB
+80
+(a)
+70.4
+60
+40
+26.0
+20
+0
+Coarse
+(b)
+120
+Normalized EMA [%]
+Te
+Reduced Computational
+Load [%]
+Fig. 2. A four-tier HRM framework with AABB for RP.
+Te
+¤ ¤ ¤ ¤ ¤ ¤ ¤ ¤
+¤ ¤ ¤ ¤ ¤ ¤ ¤ ¤
+Height
+Sampled
+Point
+Skipped
+Point
+Fine
+Traversal Traversal
+Original
+Compressed
+Traversal Granularity
+Traversal Paths
+Traversal Paths
+(a)
+(b)
+(c)
+Fig. 3. (a) Original traversal paths, where Ts and Te denote the start and
+end points, respectively. (b) Compressed traversal paths using AABB
+intersection tests. (c) Computational load reduction achieved by
+introducing the AABB during coarse and fine traversal stages.
+hierarchical bitmap, resulting in a 3.67× increase in ray casting
+speed.
+Current studies have made substantial progress in mitigating
+bank conflicts. Reference [6] introduces the AHIU to optimize
+heterogeneous memory access patterns, reducing power
+consumption by 56.4%. Reference [8] utilizes a base-Δ
+interpolation algorithm to optimize scattered memory accesses,
+enhancing the equivalent on-chip memory bandwidth by 2.38×.
+Reference [9] presents the VIM technique, distributing eight
+vertex features across eight banks for parallel fetching.
+80
+A. HRM and AABB for SS
+SS mitigates redundant computations by bypassing sampling
+in empty regions. However, the occupancy grid bitmap of all
+voxels must still be examined. To further refine SS while
+enhancing parallelism, this work proposes a four-tier HRM
+framework (Fig. 2) that integrates an AABB (Fig. 3) for RPs.
+The HRM framework comprises four tiers: coarse, fine, leaf,
+and micro traversal.
+Unlike HESS [9], which is tailored for single-ray processing,
+the HRM framework operates on RPs encompassing multiple
+rays to increase parallesim. A critical challenge for HRM is ray
+divergence within the RP, wherein rays propagate into distinct
+voxels. For example, as shown in Fig. 2, three rays enter voxel
+A while one enters voxel B during fine traversal. The HRM
+framework selectively advances rays within the same voxel
+while temporarily deferring others. A comprehensive analysis
+of ray divergence handling is presented in Section III-B.
+Furthermore, the HRM framework incorporates an AABB
+module that utilizes a Gaussian filter to mitigate noise in
+occupancy grids, thereby constraining occupancy grid bitmap
+checks to voxels within the AABB. Consequently, traversal
+paths are compressed, leading to a 70.4% reduction in
+computational load during coarse traversal and a 26.0%
+Z-order
+65.4
+90.5
+60.9
+89.7
+60
+40
+20
+0
+Total
+Occupancy Features
+Cache Type
+MLP
+(c)
+Fig. 4. (a) Row-order ray scanning. (b) Z-order ray scanning. (c) EMAs
+reduction by introducing Z-order.
+Coarse Coarse
+1st
+Voxel01: Voxel11:
+Empty Non-Empty Step
+RP
+Y
+Z
+X
+Coarse
+Voxel00:
+Empty
+Coarse
+Voxel10:
+Empty
+Lag-First Traversal
+G1
+G2
+2nd Step
+3rd
+Step
+G1
+G2
+III. HARDWARE-ORIENTED OPTIMIZATION TECHNIQUES
+Row Order
+100
+Average Number of Rays that
+Simultaneously March
+Coarse Traversal
+4
+3.89
+3.48
+2
+0
+Coarse
+Fine
+Traversal Traversal
+(a)
+(b)
+Fig. 5. (a) Illustration of lag-first traversal among coarse voxels. G1 and
+G2 denote Group 1 and Group 2, respectively. (b) The average number of
+rays that simultaneously march during coarse and fine traversal.
+reduction during fine traversal. The architectures of HRM and
+AABB are elaborated in Section IV-A.
+B. Spatial-Locality Oriented Scheduler for Data Reuse
+Instant-NGP primarily relies on three categories of data
+requiring on-chip storage: the occupancy grid (micro grid)
+bitmap for SS, feature vectors, and MLP weights. Fully storing
+this dataset on-chip is infeasible. Instead, off-chip DRAM
+functions as external storage, facilitating selective retrieval into
+on-chip SRAM. Since EMAs introduce energy and latency
+overhead, this work proposes a four-stage scheduler that
+reduces repeated EMAs for the same data block by enhancing
+on-chip data reuse. Rays and RPs exhibiting high spatial
+locality are clustered, and samples are issued in an OoO manner
+based on available on-chip features.
+The first-stage scheduler clusters four adjacent Z-order rays
+(Fig. 4(b)) into RPs, facilitating parallel traversal and data
+reuse. Compared to rays clustered via row-order scanning (Fig.
+4(a)), Z-order rays within RPs demonstrate greater traversal
+path similarity, thereby increasing data access overlap to the
+occupancy grid, feature vectors, and MLP weights. The firststage scheduler reduces EMAs by 65.4%. Architectural details
+4
+> REPLACE THIS LINE WITH YOUR MANUSCRIPT ID NUMBER (DOUBLE-CLICK HERE TO EDIT) <
+CV 0
+CV 1
+CV 3
+CV 2
+CV 4
+RP 1
+RP 2
+RP ID
+CV 5
+CV 7
+0 0 0 1 1 1 1 2 2 …
+RP ID
+CV Tag 3 0 1 3 4 1 2 3 4 …
+Loading
+3 0 4 1 Sequence
+3 0 4 1 Offloading
+Sequence
+3 0 1 3 4 1 2 …Offloading
+Sequence
+CV 8
+0 1 2 0 1 2 0 1 2
+CV Tag 3 3 3 0 4 4 1 1 5
+Loading
+3 0 1 3 4 1 2 … Sequence
+RP 3
+CV 6
+Reordered Loading && Offloading Sequence
+(With RPs Reordering)
+40
+30
+24.24
+20
+10
+1.96
+0
+Time
+Time
+47.51
+50
+Average Number of RPs
+per CV Tag Switching
+Original Loading && Offloading Sequence
+(Without RPs Reordering)
+RP 0
+Without
+With
+Reordering Reordering
+OoO
+Issuing Order
+0 1 2 3 … Blocked RPs
+0 3 6 7 …
+IRPFT
+IRPFT: RP index based on the output order after fine
+traversal. IRPFT differs from the RP ID.
+Features are stored in the on-chip feature cache.
+Features that need to be fetched from the DDR.
+0.76
+8.45%
+0.74
+0.72
+0.71
+0.7
+0.68
+Without
+OoO
+With
+OoO
+96
+95.6
+95.2
+Primary
+Miss
+95.18
+94.8
+98.65
+99
+98
+97
+96
+Primary
+Miss
+95.94
+95
+94
+94.4
+Total
+Steady
+Total
+Steady
+MLP Cache Hit
+Rate [%]
+96.27
+Feature Cache Hit
+Rate [%]
+MGB Cache Hit
+Rate [%]
+(a)
+(b)
+Fig. 7. (a) The OoO technique prioritizes issuing samples whose features
+are already on-chip. (b) Improvement in sample point throughput.
+96.4
+0
+2
+4
+97
+96
+95
+96.38
+7
+0
+7
+5
+5
+1
+3
+94.42
+94
+93
+Steady
+(a)
+(b)
+(c)
+Fig. 8. Cache hit rates of (a) micro grid bitmap (MGB), (b) feature vectors,
+and (c) MLP weights.
+of Z-order ray generation are provided in Section IV-B.
+Ray divergence poses a critical challenge in RP-based
+marching, as rays within the same RP may enter distinct voxels
+(Fig. 2), diminishing ray-level parallelism and increasing
+repetitive EMAs. To mitigate throughput degradation caused by
+ray divergence, the second-stage scheduler employs a lag-first
+approach. Upon divergence, lagging rays are selectively
+advanced to promote convergence, as illustrated in Fig. 5(a).
+This technique attains an average of 3.89 and 3.48 simultaneous
+rays per RP during coarse and fine traversal, respectively.
+Architectural details of the lag-first approach are presented in
+Section IV-C.
+The third-stage scheduler arranges RPs based on their coarse
+voxel (CV) tags (Fig. 6). On one hand, during RP marching,
+RPs traverse multiple CVs, and different RPs may access the
+same CV at different times, resulting in redundant EMAs. On
+the other hand, at CV boundaries, repeated loading and eviction
+of identical CV data further contribute to redundant EMAs. By
+reordering RPs based on their CV tags, these inefficiencies are
+alleviated, increasing the average number of RPs processed per
+CV tag switch by a factor of 24.24×. Architectural details of RP
+reordering are provided in Section IV-D.
+The first three schedulers optimize data reuse during HRM,
+whereas the fourth scheduler targets frequent EMAs resulting
+from the unpredictable nature of feature accesses during
+interpolation. Given that each CV encompasses 8³fine voxels,
+4
+6
+3
+2
+4
+6
+6 Vertex
+ID
+2
+1
+0
+0
+...
+18
+12
+12 12
+8
+10
+0
+0
+7
+6
+6
+6
+7
+5
+5
+1
+2
+4
+4
+4
+5
+3
+2
+1
+4
+5
+2
+2
+6
+1
+6
+7
+6
+7
+7
+(c)
+4
+4
+4
+4
+3
+5
+7
+5
+3
+2
+2
+6
+6
+2
+2
+1
+3
+1
+1
+3
+1
+0
+0
+0
+0
+0
+0
+1
+3
+0
+1
+3
+0
+3
+5
+7
+2
+1
+3
+Vertex ID
+(b)
+5
+4
+2
+0
+18 18
+20
+7
+3
+27 Imbalanced Distribution
+30
+Vertex
+……ID
+FSRAM
+ID
+4
+(a)
+Primary
+Miss
+Total
+6
+4
+7
+5
+7
+FSRAM 7
+Feature Availability 1 0 0 1 0 0 1 1 …
+3
+FSRAM 2
+0 3 3 1 3 3 2 2 …
+1
+0.77
+FSRAM 0
+Fine Voxel Index
+0.78
+Sample Point
+Throughput
+0 1 2 3 4 5 6 7 …
+FSRAM 1
+Time
+IRPFT
+Number of Feature
+Vectors
+(a)
+(b)
+(c)
+(d)
+Fig. 6. (a) Coarse traversal of RPs. (b) EMA inefficiency without RPs reordering, where data from CV3, CV4, and CV1must be repeatedly loaded and offloaded.
+(c) RPs reordering based on CV tags reduces EMA inefficiency. (d) The average number of RPs per CV tag switching is improved by 24.24×.
+5
+5
+7
+6
+6
+7
+Reference Address
+Fig. 9. (a) Storage of eight feature vectors in eight FSRAMs based on their
+vertex IDs. (b) The distribution of feature vectors for each vertex ID within
+a fine voxel is imbalanced. (c) Feature vector rearrangement within fine
+voxels to balance FSRAM depth. Each color represents the feature vectors
+of a single fine voxel.
+RPs within the same CV may be distributed across distinct fine,
+leaf, and micro voxels. The fourth scheduler integrates a cacheaware sample issuance mechanism that monitors feature-cache
+hits and misses. Upon a feature-cache miss, subsequent RPs that
+register feature-cache hits are prioritized, enabling OoO
+execution (Fig. 7). The scheduler fetches the missed features
+while the RPs that register feature-cache hits are interpolating
+the features, hiding the EMA delay caused by cache misses. The
+OoO sample issuance enhances on-chip feature reuse, and
+reduces the processing time, yielding an 8.45% sample point
+throughput improvement. Architectural details of OoO sample
+issuance are presented in Section IV-E.
+Together, these four schedulers improve cache hit rates, as
+illustrated in Fig. 8. Although primary cache misses are
+unavoidable during initial queries, the system attains steadystate cache hit rates of 96.27% (micro grid bitmap), 98.65%
+(feature vectors), and 96.38% (MLP weights), underscoring the
+effectiveness of the proposed scheduling techniques in reducing
+EMAs via enhanced data reuse.
+C. Balanced Bank Allocation for Feature Cache
+The feature of a sample is tri-lineraly interpolated from the
+eight vertexes features of the voxel that the sample belongs to.
+Similar to the VIM method in [9], this design stores vertex
+features using direct spatial indices as addresses. Each voxel
+vertex contains a feature vector, categorized into eight types
+according to vertex ID (Fig. 9(a)). The vertex classification
+5
+> REPLACE THIS LINE WITH YOUR MANUSCRIPT ID NUMBER (DOUBLE-CLICK HERE TO EDIT) <
+EDR-NR
+ZORG
+Image
+Boundary
+Write
+Arbiter
+RCGR
+RCXi
+PCP
+OoO-SI
+RP-ROB
+RCYi
+Direction
+Normalizer
+&& Averager
+DirRi
+Readout
+Arbiter
+Location Shifter
+Entry Selector
+Comp SRAM
+Tag Selector
+SCC
+Reschedule Insert DCRP
+Schedule
+DirRi&&Tsi
+DRP
+RP Packer
+Coarse Grid Bmap
+LFAU Controller
+RP Advancer
+DCCRP
+Partial
+LFAU
+Grid
+Bmap Controller
+Parallel RP Advancer
+Unchecked
+CCCRP_SP
+Retire
+Pixel
+Color
+Volume Rendering
+Unit (VRU)
+Update Unit
+Controller
+Tiny MLP Engine
+(TME)
+Encoder
+Sample
+Color
+Sample
+Density
+CCCRP_OoO
+PE Array
+Partial MLP Cache
+DCCRP_SP
+Fine Traversal
+Unit (FTU)
+Coarse Traversal
+Unit (CTU)
+AABB
+AABB Tester
+TSPS
+TSPS
+2 3
+Range
+TSPS
+TSPS
+0 1
+Hit CCCRP_SP
+Hit State
+CFIU
+Controller
+FIU
+Prefetch
+Coefficient
+IFV Tri-linear
+Generator
+Partial Feature Cache SamC
+Data Rearrangement
+FVTag
+Unit
+CCCRP_FV
+RCGR: rectified coordinate generator for a RP.
+PCP: pre-processed camera pose.
+DirRi: direction of rayi. i∈[0, 3].
+RCXi/ RCYi : rectified X/ Y coordinates of rayi.
+Bmap: bitmap.
+PE: processing element.
+DRP/ DCPR/ DCCPR/ DCCPR_SP: data associated with
+the RP/ CRP/ CCRP/ CCRP with sample position
+information.
+Tsi: staring point at which rayi enters the AABB.
+LFAU: lag-first aggregate unit.
+RP-ROB: ray packet reordering buffer.
+CCCPR_SP: control information within DCCPR_SP.
+CCCRP_FV/ CCCRP_OoO: control information within
+DCCPR from FTU/ OoO-SI.
+SamC: sample coordinate.
+FVTag: index of the fine voxel.
+FIU: feature interpolation unit.
+SCC: samples coordinate calculator.
+Fig. 10. Overall architecture of the proposed EDR-NR design.
+enables direct storage alignment across eight memory banks,
+allowing all required features for a sample to be fetched in a
+single cycle.
+Eliminating the HT results in storage redundancy. To
+mitigate this redundancy, feature vectors for an entire fine voxel
+are stored collectively instead of separately for each micro
+voxel in this work. The fine-voxel-centric storage reduces the
+number of feature vectors that need storage per fine voxel from
+512 to 125. However, vertices shared among multiple fine
+voxels still necessitate redundant storage. Notably, because
+sample distributions are concentrated near object surfaces,
+accessed features are predominantly localized to these regions,
+diminishing the necessity for extensive storage across the entire
+scene [8].
+A secondary challenge stems from the uneven distribution of
+feature vectors across the eight vertex types within a fine voxel
+(Fig. 9(b)). Directly mapping vertex IDs to feature SRAM
+(FSRAM) IDs results in non-uniform depth of FSRAM,
+increasing the diffculty in placement and routing [24]. To
+resolve the issue, this work introduces a bank-vertex ID
+mapping strategy that equalizes storage distribution across
+FSRAM banks (Fig. 9(c)). This strategy maintains uniform
+depth across banks. Architectural details of the balanced bank
+allocation strategy are presented in Section IV-F.
+IV. ARCHITECTURE AND DESIGN METHODOLOGY
+A. Overall Architecture and Operation Flow
+Fig. 10 illustrates the nine key components of the EDR-NR
+architecture, categorized into three functional groups: (1)
+spatial locality optimization (red units) to enhance on-chip data
+reuse, (2) SS acceleration (blue units) to expedite valid sample
+localization, and (3) pixel computation (green units) to optimize
+resource efficiency.
+The Z-order ray generator (ZORG) receives inputs from an
+external system, traverses the image plane in a Z-order pattern,
+and concurrently computes the directions of four rays. The
+AABB Tester (ABT) discards rays that fail to intersect objects,
+utilizing external AABB data. The remaining rays are
+assembled into RPs and processed via the HRM framework,
+which consists of the coarse traversal unit (CTU) and fine
+traversal unit (FTU). The traversal starting point searcher
+(TSPS) refines the RP entry point within the AABB using a
+binary search technique.
+The CTU identifies the first non-empty CV within the AABB
+intersected by a RP. The RPs reordering buffer (RP-ROB)
+allocates an entry to store the candidate RP (CRP) from CTU.
+CRP is classified based on its CV tag, forming clustered CRP
+(CCRP), which is then forwarded to the FTU. The FTU detects
+the first non-empty fine voxel and generates samples as needed.
+Additionally, the FTU integrates leaf and micro traversal to
+efficiently reuse micro grid bitmap.
+The CCRP, embedded with sample position information
+(CCRPSP), is forwarded to the OoO sample issuer (OoO-SI).
+The OoO-SI instructs the conflict-free interpolation unit (CFIU)
+to prefetch the necessary features. The interpolated feature
+vectors (IFVs) are processed by the tiny MLP engine (TME) to
+compute sample color and density. The volume rendering unit
+(VRU) integrates sample colors along the ray to compute pixel
+values and transmittance.
+The TME employs a spatial partitioning strategy similar to
+KiloNeRF, assigning each CV an independent fully connected
+network [25]. Each RP is assigned a unique pointer, serving as
+an address in the global RP buffer, and an identifier during the
+operation flow. The number of RPs under processing is decided
+by the capacity of the global RP buffer. A RP is considered fully
+processed once the transmittance of all the remaining samples
+drops below a predefined threshold or all its rays exit the AABB.
+After a RP completes rendering, four pixel values and their
+coordinates are output to reconstruct the new-view image.
+As illustrated by the green path in Fig. 10, two feedback
+signals, retire and reschedule, regulate execution flow. The
+retire path is triggered under two conditions. (1) RP termination.
+6
+> REPLACE THIS LINE WITH YOUR MANUSCRIPT ID NUMBER (DOUBLE-CLICK HERE TO EDIT) <
+ZORG
+4
+RCGR
++
+Register
+FC
+Even
+Odd
+Bits
+Bits
+BX
+MUX1
+MUX2
+CX0
+B < A
+Comparator1
+CY0
+BY
+A > B
+Comparator2
+Coordinates Rectifier
+RCX0
+RCY0
+Coordinates Generator
+RCX1
+PCP
+RCX3
+RCY1
+RCY 3
+Direction Normalizer && Averager
+3-D
+3-D
+DirR0
+DirR1
+3-D
+3-bit
+DirR2 DirR3
+ADOrder
+3-D
+RCGR: rectified
+coordinate generator for
+a RP.
+DirRi: direction of rayi.
+i [0, 3].
+BX/ BY: boundary X/ Y.
+FC: fused coordinate.
+CXi/ CYi:coordinate X i/
+Yi.
+RCXi/ RCYi: rectified
+coordinate X i/ Yi.
+PCP: pre-processed
+camera pose.
+ADOrder: the
+components order of the
+average direction for the
+RP.
+DCRP
+Reschd.: reschedule.
+Sched.: schedule.
+Addr.: address.
+Wsel/ Rsel:
+entry
+selection signal for
+writing/ reading.
+3-bit
+Decoder
+3-D
+CV TagB
+3-D
+CV TagC
+3-D
+CV TagD
+3-D
+Components Pack && Reorder Unit
+TCS1st 4-D
+TCS2nd 4-D
+TCS3rd 4-D
+Pairwise
+Pairwise
+Pairwise
+Comparator 1 EN1 Comparator 2 EN2 Comparator 3
+MUX
+EN3
+Selected CV Tag 3-D
+LFAU
+Fig. 12. LFAU architecture for aligning rays within a RP during coarse
+traversal.
+DCCRP_SP_ctrl
+Selector
+STag
+RTj: the jth recent tag. j∈[1, N]. N is the
+capacity of the recent tags recorder.
+HS: hit states.
+RNE: CRP number of the current entry.
+Cand.: candidate.
+Unchecked
+DCCRP_SP_ctrl
+Hit State
+Comp
+SRAM
+Location
+Shifter
+Hit
+DCCRP_SP_ctrl
+DCCRP_SP_ctrl/ DCCRP_SP_comp:
+control && computation
+information of CCRP with
+SCC
+sample position information.
+SamC: sample coordinate.
+CCCRP_OoO: control information
+CCCRP_OoO within DCCPR from OoO-SI.
+FVTag: index of the fine voxel.
+OoO-SI
+Data Q
+Addr
+WR_EN
+RD_EN
+FVTag
+SamC
+(a)
+Location Shifter
+DCCRP_SP_ctrl
+Prefetch
+Unchecked DCCRP_SP_ctrl
+Hit State
+Hit DCCRP_SP_ctrl
+REG1
+Entry State DCCRP_SP_ctrl
+Base Addr
+…
+FVTag
+Base Addr
+…
+CCCRP_OoO
+LS
+Controller
+Entry State DCCRP_SP_ctrl
+…
+Addr
+WR_EN
+RD_EN
+REG0
+…
+B. ZORG for Ray Generation
+The ZORG microarchitecture (Fig. 11) employs a 22-bit
+counter to generate pixel coordinates along a Z-order curve.
+ZORG partitions the odd and even bits of the counter output
+(FC) into two 11-bit binary values, representing the X and Y
+coordinates (CX and CY). Unlike row-order scanning traversal
+(Fig. 4(a)), which progresses in a predictable row-by-row
+manner, Z-order traversal (Fig. 4(b)) follows an irregular
+pattern, whereas improving the locality of rays within a RP. For
+images with non-power-of-two dimensions (e.g., 800×800), the
+Z-curve can extend beyond valid image boundaries, producing
+out-of-bounds coordinates before re-entering the valid region.
+To address this issue, the correlation between out-of-bounds
+positions and their subsequent re-entry points is analyzed.
+ZORG preemptively corrects coordinates before an out-of-
+HS
+Entry CRP Number Reg
+RNE
+Tag
+Cand. Tag Sorter
+DCCRP_SP_comp
+…
+The VRU detects that transmittance drops below a predefined
+threshold or that a RP exits the AABB during HRM. The RP
+pointer is released, and the RP-ROB deallocates a placeholder
+from the corresponding entry of RP. (2) CV transition. If a RP
+exits its current CV but remains within the AABB, the RP is
+redirected to the CTU via the retire path. Different from the RP
+termination condition, the placeholder is released whereas the
+RP pointer is kept. After the release, the RP behaves like a new
+RP from the ABT, and continues coarse traversal until the RP
+intersects a non-empty CV.
+The reschedule path enables iterative processing due to
+multiple samples per ray and multiple rays per RP. Reschedule
+is triggered under fine voxel transition if the transmittance of
+current sample is still above the threshold. Continued sampling
+along the same ray or within the same RP is required. The ray
+length which is stored in the global RP buffer is updated.
+Eaddr.
+DCPR/ DCCPR: data
+associated with the
+CRP/ CCRP.
+STag: CV tag for
+schedule operation.
+ETag: entry tag.
+Prefetch
+CFIU
+ADOrder CV TagA
+ETag
+Recent Tags Recorder Update
+RT1 RT2 …
+RTN
+Hit
+… = = Checker
+== ==
+(a)
+(b)
+Fig. 13. (a) RP-ROB architecture handling four types of CRP operations.
+(b) Tag selector architecture determining the CV tag during tag switching.
+Fig. 11. ZORG architecture for parallel generation of four ray directions
+within a RP.
+CV TagA ~ CV TagD: the CV tags
+of the 4 rays within one RP.
+ADOrder: the components order of
+the average direction for the RP.
+TCS1st ~ TCS3rd: the reordered tag
+component packages based on the
+ADOrder. TCS1st has the highest
+priority.
+EN1: the enable signal based on
+the pairwise comparison among the
+elements within the TCS1st.
+Operation Controller
+RPInsert Reschd. Sched. Retd. ROB
+Arbiter 2
+Arbiter 1
+Wsel Rsel
+Tag
+Entry ETag
+Selector STag Selector
+Addr.
+DCCRP
+RP SRAM
+REGnr Entry State DCCRP_SP_ctrl Base Addr
+(b)
+Fig. 14. Architecture of (a) OoO-SI and (b) LS.
+bounds step occurs, ensuring that all rectified coordinates (RCX
+and RCY) remain within valid bounds and reducing traversal
+stalls.
+C. Lag-first Aggregate Unit (LFAU)
+The LFAU (Fig. 12) orchestrates ray selection to address ray
+divergence in both CTU and FTU. The LFAU retrieves the
+voxel indices of four rays within the RP and sorts them along
+the X, Y, and Z axes. Pairwise comparisons along the three axes
+determine ray selection for traversal, producing three selection
+signals (EN). The rays with the Selected CV Tag that is
+determined by EN3 advance during the current iteration. After
+selecting prioritized rays, the CTU or FTU queries the
+corresponding coarse or fine bitmap to check voxel occupancy.
+If the queried bitmap designates a voxel as empty, the next
+voxel position is computed; otherwise, sampling proceeds.
+D. RP-ROB for Clustering RPs
+The RP-ROB (Fig. 13(a)) organizes CRPs from the CTU by
+their CV tags, ensuring that CRPs with the same CV tag are
+stored in the same entry. The CCRPs are forwarded to the FTU.
+Because of spatial locality optimizations, CRP distribution
+across CVs is naturally imbalanced. A fixed allocation of
+entries per CV tag can lead to inefficient resource utilization or
+processing stalls. To address this, the RP-ROB dynamically
+assigns CV tags as entry labels, enabling CVs with more CRPs
+to occupy multiple entries when necessary.
+7
+> REPLACE THIS LINE WITH YOUR MANUSCRIPT ID NUMBER (DOUBLE-CLICK HERE TO EDIT) <
+DAddr
+Prefetch
+Unchecked
+DCCRP_SP_ctrl
+DDR
+Feature Chunk
+Controller
+Data Rearrangement
+Unit
+Hit State
+Monitor
+Feature Memory
+MSHR
+SamC
+…
+FVTag
+FSU 7
+VFV_s
+FSU 1
+FSU 0FSRAM 7
+FSRAM 1
+Feature
+IFV
+FSRAM 0 N -D
+Interpolation 16-D
+FV
+Unit
+SamC Tri-linear Coefficient TC
+Generator
+8-D
+FAddrs
+…
+Hit State
+Hit
+DCCRP_SP_ctrl
+CFIU
+RM
+DAddr: DDR address.
+FSU: Feature Storage
+Unit.
+TC:
+tri-linear
+coefficient.
+IFV:
+interpolated
+feature vector.
+FAddrs: the FSRAM
+address of sth FSU. s ∈
+[0, 7].
+VFV_s: the feature
+vector of sth vertex.
+NFV: the dimensionality
+of feature vector.
+Chair
+Ground
+Truth
+EDRNR
+Lego
+Ground
+Truth
+EDRNR
+Mic
+Ground
+Truth
+Hotdog
+EDRNR
+Ground
+Truth
+EDRNR
+Output image
+Avg. PSNR [dB]
+30.96
+33.75
+34.09
+Specifications
+Technology
+40 nm 1P8M CMOS
+Area
+SRAM [KB]
+3.0 mm
+35.64
+Fig. 16. Visual rendering results and PSNR of the EDR-NR chip.
+3.5 mm (10.5 mm²)
+Micro Grid Cache
+Feature Cache
+MLP Cache
+Others
+8
+256
+8.25
+43.2
+Supply Voltage [V]
+Fig. 15. Architecture of the CFIU.
+Scene
+TABLE I
+SPECIFICATIONS OF THE EDR-NR CHIP
+0.79-1.21
+Maximum Frequency
+380 MHz
+Data Type
+INT4, 8, 16, 20
+Model Quantization
+Operating Conditions
+Feature: INT4, MLP: INT8
+Power
+Consumption* [mW]
+Rendering
+Speed* [FPS]
+Energy Efficiency*
+[nJ/pixel]
+50 MHz @ 0.79 V
+50.3
+13.2
+6.0
+150 MHz @ 0.98 V
+205.6
+38.8
+8.3
+250 MHz @ 1.06 V
+364.0
+61.2
+9.3
+350 MHz @ 1.17 V
+569.8
+81.3
+11.0
+380 MHz @ 1.21 V
+643.5
+85.9
+11.7
+*Estimated @ Synthetic NeRF Dataset.
+The RP-ROB regulates four key signals to control the
+operation flow: insert, schedule, reschedule, and retire. Upon
+activation of the insert signal, an incoming CRP is mapped to
+an entry according to its CV tag, and the recent tags recorder
+(Fig. 13(b)) in the tag selector is updated following the least
+recently used (LRU) policy. If there are multiple entries having
+the same CV tag as the incoming tag, the entry selector gives
+priority to the most occupied entry. If the incoming CV tag is
+different from the tags of all the entries, and there exists empty
+entries, an empty entry is selected and labeled.
+When the schedule signal is triggered, a CCRP is retrieved
+and sent to the FTU. If multiple entries correspond to the current
+CV tag, the entry selector selects the entry with the highest
+available capacity. Tag switching is necessary when all the
+CCRPs of current tag has retired. During tag switching, the tag
+selector gives preference to the tags in the recent tags recorder
+to improve CCRP locality. The entries with the hit tags are then
+sorted, and the entry with the least CCRPs is selected for
+schedule.
+The reschedule and retire signals facilitate feedback
+mechanisms for managing iterative processing and rendering
+completion. A detailed discussion is provided in Section IV-A.
+E. OoO-SI for Sample Issuance
+The OoO-SI (Fig. 14(a)) processes the CCRP containing
+sample positions from the FTU (CCRPSP), instructs the CFIU
+to prefetch the required features, and out-of-orderly issues
+samples to the CFIU. Without the OoO-SI, stalls may arise
+when samples wait for feature retrieval from external memory.
+The OoO-SI utilizes an OoO queue (location shifter (LS)),
+prioritizing CCRPSP with available on-chip features, thereby
+reducing stalls caused by EMA delays. The LS (Fig. 14(b))
+manages the queue, storing entry states, control information,
+and base addresses in registers. The base address specifies the
+storage location of the remaining CCRPSP data
+(DCCRP_SP_comp) in the computation (Comp) SRAM. The
+sample coordinate calculator (SCC) generates the sample
+coordinate (SamC) which is forwarded to CFIU.
+F. CFIU for Feature Interpolation
+The CFIU (Fig. 15) handles feature interpolation, monitors
+feature availability status in the FSRAMs, and fetches required
+features from external memory in response to OoO-SI requests.
+To enhance memory access efficiency and avoid conflicts,
+feature vectors within a fine voxel are allocated across eight
+distinct FSRAMs based on vertex IDs.
+The CFIU integrates miss status handling registers (MSHR)
+and a reservation monitor (RM). The MSHR aggregates
+duplicate miss requests to avoid repetitive EMAs, and RM
+prevents premature cache line replacement, ensuring data
+availability for ongoing computations. The tri-linear
+interpolation coefficients (TCs) are reordered to align FSRAM
+ID with the vertex ID.
+V. EVALUATION
+Fig. 16 illustrates benchmark results for NeRF-based
+rendering, assessed with the Synthetic NeRF dataset [26].
+Visual comparisons across multiple scenes between ground
+truth images and those rendered by the EDR-NR chip are
+showed. The EDR-NR chip attains a signal-to-noise ratio
+(PSNR) above 30 dB across these scenes, underscoring its
+rendering fidelity.
+Table I and Fig. 17(a) provide an overview of the EDR-NR
+chip. Manufactured using 40 nm CMOS technology, the chip
+occupies a 10.5 mm²die area and operates within a supply
+voltage range of 0.79-1.21 V. At an 800×800 resolution, the
+chip reaches a peak rendering speed of 85.9 frames per second
+(FPS) while consuming 0.64 W at 380 MHz. The architecture
+incorporates 315.5 KB of on-chip SRAM, and supports custom
+floating-point operations for ray generation and HRM to
+enhance sample localization. Feature vectors utilize INT4
+precision, whereas INT8 is employed for MLP weights. For
+real-time rendering at 38.8 FPS, the chip operates at 150 MHz
+and 0.98 V, consuming 0.21 W.
+Fig. 17(b) depicts the demonstration system, which consists
+of a system board integrating the EDR-NR chip and a host PC
+8
+> REPLACE THIS LINE WITH YOUR MANUSCRIPT ID NUMBER (DOUBLE-CLICK HERE TO EDIT) <
+3.5 mm
+CFIU
+3.0 mm
+VRU
+Clock Signal Source
+RP-ROB
+ZORG
+CTU
+FTU
+Ext. I/F
+OoO-SI
+Power Supply
+Xilinx FPGA
+Board
+ABT
+EDR-NR
+Chip
+Normalized Throughput
+Global RP
+Buffer
+TME
+8
+Rendering Results
+Case 1: RP-ROB
+6.95
+7
+Case 2: Case 1+ABT+LFAU
+6
+5
+Case 3: Case 2+ZORG+OoO-SI 84.4%
+3.77
+4
+3
+98.4%
+1.9
+2
+90.0%
+1
+1
+0
+Baseline
+Case 1
+(a)
+(b)
+Fig. 17. (a) Chip photograph. (b) Demonstration system. (c) Throughput contributions of the proposed techniques.
+Case 2
+Case 3
+(c)
+TABLE II
+PERFORMANCE COMPARISON OF THE EDR-NR CHIP WITH STATE-OF-THE-ART DESIGNS
+[27]
+[28]
+[7]
+[20]
+[6]
+[9]
+[8]
+This Work
+ASIC
+Technology [nm]
+12
+5
+28
+28
+28
+28
+40
+40
+Resolution
+800 800
+800 800
+-
+800 800
+800 800
+800 800
+800 800
+800 800
+NeRF Model
+Instant-NGP Instant-NGP Vanilla NeRF Instant-NGP Instant-NGP Instant-NGP Instant-NGP Instant-NGP
+Rendering Speed [FPS]
+2.9
+75.6
+110
+30.6
+73.5
+120
+131
+Area [mm²]
+-
+-
+20.25
+5.07
+20.25
+15
+19.38
+85.9
+10.5
+Voltage [V]
+-
+-
+0.6-0.95
+1
+0.68-0.9
+0.9
+0.9
+0.79-1.21
+Max Frequency [MHz]
+1400
+2500
+250
+200
+200
+300
+400
+380
+On-Chip Memory [KB]
+-
+-
+2015
+360
+2112
+2,560
+677.3
+315.5
+Max Throughput
+[megapixel/second]
+1.86
+48.38
+1.443)
+19.58
+47.04
+76.8
+83.84
+54.98
+Normalized Throughput
+[megapixel/second/mm²]
+-
+-
+0.03
+3.86
+2.32
+5.12
+4.33
+5.23
+Power [W]
+152)
+3502)
+0.90
+0.13
+0.73
+1.9
+1.30
+0.645)
+Energy Efficiency [nJ/pixel]
+-
+-
+544.43)
+6.6
+15.54)
+25
+15.51
+11.75)
+Normalized Energy
+Efficiency [FPS/W] 1)
+-
+-
+36.92
+78.77
+27.29
+24.46
+55.58
+134.22
+Normalized Area Efficiency
+[FPS/mm2] 1)
+-
+-
+1.864
+2.07
+1.253
+2.74
+6.76
+8.18
+1)
+2)
+3)
+4)
+5)
+Normalized to 40 nm technology and 1.21 V using the methodology outlined in [8] [29] [30]. s=Technology/40nm, f∼s, A∼1/s2 and P∼(1/s) ×
+(1.21/Voltage)2, where f, A and P denote frequency, area, and power, respectively. The normalized energy efficiency and normalized area efficiency are
+evaluated at the maximum rendering speed.
+Thermal design power.
+Not explicitly reported in the original paper, calculated based on the reported energy per sample and energy per pixel.
+Estimated based on the reported FPS and an assumed resolution of 800×800.
+Including power consumption from external memory access (measured with DDR3 SDRAM).
+for display. The throughput breakdown in Fig. 17(c) indicates
+that the proposed architectural techniques yield a 6.95×increase
+in throughput, with ZORG and OoO-SI contributing the largest
+share (45.76%). Serving as the first processing unit in EDR-NR,
+ZORG generates Z-order rays, improving RP spatial locality
+compared to conventional row-order scanning. Additionally,
+the OoO-SI enhances feature cache hit rates. The feature cache
+occupies 81.14% of the total on-chip SRAM.
+Table II presents a comparison of the EDR-NR chip with
+state-of-the-art accelerators, including NeRF ASICs [6][7][20],
+edge GPUs [27][28], and simulation-based implementations
+[8][9]. For a fair comparison, energy and area efficiency metrics
+are normalized according to the methodology in [8][29][30],
+which accounts for frequency, voltage, and technology
+differences.
+As shown in Table II, the recent accelerator [20] achieves the
+highest energy efficiency while maintaining the lowest area
+consumption, delivering 30.6 FPS. Simulation-based
+implementations, including [8] and [9], as well as ASIC for
+vanilla NeRF [7], exceed 110 FPS. The EDR-NR chip achieves
+low on-chip memory usage while sustaining high normalized
+throughput, leading to a 1.21× increase in normalized area
+efficiency over [8]. Moreover, by effectively reducing EMAs,
+the EDR-NR chip attains a 2.41× improvement in normalized
+energy efficiency relative to [8].
+VI. CONCLUSIONS
+This paper introduces the EDR-NR architecture, designed for
+rendering on edge devices. The EDR-NR chip improves energy
+and area efficiency through three key factors. First, the four-
+9
+> REPLACE THIS LINE WITH YOUR MANUSCRIPT ID NUMBER (DOUBLE-CLICK HERE TO EDIT) <
+stage scheduler coordinates spatial-locality-aware ray packing,
+RP marching, and sample issuance, enhancing data reuse and
+increasing cache hit rates. Second, HRM, in conjunction with
+AABB, accelerates sample positioning, thereby increasing
+throughput. Third, balanced bank allocation reduces bank
+conflicts of feature cache, which accounts for 81.14% of the
+total on-chip SRAM. In summary, the EDR-NR chip effectively
+mitigates challenges in energy efficiency and resource
+consumption, establishing it as a viable solution for edge
+computing.
+REFERENCES
+[1] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi,
+and R. Ng, “NeRF: representing scenes as neural radiance fields for view
+synthesis,” Commun. ACM, vol. 65, no. 1, pp. 99-106, Dec. 2021, doi:
+10.1145/3503250.
+[2] B. Kerbl, G. Kopanas, T. Leimkühler, and G. Drettakis, “3d gaussian
+splatting for real-time radiance field rendering,” ACM Trans. Graph., vol.
+42, no. 4, pp.139, Jul. 2023, doi: 10.1145/3592433.
+[3] T. Müller, A. Evans, C. Schied, and A. Keller, “Instant neural graphics
+primitives with a multiresolution hash encoding,” ACM Trans. Graph., vol.
+41, no. 4, pp. 1-15, Jul. 2022, doi: 10.1145/3528223.3530127.
+[4] Z. Zuo, Y. Li, T. Zhang and F. Mo, “A NeRF-based color consistency
+correction method for remote sensing images,” in IEEE Journal of Selected
+Topics in Applied Earth Observations and Remote Sensing, vol. 17, pp.
+6805-6817, Mar. 2024, doi: 10.1109/JSTARS.2024.3374808.
+[5] K. Zhou, W. Li, N. Jiang, X. Han and J. Lu, “From NeRFLiX to
+NeRFLiX++: a general nerf-agnostic restorer paradigm,” in IEEE
+Transactions on Pattern Analysis and Machine Intelligence, vol. 46, no. 5,
+pp. 3422-3437, May 2024, doi: 10.1109/TPAMI.2023.3343395.
+[6] J. Ryu, H. Kwon, W. Park, Z. Li, B. Kwon, D. Han, D. Im, S. Kim, H. Joo,
+M. Kim, and H.J. Yoo, “NeuGPU: An energy-efficient neural graphics
+processing unit for instant modeling and real-time rendering on mobile
+devices,” in IEEE Journal of Solid-State Circuits, vol. 60, no. 1, pp. 99111, Jan. 2025, doi: 10.1109/JSSC.2024.3447701.
+[7] D. Han, J. Ryu, S. Kim, S. Kim, J. Park and H. -J. Yoo, “MetaVRain: A
+mobile neural 3-D rendering processor with bundle-frame-familiaritybased NeRF acceleration and hybrid DNN computing,” in IEEE Journal of
+Solid-State Circuits, vol. 59, no. 1, pp. 65-78, Jan. 2024, doi:
+10.1109/JSSC.2023.3291871.
+[8] Y. Chen, Z. Li, D. Lyu, Y. Xu and G. He, “Neural rendering acceleration
+with deferred neural decoding and voxel-centric data flow,” in IEEE
+Transactions on Computer-Aided Design of Integrated Circuits and
+Systems, Jan. 2025, doi: 10.1109/TCAD.2024.3524918.
+[9] L. Wu, H. Zhu, J. Zheng, M. Li, Y. Cheng, Q. Liu, X. Zeng, and C. Chen,
+“Hi-NeRF: A multicore NeRF accelerator with hierarchical empty space
+skipping for edge 3-D rendering,” in IEEE Transactions on Very LargeScale Integration (VLSI) Systems, vol. 32, no. 12, pp. 2315-2326, Dec.
+2024, doi: 10.1109/TVLSI.2024.3458032.
+[10]Z. Yuan, B. Yuan, C. Rao, Y. Zhu, Y. He, P. Zhou, J. Yu, X. Lou, “A
+Neural Rendering Coprocessor With Optimized Ray Representation and
+Marching,” in IEEE Transactions on Very Large Scale Integration (VLSI)
+Systems, Jun. 2025, doi: 10.1109/TVLSI.2025.3572959.
+[11]J. Ding, Y. He, B. Yuan, Z. Yuan, P. Zhou, J. Yu, and X. Lou, “Ray
+Reordering for Hardware-Accelerated Neural Volume Rendering,” in IEEE
+Transactions on Circuits and Systems for Video Technology, vol. 34, no.
+11, pp. 11413-11422, Nov. 2024, doi: 10.1109/TCSVT.2024.3419761.
+[12]G. Park, S. Song, H. Sang, D. Im, D. Han, S. Kim, H. Lee, and H.J. Yoo,
+“An artificial-intelligence-based slam processor with scene-adaptive
+sampling and hybrid NeRF model training acceleration,” in IEEE
+Transactions on Circuits and Systems for Artificial Intelligence, vol. 1, no.
+1, pp. 3-14, Sept. 2024, doi: 10.1109/TCASAI.2024.3424388.
+[13]S. Li, Y. Zhao, C. Li, B. Guo, J. Zhang, W. Zhu, Z. Ye, C. Wan, and Y.C.
+Lin, “Fusion-3D: Integrated Acceleration for Instant 3D Reconstruction
+and Real-Time Rendering,” 2024 57th IEEE/ACM International
+Symposium on Microarchitecture (MICRO), Austin, TX, USA, Nov. 2024,
+pp. 78-91, doi: 10.1109/MICRO61859.2024.00016.
+[14]Y. Jing, Y. Sun, M. Wu, Z. Zhu, J. Zhou, R. Huang, L. Ye, and T. Jia,
+“NeRF-Learner: A 2.79mJ/frame NeRF-SLAM processor with unified
+inference/training compute-in-memory for large-scale neural rendering,”
+2024 IEEE European Solid-State Electronics Research Conference
+(ESSERC), Bruges, Belgium, Sept. 2024, pp. 145-148, doi:
+10.1109/ESSERC62670.2024.10719471.
+[15]S. Li, K. Liu, W. Liu and Z. Guo, “CFSA: An efficient CPU-FPGA
+synergies accelerator for neural radiation field rendering,” 2024 34th
+International Conference on Field-Programmable Logic and Applications
+(FPL),
+Torino,
+Italy,
+Sept.
+2024,
+pp.
+346-352,
+doi:
+10.1109/FPL64840.2024.00055.
+[16]H. Wan, L. Ma, A. Li, P. Zhou, J. Yu, and X. Lou, “ZeroTetris: A Spacial
+Feature Similarity-based Sparse MLP Engine for Neural Volume
+Rendering,” In Proceedings of the 61st ACM/IEEE Design Automation
+Conference (DAC), San Francisco, CA, USA, Jun. 2024, pp. 1-6,
+https://doi.org/10.1145/3649329.3655684.
+[17]Y. Feng, Z. Liu, J. Leng, M. Guo and Y. Zhu, “Cicero: Addressing
+algorithmic and architectural bottlenecks in neural rendering by radiance
+warping and memory optimizations,” 2024 ACM/IEEE 51st Annual
+International Symposium on Computer Architecture (ISCA), Buenos Aires,
+Argentina,
+Jun.
+2024,
+pp.
+1293-1308,
+doi:
+10.1109/ISCA59077.2024.00096.
+[18]Z. Yuan, B. Yuan, Y. Gu, Y. Zheng, Y. He, X. Wang, C. Rao, P. Zhou, J.
+Yu, and X. Lou, “A 0.59μJ/pixel high-throughput energy-efficient neural
+volume rendering accelerator on FPGA,” 2024 IEEE Custom Integrated
+Circuits Conference (CICC), Denver, CO, USA, Apr. 2024, pp. 1-2, doi:
+10.1109/CICC60959.2024.10529071.
+[19]K. Long, C. Rao, Y. He, Z. Yuan, P. Zhou, J. Yu, and X. Lou, “Analysis
+and Design of Precision-Scalable Computation Array for Efficient Neural
+Radiance Field Rendering,” in IEEE Transactions on Circuits and Systems
+I: Regular Papers, vol. 70, no. 11, pp. 4260-4270, Nov. 2023, doi:
+10.1109/TCSI.2023.3293534.
+[20]W. Jo, S. Kim, J. Lee, D. Han, S. Kim, S. Choi, and H.J. Yoo, “NeRPIM:
+A 4.2 mJ/frame neural rendering processing-in-memory processor with
+space encoding block-wise mapping for mobile devices,” 2023 IEEE
+Symposium on VLSI Technology and Circuits (VLSI Technology and
+Circuits),
+Kyoto,
+Japan,
+Jun.
+2023,
+pp.
+1-2,
+doi:
+10.23919/VLSITechnologyandCir57934.2023.10185399.
+[21]C. Li, S. Li, Y. Zhao, W. Zhu and Y. Lin, “Rt-nerf: Real-time on-device
+neural radiance fields towards immersive AR/VR rendering,” In
+Proceedings of the 41st IEEE/ACM International Conference on
+Computer-Aided Design (ICCAD), San Diego, California, USA, Oct. 2022,
+no. 132, pp. 1-9, doi: https://doi.org/10.1145/3508352.3549380.
+[22]A. El Gamal and H. Eltoukhy, “CMOS image sensors,” in IEEE Circuits
+and Devices Magazine, vol. 21, no. 3, pp. 6-20, May-June 2005, doi:
+10.1109/MCD.2005.1438751.
+[23]R. Li, H. Gao, M. Tancik and A. Kanazawa, “NerfAcc: Efficient sampling
+accelerates NeRFs,” 2023 IEEE/CVF International Conference on
+Computer Vision (ICCV), Paris, France, Oct. 2023, pp. 18491-18500, doi:
+10.1109/ICCV51070.2023.01699.
+[24]B. Liu, “Sram compilation and placement co-optimization for memory
+subsystems,” Electronics, vol. 12, no. 6, pp.1353, Mar. 2023, doi:
+10.3390/electronics12061353
+[25]C. Reiser, S. Peng, Y. Liao and A. Geiger, “KiloNeRF: Speeding up Neural
+Radiance Fields with Thousands of Tiny MLPs,” 2021 IEEE/CVF
+International Conference on Computer Vision (ICCV), Montreal, QC,
+Canada,
+Oct.
+2021,
+pp.
+14315-14325,
+doi:
+10.1109/ICCV48922.2021.01407.
+[26]B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi,
+and R. Ng, “NeRF: Representing scenes as neural radiance fields for view
+synthesis,” in Proc. European Conference on Computer Vision (ECCV),
+2020, pp. 405-421.
+[27]NVIDIA Inc., NVIDIA Xavier NX, <https://www.nvidia.com/enin/autonomousmachines/embedded-systems/jetson-xavier-nx/>, Accessed:
+Mar. 2025.
+[28]NVIDIA
+Inc.,
+NVIDIA
+GeForce
+RTX
+3090Ti,
+<https://www.nvidia.com/enus/geforce/graphics-cards/30-series/rtx-30903090ti/>, Accessed: Mar. 2025.
+[29]J. Tu, M. Lou, J. Jiang, D. Shu, and G. He, “An efficient massive mimo
+detector based on second-order richardson iteration: From algorithm to
+flexible architecture,” IEEE Transactions on Circuits and Systems I:
+Regular Papers, vol. 67, no. 11, pp. 4015–4028, 2020.
+[30]Z. Liang, D. Lv, C. Cui, H.-B. Chen, W. He, W. Sheng, N. Jing, Z. Mao,
+and G. He, “A 3.85-gb/s 8 × 8 soft-output mimo detector with latticereduction-aided channel preprocessing,” IEEE Transactions on Very
+Large-Scale Integration (VLSI) Systems, vol. 29, no. 2, pp. 307–320, 2021.
+10
+> REPLACE THIS LINE WITH YOUR MANUSCRIPT ID NUMBER (DOUBLE-CLICK HERE TO EDIT) <
+Binzhe Yuan received the B.Eng. degree
+in Electronic Information Engineering
+from ShanghaiTech University, Shanghai,
+China, in 2022. He is currently pursuing
+the M.Eng. degree in ShanghaiTech
+University, Shanghai, China. His current
+research interests include computer
+arithmetic and high-performance neural
+rendering accelerator design.
+Zhechen Yuan (Student Member, IEEE)
+received the B.Eng. degree in Electronics
+Engineering
+from
+Shanghaitech
+University, China, in 2021. He is currently
+working toward the Ph.D. degree in
+Shanghaitech University. His research
+interests include neural rendering and
+energy-efficient VLSI design for computer
+graphics and deep learning.
+XiangYu Zhang (Member, IEEE)
+obtained her B.S. in Electronics and
+Electrical Science and Engineering from
+Tianjin University, Tianjin, China 2013.
+She continued her academic journey with
+an M.S. degree in Electrical Science and
+Engineering and a Ph.D. degree in System
+Cybernetics, both from Hiroshima
+University, Hiroshima, Japan, in 2016 and
+2019, respectively. Presently, Zhang serves as an assistant
+researcher at ShanghaiTech University, Shanghai, China, where
+her research primarily focuses on the development of effective
+and efficient hardware accelerators.
+Chen Junsheng (Graduate Student,
+School of Information Science and
+Technology, ShanghaiTech University,
+Shanghai, China) received the B.Eng.
+degree
+in
+Electronic
+Information
+Engineering
+from
+ShanghaiTech
+University, Shanghai, China, in 2024, and
+is currently pursuing the M.S. degree in Electronic Science and
+Technology at ShanghaiTech University, Shanghai, China. His
+current research interests include neural rendering, hardware–
+software co-design, FPGA/ASIC accelerator design, and
+domain-specific hardware architectures.
+Zeyu Zheng received the B.Eng. degree in
+Computer Science from ShanghaiTech
+University, China, in 2022. He is currently
+pursuing the Master degree in Electronic
+Information. He is currently working for
+co-operate
+program
+of
+Shanghai
+GGUTech Co. Ltd. and ShanghaiTech
+University, focusing on test platform
+building and driver development for FPGAs and ASICs.
+Yunxiang He is currently working toward
+the B.S. degree at ShanghaiTech
+Univerisity, Shanghai, China. His research
+interests include the architecture of custom
+accelerators based on vision, computer
+graphics, and deep learning.
+Yuefeng Zhang received the B.Eng.
+degree
+in
+Electronic
+Information
+Engineering
+from
+ShanghaiTech
+University, China, in 2024. He is currently
+working toward the D.Eng. degree in
+ShanghaiTech University. His research
+interests include neural rendering and
+VLSI design for computer graphics.
+Junran Ding (Student Member, IEEE)
+received the B.Eng. degree in Electronic
+Information
+Engineering
+from
+ShanghaiTech University, Shanghai,
+China, in 2023. He is currently pursuing
+the M.Eng. degree in ShanghaiTech
+University, Shanghai, China. His current
+research interest includes hardware
+software co-design for neural rendering.
+Haochuan Wan (Graduate Student
+Member, IEEE) received his B.Eng.
+degree from ShanghaiTech University,
+Shanghai, China, in 2021. He is currently
+pursuing a Ph.D. degree at the School of
+Information Science and Technology,
+ShanghaiTech University. His research
+interests include digital ASIC design and
+hardware acceleration for neural rendering algorithms.
+Xiaoming Zhang received the B.S. degree
+in electrical engineering from Jilin
+University, Changchun, China, in 2020,
+and the M.S. degree in electrical
+engineering
+from
+ShanghaiTech
+University, Shanghai, in 2023. He is
+currently with GGU Technology Company
+Ltd ， Shanghai. His current research
+interests include neural rendering and VLSI design for artificial
+intelligence.
+11
+> REPLACE THIS LINE WITH YOUR MANUSCRIPT ID NUMBER (DOUBLE-CLICK HERE TO EDIT) <
+Chaolin Rao received the B.Eng. degree
+from the University of Electronic Science
+and Technology of China, Chengdu,
+China, in 2016, and the Ph.D. degree from
+the School of Information Science and
+Technology, ShanghaiTech University,
+Shanghai, China. He is currently with
+GGU Technology Company Ltd. His
+current research interests include neural rendering, computer
+architecture, and VLSI design for artificial intelligence.
+Wenyan Su received the B.Eng. degree in
+Information Engineering from East China
+University of Science and Technology,
+China, in 2007 and M.Sc. degree in
+Microelectronics from Fudan University,
+China, in 2010. She received the second
+M.Sc degree in System-on-Chip from
+Royal Institute of Technology(KTH),
+Sweden, in 2010 through the Fudan-KTH
+joint program.
+Before joining ShanghaiTech University, Shanghai, China, she
+was the senior Engineer in LSI Technologies, Shanghai, China
+from 2010 to 2015, and then joined as the Senior Staff Engineer
+in IBM, Shanghai, China from 2015 to 2021. She did design
+service works using different advanced node technologies. As
+an Engineer in ShanghaiTech University now, her current
+research interests include high-performance and energyefficient integrated circuits design.
+Pingqiang Zhou (Member, IEEE)
+received the B.E. degree from Nanjing
+University
+of
+Posts
+and
+Telecommunications, China, in 2005, the
+M.E. degree from Tsinghua University,
+Beijing, China, in 2007, and the Ph.D.
+degree from the University of Minnesota
+in 2012. He is currently a full professor
+with the School of Information Science and Technology at
+ShanghaiTech University, Shanghai, China. Prior to joining
+ShanghaiTech, he worked respectively at IBM T. J. Watson
+Research Center as a research intern in 2011, and the University
+of Minnesota as a postdoctoral researcher from 2012 to 2013.
+He was with the University of California, Berkeley as a visiting
+scholar in 2015. His current research interests include the
+computer-aided design of VLSI circuits, computer architecture,
+and hardware security. Prof. Zhou received the best paper
+nominations in ASP-DAC 2010 and CSTIC 2016. He has been
+serving on the technical program committees of many
+international conferences such as DAC, ICCAD, and ASPDAC, and is an associate editor of the IEEE Transactions on
+Circuits and System II.
+Jingyi Yu (Fellow, IEEE) received BS
+from Caltech in 2000 and Ph.D. from MIT
+in 2005. He is currently the Vice Provost
+at ShanghaiTech University. Before
+joining ShanghaiTech, he was a full
+professor in the Department of Computer
+and Information Sciences at University of
+Delaware. His research interests span a
+range of topics in computer vision and computer graphics,
+especially on computational photography and nonconventional
+optics and camera designs. He is a recipient of the NSF
+CAREER Award and the AFOSR YIP Award, and has served
+as an area chair of many international conferences including
+CVPR, ICCV, ECCV, IJCAI and NeurIPS. He was a program
+chair of CVPR 2021 and will be a program chair of ICCV 2025.
+Xin Lou (Senior Member, IEEE) received
+the B.Eng. degree in Electronic
+Information
+Technology
+and
+Instrumentation from Zhejiang University
+(ZJU), China, in 2010 and M.Sc. degree in
+Systemon-Chip Design from Royal
+Institute of Technology (KTH), Sweden,
+in 2012 and PhD degree in Electrical and
+Electronic Engineering from Nanyang Technological
+University (NTU), Singapore, in 2016. Then he joined
+VIRTUS, IC Design Centre of Excellence at NTU as a research
+scientist. He is currently an Associate Professor with the School
+of Information Science and Technology, ShanghaiTech
+University, Shanghai, China. His research interests primarily
+focus on high-performance and energyefficient integrated
+circuits and systems for vision and graphics processing. Dr. Lou
+is an Associate Editor of IEEE Transactions on Circuits and
+Systems II: Express Briefs and a TPC member of the Circuits
+and Systems Society.

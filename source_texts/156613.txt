@@ -1,0 +1,303 @@
+はじめに 前回の「画像生成の記事」で「3D Gaussian Splatting」による画像生成技術について解説しましたが、ご覧になりましたでしょうか。この「3D Gaussian Splatting」は学習済みの3D Gaussianモデルを用いて、任意の視点から実写に...
+
+写真から超リアルな3D空間をどうやって復元するか? 「3D Gaussian Splatting」学習の徹底解説 #Python - Qiita
+197
+Go to list of users who liked
+162
+Share on X(Twitter)
+Share on Facebook
+Add to Hatena Bookmark
+more_horiz
+Delete article
+close
+Deleted articles cannot be recovered.
+Draft of this article would be also deleted.
+Are you sure you want to delete this article?
+CancelDeletedelete
+info
+More than 1 year has passed since last update.
+@scomup(Liu Yang)
+inパナソニック アドバンストテクノロジー株式会社
+写真から超リアルな3D空間をどうやって復元するか? 「3D Gaussian Splatting」学習の徹底解説
+Python
+機械学習
+数学
+3D
+最適化
+197
+Last updated at 2024-07-26Posted at 2024-07-21
+はじめに
+前回の「画像生成の記事」で「3D Gaussian Splatting」による画像生成技術について解説しましたが、ご覧になりましたでしょうか。この「3D Gaussian Splatting」は学習済みの3D Gaussianモデルを用いて、任意の視点から実写に近い超リアルな画像を生成できるすごい技術です。画像の高品質だけでなく、明示的な3D表現によって環境を詳細に表現しており、多様な分野での応用が期待され、高い注目を集めています。
+ただし、前回の記事では、画像生成の入力となる3D Gaussianをどのように学習するのかについては触れませんでした。これは「3D Gaussian Splatting」技術の中核であり、最も難しい部分です。今回は、学習プロセスについても徹底的に解説しようと思います。
+この図は、3D Gaussianの学習する様子を示しています。後ほど詳しく説明します。
+「3D Gaussian Splatting」の学習
+「学習」と聞くと、多くの方はニューラルネットワークを使ったディープラーニングを思い浮かべるかもしれませんが、AIに詳しくない方には難しく感じられるかもしれません。しかし、「3D Gaussian Splatting」はニューラルネットワークを一切使用せず、まったく「ディープ」ではありません。この記事では、AIの専門知識がなくても理解できるように解説しようと思います。
+「3D Gaussian Splatting」の学習は、実際にカメラで撮影された真値画像とそのときのカメラの情報をペアにしたデータを用意し、生成された画像をできるだけ真値画像に近づけるように3D Gaussianのパラメータを調整するプロセスです。
+このプロセスは、真値画像とカメラ情報のペアが3D Gaussianを指導する教師のように見えるため、以下では、真値画像とカメラ情報のペアを教師データ、3D Gaussianの初期値を生徒データと呼びます。
+データの準備
+先ほど説明したように、「3D Gaussian Splatting」の学習プロセスには、3D Gaussianの初期値(生徒)および、真値画像とカメラ情報のペア（教師）という2種類のデータが必要です。
+これらの2種類のデータを以下のように図示します。
+生徒データ
+3D Gaussianの初期値 (3D Gaussians)
+${p_w}_i$: 3D Gaussianの中心点
+$q_i$: 3D Gaussianの回転
+$s_i$: 3D Gaussianのスケール
+$h_i$: 3D Gaussianの色情報(球面調和パラメータ)
+$\alpha_i$: 3D Gaussianの不透明度
+パラメータの詳細定義は、「画像生成の記事」を参考してください。
+教師データ
+カメラ情報 (Camera Information)
+$R_{cw}$: カメラの回転
+$t_{cw}$: カメラの並進
+$K$: カメラの内部パラメータ (i.e. $f_x, f_y, c_x, c_y$)
+カメラ情報とペアした真値画像 (Ground truth image)
+${\gamma}^{gt}_j$: 画像pixelのRGB値、jはpixelのインデックス
+次に、これらのデータをどのように準備するかについて説明します。真値画像の準備は比較的簡単で、実際にカメラで撮影された結果です。この撮影結果を用いて、カメラの姿勢（$R_{cw}$、$t_{cw}$）および一部の3D Gaussianパラメータ（${p_w}$、$h$）の初期値は、SfM（Structure from Motion）写真測量技術から算出されます。一方、他の3D Gaussianパラメータである回転$q$、スケール$s$、不透明度$\alpha$は定数で初期化されます。そのため、3D Gaussian（特に$q$、$s$、$\alpha$）の初期値には誤差が多く、図のように大まかな3D構造は分かりますが、品質は高くありません。
+以前、私が「SfM」技術のコアである「バンドル調整」について解説したことがあります。「SfM」の詳細について知りたい方は、この記事を参考にしてください。
+学習の目的(損失の最小化)
+「画像生成の記事」を簡単に復習すると、内容は以下の図でまとめられます。
+カメラ情報に基づいて、3D Gaussianを用いて5つの計算ステップを経て、2D画面上のすべてのピクセルの色を算出し、最終的な画像を生成します。このとき、データの流れを示す矢印の方向は、入力の3D Gaussianから出力の画像までですので、このプロセスを順伝播（Forward）と呼びます。
+学習する前は、3D Gaussianの誤差が多く、生成された画像の品質が悪く、真値の画像との差分が大きいです。
+ここで、我々が行いたいことは、最適化手法を用いて、環境を表現する「3D Gaussian」を少しずつ更新し、生成された画像と真値の画像との差分を最小化することです。
+$$
+\underset{p_w, q, s, h, \alpha}{\textrm{argmin}} \quad \mathcal{L} = \mathcal{L}(\gamma, \gamma_{gt}) \\
+\tag{1}
+$$
+$\gamma$と$\gamma_{gt}$はそれぞれ生成された画像と実際に撮影された真値の画像です。その差分の計算は損失関数 $\mathcal{L}$ として定義します。3D Gaussian Splattingの損失関数$\mathcal{L}$は、L1損失（$\mathcal{L}1$）とD-SSIM損失（$\mathcal{L}_{D-SSIM}$）の組み合わせにより計算します。
+$$
+\mathcal{L} = (1 - \lambda) \mathcal{L}1 + \lambda \mathcal{L}_{D-SSIM}
+\tag{2}
+$$
+この損失関数$\mathcal{L}$を最小化する問題は、典型的な「グラフ最適化問題」であり、以前も解説しました。私から見ると、3D Gaussian Splattingの学習は、一般的な機械学習というよりは、特徴点の再投影誤差を最小化するバンドル調整問題（グラフ最適化問題の一例）に最も近く、「3D Gaussian」のスプラット（投影）誤差を最小化する問題として理解できます。
+$$
+\newcommand{\diff}[2]{\frac{\partial #1}{\partial #2}} %diff
+$$
+最適化問題の解き方
+「グラフ最適化問題」の記事で説明したように、式(1)の損失関数を最小化するためには、この関数の各入力パラメータに対するヤコビ行列（偏微分行列）を計算する必要があります。
+得られたヤコビ行列は、各パラメータの変化に対する損失関数の変化率を示します。つまり、損失関数のヤコビ行列を計算することで、最適なパラメータを見つけるための更新方向が分かります。この情報を元に、勾配降下法などの最適化手法を使用して、繰り返し更新することで損失関数を最小化することができます。
+したがって、式(1)の入力パラメータは、$q$、$s$、$h$、$\alpha$、$p_w$の5種類があり、それらに関するヤコビ行列（$\diff{\mathcal{L}}{q}$、$\diff{\mathcal{L}}{s}$、$\diff{\mathcal{L}}{h}$、$\diff{\mathcal{L}}{\alpha}$、$\diff{\mathcal{L}}{p_{w}}$）をそれぞれ計算する必要があります。
+順伝播（Forward）の図から分かるように、画像の生成は5つの計算ステップから構成された複雑な合成関数であり、一気に全体の$\mathcal{L}$のヤコビ行列を計算することは難しいです。
+しかし、これらの5つの計算ステップをそれぞれ独立に考慮し、各インプットに対する偏微分の計算はそれほど難しくありません。下図では、順伝播の図の矢印をすべて逆にして、各計算ステップの偏微分をそれぞれ計算し、最終的に微分法の連鎖律を用いて、$\mathcal{L}$のヤコビ行列を合するプロセスを示します。
+この計算プロセスでは、損失の計算から各3D Gaussianのパラメータに逆伝播させ、損失を最小化する方向に3D Gaussianのパラメータを更新します。順伝播と比べて、データの流れが逆になるため、逆伝播（backward）とも呼ばれます。
+数式化すると、順伝播の5つの計算ステップを式(1)に代入して、以下のような合成関数となります。
+$$
+\begin{aligned}
+\mathcal{L} = \mathcal{L}(\gamma(\alpha, \sigma^{\prime}(\sigma(s, q), p_c(p_w)), u(p_c(p_w)), c(p_w, h))) \
+\end{aligned}
+\tag{3}
+$$
+式(3)の各パラメータ（$q$、$s$、$h$、$\alpha$、$p_w$）に関するヤコビ行列は、以下のように連鎖律を用いて計算できます。
+回転に関するヤコビ行列
+$$
+\begin{aligned}
+\diff{\mathcal{L}}{q_i} &= \sum_{j}{
+\diff{\mathcal{L}}{\gamma_j}
+\diff{\gamma_j}{\sigma_i^{\prime}}
+\diff{\sigma_i^{\prime}}{\sigma_i}}
+\diff{\sigma_i}{q_i}
+\end{aligned}
+\tag{4}
+$$
+スケールに関するヤコビ行列
+$$
+\begin{aligned}
+\diff{\mathcal{L}}{s_i} &= \sum_{j}{
+\diff{\mathcal{L}}{\gamma_j}
+\diff{\gamma_j}{\sigma_i^{\prime}}
+\diff{\sigma_i^{\prime}}{\sigma_i}}
+\diff{\sigma_i}{s_i}
+\end{aligned}
+\tag{5}
+$$
+球面調和パラメータに関するヤコビ行列
+$$
+\begin{aligned}
+\diff{\mathcal{L}}{h_i} &= \sum_{j}{
+\diff{\mathcal{L}}{\gamma_j}
+\diff{\gamma_j}{c_i}
+\diff{c_i}{h_i}}
+\end{aligned}
+\tag{6}
+$$
+不透明度に関するヤコビ行列
+$$
+\begin{aligned}
+\diff{\mathcal{L}}{\alpha_i} &= \sum_{j}{
+\diff{\mathcal{L}}{\gamma_j}
+\diff{\gamma_j}{\alpha_{ij}^{\prime}}
+\diff{\alpha_{ij}^{\prime}}{\alpha_i}}
+\end{aligned}
+\tag{7}
+$$
+中心点に関するヤコビ行列
+$$
+\begin{aligned}
+\diff{\mathcal{L}}{p_{w,i}}
+&= \sum_{j}{
+\diff{\mathcal{L}}{\gamma_j}
+\diff{\gamma_j}{\alpha_{ij}^{\prime}}
+\diff{\alpha_{ij}^{\prime}}{u_{i}}}
+\diff{u_{i}}{p_{c,i}}
+\diff{p_{c,i}}{p_{w,i}} \\
+&+ \sum_{j}{
+\diff{\mathcal{L}}{\gamma_j}
+\diff{\gamma_j}{c_i}
+\diff{c_i}{p_{w,i}}} \\
+&+ \sum_{j}{
+\diff{\mathcal{L}}{\gamma_j}
+\diff{\gamma_j}{\alpha_{ij}^{\prime}}
+\diff{\alpha_{ij}^{\prime}}{\sigma_i^{\prime}}
+\diff{\sigma_i^{\prime}}{p_{c,i}}
+\diff{p_{c,i}}{p_{w,i}}
+}
+\end{aligned}
+\tag{8}
+$$
+各計算ステップの偏微分
+本節では、式（4）～（7）に含まれる偏微分の詳細な計算について説明します。これらの偏微分は以下の6種類としてまとめます。
+B.1: $p_{c,i}$の計算式(F.1.1)の変数$p_{w,i}$、と$u_{i}$の計算式(F.1.2)の変数$p_{c,i}$に関する偏微分： $\diff{p_{c,i}}{p_{w,i}}$、$\diff{u_i}{p_{c,i}}$
+B.2: 3D共分散${\sigma_i}$の計算式(F.2)の変数$q_i$、$s_i$に関する偏微分: $\diff{ \sigma_i}{ q_{i}} $、$\diff{ \sigma_i}{ s_{i}} $
+B.3: 2D共分散${\sigma_i^{\prime}}$の計算式(F.3)の変数$\sigma_i$、$p_{c,i}$に関する偏微分：$\diff{ \sigma_i^{\prime}}{ \sigma_i} $、$\diff{ \sigma_i^{\prime}}{ p_{c,i}} $
+B.4: 色$c_i$の計算式(F.4)の変数$h_i$、$p_{w,i}$に関する偏微分 ：$\diff{ c_i}{ h_{i}} $、$\diff{ c_i}{ p_{w,i}} $
+B.5: ピクセル色の計算式(F.5)の変数$\alpha_i$、$c_i$、$u_i$、$\sigma^{\prime}_i$に関する偏微分：$\diff{\gamma_j}{\alpha_i} $、$\diff{\gamma_j}{c_i} $、$\diff{\gamma_j}{u_i} $、$\diff{\gamma_j}{\sigma^{\prime}_i} $
+B.6: 式(1)の損失関数の変数$\gamma_j$に関する偏微分：$\diff{ \mathcal{L}}{\gamma_j}$
+(B.6) $\diff{\mathcal{L}}{\gamma_j}$ の微分計算については、PyTorch の自動微分を使用できるため、本文では説明を省略します。（B.1）～（B.5）は、「画像生成の記事」で言及した式（F.1）～（F.5）の各変数に対する微分となります。この中で、（F.1）～（F.4）の微分計算は、多変数関数の微分法を用いて計算できます。それほど難しくないため、本文では省略し、詳細について知りたい方は、Backward.pdfを参考してください。
+ピクセル色の計算（F.5）は、各ピクセルに投影されたすべての3D Gaussianを考慮し、3D Gaussianの深度順に合成します。したがって、これらの3D Gaussianに関する偏微分をそれぞれ算出する必要があります。そのため、(B.5) の計算が最も難しいかつ面白い部分であり、以下で詳細に説明します。
+ピクセル色計算の偏微分
+ピクセル色の計算式を「画像生成の記事」の式 (F.5) から直接引用します。$j$ 番目のピクセルの色 $\gamma_j$ は、このピクセルに投影されたすべての3D Gasussianの合成によって決まります。これらの3D Gasussianは深度順に並んでおり、Nはこのピクセルに投影された3D Gasussianの数を表し、$i$ が小さいほどカメラとの距離が近いことを意味します。
+$$
+\gamma_j = \sum_{i \in N} \alpha_{ij}^{\prime} c_i \tau_{ij}
+$$
+$$
+\tau_{ij} = \prod_{k=1}^{i-1} (1 - \alpha_{kj}^{\prime})
+$$
+まず、$\alpha^{\prime}$ に対する微分を考えましょう。$\alpha^{\prime}$ は $\tau$ にも含まれているため、直接微分するのは難しいです。したがって、上記の式を次のような再帰処理に書き直します。
+$$
+\begin{aligned}
+&\gamma_{N+1,j} = 0 \\
+&\gamma_{N, j} = \alpha_{N,j}^{\prime} c_{N,j} + (1 - \alpha_{N,j}^{\prime})\gamma_{N+1,j} \\
+&... \\
+&\gamma_{2,j} = \alpha_{2,j}^{\prime} c_2 + (1 - \alpha_{2,j}^{\prime}) \gamma_{3,j} \\
+&\gamma_{1,j} = \alpha_{1,j}^{\prime} c_1 + (1 - \alpha_{1,j}^{\prime}) \gamma_{2,j} \\
+&\gamma_{j} = \gamma_{1,j}
+\end{aligned}
+$$
+$\gamma_{i,j}$ は $i$ から N 番目のガウシアンのみを考慮したときの、ピクセル $j$ の色を示します。
+このように書くと、$\gamma_{i,j}$の変数 $\alpha_{i,j}^{\prime}$に対する微分は非常にシンプルな形になります。
+$$
+\diff{\gamma_{i,j}}{\alpha_{i,j}^{\prime}} = c_i - \gamma_{i+1,j}
+$$
+$\gamma_j$ の$\gamma_{i,j} $に対する微分も再帰的に計算できます。
+$$
+\diff{\gamma_j}{\gamma_{i,j}} = \prod_{k=1}^{i-1} (1 - \alpha_{kj}^{\prime}) = \tau_{ij}
+$$
+連鎖率で合成すると、$\gamma_j$ の$\alpha^{\prime}_{i,j}$に対する微分はのように算出できます。
+$$
+\diff{\gamma_j}{\alpha_{i,j}^{\prime}} = \diff{\gamma_j}{\gamma_{i,j}}\diff{\gamma_{i,j}}{\alpha_{i,j}^{\prime}}= \tau_{i,j}(c_i - \gamma_{i+1,j})
+\tag{B.5a}
+$$
+同様に、$\gamma_j$ の $c_{i}$ に対する偏導関数は次のように計算できます。
+$$
+\diff{\gamma_j}{c_i} = \tau_{i,j}\alpha_{i,j}^{\prime}
+\tag{B.5b}
+$$
+次は、$\alpha_{ij}^{\prime}$ の微分を考えましょう。「画像生成の記事」の式(F.5.1)の引用ですが、$\alpha_{ij}^{\prime}$ は以下のように計算できます。
+$$
+\alpha_{ij}^{\prime}(\alpha_i, \sigma_i^{\prime}, u_{i}) =
+\exp\left(-0.5 (u_{i}-x_{j}) \Sigma_i^{\prime-1} (u_{i}-x_{j})^T\right) \alpha_i
+$$
+$\exp(...)$ を $g$ と定義し、(F.5.1) を次のように書き換えます。
+$$
+\alpha_{ij}^{\prime}(\alpha_i, \sigma_i^{\prime}, u_{i}) =
+g \alpha_i
+$$
+ここで:
+$$
+\begin{aligned}
+g = g(u_i, \sigma_i^{\prime}) &\equiv \exp\left(-0.5 (u_{i}-x_{j}) \Sigma_i^{\prime-1} (u_{i}-x_{j})^T\right) \\
+&= \exp(- 0.5 \omega_0^{\prime} d_0^2 - 0.5 \omega_2^{\prime} d_1^2 - \omega_1^{\prime} d_0d_1)
+\end{aligned}
+$$
+$\omega_0^{\prime}$、$\omega_1^{\prime}$、$\omega_2^{\prime}$は2D共分散行列の逆行列の上三角要素であり、$d_0$、$d_1$ は $u_{i}-x_{j}$ の2つの要素です。
+したがって、$\alpha^\prime_{ij}$ の $\alpha$ に対する微分は次のように計算できます。
+$$
+\diff{\alpha^{\prime}_{ij}}{\alpha_i} = g
+\tag{B.5.1a}
+$$
+$g$ は２つの変数 $u_i$ と $\sigma_i$ を持つため、$\alpha^{\prime}_{ij}$ の $u_i$ と $\sigma_i$ に関する微分は次のようにで書くことができます。
+$$
+\diff{\alpha^{\prime}_{ij}}{u_i} = a \diff{g}{u_i}
+\tag{B.5.2b}
+$$
+$$
+\diff{\alpha^{\prime}_{ij}}{\sigma_i^{\prime}} = a \diff{g}{\omega_i^{\prime}}\diff{\omega_i^{\prime}}{\sigma_i^{\prime}}
+\tag{B.5.2c}
+$$
+ここで:
+$$
+\diff{g}{\omega_i^{\prime}} =
+\begin{bmatrix}
+-0.5d_0^2\
+-d_0d_1\
+-0.5d_1^2\
+\end{bmatrix}g
+$$
+$$
+\diff{g}{u_i} =
+\begin{bmatrix}
+-\omega_0^{\prime} d_0 -\omega_1^{\prime} d_1 \
+-\omega_2^{\prime} d_1 -\omega_1^{\prime} d_0\
+\end{bmatrix}g
+$$
+$\omega_i^{\prime}$は$\sigma_i^{\prime}$の逆であり、$\omega_i^{\prime}$ の $\sigma_i^{\prime}$ に対する微分は以下のように示します。
+$$
+\diff{\omega_i^{\prime}}{\sigma_i^{\prime}} =
+\begin{bmatrix}
+-c^2\det^{-2} & 2bc\det^{-2} & -ac\det^{-2} + \det^{-1} \\
+bc\det^{-2} & -2b^2 \det^{-2} - \det^{-1} & ab \det^{-2} \\
+-ac\det^{-2} + \det^{-1} & 2ab \det^{-2} & -a^2 \det^{-2} \\
+\end{bmatrix}
+\tag{B.5.3}
+$$
+a、b、cは2D共分散行列の上三角要素であり、$\det$ は2D共分散行列の行列式です。
+以上より、ピクセル色計算式の偏微分を全部導出しました。
+デモ
+これで、損失関数のすべての変数に対するヤコビ行列を計算できるようになりました。このヤコビ行列を用いて、勾配降下法などの最適化手法で3D Guassianを更新できます。
+以下はこの更新を示すデモです。繰り返し更新することで損失関数が少しずつ小さくなり、生成された画像が徐々に真値に近づきます。
+学習後、3D Guassianを任意の視点にあわせて投影し、任意の視点の画像を生成することができるようになりました。
+それだけではなく、3D Gaussianたちは、明示的に環境の3D構造を表現しています。そのまま、3Dの空間構造を意味しています。以下の図は3D Gaussianを不透明の楕円体として描画しています。機関車の物理構造がわかりやすく見えていますね。
+Gaussianの適応密度制御（Adaptive Control of Gaussians）
+上記の最適化だけで、かなりキレイな3D Gaussianモデルを生成できますが、特に細部の表現において完璧な結果を得るために、論文では適応密度制御が紹介されていました。
+論文の作者は、先ほど算出した$\diff{\mathcal{L}}{u}$が大きくなると、幾何学的に誤差が大きい部分であることを示すと主張しています。私も$\diff{\mathcal{L}}{u}$の値を可視化して確認しました。以下の図では、色が赤になるほど、$\diff{\mathcal{L}}{u}$が大きいことを示しています。確かに、細かい部分ほど赤くなっていることがわかりますね（白枠で囲んだ部分）。
+「3D Gaussian Splatting」は、一定の最適化周期ごとに適応密度制御を実施します。具体的には、$\diff{\mathcal{L}}{u}$が大きい3D Gaussianに対して、コピーまたは分裂を行います。サイズが小さい3D Gaussianであれば、まったく同じものをコピーし、サイズが大きい3D Gaussianであれば、2つに分裂させます。このような密度制御を行うことで、幾何学的に誤差が大きい部分に対して3D Gaussianの密度が少しずつ高くなり、さらに最適化を進めることで、細部の表現がどんどん完璧に近づいていきます。
+結果的に、白枠で囲んだ部分でも、実物とかなり近づくようになりました。
+まとめ
+本文では、少数の写真から3D環境を再構築できる「3D Gaussian Splatting」学習方法について解説しました。生成された「Gaussian」モデルは任意の視点から超リアルな画像を生成するだけでなく、3D環境そのものを明示的に表現しており、多様な分野での応用が期待できます。
+私にとって、特に印象深かった点では、この学習プロセスが近年流行しているニューラルネットワーク学習ではなく、私の以前の記事にずっと解説してきた最適化理論を用いた解析的な手法であることです。AIのような「ブラックボックス」は一切ありません。数学的にも非常にキレイです。やはり、このような重要な基礎理論は今の時代でも非常に有用であり、正しく理解し応用すれば、素晴らしい成果を十分に出すことができます。
+なお、ちょっと宣伝ですが、深く理解したい方は、最適化理論に関する以下の記事もぜひしっかり勉強・復習しましょう。
+グラフ最適化
+バンドル調整
+リー群を用いた最適化
+「3D Gaussian Splatting」の徹底理解するため、本文の内容を含む3D Gaussian Splattingの非公式実装をGitHubで公開しています。本家の実装よりも使いやすく、読みやすく、理解しやすいようにするため、プロジェクト名をEasyGaussianSplattingと名付けました。
+EasyGaussianSplattingを使い、自分で撮った画像で試してみませんか？
+197
+Go to list of users who liked
+162
+comment0
+Go to list of comments
+Register as a new user and use Qiita more conveniently
+You get articles that match your needs
+You can efficiently read back useful information
+You can use dark theme
+What you can do with signing up
+Sign upLogin
+197
+Go to list of users who liked
+162
+more_horiz
+Delete article
+close
+Deleted articles cannot be recovered.
+Draft of this article would be also deleted.
+Are you sure you want to delete this article?
+CancelDeletedelete

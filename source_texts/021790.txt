@@ -1,0 +1,2745 @@
+PCGS: Progressive Compression of 3D Gaussian Splatting
+Qianyi Wu 2†
+Weiyao Lin 1†
+Mengyao Li 3, 2 *
+Mehrtash Harandi 2
+Jianfei Cai 2
+1
+2
+3
+Shanghai Jiao Tong University
+Monash University
+Shanghai University
+Yihang Chen 1, 2 *
+arXiv:2503.08511v1 [cs.CV] 11 Mar 2025
+{yhchen.ee, wylin}@sjtu.edu.cn, sdlmy@shu.edu.cn
+{qianyi.wu, mehrtash.harandi, jianfei.cai}@monash.edu
+Abstract
+3D Gaussian Splatting (3DGS) achieves impressive rendering fidelity and speed for novel view synthesis. However,
+its substantial data size poses a significant challenge for
+practical applications. While many compression techniques
+have been proposed, they fail to efficiently utilize existing
+bitstreams in on-demand applications due to their lack of
+progressivity, leading to a waste of resource. To address
+this issue, we propose PCGS (Progressive Compression of
+3D Gaussian Splatting), which adaptively controls both the
+quantity and quality of Gaussians (or anchors) to enable
+effective progressivity for on-demand applications. Specifically, for quantity, we introduce a progressive masking
+strategy that incrementally incorporates new anchors while
+refining existing ones to enhance fidelity. For quality, we
+propose a progressive quantization approach that gradually
+reduces quantization step sizes to achieve finer modeling
+of Gaussian attributes. Furthermore, to compact the
+incremental bitstreams, we leverage existing quantization
+results to refine probability prediction, improving entropy
+coding efficiency across progressive levels. Overall, PCGS
+achieves progressivity while maintaining compression performance comparable to SoTA non-progressive methods.
+Code available at: github.com/YihangChen-ee/PCGS.
+1. Introduction
+In the field of novel view synthesis, 3D Gaussian Splatting
+(3DGS) [20] has emerged as a leading technology due to
+its photo-realistic rendering fidelity and real-time rendering
+speed. By explicitly defining Gaussians with color and
+geometric attributes, 3DGS provides a flexible and efficient
+3D scene representation. However, the large number of
+Gaussians results in excessively large data sizes, making
+transmission and storage challenging [2, 3, 39]. To address
+this, various approaches have been proposed to compress
+* Contribute equally.
+† Corresponding authors.
+Figure 1. Comparison of existing approaches (upper) and the
+proposed progressive compression (lower). Existing approaches
+generate multiple independent bitstreams targeting different rates
+and fidelity through multiple trainings, while a progressive compression approach (with only one training) can continuously improve the fidelity by incrementally adding bitstreams, which is
+resource-saving in on-demand applications.
+3DGS [2, 3, 13, 15, 28, 42, 46]. Despite these advancements, existing methods exhibit two key limitations: (1)
+Single-rate constraint: Each bitstream from these compression models is only for a fixed rate/data size; and (2) Lack
+of progressivity: Although these models can be retrained
+to produce bitstreams for different rate targets, the resulting
+bitstreams are independent and non-reusable, as illustrated
+in the upper part of Fig. 1.
+These limitations become more pronounced in ondemand applications. For instance, as transmission bandwidth increases, bitstreams with higher rate budgets can
+be transmitted for better rendering fidelity. However, due
+to their single-rate and non-progressive nature of existing
+3DGS compression methods, generating a new bitstream
+requires retraining the model, where existing bitstreams
+cannot be reused, leading to inefficient resource utilization.
+These inefficiencies are further exacerbated in large-scale
+3DGS scenes [5], which often exceed 20 megabytes (MB)
+even after compression. To overcome these challenges, pro-
+gressive 3DGS compression presents a promising direction.
+The key idea is that existing bitstreams that encode basequality 3DGS can be refined and augmented with additional
+bitstreams to achieve higher fidelity, as illustrated in the
+lower part of Fig. 1.
+Among existing 3DGS compression approaches, only a
+few studies have explored progressive 3DGS representations [11, 12, 33, 47]. Specifically, LapisGS [33] constructs
+a layered structure of cumulative Gaussians to achieve progressively higher rendering resolutions, while GoDe [12]
+organizes Gaussians into hierarchical layers to enable progressive compression. However, they primarily focus on
+increasing the quantity of Gaussians at each level while
+overlooking improving their quality. Moreover, they fail
+to exploit the inherent context across levels, which could
+be leveraged to reuse information from previous levels for
+enhanced compression efficiency. On the other hand, although context modeling has demonstrated its effectiveness
+in existing 3DGS compression methods [8, 10, 36, 43],
+these approaches do not support progressive compression.
+For instance, HAC++ [8, 10] learns a sparse hash grid
+to capture contextual relationships among anchors, which
+are introduced in Scaffold-GS [26] to predict nearby 3D
+Gaussians. By leveraging the context, HAC++ predicts the
+quantization step and the distributions of anchor attributes
+to facilitate entropy coding [4], significantly reducing the
+bitstream size. Similarly, CAT-3DGS [43] employs multiscale triplanes to model correlations among anchors. Despite the advancements, these methods remain single-rate,
+requiring separate trainings and generating independent
+bitstreams for different rate-distortion (R-D) trade-offs.
+To address this, in this paper, we propose PCGS, a
+novel approach for the Progressive Compression of 3D
+Gaussian Splatting. The core idea behind PCGS is to
+jointly and adaptively control both the quantity and quality
+of Gaussians (or anchors), enabling a progressive bitstream
+that incrementally enhances fidelity. Specifically, to regulate the quantity of anchors, we introduce a monotonically
+non-decreasing mask learning strategy, which progressively
+decodes additional anchors and Gaussians, which are seamlessly integrated with existing ones at the decoder side to
+improve fidelity. For anchor quality, we progressively refine
+existing anchors by employing trit-plane division [19],
+which provides more precise quantization results. Building
+upon this refinement, we further introduce a quantization
+context model that exploits correlations among quantized
+values across progressive levels. It leverages a trinomial
+distribution to more accurately estimate the probability of
+quantized values, thereby improving entropy coding efficiency and reducing the incremental bitstream size.
+Our main contributions are summarized as follows.
+• We propose PCGS, a novel progressive 3DGS compression framework that jointly and progressively enhances
+anchor quantity and quality. This enables diverse ondemand applications, significantly expanding the applicability of 3DGS.
+• We introduce a progressive masking strategy that incrementally decodes additional anchors and Gaussians
+and integrates them with existing ones to enhance fidelity. Furthermore, we propose a progressive quantization mechanism that leverages quantization context to
+refine anchor quality and improve probability estimation.
+• Extensive experiments across multiple datasets demonstrate that PCGS achieves effective progressivity while
+maintaining compression performance comparable to
+SoTA single-rate compression methods.
+2. Related Work
+3D Gaussian Splatting. 3DGS represents a scene using a collection of 3D Gaussians [20], each defined by
+learnable shape and appearance attributes. Leveraging
+the rasterization technique [48], these 3D Gaussians can
+be quickly trained and rendered into 2D images given a
+viewpoint. While achieving real-time rendering speed and
+high fidelity, 3DGS typically demands significant storage
+[3] and transmission bandwidth due to the large number of
+Gaussians and their associated attributes.
+3DGS Compression. Many efforts [3] have been made to
+reduce the data size of 3DGS while maintaining rendering fidelity. Some methods focus on reducing Gaussians
+parameters or compromising their precisions. Pruning
+techniques have been extensively explored, typically eliminating unimportant Gaussians through trainable masks [22,
+23], gradient-informed thresholds [1, 2], view-dependent
+metrics [13], and other importance-evaluation mechanisms
+[16, 46]. Additionally, [42] and [14] propose to combine
+pruning with structural relations. Instead of pruning entire
+Gaussian, [28, 31] partially prunes Gaussian attributes,
+such as Sphere Harmonics (SH) coefficients. Additionally,
+vector quantization [13, 22, 29, 30, 40] groups similar Gaussians and represents them with a shared approximation.
+[35] employs entropy-constrained vector quantization with
+codebooks to quantize covariance and color parameters,
+achieving a more compact representation.
+Other methods [8, 10, 26, 34, 36, 38, 43] aim to exploit
+spatial structure correlations to reduce the size of 3DGS.
+[38] predicts attributes of unstructured 3D locations using
+a multi-level grid for compact 3D modeling. Scaffold-GS
+[26] employs anchors to cluster region-near Gaussians and
+predicts the attributes of Gaussians within each cluster
+using an MLP. Building on Scaffold-GS, HAC [8] and
+HAC++ [10] introduce hash-grid to explore the mutual
+context information between the attributes of anchors and
+hash features, facilitating entropy coding for a highly efficient representation. Different from HAC, CAT-3DGS
+[43] employs multi-scale triplanes to capture spatial cor-
+relations. HEMGS [24] proposes a hybrid entropy model
+for 3DGS entropy coding. ContextGS [36] and CompGS
+[25] reduce redundancy among anchors/Gaussians through
+context-aware designs. GaussianForest [44] constructs hybrid 3D Gaussians hierarchically, where implicit attributes
+are shared among sibling Gaussians to save storage. Additionally, optimization-free methods [9, 41] are also explored
+to compress existing 3DGS rapidly in a single feed-forward
+pass. Overall, although these methods have achieved
+impressive R-D performance, they require multiple trainings to achieve different compression levels, incapable
+of producing progressive bitstreams, which are especially
+crucial in practice scenarios involving diverse bandwidth
+and device resource constraints.
+Progressive 3DGS. To accommodate on-demand applications, progressive 3DGS has been explored [11, 18, 33, 47].
+These approaches selectively transmit only the necessary
+Gaussians based on rendering views or fluctuating network
+conditions. However, they do not consider compression.
+Given the large size of 3DGS, even partial transmission
+incurs non-negligible bit consumption. To address this,
+GoDe [12] integrates compression into progressive 3DGS
+by employing a learned mask to define Level-of-Detail
+(LoD) representations and compressing them using codebooks. However, it does not refine Gaussians from shallower levels as they propagate to deeper levels, resulting in
+a quality mismatch when fine details are required. In this
+work, we propose PCGS, a method that jointly optimizes
+both the quantity and the quality of anchors. This ensures
+that anchors decoded at shallower levels are progressively
+refined to meet the fidelity requirements of deeper levels,
+enabling efficient and progressive 3DGS compression.
+3. Method
+3.1. Preliminaries
+Scaffold-GS. Built on 3DGS [20], Scaffold-GS [26] introduces anchors to cluster nearby Gaussians and neural
+predicts their attributes from anchors. Specifically, each
+anchor consists
+a location xa ∈ R3 and its associated at a of D
+a
+tributions f ∈R , l ∈ R6 , o ∈ R3×K , which represent
+anchor feature, scaling and learnable offsets, respectively.
+Scaffold-GS employs MLPs along with scaling-based regularization to deduce Gaussian attributes for rendering. Each
+Gaussian is formulated as:
+
+
+1
+G(x) = exp − (x − xg )⊤ Σ−1 (x − xg ) , (1)
+2
+where x ∈ R3 is a random 3D location, xg ∈ R3 is
+the Gaussian location (mean), and Σ = RSS ⊤ R⊤ is the
+covariance matrix with S ∈ R3×3 and R ∈ R3×3 being
+scaling and rotation matrices, respectively. Using rasterization [48], Gaussians can be splatted to 2D and collectively
+render the pixel value C ∈ R3 using α-composed blending:
+C=
+X
+ci αi
+i
+i−1
+Y
+(1 − αj )
+(2)
+j=1
+where α ∈ R denotes the opacity of each Gaussian after 2D
+projection and c ∈ R3 is the view-dependent color [20].
+HAC++. Based on Scaffold-GS, HAC++ [8, 10] leverages
+a binary hash grid H to capture correlations among anchors
+xa . The hash feature f h is obtained via interpolation
+and used to predict both the quantization step and the
+Gaussian distribution parameters of anchor attributes for
+context-based entropy modeling. Additionally, HAC++
+employs learnable masks to prune ineffective Gaussians and
+anchors, significantly enhancing the efficiency of 3DGS
+compression. It achieves SoTA single-rate compression
+performance. In this work, we improve HAC++ by introducing progressive compression, further expanding its
+applicability to varying bandwidth and storage constraints.
+3.2. Overview of PCGS
+The framework of PCGS is illustrated in Fig. 2. It enables the progressive compression of 3DGS by controlling
+anchors from both quantity and quality perspectives. For
+quantity, we introduce a rate-aware progressive masking
+strategy, as depicted in the lower-left part of Fig. 2. Specifically, at each progressive level, each anchor learns both
+an anchor-level mask mas and a Gaussian-level mask mgs ,
+which are derived from the combination of a level-specific
+m
+.
+masking feature fsm and a base masking feature fbase
+Both masking features are explicitly defined as learnable
+parameters. At each level s, according to the i-th anchor
+mask m[i]as , it will either (1) remain undecoded when
+m[i]as = 0, (2) be newly decoded when m[i]as transits from
+0 to 1 at this level, or (3) be refined if it was previously
+decoded at an earlier level, as illustrated in the right part of
+Fig. 2. To ensure a smooth progression, the mask values
+are carefully designed to be monotonically non-decreasing
+across progressive levels (detailed in Sec. 3.3). As the
+compression levels deepen, more anchors and Gaussians
+are incorporated, thus improving rendering fidelity. For
+quality, we propose a progressive quantization strategy
+that continuously refines anchor values as levels progress
+deeper, enhancing fidelity (detailed in Sec. 3.4). As shown
+in the right part of Fig. 2, when an anchor is first decoded at a level, its attribute is quantized using Round.
+At subsequent levels, the previously quantized value is
+refined through trit-plane quantization [19]. For entropy
+modeling, we use a Gaussian distribution when an anchor
+is first decoded, as it undergoes Round quantization. For
+subsequent levels, we adopt a trinomial distribution, which
+aligns with trit-plane quantization to effectively leverage
+level-wise context. By integrating these two strategies,
+𝒙
+"
+𝑞[𝑖! ]!
+𝜆#
+𝒎[𝑖! ]!# = 1
+…
+MLP
+%𝒇[𝑖! ]!
+𝒇
+Context
+Context
+!
+Hash grid
+(binary) ℋ
+level: 𝑠=1
+T𝐫𝐢𝐭
+"
+𝒎[𝑖! ]!
+𝒎[𝑖% ]#% = 1
+𝒎[𝑖$ ]#% = 0
+level: 𝑠=2
+Round
+𝒇%[𝑖! ]"
+𝑠
+𝒇$
+#
+$
+𝒇%"&'
+𝒎[𝑖$ ]!# = 0
+Round
+Q
+Interp.
+𝒎[𝑖% ]!# = 0
+Rate-aware
+ProMasking
+𝒎"#
+Context
+(
+𝒎#
+T𝐫𝐢𝐭
+𝒇%[𝑖! ]#
+𝒇%[𝑖" ]"
+T𝐫𝐢𝐭
+𝒇%[𝑖" ]#
+"
+𝒎[𝑖! ]%
+"
+𝒎[𝑖% ]%
+𝒎[𝑖$ ]#$ = 1
+level: 𝑠=3
+Round
+𝒇%[𝑖# ]#
+"
+"
+"
+𝒎[𝑖! ]$ 𝒎[𝑖% ]$ 𝒎[𝑖$ ]$
+Figure 2. Overview of the proposed PCGS, which controls anchors in both quantity and quality in a progressive way, i.e., progressively
+decoding new anchors via masking control and refining existing anchors with finer quantization steps. Left: Given anchor xa , its position is
+interpolated within the binary hash grid to obtain the hash feature f h . A rate-aware MLP, conditioned on the level information λs , utilizes
+f h to determine the quantization steps and provide context information for different progressivity levels. Additionally, the anchor and
+m
+Gaussian masks mas and mgs are obtained via the rate-aware progressive masking strategy from learnable features fsm and fbase
+(bottom).
+Right: At each level s, according to its mask m[i]as , the i-th anchor either remains undecoded when m[i]as = 0, be newly decoded when
+m[i]as transits from 0 to 1, or otherwise be refined.
+each progressive level improves fidelity by both introducing
+new anchors and enhancing the precision of existing ones,
+striking an effective balance for progressive compression.
+For simplicity, we omit the anchor index [i] in the following
+sections. Unless otherwise specified, all operations are
+performed per anchor.
+3.3. Progressive Masking for Quantity Increase
+Masking strategies have proven effective in 3DGS compression by explicitly reducing the number of parameters
+(e.g., anchors or Gaussians) [10, 22]. By adjusting the
+masking ratio, a balance between size and fidelity can be
+achieved. To enable progressive compression, we ensure
+that the valid ratio of anchors (or Gaussians) is monotonically non-decreasing as the levels progress. This allows
+newly decoded anchors to be integrated with existing ones,
+thereby improving rendering fidelity.
+However, due to the unstructured nature of anchors,
+manually defining their importance and consequently determining the order of progressive masking are challenging.
+To address this issue, we introduce learnable masks that
+adaptively determine the progressive level s at which an
+anchor (or Gaussian) is initially decoded. Specifically, the
+masks mgs ∈ RK are first defined at the Gaussian level as
+m
+mgs = 1[Sig(fbase
++
+s
+X
+Sfp(flm )) > ϵm ],
+(3)
+l=1
+where Sig and Sfp denote the sigmoid and softplus activation functions, respectively, and ϵm is a constant threshold.
+m
+Here, fbase
+∈ RK and fsm ∈ RK represent the base
+masking feature and the masking feature at level s, which
+are explicitly defined as learnable parameters. The gradient
+of mgs is backpropagated using STE [6, 22]. Notably,
+in (3), we apply a softplus activation to fsm to ensure a
+positive output. By summing it with outputs from previous
+levels, we enforce a monotonically non-decreasing mask
+with respect to levels s. This guarantees once a Gaussian
+is decoded at any level s (i.e., mgs = 1), it remains valid in
+all subsequent levels, ensuring reusability.
+Building on the Gaussian-level mask, we further derive
+an anchor-level mask mas ∈ R by determining whether
+at least one valid Gaussian exists within an anchor, following the approach in [10]. Notably, mas inherits the
+monotonically non-decreasing property of mgs . This monotonicity plays a crucial role in progressive compression.
+On one hand, it encourages anchors from previous levels
+to collaborate with newly introduced anchors at the current level. On the other hand, it is fundamental to the
+progressive quantization strategy (detailed in Subsec. 3.4),
+as it guarantees that an anchor undergoing refinement can
+always access its coarse value from the previous level for a
+finer quantization and context modeling. By comparing the
+masks across levels, we can determine whether an anchor
+is newly decoded or refined from an existing one, which is
+formulated as:
+∆mas = mas − mas−1
+(4)
+where ma0 is set to 0. If ∆mas = 1, then the corresponding
+anchor is newly decoded at level s; otherwise, it is either
+previously decoded (mas−1 = 1) or invalid (mas = 0). Note
+that ∆mgs can be calculated in the same way. However,
+merely increasing the number of anchors or Gaussians is
+insufficient, as the anchors decoded in shallower levels
+may lack the finer details required for the improved model
+𝑞!
+𝑞#
+round
+"!
+𝒇
+round
+%𝒇"
+trit
+trit
+""
+𝒇
+trit
+the value range:
+𝒇
+𝒇
+"#
+𝒇
+(a) Progressive quantization
+𝑠=1
+𝑞" round
+%𝒇#
+%𝒇#
+trit
+trit
+%𝒇!
+%𝒇!
+%𝒇!
+∆𝒎$# = 1
+∆𝒎$! = 0
+e.g., ∆𝒎"$ = 0
+p (fˆs ) =
+G
+𝑠=2
+𝑞! round
+𝑠=3
+(b) Potential quantization paths
+Figure 3. Progressive quantization. (a): Illustration of progressive quantization. The real value f is initially quantized at
+level s = 1 using Round with the step size q1 . It is then
+progressively refined using trit-plane quantization at levels s = 2,
+and 3, gradually approaching f . (b): Three possible paths to reach
+the quantized value fˆ3 at the current level (s = 3) in training with
+∆ma2 = 1 indicating that the middle path is selected by mask
+weighting.
+fidelity at deeper levels. To address this, we further
+refine the quantization accuracy of existing anchors through
+progressive quantization.
+3.4. Progressive Quantization and Context for
+Quality Enhancement
+A finer quantization of anchor attributes maintains precision, enhancing fidelity, but also increases storage size due
+to the complexity of predicting fine-grained values. In our
+approach, a value is first decoded at an initial level and
+then progressively refined at subsequent levels. Upon initial
+decoding, the value is quantized using Round, with its
+entropy modeled by a Gaussian distribution. In later levels,
+the value undergoes refinement by leveraging strong prior
+information from the previously quantized value. To effectively exploit this prior, we adopt trit-plane quantization and
+model entropy using a trinomial distribution, as shown in
+Fig. 3 (a).
+For an anchor at its initial decoding, there is no prior
+quantization information available. Thus, the value f is
+quantized using Round, i.e. fˆs = Round(f , qs ), where
+the quantization step qs is determined by an MLP from the
+hash feature f h ,
+
+qs , µs , σs = MLP f h , λs
+(5)
+where f h is the hash feature obtained by querying the
+anchor location xa in the hash grid H. The parameter λs
+controls the R-D loss trade-off (detailed in (10)). µs and
+σs represent the estimated Gaussian distribution parameters
+for entropy modeling. Since it is at its initial decoding,
+the quantized values lack prior information and can be
+estimated as any value within the real number space. Thus,
+we model the probability of the quantized result using a
+Gaussian distribution ϕ, which imposes no preconditions on
+Z fˆs + q2s
+fˆs − q2s
+ϕ (x | µs , σs ) dx,
+(6)
+where fˆs is obtained by adding noise to f during training
+to preserve gradient flow, and Round during testing [10].
+For an anchor that has been previously decoded, it is
+refined at the current level. Given the previously decoded
+value fˆs−1 and its quantization step size qs−1 , the real value
+qs−1
+ˆ
+f is known to lie within range of [fˆs−1 − qs−1
+2 , fs−1 + 2 ).
+To fully utilize this prior, we adopt trit-plane quantization [19], as illustrated in Fig. 3 (a). Specifically, trit-plane
+quantization refines the value by subdividing the range into
+three equal sub-intervals with midpoints: {fˆsc }c=1,2,3 =
+qs−1
+ˆ
+ˆ
+{fˆs−1 − qs−1
+3 , fs−1 , fs−1 + 3 } (i.e., the three triangles
+in the second row in Fig. 3 (a)). The quantized value fˆs is
+assigned to the midpoint closest to f :
+fˆs = fˆsu ,
+where u = arg min |f − fˆsc |.
+c
+(7)
+If f lies exactly at a boundary between two sub-intervals,
+the value on the right is chosen. The quantization step is
+then updated as qs = qs−1
+for recursive use of tirt-plane
+3
+quantization in subsequent levels.
+For entropy modeling, we employ a trinomial distribution, which aligns naturally with the three candidate values
+in trit-plane quantization. Given the strong prior from level
+s − 1, we predict the probability via:
+pT (fˆs ) = psu ,
+{psc }c=1,2,3 = MLP(fˆs−1 , f h , λs ).
+(8)
+Note that although anchor values in subsequent levels could
+also be quantized using Round and their entropy modeled
+by a Gaussian distribution, this approach does not fully
+exploit the prior information from previous levels, leading
+to suboptimal performance. Please refer to ablation study
+for evaluations.
+An anchor may be initially decoded at different levels.
+Trit-plane quantization is a causal process that relies on the
+anchor’s value at its first decoded level. However, due to
+the progressive masking strategy, during training an anchor
+may be initially decoded at different levels with varying
+quantization steps, potentially leading to different trit-plane
+quantized results. This is illustrated in Fig. 3 (b) as a lower
+triangular matrix, where different columns represent the
+anchor is first decoded at a different level (i.e., s = 1, 2,
+or 3) and it leads to three different fˆ3 in training.
+This is not a problem during testing, where the anchor’s
+initial decoding level can be directly obtained using the
+trained ∆ma , and hence the desired fˆs can be decoded
+progressively. However, during training, since ∆ma is still
+learnable, all possible fˆs must be enumerated and weighted
+by the mask ∆ma to enable the joint optimization of both
+the mask and the quantized value. Here, enumerating all
+possible quantization values fˆs is complex and increases
+the learning difficulty. To address this issue, for the
+quantization step when an anchor is firstly decoded (i.e.,
+the Round steps at the diagonal of Fig. 3 (b)), we define it
+q1
+. Given the candidate values in the trit-plane
+as qs = 3s−1
+qs−1
+ˆ
+ˆ
+as {fˆsc }c=1,2,3 = {fˆs−1 − qs−1
+3 , fs−1 , fs−1 +
+3 },
+this formulation guarantees that the quantized value at the
+current level s remains identical, regardless of the level at
+which the anchor is initially decoded. This approach unifies
+the different paths illustrated in Fig. 3 (b) into a single path:
+during training, we directly apply Round to f using qs at
+level s to obtain fˆs , making it independent of ∆mas .
+3.5. Training Losses for Progressive Compression
+As the level progresses deeper, new anchors and Gaussians
+are decoded, while existing anchors are refined, collectively
+enhancing the model’s fidelity progressively. Specifically,
+at each training iteration, we randomly sample a level s,
+and compute the entropy loss based on the incremental bit
+consumption at this level. For the first level (s = 1), the
+loss formulation follows HAC++ [10]. For levels s ≥ 2, the
+entropy constraint Lentropy is applied from an incremental
+perspective:
+Lentropy =
+N
+X
+b[i]s ,
+where for each anchor i,
+i
+f
+D
+X
+X
+bs = mas ∆mas
+
+− log2 pG (fˆs,j ) +
+f ∈{f a ,l} j=1
+X
+mas (1 − ∆mas )
+f
+D
+X
+
+− log2 pT (fˆs,j ) +
+f ∈{f a ,l} j=1
+K
+X
+k=1
+∆mgs,k
+3 
+X
+− log2 pG (ôs,3k+j )
+
+j=1
+(9)
+where the first and second terms respectively account for
+the bits needed for a newly decoded anchor at level-s (with
+∆mas = 1), modeled as Gaussian distribution in (6), and
+the bits needed for a refined anchor (with ∆mas = 0),
+modeled as trinomial distribution in (8), and the third term
+accounts for the bits needed for any newly added Gaussians
+(with ∆mgs,k = 1) associated with the anchor. Note
+that for Gaussian offsets, only the quantity increases while
+previously decoded values remain unchanged.
+The final loss at level s becomes
+1
+(Lentropy + Lhash ).
+Loss = LScaffold + λs
+a
+N (D + 6 + 3K)
+(10)
+where LScaffold and Lhash are the same as those defined in
+HAC++ [10] and the trade-off parameter λs varies with s to
+balance the R-D performance at different levels.
+4. Experiments
+4.1. Implementation Details
+PCGS is implemented using the PyTorch [32] framework,
+building upon the HAC++ [10] repository. The hyperparameters remain consistent with HAC++, except that we
+employ a set of λs to train the model progressively within
+a single training process. At each iteration, we randomly
+sample a level s and its corresponding λs from this set for
+training. Since all rates are covered within one training
+session, we appropriately extend the training iterations to
+40k to ensure sufficient optimization. Additionally, we
+also present the results trained by 30k iterations for a fair
+comparison with the standard protocol.
+4.2. Experiment Evaluation
+Baselines. Progressive compression of 3DGS still lacks exploration. Specifically, GoDe [12] organizes Gaussians into
+layers and applies codebooks for progressive compression.
+Other compression methods generate only a single rate per
+training. By adjusting training parameters and retraining
+the scene multiple times, we obtain the R-D curves for
+HAC [8], HAC++[10], ContextGS[36], HEMGS [24], and
+CAT-3DGS [43]. We present the curves of these approaches
+in Fig. 4, as they exhibit the best compression performance
+among existing methods. For all metrics (i.e., PSNR,
+SSIM [37], LPIPS [45], size, training time, and encoding/decoding time) and results of more comparison methods
+(including the baselines 3DGS [20] and Scaffold-GS [26],
+and various compression methods [13, 15, 22, 25, 28–31,
+35, 41]), please refer to the Appendix.
+Dataset. We evaluate our PCGS on the large-scale realworld scenes including Mip-NeRF360 [5], DeepBlending [17], Tanks&Temples [21], and BungeeNeRF [39]
+datasets, which can better highlight the advantages of progressivity due to their large volumes.
+Results. As shown in Fig. 4, our PCGS, despite being
+trained only once to obtain the progressive R-D curve,
+achieves compression performance comparable to SoTA
+single-rate methods. More importantly, PCGS enables compression into different progressive bitstreams, efficiently
+adapting to dynamic network and storage constraints. Compared to the progressive method GoDe, which undergoes
+60k training iterations in total to achieve progressivity,
+our PCGS still outperforms it. This is because GoDe
+solely increases the number of anchors for progressivity,
+whereas PCGS jointly optimizes both the quantity and
+quality of anchors, leading to superior progressive performance. Additionally, PCGS effectively exploits contextual
+correlations across levels to model entropy more accurately,
+further compacting the incremental bitstreams. Notably,
+additional training iterations do not improve performance
+on the BungeeNeRF dataset due to its scale discrepancy
+Mip-NeRF360
+28.0
+Tank&Temples
+DeepBlending
+24.6
+BungeeNeRF
+Ours (40k)
+27.4
+30.4
+Ours (30k)
+GoDe (30k+30k)
+PSNR (dB)
+27.8
+24.3
+HEMGS (60k)
+26.9
+30.2
+CAT-3DGS (40k)
+27.6
+HAC++ (30k)
+ContextGS (30k)
+27.4
+24.0
+10
+20
+6
+8
+10
+12
+30.0
+2
+4
+6
+HAC (30k)
+26.4
+8
+15
+20
+25
+30
+size (MB)
+size (MB)
+size (MB)
+size (MB)
+Figure 4. R-D curve comparison of different methods. The number of training iterations for each method is indicated in parentheses. For
+GoDe, it applies an additional finetune stage of 30k iterations to the Scaffold-GS which is originally trained for 30k. Diamond markers ♢
+represent progressive compression methods, while circle markers ⃝ denote traditional single-rate compression methods. More results
+can be obtained in the Appendix.
+4.3. Ablation Study
+We conduct ablation studies on the Mip-NeRF360
+dataset [5] with sufficient training iterations of 40k, as it
+deals with the most diverse set of scenes and yields the
+most convincing results. The ablations are analyzed from
+three perspectives: (1) the effectiveness of progressivity, (2)
+approaches to quantize and entropy model anchors decoded
+in subsequent levels, and (3) the design of the training loss.
+Results are shown in Fig. 5.
+Mip-NeRF360
+28.0
+Ours
+W/O Prog Mask
+PSNR (dB)
+between training and testing views, which lead to overfitting. When compared to single-rate approaches, PCGS surpasses HEMGS on most datasets, even with fewer training
+iterations. Note that PCGS only needs 30/40k iterations
+to obtain the entire R-D curve while HEMGS needs 60k
+iterations for each sampled rate, which further demonstrates
+the effectiveness and efficiency of our context designs.
+Decoding Process. PCGS enables a progressive decoding
+process by reusing existing bitstreams. Initially, shared
+components such as MLPs, anchor locations xa , the hash
+grid H, and masks mg (from which ma is derived) are
+decoded from the header information. Note that since
+anchor locations are encoded using GPCC [7], which relies
+on mutual information among anchors to reduce entropy,
+we encode all valid anchor locations together in the header,
+rather than encoding the incremental anchor locations at
+each level, to reduce the total bit consumption. Based on
+the mask information, the model determines which anchors
+to be newly decoded or refined at each level. Specifically,
+at the first level (s = 1), attributes of valid anchors and
+Gaussian offsets are decoded using Gaussian distributions.
+At the next level (s = 2), two operations occur: (1) already
+decoded anchors are refined using the progressive quantization mechanism, with a trinomial distribution for probability estimation, and (2) newly introduced anchors and
+Gaussian offsets are decoded via a Gaussian distribution.
+This process continues consistently across all progressive
+levels, ensuring efficient and structured decoding.
+W/O Prog Q
+W/ Offset Prog Q
+27.8
+Subs Anc Trit + Gau Prob
+Subs Anc Rnd + Gau Prob
+27.6
+10
+15
+20
+size (MB)
+25
+30
+W/ All Rate Loss
+W/ All Rate & Fid Loss
+Figure 5. R-D curve results of ablation study. Experiments are
+conducted on Mip-NeRF360 [5].
+Effectiveness of Progressivity. Disabling progressive
+masking (W/O Prog Mask, i.e., keeping the mask identical
+across levels) prevents the model from improving fidelity
+in the high-rate segments due to the lack of additional
+anchors or Gaussians. Additionally, when the progressive
+quantization mechanism is removed (W/O Prog Q), progressivity relies solely on the mask, resulting in a narrow
+rate adjustment range with limited fidelity improvements,
+as the quality of existing anchors remains fixed and fails to
+adapt to varying levels of details. Furthermore, applying
+progressive quantization to offsets (W Offset Prog Q) shifts
+the model’s focus toward optimizing offset sizes, which
+may increase overall rate consumption and impact fidelity.
+Quantization and Entropy Modeling of Subsequent Anchors. For anchors that have been previously decoded
+(i.e., not at their initial decoding), replacing the trinomial
+distribution with a Gaussian distribution (Subs Anc Trit
++ Gau Prob) leads to inaccurate probability estimation,
+as it fails to sufficiently exploit the quantization context
+across levels. Similarly, if progressive quantization of these
+subsequent-level anchors is replaced with direct Round
+and entropy modeling using a Gaussian distribution (Subs
+Anc Rnd + Gau Prob), the performance degrades due to
+𝑠=1
+header
+𝑠=1
+𝑠=2
+𝑠=3
+𝑠=4
+1.27
+1.79
+2.06
+𝑟 𝒎!"
+𝑟 𝒎!
+#
+PSNR
+295157
+0.60
+0.61
+0.63
+0.65
+0.113
+0.117
+0.123
+0.131
+32.07
+32.24
+32.28
+32.30
+#Anc.
+𝑟 𝒎"!
+#
+𝑟 𝒎!
+PSNR
+0.72
+0.73
+0.76
+0.154
+0.159
+0.173
+27.03
+27.23
+27.28
+2.25
+header
+𝑠=1
+𝑠=2
+𝑠=3
+2.60
+12.89
+5.59
+735395
+6.66
+header
+𝑠=1
+𝑠=2
+𝑠=3
+ℋ
+#Anc.
+3.73
+1.31
+#Anc.
+4.89
+2.03
+365307
+2.67
+𝒎
+#
+𝒙"
+MLP
+𝒇" (T)
+𝒇" (G)
+𝑟 𝒎"!
+𝑟 𝒎!
+#
+PSNR
+0.68
+0.69
+0.71
+0.162
+0.165
+0.174
+26.12
+26.20
+26.22
+𝒍(T)
+𝒍(G)
+𝒐
+Figure 6. Relative size relations of different components. Total
+size of each header or level is at the right of each bin, measured
+in MB. Upper part of each chunk: Qualitative results of the
+room, amsterdam, and truck scenes across different levels. Lower
+part of each chunk: Statistical data showing the size and mask
+information across different levels. r(mas ) and r(mgs ) represent
+the valid mask ratios for anchors and Gaussians, respectively. The
+color notations are explained in the bottom of the figure. (T) and
+(G) denote the attribute is refined or newly decoded, respectively.
+ineffective adaptation to progressive refinement.
+Training Loss Design. Using the accumulated entropy
+from all previous and current levels as rate regularization
+(W/ All Rate Loss) causes the model to degrade in fidelity,
+as it does not explicitly consider the quality of reconstructions at earlier levels when optimizing the current level.
+However, if fidelity at previous levels is incorporated into
+the optimization (W/ All Rate & Fid Loss), the model’s
+performance becomes even worse, as this introduces excessive complexity and hinders the model from effectively
+balancing the R-D trade-off across levels.
+4.4. Progressive Bit Allocations
+To achieve progressive compression, we encode and decode
+the scene level by level. The statistical information on bit
+allocations and mask ratios across levels is shown in Fig. 6.
+Specifically, we first encode and store the global header
+information, which includes MLPs, anchor locations, the
+hash grid, and masks. Additionally, we present the relative
+𝑠=2
+𝑠=3
+Figure 7. Visualization of bit allocation across progressive
+levels in the mic scene [27]. Following HAC++ [10], we voxelize
+the scene, with each voxel represented by a ball. Upper: The size
+and color of a ball indicate the number of anchors and the amount
+of incremental bits (normalized) within it. Lower-right: Red balls
+indicate the newly decoded anchors at the current level.
+bit consumption at each level. For anchors at levels s ≥
+2, the bit consumption consists of two parts: bits from
+trit-plane refinement and bits from newly decoded anchors
+and Gaussian offsets. While the bits from newly decoded
+anchors and Gaussian offsets share a small portion, they
+play a crucial role in improving fidelity and enhancing the
+progressivity of the model. Moreover, both r(mas ) and
+r(mgs ) increase as the level deepens, indicating more new
+anchors and Gaussians are decoded, which highlights the
+effectiveness of the progressive masking strategy.
+4.5. Visualization
+Following HAC++ [10], we visualize the bit allocation of
+PCGS in the mic scene, as shown in Fig.7 (upper). At
+the first level (i.e., s = 1), the highest number of bits is
+consumed, as it provides basic information for subsequent
+levels. Additionally, the Gaussian distribution used at this
+level lacks prior information, making probability estimation
+more challenging. At higher levels (i.e., s = 2 and 3), they
+consume fewer bits, which demonstrates the effectiveness
+of the trinomial distribution. Moreover, as shown in Fig. 7
+(lower-right), new anchors are decoded at subsequent levels. Complex areas with higher bit consumptions activate
+more new anchors for further refinement of fidelity.
+5. Conclusion
+In this paper, we have presented PCGS, a novel framework
+for progressive compression of 3DGS. By controlling both
+the quantity and quality of anchors, PCGS achieves
+performance comparable to SoTA single-rate compression
+methods. Extensive experiments have demonstrated the
+effectiveness of the proposed components. More importantly, the progressive nature of PCGS makes it well-suited
+for on-demand applications, where dynamic bandwidth
+and diversion storage conditions often arise, significantly
+broadening the applicability of 3DGS.
+References
+[1] Muhammad Salman Ali, Sung-Ho Bae, and Enzo
+Tartaglione. Elmgs: Enhancing memory and computation
+scalability through compression for 3d gaussian splatting,
+2024. 2
+[2] Muhammad Salman Ali, Maryam Qamar, Sung-Ho Bae, and
+Enzo Tartaglione. Trimming the fat: Efficient compression
+of 3d gaussian splats through pruning. arXiv preprint
+arXiv:2406.18214, 2024. 1, 2
+[3] Milena T Bagdasarian, Paul Knoll, Yi-Hsin Li, Florian
+Barthel, Anna Hilsmann, Peter Eisert, and Wieland Morgenstern. 3dgs. zip: A survey on 3d gaussian splatting
+compression methods. arXiv preprint arXiv:2407.09510,
+2024. 1, 2
+[4] Johannes Ballé, David Minnen, Saurabh Singh, Sung Jin
+Hwang, and Nick Johnston. Variational image compression
+with a scale hyperprior. arXiv preprint arXiv:1802.01436,
+2018. 2
+[5] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P
+Srinivasan, and Peter Hedman. Mip-nerf 360: Unbounded
+anti-aliased neural radiance fields. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 5470–5479, 2022. 1, 6, 7, 3, 4, 5
+[6] Yoshua Bengio, Nicholas Léonard, and Aaron Courville.
+Estimating or propagating gradients through stochastic
+neurons for conditional computation.
+arXiv preprint
+arXiv:1308.3432, 2013. 4
+[7] Anthony Chen, Shiwen Mao, Zhu Li, Minrui Xu, Hongliang
+Zhang, Dusit Niyato, and Zhu Han. An introduction to
+point cloud compression standards. GetMobile: Mobile
+Computing and Communications, 27(1):11–17, 2023. 7
+[8] Yihang Chen, Qianyi Wu, Weiyao Lin, Mehrtash Harandi,
+and Jianfei Cai. Hac: Hash-grid assisted context for 3d
+gaussian splatting compression. In European Conference on
+Computer Vision, 2024. 2, 3, 6, 1, 5
+[9] Yihang Chen, Qianyi Wu, Mengyao Li, Weiyao Lin,
+Mehrtash Harandi, and Jianfei Cai. Fast feedforward 3d
+gaussian splatting compression. In The Thirteenth International Conference on Learning Representations, 2025. 3
+[10] Yihang Chen, Qianyi Wu, Weiyao Lin, Mehrtash Harandi,
+and Jianfei Cai. Hac++: Towards 100x compression of 3d
+gaussian splatting. arXiv preprint arXiv:2501.12255, 2025.
+2, 3, 4, 5, 6, 8, 1
+[11] Kai Cheng, Xiaoxiao Long, Kaizhi Yang, Yao Yao, Wei Yin,
+Yuexin Ma, Wenping Wang, and Xuejin Chen. Gaussianpro:
+3d gaussian splatting with progressive propagation. In Fortyfirst International Conference on Machine Learning, 2024.
+2, 3
+[12] Francesco Di Sario, Riccardo Renzulli, Marco Grangetto,
+Akihiro Sugimoto, and Enzo Tartaglione. Gode: Gaussians
+on demand for progressive level of detail and scalable compression. arXiv preprint arXiv:2501.13558, 2025. 2, 3, 6,
+5
+[13] Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia
+Xu, and Zhangyang Wang. Lightgaussian: Unbounded
+3d gaussian compression with 15x reduction and 200+ fps.
+Advances in neural information processing systems, 2024. 1,
+2, 6, 5
+[14] Guangchi Fang and Bing Wang. Mini-splatting: Representing scenes with a constrained number of gaussians. In
+European Conference on Computer Vision, 2024. 2
+[15] Sharath Girish, Kamal Gupta, and Abhinav Shrivastava.
+Eagles: Efficient accelerated 3d gaussians with lightweight
+encodings. In European Conference on Computer Vision,
+2024. 1, 6, 5
+[16] Alex Hanson, Allen Tu, Vasu Singla, Mayuka Jayawardhana,
+Matthias Zwicker, and Tom Goldstein. Pup 3d-gs: Principled
+uncertainty pruning for 3d gaussian splatting, 2024. 2
+[17] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm,
+George Drettakis, and Gabriel Brostow. Deep blending for
+free-viewpoint image-based rendering. ACM Transactions
+on Graphics (ToG), 37(6):1–15, 2018. 6, 1, 2, 4, 5
+[18] He Huang, Wenjie Huang, Qi Yang, Yiling Xu, and Zhu li. A
+hierarchical compression technique for 3d gaussian splatting
+compression, 2024. 3
+[19] Seungmin Jeon, Kwang Pyo Choi, Youngo Park, and ChangSu Kim. Context-based trit-plane coding for progressive
+image compression. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
+14348–14357, 2023. 2, 3, 5
+[20] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler,
+and George Drettakis. 3d gaussian splatting for real-time
+radiance field rendering. ACM Transactions on Graphics, 42
+(4), 2023. 1, 2, 3, 6, 5
+[21] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen
+Koltun. Tanks and temples: Benchmarking large-scale scene
+reconstruction. ACM Transactions on Graphics (ToG), 36
+(4):1–13, 2017. 6, 1, 4, 5
+[22] Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko,
+and Eunbyung Park. Compact 3d gaussian representation for
+radiance field. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, 2024. 2, 4, 6,
+1, 5
+[23] Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko,
+and Eunbyung Park. Compact 3d gaussian splatting for static
+and dynamic radiance fields, 2024. 2
+[24] Lei Liu, Zhenghao Chen, and Dong Xu. Hemgs: A hybrid
+entropy model for 3d gaussian splatting data compression,
+2024. 3, 6, 1, 5
+[25] Xiangrui Liu, Xinju Wu, Pingping Zhang, Shiqi Wang, Zhu
+Li, and Sam Kwong. Compgs: Efficient 3d scene representation via compressed gaussian splatting. In Proceedings of the
+32nd ACM International Conference on Multimedia, pages
+2936–2944, 2024. 3, 6, 1, 5
+[26] Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin
+Wang, Dahua Lin, and Bo Dai. Scaffold-gs: Structured 3d
+gaussians for view-adaptive rendering. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, 2024. 2, 3, 6, 1, 5
+[27] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik,
+Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65(1):99–106, 2021. 8,
+1, 4
+[28] Wieland Morgenstern, Florian Barthel, Anna Hilsmann, and
+Peter Eisert. Compact 3d scene representation via selforganizing gaussian grids. arXiv preprint arXiv:2312.13299,
+2023. 1, 2, 6, 5
+[29] KL Navaneet, Kossar Pourahmadi Meibodi, Soroush Abbasi
+Koohpayegani, and Hamed Pirsiavash. Compact3d: Compressing gaussian splat radiance field models with vector
+quantization. In European Conference on Computer Vision,
+2024. 2, 5
+[30] Simon Niedermayr, Josef Stumpfegger, and Rüdiger Westermann. Compressed 3d gaussian splatting for accelerated
+novel view synthesis. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 10349–10358, 2024. 2, 5
+[31] Panagiotis Papantonakis, Georgios Kopanas, Bernhard
+Kerbl, Alexandre Lanvin, and George Drettakis. Reducing
+the memory footprint of 3d gaussian splatting. Proceedings
+of the ACM on Computer Graphics and Interactive Techniques, 7(1):1–17, 2024. 2, 6, 1, 5
+[32] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer,
+James Bradbury, Gregory Chanan, Trevor Killeen, Zeming
+Lin, Natalia Gimelshein, Luca Antiga, et al. Pytorch: An
+imperative style, high-performance deep learning library.
+Advances in neural information processing systems, 32,
+2019. 6
+[33] Yuang Shi, Simone Gasparini, Géraldine Morin, and
+Wei Tsang Ooi. Lapisgs: Layered progressive 3d gaussian splatting for adaptive streaming.
+arXiv preprint
+arXiv:2408.14823, 2024. 2, 3
+[34] Seungjoo Shin, Jaesik Park, and Sunghyun Cho. Localityaware gaussian compression for fast and high-quality rendering, 2025. 2
+[35] Henan Wang, Hanxin Zhu, Tianyu He, Runsen Feng, Jiajun
+Deng, Jiang Bian, and Zhibo Chen. End-to-end ratedistortion optimized 3d gaussian representation. In European
+Conference on Computer Vision, 2024. 2, 6, 1, 5
+[36] Yufei Wang, Zhihao Li, Lanqing Guo, Wenhan Yang, Alex C
+Kot, and Bihan Wen. Contextgs: Compact 3d gaussian
+splatting with anchor level context model. Advances in
+neural information processing systems, 2024. 2, 3, 6, 1, 5
+[37] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P Simoncelli. Image quality assessment: from error visibility to
+structural similarity. IEEE transactions on image processing,
+13(4):600–612, 2004. 6
+[38] Minye Wu and Tinne Tuytelaars. Implicit gaussian splatting
+with efficient multi-level tri-plane representation. arXiv
+preprint arXiv:2408.10041, 2024. 2
+[39] Yuanbo Xiangli, Linning Xu, Xingang Pan, Nanxuan Zhao,
+Anyi Rao, Christian Theobalt, Bo Dai, and Dahua Lin.
+Bungeenerf: Progressive neural radiance field for extreme
+multi-scale scene rendering. In European conference on
+computer vision, pages 106–122, 2022. 1, 6, 2, 4, 5
+[40] Shuzhao Xie, Jiahang Liu, Weixiang Zhang, Shijia Ge,
+Sicheng Pan, Chen Tang, Yunpeng Bai, and Zhi Wang.
+Sizegs: Size-aware compression of 3d gaussians with hierarchical mixed precision quantization, 2024. 2
+[41] Shuzhao Xie, Weixiang Zhang, Chen Tang, Yunpeng Bai,
+Rongwei Lu, Shijia Ge, and Zhi Wang. Mesongs: Posttraining compression of 3d gaussians via efficient attribute
+transformation, 2024. 3, 6, 1, 5
+[42] Runyi Yang, Zhenxin Zhu, Zhou Jiang, Baijun Ye, Xiaoxue
+Chen, Yifei Zhang, Yuantao Chen, Jian Zhao, and Hao Zhao.
+Spectrally pruned gaussian fields with neural compensation.
+arXiv preprint arXiv:2405.00676, 2024. 1, 2
+[43] Yu-Ting Zhan, Cheng-Yuan Ho, Hebi Yang, Yi-Hsin Chen,
+Jui Chiu Chiang, Yu-Lun Liu, and Wen-Hsiao Peng.
+CAT-3DGS: A context-adaptive triplane approach to ratedistortion-optimized 3DGS compression. In The Thirteenth International Conference on Learning Representations, 2025. 2, 6, 1, 5
+[44] Fengyi Zhang, Yadan Luo, Tianjun Zhang, Lin Zhang, and
+Zi Huang. Gaussianforest: Hierarchical-hybrid 3d gaussian
+splatting for compressed scene modeling, 2024. 3
+[45] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman,
+and Oliver Wang. The unreasonable effectiveness of deep
+features as a perceptual metric. In Proceedings of the IEEE
+conference on computer vision and pattern recognition,
+pages 586–595, 2018. 6
+[46] Zhaoliang Zhang, Tianchen Song, Yongjae Lee, Li Yang,
+Cheng Peng, Rama Chellappa, and Deliang Fan. Lp-3dgs:
+Learning to prune 3d gaussian splatting. In The Thirty-eighth
+Annual Conference on Neural Information Processing Systems, 2024. 1, 2
+[47] Brent Zoomers, Maarten Wijnants, Ivan Molenaers, Joni
+Vanherck, Jeroen Put, Lode Jorissen, and Nick Michiels.
+Progs: Progressive rendering of gaussian splats. arXiv
+preprint arXiv:2409.01761, 2024. 2, 3
+[48] M. Zwicker, H. Pfister, J. van Baar, and M. Gross. Ewa
+volume splatting. In Proceedings Visualization, 2001. VIS
+’01., pages 29–538, 2001. 2, 3
+PCGS: Progressive Compression of 3D Gaussian Splatting
+Supplementary Material
+A. More Quantitative Results of PCGS
+In this section, we firstly present our quantitative results (trained for 40k iterations) for each scene across various datasets,
+including Mip-NeRF360 [5], DeepBlending [17], Tanks&Temples [21], and BungeeNeRF [39], as shown in Tables I, IV, II,
+and III, respectively. Furthermore, we present results on the small-scale Synthetic-NeRF dataset [27]. While this dataset is
+less suitable for progressive compression due to its limited size, we include it to ensure the completeness of our evaluations.
+Notably, the overhead introduced by MLPs (approximately 0.5 MB for this dataset) becomes more pronounced in this dataset.
+Despite this challenge, our method still achieves relatively strong compression performance.
+For the first level (i.e., s = 1) of each scene, in addition to entropy coding of anchor attributes (i.e., f a , l, and o), the
+encoding process also includes storing and coding of header information, i.e., MLPs, anchor locations xa , the hash grid H,
+and Gaussian-level masks mg (from which the anchor-level masks ma can be derived). This results in longer encoding and
+decoding times and larger sizes at the first level.
+For subsequent levels (i.e., s ≥ 2), the size is calculated as the sum of the previous level’s size and the incremental size (i.e.,
+∆ Size in the tables) of the current level. The encoding and decoding times are also calculated in an incremental perspective.
+Benefiting from this progressive design, on-demand applications require only the incremental bits and encoding/decoding
+times for levels s ≥ 2, underscoring the advantages of the progressive compression pipeline.
+Additionally, we also provide results of PCGS trained by 30k iterations to align with the standard training protocol, as
+shown in Table VI. Notably, even with only 30k iterations, PCGS has still achieved excellent compression performance.
+B. Quantitative Results of Other Methods
+In this section, we provide more quantitative results of comparison methods, including baselines 3DGS [20] and ScaffoldGS [26], as well as various compression methods [8, 10, 13, 15, 22, 24, 25, 28–31, 35, 36, 41, 43]. As shown in Tables VII, our
+PCGS, despite being trained only once to obtain the progressive R-D curve, achieves compression performance comparable
+to SoTA single-rate methods.
+Scenes
+Train
+Truck
+Avg.
+λs
+PSNR↑
+SSIM↑
+LPSPI↓
+∆ Size↓
+Size↓
+8e − 4
+4e − 4
+0.5e − 4
+8e − 4
+4e − 4
+0.5e − 4
+8e − 4
+4e − 4
+0.5e − 4
+22.88
+22.95
+22.97
+26.12
+26.20
+26.22
+24.50
+24.58
+24.59
+0.8191
+0.8230
+0.8239
+0.8850
+0.8877
+0.8883
+0.8521
+0.8554
+0.8561
+0.2195
+0.2155
+0.2143
+0.1520
+0.1491
+0.1482
+0.1857
+0.1823
+0.1813
+5.14
+1.68
+2.02
+6.20
+2.03
+2.67
+5.67
+1.85
+2.34
+5.14
+6.82
+8.84
+6.20
+8.23
+10.90
+5.67
+7.52
+9.87
+Train time
+2386
+2508
+2447
+Enc time
+Dec time
+5.5
+1.1
+1.2
+7.3
+1.5
+1.7
+6.4
+1.3
+1.5
+8.2
+1.2
+1.4
+10.9
+1.6
+2.0
+9.6
+1.4
+1.7
+Table I. Our results of each scene on the Tanks&Temples dataset [21] trained with 40k iterations. Times are measured in Second (s) and
+sizes are measured in MegaByte (MB). The ∆ Size represents the incremental size of each level.
+Scenes
+Drjohnson
+Playroom
+Avg.
+λs
+PSNR↑
+SSIM↑
+LPSPI↓
+∆ Size↓
+Size↓
+8e − 4
+4e − 4
+0.5e − 4
+8e − 4
+4e − 4
+0.5e − 4
+8e − 4
+4e − 4
+0.5e − 4
+29.70
+29.83
+29.85
+30.69
+30.85
+30.91
+30.19
+30.34
+30.38
+0.9045
+0.9069
+0.9074
+0.9091
+0.9113
+0.9119
+0.9068
+0.9091
+0.9097
+0.2620
+0.2584
+0.2576
+0.2657
+0.2620
+0.2609
+0.2639
+0.2602
+0.2593
+3.73
+1.29
+1.68
+2.80
+0.88
+1.24
+3.26
+1.09
+1.45
+3.73
+5.02
+6.70
+2.80
+3.68
+4.92
+3.26
+4.35
+5.81
+Train time
+2218
+2209
+2214
+Enc time
+Dec time
+4.0
+0.9
+1.0
+2.9
+0.6
+0.8
+3.5
+0.7
+0.9
+5.6
+1.0
+1.2
+4.2
+0.7
+1.0
+4.9
+0.8
+1.1
+Table II. Our results of each scene on the DeepBlending dataset [17] trained with 40k iterations. Times are measured in Second (s) and
+sizes are measured in MegaByte (MB). The ∆ Size represents the incremental size of each level.
+Scenes
+Amsterdam
+Bilbo
+Hollywood
+Pompidou
+Quebec
+Rome
+Avg.
+λs
+PSNR↑
+SSIM↑
+LPSPI↓
+∆ Size↓
+Size↓
+8e − 4
+4e − 4
+0.5e − 4
+8e − 4
+4e − 4
+0.5e − 4
+8e − 4
+4e − 4
+0.5e − 4
+8e − 4
+4e − 4
+0.5e − 4
+8e − 4
+4e − 4
+0.5e − 4
+8e − 4
+4e − 4
+0.5e − 4
+8e − 4
+4e − 4
+0.5e − 4
+27.03
+27.23
+27.28
+27.91
+28.09
+28.11
+24.43
+24.58
+24.64
+25.63
+25.81
+25.85
+30.13
+30.43
+30.49
+26.22
+26.47
+26.54
+26.89
+27.10
+27.15
+0.8793
+0.8861
+0.8888
+0.8818
+0.8872
+0.8891
+0.7657
+0.7736
+0.7774
+0.8517
+0.8570
+0.8585
+0.9338
+0.9380
+0.9388
+0.8694
+0.8757
+0.8778
+0.8636
+0.8696
+0.8717
+0.2028
+0.1942
+0.1891
+0.1988
+0.1903
+0.1856
+0.3319
+0.3254
+0.3210
+0.2347
+0.2293
+0.2270
+0.1610
+0.1562
+0.1546
+0.2110
+0.2049
+0.2018
+0.2234
+0.2167
+0.2132
+15.49
+5.59
+6.66
+12.18
+4.35
+5.24
+12.35
+3.98
+4.62
+13.87
+4.85
+5.84
+10.94
+3.78
+4.47
+13.01
+4.42
+5.30
+12.97
+4.50
+5.35
+15.49
+21.08
+27.74
+12.18
+16.53
+21.77
+12.35
+16.33
+20.95
+13.87
+18.72
+24.56
+10.94
+14.72
+19.18
+13.01
+17.42
+22.72
+12.97
+17.47
+22.82
+Train time
+4862
+3684
+3208
+4510
+3511
+3902
+3946
+Enc time
+Dec time
+16.3
+3.3
+4.0
+12.5
+2.5
+3.1
+12.3
+2.3
+2.7
+14.4
+2.9
+3.4
+11.2
+2.2
+2.6
+13.2
+2.6
+3.1
+13.3
+2.6
+3.2
+23.9
+3.7
+5.0
+17.9
+2.9
+4.0
+16.9
+2.5
+3.3
+20.6
+3.2
+4.3
+16.1
+2.5
+3.2
+18.8
+2.9
+3.9
+19.0
+2.9
+3.9
+Table III. Our results of each scene on the BungeeNeRF dataset [39] trained with 40k iterations. Times are measured in Second (s) and
+sizes are measured in MegaByte (MB). The ∆ Size is the incremental size of each level.
+Scenes
+Bicycle
+Garden
+Stump
+Room
+Counter
+Kitchen
+Bonsai
+Flowers
+Treehill
+Avg.
+λs
+PSNR↑
+SSIM↑
+LPSPI↓
+∆ Size↓
+Size↓
+4e − 4
+2.5e − 4
+1e − 4
+0.2e − 4
+4e − 4
+2.5e − 4
+1e − 4
+0.2e − 4
+4e − 4
+2.5e − 4
+1e − 4
+0.2e − 4
+4e − 4
+2.5e − 4
+1e − 4
+0.2e − 4
+4e − 4
+2.5e − 4
+1e − 4
+0.2e − 4
+4e − 4
+2.5e − 4
+1e − 4
+0.2e − 4
+4e − 4
+2.5e − 4
+1e − 4
+0.2e − 4
+4e − 4
+2.5e − 4
+1e − 4
+0.2e − 4
+4e − 4
+2.5e − 4
+1e − 4
+0.2e − 4
+4e − 4
+2.5e − 4
+1e − 4
+0.2e − 4
+25.12
+25.17
+25.17
+25.18
+27.37
+27.49
+27.53
+27.53
+26.61
+26.66
+26.67
+26.67
+32.07
+32.24
+32.28
+32.30
+29.75
+29.88
+29.91
+29.91
+31.55
+31.78
+31.83
+31.83
+33.20
+33.42
+33.48
+33.49
+21.33
+21.36
+21.36
+21.36
+23.32
+23.35
+23.35
+23.35
+27.81
+27.93
+27.95
+27.96
+0.7387
+0.7409
+0.7415
+0.7419
+0.8416
+0.8452
+0.8463
+0.8467
+0.7605
+0.7622
+0.7626
+0.7627
+0.9232
+0.9262
+0.9271
+0.9274
+0.9148
+0.9176
+0.9182
+0.9184
+0.9276
+0.9303
+0.9309
+0.9311
+0.9484
+0.9505
+0.9509
+0.9510
+0.5744
+0.5762
+0.5767
+0.5769
+0.6416
+0.6431
+0.6436
+0.6439
+0.8079
+0.8103
+0.8109
+0.8111
+0.2724
+0.2705
+0.2696
+0.2688
+0.1583
+0.1543
+0.1527
+0.1517
+0.2734
+0.2717
+0.2711
+0.2707
+0.2094
+0.2043
+0.2021
+0.2013
+0.1913
+0.1880
+0.1870
+0.1866
+0.1279
+0.1249
+0.1240
+0.1236
+0.1824
+0.1797
+0.1791
+0.1788
+0.3806
+0.3792
+0.3788
+0.3785
+0.3682
+0.3664
+0.3655
+0.3649
+0.2404
+0.2377
+0.2366
+0.2361
+19.09
+6.12
+6.93
+7.59
+18.27
+5.80
+6.36
+6.82
+13.49
+3.83
+4.23
+4.64
+5.00
+1.79
+2.06
+2.25
+6.80
+2.19
+2.39
+2.53
+7.67
+2.65
+2.90
+3.03
+7.44
+2.61
+3.03
+3.33
+15.73
+5.09
+5.77
+6.32
+16.24
+5.47
+6.08
+6.57
+12.19
+3.95
+4.42
+4.79
+19.09
+25.21
+32.14
+39.73
+18.27
+24.07
+30.42
+37.24
+13.49
+17.32
+21.55
+26.18
+5.00
+6.79
+8.85
+11.10
+6.80
+8.99
+11.38
+13.92
+7.67
+10.32
+13.22
+16.25
+7.44
+10.05
+13.08
+16.41
+15.73
+20.82
+26.58
+32.91
+16.24
+21.71
+27.79
+34.37
+12.19
+16.14
+20.56
+25.34
+Train time
+5570
+5647
+3617
+2914
+3111
+4206
+3477
+3847
+4008
+4044
+Enc time
+Dec time
+20.9
+3.8
+4.0
+4.5
+18.8
+3.4
+3.6
+4.0
+13.4
+2.3
+2.4
+2.8
+5.3
+1.1
+1.2
+1.3
+6.6
+1.2
+1.3
+1.4
+8.0
+1.5
+1.6
+1.7
+8.3
+1.6
+1.7
+1.9
+17.2
+3.1
+3.3
+3.7
+18.2
+3.3
+3.4
+3.8
+13.0
+2.4
+2.5
+2.8
+33.9
+4.0
+4.5
+5.4
+28.5
+3.6
+4.1
+4.6
+21.4
+2.4
+2.7
+3.4
+7.9
+1.2
+1.4
+1.6
+9.9
+1.4
+1.5
+1.7
+12.3
+1.7
+1.9
+2.0
+13.0
+1.8
+2.0
+2.4
+28.2
+3.3
+3.7
+4.5
+29.2
+3.5
+3.8
+4.5
+20.5
+2.6
+2.8
+3.4
+Table IV. Our results of each scene on the Mip-NeRF360 dataset [5] trained with 40k iterations. Times are measured in Second (s) and
+sizes are measured in MegaByte (MB). The ∆ Size represents the incremental size of each level.
+λs
+PSNR↑
+SSIM↑
+LPSPI↓
+∆ Size↓
+Size↓
+4e − 4
+2e − 4
+0.25e − 4
+4e − 4
+2e − 4
+0.25e − 4
+4e − 4
+2e − 4
+0.25e − 4
+4e − 4
+2e − 4
+0.25e − 4
+4e − 4
+2e − 4
+0.25e − 4
+4e − 4
+2e − 4
+0.25e − 4
+4e − 4
+2e − 4
+0.25e − 4
+4e − 4
+2e − 4
+0.25e − 4
+4e − 4
+2e − 4
+0.25e − 4
+34.61
+35.29
+35.45
+26.31
+26.47
+26.49
+34.78
+35.45
+35.53
+37.18
+37.77
+37.88
+35.08
+35.60
+35.70
+30.46
+30.75
+30.79
+36.00
+36.58
+36.76
+31.30
+31.53
+31.57
+33.21
+33.68
+33.77
+0.9833
+0.9856
+0.9861
+0.9504
+0.9522
+0.9524
+0.9844
+0.9864
+0.9866
+0.9817
+0.9834
+0.9838
+0.9790
+0.9811
+0.9814
+0.9604
+0.9625
+0.9628
+0.9906
+0.9917
+0.9920
+0.9032
+0.9054
+0.9057
+0.9666
+0.9685
+0.9689
+0.0157
+0.0141
+0.0136
+0.0424
+0.0407
+0.0405
+0.0144
+0.0129
+0.0127
+0.0277
+0.0257
+0.0250
+0.0207
+0.0190
+0.0186
+0.0407
+0.0385
+0.0382
+0.0093
+0.0081
+0.0077
+0.1170
+0.1154
+0.1149
+0.0360
+0.0343
+0.0339
+1.23
+0.35
+0.47
+1.68
+0.47
+0.54
+1.18
+0.29
+0.35
+0.99
+0.21
+0.28
+1.45
+0.40
+0.50
+1.56
+0.42
+0.48
+1.03
+0.20
+0.29
+2.35
+0.72
+0.80
+1.43
+0.38
+0.46
+1.23
+1.57
+2.05
+1.68
+2.15
+2.69
+1.18
+1.47
+1.82
+0.99
+1.20
+1.48
+1.45
+1.85
+2.36
+1.56
+1.99
+2.47
+1.03
+1.22
+1.52
+2.35
+3.06
+3.87
+1.43
+1.82
+2.28
+Scenes
+Chair
+Drums
+Ficus
+Hotdog
+Lego
+Materials
+Mic
+Ship
+Avg.
+Train time
+Enc time
+Dec time
+1.1
+0.3
+0.3
+1.4
+0.3
+0.3
+0.9
+0.2
+0.2
+0.7
+0.2
+0.2
+1.2
+0.3
+0.3
+1.2
+0.3
+0.3
+0.7
+0.1
+0.2
+2.1
+0.4
+0.5
+1.2
+0.2
+0.3
+1.4
+0.3
+0.4
+2.0
+0.3
+0.4
+1.2
+0.2
+0.3
+0.8
+0.2
+0.3
+1.7
+0.3
+0.4
+1.7
+0.3
+0.3
+0.9
+0.2
+0.3
+3.2
+0.5
+0.6
+1.6
+0.3
+0.4
+1223
+1225
+1191
+1208
+1177
+1181
+1151
+1362
+1215
+Table V. Our results of each scene on the Synthetic-NeRF dataset [27] trained with 40k iterations. Times are measured in Second (s) and
+sizes are measured in MegaByte (MB). The ∆ Size represents the incremental size of each level.
+λs
+PSNR↑
+SSIM↑
+LPSPI↓
+∆ Size↓
+Size↓
+4e − 4
+2.5e − 4
+1e − 4
+0.2e − 4
+27.69
+27.81
+27.83
+27.83
+0.8082
+0.8105
+0.8110
+0.8111
+Mip-NeRF360 [5]
+0.2370
+12.64
+12.64
+0.2346
+4.04
+16.68
+0.2340
+4.54
+21.22
+0.2336
+4.95
+26.17
+8e − 4
+4e − 4
+0.5e − 4
+24.27
+24.37
+24.39
+0.8501
+0.8537
+0.8544
+Tank&Temples [21]
+0.1841
+6.31
+6.31
+0.1803
+2.05
+8.36
+0.1794
+2.62
+10.98
+8e − 4
+4e − 4
+0.5e − 4
+30.14
+30.32
+30.35
+0.9062
+0.9091
+0.9096
+DeepBlednding [17]
+0.2638
+3.71
+3.71
+0.2599
+1.26
+4.97
+0.2591
+1.67
+6.63
+8e − 4
+4e − 4
+0.5e − 4
+27.01
+27.22
+27.25
+0.8730
+0.8786
+0.8797
+BungeeNeRF [39]
+0.2062
+14.07
+14.07
+0.2004
+4.76
+18.83
+0.1985
+5.47
+24.30
+4e − 4
+2e − 4
+0.25e − 4
+33.04
+33.57
+33.66
+0.9660
+0.9683
+0.9686
+Synthetic-NeRF [27]
+0.0365
+1.48
+1.48
+0.0344
+0.39
+1.88
+0.0340
+0.48
+2.35
+Train time
+Enc time
+Dec time
+2704
+13.5
+2.5
+2.6
+2.9
+21.3
+2.7
+2.9
+3.5
+1675
+7.2
+1.4
+1.6
+10.8
+1.6
+1.9
+1670
+4.0
+0.9
+1.0
+5.6
+1.0
+1.2
+2807
+14.3
+2.8
+3.2
+20.1
+3.1
+3.8
+843
+1.3
+0.3
+0.4
+1.8
+0.3
+0.4
+Table VI. Our results of the per-scene averaged results on various datasets trained with 30k iterations. Times are measured in Second (s)
+and sizes are measured in MegaByte (MB). The ∆ Size represents the incremental size of each level.
+Datasets
+methods
+Base
+models
+Single
+-rate
+methods
+3DGS [20]
+Scaffold-GS [26]
+Lee et al. [22]
+Compressed3D [30]
+EAGLES[15]
+LightGaussian [13]
+SOG [28]
+Navaneet et al. [29]
+Reduced3DGS [31]
+RDOGaussian [35]
+MesonGS-FT [41]
+HAC [8]
+ContextGS [36]
+CompGS [25]
+CAT-3DGS [43]
+HEMGS [24]
+HAC++ [10]
+Progre
+-ssive
+methods
+GoDe [12]
+Our PCGS
+Datasets
+methods
+Base
+models
+Single
+-rate
+methods
+3DGS [20]
+Scaffold-GS [26]
+Lee et al. [22]
+Compressed3D [30]
+EAGLES[15]
+LightGaussian [13]
+SOG [28]
+Navaneet et al. [29]
+Reduced3DGS [31]
+RDOGaussian [35]
+MesonGS-FT [41]
+HAC [8]
+ContextGS [36]
+CompGS [25]
+CAT-3DGS [43]
+HEMGS [24]
+HAC++ [10]
+Progressive
+methods
+GoDe [12]
+Our PCGS
+PSNR↑
+Mip-NeRF360 [5]
+SSIM↑ LPIPS↓
+27.46
+27.50
+27.08
+3.68
+27.14
+27.00
+26.56
+27.12
+27.19
+27.05
+26.99
+27.53
+27.77
+27.62
+27.75
+26.37
+27.26
+25.82
+27.77
+27.74
+27.94
+27.60
+27.82
+27.07
+27.75
+27.82
+27.96
+0.812
+0.806
+0.798
+26.98
+0.809
+0.799
+0.791
+0.806
+0.807
+0.802
+0.796
+0.807
+0.811
+0.808
+0.811
+0.778
+0.803
+0.730
+0.809
+0.807
+0.813
+0.803
+0.811
+0.780
+0.810
+0.808
+0.811
+PSNR↑
+DeepBlending [17]
+SSIM↑ LPIPS↓
+29.42
+30.21
+29.79
+29.38
+29.72
+27.01
+29.12
+29.90
+29.63
+29.63
+29.51
+29.98
+30.34
+30.11
+30.39
+29.30
+29.69
+28.53
+30.29
+30.24
+30.40
+30.16
+30.34
+29.76
+30.34
+30.19
+30.38
+0.899
+0.906
+0.901
+0.898
+0.906
+0.872
+0.892
+0.907
+0.902
+0.902
+0.901
+0.902
+0.906
+0.907
+0.909
+0.895
+0.901
+0.878
+0.909
+0.909
+0.912
+0.907
+0.911
+0.897
+0.909
+0.907
+0.910
+0.222
+0.252
+0.247
+0.801
+0.231
+0.249
+0.241
+0.240
+0.230
+0.239
+0.247
+0.238
+0.230
+0.237
+0.231
+0.276
+0.239
+0.362
+0.241
+0.249
+0.230
+0.253
+0.231
+0.336
+0.284
+0.240
+0.236
+0.247
+0.254
+0.258
+0.253
+0.249
+0.308
+0.270
+0.251
+0.249
+0.252
+0.251
+0.269
+0.258
+0.265
+0.258
+0.293
+0.279
+0.336
+0.269
+0.270
+0.258
+0.266
+0.254
+0.358
+0.331
+0.264
+0.259
+Tank&Temples [21]
+SSIM↑ LPIPS↓
+Size↓
+PSNR↑
+750.9
+253.9
+48.80
+0.238
+58.91
+44.54
+16.70
+19.33
+29.54
+23.46
+27.16
+15.26
+21.87
+12.68
+18.41
+8.83
+16.50
+1.72
+12.35
+11.96
+20.03
+8.34
+18.48
+7.5
+19.7
+12.05
+24.74
+23.69
+23.96
+23.32
+28.80
+23.28
+22.83
+23.15
+23.44
+23.57
+23.34
+23.32
+24.04
+24.40
+24.20
+24.29
+23.11
+23.70
+22.97
+24.41
+24.40
+24.55
+24.22
+24.32
+23.72
+24.01
+24.501
+24.59
+0.844
+0.853
+0.831
+23.32
+0.835
+0.822
+0.828
+0.838
+0.840
+0.835
+0.837
+0.846
+0.853
+0.852
+0.855
+0.815
+0.837
+0.786
+0.853
+0.848
+0.856
+0.849
+0.854
+0.830
+0.846
+0.852
+0.856
+Size↓
+PSNR↑
+BungeeNeRF [39]
+SSIM↑ LPIPS↓
+663.9
+66.00
+43.21
+25.30
+52.34
+33.94
+5.70
+13.50
+18.00
+18.00
+24.76
+4.35
+6.35
+3.45
+6.60
+6.03
+8.77
+0.93
+3.56
+2.85
+6.39
+2.91
+5.28
+3.9
+8.4
+3.26
+5.81
+24.87
+26.62
+23.36
+24.13
+25.89
+24.52
+22.43
+24.70
+24.57
+23.37
+23.06
+26.48
+27.08
+26.90
+27.15
+/
+/
+25.19
+27.35
+/
+/
+26.78
+27.17
+/
+/
+26.89
+27.15
+0.841
+0.865
+0.788
+0.802
+0.865
+0.825
+0.708
+0.815
+0.812
+0.762
+0.771
+0.845
+0.872
+0.866
+0.875
+/
+/
+0.808
+0.886
+/
+/
+0.858
+0.879
+/
+/
+0.864
+0.872
+0.178
+0.177
+0.201
+0.832
+0.203
+0.242
+0.198
+0.198
+0.188
+0.195
+0.193
+0.187
+0.177
+0.184
+0.176
+0.236
+0.208
+0.293
+0.189
+0.192
+0.176
+0.190
+0.178
+0.258
+0.226
+0.186
+0.181
+0.205
+0.241
+0.251
+0.245
+0.197
+0.255
+0.339
+0.266
+0.228
+0.286
+0.235
+0.250
+0.209
+0.222
+0.205
+/
+/
+0.279
+0.183
+/
+/
+0.235
+0.196
+/
+/
+0.223
+0.213
+Table VII. Quantitative results of comparison methods. Sizes are measured in MegaByte (MB).
+Size↓
+431.0
+86.50
+39.43
+0.194
+28.99
+22.43
+9.30
+12.50
+14.00
+12.03
+16.99
+8.10
+11.24
+7.05
+11.80
+5.89
+9.60
+1.42
+6.93
+5.75
+9.67
+5.18
+8.63
+5.9
+11.0
+5.67
+9.87
+Size↓
+1616
+183.0
+82.60
+55.79
+115.2
+87.28
+48.25
+33.39
+65.39
+39.06
+63.11
+18.49
+29.72
+14.00
+21.80
+/
+/
+10.14
+26.59
+/
+/
+11.75
+20.82
+/
+/
+13.0
+22.8

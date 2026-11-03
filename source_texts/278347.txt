@@ -1,0 +1,87 @@
+Train, inspect, edit, automate, and export 3D Gaussian Splatting scenes from a single native application. - Rasterize point clouds on Vulkan and Metal by MrNeRF · Pull Request #2465 · MrNeRF/LichtFeld-Studio
+
+Rasterize point clouds on Vulkan and Metal by MrNeRF · Pull Request #2465 · MrNeRF/LichtFeld-Studio · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+MrNeRF
+commented
+Sep 26, 2026
+Copy link
+Copy Markdown
+Owner
+The renderer's point-cloud rasterizer (rasterizer/cuda/point_cloud_raster.cu) exists only for CUDA. Without it, renderSoftwarePointCloud returned "CUDA point-cloud rasterization is unavailable in this build", which broke several features on Macs:
+Video export in point-cloud mode, or of a scene that is only a COLMAP sparse cloud. That is the state right after loading a dataset.
+The independent split view / PLY comparison in point-cloud mode.
+Python render_asset_preview for point-cloud assets.
+The main viewport was unaffected; it uses PointCloudVulkanRenderer.
+Changes
+lfs::core::rasterize_points (tensor_spatial.hpp), backed by a new rasterize_points backend op:
+Metal kernel raster.metal; Vulkan shader point_raster.slang; CUDA stubs the op, since it keeps the renderer's kernel.
+The per-point math is ported from the CUDA kernel: transforms with per-point indices, node visibility, the deleted mask, crop box or ellipsoid (inverse, desaturate), and perspective, orthographic and equirectangular projection. Each point splats a disk whose radius comes from voxel size and depth.
+Depth test: CUDA picks each pixel's winner with a 64-bit atomicMin over packed (depth, color). Metal has 64-bit atomic min only on newer GPUs, and MoltenVK's is limited. So this takes two 32-bit passes with the same winner: the nearest depth, then the smallest color among the points at exactly that depth. Clear and unpack passes surround them.
+The matrices and crop parameters travel in a small uploaded Float32 block, which keeps the Vulkan push constants within 128 bytes. The caller allocates the scratch buffer, so neither backend manages its own.
+renderSoftwarePointCloud keeps its tensor preparation, which was already backend-agnostic. It takes raw CUDA pointers only in the CUDA branch, and every non-CUDA backend calls rasterize_points. On CUDA builds, Vulkan tensors now take this path instead of reaching the CUDA kernel.
+Verification (M5 Max, macOS)
+TensorMetal.PointRasterSplatsTheNearestPoint: two points on the optical axis, on Metal and Vulkan. It checks the nearer point's color and depth, the one-pixel radius at depth 1, and the background.
+TensorMetal.PointRasterMatchesVulkan: 20k points, with and without transforms, indices, hidden nodes and deleted points. It covers perspective, orthographic, equirectangular with a transparent background, a crop box, an inverse desaturated crop box, and an ellipsoid.
+Metal and Vulkan agree to within 0.2% of pixels. MoltenVK's fast math can move a boundary point by a pixel, and it divides colors by 255 one ULP off.
+lichtfeld_tests passes on Metal and Vulkan (213/213 each). That run needed Link the macOS test binary against FFmpeg once #2464's link fix, which this PR doesn't include. lfs_core builds for the macOS 15.7 target.
+In the app on Metal:
+lf.render_asset_preview of a point-cloud PLY renders it.
+Video export of the garden dataset in point-cloud mode completes, and the frames show the sparse cloud.
+The CUDA branch keeps its kernel unchanged, but I can't build CUDA here, so the Linux and Windows CI jobs check that side.
+Rasterize point clouds on Vulkan and Metal
+…
+41cab04
+```
+The renderer's point-cloud rasterizer was a CUDA kernel. Without CUDA,
+several features that draw point clouds offscreen failed with "CUDA
+point-cloud rasterization is unavailable in this build":
+
+- video export in point-cloud mode, or of a scene that is only a
+  COLMAP sparse cloud;
+- the independent split view in point-cloud mode;
+- Python asset previews of point clouds.
+
+lfs::core::rasterize_points ports the kernel to a new backend op with
+Metal and Vulkan kernels. Each point splats a depth-tested disk, as
+before. CUDA picks the winner with one 64-bit atomic min over packed
+(depth, color); here that takes two 32-bit passes with the same
+result: the nearest depth, then the smallest color among the points
+at that depth. Transforms, visibility, the deleted mask, crop boxes
+and ellipsoids, and orthographic and equirectangular views carry over.
+
+renderSoftwarePointCloud keeps its tensor preparation. It runs the
+CUDA kernel on CUDA tensors and rasterize_points on every other
+backend.
+```
+Hide details
+View details
+MrNeRF
+merged commit ca4bf90
+into
+dev
+Sep 26, 2026
+6 of 7 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+MrNeRF
+deleted the
+feat/portable-point-cloud-raster
+branch
+September 26, 2026 12:40
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

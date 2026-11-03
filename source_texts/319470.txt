@@ -1,0 +1,119 @@
+Key points: Render directly into the screen buffer, without using an intermediate FBO. Once #14415 is done the rendering can be split into opaque vs translucent passes to help reduce context switches (especially when the artwork is batch...
+
+Implement a more efficient voxel renderer · Issue #14674 · OpenRA/OpenRA · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Implement a more efficient voxel renderer #14674
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Implement a more efficient voxel renderer#14674
+Copy link
+Labels
+Performance
+Milestone
+Tiberian Sun first 'full' (beta) release
+Description
+pchote
+opened on Jan 6, 2018
+Issue body actions
+Key points:
+Render directly into the screen buffer, without using an intermediate FBO. Once Track palette opacity through the renderer #14415 is done the rendering can be split into opaque vs translucent passes to help reduce context switches (especially when the artwork is batched).
+Abandon idea of combining a generic ModelRenderer that works for both voxels and triangle based models - they need to be treated differently if we want good perf.
+Load voxel data into a 3d textures instead of creating geometry. Maintain separate textures for colour vs normal indices. The first implementation could use one texture pair per voxel to defer the packing problem, but the rest of the plumbing should happily support batched artwork.
+VoxelRenderer writes the front faces of the voxel's bounding box into a VBO. The 6 metadata floats on the vertex store the (x,y,z) texture coordinate for each vertex and the (dx, dy, dz) line-of-sight vector through the texture volume (calculated by inverting the rotations that are applied to the bounding box). TODO: Need to work out a way to constrain the back face position so that the fs knows when to stop scanning - encoding in the length of the line-of-sight vector would be best, but will need to split the front faces by the edges of the back faces so that the GPU can interpolate both sets of coordinates correctly (doable but fiddly).
+Voxel vertex shader passes the metadata as two vec3s to the fragment shader.
+Fragment shader has immediate access to the line of sight through the texture volume. Follow http://www.cse.yorku.ca/~amana/research/grid.pdf to find the front-most voxel. The normal data is fetched from the same position in the normal texture, and the depth offset is simply the length of the scanned line of sight vector.
+👀React with 👀1Reacted by dnqbob
+Activity
+pchote
+added
+Performance
+on Jan 6, 2018
+pchote
+added this to the Tiberian Sun Public AlphaThis milestone has been deleted milestone on Jan 6, 2018
+pchote commented on Jan 6, 2018
+pchote
+on Jan 6, 2018
+MemberAuthor
+More actions
+Implementing this should fix #10534 and #11083.
+pchote commented on Mar 4, 2018
+pchote
+on Mar 4, 2018
+MemberAuthor
+More actions
+but will need to split the front faces by the edges of the back faces so that the GPU can interpolate both sets of coordinates correctly (doable but fiddly).
+https://github.com/mono/sysdrawing-coregraphics/blob/master/Utilities/ClipperLib/clipper.cs implements polygon intersection, which would make this much simpler.
+pchote commented on Apr 30, 2018
+pchote
+on Apr 30, 2018
+MemberAuthor
+More actions
+There are two problems with the proposal above:
+The current vertex format stores 9 floats, which isn't enough (I forgot about palettes).
+It seems obvious after discussions with @chrisforbes that 3D textures are a no-go due to driver issues.
+I've come up with a slightly convoluted way to split the required data across our normal vertex, sprite, and palette locations. This means we could in principle render sprites and voxels using the same shader if we are happy to deal with wildly different branches in the FS.
+Add 3 new floats to the vertex format, then define the instance-specific data as:
+X, Y, Z: position in the world (as normal).
+S, T, U: Fragment coordinate on the front face of the voxel bounds.
+V, P, C: Rotation of the voxel in the world (this defines both the line of sight vector through the volume, and the angle to the light source).
+J, K (new): Metadata palette row, column.
+L (new): Color palette row.
+The voxel data is flattened to a 1D buffer that is concatenated together in a sheet layer. The first three bytes are reserved to hold the width, length, height of the model, followed by the color and then normal data.
+The offset to this data (i.e. the u,v,channel coord of the first pixel) is stored together with the normals palette row in the "metadata palette" referenced by the J,K coords in the vertex data. The buffer is read by scanning across the sheet, stepping to the next row when the edge of the texture is reached, for a length of 2 * W * L * H + 3 per voxel section.
+When rendering a fragment we use J,K to look up the palette and then use that to look up the voxel data header. The header is used to define the mapping from voxel x,y,z coordinates to the color and normals index in the sprite sheet. We then step along the vector defined by S,T,U,V,P,C to find the first non-empty voxel, and then use the mappings to look up the color and normal values from the palette. The normal vector is then rotated by the inverse of V,P,C to get it into screen space before dotting it with the global light vector stored in a uniform. The lighting-adjusted color is written into FragColor, and Z + <length walked along the vector> is written into FragDepth.
+@chrisforbes do you see any issues with this?
+reaperrr
+modified the milestones: Tiberian Sun Public Preview Alpha, Tiberian Sun first 'full' (beta) release on May 12, 2019
+PunkPun commented on Jan 6, 2024
+PunkPun
+on Jan 6, 2024
+Last edited by PunkPun
+Member
+More actions
+This branch has proper voxel rendering onto the world. (FBO removed) https://github.com/PunkPun/OpenRA/tree/voxel-renderer3
+currently it's missing:
+shadow support
+cloak support
+UIModelRenderable doesn't work
+/render-geometry command doesn't render voxel bounds
+tint is applied as a uniform rather than per vertex
+PunkPun commented on Jan 6, 2024
+PunkPun
+on Jan 6, 2024
+Member
+More actions
+we will also want voxel cache to use the IndexBuffer like we use for sprite renderers, it should significantly boost performance
+PunkPun commented on Mar 27, 2025
+PunkPun
+on Mar 27, 2025
+Member
+More actions
+For shadows, I assume we'll go with planar shadow technique
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+Performance
+Type
+No type
+Projects
+No projects
+Milestone
+Tiberian Sun first 'full' (beta) releaseNo due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

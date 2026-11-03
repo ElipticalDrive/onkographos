@@ -1,0 +1,75 @@
+refined_grid should accept a per-child subdivision mask Summary GridBatch.refined_grid(factor, mask) takes one boolean per parent voxel and emits all factor^3 children of each selected parent. Generative sparse models predict which child...
+
+refined_grid should accept a per-child subdivision mask · Issue #831 · openvdb/fvdb-core · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+refined_grid should accept a per-child subdivision mask #831
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+refined_grid should accept a per-child subdivision mask#831
+Copy link
+Labels
+Python APITopology OperationsIssues related to topology operations (prune, merge, dilate, etc.Issues related to topology operations (prune, merge, dilate, etc.enhancementNew feature or requestNew feature or requesttriageNeeds team reviewNeeds team review
+Description
+swahtz
+opened on Oct 21, 2026
+Issue body actions
+refined_grid should accept a per-child subdivision mask
+Summary
+GridBatch.refined_grid(factor, mask) takes one boolean per parent voxel and emits all factor^3 children of each selected parent. Generative sparse models predict which children exist, as a [N, factor^3] boolean per parent (TRELLIS, TRELLIS.2, and similar octree-style decoders). Today the only way to build that grid in fVDB is to materialise the child coordinate list and call from_ijk, which runs NanoVDB PointsToGrid once per batch member with about 13 host waits each, then a second ijk_to_index pass to recover the row order.
+Motivation
+Measured in the TRELLIS.2 port (shape VAE, resolution 512, batch 2, RTX PRO 6000):
+Inference decode builds the fine grid this way at every pyramid level, 4 from_ijk builds per decode.
+Training with union teacher forcing does the same 4 builds per step, plus 4 more in checkpoint recompute.
+Each build is a nonzero, a child-coordinate kernel, bincount + cumsum for offsets, from_ijk (sort + dedup + per-level count readbacks per member), and an ijk_to_index scatter to put the parent/child maps into grid order.
+The same per-child information is one bit per child voxel, so this is a single leaf-mask pass: each parent voxel's factor^3 bits scatter directly into the child leaf masks. No coordinate list, no sort, no dedup (children of distinct parents never collide), batch-wide in one pass with one sizing sync like the other passes on the batched builder (#757, mask engine per #785).
+Proposal
+```
+GridBatch.refined_grid(subdiv_factor, mask: JaggedTensor | None = None)
+```
+accept mask.jdata of shape [N] (current behaviour) or [N, prod(subdiv_factor)], the second selecting children individually. Child bit order follows fVDB's existing refinement order (z fastest), documented; callers with another convention permute the mask columns.
+Implementation sketch on the batched builder: the existing refine pass with the leaf functor reading factor^3 bits per source voxel instead of one. For factor 2 a parent leaf maps to 8 child leaves, so the child leaf mask for octant o is the parent leaf's bits for child slot o, expanded by the usual refine spread.
+Optional companion: return the parent row for each child voxel (or expose it through ijk_to_index on the coarse grid as now). The TRELLIS-style consumer needs parent[row] and child_slot[row] in fine-grid order; both are derivable from the fine ijk with two integer ops, so this is not required.
+Relation to open work
+Batch the remaining per-member CUDA topology builders #775 item 2 (batched from_ijk) would reduce the sync count of the current workaround but keeps the sort and the coordinate list.
+Add fvdb.nn.Prune and generative shape completion / VAE examples #753's prune pass gives a two-pass alternative, refined_grid(parent_any_mask) then pruned_grid(child_mask), at two passes and a child-mask scatter; a native single pass is strictly cheaper.
+Generalize leaf-mask morphology to arbitrary factors: non-power-of-two coarsen/subdivide and general conv strides still pay the coordinate-list + radix-sort path #716 covers non-power-of-two factors; this issue is factor 2 (and 2^k) only.
+Reactions are currently unavailable
+Activity
+swahtz
+added
+enhancementNew feature or requestNew feature or request
+Topology OperationsIssues related to topology operations (prune, merge, dilate, etc.Issues related to topology operations (prune, merge, dilate, etc.
+Python API
+on Oct 21, 2026
+github-actions
+added
+triageNeeds team reviewNeeds team review
+on Oct 21, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+Python APITopology OperationsIssues related to topology operations (prune, merge, dilate, etc.Issues related to topology operations (prune, merge, dilate, etc.enhancementNew feature or requestNew feature or requesttriageNeeds team reviewNeeds team review
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

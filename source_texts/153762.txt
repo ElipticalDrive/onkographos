@@ -1,0 +1,810 @@
+ProNeRF: Learning Efficient Projection-Aware Ray Sampling for Fine-Grained
+Implicit Neural Radiance Fields
+Juan Luis Gonzalez Bello* , Minh-Quan Viet Bui* , Munchurl Kim
+arXiv:2312.08136v1 [cs.CV] 13 Dec 2023
+Korea Advanced Institute of Science and Technology (KAIST), South Korea
+Abstract
+Recent advances in neural rendering have shown that, albeit
+slow, implicit compact models can learn a scene’s geometries and view-dependent appearances from multiple views.
+To maintain such a small memory footprint but achieve faster
+inference times, recent works have adopted ‘sampler’ networks that adaptively sample a small subset of points along
+each ray in the implicit neural radiance fields. Although these
+methods achieve up to a 10× reduction in rendering time,
+they still suffer from considerable quality degradation compared to the vanilla NeRF. In contrast, we propose ProNeRF,
+which provides an optimal trade-off between memory footprint (similar to NeRF), speed (faster than HyperReel), and
+quality (better than K-Planes). ProNeRF is equipped with
+a novel projection-aware sampling (PAS) network together
+with a new training strategy for ray exploration and exploitation, allowing for efficient fine-grained particle sampling. Our
+ProNeRF yields state-of-the-art metrics, being 15-23× faster
+with 0.65dB higher PSNR than NeRF and yielding 0.95dB
+higher PSNR than the best published sampler-based method,
+HyperReel. Our exploration and exploitation training strategy allows ProNeRF to learn the full scenes’ color and density distributions while also learning efficient ray sampling
+focused on the highest-density regions. We provide extensive experimental results that support the effectiveness of
+our method on the widely adopted forward-facing and 360
+datasets, LLFF and Blender, respectively.
+1
+Introduction
+Neural radiance fields (NeRFs) (Mildenhall et al. 2020) have
+gained significant attention in the computer vision community due to their greater ability to compactly represent complex scenes’ 3D geometries and view-dependent specularity, in comparison with other implicit representations (Flynn
+et al. 2019; Sitzmann et al. 2020). The efficacy of NeRFs
+can be attributed to several key features such as: (i) the volumetric rendering technique (Drebin, Carpenter, and Hanrahan 1988), which aggregates estimated RGB-density values along rendering rays, (ii) their implicit representation by
+a multi-layer perception (MLP) network that incorporates
+positional encoding (Mildenhall et al. 2020), and (iii) their
+coarse-to-fine rendering strategy that enables dense finegrained ray sampling for high-quality rendering.
+* These authors contributed equally.
+Figure 1: Performance trade-off of neural rendering (memory, speed, quality) on the LLFF dataset.
+Although NeRFs offer a compact representation of 3D
+geometry and view-dependent effects, there is still significant room for improvement in rendering quality and inference times. To speed up the rendering times, recent trends
+have explored caching diffuse color estimation into an explicit voxel-based structure (Yu et al. 2021a; Hedman et al.
+2021; Garbin et al. 2021; Hu et al. 2022) or leveraging texture features stored in an explicit representation such as hash
+girds (Müller et al. 2022), meshes (Chen et al. 2023), or 3D
+Gaussians (Kerbl et al. 2023). While these methods achieve
+SOTA results on object-centric 360 datasets, they underperform for the forward-facing scene cases and require considerably larger memory footprints than NeRF.
+In a different line of work, the prior literature of (Neff
+et al. 2021; Piala and Clark 2021; Lin et al. 2022; Kurz et al.
+2022; Attal et al. 2023) has proposed training single-pass
+lightweight “sampler” networks, aimed to reduce the number of ray samples required for volumetric rendering. Although fast and memory compact, previous sampler-based
+methods often fall short in rendering quality compared to
+the computationally expensive vanilla NeRF.
+In contrast, our proposed method with a Projection-Aware
+Sampling (PAS) network and an exploration-exploitation
+training strategy, denoted as “ProNeRF,” greatly reduces the
+inference times while simultaneously achieving superior image quality and more details than the current high-quality
+methods (Chen et al. 2022; Sara Fridovich-Keil and Gi-
+acomo Meanti et al. 2023). In conjunction with its small
+memory footprint (as small as NeRF), our ProNeRF yields
+the best performance profiling (memory, speed, quality)
+trade-off. Our main contributions are as follows1 :
+• Faster rendering times. Our ProNeRF leverages multiview color-to-ray projections to yield a few precise 3D
+query points, allowing up to 23× faster inference times
+than vanilla NeRF under a similar memory footprint.
+• Higher rendering quality. Our proposed PAS and
+exploration-exploitation training strategy allow for sparse
+fine-grained ray sampling in an end-to-end manner, yielding rendered images with improved quality metrics compared to the implicit baseline NeRF.
+• Comprehensive experimental validation. The robustness of ProNeRF is extensively evaluated on forwardfacing and 360 object-centric multi-view datasets. Specifically, in the context of forward-facing scenes, ProNeRF
+establishes SOTA renders, outperforming implicit and explicit radiance fields, including NeRF, TensoRF, and KPlanes with a considerably more optimal performance
+profile in terms of memory, speed, and quality.
+2
+Related Work
+The most relevant works concerning our proposed method
+focus on maintaining the compactness of implicit NeRFs
+while reducing the rendering times by learning sampling
+networks for efficient ray querying.
+Nevertheless, other works leverage data structures for
+baking radiance fields, that is, caching diffuse color and
+latent view-dependent features from a pre-trained NeRF
+to accelerate the rendering pipelines (as in SNeRG (Hedman et al. 2021)). Similarly, Yu et al. (2021a) proposed
+Plenoctrees to store spatial densities and spherical harmonics (SH) coefficients for fast rendering. Subsequently, to reduce the redundant computation in empty space, Plenoxels
+(Fridovich-Keil et al. 2022) learns a sparse voxel grid of SH
+coefficients. On the other hand, Efficient-NeRF (Hu et al.
+2022) presents an innovative caching representation referred
+to as “NeRF-tree,” enhancing caching efficiency and rendering performance. However, these approaches require a pretrained NeRF and a considerably larger memory footprint to
+store their corresponding scene representations.
+Explicit data structures have also been used for storing latent textures in explicit texture radiance fields to speed up
+the training and inference times. Particularly, INGP (Müller
+et al. 2022) proposes quickly estimating the radiance values by interpolating latent features stored in multi-scaled
+hash grids. Drawing inspiration from tensorial decomposition, in TensoRF, Chen et al. (2022) factorize the scene’s
+radiance field into multiple low-rank latent tensor components. Following a similar decomposition principle, Sara
+Fridovich-Keil and Giacomo Meanti et al. (2023) introduced
+K-Planes for multi-plane decomposition of 3D scenes. Recently, MobileNeRF (Chen et al. 2023) and 3DGS (Kerbl
+et al. 2023) concurrently propose merging the rasterization
+process with explicit meshes or 3D Gaussians for real-time
+1
+Visit our project website at https://kaist-viclab.github.io/
+pronerf-site/
+rendering. Similar to the baked radiance fields, MobileNeRF and 3DGS demonstrate the capability to achieve incredibly rapid rendering, up to several hundred frames per second. However, they demand a considerably elevated memory footprint, which might be inappropriate in resourceconstrained scenarios where real-time swapping of neural
+radiance fields is required, such as streaming, as discussed
+by Kurz et al. (2022).
+Inspired by the concept proposed in (Levoy and Hanrahan 1996), recent studies have also explored the learning
+of neural light fields which only require a single network
+evaluation for each casted ray. Light field networks such as
+LFNR (Suhail et al. 2022b) and GPNR (Suhail et al. 2022a)
+presently exhibit optimal rendering performance across diverse novel view synthesis datasets. Nevertheless, they adopt
+expensive computational attention operations for aggregating multi-view projected features. Additionally, it’s worth
+noting that similar to generalizable radiance fields (e.g.,
+IBRNet (Wang et al. 2021), or NeuRay (Liu et al. 2022)),
+LFNR and GPNR necessitate the storage of all training input
+images for epipolar feature projection, leading to increased
+memory requirements. Conversely, our method, ProNeRF,
+leverages color-to-ray projections while guaranteeing consistent memory footprints by robustly managing a small and
+fixed subset of reference views for rendering any novel view
+in the target scene. This eliminates the necessity for nearestneighbor projection among all available training views in
+each novel scene. To balance computational cost and rendering quality for neural light fields, RSEN (Attal et al. 2022)
+introduces a novel ray parameterization and space subdivision structure of the 3D scenes. On the other hand, R2L
+(Wang et al. 2022) distills a compact neural light field with
+a pre-trained NeRF. Although R2L achieves better inference
+time and quality than RSEN, it necessitates the generation
+of numerous pseudo-images from a pre-trained NeRF to perform exhaustive training on dense pseudo-data. This process
+can extend over days of optimization.
+In addition to IBRNet and NeuRay, other generalizable
+radiance fields have also been explored in (Yu et al. 2021b;
+Li et al. 2021), but are less relevant to our work.
+Learning sampling networks. In AutoInt, Lindell, Martel, and Wetzstein (2021) propose to train anti-derivative networks that describe the piece-wise color and density integrals of discrete ray segments whose distances are individually estimated by a sampler network. In DONeRF (Neff
+et al. 2021) and TermiNeRF (Piala and Clark 2021), the
+coarse NeRF in vanilla NeRF is replaced with a sampling
+network that learns to predict the depth of objects’ surfaces
+using either depth ground truth (GT) or dense depths from a
+pre-trained NeRF. The requirement of hard-to-obtain dense
+depths severely limits DONeRF and TermiNeRF for broader
+applications. ENeRF (Lin et al. 2022) learns to estimate the
+depth distribution from multi-view images in an end-to-end
+manner. In particular, ENeRF adopts cost-volume aggregation and 3D CNNs to enhance geometry prediction.
+Instead of predicting a continuous depth distribution,
+AdaNeRF (Kurz et al. 2022) proposes a sampler network
+that maps rays to fixed and discretized distance probabilities.
+During test, only the samples with the highest probabilities
+are fed into the shader (NeRF) network for volumetric rendering. AdaNeRF is trained in a dense-to-sparse multi-stage
+manner without needing a pre-trained NeRF. The shader is
+first trained with computationally expensive dense sampling
+points, where sparsification is later introduced to prune insignificant samples, and then followed by simultaneous sampling and shading network fine-tuning. In MipNeRF360,
+Barron et al. (2022) introduce online distillation to train
+the sampling network. Nevertheless, the sampler utilized in
+MipNeRF360 remains structured as a radiance field, necessitating a per-point forward pass. Consequently, incorporating this sampler does not yield substantial improvements in
+rendering latency. On the other hand, in the recent work of
+HyperReel, Attal et al. (2023) proposed a sampling network
+for learning the geometry primitives in grid-based rendering models such as TensoRF. HyperReel inherits the fasttraining properties of TensoRF but also yields limited rendering quality with a considerably increased memory footprint compared to the vanilla NeRF.
+Contrary to the existing literature, we present a samplerbased method, ProNeRF, that allows for fast neural rendering while substantially outperforming the implicit and
+explicit NeRFs quantitatively and qualitatively in reconstructing forward-facing captured scenes. The main components of ProNeRF are a novel PAS network and a new
+learning strategy that borrows from the reinforcement learning concepts of exploration and exploitation. Moreover,
+all the previous sampler-based methods require either pretrained NeRFs (TermiNeRF), depth GTs (DoNeRF), complex dense-ray sampling and multi-stage training strategies
+(AdaNeRF), or large memory footprint (HyperReel). In contrast, our proposed method can more effectively learn the
+neural rendering in an end-to-end manner from sparse rays,
+even with shorter training cycles than NeRF.
+3
+Proposed Method
+Fig. 2 depicts a high-level overview of our ProNeRF, which
+is equipped with a projection-aware sampling (PAS) network and a shader network (a.k.a NeRF) for few-point volumetric rendering. ProNeRF performs PAS in a coarse-tofine manner. First, for a given target ray, ProNeRF maps the
+ray direction and origin into coarse sampling points with the
+help of an MLP head (Fθc ). By tracing lines from these sampling points into the camera centers of the reference views
+in the training set, ProNeRF performs a color-to-ray projection which is aggregated to the coarse sampling points and
+is processed in a second MLP head (Fθf ). Fθf then outputs
+the refined 3D points that are fed into the shading network
+(Fθs ) for the further volumetric rendering of the ray color ĉ.
+See Section 3.2 for more details.
+Training a ProNeRF as depicted in Fig. 2 is not a trivial
+task, as the implicit shader needs to learn the full color and
+density distributions in the scenes while the PAS network
+tries to predict ray points that focus on specific regions with
+the highest densities. Previous works, such as DoNERF, TermiNeRF, and AdaNeRF go around this problem at the expense of requiring depth GTs, pre-trained NeRF models, or
+expensive dense sampling. To overcome this issue, we propose an alternating learning strategy that borrows from rein-
+forcement learning which (i) allows the shading network to
+explore the scene’s rays and learn the full scene distributions
+and (ii) leads the PAS network to exploit the ray samples
+with the highest densities. See Section 3.3 for more details.
+3.1
+PAS-Guided Volumetric Rendering
+Volumetric rendering synthesizes images by traversing the
+rays that originate in the target view camera center into a
+3D volume of color and densities. As noted by Mildenhall
+et al. (2020), the continuous volumetric rendering equation
+(VRE) of a ray color c(r) can be efficiently approximated
+by alpha compositing, which is expressed as:
+
+PN Q
+ĉ(r) = i=1 i−1
+(1)
+j=1 1 − αj αi ci ,
+where N is the total number of sampling points and αi denotes the opacity at the ith sample in ray r as given by
+αi = 1 − e−σi (ti+1 −ti ) .
+(2)
+Here, σi and ci respectively indicate the density and colors
+at the 3D location given by r(ti ) for the ith sampling point
+on r. A point on r in distance t is r(t) = ro + rd t where ro
+and rd are the ray origin and direction, respectively.
+In NeRF (Mildenhall et al. 2020), a large number of N
+samples along the ray is considered to precisely approximate the original integral version of the VRE. In contrast,
+our objective is to perform high-quality volumetric rendering with a smaller number of samples Ns << N . Rendering
+a ray with a few samples in our ProNeRF can be possible by
+accurately sampling the 3D particles with the highest densities along the ray. Thanks to the PAS, our ProNeRF can
+yield a sparse set of accurate sampling distances, denoted as
+T = {t1 , t2 , ..., tNs }, by which the shading network Fθs is
+queried for each point corresponding to the ray distances in
+T (along with rd ) to obtain ci and σi as
+[ci , σi ] = Fθs (r(ti ), rd ).
+(3)
+Furthermore, similar to AdaNeRF, our ProNeRF adjusts the
+final sample opacities αi , which allows for fewer-sample
+rendering and back-propagation during training. However,
+unlike the AdaNeRF that re-scales the sample densities, we
+shift and scale the α values in our ProNeRF, yielding α̂:
+α̂i = ai (1 − e−(σi +bi )(ti+1 −ti ) ),
+(4)
+where ai and bi are estimated by the PAS network as At =
+{a1 , a2 , ..., aNs } and Bt = {b1 , b2 , ..., bNs }. We then render
+the final ray color in our PAS-guided VRE according to
+
+PNs Qi−1
+ĉ(r) = i=1
+(5)
+j=1 1 − α̂j α̂i ci .
+3.2
+PAS: Projection-Aware Sampling
+Similar to previous sampler-based methods, our PAS network in the ProNeRF runs only once per ray, which is a
+very efficient operation during both training and testing. As
+depicted in Fig. 2, our ProNeRF employs two MLP heads
+that map rays into the optimal ray distances T and the corresponding shift and scale in density values At and Bt required in the PAS-guided VRE.
+Figure 2: A conceptual illustration of our fast and high-quality projection-aware sampling of neural radiance fields (ProNeRF).
+The reference views are available during training and testing. The target view is drawn for illustrative purposes only.
+The first step in the PAS of our ProNeRF is to map the
+ray’s origin and direction (ro and rd ) into a representation
+that facilitates the mapping of training rays and interpolation
+of unseen rays. Feeding the raw ro and rd into Fθc can mislead to overfitting, as there are a few ray origins in a given
+scene (as many as reference views). To tackle this problem,
+previous works have proposed to encode rays as 3D points
+(TermiNeRF) or as a Plücker coordinate which is the crossproduct ro × rd (LightFields and HyperReel). Motivated by
+these works, we combine the Plücker and ray-point embedding into a ‘Plücker ray-point representation’. Including the
+specific points in the ray aids in making the input representation more discriminative, as it incorporates not only the ray
+origin but also the range of the ray, while the vanilla Plücker
+ray can only represent an infinitely long ray. The embedded
+ray rpr is then given by
+rpr = [rd , ro + rd ⊙ tnf , (ro + rd ⊙ tnf ) × rd ] (6)
+where tnf is a vector whose Npr elements are evenly spaced
+between the scene’s near and far bounds (tn and tf ), ⊙ is
+the Hadamard product, and [·, ·] is the concatenation operation. The ProNeRF processes the encoded ray rpr via Fθc
+in the first stage of PAS to yield the coarse sampling distances T ′ = {t′1 , t′2 , ..., t′Ns } along r. Fθc also predicts the
+shifts and scales in opacity values At and Bt . Furthermore,
+inspired by light-fields, Fθc yields a light-field color output
+ĉc which is supervised to approximate the GT color c(r) to
+further regularize Fθc and improve the overall learning. The
+multiple outputs of Fθc are then given by
+[T ′ , At , Bt , ĉc ] = Fθc (rpr ).
+(7)
+While the previous sampler-based methods attempt to
+sample radiance fields with a single network such as Fθc , we
+propose a coarse-to-fine PAS in ProNeRF. In our ProNeRF,
+the second MLP head Fθf is fed with the coarse sampling
+points r(t′i ) and color-to-ray projections which are obtained
+by tracing lines between the estimated coarse 3D ray points
+and the camera centers of Nn neighboring views from a pool
+of Nt available images, as shown in Fig. 2. The pool of Nt
+images in the training phase consists of all training images.
+However, it is worth noticing that only a significantly small
+number of Nt views is needed for inference. The color-toray projections make ProNeRF projection-aware and enable
+Fθf to better understand the detailed geometry in the scenes
+as they contain not only image gradient information but also
+geometric information that can be implicitly learned for each
+point in space. That is, high-density points tend to contain
+similarly-valued multi-view color-to-ray projections.
+Although previous image-based rendering methods have
+proposed to directly exploit projected reference-viewfeatures onto the shading network, such as the works of T
+et al. (2023) and Suhail et al. (2022b), these approaches necessitate computationally expensive attention mechanisms
+and all training views storage for inference, hence increasing the inference latency and memory footprint. On the other
+hand, we propose to incorporate color-to-ray projections not
+for directly rendering the novel views but for fine-grained
+ray sampling of radiance fields. As we learn to sample implicit NeRFs sparsely, our framework provides a superior
+trade-off between memory, speed, and quality.
+The color-to-ray projections are concatenated with the
+′
+Plücker-ray-point-encoded rpr
+of coarse ray distances T ′ ,
+which is then fed into Fθf , as shown in Fig. 2. In turn, Fθf
+improves T ′ by yielding a set of inter-sampling refinement
+weights, denoted as 0 ≤ ∆T ≤ 1. The refined ray distances
+T are obtained by the linear interpolation between consecutive elements of the expanded set of coarse ray distances
+Ṫ = {tn , t′1 , t′2 , ..., t′Ns , tf } from T ′ , as given by
+oNs
+n 
+.
+(8)
+T = 21 (Ṫi + Ṫi+1 ) + ∆Ti (Ṫi+2 − Ṫi )
+i=1
+Our inter-sampling residual refinement aids in training stability by reusing and maintaining the order of the coarse
+samples T ′ . ∆T is predicted by Fθf as given by
+′
+[∆T , W, M ] = Fθf ([rpr
+, fp1 , fp2 , ..., fpNs ]),
+(9)
+k
+th
+n
+color-towhere fpi = [c1pi , c2pi , ..., cN
+pi ] and cpi is the k
+ray projection from the Nn views at 3D point pi = r(t′i ).
+Note that W and M in Eq. (9) are the auxiliary outputs
+of softmax and sigmoid for network regularization, respectively. In contrast with Fθc , Fθf is projection-aware, thus
+ĉf is obtained by exploiting the color-to-ray projections in
+an approximated version of volumetric rendering (AVR). In
+AVR, ckpi and W ∈ RNs are employed to approximate the
+
+Qi−1
+VRE (Eq. 1). The terms
+j=1 1 − αj αi in VRE are approximated by W while ci is approximated by projected
+color ckpi for the k th view in Nn neighbors. AVR then yields
+PNs
+ckavr = i=1
+Wi ckpi ,
+(10)
+resulting in Nn sub-light-field views. The final light-field
+output ĉf is aggregated by M ∈ RNn with ckavr as
+PNn
+Mk ckavr
+(11)
+ĉf = k=1
+Algorithm 1: Exploration and exploitation end2end training
+1: procedure P RO N E RF TRAINING
+2:
+Init Data, PAS, Fθs , Opts , Optcf s
+3:
+for it = 0 to 7 × 105 do
+4:
+Sample random ray r
+5:
+At , Bt , T , ĉc , ĉf ← P AS(r)
+6:
+if 2|it and it < 4×105 then
+▷ Exploration pass
+7:
+Ns+ ← RandInt(Ns , N )
+8:
+T + ← Sample(T, Ns+ )
+9:
+T + ← T + + noise
+Ns+
+← Fθs (ro + rd ⊙ T + )
+10:
+{ci , σi }i=1
+11:
+12:
+13:
+14:
+15:
+16:
+17:
+18:
+19:
+20:
+3.3
+N+
+s
+, T + ) (Eq. 1)
+ĉ(r) ← V RE({ci , σi }i=1
+loss ← |ĉ(r) − c(r)|2
+Back-propagate and update by Opts
+else
+▷ Exploitation pass
+s
+(r
++
+r
+⊙
+T)
+←
+F
+{ci , σi }N
+o
+d
+θ
+s
+i=1
+s
+ĉ(r) ← V RE({ci , σi }N
+,
+A
+,
+Bt , T ) (Eq. 5)
+t
+i=1
+loss ← |ĉ(r) − c(r)|2
+if it < 4×105 then
+loss ← loss + |ĉc − c(r)|2 + |ĉf − c(r)|2
+Back-propagate and update by Optcf s
+Novel Exploration-Exploitation Training
+Our training strategy alternates between ray sampling exploration and exploitation as shown in Algorithm 1. As noted
+in line(L)-2, we first initialize the dataset (composed of calibrated multi-views) by extracting the target rays and colors, followed by ProNeRF’s networks’ initialization. We implement two optimizers, one for exploration (Opts ) and the
+other for exploitation (Optcf s ). Opts updates the weights in
+Fθs , while Optcf s updates all weights in Fθc , Fθf , Fθs . The
+first step in a training cycle is to obtain the PAS outputs (At ,
+Bt , T , ĉc , ĉf ), as denoted in line 5 of Algorithm 1.
+In the exploration pass (Algorithm 1 L-7 to 13), Fθs learns
+the scene’s full color and density distributions by randomly
+interpolating Ns estimated T distances into Ns+ piece-wise
+evenly-spaced exploration sample distances T + . For example, if the number of estimated ray distances is Ns = 8 and
+the exploration samples are randomly set to Ns+ = 32, the
+distance between each sample in T will be evenly divided
+into four bins such that the sample count is 32. Moreover,
+we add Gaussian noise to T + as shown in of Algorithm 1 L9, further allowing the Fθs to explore the scene’s full color
+and density distributions. We then query Fθs for the Ns+ exploration points to obtain ci and σi in the original VRE (Eq.
+1). Finally, Fθs is updated in the exploration pass.
+In the exploitation pass, described in Algorithm 1 L-15 to
+20, we let the PAS and Fθs be greedy by only querying the
+samples corresponding to T and using the PAS-guided VRE
+(Eq. 5). Additionally, we provide GT color supervision to the
+auxiliary PAS network light-field outputs ĉc and ĉf for the
+first 60% of the training iterations. For the remaining 40%,
+ProNeRF focuses on the exploitation and disables the auxiliary loss as described by Algorithm 1 L-18 and 19. Note that
+for rendering a ray color with a few points during exploitation and testing, adjusting αi in Eq. 4 is needed to compensate for the subsampled accumulated transmittance which is
+learned for the full ray distribution in the exploration pass.
+In summary, during exploration, we approximate the VRE
+with Monte Carlo sampling, where a random number of
+samples, ranging from Ns to N , are drawn around the estimated T . When training under exploitation, we sparsely
+sample the target ray r given by T . Furthermore, we only
+update Fθs during the exploration pass while using the original VRE (Eq. 1). However, in our exploitation pass, we update all MLP heads while using the PAS-guided VRE (Eq.
+5). See Section 4 for more implementation details.
+3.4
+Objective functions
+Similar to previous works, we guide ProNeRF to generate
+GT colors from the queried ray points with an l2 penalty as
+P
+l = N1r Nr ||ĉ(r) − c(r)||2 ,
+(12)
+which is averaged over the Nr rays in a batch. In contrast with the previous sampler-based networks (TermiNeRF, AdaNeRF, DoNeRF, HyperReel), our ProNeRF predicts additional light-field outputs, which further regularize
+learning, and is trained with an auxiliary loss la , as given by
+P
+la = N1r Nr ||ĉc (r) − c(r)||2 + ||ĉf (r) − c(r)||2 . (13)
+Our total objective loss is lT = l + λla , where λ is 1 for 60%
+of the training and then set to 0 afterward.
+4
+Experiments and Results
+We provide extensive experimental results on the LLFF
+(Mildenhall et al. 2019) and Blender (Mildenhall et al. 2020)
+datasets to show the effectiveness of our method in comparison with recent SOTA methods. Also, we present a comprehensive ablation study that supports our design choices and
+main contributions. More results are shown in Supplemental.
+We evaluate the rendering quality of our method by three
+widely used metrics: Peak Signal-to-Noise Ratio (PSNR),
+Structural Similarity (SSIM) (Wang et al. 2004) and Learned
+Perceptual Image Patch Similarity (LPIPS) (Zhang et al.
+2018). When it comes to SSIM, there are two common implementations available, one from Tensorflow (Abadi et al.
+2015) (used in the reported metrics from NeRF, MobileNeRF, and IBRnet), and another from sci-kit image (van der
+Walt et al. 2014) (employed in ENeRF, RSeN, NLF). We
+denoted the metrics from Tensorflow and scikit-image as
+SSIMt and SSIMs , respectively. Similarly, for LPIPS, we
+can choose between two backbone options, namely AlexNet
+(Krizhevsky, Sutskever, and Hinton 2012) and VGG (Simonyan and Zisserman 2014). We present our SSIM and
+LPIPS results across all available choices to ensure a fair and
+comprehensive evaluation of our method’s performance.
+4.1
+Implementation Details
+We train our ProNeRF with PyTorch on an NVIDIA A100
+GPU using the Adam optimizer with a batch of Nr = 4, 096
+randomly sampled rays. The initial learning rate is set to
+5 × 10−4 and is exponentially decayed for 700K iterations.
+We used TensoRT on a single RTX 3090 GPU with model
+weights quantized to half-precision FP16 for testing. We set
+the point number in the Plücker ray-point encoding for our
+PAS network to 48. We set the maximum number of exploration samples to N = 64. Fθc and Fθf consist of 6 fullyconnected layers with 256 neurons followed by ELU nonlinearities. Finally, we adopt the shading network introduced
+in DONeRF, which has 8 layers with 256 neurons.
+4.2
+Results
+Forward-Facing (LLFF). This dataset comprises 8 challenging real scenes with 20 to 64 front-facing handheld captured views. We conduct experiments on 756 × 1008 images to compare with previous methods, holding out every
+8th image for evaluation. We also provide the quantitative
+results on 378 × 504 images for a fair comparison to the
+methods evaluated on the lower resolution.
+Our quantitative and qualitative results, respectively
+shown in Table 1 and Fig. 3, demonstrate the superiority of
+our ProNeRF over the implicit NeRF and the previous explicit methods, e.g, TensoRF and K-Planes. Our model with
+8 samples, ProNeRF-8, is the first sampler-based method
+that outperforms the vanilla NeRF by 0.28dB PSNR while
+being more than 20× faster. Furthermore, our ProNeRF12 yields rendered images with 0.65dB higher PSNR while
+being about 15× faster than vanilla NeRF. Our improvements are reflected in the superior visual quality of the rendered images, as shown in Fig. 3. On the lower resolution,
+ProNeRF-8 outperforms the second-best R2L by 0.28dB and
+the latest sampler-based HypeRreel by 0.58dB with faster
+rendering. In Table 1, compared to the explicit grid-based
+methods of INGP, Plenoxels and MobileNeRF, our ProNeRF
+shows a good trade-off between memory, speed, and quality.
+We also present the quantitative results of the auxiliary
+PAS light field outputs in Table 1, denoted as PAS-8 cf for
+both the regression (Reg) and AVR cases. We observed no
+difference in the final color output when Reg or AVR were
+used in ProNeRF-8. However, PAS-8 cf (AVR) yields considerably better metrics than its Reg counterpart.
+Inspired by the higher FPS from PAS-8 cf (AVR), we also
+explored pruning ProNeRF by running the Fθs only for the
+“complex rays”. We achieve ProNeRF-8 prune by training
+a complementary MLP head Fθm which has the same complexity as Fθc and predicts the error between ĉf and ĉ outputs. When the error is low, we render the ray by PAS-8 cf
+(AVR); otherwise, we subsequently run the shader network
+Fθs . While pruning requires an additional 3.3 MB in memory, the pruned ProNeRF-8 is 23% faster than ProNeRF-8
+with a small PSNR drop and negligible SSIM and LPIPS
+degradations, as shown in Table 1. Note that other previous
+sampler-based methods cannot be pruned similarly, as they
+do not incorporate the auxiliary light-filed output. Training
+pruning is fast (5min). See more details in Supplemental.
+Res. Methods
+PSNR SSIMt/s LPIPSvgg/alex FPS Mem(MB)
+NeRF (ECCV20)
+26.50 0.811 / 0.250 / 0.3
+3.8
+INGP (SIGGRAPH22)
+25.60 0.758 / 0.267 / 7.3
+64.0
+Plenoxels (CVPR22)
+26.30 0.839 / 0.210 / 9.1 3629.8
+MipNeRF360 (CVPR22) 26.86 0.858 / - / 0.128
+0.1
+8.2
+TensoRF (ECCV22)
+26.73 0.839 / 0.204 / 0.124 1.1
+179.7
+K-Planes (CVPR23)
+26.92 0.847 / 0.182 / 0.7
+214
+25.63 0.818 / 0.183 / 50.7 337.3
+756 SNeRG (ICCV21)
+0.159 / 8.9
+10.7
+× ENeRF (SIGGRAPHA22) 24.89 - / 0.865
+25.70
+-/-/7.7
+4.1
+1008 AdaNeRF (ECCV22)
+Hyperreel (CVPR23)
+26.20
+-/-/4.0
+58.8
+MobileNeRF (CVPR23) 25.91 0.825 / 0.183 / 348 201.5
+PAS-8 cf (Reg) (Ours)
+24.86 0.787 / 0.855 0.236 / 0.150 29.4
+2.7
+PAS-8 cf (AVR) (Ours) 25.15 0.793 / 0.860 0.234 / 0.146 25.6
+5.0
+ProNeRF-8 Prune (Ours) 26.54 0.825 / 0.883 0.219 / 0.120 8.5
+6.8
+ProNeRF-8 (Ours)
+26.78 0.825 / 0.884 0.228 / 0.119 6.9
+3.5
+ProNeRF-12 (Ours)
+27.15 0.838 / 0.894 0.217 / 0.109 4.4
+3.5
+FastNeRF (ICCV21)
+26.04 - / 0.856
+- / 0.085
+700
+4100
+EfficientNeRF (CVPR22) 27.39 - / 0.912
+- / 0.082
+219
+2800
+378 RSEN (CVPR22)
+27.45 - / 0.905
+- / 0.060
+0.34
+5.4
+× R2L (ECCV22)
+27.79
+-/- / 0.097
+5.6
+22.6
+504 Hyperreel (CVPR23)
+27.50
+-/-/4.0
+58.8
+ProNeRF-8 (Ours)
+28.08 0.879 / 0.916 0.129 / 0.060 6.9
+3.5
+ProNeRF-12 (Ours)
+28.33 0.885 / 0.920 0.129 / 0.058 4.4
+3.5
+Table 1: Results on LLFF. Metrics are the lower the better
+and the higher the better . (-) metrics are not provided in the
+original literature.
+Methods
+PSNR SSIM LPIPS
+No exploration pass 24.00 0.754 0.299
+No exploitation pass 24.31 0.779 0.278 Avg Nt PSNR SSIM LPIPS Mem(MB)
+4.00 27.15 0.838 0.217
+3.5
+No σ shift (no Bt ) 24.2 0.773 0.264
+8.00 27.16 0.838 0.216
+4.2
+No aux. loss (no la ) 24.26 0.766 0.296
+4.9
+No α̂ (no At , Bt ) 24.69 0.785 0.260 12.00 27.15 0.837 0.217
+No Plücker ray-point 24.72 0.782 0.257 32.75 27.15 0.838 0.216
+8.4
+No color-to-ray proj 24.83 0.789 0.245
+ProNeRF-12 Nn =4 25.17 0.809 0.244
+Table 2: ProNeRF ablations on LLFF. (Left) Network designs on Fern. (Right) Ablation of # of available ref. views.
+360 Blender. This is an object-centric 360-captured synthetic dataset for which our ProNeRF-32 achieves a reasonably good performance of 31.92 dB PSNR, 3.2 FPS (after
+pruning) and 6.3 MB Mem. It should be also noted that
+the ProNeRF-32 outperforms NeRF, SNeRG, Plenoctree,
+and Plenoxels while still displaying a favorable performance
+profiling. See Supplemental for detailed results.
+4.3
+Ablation Studies
+We ablate our ProNeRF on the LLFF’s Fern scene in Table 2
+(left). We first show that infusing exploration and exploitation into our training strategy is critical for high-quality
+neural rendering. As shown in the top section of Table 2
+(left), exploration- or exploitation-only leads to sub-optimal
+results as neither the shading network is allowed to learn the
+full scene distributions nor the PAS network is made to focus
+on the regions with the highest densities.
+Next, we explore our network design by ablating each
+Ground Truth
+ProNeRF
+TensoRF (ECCV 2022)
+NeRF (ECCV 2020)
+Figure 3: Qualitative comparisons for the LLFF (Mildenhall et al. 2019) dataset. Zoom in for better visualization.
+Figure 4: Cameras distribution on the LLFF’s Fortress scene.
+Green cameras denote available training views. Red cameras
+denote selected and fixed subset of Nt frames for projection.
+design choice. As noted in Table 2 (left), removing α scales
+(At ) and shifts (Bt ) severely impact the rendering quality.
+We also observed that the auxiliary loss (la ) is critical to
+properly train our sampler since its removal causes almost
+1dB drop in PSNR. The importance of our Plücker ray-point
+encoding is shown in Table 2 (left), having an impact of almost 0.5dB PSNR drop when disabled. Finally, we show that
+the color-to-ray projection in the PAS of our ProNeRF is the
+key feature for high-quality rendering.
+Memory footprint consistency. This experiment proves
+ProNeRF yields a consistent usage of memory footprint. As
+mentioned in Section 2, light-fields and image-based rendering methods, which rely on multi-view color projections,
+typically require large storage for all available training views
+for rendering a novel view. This is because they utilize the
+nearest reference views to the target pose from the entire
+pool of available images. In contrast, our ProNeRF takes a
+distinct approach by consistently selecting a fixed subset of
+Nt reference views when rendering any novel viewpoint in
+the inference stage. This is possible because (i) we randomly
+select any Nn neighboring views (from the entire training
+pool) during training; and (ii) our final rendered color is obtained by sparsely querying a radiance field, not by directly
+processing projected features/colors. As a result, our framework yields a consistent memory footprint for storing reference views, which is advantageous for efficient hardware
+design. To select the Nt views, we leverage the sparse point
+cloud reconstructed from COLMAP and a greedy algorithm
+to identify the optimal combination of potential frames. As
+shown in Fig. 4, the Nt views become a subset across all
+available training images that comprehensively cover the target scene (see details in Supplemental). As shown in Table
+2 (right), we set the number of neighbors in PAS to Nn = 4
+and adjust Nt to 4, 8, 12, and all training views (32.75).
+Please note our ProNeRF’s rendering quality remains stable
+while modulating Nt , attesting to the stability and robustness of our approach across varying configurations.
+4.4
+Limitations
+While not technically constrained to forward-facing scenes
+(such as NeX) and yielding better metrics than vanilla NeRF
+and several other works, our method is behind grid-based
+explicit models such as INGP for the Blender dataset. The
+methods like INGP contain data structures that better accommodate these kinds of scenes. Our method requires more
+samples for this data type, evidencing that our method is
+more efficient and shines on forward-facing datasets.
+5
+Conclusions
+Our ProNeRF, a sampler-based neural rendering method,
+significantly outperforms the vanilla NeRF quantitatively
+and qualitatively for the first time. It also outperforms the
+existing explicit voxel/grid-based methods by large margins while preserving a small memory footprint and fast
+inference. Furthermore, we showed that our exploration
+and exploitation training is crucial for learning high-quality
+rendering. Future research might extend our ProNeRF for
+dynamic-scenes and cross-scene generalization.
+Acknowledgements
+This work was supported by IITP grant funded by the Korea
+government (MSIT) (No. RS2022-00144444, Deep Learning Based Visual Representational Learning and Rendering
+of Static and Dynamic Scenes).
+References
+Abadi, M.; Agarwal, A.; Barham, P.; Brevdo, E.; Chen, Z.;
+Citro, C.; Corrado, G. S.; Davis, A.; Dean, J.; Devin, M.;
+Ghemawat, S.; Goodfellow, I.; Harp, A.; Irving, G.; Isard,
+M.; Jia, Y.; Jozefowicz, R.; Kaiser, L.; Kudlur, M.; Levenberg, J.; Mané, D.; Monga, R.; Moore, S.; Murray, D.; Olah,
+C.; Schuster, M.; Shlens, J.; Steiner, B.; Sutskever, I.; Talwar, K.; Tucker, P.; Vanhoucke, V.; Vasudevan, V.; Viégas,
+F.; Vinyals, O.; Warden, P.; Wattenberg, M.; Wicke, M.; Yu,
+Y.; and Zheng, X. 2015. TensorFlow: Large-Scale Machine
+Learning on Heterogeneous Systems. Software available
+from tensorflow.org.
+Attal, B.; Huang, J.; Richardt, C.; Zollhöfer, M.; Kopf, J.;
+O’Toole, M.; and Kim, C. 2023. HyperReel: High-Fidelity
+6-DoF Video with Ray-Conditioned Sampling. CoRR,
+abs/2301.02238.
+Attal, B.; Huang, J.-B.; Zollhöfer, M.; Kopf, J.; and Kim,
+C. 2022. Learning Neural Light Fields with Ray-Space Embedding Networks. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR).
+Barron, J. T.; Mildenhall, B.; Verbin, D.; Srinivasan, P. P.;
+and Hedman, P. 2022. Mip-NeRF 360: Unbounded AntiAliased Neural Radiance Fields. CVPR.
+Chen, A.; Xu, Z.; Geiger, A.; Yu, J.; and Su, H. 2022. TensoRF: Tensorial Radiance Fields. In Avidan, S.; Brostow,
+G. J.; Cissé, M.; Farinella, G. M.; and Hassner, T., eds.,
+Computer Vision - ECCV 2022 - 17th European Conference, Tel Aviv, Israel, October 23-27, 2022, Proceedings,
+Part XXXII, volume 13692 of Lecture Notes in Computer
+Science, 333–350. Springer.
+Chen, Z.; Funkhouser, T.; Hedman, P.; and Tagliasacchi, A.
+2023. MobileNeRF: Exploiting the Polygon Rasterization
+Pipeline for Efficient Neural Field Rendering on Mobile Architectures. In The Conference on Computer Vision and Pattern Recognition (CVPR).
+Drebin, R. A.; Carpenter, L.; and Hanrahan, P. 1988. Volume
+rendering. ACM Siggraph Computer Graphics, 22(4): 65–
+74.
+Flynn, J.; Broxton, M.; Debevec, P.; DuVall, M.; Fyffe, G.;
+Overbeck, R.; Snavely, N.; and Tucker, R. 2019. Deepview:
+View synthesis with learned gradient descent. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, 2367–2376.
+Fridovich-Keil, S.; Yu, A.; Tancik, M.; Chen, Q.; Recht, B.;
+and Kanazawa, A. 2022. Plenoxels: Radiance Fields without
+Neural Networks. In IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, CVPR 2022, New Orleans,
+LA, USA, June 18-24, 2022, 5491–5500. IEEE.
+Garbin, S. J.; Kowalski, M.; Johnson, M.; Shotton, J.; and
+Valentin, J. P. C. 2021. FastNeRF: High-Fidelity Neural
+Rendering at 200FPS. In 2021 IEEE/CVF International
+Conference on Computer Vision, ICCV 2021, Montreal, QC,
+Canada, October 10-17, 2021, 14326–14335. IEEE.
+Hedman, P.; Srinivasan, P. P.; Mildenhall, B.; Barron, J. T.;
+and Debevec, P. E. 2021. Baking Neural Radiance Fields
+for Real-Time View Synthesis. In 2021 IEEE/CVF International Conference on Computer Vision, ICCV 2021, Montreal, QC, Canada, October 10-17, 2021, 5855–5864. IEEE.
+Hu, T.; Liu, S.; Chen, Y.; Shen, T.; and Jia, J. 2022. EfficientNeRF - Efficient Neural Radiance Fields. In IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+CVPR 2022, New Orleans, LA, USA, June 18-24, 2022,
+12892–12901. IEEE.
+Kerbl, B.; Kopanas, G.; Leimkühler, T.; and Drettakis, G.
+2023. 3D Gaussian Splatting for Real-Time Radiance Field
+Rendering. ACM Transactions on Graphics, 42(4).
+Krizhevsky, A.; Sutskever, I.; and Hinton, G. E. 2012. Imagenet classification with deep convolutional neural networks. Advances in neural information processing systems,
+25.
+Kurz, A.; Neff, T.; Lv, Z.; Zollhöfer, M.; and Steinberger, M.
+2022. AdaNeRF: Adaptive Sampling for Real-Time Rendering of Neural Radiance Fields. In Avidan, S.; Brostow, G. J.;
+Cissé, M.; Farinella, G. M.; and Hassner, T., eds., Computer
+Vision - ECCV 2022 - 17th European Conference, Tel Aviv,
+Israel, October 23-27, 2022, Proceedings, Part XVII, volume 13677 of Lecture Notes in Computer Science, 254–270.
+Springer.
+Levoy, M.; and Hanrahan, P. 1996. Light Field Rendering. In Fujii, J., ed., Proceedings of the 23rd Annual Conference on Computer Graphics and Interactive Techniques,
+SIGGRAPH 1996, New Orleans, LA, USA, August 4-9, 1996,
+31–42. ACM.
+Li, J.; Feng, Z.; She, Q.; Ding, H.; Wang, C.; and Lee, G. H.
+2021. MINE: Towards Continuous Depth MPI with NeRF
+for Novel View Synthesis. In 2021 IEEE/CVF International
+Conference on Computer Vision, ICCV 2021, Montreal, QC,
+Canada, October 10-17, 2021, 12558–12568. IEEE.
+Lin, H.; Peng, S.; Xu, Z.; Yan, Y.; Shuai, Q.; Bao, H.; and
+Zhou, X. 2022. Efficient Neural Radiance Fields for Interactive Free-viewpoint Video. In SIGGRAPH Asia Conference
+Proceedings.
+Lindell, D. B.; Martel, J. N. P.; and Wetzstein, G. 2021. AutoInt: Automatic Integration for Fast Neural Volume Rendering. In IEEE Conference on Computer Vision and Pattern
+Recognition, CVPR 2021, virtual, June 19-25, 2021, 14556–
+14565. Computer Vision Foundation / IEEE.
+Liu, Y.; Peng, S.; Liu, L.; Wang, Q.; Wang, P.; Theobalt, C.;
+Zhou, X.; and Wang, W. 2022. Neural Rays for Occlusionaware Image-based Rendering. In CVPR.
+Mildenhall, B.; Srinivasan, P. P.; Cayon, R. O.; Kalantari,
+N. K.; Ramamoorthi, R.; Ng, R.; and Kar, A. 2019. Local light field fusion: practical view synthesis with prescriptive sampling guidelines. ACM Trans. Graph., 38(4): 29:1–
+29:14.
+Mildenhall, B.; Srinivasan, P. P.; Tancik, M.; Barron, J. T.;
+Ramamoorthi, R.; and Ng, R. 2020. NeRF: Representing
+Scenes as Neural Radiance Fields for View Synthesis. In
+Vedaldi, A.; Bischof, H.; Brox, T.; and Frahm, J., eds., Computer Vision - ECCV 2020 - 16th European Conference,
+Glasgow, UK, August 23-28, 2020, Proceedings, Part I, volume 12346 of Lecture Notes in Computer Science, 405–421.
+Springer.
+Müller, T.; Evans, A.; Schied, C.; and Keller, A. 2022. Instant neural graphics primitives with a multiresolution hash
+encoding. ACM Trans. Graph., 41(4): 102:1–102:15.
+Neff, T.; Stadlbauer, P.; Parger, M.; Kurz, A.; Mueller, J. H.;
+Chaitanya, C. R. A.; Kaplanyan, A.; and Steinberger, M.
+2021. DONeRF: Towards Real-Time Rendering of Compact Neural Radiance Fields using Depth Oracle Networks.
+Comput. Graph. Forum, 40(4): 45–59.
+Piala, M.; and Clark, R. 2021. TermiNeRF: Ray Termination
+Prediction for Efficient Neural Rendering. In International
+Conference on 3D Vision, 3DV 2021, London, United Kingdom, December 1-3, 2021, 1106–1114. IEEE.
+Sara Fridovich-Keil and Giacomo Meanti; Warburg, F. R.;
+Recht, B.; and Kanazawa, A. 2023. K-Planes: Explicit Radiance Fields in Space, Time, and Appearance. In CVPR.
+Simonyan, K.; and Zisserman, A. 2014. Very deep convolutional networks for large-scale image recognition. arXiv
+preprint arXiv:1409.1556.
+Sitzmann, V.; Martel, J.; Bergman, A.; Lindell, D.; and Wetzstein, G. 2020. Implicit neural representations with periodic activation functions. Advances in Neural Information
+Processing Systems, 33: 7462–7473.
+Suhail, M.; Esteves, C.; Sigal, L.; and Makadia, A. 2022a.
+Generalizable Patch-Based Neural Rendering. In European
+Conference on Computer Vision. Springer.
+Suhail, M.; Esteves, C.; Sigal, L.; and Makadia, A. 2022b.
+Light Field Neural Rendering. In IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, CVPR 2022, New
+Orleans, LA, USA, June 18-24, 2022, 8259–8269. IEEE.
+T, M. V.; Wang, P.; Chen, X.; Chen, T.; Venugopalan, S.;
+and Wang, Z. 2023. Is Attention All That NeRF Needs?
+In The Eleventh International Conference on Learning Representations, ICLR 2023, Kigali, Rwanda, May 1-5, 2023.
+OpenReview.net.
+van der Walt, S.; Schönberger, J. L.; Nunez-Iglesias, J.;
+Boulogne, F.; Warner, J. D.; Yager, N.; Gouillart, E.; Yu, T.;
+and the scikit-image contributors. 2014. scikit-image: image
+processing in Python. PeerJ, 2: e453.
+Wang, H.; Ren, J.; Huang, Z.; Olszewski, K.; Chai, M.; Fu,
+Y.; and Tulyakov, S. 2022. R2L: Distilling Neural Radiance
+Field to Neural Light Field for Efficient Novel View Synthesis. In ECCV.
+Wang, Q.; Wang, Z.; Genova, K.; Srinivasan, P. P.; Zhou,
+H.; Barron, J. T.; Martin-Brualla, R.; Snavely, N.; and
+Funkhouser, T. A. 2021. IBRNet: Learning Multi-View
+Image-Based Rendering. In IEEE Conference on Computer Vision and Pattern Recognition, CVPR 2021, virtual,
+June 19-25, 2021, 4690–4699. Computer Vision Foundation
+/ IEEE.
+Wang, Z.; Bovik, A. C.; Sheikh, H. R.; and Simoncelli, E. P.
+2004. Image quality assessment: from error visibility to
+structural similarity. IEEE Trans. Image Process., 13(4):
+600–612.
+Yu, A.; Li, R.; Tancik, M.; Li, H.; Ng, R.; and Kanazawa, A.
+2021a. PlenOctrees for Real-time Rendering of Neural Radiance Fields. In 2021 IEEE/CVF International Conference
+on Computer Vision, ICCV 2021, Montreal, QC, Canada,
+October 10-17, 2021, 5732–5741. IEEE.
+Yu, A.; Ye, V.; Tancik, M.; and Kanazawa, A. 2021b. pixelNeRF: Neural Radiance Fields From One or Few Images.
+In IEEE Conference on Computer Vision and Pattern Recognition, CVPR 2021, virtual, June 19-25, 2021, 4578–4587.
+Computer Vision Foundation / IEEE.
+Zhang, R.; Isola, P.; Efros, A. A.; Shechtman, E.; and Wang,
+O. 2018. The Unreasonable Effectiveness of Deep Features
+as a Perceptual Metric. In 2018 IEEE Conference on Computer Vision and Pattern Recognition, CVPR 2018, Salt Lake
+City, UT, USA, June 18-22, 2018, 586–595. Computer Vision Foundation / IEEE Computer Society.

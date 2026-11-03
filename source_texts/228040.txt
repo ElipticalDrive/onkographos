@@ -1,0 +1,146 @@
+CUDA accelerated rasterization of gaussian splatting - [3DGUT] Add camera pose gradients to eval3d rasterization by Jay-D13 · Pull Request #1094 · nerfstudio-project/gsplat
+
+[3DGUT] Add camera pose gradients to eval3d rasterization by Jay-D13 · Pull Request #1094 · nerfstudio-project/gsplat · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Jay-D13
+commented
+Oct 15, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Fixes #1093
+The eval3d rasterizer does not currently return gradients for viewmats or viewmats_rs. With with_ut=True and with_eval3d=True, this leaves camera pose optimization without a geometric image gradient. View-dependent SH colors still provide a gradient through the camera position, but cannot correct a rotation about the camera center.
+This PR backpropagates the existing per-pixel ray gradients through camera ray generation. It enables pose refinement with 3DGUT, including gradients for both rolling-shutter endpoint poses. The API is unchanged. The additional buffers and pose backward pass are used only when a pose tensor requires gradients and explicit rays are absent.
+Method
+For a world-to-camera pose [R | t], ray generation computes
+```
+o = Rᵀ (o_cam - t)
+d = Rᵀ c
+```
+The eval3d backward already computes derivatives with respect to the world-space origin o and direction d. A new CUDA kernel chains these derivatives into the camera poses and reduces the contributions per image. It shares the forward pass's camera-model dispatch, including the image-plane origins used by orthographic cameras.
+For rolling shutter, the kernel differentiates the interpolated pose with respect to both endpoints. It uses the forward pass's shutter timing and normalized quaternion interpolation, with SO(3) Jacobians for the endpoint rotations. Small-angle coefficients use Taylor expansions to avoid cancellation in float32.
+Pose gradients are intended for parameterizations that produce valid rotations, such as R @ so3_exp(xi). Global shutter returns the usual matrix-entry gradient used by the EWA projection backward; rolling shutter returns a matrix gradient with the correct derivatives along rotation tangent directions. Derivatives for arbitrary changes to the rotation matrix entries are not specified.
+Pose refinement on garden
+Mip-NeRF 360 garden, data_factor=4, 7,000 training iterations, MCMC strategy, and the unchanged examples/simple_trainer.py. Each configuration was run once with seed 42 on an RTX 4070 Ti SUPER with PyTorch 2.9.1. All noisy-pose runs use the same perturbations: pose_noise=0.01, with mean initial rotation error 0.899° and translation error 0.0172 in normalized scene units. There are 161 training views and 24 test views; test views use the supplied COLMAP poses.
+The table uses pose_opt_lr=1e-4, ten times the trainer default. Pose errors are mean residuals relative to the supplied training poses, measured from T_perturb @ T_adjust, without aligning the reconstructed scene.
+Configuration
+PSNR ↑ (dB)
+SSIM ↑
+LPIPS ↓
+Rotation error ↓ (°)
+Translation error ↓
+3DGUT, fixed noisy poses
+19.54
+0.336
+0.617
+0.899
+0.0172
+3DGUT, pose refinement (upstream 512d366b)
+19.39
+0.339
+0.656
+0.899
+0.0207
+3DGUT, pose refinement (this PR)
+21.52
+0.449
+0.493
+0.457
+0.0113
+3DGS (EWA), pose refinement
+21.61
+0.457
+0.501
+0.485
+0.0116
+3DGUT, reference poses
+25.86
+0.806
+0.165
+0
+0
+With this change, 3DGUT gains 2.13 dB over upstream and reduces the mean rotation residual by about half. Its reconstruction metrics and pose residuals are close to EWA at the same iteration budget. There is still a substantial gap to training with the reference poses. These results illustrate the fix on one scene and seed.
+Mean rotation and translation residuals after 7,000 iterations, at the default and higher pose learning rates. The dashed line marks the initial perturbation.
+Illustrative crops from test views 0 and 11, with locations selected to show the effect of pose refinement. The last column is 3DGUT trained with the reference poses. PSNR labels refer to the full images and are computed from saved 8-bit renders; the table uses the trainer's floating-point evaluation metrics. Recomputing PSNR from the saved renders shows an improvement over upstream on all 24 test views, from 0.94 to 3.04 dB per view.
+Default pose learning rate and additional plots
+At the default pose_opt_lr=1e-5, 7,000 iterations produce a smaller correction:
+Configuration
+PSNR ↑ (dB)
+SSIM ↑
+LPIPS ↓
+Rotation error ↓ (°)
+Translation error ↓
+3DGUT, pose refinement (upstream)
+19.55
+0.337
+0.618
+0.899
+0.0173
+3DGUT, pose refinement (this PR)
+19.74
+0.343
+0.611
+0.841
+0.0164
+3DGS (EWA), pose refinement
+19.80
+0.343
+0.609
+0.843
+0.0164
+This PR and EWA reduce the initial rotation residual by about 6%; upstream leaves it essentially unchanged.
+Test metrics at pose_opt_lr=1e-4. Reference lines show fixed noisy poses and reference poses, both rendered with 3DGUT.
+Training loss at pose_opt_lr=1e-4. Curves average five consecutive logged samples, recorded every 100 iterations. Each sample is the loss on the training image used at that iteration.
+Reproduction
+```
+python examples/simple_trainer.py mcmc \
+    --data_dir data/360_v2/garden --data_factor 4 \
+    --max_steps 7000 --eval_steps 7000 --save_steps 7000 \
+    --disable_viewer --disable_video \
+    --pose_noise 0.01 --pose_opt --pose_opt_lr 1e-4 \
+    --with_ut --with_eval3d
+```
+Remove --with_ut --with_eval3d for EWA. Remove --pose_opt for fixed noisy poses, and also remove --pose_noise 0.01 for reference poses. Use separate result directories. The saved runs used a wrapper around the trainer to read out the final pose residuals; it did not change the training loop or MCMC preset.
+All runs and tests used PyTorch 2.9.1 (the upstream GPU CI version) and CUDA 12.8, with this branch as submitted and no local patches. Upstream rows use unmodified 512d366b, built the same way.
+Validation
+All 22 new tests in tests/test_eval3d_viewmat_grads.py pass cleanly (~6s on RTX 4070 Ti SUPER, PyTorch 2.9.1), covering:
+Reference Gradients: Verified against PyTorch autograd through the eval3d reference for global shutter and all four rolling-shutter directions (including coincident endpoints and 0.3 rad relative rotations).
+Finite Differences: Central finite differences through rasterization() across pinhole, OpenCV distorted pinhole, fisheye, F-Theta, and orthographic cameras.
+Edge Cases: Identical rolling-shutter endpoints, batched/invisible scenes, and verification that Gaussian-position gradients remain completely unchanged when pose gradients are active.
+Gradient Routing: Validates MixedBatch and ParallelBatch renderers, and ensures ray gradients are correctly routed when explicit rays are provided.
+The gradient comparisons use valid rotation perturbations. Finite differences use a sparse synthetic scene because visibility and alpha cutoffs make dense-scene numerical derivatives unstable.
+Also checked locally, outside the test file: image-based pose recovery in a fixed synthetic scene (two cameras offset by 2-4° and 5-9 cm, 400 Adam steps). With 3DGUT the loss drops from 2.0e-2 to 3.8e-6 and the rotation errors to 0.0048 and 0.00044 rad, on par with EWA on the same setup (0.0049 and 0.00045 rad).
+Full upstream suite (pytest tests/, full pytest.ini build configuration, PyTorch 2.9.1), excluding the native C++ tests: 2,631 passed, 22 failed, 132 skipped. The 22 failures are 21 numerical-tolerance cases (three 2DGS v_colors, twelve F-Theta and six orthographic UT projection) and the missing optional compression dependency. All 22 fail the same way on unmodified 512d366b, built and run the same way.
+A local RTX 4070 Ti SUPER benchmarked with 111,785 Gaussians at 1920×1280 (medians over 20 backward passes): enabling pose gradients adds at most 5.0% additional backward time with zero measurable peak memory overhead across 1, 3, and 6 cameras (global and rolling shutter). When requires_grad=False, overhead is zero. Python and C++/CUDA formatting checks pass.
+Scope
+Included: Propagates camera-ray gradients to viewmats and viewmats_rs (supporting explicit ray-generation graphs or direct rasterizer pose inputs).
+Excluded: Does not add gradients for camera intrinsics, distortion parameters, LiDAR, or external distortions. When using UT with depth (D/ED), the direct pose derivative of projected Gaussian depth is omitted (tracked separately in [fix] 3DGUT: hit-distance and normal gradients at clamped alpha #1083).
+Jay-D13
+added 2 commits
+October 15, 2026 16:22
+Add camera pose gradients to 3DGUT eval3d rasterization
+e4cd7b8
+Add tests for eval3d viewmat gradients
+30f3aac
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

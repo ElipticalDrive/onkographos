@@ -1,0 +1,193 @@
+Real-time GI has always been a holy grail of computer graphics. Over the years there were multiple approaches to this problem. Usually constraining problem domain by leveraging certain assumptions like static geometry, too coarse scene representation or tracing from coarse probes and interpolating lighting in between. When I started Lumen with Daniel Wright, our goal…
+
+Journey to Lumen | Krzysztof Narkowicz
+Krzysztof Narkowicz
+Engine / Graphics Programmer
+Skip to content
+Home
+Publications
+About
+← Comparing Microfacet Multiple Scattering with Real-Life Measurements
+Journey to Lumen
+Posted on August 18, 2022 by Krzysztof Narkowicz
+Real-time GI has always been a holy grail of computer graphics. Over the years there were multiple approaches to this problem. Usually constraining problem domain by leveraging certain assumptions like static geometry, too coarse scene representation or tracing from coarse probes and interpolating lighting in between. When I started Lumen with Daniel Wright, our goal was to build a not nearly as compromised solution as anyone may have seen before, which would unify lighting and achieve quality similar to baked lighting.
+As with any novel system, we did a lot of exploration. Some of it was a dead end and we had to revise our approach and try something different. We tried to cover our journey in SIGGRAPH 2022 talk, but 90 minutes was barely enough to present how Lumen works now. This post will cover our discarded techniques and shed some light on our journey to the solutions presented during SIGGRAPH.
+Software Ray Tracing Representation
+When we started Lumen, hardware ray tracing was announced, but there were no GPUs supporting it, nor any concrete performance numbers. Current console generation was clearly coming to its end and next-gen consoles were just around the corner, but we had no idea how fast hardware ray tracing is going to be or if it’s even going to be supported on consoles. This forced us to first look for a practical software ray tracing approach, which later also proved to be a great tool for scaling down or supporting scenes with lots of overlapping instances, which isn’t well handled by a fixed two level BVH.
+Tracing in software opens a possibility to use a wild variety of tracing structures like triangles, distance fields, surfels or heightfields. We discarded triangles as it was clear that we won’t be able to beat a hardware solution at its own game. We briefly looked into surfels, but those require a quite high density to be able to represent geometry and updating or tracing so many surfels is quite expensive.
+Heightfields
+After initial exploration the most promising candidate was heightfield. Heightfields map well to hardware, provide compact surface representation and simple continuous LOD. They are also pretty fast to trace, as we can use all of the POM algorithms like min-max quadtrees. Multiple heightfields can represent complex geometry, similar to Rasterized Bounding Volume Hierarchies.
+It’s also interesting to think about them as an acceleration structure for surfels, where a single texel is one surfel constrained to a regular grid. This trades free placement for faster updates, tracing and lower memory overhead.
+Alongside the heightfield we also store other properties like albedo or lighting, which allow us to compute lighting at every hit. This entire decal-like projection with surface data is what we named cards in Lumen.
+Rasterized triangles
+Raymarched cards (heightfields)
+Cards also store opacity, which allows us to have holes in them – imagine something like a chain-link fence. With hardware bilinear interpolation every sample can potentially interpolate from a fully transparent texel with an invalid depth value. We didn’t want to do manual bilinear interpolation inside the inner loop of the ray marcher, so instead we dilated depth values during the card capture.
+Before and after card depth dilatation
+It would be too slow to raymarch every card in the scene for every ray. We needed some kind of an acceleration structure for cards. We settled on a 4-node BVH, which was built for an entire scene every frame on a CPU and uploaded to the GPU. Then inside the tracing shader we would do stack based traversal with node sorting on the fly in order to first traverse the closest ones.
+Heightfield BVH debug view
+Card Placement
+The tricky part is how to place heightfields in order to capture the entire mesh. One of the ideas was to make GPU based placement based on a global distance field. Every frame we would trace a small set of primary rays to find ray hits not covered by cards. Next for every uncovered hit we would walk the global distance field using surface gradients to figure out an optimal card orientation and extents in order to spawn a new card.
+Global distance field based card placement
+This is great for performance, as it allows you to spawn cards for an entire merged scene instead of having to spawn cards per mesh. Unfortunately it proved to be quite finicky in practice, as every time when the camera moved different results were generated.
+The next idea was to place cards per mesh as a mesh import step. We did this by building a BVH of geometry, where every node would be converted to N cards.
+Rasterized triangles
+Raymarched cards (heightfields)
+Card placement view
+This approach had issues with finding a good placement, as we found out that BVH nodes aren’t really a good proxy for where to place cards.
+The next idea was to follow the UV unwrapping techniques and try clustering surface elements. We also switched triangles to surfels, as this was a time where it was clear that we will need to handle millions of polygons made possible by Nanite. We also switched to a less constrained freely oriented cards to try to match surfaces better.
+Freely oriented card placement
+This worked great for simple shapes, but had issues with converging on more complex shapes, so in the end we switched back to axis-aligned cards, but this time generated from surfel clusters and per mesh.
+Cone Tracing
+The unique property of tracing heightfields is that we could do cone tracing. Cone tracing is great for reducing noise without any denoising, as a pre-filtered single cone trace represents thousands of individual rays. This means that we won’t need a strong denoiser and would avoid all issues caused by it like ghosting.
+Ray tracing
+Cone tracing
+For every card we stored a full pre-filtered mip-map chain with surface height, lighting and material properties. When tracing, the cone was selecting an appropriate mip level based on the cone footprint and ray-marching it. Cone doesn’t have to be fully occluded by a card, so we approximated partial cone occlusion using distance to card border and surface transparency.
+Tracing without and with card borders
+Cone tracing isn’t trivial, as every step we may have a partial surface hit, which should then accordingly occlude any future hits. This partial cone occlusion tracking gets more complicated with multiple heightfields, as heightfields aren’t depth sorted per ray and can’t be sorted in a general case, as they may intersect each other. This is basically another big and unsolved rendering problem – unordered transparency.
+Our solution was to accumulate occlusion assuming that no cards overlap, as we prefer to over-occlude instead of leaking. For the radiance accumulation we used Weighted Blended OIT. Interestingly while Weighted Blended OIT has a fair amount of leaking with primary rays due to large depth ranges, it worked pretty well for short GI rays.
+Weighted blended OIT with a narrow cone
+Weighted blended OIT with a wide cone
+Merged Scene Representation
+Having to trace lots of incoherent rays in software proved to be quite slow. Ideally we would raymarch a single global structure per ray, instead of multiple heightfields.
+We had an important realization that when cone footprint gets larger, we don’t really need a precise scene presentation and could switch to something more approximate and faster.
+A bit more complex scene with dozens of cards to trace per ray
+The first successful approach was to implement pure voxel cone tracing, where the entire scene was voxelized at runtime and we would ray march it just like in the classic ”Interactive Indirect Illumination Using Voxel Cone Tracing” paper.
+This is also where the concept of trace continuation in Lumen was born. We would first trace heightfields for a short distance and then switch to voxel cone tracing to continue the ray if necessary.
+Rasterized triangles
+Raymarched cards (heightfields)
+Voxel cone tracing
+Raymarched cards continued with voxel cone tracing
+The main drawback of voxel cone tracing is leaking due to aggressive merging of scene geometry, which is especially visible when tracing coarser (lower) mip-maps. Such merged representation is later interpolated both spatially between neighboring voxels and angulary between nearby voxel faces.
+First leaking reduction technique was to trace a global distance field and sample voxel volume only near the surface. During sampling we would accumulate opacity alongside radiance and stop tracing when opacity would reach 1. Always sampling voxel volume exactly near the geometry increased the chance of a cone stopping at a thin solid wall.
+The second technique was to voxelize mesh interiors. This greatly reduces leaking for thicker walls, but also causes some over occlusion, as now we are interpolating zero radiance voxel faces incorrectly reducing overall energy.
+Even with distance fields we would still see leaking in various places, so later we also were forcing cone tracing to terminate if we registered a distance field ray hit. This minimized leaking, but caused more over occlusion and somewhat contradicted the idea of tracing cones.
+Some other experiments included tracing sparse voxel bit bricks and voxels with transparency channel per face. Both of those experiments were designed to solve the issue of ray direction voxel interpolation, where an axis aligned solid wall would become transparent for rays which aren’t perpendicular to the wall.
+Voxel bit bricks were storing one bit per voxel in a 8x8x8 brick to indicate whether a given voxel is empty or not. Then we raymarched them using a two level DDA algorithm. Voxels with transparent faces were similar, but had only a single level DDA and were accumulating transparency along the ray. Both approaches turned out to be less effective at representing geometry than distance fields and were quite slow due to lack of good empty space skipping.
+Voxels with transparency
+Earliest approach to tracing a merged representation was cone tracing a global distance field and shading hits using global per scene cards. Specifically we were traversing a BVH to find which cards in the scene affect our hit point and then sampling every card’s appropriate mip level based on the cone footprint.
+Raymarched cards
+Raymarched global distance field with hit lighting from cards
+We discarded this approach as at that point we didn’t think about using this only for the far field trace representation and instead thought about it as a direct replacement for heightfield ray marching. Ironically this discarded approach was closest to the solution we finally arrived at two years later.
+Shipping First Demo
+At this point we could generate some quite nice results:
+Still, we had lots of issues with leaking and performance in this simple scene wasn’t ideal even on a good PC GPU:
+Radeon RX Vega 64 at 1080p
+3.86ms Radiosity
+2.26ms DirectLighting
+8.48ms Prefilter / Voxel injection
+5.50ms LightCardDiffuseGI
+5.46ms LightCardReflections
+Total 25.56ms
+This was the initial state when we started working on our first real world use case – “Lumen in the Land of Nanite” tech demo. We had to solve leaking, handle x100 more instances and ship all of this under 8ms on a PS5. This demo was truly a catalyst and a forcing-function for the Lumen 2.0.
+The first and biggest change was replacing heightfield tracing with distance field tracing. In order to shade the hit points we interpolate lighting at the hit point from the cards as distance fields have no vertex attributes and can’t evaluate materials. With this change, areas with missing coverage only result in lost energy, instead of leaking.
+In the same spirit voxel cone tracing was changed to global distance field ray tracing and shading hits from a merged card volume.
+We still used prefiltering by keeping a full mip-map hierarchy for cards and looking up appropriate mip based on the ray footprint, but later we noticed that it doesn’t really help to prefilter only some types of traces when other traces aren’t (like screen space). Additionally any kind of prefiltering, even only for the sky cubemap, was leading to more leaking as now potentially we were gathering invisible texels.
+Alongside this we also made lots of various optimizations and time-spliced different parts of Lumen through caching schemes. Notably without cone tracing we had to more aggressively denoise and cache traces, but that’s another long and complex story. Not only out of scope for this post, but also I’m likely not the one to write about it.
+Here’s our end result after shipping the first demo with Lumen being consistently below 8ms on PS5, including all shared data structure updates like the global distance field. Nowadays those numbers are even better, as we are close to 4ms in this demo and with many quality improvements.
+Epilogue
+That was quite a journey – from a variety of theoretical ideas and a bunch of prototypes to something shippable. We did a full rewrite of the entire Lumen and had lots of different ideas which didn’t pan out practice. Some things on the other hand were repurposed. Like initially we used cards as a tracing representation, but now it became a way to cache various computations on the mesh surfaces. Similar to software tracing, which started as our main tracing method betting on the idea of cone tracing, but ended up as a way to scale down and support complex heavy scenes with lots of overlapping instances.
+You can also learn more about where we arrived at with Lumen from the SIGGRAPH Advances talks:
+* “Radiance Caching for Real-Time Global Illumination”
+* “Lumen: Real-time Global Illumination in Unreal Engine 5”
+Share this:
+Share on X (Opens in new window)
+X
+Share on Facebook (Opens in new window)
+Facebook
+Like Loading...
+This entry was posted in Uncategorized and tagged Global Illumination, Graphics, Lighting. Bookmark the permalink.
+← Comparing Microfacet Multiple Scattering with Real-Life Measurements
+9 Responses to Journey to Lumen
+Jan Klasen says:
+June 27, 2023 at 03:02
+https://advances.realtimerendering.com/s2022/index.html#Lumen
+The site no longer loads. Any mirror?
+LikeLike
+Reply
+Krzysztof Narkowicz says:
+June 27, 2023 at 03:08
+You can try web archive link: http://web.archive.org/web/20230421233640/https://advances.realtimerendering.com/s2022/SIGGRAPH2022-Advances-Lumen-Wright%20et%20al.pdf
+LikeLike
+Reply
+Jan Klasen says:
+June 27, 2023 at 03:15
+Hi Krysztof,
+Thank you, this works perfectly.
+Best,
+Jan
+LikeLike
+Reply
+James says:
+October 31, 2023 at 16:33
+Wow, thank you for sharing.
+Any possibility to see the Land of Nanite published (packaged or/and project files) one day?
+LikeLike
+Reply
+Krzysztof Narkowicz says:
+October 31, 2023 at 17:09
+I think it’s quite unlikely that we would do anything with it so long after the original binary release.
+LikeLike
+Reply
+JBlackwell says:
+November 21, 2025 at 01:18
+It’s kind of amusing to me that the solution you guys came up with for Lumen, so strongly resembles the technology that powered the Samaritan demo all those years ago. Cards to capture geometry, SDFs for occlusion. Obviously much evolved in its’ current form, but I’d be curious to hear if that demo was on the development team’s minds as different ways of solving the problem were considered.
+LikeLike
+Reply
+Krzysztof Narkowicz says:
+November 22, 2025 at 14:22
+Everything started from an idea of replacing denoising with cone tracing, which I guess is somewhat similar to reflection cards in the Samaritan. SDFs came somewhat later, when it was clear that we can’t cone trace (or even ray trace) cards and we had to ship something soon.
+LikeLike
+Reply
+Josh Plasterer says:
+January 22, 2026 at 16:31
+Oh yeah, your description of Land Of Nanite as a forcing-function matches what I heard from my prof. on Brian Karris’s work with Nanite (they shipped Prey together). Correct me if I’m wrong, but didn’t Lumen in that demo (and Valley of the Ancients?) include a reflective shadow map pass for far-field GI in SWRT? I’m sad that feature appears to have been cut, as I don’t think there’s any other way to do far-field lighting with SWRT anymore.
+LikeLike
+Reply
+Krzysztof Narkowicz says:
+January 23, 2026 at 22:44
+Hi, yeah, we have a RSM which was a last minute addition to make that last section of a demo work.
+Nowadays we have FarField for that (special simplified scene representation) and indeed it’s only implemented in the HWRT path. We could add something similar to SWRT, but that path isn’t our focus anymore.
+LikeLike
+Reply
+Leave a Reply Cancel reply
+Recent Posts
+Journey to Lumen
+Comparing Microfacet Multiple Scattering with Real-Life Measurements
+Biome Painter: Populating Massive Worlds
+Cloth Shading
+Digital Dragons 2017
+Job System and ParallelFor
+HDR Display – First Steps
+Automatic Exposure
+ACES Filmic Tone Mapping Curve
+Analytical DFG Term for IBL
+C++
+CELL
+Conference
+Global Illumination
+Graphics
+Lighting
+Multithreading
+PBR
+Post Processing
+Shader
+Tools
+Follow me on Twitter
+My Tweets
+Krzysztof Narkowicz
+Create a free website or blog at WordPress.com.
+Comment
+Reblog
+Subscribe
+Subscribed
+Krzysztof Narkowicz
+Have a WordPress.com account? Log in now.
+Krzysztof Narkowicz
+Copy shortlinkView post in Reader
+Manage subscriptionsSign upLog in
+Report this content
+Collapse this bar
+Loading Comments...
+%d
+Create your own website, free on WordPress.com.Create your own website.
+Start free

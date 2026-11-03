@@ -1,0 +1,3353 @@
+1
+CF-Splat: Closed-Form Triangle Splatting with Mesh Priors
+arXiv:2610.22108v1 [cs.RO] 15 Oct 2026
+Yixin Fang1 , Liang Zhao1,†
+Abstract—Splatting-based radiance-field representations have
+recently gained popularity in robotic perception, enabling highquality novel-view synthesis (NVS) through explicit scene primitives. However, existing splatting methods typically rely on
+iterative nonlinear optimization that jointly optimizes millions of
+coupled primitive parameters, resulting in substantial computation time, peak GPU memory consumption, and susceptibility to
+local minima. In this paper, we propose CF-Splat, a novel closedform triangle-splatting framework for efficient scene appearance
+estimation over a known mesh either pre-existing or provided by
+upstream mapping or reconstruction pipelines. Our key insight
+is that, by properly formulating the problem over the given mesh
+geometry and calibrated cameras, the rendered pixel colors can
+be expressed linearly with respect to the per-vertex spherical harmonics (SH) coefficients, allowing multi-view scene appearance
+estimation to be formulated as a global linear least-squares (LLS)
+problem without the need of iterative nonlinear optimization.
+To guarantee a well-posed solution under uneven multi-view
+observation coverage, we introduce adaptive SH regularization
+that constrains insufficiently supported high-order SH coefficients
+and yields a unique global minimizer. To ensure the scalability to
+large-scale scenes, we develop a triangle-structured matrix-free
+preconditioned conjugate-gradient solver that avoids explicitly
+constructing the large sparse normal system while producing the
+same LLS solution. Experiments on diverse real-world datasets
+demonstrate that CF-Splat achieves competitive or superior NVS
+quality compared with state-of-the-art splatting methods. While,
+CF-Splat requires approximately 27.5×–378.0× less computation
+time and 1.8× lower peak GPU memory on average than 3DGS
+across scenes of different scales on a consumer-grade laptop.
+Interactive live demos are available on an anonymous website1 .
+We will release the source code upon acceptance of this paper.
+Index Terms—Scene Appearance Estimation, Novel View Synthesis, Triangle Splatting.
+I. I NTRODUCTION
+R
+ADIANCE-FIELD representations have become increasingly important in robotic perception, including augmented reality [1], photorealistic simulation [2], and autonomous navigation [3]. In these settings, an effective scene
+representation should capture reliable geometry while efficiently modeling appearance, enabling high-quality novelview synthesis (NVS) with low computational overhead for
+downstream robotic tasks. Neural Radiance Field (NeRF) [4]
+methods represent scenes as continuous volumetric functions
+parameterized by multilayer perceptrons (MLPs) and have
+demonstrated remarkable NVS quality, but typically require
+hours of per-scene optimization. Recently, 3D Gaussian Splatting (3DGS) [5] has achieved rendering quality comparable
+to NeRF while substantially reducing optimization time and
+enabling real-time rendering. It explicitly represents a scene
+as a set of anisotropic 3D Gaussian primitives and employs
+1 The University of Edinburgh
+1 Anonymous Website: https://github.com/Yixin-F. Please allow about 5–10
+minutes for the workspace to initialize the GPU resources.
+3DGS
+CF-Splat
+48.93 min
+7.18 GB
+1.15 min
+4.18 GB
+PSNR: 24.04
+PSNR: 26.88
+Fig. 1. Evaluation of CF-Splat against 3DGS [5] on the college scene from
+the large-scale Oxford Spires dataset [7]. The input consists of 760 views at
+1080×1440 resolution and a mesh with 1.55M vertices reconstructed using
+the SDF produced by VDBFusion [8] and the LiDAR poses estimated by
+HBA [9]. Given the same input geometry source, 3DGS jointly optimizes
+millions of coupled Gaussian parameters through 30K iterations to minimize
+the photometric residual (L1 loss), which improves image-space fitting at the
+cost of increased geometric error (Chamfer distance). In contrast, CF-Splat
+directly admits a closed-form solution without any iteration, while achieving
+2.84 dB higher PSNR on the visualized test view, requiring only 1.15 min of
+computation time and 4.18 GB of peak GPU memory, compared with 48.93
+min and 7.18 GB for 3DGS.
+a differentiable tile-based rasterizer. However, 3DGS still
+faces four major bottlenecks: (1) its nonlinear optimization
+is susceptible to local minima, causing the solution to depend
+on initialization and optimization settings; (2) the optimized
+Gaussians do not accurately conform to the underlying scene
+surfaces; (3) per-scene optimization requires tens of thousands
+of iterations, making it still computationally expensive; and (4)
+the training process typically needs substantial GPU memory
+overhead.
+These limitations of 3DGS primarily lie in its training
+pipeline, which jointly optimizes millions of coupled Gaussian
+parameters, including geometry parameters such as positions,
+opacities, and covariances, as well as appearance parameters
+represented by spherical harmonics (SH), through iterative
+gradient-based optimization on the Adam optimizer [6]. During this nonlinear optimization shown in Fig. 1, additional
+Gaussians are progressively introduced, moved, reshaped, and
+recolored to better fit the appearance with photometric-only
+residual at each per-view iteration. This inevitably increases
+optimization time and GPU memory overhead, while potentially trapping the optimization in view-specific appearance
+overfitting and degrading the underlying geometric structure.
+Existing methods have attempted to alleviate these limitations from different perspectives. Multi-view regularizationbased methods [10] introduce cross-view constraints to
+improve global consistency. Geometry-aware representations [11], [12] employ more compact primitives and surfacealigned constraints to better conform to the underlying geomet-
+2
+ric structure. Triangle-integrated approaches [13], [14], [15]
+incorporate mesh constraints or directly adopt triangle-based
+representations to achieve a better balance between geometry and appearance fitting. More recently, efficiency-oriented
+methods [16], [17], [18] regulate Gaussian densification and
+pruning to suppress redundant primitives, thereby reducing
+computational and memory costs. In parallel, numerical optimization methods [19], [20] explore LM-based and matrixfree solvers to efficiently compute parameter updates within
+iterative nonlinear optimization. Despite these advances, they
+do not fundamentally alter the iterative nonlinear optimization
+framework of 3DGS, leaving its inherent bottlenecks unresolved. Therefore, a clear gap remains toward a closed-form
+splatting formulation for more efficient appearance estimation.
+To this end, we propose CF-Splat, a novel triangle-splatting
+framework that leverages a mesh prior to enable closedform scene appearance estimation. In many real-world robotic
+systems, this scene geometry prior is readily available such as
+pre-operative CT scans in surgical robotics or CAD models for
+object manipulation, or can be obtained from upstream mapping or reconstruction pipelines, such as SLAM systems [21],
+[22], [23], [24] and SDF-based reconstruction methods [25],
+[26], [8]. Rather than re-optimizing geometry together with appearance, by properly formulating view-dependent appearance
+over the given mesh and calibrated cameras, we can establish
+a linear relationship between rendered pixel colors and pervertex spherical harmonics (SH) coefficients. Based on this,
+scene appearance estimation can be formulated as a global
+linear least-squares (LLS) problem and a closed-form solution
+can be obtained without any iteration. To further ensure a
+unique global minimizer, we introduce adaptive SH regularization for uneven observation coverage to make the LLS problem
+well posed. The proposed LLS formulation also results in a
+block-sparse structure corresponding to mesh topology that
+leads us to develop an efficient triangle-structured matrix-free
+preconditioned conjugate-gradient (PCG) solver, extending its
+scalability across different scene sizes. Extensive experiments
+on diverse real-world datasets demonstrate the accuracy and
+efficiency of CF-Splat.
+Our main contributions are summarized as follows:
+1) We propose CF-Splat, a novel closed-form trianglesplatting framework for efficient scene appearance estimation over a known mesh.
+2) We derive a global LLS formulation for scene appearance estimation by exploiting the linear dependence
+of rendered pixel colors on per-vertex SH coefficients,
+thereby eliminating iterative nonlinear optimization and
+substantially reducing computation cost.
+3) We introduce adaptive SH regularization to address
+uneven multi-view observation coverage, resulting in a
+well-posed LLS problem with a unique global minimizer
+and improved cross-view stability of the solution.
+4) We develop a triangle-structured matrix-free PCG solver
+that avoids explicitly constructing the global normal system, reducing GPU memory consumption and enabling
+the proposed LLS formulation to large-scale scenes.
+5) We extensively evaluate CF-Splat on diverse real-world
+datasets against state-of-the-art splatting methods. CF-
+Splat achieves competitive or even superior NVS quality
+while maintaining high computational efficiency on a
+consumer-grade laptop. The source code will be released
+upon the acceptance of this paper.
+The remainder of this paper is organized as follows. Section II reviews related works. Section III presents our proposed
+closed-form scene appearance estimation. Section IV presents
+the triangle-structured matrix-free PCG solver. Section V
+presents the comprehensive experiments. Finally, Section VI
+concludes the paper with its limitations and future directions.
+II. R ELATED W ORK
+In this section, we discuss some related works on neural
+radiance fields and explicit splatting representations, accelerated and memory-efficient splatting methods, optimization
+strategies for differentiable rendering, and classical meshbased view-dependent appearance modeling.
+A. Neural Radiance Fields and Explicit Splatting
+NeRF [4] represents scene density and view-dependent radiance using continuous neural functions optimized from posed
+images. Although capable of high-quality NVS, volumetric
+rendering and per-scene neural optimization remain computationally expensive. 3DGS [5] improves efficiency through
+visibility-aware rasterization of explicit anisotropic Gaussian
+primitives, whose geometry, opacity, and SH appearance coefficients are jointly optimized with adaptive densification.
+Subsequent methods improve geometric fidelity using more
+surface-aware primitives and constraints. 2DGS [11] replaces
+volumetric Gaussians with oriented planar primitives and
+introduces geometric regularization, while PGSR [12] exploits
+locally planar Gaussian structures with multi-view geometric
+constraints. MVGS [10] further incorporates multi-view regulated learning to improve cross-view consistency.
+Explicit surface structures have also been incorporated into
+splatting representations. GaMeS [13] parameterizes Gaussian
+primitives with respect to triangles, allowing them to follow an
+underlying mesh while retaining differentiable Gaussian rendering. Triangle-Splat [14] directly adopts triangles as rendering primitives, whereas Mesh-Splat [15] introduces connected
+and opaque mesh structures compatible with conventional
+graphics pipelines.
+Despite their surface-aligned representations, these methods
+still estimate scene parameters through iterative nonlinear
+optimization. Moreover, incorporating additional constraints
+further increases optimization burdens. In contrast, CF-Splat
+builds upon a known mesh and formulates scene appearance
+estimation as an efficient closed-form problem.
+B. Accelerated and Memory-Efficient Gaussian Splatting
+The large number of Gaussian primitives generated during 3DGS optimization has motivated extensive research on
+reducing training, rendering, and storage costs. One direction focuses on compacting the final representation. Compact3DGS [27] removes redundant Gaussians and compresses
+Gaussian attributes using compact appearance representations
+3
+and vector quantization, while LightGaussian [28] prunes
+insignificant primitives and further compresses SH and geometric attributes through distillation and quantization.
+Another direction directly targets computational and memory costs during training. Taming-3DGS [16] controls Gaussian growth through resource-aware densification under prescribed primitive and memory budgets. Speedy-Splat [17]
+combines sparse pixel processing with aggressive pruning to
+accelerate training and rendering, while FastGS [18] regulates
+densification and pruning using multi-view consistency to
+suppress redundant Gaussian growth and shorten training time.
+Although these approaches significantly improve efficiency,
+their gains mainly arise from reducing the number of Gaussians within the same gradient-based pipeline from 3DGS. In
+contrast, CF-Splat improves efficiency by replacing per-view
+gradient-based optimization with a global LLS formulation
+that does not require any iteration, substantially reducing
+computational cost.
+[35]. Gradient-based mesh rendering with differentiable rasterizers [36], [37], [38] provides another representative optimization paradigm for estimating mesh appearance.
+These methods provide important foundations for meshbased appearance modeling, but differ from CF-Splat in their
+estimation structure. Rather than independently fitting local
+surface appearance or relying on gradient-based optimization,
+CF-Splat derives a linear shading model directly from triangle rasterization and jointly estimates per-vertex appearance
+through a global LLS formulation.
+C. Optimization Strategies and Solvers for Splatting
+A. Problem Statement
+Most splatting methods formulate scene reconstruction as
+nonlinear optimization. In particular, 3DGS [5] and many of its
+derivatives employ first-order optimizers such as Adam [6] to
+update Gaussians through differentiable rendering. Although
+effective and highly parallelizable, their convergence and computational cost depend on initialization, learning rates, iteration
+schedules, densification, and other optimization settings.
+Recent studies have explored more advanced numerical
+strategies for 3DGS. 3DGS2 [29] replaces first-order updates
+with local Newton steps using small per-parameter systems.
+3DGS-LM [19] introduces a Levenberg-Marquardt (LM) optimizer with GPU-parallelized PCG, while LM-RS [20] further exploits sparse residual dependencies through matrix-free
+Jacobian-vector products and conjugate-gradient solves. More
+recently, 3DGS2 -TR [30] adopts a matrix-free trust-region
+strategy, and Opt3DGS [31] combines stochastic exploration
+with curvature-aware quasi-Newton guidance.
+Despite their different numerical strategies, these methods retain a nonlinear formulation, where Newton, LM, or
+conjugate-gradient procedures compute local updates within
+an outer iterative optimization process. However in CF-Splat,
+a scalable solver is developed based on PCG for sufficiently
+solving large-scale global LLS problem. The proposed matrixfree solver avoids explicitly constructing the global normal
+system, reducing GPU memory overhead while converging to
+the same LLS solution within a prescribed numerical tolerance.
+We begin by defining the triangle representation and calibrated observations, followed by the global SH appearance state and appearance estimation objective in CF-Splat.
+Throughout this section, we suppose that the mesh geometry
+and camera calibrations are already available.
+Specifically, let
+M ≜ (V, F)
+(1)
+D. Mesh-Based View-dependent Appearance Modeling
+Classical surface light field (SLF) methods model viewdependent appearance directly on reconstructed surfaces. [32]
+estimated directional radiance from registered images using regularized least squares, while [33] introduced vertexcentered light fields on triangular meshes with barycentric
+interpolation. Later methods improved compactness and robustness by representing directional appearance with SH and
+estimating their coefficients through least-squares fitting [34],
+III. C LOSED -F ORM S CENE A PPEARANCE E STIMATION
+Our approach enables closed-form scene appearance estimation by properly formulating view-dependent appearance
+over the given mesh and calibrated cameras. In this section,
+we derive the resulting global LLS formulation for multi-view
+appearance estimation by establishing the linear relationship
+between rendered pixel colors and per-vertex SH coefficients.
+denote the known mesh with Nv vertices V ≜ {vi =
+v
+(xi , yi , zi )⊤ }N
+i=1 and Nf triangles (triangular faces) F ≜ {fj =
+Nf
+(ι(j, 0), ι(j, 1), ι(j, 2))}j=1
+. Here, ι(j, s) ∈ {1, . . . , Nv }, s ∈
+{0, 1, 2} is the global index of the s-th vertex of face fj .
+We are additionally given K calibrated RGB observations
+K
+O = {Ik , Kk , Tk }k=1 , Tk = [Rk | tk ],
+(2)
+where Ik ∈ RH×W ×3 is the k-th RGB image, Kk ∈ R3×3
+is the intrinsic matrix, and Tk is the extrinsic transformation
+from the mesh coordinate frame to the k-th camera frame.
+To model view-dependent appearance, each vertex in V is
+encoded by SH signals [39], [40]. Given a maximum SH
+degree L, the per-channel color is represented as
+f (c, d) =
+L X
+l
+X
+m
+cm
+l yl (d),
+(3)
+l=0 m=−l
+2
+where c ∈ R(L+1) is the SH coefficient vector, cm
+l is the
+coefficient associated with degree l and order m, d ∈ S2 is the
+unit viewing direction, and ylm (d) denotes the corresponding
+SH basis function evaluated at d. For a specific vertex vi ∈ V
+viewed from camera k, the viewing direction is
+vi − o k
+,
+ok = −R⊤
+(4)
+dik =
+k tk ,
+∥vi − ok ∥2
+where ok is the camera center in the mesh coordinate frame.
+Let q = (L + 1)2 denote the dimension of c in (3). The SH
+basis vector evaluated along dik is collected as
+h
+i⊤
+L
+Y(dik ) ≜ y00 (dik ) y1−1 (dik ) · · · yL
+(dik ) ∈ Rq . (5)
+4
+For each color channel τ ∈ {R, G, B}, the SH coefficients of
+vertex vi are collected as
+h
+i⊤
+(τ )
+)
+−1(τ )
+L(τ )
+ci ≜ c0(τ
+∈ Rq .
+(6)
+c
+·
+·
+·
+c
+0,i
+1,i
+L,i
+The RGB SH coefficient vectors of vi are then assembled into
+h
+i
+(G)
+(B)
+Ci ≜ c(R)
+∈ Rq×3 ,
+(7)
+ci
+ci
+i
+such that the view-dependent RGB color of vi from the k-th
+camera is
+i
+3
+gik = C⊤
+(8)
+i Y(dk ) ∈ R .
+Since M and O are known, dik and hence Y(dik ) in (8) is fully
+determined and independent of Ci . Therefore, gik depends
+linearly on Ci .
+We further stack Ci of all vertices and define the global SH
+appearance state as
+h
+i⊤
+⊤
+X ≜ C⊤
+∈ RqNv ×3 .
+(9)
+·
+·
+·
+C
+1
+Nv
+Thus, the photometric objective for scene appearance estimation is expressed as
+K
+Ephoto (X) ≜
+2
+1X b
+Ik (X | M, O) − Ik .
+2
+F
+(10)
+k=1
+where Ephoto (X) denotes the total photometric residual over
+K calibrated cameras, and bIk (X | M, O) denotes the image
+rendered from M and O under the current appearance state X.
+In (10), X is the only unknown to be estimated, avoiding the
+joint nonlinear optimization over multiple primitive parameters
+required by 3DGS [5]. In Section III-B, we show that the
+rendered pixel colors in bIk (X | M, O) depend linearly on
+Ci , and hence on X. Building on this property, Section III-C
+extends the linear pixel shading model to a global multiview observation model, enabling (10) to be reformulated as
+a closed-form problem that can be solved by a global LLS
+formulation derived in Section III-E.
+B. Linear Pixel Shading Model
+This section establishes the linear dependence of the rendered image bIk (X | M, O) on X.
+For the k-th calibrated image Ik , we arrange its HW pixels
+in raster-scan pixel ordering and denote the r-th pixel by
+pk,r ≜ [uk,r , vk,r ]⊤ , where r ∈ {1, . . . , HW }. We first
+perform standard z-buffer triangle rasterization to establish
+the correspondence between these image pixels and the mesh
+triangles. The projection of vertex vi onto the k-th image is
+vik = π (Kk (Rk vi + tk )) ,
+(11)
+where π(·) denotes perspective division.
+Let fρk (pk,r ) denote the triangle covering pk,r , where ρk (·)
+returns its global triangle index. For compact notation, define
+isk,r ≜ ι(ρk (pk,r ), s) , s ∈ {0, 1, 2},
+as the global index of the s-th vertex of the covering triangle.
+The pixel color is interpolated from the three corresponding
+vertex colors {giks }2s=0 using barycentric weights {λsk,r }2s=0 .
+k,r
+Since the projection in (11) is fully determined by M and O,
+the barycentric weights are independent of X. The rendered
+color at pk,r is therefore
+bIk (pk,r ) =
+2
+X
+λsk,r giksk,r .
+(12)
+s=0
+We further define the local observation feature
+ is 
+ϕsk,r ≜ λsk,r Y dkk,r ∈ Rq .
+(13)
+Substituting the vertex SH color model in (8) into (12) gives
+bIk (pk,r ) =
+2
+X
+ is 
+Y
+dkk,r
+λsk,r C⊤
+s
+ik,r
+s=0
+=
+2
+X
+(14)
+s
+C⊤
+isk,r ϕk,r .
+s=0
+Here, ϕsk,r is constant (known), and Cisk,r ∈ X.
+(14) shows that each rendered pixel bIk (pk,r ) is a linear combination of only the three SH coefficient blocks {Cisk,r }2s=0
+associated with its covering triangle. Therefore, each rendered
+pixel depends linearly on X, and this linear dependence
+extends to the entire rendered image bIk (X | M, O). We next
+assemble these pixel-level relations into a global multi-view
+observation model in Section III-C.
+C. Global Multi-View Observation Model
+We now extend the pixel-level linear color in (14) first to
+each calibrated view and then to all K views in O.
+For the k-th view, we construct the per-view observation
+matrix Ak ∈ RHW ×qNv . For the row corresponding to pk,r ,
+only the three q-dimensional vertex blocks associated with its
+covering triangle are nonzero
+⊤
+[Ak ]r,isk,r = ϕsk,r .
+(15)
+where [Ak ]r,isk,r ∈ R1×q denotes the vertex block indexed by
+isk,r in the r-th row.
+Using the raster-scan pixel ordering, the observed RGB
+colors in the k-th view are stacked as
+h
+i⊤
+(16)
+Bk ≜ Ik (pk,1 ) · · · Ik (pk,HW ) ,
+where Bk ∈ RHW ×3 . The pixel-level shading in (14) therefore
+b k = Ak X, which are then
+forms the per-view linear model B
+assembled into the global matrices
+h
+i⊤
+A ≜ A⊤
+∈ RKHW ×qNv ,
+· · · A⊤
+1
+K
+(17)
+h
+i⊤
+KHW ×3
+⊤
+B ≜ B⊤
+∈
+R
+.
+·
+·
+·
+B
+1
+K
+Accordingly, the global multi-view observation model is
+b
+B = AX.
+(18)
+Since each pixel depends on only the three vertices of its
+covering triangle, every row of A contains at most three
+nonzero q-dimensional blocks. The global observation matrix
+is therefore highly sparse.
+5
+To reduce the influence of grazing-angle observations, we
+assign each pixel an angle-dependent confidence according to
+the angle between the normal of its covering triangle and the
+corresponding camera-to-surface direction
+
+
+2
+X
+
+λsk,r visk,r − ok 
+
+
+
+
+s=0
+wk,r ≜ maxϵw , n⊤
+ . (19)
+ρk (pk,r )
+2
+
+
+X
+s
+
+
+λ vs −o
+k,r ik,r
+s=0
+k
+2
+Here, nρk (pk,r ) is the unit normal of the covering triangle,
+0 < ϵw < 1 is the minimizer confidence, and 0 < wk,r ≤ 1.
+(19) assigns higher confidence to near-frontal observations and
+lower confidence to grazing-angle observations.
+Following the pixel ordering in (16), the confidence matrix
+for the k-th view is
+h
+i⊤ 
+Wk ≜ diag wk,1 · · · wk,HW
+∈ RHW ×HW . (20)
+The global confidence matrix is assembled from all views as
+W ≜ blkdiag (W1 , . . . , WK ) ∈ RKHW ×KHW .
+(21)
+The matrices A, B, and W therefore define the weighted
+global residual W1/2 (AX − B). We next discuss the directional constraints on the per-vertex SH coefficients and
+introduce an adaptive regularization in Section III-D.
+D. Adaptive SH Regularization
+Although the global observation model in (18) combines all
+pixels from all views, multiple pixels from the same camera
+do not provide multiple independent SH directions for a given
+vertex. Consequently, high-order SH coefficients can remain
+weakly constrained when a vertex is observed from only a
+small number of cameras. As a result, A may become rankdeficient under uneven multi-view observations.
+(i)
+Suppose Ak ∈ RHW ×q denote the q-column block of
+Ak associated with vi . Its corresponding block in the global
+observation matrix is
+h
+i⊤
+⊤
+(i) ⊤
+A(i) ≜ A(i)
+∈ RKHW ×q .
+(22)
+·
+·
+·
+A
+1
+K
+(i)
+Let nview
+denote the number of cameras for which Ak
+i
+contains at least one nonzero row.
+Proposition 1 (Per-vertex directional-rank bound). The
+necessary condition for uniquely estimating the SH coefficients
+at vertex vi is that its observation rank satisfies
+
+
+rank A(i) ≤ nview
+.
+(23)
+i
+Proof. For a camera k observing
+vi , every nonzero row of
+⊤
+(i)
+Ak has the form λsk Y dik , where the barycentric weight
+λsk varies across pixels, while the SH basis vector remains
+unchanged. Hence, all such rows are scalar multiples of the
+(i)
+same vector and rank(Ak ) ≤ 1. Since only nview
+per-view
+i
+blocks contain nonzero rows
+K
+
+ X
+
+
+(i)
+rank A(i) ≤
+rank Ak ≤ nview
+,
+(24)
+i
+k=1
+which proves (23).
+□
+An SH representation through degree l contains (l + 1)2
+coefficients per color channel. Therefore, a necessary dimensional condition for independently constraining these coefficients is
+(l + 1)2 ≤ nview
+.
+(25)
+i
+This condition does not require the viewing directions to be
+well distributed and is therefore used as a soft regularization
+criterion rather than as a hard SH truncation rule.
+Accordingly, the band-wise regularizer for vertex vi is
+defined as
+Λi ≜ diag (γi,0 I1 , γi,1 I3 , . . . , γi,L I2L+1 ) ∈ Rq×q ,
+(
+γs , (l + 1)2 ≤ nview
+i
+γi,l =
+γu , (l + 1)2 > nview
+,
+i
+(26)
+where 0 < γs ≪ γu . Thus, SH bands with sufficient dimensional support receive weak regularization, whereas bands
+lacking sufficient directional support are strongly constrained.
+Following the vertex ordering in X in (9), the global SH
+regularizer is assembled as
+Λ ≜ blkdiag (Λ1 , . . . , ΛNv ) ∈ RqNv ×qNv .
+(27)
+The adaptive SH regularization retains the same q-dimensional
+appearance state for each vertex while suppressing high-order
+components that are weakly constrained by the available
+views. It consequently reduces the sensitivity of the global
+estimation to uneven directional coverage and improves its
+numerical stability for a unique global minimizer.
+E. Global LLS Formulation
+Combining the global multi-view observation model in (18)
+with the adaptive SH regularization in (27) yields the final
+global LLS formulation
+2
+2
+1
+1
+W1/2 (AX − B) +
+Λ1/2 X .
+X 2
+2
+F
+F
+(28)
+The first term jointly fits the RGB observations from all calibrated views, with grazing-angle observations down-weighted
+by W. The second term adaptively constrains the SH bands
+according to the directional support available at each vertex.
+Setting the gradient of (28) with respect to X to zero gives
+the global normal system
+X⋆ = arg min
+HX⋆ = G, H = A⊤ WA + Λ, G = A⊤ WB.
+(29)
+Here, H ∈ RqNv ×qNv is the shared normal matrix for the three
+color channels, and G ∈ RqNv ×3 is the corresponding righthand-side matrix, whose three columns contain the weighted
+observation terms for the R, G, and B channels, respectively.
+We now establish below that the proposed adaptive SH regularization in (27) makes the resulting normal system strictly
+positive definite and guarantees a unique global minimizer.
+Proposition 2 (Unique global minimizer). The global LLS
+problem in (28) admits a unique global minimizer.
+Proof. By construction, wk,r > 0 for every pixel, and hence
+W ≻ 0. Moreover, the adaptive SH regularization assigns
+6
+Algorithm 1 Closed-Form Scene Appearance Estimation
+F. Gradient-Guided Triangle Densification
+Input: Mesh M, calibrated RGB observations O, SH degree L,
+supported/under-supported SH regularization γs , γu , minimum confidence weight ϵw .
+Output: Estimated appearance X∗
+v
+1: Initialize rasterization records R and {nview
+}N
+i
+i=1
+2: For k = 1, . . . , K do
+3:
+Rasterize M in view k and initialize Ak
+4:
+For each valid pixel pk,r do
+5:
+Obtain {isk,r , λsk,r }2s=0
+Although the mesh provides sufficient geometric fidelity,
+coarse triangles may still limit the spatial resolution of
+the vertex appearance representation. We therefore apply a
+lightweight gradient-guided triangle densification as a preprocessing step before constructing the global LLS system.
+Using the pixel-to-triangle correspondence established in
+Section III-B, let Ωk,j ≜ {pk,r | ρk (pk,r ) = j} denote the
+pixels covered by triangle fj in view Ok . We measure its multiview image-space variation as
+is
+k,r
+6:
+ϕsk,r ← λsk,r Y(dk ), s = 0, 1, 2
+7:
+[Ak ]r,isk,r ← (ϕsk,r )⊤
+8:
+Compute wk,r using (19)
+9:
+Store {isk,r , ϕsk,r }2s=0 , wk,r in R
+10:
+End For
+11:
+Bk ← [Ik (pk,1 ) · · · Ik (pk,HW )]⊤
+12:
+Wk ← diag(wk,1 , . . . , wk,HW )
+13:
+Update {nview
+}
+i
+14: End For
+⊤ ⊤
+⊤ ⊤
+15: A ← [A⊤
+B ← [B⊤
+1 · · · AK ] ,
+1 · · · BK ]
+16: W ← blkdiag(W1 , . . . , WK )
+17: For i = 1, . . . , Nv do
+, γs , and γu using (26)
+18:
+Construct Λi from nview
+i
+19: End For
+20: Λ ← blkdiag(Λ1 , . . . , ΛNv )
+21: H ← A⊤ WA + Λ,
+G ← A⊤ WB
+22: X∗ ← H−1 G
+23: Return X∗
+Sj ≜
+⊤
+⊤
+⊤
+z Hz = z A WAz + z Λz
+= W1/2 Az
+2
+2
++ Λ1/2 z
+2
+> 0.
+(30)
+2
+The strict inequality follows from the SH regularization term,
+which is positive for every nonzero z. Thus, H ≻ 0. Since the
+three RGB channels share the same matrix H and are separable
+in (28), each channel has a unique minimizer. Therefore, (28)
+admits a unique global minimizer X⋆ .
+□
+The resulting estimator has the analytical form
+−1 ⊤
+X⋆ = H−1 G = A⊤ WA + Λ
+A WB,
+∥∇Ik (p)∥2 .
+(32)
+k=1 p∈Ωk,j
+either γs or γu to every SH coefficient, where 0 < γs ≪ γu .
+Therefore, Λ ≻ 0.
+For any nonzero vector z ∈ RqNv , we have
+⊤
+K
+X
+X
+(31)
+which characterizes the global closed-form solution of the
+appearance estimation problem in (10).
+Algorithm 1 summarizes the complete closed-form scene
+appearance estimation pipeline. For each calibrated view,
+triangle rasterization establishes the pixel-to-triangle correspondence, from which the local SH observation features, confidence weights, and per-view matrices Ak , Bk , and Wk are
+constructed. These per-view components are then assembled
+into the global matrices A, B, and W. Based on the available
+view support at each vertex, the adaptive SH regularizer Λ is
+constructed, yielding the global normal system defined by H
+and G. In practice, the inverse of H is not explicitly formed;
+instead, the resulting system is solved using the trianglestructured matrix-free PCG solver proposed in Section IV to
+obtain the final appearance estimate X∗ .
+Triangles with large Sj are selected for subdivision by concentrating additional vertices.
+For each selected triangle, the barycentric weights introduced in Section III-B are used to map its covered pixels back
+to the triangle surface. A new vertex is placed at the mean of
+these surface samples, and the parent triangle is replaced by
+three child triangles sharing the new vertex.
+The refined mesh is re-rasterized after each densification
+round. After a number of rounds, densification is terminated
+and the resulting mesh is used to construct the linear pixel
+model in (14) and the global LLS system in (28). Importantly,
+densification is completed before appearance estimation and
+thus does not introduce extra iterations when solving the global
+LLS problem.
+IV. T RIANGLE -S TRUCTURED M ATRIX -F REE PCG S OLVER
+The closed-form formulation in Section III defines the
+global appearance estimator through the LLS problem in
+(28). For large-scale scenes, explicitly constructing the global
+normal matrix H and solving the linear system in (31) lead to
+substantial computation and memory costs. We therefore implement the same the linear system using a triangle-structured
+matrix-free PCG solver. By exploiting the three-vertex support
+of each pixel, the normal operator is evaluated directly from
+rasterization records without explicitly constructing H, while
+vertex-block preconditioning supports efficient numerical solution.
+A. Triangle-Local Normal Operator
+PCG repeatedly requires the product between the normal
+matrix and a vector. In CF-Splat, each valid pixel is covered
+by one triangle and therefore depends only on its three
+vertices. We use this property to evaluate the required matrixvector product directly from the rasterization records, without
+explicitly constructing H.
+We first construct the right-hand side G in (29). Let Gi ∈
+Rq×3 denote the block corresponding to vertex vi . Starting
+from Gi = 0, each valid pixel contributes to the three vertices
+of its covering triangle as
+Gisk,r ← Gisk,r + wk,r ϕsk,r Ik (pk,r )⊤ .
+(33)
+Accumulating (33) over all valid pixels and views gives the
+right-hand side G of the global normal system.
+7
+For the matrix-vector product, consider an observation vector u ∈ RqNv with vertex blocks ui ∈ Rq . We first initialize
+each output block using the regularization term
+hi ← Λi ui .
+(34)
+For a valid pixel pk,r , rasterization provides its three vertex
+indices {isk,r }2s=0 and the corresponding observation vectors
+{ϕsk,r }2s=0 . The contribution of this pixel is accumulated as
+!
+2
+X
+⊤
+s
+t
+(35)
+ϕk,r uitk,r .
+hisk,r ← hisk,r + wk,r ϕk,r
+t=0
+For each pixel, only the three vertex blocks of its covering
+triangle are involved. Their contributions are first combined
+for the current pixel and then accumulated back to the same
+three vertices. Thus, repeating this operation over all valid
+pixels gives
+h
+i⊤
+H(u) = h⊤
+.
+(36)
+· · · h⊤
+1
+Nv
+{z
+}
+|
+Hu
+Thus, the normal-matrix product required by PCG is evaluated
+without explicitly constructing H in (29).
+B. PCG with Vertex-Block Preconditioner
+To improve the numerical efficiency of PCG, we use a
+vertex-block preconditioner that retains the coupling among
+the SH coefficients associated with each vertex.
+We use one q × q preconditioner block for each vertex.
+Starting from Pi = Λi , each pixel contributes
+⊤
+Pisk,r ← Pisk,r + wk,r ϕsk,r ϕsk,r .
+(37)
+After accumulation, Pi is the complete diagonal block of the
+normal matrix associated with vertex vi . Compared with a
+scalar Jacobi preconditioner, this preserves the coupling among
+all SH coefficients of the same vertex.
+Since the adaptive SH regularization makes each Pi positive
+definite, we compute
+Pi = Li L⊤
+i
+(38)
+once during system setup. Applying the preconditioner during
+PCG then only requires solving the small q ×q system Pi zi =
+ri independently for each vertex using the Cholesky factor Li .
+The right-hand side in (33) and the preconditioner blocks
+in (37) depend on the same rasterized pixel records and
+are therefore constructed in a shared traversal of the input
+observations. The three RGB channels also share the same
+triangle indices, observation vectors, normal operator, and preconditioner. Hence, the Cholesky factors {Li } are computed
+once and reused for all three channel-wise PCG solves.
+For channel τ ∈ {R, G, B}, PCG is terminated when the
+relative residual satisfies
+Nv
+Nv
+
+ 2
+X
+X
+2
+(τ )
+(τ )
+(τ )
+2
+Gi − Hi X
+≤δ
+Gi
+,
+(39)
+i=1
+2
+i=1
+2
+where δ is the prescribed relative residual tolerance and Tmax
+is the maximum iteration count. The tolerance δ controls the
+numerical residual of the global LLS solve.
+Algorithm 2 Triangle-Structured Matrix-Free PCG
+Input: Images {Ik }, rasterization records R, global SH regularizer
+Λ, tolerance δ, and maximum iteration count Tmax
+Output: Estimated appearance X∗
+1: Function TrianglePCG({Ik }, R, Λ, δ, Tmax )
+2:
+(G, {Li }) ← TriangleSetup, X ← 0
+3:
+For τ ∈ {R, G, B} do
+4:
+g ← G(τ ) , r ← g, η ← ∥g∥22
+5:
+Solve Pz = r using {Li }, p ← z, σ ← r⊤ z
+6:
+For t = 1, . . . , Tmax do
+σ
+7:
+h ← TriangleNormal(p), α ← ⊤
+p h
+8:
+X(τ ) ← X(τ ) + αp, r ← r − αh
+9:
+If ∥r∥22 ≤ δ 2 η then
+10:
+break
+11:
+End If
+12:
+Solve Pz = r using {Li }
+σnew
+13:
+σnew ← r⊤ z, β ←
+σ
+14:
+p ← z + βp, σ ← σnew
+15:
+End For
+16:
+h ← TriangleNormal(X(τ ) )
+17:
+End For
+18:
+X∗ ← X
+19:
+Return X∗
+20: End Function
+1: Function TriangleSetup
+2:
+G ← 0, Pi ← Λi , ∀i
+3:
+For k = 1, . . . , K do
+4:
+For each valid pixel pk,r do
+5:
+For s = 0, 1, 2 do
+6:
+Update Gis using
+k,r
+(33)
+Update Pis using
+k,r
+(37)
+8:
+End For
+9:
+End For
+10:
+End For
+11:
+For i = 1, . . . , Nv do
+12:
+Compute Li using (38)
+13:
+End For
+14:
+Return G, {Li }
+15: End Function
+7:
+1: Function TriangleNormal(u)
+2:
+For i = 1, . . . , Nv do
+3:
+Initialize hi using (34)
+4:
+End For
+5:
+For k = 1, . . . , K do
+6:
+For each valid pixel pk,r do
+7:
+For s = 0, 1, 2 do
+8:
+Update his using
+k,r
+(35)
+9:
+End For
+10:
+End For
+11:
+End For
+12:
+Assemble H(u) using (36)
+13:
+Return H(u)
+14: End Function
+Algorithm 2 summarizes the triangle-structured matrixfree PCG solver of the global LLS system in Algorithm 1.
+TriangleSetup constructs the right-hand side and vertexblock preconditioner, while TriangleNormal evaluates the
+normal-matrix product without explicitly constructing H. The
+resulting system is then solved channel-wise by PCG.
+C. Scalability Analysis
+We next analyze the computational and memory scalability
+of this matrix-free implementation of the global LLS estimator
+in (31).
+a) Computational complexity: The computation time
+mainly depends on the number of input observations, the
+number of mesh vertices, and the number of PCG iterations.
+During TriangleSetup, all K views are traversed once to
+construct the right-hand side G using (33) and the vertex-block
+preconditioners {Pi } using (37). These operations require
+O(KHW q) and O(KHW q 2 ), respectively. The Cholesky
+factorizations in (38) further require O(Nv q 3 ) operations.
+At each PCG iteration, TriangleNormal evaluates (35)
+over all valid pixels, requiring O(KHW q) operations. Apply-
+8
+TABLE I
+T HE DATASETS U SED FOR E VALUATION .
+Dataset
+Real-world
+Type
+✓
+✓
+✓
+✓
+surgical
+object-centric
+indoor
+outdoor
+C3VD [41]
+OmniObject3D [42]
+BundleFusion [25]
+Oxford Spires [7]
+Scene Scale RGB Resolution
+tiny
+small
+medium
+large
+540 × 675
+800 × 800
+480 × 640
+1080 × 1440
+Data Source
+colonoscopic video / phantom
+structured-light scanner
+RGB-D camera
+RGB camera / LiDAR
+ing the vertex-block preconditioner requires O(Nv q 2 ) operations, while the remaining vector updates require O(Nv q).
+Let Tpcg ≤ Tmax denote the largest iteration count among
+the three color channels. The total computation is
+
+Tsolve = O KHW q 2 + Nv q 3
+
+(40)
++ O Tpcg KHW q + Nv q 2
++ O(KHW q + Nv q) .
+The last term accounts for the final residual evaluation by
+TriangleNormal according to (39).
+For a prescribed SH degree L, q is constant. The cost of
+TriangleSetup, each TriangleNormal evaluation, and
+the PCG solve therefore grows linearly with the number of
+image observations KHW . Thus, the computation time grows
+approximately linearly with K.
+b) Memory complexity: The peak GPU memory mainly
+depends on the number of mesh vertices and the image resolution. Since TriangleNormal evaluates the normal-matrix
+product directly from the rasterization records according to
+(36), neither the global observation matrix A nor the normal
+matrix H needs to be explicitly stored on the GPU.
+The SH coefficients, right-hand side, and PCG working
+vectors require O(Nv q) GPU memory. With view-wise processing, only the data required for the current view needs to
+reside on the GPU, requiring O(HW q) additional memory.
+Therefore, the peak GPU memory complexity is
+MGPU = O(Nv q + HW q) .
+(41)
+For a constant q, increasing the number of input views K
+does not increase the peak GPU memory, since the views
+are processed sequentially during each matrix-free evaluation.
+Thus, the peak GPU memory grows linearly with Nv . Given
+a certain number of input views, the peak GPU memory only
+depends on the number of vertices of the input mesh.
+V. E XPERIMENTS
+In this section, we evaluate CF-Splat on 33 scenes from
+four real-world datasets spanning different scene scales, and
+compare it against 12 state-of-the-art baselines. All experiments are conducted on a consumer-grade laptop equipped
+with an NVIDIA RTX 4060 GPU (8 GB) and an AMD Ryzen
+9 7940HS CPU (48 GB).
+A. Baselines
+We select 12 baselines from complementary lines of splatting research discussed in Section II to comprehensively
+evaluate CF-Splat in terms of representation for NVS, computational efficiency, and optimization strategy.
+a) Primitive representations: We compare against
+Gaussian-based methods, including 3DGS [5], 2DGS [11],
+PGSR [12], and MVGS [10]; triangle-based methods, including Triangle-Splat [14] and Mesh-Splat [15]; and the hybrid
+Gaussian–triangle representation GaMeS [13].
+b) Accelerated and memory-efficient Methods: We include FastGS [18], Speedy-Splat [17] and Taming-3DGS [16]
+to evaluate computing efficiency and memory consumption.
+c) Optimization strategies and solvers: We further compare with 3DGS-LM [19] and LM-RS [20], which represent
+alternative optimization and numerical solution strategies for
+splatting-based representations.
+In addition, we implement CF-Splat (Adam), a gradientbased variant from CF-Splat. It optimizes the same objective
+in (28) over X using Adam [6], instead of solving its normal
+system using the matrix-free PCG solver in Section IV. It
+also serves as a representative gradient-based mesh-rendering
+baseline following the optimization paradigm commonly used
+with differentiable rasterizers [36], [37], [38].
+B. Datasets
+The datasets used for evaluation are summarized in Table I.
+C3VD [41] is a colonoscopy dataset acquired using a
+high-definition clinical colonoscope and high-fidelity colon
+phantoms. We select 10 sequences covering three anatomical
+regions: cecum (c t1 b, c t2 b, and c t3 a), sigmoid colon
+(s t1 a, s t2 a, and s t3 a), and transverse colon (t t1 b,
+t t2 c, t t4 a, and t t4 b).
+OmniObject3D [42] is a real-world 3D object dataset acquired using structured-light scanning, covering a wide range
+of object categories. We select 10 objects: apple, backpack,
+ball, bed, banana, battery, book, bottle, bowl, and box.
+BundleFusion [25] provides RGB-D sequences of real
+indoor environments captured using an iPad-based RGB-D
+scanning system. We evaluate all 8 released scenes: apt0, apt1,
+apt2, copyroom, office0, office1, office2, and office3.
+Oxford Spires [7] is a large-scale multimodal dataset captured across Oxford using a custom-built multi-sensor platform
+equipped with RGB cameras and LiDAR. We select 5 representative sites: college, quarter, library, church, and palace.
+These four datasets span surgical, object-centric, indoor, and
+outdoor environments across scene scales ranging from tiny to
+large, enabling a comprehensive evaluation of the performance
+and scalability of the compared methods.
+C. Experimental Setup
+To ensure a fair comparison, all evaluated methods use the
+same posed RGB observations and geometry source obtained
+from identical sources.
+For OmniObject3D, every 10-th frame is held out as a test
+view. For C3VD, BundleFusion, and Oxford Spires, every 20th frame is selected as a keyframe, and every 10-th keyframe is
+held out as a test view. The remaining frames or keyframes are
+used as input observations. For Oxford Spires, regions without
+valid geometric support, such as sky areas, are excluded from
+both optimization and quantitative evaluation for all compared
+methods. For qualitative visualization only, the corresponding
+9
+invalid regions in the rendered images are replaced with
+ground-truth pixels to avoid distracting empty regions.
+For C3VD and OmniObject3D, we use the provided meshes
+and camera poses. For BundleFusion, we reconstruct the
+indoor geometry by applying TSDF fusion [43] with a 3cm
+voxel resolution to the RGB-D observations using camera
+poses estimated with COLMAP [44], [45]. For Oxford Spires,
+we reconstruct the large-scale outdoor meshes from LiDAR
+measurements using VDBFusion [8] with a 0.5m voxel resolution, with the LiDAR poses estimated by Vilens-SLAM [46]
+and refined by HBA [9]. The resulting meshes are used directly
+by GaMeS, CF-Splat (Adam), and CF-Splat, while vertices
+extracted from the same meshes are used to initialize the
+remaining baselines.
+For CF-Splat and CF-Splat (Adam), unless otherwise specified, we use a maximum SH degree of L = 3 for C3VD
+and OmniObject3D, and L = 2 for BundleFusion and Oxford
+Spires. Before constructing the LLS system, we perform 10
+gradient-guided densification rounds. We set the supportedand unsupported-band regularization strengths to γs = 10−3
+and γu = 103 , respectively, with the confidence lower bound
+ϵw = 10−3 . The matrix-free PCG solver uses a relative
+residual tolerance of δ = 10−6 and a maximum of Tmax = 300
+iterations. All other baselines are evaluated using their publicly
+released implementations and default configurations, with 30K
+optimization iterations.
+D. Metrics
+We evaluate NVS quality using peak signal-to-noise ratio (PSNR), structural similarity index measure (SSIM), and
+learned perceptual image patch similarity (LPIPS). PSNR
+measures pixel-level reconstruction fidelity, SSIM evaluates
+structural similarity, and LPIPS assesses perceptual similarity
+using deep visual features. Computational efficiency is measured in terms of peak GPU memory consumption (GB) and
+computation time (min). To qualitatively assess the resulting
+scene appearances, we directly visualize the reconstructed
+models. For the Gaussian-based methods, the resulting Gaussian models are visualized using SuperSplat2 . For the trianglebased methods, we extract the corresponding meshes using
+their officially provided extraction code and visualize them
+using MeshLab3 . The mesh representations produced by CFSplat and CF-Splat (Adam) are likewise visualized using
+MeshLab for consistent comparison.
+E. Novel-View Synthesis Results
+Table II, III, IV, and V report the quantitative NVS results, with the corresponding qualitative comparisons shown
+in Fig. 2, 3, 4, and 5. Overall, CF-Splat achieves the best or
+near-best average NVS quality across the four datasets.
+1) C3VD Dataset: C3VD contains narrow endoscopic
+scenes with strong specular highlights and substantial crossview appearance variation, making view-dependent appearance particularly challenging. As shown in Table II, CFSplat achieves the strongest overall PSNR and SSIM while
+2 https://superspl.at/
+3 https://www.meshlab.net/
+remaining competitive in LPIPS. The qualitative results of CFSplat in Fig. 2 also show stable local structures under the
+dynamic view-dependent illumination.
+Compared Gaussian- and triangle-based baselines provide
+greater flexibility for fitting dynamic lighting through iterative adjustments of primitive positions, shapes, and opacity.
+However, such nonlinear optimization may converge to a local
+minimizer that better fits the training views but produces
+inconsistent appearance in novel views. In particular, irregular
+primitive distributions and opacity can introduce noticeable
+image-space blurring, as observed on the c t1 b and t t2 c
+scenes in Fig. 2.
+CF-Splat instead estimates the per-vertex SH coefficients
+jointly from all calibrated observations through the global LLS
+formulation in (28). The adaptive SH regularization further
+constrains directional components that are insufficiently supported by the available views. As proved in Section III-E, the
+LLS formulation admits a unique global minimizer, avoiding
+the local-minimizer ambiguity of iterative nonlinear fitting.
+This results that CF-Splat remains effective under strong crossview photometric variation while preserving consistent novelview appearance.
+2) OmniObject3D Dataset: OmniObject3D provides accurate object geometry together with sharp boundaries and
+high-frequency surface textures. It therefore offers a favorable
+setting for isolating the quality of the appearance representation with limited geometric uncertainty. CF-Splat achieves the
+strongest overall PSNR and LPIPS while remaining highly
+competitive in SSIM, as reported in Table III.
+The qualitative comparisons in Fig. 3 show that trianglebased representations generally preserve fine texture structures
+more clearly than spatially extended Gaussian primitives. For
+CF-Splat, the gradient-guided densification in Section III-F
+further allocates additional vertices to regions with stronger
+image-space variation. This increases local appearance resolution without introducing additional geometric variables into
+the subsequent appearance estimation. The strong performance
+on OmniObject3D therefore demonstrates the benefit of combining an explicit surface representation with adaptive spatial
+appearance capacity. At the same time, this fully exploits the
+advantage of the closed-form formulation by enabling CFSplat to recover the unique global optimum of the appearance
+estimation problem.
+3) BundleFusion: BundleFusion presents a different challenge because its input geometry is obtained from RGB-D
+reconstruction and therefore contains residual surface and registration errors. Despite these imperfections, CF-Splat achieves
+the best average performance across PSNR, SSIM, and LPIPS,
+indicating that it does not require near-perfect input geometry.
+Compared Gaussian- and triangle-based methods tend to
+rely on densification and flexible primitive reshaping or moving for image-space fitting. However, in regions with many
+object boundaries, as commonly observed in BundleFusion,
+freely distributed primitives can be more sensitive to residual
+geometry and registration errors. During optimization, these
+methods may compensate for such inconsistencies by redistributing primitives and reducing their opacity, which increases
+blending across object boundaries. This can produce visible
+10
+TABLE II
+Q UANTITATIVE NVS C OMPARISON R ESULTS ON C3VD DATASET [41]. F IRST , S ECOND , AND T HIRD I NDICATE R ANKING R ESULTS .
+Method
+c t1 b
+c t2 b
+c t3 a
+s t1 a
+s t2 a
+s t3 a
+t t1 b
+t t2 c
+t t4 a
+t t4 b
+Average
+PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS
+3DGS [5]
+31.95 0.902
+2DGS [11]
+28.01 0.870
+PGSR [12]
+30.72 0.892
+MVGS [10]
+32.63 0.907
+GaMeS [13]
+30.79 0.896
+Triangle-Splat [14] 33.29 0.911
+Mesh-Splat [15]
+29.71 0.890
+FastGS [18]
+32.95 0.910
+Speedy-Splat [17] 30.93 0.890
+Taming-3DGS [16] 33.04 0.897
+3DGS-LM [19]
+31.98 0.903
+LM-RS [20]
+32.85 0.895
+CF-Splat (Adam)
+CF-Splat
+0.356
+0.450
+0.369
+0.326
+0.335
+0.261
+0.321
+0.316
+0.401
+0.312
+0.346
+0.335
+34.31 0.918
+31.77 0.903
+32.57 0.904
+34.90 0.923
+29.50 0.888
+32.40 0.908
+27.85 0.878
+33.50 0.913
+33.43 0.905
+33.99 0.900
+34.25 0.918
+33.13 0.892
+0.267
+0.308
+0.284
+0.249
+0.327
+0.237
+0.310
+0.279
+0.315
+0.279
+0.264
+0.316
+33.49 0.912
+30.43 0.886
+31.81 0.889
+33.95 0.915
+31.39 0.887
+34.11 0.919
+29.42 0.878
+33.82 0.911
+32.54 0.896
+34.39 0.906
+32.45 0.904
+32.44 0.876
+0.235
+0.304
+0.274
+0.222
+0.271
+0.181
+0.269
+0.229
+0.282
+0.202
+0.256
+0.304
+37.17 0.914
+36.01 0.911
+36.57 0.913
+37.67 0.918
+36.41 0.913
+36.99 0.918
+25.58 0.606
+37.32 0.917
+36.65 0.911
+37.15 0.898
+37.32 0.917
+36.88 0.910
+0.394
+0.404
+0.374
+0.377
+0.384
+0.340
+0.470
+0.376
+0.409
+0.392
+0.380
+0.402
+35.65 0.893
+34.37 0.876
+35.10 0.887
+36.83 0.913
+32.70 0.845
+35.65 0.899
+22.91 0.582
+36.10 0.901
+35.38 0.883
+35.98 0.886
+36.02 0.897
+33.90 0.845
+0.263
+0.305
+0.262
+0.208
+0.344
+0.210
+0.476
+0.245
+0.297
+0.251
+0.250
+0.370
+36.17 0.895
+33.86 0.883
+35.40 0.892
+36.67 0.903
+34.22 0.873
+35.55 0.894
+22.42 0.568
+36.62 0.905
+35.91 0.894
+36.38 0.886
+36.44 0.899
+35.22 0.869
+0.325
+0.367
+0.314
+0.298
+0.360
+0.248
+0.491
+0.286
+0.331
+0.304
+0.306
+0.386
+37.67 0.924
+37.01 0.920
+37.24 0.920
+38.48 0.930
+35.88 0.909
+38.10 0.931
+22.79 0.527
+38.45 0.931
+37.36 0.918
+37.97 0.911
+38.06 0.926
+36.38 0.902
+0.306
+0.317
+0.289
+0.278
+0.316
+0.234
+0.501
+0.268
+0.330
+0.289
+0.292
+0.358
+32.11 0.909
+30.71 0.906
+31.61 0.906
+30.88 0.903
+33.65 0.920
+34.91 0.925
+20.97 0.436
+35.55 0.926
+32.28 0.910
+35.89 0.910
+32.08 0.909
+35.13 0.919
+0.416
+0.417
+0.415
+0.399
+0.358
+0.286
+0.535
+0.333
+0.419
+0.338
+0.422
+0.369
+32.64 0.888
+29.81 0.860
+31.98 0.874
+33.35 0.895
+30.36 0.849
+32.10 0.886
+21.17 0.526
+32.69 0.892
+32.31 0.882
+32.70 0.876
+32.70 0.890
+31.31 0.834
+0.246
+0.302
+0.259
+0.218
+0.336
+0.206
+0.490
+0.234
+0.264
+0.239
+0.232
+0.386
+32.24 0.847
+30.90 0.823
+32.13 0.836
+32.92 0.855
+20.71 0.752
+33.30 0.884
+21.92 0.588
+35.54 0.905
+31.68 0.828
+35.86 0.897
+32.53 0.851
+29.90 0.810
+0.332
+0.373
+0.337
+0.306
+0.476
+0.213
+0.500
+0.207
+0.369
+0.195
+0.316
+0.383
+34.34 0.900
+32.29 0.884
+33.51 0.891
+34.83 0.906
+31.56 0.873
+34.64 0.907
+24.47 0.648
+35.25 0.911
+33.85 0.892
+35.34 0.897
+34.38 0.902
+33.71 0.875
+0.314
+0.355
+0.318
+0.288
+0.351
+0.242
+0.436
+0.277
+0.342
+0.280
+0.306
+0.361
+32.46 0.900 0.322 29.58 0.881 0.326 30.90 0.869 0.302 37.40 0.927 0.358 27.38 0.820 0.362 29.52 0.869 0.355 32.56 0.902 0.340 34.76 0.931 0.336 27.42 0.822 0.369 38.56 0.971 0.090 32.05 0.889 0.316
+34.28 0.926 0.238 32.92 0.920 0.232 32.89 0.878 0.295 36.57 0.917 0.373 34.99 0.887 0.220 35.26 0.887 0.259 38.57 0.937 0.219 35.70 0.928 0.321 33.89 0.905 0.197 39.30 0.947 0.162 35.44 0.913 0.252
+Fig. 2. Qualitative NVS comparison results on c t1 b, s t2 a and t t2 c scenes from C3VD dataset [41]. The red boxes highlight the differences.
+TABLE III
+Q UANTITATIVE NVS C OMPARISON R ESULTS ON O MNI O BJECT 3D DATASET [42]. F IRST , S ECOND , AND T HIRD I NDICATE R ANKING R ESULTS .
+Method
+apple
+backpack
+ball
+bed
+banana
+battery
+book
+bottle
+bowl
+box
+Average
+PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS
+3DGS [5]
+24.91 0.577
+2DGS [11]
+41.46 0.985
+PGSR [12]
+40.36 0.986
+MVGS [10]
+46.04 0.994
+GaMeS [13]
+34.51 0.981
+Triangle-Splat [14] 44.89 0.996
+Mesh-Splat [15]
+33.67 0.944
+FastGS [18]
+44.65 0.994
+Speedy-Splat [17] 39.58 0.970
+Taming-3DGS [16] 44.80 0.976
+3DGS-LM [19]
+45.41 0.996
+LM-RS [20]
+43.06 0.988
+CF-Splat (Adam)
+CF-Splat
+0.119
+0.035
+0.033
+0.013
+0.037
+0.013
+0.093
+0.022
+0.095
+0.035
+0.016
+0.041
+38.03 0.982
+39.45 0.988
+38.99 0.986
+40.08 0.989
+37.75 0.981
+39.91 0.991
+35.06 0.960
+39.68 0.989
+37.75 0.976
+39.65 0.971
+40.13 0.991
+37.32 0.976
+0.054
+0.038
+0.038
+0.024
+0.053
+0.024
+0.083
+0.038
+0.076
+0.050
+0.029
+0.068
+34.22 0.961
+38.05 0.986
+35.94 0.979
+39.36 0.989
+34.47 0.943
+38.15 0.989
+27.23 0.875
+37.79 0.980
+35.41 0.956
+38.52 0.970
+38.90 0.990
+35.83 0.961
+0.090
+0.038
+0.046
+0.021
+0.117
+0.023
+0.133
+0.058
+0.109
+0.049
+0.027
+0.093
+37.62 0.982
+38.15 0.989
+39.31 0.987
+40.94 0.988
+36.54 0.977
+36.13 0.978
+27.84 0.903
+39.95 0.989
+38.60 0.981
+40.25 0.971
+40.63 0.991
+36.33 0.969
+0.048
+0.027
+0.029
+0.019
+0.056
+0.047
+0.109
+0.032
+0.056
+0.043
+0.022
+0.071
+33.74 0.926
+38.38 0.982
+42.19 0.991
+46.30 0.996
+43.68 0.996
+41.19 0.993
+34.67 0.970
+44.90 0.997
+40.50 0.986
+45.33 0.978
+45.89 0.998
+43.28 0.993
+0.033
+0.024
+0.009
+0.005
+0.008
+0.014
+0.035
+0.008
+0.028
+0.026
+0.006
+0.012
+33.82 0.981
+37.63 0.992
+43.23 0.996
+46.65 0.996
+42.39 0.997
+40.67 0.995
+35.38 0.984
+45.52 0.998
+42.92 0.994
+45.88 0.979
+46.14 0.999
+43.87 0.997
+0.019
+0.011
+0.005
+0.002
+0.006
+0.009
+0.019
+0.004
+0.013
+0.023
+0.003
+0.005
+40.64 0.996
+40.77 0.997
+40.50 0.995
+42.40 0.995
+40.54 0.996
+37.29 0.993
+33.43 0.962
+41.46 0.997
+40.13 0.992
+41.60 0.977
+41.83 0.997
+40.11 0.994
+0.020
+0.016
+0.016
+0.012
+0.018
+0.025
+0.071
+0.018
+0.037
+0.034
+0.014
+0.027
+25.57 0.679
+43.52 0.998
+42.82 0.996
+43.81 0.995
+43.76 0.998
+39.50 0.993
+35.32 0.977
+43.88 0.998
+41.53 0.993
+43.92 0.978
+44.30 0.998
+42.65 0.996
+0.127
+0.007
+0.008
+0.008
+0.008
+0.016
+0.030
+0.009
+0.021
+0.027
+0.007
+0.013
+38.45 0.990
+39.57 0.994
+39.49 0.991
+40.99 0.993
+38.26 0.991
+35.85 0.987
+28.82 0.905
+39.76 0.993
+38.12 0.987
+39.98 0.975
+40.17 0.995
+37.03 0.982
+0.058
+0.035
+0.040
+0.024
+0.042
+0.052
+0.151
+0.046
+0.077
+0.055
+0.032
+0.085
+23.98 0.859
+37.08 0.984
+39.10 0.988
+42.50 0.994
+37.95 0.989
+36.48 0.989
+29.17 0.928
+40.79 0.993
+38.19 0.984
+41.54 0.977
+41.71 0.996
+38.70 0.987
+0.138
+0.026
+0.020
+0.009
+0.029
+0.026
+0.089
+0.024
+0.047
+0.032
+0.013
+0.034
+33.10 0.893
+39.41 0.989
+40.19 0.990
+42.91 0.993
+38.98 0.985
+39.01 0.991
+32.06 0.941
+41.84 0.993
+39.27 0.982
+42.15 0.975
+42.51 0.995
+39.82 0.984
+0.070
+0.026
+0.024
+0.014
+0.037
+0.025
+0.081
+0.026
+0.056
+0.037
+0.017
+0.045
+40.12 0.973 0.036 36.72 0.972 0.039 36.50 0.951 0.053 35.48 0.963 0.065 44.34 0.985 0.013 40.00 0.983 0.021 44.82 0.984 0.031 47.35 0.990 0.012 41.52 0.985 0.040 40.28 0.976 0.049 40.71 0.976 0.036
+45.13 0.992 0.012 39.61 0.989 0.025 39.38 0.992 0.022 39.67 0.985 0.030 45.76 0.995 0.007 45.88 0.996 0.004 46.21 0.996 0.011 48.35 0.998 0.006 42.04 0.996 0.012 43.12 0.998 0.005 43.52 0.994 0.013
+Fig. 3. Qualitative NVS comparison results on backpack, book and box from OmniObject3D Dataset [42]. The red boxes highlight the rendering differences.
+floating or blurred structures around the desk and monitor
+edges in the apt1 and office0 scenes in Fig. 4. Residual
+11
+TABLE IV
+Q UANTITATIVE NVS C OMPARISON R ESULTS ON B UNDLE F USION DATASET [25]. F IRST , S ECOND , AND T HIRD I NDICATE R ANKING R ESULTS .
+Method
+apt0
+apt1
+apt2
+copyroom
+office0
+office1
+office2
+office3
+Average
+PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS
+3DGS [5]
+2DGS [11]
+PGSR [12]
+MVGS [10]
+GaMeS [13]
+Triangle-Splat [14]
+Mesh-Splat [15]
+FastGS [18]
+Speedy-Splat [17]
+Taming-3DGS [16]
+3DGS-LM [19]
+LM-RS [20]
+27.49
+27.26
+27.37
+28.45
+26.71
+21.04
+21.40
+28.18
+27.17
+28.46
+27.81
+26.79
+0.838
+0.846
+0.841
+0.852
+0.838
+0.763
+0.716
+0.852
+0.841
+0.856
+0.847
+0.821
+0.231
+0.271
+0.261
+0.236
+0.259
+0.445
+0.464
+0.264
+0.299
+0.251
+0.264
+0.332
+27.32
+27.34
+26.69
+28.03
+26.29
+21.23
+20.23
+27.88
+27.33
+28.17
+27.69
+26.87
+0.815
+0.831
+0.815
+0.828
+0.820
+0.763
+0.671
+0.835
+0.827
+0.837
+0.829
+0.808
+0.269
+0.308
+0.302
+0.275
+0.299
+0.454
+0.508
+0.296
+0.331
+0.281
+0.299
+0.357
+22.28
+24.01
+23.62
+23.98
+23.50
+19.88
+18.16
+24.40
+23.77
+24.46
+23.80
+23.84
+0.709
+0.766
+0.753
+0.746
+0.753
+0.718
+0.542
+0.771
+0.770
+0.770
+0.756
+0.756
+0.347
+0.347
+0.339
+0.335
+0.353
+0.487
+0.554
+0.344
+0.379
+0.330
+0.350
+0.414
+28.29
+28.38
+28.25
+29.67
+25.76
+18.50
+18.71
+28.61
+28.16
+29.35
+28.42
+28.11
+0.903
+0.910
+0.908
+0.916
+0.890
+0.739
+0.669
+0.914
+0.907
+0.919
+0.906
+0.894
+0.194
+0.219
+0.209
+0.185
+0.232
+0.447
+0.497
+0.211
+0.242
+0.185
+0.221
+0.254
+27.09
+27.27
+26.89
+25.14
+25.21
+22.50
+17.99
+27.16
+27.10
+27.83
+26.78
+26.46
+0.853
+0.857
+0.853
+0.848
+0.848
+0.743
+0.500
+0.865
+0.857
+0.870
+0.857
+0.839
+0.258
+0.298
+0.280
+0.308
+0.292
+0.395
+0.528
+0.277
+0.310
+0.249
+0.293
+0.333
+25.36
+25.56
+25.38
+24.69
+24.50
+21.74
+18.04
+25.62
+25.57
+25.91
+25.35
+25.15
+0.791
+0.804
+0.799
+0.796
+0.789
+0.713
+0.531
+0.809
+0.803
+0.812
+0.801
+0.777
+0.278
+0.317
+0.301
+0.325
+0.317
+0.396
+0.547
+0.308
+0.338
+0.279
+0.313
+0.371
+24.87
+25.34
+24.51
+24.47
+24.09
+20.73
+18.34
+25.60
+25.37
+25.94
+25.11
+25.43
+0.742
+0.774
+0.756
+0.769
+0.756
+0.666
+0.542
+0.782
+0.775
+0.782
+0.771
+0.757
+0.314
+0.365
+0.348
+0.381
+0.357
+0.452
+0.580
+0.349
+0.390
+0.327
+0.361
+0.413
+25.00
+25.69
+25.42
+24.97
+25.03
+18.92
+18.25
+25.63
+25.55
+25.94
+25.32
+25.29
+0.823
+0.844
+0.835
+0.842
+0.840
+0.679
+0.562
+0.846
+0.843
+0.845
+0.839
+0.828
+0.265
+0.288
+0.285
+0.293
+0.289
+0.459
+0.508
+0.281
+0.301
+0.256
+0.288
+0.330
+25.96
+26.36
+26.02
+26.18
+25.14
+20.57
+18.89
+26.64
+26.25
+27.01
+26.28
+25.99
+0.809
+0.829
+0.820
+0.825
+0.817
+0.723
+0.592
+0.834
+0.828
+0.836
+0.826
+0.810
+0.270
+0.302
+0.291
+0.292
+0.300
+0.442
+0.523
+0.291
+0.324
+0.270
+0.299
+0.351
+CF-Splat (Adam)
+CF-Splat
+25.30 0.800
+28.67 0.866
+0.287
+0.223
+25.21 0.786
+28.47 0.840
+0.312
+0.260
+22.67 0.685
+26.05 0.786
+0.402
+0.315
+25.50 0.866
+28.95 0.918
+0.252
+0.189
+24.15 0.817
+25.96 0.839
+0.301
+0.291
+23.32 0.745
+27.77 0.809
+0.327
+0.272
+23.53 0.710
+26.31 0.797
+0.357
+0.279
+24.40 0.796
+25.66 0.843
+0.340
+0.303
+23.26 0.776
+27.22 0.837
+0.322
+0.267
+Ours
+3DGS
+2DGS
+PGSR
+MVGS
+GaMeS
+2DTS
+2DTS+
+MeRe
+office0
+copyroom
+apt1
+GT
+Fig. 4. Qualitative NVS comparison results on apt1, copyroom and office0 from BundleFusion Dataset [25]. The red boxes highlight the differences.
+pose errors can further amplify these artifacts by introducing
+additional misalignment among the training views.
+CF-Splat handles these inconsistencies during appearance
+estimation without altering the given scene geometry. The
+observation weighting in (19) reduces the influence of grazingangle measurements, while the remaining observations are
+jointly incorporated into the global LLS problem in (28). As
+illustrated in Fig. 4, this formulation produces more stable
+appearance and cleaner object boundaries despite moderate
+surface and registration errors.
+4) Oxford Spires: Oxford Spires evaluates the methods
+at a substantially larger scale, with large outdoor geometry,
+high-resolution images, and extensive multi-view observations.
+Under this setting, CF-Splat maintains a clear advantage in
+average PSNR and LPIPS while remaining competitive in
+SSIM. The qualitative comparison in Fig. 5 further shows that
+this advantage extends to challenging large-scale structures.
+For iterative splatting baselines, increasing the scene scale
+introduces a larger number of primitives and correspondingly
+enlarges the nonlinear optimization problem. Redundant primitives can be difficult to sufficiently optimize or prune, resulting
+in visible floaters and unstable structures. This behavior is
+particularly noticeable in the palace and quarter scenes in
+Fig. 5. Although FastGS removes a large number of redundant
+Gaussians during optimization, the remaining primitives still
+need to be jointly optimized through the nonlinear splatting
+process, making accurate appearance fitting increasingly difficult at large scale.
+In CF-Splat, increasing the scene scale mainly increases the
+dimension of the global SH appearance state X in (9), while
+the global LLS formulation in (28) remains linear. Therefore,
+the larger problem does not introduce additional nonlinear
+optimization variables or local minima. The proposed matrixfree PCG solver further solves the resulting large normal
+system without explicitly constructing the normal system and
+achieves stable numerical convergence. This allows CF-Splat
+to retain stable appearance estimation as the scene scale
+increases. Detailed analyses of efficiency and scalability will
+be discussed in Section V-G and Section V-I, respectively.
+F. Scene Appearance Estimation Results
+Beyond image-space NVS metrics, we quantitatively evaluate the geometric accuracy and appearance fidelity of the reconstructed surface representations. We restrict this evaluation
+to triangle-based baselines, since Gaussian-based representations do not explicitly define a surface, and extracting reliable
+surfaces can be affected by floating Gaussians. We conduct
+this evaluation on OmniObject3D, which provides high-quality
+textured meshes as reference geometry and appearance.
+For geometric evaluation, we measure the bidirectional
+mean surface distance between the ground-truth and reconstructed meshes. Specifically, we compute CD = 12 (F + B),
+where F denotes the mean reference-to-prediction surface distance and B denotes the mean prediction-to-reference surface
+distance. For appearance evaluation, we reuse the predictionto-reference surface correspondences established when computing B. For each sampled location on the predicted surface,
+we compare its color with that at the corresponding location
+on the ground-truth surface. Both colors are converted to the
+CIELAB color space, and their appearance discrepancy is
+quantified by the mean CIEDE2000 color difference [47].
+12
+TABLE V
+Q UANTITATIVE NVS C OMPARISON R ESULTS ON OXFORD S PIRES DATASET [7]. F IRST , S ECOND , AND T HIRD I NDICATE R ANKING R ESULTS .
+Method
+college
+library
+quarter
+church
+palace
+Average
+PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS
+3DGS [5]
+2DGS [11]
+PGSR [12]
+MVGS [10]
+GaMeS [13] ∗
+Triangle-Splat [14]
+Mesh-Splat [15] ∗
+24.55
+22.82
+22.77
+25.08
+22.39
+22.52
+–
+FastGS [18]
+24.37
+Speedy-Splat [17] 23.60
+Taming-3DGS [16] 24.73
+3DGS-LM [19]
+19.70
+LM-RS [20]
+23.28
+0.754
+0.731
+0.728
+0.767
+0.730
+0.701
+–
+0.785
+0.773
+0.785
+0.704
+0.791
+0.351
+0.430
+0.442
+0.376
+0.485
+0.393
+–
+0.367
+0.388
+0.345
+0.377
+0.366
+18.86
+18.55
+19.56
+19.88
+18.46
+18.49
+17.31
+17.46
+15.10
+17.50
+15.11
+17.93
+0.685
+0.710
+0.722
+0.720
+0.681
+0.650
+0.506
+0.731
+0.688
+0.720
+0.687
+0.746
+0.402
+0.456
+0.490
+0.442
+0.492
+0.434
+0.631
+0.466
+0.484
+0.457
+0.486
+0.473
+17.72
+17.09
+19.49
+18.96
+–
+16.76
+–
+17.36
+17.03
+16.93
+15.87
+19.46
+0.689
+0.696
+0.730
+0.726
+–
+0.631
+–
+0.695
+0.689
+0.683
+0.672
+0.747
+0.434
+0.492
+0.513
+0.490
+–
+0.473
+–
+0.463
+0.470
+0.454
+0.470
+0.425
+17.26
+17.11
+18.04
+18.04
+19.31
+17.90
+16.21
+19.69
+17.97
+19.86
+17.75
+17.68
+0.680
+0.708
+0.713
+0.712
+0.686
+0.658
+0.481
+0.758
+0.754
+0.757
+0.745
+0.778
+0.432
+0.548
+0.548
+0.526
+0.558
+0.475
+0.635
+0.463
+0.476
+0.451
+0.467
+0.452
+19.71
+20.09
+20.22
+19.67
+20.21
+18.90
+16.80
+19.22
+18.76
+19.55
+18.67
+21.17
+0.743
+0.773
+0.777
+0.758
+0.734
+0.679
+0.543
+0.710
+0.730
+0.703
+0.711
+0.761
+0.404
+0.512
+0.537
+0.512
+0.612
+0.465
+0.667
+0.427
+0.436
+0.403
+0.425
+0.411
+19.62
+19.13
+20.02
+20.33
+20.09
+18.91
+16.77
+19.62
+18.49
+19.71
+17.42
+19.90
+0.710
+0.724
+0.734
+0.737
+0.708
+0.664
+0.510
+0.736
+0.727
+0.730
+0.704
+0.765
+0.405
+0.488
+0.506
+0.469
+0.537
+0.448
+0.644
+0.437
+0.451
+0.422
+0.445
+0.425
+CF-Splat (Adam)
+CF-Splat
+24.86 0.761
+27.48 0.831
+0.342
+0.316
+18.63 0.676
+21.81 0.706
+0.436
+0.403
+19.23 0.680
+22.70 0.756
+0.438
+0.388
+20.53 0.725
+20.97 0.705
+0.400
+0.410
+19.71 0.680
+25.46 0.784
+0.417
+0.333
+20.59 0.705
+23.68 0.756
+0.407
+0.370
+− indicates out-of-memory on GPU. ∗ means that the average results are calculated over the successfully running scenes only.
+Fig. 5. Qualitative NVS comparison results on college, quarter and palace from Oxford Spires Dataset [7]. The red boxes highlight the rendering differences.
+CF-Splat
+Triangle-Splat
+Mesh-Splat
+Appearance
+bottle
+banana
+Geometry (%)
+apple
+GT
+Fig. 6. Surface geometry and appearance evaluation on the apple, banana, and bottle scenes from OmniObject3D [42]. For each method, we show the
+reconstructed surface, appearance-error map and geometric-error map from left to right. CIEDE2000 reference is attached.
+Fig. 6 shows that CF-Splat consistently achieves the lowest
+bidirectional geometric error across all evaluated scenes while
+also producing lower surface appearance error. In contrast,
+the compared methods exhibit larger geometric deviations and
+more spatially irregular error patterns in several local regions,
+which further lead to noticeable appearance discrepancies
+around fine structures and high-frequency texture boundaries.
+over the input mesh without iterative geometry optimization. This allows CF-Splat to preserve the underlying surface
+structure while avoiding geometry drift during appearance
+fitting, leading to more faithful geometric and appearance
+reconstruction.
+To further visualize the quality of the reconstructed representations, Fig. 7 presents representative comparisons on
+BundleFusion and Oxford Spires. CF-Splat produces cleaner
+surface-attached appearance and better preserves local texture
+structures, whereas the compared Gaussian- and triangle-based
+methods exhibit more surface artifacts and texture distortions.
+Fig. 8 and Table VI evaluate the computational efficiency
+of CF-Splat in terms of computation time and peak GPU
+memory consumption. Fig. 8 illustrates the accuracy–time
+behavior on the large-scale college scene, while Table VI
+summarizes the efficiency results across all four datasets. CFSplat achieves substantially shorter computation time than the
+compared methods while maintaining a smaller peak GPU
+memory consumption across scene scales.
+Overall, these advantages stem from our closed-form formulation, which estimates view-dependent appearance directly
+G. Efficiency Analysis
+13
+TABLE VI
+E FFICIENCY COMPARISON ACROSS THE EVALUATED DATASETS . F IRST ,
+S ECOND , AND T HIRD INDICATE THE RANKING RESULTS .
+Method
+C3VD [41]
+OmniObject3D [42]
+BundleFusion [25]
+Oxford Spires [7]
+Time (min) GPU (GB) Time (min) GPU (GB) Time (min) GPU (GB) Time (min) GPU (GB)
+(a) office1
+3DGS
+2DGS
+Triangle-Splat
+Mesh-Splat
+palace
+office1
+Ours
+(b) palace
+3DGS [5]
+2DGS [11]
+PGSR [12]
+MVGS [10]
+GaMeS [13]
+Triangle-Splat [14]
+Mesh-Splat [15]
+FastGS [18]
+Speedy-Splat [17]
+Taming-3DGS [16]
+3DGS-LM [19]
+LM-RS [20]
+11.52
+14.74
+51.32
+43.99
+45.67
+41.07
+49.60
+2.94
+7.93
+8.41
+9.36
+7.62
+2.18
+2.47
+3.06
+4.28
+2.54
+3.08
+3.46
+2.04
+2.40
+2.39
+4.66
+2.14
+11.34
+14.94
+43.17
+36.69
+30.90
+39.67
+46.82
+2.53
+7.54
+5.60
+8.95
+6.12
+1.47
+1.83
+2.24
+3.07
+1.74
+2.06
+2.43
+1.28
+2.65
+1.47
+2.74
+1.88
+25.53
+41.42
+85.19
+77.69
+87.05
+76.90
+64.62
+3.26
+18.02
+26.16
+28.77
+14.25
+5.93
+6.96
+7.07
+7.43
+5.08
+7.12
+7.46
+5.08
+6.31
+5.81
+6.21
+3.63
+48.90
+42.50
+63.58
+74.00
+119.40
+99.85
+104.81
+7.25
+38.30
+35.58
+40.72
+16.61
+7.14
+6.43
+7.26
+7.76
+7.47
+6.96
+7.58
+6.58
+6.91
+6.28
+7.55
+6.61
+CF-Splat (Adam)
+CF-Splat
+5.96
+0.09
+0.47
+0.63
+12.24
+0.03
+0.61
+0.88
+22.90
+0.93
+4.14
+3.62
+44.45
+1.55
+4.72
+4.18
+Fig. 7. Surface geometry and appearance evaluation on the office1 scene
+from BundleFusion [25] and the palace scene from Oxford Spires [7]. The
+top pictures are the estimated scene of our CF-Splat.
+Fig. 9. Numerical accuracy and efficiency of matrix-free PCG under different
+stopping tolerances on the backpack scene from OmniObject3D [42], with the
+explicitly assembled solver used as the numerical reference. Explicit means
+solving the same global LLS formulation through a factorization-based solver.
+(a) Runtime and PCG iteration count. (b) GPU memory and mean RGB
+residual MAE.
+Fig. 8. Efficiency comparison on the college scene from Oxford Spires [7].
+The curves show PSNR as a function of computation time for the iterative
+baselines, while the marker denotes the result obtained by CF-Splat. The inset
+reports the corresponding peak GPU memory consumption.
+1) Computation Time: CF-Splat achieves the shortest computation time across all four datasets. Compared with 3DGS,
+it provides a speedup of approximately 27.5×–378.0×. Meanwhile, it only requires 1.55 min on large-scale Oxford Spires.
+More notably, CF-Splat is approximately 24.6×–408.0× faster
+than CF-Splat (Adam), demonstrating that the efficiency gain
+is not merely due to the triangle-based representation, but
+primarily results from the proposed closed-form formulation.
+As illustrated in Fig. 8, iterative splatting methods progressively improve reconstruction quality through repeated
+rendering, gradient back-propagation, and parameter updates.
+In contrast, CF-Splat exploits the linear dependence of image
+observations on the per-vertex SH coefficients and formulates appearance estimation as a global LLS formulation in
+(28). The advantage becomes increasingly pronounced for
+large-scale Oxford Spires, where repeatedly processing highresolution multi-view observations dominates the computational cost of iterative methods.
+2) Peak GPU Memory Consumption: CF-Splat also maintains low peak GPU memory consumption across all evaluated
+datasets, achieving a 1.6×–3.5× reduction relative to 3DGS.
+Even on the large-scale Oxford Spires dataset, CF-Splat requires only 4.18 GB of peak GPU memory.
+The memory advantage originates from two complementary
+aspects. First, CF-Splat estimates only the per-vertex SH
+appearance coefficients over the given mesh. Unlike gradientbased splatting methods, it does not require maintaining a large
+collection of independently optimized primitive parameters
+together with the intermediate gradients and optimizer states.
+Second, the matrix-free solver introduced in Section IV-A
+applies the normal operator implicitly without explicitly materializing the global normal matrix in (29).
+Overall, these results highlight a favorable scaling behavior of CF-Splat. Increasing the number of observations primarily introduces additional linear measurements rather than
+additional trainable scene parameters or optimization states.
+Combined with the matrix-free solution strategy, this allows
+CF-Splat to retain both low computation time and moderate
+GPU memory consumption as the scene scale increases. More
+detailed scalability analyses are presented in Section V-I.
+H. Analysis of matrix-free PCG Solver
+We evaluate the numerical accuracy of the matrix-free
+PCG solver by comparing it with an explicitly assembled
+solution of the same global normal system. As established
+in Section IV-A, the matrix-free operator preserves the normal
+system exactly; therefore, the PCG stopping tolerance controls
+the numerical approximation to the same LLS solution.
+As shown in Fig. 9, tightening the stopping tolerance requires more PCG iterations and computation, but progressively
+reduces the final residual error. At the tighter tolerances,
+the residual MAE approaches that of the factorization-based
+solver, demonstrating that matrix-free PCG can recover the
+same LLS solution to high numerical accuracy. This behavior
+14
+Fig. 10. Scalability of CF-Splat (w/o densification) with respect to the number of input views on the college scene from Oxford Spires [7], with 1.55M input
+mesh vertices. (a–c) Reconstruction quality, runtime, and peak GPU memory compared with baseline methods. (d) Runtime breakdown of CF-Splat. (e) PCG
+iteration counts and final relative residuals, with the dashed line indicating the convergence tolerance.
+agrees with (39), where a smaller residual provides a tighter
+bound on the error relative to the unique global minimizer.
+Meanwhile, matrix-free PCG maintains a smaller GPU memory because the normal matrices are not explicitly constructed.
+I. Analysis of Scalability on Large-Scale Scenes
+In this section, we evaluate the scalability of CF-Splat with
+respect to the number of input views and mesh vertices,
+on the large-scale college scene from Oxford Spires. For
+view scalability, we keep the input mesh at 1.55M vertices,
+while for vertex scalability, we use 760 input views across
+all settings. To isolate the computational scalability of each
+method, densification function is disabled for both CF-Splat
+and the baselines throughout these experiments.
+1) Scalability to The Number of Input Views: Fig. 10
+evaluates the scalability of CF-Splat with respect to the number
+of input views. As shown in Fig. 10(a), the PSNR of CFSplat steadily improves as more input views become available
+and remains consistently higher than those of the compared
+baselines. This trend is consistent with the directional support
+underlying our global SH appearance estimation. Additional
+cameras introduce new viewing directions for the per-vertex
+SH coefficients, enabling more SH bands to satisfy the support
+criterion in (25) and receive weaker regularization through
+(26). Although 3DGS and FastGS also benefit substantially
+from additional views, CF-Splat achieves the highest PSNR
+across all settings, while Triangle-Splat and 3DGS-LM exhibit
+non-monotonic behavior at larger input scales. Unlike CFSplat, the baselines do not explicitly adapt SH complexity
+to the available directional support, but instead incorporate
+additional observations through iterative scene optimization,
+which may contribute to their less stable fidelity gains as the
+number of views increases.
+Fig. 10(b), (d), and (e) jointly demonstrate the computational scalability of CF-Splat. CF-Splat maintains substantially
+lower overall runtime than the baselines by solving the global
+LLS system, rather than repeatedly optimizing a large set of
+scene parameters. As the number of input views increases, the
+solving time grows with the number of observations, consistent
+with (40), while the global LLS solution remains efficiently
+obtained across the evaluated settings.
+Fig. 10(c) further shows the memory scalability of CFSplat. The matrix-free formulation avoids explicitly storing A
+and H in (29), while view-wise streaming retains only the
+Fig. 11. Scalability of CF-Splat (w/o densification) with respect to the number
+of input mesh vertices on the college scene from Oxford Spires [7], with 760
+input views. (a) Reconstruction quality. (b) Peak GPU memory. (c) Runtime
+breakdown of CF-Splat. (d) PCG iteration counts and final relative residuals,
+with the dashed line indicating the convergence tolerance.
+observation features of the current view. As indicated by (41),
+the working memory is therefore governed primarily by the
+number of vertices Nv , rather than the number of input views
+K. Consequently, increasing K leads to only minor memory
+variation when the mesh resolution is unchanged.
+2) Scalability to The Number of Input Mesh Vertices:
+Fig. 11 evaluates the scalability of CF-Splat with respect to the
+number of input mesh vertices. As shown in Fig. 11(a), PSNR
+steadily improves as the mesh resolution increases. We do not
+directly compare CF-Splat with other splatting-based methods
+under a controlled primitive count, as their NVS performance
+relies heavily on adaptive densification, making it difficult to
+enforce a comparable number of primitives without altering
+their native optimization behavior.
+Fig. 11(b), (c), and (d) show that this improvement is
+achieved with moderate computational growth. Peak GPU
+memory increases gradually with Nv , since the global LLS formulation optimizes only the per-vertex SH coefficients, while
+its matrix-free solver processes the observations view-wise
+without explicitly storing the global observation or normal
+matrices. This behavior is consistent with (41). The overall
+runtime also grows moderately with Nv , mainly due to the increased vertex-wise workload described in (40). These results
+15
+33.73
+34.02
++
+Input view 1
+=
+Input view 2
+(a) CF-Splat w/o SH regularization
+33.66
+Test view
+34.69
++
+Input view 1
+22.05
+29.78
+=
+Input view 2
+(b) CF-Splat w/ SH regularization
+Test view
+Fig. 12. Effect of adaptive SH regularization under uneven observations, on
+the c t1 b scene from C3VD [41], using K = 7 input views and maximum
+SH degree L = 3. (a) PSNR on input and test views. (b) PCG solving records,
+with solve time, iteration count, and final residual MSE. (c) Per-vertex SH
+magnitudes over the number of observing input views. (d) SH magnitude
+distributions over observed vertices. Dashed and solid lines in (c) and (d)
+denote the DC (l = 0) and non-DC (l ≥ 1) SH components, respectively.
+Fig. 13. Qualitative effect of adaptive SH regularization in Fig. 12. The
+regions highlighted by the purple and blue boxes are observed in input view 1
+but not in input view 2, resulting in insufficient directional support for higherorder SH components according to (25). Without adaptive SH regularization,
+the weakly constrained SH components produce noisy colors in the test view.
+demonstrate that CF-Splat maintains better computational and
+memory scalability as the mesh resolution increases.
+TABLE VII
+E FFECT OF POSE NOISE ON THE Apt0 SCENE FROM B UNDLE F USION [25].
+ROTATION AND TRANSLATION NOISE DENOTE PER - AXIS STANDARD
+DEVIATIONS .
+Rot./Trans.
+(◦ /cm)
+J. Analysis of Adaptive SH Regularization
+0/0
+0.1/0.5
+0.3/2
+1.0/5
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+28.08
+29.16
+26.56
+28.07
+23.00
+25.08
+19.62
+21.91
+0.852
+0.854
+0.815
+0.823
+0.751
+0.759
+0.714
+0.687
+0.253
+0.232
+0.293
+0.267
+0.378
+0.333
+0.449
+0.397
+25.79
+22.52
+20.35
+29.59
+28.17
+24.23
+21.81
+3DGS
+27.45
+CF-Splat
+This section evaluates the role of the adaptive SH regularization in Section III-D under uneven observations on the
+c t1 b scene from C3VD. We set the maximum SH degree
+L = 3 and use K = 7 input views, resulting in a sparse-view
+setting with limited directional support for many vertices.
+Fig. 12 quantitatively evaluates the effect of adaptive SH
+regularization under sparse and uneven observations, while
+Fig. 13 provides a visualization of the corresponding case.
+As shown in Fig. 12(a), both configurations fit the input
+views similarly, whereas adaptive regularization substantially
+improves the test-view PSNR. This indicates that, without
+sufficient directional constraints, unconstrained SH coefficients
+that do not satisfy the condition in (25) can overfit the observed
+views and generalize poorly to unseen viewpoints.
+Fig. 12(b) further shows the numerical effect of the adaptive SH regularization. With regularization, the PCG residual
+decreases more rapidly, while the unregularized system remains difficult to solve within the maximum iteration count
+Tmax = 300. This observation is consistent with the role of the
+proposed regularization in constraining weakly supported SH
+components and improving the conditioning of the appearance
+estimation problem.
+Fig. 12(c) and (d) further illustrate how the proposed regularization controls the DC (zeroth-order, l = 0) and non-DC
+(higher-order, l > 0) components of the SH appearance vector.
+For vertices observed from only a few views, the non-DC components are strongly suppressed while the DC component is
+preserved. As view support increases, more directional components are retained according to (26). The resulting coefficient
+distribution also exhibits substantially smaller large-magnitude
+parts, reducing unstable view-dependent appearance.
+Method
+3DGS
+CF-Splat
+3DGS
+CF-Splat
+3DGS
+CF-Splat
+3DGS
+CF-Splat
+0° / 0cm
+0.1° / 0.5cm
+0.3° / 2cm
+1° / 5cm
+Fig. 14. Visualized comparison of 3DGS and CF-Splat under increasing
+camera pose perturbations, on the apt0 scene from BundleFusion [25]. PSNR
+of visualized test view is reported for each noise setting.
+K. Robustness to Input Noise
+Since CF-Splat builds upon a given mesh and calibrated
+observations, we further evaluate its robustness to camera pose
+perturbations and geometric inaccuracies in the input mesh on
+the apt0 scene from BundleFusion. Camera pose perturbations
+are applied to both the input and test views.
+1) Pose Noise: We first evaluate robustness to camera pose
+perturbations. Starting from the ground-truth poses for this
+ablation only, we apply four levels of rotation and translation
+noise with per-axis standard deviations of 0◦ /0 cm, 0.1◦ /0.5
+cm, 0.3◦ /2 cm, and 1◦ /5 cm. We compare CF-Splat with
+16
+TABLE VIII
+E FFECT OF M ESH R ECONSTRUCTION E RRORS I NDUCED BY D IFFERENT
+TSDF VOXEL SIZES ON THE apt0 SCENE FROM B UNDLE F USION [25].
+B EST R ESULTS A RE H IGHLIGHTED IN B OLD .
+Voxel size Vertices (M) PSNR ↑ SSIM ↑ LPIPS ↓ Error (cm) ↓
+0.5 cm
+1 cm
+2 cm
+4 cm
+29.17
+29.10
+29.07
+28.51
+29.12
+0.872
+0.869
+0.867
+0.863
+0.212
+0.219
+0.222
+0.223
+28.80
+SH Degree PSNR↑ SSIM↑ LPIPS↓ Time (s)↓ GPU (GB)↓
+0
+1
+2
+3
+8.29
+8.98
+9.86
+11.81
+35.39
+38.46
+38.63
+39.61
+0.968
+0.979
+0.982
+0.989
+0.96
+0.98
+1.19
+1.53
+0.062
+0.054
+0.043
+0.025
+1.153
+1.154
+1.157
+1.160
+FPS↑
+3027.6
+3018.0
+2874.4
+2853.3
+TABLE X
+A BLATION OF G RADIENT-G UIDED T RIANGLE D ENSIFICATION ON T HE
+backpack S CENE FROM O MNI O BJECT 3D [42].
+27.62
+render
+29.21
+11.92
+2.39
+0.48
+0.10
+TABLE IX
+A BLATION OF THE MAXIMUM SH DEGREE L ON THE backpack SCENE
+FROM O MNI O BJECT 3D [42].
+Rounds Vertices (K) PSNR↑ SSIM↑ LPIPS↓ Time (s)↓ GPU (GB)↓
+mesh
+0
+10
+20
+40
+0.5 cm
+1 cm
+2 cm
+22.4
+51.4
+77.2
+125.9
+39.31
+39.61
+39.66
+39.67
+0.986
+0.989
+0.989
+0.990
+0.027
+0.025
+0.023
+0.023
+0.81
+1.53
+2.43
+4.28
+1.146
+1.160
+1.174
+1.192
+FPS↑
+3959.9
+2853.3
+2159.6
+1581.8
+4 cm
+Fig. 15. Render (top) and mesh (bottom) results of CF-Splat using input
+meshes reconstructed with different TSDF voxel sizes. PSNR is reported for
+each setting.
+3DGS under the same perturbation settings, with quantitative
+and qualitative results reported in Table VII and Fig. 14,
+respectively. Compared with 3DGS, CF-Splat maintains better
+reconstruction quality than 3DGS as pose noise increases.
+Under inaccurate camera poses, the per-view iterative updates
+in 3DGS are driven by inconsistent photometric constraints,
+which can be absorbed by the coupled Gaussian geometry
+and appearance parameters and lead to blurred renderings. In
+contrast, CF-Splat jointly incorporates all observations into a
+global closed-form formulation on the given mesh, reducing
+such view-specific overfitting and yielding more stable appearance estimates under pose perturbations.
+2) Mesh Noise: To evaluate robustness to inaccuracies in
+the input geometry, we reconstruct the input meshes using
+TSDF voxel sizes of 0.5 cm, 1 cm, 2 cm, and 4 cm. We
+quantify the geometric error using the mean one-way surface
+distance from the reference mesh to the TSDF-reconstructed
+mesh, where smaller voxel sizes lead to higher geometric
+accuracy. Table VIII reports the corresponding vertex counts,
+geometric errors, and rendering performance, while Fig. 15
+provides qualitative comparisons of the rendered results and
+reconstructed mesh regions.
+Despite the increasing geometric error, CF-Splat exhibits
+only moderate degradation in rendering quality. The results
+indicate that the proposed closed-form appearance estimation
+remains stable across meshes with different geometric accuracies, demonstrating robustness to errors of the input mesh.
+L. Ablation Study
+We further ablate four design choices of CF-Splat: the
+maximum SH degree, gradient-guided triangle densification in
+Section III-F, the Block-Jacobi preconditioner in Section IV-B,
+and the global closed-form formulation in Section III-E.
+0 rounds
+10 rounds
+20 rounds
+40 rounds
+Fig. 16. Qualitative effect of gradient-guided adaptive densification on the
+backpack scene from OmniObject3D [42]. The highlighted regions show the
+appearance details.
+Fig. 17. Preconditioner ablation on the apt0 scene from BundleFusion [25],
+using a PCG tolerance of 10−6 and a maximum of 300 iterations. No precond.
+means the proposed PCG solver without any preconditioner. (a) PCG solve
+time and iteration count. (b) Peak GPU memory and mean RGB residual
+MAE. OOM exceeds the available GPU memory.
+1) SH Degree: We first evaluate the maximum SH degree
+L on the backpack scene. As shown in Table IX, increasing L
+generally improves NVS quality by expanding the directional
+appearance capacity of the per-vertex SH representation in (3).
+The improvement comes with an increase in computation and
+memory, since the SH state dimension q also grows.
+2) Gradient-Guided Adaptive Densification: We next evaluate gradient-guided adaptive densification on the backpack
+scene, varying only the number of densification rounds. Table X and Fig. 16 show that increasing spatial vertex support
+improves fine-scale appearance reconstruction, with the gains
+gradually saturating as the mesh becomes denser.
+17
+Fig. 18. Comparison between CF-Splat and CF-Splat (Adam) on the college
+scene from Oxford Spires [7]. (a) PSNR vs. computation time. (b) Final SSIM
+and LPIPS.
+3) Block-Jacobi Preconditioner: We compare the matrixfree solver without preconditioning, with scalar Jacobi, with
+the proposed Block-Jacobi preconditioner, and with a full
+dense preconditioner on the apt0 scene.
+As shown in Fig. 17, the unpreconditioned and scalar
+Jacobi variants require substantially more iterations and fail to
+satisfy the prescribed tolerance within the common maximum
+iterations. In contrast, Block-Jacobi converges more efficiently
+while maintaining a comparable memory footprint.
+4) Global Closed-Form Formulation: Finally, we isolate the
+benefit of the global closed-form formulation by comparing
+CF-Splat with CF-Splat (Adam). The only difference between
+them is the optimization strategy, as introduced in Section V-A.
+Fig. 18 shows that the Adam variant improves progressively
+with optimization but converges much more slowly, while CFSplat reaches a better appearance estimate with substantially
+less computation. CF-Splat exploits the global LLS objective
+directly rather than relying on a finite sequence of learningrate-dependent gradient updates.
+M. Discussion
+Similar to triangle-based splatting methods [14], [15], CFSplat solves a slightly different problem comparing to existing
+Gaussian splatting methods in its optimization formulation.
+Although all methods share the same high-level objective
+of estimating scene appearance for NVS, CF-Splat exploits
+the linear structure of the appearance model and formulates
+the problem as a global LLS system over the input mesh,
+rather than optimizing an α-blending-based nonlinear objective. Therefore, the global optimality guaranteed by CF-Splat
+is specific to our global LLS formulation and should not
+be interpreted as global optimality over all possible splatting
+objectives. This also explains why our goal is not to dominate
+every baseline in image-space NVS quality, but to achieve
+competitive or superior rendering quality under a substantially
+more structured optimization formulation.
+Another important distinction is that CF-Splat preserves the
+geometry of the input mesh and focuses on appearance estimation over this surface representation. Apart from appearancedriven densification, the underlying geometry is not jointly
+optimized during scene fitting. This deliberately simplifies the
+splatting problem, but also avoids degrading geometry solely
+for marginal improvements in image-space rendering quality.
+Such a property is particularly valuable in robotic pipelines,
+where the reconstructed geometry may also serve downstream
+tasks and therefore should remain consistent with the output
+of upstream mapping or reconstruction modules.
+Finally, the use of matrix-free PCG does not conflict with
+the closed-form nature of CF-Splat. The underlying appearance estimation problem remains a well-posed global LLS
+problem with a unique global minimizer, while the proposed
+PCG solver serves only as an efficient numerical procedure
+for solving the resulting LLS system at scale. In this sense,
+the closed-form formulation defines the optimization structure,
+whereas the matrix-free solver provides a practically stable
+implementation of that structure.
+VI. C ONCLUSION
+In this work, we presented CF-Splat, a novel closed-form
+triangle-splatting framework for efficient scene appearance
+estimation over a known triangular mesh. Given the mesh
+geometry and calibrated cameras, CF-Splat reveals that rasterized pixel colors are linear with respect to the per-vertex
+SH coefficients, allowing multi-view appearance estimation
+to be formulated as a global LLS problem with a unique
+global minimizer. Gradient-guided triangle densification adaptively allocates spatial appearance capacity without altering the
+mapped surface, while observation-adaptive SH regularization
+improves robustness under uneven directional support. To scale
+the resulting global system, the proposed triangle-structured
+matrix-free PCG solver exploits triangle-local observation
+support and avoids explicitly constructing the global normal
+system while converging to the same LLS solution within
+the prescribed numerical tolerance. Experiments across four
+real-world datasets demonstrate that CF-Splat achieves competitive or superior NVS quality while substantially reducing
+computation time and peak GPU memory consumption on
+a consumer-grade laptop. These results show that CF-Splat
+provides a new closed-form perspective on splatting-based
+scene representation, demonstrating that high-quality appearance estimation can be achieved through a globally structured
+linear formulation rather than iterative nonlinear scene fitting.
+The current formulation assumes relatively accurate mesh
+geometry and camera calibration, so the errors in the upstream map are not intentionally corrected. Future work will
+therefore investigate uncertainty-aware appearance estimation
+under imperfect geometry and poses, as well as incremental
+formulations that update the global appearance state as new
+observations become available.
+R EFERENCES
+[1] D. Azinović, R. Martin-Brualla, D. B. Goldman, M. Nießner, and
+J. Thies, “Neural rgb-d surface reconstruction,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), pp. 6290–6301, 2022.
+[2] Z. Yang, Y. Chen, J. Wang, S. Manivasagam, W.-C. Ma, A. J. Yang,
+and R. Urtasun, “Unisim: A neural closed-loop sensor simulator,” in
+Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), pp. 1389–1399, 2023.
+[3] M. Adamkiewicz, T. Chen, A. Caccavale, R. Gardner, P. Culbertson,
+J. Bohg, and M. Schwager, “Vision-only robot navigation in a neural
+radiance world,” IEEE Robotics and Automation Letters, vol. 7, no. 2,
+pp. 4606–4613, 2022.
+[4] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi,
+and R. Ng, “Nerf: Representing scenes as neural radiance fields for view
+synthesis,” Communications of the ACM, vol. 65, no. 1, pp. 99–106,
+2021.
+18
+[5] B. Kerbl, G. Kopanas, T. Leimkühler, and G. Drettakis, “3d gaussian
+splatting for real-time radiance field rendering.,” ACM Trans. Graph.,
+vol. 42, no. 4, pp. 139–1, 2023.
+[6] D. P. Kingma and J. Ba, “Adam: A method for stochastic optimization,”
+arXiv preprint arXiv:1412.6980, 2014.
+[7] Y. Tao, M. Á. Muñoz-Bañón, L. Zhang, J. Wang, L. F. T. Fu, and
+M. Fallon, “The oxford spires dataset: Benchmarking large-scale lidarvisual localisation, reconstruction and radiance field methods,” The
+International Journal of Robotics Research, vol. 45, no. 6, pp. 839–
+857, 2026.
+[8] I. Vizzo, T. Guadagnino, J. Behley, and C. Stachniss, “Vdbfusion:
+Flexible and efficient tsdf integration of range sensor data,” Sensors,
+vol. 22, no. 3, p. 1296, 2022.
+[9] X. Liu, Z. Liu, F. Kong, and F. Zhang, “Large-scale lidar consistent
+mapping using hierarchical lidar bundle adjustment,” IEEE Robotics and
+Automation Letters, vol. 8, no. 3, pp. 1523–1530, 2023.
+[10] X. Du, Y. Wang, and X. Yu, “Mvgs: Multi-view-regulated gaussian
+splatting for novel view synthesis,” arXiv preprint arXiv:2410.02103,
+2024.
+[11] B. Huang, Z. Yu, A. Chen, A. Geiger, and S. Gao, “2d gaussian splatting
+for geometrically accurate radiance fields,” in ACM SIGGRAPH 2024
+conference papers, pp. 1–11, 2024.
+[12] D. Chen, H. Li, W. Ye, Y. Wang, W. Xie, S. Zhai, N. Wang, H. Liu,
+H. Bao, and G. Zhang, “Pgsr: Planar-based gaussian splatting for
+efficient and high-fidelity surface reconstruction,” IEEE Transactions on
+Visualization and Computer Graphics, 2024.
+[13] J. Waczyńska, P. Borycki, S. Tadeja, J. Tabor, and P. Spurek, “Games:
+Mesh-based adapting and modification of gaussian splatting,” arXiv
+preprint arXiv:2402.01459, 2024.
+[14] J. Held, R. Vandeghen, A. Deliege, A. Hamdi, S. Giancola, D. Rebain,
+A. Cioppa, B. Ghanem, A. Vedaldi, A. Tagliasacchi, et al., “Triangle
+splatting for real-time radiance field rendering,” in 2026 International
+Conference on 3D Vision (3DV), pp. 1248–1257, IEEE, 2026.
+[15] J. Held, S. Son, R. Vandeghen, D. Rebain, M. Gadelha, Y. Zhou,
+A. Cioppa, M. C. Lin, M. Van Droogenbroeck, and A. Tagliasacchi,
+“Meshsplatting: Differentiable rendering with opaque meshes,” arXiv
+preprint arXiv:2512.06818, 2025.
+[16] S. S. Mallick, R. Goel, B. Kerbl, M. Steinberger, F. V. Carrasco, and
+F. De La Torre, “Taming 3dgs: High-quality radiance fields with limited
+resources,” in SIGGRAPH Asia 2024 Conference Papers, pp. 1–11, 2024.
+[17] A. Hanson, A. Tu, G. Lin, V. Singla, M. Zwicker, and T. Goldstein,
+“Speedy-splat: Fast 3d gaussian splatting with sparse pixels and sparse
+primitives,” in 2025 IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), pp. 21537–21546, IEEE, 2025.
+[18] S. Ren, T. Wen, Y. Fang, and B. Lu, “Fastgs: Training 3d gaussian
+splatting in 100 seconds,” in Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pp. 26094–26103, 2026.
+[19] L. Höllein, A. Božič, M. Zollhöfer, and M. Nießner, “3dgs-lm: Faster
+gaussian-splatting optimization with levenberg-marquardt,” in Proceedings of the IEEE/CVF International Conference on Computer Vision
+(ICCV), pp. 26740–26750, 2025.
+[20] H. Pehlivan, A. Boscolo Camiletto, L. G. Foo, M. Habermann, and
+C. Theobalt, “Matrix-free second-order optimization of gaussian splats
+with residual sampling,” in International Conference on 3D Vision
+(3DV), pp. 18–28, 2026.
+[21] J. Ruan, B. Li, Y. Wang, and Y. Sun, “Slamesh: Real-time lidar
+simultaneous localization and meshing,” in 2023 IEEE International
+Conference on Robotics and Automation (ICRA), pp. 3546–3552, IEEE,
+2023.
+[22] Y. Jia, F. Cao, T. Wang, Y. Tang, S. Shao, and L. Liu, “Cad-mesher:
+A convenient, accurate, dense mesh-based mapping module in slam for
+dynamic environments,” IEEE Transactions on Multimedia, 2025.
+[23] Y. Tian, Y. Chang, F. H. Arias, C. Nieto-Granda, J. P. How, and
+L. Carlone, “Kimera-multi: Robust, distributed, dense metric-semantic
+slam for multi-robot systems,” IEEE transactions on robotics, vol. 38,
+no. 4, 2022.
+[24] Y. Liu, C. Guo, Y. Luo, and Y. Wang, “Dynameshslam: A meshbased dynamic visual slammot method,” IEEE Robotics and Automation
+Letters, vol. 9, no. 6, pp. 5791–5798, 2024.
+[25] A. Dai, M. Nießner, M. Zollhöfer, S. Izadi, and C. Theobalt, “BundleFusion: Real-time globally consistent 3d reconstruction using on-the-fly
+surface re-integration,” ACM Transactions on Graphics, vol. 36, no. 4,
+pp. 76:1–76:18, 2017.
+[26] H. Oleynikova, Z. Taylor, M. Fehr, J. Nieto, and R. Siegwart, “Voxblox:
+Incremental 3d euclidean signed distance fields for on-board MAV
+planning,” in 2017 IEEE/RSJ International Conference on Intelligent
+Robots and Systems (IROS), pp. 1366–1373, 2017.
+[27] J. C. Lee, D. Rho, X. Sun, J. H. Ko, and E. Park, “Compact 3d gaussian
+representation for radiance field,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR),
+pp. 21719–21728, 2024.
+[28] Z. Fan, K. Wang, K. Wen, Z. Zhu, D. Xu, and Z. Wang, “Lightgaussian:
+Unbounded 3d gaussian compression with 15x reduction and 200+
+fps,” in Advances in Neural Information Processing Systems, vol. 37,
+pp. 140138–140158, 2024.
+[29] L. Lan, T. Shao, Z. Lu, Y. Zhang, C. Jiang, and Y. Yang, “3dgs2 :
+Near second-order converging 3d gaussian splatting,” in SIGGRAPH
+Conference Papers, 2025.
+[30] R. Hsiao, Y. Fang, X. Huang, R. Li, H. Rabeti, Z. Gojcic, J. Lavaei,
+J. Demmel, and S. Shao, “3dgs2 -tr: Scalable second-order trust-region
+method for 3d gaussian splatting,” arXiv preprint arXiv:2602.00395,
+2026.
+[31] Z. Huang, J. Chen, J. Liu, and S. Ji, “Opt3dgs: Optimizing 3d gaussian
+splatting with adaptive exploration and curvature-aware exploitation,” in
+Proceedings of the AAAI Conference on Artificial Intelligence, vol. 40,
+pp. 5230–5238, 2026.
+[32] D. N. Wood, D. I. Azuma, K. Aldinger, B. Curless, T. Duchamp, D. H.
+Salesin, and W. Stuetzle, “Surface light fields for 3d photography,” in
+Proceedings of the 27th Annual Conference on Computer Graphics and
+Interactive Techniques, pp. 287–296, 2000.
+[33] W.-C. Chen, J.-Y. Bouguet, M. H. Chu, and R. Grzeszczuk, “Light field
+mapping: Efficient representation and hardware rendering of surface
+light fields,” in Proceedings of the 29th Annual Conference on Computer
+Graphics and Interactive Techniques, pp. 447–456, 2002.
+[34] G. Palma, N. Desogus, P. Cignoni, and R. Scopigno, “Surface light field
+from video acquired in uncontrolled settings,” in 2013 Digital Heritage
+International Congress (DigitalHeritage), vol. 1, pp. 31–38, IEEE, 2013.
+[35] K. Vanhoey, B. Sauvage, O. Génevaux, F. Larue, and J.-M. Dischler,
+“Robust fitting on poorly sampled data for surface light field rendering
+and image relighting,” Computer Graphics Forum, vol. 32, no. 6,
+pp. 101–112, 2013.
+[36] H. Kato, Y. Ushiku, and T. Harada, “Neural 3d mesh renderer,” in
+Proceedings of the IEEE conference on computer vision and pattern
+recognition, pp. 3907–3916, 2018.
+[37] S. Liu, T. Li, W. Chen, and H. Li, “Soft rasterizer: A differentiable
+renderer for image-based 3d reasoning,” in Proceedings of the IEEE/CVF
+international conference on computer vision, pp. 7708–7717, 2019.
+[38] S. Liu, T. Li, W. Chen, and H. Li, “A general differentiable mesh
+renderer for image-based 3d reasoning,” IEEE Transactions on Pattern
+Analysis and Machine Intelligence, vol. 44, no. 1, pp. 50–62, 2020.
+[39] R. T. Seeley, “Spherical harmonics,” The American Mathematical
+Monthly, vol. 73, no. 4P2, pp. 115–121, 1966.
+[40] C. Müller, Spherical harmonics, vol. 17. Springer, 2006.
+[41] T. L. Bobrow, M. Golhar, R. Vijayan, V. S. Akshintala, J. R. Garcia,
+and N. J. Durr, “Colonoscopy 3d video dataset with paired depth from
+2d-3d registration,” Medical Image Analysis, p. 102956, 2023.
+[42] T. Wu, J. Zhang, X. Fu, Y. Wang, L. P. Jiawei Ren, W. Wu, L. Yang,
+J. Wang, C. Qian, D. Lin, and Z. Liu, “Omniobject3d: Large-vocabulary
+3d object dataset for realistic perception, reconstruction and generation,”
+in IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), 2023.
+[43] B. Curless and M. Levoy, “A volumetric method for building complex
+models from range images,” in Proceedings of the 23rd Annual Conference on Computer Graphics and Interactive Techniques, pp. 303–312,
+1996.
+[44] J. L. Schönberger, E. Zheng, M. Pollefeys, and J.-M. Frahm, “Pixelwise view selection for unstructured multi-view stereo,” in European
+Conference on Computer Vision (ECCV), 2016.
+[45] J. L. Schönberger and J.-M. Frahm, “Structure-from-motion revisited,”
+in Conference on Computer Vision and Pattern Recognition (CVPR),
+2016.
+[46] D. Wisth, M. Camurri, and M. Fallon, “Vilens: Visual, inertial, lidar,
+and leg odometry for all-terrain legged robots,” IEEE Transactions on
+Robotics, vol. 39, no. 1, pp. 309–326, 2022.
+[47] G. Sharma, W. Wu, and E. N. Dalal, “The ciede2000 color-difference
+formula: Implementation notes, supplementary test data, and mathematical observations,” Color Research & Application, vol. 30, no. 1, pp. 21–
+30, 2005.

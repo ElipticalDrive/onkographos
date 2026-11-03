@@ -1,0 +1,108 @@
+GPU-accelerated MuJoCo physics via MLX C++. Contribute to 20niship/MuJoCo-MLX-Cpp development by creating an account on GitHub.
+
+tendonのGPUバッチ描画とSDF-mesh衝突を追加する by 20niship · Pull Request #46 · 20niship/MuJoCo-MLX-Cpp · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+20niship
+commented
+Oct 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+概要
+次の2つをまとめて実装する。
+tendonのGPUバッチ描画: カメラセンサ(Vulkan batched rendering)で空間tendonを描く。
+SDF vs mesh衝突: SDF geomとmesh geomの衝突をGPUバッチ経路で扱う(MuJoCoのmjc_MeshSDF相当)。
+tendon描画
+空間tendon(site間・球/円柱wrap・sidesite・pulley)を、(env,tendon)ごとにGPUのcompute passで経路を求め(mju_wrapのGLSLはPR #43のものを再利用)、線分ごとの円柱の姿勢を「仮想geom」としてgeom表の後ろに並べる。描画は従来どおり全env×全カメラ×全geomの1回のindirect描画で、ドローコール数は1のまま。
+MuJoCo標準レンダラ(engine_vis_visualize.c)と同じく、wrapは「site→接点→(接点間の弦、半分の太さ)→接点→site」の線分で描く。太さはtendon_width、色はtendon_rgba/material。
+固定tendon(関節のみ)は形が無いので描かない。カテナリ表示・筋の活性色・制約の色替えは未対応。
+tendonが無いモデルは従来と同じ: 頂点/cullシェーダは元のGLSLのまま(tendon変種はtendonがあるときだけ生成)。追加は未使用のディスクリプタ4つ(ダミーバッファ)とpush constantの3 uintのみ。
+SDF vs mesh
+mesh geomと、プラグイン無しのmesh由来SDF geom(<geom type="sdf" mesh=...>、従来は未対応でエラー)を、符号付き距離の格子にベイクする(最近点は三角形総当たり、内外は光線の交差回数の偶奇。同じメッシュは格子を共有)。SDFと衝突しうるmesh geomだけを焼く。
+衝突カーネルは、両方のgeomが格子を持つペアならSDF-SDFと同じHalton初期点+勾配降下で接触を作る(sdf_infoの有無で分岐)。
+MuJoCo Cのmjc_MeshSDFは、mesh geomの距離を「ワールド原点方向のレイ」で近似する粗い実装(勾配は±(1,1,1))で、メッシュが原点付近の星形でないと破綻する(CPUのtorusはメッシュ上でも数mmめり込んだり滑り落ちる)。そのためmesh geomに対しては、より正確なGPUの結果を解析値(上面+管半径)と比べ、MuJoCo Cとの比較はoctree距離を使うmesh由来SDFで行う。
+検証
+test_camera_tendon(新規): 球wrap+sidesiteのtendonを描き、site近傍の線分・球の上の接点間の弦がtendon色で描かれること、tendonの無い場所は緑でないこと、env毎のsite位置が画像に反映されることを確認。MuJoCo標準レンダラの画像とtendon色マスクを比べるとほぼ一致(緑画素 213 / 198、重なり 193)。test_camera_mujoco.pyにもtendon比較を追加(GL環境用、CIでは走らない)。
+gpu_vs_cpu_sdf_meshsdf(新規): torus SDFを立方体のmesh由来SDFに落とし、静止高さがMuJoCo Cと一致(GPU 0.3494 / C 0.3493、差<2mm)。
+gpu_vs_cpu_sdf_mesh(新規): 立方体のmesh geomの上に静止する高さが解析値0.35と一致(GPU 0.3494)。
+既存テスト: CIと同じDockerイメージ(lavapipe)のcheck-ciが全部通過(camera, tendon 5件, sdf_gear, humanoid, high_dof ほか)。
+性能(退行なし)
+tendonが無いカメラ(humanoid、B=64、3カメラ、64px、render+読み戻し): main 5.19/5.24/5.37 ms → 本PR 5.13/5.42/5.29 ms(誤差内、交互に3回)。
+tendonを描くカメラ(arm26、1カメラ、64px): B=1 0.50 ms、B=64 1.66 ms、B=256 3.68 ms(tendon非描画のmainはB=64で0.97 ms)。
+SDF/tendon無しの物理: 衝突カーネルのSDF分岐の条件を変えただけ(SDF_INITPOINTS>0の定数条件内)で、humanoid/high_dofのテスト時間は変更前後で同じ。
+備考(別件)
+contact_stress・sensors_air・sensors_contactはこのマシンのlavapipeでmainでも失敗する(本PRと無関係。CIはcontact_stressを除外)。
+複数freeジョイントのモデルで2つ目以降の重力が効かない既存バグは、mesh接触テストを新たに壊すため別PRで扱う。
+🤖 Generated with Claude Code
+https://claude.ai/code/session_012psZ8b2RugxiDFNZR6x9dF
+tendonのGPUバッチ描画とSDF-mesh衝突を追加する
+…
+b42f277
+```
+- カメラ(Vulkan batched rendering): 空間tendon(site間・球/円柱wrap・sidesite)を(env,tendon)ごとにGPUで経路を求め、線分ごとの円柱として同じ1回のindirect描画に載せる。MuJoCo標準レンダラと同じく、wrapは接点間を弦で結び半分の太さで描く。tendonが無いモデルのシェーダ・描画コストは変えない。
+- SDF vs mesh衝突: mesh geom(とプラグイン無しのmesh由来SDF geom)を符号付き距離の格子に焼き、SDF-SDFと同じカーネルで衝突させる。mesh由来SDFはMuJoCo Cのoctree距離と一致する。
+- テスト: test_camera_tendon、gpu_vs_cpu_sdf_meshsdf、gpu_vs_cpu_sdf_mesh、MuJoCoレンダラとのtendon比較(test_camera_mujoco.py)。
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012psZ8b2RugxiDFNZR6x9dF
+```
+20niship
+commented
+Oct 28, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+動作確認動画。上段: SDF(torus) vs mesh geom(左MuJoCo C、右GPU。MuJoCo Cのmesh距離は粗くて数mmめり込む)、中段: SDF vs mesh由来SDF(左MuJoCo C、右GPUで一致)、下段: tendon描画(左MuJoCo標準レンダラ、右GPU Vulkan batched renderingで描いた画像)。上2段はGPUのqposをMuJoCo標準レンダラで描画。
+compare.mp4
+20niship
+and others
+added 2 commits
+October 29, 2026 06:50
+origin/mainをマージする
+4b328e8
+tendon拘束行があるsolverは直線探索の早期打ち切りも出さない
+…
+0b2a8fa
+```
+mainのPR #45で入った直線探索の二分法のbreakが、CIのlavapipeでtendon_sphereを発散させた(スレッドごとの判定が丸め誤差で割れるとbarrierがずれる)。Newtonの早期打ち切りと同様にtendon拘束行があるときは無効にする。tendon拘束行が無いモデルのGLSLは変えない。
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012psZ8b2RugxiDFNZR6x9dF
+```
+Hide details
+View details
+20niship
+merged commit ab0d45a
+into
+main
+Oct 28, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+20niship
+deleted the
+feature/tendon-render-sdf-mesh
+branch
+October 28, 2026 22:10
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

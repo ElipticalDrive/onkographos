@@ -1,0 +1,154 @@
+duangle: Towards Realtime Deformable Worlds: Why Tetrahedra Rule, Voxels Drool
+Thursday, April 23, 2015
+Towards Realtime Deformable Worlds: Why Tetrahedra Rule, Voxels Drool
+In this article I provide a chronicle of our turbulent terrain development, what lessons I've learned and what's next. Also, why tetrahedra (probably) rule and voxels (mostly) drool.
+It was nearly one and a half year ago that we showcased an early tech alpha of NOWHERE that had organically growing and sculptable terrain.
+I had put high hopes in this approach, but found that, while triangle meshes allowed fine control over geometric features, they were difficult to simulate efficiently in a way that would keep the surface 2-manifold.
+The last alpha version that we released took a few minutes of CPU time to grow a single coral like structure. The program takes several snapshots from the same mesh at different stages and exposes them as separately rotating triangle meshes.
+Knowing that I wanted to generate worlds far larger than that, running out of ideas in what ways initial geometry could be seeded, and hitting upon other shortcomings of triangle meshes, I embarked on a long and perilous journey to explore the rabbit hole of alternate geometric representations.
+But first, let us visit the ultimate (and retconned) list of requirements that I made for NOWHERE's terrain:
+360° degrees of freedom, modelling of minor planets in zero G
+Ideally a single integrated solution for animated actors as well as terrain
+Can be seeded from any implicit function (not necessarily just distance fields)
+Support for smooth surfaces but also sharp features (e.g. a cylinder would have both)
+Can model rocky terrain with many cavities
+Able to model anisotropic structures like sticks and membranes
+Can model contiguous, "never-ending" surfaces, but also separated, distinct structures like floating rocks
+Can host cellular automata for non-scripted procedural growth of plants-like organisms and crystals
+Can selectively host rigid and soft body physics simulations, and run classic bone animation
+Can host a simulator for flowing substances like water, lava, plasma or goo
+Persistently diggable, fillable, sculptable by players
+Support for different sediments: as you dig in, you hit upon different layers of material
+Supports classical mesh operations like extrusion, subdivision as well as boolean operators (better known as CSG modelling)
+Supports seamless ornamental and player-authorable texturing, similar to Wang Tiles; Classical triplanar mapping is not enough.
+Support for realtime ambient occlusion / radiosity
+Scale independent, non-uniform distribution of detail
+Support for seamless distance-dependent level of detail
+@paniq oh just the holy grail. That's uh. Yeah. Um. Humph.
+— David Goldfarb (@locust9) April 10, 2015
+Over the course of this project, whose beginnings started several years ago (back then, what the gameplay would ultimately be was completely unclear), I tried more than a handful of solutions. The first one was the most obvious choice:
+You can clearly see what influenced it. But I wanted more freedom of expression. The next approach glued prefabricated models together, similar to how Besiege works:
+While that covers scaffolding nicely, it's neither particularly organic nor terrain oriented, in fact it scaled rather badly, and would only allow for rather puny scenes.
+Then I tried mixing scaffolding and raymarching distance fields to produce a huge, if only somewhat monotonic terrain that was unfortunately completely unalterable and ate too much GPU time to make it a comfortable solution for low end computers (We want to make people with weaker hardware happy too):
+I had some luck with Wang Tiles earlier, so I thought a 3D version of that might be interesting to try:
+This ended up being more of a one trick pony. At the time I entertained the thought that terrains could not be altered, but I could not make peace with it. On the way to figuring out how to make geometry user-editable, I experimented with procedural terrain growth by extrusions, the first triangle mesh based solution:
+The pesky problem with extruding triangle meshes is that it is impossible to tell when surfaces intersect, which turns the mesh into garbage; Furthermore, joining intersecting meshes is everything but trivial. I started to look into scientific papers for solutions and was made aware of Stéphane Ginier's formidable SculptGL, which does Z-Brush/Sculptris-like sculpting with support for punching holes into the topology, a rarely supported technique. I wanted the same thing for our game, and that's where my first full-on foray into triangle mesh editing started (see first video).
+So in the past year I looked into voxel based solutions again, particularly Dual Contouring, and I got some rather spectacular results out of it, in terms of being able to feed it with distance field functions, doing CSG on it, running light simulation, which is why I thought this would be the ultimate solution we'd end up with. The first octree-based solution ran on the old Python engine, and despite large parts being written in C, seeding even small volumes took a few seconds too long, and editing wasn't realtime enough. Here are some screenshots from that time. Sigh.
+After a rewrite of our engine and experimenting with new editing paradigms in January this year, I had an insight for how to do, well, something with tetrahedral meshes, but it didn't quite click yet.
+Instead, I got sidetracked into tetrahedra-based dual contouring and wrote a fast GPU-based implementation that used a grid instead of an octree, and experimented with alternate honeycombs for meshing. Things were great for a while. Descend your gaze upon this smooth animation of an implicit function:
+I managed to integrate a realtime light propagation solution that ran on the same grid:
+I made strides. I wrote a realtime meshing solution that meshes voxel data on the fly, completely alterable (although that's not visible in the video yet), realtime lit, at the cost of a heavily reduced draw range:
+Alas, geometry representation on regular grids sucks for the same reason as shape
+representation in bitmaps, the 2D analog case, and I've ultimately decided to completely give up on a voxel based solution.
+Why? Behold, the long shitlist of
+voxel-based data structures. If you're considering to write something with voxels, beware of the perils:
+You have no semantic structure, unable to easily discern area, orientation,
+islands sharing attributes, proximity, related features over areas larger than
+the immediate 1-cell neighborhood, which always spans the minimally possible
+distance; Octrees can help caching some of this information, but they're not
+nearly as accurate as a graph-based representation.
+Storage increases at the power of 3 (^2 in 2D). Every time your side lengths double,
+storage increases by a factor of 8. That means 1 GB of VRAM stores only a 1024^3
+voxel cube at 1 byte per voxel; typically, when dual contouring and different
+materials are involved, a voxel costs at least 16 bytes, so a ~406^3 voxel cube is
+more realistic.
+Rendering must be done in triangles, which requires a "mixdown" of the data, as the
+two structures do not store data in the same way. You keep the same information
+twice in memory. Also, you can not know the number of generated triangles in advance,
+neither can you update single triangles well (storage penalty), which makes compact
+allocations more difficult.
+While detail is not taxed (in fact, it's prepaid ;-), it is capped at the nyquist
+frequency of <side length>; you can not have features smaller than that.
+On the other hand, large areas without topological features still store values at
+the full sample rate, which, for reasons explained, is a tremendous waste of space.
+Scaling / shearing / rotating grid data is lossy. Transformed voxels don't always
+fit back into individual cells due to the nyquist cap. Even a dual contouring grid
+can't guarantee that edges and vertices are always preserved. That means you're forced
+to keep moving objects separate from the world.
+Sparse octrees can help with culling rendundant spaces, but their expanse is isotropic;
+the volume of a pencil still requires breaking down resolution to the maximum hierarchy,
+despite less surface detail along the length of the pencil.
+Hierarchical access in an octree is limited to 10 levels with 32-bit addressing.
+That means if you want to address a space with a resolution higher than 1024^3,
+you will need 64-bit morton codes, which incurs a storage and compute penalty.
+All octrees are bounded. Exceeding the bounds means at best patching and at worst
+rebuilding the tree. Likewise, all grids are bounded. Resizing the grid can't be done
+with a simple memcpy. Also, all operations that could exceed the resolution must
+be checked.
+Neighborhood queries in octrees are a mess. Going up the hierarchy is manageable,
+going down requires extra data; explicit edges are not present. In short: due to
+hierarchical storage, octree cells are not really neighbors.
+Because of this, local transformations in an octree cause deep changes all over the
+hierarchy.
+Raycasting requires visiting each cell with a Bresenham-like algorithm; Octrees can
+help here, but can't help in the pencil case, when the ray is grazing the surface.
+Buckets can alleviate some Octree issues, but not ultimately fix them, and incur an
+added storage penalty.
+Mesh LOD techniques are inapplicable; LOD only works for dealing with situations
+where voxels become smaller than a pixel. Dual Contouring seems like it could apply,
+but it has no good LOD scheme, and nyquist is also forced to jump by a whole factor 2,
+regardless of topological detail.
+There is no popular voxel data format or voxel data editor; Most work that artists
+do these days is stored in meshes and textures, and it's impossible to import them
+without damaging the model's representation, let alone export them for backwards
+compatibility. The semantic information is destroyed.
+So I went to look into Tetrahedral meshes, also called "Finite Element Meshes", the solution I'm currently implementing. The idea is pretty straightforward: They work exactly like triangle meshes, except that the triangles are expanded by one dimension to form a volumetric mesh of tetrahedra, which tessellates space completely into solids and air. Tetrahedral meshes are largely undiscovered by the game development community (with two notable exceptions), but an old hat for companies doing structural analysis simulations (think hard core Bridge Builder) and interactive tissue surgery simulators.
+Here's why I think that NOWHERE will fare much better using a tetrahedral mesh for its terrain, in comparison with the bullet list above:
+A mesh is a graph and therefore nothing but semantic structure. Area, orientation,
+neighboring islands sharing attributes, proximity are easily discernible from the
+provided vertice-edge-face-cell structure. The immediate 1-cell neighborhood
+spans large volumes of space when topological detail is low, and small volumes
+where topological detail is high.
+Storage increase is independent of space spanned, but depends only on topological
+complexity, so it's a little difficult to tell how much complexity this buys you.
+Assuming no vertices are shared, and only float positions are stored, 1 GB of
+VRAM covers about 29 million triangles, or 22 million tets. If those tets were
+stored at equal distance, they would compact to a ~281^3 voxel cube; but could span
+a distance only bounded by desired float precision.
+Rendering must be done in triangles, which is easily achieved either by pruning
+the mesh for surface bounding faces only, or maintaining boundary faces in a
+separate array during mesh operations.
+Topological detail is taxed, but independent of scale; Size of features is only
+bounded by floating point precision.
+A large area without any variance in data can occupy as few tets as possible,
+providing an effective compression for regions with low entropy.
+Scaling / shearing / rotating vertices is, apart from float precision issues,
+lossless. C1 continuous deformations do not alter topology. Transformations that do
+always cause at least one tet to invert, which can be detected and fixed with
+local remeshing. This only alters face and edge relationships, but not vertex
+positions.
+All classical mesh animation techniques, like bone animation, still work here.
+Additionally, 3D cellular automata also operate on tetmeshes. Physics simulations
+of softbodies or fracturing volumes on tetmeshes are well documented.
+Meshes can use highly anisotropic scales. The pencil example would perform quite
+well here, tessellating space with the lowest amount of elements required. Along
+the length of the pencil, no extra elements need to be added.
+Access in a tetmesh is not explicitly hierarchical, but graph based. Each tet
+is a node with four neighbors (using a half-face structure), and most spatial
+queries are done by walking along tetfaces. The tetmesh acts as both volume data
+and accelleration structure. For everything else, non-exclusive ad-hoc BVH's
+can be constructed.
+A Mesh is only bounded by its cells. If you need more space, add as many cells
+as required. This can be done locally and directed. It is also possible to maintain
+the mesh within the volume of a cube with near infinite side length.
+Local transformations in a tetmesh are indeed only local to the hull of their
+connected neighborhood.
+Raycasting is a simple neighborhood walk algorithm. In the pencil case, when the
+ray grazes the surface along its length, a few steps suffice to cover an enormous
+distance.
+Mesh LOD techniques apply. Techniques exist to adaptively decimate meshes by
+storing edge collapse operations in a hierarchy (a so-called Half-Edge Tree).
+Triangle mesh editing is the de-facto standard for models in games.
+Many formats and assets exist. Any 2-manifold triangle mesh can be tessellated into
+a tetmesh, and pruned back into a triangle mesh without any loss of information,
+so triangle mesh imports and exports can be easily supported.
+This is the very last solution I'm trying, and the one we'll most likely stick with, which means that the gameplay of the next alpha will be close to Alpha 75 again, and then some.
+The only regret I have is that I didn't know all this three years ago. It took a long time to look at approaches and figure out what the game needs. We could have settled for something way earlier had I been more willing to make compromises. But at least this way I can say we picked the best solution for our problem, and the game is truly becoming the kind of game we want to play.
+Regarding tetrahedral meshes and related techniques, I'm keeping a lengthy list of relevant papers that may be of interest to anyone else interested in the subject here.
+Posted by
+Leonard Ritter
+at
+3:27 AM
+Newer Post
+Older Post
+Home

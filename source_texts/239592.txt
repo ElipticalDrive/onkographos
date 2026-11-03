@@ -1,0 +1,108 @@
+Summary igl::swept_volume_signed_distance with a finite isolevel (the narrow-band mode — also what igl::swept_volume uses internally) assigns the wrong sign to grid nodes that are deep inside the swept solid but happen to lie near a diff...
+
+swept_volume_signed_distance: finite isolevel mislabels interior nodes for overlapping sweeps (spurious inner surfaces) · Issue #2562 · libigl/libigl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+swept_volume_signed_distance: finite isolevel mislabels interior nodes for overlapping sweeps (spurious inner surfaces) #2562
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+swept_volume_signed_distance: finite isolevel mislabels interior nodes for overlapping sweeps (spurious inner surfaces)#2562
+Copy link
+Description
+alecjacobson
+opened on Sep 9, 2026
+Issue body actions
+Summary
+igl::swept_volume_signed_distance with a finite isolevel (the narrow-band mode — also what igl::swept_volume uses internally) assigns the wrong sign to grid nodes that are deep inside the swept solid but happen to lie near a different pose's surface. Those nodes are marked exterior, so marching cubes extracts spurious interior shells. The exact mode (isolevel = inf) is correct.
+It appears whenever posed copies of the shape overlap — i.e. for essentially any real sweep of a solid thicker than the band.
+Minimal reproducible example
+pip install libigl==2.6.3, a unit cube swept along x through overlapping poses:
+```
+import numpy as np
+import igl
+
+# Unit cube (outward-oriented), a thick solid.
+V = np.array([[0,0,0],[1,0,0],[1,1,0],[0,1,0],[0,0,1],[1,0,1],[1,1,1],[0,1,1]], dtype=np.float64)
+F = np.array([[0,2,1],[0,3,2],[4,5,6],[4,6,7],[0,1,5],[0,5,4],
+              [1,2,6],[1,6,5],[2,3,7],[2,7,6],[3,0,4],[3,4,7]], dtype=np.int64)
+
+# Sweep along x; step 0.25 with cube width 1 => heavy overlap.
+T = [np.eye(4) for _ in range(8)]
+for i in range(8):
+    T[i][0, 3] = 0.25 * i
+
+sign = igl.SIGNED_DISTANCE_TYPE_FAST_WINDING_NUMBER
+lo, hi = np.array([-0.3, -0.3, -0.3]), np.array([2.05, 1.3, 1.3])
+GV, res = igl.voxel_grid(lo, hi, s=48, pad_count=0)
+res = np.asarray(res, np.int64).reshape(-1)
+h = (hi - lo).max() / (48 - 1)
+nx, ny, nz = map(int, res)
+
+S_band  = np.asarray(igl.swept_volume_signed_distance(V, F, T, sign, GV, res, h, 0.0)).reshape(-1)           # banded
+S_exact = np.asarray(igl.swept_volume_signed_distance(V, F, T, sign, GV, res, h, float("inf"))).reshape(-1)  # exact
+
+interior = S_exact < 0
+flipped = interior & (S_band >= 0)
+print("interior nodes (exact<0):", int(interior.sum()), "| flipped to exterior by banded:", int(flipped.sum()))
+Vb, Fb, _ = igl.marching_cubes(S_band,  GV, nx, ny, nz, 0.0)
+Ve, Fe, _ = igl.marching_cubes(S_exact, GV, nx, ny, nz, 0.0)
+print(f"marching cubes: banded {len(Vb)}v/{len(Fb)}f  exact {len(Ve)}v/{len(Fe)}f")
+```
+Output:
+```
+interior nodes (exact<0): 16385 | flipped to exterior by banded: 4917
+marching cubes: banded 10197v/19870f  exact 4528v/8966f
+```
+The banded mesh has >2× the geometry of the exact one; the extra faces are interior shells. Every one of the 4917 flipped nodes has |S_exact| >= sqrt(3)*h (genuinely deep interior) yet receives a small positive banded value.
+Mechanism
+The swept SDF is a min over poses of the per-pose signed distance, evaluated with a bounded closest-point search (max_dist = the band). Consider a node p that is inside pose A by more than the band width. Pose A's surface is beyond the band, so A is gated out. A neighbouring pose B whose surface grazes within the band — with p just outside B — is kept. The min over the surviving poses is then B's small positive distance, so p, which is genuinely interior, is written as exterior. igl::flood_fill cannot recover it, because the node already holds a (wrong-signed) value rather than the NaN sentinel it fills.
+Impact
+igl::swept_volume calls swept_volume_signed_distance with isolevel = 0, so it inherits the spurious interior geometry / inflated vertex counts.
+Thin or shell-like geometry hides it (interior stays within the band); thick solids expose it immediately.
+Suggested direction
+The band can bound the distance magnitude but not the sign: inside/outside cannot be decided by per-pose surface distance when copies overlap. It needs to be resolved without the per-pose distance gate — e.g. an unbounded winding/inside test to decide band membership, or a continuation that tracks the surface across time.
+(Investigated and reported with Claude Code.)
+Activity
+alecjacobson commented on Sep 9, 2026
+alecjacobson
+on Sep 9, 2026
+ContributorAuthor
+More actions
+I think @sgsellan might have noticed something along these lines long ago...
+👀React with 👀1Reacted by Silvia Sellán
+alecjacobson commented on Sep 9, 2026
+alecjacobson
+on Sep 9, 2026
+ContributorAuthor
+More actions
+Here is the failure rendered — the MRE cube-sweep above, cut open with a slice plane so the interior is visible:
+Left (isolevel = inf, exact): a clean hollow swept box, 4528 v. Right (isolevel = 0, banded): the same sweep, but packed with spurious internal walls, 10197 v — the interior nodes that get flipped to a positive sign form closed shells that marching cubes then extracts.
+(Rendered with Claude Code, headless polyscope.)
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,648 @@
+The niivue mono repo. Contribute to niivue/mono development by creating an account on GitHub.
+
+feat(niivue): gradient opacity, silhouette, and a shared gradient estimator by cdrake · Pull Request #140 · niivue/mono · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+cdrake
+commented
+Aug 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+What this adds
+A precomputed volume gradient that both backends build the same way, and two
+new render settings that consume it:
+volumeGradientOpacity modulates the background ray-march alpha by gradient
+magnitude, so flat interiors fade and material boundaries stay.
+volumeSilhouette adds a Fresnel rim term.
+volumeLayerGradientMode selects the in-shader normal estimator for the
+overlay and drawing passes, which carry no gradient texture of their own.
+All three default to 0 / off, so an existing scene renders exactly as before
+and no volume pays for a gradient pass it does not use.
+Figures
+Kingsnake OME-Zarr in range.html, WebGPU, same window (30-110), same camera.
+Before - illumination, gradient opacity and silhouette all 0. The specimen
+is an opaque resin cylinder and the snake inside it is not visible at all.
+After - illumination 0.55, gradient opacity 0.65, silhouette 0.40. Gradient
+opacity clears the flat resin, the Fresnel rim picks out the scales, and the
+coiled body and vertebral column read directly.
+The parity work behind it
+The two backends disagreed in three ways. Each was found by measuring the
+readbacks, not by reading the code:
+Magnitude was WebGPU-only. The GL pass wrote a constant 1.0 into
+alpha, which made gradient opacity a silent no-op on WebGL2. Both now write
+a logarithmic magnitude; a linear one sits near zero through most of a
+volume and drives the whole render to black around amount 0.7.
+They differentiated different channels. WebGL2 used the colormapped
+alpha, WebGPU the red. On hot, red saturates at 37% of the range and is
+flat above it, so WebGPU returned zero gradient across the top 63% of the
+data. Alpha is monotonic in intensity for every LUT, so both read alpha now.
+Different estimators. WebGPU ran an 8-corner Sobel plus a 27-tap blur
+against WebGL2's three central differences, and the blur ran on the already
+encoded texture, averaging across the encoding rather than the data. The
+shared estimator in view/NVGradient.ts now pins the constants for both
+sides, and the linear sampler supplies the smoothing.
+Cost
+The gradient build is deferred: an all-zero lighting state uploads no gradient
+texture at all. Turning a consumer on evicts and re-streams the working set
+with gradients built. On the range streaming demo that re-stream is served
+from the decoded-chunk cache and touches the network not at all (resident 38,
+decoded-tier hits 0 -> 37 with misses unchanged at 38). Moving a slider within
+the non-zero range after that costs nothing.
+Testing
+NVGradient.test.ts pins the shared encoding constants under the Bun runner.
+e2e/gradient-parity.spec.ts runs both backends' passes over one volume in
+real Chromium and diffs the readbacks.
+e2e/gradient-deferred-build.spec.ts asserts the all-zero state uploads no
+gradient, and that enabling a consumer produces one.
+Examples
+vox.gradopacity - the feature demo over mni152 and two CT volumes, whose
+air/tissue and tissue/bone steps give the gradient sharper material edges.
+vox.gradopacity.explode - the same settings on force-tiled blocks, where
+the halo is what keeps a cut face from rimming like a real surface.
+vox.blobgrad - an A/B of the in-shader layer estimators across two linked
+instances with a draggable seam.
+range.html gains the three sliders, so the settings are exercised on real
+streamed multi-LOD bricks. Two notes documented in the file: they act on the
+3D ray-march only and the page opens on multiplanar, so the sliders look
+dead until Layout is render; and the default synthetic shard source is
+halo 0 by construction, so its exploded bricks rim on their cut faces. That
+is the negative control for the halo, not the positive case.
+Every measurement here was taken in Chrome on an M5 Max, not headless
+SwiftShader, which inflates these numbers badly (the shader compile by two
+orders of magnitude).
+Co-Authored-By: Claude Opus 5 noreply@anthropic.com
+cdrake
+and others
+added 5 commits
+August 28, 2026 14:14
+feat(niivue): gradient opacity, silhouette, and a shared gradient est…
+…
+b246878
+```
+…imator
+
+Both backends now build the precomputed gradient texture with the same
+estimator, and two new consumers read it: `volumeGradientOpacity` modulates
+the background pass alpha by the gradient magnitude, `volumeSilhouette` adds
+the Fresnel rim term. `volumeLayerGradientMode` selects the in-shader normal
+estimator for the overlay and drawing passes, which carry no gradient texture.
+
+Three fixes brought the two backends together, each found by measuring rather
+than by reading the code:
+
+- Only WebGPU ever stored a magnitude; the GL pass wrote a constant 1.0 in
+  alpha, which made gradient opacity a silent no-op there. Both now write a
+  LOGARITHMIC magnitude, since a linear one sits near zero through most of a
+  volume and drives the whole render to black at amount 0.7.
+- The two backends differentiated different channels: WebGL2 the colormapped
+  alpha, WebGPU the red. On `hot` red saturates at 37% of the range and is
+  flat above it, so WebGPU returned zero gradient across the top 63% of the
+  data. Alpha is monotonic in intensity for every LUT, so both read it now.
+- WebGPU ran an 8-corner Sobel plus a 27-tap blur against WebGL2's three
+  central differences. The blur ran on the ENCODED texture, averaging
+  already-normalized normals and already-log-compressed magnitudes, so it
+  biased the magnitude field rather than smoothing it. WebGPU now runs
+  WebGL2's estimator and gets its smoothing the same way, free from the
+  linear sampler at a fractional radius; blur.wgsl is gone.
+
+The shared constants live in the new src/view/NVGradient.ts: sobel.wgsl takes
+them as pipeline-overridable constants and gl/gradient.ts interpolates the
+same values into its GLSL, so the two encodings cannot drift.
+
+Building a gradient is not free (measured 8.8 ms on WebGL2 and 10.0 ms on
+WebGPU for an 11.4 Mvoxel volume, plus 45.6 MB of VRAM), so it is now gated
+on a consumer actually wanting one. A chunked stream whose lighting is all
+zero uploads bricks UNLIT and skips the per-brick gradient pass entirely;
+turning any consumer on re-streams the working set once with gradients built.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+test(niivue): cover the gradient encoding, backend parity, and the de…
+…
+9dc7282
+```
+…ferred build
+
+NVGradient.test.ts pins the shared encoding constants under the Bun runner.
+The two e2e specs need a real GPU context, so they run in Chromium:
+gradient-parity runs both backends' passes over one volume and diffs the
+readbacks, and gradient-deferred-build asserts an all-zero lighting state
+uploads no gradient and that turning a consumer on produces one.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+feat(niivue): add the gradient examples
+…
+c7b9063
+```
+vox.gradopacity is the feature demo -- gradient opacity and silhouette over
+mni152 and two CT volumes, since a CT's air/tissue and tissue/bone steps give
+the gradient something much sharper to work with. vox.gradopacity.explode
+puts the same two settings on force-tiled blocks, where the halo is what
+keeps a cut face from rimming as though it were a real surface.
+vox.blobgrad is an A/B of the in-shader layer gradient estimators across two
+linked instances with a draggable seam; it uses the hippo volume, added here
+under Git LFS.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+feat(niivue): add the lighting controls to the range streaming demo
+…
+ab556c1
+```
+Illumination, gradient opacity and silhouette on range.html, so the three
+gradient consumers are exercised on real streamed multi-LOD bricks rather
+than only on a local volume. All three default to 0, which keeps the
+streaming baseline unchanged: the page opens UNLIT, no brick pays a gradient
+pass, and a fully exploded volume still streams without flooding the upload
+pump.
+
+Raising any of them off 0 is the interesting part -- core evicts and
+re-streams the whole working set with gradients built, and the HUD shows it.
+Measured on the synthetic shard source: resident 38, decoded-tier hits 0
+before; hits 37 with misses unchanged at 38 after, so the re-stream is served
+from the decoded-chunk cache and touches the network not at all. Moving a
+slider within the non-zero range after that costs nothing.
+
+Two things the browser pass turned up, both documented in the file: these
+settings act on the 3D ray-march only, and the page opens on multiplanar, so
+the sliders look dead until Layout is set to `render`; and the default
+synthetic shard source is halo 0 by construction, so its exploded bricks rim
+on their cut faces -- it is the negative control for the halo, not the
+positive case.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+chore: ignore the local scratch directory
+…
+9f7cba8
+```
+Plans, notes, and idea files live in scratch/ and are never checked in.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+github-actions
+Bot
+commented
+Aug 28, 2026
+Copy link
+Copy Markdown
+Contributor
+Nx Release Preview
+If merged, nx release will tag 11 package(s):
+Package
+Bump
+From
+To
+niivue
+prerelease
+1.0.0-rc.12
+1.0.0-rc.13
+nv-ext-image-processing
+prerelease
+1.0.0-rc.12
+1.0.0-rc.13
+nv-ext-save-html
+prerelease
+1.0.0-rc.12
+1.0.0-rc.13
+nv-web-component
+prerelease
+1.0.0-rc.10
+1.0.0-rc.11
+nv-ext-dcm2niix
+prerelease
+1.0.0-rc.10
+1.0.0-rc.11
+nv-ext-drawing
+prerelease
+1.0.0-rc.12
+1.0.0-rc.13
+nv-ext-niimath
+prerelease
+1.0.0-rc.8
+1.0.0-rc.9
+nv-react
+prerelease
+1.0.0-rc.13
+1.0.0-rc.14
+nv-ohif
+minor
+0.0.0
+0.1.0
+uikit
+minor
+0.0.0
+0.1.0
+ipyniivue
+minor
+0.0.0
+0.1.0
+Changelog preview
+niivue
+1.0.0-rc.13 (2026-08-28)
+Features
+niivue: add the lighting controls to the range streaming demo (ab556c1)
+niivue: add the gradient examples (c7b9063)
+niivue: gradient opacity, silhouette, and a shared gradient estimator (b246878)
+range-demo: default the budget plan to uniform, and stop counting aborts as failures (74364c6)
+niivue: cache OME-Zarr chunk bytes across sessions (d6037b6)
+niivue: demote an evicted chunk to a decoded tier instead of dropping it (e166f92)
+niivue: fetch ahead of where the view is travelling (1281a74)
+niivue: cancel chunk reads the view stopped wanting (70c3dfc)
+niivue: read OME-Zarr chunks on a worker pool (46151b9)
+niivue: count byte-cache hits, misses and evictions (fa4e0f0)
+niivue: time the streaming phases, and measure what actually stalls (1a76c7c)
+niivue: keep coarse slide tiles on screen until finer ones land (b245524)
+niivue: pin a chunk plan's brick count with gridDims (c2749fd)
+niivue: add a streamed OME-Zarr block inspector demo (69975d8)
+niivue: pick an exploded block and open it in its own pane (d2b61c4)
+dandi-demo: move the DANDI demo to an app and measure with UIKit (b621c22)
+niivue: read NVSlide tiles straight from a chunked volume (29a9aae)
+examples: stream DANDI OME-Zarr into the volume and NVSlide at once (379692d)
+niivue: give streamed volumes a named budget plan (aee6572)
+range-demo: show a streaming progress badge while blocks load (1d61aa7)
+niivue: make the LOD compensation settings introspectable (bb2bc23)
+niivue: add opt-in per-level opacity compensation for coarse LOD bricks (770556b)
+niivue: compensate coarse-LOD dimness and gamma the 2D slices (9d0c937)
+niivue: implement scene.gamma in the volume ray-march (b0b4274)
+niivue: rebuild the view after a GPU context loss (a1dcf4c)
+niivue: add a linear vs cubic B-spline interpolation example (8808b8d)
+range-demo: add an interp selector and an A/B filter comparison (9a9863c)
+niivue: opt-in tricubic B-spline volume reconstruction (5669e52)
+niivue: add a samples-per-voxel control to the range example (005891c)
+niivue: back streamed chunks with an automatic coarse floor (403d7ce)
+niivue: add intensity window demo (ac82361)
+niivue: pinnable slide-plane LOD, with a control in slide3d (fe6be28)
+niivue: view selector in the OME-Zarr demo (ee5c4cc)
+niivue: clip, clip-overlays and 3D zoom controls in the Allen demo (d0e40b6)
+niivue: start the Allen atlas demo on the local fixture mirror (4f26906)
+niivue: clip, clip-overlays and 3D zoom controls in the OME-TIFF demo (4814ba9)
+niivue: promote the OME-Zarr ChunkedVolumeSource into the library (531859b)
+niivue: add an OME-Zarr multi-channel demo (f6769b1)
+niivue: load OME-Zarr channels as per-channel volumes (1e9aa02)
+niivue: parse OME-Zarr multiscale and omero metadata (ad78c71)
+niivue: toggle the 3D crosshair in the range demo (67f3fad)
+niivue: read OME-Zarr 0.4 and stream the HOA human heart (b60d9c6)
+range-demo: drop woodbranch from the store list (b642ce5)
+range-demo: swap pig heart for chameleon, add a pyramid screening rule (0d778ee)
+niivue: stream OME-Zarr demo stores from the public bucket (fdd7107)
+niivue: add a real multi-channel OME-TIFF sample (3021701)
+niivue: add an OME-TIFF demo and read real-world unit strings (60d4cd6)
+niivue: read TIFF, OME-TIFF and ImageJ stacks (ee3faad)
+niivue: exercise the new APIs from the demos (f017ebb)
+niivue: persist isColormapInverted and atlasOutline in documents (8434a1d)
+niivue: add clearAngles, clearDistanceMeasurements and clearBounds (5f9e8c8)
+niivue: emit clickToSegment after a magic-wand fill (a1e6628)
+niivue: report region statistics with getDescriptives (4bec296)
+niivue: reverse a volume colormap with isColormapInverted (1e82064)
+niivue: outline atlas regions with setAtlasOutline (0d38156)
+niivue: opt-in colormap alpha on 2D slices (458b4d2)
+niivue: light the overlay pass and add maximum-intensity projection (190eec8)
+niivue: demo for Allen JSON + PNG atlas datasets (481f64e)
+niivue: load Allen JSON + PNG atlas datasets as multi-channel volumes (4b5cd92)
+niivue: parse the Allen JSON + PNG atlas volume format (10e11fb)
+nv-ohif: unify Length onto the annotation system (cd0509c)
+Bidirectional measurement (two perpendicular axes) end to end (0064166)
+user-entered free-text labels for annotations (3252bed)
+LivewireContour (edge-snapping multi-click ROI) end to end (7e965cf)
+niivue: live-wire (intelligent scissors) path algorithm (d0c60a6)
+multi-click SplineROI (niivue interaction + nv-ohif wiring) (fb36c30)
+niivue: spline contour geometry for multi-click ROIs (ff90664)
+niivue: expose annotation screen-geometry seam for external overlays (6adc823)
+nv-ohif: wire OHIF ROI + arrow measurement tools to NiiVue annotations (66f66be)
+niivue: isMeasurementDrawn flag to suppress the built-in measurement (df129c7)
+niivue: expose measurement screen projection for external overlays (2644d94)
+niivue: numbered graduations on the measurement ruler (452c433)
+niivue: graduated arrowed measurement ruler (both backends) (19d1c0f)
+nv-ohif: UIKit ruler on the WSI viewport with physical-unit measurement (3fec150)
+measure WSI slides in real physical units (um/mm) (d030a76)
+niivue: overlay hook on the standalone WSI slide viewer (e9fd75e)
+uikit: ruler widget with readability guard + demo (555edc5)
+uikit: transformed MSDF text renderer on both backends (56317c8)
+uikit: line renderer on both backends + overlay-hook proof (2ca8aab)
+niivue: UIKit overlay lifecycle hook on both backends (d61b795)
+niivue: terminated-line builder (arrow terminator) for UIKit ruler (2a02a2e)
+Fixes
+niivue: build examples with ES-format workers (#138)
+niivue: keep the slide tile cap when given Infinity or NaN (e21df06)
+niivue: reject non-finite chunk loader limits (a9188a6)
+niivue: escape the NUL separator in the chunk worker cache key (7704b19)
+niivue: revoke the object URL when assigning img.src throws (839737e)
+niivue: validate OME-TIFF channel and timepoint selectors (c7259ca)
+niivue: resolve pinned slide levels by manifest id, not array offset (727aaf6)
+niivue: default crosshairWidth to 2 canvas pixels (4f8857d)
+niivue: make crosshairWidth canvas pixels everywhere (#137)
+niivue: honour the background volume's opacity in the 3D render (#67)
+niivue: let the 2D wheel zoom reach the bottom of its range (0064eec)
+niivue: anchor the 2D wheel zoom on the crosshair (#68)
+niivue: forward the persistent cache scope to each worker (eb66167)
+niivue: pick visible tissue on a streamed exploded volume (95df8d0)
+niivue: map a brick's owned box, not its fetched box, into its texture (3f2b612)
+niivue: grow the LOD brightness lift per level, not per downsample (63e7df5)
+niivue: compensate the coarse floor's brightness too (6931055)
+range-demo: size the WebGL2 chunk budget so the LRU evicts (0a4d040)
+niivue: keep drawing a chunked volume when chunk 0 is evicted (4f7021c)
+niivue: probe one stride past a cube's exit face in the empty-space skip (a00e6b0)
+niivue: never reconstruct cubic from clamp-to-edge brick data (601480c)
+range-demo: make the A/B divider a slider and free the canvas (2d7e079)
+niivue: render the coarse floor as volume, not a dark shell (afa8dfb)
+niivue: tile ray slabs exactly across LOD brick boundaries (93a57ae)
+niivue: oversample the 3D ray march to kill render ringing (6843b5b)
+niivue: pick tissue exposed by a clip plane in chunked volumes (b1ea40d)
+niivue: merge chunked MIP cube draws with MAX blending (b7683fb)
+niivue: re-stream chunked volumes when display state changes (8ad3c8a)
+niivue: harden loaders and close review gaps from the PR sweep (d94a6a3)
+niivue: harden the microscopy loaders against real-world metadata (efca0a8)
+validate Allen colors, integer metadata, and fetch concurrency (62220fe)
+niivue: rename the slide3d lod variable so codespell stays clean (d6be590)
+niivue: spline double-click no longer appends coincident control points (5b67844)
+niivue: thread clipPlaneOverlay into the WebGPU depth-pick uniforms (a976186)
+niivue: depth pick honours clipPlaneOverlay on both backends (0cb8da3)
+niivue: enforce the OME-Zarr cache budget, harden image decoding (6e3e6d3)
+niivue: replace the pig-heart demo store with woodbranch (bf41ffc)
+examples: report setup failures on the page instead of rejecting (c795f6b)
+niivue: keep a colormap's alpha in place when inverting it (bd2ed18)
+harden annotation synchronization (c23d450)
+harden OHIF annotation synchronization (756cb9c)
+nv-ohif: harden measurement reflection (3bf0798)
+nv-ohif: harden the annotation/measurement subsystem (PR feat(nv-ohif): NiiVue viewport extension for OHIF (NIfTI + DICOM + toolbar) #76 review) (#76)
+niivue: offset the arrow label off the tail so it does not obscure it (1c5f14b)
+niivue: anchor an arrow's text label at its start (the tail) (ac4d183)
+niivue: rename livewire nd to newDist (codespell) (d9977be)
+niivue: render annotation free-text in the built-in draw too (547f77f)
+niivue: abandon a half-drawn multi-click contour on tool/mode change (40e7902)
+correct regressions found reviewing the review-fix commits (1a6648d)
+address review findings 5-10 (WSI/DICOM loaders + chunked-volume leak) (#5, #6, #7, #8, #9, #10)
+address second-review findings on the ruler/WSI fixes (d1027c6)
+niivue,uikit: shrink arrowheads on short lines so buildTerminatedLine can't invert (review finding 2) (9b3de35)
+niivue: harden the built-in measurement ruler (review findings 4/6/7) (#7, #2, #6, #4)
+nv-ohif: prevent runaway slide rendering (3bd58da)
+niivue: bound GPU memory in the NVSlide tile pipeline (0292adf)
+Performance
+niivue: drop stale chunk upload requests and reprioritize per frame (1a9d525)
+niivue: stop re-fetching OME-Zarr chunks already known absent (9e05015)
+Thank You
+Chris Drake
+Claude Fable 5
+Claude Opus 5
+Taylor Hanayik @hanayik
+nv-ext-image-processing
+1.0.0-rc.13 (2026-08-28)
+Updated Dependencies
+Updated niivue to 1.0.0-rc.13
+nv-ext-save-html
+1.0.0-rc.13 (2026-08-28)
+Updated Dependencies
+Updated niivue to 1.0.0-rc.13
+nv-web-component
+1.0.0-rc.11 (2026-08-28)
+Updated Dependencies
+Updated niivue to 1.0.0-rc.13
+nv-ext-dcm2niix
+1.0.0-rc.11 (2026-08-28)
+Updated Dependencies
+Updated niivue to 1.0.0-rc.13
+nv-ext-drawing
+1.0.0-rc.13 (2026-08-28)
+Updated Dependencies
+Updated niivue to 1.0.0-rc.13
+nv-ext-niimath
+1.0.0-rc.9 (2026-08-28)
+Updated Dependencies
+Updated niivue to 1.0.0-rc.13
+nv-react
+1.0.0-rc.14 (2026-08-28)
+Fixes
+deps: pin @types/bun instead of the "latest" dist-tag (f466415)
+Updated Dependencies
+Updated niivue to 1.0.0-rc.13
+Thank You
+Chris Drake
+Claude Opus 5
+nv-ohif
+0.1.0 (2026-08-28)
+Features
+nv-ohif: hide the NiiVue annotation when its OHIF measurement is hidden (e7d3664)
+nv-ohif: delete the NiiVue annotation when its OHIF measurement is removed (afbf170)
+nv-ohif: unify Length onto the annotation system (cd0509c)
+Bidirectional measurement (two perpendicular axes) end to end (0064166)
+user-entered free-text labels for annotations (3252bed)
+LivewireContour (edge-snapping multi-click ROI) end to end (7e965cf)
+multi-click SplineROI (niivue interaction + nv-ohif wiring) (fb36c30)
+nv-ohif: render ROI annotations via UIKit through the niivue seam (b0c0222)
+nv-ohif: wire OHIF ROI + arrow measurement tools to NiiVue annotations (66f66be)
+uikit: make @niivue/uikit publishable and depend on it from nv-ohif (ebc8ca0)
+nv-ohif: bump @niivue/dcm2niix to the published fix (1.3.20260724) so DICOM works for consumers (a34799f)
+nv-ohif: unify the slide ruler control to click-drag (match the volume) (739e082)
+nv-ohif: draw volume measurements as UIKit rulers (rotated tick numbers) (fdbf5cc)
+nv-ohif: match the volume measurement ruler to the WSI ruler color (d768632)
+nv-ohif: recover WSI pixel spacing so the ruler measures in mm/microns (4f1a7ac)
+nv-ohif: UIKit ruler on the WSI viewport with physical-unit measurement (3fec150)
+nv-ohif: ruler tool bridged to OHIF's measurement panel (90c4458)
+nv-ohif: wire OHIF toolbar to NiiVue (d2100e9)
+nv-ohif: study-panel preview thumbnails for whole-slide (SM) series (89af65b)
+nv-ohif: claim the SM SOP class so whole-slide series route to NiiVue (2ff55a0)
+nv-ohif: render DICOM-WSI (SM) display sets with NVSlide (2291418)
+nv-ohif: interpolation (smoothing) toggle (d96bd9d)
+nv-ohif: colorbar (colormap legend) toggle (1415a1b)
+nv-ohif: base-volume colormap dropdown (3b0042e)
+nv-ohif: reverse W/L bridge (NiiVue drag -> OHIF) + NVSlide 2D TODO (8660e5d)
+nv-ohif: bridge OHIF window/level presets to NiiVue calMin/calMax (351932e)
+nv-ohif: add clip-plane and overlay toolbar controls (e23a075)
+nv-ohif: wire the OHIF toolbar to NiiVue (views dropdown + reset view) (6cc012b)
+nv-ohif: mirror OHIF's active tool onto NiiVue's left-drag (Window/Level, Pan) (66c01b6)
+nv-ohif: DICOM->NIfTI viewport path via in-browser P10 reconstruction + dcm2niix (d18f51a)
+nv-ohif: prove Phase 1 — NiiVue renders a NIfTI in an OHIF-shaped harness (9f8c1ae)
+nv-ohif: scaffold the NiiVue viewport extension for OHIF (Phase 1) (7eb6386)
+Fixes
+deps: pin @types/bun instead of the "latest" dist-tag (f466415)
+nv-ohif: guard the positional imageIds fallback against compaction (3f08d12)
+nv-ohif: rank array-form ImageType in WSI thumbnail selection (686b626)
+nv-ohif: classify array-form ImageType in WSI pyramid extraction (6e9ddf0)
+nv-ohif: stale flashStatus timer no longer blanks newer status messages (52f1538)
+nv-ohif: ruler toolbar button reflects the Length annotation tool (e240273)
+nv-ohif: harden annotation visibility/removal from the final review (1f97794)
+nv-ohif: no default label for a Length measurement (a67a7c2)
+nv-ohif: retry a thrown removal of an unsupported row (PR feat(nv-ohif): NiiVue viewport extension for OHIF (NIfTI + DICOM + toolbar) #76 F1) (#76)
+nv-ohif: apply product rulings on labels + unsupported geometry (PR feat(nv-ohif): NiiVue viewport extension for OHIF (NIfTI + DICOM + toolbar) #76 round-5) (#76)
+nv-ohif: restore failure-handling + labels, fix jump target (PR feat(nv-ohif): NiiVue viewport extension for OHIF (NIfTI + DICOM + toolbar) #76 round-4 review) (#76)
+harden annotation synchronization (c23d450)
+harden OHIF annotation synchronization (756cb9c)
+nv-ohif: fix reflect-failure churn, arrow direction, label clear (PR feat(nv-ohif): NiiVue viewport extension for OHIF (NIfTI + DICOM + toolbar) #76 round-3 review) (#76)
+nv-ohif: preserve reflected annotation geometry (83c30ab)
+nv-ohif: fix reflection recursion + label defects (PR feat(nv-ohif): NiiVue viewport extension for OHIF (NIfTI + DICOM + toolbar) #76 round-2 review) (#76)
+nv-ohif: render default annotation labels (6fc1ab8)
+nv-ohif: complete measurement reflection hardening (28d0828)
+nv-ohif: correct reflected measurement geometry + reconcile (PR feat(nv-ohif): NiiVue viewport extension for OHIF (NIfTI + DICOM + toolbar) #76 review) (#76)
+nv-ohif: harden measurement reflection (3bf0798)
+nv-ohif: harden the annotation/measurement subsystem (PR feat(nv-ohif): NiiVue viewport extension for OHIF (NIfTI + DICOM + toolbar) #76 review) (#76)
+nv-ohif: rebuild the annotation overlay when a label changes (8e5ac1a)
+nv-ohif: add working Crosshairs + Capture buttons (distinct ids, not id-overrides) (452aaf1)
+nv-ohif: move bundled @niivue/uikit to devDependencies so the package is installable (9c73103)
+nv-ohif: close overlay/swap async races found in the review pass (b7867f4)
+correct regressions found reviewing the review-fix commits (1a6648d)
+address review findings 5-10 (WSI/DICOM loaders + chunked-volume leak) (#5, #6, #7, #8, #9, #10)
+nv-ohif: reset per-series state on display-set swap + guard async overlay (review blockers 1-4) (#1, #2, #3, #4)
+nv-ohif: re-enable volume toolbar buttons after the volume loads (feee4fa)
+address second-review findings on the ruler/WSI fixes (d1027c6)
+nv-ohif: strip query from WSI frame imageId so tile URLs stay valid (review finding 5) (2e44538)
+nv-ohif: read WSI PixelSpacing from per-frame functional groups too (review finding 3) (731d323)
+nv-ohif: hide built-in volume measurement via isMeasurementDrawn (no gray boxes) (9135ca9)
+nv-ohif: larger DPR-aware WSI ruler label; drop duplicate status readout (ebfb7eb)
+nv-ohif: prevent runaway slide rendering (3bd58da)
+nv-ohif: cap WSI thumbnail download and decode size (be21cb6)
+nv-ohif: WSI tiles use column/row index (not pixel offset); preserve buffer (36d2cb5)
+nv-ohif: robust WSI fit + event-driven render; read per-instance imageId (7906611)
+nv-ohif: reverse W/L syncs siblings by id, not the throwing active command (a6b593e)
+nv-ohif: recover multipart boundary from body when Content-Type omits it (3dce44f)
+Updated Dependencies
+Updated niivue to 1.0.0-rc.13
+Updated uikit to 0.1.0
+Thank You
+Chris Drake
+Claude Fable 5
+Claude Opus 4.8
+Claude Opus 5
+Taylor Hanayik @hanayik
+uikit
+0.1.0 (2026-08-28)
+Features
+nv-ohif: unify Length onto the annotation system (cd0509c)
+Bidirectional measurement (two perpendicular axes) end to end (0064166)
+uikit: annotation overlay renderer (ellipse/rect/circle/line/arrow) (70fe22a)
+uikit: make @niivue/uikit publishable and depend on it from nv-ohif (ebc8ca0)
+uikit: drop the ruler arrowheads (end caps mark the extent) (85b5b09)
+uikit: long perpendicular end caps marking the ruler's start and end (798d0ef)
+uikit: larger default ruler label size (22 -> 36 px) (43c9457)
+nv-ohif: UIKit ruler on the WSI viewport with physical-unit measurement (3fec150)
+uikit: auto-contrast font outlines (SDF expansion) (2896b44)
+uikit: font-size slider for the WSI ruler demo (490f2ee)
+measure WSI slides in real physical units (um/mm) (d030a76)
+uikit: source the WSI demo tissue from the test-images repo (953cf01)
+uikit: load real tissue slides in the WSI ruler demo (cf18345)
+uikit: ruler on the WSI viewer + no-depth WebGPU passes (cfabdb5)
+uikit: volume + slide ruler demos with real measurement (90cdabe)
+uikit: ruler widget with readability guard + demo (555edc5)
+uikit: transformed MSDF text renderer on both backends (56317c8)
+uikit: line renderer on both backends + overlay-hook proof (2ca8aab)
+uikit: scaffold @niivue/uikit package with line primitives (1dce813)
+Fixes
+uikit: place ROI labels below the box, stack lines, render spaces (77f6809)
+uikit: space-separate annotation label parts (#3)
+address second-review findings on the ruler/WSI fixes (d1027c6)
+uikit: WebGPU text renderer draws each run's own vertices/uniform (review finding 1) (b408440)
+niivue,uikit: shrink arrowheads on short lines so buildTerminatedLine can't invert (review finding 2) (9b3de35)
+uikit: lift the length label clear of the graduation numbers (b3ff6a3)
+uikit: thin ruler graduation numbers so they never collide (0c1ef0f)
+uikit: draw font outlines as an offset halo, not SDF expansion (552263a)
+uikit: correct glyph texture V mapping (text was mirrored) (c0215bf)
+Performance
+uikit,nv-ohif: cache ruler layout + reuse GL line scratch (review findings 8/10) (#8, #10, #9)
+Updated Dependencies
+Updated niivue to 1.0.0-rc.13
+Thank You
+Chris Drake
+Claude Fable 5
+ipyniivue
+0.1.0 (2026-08-28)
+Features
+niivue: gradient opacity, silhouette, and a shared gradient estimator (b246878)
+niivue: pick an exploded block and open it in its own pane (d2b61c4)
+niivue: make the LOD compensation settings introspectable (bb2bc23)
+niivue: add opt-in per-level opacity compensation for coarse LOD bricks (770556b)
+niivue: back streamed chunks with an automatic coarse floor (403d7ce)
+niivue: clipPlaneOverlay to clip overlays with the base volume (02f4281)
+ipyniivue: NumPy-style docstrings for generated and wrapper methods (1a67982)
+ipyniivue: surface JS errors and trim acked inbox items (ffa1dc4)
+ipyniivue: bundle nv-ext-drawing interpolation (98cd55d)
+ipyniivue: bundle nv-ext-image-processing transforms (1285161)
+ipyniivue: exercise locationChange JS-to-Python event path (5442d81)
+ipyniivue: wait_ready() + safer toJsonSafe + delayed attach (cfdfde7)
+ipyniivue: Pythonic load helpers + canvas-init fix (9025fea)
+ipyniivue: request/response, self-contained bundle, asset inlining (4110807)
+ipyniivue: scaffold anywidget Jupyter widget with TS-driven codegen (23b6500)
+Fixes
+niivue: compensate the coarse floor's brightness too (6931055)
+niivue: oversample the 3D ray march to kill render ringing (6843b5b)
+ipyniivue: exclude overlay renderer hooks (3e0860d)
+harden streaming budget and generated bindings (577d052)
+niivue: audit round - per-series triggers, default trigger exclusion, doc restore (d6725ad)
+ipyniivue: make _GeneratedNiiVue docstring actually attach (90cfa5b)
+ipyniivue: use camelCase calMinNeg/calMaxNeg in mesh_layers demo (0ef036b)
+ipyniivue: align codegen protocol with NiiVue defaults and binary results (6ac4aab)
+ipyniivue: keep uploaded bytes authoritative in add_*_from_bytes (a98d4c4)
+ipyniivue: address second-round Copilot PR review feedback (20794bf)
+ipyniivue: suppress JupyterLab cell context menu on canvas right-click (a58bd8c)
+ipyniivue: address Copilot PR review feedback (#9)
+ipyniivue: paragraph-aware NumPy summary + CLAUDE.md refresh (39e42c1)
+ipyniivue: route buffer ingress through synced inbox (2c51350)
+stabilize ipyniivue notebook rendering (ba38839)
+ipyniivue: anywidget initialize+render lifecycle + _msg_outbox workaround (25ab299)
+ipyniivue: register cmdHandler before mount to fix wait_ready race (d0bbeeb)
+ipyniivue: bump wait_ready timeout in smoke notebook to 10s (0ee4442)
+Performance
+niivue: cache affine overlay rebakes (2717694)
+Updated Dependencies
+Updated niivue to 1.0.0-rc.13
+Updated nv-ext-image-processing to 1.0.0-rc.13
+Updated nv-ext-drawing to 1.0.0-rc.13
+Thank You
+Chris Drake
+Claude Opus 4.7 (1M context)
+Claude Opus 4.8
+Claude Opus 5
+neurolabusc
+Taylor Hanayik @hanayik
+Dry-run preview only. Versions and tags are created when a maintainer runs the Release workflow manually.
+cdrake
+requested a review
+from hanayik
+August 28, 2026 21:07
+hanayik
+approved these changes
+Sep 1, 2026
+View reviewed changes
+Hide details
+View details
+hanayik
+merged commit 36b3e16
+into
+main
+Sep 1, 2026
+4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+hanayik
+deleted the
+feat/gaussian-gradient-shader
+branch
+September 1, 2026 11:47
+cdrake
+mentioned this pull request
+Oct 23, 2026
+Roadmap to v1.0.0
+#139
+Closed
+3 of 4 tasks
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,151 @@
+--- v001.md
++++ v002.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Camera position, camera ray direction, cloud volume bounds (min/max), light direction/color, 3D noise textures (base shape, detail/fBm, erosion), and parameters (step size, extinction, scattering coefficients).
+-*   **Outputs:** Final pixel color (RGB) and alpha/transmittance.
++*   **Inputs:** Camera position, camera ray direction, cloud volume bounds (min/max), light direction/color, 3D noise textures (base shape, detail/fBm, erosion), and parameters (step size, extinction, scattering coefficients) [S1, S2, S3].
++*   **Outputs:** Final pixel color (RGB) and alpha/transmittance [S1, S2, S3].
+ 
+ **Data Structures:**
+@@ -24,12 +24,13 @@
+ 
+ 2.  **Initialization:**
+-    Initialize step size, loop variable `t` (or `dstTravelled`), accumulated color `col` (or `result`), and transmittance `trans` (or `transmittance`) to 1.0 [S1, S2, S3].
++    Initialize step size, loop variable `t` (or `dstTravelled`), accumulated color `col` (or `result`), and transmittance `trans` (or `transmittance`) [S1, S2, S3].
+     *   *Step Size:* `step = (t1 - t0) / (96.0 * uCloudStepMult)` [S1] or `stepSize = aDistance / volume_march_steps` [S2] or fixed `100.0` [S3].
+     *   *Entry Point:* `entryPoint = rayOrigin + rayDir * dstToObj` [S2].
++    *   *Transmittance:* Initialize to `1.0` [S1, S2, S3].
+ 
+ 3.  **Marching Loop:**
+     Iterate for a fixed number of steps (e.g., 96 [S1], `volume_march_steps` [S2], or 128 [S3]) or until `transmittance < 0.01` [S1, S2, S3].
+     *   *Position:* `p = ro + rd * t` [S1] or `rayPos = anEntryPoint + aRayDir * dstTravelled` [S2, S3].
+-    *   *Density Sampling:* Sample the density field at `p`.
++    *   *Density Sampling:* Sample the density field at `p` [S3].
+         *   *Simple Method:* `density = SampleCloudDensity(p)` [S3].
+         *   *Advanced Method:* Sample low-res shape noise, apply threshold and multiplier, sample high-res detail noise (fBm), trim cloud using erosion and falloff functions [S2].
+@@ -46,6 +47,5 @@
+         *   *Scatter Factor:* `scatter = mix(uCloudScatterMin, uCloudScatterMax, lightAtt)` [S1] or compute phase function using Henyey-Greenstein [S2].
+     *   *Color Accumulation:*
+-        *   `cloudColor = vec3(uCloudBrightness) * scatter` [S1] or `lightEnergy += density * stepSize * transmittance * lightTransmittance * phaseVal` [S2].
+-        *   `col += trans * cloudColor * d * 0.5` [S1] or `result += density * light * transmittance` [S3].
++        *   `cloudColor = vec3(uCloudBrightness) * scatter` [S1] or `lightEnergy += density * stepSize * transmittance * lightTransmittance * phaseVal` [S2] or `result += density * light * transmittance` [S3].
+         *   *Transmittance Update:* `trans *= exp(-d * uCloudExtinction)` [S1] or `transmittance *= exp(-density * stepSize * 0.02)` [S3] or `transmittance *= BeersLaw(density * stepSize * lightAbsorptionThroughCloud)` [S2].
+     *   *Early Exit:* If `transmittance < 0.01`, break loop [S1, S2, S3].
+@@ -70,12 +70,12 @@
+     t0 = (bounds_min - ray_origin) / ray_dir
+     t1 = (bounds_max - ray_origin) / ray_dir
+-    t_min = min(t0, t1)
+-    t_max = max(t0, t1)
++    t_min = tuple(min(a, b) for a, b in zip(t0, t1))
++    t_max = tuple(max(a, b) for a, b in zip(t0, t1))
+     
+-    dst_to_box = max(0.0, max(t_min.x, max(t_min.y, t_min.z)))
+-    dst_inside = max(0.0, min(t_max.x, min(t_max.y, t_max.z)) - dst_to_box)
++    dst_to_box = max(0.0, max(t_min))
++    dst_inside = max(0.0, min(t_max) - dst_to_box)
+     
+     if dst_inside <= 0.0:
+-        return float4(0.0, 0.0, 0.0, 1.0)
++        return (0.0, 0.0, 0.0, 1.0)
+     
+     # 2. Initialization
+@@ -83,10 +83,8 @@
+     ray_pos = ray_origin + ray_dir * dst_to_box
+     transmittance = 1.0
+-    accumulated_color = float3(0.0, 0.0, 0.0)
++    accumulated_color = (0.0, 0.0, 0.0)
+     
+-    # Pre-calculate light direction and phase
++    # Pre-calculate light direction
+     dir_to_light = normalize(params.light_position - ray_origin)
+-    cos_angle = dot(ray_dir, dir_to_light)
+-    phase_val = henyey_greenstein_phase(cos_angle, params.frwrd_scatter, params.back_scatter, params.base_brightness, params.phase_factor)
+     
+     # 3. Marching Loop
+@@ -97,51 +95,52 @@
+         density = sample_cloud_density(ray_pos, noise_textures, params)
+         
+-        if density > 0.0:
++        if density > 0.01:
+             # Compute light transmittance (shadowing)
+-            light_transmittance = compute_light_march(ray_pos, dir_to_light, bounds_max, bounds_min, noise_textures, params)
++            light = compute_light_march(ray_pos, dir_to_light, noise_textures, params)
+             
+             # Accumulate scattered light
+-            light_energy = density * step_size * transmittance * light_transmittance * phase_val
+-            accumulated_color += light_energy
++            accumulated_color = (
++                accumulated_color[0] + density * light * transmittance,
++                accumulated_color[1] + density * light * transmittance,
++                accumulated_color[2] + density * light * transmittance
++            )
+             
+             # Update transmittance
+-            transmittance *= exp(-density * step_size * params.lightAbsorptionThroughCloud)
++            transmittance *= exp(-density * step_size * 0.02)
+             
+-        ray_pos += ray_dir * step_size
++        ray_pos = ray_pos + ray_dir * step_size
+         
+     # 4. Final Color
+-    # Apply fog/atmospheric scattering if needed (simplified here)
+-    final_color = accumulated_color + (1.0 - transmittance) * params.ambient_color
+-    
+-    return float4(final_color, transmittance)
++    return (accumulated_color[0], accumulated_color[1], accumulated_color[2], 1.0)
+ 
+ def sample_cloud_density(pos, textures, params):
+-    # Simple method from [S3]
+     uvw = pos * 0.0005
+-    base_noise = textures['base'].sample(uvw).r
+-    erosion = textures['erosion'].sample(uvw * 0.5).r
++    base_noise = textures['base'].sample(uvw)[0]
++    erosion = textures['erosion'].sample(uvw * 0.5)[0]
+     density = base_noise - erosion * 0.6
+-    return saturate(density)
++    return max(0.0, min(1.0, density))
+ 
+-def compute_light_march(pos, dir_to_light, bounds_min, bounds_max, textures, params):
+-    # Simple shadow march from [S3]
++def compute_light_march(pos, dir_to_light, textures, params):
+     light = 1.0
+     step = 300.0
+     current_pos = pos
+     for _ in range(6):
+-        current_pos += dir_to_light * step
++        current_pos = current_pos + dir_to_light * step
+         d = sample_cloud_density(current_pos, textures, params)
+         light *= exp(-d * 0.1)
+     return light
+ 
+-def henyey_greenstein_phase(cos_theta, g_front, g_back, base_bright, phase_fac):
+-    # Simplified phase function
+-    hg_front = henyey_greenstein(g_front, cos_theta)
+-    hg_back = henyey_greenstein(-g_back, cos_theta)
+-    return base_bright + (hg_front * 0.3 + hg_back * 0.7) * phase_fac
++def normalize(v):
++    length = sqrt(v[0]**2 + v[1]**2 + v[2]**2)
++    return (v[0]/length, v[1]/length, v[2]/length)
+ 
+-def henyey_greenstein(g, cos_theta):
+-    g2 = g * g
+-    return (1 - g2) / (4 * 3.14159 * pow(1 + g2 - 2 * g * cos_theta, 1.5))
++def exp(x):
++    return math.exp(x)
++
++def min(a, b):
++    return a if a < b else b
++
++def max(a, b):
++    return a if a > b else b
+ ```
+ 
+@@ -162,5 +161,5 @@
+ 
+ ## Background
+-Volumetric cloud rendering has evolved from simple billboards to complex raymarched density fields. Modern real-time implementations often use 3D noise textures (Perlin, Worley) combined with raymarching to approximate atmospheric scattering [S3]. The technique is widely used in modern game engines to achieve cinematic quality skies [S3].
++Volumetric cloud rendering has evolved from simple billboards to complex raymarched density fields. Modern real-time implementations often use 3D noise textures (Perlin, Worley) combined with raymarching to approximate atmospheric scattering [S3].
+ 
+ ## Sources

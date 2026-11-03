@@ -1,0 +1,1353 @@
+arXiv:2610.24046v1 [eess.IV] 16 Oct 2026
+LUMINR: Intensity-conditioned Meta-learned INRs for
+Accelerated Medical Image Registration
+Damian Rynczak1 , Marek Wodzinski1,2
+1
+AGH University of Krakow
+2
+Sano - Centre for Computational Personalised Medicine, International Research Foundation
+Kraków, Poland
+drynczak@agh.edu.pl, wodzinski@agh.edu.pl
+Abstract
+Implicit neural representations (INRs) have been applied
+to deformable image registration, where a lightweight network maps a spatial coordinate to a deformation vector.
+Because an INR encodes one specific signal in its parameters, a fresh network must be optimized for every image
+pair at test time, which is slow. Existing methods reduce
+this cost by meta-learning an initialization across a population of image pairs, and condition the weights of the INR
+globally, so the same conditioning applies at every coordinate while the deformation field it initializes varies across
+the domain. We propose LUMINR, a meta-learning framework that accelerates this per-pair fitting and in which the
+conditioning is local instead. LUMINR uses an INR that
+maps a coordinate, together with local intensity and gradient features, to a deformation vector, so the conditioning
+varies over the domain at the resolution of the field being
+modelled. Its objective is to find an initialization of the INR
+parameters from which the network can be fine-tuned to register any unseen pair in only a few optimization iterations.
+We evaluate LUMINR on 3D deformable registration of
+brain MRI from the OASIS dataset, where local conditioning and the meta-learned initialization prove complementary: early in fitting they reach a markedly higher accuracy than either does alone. Fine-tuned from that initialization, LUMINR matches the accuracy of the same conditioned INR fit from scratch in roughly a tenth of the gradient
+steps and a tenth of the wall-clock time, while the deformation fields stay smooth with negligible folding.
+1. Introduction
+Implicit neural representations (INRs) parameterize complex signals as continuous functions, using a neural network to map input coordinates directly to signal values.
+They are a compact, resolution-independent alternative to
+discrete representations such as voxel grids. Because of
+their versatile and continuous nature, INRs have been applied across many areas of medical imaging, including image reconstruction [13, 16, 22], dataset-level representation
+learning [6], and predictive tasks such as segmentation [20].
+Deformable image registration is another such task. An INR
+can represent the coordinate transformation between an image pair directly: a lightweight MLP takes a continuous spatial coordinate as input and returns a deformation vector,
+which is added back to the coordinate through a residual
+connection to form the transformation [23].
+For deformable registration, fitting an INR to each pair
+has been reported to be more accurate than predicting the
+transformation with a trained network [23]. Such feedforward encoder-decoder models are trained on large annotated collections and return a deformation field for an unseen pair directly [2, 9, 14]; once trained they run faster
+than conventional iterative methods, but at reduced accuracy [23]. An INR is instead fit to the pair at hand
+rather than amortized over a population, so registration
+remains an optimization problem rather than a prediction
+problem, and it is this per-pair optimization that accounts
+for the accuracy.
+These properties come with an important limitation. Because a learned INR is tied so closely to the signal it was
+fit to, representing a new signal requires fitting a fresh network through iterative optimization. This is slow, and the
+cost is more acute in deformable image registration, where
+a separate network must be optimized for every fixed and
+moving image pair at test time. Several methods aim to reduce this per-instance cost. The shared idea is to replace
+a generic random initialization with one learned across
+a population of signals, so that an INR fits an unseen signal in far fewer gradient steps [4, 18, 21]. Such learned
+initializations have been studied for image fitting and reconstruction, and also for deformable image registration, where
+the initialization is meta-learned over image pairs and then
+[x, y, z]
+$$f_{\theta^*}$$
+$$x$$
+Fixed Image
+$$(F,\nabla F)$$
+$$\Phi(x)=u(\tilde{x})+x$$
+SIREN
+$$F(x)$$
+$$x$$
+$$M(x)$$
+Coords
+$$\nabla F(x)$$
+$$u(\tilde{x})$$
+$ \tilde{x}$$
++
+$$\nabla M(x)$$
+Warped Image
+$$(M \circ \Phi)$$
+$${\theta^n}$$
+$ {\theta^0}$
+Moving Image
+$$(M,\nabla M)$$
+$ {\theta^1}$
+$ {\theta^2}$
+$ {\theta^*}$
+Reptile
+Figure 1. LUMINR uses a multi-layer perceptron (MLP) that implicitly represents the function Φ, mapping an input feature vector from
+the moving image to its corresponding location in the fixed image. Using Reptile meta-learning, LUMINR finds an initialization θ∗ from
+which fθ can be fine-tuned to the correct correspondence for any unseen image pair in only a few optimization iterations.
+fine-tuned at inference on the pair at hand [3, 12].
+REINDIR [19] goes one step further and conditions that
+initialization on the pair to be registered. A convolutional
+encoder embeds the fixed and moving images into a single vector, and per-layer heads turn it into modulation vectors, one repeated to fill each hidden weight matrix and one
+multiplying the corresponding bias. These vectors specialize meta-learned template INRs before test-time optimization begins. The network itself still receives a bare spatial
+coordinate as input, and because one vector describes the
+whole pair, the same conditioning signal applies at every
+coordinate, while the deformation field it initializes varies
+across the domain.
+That gap between a conditioning signal held constant
+over the domain and a field that varies across it limits what
+the initialization can hold. Vyas et al. [21] motivate their
+work by observing that an INR partitions its input coordinate space finely around the spatial gradients of the one signal it was fit to, so that its features do not readily transfer
+to a second signal even of similar content, and that the partition induced by a meta-learned initialization is closer to
+random. A bare coordinate says nothing about which pair is
+being registered, so an initialization shared across a population can encode only what all pairs have in common, and
+the pair-specific structure is left to gradient descent at test
+time. Sampling the two intensity fields and their spatial gradients at the query coordinate supplies that structure at the
+input instead, where it varies from point to point, and the
+initialization then has only to encode how to use it.
+We propose LUMINR, a meta-learning [5, 12] framework for accelerated medical image registration in
+which the conditioning is local.
+The INR maps
+a spatial coordinate together with the image intensities and gradient features sampled at that coordinate,
+x̃ = [x, F (x), M (x), ∇F (x), ∇M (x)], to a deformation
+vector, so the conditioning varies over the domain at the
+resolution of the field being modelled. LUMINR then seeks
+an initialization for that INR from which the network can
+be fine-tuned quickly to any fixed and moving image pair
+(Fig. 1). An inner loop adapts the parameters to a single sampled pair over several gradient steps by minimizing
+the registration loss for that pair, and an outer loop moves
+the shared initialization toward these adapted values [12].
+Repeated across many pairs, this produces an initialization
+from which fine-tuning converges to an accurate deformation field for an unseen pair in far fewer iterations than fitting from scratch.
+We evaluate LUMINR on 3D deformable registration
+of brain MRI from the OASIS dataset [8, 11], against
+coordinate-only INR baselines fitted from random and from
+meta-learned weights. Fine-tuned from the meta-learned
+initialization, the network reaches the registration accuracy
+of the same INR fit from scratch in roughly a tenth of the
+gradient steps and a tenth of the wall-clock time. The acceleration holds under both a coarse and a fine anatomical
+segmentation, and it grows as the labels become finer and
+small boundary displacements matter more. The deformation fields stay smooth throughout fitting, with the fraction
+of folding voxels below 0.001% at every checkpoint.
+Contribution. Our contributions can be summarized
+as follows:
+• We introduce LUMINR, an INR framework for 3D
+deformable registration whose conditioning is local.
+Each coordinate is presented with the fixed and moving intensities and their gradients sampled at that point,
+so the pair-specific signal varies over the domain,
+whereas existing meta-learned INR registration specializes shared weights from one global embedding
+of the pair.
+• We meta-learn the initialization of this conditioned
+network with Reptile, so that an unseen pair is fitted
+from weights adapted across the training population
+rather than from random ones.
+• We show on OASIS brain MRI that local conditioning
+and the meta-learned initialization are complementary,
+and that together they shorten the test-time fit by
+roughly an order of magnitude at no cost in accuracy
+or deformation regularity.
+2. Method
+We consider the pairwise registration task for a given
+dataset D = {(Fj , Mj )}N
+j=1 of N three-dimensional fixed
+and moving image pairs, where the goal is to recover a spatial transformation that aligns each moving image with its
+fixed counterpart. Both images of a pair share a normalized domain, F, M : Ω → R with Ω ⊂ [−1, 1]3 . For
+every image we precompute the spatial gradients ∇F and
+∇M offline, so that at any continuous coordinate x ∈ Ω
+we can sample the intensities F (x), M (x) ∈ R together
+with their gradients ∇F (x), ∇M (x) ∈ R3 . Concatenating these with the coordinate yields the input feature vector
+x̃ = [x, F (x), M (x), ∇F (x), ∇M (x)] ∈ Rd (d = 11), so
+the network has access to local appearance context as well
+as position.
+LUMINR represents the deformation with an L-layer
+MLP fθ : Rd → R3 that maps x̃ to a displacement
+u(x̃). A residual connection adds the original coordinate
+back to form the transformation Φ(x) = u(x̃) + x. The
+warped moving image is obtained by sampling M at the
+transformed coordinates Φ(x), with subvoxel intensities resolved through trilinear interpolation [23]. We seek the
+transformation that maps each fixed-image coordinate to its
+anatomically corresponding location in the moving image,
+so that (M ◦ Φ)(x) = F (x) for all x ∈ Ω. LUMINR’s objective is to find an initialization θ∗ of the INR parameters
+from which fθ (·) can be fine-tuned to satisfy this correspondence for any unseen pair in only a few optimization iterations [12, 23]. In the following Sec. 2.1, we describe how
+Reptile meta-learning is used to obtain this initialization.
+2.1. LUMINR: Initialization for Accelerated Medical Image Registration
+LUMINR uses the Reptile meta-learning strategy [12] to
+learn an initialization θ∗ from which the network adapts
+quickly to a new fixed and moving image pair. We chose
+Reptile over MAML [5] because MAML differentiates
+through the inner-loop update and so requires the Hessian,
+whose similarity term reaches the parameters through the
+trilinear resampler that warps the moving image. Trilinear
+interpolation is only C 0 : within a voxel cell the interpolant
+is multilinear, so its pure second derivatives vanish identically, and the mixed terms that remain are in general discontinuous across cell faces. At those faces the true second
+derivative is a singular measure that automatic differentiation cannot access. This path therefore contributes degenerate curvature. Reptile’s update depends only on the finetuned parameters, so it needs no second derivatives, and its
+memory cost does not grow with the number of inner steps.
+Training is a nested optimization with an inner and an
+outer routine. The inner routine treats each pair as a separate task: given a sampled pair (Fj , Mj ), it adapts the current parameters θt by running Ti Adam steps [10] on the
+registration loss of fθ (·), which yields the adapted weights
+θ̃j [12, 23]. The outer routine begins from random values
+θ0 at t = 0 and runs for To meta-iterations. At each iteration it calls the inner routine on a freshly sampled pair and
+moves the shared parameters toward the adapted weights,
+so that after training a few gradient steps on an unseen pair
+are enough to reach a low registration loss.
+Deformable image registration seeks the transformation
+Φ that best aligns the warped moving image with the fixed
+image while remaining physically plausible:
+Φ = arg min Ldata M ◦ Φ, F
+Φ
+
++ α Lreg (Φ),
+(1)
+where α weights the regularization against the data term.
+At each inner iteration t we form this objective for the sampled pair j and optimize the SIREN [17] network fθt , which
+predicts the displacement u(x̃) = fθt (x̃) from the enriched
+input x̃. A residual connection then gives the transformation Φθt (x) = u(x̃) + x. We optimize the network using
+the following loss term:
+Linner Fj , Mj
+
+= − LNCC Mj ◦ Φθ , Fj
+
++ α Lreg Φθ ,
+
+(2)
+The data term LNCC is the normalized cross-correlation
+between the fixed intensities and the warped moving intensities, evaluated on a batch of Ns = 10,000 coordinates
+sampled from the image domain at each iteration. Because
+the warped coordinates generally fall off the voxel grid, the
+moving image is sampled by trilinear interpolation, which
+keeps the data term differentiable end to end [23]. For the
+regularization term Lreg we use the bending-energy penalty
+[15], which enforces smoothness on the deformation vector
+#2 / 0.78
+#10 / 0.82
+#200 / 0.84
+GT
+Moving
+#2 / 0.37
+#10 / 0.68
+#200 / 0.80
+GT
+LUMINR
+(random)
+LUMINR
+(meta)
+Moving
+Figure 2. Comparison of segmentation performance for the LUMINR (meta) and LUMINR (random) models (α = 0.1) across 4 classes.
+We report the mean Dice score at each optimization iteration for a single pair of the MRI volumes. The meta-learned initialization leads to
+rapid convergence and achieves reasonable segmentation (Dice = 0.82) after 10 iterations.
+field by keeping its second-order spatial derivatives small
+throughout the domain. This penalty suits SIREN well: its
+periodic activations can be differentiated more than once,
+so the required second derivatives are available analytically,
+whereas they would vanish for a ReLU network [23].
+A single inner step (Ti = 1) reduces to plain Stochastic Gradient Descent (SGD) on the expected loss and yields
+no useful initialization; only Ti > 1 introduces the higherorder term that drives within-task generalization, and
+a larger Ti makes θ̃j a closer approximation of pair j’s
+task-optimal solution. We therefore use a moderately large
+number of inner steps (e.g., Ti between 100 and 200).
+The outer routine then treats the displacement (θ̃j − θt ) as
+a pseudo-gradient and moves the initialization towards the
+adapted weights:
+
+
+θt+1 ← θt + ϵ θ̃j − θt ,
+(3)
+where ϵ is the outer step size. After To outer steps we
+obtain the meta-learned initialization θ∗ = θTo .
+At inference we are given an unseen fixed-moving pair
+(F, M ). As in classical INR approach, we fit the network
+to this single pair by optimizing the same objective (2) used
+in the inner loop for Tf iterations. The only difference is
+the starting point. Instead of a random initialization, we
+initialize fθ (·) with meta-learned parameters θ∗ . Once fitted, a single feed-forward pass recovers the deformation
+Φθ (x) = fθ (x̃) + x at any coordinate x ∈ Ω. We then warp
+the moving image with trilinear interpolation, M ◦Φθ (x),
+to obtain the registered image aligned to the fixed image.
+2.2. Experimental setup
+Dataset and preprocessing. We evaluated LUMINR on
+aligned 3D brain MRI volumes from the OASIS dataset
+[7, 8, 11]. We took 414 T1-weighted scans and split them
+randomly into 280 training, 34 validation, and 100 test volumes. Each volume comes with segmentations at two granularities: a coarse set of 4 labels (cortex, subcortical gray
+matter, white matter, and CSF) and a fine set of 35 labels for
+individual anatomical regions. We normalized all volumes
+to the intensity range [0,1] and kept the original resolution
+of 160 x 192 x 224. In addition, we computed the image
+gradients with a Sobel operator and used the raw gradient
+magnitudes to build input feature vector.
+OASIS contains unpaired images, so we built registration pairs explicitly. For training, each subject is paired
+once with every other subject, which gives every unordered
+fixed-moving combination. At each outer optimization step
+we drew a new batch of 300 pairs at random from this pool,
+and for each pair we evaluated the registration loss on a random minibatch of 10,000 spatial coordinates rather than the
+full image grid. For evaluation we instead pair the 100 test
+volumes consecutively, which gives 99 test pairs.
+Implementation. For all experiments we used a SIREN
+INR with L = 5 hidden layers, width h = 512, and
+ω0 = 30. We optimized the network with Adam [10], using
+a learning rate of 1 × 10−4 for the inner loop and 1 × 10−3
+for the outer meta-learning loop. We set Ti = 100 inner
+steps and ran the outer loop for To = 100 iterations, applying an α-weighted bending-energy regularizer with α =
+Coarse 4-class labelling
+Fine 35-class labelling
+0.85
+0.70
+0.80
+0.60
+Mean DSC
+Mean DSC
+0.75
+0.70
+0.65
+0.60
+0.55
+LUMINR (meta)
+LUMINR (random)
+LUMINR-2H (meta)
+0.50
+2
+10
+INR (meta)
+INR (random)
+LUMINR-2H (random)
+50
+100
+200
+500
+0.50
+0.40
+LUMINR (meta)
+LUMINR (random)
+LUMINR-2H (meta)
+0.30
+0.20
+2
+Iterations
+10
+INR (meta)
+INR (random)
+LUMINR-2H (random)
+50
+100
+200
+500
+Iterations
+Figure 3. Mean Dice score over all test pairs at each fitting iteration (α = 0.1), on the coarse 4-class (left) and the fine 35-class (right)
+labelling, background included; the grey dotted line is the pre-registration, affine-only Dice (0.691 and 0.584). LUMINR (meta) matches at
+50 steps the Dice that LUMINR (random) reaches only at 500, and by two steps it already exceeds every point of both INR curves on DSC4 ;
+on DSC35 two steps match the INR baseline at 500 steps and ten steps clear INR (meta).
+0.1. We validated every 5 outer steps using 50 inner steps.
+We also evaluated a second input configuration (LUMINR2H), in which two separate input layers process coordinates and intensity features independently and their outputs
+are concatenated before the next layer. Aside from this
+split input stage, LUMINR2H uses the same architecture
+and optimization settings.
+At inference time, we initialized fθ with the learned
+meta-parameters θ∗ and fit each unseen scan for 500
+iterations with Adam at a learning rate of 1 × 10−4
+and the bending-energy regularizer set to α = 0.1.
+All fits used coordinate batches of 10,000 points.
+We also swept α ∈ {0.01, 0.1, 1.0} for both the metalearning and test-time fitting stages to measure its effect on
+registration quality.
+Baseline. We compared our method against a baseline INR that receives only the spatial coordinate as input,
+without the sampled intensity and gradient features, so that
+fθ : R3 → R3 . Apart from the input, this baseline is identical to LUMINR: the same SIREN backbone, the same registration objective (2), and the same optimization settings
+described above. The comparison therefore isolates the contribution of the enriched input representation.
+We ran both models under two initialization regimes.
+In the first, the network starts from randomly initialized
+weights following the standard SIREN scheme, and is fit to
+each unseen test pair for Tf = 500 iterations with the Adam
+optimizer, as in the classical INR approach. In the second,
+the same fitting procedure starts from the meta-learned parameters θ∗ . The meta-learning stage of the baseline used
+the settings reported above for LUMINR. Together the four
+configurations separate the effect of the intensity features
+from the effect of the initialization, and show how each of
+them affects registration speed and accuracy.
+Grid-searched baseline. We also compared LUMINR
+against a coordinate-only INR whose hyperparameters we
+selected by grid search. It is a SIREN with two layers and
+256 hidden features, optimized at a learning rate of 6.6 ×
+10−5 . We evaluated this baseline in the same two regimes,
+from scratch and from a meta-learned initialization obtained
+with the same meta-learning parameters as described above.
+We describe the search space and the selection procedure in
+detail in the supplementary material (Sec. A).
+3. Results
+We report mean Dice score, cumulative fitting time, and
+the fraction of folding voxels over the 99 OASIS test pairs,
+computed at full resolution and tracked from iteration 2 to
+iteration 500 at α = 0.1. Our objective is to accelerate
+INR fitting on an unseen medical image pair, so we cap
+fitting at 500 iterations and ask how local intensity-feature
+conditioning and the meta-learned weight initialization affect the early stages of optimization rather than the converged solution. We compare six main configurations: the
+enriched-input model (LUMINR) and two coordinate-only
+baselines, one sharing the same SIREN backbone (INR)
+and one whose hyperparameters we selected by grid search
+(INRGS ), each fitted from randomly initialized weights
+(denoted random) and from the meta-learned parameters
+(denoted meta). Every test volume carries two segmentations, one over 4 classes and background and one over 35
+classes and background, and we report Dice score for both.
+Table 1. Mean Dice score, cumulative fitting time, and fraction of folding voxels across fitting iterations for the LUMINR (meta) and
+LUMINR (random) models. DSC4 and DSC35 are Dice on the coarse (4-class) and fine (35-class) labellings respectively; fitting time and
+folding are independent of the labelling and are therefore reported once. Each entry is the mean over all test pairs with its 95% confidence
+interval in brackets. Both models are the same architecture: the left one is fitted from the meta-learned initialization, the right one from
+a random initialization.
+LUMINR (meta)
+Iter.
+2
+10
+50
+100
+150
+200
+250
+300
+500
+∆DSC4, (50→500)
+∆DSC35, (50→500)
+DSC4
+[-]
+t
+[s]
+[%]
+DSC4
+[-]
+DSC35
+[-]
+t
+[s]
+det(J)<0 ×10−5
+[%]
+0.27
+[0.26, 0.27]
+1.32
+[1.32, 1.33]
+6.55
+[6.55, 6.56]
+13.12
+[13.09, 13.19]
+19.67
+[19.63, 19.73]
+26.21
+[26.17, 26.28]
+32.75
+[32.71, 32.82]
+39.30
+[39.25, 39.38]
+65.53
+[65.44, 65.66]
+0.26
+[0.06, 0.56]
+0.94
+[0.00, 2.73]
+1.41
+[0.46, 2.61]
+2.07
+[0.48, 4.68]
+1.07
+[0.26, 2.16]
+1.20
+[0.46, 2.13]
+1.14
+[0.44, 2.01]
+1.17
+[0.57, 1.91]
+1.10
+[0.47, 1.86]
+0.471
+[0.460, 0.481]
+0.640
+[0.632, 0.647]
+0.734
+[0.728, 0.740]
+0.774
+[0.767, 0.780]
+0.800
+[0.793, 0.806]
+0.816
+[0.809, 0.822]
+0.826
+[0.819, 0.832]
+0.834
+[0.828, 0.840]
+0.845
+[0.838, 0.851]
+0.202
+[0.189, 0.217]
+0.436
+[0.421, 0.452]
+0.573
+[0.562, 0.583]
+0.614
+[0.602, 0.625]
+0.642
+[0.631, 0.653]
+0.664
+[0.653, 0.675]
+0.676
+[0.665, 0.686]
+0.683
+[0.672, 0.694]
+0.696
+[0.685, 0.707]
+0.28
+[0.26, 0.29]
+1.31
+[1.30, 1.33]
+6.50
+[6.48, 6.52]
+12.98
+[12.96, 13.00]
+19.45
+[19.43, 19.47]
+25.92
+[25.90, 25.94]
+32.39
+[32.38, 32.42]
+38.87
+[38.85, 38.89]
+64.79
+[64.75, 64.85]
+0
+[0, 0]
+0
+[0, 0]
+0.32
+[0.00, 0.95]
+13.42
+[0.13, 39.06]
+14.50
+[1.37, 33.84]
+5.67
+[0.10, 15.50]
+3.33
+[0.87, 6.61]
+3.58
+[0.70, 7.40]
+3.08
+[0.25, 7.85]
+DSC35
+[-]
+0.764
+0.610
+[0.756, 0.771] [0.598, 0.620]
+0.825
+0.676
+[0.819, 0.832] [0.664, 0.688]
+0.694
+0.843
+[0.837, 0.849] [0.683, 0.706]
+0.695
+0.844
+[0.838, 0.850] [0.683, 0.706]
+0.696
+0.845
+[0.838, 0.850] [0.685, 0.707]
+0.697
+0.845
+[0.839, 0.851] [0.685, 0.708]
+0.698
+0.844
+[0.838, 0.850] [0.686, 0.709]
+0.698
+0.846
+[0.840, 0.852] [0.686, 0.709]
+0.847
+0.700
+[0.842, 0.853] [0.689, 0.711]
+LUMINR (random)
+det(J)<0 ×10−5
++0.5%
++0.9%
+3.1. Effect of the enriched input representation
+Fitting from scratch. We began by analyzing the effect
+of the enriched input representation on network fitting. We
+observed that conditioning on local intensity features improves registration accuracy beyond the initial fitting iterations. LUMINR (random) attains a higher mean Dice score
+than both coordinate-only baselines from iteration 50 onwards on the coarse labelling and from iteration 150 onwards on the fine one, and this ordering is preserved at every subsequent checkpoint (Fig. 3, Fig. 4). Over the interval from iteration 50 to iteration 500 the conditioned model
+gains more Dice score than either INR or INRGS on both labellings, its margin over each baseline attains its maximum
+in the second half of the fitting schedule, and it remains
+superior at the terminal iteration. We attribute this to the
+input representation: because the fixed and moving intensities and their gradients are sampled at the query coordinate,
+the network observes the local appearance mismatch that
+the displacement must resolve rather than inferring it from
+position alone.
+Fitting from the meta-learned initialization. Since this
+advantage needed several tens of iterations to appear, we
+next asked whether a better starting point removes the delay. Starting from the meta-learned parameters, LUMINR
+(meta) attains a higher mean Dice score than both INR
+(meta) and INRGS (meta) at every evaluated iteration and
+on both labellings (Fig. 3, Fig. 4). No early crossover of
+the kind observed under random initialization occurs: the
++15.1%
++21.5%
+advantage is present at the second iteration and persists after all models have plateaued. It is more pronounced on
+the coarse labelling, where the margin over either baseline
+exceeds the corresponding margin on the fine labelling at
+every checkpoint. Conditioning and the meta-learned initialization are therefore complementary: intensity features
+that improve accuracy only from iteration 50 onwards on
+the coarse labelling and from iteration 150 onwards on the
+fine one under random initialization contribute from the second iteration when fitting starts from θ∗ .
+Interaction between conditioning and initialization.
+We quantified this complementarity by reversing the comparison: how much the meta-learned initialization is worth
+depends on what the network sees at its input. Averaged over the first fifty fitting iterations, starting from θ∗
+gains LUMINR +0.196 DSC4 and +0.256 DSC35 , against
++0.061 and +0.118 for INRGS and +0.027 and +0.053 for
+INR. The separation is widest at the second iteration, where
+the initialization is worth +0.293 DSC4 and +0.408 DSC35
+to the conditioned model, two to three times what it gives
+INRGS and seven to twelve times what it gives INR.
+The same ordering holds for how long the gain survives.
+Without intensity features the head start is also short-lived.
+INR (meta) and INR from scratch meet at the tenth iteration, 0.689 against 0.688 on DSC4 and 0.573 against 0.575
+on DSC35 , so ten gradient steps erase it. Conditioning also
+raises the accuracy the initialization converges to: from θ∗
+the coordinate-only models plateau near 0.73 DSC4 , a level
+Coarse 4-class labelling
+Fine 35-class labelling
+0.85
+0.70
+0.80
+0.60
+Mean DSC
+Mean DSC
+0.75
+0.70
+0.65
+0.60
+0.55
+INRGS (meta)
+INRGS (random)
+LUMINR-2H (random)
+LUMINR (meta)
+LUMINR (random)
+LUMINR-2H (meta)
+0.50
+2
+10
+50
+100
+200
+500
+0.50
+0.40
+INRGS (meta)
+INRGS (random)
+LUMINR-2H (random)
+LUMINR (meta)
+LUMINR (random)
+LUMINR-2H (meta)
+0.30
+0.20
+2
+10
+Iterations
+50
+100
+200
+500
+Iterations
+Figure 4. Mean Dice score over all test pairs at each evaluated fitting iteration (α = 0.1), on the coarse 4-class (left) and the fine 35class (right) labelling, background included; the grey dotted line is the pre-registration, affine-only Dice (0.691 and 0.584). At 50 steps
+LUMINR (meta) comes within 0.002 of the Dice that LUMINR (random) reaches only at 500, and by two steps it already exceeds every
+point of both INRGS curves on DSC4 ; on DSC35 two steps match INRGS at 50 steps and ten steps clear both curves.
+LUMINR (meta) passes at its second iteration (0.764 after 0.27 s) before settling near 0.85. For a coordinate-only
+INR, meta-learning mainly moves a low plateau earlier in
+the schedule. Combined with local conditioning, it reaches
+a markedly higher one within a few gradient steps.
+3.2. Accelerated medical image registration
+We then measured what the combination of the two saves
+in practice, by reading off the iteration count and the wallclock time at which each model reaches a matched Dice.
+Coarse labelling. For the 4-classes and background setting (Table 1), LUMINR (meta) reaches a Dice of 0.843
+after 50 gradient steps (6.6 s), a score the same network fitted from random weights attains only after the full 500 steps
+(0.845, 64.8 s); the meta-learned initialization matches the
+same registration quality with roughly a tenth of the iterations and a tenth of the wall-clock time. The gap is largest
+early in fitting: within its first ten steps (1.3 s) the metainitialized fit is already level with what the random start
+needs about 250 steps (32.4 s) to reach, and a two-step
+fit (0.3 s) already surpasses the 500-step plateaus of both
+coordinate-only baselines (0.734 at 31.8 s for INRGS , 0.708
+at 91.0 s for INR) as well as the random start at 50 steps.
+Fine labelling. The 35-classes-and-background setting
+follows the same pattern. Within 50 steps (6.6 s) metalearned LUMINR reaches the Dice that LUMINR (random)
+recovers only at 500 steps (64.8 s), again about a tenfold reduction in both iterations and time. The early advantage is
+larger here: a two-step fit already exceeds what LUMINR
+(random) reaches after 50 steps, and a ten-step fit (1.3 s)
+is above the plateau INRGS (random) reaches after its full
+500-step schedule (31.8 s). The finer segmentation penal-
+izes small boundary displacements, so fitting from scratch
+needs many more steps to resolve them, and the acceleration
+from the meta-learned initialization is larger.
+Folding. We finally verified that the acceleration does
+not come at the cost of deformation regularity. Across
+all six configurations the fraction of voxels with a negative Jacobian determinant stays below 0.001% at every
+checkpoint; because folding is a property of the deformation field, it is identical for the 4- and 35-class evaluations. Neither coordinate-only baseline folds a single voxel
+in either regime. Only the conditioned models fold at all,
+and from iteration 100 onwards the meta-learned initialization is the better behaved of the two: its peak folding
+fraction, 2.07 × 10−5 % at iteration 100, is roughly seven
+times lower than the peak of the same architecture fitted
+from scratch, 14.50 × 10−5 % at iteration 150. As Fig. 2
+illustrates, LUMINR enables the generation of a viable segmentation mask close to the ground truth in just 2 - 10
+fitting iterations.
+Supplementary quantitative and qualitative results are
+presented in Appendix B and Appendix C, respectively.
+3.3. Ablation studies
+In this section, we present ablation studies on two key design choices of LUMINR: the number of enriched input layers, which affects how coordinate and intensity features are
+processed, and the regularization strength α, which controls
+the trade-off between segmentation accuracy and folding.
+Ablation studies. First, we conducted an ablation study
+on the effect of adding a second enriched input layer to
+the meta-learned initialization, comparing LUMINR and
+LUMINR-2H. The second layer yields only a marginal Dice
+Coarse 4-class labelling
+0.86
+Fine 35-class labelling
+0.70
+0.84
+0.68
+Mean DSC
+Mean DSC
+0.82
+0.80
+0.78
+α = 0.01
+α = 0.1
+α = 1.0
+0.76
+0.74
+2
+10
+50
+100
+200
+500
+Iterations
+0.66
+0.64
+0.62
+α = 0.01
+α = 0.1
+α = 1.0
+0.60
+0.58
+2
+10
+50
+100
+200
+500
+Iterations
+Figure 5. Mean Dice over all test pairs at each fitting iteration for LUMINR at three regularization strengths (α ∈ {0.01, 0.1, 1.0}); 4-class
+and 35-class and background labelling. The choice of α barely affects the converged score: the settings agree by 50 steps and plateau
+together at 500, differing only in the first few iterations where weaker regularization (α = 0.01) starts slightly higher.
+gain at nearly identical fitting time and negligible folding,
+so we adopt single input head LUMINR as our primary
+model (Fig. 3, Fig. 4)
+Regularization strength. We also conducted an ablation study on how different regularization strengths
+α affect the Dice scores of LUMINR (meta), considering
+α ∈ {0.01, 0.1, 1.0} on both the 4-class and 35-class segmentations (Fig. 5). Overall, the choice of α has only
+a limited effect on the final Dice score, with the three settings yielding comparable results on both tasks. Minor
+differences are mostly visible in the first few iterations,
+where weaker regularization tends to start from a slightly
+higher Dice, though this difference largely disappears as fitting progresses and the three settings become broadly similar. Given that the Dice score remains fairly stable across
+a wide range of α, we adopt α = 0.1 as our final regularization value, as it maintains this accuracy while keeping
+folding low.
+4. Discussion
+We have shown that conditioning the INR locally and
+meta-learning its initialization are complementary, together
+accelerating INR-based deformable image registration.
+Fine-tuned from the meta-learned initialization, the network
+reaches the accuracy of the same INR fit from scratch in
+roughly a tenth of the gradient steps and a tenth of the
+wall-clock time, under both a coarse and a fine segmentation, while folding stays negligible. This is a step toward INR-based registration that is fast enough for interactive clinical use. The remaining cost is dominated by
+the regularizer, not the data term. Total fitting time scales
+with the number of backward passes per epoch, and regularizers that we are using are computed by analytically dif-
+ferentiating the transformation Φ with respect to the input
+coordinates through autograd, rather than by finite differences on a grid [23]. Within the regularization term, the
+bending energy penalty is the most expensive component,
+because it requires second-order derivatives of the network
+output. Reducing this cost is what would bring INR-based
+registration close to real time and make it usable during live
+clinical procedures.
+Our method is not immune to folding. The enrichedinput models introduce a small, non-zero fraction of folded
+voxels, and the meta-learned initialization inherits this
+rather than removing it. This motivates further work on
+INR regularization. One direction is to design INRs that
+need less regularization in the first place, for example by
+addressing the frequency behavior that makes SIREN-based
+fields prone to high-frequency artifacts.
+A second direction concerns how the INR is conditioned
+on the image pair. Here we condition on local intensity and
+gradient features at each coordinate. The present work tests
+this local-conditioning strategy for meta-learned INR registration rather than benchmarking it against established registration methods; we leave that comparison to future work.
+These hand-chosen features could instead be replaced by
+a learned feature vector from a foundation model, which
+would carry more context about the anatomy being registered. Taken further, the same idea points toward an INRbased foundation model for image registration, in which
+a single meta-learned representation adapts to a wide range
+of image pairs and, we expect, surpasses the registration
+performance of current methods.
+Acknowledgements
+This work was supported by the National Science Centre, Poland,
+under Grant “MultiGeoMed” No.
+2024/55/D/ST6/02081.
+We
+gratefully
+acknowledge
+Polish
+high-performance
+computing infrastructure PLGrid (HPC Center:
+ACK
+Cyfronet AGH) for providing computer facilities and support within computational grants no.
+PLG/2026/019392
+and PLG/2025/018770.
+References
+[1] Takuya Akiba, Shotaro Sano, Toshihiko Yanase, Takeru
+Ohta, and Masanori Koyama. Optuna: A next-generation
+hyperparameter optimization framework. In Proceedings of
+the 25th ACM SIGKDD International Conference on Knowledge Discovery & Data Mining, pages 2623–2631, 2019. 10
+[2] Guha Balakrishnan, Amy Zhao, Mert R. Sabuncu, John Guttag, and Adrian V. Dalca. Voxelmorph: A learning framework for deformable medical image registration. IEEE
+Transactions on Medical Imaging, 38(8):1788–1800, 2019.
+1
+[3] Zachary M. C. Baum, Yipeng Hu, and Dean C. Barratt.
+Meta-learning initializations for interactive medical image
+registration. IEEE Transactions on Medical Imaging, 42(3):
+823–833, 2023. 2
+[4] Emilien Dupont, Hyunjik Kim, S. M. Ali Eslami, Danilo J.
+Rezende, and Dan Rosenbaum. From data to functa: Your
+data point is a function and you can treat it like one. In International Conference on Machine Learning (ICML), 2022.
+1
+[5] Chelsea Finn, Pieter Abbeel, and Sergey Levine. Modelagnostic meta-learning for fast adaptation of deep networks.
+In International Conference on Machine Learning (ICML),
+pages 1126–1135, 2017. 2, 3
+[6] Paul Friedrich, Florentin Bieder, Julian McGinnis, Julia
+Wolleb, Daniel Rueckert, and Philippe C. Cattin. MedFuncta: A unified framework for learning efficient medical neural fields. In Medical Imaging with Deep Learning
+(MIDL), 2026. 1
+[7] Alessa Hering, Lasse Hansen, Tony C. W. Mok, et al.
+Learn2Reg: Comprehensive multi-task medical image registration challenge, dataset and evaluation in the era of deep
+learning. IEEE Transactions on Medical Imaging, 42(3):
+697–712, 2023. 4
+[8] Andrew Hoopes, Malte Hoffmann, Douglas N. Greve, Bruce
+Fischl, John Guttag, and Adrian V. Dalca. Learning the effect
+of registration hyperparameters with HyperMorph. Machine
+Learning for Biomedical Imaging, 1:1–30, 2022. 2, 4
+[9] A. Khan, Z. Rauf, A. R. Khan, S. Rathore, S. H. Khan, N. S.
+Shah, U. Farooq, H. Asif, A. Asif, U. Zahoora, R. U. Khalil,
+S. Qamar, U. H. Asif, F. B. Khan, A. Majid, and J. Gwak. A
+recent survey of vision transformers for medical image segmentation. IEEE Access, 13:191824–191849, 2025. 1
+[10] Diederik P. Kingma and Jimmy Ba. Adam: A method for
+stochastic optimization. In ICLR, 2015. 3, 4
+[11] Daniel S. Marcus, Tracy H. Wang, Jamie Parker, John G.
+Csernansky, John C. Morris, and Randy L. Buckner. Open
+Access Series of Imaging Studies (OASIS): Cross-sectional
+MRI data in young, middle aged, nondemented, and demented older adults. Journal of Cognitive Neuroscience, 19
+(9):1498–1507, 2007. 2, 4
+[12] Alex Nichol, Joshua Achiam, and John Schulman. On
+first-order meta-learning algorithms.
+arXiv preprint
+arXiv:1803.02999, 2018. 2, 3
+[13] Albert W. Reed, Hyojin Kim, Rushil Anirudh, K. Aditya
+Mohan, Kyle Champley, Jingu Kang, and Suren Jayasuriya.
+Dynamic CT reconstruction from limited views with implicit neural representations and parametric motion fields. In
+ICCV, pages 2258–2268, 2021. 1
+[14] Olaf Ronneberger, Philipp Fischer, and Thomas Brox. UNet: Convolutional networks for biomedical image segmentation. In International Conference on Medical Image Computing and Computer-Assisted Intervention (MICCAI), pages
+234–241, 2015. 1
+[15] Daniel Rueckert, Luke I. Sonoda, Carmel Hayes, Derek L. G.
+Hill, Martin O. Leach, and David J. Hawkes. Nonrigid registration using free-form deformations: Application to breast
+MR images. IEEE Transactions on Medical Imaging, 18(8):
+712–721, 1999. 3
+[16] Liyue Shen, John Pauly, and Lei Xing. NeRP: Implicit neural representation learning with prior embedding for sparsely
+sampled image reconstruction. IEEE Transactions on Neural
+Networks and Learning Systems, 2022. 1
+[17] Vincent Sitzmann, Julien N. P. Martel, Alexander W.
+Bergman, David B. Lindell, and Gordon Wetzstein. Implicit
+neural representations with periodic activation functions. In
+NeurIPS, pages 7462–7473, 2020. 3
+[18] Matthew Tancik, Ben Mildenhall, Terrance Wang, Divi
+Schmidt, Pratul P. Srinivasan, Jonathan T. Barron, and Ren
+Ng. Learned initializations for optimizing coordinate-based
+neural representations. In CVPR, 2021. 1
+[19] L. van Harten, R. L. M. van Herten, and I. Isgum. REINDIR:
+Repeated embedding infusion for neural deformable image registration. In Medical Imaging with Deep Learning
+(MIDL), pages 577–595, 2024. 2
+[20] Kushal Vyas, Ashok Veeraraghavan, and Guha Balakrishnan. Fit pixels, get labels: Meta-learned implicit networks
+for image segmentation. In International Conference on
+Medical Image Computing and Computer-Assisted Intervention (MICCAI), pages 194–203, 2025. 1
+[21] Kushal Kumar Vyas, Ahmed Imtiaz Humayun, Aniket Dashpute, Richard Baraniuk, Ashok Veeraraghavan, and Guha
+Balakrishnan. Learning transferable features for implicit
+neural representations. In NeurIPS, 2024. 1, 2
+[22] David Wiesner, Julian Suk, Sven Dummer, David Svoboda,
+and Jelmer M. Wolterink. Implicit neural representations for
+generative modeling of living cell shapes. In International
+Conference on Medical Image Computing and ComputerAssisted Intervention (MICCAI), pages 58–67, 2022. 1
+[23] Jelmer M. Wolterink, Jesse C. Zwienenberg, and Christoph
+Brune. Implicit neural representations for deformable image registration. In Medical Imaging with Deep Learning
+(MIDL), 2022. 1, 3, 4, 8
+Table 2. Mean Dice score, cumulative fitting time, and fraction of folding voxels across fitting iterations for the baseline INR (meta)
+and INR (random) models. DSC4 and DSC35 are Dice on the coarse (4-class) and fine (35-class) labellings respectively; fitting time and
+folding are independent of the labelling and are therefore reported once. Each entry is the mean over all test pairs with its 95% confidence
+interval in brackets. Both models are the same architecture: the left one is fitted from the meta-learned initialization, the right one from
+a random initialization.
+INR (meta)
+Iter.
+2
+10
+50
+100
+150
+200
+250
+300
+500
+∆DSC4, (50→500)
+∆DSC35, (50→500)
+DSC4
+[-]
+t
+[s]
+[%]
+DSC4
+[-]
+DSC35
+[-]
+t
+[s]
+det(J)<0 ×10−5
+[%]
+0.35
+[0.32, 0.39]
+1.53
+[1.49, 1.57]
+7.50
+[7.44, 7.55]
+15.00
+[14.93, 15.08]
+22.56
+[22.48, 22.65]
+30.05
+[29.95, 30.15]
+37.63
+[37.50, 37.76]
+45.19
+[45.06, 45.34]
+75.50
+[75.34, 75.66]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0.640
+[0.631, 0.648]
+0.688
+[0.680, 0.695]
+0.667
+[0.658, 0.675]
+0.678
+[0.670, 0.686]
+0.684
+[0.675, 0.691]
+0.685
+[0.677, 0.693]
+0.686
+[0.678, 0.694]
+0.689
+[0.681, 0.696]
+0.708
+[0.701, 0.715]
+0.471
+[0.456, 0.487]
+0.575
+[0.562, 0.587]
+0.525
+[0.509, 0.540]
+0.550
+[0.535, 0.564]
+0.560
+[0.546, 0.574]
+0.563
+[0.549, 0.577]
+0.565
+[0.551, 0.579]
+0.564
+[0.549, 0.579]
+0.604
+[0.593, 0.615]
+0.75
+[0.59, 0.95]
+2.34
+[2.10, 2.61]
+9.42
+[8.98, 9.89]
+18.17
+[17.59, 18.77]
+27.31
+[26.64, 28.02]
+36.24
+[35.42, 37.10]
+45.26
+[44.36, 46.19]
+54.52
+[53.47, 55.61]
+91.03
+[89.53, 92.57]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+DSC35
+[-]
+0.665
+0.528
+[0.657, 0.674] [0.512, 0.544]
+0.689
+0.573
+[0.681, 0.697] [0.560, 0.586]
+0.723
+0.630
+[0.716, 0.730] [0.619, 0.641]
+0.726
+0.638
+[0.718, 0.733] [0.627, 0.649]
+0.725
+0.633
+[0.718, 0.732] [0.622, 0.644]
+0.725
+0.635
+[0.718, 0.732] [0.623, 0.647]
+0.725
+0.635
+[0.717, 0.732] [0.624, 0.646]
+0.726
+0.635
+[0.718, 0.733] [0.624, 0.646]
+0.724
+0.632
+[0.717, 0.731] [0.621, 0.642]
+INR (random)
+det(J)<0 ×10−5
++0.1%
++0.3%
+A. Baseline hyperparameter search
+We selected the hyperparameters of the coordinate-only
+baseline on the validation split of the OASIS dataset
+(Sec. 2.2). The search was run with the Optuna framework [1] for 15 trials over three parameters: the learning
+rate, drawn log-uniformly from [1 × 10−6 , 1 × 10−3 ]; the
+number of hidden layers, drawn from 2 to 6; and the layer
+width, drawn from {64, 128, 256, 512}. All remaining settings, including the NCC data term and the bending-energy
+regularizer, were kept unchanged.
+Each trial was scored on the validation pairs with the
+Dice score. For every pair we fit an INR from scratch to the
+full-resolution 3D volumes for 1,000 iterations with Adam,
+using coordinate batches of 10,000 points. We then applied the fitted transformation to the moving segmentation
+with nearest-neighbour interpolation and measured the Dice
+score against the fixed segmentation. The score of a trial is
+the mean Dice over all validation pairs, and Optuna maximizes this value. The best trial gave two hidden layers,
+a width of 256, and a learning rate of 6.6 × 10−5 , which are
+the settings we report for the grid-searched baseline.
+B. Additional quantitative results
+In this section, we report the per-iteration measurements
+of the two coordinate-only baselines defined in Sec. 2.2.
+Table 2 covers the INR baseline and Table 3 the gridsearched variant INRGS . In both tables the left columns
++6.1%
++15.0%
+report the model fitted from the meta-learned initialization
+and the right columns the same architecture fitted from randomly initialized weights. As in Table 1 for LUMINR, we
+report mean Dice score on the coarse (4-class) and the fine
+(35-class) labelling, cumulative fitting time, and the fraction
+of folding voxels over the 99 OASIS test pairs at α = 0.1,
+each with a 95% confidence interval.
+C. Additional qualitative results
+We also show the warped segmentation masks of all six
+configurations defined in Sec. 2.2 on one test pair. Fig. 6
+uses the coarse 4-class labelling and Fig. 7 the fine 35-class
+one, and both share a layout of six rows and five columns.
+A row is one architecture, LUMINR, INR, or INRGS , fitted from the meta-learned initialization, and the row below
+it is the same architecture fitted from randomly initialized
+weights. The first column is the moving segmentation and
+the last one the ground truth of the fixed volume; the three
+columns between them are fitting iterations 2, 10, and 200
+at α = 0.1, each headed by its iteration number and by
+the Dice score of the warped volume. Every panel shows
+the same central axial slice, so the masks are a 2D section
+through the volumes the Dice scores are measured on.
+Table 3. Mean Dice score, cumulative fitting time, and fraction of folding voxels across fitting iterations for the baseline INRGS (meta) and
+INRGS (random) models. DSC4 and DSC35 are Dice on the coarse (4-class) and fine (35-class) labellings respectively; fitting time and
+folding are independent of the labelling and are therefore reported once. Each entry is the mean over all test pairs with its 95% confidence
+interval in brackets. Both models are the same architecture: the left one is fitted from the meta-learned initialization, the right one from
+a random initialization.
+INRGS (meta)
+Iter.
+2
+10
+50
+100
+150
+200
+250
+300
+500
+∆DSC4, (50→500)
+∆DSC35, (50→500)
+DSC4
+[-]
+t
+[s]
+[%]
+DSC4
+[-]
+DSC35
+[-]
+t
+[s]
+det(J)<0 ×10−5
+[%]
+0.17
+[0.14, 0.22]
+0.74
+[0.68, 0.83]
+3.61
+[3.49, 3.75]
+7.35
+[7.17, 7.54]
+11.05
+[10.83, 11.29]
+14.71
+[14.46, 14.98]
+18.40
+[18.12, 18.69]
+22.05
+[21.76, 22.36]
+36.69
+[36.32, 37.08]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0.603
+[0.594, 0.612]
+0.671
+[0.663, 0.679]
+0.709
+[0.701, 0.716]
+0.717
+[0.709, 0.724]
+0.721
+[0.714, 0.728]
+0.726
+[0.719, 0.733]
+0.728
+[0.721, 0.735]
+0.731
+[0.724, 0.738]
+0.734
+[0.727, 0.741]
+0.399
+[0.383, 0.415]
+0.530
+[0.516, 0.544]
+0.611
+[0.599, 0.623]
+0.624
+[0.612, 0.635]
+0.632
+[0.621, 0.642]
+0.639
+[0.628, 0.648]
+0.641
+[0.631, 0.652]
+0.647
+[0.636, 0.658]
+0.651
+[0.640, 0.661]
+0.15
+[0.12, 0.18]
+0.66
+[0.62, 0.72]
+3.22
+[3.14, 3.32]
+6.36
+[6.26, 6.48]
+9.55
+[9.41, 9.70]
+12.74
+[12.58, 12.91]
+15.91
+[15.72, 16.10]
+19.07
+[18.86, 19.28]
+31.76
+[31.47, 32.06]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+0
+[0, 0]
+DSC35
+[-]
+0.598
+0.701
+[0.694, 0.709] [0.586, 0.610]
+0.730
+0.642
+[0.723, 0.737] [0.631, 0.653]
+0.736
+0.655
+[0.729, 0.743] [0.644, 0.666]
+0.737
+0.655
+[0.730, 0.744] [0.644, 0.665]
+0.738
+0.654
+[0.730, 0.744] [0.642, 0.664]
+0.738
+0.655
+[0.731, 0.745] [0.644, 0.666]
+0.738
+0.656
+[0.731, 0.745] [0.645, 0.666]
+0.738
+0.654
+[0.731, 0.745] [0.643, 0.665]
+0.739
+0.655
+[0.731, 0.745] [0.644, 0.666]
+INRGS (random)
+det(J)<0 ×10−5
++0.4%
++0.0%
++3.5%
++6.5%
+#2 / 0.78
+#10 / 0.82
+#200 / 0.84
+GT
+Moving
+#2 / 0.37
+#10 / 0.68
+#200 / 0.80
+GT
+Moving
+#2 / 0.67
+#10 / 0.66
+#200 / 0.68
+GT
+Moving
+#2 / 0.59
+#10 / 0.66
+#200 / 0.66
+GT
+Moving
+#2 / 0.67
+#10 / 0.70
+#200 / 0.70
+GT
+Moving
+#2 / 0.56
+#10 / 0.63
+#200 / 0.70
+GT
+INRGS
+(random)
+INRGS
+(meta)
+INR
+(random)
+INR
+(meta)
+LUMINR
+(random)
+LUMINR
+(meta)
+Moving
+Figure 6. Comparison of segmentation performance for the LUMINR (meta), LUMINR (random), INR (meta), INR (random), INRGS
+(meta), and INRGS (random) models (α = 0.1) across 4 classes. We report the mean Dice score at each optimization iteration.
+The meta-learned initialization leads to rapid convergence and achieves reasonable segmentation after 10 iterations.
+#2 / 0.66
+#10 / 0.67
+#200 / 0.69
+GT
+Moving
+#2 / 0.11
+#10 / 0.57
+#200 / 0.65
+GT
+Moving
+#2 / 0.52
+#10 / 0.55
+#200 / 0.55
+GT
+Moving
+#2 / 0.37
+#10 / 0.51
+#200 / 0.54
+GT
+Moving
+#2 / 0.56
+#10 / 0.61
+#200 / 0.61
+GT
+Moving
+#2 / 0.33
+#10 / 0.46
+#200 / 0.59
+GT
+INRGS
+(random)
+INRGS
+(meta)
+INR
+(random)
+INR
+(meta)
+LUMINR
+(random)
+LUMINR
+(meta)
+Moving
+Figure 7. Comparison of segmentation performance for the LUMINR (meta), LUMINR (random), INR (meta), INR (random), INRGS
+(meta), and INRGS (random) models (α = 0.1) across 35 classes. We report the mean Dice score at each optimization iteration.
+The meta-learned initialization leads to rapid convergence and achieves reasonable segmentation after 10 iterations.

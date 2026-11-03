@@ -1,0 +1,281 @@
+I have a splat that, when compressed by supersplat, mostly looks great except for (as far as I can tell) one specific area of interest, wherein the means of the splats themselves seem to have moved. Here's a GIF comparison: Here I'm togg...
+
+Compression changes splat positions · Issue #356 · playcanvas/supersplat · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Compression changes splat positions #356
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Compression changes splat positions#356
+Copy link
+Labels
+bugSomething isn't workingSomething isn't working
+Description
+vincentwoo
+opened on Dec 19, 2024
+Issue body actions
+I have a splat that, when compressed by supersplat, mostly looks great except for (as far as I can tell) one specific area of interest, wherein the means of the splats themselves seem to have moved. Here's a GIF comparison:
+Here I'm toggling between the compressed/uncompressed plys in a scene in SuperSplat with both loaded. The tips of the towers seem to "detach" in the compressed ply.
+Here are the files if you want to try to repro/inspect more closely:
+https://sutro-tower.netlify.app/scene.ply
+https://sutro-tower.netlify.app/scene.compressed.ply
+and you can check out the viewer I rigged up at https://sutro-tower.netlify.app itself.
+(I erroneously reported previously that this issue only happened in the viewer, please ignore that version of the issue)
+Activity
+Next
+vincentwoo
+changed the title [-][BUG] Splat positions rendering differently in the compressed viewer[/-] [+][BUG] Splat positions rendering differently after compression[/+] on Dec 19, 2024
+marklundin commented on Dec 19, 2024
+marklundin
+on Dec 19, 2024
+Contributor
+More actions
+Love this scan btw 😍
+vincentwoo commented on Dec 19, 2024
+vincentwoo
+on Dec 19, 2024
+ContributorAuthor
+More actions
+Thank you! I hope to build more of an interactive experience around it using playcanvas! Let me know if you have any bandwidth to help, I am an extreme novice in this kind of programming (just barely getting acquainted with the playcanvas editor platform).
+simonbethke commented on Dec 19, 2024
+simonbethke
+on Dec 19, 2024
+Contributor
+More actions
+This is really weird. I looked into the compressed splat a bit but couldn't find a clue. Maybe it is related to some precision loss/rounding. Have you tried rescaling the scene a bit and compressing it? Will it create the same artifacts?
+vincentwoo commented on Dec 19, 2024
+vincentwoo
+on Dec 19, 2024
+ContributorAuthor
+More actions
+Yes, I tried rescaling from supersplat and exporting the compressed ply both at 1/10th and 10x scale. At 1/10th there was much worse artifacting near the top (all geometry appeared weirdly thin), and at 10x it was the same.
+vincentwoo commented on Dec 19, 2024
+vincentwoo
+on Dec 19, 2024
+Last edited by vincentwoo
+ContributorAuthor
+More actions
+Also maybe interesting - if I cut just that part of the model and save it separately it does not seem to exhibit the problem. It seems like it arises in situ with the rest of the splats too. Maybe to do with the way the compression chunks the scene? I do also notice some issues in other less prominent areas, like trees.
+slimbuck commented on Dec 19, 2024
+slimbuck
+on Dec 19, 2024
+Member
+More actions
+Hi @vincentwoo ,
+I think I know what the issue might be, but will need some time to investigate.
+The compression works by:
+ordering all splats into morton order (so splats close together in world space are ordered together)
+for every chunk of 256 splats:
+calculate position/scale scale bounds
+normalise the position and scale based on bounds and store quantised value per splat
+There are a few possibilities that might explain the issue you're seeing:
+we calculate morton order based on a (1024, 1024, 1024) integer space. Its possible that on this huge scene too many splats are falling into a single morton order bin.
+the solution is to detect this case and reorder the binned splats again to get good bounds
+since we just blindly group 256 splats, it's possible you're seeing an unfortunate case where splats far away are being grouped together.
+solution is to introduce some threshold and pad chunks if they contain points too far away from the rest.
+Sorry I hope some of that makes sense. Basically the compress stage needs some love.
+Thanks!
+vincentwoo commented on Dec 19, 2024
+vincentwoo
+on Dec 19, 2024
+ContributorAuthor
+More actions
+No, that makes perfect sense. Basically for the morton order issue you would try a different hilbert curve through the ordering space, with the aim of minimizing the bounds for each cube defined by 256 splats? Sounds like a fun puzzle, if you point me at the code for that bit I'd love to take a look.
+slimbuck commented on Dec 19, 2024
+slimbuck
+on Dec 19, 2024
+Member
+More actions
+Awesome! Here's the sorter https://github.com/playcanvas/supersplat/blob/main/src/splat-serialize.ts#L569
+vincentwoo commented on Dec 19, 2024
+vincentwoo
+on Dec 19, 2024
+ContributorAuthor
+More actions
+```
+        const Part1By2 = (x: number) => {
+            x &= 0x000003ff;
+            x = (x ^ (x << 16)) & 0xff0000ff;
+            x = (x ^ (x <<  8)) & 0x0300f00f;
+            x = (x ^ (x <<  4)) & 0x030c30c3;
+            x = (x ^ (x <<  2)) & 0x09249249;
+            return x;
+        };
+```
+hahaha, should be a good time
+🎉React with 🎉2Reacted by Will Eastcott and Donovan Hutchence
+vincentwoo commented on Dec 20, 2024
+vincentwoo
+on Dec 20, 2024
+Last edited by vincentwoo
+ContributorAuthor
+More actions
+Playing with it a bit:
+I tried enhancing the precision of the morton order (using 17 bits of the keys instead of 8) but didn't seem to help
+Poking around at the chunks, I removed the top 1% of chunks just by hypotenuse of the cube extents, and found that the troublesome splats were indeed in one of those chunks. Bit tricky because sometimes imprecision in a large chunk is okay (background object) and sometimes its not.
+Splitting (padding) those chunks makes sense to alleviate this but I think it would require an engine change too, no? You'd need variable length chunks or a way to communicate that the chunk has dead space. I think that one might be a bit beyond me.
+👍React with 👍1Reacted by Simon Bethke
+slimbuck commented on Dec 20, 2024
+slimbuck
+on Dec 20, 2024
+Member
+More actions
+I wrote a node CLI tool for creating compressed.ply yesterday and noticed a bug which might explain this.
+The very last chunk in the scene is almost always part-full (since chunks are 256 in size) and I realised that the remaining out-of-bounds gaussians in the last chunk will keep the values from the preceding chunk.
+The out-of-bounds gaussians do not get rendered or used at runtime, but their presence in the last chunk will impact the calculated bounds, which may result in lower-than-necessary precision for the remaining gaussians.
+I think it's a long shot, but I will fix this bug today and retest.
+vincentwoo commented on Dec 20, 2024
+vincentwoo
+on Dec 20, 2024
+ContributorAuthor
+More actions
+Interesting. I just now tried to try writing out the compressed ply leaving off the last chunk, but still saw my oddly placed gaussians there.
+slimbuck commented on Dec 20, 2024
+slimbuck
+on Dec 20, 2024
+Member
+More actions
+Yep didn't fix anything.
+The largest buckets in the scene are bigger than I thought:
+```
+  96047, 57649, 39528, 27071, 22609, 21627, 15920, 11865, 11340,
+  11293, 11120, 10662, 10303, 10276,  9984,  9983,  9604,  9470,
+   9254,  8922,  8351,  8158,  8027,  7871,  7602,  7238,  7232,
+   7067,  6900,  6899,  6889,  6810,  6714,  6504,  6443,  6035,
+   6032,  5882,  5787,  5674,  5623,  5609,  5594,  5503,  5461,
+   5414,  5273,  5244,  5205,  5129,  5042,  5002,  4832,  4752,
+   4697,  4684,  4634,  4467,  4393,  4244,  4206,  4166,  4163,
+   4156,  4153,  4121,  4121,  4041,  4031,  3982,  3978,  3978,
+   3964,  3948,  3940,  3926,  3903,  3852,  3737,  3718,  3717,
+   3549,  3545,  3532,  3531,  3519,  3517,  3433,  3416,  3369,
+   3280,  3261,  3172,  3150,  3137,  3136,  3105,  3052,  3038,
+```
+So I'm going to try recursively performing morton order on buckets larger than n next.
+👍React with 👍1Reacted by Vincent Woo
+slimbuck commented on Dec 20, 2024
+slimbuck
+on Dec 20, 2024
+Member
+More actions
+Recursively ordering buckets does nothing good...
+11 remaining items
+Load more
+vincentwoo commented on Jan 13, 2025
+vincentwoo
+on Jan 13, 2025
+Last edited by vincentwoo
+ContributorAuthor
+More actions
+I have a lil demo up: https://pier90-preview.netlify.app/sogs/. the implementation of the decoder is at https://pier90-preview.netlify.app/sogs/sogs-decoder.js. Any thoughts? I'm not sure this should be a part of supersplat, but having the ability to use a new compression method with it is really nice.
+Also I have to tune it, it's really slow to load (aside from the network savings).
+slimbuck commented on Jan 13, 2025
+slimbuck
+on Jan 13, 2025
+Member
+More actions
+This is so cool @vincentwoo !
+I haven't looked into this paper or technique at all yet, but presumably you could also render directly from the data instead of decompressing first?
+I imagine loading those images as textures directly and rendering them would be a huge win. I would love to add support for this to the engine.
+It's a lot like our compressed.ply format - perfect for loading and rendering scenes directly, but in order to edit the scene in SuperSplat, you must first decompress the data (like you're doing here).
+vincentwoo commented on Jan 13, 2025
+vincentwoo
+on Jan 13, 2025
+Last edited by vincentwoo
+ContributorAuthor
+More actions
+It is similar to the playcanvas compression technique in that it does quantize the params. The biggest jumping off point is the ML sorting technique to optimize for adjacency across all dimensions, and then using 2D image compression on the sorted splats. I haven't got the full pipeline working yet, but I should be able to get another 3-5x savings by training with a neighbor-smoothness regularizer and using lossy compression.
+I'm not sure how one builds the textures directly - can you direct me? I would have assumed you'd still need to translate the uint8s into floats? I'm gonna take a crack at just skipping one buffer scan and just decompressing into the buffer format playcanvas expects, that might be "fast enough"
+Also communicating in this bug report is sort of funny, but if you'd like to get in touch a lot of us splat enthusiasts hang out on https://discord.gg/tdap466E, or you can email me at me@vincentwoo.com.
+vincentwoo commented on Jan 13, 2025
+vincentwoo
+on Jan 13, 2025
+ContributorAuthor
+More actions
+I improved the deserialization (no double buffer allocation), and spread the work out as the data comes in. As you note loading the finalized data is not quite as quick as the playcanvas impl. On this dataset the network savings just about evens out the loading speed for me (you can compare to loading a normal compressed splat at the root URL https://pier90-preview.netlify.app). I think another sticking point is that I'm using a png library where I could probably just rely on the browser. If you wanna take a crack at it the latest code is at https://pier90-preview.netlify.app/sogs/sogs-decoder.js.
+❤️React with ❤️1Reacted by Donovan Hutchence
+slimbuck commented on Jan 13, 2025
+slimbuck
+on Jan 13, 2025
+Member
+More actions
+Thanks so much, I've joined the discord channel.
+Creating the textures directly is actually straightforward, but the rendering internals and shaders for GS assumes a data layout which isn't so easy to update.
+TBH regarding data locality of this technique, ultimately the best option will be ordering the data at runtime based on camear position. This will aid GPU memory caches, which is super important for rendering speeds on large scenes.
+vincentwoo commented on Jan 14, 2025
+vincentwoo
+on Jan 14, 2025
+ContributorAuthor
+More actions
+A quick update on the original bug filing, after a very circuitous route I've managed to get SOGS-based compression working for that scene too (though I did have to bump up SH quantization): https://sutro-tower.netlify.app.
+It weighs about half the Supersplat default compression and it does in fact solve the means quantization issue, so long as the high detail area is properly centered on the origin.
+I think a good interim fix for SuperSplat could be to just give a bit more quantization juice to the means? Getting positions right is essential for perceptual quality, and you can slip a bit on the rest.
+❤️React with ❤️3Reacted by Donovan Hutchence, Will Eastcott and Mark Lundin
+willeastcott commented on Jan 14, 2025
+willeastcott
+on Jan 14, 2025
+Contributor
+More actions
+@vincentwoo This is extremely cool! Have you considered switching from PNGs to WebP? quats.png is 5,579KB. A lossless quats.webp is 5,355KB. So only 4% smaller - not a massive saving - but better than nothing. How would SOGS cope with WebP compression applied?
+Also, I'd love to tweet that link. Would that be OK? Are you on X?
+vincentwoo commented on Jan 14, 2025
+vincentwoo
+on Jan 14, 2025
+Last edited by vincentwoo
+ContributorAuthor
+More actions
+I am but I'm still refining a bit if you don't mind waiting a week or so. I actually want to annotate the model in 3D and would actually love some help from people with more 3D / playcanvas experience. For instance, I want to add clickable tooltips and an automatic camera track. Would you be down to consult with me on a call or something? I'm gonna just release this all permissibly, I just think its so cool.
+Oh and to your webp question - yeah me and wieland of SOGS fame are cooking up some stuff, should be able to do even better.
+willeastcott commented on Jan 14, 2025
+willeastcott
+on Jan 14, 2025
+Contributor
+More actions
+@vincentwoo I've DMd you on ✖️
+slimbuck
+added
+bugSomething isn't workingSomething isn't working
+on Apr 7, 2025
+slimbuck
+changed the title [-][BUG] Splat positions rendering differently after compression[/-] [+]Splat positions rendering differently after compression[/+] on Apr 7, 2025
+slimbuck commented on Apr 25, 2025
+slimbuck
+on Apr 25, 2025
+Member
+More actions
+We have another instance of this, though much worse in @simonbethke 's haus1 scene:
+Before:
+After compression:
+The reason for these artifacts is similar. Scene is so huge the 1024^3 integer morton codes just isn't enough precision.
+slimbuck
+added this to SuperSplat Roadmapon Apr 25, 2025
+slimbuck
+removed this from SuperSplat Roadmapon May 28, 2025
+willeastcott
+changed the title [-]Splat positions rendering differently after compression[/-] [+]Compression changes splat positions[/+] on Jul 20, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+bugSomething isn't workingSomething isn't working
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

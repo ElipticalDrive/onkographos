@@ -1,0 +1,90 @@
+SkySaga:Infinite Isles is a voxel based, sandbox, single/multiplayer exploration and crafting game currently in closed Alpha state. It has a very distinct aesthetic with vivid, saturated colours and complex lighting. It additionally supports a day-night cycle, a weather system, translucent and solid shadows, clouds, lit transparencies, volumetric fog, and many dynamic lights. The game also…
+
+The Rendering Technology of SkySaga: Infinite Isles – Interplay of Light
+Skip to content
+SkySaga:Infinite Isles is a voxel based, sandbox, single/multiplayer exploration and crafting game currently in closed Alpha state. It has a very distinct aesthetic with vivid, saturated colours and complex lighting. It additionally supports a day-night cycle, a weather system, translucent and solid shadows, clouds, lit transparencies, volumetric fog, and many dynamic lights. The game also features a variety of biome types, from sunny or frozen forests, to scorching deserts and underground towns hidden in fog just to name a few.
+The procedural nature of the game, and the art and lighting requirements created many interesting rendering challenges which we had to overcome.
+Game engine
+The game runs on a proprietary game engine, called Meandros. At the core of the renderer is a token submission and processing system. A token in the context of Meandros is a single operation that can set a Direct3D rendering state, a pixel shader, a texture, submit a drawcall etc. Every renderable entity submits the tokens needed to render it to an appropriate stream of tokens which the renderer collects in buffers, and processes them in order to sort and avoid redundant state setting, then submits to the D3D API. The advantage of this system is that it is very cache friendly as the tokens are very compact and have local access to the data they need to submit. The token system is agnostic of renderer architecture and can support either forward or deferred rendering.
+At a higher level, the token streams (buffers) belong to Pipeline Stages, each pipeline stage implementing a rendering pass such as shadow pass, lighting pass, post processing pass etc. The Pipeline Stages can be chained, the output of one feeding the input of another.
+Using the Pipeline Stages system we implemented the deferred shading architecture the game is based on. The reason we chose deferred shading instead of deferred lighting or forward rendering was mainly due to the large number of dynamic lights we had to support in-game and also because the amount of geometry rendered which prohibited us from rendering it more than once. During the g-prepass we fill a 4 rendertarget g-buffer with all the material and surface information needed to perform the lighting and shading of the pixels in screen space.
+In the g-buffer we store data such as:
+Normal XYZ and Geometric Normal XY
+Depth XYZ – Ambient Occlusion
+Compressed Albedo XY – Emissive – Lit Alpha Flag
+Metalness – Midscale AO – Glossiness
+The normals are stored in view space, and we encode the depth into 3 channels so as to free up a channel in the rendertarget for other uses. The Ambient Occlusion term is the small scale darkening we apply to voxel corners and intersections and it comes baked in a texture. The midscale AO term is the ambient occlusion we calculate with the light propagation method described below. The albedo we compress into 2 channels using the method described here.
+The layout of the g-buffer is such that allows us to subsequently perform a separate screen-space pass to blend in different material properties, an approach used for various effects as explained later.
+Materials and Lighting
+Stylised games frequently rely on a simple lighting model and drive the look mainly through the art, i.e. using saturated colours, baking lighting information in textures etc. In SkySaga the lighting conditions change drastically between different biome types, in addition to the dynamic day-night cycle and the large number of dynamic lights supported. For those reasons we needed materials that would respond well irrespective of the lighting environment.
+We experimented with a variety of lighting models starting with the plain (unnormalised) Blinn-Phong the game initially supported moving to a normalised one and later to a GGX BRDF. The artists preferred the GGX specular response with the softer falloff so we ended up using this as our lighting model. We also used the Albedo-Metalness-Glossiness formulation to support both metals and non-metals, getting the albedo to act as the specular colour in metals and fixing the specular colour value to 0.04 for non-metals.
+We implemented an HDR lighting and shading pipeline throughout, using 64 bit textures for all render passes, apart from the g-buffer one.
+For dynamic lighting we support one shadowcasting directional light for the Sun/Moon and many point lights, a small number of which can be shadowcasting at any time, depending on the platform.
+For directional light shadows we use a standard Cascading Shadowmap system with 4 cascades and PCF filtering within each cascade. In SkySaga’s world we have clouds which also cast shadows on the terrain and on other clouds. Due the cloud coverage, which in some biomes can be relatively high, using standard solid shadows made the world look very dark, so we needed an additional “translucent” shadow solution. We opted with splitting the shadowmap into two channels and storing 2 16bit depth values, one for solid and one for translucent geometry. This had, as expected, a negative impact on self-shadowing worsening shadow acne which we improved using Normal Offset mapping. Additionally, for transparent geometry there is an option to render colour along with depth in a second rendertarget. This allows for coloured shadows from translucent geometry as well as coloured volumetric lightshafts.
+Ambient, environmental lighting and occlusion
+To avoid flat shadowed areas we implemented a six-axis ambient lighting solution as proposed by Valve. This allows the normal map to add some variation to the surfaces even in shadow. The six colours that drive the ambient lighting are specified per biome allowing for a variety of looks.
+To approximate a Global Illumination-like effect and simulate mid-scale ambient occlusion we create a 3D array of voxel occupancy on the CPU and propagate light through it using a set number of steps as falloff. This allows “open” spaces like caves and doors to receive some light. The more enclosed a space is the faster to zero the ambient light falls off to. After a light propagation pass the 3D array contains the amount of light that reaches every voxel (occupied or not). We use this information to bake the midscale ambient occlusion to the voxels’ vertices and use during lighting calculations. For dynamic objects vertex baking was not an option so we sample the amount of light that reaches the object’s position and pass it down to the shader through a constant. This “occlusion” information is very useful to mask effects as well; as we will explain later we use it to mask snow and fog from enclosed spaces.
+To add environmental reflections to the scene we render a dynamic cubemap containing skydome elements like clouds, floating islands etc. To approximate glossy reflections we blur the cubemap after generation and apply it to reflective surfaces using their glossiness value to select the amount of blurriness.
+Rendering transparency
+Water in the form of sea, waterfalls and rivers is a big feature of SkySaga. Typically, transparencies are forward lit in deferred shading engines which making lighting them problematic, especially for non-directional dynamic lights. In order to simplify the renderer and make lighting consistent between solid and transparent surfaces we chose to store one layer of transparency in the g-buffer and light it along with the rest of the (solid) geometry. We designed our transparency rendering system to render an arbitrary number of transparency layers but use lighting information from the lighting buffer for the closest to viewer one and the directional light only to forward light the rest.
+Lighting transparent surfaces add a layer of complexity to any deferred renderer but the results and quality of lighting that can be achieved make it worth the effort.
+Most postprocessing effects rely on the presence of depth information. Since alpha surfaces do not typically store depth, correctly fogging them and applying effects like depth of field to them is not trivial, since their surfaces are perceived as belonging to the solid surfaces behind them or to the skydome. To avoid this in our game, we render transparent surfaces in a deferred sort of way to a separate render target along with approximate depth information. Additionally we support two types of deferred alpha rendertargets, one for surfaces like water (sea) that need to be fogged and have depth of field applied to them and one for other surfaces like particle effects that need not (most of the time. If they needed to be then we can write depth information but artifacts might appear on the edges). An artist/coder can easily select which pass an alpha surface will be rendered to and how it will be affected by a postprocessing effect.
+Accumulation effects/decals
+The procedural nature of the game and the desire to easily create a variety of environments required the ability to procedurally overlay effects on existing biomes to generate new ones. To augment our dynamic weather system we added a g-buffer modification pass to the game that can easily accumulate snow and dust, add wetness and well as decals to a scene. This 2D pass modifies certain material parameters already in the g-buffer to change the look of the scene.
+Since applying an effect to the scene is often restricted by the material attributes of the objects in the scene, for example we can’t apply snow to an emissive surface, or we shouldn’t darken the albedo (which acts as specular colour) of a metallic surface to create a wet look, we chose to create a g-buffer copy prior to the modification and use it as an input. Then we can add effects to the scene by conditionally blending in new values for normal, albedo, glossiness etc. In our setup we can modify, using standard alpha blending, pretty much any g-buffer attribute except for ambient occlusion. The same approach can be used for “global” effects like snow or for localised effects like decals.
+We use the ambient occlusion information described above to mask the accumulation effects from caves and buildings. This works very well as it allows an accumulated affect to “falloff” along with the ambient light.
+The following scene from a Winter biome demonstrates an application of the g-buffer modification pass; the snow on the terrain, buildings and props is applied entirely in screenspace.
+Postprocessing effects
+Games typically rely heavily on postprocessing effects to enhance their visuals. In SkySaga we implemented a series postprocessing effects, such as local Screenspace Reflections, Volumetric fog, Depth of Field, Bloom and Tonemapping.
+We use a screenspace raymarching approach to produce the local reflections, fading towards the screen edges to avoid artifacts due to missing information. To fill-in the missing information we use the global dynamic cubemap that I described earlier.
+To enhance the atmosphere in the game we calculate shadowed volumetric fog originating from the main dynamic light (Sun/Moon), in a way similar to Toth et al.
+The dynamic and destructible nature of the terrain made modifying the fog density locally (eg in forests, indoors etc) using artist placed bounding boxes quite difficult. In order to create lightshafts around the player we would have to increase the fog density globally and this has an adverse effect on the rest of the biome. To achieve local lightshafts we relied on dynamic “enclosure” calculations we already perform on the CPU to determine if a player is indoors or outdoors. When indoors we gradually increase the fog density around the player to make the lightshafts more apparent, an approximation that works well in practice.
+Finally, although the fog is not lit by point lights we achieve a point light scattering effect by blurring the lightbuffer and applying to the fog. To further enhance the effect, before the blurring passes we threshold and add in the main rendertarget as well, which contains the images of the lights themselves (their bright core, after thresholding). This creates the bright hot centre on the torches seen in the following screenshot.
+Our depth of field approach was inspired by the technique developed by Morgan et al. We calculate and store the circle of confusion as a function of the scene’s depth and calculate two layers – the in-focus foreground and the to–be-blurred background. We don’t use a near blur plane at all. The background layer we blur using a bilateral filter in order to avoid colour bleeding. We use the scene depth to apply DOF by lerping between the blurred background and the in-focus foreground. DOF worked very well in our game giving the background elements a soft, painterly look.
+Our bloom approach is simple enough, consisting of thresholding the main rendertarget, blurring the result and adding it back to the main rendertarget.
+Finally for tonemapping we tried several approaches from Reinhard to Filmic. Our artists felt that they needed more control in maintaining the stylised look of the game and saturation, so we ended up using colourgrading through a 3D LUT. This approach consists of converting the HDR image to a low-range one by using some scaling operation, taking a screenshot of the game, pasting an identity lookup texture on it and manipulating it in Photoshop until the desired visual look has been achieved. Then the lookup texture (LUT) is extracted, converted to a 3D texture and applied to the final rendertarget in the shader using the original colours as 3D texture coordinates. This approach is very flexible allowing the artists to produce different colourgrading LUTs per biome and achieve very different looks, for example desaturating and shifting to blue in a snow biome or increasing the saturation and vibrancy in a sunny biome.
+Support for various hardware configurations
+We put a lot of effort into making the game as scalable as possible in order to support a wide range of PC configurations. This was achieved by a combination shader and geometry LODing (level of detail), a billboard system for trees and voxel chunk LODing, which amounts to varying the voxel size with distance. Additionally we simplify some postprocessing effects, especially the ones that have no gameplay impact like the volumetric fog which degrades to plain distance fog. To reduce voxel vertex buffer sizes we also optimised the voxel geometry using greedy meshing, and to reduce the number of drawcalls we based our occlusion system on this approach which is suitable for chunk-based geometry layouts with many closed spaces like ours.
+Future work
+In this article we presented a brief summary of the rendering technology behind SkySaga. Some of the rendering systems we have described are evolving and improving as the time goes by. Also as new biome types are added to the list, such as Lava worlds or Underwater worlds, new rendering challenges arise. Additionally, a Direct3D11 port is in our plans to support next-gen systems.
+Disclaimer:
+These systems are still work in progress, and may not all be present in the live game yet or may undergo changes before they are seen in-game. The post appeared here originally, reproduced with permission.
+Share this:
+Share on X (Opens in new window)
+X
+Share on Bluesky (Opens in new window)
+Bluesky
+Share on Mastodon (Opens in new window)
+Mastodon
+Share on Facebook (Opens in new window)
+Facebook
+Like Loading...
+Related
+The Rendering Technology of SkySaga: Infinite Isles
+4 thoughts on “The Rendering Technology of SkySaga: Infinite Isles”
+This is beautiful. Keep up the work.
+April 9, 2015 at 5:58 pm
+Reply
+Hello. I really like the look of the game. I have made lot’s of similar/identical technical choices for our early access game Hardland. Good luck with your game.
+April 10, 2015 at 10:24 pm
+Reply
+[…] Link of the Day: Here’s a really good read about a full working game-worthy rendering pipeline… It filled me with ideas about my own, but I need to stop adding stuff to the task list! https://interplayoflight.wordpress.com/2015/04/08/the-rendering-technology-of-skysaga-infinite-isles&#8230; […]
+April 28, 2015 at 8:59 pm
+Reply
+[…] Το παιχνίδι κάνει χρήση μίας In-House Game Engine ονόματι Meandros. Το Art-Style του SkySaga είναι blocky (σχεδόν) και καρτουνίστικο μαζί με φανταχτερά Hand-Painted Textures, τα οποία προσωπικά τα βρίσκω καταπληκτικά. Επιπλέον, η μηχανή κάνει χρήση των Physically-Based Materials (albedo, metalness, glossiness), Ambient Occlusion, Dynamic Lighting κλπ. Για όσους θέλουν να μάθουν περισσότερα για την τεχνολογία πίσω από το Rendering της Meandros Engine, μπορούν να ρίξουν μία ματιά εδώ. […]
+August 11, 2015 at 5:21 pm
+Reply
+Leave a Reply Cancel reply
+Comment
+Reblog
+Subscribe
+Subscribed
+Interplay of Light
+Have a WordPress.com account? Log in now.
+Interplay of Light
+Copy shortlinkView post in Reader
+Manage subscriptionsSign upLog in
+Report this content
+Collapse this bar
+Loading Comments...
+%d

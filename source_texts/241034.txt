@@ -1,0 +1,186 @@
+Hi there! First of all, thank you so much for this amazing library! I've been learning about 3D Gaussian Splatting by using MetalSplatter with PLY files converted via ml-sharp, and this open-source project has been incredibly helpful for...
+
+Question about rendering optimization in the released app · Issue #54 · scier/MetalSplatter · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Question about rendering optimization in the released app #54
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Question about rendering optimization in the released app#54
+Copy link
+Description
+daminoworld
+opened on Feb 3, 2026
+Issue body actions
+Hi there!
+First of all, thank you so much for this amazing library!
+I've been learning about 3D Gaussian Splatting by using MetalSplatter
+with PLY files converted via ml-sharp, and this open-source project
+has been incredibly helpful for my studies.
+I have a question that I hope you don't mind me asking:
+When I load my PLY files (~1.18M splats) using an app I built based on
+this library, the Vision Pro fan spins up and there's noticeable
+flickering during rendering, especially when moving my head.
+However, when I load the exact same PLY file in your released
+MetalSplatter app from the App Store, it renders beautifully -
+no fan noise, no flickering, and smooth interaction with gestures.
+I've tried various approaches to fix this (adjusting sortTimeout,
+deviceAnchor handling, etc.) but haven't been able to match the
+performance of your released app.
+I was wondering if you could share some insight on how you optimized
+the rendering in the released version? The visual quality seems the same,
+so I'm curious if you're using a different format (like SPZ perhaps?)
+or some other technique.
+Any guidance would be greatly appreciated! 🙏
+Thank you again for your work on this project!
+👀React with 👀3Reacted by Markus Lanxinger, cmpsft-davetaylor and Hattori Satoshi
+Activity
+scier commented on Feb 3, 2026
+scier
+on Feb 3, 2026
+Owner
+More actions
+Glad the library's been helpful thus far! The App Store app is using the same library and loading path with no additional optimizations. So, the performance difference may be straightforward to fix:
+Are you building your app in Release (vs. Debug) mode?
+Are you running the app without the debugger attached (i.e. straight from the Home Screen after hitting Stop in Xcode)?
+Do you have highQualityDepth enabled? (This actually slows down actual frame rendering by ~~5% depending on scene, but makes the Vision Pro experience much smoother)
+If the answer to each is 'yes', then the issue must be something subtler. How is the performance with the sample app (running under the same Release, no-debugger conditions)?
+👍React with 👍1Reacted by Damin Kim
+daminoworld commented on Feb 4, 2026
+daminoworld
+on Feb 4, 2026
+Author
+More actions
+Thank you so much for your quick and helpful response! 🙏
+I tested in Release mode without the debugger attached, and I'm happy to
+report that the periodic flickering issue has been resolved. thank you for that!
+However, I'm still experiencing an issue where the splat model shakes
+significantly when moving the camera/head, and sometimes the entire scene
+disappears momentarily before re-rendering.
+I tested the same PLY file (~1.1M splats) in the Released app, and it only
+showed minor wobble during head movement — nothing like the complete
+scene disappearance I'm seeing in my app.
+I'm currently investigating this on my end, but if you have any insights
+or suggestions about what might cause this behavior, I would really
+appreciate it!
+scier commented on Feb 4, 2026
+scier
+on Feb 4, 2026
+Owner
+More actions
+Does the "shaking" look like the foreground is bouncing rapidly back and forth when you head moves (and more with more movement)? That sounds like the effect that led me to develop the "high quality depth", so I'd again suggest double-checking that you're leaving that enabled. The root cause of that flickering was actually the Vision Pro's frame extrapolation going wonky because it was using the (poor) depth produced by default when one renders splats.
+But the scene disappearance sounds like something deeper. Perhaps it's actually dropping too many frames and the Vision Pro is giving up. I'd first make sure that the sample app isn't doing the same thing (if it is, then it's not your app). If it isn't, then Instruments is your best bet to see what's going on (maybe the Metal System Trace instrument?)
+One other possibility: the MetalSplatter app is using a slightly older version of the MetalSplatter library (I haven't submitted it with the latest library, but will soon) and isn't using the 26 SDK; so the problem could actually be an issue with the latest MetalSplatter library, or and issue when building with the iOS 26 SDK. If you aren't able to make any headway, we could investigate this via a TestFlight of a new MetalSplatter app build once I have one available.
+👍React with 👍1Reacted by Damin Kim
+👀React with 👀1Reacted by Damin Kim
+daminoworld commented on Feb 9, 2026
+daminoworld
+on Feb 9, 2026
+Author
+More actions
+Hi @scier — sorry for the late reply; I’ve been tied up with other work 🥲
+Thanks again for the detailed guidance. I’ve been testing and profiling more, and here’s a consolidated update.
+Environment / setup
+Vision Pro (M2), visionOS 26.2
+Release build, no debugger attached
+highQualityDepth = true
+Command buffer per frame = 1 (confirmed in Metal System Trace)
+Using queryDrawable() single drawable (aligned with SampleApp)
+Behavior
+“Shaking” still happens when moving the head. Throttling sort reduces the frequency, but large head movement still causes the scene to disappear briefly and then re-render.
+The effect is worse on larger PLYs (1.4M splats vs 1.15M).
+Metal System Trace summary
+Display VSYNC is stable at 90fps (11.11ms).
+Average FPS ≈ 43; median frame time ≈ 33ms (most frames in 33–50ms bucket → 30fps fallback).
+Command Buffer submission rate ≈ 30.4/s.
+CPU encoder time is tiny (~0.058ms avg), so CPU encoding is not the bottleneck.
+GPU driver-level command buffer time frequently 55–91ms (sometimes >100ms).
+A few severe stalls (e.g. an 8.2s gap, hundreds of missed VSYNCs).
+Thermal state transitions to “Fair” after ~33s.
+Interpretation
+The bottleneck appears to be GPU work (sort + splat rendering), not CPU or draw submission.
+Large head motion + long sort time often causes frame drops, and that’s likely when the scene “disappears”.
+Changes tried
+Pre-allocating index buffers and triangle index buffer.
+Switching PLY load to SplatIO + SplatChunk to avoid repeated buffer reallocations.
+Sort throttling (position/angle threshold + minimum interval + avoid queuing while a sort is running).
+World-locked model transform (fixed to initial device anchor).
+Open questions
+Could the released MetalSplatter app (older library / pre‑26 SDK) be avoiding some GPU cost in the sort/render path?
+Is there any known change in the latest MetalSplatter or iOS/visionOS 26 SDK that increases GPU cost or sorting overhead?
+In the released app, when do you actually trigger a re‑sort? Is it every frame, or only after certain camera deltas/intervals? I see the flicker mostly when a re‑sort kicks in, so understanding that trigger would really help.
+Thanks again for all your help!
+daminoworld commented on Feb 19, 2026
+daminoworld
+on Feb 19, 2026
+Author
+More actions
+Hi, @scier I've done some further testing on this issue and wanted to share my findings.
+I noticed that queryDrawable() has been deprecated in visionOS 26, so I ran comparison tests around this change.
+Test
+SDK
+API
+Shaking
+Your released app (App Store)
+Old SDK
+queryDrawable()
+Minimal ✅
+MetalSplatter SampleApp (modified*)
+visionOS 26 SDK
+queryDrawable()
+Present ❌
+My app (SharpMemory)
+visionOS 26 SDK
+queryDrawables()
+Slightly better, but still present ❌
+*SampleApp modifications: Since my PLY files (generated by ml-sharp) have a different element ordering, I modified SplatPLYSceneReader to continue instead of throwing an error on non-point elements. Initially, I also reverted queryDrawables() → queryDrawable() to avoid a runtime crash (cp_frame_end_submission() before cp_drawable_encode_present()), but later migrated back to queryDrawables() by always calling encodePresent on each drawable.
+Key Observations
+Screen recording does NOT capture the shaking — confirming it's a frame reprojection artifact, not a sorting issue
+Shaking scales with splat count — 1.5M splats shake noticeably, while smaller models (~500K) are mostly smooth
+UI windows also shake when a large model is loaded — indicating system-wide frame drops, not just a model rendering issue
+Analysis
+The shaking appears to be caused by changes in reprojection behavior in the visionOS 26 SDK:
+Your released app uses the old SDK, where queryDrawable() (layered stereo rendering) has well-optimized reprojection → smooth even with 1.5M splats
+In the visionOS 26 SDK, queryDrawable() is deprecated, and its reprojection support appears to have been degraded
+Migrating to queryDrawables() (per-eye rendering) improves reprojection quality, but doubles the number of render passes, exceeding the 11ms/frame budget for large models
+This aligns with your earlier analysis that "the problem could actually be an issue with the latest MetalSplatter library, or an issue when building with the iOS 26 SDK."
+My conclusion is that the behavioral change introduced by the SDK difference is causing the shaking in both the SampleApp and my app, which is not present in your released app built with the older SDK.
+Going forward, it seems like optimizations such as GPU-based sorting will be necessary. If I'm misunderstanding anything here, I'd really appreciate your feedback. Thank you!
+scier commented on Feb 20, 2026
+scier
+on Feb 20, 2026
+Owner
+More actions
+The recently-released versions of MetalSplatter on the App Store (1.2.x) are using the iOS 26 SDK (and built with the latest versions of the library), so that would be an interesting data point. If there's a significant performance regression compared to 1.1.x, that's an issue I'd love to solve, but I haven't seen it so far myself. If there's not, then you should be able to achieve the same performance in your local environment using the latest versions of the MetalSplatter library, which should be compatible with the 26 SDK.
+scier commented on May 28, 2026
+scier
+on May 28, 2026
+Owner
+More actions
+Please let me know if you're seeing this performance regression with the current versions of the released app (built with the visionOS 26 SDK); if not I'll close this as unable to repro, but feel free to reopen if you have further information.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

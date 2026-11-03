@@ -1,0 +1,199 @@
+Description: When running Marching Cubes on integer data, it can happen that it creates duplicated faces. In this case it happens specifically if I get 2 instances of case 7.4.2 (numbering as in Lewiner et al. 2003) next to each other. I...
+
+Duplicate faces created during marching cubes · Issue #8109 · scikit-image/scikit-image · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Duplicate faces created during marching cubes #8109
+New issue
+Copy link
+New issue
+Copy link
+Open
+#8115
+Open
+Duplicate faces created during marching cubes#8109
+#8115
+Copy link
+Labels
+🐛 Bug😴 DormantNo recent activityNo recent activity
+Description
+GeertUU
+opened on Mar 30, 2026
+Issue body actions
+Description:
+When running Marching Cubes on integer data, it can happen that it creates duplicated faces.
+In this case it happens specifically if I get 2 instances of case 7.4.2 (numbering as in Lewiner et al. 2003) next to each other.
+In this minimal example I use level = 0 for a volume in a shape of 3x2x2
+[[[13,-1],[-1,-7]],[[-1,1],[7,-7]],[[15,-9],[-3,-1]]]
+When running the Marching Cubes algorithm I now get as output a mesh containing 18 triangles, 4 of which are overlapping. Specifically, faces 5 and 14 share the same set of 3 vertices and similarly faces 6 and 15 share the same set of 3 vertices. I think these faces should not exist in the final generated mesh; it makes no sense to me to have two parts of the isosurface right on top of each other.
+I think this is related to the fact that the face ambiguity test of the middle face in my volume amounts to 71-(-7)(-1) = 0. Apparently the face test then somewhat arbitrarily evaluates as positive in both cases, creating these duplicated faces.
+Way to reproduce:
+```
+import numpy as np
+import skimage as ski
+
+mydata = np.array([[[13,-1],[-1,-7]],[
+            [-1,1],[7,-7]],[
+            [15,-9],[-3,-1]]], dtype=int)
+
+detailmesh = ski.measure.marching_cubes(mydata, level=0)
+print(detailmesh[1])
+```
+yields as output
+```
+[[ 2  1  0]
+ [ 1  2  3]
+ [ 4  3  2]
+ [ 5  4  2]
+ [ 4  5  6]
+ [ 7  6  5]
+ [ 6  7  8]
+ [ 0  8  7]
+ [ 2  0  7]
+ [11 10  9]
+ [12  9 10]
+ [ 9 12 13]
+ [ 9 13  5]
+ [ 6  5 13]
+ [ 5  6  7]
+ [ 8  7  6]
+ [ 7  8 11]
+ [ 7 11  9]]
+```
+Note that items 5 and 6 use the same vertices as items 14 and 15
+Version information:
+```
+3.13.2 | packaged by Anaconda, Inc. | (main, Feb  6 2025, 18:49:14) [MSC v.1929 64 bit (AMD64)]
+Windows-11-10.0.26200-SP0
+scikit-image version: 0.25.0
+numpy version: 2.2.5
+```
+Reactions are currently unavailable
+Activity
+GeertUU
+added
+🐛 Bug
+on Mar 30, 2026
+michaelbratsch commented on Apr 2, 2026
+michaelbratsch
+on Apr 2, 2026
+Contributor
+More actions
+@GeertUU Thanks for the nice reproducer.
+The reference implementation for the skimage cython code of the Lewiner marching cubes algorithm can be found here: https://github.com/afni/afni/tree/25e77d564f2c67ff480fa99a7b8e48ec2d9a89fc/src/SUMA/MarchingCubes
+It seems that the critical check is
+scikit-image/skimage/measure/_marching_cubes_lewiner_cy.pyx
+Line 1306
+in
+e8a42ba
+return face >= 0
+in test_face for the degenerate case.
+The original implementation does not have the distinction whether A*C - B*D is close to zero. Unfortunately, there is no comment in the skimage implementation why it has been changed.
+I created a unit test with all combinations of face and A which eventually should be passing:
+```
+@pytest.mark.parametrize(
+    "mydata",
+    [
+        # face > 0, A < 0  (original reproducer)
+        np.array(
+            [[[13, -1], [-1, -7]], [[-1, 1], [7, -7]], [[15, -9], [-3, -1]]],
+            dtype=int,
+        ),
+        # face > 0, A > 0
+        np.array(
+            [[[0, -8], [9, -1]], [[1, -1], [-1, 1]], [[-6, -8], [14, -13]]],
+            dtype=int,
+        ),
+        # face < 0, A > 0
+        np.array(
+            [[[9, -1, 7], [10, -15, -2], [13, -8, 3]],
+             [[-1, 2, -5], [4, 8, 7], [9, -8, -11]],
+             [[1, -11, 3], [-4, 6, -2], [1, 13, 3]]],
+            dtype=int,
+        ),
+        # face < 0, A < 0
+        np.array(
+            [[[-5, -8, 6], [-11, 3, 0], [9, -2, -8]],
+             [[-4, -12, 8], [-11, 6, -4], [1, -3, 3]],
+             [[7, 2, 1], [5, -2, 12], [-13, 13, -8]]],
+            dtype=int,
+        ),
+    ],
+)
+def test_no_duplicate_faces(mydata):
+    # Regression test for https://github.com/scikit-image/scikit-image/issues/8109
+    # Integer data where A*C - B*D = 0 triggered a degenerate fallback in test_face()
+    # that caused adjacent cubes to both generate triangles on a shared face.
+    # Covers all (sign(face), sign(A)) combinations from the look-up tables.
+    _, faces, _, _ = marching_cubes(mydata, level=0)
+    sorted_faces = np.sort(faces, axis=1)
+    unique_faces = np.unique(sorted_faces, axis=0)
+    assert len(unique_faces) == len(faces), (
+        f"Duplicate faces found: {len(faces)} total, {len(unique_faces)} unique"
+    )
+```
+michaelbratsch
+added a commit that references this issue on Apr 6, 2026
+Avoid duplicate faces (scikit-image#8109)
+6097d62
+lagru commented on Apr 14, 2026
+lagru
+on Apr 14, 2026
+Member
+More actions
+@michaelbratsch, how did you figure the "reference" as being from github.com/afni/afni? #2052 which added the original implementation doesn't seem to mention it? Is it referenced in one of the linked papers?
+michaelbratsch commented on Apr 26, 2026
+michaelbratsch
+on Apr 26, 2026
+Contributor
+More actions
+@michaelbratsch, how did you figure the "reference" as being from github.com/afni/afni? #2052 which added the original implementation doesn't seem to mention it? Is it referenced in one of the linked papers?
+I assumed it to be the reference implementation because of the header of the source code file:
+```
+// MarchingCubes Algorithm
+// Version 0.2 - 12/08/2002
+//
+// Thomas Lewiner thomas.lewiner@polytechnique.org
+// Math Dept, PUC-Rio
+//
+//
+// Translated to C by Ziad S. Saad November 30/04
+```
+but you are right it does not have to be the reference of the skimage implementation. I found the following https://github.com/neurolabusc/LewinerMarchingCubes/blob/main/MarchingCubes.c which has the same header but seems to be an improved version which matches the one from skimage more closely. There test_face has also returns:
+```
+  if( fabs( A*C - B*D ) < FLT_EPSILON )
+    return face >= 0 ;
+  return face * A * ( A*C - B*D ) >= 0  ;  // face and A invert signs
+```
+github-actions commented on Oct 24, 2026
+github-actionsBot
+on Oct 24, 2026 – with GitHub Actions
+More actions
+Hello scikit-image core devs! There hasn't been any activity on this issue for more than 180 days. I have marked it as "dormant" to make it easy to find.
+To our contributors, thank you for your contribution and apologies if this issue fell through the cracks! Hopefully this ping will help bring some fresh attention to the issue. If you need help, you can always reach out on our forum
+If you think that this issue is no longer relevant, you may close it, or we may do it at some point (either way, it will be done manually).
+github-actions
+added
+😴 DormantNo recent activityNo recent activity
+on Oct 24, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+🐛 Bug😴 DormantNo recent activityNo recent activity
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

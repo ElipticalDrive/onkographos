@@ -1,0 +1,446 @@
+What techniques does one normally use for traversing a voxel grid with a ray (i.e. voxel cone tracing)? Does one use a traversal algorithm that does not skip v…
+
+Voxel grid traversal algorithm | GameDev.net
+Skip to main content
+Advertisement
+Original Post
+matt77hias
+484
+matt77hias
+Mar 19, 2018 at 8:05 PM
+What techniques does one normally use for traversing a voxel grid with a ray (i.e. voxel cone tracing)?
+Does one use a traversal algorithm that does not skip voxels along a ray such as the ancient DDA (which requires quite some branching that can maybe be eliminated using some binary arithmetic tricks) or does one use something less precise such as ray marching using a fixed step size which has the potential of stepping over voxels?
+Vilem Otte
+1,953
+Vilem Otte
+Mar 19, 2018 at 10:55 PM
+I'm currently using the one that skips voxels on the way.
+I've had some attempts on DDA, but the general problem with those is that they ended up being far inferior in performance.
+I can even share:
+```
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+// P - ray origin position
+// V - ray direction
+// cone_ratio - using 1 large cone lead to poor results, multiple ones with some sane ratio looks a lot better
+// max_dist - maximum acceptable distance for cone to travel (usable for AO F.e.)
+// step_mult - in case we want "faster" and even less-precise stepping
+float4 ConeTraceGI(in float3 P, in float3 V, in float cone_ratio, in float max_dist, in float step_mult)
+{
+	float min_voxel_diameter = resolution.y;
+	float min_voxel_diameter_inv = 1.0 / min_voxel_diameter;
+
+	float4 accum = 0.f;
+
+	// push out the starting point to avoid self-intersection
+	float dist = min_voxel_diameter;
+
+	// Marching!
+	while (dist <= max_dist && accum.a < 1.0f)
+	{
+		// Calculate which level to sample
+		float sample_diameter = max(min_voxel_diameter, cone_ratio * dist);
+		float sample_lod = log2(sample_diameter * min_voxel_diameter_inv);
+
+		// Step
+		float3 sample_pos = P + V * dist;
+		dist += sample_diameter * step_mult;
+
+		// Sample from 3D texture (in performance superior to Sparse Voxel Octrees, hence use these)
+		float4 sample_value = voxelData.SampleLevel(shadowSampler, sample_pos, sample_lod);
+
+		float a = 1.0 - accum.a;
+		accum += sample_value * a;
+	}
+
+	return accum;
+}CopyExpand (36 lines)
+```
+This is the result for such GI (this is in-editor):
+The performance is also no that bad (considering this is an editor - and we're running full deferred pipeline at 4x MSAA (including 4x MSAA for calculating GI and reflections) ... along with a lot of other things).
+Overall I'm quite satisfied with my VXGI implementation. Even though I also have support for octree-based version (not 3D texture based one), it ends up being few times slower.
+To also give you a hint on performance - here is another one with profiler shown:
+matt77hias
+Author
+484
+matt77hias
+Mar 20, 2018 at 10:09 AM
+11 hours ago, Vilem Otte said:
+Even though I also have support for octree-based version (not 3D texture based one), it ends up being few times slower.
+Show more
+Just an octree or an SVO?
+The memory savings of the sparsity do not seem to outweigh the performance penalty, especially when the voxelization is computed every frame.
+11 hours ago, Vilem Otte said:
+float min_voxel_diameter = resolution.y;
+This is just the size of the voxel cube, right?
+11 hours ago, Vilem Otte said:
+dist += sample_diameter * step_mult;
+Why do you chose the step based on the diameter of the cone (sample_diameter) instead of the distance from the apex (dist)?
+matt77hias
+Author
+484
+matt77hias
+Mar 20, 2018 at 10:14 AM
+11 hours ago, Vilem Otte said:
+To also give you a hint on performance - here is another one with profiler shown:
+The "voxelize" entry says "0.00ms", shouldn't this be the most expensive one?
+Vilem Otte
+1,953
+Vilem Otte
+Mar 20, 2018 at 12:40 PM
+2 hours ago, matt77hias said:
+Just an octree or an SVO?
+The memory savings of the sparsity do not seem to outweigh the performance penalty, especially when the voxelization is computed every frame.
+Show more
+SVO - it is only necesasry when you literally couldn't fit your 3D texture into memory. The voxelization, building tree, etc. is not that expensive - the traversal is what is much more expensive. Also using properly hardware trilinear filtering ends up in increased memory usage.
+I could eventually switch to it to show the differences (in memory and performance). And give you here more proper figures - if you want.
+2 hours ago, matt77hias said:
+This is just the size of the voxel cube, right?
+Actually it's 1.0f / resolution - it's size of voxel cube within 0.0 - 1.0 boundaries (as we're just looking up texture).
+2 hours ago, matt77hias said:
+Why do you chose the step based on the diameter of the cone (sample_diameter) instead of the distance from the apex (dist)?
+Show more
+The sample_diameter is actually maximum from minimum voxel size (in texture space coordinates) and 'cone_ratio * dist' - where dist is distance travelled and cone_ratio is representing apex angle.
+2 hours ago, matt77hias said:
+The "voxelize" entry says "0.00ms", shouldn't this be the most expensive one?
+Sorry for that, here is updated one (my tone mapping parameters are a bit 'overdone' though):
+This one has disabled MSAA for GI and Reflection cone tracing buffers, and enabled MSAA for deferred shading (hence different numbers), this doesn't matter for voxelization though - it took ~4ms here. I enabled voxelization of whole scene every frame.
+So why was there 0 before? Simply because I voxelize only 'when required'. This is especially useful in editor!
+I can post more detailed analysis on that if you are interested in that part (how long actual voxelization takes, how long separate miplevel generation take - for specific resolutions, etc.), as I've written this into profiling back when I worked on SVO implementation - so it's just about switching some defines and writing it out.
+matt77hias
+Author
+484
+matt77hias
+Mar 20, 2018 at 4:12 PM
+Why doesn't one normally increase the distance such that the next iteration will sample another MIP?
+Vilem Otte
+1,953
+Vilem Otte
+Mar 20, 2018 at 4:21 PM
+It does, with each ray marching step increase dist amount (Ln. 25 in the code snippet).
+matt77hias
+Author
+484
+matt77hias
+Mar 20, 2018 at 4:28 PM
+4 minutes ago, Vilem Otte said:
+It does, with each ray marching step increase dist amount (Ln. 25 in the code snippet).
+But sample_lod can stay the same between consecutive iterations?
+Vilem Otte
+1,953
+Vilem Otte
+Mar 20, 2018 at 4:47 PM
+20 minutes ago, matt77hias said:
+But sample_lod can stay the same between consecutive iterations?
+It's a float - therefore you will get fractions.
+If I remember correctly hardware trilinear filtering will work like this (I wrote it from my head - so I might've made some typos!):
+```
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+float xf = frac(coord.x * TEXTURE_SIZE_X);
+float yf = frac(coord.y * TEXTURE_SIZE_Y);
+float yz = frac(coord.y * TEXTURE_SIZE_Z);
+uint m0 = (uint)miplevel;
+uint m1 = min(m0 + 1, TEXTURE_MIPCOUNT);
+float m = frac(miplevel);
+
+float4 c0 = 
+  lerp(
+    lerp(
+        lerp(texture.SampleLevel(sampler, coord + (0, 0, 0), m0), texture.SampleLevel(sampler, coord + (1, 0, 0), m0), xf),
+        lerp(texture.SampleLevel(sampler, coord + (0, 1, 0), m0), texture.SampleLevel(sampler, coord + (1, 0, 0), m0), xf),
+        yf),
+    lerp(
+        lerp(texture.SampleLevel(sampler, coord + (0, 0, 1), m0), texture.SampleLevel(sampler, coord + (1, 0, 1), m0), xf),
+        lerp(texture.SampleLevel(sampler, coord + (0, 1, 1), m0), texture.SampleLevel(sampler, coord + (1, 0, 1), m0), xf),
+        yf),
+    zf);
+
+float4 c1 = 
+  lerp(
+    lerp(
+        lerp(texture.SampleLevel(sampler, coord + (0, 0, 0), m1), texture.SampleLevel(sampler, coord + (1, 0, 0), m1), xf),
+        lerp(texture.SampleLevel(sampler, coord + (0, 1, 0), m1), texture.SampleLevel(sampler, coord + (1, 0, 0), m1), xf),
+        yf),
+    lerp(
+        lerp(texture.SampleLevel(sampler, coord + (0, 0, 1), m1), texture.SampleLevel(sampler, coord + (1, 0, 1), m1), xf),
+        lerp(texture.SampleLevel(sampler, coord + (0, 1, 1), m1), texture.SampleLevel(sampler, coord + (1, 0, 1), m1), xf),
+        yf),
+    zf);
+
+return lerp(c0, c1, m);CopyExpand (33 lines)
+```
+So you actually interpolate between mip levels too - as per description here https://msdn.microsoft.com/en-us/library/windows/desktop/bb509699(v=vs.85).aspx:
+LOD
+[in] A number that specifies the mipmap level. If the value is ≤ 0, the zero'th (biggest map) is used. The fractional value (if supplied) is used to interpolate between two mipmap levels.
+MJP
+Mod
+2,105
+MJP
+Mar 20, 2018 at 11:11 PM
+For VCT, I have written code very similiar to what Villem Otte just described. For general voxel visualization where I care much more about exactness than I do about performance, I've used DDA-like algorithms where I step through each voxel into its neighbor, potentially checking many empty voxels along the way. For debugging purposes this can be fast enough on a beefy desktop GPU. You can accelerate that march by generating a distance field from the voxels, which lets you skip empty space and potentially reduce your iteration counts by quite a bit. I've done this and it definitely helps, but you would probably have to go deeper and try to reduce intra-warp divergence if you really wanted to make things fast.
+Hodgman
+Mod
+5,991
+Hodgman
+Mar 21, 2018 at 2:21 AM
+On 3/20/2018 at 7:05 AM, matt77hias said:
+DDA (which requires quite some branching that can maybe be eliminated using some binary arithmetic tricks)
+Show more
+Definitely not the fastest code in the world, but the guts of my CPU voxel tracing DDA is below and not overly branchy:
+```
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+	for(;;)
+	{
+		int side = impact[side] > impact[1] ? 1 : 0;
+		side = impact[side] > impact[2] ? 2 : side;
+		map[side] += step[side];
+		impact[side] += delta[side];
+		if( Solid(map, side) )
+			break;
+	}Copy
+```
+3 hours ago, MJP said:
+You can accelerate that march by generating a distance field from the voxels, which lets you skip empty space and potentially reduce your iteration counts by quite a bit.
+Show more
+Great guide on this: http://erleuchtet.org/~cupe/permanent/enhanced_sphere_tracing.pdf
+matt77hias
+Author
+484
+matt77hias
+Mar 21, 2018 at 8:02 AM
+8 hours ago, MJP said:
+For general voxel visualization where I care much more about exactness than I do about performance,
+For debugging, I just generate the opaque cubes (GS) from the points (PS). Fast enough
+matt77hias
+Author
+484
+matt77hias
+Mar 21, 2018 at 10:19 AM
+19 hours ago, Vilem Otte said:
+It's a float - therefore you will get fractions.
+I was wondering, if the marching couldn't be more aggressive by just ensuring that sample_lod is exactly at an integer MIP level. So if you have 128^3, at most 7 steps would be needed to traverse the MIP pyramid. I mean, what if you have some sample_lod of 2.3 and the next sample_lod of 2.5, you will basically interpolate the same MIPs again with different weights. But this isn't adding "new" radiance information?
+23 hours ago, Vilem Otte said:
+The sample_diameter is actually maximum from minimum voxel size
+Could you elaborate on this one, because I do not understand. Or I am confused by the names:
+$$\tan\left(\alpha_\mathrm{half}\right)=\frac{\mathrm{diameter}/2}{\mathrm{distance}} \Leftrightarrow \mathrm{diameter} = 2 \tan\left(\alpha_\mathrm{half}\right) \mathrm{distance}$$
+where distance is the cone height expressed in normalized texture space, diameter is the cone diameter expressed in normalized texture space (i.e. texel footprint for deciding on the MIP level), and alpha half is the half angle of the cone. So where is the factor 2?
+Instead of calculating the diameter from the distance and stepping the distance, wouldn't it be more intuitive to calculate the distance from the diameter, while enlarging the diameter (e.g. x1.25)?
+Probably just a minor detail, but what about stepping out the voxel grid (or off the top MIP)?
+Summary:
+```
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+float4 GetRadiance(Texture3D< float4 > voxel_texture, Cone cone) {
+    float4 L = 0.0f;
+
+    // Set the initial distance to the voxel diagonal (expressed in normalized 
+    // texture coordinates) (= sqrt(2)/g_voxel_grid_resolution) to avoid 
+    // sampling the voxel containing the given position.
+    float distance = 1.414213562f * g_voxel_grid_inv_resolution;
+
+    // A maximum distance enables early termination in large voxel grids.
+    const float max_distance = XXX * g_voxel_grid_inv_resolution;
+    while (max_distance > distance && 1.0f > L.w) {
+
+        // Obtain the diameter (expressed in normalized texture coordinates).
+        //
+        //                diameter/2
+        // tan_aperture = ---------- <=> diameter = 2 . tan_aperture . distance
+        //                 distance
+        //
+        const float diameter = max(g_voxel_grid_inv_resolution, 
+                                   2.0f * cone.tan_aperture * distance);
+        
+        // Obtain the MIP level.
+        const float mip_level = log2(diameter * g_voxel_grid_resolution);
+        
+        // Obtain the position (expressed in normalized texture coordinates).
+        const float3 uvw = cone.apex + distance * cone.d;
+        
+        [branch]
+        if (any(uvw - saturate(uvw)) || XXX <= mip_level) {
+            break;
+        }
+
+        // Obtain the radiance.
+        const float4 L_voxel 
+            = voxel_texture.SampleLevel(g_linear_clamp_sampler, uvw, mip_level);
+
+        // Perform blending.
+        const float inv_alpha = 1.0f - L.w;
+        L += inv_alpha * L_voxel;
+
+        distance += XXX * diameter;
+    }
+}CopyExpand (44 lines)
+```
+The 'XXX' are some constants/factors I need to fill in/my API doesn't provide yet.
+matt77hias
+Author
+484
+matt77hias
+Mar 23, 2018 at 1:53 PM
+Looks like an improvement (forward versus depth+forward). Though, my step multiplier is a bit too fine.
+The quality of the uploaded .png is a disaster
+Vilem Otte
+1,953
+Vilem Otte
+Mar 23, 2018 at 2:44 PM
+Looks good!
+You need to use higher precision in render targets (low precision results in banding which can be clearly visible in part which is in shadow). Generally GI means you definitely need to use HDR render targets - with tone mapping and eye adaptation.
+Also I don't see any light bleeding from curtains - shouldn't there be some? (I know I have it a bit overdone in mine)
+I assume you're using texture now, and not octree - correct?
+matt77hias
+Author
+484
+matt77hias
+Mar 23, 2018 at 3:14 PM
+1 hour ago, Vilem Otte said:
+You need to use higher precision in render targets (low precision results in banding which can be clearly visible in part which is in shadow). Generally GI means you definitely need to use HDR render targets - with tone mapping and eye adaptation.
+Show more
+I use half floats for my render targets all the way till the back buffer. Maybe my tone mapper is too premature (no adaption, etc.).
+The rendered images from above as-is:
+https://www.dropbox.com/s/wi22fizyt768l1b/screenshot-2018-03-23-14-42-40.png?dl=0
+https://www.dropbox.com/s/h00b5zwxt8vw77j/screenshot-2018-03-23-14-42-47.png?dl=0
+1 hour ago, Vilem Otte said:
+Also I don't see any light bleeding from curtains - shouldn't there be some? (I know I have it a bit overdone in mine)
+Show more
+I noticed some bleeding on the ground near the curtains hanging over the back the balcony on the first floor. I assume my direct radiance contribution is really large over there.
+Indirect only:
+https://www.dropbox.com/s/6t8ek2hti9az1zv/screenshot-2018-03-23-16-45-48.png?dl=0
+1 hour ago, Vilem Otte said:
+I assume you're using texture now, and not octree - correct?
+Indeed, I wouldn't never obtain a decent framerate with this on my GTX 970
+Topic Locked
+This topic has been locked by a moderator. New replies are not allowed.
+Sign in to reply to this topic.
+Advertisement
+Press ? for shortcuts
+Beta Feedback
+With your permission, GameDev.net uses analytics cookies to understand how people use the platform.
+You can accept analytics or continue with necessary cookies only.
+Learn more
+Necessary only
+Accept analytics
+Do Not Sell or Share My Personal Information
+Opt out of the sale or sharing of personal information
+We won't sell or share your personal information to inform the ads you see. You may still see interest-based ads if your information is sold or shared by other companies or was sold or shared previously.
+Dismiss
+Opt out

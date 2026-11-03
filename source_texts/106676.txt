@@ -1,0 +1,139 @@
+Engine Work: DDGI Light Probe Depth Data Compression | Handmade Network
+Monter
+/
+Blog
+/
+Engine Work: DDGI Light Probe Depth Data Compression
+Engine Work: DDGI Light Probe Depth Data Compression
+Chen
+— August 2, 2020
+Continuing from last post, DDGI requires a high amount of memory to store its depth maps. I present a compression scheme that compresses the data to 5~10% of its original size. Note this is completely orthogonal to BC texture compression or any bit-saving tricks, so this compression ratio can be improved further with those existing techniques.
+Memory Constraint
+For DDGI to work effectively, we need a 16x16 depth map attached to each probe, with each texel storing both depth and depth^2. If we use R16G16 to store each texel, then that would give us 1KB per probe, not counting the gutter padding.
+Let’s say we have a generous budget of 1GB for light probes, and we have a 200x200x50 meter^3 world. Placing probes one meter apart, we would need 2 million probes, which will take up 1.9G. So a dumb uniform distribution of probes won’t cut it.
+A smarter way to go about it is building a voxel tree around geometry, like the one talked about by Remedy (Multi-scale GI talk). This will save us a lot of memory, but turned out that isn’t enough either. First of all, dynamic objects need probes as well, so we still need to scatter a decent amount of them out in the opening. Secondly, this space optimization is pretty meaningless if your world has geometry everywhere. So not a really robust solution to our memory issue.
+Motivation
+In Monter, I have probes placed conservatively and one meter apart. The probes eat up about 300MB. That’s pretty bad, because we can’t scale with that. Firstly, the algorithm breaks down in some places because the probes are just too damn far apart:
+As you can see, either probes can’t fit in that crevasse, or it’s clipped against the wall and has nobody to interpolate with. This is pretty glaring, and the only way to solve this is placing more probes. So I bumped the probe resolution to be 0.5 meters apart:
+Much better, But we just increased the memory footprint to 2.4GB … which makes it unusable. As I’ve said, the dominating factor is the radial depth map, let’s try to compress that.
+”Dead” Probes
+An obvious thought: probes are small distance apart from each other, so do we really need to store the true depth value? No, because during interpolation, probes must be within some distance threshold. If a probe happens to be farther from the shading point than the threshold, the shading point will query another probe that’s closer instead, because it’s guaranteed that such a probe will exist given our uniform probe density. We can just clip the depth value at max probe distance.
+```
+1
+```
+```
+depth_to_store = min(true_depth, max_dist_from_probe_to_probe);
+```
+We just reduced the range of the depth value from [0, inf] to [0, N], N being the maximum distance possible from one probe to another during interpolation. Just some small value, anyway.
+This makes our lives a lot easier. Immediately, a lot of probes that are farther from geometry than this maximum distance will have its radial depth data consist of only the value N. Then we can just toss all their depth maps out of the window and slap a label on them. Every time their depth gets queried, always return depth N for all directions.
+This ends up working pretty well. For my case, the depth storage size has been compressed to 50% of its original size. Which gives us 1.2GB. I mean it’s not bad, but not great either. We can do better.
+Dictionary Compression
+Another thought: can we dictionary compress these depth map blocks? We see a clipped depth map of value N is very common, but are there any unknown configurations that are just as common, but we are not taking advantage of?
+Well, there’s simply no tradeoff here. Dictionary compression is just better because what we did is simply a subset of dictionary compression. It’s only going to achieve a better compression ratio, not worse.
+So here’s what we are going to do. We queue up light probe baking requests, and process them one by one. This process spits out a 16x16 depth block per request. Then we try to match this depth block with the previous depth blocks. If we find a match, we just spit out its index, otherwise we stamp the new depth block in the depth block list and spit out that new index.
+The block matching criteria is peak pixel difference thresholding. As long as the biggest per-texel difference is below 0.01, I accept that block as a match. I don’t enforce an exact zero difference, and this implies lossy compression.
+My look-back window size is 10k.
+GPU implementation
+This algorithm is slow if implemented as a single thread. Since my baking process is all on the GPU, I’ve added this in-place streaming compressor onto the GPU as well. Instead of processing one light probe, I batch a whole bunch per dispatch. This causes issues, however. Turns out the compressor works best if blocks within vicinity are available for matching, and the probe indices are ordered in a spatially coherent way. By batching probes, these close-by probes cannot cross-talk. I can run one probe per dispatch, but that will negate any latency-hiding capability of the GPU.
+Instead, I swizzle the indices like so:
+```
+ 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+```
+```
+int SwizzleProbeIndex(int FlatIndex, int ProbeCount)
+{
+    int BlockSize = 100;
+    int BlockCount = 500;
+    int GroupSize = BlockSize*BlockCount;
+    
+    int GroupIndex = FlatIndex / GroupSize;
+    int GroupHead = GroupIndex * GroupSize;
+    int GroupTail = GroupHead + GroupSize;
+    if (GroupTail >= ProbeCount) 
+    {
+        return FlatIndex;
+    }
+    
+    int Offset = FlatIndex - GroupHead;
+    Offset = ((BlockSize * Offset) % GroupSize) + Offset/BlockCount;
+    return GroupHead + Offset;
+}
+```
+This code iterates through the indices at large steps, which means a batch contains distant probes instead of neighbor probes. This enables neighbor block sharing without performance penalty.
+Results
+The results are very nice, for the following configurations:
+(dilation is applied to the probe volume to cover open ground)
+density=0.5 meters, dilation=3 meters: 4.5% of its original size
+density=1.0 meters, dilation=1.5 meters: 9% of its original size
+If we map this level of efficiency to our original problem, then we get to store 2.4GB worth of DDGI probes in 168MB, awesome!
+The compression ratio seems to improve as dilation gets bigger due to more “dead” probes, which are easy targets to get compressed. This is cool because it permits more probes in the open field.
+Comments
+Comment
+Simon Anciaux
+August 2, 2020
+I don't know much about modern graphics development, and will probably not do any in the near future but I would like to understand more about this. At the moment I'm a bit lost about what's running on the GPU or the CPU and how all this is coming together (basically how the whole pipeline works).
+Would it be possible for you to make a pseudo code example of the pipeline ?
+Chen
+August 2, 2020
+The pipeline is pretty much this:
+You just upload the probe location data and probe topology data to the gpu during init. Then for every iteration in the baking loop, shaders running on the gpu picks batches of probes and process them. You can imagine each green block in the diagram as a separate shader, with barrier in between each shader pass.
+One note is that the depth block data is passed along side the SH data, both of them make up a single probe.
+The compressor is inserted at the last endpoint, "store to light data". Instead of shoving data blocks onto the texture atlas indiscriminately, it tries to enable sharing with previous blocks if possible.
+Simon Anciaux
+August 3, 2020
+Thanks.
+Are those compute shaders ?
+Is rendering a frame like the following:
+On the CPU, in order:
+- preparing geometry (vertex arrays, matrices...);
+- generating light probes positions;
+On the GPU, in order
+- Light probe pass (the pipeline you described);
+- Rendering geometry using result from the light probes;
+Do you cache light probes result and have some latency on the light propagation ?
+I suppose my list doesn't work because assuming you're passing models + transformation matrix to the GPU, you will not know the position of object on the CPU and so not be able to generate the probes positions (since you'd need to transform objects vertices on the CPU ?).
+I'm sorry, all this seems to be mentioned on the previous article but it's still no 100% clear to me.
+Chen
+August 3, 2020
+Yep, everything is compute shader.
+Light probes don't get relit every frame, it's like a preprocess step.
+So the list is like the following:
+initialization:
+- generating light probes positions;
+- Light probe pass (the pipeline you described);
+rendering a frame:
+On the CPU, in order:
+- preparing geometry (vertex arrays, matrices...);
+On the GPU, in order
+- Rendering geometry using result from the light probes;
+Simon Anciaux
+August 4, 2020
+So the lighting is static ? Object don't move, light don't move and the player doesn't obstruct light ?
+If so what is the advantage on pre-processing the lighting at runtime instead of doing it offline ?
+Chen
+August 5, 2020
+All my editor stuff is in-engine. A run-time implementation lets me hit rebake button every time I edit something.
+ctrlmonster
+September 25, 2025
+Awesome blog posts, still gaining loads of insights from these a couple years later, so thank you!
+Few questions regarding the visiblity data. I'm working in a heavily memory constrained environment (Web) where even the 168mb would be too much, so I'm contemplating alternatives. I had also thought of projecting the depth into SH and I wonder, when you tried it, how many coefficients did you use and had you alreay clamped the depth to the max. dist ("N") value?
+Best Regards,
+Brian
+Leave a Comment

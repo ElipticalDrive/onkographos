@@ -1,0 +1,696 @@
+Point Cloud Library (PCL): /__w/1/s/gpu/kinfu/src/internal.h Source File
+Point Cloud Library (PCL) 1.15.1-dev
+Loading...
+Searching...
+No Matches
+kinfu
+src
+internal.h
+1/*
+2 * Software License Agreement (BSD License)
+3 *
+4 * Point Cloud Library (PCL) - www.pointclouds.org
+5 * Copyright (c) 2011, Willow Garage, Inc.
+6 *
+7 * All rights reserved.
+8 *
+9 * Redistribution and use in source and binary forms, with or without
+10 * modification, are permitted provided that the following conditions
+11 * are met:
+12 *
+13 * * Redistributions of source code must retain the above copyright
+14 * notice, this list of conditions and the following disclaimer.
+15 * * Redistributions in binary form must reproduce the above
+16 * copyright notice, this list of conditions and the following
+17 * disclaimer in the documentation and/or other materials provided
+18 * with the distribution.
+19 * * Neither the name of Willow Garage, Inc. nor the names of its
+20 * contributors may be used to endorse or promote products derived
+21 * from this software without specific prior written permission.
+22 *
+23 * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+24 * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+25 * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+26 * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+27 * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+28 * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+29 * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+30 * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+31 * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+32 * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+33 * ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+34 * POSSIBILITY OF SUCH DAMAGE.
+35 *
+36 */
+37
+38#pragma once
+39
+40#include <pcl/gpu/containers/device_array.h>
+41//#include <pcl/gpu/utils/safe_call.hpp>
+42#include "safe_call.hpp"
+43
+44namespace pcl
+45{
+46 namespace device
+47 {
+48 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+49 // Types
+50 using ushort = unsigned short;
+51 using MapArr = DeviceArray2D<float>;
+52 using DepthMap = DeviceArray2D<ushort>;
+53 using PointType = float4;
+54
+55 //TSDF fixed point divisor (if old format is enabled)
+56 constexpr int DIVISOR = std::numeric_limits<short>::max();
+57
+58 //Should be multiple of 32
+59 constexpr int VOLUME_X = 512;
+60 constexpr int VOLUME_Y = 512;
+61 constexpr int VOLUME_Z = 512;
+62
+63
+64 constexpr float VOLUME_SIZE = 3.0f; // in meters
+65
+66 /** \brief Camera intrinsics structure
+67 */
+68 struct Intr
+69 {
+70 float fx, fy, cx, cy;
+71 Intr () {}
+72 Intr (float fx_, float fy_, float cx_, float cy_) : fx(fx_), fy(fy_), cx(cx_), cy(cy_) {}
+73
+74 Intr operator()(int level_index) const
+75 {
+76 int div = 1 << level_index;
+77 return (Intr (fx / div, fy / div, cx / div, cy / div));
+78 }
+79 };
+80
+81 /** \brief 3x3 Matrix for device code
+82 */
+83 struct Mat33
+84 {
+85 float3 data[3];
+86 };
+87
+88 /** \brief Light source collection
+89 */
+90 struct LightSource
+91 {
+92 float3 pos[1];
+93 int number;
+94 };
+95
+96 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+97 // Maps
+98
+99 /** \brief Performs bilateral filtering of disparity map
+100 * \param[in] src source map
+101 * \param[out] dst output map
+102 */
+103 void
+104 bilateralFilter (const DepthMap& src, DepthMap& dst);
+105
+106 /** \brief Computes depth pyramid
+107 * \param[in] src source
+108 * \param[out] dst destination
+109 */
+110 void
+111 pyrDown (const DepthMap& src, DepthMap& dst);
+112
+113 /** \brief Computes vertex map
+114 * \param[in] intr depth camera intrinsics
+115 * \param[in] depth depth
+116 * \param[out] vmap vertex map
+117 */
+118 void
+119 createVMap (const Intr& intr, const DepthMap& depth, MapArr& vmap);
+120
+121 /** \brief Computes normal map using cross product
+122 * \param[in] vmap vertex map
+123 * \param[out] nmap normal map
+124 */
+125 void
+126 createNMap (const MapArr& vmap, MapArr& nmap);
+127
+128 /** \brief Computes normal map using Eigen/PCA approach
+129 * \param[in] vmap vertex map
+130 * \param[out] nmap normal map
+131 */
+132 void
+133 computeNormalsEigen (const MapArr& vmap, MapArr& nmap);
+134
+135 /** \brief Performs affine transform of vertex and normal maps
+136 * \param[in] vmap_src source vertex map
+137 * \param[in] nmap_src source vertex map
+138 * \param[in] Rmat Rotation mat
+139 * \param[in] tvec translation
+140 * \param[out] vmap_dst destination vertex map
+141 * \param[out] nmap_dst destination vertex map
+142 */
+143 void
+144 tranformMaps (const MapArr& vmap_src, const MapArr& nmap_src, const Mat33& Rmat, const float3& tvec, MapArr& vmap_dst, MapArr& nmap_dst);
+145
+146 /** \brief Performs depth truncation
+147 * \param[out] depth depth map to truncation
+148 * \param[in] max_distance truncation threshold, values that are higher than the threshold are reset to zero (means not measurement)
+149 */
+150 void
+151 truncateDepth(DepthMap& depth, float max_distance);
+152
+153 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+154 // ICP
+155
+156 /** \brief (now it's extra code) Computes corespondances map
+157 * \param[in] vmap_g_curr current vertex map in global coo space
+158 * \param[in] nmap_g_curr current normals map in global coo space
+159 * \param[in] Rprev_inv inverse camera rotation at previous pose
+160 * \param[in] tprev camera translation at previous pose
+161 * \param[in] intr camera intrinsics
+162 * \param[in] vmap_g_prev previous vertex map in global coo space
+163 * \param[in] nmap_g_prev previous vertex map in global coo space
+164 * \param[in] distThres distance filtering threshold
+165 * \param[in] angleThres angle filtering threshold. Represents sine of angle between normals
+166 * \param[out] coresp
+167 */
+168 void
+169 findCoresp (const MapArr& vmap_g_curr, const MapArr& nmap_g_curr, const Mat33& Rprev_inv, const float3& tprev, const Intr& intr,
+170 const MapArr& vmap_g_prev, const MapArr& nmap_g_prev, float distThres, float angleThres, PtrStepSz<short2> coresp);
+171
+172 /** \brief (now it's extra code) Computation Ax=b for ICP iteration
+173 * \param[in] v_dst destination vertex map (previous frame cloud)
+174 * \param[in] n_dst destination normal map (previous frame normals)
+175 * \param[in] v_src source normal map (current frame cloud)
+176 * \param[in] coresp Corespondances
+177 * \param[out] gbuf temp buffer for GPU reduction
+178 * \param[out] mbuf output GPU buffer for matrix computed
+179 * \param[out] matrixA_host A
+180 * \param[out] vectorB_host b
+181 */
+182 void
+183 estimateTransform (const MapArr& v_dst, const MapArr& n_dst, const MapArr& v_src, const PtrStepSz<short2>& coresp,
+184 DeviceArray2D<float>& gbuf, DeviceArray<float>& mbuf, float* matrixA_host, float* vectorB_host);
+185
+186
+187 /** \brief Computation Ax=b for ICP iteration
+188 * \param[in] Rcurr Rotation of current camera pose guess
+189 * \param[in] tcurr translation of current camera pose guess
+190 * \param[in] vmap_curr current vertex map in camera coo space
+191 * \param[in] nmap_curr current vertex map in camera coo space
+192 * \param[in] Rprev_inv inverse camera rotation at previous pose
+193 * \param[in] tprev camera translation at previous pose
+194 * \param[in] intr camera intrinsics
+195 * \param[in] vmap_g_prev previous vertex map in global coo space
+196 * \param[in] nmap_g_prev previous vertex map in global coo space
+197 * \param[in] distThres distance filtering threshold
+198 * \param[in] angleThres angle filtering threshold. Represents sine of angle between normals
+199 * \param[out] gbuf temp buffer for GPU reduction
+200 * \param[out] mbuf output GPU buffer for matrix computed
+201 * \param[out] matrixA_host A
+202 * \param[out] vectorB_host b
+203 */
+204 void
+205 estimateCombined (const Mat33& Rcurr, const float3& tcurr, const MapArr& vmap_curr, const MapArr& nmap_curr, const Mat33& Rprev_inv, const float3& tprev, const Intr& intr,
+206 const MapArr& vmap_g_prev, const MapArr& nmap_g_prev, float distThres, float angleThres,
+207 DeviceArray2D<float>& gbuf, DeviceArray<float>& mbuf, float* matrixA_host, float* vectorB_host);
+208
+209
+210 void
+211 estimateCombined (const Mat33& Rcurr, const float3& tcurr, const MapArr& vmap_curr, const MapArr& nmap_curr, const Mat33& Rprev_inv, const float3& tprev, const Intr& intr,
+212 const MapArr& vmap_g_prev, const MapArr& nmap_g_prev, float distThres, float angleThres,
+213 DeviceArray2D<double>& gbuf, DeviceArray<double>& mbuf, double* matrixA_host, double* vectorB_host);
+214
+215
+216 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+217 // TSDF volume functions
+218
+219 /** \brief Perform tsdf volume initialization
+220 * \param[out] array volume to be initialized
+221 */
+222 PCL_EXPORTS void
+223 initVolume(PtrStep<short2> array);
+224
+225 //first version
+226 /** \brief Performs Tsfg volume uptation (extra obsolete now)
+227 * \param[in] depth_raw Kinect depth image
+228 * \param[in] intr camera intrinsics
+229 * \param[in] volume_size size of volume in mm
+230 * \param[in] Rcurr_inv inverse rotation for current camera pose
+231 * \param[in] tcurr translation for current camera pose
+232 * \param[in] tranc_dist tsdf truncation distance
+233 * \param[in] volume tsdf volume to be updated
+234 */
+235 void
+236 integrateTsdfVolume (const PtrStepSz<ushort>& depth_raw, const Intr& intr, const float3& volume_size,
+237 const Mat33& Rcurr_inv, const float3& tcurr, float tranc_dist, PtrStep<short2> volume);
+238
+239 //second version
+240 /** \brief Function that integrates volume if volume element contains: 2 bytes for round(tsdf*SHORT_MAX) and 2 bytes for integer weight.
+241 * \param[in] depth_raw Kinect depth image
+242 * \param[in] intr camera intrinsics
+243 * \param[in] volume_size size of volume in mm
+244 * \param[in] Rcurr_inv inverse rotation for current camera pose
+245 * \param[in] tcurr translation for current camera pose
+246 * \param[in] tranc_dist tsdf truncation distance
+247 * \param[in] volume tsdf volume to be updated
+248 * \param[out] depthRawScaled Buffer for scaled depth along ray
+249 */
+250 PCL_EXPORTS void
+251 integrateTsdfVolume (const PtrStepSz<ushort>& depth_raw, const Intr& intr, const float3& volume_size,
+252 const Mat33& Rcurr_inv, const float3& tcurr, float tranc_dist, PtrStep<short2> volume, DeviceArray2D<float>& depthRawScaled);
+253
+254 /** \brief Initialized color volume
+255 * \param[out] color_volume color volume for initialization
+256 */
+257
+258 void
+259 initColorVolume(PtrStep<uchar4> color_volume);
+260
+261 /** \brief Performs integration in color volume
+262 * \param[in] intr Depth camera intrionsics structure
+263 * \param[in] tranc_dist tsdf truncation distance
+264 * \param[in] R_inv Inverse camera rotation
+265 * \param[in] t camera translation
+266 * \param[in] vmap Raycasted vertex map
+267 * \param[in] colors RGB colors for current frame
+268 * \param[in] volume_size volume size in meters
+269 * \param[in] color_volume color volume to be integrated
+270 * \param[in] max_weight max weight for running color average. Zero means not average, one means average with prev value, etc.
+271 */
+272 void
+273 updateColorVolume(const Intr& intr, float tranc_dist, const Mat33& R_inv, const float3& t, const MapArr& vmap,
+274 const PtrStepSz<uchar3>& colors, const float3& volume_size, PtrStep<uchar4> color_volume, int max_weight = 1);
+275
+276 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+277 // Raycast and view generation
+278 /** \brief Generation vertex and normal maps from volume for current camera pose
+279 * \param[in] intr camera intrinsices
+280 * \param[in] Rcurr current rotation
+281 * \param[in] tcurr current translation
+282 * \param[in] tranc_dist volume truncation distance
+283 * \param[in] volume_size volume size in mm
+284 * \param[in] volume tsdf volume
+285 * \param[out] vmap output vertex map
+286 * \param[out] nmap output normals map
+287 */
+288 void
+289 raycast (const Intr& intr, const Mat33& Rcurr, const float3& tcurr, float tranc_dist, const float3& volume_size,
+290 const PtrStep<short2>& volume, MapArr& vmap, MapArr& nmap);
+291
+292 /** \brief Renders 3D image of the scene
+293 * \param[in] vmap vertex map
+294 * \param[in] nmap normals map
+295 * \param[in] light poase of light source
+296 * \param[out] dst buffer where image is generated
+297 */
+298 void
+299 generateImage (const MapArr& vmap, const MapArr& nmap, const LightSource& light, PtrStepSz<uchar3> dst);
+300
+301
+302 /** \brief Renders depth image from give pose
+303 * \param[in] R_inv inverse camera rotation
+304 * \param[in] t camera translation
+305 * \param[in] vmap vertex map
+306 * \param[out] dst buffer where depth is generated
+307 */
+308 void
+309 generateDepth (const Mat33& R_inv, const float3& t, const MapArr& vmap, DepthMap& dst);
+310
+311 /** \brief Paints 3D view with color map
+312 * \param[in] colors rgb color frame from OpenNI
+313 * \param[out] dst output 3D view
+314 * \param[in] colors_weight weight for colors
+315 */
+316 void
+317 paint3DView(const PtrStep<uchar3>& colors, PtrStepSz<uchar3> dst, float colors_weight = 0.5f);
+318
+319 /** \brief Performs resize of vertex map to next pyramid level by averaging each four points
+320 * \param[in] input vertext map
+321 * \param[out] output resized vertex map
+322 */
+323 void
+324 resizeVMap (const MapArr& input, MapArr& output);
+325
+326 /** \brief Performs resize of vertex map to next pyramid level by averaging each four normals
+327 * \param[in] input normal map
+328 * \param[out] output vertex map
+329 */
+330 void
+331 resizeNMap (const MapArr& input, MapArr& output);
+332
+333 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+334 // Cloud extraction
+335
+336 /** \brief Perform point cloud extraction from tsdf volume
+337 * \param[in] volume tsdf volume
+338 * \param[in] volume_size size of the volume
+339 * \param[out] output buffer large enough to store point cloud
+340 * \return number of point stored to passed buffer
+341 */
+342 PCL_EXPORTS std::size_t
+343 extractCloud (const PtrStep<short2>& volume, const float3& volume_size, PtrSz<PointType> output);
+344
+345 /** \brief Performs normals computation for given points using tsdf volume
+346 * \param[in] volume tsdf volume
+347 * \param[in] volume_size volume size
+348 * \param[in] input points where normals are computed
+349 * \param[out] output normals. Could be float4 or float8. If for a point normal can't be computed, such normal is marked as nan.
+350 */
+351 template<typename NormalType>
+352 void
+353 extractNormals (const PtrStep<short2>& volume, const float3& volume_size, const PtrSz<PointType>& input, NormalType* output);
+354
+355 /** \brief Performs colors extraction from color volume
+356 * \param[in] color_volume color volume
+357 * \param[in] volume_size volume size
+358 * \param[in] points points for which color are computed
+359 * \param[out] colors output array with colors.
+360 */
+361 void
+362 exctractColors(const PtrStep<uchar4>& color_volume, const float3& volume_size, const PtrSz<PointType>& points, uchar4* colors);
+363
+364 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+365 // Utility
+366 struct float8 { float x, y, z, w, c1, c2, c3, c4; };
+367 struct float12 { float x, y, z, w, normal_x, normal_y, normal_z, n4, c1, c2, c3, c4; };
+368
+369 /** \brief Conversion from SOA to AOS
+370 * \param[in] vmap SOA map
+371 * \param[out] output Array of 3D points. Can be float4 or float8.
+372 */
+373 template<typename T>
+374 void
+375 convert (const MapArr& vmap, DeviceArray2D<T>& output);
+376
+377 /** \brief Merges pcl::PointXYZ and pcl::Normal to PointNormal
+378 * \param[in] cloud points cloud
+379 * \param[in] normals normals cloud
+380 * \param[out] output array of PointNomals.
+381 */
+382 void
+383 mergePointNormal(const DeviceArray<float4>& cloud, const DeviceArray<float8>& normals, const DeviceArray<float12>& output);
+384
+385 /** \brief Check for qnan (unused now)
+386 * \param[in] value
+387 */
+388 inline bool
+389 valid_host (float value)
+390 {
+391 return *reinterpret_cast<int*>(&value) != 0x7fffffff; //QNAN
+392 }
+393
+394 /** \brief synchronizes CUDA execution */
+395 inline
+396 void
+397 sync () { cudaSafeCall (cudaDeviceSynchronize ()); }
+398
+399
+400 template<class D, class Matx> D&
+401 device_cast (Matx& matx)
+402 {
+403 return (*reinterpret_cast<D*>(matx.data ()));
+404 }
+405
+406 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+407 // Marching cubes implementation
+408
+409 /** \brief Binds marching cubes tables to texture references */
+410 void
+411 bindTextures(const int *edgeBuf, const int *triBuf, const int *numVertsBuf);
+412
+413 /** \brief Unbinds */
+414 void
+415 unbindTextures();
+416
+417 /** \brief Scans tsdf volume and retrieves occupied voxels
+418 * \param[in] volume tsdf volume
+419 * \param[out] occupied_voxels buffer for occupied voxels. The function fulfills first row with voxel ids and second row with number of vertices.
+420 * \return number of voxels in the buffer
+421 */
+422 int
+423 getOccupiedVoxels(const PtrStep<short2>& volume, DeviceArray2D<int>& occupied_voxels);
+424
+425 /** \brief Computes total number of vertexes for all voxels and offsets of vertexes in final triangle array
+426 * \param[out] occupied_voxels buffer with occupied voxels. The function fulfills 3nd only with offsets
+427 * \return total number of vertexes
+428 */
+429 int
+430 computeOffsetsAndTotalVertexes(DeviceArray2D<int>& occupied_voxels);
+431
+432 /** \brief Generates final triangle array
+433 * \param[in] volume tsdf volume
+434 * \param[in] occupied_voxels occupied voxel ids (first row), number of vertexes(second row), offsets(third row).
+435 * \param[in] volume_size volume size in meters
+436 * \param[out] output triangle array
+437 */
+438 void
+439 generateTriangles(const PtrStep<short2>& volume, const DeviceArray2D<int>& occupied_voxels, const float3& volume_size, DeviceArray<PointType>& output);
+440 }
+441}
+pcl::gpu::DeviceArray2D
+DeviceArray2D class
+Definition device_array.h:188
+pcl::gpu::DeviceArray
+DeviceArray class
+Definition device_array.h:54
+pcl::device::extractCloud
+PCL_EXPORTS std::size_t extractCloud(const PtrStep< short2 > &volume, const float3 &volume_size, PtrSz< PointType > output)
+Perform point cloud extraction from tsdf volume.
+pcl::device::integrateTsdfVolume
+void integrateTsdfVolume(const PtrStepSz< ushort > &depth_raw, const Intr &intr, const float3 &volume_size, const Mat33 &Rcurr_inv, const float3 &tcurr, float tranc_dist, PtrStep< short2 > volume)
+Performs Tsfg volume uptation (extra obsolete now)
+pcl::device::pyrDown
+void pyrDown(const DepthMap &src, DepthMap &dst)
+Computes depth pyramid.
+pcl::device::estimateCombined
+void estimateCombined(const Mat33 &Rcurr, const float3 &tcurr, const MapArr &vmap_curr, const MapArr &nmap_curr, const Mat33 &Rprev_inv, const float3 &tprev, const Intr &intr, const MapArr &vmap_g_prev, const MapArr &nmap_g_prev, float distThres, float angleThres, DeviceArray2D< float > &gbuf, DeviceArray< float > &mbuf, float *matrixA_host, float *vectorB_host)
+Computation Ax=b for ICP iteration.
+pcl::device::device_cast
+D & device_cast(Matx &matx)
+Definition internal.h:401
+pcl::device::unbindTextures
+void unbindTextures()
+Unbinds.
+pcl::device::VOLUME_Y
+constexpr int VOLUME_Y
+Definition internal.h:60
+pcl::device::VOLUME_Z
+constexpr int VOLUME_Z
+Definition internal.h:61
+pcl::device::createVMap
+void createVMap(const Intr &intr, const DepthMap &depth, MapArr &vmap)
+Computes vertex map.
+pcl::device::extractNormals
+void extractNormals(const PtrStep< short2 > &volume, const float3 &volume_size, const PtrSz< PointType > &input, NormalType *output)
+Performs normals computation for given points using tsdf volume.
+pcl::device::generateImage
+void generateImage(const MapArr &vmap, const MapArr &nmap, const LightSource &light, PtrStepSz< uchar3 > dst)
+Renders 3D image of the scene.
+pcl::device::tranformMaps
+void tranformMaps(const MapArr &vmap_src, const MapArr &nmap_src, const Mat33 &Rmat, const float3 &tvec, MapArr &vmap_dst, MapArr &nmap_dst)
+Performs affine transform of vertex and normal maps.
+pcl::device::PointType
+float4 PointType
+Definition internal.hpp:58
+pcl::device::generateTriangles
+void generateTriangles(const PtrStep< short2 > &volume, const DeviceArray2D< int > &occupied_voxels, const float3 &volume_size, DeviceArray< PointType > &output)
+Generates final triangle array.
+pcl::device::VOLUME_SIZE
+constexpr float VOLUME_SIZE
+Definition internal.h:64
+pcl::device::initVolume
+PCL_EXPORTS void initVolume(PtrStep< short2 > array)
+Perform tsdf volume initialization.
+pcl::device::generateDepth
+void generateDepth(const Mat33 &R_inv, const float3 &t, const MapArr &vmap, DepthMap &dst)
+Renders depth image from give pose.
+pcl::device::bilateralFilter
+void bilateralFilter(const DepthMap &src, DepthMap &dst)
+Performs bilateral filtering of disparity map.
+pcl::device::sync
+void sync()
+synchronizes CUDA execution
+Definition internal.h:397
+pcl::device::updateColorVolume
+void updateColorVolume(const Intr &intr, float tranc_dist, const Mat33 &R_inv, const float3 &t, const MapArr &vmap, const PtrStepSz< uchar3 > &colors, const float3 &volume_size, PtrStep< uchar4 > color_volume, int max_weight=1)
+Performs integration in color volume.
+pcl::device::raycast
+void raycast(const Intr &intr, const Mat33 &Rcurr, const float3 &tcurr, float tranc_dist, const float3 &volume_size, const PtrStep< short2 > &volume, MapArr &vmap, MapArr &nmap)
+Generation vertex and normal maps from volume for current camera pose.
+pcl::device::initColorVolume
+void initColorVolume(PtrStep< uchar4 > color_volume)
+Initialized color volume.
+pcl::device::computeNormalsEigen
+void computeNormalsEigen(const MapArr &vmap, MapArr &nmap)
+Computes normal map using Eigen/PCA approach.
+pcl::device::convert
+void convert(const MapArr &vmap, DeviceArray2D< T > &output)
+Conversion from SOA to AOS.
+pcl::device::estimateTransform
+void estimateTransform(const MapArr &v_dst, const MapArr &n_dst, const MapArr &v_src, const PtrStepSz< short2 > &coresp, DeviceArray2D< float > &gbuf, DeviceArray< float > &mbuf, float *matrixA_host, float *vectorB_host)
+(now it's extra code) Computation Ax=b for ICP iteration
+pcl::device::createNMap
+void createNMap(const MapArr &vmap, MapArr &nmap)
+Computes normal map using cross product.
+pcl::device::findCoresp
+void findCoresp(const MapArr &vmap_g_curr, const MapArr &nmap_g_curr, const Mat33 &Rprev_inv, const float3 &tprev, const Intr &intr, const MapArr &vmap_g_prev, const MapArr &nmap_g_prev, float distThres, float angleThres, PtrStepSz< short2 > coresp)
+(now it's extra code) Computes corespondances map
+pcl::device::valid_host
+bool valid_host(float value)
+Check for qnan (unused now)
+Definition internal.h:389
+pcl::device::paint3DView
+void paint3DView(const PtrStep< uchar3 > &colors, PtrStepSz< uchar3 > dst, float colors_weight=0.5f)
+Paints 3D view with color map.
+pcl::device::resizeVMap
+void resizeVMap(const MapArr &input, MapArr &output)
+Performs resize of vertex map to next pyramid level by averaging each four points.
+pcl::device::ushort
+unsigned short ushort
+Definition internal.h:50
+pcl::device::DepthMap
+DeviceArray2D< ushort > DepthMap
+Definition internal.h:52
+pcl::device::VOLUME_X
+constexpr int VOLUME_X
+Definition internal.h:59
+pcl::device::getOccupiedVoxels
+int getOccupiedVoxels(const PtrStep< short2 > &volume, DeviceArray2D< int > &occupied_voxels)
+Scans tsdf volume and retrieves occupied voxels.
+pcl::device::mergePointNormal
+void mergePointNormal(const DeviceArray< float4 > &cloud, const DeviceArray< float8 > &normals, const DeviceArray< float12 > &output)
+Merges pcl::PointXYZ and pcl::Normal to PointNormal.
+pcl::device::NormalType
+float4 NormalType
+Definition internal.hpp:59
+pcl::device::exctractColors
+void exctractColors(const PtrStep< uchar4 > &color_volume, const float3 &volume_size, const PtrSz< PointType > &points, uchar4 *colors)
+Performs colors extraction from color volume.
+pcl::device::DIVISOR
+constexpr int DIVISOR
+Definition internal.h:56
+pcl::device::bindTextures
+void bindTextures(const int *edgeBuf, const int *triBuf, const int *numVertsBuf)
+Binds marching cubes tables to texture references.
+pcl::device::truncateDepth
+void truncateDepth(DepthMap &depth, float max_distance)
+Performs depth truncation.
+pcl::device::computeOffsetsAndTotalVertexes
+int computeOffsetsAndTotalVertexes(DeviceArray2D< int > &occupied_voxels)
+Computes total number of vertexes for all voxels and offsets of vertexes in final triangle array.
+pcl::device::resizeNMap
+void resizeNMap(const MapArr &input, MapArr &output)
+Performs resize of vertex map to next pyramid level by averaging each four normals.
+pcl
+Definition convolution.h:46
+pcl::device::Intr
+Camera intrinsics structure.
+Definition internal.h:69
+pcl::device::Intr::fy
+float fy
+Definition internal.h:70
+pcl::device::Intr::fx
+float fx
+Definition internal.h:70
+pcl::device::Intr::cy
+float cy
+Definition internal.h:70
+pcl::device::Intr::operator()
+Intr operator()(int level_index) const
+Definition internal.h:74
+pcl::device::Intr::cx
+float cx
+Definition internal.h:70
+pcl::device::Intr::Intr
+Intr()
+Definition internal.h:71
+pcl::device::Intr::Intr
+Intr(float fx_, float fy_, float cx_, float cy_)
+Definition internal.h:72
+pcl::device::LightSource
+Light source collection.
+Definition internal.h:91
+pcl::device::LightSource::pos
+float3 pos[1]
+Definition internal.h:92
+pcl::device::LightSource::number
+int number
+Definition internal.h:93
+pcl::device::Mat33
+3x3 Matrix for device code
+Definition internal.h:84
+pcl::device::Mat33::data
+float3 data[3]
+Definition internal.h:85
+pcl::device::float12
+Definition internal.h:367
+pcl::device::float12::c3
+float c3
+Definition internal.h:367
+pcl::device::float12::normal_z
+float normal_z
+Definition internal.h:367
+pcl::device::float12::c2
+float c2
+Definition internal.h:367
+pcl::device::float12::y
+float y
+Definition internal.h:367
+pcl::device::float12::w
+float w
+Definition internal.h:367
+pcl::device::float12::normal_y
+float normal_y
+Definition internal.h:367
+pcl::device::float12::x
+float x
+Definition internal.h:367
+pcl::device::float12::c4
+float c4
+Definition internal.h:367
+pcl::device::float12::n4
+float n4
+Definition internal.h:367
+pcl::device::float12::normal_x
+float normal_x
+Definition internal.h:367
+pcl::device::float12::c1
+float c1
+Definition internal.h:367
+pcl::device::float12::z
+float z
+Definition internal.h:367
+pcl::device::float8
+Definition internal.h:366
+pcl::device::float8::x
+float x
+Definition internal.h:366
+pcl::device::float8::c1
+float c1
+Definition internal.h:366
+pcl::device::float8::y
+float y
+Definition internal.h:366
+pcl::device::float8::c2
+float c2
+Definition internal.h:366
+pcl::device::float8::c4
+float c4
+Definition internal.h:366
+pcl::device::float8::c3
+float c3
+Definition internal.h:366
+pcl::device::float8::w
+float w
+Definition internal.h:366
+pcl::device::float8::z
+float z
+Definition internal.h:366
+pcl::gpu::PtrStep
+Definition kernel_containers.h:85
+pcl::gpu::PtrStepSz
+Definition kernel_containers.h:122
+pcl::gpu::PtrSz
+Definition kernel_containers.h:74
+Except where otherwise noted, the PointClouds.org web pages are licensed under Creative Commons Attribution 3.0.
+Pages generated on Fri Oct 30 2026 10:25:35

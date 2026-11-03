@@ -1,0 +1,1216 @@
+This CVPR Workshop paper is the Open Access version, provided by the Computer Vision
+Foundation. Except for this watermark, it is identical to the accepted version;
+the final published version of the proceedings is available on IEEE Xplore.
+FALO: Fast and Accurate LiDAR 3D Object Detection
+on Resource-Constrained Devices
+Shizhong Han1
+Hsin-Pai Cheng1 Hong Cai1 Jihad Masri2 Soyeb Nagori2
+1
+Qualcomm AI Research* 2 Qualcomm Technologies, Inc.
+Fatih Porikli1
+High er is better
+High er is better
+{shizhan, hsinpaic, hongcai, jmasri, soyeb, fporikli}@qti.qualcomm.com
+due to irregular memory access patterns and high computational costs. In this paper, we propose FALO, a hardwarefriendly approach to LiDAR 3D detection, which offers both
+state-of-the-art (SOTA) detection accuracy and fast inference speed. More specifically, given the 3D point cloud and
+after voxelization, FALO first arranges sparse 3D voxels
+into a 1D sequence based on their coordinates and proximity. The sequence is then processed by our proposed ConvDotMix blocks, consisting of large-kernel convolutions,
+Hadamard products, and linear layers. ConvDotMix provides sufficient mixing capability in both spatial and embedding dimensions, and introduces higher-order nonlinear
+interaction among spatial features. Furthermore, when going through the ConvDotMix layers, we introduce implicit
+grouping, which balances the tensor dimensions for more
+efficient inference and takes into account the growing receptive field. All these operations are friendly to run on
+resource-constrained platforms and FALO can readily deploy on compact, embedded devices. Our extensive evaluation on LiDAR 3D detection benchmarks such as nuScenes
+and Waymo shows that FALO achieves competitive performance. Meanwhile, FALO is 1.6∼9.8× faster than the latest SOTA on NVIDIA Graphics Processing Unit (GPU) and
+Qualcomm Neural Processing Unit (NPU).1
+High er is better
+High er is better
+Figure 1. Comparison of 3D object detection accuracy (nuScenes
+Detection Score on nuScenes validation) vs. inference speed (inferences per second) on two embedded platforms: Nvidia Jetson
+AGX Orin GPU (left) and Qualcomm HexagonTM NPU which is
+integrated within the Snapdragon 8 Gen 3 processor (right). For
+feasible deployment on device, we select models that do not use
+sparse convolutions. Specifically, DSVT [40] is the only latest
+SOTA method that does not use sparse convolutions. Additionally, we use a modified version of PillarNet [33], which replaces
+sparse convolutions with dense ones and has similar accuracy as
+the original model.
+1. Introduction
+Perceiving objects based on 3D LiDAR point cloud is critical to various applications, such as autonomous driving,
+robotics, and AR/VR. Unlike cameras, LiDAR sensors directly measure distances, and are robust to varying illumination and weather conditions, providing more reliability
+and safety to the autonomous system. Moreover, in recent
+years, LiDAR sensors have become more affordable, making it more economical to use them in production systems.
+Existing methods for LiDAR-based 3D object detection
+predominantly utilize 3D sparse convolutions to process the
+Abstract
+Existing LiDAR 3D object detection methods predominantly
+rely on sparse convolutions and/or transformers, which can
+be challenging to run on resource-constrained edge devices,
+1 Snapdragon and Qualcomm branded products are products of Qualcomm Technologies, Inc. and/or its subsidiaries. Qualcomm patented
+technologies are licensed by Qualcomm Incorporated.
+3518
+3D voxels [9, 11, 15, 22, 35, 39, 43, 48, 50, 56]. While
+sparse convolution is more computationally and memory
+efficient compared to regular dense convolution, it incurs
+irregular data and memory access patterns due to the inherent sparsity of the 3D point cloud. This poses a challenge
+for compact, memory-constrained embedded devices. Furthermore, the use of sparse convolutions complicates quantization and deployment of the model via TensorRT [55].
+Another line of work leverages pillar-based representation to project 3D voxels to a 2D plane [19]. This significantly improves the computation efficiency thanks to the
+reduced number of voxels. However, their detection accuracy lags behind models that directly process 3D voxels, and most recent works still require 2D sparse convolutions [21, 33].
+More recently, researchers have started to explore transformers for LiDAR 3D object detection [24, 40]. For instance, in DSVT [40], the 3D voxels are treated as tokens
+and divided into small groups, with self-attention performed
+within each group. By doing this, DSVT achieves state-ofthe-art performance, without using any sparse convolutions.
+However, transformers incur high computational and memory costs, both of which are quadratic w.r.t. the number
+of input tokens, i.e., non-empty voxels in this case. Recent works such as LION [25] and VoxelMamba [51] explore replacing transformers with Recurrent Neural Networks (RNNs) or State-Space Models (SSMs). While these
+models are originally designed for auto-regressive tasks,
+they require sequential processing of voxel tokens, which
+introduces inefficiencies. Moreover, they still depend on
+sparse convolutions for spatial reasoning. PTv3 [42] also
+aims to improve efficiency by serializing 3D data into 1D
+and applying Point Transformers. However, it still cannot
+fully eliminate the reliance on 3D sparse convolution, which
+is used in the xCPE layer.
+In this paper, we propose a fast and accurate approach
+to LiDAR 3D object detection, FALO, which not only runs
+on embedded computation units with low latencies but also
+maintains competitive detection accuracy. Figure 1 shows
+detection accuracy vs. inference speed comparisons between FALO and the latest state of the art (SOTA), where
+the inference speeds are measured on Nvidia Jetson Orin
+GPU and Hexagon NPU (included in the Snapdragon 8 Gen
+3 processor), respectively, which are common choices of
+computation platform for autonomous systems. Note that
+except for DSVT [40], existing SOTA models cannot even
+be deployed due to the use of sparse convolutions. Figure 1 demonstrates that the proposed FALO has the highest
+inference speed on resource-constrained computation platforms while keeping comparable detection accuracy compared with SOTA methods.
+At the core of FALO is an efficient, systematic design for
+processing voxels. More specifically, we first arrange the
+3D voxels into a 1D sequence, based on their coordinates
+and proximity. Next, we utilize large-kernel convolutions
+and linear layers to perform spatial and channel feature mixing, respectively. In addition, we leverage Hadamard product to create higher-order nonlinear interactions among the
+voxel features. As shown in recent studies on efficient image backbones, such as Conv2Former [18] and PADRe [20],
+high-order nonlinear processing is crucial for capable vision networks in lieu of the costly self-attention operations.
+Note that these operations incur only linear computation
+and memory costs w.r.t. the number of non-empty voxels.
+Moreover, we maintain a dense representation throughout
+the network and do not require sparse convolutions, which
+facilitates more efficient memory access. We pack this series of operations in a layer, which we refer to as ConvDotMix, and repeat the ConvDotMix layer multiple times to
+process the voxel features, before converting them to Bird’s
+Eye View (BEV).
+Together with ConvDotMix, we introduce implicit
+grouping to the 1D sequence that better balances the tensor dimensions. This approach improves inference speed by
+creating tensors with more balanced dimension sizes. We
+also use variable, increasing implicit group sizes through
+the ConvDotMix layers, to allow for voxel interaction in
+wide spatial ranges as the receptive field grows larger.
+In addition to not using sparse convolutions, we eliminate other cumbersome and hardware-unfriendly designs in
+latest SOTA methods [25, 40], e.g., window shifting. At
+each inference, we only need to perform 1D serialization of
+the voxels once, unlike existing work [40, 51]; this significantly reduces costly data movement. Finally, all our operations are amenable to parallelization. In addition to these
+computational advantages, FALO achieves state-of-the-art
+detection performance, as we will see in the paper.
+Our main contributions are summarized as follows:
+• We propose FALO, an efficient, systematic approach for
+fast and accurate LiDAR 3D object detection on resourceconstrained computation platforms.
+• More specifically, we propose ConvDotMix operations to
+process the voxel features, which consists of large-kernel
+convolutions, linear layers, and Hadamard products. ConvDotMix is computationally efficient and provides sufficient spatial, channel-wise, and higher-order nonlinear
+mixing capabilities to process the features.
+• We introduce additional efficient designs that make inference faster on hardware, e.g., only performing voxel
+serialization once, implicit voxel grouping. Also, we
+eliminate deployment-unfriendly and/or costly operations
+used in existing SOTA, such as sparse convolution, selfattention, window shifting, and re-ordering the voxels.
+• FALO achieves efficient inference speed on embedded
+computation platforms, including the Nvidia Jetson Orin
+GPU and Qualcomm Hexagon NPU. FALO is 1.6∼9.8×
+3519
+Figure 2. Overview of our proposed FALO approach. Given the input 3D point cloud and after voxelization, we perform 3D sparse feature
+serialization to arrange the non-empty 3D voxel features into a dense 1D sequence of tokens. The 1D sequence then goes into our 3D
+backbone, which consists of implicit feature grouping and FALO layers. Implicit grouping reshapes variables from the token dimension to
+the batch dimension, creating more balanced sizes across the two dimensions. ConvDotMix operates on the tokens, mixing them spatially
+and channel-wise, as well as enabling higher-order nonlinear interaction between the features. ⊙ means Hadamard product (i.e., elementwise multiplication).
+A special case of the voxel-based methods is the pillarbased approach, which combines 3D voxels at the same
+vertical location into a “pillar”. Pillar-based methods are
+significantly more efficient since there are much fewer grids
+to process after projecting the 3D points/voxels onto the
+bird’s eye view [19, 21, 27, 33, 48, 55]. However, pillarbased methods typically have lower accuracy when compared to voxel-based ones due to their reduced 3D representation capacity, and most of them still require 2D sparse
+convolutions [21, 33, 48].
+Several works have explored hybrid approaches, leveraging the strengths of both point-based and voxel-based
+techniques [34, 36, 44]. For instance, PV-RCNN [34] and
+its variants [36, 44] integrate point-based and voxel-based
+features to improve detection accuracy. While these methods aim to balance computational efficiency and feature representation capability, they often face challenges in achieving real-time performance due to the complexity of integrating multiple feature extraction schemes.
+More recently, researchers have started to explore processing the voxels in a tokenized way [25, 40, 51]. More
+specifically, these approaches first serialize the 3D sparse
+voxels into a 1D dense sequence of tokens, which is then
+processed using transformers, Recurrent Neural Networks
+(RNNs), or State-Space Models (SSMs). All of these methods, however, heavily rely on using different orderings
+of the voxels. For instance, DSVT [40] and LION [25]
+use alternating x-order and y-order. VoxelMamba [51]
+requires multi-scale orderings. Re-ordering the voxels
+several times during inference requires considerable data
+movement. This incurs expensive memory accesses, espe-
+faster than the latest SOTA on NVIDIA Graphics Processing Unit and Qualcomm Neural Processing Unit.
+2. Related Work
+In 3D perception, two primary methodologies have
+emerged: point-based methods and voxel-based methods.
+Point-based methods [3, 4, 8, 16, 21, 28, 31, 32, 45–47, 53],
+originating from the PointNet series [29, 30], extract features directly from raw point clouds. Despite their performance in perception tasks, these methods are hindered
+by the time-consuming processes of point sampling, which
+incurs irregular memory access, and neighbor searching,
+which requires expensive computation.
+As a result, voxel-based methods [6, 9, 11, 15, 22, 35,
+39, 43, 48, 50, 52] have gained prominence in recent years.
+These methods convert the input point clouds into a structured grid of 3D cells, known as 3D voxels, in which the
+grids are sparsely occupied. Instead of using the regular, dense 3D convolution, these methods employ 3D submanifold sparse convolution, which allows them to significantly reduce memory consumption and computational
+costs while improving detection accuracy. However, 3D
+sparse convolution requires customized CUDA operations,
+involves complex data structures, and incurs irregular memory accesses due to the random sparsity patterns in the data,
+making it expensive to run on hardware. Specifically, on
+resource-constrained embedded platforms, where computation capabilities and/or memory bandwidth are limited, it is
+very challenging, if not infeasible, to run 3D sparse convolutions.
+3520
+Input Tensor Shape
+1 × 6000 × 128
+2 × 3000 × 128
+4 × 1500 × 128
+10 × 600 × 128
+20 × 300 × 128
+60 × 100 × 128
+Latency on NPU (ms)
+10.60
+9.53
+9.00
+8.40
+8.12
+7.99
+Table 1. Latencies of inference one ConvDotMix layer with different tensor shape. The input shape is in batch size × number
+of tokens × embedding dimension. Latency is measured on the
+Qualcomm Hexagon NPU.
+3.2. 3D Sparse Feature Serialization
+Existing methods use expensive ways to serialize the voxel
+features, e.g., alternating between x- and y-orders [25, 40],
+using forward, backward, Z-order [42], Hilbert order [42]
+and multi-scale orders [51]. What is more, these methods
+all require re-ordering the voxels multiple times throughout
+the network layers. This creates costly data movements,
+especially for devices with limited memory bandwidth.
+In FALO, we use an efficient and effective way to arrange the non-empty voxels into a 1D sequence. Figure 3
+provides an illustrative example of our approach. First, we
+divide the voxels into local windows (highlighted with different colors in the figure) for the locality preservation, and
+traverse the voxels within each window before proceeding
+to the next window. In this way, the non-empty voxels in the
+same local neighborhood reside in nearby locations in the
+1D sequence, which allows their features to interact more
+easily via convolution operations. Within each window, it
+is possible to follow x- or y-order to traverse the voxels and
+collect the non-empty ones into the 1D sequence. Figure 3
+shows an example of using the x-order. In our experiments,
+we observe minimal performance difference between using
+x-order and y-order.
+Note that our serialization operation is only performed
+once after voxelization. Then, the order of the 1D sequence
+of voxel tokens remains the same throughout the 3D backbone. This requires minimal data movement to arrange the
+voxels into a 1D sequence.
+Figure 3. We divide the space into local windows (shown in different colors) to preserve locality. Within each window, we traverse
+and collect non-empty voxels, forming a 1D dense sequence of tokens before moving to the next window.
+cially on compact devices with limited memory bandwidth.
+Moreover, transformers are computationally expensive with
+quadratic complexity w.r.t. input size, and latest SSMs, like
+Mamba [14] require customized CUDA operations, making
+them infeasible for non-CUDA devices.
+3. Proposed Approach: FALO
+In this section, we present our proposed fast and accurate LiDAR 3D object detection approach for edge devices,
+FALO. We describe our designs that enable FALO, including the serialization of 3D sparse voxels into a dense, 1D sequence of tokens (Section 3.2), hardware-friendly implicit
+voxel grouping (Section 3.3), and the ConvDotMix operations (Section 3.4).
+3.1. System Overview
+An overview of our proposed approach is shown in Figure 2.
+In the LiDAR 3D detection pipeline, the input 3D point
+cloud is typically first voxelized, i.e., converted into regular 3D grids that are sparsely occupied. This can be done
+with a voxel feature encoder, such as PointNet [29]. Unlike
+existing works that directly apply 3D sparse convolution to
+process the voxel features, we extract the non-empty voxels and arrange them into a dense, 1D sequence of tokens.
+This facilitates using hardware-friendly, dense operations to
+process them in our devised 3D backbone, which includes
+implicit feature grouping and ConvDotMix layers. After the
+3D backbone, the voxel features are projected to the Bird’s
+Eye View (BEV) space and further processed by 2D layers.
+Finally, a detection head consumes the BEV features and
+predicts the bounding boxes. We follow standard choices
+for the BEV backbone and detection head.
+3.3. Implicit Voxel Grouping
+Given that the number of non-empty voxels is usually in the
+order of thousands, the dense 1D sequence has a severely
+imbalanced shape, e.g., 1×6000×128, where 1 is the batch
+size, 6000 is the number of non-empty voxels, and 128 is
+the feature embedding dimension. We observe that this is
+less efficient on a compact embedded device, as compared
+to the case where the dimension sizes are more balanced.
+We speculate that when the dimensions are more balanced,
+potential underlying parallelization may be utilized to enable faster inference. To make this more concrete, we profile one layer of ConvDotMix on the Qualcomm Hexagon
+3521
+Figure 4. Implicit voxel grouping. The 1D sequence of non-empty voxel tokens with shape 1 × N × D is converted to N/K1 × K1 × D,
+which implicitly creates N/K1 groups of K1 tokens each. As we proceed to deeper ConvDotMix layers, we use bigger group sizes, e.g.,
+K2 , K3 , where K1 < K2 < K3. Smaller group sizes at the beginning facilitate faster inference and more focused local learning, while
+larger group sizes at deeper layers work better with the larger effective receptive field.
+3.4. ConvDotMix
+NPU with different input tensor shapes, the result of which
+is shown in Table 1. Indeed, we can see that when the sizes
+are more balanced across the batch and token dimensions,
+the inference is faster.
+Our devised 3D backbone contains multiple ConvDotMix
+layers (in addition to the implicit voxel grouping operations). Each ConvDotMix layer is made of large-kernel
+convolutions operating on the tokens (i.e., non-empty voxels), linear layers operating on the embedding dimension,
+as well as Hadamard product (i.e., element-wise multiplication) that creates higher-order nonlinear interaction among
+the voxels. More specifically, as shown in Figure 2, the sequence of non-empty voxels (after grouping) goes through
+linear layers and larger-kernel convolutions. At the same
+time, a copy of the voxels are mixed channel-wise but without spatial mixing. These two differently mixed versions of
+voxels are combined via Hadamard product. In this way,
+the tokens can interact with each other beyond linear operations. As the effective receptive field becomes larger after several convolution layers, such nonlinear interactions
+can happen even between two spatially distant voxels. As
+inspired by MetaFormer [49], we further process the combined features through additional linear layers, as well as
+add skip connections from the input.
+Motivated by this observation, we propose to reshape
+the 1D sequence and better balance the batch and token
+dimensions, which implicitly groups the voxels. For instance, when changing the shape from 1 × 6000 × 128 to
+10 × 600 × 128, the 6000 voxels are divided into 10 groups
+of 600 voxels each. While this improves inference speed,
+such grouping limits the interaction among the voxels, especially when the group size is small. In order to address this,
+we further propose to use variable, increasing group sizes
+as we go to deeper ConvDotMix layers. This is because
+ConvDotMix uses convolutions to perform spatial mixing
+and with more ConvDotMix layers, the effective receptive
+field becomes larger and creates wider interaction among
+the voxels. By increasing the group size in deeper layers,
+we mitigate its impact on the growing receptive field.
+Figure 4 provides an illustration. In earlier layers, we
+use smaller group sizes, which provide more balanced sizes
+across the batch and token dimensions for more efficient
+inference. In deeper layers, we use larger group sizes to
+account for larger effective receptive fields. Another benefit of using increasing group sizes is that this encourages the
+network to first aggregate local information, before incorporating bigger spatial contexts in deeper layers. As we shall
+see in our experiments, increasing group sizes leads to the
+best performance while a decreasing order is detrimental.
+All operations in ConvDotMix incur only linear computation and memory costs with respect to the number of input
+tokens. Our use of Hadamard product follows recent efficient alternative self-attention designs [18, 20], which show
+such operations can replace standard self-attention while
+maintaining linear complexity. Moreover, the ConvDotMix
+components—convolution, MLP, and element-wise multiplication—reduce to matrix multiplications, which are well
+supported and parallelizable on modern AI hardware.
+3522
+Repr.
+9*Voxel
+8*Pillar
+Method
+CenterPoint [48]
+VoxelNeXt [6]
+VISTA [10]
+Uni3DETR [41]
+TransFusion-L [1]
+LargeKernel3D [5]
+LinK [26]
+FSDv2 [13]
+SAFDNet[50]
+CenterPoint-Pillars [48]
+PillarNet-34 [33]
+FastPillars-m [55]
+PillarNeXt-B [21]
+PillarNeSt-Base [27]
+DSVT [40]
+FALO (Ours)
+Key Operators
+SpConv
+SpConv
+SpConv
+SpConv
+SpConv
+SpConv
+SpConv
+SpConv
+SpConv
+SpConv
+SpConv
+Conv, Attention
+SpConv
+Conv, MLP
+Transformer
+Conv, MLP, HP
+NDS
+64.8
+66.7
+68.1
+68.5
+70.1
+69.1
+69.5
+70.4
+71.0
+60.2
+67.6
+68.2
+68.8
+69.2
+71.1
+70.8
+mAP
+56.4
+60.5
+60.8
+61.7
+65.5
+63.9
+63.6
+64.7
+66.3
+50.3
+60.2
+61.7
+62.5
+63.2
+66.4
+65.7
+Car
+83.9
+84.8
+86.9
+85.1
+84.4
+87.6
+87.4
+87.1
+Truck
+55.5
+57.2
+60.8
+60.1
+57.3
+60.8
+62.6
+62.3
+Bus
+70.5
+20.5
+73.1
+72.6
+75.9
+78.0
+75.9
+75.3
+T.L.
+38.1
+67.6
+43.4
+41.4
+44.1
+43.5
+42.1
+43.0
+C.V.
+21.1
+36.8
+25.2
+24.3
+28.5
+26.6
+25.3
+25.5
+Ped.
+84.6
+69.0
+87.5
+85.6
+86.9
+87.8
+88.2
+87.6
+M.T.
+62.8
+67.7
+72.9
+70.8
+69.5
+75.5
+74.8
+71.9
+Bike
+50.0
+50.7
+57.3
+59.2
+57.4
+58.0
+58.7
+57.9
+T.C.
+69.4
+84.1
+77.2
+72.3
+72.9
+75.0
+77.9
+77.5
+B.R.
+69.4
+69.7
+70.3
+67.7
+73.6
+69.7
+71.0
+68.7
+Table 2. Performance comparison on nuScenes validation set. HP stands for Hadamard product. T.L., C.V., Ped., M.T., T.C., and B.R.
+stand for trailer, construction vehicle, pedestrian, motorcycle, traffic cone, and barrier, respectively.
+Repr.
+7*Voxel
+4*Pillar
+Method
+CenterPoint [48]
+VoxelNeXt [6]
+TransFusion-L [1]
+LargeKernel3D [5]
+LinK [26]
+FSDv2 [13]
+SAFDNet[50]
+PointPillars [19]
+PillarNeSt-Base [27]
+DSVT [40]
+FALO (Ours)
+Key Operators
+SpConv
+SpConv
+SpConv
+SpConv
+SpConv
+SpConv
+SpConv
+MLP
+Conv, MLP
+Transformer
+Conv, MLP, HP
+NDS
+65.5
+70.0
+70.2
+70.5
+71.0
+71.7
+72.3
+45.3
+71.3
+72.7
+70.9
+mAP
+58.0
+64.5
+65.5
+65.3
+66.3
+66.2
+68.3
+30.5
+65.6
+68.4
+66.1
+Car
+84.6
+84.6
+86.2
+85.9
+86.1
+83.7
+87.3
+68.4
+87.1
+86.8
+85.8
+Truck
+51.0
+53.0
+56.7
+55.3
+55.7
+51.6
+57.3
+23.0
+55.5
+58.4
+56.3
+Bus
+60.2
+64.7
+66.3
+66.2
+65.7
+66.4
+68.0
+28.2
+61.6
+67.3
+66.7
+T.L.
+53.2
+55.8
+58.8
+60.2
+62.1
+59.1
+63.7
+23.4
+62.1
+63.1
+60.8
+C.V.
+17.5
+28.7
+28.2
+26.8
+30.9
+32.5
+37.3
+4.1
+31.0
+37.1
+33.2
+Ped.
+83.4
+85.8
+86.1
+85.6
+85.8
+87.1
+89.0
+59.7
+86.3
+88.0
+87.0
+M.T.
+53.7
+73.2
+68.3
+72.5
+73.5
+71.4
+71.1
+27.4
+69.4
+73.0
+69.3
+Bike
+28.7
+45.7
+44.2
+46.6
+47.5
+51.7
+44.8
+1.1
+46.8
+47.2
+44.7
+T.C.
+76.7
+79.0
+82.0
+80.0
+80.4
+80.3
+84.9
+30.8
+80.6
+84.9
+84.1
+B.R.
+70.9
+74.6
+78.2
+74.3
+75.5
+78.7
+79.5
+38.9
+76.0
+78.4
+73.0
+Table 3. Performance comparison on nuScenes test set. All reported results are without applying test-time augmentation or model ensemble.
+HP stands for Hadamard product.
+4. Experiments
+model performance, we do not use test-time augmentation
+or ensemble techniques. These techniques are not practical for real-world applications as they significantly increase
+the inference cost, e.g., the commonly used double-flip
+augmentation requires 4 inferences per input sample and
+quadruples the latency.
+Waymo Open Dataset (WOD) [37] is a prominent
+and well-known benchmark for large-scale outdoor 3D perception. It consists of 1,150 point cloud sequences, totaling over 200,000 frames. Each frame spans a substantial
+perception range of 150m×150m. The dataset is divided
+into 798 scenes for training, 202 scenes for validation, and
+150 scenes for testing, with each scene containing approximately 200 frames.
+For evaluation, WOD employs 3D mean Average Precision (mAP) and mean Average Precision weighted by Heading accuracy (mAPH). These metrics are further divided
+into two difficulty levels: L1 for objects detected with more
+than five points and L2 for those detected with at least one
+point. Similarly, we do not use any test-time augmentation
+or model ensemble here.
+We perform extensive evaluation of both the efficiency and
+accuracy of our proposed FALO approach. More specifically, we measure the latency of our model and compare with the latest SOTA on both mobile Orin GPU and
+Hexagon NPU. We evaluate the detection accuracy on standard benchmarks for LiDAR 3D detection. Further, we conduct extensive ablation study to analyze our proposed designs.
+4.1. Datasets and Evaluation Protocol
+nuScenes dataset [2] is a widely recognized and challenging benchmark for outdoor 3D perception, offering a perception range of up to 50 meters. It provides comprehensive
+annotations for various tasks, including 3D object detection
+and BEV map segmentation. Each frame is annotated at
+a frequency of 2Hz. The dataset comprises 1,000 scenes,
+divided into 750 scenes for training, 150 scenes for validation, and 150 scenes for testing, resulting in a total of
+40,157 annotated samples. Each sample includes data from
+six cameras and a 32-beam LiDAR scan.
+For 3D object detection, the dataset employs mean Average Precision (mAP) and the nuScenes Detection Score
+(NDS) as evaluation metrics. Note that when evaluating
+4.2. Implementation Details
+We use 8 ConvDotMix layers in our 3D backbone, with a
+kernel size 11 for the 1D convolutions and group sizes of
+3523
+2*Method
+PointPillar [19]
+CenterPoint [48]
+PillarNet-34 [33]
+PillarNeXt [21]
+VoxelNext [6]
+Transfusion [1]
+FocalFormer3D [7]
+HEDNet [52]
+SST TS [12]
+SWFormer [38]
+OcTr [54]
+DSVT-Pillar [40]
+FlatFormer [24]
+FastPillars [55]
+PTv3 [42]
+FALO (Ours)
+2*Operator
+SpConv
+SpConv
+SpConv
+SpConv
+SpConv
+SpConv
+SpConv
+SpConv
+Transformer
+Transformer
+Transformer
+Transformer
+Transformer
+Conv
+SpConv
+Conv, MLP, HP
+Vehicle 3D AP/APH
+L1
+L2
+72.1/71.5
+63.6/63.1
+74.2/73.6
+66.2/65.7
+79.1/78.6
+70.9/70.5
+78.4/77.9
+70.3/69.8
+78.2/77.7
+69.9/69.4
+–/–
+–/65.1
+–/–
+68.1/67.6
+81.1/80.6
+73.2/72.7
+76.2/75.8
+68.0/67.6
+77.8/77.3
+69.2/68.8
+78.1/77.6
+69.8/69.3
+79.3/78.8
+70.9/70.5
+-/69.0/68.6
+-/71.5/71.1
+-/71.2/70.8
+78.7/78.3
+70.3/69.6
+Pedestrian 3D AP/APH
+L1
+L2
+70.6/56.7
+62.8/50.3
+76.6/70.5
+68.8/63.2
+80.6/74.0
+72.3/66.2
+82.5/77.1
+74.9/69.8
+81.5/76.3
+73.5/68.6
+–/–
+–/63.7
+–/–
+72.7/66.8
+84.4/80.0
+76.8/72.6
+81.4/74.0
+72.8/65.9
+80.9/72.7
+72.5/64.9
+80.8/74.4
+72.5/66.5
+82.8/77.0
+75.2/69.8
+-/71.5/65.3
+-/73.2/67.2
+-/76.3/70.4
+82.6/76.9
+75.0/69.6
+Cyclist 3D AP/APH
+L1
+L2
+64.4/62.3
+61.9/59.9
+72.3/71.1
+69.7/68.5
+72.3/71.2
+69.7/68.7
+73.2/72.2
+70.6/69.6
+76.1/74.9
+73.3/72.2
+–/–
+–/65.9
+–/–
+73.7/72.6
+78.7/77.7
+75.8/74.9
+–/–
+–/–
+–/–
+–/–
+72.6/71.5
+69.9/68.9
+76.4/75.4
+73.6/72.7
+-/68.6/67.5
+-/70.5/69.5
+-/71.5/70.4
+75.4/74.4
+75.4/72.5
+mAP/mAPH
+L1
+69.0/63.5
+74.4/71.7
+77.3/74.6
+78.0/75.7
+78.6/76.3
+-/-/81.4/79.4
+-/-/77.2/74.5
+79.5/77.1
+-/-/-/78.9/76.5
+mAP/mAPH
+L2
+62.8/57.8
+68.2/65.8
+71.0/68.5
+71.9/69.7
+72.2/70.1
+–/64.9
+71.5/69.0
+75.3/73.4
+–/–
+–/–
+70.7/68.2
+73.2/71.0
+-/67.2
+-/69.3
+-/70.5
+73.6/70.6
+Table 4. Performance comparison on the Waymo Open Dataset validation set. HP stands for Hadamard product. All experiments are
+evaluated with 1 input frame.
+4.3. Detection Performance Evaluation
+128, 128, 256, 256, 512, 512, 1024, and 1024. No reshaping is needed between layers that use the same group size.
+We use y-order to serialize the voxels, and there is minimal accuracy difference between using x-order and y-order.
+Due to the different LiDAR sensors, point cloud densities,
+and evaluation ranges, we use a pillar size of (0.3m, 0.3m,
+8m) for nuScenes data and (0.32m, 0.32m, 6m) for Waymo
+data, following standard practice. Similar to DSVT [40], we
+use ResNet layers [17] for the BEV backbone. In the DSVT
+setup, there are 3 stages of ResNet with 2, 3, and 3 layers
+each. We create 2 more variants using 3-4-4 and 4-5-5 configurations, respectively. For the detection head, we use the
+TransFusion [1] head for nuScenes and the CenterPoint [48]
+head for Waymo.
+nuScenes. Table 2 and Table 3 summarize the detection
+performance on nuScenes validation and test sets, respectively. We see that FALO achieves similar detection performance compared to the latest SOTA, e.g., DSVT [40],
+SAFDNet [50], despite not using expensive, deploymentunfriendly operations like self-attention and 3D sparse convolution. It is noteworthy that without using the 3D voxel
+representation and 3D sparse convolution, FALO outperforms most voxel-based methods, and additionally, FALO
+provides significantly better detection accuracy as compared to most pillar-based methods. While PillarNeStBase [27] has slightly better accuracy than FALO, it uses
+the heavy ConvNeXt-Base [23] as the BEV backbone.
+Waymo. As summarized in Table 4, our proposed
+FALO also delivers competitive performance on the Waymo
+dataset. It achieves detection accuracy on par with SOTA,
+achieving comparable Average Precision (AP) and Average
+Precision with Heading (APH) scores across key classes,
+including vehicles, pedestrians, and cyclists. This result reinforces the generalization and robustness of our proposed
+efficient FALO architecture across different datasets.
+We choose Nvidia Jetson Orin GPU and Qualcomm
+Hexagon NPU as the embedded edge compute platforms
+to measure model latency because they are widely adopted
+and easily accessible edge-AI platforms, representing both
+GPU- and NPU-based architectures. For running a model
+on device, we first export it to ONNX format, followed by
+W8A8 quantization. We further use TensorRT when running the model on the Orin GPU. For comparison, we also
+measure the inference speed of DSVT [40], which is the
+only available model with SOTA detection accuracy and
+does not require sparse convolutions.2 We also compare
+with a modified version of PillarNet [33], which is a representative recent pillar-based model. To enable on-device inference, we replace its sparse convolutions with dense ones
+and have verified that the modified version achieves similar
+detection accuracy as the original model via retraining.
+4.4. Latency Evaluation
+Figure 1 shows the latency comparison between our proposed FALO models with DSVT [40] and PillarNet [33].
+It can be seen that with similar detection performance,
+FALO achieves significantly higher inference speeds that
+are 1.6×∼9.8× faster than DSVT on Nvidia Jetson Orin
+GPU and Qualcomm Hexagon NPU. Specifically, FALO offers 24∼60 inferences per second on device, enabling realtime, accurate 3D LiDAR object detection operations on
+mobile autonomous systems, such as self-driving cars and
+mobile robots. Although PillarNet can also provide ∼30 inferences per second, its detection accuracy is considerably
+lower due to the less capable network architecture.
+2 While FastPillars [55] and PillarNeSt [27] also claim SOTA performance without using sparse convolutions, they have not made their models
+publicly available.
+3524
+4.5. Ablation Study
+Baseline
+2*DSVT [40]
+In this part, we analyze the effects of various designs in our
+proposed approach.
+Ordering. When serializing the voxels, our proposed
+ordering is based on local window partitions and traversing
+voxels in the same neighborhood first before proceeding to
+the next window. Here, we compare with an variant where
+no explicit ordering is used, i.e., the voxels are traversed
+based on their pre-existing order which depends on when
+the corresponding point is measured by the LiDAR sensor.
+Table 5 shows that our proposed ordering is effective and
+improves the detection performance because of its simplicity and locality preservation.
+Ordering Method
+No Ordering
+FALO Ordering
+NDS
+69.1
+70.2
+mAP
+66.4
+66.6
+FLOPs (G)
+14.9
+10.7
+reduces the computational cost (in terms of FLOPs) by more
+than 28% in the 3D backbone. Note that ConvDotMix will
+be even more efficient when the input 3D point cloud is
+large and/or the resolution is large, as its complexity scales
+linearly w.r.t. the number of input tokens, whereas selfattention scales quadratically.
+Depth of BEV Backbone. We use 3 ResNet configurations in the BEV backbone, which are 2-3-3, 3-3-4, and 45-5; the ResNet contains 3 stages with different number of
+layers in each stage. As shown in Table 8, using more layers improves the detection performance at the cost of higher
+latency.
+mAP
+63.0
+64.9
+Grouping and Group Sizes. The implicit grouping provides two benefits: 1) improving inference speed and 2)
+encouraging a local-to-global learning. It can be seen in
+Table 6 that by using our proposed implicit grouping with
+increasing group sizes, we improve both the accuracy and
+latency as compared to the baseline that has no grouping.
+Grouping with constant group sizes provides a very slight
+detection accuracy improvement. On the other hand, using
+decreasing group sizes is detrimental to detection performance as it conflicts with the growing effective receptive
+field as the inference goes deeper through the network.
+NDS
+69.8
+69.9
+69.7
+70.2
+NDS
+71.1
+71.2
+Table 7. Comparison of transformer and our proposed ConvDotMix for processing voxels. We use DSVT [40] and compare the
+performance of these two operations.
+Table 5. Effect of our proposed ordering for serializing the voxels
+into 1D sequence. We use 2-3-3 BEV backbone configuration in
+this experiment. We don’t use any order shuffle or shift.
+Grouping Option
+No Grouping
+Constant
+Decreasing
+Increasing
+Key Operation
+Transformer
+ConvDotMix
+2*ResNet Config.
+2*NDS
+2*mAP
+2-3-3
+3-4-4
+4-5-5
+70.2
+70.6
+70.8
+64.9
+65.8
+65.7
+Latency (ms)
+Hexagon NPU
+Orin GPU
+33.8
+16.6
+37.8
+18.4
+41.7
+21.2
+Table 8. Effect of using different numbers of ResNet layers in
+BEV backbone.
+Large Kernel Size. Reducing the kernel sizes from 11,
+9, 7 to 5 leads to a drop in NDS from 70.8 to 70.2 on the
+nuScenes validation set. This indicates that larger kernels
+are beneficial for performance.
+mAP
+64.8
+64.9
+64.9
+65.9
+5. Conclusions and Limitation
+In this paper, we present FALO, a systematic and efficient
+solution for real-time LiDAR-based 3D object detection on
+resource-constrained platforms. By introducing ConvDotMix, which leverages large-kernel convolutions, linear layers, and Hadamard products, along with hardware-friendly
+designs like one-time voxel serialization and implicit grouping, we eliminate costly operations such as sparse convolutions and transformers. FALO achieves up to 9.8× faster inference on embedded devices like Jetson Orin and Hexagon
+NPU, while maintaining competitive detection accuracy despite the inherent limitations of lightweight design.
+Since we focus on efficiency for edge devices, using more memory- and compute-efficient operations
+can lead to some accuracy degradation, especially for
+small or sparse objects such as pedestrians and cyclists.
+Despite removing commonly used 3D sparse convolutions and transformer modules, our method achieves
+accuracy comparable to state-of-the-art approaches.
+Table 6. Comparison of different grouping options. We use 2-33 BEV backbone configuration in this experiment. The grouping
+can significantly reduce the latency as table 1
+ConvDotMix. Our proposed ConvDotMix serves as the
+core of FALO and provides an efficient, alternative way to
+process the features as compared to self-attention or 2D/3D
+sparse convolution. In order to better understand its effectiveness, we use DSVT [40] as the baseline and replace the
+transformer layers with our ConvDotMix layers. This is the
+only modification on DSVT in this experiment and we keep
+the other operations the same as the original DSVT, e.g.,
+window shifting, alternating the voxel serialization between
+x-order and y-order, etc.
+Table 7 shows the result. By replacing the transformer
+operations with our proposed ConvDotMix, we can even
+slightly outperform the original DSVT. Moreover, this also
+3525
+References
+Embracing single stride 3d object detector with sparse transformer. In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition, pages 8458–8468,
+2022. 7
+[13] Lue Fan, Feng Wang, Naiyan Wang, and Zhaoxiang Zhang.
+Fsd v2: Improving fully sparse 3d object detection with virtual voxels. arXiv preprint arXiv:2308.03755, 2023. 6
+[14] Albert Gu and Tri Dao. Mamba: Linear-time sequence
+modeling with selective state spaces.
+arXiv preprint
+arXiv:2312.00752, 2023. 4
+[15] Tianrui Guan, Jun Wang, Shiyi Lan, Rohan Chandra, Zuxuan Wu, Larry Davis, and Dinesh Manocha. M3detr: Multirepresentation, multi-scale, mutual-relation 3d object detection with transformers. In Proceedings of the IEEE/CVF
+winter conference on applications of computer vision, pages
+772–782, 2022. 2, 3
+[16] Chenhang He, Hui Zeng, Jianqiang Huang, Xian-Sheng Hua,
+and Lei Zhang. Structure aware single-stage 3d object detection from point cloud. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages
+11873–11882, 2020. 3
+[17] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+Deep residual learning for image recognition. In Proceedings of the IEEE conference on computer vision and pattern
+recognition, pages 770–778, 2016. 7
+[18] Qibin Hou, Cheng-Ze Lu, Ming-Ming Cheng, and Jiashi
+Feng. Conv2former: A simple transformer-style convnet for
+visual recognition. IEEE Transactions on Pattern Analysis
+and Machine Intelligence, 2024. 2, 5
+[19] Alex H Lang, Sourabh Vora, Holger Caesar, Lubing Zhou,
+Jiong Yang, and Oscar Beijbom. Pointpillars: Fast encoders
+for object detection from point clouds. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 12697–12705, 2019. 2, 3, 6, 7
+[20] Pierre-David Letourneau, Manish Kumar Singh, HsinPai Cheng, Shizhong Han, Yunxiao Shi, Dalton Jones,
+Matthew Harper Langston, Hong Cai, and Fatih Porikli.
+Padre: A unifying polynomial attention drop-in replacement for efficient vision transformer.
+arXiv preprint
+arXiv:2407.11306, 2024. 2, 5
+[21] Jinyu Li, Chenxu Luo, and Xiaodong Yang. Pillarnext: Rethinking network designs for 3d object detection in lidar
+point clouds. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 17567–
+17576, 2023. 2, 3, 6, 7
+[22] Zhe Liu, Xin Zhao, Tengteng Huang, Ruolan Hu, Yu Zhou,
+and Xiang Bai. Tanet: Robust 3d object detection from point
+clouds with triple attention. In Proceedings of the AAAI conference on artificial intelligence, pages 11677–11684, 2020.
+2, 3
+[23] Zhuang Liu, Hanzi Mao, Chao-Yuan Wu, Christoph Feichtenhofer, Trevor Darrell, and Saining Xie. A convnet for the
+2020s. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages 11976–11986,
+2022. 7
+[24] Zhijian Liu, Xinyu Yang, Haotian Tang, Shang Yang, and
+Song Han. Flatformer: Flattened window attention for
+[1] Xuyang Bai, Zeyu Hu, Xinge Zhu, Qingqiu Huang, Yilun
+Chen, Hongbo Fu, and Chiew-Lan Tai. Transfusion: Robust lidar-camera fusion for 3d object detection with transformers. In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition, pages 1090–1099,
+2022. 6, 7
+[2] Holger Caesar, Varun Bankiti, Alex H Lang, Sourabh Vora,
+Venice Erin Liong, Qiang Xu, Anush Krishnan, Yu Pan, Giancarlo Baldan, and Oscar Beijbom. nuscenes: A multimodal dataset for autonomous driving. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 11621–11631, 2020. 6
+[3] Chen Chen, Zhe Chen, Jing Zhang, and Dacheng Tao. Sasa:
+Semantics-augmented set abstraction for point-based 3d object detection. In Proceedings of the AAAI Conference on
+Artificial Intelligence, pages 221–229, 2022. 3
+[4] Yilun Chen, Shu Liu, Xiaoyong Shen, and Jiaya Jia. Fast
+point r-cnn. In Proceedings of the IEEE/CVF international
+conference on computer vision, pages 9775–9784, 2019. 3
+[5] Yukang Chen, Jianhui Liu, Xiangyu Zhang, Xiaojuan Qi, and
+Jiaya Jia. Largekernel3d: Scaling up kernels in 3d sparse
+cnns. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 13488–13498,
+2023. 6
+[6] Yukang Chen, Jianhui Liu, Xiangyu Zhang, Xiaojuan Qi, and
+Jiaya Jia. Voxelnext: Fully sparse voxelnet for 3d object detection and tracking. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
+21674–21683, 2023. 3, 6, 7
+[7] Yilun Chen, Zhiding Yu, Yukang Chen, Shiyi Lan, Anima Anandkumar, Jiaya Jia, and Jose M Alvarez. Focalformer3d: focusing on hard instance for 3d object detection.
+In Proceedings of the IEEE/CVF International Conference
+on Computer Vision, pages 8394–8405, 2023. 7
+[8] Bowen Cheng, Lu Sheng, Shaoshuai Shi, Ming Yang, and
+Dong Xu. Back-tracing representative points for votingbased 3d object detection in point clouds. In Proceedings
+of the IEEE/CVF conference on computer vision and pattern
+recognition, pages 8963–8972, 2021. 3
+[9] Jiajun Deng, Shaoshuai Shi, Peiwei Li, Wengang Zhou,
+Yanyong Zhang, and Houqiang Li. Voxel r-cnn: Towards
+high performance voxel-based 3d object detection. In Proceedings of the AAAI conference on artificial intelligence,
+pages 1201–1209, 2021. 2, 3
+[10] Shengheng Deng, Zhihao Liang, Lin Sun, and Kui Jia. Vista:
+Boosting 3d object detection via dual cross-view spatial attention. In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition, pages 8448–8457,
+2022. 6
+[11] Shaocong Dong, Lihe Ding, Haiyang Wang, Tingfa Xu,
+Xinli Xu, Jie Wang, Ziyang Bian, Ying Wang, and Jianan Li.
+Mssvt: Mixed-scale sparse voxel transformer for 3d object
+detection on point clouds. Advances in Neural Information
+Processing Systems, 35:11615–11628, 2022. 2, 3
+[12] Lue Fan, Ziqi Pang, Tianyuan Zhang, Yu-Xiong Wang, Hang
+Zhao, Feng Wang, Naiyan Wang, and Zhaoxiang Zhang.
+3526
+Yuning Chai, Benjamin Caine, et al. Scalability in perception
+for autonomous driving: Waymo open dataset. In Proceedings of the IEEE/CVF conference on computer vision and
+pattern recognition, pages 2446–2454, 2020. 6
+[38] Pei Sun, Mingxing Tan, Weiyue Wang, Chenxi Liu, Fei Xia,
+Zhaoqi Leng, and Dragomir Anguelov. Swformer: Sparse
+window transformer for 3d object detection in point clouds.
+In European Conference on Computer Vision, pages 426–
+442. Springer, 2022. 7
+[39] Haiyang Wang, Lihe Ding, Shaocong Dong, Shaoshuai Shi,
+Aoxue Li, Jianan Li, Zhenguo Li, and Liwei Wang. Cagroup3d: Class-aware grouping for 3d object detection on
+point clouds. Advances in Neural Information Processing
+Systems, 35:29975–29988, 2022. 2, 3
+[40] Haiyang Wang, Chen Shi, Shaoshuai Shi, Meng Lei, Sen
+Wang, Di He, Bernt Schiele, and Liwei Wang. Dsvt: Dynamic sparse voxel transformer with rotated sets. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pages 13520–13529, 2023. 1, 2, 3,
+4, 6, 7, 8
+[41] Zhenyu Wang, Ya-Li Li, Xi Chen, Hengshuang Zhao, and
+Shengjin Wang. Uni3detr: Unified 3d detection transformer.
+Advances in Neural Information Processing Systems, 36,
+2024. 6
+[42] Xiaoyang Wu, Li Jiang, Peng-Shuai Wang, Zhijian Liu, Xihui Liu, Yu Qiao, Wanli Ouyang, Tong He, and Hengshuang
+Zhao. Point transformer v3: Simpler, faster, stronger. In
+CVPR, 2024. 2, 4, 7
+[43] Yan Yan, Yuxing Mao, and Bo Li. Second: Sparsely embedded convolutional detection. Sensors, 18(10):3337, 2018. 2,
+3
+[44] Honghui Yang, Wenxiao Wang, Minghao Chen, Binbin Lin,
+Tong He, Hua Chen, Xiaofei He, and Wanli Ouyang. Pvt-ssd:
+Single-stage 3d object detector with point-voxel transformer.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 13476–13487, 2023.
+3
+[45] Jinrong Yang, Lin Song, Songtao Liu, Weixin Mao, Zeming Li, Xiaoping Li, Hongbin Sun, Jian Sun, and Nanning
+Zheng. Dbq-ssd: Dynamic ball query for efficient 3d object
+detection. In International Conference on Learning Representations, 2023. 3
+[46] Zetong Yang, Yanan Sun, Shu Liu, Xiaoyong Shen, and Jiaya
+Jia. Std: Sparse-to-dense 3d object detector for point cloud.
+In Proceedings of the IEEE/CVF international conference on
+computer vision, pages 1951–1960, 2019.
+[47] Zetong Yang, Yanan Sun, Shu Liu, and Jiaya Jia. 3dssd:
+Point-based 3d single stage object detector. In Proceedings
+of the IEEE/CVF conference on computer vision and pattern
+recognition, pages 11040–11048, 2020. 3
+[48] Tianwei Yin, Xingyi Zhou, and Philipp Krahenbuhl. Centerbased 3d object detection and tracking. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 11784–11793, 2021. 2, 3, 6, 7
+[49] Weihao Yu, Mi Luo, Pan Zhou, Chenyang Si, Yichen Zhou,
+Xinchao Wang, Jiashi Feng, and Shuicheng Yan. Metaformer
+is actually what you need for vision. In Proceedings of
+efficient point cloud transformer. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 1200–1211, 2023. 2, 7
+[25] Zhe Liu, Jinghua Hou, Xinyu Wang, Xiaoqing Ye, Jingdong
+Wang, Hengshuang Zhao, and Xiang Bai. Lion: Linear
+group rnn for 3d object detection in point clouds. arXiv
+preprint arXiv:2407.18232, 2024. 2, 3, 4
+[26] Tao Lu, Xiang Ding, Haisong Liu, Gangshan Wu, and Limin
+Wang. Link: Linear kernel for lidar-based 3d perception.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), pages 1105–1115,
+2023. 6
+[27] Weixin Mao, Tiancai Wang, Diankun Zhang, Junjie Yan, and
+Osamu Yoshie. Pillarnest: Embracing backbone scaling and
+pretraining for pillar-based 3d object detection. IEEE Transactions on Intelligent Vehicles, 2024. 3, 6, 7
+[28] Xuran Pan, Zhuofan Xia, Shiji Song, Li Erran Li, and Gao
+Huang. 3d object detection with pointformer. In Proceedings
+of the IEEE/CVF conference on computer vision and pattern
+recognition, pages 7463–7472, 2021. 3
+[29] Charles R Qi, Hao Su, Kaichun Mo, and Leonidas J Guibas.
+Pointnet: Deep learning on point sets for 3d classification
+and segmentation. In Proceedings of the IEEE conference
+on computer vision and pattern recognition, pages 652–660,
+2017. 3, 4
+[30] Charles Ruizhongtai Qi, Li Yi, Hao Su, and Leonidas J
+Guibas. Pointnet++: Deep hierarchical feature learning on
+point sets in a metric space. Advances in neural information
+processing systems, 30, 2017. 3
+[31] Charles R Qi, Wei Liu, Chenxia Wu, Hao Su, and Leonidas J
+Guibas. Frustum pointnets for 3d object detection from rgbd data. In Proceedings of the IEEE conference on computer
+vision and pattern recognition, pages 918–927, 2018. 3
+[32] Charles R Qi, Or Litany, Kaiming He, and Leonidas J
+Guibas. Deep hough voting for 3d object detection in point
+clouds. In proceedings of the IEEE/CVF International Conference on Computer Vision, pages 9277–9286, 2019. 3
+[33] Guangsheng Shi, Ruifeng Li, and Chao Ma. Pillarnet: Realtime and high-performance pillar-based 3d object detection.
+In European Conference on Computer Vision, pages 35–52.
+Springer, 2022. 1, 2, 3, 6, 7
+[34] Shaoshuai Shi, Chaoxu Guo, Li Jiang, Zhe Wang, Jianping
+Shi, Xiaogang Wang, and Hongsheng Li. Pv-rcnn: Pointvoxel feature set abstraction for 3d object detection. In Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pages 10529–10538, 2020. 3
+[35] Shaoshuai Shi, Zhe Wang, Jianping Shi, Xiaogang Wang,
+and Hongsheng Li. From points to parts: 3d object detection
+from point cloud with part-aware and part-aggregation network. IEEE transactions on pattern analysis and machine
+intelligence, 43(8):2647–2664, 2020. 2, 3
+[36] Shaoshuai Shi, Li Jiang, Jiajun Deng, Zhe Wang, Chaoxu
+Guo, Jianping Shi, Xiaogang Wang, and Hongsheng Li. Pvrcnn++: Point-voxel feature set abstraction with local vector
+representation for 3d object detection. International Journal
+of Computer Vision, 131(2):531–551, 2023. 3
+[37] Pei Sun, Henrik Kretzschmar, Xerxes Dotiwalla, Aurelien
+Chouard, Vijaysai Patnaik, Paul Tsui, James Guo, Yin Zhou,
+3527
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 10819–10829, 2022. 5
+[50] Gang Zhang, Junnan Chen, Guohuan Gao, Jianmin Li, Si
+Liu, and Xiaolin Hu. Safdnet: A simple and effective network for fully sparse 3d object detection. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 14477–14486, 2024. 2, 3, 6, 7
+[51] Guowen Zhang, Lue Fan, Chenhang He, Zhen Lei, Zhaoxiang Zhang, and Lei Zhang. Voxel mamba: Group-free
+state space models for point cloud based 3d object detection.
+arXiv preprint arXiv:2406.10700, 2024. 2, 3, 4
+[52] Gang Zhang, Chen Junnan, Guohuan Gao, Jianmin Li, and
+Xiaolin Hu. Hednet: A hierarchical encoder-decoder network for 3d object detection in point clouds. Advances in
+Neural Information Processing Systems, 36, 2024. 3, 7
+[53] Yifan Zhang, Qingyong Hu, Guoquan Xu, Yanxin Ma, Jianwei Wan, and Yulan Guo. Not all points are equal: Learning highly efficient point-based detectors for 3d lidar point
+clouds. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages 18953–18962,
+2022. 3
+[54] Chao Zhou, Yanan Zhang, Jiaxin Chen, and Di Huang. Octr:
+Octree-based transformer for 3d object detection. In Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pages 5166–5175, 2023. 7
+[55] Sifan Zhou, Zhi Tian, Xiangxiang Chu, Xinyu Zhang, Bo
+Zhang, Xiaobo Lu, Chengjian Feng, Zequn Jie, Patrick Yin
+Chiang, and Lin Ma. Fastpillars: A deployment-friendly
+pillar-based 3d detector. arXiv preprint arXiv:2302.02367,
+9, 2023. 2, 3, 6, 7
+[56] Yin Zhou and Oncel Tuzel. Voxelnet: End-to-end learning
+for point cloud based 3d object detection. In Proceedings of
+the IEEE conference on computer vision and pattern recognition, pages 4490–4499, 2018. 2
+3528

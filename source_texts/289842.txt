@@ -1,0 +1,206 @@
+An open container format for 4D Gaussian Splat video — single-file, streamable, seekable, error-bounded. - python: import and export KHR_gaussian_splatting glTF by emal-avala · Pull Request #28 · avala-ai/4dgs
+
+python: import and export KHR_gaussian_splatting glTF by emal-avala · Pull Request #28 · avala-ai/4dgs · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+emal-avala
+commented
+Jul 29, 2026
+Copy link
+Copy Markdown
+Member
+Closes the "no interop with converging standards" gap: the format could read and write nothing but its own container and PLY sequences, while the ecosystem settles on glTF's KHR_gaussian_splatting for static splats.
+What the extension actually specifies
+Pinned to KhronosGroup/glTF commit 77b44be7bef26e01fb0b140e3d5bb1716421c5e9 (2026-07-17), status Release Candidate. Read from the registry, not from memory:
+Primitive. mode MUST be POINTS (0). The extension object requires kernel and colorSpace; projection (default perspective) and sortingMethod (default cameraDistance) are optional. One kernel is defined: "ellipse". Two colour spaces: srgb_rec709_display, lin_rec709_display.
+Attributes. POSITION (base glTF) plus four namespaced ones, with more than float permitted:
+semantic
+type
+component types
+KHR_gaussian_splatting:ROTATION
+VEC4
+float, signed byte normalized, signed short normalized
+KHR_gaussian_splatting:SCALE
+VEC3
+float, unsigned byte/short, normalized or not
+KHR_gaussian_splatting:OPACITY
+SCALAR
+float, unsigned byte/short normalized
+KHR_gaussian_splatting:SH_DEGREE_0_COEF_0
+VEC3
+float (required)
+KHR_gaussian_splatting:SH_DEGREE_[1-3]_COEF_[n]
+VEC3
+float (whole degrees only)
+Spherical harmonics. One attribute per coefficient, 2l+1 coefficients at degree l (3/5/7), packed lowest m first, Condon–Shortley phase. Higher degrees require all lower ones. 45 coefficients at degree 3.
+Encodings. Rotation is a unit quaternion in the usual glTF order, used without renormalization. Opacity is a linear post-activation value in [0, 1] — not a logit. Scale is linear and MUST NOT be negative. Diffuse colour is SH_0,0 × 0.2820947917738781 + 0.5.
+Transforms. The node's matrix participates in the covariance (Σ = M C Cᵀ Mᵀ); last row must be (0,0,0,1), column lengths finite and positive, normalized determinant near +1. Harmonics SHOULD be rotated by the transform's rotation (Wigner-D).
+Coordinates. glTF's own: right-handed, +Y up, metres. Training in that frame is recommended so nothing rotates on load.
+Fallback. COLOR_0 MAY carry the diffuse colour so a non-supporting viewer draws a point cloud; it is linear per base glTF, so an sRGB-declared asset decodes before writing it.
+Compression. There is no companion compression extension in the registry at this commit — KHR_draco_mesh_compression and EXT_meshopt_compression are mesh extensions and do not apply. The base extension only reserves the ground: a future compression extension SHOULD extend it and SHOULD define how its data decodes back to the base form.
+What this adds
+4dgs from-gltf scene.glb -o scene.4dgs — a static asset as a single-keyframe .4dgs.
+4dgs to-gltf scene.4dgs -o frame.glb --time 1.25 — the reconstructed state at an instant, as a conforming asset.
+fourdgs.from_gltf / fourdgs.to_gltf behind them; the commands are a few lines over the library, per the CLI's thin-command rule.
+website/docs/guides/interop-gltf.md, the mapping document, linked from the guides index and from the implementation notes' glTF section.
+What maps, and what doesn't
+Unchanged: position, rotation (same quaternion order — no component shuffle), scale, opacity (both sides store the activated value, so no sigmoid either way).
+Stated transform: the degree-0 term, since this format stores resolved colour and the extension stores the coefficient — coef0 = (rgb − 0.5)/k and back. Lossy in one direction only: importing clamps colour to [0,1], so a coefficient beyond about ±1.77 does not survive.
+Lossy, bounded: higher harmonics. The extension stores float, this format stores unsigned bytes, so a coefficient round-trips to within one 8/255 ≈ 0.031 step.
+Impossible: time. The extension has no temporal model — not deferred, absent. Export is a snapshot and the guide says so plainly; velocity, birth time, temporal extent, validity windows, audio and camera all end there. The guide also states our position for the ecosystem discussion: the temporal dimension belongs in an extension that extends KHR_gaussian_splatting, carrying the four additive per-gaussian fields this format already stores, so a renderer ignoring them draws t = 0 and is not wrong, merely still.
+Refused rather than guessed — the failure this bridge exists to prevent is a scene that converts cleanly and looks wrong:
+non-uniform, sheared, mirrored or projective node transforms (not expressible as a gaussian's scale and rotation);
+a rotating node over degree > 0 harmonics (needs Wigner-D, not implemented);
+a coordinate system the converter cannot place in glTF's frame — --coordinate-system says which you mean;
+an asset whose extensionsRequired names something unimplemented, a non-ellipse kernel, a non-POINTS mode, a partial SH degree, an unlisted colour space.
+Translation and uniform scale are baked; a rotating node with no higher harmonics is baked too. A z-up-right-handed scene exports its axis change as a node rotation rather than baking it — that is where the extension puts a transform, it is exact, and it leaves the harmonics to the renderer's Wigner-D as the extension already asks.
+A spec gap this surfaced
+Section 6.5 is deliberate that "the stored byte is the coefficient" and that step_sh is encode-side only. That leaves the byte-to-float mapping for harmonic coefficients unpinned, and glTF needs a float. The PLY importer had [-4, +4] inline; this PR lifts it to one constant (fourdgs.quantization.SH_QUANT_LO/_HI) that both importers read, so PLY → 4dgs → glTF is consistent, and the guide flags it in a callout. Pinning it belongs in the specification and is not done here.
+Also fixed in passing: the implementation notes referred to color_space as a registry key without the glTF section linking to anything operational; it now points at the guide.
+Round-trip evidence
+python/fourdgs/tests/test_gltf.py, 31 tests, fixtures built in-process from a fixed seed — no downloaded assets, no committed binaries.
+glTF → 4dgs → glTF returns every attribute within the bounds the intermediate file declares in its own Quantization record: positions within pos, opacity within alpha, scale within relative scale_rel, degree-0 within rgb/k, higher coefficients within one quantization step. Those bounds are the encoder's own verified claim, not the test's.
+4dgs → glTF at t → 4dgs returns the canonical state at t: same set of gaussians, centres and opacities within twice the declared bounds after two quantization passes. The export test also asserts the written positions are the centres carried along their velocity to t and explicitly not the stored centres, which is the mistake a snapshot exporter makes.
+Gaussian order is not preserved and is not claimed: the encoder sorts each chunk by Morton code, so both round-trip tests match gaussians by nearest centre and assert the matching is one-to-one — which is itself the check that nothing was dropped or duplicated.
+Also covered: every permitted integer attribute encoding, degrees 1–3 with the component-major band layout, node-transform baking, .gltf-beside-.bin in both directions, the CLI wiring, and each refusal above.
+Dependencies
+None added. Stdlib plus numpy. GLB is a 12-byte header and length-prefixed chunks and the accessor rules are a lookup table — about 100 lines, the same call this repository made for CRC-32 and the JSON writer in cpp/.
+Deferred
+Wigner-D rotation of harmonic bands, which would let a rotating node be baked and a z-up scene be baked rather than placed on a node. Refused with a message that names it.
+Sparse accessors — legal glTF, rare in splat assets, refused by name.
+The other SDKs (Rust, TypeScript, C++, Swift). This is Python only; the conformance suite has nothing to say about glTF, so no feature-matrix cell changes.
+Pinning the SH byte-to-float mapping in the specification.
+python: import and export KHR_gaussian_splatting glTF
+…
+a9bad4a
+```
+The format had no way in or out but its own container and PLY sequences,
+which left it outside the interchange the ecosystem is converging on.
+
+`4dgs from-gltf` reads a static KHR_gaussian_splatting asset as the
+degenerate temporal case: gaussians that never move and never fade, with
+duration zero. `4dgs to-gltf --time t` writes the reconstructed state at
+one instant as a conforming asset — a snapshot, because the extension has
+no temporal model at all, and the guide says so rather than implying the
+export is the scene.
+
+Position, rotation, scale and opacity cross unchanged; the degree-0 term
+converts to and from resolved colour by the constant the spec already
+states. What cannot be carried exactly is refused by name: a non-uniform
+or sheared node transform, a rotation over higher harmonics (Wigner-D),
+an unrecognized coordinate system, a required extension we do not
+implement.
+
+GLB parsing is written out rather than taken as a dependency, the same
+call this repository made for CRC-32 and the JSON writer in cpp/.
+
+The byte-to-float mapping for stored harmonic coefficients is a codec
+convention the specification does not pin — it says the stored byte is
+the coefficient. Both importers now read it from one constant so PLY and
+glTF agree, and the guide flags it as a gap to close in the spec.
+```
+Hide details
+View details
+emal-avala
+merged commit 22e568a
+into
+main
+Jul 29, 2026
+38 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+emal-avala
+deleted the
+feat/gltf-interop
+branch
+July 29, 2026 06:21
+chatgpt-codex-connector
+Bot
+reviewed
+Jul 29, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: a9bad4a56f
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+python/fourdgs/fourdgs/cli.py
+def cmd_to_gltf(args) -> int:
+scene = read(args.file)
+chatgpt-codex-connector
+Bot
+Jul 29, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Use indexed reads for snapshot export
+When exporting one instant from a temporally partitioned .4dgs, this front-to-back read() decodes and retains every chunk even though only chunks_for_time(args.time) can contribute to the snapshot. Large scenes therefore lose the format's range-seek benefit and may exhaust memory; use the existing indexed reader and fetch only the requested instant's chunks.
+AGENTS.md reference: AGENTS.md:L15-L19
+Useful? React with 👍 / 👎.
+Comment thread
+python/fourdgs/fourdgs/gltf.py
+Comment on lines
++171
+to
++172
+with open(path, "rb") as fh:
+blob = fh.read()
+chatgpt-codex-connector
+Bot
+Jul 29, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Bound GLB reads instead of loading the whole container
+For a large .glb, this reads the entire container into one bytes object before _read_glb copies out its binary chunk and accessors allocate decoded arrays, so ordinary multi-gigabyte splat assets can require multiple times their file size in memory and OOM. Parse the container through bounded header/range reads rather than fh.read().
+AGENTS.md reference: AGENTS.md:L6-L13
+Useful? React with 👍 / 👎.
+Comment thread
+python/fourdgs/fourdgs/gltf.py
+def _join(parts: list[dict]) -> GaussianSet:
+"""Concatenate primitives into one set, at the lowest whole degree they all carry."""
+degree = min(part["sh_degree"] for part in parts)
+chatgpt-codex-connector
+Bot
+Jul 29, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Preserve higher SH bands across mixed-degree primitives
+When a valid asset contains primitives with different optional SH degrees, taking the minimum silently discards every higher band from the richer primitives; for example, one degree-0 primitive causes degree-3 directional color on all other primitives to disappear. The joined set should retain the maximum degree and represent absent bands as zero coefficients rather than downgrading the whole asset.
+Useful? React with 👍 / 👎.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

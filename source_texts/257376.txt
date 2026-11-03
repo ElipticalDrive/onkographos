@@ -1,0 +1,242 @@
+A fork of Comfyfluffy Ray-traced renderer for Minecraft 26.2's Vulkan backend. Gameplay focused and highly customizable for aesthetics. Support for other gpus is planned. - Add path-traced frustum-froxel volumetric scattering by arena-ai-coding-agent[bot] · Pull Request #16 · Lumitos0-0/LumisCaustica
+
+Add path-traced frustum-froxel volumetric scattering by arena-ai-coding-agent[bot] · Pull Request #16 · Lumitos0-0/LumisCaustica · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+arena-ai-coding-agent
+Bot
+commented
+Aug 30, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Summary
+Rebuilds the volumetric fog system from scratch (not a restore of #4) and integrates it into the path-traced Vulkan renderer as four extra raygen records of the existing world pipeline (light / inject / filter / integrate, SBT indices 2–5), sharing the TLAS, descriptor set and push constants with the trace itself.
+The fog's light field is split by frequency, which is what removes both fireflies and grid wobble at the source:
+Sun/moon shafts stay in the frustum-aligned froxel grid (sharp, directional, one path-traced visibility ray per decimated cell).
+Skylight, terrain GI and block-emitter glow live in a world-anchored radiance probe volume (RTXGI/DDGI architecture): a fixed 32×32×16 grid of 4-block probes snapped to a quantized world anchor. Probes are fixed in world space while the camera moves, so the GI field cannot re-sample new positions per frame — no grid wobble by construction. Each probe traces a uniform-sphere restricted GI path plus 2 pdf-correct emitter next-event samples and accumulates them in a gamma-encoded (1/5) running average with sample-count weighting, ping-pong lanes carrying history across the camera-anchor shift. ~16k fixed probes each averaged over up to 64 frames vs ~200k single-sample frustum cells — no per-cell dots by construction, and no per-cell GI/emitter rays left to shimmer.
+How it works
+Light pass (world-anchored probe volume): one thread per probe. Uniform-sphere tracePath under a restricted probe path (no surface RIS, no emission gather, no SSS, diffuse-only continuation, no stars; the celestial disc never appears even through specular/glass bounces) + 2 alias-sampled emitters over the light grid with the exact reconstructed proposal PDF, phase folded into the isotropic average (1/4π). Values are scaled by the configured fog ambient strength and blended into history gamma-encoded with weight 1/count (max 64). History follows the camera-anchor shift (index - shift); out-of-bounds probes seed from the clamped boundary neighbor at half weight; teleports and terrain/light publications restart accumulation (RtTerrain.epoch()).
+Inject (one thread per sun-shaft cell): world-stable procedural density (3-octave FBM, world-anchored, wind-advected) and the single-scattering term {sigma_s·L per unit length, sigma_t}: the analytic sun/moon term through the same path-traced visibility() as surface lighting (tinted glass/water/translucent geometry colors the shafts, underwater wave caustics apply), plus a trilinear query of the probe volume for everything else.
+Filter: trilinear resample of the decimated shaft grid + temporal reprojection (same prevViewProj + camDelta convention as reflection MVs) + variance clipping; the blend runs in gamma-encoded space so shadow-edge transitions stay perceptually linear, ping-pong between two RGBA16F lanes selected by frameIndex parity.
+Integrate: camera-outward march with the exact analytic Beer-Lambert slice integral → per-column {cumulative in-scatter, transmittance}.
+Composite: applyFroxelFog in indirect.rgen applies L' = L·T + S in scene-linear space before pre-exposure, so fog composes correctly with DLSS-RR, exposure and the display transform. The primary pass writes first-interface distance into volumeDepth, so fog stops at the wall/glass/water surface the camera sees.
+Underwater mode: dedicated parameters selected on the CPU side when the camera is submerged; probes start in the water medium (Beer-Lambert + wave-refraction caustics), and the sun term keeps its strength-gated caustic weighting.
+No shadow maps
+Every light-attenuation path is path-traced — this is the point of doing fog inside the PT. Nothing samples a shadow map.
+Performance
+The probe volume is fixed-size and independent of render resolution; quality settings now trade light-probe samples/bounces and shaft-grid decimation. Per-cell GI/emitter rays (the dominant cost of the previous design) are removed entirely — inject is one sun visibility ray per decimated cell, and the GI/emitter field is a trilinear lookup.
+Settings
+In-game options (bound in RtVideoOptions, keys caustica.options.rt.*, en_us.json translated): volumetric fog toggle, fog quality (scales sun-shaft grid, light-probe samples and probe bounce depth), density, distance, height falloff, noise, anisotropy, god rays, temporal weight, ambient (GI) strength, underwater fog toggle. Config surface: rt.volumetrics.* with TOML comments.
+Testing status
+CI green on the head commit (full build: shaders via slangc + spirv-val, Java, bundled jar). Suggested runtime check: night near torches/lava, sunset, and camera + light movement — fog glow should be smooth (no dots), stable while the camera moves (no grid wobble/boiling), and the frame-stats tool should show frame.volumetricLight/Inject/Filter/Integrate.
+arena-ai-coding-agent
+Bot
+force-pushed
+the
+arena/01a05122-lumiscaustica
+branch
+5 times, most recently
+from
+a56f7cd to
+08a2c50
+Compare
+August 30, 2026 15:16
+Add path-traced frustum-froxel volumetric scattering
+…
+7ac006e
+```
+Rebuild the removed volumetric system from scratch around the path
+tracer's existing visibility rays: a camera-aligned froxel grid is
+injected, temporally filtered, integrated camera-outward and
+composited scene-linearly before pre-exposure in the indirect pass.
+
+No shadow maps are used: sun/moon, ambient and local emitter light
+reaches each cell through the same path-traced visibility() rays as
+surface lighting, so tinted glass, water and translucent geometry
+color fog incident light through the existing per-channel
+Beer-Lambert transmission in any_hit. Rendering settings expose
+density, distance, height falloff, noise, anisotropy, god rays,
+temporal weight, quality and a dedicated underwater mode with
+wave-refraction caustic weighting.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+arena-ai-coding-agent
+Bot
+force-pushed
+the
+arena/01a05122-lumiscaustica
+branch
+from
+08a2c50 to
+7ac006e
+Compare
+August 30, 2026 15:22
+Lumitos0-0
+and others
+added 6 commits
+August 30, 2026 16:08
+Fog lighting from path-traced radiance probes (GI, no fog-side RIS)
+…
+9dae898
+```
+Replace the emitter-RIS and analytic ambient froxel lighting with the path
+tracer itself: each probe cell importance-samples the HG phase about the
+view ray and calls the scene's tracePath (extracted to path_trace.slang,
+shared with the indirect pass). First-hit surfaces shade like surface pixels
+(emission, sun NEE, emitter RIS, SSS) and continue up to the configured GI
+depth, so block emitters, terrain/canopy GI and skylight flow into the fog
+through the same local lighting model as the image. Sun/moon directional
+in-scattering stays as the god-ray term with path-traced visibility; probe
+rays hide the celestial disc to avoid double counting it.
+
+Fog RIS/light-grid sampling and analytic ambient are removed from the
+inject pass; quality flags now carry GI samples and bounce depth.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Cut fog probe cost ~8x and remove star speckle from fog GI
+…
+34a1381
+```
+Perf: the probe grid was half XY x full Z, but at 1 sample + 1 bounce a
+probe costs 6+ sequential rays (trace, NEE, RIS at each vertex) — ~11M
+rays/frame at default quality. The light field is smooth and the filter
+already upscales it, so shade one probe per 4x4x2 fog cells (1/4 XY x 1/2
+Z): 32x fewer inject threads, ~8x fewer rays, no fog density loss.
+High-quality GI depth is capped at one continuation — extra bounces cost
+full traces + shadow rays for detail a scattering medium does not show.
+
+Noise: the probe miss kept the discrete starfield, so one phase sample per
+cell occasionally landed on a star and injected a bright speckle that the
+variance clip could not reject (star hits are also one-sided neighbors).
+Probe paths now set PAYLOAD_HIDE_STARS; world.rmiss returns only the smooth
+atmosphere LUT + airglow for them. Emitter surfaces and GI still reach the
+fog, and the sun/moon disc stays gated by the directional term as before.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Fog lighting redesign: restricted GI probes, emitter next-event, DDGI…
+…
+e629dc4
+```
+…-style accumulation
+
+The per-probe path traces were the noise source: at one sample per fog
+cell, a path that happened to HIT a lava block or gather a surface-RIS
+HDR sample injected a per-cell firefly that the linear variance clip
+could not reject (the one-sided neighborhood inflates its own sigma).
+The sky dots were emitter/star/specular hits, and the pixelation came
+from the fixed 4x4x2 probe decimation.
+
+Rework the fog light field along the production path-traced architecture
+(Minecraft RTX keeps its GI/emissive data in a fog volume; NVIDIA's
+RTXGI probes use gamma-encoded accumulation to suppress fireflies):
+
+- Probe paths are restricted to the low-variance terms only: no surface
+  RIS, no direct emitter gather, no SSS, diffuse-only continuation. The
+  sun/moon and celestial discs were already gated; stars stay hidden.
+- Block emitters enter the fog through a pdf-correct next-event sample
+  over the existing light grid (one alias-sampled emitter + one path-
+  traced visibility ray per probe) — the only way torch/lava glow can
+  exist in fog at all, and now bounded and low-variance instead of an
+  accidental path hit.
+- The temporal filter blends in gamma-encoded space (exponent 1/5, the
+  production DDGI probe-update curve): residual HDR samples are
+  compressed before entering history, so the field converges to a
+  perceptually stable value instead of an unstable one with spikes.
+- Probe decimation is per-quality (4/3/2x XY, 2x Z) instead of fixed,
+  so Quality 1 gains resolution back (3x3x2 cells) at the same ray
+  budget, and higher qualities spend rays on samples before depth.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Probe paths must never see the celestial disc through specular bounces
+…
+a923bda
+```
+The dielectric and specular-continuation branches reset showCelestial to
+true, so a fog probe ray hitting glass or a glossy surface could reflect
+the sun/moon disc straight into the fog cell — an HDR per-cell spike
+(windows at night would glow-dot). Probe paths keep the disc hidden at
+every bounce; their sun/moon is the fog directional term.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Fog light field: world-anchored accumulated probe volume (RTXGI-style)
+…
+c9f3a7b
+```
+The per-cell approach could not converge: one GI path + one emitter
+next-event per frustum-aligned cell per frame is single-sample noise, and
+the grid re-samples new world positions every camera move (the wobble).
+Replace it with the architecture the production path-traced stack uses
+(Minecraft RTX keeps GI data in the fog volume; NVIDIA's RTXGI probes
+accumulate gamma-encoded to suppress fireflies):
+
+- volumetric_light: a fixed world-space 32x32x16 probe volume (4-block
+  cells) snapped to a quantized anchor. Each probe traces a uniform-sphere
+  restricted path (terrain/canopy/sky radiance) plus 2 pdf-correct emitter
+  next-event samples, and accumulates them in a gamma-encoded (1/5) running
+  average with a sample-count weight, ping-pong lanes carrying history
+  across the camera-anchor shift (index - shift = same world position).
+  Probes are fixed in world space: no grid wobble, no per-cell dots, and
+  every probe is averaged over up to 64 frames (16k probes vs ~200k cells).
+- inject: only the analytic sun/moon shaft term remains per cell (one
+  visibility ray, deterministic NEE) plus a trilinear query of the probe
+  volume; the GI/emitter field costs no per-cell rays at all.
+- bindings/pipeline/volumetrics: two new storage volumes (bindings 17/18),
+  raygen index 2 for the light pass, fixed-size allocation independent of
+  render resolution, frame stat entry, and quality flags now drive light-
+  probe samples/bounces plus the shaft-grid decimation.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Fix probe lookup alignment, quality reallocation and light-change res…
+…
+4ed7b23
+```
+…ponse
+
+- froxelLightSample: the extra half-cell offset shifted every probe-volume
+  query between cells (cell centers are anchor + (i+0.5)*CELL and
+  froxelTrilinear already converts center coords to texel coords).
+- RtVolumetrics.matches: the decimated sun-shaft volume is reallocated when
+  the quality flags change, even if the fog grid itself stayed the same.
+- Probe accumulation restarts when the terrain/light publication epoch
+  changes (new RtTerrain.epoch()), so a placed or moved torch shows up in
+  the fog in a few frames of re-convergence instead of lagging the ~64
+  frame accumulation window.
+- Frame-stat entry for the light pass; stale docs describe the current
+  froxel split (shaft grid + anchored light volume).
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Lumitos0-0
+closed this
+Aug 30, 2026
+Lumitos0-0
+deleted the
+arena/01a05122-lumiscaustica
+branch
+August 30, 2026 23:18
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

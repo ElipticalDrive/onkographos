@@ -1,0 +1,3241 @@
+# Direct Volume Renderer 
+
+An interactive web-based **Direct Volume Rendering (DVR)**
+
+It supports medical and scientific datasets (`.nii`, `.nii.gz`,  `.raw + .json`), with shading, transfer functions, multiple rendering modes.
+
+## Video
+https://github.com/user-attachments/assets/39fb1a86-e2f1-4283-bd13-cd12a19b9334
+
+---
+
+**Project Website:** [https://kaanares10.github.io/Volume-Rendering](https://kaanares10.github.io/Volume-Rendering)
+
+<p align="center">
+  <img src="dvr.png" alt="Direct Volume Renderer Screenshot"/>
+</p>
+
+
+
+
+Transfer function editor components are adapted from  
+  [DLR-SC/transfer-function-editor](https://github.com/DLR-SC/transfer-function-editor)
+
+### DirectVolume-Renderer/vite.config.js
+```
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+  base: '/Volume-Rendering/',  
+});
+```
+
+### DirectVolume-Renderer/src/main.js
+```
+import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import VERT from './shaders/dvr.vert?raw';
+import FRAG from './shaders/dvr.frag?raw';
+import chroma from 'chroma-js';
+import GUI from 'lil-gui';
+
+import { TransferFunctionEditor }   from './tfeditor_js/TransferFunctionEditor.js';
+import { loadVolumeFromFiles} from './file_loader/volume_loader.js';
+
+const COMP = { MIP:0, ISO:1, EA:2, AVG:3 };
+
+const compositions = [
+    { name: 'Maximum Intensity', id: 'MIP' },
+    { name: 'First Hit',        id: 'ISO' },
+    { name: 'Emission/Absorption', id: 'EA' },
+    { name: 'Average',           id: 'AVG' },
+];
+
+const SHADING = {
+    NONE: 0,
+    LAMBERT: 1,
+    PHONG: 2,
+    BLINN_PHONG: 3
+};
+
+const shadingOptions = [
+    { name: 'None', id: SHADING.NONE },
+    { name: 'Lambert', id: SHADING.LAMBERT },
+    { name: 'Phong', id: SHADING.PHONG },
+    { name: 'Blinn-Phong', id: SHADING.BLINN_PHONG }
+];
+
+const GRADIENT = {
+    CENTRAL: 0,
+    SOBEL: 1
+};
+
+const gradientOptions = [
+    { name: 'Central Difference', id: GRADIENT.CENTRAL },
+    { name: 'Sobel', id: GRADIENT.SOBEL }
+];
+
+const renderProps = {
+    composition: 'Emission/Absorption',
+    rotations: { x: false, y: true, z: false },
+    speed: 0.002,
+    samplingRate: 1.0,
+    threshold: 0.5,
+    palette: 'Greys',
+    invertColor: false,
+    alphaScale: 1.0,
+    shading: 'None',
+    gradient: 'Central Difference',
+};
+
+let renderer;
+let rafId;
+
+
+function showFallback(reason = 'WebGL is not supported or failed to initialize.',   { noWebGL = false } = {}) {
+    const overlay = document.getElementById('fallback-overlay');
+    if (!overlay) return;
+
+    document.body.classList.add('fallback-active');
+    overlay.hidden = false;
+
+    const why = overlay.querySelector('.why');
+    if (why) {
+        why.style.whiteSpace = 'pre-line';
+
+        let message;
+        if (noWebGL) {
+            message =
+                'Your browser or device does not support WebGL2.\n\n' +
+                'This application requires WebGL2 for 3D graphics.\n\n' +
+                'Possible fixes:' +
+                '\n• Use a modern desktop browser (Chrome, Firefox, Edge).' +
+                '\n• Ensure hardware acceleration is enabled in browser settings.' +
+                '\n• If you’re on a VM/remote session, try running locally.';
+        } else {
+            message =
+                reason +
+                '\n\nPossible fixes:' +
+                '\n• Restart your browser' +
+                '\n• Close all other tabs using WebGL' +
+                '\n• Try a different browser (e.g., Chrome, Firefox).' +
+                '\n• Update your graphics driver.';
+        }
+
+        why.textContent = message;
+    }
+    try { if (rafId) cancelAnimationFrame(rafId); } catch {}
+}
+
+(function guardWebGL() {
+    if (!('WebGL2RenderingContext' in window)) {
+        showFallback('Your browser does not support WebGL2.', { noWebGL: true });
+        throw new Error('No WebGL2RenderingContext');
+    }
+    const testCanvas = document.createElement('canvas');
+    const gl = testCanvas.getContext('webgl2');
+    if (!gl) {
+        showFallback('WebGL2 context could not be created (graphics driver or browser limitation).' +
+            'Try to refresh the page.');
+        throw new Error('WebGL2 context creation failed');
+    }
+})();
+
+function hideFallback() {
+    const overlay = document.getElementById('fallback-overlay');
+    if (!overlay) return;
+
+    overlay.hidden = true;
+    document.body.classList.remove('fallback-active');
+
+    const why = overlay.querySelector('.why');
+    if (why) why.textContent = '';
+}
+
+function initRenderer(container) {
+    if (renderer) return renderer;
+
+    renderer = new THREE.WebGLRenderer({
+        antialias: false,
+        alpha: false,
+        depth: false,
+        stencil: false,
+        powerPreference: 'high-performance',
+        failIfMajorPerformanceCaveat: false,
+        preserveDrawingBuffer: false,
+    });
+
+    renderer.setSize(800, 600);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+
+    container.appendChild(renderer.domElement);
+
+    renderer.domElement.addEventListener('webglcontextlost', (e) => {
+        e.preventDefault();                 // allow automatic restoration
+        cancelAnimationFrame(rafId);
+        console.warn('WebGL context lost');
+        showFallback('WebGL context was lost (the GPU/browser disabled the context).\n\nTry to refresh the page.');
+    });
+
+    renderer.domElement.addEventListener('webglcontextrestored', () => {
+        console.warn('WebGL context restored');
+        hideFallback();
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+        rafId = requestAnimationFrame(animate);
+    });
+
+    return renderer;
+}
+function setVolumeTexture(newTex) {
+    const oldTex = material.uniforms.dataTexture.value;
+    if (oldTex && oldTex !== newTex) {
+        try { oldTex.dispose(); } catch {}
+    }
+    material.uniforms.dataTexture.value = newTex;
+    material.uniforms.dataTexture.value.needsUpdate = true;
+}
+
+export function makeColorTexture(count = 256) {
+    const scale = chroma.scale(renderProps.palette);
+
+    // Create an array to hold the color values.
+    const colorData = new Uint8Array(count * 4); // RGBA
+
+    for (let i = 0; i < count; ++i) {
+        const value = i / (count - 1.0);
+        const [r, g, b] = scale(value).rgb();
+
+        const stride = i * 4;
+        colorData[stride + 0] = r;
+        colorData[stride + 1] = g;
+        colorData[stride + 2] = b;
+        colorData[stride + 3] = 255; // Alpha
+    }
+
+    const texture = new THREE.DataTexture(colorData, count, 1);
+    texture.format = THREE.RGBAFormat;
+    texture.type = THREE.UnsignedByteType;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.wrapS = THREE.ClampToEdgeWrapping;
+    texture.wrapT = THREE.ClampToEdgeWrapping;
+    texture.needsUpdate = true;
+
+    return texture;
+}
+
+function setBoxScale(dims, spacing) {
+    // physical size per axis
+    const Sx = dims.x * spacing[0];
+    const Sy = dims.y * spacing[1];
+    const Sz = dims.z * spacing[2];
+
+    const m = Math.max(Sx, Sy, Sz) || 1;
+
+    box.scale.set(-Sx / m, -Sy / m,  Sz / m);
+}
+
+// Creating Color Texture
+let colorTexture = makeColorTexture();
+
+// Setting up 3D scene
+const scene = new THREE.Scene();
+scene.background = new THREE.Color("#1f1f1f");
+
+const geometry = new THREE.BoxGeometry(1, 1, 1);
+
+const box = new THREE.Mesh(geometry);
+
+const line = new THREE.LineSegments(
+    new THREE.EdgesGeometry(geometry),
+    new THREE.LineBasicMaterial({color: 0x999999})
+);
+box.add(line);
+
+const material = new THREE.RawShaderMaterial({
+    glslVersion: THREE.GLSL3,
+    uniforms: {
+        dataTexture: {value: null},
+        colorTexture: {value: colorTexture},
+        cameraPosition: {value: new THREE.Vector3()},
+        samplingRate: {value: renderProps.samplingRate},
+        threshold: {value: renderProps.threshold},
+        alphaScale: {value: renderProps.alphaScale},
+        invertColor: {value: renderProps.invertColor},
+        composition: {value: COMP.EA},
+
+
+        shadingMode: { value: SHADING.NONE },
+
+        gradientMode: { value: GRADIENT.CENTRAL },
+
+        lightPosObj:   { value: new THREE.Vector3(0.8, 0.6, 0.8) }, // object space [-0.5,0.5]
+        lightColor:    { value: new THREE.Color(1,1,1) },
+        lightIntensity:{ value: 2.0 },
+        ambient:       { value: 0.5 },
+        shininess:     { value: 32.0 },
+        enableLighting:{ value: true },
+
+        densityScale: { value: 100.0 }
+    },
+    vertexShader: VERT,
+    fragmentShader: FRAG,
+    side: THREE.BackSide,
+    transparent: true,
+});
+
+box.material = material;
+
+scene.add(box);
+
+const width = 800;
+const height = 600;
+
+const fov = 45;
+const aspect = width / height;
+const near = 0.1;
+const far = 1000;
+
+const camera = new THREE.PerspectiveCamera(fov, aspect, near, far);
+camera.position.set(0, 0, -2);
+camera.lookAt(new THREE.Vector3(0, 0, 0));
+
+initRenderer(document.getElementById("three-root"));
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.addEventListener("change", () => renderer.render(scene, camera));
+
+
+// GUI
+// Create GUI
+const gui = new GUI({container: document.getElementById('gui-mount')});
+
+const compCtrl = gui.add(renderProps, 'composition', [
+    'Maximum Intensity',
+    'First Hit',
+    'Emission/Absorption',
+    'Average'
+]).name('Composition');
+
+const shadingCtrl = gui.add(renderProps, 'shading', shadingOptions.map(o => o.name))
+    .name('Shading')
+    .onChange(name => {
+        const id = shadingOptions.find(o => o.name === name)?.id ?? SHADING.NONE;
+        material.uniforms.shadingMode.value = id;
+
+        // show/hide gradient depending on shading
+        if (id === SHADING.NONE) {
+            gradientCtrl.hide();
+        } else {
+            gradientCtrl.show();
+        }
+        updateUI();
+    });
+
+const gradientCtrl = gui.add(renderProps, 'gradient', gradientOptions.map(o => o.name))
+    .name('Gradient')
+    .onChange(name => {
+        const id = gradientOptions.find(o => o.name === name)?.id ?? GRADIENT.CENTRAL;
+        material.uniforms.gradientMode.value = id;
+    });
+
+
+const densityCtrl = gui.add(material.uniforms.densityScale, 'value', 0.1, 300.0, 0.1)
+    .name('Density scale (σ)')
+    .onChange(v => { material.uniforms.densityScale.value = v; });
+
+// Keep refs for toggling
+const isoCtrl = gui.add(renderProps, 'threshold', 0.0, 1.0, 0.0001)
+    .name('Iso Value')
+    .onChange(v => {
+        renderProps.threshold = v;
+        material.uniforms.threshold.value = v;
+    });
+
+const alphaCtrl = gui.add(renderProps, 'alphaScale', 0.0, 2.0, 0.0001)
+    .name('Alpha scale')
+    .onChange(v => material.uniforms.alphaScale.value = v);
+
+
+const samplingCtrl= gui.add(renderProps, 'samplingRate', 0.1, 4.0, 0.1)
+    .name('Sampling rate')
+    .onChange(v => material.uniforms.samplingRate.value = v);
+
+
+
+const lightFolder = gui.addFolder('Lighting');
+const lightIntensityCtrl = lightFolder.add(material.uniforms.lightIntensity, 'value', 0.0, 10.0, 0.1).name('Intensity');
+const ambientCtrl        = lightFolder.add(material.uniforms.ambient, 'value', 0.0, 1.0, 0.01).name('Ambient');
+const shininessCtrl      = lightFolder.add(material.uniforms.shininess, 'value', 1.0, 128.0, 1.0).name('Shininess');
+
+
+const invertCtrl = gui.add(renderProps, 'invertColor').name('Invert color')
+    .onChange(v => { material.uniforms.invertColor.value = v; });
+const rotFolder = gui.addFolder('Rotation');
+
+const rotXCtrl= rotFolder.add(renderProps.rotations, 'x').name('X');
+const rotYCtrl = rotFolder.add(renderProps.rotations, 'y').name('Y');
+const rotZCtrl = rotFolder.add(renderProps.rotations, 'z').name('Z');
+
+
+compCtrl.onChange(name => {
+    const id = compositions.find(c => c.name === name)?.id || 'MIP';
+    material.uniforms.composition.value =
+        id === 'MIP' ? COMP.MIP :
+            id === 'ISO' ? COMP.ISO :
+                id === 'EA'  ? COMP.EA  : COMP.AVG;
+
+    if (id === 'MIP' || id === 'AVG') {
+        renderProps.shading = 'None';
+        material.uniforms.shadingMode.value = SHADING.NONE;
+    }
+    material.needsUpdate = true;
+    updateUI();
+});
+
+updateUI();
+
+
+const tfFolder = gui.addFolder('Transfer Function');
+tfFolder.open();
+
+// Host inside the folder
+const tfHost = document.createElement('div');
+tfHost.style.width = '100%';
+tfHost.style.height = '300px';
+tfHost.style.borderRadius = '6px';
+tfHost.style.background = '#1f1f1f';
+
+// Buttons row
+const btnRow = document.createElement('div');
+btnRow.style.display = 'flex';
+btnRow.style.gap = '8px';
+btnRow.style.marginTop = '8px';
+
+const contentEl =
+    tfFolder.domElement.querySelector(':scope > .children')  // preferred
+    || tfFolder.domElement.querySelector('.children')        // fallback
+    || tfFolder.domElement.children[1];                      // last resort
+
+contentEl.appendChild(tfHost);
+contentEl.appendChild(btnRow);
+// Init editor
+const tf = new TransferFunctionEditor(tfHost, {
+    initialColorMap: {
+        colorStops: [
+            { stop: 0.0, color: 'blue' },
+            { stop: 0.5, color: 'white' },
+            { stop: 1.0, color: 'red' }
+        ],
+        interpolationMethod: 'HSL',
+        discrete: false,
+        bins: 8
+    }
+});
+
+const fileInput = document.getElementById('volume-input');
+if (fileInput) {
+    fileInput.addEventListener('change', async (e) => {
+        try {
+            const vol = await loadVolumeFromFiles(e.target.files);
+            const volumeTexture = new THREE.Data3DTexture(vol.data, vol.dims.x, vol.dims.y, vol.dims.z);
+            volumeTexture.format = THREE.RedFormat;
+            volumeTexture.type = THREE.UnsignedByteType;
+            volumeTexture.minFilter = THREE.LinearFilter;
+            volumeTexture.magFilter = THREE.LinearFilter;
+            volumeTexture.wrapS = volumeTexture.wrapT = volumeTexture.wrapR = THREE.ClampToEdgeWrapping;
+            volumeTexture.needsUpdate = true;
+
+            setVolumeTexture(volumeTexture);
+
+            const [sx, sy, sz] = vol.spacing || [1,1,1];
+            setBoxScale(vol.dims, [sx, sy, sz]);
+
+            renderProps.composition = 'Emission/Absorption';
+            material.uniforms.composition.value = COMP.EA;
+            material.needsUpdate = true;
+            renderer.render(scene, camera);
+        } catch (err) {
+            console.error(err);
+            alert(err.message || String(err));
+        }
+    });
+}
+
+function updateUI() {
+    // resolve current composition
+    const compName = renderProps.composition;
+    const compId =
+        compName === 'Maximum Intensity'      ? COMP.MIP :
+            compName === 'First Hit'              ? COMP.ISO :
+                compName === 'Emission/Absorption'    ? COMP.EA  :
+                    COMP.AVG;
+
+    // resolve shading mode
+    const shadeId = shadingOptions.find(o => o.name === renderProps.shading)?.id ?? SHADING.NONE;
+
+
+    const isEA  = compId === COMP.EA;
+    const isISO = compId === COMP.ISO;
+    const isMIP = compId === COMP.MIP;
+    const isAVG = compId === COMP.AVG;
+
+    isEA ? densityCtrl.show() : densityCtrl.hide();
+
+
+    (isISO || isMIP || isAVG) ? alphaCtrl.show() : alphaCtrl.hide();
+
+    isISO ? isoCtrl.show() : isoCtrl.hide();
+
+    (isEA || isISO) ? shadingCtrl.show() : shadingCtrl.hide();
+
+
+    if ((isEA || isISO) && shadeId !== SHADING.NONE) {
+        gradientCtrl.show();
+        lightFolder.show();
+    } else {
+        gradientCtrl.hide();
+        lightFolder.hide();
+    }
+}
+function lerpAlpha(stops, x) {
+    if (!stops || !stops.length) return 1.0;
+    x = Math.min(1, Math.max(0, x));
+    const s = stops.slice().sort((a,b)=>a.stop-b.stop);
+    if (x <= s[0].stop) return s[0].alpha;
+    for (let i=0;i<s.length-1;i++){
+        const a=s[i], b=s[i+1];
+        if (x>=a.stop && x<=b.stop){
+            const t=(x-a.stop)/Math.max(1e-6,(b.stop-a.stop));
+            return (1-t)*a.alpha + t*b.alpha;
+        }
+    }
+    return s[s.length-1].alpha;
+}
+
+function makeTFTextureFromEditor(tfObj, count=256, alphaScale=1.0) {
+    const { colorMap, alphaStops } = tfObj;
+    const { colorStops, interpolationMethod='RGB', discrete=false, bins=8 } = colorMap;
+
+    const positions = colorStops.map(s=>s.stop);
+    const colorsStr = colorStops.map(s=>s.color);
+    const mode = interpolationMethod.toLowerCase();
+    const cscale = chroma.scale(colorsStr).domain(positions).mode(mode);
+
+    const lut = new Uint8Array(count*4);
+    const steps = discrete ? Math.max(2, (bins|0)) : count;
+
+    for (let i=0;i<count;i++){
+        let v = i/(count-1);
+        if (discrete){
+            const q = Math.floor(v*steps)/(steps-1);
+            v = Math.min(1, Math.max(0, q));
+        }
+        const [r,g,b] = cscale(v).rgb();
+        const a = Math.max(0, Math.min(1, lerpAlpha(alphaStops, v) * alphaScale));
+        const k = 4*i;
+        lut[k+0]=r|0; lut[k+1]=g|0; lut[k+2]=b|0; lut[k+3]=Math.round(255*a);
+    }
+
+    const tex = new THREE.DataTexture(lut, count, 1);
+    tex.format = THREE.RGBAFormat;
+    tex.type = THREE.UnsignedByteType;
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.wrapS = THREE.ClampToEdgeWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.needsUpdate = true;
+    return tex;
+}
+
+function applyTransferFunction() {
+    const state = tf.getTransferFunction();
+    const tex = makeTFTextureFromEditor(state, 256, renderProps.alphaScale);
+    colorTexture = tex;
+    material.uniforms.colorTexture.value = tex;
+    material.uniforms.colorTexture.value.needsUpdate = true;
+}
+
+// Update LUT on change
+tf.addListener(applyTransferFunction);
+applyTransferFunction();
+
+
+await loadExample('Subclavia')
+
+async function loadExample(name) {
+    if (!name) return;
+
+    const base = import.meta.env.BASE_URL;
+
+    const res = await fetch(`${base}examples/${name}.meta.json`);
+    const meta = await res.json();
+
+    const rawUrl = `${base}examples/${name}.raw`;
+    const bufRes = await fetch(rawUrl);
+
+    if (!bufRes.ok) {
+        throw new Error(`Could not load ${name}.raw (status ${bufRes.status})`);
+    }
+
+    const buf = await bufRes.arrayBuffer();
+
+    if (buf.byteLength === 0) {
+        throw new Error(`Loaded RAW but it was empty! Check if file exists at ${rawUrl}`);
+    }
+    const typemap = {
+        uint8: Uint8Array, int8: Int8Array,
+        uint16: Uint16Array, int16: Int16Array,
+        float32: Float32Array, float64: Float64Array
+    };
+    const Typed = typemap[(meta.type || 'uint8').toLowerCase()] || Uint8Array;
+
+    const typed = new Typed(buf);
+
+    const voxCount = meta.dims[0] * meta.dims[1] * meta.dims[2];
+    if (typed.length < voxCount) {
+        throw new Error(`RAW too small: ${typed.length} < ${voxCount}`);
+    }
+
+    let voxels;
+    if (Typed === Uint8Array) {
+        // slice to exact voxCount in case of padding
+        voxels = typed.length === voxCount ? typed : typed.subarray(0, voxCount);
+    } else {
+        let min = Infinity, max = -Infinity;
+        for (let i = 0; i < voxCount; i++) {
+            const v = typed[i];
+            if (v < min) min = v;
+            if (v > max) max = v;
+        }
+        const range = max - min || 1;
+
+        voxels = new Uint8Array(voxCount);
+        for (let i = 0; i < voxCount; i++) {
+            voxels[i] = Math.round(255 * (typed[i] - min) / range);
+        }
+    }
+
+    const tex = new THREE.Data3DTexture(
+        voxels,
+        meta.dims[0], meta.dims[1], meta.dims[2]
+    );
+    tex.format = THREE.RedFormat;
+    tex.type   = THREE.UnsignedByteType;
+    tex.minFilter = tex.magFilter = THREE.LinearFilter;
+    tex.wrapS = tex.wrapT = tex.wrapR = THREE.ClampToEdgeWrapping;
+    tex.needsUpdate = true;
+
+    setVolumeTexture(tex);
+
+    const spacing = meta.spacing || [1,1,1];
+    setBoxScale({ x: meta.dims[0], y: meta.dims[1], z: meta.dims[2] }, spacing);
+
+    await tryLoadConfigAndApply(name);
+    renderer.render(scene, camera);
+}
+
+document.getElementById('example-select')
+    .addEventListener('change', e => loadExample(e.target.value));
+
+
+async function tryLoadConfigAndApply(name) {
+    const baseName = String(name).replace(/(\.nii(\.gz)?|\.raw|\.zip|\.json)$/i, '');
+    const baseUrl  = import.meta.env.BASE_URL;
+    const url      = `${baseUrl}examples/${baseName}.config.json`;
+
+    try {
+        const res = await fetch(url, { cache: 'no-cache' });
+        if (!res.ok) {
+            console.warn(`No config for ${baseName}, skipping.`);
+            return;
+        }
+        const cfg = await res.json();
+        applyExampleConfig(cfg);
+    } catch (err) {
+        console.error(`Error loading config for ${baseName}:`, err);
+    }
+}
+
+function applyExampleConfig(cfg = {}) {
+    // Transfer Function
+    if (cfg.tf) {
+        let appliedViaEditor = false;
+
+        if (typeof tf?.setTransferFunction === 'function') {
+            try {
+                tf.setTransferFunction({
+                    colorMap:   cfg.tf.colorMap,
+                    alphaStops: cfg.tf.alphaStops || []
+                });
+                applyTransferFunction();
+                appliedViaEditor = true;
+            } catch (e) {
+                console.warn('TF editor rejected preset, falling back to direct LUT', e);
+            }
+        }
+
+        // Fallback: build LUT directly from config and push to shader
+        if (!appliedViaEditor) {
+            const alphaScale =
+                (cfg.render && typeof cfg.render.alphaScale === 'number')
+                    ? cfg.render.alphaScale
+                    : renderProps.alphaScale;
+
+            const tex = makeTFTextureFromEditor(
+                { colorMap: cfg.tf.colorMap, alphaStops: cfg.tf.alphaStops || [] },
+                256,
+                alphaScale
+            );
+            colorTexture = tex;
+            material.uniforms.colorTexture.value = tex;
+            material.uniforms.colorTexture.value.needsUpdate = true;
+        }
+    }
+
+    // Render
+    if (cfg.render) {
+        if (cfg.render.composition) {
+            compCtrl?.setValue(cfg.render.composition);
+        }
+        if (cfg.render.shading) {
+            shadingCtrl?.setValue(cfg.render.shading);
+        }
+
+        if (cfg.render.gradient) {
+            gradientCtrl?.setValue(cfg.render.gradient);
+        }
+
+        if (typeof cfg.render.samplingRate === 'number') {
+            samplingCtrl?.setValue(cfg.render.samplingRate);
+            material.uniforms.samplingRate.value = cfg.render.samplingRate;
+        }
+        if (typeof cfg.render.alphaScale === 'number') {
+            alphaCtrl?.setValue(cfg.render.alphaScale);
+            material.uniforms.alphaScale.value = cfg.render.alphaScale;
+        }
+        if (typeof cfg.render.threshold === 'number') {
+            isoCtrl?.setValue(cfg.render.threshold);
+            material.uniforms.threshold.value = cfg.render.threshold;
+        }
+        if (typeof cfg.render.invertColor === 'boolean') {
+            invertCtrl?.setValue(cfg.render.invertColor);
+            material.uniforms.invertColor.value = cfg.render.invertColor; // bool
+        }
+        if (typeof cfg.render.densityScale === 'number') {
+            densityCtrl?.setValue(cfg.render.densityScale);
+            material.uniforms.densityScale.value = cfg.render.densityScale;
+        }
+        if (cfg.render.rotations) {
+            if ('x' in cfg.render.rotations) rotXCtrl?.setValue(!!cfg.render.rotations.x);
+            if ('y' in cfg.render.rotations) rotYCtrl?.setValue(!!cfg.render.rotations.y);
+            if ('z' in cfg.render.rotations) rotZCtrl?.setValue(!!cfg.render.rotations.z);
+        }
+
+        // Lighting
+        if (cfg.render?.lighting) {
+            const L = cfg.render.lighting;
+            if (typeof L.intensity === 'number') {
+                material.uniforms.lightIntensity.value = L.intensity;
+            }
+            if (typeof L.ambient === 'number') {
+                material.uniforms.ambient.value = L.ambient;
+            }
+            if (typeof L.shininess === 'number') {
+                material.uniforms.shininess.value = L.shininess;
+            }
+            if (typeof L.enabled === 'boolean' && material.uniforms.enableLighting) {
+                material.uniforms.enableLighting.value = L.enabled;
+            }
+        }
+
+        if (cfg.render?.lighting) {
+            const L = cfg.render.lighting;
+            if (typeof L.intensity === 'number') lightIntensityCtrl.setValue(L.intensity);
+            if (typeof L.ambient   === 'number') ambientCtrl.setValue(L.ambient);
+            if (typeof L.shininess === 'number') shininessCtrl.setValue(L.shininess);
+        }
+
+    }
+    updateUI();
+    renderer.render(scene, camera);
+}
+// Rendering Loop
+function animate() {
+    if (material) {
+        box.material.uniforms.cameraPosition.value.copy(camera.position);
+    }
+
+    const s = renderProps.speed || 0.002;
+    const rot = renderProps.rotations;
+    if (rot.x) box.rotation.x += s;
+    if (rot.y) box.rotation.y += s;
+    if (rot.z) box.rotation.z += s;
+
+    controls.update?.();
+
+    renderer.render(scene, camera);
+    rafId = requestAnimationFrame(animate);
+}
+rafId = requestAnimationFrame(animate);
+```
+
+### DirectVolume-Renderer/src/file_loader/volume_loader.js
+```
+import * as nifti from 'nifti-reader-js';
+import pako from 'pako';
+
+// Helpers
+function ext(name='') {
+    const m = name.toLowerCase().match(/\.([^.]+)$/);
+    return m ? m[1] : '';
+}
+function isGz(name='') {
+    return name.toLowerCase().endsWith('.gz');
+}
+function readAsArrayBuffer(file) {
+    return new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onload = () => res(fr.result);
+        fr.onerror = rej;
+        fr.readAsArrayBuffer(file);
+    });
+}
+function findFileByName(fileList, name) {
+    const lower = name.toLowerCase();
+    return [...fileList].find(f => f.name.toLowerCase().endsWith(lower));
+}
+function toUint8(dataTyped) {
+    let min = +Infinity, max = -Infinity;
+    const len = dataTyped.length;
+    for (let i=0;i<len;i++) { const v = dataTyped[i]; if (v < min) min = v; if (v > max) max = v; }
+    const range = (max - min) || 1;
+    const out = new Uint8Array(len);
+    for (let i=0;i<len;i++) out[i] = Math.round(255 * (dataTyped[i] - min) / range);
+    return { data: out, min, max };
+}
+
+// NIfTI (.nii / .nii.gz)
+export async function loadNifti(file) {
+    const ab = await readAsArrayBuffer(file);
+    const buf = isGz(file.name) ? pako.ungzip(new Uint8Array(ab)).buffer : ab;
+
+    if (!nifti.isNIFTI(buf)) throw new Error('Not a valid NIFTI file');
+    const header = nifti.readHeader(buf);
+    const image  = nifti.readImage(header, buf);
+
+    const dtypeMap = {
+        2: Uint8Array, 4: Int16Array, 8: Int32Array,
+        16: Float32Array, 64: Float64Array, 512: Uint16Array, 768: Uint32Array
+    };
+    const Typed = dtypeMap[header.datatypeCode] || Uint8Array;
+    const typed = new Typed(image);
+
+    const dims = { x: header.dims[1], y: header.dims[2], z: header.dims[3] };
+    const spacing = [header.pixDims[1]||1, header.pixDims[2]||1, header.pixDims[3]||1];
+
+    const { data } = Typed === Uint8Array ? { data: typed } : toUint8(typed);
+
+    return {
+        name: file.name,
+        data,
+        dims,
+        spacing,
+        dataType: Typed.name.toLowerCase(),
+        meta: { header }
+    };
+}
+
+// RAW (.raw / .raw.gz) + sidecar JSON or META.JSON
+async function loadRAW(file, allFiles) {
+    const ab0 = await readAsArrayBuffer(file);
+    let u8 = new Uint8Array(ab0);
+    if (isGz(file.name)) u8 = pako.ungzip(u8);
+
+    // sidecar lookup by basename
+    const base = file.name.replace(/\.gz$/i, '').replace(/\.[^.]+$/,'');
+    const findSidecar = (exts) => {
+        for (const e of exts) {
+            const f = findFileByName(allFiles, `${base}.${e}`);
+            if (f) return f;
+        }
+        return null;
+    };
+
+    // parse JSON meta
+    const jsonSidecar = findSidecar(['meta.json','json']);
+    if (!jsonSidecar) throw new Error('RAW: missing sidecar meta.json/json with dims/spacing/type');
+
+    let text = new TextDecoder().decode(await readAsArrayBuffer(jsonSidecar));
+    text = text.replace(/^\uFEFF/, ''); // strip BOM if present
+    const meta = JSON.parse(text);
+
+    if (!meta.dims || meta.dims.length < 3) throw new Error('RAW: meta.json missing dims [x,y,z]');
+    const dims = { x: meta.dims[0], y: meta.dims[1], z: meta.dims[2] };
+    const spacing = Array.isArray(meta.spacing) && meta.spacing.length >= 3 ? meta.spacing.slice(0,3) : [1,1,1];
+    const dtype = String(meta.type || 'uint8').toLowerCase();
+
+    const typemap = {
+        'uint8': Uint8Array, 'u8': Uint8Array, 'uchar': Uint8Array, 'unsigned char': Uint8Array,
+        'int8': Int8Array, 'i8': Int8Array, 'char': Int8Array,
+        'uint16': Uint16Array, 'u16': Uint16Array, 'ushort': Uint16Array, 'unsigned short': Uint16Array,
+        'int16': Int16Array, 'i16': Int16Array, 'short': Int16Array,
+        'uint32': Uint32Array, 'u32': Uint32Array, 'unsigned int': Uint32Array,
+        'int32': Int32Array, 'i32': Int32Array, 'int': Int32Array,
+        'float32': Float32Array, 'f32': Float32Array, 'float': Float32Array,
+        'float64': Float64Array, 'f64': Float64Array, 'double': Float64Array,
+    };
+    const Typed = typemap[dtype] || Uint8Array;
+
+    const voxCount = dims.x * dims.y * dims.z;
+    const bytesPerSample = (new Typed(1)).BYTES_PER_ELEMENT;
+    const needed = voxCount * bytesPerSample;
+    if (u8.byteLength < needed) {
+        throw new Error(`RAW: payload too small (${u8.byteLength} < ${needed}) for ${dims.x}x${dims.y}x${dims.z} @ ${dtype}`);
+    }
+
+    let outU8;
+    if (Typed === Uint8Array) {
+        outU8 = u8.subarray(0, voxCount);
+    } else {
+        const buf = u8.buffer.slice(u8.byteOffset, u8.byteOffset + needed);
+        const typed = new Typed(buf);
+        outU8 = toUint8(typed).data;
+    }
+
+    return {
+        name: file.name,
+        data: outU8,
+        dims,
+        spacing,
+        dataType: dtype,
+        meta: { format: 'raw+json' }
+    };
+}
+
+// General Load Function
+export async function loadVolumeFromFiles(fileList) {
+    const files = [...fileList];
+    if (!files.length) throw new Error('No files selected');
+
+    const lc = (s) => s.toLowerCase();
+    const parentKey = (f) => {
+        const p = f.webkitRelativePath || f.name;
+        const parts = lc(p).split('/');
+        return parts.slice(0, -1).join('/');
+    };
+    const baseKey = (name) => {
+        let n = lc(name);
+        if (n.endsWith('.gz')) n = n.slice(0, -3);
+        if (n.endsWith('.meta.json')) return n.slice(0, -('.meta.json'.length));
+        return n.replace(/\.[^.]+$/, '');
+    };
+    const isRaw = (f) => {
+        const n = lc(f.name);
+        return n.endsWith('.raw') || n.endsWith('.raw.gz');
+    };
+    const isJson = (f) => {
+        const n = lc(f.name);
+        return n.endsWith('.meta.json') || n.endsWith('.json');
+    };
+
+    // RAW + (meta).json pairing
+    if (files.length > 1) {
+        const groups = new Map(); // key: parent::base -> { raws:[], jsons:[] }
+        for (const f of files) {
+            const key = `${parentKey(f)}::${baseKey(f.name)}`;
+            if (!groups.has(key)) groups.set(key, { raws: [], jsons: [] });
+            const g = groups.get(key);
+            if (isRaw(f)) g.raws.push(f);
+            else if (isJson(f)) g.jsons.push(f);
+        }
+        for (const g of groups.values()) {
+            if (g.raws.length && g.jsons.length) {
+                return await loadRAW(g.raws[0], files);
+            }
+        }
+    }
+
+    // .nii / .nii.gz / .raw(.gz)
+    const f = files[0];
+    const e = ext(f.name);
+    if (e === 'nii' || (e === 'gz' && lc(f.name).endsWith('.nii.gz'))) {
+        return await loadNifti(f);
+    }
+    if (e === 'raw' || (e === 'gz' && lc(f.name).endsWith('.raw.gz'))) {
+        return await loadRAW(f, files);
+    }
+
+    // Nothing else is supported
+    throw new Error(`Unsupported file(s): ${files.map(f => f.name).join(', ')}. Supported: .nii/.nii.gz, .raw + .meta.json`);
+}
+```
+
+### DirectVolume-Renderer/src/shaders/dvr.frag
+```
+precision highp sampler3D;
+precision highp float;
+
+uniform sampler3D dataTexture;
+uniform sampler2D colorTexture;
+uniform float samplingRate;
+uniform float threshold;
+uniform float alphaScale;
+uniform bool invertColor;
+uniform int composition;
+
+uniform vec3  lightPosObj;
+uniform vec3  lightColor;
+uniform float lightIntensity;
+uniform float ambient;
+uniform float shininess;
+uniform bool  enableLighting;
+
+
+uniform int shadingMode;
+// Shading modes
+const int SHADING_NONE       = 0;
+const int SHADING_LAMBERT    = 1;
+const int SHADING_PHONG      = 2;
+const int SHADING_BLINNPHONG = 3;
+
+uniform int gradientMode;
+const int GRADIENT_CENTRAL = 0;
+const int GRADIENT_SOBEL   = 1;
+
+uniform float densityScale;
+
+in vec3 vOrigin;
+in vec3 vDirection;
+
+out vec4 frag_color;
+
+float sampleData(vec3 coord) {
+    return texture(dataTexture, coord).x;
+}
+
+vec4 sampleColor(float value) {
+    float x = invertColor ? 1.0 - value : value;
+    return texture(colorTexture, vec2(x, 0.5));
+}
+
+vec2 intersectAABB(vec3 rayOrigin, vec3 rayDir, vec3 boxMin, vec3 boxMax) {
+    vec3 tMin = (boxMin - rayOrigin) / rayDir;
+    vec3 tMax = (boxMax - rayOrigin) / rayDir;
+    vec3 t1 = min(tMin, tMax);
+    vec3 t2 = max(tMin, tMax);
+    float tNear = max(max(t1.x, t1.y), t1.z);
+    float tFar = min(min(t2.x, t2.y), t2.z);
+
+    return vec2(tNear, tFar);
+}
+
+
+// size of a texel in texture space
+vec3 voxelSizeTex() {
+    vec3 dims = vec3(textureSize(dataTexture, 0));
+    return 1.0 / (dims - vec3(1.0));
+}
+
+// Central difference
+vec3 gradientCentral(vec3 textureCoord) {
+    vec3 h = voxelSizeTex();
+    float dx = sampleData(textureCoord + vec3(h.x,0,0)) - sampleData(textureCoord - vec3(h.x,0,0));
+    float dy = sampleData(textureCoord + vec3(0,h.y,0)) - sampleData(textureCoord - vec3(0,h.y,0));
+    float dz = sampleData(textureCoord + vec3(0,0,h.z)) - sampleData(textureCoord - vec3(0,0,h.z));
+    return vec3(dx, dy, dz);
+}
+
+// Sobel operator
+vec3 gradientSobel(vec3 textureCoord) {
+    vec3 h = voxelSizeTex();
+
+    const float k[3] = float[3](-1.0, 0.0, 1.0);  // derivative
+    const float s[3] = float[3]( 1.0, 2.0, 1.0);  // smoothing
+
+    float Gx = 0.0;
+    float Gy = 0.0;
+    float Gz = 0.0;
+
+    for (int dz = -1; dz <= 1; ++dz) {
+        int indexZ = dz + 1;
+        for (int dy = -1; dy <= 1; ++dy) {
+            int indexY = dy + 1;
+            for (int dx = -1; dx <= 1; ++dx) {
+                int indexX = dx + 1;
+
+                vec3 offset = vec3(dx, dy, dz) * h;
+                float v = sampleData(textureCoord + offset);
+
+                // separable Sobel weights
+                float wx = k[indexX] * s[indexY] * s[indexZ];
+                float wy = s[indexX] * k[indexY] * s[indexZ];
+                float wz = s[indexX] * s[indexY] * k[indexZ];
+
+                Gx += wx * v;
+                Gy += wy * v;
+                Gz += wz * v;
+            }
+        }
+    }
+
+    const float NORM = 1.0 / 16.0;
+    return vec3(Gx, Gy, Gz) * NORM;
+}
+
+vec3 gradientAt(vec3 textureCoord) {
+    if (gradientMode == GRADIENT_SOBEL) {
+        return gradientSobel(textureCoord);
+    } else {
+        return gradientCentral(textureCoord);
+    }
+}
+
+vec3 lambert(vec3 baseRGB, vec3 Ptex, vec3 VdirTex, vec3 Ntex) {
+    vec3 LposTex = (lightPosObj - vec3(-0.5)) / (vec3(0.5) - vec3(-0.5));
+    vec3 N = normalize(Ntex);
+    vec3 L = normalize(LposTex - Ptex);
+    float diff = max(dot(N, L), 0.0);
+    return baseRGB * (ambient + diff * lightIntensity) * lightColor;
+}
+
+vec3 phong(vec3 baseRGB, vec3 Ptex, vec3 VdirTex, vec3 Ntex) {
+    vec3 LposTex = (lightPosObj - vec3(-0.5)) / (vec3(0.5) - vec3(-0.5));
+    vec3 N = normalize(Ntex);
+    vec3 L = normalize(LposTex - Ptex);
+    vec3 V = normalize(-VdirTex);
+    vec3 R = reflect(-L, N);
+    float diff = max(dot(N, L), 0.0);
+    float spec = (diff > 0.0) ? pow(max(dot(R, V), 0.0), shininess) : 0.0;
+    vec3 light = ambient * vec3(1.0) + (diff + spec) * lightColor * lightIntensity;
+    return baseRGB * light;
+}
+
+vec3 blinnPhong(vec3 baseRGB, vec3 Ptex, vec3 VdirTex, vec3 Ntex) {
+    if (!enableLighting) return baseRGB;
+
+    // convert light from object-space [-.5,.5] to texture space [0,1]
+    vec3 LposTex = (lightPosObj - vec3(-0.5)) / (vec3(0.5) - vec3(-0.5));
+
+    vec3 N = normalize(Ntex);
+    vec3 L = normalize(LposTex - Ptex);
+    vec3 V = normalize(-VdirTex);
+    vec3 H = normalize(L + V);
+
+    float diff = max(dot(N, L), 0.0);
+    float spec = (diff > 0.0) ? pow(max(dot(N, H), 0.0), shininess) : 0.0;
+
+    vec3 light = ambient * vec3(1.0) + (diff + spec) * lightColor * lightIntensity;
+    return baseRGB * light;
+}
+
+
+vec4 MIP(vec4 color, vec3 entryPoint, vec3 rayDir, float samples, float tStart, float tEnd, float tIncr) {
+    float density = 0.0;
+    for (float i = 0.0; i < samples; i += 1.0) {
+        float t = tStart + tIncr * i;
+        vec3 p = entryPoint + rayDir * t;
+
+        float value = sampleData(p);
+
+        if (value > density) {
+            density = value;
+        }
+
+        if (density >= 1.0 || t > tEnd) {
+            break;
+        }
+    }
+
+    color.rgb = sampleColor(density).rgb;
+
+    color.a = alphaScale * (invertColor ? 1.0 - density: density);
+
+    return color;
+}
+
+vec4 IsoSurface(vec4 color, vec3 entryPoint, vec3 rayDir, float samples, float tStart, float tEnd, float tIncr) {
+    for (float i = 0.0; i < samples; i += 1.0) {
+        float t = tStart + tIncr * i;
+        vec3 p = entryPoint + rayDir * t;
+
+        float value = sampleData(p);
+
+        if (value >= threshold || t > tEnd) {
+            vec4 valueColor = sampleColor(value);
+
+            vec3 lightRGB;
+            if (shadingMode == SHADING_NONE) {
+                lightRGB = valueColor.rgb;
+            } else if (shadingMode == SHADING_LAMBERT) {
+                lightRGB = lambert(valueColor.rgb, p, rayDir, gradientAt(p));
+            } else if (shadingMode == SHADING_PHONG) {
+                lightRGB = phong(valueColor.rgb, p, rayDir, gradientAt(p));
+            } else if (shadingMode == SHADING_BLINNPHONG) {
+                lightRGB = blinnPhong(valueColor.rgb, p, rayDir, gradientAt(p));
+            }
+
+            color.rgb = lightRGB;
+            color.a   = alphaScale;
+            break;
+        }
+    }
+
+    return color;
+}
+
+vec4 EmissonAbsorption(vec4 color, vec3 entryPoint, vec3 rayDir, float samples, float tStart, float tEnd, float tIncr) {
+    for (float i = 0.0; i < samples; i += 1.0) {
+        float t = tStart + tIncr * i;
+        vec3 p = entryPoint + rayDir * t;
+
+        float value = sampleData(p);
+        vec4 valueColor = sampleColor(value);
+
+        vec3 lightRGB;
+        if (shadingMode == SHADING_NONE) {
+            lightRGB = valueColor.rgb;
+        } else if (shadingMode == SHADING_LAMBERT) {
+            lightRGB = lambert(valueColor.rgb, p, rayDir, gradientAt(p));
+        } else if (shadingMode == SHADING_PHONG) {
+            lightRGB = phong(valueColor.rgb, p, rayDir, gradientAt(p));
+        } else if (shadingMode == SHADING_BLINNPHONG) {
+            lightRGB = blinnPhong(valueColor.rgb, p, rayDir, gradientAt(p));
+        }
+        // Beer-Lambert
+        float sigma = max(0.0, value * densityScale);
+        valueColor.a = (1.0 - exp(-sigma * tIncr)) * valueColor.a;
+        valueColor.a = clamp(valueColor.a, 0.0, 1.0);
+
+        // Front to Back Alpha Blending
+        color.rgb += (1.0 - color.a) * valueColor.a * lightRGB;
+        color.a += (1.0 - color.a) * valueColor.a;
+
+        // Early Exit
+        if (color.a >= 0.97 || t > tEnd) {
+            break;
+        }
+    }
+    return color;
+}
+
+vec4 Average(vec4 color, vec3 entryPoint, vec3 rayDir, float samples, float tStart, float tEnd, float tIncr) {
+    float sum = 0.0;
+    float count = 0.0;
+
+    for (float i = 0.0; i < samples; i += 1.0) {
+        float t = tStart + tIncr * i;
+        if (t > tEnd) {
+            break;
+        }
+        vec3 p = entryPoint + rayDir * t;
+
+        float value = sampleData(p);
+
+        sum += value;
+        count++;
+
+    }
+    float mean = (count > 0.0) ? (sum / count) : 0.0;
+    vec3 rgb = sampleColor(mean).rgb;
+    return vec4(rgb, alphaScale);
+}
+
+
+
+void main() {
+    vec3 rayDir = normalize(vDirection);
+    vec3 aabbmin = vec3(-0.5);
+    vec3 aabbmax = vec3(0.5);
+    vec2 intersection = intersectAABB(vOrigin, rayDir, aabbmin, aabbmax);
+
+    vec4 color = vec4(0.0);
+
+    if (intersection.x <= intersection.y) {
+        intersection.x = max(intersection.x, 0.0);
+
+        vec3 entryPoint = vOrigin + rayDir * intersection.x;
+        vec3 exitPoint = vOrigin + rayDir * intersection.y;
+
+        vec3 dimensions = vec3(textureSize(dataTexture, 0));
+        vec3 entryToExit = exitPoint - entryPoint;
+        float samples = ceil(samplingRate * length(entryToExit * (dimensions - vec3(1.0))));
+        float tEnd = length(entryToExit);
+        float tIncr = tEnd / samples;
+        float tStart = 0.5 * tIncr;
+
+        vec3 texEntry = (entryPoint - aabbmin) / (aabbmax - aabbmin);
+
+        if (composition == 0)
+        {
+            color = MIP(color, texEntry, rayDir, samples, tStart, tEnd, tIncr);
+        } else if (composition == 1){
+            color = IsoSurface(color, texEntry, rayDir, samples, tStart, tEnd, tIncr);
+        } else if (composition == 2) {
+            color = EmissonAbsorption(color, texEntry, rayDir, samples, tStart, tEnd, tIncr);
+        } else if (composition == 3) {
+            color = Average(color, texEntry, rayDir, samples, tStart, tEnd, tIncr);
+        }
+    }
+    frag_color = color;
+}
+```
+
+### DirectVolume-Renderer/src/shaders/dvr.vert
+```
+in vec3 position;
+
+uniform mat4 modelMatrix;
+uniform mat4 modelViewMatrix;
+uniform mat4 projectionMatrix;
+uniform vec3 cameraPosition;
+
+out vec3 vOrigin; // ray origin
+out vec3 vDirection; // ray direction
+
+void main() {
+    vOrigin = vec3(inverse(modelMatrix) * vec4(cameraPosition, 1.0)).xyz;
+    vDirection = position - vOrigin;
+
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+```
+
+### DirectVolume-Renderer/src/tfeditor_js/ColorMapEditor.js
+```
+import { InterpolationMethod } from './Types';
+import { ColorPicker } from './ColorPicker';
+import objectAssignDeep from 'object-assign-deep';
+import { getColorFromColorMapAt, getColorMapBins } from './convert';
+import * as d3Color from 'd3-color';
+import { drawControlPoint } from './draw';
+import Container from './Container';
+/**
+ * This creates a color map editor component, where the user can create a color gradient using stops and colors.
+ *
+ * @example
+ *   const cm = new ColorMapEditor("#cm", {
+ *     initialColorMap: {
+ *       colorStops: [
+ *         { stop: 0, color: "#0f0" },
+ *         { stop: 0.5, color: "#f00" },
+ *         { stop: 1, color: "#000" }
+ *       ]
+ *     }
+ *   });
+ *
+ *   cm.addListener((colorMapEditor) => {
+ *     console.log(colorMapEditor.getColorMap());
+ *     // output:
+ *     // {
+ *     //   colorStops: [{stop: 0, color: "#0f0"},{stop: 0.5, color: "#f00"},{stop: 1, color: "#000"}],
+ *     //   interpolationMethod: "HSL_LONG"
+ *     // }
+ *   });
+ */
+export class ColorMapEditor extends Container {
+    /**
+     * Creates a new color map editor inside the given container.
+     *
+     * @param container Either an HTMLElement or a query string to an element, in which the editor will be embedded.
+     * @param options   Can be used to configure the color map editor. See {@link ColorMapEditorOptions}.
+     */
+    constructor(container, options) {
+        super(container);
+        /** This gets called when the color changes to notify users of this library. */
+        this.callbacks = new Map();
+        this.callbackCounter = 0;
+        // Set all defaults.
+        const defaultOptions = {
+            initialColorMap: {
+                colorStops: [
+                    { stop: 0, color: 'green' },
+                    { stop: 0.5, color: 'yellow' },
+                    { stop: 1, color: 'red' },
+                ],
+                interpolationMethod: InterpolationMethod.HSL,
+                discrete: false,
+                bins: 7,
+            },
+            showStopNumbers: false,
+            interpolationMethodsEditable: true,
+            binSelectorEditable: true,
+            controlPointSize: 7,
+        };
+        // Merge the options with the defaults.
+        // !!! DON'T USE options AND defaultOptions AFTER THIS LINE !!!
+        const finalOptions = objectAssignDeep(defaultOptions, options);
+        this.colorStops = finalOptions.initialColorMap.colorStops;
+        this.sortControlPoints();
+        this.showStopNumbers = finalOptions.showStopNumbers;
+        this.interpolationMethod = finalOptions.initialColorMap.interpolationMethod;
+        this.discrete = finalOptions.initialColorMap.discrete;
+        this.bins = finalOptions.initialColorMap.bins;
+        this.controlPointSize = finalOptions.controlPointSize;
+        this.parent.classList.add('tfe-color-map-editor');
+        // This contains the canvas and the controls.
+        this.rootElement = document.createElement('div');
+        this.rootElement.classList.add('tfe-color-map-editor-root');
+        this.rootElement.style.display = 'flex';
+        this.rootElement.style.flexDirection = 'column';
+        this.rootElement.style.gap = '5px';
+        this.parent.appendChild(this.rootElement);
+        // Prepare the canvas and the context.
+        this.canvas = document.createElement('canvas');
+        this.canvas.width = this.parent.clientWidth;
+        this.canvas.height = this.parent.clientHeight;
+        this.rootElement.appendChild(this.canvas);
+        this.ctx = this.canvas.getContext('2d', { alpha: false });
+        // Prepare the container for the color picker and initialize it.
+        this.colorPickerContainer = document.createElement('div');
+        this.colorPickerContainer.classList.add('tfe-color-map-editor-color-picker-container');
+        this.colorPickerContainer.style.width = 'fit-content';
+        this.colorPickerContainer.style.padding = '12px';
+        this.colorPickerContainer.style.backgroundColor = 'white';
+        this.colorPickerContainer.style.border = '1px solid black';
+        this.colorPickerContainer.style.visibility = 'hidden';
+        this.colorPickerContainer.style.position = 'relative';
+        this.parent.appendChild(this.colorPickerContainer);
+        this.colorPicker = new ColorPicker(this.colorPickerContainer);
+        this.setUpInputElements(finalOptions);
+        this.draw();
+        // Add all event listeners.
+        this.addCanvasEventListeners();
+    }
+    /** Set new color stops. */
+    setColorStops(colorStops) {
+        this.colorStops = colorStops;
+        this.sortControlPoints();
+        this.draw();
+        this.sendUpdates();
+    }
+    /** Get the current color stops. */
+    getColorStops() {
+        return this.colorStops;
+    }
+    /** Sets the interpolation method used for interpolating colors between two stops. */
+    setInterpolationMethods(interpolationMethod) {
+        this.interpolationMethod = interpolationMethod;
+        if (this.interpolationMethodElement) {
+            this.interpolationMethodElement.value = this.interpolationMethod;
+        }
+        this.draw();
+        this.sendUpdates();
+    }
+    /** Get the interpolation method used for interpolating colors between two stops. */
+    getInterpolationMethods() {
+        return this.interpolationMethod;
+    }
+    /**
+     * Sets, if the resulting color map is discrete or continuous. If discrete is true, the bins property controls how many
+     * bins are shown.
+     */
+    setDiscrete(discrete) {
+        this.discrete = discrete;
+        if (this.discreteElement) {
+            this.binsElement.disabled = !this.discrete;
+        }
+        this.draw();
+        this.sendUpdates();
+    }
+    /** If the color map is discrete. */
+    isDiscrete() {
+        return this.discrete;
+    }
+    /** Sets the number of bins, if the color map is discrete. */
+    setBins(bins) {
+        this.bins = Math.max(bins, 0);
+        if (this.binsElement) {
+            this.binsElement.valueAsNumber = this.bins;
+        }
+        this.draw();
+        this.sendUpdates();
+    }
+    /** The number of bins, if the color map is discrete. */
+    getBins() {
+        return this.bins;
+    }
+    /** Set a new color map. */
+    setColorMap(colorMap) {
+        this.colorStops = colorMap.colorStops;
+        this.sortControlPoints();
+        this.discrete = colorMap.discrete;
+        this.bins = Math.max(colorMap.bins || 0, 0);
+        this.interpolationMethod = colorMap.interpolationMethod;
+        if (this.discreteElement && this.binsElement) {
+            this.discreteElement.checked = this.discrete;
+            this.binsElement.valueAsNumber = this.bins;
+            this.binsElement.disabled = !this.discrete;
+        }
+        if (this.interpolationMethodElement) {
+            this.interpolationMethodElement.value = this.interpolationMethod;
+        }
+        this.draw();
+        this.sendUpdates();
+    }
+    /** Get the current color map. */
+    getColorMap() {
+        return {
+            colorStops: this.colorStops,
+            interpolationMethod: this.interpolationMethod,
+            discrete: this.discrete || undefined,
+            bins: this.discrete ? this.bins : undefined,
+        };
+    }
+    /**
+     * This function returns an array of bins with their color, if the color map is discrete. Otherwise, it will return an
+     * empty array.
+     */
+    getDiscreteColorMap() {
+        return getColorMapBins(this.getColorMap());
+    }
+    /**
+     * Register a callback that gets called, when the color map changes. The callback gets called once immediately.
+     *
+     * @param callback The function that gets called whenever the color map changes.
+     */
+    addListener(callback) {
+        const id = this.callbackCounter++;
+        this.callbacks.set(id, callback);
+        callback(this);
+        return id;
+    }
+    /** Removes the listener with the given id. */
+    removeListener(id) {
+        this.callbacks.delete(id);
+    }
+    /** This function notifies all listeners to this color map editor. */
+    sendUpdates() {
+        this.callbacks.forEach((value) => value(this));
+    }
+    sortControlPoints() {
+        this.colorStops.sort((a, b) => a.stop - b.stop);
+    }
+    /** Draws the gradient and the control points. */
+    draw() {
+        // Draw the gradient.
+        for (let i = 0; i < this.canvas.width; ++i) {
+            this.ctx.fillStyle = getColorFromColorMapAt({
+                colorStops: this.colorStops,
+                interpolationMethod: this.interpolationMethod,
+                discrete: this.discrete,
+                bins: this.bins,
+            }, i / (this.canvas.width - 1));
+            this.ctx.fillRect(i, 0, 1, this.canvas.height);
+        }
+        // Draw the control points. To ensure visibility everywhere it is an alternating circle in white and black.
+        for (let i = 0; i < this.colorStops.length; i++) {
+            const x = this.colorStops[i].stop * this.canvas.width;
+            const y = 0.5 * this.canvas.height;
+            const color = this.colorStops[i].color;
+            this.ctx.fillStyle = color;
+            this.ctx.beginPath();
+            this.ctx.arc(x, y, this.controlPointSize, 0, 2 * Math.PI);
+            this.ctx.fill();
+            drawControlPoint(this.ctx, x, y, this.controlPointSize);
+            // Below the control point we draw the number of the stop, if enabled.
+            if (this.showStopNumbers) {
+                if (i === 0) {
+                    this.ctx.textAlign = 'left';
+                }
+                else if (i === this.colorStops.length - 1) {
+                    this.ctx.textAlign = 'right';
+                }
+                else {
+                    this.ctx.textAlign = 'center';
+                }
+                const brightness = d3Color.hsl(color).l;
+                this.ctx.fillStyle = brightness < 0.5 ? 'white' : 'black';
+                this.ctx.fillText(this.colorStops[i].stop.toPrecision(3), x, this.canvas.height - 1);
+            }
+        }
+    }
+    /** Adds event listeners for adding, removing and moving control points as well as showing the color picker. */
+    addCanvasEventListeners() {
+        // This flag prevents click events to trigger when dragging control points small distances.
+        let draggedBefore = false;
+        // Tracks if the user is currently dragging a control point.
+        let isDragging = false;
+        // The index of the currently dragged control point.
+        let dragIndex = -1;
+        // The AbortController is for removing the mousemove listener from the document, when the user stops dragging.
+        let abortController = null;
+        /**
+         * This function checks if a control point was selected, sets the dragIndex and isDragging fields and attaches a
+         * mouse move listener to the document. This allows for more consistent control.
+         */
+        const checkDragStart = (e) => {
+            // Figure out which control point was selected.
+            dragIndex = -1;
+            for (let i = 0; i < this.colorStops.length; i++) {
+                const stop = this.colorStops[i];
+                const dx = Math.abs(stop.stop * this.canvas.width - e.offsetX);
+                if (dx < this.controlPointSize) {
+                    dragIndex = i;
+                    isDragging = true;
+                    break;
+                }
+            }
+            if (isDragging) {
+                // Attach a mouse move listener to the document.
+                abortController = new AbortController();
+                document.addEventListener('mousemove', (e) => {
+                    e.preventDefault();
+                    if (dragIndex > 0 && dragIndex < this.colorStops.length - 1) {
+                        const offsetX = e.clientX - this.canvas.getBoundingClientRect().x;
+                        const leftBound = this.colorStops[dragIndex - 1].stop + Number.EPSILON;
+                        const rightBound = this.colorStops[dragIndex + 1].stop - Number.EPSILON;
+                        this.colorStops[dragIndex].stop = Math.max(leftBound, Math.min(rightBound, offsetX / this.canvas.width));
+                        this.draw();
+                        this.sendUpdates();
+                    }
+                    draggedBefore = true;
+                }, { signal: abortController.signal });
+            }
+        };
+        // This listener is responsible for:
+        //  - Starting dragging a control point, if one was pressed on with the left mouse button.
+        //  - Adding a control point if the left mouse button was pressed anywhere else (also starts dragging the newly
+        //    created point).
+        //  - Removing a control point on right click.
+        this.canvas.addEventListener('mousedown', (e) => {
+            draggedBefore = false;
+            if (e.button === 0) {
+                // Left Mouse Button
+                // Check if a control point was selected with the left mouse button.
+                checkDragStart(e);
+                if (!isDragging) {
+                    // If no control point was selected a new one is being created and also immediately dragged.
+                    const x = Math.max(0, Math.min(1, e.offsetX / this.canvas.width));
+                    const color = getColorFromColorMapAt({
+                        colorStops: this.colorStops,
+                        interpolationMethod: this.interpolationMethod,
+                        discrete: this.discrete,
+                        bins: this.bins,
+                    }, x);
+                    const stop = { stop: x, color };
+                    this.colorStops.push(stop);
+                    this.sortControlPoints();
+                    this.draw();
+                    this.sendUpdates();
+                    checkDragStart(e);
+                }
+            }
+            else if (e.button === 2) {
+                // Right Mouse Button
+                e.preventDefault();
+                // If a control point was pressed on with the RMB it gets removed.
+                for (let i = 1; i < this.colorStops.length - 1; i++) {
+                    const stop = this.colorStops[i];
+                    const dx = stop.stop * this.canvas.width - e.offsetX;
+                    const dy = 0.5 * this.canvas.height - e.offsetY;
+                    if (Math.sqrt(dx * dx + dy * dy) < this.controlPointSize) {
+                        this.colorStops.splice(i, 1);
+                        this.draw();
+                        this.sendUpdates();
+                        return;
+                    }
+                }
+            }
+        });
+        this.canvas.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            return false;
+        });
+        // This listener is responsible to stop the dragging action, once the mouse is lifted.
+        document.addEventListener('mouseup', () => {
+            if (isDragging && abortController) {
+                abortController.abort();
+                abortController = null;
+                isDragging = false;
+                dragIndex = -1;
+            }
+        });
+        // This saves the id of the callback from the color picker.
+        let colorPickerListener = -1;
+        // When clicking a control point the color picker is shown.
+        this.canvas.addEventListener('click', (e) => {
+            if (draggedBefore) {
+                return;
+            }
+            e.stopPropagation();
+            let stop = null;
+            for (let i = 0; i < this.colorStops.length; i++) {
+                stop = this.colorStops[i];
+                const dx = Math.abs(stop.stop * this.canvas.width - e.offsetX);
+                if (dx < this.controlPointSize) {
+                    break;
+                }
+            }
+            if (stop !== null) {
+                // Figure out, where to position the color picker popup, depending on the available space.
+                const pageY = this.canvas.height / 2 + this.canvas.getBoundingClientRect().y;
+                const viewPortHeight = window.innerHeight;
+                const cpHeight = this.colorPickerContainer.clientHeight;
+                if (pageY + cpHeight < viewPortHeight) {
+                    // Show below the point
+                    const y = this.canvas.height / 2;
+                    this.colorPickerContainer.style.bottom = `${y}px`;
+                }
+                else if (pageY - cpHeight > 0) {
+                    // Show above the point
+                    const y = this.canvas.height / 2 + cpHeight;
+                    this.colorPickerContainer.style.bottom = `${y}px`;
+                }
+                else {
+                    // Show vertically centered on the point
+                    const y = this.canvas.height / 2 + cpHeight / 2;
+                    this.colorPickerContainer.style.bottom = `${y}px`;
+                }
+                const pageX = stop.stop * this.canvas.width + this.canvas.getBoundingClientRect().x;
+                const viewPortWidth = window.innerWidth;
+                const cpWidth = this.colorPickerContainer.clientWidth;
+                if (pageX + cpWidth < viewPortWidth) {
+                    // Show right of the point
+                    const x = stop.stop * this.canvas.width;
+                    this.colorPickerContainer.style.left = `${x}px`;
+                }
+                else if (pageX - cpWidth > 0) {
+                    // Show left of the point
+                    const x = stop.stop * this.canvas.width - cpWidth;
+                    this.colorPickerContainer.style.left = `${x}px`;
+                }
+                else {
+                    // Show horizontally centered on the point
+                    const x = stop.stop * this.canvas.width - cpWidth / 2;
+                    this.colorPickerContainer.style.left = `${x}px`;
+                }
+                this.colorPickerContainer.style.visibility = 'visible';
+                this.colorPicker.removeListener(colorPickerListener);
+                this.colorPicker.setHEX(stop.color);
+                colorPickerListener = this.colorPicker.addListener((colorPicker) => {
+                    stop.color = colorPicker.getHEX();
+                    this.draw();
+                    this.sendUpdates();
+                });
+            }
+        });
+        // Hides the color picker, if you click outside it.
+        document.addEventListener('click', () => {
+            this.colorPickerContainer.style.visibility = 'hidden';
+        });
+        // This prevents the color picker from closing when clicking inside it.
+        this.colorPickerContainer.addEventListener('click', (e) => e.stopPropagation());
+        // Ensures that the canvas gets redrawn when its size changes.
+        const resizeObserver = new ResizeObserver(() => {
+            this.canvas.width = this.parent.clientWidth;
+            this.canvas.height = this.parent.clientHeight;
+            this.draw();
+        });
+        resizeObserver.observe(this.parent);
+    }
+    /**
+     * Depending on the users options this method creates a dropdown for selecting the interpolation method, a checkbox
+     * for toggling if the color map is discrete and a number input for the number of bins.
+     */
+    setUpInputElements(finalOptions) {
+        // If no controls are enabled we don't add anything to the DOM.
+        if (!finalOptions.interpolationMethodsEditable && !finalOptions.binSelectorEditable) {
+            return;
+        }
+        // The root of the inputs. It aligns them horizontally and wraps them if needed.
+        const settingsContainer = document.createElement('div');
+        settingsContainer.classList.add('tfe-color-map-editor-settings');
+        settingsContainer.style.display = 'flex';
+        settingsContainer.style.flexDirection = 'row';
+        settingsContainer.style.justifyContent = 'space-between';
+        settingsContainer.style.alignItems = 'center';
+        settingsContainer.style.flexWrap = 'wrap';
+        this.rootElement.appendChild(settingsContainer);
+        if (finalOptions.interpolationMethodsEditable) {
+            const label = document.createElement('label');
+            label.classList.add('tfe-color-map-editor-interpolation-method-label');
+            label.innerText = 'Interpolation: ';
+            this.interpolationMethodElement = document.createElement('select');
+            this.interpolationMethodElement.classList.add('tfe-color-map-editor-interpolation-method-select');
+            // Generate options for all interpolation methods.
+            for (let method of Object.keys(InterpolationMethod)) {
+                const option = document.createElement('option');
+                option.classList.add('tfe-color-map-editor-interpolation-method-option');
+                option.value = method;
+                option.innerText = method.replace('_', ' ');
+                this.interpolationMethodElement.options.add(option);
+            }
+            this.interpolationMethodElement.value = this.interpolationMethod;
+            this.interpolationMethodElement.addEventListener('change', () => {
+                this.interpolationMethod = InterpolationMethod[this.interpolationMethodElement.value];
+                this.draw();
+                this.sendUpdates();
+            });
+            label.appendChild(this.interpolationMethodElement);
+            settingsContainer.appendChild(label);
+        }
+        if (finalOptions.binSelectorEditable) {
+            const binSelectorRoot = document.createElement('div');
+            binSelectorRoot.classList.add('tfe-color-map-editor-bin-selector');
+            binSelectorRoot.style.display = 'flex';
+            binSelectorRoot.style.flexDirection = 'row';
+            binSelectorRoot.style.gap = '10px';
+            binSelectorRoot.style.alignItems = 'center';
+            settingsContainer.appendChild(binSelectorRoot);
+            const checkboxLabel = document.createElement('label');
+            checkboxLabel.classList.add('tfe-color-map-editor-bin-selector-checkbox-label');
+            checkboxLabel.innerText = 'discrete: ';
+            binSelectorRoot.appendChild(checkboxLabel);
+            this.discreteElement = document.createElement('input');
+            this.discreteElement.classList.add('tfe-color-map-editor-bin-selector-checkbox');
+            this.discreteElement.type = 'checkbox';
+            this.discreteElement.checked = this.discrete;
+            checkboxLabel.appendChild(this.discreteElement);
+            const binsLabel = document.createElement('label');
+            binsLabel.classList.add('tfe-color-map-editor-bin-selector-number-label');
+            binsLabel.innerText = 'bins: ';
+            binSelectorRoot.appendChild(binsLabel);
+            this.binsElement = document.createElement('input');
+            this.binsElement.classList.add('tfe-color-map-editor-bin-selector-number-input');
+            this.binsElement.style.width = '50px';
+            this.binsElement.disabled = !this.discrete;
+            this.binsElement.type = 'number';
+            this.binsElement.min = '0';
+            this.binsElement.step = '1';
+            this.binsElement.valueAsNumber = this.bins;
+            this.discreteElement.addEventListener('change', () => {
+                this.discrete = this.discreteElement.checked;
+                this.binsElement.disabled = !this.discrete;
+                this.draw();
+                this.sendUpdates();
+            });
+            this.binsElement.addEventListener('change', () => {
+                this.bins = this.binsElement.valueAsNumber;
+                this.draw();
+                this.sendUpdates();
+            });
+            // Add scroll wheel support to the number input.
+            this.binsElement.addEventListener('wheel', (ev) => {
+                ev.preventDefault();
+                let value = this.binsElement.valueAsNumber;
+                if (ev.deltaY > 0) {
+                    // Decrement
+                    value = Math.max(value - 1, 0);
+                }
+                else if (ev.deltaY < 0) {
+                    // Increment
+                    value = Math.max(value + 1, 0);
+                }
+                this.binsElement.valueAsNumber = Math.round(value);
+                this.bins = this.binsElement.valueAsNumber;
+                this.draw();
+                this.sendUpdates();
+            });
+            // Ensure that all user inputs are properly handled. For example empty and negative input.
+            const validateBins = (ev) => {
+                const el = ev.currentTarget;
+                if (!el.valueAsNumber || el.valueAsNumber < 0) {
+                    el.valueAsNumber = 0;
+                    this.bins = this.binsElement.valueAsNumber;
+                }
+                this.draw();
+                this.sendUpdates();
+            };
+            this.binsElement.addEventListener('focusout', validateBins);
+            this.binsElement.addEventListener('keypress', (ev) => {
+                if (ev.key === 'Enter') {
+                    validateBins(ev);
+                }
+            });
+            binsLabel.appendChild(this.binsElement);
+        }
+    }
+}
+```
+
+### DirectVolume-Renderer/src/tfeditor_js/ColorPicker.js
+```
+import { hsl as d3HSL } from 'd3-color';
+import { hsv as d3HSV } from 'd3-hsv';
+import { drawControlPoint } from './draw';
+import Container from './Container';
+import NumberInputField from './NumberInputField';
+/**
+ * This creates a color picker component, that will be embedded in the given container. The color can be chosen with a
+ * hue, saturation and value picker, or by text fields for hsv, rgb and hex values. This might be more configurable in
+ * the future.
+ *
+ * @example
+ * ```js
+ *   const cp = new ColorPicker("#color-picker-container", { initialColor: "cyan" });
+ *
+ *   cp.addListener((colorPicker) => {
+ *     console.log("rgb: ", colorPicker.getRGB()); // rgb: { r: 0, g: 255, b: 255 }
+ *     console.log("hsv: ", colorPicker.getHSV()); // hsv: { r: 180, g: 100, b: 50 }
+ *     console.log("hsl: ", colorPicker.getHSL()); // hsl: { h: 180, s: 100, l: 100 }
+ *
+ *     console.log("rgb: ", colorPicker.getRGBNormalized()); // rgb: { r: 0.0, g: 1.0, b: 1.0 }
+ *     console.log("hsv: ", colorPicker.getHSVNormalized()); // hsv: { r: 0.5, g: 1.0, b: 0.5 }
+ *     console.log("hsl: ", colorPicker.getHSLNormalized()); // hsl: { h: 0.5, s: 1.0, l: 1.0 }
+ *     console.log("hex: ", colorPicker.getHEX()); // hex: "#00ffff"
+ *   });
+ * ```
+ */
+export class ColorPicker extends Container {
+    /**
+     * Creates a new color picker inside the given container.
+     *
+     * @param container Either an HTMLElement or a query string to an element, in which the color picker will be embedded.
+     * @param options   Can be used to configure the color picker. See {@link ColorPickerOptions}.
+     */
+    constructor(container, options) {
+        super(container);
+        /** The default dimensions of the color picker components. Might become configurable in the future. */
+        this.CANVAS_SIZE = 256;
+        /** The size of the control points. Might become configurable in the future. */
+        this.controlPointSize = 7;
+        /** This gets called, when the color changes to notify users of this library. */
+        this.callbacks = new Map();
+        this.callbackCounter = 0;
+        // Set all defaults.
+        const defaultOptions = {
+            initialColor: '#FFF',
+        };
+        // Merge the options with the defaults.
+        // !!! DON'T USE options AND defaultOptions AFTER THIS LINE !!!
+        const finalOptions = Object.assign(defaultOptions, options);
+        this.hsv = d3HSV(finalOptions.initialColor);
+        if (Number.isNaN(this.hsv.h)) {
+            this.hsv.h = 180;
+        }
+        if (Number.isNaN(this.hsv.s)) {
+            this.hsv.s = 1;
+        }
+        this.backUpHue = this.hsv.h;
+        this.backUpSaturation = this.hsv.s;
+        // Fill the given container with all the HTML and CSS that we need.
+        this.parent.classList.add('tfe-color-picker');
+        this.parent.innerHTML = `
+      <div class="tfe-color-picker-root">
+        <div class="tfe-color-picker-sl-picker" style="width: ${this.CANVAS_SIZE}px; height: ${this.CANVAS_SIZE}px">
+          <canvas class="tfe-color-picker-sl-picker-canvas" width="${this.CANVAS_SIZE}" height="${this.CANVAS_SIZE}" />
+        </div>
+        <div class="tfe-color-picker-h-picker"  style="height: ${this.CANVAS_SIZE}px">
+          <canvas class="tfe-color-picker-h-picker-canvas" width="18" height="${this.CANVAS_SIZE}" />
+        </div>
+        <form class="tfe-color-picker-input-root">
+          <div class="tfe-color-preview" style="background: ${this.getHEX()}"></div>
+          <div></div>
+          <div class="tfe-color-picker-h-input"></div>
+          <div class="tfe-color-picker-s-input"></div>
+          <div class="tfe-color-picker-v-input"></div>
+          <div></div>
+          <div class="tfe-color-picker-r-input"></div>
+          <div class="tfe-color-picker-g-input"></div>
+          <div class="tfe-color-picker-b-input"></div>
+          <div></div>
+          <label>hex:
+            <input class="tfe-color-picker-hex-input" type="text" minlength="4" maxlength="7" value="${this.getHEX()}">
+          </label>
+        </form>
+      </div>
+    `;
+        // Prepare the canvas and context for the saturation and value picker.
+        this.svCanvas = this.parent.querySelector('.tfe-color-picker-sl-picker-canvas');
+        this.svContext = this.svCanvas.getContext('2d', { alpha: false });
+        this.drawSVPicker();
+        this.addSVEventListener();
+        // Prepare the canvas and context for the hue picker.
+        this.hCanvas = this.parent.querySelector('.tfe-color-picker-h-picker-canvas');
+        this.hCanvas.style.background = 'linear-gradient(#f00, #f0f, #00f, #0ff, #0f0, #ff0, #f00)';
+        this.hContext = this.hCanvas.getContext('2d', { alpha: true });
+        this.drawHPicker();
+        this.addHEventListener();
+        // Get the preview element.
+        this.previewElement = this.parent.querySelector('.tfe-color-preview');
+        // Initialize all input fields.
+        this.inputFields = {
+            h: new NumberInputField(this.parent.querySelector('.tfe-color-picker-h-input'), {
+                label: 'h: ',
+                min: 0,
+                max: 360,
+                initialValue: this.hsv.h,
+            }),
+            s: new NumberInputField(this.parent.querySelector('.tfe-color-picker-s-input'), {
+                label: 's: ',
+                min: 0,
+                max: 100,
+                initialValue: this.hsv.s * 100,
+            }),
+            v: new NumberInputField(this.parent.querySelector('.tfe-color-picker-v-input'), {
+                label: 'v: ',
+                min: 0,
+                max: 100,
+                initialValue: this.hsv.v * 100,
+            }),
+            r: new NumberInputField(this.parent.querySelector('.tfe-color-picker-r-input'), {
+                label: 'r: ',
+                min: 0,
+                max: 255,
+                initialValue: this.hsv.rgb().r,
+            }),
+            g: new NumberInputField(this.parent.querySelector('.tfe-color-picker-g-input'), {
+                label: 'g: ',
+                min: 0,
+                max: 255,
+                initialValue: this.hsv.rgb().g,
+            }),
+            b: new NumberInputField(this.parent.querySelector('.tfe-color-picker-b-input'), {
+                label: 'b: ',
+                min: 0,
+                max: 255,
+                initialValue: this.hsv.rgb().b,
+            }),
+            hex: this.parent.querySelector('.tfe-color-picker-hex-input'),
+        };
+        this.addInputEventListeners();
+    }
+    /**
+     * Register a callback that gets called, when a new color is picked. The callback gets called once immediately.
+     *
+     * @param callback The function that gets called whenever the color changes.
+     */
+    addListener(callback) {
+        const id = this.callbackCounter++;
+        this.callbacks.set(id, callback);
+        callback(this);
+        return id;
+    }
+    /** Removes the listener with the given id. */
+    removeListener(id) {
+        this.callbacks.delete(id);
+    }
+    /**
+     * Sets a new color for the color picker in HEX format. Theoretically all valid CSS color strings can be given
+     * here, but for consistency with other function names we keep the name as is.
+     */
+    setHEX(color) {
+        this.hsv = d3HSV(color);
+        this.validateHueAndSaturation();
+        this.sendUpdate();
+        this.updateAll();
+    }
+    /** Sets a new color for the color picker in RGB format. The given values must be in the range of 0 - 255. */
+    setRGB(r, g, b) {
+        this.hsv = d3HSV(`rgb(${r},${g},${b})`);
+        this.validateHueAndSaturation();
+        this.sendUpdate();
+        this.updateAll();
+    }
+    /** Sets a new color for the color picker in RGB format. The given values must be in the range of 0.0 - 1.0. */
+    setRGBNormalized(r, g, b) {
+        this.setRGB(r * 255, g * 255, b * 255);
+    }
+    /**
+     * Sets a new color for the color picker in HSL format. The given values must be in the range of 0 - 360 for h and
+     * 0 - 100 for s and l.
+     */
+    setHSL(h, s, l) {
+        this.hsv = d3HSV(`hsl(${h} ${s} ${l})`);
+        this.validateHueAndSaturation();
+        this.sendUpdate();
+        this.updateAll();
+    }
+    /** Sets a new color for the color picker in HSL format. The given values must be in the range of 0.0 - 1.0. */
+    setHSLNormalized(h, s, l) {
+        this.setHSL(h * 360, s * 100, l * 100);
+    }
+    /**
+     * Sets a new color for the color picker in HSV format. The given values must be in the range of 0 - 360 for h and
+     * 0 - 100 for s and v.
+     */
+    setHSV(h, s, v) {
+        this.hsv = d3HSV(h, s, v);
+        this.validateHueAndSaturation();
+        this.sendUpdate();
+        this.updateAll();
+    }
+    /** Sets a new color for the color picker in HSV format. The given values must be in the range of 0.0 - 1.0. */
+    setHSVNormalized(h, s, v) {
+        this.setHSV(h * 360, s * 100, v * 100);
+    }
+    /** Returns the currently selected color in HEX format. */
+    getHEX() {
+        return this.hsv.formatHex();
+    }
+    /** Returns the currently selected color on RGB format with values between 0 - 255. */
+    getRGB() {
+        const rgb = this.hsv.rgb();
+        return { r: rgb.r, g: rgb.g, b: rgb.b };
+    }
+    /** Returns the currently selected color on RGB format with values between 0.0 - 1.0. */
+    getRGBNormalized() {
+        const rgb = this.hsv.rgb();
+        return { r: rgb.r / 255, g: rgb.g / 255, b: rgb.b / 255 };
+    }
+    /** Returns the currently selected color on HSL format with values between 0 - 360 for h and 0 - 100 for s and l. */
+    getHSL() {
+        const hsl = d3HSL(this.hsv.formatHsl());
+        return { h: hsl.h, s: hsl.s * 100, l: hsl.l * 100 };
+    }
+    /** Returns the currently selected color on HSL format with values between 0.0 - 1.0. */
+    getHSLNormalized() {
+        const hsl = d3HSL(this.hsv.formatHsl());
+        return { h: hsl.h / 360, s: hsl.s, l: hsl.l };
+    }
+    /** Returns the currently selected color on HSV format with values between 0 - 360 for h and 0 - 100 for s and v. */
+    getHSV() {
+        return { h: this.hsv.h, s: this.hsv.s * 100, v: this.hsv.v * 100 };
+    }
+    /** Returns the currently selected color on HSV format with values between 0.0 - 1.0. */
+    getHSVNormalized() {
+        return { h: this.hsv.h / 360, s: this.hsv.s, v: this.hsv.v };
+    }
+    /**
+     * Returns a collection of all different color representations of the currently selected color. RGB values are in the
+     * range 0 - 255, hue is in the range 0 - 360, saturation, value and lightness are in the range 0 - 100.
+     */
+    getColor() {
+        const rgb = this.getRGB();
+        const hsl = this.getHSL();
+        const hsv = this.getHSV();
+        const hex = this.getHEX();
+        return { rgb, hsl, hsv, hex };
+    }
+    /**
+     * Returns a collection of all different color representations of the currently selected color. All numerical values
+     * are in the range 0.0 - 1.0.
+     */
+    getColorNormalized() {
+        const rgb = this.getRGBNormalized();
+        const hsl = this.getHSLNormalized();
+        const hsv = this.getHSVNormalized();
+        const hex = this.getHEX();
+        return { rgb, hsl, hsv, hex };
+    }
+    /**
+     * This function should be called everytime the color changes. It triggers the callback and sets the color of the
+     * preview element.
+     */
+    sendUpdate() {
+        this.previewElement.style.backgroundColor = this.getHEX();
+        this.callbacks.forEach((callback) => {
+            callback(this);
+        });
+    }
+    /** Draws the canvases and updates the input fields. */
+    updateAll() {
+        this.drawAll();
+        this.updateInputFields();
+    }
+    /** Draws the saturation-value picker and the hue picker. */
+    drawAll() {
+        this.drawHPicker();
+        this.drawSVPicker();
+    }
+    /** Draws the saturation-value picker. */
+    drawSVPicker() {
+        // We draw the saturation value picker in three steps:
+        // 1. Draw the current hue with full saturation and value as the backgrund color.
+        this.svContext.fillStyle = d3HSV(this.hsv.h, 1, 1).formatHex();
+        this.svContext.fillRect(0, 0, this.CANVAS_SIZE, this.CANVAS_SIZE);
+        // 2. Draw a white to transparent gradient for the saturation from left to right.
+        const saturationGradient = this.svContext.createLinearGradient(0, this.CANVAS_SIZE / 2, this.CANVAS_SIZE, this.CANVAS_SIZE / 2);
+        saturationGradient.addColorStop(0, 'rgb(255, 255, 255)');
+        saturationGradient.addColorStop(1, 'rgb(255, 255, 255, 0)');
+        this.svContext.fillStyle = saturationGradient;
+        this.svContext.fillRect(0, 0, this.CANVAS_SIZE, this.CANVAS_SIZE);
+        // 3. Draw a black to transparent gradient for the value from bottom to top.
+        const valueGradient = this.svContext.createLinearGradient(this.CANVAS_SIZE / 2, this.CANVAS_SIZE, this.CANVAS_SIZE / 2, 0);
+        valueGradient.addColorStop(0, 'rgb(0, 0, 0)');
+        valueGradient.addColorStop(1, 'rgb(0, 0, 0, 0)');
+        this.svContext.fillStyle = valueGradient;
+        this.svContext.fillRect(0, 0, this.CANVAS_SIZE, this.CANVAS_SIZE);
+        // Draw the control point. To ensure visibility everywhere it is an alternating circle in white and black.
+        const x = this.hsv.s * this.CANVAS_SIZE;
+        const y = (1 - this.hsv.v) * this.CANVAS_SIZE;
+        drawControlPoint(this.svContext, x, y, this.controlPointSize);
+    }
+    /** Draws the hue picker. */
+    drawHPicker() {
+        // Draw the hue gradient.
+        this.hContext.clearRect(0, 0, this.hCanvas.width, this.hCanvas.height);
+        // Draw the control point. To ensure visibility everywhere it is an alternating circle in white and black.
+        const x = this.hCanvas.width / 2;
+        const y = (1 - this.hsv.h / 360) * this.hCanvas.height;
+        drawControlPoint(this.hContext, x, y, this.controlPointSize);
+    }
+    /** Adds all the mouse input events for moving the control point of the saturation-value picker around. */
+    addSVEventListener() {
+        let isDragging = false;
+        let abortController = null;
+        // Gets called when a new value was selected with the mouse.
+        const updateSV = (x, y) => {
+            // Calculate new values from mouse position.
+            this.hsv.s = clamp(x / this.CANVAS_SIZE, 0, 1);
+            this.backUpSaturation = this.hsv.s;
+            this.hsv.v = clamp(1 - y / this.CANVAS_SIZE, 0, 1);
+            // Send an update to the user.
+            this.sendUpdate();
+            // Update other relevant components.
+            this.drawSVPicker();
+            this.updateHSVInputFields();
+            this.updateRGBInputFields();
+            this.updateHEXInputField();
+        };
+        // When the left mouse button is pressed we attach a mouse move listener to the document to track the mouse movement
+        // even outside the canvas.
+        this.svCanvas.addEventListener('mousedown', (e) => {
+            if (e.button === 0) {
+                abortController = new AbortController();
+                document.addEventListener('mousemove', (e) => {
+                    e.preventDefault();
+                    updateSV(e.clientX - this.svCanvas.getBoundingClientRect().x, e.clientY - this.svCanvas.getBoundingClientRect().y);
+                }, { signal: abortController.signal });
+                isDragging = true;
+                updateSV(e.offsetX, e.offsetY);
+            }
+        });
+        // Stop the drag tracking and remove the move listener from the document.
+        document.addEventListener('mouseup', () => {
+            if (isDragging && abortController) {
+                abortController.abort();
+                abortController = null;
+                isDragging = false;
+            }
+        });
+    }
+    /** Adds all the mouse input events for moving the control point of the hue picker around. */
+    addHEventListener() {
+        let isDragging = false;
+        let abortController = null;
+        // Gets called when a new value was selected with the mouse.
+        const updateH = (y) => {
+            // Calculate the new value from the mouse position.
+            this.hsv.h = clamp(Math.round((1 - y / this.CANVAS_SIZE) * 360), 0, 360);
+            this.backUpHue = this.hsv.h;
+            // Send an update to the user.
+            this.sendUpdate();
+            // Update other relevant components.
+            this.drawAll();
+            this.inputFields.h.setValue(this.hsv.h);
+            this.updateRGBInputFields();
+            this.updateHEXInputField();
+        };
+        // When the left mouse button is pressed we attach a mouse move listener to the document to track the mouse movement
+        // even outside the canvas.
+        this.hCanvas.addEventListener('mousedown', (e) => {
+            abortController = new AbortController();
+            document.addEventListener('mousemove', (e) => {
+                e.preventDefault();
+                updateH(e.clientY - this.svCanvas.getBoundingClientRect().y);
+            }, { signal: abortController.signal });
+            isDragging = true;
+            updateH(e.offsetY);
+        });
+        // Stop the drag tracking and remove the move listener from the document.
+        document.addEventListener('mouseup', () => {
+            if (isDragging && abortController) {
+                abortController.abort();
+                abortController = null;
+                isDragging = false;
+            }
+        });
+    }
+    /** Adds all the listeners to the text input fields. It also adds validation, so the values are always valid. */
+    addInputEventListeners() {
+        this.setupNumberInputListeners();
+        this.setupHEXListeners();
+    }
+    /** Sets up all listeners for the HSV and RGB input fields. */
+    setupNumberInputListeners() {
+        // Serves to prevent cyclic updates.
+        let updateInProgress = false;
+        const onHSVUpdate = () => {
+            if (!updateInProgress) {
+                updateInProgress = true;
+                this.sendUpdate();
+                this.drawAll();
+                this.updateRGBInputFields();
+                this.updateHEXInputField();
+                updateInProgress = false;
+            }
+        };
+        const onRGBUpdate = (r, g, b) => {
+            if (!updateInProgress) {
+                updateInProgress = true;
+                this.hsv = d3HSV(`rgb(${Math.round(r)},${Math.round(g)},${Math.round(b)})`);
+                this.validateHueAndSaturation();
+                this.sendUpdate();
+                this.drawAll();
+                this.updateHSVInputFields();
+                this.updateHEXInputField();
+                updateInProgress = false;
+            }
+        };
+        // hsv
+        this.inputFields.h.addListener((value) => {
+            if (value !== this.hsv.h) {
+                this.hsv.h = value;
+                this.backUpHue = value;
+                onHSVUpdate();
+            }
+        });
+        this.inputFields.s.addListener((value) => {
+            if (value !== this.hsv.s) {
+                this.hsv.s = value / 100;
+                this.backUpSaturation = this.hsv.s;
+                onHSVUpdate();
+            }
+        });
+        this.inputFields.v.addListener((value) => {
+            if (value !== this.hsv.v) {
+                this.hsv.v = value / 100;
+                onHSVUpdate();
+            }
+        });
+        // rgb
+        this.inputFields.r.addListener((value) => {
+            const oldRGB = this.hsv.rgb();
+            if (value !== oldRGB.r) {
+                onRGBUpdate(value, oldRGB.g, oldRGB.b);
+            }
+        });
+        this.inputFields.g.addListener((value) => {
+            const oldRGB = this.hsv.rgb();
+            if (value !== oldRGB.g) {
+                onRGBUpdate(oldRGB.r, value, oldRGB.b);
+            }
+        });
+        this.inputFields.b.addListener((value) => {
+            const oldRGB = this.hsv.rgb();
+            if (value !== oldRGB.b) {
+                onRGBUpdate(oldRGB.r, oldRGB.g, value);
+            }
+        });
+    }
+    /** Sets up all listeners for the HEX input field. */
+    setupHEXListeners() {
+        this.inputFields.hex.addEventListener('input', (ev) => {
+            const element = ev.currentTarget;
+            const value = element.value;
+            if (value.match(/#([0-7a-fA-F]{3}$|[0-7a-fA-F]{6}$)/)) {
+                this.hsv = d3HSV(value);
+                this.validateHueAndSaturation();
+                this.sendUpdate();
+                this.drawAll();
+                this.updateRGBInputFields();
+                this.updateHSVInputFields();
+                element.classList.remove('tfe-color-picker-input-hex-invalid');
+            }
+            else {
+                element.classList.add('tfe-color-picker-input-hex-invalid');
+            }
+        });
+        this.inputFields.hex.addEventListener('focusout', (ev) => {
+            const element = ev.currentTarget;
+            const value = element.value;
+            if (!value.match(/#([0-7a-fA-F]{3}$|[0-7a-fA-F]{6}$)/)) {
+                element.value = this.getHEX();
+                element.classList.remove('tfe-color-picker-input-hex-invalid');
+            }
+        });
+    }
+    /** Updates the text in all input fields. */
+    updateInputFields() {
+        this.updateHSVInputFields();
+        this.updateRGBInputFields();
+        this.updateHEXInputField();
+    }
+    /** Updates the text inside the hsv input fields. */
+    updateHSVInputFields() {
+        this.inputFields.h.setValue(this.hsv.h, false);
+        this.inputFields.s.setValue(this.hsv.s * 100, false);
+        this.inputFields.v.setValue(this.hsv.v * 100, false);
+    }
+    /** Updates the text inside the rgb input fields. */
+    updateRGBInputFields() {
+        const rgb = this.hsv.rgb();
+        this.inputFields.r.setValue(rgb.r, false);
+        this.inputFields.g.setValue(rgb.g, false);
+        this.inputFields.b.setValue(rgb.b, false);
+    }
+    /** Updates the text inside the hex input field. */
+    updateHEXInputField() {
+        this.inputFields.hex.value = this.getHEX();
+    }
+    /**
+     * Some colors have arbitrary hue or saturation values. We would like to show the last valid value in that case. This
+     * function ensures that this always is true. It must be called everytime the hsv field is updated.
+     */
+    validateHueAndSaturation() {
+        if (Number.isNaN(this.hsv.h)) {
+            this.hsv.h = this.backUpHue;
+        }
+        else {
+            this.backUpHue = this.hsv.h;
+        }
+        if (Number.isNaN(this.hsv.s)) {
+            this.hsv.s = this.backUpSaturation;
+        }
+        else {
+            this.backUpSaturation = this.hsv.s;
+        }
+    }
+}
+/** Simple utility to clamp a number between two values. */
+function clamp(number, min, max) {
+    return Math.max(min, Math.min(max, number));
+}
+// Add a stylesheet to the header, that contains the base layout of the color picker.
+if (document.head.querySelector('#tfe-color-picker-style') === null) {
+    document.head.insertAdjacentHTML('beforeend', `
+    <style id="tfe-color-picker-style">
+      .tfe-color-picker-root {
+        display: flex;
+        justify-content: center;
+      }
+    
+      .tfe-color-picker-sl-picker {
+        border: 1px solid grey;
+      }
+    
+      .tfe-color-picker-h-picker {
+        width: 18px;
+        margin-left: 12px;
+        border: 1px solid grey;
+      }
+    
+      .tfe-color-picker-input-root {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        justify-content: space-between;
+        align-content: space-evenly;
+        margin-left: 12px;
+        margin-bottom: 0;
+      }
+    
+      .tfe-color-preview {
+        height: 50px;
+        width: 100%;
+        border: 1px solid grey;
+        border-radius: 25px;
+      }
+    
+      .tfe-color-picker-input-root > label {
+        text-align: right;
+      }
+    
+      .tfe-color-picker-input-root input {
+        width: 60px;
+        text-align: right;
+        font-family: monospace;
+      }
+    
+      .tfe-color-picker-input-hex-invalid:focus-visible {
+        outline-color: red;
+      }
+    </style>`);
+}
+```
+
+### DirectVolume-Renderer/src/tfeditor_js/Container.js
+```
+/** This class handles common functionality of all components in this library. */
+export default class Container {
+    constructor(container) {
+        // Figure out which element we want to embed in.
+        if (container) {
+            if (typeof container === 'string') {
+                this.parent = document.querySelector(container);
+            }
+            else {
+                this.parent = container;
+            }
+        }
+        else {
+            throw 'No element given!';
+        }
+    }
+}
+```
+
+### DirectVolume-Renderer/src/tfeditor_js/NumberInputField.js
+```
+import Container from './Container';
+/**
+ * This container is a wrapper around an HTMLInputElement of type number. It adds the ability to change the number with
+ * the scroll wheel and adds robust validation, so that the field always contains a number.
+ */
+export default class NumberInputField extends Container {
+    /**
+     * Creates a new number input field inside the given container.
+     *
+     * @param container Either an HTMLElement or a query string to an element, in which the number input will be embedded.
+     * @param options   Can be used to configure the number input field. See {@link NumberInputFieldOptions}.
+     */
+    constructor(container, options) {
+        super(container);
+        /** This gets called, when the value changes to notify users of this library. */
+        this.callbacks = new Map();
+        this.callbackCounter = 0;
+        // Set all defaults.
+        const defaultOptions = {
+            label: undefined,
+            initialValue: 0,
+            min: undefined,
+            max: undefined,
+            step: 1,
+            integerOnly: true,
+        };
+        // Merge the options with the defaults.
+        // !!! DON'T USE options AND defaultOptions AFTER THIS LINE !!!
+        const finalOptions = Object.assign(defaultOptions, options);
+        this.parent.classList.add('tfe-number-input-field-root');
+        this.input = document.createElement('input');
+        this.input.classList.add('tfe-number-input-field-input');
+        this.input.type = 'number';
+        if (finalOptions.min !== undefined) {
+            this.input.min = finalOptions.min.toString();
+            this.min = finalOptions.min;
+        }
+        if (finalOptions.max !== undefined) {
+            this.input.max = finalOptions.max.toString();
+            this.max = finalOptions.max;
+        }
+        this.input.step = finalOptions.step.toString();
+        this.step = finalOptions.step;
+        this.integerOnly = finalOptions.integerOnly;
+        this.setValue(finalOptions.initialValue);
+        // If a label string is given, we wrap the input element in a label element.
+        if (finalOptions.label) {
+            this.label = document.createElement('label');
+            this.label.classList.add('tfe-number-input-field-label');
+            this.label.innerText = finalOptions.label;
+            this.label.appendChild(this.input);
+            this.parent.appendChild(this.label);
+        }
+        else {
+            this.parent.appendChild(this.input);
+        }
+        this.setUpEventListeners();
+    }
+    /**
+     * Register a callback that gets called, when the value changes. The callback gets called once immediately.
+     *
+     * @param callback The function that gets called whenever the value changes.
+     */
+    addListener(callback) {
+        const id = this.callbackCounter++;
+        this.callbacks.set(id, callback);
+        callback(this.value);
+        return id;
+    }
+    /** Removes the listener with the given id. */
+    removeListener(id) {
+        this.callbacks.delete(id);
+    }
+    /** Returns the number value. */
+    getValue() {
+        return this.value;
+    }
+    /**
+     * Sets a new value. The value might be modified to fulfill the min, max and integerOnly constraints. By default, the
+     * observers will be notified as well. This can be suppressed with the second argument set to false.
+     */
+    setValue(value, notifyObservers = true) {
+        if (value === this.value) {
+            return;
+        }
+        let tmp = value;
+        if (this.min !== undefined && value < this.min) {
+            tmp = this.min;
+        }
+        else if (this.max !== undefined && value > this.max) {
+            tmp = this.max;
+        }
+        this.value = this.integerOnly ? Math.round(tmp) : tmp;
+        this.input.valueAsNumber = this.value;
+        if (notifyObservers) {
+            this.callbacks.forEach((callback) => {
+                callback(this.value);
+            });
+        }
+    }
+    /**
+     * This function clamp the number inside the input field to a given range and returns the number or null if it is not
+     * valid.
+     */
+    validateInput() {
+        if (this.min !== undefined && this.input.valueAsNumber < this.min) {
+            this.input.valueAsNumber = this.min;
+        }
+        else if (this.max !== undefined && this.input.valueAsNumber > this.max) {
+            this.input.valueAsNumber = this.max;
+        }
+        return Number.isFinite(this.input.valueAsNumber) ? this.input.valueAsNumber : null;
+    }
+    /** This function validates the content of the input, once it gets submitted or the focus is lost. */
+    validateFinalInput() {
+        const value = this.validateInput();
+        if (value === null) {
+            this.input.valueAsNumber = this.min;
+            return this.min;
+        }
+        return null;
+    }
+    /**
+     * Adds listeners for handling mouse wheel events and validation.
+     */
+    setUpEventListeners() {
+        // Adds support for changing the number with the mouse wheel.
+        this.input.addEventListener('wheel', (ev) => {
+            ev.preventDefault();
+            if (ev.deltaY > 0) {
+                // Decrement
+                this.setValue(this.value - this.step);
+            }
+            else if (ev.deltaY < 0) {
+                // Increment
+                this.setValue(this.value + this.step);
+            }
+        });
+        // This listener makes sure, that the number is always clamped to the min/max constraints. It allows an empty input.
+        // An empty input will be handled by the next two listeners.
+        this.input.addEventListener('input', () => {
+            const value = this.validateInput();
+            if (value !== null) {
+                this.setValue(value);
+            }
+        });
+        // If focus is lost, the input gets validated to fulfill all requirements.
+        this.input.addEventListener('focusout', () => {
+            const value = this.validateFinalInput();
+            if (value !== null) {
+                this.setValue(value);
+            }
+        });
+        // If enter is pressed, the input gets validated to fulfill all requirements.
+        this.input.addEventListener('keypress', (ev) => {
+            if (ev.key === 'Enter') {
+                const value = this.validateFinalInput();
+                if (value !== null) {
+                    this.setValue(value);
+                }
+            }
+        });
+    }
+}
+```
+
+### DirectVolume-Renderer/src/tfeditor_js/TransferFunctionEditor.js
+```
+import { ColorMapEditor } from './ColorMapEditor';
+import { TransparencyEditor } from './TransparencyEditor';
+import objectAssignDeep from 'object-assign-deep';
+/**
+ * This component creates a complete transfer function editor, combining the features from the transparency and color
+ * map editors.
+ *
+ * @example
+ *   const tf = new TransferFunctionEditor("#tf-editor", {
+ *     initialColorMap: {
+ *       colorStops: [
+ *         {stop: 0, color: "blue"},
+ *         {stop: 0.5, color: "white"},
+ *         {stop: 1, color: "red"}
+ *       ]
+ *     }
+ *   });
+ *
+ *
+ *   tf.addListener((transferFunctionEditor) => {
+ *     console.log(transferFunctionEditor.getTransferFunction());
+ *     // output:
+ *     // {
+ *     //   alphaStops: [
+ *     //     { stop: 0, alpha: 0 },
+ *     //     { stop: 0.5, alpha: 0.5 },
+ *     //     { stop: 1, alpha: 1 }
+ *     //   ],
+ *     //   colorMap: {
+ *     //     colorStops: [
+ *     //       { stop: 0, color: "blue" },
+ *     //       { stop: 0.5, color": "white" },
+ *     //       { stop: 1, color: "red" }
+ *     //     ],
+ *     //     interpolationMethod: "HSL_LONG"
+ *     //   }
+ *     // }
+ *   }
+ */
+export class TransferFunctionEditor {
+    /**
+     * Creates a new transfer function editor inside the given container.
+     *
+     * @param container Either an HTMLElement or a query string to an element, in which the editor will be embedded.
+     * @param options   Can be used to configure the transfer function editor. See {@link TransferFunctionEditorOptions}.
+     */
+    constructor(container, options) {
+        /** This gets called, when the transfer function changes to notify users of this library. */
+        this.callbacks = new Map();
+        this.callbackCounter = 0;
+        if (container) {
+            if (typeof container === 'string') {
+                this.container = document.querySelector(container);
+            }
+            else {
+                this.container = container;
+            }
+        }
+        else {
+            throw 'No element given!';
+        }
+        // Set all defaults.
+        const defaultOptions = {};
+        // Merge the options with the defaults.
+        // !!! DON'T USE options AND defaultOptions AFTER THIS LINE !!!
+        const finalOptions = objectAssignDeep(defaultOptions, options);
+        this.container.classList.add('tfe-transfer-function-editor');
+        const transparencyEditorElement = document.createElement('div');
+        transparencyEditorElement.style.width = '100%';
+        transparencyEditorElement.style.minHeight = '50px';
+        this.container.append(transparencyEditorElement);
+        this.transparencyEditor = new TransparencyEditor(transparencyEditorElement, finalOptions);
+        const colorMapEditorElement = document.createElement('div');
+        colorMapEditorElement.style.width = '100%';
+        colorMapEditorElement.style.minHeight = '10px';
+        this.container.append(colorMapEditorElement);
+        this.colorMapEditor = new ColorMapEditor(colorMapEditorElement, finalOptions);
+        // Connect the color map editor to the transparency editor.
+        this.colorMapEditor.addListener((colorMapEditor) => this.transparencyEditor.setColorMap(colorMapEditor.getColorMap()));
+        this.transparencyEditor.setColorMap(this.colorMapEditor.getColorMap());
+        // When something in the transparency editor changes we notify our listeners. This also includes changes to the
+        // color map. The control flow goes like this:
+        // ColorMapEditor --notify--> TransparencyEditor --notify--> TransferFunctionEditor --notify--> Listeners
+        this.transparencyEditor.addListener(() => {
+            this.callbacks.forEach((value) => value(this));
+        });
+    }
+    /**
+     * Register a callback that gets called, when the transfer function changes. The callback gets called once
+     * immediately.
+     *
+     * @param callback The function that gets called whenever the transfer function changes.
+     */
+    addListener(callback) {
+        const id = this.callbackCounter++;
+        this.callbacks.set(id, callback);
+        callback(this);
+        return id;
+    }
+    /** Removes the listener with the given id. */
+    removeListener(id) {
+        this.callbacks.delete(id);
+    }
+    /** Get the alpha stops. */
+    getAlphaStops() {
+        return this.transparencyEditor.getAlphaStops();
+    }
+    /** Replace the existing alpha stops with new ones. */
+    setAlphaStops(alphaStops) {
+        this.transparencyEditor.setAlphaStops(alphaStops);
+    }
+    /** Get the current color map. */
+    getColorMap() {
+        return this.colorMapEditor.getColorMap();
+    }
+    /**
+     * This function returns an array of bins with their color, if the color map is discrete. Otherwise, it will return an
+     * empty array.
+     */
+    getDiscreteColorMap() {
+        return this.colorMapEditor.getDiscreteColorMap();
+    }
+    /** Set a new color map. */
+    setColorMap(colorMap) {
+        this.colorMapEditor.setColorMap(colorMap);
+    }
+    /** Returns the complete transfer function including the alpha values and the color map. */
+    getTransferFunction() {
+        return this.transparencyEditor.getTransferFunction();
+    }
+
+    setTransferFunction(tf) {
+        if (tf?.colorMap) {
+            this.colorMapEditor.setColorMap(tf.colorMap);
+        }
+        if (Array.isArray(tf?.alphaStops)) {
+            this.transparencyEditor.setAlphaStops(tf.alphaStops);
+        }
+        // notify listeners that the TF changed
+        this.callbacks.forEach(cb => cb(this));
+    }
+}
+```
+
+### DirectVolume-Renderer/src/tfeditor_js/TransparencyEditor.js
+```
+import { InterpolationMethod } from './Types';
+import * as d3Scale from 'd3-scale';
+import * as d3Color from 'd3-color';
+import * as d3Interpolate from 'd3-interpolate';
+import objectAssignDeep from 'object-assign-deep';
+import { getColorFromColorMapAt } from './convert';
+import Container from './Container';
+/**
+ * This creates an editor to create transparency mappings.
+ *
+ * @example
+ *   const te = new TransparencyEditor("#te", {
+ *      initialAlphaStops: [
+ *        { stop: 0, alpha: 0 },
+ *        { stop: 0.5, alpha: 0.5 },
+ *        { stop: 1, alpha: 1 }
+ *      ]
+ *   });
+ *
+ *   te.addListener((transparencyEditor) => {
+ *     console.log(transparencyEditor.getAlphaStops());
+ *     // output:
+ *     // [
+ *     //   { stop: 0, alpha: 0 },
+ *     //   { stop: 0.5, alpha: 0.5 },
+ *     //   { stop: 1, alpha: 1 }
+ *     // ]
+ *   });
+ */
+export class TransparencyEditor extends Container {
+    /**
+     * Creates a new transparency editor inside the given container.
+     *
+     * @param container Either an HTMLElement or a query string to an element, in which the editor will be embedded.
+     * @param options   Can be used to configure the transparency editor. See {@link TransparencyEditorOptions}.
+     */
+    constructor(container, options) {
+        super(container);
+        /** This gets called, when the transparency changes to notify users of this library. */
+        this.callbacks = new Map();
+        this.callbackCounter = 0;
+        // Set all defaults.
+        const defaultOption = {
+            initialAlphaStops: [
+                { stop: 0, alpha: 0 },
+                { stop: 0.5, alpha: 0.5 },
+                { stop: 1, alpha: 1 },
+            ],
+            initialColorMap: {
+                colorStops: [
+                    { stop: 0, color: 'black' },
+                    { stop: 1, color: 'black' },
+                ],
+                interpolationMethod: InterpolationMethod.RGB,
+            },
+            controlPointSize: 7,
+            showAlphaGrid: true,
+            alphaGridSize: 8,
+        };
+        // Merge the options with the defaults.
+        // !!! DON'T USE options AND defaultOptions AFTER THIS LINE !!!
+        const finalOptions = objectAssignDeep(defaultOption, options);
+        this.alphaStops = finalOptions.initialAlphaStops;
+        this.sortControlPoints();
+        this.colorMap = finalOptions.initialColorMap;
+        this.controlPointSize = finalOptions.controlPointSize;
+        this.showAlphaGrid = finalOptions.showAlphaGrid;
+        this.alphaGridSize = finalOptions.alphaGridSize;
+        this.parent.classList.add('tfe-transparency-editor');
+        this.canvas = document.createElement('canvas');
+        this.canvas.width = this.parent.clientWidth;
+        this.canvas.height = this.parent.clientHeight;
+        this.canvas.style.imageRendering = 'pixelated';
+        this.parent.appendChild(this.canvas);
+        this.ctx = this.canvas.getContext('2d');
+        this.updateAlphaRange();
+        this.draw();
+        this.addEventListeners();
+    }
+
+    setStops(alphaStops) {
+        this.setAlphaStops(alphaStops);
+    }
+
+    /**
+     * Register a callback that gets called, when the transfer function changes. The callback gets called once
+     * immediately.
+     *
+     * @param callback The function that gets called whenever the transfer function changes.
+     */
+    addListener(callback) {
+        const id = this.callbackCounter++;
+        this.callbacks.set(id, callback);
+        callback(this);
+        return id;
+    }
+    /** Removes the listener with the given id. */
+    removeListener(id) {
+        this.callbacks.delete(id);
+    }
+    /** Returns the complete transfer function including the alpha values and the color map. */
+    getTransferFunction() {
+        return { alphaStops: this.alphaStops, colorMap: this.colorMap };
+    }
+    /** Returns the color, excluding transparency, at the given stop. */
+    getRGB(stop) {
+        return getColorFromColorMapAt(this.colorMap, stop);
+    }
+    /** Returns the alpha value at the given stop. */
+    getAlpha(stop) {
+        return this.alphaRange(stop);
+    }
+    /** Returns the color, including transparency, at the given stop. */
+    getRGBA(stop) {
+        const color = d3Color.rgb(this.getRGB(stop));
+        color.opacity = this.getAlpha(stop);
+        return color.formatHex8();
+    }
+    /** Adds a control point at the given stop with the given alpha value. */
+    addControlPoint(stop, alpha) {
+        this.alphaStops.push({ stop, alpha });
+        this.sortControlPoints();
+        this.updateAlphaRange();
+        this.sendUpdate();
+        this.draw();
+    }
+    /** Remove a control point at the given pixel coordinates. */
+    removeControlPointAt(x, y) {
+        let indexToDelete = -1;
+        for (let i = 1; i < this.alphaStops.length - 1; i++) {
+            const controlPoint = this.alphaStops[i];
+            const dx = controlPoint.stop * this.canvas.width - x;
+            const dy = (1 - controlPoint.alpha) * this.canvas.height - y;
+            if (Math.sqrt(dx * dx + dy * dy) < this.controlPointSize) {
+                indexToDelete = i;
+                break;
+            }
+        }
+        if (indexToDelete !== -1) {
+            this.alphaStops.splice(indexToDelete, 1);
+            this.updateAlphaRange();
+            this.sendUpdate();
+            this.draw();
+        }
+    }
+    /** Get the alpha stops. */
+    getAlphaStops() {
+        return this.alphaStops;
+    }
+    /** Replace the existing alpha stops with new ones. */
+    setAlphaStops(alphaStops) {
+        this.alphaStops = alphaStops;
+        this.sortControlPoints();
+        this.updateAlphaRange();
+        this.sendUpdate();
+        this.draw();
+    }
+    /** Get the current color map. */
+    getColorMap() {
+        return this.colorMap;
+    }
+    /** Set a new color map. */
+    setColorMap(colorMap) {
+        this.colorMap = colorMap;
+        this.sendUpdate();
+        this.draw();
+    }
+    /** This function notifies all listeners to this transparency editor. */
+    sendUpdate() {
+        this.callbacks.forEach((value) => value(this));
+    }
+    /** Generate a new d3 range. */
+    updateAlphaRange() {
+        this.alphaRange = d3Scale
+            .scaleLinear()
+            .domain(this.alphaStops.map((entry) => entry.stop))
+            .range(this.alphaStops.map((entry) => entry.alpha))
+            .interpolate(d3Interpolate.interpolateNumber);
+    }
+    /** Draws the transfer function, the control points, and the transparency grid into the canvas. */
+    draw() {
+        // Clear the drawing area.
+        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        // If the alpha grid is enabled we draw it.
+        if (this.showAlphaGrid) {
+            this.ctx.fillStyle = '#CACACA';
+            for (let y = 0; y < this.canvas.height / this.alphaGridSize; y++) {
+                for (let x = 0; x < this.canvas.width / this.alphaGridSize; x++) {
+                    if ((x % 2 == 0 && y % 2 == 0) || (x % 2 == 1 && y % 2 == 1)) {
+                        this.ctx.fillRect(x * this.alphaGridSize, y * this.alphaGridSize, this.alphaGridSize, this.alphaGridSize);
+                    }
+                }
+            }
+        }
+        // Draw the color gradient.
+        for (let i = 0; i < this.canvas.width; ++i) {
+            const alpha = this.getAlpha(i / (this.canvas.width - 1));
+            this.ctx.fillStyle = this.getRGBA(i / (this.canvas.width - 1));
+            this.ctx.fillRect(i, (1 - alpha) * this.canvas.height, 1, alpha * this.canvas.height);
+            if (this.showAlphaGrid) {
+                this.ctx.clearRect(i, 0, 1, (1 - alpha) * this.canvas.height);
+            }
+        }
+        // Draw the lines between points.
+        this.ctx.strokeStyle = 'black';
+        this.ctx.beginPath();
+        for (let i = 0; i < this.alphaStops.length; i++) {
+            const x = this.alphaStops[i].stop * this.canvas.width;
+            const y = (1 - this.alphaStops[i].alpha) * this.canvas.height;
+            if (i === 0) {
+                this.ctx.moveTo(x, y);
+            }
+            else {
+                this.ctx.lineTo(x, y);
+            }
+        }
+        this.ctx.stroke();
+        // Draw the control points.
+        this.ctx.fillStyle = 'white';
+        for (let i = 0; i < this.alphaStops.length; i++) {
+            const x = this.alphaStops[i].stop * this.canvas.width;
+            const y = (1 - this.alphaStops[i].alpha) * this.canvas.height;
+            this.ctx.strokeStyle = 'black';
+            this.ctx.beginPath();
+            this.ctx.arc(x, y, this.controlPointSize, 0, 2 * Math.PI);
+            this.ctx.fill();
+            this.ctx.stroke();
+        }
+    }
+    /** Helper function to ensure all control points are in the correct order. */
+    sortControlPoints() {
+        this.alphaStops.sort((a, b) => a.stop - b.stop);
+    }
+    /** This helper function calculates which pixels correspond to which stop and alpha value. */
+    pixelToNormalized(x, y) {
+        const stop = Math.max(0, Math.min(1, x / this.canvas.width));
+        const alpha = Math.max(0, Math.min(1, 1 - y / this.canvas.height));
+        return { stop, alpha };
+    }
+    /** Adds event listeners for creating, moving and deleting control points. */
+    addEventListeners() {
+        // Tracks if the user is currently dragging a control point.
+        let isDragging = false;
+        // The index of the currently dragged control point.
+        let dragIndex = -1;
+        // The AbortController is for removing the mousemove listener from the document, when the user stops dragging.
+        let abortController = null;
+        /**
+         * This function checks if a control point was selected, sets the dragIndex and isDragging fields and attaches a
+         * mouse move listener to the document. This allows for more consistent control.
+         */
+        const checkDragStart = (e) => {
+            // Figure out which control point was selected.
+            dragIndex = -1;
+            for (let i = 0; i < this.alphaStops.length; i++) {
+                const controlPoint = this.alphaStops[i];
+                const dx = controlPoint.stop * this.canvas.width - e.offsetX;
+                const dy = (1 - controlPoint.alpha) * this.canvas.height - e.offsetY;
+                if (Math.sqrt(dx * dx + dy * dy) < this.controlPointSize) {
+                    dragIndex = i;
+                    isDragging = true;
+                    break;
+                }
+            }
+            if (isDragging) {
+                // Attach a mouse move listener to the document.
+                abortController = new AbortController();
+                document.addEventListener('mousemove', (e) => {
+                    e.preventDefault();
+                    const offsetX = e.clientX - this.canvas.getBoundingClientRect().x;
+                    const offsetY = e.clientY - this.canvas.getBoundingClientRect().y;
+                    const { stop, alpha } = this.pixelToNormalized(offsetX, offsetY);
+                    if (dragIndex === 0) {
+                        this.alphaStops[dragIndex].alpha = alpha;
+                    }
+                    else if (dragIndex === this.alphaStops.length - 1) {
+                        this.alphaStops[dragIndex].alpha = alpha;
+                    }
+                    else {
+                        const leftBound = this.alphaStops[dragIndex - 1].stop + Number.EPSILON;
+                        const rightBound = this.alphaStops[dragIndex + 1].stop - Number.EPSILON;
+                        this.alphaStops[dragIndex].stop = Math.max(leftBound, Math.min(rightBound, stop));
+                        this.alphaStops[dragIndex].alpha = alpha;
+                    }
+                    this.updateAlphaRange();
+                    this.sendUpdate();
+                    this.draw();
+                }, { signal: abortController.signal });
+            }
+        };
+        // This listener is responsible for:
+        //  - Starting dragging a control point, if one was pressed on with the left mouse button.
+        //  - Adding a control point if the left mouse button was pressed anywhere else (also starts dragging the newly
+        //    created point).
+        //  - Removing a control point on right click.
+        this.canvas.addEventListener('mousedown', (e) => {
+            if (e.button === 0) {
+                // Left click
+                checkDragStart(e);
+            }
+            if (isDragging) {
+                return;
+            }
+            if (e.button === 0) {
+                // Left click
+                const { stop, alpha } = this.pixelToNormalized(e.offsetX, e.offsetY);
+                this.addControlPoint(stop, alpha);
+                checkDragStart(e);
+            }
+            else if (e.button === 2) {
+                // Right click
+                e.preventDefault();
+                this.removeControlPointAt(e.offsetX, e.offsetY);
+            }
+        });
+        this.canvas.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            return false;
+        });
+        // This listener is responsible to stop the dragging action, once the mouse is lifted.
+        document.addEventListener('mouseup', () => {
+            if (isDragging && abortController) {
+                abortController.abort();
+                abortController = null;
+                isDragging = false;
+                dragIndex = -1;
+            }
+        });
+        // Ensure, that when the container size changes we adjust the canvas size and redraw.
+        const resizeObserver = new ResizeObserver(() => {
+            this.canvas.width = this.parent.clientWidth;
+            this.canvas.height = this.parent.clientHeight;
+            this.draw();
+        });
+        resizeObserver.observe(this.parent);
+    }
+}
+```
+
+### DirectVolume-Renderer/src/tfeditor_js/Types.js
+```
+/** The methods of interpolation between color stops. See https://github.com/d3/d3-interpolate#color-spaces. */
+export var InterpolationMethod;
+(function (InterpolationMethod) {
+    InterpolationMethod["RGB"] = "RGB";
+    InterpolationMethod["HSL"] = "HSL";
+    InterpolationMethod["HSL_LONG"] = "HSL_LONG";
+    InterpolationMethod["HSV"] = "HSV";
+    InterpolationMethod["HSV_LONG"] = "HSV_LONG";
+    InterpolationMethod["HCL"] = "HCL";
+    InterpolationMethod["HCL_LONG"] = "HCL_LONG";
+    InterpolationMethod["LAB"] = "LAB";
+    InterpolationMethod["CUBEHELIX"] = "CUBEHELIX";
+    InterpolationMethod["CUBEHELIX_LONG"] = "CUBEHELIX_LONG";
+})(InterpolationMethod || (InterpolationMethod = {}));
+```
+
+### DirectVolume-Renderer/src/tfeditor_js/convert.js
+```
+import * as d3Interpolate from 'd3-interpolate';
+import * as d3Hsv from 'd3-hsv';
+import { InterpolationMethod } from './Types';
+import * as d3Scale from 'd3-scale';
+const colorRangeCache = new WeakMap();
+/**
+ * This utility function creates a color range method from d3 to the given color map. It also does some caching, since
+ * this is an expensive object to create.
+ */
+export function getColorRange(colorMap) {
+    if (colorRangeCache.has(colorMap)) {
+        return colorRangeCache.get(colorMap);
+    }
+    const colorRange = d3Scale
+        .scaleLinear()
+        .domain(colorMap.colorStops.map((entry) => entry.stop))
+        .range(colorMap.colorStops.map((entry) => entry.color))
+        .interpolate(getColorInterpolator(colorMap.interpolationMethod));
+    colorRangeCache.set(colorMap, colorRange);
+    return colorRange;
+}
+/**
+ * This function returns a color for a value in the given color map.
+ */
+export function getColorFromColorMapAt(colorMap, value) {
+    const colorRange = getColorRange(colorMap);
+    if (colorMap.discrete && colorMap.bins) {
+        return colorRange(Math.floor(value * colorMap.bins) / (colorMap.bins - 1));
+    }
+    return colorRange(value);
+}
+/**
+ * This function returns an array of bins with their color, if the color map is discrete. Otherwise, it will return an
+ * empty array.
+ */
+export function getColorMapBins(colorMap) {
+    if (!colorMap.discrete || !colorMap.bins) {
+        return [];
+    }
+    const min = colorMap.colorStops[0].stop;
+    const max = colorMap.colorStops[colorMap.colorStops.length - 1].stop;
+    const range = max - min;
+    const binSize = range / colorMap.bins;
+    const colorRange = getColorRange(colorMap);
+    const result = [];
+    for (let i = 0; i < colorMap.bins; i++) {
+        const lowerBound = min + i * binSize;
+        const upperBound = lowerBound + binSize;
+        const center = (lowerBound + upperBound) / 2;
+        const color = colorRange(Math.floor(center * colorMap.bins) / (colorMap.bins - 1));
+        result.push({ lowerBound, center, upperBound, color });
+    }
+    return result;
+}
+/**
+ * This is a helper method, mapping the InterpolationMethod enum to d3 interpolation functions.
+ */
+export function getColorInterpolator(interpolationMethods) {
+    switch (interpolationMethods) {
+        case InterpolationMethod.RGB:
+            return d3Interpolate.interpolateRgb;
+        case InterpolationMethod.HSL:
+            return d3Interpolate.interpolateHsl;
+        case InterpolationMethod.HSL_LONG:
+            return d3Interpolate.interpolateHslLong;
+        case InterpolationMethod.HSV:
+            return d3Hsv.interpolateHsv;
+        case InterpolationMethod.HSV_LONG:
+            return d3Hsv.interpolateHsvLong;
+        case InterpolationMethod.HCL:
+            return d3Interpolate.interpolateHcl;
+        case InterpolationMethod.HCL_LONG:
+            return d3Interpolate.interpolateHclLong;
+        case InterpolationMethod.LAB:
+            return d3Interpolate.interpolateLab;
+        case InterpolationMethod.CUBEHELIX:
+            return d3Interpolate.interpolateCubehelix;
+        case InterpolationMethod.CUBEHELIX_LONG:
+            return d3Interpolate.interpolateCubehelixLong;
+    }
+}
+```
+
+### DirectVolume-Renderer/src/tfeditor_js/draw.js
+```
+export function drawControlPoint(context, x, y, pointSize) {
+    const strokes = 10;
+    for (let i = 0; i < strokes; i++) {
+        context.beginPath();
+        context.strokeStyle = i % 2 === 0 ? 'white' : 'black';
+        context.arc(x, y, pointSize, (i / strokes) * (2 * Math.PI), ((i + 1) / strokes) * (2 * Math.PI));
+        context.stroke();
+    }
+}
+```
+
+### DirectVolume-Renderer/src/tfeditor_js/index.js
+```
+export { TransferFunctionEditor } from './TransferFunctionEditor';
+export { ColorMapEditor } from './ColorMapEditor';
+export { ColorPicker } from './ColorPicker';
+export { TransparencyEditor } from './TransparencyEditor';
+export * from './convert';
+export * from './Types';
+```

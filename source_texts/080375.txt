@@ -1,0 +1,1674 @@
+The niivue mono repo. Contribute to niivue/mono development by creating an account on GitHub.
+
+feat(niivue): streamed multi-LOD rendering fixes, LOD compensation, budget plans, and block inspection by cdrake · Pull Request #138 · niivue/mono · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+cdrake
+commented
+Aug 19, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Stacked on #110. Base is feat/multichannel-microscopy-formats, so the diff here is just this branch's 39 commits.
+Draft, opened to exercise CI.
+The through-line: make a streamed multi-LOD volume look right. That started as the swap flicker and grew to cover every reason a brick could read wrong (geometry, brightness, opacity, reconstruction), then the controls and demos needed to see those defects at all.
+The flicker
+Every refocus swaps the chunk plan, synchronously destroying unmatched bricks, and a brick with no resident texture draws nothing, so the scene background showed through until the re-stream landed. NVChunkedVolume now fetches the coarsest pyramid level once and installs it as a whole-volume floor behind the octree (coarseFloor: false opts out; skipped when that level is too big for one texture upload). Adds chunkFadeMs (default 120 ms, 0 disables) on both backends so fine detail dissolves in over the floor instead of popping.
+The OME-Zarr demo builds its plans by hand, so the automatic floor never reached it; it now builds one from the coarse data it already keeps resident.
+Also in this group: picking tissue exposed by a clip plane in chunked volumes (installs NVImage.pickSampler in the NVChunkedVolume constructor, teaches clipRaySegment cutaway mode to return a skip slab, and makes both views march before falling back).
+Brick misregistration (the real seam)
+A multi-LOD brick's fetch box is snapped out to whole voxels of its own pyramid level, so it covers up to one level voxel more than the brick owns on each face. Both backends' chunkUniformsFor and chunkSampleTransform treated that fetched box as the owned box, so the shader mapped the brick's common-grid edges onto the fetched region's edges. Content inside every coarse brick was shifted and stretched, and because neighbouring bricks snap independently, two neighbours disagreed about the level coordinate at their shared face. That disagreement is a geometric seam, which no brightness knob can remove.
+chunkOwnedTexBox is now the single source for the remap in all three call sites. On the real hoa_heart pyramid this moves brick content by up to 3.4 / 6.3 / 8.7 common voxels at L2 / L3 / L4 and corrects a stretch of up to 5.9 / 12.4 / 23.7, about 61 um of displacement on an L4 brick. A single-level plan takes an exact path and is bit-identical to before.
+Ray-march ringing and slab tiling
+Oversampled the 3D ray march.
+Each fine sample now owns the slab it is the midpoint of, clipped to the brick's segment, so slab thicknesses tile [0, len] exactly at LOD interfaces.
+The empty-space skip now probes one stride past each cube's exit face. It restarted at every chunk / coarse-floor cube face and strode 1.9 level voxels, so material in the last sub-stride was never probed, the cube contributed zero, and its exit face showed as a discontinuity. CPU replica: worst-case two-cube split error -3.99% to +0.68%. Browser A/B (HOA heart, pinned L4, 64 chunks, WebGPU): whole-image TV -2.7% x / -2.2% y.
+The coarse floor renders as volume rather than a dark shell.
+Gamma and LOD compensation
+scene.gamma was declared, settable, and persisted in NVD, but no renderer ever read it, so the property was dead while FEATURE_PARITY claimed it worked. It is now wired into both backends' ray-march and the 2D slice tiles. Semantics follow the old package (classified RGB raised to 1/gamma, alpha untouched, 1.0 an exact no-op). Measured headless on both backends, mean canvas luminance: 13.59 at 0.7, 17.85 at 1.0, 29.56 at 2.0, 36.91 at 3.0, the two backends agreeing to within 0.003.
+Downsampling averages voxels, which destroys the correlation between a sample's colour and its opacity, so a coarse brick integrates darker than the fine data it stands in for. volumeLodBrightnessCompensation applies a per-chunk exponent that multiplies the gamma exponent, so a level-0 brick or any single-level plan is an exact no-op. The coarse floor draws through its own uniform block and initially got no correction at all, which put the scene's largest brightness step exactly at the edge of the resident fine region; its downsample now comes from its own dims.
+The law was wrong, and that was the seam. The lift grew with downsample - 1, which assumes a level-4 brick loses eight times what a level-1 brick loses. Averaging does not work that way: every level reduces the same 2x2x2 neighbourhood, so it is one comparable step per level. It is now log2(downsample). Under the old form a level-6 brick asked for exponent -0.386 on a seven-level pyramid, the 0.25 clamp caught it, and the correction became the artifact: measured across the strongest seam on hoa_heart, +35.7% at the default against -34.0% with compensation off, having overshot the null by about 6x. The floor sat pinned at the clamp, which was the pale flash on zoom. Default refit to 0.08 per level; seam response is now monotonic across the whole slider (-33.0% at 0, -10.1% at 0.08).
+volumeLodOpacityCompensation is the matching alpha knob, ray-march only, and defaults to 0 as a measured choice: over four probe regions, raising c from 0 to 0.5 cut mean alpha error from 6.7% to 5.1% while driving colour error from 15.3% to 25.7%. Sparse thin material has a genuine deficit that no global scale recovers; fixing it needs a coverage-preserving pyramid, not a renderer knob.
+Both coefficients are exact no-ops on a non-multi-LOD volume and nothing on screen said so, so nv.lodCompensation() reports isActive plus an inactiveReason, then per level the downsample factor, bricks drawn, and the exact exponent and scale handed to the shader (floor reported separately, via a new ViewBackend.coarseFloorDims() in both views). Setting a non-zero coefficient with no multi-LOD volume loaded now warns at the moment of the set. Covered by e2e/lod-compensation-report.spec.ts.
+Opt-in tricubic B-spline reconstruction
+volumeIsCubicInterpolation, both backends, default off. It fixes the texel staircase; it does not remove the ringing (see above). Cubic needs a 2-voxel halo, so chunking.ts gained LINEAR_MIN_HALO / CUBIC_MIN_HALO / planSupportsHalo / planSupportsCubic, and NVChunkedVolume.raiseHaloTo() re-plans a loaded volume when the setter fires. Both views gate cubic per draw on halo >= 2 and on not-a-label-volume, including the coarse-floor cube. Public default halo stays [1,1,1]. New unit test src/volume/chunkHalo.test.ts carries a CPU replica of sampleTricubic.
+New example vox.interp.html (linear vs cubic, A/B split or flip); the range demo gained an interp selector, a draggable A/B divider, and a samples-per-voxel control.
+Named budget plans
+A chunked volume had exactly one policy: an octree focused on the crosshair. That is right for exploring and wrong for a whole-volume figure or for holding a frame rate while rotating. budgetPlans.ts owns the BudgetPlan type, three presets (focus / uniform / interactive) and resolveBudgetPlan. Precedence lowest first: focus baseline, named preset, explicit plan object, individual options, so every existing call keeps its behavior. radius: 'volume' is all uniform needs, since the detail shrink pass only bites beyond the radius and the budget pass converges on the finest uniform level that fits. setBudgetPlan switches mid-session and re-folds over the load options so an app-pinned knob still wins; minLevel and halo come from current state so a switch cannot undo setMaxDetail or undercut a wider kernel already streamed for. targetFrameMs is resolved and readable but nothing acts on it yet.
+Design doc: docs/budget-plans.md. Remaining streaming work is tracked in docs/streaming-todos.md (off-thread chunk decode is the next item).
+Chunk 0 eviction blanked the volume (WebGL2)
+Reported as "stopped loading chunks when I moved the crosshairs to the opposite surface of the clipped volume".
+draw() early-returned on a null volumeTexture / volumeGradientTexture. For a chunked volume those are only a best-effort alias of chunk 0 (the real textures bind per chunk, and the coarse-floor cubes bind the floor textures), so a refocus that evicted chunk 0 silently killed the whole volume. WebGPU already branched on the chunked entry before its equivalent guard, which is why this was WebGL2-only.
+Two dangling-pointer paths fixed alongside it: swapChunkedVolumePlan never refreshed the aliases after manager.remap() destroyed unmatched chunks, and switching from a chunked volume to a single one let the single-volume path delete textures the chunked cache entry still owned.
+GPU context recovery
+A lost context was permanent: NVViewGL latched _contextLost and stopped rendering, and its webglcontextlost listener was { once: true } so a second loss was not even reported. Both views now expose an onContextLost hook, wired by the controller inside its RAF callback so it survives view recreation (the same treatment overlayDraw gets). WebGL2 calls preventDefault() (which is what makes the browser promise a replacement) and fires on webglcontextrestored; WebGPU has no restored event so it fires straight from device.lost, with a _destroyed latch so deliberate teardown does not ask for a rebuild. The controller rebuilds via recreateView, capped at two attempts, with a canvas overlay while rebuilding and a "GPU most likely ran out of memory" message on giving up.
+The range demo asked for an 8 GB GPU residency budget against a 2 GB plan budget, so the LRU never evicted and each refocus piled bricks on top of the old ones: 1.67 GB across 177 bricks measured on hoa_heart L0. WebGL2 now gets 1.25 GB, deliberately below the plan budget. WebGPU unchanged.
+Block inspection (how the above gets seen)
+A registration or reconstruction error inside one brick is nearly invisible in the full render and obvious with the brick beside its own fine data. Two demos, in two halves.
+examples/vox.block.pick.html, CPU-resident NIfTI. pickExplodedBlock(clientX, clientY) resolves a pointer onto one visible brick, CPU-side: it slab-tests each brick's EXPLODED mm AABB and inverts the exploded matRAS, because GPU depth picking cannot see the render-time per-brick translation. extractSubVolume / extractChunkBlock (src/volume/ChunkExtract.ts) copy a voxel box out as a complete NIfTI whose affine is the parent's with its origin walked to the box, so an oblique parent stays oblique and the child reports true anatomical mm. The brick's DATA region is used rather than its halo region, so adjacent blocks tile the parent without overlap.
+examples/vox.block.pick.zarr.html, streamed multi-LOD hoa_heart, which is the part that actually tests chunkOwnedTexBox. A streamed volume has no CPU img, so extractSubVolume returns null and the right pane cannot be built by copying. It opens a SECOND streamed volume over the same store, cropped to the picked brick's common-grid box, and lets that volume's octree pull the crop toward level 0 near its crosshair. A brick is already one texture's worth at its own level, so re-fetching it there buys nothing; the detail comes from the crop source's finest levels. Picking needed a core fix: pickExplodedDraw sampled the parent's CPU img, so on a streamed volume every pick landed on the brick's box face. It now falls back to vol.pickSampler (mm-space, backed by the coarse floor), in control/ so both backends get it.
+The lattice you pick out of also needs a block COUNT you choose, and the planner could not express one. chunkVolumeMultiLOD sized bricks from a scalar cellEdge, so the count fell out of the pyramid: on hoa_heart L5 (181x186x246, not a cube) the reachable counts step 2, 8, 12, 16, 27, and 4 or 9 are unreachable at any edge length. maxBricks only coarsens by raising the level floor, which fights the demo's own level control. A new gridDims option replaces the octree with an exact lattice, gridDims[a] bricks per axis all drawn from minLevel, and sets real gridDims / stride on the plan so chunkAtVoxel indexes it (multi-LOD plans previously returned a degenerate [1,1,1]). An axis grows when a brick would exceed deviceLimit, since emitBrick clamps an oversize texture and that squashes the sampling, so callers read the built plan's own gridDims back. The zarr demo gets a Blocks control (4 / 9 / 16) on top of it, choosing the factorization whose blocks come out closest to cubic, and reports what was built plus the asked-for count when an axis had to grow. Its lattice budget option is dropped as inert: the plan budget only shapes the octree, and GPU residency is capped separately by the renderer.
+Per-pane block-loading badges in both the zarr block demo and the range demo. pending is the GPU upload QUEUE, not a finite work list (the octree re-requests its working set every frame), so the badge keys on the resident count moving, counts against what the stream actually asked for rather than the plan total (absent and empty bricks are never fetched and the LRU evicts), and holds a per-episode high-water mark so the bar only moves forward. Verified against a fake clock in isolation, then live on both backends.
+DANDI app: one store, two viewers
+VolumeSliceSource adapts a chunked volume store to the NVSlide tile source interface, so one OME-Zarr drives both the volumetric view and the deep-zoom pane without opening the store twice. apps/dandi-demo puts them side by side over a single zarrita byte cache: a plane the deep-zoom viewer already pulled costs the volumetric stream nothing. The panes link both ways (crosshair moves the slide plane, debounced; clicking the slide refocuses the multi-LOD budget). It lives in apps/ rather than packages/niivue/examples because its measuring ruler comes from @niivue/uikit, which builds against niivue's dist, and importing it from examples would close a cycle in the task graph. The ruler holds endpoints in slide base pixels and scales each leg by its own axis spacing, so it stays pinned to tissue through pan, zoom and level swaps on anisotropic planes.
+Three verified stores: a 106 MB OCT block, the 4.5 GB OCT volume it comes from, and a 17.7 GB light-sheet SPIM. On the 30 GB NeuN slab, the ruler reads 2.96 mm on WebGPU and 550 um on WebGL2, both matching the level's um-per-pixel by hand.
+Known remaining
+Residual LOD seams. At the refitted default the measured step across a level boundary is about -10% on hoa_heart, down from +36%. No single coefficient nulls every dataset (sparse thin material wants ~0.11, dense structure ~0.05), so closing the rest is structural: cross-LOD blending at brick faces, or publishing a coverage-preserving pyramid. The max/mean blend prototype landed every measured region within 4% at every level and is the stronger lead. Tracked in docs/streaming-todos.md.
+OME-NGFF translation still never reaches a streamed volume's affine. Measured on hoa_heart, every level's translation is exactly half its own scale, which is the voxel-centre convention rather than a world origin, so for this store the gap is a uniform half-voxel shift with no inter-level misregistration. It still matters for any store declaring a real world origin. Shape of the fix is written up in the TODO; vox.block.pick.zarr.html prints the numbers so the convention is visible.
+Verification
+nx affected -t format lint typecheck test build, check-boundaries, and codespell all green. 1191 unit tests pass. Rendering changes verified manually in the browser on both backends via each demo's ?backend=webgl2|webgpu switch.
+Not verified by a live test: the context-recovery path. I could not get a context loss to reproduce on demand (five rapid refocuses across all six faces held), so that path is verified by construction and typecheck only.
+🤖 Generated with Claude Code
+cdrake
+and others
+added 17 commits
+August 17, 2026 11:54
+feat(niivue): back streamed chunks with an automatic coarse floor
+…
+403d7ce
+```
+A brick with no resident texture draws nothing, so the scene background
+shows through wherever one is missing. Every refocus swaps the chunk plan,
+which synchronously destroys the unmatched bricks and re-streams them over
+the following frames, so without a backdrop the gap is visible for every
+region that moved level. That is the flash reported while zooming.
+
+NVChunkedVolume now fetches the coarsest pyramid level once and installs it
+through setBaseCoarseFloor, so both render paths have something to fall back
+on. The build is skipped with a warning when the coarsest level is too large
+for a single texture upload or carries a datatype with no per-voxel
+intensity, and in that case the host floor is cleared rather than left
+holding a previous volume's grid. Opt out with coarseFloor: false.
+
+applyCoarseFloor is public and caches the built volume, because init runs
+while an additive reload still has the outgoing volume as the base; callers
+that swap volumes can re-apply afterwards at no extra fetch. range.js drops
+its hand-rolled floor helper and demonstrates that pattern.
+
+Also make the cross-fade duration configurable as chunkFadeMs (default
+120 ms, 0 disables) in both the WebGL and WebGPU renderers, so a chunk
+arriving over the floor dissolves in rather than cutting.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(iiif-volumetric-demo): back the OME-Zarr view with a coarse floor
+…
+7c3f907
+```
+This demo builds its chunk plans by hand (chunkVolumeMultiLOD +
+swapVolumeChunkPlan) rather than through loadChunkedVolume, so the library's
+automatic floor never reaches it, and it had no floor at all: every plan swap
+showed the scene background through the bricks that were still streaming.
+
+Build the floor from the coarse level data ensureCoarsePickData already keeps
+resident, so it costs no extra request, and re-apply it on each multi-LOD
+reload. The single-level paths clear it, since a floor on a different grid
+must not draw behind them.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(niivue): pick tissue exposed by a clip plane in chunked volumes
+…
+b1ea40d
+```
+Double-clicking a cavity opened up by the clip plane in the range demo
+moved the crosshair to the volume's outer bounding box instead of the
+tissue under the cursor. A chunked/multi-LOD volume has no whole-volume
+texture, so depthPick cannot run its GPU readback pass and falls back to
+CPU ray math. Three gaps made that fallback useless:
+
+- Nothing ever set NVImage.pickSampler, so the CPU path could only ever
+  return the box entry point. NVChunkedVolume now installs a sampler
+  backed by its coarse floor. It is built in the constructor, before
+  init() adds the volume, because prepareVolume shallow-copies the
+  NVImage at addVolume time and anything attached later never reaches
+  the mounted copy.
+- clipRaySegment skipped clip handling entirely in cutaway mode, so a
+  carved-away region stayed pickable. It now mirrors the shader: the
+  kept interval is what a cutaway removes, returned as a skipMin/skipMax
+  slab that rayBoxEntryMM advances past and rayMarchFirstVisibleMM
+  steps over.
+- A null march result fell through to the GPU pass that cannot sample
+  the volume. Both views now march first and fall back to the box or
+  clip surface, which is what the shader does on its own miss.
+
+Verified in examples/range.html on the HOA heart with a solid clip
+plane and in cutaway mode, on both WebGL2 and WebGPU: picks land on
+tissue, never inside the removed half.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(niivue): oversample the 3D ray march to kill render ringing
+…
+6843b5b
+```
+The fine ray march took exactly one sample per voxel, which sits at the
+Nyquist limit of the trilinear reconstruction. The ray integral is then
+quantized against a sample lattice coherent across the screen, painting
+concentric "wood grain" rings over smooth structures. It is not a chunked
+or multi-LOD artifact: the single-level, non-chunked coarse floor shows
+the same rings.
+
+Add volumeSampleRate (samples per voxel along the ray), default 2,
+clamped to [1,4], on both backends. Measured over a fixed camera and
+fixed residency, the detrended high-frequency residual RMS of a 512x512
+patch falls 11.94 (rate 1) -> 8.30 (2) -> 7.94 (3) -> 7.85 (4), and mean
+luminance falls 66.5 -> 61.7 -> 60.8, confirming rate 1 was systematically
+over-estimating the ray integral. Cost in the worst case tested (retina,
+2.6x zoom, 168 brick cube draws) is 48ms -> 80ms per frame at rate 2.
+
+The stepRatio clamp at >= 1 had to go now that oversampling is possible,
+or the opacity correction would under-compensate. The empty-space skip
+scales with the rate so the fast pass still strides 1.9 voxels of real
+distance. The fine-loop cap goes 2048 -> 8192 to accommodate rate 4; every
+loop exits on ray length long before that. WebGPU carries the rate in the
+former pad lane of rayStepTexVox, so the uniform struct size and offsets
+are unchanged. Depth picking stays at one sample per voxel.
+
+Also re-anchor the fast-to-fine handoff onto the ray's own sample lattice
+(snapToSampleLattice). The fast pass strides 1.9 voxels, not a whole
+number of fine steps, so resuming the fine march where the fast pass
+stopped left the fine lattice with a phase set by floor(depth / 1.9) -- a
+sawtooth in depth-to-first-hit that shifted a chunk's samples whenever a
+neighbour changed where empty-space skipping ended. Real defect, though
+it was not the cause of the rings.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+feat(niivue): add a samples-per-voxel control to the range example
+…
+005891c
+```
+Ringing is a fill-rate/quality tradeoff best judged by eye, and the A/B is
+only fair when brick residency is held fixed. volumeSampleRate is purely
+render-time, so the slider re-renders in place with no re-streaming.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(niivue): tile ray slabs exactly across LOD brick boundaries
+…
+93a57ae
+```
+Each fine sample now owns the slab it is the midpoint of, clipped to the
+brick's own [0, len] segment, and that slab thickness drives the opacity
+(step-size) correction instead of a constant per-brick stepRatio.
+
+Same-level neighbours already tiled correctly because they share the
+global sample lattice. At a LOD interface they do not: the step-D and
+step-2D lattices are both centered but do not nest, so the boundary
+gained or lost up to ~1.5 fine steps of optical depth and drew as a
+bright or dark seam along every level change. Attributing the ray length
+each sample actually owns makes the slabs sum to len exactly for any
+lattice phase, so a brick contributes the same optical depth regardless
+of where its samples fall.
+
+The correction factor is now refPerLen (reference steps per unit ray
+length) and is left unclamped: a coarse brick owns longer slabs and
+scales up, oversampling owns shorter ones and scales down, and both
+directions are correct.
+
+Mirrored in the WGSL renderer for backend parity.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(niivue): render the coarse floor as volume, not a dark shell
+…
+afa8dfb
+```
+Two independent defects made a floor-backed brick (any region whose fine
+chunk is not resident) render as a flat dark shell instead of coarse
+detail, which read as "black blocks" next to the streamed fine ones.
+
+1. The floor was baked with `overlayOpacity = 1`, which selects the
+   overlay path in the orient shader and makes alpha binary
+   (`a = step(0, a)`). Every voxel above threshold came out fully
+   opaque. The base volume and every streamed chunk bake with 0 (alpha
+   straight from the colormap LUT), so the floor was the odd one out.
+   Measured on the coarse texture: alpha was 255 for 100% of non-empty
+   voxels before, a 57-69 mean ramp after.
+
+2. The floor cubes marched at the fine common grid's density
+   (`rayStepTexVox = volumeTexDimsFull`) while sampling a texture ~64x
+   coarser. The step-size correction gives each step an optical depth of
+   `fineVoxels / steps` reference steps, so the first in-tissue sample
+   saturated to alpha 1 and the ray terminated on the outer surface.
+   They now march at the floor texture's own voxel density, matching an
+   equivalent coarse-level brick draw.
+
+Both land on WebGL2 and WebGPU. Measured in examples/range.html on
+hoa_heart (5787x5943x7865, 176 bricks, all but one forced to the floor
+path), crop luminance mean / max:
+
+  binary alpha, fine-grid steps   6.94 /  63.4   (before)
+  binary alpha, floor-dim steps  14.69 / 147
+  LUT alpha,    fine-grid steps  25.87 /  63.4
+  LUT alpha,    floor-dim steps  32.28 / 177     (after)
+
+For reference the same level-6 data drawn through the normal brick path
+measures 29.56 / 92, and the resident fine bricks reach 233.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+feat(niivue): opt-in tricubic B-spline volume reconstruction
+…
+5669e52
+```
+Adds volumeIsCubicInterpolation (default false) on both backends. When set,
+the 3D fine ray-march reconstructs the volume texture with a cubic B-spline
+built from 8 hardware-trilinear fetches instead of a single trilinear fetch.
+
+Hardware trilinear is only C0, so band edges in a dense scalar volume carry a
+blocky texel staircase. The B-spline is C2 and removes it. It is approximating
+rather than interpolating, so it cannot overshoot: it does not introduce new
+ringing, and it does not remove the concentric ringing in the HOA heart data
+either (that survives a C2 reconstruction unchanged).
+
+The fast skip pass stays trilinear; it only needs a coarse alpha test, so
+8 fetches there would be waste.
+
+Chunk safety: the filter reaches 2 texels either side of the sample, so a
+chunked volume needs a brick halo of at least 2 for brick faces to reconstruct
+from real neighbour data. Each chunk cube binds its own sampler, so the cubic
+coordinates already use that chunk's own dimensions and halo.
+
+Cost on a 240-brick mixed-LOD heart at 2 samples/voxel: 28.6 -> 58.1 ms/frame.
+At 1 sample/voxel cubic runs 27.2 ms, so pairing the filter with a halved
+sample rate is cheaper than trilinear at 2 and still staircase-free.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+feat(range-demo): add an interp selector and an A/B filter comparison
+…
+9a9863c
+```
+The two reconstruction filters differ by a fraction of a gray level per pixel,
+so judging them across a control change relies on memory of the previous frame
+and is not trustworthy. Adds:
+
+- Interp: linear (default) | cubic B-spline. Opt-in, render-time only.
+- A/B: split draws the SAME frame twice inside one animation frame, changing
+  only the filter uniform between the two renders, and wipes the pair side by
+  side under a draggable divider. flip leaves the live render alone and
+  alternates the filter on a 700 ms timer so the eye does the differencing.
+
+Both modes hold the camera, window and LOD residency fixed by construction.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(range-demo): make the A/B divider a slider and free the canvas
+…
+2d7e079
+```
+The split overlay is a canvas, so it took pointer events by default and ate
+every drag: with a split up the volume could not be rotated at all. The
+divider handle sat on top of it and took a 16 px strip of its own.
+
+The overlay is now pointer-events: none and the divider is a header slider,
+so drags, wheels and clicks all reach the live canvas and the camera behaves
+exactly as it does with A/B off. Moving the slider only re-blits the two
+captures, so it needs no re-render and is excluded from the header's
+invalidate-the-pair listener.
+
+Any interaction that DOES invalidate the pair now drops straight back to the
+live render for the duration instead of leaving a stale split on screen, and
+the overlay reveals itself again when the new pair lands.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+feat(niivue): add a linear vs cubic B-spline interpolation example
+…
+8808b8d
+```
+Pull the filter A/B tooling out of the chunk-streaming demo into its own
+page. Two audiences: debugging a render whose reconstruction filter is
+under suspicion, and producing higher-quality still figures, where the
+2x fine-march cost of the cubic filter does not matter.
+
+vox.interp.html loads a standard volume in the render view and carries
+the Interp select, the split/flip A/B comparison with a header divider
+slider, sample-rate and illumination sliders, a ms/frame benchmark over
+both filters, and a PNG export (the split composite when one is up).
+
+range.html keeps the plain Interp select, since a chunked stream is
+where halo correctness matters, and drops the A/B machinery.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+chore(ipyniivue): regenerate bindings for volumeIsCubicInterpolation
+…
+f0add95
+```
+Picks up the property added by 5669e52 so the widget exposes
+volume_is_cubic_interpolation alongside the other volume traits.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(niivue): never reconstruct cubic from clamp-to-edge brick data
+…
+601480c
+```
+sampleTricubic reaches texels idx-1 .. idx+2, so it needs two source
+voxels past a brick's owned data at every internal face. Streamed chunks
+default to a one-voxel halo, which is right for trilinear and for the
+gradient tap but leaves the outermost cubic taps to be served by
+clamp-to-edge, so two bricks reconstruct different values on a shared
+face and the face shows as a seam.
+
+Three parts:
+
+- chunking.ts gains LINEAR_MIN_HALO / CUBIC_MIN_HALO, planSupportsHalo
+  (true volume-boundary faces are exempt, clamp is correct there),
+  planSupportsCubic and warnIfCubicUnsafe (warn-once per volume,
+  re-armed if a volume goes safe then unsafe again).
+- Turning the filter on re-plans what is already loaded:
+  NVChunkedVolume.raiseHaloTo() raises the plan's halo and refocuses,
+  and NVControlBase keeps a registry of live chunked volumes so the
+  volumeIsCubicInterpolation setter can call it on each. The public
+  default halo stays [1,1,1], so trilinear rendering pays nothing.
+- Both views gate cubic per draw on planSupportsCubic(plan) and on the
+  volume not being a label volume, the coarse-floor cube included, so a
+  plan that still cannot feed the kernel falls back to trilinear with a
+  warning rather than seaming silently.
+
+Verified on both backends with a fixed camera and frozen streaming: with
+the gate in place a cubic frame is pixel-identical to the linear frame on
+an unsafe plan, and forcing the gate open reproduces the seams (WebGL2
+53858 differing pixels, WebGPU 1023026). With a sufficient halo the
+filter engages and the plan reports safe. Level-dependent kernel width
+across pyramid levels was measured and left as is: cubic lowers
+gradient energy in every direction (row 1.278 -> 1.020, column 0.627 ->
+0.537, diagonal 1.929 -> 1.473) and adds no interior discontinuity, so
+the reconstruction stays uniform across levels.
+
+chunkHalo.test.ts is a CPU replica of the shader kernel: trilinear exact
+at halo 1, tricubic exact at halo 2, tricubic wrong at halo 1.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(niivue): probe one stride past a cube's exit face in the empty-sp…
+…
+a00e6b0
+```
+…ace skip
+
+Each chunk (and each coarse-floor cube) restarts the fast empty-space skip at
+its own entry face and walks in 1.9-voxel strides. The loop stopped at
+samplePos.a > len, so any material lying in the last sub-stride of a cube was
+never probed: the cube reported "found nothing", contributed zero, and its exit
+face showed as a discontinuity. The skip is therefore not subdivision
+invariant, and the same ray split across two cubes does not reproduce the
+single-cube result.
+
+Let the probe run one stride past the segment end (fastLimit = len +
+stepSizeFast), reading halo or clamp-to-edge texels. This can only ever produce
+a false HIT, and the fine march that follows is still clipped to [0, len], so
+an over-eager probe costs a few empty samples and changes no output.
+
+A CPU replica of one cube's march over a realistic alpha band (peak 0.03, sigma
+0.02) measures worst-case error against the unsplit march improving from
+-3.99% to +0.68% for a two-cube split, and from -3.82% to -0.62% over an
+eight-cube sweep, with the spread across split offsets dropping from 4.43% to
+1.23%.
+
+On the HOA heart at a pinned LOD 4 this reduces whole-image total variation by
+2.7% (x) and 2.2% (y) with no visible regression, verified on both backends.
+It does NOT remove the residual straight seam lines seen at some cube face
+planes, which are a separate defect still under investigation.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(niivue): keep drawing a chunked volume when chunk 0 is evicted
+…
+4f7021c
+```
+Moving the crosshair to the opposite face of a clipped volume made the
+WebGL2 range demo stop streaming and blank the volume.
+
+draw() early-returned on a null volumeTexture/volumeGradientTexture. For a
+chunked volume those fields are only a best-effort alias of chunk 0 -- the
+real textures are bound per chunk (and the coarse-floor cubes bind the floor
+textures) -- so a refocus that evicts chunk 0 silently killed the whole
+volume. WebGPU already branched on the chunked entry before its equivalent
+guard, which is why the report was WebGL2-only.
+
+Two related dangling-pointer paths fixed alongside it:
+
+- swapChunkedVolumePlan never refreshed the aliases after manager.remap()
+  destroyed every chunk the new plan does not match, so they could name a
+  deleted texture. All three sites now go through _syncChunkedAliases.
+- Switching from a chunked volume to a single one let the single-volume path
+  delete whatever it found in the aliases, freeing textures the chunked cache
+  entry still owns. The pointers are dropped before that path runs.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+feat(niivue): rebuild the view after a GPU context loss
+…
+a1dcf4c
+```
+A lost GPU context was permanent. NVViewGL latched _contextLost and stopped
+rendering, and its 'webglcontextlost' listener was { once: true }, so a
+second loss was not even reported. Streaming froze mid-plan with no
+indication of why.
+
+Both views now expose an onContextLost hook, wired by the controller inside
+its RAF callback so it survives view recreation (the same treatment
+overlayDraw gets). WebGL2 calls preventDefault() on the loss -- which is what
+makes the browser promise a replacement -- and fires the hook on
+'webglcontextrestored'; WebGPU has no restored event, so it fires straight
+from device.lost, with a _destroyed latch so a deliberate teardown does not
+ask for a rebuild.
+
+The controller rebuilds the view via recreateView, capped at two attempts
+since a scene that genuinely does not fit in VRAM would otherwise loop
+forever. A canvas overlay says the view is rebuilding, and on giving up says
+the GPU most likely ran out of memory and to load less at once.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(range-demo): size the WebGL2 chunk budget so the LRU evicts
+…
+0a4d040
+```
+The demo asked for an 8 GB GPU residency budget against a 2 GB plan budget,
+so no planned brick ever evicted. On WebGL2 that meant a refocus piled new
+bricks on top of the old ones: hoa_heart L0 was measured holding 1.67 GB
+across 177 bricks before the driver dropped the context.
+
+WebGL2 now gets 1.25 GB, below the plan budget on purpose, so the LRU keeps
+the visible bricks and evicts the rest. WebGPU is unchanged.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+cdrake
+changed the base branch from
+feat/multichannel-microscopy-formats
+to
+main
+August 20, 2026 12:41
+cdrake
+closed this
+Aug 20, 2026
+cdrake
+reopened this
+Aug 20, 2026
+github-actions
+Bot
+commented
+Aug 20, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Nx Release Preview
+If merged, nx release will tag 11 package(s):
+Package
+Bump
+From
+To
+niivue
+prerelease
+1.0.0-rc.12
+1.0.0-rc.13
+nv-ext-image-processing
+prerelease
+1.0.0-rc.12
+1.0.0-rc.13
+nv-ext-save-html
+prerelease
+1.0.0-rc.12
+1.0.0-rc.13
+nv-web-component
+prerelease
+1.0.0-rc.10
+1.0.0-rc.11
+nv-ext-dcm2niix
+prerelease
+1.0.0-rc.10
+1.0.0-rc.11
+nv-ext-drawing
+prerelease
+1.0.0-rc.12
+1.0.0-rc.13
+nv-ext-niimath
+prerelease
+1.0.0-rc.8
+1.0.0-rc.9
+nv-react
+prerelease
+1.0.0-rc.13
+1.0.0-rc.14
+nv-ohif
+minor
+0.0.0
+0.1.0
+uikit
+minor
+0.0.0
+0.1.0
+ipyniivue
+minor
+0.0.0
+0.1.0
+Changelog preview
+niivue
+1.0.0-rc.13 (2026-08-26)
+Features
+range-demo: default the budget plan to uniform, and stop counting aborts as failures (74364c6)
+niivue: cache OME-Zarr chunk bytes across sessions (d6037b6)
+niivue: demote an evicted chunk to a decoded tier instead of dropping it (e166f92)
+niivue: fetch ahead of where the view is travelling (1281a74)
+niivue: cancel chunk reads the view stopped wanting (70c3dfc)
+niivue: read OME-Zarr chunks on a worker pool (46151b9)
+niivue: count byte-cache hits, misses and evictions (fa4e0f0)
+niivue: time the streaming phases, and measure what actually stalls (1a76c7c)
+niivue: keep coarse slide tiles on screen until finer ones land (b245524)
+niivue: pin a chunk plan's brick count with gridDims (c2749fd)
+niivue: add a streamed OME-Zarr block inspector demo (69975d8)
+niivue: pick an exploded block and open it in its own pane (d2b61c4)
+dandi-demo: move the DANDI demo to an app and measure with UIKit (b621c22)
+niivue: read NVSlide tiles straight from a chunked volume (29a9aae)
+examples: stream DANDI OME-Zarr into the volume and NVSlide at once (379692d)
+niivue: give streamed volumes a named budget plan (aee6572)
+range-demo: show a streaming progress badge while blocks load (1d61aa7)
+niivue: make the LOD compensation settings introspectable (bb2bc23)
+niivue: add opt-in per-level opacity compensation for coarse LOD bricks (770556b)
+niivue: compensate coarse-LOD dimness and gamma the 2D slices (9d0c937)
+niivue: implement scene.gamma in the volume ray-march (b0b4274)
+niivue: rebuild the view after a GPU context loss (a1dcf4c)
+niivue: add a linear vs cubic B-spline interpolation example (8808b8d)
+range-demo: add an interp selector and an A/B filter comparison (9a9863c)
+niivue: opt-in tricubic B-spline volume reconstruction (5669e52)
+niivue: add a samples-per-voxel control to the range example (005891c)
+niivue: back streamed chunks with an automatic coarse floor (403d7ce)
+niivue: add intensity window demo (ac82361)
+niivue: pinnable slide-plane LOD, with a control in slide3d (fe6be28)
+niivue: view selector in the OME-Zarr demo (ee5c4cc)
+niivue: clip, clip-overlays and 3D zoom controls in the Allen demo (d0e40b6)
+niivue: start the Allen atlas demo on the local fixture mirror (4f26906)
+niivue: clip, clip-overlays and 3D zoom controls in the OME-TIFF demo (4814ba9)
+niivue: promote the OME-Zarr ChunkedVolumeSource into the library (531859b)
+niivue: add an OME-Zarr multi-channel demo (f6769b1)
+niivue: load OME-Zarr channels as per-channel volumes (1e9aa02)
+niivue: parse OME-Zarr multiscale and omero metadata (ad78c71)
+niivue: toggle the 3D crosshair in the range demo (67f3fad)
+niivue: read OME-Zarr 0.4 and stream the HOA human heart (b60d9c6)
+range-demo: drop woodbranch from the store list (b642ce5)
+range-demo: swap pig heart for chameleon, add a pyramid screening rule (0d778ee)
+niivue: stream OME-Zarr demo stores from the public bucket (fdd7107)
+niivue: add a real multi-channel OME-TIFF sample (3021701)
+niivue: add an OME-TIFF demo and read real-world unit strings (60d4cd6)
+niivue: read TIFF, OME-TIFF and ImageJ stacks (ee3faad)
+niivue: exercise the new APIs from the demos (f017ebb)
+niivue: persist isColormapInverted and atlasOutline in documents (8434a1d)
+niivue: add clearAngles, clearDistanceMeasurements and clearBounds (5f9e8c8)
+niivue: emit clickToSegment after a magic-wand fill (a1e6628)
+niivue: report region statistics with getDescriptives (4bec296)
+niivue: reverse a volume colormap with isColormapInverted (1e82064)
+niivue: outline atlas regions with setAtlasOutline (0d38156)
+niivue: opt-in colormap alpha on 2D slices (458b4d2)
+niivue: light the overlay pass and add maximum-intensity projection (190eec8)
+niivue: demo for Allen JSON + PNG atlas datasets (481f64e)
+niivue: load Allen JSON + PNG atlas datasets as multi-channel volumes (4b5cd92)
+niivue: parse the Allen JSON + PNG atlas volume format (10e11fb)
+nv-ohif: unify Length onto the annotation system (cd0509c)
+Bidirectional measurement (two perpendicular axes) end to end (0064166)
+user-entered free-text labels for annotations (3252bed)
+LivewireContour (edge-snapping multi-click ROI) end to end (7e965cf)
+niivue: live-wire (intelligent scissors) path algorithm (d0c60a6)
+multi-click SplineROI (niivue interaction + nv-ohif wiring) (fb36c30)
+niivue: spline contour geometry for multi-click ROIs (ff90664)
+niivue: expose annotation screen-geometry seam for external overlays (6adc823)
+nv-ohif: wire OHIF ROI + arrow measurement tools to NiiVue annotations (66f66be)
+niivue: isMeasurementDrawn flag to suppress the built-in measurement (df129c7)
+niivue: expose measurement screen projection for external overlays (2644d94)
+niivue: numbered graduations on the measurement ruler (452c433)
+niivue: graduated arrowed measurement ruler (both backends) (19d1c0f)
+nv-ohif: UIKit ruler on the WSI viewport with physical-unit measurement (3fec150)
+measure WSI slides in real physical units (um/mm) (d030a76)
+niivue: overlay hook on the standalone WSI slide viewer (e9fd75e)
+uikit: ruler widget with readability guard + demo (555edc5)
+uikit: transformed MSDF text renderer on both backends (56317c8)
+uikit: line renderer on both backends + overlay-hook proof (2ca8aab)
+niivue: UIKit overlay lifecycle hook on both backends (d61b795)
+niivue: terminated-line builder (arrow terminator) for UIKit ruler (2a02a2e)
+Fixes
+niivue: keep the slide tile cap when given Infinity or NaN (e21df06)
+niivue: reject non-finite chunk loader limits (a9188a6)
+niivue: escape the NUL separator in the chunk worker cache key (7704b19)
+niivue: revoke the object URL when assigning img.src throws (839737e)
+niivue: validate OME-TIFF channel and timepoint selectors (c7259ca)
+niivue: resolve pinned slide levels by manifest id, not array offset (727aaf6)
+niivue: default crosshairWidth to 2 canvas pixels (4f8857d)
+niivue: make crosshairWidth canvas pixels everywhere (#137)
+niivue: honour the background volume's opacity in the 3D render (#67)
+niivue: let the 2D wheel zoom reach the bottom of its range (0064eec)
+niivue: anchor the 2D wheel zoom on the crosshair (#68)
+niivue: forward the persistent cache scope to each worker (eb66167)
+niivue: pick visible tissue on a streamed exploded volume (95df8d0)
+niivue: map a brick's owned box, not its fetched box, into its texture (3f2b612)
+niivue: grow the LOD brightness lift per level, not per downsample (63e7df5)
+niivue: compensate the coarse floor's brightness too (6931055)
+range-demo: size the WebGL2 chunk budget so the LRU evicts (0a4d040)
+niivue: keep drawing a chunked volume when chunk 0 is evicted (4f7021c)
+niivue: probe one stride past a cube's exit face in the empty-space skip (a00e6b0)
+niivue: never reconstruct cubic from clamp-to-edge brick data (601480c)
+range-demo: make the A/B divider a slider and free the canvas (2d7e079)
+niivue: render the coarse floor as volume, not a dark shell (afa8dfb)
+niivue: tile ray slabs exactly across LOD brick boundaries (93a57ae)
+niivue: oversample the 3D ray march to kill render ringing (6843b5b)
+niivue: pick tissue exposed by a clip plane in chunked volumes (b1ea40d)
+niivue: merge chunked MIP cube draws with MAX blending (b7683fb)
+niivue: re-stream chunked volumes when display state changes (8ad3c8a)
+niivue: harden loaders and close review gaps from the PR sweep (d94a6a3)
+niivue: harden the microscopy loaders against real-world metadata (efca0a8)
+validate Allen colors, integer metadata, and fetch concurrency (62220fe)
+niivue: rename the slide3d lod variable so codespell stays clean (d6be590)
+niivue: spline double-click no longer appends coincident control points (5b67844)
+niivue: thread clipPlaneOverlay into the WebGPU depth-pick uniforms (a976186)
+niivue: depth pick honours clipPlaneOverlay on both backends (0cb8da3)
+niivue: enforce the OME-Zarr cache budget, harden image decoding (6e3e6d3)
+niivue: replace the pig-heart demo store with woodbranch (bf41ffc)
+examples: report setup failures on the page instead of rejecting (c795f6b)
+niivue: keep a colormap's alpha in place when inverting it (bd2ed18)
+harden annotation synchronization (c23d450)
+harden OHIF annotation synchronization (756cb9c)
+nv-ohif: harden measurement reflection (3bf0798)
+nv-ohif: harden the annotation/measurement subsystem (PR feat(nv-ohif): NiiVue viewport extension for OHIF (NIfTI + DICOM + toolbar) #76 review) (#76)
+niivue: offset the arrow label off the tail so it does not obscure it (1c5f14b)
+niivue: anchor an arrow's text label at its start (the tail) (ac4d183)
+niivue: rename livewire nd to newDist (codespell) (d9977be)
+niivue: render annotation free-text in the built-in draw too (547f77f)
+niivue: abandon a half-drawn multi-click contour on tool/mode change (40e7902)
+correct regressions found reviewing the review-fix commits (1a6648d)
+address review findings 5-10 (WSI/DICOM loaders + chunked-volume leak) (#5, #6, #7, #8, #9, #10)
+address second-review findings on the ruler/WSI fixes (d1027c6)
+niivue,uikit: shrink arrowheads on short lines so buildTerminatedLine can't invert (review finding 2) (9b3de35)
+niivue: harden the built-in measurement ruler (review findings 4/6/7) (#7, #2, #6, #4)
+nv-ohif: prevent runaway slide rendering (3bd58da)
+niivue: bound GPU memory in the NVSlide tile pipeline (0292adf)
+Performance
+niivue: drop stale chunk upload requests and reprioritize per frame (1a9d525)
+niivue: stop re-fetching OME-Zarr chunks already known absent (9e05015)
+Thank You
+Chris Drake
+Claude Fable 5
+Claude Opus 5
+Taylor Hanayik @hanayik
+nv-ext-image-processing
+1.0.0-rc.13 (2026-08-26)
+Updated Dependencies
+Updated niivue to 1.0.0-rc.13
+nv-ext-save-html
+1.0.0-rc.13 (2026-08-26)
+Updated Dependencies
+Updated niivue to 1.0.0-rc.13
+nv-web-component
+1.0.0-rc.11 (2026-08-26)
+Updated Dependencies
+Updated niivue to 1.0.0-rc.13
+nv-ext-dcm2niix
+1.0.0-rc.11 (2026-08-26)
+Updated Dependencies
+Updated niivue to 1.0.0-rc.13
+nv-ext-drawing
+1.0.0-rc.13 (2026-08-26)
+Updated Dependencies
+Updated niivue to 1.0.0-rc.13
+nv-ext-niimath
+1.0.0-rc.9 (2026-08-26)
+Updated Dependencies
+Updated niivue to 1.0.0-rc.13
+nv-react
+1.0.0-rc.14 (2026-08-26)
+Fixes
+deps: pin @types/bun instead of the "latest" dist-tag (f466415)
+Updated Dependencies
+Updated niivue to 1.0.0-rc.13
+Thank You
+Chris Drake
+Claude Opus 5
+nv-ohif
+0.1.0 (2026-08-26)
+Features
+nv-ohif: hide the NiiVue annotation when its OHIF measurement is hidden (e7d3664)
+nv-ohif: delete the NiiVue annotation when its OHIF measurement is removed (afbf170)
+nv-ohif: unify Length onto the annotation system (cd0509c)
+Bidirectional measurement (two perpendicular axes) end to end (0064166)
+user-entered free-text labels for annotations (3252bed)
+LivewireContour (edge-snapping multi-click ROI) end to end (7e965cf)
+multi-click SplineROI (niivue interaction + nv-ohif wiring) (fb36c30)
+nv-ohif: render ROI annotations via UIKit through the niivue seam (b0c0222)
+nv-ohif: wire OHIF ROI + arrow measurement tools to NiiVue annotations (66f66be)
+uikit: make @niivue/uikit publishable and depend on it from nv-ohif (ebc8ca0)
+nv-ohif: bump @niivue/dcm2niix to the published fix (1.3.20260724) so DICOM works for consumers (a34799f)
+nv-ohif: unify the slide ruler control to click-drag (match the volume) (739e082)
+nv-ohif: draw volume measurements as UIKit rulers (rotated tick numbers) (fdbf5cc)
+nv-ohif: match the volume measurement ruler to the WSI ruler color (d768632)
+nv-ohif: recover WSI pixel spacing so the ruler measures in mm/microns (4f1a7ac)
+nv-ohif: UIKit ruler on the WSI viewport with physical-unit measurement (3fec150)
+nv-ohif: ruler tool bridged to OHIF's measurement panel (90c4458)
+nv-ohif: wire OHIF toolbar to NiiVue (d2100e9)
+nv-ohif: study-panel preview thumbnails for whole-slide (SM) series (89af65b)
+nv-ohif: claim the SM SOP class so whole-slide series route to NiiVue (2ff55a0)
+nv-ohif: render DICOM-WSI (SM) display sets with NVSlide (2291418)
+nv-ohif: interpolation (smoothing) toggle (d96bd9d)
+nv-ohif: colorbar (colormap legend) toggle (1415a1b)
+nv-ohif: base-volume colormap dropdown (3b0042e)
+nv-ohif: reverse W/L bridge (NiiVue drag -> OHIF) + NVSlide 2D TODO (8660e5d)
+nv-ohif: bridge OHIF window/level presets to NiiVue calMin/calMax (351932e)
+nv-ohif: add clip-plane and overlay toolbar controls (e23a075)
+nv-ohif: wire the OHIF toolbar to NiiVue (views dropdown + reset view) (6cc012b)
+nv-ohif: mirror OHIF's active tool onto NiiVue's left-drag (Window/Level, Pan) (66c01b6)
+nv-ohif: DICOM->NIfTI viewport path via in-browser P10 reconstruction + dcm2niix (d18f51a)
+nv-ohif: prove Phase 1 — NiiVue renders a NIfTI in an OHIF-shaped harness (9f8c1ae)
+nv-ohif: scaffold the NiiVue viewport extension for OHIF (Phase 1) (7eb6386)
+Fixes
+deps: pin @types/bun instead of the "latest" dist-tag (f466415)
+nv-ohif: guard the positional imageIds fallback against compaction (3f08d12)
+nv-ohif: rank array-form ImageType in WSI thumbnail selection (686b626)
+nv-ohif: classify array-form ImageType in WSI pyramid extraction (6e9ddf0)
+nv-ohif: stale flashStatus timer no longer blanks newer status messages (52f1538)
+nv-ohif: ruler toolbar button reflects the Length annotation tool (e240273)
+nv-ohif: harden annotation visibility/removal from the final review (1f97794)
+nv-ohif: no default label for a Length measurement (a67a7c2)
+nv-ohif: retry a thrown removal of an unsupported row (PR feat(nv-ohif): NiiVue viewport extension for OHIF (NIfTI + DICOM + toolbar) #76 F1) (#76)
+nv-ohif: apply product rulings on labels + unsupported geometry (PR feat(nv-ohif): NiiVue viewport extension for OHIF (NIfTI + DICOM + toolbar) #76 round-5) (#76)
+nv-ohif: restore failure-handling + labels, fix jump target (PR feat(nv-ohif): NiiVue viewport extension for OHIF (NIfTI + DICOM + toolbar) #76 round-4 review) (#76)
+harden annotation synchronization (c23d450)
+harden OHIF annotation synchronization (756cb9c)
+nv-ohif: fix reflect-failure churn, arrow direction, label clear (PR feat(nv-ohif): NiiVue viewport extension for OHIF (NIfTI + DICOM + toolbar) #76 round-3 review) (#76)
+nv-ohif: preserve reflected annotation geometry (83c30ab)
+nv-ohif: fix reflection recursion + label defects (PR feat(nv-ohif): NiiVue viewport extension for OHIF (NIfTI + DICOM + toolbar) #76 round-2 review) (#76)
+nv-ohif: render default annotation labels (6fc1ab8)
+nv-ohif: complete measurement reflection hardening (28d0828)
+nv-ohif: correct reflected measurement geometry + reconcile (PR feat(nv-ohif): NiiVue viewport extension for OHIF (NIfTI + DICOM + toolbar) #76 review) (#76)
+nv-ohif: harden measurement reflection (3bf0798)
+nv-ohif: harden the annotation/measurement subsystem (PR feat(nv-ohif): NiiVue viewport extension for OHIF (NIfTI + DICOM + toolbar) #76 review) (#76)
+nv-ohif: rebuild the annotation overlay when a label changes (8e5ac1a)
+nv-ohif: add working Crosshairs + Capture buttons (distinct ids, not id-overrides) (452aaf1)
+nv-ohif: move bundled @niivue/uikit to devDependencies so the package is installable (9c73103)
+nv-ohif: close overlay/swap async races found in the review pass (b7867f4)
+correct regressions found reviewing the review-fix commits (1a6648d)
+address review findings 5-10 (WSI/DICOM loaders + chunked-volume leak) (#5, #6, #7, #8, #9, #10)
+nv-ohif: reset per-series state on display-set swap + guard async overlay (review blockers 1-4) (#1, #2, #3, #4)
+nv-ohif: re-enable volume toolbar buttons after the volume loads (feee4fa)
+address second-review findings on the ruler/WSI fixes (d1027c6)
+nv-ohif: strip query from WSI frame imageId so tile URLs stay valid (review finding 5) (2e44538)
+nv-ohif: read WSI PixelSpacing from per-frame functional groups too (review finding 3) (731d323)
+nv-ohif: hide built-in volume measurement via isMeasurementDrawn (no gray boxes) (9135ca9)
+nv-ohif: larger DPR-aware WSI ruler label; drop duplicate status readout (ebfb7eb)
+nv-ohif: prevent runaway slide rendering (3bd58da)
+nv-ohif: cap WSI thumbnail download and decode size (be21cb6)
+nv-ohif: WSI tiles use column/row index (not pixel offset); preserve buffer (36d2cb5)
+nv-ohif: robust WSI fit + event-driven render; read per-instance imageId (7906611)
+nv-ohif: reverse W/L syncs siblings by id, not the throwing active command (a6b593e)
+nv-ohif: recover multipart boundary from body when Content-Type omits it (3dce44f)
+Updated Dependencies
+Updated niivue to 1.0.0-rc.13
+Updated uikit to 0.1.0
+Thank You
+Chris Drake
+Claude Fable 5
+Claude Opus 4.8
+Claude Opus 5
+Taylor Hanayik @hanayik
+uikit
+0.1.0 (2026-08-26)
+Features
+nv-ohif: unify Length onto the annotation system (cd0509c)
+Bidirectional measurement (two perpendicular axes) end to end (0064166)
+uikit: annotation overlay renderer (ellipse/rect/circle/line/arrow) (70fe22a)
+uikit: make @niivue/uikit publishable and depend on it from nv-ohif (ebc8ca0)
+uikit: drop the ruler arrowheads (end caps mark the extent) (85b5b09)
+uikit: long perpendicular end caps marking the ruler's start and end (798d0ef)
+uikit: larger default ruler label size (22 -> 36 px) (43c9457)
+nv-ohif: UIKit ruler on the WSI viewport with physical-unit measurement (3fec150)
+uikit: auto-contrast font outlines (SDF expansion) (2896b44)
+uikit: font-size slider for the WSI ruler demo (490f2ee)
+measure WSI slides in real physical units (um/mm) (d030a76)
+uikit: source the WSI demo tissue from the test-images repo (953cf01)
+uikit: load real tissue slides in the WSI ruler demo (cf18345)
+uikit: ruler on the WSI viewer + no-depth WebGPU passes (cfabdb5)
+uikit: volume + slide ruler demos with real measurement (90cdabe)
+uikit: ruler widget with readability guard + demo (555edc5)
+uikit: transformed MSDF text renderer on both backends (56317c8)
+uikit: line renderer on both backends + overlay-hook proof (2ca8aab)
+uikit: scaffold @niivue/uikit package with line primitives (1dce813)
+Fixes
+uikit: place ROI labels below the box, stack lines, render spaces (77f6809)
+uikit: space-separate annotation label parts (#3)
+address second-review findings on the ruler/WSI fixes (d1027c6)
+uikit: WebGPU text renderer draws each run's own vertices/uniform (review finding 1) (b408440)
+niivue,uikit: shrink arrowheads on short lines so buildTerminatedLine can't invert (review finding 2) (9b3de35)
+uikit: lift the length label clear of the graduation numbers (b3ff6a3)
+uikit: thin ruler graduation numbers so they never collide (0c1ef0f)
+uikit: draw font outlines as an offset halo, not SDF expansion (552263a)
+uikit: correct glyph texture V mapping (text was mirrored) (c0215bf)
+Performance
+uikit,nv-ohif: cache ruler layout + reuse GL line scratch (review findings 8/10) (#8, #10, #9)
+Updated Dependencies
+Updated niivue to 1.0.0-rc.13
+Thank You
+Chris Drake
+Claude Fable 5
+ipyniivue
+0.1.0 (2026-08-26)
+Features
+niivue: pick an exploded block and open it in its own pane (d2b61c4)
+niivue: make the LOD compensation settings introspectable (bb2bc23)
+niivue: add opt-in per-level opacity compensation for coarse LOD bricks (770556b)
+niivue: back streamed chunks with an automatic coarse floor (403d7ce)
+niivue: clipPlaneOverlay to clip overlays with the base volume (02f4281)
+ipyniivue: NumPy-style docstrings for generated and wrapper methods (1a67982)
+ipyniivue: surface JS errors and trim acked inbox items (ffa1dc4)
+ipyniivue: bundle nv-ext-drawing interpolation (98cd55d)
+ipyniivue: bundle nv-ext-image-processing transforms (1285161)
+ipyniivue: exercise locationChange JS-to-Python event path (5442d81)
+ipyniivue: wait_ready() + safer toJsonSafe + delayed attach (cfdfde7)
+ipyniivue: Pythonic load helpers + canvas-init fix (9025fea)
+ipyniivue: request/response, self-contained bundle, asset inlining (4110807)
+ipyniivue: scaffold anywidget Jupyter widget with TS-driven codegen (23b6500)
+Fixes
+niivue: compensate the coarse floor's brightness too (6931055)
+niivue: oversample the 3D ray march to kill render ringing (6843b5b)
+ipyniivue: exclude overlay renderer hooks (3e0860d)
+harden streaming budget and generated bindings (577d052)
+niivue: audit round - per-series triggers, default trigger exclusion, doc restore (d6725ad)
+ipyniivue: make _GeneratedNiiVue docstring actually attach (90cfa5b)
+ipyniivue: use camelCase calMinNeg/calMaxNeg in mesh_layers demo (0ef036b)
+ipyniivue: align codegen protocol with NiiVue defaults and binary results (6ac4aab)
+ipyniivue: keep uploaded bytes authoritative in add_*_from_bytes (a98d4c4)
+ipyniivue: address second-round Copilot PR review feedback (20794bf)
+ipyniivue: suppress JupyterLab cell context menu on canvas right-click (a58bd8c)
+ipyniivue: address Copilot PR review feedback (#9)
+ipyniivue: paragraph-aware NumPy summary + CLAUDE.md refresh (39e42c1)
+ipyniivue: route buffer ingress through synced inbox (2c51350)
+stabilize ipyniivue notebook rendering (ba38839)
+ipyniivue: anywidget initialize+render lifecycle + _msg_outbox workaround (25ab299)
+ipyniivue: register cmdHandler before mount to fix wait_ready race (d0bbeeb)
+ipyniivue: bump wait_ready timeout in smoke notebook to 10s (0ee4442)
+Performance
+niivue: cache affine overlay rebakes (2717694)
+Updated Dependencies
+Updated niivue to 1.0.0-rc.13
+Updated nv-ext-image-processing to 1.0.0-rc.13
+Updated nv-ext-drawing to 1.0.0-rc.13
+Thank You
+Chris Drake
+Claude Opus 4.7 (1M context)
+Claude Opus 4.8
+Claude Opus 5
+neurolabusc
+Taylor Hanayik @hanayik
+Dry-run preview only. Versions and tags are created when a maintainer runs the Release workflow manually.
+cdrake
+changed the base branch from
+main
+to
+feat/multichannel-microscopy-formats
+August 20, 2026 12:44
+cdrake
+and others
+added 8 commits
+August 20, 2026 13:06
+feat(niivue): implement scene.gamma in the volume ray-march
+…
+b0b4274
+```
+scene.gamma was declared, settable, and persisted in NVD, but no renderer
+ever read it, so the property was dead while FEATURE_PARITY claimed it
+worked. Wire it into both backends.
+
+Semantics follow the old package: the shaders raise the classified RGB to
+1/gamma and leave alpha alone, so gamma > 1 brightens and 1.0 is exactly a
+no-op. The old package baked the exponent into the colormap LUT; doing it
+in the ray-march instead means it also lifts the coarse LOD bricks that
+read darker than the fine ones, at the cost of not reaching the 2D slice
+tiles. FEATURE_PARITY records that scope difference.
+
+The WebGPU uniform lands in the free _pad0.y lane of the shared Params
+struct, so no later vec4f offset moves and depth-pick stays neutral.
+invGamma() in NVConstants clamps to GAMMA_RANGE, so a slider dragged to
+its floor cannot divide by zero.
+
+Measured headless on both backends at sliceType RENDER, mean canvas
+luminance: 13.59 at gamma 0.7, 17.85 at 1.0, 29.56 at 2.0, 36.91 at 3.0,
+with the two backends agreeing to within 0.003 and 1.0 reproducing
+byte-identically on the way back down.
+
+range.html gets a gamma slider to drive it.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+feat(niivue): compensate coarse-LOD dimness and gamma the 2D slices
+…
+9d0c937
+```
+Downsampling averages voxels, which destroys the correlation between a
+sample's colour and its opacity. Front-to-back compositing weights colour
+by opacity, so a coarse brick integrates darker than the fine data it
+stands in for: a level-3 brick reads roughly 16% dim next to level 0.
+
+Correct it with a per-chunk exponent e = 1 - c * (k - 1), where k is the
+geometric mean of the per-axis downsample ratios for that brick's source
+level and c is volumeLodBrightnessCompensation (default 0.022, fit
+against the pig-heart pyramid: mean brightness error across levels 1-3
+drops from 7.5% to 1.5%). The exponent multiplies the existing gamma
+exponent, so a brick at level 0 (or any single-level plan) is an exact
+no-op and nothing changes for non-chunked volumes. Sparse materials stay
+under-corrected; the deficit is data-dependent and this is a heuristic.
+
+It rides a draw-time uniform rather than being baked into the orient
+prepass colour texture. The prepass is the shared colour source for both
+the ray-march and the slice tiles, so baking there would be the smaller
+diff, but it would force a re-upload of every resident chunk on every
+slider tick, add a second 8-bit quantization, and freeze the coefficient
+at upload time.
+
+Gamma now also reaches the 2D slice tiles, which previously ignored it.
+Both exponents ride the same lane in SliceUniforms (a free pad float, so
+the struct does not grow), and the views push the same two values to the
+slice renderer and the volume renderer so a slice and the render panel
+agree on brightness.
+
+Both exponents apply to intensity-derived layers only. The 3D drawing
+pass used to pick gamma up implicitly through rayMarchPass and now passes
+1.0, matching the V1 fiber-direction branch in the slice shaders: those
+carry categorical label colours and encoded vectors, not luminance, and a
+pow() would bend them.
+
+Verified on both backends against the pawpawsaurus OME-Zarr pyramid
+(level 2 bricks): the coefficient moves the mean monotonically in 3D and
+2D, WebGPU and WebGL2 agree to within 0.3/255, and returning to 0
+reproduces the original frame.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(niivue): compensate the coarse floor's brightness too
+…
+6931055
+```
+The floor cube draws through its own uniform block rather than through a
+plan chunk, so it fell through to lodDownsample 1 and got no correction
+at all. It is normally the coarsest data on screen, which put the scene's
+largest brightness step exactly at the edge of the resident fine region
+where it is most visible: the case that shows up while a fine level is
+still streaming.
+
+Its downsample now comes from its own dims (dimsDownsample, factored out
+of chunkLodDownsample so both read the same geometric mean). On the
+pawpawsaurus pyramid pinned to L0, where residency cannot hold the level
+whole and floor cubes stay on screen beside level 0/1/2 bricks, a sweep
+to coefficient 0.06 moved the frame mean 20.611 -> 20.967 before this and
+20.616 -> 21.777 after: most of the uncompensated area was the floor.
+
+Also picks up the regenerated ipyniivue API surface for
+volumeLodBrightnessCompensation.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+feat(niivue): add opt-in per-level opacity compensation for coarse LO…
+…
+770556b
+```
+…D bricks
+
+The ray-march already raises a coarse sample's alpha to the number of
+reference steps it stands for, which is exact only if the coarse voxel is
+homogeneous. It is not: the true transmittance through the k fine voxels
+the brick replaces is prod(1-a_i), and since log(1-a) is concave that
+product is smaller than (1-mean(a))^k, so a coarse brick is systematically
+too see-through by an amount set by the intensity variance inside it.
+
+volumeLodOpacityCompensation scales that exponent by 1 + c*(k-1)
+(lodOpacityScale, capped at 8x). Both backends, ray-march only: a 2D slice
+tile shows one sample with no accumulation, so there is no aggregated alpha
+to correct there.
+
+It defaults to 0, and that is a measured choice. Simulating the march over
+a real OME-Zarr pyramid says the variance term is ~0 wherever structure is
+dense enough to saturate the ray; inflating alpha there only front-loads
+accumulation onto the nearer, dimmer samples and makes the accumulated
+colour worse. Over four probe regions, raising c from 0 to 0.5 cut mean
+alpha error from 6.7% to 5.1% while driving colour error from 15.3% to
+25.7%. Sparse thin material has a genuine deficit (~-30% at level 3) but no
+global scale recovers much of it: c=0.5 improves it to -30.6%. Fixing that
+case needs a coverage-preserving pyramid, not a renderer knob.
+
+Exposed because the trade is data-dependent, with a slider in range.html
+beside LOD comp. Browser-verified on both backends (pawpawsaurus pinned to
+level 1, mixed levels 1-2): mean falls 16.016 -> 15.907 on WebGL2 and
+15.952 -> 15.826 on WebGPU across c = 0 -> 0.35, matching the CPU
+prediction that inflating alpha lowers accumulated colour, and 0 restores
+the baseline exactly.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+feat(niivue): make the LOD compensation settings introspectable
+…
+bb2bc23
+```
+Both volumeLodBrightnessCompensation and volumeLodOpacityCompensation are
+exact no-ops on any volume that is not a multi-LOD chunked volume, and
+nothing on screen says so. A developer (or an agent) could set them, see no
+change, and have no way to tell "wrong value" from "wrong kind of volume".
+
+nv.lodCompensation() answers that in one call: isActive plus an
+inactiveReason naming the missing precondition, then per pyramid level the
+linear downsample factor, the bricks currently drawn from it, and the exact
+brightness exponent and opacity scale being handed to the shader. The
+whole-volume coarse floor is reported separately since it is not a member of
+the chunk plan. Reaching it needs a new ViewBackend.coarseFloorDims(),
+implemented in both views beside chunkStreamStats.
+
+Setting a non-zero coefficient while no loaded volume is multi-LOD now also
+log.warns at the moment of the set, so the trap surfaces where it is sprung
+(silent when no volume is loaded at all: configuring before loadVolumes is
+normal).
+
+LOD_BRIGHTNESS_RANGE widens from [0, 0.2] to [0, 1] so both coefficients
+obey one rule and a value copied from one knob into the other is never
+silently clamped. Safe because the brightness exponent is independently
+floored at 0.25; useful magnitudes are unchanged and now documented.
+
+Docs and JSDoc lead with the symptom rather than the mechanism: too dark ->
+brightness, too transparent -> opacity.
+
+Verified on both backends against the pawpawsaurus pyramid pinned to L1: the
+report reads L1 k2.0 x128, L2 k4.0 x16 and floor k6.4 identically under
+WebGL2 and WebGPU. e2e/lod-compensation-report.spec.ts covers the inactive
+reasons, the per-level numbers and the shared range.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+chore: pin @types/bun off "latest" in nv-ohif and nv-react
+…
+fb75a63
+```
+CI's `bun install --frozen-lockfile` broke the moment @types/bun 1.4.0 was
+published (2026-08-20 19:46Z): a "latest" spec is re-resolved on every install,
+so the lockfile can never stay frozen across an upstream release. Both packages
+now use "^1.3.12", matching the other seven that declare the dep.
+
+The lockfile keeps @types/bun at 1.3.14 rather than taking 1.4.0, which is a
+separate upgrade: 1.4.0's bun-types adds `off(event: "memoryPressure", ...)` to
+NodeJS.Process, and that own-member overload shadows the inherited EventEmitter
+signature, so `process.off('unhandledRejection', ...)` in
+NVChunkedVolume.test.ts stops typechecking.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(niivue): grow the LOD brightness lift per level, not per downsample
+…
+63e7df5
+```
+The per-level brightness compensation grew with `downsample - 1`, which
+assumes a level-4 brick loses eight times what a level-1 brick loses.
+Averaging does not work that way: every pyramid level reduces the same
+2x2x2 neighbourhood, so the colour/opacity correlation is lost in one
+comparable step per level. Use `log2(downsample)` instead.
+
+On a seven-level pyramid the old form ran away. At the 0.022 default a
+level-6 brick asked for exponent -0.386 and the 0.25 clamp caught it, so
+the correction became the artifact:
+
+  - A brick face where the LOD changed read as a hard step with the
+    COARSE side too BRIGHT. Measured across the strongest seam on
+    hoa_heart (WebGL2, gamma 1, trend removed): +35.7% at the default,
+    against -34.0% with the compensation off. It had overshot the null
+    by about 6x.
+  - The coarse floor is built from the coarsest level, so it sat pinned
+    at the clamp. That floor is what shows while a refocus streams fine
+    bricks in, which is the pale flash on zoom.
+
+Under the new form the deepest level of that pyramid asks for 0.52, well
+clear of the clamp, and the seam response is monotonic across the whole
+slider: -33.0% at 0, -28.7% at 0.02, -23.4% at 0.04, -10.1% at 0.08.
+
+Refit the default to 0.08 per level. The coefficient that nulls a seam is
+data-dependent (about 0.11 for sparse thin hoa_heart, about 0.05 for
+dense pawpawsaurus), and dense data is nearly insensitive to it: sweeping
+pawpawsaurus 0 to 0.08 moves its mean brightness 4% and its strongest
+edge step from 10.1% to 9.3%, while the same sweep on hoa_heart takes the
+seam from -33% to -10%.
+
+The change is in one shared helper, so both backends pick it up. Widen
+the range demo slider to 0.2 and drop the diagnostic query-string knobs
+it grew during the investigation.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+feat(range-demo): show a streaming progress badge while blocks load
+…
+1d61aa7
+```
+At high zoom a refocus can want bricks that take seconds to arrive, and the
+viewport gives no sign it is working -- it just looks soft or stalled. Add a
+small badge driven off chunkStreamStats at the existing HUD poll: a spinner, a
+label, a resident/requested count and a progress bar.
+
+The label reads "Refocusing" for 600ms after a plan swap and "Loading blocks"
+otherwise, so a user who moved the crosshair sees why the view went soft.
+Showing is debounced 180ms and hiding lingers 450ms, because dragging the
+crosshair replans continuously and each replan settles in a frame or two -- a
+badge without both margins strobes on every twitch.
+
+The bar counts against resident + inFlight + pending rather than plan.total:
+absent and empty chunks are never fetched and the LRU may evict, so a
+total-based bar stalls short of full (measured 95/128 = 74%) even once
+everything relevant is resident.
+
+Verified in Chrome/SwiftShader against the HiP-CT heart store with added
+request latency: hidden through the debounce, both labels observed, the bar
+tracking 61 -> 94% and reaching 100% at settle. Honours
+prefers-reduced-motion (element stays, animation drops) and uses a polite live
+region that is only rewritten when the wording changes.
+
+Also retitles the LOD comp slider for the refitted 1 - c*log2(k) law.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+cdrake
+and others
+added 15 commits
+August 25, 2026 21:37
+docs(niivue): record stage D, directional prefetch
+…
+7bdfa5a
+```
+Section 2.4 now describes what landed rather than what was proposed,
+including the two behaviours the obvious implementation gets wrong and
+the reason the demo cannot easily show a live predicted count.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+feat(niivue): demote an evicted chunk to a decoded tier instead of dr…
+…
+e166f92
+```
+…opping it
+
+A chunked volume's GPU residency is a fixed byte budget, so a moving view
+evicts bricks constantly, and an evicted brick cost a full fetch + decode +
+assemble + upload to bring back. Hold its decoded source bytes instead, so
+its return costs only a texture upload.
+
+The tier necessarily shadows the resident set: to have an evicted chunk's
+bytes you must still hold them at the moment of eviction, so a tier that
+drops bytes on upload has nothing to demote later. That shadow is affordable
+because source voxels are 1-4 bytes against the GPU's 8 (RGBA8 color + RGBA8
+gradient), so decodedTierBudgetBytes sizes the tier at the shadow plus a 50%
+tail, scaled by datatype and capped at 384 MiB. Eviction is plain LRU, which
+is what the structure wants: the newest entries are the chunks still on the
+GPU and the oldest are the chunks evicted longest ago, so dropping from the
+old end keeps exactly the frontier a reversal crosses back over.
+
+The tier is owned by the render entry, not the uploader, so it survives an
+uploader rebuild: a colormap or window change now re-orients bytes it already
+holds instead of re-fetching every chunk. A multi-LOD plan swap re-keys it
+with the same content match the residency manager uses.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+chore(ipyniivue): regenerate the chunkStreamStats API surface
+…
+a7ca66d
+```
+Picks up the `predicted` and `decoded` fields and their docs from the
+prefetch and decoded-tier work.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+docs(niivue): record stage E and correct the demotion-tier design
+…
+f1ef6f9
+```
+The plan said the tier would hold only chunks evicted from the GPU. That is
+not implementable, and section 2.3 now says why: the bytes have to be held
+through residency to exist at eviction, so the tier shadows the resident set,
+and what makes that affordable is 8 GPU bytes per voxel against 1 to 4 on the
+CPU.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+feat(niivue): cache OME-Zarr chunk bytes across sessions
+…
+d6037b6
+```
+Every tier we have dies on reload. For a DANDI volume over S3 that is the
+most visible cost left: the second visit re-fetches what the first one
+already paid for.
+
+This adds a persistent tier of raw compressed store bytes, below the byte
+LRU and above the fetch store, so it only ever sees what memory could not
+answer. Persisting at that layer is format-agnostic, keyed by something
+already stable (the store key), and is the smallest form a chunk has.
+
+Cache Storage has no size bound and no eviction, so our in-memory index is
+the budget: each entry's byte length rides in its backing key, and one
+keys() listing rebuilds both the index and the accounting without reading
+a body. Absences are deliberately not persisted -- bytes never change, but
+a missing chunk in a store still being written can become bytes tomorrow.
+
+With the worker pool running the workers share one backing and own a scope
+apiece, which is sound because routing is deterministic: a brick always
+returns to the worker that holds it.
+
+Off by default (it writes to the user's disk). The DANDI demo opts in with
+512 MB and reports the warm-start rate in its HUD.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+docs(niivue): record stage F, the persistent byte cache
+…
+691dff2
+```
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(niivue): forward the persistent cache scope to each worker
+…
+eb66167
+```
+`openPersistTier` picked two fields out of the options and dropped the
+rest, so every worker opened the persistent tier unscoped and adopted the
+whole store. Verified in the DANDI demo: a cold load now writes 22 entries
+under w0/ and w3/, and a reload serves 85% of its lookups from disk with
+nothing written.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+docs(niivue): record the measured warm start and the scope drop
+…
+c8a07f6
+```
+Adds section 2.9: cold and warm numbers for the persistent tier on the demo's
+default block, and the one bug in the series no unit test could have caught,
+since both sides of the options boundary were correct in isolation. Refreshes
+the status line and the closing summary now that every gap the doc opened with
+is closed.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+docs(niivue): add a caching reference with the Neuroglancer comparison
+…
+1b8c58c
+```
+`caching.md` is the record of a plan being worked through, which is the wrong
+shape for someone who just wants to know how the caches behave. This adds
+`caching-architecture.md`: the tiers of both streaming paths with their keys,
+budgets and lifetimes, the scheduling around them, how to observe it, a
+comparison table against Neuroglancer, and two sections the plan doc never
+carried - what we tried that did not work, and what we chose not to build and
+why. Section 1 of the parity doc is refreshed where the stages changed its
+verdicts.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+feat(range-demo): default the budget plan to uniform, and stop counti…
+…
+74364c6
+```
+…ng aborts as failures
+
+The Plan control started on `focus`, which puts the finest bricks at the
+crosshair and coarsens outward. Opening a source that way shows a detailed
+core inside a coarse shell, which reads as a rendering artifact to anyone
+seeing the demo for the first time rather than as the octree doing its job.
+`uniform` ignores the crosshair and plans the finest level that fits the WHOLE
+volume, so a source now opens showing all of itself at one detail level.
+`?plan=focus` (or the control) still gets the old behavior.
+
+The switch surfaced a counter that had gone stale. Cancellation landed after
+the HUD's `failures` row was written, so an abort -- a brick a re-plan
+superseded, cancelled on the wire, exactly the behavior we want -- was counted
+as a failure. A uniform plan has more reads outstanding when the startup
+re-plan lands, so a healthy load read as "failures 16". Aborts now tick a
+separate `cancelled` count, shown beside the failure count rather than folded
+into it, and no longer log to the console as errors.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(niivue): anchor the 2D wheel zoom on the crosshair
+…
+7ce1477
+```
+The pan/zoom wheel handler meant to hold the crosshair still while the
+zoom changed, but compensated with
+
+  pan2 = pan1 + (zoom1 - zoom2) * mm
+
+which is wrong twice over. calculateMvpMatrix2D scales the ortho window
+about the CENTRE of the volume's mm extents, so the offset has to be
+measured from that centre rather than from the world origin; and holding
+a point across a zoom change takes a RATIO of the two zooms, not their
+difference. The inverse of that window is
+
+  pan2 = (zoom1 / zoom2) * (d + pan1) - d,  d = anchorMM - centre
+
+so the old term was off by a factor of the new zoom and drifted worse the
+deeper you zoomed - five times too large at 5x - and drifted from the
+first step on any volume whose mm origin is not its centre.
+
+The compensation now lives next to the transform it inverts, as
+NVTransforms.zoomPan2DAbout: only that module knows how the window is
+built, and keeping the pair adjacent is what stops them diverging again.
+Radiological needs no special case - it negates the U axis and panU
+together, which leaves the hold-fixed condition unchanged.
+
+Tested against the real calculateMvpMatrix2D rather than by restating the
+algebra, since the bug was a compensation that disagreed with the window
+the renderer actually builds: project the anchor before and after a zoom
+step and assert its clip position is unchanged, over an off-centre
+volume, a 20-step deep zoom, radiological, a non-zero starting pan, and
+all three tile permutations.
+
+Fixes #68
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(niivue): let the 2D wheel zoom reach the bottom of its range
+…
+0064eec
+```
+The wheel took 10% of the current zoom and snapped the result to a tenth.
+Below 0.5 the proportional step is smaller than half the snap increment,
+so it rounded straight back to where it started: 0.5 could not zoom out
+(0.45 snaps to 0.5), and a zoom of 0.2 set from code was frozen in BOTH
+directions (0.18 and 0.22 both snap to 0.2). The range advertises 0.1 as
+the floor, but half size was as far as the wheel could go.
+
+stepZoom2D keeps the multiplicative curve wherever the proportional step
+already clears the snap, and falls back to one whole snap increment when
+the snap would land back on the zoom it started from. It sits beside
+zoomPan2DAbout because both encode what a wheel notch means to the 2D
+view, and it is pure, so the behaviour is pinned by tests the DOM handler
+could not carry.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(niivue): honour the background volume's opacity in the 3D render
+…
+1e2f82b
+```
+Overlays already fade in 3D because the orient pass bakes their opacity
+into the combined overlay texture's alpha. Volume 0 has no such bake --
+its opacity reached only the 2D slice shaders, as a plain uniform -- so
+setVolume(0, { opacity }) changed the slice tiles and left the volume
+render untouched.
+
+Carry it into both render shaders as backOpacity and scale the
+background sample's alpha with it before the classification test, so a
+half-opaque volume behaves as a half-dense medium (you see deeper into
+it) rather than a fully dense one faded at the end, and so opacity 0
+drops the background out of the depth write and the AO stencil as well
+as the colour. A fully transparent background short-circuits the march
+entirely.
+
+On WebGPU the new field takes the last free padding lane after
+lodOpacityScale, so the Params struct size and every *_PARAMS_BASE
+offset are unchanged. The GL overlay-chunk path writes a neutral 1.0
+explicitly: it shares its program with draw(), so an unset uniform
+would keep the base volume's opacity from the previous draw.
+
+Verified on examples/annotations.html at opacity 1.0, 0.4 and 0 --
+identical behaviour on WebGL2 and WebGPU.
+
+Fixes #67
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(niivue): make crosshairWidth canvas pixels everywhere
+…
+69b8e70
+```
+crosshairWidth was a world-mm cylinder radius on 2D slice tiles and on the
+3D render tile, but a canvas-pixel thickness in the mosaic cross-lines path.
+The same number therefore meant two different things, and on the mm side the
+drawn weight tracked the volume's field of view and the tile's zoom: a small
+2D tile drew a hairline while a large render tile drew a fat bar, and zooming
+in thickened the crosshair.
+
+Canvas pixels win, since that is what a screen weight should be. Both
+projections are orthographic, so each tile has a single depth-independent
+mm-per-pixel and an orthographically projected cylinder is exactly 2r wide
+from any angle: mmPerPixel2D and mmPerPixelRender invert the two matrix
+builders, and crosshairRadiusMM turns the requested pixel width into that
+tile's world radius at draw time. The default stays 1.
+
+Each tile now rebuilds the geometry for its own radius. WebGL2 keeps its
+single buffer set and skips the upload when nothing that shapes the geometry
+moved; WebGPU cannot rewrite one buffer between draws inside a frame (all
+queue writes land before the submit), so each drawing tile takes its own
+vertex-buffer slot, mirroring the per-tile uniform dynamic offsets.
+
+Fixes #137
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(niivue): default crosshairWidth to 2 canvas pixels
+…
+4f8857d
+```
+Now that the width is a screen weight rather than a world-mm radius, the old
+default of 1 draws a true one-pixel hairline on every tile, thinner than the
+~2.5 px the 2D tiles used to get. 2 restores the familiar look, and the mosaic
+cross-lines, which already read the value as pixels, thicken to match.
+
+Two demos followed from the unit change. range.js scaled crosshairWidth by the
+mean scene span so a micron-scale store would not collapse the crosshair below
+a pixel; pixels need no such correction, so only the centre gap, still world
+mm, keeps its scaling. vox.modulate wanted a line thinner than stock, which
+0.5 mm gave and 0.5 px would not, so both demos ask for 1 px.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Base automatically changed from
+feat/multichannel-microscopy-formats
+to
+main
+August 26, 2026 19:26
+cdrake
+and others
+added 2 commits
+August 26, 2026 15:34
+Merge branch 'main' into feat/lod-swap-flicker
+…
+50cd8eb
+```
+Brings in PR #110 (multi-channel microscopy formats and OME-Zarr
+streaming), which this branch was originally cut from. No conflicts:
+the two branches touch disjoint parts of the streaming code.
+```
+fix(niivue): escape the NUL separator in the chunk worker cache key
+…
+7704b19
+```
+The source-cache key joined url and options with a literal NUL byte typed
+into the template literal rather than an escape. One raw 0x00 in the file
+is enough for git to classify it as binary: git diff reported the worker
+as "Bin 0 -> 4724 bytes", so the whole file was invisible to line-level
+review on the PR, and file(1) reported it as data rather than text.
+
+The escape produces the same string, so the cache key is byte-for-byte
+unchanged and the separator keeps the property it was chosen for: a URL
+cannot contain NUL. Only the on-disk encoding changes, and the file is
+now ASCII text that diffs and reviews normally.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+cdrake
+marked this pull request as ready for review
+August 26, 2026 19:41
+cdrake
+added 3 commits
+August 26, 2026 16:04
+fix(niivue): reject non-finite chunk loader limits
+…
+a9188a6
+```
+maxConcurrentLoads and retryAttempts are public options on NVChunkedVolume,
+and both are safety limits. The clamp caught 0, negatives, NaN and fractions
+but not Infinity, which survives Math.floor and Math.max untouched and so
+defeats the exact bound it is asked to impose:
+
+  maxConcurrentLoads: Infinity leaves `active < maxConcurrent` permanently
+  true, removing the flood cap (measured: all 5 concurrent reads in flight
+  at once instead of the intended bound).
+
+  retryAttempts: Infinity is the worse half. withRetry's loop never ends, so
+  a transient fetch failure retries forever on a backoff of 80 * 2 ** i that
+  overflows to Infinity around i = 1024, leaving the read parked on a delay
+  that never resolves.
+
+Route both through positiveIntOption, which rejects any non-finite input to
+the same floor of 1 the other unusable values already land on.
+
+Tests cover Infinity on both options; each fails against the old clamp (5
+concurrent reads, and still retrying at 500ms) and passes with the guard.
+The NaN and fractional case is added as a characterization test: the old
+clamp already handled those, and this pins that down.
+```
+fix(niivue): keep the slide tile cap when given Infinity or NaN
+…
+e21df06
+```
+Same defect class as the chunk loader limits, found while reviewing them.
+NVSlide's cap was a bare Math.max(1, x), which passes Infinity and NaN
+through untouched. Neither raises the cap, both remove it: every capacity
+test is `_activeLoads >= cap`, false for either value, so no tile is ever
+queued and every request goes straight to _runLoad. Measured on a 30-tile
+manifest: peak concurrency 30 instead of the intended 12.
+
+Flooring also makes the effective cap match the number asked for; 2.5
+previously admitted a third load.
+
+Non-finite input falls back to the documented default of 12 rather than to
+1 as the chunk loader does. The difference is deliberate: createSourceChunkLoader
+receives values its caller has already defaulted, so it cannot know the
+intended default and 1 is its safe floor, whereas here the default is in
+scope and serializing tile loads to 1 would be its own performance bug.
+
+NVSlide is not otherwise touched by this branch, so this is a standalone
+commit that can be dropped without affecting the rest.
+```
+docs(niivue): correct the render uniform layout comment
+…
+4b11461
+```
+The parenthetical described the eight scalars as replacing "1 + a 7-lane
+_pad0". That phrasing predates this branch and had gone stale: the layout it
+replaced was four named floats plus a 2-lane _pad0 plus the 2 lanes WGSL
+inserts implicitly to 16-align volumeTexDimsFull. The float arithmetic above
+it was already correct; only the explanation was wrong.
+```
+Hide details
+View details
+cdrake
+merged commit 0ebd4f7
+into
+main
+Aug 26, 2026
+4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+cdrake
+deleted the
+feat/lod-swap-flicker
+branch
+August 26, 2026 20:25
+cdrake
+commented
+Aug 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Merged as 0ebd4f78
+Merge commit rather than squash, to keep the per-project scopes intact for Nx Release changelogs. 69 commits.
+Issues closed by this merge
+Auto-closed via Fixes trailers in the commits, no manual action needed:
+bug: opacity changes do not update in 3d view for volume 0 #67 bug: opacity changes do not update in 3d view for volume 0 (1e2f82b9)
+bug: zooming zooms in on an arbitrary location rather than the crosshair location #68 bug: zooming zooms in on an arbitrary location rather than the crosshair location (7ce1477a, 0064eec7)
+crosshairWidth means world mm on 2D slices but canvas pixels in the mosaic path #137 crosshairWidth means world mm on 2D slices but canvas pixels in the mosaic path (69b8e706, 4f8857dd)
+The chunk-0 eviction bug described above was reported directly rather than filed, so it has no issue to close.
+CI note worth recording
+For most of this branch's life the full gate was not running on it. pr_gate.yml, codespell.yml and release-preview.yml are all gated on pull_request: branches: [main], and while this PR was based on feat/multichannel-microscopy-formats none of them triggered. Only niivue-e2e.yml ran, because its pull_request: trigger has no branches: filter. That left 64 commits and roughly +17k lines covered by one narrow Playwright job. Merging #110 deleted the base branch, GitHub retargeted this PR to main, and the gate came back.
+The general lesson for stacked PRs here: if the base is another PR's branch, assume the base-filtered workflows are silent and verify locally.
+Final review
+Three commits came out of the pre-merge review.
+a9188a62 reject non-finite chunk loader limits. Raised by Codex as a P1. Real, with two corrections to the framing: it is pre-existing rather than introduced here (the identical clamp is at the merge-base 8d0802b0), and the scope is narrower than "Infinity, NaN and fractional". The old Math.max(1, Math.floor(x) || 1) already handled NaN (NaN || 1 gives 1) and fractions (floor(0.5) || 1 gives 1). Only Infinity survived, since it passes through both floor and max untouched, defeating the exact bound it is asked to impose.
+retryAttempts: Infinity was the dangerous half: withRetry's loop never ends, and the 80 * 2 ** i backoff overflows to Infinity around i = 1024, parking the read on a delay that never resolves. maxConcurrentLoads: Infinity removed the flood cap outright (measured: all 5 concurrent reads in flight against the intended bound of 1).
+e21df06a keep the slide tile cap when given Infinity or NaN. Same defect class, found while checking the first, in NVSlide (not otherwise touched by this branch). Neither value raises the cap, both remove it: every capacity test is _activeLoads >= cap, false for either, so nothing is ever queued and every request goes straight to _runLoad. Measured peak concurrency 30 on a 30-tile manifest against the intended 12. Falls back to the documented default of 12 rather than to 1, deliberately unlike the chunk loader, which receives values its caller has already defaulted and so cannot know the intended default.
+4b114613 correct the render uniform layout comment. The "1 + a 7-lane _pad0" parenthetical was inherited staleness predating even #110. The real baseline was four named floats plus a 2-lane _pad0 plus the 2 lanes WGSL inserts implicitly to 16-align volumeTexDimsFull. The float arithmetic above it was already correct.
+Every new test was checked by reverting the source and confirming it fails. That caught two things worth noting: the NaN/fractional case passes either way, so it is labelled a characterization test rather than dressed up as a regression test, and the retryAttempts test originally hung instead of failing, which would stall CI on a future revert. It now races a 500ms timer and fails in half a second.
+Passes that found nothing: the GL and WGSL sampleTricubic are identical term for term, and applyGamma / snapToSampleLattice / raySamplePhase / lodOpacityScale / backOpacity are present in both backends; uniform struct offsets agree with the CPU writer at 124 floats and 496 bytes; the worker cancel protocol has no race; joinRead listener retention is a non-issue because the controllers are per-chunk; the worker-pool abort block is fully synchronous.
+Local gate green throughout: lint, typecheck, 1334 pass / 1 skip / 0 fail, build, boundaries, codespell. All four CI checks green on the final push.
+cdrake
+added a commit
+that referenced
+this pull request
+Aug 26, 2026
+fix(niivue): build examples with ES-format workers
+…
+0e69309
+```
+The GitHub Pages deploy broke on main immediately after #138:
+
+  [vite:worker] Could not load src/workers/omeZarrChunk.worker.ts?worker&inline
+  (imported by src/volume/omeZarrChunkWorkerPool.ts): Invalid value "iife" for
+  option "worker.format" - UMD and IIFE output formats are not supported for
+  code-splitting builds.
+
+vite.config.examples.ts takes one input per examples/*.html, which makes it a
+code-splitting build, and Rollup rejects Vite's default worker.format of
+'iife' outright in that mode. Any worker reachable from an example fails the
+whole build. Nothing reached one until the OME-Zarr chunk worker pool landed,
+and range.html and vox.block.pick.zarr.html both pull it in.
+
+The library build is unaffected because it is single-entry, which is why
+`nx run niivue:build` stayed green while the site build did not. That gap is
+the reason this reached main: niivue-ghpages.yml only runs on push to main,
+so no PR check ever builds the examples.
+
+Set worker.format to 'es' for the examples build. Verified by running
+.github/build-pages.sh end to end (all nine stages, 121M site); the inlined
+worker is constructed with type:"module" in both affected example bundles.
+```
+This was referenced Aug 28, 2026
+feat(niivue): gradient opacity, silhouette, and a shared gradient estimator
+#140
+Merged
+Single view layout
+#141
+Merged
+fix(dandi-demo): window streamed volumes from the coarse floor, add a UIKit crosshair
+#144
+Merged
+fix(niivue): evict stale chunked texture cache entries
+#146
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

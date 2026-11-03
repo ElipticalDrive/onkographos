@@ -1,0 +1,469 @@
+Capsule shapes are useful tools for handling simple game physics. Here you will find out why and how to detect and handle collisions between capsule and triangle mesh, as well as with other capsules, without using a physics engine. (Note on not using a physics engine: There is reason for doing this without physics engine,…
+
+Capsule Collision Detection – Wicked Engine
+Skip to content
+Devblog
+Capsule Collision Detection
+April 26, 2020
+Capsule shapes are useful tools for handling simple game physics. Here you will find out why and how to detect and handle collisions between capsule and triangle mesh, as well as with other capsules, without using a physics engine.
+(Note on not using a physics engine: There is reason for doing this without physics engine, even if you have a physics engine up and running within your game engine. Physics engine is probably configured for physically correct behaviour which is not necessarily the most gameplay friendly. It also comes with a lot of parameters and lot of overhead, such as the need to set up and manage a physics collision world, probably separately from your own entity system. Also, it is fun to learn how these things work.)
+The capsule collisions in action
+Capsules are often a better choice to represent game entities than spheres or boxes. Think about a human player character for example:
+The bounding sphere doesn’t let the player close to the wall
+As you can see, the sphere collision shape will not let the player close to walls if it is large enough to contain the player. But it might work well for other types of more rounded characters. For example imagine this type of roundish entity:
+And now more seriously, take a look at the bounding box collision:
+Bouding box is better than sphere, but it has corner cases (literally)
+The box shape has another problem, that it is not rounded, so it will not be able to traverse stairs, and can be jerky when sliding along walls (shown later). These will lead to weird or unsatisfying gameplay experience.
+Capsule is even better
+A capsule shape will provide a result that match player expectation more closely. From programming standpoint, it will also be more complicated to implement, but not by much. The implementation is just an extension to sphere collision detection, so let’s start with that.
+Sphere – Sphere collision
+This is quite simple, we take the distance between the two sphere centres, and if it is less than the added radius of both, they are intersecting. We are also interested in the penetration depth and normal vector to handle game physics such as sliding on top of surfaces/walls (shown later).
+Sphere – Triangle collision
+This is probably the most complicated part and we should break it down. First, we determine the triangle’s plane from its corner points and see whether the sphere intersects the plane (if not, we do not continue). This is done by taking the distance between the plane and sphere centre. I tried to make the following sample codes to resemble HLSL code, but look at it like pseudo-code:
+```
+float3 p0, p1, p2; // triangle corners
+float3 center; // sphere center
+float3 N = normalize(cross(p1 – p0, p2 – p0)); // plane normal
+float dist = dot(center – p0, N); // signed distance between sphere and plane
+if(!mesh.is_double_sided() && dist > 0)
+  continue; // can pass through back side of triangle (optional)
+if(dist < -radius || dist > radius)
+  continue; // no intersection
+```
+If the code is still running, that means the sphere is intersecting the infinite plane of the triangle. Next, we determine if there is any point inside the triangle that is inside the sphere or not. There are two cases. The first case is that if the sphere centre projected to the plane is inside the triangle perimeter, then the sphere is intersecting the triangle:
+When sphere centre projection is inside the triangle…
+```
+float3 point0 = center – N * dist; // projected sphere center on triangle plane
+
+// Now determine whether point0 is inside all triangle edges: 
+float3 c0 = cross(point0 – p0, p1 – p0) 
+float3 c1 = cross(point0 – p1, p2 – p1) 
+float3 c2 = cross(point0 – p2, p0 – p2)
+bool inside = dot(c0, N) <= 0 && dot(c1, N) <= 0 && dot(c2, N) <= 0;
+```
+If inside is true, then we can just take the point0 (projected sphere centre as the closest point on the triangle to the sphere. Otherwise, we are not sure we are intersecting with the triangle, so find the closest point to the sphere centre on all three edges, choose the closest of the three and determine if it is within the sphere radius. So for all three edge line segments, we will determine the closest point to the sphere centre and take the closest one:
+When sphere centre projection is not inside triangle…
+```
+float3 ClosestPointOnLineSegment(float3 A, float3 B, float3 Point)
+{
+  float3 AB = B – A;
+  float t = dot(Point – A, AB) / dot(AB, AB);
+  return A + saturate(t) * AB; // saturate(t) can be written as: min((max(t, 0), 1)
+}
+
+float radiussq = radius * radius; // sphere radius squared
+
+// Edge 1:
+float3 point1 = ClosestPointOnLineSegment(p0, p1, center);
+float3 v1 = center – point1;
+float distsq1 = dot(v1, v1);
+bool intersects = distsq1 < radiussq;
+
+// Edge 2:
+float3 point2 = ClosestPointOnLineSegment(p1, p2, center);
+float3 v2 = center – point2;
+float distsq2 = dot(vec2, vec2);
+intersects |= distsq2 < radiussq;
+
+// Edge 3:
+float3 point3 = ClosestPointOnLineSegment(p2, p0, center);
+float3 v3 = center – point3;
+float distsq3 = dot(v3, v3);
+intersects |= distsq3 < radiussq;
+```
+At the end of this, we will know whether we intersect with the triangle or not. If we intersect, we must compute the penetration depth and normal so that we will be able to properly handle the collision (bounce back or slide on surface). Like I said, we need to determine the closest intersection point for this. It is either inside the triangle, or on one of the edges:
+```
+if(inside || intersects)
+{
+  float3 best_point = point0;
+  float3 intersection_vec;
+
+  if(inside)
+  {
+    intersection_vec = center – point0;
+  }
+  else  
+  {
+    float3 d = center – point1;
+    float best_distsq = dot(d, d);
+    best_point = point1;
+    intersection_vec = d;
+
+    d = center – point2;
+    float distsq = dot(d, d);
+    if(distsq < best_distsq)
+    {
+      distsq = best_distsq;
+      best_point = point2;
+      intersection_vec = d;
+    }
+
+    d = center – point3;
+    float distsq = dot(d, d);
+    if(distsq < best_distsq)
+    {
+      distsq = best_distsq;
+      best_point = point3; 
+      intersection_vec = d;
+    }
+  }
+
+  float3 len = length(intersection_vec);  // vector3 length calculation: 
+  sqrt(dot(v, v))
+  float3 penetration_normal = intersection_vec / len;  // normalize
+  float penetration_depth = radius – len; // radius = sphere radius
+  return true; // intersection success
+}
+```
+That’s it for the sphere – triangle intersection!
+Capsule collision
+The capsule collision is a simple extension to the sphere intersection test. I define the capsule with two points, base and tip, and the radius:
+Points A an B are derived from Base, Tip points and radius. They will also be useful in computations. In game code I found that it makes more sense to handle the Base and Tip points instead of A and B sphere centers.
+The main idea with the implementation, is that we want to do a sphere intersection test by selecting the most relevant sphere along the capsule axis, clamped to the A-B line segment. Let’s see it in action in the following cases:
+Capsule – Capsule collision
+We are looking for BestA and BestB points.
+As you can see, the intersection test is at the end performed against two spheres. To select the most relevant spheres, the previously defined ClosestPointOnLineSegment() function will come in handy. We will compute the A and B line endpoints on both capsules, then take vectors and distances between all endpoints between the two capsules, to finally compute the closest points between two lines:
+```
+// capsule A:
+float3 a_Normal = normalize(a.tip – a.base); 
+float3 a_LineEndOffset = a_Normal * a.radius; 
+float3 a_A = a.base + a_LineEndOffset; 
+float3 a_B = a.tip - a_LineEndOffset;
+
+// capsule B:
+float3 b_Normal = normalize(b.tip – b.base); 
+float3 b_LineEndOffset = b_Normal * b.radius; 
+float3 b_A = b.base + b_LineEndOffset; 
+float3 b_B = b.tip - b_LineEndOffset;
+
+// vectors between line endpoints:
+float3 v0 = b_A – a_A; 
+float3 v1 = b_B – a_A; 
+float3 v2 = b_A – a_B; 
+float3 v3 = b_B – a_B;
+
+// squared distances:
+float d0 = dot(v0, v0); 
+float d1 = dot(v1, v1); 
+float d2 = dot(v2, v2); 
+float d3 = dot(v3, v3);
+
+// select best potential endpoint on capsule A:
+float3 bestA;
+if (d2 < d0 || d2 < d1 || d3 < d0 || d3 < d1)
+{
+  bestA = a_B;
+}
+else
+{
+  bestA = a_A;
+}
+
+// select point on capsule B line segment nearest to best potential endpoint on A capsule:
+float3 bestB = ClosestPointOnLineSegment(b_A, b_B, bestA);
+
+// now do the same for capsule A segment:
+bestA = ClosestPointOnLineSegment(a_A, a_B, bestB);
+```
+We selected the two best possible candidates on both capsule axes. What remains is to place spheres on those points and perform the sphere intersection routine:
+```
+float3 penetration_normal = bestA – bestB;
+float len = length(penetration_normal);
+penetration_normal /= len;  // normalize
+float penetration_depth = a.radius + b.radius – len;
+bool intersects = penetration_depth > 0;
+```
+Done, we can now detect collision between two capsules.
+Capsule – Triangle collision
+The principle is very similar to the previous example, we select the closest point on the capsule line to the triangle, place a sphere on that point and then perform the sphere – triangle test. We can find the closest point on a line to triangle with ray tracing. First we trace the plane with the capsule line (ray). Then we determine the closest point on the triangle to the trace point. The reference point is the closest point on the capsule line to that. We will place the sphere on the reference point and do a normal triangle – sphere intersection test as usual.
+Only tracing the plane and finding closest point on capsule line is not enough. We must find closest point on capsule line to the triangle. We are looking for the Reference point (pink).
+It seems that this image has a mistake: the segment marked with “penetration depth”, is really (radius – penetrationdepth)
+```
+// Compute capsule line endpoints A, B like before in capsule-capsule case:
+float3 CapsuleNormal = normalize(tip – base); 
+float3 LineEndOffset = CapsuleNormal * radius; 
+float3 A = base + LineEndOffset; 
+float3 B = tip - LineEndOffset;
+
+// Then for each triangle, ray-plane intersection:
+//  N is the triangle plane normal (it was computed in sphere – triangle intersection case)
+float t = dot(N, (p0 - base) / abs(dot(N, CapsuleNormal)));
+float3 line_plane_intersection = base + CapsuleNormal * t;
+
+float3 reference_point = {find closest point on triangle to line_plane_intersection};
+
+// The center of the best sphere candidate:
+float3 center = ClosestPointOnLineSegment(A, B, reference_point);
+```
+The “find closest point on triangle to line_plane_intersection” refers to the same approach that was used in the sphere – triangle intersection case, when we try to determine if the sphere centre projection is inside the triangle, or find a closest edge point. Here, instead of the sphere centre projection, we use the line_plane_intersection point:
+```
+// Determine whether line_plane_intersection is inside all triangle edges: 
+float3 c0 = cross(line_plane_intersection – p0, p1 – p0) 
+float3 c1 = cross(line_plane_intersection – p1, p2 – p1) 
+float3 c2 = cross(line_plane_intersection – p2, p0 – p2)
+bool inside = dot(c0, N) <= 0 && dot(c1, N) <= 0 && dot(c2, N) <= 0;
+
+if(inside)
+{
+  reference_point = line_plane_intersection;
+}
+else
+{
+  // Edge 1:
+  float3 point1 = ClosestPointOnLineSegment(p0, p1, line_plane_intersection);
+  float3 v1 = line_plane_intersection – point1;
+  float distsq = dot(v1, v1);
+  float best_dist = distsq;
+  reference_point = point1;
+
+  // Edge 2:
+  float3 point2 = ClosestPointOnLineSegment(p1, p2, line_plane_intersection);
+  float3 v2 = line_plane_intersection – point2;
+  distsq = dot(vec2, vec2);
+  if(distsq < best_dist)
+  {
+    reference_point = point2;
+    best_dist = distsq;
+  }
+
+  // Edge 3:
+  float3 point3 = ClosestPointOnLineSegment(p2, p0, line_plane_intersection);
+  float3 v3 = line_plane_intersection – point3;
+  distsq = dot(v3, v3);
+  if(distsq < best_dist)
+  {
+    reference_point = point3;
+    best_dist = distsq;
+  }
+}
+```
+After this (that you placed the sphere onto the reference point), just finish it off with the sphere – triangle intersection, and you are done.
+There is a corner case with this. When the capsule line is parallel to the triangle plane, the ray – plane trace will fail. You can detect this case by checking the dot product between the ray direction (CapsuleNormal) and triangle normal (N). If it’s zero, then they are parallel. When this happens, instead of relying on the tracing, a simple fix is to just take an arbitrary point (for example the first corner) from the triangle and use that as reference point. The reference point will be used the same way as the intersection point, to determine the closest point on the capsule A-B segment.
+Usage
+Now that you have capsule collision, you will want to use the results. You will obviously know when two primitives intersect now, but you also get the penetration normal and depth. You can use these for character sliding on surfaces.
+If the capsule collides with a surface, then modify the velocity so that it will be absorbed in the direction of the impact and instead slide parallel to the surface:
+Absorbing penetration force (red arrow) will make the box collider stop in place because it is perpendicular to collision plane (purple line). The collision plane is perpendicular to the penetration normal (blue arrow)
+The penetration force (red arrow) is nicely absorbed and allows sliding upwards (green arrow).
+```
+collisionobject, normal, depth = SceneIntersectCapsule(capsule);
+if(collisionobject)
+{
+  // Modify player velocity to slide on contact surface:
+  float3 velocity_length = length(velocity);
+  float3 velocity_normalized = velocity / velocity_length;
+  float3 undesired_motion = normal * dot(velocity_normalized, normal);
+  float3 desired_motion = velocity_normalized – undesired_motion;
+  velocity = desired_motion * velocity_length;
+
+  // Remove penetration (penetration epsilon added to handle infinitely small penetration):
+  capsule.Translate(normal * (depth + 0.0001f));
+}
+```
+The player sliding on the contact surface is a very nice and expected experience for the player. It handles collision with the wall as well as with the floor. It will automatically handle moving a slope or stairs as well, however, if there is gravity, the player will be constantly sliding down slopes and small stairs. The gravity also makes it difficult to climb the slopes and stairs, which is not very desirable. In my experience, it is best to perform the collision detection twice, once for the player motion forces, and once with only the gravity force, but in the gravity collision phase, don’t do the sliding along surface if the surface is not sloped enough. You can check how much it is sloped by comparing the dot product of the penetration normal and the “up” vector:
+```
+if(dot(normal, float3(0, 1, 0)) > 0.3f)
+{
+  ground_intersection = true;
+  gravity_force = 0;
+}
+```
+Discrete collision detection
+This kind of collision detection can detect when a stationary capsule intersect with an other one or a triangle, but if the capsule is moving very fast, it can miss objects in between two game update ticks. This phenomenon is called the bullet through paper problem. To avoid this, we must do continuous collision detection. A very simple solution for this is just to do multiple steps of collision detection during one game frame. For example, let’s say that we want to divide the game frame into 5 collision sub-steps:
+```
+int ccd_max = 5; 
+for(int ccd = 0; ccd < ccd_max; ++ccd)
+{
+  float step = velocity / ccd_max;
+  capsule.Translate(step);
+  collisionobject, normal, depth = SceneIntersectCapsule(capsule);
+  // …
+}
+```
+The more sub-steps we do, the more accurate the result will be, as well as more expensive.
+As a bonus, an idea worth to try in the future is to apply one capsule collision detection step for moving spheres instead of multiple step based continuous collision detection phases. For example to implement geometry collision for a particle system.
+Optimization
+Some simple optimizations here can get us a long way. The most obvious one is to perform AABB (axis aligned bounding box) checks before you do a capsule collision test. AABB for a capsule is very easily generated, for example generate two AABBs for the two opposite spheres, and merge the resulting AABBs. Only check collisions between objects whose AABBs are overlapping the capsule. I also got a very prominent speed up by doing the AABB check between capsule AABB and triangle AABB. This was also very important for a large terrain mesh. In continuous collision detection fashion, you can also create a large AABB encompassing the starting and ending capsule positions (according to velocity) for all the CCD steps, so the sub-steps will only check a subset of potential collider objects.
+It would be also preferable to use a BVH (bounding volume hierarchy, hierarchical bounding box acceleration structure) to reduce the number of comparisons for detecting overlapping objects/triangles.
+An other thing that you probably want to return early as possible when doing the continuous collision detection sub-steps. So don’t search for the closest intersection, but return immediately if you find one. Let the gameplay code adjust position/velocity and continue with the next sub-step. It might be the case that no further collision occurs after it anyway. At least in my experience, this approach posed no visible problems.
+I based the sphere collision detection approach on how the DirectXMath library does it, but modified in some places to work better for my case.
+I hope you found it useful. If you notice any mistakes or have any ideas to make it better, hit the comment section below.
+Posted by
+turanszkij
+28 responses to “Capsule Collision Detection”
+james
+June 4, 2020 at 8:05 am
+this is wonderful, thank you!
+LikeLiked by 1 person
+Reply
+Atahan Acar
+July 25, 2020 at 8:44 pm
+Thanks for the amazing guide. One small mistake I noticed: in the code of the “find closest point on triangle to line_plane_intersection” part, inside the “else” statement, we use “line_point_intersection” instead of “center”
+LikeLiked by 1 person
+Reply
+turanszkij
+July 26, 2020 at 4:20 pm
+You are right, I fixed it, thanks a lot!
+LikeLike
+Reply
+Callum
+October 1, 2020 at 2:22 pm
+Thank you so much for this!
+It’s been a nightmare trying to wrap my head around ellipsoid based collision detection, but the capsule collider made from two spheres is a brilliant alternative. Thanks again!
+Also if you want your character movement to behave the laws of physics smoothly (and without using a physics engine) I’d recommend looking into the source code for Quake 1 or Quake 3. They have some really elegant methods for velocity and friction.
+LikeLike
+Reply
+Tara
+October 18, 2020 at 5:46 am
+Do you know of any resources regarding implementation of true continuous collision detection using capsules? I use ellipsoids in my engine (with true continuous collision detection), but I don’t like the behavior in certain situations and wanted to switch to or try capsules for a while now. What kept me from doing so was lack of information about continuous collision detection that doesn’t involve doing multiple sub-steps. I could imagine some kind of approach based on finding the closest point to the plane/rectangle formed by the previous and current capsule position.
+LikeLiked by 1 person
+Reply
+turanszkij
+October 18, 2020 at 8:06 am
+I don’t know about a true ccd for this. Maybe an approximate solution would be to create a bounding sphere around the triangle and stretch it along the capsule’s velocity vector (so that it is also a capsule shape). Then a capsule-capsule check could be made like a broad phase collision filter. Then refine that with the step based ccd. I haven’t tried it though.
+LikeLiked by 1 person
+Reply
+Jot
+January 30, 2021 at 12:35 am
+Enjoyable article Turanszkij, thank you.
+Tara, Sweep 2 spheres and a finite open ended cylinder.
+You’re already CCD sweeping an ellipsoid/sphere, now you need the cylinder cases for the triangle’s verts/edges/face. For the edges you can use the following (oliii’s 3rd reply):https://www.gamedev.net/forums/topic/288963-swept-capsule-capsule-intersection-3d/
+I started with the papers and code form Kasper Fauerby and Jorrit Rouwé and added cases for the swept cylinder. Seems to work, but haven’t a clue how robust it is.
+Other thoughts:
+Capsule collision optimisations to consider/implement, not looked at this in detail yet (@time 44.31):https://www.gdcvault.com/play/1025126/Extreme-SIMD-Optimized-Collision-Detection
+Overgrowth developer started off using an ellipsoid overlapped with a sphere. Not sure how he avoided weird collision issues – this didn’t work for me:https://www.youtube.com/watch?t=209&v=LNidsMesxSE
+Apparently Discrete collision detection and response was used in Mario:https://www.youtube.com/watch?v=UnU7DJXiMAQ
+Casey Muratori introduces a 2nd class of discrete collision detection:https://youtu.be/YE8MVNMzpbo?t=739
+LikeLike
+Reply
+Tara
+February 1, 2021 at 8:31 am
+I guess I wasn’t clear enough. I was talking about continuous capsule vs triangle mesh collision detection.
+LikeLike
+John
+October 25, 2020 at 9:55 pm
+I haven’t really thought through this *at all*, but for triangle/sphere collision, and if there is no rotation during the motion, the trace points for the beginning and end of the capsule travel with the triangle’s plane should be linear (and I would think could be determined simply by projecting the motion vector onto the triangle’s plane after determining the starting point’s trace point). At that point you would need to find the closest point on the trace segment to determine the reference point, and continue from there.
+LikeLike
+Reply
+LordFers
+March 10, 2021 at 8:11 pm
+I can’t understand why calculate Ray-tracing from normal to capsule. I understand that you get a point of intersection between the ray and the plane of the triangle (tracepoint), but for what? If there are many cases where both are parallel and it is useless since there is no point of intersection.
+Another important thing, I have noticed in several of my implementations that if you don’t take vertices into account separately as possible collision points, it generates incorrect behavior in collision response.
+LikeLike
+Reply
+turanszkij
+March 17, 2021 at 12:51 am
+It has been a while since I was working on this, so memory a bit hazy. There are two cases that are handled differently, one where the capsule is parallel to the plane, so no trace point, but taking the line distance to plane as a simplified approach. The other case is when not parallel, and searching closest point to triangle on capsule line. Currently seems to work very well for me even after testing difficult cases with large triangle vs small capsule and large capsule vs small triangles. But if you propose an improvement, let me know.
+LikeLike
+Reply
+Martin
+March 27, 2021 at 1:35 am
+Hi I just want to say you really helped me with this tutorial. Thank you!
+LikeLiked by 1 person
+Reply
+turanszkij
+March 27, 2021 at 9:44 am
+Great, thanks for the comment!
+LikeLike
+Reply
+Phips
+November 1, 2021 at 12:34 am
+Hi, good article. But there are a few inconsistencies. You change intersection_vec to penetration_vec in the middle of the code, change v2 to vec2. Also you only mention dual sided meshes in the first test, how to adapt for the others? Also I’d have explicitly handled the case of parallel lines in the pseudocode. Also where you use abs, isn’t it better to use outside the dot product? So you just divide by that scalar once instead of the whole vector. Anyways, great job in general
+LikeLike
+Reply
+Phips
+November 1, 2021 at 5:19 am
+Also, distsq = best_distsq; should be the inverse assignment
+LikeLiked by 1 person
+Reply
+baruch
+May 20, 2022 at 5:26 pm
+Thanks for the post!
+In capsule-capsule collisions, I’m wondering how you got the `if (d2 < d0 || d2 < d1 || d3 < d0 || d3 < d1)` line? I was comparing your implementation to an exact solution of the closest point for two line segments (reference here: http://paulbourke.net/geometry/pointlineplane/), and I get different results for certain orientations of the line segments.
+LikeLike
+Reply
+Lucie
+May 11, 2023 at 8:13 am
+Hey, i wonder how we do when the A -> B ray doesnt intersect at all the triangle, cause sometime capsule is perfectly aligned with the wall and still we want it to collide, didn’t understand how you deal with that case.
+LikeLike
+Reply
+turanszkij
+May 15, 2023 at 8:55 am
+It’s been a while since I did this, so memory is hazy, but I written that if the trace fails, you can take any point from the triangle as reference point basically, for example one of the corners. Then it will still work like sphere intersection check, perhaps you will get an intersection point with the capsule endpoint if the triangle is larger than capsule, but it is still usable as simple collision result. Note that you always get just one collision point on the capsule with this method, even though the capsule collision is really a more complex shape. But for simple character collision logic, it works well for me.
+LikeLike
+Reply
+auraxarr
+March 9, 2024 at 5:29 pm
+Would a player object consisting of 3 spheres be more efficient in terms of collisions calculation then a default calsule? Thanks 🙂
+LikeLike
+Reply
+turanszkij
+March 10, 2024 at 9:38 am
+No, the capsule-triangle intersection is quite similar to sphere-triangle, with just one modification of finding closest sphere on the capsule axis, then it’s essentially just one sphere-triangle intersect. And testing 3 spheres wouldn’t even give the same result as a capsule, because there are gaps between them.
+LikeLike
+Reply
+auraxarr
+March 11, 2024 at 3:40 am
+my appreciations, mate! 🙂
+LikeLike
+Hope41
+May 15, 2024 at 7:13 am
+Thanks for such a helpful article! I’ve made a lot of platform games over the years, but have always used bounding box collision for the math, causing me weeks and weeks of head-scratching and frustration. I think this article has just made my life. Truly a revelation. Thank you! 😉
+LikeLike
+Reply
+turanszkij
+May 15, 2024 at 9:49 am
+You’re welcome, thanks for dropping a comment!
+LikeLike
+Reply
+Finn Bear
+May 21, 2024 at 5:46 am
+I found an issue with the Capsule-Triangle collision. It doesn’t detect the following intersection:
+Triangle:
+p0 = 1.0, 0.7853, -0.1526
+p1 = 1.0, 0.9816, -0.1908
+p2 = -2.0, -0.9816, 0.1908
+Capsule (A and B are sphere centers, not base and tip):
+A = -1.0, -0.7, 0.25
+B = -1.0, 0.3, 0.25
+r = 0.2
+If I’m not mistaken, this is due to:
+1) line_plane_intersection is outside the triangle
+2) reference point is far from the capsule
+3) resulting sphere candidate doesn’t intersect the triangle
+LikeLike
+Reply
+ryrayer
+July 25, 2024 at 2:12 am
+float3 reference_point = {find closest point on triangle to line_plane_intersection};
+what is that even. when teaching beginners, this is very bad. of course you should know what you are writing or copying when using tutorials like this, but this is even bad for advanced users.
+specify which function to use on these lines. the description “find closest point on triangle to line_plane_intersection” doesnt mean anything when you are teaching beginners. thank you for the tutorial!
+LikeLike
+Reply
+turanszkij
+July 25, 2024 at 4:30 am
+This is explained in the post if you read further.
+LikeLike
+Reply
+닉넴할거없다
+March 12, 2025 at 3:07 am
+Does this article apply to 3d or does it apply to 2d?
+LikeLike
+Reply
+turanszkij
+March 12, 2025 at 6:12 am
+I think it applies to 2D if you just remove the Z axis from the computations.
+LikeLike
+Reply
+Leave a Reply Cancel reply
+Loading Comments...
+Comment
+Reblog
+Subscribe
+Subscribed
+Wicked Engine
+Have a WordPress.com account? Log in now.
+Wicked Engine
+Copy shortlinkView post in Reader
+Manage subscriptionsSign upLog in
+Report this content
+Collapse this bar

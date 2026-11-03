@@ -1,0 +1,269 @@
+Hi, We hit an intermittent crash in the camera+LiDAR fusion setup and it took us a while to track down, so I wanted to write up what we found in case it helps others. The symptom Training a camera+LiDAR fusion model on this repo, validat...
+
+`Voxelization` returns coordinate columns in a different order depending on import order — with `sparse_shape=[300,600,41]` most LiDAR voxels get dropped silently · Issue #214 · hustvl/MapTR · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Voxelization returns coordinate columns in a different order depending on import order — with sparse_shape=[300,600,41] most LiDAR voxels get dropped silently #214
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Voxelization returns coordinate columns in a different order depending on import order — with sparse_shape=[300,600,41] most LiDAR voxels get dropped silently#214
+Copy link
+Description
+08Youssef08
+opened on Jul 27, 2026
+Issue body actions
+Hi,
+We hit an intermittent crash in the camera+LiDAR fusion setup and it took us a while to track down,
+so I wanted to write up what we found in case it helps others.
+The symptom
+Training a camera+LiDAR fusion model on this repo, validation would occasionally die with
+```
+N > 0 assert faild. CUDA kernel launch blocks must be positive, but got N= 0
+```
+Always on a small subset of frames (29 out of 6019 on nuScenes val for us, two consecutive
+scenes), and the subset looked stable within a run but changed between runs. Restarting the same
+job sometimes made it go away entirely, which is what made it so annoying to chase.
+What's actually happening
+mmdet3d.ops.Voxelization does not always return the voxel coordinate columns in the same order.
+Some processes give (x, y, z), others give (z, y, x) — same machine, same binary, same input
+points. It's decided once when the process starts and stays fixed after that.
+The config at projects/configs/maptr/maptr_tiny_fusion_24e.py:63 says
+```
+sparse_shape = [300, 600, 41]      # (x, y, z)
+```
+so in a process that emits (z, y, x), the x column (values 0-299) ends up being range-checked
+against 41. spconv drops out-of-range sites without complaining, so only x < -10.9 m survives —
+a 4.1 m strip out of a 30 m lateral range, somewhere between 4 % and 20 % of voxels depending on
+the frame. On frames where nothing at all falls in that strip you get zero active sites after the
+first strided conv, and that's the assert.
+The crash is honestly the least of it. The silent 96 % loss is worse: loss curves look normal,
+validation mAP climbs normally, nothing warns you. Our fusion model trained in the degraded state
+still comfortably beat a camera-only baseline, so you can't tell from the final number whether a
+run was affected.
+Narrowing it down
+We couldn't reproduce it reliably in a small script, which turned out to be the clue — small
+scripts don't import enough. So we built a ladder: same synthetic points (torch.rand, fixed
+seed), same GPU, one process per measurement, each variant adding exactly one thing to a baseline.
+8 repeats per variant per job, 9 jobs, 6 GPUs across 2 nodes.
+The geometry makes the axes unambiguous — with point_cloud_range=[-15,-30,-5, 15,30,3] and
+voxel_size=[0.1,0.1,0.2] you get 300 bins in x, 600 in y, 40 in z. Whichever column reaches ~299
+is x; whichever tops out at ~39 is z.
+variant
+what it adds to V0
+n
+(x,y,z) ok
+(z,y,x) broken
+V0
+baseline: import mmdet3d.ops only, module built then points, seed 0
+72
+72
+0
+V1
++ different RNG seed (i.e. different points)
+72
+72
+0
+V2
++ points allocated before the module instead of after
+72
+72
+0
+V3
++ mmcv.Config.fromfile(...)
+72
+72
+0
+V4
++ importing our own project package
+72
+72
+0
+V5
++ V1, V2, V3 and V4 all together
+72
+72
+0
+V6
++ from mmdet3d.models import build_model, after torch and before mmdet3d.ops
+72
+39
+33
+V7
+V6 plus everything from V5 (realistic import chain)
+72
+29
+43
+432 correct results in a row through V0-V5, then it starts flipping about half the time at V6.
+Every one of the 8 GPUs shows the same picture side by side, e.g.
+```
+gpu A   V5=xxxxxxxx   V6=zzzxzzzx
+gpu B   V5=xxxxxxxx   V6=xxxzzzzz
+gpu C   V5=xxxxxxxx   V6=zzxxxxxx
+gpu D   V5=xxxxxxxx   V6=zzxzxzzx
+```
+One thing worth pointing out: V4 and V5 also end up with mmdet3d.models in sys.modules,
+because our package imports it, and those are 144/144 correct. So it isn't whether
+mmdet3d.models is loaded, it's when it gets loaded relative to torch and mmdet3d.ops.
+Every line in the attached logs prints mmdet3d.models=0/1 so you can check that directly.
+That table also rules out the point data (V1), allocation order (V2), mmcv config machinery (V3)
+and our own code (V4). Separately we confirmed it's not tied to a particular GPU (every GPU we
+tested produced both orders), not the node, and not the time of day.
+There is a safe import order (workaround)
+We ran the reverse order to see whether it helps, and it does:
+import order
+n
+(x,y,z) ok
+(z,y,x) broken
+torch → mmdet3d.ops (no models)
+40
+40
+0
+torch → mmdet3d.ops → mmdet3d.models
+40
+40
+0
+torch → mmdet3d.models → mmdet3d.ops
+40
+23
+17
+Same jobs, same GPUs, back to back. So importing mmdet3d.ops before anything pulls in
+mmdet3d.models avoids it entirely — for us that meant one line at the top of our plugin's
+__init__.py. Might be worth doing the same in the fusion configs' plugin entry point, though
+the bounds check below is the thing that would actually make this safe rather than lucky.
+We tried the fix from the older threads — it doesn't work
+The advice in the earlier reports of this assert is pip install spconv-cuXXX. We cloned our
+conda env and tried it properly, running the same trigger variant 30 times per configuration:
+environment
+correct
+broken
+vendored spconv 1.x (as shipped)
+62
+50
++ spconv-cu111 2.1.21
+17
+13
++ spconv-cu111 2.1.21, imported first
+18
+12
++ spconv-cu113 2.3.6 (newest available)
+13
+17
+No effect at any version. The reason is visible at install time: mmdet3d.ops.spconv still
+resolves to the vendored in-tree copy, while the pip package installs as a separate top-level
+spconv module that mmdet3d never imports. So the version you install is irrelevant to the code
+path that actually runs.
+That probably explains why those threads read the way they do — someone reinstalls, the
+environment shifts, they draw the good order, and it looks fixed. Someone else does the same and
+reports it didn't help.
+It isn't spconv either (the obvious guess)
+Worth saying since it's the obvious guess: mmdet3d/ops/__init__.py pulls spconv in transitively,
+so sparse_conv_ext.so is already loaded in the clean V0 baseline (72/72 correct). spconv is
+present in both the working and broken cases, so it isn't what distinguishes them, and upgrading
+it wouldn't help. Whatever collides comes from the rest of what mmdet3d.models loads.
+Reproducer
+```
+import torch
+from mmdet3d.models import build_model      # required — after torch, before ops
+from mmdet3d.ops import Voxelization
+
+PCR = [-15.0, -30.0, -5.0, 15.0, 30.0, 3.0]
+VS  = [0.1, 0.1, 0.2]                       # -> 300 / 600 / 40 bins
+
+vox = Voxelization(voxel_size=VS, point_cloud_range=PCR,
+                   max_num_points=10, max_voxels=120000).cuda()
+torch.manual_seed(0)
+p = torch.rand(200000, 5, device='cuda')
+for a in range(3):
+    p[:, a] = p[:, a] * (PCR[a + 3] - PCR[a]) + PCR[a]
+
+_, coors, _ = vox(p)
+mx = [int(coors[:, j].max()) for j in range(3)]
+print(mx, '(x,y,z)' if mx[0] > 250 else '(z,y,x)  <-- wrong for sparse_shape=[300,600,41]')
+```
+```
+for i in $(seq 10); do python repro.py; done
+```
+About half the runs print (z,y,x). Drop the mmdet3d.models line and it prints (x,y,z) every
+time — that import is the difference between reproducing and not.
+Some related things we noticed in the tree
+mmdet3d/ops/voxel/voxelize.py:119 has self.pcd_shape = [*input_feat_shape, 1]#[::-1], with
+the reversal commented out
+voxelization_cpu.cpp declares ndim_minus_1 and never uses it, and the CPU path segfaults on
+this config
+the CUDA kernel writes x first (coors_offset[0]=c_x), whereas stock mmdet3d documents coords
+as (batch_idx, z_idx, y_idx, x_idx) and its configs are all z-first ([41,1600,1408])
+So both conventions exist in the history here, and something in library load order is picking
+between them at runtime. We did not dig into the compiled extension to find out what — a symbol
+collision between the voxel extension and something else loaded would fit (decided at load time,
+stable per process, order-dependent, invisible to file hashes) but we haven't proven that.
+Environment
+```
+python        3.8.20
+torch         1.9.1+cu111, cuda 11.1, cudnn 8005
+mmcv          1.4.0
+mmdet         2.14.0
+mmdet3d       0.17.2  (the vendored in-tree copy, editable install)
+mmseg         0.14.1
+numpy         1.23.5
+spconv        vendored: mmdet3d/ops/spconv (1.x)
+GPU           A100-SXM4-80GB, driver 570.124.06
+voxel ext     mmdet3d/ops/voxel/voxel_layer.cpython-38-x86_64-linux-gnu.so
+              14150328 bytes, md5 31ba0dbd4e6f46e29cbd99f33aaf0c29
+```
+There's only one compiled voxel extension in our install and its md5 is the same read from every
+node, so this isn't two builds shadowing each other.
+Attached
+11 logs, all self-contained. Hostnames and GPU serials are anonymised; each has a header
+explaining what it shows.
+ladder_run01..07.log — the main import-order ladder (V0–V7). Each file covers one GPU and
+carries a hardware header (driver, torch, the extension's md5), the variant legend, and every
+raw measurement. Each result line prints mmdet3d.models=0/1 so the correlation is visible in
+the data rather than only in the table above.
+safe_import_order_01..02.log — V0 / V9 / V6 back to back on one GPU, the evidence for the
+workaround table.
+spconv_2.3.6_01..02.log — the same trigger in a cloned env with spconv 2.3.6 installed,
+showing the upgrade makes no difference.
+ladder_run01.log
+ladder_run02.log
+ladder_run03.log
+ladder_run04.log
+ladder_run05.log
+ladder_run06.log
+ladder_run07.log
+[safe_import_or
+ladder_run07.log
+spconv_2.3.6_01.log
+der_01.log](https://github.com/user-attachments/files/30432878/safe_import_order_01.log)
+safe_import_order_02.log
+spconv_2.3.6_01.log
+spconv_2.3.6_02.log
+Reactions are currently unavailable
+Activity
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

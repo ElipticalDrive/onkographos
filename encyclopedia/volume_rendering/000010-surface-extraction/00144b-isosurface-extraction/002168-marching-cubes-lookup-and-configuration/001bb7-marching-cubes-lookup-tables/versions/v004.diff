@@ -1,0 +1,227 @@
+--- v003.md
++++ v004.md
+@@ -1,85 +1,52 @@
+ # Marching Cubes Lookup Tables
+ 
+-Also called: MC Lookup Table, Marching Cubes Triangle Table, Tri Table, Lorensen and Cline Lookup Tables, Paul Bourke's table, Precalculated lookup table for Marching Cubes
++Also called: MC Lookup Table, MC Case Tables, Tri Table, Cube Configuration Tables, Lorensen and Cline Lookup Tables, Paul Bourke's table, Precalculated lookup table for Marching Cubes
+ 
+ ## Overview
+-Marching Cubes Lookup Tables are precomputed data structures that map the 256 possible binary configurations of a voxel's corner signs relative to an isovalue to the specific edges intersected by the isosurface and the resulting triangle vertex indices [S1, S2, S3]. This method solves the problem of determining mesh topology without runtime branching logic, allowing for efficient traversal on both CPU and GPU architectures [S2]. Unlike [Dual Contouring](778-dual-contouring.md), which optimizes for vertex placement and normal accuracy, or [Surface Nets](921-surface-nets.md), which uses a different topological approach, the Lookup Table method strictly follows the original triangulation, prioritizing simplicity and topological consistency over geometric optimality [G].
++Marching Cubes Lookup Tables are precomputed data structures that map the 256 possible binary configurations of a voxel's corner signs relative to an isovalue to the triangle definitions required for mesh generation [S2, S3, S4]. This method solves the problem of determining mesh topology without runtime branching logic, enabling efficient traversal on both CPU and GPU architectures [S2, S5]. It builds on [Isosurface extraction](30-isosurface-extraction.md) by replacing conditional topology checks with direct table indexing [S4].
+ 
+ ## How it works
+-The method relies on two primary lookup tables: an **Edge Table** to identify intersected edges and a **Triangle Table** to define the connectivity of those edges into triangles [S2, S3].
++The method uses precomputed tables to determine which edges of a cubic voxel are intersected by the isosurface and how to connect those intersections into triangles [S2, S4]. Implementations typically use a Triangle Table, and optionally an Edge Table for bitmask optimization [S3, S6].
+ 
+ ### Inputs and Outputs
+-*   **Input:** A scalar field volume $V$, an isovalue $u_{isolevel}$, and a voxel grid. For each voxel, the scalar values at its 8 corners are compared against $u_{isolevel}$ [S2, S3].
+-*   **Output:** A list of triangles (vertex indices) representing the isosurface within that voxel [S2].
++*   **Input:** Scalar field values at the 8 vertices of a cubic voxel and a scalar isovalue [S2, S4].
++*   **Output:** A list of triangle vertex indices representing the isosurface intersection within that voxel [S2, S5].
+ 
+ ### Data Structures
+ 
+ #### Edge Table (`edgeTable`)
+-A 1D array of 256 integers. Each entry corresponds to a cube index $0 \dots 255$ [S3, S4]. The integer is a bitmask where bits $0$ through $11$ correspond to the 12 edges of a cube. A set bit indicates the isosurface intersects that edge [S3, S4].
+-
+-*   **Layout:** `int edgeTable[256]` [S4].
+-*   **Size:** 256 entries [S3, S4].
+-*   **Bit Packing:** Bit $k$ ($0 \le k < 12$) is 1 if edge $k$ is intersected, 0 otherwise [S3, S4].
++A 1D array of 256 integers. Each entry corresponds to a cube index $0 \dots 255$ [S3, S6]. The integer is a bitmask where bits $0$ through $11$ correspond to the 12 edges of a cube. A set bit indicates the isosurface intersects that edge [S3, S6].
++*   **Layout:** `int edgeTable[256]` [S3, S6].
++*   **Size:** 256 entries [S3, S6].
++*   **Bit Packing:** Bit $k$ ($0 \le k < 12$) is 1 if edge $k$ is intersected, 0 otherwise [S3, S6].
+ 
+ #### Triangle Table (`triangleTable`)
+-A 2D array mapping each cube index to a sequence of vertex/edge indices forming triangles [S2, S3]. The indices refer to the cube's 8 vertices ($0-7$) and 12 edges ($8-19$) [S3]. In the standard implementation, the table stores indices directly referencing the **interpolated vertex positions** on the edges [G]. The table is structured to output triangle lists [S2].
+-
+-*   **Layout:** `int triangleTable[256][16]` [S2].
+-*   **Size:** 256 rows, 16 columns [S2].
+-*   **Content:** Each row contains a sequence of integers. Values $0-11$ represent edge indices where the interpolated vertex lies [S2]. The table defines which edges are connected to form triangles [S2]. A triplet $(a, b, c)$ means "connect the intersection point on edge $a$, edge $b$, and edge $c$ to form a triangle" [S2].
+-*   **Terminator:** The sequence is terminated by $-1$ [S2, S3].
+-*   **Padding:** The array is padded to 16 integers per row to allow fixed-size memory access (e.g., on GPU) [S2, S3].
+-*   **Max Triangles:** A cube can have at most 5 triangles (15 edge indices) [S2].
+-*   **Alternative GPU Layout:** Some implementations use a 64-bit unsigned integer per cube index to encode the triangle configuration, packing multiple triangle definitions into a single `ulong` to save memory bandwidth [S1].
++A 2D array mapping each cube index to a sequence of indices forming triangles [S2, S4, S5]. The table is structured as `int triangleTable[256][16]` (or packed into `ulong` arrays for GPU memory bandwidth optimization) [S2, S4]. Each row contains a sequence of integers representing vertex or edge indices, terminated by $-1$ [S3, S4, S5]. The maximum number of triangles per cube is 5 (15 indices), leaving the 16th column for the terminator [S4].
++*   **Layout:** `int triangleTable[256][16]` [S4].
++*   **Size:** 256 rows, 16 columns [S2, S4].
++*   **Content:** Each row contains a sequence of integers. Values reference the cube's 8 vertices ($0-7$) and 12 edges ($8-19$ or $0-11$ depending on implementation) [S3, S4, S5]. A triplet $(a, b, c)$ means "connect the intersection point on index $a$, index $b$, and index $c$ to form a triangle" [S2, S4].
++*   **Terminator:** The sequence is terminated by $-1$ [S2, S3, S5].
++*   **Padding:** The array is padded to 16 integers per row to allow fixed-size memory access [S2, S3].
+ 
+ ### Numbered Steps
+ 
+ 1.  **Calculate Cube Index:**
+-    For a given voxel with corner scalar values $v_0, \dots, v_7$, calculate the `cubeIndex` (0-255) based on which of the 8 corners are above the isovalue [S2].
++    For a given voxel with corner scalar values $v_0, \dots, v_7$, calculate the `cubeIndex` (0-255) based on which of the 8 corners are above the isovalue [S2, S4].
+     $$ \text{cubeIndex} = \sum_{i=0}^{7} b_i 2^i $$
+-    where $b_i = 1$ if $v_i \ge u_{isolevel}$, else $0$ [G].
++    where $b_i = 1$ if $v_i \ge u_{\text{isolevel}}$, else $0$ [S4].
+ 
+ 2.  **Check for Empty/Full Cube:**
+-    If `cubeIndex` is 0 or 255, the isosurface does not intersect the cube [S2]. Skip to the next voxel [G].
++    If `cubeIndex` is 0 or 255, the isosurface does not intersect the cube [G]. Skip to the next voxel.
+ 
+-3.  **Identify Intersected Edges (Optional for Vertex Table only):**
+-    If using the Edge Table variant:
+-    $$ \text{edgeMask} = \text{edgeTable}[\text{cubeIndex}] $$
+-    Iterate bits $0-11$. If bit $k$ is set, edge $k$ is intersected [S3].
+-    *   *Note:* If using the Triangle Table directly (which lists edge indices), this step is implicit in the table lookup, but you still need to know *which* edge corresponds to which geometric location to interpolate the vertex position. The standard edge numbering is fixed (e.g., edge 0 connects vertex 0 and 1) [S2, S3].
+-
+-4.  **Lookup Triangle Configuration:**
++3.  **Lookup Triangle Configuration:**
+     Access the Triangle Table:
+     $$ \text{triConfig} = \text{triangleTable}[\text{cubeIndex}] $$
+-    This returns an array of integers [S2, S3].
++    This returns an array of integers [S2, S3, S4].
+ 
+-5.  **Generate Triangles:**
+-    Iterate through `triConfig` in steps of 3:
+-    ```python
+-    idx = 0
+-    while idx < 16 and triConfig[idx] != -1:
+-        edge_a = triConfig[idx]
+-        edge_b = triConfig[idx+1]
+-        edge_c = triConfig[idx+2]
+-        
+-        # Interpolate vertex positions on the identified edges
+-        # Note: edge_a, edge_b, edge_c are indices 0-11
+-        p_a = interpolate_vertex(edge_a, cube_corners, u_isolevel)
+-        p_b = interpolate_vertex(edge_b, cube_corners, u_isolevel)
+-        p_c = interpolate_vertex(edge_c, cube_corners, u_isolevel)
+-        
+-        add_triangle(p_a, p_b, p_c)
+-        
+-        idx += 3
+-    ```
+-    Stop when a $-1$ is encountered [S2, S3].
++4.  **Generate Triangles:**
++    Iterate through `triConfig` in steps of 3. Each triplet defines a triangle by connecting the intersection points on the referenced indices [S4, S5]. Stop when a $-1$ terminator is encountered [S2, S5].
+ 
+-6.  **GPU Implementation Specifics:**
+-    *   Upload `triangleTable` (size $256 \times 16 \times 4$ bytes or $256 \times 8$ bytes if bit-packed) to a Shader Storage Buffer Object (SSBO) [S3].
+-    *   Upload `edgeTable` (size $256 \times 4$ bytes) to an SSBO [S3].
+-    *   Bind lookup tables as Shader Storage Buffer Objects (SSBOs) at binding points 2 and 3 respectively [S3].
+-    *   Dispatch compute shader for Marching Cubes: grid dimensions are volume_size.x/y/z divided by the shader's local workgroup size [S3].
+-    *   The compute shader calculates `cubeIndex`, looks up the triangle configuration, and writes to an output vertex buffer [S3].
+-    *   Synchronize GPU after Marching Cubes compute pass: barrier for shader storage and vertex attribute arrays [S3].
++5.  **Intersect and Connect:**
++    For each referenced edge index, compute the exact intersection point using linear interpolation between the edge's endpoints [Parent]. Connect the three interpolated points to form a triangle [Parent].
+ 
+ ### Formulas
+@@ -87,39 +54,24 @@
+ **Vertex Interpolation:**
+ For an edge connecting corner $A$ (value $v_A$) and corner $B$ (value $v_B$), the intersection point $P$ is:
+-$$ P = A + \frac{u_{isolevel} - v_A}{v_B - v_A} (B - A) $$
++$$ P = V_a + \frac{u_{\text{isolevel}} - v_a}{v_b - v_a} (V_b - V_a) $$
+ If $v_A = v_B$, the edge is not intersected (handled by the lookup table logic) [G].
+ 
+ **Cube Index Calculation:**
+ $$ \text{cubeIndex} = \sum_{i=0}^{7} b_i 2^i $$
+-where $b_i = 1$ if $v_i \ge u_{isolevel}$, else $0$ [S2].
++where $b_i = 1$ if $v_i \ge u_{\text{isolevel}}$, else $0$ [S4].
+ 
+ ### Parameters
+-*   **$u_{isolevel}$:** Float uniform passed to the marching cubes compute shader. Threshold value for scalar field comparison. UI slider range: -1.0f to 1.0f [S3].
+-*   **Edge Numbering:** The mapping of edge index $0-11$ to corner pairs must be consistent between the Edge Table and the interpolation logic. Standard numbering:
+-    *   Edges 0-7: Connect vertex $i$ to $i+1$ (wrapping around faces? No, standard is specific).
+-    *   *Standard Lorensen-Cline Edge Indices:*
+-        *   0: (0,1), 1: (1,2), 2: (2,3), 3: (3,0)
+-        *   4: (4,5), 5: (5,6), 6: (6,7), 7: (7,4)
+-        *   8: (0,4), 9: (1,5), 10: (2,6), 11: (3,7)
+-        *   (Note: Exact numbering varies by implementation; the table values must match the interpolation logic) [G].
++*   **$u_{\text{isolevel}}$:** Float uniform passed to the marching cubes compute shader. Threshold value for scalar field comparison. UI slider range: $-1.0$ to $1.0$ [S5].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Ambiguous Cases:** Cube indices 210 and 213 (and their symmetric counterparts) represent configurations where the isosurface passes through the center of the cube, allowing multiple topologically valid triangulations. The standard lookup tables use a single default triangulation, which can cause cracks or holes if adjacent cubes resolve ambiguities inconsistently [S2].
+-*   **Terminator Check:** The implementation must strictly check for $-1$ in the Triangle Table. Reading past the terminator results in garbage memory access or out-of-bounds errors [S3].
+-*   **Precision:** Floating-point comparison $v_i \ge u_{isolevel}$ can be sensitive to precision errors near the isovalue. Consistent handling of equality is required [G].
++*   **Ambiguous Cases:** Cube indices 210 and 213 (and their symmetric counterparts) represent configurations where the isosurface passes through the center of the cube, allowing multiple topologically valid triangulations. The standard lookup tables use a single default triangulation, which can cause cracks or holes if adjacent cubes resolve ambiguities inconsistently [S2, S3].
++*   **Terminator Check:** The implementation must strictly check for $-1$ in the Triangle Table. Reading past the terminator results in garbage memory access or out-of-bounds errors [S2, S5].
++*   **Precision:** Floating-point comparison $v_i \ge u_{\text{isolevel}}$ can be sensitive to precision errors near the isovalue. Consistent handling of equality is required [G].
+ 
+ ### Pseudocode (CPU Reference)
+ 
+ ```python
+-# Constants
+-NUM_CUBES = 256
+-MAX_TRIS_PER_CUBE = 5
+-TRI_TABLE_SIZE = 16 # 5 tris * 3 verts + 1 terminator
+-
+-# Precomputed data (simplified representation)
+-# edgeTable[i] is a bitmask of intersected edges for cube index i
+-# triangleTable[i] is an array of 16 ints, terminated by -1
+-# edgeToVertices[k] maps edge index k (0-11) to the pair of corner indices (c1, c2)
+-edgeToVertices = [
++# Standard edge-to-vertex mapping for a unit cube [S3]
++EDGE_VERTICES = [
+     (0, 1), (1, 2), (2, 3), (3, 0), # Face 0 edges
+     (4, 5), (5, 6), (6, 7), (7, 4), # Face 1 edges
+@@ -128,12 +80,12 @@
+ 
+ def interpolate_vertex(edge_idx, corners, values, isovalue):
+-    c1, c2 = edgeToVertices[edge_idx]
++    c1, c2 = EDGE_VERTICES[edge_idx]
+     v1 = values[c1]
+     v2 = values[c2]
+-    # Linear interpolation
++    # Linear interpolation [Parent]
+     t = (isovalue - v1) / (v2 - v1)
+     return corners[c1] + t * (corners[c2] - corners[c1])
+ 
+-def process_voxel(corners, values, isovalue, edgeTable, triangleTable):
++def process_voxel(corners, values, isovalue, triangle_table):
+     # 1. Calculate cube index
+     cube_index = 0
+@@ -147,11 +99,12 @@
+         
+     # 3. Get triangle configuration
+-    tri_config = triangleTable[cube_index]
++    tri_config = triangle_table[cube_index]
+     
+     triangles = []
+     idx = 0
++    MAX_ENTRIES = 16 # 5 tris * 3 verts + 1 terminator
+     
+     # 4. Iterate through triangle list
+-    while idx < TRI_TABLE_SIZE and tri_config[idx] != -1:
++    while idx < MAX_ENTRIES and tri_config[idx] != -1:
+         e1 = tri_config[idx]
+         e2 = tri_config[idx+1]
+@@ -172,22 +125,24 @@
+ 
+ ### [Smart Vertex Interpolation with Auxiliary Arrays](1137-smart-vertex-interpolation-with-auxiliary-arrays.md)
+-Avoids duplicate vertex calculation by caching interpolated vertex positions in auxiliary arrays, keyed by edge index, ensuring adjacent cubes share vertices [G].
++A technique to avoid duplicate vertex calculation in Marching Cubes by computing vertex coordinates only the first time an active edge is considered, storing the index in auxiliary arrays to be reused by adjacent cells [G].
+ 
+ ### [Layer-Based Cube Traversal](1358-layer-based-cube-traversal.md)
+-Optimizes memory access patterns by traversing the 3D grid layer by layer, keeping only two layers of voxel data in memory to reduce space complexity [G].
++Traverses a 3D grid of cubes layer by layer, maintaining only two layers in memory to reduce space complexity while fetching corner data for each cube [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels. Each voxel requires a constant number of operations (lookup, interpolation, triangle generation). The lookup is $O(1)$ [S2, S3].
+-*   **Memory Complexity:** $O(1)$ for the lookup tables (fixed size: 256 entries). The output mesh size depends on the surface area [S2, S3].
+-*   **Performance:** The compute shader dispatch and synchronization are described in [S3]. The loop structure iterates through lookup table entries and checks for a terminator, so it is not strictly branchless in all implementations, but the table lookup itself avoids runtime topology decisions [S2, S3].
+-*   **Strengths:** Simple to implement, fast, deterministic topology, well-understood [S2, S3].
+-*   **Limitations:** Does not guarantee topological correctness in ambiguous cases (cracks). The resulting mesh may have more vertices/triangles than necessary compared to [Dual Contouring](778-dual-contouring.md). Precision issues near the isovalue can cause artifacts [S2].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels. Each voxel requires a constant number of operations (lookup, interpolation, triangle generation) [G].
++*   **Memory Complexity:** $O(1)$ for the lookup tables (fixed size: 256 entries) [S4].
++*   **Performance:** GPU implementations upload the tables to Shader Storage Buffer Objects (SSBOs), dispatch compute shaders with grid dimensions divided by the local workgroup size, and synchronize barriers for shader storage and vertex attribute arrays [S5].
++*   **Strengths:** Simple to implement, fast, deterministic topology, well-understood [S2, S4].
++*   **Limitations:** Does not guarantee topological correctness in ambiguous cases (cracks). Precision issues near the isovalue can cause artifacts [S2].
+ 
+ ## Background
+-Not given in the sources. The lookup tables are a core part of the Marching Cubes algorithm, precomputing the 256 cases to avoid runtime decision trees [S2]. GPU implementations adapt this table lookup to parallel compute shaders, leveraging the fixed-size nature of the tables for efficient memory coalescing [S3].
++Not given in the sources.
+ 
+ ## Sources
+-[S1] keijiro/ComputeMarchingCubes, https://github.com/keijiro/ComputeMarchingCubes, fetched 2026-10-26 (unofficial)
+-[S2] nihaljn/marching-cubes, https://github.com/nihaljn/marching-cubes, fetched 2026-10-26 (unofficial)
+-[S3] mwalczyk/marching-cubes, https://github.com/mwalczyk/marching-cubes, fetched 2026-10-26 (unofficial)
+-[S4] HeartofTheForce/Isosurface, https://github.com/HeartofTheForce/Isosurface, fetched 2026-10-26 (unofficial)+[S1] 3D Volume Calculation For the Marching Cubes Algorithm in Cartesian Coordinates, https://arxiv.org/abs/1308.0387v1, fetched 2026-10-26
++[S2] keijiro/ComputeMarchingCubes, https://github.com/keijiro/ComputeMarchingCubes, fetched 2026-10-26 (unofficial)
++[S3] BorisTheBrave/mc-dc, https://github.com/BorisTheBrave/mc-dc, fetched 2026-10-26 (unofficial)
++[S4] nihaljn/marching-cubes, https://github.com/nihaljn/marching-cubes, fetched 2026-10-26 (unofficial)
++[S5] mwalczyk/marching-cubes, https://github.com/mwalczyk/marching-cubes, fetched 2026-10-26 (unofficial)
++[S6] HeartofTheForce/Isosurface, https://github.com/HeartofTheForce/Isosurface, fetched 2026-10-26 (unofficial)

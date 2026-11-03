@@ -1,0 +1,857 @@
+Environmental Volumetric Neural Shading of Clouds for
+Real-Time Rendering
+RIKARD OLAJOS, Lund University, Sweden
+MICHAEL DOGGETT, Lund University, Sweden
+PRASHANT GOSWAMI, Blekinge Institute of Technology, Sweden
+Fig. 1. Overview of our method. A volumetric cloud is converted into a mesh and rendered in Blender to
+generate training data under diverse viewing and lighting conditions. Front- and back-face renderings are
+used to estimate per-pixel thickness, enabling the model to capture volumetric effects. The resulting dataset
+is used to train a neural shading model based on Relightable Neural Assets, implemented as a multi-layer
+perceptron (MLP) that learns complex light scattering. At runtime, the cloud is rendered in real time using a
+rasterization pipeline, where the mesh is shaded with the trained model to produce volumetric appearance
+without explicit volumetric rendering.
+We present a high-performance method for real-time relighting of high-fidelity volumetric clouds. Building on
+Relightable Neural Assets, we introduce key adaptations that enable neural shading of volumetric cloud phenomena within a rasterization-based pipeline. In particular, we incorporate a per-pixel thickness parameter to
+capture view-dependent opacity and replace the generalizing single light source with a sky illumination model,
+allowing the network to learn complex atmospheric scattering effects. To achieve real-time performance, we
+depart from density-field-based volumetric rendering and instead operate on mesh representations combined
+with a triplane feature encoding. This enables a fully rasterization-driven solution that reproduces volumetric
+appearance without requiring ray marching or volume integration. We further describe a complete pipeline
+Authors’ Contact Information: Rikard Olajos, Lund University, Lund, Sweden, rikard.olajos@cs.lth.se; Michael Doggett, Lund
+University, Lund, Sweden, Michael.Doggett@cs.lth.se; Prashant Goswami, Blekinge Institute of Technology, Karlskrona,
+Sweden, prg@bth.se.
+This work is licensed under a Creative Commons Attribution 4.0 International License.
+© 2026 Copyright held by the owner/author(s).
+ACM 2577-6193/2026/7-ART59
+https://doi.org/10.1145/3820020
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 9, No. 4, Article 59. Publication date: July 2026.
+59:2
+Rikard Olajos, Michael Doggett, and Prashant Goswami
+for converting volumetric cloud assets into a neural representation trained from path-traced supervision. We
+evaluate our method through an ablation study analyzing both image quality and runtime performance. Our
+adaptations improve reconstruction quality from 18.13 dB to 22.32 dB while achieving rendering times as
+low as 3.7 ms per frame. These results demonstrate that our approach enables high-quality, relightable cloud
+rendering suitable for real-time and performance-critical applications.
+CCS Concepts: • Computing methodologies → Rendering; Real-time rendering; Neural networks; Imagebased rendering.
+ACM Reference Format:
+Rikard Olajos, Michael Doggett, and Prashant Goswami. 2026. Environmental Volumetric Neural Shading of
+Clouds for Real-Time Rendering. Proc. ACM Comput. Graph. Interact. Tech. 9, 4, Article 59 (July 2026), 17 pages.
+https://doi.org/10.1145/3820020
+1
+Introduction
+In the pursuit of increasing visual realism in real-time graphics, rendering volumetric clouds
+remains a challenging problem. Modern game engines rely on a spectrum of approximations,
+ranging from static skyboxes and billboards [Maciel and Shirley 1995] to impostors and dynamic
+density fields [Schneider 2023]. While density-field approaches produce a more faithful cloud
+appearance, they require volumetric rendering, which is computationally expensive.
+Real-time volumetric rendering typically relies on ray marching, a process that incurs significant
+computational cost due to repeated sampling along view rays. To achieve interactive performance,
+existing systems often trade image quality for speed, for example, by evaluating the volume at
+reduced resolution or using sparse sampling for distant regions [Hillaire 2016; Schneider 2023].
+As a result, real-time cloud rendering often suffers from blur and loss of fine detail, making it a
+delicate balance between performance and visual fidelity.
+Recent advances in neural rendering have demonstrated strong potential for modeling complex
+light transport in real time [Mullia et al. 2024; Zeltner et al. 2024]. However, these approaches
+primarily target surfaces, focusing on reflectance and subsurface scattering, and do not directly
+address fully volumetric phenomena such as clouds.
+In this work, we introduce an adaptation of Relightable Neural Assets (RNA) [Mullia et al. 2024]
+for real-time rendering of volumetric clouds within a rasterization-based pipeline. Our method
+replaces explicit volumetric rendering with a neural shading model that reproduces volumetric
+appearance on mesh geometry. To this end, we convert volumetric cloud assets into meshes and
+generate training data using path-traced ground-truth renderings in Blender. The dataset captures
+the cloud under diverse viewing and lighting conditions, including illumination from a physically
+motivated sky model that accounts for atmospheric scattering. While RNA generalizes the light
+interactions, our model bakes a single sky-illumination model as part of the training.
+The resulting neural model learns to approximate complex light transport effects and is evaluated
+at render time using standard rasterization outputs. By leveraging mesh representations, we
+integrate seamlessly into the rasterization pipeline and utilize readily available information such as
+G-buffers and depth. This design eliminates the need for ray marching while preserving volumetric
+appearance, enabling sharper details than traditional real-time volumetric approaches and greater
+view-dependent fidelity than billboard-based methods.
+The main contributions of this paper are:
+• We propose a neural shading model, inspired by Relightable Neural Assets, for real-time
+rendering of volumetric clouds with realistic lighting.
+• We present a workflow for converting volumetric cloud assets into mesh-based representations suitable for neural training.
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 9, No. 4, Article 59. Publication date: July 2026.
+Environmental Volumetric Neural Shading of Clouds for Real-Time Rendering
+59:3
+• We demonstrate how the proposed model can be integrated into a rasterization pipeline to
+render volumetric-looking clouds without explicit volumetric rendering.
+The remainder of this paper is organized as follows. Section 2 reviews related work. Section 3
+describes the proposed method, including data generation, model architecture, and rendering
+integration. Section 4 presents qualitative and quantitative evaluations, including ablation studies
+and performance analysis. Section 5 discusses limitations and future work, and Section 6 concludes
+the paper.
+2
+Related Work
+Cloud research in computer graphics is commonly studied from three complementary perspectives:
+modeling, animation, and rendering [Goswami 2021]. Rendering in computer graphics has traditionally been dominated by physically-based approaches, which explicitly simulate light transport
+to achieve high realism. While these methods provide strong physical grounding and predictive
+accuracy, they are often computationally expensive, particularly for volumetric phenomena such
+as clouds. In contrast, recent machine learning-based approaches, including neural rendering, aim
+to approximate light transport from data, enabling efficient evaluation at runtime while capturing
+complex appearance effects that are difficult to model analytically.
+Building on this paradigm shift, our work extends Relightable Neural Assets [Mullia et al. 2024]
+to the domain of volumetric cloud rendering. Accordingly, this section focuses on complementary
+literature not extensively covered in their work, while highlighting key similarities and differences
+where relevant throughout the paper.
+2.1
+Real-Time Cloud Rendering
+Existing approaches for rendering clouds span a wide range of techniques, from heuristic approximations to physically-based methods. High-fidelity results typically require simulating light transport
+through a participating medium, which is computationally expensive. In practice, real-time methods
+rely on approximations, often limiting computations to single scattering or employing simplified
+models of multiple scattering.
+Billboard-based approaches [Maciel and Shirley 1995] approximate clouds using textured polygons and offer excellent performance. They have been widely used in real-time applications [Dobashi
+et al. 2000; Harris and Lastra 2001; Wang 2003], producing visually plausible results. However, such
+methods are inherently limited in view-dependent effects and lighting interactions. In contrast,
+our mesh-based representation enables full parallax and more consistent lighting under changing
+viewpoints.
+Physically-based real-time cloud rendering is commonly achieved using ray marching over
+density fields. For instance, Hillaire [2016] and Schneider [2023] present production-ready systems
+for sky, atmosphere, and cloud rendering that rely on volumetric ray marching. While these methods
+achieve high visual fidelity, their computational cost necessitates optimizations such as reduced
+resolution and sparse sampling, often leading to blurred results. In contrast, our approach eliminates
+ray marching entirely by learning the appearance of volumetric light transport through a neural
+model applied to mesh geometry.
+Duarte and Gomes [2017] propose a simulation-based pipeline that converts density fields into
+meshes; however, these meshes are not used directly for rendering. Instead, they are voxelized and
+used to derive volumetric fields, and the final rendering still relies on multi-scattering ray marching.
+Our approach differs fundamentally by using the mesh as the primary rendering primitive.
+For offline rendering, Kallweit et al. [2017] demonstrate neural methods for predicting radiance in
+atmospheric clouds, achieving high-quality results at the cost of performance. Hu et al. [2023] build
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 9, No. 4, Article 59. Publication date: July 2026.
+59:4
+Rikard Olajos, Michael Doggett, and Prashant Goswami
+on this line of work by introducing physically motivated features derived from the radiative transfer
+equation [Kajiya and Von Herzen 1984], including transmittance, phase, and albedo features, and by
+coupling these features to a lighter neural architecture. This reduces the required network size and
+improves inference performance, bringing neural volumetric multiple scattering into the real-time
+domain. The paper reports interactive performance, including a headline result of about 25 ms at
+1024 × 1024 resolution.
+Hofmann et al. [2021] combine multiple techniques, including neural denoising, to accelerate
+volumetric path tracing toward real-time performance. However, these approaches still depend on
+volumetric integration and do not fully eliminate their cost.
+2.2
+Neural Rendering
+Beyond RNA [Mullia et al. 2024], neural rendering has been widely explored for modeling appearance and light transport. Neural Radiance Fields (NeRF) [Mildenhall et al. 2020] enable high-quality
+novel view synthesis by encoding volumetric scenes into neural networks. However, NeRF-based
+methods rely on ray marching through density fields and typically bake lighting into the representation, limiting relighting capabilities. Several extensions address relighting [Toschi et al. 2023; Xu
+et al. 2023; Zhao et al. 2024], but they retain the fundamental cost of volumetric rendering. Stadter
+et al. [2024] extend NeRF-based approaches with neural volumetric level-of-detail representations
+for path tracing, improving efficiency by adapting resolution based on distance. While effective,
+these methods remain tied to volumetric representations and ray-based integration.
+Condor et al. [2025] propose representing scattering and emissive volumes as compact threedimensional Gaussian or Epanechnikov volumetric primitives that can then be rendered through
+ray tracing. However, their approach is not primarily targeting real-time rendering.
+Neural methods have also been used to replace or augment BVH-based ray queries in ray tracing.
+Weier et al. [2024] introduce neural nodes in a BVH-like hierarchy that can be queried for visibility,
+intersection depth, normals, and appearance attributes. Fujieda et al. [2025] similarly introduce
+per-object neural intersection functions that replace bottom-level BVH traversal. These works
+primarily address geometry compression and ray-intersection queries rather than learning complex
+shading or relightable light transport.
+In contrast to prior neural and volumetric approaches, our method combines a neural shading
+model with mesh-based rasterization, enabling real-time rendering of volumetric-looking clouds
+without explicit volumetric integration.
+3
+Method
+Our method consists of three stages: dataset generation, training, and real-time rendering (see
+Figure 1). At its core is a neural shading model that learns to approximate the complex light
+scattering within clouds, as well as their interaction with atmospheric illumination. The model
+takes scene-dependent features as input and evaluates a multilayer perceptron (MLP), composed
+of fully connected layers, to predict the final pixel color. In this way, volumetric appearance
+is reproduced through learned shading on mesh geometry. The details of the neural model are
+described in the following sections.
+To train the model, we generate supervised data using Blender [Blender Online Community
+2025]. This includes physically-based, path-traced renderings of clouds under varying viewing and
+lighting conditions, as well as auxiliary scene information required as input to the neural model.
+In addition, Blender is used to extract a mesh representation from the volumetric density field of
+the cloud asset. Generating this dataset requires a carefully designed rendering setup, which we
+describe in detail below.
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 9, No. 4, Article 59. Publication date: July 2026.
+Environmental Volumetric Neural Shading of Clouds for Real-Time Rendering
+59:5
+The generated data are then processed into a representation that is normalized per asset and
+independent of Blender-specific features. This ensures that the same inputs can be reconstructed
+at runtime within a real-time renderer. The processed dataset is used to train the neural model in
+PyTorch [Paszke et al. 2019]. While our implementation largely follows Relightable Neural Assets
+(RNA) [Mullia et al. 2024], we introduce several modifications tailored to volumetric clouds, which
+are detailed in the following.
+Finally, the trained model and extracted mesh are integrated into a real-time renderer implemented in Vulkan. At runtime, the renderer reconstructs the required input features (e.g., geometric
+and lighting information) and evaluates the neural model per pixel within a rasterization pipeline,
+enabling efficient rendering of volumetric-looking clouds without explicit volumetric integration.
+These stages are described in detail in the subsections below.
+3.1
+Neural Model
+Our neural model is based on the work of Mullia et al. [2024] with some modifications to better suit
+volumetric clouds. Although their model handles subsurface scattering, it is primarily designed for
+surfaces. To better capture the volumetric nature of clouds, we introduce a thickness parameter
+that provides additional context about the distance that light travels through the cloud at a given
+point and direction. Additionally, we add transparency as an output feature of the model to better
+represent the semi-transparent nature of clouds. The rest of the inputs and outputs of the model
+remain similar to the original RNA model, except for the normal and view directions. RNA uses the
+normal direction as input to the model. In our model, however, we are not using it as it makes little
+sense for a cloud. Even though we could extract it from the mesh, it does not contribute to how
+photons scatter when they enter the cloud. The view direction is also left out, and the effects of
+that are discussed in the results.
+The complete architecture of our neural model is illustrated in Figure 2. The shading point p is
+encoded using a triplane representation: the point is projected onto three orthogonal planes, and
+the features 𝐹𝑋 𝑌 , 𝐹𝑌 𝑍 , and 𝐹𝑋 𝑍 are sampled from each plane using bilinear interpolation and finally
+summed together [Chan et al. 2022]. While Mullia et al. [2024] use a 3D vector to represent the
+light direction, we use a 2D parametrization of the hemisphere using spherical coordinates 𝜃 and
+𝜙 for azimuth and elevation angles, respectively. These angles map to the sun direction in a sky
+model, which will be the light source for the shading. This is in contrast to RNA, which considers
+only a single directional light source. The final input to the model is the thickness parameter 𝛿,
+which is the thickness of the cloud along the view direction at point p.
+These inputs are concatenated and passed to an MLP that outputs two RGB colors c𝐷 and c𝐼 . The
+color c𝐷 represents the color of the shading point when it is directly lit by the light source, while c𝐼
+represents the indirect shading color when the shading point is occluded from the light source. This
+is the same approach used by Mullia et al. [2024]. However, we also output a transparency value
+𝛼 that represent how transparent the cloud is at the shading point for the given view direction.
+For activation functions, we use rectified linear units, or ReLU, on all the hidden layers. On the
+output layer, we use an exponential activation function with an offset, 𝑔(𝑥) = 𝑒 𝑥−3 , as proposed
+by Zeltner et al. [2024].
+In Section 4, we show an ablative study that demonstrates the importance of the thickness
+parameter, the split RGB outputs (𝑐𝐷 and 𝑐𝐼 ), and different configurations for the MLP network.
+3.2
+Dataset Generation
+To train the neural shading model, we generate a dataset that matches the required inputs and
+outputs of the network. We use Blender 4.5.3 LTS and its Python API to automate this process. In
+contrast to RNA [Mullia et al. 2024], which relies on a customized version of Blender Cycles, we
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 9, No. 4, Article 59. Publication date: July 2026.
+59:6
+Rikard Olajos, Michael Doggett, and Prashant Goswami
+y
+FXY
++ F
+XZ
+cD
++ F
+YZ
+p
+x
+z
+(θ, ϕ)
+MLP
+δ
+cI
+α
+Fig. 2. Our proposed neural model. Given a 3D position p, we first project it onto the three orthogonal planes
+to obtain 2D coordinates (𝑝𝑋 𝑌 , 𝑝𝑌 𝑍 , 𝑝𝑋 𝑍 ). We then sample, with bilinear interpolation, features 𝐹𝑋 𝑌 , 𝐹𝑌 𝑍 , and
+𝐹𝑋 𝑍 from the corresponding triplane feature maps. These features are combined with the sun direction (𝜃, 𝜙)
+and the thickness parameter 𝛿 before being passed to a multi-layer perceptron (MLP) that outputs the two
+colors c𝐷 and c𝐼 , as well as the transparency 𝛼.
+use the official Blender release. Although we present how we generate the dataset using Blender,
+any volumetric renderer that can output the buffers presented in Table 1 will work.
+Mesh extraction. We begin by converting the volumetric cloud asset into a mesh representation. Cloud assets are typically provided as density fields; in our case, we use the OpenVDB
+format [Museth 2013]. The conversion from volume to mesh is performed using Blender’s Volume
+to Mesh modifier, which internally relies on the OpenVDB toolkit. While various methods exist
+for extracting isosurfaces [Kobbelt et al. 2001; Lorensen and Cline 1987; Schaefer et al. 2007], the
+specifics of this process are not the focus of this work.
+The resulting mesh can be highly detailed depending on the input density field and the algorithm
+used. For our dataset, the extracted mesh contains approximately 5.1 million triangles. To study
+performance trade-offs, we also generate a simplified version using Blender’s Decimate modifier,
+reducing the mesh to 83,995 triangles. The neural model is trained using the high-resolution mesh,
+while both versions are evaluated at runtime. This demonstrates that inference can be performed
+on lower-resolution meshes, provided they approximate the same geometry and yield consistent
+positional features (e.g., for thickness and triplane encoding).
+Rendering setup. Training data are generated by rendering the mesh from multiple viewpoints
+under varying lighting conditions. We use Blender’s View Layers and Render Passes to extract both
+ground-truth images and auxiliary scene information, such as world-space positions.
+To capture both volumetric appearance and surface-based features, we maintain multiple instances of the cloud mesh across different collections with distinct materials. For ground-truth
+rendering, we use the Principled Volume shader to simulate volumetric light transport. For feature
+extraction, we use a diffuse surface material (Principled BSDF ) to obtain geometric information.
+Multi-scene configuration. We employ three separate scenes to capture all required data in a
+single rendering pipeline:
+• Front: Renders the volumetric cloud using a Nishita Sky Texture [Nishita et al. 1993] for
+illumination, and outputs both color and surface position.
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 9, No. 4, Article 59. Publication date: July 2026.
+Environmental Volumetric Neural Shading of Clouds for Real-Time Rendering
+59:7
+Table 1. Blender scene render setup and corresponding output buffers.
+Scenes
+Collections
+Camera
+Light
+Front
+volumetric
+front
+Nishita
+color
+surface
+front
+none
+position
+Back
+surface
+back
+none
+position
+Visibility
+surface
+front
+sun
+diff. direct
+Outputs
+• Back: Captures the surface position from the opposite viewpoint to compute per-pixel
+thickness. This is achieved by mirroring the camera around a shared pivot point (see Figure 1).
+• Visibility: Computes direct light visibility using a directional Sun light source, outputting
+the Light Diffuse Direct pass. The sky illumination is disabled in this scene to isolate direct
+lighting.
+Data extraction. The complete setup is summarized in Table 1. Outputs from all scenes are
+combined using Blender’s Compositor and stored as OpenEXR images with 32-bit floating-point
+precision at a resolution of 1024 × 1024.
+In addition to per-pixel outputs, we record global parameters including the mesh bounding box,
+camera position, and sun direction. For each frame, camera orientation and lighting are randomized
+to ensure diverse coverage. Camera positions are sampled uniformly on a sphere around the
+cloud, while sun elevation and azimuth are sampled within [−5∘ , 90∘ ] and [0∘ , 360∘ ], respectively.
+Elevations below −5∘ are avoided due to insufficient illumination.
+Dataset size. Unlike RNA, which varies lighting per pixel within a single render, the standard
+Blender pipeline requires separate renders for each lighting condition. To compensate, we generate
+1,000 frames (compared to 400 in RNA), increasing diversity in viewing and illumination conditions.
+3.3
+Dataset Processing
+Before training, the generated data are processed to match the input representation of the neural
+model.
+Position normalization and thickness. Using the bounding box of the cloud, all world-space
+positions are normalized to a consistent coordinate range. To compute per-pixel thickness, we
+mirror the positions captured by the back camera and compute the difference with the corresponding
+front-facing positions. This yields a thickness value that approximates the accumulated density
+along the view direction.
+View direction. Unlike RNA [Mullia et al. 2024], our model does not use the view direction as an
+input. However, for comparison purposes, we store the camera position for each frame. We assume
+that clouds are observed at a distance, allowing us to approximate the view direction as constant
+across the image. This contrasts with RNA, where the view direction is defined per pixel.
+This assumption should not pose any problems since this parameter is only used for the evaluation
+of the impact of the view direction, and we can control the evaluation dataset to not include any
+close-up images.
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 9, No. 4, Article 59. Publication date: July 2026.
+59:8
+Rikard Olajos, Michael Doggett, and Prashant Goswami
+Visibility. The diffuse direct light pass from the visibility scene is used to determine whether
+a point is directly or indirectly illuminated, corresponding to the outputs c𝐷 and c𝐼 . In RNA,
+this visibility is computed via ray tracing. In our case, the rendered diffuse direct pass contains
+continuous values and color information, and is therefore not directly suitable for binary visibility
+classification.
+To address this, we convert the diffuse direct pass to grayscale using the luminosity method. The
+resulting values are then processed using a smoothstep function (cubic Hermite interpolation) to
+produce soft visibility values. We empirically set the lower and upper thresholds to 0.0 and 0.1,
+respectively. This formulation enables smooth interpolation between c𝐷 and c𝐼 , which is particularly
+important for clouds with soft shadow boundaries.
+Data filtering. Finally, we remove fully transparent pixels from the dataset, as they do not
+contribute to the training signal. All processing steps are implemented using NumPy and PyTorch.
+3.4
+Training
+We train the neural shading model using PyTorch [Paszke et al. 2019]. For each sample, the 3D
+position p is encoded using a triplane representation, from which feature vectors are extracted
+via bilinear interpolation. These features are concatenated with the sun direction (𝜃, 𝜙) and the
+thickness parameter 𝛿, forming the input to the MLP. The network predicts two RGB values, c𝐷 and
+c𝐼 , corresponding to directly and indirectly illuminated components, as well as a transparency value
+𝛼. The triplane feature maps are implemented as learnable Parameter tensors in PyTorch. Using the
+precomputed visibility values, we interpolate between c𝐷 and c𝐼 to obtain the final predicted color
+c.̃ The predicted output (c̃, 𝛼) is then compared to the ground-truth RGBA values to compute the
+training loss.
+Following RNA [Mullia et al. 2024], we apply a logarithmic transformation log(𝑥 + 1) to both
+predictions and ground truth prior to computing the ℓ2 loss. This stabilizes training and improves
+reconstruction of high dynamic range values. We train the network for 250 epochs using the Adam
+optimizer with an initial learning rate of 10−3 , which is halved every 50 epochs. The batch size is
+set to 10242 samples, corresponding approximately to one frame of training data (but not exactly,
+since fully transparent pixels are filtered). Training is performed on an NVIDIA A100 GPU, giving
+a total training time of about 20 minutes.
+3.5
+Renderer
+Real-time rendering is implemented in a custom Vulkan framework using a sequence of render
+passes. The scene is first rendered with all opaque geometry and the Nishita sky model, which is
+required for consistency with the training data. While other sky models could be used, they would
+require retraining to ensure consistency between training and inference.
+After rendering the base scene, clouds are processed through a series of passes that reconstruct
+the inputs required by the neural model and perform neural shading within a rasterization pipeline.
+3.5.1 Neural Model and Inference. The trained neural model is integrated into Vulkan using the
+cooperative vector extension, enabling execution on tensor cores from any shader stage [The
+Khronos Group, Inc. 2024]. The MLP weights are stored in 16-bit floating-point precision, as
+required by tensor core operations.
+The triplane encoding is stored as 32-bit floating-point RGBA textures. Each texture encodes
+four feature channels, and with three planes (XY, XZ, YZ) and eight features per plane, a total of six
+textures are used at a resolution of 512 × 512. Using textures allows efficient bilinear interpolation
+during feature lookup, consistent with the training setup.
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 9, No. 4, Article 59. Publication date: July 2026.
+Environmental Volumetric Neural Shading of Clouds for Real-Time Rendering
+59:9
+Back-Face Position Pre-Pass
+Render back faces and write normalized
+positions to color attachment (16-bit
+RGB).
+State
+Depth test: Greater, write enabled
+Cull mode: Front
+Blending: Disabled
+Attachments
+• Color 0: Back face position
+• Depth: Scene Depth (Discard after
+pass)
+Shadow Pre-Pass
+Generate shadow map by rendering from
+light source’s point of view.
+State
+Depth test: Disabled
+Cull mode: Back
+Blending: Disabled
+Attachments
+• Depth: Shadow Map
+Cloud Color Pass
+Front-Face Depth Pre-Pass
+Rasterize depth of front faces to depth
+map.
+State
+Depth test: Less or equal, write enable
+Cull mode: Back
+Blending: Disabled
+Attachments
+• Depth: Scene Depth
+Use generated inputs to infer cloud
+surface values with neural model.
+State
+Depth test: Equal, write disable
+Blending: Enabled
+Attachments
+• Input: Back position
+• Input: Shadow Map
+• Color 0: Cloud shading (16-bit RGBA)
+• Depth: Scene Depth
+Fig. 3. Overview of the render passes needed to retrieve the input parameters for the shading model and to
+perform the final shading.
+At runtime, the required inputs are reconstructed per fragment and passed to the MLP, which is
+evaluated directly in the fragment shader to produce color and transparency.
+3.5.2 Cloud Render Passes. The rendering pipeline for clouds is illustrated in Figure 3. It consists
+of several pre-passes followed by a final shading pass.
+Back-face position pre-pass. To compute the thickness parameter, we first render the back faces
+of the cloud mesh. This pre-pass uses front-face culling and a greater-than depth test to capture the
+furthest visible surface. The resulting positions are stored in a 16-bit RGB attachment, normalized
+to the cloud’s bounding box.
+Front-face depth pre-pass. Since the neural model shades only the visible surface, we perform a
+Front-Face Depth Pre-Pass using back-face culling and a less-or-equal depth test. This ensures that
+only the closest surface contributes during the final shading pass, which loads the same depth
+buffer and compares to it.
+Shadow pre-pass. To determine direct and indirect illumination, we generate a shadow map
+from the sun direction defined by the Nishita sky model. The MLP outputs two colors, c𝐷 and c𝐼 ,
+corresponding to directly and indirectly lit regions. We compute a shadow factor using percentage
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 9, No. 4, Article 59. Publication date: July 2026.
+59:10
+Rikard Olajos, Michael Doggett, and Prashant Goswami
+closer filtering (PCF) [Reeves et al. 1987], which allows smooth interpolation between these outputs,
+mirroring the soft visibility formulation used during training.
+Final shading pass. The Cloud Color Pass performs neural shading and compositing. Using a
+depth test set to equal, only the previously identified front-facing surface is shaded. The front-face
+position is reconstructed in the vertex shader and normalized to the bounding box. The thickness is
+computed as the difference between front- and back-face positions.
+The normalized position is projected onto the XY, XZ, and YZ planes to obtain texture coordinates
+for the triplane features. These features are sampled, combined, and passed—together with thickness
+and lighting parameters—to the MLP. The network outputs color and transparency, which are then
+blended with the background to produce the final image.
+4
+Results
+We evaluate our method through a series of ablation studies analyzing both model design and
+rendering performance. Quantitative results are reported using image quality metrics and frame
+times. Image quality is evaluated in PyTorch by comparing predicted images against a held-out
+test set. This setup ensures pixel-perfect alignment between predictions and ground truth, which
+would be difficult to achieve within our Vulkan renderer. Consequently, the reported image metrics
+isolate the performance of the neural model and do not include errors introduced by rasterization
+or mesh approximation.
+Since the ground-truth data are path-traced HDR images (OpenEXR), we initially considered
+HDR-specific metrics such as mPSNR [Munkberg et al. 2006] and FLIP-HDR [Andersson et al. 2021].
+However, these metrics rely on multiple exposure levels, which in our case introduced instability
+due to over- and under-exposed samples. Instead, we apply a fixed exposure and clamp values to
+[0, 1], after which we report PSNR and FLIP-LDR [Andersson et al. 2020]. For FLIP, inferred images
+are composited over a black background to account for the lack of alpha support.
+Performance is measured in our Vulkan renderer using GPU timestamps to isolate different
+pipeline stages. All frame times are reported in milliseconds with two significant digits. Experiments
+were conducted on a system with an NVIDIA GeForce RTX 4080 GPU and an AMD Ryzen 9 5950X
+CPU (Windows 11, NVIDIA GPU driver version 581.80, Vulkan 1.4.328).
+4.1
+Ablation Study
+We evaluate a range of MLP architectures, varying both depth (2–4 hidden layers) and width
+(16–512 neurons). Results are summarized in Table 2. Architectures are denoted as 𝐻 × 𝑁, where 𝐻
+is the number of hidden layers and 𝑁 the number of neurons per layer. The triplane encoding is
+kept fixed across all experiments (resolution 512 × 512, 8 features).
+We observe that increasing model capacity improves image quality, although with diminishing
+returns beyond 4 × 128. In particular, the jump from 4 × 256 to 4 × 512 yields negligible improvement
+while incurring a substantial performance cost. Performance is strongly influenced by both network
+size and mesh complexity. Larger MLPs introduce significant register pressure, leading to sharp
+increases in frame time beyond 128 neurons. Additionally, mesh resolution has a major impact on
+performance, with high-poly meshes consistently dominating rendering cost.
+Based on this trade-off, the 4×64 architecture provides the best balance between quality (22.315 dB
+PSNR) and performance (3.7 ms), and is used in subsequent experiments. Compared to RNA [Mullia
+et al. 2024], we remove the view direction from the model inputs. Empirically, this leads to slightly
+improved results (22.315 dB vs. 22.141 dB for 4 × 64) and reduced model complexity, suggesting
+that an explicit view direction input is less critical for cloud appearance in our setting. However,
+because of the way it is calculated, the thickness parameter still retains view dependency.
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 9, No. 4, Article 59. Publication date: July 2026.
+Environmental Volumetric Neural Shading of Clouds for Real-Time Rendering
+59:11
+Table 2. Ablation study of MLP architectures with PSNR values (higher is better), FLIP error values (lower is
+better), and frame times (lower is better).
+MLP
+Thickness
+4 × 16
+4 × 32
+4 × 64
+4 × 128
+4 × 256
+4 × 512
+2 × 64
+3 × 64
+4 × 64
+Yes
+Yes
+Yes
+Yes
+Yes
+Yes
+Yes
+Yes
+Yes
+PSNR (dB) ↑ FLIP ↓
+20.944
+21.803
+22.315
+22.749
+22.916
+22.911
+21.028
+21.842
+22.315
+0.068
+0.062
+0.059
+0.056
+0.055
+0.056
+0.070
+0.064
+0.059
+Frame time (ms) ↓
+High Poly Low Poly
+3.5
+0.30
+3.5
+0.33
+3.7
+0.41
+5.2
+1.1
+10.2
+3.1
+190
+77
+3.5
+0.31
+3.6
+0.36
+3.7
+0.41
+Table 3. Ablation study of the influence of thickness parameter.
+MLP
+Thickness
+4 × 64
+4 × 64
+4 × 512
+4 × 512
+Yes
+No
+Yes
+No
+PSNR (dB) ↑ FLIP ↓
+22.315
+18.133
+22.911
+17.674
+0.059
+0.066
+0.056
+0.067
+Frame time (ms) ↓
+High Poly Low Poly
+3.7
+0.41
+3.7
+0.41
+190
+77
+190
+77
+4.1.1 Thickness. We evaluate the impact of the proposed thickness parameter, which distinguishes
+our model from RNA. Results are shown in Table 3. Including thickness significantly improves image
+quality across all tested architectures (e.g., from 18.133 dB to 22.315 dB for 4 × 64), demonstrating
+its importance for capturing volumetric effects. Without thickness, the model fails to correctly
+account for accumulated density along the view direction, leading to inconsistent transparency
+across viewpoints.
+This behavior is illustrated in Figure 4, where the model without thickness produces erroneous
+semi-transparent regions that persist across views. These artefacts manifest as incorrect dark bands
+and reduced opacity in dense regions. Although thickness improves results substantially, we observe
+that opacity does not saturate sufficiently toward the cloud interior. This leads to visible contouring
+artefacts when compositing with the background. To address this, we apply a smoothstep function
+to the thickness parameter prior to inference. As shown in Figure 5, this results in better opacity
+behavior and improved visual consistency.
+4.1.2 Visibility. Following RNA [Mullia et al. 2024], we evaluate a visibility mechanism that predicts
+separate RGB outputs for directly and indirectly lit regions. Unlike RNA, our visibility test does
+not rely on ray tracing but is adapted to our rasterization-based pipeline. Without visibility, the
+model struggles to reproduce self-shadowing effects, resulting in overly smooth shading and loss of
+fine details. Introducing visibility improves the reconstruction of shadowed regions and enhances
+local contrast, as shown in Figure 6. Quantitatively, the inclusion of visibility yields a modest
+improvement (22.315 dB vs. 22.134 dB for 4 × 64), but the qualitative gains are more pronounced.
+Some failure cases remain, particularly in regions with soft shadow transitions, indicating limitations
+of the binary visibility formulation for highly diffuse media.
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 9, No. 4, Article 59. Publication date: July 2026.
+59:12
+Rikard Olajos, Michael Doggett, and Prashant Goswami
+(a) Color reference
+(b) Color with thickness
+(c) Color without thickness
+(d) Alpha reference
+(e) Alpha with thickness
+(f) Alpha without thickness
+Fig. 4. Impact of the thickness parameter. The top row shows color renderings, while the bottom row visualizes
+the alpha channel as a colormap (brighter values indicate higher opacity). Color images are composited over
+a black background using the alpha channel. (a,d) Reference images, (b,e) results with thickness, and (c,f)
+results without thickness.
+(a) Alpha reference
+(b) Alpha with smoothstep on
+thickness parameter
+Fig. 5. Effect of applying a smoothstep to the thickness parameter. (a) Reference alpha channel and (b)
+inferred alpha channel with smoothstepped thickness. The smoothstep bounds are set to 0.0 and 0.4.
+Reference
+W/O vis.
+incorrect
+With vis.
+correct
+failure
+no details
+details
+Fig. 6. Evaluation of the visibility test. From left to right: reference image from the evaluation dataset,
+rendering without visibility, and rendering with visibility.
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 9, No. 4, Article 59. Publication date: July 2026.
+Environmental Volumetric Neural Shading of Clouds for Real-Time Rendering
+Triplanes
+Triplanes
+Mipmap
+Mipmap
+0
+4
+Triplanes Mipmap 0
+59:13
+Triplanes Mipmap 4
+Triplanes
+Triplanes
+Mipmap
+Mipmap
+0
+4
+Fig. 7. Effect of blurring triplane feature maps. The top row visualizes a single feature channel from the triplane
+representation (blue indicates negative values, orange positive). The corresponding real-time renderings are
+shown below, where blurring reduces high-frequency noise in the final shading.
+4.2
+Triplane Encoding
+Consistent with RNA, the triplane encoding captures geometric features of the cloud. However, we
+observe that high-frequency components in the triplane representation can introduce noise in the
+final rendering. To mitigate this, we apply filtering to the triplane features using mipmapping. This
+allows efficient, hardware-supported control over feature smoothness during rendering.
+As shown in Figure 7, increasing the mipmap level reduces high-frequency artefacts and produces
+visually smoother results. While this filtering decreases PSNR (20.031 dB vs. 22.315 dB for 4 × 64),
+the perceptual quality improves, highlighting a mismatch between standard metrics and perceived
+realism. This observation aligns with prior work [Sun et al. 2024], suggesting that controlled
+smoothing of learned features can improve visual quality.
+4.3
+Final Rendering
+Figure 8 and 9 present real-time renderings under varying lighting and viewing conditions. These
+results use the 4 × 64 model, mipmap level 4 for the triplane encoding, and smoothed thickness. Our
+method produces volumetric-looking clouds with realistic lighting while maintaining real-time
+performance. Notably, the approach avoids volumetric integration entirely, yet retains key visual
+characteristics such as soft self-shadowing and view-dependent appearance. Additional results,
+including low-polygon meshes and dynamic sequences, are provided in the supplemental material.
+5 Discussion
+Our results demonstrate that the proposed approach achieves real-time performance while maintaining competitive image quality for volumetric cloud rendering, despite avoiding explicit volumetric
+integration. In particular, rendering times as low as 3.7 ms per frame highlight the efficiency of
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 9, No. 4, Article 59. Publication date: July 2026.
+59:14
+Rikard Olajos, Michael Doggett, and Prashant Goswami
+Fig. 8. Screenshots from different angles of a cloud under different lighting conditions.
+(a)
+(b)
+(c)
+(d)
+(e)
+(f)
+Fig. 9. Additional results using other cloud assets. (a) to (e) show the same asset under different light
+conditions. (d) and (e) show a close-up view but with varying light. (f) shows a different cloud asset with a
+more spread out geometry.
+our rasterization-based formulation compared to traditional volumetric methods, which rely on
+costly ray marching. From the ablation study, we observe that increasing network capacity improves image quality only up to a certain point, after which gains diminish while computational
+cost increases significantly. In particular, wider networks introduce substantial register pressure,
+leading to sharp increases in frame time, as seen in Table 2. The 4 × 64 architecture provides the
+best trade-off, achieving high image quality while maintaining stable real-time performance. The
+thickness parameter is a key component of our method and is critical for reproducing volumetric
+effects. Without it, the model fails to correctly represent opacity and accumulated density, resulting
+in significant degradation of the alpha channel and overall image quality. This highlights the
+importance of incorporating view-dependent volumetric cues into neural shading models.
+Although we saw that our model fared better when not using an explicit view direction as input,
+this might change with the choice of volumetric shader in the reference renderer. We used Principled
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 9, No. 4, Article 59. Publication date: July 2026.
+Environmental Volumetric Neural Shading of Clouds for Real-Time Rendering
+59:15
+Volume in Blender Cycles, but a d shader, configured to render highly anisotropic volumes, may
+require the view direction as input as well.
+For the triplane encoding, we observe a discrepancy between quantitative metrics and perceived
+image quality. While smoothing the triplane features reduces PSNR, it improves visual coherence
+by suppressing high-frequency artefacts. This suggests that standard pixel-wise loss functions
+are insufficient for capturing perceptual quality in this setting, motivating the use of perceptual
+or frequency-aware losses in future work. The observed noise in the triplane representation can
+be attributed to feature collisions: multiple points along a viewing direction may project to the
+same coordinates in a given plane (e.g., the XY plane), forcing the network to encode competing
+information in shared features. This ambiguity introduces high-frequency artefacts in the learned
+representation. Potential solutions include increasing feature dimensionality, adopting alternative
+encodings, or incorporating view-dependent features.
+Although our method targets rasterization-based rendering, it can be extended to ray tracing. The
+position input is directly available from primary intersections, while thickness could be calculated
+by tracking entry and exit points along rays (e.g., via any-hit shaders). Similarly, visibility could
+be computed using ray tracing; however, for clouds, a soft visibility formulation would likely be
+more appropriate than the binary approach used in RNA, suggesting the integration of soft shadow
+techniques.
+5.1
+Limitations and Future Work
+A primary limitation of our approach is the dependence on mesh complexity. High triangle counts
+significantly impact performance, as demonstrated in our results. While we show that lowerresolution meshes can be used at runtime without retraining, further work is needed to optimize
+asset generation with performance constraints in mind.
+We also observe artefacts such as sharp edges and seams in certain regions. These can arise from
+discontinuities in the visibility blending between 𝑐𝐷 and 𝑐𝐼 , as well as from abrupt changes in the
+triplane encoding. Addressing these issues may require improved blending strategies or smoother
+feature representations.
+The thickness as an approximation for the accumulated density along the viewing direction
+assumes homogeneous density. This is a limitation currently. Also, the thickness is the geometrical
+distance from the first surface to the last surface, which can lead to some failure cases. For instance,
+if there are two small sections of the volume located far apart from each other, but aligned with the
+view direction they are overlapping. Then the calculated thickness would still be high, even though
+the accumulated density likely should be low.
+Our training pipeline is constrained by the lack of access to the modified Blender Cycles renderer
+used in RNA [Mullia et al. 2024]. As a result, we rely on a less efficient data generation process,
+requiring a larger dataset and limiting control over per-pixel lighting variation. Improving data
+efficiency or enabling more flexible rendering control would be beneficial.
+Finally, our evaluation is limited to a single static cloud asset. While extending the approach
+to multiple assets is straightforward, generating the required path-traced training data is timeconsuming. Future work could explore more scalable data generation, as well as extensions to
+dynamic or continuous cloudscapes, enabling temporally coherent neural rendering of evolving
+volumetric phenomena.
+6
+Conclusions
+In this work, we presented a neural shading approach for rendering volumetric clouds in real
+time without requiring explicit volumetric rendering. Our method demonstrates that volumetric
+appearance can be effectively approximated on mesh geometry, enabling efficient rendering while
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 9, No. 4, Article 59. Publication date: July 2026.
+59:16
+Rikard Olajos, Michael Doggett, and Prashant Goswami
+preserving key visual characteristics of clouds. We introduced a complete workflow for converting
+volumetric cloud assets into a neural representation, including data generation with path-traced
+supervision and integration into a rasterization-based pipeline. This demonstrates that the Relightable Neural Assets framework can be successfully adapted beyond its original ray tracing
+setting to support real-time rasterization. Our results highlight the importance of incorporating
+volumetric cues into the neural model. In particular, the proposed thickness parameter plays a
+crucial role in capturing view-dependent opacity and significantly improves the rendering quality
+of semi-transparent clouds. Overall, our work shows that neural shading provides a practical and
+efficient alternative to traditional volumetric rendering for clouds, opening up new possibilities for
+real-time applications.
+Acknowledgments
+The computations were enabled by resources provided by LUNARC, The Centre for Scientific
+and Technical Computing at Lund University. This work was supported by the strategic research
+environment ELLIIT. The cloud asset used for this work comes from Walt Disney Animation Studios
+(CC BY-SA 3.0). The cloud assets used in Figure 9 were made by Samuel Krug.
+References
+Pontus Andersson, Jim Nilsson, Tomas Akenine-Möller, Magnus Oskarsson, Kalle Åström, and Mark D. Fairchild. 2020.
+FLIP: A Difference Evaluator for Alternating Images. Proc. ACM Comput. Graph. Interact. Tech. 3, 2, Article 15 (Aug. 2020),
+23 pages. doi:10.1145/3406183
+Pontus Andersson, Jim Nilsson, Peter Shirley, and Tomas Akenine-Möller. 2021. Visualizing Errors in Rendered High
+Dynamic Range Images. In Eurographics 2021 - Short Papers, Holger Theisel and Michael Wimmer (Eds.). The Eurographics
+Association. doi:10.2312/egs.20211015
+Blender Online Community. 2025. Blender - a 3D modelling and rendering package. Blender Foundation, Stichting Blender
+Foundation, Amsterdam. http://www.blender.org
+Eric R. Chan, Connor Z. Lin, Matthew A. Chan, Koki Nagano, Boxiao Pan, Shalini De Mello, Orazio Gallo, Leonidas Guibas,
+Jonathan Tremblay, Sameh Khamis, Tero Karras, and Gordon Wetzstein. 2022. Efficient Geometry-aware 3D Generative
+Adversarial Networks. arXiv:2112.07945 [cs.CV] https://arxiv.org/abs/2112.07945
+Jorge Condor, Sebastien Speierer, Lukas Bode, Aljaz Bozic, Simon Green, Piotr Didyk, and Adrian Jarabo. 2025. Don’t Splat
+your Gaussians: Volumetric Ray-Traced Primitives for Modeling and Rendering Scattering and Emissive Media. ACM
+Trans. Graph. 44, 1, Article 10 (Feb. 2025), 17 pages. doi:10.1145/3711853
+Yoshinori Dobashi, Kazufumi Kaneda, Hideo Yamashita, Tsuyoshi Okita, and Tomoyuki Nishita. 2000. A simple, efficient
+method for realistic animation of clouds (SIGGRAPH ’00). ACM Press/Addison-Wesley Publishing Co., USA, 19–28.
+doi:10.1145/344779.344795
+Rui P.M. Duarte and Abel J.P. Gomes. 2017. Real-time simulation of cumulus clouds through SkewT/LogP diagrams.
+Computers & Graphics 67 (2017), 103–114. doi:10.1016/j.cag.2017.06.005
+Shin Fujieda, Chih-Chen Kao, and Takahiro Harada. 2025. LSNIF: Locally-Subdivided Neural Intersection Function. Proc.
+ACM Comput. Graph. Interact. Tech. 8, 1, Article 17 (May 2025), 18 pages. doi:10.1145/3728295
+Prashant Goswami. 2021. A survey of modeling, rendering and animation of clouds in computer graphics. Vis. Comput. 37,
+7 (July 2021), 1931–1948. doi:10.1007/s00371-020-01953-y
+Mark J. Harris and Anselmo Lastra. 2001. Real-Time Cloud Rendering. Computer Graphics Forum 20, 3 (2001), 76–85.
+doi:10.1111/1467-8659.00500
+Sébastien Hillaire. 2016. Physically Based Sky, Atmosphere and Cloud Rendering in Frostbite. In ACM SIGGRAPH 2016
+Courses (Anaheim, California) (SIGGRAPH ’16). Association for Computing Machinery, New York, NY, USA, Article 21.
+doi:10.1145/2897826.2927353
+Nikolai Hofmann, Jon Hasselgren, Petrik Clarberg, and Jacob Munkberg. 2021. Interactive Path Tracing and Reconstruction
+of Sparse Volumes. Proc. ACM Comput. Graph. Interact. Tech. 4, 1, Article 5 (April 2021), 19 pages. doi:10.1145/3451256
+Jinkai Hu, Chengzhong Yu, Hongli Liu, Lingqi Yan, Yiqian Wu, and Xiaogang Jin. 2023. Deep Real-time Volumetric Rendering
+Using Multi-feature Fusion. In ACM SIGGRAPH 2023 Conference Proceedings (Los Angeles, CA, USA) (SIGGRAPH ’23).
+Association for Computing Machinery, New York, NY, USA, Article 61, 10 pages. doi:10.1145/3588432.3591493
+James T. Kajiya and Brian P Von Herzen. 1984. Ray tracing volume densities. SIGGRAPH Comput. Graph. 18, 3 (Jan. 1984),
+165–174. doi:10.1145/964965.808594
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 9, No. 4, Article 59. Publication date: July 2026.
+Environmental Volumetric Neural Shading of Clouds for Real-Time Rendering
+59:17
+Simon Kallweit, Thomas Müller, Brian McWilliams, Markus Gross, and Jan Novák. 2017. Deep Scattering: Rendering
+Atmospheric Clouds with Radiance-Predicting Neural Networks. ACM Trans. Graph. (Proc. of Siggraph Asia) tbd, tbd,
+Article tbd (Nov. 2017), 11 pages. doi:10.1145/3130800.3130880
+Leif P. Kobbelt, Mario Botsch, Ulrich Schwanecke, and Hans-Peter Seidel. 2001. Feature sensitive surface extraction from
+volume data. In Proceedings of the 28th Annual Conference on Computer Graphics and Interactive Techniques (SIGGRAPH
+’01). Association for Computing Machinery, New York, NY, USA, 57–66. doi:10.1145/383259.383265
+William E. Lorensen and Harvey E. Cline. 1987. Marching cubes: A high resolution 3D surface construction algorithm.
+SIGGRAPH Comput. Graph. 21, 4 (Aug. 1987), 163–169. doi:10.1145/37402.37422
+Paulo W. C. Maciel and Peter Shirley. 1995. Visual navigation of large environments using textured clusters. In Proceedings
+of the 1995 Symposium on Interactive 3D Graphics. Association for Computing Machinery. doi:10.1145/199404.199420
+Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. 2020. NeRF:
+Representing Scenes as Neural Radiance Fields for View Synthesis. In ECCV.
+Krishna Mullia, Fujun Luan, Xin Sun, and Miloš Hašan. 2024. RNA: Relightable Neural Assets. ACM Trans. Graph. 44, 1,
+Article 2 (Oct. 2024), 19 pages. doi:10.1145/3695866
+Jacob Munkberg, Petrik Clarberg, Jon Hasselgren, and Tomas Akenine-Möller. 2006. High dynamic range texture compression
+for graphics hardware. ACM Trans. Graph. 25, 3 (July 2006), 698–706. doi:10.1145/1141911.1141944
+Ken Museth. 2013. VDB: High-resolution sparse volumes with dynamic topology. ACM Trans. Graph. 32, 3, Article 27 (July
+2013), 22 pages. doi:10.1145/2487228.2487235
+Tomoyuki Nishita, Takao Sirai, Katsumi Tadamura, and Eihachiro Nakamae. 1993. Display of the earth taking into
+account atmospheric scattering. In Proceedings of the 20th Annual Conference on Computer Graphics and Interactive
+Techniques (Anaheim, CA) (SIGGRAPH ’93). Association for Computing Machinery, New York, NY, USA, 175–182.
+doi:10.1145/166117.166140
+Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor Killeen, Zeming Lin,
+Natalia Gimelshein, Luca Antiga, Alban Desmaison, Andreas Köpf, Edward Yang, Zach DeVito, Martin Raison, Alykhan
+Tejani, Sasank Chilamkurthy, Benoit Steiner, Lu Fang, Junjie Bai, and Soumith Chintala. 2019. PyTorch: an imperative
+style, high-performance deep learning library. Curran Associates Inc., Red Hook, NY, USA.
+William Reeves, David Salesin, and Robert Cook. 1987. Rendering Antialiased Shadows with Depth Maps. ACM Siggraph
+Computer Graphics 21, 283–291. doi:10.1145/37401.37435
+Scott Schaefer, Tao Ju, and Joe Warren. 2007. Manifold Dual Contouring. IEEE Transactions on Visualization and Computer
+Graphics 13, 3 (2007), 610–619. doi:10.1109/TVCG.2007.1012
+Andrew Schneider. 2023. NUBIS3 Methods (and madness) to model and render immersive real-time voxel-based clouds. In
+SIGGRAPH 2023 Courses. ACM, NY. doi:10.1145/3587423.3607877
+Linda Stadter, Nikolai Hofmann, and Marc Stamminger. 2024. Neural Volumetric Level of Detail for Path Tracing. In Vision,
+Modeling, and Visualization, Lars Linsen and Justus Thies (Eds.). The Eurographics Association. doi:10.2312/vmv.20241197
+Wenqiang Sun, Zhengyi Wang, Shuo Chen, Yikai Wang, Zilong Chen, Jun Zhu, and Jun Zhang. 2024. Freeplane: Unlocking
+Free Lunch in Triplane-Based Sparse-View Reconstruction Models. arXiv preprint arXiv:2406.00750 (2024).
+The Khronos Group, Inc. 2024. VK_NV_cooperative_vector. https://docs.vulkan.org/refpages/latest/refpages/source/VK_
+NV_cooperative_vector.html
+Marco Toschi, Riccardo De Matteo, Riccardo Spezialetti, Daniele De Gregorio, Luigi Di Stefano, and Samuele Salti. 2023.
+ReLight My NeRF: A Dataset for Novel View Synthesis and Relighting of Real World Objects . In 2023 IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR). IEEE Computer Society, Los Alamitos, CA, USA, 20762–20772.
+doi:10.1109/CVPR52729.2023.01989
+Niniane Wang. 2003. Realistic and fast cloud rendering in computer games. In ACM SIGGRAPH 2003 Sketches & Applications
+(San Diego, California) (SIGGRAPH ’03). Association for Computing Machinery, New York, NY, USA, 1. doi:10.1145/
+965400.965539
+Philippe Weier, Alexander Rath, Élie Michel, Iliyan Georgiev, Philipp Slusallek, and Tamy Boubekeur. 2024. N-BVH: Neural
+ray queries with bounding volume hierarchies. In ACM SIGGRAPH 2024 Conference Papers (Denver, CO, USA) (SIGGRAPH
+’24). Association for Computing Machinery, New York, NY, USA, Article 99, 11 pages. doi:10.1145/3641519.3657464
+Yingyan Xu, Gaspard Zoss, Prashanth Chandran, Markus Gross, Derek Bradley, and Paulo Gotardo. 2023. ReNeRF: Relightable
+Neural Radiance Fields with Nearfield Lighting. In 2023 IEEE/CVF International Conference on Computer Vision (ICCV).
+22524–22534. doi:10.1109/ICCV51070.2023.02064
+Tizian Zeltner, Fabrice Rousselle, Andrea Weidlich, Petrik Clarberg, Jan Novák, Benedikt Bitterli, Alex Evans, Tomáš
+Davidovič, Simon Kallweit, and Aaron Lefohn. 2024. Real-time Neural Appearance Models. ACM Trans. Graph. 43, 3,
+Article 33 (June 2024), 17 pages. doi:10.1145/3659577
+Xiaoming Zhao, Pratul P. Srinivasan, Dor Verbin, Keunhong Park, Ricardo Martin Brualla, and Philipp Henzler. 2024.
+IllumiNeRF: 3D Relighting Without Inverse Rendering. In NeurIPS.
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 9, No. 4, Article 59. Publication date: July 2026.

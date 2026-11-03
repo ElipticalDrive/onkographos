@@ -1,0 +1,1171 @@
+Ray-Distance Volume Rendering for
+Neural Scene Reconstruction
+Ruihong Yin1 , Yunlu Chen2 , Sezer Karaoglu1,3 , and Theo Gevers1,3
+University of Amsterdam, Amsterdam, The Netherlands
+Carnegie Mellon University, Pittsburgh, The United States
+3
+3DUniversum, Amsterdam, The Netherlands
+{r.yin, Th.Gevers}@uva.nl, s.karaoglu@3duniversum.com,
+yunluche@andrew.cmu.edu
+1
+arXiv:2408.15524v1 [cs.CV] 28 Aug 2024
+2
+Abstract. Existing methods in neural scene reconstruction utilize the
+Signed Distance Function (SDF) to model the density function. However,
+in indoor scenes, the density computed from the SDF for a sampled point
+may not consistently reflect its real importance in volume rendering, often due to the influence of neighboring objects. To tackle this issue, our
+work proposes a novel approach for indoor scene reconstruction, which
+instead parameterizes the density function with the Signed Ray Distance Function (SRDF). Firstly, the SRDF is predicted by the network
+and transformed to a ray-conditioned density function for volume rendering. We argue that the ray-specific SRDF only considers the surface
+along the camera ray, from which the derived density function is more
+consistent to the real occupancy than that from the SDF. Secondly, although SRDF and SDF represent different aspects of scene geometries,
+their values should share the same sign indicating the underlying spatial
+occupancy. Therefore, this work introduces a SRDF-SDF consistency loss
+to constrain the signs of the SRDF and SDF outputs. Thirdly, this work
+proposes a self-supervised visibility task, introducing the physical visibility geometry to the reconstruction task. The visibility task combines
+prior from predicted SRDF and SDF as pseudo labels, and contributes to
+generating more accurate 3D geometry. Our method implemented with
+different representations has been validated on indoor datasets, achieving
+improved performance in both reconstruction and view synthesis.
+Keywords: Indoor scene reconstruction · neural radiance fields · signed
+ray distance function
+1
+Introduction
+Indoor 3D scene reconstruction involves using multi-view RGB images as input to generate detailed 3D geometry as output. This task is crucial and has
+widespread applications in virtual/mixed augmentation, robotics, navigation,
+and so on. Contrary to a single object, indoor environments contain various elements, such as chairs, walls, tables, and cups, which present a challenge for the
+task of reconstruction. Traditional reconstruction approaches [2,25,31,37,44,48]
+2
+R. Yin et al.
+use 2D and 3D convolutional neural networks (CNNs) [38, 39] to extract features. They can be classified as depth-based methods [7, 31, 41, 44] and volumetric methods [2, 25, 35, 37, 48]. Depth-based techniques estimate depth for every
+viewpoint, encountering difficulties like scale uncertainties and inconsistencies in
+depth across different views. The surfaces created through these techniques can
+be coarse and imprecise. Unlike depth-based approaches, volumetric techniques
+utilize 3D CNNs to directly generate 3D geometry, leading to smoother surfaces.
+Nevertheless, these methods use voxels for scene representation, causing GPU
+memory usage and computational expenses to grow cubically as voxel resolution increases. Such a limitation restricts the use of volumetric approaches for
+high-quality scene reconstruction. Moreover, volumetric techniques require 3D
+annotations for network training, significantly increasing the cost of annotations.
+Implicit representations [22, 28, 33] encode 3D models as functions of coordinates. Utilizing implicit representations and volume rendering, neural radiance
+fields (NeRF) [23] achieves remarkable performance in novel view synthesis, even
+without 3D supervision. Some methods [42,46] exploit the capabilities of NeRF in
+reconstruction tasks. These methods typically parameterize the volume density
+as a learnable transformation of the Signed Distance Function (SDF), leading to
+impressive reconstruction performance. Compared to classic volumetric methods, neural implicit scene representation is more memory-efficient, marking a
+new trend in reconstruction tasks.
+In multi-object indoor scenes, the SDF from sampled points considers surface
+points across the entire scene. However, for neural implicit scene reconstruction,
+along a camera ray, from the camera center to the intersected surface point, the
+SDF may exhibit fluctuations, leading to several local minimum values. Fig. 1
+provides a toy example to illustrate this. In Fig. 1c, volume density yielded from
+the fluctuating SDF displays several local maximum values, contributing to high
+−−→
+weights in Fig. 1d. However, the camera ray OP targets the green rectangle,
+while the SDF of the near-surface point Q refers to the surface of the blue
+cylinder. Besides, Q is far from the intersected point P, but still corresponds to
+high density and high weight. Nevertheless, during volume rendering that maps
+the 3D output to 2D space, it is evident that along a ray, points closer to the
+intersected surface point may carry a higher weight as they are more relevant to
+actual observations. Consequently, in the multi-object scenes, using the SDF to
+model the density function along the camera ray may disrupt this relationship,
+introduce noise, and lead to inaccuracies in 2D results or 3D geometries.
+This paper proposes RS-Recon, a novel indoor scene reconstruction method
+with the ray-specific density function to address the aforementioned issue. Firstly,
+our method models the density function as a function of the Signed Ray Distance Function (SRDF). Unlike SDF, SRDF measures the shortest distance to
+the surface along a camera ray, eliminating the influence of surrounding surfaces
+that are not located on the given ray. Moreover, the density distribution generated from SRDF attains the local maximum only around the intersected surface,
+aligning more closely to the concept that points nearer to the surface have more
+importance. To achieve this, our network predicts both SRDF and SDF, where
+Ray-Distance Volume Rendering for Neural Scene Reconstruction
+3
+SRDF encompasses the density function, while SDF mainly focuses on describing
+the 3D surfaces. Secondly, despite SRDF and SDF being defined differently, both
+of them produce positive values outside the object and negative values within.
+Therefore, in this paper, a SRDF-SDF consistency loss is devised to ensure they
+share the same sign. Thirdly, this work introduces a self-supervised visibility
+task to enhance the prediction of 3D geometry. The visibility task predicts the
+probability of whether the sampled points are physically visible along the ray in
+3D space. The pseudo visibility ground truth is formed by combining the prior
+of SRDF and SDF from the network itself, without the reliance on multi-view
+geometry or any additional annotations.
+Our contributions can be summarized as follows, (1) This work proposes a
+novel neural scene reconstruction method that leverages the ray-specific SRDF
+to model the volume density. Compared to SDF, SRDF better reflects the significance of the real observations. (2) A SRDF-SDF consistency loss is proposed
+to constrain the alignment between SRDF and SDF, ensuring the same sign inside and outside the object. (3) To enhance the accuracy of 3D geometry, an
+additional self-supervised visibility task is introduced to predict the visibility
+probability of sampled points. This task integrates prior information from both
+the SDF and SRDF predictions as labels. (4) The experiments conducted on
+both synthetic and real-world indoor datasets illustrate that our method enhances performance in both reconstruction and view synthesis.
+2
+Related Works
+Classic Indoor Scene Reconstruction. Traditional methods for indoor scene
+reconstruction fall into two classes, i.e. depth-based methods [7, 20, 31,41, 44,45,
+49] and volumetric methods [2, 9, 15, 25, 35, 37, 48]. Depth-based methods predict pixel-level depth for individual frames, and subsequently depth fusion [5] is
+adopted to generate the 3D scene. To achieve favorable outcomes, these methods
+often construct a plane sweep cost volume [3, 11] at the feature or image level,
+leveraging information from multiple views to complement the current frame,
+e.g. MVSNet [44], DeepVideoMVS [7], and SimpleRecon [31]. Using the depth
+map as the intermediate representation, these methods encounter challenges such
+as depth inconsistency and scale ambiguities. In contrast, volumetric methods
+utilize 3D CNN to directly regress the 3D geometry, which can generate smooth
+surfaces and reconstruct unobserved regions. For instance, NeuralRecon [37] designs a learnable TSDF fusion module to integrate features from previous frames
+and predicts the TSDF for sparse volumes. TransformerFusion [2], based on volumetric representation, adopts Transformer to fuse multi-view features and select
+frames with higher attention. Yin et al . [48] propose to incorporate geometry
+priors at different levels for the volumetric methods. However, due to the use of
+3D CNN in volumetric methods, computational costs escalate significantly with
+higher resolutions.
+Neural Implicit Scene Representation. With the success of implicit representation and NeRF [23], neural implicit scene representation has emerged as a
+4
+R. Yin et al.
+Fig. 1: Analysis of the density function and weight distribution for a toy
+scene. (a) Frontal and overhead perspectives of a scene with multiple objects, where
+a ray originates from the camera center O, intersecting with the green rectangle at the
+−
+−
+→
+point P. Q is the closest point to the blue cylinder along the ray OP . (b) The SDF dΩ
+−
+−
+→
+∼
+/SRDF dΩ in Eqs. (2) and (4) along the ray OP . (c) The volume density σ generated
+from the SDF/SRDF in (b) using Eqs. (3) and (5). (d) The weight distribution Ti αi
+generated from the density in (c) via Eq. (1). Although Q is distant from the surface
+boundary intersecting with the ray, the density function from the SDF in Q generates
+a high weight in volume rendering, resulting in noisy rendering and reconstruction.
+hot spot in the past few years. Generally, reconstruction approaches based on
+neural implicit scene representation first map point positions to a continuous
+representation of SDF or occupancy by multi-layer perceptrons (MLPs), then
+transfer SDF or occupancy to volume density, and finally render the 2D results
+from the 3D outputs. Despite requiring only 2D supervision during training,
+these methods can reconstruct high-quality surfaces and are more computationally efficient. For example, VolSDF [46] parameterizes the volume density as a
+Laplace distribution of SDF, while NeuS [42] models it as the logistic distribution. Some extensions [13,40,43,50,51] introduce extra priors to achieve superior
+outcomes. For instance, Manhattan-SDF [13] employs planar constraints based
+on Manhattan-world assumption [4]. NeuRIS [40] proposes to combine normal
+prior for the reconstruction of texture-less regions, while NeuralRoom [43] implements perturbation-residual restriction to reconstruct the flat region better.
+MonoSDF [50] exploits both depth and normal cues to improve the reconstruction quality. Although additional priors contribute to the accuracy and completeness of reconstructed surfaces, they employ the SDF to model the volume
+density, potentially resulting in noisy 2D results in the multi-object scenes. Contrastingly, our method advocates for parameterizing the density function with
+the ray-specific SRDF, resulting in enhanced reconstruction performance.
+Some NeRF-based methods also utilize multi-view geometry to introduce
+additional regularization. For instance, RegNeRF [26] regularizes patched-based
+depth maps from unobserved viewpoints. Geo-NeuS [10] and ConsistentNeRF
+[14] use multi-view photometric consistency. SRDF and observation consistencies are used by [52]. GenS [29] introduces multi-view and multi-scale feature
+Ray-Distance Volume Rendering for Neural Scene Reconstruction
+5
+Fig. 2: Our framework. A geometry MLP fg is adopted to generate the SDF and
+geometry features Fg , utilizing the encoded position (and optionally grid features) as
+input. Then, Fg , along with viewing direction, passes through a color MLP fc to predict
+the color for each point. Notably, (1) our approach advocates for modeling the density
+function with the ray-specific SRDF in addition to the SDF. For this purpose, a SRDF
+MLP fs is introduced to generate the SRDF. (2) A SRDF-SDF consistency loss Lcon is
+devised to align the signs between the generated SRDF and SDF. (3) To enhance the
+geometry prediction, a self-supervised visibility task is proposed to integrate geometry
+priors in both SRDF and SDF predicted by the network and generates the pseudo
+visibility ground truth. The visibility probability is predicted by the SRDF MLP.
+consistencies for neural surface reconstruction. VIP-NeRF [34] adopts a visibility prior, using the plane sweep volume among multiple views to generate
+visibility labels. However, they depend on the computation of multi-view geometry, some of which may involve processing multiple frames yielding increased
+computational demands. In contrast, this paper introduces a self-supervised visibility task that requires minimal computational increases and does not depend
+on multi-view geometry for ground truth generation.
+3
+Method
+In this section, we provide the background on NeRF-based reconstruction methods, which typically model the volume density as a transformation of SDF (refer
+to Sec. 3.1). To overcome the issue of false local maxima in the density from SDF,
+our approach covered in Sec. 3.2 - Sec. 3.5 proposes to model the density function with the ray-specific SRDF in neural scene reconstruction, which achieves
+more accurate reconstruction. Fig. 2 presents the framework of our approach.
+3.1
+Background: Volume Rendering Density as Transformed SDF
+Our goal is to recover the scene geometry given a set of projected 2D views of
+a 3D scene. To achieve this, NeRF [23] optimizes a continuous 5D function to
+represent the scene, which predicts the volume density σ(p) and view-dependent
+color c(p, r) for each sampled point p ∈ R and ray direction r ∈ S 2 . With Ω ⊂ R3
+6
+R. Yin et al.
+denoting the scene geometry filled with physical presence, the predicted density
+σ(p) approximates the ground truth scene density 1Ω (p), such that 1Ω (p) = 1
+if p ∈ Ω and 0 otherwise. After that, the classic volume rendering is employed
+to render the color C(r), and N points {pi = o + zi r, i ∈ [1, N ]} are sampled
+along the camera ray r, with zi indicating the depth from the camera center o
+to the sampled point. The color is accumulated along the ray:
+\begin {aligned} {\textbf {C}}(\rvr )=\sum _{i=1}^N T_i\alpha _i \mathbf {c}(\rvp _i, \rvr ), T_i=\prod _{j=1}^{i-1}\left (1-\alpha _i\right ), \alpha _i=1-\exp \left (-\sigma (\rvp _i) \delta _i\right ) \end {aligned} \label {eq:rendering_color}
+(1)
+where δi is the interval of neighboring points.
+Despite the great success in novel view synthesis, NeRF has difficulty reconstructing satisfactory actual surfaces from the generated volume density. To
+address this challenge, recent methods [46, 50] propose to predict the SDF and
+then transform it to volume density, which aligns with the geometry bias that
+the surface points have a higher density than other non-surface points and corresponds to a higher weight during volume rendering.
+For any sampled point p ∈ R3 , the SDF dΩ (p) is with an absolute value
+representing the shortest distance from p to the surface M = ∂Ω, while the sign
+indicates whether the point is outside (positive) or inside (negative) the surface.
+Formally,
+\text {SDF:}\quad d_{\Omega }(\mathbf {p}) =(-1)^{\mathbf {1}_{\Omega }(\mathbf {p})} \min _{\mathbf {p}^* \in \mathcal {M}}||\mathbf {p}-\mathbf {p}^*||_2, \label {eq:sdf}
+(2)
+where the indicator function 1Ω (p) = 1 if p ∈ Ω and 0 otherwise. This indicates
+that the SDF considers every surface around the point. To apply SDF to volume
+rendering, Yariv et al . [46] suggest to derive the volume density σ SDF from the
+signed distance as follows:
+\begin {aligned} \sigma ^{\text {SDF}}(\textbf {p})=\alpha {\rm {\Psi }}_\beta \left (-{d}_{\Omega }(\textbf {p})\right ), {\rm {\Psi }}_\beta (s)= \begin {cases}\frac {1}{2} \exp \left (\frac {s}{\beta }\right ) & \text { if } s \leq 0 \\ 1-\frac {1}{2} \exp \left (-\frac {s}{\beta }\right ) & \text { if } s>0\end {cases} \end {aligned} \label {eq:density_sdf}
+(3)
+in which α, β are learnable parameters. Ψβ is the Cumulative Distribution Function (CDF) of the Laplace distribution with zero mean and β scale. Then,
+σ SDF (p) is applied to Eq. (1) and as the density function σ.
+3.2
+Accurate Scene Volume Density from Ray-Specific SRDF
+We illustrate the issues with volume rendering SDF by a toy example in Fig. 1.
+Indoor scenes typically include multiple objects. Along the camera ray r, the
+SDF may be influenced by surfaces not intersecting the ray, resulting in several
+ambiguous local maxima of false high volume density and weight. This implies
+that the 2D observations may have a strong correlation to these distant points,
+contradicting the fact that the points closer to the surface along the camera ray
+may carry more significance.
+To this end, we propose volume rendering scene density function from SRDF,
+the distance field local to the ray direction. In contrast to the SDF in Eq. (2),
+Ray-Distance Volume Rendering for Neural Scene Reconstruction
+7
+∼
+the SRDF dΩ (p, r) [30,52] computes the shortest distance from the point to the
+surface along the sampled ray r, i.e. the SRDF is ray-dependent. Formally, the
+∼
+SRDF dΩ (p, r) can be represented by
+\begin {aligned} \text {SRDF: }\quad \Wtilde {d_{\Omega }}(\mathbf {p}, \mathbf {r}) =(-1)^{\mathbf {1}_{\Omega }(\mathbf {p})} \min _{(\mathbf {p} + \rho \mathbf {r}) \in \mathcal {M} ; \rho \in \mathbb {R}} |\rho |, \end {aligned} \label {eq:srdf_sdf}
+(4)
+where 1Ω (p) = 1 if p ∈ Ω and 0 otherwise. In the following sections, dΩ from
+∼
+Eq. (2) and dΩ are used to denote SDF and SRDF for brevity.
+In Fig. 1, it can be seen that the weight computed from SRDF in the volume
+rendering only reaches a local peak around the surface point, aligning more consistently with the nature of the 2D observations. Therefore, this paper proposes
+to employ the ray-specific SRDF to yield the volume density instead of the SDF.
+This work predicts both SDF and SRDF, where SDF is mainly used to model
+the surface. As depicted in Fig. 2, for a sampled point p, a geometry MLP fg is
+applied on the input (including the encoded position or features) to predict SDF
+dΩ and geometry feature Fg . By definition, SRDF is view-dependent. Hence, the
+viewing direction r, geometry feature Fg , and point position p are concatenated
+and then passed through a SRDF MLP fs to yield the SRDF. On the other
+hand, the viewing direction r, geometry feature Fg , point position p, and 3D
+unit normal n = ∇dΩ are used as input to a color MLP fc to output color c.
+∼
+For volume rendering, our method adopts the predicted SRDF dΩ to derive
+the volume density σ. This is defined by:
+\begin {aligned} \sigma ^\text {SRDF}(\textbf {p},\mathbf {r})=\alpha {\rm {\Psi }}_\beta \left (-\Wtilde {d_{\Omega }}(\textbf {p},\mathbf {r})\right ). \end {aligned} \label {eq:density}
+(5)
+Then, σ SRDF (p, r) is applied to the volume rendering in Eq. (1) as a rayconditioned density function to obtain the color value CSRDF (r). Besides, during
+training, we also render color CSDF (r) with density functions from SDF to obtain gradient signals to optimize the prediction of SDF, in which the volume
+rendering processes use the same rays and points as those for CSRDF (r).
+For the scene geometry, after the network is trained with NeRF optimization
+targets, the geometric surface M = ∂Ω is extracted as watertight meshes by the
+marching cubes algorithm [19, 28] from the SDF results dΩ , which only depends
+on the query location p.
+3.3
+SRDF-SDF Consistency Loss
+Following the definitions in Eq. (4), despite SRDF and SDF being defined differently, they share the same sign, which indicates the spatial occupancy — positive
+outside the surface and negative inside the surface. However, in this paper, where
+SDF and SRDF are predicted from separate branches, sign consistency is not
+guaranteed. To deal with this issue, a SRDF-SDF consistency loss is proposed
+to enforce this constraint.
+Although the sign function effectively computes the output’s sign, it cannot
+be differentiated during back-propagation. To a certain degree, the values derived
+8
+R. Yin et al.
+from the sigmoid function approximate those calculated by the sign function.
+Thus, in our SRDF-SDF consistency loss, the sigmoid function is first employed
+to generate the sign of SRDF and SDF as the approximated sign function ς(·),
+after which a ℓ2 loss is adopted to quantify the sign difference, as defined by:
+\begin {aligned} \mathcal {L}_{con} &= \frac {1}{N_r}\sum _{\textbf {p}, \mathbf {r}} M_{con}||\varsigma (\Wtilde {d_{\Omega }})-\varsigma ({d}_{\Omega })||_2 \\ \varsigma (d) &= \texttt {Sigmoid}(k \cdot d) , M_{con} = [\Wtilde {d_{\Omega }} \cdot {d}_{\Omega } < 0] \end {aligned} \label {eq:consistency_loss}
+(6)
+in which k is a hyperparameter, controlling the slope of the sigmoid function. The
+∼
+indicator function [dΩ ·dΩ < 0] is leveraged to identify whether the generated
+SDF and SRDF have opposite signs. Therefore, the consistency loss imposes
+penalties when there is a difference between the signs of SRDF and SDF. Nr
+∼
+represents the number of sampled points in a minibatch that satisfy [dΩ ·dΩ < 0].
+Taking the derivative of Lcon with respect to SDF dΩ (as an example), is
+computed as follows:
+\begin {aligned} \frac {\partial {\mathcal {L}_{con}}}{\partial {d}_{\Omega }} = -\frac {2}{N_r}M_{con}||\varsigma (\Wtilde {d_{\Omega }})-\varsigma ({d}_{\Omega })||_1 \cdot \frac {\partial {\varsigma ({d}_{\Omega })}}{\partial {d}_{\Omega }} \end {aligned} \label {eq:derivative_consistency}
+(7)
+The derivative in Eq. (7) shows that our consistency loss has two advantages:
+(1) Unlike the sign function, which assigns the same penalty for outputs with
+different signs of SRDF and SDF, our consistency loss can adjust the penalty
+according to the extent of the sign discrepancy between SRDF and SDF, referring
+∼
+Ω)
+to ||ς(dΩ ) − ς(dΩ )||1 . (2) The derivative of the sigmoid function ∂ς(d
+∂dΩ peaks at
+zero and decreases from 0 to +∞/ − ∞. Consequently, predictions in proximity
+to zero (indicating the surface) may exhibit higher absolute gradient values,
+providing effective supervision for points near the surface.
+3.4
+Self-supervised Visibility Task
+Theoretically, with visibility attributes of 3D points, surface location becomes
+straightforward. Therefore, to enhance 3D geometry prediction, we propose a
+self-supervised visibility task in this paper. Along the trajectory of a camera ray,
+points sampled prior to reaching the first surface point are categorized as visible,
+whereas points sampled beyond the first surface point are classified as occluded.
+To find the first surface point along the ray, using SRDF as an example, the
+multiplication of SRDF between adjacent sampled points is computed. When
+∼ i
+∼ i+1
+∼ m
+∼ m+1
+dΩ · dΩ ≤ 0 and dΩ · dΩ
+> 0, m ∈ [1, i − 1], it indicates that the first
+surface is within the interval [o+zi r, o+zi+1 r]. Consequently, the points between
+[p1 , pi ] are considered physically visible while points between [pi+1 , pN ] are
+regarded as occluded. However, the SRDF or SDF predicted by the network may
+be inaccurate at some points, introducing potential noise in the visibility task. To
+improve the accuracy of the visibility labeling, both SDF and SRDF are utilized
+in determining visibility. Points are labeled as visible or occluded only when there
+Ray-Distance Volume Rendering for Neural Scene Reconstruction
+9
+Table 1: Evaluation of 3D reconstruction meshes on ScanNet. † indicates our reproduced results. The best results are bold. ↓ denotes that a lower value is preferable
+while ↑ means higher value corresponds to better performance.
+Method
+COLMAP [32]
+UNISURF [27]
+NeuS [42]
+VolSDF [46]
+Manhattan-SDF [13]
+S3P [47]
+NeuRIS [40]
+MonoSDF_Grid [50]
+MonoSDF_MLP [50]
+HelixSurf [18]
+Occ_SDF_Hybrid† [21]
+Ours_Grid
+Ours_MLP
+Acc ↓
+0.047
+0.554
+0.179
+0.414
+0.072
+0.055
+0.050
+0.072
+0.035
+0.038
+0.040
+0.074
+0.040
+Comp ↓
+0.235
+0.164
+0.208
+0.120
+0.068
+0.059
+0.049
+0.057
+0.048
+0.044
+0.041
+0.049
+0.040
+Prec ↑
+0.711
+0.212
+0.313
+0.321
+0.621
+0.709
+0.717
+0.660
+0.799
+0.786
+0.783
+0.670
+0.809
+Recall ↑
+0.441
+0.362
+0.275
+0.394
+0.586
+0.660
+0.669
+0.601
+0.681
+0.727
+0.748
+0.703
+0.779
+F-score ↑
+0.537
+0.267
+0.291
+0.346
+0.602
+0.683
+0.692
+0.626
+0.733
+0.755
+0.765
+0.683
+0.794
+is agreement between SRDF and SDF on their classification. If the classifications
+from SRDF and SDF diverge, suggesting difficulties in accurately categorizing
+these points for the network, such points are omitted from the visibility task.
+The method for assigning visibility labels is defined as follows
+\begin {aligned} V_{gt}= \begin {cases} 1, & \text { if } (V^\text {SRDF} = 1) \& (V^\text {SDF} = 1) \\0, & \text { if } (V^\text {SRDF} = 0) \& (V^\text {SDF} = 0) \end {cases} \end {aligned} \label {eq:visibility_gt}
+(8)
+where V SRDF /V SDF are the visibility labels determined based on the prediction
+of SRDF/SDF. 1/0 means label for visible/occluded points. The formation of the
+visibility label can be inferred as self-supervised, thus eliminating the necessity
+for multi-view geometry and additional annotations. Additionally, it incorporates
+information from both SRDF and SDF.
+From the analysis above, similar to SRDF, the visibility task also relies on
+the view direction. Therefore, a visibility probability Vpred is predicted from the
+SRDF branch. It is a binary classification task, i.e. visible or occluded, so the
+binary cross-entropy loss is employed as visibility loss Lvis during optimization.
+The visibility task can discern the point’s visibility along the camera ray,
+thereby influencing the learning of SRDF. Moreover, the optimization process
+integrates knowledge of ray-related visibility across the entire space, further impacting the learning of SDF. Notably, unlike 2D supervision, the visibility task
+provides priors in 3D space, imparting a more direct influence on 3D geometry.
+3.5
+Optimization
+Loss Functions. During training, the overall loss consists of RGB loss Lc ,
+normal loss Ln , depth loss Ld , Eikonal loss Le , smooth loss Ls , SRDF-SDF
+10
+R. Yin et al.
+consistency loss Lcon , and visibility loss Lvis ,
+\begin {aligned} \mathcal {L} = \mathcal {L}_c + \lambda _n \mathcal {L}_n + \lambda _d \mathcal {L}_d + \lambda _e \mathcal {L}_e + \lambda _s \mathcal {L}_s + \lambda _{con} \mathcal {L}_{con} + \lambda _{vis} \mathcal {L}_{vis} \end {aligned} \label {eq:total_loss}
+(9)
+in which λ(·) are the loss weight. Following MonoSDF [50], the 2.5D depth and
+normal maps are volume rendered using the density function σ SRDF to exploit
+geometric cues and support training. More details on the computation of loss
+functions are provided in the supplementary material.
+Implementation Details. Theoretically, our method can be applied to replace
+SDF-based volume rendering in indoor scene reconstruction. To measure our
+method, VolSDF-based reconstruction method MonoSDF is considered as our
+baseline in the following experiments. Furthermore, in the supplementary material, we also verify our method on NeuS-based reconstruction method NeuRIS.
+We used different spatial encoding techniques as input, including hash features [24] and Fourier features [23], referred to as Grid and MLP respectively in
+the following experiments. More details are given in the supplementary material.
+4
+Experiments
+4.1
+Experimental Setup
+Datasets. Our proposed method is evaluated on three indoor datasets, comprising: (1) four scenes from the real-world dataset ScanNet [6], (2) eight scenes
+from the synthetic dataset Replica [36], and (3) four scenes from the advanced
+set of the real-world large-scale dataset Tanks and Temples [17].
+Metrics. For ScanNet, the assessment of the results involves five reconstruction
+metrics: accuracy (acc), completeness (comp), precision (prec), recall, and Fscore with a threshold of 5cm. For Replica, in alignment with MonoSDF, metrics
+including normal consistency (normal c.), chamfer L1 distance (Chamfer-L1),
+and F-score with a threshold of 5cm are utilized. For Tanks and Temples, as
+evaluated by the official server, results are reported based on the F-score with
+a 1cm threshold. Additionally, this study assesses the peak signal-to-noise ratio
+(PSNR) of the rendered 2D RGBs to showcase the effectiveness of our approach.
+Detailed computations for all metrics are given in the supplementary material.
+Baselines. Except for the baseline MonoSDF, our method is also compared to
+(1) the classic MVS method: COLMAP [32], (2) neural implicit reconstruction
+methods: UNISURF [27], NeuS [42], VolSDF [46], Manhattan-SDF [13], NeuRIS
+[40], S3P [47], HelixSurf [18], and Occ_SDF_Hybrid [21].
+4.2
+Evaluation Results
+Reconstruction on ScanNet [6]. Tab. 1 compares our method against other
+state-of-the-art (SOTA) methods on ScanNet. When contrasted with the baseline MonoSDF, our method consistently shows better performance across all
+metrics, regardless of whether utilizing MLP or grid representation. For example,
+employing grid representation, our method exhibits a 5.7% higher F-score than
+Ray-Distance Volume Rendering for Neural Scene Reconstruction
+11
+Fig. 3: Qualitative comparisons on ScanNet. It can be seen that our method can
+reconstruct more surfaces, especially in thin regions.
+Fig. 4: Qualitative comparisons on Replica. Compared to MonoSDF and
+Occ_SDF_Hybrid, our method can generate more accurate surfaces.
+MonoSDF. Using the MLP representation, our method outperforms MonoSDF
+by 1.0% in recall, 9.8% in precision, and 6.1% in F-score. In addition, our method
+with the MLP representation surpasses other SOTA methods on almost all metrics, explaining the effectiveness of our method on reconstruction. Notably, our
+method achieves a 2.9% higher F-score compared to Occ_SDF_Hybrid.
+Reconstruction on Replica [36]. The results on the synthetic dataset Replica
+are shown in Tab. 2. Using the grid representation, our method reports a notable improvement of 9.91% in chamfer distance and 2.88% in F-score. Similar
+increases are also illustrated in our method with the MLP representation across
+all metrics. Our approach also achieves on-par results with Occ_SDF_Hybrid.
+Reconstruction on Tanks and Temples [17]. Tab. 3 shows quantitative outcomes on the challenging large-scale dataset Tanks and Temples. The F-score
+for each scene - Auditorium, Ballroom, Courtroom, and Museum - along with
+12
+R. Yin et al.
+Table 2: Evaluation of 3D reconstruction meshes on Replica.
+Grid
+MLP
+Method
+MonoSDF [50]
+Ours
+MonoSDF [50]
+Occ_SDF_Hybrid† [21]
+Ours
+Normal C. ↑
+90.93
+91.66
+92.11
+93.34
+93.49
+Chamfer-L1 ↓
+3.23
+2.91
+2.94
+2.58
+2.60
+F-score ↑
+85.91
+88.79
+86.18
+91.54
+91.72
+Table 3: Evaluation of 3D reconstruction meshes on the advanced set of Tanks and
+Temples. The F-score is reported in the table.
+Method
+Auditorium Ballroom Courtroom Museum mean
+MonoSDF [50]
+3.17
+3.70
+13.75
+5.68
+6.58
+Grid Occ_SDF_Hybrid† [21]
+3.76
+3.58
+14.04
+7.27
+7.16
+Ours
+4.84
+4.31
+14.18
+7.60
+7.73
+MonoSDF [50]
+3.09
+2.47
+10.00
+5.10
+5.17
+MLP Occ_SDF_Hybrid† [21]
+3.21
+3.34
+10.29
+4.66
+5.38
+Ours
+4.24
+4.69
+10.79
+5.91
+6.41
+their mean, is reported. Our method, with both the MLP and grid representations, outperforms Occ_SDF_Hybrid and MonoSDF. In particular, our F-score
+is 1.15% higher (grid representation) and 1.24% higher (MLP representation)
+than MonoSDF across all scenes.
+Visualization of Reconstruction Results. Fig. 3 and Fig. 4 report qualitative results on ScanNet and Replica respectively. In contrast to other methods,
+our approach can produce superior meshes and recall more regions, particularly
+for thin regions/small objects, such as chair legs and table legs. Although our
+method relies on the SRDF for improved density in volume rendering while the
+surface geometry is extracted by the SDF, both the proposed SRDF-SDF consistency loss and self-supervised visibility task guide the optimization of the SDF to
+be more consistent with the SRDF, resulting in more accurate surface boundary.
+Additional visualization is provided in the supplementary material.
+View Synthesis. Tab. 4 also provides a comparison of view synthesis performance on training views. Notably, 2D views are rendered with density derived
+Table 4: Evaluation of the rendering quality. PSNR is given in this table.
+Grid
+MLP
+Method
+MonoSDF [50]
+Ours
+MonoSDF [50]
+Occ_SDF_Hybrid† [21]
+Ours
+ScanNet
+28.96
+30.09
+26.40
+26.98
+27.77
+Replica
+40.25
+42.04
+34.45
+35.50
+36.06
+Tanks and Temples
+28.45
+29.52
+24.13
+24.72
+25.47
+Ray-Distance Volume Rendering for Neural Scene Reconstruction
+13
+Table 5: Ablation study of our method on ScanNet.
+Method
+Acc ↓ Comp ↓ Prec ↑ Recall ↑ F-score ↑
+a
+Baseline
+0.035 0.048 0.799 0.681
+0.733
+b
+RS. Den.
+0.040 0.044 0.772 0.720
+0.745
+c
+RS. Den. + Con. L.
+0.039 0.041 0.794 0.760
+0.776
+d RS. Den. + Con. L. + Vis.(SDF) 0.039 0.040 0.809 0.772
+0.789
+e RS. Den. + Con. L. + Vis.(SRDF) 0.042 0.040 0.804 0.774
+0.788
+f
+RS. Den. + Con.L. + Vis.
+0.040 0.040 0.809 0.779
+0.794
+Fig. 5: Comprison of the yielded weight and image. The weight and image
+generated by our approach align more closely with the actual observations.
+from SRDF. On the three datasets, our method outperforms the baseline and
+Occ_SDF_Hybrid in rendering training views. Overall, our method not only
+enhances surface reconstruction but also generates more accurate views. The
+visualization can be found in the supplementary material.
+4.3
+Ablation Study
+Tab. 5 presents an ablation study to evaluate the effectiveness of our design
+on ScanNet with MLP representation. The ablation experiments consist of: (a)
+Baseline: MonoSDF. (b) RS. Den.: this structure models the volume density
+using the ray-specific SRDF, without the SRDF-SDF consistency loss and selfsupervised visibility task. (c) RS. Den. + Con. L.: Building upon the structure
+in (b), this setup adopts the proposed SRDF-SDF consistency loss. (d) RS. Den.
++ Con. L. + Vis.(SDF): based on (c), this configuration adds the self-supervised
+visibility task, in which only SDF is used to compute the visibility label. (e) RS.
+Den. + Con. L. + Vis.(SRDF): Different from structure (d), this method relies
+solely on SRDF to compute the visibility label. (f) RS. Den. + Con. L. + Vis.:
+14
+R. Yin et al.
+this structure represents the comprehensive model of our method, wherein the
+visibility labels integrate priors from both SRDF and SDF predictions.
+The comparison between configurations (a) and (b) highlights that our design
+using SRDF to model the density, without any additional constraints, results in a
+better performance compared to MonoSDF. The SRDF-SDF consistency loss in
+(c) surpasses the structure in (b) by 3.1% in F-score. This shows the significance
+of sign consistency. Compared to (c), the self-supervised visibility task in (d)-(f)
+enhances the reconstruction performance. In particular, structure (f) obtains a
+better F-score than structures (d) and (e). These explain the effectiveness of our
+self-supervised visibility task and the computation of visibility labels integrating
+both SRDF and SDF priors. The visualization of the ablation study is given in
+the supplementary material.
+Furthermore, Fig. 5 compares the weight distribution for the red and yellow
+sampled points generated by MonoSDF and our method. (1) The analysis of the
+yellow sampled point demonstrates the benefits of our method for reconstruction:
+MonoSDF generates high weights and negative SDF values when sampled rays
+are near the white wall, resulting in false surfaces that significantly deviate from
+the ground truth. In contrast, our method yields more accurate surfaces and thus
+enhances both completeness and recall. (2) The analysis of the red sampled point
+explains the reason why our method can generate accurate views: MonoSDF
+produces weights with two local maxima, causing an inaccurate RGB value.
+This occurs because the SDF along the camera ray fluctuates, resulting in varying
+density and weight. In comparison, our method produces uni-modal weights that
+peak only around the surface, resulting in more accurate views. The quantitative
+PSNR in Fig. 5b and Fig. 5d confirms that our rendered image is more accurate
+compared to MonoSDF. These findings align with our motivation to achieve a
+more consistent and accurate weight distribution, thereby reconstructing better
+surfaces and generating high-quality views. This underscores the effectiveness of
+using ray-specific SRDF to model volume density in our approach.
+5
+Conclusion
+This work proposes a novel method for neural indoor scene reconstruction, modeling density function with ray-specific SRDF. Firstly, this study analyzed that
+using the SDF to parameterize the volume density may introduce noises in multiobject indoor scenes, and the SRDF exhibits stronger relationships with the actual 2D observations. Motivated by this, this work employed SRDF to model
+the volume density, while SDF mainly focuses on the representation of the 3D
+surface. Secondly, a SRDF-SDF consistency loss has been introduced to align
+the sign between SRDF and SDF. Thirdly, a self-supervised visibility task has
+been designed to distinguish whether the sampled 3D point is physically visible
+or occluded. It combined the prior from SDF and SRDF as visibility labels to
+improve geometry reconstruction without any other annotations. Experimental
+results on real-world and synthetic datasets showed that our method excels not
+only in reconstructing better surfaces but also in generating more accurate views.
+Ray-Distance Volume Rendering for Neural Scene Reconstruction
+15
+References
+1. Atzmon, M., Lipman, Y.: Sal: Sign agnostic learning of shapes from raw data.
+In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. pp. 2565–2574 (2020)
+2. Bozic, A., Palafox, P., Thies, J., Dai, A., Nießner, M.: Transformerfusion: Monocular rgb scene reconstruction using transformers. Advances in Neural Information
+Processing Systems 34, 1403–1414 (2021)
+3. Collins, R.T.: A space-sweep approach to true multi-image matching. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition.
+pp. 358–363. Ieee (1996)
+4. Coughlan, J.M., Yuille, A.L.: Manhattan world: Compass direction from a single image by bayesian inference. In: Proceedings of the IEEE/CVF International
+Conference on Computer Vision. vol. 2, pp. 941–947. IEEE (1999)
+5. Curless, B., Levoy, M.: A volumetric method for building complex models from
+range images. In: Proceedings of the 23rd Annual Conference on Computer Graphics and Interactive Techniques. pp. 303–312 (1996)
+6. Dai, A., Chang, A.X., Savva, M., Halber, M., Funkhouser, T., Nießner, M.: Scannet: Richly-annotated 3d reconstructions of indoor scenes. In: Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 5828–
+5839 (2017)
+7. Duzceker, A., Galliani, S., Vogel, C., Speciale, P., Dusmanu, M., Pollefeys, M.:
+Deepvideomvs: Multi-view stereo on video with recurrent spatio-temporal fusion.
+In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. pp. 15324–15333 (2021)
+8. Eftekhar, A., Sax, A., Malik, J., Zamir, A.: Omnidata: A scalable pipeline for
+making multi-task mid-level vision datasets from 3d scans. In: Proceedings of the
+IEEE/CVF International Conference on Computer Vision. pp. 10786–10796 (2021)
+9. Feng, Z., Yang, L., Guo, P., Li, B.: Cvrecon: Rethinking 3d geometric feature
+learning for neural reconstruction. In: Proceedings of the IEEE/CVF International
+Conference on Computer Vision. pp. 17750–17760 (2023)
+10. Fu, Q., Xu, Q., Ong, Y.S., Tao, W.: Geo-neus: Geometry-consistent neural implicit
+surfaces learning for multi-view reconstruction. Advances in Neural Information
+Processing Systems 35, 3403–3416 (2022)
+11. Gallup, D., Frahm, J.M., Mordohai, P., Yang, Q., Pollefeys, M.: Real-time
+plane-sweeping stereo with multiple sweeping directions. In: Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 1–8.
+IEEE (2007)
+12. Gropp, A., Yariv, L., Haim, N., Atzmon, M., Lipman, Y.: Implicit geometric regularization for learning shapes. In: Proceedings of the International Conference on
+Machine Learning. pp. 3789–3799 (2020)
+13. Guo, H., Peng, S., Lin, H., Wang, Q., Zhang, G., Bao, H., Zhou, X.: Neural 3d
+scene reconstruction with the manhattan-world assumption. In: Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 5511–
+5520 (2022)
+14. Hu, S., Zhou, K., Li, K., Yu, L., Hong, L., Hu, T., Li, Z., Lee, G.H., Liu, Z.:
+Consistentnerf: Enhancing neural radiance fields with 3d consistency for sparse
+view synthesis. arXiv preprint arXiv:2305.11031 (2023)
+15. Ju, J., Tseng, C.W., Bailo, O., Dikov, G., Ghafoorian, M.: Dg-recon: Depth-guided
+neural 3d scene reconstruction. In: Proceedings of the IEEE/CVF International
+Conference on Computer Vision. pp. 18184–18194 (2023)
+16
+R. Yin et al.
+16. Kingma, D.P., Ba, J.: Adam: A method for stochastic optimization. arXiv preprint
+arXiv:1412.6980 (2014)
+17. Knapitsch, A., Park, J., Zhou, Q.Y., Koltun, V.: Tanks and temples: Benchmarking
+large-scale scene reconstruction. ACM Transactions on Graphics 36(4), 1–13 (2017)
+18. Liang, Z., Huang, Z., Ding, C., Jia, K.: Helixsurf: A robust and efficient neural
+implicit surface learning of indoor scenes with iterative intertwined regularization.
+In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. pp. 13165–13174 (2023)
+19. Lorensen, W.E., Cline, H.E.: Marching cubes: A high resolution 3d surface construction algorithm. In: Seminal graphics: pioneering efforts that shaped the field,
+pp. 347–353 (1998)
+20. Luo, K., Guan, T., Ju, L., Huang, H., Luo, Y.: P-mvsnet: Learning patch-wise
+matching confidence aggregation for multi-view stereo. In: Proceedings of the
+IEEE/CVF International Conference on Computer Vision. pp. 10452–10461 (2019)
+21. Lyu, X., Dai, P., Li, Z., Yan, D., Lin, Y., Peng, Y., Qi, X.: Learning a room with
+the occ-sdf hybrid: Signed distance function mingled with occupancy aids scene
+representation. arXiv preprint arXiv:2303.09152 (2023)
+22. Mescheder, L., Oechsle, M., Niemeyer, M., Nowozin, S., Geiger, A.: Occupancy
+networks: Learning 3d reconstruction in function space. In: Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 4460–
+4470 (2019)
+23. Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng,
+R.: Nerf: Representing scenes as neural radiance fields for view synthesis. Communications of the ACM 65(1), 99–106 (2021)
+24. Müller, T., Evans, A., Schied, C., Keller, A.: Instant neural graphics primitives
+with a multiresolution hash encoding. ACM Transactions on Graphics 41(4), 1–15
+(2022)
+25. Murez, Z., Van As, T., Bartolozzi, J., Sinha, A., Badrinarayanan, V., Rabinovich,
+A.: Atlas: End-to-end 3d scene reconstruction from posed images. In: Proceedings
+of the European Conference on Computer Vision. pp. 414–431. Springer (2020)
+26. Niemeyer, M., Barron, J.T., Mildenhall, B., Sajjadi, M.S., Geiger, A., Radwan, N.:
+Regnerf: Regularizing neural radiance fields for view synthesis from sparse inputs.
+In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. pp. 5480–5490 (2022)
+27. Oechsle, M., Peng, S., Geiger, A.: Unisurf: Unifying neural implicit surfaces and
+radiance fields for multi-view reconstruction. In: Proceedings of the IEEE/CVF
+International Conference on Computer Vision. pp. 5589–5599 (2021)
+28. Park, J.J., Florence, P., Straub, J., Newcombe, R., Lovegrove, S.: Deepsdf: Learning
+continuous signed distance functions for shape representation. In: Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 165–
+174 (2019)
+29. Peng, R., Gu, X., Tang, L., Shen, S., Yu, F., Wang, R.: Gens: Generalizable neural
+surface reconstruction from multi-view images. In: Advances in Neural Information
+Processing Systems (2023)
+30. Ren, Y., Zhang, T., Pollefeys, M., Süsstrunk, S., Wang, F.: Volrecon: Volume rendering of signed ray distance functions for generalizable multi-view reconstruction.
+In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. pp. 16685–16695 (2023)
+31. Sayed, M., Gibson, J., Watson, J., Prisacariu, V., Firman, M., Godard, C.: Simplerecon: 3d reconstruction without 3d convolutions. In: Proceedings of the European Conference on Computer Vision. pp. 1–19. Springer (2022)
+Ray-Distance Volume Rendering for Neural Scene Reconstruction
+17
+32. Schönberger, J.L., Zheng, E., Frahm, J.M., Pollefeys, M.: Pixelwise view selection
+for unstructured multi-view stereo. In: Proceedings of the European Conference on
+Computer Vision. pp. 501–518. Springer (2016)
+33. Sitzmann, V., Martel, J., Bergman, A., Lindell, D., Wetzstein, G.: Implicit neural
+representations with periodic activation functions. Advances in Neural Information
+Processing Systems 33, 7462–7473 (2020)
+34. Somraj, N., Soundararajan, R.: Vip-nerf: Visibility prior for sparse input neural
+radiance fields. arXiv preprint arXiv:2305.00041 (2023)
+35. Stier, N., Rich, A., Sen, P., Höllerer, T.: Vortx: Volumetric 3d reconstruction with
+transformers for voxelwise view selection and fusion. In: 2021 International Conference on 3D Vision. pp. 320–330. IEEE (2021)
+36. Straub, J., Whelan, T., Ma, L., Chen, Y., Wijmans, E., Green, S., Engel, J.J.,
+Mur-Artal, R., Ren, C., Verma, S., et al.: The replica dataset: A digital replica of
+indoor spaces. arXiv preprint arXiv:1906.05797 (2019)
+37. Sun, J., Xie, Y., Chen, L., Zhou, X., Bao, H.: Neuralrecon: Real-time coherent 3d
+reconstruction from monocular video. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 15598–15607 (2021)
+38. Tan, M., Chen, B., Pang, R., Vasudevan, V., Sandler, M., Howard, A., Le, Q.V.:
+Mnasnet: Platform-aware neural architecture search for mobile. In: Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp.
+2820–2828 (2019)
+39. Tang, H., Liu, Z., Zhao, S., Lin, Y., Lin, J., Wang, H., Han, S.: Searching efficient 3d
+architectures with sparse point-voxel convolution. In: Proceedings of the European
+Conference on Computer Vision. pp. 685–702. Springer (2020)
+40. Wang, J., Wang, P., Long, X., Theobalt, C., Komura, T., Liu, L., Wang, W.: Neuris:
+Neural reconstruction of indoor scenes using normal priors. In: Proceedings of the
+European Conference on Computer Vision. pp. 139–155. Springer (2022)
+41. Wang, K., Shen, S.: Mvdepthnet: Real-time multiview depth estimation neural
+network. In: 2018 International conference on 3d vision. pp. 248–257. IEEE (2018)
+42. Wang, P., Liu, L., Liu, Y., Theobalt, C., Komura, T., Wang, W.: Neus: Learning
+neural implicit surfaces by volume rendering for multi-view reconstruction. arXiv
+preprint arXiv:2106.10689 (2021)
+43. Wang, Y., Li, Z., Jiang, Y., Zhou, K., Cao, T., Fu, Y., Xiao, C.: Neuralroom:
+Geometry-constrained neural implicit surfaces for indoor scene reconstruction.
+ACM Transactions on Graphics 41(6), 1–15 (2022)
+44. Yao, Y., Luo, Z., Li, S., Fang, T., Quan, L.: Mvsnet: Depth inference for unstructured multi-view stereo. In: Proceedings of the European Conference on Computer
+Vision. pp. 767–783 (2018)
+45. Yao, Y., Luo, Z., Li, S., Shen, T., Fang, T., Quan, L.: Recurrent mvsnet for highresolution multi-view stereo depth inference. In: Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition. pp. 5525–5534 (2019)
+46. Yariv, L., Gu, J., Kasten, Y., Lipman, Y.: Volume rendering of neural implicit
+surfaces. Advances in Neural Information Processing Systems 34, 4805–4815 (2021)
+47. Ye, B., Liu, S., Li, X., Yang, M.H.: Self-supervised super-plane for neural 3d reconstruction. In: Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition. pp. 21415–21424 (2023)
+48. Yin, R., Karaoglu, S., Gevers, T.: Geometry-guided feature learning and fusion
+for indoor scene reconstruction. In: Proceedings of the IEEE/CVF International
+Conference on Computer Vision. pp. 3652–3661 (2023)
+18
+R. Yin et al.
+49. Yu, Z., Gao, S.: Fast-mvsnet: Sparse-to-dense multi-view stereo with learned propagation and gauss-newton refinement. In: Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition. pp. 1949–1958 (2020)
+50. Yu, Z., Peng, S., Niemeyer, M., Sattler, T., Geiger, A.: Monosdf: Exploring monocular geometric cues for neural implicit surface reconstruction. Advances in Neural
+Information Processing Systems 35, 25018–25032 (2022)
+51. Zhu, Z., Peng, S., Larsson, V., Cui, Z., Oswald, M.R., Geiger, A., Pollefeys,
+M.: Nicer-slam: Neural implicit scene encoding for rgb slam. arXiv preprint
+arXiv:2302.03594 (2023)
+52. Zins, P., Xu, Y., Boyer, E., Wuhrer, S., Tung, T.: Multi-view reconstruction using
+signed ray distance functions (srdf). In: Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition. pp. 16696–16706 (2023)
+Ray-Distance Volume Rendering for Neural Scene Reconstruction
+19
+Supplementary Material
+This supplementary document provides additional details and experimental
+results of our approach. The definitions of evaluation metrics are given in Sec. A.
+Sec. B details loss functions employed in our method. The implementation details
+are discussed in Sec. C. Sec. D shows additional qualitative and quantitative
+results. Sec. E offers a complementary analysis of the efficacy of our approach.
+A
+Evaluation Metrics
+The definitions of metrics are given in Tab. S1, including accuracy (acc), completeness (comp), precision (prec), recall, F-score, normal consistency (normal
+c.), chamfer L1 distance (Chamfer-L1), and peak signal-to-noise ratio (PSNR).
+Lower values denote superior performance for accuracy, completeness, and chamfer L1 distance, whereas higher values are preferable for precision, recall, F-score,
+normal consistency, and PSNR.
+Table S1: Definitions of evaluation metrics. p is the sampled point cloud from the
+predicted mesh, while p̄ is from the ground truth. np and np̄ represent normal vectors
+n
+computed from the prediction and ground truth respectively. Cn
+pred / Cgt is the n-th
+predicted/ground truth image. NI is the number of images for evaluation.
+Metric
+Acc
+Comp
+Chamfer-L1
+Prec
+Recall
+F-score
+Normal-Acc
+Definition
+meanp∈P (minp̄∈P̄ ||p − p̄||1 )
+meanp̄∈P̄ (minp∈P ||p − p̄||1 )
+meanp∈P
+Normal-Comp
+meanp̄∈P̄ nTp np̄
+Acc+Comp
+2
+meanp∈P (minp̄∈P̄ ||p − p̄||1 < .05)
+meanp̄∈P̄ (minp∈P ||p − p̄||1 < .05)
+2×Prec×Recall
+Prec+Recall
+s.t. p̄ = argmin ∥p − p̄∥1
+nTp np̄
+p̄∈P̄
+Normal Consistency
+PSNR
+B
+
+s.t. p = argmin ∥p − p̄∥1
+p∈P
+Normal-Acc+Normal-Comp
+2 p
+meann∈[1,NI ] (20 · log10 (1/
+n
+MSE(Cn
+pred , Cgt )))
+Details of Loss Function
+This section provides the computation for the RGB loss Lc , the depth loss Ld ,
+the normal loss Ln , the smooth loss Ls , and the Eikonal loss Le .
+To enhance the prediction of geometry and appearance, the RGB loss comprises the color loss with density derived from SRDF, denoted as LSRDF
+, and
+c
+20
+R. Yin et al.
+another color loss with density transformed from SDF, denoted as LSDF
+. They
+c
+are calculated as follows:
+\begin {aligned} \mathcal {L}_{c} &= \mathcal {L}_{c}^{\text {SRDF}} + \mathcal {L}_{c}^{\text {SDF}} \\ \mathcal {L}_{c}^{\text {SRDF}} &= \frac {1}{N_s}\sum _{\rvr \in \mathcal {S}^2} {\parallel \textbf {C}^{\text {SRDF}} - \bar {\textbf {C}}\parallel }_1 \\ \mathcal {L}_{c}^{\text {SDF}} &= \frac {1}{N_s}\sum _{\rvr \in \mathcal {S}^2} {\parallel \textbf {C}^{\text {SDF}} - \bar {\textbf {C}}\parallel }_1 \\ \end {aligned}
+(S-1)
+where S 2 represents the set of rays in a minibatch. C̄ denotes the ground truth of
+color. CSRDF is the rendered color with density derived from SRDF as detailed in
+Eq. (5), while CSDF represents the color rendered with the density that is derived
+from SDF according to Eq. (3). Ns refers to the number of points sampled per
+minibatch.
+The depth and normal losses, serving to constrain the 3D geometry, are
+defined as follows:
+\begin {aligned} {D} &= \sum _{i=1}^N T_i\alpha _i {z}_i, {\textbf {N}}=\sum _{i=1}^N T_i\alpha _i \mathbf {n}_i \\ \mathcal {L}_d &= \frac {1}{N_s}\sum _{\rvr \in \mathcal {S}^2} {\parallel (w{{D}}+q) -\bar {D}\parallel }_2 \\ \mathcal {L}_n &= \frac {1}{N_s}\sum _{\rvr \in \mathcal {S}^2} ({\parallel {\textbf {N}} - \bar {\textbf {N}}\parallel }_1 + {\parallel 1 - {\textbf {N}}^T\bar {\textbf {N}}\parallel }_1) \\ \end {aligned}
+(S-2)
+where D̄ and N̄ correspond to the ground truth of depth and normal, predicted
+by the pre-trained Omnidata model [8]. D and N denote rendered depth and
+normal, respectively. Ti and αi are computed by Eq. (1) with density derived
+from SRDF. To address potential depth ambiguities, a scale parameter w and a
+shift parameter q are utilized to ensure predicted depth D matches the ground
+truth D̄, as utilized by MonoSDF.
+The smooth loss, defined in Eq. (S-3), is computed by considering the gradients of the SDF between adjacent points. This encourages a smoother reconstructed surface.
+\begin {aligned} \mathcal {L}_s = \frac {1}{N_{sm}}\sum _{\textbf {p} \in \mathcal {X}} {\parallel \nabla {d_\Omega (\textbf {p})} - \nabla {d_\Omega (\textbf {p} + \varepsilon )}\parallel }_2 \\ \end {aligned} \label {eq: smooth loss}
+(S-3)
+where ε is a small perturbation applied to the point. X is the set of sampled
+points. dΩ (p) refers to the SDF output produced by the geometry MLP. Additionally, Nsm indicates the number of points for computing the smooth loss.
+The Eikonal loss [12] serves as a regularization term for SDF prediction,
+detailed in Eq. (S-4).
+\begin {aligned} \mathcal {L}_e = \frac {1}{N_{ei}}\sum _{\textbf {p} \in \mathcal {X}} ({\parallel \nabla {d_\Omega (\textbf {p})}\parallel }_2 - 1)^2 \\ \end {aligned} \label {eq: eikonal loss}
+where Nei refers to the number of sampled points for the Eikonal loss.
+(S-4)
+Ray-Distance Volume Rendering for Neural Scene Reconstruction
+C
+21
+Implementation Details
+The MLP representation employs a geometry MLP comprising 8 layers with a
+hidden dimension of 256, while the grid representation utilizes two layers. Both
+the color MLP and SRDF MLP consist of two layers each, with an intermediate
+output comprising 256 channels. Softplus is used as the activation layer in the
+geometry MLP and SRDF MLP, while ReLU is applied in the color MLP. The
+network utilizes geometric initialization [1] and is optimized over 200,000 iterations with Adam optimizer [16]. The resolution of 2D output is set to 384 × 384.
+Each iteration includes the sampling of 1024 rays. The initial learning rate is configured as 5e-4 for geometry MLP and color MLP, 1e-5 for the SRDF branch, and
+1e-2 for feature grids. The hyperparameter k in the SRDF-SDF consistency loss
+is set to 12. Loss weights {λd , λn , λe , λs , λcon , λvis } are {0.1, 0.05, 0.05, 0.005, 1.0,
+0.001}. Following MonoSDF, the ground truth for monocular geometric cues is
+predicted by the pre-trained Omnidata model [8]. The optimization is performed
+on one NVIDIA A100 GPU.
+D
+Additional Results
+D.1
+Additional Ablation Study
+Impact of SRDF Branch: Additional ablation study, shown in Tab. S3, evaluates the importance of SRDF branch. The experiments include: (a) Baseline:
+MonoSDF with MLP representation. (b) SDF to SRDF : this setup generates
+SRDF from the predicted SDF, eliminating the need for the SRDF branch. The
+SRDF is then used to calculate volume density. (c) SRDF branch: SRDF is predicted by the SRDF branch. In Tab. S3, Row (b) performs much worse than
+the baseline. The reason is that the SDF prediction for a single point is affected
+by all nearby objects, which can result in inaccuracies, generating false surfaces
+and imprecise SRDF. Thus, without the SRDF branch, SRDF-based volume
+rendering may yield inaccurate weights, encountering the same issues as SDFbased volume rendering. Moreover, since the surface is interpolated by the SDF of
+near-surface points, SRDF derived from SDF lacks adequate supervision for SDF
+during training, which can result in poorer geometry. Hence, generating SRDF
+from the SDF branch is not optimal. Instead, Row (c) shows that the structure
+with an SRDF branch can avoid the influence of inaccurate SDF and achieve
+better results. Additionally, the joint optimization of SRDF and SDF branches
+can integrate SRDF information into the SDF branch, thereby improving SDF
+prediction. In conclusion, the SRDF branch is crucial for SRDF-based volume
+rendering.
+Impact of SDF Prediction: Tab. S2 measures the importance of using SDF
+for 3D surface localization. Two configurations are compared: (1) RS. Den. (w/o
+SDF): This structure only predicts ray-specific SRDF, without using SDF for 3D
+geometry representation. During training, color loss and depth loss are used to
+optimize the network. Since SRDF relies on viewing direction, directly extracting
+the surface from SRDF is not feasible. Therefore, during inference, to generate
+22
+R. Yin et al.
+Fig. S1: Visualization of structures with/without SDF on ScanNet. With
+SDF representing the surface geometry, our method (RS. Den.) generates smoother
+and more accurate surfaces.
+Table S2: Ablation study for the impact of SDF in our method on ScanNet.
+Method
+RS. Den. (w/o SDF)
+RS. Den.
+Acc ↓
+0.061
+0.040
+Comp ↓
+0.079
+0.044
+Prec ↑
+0.600
+0.772
+Recall ↑
+0.540
+0.720
+F-score ↑
+0.568
+0.745
+3D meshes, the network first renders 2D depth with volume density derived
+from SRDF, after which TSDF Fusion [5] is adopted to fuse the multi-view
+depth maps. (2) RS. Den.: This structure predicts both SRDF and SDF, where
+SRDF models the volume density and SDF locates 3D surfaces. Notably, the
+SRDF-SDF consistency loss and self-supervised visibility task are not employed
+in this ablation study. In Tab. S2, The structure RS. Den. (w/o SDF) achieves
+much worse results than RS. Den.. This occurs because the depth label in the
+depth loss is generated by a pre-trained network, which may yield inaccurate
+absolute depth and introduce noises. Besides, the scale inconsistency between
+overlapped regions in the predicted depth also results in coarse surfaces, e.g.
+Table S3: Ablation study for the impact of SRDF branch in our method on ScanNet.
+a
+b
+c
+Method
+Baseline
+SDF to SRDF
+SRDF branch
+Acc ↓
+0.035
+0.049
+0.040
+Comp ↓
+0.048
+0.068
+0.044
+Prec ↑
+0.799
+0.673
+0.772
+Recall ↑
+0.681
+0.591
+0.720
+F-score ↑
+0.733
+0.628
+0.745
+Ray-Distance Volume Rendering for Neural Scene Reconstruction
+23
+Fig. S2: Visualization for ablation study. Our ray-specific volume density (RS.
+Den.), SRDF-SDF consistency loss (Con. L.), and self-supervised visibility task (Vis.)
+all lead to better performance.
+Table S4: Evaluation of 3D reconstruction meshes on ScanNet.
+Method
+NeuRIS [40]
+NeuRIS + ours
+Acc ↓
+0.050
+0.044
+Comp ↓
+0.049
+0.046
+Prec ↑
+0.717
+0.768
+Recall ↑
+0.669
+0.717
+F-score ↑
+0.692
+0.742
+walls and floors, as illustrated in Fig. S1. In contrast, our structure with SDF
+yields superior reconstruction meshes.
+Visualization for Ablation Study: To further comprehend the effectiveness
+of our proposed method, Fig. S2 shows the visualization for ablation study. It
+can be seen that our ray-specific volume density, SRDF-SDF consistency loss,
+and self-supervised visibility task all contribute to high-quality reconstruction.
+D.2
+Applying Our SRDF-based Solution to NeuRIS [40]
+In 3D surface reconstruction, VolSDF [46] and NeuS [42] are two mainstream
+baselines that apply volume rendering based on SDF. Our baseline MonoSDF,
+discussed in the main text, is an extension of VolSDF for indoor scene reconstruction. To assess the generalization of our method, we also apply our method
+to the NeuS-based method, namely NeuRIS [40], which also operates on indoor
+scenes. Tab. S4 compares our method based on NeuRIS and the baseline NeuRIS.
+Fig. S3: Visualization of NeuRIS and our method on ScanNet. Our method
+improves the reconstruction performance.
+24
+R. Yin et al.
+Table S5: 3D reconstruction metrics for objects on ScanNet.
+MonoSDF_Grid
+Ours_Grid
+MonoSDF_MLP
+Ours_MLP
+3-class objects
+Comp↓
+Recall↑
+0.041
+0.754
+0.035
+0.801
+0.034
+0.849
+0.026
+0.886
+All objects
+Comp↓
+Recall↑
+0.047
+0.662
+0.036
+0.779
+0.038
+0.772
+0.031
+0.827
+Our approach outperforms NeuRIS by a significant margin, e.g. achieving a 4.8%
+increase in recall and a 5.0% increase in F-score. Qualitative comparisons are
+given in Fig. S3. Our approach demonstrates the ability to reconstruct more accurate surfaces compared to NeuRIS. Overall, these results highlight the efficacy
+of our method across both VolSDF-based and NeuS-based methods.
+D.3
+Additional Reconstruction Results
+To further verify that our method is beneficial for small/thin objects, we also
+evaluate the reconstruction performance for objects. Using the semantic segmentation mask as prior, we adopt two evaluation approaches: (1) Assessing ‘3class objects’ including chairs, tables, and lamps, which often contain thin/small
+regions. (2) Evaluating ‘all objects’ excluding walls, ceilings, floors, windows,
+and doors, as they may not include thin/small regions. In Tab. S5, compared
+to MonoSDF, our method demonstrates significant improvements in both completeness and recall, confirming its effectiveness in object reconstruction.
+Fig. S4 and Fig. S5 give additional visualizations on ScanNet and Replica, respectively, with the grid representation. In comparison to MonoSDF, our method
+demonstrates superior performance in capturing more surfaces and details, e.g.
+chairs, toilets, and shelves.
+Fig. S6 and Fig. S8 present the reconstructed surfaces using grid and MLP
+representations on Tanks and Temples. It can be seen that our approach yields
+much better surfaces compared to MonoSDF and Occ_SDF_Hybrid.
+D.4
+Visualization for View Synthesis
+Fig. S7 presents visualization for rendered views. MonoSDF with MLP representation produces blurred regions, whereas our method captures more details
+and textures in the rendered views. Similarly, with the grid representation, our
+approach generates more precise views.
+E
+Additional Analysis
+E.1
+Analysis for Reconstruction
+The reconstruction task aims to predict accurate SDF values. Existing NeRFbased reconstruction methods [13, 46] typically apply a 2D color loss as the primary loss function, in which the predicted color is rendered with volume density
+Ray-Distance Volume Rendering for Neural Scene Reconstruction
+25
+Fig. S4: Additional results on ScanNet. Our method can recall more regions.
+derived from SDF. However, the 2D color loss aims to learn the actual appearance, potentially interfering with the optimization of 3D geometry. For example,
+in the toy scene depicted in Fig. 1, the 2D color loss guides the network to assign
+a higher weight to the point P and a lower weight to the point Q. Consequently,
+the lower weight for the point Q encourages the network to learn a SDF with
+a larger absolute value, contradicting the actual SDF for Q. This discrepancy
+negatively impacts surface reconstruction, particularly for small objects and thin
+regions.
+Our method, including the ray-conditioned density function with SRDF, the
+SRDF-SDF consistency loss, and the self-supervised visibility task, can solve
+the aforementioned issue, generating more accurate surface geometry. The reasons are as follows: (1) Reduced negative impact from 2D output: Our
+approach utilizes SRDF to represent density, guiding the network to predict a
+positive SRDF with a large absolute value at point Q, consistent with SRDF’s
+definition. This partially mitigates the negative influence of 2D losses on SDF.
+The comparison between Fig. S2 - (Baseline) and Fig. S2 -(RS. Den.) also proves
+that our method can generate better geometry, e.g. recalling thin objects. (2)
+Positive impact from the proposed SRDF-SDF consistency loss: As analyzed in Fig. 1, the density generated from the SRDF closely matches the actual
+observation. Hence, with multi-view input, the network can learn an accurate
+SRDF and density distribution among the entire 3D space. However, the network
+may struggle to produce precise SDF, resulting in missed surfaces, as shown in
+Fig. S2 -(RS. Den.). Our SRDF-SDF consistency loss is designed to ensure SDF
+shares the same sign as SRDF, which can facilitate the recall of missed surfaces.
+As observed in Fig. S2 -(RS. Den. + Con. L.), more surfaces are recalled. (3)
+Positive impact from the proposed self-supervised visibility task: Our
+self-supervised visibility task incorporates the physical visibility prior into the
+network, which can help the learning of SRDF and SDF. The comparisons in
+Fig. S2 demonstrate that our self-supervised visibility task can recover more
+26
+R. Yin et al.
+Fig. S5: Additional results on Replica. Our method can generate more details.
+Fig. S6: Additional results on Tanks and Temples. Our method enhances the
+quality of reconstructed meshes.
+surfaces. Overall, our proposed method contributes to producing accurate SDF
+and reconstructing superior 3D geometry.
+E.2
+Analysis for View Synthesis
+Existing methods [13, 46] utilize SDF to generate the volume density. However,
+as depicted in Fig. 1 and Fig. 5, the transformed density and weight derived
+from predicted SDF may introduce noises during volume rendering, resulting in
+inaccurate 2D color and consequently low PSNR. In contrast, our approach generates volume density from SRDF when rendering 2D color, ensuring consistent
+weights with actual observations and avoiding the influence of SDF. As a result,
+views rendered by our method achieve higher PSNR.
+Ray-Distance Volume Rendering for Neural Scene Reconstruction
+27
+Fig. S7: Visualization of rendered views. Our method improves the quality of
+generated views.
+28
+R. Yin et al.
+Fig. S8: Qualitative comparisons on Tanks and Temples. Compared to other
+methods, our method can reconstruct more surfaces and recover details.

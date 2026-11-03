@@ -1,0 +1,153 @@
+monorepo for my projects and sites. dockerised, deployable. - [SEAN-704] refactor: retire naive meshing, the mesher emits PackedQuad only by seanmizen · Pull Request #721 · seanmizen/seanorepo
+
+[SEAN-704] refactor: retire naive meshing, the mesher emits PackedQuad only by seanmizen · Pull Request #721 · seanmizen/seanorepo · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+seanmizen
+commented
+Oct 15, 2026
+Copy link
+Copy Markdown
+Owner
+Closes #704
+Summary
+Greedy is the only mesher. This PR removes MeshingMode, the --meshing flag, generateMeshForMode, the one-quad-per-face mesher, updateForBlockChange, swapRemoveQuad, quad_block, quad_highlight and decayHighlights.
+generateMesh (the greedy mesher) writes one 16-byte PackedQuad per quad to Mesh.quads, and the y range of the quads to Mesh.y_min and Mesh.y_max. Mesh has no VoxelVertex list and no index list.
+uploadChunkMeshToGPU writes the header and then Mesh.quads with no conversion. The pack_scratch copy and packQuads are gone. The frustum cull gets the y range from the mesh.
+async_chunks.Result carries quads: []PackedQuad and the y range, not 4 slices.
+--depth-stencil=off: sortByDepth sorts the packed quads back to front into Mesh.sorted_quads, and the upload writes that list. The centroid comes from the packed quad. Each centroid is an integer or a half integer, so the depths are the same f32 values as before. The depth_stencil_off frame is byte-identical to main.
+GPU debug: one value for each chunk. uploadChunkMeshToGPU writes the debug tick of the rebuild into the buffer header (origin.y, unused before). The uniform _padding is now debug_tick (0 when GPU debug is off). rebuildTint in voxel.wgsl gives (255 - 4 × age) / 255 for 64 ticks (about 0.5 s at 120 Hz), the same fade as the old per-quad decay. The clock advances only on executing ticks in TAS step mode, as before. Cmd+G and Ctrl+G still toggle it. A fade needs no upload now. Before, GPU debug packed and uploaded every chunk every frame.
+Removed tests/greedy_vs_naive.sh and .tas. Updated .claude/rules/swindowzig-voxel.md, docs/memory.md, docs/async-chunks.md, docs/chunk-size-investigation.md, scripts/benchmark.sh and comments.
+Bytes for each quad
+Where
+Before
+After
+CPU mesh (Mesh)
+221 B: 4 × 48 B VoxelVertex + 6 × 4 B indices + 4 B quad_block + 1 B quad_highlight
+16 B (PackedQuad)
+Async result (worker to main)
+221 B (4 slices)
+16 B (1 slice)
+Extra with --depth-stencil=off
+16 B SortEntry + 24 B sorted indices, then a 16 B pack into pack_scratch
+16 B SortEntry + 16 B sorted_quads
+GPU buffer
+16 B
+16 B (no change)
+Quad hash (zig build bench-mesher -Doptimize=ReleaseFast)
+Before (main)
+After
+Quad hash
+4b4f00654f783b36
+4b4f00654f783b36
+Quads (49 chunks)
+19821
+19821
+Skylight hash
+d35232a111956058
+d35232a111956058
+Mesh per chunk, median
+896 µs
+761 µs
+The hash uses the same algorithm: sort the packed quads of each chunk, Wyhash them, and add the chunk hashes. The timings come from a shared cloud machine with other jobs on it, so they are only approximate. (The skylight time on the same run, with no code change, went from 216 µs to 398 µs.)
+Test plan
+zig fmt --check . (in utils/swindowzig)
+zig build test: 45/45 steps. New mesher tests: each packed quad decodes to the face, block and light of its cell, the y range matches, the centroid is the mean of the corners. sortByDepth writes every quad once, back to front, for the full sort and for the insertion sort. The border test in async_chunks.zig compares packed quads and the y range.
+zig build native -Dexample=voxel
+./zig-out/bin/voxel --headless --tas examples/voxel/framespike.tas exits 0
+bun run build:voxel
+./examples/voxel/scripts/run_headless_regressions.sh (lavapipe): 12 passed. The goldens do not change. I also built origin/main and compared all 12 captured frames with cmp: they are byte-identical to the frames of this branch, depth_stencil_off included. (msaa_flatland_fxaa differs from its golden by 60 px on main too, inside the tolerance.)
+bench_mesher quad hash 4b4f00654f783b36 before and after.
+GPU debug tint, headless with lavapipe: dig_relight.tas --gpu-debug gives an orange-shifted frame (the chunks were rebuilt less than 64 ticks before the capture). framespike.tas --gpu-debug (capture more than 64 ticks after the last rebuild) is byte-identical to the frame with GPU debug off, so the tint fades to 0.
+grep for naive meshing: grep -rniE "naive|--meshing|greedy_vs|updateForBlockChange|quad_block|quad_highlight|decayHighlights|MeshingMode|generateMeshForMode|packQuads|sort_indices|swapRemoveQuad" over the repo (no node_modules, .git, .yarn, build output) finds only stb_image.h (vendored, a comment about a bit buffer) and utils/debbie/2026-09-17/payload/assert.sh (not related to meshing). I changed "naive BFS" in docs/lighting.md to "simple BFS" so the voxel tree has no hit.
+yarn fix: no changes. STE lint on the new prose: no hard findings.
+Not verified
+The windowed GPU smoke test (timeout 5 ./zig-out/bin/voxel): the cloud has no display. With SDL_VIDEODRIVER=offscreen, SDL gives no window info, so the GPU does not start. The headless --dump-frame runs above use the same render path on lavapipe, with depth on and off.
+Any browser check: the cloud has no browser. The web build compiles.
+The interactive dig, place and Cmd+G tint: no input device and no window here.
+macOS (Metal) and the web WebGPU backend: the new shader code (rebuildTint, u32 uniform field) ran only on lavapipe through wgpu-native.
+Verification for the on-machine session
+zig build run -Dexample=voxel: the world loads, chunks load past spawn.
+Dig a block in the middle of a chunk: the hole shows at once, with no gap.
+Dig and place a block at a chunk edge: the neighbour chunk shows its face with no gap.
+Press Cmd+G (Ctrl+G on Windows/Linux), then dig: the edited chunk (and the neighbour chunk at an edge) flashes orange and fades in about 0.5 s. Press it again: no tint.
+Same three checks in a browser (bun run dev:voxel), with Ctrl+G or Cmd+G. Check the browser console for WebGPU validation errors.
+--depth-stencil=off: walk and look around. No sort artifacts, the same as main.
+--tas-step with a TAS that digs: the tint stays between steps and fades only when a step runs.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01VEjT6FPzmYWirxiJ5q3nMR
+Generated by Claude Code
+claude
+added 3 commits
+October 15, 2026 13:18
+[SEAN-704] refactor: retire naive meshing, the mesher emits PackedQua…
+…
+f37a850
+```
+…d only
+
+Greedy is now the only mesher. The mesher writes one 16-byte PackedQuad
+per quad and the y range of the mesh. The upload, the async result and
+sortByDepth use these bytes as they are. The per-quad debug highlight is
+now one "rebuilt at" tick for each chunk, in the header of the quad
+buffer. The shader fades the orange tint over 64 ticks.
+
+Remove MeshingMode, the --meshing flag, updateForBlockChange, quad_block,
+quad_highlight and the greedy_vs_naive test. Update the docs and the
+voxel rules file.
+
+Mesh bytes per quad: 221 before, 16 after. The bench_mesher quad hash
+stays 4b4f00654f783b36. The lavapipe frames are byte-identical to main.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VEjT6FPzmYWirxiJ5q3nMR
+```
+Merge remote-tracking branch 'origin/main' into SEAN-704/packed-quad-…
+…
+a4aee5a
+```
+…mesher
+```
+[SEAN-704] fix: stage benchmark uses the PackedQuad mesher
+…
+11108b4
+```
+stage_bench.zig came from main and called generateMeshForMode and
+packQuads. This branch removes both. The benchmark now calls
+generateMesh and hashes mesh.quads. The three hashes do not change:
+block db5d8508a4c6cd54, skylight d35232a111956058, quad
+4b4f00654f783b36, native and wasm.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VEjT6FPzmYWirxiJ5q3nMR
+```
+Hide details
+View details
+seanmizen
+merged commit 7ed4af1
+into
+main
+Oct 15, 2026
+6 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+seanmizen
+deleted the
+SEAN-704/packed-quad-mesher
+branch
+October 15, 2026 14:55
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

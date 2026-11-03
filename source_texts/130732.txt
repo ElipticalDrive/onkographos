@@ -1,0 +1,984 @@
+MPI-hybrid Parallelism for Volume Rendering on Large,
+Multi-core Systems
+M. Howison, E. W. Bethel, and H. Childs
+Visualization Group, Lawrence Berkeley National Laboratory
+Abstract
+This work studies the performance and scalability characteristics of “hybrid” parallel programming and execution
+as applied to raycasting volume rendering – a staple visualization algorithm – on a large, multi-core platform.
+Historically, the Message Passing Interface (MPI) has become the de-facto standard for parallel programming and
+execution on modern parallel systems. As the computing industry trends towards multi-core processors, with fourand six-core chips common today and 128-core chips coming soon, we wish to better understand how algorithmic
+and parallel programming choices impact performance and scalability on large, distributed-memory multi-core
+systems. Our findings indicate that the hybrid-parallel implementation, at levels of concurrency ranging from
+1,728 to 216,000, performs better, uses a smaller absolute memory footprint, and consumes less communication
+bandwidth than the traditional, MPI-only implementation.
+Categories and Subject Descriptors (according to ACM CCS): D.1.3 [Programming Techniques]: Concurrent
+Programming—Parallel programming, F.1.2 [Computation by Abstract Devices]: Modes of Computation—
+Parallelism and concurrency, I.3.3 [Computer Graphics]: Picture/Image Generation—Display algorithms
+1. Introduction
+It is well accepted that the future of parallel computing involves chips that are comprised of many (smaller) cores.
+With this trend towards more cores on a chip, many in
+the HPC community have expressed concern that parallel
+programming languages, models, and execution frameworks
+that have worked well to-date on single-core massively parallel systems may “face diminishing returns” as the number of computing cores on a chip increase [ABC∗ 06]. In the
+broader high-performance computing community, this general topic has engendered much interest but little published
+research to date.
+In this context, the focus of our work is on exploring
+the performance and scalability of a common visualization
+algorithm – raycasting volume rendering – implemented
+with different parallel programming models and run on a
+large supercomputer comprised of six-core chips. In this
+study, we compare a traditional implementation based on
+message-passing against a “hybrid” parallel implementation,
+which uses a blend of traditional message-passing (interchip) and shared-memory (intra-chip) parallelism. The the-
+Figure 1: This 46082 image of a combustion simulation
+result was rendered by our MPI+pthreads implementation
+running on 216,000 cores of the JaguarPF supercomputer.
+M. Howison, E.W. Bethel, & H. Childs / MPI-hybrid Parallelism for Volume Rendering on Large, Multi-core Systems
+sis we wish to test is whether there are opportunities in the
+hybrid-parallel implementation for performance and scalability gains that result from using shared-memory parallelism among cores within a chip.
+Over the years, there has been a consistent and welldocumented concern that the overall runtime of large-data
+visualization algorithms is dominated by I/O costs (e.g.,
+[SKP96, KMM∗ 01, PYR∗ 09]). During our experiments, we
+observed results consistent with previous work: there is a
+significant cost associated with scientific data I/O. In this
+study, however, we focus exclusively on the performance
+and scalability of the ray casting volume rendering algorithm, not on parallel I/O performance. This approach is
+valid for many visualization use cases, such as creating multiple images from a single dataset that fits entirely within the
+memory footprint of a large system, or creating one or more
+images of data that is already resident in memory, as in the
+case of in-situ visualization.
+Our findings (Section 4) show that there is indeed opportunity for performance gains when using hybrid-parallelism
+for raycasting volume rendering across a wide range of concurrency levels. The hybrid-parallel implementation runs
+faster, requires less memory, and for this particular algorithm and set of implementation choices (Section 3), consumes less communication bandwidth than the traditional,
+MPI-only implementation.
+2. Background and Previous Work
+2.1. Parallel Volume Rendering
+Volume rendering is a common technique for displaying 2D
+projections of 3D sampled data [Lev88,DCH88] and is computationally, memory, and data I/O intensive. In the quest
+towards interactivity, as well as to address the challenges
+posed by growing data size and complexity, there has been
+a great deal of work over the years in the space of parallel
+volume visualization (see Kaufman and Mueller [KM05] for
+an overview).
+Within the field of parallel volume rendering, our work
+focuses on examining a form of “hybrid parallelism,” which
+is distinct and different from the term “hybrid volume rendering.” Hybrid volume rendering refers to using combination of image- and object-order techniques to perform rendering [KM05]. In contrast, hybrid parallel refers to the use
+of a mixture of shared- and distributed-memory algorithms,
+programming, and execution environments [LG08].
+However, our hybrid-parallel implementation also makes
+use of hybrid volume rendering (e.g. [MPHK93, TH94,
+Ma95, BIJP99]), starting with an object-order partitioning to
+distribute source data blocks to processors where they are
+rendered using ray casting [Lev88, Sab88, DCH88, UK88].
+Within a processor, we then use an image-space decomposition, similar to [NL92], to allow multiple rendering threads
+to cooperatively generate partial images that are later combined via compositing into a final image ( [DCH88, Lev88,
+UK88]).
+Hybrid volume rendering techniques have proven successful in achieving scalability and tackling large data sizes.
+The TREX system [KMM∗ 01] is a hybrid volume rendering algorithm on a shared-memory platform that uses
+object-parallel data domain decomposition and texturebased, hardware-accelerated rendering followed by a parallel, software-based composition phase with image-space
+partitioning. The design choices for which part of the SGI
+Origin to use for different portions of the algorithm reflect
+a desire to achieve optimal performance at each algorithmic stage and to minimize inter-stage communication costs.
+Childs et al. [CDM06] present a hybrid scheme for volume
+rendering massive datasets (with one hundred million unstructured elements and a 30003 rectilinear data set). Their
+approach parallelizes over both input data elements and output pixels, and is demonstrated to scale well on up to 400
+processors. Peterka et al. were the first to run a hybrid volume rendering algorithm at massive concurrency, rendering
+44803 data sizes with 32,000 cores on an IBM BG/P system [PYR∗ 09]. They demonstrated generally good scalability and found that the compositing phase slowed down when
+more than ten thousand cores were involved, likely due to
+hardware or MPI limitations. To address this problem, they
+reduced the number of processors involved in the compositing phase.
+The most substantial difference between our work and
+previous work in hybrid volume rendering is that we are exploiting hybrid parallelism. In addition, we contribute to the
+knowledge of hybrid volume rendering at massive concurrency: we performed experiments with up to 216,000 cores,
+which is more than six times larger than previously published results. Further, our study reproduces the degradation
+in compositing performance first discovered by Peterka et
+al. [PYR∗ 09] via a different software implementation and
+supercomputer, and we present results that characterize this
+effect in more detail.
+2.2. Traditional and Hybrid Parallelism
+The Message Passing Interface (MPI) evolved as the defacto standard for parallel programming and execution on
+machines consisting of single-core CPUs interconnected via
+a high-speed fabric [SOHL∗ 98]. To use MPI, an application
+developer must explicitly add MPI library calls to an application to implement fundamental parallel execution motifs:
+data scatter and gather, execution synchronization, and so
+forth. In MPI parlance, a processing element (PE) is the fundamental unit of execution, and historically each MPI PE has
+mapped one-to-one to the processors of a massively parallel (MPP) system. To support more recent multi-core MPPs,
+vendors’ MPI implementations provide support for MPI PEs
+to be mapped onto one or more cores of multi-core chips.
+M. Howison, E.W. Bethel, & H. Childs / MPI-hybrid Parallelism for Volume Rendering on Large, Multi-core Systems
+However, on multi-core platforms, there may be opportunities for more efficient inter-PE communication through local, high-speed, shared memory that bypasses the MPI interface.
+[HJR09, MTT∗ 09]) has focused on benchmarking wellknown computational kernels. In contrast, our study examines this space from the perspective of visualization algorithms.
+Shared-memory parallel applications are somewhat easier to develop than distributed memory ones as there is no
+need to explicitly move data among parallel program elements. Instead, each execution thread has access to the
+same shared memory within a single address space. Common programming models for shared-memory parallelism
+include POSIX threads [But97], OpenMP [CDK∗ 01], and
+Intel Thread Building Blocks [Rei07]. These APIs allow
+applications to manage creation and termination of execution threads, and synchronize thread execution through
+semaphores and mutexes. The scalability of shared-memory
+codes is typically limited by physical constraints: there are
+typically only a few cores in a single CPU. Four to six cores
+per CPU are common today, although the trend seems to be
+towards hundreds to thousands of cores per chip.
+The previous studies point to several areas where MPIhybrid may outperform MPI-only. First, MPI-hybrid tends to
+require less memory for applications with domain decomposition (e.g. parallel volume rendering), since fewer domains
+means less “surface area” between domains and hence less
+exchange of “ghost zone” data. Second, the MPI runtime allocates various tables, buffers, and constants on a per-PE
+basis. Today, the gain from using fewer PEs to reduce this
+memory overhead may seem small with only four or six
+cores per chip, but the trend towards hundreds of cores per
+chip with less memory per core will magnify these gains.
+Third, MPI-hybrid can use only one PE per node for collective operations such as scatter, gather and all-to-all, thereby
+reducing the absolute number of messages traversing the
+inter-connect. While the size of the messages in this scenario may be larger or smaller depending upon the specific
+problem, a significant factor influencing overall communication performance is latency, which is reduced by using fewer
+messages.
+In all of the above models, the developer must explicitly
+design for parallelism, as opposed to relying on a compiler
+to discover and implement parallelism. Other approaches,
+which allow the developer to express parallelism implicitly
+via language syntax, include data-parallel languages (e.g.,
+CUDA [NVI08]), languages with data parallel extensions
+(e.g., High Performance Fortran [Hig93]), and partitioned
+global address space (PGAS) languages (e.g., Unified Parallel C (UPC) [EGCSY05], which offers the developer a
+single-address space view of memory, even on distributed
+memory platforms).
+Hybrid parallelism has evolved in response to the
+widespread deployment of multi-core chips in distributedmemory systems. An MPI-hybrid model allows data movement among nodes using traditional MPI motifs like scatter and gather, but within nodes using shared-memory parallelism via POSIX threads or OpenMP. Previous work comparing MPI-only with MPI-hybrid implementations (e.g.,
+The primary contributions of our work is a comparison
+of the performance and resource requirements of hybridand traditional-parallel implementations of raycasting volume rendering. Our methodology and results (Section 4) are
+consistent with those identified in previous studies of hybrid
+parallelism from the HPC community (e.g., [HJR09]).
+3. Implementation
+From a high level view, our parallel volume rendering implementation repeats a design pattern that forms the basis
+of previous work (e.g., [MPHK93, TH94, Ma95, BIJP99]).
+Given a source data volume S and n parallel processes, each
+process reads in 1n of S. Next, each of the n processes performs raycasting volume rendering on its data subdomain
+Figure 2: Diagram of our system architecture.
+M. Howison, E.W. Bethel, & H. Childs / MPI-hybrid Parallelism for Volume Rendering on Large, Multi-core Systems
+to produce a set of image fragments. Next, each of the n
+processes participates in a compositing stage in which fragments are exchanged and combined into a final image. Each
+of the n processes then sends it portion of the completed
+image to process 0 for display or I/O to storage. Figure 2
+provides a block-level view of this organization. Our distributed memory parallel implementation is written in C++
+and C and makes calls to MPI [SOHL∗ 98]. The portions
+of the implementation that are shared-memory parallel are
+written using a combination of C++ and C and either POSIX
+threads [But97] or OpenMP [CDK∗ 01], so that we are actually comparing two hybrid implementations that we refer to
+as MPI+pthreads and MPI+OpenMP.
+The MPI-only and MPI-hybrid implementations differ in
+several key respects. First, the raycasting volume rendering
+algorithm itself is serial on each MPI-only PE or is sharedmemory multicore-parallel in the MPI-hybrid case. We discuss this issue in more detail in Section 3.1. Second, the
+communication topology in the compositing stage differs
+slightly, and we discuss this issue in more detail in Section
+3.2. A third difference is in how data is partitioned across the
+pool of parallel processes. In the MPI-only implementation,
+each PE loads and operates on a disjoint block of data. In the
+MPI-hybrid case, each MPI PE loads a disjoint block of data
+and each of its worker threads operate in parallel on that data
+using an image-parallel decomposition [NL92].
+3.1. Parallel, Multicore Raycasting Volume Rendering
+Our raycasting volume rendering code implements Levoy’s
+method [Lev88]: we compute the intersection of a ray with
+the data block, and then compute the color at a fixed step
+size along the ray through the volume. All such colors along
+the ray are integrated front-to-back using the “over” operator. Output from our algorithm consists of a set of image
+fragments that contain an x, y pixel location, R, G, B, α color
+information, and a z-coordinate. The z-coordinate is the location in eye coordinates where the ray penetrates the block
+of data. Later, these fragments are composited in the correct
+order to produce a final image (see Section 3.2).
+In the MPI-only case, this serial implementation is invoked on each of the MPI PEs. Each operates on its own
+disjoint block of data. As we are processing structured rectilinear grids, all data subdomains are spatially disjoint, so we
+can safely use the ray’s entry point into the data block as the
+z-coordinate for sorting during the later composition step.
+In the MPI-hybrid case, the raycasting volume renderer
+on each MPI PE is a shared-memory parallel implementation
+consisting of T threads all executing concurrently to perform
+the raycasting on a single block of data. As in [NL92], we
+use an image-space partitioning: each thread is responsible
+for raycasting portion of the image. Our image-space partitioning is interleaved, where the image is divided into many
+small tiles that are distributed amongst the threads. Through
+a process of manual experimentation, we determined that an
+image tile size of 32 × 32 pixels produced consistently better
+performance than other tile sizes for a variety of source volume sizes on the six-core AMD Opteron processor. We also
+found that a dynamic work assignment of tiles to threads
+minimized load imbalance.
+3.2. Parallel Compositing
+The compositing algorithm takes the fragments generated
+by the raycasting algorithm and produces the final image.
+The compositing begins by partitioning the pixels of the final image amongst the MPI PEs. It then performs an all-toall communication step, where MPI PEs send and receive
+fragments. The sent fragments are the fragments from that
+MPI PE’s raycasting phase. The MPI PE identifies where
+to send fragments using the partition information. The received fragments correspond to the pixels of the final image
+that that MPI PE owns. The fragments are exchanged using an MPI_Alltoallv call. This call provides the same
+functionality as direct sends and receives, but bundles the
+messages into fewer point-to-point exchanges, and thus is
+more efficient. After the fragments are exchanged, each MPI
+PE is able to perform the final compositing for its portion of
+the larger image, using the “over” operator on the fragments.
+The final step is to collect the image subpieces to MPI PE 0
+and output the entire image.
+Peterka et al. [PYR∗ 09] reported scaling difficulties for
+compositing when using more than 8,000 MPI PEs. They
+solved this problem by reducing the number of MPI PEs receiving fragments to be no more than 2,000. We emulated
+this approach, again limiting the number of MPI PEs receiving fragments, although we experimented with values higher
+than 2,000.
+In the hybrid implementations, only one thread per socket
+participates in the compositing phase. That thread gathers
+fragments from all other threads in the same socket, packs
+them into a single buffer, and transmits them to other compositing PEs. This approach results in fewer messages than
+if all threads in the hybrid parallel implementation were to
+send messages to all other threads on all other CPUs. Our
+aim here is to better understand the opportunities for improving performance in the hybrid-parallel implementation.
+The overall effect of this design choice is an improvement in
+communication characteristics, as indicated in Section 4.4.2.
+4. Results
+4.1. Methodology
+Our methodology is designed to test the hypothesis that an
+MPI-hybrid implementation exhibits better performance and
+resource utilization than the MPI-only implementation. We
+compare the cost of MPI runtime overhead and corresponding memory footprint in Section 4.3.1; compare the absolute
+M. Howison, E.W. Bethel, & H. Childs / MPI-hybrid Parallelism for Volume Rendering on Large, Multi-core Systems
+amount of memory required for data blocks and ghost zone
+(halo) exchange in Section 4.3.2; compare scalability of the
+raycasting and compositing algorithms in Sections 4.4.1 and
+4.4.2; and compare the levels of communication required
+during the compositing phase in Section 4.4.2.
+Our test system, JaguarPF, is a Cray XT5 located at Oak
+Ridge National Lab and was recently ranked by the Top500
+list as the fastest supercomputer in the world with a theoretical peak performance of 2.3 Petaflops [Top09]. Each of
+the 18,688 nodes has two sockets, and each socket has a sixcore 2.6GHz AMD Opteron processor, for a total of 224,256
+compute cores. With 16GB per node (8GB per socket), the
+system has 292TB of aggregate memory and roughly 1.3GB
+per core.
+We conducted a strong scaling study where we rendered
+a 46082 image from a 46083 dataset (roughly 97.8 billion cells) at concurrency levels from 1,728-way parallel to
+216,000-way parallel. On JaguarPF, a minimum of 1,728
+cores is required to accommodate this particular problem
+size. In the hybrid case, we shared a data block among six
+threads and used one sixth as many MPI PEs. Although we
+could have shared a data block among as many as twelve
+threads on each dual-socket six-core node, we chose not to
+because sharing data across sockets results in non-uniform
+memory access. Based on preliminary tests, we estimated
+this penalty to be around 5 or 10% of the raycasting time.
+Therefore, we used six threads running on the cores of a single six-core processor.
+Because the time to render is view-dependent, we executed each raycasting phase ten times over a selection of
+ten different camera locations (see Figure 3). The raycasting times we report are an average over all locations.
+In the compositing phase, we tested five different ratios of
+total PEs to compositing PEs. We restricted the compositing
+experiment to only two views (the first and last) because it
+was too costly to run a complete battery of all view and ratio
+permutations. Since the runtime of each trial can vary due to
+contention for JaguarPF’s interconnection fabric with other
+users, we ran the compositing phase ten times for both views.
+We report mean and minimum times over this set of twenty
+trials. Minimum times most accurately represent what the
+system is capable of under optimal, contention-free condiMPI-only
+MPI PEs
+Block Dimensions
+123 =1728
+384 × 384 × 384
+243 =13824
+192 × 192 × 192
+363 =46656
+128 × 128 × 128
+483 =110592
+96 × 96 × 96
+603 =216000
+76 × 76 × 76
+MPI PEs
+288
+2304
+7776
+18432
+36000
+tions, while mean times help characterize the variability of
+the trials.
+4.2. Source Data and Decomposition
+Starting with a 5123 dataset of combustion simulation results
+, we used trilinear interpolation to upscale it to arbitrary
+sizes in memory. We scaled equally in all three dimensions
+to maintain a cubic volume. Our goal was to choose a problem size that came close to filling all available memory (see
+Table 1). Although upscaling may distort the results for a
+data-dependent algorithm, the only data dependency during
+raycasting is early ray termination. However, we found that
+for our particular dataset and transfer function, there was always at least one data block for which no early terminations
+occurred. Moreover, the cost of the extra conditional statement inside the ray integration loop to test for early termination added a 5% overhead. Therefore, we ran our study with
+early ray termination turned off, and we believe that upscaling the dataset does not effect our results.
+†
+† Sample data courtesy J. Bell and M. Day, Center for Computational Sciences and Engineering, Lawrence Berkeley National Laboratory.
+Color
+Black
+Black
+Black
+Cyan
+Magenta
+Yellow
+Red
+Green
+Blue
+Gray
+Camera
+(1, 0, 0)
+(0, 1, 0)
+(0, 0, 1)
+(0, 1, 1)
+(1, 0, 1)
+(1, 1, 0)
+(2, 1, 1)
+(1, 2, 1)
+(1, 1, 2)
+(1, 1, 1)
+Figure 3: The raycasting phase used these ten camera locations to approximate an “average” use case.
+MPI-hybrid
+Block Dimensions
+384 × 768 × 1152
+192 × 384 × 576
+128 × 256 × 384
+96 × 192 × 288
+76 × 153 × 230
+Memory Per Node
+10368MB
+1296MB
+384MB
+162MB
+80.4MB / 81.6MB
+Table 1: Problem size configurations and per-node memory requirements for our experiment. The memory usage for MPIhybrid and MPI-only at 216,000 cores differs because they have different dataset dimensions.
+M. Howison, E.W. Bethel, & H. Childs / MPI-hybrid Parallelism for Volume Rendering on Large, Multi-core Systems
+Cores
+Mode
+MPI PEs
+1728
+1728
+13824
+13824
+46656
+46656
+110592
+110592
+216000
+216000
+MPI-hybrid
+MPI-only
+MPI-hybrid
+MPI-only
+MPI-hybrid
+MPI-only
+MPI-hybrid
+MPI-only
+MPI-hybrid
+MPI-only
+288
+1728
+2304
+13824
+7776
+46656
+18432
+110592
+36000
+216000
+MPI Runtime Memory Usage
+Per PE (MB) Per Node (MB) Aggregate (GB)
+67
+133
+19
+67
+807
+113
+67
+134
+151
+71
+857
+965
+68
+136
+518
+88
+1055
+4007
+73
+146
+1318
+121
+1453
+13078
+82
+165
+2892
+176
+2106
+37023
+Table 2: Memory usage as measured directly after MPI initialization.
+Ghost Data (GB)
+50
+40
+30
+20
+10
+0
+00
+60
+21
+92
+05
+11
+6
+65
+46
+4
+82
+28
+13
+We chose concurrencies that are cubic numbers to allow for a clean decomposition of the entire volume into
+cubic blocks per MPI PE. In the MPI-hybrid case, however, these blocks are rectangular because we aggregated
+six blocks (1 × 2 × 3) into one shared block. For 216,000
+cores, we could not evenly divide the 46083 dataset, and
+chose to round down to a 45603 dataset for MPI-only and
+a 4560 × 4590 × 4600 dataset for MPI-hybrid. As a result,
+the MPI-only dataset is approximately 1.4% smaller than
+the MPI-hybrid dataset. While this difference might seem to
+give an advantage to the MPI-only implementation, results
+in later sections show that the MPI-hybrid performance and
+resource utilization are uniformly better than for MPI-only.
+60
+17
+Because the compute nodes on an XT5 system have no
+physical disk for swap, and hence no virtual memory, exceeding the physical amount of memory causes program termination. Our total memory footprint was four times the
+number of bytes in the entire dataset: one for the dataset
+itself, and the other three for the gradient data, which we
+computed by central difference and used in shading calculations. Although each node has 16GB of memory, we could
+reliably allocate only 10.4GB for the data block and gradient
+field at 1,728-way concurrency because of overhead from the
+operating system and MPI runtime.
+Cores
+MPI-only
+MPI-hybrid
+Figure 4: Ghost data required by our implementations.
+Cores
+1728
+13824
+46656
+110592
+216000
+MPI-only
+24.88s
+3.10s
+0.92s
+0.38s
+0.19s
+MPI+pthreads
+22.31s
+2.84s
+0.85s
+0.37s
+0.21s
+MPI+OpenMP
+22.23s
+2.83s
+0.85s
+0.37s
+0.20s
+Table 3: Raycasting times for our three implementations.
+4.3. Memory Usage
+4.3.1. Overhead at Initialization
+Because MPI-hybrid uses fewer MPI PEs, it incurs less
+memory overhead from the MPI runtime environment and
+from program-specific data structures that are allocated per
+PE. Table 2 shows the memory footprint of the program
+as measured directly after calling MPI_Init and reading
+in command-line parameters. We collected the VmRSS, or
+“resident set size,” value from the /proc/self/status
+interface. Memory usage was sampled only from MPI PEs
+0 through 6, but those values agreed within 1–2%. Therefore, the per-PE values we report in Table 2 are from PE 0
+and the per-node and aggregate values are derived from the
+per-task value: MPI-only uses twelve PEs per node versus
+MPI-hybrid’s two PEs per node, and in the aggregate MPIhybrid has one sixth as many PEs. At 216,000 cores, the perPE runtime overhead of MPI-only is more that 2× that of
+MPI-hybrid and the per-node and aggregate memory usage
+is another factor of six larger for MPI-only because it uses
+6× as many PEs as MPI-hybrid. Thus, MPI-only uses nearly
+12× as much memory per-node and in-aggregate than MPIhybrid to initialize the MPI runtime at 216,000-way concurrency.
+M. Howison, E.W. Bethel, & H. Childs / MPI-hybrid Parallelism for Volume Rendering on Large, Multi-core Systems
+4.3.2. Ghost Data
+Time in seconds
+Two layers of ghost data are required in our raycasting
+phase: the first layer for trilinear interpolation of sampled
+values, and the second layer for computing the gradient field
+using central differences (gradients are not precomputed for
+our dataset). Because the MPI-hybrid approach uses fewer,
+larger blocks in its decomposition, it requires less exchange
+and storage of ghost data by roughly 40% across all concurrencies (see Figure 4).
+4
+1,728
+3
+MPI-only
+MPI+pthreads
+MPI+OpenMP
+2
+1
+0
+10
+100
+1000
+4
+4.4.2. Compositing
+We observe the same effect that Peterka et al. [PYR∗ 09] report: for higher concurrencies, it is more beneficial to use
+Time in seconds
+2
+1
+10
+100
+1000
+10000
+100000
+Log10(Compositors)
+Time in seconds
+4
+46,656
+3
+2
+1
+0
+10
+100
+1000
+10000
+100000
+Log10(Compositors)
+4
+Time in seconds
+Overall, we have achieved linear scaling up to 216,000
+for the raycasting phase with MPI-only (see Figure 5). MPIhybrid exhibits different scaling behavior because it has a
+different decomposition geometry: MPI-only has a perfectly
+cubic decomposition, while MPI-hybrid aggregates 1×2×3
+cubic blocks into rectangular blocks that are longest in the zdirection (see Table 1). The interaction of the decomposition
+geometry and the camera direction determine the maximum
+number of ray integration steps, which is the limiting factor
+for the raycasting time. At lower concurrencies, this interaction benefits MPI-hybrid, which outperforms MPI-only by
+as much as 11% (see Table 3). At higher concurrencies the
+trend flips, and MPI-only outperforms MPI-hybrid by 10%.
+We expect that if we were able to run on an eight-core system with a 2 × 2 × 2 aggregation factor for MPI-hybrid, both
+implementations would scale identically. We also note that
+at 216,000 cores, raycasting is less than 20% of the total
+runtime (see Figure 6), and MPI-hybrid is over 50% faster
+because of gains in the compositing phase that we describe
+next.
+3
+0
+110,592
+3
+2
+1
+0
+10
+100
+1000
+10000
+100000
+Log10(Compositors)
+4
+Time in seconds
+Our raycasting phase scales nearly linearly because it involves no inter-processor communication (see Figure 5).
+Each MPI PE obtains its data block, then launches either one
+(MPI-only) or six (MPI-hybrid) raycasting threads. Working
+independently, each thread tests for ray-triangle intersections
+along the data block’s bounding box and, in the case of a hit,
+integrates the ray by sampling data values at a fixed interval
+along the ray, applying a transfer function to the values, and
+aggregating the resulting color and opacity in a fragment for
+that ray’s image position. For these runs and timings, we use
+trilinear interpolation for data sampling along the ray as well
+as a Phong-style shader. The final raycasting time is essentially the runtime of the thread that takes the most integration
+steps. This behavior is entirely dependent on the view. Our
+approach, which is aimed at understanding “average” behavior, uses ten different views (see Figure 3 in Section 4.1) and
+reports their average runtime.
+100000
+13,824
+4.4. Scaling Study
+4.4.1. Raycasting
+10000
+Log10(Compositors)
+216,000
+3
+2
+1
+0
+10
+100
+1000
+10000
+100000
+Log10(Compositors)
+Figure 7: Compositing times for different ratios of compositing PEs to total PEs. Solid lines show minimum times
+taken over ten trials each for two different views; dashed
+lines show the corresponding mean times.
+M. Howison, E.W. Bethel, & H. Childs / MPI-hybrid Parallelism for Volume Rendering on Large, Multi-core Systems
+Above 1,728 cores, we observe that the compositing times
+are systematically better for the MPI-hybrid implementation.
+The primary cost of compositing is the MPI_Alltoallv
+call that moves each fragment from the PE where it originated during raycasting to the compositing PE that owns
+the region of image space where the fragment lies. Because MPI-hybrid aggregates these fragments in the memory shared by six threads, it uses on average about 6× fewer
+messages than MPI-only (see Figure 8). In addition, MPI-
+only a subset of PEs for compositing. While Peterka et al.
+found that 1,000 to 2,000 compositors were optimal for up
+to 32,768 total PEs, we have found that at 46,656 PEs and
+above the optimal number of compositors is closer to 4,000
+to 8,000 (see Figure 7). We note that there are many differences between our study and theirs in the levels of concurrency, architectures, operating systems, communication networks, and MPI libraries, each potentially introducing variation in the ideal number of compositors.
+125
+Linear Scaling
+MPI+pthreads
+MPI+OpenMP
+MPI-only
+Linear Scaling
+MPI+pthreads
+MPI+OpenMP
+MPI-only
+Total Speedup
+Raycasting Speedup
+125
+64
+64
+27
+27
+8
+8
+1
+1
+0
+00
+6
+21
+2
+59
+0
+11
+56
+6
+46
+24
+8
+13
+8
+2
+17
+0
+00
+6
+21
+2
+59
+0
+11
+56
+6
+46
+24
+8
+8
+13
+2
+17
+Cores
+Cores
+Figure 5: The speedups (referenced to 1,728 cores) for both the raycasting phase and the total render time (raycasting and
+compositing). The raycasting speedup is linear for MPI-only, but sublinear for MPI-hybrid: this effect is caused by the difference
+in decomposition geometries (cubic versus rectangular). At higher concurrencies, however, raycasting accounts for a smaller
+proportion of the total time and MPI-hybrid exhibits better overall scaling because of its gains in the compositing phase.
+13824
+25.33
+46656
+3.62
+22.87
+110592
+1.55
+22.79
+3.17
+216000
+1.19
+1.25
+3.16
+1.18
+80
+1.16
+0.7
+0.7
+60
+0.56
+0.56
+M
+M
+40
+20
+0
+P
+s
+ad
+Compositing
+nM
+re
+pe
+th
++O
+PI
++p
+PI
+y
+nl
+-o
+PI
+M
+P
+Raycasting
+s
+ad
+nM
+re
+pe
+th
++O
+PI
+M
+P
+s
+ad
+nM
+re
+pe
+y
+nl
++p
+PI
+M
+-o
+PI
+M
++O
+th
++p
+PI
+M
+y
+nl
+-o
+PI
+M
+PI
+M
+P
+s
+ad
+nM
+re
+pe
+th
++O
+PI
+M
+P
+s
+ad
+nM
+re
+pe
+y
+nl
++p
+PI
+M
+-o
+PI
+M
++O
+th
++p
+PI
+M
+y
+nl
+-o
+PI
+M
+PI
+M
+Percent of "MPI-only" Time
+1728
+100
+Figure 6: In terms of total render time, MPI-hybrid outperforms MPI-only at every concurrency level, with performance gains
+improving at higher concurrency.
+M. Howison, E.W. Bethel, & H. Childs / MPI-hybrid Parallelism for Volume Rendering on Large, Multi-core Systems
+Messages
+106
+105
+105
+105
+105
+100
+15
+10
+5
+0
+00
+60
+We found that at high concurrency, fragment exchange
+during the compositing phase is the most expensive operation. Our compositing algorithm relies entirely on the implementation of the MPI_Alltoallv call in the Cray MPI library. Our finding that using a subset of compositing PEs reduces communication overhead agrees with what Peterka et
+al. [PYR∗ 09] found for the MPI implementation on an IBM
+BG/P system, suggesting that both libraries use similar implementations and optimizations of MPI_Alltoallv. A
+separate paper by Peterka et al. [PGR∗ 09] introduces a new
+compositing algorithm, “Radix-k,” that shows good scaling up to 16,000-way concurrency. This approach, which is
+compatible with our hybrid parallel system, may lead to even
+21
+92
+05
+11
+6
+65
+46
+4
+82
+28
+The multi-core era offers new opportunities and challenges
+for parallel applications. This study has shown that hybrid
+parallelism offers performance improvements and better resource utilization for raycasting volume rendering on a large,
+distributed-memory supercomputer comprised of multi-core
+CPUs. The advantages we observe for hybrid parallelism are
+reduced memory footprint, reduced MPI overhead, and reduced communication traffic. These advantages are likely
+to become more pronounced in the future as the number of
+cores per CPU increases while per-core memory size and
+bandwidth decrease.
+00
+20
+Cores
+MPI-only
+5. Conclusion and Future Work
+60
+25
+4.4.3. Overall Performance
+At 216,000 cores, the best compositing time for MPI-hybrid
+(0.35s, 4500 compositors) is 67% less than for MPI-only
+(1.06s, 6750 compositors). Furthermore, at this scale compositing time dominates rendering time, which is roughly
+0.2s for both MPI-only and MPI-hybrid. Thus, the total render time is 55% faster for MPI-hybrid (0.56s versus 1.25s).
+Overall, the scaling study shows that the advantage of MPIhybrid over MPI-only becomes greater as the number of
+cores increases (see Figure 6).
+21
+92
+05
+11
+6
+4
+65
+13
+46
+17
+82
+13
+28
+17
+We observe a critical point in the compositing performance beginning at 13,824 cores where the elapsed time for
+MPI-only begins to increase with additional compositors. A
+similar critical point occurs for MPI-hybrid at 46,656 cores.
+We believe this critical point exists due to the characteristics of the underlying interconnect fabric. Because MPIhybrid generates fewer and smaller messages, the critical
+point occurs at a higher level of concurrency than for MPIonly. Also, our MPI-hybrid version outperforms the MPIonly version across all configurations in these tests. Future
+work will examine this issue in more detail and on different architectures to better illuminate factors contributing to
+performance of this stage of processing.
+106
+Data Sent (GB)
+hybrid exchanges less fragment data because its larger data
+blocks allow for more compositing to take place during ray
+integration.
+MPI-hybrid
+Figure 8: The number of messages and total data sent during the fragment exchange in the compositing phase.
+faster compositing times. Studying their combined performance, especially at concurrencies in the hundreds of thousands, is an avenue for future work.
+Acknowledgments
+This work was supported by the Director, Office of Science,
+Office and Advanced Scientific Computing Research, of the
+U.S. Department of Energy under Contract No. DE-AC0205CH11231 through the Scientific Discovery through Advanced Computing (SciDAC) program’s Visualization and
+Analytics Center for Enabling Technologies (VACET). This
+research used resources of the National Center for Computational Sciences at Oak Ridge National Laboratory, which is
+supported by the Office of Science of the U.S. Department
+of Energy under Contract No. DE-AC05-00OR22725. Additionally, preliminary results for this work were collected
+using resources of the National Energy Research Scientific
+Computing Center (NERSC), which is supported by the Office of Science of the U.S. Department of Energy under Contract No. DE-AC02-05CH11231.
+References
+[ABC∗ 06] A SANOVIC K., B ODIK R., C ATANZARO B. C.,
+G EBIS J. J., H USBANDS P., K EUTZER K., PATTERSON D. A.,
+P LISHKER W. L., S HALF J., W ILLIAMS S. W., Y ELICK K. A.:
+The Landscape of Parallel Computing Research: A View from
+Berkeley. Tech. Rep. UCB/EECS-2006-183, EECS Department,
+University of California, Berkeley, Dec 2006.
+[BIJP99] BAJAJ C., I HM I., J OO G., PARK S.: Parallel ray casting of visibly human on distributed memory architectures. In
+M. Howison, E.W. Bethel, & H. Childs / MPI-hybrid Parallelism for Volume Rendering on Large, Multi-core Systems
+VisSym’99 Joint EUROGRAPHICS-IEEE TVCG Symposium on
+Visualization (1999), pp. 269–276.
+of the 2009 ACM/IEEE conference on Supercomputing (New
+York, NY, USA, 2009), ACM, pp. 1–10.
+[But97] B UTENHOF D. R.: Programming with POSIX threads.
+Addison-Wesley Longman Publishing Co., Inc., Boston, MA,
+USA, 1997.
+[PYR∗ 09] P ETERKA T., Y U H., ROSS R., M A K.-L., L ATHAM
+R.: End-to-end study of parallel volume rendering on the ibm
+blue gene/p. In Proceedings of ICPP’09 Conference (September
+2009).
+[CDK∗ 01] C HANDRA R., DAGUM L., KOHR D., M AYDAN D.,
+M C D ONALD J., M ENON R.: Parallel programming in OpenMP.
+Morgan Kaufmann Publishers Inc., San Francisco, CA, USA,
+2001.
+[CDM06] C HILDS H., D UCHAINEAU M. A., M A K.-L.: A scalable, hybrid scheme for volume rendering massive data sets. In
+Eurographics Symposium on Parallel Graphics and Visualization
+(2006), pp. 153–162.
+[DCH88] D REBIN R. A., C ARPENTER L., H ANRAHAN P.: Volume rendering. SIGGRAPH Computer Graphics 22, 4 (1988),
+65–74.
+[EGCSY05] E L -G HAZAWI T., C ARLSON W., S TERLING T.,
+Y ELICK K.: UPC – Distributed Shared Memory Programming.
+John Wiley & Sons, 2005.
+[Hig93] H IGH P ERFORMANCE F ORTRAN F ORUM: High Performance Fortran Language Specification, version 1.0. Tech. Rep.
+CRPC-TR92225, Houston, Tex., 1993.
+[HJR09] H AGER G., J OST G., R ABENSEIFNER R.: Communication Characteristics and Hybrid MPI/OpenMP Parallel Programming on Clusters of Multi-core SMP Nodes. In Proceedings of
+Cray User Group Conference (2009).
+[KM05] K AUFMAN A., M UELLER K.: Overview of Volume
+Rendering. In The Visualization Handbook, Hansen C. D., Johnson C. R., (Eds.). Elsevier, 2005, pp. 127–174.
+[KMM∗ 01] K NISS J., M C C ORMICK P., M C P HERSON A.,
+A HRENS J., PAINTER J., K EAHEY A., H ANSEN C.: Interactive Texture-Based Volume Rendering for Large Data Sets. IEEE
+Computer Graphics and Applications (July/August 2001).
+[Lev88] L EVOY M.: Display of Surfaces from Volume Data.
+IEEE Computer Graphics and Applications 8, 3 (May 1988), 29–
+37.
+[LG08] L IEBROCK L. M., G OUDY S. P.: Methodology for Modelling SPMD Hybrid Parallel Computation. Concurrency and
+Computation: Practice and Experience 20, 8 (2008), 903–940.
+[Ma95] M A K.-L.: Parallel volume ray-casting for unstructuredgrid data on distributed-memory architectures. In PRS ’95: Proceedings of the IEEE symposium on Parallel rendering (New
+York, NY, USA, 1995), ACM, pp. 23–30.
+[MPHK93] M A K.-L., PAINTER J. S., H ANSEN C. D., K ROGH
+M. F.: A Data Distributed, Parallel Algorithm for Ray-Traced
+Volume Rendering. In Proceedings of the 1993 Parallel Rendering Symposium (October 1993), ACM Press, pp. 15–22.
+[MTT∗ 09] M ALLÓN D., TABOADA G., T EIJEIRO C., T OURINO
+J., F RAGUELA B., G ÓMEZ A., D OALLO R., M OURINO J.: Performance Evaluation of MPI, UPC and OpenMP on Multicore
+Architectures. In 16th European PVM/MPI Users’ Group Meeting, (EuroPVM/MPI’09) (September 2009).
+[NL92] N IEH J., L EVOY M.: Volume Rendering on Scalable
+Shared-Memory MIMD Architectures. In Proceedings of the
+1992 Workshop on Volume Visualization (October 1992), ACM
+SIGGRAPH, pp. 17–24.
+[NVI08] NVIDIA C ORPORATION: NVIDIA CUDAT M Version
+2.1 Programming Guide, 2008.
+[PGR∗ 09] P ETERKA T., G OODELL D., ROSS R., S HEN H.W., T HAKUR R.: A configurable algorithm for parallel imagecompositing applications. In Supercomputing ’09: Proceedings
+[Rei07] R EINDERS J.: Intel threading building blocks: outfitting
+C++ for multi-core processor. O’Reilly Media Inc., 2007.
+[Sab88] S ABELLA P.: A Rendering Algorithm for Visualizing 3D
+Scalar Fields. SIGGRAPH Computer Graphics 22, 4 (1988), 51–
+58.
+[SKP96] S ILVA C. T., K AUFMAN A. E., PAVLAKOS C.: PVR:
+High-Performance Volume Rendering. Computing in Science
+and Engineering 3, 4 (1996), 18–28.
+[SOHL∗ 98] S NIR M., OTTO S., H USS -L EDERMAN S.,
+WALKER D., D ONGARRA J.: MPI – The Complete Reference:
+The MPI Core, 2nd edition. MIT Press, Cambridge, MA, USA,
+1998.
+[TH94] T IWARI R., H UNTSBERGER T. L.: A Distributed Memory Algorithm for Volume Rendering. In Scalable High Performance Computing Conference (Knoxville, TN, USA, May
+1994).
+[Top09] The
+top
+http://www.top500.org.
+500
+supercomputers,
+2009.
+[UK88] U PSON C., K EELER M.: V-buffer: visible volume rendering. In SIGGRAPH ’88: Proceedings of the 15th annual conference on Computer graphics and interactive techniques (New
+York, NY, USA, 1988), ACM, pp. 59–64.

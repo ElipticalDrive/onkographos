@@ -1,0 +1,160 @@
+The Persistence of Vision Raytracer (POV-Ray). Contribute to randomdevltd/povray development by creating an account on GitHub.
+
+Isosurface mesh: isosurface_mesh, a mesh2 built from an isosurface at parse time by randomdevpete · Pull Request #39 · randomdevltd/povray · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+randomdevpete
+commented
+Oct 4, 2026
+Copy link
+Copy Markdown
+A drop-in for mesh2 that builds a triangle mesh from an isosurface at parse time, for fast iteration and cheap distant copies. Sibling of skein_mesh (#35): same min_size / max_angle controls, same two-million-triangle error, same one-line build report.
+Syntax
+```
+isosurface_mesh {
+  function { ... }  [contained_by { box | sphere }]  [threshold T]  [max_gradient G]  [open]  [polarity P]
+  [min_size S]    // object units, default 1/1000 of the container's longest side
+  [max_angle A]   // degrees, default 10
+  [object modifiers]
+}
+```
+Everything else an isosurface accepts (accuracy, max_trace, evaluate, all_intersections) parses and is ignored.
+Algorithm
+Octree over contained_by. The root cells are at most 1/8 of the container's longest side, and the finest cells are exactly min_size. The field meshed is max(f - threshold, container distance), with polarity applied, so the container closes the surface just as it closes the isosurface.
+Culling. A cell is dropped when range arithmetic (the VM's EvaluateRange) proves the field has no zero in it. When the function has no range plan, the fallback is one sample at the cell centre, with a margin of max_gradient × half the cell diagonal. The debug line counts how many cells each method handled.
+Refinement. A cell splits while the gradient at its 8 corners and centre turns more than max_angle. The exception is a turn that falls into 2 or 3 tight groups at least 2×max_angle apart (and under 150°): that is a crease or corner, and the cell's vertex can sit on it. Cells never split below min_size.
+Extraction: dual contouring. Each edge with a sign change that no smaller cell splits is found once, and joins the vertices of the 3 or 4 cells around it. Because of this, cells of different sizes need no balancing and leave no cracks.
+Vertices. Each vertex is the QEF point of the tangent planes at the crossings, with a truncated eigen solve; it falls back to the mass point if the QEF point lies more than half a cell outside. A Newton step along the gradient then puts it on the surface. The normal is the gradient. Where a triangle spans a crease, its corners take the gradient just inside the triangle, as skein_mesh does. Each quad is split along the diagonal whose midpoint lies nearer the surface, which keeps creases.
+open. Quads whose crossing is on the container are dropped, and cells along the rim always split down to min_size.
+Memory. MeshBuilder (mesh.h) grows the mesh's own arrays in place (POV_REALLOC) and trims them at the end. It stores one vertex per distinct position and normal, so there are no index lists and no second full-size copy. Octree, samples, QEFs and quads are freed as soon as each phase ends. Copies share MESH_DATA through the normal mesh copy path. MeshBuilder is written so skein_mesh can adopt it in place of its vectors-then-copy.
+What is exact
+Flat faces, sharp edges and corners. A cube turned off the axes comes out as 408 triangles, with chord error 0 and edges exact to 1e-6.
+Vertex positions, which lie on the surface wherever a Newton step lands within the cell.
+Watertightness: closed shapes give 0 open edges.
+Not exact: curved surfaces stay within about R(1 − cos max_angle). Features smaller than a cell can be missed.
+How verified
+tests/render/isosurface_mesh_check.pov is run by isosurface_mesh.sh and wired into make check. For each shape it fires 2000 rays at both the isosurface and the mesh, measures the chord error of the mesh hits, and checks inside() on a 16³ grid.
+shape
+culling
+triangles
+open edges
+max chord (limit)
+inside()
+build
+sphere r=1
+sampled (sqrt)
+6348
+0
+0.0019 (0.0152)
+3993/3993
+0.04 s
+turned cube, min_size 0.01
+range
+408
+0
+0.0000 (0.002); edge rays miss by 0.000000
+4081/4081
+0.003 s
+sphere r=1.3 closed by box ±1
+sampled
+5968
+0
+0.0101 (0.0198)
+4049/4049
+0.03 s
+same, open
+sampled
+84312
+19944 (rim)
+0.0022 (0.0198)
+n/a
+1.0 s
+1 − r², threshold 0.19, polarity 1
+range
+7452
+0
+0.0013 (0.0137)
+3943/3943
+0.04 s
+sphere + 0.3·(f_noise3d(3p) − 0.5)
+sampled
+135734
+0
+0.0013 (0.0152)
+3972/3972
+2.4 s
+Other results:
+Finished mesh size is 24 bytes per triangle on smooth shapes, and 29–31 on creased ones (normals split at creases).
+Peak build memory is about 450 bytes per triangle for the noisy sphere (60 MB) and 238 for the plain sphere.
+Render of the noisy sphere at 480×360 (+a0.3, 2 threads): the isosurface traces in 1.13 s, the mesh in 0.22 s plus 2.4 s to build.
+A declared mesh used three times (translated and scaled) builds once, and inside() is right for every copy.
+Open questions
+open rims refine to min_size. The open sphere is 84k triangles against 6k closed. Recommend: a follow-up that clips triangles against the container instead, so rims can stay coarse.
+Peak build memory. About 450 B per triangle, against 24 B for the finished mesh, so the 2M cap implies roughly 0.9 GB while building. Recommend: a lower cap for isosurface_mesh (for example 1M) until a slab-at-a-time build exists. One alternative is to stop storing cells ruled out by sampling, which saves about 30% but loses the "max_gradient too low" warning.
+Interval coverage. The range plan has no sqrt, pow, trig or noise, so the most common distance functions fall back to sampling. Recommend: adding monotone sqrt and integer pow to BuildRangePlan; it is small and would make sphere- and torus-style functions provable.
+Reusing a declared isosurface (isosurface_mesh { MyIso ... }) is not supported. Recommend: decide this together with the tessellate { OBJECT } wrapper question from the scope, rather than add it here.
+An accuracy control. Only max_angle and min_size exist, matching skein_mesh; the scope's accuracy D is not added. Recommend: leave it out unless iteration shows the angle control is not enough.
+uv. There are none. Recommend: projected uv (planar, cylindrical, spherical) as a follow-up.
+🤖 Generated with Claude Code
+Isosurface mesh: isosurface_mesh, a mesh2 built from an isosurface at…
+…
+09259c7
+```
+… parse time
+
+isosurface_mesh takes everything an isosurface takes plus min_size and
+max_angle, and builds a triangle mesh by dual contouring on an octree over
+contained_by. Cells that range arithmetic proves empty stop; functions
+without a range plan fall back to one centre sample and max_gradient. A
+cell splits while the gradient turns more than max_angle across it, unless
+the turn is a crease or corner its vertex can sit on, so sharp edges stay
+exact at coarse sizes. Vertices sit where the crossing planes meet, then on
+the surface; normals are the gradient. The container closes the mesh unless
+open. Copies share one mesh; more than two million triangles is an error.
+
+MeshBuilder fills a mesh's own arrays as triangles arrive, one vertex per
+distinct position, normal and uv, so no index lists and no second copy.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+randomdevpete
+force-pushed
+the
+isosurface-mesh
+branch
+from
+341d345 to
+09259c7
+Compare
+October 4, 2026 13:41
+randomdevpete
+mentioned this pull request
+Oct 4, 2026
+skein_mesh and isosurface_mesh: mesh2 built at parse time, with documentation
+#41
+Merged
+randomdevpete
+commented
+Oct 4, 2026
+Copy link
+Copy Markdown
+Author
+Superseded by #41, which merged these changes rebased onto performance together with their documentation.
+randomdevpete
+closed this
+Oct 4, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

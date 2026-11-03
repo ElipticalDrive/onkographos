@@ -1,0 +1,784 @@
+Neural Assets: Volumetric Object Capture and Rendering
+for Interactive Environments
+Aljaž Božič, Denis Gladkov, Luke Doukakis and Christoph Lassner
+Meta Reality Labs Research
+arXiv:2212.06125v1 [cs.CV] 12 Dec 2022
+{aljaz, denisg, lukedoukakis, classner}@meta.com
+Figure 1. We capture and render Neural Assets—real world objects scanned using a mobile device—volumetrically and seamlessly in
+interactive virtual environments. Left/blue: render volume and number-of-sample visualization. All pixels on the bounding volume are
+path traced to create the rendering, however for most pixels none (black) or few (dark blue) samples are needed to produce the rendering.
+Most samples are needed to render object boundaries (light blue). Center/red: objects with fur, flyaway hair and translucent parts, such
+as the bow tie, are represented correctly. The fur and bow tie blend seamlessly and realistically with the background. The details are
+reproduced in appearance and geometry, which becomes apparent in the red depth map. Right: game engine integration and interaction.
+Abstract
+1. Introduction
+The appearance of virtual environments is only as convincing as their parts: the virtual ‘assets’ that have been
+used to design them. Hence, designers and artists spend a
+tremendous amount of time creating and fine-tuning object
+appearance and scene integration to match real scenes by
+finetuning object shape, as well as material properties and
+scene lighting. This includes object scanning with expensive hardware, such as laser scanners, mesh ‘cleanup’ (removal of scan artifacts), texture editing, BRDF definition,
+optimization and shader design. The latter is particularly
+complex, because effects such as translucency and subsurface scattering are usually not (correctly) modeled in realtime rendering systems, leading to complications when the
+appearance of real-world objects should be reproduced. In
+case of thin and organic materials such as skin or fur this
+results in ‘uncanny valley’ effects present in many virtual
+productions. In this paper, we introduce methods for reconstructing, rendering and integrating objects into interactive
+environments seamlessly using models that work with consumer hardware, have real-time performance, reproduce ap-
+Creating realistic virtual ‘assets’ is a time-consuming
+process: it usually involves an artist designing the object,
+then spending a lot of effort on tweaking its appearance. Intricate details and certain effects, such as subsurface scattering, elude representation using real-time BRDFs, making
+it impossible to fully capture the appearance of certain objects. Inspired by the recent progress of neural rendering,
+we propose an approach for capturing real-world objects
+in everyday environments faithfully and fast. We use a novel
+neural representation to reconstruct volumetric effects, such
+as translucent object parts, and preserve photorealistic object appearance. To support real-time rendering without
+compromising rendering quality, our model uses a grid of
+features and a small MLP decoder that is transpiled into efficient shader code with interactive framerates. This leads
+to a seamless integration of the proposed neural assets with
+existing mesh environments and objects. Thanks to the use
+of standard shader code rendering is portable across many
+existing hardware and software systems.
+1
+pearance faithfully and can be easily integrated with many
+game engine and graphics systems.
+We build on recent advances in neural volumetric rendering based on the seminal works on neural volumes [15] and
+radiance fields (NeRFs) [20]. Radiance fields are a volumetric representation that aims to directly model the plenoptic
+function of an object or scene, i.e., they directly model the
+emitted or reflected light (i.e., radiance) for every position in
+space depending on the view direction. The recent success
+of neural representations is largely due to their elegant use
+as radiance field models that can be optimized end-to-end.
+Overall, neural radiance fields have only minimal requirements for data capturing: a set of RGB images captured
+with a mobile phone is enough to to reconstruct a scene with
+high quality, as long as a decent camera calibration can be
+extracted. Furthermore, they are versatile and powerful in
+modeling a wide variety of objects and scenes, including
+translucent materials and fur, that are hard or impossible to
+model using mesh-based representations.
+However, our intended application is notably different
+from standard radiance field reconstruction: we aim to separate a foreground object from its background without simplifying assumptions (e.g., a green screen) and making the
+capture process as user-friendly as possible, ideally requiring only a ca. 90s of video capture. Reconstructing fine details in the object boundary or translucency requires a full
+reconstruction of the scene. To focus model capacity on the
+object of interest, we use two radiance field models: one for
+the background and one for the foreground, and only use
+the foreground model as asset. To make the capture process as user-friendly as possible, we directly address many
+common recording mistakes in a simple capture application
+and fix, for example, white balance and exposure and let the
+user select the foreground object bounding box in 3D.
+After reconstruction, neural volumetric models don’t
+play well with existing interactive graphics systems:
+(1) they use different rendering ‘primitives’ that don’t fit
+well into traditional graphics shading systems and (2) they
+don’t naturally plug in to the various game engine subsystems, such as the color blending, shadowing, level-of-detail
+(LoD) and physics systems. We propose to overcome these
+problems by creating a transpiler that produces GLSL or
+HLSL shader code for a pixel shader. The model architecture has been optimized to work particularly well in this
+setting and the shader is able to render the model in super real-time. The shader performs volumetric raycasting,
+aggregates sample points and produces a result that blends
+correctly with the background consisting of other objects,
+mesh- or volume-based. We fuse the asset with a marchingcubes generated, low-fidelity mesh for collision and shadowing and present solutions to integrate it with the color and
+LoD systems. The resulting solution is fast enough to render frames stereoscopically for virtual reality systems. In-
+teractivity is naturally achieved through the collision mesh,
+which enables hand-interactions and inter-object collisions.
+Overall, we claim the following contributions:
+• we present a model that enables photorealistic object
+appearance capture in natural environments using lowfidelity capture devices, such as mobile phones,
+• it enables rendering at interactive framerates even in
+stereoscopic settings while supporting volumetric materials,
+• seamless integration into a virtual scene of a game
+engine, including shadowing, collision and level-ofdetail.
+2. Related Work
+Object Capture. 3D reconstructing objects and environments using photometric information has a long history [19, 34]. In recent years, the highest quality capture
+rig for this purpose is the light stage [4]. It uses many point
+lights mounted on a spherical hull to record an object under
+many lighting conditions with hard shadows, emphasizing
+the geometrical structure of the object and facilitating 3D
+reconstruction with a high level of detail. However, it is
+costly to build and complex to operate and can not be used
+for in-the-wild captures.
+With the release of the Kinect sensor, Microsoft made
+depth sensors readily available for consumers and researchers. This inspired research on a variety of approaches that use depth information for 3D reconstruction [7, 9, 26, 36]. However, with the recent popularity of
+radiance field approaches for 3D reconstruction, datasets
+recorded solely with consumer-grade mobile devices are
+starting to emerge [30]. Photogrammetry has always tried
+to enable capture in in-the-wild scenarios: COLMAP [31]
+and AliceVision [6] are examples of free photogrammetry
+packages. All of these packages provide camera calibration,
+triangulation and meshing tools, making them suitable to
+reconstruct textured object meshes from images or videos.
+Still, pure mesh reconstructions lack view-dependent effects and cannot model transparent object parts. Compared
+to radiance field representations, they often have to be manually ‘cleaned up’ by artists because the reconstructed surfaces contain artifacts from a reconstruction pipeline that
+(1) can not model more complex effects violating the Lambertian assumption, such as specularities or subsurface scattering, and (2) is composed of multiple steps that are optimized separately and can not propagate information end-toend. This stands in contrast to radiance fields that capture
+viewpoint dependent effects and can be optimized end-toend.
+2
+Radiance field representations. Neural Radiance Fields
+(NeRFs) model the plenoptic function as a coordinatebased function that is being aggregated using an emissionabsorption model [20]. NeRFs make volume rendering
+computationally tractable in an end-to-end optimization using multiple images, yet using a model that can capture any
+viewpoint-dependent effects given enough model capacity.
+Most existing works focus on modeling entire scenes and
+not objects and have problems modeling scenes with details close to the camera (foreground) as well as far away
+from the camera (background). Two recent works [1, 43]
+alleviate this problem by introducing explicit ‘background’
+modeling, yet still combine foreground and background in
+the same representation. [12, 27, 38] decompose foreground
+and background models to create a separate foreground
+model—a strategy that we apply as well to create high quality decompositions of objects vs. background.
+Several works have improved upon the slow runtime of
+the original radiance field implementation: Plenoxels [41]
+and ReLU-Fields [11] use a voxel grid encoding for better
+runtimes at training and test time and remove neural networks from the rendering process. Instant-NGP [21] uses a
+hash function instead, creating a volumetric storage for features that are processed by a small neural network; [2] uses
+volume factorization to reduce memory use. We found a
+hybrid approach that lead to superior runtime as well as render performance: we use a regular grid for volumetric feature storage, and two MLPs to create density and viewpointdependent features for our encoding. To achieve high quality results in real-world scenarios, the quality of the camera
+parameters is critical. During 3D reconstruction gradients
+are readily available for every pixel, and they can be used to
+refine the camera parameters [10, 14, 37]. Similar to these
+works, we propagate gradients from our 3D representation
+to the camera parameters. For a comprehensive overview
+over recent work on radiance fields, we refer to [33]. Overall, many existing radiance field approaches have too slow
+render speeds for interactive experiences or are not suitable
+for implementations using shading languages.
+Another approach to achieve speedups is to use fewer,
+but better-placed samples during volume sampling. DONeRF [22] uses a learned sampling strategy (oracle network)
+for this purpose—however, this leads to problems at object boundaries and with fine details, a use case that we
+focus on. Fast-NeRF [5] uses another strategy: prediction caching. This, however, is only applied at test time
+and has high memory requirements. MobileNeRF [3] distills trained radiance fields into a multi-plane mesh structure, which leads to very fast render results but sacrifices
+volumetric effects. In comparison, our proposed method is
+faster than MobileNeRF (the fastest of the aforementioned
+approaches), shows relatively high speed for training as well
+as rendering and retains the ability to correctly render volumetric and viewpoint-dependent effects.
+3. Method
+In the following sections, we describe our proposed
+capture- and rendering-processes, as well as the model architecture and engine integrations to take objects from the
+physical into a virtual world.
+3.1. Object Capture
+The first step for the entire system is the object capture:
+we need to find a set of images suitable for reconstruction,
+camera intrinsics and extrinsics and an object boundary. To
+keep this process as lightweight and efficient as possible,
+we design it to work with a low-fidelity camera, for example from a mobile phone, and require only a short video
+recording of the object (about 90s; we include an example
+capture in the suppl. mat.). We aim to support a wide variety of devices, hence we decided not to use any on-device
+camera tracking or vendor-specific reconstruction or SLAM
+frameworks. We solely assume fixed exposure, white balance and sensitivity settings during object recording—these
+settings are trivial to set by the user using off-the-shelf
+recording applications. The resulting video may still contain blurry frames that could hinder a detailed reconstruction. To address this, we use a simple gradient-based motion
+blur detector that filters blurry frames and selects a subset
+of frames sampled at an interval of 6FPS. These frames are
+processed by an off-the-shelf photogrammetry software that
+estimates approximate camera intrinsic parameters K (precalibration is possible as well) and poses Rk , tk for each
+frame k. Using this initial rough solve and the resulting
+point cloud, we ask the user to provide a rough bounding
+box in 3D around the foreground object. While it is possible to use an object segmentation method or a video salient
+object detector (for which we also present experiments in
+Sec. 4), we use this simple method for reliable, fine-grained
+user control.
+Real-time neural rendering. Several approaches have
+been created specifically to address rendering speed:
+PlenOctrees [42] use an octree acceleration structure to
+speed up volume traversal at render time and store viewdependent information in a spherical harmonics encoding.
+SNeRG [8] uses a volumetric grid for feature storage and
+predicts a separation of diffuse and specular colors from
+those features. Pulsar [13] is a sphere-based renderer with
+high render speeds that uses a slightly different ray accumulation function compared to NeRF, but can also be used for
+volumetric rendering of complex scenes. Instead of using
+one large MLP to model radiance fields, they can be broken
+up into many small models to improve render speed [28,29].
+3
+Figure 2. Method overview. (1) Objects can be casually recorded with a smartphone. Our captures usually take 90s or less. (2) After an
+initial filtering and solve for camera pose, intrinsics and bounding box specification, (3) an end-to-end optimization for 3D reconstruction
+is performed. For every sample point, we split the features into 4 density features that are processed using an MLP to produce σ, and 8
+appearance features that are concatenated with a viewpoint encoding and processed by a separate MLP to produce color predictions. (4) We
+export a shadow- and collision mesh and the feature volume and transpile the model to shader code for real-time volumetric rendering.
+3.2. 3D Reconstruction
+integrating these density and color values using numerical
+quadrature [18]:
+X
+c(o, d) =
+w i ci
+(3)
+Given RGB frames with approximately estimated camera intrinsics K and poses Rk , tk for every frame k, we aim
+to optimize a volumetric representation to model the object
+appearance. However, we are facing two problems: (1) we
+want to obtain the highest level of detail in the reconstructed
+object (the foreground), while still requiring a fairly detailed
+reconstruction of the background to create high quality segmentation and translucency effects; (2) the representation
+has to be separated after reconstruction to extract the foreground object. To address that, we propose to use a twolayer volumetric representation similar to [12, 27, 38].
+i
+with sample weight wi computed as:
+wi = e−
+d = Rk K
+T
+(x, y, 1) .
+(1 − e−σi (ti+1 −ti ) )
+(4)
+σi = σio + σie ,
+(5)
+ci = (σio coi + σie cei )/ max(σi , ),
+(6)
+where  = 1e−10 is added solely for numerical stability.
+This formulation conveniently combines the contributions
+of object and environment layers directly in the aggregation. If a 3D bounding box is available, any samples that
+fall within the box are sampled from the foreground layer
+model, and any samples that are outside are sampled from
+the background layer model. Without bounding box we
+instead use predicted semantic masks to disambiguate the
+foreground from the background. In that case, object and
+(1)
+−1
+j<i σj (tj+1 −tj )
+This representation supports complex volumetric effects
+such as translucency and can, given a viewpoint-dependent
+model for ci , even capture subsurface scattering and reflections. However, it couples the representation of the object
+with the environment. Therefore, we split the model into
+two layers with separate density and appearance modules
+for the object Do , Co and the environment De , Ce .
+To compute the final color, we follow Eq. 3, and compute
+the density σi and color ci from object properties σio , coi and
+environment properties σie , cei as:
+Two-layer volumetric rendering. Overall, we represent
+the objects using a volumetric representation, following
+neural radiance fields [20]. To render a novel view, the
+color of each pixel is computed using volumetric integration along each pixel ray by using many sample points
+pi = o + δi d, where o is the corresponding camera origin, d is the normalized pixel view direction, and δi is the
+current sample point’s distance to the origin. They can be
+computed for pixel (x, y) in frame k as:
+o = tk ,
+P
+(2)
+The model consists of two modules: the density module D
+that takes point pi as input and predicts its density value
+σi = D(pi ), and the appearance module C that predicts
+view-dependent color ci = C(pi , d) given the point position pi and view direction d. The pixel color is obtained by
+4
+environment density estimates can be accumulated along
+the rays, assuming white radiance values, resulting in rendered object and environment masks. These are enforced
+to match the predicted semantic masks, guiding the neural
+asset segmentation, similar to [27].
+To optimize the model, we take sensor pixel observations
+c̃ and enforce that our model prediction from the rendering
+Eq. 3 matches it by evaluating the `2 color difference:
+X
+L=
+||c̃(o, d) − c(o, d)||22
+(7)
+Figure 3. Model execution graph. All texture reads are hardwaresupported as a single operation including trilinear interpolation.
+Reading fd is used to evaluate πd , potentially for several/all points
+to do priority-queue based filtering. Only for ‘valuable’ points,
+texture reads for fc1 and fc2 are performed and πc executed.
+o,d
+However, to make optimization robust and achieve the
+highest quality, we introduce additional improvements.
+Weight regularization. Using only the photometric loss
+(Eq. 7) for optimizing the radiance field can results in artefacts in ‘free space’ when generating novel views. Thus,
+we follow the weight regularization strategy from [1] encouraging every ray to either have zero weights along the
+entire ray, or to consolidate all weights into as small area as
+possible, resulting in an additional loss Lweight .
+Camera pose and intrinsics refinement. The initial
+camera pose and intrinsics estimates can be inaccurate, and
+sub-pixel precision is needed for high-quality reconstruction. We refine the parameters for camera poses Rk , tk and
+pinhole intrinsics K, and optimize them together with the
+object model. To ensure the rotation matrices Rk remain
+valid throughout the gradient-based optimization, we use a
+6D parametrization [44] for the rotations.
+For a stable optimization we found it useful to include
+additional pose regularization with respect to the initial
+poses R̂k and t̂k penalizing strong deviations:
+X
+Lpose =
+(λR ||Rk − R̂k ||22 + λt ||tk − t̂k ||22 ). (8)
+Adaptive point sampling. For accurate appearance modelling a high number of sample points pi are required along
+each ray during optimization. We use at most N = 1024
+samples; to distribute them effectively, we divide them into
+three regions: most samples are linearly allocated to the approximated foreground bounding box, with the remaining
+samples either in front of the object (linearly in depth) or
+behind the object (inversely proportional to depth).
+k
+3.3. Real-time Rendering
+We use different learning rates for rotation, translation and
+the intrinsic matrix. For further details on the training,
+learning rates and λR and λt , please see the suppl. mat.
+Rendering radiance fields in interactive environments
+requires super real-time performance: they are part of a
+larger rendering system, requiring time for scene logic,
+physics, . . . , and potentially having to render twice for
+stereoscopic render targets in virtual or augmented reality. In the original neural radiance field formulation [20],
+the density D and color C modules are modelled by single,
+large multi-layer perceptron (MLP). Evaluating this MLP
+for every point along the ray is prohibitively expensive, taking minutes per frame to render. We tackle this problem in
+three steps: (1) hardware-guided model design, (2) densityguided sample filtering and (3) model transpilation into optimized shader code.
+Coarse-to-fine grid optimization. To improve model
+convergence and make the camera refinement more effective, we construct the feature grid in a coarse-to-fine manner, similar to [41]. We start the model optimization with
+a grid resolution of d = 32, and upsample it trilinearly to
+a two times larger resolution every 5k iterations, up to the
+final dimension of d = 256.
+Modelling unbounded environments. In everyday environments it is very common to make recordings in ‘unbounded’ areas, i.e. where the maximum ranges for some
+rays are much larger than for the foreground object. Failure to model these rays causes artefacts in the object representation and prevents complete background segmentation. To extend our model to unbounded scenes, we add a
+3D space contraction to the environment layer, which nonlinearly warps all point coordinates along the ray from an
+unbounded interval [1, ∞) to the bounded interval [1, 2), as
+is detailed in [1].
+Hardware-guided model design. Current generation
+GPUs provide several gigabytes of memory and hardwaresupport for texture readouts, including interpolation of
+voxel values. This is an incredibly powerful and fast way to
+store large amounts of volumetric data and the inspiration
+for recent neural network free radiance field models such as
+ReLU fields [11]. ReLU fields store features in a volume
+structure, trilinearly interpolate them for sample point read5
+outs and solely use a rectified linear unit (ReLU) as nonlinearity to produce density or viewpoint-dependent effects.
+This leads to very fast processing times, but we found the visual quality insufficient in many scenarios: details were not
+always reproduced faithfully, or the grid resolution had to
+be increased which leads to very high memory requirements
+due to the cubic growth of storage requirements (multiplied
+with the number of feature channels per point). However,
+we found a combination of a 3D feature grid ψ of dimension f × d3 and very small MLP decoders πd and πc (for
+density and color, respectively) to be even more efficient,
+while at the same time obtaining higher quality novel views.
+We assume the higher computational efficiency is due to the
+more compact representation in memory which leads to better cache coherence for sampling. The MLPs allow us to reduce the grid size to 2563 and set the number of features as
+low as 4 for the density and 8 for the appearance predictor,
+split into fd ∈ R4 and fc ∈ R8 . It is critical to use multiples
+of four for the number of features for each network to maximize texture efficiency: one hardware-accelerated texture
+read fetches four channel values. Hence, for each sample
+point pi , its features f are obtained from the trilinearly interpolated feature grid ψ. The sample’s density and color
+values are obtained by processing the features by MLPs:
+expensive to model complex viewpoint dependent appearance and is more expensive to evaluate. Hence, we incrementally build up a priority queue of weight values wi along
+the ray using πd densely, and evaluate the appearance only
+at the samples with the highest blending weights.
+Transpilation into efficient shader code. Integrating radiance fields seamlessly into current render and game engines requires optimized code, integrated with shading language standard that is portable to many platforms. We decide to support HLSL and GLSL, making a wide variety of
+render engines including web browsers (thanks to WebGL
+supporting GLSL) to target platforms. We implemented a
+transpiler that takes PyTorch modules and generates performant shader code for a pixel shader in HLSL or GLSL.
+Within the rendering engine, we can create a proxy volume
+and assign the pixel shader to it, automatically running it
+for every pixel that lies on the respective volume and rendering the reconstructed object. The transpiler runs several
+optimizations: it optimizes the use of registers to minimize
+the amount of register memory required, and it groups operations into vectorized SIMD operations to make use of the
+wide GPU instruction set.
+σi = πd (fd ),
+(9)
+3.4. Integration into a Game Engine
+ci = πc (fc , γ(d)).
+(10)
+Achieving interactivity requires additional integrations
+with the game engine.
+Similar to [20], we use a positional encoding function γ(.)
+for the view direction d, with 6 frequencies.
+Level-of-detail. When we interact with volumetric objects in a game engine, especially in virtual reality, where
+the distances to the object can vary a lot, the aliasing
+artefacts can be quite severe. Furthermore, even though
+the neural asset rendering is very efficient, querying highresolution feature grids can become expensive with a lot of
+objects that are visible at the same time in the scene (e.g.,
+when going further away from the objects). To address
+both of these problems, we introduce a hierarchy of feature grids by using the full-resolution 3D feature grid and
+trilinearly downsampling it to multiple levels of lower resolutions (similar to mipmaps for textures in graphics). When
+querying features, we adaptively pick the two grid levels
+appropriate depending on the distance to the viewpoint, and
+linearly interpolate their feature values. This makes the feature querying for far-away objects faster and also eliminates
+aliasing issues thanks to the implicit lowpass filtering.
+Density-guided sample filtering. A major contribution
+to model runtime is the number of evaluated feature points:
+when determining the runtime of the rendering system, the
+number of pixels/rays is multiplied by the number of samples along each ray. Hence, we aim to reduce the number
+of sample point evaluations. We considered several ways
+of sample culling, but identified most of them to either fail
+for rays close to object boundaries, for rays with multiple
+major intersections or found them to be not suitable for efficient execution on a GPU because of excessive branching requirements. We found density-guided sample filtering
+to improve the render performance a lot without sacrificing
+quality and being a good fit for the GPU execution model.
+The decision to split the non-viewpoint dependent density
+calculation in feature and model space is the first critical
+part: it makes obtaining σi for a sample point very cheap.
+We model πd as a single 4 × 4 fully-connected layer, followed by a SoftPlus activation [1]. This means it can be
+evaluated by a single texture fetch operation followed by
+five SIMD dot products and the SoftPlus non-linearity—we
+can easily afford executing this operation along the entire
+ray, or until we meet an aggregation density target. On the
+other hand, πc , the color decoder, must be larger and more
+Collisions and shadow mesh. We aim for a fully seamless experience where objects can be interacted with and can
+interact with each other (for instance by colliding). This is
+critical for experiences in which a physics engine dictates
+object placement in the world, or to enable natural object
+interactions through hand tracking in augmented and virtual
+6
+Figure 4. Test views of reconstructed benchmark objects. All objects have been reconstructed from mobile phone recordings and have
+been picked as a set of hard test objects. (a) has lots of wrinkles and concave areas, (b) transparency and fur, (c) viewpoint dependent
+effects (sparkles on surface), (d) intricate surface details, (e) viewpoint dependent shading effects.
+reality. To achieve that, we additionally compute a coarse
+collision mesh for every object and register it with the object volume. This mesh can be be directly extracted from
+the objects density field using marching cubes [17]. We use
+the same mesh as a shadow mesh to cast dynamic shadows
+to the environment.
+Approach
+PSNR
+SSIM
+Single-layered representation
+W/o coarse-to-fine grid optimization
+W/o camera refinement
+W/o weight regularization
+W/o adaptive sampling
+31.77
+25.70
+33.39
+33.04
+33.94
+0.9414
+0.8704
+0.9584
+0.9578
+0.9581
+Colors and blending. Modern game engines use a wide
+gamut linear color space for compositing and map it only
+during a final render pass to the respective device color
+space. This is important to take into account to achieve
+correct results for radiance field rendering: after aggregation, we map the predicted result from sRGB to a linear
+color space, normalize for scene exposure and let the game
+engine map it to the output color space. Furthermore, we
+disable wide gamut mapping, though we note that it is possible to use it in principle as long as it is being accounted for
+in the render process. To enable correct alpha-blending of
+the object with the rest of the scene, the alpha values have
+to be correctly treated as pre-multiplied alpha.
+Ours
+34.25
+0.9614
+Table 1. Ablation study of our approach averaged over five benchmark object reconstructions.
+Approach
+PSNR
+FPS
+ReLU-Fields [11]
+KiloNeRF [29]
+FastNeRF [5]
+PlenOctrees [42]
+SNeRG [8]
+MobileNeRF [3]
+30.04
+31.00
+29.97
+31.71
+30.38
+30.99
+10.05
+38.46
+238.10
+167.68
+207.26
+744.91
+Ours
+31.11
+813.01
+CR
+VE
+X
+X
+X
+X
+Table 2. Quantitative comparison of different interactive rendering methods on the NeRF-synthetic [20] dataset. We additionally note down which approaches support camera refinement (CR) and showcase perceived volumetric and high-frequency
+viewpoint dependent effects (VE), both very important for reconstructing real-world objects using phone recordings.
+4. Results
+In this section we extensively evaluate the components of
+our approach, and compare our real-time rendering runtime
+and quality with other state-of-the-art approaches.
+Experimental setting. We evaluate our approach on several datasets on the task of novel view synthesis, with a
+fixed split of train/val/test views. For each test view, we
+compare the rendered pixel colors with the raw observations, and evaluate peak signal-to-noise ratio (PSNR) and
+structural similarity index measure (SSIM). We report the
+average metrics over all test views.
+resulting in neural assets featuring fur, translucent parts and
+thin structures. The reconstructions using our method are
+visualized in Fig. 4. In Tab. 1 we evaluate different model
+components, showing that each of them is important to
+achieve high quality reconstruction. We additionally provide a qualitative preview of interactions with these neural assets in VR, using a headset and hand tracking in the
+suppl. mat. The reconstruction for all of these objects is
+automatic and we use the same hyperparameters for all of
+them, demonstrating the generality of the approach.
+Ablation of model components. We trained our approach on five recordings of real-world objects with particularly challenging materials in everyday environments,
+7
+Rendering efficiency. We generated efficient shader code
+for different environments, and extensively evaluated the
+rendering efficiency using a variety of hardware. The timings are summarized in Tab. 3. When the assets are rendered
+in a game engine, then beside the shader code that executes
+the volumetric rendering, we also report the frame time,
+which additionally includes the dynamic shadow visualization, collision resolution, etc. It’s interesting that at certain
+resolutions these classical mesh-based operations can take
+a lot of time compared to volumetric rendering.
+Limitations. While our neural assets support photorealistic appearance, the feature grids that enable efficient rendering of detailed effects use more GPU memory than mesh
+objects (e.g., at the highest resolution, the grids need about
+800 MB). An interesting future direction would be compressing the features further, e.g. by exploring dense grid
+decomposition into 2D and 1D representations [2]. Furthermore, while our approach supports natural interactions with
+the neural objects, the objects are moving only rigidly. It
+would be interesting to extend our method to a deformable
+NeRF representation [23, 24, 35], and add realistic deformations during interactions. Another important addition for
+our models is editability: by storing features on the voxel
+grid, it is easy to enable local editing in principle. However, a mapping betweeen features and intended colors or
+material properties is needed, and there exist many possibilities considering the latest advances in generative radiance
+fields [25].
+Figure 5. Qualitative comparisons of our approach with the reconstruction methods [16, 20, 30, 32, 40] on sequences from the
+CO3D dataset [30].
+Renderer
+Hardware
+Resolution
+FPS
+PyTorch
+Unreal Shader
+Unreal Frame
+WebGL Shader
+WebGL Shader
+Quest Pro Shader
+Quest Pro Frame
+V100
+RTX3080
+RTX3080
+RTX3080
+M1 Pro
+RTX3080
+RTX3080
+1920 × 1080
+1920 × 1080
+1920 × 1080
+3840 × 2160
+3456 × 2234
+3840 × 1800
+3840 × 1800
+0.53
+423.73
+140.06
+59.40†
+62.40
+150.60
+95.15
+Table 3. Rendering runtime of our automatically generated
+shader code compared to PyTorch, and evaluated on different hardware and resolutions. † WebGL was capped to 60 FPS on this machine.
+5. Conclusion
+In this paper, we introduced Neural Assets: a pipeline
+and model to create neural radiance field representations
+of objects and use them in interactive environments. We
+created a new model architecture, suitable to model high
+quality viewpoint dependent and transparency effects that
+can be rendered in super real-time (greater than 200 FPS on
+consumer grade GPUs). To achieve this speed, we propose
+to use a transpiler and convert the model directly to shader
+code and textures—components that are readily available in
+production-ready game engines. On this end, we present
+solutions for full integration with interactive systems: shadows, physics and level-of-detail, tackling many practical
+issues and making the use of radiance fields in environments with mesh representations seamless and attractive.
+The combination of visual quality of the real-world reconstructions and the efficiency gains of the presented model
+are outperforming the state-of-the art and translate to many
+existing 3D reconstruction pipelines. Its rendering speed
+combined with the visual quality of the volumetrically rendered radiance fields make it an attractive model for many
+applications.
+Comparison with baseline methods. In Tab. 2 we compare the rendering of our neural assets with existing neural rendering methods that support (close to) real-time rendering performance, on the test set of the Synthetic-NeRF
+dataset [20]. Our approach achieves the best runtime performance, while still attaining a very high reconstruction quality. The runtime was measured by rendering novel views at
+resolution of 800 × 800, using an RTX3080 GPU.
+Using semantic mask predictions. If an estimated object bounding box is not available, e.g., in the lightweight
+captures of the publicly available CO3D dataset [30], we
+instead rely on semantic object masks, which can be predicted by an off-the-shelf foreground segmentation network
+or video salient object detection model [39]. In Fig. 5 we
+show novel views on sequences from the CO3D dataset and
+compare them with other neural rendering approaches.
+8
+Figure 6. Illustration of adaptive point sampling. We differentiate samples in front of the object (red), inside the bounding box
+(green) and further away from the object (blue).
+Acknowledgements. We thank D. Roble for his great
+support of the project; O. Maury, C. Marshall and M. David
+for the inspiring discussions and feedback, Z. Dong, Z. Li
+and team for the excellent collaboration towards our demos;
+C. McCard and A. Ferguson for the design of the demo
+scenes.
+Figure 7. Visualizations of hand interactions with neural assets in
+a virtual environment.
+A. Optimization Details
+In this section we provide further details about model
+optimization.
+the appearance decoder size for Synthetic-NeRF [20] and
+real-world recordings. Synthetic sequences include some
+scenes with multiple objects (e.g. Materials sequence),
+which benefit from a larger appearance decoder (using a
+linear layer with width of 40) but perform well with fewer
+samples per ray (5). This delivers high-quality novel views
+even with the low number of samples (achieving the reported PSNR of 31.11). On the other hand, we found that
+real-world sequences benefit from a larger sample count to
+model translucency within objects and high-quality blending around their boundaries. Hence, we use a smaller decoder (with a linear layer width of 12) and 20 samples along
+each ray with equivalent runtime performance; a model with
+this architecture achieves 30.80 PSNR on the SyntheticNeRF scenes.
+Hyperparameters for training. We use an ADAM optimizer with momentum of 0.9 and β1 = 0.82, β2 = 0.97.
+The batch size is set to 8192 rays, and we sample N = 1024
+samples along each ray. The model is trained for a total of
+500k iterations. We set different learning rates for different parts of the model: 0.0024 for the decoder, 0.027 for
+the feature grid, 7 × 10−6 for rotations, 3 × 10−5 for translations and 2 × 10−6 for pinhole intrinsics. We apply an
+exponential decay of 0.035 over 350k iterations to learning
+rate. To balance the loss terms, we use λR = 0.00046,
+λt = 0.0018 and λweight = 5 × 10−4 .
+Adaptive sampling. In the method section of the main
+paper, we introduce adaptive point sampling, which makes
+a better use of limited N = 1024 point samples along each
+ray, by focusing most samples in the approximate object
+bounding box. A visualization of the sampling is provided
+in Fig. 6. We distribute the samples in the following way:
+C. Visualizations
+We visualize different examples of hand interactions
+with virtual assets in Fig. 7.
+References
+• 7% of samples in front of the object, using linear depth
+sampling (red);
+[1] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P
+Srinivasan, and Peter Hedman. Mip-nerf 360: Unbounded
+anti-aliased neural radiance fields. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 5470–5479, 2022. 3, 5, 6
+[2] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and
+Hao Su. Tensorf: Tensorial radiance fields. arXiv preprint
+arXiv:2203.09517, 2022. 3, 8
+[3] Zhiqin Chen, Thomas Funkhouser, Peter Hedman, and Andrea Tagliasacchi. Mobilenerf: Exploiting the polygon rasterization pipeline for efficient neural field rendering on mobile architectures. arXiv preprint arXiv:2208.00277, 2022.
+3, 7
+• 63% of samples in the object bounding box, using linear depth sampling (green);
+• 30% of samples in the range further away from the object, using inverse depth sampling (blue).
+B. Architecture Variations
+While we kept most architecture details consistent across
+different data sources, we did find it useful to differentiate
+9
+[16] Stephen Lombardi, Tomas Simon, Jason Saragih, Gabriel
+Schwartz, Andreas Lehrmann, and Yaser Sheikh. Neural volumes: Learning dynamic renderable volumes from images.
+arXiv preprint arXiv:1906.07751, 2019. 8
+[17] William E Lorensen and Harvey E Cline. Marching cubes:
+A high resolution 3d surface construction algorithm. ACM
+siggraph computer graphics, 21(4):163–169, 1987. 7
+[18] Nelson Max. Optical models for direct volume rendering.
+IEEE Transactions on Visualization and Computer Graphics,
+1(2):99–108, 1995. 4
+[19] Albrecht Meydenbauer. Die photometrographie. Wochenblatt des Architektenvereins zu Berlin, 1(14):125–126, 1867.
+2
+[20] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik,
+Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. In ECCV, 2020. 2, 3, 4, 5, 6, 7, 8, 9
+[21] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. arXiv preprint arXiv:2201.05989,
+2022. 3
+[22] Thomas Neff, Pascal Stadlbauer, Mathias Parger, Andreas
+Kurz, Joerg H Mueller, Chakravarty R Alla Chaitanya, Anton
+Kaplanyan, and Markus Steinberger. Donerf: Towards realtime rendering of compact neural radiance fields using depth
+oracle networks. In Computer Graphics Forum, volume 40,
+pages 45–59. Wiley Online Library, 2021. 3
+[23] Keunhong Park, Utkarsh Sinha, Jonathan T Barron, Sofien
+Bouaziz, Dan B Goldman, Steven M Seitz, and Ricardo
+Martin-Brualla. Nerfies: Deformable neural radiance fields.
+In Proceedings of the IEEE/CVF International Conference
+on Computer Vision, pages 5865–5874, 2021. 8
+[24] Keunhong Park, Utkarsh Sinha, Peter Hedman, Jonathan T
+Barron, Sofien Bouaziz, Dan B Goldman, Ricardo MartinBrualla, and Steven M Seitz.
+Hypernerf: A higherdimensional representation for topologically varying neural
+radiance fields. arXiv preprint arXiv:2106.13228, 2021. 8
+[25] Ben Poole, Ajay Jain, Jonathan T. Barron, and Ben Mildenhall. Dreamfusion: Text-to-3d using 2d diffusion, 2022. 8
+[26] Charles R Qi, Hao Su, Kaichun Mo, and Leonidas J Guibas.
+Pointnet: Deep learning on point sets for 3d classification
+and segmentation. arXiv preprint arXiv:1612.00593, 2016.
+2
+[27] Siddhant Ranade, Christoph Lassner, Kai Li, Christian
+Haene, Shen-Chi Chen, Jean-Charles Bazin, and Sofien
+Bouaziz. Ssdnerf: Semantic soft decomposition of neural
+radiance fields. arXiv preprint arXiv:2212.03406, 2022. 3,
+4, 5
+[28] Daniel Rebain, Wei Jiang, Soroosh Yazdani, Ke Li,
+Kwang Moo Yi, and Andrea Tagliasacchi. Derf: Decomposed radiance fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
+14153–14161, 2021. 3
+[29] Christian Reiser, Songyou Peng, Yiyi Liao, and Andreas
+Geiger. Kilonerf: Speeding up neural radiance fields with
+thousands of tiny mlps. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 14335–
+14345, 2021. 3, 7
+[4] Paul Debevec, Tim Hawkins, Chris Tchou, Haarm-Pieter
+Duiker, Westley Sarokin, and Mark Sagar. Acquiring the
+reflectance field of a human face. In Proceedings of the 27th
+Annual Conference on Computer Graphics and Interactive
+Techniques, SIGGRAPH ’00, page 145–156, USA, 2000.
+ACM Press/Addison-Wesley Publishing Co. 2
+[5] Stephan J Garbin, Marek Kowalski, Matthew Johnson, Jamie
+Shotton, and Julien Valentin. Fastnerf: High-fidelity neural
+rendering at 200fps. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 14346–
+14355, 2021. 3, 7
+[6] Carsten Griwodz, Simone Gasparini, Lilian Calvet, Pierre
+Gurdjos, Fabien Castan, Benoit Maujean, Gregoire De Lillo,
+and Yann Lanthony. Alicevision Meshroom: An open-source
+3D reconstruction pipeline. In Proceedings of the 12th ACM
+Multimedia Systems Conference - MMSys ’21. ACM Press,
+2021. 2
+[7] Jungong Han, Ling Shao, Dong Xu, and Jamie Shotton. Enhanced computer vision with microsoft kinect sensor: A review. IEEE Transactions on Cybernetics, 43(5):1318–1334,
+2013. 2
+[8] Peter Hedman, Pratul P Srinivasan, Ben Mildenhall,
+Jonathan T Barron, and Paul Debevec. Baking neural radiance fields for real-time view synthesis. In Proceedings
+of the IEEE/CVF International Conference on Computer Vision, pages 5875–5884, 2021. 3, 7
+[9] Shahram Izadi, David Kim, Otmar Hilliges, David
+Molyneaux, Richard Newcombe, Pushmeet Kohli, Jamie
+Shotton, Steve Hodges, Dustin Freeman, Andrew Davison,
+et al. Kinectfusion: real-time 3d reconstruction and interaction using a moving depth camera. In Proceedings of the
+24th annual ACM symposium on User interface software and
+technology, pages 559–568, 2011. 2
+[10] Yoonwoo Jeong, Seokjun Ahn, Christopher Choy, Anima
+Anandkumar, Minsu Cho, and Jaesik Park. Self-calibrating
+neural radiance fields. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 5846–
+5854, 2021. 3
+[11] Animesh Karnewar, Tobias Ritschel, Oliver Wang, and Niloy
+Mitra. Relu fields: The little non-linearity that could. In
+ACM SIGGRAPH 2022 Conference Proceedings, pages 1–9,
+2022. 3, 5, 7
+[12] Sosuke Kobayashi, Eiichi Matsumoto, and Vincent Sitzmann. Decomposing nerf for editing via feature field distillation. In Advances in Neural Information Processing Systems,
+volume 35, 2022. 3, 4
+[13] Christoph Lassner and Michael Zollhofer. Pulsar: Efficient sphere-based neural rendering. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 1440–1449, 2021. 3
+[14] Chen-Hsuan Lin, Wei-Chiu Ma, Antonio Torralba, and Simon Lucey. Barf: Bundle-adjusting neural radiance fields.
+In Proceedings of the IEEE/CVF International Conference
+on Computer Vision, pages 5741–5751, 2021. 3
+[15] Stephen Lombardi, Tomas Simon, Jason Saragih, Gabriel
+Schwartz, Andreas Lehrmann, and Yaser Sheikh. Neural volumes: Learning dynamic renderable volumes from images.
+ACM Trans. Graph., 38(4):65:1–65:14, July 2019. 2
+10
+of neural radiance fields. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision, pages 5752–
+5761, 2021. 3, 7
+[43] Kai Zhang, Gernot Riegler, Noah Snavely, and Vladlen
+Koltun. Nerf++: Analyzing and improving neural radiance
+fields. arXiv preprint arXiv:2010.07492, 2020. 3
+[44] Yi Zhou, Connelly Barnes, Jingwan Lu, Jimei Yang, and
+Hao Li. On the continuity of rotation representations in neural networks. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 5745–
+5753, 2019. 5
+[30] Jeremy Reizenstein, Roman Shapovalov, Philipp Henzler,
+Luca Sbordone, Patrick Labatut, and David Novotny. Common objects in 3d: Large-scale learning and evaluation of
+real-life 3d category reconstruction. In International Conference on Computer Vision, 2021. 2, 8
+[31] Johannes Lutz Schönberger and Jan-Michael Frahm.
+Structure-from-motion revisited. In Conference on Computer Vision and Pattern Recognition (CVPR), 2016. 2
+[32] Vincent Sitzmann, Michael Zollhöfer, and Gordon Wetzstein. Scene representation networks: Continuous 3dstructure-aware neural scene representations. Advances in
+Neural Information Processing Systems, 32, 2019. 8
+[33] Ayush Tewari, Justus Thies, Ben Mildenhall, Pratul Srinivasan, Edgar Tretschk, W Yifan, Christoph Lassner, Vincent
+Sitzmann, Ricardo Martin-Brualla, Stephen Lombardi, et al.
+Advances in neural rendering. In Computer Graphics Forum,
+volume 41, pages 703–735. Wiley Online Library, 2022. 3
+[34] Carlo Tomasi and Takeo Kanade. Shape and motion from image streams under orthography: A factorization method. International Journal of Computer Vision, 9:137–54, 11 1992.
+2
+[35] Edgar Tretschk, Ayush Tewari, Vladislav Golyanik, Michael
+Zollhöfer, Christoph Lassner, and Christian Theobalt. Nonrigid neural radiance fields: Reconstruction and novel view
+synthesis of a dynamic scene from monocular video. In
+Proceedings of the IEEE/CVF International Conference on
+Computer Vision, pages 12959–12970, 2021. 8
+[36] Mikaela Angelina Uy, Quang-Hieu Pham, Binh-Son Hua,
+Thanh Nguyen, and Sai-Kit Yeung. Revisiting point cloud
+classification: A new benchmark dataset and classification
+model on real-world data. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision (ICCV), October 2019. 2
+[37] Zirui Wang, Shangzhe Wu, Weidi Xie, Min Chen,
+and Victor Adrian Prisacariu. Nerf–: Neural radiance
+fields without known camera parameters. arXiv preprint
+arXiv:2102.07064, 2021. 3
+[38] Christopher Xie, Keunhong Park, Ricardo Martin-Brualla,
+and Matthew Brown. Fig-nerf: Figure-ground neural radiance fields for 3d object category modelling. In International
+Conference on 3D Vision (3DV), 2021. 3, 4
+[39] Binwei Xu, Haoran Liang, Ronghua Liang, and Peng Chen.
+Locate globally, segment locally: A progressive architecture
+with knowledge review network for salient object detection.
+In Proceedings of the AAAI Conference on Artificial Intelligence, volume 35, pages 3004–3012, 2021. 8
+[40] Lior Yariv, Yoni Kasten, Dror Moran, Meirav Galun, Matan
+Atzmon, Basri Ronen, and Yaron Lipman. Multiview neural surface reconstruction by disentangling geometry and appearance. Advances in Neural Information Processing Systems, 33:2492–2502, 2020. 8
+[41] Alex Yu, Sara Fridovich-Keil, Matthew Tancik, Qinhong
+Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels: Radiance fields without neural networks. arXiv preprint
+arXiv:2112.05131, 2021. 3, 5
+[42] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng,
+and Angjoo Kanazawa. Plenoctrees for real-time rendering
+11

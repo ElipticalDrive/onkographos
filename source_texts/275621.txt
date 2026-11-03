@@ -1,0 +1,97 @@
+Found by running the whole gallery at v0.30.0 and looking at it. Every voxel render is Minecraft; every SDF render is clay. The brushes are not the problem — the display is. What it looks like representation renders what they look like v...
+
+A voxel sculpt can only be displayed as cubes: mesh_greedy is the grid's only mesher, so every voxel brush renders blocky · Issue #108 · CyberdyneCorp/ClayCore · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+A voxel sculpt can only be displayed as cubes: mesh_greedy is the grid's only mesher, so every voxel brush renders blocky #108
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#110
+Closed
+A voxel sculpt can only be displayed as cubes: mesh_greedy is the grid's only mesher, so every voxel brush renders blocky#108
+#110
+Copy link
+Labels
+enhancementNew feature or requestNew feature or request
+Description
+leonardoaraujosantos
+opened on Aug 13, 2026
+Issue body actions
+Found by running the whole gallery at v0.30.0 and looking at it. Every voxel render is Minecraft; every SDF render is clay. The brushes are not the problem — the display is.
+What it looks like
+representation
+renders
+what they look like
+voxel
+09_sculpt_verbs, 07_voxel_edits, 15_smudge, 15_fill_cavities, 36_levels, 35_voxel_trim
+axis-aligned cubes throughout; 15_smudge shows the smudge producing tiny cube nubs on a cube face
+SDF
+25_relief_crease, 29_claybuildup_stroke, 20_relax_passes, 22_snakehook_creature, 28_hpolish_modes, 24_noise_weathered, 34_organic_character, 35_hard_surface_helmet
+smooth, and each brush shows its characteristic signature
+The voxel verbs are doing the right thing to the data — 15_smudge's nubs are in the right place, 36_levels' fine ribs are there. The mesher is what a sculptor sees, and it renders occupancy as boxes.
+Why
+VoxelGrid::mesh_greedy is the only mesher a voxel grid has (include/clay/voxel/grid.h:306-340), and it emits axis-aligned quads by construction — that is what greedy meshing is. The engine owns two smooth meshers, mesh/marching.h and mesh/surface_nets.h, and neither has a VoxelGrid entry point: they take a tape or a brick cache. The brick cache is deliberately SDF-only, so voxel layers are outside it (#86).
+There is a second reason underneath, already recorded in #89: occupancy is binary — a palette index per cell, no fractional coverage — so "up-sampling does not interpolate". A smooth mesher run directly over binary occupancy still stair-steps, because every edge crossing lands at the same midpoint.
+Why this matters now
+v0.30.0 measured the voxel display path on device: a dab and the frame that shows it cost ~0.54 ms together, ~13% of the 4.17 ms engine share. The voxel path is the interactive one — docs/sculpt_comparison.md puts the voxel verbs 300–4000× inside the frame while every SDF verb bakes.
+So the two paths have swapped problems:
+voxel — fits the frame with ~7× to spare, and looks like blocks
+SDF — looks like clay, and misses the frame by 1.15× at 1000 stamps
+Speed cannot fix the first one. This is now the largest visible gap between what claycore produces and what a sculptor expects, and nothing in docs/09 said so until today, because that document measures time and never asked what the result looks like.
+The pieces are mostly here
+mesh_lattice_nets is already generic over the lattice:
+```
+Mesh mesh_lattice_nets(const std::function<float(int, int, int)>& sample,
+                       const int cell_min[3], const int cell_max[3],
+                       kernel::cfloat3 origin, float spacing);
+```
+It takes a sampler, not a tape — so it can mesh a voxel grid today if given something to sample. What is missing is a field to hand it:
+VoxelGrid::sample_step_field exists but returns a step function (±voxel_size/2), which is exactly the binary problem: every crossing lands mid-edge and the result is still blocky.
+field::redistance (fast sweeping, grown by add-consolidation-policy) builds a proper narrow band from a sign field — the primitive a smooth voxel surface needs.
+That is the same bridge #90 asks for on workflow grounds (voxel → field without a mesh detour). #90 turns out to answer the visual gap too, which is a considerably stronger reason to prioritise it than the one on that issue.
+Worth deciding, not just fixing
+A display path or a conversion? A preview mesher that smooths for display only, leaving the grid binary, is much cheaper than a real voxel→field conversion and does not touch the document. But it means the thing on screen is not the thing that gets exported. No direct voxel-to-field return trip: a sculpt can only re-enter the document through a mesh detour that resamples onto a frozen lattice and drops the palette #90 is the conversion; this issue is the display, and they could be answered together or separately.
+Where does the smoothing live? Redistancing the whole grid per dab would throw away everything clay_voxel_mesh is a whole-grid sweep costing ~4 ms per occupied chunk however empty, so a voxel sculpt cannot be displayed inside a frame #86 part 2 bought — a dab currently re-meshes 2.2 chunks in 0.53 ms. Any smoothing has to be per-dirty-chunk with an apron, or it is not interactive any more.
+Does it stay optional? Blocky is correct for some work — a hard-surface voxel trim, a Minecraft-ish style — and it is what export currently guarantees. A clay_voxel_mesh_smooth beside clay_voxel_mesh keeps both, and matches how mesh_bricks and the nets mesher already coexist as export-grade and preview.
+Does anything need to move on the C ABI? A host that meshes through clay_voxel_mesh_chunks needs the smooth variant to keep the same per-key range contract, or incremental display cannot use it.
+Acceptance, if it goes ahead
+The gallery is the test. 09_sculpt_verbs and 15_smudge regenerated through the smooth path should read as sculpted forms rather than cubes, and the same device cases (voxel_mesh_dirty) should still fit the frame — a smooth display that costs 10× is a different feature, not this one.
+Reproduce with python3 examples/run_all.py and look at examples/output/09_sculpt_verbs.png beside examples/output/25_relief_crease.png.
+Activity
+leonardoaraujosantos
+added
+enhancementNew feature or requestNew feature or request
+on Aug 13, 2026
+leonardoaraujosantos
+added a commit that references this issue on Aug 13, 2026
+Give the round trip a Python surface, a picture, and the other half's
+...
+344b968
+leonardoaraujosantos
+closed this as completedin #110on Aug 13, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or request
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

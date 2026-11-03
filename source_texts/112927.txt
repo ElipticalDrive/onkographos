@@ -1,0 +1,160 @@
+Problem statement I was wondering If you could expose an option for compression presets, I have already done it myself, but simply just for the platform I want to optimize for. Maybe other's would find something like this useful. Propose...
+
+Texture Compression for stored bakes · Issue #8 · ydeltastar/godot-scene-texture · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Texture Compression for stored bakes #8
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Texture Compression for stored bakes#8
+Copy link
+Labels
+enhancementNew feature or requestNew feature or request
+Description
+CalvinKline
+opened on Apr 10, 2026
+Issue body actions
+Problem statement
+I was wondering If you could expose an option for compression presets, I have already done it myself, but simply just for the platform I want to optimize for. Maybe other's would find something like this useful.
+Proposed solution
+All I did was change the class of _data, to Object. Add image.compress(Image.COMPRESS_ASTC,Image.COMPRESS_SOURCE_SRGB,Image.ASTC_FORMAT_4x4) for better web compression (Reduced the image file size by around 3.5-4x). I would imagine something like this and an export variable for the different compression methods is all you need.
+```
+##Inside SceneTexture class
+
+func _set_image(image: Image) -> void:
+	assert(image.get_width() == size.x)
+	assert(image.get_height() == size.y)
+	
+	if _texture.is_valid():
+		var new_texture := RenderingServer.texture_2d_create(image)
+		RenderingServer.texture_replace(_texture, new_texture)
+	else:
+		_texture = RenderingServer.texture_2d_create(image)
+	RenderingServer.texture_set_path(_texture, resource_path)
+	
+
+	if render_store_bake:
+
+        ##This is what I Changed
+		image.compress(Image.COMPRESS_ASTC,Image.COMPRESS_SOURCE_SRGB,Image.ASTC_FORMAT_4x4)
+
+		_data = image
+	else:
+		_data = null
+```
+Alternatives
+Leave an option for no compression
+Reactions are currently unavailable
+Activity
+CalvinKline
+added
+enhancementNew feature or requestNew feature or request
+on Apr 10, 2026
+CalvinKline commented on Apr 10, 2026
+CalvinKline
+on Apr 10, 2026
+Author
+More actions
+However there is a warning and error that pops up for every SceneTexture when running the project, not for when baking though. They aren't game breaking, and for the warning it is just a case of the compression type and the type of hardware.
+CalvinKline commented on Apr 11, 2026
+CalvinKline
+on Apr 11, 2026
+Author
+More actions
+After further testing, it was a little more complicated but I found a simple solution that at least does what I need it to do, and could probably just have adjustable compress enums.
+Simply added a boolean to SceneTexture, for only compressing specific textures.
+```
+##Whether it should be compressed.
+@export var compress : bool = true
+```
+Then compress only when baking, so that when compression isn't allowed in certain exports (like web apparently) it will compress it with no issues as long as you store bakes in that case. This is the entire function, with my changes in SceneTexture.gd.
+```
+func _set_image(image: Image) -> void:
+	assert(image.get_width() == size.x)
+	assert(image.get_height() == size.y)
+
+	if compress:
+		image.decompress()
+		image.convert(Image.FORMAT_RGBA8)
+
+	if _texture.is_valid():
+		var new_texture := RenderingServer.texture_2d_create(image)
+		RenderingServer.texture_replace(_texture, new_texture)
+	else:
+		_texture = RenderingServer.texture_2d_create(image)
+	RenderingServer.texture_set_path(_texture, resource_path)
+
+	if render_store_bake:
+		if compress and _is_baking:
+			image.compress(Image.COMPRESS_ASTC,Image.COMPRESS_SOURCE_SRGB,Image.ASTC_FORMAT_8x8)
+		_data = image
+	else:
+		_data = null
+```
+I have tested in editor and a Web build, and there are no issues for me.
+This reduced a 128 x 128 texture from ~87KB to ~23KB
+ydeltastar commented on Apr 11, 2026
+ydeltastar
+on Apr 11, 2026
+Last edited by ydeltastar
+Owner
+More actions
+Disabling render_store_bake would be more effective for saving disk space, since the texture is generated at runtime.
+Also note that if you decompress the image before sending it to the rendering server, you lose the benefits on the GPU side as well.
+It is a great idea, and I will definitely add support to this. I think your implementation direction is right. The only thing to change is the handling of the specific texture format. It is a project-wide setting that changes by export target. I would do it like the regular image import settings, where you set Lossless/Lossy/VRAM/etc but the specific format is automatically inferred from the project settings and target platform. However, I think this can only work as an EditorExportPlugin because the correct format is only really defined at the exporting stage.
+CalvinKline commented on Apr 11, 2026
+CalvinKline
+on Apr 11, 2026
+Author
+More actions
+I believe I had previously wanted to store it to save load-times (single-threaded web build). I am using a lot of them, and they take around 10-18ms each for a single bake. That's excluding the compression, and I am only testing in the editor which may or may not be faster than a web build, especially on a lower end device.
+This is how I tested. In a loop of 36 textures when much more will be added it's already ~0.5 seconds. On a much slower device it could be much more ofc.
+```
+var start : int = Time.get_ticks_usec()
+texture.bake()
+await texture.bake_finished
+print("Bake Time: ", Time.get_ticks_usec() - start)
+```
+The settings were:
+-Compatibility Mode
+-size 128 x 128
+-Transparent BG = true
+-MSAA 3D = 8x
+-SSAA disabled since compatibility cant use it.
+-World3D environment with glow enabled if that matters.
+-Fairly simple scenes
+Even though mine might be an edge case I am glad to see you're interested in supporting it.
+ydeltastar commented on Apr 11, 2026
+ydeltastar
+on Apr 11, 2026
+Last edited by ydeltastar
+Owner
+More actions
+Yeah, runtime baking for the web can be heavy and should be avoided.
+The best approach to address all these is to follow Godot's method for importing regular images. Save the rendered output in multiple formats within the cache folder .godot, then export only the format suitable for the target platform. This avoids storing image data in source control, allowing render_store_bake to be enabled by default and facilitating compression management.
+I am updating the addon to Godot 4.6.2 (it currently targets 4.3), which will likely introduce breaking changes. As part of this update, I was already considering adopting this method for storing rendered data. Implementing compression within this system should be straightforward.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or request
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

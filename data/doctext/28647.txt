@@ -1,0 +1,376 @@
+# SphereTracing — Ray Marching with Signed Distance Fields
+
+A real-time **ray marching** renderer in C# using **Signed Distance Functions (SDFs)** and OpenGL compute shaders.
+
+Ray marching (also called sphere tracing) is an alternative to traditional rasterization or ray-triangle intersection. Instead of testing rays against geometry explicitly, the scene is described by mathematical distance functions — enabling rendering of perfectly smooth surfaces, fractals, and complex implicit geometry that would be impossible to represent as meshes.
+
+## Features
+
+- SDF-based scene description (spheres, boxes, smooth blending)
+- `smoothmin` operator for organic shape blending
+- Phong shading with soft shadows via secondary ray marching
+- Real-time rendering with OpenGL + GLFW
+
+## How It Works
+
+Each pixel fires a ray from the camera. Rather than checking triangle intersections, the ray **marches forward in steps** — each step sized by the minimum SDF value across all scene objects (guaranteed safe step distance). When the ray gets close enough to a surface, it shades the point.
+
+```
+for each step:
+    d = min(sdf_sphere(p), sdf_box(p), ...)
+    if d < epsilon: HIT → shade
+    p += ray_dir * d
+```
+
+## Getting Started
+
+### Prerequisites
+
+- [.NET 8 SDK](https://dotnet.microsoft.com/en-us/download)
+- OpenGL 4.3+ capable GPU
+- `libglfw` installed:
+  ```sh
+  # Ubuntu/Debian
+  sudo apt install libglfw3
+
+  # Arch
+  sudo pacman -S glfw
+  ```
+
+### Run
+
+```sh
+git clone https://github.com/gqvz/SphereTracing
+cd SphereTracing
+dotnet run --project SphereTracing
+```
+
+> If you get a GLFW library not found error, check the exact `.so` name on your system (`ldconfig -p | grep glfw`) and update the dllmap in the project accordingly.
+
+## References
+
+- [Inigo Quilez — SDF functions](https://iquilezles.org/articles/distfunctions/)
+- [Jamie Wong — Ray Marching and SDFs](https://jamie-wong.com/2016/07/15/ray-marching-signed-distance-functions/)
+
+### SphereTracing/Program.cs
+```
+﻿using System.Diagnostics;
+using ComputeSharp;
+using GLFW;
+using SkiaSharp;
+using SphereTracing.Shaders;
+
+namespace SphereTracing
+{
+    public class Program
+    {
+        private static Window _window = null!;
+        public const int Width = 1600;
+        public const int Height = 900;
+
+        private static readonly Circle[] Circles = CreateCircles();
+        private static readonly Stopwatch Stopwatch = new();
+
+        private static void Main()
+        {
+            _window = new Window();
+            Glfw.SetWindowAttribute(_window.NativeWindow.Handle, WindowAttribute.Resizable, false);
+            _window.NativeWindow.CursorMode = CursorMode.Hidden;
+            _window.NativeWindow.KeyAction += OnKeyAction;
+            Glfw.SetCursorPositionCallback(_window.NativeWindow, MouseCallback);
+            _window.OnUpdate += WindowOnOnUpdate;
+            Stopwatch.Start();
+            _window.Run();
+        }
+
+        private static void MouseCallback(IntPtr window, double x, double y)
+        {
+            _targetX = (float)x;
+            _targetY = (float)y;
+
+            _positionAndDirectionBuffer.Dispose();
+            _positionAndDirectionBuffer = GraphicsDevice.Default.AllocateReadOnlyBuffer(new []{_x, _y, _targetX, _targetY});
+        }
+
+        private static float _x = 50;
+        private static float _y = 50;
+        private static float _xToChange;
+        private static float _yToChange;
+        private static float _targetX;
+        private static float _targetY;
+        
+        private static void OnKeyAction(object? sender, KeyEventArgs e)
+        {
+            const int speed = 3;
+            if (e.Key == Keys.A)
+                _xToChange += e.State is InputState.Press or InputState.Repeat ? -speed : -_xToChange;
+            if (e.Key == Keys.D)
+                _xToChange += e.State is InputState.Press or InputState.Repeat ? +speed : -_xToChange;
+            if (e.Key == Keys.W)
+                _yToChange += e.State is InputState.Press or InputState.Repeat ? -speed : -_yToChange;
+            if (e.Key == Keys.S) 
+                _yToChange += e.State is InputState.Press or InputState.Repeat ? +speed : -_yToChange;
+            _xToChange = Math.Clamp(_xToChange, -speed, speed);
+            _yToChange = Math.Clamp(_yToChange, -speed, speed);
+        }
+
+        private static readonly SKPaint FpsPaint = new() {Color = SKColor.Parse("#F34336"), TextSize = 18, IsAntialias = true};
+        private static readonly ReadOnlyBuffer<Circle> CirclesBuffer = GraphicsDevice.Default.AllocateReadOnlyBuffer(Circles);
+        private static ReadWriteBuffer<SKColor> _pixelsBuffer = null!;
+        private static readonly SKBitmap Bitmap = new(Width, Height);
+        private static ReadOnlyBuffer<float> _positionAndDirectionBuffer = GraphicsDevice.Default.AllocateReadOnlyBuffer(new float[]{50, 50, 100, 100});
+        private static unsafe void WindowOnOnUpdate()
+        {
+            if (_xToChange is not 0 || _yToChange is not 0)
+            {
+                _x += _xToChange;
+                _y += _yToChange;
+                _x = Math.Clamp(_x, 10, Width - 10);
+                _y = Math.Clamp(_y, 10, Height - 10);
+                _positionAndDirectionBuffer.Dispose();
+                _positionAndDirectionBuffer = GraphicsDevice.Default.AllocateReadOnlyBuffer(new []{_x, _y, _targetX, _targetY});
+            }
+
+            Stopwatch.Stop();
+            var elapsed = Stopwatch.Elapsed.TotalMilliseconds;
+            if (elapsed < 16.6666666666667D)
+            {
+                Thread.Sleep((int) (16.6666666666667D - elapsed));
+            }
+            Stopwatch.Restart();
+
+            _window.Canvas.Clear(SKColor.Parse("#282C34"));
+            _pixelsBuffer?.Dispose();
+            _pixelsBuffer = GraphicsDevice.Default.AllocateReadWriteBuffer<SKColor>(Height * Width, AllocationMode.Clear);
+            GraphicsDevice.Default.For(Width, Height, new SphereGameShader(_pixelsBuffer, CirclesBuffer, _positionAndDirectionBuffer));
+            fixed (SKColor* ptr = &_pixelsBuffer.ToArray()[0])
+                Bitmap.SetPixels((IntPtr)ptr);
+            _window.Canvas.DrawBitmap(Bitmap, 0, 0);
+            _window.Canvas.DrawText($"FPS: {1000 / elapsed:N0}", new SKPoint(10, 20), FpsPaint);
+            _window.Canvas.Flush();
+            _window.NativeWindow.SwapBuffers();
+        }
+
+        private static Circle[] CreateCircles()
+        {
+            const int count = 15;
+            var circles = new Circle[count];
+            for (var i = 0; i < count; i++)
+            {
+                var radius = Random.Shared.Next(10, 100);
+                var x = Random.Shared.Next(radius, Width - radius);
+                var y = Random.Shared.Next(radius, Height - radius);
+                circles[i] = new Circle(x, y, radius);
+            }
+
+            return circles;
+        }
+    }
+}
+```
+
+### SphereTracing/Types.cs
+```
+﻿namespace SphereTracing;
+
+public readonly struct Circle
+{
+    public Circle(int x, int y, int r)
+    {
+        X = x;
+        Y = y;
+        R = r;
+    }
+
+    public readonly int X;
+    public readonly int Y;
+    public readonly int R;
+}
+```
+
+### SphereTracing/Window.cs
+```
+﻿using System.Runtime.InteropServices;
+using GLFW;
+using SkiaSharp;
+
+namespace SphereTracing;
+
+public class Window
+{
+    public readonly NativeWindow NativeWindow;
+    public readonly SKCanvas Canvas;
+    public readonly SKSurface SkiaSurface;
+
+    public Window()
+    {
+        NativeWindow = new NativeWindow(Program.Width, Program.Height, "toasty made a thing (tried to)");
+        var nativeContext = GetNativeContext(NativeWindow);
+        var glInterface =
+            GRGlInterface.AssembleGlInterface(nativeContext, (_, name) => Glfw.GetProcAddress(name));
+        var skiaContext = GRContext.Create(GRBackend.OpenGL, glInterface);
+        var framebufferInfo = new GRGlFramebufferInfo(0, GRPixelConfig.Rgba8888.ToGlSizedFormat());
+        var backendRenderTarget = new GRBackendRenderTarget(Program.Width, Program.Height, 0, 8, framebufferInfo);
+        SkiaSurface =
+            SKSurface.Create(skiaContext, backendRenderTarget, GRSurfaceOrigin.BottomLeft, SKImageInfo.PlatformColorType);
+        Canvas = SkiaSurface.Canvas;
+    }
+
+    private static object GetNativeContext(NativeWindow nativeWindow)
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            return Native.GetWglContext(nativeWindow);
+        }
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+        {
+            // XServer
+            return Native.GetGLXContext(nativeWindow);
+            // Wayland
+            //return Native.GetEglContext(nativeWindow);
+        }
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            return Native.GetNSGLContext(nativeWindow);
+        }
+
+        throw new PlatformNotSupportedException();
+    }
+
+    public event Action? OnUpdate;
+
+    public void Run()
+    {
+        while (!NativeWindow.IsClosing)
+        {
+            OnUpdate?.Invoke();
+            Glfw.PollEvents();
+        }
+    }
+}
+```
+
+### SphereTracing/Shaders/SphereGameShader.cs
+```
+﻿using ComputeSharp;
+using SkiaSharp;
+
+// ReSharper disable All
+
+namespace SphereTracing.Shaders;
+
+[AutoConstructor]
+public readonly partial struct SphereGameShader : IComputeShader
+{
+    private const int Width = Program.Width;
+    private const int Height = Program.Height;
+
+    public readonly ReadWriteBuffer<SKColor> buffer;
+    public readonly ReadOnlyBuffer<Circle> circleBuffer;
+    public readonly ReadOnlyBuffer<float> positionAndDirectionBuffer;
+
+    [ShaderMethod]
+    public static bool OnCircle(Float2 center, float radius, Float2 xy) => 
+        CircleDistance(center, radius, xy) <= 0;
+    
+    [ShaderMethod]
+    public static float CircleDistance(Float2 center, float radius, Float2 xy) =>
+        Hlsl.Distance(xy, center) - radius;
+    
+    [ShaderMethod]
+    public static bool OnLine(Float2 start, Float2 end, float width, Float2 xy) =>
+        Hlsl.Distance(xy, start) + Hlsl.Distance(xy, end) - Hlsl.Distance(start, end) <= width;
+
+    public float ClosestShapeDistance(Float2 xy)
+    {
+        float closestDistance = float.MaxValue;
+        for (var index = 0; index < circleBuffer.Length; index++)
+        {
+            var circle = circleBuffer[index];
+            var distance = CircleDistance(new Float2(circle.X, circle.Y), circle.R, xy);
+            if (distance < closestDistance)
+                closestDistance = distance;
+        }
+
+        return closestDistance;
+    }
+
+    public void Execute()
+    {
+        var pixel = ThreadIds.Y * Width + ThreadIds.X;
+        
+        int red = 0, green = 0, blue = 0;
+        // spheres
+        for (int i = 0; i < circleBuffer.Length; i++)
+        {
+            var circle = circleBuffer[i];
+            if (OnCircle(new Float2(circle.X, circle.Y), circle.R, ThreadIds.XY))
+            {
+                red = green = blue = 255;
+                break;
+            }
+        }
+
+        var currentPos = new Float2(positionAndDirectionBuffer[0], positionAndDirectionBuffer[1]);
+
+        var target = new Float2(positionAndDirectionBuffer[2], positionAndDirectionBuffer[3]);
+        
+        /*
+        if (OnLine(currentPos, target, .01f, ThreadIds.XY))
+        {
+            blue = 255;
+            red = green = 0;
+        }
+        */
+        
+        int maxIterations = 50;
+
+        var closestDistance = ClosestShapeDistance(currentPos);
+        var direction = Hlsl.Normalize(target - currentPos);
+        var posToPlaceCircle = currentPos;
+        while (maxIterations > 0 && closestDistance > 2)
+        {
+            
+            if (OnCircle(posToPlaceCircle, closestDistance, ThreadIds.XY) && !OnCircle(posToPlaceCircle, closestDistance - 2, ThreadIds.XY))
+            {
+                red = 120;
+                green = 120;
+                blue = 120;
+            }
+
+            /*
+            if (OnCircle(posToPlaceCircle, closestDistance - 2, ThreadIds.XY))
+            {
+                red = 0;
+                green = 0;
+                blue = 0;
+            }
+            */
+
+            posToPlaceCircle = posToPlaceCircle + direction * closestDistance;
+            closestDistance = ClosestShapeDistance(posToPlaceCircle);
+
+            maxIterations--;
+        }
+        
+        if (OnCircle(currentPos, 10, ThreadIds.XY))
+        {
+            red = 255;
+            green = blue = 0;
+        }
+
+        if (OnCircle(target, 10, ThreadIds.XY))
+        {
+            green = 255;
+            red = blue = 0;
+        }
+
+        if (red != 0 || green != 0 || blue != 0)
+        {
+            buffer[pixel] = new SKColor((uint)((255 << 24 | (red & 0xFF) << 16 | (green & 0xFF) << 8 | (blue & 0xFF)) & 0xFFFFFFFF));
+        }
+    }
+}
+```

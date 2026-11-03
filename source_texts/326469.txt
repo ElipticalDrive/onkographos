@@ -1,0 +1,130 @@
+Hi. Thanks for sharing your great work! I have two questions regarding your method: It looks like you compute the result of the rendering equation for every point in the GaussianModel instead of just for those points in the view frustrum...
+
+Rendering Equation and Visibility Tracing · Issue #8 · NJU-3DV/Relightable3DGaussian · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Rendering Equation and Visibility Tracing #8
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Rendering Equation and Visibility Tracing#8
+Copy link
+Description
+riccardodm97
+opened on Jan 15, 2024
+Issue body actions
+Hi. Thanks for sharing your great work! I have two questions regarding your method:
+It looks like you compute the result of the rendering equation for every point in the GaussianModel instead of just for those points in the view frustrum. What's the reason for that? Wouldn't it be possible to compute the brdf_color after the world2camera projection and viewport culling ?
+Your Visibility Computation via Ray Tracing doesn't allow backpropagation of gradients. Did you consider using a differentiable implementation ? Also why do you need the learned visibility ? To be able to actually explicitly computing it for every point instead of just for a subset ?
+Thanks a lot
+Activity
+yGaoJiany commented on Jan 16, 2024
+yGaoJiany
+on Jan 16, 2024
+Collaborator
+More actions
+Hello, thank you for your interest.
+It is perfectly fine to calculate the rendering equations after projection and culling. Thank you for raising this issue!
+Mainly because raytracing is too time consuming. Using raytracing in each iteration of training would make the training time unbearably long. In addition, the current approach allows us to calculate the visibility via ray tracing and bake it into each Gaussian using SHs in advance of rendering, which facilitates further real-time rendering, especially when compositing multiple objects.
+riccardodm97 commented on Jan 16, 2024
+riccardodm97
+on Jan 16, 2024
+Author
+More actions
+Thanks for the very quick reply.
+Regarding point 2: for each training iteration in the calculate_loss function in render_neilf.py you compute the visibility via raytracing but only for 10000 random points and only for a single random ray direction per point. Then you supervise the predicted visibility to be close to the random traced one. Is this accurate ? Please correct me if I am mistaken.
+Do you know how slow is the ray tracing operation on average ?
+Again, thanks a lot
+yGaoJiany commented on Jan 16, 2024
+yGaoJiany
+on Jan 16, 2024
+Collaborator
+More actions
+You're basically right. But I need to emphasise that we have already obtained a better geometry in the first stage. Since visibility is only related to geometry, we precomputed the visibility of each Gaussian point using randomly chosen rays before training in the second stage, as an initial value for optimisation afterwards. (See https://github.com/NJU-3DV/Relightable3DGaussian/blob/77827626db514d59b390da2474de5d71be61a2e6/scene/gaussian_model.py#L266C5-L266C5) Afterwards, in the second stage of optimisation, we supervised each point with a random ray in each iteration. Using the precomputed visibility as the initial value for the optimization with 10k iterations in the second stage is sufficient in my opinion. As for the time, this is closely related to the number of Gaussian points and the image size. On the NeRF/lego dataset, precomputation of visibility using ray tracing would take about a few seconds.
+riccardodm97 commented on Jan 16, 2024
+riccardodm97
+on Jan 16, 2024
+Author
+More actions
+I guess my question was why do you need to optimize a learned visibility initialized from the baked one if computing it via ray tracing only take a few seconds ? I understand that's too much for real-time rendering but it shouldn't be a problem for training, right?
+I am asking this because, in a setting where light is non-static (e.g. OLAT), it's not possible to optimize the geometry in a first stage and only after compute visibility.
+👀React with 👀1Reacted by Yumeng He
+yGaoJiany commented on Jan 18, 2024
+yGaoJiany
+on Jan 18, 2024
+Collaborator
+More actions
+If we use full ray tracing in the training process, it will take seconds per iteration. I think it's a problem to perform efficient training.
+However, if the lighting setup is dynamic, I agree with you that relying solely on pre-calculated visibility and fine tuning is really not a good option. In this case, full ray tracing seems necessary in the training process, as the geometry will change rapidly as the material decouples from the lighting.
+👍React with 👍3Reacted by Riccardo De Matteo, Jasper and Yumeng He
+karranpandey commented on Mar 13, 2024
+karranpandey
+on Mar 13, 2024
+Last edited by karranpandey
+More actions
+Hey!
+Great project, just following up on this thread. I'm struggling to get real-time rendering when using the neilf_composite mode for the render function (which I assume I need to use to update the gaussians to incorporate some change to the lighting or composition in the scene). You mention using some kind of baking to help achieve this?
+Could you expand on this a bit more? In my case, it doesn't really help to set bake to True in the render_kwargs in terms of getting the fps up. Let me know if you have any further tips for this!
+For instance, I am wondering if its possible to perform some relighting / composition, and update the gaussians to incorporate this change, and now render the relit scene with the faster 'neilf' mode again for real-time rendering?
+For context, I'm testing on the lego scene from the nerf synthetic dataset within the repo.
+Jiatttliu commented on May 25, 2024
+Jiatttliu
+on May 25, 2024
+More actions
+Hello！
+Great Project! And I have a question about rendering equation. In the paper, the formula for calculating the specular term is DFG/(n,wi)(n,wo), but only DFG is calculated in the code (in file:gaussian_renderer/neilf.py). What are the considerations behind this? Thanks for your reply, below is the code about how to calculate the specular term.
+```
+def _f_specular(h_d_n, h_d_o, n_d_i, n_d_o, base_color, roughness, metallic):
+    # used in SG, wrongly normalized
+    def _d_sg(r, cos):
+        r2 = (r * r).clamp(min=1e-7)
+        amp = 1 / (r2 * np.pi)
+        sharp = 2 / r2
+        return amp * torch.exp(sharp * (cos - 1))
+
+    D = _d_sg(roughness, h_d_n)
+
+    # Fresnel term F
+    F_0 = 0.04 * (1 - metallic) + base_color * metallic  # [H, W, 1, 3]
+    F = F_0 + (1.0 - F_0) * ((1.0 - h_d_o) ** 5)  # [H, W, S, 3]
+
+    # geometry term V, we use V = G / (4 * cos * cos) here
+    def _v_schlick_ggx(r, cos):
+        r2 = ((1 + r) ** 2) / 8
+        return 0.5 / (cos * (1 - r2) + r2).clamp(min=1e-7)
+
+    V = _v_schlick_ggx(roughness, n_d_i) * _v_schlick_ggx(roughness, n_d_o)  # [H, W, S, 1]
+
+    return D * F * V
+
+f_s = _f_specular(h_d_n, h_d_o, n_d_i, n_d_o, base_color, roughness, metallic)
+transport = incident_lights * incident_areas * n_d_i  # （num_pts, num_sample, 3)
+rgb_s = (f_s * transport).mean(dim=-2)
+```
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

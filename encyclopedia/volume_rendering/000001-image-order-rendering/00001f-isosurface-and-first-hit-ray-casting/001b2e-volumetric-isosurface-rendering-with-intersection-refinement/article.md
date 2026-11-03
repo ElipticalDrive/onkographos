@@ -1,0 +1,193 @@
+# Volumetric Isosurface Rendering with Intersection Refinement
+
+Also called: Volumetric isosurface rendering, Iso Ray Casting, Isosurface Ray Casting, Iso-Surface Rendering, Isosurface mode
+
+## Overview
+Volumetric isosurface rendering with intersection refinement is a real-time technique that extracts an isosurface directly from a 3D volumetric scalar field during ray traversal, avoiding explicit polygon mesh extraction (e.g., Marching Cubes) [S3]. It detects the surface by checking if the sampled scalar value equals or crosses the target isovalue [S1, S2, unofficial], stops traversal at the first hit, and refines the intersection position to reduce discretization artifacts [S4]. Unlike [Differentiable Volumetric Rendering (DVR)](775-differentiable-volumetric-rendering-dvr.md), which composites the entire volume, this method stops at the first hit, offering higher performance for opaque surfaces [S4]. It differs from [Real-Time Ray-Casting and Advanced Shading of Discrete Isosurfaces](838-real-time-ray-casting-and-advanced-shading-of-discrete-isosu.md) by operating on implicit continuous data rather than discrete extracted meshes [S3].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volumetric scalar field texture ($f$), camera parameters (view/projection matrices, position), an isovalue ($uIsovalue$), a ray marching step size ($uStepSize$), and rendering parameters (refinement iterations, shadow enablement) [S2, unofficial, S3].
+*   **Output:** A 2D image where each pixel contains the color of the first isosurface intersection, shaded with lighting and shadows [S1, S3].
+
+**Data Structures:**
+The method relies on Uniform Buffer Objects (UBOs) and a 3D texture sampler [S2, unofficial].
+1.  **CameraUBO** (`std140`, binding=0):
+    *   `mat4 uView`: View matrix.
+    *   `mat4 uProj`: Projection matrix.
+    *   `vec3 uCameraPos`: Camera position in world space.
+    *   `float _pad0`: Padding to align to 16 bytes.
+2.  **VolumeUBO** (`std140`, binding=1):
+    *   `vec3 uDomainMin`: Minimum bounds of the volume domain.
+    *   `float uStepSize`: Step size for ray marching and normal computation.
+    *   `vec3 uDomainMax`: Maximum bounds of the volume domain.
+    *   `float uIsovalue`: The scalar threshold defining the isosurface.
+    *   `float uLightAngle`: Angle for light direction calculation (mapped to $2\pi$) [S2, unofficial].
+    *   `int uEnableShadows`: Boolean flag (0 or 1) to enable/disable shadow rays [S2, unofficial].
+    *   `int uRefinementIterations`: Number of bisection/refinement iterations [S2, unofficial].
+    *   `float _pad1`: Padding.
+3.  **Volume Texture**:
+    *   `sampler3D volumeTex` at binding=0. Sampled using standard trilinear interpolation [S2, unofficial].
+
+**Algorithm Steps:**
+1.  **Ray Construction and Box Intersection:**
+    For each fragment covered by the volume, construct a ray origin $O$ and direction $D$ from the camera [S2, unofficial]. Compute the intersection parameters $t_{min}$ and $t_{max}$ for the ray with the volume domain $[uDomainMin, uDomainMax]$ [S2, unofficial]. If $t_{max} \le t_{min}$, the ray misses the volume; return empty/no hit [S2, unofficial]. Set $t_{start} = \max(t_{min}, 0.0)$ and $t_{end} = t_{max}$ [S2, unofficial].
+2.  **Ray Marching and Surface Detection:**
+    Initialize $t_{prev} = t_{start}$ [S2, unofficial]. Sample the scalar field at the start position: $d_{prev} = f(O + t_{prev} D) - uIsovalue$ [S2, unofficial]. Iterate $t_{curr}$ from $t_{start} + uStepSize$ to $t_{end}$ with step $uStepSize$ [S2, unofficial]. At each step, sample the field: $d_{curr} = f(O + t_{curr} D) - uIsovalue$ [S2, unofficial]. Check for a sign change between $d_{prev}$ and $d_{curr}$ [S2, unofficial]. A sign change indicates the isosurface lies within the interval $[t_{prev}, t_{curr}]$ [S2, unofficial]. (Note: Some implementations simply stop when the sampled value exceeds the isovalue [S4]).
+3.  **Intersection Refinement:**
+    If a sign change is detected, refine the hit position $t_{hit}$ using one of two methods described in the sources:
+    *Method A: Bisection Refinement [S2, unofficial]*
+    Given interval $[t_a, t_b]$ (initially $t_{prev}, t_{curr}$) with signs $d_a, d_b$:
+    1.  Compute midpoint $t_m = (t_a + t_b) / 2$ [S2, unofficial].
+    2.  Evaluate $d_m = f(O + t_m D) - uIsovalue$ [S2, unofficial].
+    3.  If $d_a \cdot d_m \le 0$, set $t_b = t_m, d_b = d_m$; else set $t_a = t_m, d_a = d_m$ [S2, unofficial].
+    4.  Repeat for $uRefinementIterations$ (typical range 0–10) [S2, unofficial].
+    5.  Final hit: $t_{hit} = (t_a + t_b) / 2$ [S2, unofficial].
+    *Method B: Linear Interpolation Refinement [S4]*
+    Let $X_{prev} = O + t_{prev} D$ and $X_{next} = O + t_{curr} D$. Let $f_{prev}$ and $f_{next}$ be the raw scalar values at these points.
+    1.  Calculate new point:
+        $$X_{new} = (X_{next} - X_{prev}) \frac{uIsovalue - f_{prev}}{f_{next} - f_{prev}} + X_{prev}$$
+    2.  Read volume value $f_{new}$ at $X_{new}$ [S4].
+    3.  If $f_{new} > uIsovalue$, assign $X_{new}$ to $X_{prev}$ and $f_{new}$ to $f_{prev}$ [S4]. Otherwise, assign to $X_{next}$ and $f_{next}$ [S4].
+    4.  Iterate until convergence or a fixed iteration count (typically ~10) [S4].
+4.  **Hit Position and Normal Computation:**
+    Compute the hit position: $P_{hit} = O + t_{hit} D$ [S2, unofficial].
+    Estimate the surface normal using central differences with step size $h = uStepSize$ [S2, unofficial]:
+    $$g_x = f(P_{hit} + (h,0,0)) - f(P_{hit} - (h,0,0))$$
+    $$g_y = f(P_{hit} + (0,h,0)) - f(P_{hit} - (0,h,0))$$
+    $$g_z = f(P_{hit} + (0,0,h)) - f(P_{hit} - (0,0,h))$$
+    The gradient is $\nabla f = (g_x, g_y, g_z)$ [S2, unofficial]. The normal is the normalized negative gradient:
+    $$n = -\frac{\nabla f}{|\nabla f|}$$
+    The negative gradient ensures the normal points outward toward the lighter medium [S2, unofficial]. Note: In some implementations (e.g., Met.3D), the gradient computation may vary based on grid type (pressure, hybrid, auxiliary) [S3].
+5.  **Shading and Shadows:**
+    Calculate the light direction vector $\ell$ from $uLightAngle$ (mapped to $2\pi$) [S2, unofficial].
+    Compute Lambertian diffuse term: $L = \max(0, n \cdot \ell)$ [S2, unofficial].
+    *Shadow Ray Traversal [S2, unofficial]:*
+    If $uEnableShadows$ is true, cast a shadow ray from $P_{hit}$ in direction $\ell$ [S2, unofficial].
+    1.  Start at $t = 2 \cdot uStepSize$ to avoid self-intersection due to precision errors [S2, unofficial].
+    2.  March with step $uStepSize$ [S2, unofficial].
+    3.  If $f(O_{shadow} + t \ell) \ge uIsovalue$ before leaving the volume, return shadow factor $S = 0$ [S2, unofficial].
+    4.  If the ray exits the volume without hitting, return $S = 1$ [S2, unofficial].
+    *Color Assignment:*
+    The final color is computed as:
+    $$Color = BaseColor \cdot L \cdot S$$
+    $BaseColor$ can be a fixed color, a color mapped from the isovalue via a transfer function, or a color derived from a secondary scalar field (e.g., coloring wind speed by temperature) [S3, S4]. Using the isovalue to fetch color avoids artifacts caused by transfer function interpolation at the surface [S4].
+6.  **Multiple Isosurfaces (Optional):**
+    If the surface is transparent or multiple isosurfaces are supported, the ray traversal continues after the first hit to composite nested surfaces [S3].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_fragment(origin, direction, domain_min, domain_max, step_size, isovalue, refinement_iterations, enable_shadows, light_angle, volume_data):
+    # 1. Ray-box intersection
+    t_min = float('inf')
+    t_max = float('-inf')
+    for i in range(3):
+        if direction[i] == 0.0:
+            if origin[i] < domain_min[i] or origin[i] > domain_max[i]:
+                return (0.0, 0.0, 0.0, 0.0)
+        else:
+            t1 = (domain_min[i] - origin[i]) / direction[i]
+            t2 = (domain_max[i] - origin[i]) / direction[i]
+            t_enter = min(t1, t2)
+            t_exit = max(t1, t2)
+            t_min = max(t_min, t_enter)
+            t_max = min(t_max, t_exit)
+    if t_max <= t_min:
+        return (0.0, 0.0, 0.0, 0.0)
+    t_start = max(t_min, 0.0)
+    t_end = t_max
+
+    # 2. Ray marching and sign change detection
+    t_prev = t_start
+    pos_prev = origin + t_prev * direction
+    d_prev = sample_volume(pos_prev, volume_data) - isovalue
+    hit = False
+    final_color = (0.0, 0.0, 0.0)
+
+    t_curr = t_start + step_size
+    while t_curr <= t_end:
+        pos_curr = origin + t_curr * direction
+        d_curr = sample_volume(pos_curr, volume_data) - isovalue
+        if d_prev * d_curr <= 0.0:
+            # Sign change detected, refine intersection
+            t_a, t_b = t_prev, t_curr
+            d_a, d_b = d_prev, d_curr
+            for _ in range(refinement_iterations):
+                t_m = (t_a + t_b) / 2.0
+                pos_m = origin + t_m * direction
+                d_m = sample_volume(pos_m, volume_data) - isovalue
+                if d_a * d_m <= 0.0:
+                    t_b, d_b = t_m, d_m
+                else:
+                    t_a, d_a = t_m, d_m
+            t_hit = (t_a + t_b) / 2.0
+            p_hit = origin + t_hit * direction
+
+            # 3. Normal computation
+            h = step_size
+            gx = sample_volume(p_hit + (h, 0.0, 0.0), volume_data) - sample_volume(p_hit - (h, 0.0, 0.0), volume_data)
+            gy = sample_volume(p_hit + (0.0, h, 0.0), volume_data) - sample_volume(p_hit - (0.0, h, 0.0), volume_data)
+            gz = sample_volume(p_hit + (0.0, 0.0, h), volume_data) - sample_volume(p_hit - (0.0, 0.0, h), volume_data)
+            grad = (gx, gy, gz)
+            norm_len = sqrt(gx*gx + gy*gy + gz*gz)
+            normal = (-gx/norm_len, -gy/norm_len, -gz/norm_len)
+
+            # 4. Lighting and shadows
+            angle = light_angle * 6.28318530718
+            light_dir = normalize((cos(angle), sin(angle), -1.0))
+            diffuse = max(0.0, dot(normal, light_dir))
+            shadow = 1.0
+            if enable_shadows == 1:
+                t_shadow = 2.0 * step_size
+                while True:
+                    p_shadow = p_hit + t_shadow * light_dir
+                    if p_shadow.x < domain_min.x or p_shadow.y < domain_min.y or p_shadow.z < domain_min.z or \
+                       p_shadow.x > domain_max.x or p_shadow.y > domain_max.y or p_shadow.z > domain_max.z:
+                        break
+                    if sample_volume(p_shadow, volume_data) >= isovalue:
+                        shadow = 0.0
+                        break
+                    t_shadow += step_size
+            base_color = (1.0, 1.0, 1.0) # Fixed color; can be mapped from isovalue or secondary field
+            final_color = (base_color[0]*diffuse*shadow, base_color[1]*diffuse*shadow, base_color[2]*diffuse*shadow)
+            hit = True
+            break
+        t_prev, d_prev = t_curr, d_curr
+        t_curr += step_size
+
+    return (final_color[0], final_color[1], final_color[2], 1.0)
+
+def sample_volume(pos, volume_data):
+    # Performs trilinear interpolation of the 3D volume texture at pos
+    # Implementation depends on hardware/software backend [G]
+    pass
+```
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of samples along the ray [S3]. Refinement adds a constant factor ($k$ iterations) only when a hit is found [S2, unofficial]. Shadow rays add another traversal pass [S2, unofficial].
+*   **Memory Complexity:** Low. Requires storage for the 3D volume texture and small UBOs [S2, unofficial]. No explicit mesh geometry is stored [S1, S3].
+*   **Performance:** Real-time on modern GPUs [S2, unofficial]. Performance scales with step size and number of samples [S3]. Smaller step sizes increase accuracy but reduce frame rate [S2, unofficial].
+*   **Optimizations:**
+    *   **Empty-space skipping:** Using a 32x32x32 brick min/max acceleration structure allows rays to jump over regions that cannot contain the isovalue [S3].
+    *   **Interaction Step Size:** A coarser step size can be used during camera interaction to maintain frame rate, with refinement restoring quality [S3].
+    *   **Grid Type:** Performance varies by grid type; hybrid or auxiliary pressure grids are significantly more expensive than simple pressure level grids due to complex sampling requirements [S3].
+*   **Strengths:**
+    *   No preprocessing/mesh extraction required [S1, S3].
+    *   Dynamic isovalue changes are instantaneous without CPU geometry rebuilds [S3].
+    *   Avoids the high computational cost of full volume rendering (DVR) for opaque surfaces [S4].
+    *   High-quality intersection refinement reduces stair-stepping artifacts [S4].
+*   **Limitations:**
+    *   Discretization artifacts if refinement is insufficient or step size is too large [S4].
+    *   Self-intersection in shadow rays if not handled (requires offset start) [S2, unofficial].
+
+## Background
+This method was developed as a real-time GPU-based implementation for scientific visualization, notably in the SciVisLab framework [S2, unofficial]. It is also implemented in Met.3D for meteorological data visualization [S3] and has been integrated into the Visualization Toolkit (VTK) as `vtkGPUVolumeRayCastMapper2` with features like refined isosurface rendering and shadow mapping [S4]. The technique addresses the limitations of traditional isosurface extraction (marching cubes) by providing a direct, flexible, and performant way to visualize scalar fields in real-time [S4].
+
+## Sources
+[S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26
+[S2] shalu-007-git/isosurface-ray-casting, https://github.com/shalu-007-git/isosurface-ray-casting, fetched 2026-10-26 (unofficial)
+[S3] Isosurface raycasting — Met.3D 2.0.0 documentation, https://met3d.readthedocs.io/en/latest/05_developer_manual/03_actors/algorithms/isosurfaces.html, fetched 2026-10-27
+[S4] Adding Refined Isosurface Rendering and Shadow Mapping to vtkGPUVolumeRayCastMapper, https://insight-journal.org/pdfs/880.pdf, fetched 2026-10-27

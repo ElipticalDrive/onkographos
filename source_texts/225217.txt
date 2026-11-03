@@ -1,0 +1,254 @@
+Sparse voxel grid on the GPU for volumetric_kit: voxel hashing, marching cubes, mesh voxelization, the geometry codec and its .vrst stream - feat(mesh): per-vertex gradient normals in marching cubes by taojin-6 · Pull Request #5 · taojin-6/volumetric_kit_grid
+
+feat(mesh): per-vertex gradient normals in marching cubes by taojin-6 · Pull Request #5 · taojin-6/volumetric_kit_grid · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+taojin-6
+commented
+Oct 29, 2026
+Copy link
+Copy Markdown
+Owner
+What
+Marching cubes gives each vertex the field's gradient at its own position. Until now every vertex of a cell carried the cell's 8-corner gradient. Both kernels change: the unshared one the live path uses and the vertex-sharing one the player uses. There is no switch, and geometry is untouched: positions, winding and triangle counts are bit-identical to main.
+The normal. Central differences at the edge's two end voxels, mixed by the vertex's ratio along the edge (the same ratio as the position), then normalized. A vertex on a corner whose distance is the iso-value takes that corner's gradient. Where the gradient vanishes, the normal is the edge's axis toward increasing distance.
+Missing neighbours. A neighbour that is unallocated or below the weight threshold is never used. That axis takes the one-sided difference toward the cell, whose voxels the gather already read.
+No seams. A corner's gradient depends on its voxel alone, so a normal depends on its edge alone. At block_size ≥ 2 (every in-tree caller uses 8), every cell and both kernels give a vertex the same normal, so shading has no seam between cells or blocks.
+Memory and registers. The differences reach one voxel past the cell, so each workgroup also resolves its block's 3×3×3 neighbourhood (27 more probes). Shared memory grows by 108 B in SPIR-V: 44 → 152 B in the default kernel and 8452 → 8560 B in the sharing kernel. What sets the speed is registers: on the RTX 4090 the default kernel goes from 64 to 80 registers and the sharing kernel from 122 to 128 (VK_KHR_pipeline_executable_properties).
+Speed. Three choices, each measured:
+The eight corner gradients are kept in registers.
+Neighbour samples are branch-free. Branching made the extract 5–11% slower on the live room.
+The default kernel writes each vertex as soon as it is computed. Holding a triangle's three vertices to the end took it to 116 registers, and its live-room extract to 1.29 ms instead of 1.04 ms on the 4090.
+Tried and slower, or no gain (live room, against the kernels above):
+computing only the corners a crossing edge touches: slower;
+computing each vertex's two corner gradients on demand: +0.11 / +0.23 ms (unshared / sharing) on the 4090 and +0.68 / +0.23 ms on the M5 Max;
+one probe round instead of two, skipping the 7 blocks no sample reaches: −0.04 / −0.02 ms on the M5 Max (2% at most);
+an early exit from the sharing kernel's owned-edge pass: +0.07 ms on the M5 Max (sharing kernel);
+loading the weight and the distance together, or moving the probes to other lanes: no change.
+Docs. DESIGN.md (mesh) states the vertex normal and its cost, and the TODO(mesh) is gone. CHANGELOG 0.2.1. No locked decision changes.
+Not affected. Mesh-to-SDF conversion (voxelize) signs by face normals computed from the input triangles. It never reads a vertex normal and is unchanged.
+Why
+Per-cell normals make lighting constant over each cell and jump at every cell face. Curved and tilted surfaces show the blocky, checkered look seen in the viewer and the player.
+Tests
+marching_cubes_sparse_test now checks:
+a welded position carries one normal in each kernel, and the two kernels agree (< 1e-5);
+on the analytic sphere, normals are within 0.5° of the true normal, with a mean under 0.1° (measured 0.024° mean / 0.063° worst on M5 Max, 0.027° / 0.066° on RTX 4090; per-cell normals measured 2.7° mean);
+with a cap left unobserved (NaN distances, weight 0) and blocks removed, normals stay finite, unit and within 4° (measured 1.27°), in both kernels.
+marching_cubes_corner_test now also checks the normal of a vertex on an exact-iso corner: the plane's normal, ±1 along its axis and 0 across it (within 1e-6), in both kernels.
+These checks fail against main's kernels. They also fail against a sample that skips the weight test, a wrong neighbourhood, and taking the other end of the edge at an exact-iso corner.
+Full suite, Release, VGRID_WARNINGS_AS_ERRORS=ON, VKC_TEST_VALIDATION=1, VKC_REQUIRE_VULKAN_DEVICE=1:
+Apple M5 Max (MoltenVK): 70/70 passed.
+NVIDIA RTX 4090 (Linux, driver 615.71.10): 70/70 passed.
+The suite cannot check that geometry matches main, so a bench compared main and the branch on both devices directly:
+Positions. A hash of the sorted triangles (positions and winding) is identical on main and the branch for both workloads and both kernels:
+RTX 4090: 8d0f9dcfebef8800 (live room), 671341609d0a0006 (Rafa2);
+M5 Max: 214fd49cab5510be (live room), 2a9e000e17e70cea (Rafa2).
+Welded normals. The largest difference between normals at one position is exactly 0 on the branch, in both kernels and between them. On main it is up to 2.0 on the room (opposite normals) and 1.09 on Rafa2.
+Cost
+The table gives marching-cubes extract dispatch device time in ms (extract_device's ..dispatch: sizing, marching cubes and finalize), Release build.
+Method. Main and branch builds ran alternately, one process at a time: 6 rounds on the room and 8 on Rafa2. Each process did 3 warm-ups, then 50 timed extracts per kernel, alternating kernels. The table shows the median over processes of each process's median. The paired per-round differences spread ≤ 0.02 ms on the RTX 4090 and ≤ 0.04 ms on the M5 Max live room; on M5 Max Rafa2 they spread about 0.2 ms.
+Live room. A live room capture fused at 1 cm and decoded through its last frame (300): 1,239,361 triangles.
+Rafa2. Frame 1, placed 1.7 m tall, as a signed TSDF at 5 mm (truncation 8 cm): 198,220 triangles.
+Device
+Workload
+Kernel
+main
+branch
+Added
+RTX 4090
+live room
+unshared
+0.62
+1.04
++0.42 (×1.67)
+RTX 4090
+live room
+sharing
+1.57
+1.80
++0.23 (×1.15)
+RTX 4090
+Rafa2
+unshared
+0.163
+0.243
++0.08
+RTX 4090
+Rafa2
+sharing
+0.295
+0.369
++0.07
+M5 Max
+live room
+unshared
+1.51
+2.10
++0.59 (×1.39)
+M5 Max
+live room
+sharing
+2.29
+3.20
++0.91 (×1.40)
+M5 Max
+Rafa2
+unshared
+0.391
+0.488
++0.10
+M5 Max
+Rafa2
+sharing
+0.512
+0.643
++0.13
+The sharing kernel on Apple is the largest cost: +0.91 ms per live-room extract on the M5 Max. iPhone and iPad were not measured.
+Renders
+Lit before/after renders (Phong over the mesh's own vertex normals) of Rafa2 frame 1 and of the live room's last frame: the checkered per-cell shading on curved and tilted surfaces is gone, and geometry is unchanged.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01AaGoFi21dw57UZWoiLwB7n
+taojin-6
+and others
+added 4 commits
+October 29, 2026 02:41
+feat(mesh): per-vertex gradient normals in marching cubes
+…
+2a6dd7f
+```
+Each vertex's normal is the field's gradient at its own position: central
+differences at its edge's two end voxels, mixed by the vertex's ratio along
+the edge, normalized. An unallocated or unobserved neighbour is never read;
+that axis takes the one-sided difference toward the cell. The normal depends
+on the edge alone, so every cell and both kernels give a vertex one normal,
+and shading has no seam between cells or blocks. It replaces the one
+8-corner gradient per cell; positions, winding and counts are unchanged.
+
+- Each workgroup also resolves its block's 3x3x3 neighbourhood
+  (s_gradient_block, 27 probes): the default kernel's shared memory goes
+  from 44 to 152 B, the sharing kernel's from 8452 to 8560 B.
+- The corner gradients live in eight registers, filled once per emitting
+  cell; the sharing kernel's owned-edge pass fills the four it reads.
+- Neighbour samples are branch-free: a neighbour with no block reads index
+  0 and is discarded, and the weight is tested after both loads, so a
+  cell's 24 samples can all be in flight at once. Branching made the
+  extract 5 to 11% slower on a decoded live room capture.
+- marching_cubes_sparse_test: a welded position carries one normal in both
+  kernels, the kernels agree, the sphere's normals are within 0.5 degrees
+  (mean 0.1); with a cap unobserved (NaN distances) and blocks removed, the
+  normals stay finite, unit and within 4 degrees.
+- DESIGN.md states the vertex normal and its measured cost, and drops the
+  TODO; version 0.2.1.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AaGoFi21dw57UZWoiLwB7n
+```
+perf(mesh): write each marching-cubes vertex as soon as it is computed
+…
+266a4a9
+```
+mcWriteTriangle held all three vertices (27 floats) until the end, beside
+the eight corner gradients, because the compiler cannot move a write past
+reads of buffers the vertex buffer may alias. On an RTX 4090 the default
+kernel took 116 registers; writing each vertex right after mcEdgeVertex
+takes it to 80. Table entry k is still vertex 0, 2, 1 (reversed winding).
+
+Interleaved on a decoded live room capture (1.24 M triangles, Release),
+the default kernel's extract dispatch goes from 1.29 to 1.04 ms on an RTX
+4090 and from 2.17 to 2.10 ms on an M5 Max; the sharing kernel does not
+call it. Positions, winding and normals are unchanged on both devices.
+DESIGN.md's cost figures follow.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AaGoFi21dw57UZWoiLwB7n
+```
+test(mesh): check the normal at an exact-iso corner
+…
+e63c062
+```
+A vertex on a corner whose distance is the iso-value takes that corner's
+gradient, and no test checked it: the sphere fixtures never put a corner
+exactly at iso. marching_cubes_corner_test now also requires each such
+vertex's normal to be the plane's, +-1 along its axis and 0 across it
+(within 1e-6). Every distance on the plane is the iso-value, so the plane
+corner's gradient has nothing across the plane, while the corners beside
+it tilt with their columns' slopes. The check fails against main's
+per-cell normals and against picking the other end of the edge.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AaGoFi21dw57UZWoiLwB7n
+```
+docs(mesh): the vertex normal's conditions, probes and rejected variants
+…
+c29ae06
+```
+- The same-normal-from-every-cell claim holds at block_size >= 2 (DESIGN.md,
+  the extract header, mcEdgeVertex's note): at block_size 1 a sample two
+  blocks away reads as missing.
+- The extract header, the default kernel's note and the probe prologue's
+  TODO count the 3x3x3 neighbourhood's 27 extra probes, and the TODO
+  records that a single probe round in place of the two saved at most 2%.
+- The host comment points at the shader note for the shared-memory figures
+  rather than repeating stale ones.
+- The branching figure is as measured: 5 to 11% on a decoded live room
+  capture. The corner-gradient note records that computing a vertex's two
+  gradients on demand was slower.
+
+Comments and docs only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AaGoFi21dw57UZWoiLwB7n
+```
+taojin-6
+self-assigned this
+Oct 29, 2026
+Hide details
+View details
+taojin-6
+merged commit 2d11f3f
+into
+main
+Oct 29, 2026
+7 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+taojin-6
+deleted the
+feat/mc-vertex-normals
+branch
+October 29, 2026 07:03
+taojin-6
+added a commit
+that referenced
+this pull request
+Oct 29, 2026
+Merge origin/main into feat/serve-max-viewers
+…
+cff29c1
+```
+main took 0.2.1 for marching-cubes vertex normals (#5), so this stays 0.3.0,
+its CHANGELOG section above 0.2.1's.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+taojin-6
+mentioned this pull request
+Oct 29, 2026
+build: re-pin sensor 0.1.1
+taojin-6/volumetric_kit_recon#314
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

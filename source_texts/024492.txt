@@ -1,0 +1,1957 @@
+MobileNeRF: Exploiting the Polygon Rasterization Pipeline
+for Efficient Neural Field Rendering on Mobile Architectures
+Zhiqin Chen1,2,4
+Thomas Funkhouser1
+Peter Hedman1
+1
+2
+arXiv:2208.00277v5 [cs.CV] 30 May 2023
+Google Research
+Simon Fraser University
+Andrea Tagliasacchi1,2,3,4
+University of Toronto3
+Abstract
+Neural Radiance Fields (NeRFs) have demonstrated
+amazing ability to synthesize images of 3D scenes from
+novel views. However, they rely upon specialized volumetric rendering algorithms based on ray marching that are
+mismatched to the capabilities of widely deployed graphics hardware. This paper introduces a new NeRF representation based on textured polygons that can synthesize
+novel images efficiently with standard rendering pipelines.
+The NeRF is represented as a set of polygons with textures
+representing binary opacities and feature vectors. Traditional rendering of the polygons with a z-buffer yields an
+image with features at every pixel, which are interpreted
+by a small, view-dependent MLP running in a fragment
+shader to produce a final pixel color. This approach enables
+NeRFs to be rendered with the traditional polygon rasterization pipeline, which provides massive pixel-level parallelism, achieving interactive frame rates on a wide range of
+compute platforms, including mobile phones.
+Project page: https://mobile-nerf.github.io
+Figure 1. Teaser – We present a NeRF that can run on a variety of
+common devices at interactive frame rates.
+algorithm that evaluates a large MLP at hundreds of sample
+positions along the ray for each pixel in order to estimate
+and integrate density and radiance. This rendering process
+is far too slow for interactive visualization.
+Recent work has addressed this issue by “baking” NeRFs
+into a sparse 3D voxel grid [21, 51]. For example, Hedman et al. introduced Sparse Neural Radiance Grids
+(SNeRG) [21], where each active voxel contains an opacity, diffuse color, and learned feature vector. Rendering an
+image from SNeRG is split into two phases: the first uses
+ray marching to accumulate the precomputed diffuse colors and feature vectors along each ray, and the second uses
+a light-weight MLP operating on the accumulated feature
+vector to produce a view-dependent residual that is added
+to the accumulated diffuse color. This precomputation and
+deferred rendering approach increase the rendering speed of
+NeRF by three orders of magnitude. However, it still relies
+upon ray marching through a sparse voxel grid to produce
+the features for each pixel, and thus it cannot fully utilize
+the parallelism available in commodity graphics processing
+units (GPUs). In addition, SNeRG requires a significant
+amount of GPU memory to store the volumetric textures,
+which prohibits it from running on common mobile devices.
+In this paper, we introduce MobileNeRF, a NeRF that
+1. Introduction
+Neural Radiance Fields (NeRF) [33] have become a popular representation for novel view synthesis of 3D scenes.
+They represent a scene using a multilayer perceptron (MLP)
+that evaluates a 5D implicit function estimating the density
+and radiance emanating from any position in any direction,
+which can be used in a volumetric rendering framework to
+produce novel images. NeRF representations optimized to
+minimize multi-view color consistency losses for a set of
+posed photographs have demonstrated remarkable ability to
+reproduce fine image details for novel views.
+One of the main impediments to wide-spread adoption
+of NeRF is that it requires specialized rendering algorithms
+that are poor match for commonly available hardware. Traditional NeRF implementations use a volumetric rendering
+4 Work done while at Google.
+1
+can run on a variety of common mobile devices at interactive frame rates. The NeRF is represented by a set of
+textured polygons, where the polygons roughly follow the
+surface of the scene, and the texture atlas stores opacity and
+feature vectors. To render an image, we utilize the classic
+polygon rasterization pipeline with Z-buffering to produce
+a feature vector for each pixel and pass it to a lightweight
+MLP running in a GLSL fragment shader to produce the
+output color. This rendering pipeline does not sample rays
+or sort polygons in depth order, and thus can model only binary opacities. However, it takes full advantage of the parallelism provided by z-buffers and fragment shaders in modern graphics hardware, and thus is 10× faster than SNeRG
+with the same output quality on standard test scenes. Moreover, it requires only a standard polygon rendering pipeline,
+which is implemented and accelerated on virtually every
+computing platform, and thus it runs on mobile phones and
+other devices previously unable to support NeRF visualization at interactive rates.
+lection of textured planes with alpha [28]. Point-based
+representations further increase quality by jointly refining
+the scene geometry while training the post-processing network [24, 25, 40]. However, as this convolutional postprocessing runs independently per output frame it often results in a lack of 3D consistency. Furthermore, unlike our
+work, they require powerful desktop GPUs and have not
+been demonstrated to run on a mobile device. Finally, unlike the vast majority of the methods above, our method
+does not need reconstructed 3D geometry as input.
+It is also possible to extract explicit triangle meshes via
+differentiable inverse-rendering [11, 16, 35]. DefTet [16]
+differentiably renders a tetrahedral grid with occupancy and
+color at each vertex, and then compositing the interpolated
+values at all intersected faces along a ray. NVDiffRec [35]
+combines differentiable marching tetrahedra [42] with differentiable rasterization to perform full inverse rendering
+and extract triangle meshes, materials, and lighting from
+images. This representation enables elaborate editing and
+scene relighting. However, it incurs a significant loss in
+view-synthesis quality. Furthermore, while real-time rendering is possible with simple lighting, global illumination
+(GI) is computationally infeasible on mobile hardware. In
+contrast, our method simply caches the outgoing radiance,
+which does not need expensive compute to model GI effects, and also results in higher view-synthesis quality.
+NeRF [33] represents the scene as a continuous field
+of opacity and view-dependent color, and produces images
+with volume rendering. This representation is 3D consistent
+and reaches high quality results [3,45]. However, rendering
+a NeRF involves evaluating a large neural network at multiple 3D locations per pixel, preventing real-time rendering.
+Recent works have improved the training speed of NeRF.
+For example, by modeling the opacity and color of entire
+ray segments instead of just points [29] or by subdividing
+the scene and modeling each sub-region with a smaller neural network [38]. Recently, significant speed-ups have been
+achieved by decoding features fetched from a 3D embedding with a small neural network. This embedding can either be a dense voxel grid [23, 43], a sparse voxel grid [41],
+a low-rank decomposition of a voxel grid [9], a point-based
+representation [50], or a multi-resolution hash map [34].
+These 3D embeddings can also be used without a trained
+decoder, for example by directly storing diffuse colors [30]
+or by encoding view-dependent colors as spherical harmonics [41]. While these approaches drastically speed up training, they still require a large consumer GPU for rendering.
+Rendering performance can further be increased by postprocessing a trained NeRF. For example, by reducing the
+network queries per pixel with learned sampling [36], by
+evaluating the network for larger ray segments [48], or by
+subdividing the scene into smaller networks [38, 39, 49].
+Contributions. In summary, MobileNeRF:
+• Is 10× faster than the state-of-the-art (SNeRG), with the
+same output quality;
+• Consumes less memory by storing surface textures instead of volumetric textures, enabling our method to run
+on integrated GPUs with limited memory and power;
+• Runs on a web browser and is compatible with all devices
+we have tested, as our viewer is an HTML webpage;
+• Allows real-time manipulation of the reconstructed objects/scenes, as they are simple triangle meshes.
+2. Related work
+Our work lies within the field of view-synthesis, which
+encompasses many areas of research: light fields, imagebased rendering and neural rendering. To narrow the scope,
+we focus on methods that render output views in real-time.
+Light fields [27] and Lumigraphs [19] store a dense
+grid of images, enabling real-time rendering of high quality scenes, albeit with limited camera freedom and significant storage overhead. Storage can be reduced by interpolating intermediate images with optical flow [5], representing the light field as a neural network [1], or by reconstructing a Multi-Plane Image (MPI) representation of the
+scene [15, 32, 37, 47, 54]. Multi-sphere images enable larger
+fields of view [2, 6], but these representations still only support limited output camera motion
+Other approaches leverage explicit 3D geometry to enable more camera freedom. While early methods applied
+view-dependent texturing to a 3D mesh [7, 12, 13], later
+methods incorporated convolutional neural networks as a
+post-processing step to improve quality [20, 31, 44]. Alternatively, the input geometry can be simplified into a col2
+Figure 2. Overview (rendering) – We represent the scene as a triangle mesh textured by deep features. We first rasterize the mesh to a
+deferred rendering buffer. For each visible fragment, we execute a neural deferred shader that converts the feature and view direction to
+the corresponding output pixel color.
+Alternatively, pre-computation can speed up rendering, by
+storing both scene opacity and a latent representation for
+view-dependent colors in a grid. FastNeRF [17] uses a
+dense voxel grid and represents view-dependence with a
+global spherical basis function. PlenOctrees [51] uses an
+octree representation, where each leaf node stores both
+opacity and spherical harmonics for colors. SNeRG [21]
+uses a sparse grid representation, and evaluates viewdependence as a post-process with a small neural network.
+Among these real-time methods, only SNeRG has been
+shown to work on lower-powered devices without access
+to CUDA. As our method directly targets rendering on lowpowered hardware, we primarily compare with SNeRG in
+our experiments.
+ities, as while classical rasterization can easily discard fragments, they cannot elegantly deal with semitransparent fragments.
+• Training Stage 3 (Section 3.3) – We extract a sparse
+polygonal mesh, bake opacities and features into texture
+maps, and store the weights of the neural deferred shader.
+The mesh is stored as an OBJ file, the texture maps in
+PNGs, and the deferred shader weights in a (small) JSON
+file. As we employ the standard GPU rasterization pipeline,
+our real-time renderer is simply an HTML webpage.
+As representing continuous signals with discrete representations can introduce aliasing, we also detail a simple,
+yet computationally efficient, anti-aliasing solution based
+on super-sampling (Section 3.4).
+3. Method
+3.1. Continuous training (Training Stage 1)
+Given a collection of (calibrated) images, we seek to optimize a representation for efficient novel-view synthesis.
+Our representation consists of a polygonal mesh (Figure 2a)
+whose texture maps (Figure 2b) store features and opacity.
+At rendering time, given a camera pose, we adopt a twostage deferred rendering process:
+• Rendering Stage 1 – we rasterize the mesh to screen
+space and construct a feature image (Figure 2c), i.e. we
+create a deferred rendering buffer in GPU memory;
+• Rendering Stage 2 – we convert these features into a
+color image via a (neural) deferred renderer running in
+a fragment shader, i.e. a small MLP, which receives
+a feature vector and view direction and outputs a pixel
+color (Figure 2d).
+Our representation is built in three training stages, gradually
+moving from a classical NeRF-like continuous representation towards a discrete one:
+• Training Stage 1 (Section 3.1) – We train a NeRF-like
+model with continuous opacity, where volume rendering
+quadrature points are derived from the polygonal mesh;
+• Training Stage 2 (Section 3.2) – We binarize the opac-
+As Figure 3 shows, our training setup consists of a
+polygonal mesh M=(T , V) and three MLPs. The mesh
+topology T is fixed, but the vertex locations V and MLPs
+are optimized, similarly to NeRF, in an auto-decoding fashion by minimizing the mean squared error between predicted colors and ground truth colors of the pixels in the
+training images1 :
+\mathcal {L}_\mathbf {C} = \expect _{\ray } \| \mathbf {C}(\ray ) - \mathbf {C}_\text {gt}(\ray ) \|_2^2. \label {eq:rgb_reconstruction}
+(1)
+where the predicted color C(.) is obtained by alphacompositing the radiance ck along a ray r(t)=o + td, at
+the (depth sorted) quadrature points K={tk }K
+k=1 :
+\mathbf {C}(\mathbf {r}) = \sum _{k = 1}^{K} T_k \alpha _k \mathbf {c}_k, \;\;\;\; T_k = \prod _{l=1}^{k-1}(1-\alpha _l) \label {eq:alpha_compositing}
+(2)
+1 For real-world scenes, we further incorporate the distortion loss L
+dist
+introduced by [3, Eq. 15] to suppress floaters and background collapse.
+3
+Figure 3. Overview (train) – We initialize the mesh as a regular grid, and use MLPs to represent features and opacity for any point on the
+mesh. For each ray, we compute its intersection points on the mesh, and alpha-composite the colors of those points to obtain the output
+color. In a later training stage, we enforce binary opacity, and perform super-sampling on features for anti-aliasing.
+where opacity αk and the view-dependent radiance ck are
+given by evaluating the MLPs at position pk =r(tk ):
+voxels that are unlikely to contain geometry; see Figure 5b.
+Finally, we compute intersections between the ray and the
+faces of M that are incident to the voxel’s vertex to obtain the final set of quadrature points; see Figure 5c. We
+use the barycentric interpolation to back-propagate the gradients from the intersection point to the three vertices in
+the intersected triangle. For further technical details on the
+computation of intersections, we refer the reader to supplementary (Section G). In summary, for each input ray r:
+\alpha _k &= \OpacityMLP (\mathbf {p}_k; \pars _\OpacityMLP )& \OpacityMLP &: \real ^3 \rightarrow [0,1] \label {eq:opacity} \\ \mathbf {f}_k &= \FeaturesMLP (\mathbf {p}_k; \pars _\FeaturesMLP )& \FeaturesMLP &: \real ^3 \rightarrow [0,1]^8 \label {eq:features} \\ \mathbf {c}_k &= \ShaderMLP (\mathbf {f}_k,\mathbf {d}; \pars _\ShaderMLP )& \ShaderMLP &: [0,1]^8 \times [-1,1]^3 \rightarrow [0,1]^3 \label {eq:color}
+(5)
+The small network H is our deferred neural shader, which
+outputs the color of each fragment given the fragment feature and viewing direction. Finally, note that (2) does
+not perform compositing with volumetric density [33], but
+rather with opacity [1, Eq.8].
+\tilde \Voxels &= \text {intersect}(\ray , \DualGrid ) \label {eq:ray_voxel_intersection} \\ \Voxels &= \{ b \in \tilde \Voxels ~|~ \Grid [b] > \tau _\Grid \} \label {eq:acceleration} \\ \QuadraturePoints &= \text {intersect}(\ray , \{ \triangle \in \Triangles ~|~ \triangle \cap \Voxels \}) \label {eq:ray_meshface_intersection}
+Polygonal mesh. Without loss of generality, we describe
+the polygonal mesh used in Synthetic 360◦ scenes, and provide the configurations for Forward-Facing and Unbounded
+360◦ scenes in supplementary (Section H). 2D illustrations
+can be found in Figure 4. We first define a regular grid
+G of size P ×P ×P in the unit cube centered at the origin;
+see Figure 4a. We instantiate V by creating one vertex per
+voxel, and T by creating one quadrangle (two triangles) per
+grid edge connecting the vertices of the four adjacent voxels, akin to Dual Contouring [10, 22]. We locally parameterize vertex locations with respect to the voxel centers (and
+sizes), resulting in V∈[−.5, +.5]P ×P ×P ×3 free variables.
+During optimization, we initialize the vertex locations to
+V=0, which corresponds to a regular Euclidean lattice, and
+we regularize them to prevent vertices from exiting their
+voxels, and to promote their return to their neutral position
+whenever the optimization problem is under-constrained:
+(9)
+where (a ∩ b)=true if a intersects b, and the acceleration
+grid is supervised so to upper-bound2 the alpha-compositing
+visibility Tk αk across viewpoints during training.
+\mathcal {L}_\Grid ^\text {bnd} &= \sum _k \max ( \StopGradient [T_k \alpha _k] - \Grid [\mathbf {p}_k] ,0)
+where ∇[.] is the stop-gradient operator that prevents the
+acceleration grid from (negatively) affecting the image reconstruction quality. This can be interpreted as a way to
+compute the so-called “surface field” during NeRF training,
+as opposed to after training as in nerf2nerf [18]. Similarly
+to Plenoxels [41], we additionally regularize the content of
+the grid by promoting its pointwise sparsity (i.e. lasso), and
+its spatial smoothness:
+\mathcal {L}_\Grid ^\text {sparse} = \| \Grid \|_1^1 \quad \quad \mathcal {L}_\Grid ^\text {smooth} = \| \nabla \Grid \|_2^2
+\mathcal {L}_\Vertices = \sum _{\mathbf {v} \in \Vertices } (10^{3}\,\mathcal {I}(\mathbf {v}) + 10^{-2}) \cdot ||\mathbf {v}||_1,
+(10)
+(6)
+(11)
+3.2. Binarized training (Training Stage 2)
+where the indicator function I(v)≡1 whenever v is outside
+its corresponding voxel.
+Rendering pipelines implemented in typical hardware do
+not natively support semi-transparent meshes. Rendering
+semi-transparent meshes requires cumbersome (per-frame)
+sorting so to execute rendering in back-to-front order to
+guarantee correct alpha-compositing. We overcome this issue by converting the smooth opacity αk ∈[0, 1] from (3) to
+Quadrature. As evaluating the MLPs of our representation is computationally expensive, we rely on an acceleration grid to limit the cardinality |K| of quadrature points.
+First of all, quadrature points are only generated for the set
+of voxels that intersect the ray; see Figure 5a: Then, like InstantNGP [34], we employ an acceleration grid G to prune
+2 This loss performs a stochastic upper-bound, as we initialize G[∗]=0,
+and G[pk ] receives gradients whenever Tk αk >G[pk ].
+4
+we allocate a K×K patch in the texture, similarly to Disney’s Ptex [8]. We use K=17 in our experiments, so that
+the quad has a 16×16 texture with half-a-pixel boundary
+padding. We then iterate over the pixels of the texture, convert the pixel coordinate to 3D coordinates, and bake the
+values of the discrete opacity (i.e. (3) and (12)) and features (i.e. (4)) into the texture map. We quantize the [0, 1]
+ranges to 8-bit integers, and store the texture into (losslessly compressed) PNG images. Our experiments show
+that quantizing the [0, 1] range with 8-bit precision, which
+is not accounted for during back-propagation, does not significantly affect rendering quality.
+Figure 4. Configurations of polygonal meshes – The meshes employed for the different types of scenes. We sketch the distribution
+of camera poses in training views.
+3.4. Anti-aliasing
+In classic rasterization pipelines, aliasing is an issue
+that ought to be considered to obtain high-quality rendering. While classical NeRF hallucinates smooth edges
+via semi-transparent volumes, as previously discussed,
+semi-transparency would require per-frame polygon sorting. We overcome this issue by employing anti-aliasing by
+super-sampling. While we could simply execute (5) four
+times/pixel and average the resulting color, the execution
+of the deferred neural shader H is the computational bottleneck of our technique. We can overcome this issue by
+simply averaging the features, that is, averaging the input
+of the deferred neural shader, rather than averaging its output. We first rasterize features (at 2× resolution):
+Figure 5. Quadrature points – are obtained by (a) identifying
+cells that intersect the ray; (b) pruning cells that do not contain
+geometry; and, (c) computing explicit intersections with the mesh.
+a discrete/categorical opacity α̂k ∈{0, 1}. To optimize for
+discrete opacities via photometric supervision we employ a
+straight-through estimator [4]:
+\dOpacity _k = \opacity _k + \StopGradient [ \mathbbm {1}(\alpha _k>0.5) - \alpha _k ] \label {eq:dOpacity}
+(12)
+Please note that the gradients are transparently passed
+through the discretization operation (i.e. ∇α̂ ≡ ∇α), regardless of the values of αk and the resulting α̂k ∈{0, 1}.
+To stabilize training, we then co-train the continuous and
+discrete models:
+\Feature (\ray ) = \sum _k T_k \alpha _k \mathbf {f}_k,
+(16)
+and then average sub-pixel features to produce the antialiased representation we feed to our neural deferred shader:
+\mathcal {L}_\Color ^\text {bin} &= \expect _{\ray } \| \hat \Color (\ray ) - \Color _\text {gt}(\ray ) \|_2^2 \\ \mathcal {L}_\Color ^\text {stage2} &= \tfrac {1}{2} \mathcal {L}_\Color ^\text {bin} ~~+ \tfrac {1}{2} \mathcal {L}_\Color \label {eq:MSE_plus_binary}
+\Color (\ray ) = \ShaderMLP \left ( \expect _{\ray _\delta \sim \ray }[\Feature (\ray _\delta )], \: \expect _{\ray _\delta \sim \ray }[\mathbf {d}_\delta ] \right ) \label {eq:antialiased_shader}
+(14)
+where Erδ ∼r computes the average between the subpixels (i.e. four in our implementation), and dδ is the direction of ray rδ . Note how with this change we only query H
+once per output pixel. Finally, this process is analogously
+applied to (15) for discrete occupancies α̂. These changes
+for anti-aliasing are applied in training stage 2 (14).
+where Ĉ(r) is the output radiance corresponding to the discrete opacity model α̂:
+\hat \Color (\ray ) &= \sum _{k = 1}^{K} \hat {T}_k \dOpacity _k \mathbf {c}_k, \;\;\;\; \hat {T}_k = \prod _{l=1}^{k-1}(1-\dOpacity _l) \label {eq:col_binarized}
+(17)
+(15)
+Once (14) has converged, we will apply a fine-tuning step
+to the weights in F and H by minimizing Lbin
+C , while fixing
+the weights of others.
+3.5. Rendering
+The result of the optimization process is a textured
+polygonal mesh (where texture maps store features rather
+than colors) and a small MLP (which converts view direction and features to colors). Rendering this representation
+is done in two passes using a deferred rendering pipeline:
+1. we rasterize all faces of the textured mesh with a z-buffer
+to produce a 2M ×2N feature image with 12 channels
+per pixel, comprising 8 channels of learned features, a
+binary opacity, and a 3D view direction;
+3.3. Discretization (Training Stage 3)
+After binarization and fine-tuning, we convert the representation into an explicit polygonal mesh (in OBJ format).
+We only store quads if they are at least partially visible in
+the training camera poses (i.e. non-visible quads are discarded). We then create a texture image whose size is proportional to the number of visible quads, and for each quad
+5
+Device
+iPhone XS
+Pixel 3
+Surface Pro 6
+Chromebook
+Gaming laptop
+Desktop
+2. we synthesize an M ×N output RGB image by rendering
+a textured rectangle that uses the feature image as its texture, with linear filtering to average the features for antialiasing. We apply the small MLP for pixels with nonzero alphas to convert features into RGB colors. The
+small MLP is implemented as a GLSL fragment shader.
+These rendering steps are implemented within the classic
+rasterization pipeline. Since z-buffering with binary transparency is order-independent, polygons do not need to be
+sorted into depth-order for each new view, and thus can be
+loaded into a buffer in the GPU once at the start of execution. Since the MLP for converting features to colors
+is very small, it can be implemented in a GLSL fragment
+shader [21], which is run in parallel for all pixels. These
+classical rendering steps are highly-optimized on GPUs,
+and thus our rendering system can run at interactive frame
+rates on a wide variety of devices; see Table 2. It is also
+easy to implement, since it requires only standard polygon
+rendering with a fragment shader. Our interactive viewer
+is an HTML webpage with Javascript, rendered by WebGL
+via the threejs library.
+Type
+Phone
+Phone
+Tablet
+Laptop
+Laptop
+PC
+OS
+iOS 15
+Android 12
+Windows 10
+Chrome OS
+Windows 11
+Ubuntu 16.04
+GPU
+Integrated GPU
+Integrated GPU
+Integrated GPU
+Integrated GPU
+NVIDIA RTX 2070
+NVIDIA RTX 2080 Ti
+Power
+6W
+9W
+15W
+15W
+115W
+250W
+Table 1. Hardware specs – of the devices used in our rendering experiments. The power is the max GPU power for discrete
+NVIDIA cards, and the combined max CPU and GPU power for
+integrated GPUs.
+Dataset
+Method
+iPhone XS
+Pixel 3
+Surface Pro 6
+Chromebook
+Gaming laptop
+Gaming laptop
+Desktop
+Synthetic 360◦
+Ours
+SNeRG
+55.89
+0.0 88
+37.14
+0.0 88
+77.40
+Unsupported
+53.67
+22.62 28
+178.26
+8.30 18
+606.73 43.87 18
+744.91 207.26
+Forward-facing
+Ours
+SNeRG
+27.19 82
+0.0 88
+12.40
+0.0 88
+21.51
+Unsupported
+19.44
+7.85 38
+57.72
+3.63
+250.17
+26.01
+349.34
+50.71
+Unbounded 360◦
+Ours
+22.20 45
+9.24
+19.44
+15.28
+55.32
+192.59
+279.70
+Table 2. Rendering speed – on various devices in frames per second (FPS). The devices are on battery, except for the gaming laptop and the desktop which are plugged in, indicated with a . The
+mobile devices (first four rows) have almost identical rendering
+speed when plugged in. With the notation M
+we indicate that M
+N
+out of N testing scenes failed to run due to out-of-memory errors.
+4. Experiments
+Dataset
+Method
+GPU memory
+Disk storage
+We run a series of experiments to test how well MobileNeRF performs on a wide variety of scenes and devices.
+We test on three datasets: the 8 synthetic 360◦ scenes from
+NeRF [33], the 8 forward-facing scenes from LLFF [32],
+and 5 unbounded 360◦ outdoor scenes from Mip-NeRF 360
+[3]. We compare with SNeRG [21], since, to our knowledge, it is the only NeRF model that can run in real-time on
+common devices. We also include extensive ablation studies to investigate the impact of different design choices.
+Synthetic 360◦
+Ours
+SNeRG
+538.38 2707.25
+125.75
+86.75
+Forward-facing
+Ours
+SNeRG
+759.25 4312.13
+201.50 337.25
+Unbounded 360◦
+Ours
+1162.20
+344.60
+Table 3. Resources – memory and disk storage (MB).
+Synthetic 360◦
+Forward-facing
+Unbounded 360◦
+PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+NeRF
+31.00 0.947 0.081 26.50 0.811 0.250
+JAXNeRF 31.65 0.952 0.051 26.92 0.831 0.173 21.46 0.458 0.515
+NeRF++
+22.76 0.548 0.427
+SNeRG
+30.38 0.950 0.050 25.63 0.818 0.183
+30.90 0.947 0.062 25.91 0.825 0.183 21.95 0.470 0.470
+Ours
+Table 4.
+Quantitative Analysis – For NeRF [33] and
+NeRF++ [52], we dash entries where the original papers did not
+report quantitative performance. For SNeRG, while one could extend the method to include the unbounded design from [3], implementing this is far from trivial. Our method can be easily adapted
+to work across all modalities.
+4.1. Comparisons
+To show the superior performance and compatibility of
+our method, we test our method and SNeRG on a variety
+of devices, as shown in Table 1. We report the rendering
+speed in Table 2. The rendering resolution is the same as
+the training images: 800×800 for synthetic, 1008×756 for
+forward-facing, and 1256×828 for unbounded. We test all
+methods on a chrome browser and rotate/pan the camera in a
+full circle to render 360 frames. Note that SNeRG is unable
+to represent unbounded 360◦ scenes due to its regular grid
+representation, and it does not run on phone or tablet due
+to compatibility or out-of-memory issues. We also report
+the GPU memory consumption and storage cost in Table 3.
+MobileNeRF requires 5x less GPU memory than SNeRG.
+Number
+Percentage
+Synthetic 360◦
+V
+T
+494,289 224,341
+1.964% 1.783%
+Forward-facing
+V
+T
+830,076 338,535
+3.298% 2.690%
+Unbounded 360◦
+V
+T
+1,436,033 608,785
+4.891%
+4.147%
+Table 5. Polygon count – Average number of vertices and triangles produced, and their percentage compared to all available
+vertices/triangles in the initial mesh.
+better than NeRF. Visual results are shown in Figure 6 (a-c).
+Our method achieves image quality similar to SNeRG when
+the camera is at an appropriate distance. When the camera is
+zoomed in, SNeRG tends to render over-smoothed images.
+Rendering quality. We report the rendering quality in
+Table 4, while comparing with other methods using the
+common PSNR, SSIM [46], and LPIPS [53] metrics. Our
+method has roughly the same image quality as SNeRG, and
+Polygon count. Table 5 shows the average number of vertices and triangles produced by our method, and the per6
+Figure 6. Qualitative Results – Comparisons to the state-of-the-art and ablation studies. With a solid line we denote zoom-ins of the
+rendered (800×800) image, while with a dashed line we move the camera to zoom-in onto the same detail.
+Stage 1, our method
+Stage 1, fixed mesh grid
+Stage 1, no view-dependent MLP
+Stage 1, smaller grid P =128 → 64
+Stage 1, no acceleration grid
+Stage 2, our method
+Stage 2, no fine-tuning
+Stage 2, only pseudo-gradients
+Stage 2, binary loss
+Stage 3, our method
+Stage 3, larger texture K=17 → 33
+Stage 3, smaller texture K=17 → 9
+Stage 3, no supersampling
+Synthetic 360◦
+PSNR↑ SSIM↑
+32.13
+0.955
+29.87
+0.938
+29.91
+0.935
+31.58
+0.952
+31.77
+0.953
+31.01
+0.948
+30.80
+0.946
+29.70
+0.935
+30.89
+0.947
+30.90
+0.947
+30.99
+0.948
+30.49
+0.945
+29.26
+0.937
+Forward-facing
+PSNR↑ SSIM↑
+26.57
+0.839
+25.43
+0.797
+25.91
+0.824
+26.39
+0.831
+26.61
+0.835
+26.32
+0.833
+26.25
+0.832
+26.01
+0.820
+26.32
+0.832
+25.91
+0.825
+26.14
+0.830
+24.85
+0.796
+24.88
+0.799
+our method
+Larger texture K = 33
+Smaller texture K = 9
+No supersampling
+No view-dependent MLP
+Speed in FPS
+Surface Gaming
+Pro 6
+laptop
+37.14
+77.40
+606.73
+32.48 28
+59.15
+589.20
+37.74
+94.62
+617.74
+51.81
+113.41
+649.86
+52.16
+96.76
+638.30
+Space in MB
+GPU
+Disk
+memory storage
+538.38
+125.75
+1290.88 283.50
+336.63
+67.00
+440.25
+125.75
+538.38
+125.75
+Forward-facing scenes
+Pixel 3
+our method
+Larger texture K = 33
+Smaller texture K = 9
+No supersampling
+No view-dependent MLP
+12.40
+12.88 38
+12.70
+16.97
+23.72
+GPU
+memory
+759.25
+2024.13
+394.13
+645.00
+759.25
+Synthetic 360◦ scenes
+Table 6. Ablation – rendering quality.
+Pixel 3
+Surface
+Pro 6
+21.51
+18.79
+23.61
+42.11
+28.06
+Gaming
+laptop
+250.17
+241.52
+257.64
+413.02
+385.65
+Disk
+storage
+201.50
+462.75
+105.75
+201.50
+201.50
+Table 7. Ablation – rendering speed/memory.
+centage compared to all available vertices/triangles in the
+initial mesh. As we only retain visible triangles, most vertices/triangles are removed in the final mesh.
+Shading mesh. In Figure 2a and Figure 7, we show the
+extracted triangle meshes without the textures. Most triangle faces do not align with the actual object surface. This
+is perhaps due to the ambiguity that good rendering quality
+can be achieved despite how the triangles are aligned. For
+example, the results of our method after Stage 1 in Table 6
+is similar to other methods in Table 4. Therefore, better
+regularization losses or training objectives need to be devised if one wishes to have better surface quality. However,
+optimizing vertices does improve the rendering quality, as
+shown in Figure 6h.
+Figure 7. Shading mesh – not textured. The mesh corresponds to
+the bicycle (see Figure 1). We manually removed the background
+mesh to better show the geometry of the object. Zoom-in to see
+more details. In the bottom, we also show the rendered images of
+our method. Note how the coarse mesh is able to represent detailed
+structures such as the spokes of the wheels and the wires around
+the handles, thanks to high-resolution textures with transparencies.
+4.2. Ablation studies
+In Table 6, we show the rendering quality of our method
+at each stage, and report our ablation studies. The rendering quality gradually drops after each stage, because each
+stage adds more constraints to the model. In Stage 1, the
+performance drops significantly if we use a fixed regular
+grid mesh instead of having optimizable mesh vertices, or
+if we forgo view-dependent effects by directly predicting
+the color and alpha of each point. The performance drops
+slightly if the grid is smaller (P =64 vs. 128). If we remove
+the acceleration grid, we are not able to quadruple the batch
+7
+sampling step, the performance drops significantly. Visual
+results are shown in Figure 6. We omit some models because they do not have significant visual differences compared to our method. Notice the squared pixels of the texture images are clearly visible in the dashed-line boxes in
+(e) and almost invisible in (d). The aliasing artifacts are
+conspicuous in the solid-line boxes in (f). In Stage 1, if the
+grid vertices cannot be optimized, the results will be significantly worse, as shown in (h). Without the small MLP, the
+model cannot handle reflections, as shown in (i). Changing
+to a smaller grid size introduces some minor artifacts in (j).
+In Table 7. we show the rendering speed and space cost if
+we use a larger or smaller texture size, or if we remove the
+super-sampling step, or if we only perform the rasterization
+without using the small MLP to predict the view-dependent
+colors. One can find that the super-sampling step and the
+small MLP have the most significant impact.
+Figure 8. Limitations – (a) the monitor/table are hollow, because
+the reflections are modelled as real objects behind the monitor and
+below the table. (b) our method generates scattered small fragments in the semi-transparent parts. (c) the camera is too close
+to the scene and details in the grass cannot be represented at the
+chosen texture resolution.
+5. Conclusions
+We introduce MobileNeRF, an architecture that takes advantage of the classical rasterization pipeline (i.e. z-buffers
+and fragment shaders) to perform efficient rendering of
+surface-based neural fields on a wide range of compute platforms. It achieves frame rates an order of magnitude faster
+than the previous state-of-the-art (SNeRG) while producing
+images of equivalent quality.
+Limitations. Our estimated surface may be incorrect, especially for scenes with specular surfaces and/or sparse
+views (Figure 8a); it uses binary opacities to avoid sorting polygons, and thus cannot handle scenes with semitransparencies (Figure 8b); it uses fixed mesh and texture
+resolutions, which may be too coarse for close-up novelview synthesis (Figure 8c); it models a radiance field without explicitly decomposing illumination and reflectance,
+and thus does not handle glossy surfaces as well as recent
+methods [45]. Extending the polygon rendering pipeline
+with efficient partial sorting, levels-of-detail, mipmaps, and
+surface shading should address some of these issues. Also,
+the current training speed of MobileNeRF is slow due to
+NeRF’s MLP backbone. The extension of MobileNeRF to
+fast-training architectures (e.g., Instant NGP [34]) constitutes an exciting avenue for future works.
+The explicit mesh representation provided by MobileNeRF gives us direct editing control over the NeRF model
+without any complex architectural change (e.g. ControlNerf [26]), but in this paper we only superficially investigated these possibilities; see Figure 9 and the videos in the
+supplementary (Section C).
+Figure 9. Scene editing – (a) four objects learned from the synthetic scenes are added into an unbounded scene. (b) a branch of
+the ficus is bent. (c) the horns are removed.
+size during training; the performance drops if we train this
+model the same number of iterations as our method. Note
+that the PSNR of this model is higher on forward-facing
+scenes. This is because the acceleration grid will remove
+cells that are not visible in the training images, thus cannot “inpaint” the objects and may leave holes. In Stage
+2, if we do not perform the fine-tuning step that only optimizes F and H and fix the weights of others, the performance drops. If we only use the binary opacity with pseudogradients by applying Lstage2
+=Lbin
+C instead of Eq. 14, the
+C
+performance drops. If we useP
+a binary loss on the predicted opacity, e.g., Lbinary =− |αk −0.5|, instead of using the pseudo-gradients with Ĉ(r), the performance drops
+slightly. In stage 3, when we use a larger texture size K=33
+instead of 17, the performance improves, but the texture
+size will be quadrupled; the performance drops when we
+use a smaller texture size K=9. If we remove the super-
+Acknowledgements. We thank the reviewers as well as Simon Kornblinth, Ting Chen, Daniel Rebain, Kevin Swersky, and David Fleet for their valuable feedback.
+8
+References
+[17] Stephan J. Garbin, Marek Kowalski, Matthew Johnson,
+Jamie Shotton, and Julien P. C. Valentin. Fastnerf: Highfidelity neural rendering at 200fps. In ICCV, 2021. 3
+[18] Lily Goli, Daniel Rebain, Sara Sabour, Animesh Garg, and
+Andrea Tagliasacchi. nerf2nerf: Pairwise registration of neural radiance fields. ICRA, 2023. 4
+[19] Steven J. Gortler, Radek Grzeszczuk, Richard Szeliski, and
+Michael F. Cohen. The lumigraph. SIGGRAPH, 1996. 2
+[20] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm,
+George Drettakis, and Gabriel Brostow. Deep blending for
+free-viewpoint image-based rendering. ACM Transactions
+on Graphics, 2018. 2
+[21] Peter Hedman, Pratul P. Srinivasan, Ben Mildenhall,
+Jonathan T. Barron, and Paul Debevec. Baking neural radiance fields for real-time view synthesis. ICCV, 2021. 1, 3,
+6, 4, 5
+[22] Tao Ju, Frank Losasso, Scott Schaefer, and Joe Warren. Dual
+contouring of Hermite data. ACM Transactions on graphics,
+2002. 4
+[23] Animesh Karnewar, Tobias Ritschel, Oliver Wang, and
+Niloy J. Mitra. Relu fields: The little non-linearity that could.
+ACM Transactions on Graphics, 2022. 2
+[24] Georgios Kopanas, Julien Philip, Thomas Leimkühler, and
+George Drettakis. Point-based neural rendering with perview optimization. In Computer Graphics Forum, 2021. 2
+[25] Christoph Lassner and Michael Zollhofer. Pulsar: Efficient
+sphere-based neural rendering. CVPR, 2021. 2
+[26] Verica Lazova, Vladimir Guzov, Kyle Olszewski, Sergey
+Tulyakov, and Gerard Pons-Moll. Control-nerf: Editable feature volumes for scene rendering and manipulation. arXiv
+preprint arXiv:2204.10850, 2022. 8
+[27] Marc Levoy and Pat Hanrahan. Light field rendering. SIGGRAPH, 1996. 2
+[28] Zhi-Hao Lin, Wei-Chiu Ma, Hao-Yu Hsu, Yu-Chiang Frank
+Wang, and Shenlong Wang. Neurmips: Neural mixture of
+planar experts for view synthesis. CVPR, 2022. 2
+[29] David B. Lindell, Julien N.P. Martel, and Gordon Wetzstein.
+Autoint: Automatic integration for fast neural rendering.
+CVPR, 2021. 2
+[30] Stephen Lombardi, Tomas Simon, Jason Saragih, Gabriel
+Schwartz, Andreas Lehrmann, and Yaser Sheikh. Neural volumes: Learning dynamic renderable volumes from images.
+SIGGRAPH, 2019. 2
+[31] Ricardo Martin-Brualla, Rohit Pandey, Shuoran Yang, Pavel
+Pidlypenskyi, Jonathan Taylor, Julien Valentin, Sameh
+Khamis, Philip Davidson, Anastasia Tkach, Peter Lincoln,
+Adarsh Kowdle, Christoph Rhemann, Dan B Goldman,
+Cem Keskin, Steve Seitz, Shahram Izadi, and Sean Fanello.
+Lookingood: Enhancing performance capture with real-time
+neural re-rendering. ACM Transactions on Graphics, 2018.
+2
+[32] Ben Mildenhall, Pratul P. Srinivasan, Rodrigo Ortiz-Cayon,
+Nima Khademi Kalantari, Ravi Ramamoorthi, Ren Ng, and
+Abhishek Kar. Local light field fusion: Practical view synthesis with prescriptive sampling guidelines. ACM Transactions on Graphics, 2019. 2, 6
+[1] Benjamin Attal, Jia-Bin Huang, Michael Zollhöfer, Johannes
+Kopf, and Changil Kim. Learning neural light fields with
+ray-space embedding networks. CVPR, 2022. 2, 4
+[2] Benjamin Attal, Selena Ling, Aaron Gokaslan, Christian
+Richardt, and James Tompkin. MatryODShka: Realtime 6DoF video view synthesis using multi-sphere images.
+ECCV, 2020. 2
+[3] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P.
+Srinivasan, and Peter Hedman. Mip-nerf 360: Unbounded
+anti-aliased neural radiance fields. CVPR, 2022. 2, 3, 6
+[4] Yoshua Bengio, Nicholas Léonard, and Aaron Courville.
+Estimating or propagating gradients through stochastic
+neurons for conditional computation.
+arXiv preprint
+arXiv:1308.3432, 2013. 5
+[5] Tobias Bertel, Mingze Yuan, Reuben Lindroos, and Christian
+Richardt. OmniPhotos: Casual 360° VR photography. ACM
+Transactions on Graphics, 2020. 2
+[6] Michael Broxton, John Flynn, Ryan Overbeck, Daniel Erickson, Peter Hedman, Matthew DuVall, Jason Dourgarian,
+Jay Busch, Matt Whalen, and Paul Debevec. Immersive light
+field video with a layered mesh representation. ACM Transactions on Graphics, 2020. 2
+[7] Chris Buehler, Michael Bosse, Leonard McMillan, Steven
+Gortler, and Michael Cohen. Unstructured lumigraph rendering. In Proceedings of Computer graphics and interactive
+techniques, 2001. 2
+[8] Brent Burley and Dylan Lacewell. Ptex: Per-face texture
+mapping for production rendering. In Computer Graphics
+Forum, 2008. 5
+[9] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and
+Hao Su. Tensorf: Tensorial radiance fields. ECCV, 2022. 2
+[10] Zhiqin Chen, Andrea Tagliasacchi, Thomas Funkhouser, and
+Hao Zhang. Neural dual contouring. ACM Transactions on
+Graphics, 2022. 4
+[11] Forrester Cole, Kyle Genova, Avneesh Sud, Daniel Vlasic,
+and Zhoutong Zhang. Differentiable surface rendering via
+non-differentiable sampling. In ICCV, 2021. 2
+[12] Abe Davis, Marc Levoy, and Fredo Durand. Unstructured
+light fields. Computer Graphics Forum, 2012. 2
+[13] Paul Debevec, Yizhou Yu, and George Borshukov. Efficient view-dependent image-based rendering with projective
+texture-mapping. In Eurographics Workshop on Rendering
+Techniques, 1998. 2
+[14] Boyang Deng, Jonathan T. Barron, and Pratul P. Srinivasan.
+JaxNeRF: an efficient JAX implementation of NeRF, 2020.
+4, 5, 6
+[15] John Flynn, Michael Broxton, Paul Debevec, Matthew DuVall, Graham Fyffe, Ryan Overbeck, Noah Snavely, and
+Richard Tucker. DeepView: View synthesis with learned
+gradient descent. CVPR, 2019. 2
+[16] Jun Gao, Wenzheng Chen, Tommy Xiang, Clement Fuji
+Tsang, Alec Jacobson, Morgan McGuire, and Sanja Fidler.
+Learning deformable tetrahedral meshes for 3d reconstruction. In NeurIPS, 2020. 2
+9
+[49] Xiuchao Wu, Jiamin Xu, Zihan Zhu, Hujun Bao, Qixing
+Huang, James Tompkin, and Weiwei Xu. Scalable neural indoor scene rendering. ACM Transactions on Graphics, 2022.
+2
+[50] Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin Shu,
+Kalyan Sunkavalli, and Ulrich Neumann. Point-nerf: Pointbased neural radiance fields. CVPR, 2022. 2
+[51] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and
+Angjoo Kanazawa. PlenOctrees for real-time rendering of
+neural radiance fields. In ICCV, 2021. 1, 3
+[52] Kai Zhang, Gernot Riegler, Noah Snavely, and Vladlen
+Koltun. Nerf++: Analyzing and improving neural radiance
+fields. arXiv preprint arXiv:2010.07492, 2020. 6
+[53] Richard Zhang, Phillip Isola, Alexei A. Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of
+deep features as a perceptual metric. In CVPR, 2018. 6
+[54] Tinghui Zhou, Richard Tucker, John Flynn, Graham Fyffe,
+and Noah Snavely. Stereo magnification: Learning view
+synthesis using multiplane images. ACM Transactions on
+Graphics, 2018. 2
+[33] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik,
+Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. In ECCV, 2020. 1, 2, 4, 6, 5
+[34] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM Transactions on Graphics,
+2022. 2, 4, 8
+[35] Jacob Munkberg, Jon Hasselgren, Tianchang Shen, Jun Gao,
+Wenzheng Chen, Alex Evans, Thomas Müller, and Sanja Fidler. Extracting triangular 3d models, materials, and lighting
+from images. In CVPR, 2022. 2
+[36] Thomas Neff, Pascal Stadlbauer, Mathias Parger, Andreas
+Kurz, Joerg H Mueller, Chakravarty R Alla Chaitanya, Anton
+Kaplanyan, and Markus Steinberger. Donerf: Towards realtime rendering of compact neural radiance fields using depth
+oracle networks. In Computer Graphics Forum, 2021. 2
+[37] Eric Penner and Li Zhang. Soft 3D reconstruction for view
+synthesis. ACM Transactions on Graphics, 2017. 2
+[38] Daniel Rebain, Wei Jiang, Soroosh Yazdani, Ke Li,
+Kwang Moo Yi, and Andrea Tagliasacchi. DeRF: Decomposed radiance fields. CVPR, 2021. 2
+[39] Christian Reiser, Songyou Peng, Yiyi Liao, and Andreas
+Geiger. Kilonerf: Speeding up neural radiance fields with
+thousands of tiny mlps. In ICCV, 2021. 2
+[40] Darius Rückert, Linus Franke, and Marc Stamminger. Adop:
+Approximate differentiable one-pixel point rendering. arXiv
+preprint arXiv:2110.06635, 2021. 2
+[41] Sara Fridovich-Keil and Alex Yu, Matthew Tancik, Qinhong
+Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels:
+Radiance fields without neural networks. In CVPR, 2022. 2,
+4
+[42] Tianchang Shen, Jun Gao, Kangxue Yin, Ming-Yu Liu, and
+Sanja Fidler. Deep marching tetrahedra: a hybrid representation for high-resolution 3d shape synthesis. In NeurIPS,
+2021. 2
+[43] Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct voxel
+grid optimization: Super-fast convergence for radiance fields
+reconstruction. CVPR, 2022. 2
+[44] Justus Thies, Michael Zollhöfer, and Matthias Nießner. Deferred neural rendering: Image synthesis using neural textures. ACM Transactions on Graphics, 2019. 2
+[45] Dor Verbin, Peter Hedman, Ben Mildenhall, Todd Zickler,
+Jonathan T. Barron, and Pratul P. Srinivasan. Ref-NeRF:
+Structured view-dependent appearance for neural radiance
+fields. CVPR, 2022. 2, 8
+[46] Zhou Wang, A.C. Bovik, H.R. Sheikh, and E.P. Simoncelli.
+Image quality assessment: from error visibility to structural
+similarity. IEEE Transactions on Image Processing, 2004. 6
+[47] Suttisak Wizadwongsa, Pakkapon Phongthawee, Jiraphon
+Yenphraphai, and Supasorn Suwajanakorn. Nex: Real-time
+view synthesis with neural basis expansion. CVPR, 2021. 2
+[48] Liwen Wu, Jae Yong Lee, Anand Bhattad, Yuxiong Wang,
+and David Forsyth. Diver: Real-time and accurate neural radiance fields with deterministic integration for volume rendering. CVPR, 2022. 2
+10
+MobileNeRF: Exploiting the Polygon Rasterization Pipeline
+for Efficient Neural Field Rendering on Mobile Architectures
+(Supplementary Material)
+A. More results
+timized forward rendering implementation, which is 223%
+faster than our original deferred rendering implementation
+(26 FPS) and 140% faster than the optimized deferred rendering implementation (35 FPS).
+Note that forward rendering is still slower than deferred
+rendering on some devices due to excessive overdraw. A
+depth pre-pass can help resolve this issue, but it may not be
+available on certain devices.
+We provide demos for both forward and deferred
+rendering settings on our project page: https://mobilenerf.github.io. However, the models in these demos were
+trained with deferred rendering, where super-sampling is
+done on pixel features, while the super-sampling in forward
+rendering should be done on pixel colors. Therefore the
+rendered results may be slightly different.
+Check out our project page: https://mobile-nerf.github.io
+The models used in the online demos of our project page
+are the same as the ones used in our paper. The rendered
+images of our method are nearly identical whether they are
+rendered in Python (for computing quantitative metrics) or
+web browsers, see Figure 10. If one overlays the difference
+image and the rendered image, one can find that the few
+very different pixels are all on the boundary of a part, which
+indicates that they are likely caused by precision errors in
+rasterization.
+B. [Post-submission] Shader code optimization
+With the optimizations suggested by Noeri Huisman, we
+have greatly improved the rendering speed of the fragment
+shader containing the small MLP H. specifically, we
+• Inject network weights directly into the shader source
+code, instead of using weight textures and texel fetches;
+• Use mat4 and vec3 multiplications in all operations, instead of multiplying and adding float numbers.
+When tested on the 5 real unbounded scenes with a Samsung Galaxy S22 Ultra mobile phone, the average FPS is 35
+using the optimized implementation, which is 35% faster
+than our original implementation (26 FPS).
+Note that our default rendering setting is deferred rendering, that is, meshes and textures are rasterized into a
+feature image with pixels containing features, and then we
+treat this feature image as the texture image of a rectangle
+polygon mesh and rasterize it into the final output image
+with pixels containing RGB colors using our MLP fragment
+shader. This design was to ensure that the MLP shader is
+executed once per output pixel. in contrast, forward rendering, where the meshes and textures are directly rasterized into pixels containing RGB colors using the MLP fragment shader, will need to execute the MLP shader once per
+fragment. Since the number of fragments are usually much
+larger than the number of output pixels, the deferred rendering setting has a speed advantage over forward rendering when the speed of the MLP shader is a bottleneck in
+rendering.
+Now that the optimized MLP fragment shader is so fast,
+we have observed that forward rendering is much faster than
+deferred rendering on some mobile devices. When tested on
+the 5 real unbounded scenes with a Samsung Galaxy S22
+Ultra mobile phone, the average FPS is 84 using the op-
+C. Scene editing
+Our representation is a textured mesh with baked lighting, and thus can be used in any application that combines,
+renders, or manipulates such meshes. Figure 9 (a) shows
+a simple example where meshes learned from four different sets of photos are composited into a single scene. The
+scene, rendered in 1920×1080 resolution without supersampling, runs at 150 FPS on the gaming laptop, and consumes 1.5 GB of GPU memory. Similarly Figure 9 (b)(c)
+show scenes where some parts or objects are edited or removed by manipulating the triangle meshes of the scenes in
+a 3D modeling software. The resulting renders do not account for differences in illumination between the captured
+photos or indirect illumination between different meshes.
+However, it suggests an easy way to create “photorealisticlooking” scenes from a library of objects captured using
+photos rather than painstaking 3D modeling.
+https://youtu.be/kVy2W6afuyk shows three examples
+where we manipulate the learned NeRF objects interactively in real-time. We also highlight how easy it is to implement these operations with our mesh representation. In contrast, implementing those with classic NeRF is non-trivial.
+In the first example, we render all 8 objects learned from
+the synthetic scenes at the same time, and we move the objects by using mouse to drag the objects. This is implemented by a single line of code with the DragControls class
+provided in the threejs library. DragControls is designed for
+manipulating meshes, which suits our needs exactly since
+our objects are meshes. We also cast real-time shadow of
+the objects by applying shadow mapping. This is imple1
+Figure 10. Comparison between images rendered in Python and in a web browser. Image pixel value range is 0-255. Zoom in for details.
+E. Network architectures
+mented by having a directional light, an ambient light, and
+a plane below the objects to receive shadows. The drag control and the real-time shadow are also used in the following
+examples.
+In the second example, we interactively deform the
+learned chair object to create new variations of chairs. To
+implement the deformation, we only need to deform the vertex positions of the meshes, and this is achieved by adding
+vertex deformation code in the vertex shader. Specifically, we implemented three operations: moving the chair
+up/down will lengthen or shorten its legs, moving the chair
+left/right will adjust its width, and moving the chair forward/backward will adjust the skew of its back.
+In the third example, we render 9 ficus objects, which
+are considered “NeRF” objects, and a blue ball, which is a
+classic object with standard material used in classic rendering. We again change the vertex shader to make the leaves
+of the plants to be repelled by the blue ball.
+We adopt the MLP designed in NeRF as the network for
+both A and F. We increase the hidden layer sizes from 256
+to 384, since A and F are not used during inference, so we
+can afford more time on training. The small MLP H is the
+same as the small MLP used in SNeRG, with two hidden
+layers, each consisting 16 neurons.
+F. More details about texture images
+Since the features to be stored are 8-dimensional, we use
+two PNG images to store them. Each PNG image has 4
+channels, therefore two PNG images have a total of 8 channels to store 8-d features. To avoid having an extra image
+to store the binary alpha (opacity) channel, we squeeze the
+alpha channel into the first feature channel, so that the alpha
+is one when the first feature channel is non-zero, and zero
+when the channel is zero. Since phones have a hardware
+constraint that the texture size must be a power of 2 and at
+most 4096 × 4096, we split the large texture images into
+multiple 4096 × 4096 texture images.
+D. Training
+Our training stages are formalized as follows. In the first
+training stage, we optimize
+\argmin _{\Vertices , \pars _\OpacityMLP , \pars _\FeaturesMLP , \pars _\ShaderMLP } \quad \mathcal {L}_\Color + w_d \mathcal {L}_\text {dist} + \mathcal {L}_\text {v}
+G. Quadrature details
+(18)
+The regular-grid mesh M provides an efficient way for
+computing intersections between a ray and the mesh of size
+P × P × P in O(P ) complexity, as shown in Figure 5.
+First, we compute the set of voxels that are intersected
+by the ray. This involves solving 3P ray-plane intersections
+and using those intersection points to obtain at most 3P intersected voxels. This step is shown in Figure 5a and Eq. 7.
+Then, we use the acceleration grid G ∈ RP ×P ×P to
+prune voxels that are unlikely to contain geometry, with respect to a threshold τG = 0.1. This step is shown in Figure 5b and Eq. 8.
+Finally, we compute intersections between the ray and
+the faces of M that are incident to the voxel’s vertex to
+obtain the final set of quadrature points. This step is shown
+in Figure 5c and Eq. 9.
+During the first quarter of the training iterations, G may
+not be accurate, therefore we will keep all 3P intersected
+and
+\argmin _{\Grid } \quad \mathcal {L}_\Grid ^\text {bnd} + w_{g1} \mathcal {L}_\Grid ^\text {sparse} + w_{g2} \mathcal {L}_\Grid ^\text {smooth}, \label {eq:acc_grid_loss}
+(19)
+where wg1 = wg2 = 10−5 . wd is set to 0.0 for synthetic
+360◦ scenes, 0.01 for forward-facing scenes, and 0.001 for
+unbounded 360◦ scenes. In the second training stage, we
+optimize
+\argmin _{\Vertices , \pars _\OpacityMLP , \pars _\FeaturesMLP , \pars _\ShaderMLP } \quad \mathcal {L}_\Color ^\text {stage2} + w_d \mathcal {L}_\text {dist} + \mathcal {L}_\text {v}
+(20)
+and Eq. 19. When the loss converges, we fix the weights of
+V, θA , and G and optimize
+\argmin _{\pars _\FeaturesMLP , \pars _\ShaderMLP } \quad \mathcal {L}_\Color ^\text {bin}.
+(21)
+2
+I. Per-Scene metrics
+voxels regardless of τG , and keep 3P intersection points
+(Recall that if the mesh grid is a regular grid, there are at
+most 3P intersections). Then in the next quarter, we will
+use G to remove empty voxels and keep at most 3P/2 nonempty voxels and 3P/2 intersection points that are closest
+to the camera. In the rest of the training, we will keep 3P/4.
+We also double the training batch size each time we halve
+the number of intersections.
+For the concentric boxes in unbounded 360◦ scenes, we
+will compute their intersections and keep all of them.
+We provide per-scene breakdown for the quality metrics in Table 8 9 10 12 13 14 16 17 18. We provide perscene breakdown for rendering speed and storage cost in
+Table 11 15 19, where OOM (out-of-memory) indicates the
+device cannot run a testing scene due to GPU memory issues, and ICP (incompatible) indicates the device cannot
+run the method due to compatibility issues. The GPU memory and disk storage were tested on the Desktop.
+For Surface Pro 6, Gaming laptop, and Desktop, we disable frame-rate limiting from vertical synchronization by
+starting the Chrome browser with the following arguments:
+H. Initial meshes
+In this section we detail the polygonal meshes used
+for synthetic 360◦ , forward-facing, and unbounded 360◦
+scenes, see Fig. 4 for 2D illustrations.
+We will call the coordinate system of a regular mesh grid
+in a unit cube centered at the origin as the normalized coordinates, and we can apply transformations to obtain the
+grids in the world coordinates for different types of scenes.
+In the following, we will denote points in the normalized
+coordinates as p ∈ [−0.5, 0.5] and points in the world coordinates as p′ .
+For synthetic 360◦ scenes, we apply scaling to the grid
+to put the object inside the grid.
+\mathbf {p}' = w\mathbf {p},
+--disable-frame-rate-limit
+--disable-gpu-vsync
+However, for phones and Chromebook, we did not find a
+way to easily disable vertical synchronization, therefore the
+FPS is capped at 60.
+(22)
+where w = 2.4 or 3, depending on the size of the object.
+We use a grid size of P = 128.
+In forward-facing scenes, we apply transformation to
+concentrate more voxels close to the camera, as shown in
+Fig. 4 (b).
+\begin {cases} \mathbf {p}_z' &= \exp ( w (\mathbf {p}_z + 0.5) ), \\ \mathbf {p}_x' &= u \mathbf {p}_x \mathbf {p}_z', \\ \mathbf {p}_y' &= v \mathbf {p}_y \mathbf {p}_z', \end {cases}
+(23)
+where w is set to a value so that p′z = 25 when pz = 0.5;
+u = v = 1.75. We use a grid size of P = 128.
+In unbounded 360◦ scenes, we assume the cameras are
+inside the unit cube in the normalized coordinates, therefore we do not apply transformations. However, to model
+the surrounding environments, we add a set of L + 1 concentric boxes around the regular grid. The boxes have fixed
+positions and geometry, and their distances to the center are
+given by
+d_i = ( \exp (\frac {wi}{L} ) + w-1 )/2w,
+(24)
+where i ranges from 0 to L. w is set to a value so that
+dL = 8, therefore di ∈ [0.5, 8]. We use a grid size of
+P = 128, and L = 64.
+3
+NeRF [33]
+JAXNeRF [14]
+SNeRG [21]
+Ours
+Chair
+33.00
+33.88
+33.24
+34.09
+Drums
+25.01
+25.08
+24.57
+25.02
+Ficus
+30.13
+30.51
+29.32
+30.20
+Hotdog
+36.18
+36.91
+34.33
+35.46
+Lego
+32.54
+33.24
+33.82
+34.18
+Materials
+29.62
+30.03
+27.21
+26.72
+Mic
+32.91
+34.52
+32.60
+32.48
+Ship
+28.65
+29.07
+27.97
+29.06
+Mean
+31.00
+31.65
+30.38
+30.90
+Mic
+0.980
+0.987
+0.982
+0.979
+Ship
+0.856
+0.865
+0.865
+0.867
+Mean
+0.947
+0.952
+0.950
+0.947
+Mic
+0.028
+0.013
+0.016
+0.032
+Ship
+0.206
+0.156
+0.156
+0.145
+Mean
+0.081
+0.051
+0.050
+0.062
+Table 8. PSNR↑ on Synthetic 360◦ scenes.
+NeRF [33]
+JAXNeRF [14]
+SNeRG [21]
+Ours
+Chair
+0.967
+0.974
+0.975
+0.978
+Drums
+0.925
+0.927
+0.929
+0.927
+Ficus
+0.964
+0.967
+0.967
+0.965
+Hotdog
+0.974
+0.979
+0.971
+0.973
+Lego
+0.961
+0.968
+0.973
+0.975
+Materials
+0.949
+0.952
+0.938
+0.913
+Table 9. SSIM↑ on Synthetic 360◦ scenes.
+NeRF [33]
+JAXNeRF [14]
+SNeRG [21]
+Ours
+Chair
+0.046
+0.027
+0.025
+0.025
+Drums
+0.091
+0.070
+0.061
+0.077
+Ficus
+0.044
+0.033
+0.028
+0.048
+Hotdog
+0.121
+0.030
+0.043
+0.050
+Lego
+0.050
+0.030
+0.022
+0.025
+Materials
+0.063
+0.048
+0.052
+0.092
+Table 10. LPIPS↓ on Synthetic 360◦ scenes.
+iPhone XS
+Pixel 3
+Surface Pro 6
+Chromebook
+Gaming laptop
+Gaming laptop
+Desktop
+GPU memory
+Disk storage
+Chair
+OOM
+OOM
+ICP
+28.06
+4.94
+37.66
+120.70
+1254.00
+141.00
+Drums
+OOM
+OOM
+ICP
+OOM
+10.27
+51.06
+147.72
+4729.00
+44.00
+Ficus
+OOM
+OOM
+ICP
+OOM
+OOM
+OOM
+81.88
+8243.00
+43.00
+SNeRG [21]
+Hotdog
+Lego
+OOM
+OOM
+OOM
+OOM
+ICP
+ICP
+26.11
+27.08
+8.10
+9.41
+45.52
+60.20
+436.05
+232.03
+1253.00 1253.00
+67.00
+114.00
+Materials
+OOM
+OOM
+ICP
+16.48
+2.05
+13.81
+92.45
+1253.00
+134.00
+Mic
+OOM
+OOM
+ICP
+26.99
+21.65
+87.67
+507.54
+1251.00
+22.00
+Ship
+OOM
+OOM
+ICP
+11.01
+1.69
+11.17
+39.73
+2422.00
+129.00
+Mean
+22.62
+8.30
+43.87
+207.26
+2707.25
+86.75
+iPhone XS
+Pixel 3
+Surface Pro 6
+Chromebook
+Gaming laptop
+Gaming laptop
+Desktop
+GPU memory
+Disk storage
+Chair
+60.00
+41.68
+83.40
+60.00
+186.03
+657.77
+810.99
+451.00
+107.00
+Drums
+60.00
+38.71
+83.15
+60.00
+183.04
+656.22
+789.30
+590.00
+120.00
+Ficus
+60.00
+43.09
+99.34
+60.00
+231.01
+643.32
+882.23
+450.00
+80.00
+Ours
+Hotdog
+60.00
+35.59
+64.01
+53.24
+156.08
+649.58
+707.27
+456.00
+88.00
+Materials
+54.65
+32.35
+58.80
+51.04
+129.80
+618.98
+659.95
+721.00
+191.00
+Mic
+60.00
+52.65
+130.62
+60.00
+332.10
+648.88
+970.35
+322.00
+50.00
+Ship
+42.37
+23.52
+42.76
+37.56
+89.74
+412.70
+509.48
+594.00
+171.00
+Mean
+55.89
+37.14
+77.40
+53.67
+178.26
+606.73
+744.91
+538.38
+125.75
+Lego
+50.10
+29.56
+57.11
+47.51
+118.27
+566.39
+629.70
+723.00
+199.00
+Table 11. Rendering speed in frames per second (FPS), and GPU memory and disk storage in MB, on Synthetic 360◦ scenes.
+4
+NeRF [33]
+JAXNeRF [14]
+SNeRG [21]
+Ours
+Room
+32.70
+33.30
+30.04
+31.28
+Fern
+25.17
+24.92
+24.85
+24.59
+Leaves
+20.92
+21.24
+20.01
+20.54
+Fortress
+31.16
+31.78
+30.91
+30.82
+Orchids
+20.36
+20.32
+19.73
+19.66
+Flower
+27.40
+28.09
+27.00
+27.05
+Trex
+26.80
+27.43
+25.80
+26.26
+Horns
+27.45
+28.29
+26.71
+27.09
+Mean
+26.50
+26.92
+25.63
+25.91
+Trex
+0.880
+0.902
+0.882
+0.900
+Horns
+0.828
+0.863
+0.852
+0.864
+Mean
+0.811
+0.831
+0.818
+0.825
+Trex
+0.249
+0.143
+0.157
+0.147
+Horns
+0.268
+0.173
+0.176
+0.169
+Mean
+0.250
+0.173
+0.183
+0.183
+Table 12. PSNR↑ on Forward-facing scenes.
+NeRF [33]
+JAXNeRF [14]
+SNeRG [21]
+Ours
+Room
+0.948
+0.958
+0.936
+0.943
+Fern
+0.792
+0.806
+0.802
+0.808
+Leaves
+0.690
+0.717
+0.696
+0.711
+Fortress
+0.881
+0.897
+0.889
+0.891
+Orchids
+0.641
+0.657
+0.655
+0.647
+Flower
+0.827
+0.850
+0.835
+0.839
+Table 13. SSIM↑ on Forward-facing scenes.
+NeRF [33]
+JAXNeRF [14]
+SNeRG [21]
+Ours
+Room
+0.178
+0.086
+0.133
+0.143
+Fern
+0.280
+0.207
+0.198
+0.202
+Leaves
+0.316
+0.247
+0.252
+0.245
+Fortress
+0.171
+0.108
+0.125
+0.115
+Orchids
+0.321
+0.266
+0.255
+0.277
+Flower
+0.219
+0.156
+0.167
+0.163
+Table 14. LPIPS↓ on Forward-facing scenes.
+iPhone XS
+Pixel 3
+Surface Pro 6
+Chromebook
+Gaming laptop
+Gaming laptop
+Desktop
+GPU memory
+Disk storage
+Room
+OOM
+OOM
+ICP
+9.75
+7.77
+52.40
+110.36
+3594.00
+149.00
+Fern
+OOM
+OOM
+ICP
+6.02
+1.28
+14.45
+28.18
+3585.00
+288.00
+Leaves
+OOM
+OOM
+ICP
+OOM
+0.80
+6.15
+13.54
+4729.00
+408.00
+SNeRG [21]
+Fortress Orchids
+OOM
+OOM
+OOM
+OOM
+ICP
+ICP
+9.68
+OOM
+8.46
+1.14
+54.47
+12.43
+122.91
+17.59
+3595.00 5903.00
+162.00
+704.00
+Flower
+OOM
+OOM
+ICP
+5.12
+0.67
+8.77
+15.96
+3593.00
+321.00
+Trex
+OOM
+OOM
+ICP
+8.68
+4.72
+32.87
+62.65
+3595.00
+251.00
+Horns
+OOM
+OOM
+ICP
+OOM
+4.18
+26.51
+34.46
+5903.00
+415.00
+Mean
+7.85
+3.63
+26.01
+50.71
+4312.13
+337.25
+iPhone XS
+Pixel 3
+Surface Pro 6
+Chromebook
+Gaming laptop
+Gaming laptop
+Desktop
+GPU memory
+Disk storage
+Room
+29.82
+13.57
+22.92
+20.70
+64.27
+281.01
+377.87
+610.00
+127.00
+Fern
+25.10
+12.74
+20.32
+18.95
+55.88
+252.70
+352.01
+610.00
+147.00
+Leaves
+OOM
+8.66
+13.84
+14.65
+37.11
+170.66
+254.51
+1143.00
+353.00
+Ours
+Fortress
+30.02
+14.69
+29.13
+23.16
+76.29
+303.77
+397.00
+473.00
+89.00
+Flower
+26.28
+12.98
+22.30
+20.06
+60.60
+260.44
+367.68
+611.00
+151.00
+Trex
+26.30
+13.07
+22.53
+20.08
+59.65
+258.45
+359.68
+604.00
+162.00
+Horns
+25.59
+12.71
+23.92
+21.12
+59.26
+251.82
+362.46
+747.00
+211.00
+Mean
+27.19
+12.40
+21.51
+19.44
+57.72
+250.17
+349.34
+759.25
+201.50
+Orchids
+OOM
+10.77
+17.10
+16.79
+48.72
+222.54
+323.54
+1276.00
+372.00
+Table 15. Rendering speed in frames per second (FPS), and GPU memory and disk storage in MB, on Forward-facing scenes.
+5
+JAXNeRF [14]
+NeRF++ [52]
+Ours
+Bicycle
+21.76
+22.64
+21.70
+Flower
+19.40
+20.31
+18.86
+Garden
+23.11
+24.32
+23.54
+Stump
+21.73
+24.34
+23.95
+Treehill
+21.28
+22.20
+21.72
+Mean
+21.46
+22.76
+21.95
+Table 16. PSNR↑ on Unbounded 360◦ scenes.
+JAXNeRF [14]
+NeRF++ [52]
+Ours
+Bicycle
+0.455
+0.526
+0.426
+Flower
+0.376
+0.453
+0.321
+Garden
+0.546
+0.635
+0.599
+Stump
+0.453
+0.594
+0.556
+Treehill
+0.459
+0.530
+0.450
+Mean
+0.458
+0.548
+0.470
+Table 17. SSIM↑ on Unbounded 360◦ scenes.
+JAXNeRF [14]
+NeRF++ [52]
+Ours
+Bicycle
+0.536
+0.455
+0.513
+Flower
+0.529
+0.466
+0.526
+Garden
+0.415
+0.331
+0.358
+Stump
+0.551
+0.416
+0.430
+Treehill
+0.546
+0.466
+0.522
+Mean
+0.515
+0.427
+0.470
+Table 18. LPIPS↓ on Unbounded 360◦ scenes.
+iPhone XS
+Pixel 3
+Surface Pro 6
+Chromebook
+Gaming laptop
+Gaming laptop
+Desktop
+GPU memory
+Disk storage
+Bicycle
+OOM
+9.44
+20.24
+15.89
+55.62
+195.63
+280.24
+1350.00
+400.00
+Ours
+Flower Garden
+OOM
+22.20
+8.61
+10.49
+19.12
+21.67
+14.72
+16.56
+59.18
+58.19
+194.66
+204.31
+282.02
+295.74
+1081.00 808.00
+294.00
+239.00
+Stump
+OOM
+8.54
+18.21
+14.23
+51.73
+178.89
+265.90
+1082.00
+337.00
+Treehill
+OOM
+9.12
+17.97
+15.02
+51.89
+189.46
+274.58
+1490.00
+453.00
+Mean
+22.20
+9.24
+19.44
+15.28
+55.32
+192.59
+279.70
+1162.20
+344.60
+Table 19. Rendering speed in frames per second (FPS), and GPU memory and disk storage in MB, on Unbounded 360◦ scenes.
+6

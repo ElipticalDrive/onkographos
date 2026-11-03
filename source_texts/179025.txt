@@ -1,0 +1,145 @@
+Computing Good Crosshair Placements Using RLpbr’s GPU Ray Tracing
+David Durst's Blog
+Computing Good Crosshair Placements Using RLpbr’s GPU Ray Tracing
+David Durst
+--
+December 18, 2021
+TL;DR Crosshair placement is a crucial skill for expert CSGO players
+and a key factor in quantitative game sense models. However, learning
+crosshair placement is hard because it depends on context like a player's location and the map's geometry.
+In this blog post, I'll propose a way to compute good crosshair placements using this context
+and Brennan Shacklett's RLpbr renderer, which enables us
+to GPU-accelerate the computation's ray tracing.
+The Human Crosshair Placement Approach
+The green boxes highlight corners of B tunnels in de_dust2 where an enemy may appear.
+Expert CSGO players constantly adjust their crosshair placement, even when no enemies are visible. The
+predictive crosshair placement process [1] focuses a player's crosshair at a
+likely location where an enemy will appear. Predictive crosshair placement is a crucial skill because it
+enables faster reactions. It does so by decreasing the amount of crosshair movement required when an
+enemy appears.
+Predictive crosshair placement is challenging to learn because it depends on a lot of context: a
+player's location, the map's geometry, enemies' locations, and teammates' crosshair placements. As
+shown by the green boxes in the video on the right, the player's
+location and map geometry create corners where enemies may appear. Information about enemies' positions
+and teammates' crosshair placements allow a player to filter down the green boxes into a smaller set of
+corners not covered by teammates where enemies are likely to appear.
+In this post, I will define an algorithm for computing the predictive crosshair placement corners where
+enemies may appear based on the player's position and the map's geometry. Brennan Shacklett and I implemented this algorithm in his RLpbr renderer. A
+later post will cover how to use enemies' positions and teammates' crosshair placements to filter these
+corners.
+Algorithm For Finding The Important Corners
+In order to algorithmically compute the corners for crosshair placement, I need to formalize the concept of
+"corners where enemies may appear". First, I will list the algorithm's inputs. Then, I will more
+formally define the corners, the algorithm's output. Finally, I will describe the algorithm.
+Algorithm Inputs
+Navmesh - The navigation mesh for B tunnels in de_dust2. The
+green AABB show where players and bots can stand.
+Voxels - Some of the voxels in de_dust2's B tunnels. The voxels
+overlap to account for small movements. I only show some voxels for clarity. The voxels
+are 72 units high, but I removed the bottom 30 units so that the ground is easier to see.
+Slope - The navigation mesh on the slope from T spawn to B
+tunnels. There is one, big AABB for the entire slope.
+Map Geometry - Let G be the map's
+geometry, such as the floors and walls. I get this data by exporting CSGO's BSP map files to GLTF
+files with the vsource decompiler. GLTF
+files can be read by other renderers like Blender and RLpbr.
+Continuous Locations Where A Player May Stand - Let P be all the places a player can stand. I get this data from the navigation mesh's 3D axis-aligned
+bounding boxes (AABB). The image on the right titled Navmesh shows this mesh. CSGO's bots use the mesh to walk through the
+map, as they know they can stand in any place in the green boxes. I extend the boxes up by 72 units
+(the
+player's height) so P's AABBs contain entire character model,
+not just feet.
+Discretization of the Map - Let V be
+the voxels that discretize all possible locations for a character model in the map, even in the sky
+or under the ground. I compute this data by splitting the map's coordinates into voxels of size 32x32x72
+units with a stride of 2x2x72 units. The voxels are of size 32x32x72 to match the size
+of a player. The image on the right titled Voxels shows some of these voxels. The voxels overlap (the stride
+2x2x72 is far less than the size 32x32x72) so there are different voxels for small movements, like a
+jiggle peak where one voxel is fully behind cover and the other voxel has the player's shoulder
+exposed.
+Discrete Locations Where A Player May Stand - Let Q be the voxels that discretize all the places a player can stand in the
+map. This is an intersection of P, a continuous set of all the
+places a player can stand, and V, the discretization of the map
+into player-sized voxels. Also, we need to account for the ground height at every voxel. For large
+slopes like the one in the image on the right titled Slope, P's AABBs may be large. This
+causes the voxels to clip into the ground, which is invalid since players can't stand inside the
+ground. We ensure all voxels are valid standing locations by adjusting for the ground height at each
+voxel's center. We find the ground height by tracing rays up from the bottom of P's AABBs to the first intersection with the map geometry in
+G.
+Locations For A Player's Eyes - Let E be all possible locations for a player's eyes. I compute this by
+creating a 2D grid for each AABB in P with cells of size 20x20
+units. At each point in the grid, I create an eye point e that
+is 64 units above the ground. I use the same technique for finding ground height as above. I use 64
+units since a player's eye level is roughly
+64 units above ground. While they may seem similar, the eye points E and voxels Q serve different
+purposes. I'll use the eye points as locations the current player may look from and the voxels as
+locations where enemies may appear.
+Algorithm Output: Cover Edges
+With these definitions, I can now formalize the concept of "locations where enemies may appear". For a
+player's eye point e, a cover edge is a
+voxel in Q where an enemy may move from not visible to the player (aka
+behind cover) to visible to the player (aka not behind cover). We will find these cover edges by looking
+for voxels that aren't visible from the current eye point e, but are if
+the player moves to an offset eye point at location e + ε. For
+small movements ε, it is equivalent for either the player or
+the enemy to move. For my implementation, ε = 10 units.
+Key Detail: Not Every Corner Hides A Cover Edge
+An intuitive definition for cover edges is the areas hidden by corners. This intuition matches the
+typical advice by CSGO experts to "check the corners" of the map. The green box in the left image below
+is one such corner that hides a cover edge. However, there are many corners that don't hide cover
+edges. These corners aren't worth checking because no enemy can hide behind them. The green box in the
+right image below doesn't hide a cover edge because there isn't enough space behind the corner for a
+character model. By requiring a whole voxel of size 32x32x72 to be invisible, the cover edge definition
+filters out these uninteresting corners.
+The green boxes in the above images show two corners of the map. The left one hides a cover edge
+because there is space for an entire player to stand behind the corner. The right one doesn't hide
+a cover edge because some part of the player will be visible no matter where they stand behind the
+corner.
+Algorithm Implementation
+The following steps are repeated for each eye point e in E to determine the cover edges from that eye
+point.
+Find All Eye Position Offsets - Choose 9 points in a sphere of
+radius ε around e.
+We denote these offset points as e + ε0, ...,
+e + ε8.
+Ensure Offsets Are Reachable - Trace a ray from e to each e + εi. If
+the ray hits the map geometry in G before traveling 10 units, e + εi isn't reachable. Otherwise, the offset is reachable.
+Find All Voxels Where Enemies Can Stand And Are Visible From An Offset But
+Not e - For each voxel q in
+Q, pick 20 points r, the 8 corners
+and 12 random points. For each r, trace a ray from each reachable
+e + εi. If the ray doesn't hit the map geometry
+in G before reaching r, then r is visible from e +
+εi. If any r is visible from any e + εi, then q is
+visible from an offset. If so, check if q is visible from e using the same ray tracing approach for all r. If q is visible from any e + εi but not e, it
+is a cover edge voxel for e.
+Algorithm Performance
+The algorithm requires a lot of ray tracing. It needs to trace 20 rays from every eye position and every
+offset to every voxel in the map. On an AWS g4dn.4xlarge, this takes about 2 hours (note: this number is
+very rough, as the algorithm has gone through many revisions). Two key system constraints are the GPU
+memory required to store the voxels in Q and the CPU memory required to
+store the cover edge voxels for all eye positions in E.
+Cover Edge Applications
+I will use the algorithm in two applications.
+Evaluating Game Sense - My game sense
+model will use this algorithm to determine a player's current action, such as peeking (moving
+into enemy territory and looking at a cover edge) or rotating (moving in friendly territory and not
+looking at a cover edge). Also, I will evaluate a player's ability to check the right cover
+edge, the one that enemies are hiding behind, when multiple exist for their current eye position.
+Training Maps - I want to build a map for de_dust2 that teaches
+which cover edges to look at. Once I incorporate more context data, like where enemies are hiding or
+where teammates are looking, I can create training maps that teach predictive crosshair placement to
+new players.
+Request For Feedback
+If you have questions or comments about this analysis, please email me at durst@stanford.edu. IF YOU ARE A CSGO MAP
+CREATOR, PLEASE CONTACT ME! I WANT HELP BUILDING THE TRAINING MAPS. I want to automatically
+create a modified version of de_dust2 with the cover edge voxels shown here. I want the right voxels to
+appear for a player's current eye position. I don't know how to automatically modify a map to add the
+voxels. I would prefer to avoid manually adding the voxels in Hammer, since there are a lot of them.
+This script demonstrates what I want for one eye
+position.
+Footnotes
+In the CSGO community, predictive crosshair placement is known as pre-aiming.
+David Durst © 2022 |
+durst@stanford.edu |
+Home

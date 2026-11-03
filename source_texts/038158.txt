@@ -1,0 +1,1403 @@
+DeRF: Decomposed Radiance Fields
+Daniel Rebain1 , Wei Jiang1 , Soroosh Yazdani4 , Ke Li2,4 , Kwang Moo Yi1 , Andrea Tagliasacchi3,4
+arXiv:2011.12490v1 [cs.CV] 25 Nov 2020
+1
+University of British Columbia
+3
+University of Toronto
+2
+4
+Simon Fraser University
+Google Research
+Abstract
+With the advent of Neural Radiance Fields (NeRF), neural networks can now render novel views of a 3D scene
+with quality that fools the human eye. Yet, generating these
+images is very computationally intensive, limiting their applicability in practical scenarios. In this paper, we propose a technique based on spatial decomposition capable
+of mitigating this issue. Our key observation is that there
+are diminishing returns in employing larger (deeper and/or
+wider) networks. Hence, we propose to spatially decompose
+a scene and dedicate smaller networks for each decomposed
+part. When working together, these networks can render the
+whole scene. This allows us near-constant inference time
+regardless of the number of decomposed parts. Moreover, we
+show that a Voronoi spatial decomposition is preferable for
+this purpose, as it is provably compatible with the Painter’s
+Algorithm for efficient and GPU-friendly rendering. Our
+experiments show that for real-world scenes, our method
+provides up to 3× more efficient inference than NeRF (with
+the same rendering quality), or an improvement of up to
+1.0 dB in PSNR (for the same inference cost).
+Figure 1. We render a scene (a) from a decomposed neural representation (b), consisting of a collection of spatially localized neural
+networks. Each of these networks render a convex portion of the image, and these are then composited into the output via the Painter’s
+Algorithm. Depending on the level of decomposition, this can lead
+to faster rendering, or to renderings that have the same runtime, but
+contain sharper details. In (c), we decompose the scene into 16
+parts, which leads to sharper details than (d), with similar runtime.
+1. Introduction
+While high-quality rendering of virtual scenes has
+long been the sole domain of traditional computer graphics [14, 13], there have recently been promising developments in using neural networks for photo-realistic rendering [19, 8, 10, 12]. These new neural rendering methods
+have the potential to diminish the enormous amount of user
+intervention that is today needed to digitize the real-world.
+We believe the further development of neural scene representations will open the doors to 3D content creation in-the-wild,
+with the potential to achieve previously unimaginable levels
+of visual detail.
+Among existing neural rendering methods, those that
+operate in 3D have lately drawn much interest [17, 8, 12].
+Unlike those based on convolutional neural networks [5],
+these methods do not operate in image-space, and rather
+train volumetric representations of various types: they define functions that can be queried in space during a volume
+rendering operation. This is essential, as volume rendering
+introduces an inductive bias towards rendering phenomena,
+so that effects like occlusion and parallax are modeled by
+construction, rather than being emulated by image-space
+operations.
+However, neural volume rendering is far from being a
+1
+rithm [2, Ch. 12] can be used to composite the final image.
+We formulate our Voronoi decomposition to be differentiable, and train end-to-end to find an optimal cell arrangement. By doing so we increase the efficiency of the
+rendering process by up to a factor of three without any loss
+in rendering quality. Alternatively, with the same rendering
+cost, we enhance the rendering quality by a PSNR of up to
+1.0dB (recall that Peak Signal to Noise Ratio is expressed in
+log-scale).
+Contributions. To summarize, our main contributions are:
+Figure 2. Diminishing returns – We sweep through network
+architectures varying by depth and width to show how the gains
+in quality diminish with increased capacity. The total number of
+network parameters varies linearly with network depth (left) and
+quadratically with the number of units in each layer (right). All
+networks trained for 300k iterations on the NeRF “room” scene.
+• We highlight the presence of diminishing returns for network capacity in NeRF, and propose spatial decompositions to address this issue.
+• We demonstrate how a decomposition based on Voronoi
+Diagrams may be learned to optimally represent a scene.
+• We show how this decomposition allows the whole scene
+to be rendered by rendering each part independently, and
+compositing the final image via Painter’s Algorithm.
+• In comparison to the NeRF baseline, these modifications
+result in improvement of rendering quality for the same
+computational budget, or faster rendering of images given
+the same visual quality.
+fully developed technology. The two development axes are
+generality (removing assumptions about the input, hence allowing their application to more general visual phenomena)
+and performance (increasing the efficiency of training and/or
+inference). In this paper, we focus on performance, and
+specifically the inference performance. Hence, the natural
+question then becomes “why are neural volume rendering
+models so incredibly slow?” Let us consider Neural Radiance Fields (NeRF) [12] as the cardinal example. These
+method requires hundreds of MLP invocations per pixel to
+compute the samples needed by volume rendering. This
+results in an extremely compute-intensive inference process
+needing ≈108 network evaluations and minutes of computation to render a one megapixel image on a modern NVIDIA
+RTX 2080 Ti accelerator.
+Naturally, to accelerate inference one could trade away
+model capacity, but doing so naı̈vely results in lower rendering quality. However, as illustrated in Figure 2, there are
+diminishing returns regarding how the capacity of neural
+networks (i.e. number of layers or number of neurons per
+layer) affects final rendering quality. We take advantage of
+this phenomena and accelerate neural rendering by dividing
+the scene into multiple areas (i.e. spatial decomposition), and
+employing a small(er) networks in each of these areas.
+Due to hardware limitations in the memory architecture of
+accelerators, not all decompositions are appropriate. For example, a random decomposition of the volume would result
+in random sub-network invocations. Coalescing invocations
+so that memory access are contiguous is possible, but in
+our experiments we found the re-ordering operations are not
+sufficiently fast, and any efficiency gain from using smaller
+networks was lost. Hence, our question becomes “Can we
+design a spatial decomposition that minimizes the chance
+of random memory access?” We address this question by
+noting that we can elegantly overcome these limitations if we
+decompose space with Voronoi Diagrams [2, Ch. 7]. More
+specifically, the convex cells of the Voronoi diagram can
+be rendered independently, after which the Painter’s Algo-
+2. Related Work
+A large literature exists on neural rendering. We refer
+the reader to a recent survey [18], and only cover the most
+relevant techniques in what follows.
+Image-space neural rendering. The simplest form of neural rendering resorts to image-to-image transformations via
+convolutional neural networks [5]. This operation can be
+aided by 3D reasoning [3, 15, 10, 21], producing an intermediate output that is then again fed to a CNN; regular grids [3, 15] or point clouds [10, 21] have both been
+used for this purpose. As these works still rely on CNNs
+to post-process the output, they have difficulty modeling
+view-dependent effects, often resulting in visible artefacts.
+Neural volumetric rendering. Recently, researchers succeeded in integrating 3D inductive bias within a network
+in a completely end-to-end fashion, hence removing the
+need CNN post-processing. Instead, they rely on tracing
+rays through a volume to render an image [16, 17]. While
+these results pioneered the field, more compelling results
+were achieved via the use of fixed-function volume rendering [8, 12]. In particular, and thanks to the use of positional
+encoding, NeRF [12] is able to render novel views of a
+scene from a neural representation with photo-realistic quality. Extensions of NeRF to dynamic lighting and appearance
+exist [9], as well as early attempts at decomposing the complexity of the scene into near/far components [23]. With an
+objective similar to ours, in Neural Sparse Voxel Fields [7],
+the authors realize a 10× speed-up by discretizing the scene
+2
+Figure 3. Framework – The DeRF architecture (left) consists of a set of independent NeRF (right) networks which are each responsible
+for the region of space within a Voronoi cell defined by the decomposition parameters φ. The final color value for a ray is computed by
+applying the volume rendering equation to each segment of radiance c and density σ, and alpha compositing together the resulting colors.
+Figure 4. Decomposed radiance fields – We visualize each of the rendering heads individually. Note that as each head is rendered only the
+weights of one neural network head needs to be loaded, hence resulting in optimal cache coherency while accessing GPU memory.
+and avoiding computation in empty areas; note this solution
+is complementary to ours. It focuses on the sampling part of
+the NeRF pipeline, and therefore can be used in conjunction
+with what we propose.
+along the ray:
+Z tf
+C(r) =
+T (t) σ(r(t)) c(r(t), d) dt
+(1)
+tn
+to obtain a the pixel color C(r). Here, tn and tf are the
+near/far rendering bounds, and transmittance T (t) represents
+the amount of the radiance from position t that will make it
+to the eye, and is a function of density:
+ Z t
+
+T (t) = exp −
+σ(r(s)) ds
+(2)
+3. Method
+We review the fundamentals of NeRF in Section 3.1,
+describe our decomposition-based solution in Section 3.2, its
+practical realization with Voronoi Diagrams and the Painter’s
+Algorithm in Section 3.3. We conclude by detailing our
+training methodology in Section 3.4.
+tn
+The neural fields σ(x) and c(x, d) are trained to minimize
+the difference between the rendered and observed pixel values Cgt over the set of all rays R from the training images:
+h
+i
+2
+Lradiance = Er∼R kC(r) − Cgt (r)k2 .
+(3)
+3.1. Neural radiance fields (NeRF)
+To represent a scene, we follow the volume rendering
+framework of NeRF [12]; see Figure 3 (right). Given a
+camera ray r(t) = o + td corresponding to a single pixel,
+we integrate the contributions of a 5D (3D space plus 2D
+for direction) radiance field c(x, d) and spatial density σ(x)
+Note how in neural radiance fields, a single neural network
+is used to estimate σ(x) and c(x, d) for the entire scene.
+However, as discussed in the introduction, it is advisable
+3
+Figure 5. Compositing with the Painter’s algorithm – Visualization of the intermediate steps of the compositing process.
+N heads contributes to a given ray:
+Z tf
+Wφ (r) =
+T (t) σ(r(t)) wφ (r(t)) dt .
+to use multiple smaller capacity neural networks (heads) to
+compensate for diminishing returns in rendering accuracy.
+3.2. Decomposed radiance fields (DeRFs)
+and employ a loss function that enforces the contributions to
+be uniformly spread across the various heads:
+We propose to model the radiance field functions σ(x)
+and c(x, d) as a weighted sum of N separate functions, each
+represented by a neural network (head); see Figure 3 (left).
+Specifically, the NeRF model defines two directly learned
+functions: σθ (x) and cθ (x, d), each defined for values of x
+over the full space of R3 , and modeled with a neural network
+with weights θ. Conversely, in DeRF we write:
+σ(x) =
+c(x, d) =
+XN
+n=1
+XN
+n=1
+(6)
+tn
+wφn (x)σθn (x)
+(4)
+wφn (x)cθn (x, d)
+(5)
+2
+Luniform = kEr∼R [Wφ (r)]k2 .
+(7)
+Minimizing this loss results in a decomposition which utilizes all heads equally. To see this, let Wφ = Er∼R [Wφ (r)],
+and let 1 ∈ RN be the vector with all 1’s. Recall that since
+kwφ (x)k1 =1 and is coordinatewise positive, we get that
+1 · wφ (x) = 1. Therefore, 1 · Wφ (r) will be independent
+of φ, and hence 1 · Wφ will be a constant. Finally, by the
+Cauchy-Schwartz inequality, we get that k1k22 kWφ k22 is minimized when Wφ is parallel to 1, which means that all heads
+contribute equally.
+where n denotes the head index, and wφ (x):R3 7→RN represents our decomposition via a learned function (with parameters φ) that is coordinatewise positive and satisfies the
+property kwφ (x)k1 =1.
+3.3. Voronoi learnable decompositions
+We seek a decomposition satisfying these requirements:
+1. it must be differentiable, so that the decomposition can
+be fine-tuned to a particular scene
+2. the decomposition must be a spatial partition to unlock
+efficient evaluation, our core objective
+3. it must be possible to evaluate the partition in an
+accelerator-friendly fashion
+Efficient scene decomposition. Note how in Eq. (5), whenever wφn (x)=0 there is no need for σθn (x) and cθn (x, d) to
+be evaluated, as their contributions would be zero. Hence,
+we train our decomposition wφ so that only one of the
+N elements in {wφn (x)} is non-zero at any position in
+space (i.e. we have a spatial partition). Because of this
+property, for each x, only one head needs to be evaluated,
+accelerating the inference process.
+Towards this objective, we select a Voronoi Diagram as the
+most suitable representation for our decomposition. We employ the solution proposed in [22], which defines, based on a
+set φ ∈ RN ×3 of N Voronoi sites, a differentiable (i.e. soft)
+Voronoi Diagram as:
+Balanced scene decomposition. As all of our heads have
+similar representation power, it is advisable to decompose the
+scene in a way that all regions represent a similar amount of
+information (i.e. visual complexity). Toward this objective,
+we first introduce Wφ (r) ∈ RN to measure how much the
+n
+e−β||x−φ ||2
+wφn (x) = PN
+−β||x−φj ||2
+j=1 e
+4
+(8)
+that VP 0 <Q VP , or equivalently d(P 0 , Q) < d(P, Q). Let
+where β ∈ R+ is a temperature parameter controlling the
+softness of the Voronoi approximation. This decomposition
+is: 1 differentiable w.r.t. its parameters φ, and has smooth
+gradients thanks to the soft-min op in (8); 2 a spatial partition for β → ∞, and thanks to the defining characteristics
+of the Voronoi diagram; 3 compatible with the classical
+“Painter’s Algorithm”, enabling efficient compositing of the
+rendering heads to generate the final image. An example of
+the trained decomposition is visualized in Figure 4.
+Painter’s Algorithm. This algorithm is one of the
+most elementary rendering techniques; see [2, Ch. 12].
+The idea is to render objects
+independently, and draw them
+on top of each other in order,
+from back to front, to the output buffer (i.e. image). Such
+an ordering ensures that closer
+objects occlude further ones.
+This algorithm has only found
+niche applications (e.g. rendering transparencies in real-time
+Figure 6. A simple scene
+graphics), but it encounters
+made of convex elements
+failure cases when the front to
+that the Painter’s Algoback ordering of objects in the
+rithm cannot render.
+scene is non decidable; see a
+simple example in the inset figure, where three convex elements form a cycle in the front/behind relation graph.
+In our solution, the scene can be rendered part-by-part,
+one Voronoi cell at a time, without causing memory cache incoherences, leading to better GPU throughput. We can then
+composite the cell images back-to-front, via the Painter’s
+Algorithm, to generate the final image; see Figure 5. However, we need to verify that Voronoi decompositions are
+compatible with the Painter’s Algorithm.
+On the correctness of the Voronoi Painter’s. Taking an
+approach similar to [4], we prove that our Voronoi decomposition is compatible with the Painter’s Algorithm. To do
+so, we will show that for any Voronoi decomposition and a
+camera located at Q, there is a partial ordering of the Voronoi
+cells so that if V shows up before W in our ordering, then W
+does not occlude any part of V (i.e. no ray starting from Q to
+any point in V will intersect W ). To this end, let P ⊂ Rn be
+a set of points, and for each P ∈ P let VP be the Voronoi cell
+attached to P . For any Q ∈ Rn define <Q on the Voronoi
+cells of
+VP 0 <Q VP if and only if d(P 0 , Q) < d(P, Q),
+H = {z | d(z, P ) < d(z, P 0 )}
+(10)
+be the halfspace of points closer to P . Note that d(x, P ) <
+d(x, P 0 ) (since x ∈ VP ) and d(x0 , P ) > d(x0 , P 0 ), and
+hence x ∈ H and x0 6∈ H. If Q ∈ H then the line segment (x, Q) will intersect the boundary of H twice, once
+between (x, x0 ) and once between (x0 , Q), which is not possible. Therefore Q 6∈ H, which implies d(P 0 , Q) < d(P, Q)
+as desired.
+3.4. Training details
+When training our model, we find that successful training
+is only achieved when the decomposition function wφ is
+trained before the network heads for density σθn and radiance cθn . This allows the training of the primary model to
+proceed without interference from shifting boundaries of the
+decomposition. However, as shown in Eq. (6), the training
+of wφ requires a density model σ. To resolve this problem,
+we first train coarse networks σcoarse and ccoarse that apply
+to the entire scene, before the networks heads σθn and cθn
+are trained; this pre-training stage lasts ≈100k iterations in
+our experiments. During the pre-training stage, to stabilize
+training even further, we optimize θcoarse and φ separately,
+respectively minimizing the reconstruction loss Lradiance
+and uniformity loss Luniform . We found through experiment
+that allowing Luniform to affect the optimization of θcoarse
+inhibited the ability of the density network to properly learn
+the scene structure, resulting in unstable training. Once wφ is
+pre-trained, we keep φ fixed and train the per-decomposition
+networks σθn and cθn with the Lradiance , as the Voronoi
+sites are fixed, and Luniform is no longer is necessary.
+Controlling the temperature parameter.
+The softVoronoi diagram formulation in (8) leads to differentiability w.r.t the Voronoi sites (as otherwise gradients of the
+weight function would be zero), but efficient scene decomposition (Section 3.2) requires spatial partitions. Hence, we
+define a scheduling for β over the training process. We start
+at sufficiently low value so that wi (x) ≈ wj (x) for all i
+and j. As the training progresses, we exponentially increase
+β until it reaches a sufficiently high value (10e9 in our experiments), so that the decomposition is indistinguishable
+from a (hard) Voronoi diagram; i.e. either wi (x) ≈ 1 or
+wi (x) ≈ 0 for all i.
+Parameter magnitude scaling. When using an optimizer
+such as ADAM [6], the training process is not necessarily
+invariant with respect to the magnitude of individual variables. As a result, when using a common optimizer state
+for all trainable variables, we found that scaling the scene
+coordinate system such that φ ∈ [−1, 1]N ×3 was necessary
+to prevent the training of the decomposition from oscillating
+excessively or progressing too slowly.
+(9)
+where d defines the distance between points. This clearly defines a partial ordering on P. We now show that this partial
+ordering is the desired partial ordering for the Painter’s Algorithm. Let (x, x0 ) ∈ VP × VP 0 and let x0 = λx + (1 − λ)Q
+for λ ∈ (0, 1) (i.e. x0 is on the line segment (x, Q)) and
+hence parts of VP 0 is covering VP . We now need to show
+5
+Units
+64
+96
+128
+192
+256
+PSNR ↑
+1 Head
+SSIM↑
+LPIPS ↓
+PSNR↑
+4 Heads
+SSIM↑ LPIPS ↓
+PSNR↑
+8 Heads
+SSIM↑ LPIPS ↓
+22.15
+22.87
+23.20
+23.83
+23.88
+0.61
+0.64
+0.66
+0.70
+0.70
+0.52
+0.48
+0.46
+0.42
+0.41
+23.08
+23.56
+23.74
+24.01
+24.22
+0.66
+0.68
+0.69
+0.71
+0.72
+23.34
+23.77
+23.82
+24.17
+24.26
+0.67
+0.70
+0.70
+0.72
+0.73
+0.46
+0.43
+0.42
+0.39
+0.38
+0.44
+0.41
+0.40
+0.37
+0.36
+Figure 7. Quality vs. efficiency – Reconstruction quality versus run-time inference cost for the “fern” scene as the network capacity (number
+of hidden units) is changed; the table report the data used to draw the diagrams. To make the computational requirements tractable, we
+lower sample counts (128 per ray) and batch sizes (512) are used than for results reported in [12], and thus are not directly comparable. For
+quantitative results for other scenes, please refer to the appendix.
+4. Results
+Units
+We now provide our empirical results. We first detail
+the experimental setup in Section 4.1. We then present how
+the theory of our method translates to practice, and how
+our method performs under various computation loads in
+Section 4.2. We then discuss other potential decomposition
+strategies in Section 4.3.
+64
+96
+128
+192
+256
+1 Head
+TFLOPs ↓ Time ↓
+14.5
+26.0
+34.4
+83.3
+115.7
+14.4
+32.4
+57.5
+129.4
+230.1
+4 Heads
+TFLOPs ↓ Time ↓
+19.6
+29.2
+46.0
+87.2
+160.9
+20.7
+39.3
+67.6
+146.5
+253.5
+8 Heads
+TFLOPs ↓
+Time ↓
+21.1
+37.7
+55.9
+111.0
+186.6
+21.2
+44.6
+74.7
+155.0
+257.4
+Table 1. Quantitative comparison of average TeraFLOPs and
+seconds needed to generate a frame for the “fern” scene on an
+NVIDIA v100 GPU; for both metrics smaller values are better.
+4.1. Experimental setup
+To validate the efficacy of our method, we use the “Real
+Forward-Facing” dataset from NeRF [12]. The dataset is
+composed of eight scenes, which includes 5 scenes originally
+from [11], each with a collection of high-resolution images,
+and corresponding camera intrinsics and extrinsics. As we
+are interested in the relationship between rendering quality
+and the computational budget in a practical scenario, we
+focus on real images. For results on the NeRF [12] synthetic
+and DeepVoxels [16] synthetic datasets, see appendix.
+Implementation. We implement our method in in TensorFlow 2 [1]. Due to the large number of evaluation jobs, we
+train with some quality settings reduced: we use a batch size
+of 512 and 128 samples/ray. We train each model for 300k
+iterations (excluding the decomposition pre-training). Other
+settings are the same as reported in NeRF [12]
+merge rendering results. We validate that this is in fact
+the case by evaluating the number of rendered frames-perTeraFLOP (theoretical performance) as well as the number
+of frames-per-second (practical performance). As shown in
+Table 1, in terms of FLOPs, the difference between using nodecomposition and 8-decompositions is 62.8% in maximum,
+and 49.8% in average, whereas there is a quadratic increase
+in computation should more units be used.
+These theoretical trends are mirrored into those of actual
+runtime. While there can be an increase in computation time
+compared to the operation count, the maximum increase
+when going from no-decomposition to 8-decomposition is
+47.5%, and the average is 29.3%. Again, this is much more
+efficient than increasing the number of neurons. This highlights the efficacy of our decomposition strategy – Voronoi
+– allowing theory to be applicable in practice. Note that in
+Section 4.3, we show that this is not necessarily the case for
+other naı̈ve strategies.
+Quality vs. efficiency – Figure 7. We further evaluate how
+4.2. Efficiency of DeRF
+Theory vs. practice – Table 1. In theory the decomposition should not cause any significant increase in computation – the only increase would be to decompose and then
+6
+Figure 8. Qualitative comparison – A direct comparison of the results of a standard NeRF model with 256 hidden units (left), and a
+16-head DeRF model with 128 units (right). The DeRF model has better performance and quality than the baseline while using networks
+which each have one quarter the number of parameters. In other words, despite our DeRF having 16 × 14 = 4× more parameters than the
+baseline NeRF, it executes 1.7× faster. See Figure 7 for metrics on various model combinations for this scene.
+the quality of rendering changes with respect to the number
+of decompositions, and the number of neurons used. To
+quantify the rendering quality, we rely on three metrics:
+• Peak Signal to Noise Ratio (PSNR): A classic metric to
+measure the corruption of a signal.
+• Structural Similarity Index Measure (SSIM) [20]: A perceptual image quality assessment based on the degradation
+of structural information.
+• Learned Perceptual Image Patch Similarity (LPIPS) [24]:
+A perceptual metric based on the deep features of a trained
+network that is more consistent with human judgement.
+DeRF
+DeRF-MLP
+We summarize the results for a representative scene in Figure 7. As shown, given the same render cost, more finegrained decompositions improve rendering quality across all
+metrics. Regardless of the computation, using more decomposition leads to better rendering quality.
+Qualitative results – Figure 8 and Figure 9. We further
+show a qualitative comparison between a standard NeRF
+model and DeRF in Figure 8, where we show that our method
+outperforms NeRF in terms of both quality and efficiency.
+More qualitative results are also available in Figure 9 and
+the video supplementary.
+4 Heads
+8 Heads
+16 Heads
+55.88s
+32.89s
+76.51s
+63.40s
+83.50s
+127.32s
+Table 2. Decomposition baselines – The frame render time for the
+“room” scene (in seconds) for a Voronoi and MLP-decomposition.
+Note that as the number of heads increases, the Voronoi decomposition provides a substantial benefit to efficiency. Note models
+beyond 16 heads are infeasible to train due to memory requirements (for reasonable network widths).
+baseline, we implement a decomposition network with an
+MLP with a softmax activation at the end to provide values
+of wφn (x). We show the actual rendering time compared to
+ours in Table 2. While in theory this method should require
+a similar number of operations to ours, due to the random
+memory access during the integration process, they can not
+be accelerated as efficiently. Consequently, their runtime
+cost tends to grow much faster than DeRF models as we
+increase the number of heads.
+4.3. Alternative decomposition methods
+We further empirically demonstrate that naı̈ve decomposition strategies are insufficient, and hence the importance
+of using our Voronoi decomposition.
+Decompositions with MLPs – Table 2. An obvious first
+thought into decomposing scenes would be to leave the decomposition to a neural network, and ask it to find the optimal decomposition through training. To compare against this
+Decompositions with regular grids. A trivial spatial de7
+Figure 9. Qualitative results gallery – A sampling of DeRF renders, alongside visualizations of decompositions.
+composition could be achieved by using a regular grid of
+network regions. While this would eliminate the requirement to train the decomposition, in practice it would require
+many more regions in total to achieve the same level of accuracy (due to the non-homogeneous structure of real scenes).
+Due to the curse of dimensionality, this will also result in a
+significant amount of incoherence in the memory access pattern for network weights, resulting in lower computational
+performance; see the appendix.
+decompositions, which we prove to be compatible with the
+Painter’s algorithm, making our inference pipeline GPUfriendly. As a result, our method not only renders much
+faster, but can also deliver higher quality images.
+Limitations and future work. There are diminishing returns with respect to the number of decomposition heads,
+not just network capacity; see Figure 7. Yet, one is left to
+wonder whether the saturation in rendering quality could be
+compensated by significantly faster rendering as we increase
+the number of heads in the hundreds or thousands. In this
+respect, while in this paper we assumed all heads to have the
+same neural capacity, it would be interesting to investigate
+heterogeneous DeRFs, as, e.g., a 0-capacity head is perfect
+for representing an empty space. On a different note, the
+implementation of highly efficient scatter/gather operations
+could lead to an efficient version of the simple MLP solution
+in Section 4.3, and accelerate the training of DeRFs, which
+currently train slower than models without decomposition.
+5. Conclusions
+We have presented DeRF – Decomposed Radiance
+Fields – a method to increase the inference efficiency of
+neural rendering via spatial decomposition. By decomposing the scene into multiple cells, we circumvent the problem
+of diminishing returns in neural rendering: increasing the
+network capacity does not directly translate to better rendering quality. To decompose the scene, we rely on Voronoi
+8
+Acknowledgements
+Abhishek Kar. Local Light Field Fusion: Practical View Synthesis with Prescriptive Sampling Guidelines. ACM Transactions on Graphics, 2019. 6
+[12] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik,
+Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. NeRF:
+Representing Scenes as Neural Radiance Fields for View Synthesis. In European Conference on Computer Vision, 2020. 1,
+2, 3, 6, 10, 14
+[13] Merlin Nimier-David, Delio Vicini, Tizian Zeltner, and Wenzel Jakob. Mitsuba 2: A Retargetable Forward and Inverse
+Renderer. ACM SIGGRAPH Asia, 2019. 1
+[14] Matt Pharr, Wenzel Jakob, and Greg Humphreys. Physically
+Based Rendering: From Theory to Implementation. Morgan
+Kaufmann, 2016. 1
+[15] Konstantinos Rematas and Vittorio Ferrari. Neural Voxel Renderer: Learning an Accurate and Controllable Rendering Tool.
+In Conference on Computer Vision and Pattern Recognition,
+2020. 2
+[16] Vincent Sitzmann, Justus Thies, Felix Heide, Matthias Niessner, Gordon Wetzstein, and Michael Zollhofer. DeepVoxels:
+Learning Persistent 3D Feature Embeddings. In Conference
+on Computer Vision and Pattern Recognition, 2019. 2, 6, 14
+[17] Vincent Sitzmann, Michael Zollhöfer, and Gordon Wetzstein.
+Scene Representation Networks: Continuous 3D-StructureAware Neural Scene Representations. In Advances in Neural
+Information Processing Systems, 2019. 1, 2
+[18] Ayush Tewari, Ohad Fried, Justus Thies, Vincent Sitzmann, Stephen Lombardi, Kalyan Sunkavalli, Ricardo MartinBrualla, Tomas Simon, Jason Saragih, Matthias Niessner, et al.
+State of the Art on Neural Rendering. Eurographics 2020
+State of The Art Report, 2020. 2
+[19] Justus Thies, Michael Zollhöfer, and Matthias Niessner. Deferred Neural Rendering: Image Synthesis Using Neural Textures. ACM Transactions on Graphics, 2019. 1
+[20] Zhou Wang, Alan C. Bovik, Hamid R. Sheikh, and Eero P.
+Simoncelli. Image Quality Assessment: From Error Visibility to Structural Similarity. IEEE Transactions on Image
+Processing, 2004. 7
+[21] Olivia Wiles, Georgia Gkioxari, Richard Szeliski, and Justin
+Johnson. SynSin: End-to-End View Synthesis from a Single Image. In Conference on Computer Vision and Pattern
+Recognition, 2020. 2
+[22] Francis Williams, Jerome Parent-Levesque, Derek
+Nowrouzezahrai, Daniele Panozzo, Kwang Moo Yi,
+and Andrea Tagliasacchi. Voronoinet: General functional
+approximators with local support.
+In Conference on
+Computer Vision and Pattern Recognition Workshops, 2020.
+4
+[23] Kai Zhang, Gernot Riegler, Noah Snavely, and Vladlen
+Koltun. NeRF++: Analyzing and Improving Neural Radiance
+Fields. arXiv Preprint, 2020. 2
+[24] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman,
+and Oliver Wang. The Unreasonable Effectiveness of Deep
+Features as a Perceptual Metric. In Conference on Computer
+Vision and Pattern Recognition, 2018. 7
+This work was supported by the Natural Sciences and Engineering Research Council of Canada (NSERC) Discovery
+Grant, NSERC Collaborative Research and Development
+Grant, Google, Compute Canada, and Advanced Research
+Computing at the University of British Columbia.
+We thank Ricardo Martin Brualla for his comments.
+References
+[1] Martı́n Abadi, Ashish Agarwal, Paul Barham, Eugene Brevdo,
+Zhifeng Chen, Craig Citro, Greg S. Corrado, Andy Davis, Jeffrey Dean, Matthieu Devin, Sanjay Ghemawat, Ian Goodfellow, Andrew Harp, Geoffrey Irving, Michael Isard, Yangqing
+Jia, Rafal Jozefowicz, Lukasz Kaiser, Manjunath Kudlur, Josh
+Levenberg, Dandelion Mané, Rajat Monga, Sherry Moore,
+Derek Murray, Chris Olah, Mike Schuster, Jonathon Shlens,
+Benoit Steiner, Ilya Sutskever, Kunal Talwar, Paul Tucker,
+Vincent Vanhoucke, Vijay Vasudevan, Fernanda Viégas, Oriol
+Vinyals, Pete Warden, Martin Wattenberg, Martin Wicke,
+Yuan Yu, and Xiaoqiang Zheng. TensorFlow: Large-scale
+machine learning on heterogeneous systems, 2015. Software
+available from tensorflow.org. 6
+[2] Mark De Berg, Marc Van Kreveld, Mark Overmars, and Otfried Schwarzkopf. Computational geometry. Springer, 1997.
+2, 5
+[3] Emilien Dupont, Miguel Angel Bautista, Alex Colburn,
+Aditya Sankar, Carlos Guestrin, Josh Susskind, and Qi Shan.
+Equivariant Neural Rendering. arXiv Preprint, 2020. 2
+[4] Herbert Edelsbrunner. An Acyclicity Theorem for Cell Complexes in D Dimension. Combinatorica, 1990. 5
+[5] SM Ali Eslami, Danilo Jimenez Rezende, Frederic Besse,
+Fabio Viola, Ari S Morcos, Marta Garnelo, Avraham Ruderman, Andrei A Rusu, Ivo Danihelka, Karol Gregor, et al.
+Neural Scene Representation and Rendering. Science, 2018.
+1, 2
+[6] Diederik P. Kingma and Jimmy Ba. Adam: A Method for
+Stochastic Optimization. In International Conference on
+Learning Representations, 2015. 5
+[7] Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and
+Christian Theobalt. Neural Sparse Voxel Fields. Advances in
+Neural Information Processing Systems, 2020. 2
+[8] Stephen Lombardi, Tomas Simon, Jason Saragih, Gabriel
+Schwartz, Andreas Lehrmann, and Yaser Sheikh. Neural Volumes: Learning Dynamic Renderable Volumes from Images.
+ACM Transactions on Graphics, 2019. 1, 2
+[9] Ricardo Martin-Brualla, Noha Radwan, Mehdi S. M. Sajjadi, Jonathan T. Barron, Alexey Dosovitskiy, and Daniel
+Duckworth. NeRF in the Wild: Neural Radiance Fields for
+Unconstrained Photo Collections. arXiv Preprint, 2020. 2
+[10] Moustafa Meshry, Dan B Goldman, Sameh Khamis, Hugues
+Hoppe, Rohit Pandey, Noah Snavely, and Ricardo MartinBrualla. Neural Rerendering in the Wild. In Conference on
+Computer Vision and Pattern Recognition, 2019. 1, 2
+[11] Ben Mildenhall, Pratul P. Srinivasan, Rodrigo Ortiz-Cayon,
+Nima Khademi Kalantari, Ravi Ramamoorthi, Ren Ng, and
+9
+Appendix
+A. Voronoi vs naı̈ve decomposition – Table 3
+especially for PSNR. This suggests that, while the current
+experiments already provide enough evidence for the efficacy of DeRF, extracting robust statistics via multiple runs
+may deliver a more conclusive answer at the expense of compute. We note however, our results already demonstrate that
+decomposing the scene is almost always better, especially in
+terms of perceptual metrics, and when less computation is
+used for inference.
+Video supplementary. We further direct the interested readers to the video supplementary that demonstrates the rendering quality and the decomposition in 3D.
+To test that our learned decomposition actually contributes to an improvement in accuracy, we test against a
+version of DeRF with a naı̈ve decomposition – where cells
+are fixed into a grid. We find that the learned decomposition
+results in improvement in all metrics.
+B. Additional experiments on real data
+Per-scene results – Figures 10–17. In this section we provide further comprehensive experiments on the real capture
+scenes showing how DeRFs with up to 16 heads perform in
+terms of reconstruction quality and inference cost.
+We find that DeRF models provide the best qualitycomputation trade-off, for all cases in terms of LPIPS, and
+almost all cases for PSNR and SSIM. Moreover, for the
+strong majority of scenes, highly decomposed DeRF models give the best results, especially for the perceptual and
+structural metrics. We also find the advantage of DeRF is
+most consistent for scenes where the absolute error is higher,
+i.e. where gains in performance are needed the most. All
+experiments in this section use the same sample counts as
+[12].
+Variance Test – Table 4. Additionally, to help explain the
+increasingly chaotic nature of the graphs as quality increases,
+we perform an experiment in which we train eight identical
+DeRF models on the scene with the highest reconstruction
+accuracy (the “room” scene). In this test we find a significant difference in results depending only on initialization,
+Units
+PSNR ↑
+64
+96
+128
+192
+256
+23.30
+24.11
+24.52
+24.99
+25.31
+1 Head ()
+SSIM↑
+LPIPS ↓
+0.66
+0.71
+0.73
+0.76
+0.78
+0.45
+0.39
+0.36
+0.31
+0.29
+PSNR↑
+24.43
+24.76
+25.02
+25.36
+25.45
+DeRF
+DeRF-Grid
+SSIM↑
+LPIPS↓
+28.55
+28.07
+0.89
+0.88
+0.25
+0.28
+Table 3. Voronoi vs grid decomposition – Quantitative results for
+two equal-capacity 64-head, 32-unit models trained on the “room”
+scene. The DeRF model uses our Voronoi decomposition and the
+DeRF-Grid uses an untrained decomposition where the cells are
+arranged in a 4×4×4 grid. Our Voronoi decomposition brings
+significant benefit in terms of rendering quality.
+Minimum
+Maximum
+PSNR↑
+SSIM↑
+LPIPS↓
+29.15
+29.86
+0.92
+0.93
+0.15
+0.16
+Table 4. Variation across initialization – We report the variation in rendering quality resulting from different initializations by
+showing the minimum and maximum metrics, achieved by a set of
+16-head, 128-unit DeRF models trained on the “room” scene.
+4 Heads (◦)
+SSIM↑
+LPIPS ↓
+0.73
+0.75
+0.77
+0.79
+0.80
+PSNR↑
+0.36
+0.33
+0.30
+0.27
+0.25
+PSNR↑
+24.66
+24.87
+25.43
+25.29
+25.47
+8 Heads ()
+SSIM↑
+LPIPS ↓
+0.75
+0.77
+0.79
+0.80
+0.81
+Figure 10. Quantitative results for the “fern” scene.
+10
+0.34
+0.30
+0.26
+0.24
+0.23
+PSNR↑
+24.81
+25.35
+25.30
+25.39
+25.33
+16 Heads (4)
+SSIM↑
+LPIPS ↓
+0.75
+0.79
+0.79
+0.80
+0.80
+0.32
+0.27
+0.25
+0.22
+0.23
+Units
+PSNR ↑
+64
+96
+128
+192
+256
+17.75
+18.51
+18.91
+19.51
+19.88
+1 Head ()
+SSIM↑
+LPIPS ↓
+0.41
+0.48
+0.52
+0.58
+0.61
+0.52
+0.46
+0.42
+0.36
+0.33
+PSNR↑
+19.13
+19.92
+19.76
+20.03
+20.12
+4 Heads (◦)
+SSIM↑
+LPIPS ↓
+0.53
+0.61
+0.60
+0.63
+0.65
+0.43
+0.36
+0.34
+0.33
+0.30
+PSNR↑
+19.24
+19.97
+19.98
+20.09
+20.19
+8 Heads ()
+SSIM↑
+LPIPS ↓
+0.55
+0.61
+0.62
+0.64
+0.67
+0.40
+0.34
+0.32
+0.31
+0.27
+PSNR↑
+19.29
+20.05
+19.99
+20.04
+19.85
+16 Heads (4)
+SSIM↑
+LPIPS ↓
+0.58
+0.63
+0.64
+0.65
+0.64
+0.38
+0.32
+0.31
+0.30
+0.30
+Figure 11. Quantitative results for the “orchids” scene.
+Units
+PSNR ↑
+64
+96
+128
+192
+256
+23.27
+23.83
+24.48
+25.99
+25.93
+1 Head ()
+SSIM↑
+LPIPS ↓
+0.66
+0.70
+0.73
+0.79
+0.79
+0.47
+0.42
+0.38
+0.33
+0.31
+PSNR↑
+25.06
+25.33
+25.48
+26.11
+26.26
+4 Heads (◦)
+SSIM↑
+LPIPS ↓
+0.75
+0.77
+0.80
+0.81
+0.82
+0.37
+0.34
+0.30
+0.27
+0.25
+PSNR↑
+25.71
+25.89
+25.97
+26.73
+26.54
+8 Heads ()
+SSIM↑
+LPIPS ↓
+0.78
+0.79
+0.81
+0.84
+0.83
+0.33
+0.30
+0.29
+0.24
+0.24
+PSNR↑
+25.36
+25.64
+26.14
+26.42
+26.26
+16 Heads (4)
+SSIM↑
+LPIPS ↓
+0.78
+0.80
+0.82
+0.83
+0.84
+0.32
+0.29
+0.27
+0.24
+0.23
+Figure 12. Quantitative results for the “horns” scene.
+Units
+PSNR ↑
+64
+96
+128
+192
+256
+27.95
+28.98
+29.01
+29.92
+30.22
+1 Head ()
+SSIM↑
+LPIPS ↓
+0.87
+0.90
+0.91
+0.92
+0.94
+0.30
+0.23
+0.21
+0.18
+0.14
+PSNR↑
+28.94
+29.88
+29.60
+29.88
+30.03
+4 Heads (◦)
+SSIM↑
+LPIPS ↓
+0.91
+0.93
+0.93
+0.93
+0.94
+0.24
+0.17
+0.17
+0.15
+0.13
+PSNR↑
+29.24
+29.72
+29.97
+29.72
+29.97
+8 Heads ()
+SSIM↑
+LPIPS ↓
+0.91
+0.93
+0.93
+0.93
+0.93
+Figure 13. Quantitative results for the “room” scene.
+11
+0.20
+0.16
+0.15
+0.14
+0.13
+PSNR↑
+29.11
+29.80
+29.72
+28.66
+29.95
+16 Heads (4)
+SSIM↑
+LPIPS ↓
+0.92
+0.93
+0.93
+0.91
+0.93
+0.18
+0.15
+0.15
+0.17
+0.13
+Units
+PSNR ↑
+64
+96
+128
+192
+256
+22.53
+23.51
+24.19
+25.08
+25.26
+1 Head ()
+SSIM↑
+LPIPS ↓
+0.69
+0.75
+0.79
+0.84
+0.86
+0.39
+0.33
+0.29
+0.22
+0.20
+PSNR↑
+23.96
+24.40
+25.16
+25.25
+25.46
+4 Heads (◦)
+SSIM↑
+LPIPS ↓
+0.78
+0.82
+0.85
+0.86
+0.87
+0.29
+0.25
+0.22
+0.20
+0.18
+PSNR↑
+24.44
+24.86
+25.16
+25.47
+25.63
+8 Heads ()
+SSIM↑
+LPIPS ↓
+0.81
+0.84
+0.85
+0.88
+0.88
+0.26
+0.22
+0.20
+0.18
+0.17
+PSNR↑
+24.91
+25.18
+25.21
+25.42
+25.51
+16 Heads (4)
+SSIM↑
+LPIPS ↓
+0.83
+0.85
+0.87
+0.87
+0.88
+0.23
+0.19
+0.18
+0.18
+0.15
+Figure 14. Quantitative results for the “trex” scene.
+Units
+PSNR ↑
+64
+96
+128
+192
+256
+24.94
+26.05
+28.65
+26.58
+26.74
+1 Head ()
+SSIM↑
+LPIPS ↓
+0.55
+0.61
+0.76
+0.70
+0.73
+0.51
+0.44
+0.31
+0.34
+0.31
+PSNR↑
+26.25
+26.53
+26.58
+26.66
+19.88
+4 Heads (◦)
+SSIM↑
+LPIPS ↓
+0.65
+0.68
+0.71
+0.74
+0.45
+0.40
+0.39
+0.35
+0.30
+0.63
+PSNR↑
+25.37
+26.84
+27.25
+26.33
+26.70
+8 Heads ()
+SSIM↑
+LPIPS ↓
+0.64
+0.73
+0.75
+0.73
+0.79
+0.40
+0.32
+0.29
+0.35
+0.26
+PSNR↑
+26.68
+27.12
+27.56
+27.10
+27.54
+16 Heads (4)
+SSIM↑
+LPIPS ↓
+0.66
+0.73
+0.78
+0.77
+0.80
+0.40
+0.30
+0.26
+0.29
+0.24
+Figure 15. Quantitative results for the “fortress” scene.
+Units
+PSNR ↑
+64
+96
+128
+192
+256
+22.03
+23.49
+24.31
+24.61
+25.32
+1 Head ()
+SSIM↑
+LPIPS ↓
+0.57
+0.65
+0.70
+0.73
+0.77
+0.45
+0.39
+0.35
+0.29
+0.25
+PSNR↑
+23.73
+24.57
+25.30
+25.40
+25.89
+4 Heads (◦)
+SSIM↑
+LPIPS ↓
+0.67
+0.73
+0.77
+0.78
+0.81
+0.36
+0.30
+0.26
+0.26
+0.20
+PSNR↑
+24.68
+25.66
+25.88
+26.10
+26.16
+8 Heads ()
+SSIM↑
+LPIPS ↓
+0.73
+0.79
+0.80
+0.81
+0.82
+Figure 16. Quantitative results for the “flower” scene.
+12
+0.30
+0.24
+0.22
+0.20
+0.19
+PSNR↑
+24.57
+25.36
+25.43
+26.36
+26.26
+16 Heads (4)
+SSIM↑
+LPIPS ↓
+0.74
+0.78
+0.79
+0.82
+0.83
+0.29
+0.23
+0.22
+0.19
+0.18
+Units
+PSNR ↑
+64
+96
+128
+192
+256
+18.08
+18.93
+19.47
+20.39
+20.77
+1 Head ()
+SSIM↑ LPIPS ↓
+0.45
+0.53
+0.58
+0.66
+0.69
+0.51
+0.46
+0.40
+0.33
+0.30
+PSNR↑
+19.37
+20.47
+20.61
+21.20
+21.31
+4 Heads (◦)
+SSIM↑ LPIPS ↓
+0.57
+0.66
+0.68
+0.73
+0.75
+0.42
+0.34
+0.30
+0.26
+0.23
+PSNR↑
+19.92
+20.64
+20.69
+21.42
+21.23
+8 Heads ()
+SSIM↑ LPIPS ↓
+0.63
+0.68
+0.70
+0.75
+0.75
+Figure 17. Quantitative results for the “leaves” scene.
+13
+0.37
+0.31
+0.28
+0.23
+0.22
+PSNR↑
+20.40
+20.99
+20.86
+21.34
+21.44
+16 Heads (4)
+SSIM↑ LPIPS ↓
+0.67
+0.71
+0.73
+0.75
+0.76
+0.32
+0.27
+0.25
+0.23
+0.21
+C. Synthetic data – Figure 18
+While we are mainly interested in photorealistic scenes,
+our method can also learn decomposed models from synthetic data. To show this we provide renders and visualize the
+decompositions for DeRF models trained on two synthetic
+scenes. Each model uses 192 units and 8 heads.
+Figure 18. Synthetic Data – Renders and decompositions for the
+NeRF [12] “lego” scene (top) and DeepVoxels [16] “greek” scene
+(bottom).
+14

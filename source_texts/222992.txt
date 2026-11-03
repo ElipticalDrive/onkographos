@@ -1,0 +1,295 @@
+JAX implementation of the NeuralMie aerosol optics emulator (Geiss & Ma, GMD 2024) - Gradient-safe core_fraction_from_volume, and document ke_rho's truncation convention (#5, #4) by duncanwp · Pull Request #6 · reflective-org/neuralmie-jax
+
+Gradient-safe core_fraction_from_volume, and document ke_rho's truncation convention (#5, #4) by duncanwp · Pull Request #6 · reflective-org/neuralmie-jax · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+duncanwp
+commented
+Sep 18, 2026
+Copy link
+Copy Markdown
+Two consumer-coupling defects, one per commit. Both are about the contract this
+package presents to a host model rather than about the emulator itself, which is
+why they land together — they are the same class of bug and they touch the same
+README section.
+Closes #5. Closes #4.
+1. core_fraction_from_volume — a gradient-safe volume-to-radius inversion
+The README told hosts to reach core_fraction with f = (V_core/V_tot)**(1/3).
+Correct, and not safe to differentiate — which matters because being usable
+inside a differentiable model is this port's reason to exist.
+cbrt'(0) is unbounded, and a host evaluates that expression for every mode in
+every cell, including the many carrying no core material: whether a mode can
+carry a core is static configuration, whether a column does is not. Masking
+afterwards does not repair it — reverse mode multiplies the zero cotangent into
+the inf the other branch already produced, so derivatives w.r.t. unrelated
+species in the same mode come back NaN, with no finite forward symptom:
+```
+>>> float(jnp.cbrt(jnp.clip(0.0 / 1.0, 0, 1)))                    # 0.0
+>>> float(jax.grad(lambda v: jnp.cbrt(v / 1.0))(0.0))             # inf
+>>> float(jax.grad(lambda v: jnp.where(v > 0, jnp.cbrt(v), 0.0))(0.0))   # nan
+```
+Why a shipped helper over a README fix. The guard belongs in the one place
+that knows the domain, and every consumer then gets it by default; a corrected
+expression in prose gets re-derived and re-broken. Both the division and the
+root are evaluated on substituted arguments (§5's double-where), so an empty
+mode gives exactly zero with a zero derivative.
+Two choices worth disagreeing with:
+It is not clipped to CORE_FRACTION_RANGE. coreshell_bulk_optics
+already applies that domain clip with a straight-through estimator, and a
+second policy here would silently take precedence over it. The only clamp is
+the physical [0, 1] a radius ratio can occupy, which also absorbs ringing in
+a host's tracer fields.
+The guard makes the derivative finite at zero, not bounded near it.
+The (1/3)·ratio^(-2/3) steepness just outside is the function's real
+behaviour, and a test pins it against the analytic value so a future smoothing
+cannot creep in unnoticed.
+2. ke_rho is a truncated-moment ratio — documented and quantified
+Both module docstrings and the README give
+ke_rho = 0.75·∫Qe·pdf·r² dlnr / ∫pdf·r³ dlnr without bounds, so it reads as
+the full-distribution moment ratio. It is not: upstream integrates both
+integrals between the radii holding INTFRAC = 0.999 of the number
+distribution, and the networks were trained on that. The port is faithful; only
+the documentation was misleading.
+The truncation does not cancel. Numerator and denominator carry different radius
+weights, so a window symmetric in ln r about the number median removes
+different fractions of each, and a host writing tau = ke_rho·V_full·(column factor) — V_full being what a modal scheme's mass/number relationship gives —
+inherits the difference.
+Please read this closely: I got the magnitude wrong twice before landing
+here. I first derived the bias from geometry alone and reported −0.6 % to
++9.8 % (issue #4). Corrected on the issue to −37 % to +10 %. A review pass then
+broke that too. The answer is roughly −94 % to +56 %.
+The mechanism, which predicts every case instead of tabulating a few: each
+integral retains M(k) = Phi(z - k*s) - Phi(-z - k*s) of an r^k-weighted
+lognormal, with s = ln(sigma_g) and z = 3.29053, so
+```
+bias = M(k_eff)/M(3) - 1,     k_eff = 2 + dln(Qe)/dln(r)
+```
+k_eff is 2 where Qe is flat and 6 where Qe ~ x^4. That reproduces both
+limits to under 1 pp:
+sigma_g
+1.2
+1.4
+1.6
+1.8
+2.0
+2.4
+2.8
+k_eff = 2
++0.1 %
++0.7 %
++2.1 %
++4.9 %
++9.5 %
++25.6 %
++53.6 %
+k_eff = 6
+−1.1 %
+−9.1 %
+−29.8 %
+−56.6 %
+−78.3 %
+−96.7 %
+−99.7 %
+Three things this gets right that my earlier framing did not:
+Refractive index matters as much as geometry. Q_abs ~ x is r^3-weighted
+like the denominator, so absorption masks the deficit. At m_i = 1e-8 —
+sulfate, sea salt, water, the commonest host aerosol in the visible — nothing
+masks it: −56.5 % at sigma_g = 1.8, −94.1 % at sigma_g = 2.8.
+The old bound broke at the docs' own material too. sigma_g = 2.0,
+mu_x = 0.1, m_i = 5e-3 gives −53.3 %. My table never sampled small
+mu_x at its own last column.
+"Worst case is small mu_x, not large sigma_g" was a false dichotomy.
+It is the product of the two, and the sigma_g dependence is the steeper.
+Where it bites: mu_x ~ 0.1 is r_g ~ 9 nm at 550 nm (Aitken only) but
+r_g ~ 160 nm at 10 um, so a host's longwave accumulation-mode optics sit
+in the worst regime.
+Why documentation and not a correction factor. The closed form makes one
+look easy — ship M(2)/M(3) - 1, a factor in sigma_g alone. That is the
+k_eff = 2 row, and it is worse than no correction where the bias is largest:
+at sigma_g = 1.8 it applies +4.9 % where the truth is −57 %, roughly doubling
+the error. An exact factor needs Qe, the integral the emulator exists to
+avoid. Reasoning in docs/decisions/truncated-moment-convention.md.
+mass_efficiency already takes intfrac, so a consumer can measure it for
+their own modes with no new API.
+The accuracy sweep cannot see any of this: it measures the emulator against the
+same truncated reference. Hence a separate TruncationConventionTest, which also
+asserts the widened-window reference is converged at the default nrad —
+without that, the comparison would be measuring quadrature error instead.
+How it was verified
+ruff==0.15.17 — clean.
+pytest -q — 58 passed, 1 skipped, 60 subtests (what CI runs).
+pytest -q -m slow — 7 passed, 22 subtests, sampling both k_eff limits,
+both signs and two materials, so the bound the docs assert is the bound the
+suite checks.
+python src/neuralmie_jax/accuracy_test.py — 7 tests, not 4 (see below).
+The truncation numbers are reproducible from this repo alone, with no emulator
+involved — the reference against itself at two intfrac values.
+Found by a review pass, folded in as the third commit
+Two of these are behaviour changes, so calling them out rather than burying them:
+jnp.clip was halving a gradient. It resolves the tie at its upper bound
+with a balanced subgradient, so d f / d v_core was 1/6 instead of 1/3 at
+exactly v_core == v_total — a bare core with no shell, an ordinary state
+rather than a measure-zero one. Every uncoated column had its sensitivity of
+optical depth to core mass halved. Now a strict-> select, with a test.
+TruncationConventionTest sat below the __main__ guard, so running the
+file as a script collected 4 tests instead of 7. pytest was unaffected.
+NaN handling is now stated in the Returns contract and pinned: both guards
+are > 0 comparisons, which NaN fails, so a NaN volume yields 0.0 rather than
+propagating.
+The docstring's claim that the naive form poisons derivatives "with respect to
+unrelated inputs" was an overclaim — the NaN reaches inputs upstream of the
+volumes, which in a modal host means other species' masses through the total.
+What I'd look at closely
+Whether the helper's zero-derivative-at-zero policy is the one you want, or
+whether you'd rather it be an explicit eps the caller sets. I kept it
+parameterless per §6.
+Whether ke_rho's convention deserves a louder treatment than documentation
+— a full_distribution= flag on the reference, say, or a retrained target.
+That is a bigger decision than this PR should make unilaterally.
+Whether NaN should propagate. The helper launders a NaN volume to 0.0,
+which sits awkwardly beside a docstring that motivates it by "no finite
+forward symptom to localise it by". I documented and pinned the behaviour
+rather than changing it, per §6, but the opposite default is defensible and
+it is your call.
+Whether the measured tables belong in the README at all, or in a generated
+docs page driven by the slow test. They are 7x7 and 1x5 today.
+Happy to split this into two PRs if you'd prefer; they only share the README's
+"Units and conventions" section.
+duncanwp
+added 3 commits
+September 18, 2026 16:31
+Add core_fraction_from_volume, a gradient-safe volume-to-radius inver…
+…
+c705a95
+```
+…sion
+
+The README told hosts to reach core_fraction with
+`f = (V_core/V_tot)**(1/3)`. The conversion is right and the expression is
+not safe to differentiate, which matters because being usable inside a
+differentiable model is this port's reason to exist.
+
+cbrt'(0) is unbounded, and a host evaluates the expression for every mode in
+every cell — including the many cells carrying no core material, since
+whether a mode CAN carry a core is static configuration while whether a
+column DOES is not. Masking the result afterwards does not repair it:
+reverse mode multiplies the zero cotangent into the inf the other branch
+already produced, so derivatives with respect to unrelated species in the
+same mode come back NaN with no finite forward symptom to localise by.
+
+Ship the conversion instead of describing it, with both the division and the
+root evaluated on substituted arguments (the double-where pattern in §5 of
+CLAUDE.md), so an empty mode gives exactly zero with a zero derivative. The
+guard makes the derivative finite AT zero, not bounded NEAR it — the
+(1/3)·ratio^(-2/3) steepness just outside is the function's real behaviour,
+and a test pins it against the analytic value so a future smoothing cannot
+creep in unnoticed.
+
+Deliberately NOT clipped to CORE_FRACTION_RANGE: coreshell_bulk_optics
+already applies that domain clip with a straight-through estimator, and a
+second clipping policy here would silently take precedence over it. The only
+clamp is the physical [0, 1] a radius ratio can occupy, which also absorbs
+ringing in a host's tracer fields.
+
+Closes reflective-org#5
+```
+Document that ke_rho is a truncated-moment ratio, and quantify the gap
+…
+77ac635
+```
+The formula given in the README and in both module docstrings --
+ke_rho = 0.75 INT(Qe pdf r^2 dlnr) / INT(pdf r^3 dlnr) -- is written without
+bounds, so it reads as the full-distribution moment ratio. It is not one:
+upstream integrates both numerator and denominator between the radii holding
+INTFRAC = 0.999 of the NUMBER distribution, and the networks were trained on
+exactly that. The port is faithful; only the documentation was misleading.
+
+It matters because the truncation does not cancel. Numerator and denominator
+carry different radius weights, so a window symmetric in ln r about the number
+median removes different fractions of each, and a host model -- whose
+mass/number relationship gives it the FULL third moment -- picks up the
+difference when it writes tau = ke_rho * V_full * (column factor).
+
+Quantified against the reference itself, the bias is NOT a function of
+sigma_g alone, which is the easy mistake: the constant-Qe geometry argument
+gives +4.9% at sigma_g = 1.8 and describes only the large-mu_x plateau. Where
+Qe ~ x^4 the numerator is effectively r^6-weighted and truncation costs it
+far more than the r^3 denominator, so the bias inverts, reaching -37% near
+mu_x = 0.11 before crossing zero around mu_x ~ 0.6. Worst case is SMALL size
+parameter -- mu_x ~ 0.1 is r_g ~ 9 nm at 550 nm but r_g ~ 160 nm at 10 um, so
+a host's longwave accumulation-mode optics sit right in it.
+
+No correction factor is shipped: an exact one needs Qe, which is the integral
+the emulator exists to avoid, and a geometry-only one would be worse than
+nothing in the regime that matters most. The reasoning is recorded in
+docs/decisions/.
+
+The accuracy sweep cannot catch any of this -- it measures the emulator
+against the same truncated reference -- so TruncationConventionTest pins the
+convention separately, and also asserts the widened-window reference is
+converged at the default nrad, without which the comparison would be
+measuring quadrature error instead.
+
+Closes reflective-org#4
+```
+Correct the truncation bound, and two defects review found in the helper
+…
+9977bb6
+```
+The bias I documented, "-37% to +10%", was measured at one refractive index
+and at size parameters that never went small at large sigma_g. Both bounds
+break inside the supported domain, so the numbers a consumer would have
+planned around were wrong by a factor of two and a half.
+
+Replace the measured-points framing with the mechanism, which predicts every
+case and both signs. Each integral retains M(k) = Phi(z - k s) - Phi(-z - k s)
+of an r^k-weighted lognormal, s = ln(sigma_g), so
+
+    bias = M(k_eff)/M(3) - 1,   k_eff = 2 + dln(Qe)/dln(r)
+
+with k_eff = 2 where Qe is flat and 6 where Qe ~ x^4. That reproduces both
+limits to under 1 pp across sigma_g, and makes plain why the sign flips and
+why absorption matters: Q_abs ~ x is r^3-weighted like the denominator, so it
+masks the deficit. At m_i = 1e-8 -- sulfate, sea salt, water, the commonest
+host aerosol -- nothing masks it and the bias reaches -94%. The true span is
+about -94% to +56%. Even at the old table's own material, sigma_g = 2.0 and
+mu_x = 0.1 give -53%, past the floor I claimed without leaving the parameters
+the docs had chosen. "Worst case is small mu_x, not large sigma_g" was a false
+dichotomy: it is the product, and the sigma_g dependence is the steeper.
+
+The test now samples both limits, both signs and two materials, so the bound
+the docs assert is the bound the suite checks rather than a claim beside it.
+
+Two defects in core_fraction_from_volume:
+
+- jnp.clip resolves the tie at its upper bound with a balanced subgradient, so
+  d f / d v_core was 1/6 instead of 1/3 at exactly v_core == v_total -- a bare
+  core with no shell, an ordinary state, not a measure-zero one. Every
+  uncoated column had its sensitivity of optical depth to core mass halved. A
+  strict-`>` select takes the pass-through branch at the bound instead.
+- The docstring claimed the naive form poisons derivatives "with respect to
+  unrelated inputs". It does not: the NaN reaches inputs upstream of the
+  volumes, which in a modal host means the other species' masses through the
+  total. Related, and still the reason the helper exists.
+
+Also: TruncationConventionTest sat below the __main__ guard, so running the
+file as a script collected four tests instead of seven; NaN handling is now
+stated in the Returns contract and pinned, since both guards are `> 0`
+comparisons that NaN fails; and the README example no longer references names
+it never defines.
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

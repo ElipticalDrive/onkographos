@@ -1,0 +1,340 @@
+I'm trying to build a voxel engine, and to do this I have to create hundreds of thousands of voxels, and I was hoping I could use instanced rendering. However, on rendering, the shape is completely disfigured, and not the expected cube shape:
+ 
+ And with several voxels:
+ 
+ This is what my code looks like: 
+ chunk.hpp 
+ #pragma once
+
+#include <stdio.h>
+
+#include <iostream>
+#include <vector>
+
+#include <algorithm>
+
+#include "voxel.hpp"
+
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+
+using std::vector;
+using glm::mat4;
+using glm::vec3;
+
+
+class Chunk {
+    vec3 centerPoint;
+    int voxelNum;
+    int shaderProgram;
+    unsigned int VBO, EBO, VAO;
+    mat4 VP;
+public:
+    Chunk(vec3 center, float radius, int rinv);
+    void setVP(mat4 vp);
+    void draw();
+};
+ 
+ chunk.cpp 
+ #include "chunk.hpp"
+
+#include <stdlib.h>
+
+Chunk::Chunk(vec3 centerPoint, float radius, int rinv) {
+    vec3 endPoint(centerPoint.x - radius, centerPoint.y - radius, centerPoint.z - radius);
+    
+    float distVox = 2 * radius/rinv;
+    
+    voxelNum = pow(rinv, 3);
+    
+    mat4* modelMatrices = new mat4[voxelNum];
+    srand(glfwGetTime()); // initialize random seed
+    
+    for (int z = 0; z < rinv; z++) {
+        for (int y = 0; y < rinv; y++) {
+            for (int x = 0; x < rinv; x++) {
+                glm::mat4 model = glm::mat4(1.0f);
+                
+                model = translate(model, vec3(endPoint.x + (x + 0.5) * distVox, endPoint.y + (y + 0.5) * distVox, endPoint.z + (z + 0.5) * distVox));
+                model = scale(model, vec3(radius));
+                
+                int index = x + y * rinv + z * pow(rinv, 2);
+                modelMatrices[index] = model;
+            }
+        }
+    }
+    
+    const char *vertexShaderSource = "#version 330 core\n"
+        "layout (location = 0) in vec3 aPos;\n"
+        "layout (location = 3) in mat4 aInstanceMatrix;\n"
+        "uniform mat4 VP;\n"
+        "void main()\n"
+        "{\n"
+        "    gl_Position = VP * aInstanceMatrix * vec4(aPos, 1.0);\n"
+        "}\n\0";
+    
+    const char *fragmentShaderSource = "#version 330 core\n"
+        "out vec4 FragColor;\n"
+        "uniform vec3 color;\n"
+        "void main()\n"
+        "{\n"
+        "   FragColor = vec4(color, 1.0f);\n"
+        "}\n\0";
+
+    // vertex shader
+    int vertexShader = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vertexShader, 1, &vertexShaderSource, NULL);
+    glCompileShader(vertexShader);
+    // check for shader compile errors
+    int success;
+    char infoLog[512];
+    glGetShaderiv(vertexShader, GL_COMPILE_STATUS, &success);
+    if (!success)
+    {
+        glGetShaderInfoLog(vertexShader, 512, NULL, infoLog);
+        std::cout << "ERROR::SHADER::VERTEX::COMPILATION_FAILED\n" << infoLog << std::endl;
+    }
+    // fragment shader
+    int fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fragmentShader, 1, &fragmentShaderSource, NULL);
+    glCompileShader(fragmentShader);
+    // check for shader compile errors
+    glGetShaderiv(fragmentShader, GL_COMPILE_STATUS, &success);
+    if (!success)
+    {
+        glGetShaderInfoLog(fragmentShader, 512, NULL, infoLog);
+        std::cout << "ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n" << infoLog << std::endl;
+    }
+    // link shaders
+    shaderProgram = glCreateProgram();
+    glAttachShader(shaderProgram, vertexShader);
+    glAttachShader(shaderProgram, fragmentShader);
+    glLinkProgram(shaderProgram);
+    // check for linking errors
+    glGetProgramiv(shaderProgram, GL_LINK_STATUS, &success);
+    if (!success) {
+        glGetProgramInfoLog(shaderProgram, 512, NULL, infoLog);
+        std::cout << "ERROR::SHADER::PROGRAM::LINKING_FAILED\n" << infoLog << std::endl;
+    }
+    glDeleteShader(vertexShader);
+    glDeleteShader(fragmentShader);
+    
+    vec3 voxCenterPoint(0.0f);
+    float voxRadius = 1.0f;
+    
+    vec3 maxV(voxCenterPoint.x + voxRadius, voxCenterPoint.y + voxRadius, voxCenterPoint.z + voxRadius);
+    vec3 minV(voxCenterPoint.x - voxRadius, voxCenterPoint.y - voxRadius, voxCenterPoint.z - voxRadius);
+    
+    vec3 vertices[8] = {
+        vec3(maxV.x, maxV.y, maxV.z),
+        vec3(maxV.x, maxV.y, minV.z),
+        vec3(maxV.x, minV.y, minV.z),
+        vec3(maxV.x, minV.y, maxV.z),
+        vec3(minV.x, minV.y, maxV.z),
+        vec3(minV.x, maxV.y, maxV.z),
+        vec3(minV.x, maxV.y, minV.z),
+        vec3(minV.x, minV.y, minV.z),
+    };
+    
+    unsigned int indices[36] = {
+        0, 2, 1, // maxV.x
+        0, 2, 3,
+
+        2, 6, 1, // minV.z
+        2, 6, 7,
+
+        2, 4, 3, // minV.y
+        2, 4, 7,
+
+        4, 6, 5, // minV.x
+        4, 6, 7,
+
+        1, 5, 0, // maxV.y
+        1, 5, 6,
+
+        0, 4, 3, // maxV.z
+        0, 4, 5,
+    };
+    
+    glGenVertexArrays(1, &VAO);
+    glGenBuffers(1, &VBO);
+    glGenBuffers(1, &EBO);
+
+    glBindVertexArray(VAO);
+    // load data into vertex buffers
+    glBindBuffer(GL_ARRAY_BUFFER, VBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), &vertices[0], GL_STATIC_DRAW);
+//    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), &indices[0], GL_STATIC_DRAW);
+//    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+
+//    // set the vertex attribute pointers
+//    // vertex Positions
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(vec3), (void*)0);
+    
+    // set attribute pointers for matrix (4 times vec4)
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(glm::mat4), (void*)0);
+    glEnableVertexAttribArray(4);
+    glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, sizeof(glm::mat4), (void*)(sizeof(glm::vec4)));
+    glEnableVertexAttribArray(5);
+    glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, sizeof(glm::mat4), (void*)(sizeof(glm::vec4) * 2));
+    glEnableVertexAttribArray(6);
+    glVertexAttribPointer(6, 4, GL_FLOAT, GL_FALSE, sizeof(glm::mat4), (void*)(sizeof(glm::vec4) * 3));
+
+    glVertexAttribDivisor(3, 1);
+    glVertexAttribDivisor(4, 1);
+    glVertexAttribDivisor(5, 1);
+    glVertexAttribDivisor(6, 1);
+    
+    
+    glBufferData(GL_ARRAY_BUFFER, voxelNum * sizeof(mat4), &modelMatrices[0], GL_STATIC_DRAW);
+    
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+}
+
+void Chunk::setVP(mat4 vp) {
+    VP = vp;
+}
+
+void Chunk::draw() {
+    glUseProgram(shaderProgram);
+    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "VP"), 1, GL_FALSE, &VP[0][0]);
+
+    glBindVertexArray(VAO);
+    glDrawElementsInstanced(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0, voxelNum);
+    glBindVertexArray(0);
+}
+ 
+ main.cpp 
+ #include <iostream>
+using namespace std;
+
+#include "chunk.hpp"
+
+#include <GLFW/glfw3.h>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+using namespace glm;
+
+//Global Variables
+GLFWwindow* window;
+const char* SCR_TITLE = "WORKINGPLANET";
+const int SCR_WIDTH = 500, SCR_HEIGHT = 500;
+
+float x_rot = 0.0f;
+float y_rot = 0.0f;
+
+float y_rot_clamp = 89.999f;
+
+// timing
+float deltaTime = 0.0f; // time between current frame and last frame
+float lastFrame = 0.0f;
+
+void mouseCallback(GLFWwindow *window, int button, int action, int mods);
+
+vec3 X_AXIS = vec3(1.0f, 0.0f, 0.0f);
+vec3 Y_AXIS = vec3(0.0f, 1.0f, 0.0f);
+
+//Main Program
+int main()
+{
+    //Constructor Code
+    if(!glfwInit())
+    {
+        cerr << "Error!!GLFW";
+        return -1;
+    }
+    
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+    
+    if(!(window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, SCR_TITLE, NULL, NULL)))
+    {
+        cerr << "Error!!GLFW window";
+        glfwTerminate();
+        return -1;
+    }
+
+    glfwMakeContextCurrent(window);
+
+    if (!gladLoadGLLoader((GLADloadproc) glfwGetProcAddress)) {
+        std::cout << "Failed to initialize OpenGL context" << std::endl;
+        return -1;
+    }
+    
+    glEnable(GL_DEPTH_TEST);
+    
+    Chunk chunk(vec3(0.0f), 0.5, 2);
+
+    mat4 view = mat4(1.0);
+    vec3 cameraPos = glm::vec3(0.0f, 0.0f, 4.0f);
+    view = lookAt(cameraPos, vec3(0,0,0), vec3(0,1,0));
+    //Loop Events
+    while(!glfwWindowShouldClose(window))
+    {
+        // per-frame time logic
+        float currentFrame = glfwGetTime();
+        deltaTime = currentFrame - lastFrame;
+        lastFrame = currentFrame;
+        
+        glClearColor(1.0, 1.0, 1.0, 1.0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+
+        // Tweak these values to change the sensitivity
+        float scale_x = 7.0f / SCR_WIDTH;
+        float scale_y = 7.0f / SCR_HEIGHT;
+        float rotSpeed = 350.0f;
+        float rot = scale_x * rotSpeed;
+
+        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
+            rot = scale_y * rotSpeed;
+            if (y_rot + rot > y_rot_clamp)
+                rot = y_rot_clamp - y_rot;
+
+            view = rotate(view, (float)radians(rot), X_AXIS);
+            y_rot += rot;
+        } if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) {
+            rot = scale_y * rotSpeed;
+            if (y_rot - rot < -y_rot_clamp)
+                rot = y_rot + y_rot_clamp;
+
+            view = rotate(view, (float)radians(-rot), X_AXIS);
+            y_rot -= rot;
+        } if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) {
+            view = rotate(view, (float)radians(-rot), Y_AXIS);
+            x_rot -= rot;
+        } if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) {
+            view = rotate(view, (float)radians(rot), Y_AXIS);
+            x_rot += rot;
+        } if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS) {
+            view = lookAt(cameraPos, vec3(0,0,0), vec3(0,1,0));
+            x_rot = 0.0f;
+            y_rot = 0.0f;
+        }
+
+        mat4 projection = perspective(radians(45.0f), (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 100.0f);
+
+        //Rendering
+        chunk.setVP(projection * view);
+        chunk.draw();
+        
+        glfwSwapBuffers(window);
+        glfwPollEvents();
+    }
+
+    glfwTerminate();
+    return 0;
+
+}
+ 
+ At first I thought this could be an indices issue, but trying to modify them only revealed that vertices seemed to be out of order. Trying a vector changed nothing (as expected). 
+ Trying to modify the modelMatrices also resulted in nothing of consequence. 

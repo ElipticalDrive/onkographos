@@ -1,0 +1,516 @@
+# DualContouring
+Minimal dual contouring library.
+
+Both in C++ and Julia - the Julia implementation also supports gradient-based positioning of the cell-points.
+
+The header file (C++) and the docstrings (Julia) should be enough as documentation.
+
+### dc-test.cc
+```
+#include <cmath>
+
+#include "dc.hh"
+
+using namespace DualContouring;
+
+double chebyshev(size_t n, double x) {
+  if (n == 0)
+    return 1;
+  if (n == 1)
+    return x;
+  return 2 * x * chebyshev(n - 1, x) - chebyshev(n - 2, x);
+}
+
+int main() {
+  // See also: https://mathworld.wolfram.com/AlgebraicSurface.html
+
+  // Cube (size 1)
+  auto f0 = [](const Point3D &p) {
+    return std::max(std::max(std::abs(p[0]), std::abs(p[1])), std::abs(p[2])) - 1;
+  };
+
+  // Entzensberger star (size 1)
+  auto f1 = [](const Point3D &p) {
+    auto x = p[0] * p[0], y = p[1] * p[1], z = p[2] * p[2];
+    return 400 * (x * y + y * z + x * z) - std::pow(1 - x - y - z, 3);
+  };
+
+  // Banchoff-Chmutov surfaces (n = 4, 6, etc.; size 2)
+  auto f2 = [](size_t n) {
+    return [=](const Point3D &p) {
+      return chebyshev(n, p[0]) + chebyshev(n, p[1]) + chebyshev(n, p[2]);
+    };
+  };
+
+  // Klein bottle (size 4)
+  auto f3 = [](const Point3D &p) {
+    auto x = p[0] * p[0], y = p[1] * p[1], z = p[2] * p[2];
+    auto tmp = x + y + z - 2 * p[1] - 1;
+    return (x + y + z + 2 * p[1] - 1) * (tmp * tmp - 8 * z) + 16 * p[0] * p[2] * tmp;
+  };
+
+  // Hunt's surface (size 4)
+  auto f4 = [](const Point3D &p) {
+    auto x = p[0] * p[0], y = p[1] * p[1], z = p[2] * p[2];
+    return 4 * std::pow(x + y + z - 13, 3) + 27 * std::pow(3 * x + y - 4 * z - 12, 2);
+  };
+
+  double size = 4;
+  size_t res = 100;
+  isosurface(f4, 0, { { { -size, -size, -size }, { size, size, size } } },
+             { { res, res, res } }).writeOBJ("/tmp/dc.obj");
+}
+```
+
+### dc.cc
+```
+#include "dc.hh"
+
+namespace DualContouring {
+
+const double SMALL_NUMBER = 1e-15;
+
+bool computeCell(const Point3D &origin, const std::array<Vector3D, 3> &dirs,
+                 const std::array<double, 8> &vertices, Point3D &surface_point) {
+  bool negative = false, positive = false;
+  for (size_t i = 0; i < 8; ++i)
+    if (vertices[i] < 0)
+      negative = true;
+    else
+      positive = true;
+  if (!negative || !positive)
+    return false;
+
+  // Find all edge intersections, and take their mean
+  static constexpr std::array<size_t, 24> edges =
+    { 0, 4, 1, 5, 2, 6, 3, 7, 0, 2, 1, 3, 4, 6, 5, 7, 0, 1, 2, 3, 4, 5, 6, 7 };
+
+  Point3D mean(0, 0, 0);
+  size_t count = 0;
+  for (size_t i = 0; i < 12; ++i) {
+    size_t v1 = edges[2*i], v2 = edges[2*i+1];
+    double a = vertices[v1], b = vertices[v2];
+    if (a * b > 0)
+      continue;
+    double denom = std::abs(b - a);
+    double x = denom < SMALL_NUMBER ? 0.5 : std::abs(a) / denom;
+    mean += dirs[0] * (v1 / 4) + dirs[1] * ((v1 % 4) / 2) + dirs[2] * (v1 % 2) + dirs[i/4] * x;
+    ++count;
+  }
+  surface_point = origin + mean / count;
+  return true;
+}
+
+std::vector<size_t> addPoints(QuadMesh &mesh, const std::vector<double> &values,
+                              const Point3D &corner, const Vector3D &delta,
+                              const std::array<size_t, 3> &resolution) {
+  std::vector<size_t> cells;
+  cells.reserve(resolution[0] * resolution[1] * resolution[2]);
+
+  std::array<Vector3D, 3> dirs =
+    { { { delta[0], 0, 0 },
+        { 0, delta[1], 0 },
+        { 0, 0, delta[2] } } };
+
+  size_t mi = (resolution[1] + 1) * (resolution[2] + 1), mj = (resolution[2] + 1);
+  size_t point_index = 1;
+  std::array<double, 8> vertices;
+  for (size_t i = 0; i < resolution[0]; ++i) {
+    size_t index1 = i * mi;
+    for (size_t j = 0; j < resolution[1]; ++j) {
+      size_t index2 = index1 + j * mj;
+      for (size_t k = 0; k < resolution[2]; ++k) {
+        size_t index = index2 + k;
+
+        // Gather the distance values for cell (i,j,k)
+        for (size_t di = 0, vi = 0; di <= 1; ++di)
+          for (size_t dj = 0; dj <= 1; ++dj)
+            for (size_t dk = 0; dk <= 1; ++dk, ++vi)
+              vertices[vi] = values[index+di*mi+dj*mj+dk];
+
+        Point3D origin = corner + Vector3D(delta[0] * i, delta[1] * j, delta[2] * k);
+        Point3D surface_point;
+        if (computeCell(origin, dirs, vertices, surface_point)) {
+          mesh.addPoint(surface_point);
+          cells.push_back(point_index++);
+        } else
+          cells.push_back(0);
+      }
+    }
+  }
+
+  return cells;
+}
+
+void addQuads(QuadMesh &mesh, const std::vector<double> &values, const std::vector<size_t> &cells,
+              const std::array<size_t, 3> &resolution) {
+  static constexpr std::array<size_t, 3> c1 = { 1, 2, 0 }, c2 = { 2, 0, 1 };
+  std::array<size_t, 3> ns = { resolution[1] * resolution[2], resolution[2], 1 };
+  std::array<size_t, 3> ms = { (resolution[1] + 1) * (resolution[2] + 1), resolution[2] + 1, 1 };
+  for (size_t c = 0; c < 3; ++c) {
+    size_t ni = ns[c], nj = ns[c1[c]], nk = ns[c2[c]];
+    size_t mi = ms[c], mj = ms[c1[c]], mk = ms[c2[c]];
+    for (size_t i = 0; i < resolution[c]; ++i) {
+      for (size_t j = 1; j < resolution[c1[c]]; ++j) {
+        for (size_t k = 1; k < resolution[c2[c]]; ++k) {
+          size_t index = i * ni + j * nj + k * nk;
+          size_t a = cells[index], b = cells[index-nj], c = cells[index-nj-nk], d = cells[index-nk];
+          if (a * b * c * d == 0)
+            continue;
+          size_t vi = i * mi + j * mj + k * mk;
+          double v1 = values[vi], v2 = values[vi+mi];
+          if (v1 * v2 > 0)
+            continue;
+          if (v1 < 0)
+            mesh.addQuad(a, b, c, d);
+          else
+            mesh.addQuad(d, c, b, a);
+        }
+      }
+    }
+  }
+}
+
+QuadMesh isosurface(std::function<double(const Point3D &)> f, double isolevel,
+                    const std::array<Point3D, 2> &bounding_box,
+                    const std::array<size_t, 3> &resolution) {
+  auto axis = bounding_box[1] - bounding_box[0];
+  Vector3D delta(axis[0] / resolution[0], axis[1] / resolution[1], axis[2] / resolution[2]);
+
+  // Compute distances at the cell corners
+  std::vector<double> values;
+  values.reserve((resolution[0] + 1) * (resolution[1] + 1) * (resolution[2] + 1));
+  for (size_t i = 0; i <= resolution[0]; ++i) {
+    double x = delta[0] * i;
+    for (size_t j = 0; j <= resolution[1]; ++j) {
+      double y = delta[1] * j;
+      for (size_t k = 0; k <= resolution[2]; ++k) {
+        double z = delta[2] * k;
+        double v = f(bounding_box[0] + Vector3D(x, y, z)) - isolevel;
+        values.push_back(std::abs(v) < SMALL_NUMBER ? (v < 0 ? -SMALL_NUMBER : SMALL_NUMBER) : v);
+      }
+    }
+  }
+
+  QuadMesh mesh;
+  auto cells = addPoints(mesh, values, bounding_box[0], delta, resolution);
+  addQuads(mesh, values, cells, resolution);
+
+  return mesh;
+}
+
+QuadMesh isosurface(const std::vector<double> &distances, double isolevel,
+                    const std::array<Point3D, 2> &bounding_box,
+                    const std::array<size_t, 3> &resolution) {
+  auto axis = bounding_box[1] - bounding_box[0];
+  Vector3D delta(axis[0] / resolution[0], axis[1] / resolution[1], axis[2] / resolution[2]);
+
+  std::vector<double> values = distances;
+  for (double &v : values) {
+    v -= isolevel;
+    if (std::abs(v) < SMALL_NUMBER)
+      v = v < 0 ? -SMALL_NUMBER : SMALL_NUMBER;
+  }
+
+  QuadMesh mesh;
+  auto cells = addPoints(mesh, values, bounding_box[0], delta, resolution);
+  addQuads(mesh, values, cells, resolution);
+
+  return mesh;
+}
+
+}
+```
+
+### dc.hh
+```
+#pragma once
+
+#include <functional>
+
+#include "quadmesh.hh"
+
+// Constructs a quad mesh approximating the isosurface of a given scalar function
+
+namespace DualContouring {
+
+QuadMesh isosurface(std::function<double(const Point3D &)> f, double isolevel,
+                    const std::array<Point3D, 2> &bounding_box,
+                    const std::array<size_t, 3> &resolution);
+
+QuadMesh isosurface(const std::vector<double> &distances, double isolevel,
+                    const std::array<Point3D, 2> &bounding_box,
+                    const std::array<size_t, 3> &resolution);
+
+}
+```
+
+### dual-contouring.jl
+```
+module DualContouring
+
+using LinearAlgebra
+
+export isosurface, writeOBJ
+
+ϵ = 1e-15
+
+"""
+    isosurface_point(points, df, limits)
+
+Computes the likely position of a point on the isosurface, based on 0-crossing on the
+cell's edges given in `points`. `df` is the gradient of the function,
+and `limits` is a pair of points defining the size of the cell.
+
+When `df` is `nothing`, the isosurface point is created based only on the distance values.
+"""
+function isosurface_point(points, df, limits)
+    m = length(points)
+    (df === nothing || m < 3) && return sum(points) / m
+    A = Array{Float64}(undef, m, 3)
+    b = Vector{Float64}(undef, m)
+    for i in 1:m
+        n = df(points[i])
+        A[i,:] = n
+        b[i] = dot(n, points[i])
+    end
+    q = A \ b
+    any(x < 0 for x in q - limits[1]) || any(x < 0 for x in limits[2] - q) ? sum(points) / m : q
+end
+
+"""
+    compute_cell(origin, dirs, vertices, df)
+
+Computes an approximate position of the isosurface in a cell. `origin` is the bottom-left-front
+corner of the cell, with `dirs` contains 3 axis-aligned vectors going to the opposite corner.
+`vertices` gives the function values at the cell corners in this fashion:
+```
+      7-----8
+     /|    /|     Y
+    3-----4 |     ^  
+    | 5---|-6     | Z
+    |/    |/      |/
+    1-----2       O----> X
+```
+`df` is the gradient function (when available), or `nothing`.
+
+It is assumed that the function values are never exactly zero.
+When all values have the same sign, the function returns `nothing`.
+"""
+function compute_cell(origin, dirs, vertices, df)
+    (all(v < 0 for v in vertices) || all(v > 0 for v in vertices)) && return nothing
+    edges = [0, 4, 1, 5, 2, 6, 3, 7,
+             0, 2, 1, 3, 4, 6, 5, 7,
+             0, 1, 2, 3, 4, 5, 6, 7]
+    mean = [0, 0, 0]
+    points = []
+    for i in 1:12
+        v1, v2 = edges[2i-1], edges[2i]
+        a, b = vertices[v1+1], vertices[v2+1]
+        a * b > 0 && continue
+        denom = abs(b - a)
+        x = denom < ϵ ? 0.5 : abs(a) / denom
+        c = (i - 1) ÷ 4 + 1
+        p = origin + dirs[1] * (v1 ÷ 4) + dirs[2] * (v1 % 4 ÷ 2) + dirs[3] * (v1 % 2) + dirs[c] * x
+        push!(points, p)
+    end
+    isosurface_point(points, df, (origin, origin + sum(dirs)))
+end
+
+"""
+    generate_cells(values, df, corner, delta, resolution)
+
+Generates cells with dual points for an isosurface. `values` is a 3D matrix of dimension
+`resolution[i]+1` in each direction, containing the function values. `corner` is the
+bottom-left-front corner of the volume, with the `delta` vector going to the opposite corner.
+`resolution` is a tuple of 3 values, describing the number of cells in each axis direction.
+
+The return value is a `(points, cells)` pair, where `points` is a list of approximated pionts
+of the isosurface, and `cells` is a 3D matrix of dimension `resolution[i]` in each direction,
+containing an index to the `points` array, or 0 when empty.
+"""
+function generate_cells(values, df, corner, delta, resolution)
+    cells = zeros(Int, resolution)
+    points = []
+    dirs = [[delta[1], 0, 0],
+            [0, delta[2], 0],
+            [0, 0, delta[3]]]
+    for i in 1:resolution[1], j in 1:resolution[2], k in 1:resolution[3]
+        vertices = []
+        for di in 0:1, dj in 0:1, dk in 0:1
+            push!(vertices, values[i+di,j+dj,k+dk])
+        end
+        origin = corner + [delta[1] * (i - 1), delta[2] * (j - 1), delta[3] * (k - 1)]
+        surface_point = compute_cell(origin, dirs, vertices, df)
+        if surface_point != nothing
+            push!(points, surface_point)
+            cells[i,j,k] = length(points)
+        end
+    end
+
+    points, cells
+end
+
+"""
+    generate_faces(values, cells, resolution)
+
+Generate faces for the cells created by `generate_cells`, when possible. `values` and
+`resolution` are defined the same way as in that function.
+
+The return value is an array of quads, where each quad is an array containing 4 indices.
+"""
+function generate_faces(values, cells, resolution)
+    quads = []
+    for (r, value, cell) in [([1, 2, 3], (i, j, k) -> values[i,j,k], (i, j, k) -> cells[i,j,k]),
+                             ([2, 3, 1], (i, j, k) -> values[j,k,i], (i, j, k) -> cells[j,k,i]),
+                             ([3, 1, 2], (i, j, k) -> values[k,i,j], (i, j, k) -> cells[k,i,j])]
+        for i in 1:resolution[r[1]], j in 2:resolution[r[2]], k in 2:resolution[r[3]]
+            a, b, c, d = cell(i,j,k), cell(i,j-1,k), cell(i,j-1,k-1), cell(i,j,k-1)
+            a * b * c * d == 0 && continue
+            v1, v2 = value(i,j,k), value(i+1,j,k)
+            v1 * v2 > 0 && continue
+            if v1 < 0
+                push!(quads, [a, b, c, d])
+            else
+                push!(quads, [d, c, b, a])
+            end
+        end
+    end
+    quads
+end
+
+"""
+    isosurface(f, isolevel, bounding_box, resolution; df)
+
+Generates the isosurface of `f` at the given `isolevel`. The `bounding_box` is a tuple
+containing the bottom-left-front and top-right-back points. The `resolution` is given as a
+tuple of 3 integers - the number of cells in each of the axis directions.
+
+When `df` is given, it is assumed to be the gradient function.
+
+Sphere example:
+
+    julia> using LinearAlgebra
+    julia> isosurface(p -> norm(p) - 1, 0, ([-2, -2, -2], [2, 2, 2]), (20, 20, 20))
+"""
+function isosurface(f, isolevel, bounding_box, resolution; df=nothing)
+    delta = (bounding_box[2] - bounding_box[1]) ./ resolution
+    values = zeros(resolution .+ 1)
+    for i in 0:resolution[1], j in 0:resolution[2], k in 0:resolution[3]
+        v = f(bounding_box[1] + delta .* [i, j, k]) - isolevel
+        values[i+1,j+1,k+1] = abs(v) < ϵ ? copysign(ϵ, v) : v
+    end
+    points, cells = generate_cells(values, df, bounding_box[1], delta, resolution)
+    faces = generate_faces(values, cells, resolution)
+    points, faces
+end
+
+"""
+    writeOBJ(points, faces, filename)
+
+Writes a quad mesh in OBJ format to the given file.
+"""
+function writeOBJ(points, faces, filename)
+    open(filename, "w") do fp
+        for p in points
+            println(fp, "v $(p[1]) $(p[2]) $(p[3])")
+        end
+        for f in faces
+            println(fp, "f $(f[1]) $(f[2]) $(f[3]) $(f[4])")
+        end
+    end
+end
+
+end # module
+```
+
+### quadmesh.cc
+```
+#include "quadmesh.hh"
+
+#include <fstream>
+
+namespace DualContouring {
+
+void
+QuadMesh::addPoint(const Point3D &p) {
+  points.push_back(p);
+}
+
+void
+QuadMesh::addQuad(size_t a, size_t b, size_t c, size_t d) {
+  quads.push_back({a, b, c, d});
+}
+
+void
+QuadMesh::writeOBJ(std::string filename) const {
+  std::ofstream f(filename);
+  f.exceptions(std::ios::failbit | std::ios::badbit);
+  for (const auto &p : points)
+    f << "v " << p[0] << ' ' << p[1] << ' ' << p[2] << std::endl;
+  for (const auto &t : quads)
+    f << "f " << t[0] << ' ' << t[1] << ' ' << t[2] << ' ' << t[3] << std::endl;
+}
+
+}
+```
+
+### quadmesh.hh
+```
+#pragma once
+
+#include <string>
+#include <vector>
+
+#include "vector3d.hh"
+
+namespace DualContouring {
+
+struct QuadMesh {
+  using Quad = std::array<size_t, 4>;
+  std::vector<Point3D> points;
+  std::vector<Quad> quads;
+
+  void addPoint(const Point3D &p);
+  void addQuad(size_t a, size_t b, size_t c, size_t d);
+  void writeOBJ(std::string filename) const;
+};
+
+}
+```
+
+### vector3d.hh
+```
+#pragma once
+
+#include <array>
+
+namespace DualContouring {
+
+  struct Vector3D {
+    std::array<double, 3> data;
+
+    Vector3D(double x = 0, double y = 0, double z = 0) : data({x, y, z}) { }
+    Vector3D(const double *raw) : data({raw[0], raw[1], raw[2]}) { }
+    double operator[](size_t i) const { return data[i]; }
+    double &operator[](size_t i) { return data[i]; }
+    Vector3D &operator+=(const Vector3D &v) {
+      data[0] += v.data[0]; data[1] += v.data[1]; data[2] += v.data[2];
+      return *this;
+    }
+    Vector3D operator+(const Vector3D &v) const {
+      return { data[0] + v.data[0], data[1] + v.data[1], data[2] + v.data[2] };
+    }
+    Vector3D operator-(const Vector3D &v) const {
+      return { data[0] - v.data[0], data[1] - v.data[1], data[2] - v.data[2] };
+    }
+    Vector3D operator*(double x) const {
+      return { data[0] * x, data[1] * x, data[2] * x };
+    }
+    Vector3D operator/(double x) const { return operator*(1 / x); }
+  };
+
+  using Point3D = Vector3D;
+
+}
+```

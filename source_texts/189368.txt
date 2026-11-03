@@ -1,0 +1,180 @@
+I found a raycasting parity mismatch on current main (722a4ac314315ba00f085ed226e293b1fe629885). Rays exactly tangent to sphere, capsule, ellipsoid, cylinder, and box geoms return the expected hit in MuJoCo 3.14.0 but return no intersect...
+
+Tangent rays miss bounded primitive geoms · Issue #1698 · google-deepmind/mujoco_warp · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Tangent rays miss bounded primitive geoms #1698
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Tangent rays miss bounded primitive geoms#1698
+Copy link
+Description
+kavyabhand
+opened on Sep 25, 2026
+Issue body actions
+I found a raycasting parity mismatch on current main (722a4ac314315ba00f085ed226e293b1fe629885). Rays exactly tangent to sphere, capsule, ellipsoid, cylinder, and box geoms return the expected hit in MuJoCo 3.14.0 but return no intersection in MuJoCo Warp.
+I reproduced this on CPU through the public ray API:
+```
+sphere:    MuJoCo=2.00000000/geom 0, MJWarp=-1.00000000/geom -1
+capsule:   MuJoCo=2.00000000/geom 0, MJWarp=-1.00000000/geom -1
+ellipsoid: MuJoCo=2.00000000/geom 0, MJWarp=-1.00000000/geom -1
+cylinder:  MuJoCo=2.00000000/geom 0, MJWarp=-1.00000000/geom -1
+box:       MuJoCo=2.00000000/geom 0, MJWarp=-1.00000000/geom -1
+```
+The same behavior reaches rangefinder sensors: tangent sphere, capsule, ellipsoid, and cylinder hits return 2.0 in MuJoCo and -1.0 in MuJoCo Warp.
+The apparent cause is _ray_quad, which currently rejects det < MJ_MINVAL. A tangent intersection has det == 0, so it is discarded. Native MuJoCo instead rejects det < 0 || a < mjMINVAL:
+https://github.com/google-deepmind/mujoco/blob/393c1e421755e90c5dd2243e5ba81f6324f6d7aa/src/engine/engine_ray.c#L103-L115
+The complete native guard matters here. Changing only the determinant comparison would allow tangencies, but it would mishandle degenerate axis-parallel capsule and cylinder subproblems where a == 0.
+A focused fix could mirror MuJoCo’s guard and add parity coverage for all bounded primitive types, including the public ray, BVH-backed ray, and rangefinder paths. I would be happy to submit the fix and regression tests if this matches the intended tangent-hit behavior.
+Activity
+thowell commented on Sep 29, 2026
+thowell
+on Sep 29, 2026
+Collaborator
+More actions
+@shi-eric is this potentially a bug with warp?
+Problem
+wp.bvh_query_ray and wp.tile_bvh_query_ray falsely miss an AABB when an axis-aligned ray (dir[i] == 0.0) lies on a slab boundary (pos[i] == lower[i] or pos[i] == upper[i]).
+Root Cause
+Both bvh_query_ray and tile_bvh_query_ray precompute rcp_dir = 1.0f / dir and call intersect_ray_aabb (warp/native/intersect.h:128, unrolled for i = 0, 1, 2):
+```
+l1 = (lower[i] - pos[i]) * rcp_dir[i];
+l2 = (upper[i] - pos[i]) * rcp_dir[i];
+lmin = max(min(l1, l2), lmin);
+lmax = min(max(l1, l2), lmax);
+```
+When dir[i] == 0.0f (rcp_dir[i] = ±inf) and pos[i] touches one boundary of a non-degenerate slab (pos[i] == lower[i] < upper[i] or lower[i] < pos[i] == upper[i]):
+One product evaluates 0.0f * (±inf) = NaN, and the other evaluates (nonzero) * (±inf) = ±inf.
+Because min and max use fminf/fmaxf semantics (returning the non-NaN operand), both min(l1, l2) and max(l1, l2) evaluate to the same +inf or -inf value.
+This collapses [lmin, lmax] (lmin = +inf or lmax = -inf), causing lmax >= lmin to return false.
+Upstream Warp already fixed this in warp/native/intersect.h by adding intersect_ray_aabb_robust and adopting it for mesh ray queries (warp/native/mesh.h, GH-1530) and capsule BVH queries (BvhQueryKind::CAPSULE in warp/native/bvh.h, GH-1741). However, two plain-ray BVH paths still call intersect_ray_aabb (tracked as part of GH-1680):
+bvh_query_test<BvhQueryKind::RAY> in warp/native/bvh.h:510 (wp.bvh_query_ray on CPU/CUDA, and wp.tile_bvh_query_ray on CPU).
+bvh_query_intersection_test in warp/native/tile_bvh.h:58 (wp.tile_bvh_query_ray on CUDA).
+Proposed Fix
+Route both remaining ray-AABB tests through intersect_ray_aabb_robust (matching BvhQueryKind::CAPSULE in bvh.h:501-505; or optionally dispatch between intersect_ray_aabb and intersect_ray_aabb_robust when rcp_dir is non-finite, matching mesh_query_ray_intersect_aabb in mesh.h:1376-1395):
+1. warp/native/bvh.h
+```
+// Before (warp/native/bvh.h:507-511)
+    } else if constexpr (QUERY_KIND == BvhQueryKind::RAY) {
+        // Plain ray: original slab test with its original half-open max_dist bound.
+        float t = FLT_MAX;
+        bool hit = intersect_ray_aabb(query.input_lower, query.input_upper, node_lower, node_upper, t);
+        return hit && !(t >= max_dist);
+    }
+
+// After
+    } else if constexpr (QUERY_KIND == BvhQueryKind::RAY) {
+        // Plain ray: robust slab test with its original half-open max_dist bound.
+        float t = FLT_MAX;
+        bool hit = intersect_ray_aabb_robust(
+            query.input_lower,
+            vec3(1.0f / query.input_upper[0], 1.0f / query.input_upper[1], 1.0f / query.input_upper[2]),
+            query.input_upper, node_lower, node_upper, t
+        );
+        return hit && !(t >= max_dist);
+    }
+```
+2. warp/native/tile_bvh.h
+```
+// Before (warp/native/tile_bvh.h:53-62)
+CUDA_CALLABLE inline bool
+bvh_query_intersection_test(const bvh_query_thread_block_t& query, const vec3& node_lower, const vec3& node_upper)
+{
+    if (query.is_ray) {
+        float t = 0.0f;
+        return intersect_ray_aabb(query.input_lower, query.input_upper, node_lower, node_upper, t);
+    } else {
+        return intersect_aabb_aabb(query.input_lower, query.input_upper, node_lower, node_upper);
+    }
+}
+
+// After
+CUDA_CALLABLE inline bool
+bvh_query_intersection_test(const bvh_query_thread_block_t& query, const vec3& node_lower, const vec3& node_upper)
+{
+    if (query.is_ray) {
+        float t = 0.0f;
+        return intersect_ray_aabb_robust(
+            query.input_lower,
+            vec3(1.0f / query.input_upper[0], 1.0f / query.input_upper[1], 1.0f / query.input_upper[2]),
+            query.input_upper, node_lower, node_upper, t
+        );
+    } else {
+        return intersect_aabb_aabb(query.input_lower, query.input_upper, node_lower, node_upper);
+    }
+}
+```
+Minimal Reproducer
+```
+import warp as wp
+
+
+@wp.kernel
+def ray_query_kernel(bvh_id: wp.uint64, start: wp.vec3, direction: wp.vec3, hits: wp.array(dtype=int)):
+    q = wp.bvh_query_ray(bvh_id, start, direction)
+    idx = int(0)
+    while wp.bvh_query_next(q, idx):
+        wp.atomic_add(hits, 0, 1)
+
+
+@wp.kernel
+def tile_ray_query_kernel(bvh_id: wp.uint64, start: wp.vec3, direction: wp.vec3, hits: wp.array(dtype=int)):
+    q = wp.tile_bvh_query_ray(bvh_id, start, direction)
+    while wp.tile_query_valid(q):
+        idx = wp.untile(wp.tile_bvh_query_next(q))
+        if idx != -1:
+            wp.atomic_add(hits, 0, 1)
+
+
+lowers = wp.array([wp.vec3(0.5, -1.0, -1.0)], dtype=wp.vec3)
+uppers = wp.array([wp.vec3(1.0, 1.0, 1.0)], dtype=wp.vec3)
+bvh = wp.Bvh(lowers, uppers)
+hits = wp.zeros(1, dtype=int)
+
+# Ray along +X lying on the upper Y=1.0 face of the AABB
+start = wp.vec3(0.0, 1.0, 0.0)
+direction = wp.vec3(1.0, 0.0, 0.0)
+
+wp.launch(ray_query_kernel, dim=1, inputs=[bvh.id, start, direction, hits])
+assert hits.numpy()[0] == 1  # Fails: returns 0
+
+hits.zero_()
+wp.launch_tiled(tile_ray_query_kernel, dim=1, inputs=[bvh.id, start, direction, hits], block_dim=64)
+assert hits.numpy()[0] == 1  # Fails: returns 0
+```
+shi-eric commented on Sep 30, 2026
+shi-eric
+on Sep 30, 2026
+Last edited by shi-eric
+Collaborator
+More actions
+Thanks for narrowing* this down in Warp @thowell. We will track the Warp fix for this in NVIDIA/warp#2011 and aim to get a fix in for Warp 1.19 (too late for Warp 1.18).
+👍React with 👍1Reacted by Taylor Howell
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

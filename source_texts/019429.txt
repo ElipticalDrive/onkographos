@@ -1,0 +1,102 @@
+I am using rustgpu, which is a rather experimental tool to compile rust into shaders. I have been noticing that for many models, even though I see implementations of sphere tracing rendering with no issue, I get problems with mine, but afaict they should be the same. 
+ For example consider this glsl code taken from  shadertoy . 
+ 
+#define ITER 1024
+float march(vec3 rayOriginWS, vec3 rayDirWS, float rand, out vec3 sceneColour, out float responsiveness)
+{       
+    vec4 material;
+    
+    vec3 inscatter = oz.yyy;
+    float transmittance = 1.0;
+    
+    float t = 0.001;
+    float d;
+    
+    for(int i = NON_CONST_ZERO; i < ITER; ++i)
+    {   
+        vec3 posWS = rayOriginWS + rayDirWS*t;
+        d = fSDF(posWS, kRenderFilter, iChannel2, material);
+        
+        t += d;
+        
+        
+        if(d < 0.0001)
+        {
+            break;
+        }
+        
+    }
+      
+    sceneColour = computeFinalLighting(t, rayOriginWS, rayDirWS, material);
+    
+    sceneColour = sceneColour * transmittance + inscatter;
+    
+    
+    return t;
+}
+ 
+ It produces a beautiful image of a tree alongside grass, mountains, the things is outright gorgeous. 
+ I copied and transpiled the same sdf code, and tried to replicate just the tree part on my end. With this sphere tracing code: 
+ pub fn trace_sdf(
+    start: &Vec3,
+    ray: &Vec3,
+    mut sdf: impl FnMut(&Vec3, usize, f32) -> f32,
+    min_step: f32,
+    max_step: f32,
+    cutoff: f32,
+    iter_max: usize,
+    mut termination: impl FnMut(&Vec3, f32) -> bool,
+) -> (bool, Vec3, usize, bool, f32)
+{
+    let mut iter_count = 0;
+    let mut hit_sdf = false;
+    let mut current_pos = start.clone();
+    let mut prior_d = f32::MAX;
+    let mut terminated = false;
+    let mut distance = 0.0001;
+
+    let mut small_step_count = 0;
+    while iter_count < iter_max
+    {
+        current_pos = *start + distance * ray;
+        let increment = sdf(&current_pos, iter_count, prior_d);
+        distance += increment.clamp(min_step, max_step);
+        if increment <= cutoff
+        {
+            hit_sdf = true;
+            break;
+        }
+
+        iter_count += 1
+    }
+
+    (hit_sdf, current_pos, iter_count, terminated, distance)
+}
+ 
+ If I call the above like this: 
+ 
+    let (v_collision, v_collision_point, _, _, _) = trace_sdf(
+        &cam_pos,
+        &ray,
+        tree_sdf,
+        0.0001,
+        0.001, // we are capping the max distance we can travel by, by a lot.
+        0.05,
+        1600,
+        |_, _| false,
+    );
+ 
+ I do get an image 
+ 
+ However, notice that the above is effectively ray marching instead of sphere tracing, since the maximum step is very clamped. If I instead allow for large steps, by making that upper bound much larger, say even just 1, I get this instead: 
+ 
+ As if I am tracing way past collision. This seems to happen because I am multiplying the input position point by 10 as a way to scale down the sdf model. 
+ The cause of the problem 
+ I don;t fully understand why a scalar constant would affect the result of raytracing so much. 
+ I.e. this breaks the tracing logic: 
+     let tree_sdf = |v: &Vec3, _: usize, _: f32| {
+        let mut tmp = Vec4::default();
+        f_tree_sdf(*v * 10., 0., 0., &mut tmp).powf(1.)
+    };
+ 
+ And I don;t get why. 

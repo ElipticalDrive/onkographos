@@ -1,0 +1,492 @@
+CUDA accelerated rasterization of gaussian splatting - fix(2dgs): use ray-plane intersection depth instead of Gaussian center depth by siddhu-pikachu · Pull Request #932 · nerfstudio-project/gsplat
+
+fix(2dgs): use ray-plane intersection depth instead of Gaussian center depth by siddhu-pikachu · Pull Request #932 · nerfstudio-project/gsplat · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+siddhu-pikachu
+commented
+Apr 24, 2026
+Copy link
+Copy Markdown
+Summary
+This PR fixes 2DGS depth rendering so that the depth channel uses the ray-splat intersection depth instead of the Gaussian center depth.
+The original issue was that rasterize_to_pixels_2dgs blended the packed Gaussian center depth in the last channel, which produced incorrect depth for tilted splats. In the repro from #863, this showed up as nearly constant depth across each splat instead of the expected gradient.
+What changed
+Added a has_depth_channel flag through the 2DGS stack so the correction is only applied when the last color channel actually stores depth:
+Python wrapper
+torch bindings / schemas
+C++ declarations / definitions
+CUDA forward / backward paths
+Updated the 2DGS forward kernel to replace the packed center depth with the ray-splat intersection depth.
+Updated the 2DGS backward kernel so gradients for the depth channel flow through the intersection-depth computation instead of back into the packed center-depth color channel.
+Updated distortion / median-depth handling to use the same corrected depth quantity.
+Fixed the 2DGS binding/declaration mismatches needed to expose the new argument correctly.
+Validation
+I validated this with the issue #863 repro scene (two tilted splats) and compared the gsplat 2DGS output against the local Inria diff-surfel-rasterization reference backend.
+Before this change:
+depth_2dgs was using Gaussian center depth and did not match the expected ray-plane/ray-splat intersection behavior.
+After this change:
+depth_2dgs shows the expected spatially varying depth gradient.
+The output now matches the Inria reference visually on the repro scene.
+Notes
+There are still tiny residual rasterization-footprint differences between gsplat and the Inria backend, but those appear to be pre-existing and separate from the depth bug fixed here. This PR is focused on correcting the depth quantity used by the 2DGS path.
+Closes #863
+rodlima78
+requested changes
+Jul 13, 2026
+View reviewed changes
+rodlima78
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Low severity — must fix before merge. While rebasing this conflict-dirty branch, please squash e09b7ecb and 5fa1aa9f into one complete fix, include the regression test there, and drop the three merge-from-main commits. A suitable final message would be:
+fix(2dgs): use ray-splat intersection depth
+Use the local ray-splat hit depth for tilted surfels so rendered depth,
+distortion, and median outputs share one geometric quantity. Preserve
+gradients through the same intersection computation.
+The first commit introduced the reciprocal formula; the second corrected only the forward expression after the Inria comparison rejected it. There is no independently useful boundary between those iterations, and retaining both leaves a known-invalid intermediate state in history.
+Comment thread
+gsplat/cuda/_wrapper.py
+packed: bool = False,
+absgrad: bool = False,
+distloss: bool = False,
+has_depth_channel: bool = False,
+rodlima78
+Jul 13, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+rasterization_2dgs() already receives render_mode and therefore knows whether depth was requested. Adding has_depth_channel here gives the last colors channel special semantics throughout the Python/C++/CUDA stack, whereas the 3DGS pixel rasterizer keeps feature channels generic.
+Please consider producing ray-plane intersection depth as a dedicated optional output, controlled internally by something like compute_depth derived from render_mode, and concatenating/normalizing it in the high-level function. This would keep depth gradients separate from ordinary color gradients and avoid coupling correctness to the last-channel layout.
+siddhu-pikachu
+Aug 15, 2026
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Agreed the last-channel coupling isn't the ideal long-term shape. Two notes on scope: the last-channel depth layout predates this PR (the old code already blended center depth out of colors[..., -1]) and on current main the public entry points derive the flag internally from render_mode, so the special semantics stays confined to the private kernel op rather than the user-facing API. I'd prefer to keep this PR minimal for #863 and do the dedicated-depth-output refactor as a follow-up PR.happy to take that on.
+Comment thread
+gsplat/cuda/csrc/RasterizeToPixels2DGSBwd.cu
+Outdated
+}
+// Fix #863: depth channel grad goes to v_w_M, not v_colors
+if (has_depth_channel) {
+float isect_d =
+rodlima78
+Jul 13, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Blocker — must fix before merge. Please route the rendered-depth adjoint through the exact forward expression, including the dependence of s on u_M, v_M, and w_M, on both footprint branches. The alpha correction and reverse-compositing buffer also need to use that same depth.
+This block instead differentiates 1 / (w_M.x * px + w_M.y * py + w_M.z), while forward computes s.x * w_M.x + s.y * w_M.y + w_M.z. Those are different functions—the reciprocal form was also the formula rejected during the Inria comparison. The direct update misses the u_M/v_M chain; when the geometry VJP runs on the 3D-footprint branch, the later v_w_M_local = {...} assignment also overwrites it. As written, the rendered value can be correct while its gradients, alpha term, and compositing state are not. A finite-difference test covering both footprint branches would pin this down.
+rodlima78
+Jul 13, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+One concrete way to isolate the newly added opacity-gradient term in this thread is the following regression test. It compares selected opacities gradients from the CUDA backward pass with centered finite differences of the rendered depth loss, complementing the broader footprint-branch coverage requested above.
+Suggested test (in tests/test_2dgs.py):
+```
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
+@pytest.mark.skipif(not gsplat.has_2dgs(), reason="2DGS support wasn't built")
+def test_rasterize_to_pixels_2dgs_depth_grad_finite_diff(test_data):
+    """#863: finite-difference check on the depth-channel backward for the
+    has_depth_channel=True path (opacities and ray_transforms gradients)."""
+    from gsplat.cuda._wrapper import (
+        fully_fused_projection_2dgs,
+        isect_offset_encode,
+        isect_tiles,
+        rasterize_to_pixels_2dgs,
+    )
+
+    torch.manual_seed(0)
+
+    # Small scene to keep finite differences tractable.
+    C, N = 1, 32
+    means = torch.randn(N, 3, device=device)
+    means[:, 2] += 3.0  # push in front of camera
+    quats = torch.nn.functional.normalize(torch.randn(N, 4, device=device), dim=-1)
+    scales = torch.ones(N, 3, device=device)
+    scales[..., :2] *= 0.1
+    opacities = torch.rand(C, N, device=device).clamp(0.1, 0.9).double()
+    viewmats = torch.eye(4, device=device).expand(C, 4, 4).contiguous()
+    W, H = 32, 32
+    Ks = torch.tensor(
+        [[W, 0.0, W / 2], [0.0, W, H / 2], [0.0, 0.0, 1.0]], device=device
+    ).expand(C, 3, 3).contiguous()
+
+    radii, means2d, depths, ray_transforms, normals = fully_fused_projection_2dgs(
+        means, quats, scales, viewmats, Ks, W, H
+    )
+    rgb = torch.rand(C, N, 3, device=device)
+    colors = torch.cat([rgb, depths[..., None]], dim=-1)
+
+    tile_size = 16
+    tw = math.ceil(W / float(tile_size))
+    th = math.ceil(H / float(tile_size))
+    _, isect_ids, flatten_ids = isect_tiles(
+        means2d, radii, depths, tile_size, tw, th
+    )
+    isect_offsets = isect_offset_encode(isect_ids, C, tw, th)
+    densify = torch.zeros_like(means2d)
+
+    # Analytical gradient w.r.t. opacities through depth channel.
+    op = opacities.detach().float().clone().requires_grad_(True)
+    out, _, _, _, _ = rasterize_to_pixels_2dgs(
+        means2d, ray_transforms, colors, op, normals, densify,
+        W, H, tile_size, isect_offsets, flatten_ids,
+        has_depth_channel=True,
+    )
+    loss = out[..., -1].sum()
+    loss.backward()
+    analytical = op.grad.detach().clone()
+
+    # Finite-difference gradient at a few indices.
+    eps = 1e-3
+    sampled = torch.randperm(N, device=device)[:5]
+    for i in sampled.tolist():
+        op_p = opacities.detach().float().clone()
+        op_m = opacities.detach().float().clone()
+        op_p[0, i] += eps
+        op_m[0, i] -= eps
+        out_p, *_ = rasterize_to_pixels_2dgs(
+            means2d, ray_transforms, colors, op_p, normals, densify,
+            W, H, tile_size, isect_offsets, flatten_ids,
+            has_depth_channel=True,
+        )
+        out_m, *_ = rasterize_to_pixels_2dgs(
+            means2d, ray_transforms, colors, op_m, normals, densify,
+            W, H, tile_size, isect_offsets, flatten_ids,
+            has_depth_channel=True,
+        )
+        fd = (out_p[..., -1].sum() - out_m[..., -1].sum()) / (2 * eps)
+        torch.testing.assert_close(
+            analytical[0, i], fd, atol=1e-2, rtol=5e-2,
+            msg=f"opacities grad mismatch at i={i}",
+        )
+```
+siddhu-pikachu
+Aug 15, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Fixed in d948d5c. The depth adjoint now differentiates the actual forward expression: a per-thread v_depth accumulates the main-blend, distortion and median adjoints, then routes through ∂depth/∂s and ∂depth/∂w_M into the h_u/h_v → u_M/v_M/w_M chain. The branch guard is now gauss_weight_3d <= gauss_weight_2d || v_depth != 0, so the projective VJP runs on both footprint branches and the later v_w_M_local assignment can no longer clobber it. v_alpha and the reverse-compositing buffer use the same intersection depth. I adopted your finite-difference test as-is and it passes locally (RTX 5080).
+Comment thread
+gsplat/cuda/csrc/RasterizeToPixels2DGSFwd.cu
+Outdated
+if (render_distort != nullptr) {
+// the last channel of colors is depth
+const float depth = c_ptr[CDIM - 1];
+const float depth = s.x * w_M.x + s.y * w_M.y + w_M.z;
+rodlima78
+Jul 13, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Blocker — must fix before merge. The same forward/backward depth mismatch also affects the dedicated distortion and median outputs, independently of has_depth_channel.
+Forward now computes both from s.x * w_M.x + s.y * w_M.y + w_M.z, but the backward path still reads rgbs_batch[..., CDIM - 1] for distortion and sends both adjoints to v_rgb_local. Because these outputs exist independently of has_depth_channel, that channel can be an ordinary feature. Please use intersection depth throughout the distortion recurrence and accumulate both adjoints into the shared depth path, leaving v_rgb_local untouched. Separate distortion and median gradient tests, including an RGB-only low-level call, would cover this extension.
+Please also delete the stale // the last channel of colors is depth comment here and replace the related _wrapper.py:2837 comment with:
+```
+# Keep a requested depth channel at CDIM - 1 so the CUDA kernel can replace it with intersection depth.
+```
+siddhu-pikachu
+Aug 15, 2026
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Fixed in d948d5c — the distortion recurrence and median output read the intersection depth in forward and their adjoints accumulate into the shared v_depth path. v_rgb_local stays untouched apart from the center-depth cancellation term. The stale comment is gone (the port onto the refactored code was written fresh) and the rasterize_to_pixels_2dgs docstring now states the flag's semantics explicitly.
+rodlima78
+reviewed
+Jul 13, 2026
+View reviewed changes
+Comment thread
+gsplat/cuda/csrc/RasterizeToPixels2DGSFwd.cu
+Outdated
+for (uint32_t k = 0; k < CDIM; ++k) {
+pix_out[k] += c_ptr[k] * vis;
+}
+if (has_depth_channel) {
+rodlima78
+Jul 13, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The new has_depth_channel=True code path—the core of the #863 fix—is not exercised by any test. The existing test_rasterize_to_pixels_2dgs (tests/test_2dgs.py:273) calls rasterize_to_pixels_2dgs without has_depth_channel, so it defaults to False and never touches the new branches in RasterizeToPixels2DGSFwd.cu or RasterizeToPixels2DGSBwd.cu.
+Two behavioral invariants should be locked in:
+Forward: with has_depth_channel=True, the rendered depth differs from the False result (ray-plane intersection versus alpha-blended center depth), while the non-depth channels and alpha stay identical.
+Backward: with has_depth_channel=True, colors[..., -1].grad is zero because the center-depth accumulation is canceled, and the depth-channel gradient flows to ray_transforms instead.
+Suggested test (in tests/test_2dgs.py):
+```
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
+@pytest.mark.skipif(not gsplat.has_2dgs(), reason="2DGS support wasn't built")
+def test_rasterize_to_pixels_2dgs_has_depth_channel(test_data):
+    """#863: with has_depth_channel=True, depth channel is ray-plane intersection
+    depth and its gradient is routed to ray_transforms (not colors[..., -1])."""
+    from gsplat.cuda._wrapper import (
+        fully_fused_projection_2dgs,
+        isect_offset_encode,
+        isect_tiles,
+        rasterize_to_pixels_2dgs,
+    )
+
+    torch.manual_seed(42)
+    channels = 3
+
+    Ks = test_data["Ks"]
+    viewmats = test_data["viewmats"]
+    H, W = test_data["height"], test_data["width"]
+    quats = test_data["quats"]
+    scales = test_data["scales"]
+    means = test_data["means"]
+    opacities = test_data["opacities"]
+    C = viewmats.shape[0]
+    N = means.shape[0]
+    rgb = torch.rand(C, N, channels, device=device)
+
+    radii, means2d, depths, ray_transforms, normals = fully_fused_projection_2dgs(
+        means, quats, scales, viewmats, Ks, W, H
+    )
+    # Last channel is the packed Gaussian-center depth (what the caller stuffs in).
+    colors_with_depth = torch.cat([rgb, depths[..., None]], dim=-1)
+    backgrounds = torch.zeros(C, channels + 1, device=device)
+
+    tile_size = 16
+    tile_width = math.ceil(W / float(tile_size))
+    tile_height = math.ceil(H / float(tile_size))
+    _, isect_ids, flatten_ids = isect_tiles(
+        means2d, radii, depths, tile_size, tile_width, tile_height
+    )
+    isect_offsets = isect_offset_encode(isect_ids, C, tile_width, tile_height)
+    densify = torch.zeros_like(means2d, device=device)
+
+    def _run(has_depth_channel: bool):
+        c = colors_with_depth.detach().clone().requires_grad_(True)
+        rt = ray_transforms.detach().clone().requires_grad_(True)
+        out, alphas, _, _, _ = rasterize_to_pixels_2dgs(
+            means2d, rt, c, opacities, normals, densify,
+            W, H, tile_size, isect_offsets, flatten_ids,
+            backgrounds=backgrounds, has_depth_channel=has_depth_channel,
+        )
+        return out, alphas, c, rt
+
+    out_false, alphas_false, _, _ = _run(False)
+    out_true, alphas_true, c_true, rt_true = _run(True)
+
+    # Alphas and non-depth channels are unaffected by the flag.
+    torch.testing.assert_close(alphas_true, alphas_false, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(
+        out_true[..., :channels], out_false[..., :channels], atol=1e-5, rtol=1e-5
+    )
+    # Depth channel must differ: ray-plane intersection != alpha-blended center.
+    depth_delta = (out_true[..., -1] - out_false[..., -1]).abs()
+    assert depth_delta.max().item() > 1e-3, (
+        "has_depth_channel=True should change the depth channel "
+        f"(max|Δ| = {depth_delta.max().item():.3e})"
+    )
+
+    # Backward: drive a unit gradient only into the depth channel.
+    v = torch.zeros_like(out_true)
+    v[..., -1] = 1.0
+    out_true.backward(v)
+
+    # The 'undo center-depth grad' line must zero out colors[..., -1].grad.
+    assert c_true.grad is not None
+    max_depth_color_grad = c_true.grad[..., -1].abs().max().item()
+    assert max_depth_color_grad < 1e-5, (
+        f"colors[..., -1].grad should be ~0 when has_depth_channel=True, "
+        f"got max abs {max_depth_color_grad:.3e}"
+    )
+    # RGB channels of colors get no depth-channel gradient either (v has 0 there).
+    assert c_true.grad[..., :channels].abs().max().item() < 1e-5
+    # ray_transforms must absorb the depth gradient instead.
+    assert rt_true.grad is not None
+    assert rt_true.grad.abs().sum().item() > 0.0, (
+        "ray_transforms must receive gradient from the depth channel "
+        "when has_depth_channel=True"
+    )
+```
+siddhu-pikachu
+Aug 15, 2026
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Added all three suggested tests in d948d5c: the has_depth_channel invariants test, the opacity finite-difference test and the rasterization_2dgs render-mode integration test. Worth flagging: the render-mode test runs the fused path with multiple cameras and RGB+D backward for the first time, which exposed two pre-existing contiguity crashes — expand()'d opacities passed to the kernel in forward, and the cat-sliced depth gradient reaching projection backward. Both fixed by mirroring the 3DGS path's contiguous() handling; included in this commit since the new tests can't pass without them.
+rodlima78
+reviewed
+Jul 13, 2026
+View reviewed changes
+Comment thread
+gsplat/rendering.py
+Outdated
+packed=packed,
+absgrad=absgrad,
+distloss=distloss,
+has_depth_channel=render_mode_has_depth_channel(render_mode),
+rodlima78
+Jul 13, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+rasterization_2dgs is the public entry point that wires the new has_depth_channel flag from render_mode, but the test suite has no end-to-end coverage for rasterization_2dgs (grep -rn 'rasterization_2dgs\b' tests/ returns no matches). A regression in how render_mode maps to has_depth_channel, or in how expected depth is normalized by alpha, would therefore not be caught.
+Please add a minimal integration test that exercises the depth render modes and confirms that their output is sane and differentiable.
+Suggested test (in tests/test_2dgs.py):
+```
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
+@pytest.mark.skipif(not gsplat.has_2dgs(), reason="2DGS support wasn't built")
+@pytest.mark.parametrize("render_mode", ["RGB+D", "RGB+ED", "D", "ED"])
+def test_rasterization_2dgs_depth_render_modes(test_data, render_mode):
+    """#863: rasterization_2dgs with depth render modes wires has_depth_channel
+    and produces a finite, non-negative, differentiable depth channel."""
+    from gsplat.rendering import rasterization_2dgs
+
+    torch.manual_seed(0)
+
+    # Keep every splat in front of the camera and make its plane front-facing.
+    # The shared fixture deliberately includes arbitrary positions and rotations,
+    # for which ray-plane intersections are not necessarily positive.
+    means = test_data["means"].detach().clone()
+    means[:, 2] = means[:, 2].abs() + 3.0
+    means.requires_grad_(True)
+    quats = torch.zeros_like(test_data["quats"])
+    quats[:, 0] = 1.0  # Identity quaternion in wxyz convention.
+    scales = test_data["scales"].detach().clone()
+    # rasterization_2dgs expects per-Gaussian opacities and per-camera colors.
+    opacities = test_data["opacities"][0].detach().clone()
+    colors = test_data["colors"].detach().clone()
+    viewmats = test_data["viewmats"]
+    Ks = test_data["Ks"]
+    W, H = test_data["width"], test_data["height"]
+    C = viewmats.shape[0]
+
+    out = rasterization_2dgs(
+        means=means, quats=quats, scales=scales,
+        opacities=opacities, colors=colors,
+        viewmats=viewmats, Ks=Ks, width=W, height=H,
+        render_mode=render_mode,
+    )
+    render_colors = out[0]
+    render_alphas = out[1]
+
+    if render_mode in ("RGB+D", "RGB+ED"):
+        expected_C = 4  # RGB + 1 depth
+    else:
+        expected_C = 1  # depth-only
+    assert render_colors.shape == (C, H, W, expected_C), render_colors.shape
+    assert render_alphas.shape == (C, H, W, 1), render_alphas.shape
+
+    depth = render_colors[..., -1]
+    assert torch.isfinite(depth).all(), "depth must be finite"
+    assert (depth >= 0).all(), f"depth must be >= 0 (min={depth.min().item():.3e})"
+
+    # Backprop through the depth channel must reach `means` (and not blow up).
+    depth.sum().backward()
+    assert means.grad is not None
+    assert torch.isfinite(means.grad).all()
+    assert means.grad.abs().sum().item() > 0.0, (
+        f"means must receive gradient through depth render_mode={render_mode}"
+    )
+```
+siddhu-pikachu
+Aug 15, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Added your suggested test as test_rasterization_2dgs_depth_render_modes (all four depth render modes, shape/finiteness/differentiability checks). This is the test that caught the two contiguity issues mentioned above. Passes locally across RGB+D, RGB+ED, D and ED.
+fix(2dgs): use ray-splat intersection depth
+…
+d948d5c
+```
+Use the local ray-splat hit depth for tilted surfels so rendered depth,
+distortion, and median outputs share one geometric quantity. Preserve
+gradients through the same intersection computation.
+
+Includes the regression tests from review, which also exposed two
+pre-existing contiguity issues in the fused 2DGS path (expand()'d
+opacities in forward, cat-sliced depth gradient in backward); fixed by
+mirroring the 3DGS path's handling. The new has_depth_channel op arg
+defaults to False so existing raw-op callers are unaffected.
+```
+siddhu-pikachu
+force-pushed
+the
+fix/2dgs-intersection-depth
+branch
+from
+1a72ad2 to
+d948d5c
+Compare
+August 15, 2026 07:22
+siddhu-pikachu
+commented
+Aug 15, 2026
+Copy link
+Copy Markdown
+Author
+Done — squashed to a single commit (d948d5c) with the suggested message, regression tests included in the same commit, merge commits dropped. The branch is based on bf302ef (post-refactor main) and merges cleanly; happy to rebase onto latest main if you'd prefer. Agreed on the history reasoning, the reciprocal-formula intermediate state had no independently useful boundary.
+siddhu-pikachu
+requested a review
+from rodlima78
+August 15, 2026 07:47
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

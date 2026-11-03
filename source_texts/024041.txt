@@ -1,0 +1,1209 @@
+COMPUTER GRAPHICS forum
+DOI: 10.1111/cgf.14090
+Volume 39 (2020), number 6 pp. 527–541
+Multi-Level Memory Structures for Simulating and Rendering
+Smoothed Particle Hydrodynamics
+and A. Kolb
+R. Winchenbach
+University of Siegen, Siegen, Germany
+andreas.kolb@uni-siegen.de
+Abstract
+In this paper, we present a novel hash map-based sparse data structure for Smoothed Particle Hydrodynamics, which allows for
+efficient neighbourhood queries in spatially adaptive simulations as well as direct ray tracing of fluid surfaces. Neighbourhood
+queries for adaptive simulations are improved by using multiple independent data structures utilizing the same underlying selfsimilar particle ordering, to significantly reduce non-neighbourhood particle accesses. Direct ray tracing is performed using
+an auxiliary data structure, with constant memory consumption, which allows for efficient traversal of the hash map-based data
+structure as well as efficient intersection tests. Overall, our proposed method significantly improves the performance of spatially
+adaptive fluid simulations and allows for direct ray tracing of the fluid surface with little memory overhead.
+Keywords: fluid modelling, animation, surface reconstruction, modelling, ray tracing, rendering
+ACM CCS: • Computing methodologies → Massively parallel and high-performance simulations; Ray tracing; Physical
+simulation
+results and cannot readily handle refraction effects. Furthermore,
+many rendering methods have varying memory requirements, for
+example depending on particle resolution and not particle count,
+making them impractical to use on the fly on a GPU as this requires
+an overly conservative maximum number of particles to not run out
+of memory during a simulation.
+1. Introduction
+Highly detailed and realistic fluid simulations have become an essential part of modern computer graphics, where Smoothed Particle
+Hydrodynamics (SPH) [GM77] provides a good balance of visual
+quality and computational cost [UHT17]. Recent advances enable
+highly adaptive incompressible fluid simulations [WHK17], which
+dedicate computational resources where they are most beneficial to
+the desired outcome, that is, at the fluid surface. However, adaptive simulations with adaptivity ratios of 1000:1 and higher suffer
+from significant performance drops due to limitations in existing
+underlying data structures. CPU-based SPH simulations commonly
+use compact hash maps [IABT11], which are difficult to apply on
+GPUs. GPU-based SPH simulations commonly use dense cell structures [Gre10, GSSP10] or linked list based structures [DCVB*13,
+WRR18], which suffer from high memory usage and less than
+ideal particle orderings. Additionally, rendering the resulting fluid
+surfaces often involves either expensive explicit surface extraction methods [AAOT13, WLS*17] using marching cubes [LC87],
+which cannot readily be done on the fly, or screen space-based approaches [vdLGS09, XZY17], which result in lower quality visual
+In this paper, we present a hash map-based data structure, which
+is specifically designed to handle the requirements of highly adaptive SPH methods, on GPUs and CPUs, and is readily extended to
+enable direct ray tracing of the fluid surface. Our proposed data
+structure works by utilizing a hash map to efficiently access a compact cell list, which refers to particles sorted by a self-similar ordering. We extend this method by efficiently creating multiple distinct
+data structures, based on different cell sizes, by utilizing the selfsimilarity. Our method allows us to significantly reduce the number
+of non-neighbour particle accesses by providing an appropriate data
+structure for different particle resolutions. Furthermore, we add an
+auxiliary data structure to facilitate traversal of our data structure
+during rendering, which also enables efficient ray-fluid intersection tests. Our proposed method significantly improves the practical
+© 2020 The Authors. Computer Graphics Forum published by Eurographics - The European Association for Computer Graphics and John Wiley & Sons Ltd
+This is an open access article under the terms of the Creative Commons Attribution License, which permits use, distribution and reproduction in any medium,
+provided the original work is properly cited.
+527
+R. Winchenbach and A. Kolb / Multi Level Memory for Simulating and Rendering
+Figure 1: Using our rendering approach, we can render an SPH fluid simulation with only a small, constant, memory overhead. Pictured here
+is an inlet stream colliding with an obstacle using an anisotropic surface rendering. The images to the right show the underlying particles,
+colour coded for their velocity (top), the underlying cells, colour coded for their Morton code (middle) and an opaque fluid surface (bottom).
+applicability of adaptive simulations, and substantially reduces the
+data structure overhead, as well as enabling direct ray tracing of fluid
+simulations, with constant memory overhead. Finally, our method
+requires a constant amount of memory, regardless of simulation domain size, particle resolution, or particle distribution, allowing for
+unbounded simulation domains.
+2. Related Work
+SPH has been an active field of research since its introduction
+by Gingold and Monaghan [GM77]. Although initially only stiff
+equations of state were used to simulate weakly compressible fluids [MCG03, BT07], recent advances allow both divergence-free
+and incompressible fluids [BK15, GPB*19], allowing for highly detailed and realistic fluid simulations. For a general overview of SPH
+methods, we refer the reader to [KBST19].
+Spatially adaptive SPH methods using splitting and merging were
+initially introduced by Desbrun and Cani [DC99], however, directly
+changing particle resolutions causes instabilities. To reduce these
+instabilities Adams et al. [APKG07] adjusted particle positions after splitting, Keiser et al. [KAD*06] used virtual link particles of
+neighbouring resolutions, Orthmann and Kolb [OK12] used temporal blending, Horvath and Solenthaler [HS13] used multiple simultaneous simulations and Winchenbach et al. [WHK17] used an
+additional process of mass redistribution. However, even though recent work enables adaptive ratios in excess of 10 000:1, these methods are constrained by significant performance limitations due to
+existing data structures [WHK17].
+To render fluid simulations there are three commonly used approaches: explicit surface extraction, ray casting or splatting. Explicit surface extraction methods are commonly based on marching
+cubes [LC87] or metaballs [Bli82], which have been adapted over
+time for GPUs [WLS*17, SI12], for varying spatial surface resolutions [AAOT13] or for direct rendering [KSN08], however, these
+methods often have highly varying memory requirements making
+them difficult to use on the fly. Ray casting methods are commonly
+found in volume rendering approaches [DCH88] where the fluid
+volume is commonly resampled into a 3D uniform grid [NJB07] or a
+perspective aligned grid [FAW10] and then rendered using standard
+volume ray casting [KW03]. However, these methods commonly
+require resampling of the full simulation data into memory intensive grids. Splatting methods [ZPVBG01] used in real-time applications, due to their computational simplicity, render particles as simple geometry in screen space and then smooth the resulting depth
+image [MSD07, vdLGS09, XZY17], however, these methods cannot handle refractions and reflections properly. Outside of fluid simulations, various other rendering approaches exist, that is, for point
+clouds [BTS*17], however, they are usually not directly applicable.
+For SPH-based simulations, Ihmsen et al. [IOS*14] give a good
+overview of existing data structure methods for CPUs, and identify
+a hash map-based method [IABT11] as the most efficient data structure. This approach is, however, not directly applicable to GPUs
+due to the way in which the hash map is constructed. For GPUbased simulations, Green [Gre10] introduced a method utilizing a
+fixed domain with linearly indexed cell lists. A similar approach
+was used by Dominguez et al. [DCG11], optimized for multiple
+GPUs. Goswami et al. [GSSP10] used Morton codes, however, their
+approach introduces a complex scheme to balance workloads on
+GPUs, making it difficult to implement and utilize. In order to limit
+memory usage on GPUs, Winchenbach et al. [WHK16] introduced
+an iterative process to constrain the size of so-called Verlet-lists,
+which are used to store references to neighbouring particles. However, all of these methods suffer from scaling and performance problems for adaptive simulations due to excessive non-neighbour particle accesses.
+Many generic data structures have been developed for computer animation, that is, perfect hash maps to store sparse voxel
+data [LH06, GLHL11], which are not easily scalable to multiple resolutions, or approximate nearest neighbour methods from machine
+learning [AI08], which are only approximate and designed for highdimensional data. To improve the rendering speed of explicit surface
+methods, many methods have been developed, that is, bounding volume hierarchies (BVH) [GPSS07, LGS*09] and kd-trees [FS05];
+however, these structures are varying in their memory requirements
+making them difficult to apply on the fly. Furthermore, various
+© 2020 The Authors. Computer Graphics Forum published by Eurographics - The European Association for Computer Graphics and John Wiley & Sons Ltd
+14678659, 2020, 6, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.14090, Wiley Online Library on [28/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+528
+CPU-based approaches exist, for example, OpenVDB [MLJ*13],
+but they often require significant changes to be realized on GPUbased systems. OpenVDB was realized for GPUs as GVDB, where
+recently, Wu et al. [WTYH18] introduced a GVDB-based data
+structure for FLIP-based simulations that significantly improves
+performance, but which is not directly applicable to SPH, as FLIP
+imposes significantly different requirements on the data structure,
+which is an integral part of the simulation itself. Overall, none of
+the existing data structures can be applied directly both for rendering and simulation without significant overhead.
+3. Foundations of Isotropic and Anisotropic SPH
+In standard SPH, a quantity A at a position x is interpolated using a
+weighted average of spatially close particles j as [KBST19]
+ mj
+A j W (x − x j , h),
+(1)
+A(x) =
+ρj
+j
+where m denotes the mass and ρ the density of a particle and W is a
+kernel function. Evaluating Equation (1) at the position of a particle
+i then results in
+ mj
+ mj
+A j W (xi j , h) =
+A j Wi j ,
+(2)
+Ai =
+ρj
+ρj
+j
+j
+where xi j = xi − x j . The support radius h in standard SPH formulations describes an isotropic sphere with radius h, which allows one
+to define the kernel function W as [DA12]
+Wi j = W (xi j , h) = Cd
+1
+Ŵ (q),
+hd
+(3)
+where q = xi j /h, d being the dimensionality of the simulation and
+Cd a normalization factor. For the interaction of two particles with
+different support radii, that is, due to spatil adaptivity, h can be determined as either hi , resulting in a gather formulation, h j , resulting
+h +h
+in a scatter formulation, or i 2 j , resulting in a symmetric formulation. When not evaluating an SPH quantity at a particle, but at an
+arbitrary position x, symmetric or gather formulations cannot be directly used and, thus, the scatter formulation is commonly utilized.
+Here Ŵ denotes the actual kernel function, where for an SPH simulation the cubic spline kernel [Mon05]
+
+
+
+
+(4)
+Ŵ (q) = (1 − q)3 + + 4(0.5 − q)3 +
+and [·]+ being max(·, 0). For
+is a common choice, with C3 = 14
+π
+rendering a more simple kernel is commonly chosen, that is, [YT13]
+
+
+Ŵ (q) = (1 − q2 )3 + ,
+(5)
+315
+. An isotropic support radius results in an equal extent
+with C3 = 64π
+x
+y
+z
+of the support domain in all directions, that is, h = h = h = h ,
+which leads to issues on the surface of the fluid [YT13]. Instead of
+this isotropic formulation, one can determine an anisotropic formulation of SPH [OVSM98]
+Wi j = Cd
+1
+Ŵ (||H · xi j ||),
+|H|
+(6)
+where H is the anisotropy matrix and |H| being the determinant of
+H. Here the isotropic variant of SPH is equivalent to H = 1h . This
+529
+anisotropic formulation, however, also means that the support domain of a particle is ellipsoidal, instead of spherical, meaning the extent of the domain in all directions is not equal, that is, hx = hy = hz ,
+resulting in additional challenges for neighbourhood queries as this
+requires non-cubic cells in a data structure. Determining a gather
+and scatter formulation for anisotropic SPH can be done directly
+using the anisotropic matrix of either particle; however, to yield a
+symmetric formulations, we use [HK89]
+Ŵ (||H · xi j ||) =
+
+1
+Ŵ (||Hi · xi j ||) + Ŵ (||H j · xi j ||) .
+2
+(7)
+We utilize a standard isotropic formulation for the simulation, and
+the anisotropic formulation only for a fluid surface rendering using [YT13]. For an isotropic formulation,
+the support radius hi for
+√
+particle i can be determined as hi = 3 NhVi [DA12, WHK16], with
+Vi being the rest volume of a particle, that is, 43 π r3 for a particle of
+radius r, and Nh = 50 for the cubic spline kernel.
+4. Simulation Data Structure
+The main purpose of a data structure for SPH is to relate the spatial
+position of a particle with its location in memory in order to reduce the number of particle accesses from O(n2 ) to O(n · c), where
+c is the number of particles accessed for each particle. Therefore,
+with c  n this results in an asympotically linear scaling instead
+of quadratic scaling. One possible approach is to divide the simulation domain into uniform cells of size h [Gre10, IOS*14], with h
+being the particle support radius. Note that this notion of a cell does
+not introduce any grid-based methodology into SPH and is solely
+for data handling. Owing to this, a particle only needs to consider
+at most 27 cells (a 3 × 3 × 3 sub-grid) for accessing (potentially)
+neighbouring particles. The sphere described by the support radius
+of a particle will, on average, contain Nh neighbours [DA12] within
+a volume of 43 π h3 , whereas the sub-grid of all potential neighbours
+has a volume of 27h3 . This means that the sub-grid will contain,
+81
+Nh ≈ 6.5Nh particles, that is, 15.5% of all potential
+on average, 4π
+neighbours are actual neighbours, that is, the factor m in O(n · m)
+becomes 325. For an adaptive ratio of 1000:1, however, only 0.016%
+of all considered particles are neighbours as a cell of the same size
+would now contain 814π000 Nh particles, causing significant performance problems [WHK17]. We are going to introduce our general
+data structure for non-adaptive simulations in Section 4.1, and the
+changes required for adaptive simulations in Section 4.2. Section 4.3
+introduces our data structure for rendering and Section 4.4 discusses
+how we can optimize the memory layout of our data structure.
+4.1. Single-level data structure
+Isotropic SPH methods commonly use cubic cells for data handling [Gre10, IABT11], as the support domain of a particle extents
+equally along all axes. Anisotropic SPH methods require non-cubic
+cells for data handling, as the support domain of a particle might
+extend differently along all axes. As our overall method uses both
+formulations, we determine the effective support extent h for each
+particle, based on the isotropic support radius hii and the anisotropic
+support extent along all axes [hxi , hyi , hzi ], as
+
+
+
+
+
+
+
+hi = max hii , hxi , max hii , hyi , max hii , hzi .
+(8)
+© 2020 The Authors. Computer Graphics Forum published by Eurographics - The European Association for Computer Graphics and John Wiley & Sons Ltd
+14678659, 2020, 6, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.14090, Wiley Online Library on [28/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+R. Winchenbach and A. Kolb / Multi Level Memory for Simulating and Rendering
+R. Winchenbach and A. Kolb / Multi Level Memory for Simulating and Rendering
+Figure 2: These two images show the Morton code Z on the left and the hashed indices H on the right for every occupied cell, with colour
+coding indicating indices. The Morton code yields indices that are very similar, for spatially nearby cells, but results in significant amounts
+of collisions. Using a Hash function (right) yields no relation between spatial position and index, causing a low amount of collisions.
+Alternatively, anisotropic SPH methods can be treated as isotropic,
+for data handling, using hii = max(hii , hxi , hyi , hzi ), however, this
+places more particles in each cell, causing more non-neighbour accesses in total. The cell size Cmax is set to the same value as the
+largest support extent of all particles. This ensures that all neighbours for a particle are contained in a 3 × 3 × 3 sub-grid, which
+would not be possible for an arbitrary cell size. As such, we calculate Cmax as
+Cmax = max{h0 , . . . , hn−1 }.
+(9)
+The simulation domain itself is similarly determined as the axis
+aligned bounding box, from Dmin to Dmax , surrounding the positions
+of all particles. We determine these bounds by using reduction operations over all particle positions xi
+Dmin = min{x0 , . . . , xn−1 }, Dmax = max{x0 , . . . , xn−1 }.
+(10)
+These bounds are used to calculate the size of the simulation domain in cells as
+
+
+Dmax − Dmin
+.
+(11)
+D=
+Cmax
+When using dense data structures, D needs to be kept constant to
+avoid reallocating memory when particles move outside the current
+simulation domain. This, in turn, limits the scene’s extend as it needs
+to be known a priori. We then calculate the integer coordinates x̄ for
+any position x based on the lower simulation bound Dmin and the cell
+size Cmax as
+x̄ =
+x − Dmin
+.
+Cmax
+This can be used to determine a linear index L as
+
+
+L(x̄) = x̄x + Dx x̄y + Dy (x̄z ) ,
+(12)
+(13)
+where the subscript denotes the dimension. In a dense cell grid, we
+can utilize L(x̄) to find the memory location of any position in space.
+Dense data structures, however, are not desirable as their memory
+consumption scales with both the simulation domain D and the cell
+size Cmax , instead of scaling with the particle count nparticles . The
+Morton code [Mor66], also sometimes referred to as the Z-ordering,
+is an alternative indexing scheme, which describes a self-similar
+space-filling curve. We can determine Z (x̄) by interleaving the binary representation of an integer coordinates as
+where the superscript denotes a specific bit. Using a 32 bit Morton
+code results in 10 bit per dimension, meaning each dimension contains a maximum of #K = 1024 cells. A 64 bit Morton code results
+in 21 bit per dimension, meaning a maximum of #K = 2 097 152
+cells per dimension. On one hand, it would be possible to create an
+octree directly from Morton codes [Kar12], as this code represents
+the ordering of an octree. To find neighbouring particles, in SPH,
+we only have to consider a small spatial region and, as such, many
+octree notes, for example, the root node, contain no useful information but still require memory. Furthermore, traversing an octree is
+computationally relatively expensive and the memory consumption
+of an octree is not independent of the content. On the other hand,
+a dense data structure using a Morton code would require excessive amounts of memory, especially as a 64 bit Code would require
+260 entries.
+We instead propose to create a list of all occupied cells, as the
+number of occupied cells noccupied is bound by the number of particles nparticles , as the worst case would be every particle occupying a
+different cell. Moreover, the lower bound of occupied cells is based
+on the number of particles per cell, which is bounded by incompress3
+Nh , see Section 4, resulting in approximately 12 partiibility, of 4π
+cles per cell for the cubic spline kernel, that is, noccupied = 121 nparticles .
+However, during a simulation many cells contain less particles, that
+is, particles flying through the air after an impact, resulting in an
+average ratio of approximately 1:6 over the course of a simulation.
+To generate the list of occupied cells, we first re-sort all particles
+according to their Morton code Zi = Z (x̄i ). Using this ordering we
+create a list C of length nparticles + 1, where each element is determined as
+⎧
+, if i = 0 ∨ Zi = Zi−1
+⎨i
+, if Zi = Zi−1
+(14)
+C[i] = −1
+⎩
+nparticles , else.
+© 2020 The Authors. Computer Graphics Forum published by Eurographics - The European Association for Computer Graphics and John Wiley & Sons Ltd
+14678659, 2020, 6, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.14090, Wiley Online Library on [28/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+530
+C now contains either a marker entry (−1 or nparticles ), or the first index of a particle in an occupied cell, which is similar to the approach
+by Green [Gre10]. We can now compact C, by removing all invalid
+entries, which gives us a list Cbegin
+compact of length noccupied + 1. Using
+this list of occupied cell beginnings, we can calculate the number of
+particles in each occupied cell as
+begin
+begin
+Clength
+compact [i] = Ccompact [i + 1] − Ccompact [i].
+Algorithm 1. The algorithm to access the cell associated with an
+arbitrary integer coordinate using our proposed sparse data
+structure without embedding C into H. Note that an empty cell can
+map to the same hash map entry as an occupied cell, without
+causing a collision, and as such we always check Zc = Z j to
+avoid returning a wrong cell
+(15)
+This compact list, however, does not yield any way to find the
+memory location for a particle based on its spatial location. To resolve this, we propose to apply a hash map on top of Cbegin
+compact and
+Clength
+compact . Depending on the intended purpose of the data structure,
+that is, solely simulation or simulation and rendering, different hash
+functions should be used. The cell information is only accessed
+once during the simulation, as it is only required for the creation
+of a neighbour list, but accessed many times during rendering, as
+rendering requires evaluating SPH estimates at arbitrary positions,
+which have no neighbour list associated. As such, for the simulation a hash function with few collisions is preferable, but for rendering a hash function with good spatial locality is preferable. If
+the hash map is only required for the simulation we use the hash
+function of Teschner et al. [THM*03], which is determined using three large prime numbers p1 = 73 856 093, p2 = 19 349 663,
+p3 = 83 492 791 and the size of the hash table nhash as
+
+
+H(x̄) = p1 x̄x + p2 x̄y + p3 x̄z %nhash .
+531
+Algorithm 2. Our proposed single resolution data-structure
+algorithm. This algorithm first re-sorts all particles and then
+creates a compact cell table followed by the creation of our hash
+map as described in Section 4.1
+(16)
+We choose nhash as the smallest prime number larger than the maximum number of particles in a simulation, as this results in a relatively sparse hash map with few collisions, in general. Figure 2
+shows a comparison of this hash function with the Morton code,
+which demonstrates the lack of spatial locality. If the hash map is
+also used for rendering, we use a more simple hash function, directly
+based on the Morton code, as
+H(x̄) = Z (x̄)%nhash ,
+(17)
+which will result in more hash collisions, but also much greater
+cache locality. Alternatively other hash functions could be used, that
+is, perfect hash functions [LH06], but they are more expensive to
+create and especially more computationally expensive to evaluate,
+making them unattractive for rendering. In general, we place the cell
+information in the hash map, if there were no collisions in this hash
+map entry, as this avoids one level of indirection.
+pied cells according to the hashed index of the first particle in this
+cell. We then, for each occupied cell i, set
+Hbegin [Hi ] = i, if i = 0∨Hi = Hi−1 ,
+(18)
+where we then set the length entry, for each occupied cell i, as
+The hash map itself is similar to the cell list in that it contains a
+begin entry and a length entry, where the begin entry now points to
+the first cell mapped to a hash table entry and the length entry indicates how many cells map to this hash table entry. If there is no
+cell, then the length is 0, if there is a single cell occupying this hash
+map the length is 1 and a length > 1 indicates a hash collision. The
+hash map, contrary to the cell list, is not compacted and as such allows us access via the hash index of an integer coordinate H(x̄). The
+process required to find a specific cell c based on the cells integer
+coordinates x̄c is described in Algorithm 1.
+which naturally handles hash collisions as the predicate is based
+on Hi = Hi+1 which is only true for the last cell associated with
+a certain hash value. The overall algorithm to create our hash map–
+based data structure, for a single level, is described in Algorithm 2.
+To create the hash table H, we first start by initializing all hash
+table entries as invalid, that is 0 length, and re-sort the list of occu-
+The prior section described our approach for a single fixed cell
+size, which would suffer from the same problems for adaptive
+Hlength [Hi ] = i − Hbegin [Hi ] − 1, if i = noccupied ∨Hi = Hi+1 , (19)
+4.2. Multi-level data structures
+© 2020 The Authors. Computer Graphics Forum published by Eurographics - The European Association for Computer Graphics and John Wiley & Sons Ltd
+14678659, 2020, 6, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.14090, Wiley Online Library on [28/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+R. Winchenbach and A. Kolb / Multi Level Memory for Simulating and Rendering
+R. Winchenbach and A. Kolb / Multi Level Memory for Simulating and Rendering
+Algorithm 3. Changes required to create multiple levels of our
+data structure
+
+Figure 3: Asymmetry interaction: Two particles at different levels
+may not mutually see each other due to the different cell size. Here,
+the lower level particle to the left sees the higher level particle to
+the right, but not vice versa.
+simulations as prior methods, due to a mismatch of cell size and particle resolution. Utilizing the self-similarity of the underlying Morton code, however, we can efficiently create multiple, distinct, data
+structures for different cell sizes on the same underlying particle
+data. All power of 2 times coarser resolutions follow the same underlying ordering, due the octree-like structure of Morton codes. The
+lowest required resolution for the data structure is still Cmax , resulting in a coarse grid size of Dc ; see Equation (11). Using the largest
+component of the grid, P = max(Dxc , Dyc , Dzc ), we determine the
+smallest cell size possible, as the bit length of the Morton code used
+limits the number of cells per dimension to #K; see Section 4.1, as
+Li = clamp
+−log2
+
+hi
+, 0, Lfine − 1 .
+Cmax
+(24)
+Thus, every particle can easily access all neighbours at any scale
+L ∈ [0, Lmax ] using the data structure for L. However, when a particle i only looks for neighbours at its level Li , we may encounter
+asymmetric interactions, as neighbour searches are limited by the
+cell size for level Li ; see Figure 3.
+More formally, asymmetric interactions occur when a particle i
+of lower level Li is interacting with a particle k of a higher level
+Lk , that is, if Lk > Li ∧xik < hik . In order to resolve the asymmetry,
+we iterate over all neighbouring particles k of i and determine their
+integer coordinate distance, for the cell size associated with Lk as
+x̄Likk = x̄Li k − x̄Lk k . We use x̄Likk to identify the problem case that k does
+not see particle i by checking
+ 
+ Lk 
+Lk
+k
+k
+|, |x̄Lik,y
+|, |x̄Lik,z
+|) > 1.
+(25)
+x̄ik  = max(|x̄ik,x
+1
+2 log2 (P)
+.
+Cfine = Cmax
+#K
+(20)
+Here 2 log2 (P) /#K = 2−Lfine , Lfine ∈ N is the refinement factor. The
+algorithm described in Section 4.1 can now be extended by creating
+the cell list and hash map for a Morton code Z max based on Cmax and
+additional finer levels 0 < L ≤ Lfine using the integer coordinates
+x − Dmin
+.
+x̄L =
+Cmax · 2−L
+(21)
+L = 0 results in the same data structures as the single-level version
+of this algorithm and L = Lfine the finest possible data structure, with
+the given Morton code. The corresponding Morton code is determined as Z L (x) = Z (x̄L ). We relate the maximum level Lmax to the
+maximal adaptivity ratio α of the simulation as
+
+
+√ 
+(22)
+Lmax = min log2 3 α , Lfine ,
+We then resolve this issue by atomically updating Lk to be at least
+Li , as this ensures that k will search distant enough cells to find i.
+The overall changes to the single resolution algorithm are relatively
+minor but are outlined in Algorithm 3.
+4.3. Rendering data structure
+A naïve way to render the fluid surface using ray-casting would be
+to treat the underlying cell structure as a grid and use traditional
+ray-casting approaches, that is, [KW03]; however, this would re-
+and generate the data structure for all levels 0 ≤ L ≤ Lmax . We store
+all data structures within single continuous arrays, which allows us
+to calculate the hashed indices by simply adding an offset based on
+the level to any hash function
+Z L (x̄) = Lnhash + Z (x̄).
+(23)
+Furthermore, we determine the appropriate level for a particle i
+according to its support radius as
+Figure 4: An anisotropic particle in a non-cubic grid. The blue cell
+contains the actual particle position, red cells are neighbouring but
+cannot contain fluid surface, green cells are neighbouring and can
+contain fluid surface and grey cells are not neighbouring. The fluid
+surface due to the particle is coloured dark blue.
+© 2020 The Authors. Computer Graphics Forum published by Eurographics - The European Association for Computer Graphics and John Wiley & Sons Ltd
+14678659, 2020, 6, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.14090, Wiley Online Library on [28/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+532
+quire checking every cell inside of the simulation domain along a ray
+for potential ray-fluid intersections, even though most cells contain
+no actual fluid surface. Alternatively, simply checking for fluid-ray
+intersections within occupied cells does not work as the fluid surface
+of particles within one cell extends into other cells; see Figure 4. At
+worst, the fluid surface for every single particle could be distributed
+amongst 27 cells, which would require a total of 27 · nparticles cells;
+however, explicitly storing these cells is not practical, due to limited memory resources on GPUs. Instead, we propose to store this
+information only implicitly using a hash map, as it suffices to mark
+whether any cell, that potentially contains fluid surface, maps to a
+certain hash map entry. Moreover, cells that contain no fluid particles, themselves, can still contain fluid surfaces. Thus using the
+data-structure directly requires checking every cell intersected by a
+ray, instead of only checking cells that can contain fluid surfaces.
+533
+Algorithm 4. Changes required to create multiple levels of our
+data structure
+The main purpose of this data structure is not to find particles
+close to a spatial location, as was the case for the simulation data
+structure, but instead to check whether a cell at a spatial location
+could contain fluid surface. Instead of storing references to particle
+ranges contained in a cell, we only store the Morton code of a cell,
+as many cells that could contain fluid surface do not contain any
+particles. The hash map used here uses the same size as the one for
+the simulation, which, due to the low number of cells containing
+fluid surface, results in only a moderate number of collisions, even
+when using non-ideal hash functions.
+In order to find cells containing particles at the fluid surface, we
+first calculate the signed surface distance φ for all particles, using
+the method of Horvath and Solenthaler [HS13]. A particle that is
+close enough to the surface, that is, φi < ri , is marked as a surface
+particle. We then iterate over all cells in the compact list of occupied
+cells Ccompact and create a list of surface cells
+
+R[i] =
+Z (xc0 ), if ∃c marked as surface : c ∈ Ci ,
+i
+−1,
+else,
+(26)
+where Ci is the set of particles contained in cell i and c0i is the first
+particle contained in a cell, that is, c0i = Cbegin
+compact [i]. Next, we use
+a compact operation on this list to yield a compacted list of cells
+containing surface particles, denoted as F. Next, similar to the simulation data structure, we sort this list according to the hash function
+and create a hash table HR , as before, using this sorted compact list.
+Next, we embed the cell information in the hash table, if there was
+no collision for a hash entry, as this avoids one level of indirection.
+At the end of this process, a hash table entry either contains a cell,
+represented as a Morton code, or a range of cells that map to this
+hash entry. We then calculate an AABB for every cell i ∈ F, based
+on the contained particles, as
+= min xc − hc ; AABBmax
+= max xc + hc ,
+AABBmin
+i
+i
+c∈Ci
+c∈Ci
+(27)
+where h is the extent of support along the simulation axes. Finally,
+for every cell i ∈ F, we check if any of the surrounding cells Ni
+overlap the bounding box of i. If we find an overlap with cell n ∈ Ni ,
+we check if n ∈ F using HR , in which case nothing needs to be done.
+If n ∈
+/ F and the corresponding hash map entry is empty, we set the
+entry to indicate n as potentially having fluid surface. If the hash map
+entry was already occupied, we mark the entry as having a collision,
+which means that any cell mapping to this hash entry is assumed to
+have fluid surface in it. This process is also described in Algorithm 1.
+Given a position x, with a corresponding cell q, we can query this
+data structure using the corresponding Morton code Zq and hash
+key Hq . If HR [Hq ] is empty, no fluid surface can be contained in q.
+If HR [Hq ] is marked as collision, q potentially contains fluid surface. Otherwise, if HR [Hq ] contains Zq , then q contains particles at
+the fluid surface. This rendering data structure is also described in
+Algorithm 4.
+4.4. Data structure memory layout
+To reduce the memory consumption, and improve the performance,
+of our data structure, several optimizations can be made to the memory layout of the data structure. These optimizations are based on a
+word size of 4 Byte, which reduces the number of required atomic
+operations significantly. For the Morton code, we use 30 bits in nonadaptive simulations and 60 bits in adaptive simulations.
+A hash table and cell list entry of the simulation data structure
+contain both a beginning and length entry, using a 4 Byte integer
+each. To embed a cell list entry in the hash map, we reserve a single
+bit of the beginning entry, as an indicator for the kind of data, which
+limits the maximum number of particles to at most 231 − 1, which
+should not cause problems on single GPUs.
+As stated at the beginning of Section 4, an average cell contains
+only 4π3 Nh ≈ 11.94 particles, when using a cubic spline kernel, in
+non-adaptive simulations. Furthermore, the maximum number of
+© 2020 The Authors. Computer Graphics Forum published by Eurographics - The European Association for Computer Graphics and John Wiley & Sons Ltd
+14678659, 2020, 6, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.14090, Wiley Online Library on [28/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+R. Winchenbach and A. Kolb / Multi Level Memory for Simulating and Rendering
+R. Winchenbach and A. Kolb / Multi Level Memory for Simulating and Rendering
+Figure 5: Memory layout of the data structures for simulation and
+rendering for uniform and adaptive simulations. The render data
+layout uses a union indicated by the split fields.
+particles we can simulate on a single GPU is below 32 M. As such,
+we only require 25 bits to represent the cell begin entry and approximately 3.6 bits to represent the number of particles per cell. As we
+still require a single bit to indicate if a cell entry is embedded, we
+chose a 25 bit integer for the cell begin entry and a 6 bit integer for
+the cell length entry; see Figure 5. To account for larger support radii
+for rendering, which might increase the number of particles per cell
+significantly, we keep track of the actual number of particles in each
+cell, in a separate list, where a length entry of 63 in a cell indicates
+a required additional lookup. The data structure for rendering needs
+to indicate four cases, requiring 2 bits, as well as store the Morton
+code, requiring 30 bits in non-adaptive simulations. As such, we can
+store the Morton code for a cell, and the case indicator, within a single 4B entry. To account for the 2 bits for the cases a hash entry
+in this data structure consists of a 25 bit integer for the begin entry
+and a 5 bit integer for the length entry, limiting the number of cells
+mapped to the same hash entry to 32, which should not be exceeded
+in practice. To embed cell information into the hash map, we utilize
+a union, with a case field indicating the kind of entry; see Figure 5
+5. Rendering
+Intersecting a ray with the fluid surface could, naïvely, be done by
+simply evaluating a function at every point along the ray and finding
+the closest value that matches the desired iso value; however, this is
+not practically possible. Instead, we propose to first find rays that
+can potentially intersect the fluid, that is, rays intersecting the simulation domain. Next, we iterate along those rays, over the cells in
+the data structure, to find cells that can potentially contain fluid surfaces. Finally, we evaluate the ray-fluid intersection, but only within
+an intersected cell; see Figure 6. Given a ray
+rayi (λ) = xoi + λ · di , λ ∈ R+
+0,
+(28)
+starting at xoi with direction di , we check for an intersection of a
+ray with the simulation domain using a standard AABB intersection
+test. Next, in case of an intersection, we calculate the first cell hit by
+the ray and traverse the domain, along the ray; see Section 5.1, until
+Figure 6: The warp program used to calculate ray fluid intersections. Warp here refers to a group of threads, that is, 32, executing
+in parallel on either a GPU or CPU.
+either the ray exits the simulation domain, or we find a cell that can
+potentially contain fluid surfaces, see Section 4.3. For a found cell,
+we then calculate an intersection using either the cells directly; see
+Section 5.2, treating particles as spheres; see Section 5.3, or using a
+surface function to determine an iso surface; see Section 5.4.
+To implement this process on a GPU, all rays are stored in a queue
+and we process one ray at a time in a thread. The simulation domain
+intersection and traversal of the data structure is executed independently, on all threads in a warp, as these do not require any interthread communication. Next, after synchronizing the threads in a
+warp, we check if any thread has found a cell that can potentially
+contain fluid surfaces. For these potential intersections, we then calculate the actual ray-fluid intersection and store the results, if an
+intersection is found.
+5.1. Data structure traversal
+In case an intersection of a ray with the simulation domain AABB
+exists, this calculation yields a close distance λmin and far distance
+λmax to the domain intersections along the ray, where we clamp λmin
+to positive values, which yields the distance along the ray, within
+min
+the domain, as λl = λmax − λmin
++ . Using λ+ , we determine xmin =
+min
+ray(λ+ ), which, in turn, yields the integer coordinates of the first
+cell x̄min hit by the ray, within the simulation domain. Similar to
+Amanatides and Woo [AW87], we traverse the simulation domain
+by first calculating the integer ray direction as
+
+
+(29)
+d̄ = sign(dx ), sign(dy ), sign(dz ) .
+© 2020 The Authors. Computer Graphics Forum published by Eurographics - The European Association for Computer Graphics and John Wiley & Sons Ltd
+14678659, 2020, 6, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.14090, Wiley Online Library on [28/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+534
+535
+Algorithm 6. Intersection calculation after all threads in a warp
+have evaluated φ. ballot(p) is an intra-warp voting function of the
+predicate p, shu f fle(t, i) returns the value of t for thread i, active
+is a mask indicating active threads and f f s(b) returns the index of
+the first set bit in b. The result of this algorithm is a depth t
+Algorithm 5. Domain traversal algorithm; based on [AW87]
+If there is no cell, containing particles, we continue the traversal;
+otherwise, we calculate the centre of the found cell as
+We then determine the next cell boundary, intersected by the ray, as
+
+
+xnext = Dmin + x̄min + max(d̄, 0) ◦ Cmax ,
+(30)
+where ◦ denotes the component-wise multiplication (Hadamard
+product) and the maximum is applied component-wise. Next, we
+determine the distance along the ray, until the next cell boundary is
+intersected, as
+λn = xnext − xmin  d,
+(31)
+where  is the component-wise division (Hadamard division). For
+small components of d, that is, |dx | < 10−6 , we set the corresponding component of λn to infinite. Finally, we start the traversal in the
+cell c̄ = x̄min .
+We first check if c̄ can contain fluid surfaces; see Section 4.3, and
+in this case stop the traversal, otherwise we move to the next cell.
+This increment, using d̄, is based on the smallest component in λn ;
+however, if the smallest component λn was larger than λl , we stop
+the traversal. Otherwise we increment the smallest component in λn ,
+using d̄  d ◦ Cmax , and repeat this process; see Algorithm 5.
+5.2. Data structure visualization
+For simulations with sparse data structures, visualizing the occupied cells is a useful, and fairly straight forward, visualization. To
+visualize the data structure, after the traversal algorithm yields a cell
+c potentially containing fluid surface, we check if there is a cell at
+location c in the simulation data structure, which is only the case
+for cells containing particles, not just fluid surface; see Section 4.1.
+xc = Dmin + c ◦ Cmax ,
+(32)
+with a half cell size rc = 0.5Cmax . Calculating the intersection of the
+and λmax
+and the point of ray-cell interray with this cell yields λmin
+c
+c
+).
+Using
+d = xi − xc , we determine a normal,
+section xi = ray(λmin
+c
+where a cell is represented as a cuboid, as
+nc = [(1 + )d  rc ],
+(33)
+where  is a small positive value and [·] denotes rounding to the
+nearest integer. As the colour for the intersected cell, we use the
+colour of the first particle in c. This process yields all required information, that is, depth, normal, and colour, required to render the
+data structure.
+5.3. Particle visualization
+Rendering particles as spheres, overlapping the cell c first involves
+finding the intersection of the current ray with the cell, similar to
+and λmin
+the cell visualization, which yields λmax
+c
+c . Using the simulation data structure, we iterate over all particles that can potentially
+overlap c, that is, all those contained within neighbouring cells of c
+and c. For each of these particles j, we can calculate a ray sphere
+intersection, which, if there was an intersection, yields an intersecmax
+tion distance λ j . If λ j ∈ [λmin
+c , λc ], we store j and λ j , if this was
+the closest intersection found so far, and keep iterating over the remaining particles. If there was an intersection with any particle, we
+can then determine the intersection point xi = ray(λ j ) and the intersection normal ni = xi − x j . We use the colour associated with
+the particle, that is, using colour mapping of some quantity, as the
+colour for the intersection.
+© 2020 The Authors. Computer Graphics Forum published by Eurographics - The European Association for Computer Graphics and John Wiley & Sons Ltd
+14678659, 2020, 6, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.14090, Wiley Online Library on [28/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+R. Winchenbach and A. Kolb / Multi Level Memory for Simulating and Rendering
+R. Winchenbach and A. Kolb / Multi Level Memory for Simulating and Rendering
+5.4. Surface rendering
+Rendering the fluid surface directly requires extracting an iso surface of some field quantity φ. There are many different ways to
+determine this quantity; however, common choices include simply using the density ρ, the surface distance function of Zhu and
+Bridson [ZB05], or the anisotropic surface distance function of Yu
+and Turk [YT13]. For our approach, the choice of function does
+not influence the process beyond potentially increasing the computational workload. Therefore, we assume an arbitrary field quantity φ(x) : R3 → R, with an iso value of φ iso . To calculate the raysurface intersection, we evaluate a single intersection of a ray with
+a corresponding found cell c̄ in parallel, using all threads in a warp,
+where we sequentially process the overall set of potential intersections.
+To evaluate a single ray-surface intersection we first calculate
+the intersection of the ray with the found the cell c̄, yielding λmin
+c
+and λmax
+c . For a warp size of w, we then subdivide the interval
+max
+[max{λmin
+c , 0}, λc ) into w − 1 segments, where each segment s ∈
+[0, w − 1) is assigned a starting position
+
+
+
+s  max
+min
+λ
+,
+0}
++
+−
+max{λ
+,
+0}
+, (34)
+xs = ray max{λmin
+c
+c
+w−1 c
+where each thread in a warp is assigned one position, with the last
+thread being assigned x = ray(λmax
+c ), and each ray is assigned an
+according distance value λs .
+To evaluate φs , at each assigned position xs , we iterate over all
+particles in all neighbouring cells, where the cell entries are stored
+in shared memory. Afterwards, utilizing Algorithm 6, we find an intersection depth λ f and, if there was an intersection, store λ f and
+mark the ray as processed; otherwise, we keep traversing the simulation domain for this ray. Calculating the intersection normal can
+be done directly by evaluating ∇φ(x). Note the synchronization required here can be implemented implicitly by checking after each
+cell traversal if any thread in a warp has found a cell that can contain
+fluid surfaces and performing the check immediately. This avoids
+threads within a warp waiting for other threads and reduces warp
+divergence. We refer the reader to the supplementary materials for
+the implementation of this optimization.
+6. Results and Discussion
+All results were simulated and rendered using a single Nvidia RTX
+2080 Ti GPU with 11 GiB of VRAM and an AMD Ryzen 3970x
+CPU with 64 GB of RAM. We used DFSPH [BK15], with a density error limit of 0.01% and a divergence error limit of 0.1%,
+and density maps [KB17] to represent rigid objects. Artificial viscosity was modelled based on XSPH [Mon05], surface tension
+was modelled based on [AAT13] and fluid air phase interactions
+were modelled based on [GBP*17]. We used the vorticity refinement method of [BKKW18] and the spatially adaptive method
+of [WHK17]. Our overall uni-directional ray-tracing algorithm is
+implemented in CUDA and inspired by [PJH16], where we used a
+simple bounding volume hierarchy for rigid objects, and calculate
+each bounce of a ray using a loop on the CPU to avoid recursions
+on the GPU. We implemented our data structure and rendering approach in the open source SPH framework openMaelstrom [Win].
+For an in-depth discussion of the simulation data structure, we refer
+the reader to [WK19]. For all renderings we used a fixed resolution
+of 1920 × 1080 and a frame rate of 60 fps, with 35 primary rays
+cast per pixel with 6 and 16 bounces per primary ray for opaque and
+transparent renderings, respectively. .
+Test Scenes: We evaluated our approach using three test scenes.
+The Dam break test scene involves the collision of two initial fluid
+volumes in a cubic domain; see Figure 8, with a particle resolution of r = 0.175 m and 3.9 million particles. The Inlet test scene
+involves a stream of liquid flowing along a channel and colliding
+with an obstacle; see Figure 10, with a particle resolution of r =
+0.35 m and up to 2.2 million particles. The Drop test scene involves
+dropping a sphere of liquid into a basin; see Figure 7, with a particle resolution of r = 0.2 m and 1.5 million particles. For simulation performance see Table 1, and for rendering performance see
+Table 2.
+Ray-casting performance: To evaluate the performance of our
+method, we first consider the performance cost of the primary ray
+intersection. These rays are cast directly from the camera into the
+scene and traverse similar cells. Primary ray intersections can be
+used to implement a deferred shading approach, as the intersection yields both a depth and normal, or using a simple direct lighting model. When using an isotropic surface function [ZB05], we
+find good performance in all scenes, that is, primary intersection
+tests requiring less than 50 ms. For an anisotropic surface function [YT13], the overall computational cost is significantly higher,
+due to a more expensive surface function and larger cell non-cubic
+cells. The cost of the primary intersection, regardless of which surfacing method specific is chosen, changes significantly depending
+on the relation of camera and fluid geometry. This involves many
+aspects, that is, many rays parallel to a flat surface require many
+unnecessary intersection tests, whereas rays orthogonal to a flat surface require few unnecessary intersection tests. Additionally the performance changes depending on how many rays can even intersect
+the fluid, that is, the fluid surface might be partially occluded by
+some other geometry, and also depends on the screen-space size of
+the fluid simulation. Finally, the overhead for the construction of
+the render data structure is fairly low and is only required once per
+frame.
+Opaque fluid rendering: Rendering an opaque surface does not
+just require the primary intersection, but a full path trace per ray.
+The directions of bounced rays show very little spatial coherency,
+which causes the rays to not traverse similar cells, as was the case
+for the primary intersection. In all scenes we tested (see Table 2), we
+found that the performance of the first bounced ray is always lower
+than the primary ray, and the cost of following bounces decreases
+with each bounce. However, if the number of rays intersecting the
+fluid domain falls below the number of threads, we can executed in
+parallel, that is, after a significant number of bounces, the cost stays
+relatively fixed. Additionally, the performance depends on the geometry of the surface, that is, any bounced ray from an intersection
+with a cube shared surface is guaranteed to not intersect the surface directly. However, more complex geometries that, for instance,
+contain cavities where rays enter but rarely exit, significantly increase computational cost. Furthermore, for an opaque rendering,
+we require multiple samples per pixel, which further increases the
+computational cost.
+© 2020 The Authors. Computer Graphics Forum published by Eurographics - The European Association for Computer Graphics and John Wiley & Sons Ltd
+14678659, 2020, 6, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.14090, Wiley Online Library on [28/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+536
+Table 1: The timing values shown here are given as the average time, required to simulate 1/60 s, over an entire simulation as measurements in milliseconds.
+DFSPH refers to the combined time required to solve for both incompressibility and divergence-freedom. The timing for the data structure here refers to all
+steps in Algorithm 2, that is, including resorting and data structure creation. Neighbour-list timings refer to the timing of the construction of a constrained
+neighbour-list [WK19].
+Scene
+Drop
+Dam break
+Inlet
+Figure
+Particles
+Radius/m
+t/ms
+Domain
+Structure/ms
+Neighbour-list/ms
+DFSPH/ms
+Overall/ms
+7
+8
+9
+1.5M
+3.9M
+2.2M
+0.2
+0.175
+0.35
+4.0
+5.6
+6.0
+68x68x204
+1563
+156x156x76
+30.5
+41.5
+22.1
+77.3
+174.9
+66.8
+1150.6
+2312
+316.2
+2079
+2919
+517
+Figure 7: Rendering of the drop scene. A spherical fluid volume is dropped into a basin and rendered using an anisotropic surface function
+as a transparent fluid. The left part of the image shows the initial configuration, whereas the right part shows a later point in time.
+Figure 8: Rendering of the dam break scene. Two initial fluid volumes collide in this scene and are rendered using an isotropic surface
+function as an opaque fluid. The left part of the image shows the simulation immediately after the collision, whereas the right part shows a
+much later point in time.
+Transparent fluid rendering: Although an opaque surface rendering does not cause rays to transmit into the fluid, a transparent
+surface rendering will cause rays to either reflect or refract into the
+fluid. This means that the computational requirements are significantly higher, as rays traversing the interior of the fluid require
+many checks for potential fluid intersections, which are mostly negative as a significant number of internal cells could contain fluid
+surface. Additionally, rays moving on the interior of a fluid volume might be reflected multiple times before they exit the fluid,
+requiring significantly more bounces per ray than an opaque surface rendering. These additional computational costs increase the
+time per sample-per-pixel by about 3 times. Although there are
+options to improve the computational performance, such as lowering the number of samples per pixels, utilizing a screen-space
+© 2020 The Authors. Computer Graphics Forum published by Eurographics - The European Association for Computer Graphics and John Wiley & Sons Ltd
+14678659, 2020, 6, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.14090, Wiley Online Library on [28/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+537
+R. Winchenbach and A. Kolb / Multi Level Memory for Simulating and Rendering
+R. Winchenbach and A. Kolb / Multi Level Memory for Simulating and Rendering
+Figure 9: Rendering of the inlet scene. A fluid inlet stream impacts a rigid obstacle visualized as particle spheres, with particle velocities
+colour coded from purple (0 m/s) to yellow (30 m/s) (left), a visualization of the data structure, with the Morton code of the first particle in
+each cell colour coded from blue to red (middle) and an isotropic surface extraction (right).
+Table 2: Timing for intersection tests. This table states the average computation time over the entire simulation in milliseconds per sample per pixel,
+separately for the first four intersection and the total rendering time including illumination calculations per sample per pixel. Grid and Particles stands
+for visualizing the underlying data structure and particles as spheres, respectively.
+Intersection tests
+Method
+Init
+[YT13]
+12.1
+[ZB05]
+Particles
+23
+22.2
+[ZB05]
+[YT13]
+Grid
+Particles
+12.7
+14.1
+12.7
+12.6
+[ZB05]
+[YT13]
+12.8
+14.0
+First
+Second
+Third
+Drop scene, Figure 7
+90.1
+113.4
+103.5
+Dam break scene, Figure 8
+37.5
+49.4
+17.7
+14.3
+23.5
+12.6
+Inlet scene top down, Figure 9
+30.4
+41.8
+19.1
+149.8
+204.2
+60.6
+2.3
+3.4
+1.7
+12.9
+19.9
+13.7
+Inlet scene side view, Figure 10
+46.9
+52.7
+25.3
+237.5
+273.3
+124.7
+Render
+Fourth
+Overall
+84.8
+838.7
+10.5
+9.5
+132.8
+69.2
+Figure 10: Rendering of the inlet scene using an anisotropic (left)
+and an isotropic surface function (right).
+14.6
+46.9
+1.3
+10.9
+136.7
+503.6
+27.86
+79.8
+the memory requirements only depend on the particle count, and not
+the simulation domain or particle distribution.
+18.2
+79.5
+180.2
+785.3
+based refraction model [vdLGS09] or considering refraction on the
+first bounce only, these methods have a large and complex impact on visual quality, the study of which is beyond the scope of
+this paper. Although our method is slowed down for a transparent rendering, we can still achieve good results, especially using
+anisotropic surface functions, just not at interactive frame rates; see
+Table 2.
+Simulation data structure memory usage: Our data structure
+requires a hash map and a cell list, both containing a begin and
+length entry; see Section 4.4. The length of the cell list is determined
+by the number of particles, that is O(nparticles ), whereas the hash table size is determined as the smallest prime number larger than the
+number of particles. As this value is very close to the number of
+particles, we can assume that the hash map scales with the number
+of particles. Using bit-fields we require 4 Bytes per hash map entry
+and 8 Bytes per cell table entry. In contrast to many prior methods,
+Rendering data structure memory usage: Our rendering data
+structure is similar to the simulation data structure and, as such, also
+requires 12 Bytes per particle, for a 32 Bit Morton Code. Overall,
+as the simulation data structure is required for rendering, the total
+cost per particle is 24 Bytes. However, ignoring memory requirements for the overall rendering algorithm, that is, for textures, these
+memory requirements only scale with the particle count, that is,
+O(nparticles ), and are independent of domain size, particle distribution or particle resolution, similar to the simulation data structure.
+Furthermore, we do not require any amount of memory to store an
+extracted mesh, nor an acceleration structure for the mesh, nor an
+intermediate grid used for an explicit surface extraction.
+Limitations: Although our method yields very high quality surfaces at a low, and constant, memory cost, the computational requirements for the surface extraction can become very high, especially when using complex surface functions, that is, [YT13].
+This performance cost becomes especially noticeable in transparent surface renderings, making them comparably slow. Although
+our approach is ready to render adaptive fluid surfaces [WHK17],
+the performance quickly degrades with higher adaptivity ratios, as
+applying the same approach as was done for the simulation (see Section 4.2) is not directly possible.
+© 2020 The Authors. Computer Graphics Forum published by Eurographics - The European Association for Computer Graphics and John Wiley & Sons Ltd
+14678659, 2020, 6, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.14090, Wiley Online Library on [28/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+538
+7. Conclusions
+In this paper, we presented a data structure that can be used to efficiently simulate and render SPH fluid simulations using a combination of a cell table and hash map. The memory requirements of our
+approach do not scale with the domain size, particle resolution or
+particle distribution, but instead solely depend on the number of particles, making our approach well suited for usage on GPUs. Using
+our simulation data structure [WK19], we can efficiently simulate
+even highly adaptive SPH simulations in unbounded simulation domains. Using our rendering data structure, we can efficiently render
+an iso surface, without requiring an explicit surface extraction, using arbitrary surface metrics, that is, isotropic and anisotropic, using
+opaque or transparent shading models.
+Acknowledgements
+Open access funding enabled and organized by Projekt DEAL.
+References
+[AAOT13] Akinci G., Akinci N., Oswald E., Teschner M.:
+Adaptive surface reconstruction for sph using 3-level uniform
+grids. In WSCG (2013), Václav Skala-UNION Agency, pp. 195–
+204.
+[AAT13] Akinci N., Akinci G., Teschner M.: Versatile surface tension and adhesion for SPH fluids. ACM Transactions on
+Graphics 32, 6 (2013), 182.
+[AI08] Andoni A., Indyk P.: Near-optimal hashing algorithms for
+approximate nearest neighbor in high dimensions. Communications of the ACM 51, 1 (2008), 117.
+[APKG07] Adams B., Pauly M., Keiser R., Guibas L. J.: Adaptively sampled particle fluids. In SIGGRAPH ’07: ACM SIGGRAPH 2007 Papers (New York, NY, 2007), ACM Press, pp.
+48–es.
+[AW87] Amanatides, J., Woo, A.: A fast voxel traversal algorithm
+for ray tracing. Eurographics 87, (1987), 3–10.
+[BK15] Bender J., Koschier D.: Divergence-free smoothed particle hydrodynamics. In Proceedings of the 14th ACM SIGGRAPH/Eurographics Symposium on Computer Animation (Los
+Angeles, CA, 2015), ACM Press, pp. 147–155.
+[BKKW18] Bender J., Koschier D., Kugelstadt T., Weiler
+M.: Turbulent micropolar SPH fluids with foam. IEEE Transactions on Visualization and Computer Graphics 25, 6 (2018),
+2284–2295.
+539
+[BTS*17] Berger M., Tagliasacchi A., Seversky L. M.,
+Alliez P., Guennebaud G., Levine J. A., Sharf A.,
+Silva C. T.: A survey of surface reconstruction from
+point clouds. Computer Graphics Forum 36 (2017), 301–
+329.
+[DA12] Dehnen W., Aly H.: Improving convergence in smoothed
+particle hydrodynamics simulations without pairing instability.
+Monthly Notices of the Royal Astronomical Society 425, 2 (2012),
+1068–1082.
+[DC99] Desbrun M., Cani M.-P.: Space-Time Adaptive Simulation
+of Highly Deformable Substances. Research Report RR-3829,
+INRIA, 1999.
+[DCG11] Domínguez J. M., Crespo A. J. C., Gómez-Gesteira
+M.: Optimization strategies for parallel CPU and GPU implementations of a meshfree particle method. Preprint, 2011, http:
+//arxiv.org/abs/1110.3711.
+[DCH88] Drebin R. A., Carpenter L., Hanrahan P.: Volume
+rendering. ACM Siggraph Computer Graphics 22, 4 (1988), 65–
+74.
+[DCVB*13] Dominguez J. M., Crespo A. J., Valdez-Balderas
+D., Rogers B. D., Gomez-Gesteira M.: New multi-GPU implementation for smoothed particle hydrodynamics on heterogeneous clusters. Computer Physics Communications 184, 8
+(2013), 1848–1860.
+[FAW10] Fraedrich R., Auer S., Westermann R.: Efficient
+high-quality volume rendering of SPH data. IEEE Transactions
+on Visualization and Computer Graphics 16, 6 (2010), 1533–
+1540.
+[FS05] Foley T., Sugerman J.: Kd-tree acceleration structures for a gpu raytracer. In Proceedings of the ACM SIGGRAPH/EUROGRAPHICS Conference on Graphics hardware
+(New York, NY, 2005), ACM Press, pp. 15–22.
+[GBP*17] Gissler C., Band S., Peer A., Ihmsen M., Teschner
+M.: Generalized drag force for particle-based simulations. Computers & Graphics 69 (2017), 1–11.
+[GLHL11] Garcia I., Lefebvre S., Hornus S., Lasram A.:
+Coherent parallel hashing. ACM Transactions on Graphics 30,
+(2011), 161.
+[GM77] Gingold R. A., Monaghan J. J.: Smoothed particle
+hydrodynamics-theory and application to non-spherical stars.
+Monthly Notices of the Royal Astronomical Society 181 (1977),
+375–389.
+[Bli82] Blinn J. F.: A generalization of algebraic surface drawing.
+ACM Transactions on Graphics 1, 3 (1982), 235–256.
+[GPB*19] Gissler C., Peer A., Band S., Bender J., Teschner
+M.: Interlinked SPH pressure solvers for strong fluid-rigid coupling. ACM Transactions on Graphics 38, 1 (2019), 5.
+[BT07] Becker M., Teschner M.: Weakly compressible SPH
+for free surface flows. Proceedings of the 14th ACM SIGGRAPH/Eurographics Symposium on Computer Animation
+(2007), pp. 209–217.
+[GPSS07] Gunther J., Popov S., Seidel H.-P., Slusallek P.: Realtime ray tracing on GPU with BVH-based packet traversal. In
+2007 IEEE Symposium on Interactive Ray Tracing (Piscataway,
+NJ, 2007), IEEE, pp. 113–118.
+© 2020 The Authors. Computer Graphics Forum published by Eurographics - The European Association for Computer Graphics and John Wiley & Sons Ltd
+14678659, 2020, 6, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.14090, Wiley Online Library on [28/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+R. Winchenbach and A. Kolb / Multi Level Memory for Simulating and Rendering
+R. Winchenbach and A. Kolb / Multi Level Memory for Simulating and Rendering
+[Gre10] Green S.: Particle Simulation using CUDA. Cuda 4.0 Sdk,
+May (2010).
+[GSSP10] Goswami P., Schlegel P., Solenthaler B., Pajarola
+R.: Interactive sph simulation and rendering on the gpu. In Proceedings of the 2010 ACM SIGGRAPH/Eurographics Symposium on Computer Animation (Madrid, Spain, 2010), Eurographics Association, pp. 55–64.
+[HK89] Hernquist L., Katz N.: TREESPH - A unification of SPH
+with the hierarchical tree method. Astrophysical Journal Supplement Series 70 (1989), 419.
+[HS13] Horvath C. J., Solenthaler B.: Mass Preserving MultiScale SPH. Tech. Rep., Emeryville, CA, 2013.
+[IABT11] Ihmsen M., Akinci N., Becker M., Teschner M.:
+A parallel SPH implementation on multi-core CPUs. Computer
+Graphics Forum 30, 1 (2011), 99–112.
+[IOS*14] Ihmsen M., Orthmann J., Solenthaler B., Kolb A.,
+Teschner M.: SPH Fluids in Computer Graphics. Eurographics
+STARS, 2 (2014), 21–42.
+[KAD*06] Keiser R., Adams B., Dutré P., Guibas L., Pauly
+M.: Multiresolution Particle-Based Fluids. Tech. Rep. 520, Department of Computer Science, ETH Zurich, 2006.
+[Kar12] Karras T.: Thinking parallel, part iii: Tree construction on the GPU, 2012. https://devblogs.nvidia.com/thinkingparallel-part-iii-tree-construction-gpu/. Accessed: 2019-06-17.
+[KB17] Koschier D., Bender J.: Density maps for improved SPH boundary handling. In Proceedings of the ACM
+SIGGRAPH/Eurographics Symposium on Computer Animation
+(2017), ACM Press, pp. 1–10.
+[KBST19] Koschier D., Bender J., Solenthaler B., Teschner
+M.: Smoothed particle hydrodynamics techniques for the physics
+based simulation of fluids and solids. In Eurographics 2019 - Tutorials. W. Jakob W. and E. Puppo (Eds.), The Eurographics Association, Aire-la-Ville, Switzerland, pp. 1–41.
+[KSN08] Kanamori Y., Szego Z., Nishita T.: GPU-based fast
+ray casting for a large number of metaballs. Computer Graphics
+Forum 27 (2008), 351–360.
+[KW03] Kruger J., Westermann R.: Acceleration techniques for
+gpu-based volume rendering. In IEEE Visualization 2003 (Piscataway, NJ, 2003), IEEE, pp. 287–292.
+[LC87] Lorensen W. E., Cline H. E.: Marching cubes: A high resolution 3d surface construction algorithm. ACM Siggraph Computer Graphics 21, 4 (1987), 163–169.
+[LGS*09] Lauterbach C., Garland M., Sengupta S., Luebke
+D., Manocha D.: Fast BVH construction on GPUS. Computer
+Graphics Forum 28 (2009), 375–384.
+[LH06] Lefebvre S., Hoppe H.: Perfect spatial hashing. ACM
+Transactions on Graphics 25 (2006), 579–588.
+[MCG03] Müller M., Charypar D., Gross M.: Particle-based
+fluid simulation for interactive applications. Proceedings of the
+ACM SIGGRAPH/Eurographics Symposium on Computer Animation 5, (2003), 154–159.
+[MLJ*13] Museth K., Lait J., Johanson J., Budsberg J., Henderson R., Alden M., Cucka P., Hill D., Pearce A.: Openvdb:
+An open-source data structure and toolkit for high-resolution volumes. In Acm Siggraph 2013 Courses (2013), ACM Press, p. 19.
+[Mon05] Monaghan J. J.: Smoothed particle hydrodynamics. Reports on Progress in Physics 68, 8 (2005), 1703.
+[Mor66] Morton G. M.: A computer oriented geodetic data base
+and a new technique in file sequencing. International Business
+Machines Company, Armonk, New York, 1966.
+[MSD07] Müller M., Schirm S., Duthaler S.: Screen
+space meshes. In Proceedings of the 2007 ACM SIGGRAPH/Eurographics symposium on Computer animation
+(2007), pp. 9–15.
+[NJB07] Navratil P., Johnson J., Bromm V.: Visualization of cosmological particle-based datasets. IEEE Transactions on Visualization and Computer Graphics 13, 6 (2007), 1712–1718.
+[OK12] Orthmann J., Kolb A.: Temporal blending for adaptive
+SPH. Computer Graphics Forum 31 (2012), 2436–2449.
+[OVSM98] Owen J. M., Villumsen J. V., Shapiro P. R., Martel
+H.: Adaptive smoothed particle hydrodynamics: Methodology. ii.
+The Astrophysical Journal Supplement Series 116, 2 (1998), 155.
+[PJH16] Pharr M., Jakob W., Humphreys G.: Physically Based
+Rendering: From Theory to Implementation. Morgan Kaufmann,
+Burlington, MA, 2016.
+[SI12] Szécsi L., Illés D.: Real-time metaball ray casting with
+fragment lists. In Eurographics (Short Papers) (2012), 93–96.
+[THM*03] Teschner M., Heidelberger B., Müller M., Pomerantes D., Gross M. H.: Optimized spatial hashing for collision
+detection of deformable objects. Vmv 3, (2003), 47–54.
+[UHT17] Um K., Hu X., Thuerey N.: Perceptual evaluation of
+liquid simulation methods. ACM Transactions on Graphics 36, 4
+(2017), 143.
+[vdLGS09] van der Laan W. J., Green S., Sainz M.: Screen space
+fluid rendering with curvature flow. In Proceedings of the 2009
+Symposium on Interactive 3D Graphics and Games (2009), pp.
+91–98.
+[WHK16] Winchenbach R., Hochstetter H., Kolb A.: Constrained neighbor lists for SPH-based fluid simulations. In Proceedings of the 15th ACM SIGGRAPH/Eurographics Symposium
+on Computer Animation (July 2016).
+[WHK17] Winchenbach R., Hochstetter H., Kolb A.: Infinite
+continuous adaptivity for incompressible SPH. ACM Transactions on Graphics 36, 4 (2017), 102:1–102:10.
+© 2020 The Authors. Computer Graphics Forum published by Eurographics - The European Association for Computer Graphics and John Wiley & Sons Ltd
+14678659, 2020, 6, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.14090, Wiley Online Library on [28/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+540
+[Win] Winchenbach R.: openmaelstrom, 2019–. URL: http://
+www.cg.informatik.uni-siegen.de/openMaelstrom. Accessed:
+2020-02-28.
+[WK19] Winchenbach R., Kolb A.: Multi-level-memory structures for adaptive SPH simulations. In Vision, Modeling and Visualization (2019), Schulz, H.-J., Teschner, M., Wimmer, M.,
+(Eds.), The Eurographics Association, Aire-la-Ville, Switzerland. 99–107.
+[WLS*17] Wu W., Li H., Su T., Liu H., Lv Z.: Gpu-accelerated
+SPH fluids surface reconstruction using two-level spatial uniform
+grids. The Visual Computer 33, 11 (2017), 1429–1442.
+[WRR18] Winkler D., Rezavand M., Rauch W.: Neighbour
+lists for smoothed particle hydrodynamics on GPUS. Computer
+Physics Communications 225 (2018), 140–148.
+[WTYH18] Wu K., Truong N. P., Yuksel C., Hoetzlein R.:
+Fast fluid simulations with sparse volumes on the GPU. Computer Graphics Forum 37, 2 (2018), 157–167.
+[XZY17] Xiao X., Zhang S., Yang X.: Real-time high-quality
+surface rendering for large scale particle-based fluids. In Pro-
+541
+ceedings of the 21st ACM Siggraph Symposium on Interactive
+3D Graphics and Games (2017), pp. 1–8.
+[YT13] Yu J., Turk G.: Reconstructing surfaces of particle-based
+fluids using anisotropic kernels. ACM Transactions on Graphics
+32, 1 (2013), 5.
+[ZB05] Zhu Y., Bridson R.: Animating sand as a fluid. ACM
+Transactions on Graphics 24, 3 (2005), 965–972.
+[ZPVBG01] Zwicker M., Pfister H., Van Baar J., Gross M.:
+Surface splatting. In Proceedings of the 28th Annual Conference
+on Computer Graphics and Interactive Techniques (2001), pp.
+371–378.
+Supporting Information
+Additional supporting information may be found online in the Supporting Information section at the end of the article.
+Data Video S1
+Data S2
+© 2020 The Authors. Computer Graphics Forum published by Eurographics - The European Association for Computer Graphics and John Wiley & Sons Ltd
+14678659, 2020, 6, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.14090, Wiley Online Library on [28/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+R. Winchenbach and A. Kolb / Multi Level Memory for Simulating and Rendering

@@ -1,0 +1,166 @@
+--- v001.md
++++ v002.md
+@@ -4,14 +4,14 @@
+ 
+ ## Overview
+-Topological Sort for Cell Projection (MPVO) is an $O(n)$ algorithm for computing a back-to-front visibility ordering of convex polyhedral cells in a convex grid [S1, S2, S3]. It solves the occlusion ordering problem required for correct alpha-blending in object-order volume rendering by constructing a directed graph of pairwise occlusion relations between adjacent cells and performing a topological sort [S1, S3]. Unlike [Projected Tetrahedra](877-projected-tetrahedra.md) which may use simpler centroid sorts, MPVO guarantees a correct visibility order for convex meshes by respecting the transitive occlusion chain along viewing rays [S1, S3]. It fails on non-convex meshes because it ignores occlusion across empty space between non-adjacent cells [S1, S3].
++Topological Sort for Cell Projection (MPVO) is an $O(n)$ algorithm for computing a back-to-front visibility ordering of convex polyhedral cells in a convex grid [S1, S2, S3]. It solves the occlusion ordering problem required for correct alpha-blending in object-order volume rendering by constructing a directed graph of pairwise occlusion relations between adjacent cells and performing a topological sort [S1, S3]. Unlike [Tetrahedral Volume Rendering](820-tetrahedral-volume-rendering.md) or [Projected Tetrahedra](877-projected-tetrahedra.md) which may rely on simpler centroid or distance-based heuristics, MPVO guarantees a correct visibility order for convex meshes by respecting the transitive occlusion chain along viewing rays [S1, S3]. It fails on non-convex meshes because it ignores occlusion across empty space between non-adjacent cells [S1, S3].
+ 
+ ## How it works
+-**Inputs:** A convex grid of convex polyhedral cells; a viewpoint $V$ (for perspective) or a projection direction vector $\vec{d}$ (for orthogonal).
+-**Outputs:** A list of cells sorted in back-to-front order.
++**Inputs:** A convex grid of convex polyhedral cells; a viewpoint $V$ (for perspective) or a projection direction vector $\vec{d}$ (for orthogonal) [S1, S3].
++**Outputs:** A list of cells sorted in back-to-front order [S1, S3].
+ 
+ **Data Structures:**
+-1.  **Cell Node:** Contains `incount` (integer, number of incoming edges), `visited` (boolean), `cycle_detection` (boolean), and a list of outgoing edges (indices of cells it occludes).
+-2.  **Directed Graph:** Implicitly defined by adjacency. Nodes are cells. An edge exists from cell $B$ to cell $A$ if $B <_{vp} A$.
+-3.  **Queue:** A FIFO queue for cells with `incount` == 0.
++1.  **Cell Node:** Contains `incount` (integer, number of incoming edges), `visited` (boolean), `cycle_detection` (boolean), `outgoing` (list of cell references it occludes), and `incoming` (list of cell references that occlude it) [S1, S3].
++2.  **Directed Graph:** Implicitly defined by adjacency. Nodes are cells. An edge exists from cell $B$ to cell $A$ if $B <_{vp} A$ [S1].
++3.  **Queue / Sink List:** A FIFO queue for cells with `incount == 0` (Kahn's variant) or a list of sink cells with no outgoing edges (DFS variant) [S1, S3].
+ 
+ **Definitions:**
+@@ -22,10 +22,10 @@
+ 
+ 1.  **Phase I: Construct Partial Ordering (Graph Construction)**
+-    *   Initialize all cells $C$: $C.incount = 0$, $C.visited = false$, $C.cycle\_detection = false$ [S1, S3].
++    *   Initialize all cells $C$: set $C.incount = 0$, $C.visited = false$, $C.cycle\_detection = false$ [S1, S3].
+     *   For each interior face $f$ shared by cells $c_1$ and $c_2$:
+-        *   Determine the direction of occlusion.
+-        *   **Perspective View:** Calculate the vector from the viewpoint $V$ to a point on the face. If $V$ and $c_1$ are on the same side of the plane of $f$ (i.e., $D(V)$ and $D(c_1)$ have the same sign relative to the face normal pointing out of $c_1$), then $c_1$ occludes $c_2$. Add a directed edge from $c_2$ to $c_1$ [S1, S3].
+-        *   **Orthogonal View:** Use the projection direction $\vec{d}$. If $\vec{d} \cdot \vec{n}_{c_1} > 0$ (where $\vec{n}_{c_1}$ points out of $c_1$), $c_1$ is "in front" of $c_2$. Add edge from $c_2$ to $c_1$ [S3].
+-        *   Increment $c_1.incount$ for each incoming edge [S1].
++        *   Determine the direction of occlusion [S3].
++        *   **Perspective View:** Calculate the vector from the viewpoint $V$ to a point on the face. If $V$ and $c_1$ are on the same side of the plane of $f$ (i.e., $D(V)$ and $D(c_1)$ have the same sign relative to the face normal pointing out of $c_1$), then $c_1$ occludes $c_2$ [S1, S3].
++        *   **Orthogonal View:** Use the projection direction $\vec{d}$. If $\vec{d} \cdot \vec{n}_{c_1} > 0$ (where $\vec{n}_{c_1}$ points out of $c_1$), $c_1$ is "in front" of $c_2$ [S3].
++        *   Add a directed edge from the occluded cell to the occluder. Increment the occluder's `incount` [S1].
+     *   Identify **sink cells**: Cells with no outgoing arrows across interior faces (i.e., they do not occlude any other cell across a shared face). Add these to a `sink_cell_list` [S3].
+     *   Identify **source cells**: Cells with $incount == 0$. Add these to the `queue` [S1].
+@@ -49,84 +49,48 @@
+ 
+ ```python
+-def mpvo_sort(cells, viewpoint, is_orthogonal=False, projection_dir=None):
+-    # Phase I: Graph Construction
++def mpvo_sort(cells, interior_faces, viewpoint, is_orthogonal=False, projection_dir=None):
++    # Phase I: Initialize and build graph
+     for cell in cells:
+         cell.incount = 0
+         cell.visited = False
+         cell.cycle_detection = False
+-        cell.outgoing_edges = [] # List of cells that this cell occludes (edges FROM this cell)
+-        cell.incoming_edges = [] # List of cells that occlude this cell (edges TO this cell)
+-
+-    sink_cell_list = []
+-    
+-    # Process interior faces
+-    for face in interior_faces:
+-        c1, c2 = face.cells # c1 and c2 share this face
+-        # Determine direction: who occludes whom?
+-        # Edge goes FROM occluded TO occluder.
+-        # If c1 occludes c2, edge is c2 -> c1.
++        cell.outgoing = [] # cells that this cell occludes (edges FROM this cell)
++        cell.incoming = [] # cells that occlude this cell (edges TO this cell)
+         
+-        occludes, occluded = determine_occlusion(c1, c2, face, viewpoint, is_orthogonal, projection_dir)
++    for c1, c2, face in interior_faces:
++        # Determine occlusion direction
++        if is_orthogonal:
++            n = face.normal # points out of c1
++            if dot(projection_dir, n) > 0:
++                occluder, occluded = c1, c2
++            else:
++                occluder, occluded = c2, c1
++        else:
++            # Perspective: V and c1 on same side of face plane -> c1 occludes c2
++            n = face.normal
++            P = face.center
++            d_v = dot(n, viewpoint - P)
++            d_c1 = dot(n, c1.center - P)
++            if (d_v > 0 and d_c1 > 0) or (d_v < 0 and d_c1 < 0):
++                occluder, occluded = c1, c2
++            else:
++                occluder, occluded = c2, c1
++                
++        # Add edge: occluded -> occluder
++        occluded.outgoing.append(occluder)
++        occluder.incoming.append(occluded)
++        occluder.incount += 1
+         
+-        # Add edge: occluded -> occludes
+-        occluded.outgoing_edges.append(occludes)
+-        occludes.incoming_edges.append(occluded)
+-        occludes.incount += 1
+-        
+-        # Check if c1 or c2 is a sink (no outgoing edges)
+-        # Note: incount tracks incoming. Outgoing count is len(outgoing_edges).
+-        # We need to track outgoing count separately or check len()
+-        if len(occludes.outgoing_edges) == 0:
+-            sink_cell_list.append(occludes)
+-        if len(occluded.outgoing_edges) == 0:
+-            sink_cell_list.append(occluded)
+-
+-    # Initialize Queue with sources (incount == 0)
+-    queue = [c for c in cells if c.incount == 0]
++    # Identify sink cells (no outgoing edges)
++    sink_cell_list = [c for c in cells if len(c.outgoing) == 0]
+     
+     # Phase II: Topological Sort using DFS
+     sorted_output = []
+     
+-    # We use a stack for iterative DFS to avoid recursion limits, 
+-    # but the logic follows the recursive definition in [S3].
+-    # To strictly follow [S3], we process sink cells first.
+-    
+     for start_cell in sink_cell_list:
+         if not start_cell.visited:
+             dfs_visit(start_cell, sorted_output)
+-
+-    # Handle any remaining unvisited cells (should be covered by sink list if acyclic, 
+-    # but queue method in [S1] is an alternative for acyclic graphs)
+-    # The [S3] DFS method is preferred for cycle detection.
+-    
++            
+     return sorted_output
+-
+-def determine_occlusion(c1, c2, face, viewpoint, is_orthogonal, projection_dir):
+-    # Returns (occluder, occluded)
+-    # Edge direction: occluded -> occluder
+-    if is_orthogonal:
+-        # Use projection direction
+-        # If normal points out of c1, and dot(projection_dir, normal) > 0, c1 is in front
+-        n = face.normal # Points out of c1
+-        if dot(projection_dir, n) > 0:
+-            return c1, c2 # c1 occludes c2
+-        else:
+-            return c2, c1
+-    else:
+-        # Perspective: Viewpoint V
+-        # If V and c1 are on the same side of face plane, c1 occludes c2
+-        # Plane defined by face points and normal n (out of c1)
+-        # Distance of V: D(V) = dot(n, V - P_face)
+-        # Distance of c1 center: D(c1) = dot(n, c1.center - P_face)
+-        # If signs are same, V and c1 are on same side
+-        n = face.normal
+-        P = face.center
+-        d_v = dot(n, viewpoint - P)
+-        d_c1 = dot(n, c1.center - P)
+-        
+-        if (d_v > 0 and d_c1 > 0) or (d_v < 0 and d_c1 < 0):
+-            return c1, c2 # c1 occludes c2
+-        else:
+-            return c2, c1
+ 
+ def dfs_visit(current_cell, sorted_output):
+@@ -135,9 +99,9 @@
+     
+     # Eligible neighbors are those that occlude current_cell (incoming edges)
+-    for neighbor in current_cell.incoming_edges:
++    for neighbor in current_cell.incoming:
+         if not neighbor.visited:
+             dfs_visit(neighbor, sorted_output)
+         elif neighbor.cycle_detection:
+-            raise CycleError("Visibility cycle detected")
++            raise ValueError("Visibility cycle detected")
+             
+     # No remaining eligible neighbors

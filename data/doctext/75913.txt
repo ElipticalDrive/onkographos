@@ -1,0 +1,859 @@
+# sdf-math-rs
+
+[![Deploy GitHub Pages](https://github.com/bhubbard/sdf-math-rs/actions/workflows/pages.yml/badge.svg)](https://github.com/bhubbard/sdf-math-rs/actions/workflows/pages.yml)
+[![GitHub Pages](https://img.shields.io/badge/Live_Visualizer-GitHub_Pages-blue?style=flat&logo=github)](https://code.brandonhubbard.com/sdf-math-rs/)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
+[![Rust: Edition 2024](https://img.shields.io/badge/Rust-2024_Edition-orange?logo=rust)](https://www.rust-lang.org/)
+
+A pure Rust implementation of 2D and 3D Signed Distance Fields (SDF), Constructive Solid Geometry (CSG), polynomial smooth blending, spatial domain transformations, and sphere tracing ray marching algorithms based on the mathematical research of **Inigo Quilez**.
+
+✨ **[Live Interactive 2D/3D SDF & Ray Marching Visualizer](https://code.brandonhubbard.com/sdf-math-rs/)** (or [GitHub Pages mirror](https://bhubbard.github.io/sdf-math-rs/))
+
+---
+
+## Features
+
+- **2D Distance Functions (`src/sdf2d.rs`)**:
+  - `circle(p, r)`: Euclidean circle centered at origin.
+  - `box2d(p, b)`: Axis-aligned box with half-extents $b$.
+  - `oriented_box(p, a, b, th)`: Arbitrarily rotated box from point $a$ to $b$ with thickness $th$.
+  - `segment(p, a, b)`: Distance to 1D line segment.
+  - `capsule2d(p, a, b, r)`: 2D stadium / capsule.
+  - `equilateral_triangle(p, r)`: Inigo Quilez exact equilateral triangle distance.
+  - `rounded_box2d(p, b, r)`: Box with rounded corners.
+  - `ring(p, r, th)`: Annulus ring with radius and wall thickness.
+- **3D Distance Functions (`src/sdf3d.rs`)**:
+  - `sphere(p, r)`: Euclidean sphere.
+  - `box3d(p, b)`: Axis-aligned 3D cuboid.
+  - `rounded_box(p, b, r)`: Box with continuous rounded edges.
+  - `torus(p, t)`: Torus in XZ plane with major radius $t_x$ and minor radius $t_y$.
+  - `capped_cylinder(p, h, r)`: Cylinder along Y-axis with half-height $h$ and radius $r$.
+  - `capsule3d(p, a, b, r)`: 3D capsule segment.
+  - `cone(p, r, h)`: Exact distance to cone with base radius $r$ and height $h$.
+  - `plane(p, n, h)`: Infinite oriented plane with normal $n$ and offset $h$.
+  - `ellipsoid(p, r)`: Semi-axes bounding ellipsoid.
+- **CSG Combinators & Domain Operations (`src/ops.rs`)**:
+  - Boolean CSG: `union` ($\min$), `subtraction` ($\max(-d_1, d_2)$), `intersection` ($\max$).
+  - Polynomial Smooth Minimum (`smin(a, b, k)`):
+    $$h = \max(k - |a - b|, 0) / k$$
+    $$\text{smin}(a, b, k) = \min(a, b) - h^2 \cdot k \cdot 0.25$$
+  - Polynomial Smooth Maximum (`smax(a, b, k)`), `smooth_subtraction`, and `smooth_intersection`.
+  - Domain tiling: `repeat(p, c)` and `repeat_finite(p, c, l)`.
+  - Non-linear transforms: `twist(p, k)` and `bend(p, k)`.
+  - Harmonic trigonometric noise displacement: `displacement_noise(p, freq, amp)`.
+- **Ray Marching & Shading Engine (`src/raymarching.rs`)**:
+  - Sphere tracing algorithm: $t_{i+1} = t_i + \text{scene}(p)$.
+  - Surface normal estimation using Inigo Quilez's **tetrahedron gradient** ($O(4)$ distance queries instead of 6).
+  - Ambient Occlusion (AO) estimation along surface normal vectors.
+  - Penumbra soft shadow cone tracing without band artifacts.
+
+---
+
+## Quick Start
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+sdf-math-rs = { git = "https://github.com/bhubbard/sdf-math-rs" }
+glam = "0.29"
+```
+
+### 1. Evaluating 2D & 3D Signed Distance Fields
+
+```rust
+use glam::{Vec2, Vec3};
+use sdf_math_rs::{sdf2d, sdf3d, ops};
+
+fn main() {
+    // 2D distance to a rounded box
+    let p2 = Vec2::new(1.2, 0.5);
+    let d2 = sdf2d::rounded_box2d(p2, Vec2::new(1.0, 0.8), 0.2);
+    println!("2D Box Distance: {d2}");
+
+    // 3D smooth blending of a sphere and a torus
+    let p3 = Vec3::new(0.5, 0.2, 0.0);
+    let d_sphere = sdf3d::sphere(p3, 1.0);
+    let d_torus = sdf3d::torus(p3, Vec2::new(1.2, 0.3));
+    
+    // Smooth union blending with radius k = 0.3
+    let blended = ops::smin(d_sphere, d_torus, 0.3);
+    println!("Smooth Blended CSG: {blended}");
+}
+```
+
+### 2. Ray Marching & Sphere Tracing a Scene
+
+```rust
+use glam::Vec3;
+use sdf_math_rs::{
+    ray_march, Camera, RayMarchConfig,
+    sdf3d::{plane, sphere},
+    ops::smin,
+};
+
+fn main() {
+    // Define an SDF scene closure
+    let scene = |p: Vec3| {
+        let s1 = sphere(p - Vec3::new(0.0, 1.0, 0.0), 1.0);
+        let s2 = sphere(p - Vec3::new(0.8, 1.2, 0.0), 0.7);
+        let blended_spheres = smin(s1, s2, 0.4);
+        let ground = plane(p, Vec3::Y, 0.0);
+        blended_spheres.min(ground)
+    };
+
+    // Setup camera
+    let cam = Camera::new(
+        Vec3::new(0.0, 2.0, 4.0), // Eye position
+        Vec3::new(0.0, 1.0, 0.0), // Target
+        Vec3::Y,                  // Up vector
+        60.0,                     // FOV degrees
+        16.0 / 9.0,               // Aspect ratio
+    );
+
+    // Cast a ray through screen center (0, 0)
+    let ray = cam.get_ray(glam::Vec2::ZERO);
+    let config = RayMarchConfig::default();
+
+    let hit = ray_march(&ray, scene, &config);
+    if hit.hit {
+        println!("Surface hit at distance: {:.3}", hit.distance);
+        println!("Hit coordinate: {:?}", hit.position);
+        println!("Estimated normal: {:?}", hit.normal);
+    }
+}
+```
+
+---
+
+## Interactive Visualizer
+
+The included web visualizer in `docs/index.html` showcases:
+- **3D Ray Marching**: Real-time sphere tracing with smooth union blending ($k$ slider), twist deformation, displacement noise, azimuth light rotation, ambient occlusion, and soft shadow penumbras.
+- **2D Contour Field**: Exact Inigo Quilez distance coloring (orange exterior, cyan interior, white zero-contour), animated wave pulses, and interactive mouse tangent clearance circles.
+
+Try it in your browser: **[https://code.brandonhubbard.com/sdf-math-rs/](https://code.brandonhubbard.com/sdf-math-rs/)**
+
+---
+
+## License
+
+Dual-licensed under either:
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+### examples/bench_vs_original.rs
+```
+use std::time::Instant;
+use glam::{Vec2, Vec3};
+use sdf_math_rs::ops::{smin, subtraction, union};
+use sdf_math_rs::raymarching::{estimate_normal, ray_march, Ray, RayMarchConfig};
+use sdf_math_rs::sdf2d::{circle, rounded_box2d};
+use sdf_math_rs::sdf3d::{box3d, sphere, torus};
+
+fn main() {
+    println!("============================================================");
+    println!("     sdf-math-rs (Rust) vs Inigo Quilez Reference (C/GLSL)  ");
+    println!("============================================================");
+
+    // 1. Primitive 3D SDF Queries Throughput
+    println!("\n--- 1. Primitive 3D SDF Throughput (Sphere, Box, Torus) ---");
+    {
+        let iterations = 10_000_000;
+        let start = Instant::now();
+        let mut sum_dist = 0.0;
+
+        for i in 0..iterations {
+            let p = Vec3::new((i % 100) as f32 * 0.05, ((i / 100) % 100) as f32 * 0.05, 1.5);
+            let d_sphere = sphere(p, 1.0);
+            let d_box = box3d(p - Vec3::new(2.0, 0.0, 0.0), Vec3::new(0.8, 0.8, 0.8));
+            let d_torus = torus(p - Vec3::new(0.0, 2.0, 0.0), Vec2::new(1.2, 0.3));
+            let d = smin(smin(d_sphere, d_box, 0.2), d_torus, 0.2);
+            sum_dist += d;
+        }
+
+        let elapsed = start.elapsed();
+        let ns_per_eval = elapsed.as_nanos() as f64 / iterations as f64;
+        let evals_per_sec = iterations as f64 / elapsed.as_secs_f64();
+
+        println!(
+            "SDF Compound Evals: {} | Time: {:.2?} | Latency: {:.2} ns/eval | {:>10.0} evals/s | Sum: {:.1}",
+            iterations, elapsed, ns_per_eval, evals_per_sec, sum_dist
+        );
+    }
+
+    // 2. Full Sphere-Tracing Ray Marching (Raycast Resolution)
+    println!("\n--- 2. Sphere Tracing Raymarching Engine (Complex CSG Scene) ---");
+    {
+        let scene = |p: Vec3| {
+            let s1 = sphere(p - Vec3::new(0.0, 0.0, 5.0), 1.2);
+            let b1 = box3d(p - Vec3::new(0.0, 0.0, 5.0), Vec3::splat(1.0));
+            let blend = smin(s1, b1, 0.3);
+            let hole = sphere(p - Vec3::new(0.0, 0.0, 5.0), 0.7);
+            subtraction(hole, blend)
+        };
+
+        let config = RayMarchConfig {
+            min_dist: 0.01,
+            max_dist: 50.0,
+            max_steps: 64,
+            epsilon: 0.001,
+        };
+
+        let rays_to_trace = 500_000;
+        let start = Instant::now();
+        let mut hits = 0;
+
+        for i in 0..rays_to_trace {
+            let u = (i % 500) as f32 / 500.0 - 0.5;
+            let v = (i / 500) as f32 / 1000.0 - 0.5;
+            let dir = Vec3::new(u * 1.2, v * 1.2, 1.0).normalize();
+            let ray = Ray::new(Vec3::new(0.0, 0.0, 0.0), dir);
+
+            let hit = ray_march(&ray, scene, &config);
+            if hit.hit {
+                hits += 1;
+            }
+        }
+
+        let elapsed = start.elapsed();
+        let us_per_ray = elapsed.as_micros() as f64 / rays_to_trace as f64;
+        let rays_per_sec = rays_to_trace as f64 / elapsed.as_secs_f64();
+
+        println!(
+            "Rays Marched: {} | Time: {:.2?} | Latency: {:.2} µs/ray | {:>10.0} rays/s | Hits: {}",
+            rays_to_trace, elapsed, us_per_ray, rays_per_sec, hits
+        );
+    }
+
+    // 3. Tetrahedron Normal Estimation
+    println!("\n--- 3. Tetrahedron Analytical Surface Normal Estimation ---");
+    {
+        let scene = |p: Vec3| torus(p, Vec2::new(2.0, 0.5));
+        let iterations = 2_000_000;
+        let start = Instant::now();
+        let mut normal_sum = Vec3::ZERO;
+
+        for i in 0..iterations {
+            let angle = (i % 360) as f32 * std::f32::consts::PI / 180.0;
+            let p = Vec3::new(angle.cos() * 2.5, 0.0, angle.sin() * 2.5);
+            let n = estimate_normal(p, &scene, 1e-4);
+            normal_sum += n;
+        }
+
+        std::hint::black_box(normal_sum);
+        let elapsed = start.elapsed();
+        let ns_per_normal = elapsed.as_nanos() as f64 / iterations as f64;
+        let normals_per_sec = iterations as f64 / elapsed.as_secs_f64();
+
+        println!(
+            "Normal Estimates: {} | Time: {:.2?} | Latency: {:.2} ns/normal | {:>10.0} normals/s | Sum: {:.1}",
+            iterations, elapsed, ns_per_normal, normals_per_sec, normal_sum.length()
+        );
+    }
+
+    // 4. 2D SDF Glyph & UI Primitives
+    println!("\n--- 4. 2D SDF Glyph & UI Geometry (Rounded Box & Circle) ---");
+    {
+        let iterations = 10_000_000;
+        let start = Instant::now();
+        let mut sum_dist2d = 0.0;
+
+        for i in 0..iterations {
+            let p = Vec2::new((i % 200) as f32 * 0.1, ((i / 200) % 200) as f32 * 0.1);
+            let d_box = rounded_box2d(p, Vec2::new(10.0, 5.0), 2.0);
+            let d_circ = circle(p - Vec2::new(5.0, 2.0), 3.0);
+            sum_dist2d += union(d_box, d_circ);
+        }
+
+        let elapsed = start.elapsed();
+        let ns_per_eval2d = elapsed.as_nanos() as f64 / iterations as f64;
+        let evals2d_per_sec = iterations as f64 / elapsed.as_secs_f64();
+
+        println!(
+            "2D SDF Evaluations: {} | Time: {:.2?} | Latency: {:.2} ns/eval ({:>10.0} evals/s) | Sum: {:.1}",
+            iterations, elapsed, ns_per_eval2d, evals2d_per_sec, sum_dist2d
+        );
+    }
+
+    println!("\n============================================================");
+    println!("                      Benchmark Complete                    ");
+    println!("============================================================");
+}
+```
+
+### src/lib.rs
+```
+//! # sdf-math-rs
+//!
+//! A pure Rust implementation of 2D & 3D Signed Distance Fields (SDF), Constructive Solid
+//! Geometry (CSG), polynomial smooth blending, domain transformations, and ray marching /
+//! sphere tracing algorithms based on the mathematical research of **Inigo Quilez**.
+//!
+//! ## Modules
+//!
+//! - [`sdf2d`]: 2D distance functions: `circle`, `box2d`, `oriented_box`, `segment`, `capsule2d`, `equilateral_triangle`, `rounded_box2d`, `ring`.
+//! - [`sdf3d`]: 3D distance functions: `sphere`, `box3d`, `rounded_box`, `torus`, `capped_cylinder`, `capsule3d`, `cone`, `plane`, `ellipsoid`.
+//! - [`ops`]: CSG operations (`union`, `subtraction`, `intersection`), smooth blending (`smin`, `smax`, `smooth_subtraction`, `smooth_intersection`), and domain transforms (`repeat`, `twist`, `bend`, `displacement_noise`).
+//! - [`raymarching`]: Sphere tracing engine (`ray_march`), tetrahedron normal estimation (`estimate_normal`), ambient occlusion (`ambient_occlusion`), and soft shadow cone tracing (`soft_shadow`).
+
+pub mod ops;
+pub mod raymarching;
+pub mod sdf2d;
+pub mod sdf3d;
+
+// Re-export glam types for convenience
+pub use glam::{Vec2, Vec3};
+
+// Re-export primary operators and raymarching constructs
+pub use ops::{
+    bend, displacement_noise, intersection, repeat, repeat2d, repeat_finite, smax, smin,
+    smooth_intersection, smooth_subtraction, subtraction, twist, union,
+};
+pub use raymarching::{
+    ambient_occlusion, estimate_normal, ray_march, soft_shadow, Camera, Ray, RayMarchConfig,
+    RayMarchHit,
+};
+```
+
+### src/ops.rs
+```
+//! CSG Combinators, smooth blending, and spatial domain transformations.
+
+use glam::{Vec2, Vec3};
+
+/// Constructive Solid Geometry (CSG) boolean union: $\min(d_1, d_2)$.
+#[inline]
+pub fn union(d1: f32, d2: f32) -> f32 {
+    d1.min(d2)
+}
+
+/// CSG boolean subtraction: carves shape 1 out of shape 2: $\max(-d_1, d_2)$.
+#[inline]
+pub fn subtraction(d1: f32, d2: f32) -> f32 {
+    (-d1).max(d2)
+}
+
+/// CSG boolean intersection: $\max(d_1, d_2)$.
+#[inline]
+pub fn intersection(d1: f32, d2: f32) -> f32 {
+    d1.max(d2)
+}
+
+/// Polynomial smooth minimum between two distances with smoothing radius `k`.
+///
+/// Implements Inigo Quilez's quadratic smooth minimum:
+/// $$h = \max(k - |a - b|, 0) / k$$
+/// $$\text{smin}(a, b, k) = \min(a, b) - h^2 \cdot k \cdot 0.25$$
+#[inline]
+pub fn smin(a: f32, b: f32, k: f32) -> f32 {
+    if k <= 1e-6 {
+        return a.min(b);
+    }
+    let h = (k - (a - b).abs()).max(0.0) / k;
+    a.min(b) - h * h * k * 0.25
+}
+
+/// Polynomial smooth maximum with smoothing factor `k`.
+///
+/// $$h = \max(k - |a - b|, 0) / k$$
+/// $$\text{smax}(a, b, k) = \max(a, b) + h^2 \cdot k \cdot 0.25$$
+#[inline]
+pub fn smax(a: f32, b: f32, k: f32) -> f32 {
+    if k <= 1e-6 {
+        return a.max(b);
+    }
+    let h = (k - (a - b).abs()).max(0.0) / k;
+    a.max(b) + h * h * k * 0.25
+}
+
+/// Smooth subtraction of distance `d1` from `d2` with blending factor `k`.
+#[inline]
+pub fn smooth_subtraction(d1: f32, d2: f32, k: f32) -> f32 {
+    smax(-d1, d2, k)
+}
+
+/// Smooth intersection of two distance fields with blending factor `k`.
+#[inline]
+pub fn smooth_intersection(d1: f32, d2: f32, k: f32) -> f32 {
+    smax(d1, d2, k)
+}
+
+/// Infinite domain repetition in 3D: tiles space with cell period `c`.
+#[inline]
+pub fn repeat(p: Vec3, c: Vec3) -> Vec3 {
+    p - c * (p / c).round()
+}
+
+/// Infinite domain repetition in 2D: tiles space with cell period `c`.
+#[inline]
+pub fn repeat2d(p: Vec2, c: Vec2) -> Vec2 {
+    p - c * (p / c).round()
+}
+
+/// Finite domain repetition in 3D: limits replication count within $[-l, l]$ cells.
+#[inline]
+pub fn repeat_finite(p: Vec3, c: Vec3, l: Vec3) -> Vec3 {
+    let q = (p / c).round().clamp(-l, l);
+    p - c * q
+}
+
+/// Twists space around the Y-axis proportional to height: $k$ controls rate of twist.
+#[inline]
+pub fn twist(p: Vec3, k: f32) -> Vec3 {
+    let angle = k * p.y;
+    let cos_a = angle.cos();
+    let sin_a = angle.sin();
+    Vec3::new(
+        cos_a * p.x - sin_a * p.z,
+        p.y,
+        sin_a * p.x + cos_a * p.z,
+    )
+}
+
+/// Bends space along the X-axis around the Y-axis.
+#[inline]
+pub fn bend(p: Vec3, k: f32) -> Vec3 {
+    let angle = k * p.x;
+    let cos_a = angle.cos();
+    let sin_a = angle.sin();
+    Vec3::new(
+        cos_a * p.x - sin_a * p.y,
+        sin_a * p.x + cos_a * p.y,
+        p.z,
+    )
+}
+
+/// Harmonic trigonometric displacement noise for adding organic or porous textures.
+#[inline]
+pub fn displacement_noise(p: Vec3, freq: f32, amp: f32) -> f32 {
+    amp * (freq * p.x).sin() * (freq * p.y).sin() * (freq * p.z).sin()
+}
+```
+
+### src/raymarching.rs
+```
+//! Sphere tracing, ray marching, normal estimation, ambient occlusion, and soft shadows.
+
+use glam::{Vec2, Vec3};
+
+/// A 3D ray with starting origin and unit direction vector.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ray {
+    /// Ray origin point.
+    pub origin: Vec3,
+    /// Unit ray direction vector.
+    pub direction: Vec3,
+}
+
+impl Ray {
+    /// Create a new ray. `direction` will be normalized.
+    #[inline]
+    pub fn new(origin: Vec3, direction: Vec3) -> Self {
+        Self {
+            origin,
+            direction: direction.normalize(),
+        }
+    }
+
+    /// Point along the ray at distance `t`.
+    #[inline]
+    pub fn point_at(&self, t: f32) -> Vec3 {
+        self.origin + self.direction * t
+    }
+}
+
+/// Configuration settings for sphere tracing.
+#[derive(Debug, Clone, Copy)]
+pub struct RayMarchConfig {
+    /// Minimum tracing distance.
+    pub min_dist: f32,
+    /// Maximum tracing distance.
+    pub max_dist: f32,
+    /// Maximum number of march steps.
+    pub max_steps: usize,
+    /// Surface hit threshold epsilon.
+    pub epsilon: f32,
+}
+
+impl Default for RayMarchConfig {
+    fn default() -> Self {
+        Self {
+            min_dist: 0.01,
+            max_dist: 50.0,
+            max_steps: 128,
+            epsilon: 1e-4,
+        }
+    }
+}
+
+/// The result of a sphere tracing operation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RayMarchHit {
+    /// True if an SDF surface was struck.
+    pub hit: bool,
+    /// Total distance traversed along the ray.
+    pub distance: f32,
+    /// Exact 3D point of contact on the surface.
+    pub position: Vec3,
+    /// Surface unit normal vector at the hit point.
+    pub normal: Vec3,
+    /// Number of steps taken during the march.
+    pub steps: usize,
+}
+
+/// Sphere trace a ray through an arbitrary SDF scene.
+///
+/// Implements standard sphere tracing:
+/// $$t_{i+1} = t_i + \text{scene}(p)$$
+pub fn ray_march<F>(ray: &Ray, scene_sdf: F, config: &RayMarchConfig) -> RayMarchHit
+where
+    F: Fn(Vec3) -> f32,
+{
+    let mut t = config.min_dist;
+    let mut steps = 0;
+
+    while t < config.max_dist && steps < config.max_steps {
+        steps += 1;
+        let pos = ray.point_at(t);
+        let dist = scene_sdf(pos);
+
+        if dist < config.epsilon {
+            let normal = estimate_normal(pos, &scene_sdf, config.epsilon * 2.0);
+            return RayMarchHit {
+                hit: true,
+                distance: t,
+                position: pos,
+                normal,
+                steps,
+            };
+        }
+
+        t += dist;
+    }
+
+    RayMarchHit {
+        hit: false,
+        distance: t,
+        position: ray.point_at(t),
+        normal: Vec3::ZERO,
+        steps,
+    }
+}
+
+/// Estimate surface normal using Inigo Quilez's tetrahedron technique ($O(4)$ SDF queries).
+///
+/// Uses four tetrahedron vertices to calculate gradient with minimal queries:
+/// $$k_0 = (1, -1, -1), k_1 = (-1, -1, 1), k_2 = (-1, 1, -1), k_3 = (1, 1, 1)$$
+/// $$N = \sum_{i=0}^3 k_i \cdot \text{scene}(p + k_i \cdot \epsilon)$$
+pub fn estimate_normal<F>(p: Vec3, scene_sdf: &F, eps: f32) -> Vec3
+where
+    F: Fn(Vec3) -> f32,
+{
+    let k0 = Vec3::new(1.0, -1.0, -1.0);
+    let k1 = Vec3::new(-1.0, -1.0, 1.0);
+    let k2 = Vec3::new(-1.0, 1.0, -1.0);
+    let k3 = Vec3::new(1.0, 1.0, 1.0);
+
+    let grad = k0 * scene_sdf(p + k0 * eps)
+        + k1 * scene_sdf(p + k1 * eps)
+        + k2 * scene_sdf(p + k2 * eps)
+        + k3 * scene_sdf(p + k3 * eps);
+
+    let len = grad.length();
+    if len > 1e-12 {
+        grad / len
+    } else {
+        Vec3::Y
+    }
+}
+
+/// Compute ambient occlusion along the surface normal vector.
+///
+/// Samples the distance field at successive steps away from the surface.
+/// If geometry is nearby, sampled distance will be less than step offset, darkening the surface.
+pub fn ambient_occlusion<F>(p: Vec3, normal: Vec3, scene_sdf: &F, step_size: f32, num_samples: usize) -> f32
+where
+    F: Fn(Vec3) -> f32,
+{
+    let mut occ = 0.0;
+    let mut weight = 1.0;
+
+    for i in 1..=num_samples {
+        let h = (i as f32) * step_size;
+        let d = scene_sdf(p + normal * h);
+        occ += (h - d) * weight;
+        weight *= 0.5;
+    }
+
+    (1.0 - (occ * 1.5).clamp(0.0, 1.0)).max(0.0)
+}
+
+/// Compute penumbra soft shadow factor towards a light source.
+///
+/// Implements Inigo Quilez's improved soft shadow cone tracing without shadow-acne band artifacts:
+/// Returns a scalar factor in $[0.0, 1.0]$ where 1.0 is fully lit and 0.0 is fully in shadow.
+pub fn soft_shadow<F>(
+    ray_origin: Vec3,
+    light_dir: Vec3,
+    min_dist: f32,
+    max_dist: f32,
+    softness_k: f32,
+    scene_sdf: &F,
+) -> f32
+where
+    F: Fn(Vec3) -> f32,
+{
+    let mut res: f32 = 1.0;
+    let mut t = min_dist;
+    let mut ph = 1e10f32;
+
+    while t < max_dist {
+        let h = scene_sdf(ray_origin + light_dir * t);
+        if h < 0.001 {
+            return 0.0;
+        }
+        let term = if ph < 1e9 && h < 1.99 * ph {
+            let y = (h * h) / (2.0 * ph);
+            if y < h && t > y {
+                let d = (h * h - y * y).max(0.0).sqrt();
+                (softness_k * d / (t - y)).min(softness_k * h / t)
+            } else {
+                softness_k * h / t
+            }
+        } else {
+            softness_k * h / t
+        };
+        res = res.min(term);
+        ph = h;
+        t += h.max(0.01);
+    }
+
+    res.clamp(0.0, 1.0)
+}
+
+/// Perspective pinhole camera for generating rays into the scene.
+#[derive(Debug, Clone, Copy)]
+pub struct Camera {
+    pub eye: Vec3,
+    pub target: Vec3,
+    pub up: Vec3,
+    pub fov_y_rad: f32,
+    pub aspect_ratio: f32,
+}
+
+impl Camera {
+    /// Create a new camera.
+    pub fn new(eye: Vec3, target: Vec3, up: Vec3, fov_deg: f32, aspect_ratio: f32) -> Self {
+        Self {
+            eye,
+            target,
+            up: up.normalize(),
+            fov_y_rad: fov_deg.to_radians(),
+            aspect_ratio,
+        }
+    }
+
+    /// Generate ray for normalized device coordinate `ndc` in $[-1, 1]$.
+    pub fn get_ray(&self, ndc: Vec2) -> Ray {
+        let forward = (self.target - self.eye).normalize();
+        let right = forward.cross(self.up).normalize();
+        let up = right.cross(forward).normalize();
+
+        let half_height = (self.fov_y_rad * 0.5).tan();
+        let half_width = half_height * self.aspect_ratio;
+
+        let dir = (forward + right * (ndc.x * half_width) + up * (ndc.y * half_height)).normalize();
+        Ray::new(self.eye, dir)
+    }
+}
+```
+
+### src/sdf2d.rs
+```
+//! 2D Signed Distance Fields (SDF) based on Inigo Quilez's distance functions.
+
+use glam::Vec2;
+
+/// Signed distance to a circle centered at origin with radius `r`.
+/// Returns negative inside, positive outside, and zero on the boundary.
+#[inline]
+pub fn circle(p: Vec2, r: f32) -> f32 {
+    p.length() - r
+}
+
+/// Signed distance to an axis-aligned box centered at origin with half-extents `b`.
+#[inline]
+pub fn box2d(p: Vec2, b: Vec2) -> f32 {
+    let d = p.abs() - b;
+    d.max(Vec2::ZERO).length() + d.x.max(d.y).min(0.0)
+}
+
+/// Signed distance to a box with custom orientation and thickness between points `a` and `b`.
+/// `th` is the full thickness (width) perpendicular to the segment [a, b].
+#[inline]
+pub fn oriented_box(p: Vec2, a: Vec2, b: Vec2, th: f32) -> f32 {
+    let l = (b - a).length();
+    if l <= 1e-6 {
+        return circle(p - a, th * 0.5);
+    }
+    let d = (b - a) / l;
+    let q = p - (a + b) * 0.5;
+    // Rotate into segment local frame: [d, (-d.y, d.x)]
+    let local = Vec2::new(d.x * q.x + d.y * q.y, -d.y * q.x + d.x * q.y);
+    let h = Vec2::new(l * 0.5, th * 0.5);
+    box2d(local, h)
+}
+
+/// Distance to a 1D line segment between endpoints `a` and `b`.
+#[inline]
+pub fn segment(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let pa = p - a;
+    let ba = b - a;
+    let len_sq = ba.length_squared();
+    let h = if len_sq > 1e-12 {
+        (pa.dot(ba) / len_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (pa - ba * h).length()
+}
+
+/// Signed distance to a 2D capsule (stadium) between points `a` and `b` with radius `r`.
+#[inline]
+pub fn capsule2d(p: Vec2, a: Vec2, b: Vec2, r: f32) -> f32 {
+    segment(p, a, b) - r
+}
+
+/// Signed distance to an equilateral triangle with inscribed radius `r`.
+/// Based on Inigo Quilez's exact equilateral triangle distance function.
+#[inline]
+pub fn equilateral_triangle(mut p: Vec2, r: f32) -> f32 {
+    let k = 3.0f32.sqrt();
+    p.x = p.x.abs() - r;
+    p.y += r / k;
+    if p.x + k * p.y > 0.0 {
+        p = Vec2::new(p.x - k * p.y, -k * p.x - p.y) * 0.5;
+    }
+    p.x -= p.x.clamp(-2.0 * r, 0.0);
+    -p.length() * p.y.signum()
+}
+
+/// Signed distance to a rounded box with corner radius `r`.
+#[inline]
+pub fn rounded_box2d(p: Vec2, b: Vec2, r: f32) -> f32 {
+    box2d(p, b - Vec2::splat(r)) - r
+}
+
+/// Signed distance to a ring / annulus with radius `r` and thickness `th`.
+#[inline]
+pub fn ring(p: Vec2, r: f32, th: f32) -> f32 {
+    (p.length() - r).abs() - th * 0.5
+}
+```
+
+### src/sdf3d.rs
+```
+//! 3D Signed Distance Fields (SDF) based on Inigo Quilez's distance functions.
+
+use glam::{Vec2, Vec3};
+
+/// Signed distance to a sphere centered at origin with radius `r`.
+#[inline]
+pub fn sphere(p: Vec3, r: f32) -> f32 {
+    p.length() - r
+}
+
+/// Signed distance to an axis-aligned 3D box centered at origin with half-extents `b`.
+#[inline]
+pub fn box3d(p: Vec3, b: Vec3) -> f32 {
+    let q = p.abs() - b;
+    q.max(Vec3::ZERO).length() + q.x.max(q.y.max(q.z)).min(0.0)
+}
+
+/// Signed distance to a rounded box with corner radius `r` and half-extents `b`.
+#[inline]
+pub fn rounded_box(p: Vec3, b: Vec3, r: f32) -> f32 {
+    let q = p.abs() - b + Vec3::splat(r);
+    q.max(Vec3::ZERO).length() + q.x.max(q.y.max(q.z)).min(0.0) - r
+}
+
+/// Signed distance to a torus lying in the XZ plane.
+/// `t.x` is the major radius (center of the tube to center of the torus).
+/// `t.y` is the minor radius (radius of the tube).
+#[inline]
+pub fn torus(p: Vec3, t: Vec2) -> f32 {
+    let q = Vec2::new(Vec2::new(p.x, p.z).length() - t.x, p.y);
+    q.length() - t.y
+}
+
+/// Signed distance to a capped cylinder aligned along the Y axis.
+/// `h` is half the height, `r` is the radius.
+#[inline]
+pub fn capped_cylinder(p: Vec3, h: f32, r: f32) -> f32 {
+    let d = Vec2::new(Vec2::new(p.x, p.z).length(), p.y.abs()) - Vec2::new(r, h);
+    d.max(Vec2::ZERO).length() + d.x.max(d.y).min(0.0)
+}
+
+/// Signed distance to a 3D line segment / capsule between points `a` and `b` with radius `r`.
+#[inline]
+pub fn capsule3d(p: Vec3, a: Vec3, b: Vec3, r: f32) -> f32 {
+    let pa = p - a;
+    let ba = b - a;
+    let len_sq = ba.length_squared();
+    let h = if len_sq > 1e-12 {
+        (pa.dot(ba) / len_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (pa - ba * h).length() - r
+}
+
+/// Signed distance to a cone with base radius `r` and height `h`.
+/// The cone apex is at origin (0, 0, 0) opening downward along -Y towards base at y = -h.
+#[inline]
+pub fn cone(p: Vec3, r: f32, h: f32) -> f32 {
+    // Inigo Quilez exact cone
+    let q = Vec2::new(Vec2::new(p.x, p.z).length(), p.y);
+    let tip = Vec2::ZERO;
+    let base = Vec2::new(r, -h);
+
+    let k = Vec2::new(r, h);
+    let m2 = k.length_squared();
+
+    let d1 = q - tip;
+    let _d2 = q - base;
+    let d3 = q - Vec2::new((q.x).clamp(0.0, r), -h);
+
+    // Segment distance to side slope
+    let ba = base - tip;
+    let u = (d1.dot(ba) / m2).clamp(0.0, 1.0);
+    let side_dist = (d1 - ba * u).length();
+    let cap_dist = d3.length();
+
+    let dist = side_dist.min(cap_dist);
+
+    // Inside test
+    let inside = q.y <= 0.0 && q.y >= -h && (q.x * h + q.y * r <= 0.0);
+    if inside {
+        -dist
+    } else {
+        dist
+    }
+}
+
+/// Signed distance to an infinite plane with unit normal `n` and offset `h`.
+/// $d = (p \cdot n) + h$.
+#[inline]
+pub fn plane(p: Vec3, n: Vec3, h: f32) -> f32 {
+    p.dot(n) + h
+}
+
+/// Signed distance to an ellipsoid with semi-axes `r`.
+#[inline]
+pub fn ellipsoid(p: Vec3, r: Vec3) -> f32 {
+    let k0 = (p / r).length();
+    let k1 = (p / (r * r)).length();
+    k0 * (k0 - 1.0) / k1
+}
+```

@@ -1,0 +1,2860 @@
+An efficient header-only C++ package for bounding volume hierarchies, implicit functions, signed distance fields, surface meshes, point clouds, and more! - Span ray tracing: fused compositions, BVHUnion and Tape traced exactly by rmrsk · Pull Request #237 · rmrsk/EBGeometry
+
+Span ray tracing: fused compositions, BVHUnion and Tape traced exactly by rmrsk · Pull Request #237 · rmrsk/EBGeometry · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+rmrsk
+commented
+Oct 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+Background
+#228 made firstHit()/intersects() work on any shape, but only the closed-form shapes and the mesh SDFs (#236) were traced exactly. Every composition (fused nodes, BVHUnion, Tape) was sphere traced, at tens of signed-distance evaluations per ray. Marching also reports a ray that passes within its tolerance of a surface as a hit, so a near miss can come back as a crossing up to the width of a feature too early. That is where the two host/device DIFFER rays on #228's and #236's receipts came from.
+This is the second follow-up of #228 (roadmap #232, "Span ray tracing"). The renderer (tier 4) waits for it. The design was settled in an interview (decisions D27–D35):
+a side table for the Tape;
+unions, intersections, complements and affine maps traced exactly, everything else marched in its box;
+mesh crossings collected into spans;
+span lists of 8 with a horizon and a restart;
+unions asking only for first crossings;
+a public spans() on RayForm;
+a forced-march switch;
+one PR;
+signature detection instead of the available flag.
+A scratch measurement first checked that exact tracing pays off. On a scene of 50 spheres and boxes, it ran 10–16× faster than marching on the host and 10–75× on the GPU. In that measurement marching was wrong on 0.15–0.3% of rays, and the exact answer matched a dense sampling of the SDF on every one of them.
+Solution
+Spans. A composition is traced from where the ray is inside each operand: its spans. Union, intersection and complement combine span lists as sets of points; a difference is an intersection with a complement. An affine map traces its operand along the mapped ray and maps the distances and normals back.
+RaySpansT<T> holds the list: up to 8 spans, each a pair of SpanEndT. An end is a distance, the leaf it lies on, and whether it is an exact crossing, a marched one, or an Open end. It carries no normal: 12 bytes in float, 16 in double.
+The normal and primitive are found once per ray, at the crossing the trace ends at. The composition follows the leaf id down to the leaf, mapping the ray through the affine maps above it, and calls the leaf's own firstHit() over a small window. The normal is mapped back by the transposed matrices and turned to face against the ray where it enters and along it where it leaves, which covers any complements in between.
+Leaf ids: a fused node numbers its leaves depth first (LeafCount/FirstLeaf traits), BVHUnion by primitive, and the Tape by the leaf's ray clause, which it finds again by following its ray program, into the BVH-union operand whose clauses hold it. That operand is found in O(log n): a bisection over where the ray programs begin, then up a parent entry per sub-program (8 bytes each); the union's ray clause holds its operands' sub-program range, so a sibling union's leaf is skipped. A scan over the operands took 9.8 µs per ray on a union of 4,096 balls, the bisection 0.71 µs.
+A union inserts its operand's spans into the list in place, with no scratch list and no copy back.
+The list also carries a horizon: how far along the ray it is complete. A list that overflows drops the far spans and lowers its horizon. If the first crossing is not found before the horizon, the trace restarts from there. So the answer is never wrong, only slower for a ray through more than 8 pieces.
+An operand under unions only needs its first crossing (its list stops there, with its horizon), unless the ray starts inside it. An operand of an intersection or a complement gives all its spans. Each union operand is traced only up to the union's current horizon.
+The span maths (EBGeometry_RaySpans.hpp) is shared by the fused nodes, BVHUnion and the Tape, as CSGOps is for values.
+Ray forms.
+RayForm<S> may now define spans(shape, ray, tMin, tMax, options, firstOnly, spans). Without it, a composition finds an operand's spans by calling its firstHit() from one crossing to the next.
+The closed-form shapes give their one span. The sphere, the capsule's caps and the cylinders now solve their quadratic without cancellation (discriminant r² − |oc × d|², nearer root c / q): before, in float, a small ball or thin cylinder far from the ray's start was hit or missed by rounding within about 1e-3 of its radius, which made 74 of 262,144 crowd rays differ between host and device. The mesh SDFs collect the nearest 17 crossings in one BVH walk and pair them by the side each face is crossed from; TriangleAoSoA::rayCrossings() gives every lane's crossing for this.
+Fused:: union, intersection, difference, complement and affine maps get ray forms (EBGeometry_CSGRayForms.hpp). The other fused operations have none and are marched.
+BVHUnion walks its BVH along the ray, nearest box first, pruning boxes beyond the union's horizon.
+The available flag is gone: a ray form is found by its firstHit() signature (HasRayFirstHit; also HasRaySpans, HasRayIntersects). Each detector is one place to swap for a concept under C++20. Public hasRayForm<S, T> and hasRaySpans<S, T> expose them, so a user can static_assert that a ray form is found.
+Tape.
+Beside the clauses, the compiler writes a ray program for the tape and each BVH-union operand. It covers the expression's unions, intersections, complements and affine maps over primitives with ray forms, in clause order, and runs on a stack of span lists (Tape::RayStackSize = 4).
+A subtree with anything else (a blend, offset, elongation, repetition, blur, mollify, or a primitive without a ray form), or one that would need more lists, is marched as a whole over its own clause range.
+The ray programs are stored after the evaluator's clauses and programs, in the same pool arrays. evaluateBody() is untouched and never reads them.
+getNumPrograms() and getNumClauses() still count only the evaluator's.
+A hit names the leaf crossed, or for a marched subtree the deciding leaf (closestPrimitive()).
+RayOptions::m_march marches any shape even where it has a ray form: a reference to compare with, and a way round a ray form.
+Tests (TestRay):
+span lists against the sets of points they cover;
+traced normals against the normalised gradient of each composition's own value at the hit, through affine maps and BVH unions (away from edges);
+fused compositions and tapes (BVH union, difference, complement, rotation and scaling, deep copy and view) against their values sampled along rays from outside and inside;
+a row of 20 balls with a slab cut out (overflow and restart) against crossings worked on the axis, and cut by a half-space so that the first crossing lies exactly where a full list stops;
+a composition whose operand never decides ends Unresolved after its 64 passes;
+two sibling BVH unions in one tape, one rotated and translated, name each leaf and its normal;
+rays past a small far ball and a thin far cylinder at 1 ± 3e-4 radii are hit or missed by their exact distance;
+hasRayForm/hasRaySpans, including a mistyped ray form;
+the three mesh SDFs, a user shape with only firstHit() and a marched offset inside differences, and a mesh in a tape;
+the composition test now expects exact crossings, and the marched ones on request;
+[gpu]: a fused part, two tapes and a mesh in a fused difference against the host.
+All pass in both precisions, under CUDA on the device, and under every preset.
+Probe Performance/RayCSG: 25 balls and 25 boxes less 10 balls, fused and through a tape, traced and marched; each traced case notes marched/traced. crowd-tape: 4,096 small balls as one BVH union in a tape, traced, which times the leaf lookup. It is a new folder rather than new cases in Ray/, following the probe-inlining lesson. Docs:
+Rays.rst: a "Compositions" section.
+ImplemRays.rst: the ray forms table, the user RayForm without available, a "Spans" section, and m_march.
+ImplemCSG.rst: the tape's ray program.
+PerformanceTesting.rst, Performance/README.md, TestingLocally.rst and README.md updated to match.
+Side-effects
+Breaking (dev crunch mode): RayForm<S>::available is removed. A user ray form is detected by its firstHit() signature; one with a wrong signature is now marched instead of failing to compile. static_assert(hasRayForm<MyShape<T>, T>) turns that back into a compile error (ImplemRays.rst shows it); an old available member is ignored.
+firstHit()/intersects() on fused compositions, BVHUnion and tapes now return exact crossings (m_exact true where every leaf has a ray form) where they used to march. Answers move by up to the march tolerance, and near misses that marching counted as hits are now misses. The Ray/csg-* checksums change accordingly.
+The Tape's pool grows by the ray programs: about one 16-byte clause per expression node, plus one 8-byte range per sub-program. On the probe's tapes that is +12–66%; the small tapes grow most.
+Tape::Layout gains m_numPrograms and m_rayPrograms (two uint32_t). Tape is the friend of RayForm<Tape>.
+Host inlining: the extra compile-side code in EBGeometry_TapeImplem.hpp made GCC keep double's whole primitive dispatch out of evaluateBody<0>, costing up to +28% on the double Tape cases. The fix is a fixed host split of the dispatch: Tape::dispatchRest(), marked with the new EBGEOMETRY_HOST_NOINLINE, takes the types from index 6 on, which is where dev's float build already split. With it, the probe's float symbols match dev byte for byte, and double inlines one shape more than dev.
+The value kernels still use 168 registers (1- and 16-evaluation float).
+The device frame of a traced Tape is a few kilobytes per call level: span lists in local memory.
+Why span ends carry no normal. The first CUDA receipt showed the classic CSG solid, fused in float, 3–6× slower than dev marched it. Nsight Compute showed the kernel stalled on local-memory instructions: 65% waiting on L1TEX loads, 41% on a full LG queue. The cost was the number of span words moved, not the lists' size: capacity 8, 4 and 2 timed the same. Dropping the normals from the ends and uniting in place took that case from 1.29 to 0.58 ms per 262,144 rays (marched: about 0.4 ms), and the 60-part scene from 8.95 to 3.38 ms in float.
+New macro EBGEOMETRY_HOST_NOINLINE (EBGeometry_GPU.hpp).
+Alternative solutions
+Plain sphere tracing, improved (box skipping). Simpler, but it stays 10–75× slower on the scenes measured, and only right to within its tolerance.
+Op::RayMark in the clause list (as [DO NOT MERGE] Ray tape: closed-form ray forms, the tape's ray program, a generic renderer (3/3) #216). One structure, but a new case in evaluateBody(), the register-sensitive path (Tape: evaluator performance swings 10-20% on unrelated code changes (GPU registers, GCC inlining of the primitive dispatch) #226).
+Dropping spans past the capacity (as [DO NOT MERGE] Ray tape: closed-form ray forms, the tape's ray program, a generic renderer (3/3) #216). Simpler, but it can give a wrong first crossing under an intersection or complement.
+An event merge with no span lists (step through the operands' crossings, stop at the first change of the combined state). No capacity, but it re-queries operands and needs a per-level cursor stack in the tape's walk.
+Ray clauses in pool arrays of their own. Clearer, but each array's padding dominates on small tapes; they now share the evaluator's arrays.
+Normals from the gradient of the composition's value at the hit, instead of from the leaf crossed. Simpler, but the normals become approximate (about 1e-3 in float), and blurred at edges.
+Follow-ups noted:
+On the GPU, a small fused solid in float still traces slower than marching, which ran it in registers: 1.5–3× on the receipt's classic CSG solid.
+The fused path on the host is about 3× slower than a hand-written exact loop on a union of 50: general list handling per operand.
+A Tape built only for value queries still stores its ray programs (+12–66% pool bytes on the receipt). A switch to leave them out would spare value-only users (AMReX, Chombo); raised in review round 1.
+The host dispatch split (Tape::DispatchSplit, which fixed double signedDistance()) also puts primitives past the sixth type out of line in closestPrimitive(): about 6% slower on a tape of fused parts (accepted on the receipt). Tune the split.
+Two death tests (Analytic shapes: invalid constructor arguments…, Fused: rejects invalid arguments…) failed once each locally under ctest -j8 with builds running, and passed on rerun.
+All of these are worth a look after the renderer.
+Performance
+Both receipts are red, with the reasons accepted on them (Performance/receipt.md), recorded on the merge with dev 8f43bf5 (after #234 and #238), with #238's defaults (2 rounds of 3). Another session ran a one-core simulation during the recording.
+Host (beea848 against dev 8f43bf5): 18 major, all for pool bytes; 1 minor; 3 faster.
+The Tape's signedDistance() (Tape/*) runs within noise. Its pool grows +14–80%: the ray programs and the parent entries.
+ClosestPrimitive/parts is about 6% slower (+5.8% float, +19.3% double with a wide interval; +2–8% on the three earlier receipts): the host dispatch split puts the fused parts, user primitives past the sixth type, out of line. Accepted, with a follow-up.
+Minor: Ray/mesh-polygons/intersects/float +4.3% [+2.3%, +6.3%]; not seen on the earlier receipts, possibly the simulation.
+Ray/csg-tape traces 47–48% faster, Ray/csg-fused 8% (float) and 30% (double); their checksums change.
+New RayCSG cases: traced is 6.8–7.5× faster than marched.
+Accepted: "Ray programs stored beside the Tape's clauses (about 16 bytes per expression node, and 8 per sub-program) grow its pool; compositions are now traced exactly instead of marched, which changes the CSG ray checksums. closestPrimitive() on a tape whose primitives sit past the host dispatch split (fused parts, meshes, user types) is about 6% slower; a follow-up tunes the split."
+CUDA (beea848 against dev 8f43bf5): 2 major, 6 faster, 6 differ.
+Ray/csg-fused float is MAJOR: +214% (morton), +82% (random). Dev marched this 5-part solid in registers.
+Everything else traced is faster: Ray/csg-tape 21–66%, Ray/csg-fused double 72–78%. On the new scene, traced is 3.5–4.3× faster than marched (fused, float), 30× (fused, double) and 20–23× (Tape).
+DIFFER: one ray per case, float only: the marched scene's grazing ray, and one crowd ray (74 before the sphere fix).
+Accepted: "On the device, a small fused solid in float traces slower than dev marched it in registers (the span lists live in local memory); the Tape and larger scenes trace faster. A few float rays graze a surface tangentially; host and device round them differently. Checksums change because compositions are now traced exactly."
+The register checks still hold: the Tape's value kernels use 168 registers (1- and 16-evaluation float kernels), as on dev.
+Device compile time: the CI CUDA target set builds in about 12 minutes on two cores (dev: 5); review round 1 fixed a blow-up past CI's limit.
+Host report
+VERDICT: MAJOR regression in 18 cases; do not merge until it is fixed or accepted (see Flagged above)
+Performance comparison: 18 major, 1 minor, 3 faster, 0 differ, 0 lost, 130 cases
+base: 8f43bf5 (gcc 13.3.0, simd avx2, gpu host, allocator glibc, heap only, freed memory returned before each repetition)
+head: beea848 (gcc 13.3.0, simd avx2, gpu host, allocator glibc, heap only, freed memory returned before each repetition)
+CPU: 12th Gen Intel(R) Core(TM) i9-12900K
+Thresholds: minor >= 3%, major >= 10% slower, and outside the 95% bootstrap interval over the runs
+case
+base
+head
+change
+95% interval
+pool
+verdict
+note
+BVH/mesh-boxes/ray-nearest/float/host
+333 ms
+332 ms
+-0.1%
+[-2.2%, +2.1%]
++0.0%
+~
+BVH/mesh-boxes/ray-any/float/host
+181 ms
+180 ms
+-0.3%
+[-1.4%, +0.8%]
++0.0%
+~
+BVH/mesh-boxes/point-nearest/float/host
+615 ms
+525 ms
+-14.7%
+[-26.9%, +2.0%]
++0.0%
+~
+BVH/mesh-boxes/ray-nearest/double/host
+460 ms
+449 ms
+-2.2%
+[-39.6%, +59.5%]
++0.0%
+~
+BVH/mesh-boxes/ray-any/double/host
+235 ms
+238 ms
++1.4%
+[-34.3%, +55.6%]
++0.0%
+~
+BVH/mesh-boxes/point-nearest/double/host
+616 ms
+688 ms
++11.6%
+[-16.9%, +45.9%]
++0.0%
+~
+BVHUnion/spheres/build/float/host
+56.3 ms
+56.3 ms
++0.1%
+[-5.6%, +6.1%]
++0.0%
+~
+BVHUnion/spheres/query-random/float/host
+53.1 ms
+53.4 ms
++0.5%
+[-3.4%, +4.5%]
++0.0%
+~
+BVHUnion/spheres/build/double/host
+66.5 ms
+65.4 ms
+-1.6%
+[-4.2%, +1.1%]
++0.0%
+~
+BVHUnion/spheres/query-random/double/host
+56.1 ms
+56.2 ms
++0.1%
+[-4.9%, +5.5%]
++0.0%
+~
+BVHUnion/capsules-diagonal/build/float/host
+61.6 ms
+64.1 ms
++4.0%
+[-3.0%, +11.1%]
++0.0%
+~
+BVHUnion/capsules-diagonal/query-random/float/host
+74.9 ms
+75.4 ms
++0.7%
+[-6.5%, +8.4%]
++0.0%
+~
+BVHUnion/capsules-diagonal/build/double/host
+74.9 ms
+75.4 ms
++0.6%
+[-2.1%, +3.3%]
++0.0%
+~
+BVHUnion/capsules-diagonal/query-random/double/host
+80.9 ms
+85.1 ms
++5.2%
+[-7.4%, +18.7%]
++0.0%
+~
+BVHUnion/cylinders-random/build/float/host
+67.5 ms
+67.4 ms
+-0.1%
+[-1.5%, +1.4%]
++0.0%
+~
+BVHUnion/cylinders-random/query-random/float/host
+101 ms
+104 ms
++2.8%
+[-3.1%, +8.9%]
++0.0%
+~
+BVHUnion/cylinders-random/build/double/host
+83.3 ms
+83.3 ms
++0.1%
+[-2.9%, +3.1%]
++0.0%
+~
+BVHUnion/cylinders-random/query-random/double/host
+116 ms
+116 ms
+-0.2%
+[-10.3%, +11.1%]
++0.0%
+~
+ClosestPrimitive/csg/closestPrimitive/float/host
+19.5 ms
+19.8 ms
++1.5%
+[-0.4%, +3.5%]
++62.9%
+MAJOR
+pool bytes up
+ClosestPrimitive/parts/closestPrimitive/float/host
+43.8 ms
+46.3 ms
++5.8%
+[+4.8%, +6.8%]
++20.6%
+MAJOR
+pool bytes up
+ClosestPrimitive/drilled-mesh/closestPrimitive/float/host
+83.2 ms
+83.1 ms
+-0.2%
+[-3.6%, +3.3%]
++0.0%
+~
+ClosestPrimitive/csg/closestPrimitive/double/host
+20.8 ms
+20.3 ms
+-2.2%
+[-3.7%, -0.7%]
++47.8%
+MAJOR
+pool bytes up
+ClosestPrimitive/parts/closestPrimitive/double/host
+44.1 ms
+52.6 ms
++19.3%
+[+5.5%, +33.5%]
++13.9%
+MAJOR
+pool bytes up
+ClosestPrimitive/drilled-mesh/closestPrimitive/double/host
+97.5 ms
+97.0 ms
+-0.5%
+[-4.7%, +4.2%]
++0.0%
+~
+Fused/csg/signedDistance/float/host
+4.42 ms
+4.48 ms
++1.3%
+[-0.0%, +2.7%]
+-
+~
+tape/fused 2.87x
+Fused/smooth/signedDistance/float/host
+12.2 ms
+12.2 ms
++0.0%
+[-0.8%, +0.8%]
+-
+~
+tape/fused 1.99x
+Fused/chain16/signedDistance/float/host
+969 µs
+983 µs
++1.5%
+[-1.6%, +4.6%]
+-
+~
+tape/fused 16.21x
+Fused/drilled-mesh/signedDistance/float/host
+49.0 ms
+49.0 ms
+-0.0%
+[-3.3%, +3.4%]
++0.0%
+~
+tape/fused 1.01x
+Fused/drilled-mesh-tape/signedDistance/float/host
+49.2 ms
+49.3 ms
++0.3%
+[-3.6%, +4.3%]
++0.0%
+~
+Fused/csg/signedDistance/double/host
+4.59 ms
+4.57 ms
+-0.5%
+[-1.5%, +0.6%]
+-
+~
+tape/fused 2.80x (was 3.80x)
+Fused/smooth/signedDistance/double/host
+12.9 ms
+12.8 ms
+-0.4%
+[-1.9%, +1.1%]
+-
+~
+tape/fused 2.03x (was 2.10x)
+Fused/chain16/signedDistance/double/host
+3.92 ms
+3.92 ms
++0.0%
+[-2.1%, +2.2%]
+-
+~
+tape/fused 4.18x (was 4.40x)
+Fused/drilled-mesh/signedDistance/double/host
+58.1 ms
+58.6 ms
++0.8%
+[-5.3%, +7.4%]
++0.0%
+~
+tape/fused 1.02x (was 1.09x)
+Fused/drilled-mesh-tape/signedDistance/double/host
+63.6 ms
+59.5 ms
+-6.5%
+[-15.9%, +5.2%]
++0.0%
+~
+TriMeshSDF/w4/build/float/host
+83.0 ms
+83.4 ms
++0.6%
+[-3.1%, +4.4%]
++0.0%
+~
+TriMeshSDF/w4/query-random/float/host
+245 ms
+243 ms
+-1.0%
+[-5.9%, +4.4%]
++0.0%
+~
+TriMeshSDF/w4/build/double/host
+114 ms
+115 ms
++0.5%
+[-4.0%, +5.2%]
++0.0%
+~
+TriMeshSDF/w4/query-random/double/host
+280 ms
+278 ms
+-0.7%
+[-1.6%, +0.3%]
++0.0%
+~
+TriMeshSDF/w8/build/float/host
+70.5 ms
+70.6 ms
++0.1%
+[-1.3%, +1.7%]
++0.0%
+~
+TriMeshSDF/w8/query-random/float/host
+208 ms
+208 ms
+-0.3%
+[-1.2%, +0.5%]
++0.0%
+~
+MeshSDF/build/float/host
+97.3 ms
+96.8 ms
+-0.6%
+[-1.9%, +0.9%]
++0.0%
+~
+MeshSDF/refit/float/host
+40.7 ms
+33.1 ms
+-18.8%
+[-42.8%, +22.2%]
+-
+~
+MeshSDF/query-random/float/host
+837 ms
+837 ms
++0.1%
+[-15.2%, +18.1%]
++0.0%
+~
+MeshSDF/build/double/host
+126 ms
+124 ms
+-1.7%
+[-11.3%, +9.2%]
++0.0%
+~
+MeshSDF/refit/double/host
+53.0 ms
+55.4 ms
++4.5%
+[-25.9%, +45.2%]
+-
+~
+MeshSDF/query-random/double/host
+983 ms
+959 ms
+-2.4%
+[-21.2%, +21.0%]
++0.0%
+~
+PointCloudBVH/uniform/build/float/host
+73.7 ms
+73.8 ms
++0.1%
+[-15.4%, +18.5%]
++0.0%
+~
+PointCloudBVH/uniform/all1nn/float/host
+183 ms
+183 ms
+-0.2%
+[-29.7%, +41.9%]
+-
+~
+PointCloudBVH/uniform/all8nn/float/host
+399 ms
+409 ms
++2.7%
+[-9.2%, +15.7%]
+-
+~
+PointCloudBVH/uniform/closest-random/float/host
+81.4 ms
+80.4 ms
+-1.3%
+[-6.2%, +3.8%]
+-
+~
+PointCloudBVH/uniform/closest-outside-random/float/host
+6.85 ms
+6.87 ms
++0.3%
+[-4.2%, +5.0%]
+-
+~
+PointCloudBVH/uniform/build/double/host
+83.4 ms
+84.2 ms
++0.9%
+[-6.5%, +8.8%]
++0.0%
+~
+PointCloudBVH/uniform/all1nn/double/host
+178 ms
+180 ms
++1.1%
+[-13.5%, +18.2%]
+-
+~
+PointCloudBVH/uniform/all8nn/double/host
+416 ms
+417 ms
++0.3%
+[-5.1%, +5.9%]
+-
+~
+PointCloudBVH/uniform/closest-random/double/host
+92.7 ms
+93.7 ms
++1.1%
+[-10.5%, +14.0%]
+-
+~
+PointCloudBVH/uniform/closest-outside-random/double/host
+7.60 ms
+7.65 ms
++0.6%
+[-10.8%, +13.4%]
+-
+~
+PointCloudHashGrid/uniform/build/float/host
+12.1 ms
+12.1 ms
++0.5%
+[-8.4%, +10.3%]
++0.0%
+~
+PointCloudHashGrid/uniform/all1nn/float/host
+133 ms
+140 ms
++5.3%
+[-12.6%, +25.4%]
+-
+~
+PointCloudHashGrid/uniform/all8nn/float/host
+519 ms
+530 ms
++2.1%
+[+1.1%, +3.0%]
+-
+~
+PointCloudHashGrid/uniform/closest-random/float/host
+153 ms
+152 ms
+-0.3%
+[-0.5%, -0.1%]
+-
+~
+PointCloudHashGrid/uniform/closest-outside-random/float/host
+863 ms
+862 ms
+-0.1%
+[-0.4%, +0.2%]
+-
+~
+PointCloudHashGrid/uniform/build/double/host
+15.0 ms
+15.0 ms
++0.0%
+[-1.0%, +1.0%]
++0.0%
+~
+PointCloudHashGrid/uniform/all1nn/double/host
+129 ms
+127 ms
+-1.9%
+[-3.5%, -0.3%]
+-
+~
+PointCloudHashGrid/uniform/all8nn/double/host
+550 ms
+552 ms
++0.3%
+[-0.2%, +0.9%]
+-
+~
+PointCloudHashGrid/uniform/closest-random/double/host
+158 ms
+158 ms
+-0.3%
+[-1.2%, +0.6%]
+-
+~
+PointCloudHashGrid/uniform/closest-outside-random/double/host
+927 ms
+909 ms
+-2.0%
+[-3.5%, -0.4%]
+-
+~
+PointCloudBVH/sphere/build/float/host
+68.1 ms
+66.7 ms
+-2.1%
+[-3.5%, -0.6%]
++0.0%
+~
+PointCloudBVH/sphere/all1nn/float/host
+113 ms
+113 ms
+-0.2%
+[-0.5%, +0.1%]
+-
+~
+PointCloudBVH/sphere/all8nn/float/host
+277 ms
+274 ms
+-1.1%
+[-2.0%, -0.1%]
+-
+~
+PointCloudBVH/sphere/closest-random/float/host
+113 ms
+114 ms
++0.7%
+[+0.5%, +0.8%]
+-
+~
+PointCloudBVH/sphere/closest-outside-random/float/host
+108 ms
+113 ms
++4.8%
+[-0.1%, +9.8%]
+-
+~
+PointCloudBVH/sphere/build/double/host
+79.9 ms
+79.3 ms
+-0.8%
+[-1.3%, -0.3%]
++0.0%
+~
+PointCloudBVH/sphere/all1nn/double/host
+125 ms
+126 ms
++0.9%
+[-2.8%, +4.7%]
+-
+~
+PointCloudBVH/sphere/all8nn/double/host
+300 ms
+301 ms
++0.3%
+[-0.4%, +1.1%]
+-
+~
+PointCloudBVH/sphere/closest-random/double/host
+127 ms
+131 ms
++2.6%
+[-0.9%, +6.1%]
+-
+~
+PointCloudBVH/sphere/closest-outside-random/double/host
+127 ms
+126 ms
+-0.2%
+[-6.4%, +6.3%]
+-
+~
+PointCloudHashGrid/sphere/build/float/host
+9.01 ms
+9.19 ms
++2.0%
+[-0.4%, +4.4%]
++0.0%
+~
+PointCloudHashGrid/sphere/all1nn/float/host
+143 ms
+141 ms
+-1.5%
+[-4.5%, +1.8%]
+-
+~
+PointCloudHashGrid/sphere/all8nn/float/host
+389 ms
+388 ms
+-0.3%
+[-0.5%, -0.0%]
+-
+~
+PointCloudHashGrid/sphere/closest-random/float/host
+250 ms
+253 ms
++1.2%
+[-0.1%, +2.4%]
+-
+~
+PointCloudHashGrid/sphere/closest-outside-random/float/host
+336 ms
+333 ms
+-0.8%
+[-1.2%, -0.5%]
+-
+~
+PointCloudHashGrid/sphere/build/double/host
+12.5 ms
+12.6 ms
++1.1%
+[+0.2%, +1.9%]
++0.0%
+~
+PointCloudHashGrid/sphere/all1nn/double/host
+149 ms
+149 ms
++0.0%
+[-4.4%, +4.7%]
+-
+~
+PointCloudHashGrid/sphere/all8nn/double/host
+444 ms
+554 ms
++24.8%
+[-7.0%, +58.1%]
+-
+~
+PointCloudHashGrid/sphere/closest-random/double/host
+633 ms
+600 ms
+-5.3%
+[-64.1%, +171.0%]
+-
+~
+PointCloudHashGrid/sphere/closest-outside-random/double/host
+601 ms
+425 ms
+-29.3%
+[-53.8%, +24.5%]
+-
+~
+Ray/mesh/firstHit/float/host
+51.1 ms
+50.3 ms
+-1.6%
+[-8.0%, +5.4%]
++0.0%
+~
+hand/api 0.96x
+Ray/mesh/firstHit-handrolled/float/host
+49.8 ms
+48.1 ms
+-3.4%
+[-6.7%, +0.2%]
++0.0%
+~
+Ray/mesh/intersects/float/host
+42.0 ms
+43.0 ms
++2.5%
+[+1.1%, +3.9%]
++0.0%
+~
+Ray/mesh-polygons/firstHit/float/host
+83.9 ms
+93.0 ms
++10.9%
+[-1.8%, +24.0%]
++0.0%
+~
+triangles/polygons 0.54x (was 0.61x)
+Ray/mesh-polygons/intersects/float/host
+72.6 ms
+75.7 ms
++4.3%
+[+2.3%, +6.3%]
++0.0%
+minor
+Ray/csg-fused/firstHit/float/host
+9.56 ms
+8.79 ms
+-8.0%
+[-8.8%, -7.2%]
+-
+faster
+tape/fused 0.88x (was 1.55x); checksum differs (20484.9529 -> 20460.87799)
+Ray/csg-tape/firstHit/float/host
+14.9 ms
+7.75 ms
+-47.8%
+[-48.7%, -47.0%]
++62.9%
+MAJOR
+pool bytes up; checksum differs (20484.9529 -> 20460.87799)
+Ray/mesh/firstHit/double/host
+56.4 ms
+57.9 ms
++2.7%
+[-2.1%, +7.6%]
++0.0%
+~
+hand/api 0.97x
+Ray/mesh/firstHit-handrolled/double/host
+55.8 ms
+55.9 ms
++0.2%
+[-3.3%, +3.8%]
++0.0%
+~
+Ray/mesh/intersects/double/host
+49.5 ms
+49.1 ms
+-0.8%
+[-6.9%, +5.8%]
++0.0%
+~
+Ray/mesh-polygons/firstHit/double/host
+103 ms
+97.8 ms
+-5.0%
+[-8.9%, -1.0%]
++0.0%
+faster
+triangles/polygons 0.59x (was 0.55x)
+Ray/mesh-polygons/intersects/double/host
+93.6 ms
+86.9 ms
+-7.2%
+[-17.2%, +5.1%]
++0.0%
+~
+Ray/csg-fused/firstHit/double/host
+10.4 ms
+7.29 ms
+-30.1%
+[-31.5%, -28.7%]
+-
+faster
+tape/fused 1.10x (was 1.46x); checksum differs (20485.21204 -> 20460.87895)
+Ray/csg-tape/firstHit/double/host
+15.2 ms
+8.03 ms
+-47.2%
+[-48.5%, -46.0%]
++47.8%
+MAJOR
+pool bytes up; checksum differs (20485.21204 -> 20460.87895)
+RayCSG/scene-fused/firstHit/float/host
+-
+-
+-
+-
+-
+new
+marched/traced 7.52x
+RayCSG/scene-fused/firstHit-marched/float/host
+-
+-
+-
+-
+-
+new
+RayCSG/scene-tape/firstHit/float/host
+-
+-
+-
+-
+-
+new
+marched/traced 7.29x
+RayCSG/scene-tape/firstHit-marched/float/host
+-
+-
+-
+-
+-
+new
+RayCSG/crowd-tape/firstHit/float/host
+-
+-
+-
+-
+-
+new
+RayCSG/scene-fused/firstHit/double/host
+-
+-
+-
+-
+-
+new
+marched/traced 6.76x
+RayCSG/scene-fused/firstHit-marched/double/host
+-
+-
+-
+-
+-
+new
+RayCSG/scene-tape/firstHit/double/host
+-
+-
+-
+-
+-
+new
+marched/traced 7.26x
+RayCSG/scene-tape/firstHit-marched/double/host
+-
+-
+-
+-
+-
+new
+RayCSG/crowd-tape/firstHit/double/host
+-
+-
+-
+-
+-
+new
+Tape/csg/signedDistance/float/host
+12.9 ms
+12.9 ms
+-0.0%
+[-0.4%, +0.3%]
++62.9%
+MAJOR
+pool bytes up
+Tape/csg-handwritten/signedDistance/float/host
+4.57 ms
+4.57 ms
++0.0%
+[-0.8%, +0.9%]
+-
+~
+Tape/smooth/signedDistance/float/host
+24.3 ms
+24.3 ms
+-0.0%
+[-0.5%, +0.4%]
++14.0%
+MAJOR
+pool bytes up
+Tape/union64/signedDistance/float/host
+41.2 ms
+41.2 ms
+-0.1%
+[-0.5%, +0.3%]
++26.9%
+MAJOR
+pool bytes up
+Tape/sphere/signedDistance/float/host
+1.76 ms
+1.78 ms
++1.0%
+[+0.0%, +2.1%]
++80.0%
+MAJOR
+pool bytes up
+Tape/sphere-handwritten/signedDistance/float/host
+134 µs
+128 µs
+-4.7%
+[-10.3%, +1.5%]
+-
+~
+Tape/sphere/signedDistance-x16/float/host
+30.2 ms
+30.5 ms
++1.2%
+[+0.1%, +2.2%]
++80.0%
+MAJOR
+pool bytes up
+Tape/sphere-handwritten/signedDistance-x16/float/host
+5.77 ms
+5.75 ms
+-0.4%
+[-1.3%, +0.5%]
+-
+~
+Tape/chain16/signedDistance/float/host
+16.0 ms
+15.9 ms
+-0.0%
+[-0.6%, +0.5%]
++67.4%
+MAJOR
+pool bytes up
+Tape/chain16-handwritten/signedDistance/float/host
+4.66 ms
+4.74 ms
++1.7%
+[+1.0%, +2.5%]
+-
+~
+Tape/csg/signedDistance/double/host
+17.4 ms
+12.8 ms
+-26.7%
+[-40.1%, -5.7%]
++47.8%
+MAJOR
+pool bytes up
+Tape/csg-handwritten/signedDistance/double/host
+4.65 ms
+5.75 ms
++23.8%
+[-1.2%, +49.0%]
+-
+~
+Tape/smooth/signedDistance/double/host
+27.0 ms
+26.0 ms
+-3.5%
+[-3.9%, -3.2%]
++15.1%
+MAJOR
+pool bytes up
+Tape/union64/signedDistance/double/host
+42.6 ms
+42.9 ms
++0.5%
+[+0.1%, +1.0%]
++19.3%
+MAJOR
+pool bytes up
+Tape/sphere/signedDistance/double/host
+1.78 ms
+1.81 ms
++1.9%
+[-1.4%, +5.5%]
++57.1%
+MAJOR
+pool bytes up
+Tape/sphere-handwritten/signedDistance/double/host
+259 µs
+277 µs
++6.8%
+[-1.1%, +15.1%]
+-
+~
+Tape/sphere/signedDistance-x16/double/host
+30.4 ms
+30.4 ms
+-0.1%
+[-0.6%, +0.5%]
++57.1%
+MAJOR
+pool bytes up
+Tape/sphere-handwritten/signedDistance-x16/double/host
+10.0 ms
+7.82 ms
+-21.9%
+[-36.5%, +0.9%]
+-
+~
+Tape/chain16/signedDistance/double/host
+17.2 ms
+16.4 ms
+-4.8%
+[-5.7%, -3.8%]
++50.4%
+MAJOR
+pool bytes up
+Tape/chain16-handwritten/signedDistance/double/host
+7.82 ms
+7.77 ms
+-0.7%
+[-2.1%, +0.8%]
+-
+~
+The probes differ between the sides (each side ran its own): Performance/RayCSG/main.cpp, Performance/Common/Inputs.hpp
+Run it manually
+```
+Run it manually
+---------------
+The whole comparison again (2 rounds x 3 repetitions, pinned to core 2 with taskset):
+
+    Scripts/run-performance.sh compare origin/dev --record
+
+One case, both sides, by hand (the builds are kept under /home/robertm/Projects/EBGeometry/build/performance/compare):
+
+    /home/robertm/Projects/EBGeometry/build/performance/compare/base-build/bin/<Probe>.ex --case '<case name>' --reps 10
+    /home/robertm/Projects/EBGeometry/build/performance/compare/head-build/bin/<Probe>.ex --case '<case name>' --reps 10
+
+The cases in this tree, and a run of some of them:
+
+    Scripts/run-performance.sh list
+    Scripts/run-performance.sh 'PointCloudBVH/*'
+
+Results: /home/robertm/Projects/EBGeometry/build/performance/compare/base.jsonl and head.jsonl; this report: /home/robertm/Projects/EBGeometry/build/performance/compare/report.md
+```
+CUDA report
+VERDICT: host and device answers differ in 6 cases; investigate before merging (see Flagged above)
+Performance comparison: 2 major, 0 minor, 6 faster, 6 differ, 0 lost, 156 cases
+base: 8f43bf5 (gcc 13.3.0, simd none, gpu CUDA, allocator glibc, heap only, freed memory returned before each repetition)
+head: beea848 (gcc 13.3.0, simd none, gpu CUDA, allocator glibc, heap only, freed memory returned before each repetition)
+CPU: 12th Gen Intel(R) Core(TM) i9-12900K
+Thresholds: minor >= 3%, major >= 10% slower, and outside the 95% bootstrap interval over the runs
+case
+base
+head
+change
+95% interval
+pool
+verdict
+note
+BVH/mesh-boxes/ray-nearest-morton/float/hostdevice
+1.57 ms
+1.57 ms
++0.5%
+[-0.7%, +1.8%]
+-
+~
+device 23.6x faster than the host
+BVH/mesh-boxes/ray-nearest-random/float/hostdevice
+3.37 ms
+3.37 ms
++0.0%
+[-1.2%, +1.2%]
+-
+~
+device 18.8x faster than the host
+BVH/mesh-boxes/ray-any-morton/float/hostdevice
+1.05 ms
+1.05 ms
+-0.7%
+[-2.3%, +0.9%]
+-
+~
+device 19.7x faster than the host
+BVH/mesh-boxes/ray-any-random/float/hostdevice
+2.26 ms
+2.25 ms
+-0.6%
+[-2.3%, +1.1%]
+-
+~
+device 16.8x faster than the host
+BVH/mesh-boxes/point-nearest-morton/float/hostdevice
+6.63 ms
+6.59 ms
+-0.7%
+[-3.7%, +2.4%]
+-
+~
+device 7.0x faster than the host
+BVH/mesh-boxes/point-nearest-random/float/hostdevice
+12.4 ms
+12.5 ms
++0.5%
+[-0.0%, +1.1%]
+-
+~
+device 5.1x faster than the host
+BVH/mesh-boxes/ray-nearest-morton/double/hostdevice
+33.7 ms
+34.1 ms
++0.9%
+[-0.3%, +2.2%]
+-
+~
+device 1.1x faster than the host
+BVH/mesh-boxes/ray-nearest-random/double/hostdevice
+56.6 ms
+56.9 ms
++0.6%
+[+0.2%, +1.0%]
+-
+~
+device 1.2x faster than the host
+BVH/mesh-boxes/ray-any-morton/double/hostdevice
+21.5 ms
+21.3 ms
+-0.8%
+[-2.6%, +1.1%]
+-
+~
+device 1.0x faster than the host
+BVH/mesh-boxes/ray-any-random/double/hostdevice
+47.9 ms
+48.0 ms
++0.1%
+[-0.1%, +0.3%]
+-
+~
+device 0.8x faster than the host
+BVH/mesh-boxes/point-nearest-morton/double/hostdevice
+62.7 ms
+63.2 ms
++0.9%
+[-2.0%, +3.9%]
+-
+~
+device 0.7x faster than the host
+BVH/mesh-boxes/point-nearest-random/double/hostdevice
+109 ms
+109 ms
++0.3%
+[-1.9%, +2.5%]
+-
+~
+device 0.6x faster than the host
+BVHUnion/spheres/query-morton/float/hostdevice
+394 µs
+394 µs
+-0.1%
+[-0.7%, +0.5%]
+-
+~
+device 14.7x faster than the host
+BVHUnion/spheres/query-random/float/hostdevice
+884 µs
+886 µs
++0.2%
+[-1.1%, +1.5%]
+-
+~
+device 9.6x faster than the host
+BVHUnion/spheres/query-morton/double/hostdevice
+4.54 ms
+4.52 ms
+-0.6%
+[-1.1%, +0.0%]
+-
+~
+device 1.3x faster than the host
+BVHUnion/spheres/query-random/double/hostdevice
+4.66 ms
+4.67 ms
++0.2%
+[-0.3%, +0.6%]
+-
+~
+device 1.9x faster than the host
+BVHUnion/capsules-diagonal/query-morton/float/hostdevice
+626 µs
+623 µs
+-0.5%
+[-1.7%, +0.7%]
+-
+~
+device 12.3x faster than the host
+BVHUnion/capsules-diagonal/query-random/float/hostdevice
+1.54 ms
+1.54 ms
+-0.2%
+[-1.6%, +1.3%]
+-
+~
+device 7.4x faster than the host
+BVHUnion/capsules-diagonal/query-morton/double/hostdevice
+6.77 ms
+6.75 ms
+-0.2%
+[-0.6%, +0.2%]
+-
+~
+device 1.1x faster than the host
+BVHUnion/capsules-diagonal/query-random/double/hostdevice
+7.01 ms
+7.01 ms
+-0.0%
+[-0.4%, +0.4%]
+-
+~
+device 1.7x faster than the host
+BVHUnion/cylinders-random/query-morton/float/hostdevice
+994 µs
+994 µs
++0.0%
+[-1.8%, +1.9%]
+-
+~
+device 13.0x faster than the host
+BVHUnion/cylinders-random/query-random/float/hostdevice
+2.47 ms
+2.47 ms
+-0.0%
+[-1.0%, +1.0%]
+-
+~
+device 7.1x faster than the host
+BVHUnion/cylinders-random/query-morton/double/hostdevice
+9.49 ms
+9.47 ms
+-0.2%
+[-0.5%, +0.2%]
+-
+~
+device 1.4x faster than the host
+BVHUnion/cylinders-random/query-random/double/hostdevice
+10.1 ms
+10.1 ms
++0.3%
+[-0.2%, +0.7%]
+-
+~
+device 1.8x faster than the host
+ClosestPrimitive/csg/closestPrimitive/float/hostdevice
+326 µs
+327 µs
++0.2%
+[-0.2%, +0.7%]
+-
+~
+device 11.0x faster than the host
+ClosestPrimitive/parts/closestPrimitive/float/hostdevice
+1.80 ms
+1.80 ms
+-0.0%
+[-0.2%, +0.2%]
+-
+~
+device 4.9x faster than the host (was 4.6x)
+ClosestPrimitive/drilled-mesh/closestPrimitive/float/hostdevice
+59.0 ms
+59.0 ms
+-0.1%
+[-0.2%, +0.0%]
+-
+~
+device 3.4x faster than the host
+ClosestPrimitive/csg/closestPrimitive/double/hostdevice
+1.38 ms
+1.38 ms
++0.0%
+[-0.0%, +0.1%]
+-
+~
+device 2.8x faster than the host
+ClosestPrimitive/parts/closestPrimitive/double/hostdevice
+5.76 ms
+5.78 ms
++0.2%
+[-0.0%, +0.5%]
+-
+~
+device 1.7x faster than the host
+ClosestPrimitive/drilled-mesh/closestPrimitive/double/hostdevice
+521 ms
+520 ms
+-0.1%
+[-0.4%, +0.2%]
+-
+~
+device 0.4x faster than the host
+Fused/csg/signedDistance/float/hostdevice
+48.7 µs
+48.7 µs
++0.0%
+[-3.2%, +3.4%]
+-
+~
+device 23.6x faster than the host; tape/fused 4.59x
+Fused/smooth/signedDistance/float/hostdevice
+51.2 µs
+50.1 µs
+-2.1%
+[-4.9%, +0.9%]
+-
+~
+device 44.3x faster than the host; tape/fused 7.39x
+Fused/chain16/signedDistance/float/hostdevice
+48.3 µs
+48.2 µs
+-0.1%
+[-1.0%, +0.9%]
+-
+~
+device 8.7x faster than the host (was 9.9x); tape/fused 10.11x
+Fused/drilled-mesh/signedDistance/float/hostdevice
+17.6 ms
+17.6 ms
+-0.3%
+[-1.0%, +0.4%]
+-
+~
+device 7.1x faster than the host; tape/fused 1.79x
+Fused/drilled-mesh-tape/signedDistance/float/hostdevice
+31.5 ms
+31.4 ms
+-0.2%
+[-0.3%, -0.0%]
+-
+~
+device 4.0x faster than the host
+Fused/csg/signedDistance/double/hostdevice
+809 µs
+809 µs
++0.0%
+[+0.0%, +0.0%]
+-
+~
+device 1.5x faster than the host; tape/fused 1.12x
+Fused/smooth/signedDistance/double/hostdevice
+1.55 ms
+1.55 ms
+-0.0%
+[-0.0%, +0.0%]
+-
+~
+device 1.6x faster than the host; tape/fused 1.15x
+Fused/chain16/signedDistance/double/hostdevice
+2.10 ms
+2.10 ms
+-0.0%
+[-0.0%, +0.0%]
+-
+~
+device 0.6x faster than the host; tape/fused 1.03x
+Fused/drilled-mesh/signedDistance/double/hostdevice
+284 ms
+285 ms
++0.2%
+[-2.1%, +2.7%]
+-
+~
+device 0.5x faster than the host (was 0.5x); tape/fused 0.98x
+Fused/drilled-mesh-tape/signedDistance/double/hostdevice
+279 ms
+281 ms
++0.5%
+[-2.4%, +3.5%]
+-
+~
+device 0.5x faster than the host
+TriMeshSDF/w4/query-morton/float/hostdevice
+8.48 ms
+8.55 ms
++0.8%
+[-0.1%, +1.7%]
+-
+~
+device 11.2x faster than the host
+TriMeshSDF/w4/query-random/float/hostdevice
+16.9 ms
+16.8 ms
+-0.3%
+[-0.7%, +0.1%]
+-
+~
+device 7.2x faster than the host
+TriMeshSDF/w4/query-morton/double/hostdevice
+165 ms
+168 ms
++1.7%
+[-0.3%, +3.6%]
+-
+~
+device 0.6x faster than the host
+TriMeshSDF/w4/query-random/double/hostdevice
+279 ms
+279 ms
+-0.2%
+[-3.5%, +3.3%]
+-
+~
+device 0.5x faster than the host
+MeshSDF/query-morton/float/hostdevice
+24.4 ms
+24.6 ms
++0.7%
+[-0.0%, +1.4%]
+-
+~
+device 5.3x faster than the host (was 4.1x)
+MeshSDF/query-random/float/hostdevice
+58.1 ms
+58.1 ms
++0.0%
+[-0.4%, +0.5%]
+-
+~
+device 2.5x faster than the host
+MeshSDF/query-morton/double/hostdevice
+158 ms
+157 ms
+-0.5%
+[-1.6%, +0.6%]
+-
+~
+device 0.6x faster than the host
+MeshSDF/query-random/double/hostdevice
+243 ms
+243 ms
++0.1%
+[-1.7%, +2.1%]
+-
+~
+device 0.7x faster than the host
+PointCloudBVH/uniform/closest-morton/float/hostdevice
+752 µs
+757 µs
++0.6%
+[+0.1%, +1.2%]
+-
+~
+device 10.8x faster than the host
+PointCloudBVH/uniform/closest-random/float/hostdevice
+2.38 ms
+2.38 ms
++0.3%
+[-0.9%, +1.6%]
+-
+~
+device 5.4x faster than the host
+PointCloudBVH/uniform/neighbor-morton/float/hostdevice
+1.15 ms
+1.15 ms
++0.3%
+[+0.0%, +0.5%]
+-
+~
+device 8.5x faster than the host
+PointCloudBVH/uniform/neighbors8-morton/float/hostdevice
+8.80 ms
+8.81 ms
++0.1%
+[-1.3%, +1.5%]
+-
+~
+device 3.2x faster than the host
+PointCloudBVH/uniform/closest8-morton/float/hostdevice
+5.97 ms
+5.95 ms
+-0.3%
+[-2.3%, +1.7%]
+-
+~
+device 2.9x faster than the host
+PointCloudBVH/uniform/closest-morton/double/hostdevice
+7.14 ms
+7.11 ms
+-0.5%
+[-0.9%, +0.0%]
+-
+~
+device 1.2x faster than the host
+PointCloudBVH/uniform/closest-random/double/hostdevice
+8.08 ms
+8.02 ms
+-0.8%
+[-1.3%, -0.3%]
+-
+~
+device 1.7x faster than the host
+PointCloudBVH/uniform/neighbor-morton/double/hostdevice
+13.2 ms
+13.2 ms
++0.1%
+[-0.3%, +0.5%]
+-
+~
+device 0.8x faster than the host
+PointCloudBVH/uniform/neighbors8-morton/double/hostdevice
+21.9 ms
+21.9 ms
+-0.3%
+[-1.4%, +0.9%]
+-
+~
+device 1.3x faster than the host
+PointCloudBVH/uniform/closest8-morton/double/hostdevice
+14.8 ms
+14.6 ms
+-0.7%
+[-2.0%, +0.5%]
+-
+~
+device 1.2x faster than the host
+PointCloudHashGrid/uniform/closest-morton/float/hostdevice
+2.22 ms
+2.22 ms
+-0.1%
+[-0.5%, +0.3%]
+-
+~
+device 4.8x faster than the host
+PointCloudHashGrid/uniform/closest-random/float/hostdevice
+5.45 ms
+5.45 ms
++0.0%
+[-0.4%, +0.4%]
+-
+~
+device 2.9x faster than the host
+PointCloudHashGrid/uniform/neighbor-morton/float/hostdevice
+929 µs
+928 µs
+-0.1%
+[-0.4%, +0.3%]
+-
+~
+device 9.4x faster than the host
+PointCloudHashGrid/uniform/neighbors8-morton/float/hostdevice
+11.5 ms
+11.6 ms
++1.0%
+[-1.0%, +3.1%]
+-
+~
+device 3.1x faster than the host
+PointCloudHashGrid/uniform/closest8-morton/float/hostdevice
+7.40 ms
+7.41 ms
++0.2%
+[-1.9%, +2.3%]
+-
+~
+device 3.6x faster than the host
+PointCloudHashGrid/uniform/closest-morton/double/hostdevice
+8.35 ms
+8.38 ms
++0.4%
+[-1.2%, +2.0%]
+-
+~
+device 1.3x faster than the host
+PointCloudHashGrid/uniform/closest-random/double/hostdevice
+16.2 ms
+16.3 ms
++0.4%
+[-0.7%, +1.6%]
+-
+~
+device 1.0x faster than the host
+PointCloudHashGrid/uniform/neighbor-morton/double/hostdevice
+4.08 ms
+4.10 ms
++0.3%
+[-0.1%, +0.7%]
+-
+~
+device 2.1x faster than the host
+PointCloudHashGrid/uniform/neighbors8-morton/double/hostdevice
+24.2 ms
+24.1 ms
+-0.3%
+[-0.7%, +0.1%]
+-
+~
+device 1.4x faster than the host
+PointCloudHashGrid/uniform/closest8-morton/double/hostdevice
+17.0 ms
+17.0 ms
++0.1%
+[-1.4%, +1.6%]
+-
+~
+device 1.5x faster than the host
+PointCloudBVH/sphere/closest-morton/float/hostdevice
+1.48 ms
+1.48 ms
++0.0%
+[-0.6%, +0.7%]
+-
+~
+device 8.8x faster than the host
+PointCloudBVH/sphere/closest-random/float/hostdevice
+5.11 ms
+5.12 ms
++0.2%
+[-0.5%, +0.9%]
+-
+~
+device 3.7x faster than the host
+PointCloudBVH/sphere/neighbor-morton/float/hostdevice
+1.37 ms
+1.38 ms
++0.8%
+[-0.4%, +2.0%]
+-
+~
+device 5.4x faster than the host
+PointCloudBVH/sphere/neighbors8-morton/float/hostdevice
+4.47 ms
+4.46 ms
+-0.2%
+[-1.2%, +0.8%]
+-
+~
+device 4.2x faster than the host
+PointCloudBVH/sphere/closest8-morton/float/hostdevice
+6.78 ms
+6.78 ms
+-0.0%
+[-1.2%, +1.2%]
+-
+~
+device 2.8x faster than the host
+PointCloudBVH/sphere/closest-morton/double/hostdevice
+13.4 ms
+13.5 ms
++0.3%
+[-1.1%, +1.8%]
+-
+~
+device 1.0x faster than the host
+PointCloudBVH/sphere/closest-random/double/hostdevice
+17.6 ms
+17.6 ms
++0.2%
+[-0.5%, +1.0%]
+-
+~
+device 1.2x faster than the host
+PointCloudBVH/sphere/neighbor-morton/double/hostdevice
+7.92 ms
+7.90 ms
+-0.3%
+[-0.8%, +0.3%]
+-
+~
+device 1.0x faster than the host
+PointCloudBVH/sphere/neighbors8-morton/double/hostdevice
+12.9 ms
+12.9 ms
++0.4%
+[-1.5%, +2.2%]
+-
+~
+device 1.5x faster than the host
+PointCloudBVH/sphere/closest8-morton/double/hostdevice
+18.5 ms
+18.6 ms
++0.6%
+[-0.2%, +1.4%]
+-
+~
+device 1.0x faster than the host
+PointCloudHashGrid/sphere/closest-morton/float/hostdevice
+6.47 ms
+6.48 ms
++0.1%
+[+0.0%, +0.2%]
+-
+~
+device 2.7x faster than the host
+PointCloudHashGrid/sphere/closest-random/float/hostdevice
+17.7 ms
+17.7 ms
+-0.1%
+[-0.2%, +0.0%]
+-
+~
+device 1.9x faster than the host
+PointCloudHashGrid/sphere/neighbor-morton/float/hostdevice
+2.10 ms
+2.11 ms
++0.3%
+[-0.3%, +1.0%]
+-
+~
+device 5.7x faster than the host
+PointCloudHashGrid/sphere/neighbors8-morton/float/hostdevice
+6.02 ms
+6.01 ms
+-0.1%
+[-0.7%, +0.4%]
+-
+~
+device 4.6x faster than the host
+PointCloudHashGrid/sphere/closest8-morton/float/hostdevice
+14.8 ms
+14.8 ms
+-0.2%
+[-1.4%, +0.9%]
+-
+~
+device 1.7x faster than the host
+PointCloudHashGrid/sphere/closest-morton/double/hostdevice
+34.4 ms
+34.4 ms
++0.1%
+[-0.8%, +1.0%]
+-
+~
+device 0.5x faster than the host
+PointCloudHashGrid/sphere/closest-random/double/hostdevice
+69.0 ms
+68.9 ms
+-0.1%
+[-0.7%, +0.4%]
+-
+~
+device 0.6x faster than the host
+PointCloudHashGrid/sphere/neighbor-morton/double/hostdevice
+18.8 ms
+18.7 ms
+-0.5%
+[-1.2%, +0.1%]
+-
+~
+device 0.6x faster than the host
+PointCloudHashGrid/sphere/neighbors8-morton/double/hostdevice
+21.6 ms
+21.7 ms
++0.5%
+[+0.0%, +1.0%]
+-
+~
+device 1.3x faster than the host
+PointCloudHashGrid/sphere/closest8-morton/double/hostdevice
+42.1 ms
+42.0 ms
+-0.3%
+[-1.2%, +0.6%]
+-
+~
+device 0.6x faster than the host
+Ray/mesh/firstHit-morton/float/hostdevice
+658 µs
+663 µs
++0.8%
+[+0.3%, +1.2%]
+-
+~
+device 17.1x faster than the host; hand/api 0.97x
+Ray/mesh/firstHit-random/float/hostdevice
+1.25 ms
+1.25 ms
++0.8%
+[+0.1%, +1.4%]
+-
+~
+device 15.2x faster than the host (was 15.7x); hand/api 0.98x
+Ray/mesh/firstHit-handrolled-morton/float/hostdevice
+650 µs
+644 µs
+-0.8%
+[-2.6%, +1.0%]
+-
+~
+device 17.4x faster than the host (was 18.3x)
+Ray/mesh/firstHit-handrolled-random/float/hostdevice
+1.23 ms
+1.23 ms
++0.8%
+[-0.2%, +1.7%]
+-
+~
+device 15.1x faster than the host (was 15.8x)
+Ray/mesh/intersects-morton/float/hostdevice
+612 µs
+611 µs
+-0.2%
+[-0.9%, +0.5%]
+-
+~
+device 16.0x faster than the host
+Ray/mesh/intersects-random/float/hostdevice
+1.11 ms
+1.12 ms
++0.9%
+[+0.7%, +1.1%]
+-
+~
+device 14.9x faster than the host
+Ray/mesh-polygons/firstHit-morton/float/hostdevice
+1.19 ms
+1.19 ms
+-0.0%
+[-0.3%, +0.2%]
+-
+~
+device 12.1x faster than the host; triangles/polygons 0.56x
+Ray/mesh-polygons/firstHit-random/float/hostdevice
+2.48 ms
+2.49 ms
++0.2%
+[-0.0%, +0.4%]
+-
+~
+device 9.9x faster than the host; triangles/polygons 0.50x
+Ray/mesh-polygons/intersects-morton/float/hostdevice
+1.06 ms
+1.07 ms
++0.6%
+[-0.3%, +1.5%]
+-
+~
+device 12.1x faster than the host
+Ray/mesh-polygons/intersects-random/float/hostdevice
+2.15 ms
+2.16 ms
++0.2%
+[-0.6%, +1.0%]
+-
+~
+device 10.3x faster than the host
+Ray/csg-fused/firstHit-morton/float/hostdevice
+186 µs
+583 µs
++213.9%
+[+212.9%, +214.9%]
+-
+MAJOR
+device 3.1x faster than the host (was 12.4x); tape/fused 3.30x (was 13.17x); checksum differs (106403.7998 -> 106269.5319)
+Ray/csg-fused/firstHit-random/float/hostdevice
+340 µs
+619 µs
++81.8%
+[+75.4%, +88.2%]
+-
+MAJOR
+device 3.6x faster than the host (was 7.9x); tape/fused 4.08x (was 14.62x); checksum differs (106403.7998 -> 106269.5319)
+Ray/csg-tape/firstHit-morton/float/hostdevice
+2.45 ms
+1.92 ms
+-21.3%
+[-21.5%, -21.1%]
+-
+faster
+device 1.3x faster than the host (was 2.1x); checksum differs (106403.7998 -> 106269.5319)
+Ray/csg-tape/firstHit-random/float/hostdevice
+4.97 ms
+2.52 ms
+-49.3%
+[-49.5%, -49.1%]
+-
+faster
+device 1.2x faster than the host (was 1.1x); checksum differs (106403.7998 -> 106269.5319)
+Ray/mesh/firstHit-morton/double/hostdevice
+17.1 ms
+17.1 ms
++0.3%
+[-0.2%, +0.7%]
+-
+~
+device 0.7x faster than the host; hand/api 0.99x
+Ray/mesh/firstHit-random/double/hostdevice
+27.8 ms
+27.6 ms
+-0.8%
+[-1.2%, -0.3%]
+-
+~
+device 0.7x faster than the host; hand/api 1.00x
+Ray/mesh/firstHit-handrolled-morton/double/hostdevice
+17.0 ms
+17.0 ms
+-0.0%
+[-0.6%, +0.6%]
+-
+~
+device 0.7x faster than the host
+Ray/mesh/firstHit-handrolled-random/double/hostdevice
+27.8 ms
+27.6 ms
+-0.7%
+[-1.0%, -0.3%]
+-
+~
+device 0.7x faster than the host
+Ray/mesh/intersects-morton/double/hostdevice
+14.9 ms
+14.9 ms
++0.2%
+[-0.7%, +1.0%]
+-
+~
+device 0.7x faster than the host (was 0.7x)
+Ray/mesh/intersects-random/double/hostdevice
+24.8 ms
+24.7 ms
+-0.5%
+[-0.8%, -0.2%]
+-
+~
+device 0.7x faster than the host
+Ray/mesh-polygons/firstHit-morton/double/hostdevice
+16.4 ms
+16.5 ms
++0.6%
+[+0.1%, +1.1%]
+-
+~
+device 0.9x faster than the host; triangles/polygons 1.04x
+Ray/mesh-polygons/firstHit-random/double/hostdevice
+24.4 ms
+24.4 ms
++0.0%
+[-0.4%, +0.4%]
+-
+~
+device 1.0x faster than the host; triangles/polygons 1.13x
+Ray/mesh-polygons/intersects-morton/double/hostdevice
+15.0 ms
+15.0 ms
++0.1%
+[-0.5%, +0.8%]
+-
+~
+device 0.9x faster than the host
+Ray/mesh-polygons/intersects-random/double/hostdevice
+23.0 ms
+23.0 ms
+-0.1%
+[-0.4%, +0.1%]
+-
+~
+device 1.0x faster than the host
+Ray/csg-fused/firstHit-morton/double/hostdevice
+4.92 ms
+1.39 ms
+-71.8%
+[-72.2%, -71.4%]
+-
+faster
+device 1.4x faster than the host (was 0.5x); tape/fused 2.17x (was 1.25x); checksum differs (106402.324 -> 106269.5362)
+Ray/csg-fused/firstHit-random/double/hostdevice
+9.58 ms
+2.15 ms
+-77.6%
+[-77.7%, -77.5%]
+-
+faster
+device 1.1x faster than the host (was 0.3x); tape/fused 1.94x (was 1.27x); checksum differs (106402.324 -> 106269.5362)
+Ray/csg-tape/firstHit-morton/double/hostdevice
+6.13 ms
+3.01 ms
+-50.9%
+[-51.2%, -50.6%]
+-
+faster
+device 0.9x faster than the host (was 0.9x); checksum differs (106402.324 -> 106269.5362)
+Ray/csg-tape/firstHit-random/double/hostdevice
+12.2 ms
+4.17 ms
+-65.8%
+[-65.9%, -65.7%]
+-
+faster
+device 0.7x faster than the host (was 0.5x); checksum differs (106402.324 -> 106269.5362)
+RayCSG/scene-fused/firstHit-morton/float/hostdevice
+-
+-
+-
+-
+-
+new
+marched/traced 3.45x
+RayCSG/scene-fused/firstHit-random/float/hostdevice
+-
+-
+-
+-
+-
+new
+marched/traced 4.33x
+RayCSG/scene-fused/firstHit-marched-morton/float/hostdevice
+-
+-
+-
+-
+-
+DIFFER
+new; 1 host and device answers DIFFER (max diff 3.14)
+RayCSG/scene-fused/firstHit-marched-random/float/hostdevice
+-
+-
+-
+-
+-
+DIFFER
+new; 1 host and device answers DIFFER (max diff 3.14)
+RayCSG/scene-tape/firstHit-morton/float/hostdevice
+-
+-
+-
+-
+-
+new
+marched/traced 22.59x
+RayCSG/scene-tape/firstHit-random/float/hostdevice
+-
+-
+-
+-
+-
+new
+marched/traced 22.42x
+RayCSG/scene-tape/firstHit-marched-morton/float/hostdevice
+-
+-
+-
+-
+-
+DIFFER
+new; 1 host and device answers DIFFER (max diff 3.14)
+RayCSG/scene-tape/firstHit-marched-random/float/hostdevice
+-
+-
+-
+-
+-
+DIFFER
+new; 1 host and device answers DIFFER (max diff 3.14)
+RayCSG/crowd-tape/firstHit-morton/float/hostdevice
+-
+-
+-
+-
+-
+DIFFER
+new; 1 host and device answers DIFFER (max diff 1.41)
+RayCSG/crowd-tape/firstHit-random/float/hostdevice
+-
+-
+-
+-
+-
+DIFFER
+new; 1 host and device answers DIFFER (max diff 1.41)
+RayCSG/scene-fused/firstHit-morton/double/hostdevice
+-
+-
+-
+-
+-
+new
+marched/traced 30.30x
+RayCSG/scene-fused/firstHit-random/double/hostdevice
+-
+-
+-
+-
+-
+new
+marched/traced 29.75x
+RayCSG/scene-fused/firstHit-marched-morton/double/hostdevice
+-
+-
+-
+-
+-
+new
+RayCSG/scene-fused/firstHit-marched-random/double/hostdevice
+-
+-
+-
+-
+-
+new
+RayCSG/scene-tape/firstHit-morton/double/hostdevice
+-
+-
+-
+-
+-
+new
+marched/traced 20.15x
+RayCSG/scene-tape/firstHit-random/double/hostdevice
+-
+-
+-
+-
+-
+new
+marched/traced 19.99x
+RayCSG/scene-tape/firstHit-marched-morton/double/hostdevice
+-
+-
+-
+-
+-
+new
+RayCSG/scene-tape/firstHit-marched-random/double/hostdevice
+-
+-
+-
+-
+-
+new
+RayCSG/crowd-tape/firstHit-morton/double/hostdevice
+-
+-
+-
+-
+-
+new
+RayCSG/crowd-tape/firstHit-random/double/hostdevice
+-
+-
+-
+-
+-
+new
+Tape/csg/signedDistance/float/hostdevice
+224 µs
+223 µs
+-0.5%
+[-1.2%, +0.2%]
+-
+~
+device 11.1x faster than the host (was 11.5x)
+Tape/csg-handwritten/signedDistance/float/hostdevice
+47.9 µs
+47.9 µs
+-0.2%
+[-0.2%, -0.1%]
+-
+~
+device 23.8x faster than the host
+Tape/smooth/signedDistance/float/hostdevice
+371 µs
+371 µs
+-0.1%
+[-0.2%, +0.0%]
+-
+~
+device 12.1x faster than the host
+Tape/union64/signedDistance/float/hostdevice
+2.00 ms
+1.99 ms
+-0.1%
+[-0.3%, -0.0%]
+-
+~
+device 7.3x faster than the host
+Tape/sphere/signedDistance/float/hostdevice
+76.2 µs
+76.5 µs
++0.3%
+[+0.1%, +0.6%]
+-
+~
+device 6.6x faster than the host
+Tape/sphere-handwritten/signedDistance/float/hostdevice
+48.3 µs
+47.9 µs
+-0.8%
+[-2.4%, +0.7%]
+-
+~
+device 4.9x faster than the host
+Tape/sphere/signedDistance-x16/float/hostdevice
+651 µs
+651 µs
++0.0%
+[-0.1%, +0.1%]
+-
+~
+device 10.7x faster than the host
+Tape/sphere-handwritten/signedDistance-x16/float/hostdevice
+133 µs
+133 µs
++0.1%
+[+0.0%, +0.2%]
+-
+~
+device 12.3x faster than the host (was 11.9x)
+Tape/chain16/signedDistance/float/hostdevice
+487 µs
+488 µs
++0.1%
+[+0.0%, +0.2%]
+-
+~
+device 7.0x faster than the host
+Tape/chain16-handwritten/signedDistance/float/hostdevice
+48.0 µs
+48.3 µs
++0.6%
+[+0.2%, +0.9%]
+-
+~
+device 26.7x faster than the host
+Tape/csg/signedDistance/double/hostdevice
+905 µs
+904 µs
+-0.1%
+[-0.2%, -0.0%]
+-
+~
+device 2.9x faster than the host
+Tape/csg-handwritten/signedDistance/double/hostdevice
+810 µs
+810 µs
+-0.0%
+[-0.0%, +0.0%]
+-
+~
+device 1.5x faster than the host (was 1.6x)
+Tape/smooth/signedDistance/double/hostdevice
+1.79 ms
+1.79 ms
++0.0%
+[-0.0%, +0.0%]
+-
+~
+device 2.7x faster than the host (was 2.6x)
+Tape/union64/signedDistance/double/hostdevice
+6.93 ms
+6.94 ms
++0.1%
+[+0.0%, +0.2%]
+-
+~
+device 2.0x faster than the host
+Tape/sphere/signedDistance/double/hostdevice
+212 µs
+213 µs
++0.2%
+[+0.2%, +0.3%]
+-
+~
+device 2.8x faster than the host (was 2.7x)
+Tape/sphere-handwritten/signedDistance/double/hostdevice
+163 µs
+163 µs
+-0.1%
+[-0.4%, +0.1%]
+-
+~
+device 2.3x faster than the host (was 1.8x)
+Tape/sphere/signedDistance-x16/double/hostdevice
+2.81 ms
+2.81 ms
++0.0%
+[+0.0%, +0.1%]
+-
+~
+device 2.4x faster than the host
+Tape/sphere-handwritten/signedDistance-x16/double/hostdevice
+2.50 ms
+2.50 ms
+-0.0%
+[-0.0%, +0.0%]
+-
+~
+device 0.8x faster than the host
+Tape/chain16/signedDistance/double/hostdevice
+2.16 ms
+2.16 ms
++0.0%
+[-0.0%, +0.1%]
+-
+~
+device 1.7x faster than the host (was 1.6x)
+Tape/chain16-handwritten/signedDistance/double/hostdevice
+2.10 ms
+2.10 ms
+-0.0%
+[-0.0%, +0.0%]
+-
+~
+device 0.9x faster than the host
+The probes differ between the sides (each side ran its own): Performance/RayCSG/main.cpp, Performance/Common/Inputs.hpp
+Run it manually
+```
+Run it manually
+---------------
+The whole comparison again (2 rounds x 3 repetitions, not pinned):
+
+    Scripts/run-performance.sh compare origin/dev span_ray_tracing --gpu cuda --gpu-arch 86 --cuda-compiler /usr/local/cuda-12.5/bin/nvcc --record
+
+One case, both sides, by hand (the builds are kept under /home/robertm/Projects/EBGeometry/build/performance/compare):
+
+    /home/robertm/Projects/EBGeometry/build/performance/compare/base-build/bin/<Probe>.ex --case '<case name>' --reps 10
+    /home/robertm/Projects/EBGeometry/build/performance/compare/head-build/bin/<Probe>.ex --case '<case name>' --reps 10
+
+The cases in this tree, and a run of some of them:
+
+    Scripts/run-performance.sh list
+    Scripts/run-performance.sh 'PointCloudBVH/*'
+
+Results: /home/robertm/Projects/EBGeometry/build/performance/compare/base.jsonl and head.jsonl; this report: /home/robertm/Projects/EBGeometry/build/performance/compare/report.md
+```
+Reviewer checklist (to be completed by a human)
+The test suite compiles and runs to completion without warnings or errors.
+All relevant new features are documented in the user documentation (Sphinx).
+This contribution does not break existing sections in the user documentation.
+All relevant APIs are documented in the doxygen documentation.
+Appropriate labels have been assigned to this PR.
+New or revised proper licensing and copyright information is in place.
+A PR review has been run using @claude review.
+The continuous integration and testing hooks at GitHub run to completion.
+The performance receipt is current (CI's Performance-receipt passes), and every regression in it is explained.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01FnaeZk1ThKVcT9ypbex2Vt
+Span ray tracing: fused compositions, BVHUnion and Tape traced exactl…
+…
+3b65628
+```
+…y from their operands' spans
+
+Compositions are traced from where the ray is inside each operand (RaySpansT, up to 8 spans with a
+horizon; a trace restarts from the horizon when its first crossing lies beyond it). Union, intersection
+and complement combine span lists, affine maps trace the mapped ray; unions ask only for first
+crossings. RayForm may define spans(); the closed forms give their span, the mesh SDFs pair their
+nearest crossings. Fused union/intersection/difference/complement/affine and BVHUnion get ray forms;
+the Tape gets a ray program beside its clauses, stored in the same arrays, which the evaluator never
+reads; subtrees with other operations are marched in their boxes. RayOptions::m_march marches any
+shape. RayForm::available is replaced by signature detection.
+
+The Tape's primitive dispatch is split at a fixed point on the host (Tape::dispatchRest,
+EBGEOMETRY_HOST_NOINLINE), so GCC inlines the common shapes whatever else the file holds.
+
+New probe Performance/RayCSG; tests, docs and README updated.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FnaeZk1ThKVcT9ypbex2Vt
+```
+rmrsk
+mentioned this pull request
+Oct 26, 2026
+Roadmap: merge order of the open pull requests
+#232
+Open
+7 of 14 tasks
+rmrsk
+and others
+added 5 commits
+October 26, 2026 10:49
+Performance receipt for #237 (host, red: pool bytes of the ray progra…
+…
+7f9bcce
+```
+…ms; awaiting acceptance)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FnaeZk1ThKVcT9ypbex2Vt
+```
+Performance receipt for #237: host verdict accepted
+…
+241e0a4
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FnaeZk1ThKVcT9ypbex2Vt
+```
+Span ends without normals: the normal found once, at the hit, from th…
+…
+8d8475c
+```
+…e leaf crossed
+
+On a device the span lists live in local memory, and the profile showed the cost is the number of
+local-memory operations, not the lists' size. A span end is now a distance, the leaf it lies on and its
+kind (12 bytes in float, was 24). The normal and primitive are found once per ray: the composition follows
+the leaf down (fused: depth-first leaf ids; BVHUnion: primitive index; Tape: the leaf's clause, found again
+by following its ray program into BVH union operands), maps the ray through the affine maps above it,
+calls the leaf's firstHit() over a small window, maps the normal back, and turns it to face the way the ray
+crosses. A union now inserts its operand's spans in place, with no scratch list or copy.
+
+GPU, 262,144 rays, fused: the 5-part solid in float 1.29 -> 0.58 ms, the 60-part scene 8.95 -> 3.38 ms
+(float) and 15.3 -> 8.87 ms (double). The traced normals are checked against the gradient of each
+composition's value in TestRay.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FnaeZk1ThKVcT9ypbex2Vt
+```
+Performance receipt for #237: host, accepted
+…
+0b2a062
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FnaeZk1ThKVcT9ypbex2Vt
+```
+Performance receipt for #237: CUDA, accepted
+…
+310ead7
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FnaeZk1ThKVcT9ypbex2Vt
+```
+rmrsk
+marked this pull request as ready for review
+October 26, 2026 14:47
+rmrsk
+commented
+Oct 26, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@claude review
+github-actions
+Bot
+commented
+Oct 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Claude finished @rmrsk's task in 34s —— View job
+Review of #237: span ray tracing
+I read the design, the span core (EBGeometry_RaySpans.hpp, in particular traceSpans(), mapBack() and the horizon handling), and the doc and instantiation checklist items. I did not build or run the suite, and I did not read the Tape ray-program compiler (EBGeometry_TapeImplem.hpp) or the mesh span pairing line by line. This is a review of what I read, not a full audit.
+Overall: the approach is sound and well argued. The horizon and restart scheme keeps the answer exact and only slows rays through many pieces. Moving the normal and primitive lookup to the hit, instead of carrying them in span ends, is well justified by the CUDA profile.
+Checks against CLAUDE.md
+No literalinclude in Docs/Sphinx/source/ except the check-docs prose in ContinuousIntegration.rst. ✅
+No stale RayForm<S>::available references in Sphinx, Source/ or README.md. ✅
+No std::min, std::max, std::clamp, std::numeric_limits or std::array in the new or changed headers I grepped (RaySpans, CSGRayForms, MeshRayForms, Tape, TapeImplem). ✅
+EBGEOMETRY_HOST_NOINLINE is defined for both the host and the no-op branch in EBGeometry_GPU.hpp. ✅
+Performance receipts are committed, with the accepted reasons on them, as CLAUDE.md requires. ✅
+Findings
+Tests/InstantiateAll.cpp gaps (minor). RaySpansT, SpanEndT and the RayForm specializations for BVHUnion, Tape and the closed-form and mesh shapes are listed. The new ray forms in EBGeometry_CSGRayForms.hpp (Fused::Union, Intersection, Difference, Complement and the affine maps) are not instantiated. CLAUDE.md asks for new public classes to be added there so clang-tidy and -Wdouble-promotion see both precisions. Adding one representative RayForm<Fused::Node<...>> per operation would cover them.
+traceSpans() restart logic (EBGeometry_RaySpans.hpp, around lines 954–990).
+The loop reports the first crossing with end.m_t >= t0 && end.m_t <= horizon. After a restart at t0 = horizon, an exact crossing at horizon from the previous pass has already been rejected, so it cannot be double counted. But a crossing exactly at the horizon is only reported in the next pass if the new list recomputes it identically. With the 8-span truncation, float rounding of the horizon could in principle skip a crossing that lies within one ulp of it. A test with a crossing placed exactly on a horizon boundary would pin this down. The 20-ball row test covers overflow but probably not that edge.
+A ray that never makes progress ends as Unresolved after 64 passes. Please confirm firstHit() and intersects() callers handle HitStatus::Unresolved consistently. intersects() should probably report a conservative hit there, and the docs should say what it does.
+mapBack() distance mapping (line ~495). The distance back-map uses equality tests against m_t0 and a >= test against m_t1, otherwise t / m_scale. For scaled maps, t / m_scale can land slightly outside [a_t0, a_t1] through rounding, so a crossing might fall outside the caller's interval. Clamping the result to [a_t0, a_t1] is cheap and keeps the ordering invariants of the span lists.
+Normal orientation in traceSpans() (lines ~965–968). The flip uses (dot(n, dir) < 0) != entering. For a ray grazing tangentially, dot is about 0 and the sign is noise. The host and device DIFFER rays in the CUDA report are probably this case. That is acceptable, since it is accepted on the receipt and noted in the PR. A comment at that line stating the tangential case is intentionally undefined would help later readers.
+Documentation. The Rays.rst and ImplemRays.rst updates read well. Since m_march and the removal of available are user-facing and breaking, please add a short migration note for existing user RayForms, such as "rename or fix the signature, otherwise it is marched silently". The PR body says a wrong signature now silently marches instead of failing to compile. That is a footgun, so a static_assert opt-in for users who want the error would be a good addition. For example, the detector could stay silent but RayForm could offer a checkable helper.
+Performance. The host receipt shows +12–66% pool bytes on the Tape. That is flagged and accepted on the receipt. Is there a way to make the ray programs optional, so a Tape built only for value queries does not pay for them? The PR body says the ray programs are written in the same pool arrays. A compile-time or constructor-time switch would remove the cost for value-only users, such as AMReX and Chombo, who never trace rays. I did not check whether this is feasible. If you want to keep it as is, the receipt's accepted reason covers it.
+GPU follow-up. The 3× slowdown of the small fused float solid on the device, against marching, is documented as a follow-up. A heuristic that falls back to marching for fused trees with at most about 5 leaves, on the device only, would remove the one MAJOR CUDA regression. It would also take a small, documented behavioral difference between host and device (exact versus marched). Probably better kept as a follow-up, as you planned.
+Verdict
+No blocking correctness bugs found in the parts I read. The remaining items are the InstantiateAll additions (1), an edge-case test for the horizon boundary and the Unresolved handling (2), and a clamp in mapBack() (3). I'd resolve those before moving the PR out of draft. I also have not audited the Tape ray-program compiler in depth, which is the largest and most intricate part (EBGeometry_TapeImplem.hpp, +828 lines). A second pair of eyes there would be worthwhile.
+CLAUDE.md: the tape's fixed host dispatch split, and what a new opera…
+…
+edf72ca
+```
+…tion needs to be traced
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FnaeZk1ThKVcT9ypbex2Vt
+```
+rmrsk
+self-assigned this
+Oct 26, 2026
+rmrsk
+added
+csg
+Affects constructive solid geometry functionalities
+ray tracing
+Affects ray tracing functionality
+labels
+Oct 26, 2026
+rmrsk
+and others
+added 2 commits
+October 26, 2026 17:54
+Review round 1: Release warning, CUDA compile time, ray form traits
+…
+c248ca8
+```
+- RaySpans: suppress GCC's -Wmaybe-uninitialized on span lists (only the
+  first m_count spans are read; zeroing them costs local memory on a device).
+- Tape: rayLeafHit<D> calls one out-of-line primitiveLeafHit() on a device
+  instead of inlining the whole primitive dispatch at every call depth
+  (PerfRay PTX 20 MB -> 14 MB; the CI CUDA build fits its time limit again).
+- mapBack() clamps mapped distances to the caller's interval.
+- Public hasRayForm<S, T> and hasRaySpans<S, T> to static_assert a user ray
+  form; docs note on migrating ray forms and on Unresolved traces.
+- Tests: a first crossing exactly at a full list's horizon; the traits,
+  including a mistyped ray form; fused ray forms in InstantiateAll.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FnaeZk1ThKVcT9ypbex2Vt
+```
+Performance receipt for #237: host and CUDA after review round 1, acc…
+…
+3b3587c
+```
+…epted
+
+Same verdicts as before, accepted with the same reasons.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FnaeZk1ThKVcT9ypbex2Vt
+```
+rmrsk
+commented
+Oct 26, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@claude review
+github-actions
+Bot
+commented
+Oct 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Claude finished @rmrsk's task in 34s —— View job
+Review of #237: span ray tracing
+I read the span core (EBGeometry_RaySpans.hpp: traceSpans(), mapBack(), the firstHit() fallback), and checked Tests/InstantiateAll.cpp against the earlier automated review. I did not build or run anything, and I did not read the Tape ray-program compiler (EBGeometry_TapeImplem.hpp) or the mesh span pairing line by line.
+Overall: the design holds together. The horizon and restart scheme keeps the answer exact and only slows rays through many pieces. Moving the normal and primitive lookup to the hit is well supported by the CUDA profile in the PR body. I found no correctness bug in what I read.
+Corrections to the earlier automated review
+Three of its findings do not hold against the current branch (c248ca8 and later):
+InstantiateAll gaps: not a gap. Tests/InstantiateAll.cpp:116-119 instantiates RayForm for Fused::Node with UnionOp, IntersectionOp, ComplementOp and AffineOp. Difference is built from the intersection and complement, so it needs no entry of its own. The Fused::operands(...) block near line 355 also exercises these.
+Horizon edge double-count or skip: traceSpans() accepts a crossing with end.m_t >= t0 && end.m_t <= horizon, so the bounds are inclusive on both sides. A crossing exactly at the horizon is taken in the pass that produced it, and the next pass starts at t0 = horizon. It is never rejected and then lost.
+mapBack() clamp: already there. EBGeometry_RaySpans.hpp:517 clamps the quotient to [a_t0, a_t1], and the interval ends map back exactly.
+Tangential normal orientation: a comment at EBGeometry_RaySpans.hpp:980-981 already says the orientation of a grazing ray is rounding noise.
+Findings
+Unresolved through the firstHit() fallback (minor, EBGeometry_RaySpans.hpp:659). When an operand without a spans() form returns Unresolved, its list stays empty and its horizon moves to the unresolved distance, so the restart continues from there. This is sound. The cost is that a grazing ray can take up to MaxPasses = 64 passes before the composition returns Unresolved. Please say in ImplemRays.rst how intersects() treats an Unresolved composition (conservative hit or miss), if it is not already said there. I did not find where RayForm<Fused::Node> handles it, since EBGeometry_CSGRayForms.hpp never mentions Unresolved.
+A test for the 64-pass exit (minor). The 20-ball row covers overflow and restart. Nothing I read forces the MaxPasses / Unresolved exit in traceSpans() (lines 1000-1008). A shape that returns Unresolved from every firstHit() would pin down that branch and its reported m_t.
+User-facing break (docs). Removing RayForm<S>::available turns a wrong firstHit() signature into a silent march. The PR says ImplemRays.rst shows static_assert(hasRayForm<...>). A one-line migration note for existing users ("a ray form with an available member is detected by its firstHit() signature now; check it with hasRayForm") would make the breaking change easier to find.
+Pool growth on value-only tapes (already raised, accepted). The host receipt shows +12–66% pool bytes. The reason is accepted on the receipt and listed as a follow-up in the PR body. An opt-out for value-only users such as AMReX and Chombo is worth tracking as its own issue.
+Small fused float solid on CUDA (already accepted). The one MAJOR CUDA regression, Ray/csg-fused float at +69% to +210%, is accepted on the receipt and listed as a follow-up. I agree it belongs after the renderer.
+Checks against CLAUDE.md
+No std::min, std::max, std::clamp, std::numeric_limits or std::array in the span code I read; it uses Math::clamp, Math::max and Math::min.
+The new public ray forms are covered in InstantiateAll.cpp.
+Both performance receipts are committed, with accepted reasons.
+The PR is still a draft, so the .rst audit has not started. It will need a full pass once the PR leaves draft.
+Not reviewed
+The largest and most intricate part is EBGeometry_TapeImplem.hpp (about 840 added lines: ray-program compilation, leaf-id lookup, the span-list stack of Tape::RayStackSize = 4). I read only the mapBack() call at line 1825. It needs a second look from a human reviewer, or a dedicated pass.
+Verdict
+No blocking issues in the parts I read. Items 1 and 2 are small additions (a doc sentence, one test) and item 3 is a doc note. The Tape ray-program compiler is the part still unreviewed.
+Review round 2: test the 64-pass exit of a traced composition
+…
+0e3a85d
+```
+A user shape whose firstHit() is always unresolved a step further on makes a
+fused intersection and a tape restart on every pass; both end Unresolved
+64 steps along the ray, and intersects() reports it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FnaeZk1ThKVcT9ypbex2Vt
+```
+rmrsk
+commented
+Oct 26, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@claude review
+Round 2's items: the 64-pass Unresolved exit now has a test (0e3a85d). ImplemRays.rst already says when a traced composition is Unresolved and that intersects() returns that status for the caller to decide (Spans section), and it has the available migration note with static_assert(hasRayForm<...>) (user ray form section). The PR is out of draft.
+Please spend this round on what the last two skipped: Source/EBGeometry_TapeImplem.hpp and the ray parts of Source/EBGeometry_Tape.hpp — the ray-program compiler (compileProgram, emit, raySlots, flatten), rayEvaluate<D> and its span-list stack (RayStackSize), rayUnion<D>, and rayLeafHit<D>'s descent into BVH-union operands.
+github-actions
+Bot
+commented
+Oct 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Claude finished @rmrsk's task in 1m 41s —— View job
+Round 3 review of #237: the Tape ray-program compiler and evaluator
+I read the ray code in EBGeometry_TapeImplem.hpp: compileProgram, emit, raySlots, traced, flatten, rayEvaluate<D>, rayLeaf/dispatchRayLeaf, rayUnion<D> and rayLeafHit<D>. I also read traceSpans() for how it uses them. I did not build or run anything, and I did not read the ray declarations in EBGeometry_Tape.hpp line by line. I found no correctness bug. There is one cost problem and a few robustness and test gaps.
+What I checked and found sound
+Span-list stack bound.
+raySlots() and the level + raySlots > RayStackSize test in emit() agree with how rayEvaluate uses lists[]. The first operand sits at level L, the others at L+1, and slots = max(first, 1 + other).
+A marched subtree needs 1 slot. A parent that passed the check can never leave a child with no room.
+A BVH union counts as 1 slot because its operands run in their own rayEvaluate frames.
+Complement and affine nodes keep the level, matching RayEmit{true, level}.
+all/first-only flags.
+Compile-time flags (RayEmit::m_all) are set to true for intersection and complement subtrees.
+At run time firstOnly = !a_all && flag == 0. Operand programs of a BVH union are compiled with the same m_all, so passing a_all through rayUnion stays consistent with the union clause's own flag.
+flatten. The layout is clauses, then marched ranges, then ray programs. Marched clauses get m_a += numPrograms, which matches the marched ranges' position in m_flatPrograms. getNumPrograms() is unchanged.
+Call depth. calls() is recorded in buildUnion for every operand, so rayUnion<D> has D > 0 wherever a UnionBVH ray clause exists. A BVH union inside a marched range gets its depth from the same bookkeeping.
+Affine frames. The value PushAffine is emitted before the ray PushAffine, so a marched range sees the mapped point. Subtree marches in the unit-direction mapped frame, and mapBack rescales and clamps. rayLeafHit maps t0 through mapRay and the normal back through the transposed matrices. hit.m_point comes from the original ray in traceSpans, so closestPrimitive(hit.m_point) for MarchedLeaf is evaluated in the right frame.
+Findings
+rayLeafHit descent into a BVH union is O(operands) per hit (TapeImplem.hpp:2058-2076).
+consider() loops over every unbounded and bounded operand of the union and reads each one's m_begin, to find the program with the greatest m_begin <= a_clause.
+The trace itself prunes through the BVH, so a union of thousands of parts pays that linear scan once per ray hit. The probe's 50-part scene hides this. At around 5k parts it could be a visible fraction of a traced ray.
+Two ways to avoid it. At compile time, store the operand programs in a table sorted by m_begin and binary-search it. Or put the operand's program id in the leaf id.
+Whatever you choose, please add a RayCSG case with a few thousand parts, so a regression shows up on the receipt.
+Several UnionBVH clauses in one ray program pick the wrong operand first (TapeImplem.hpp:2049-2081).
+Take Intersection(UnionBVH A, UnionBVH B) with the hit in B. The first UnionBVH clause met is A's. Every A operand begins before a_clause, so A's last operand is chosen and rayLeafHit<D-1> runs over it for nothing.
+The answer is still right. No clause in that operand equals a_clause, the returned hit is not a hit, and the outer loop goes on to B. But it is wasted work, and it walks the operand's own nested unions as well.
+Choosing only an operand whose program range, with its nested programs, contains a_clause would remove it. The next program's m_begin can serve as the end bound. This falls away if finding 1 is solved with a table that records ends.
+I did not find a test with two sibling BVH unions in one program, or with a BVH union inside an affine map inside a union operand. That would pin both this and the frame mapping.
+A failed descent is silent.
+traceSpans() takes leaf.m_primitive and leaf.m_normal from a_resolve without checking leaf.hit(). If the leaf cannot be found again, which would be a compiler/evaluator disagreement, the caller gets Hit with a zero normal and a garbage primitive.
+After the loop in rayLeafHit, adding EBGEOMETRY_EXPECT(hit.hit()) would catch that in debug builds. The leaf branch forces m_status = Hit, so a real match always satisfies it.
+The same applies to dispatchRayLeaf/dispatchLeafHit, which already have EXPECT(false) on the fall-through.
+Frame size (informational).
+Each rayEvaluate frame holds lists[4] plus scratch, and rayUnion adds operand. That is six lists per call level, and it is multiplied by MaxCallDepth on the device. The PR body already notes this.
+If a future operation needs more depth, the scratch use in Intersection and Complement is the cheapest to share with operand. They are never live at the same time in one frame, but operand lives in rayUnion, one level up.
+Minor, emit() comment. The comment above the leaf number (TapeImplem.hpp:718-719) says the number is "in the clause's otherwise unused m_b", but the ray clause also stores it there (pushRay(..., index, m_nextLeaf, ...)). Saying so would make it clearer that the ray Leaf clause's m_b is the closestPrimitive leaf number and not the clause id used for nameLeaf(pc, ...).
+Verdict
+No blocking issue in the ray-program compiler or evaluator. I would address finding 1 with a probe case before the renderer depends on large unions, add a test for finding 2, and add the EXPECT from finding 3. The .rst audit is still pending now that the PR is out of draft.
+Review round 3: find a hit's BVH-union operand by bisection, not a scan
+…
+1869b3e
+```
+rayLeafHit() scanned every operand of a BVH union to find the one holding the
+leaf a trace ended on: 9.8 us per ray on a union of 4096 balls. Now the
+leaf's ray program is found by bisection over the ray programs' starts, and
+a parent per sub-program (appended to m_programs, 8 bytes each) leads up to
+the operand; the union's ray clause records its operands' sub-program range,
+so a sibling union's leaf is skipped at once. 0.71 us per ray (14x).
+
+- EXPECT that rayLeafHit() finds the leaf the trace named.
+- Test: two sibling BVH unions, one rotated and translated, name each leaf
+  and its normal.
+- RayCSG probe: crowd-tape, a tape of 4096 small balls, traced.
+- Docs: the lookup, and the new case.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FnaeZk1ThKVcT9ypbex2Vt
+```
+rmrsk
+commented
+Oct 26, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@claude review
+Round 3's findings are addressed in the latest commit: the BVH-union operand lookup in rayLeafHit is now a bisection over the ray programs' starts plus a parent walk (findings 1 and 2; a new RayCSG/crowd-tape case of 4096 balls went from 9.8 µs to 0.71 µs per ray), with a test of sibling BVH unions in a rotated frame, the EXPECT (3) and the comment (5). Please check the new lookup in EBGeometry_TapeImplem.hpp (rayLeafHit, the parent entries written in flatten and read after the ray programs, the operand range in the UnionBVH ray clause) and anything else not yet covered.
+github-actions
+Bot
+commented
+Oct 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+PR #237 was updated after the trigger (2026-10-26T18:20:35Z >= 2026-10-26T18:20:16Z). Mention Claude again to run on the latest version.
+rmrsk
+commented
+Oct 26, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@claude review
+github-actions
+Bot
+commented
+Oct 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Claude finished @rmrsk's task in 51s —— View job
+Round 4 review of #237: the bisected BVH-union operand lookup
+I read rayLeafHit<D>, the parent entries in flatten(), how finalize() and the deep copy carry them, compileProgram (m_current and m_parents), and the UnionBVH ray clause emission (first..end). I did not build or run anything, so this review is from reading only. I found no correctness bug.
+What I checked and found sound
+Layout. flatten() writes the compiled programs, then the marched ranges, then the ray programs (m_rayPrograms + i), then one parent entry per sub-program (m_rayPrograms + numPrograms + i, parent in m_begin). rayLeafHit reads exactly those offsets.
+Pool carry-over. finalize() reserves and assigns the whole m_flatPrograms array. The deep-copy path copies it whole and carries m_flatNumPrograms and m_flatRayPrograms. So the parent entries travel with the tape. getNumPrograms() still reports the evaluator's count only.
+Bisection.
+The ray programs' m_begin values do not decrease with the program index, because flatten lays them out in index order.
+Empty ray programs (null a_ray, from marched subtrees) have begin == end, equal to the next program's begin. The last program with begin <= a_clause is then never an empty one: a following non-empty program shares its begin, and a trailing empty one begins at the total clause count, which is greater than any clause id.
+lo starts at 0 and begin(0) == 0, so a clause before every other begin still resolves.
+Parent walk.
+compileProgram records m_current as the parent and restores it on exit, so an operand's parent is the program that contains the union.
+The walk stops at the direct child of a_program. The range test [c.m_b, c.m_c) then also confirms the child belongs to this union and not to a sibling.
+For Intersection(UnionBVH A, UnionBVH B) with the hit in B, A's clause finds an operand that is not in A's range and is skipped. That fixes finding 2 of round 3.
+A leaf that sits in a_program itself ends the walk at operand == a_program, which is skipped.
+A nested union inside an operand is reached by the recursive call, with D - 1.
+Frames. PushAffine applies mapRay before descending, and the normal is mapped back on the way out through maps[]. The new EXPECT(hit.hit()) holds, because the leaf branch sets m_status = Hit. It cannot fire in a call that descends only when the operand holds the clause.
+Findings (all minor)
+The lookup depends on an ordering invariant that nothing checks. It needs ray-program m_begin to be monotonic in the program index and the parent entries to live at m_rayPrograms + numPrograms. A short comment on the Program layout in EBGeometry_Tape.hpp (near line 623) would help. It would say that parent entries reuse Program::m_begin, that m_end is unused, and that the bisection relies on the ordering. An EBGEOMETRY_EXPECT in flatten() that checks the begins are sorted would catch a future reordering in Debug.
+The bisection runs per UnionBVH clause passed, not per hit. It runs again for each sibling union that precedes the hit's clause and finds nothing. It costs about log2(numPrograms) reads, so it is cheap, and your 4096-ball case shows it. If you ever want it once per call, it could be hoisted above the loop and computed lazily. I would not do it now.
+Coverage.
+The sibling-union test is a good pin for the skip. I did not find a case where the leaf sits in an operand that is itself nested under a marched subtree. That case should not occur, since a marched range has no ray program and its leaf is named MarchedLeaf. A one-line comment saying so near the Marched branch would settle the question for later readers.
+The RayCSG/crowd-tape case is on the host only, in the probe I read about. If the device receipt is recorded again for this commit, a hostdevice pair would show the bisection's cost on a device, where a data-dependent loop of reads can differ from the host.
+Process, per CLAUDE.md.
+The change touches Source/EBGeometry_TapeImplem.hpp and the probes, so the host and device receipts need recording again for the new commit. Run Scripts/run-performance.sh compare origin/dev --record and the CUDA one. Keep the accepted reasons, but only where you explicitly accept them.
+Now that the PR is out of draft, the .rst audit starts. The Tape's layout paragraph in ImplemCSG.rst should mention the parent entries after the ray programs, if it does not already. Run grep -rn literalinclude Docs/Sphinx/source/ and a -W Sphinx build.
+Verdict: the new lookup looks correct, and I see no blocking issue. What is left is the invariant comment and EXPECT from finding 1, the receipts from item 4, and the docs audit.
+rmrsk
+and others
+added 4 commits
+October 26, 2026 19:29
+Review round 4: check the ray programs' order; clang double promotion
+…
+9db75e8
+```
+- flatten() EXPECTs that the ray programs begin in program order, which the
+  bisection in rayLeafHit() relies on; the layout comment says so, and that
+  a parent entry's m_end is unused.
+- Comment: a Marched clause is a leaf of the trace as a whole.
+- ImplemCSG.rst: the parent entries and how a hit's leaf is found again.
+- TestRay: the sibling-union test's margin is a double (clang's
+  -Wdouble-promotion failed the float build).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FnaeZk1ThKVcT9ypbex2Vt
+```
+Stable ray-sphere and ray-cylinder quadratics
+…
+752025d
+```
+The closed forms of the sphere, the capsule's caps and the cylinders took the
+discriminant as b^2 - c, with c = |oc|^2 - r^2. For a small ball or thin
+cylinder far from the ray's start that cancels: in float, a ray passing
+within about 1e-3 of the radius was hit or missed by rounding, and host and
+device (which fuse multiply-adds differently) disagreed on 74 of 262,144 rays
+of the new RayCSG crowd. The discriminant is now r^2 - |oc x d|^2 (a r^2 -
+|o x d|^2 for a tube), and the nearer root c / q. With FMA contraction on and
+off, the crowd's float rays now differ in 1 case instead of 73.
+
+Test: rays passing a small far ball and a thin far cylinder at 1 +- 3e-4 and
+1 +- 1e-3 radii are hit or missed by their exact distance (the old form got
+38 of them wrong in float).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FnaeZk1ThKVcT9ypbex2Vt
+```
+Merge remote-tracking branch 'origin/dev' into span_ray_tracing
+…
+beea848
+```
+# Conflicts:
+#	Performance/receipt.md
+#	README.md
+```
+Performance receipt for #237: host and CUDA against dev 8f43bf5, acce…
+…
+ff10006
+```
+…pted
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FnaeZk1ThKVcT9ypbex2Vt
+```
+Hide details
+View details
+rmrsk
+merged commit e0a6775
+into
+dev
+Oct 26, 2026
+30 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+This was referenced Oct 26, 2026
+Renderer and viewer on the ray queries (renderer step 1)
+#239
+Draft
+[DO NOT MERGE] Renderer: ray queries on any shape, a renderer and an SDL2 viewer (1/3)
+#214
+Closed
+[DO NOT MERGE] Examples: every example that builds a shape opens the viewer on it (2/3)
+#215
+Closed
+[DO NOT MERGE] Ray tape: closed-form ray forms, the tape's ray program, a generic renderer (3/3)
+#216
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+csg
+Affects constructive solid geometry functionalities
+ray tracing
+Affects ray tracing functionality
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

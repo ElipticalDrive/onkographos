@@ -1,0 +1,1280 @@
+# Volume Rendering 纯 C++ 实现
+
+[![Windows Build](https://github.com/upupming/volume-rendering/actions/workflows/windows.yml/badge.svg)](https://github.com/upupming/volume-rendering/actions/workflows/windows.yml)
+
+Raycasting 实现的 Volume Rendering 算法。
+
+![result](img/result.png)
+
+## 数据下载
+
+一份 CBCT 数据，在 [upupming/marching-cubes 的 Release 中](https://github.com/upupming/marching-cubes/releases/tag/v0.0.1)下载并放入 [data](data) 文件夹下。
+
+## 基本知识
+
+> 看不了公式可以访问 HTML 页面: http://upupming.site/volume-rendering
+
+> Raycasting is not the same as raytracing! Raycasting is a fast semi-3D technique that works in realtime even on 4MHz graphical calculators, while raytracing is a realistic rendering technique that supports reflections and shadows in true 3D scenes, and only recently computers became fast enough to do it in realtime for reasonably high resolutions and complex scenes.
+
+Raycasting 和 Raytracing 有区别，前者用来直接渲染体数据，后者则是用来对表面（例如 mesh 数据）进行渲染，获得具有阴影等真实的结果。
+
+在 Raycasting 中，两个东西非常重要：
+
+- Transfer function: A function that **maps** the information from every point q(t) along the ray to a color and opacity (RGBA) value
+- Ray function: The ray function F is used to **combine** the scalar values along a ray, together with the application of the transfer function f, and produce a single RGBA value per ray
+
+首先我们需要从眼睛发出一些光，最开始这道光颜色值和不透明度（RGBA）都是 0，然后打到一个 `zNear` 平面上表示我们最终看到的坐标在屏幕上是什么。然后穿透整个体数据，在这个过程中遇到的每个体素都是一个 scalar value，CT 数据对应的就是它的 hounsfield unit 值，我们可以根据这个值给他分配一个 RGBA 值，这就是传输函数（Transfer function），当然这是最简单的一维传输函数，复杂的二维传输函数可以根据梯度值等定义。我们可以把一路上遇到的所有的传输函数值作为 depth 的函数记录下来，记录下来之后，我们利用光线函数（Ray function）将这条光线所通过的所有的 RGBA 值做一个变换变成一个 RGBA 值，这个过程可以是求最大值（对应的结果就是 Max Intensity Project），可以是 First value >= threshold，这样得到的就是表面，也可以是平均值、求和等其他操作。
+
+## Ray function
+
+### Alpha blending (Compositing function)
+
+算是最复杂的一种 Ray function，因为可以定义每一个体素的颜色和不透明度值，理论上传输函数调节的好的话可以得到任意的接近现实的想要的结果。
+
+具体的光线传输和吸收公式就不推导了，可以参考 [Real-Time Volume Graphics](materials/Real-Time%20Volume%20Graphics.pdf)，最终可以得到光线的颜色计算公式：
+
+$$
+\tilde{C} = \sum_{i=0}^n\alpha_iC_i\prod_{j=0}^{i-1}(1-\alpha_j)
+$$
+
+- 这个公式可以理解为，一条从眼睛射出的光线打到体素上，交点分别为 $0, 1, \cdots, n$，第 $i$ 个点到达眼睛的时候要经过前面 $0 \cdots (i-1)$ 这些体素的遮挡，最终的到达眼睛处的颜色值要乘上这所有体素的透明度之积。
+- 注意这里的 $\alpha C$ 被称之为 *opacity-weighted color*，也就是已经乘以过透明度之后的颜色，在这个颜色上进行插值得到的结果是比较好的。在看相关资料的时候一定要注意上下文判断到底 $C$ 是已经乘过透明度还是没有乘过，我这里统一都是没有乘过，和代码实现相对应。
+
+#### Back-to-Front
+
+递推公式更加简单，不需要处理不透明度的递推。
+
+用 $C_i$ 表示第 $i$ 个点的颜色，$C_i'$ 表示从 $i \cdots n$ 的 compositing 颜色，$\alpha$ 表示不透明度，递推公式为
+
+$$
+\begin{aligned}
+    C'_{i} = \alpha_i C_i + (1 - \alpha_i) C'_{i+1}
+\end{aligned}
+$$
+
+极端情况：
+
+- 当 $\alpha_i = 0$ 时，当前点完全透明，更新后完全等于后面的颜色，$C'_{i} = C'_{i+1}$
+- 当 $\alpha_i = 1$ 时，当前点完全不透明，更新后完全等于这个点的颜色，$C'_{i} = \alpha C$
+
+初始条件（背景色） $C'_n = 0$
+
+根据数学归纳法不难证明：
+
+$$
+\begin{aligned}
+    C'_0 &= \alpha_0 C_0 + \left(1-\alpha_0\right)C'_1 \\
+         &= \alpha_0 C_0 + \left(1-\alpha_0\right)\left(\alpha_1 C_1 + \left(1-\alpha_1\right)C'_2\right) = \alpha_0 C_0 + \left(1-\alpha_0\right)\alpha_1 C_1 + \left(1-\alpha_0\right)\left(1-\alpha_1\right)C'_2\\
+         \vdots \\
+         &= \alpha_0 C_0 + \left(1-\alpha_0\right)\alpha_1 C_1 + \left(1-\alpha_0\right)\left(1-\alpha_1\right)\alpha_2 C_2 + \cdots + \prod_{j=0}^{n-1}\left(1-\alpha_j\right)\alpha_nC_n
+\end{aligned}
+$$
+
+#### Front-to-Back
+
+需要同时处理不透明度的递推，但是可以在不透明度累积到 1 时终止（early ray termination），效率更高。
+
+用 $C_i$ 表示第 $i$ 个点的颜色，$C_i'$ 表示从 $0 \cdots i$ 的 compositing 颜色，$\alpha$ 表示不透明度，递推公式为
+
+$$
+\begin{aligned}
+    C'_{i} &= C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i \\
+    \alpha'_{i} &= \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i \\
+\end{aligned}
+$$
+
+极端情况：
+
+- 当 $\alpha_i = 0$ 时，当前点完全透明，更新后完全等于前面的颜色，$C'_{i} = C'_{i-1}$，$\alpha'_{i} = \alpha'_{i-1}$
+- 当 $\alpha_i = 1$ 时，当前点完全不透明，更新后，$C'_{i} = C'_{i-1} + (1-\alpha'_{i-1}) C_i$，$\alpha'_{i} = 1$
+
+初始条件（背景色）：
+
+$$
+\begin{cases}
+    C'_0 &= 0 \\
+    \alpha'_0 &= 0 \\
+\end{cases}
+$$
+
+先把 $\alpha'$ 的递推公式等价变形成 $1 - \alpha'_{i} = (1 - \alpha'_{i-1}) (1 - \alpha_i)$
+
+然后根据数学归纳法不难证明：
+
+$$
+\begin{cases}
+    C'_i &= C_1 + (1-\alpha_1)\alpha_2 C_2 + \cdots + \left(\prod_{j=0}^{i-1}(1-\alpha_j)\right)\alpha_iC_i \\
+    1 - \alpha'_i &= \prod_{j=0}^{i}(1-\alpha_j)
+\end{cases}
+$$
+
+## image-order vs object order
+
+- image-order (ray-casting): divides the resulting image into pixels and then computes the contributions of the entire volume to each pixel
+- object order (graphics hardware): divides the objects into primitives and then calculates which set of pixels are influenced by a primitive
+
+## 3D texture proxy geometry
+
+- The biggest advantage of using view-aligned slices and 3D textures for volume rendering is that hardware-accelerated tri-linear interpolation is employed for resampling the volume at arbitrary locations.
+- Apart from better image quality compared to bi-linear interpolation, this allows the rendering of slices with arbitrary orientation with respect to the volume, making it possible to maintain a constant sampling rate for all pixels and viewing directions.
+- Additionally, a single 3D texture suffices for storing the entire volume, if there is enough texture memory available.
+
+## 踩坑
+
+1. `glTexImage3D` 的 `depth` 参数才是数组的第一维，如果传错了会导致索引出现混乱。
+    1. 如果要传入 `unsigned short` 数据，需要使用 `usampler3D`，直接使用 `sampler3D` 的话，得到的结果全是 0。参考: https://stackoverflow.com/a/23410610/8242705
+
+## 参考资料
+
+1. [CUDA CMake](https://cliutils.gitlab.io/modern-cmake/chapters/packages/CUDA.html)
+2. [RenderDoc graphics debug tool](https://github.com/baldurk/renderdoc)
+3. [Coding Challenge #146: Rendering Raycasting](https://www.youtube.com/watch?v=vYgIKn7iDH8)
+4. https://lodev.org/cgtutor/raycasting.html
+5. [Ray Casting versus Ray Tracing (Volumetric): A Quick and Convenient Comparison](https://www.youtube.com/watch?v=ll4_79zKapU)
+6. [Ray Functions for Volume Rendering: A Quick and Convenient Review](https://www.youtube.com/watch?v=1PqvwOjnKJw)
+7. [Visualization Lecture 11.2. Ray Casting, Ray Functions, Transfer Functions, Direct Volume Rendering](https://www.youtube.com/watch?v=Thk-MiBIZpE)
+8. [data visualization: principles and practice](https://books.google.com.hk/books?id=AGjOBQAAQBAJ&printsec=frontcover)
+9. Data Vis Book
+10. [Chapter 39. Volume Rendering Techniques](https://developer.nvidia.com/gpugems/gpugems/part-vi-beyond-triangles/chapter-39-volume-rendering-techniques)
+11. https://cgl.ethz.ch/teaching/former/scivis_07/Notes/Handouts/03-raycasting.pdf
+12. [slab 光线和 box 求交法](materials/03raytracing1.pdf)
+13. https://github.com/m-pilia/volume-raycasting/
+
+### src/main.cpp
+```
+#include <QApplication>
+#include <array>
+#include <glm/glm.hpp>
+#include <iostream>
+
+#include "main_window.h"
+#include "raw_reader.h"
+#include "volume_rendering.h"
+
+int main(int argc, char *argv[]) {
+    QApplication app(argc, argv);
+
+    QCoreApplication::setOrganizationName("upupming");
+    app.setApplicationName("Volume Rendering (levoy1988)");
+    app.setApplicationVersion(QT_VERSION_STR);
+
+#if _DEBUG
+    std::cout << "Debug mode" << std::endl;
+#else
+    std::cout << "Release mode" << std::endl;
+#endif
+
+#ifndef QT_NO_OPENGL
+    MainWindow mainWin;
+    mainWin.show();
+
+#else
+    QLabel note("OpenGL Support required");
+    note.show();
+#endif
+    return app.exec();
+}
+```
+
+### src/main_window.cpp
+```
+﻿#include "main_window.h"
+
+MainWindow::MainWindow() {
+    readSettings();
+
+    QWidget *mWidget = new QWidget;
+
+    QVBoxLayout *vBoxLayout = new QVBoxLayout;
+    QHBoxLayout *hBoxLayout1 = new QHBoxLayout;
+    QHBoxLayout *hBoxLayout2 = new QHBoxLayout;
+
+    rayCasting = new RayCasting;
+    vBoxLayout->addWidget(rayCasting, 10);
+
+    opacityThresholdSlider = createThresholdSlider(
+        [=](int value) {
+            rayCasting->setOpacityThreshold(value);
+        },
+        rayCasting->getOpacityThreshold());
+    colorThresholdSlider = createThresholdSlider(
+        [=](int value) {
+            rayCasting->setColorThreshold(value);
+        },
+        rayCasting->getColorThreshold());
+    hBoxLayout1->addWidget(new QLabel("Opacity threshold (transfer function)"));
+    hBoxLayout1->addWidget(opacityThresholdSlider);
+    hBoxLayout2->addWidget(new QLabel("Color threshold   (transfer function)"));
+    hBoxLayout2->addWidget(colorThresholdSlider);
+
+    vBoxLayout->addLayout(hBoxLayout1, 1);
+    vBoxLayout->addLayout(hBoxLayout2, 1);
+
+    mWidget->setLayout(vBoxLayout);
+    setCentralWidget(mWidget);
+
+    connect(this, &MainWindow::readVolumeDataFinished,
+            this, &MainWindow::updateRayCasting);
+
+    // 在后面一点执行，避免出现多线程执行完了，但是还没有初始化完 slots 的情况
+    readDataProcess = QtConcurrent::run(this, &MainWindow::readData);
+}
+
+QSlider *MainWindow::createThresholdSlider(std::function<void(int)> callback, int initVal, int maxThreshold) {
+    QSlider *slider = new QSlider;
+    slider->setOrientation(Qt::Orientation::Horizontal);
+    slider->setFocusPolicy(Qt::StrongFocus);
+    slider->setTickPosition(QSlider::TicksBothSides);
+    slider->setTickInterval(100);
+    slider->setSingleStep(1);
+    slider->setMaximum(maxThreshold);
+    slider->setValue(initVal);
+    connect(slider, &QSlider::valueChanged,
+            this, callback);
+    return slider;
+}
+
+MainWindow::~MainWindow() {
+    delete rawReader;
+    delete rayCasting;
+}
+
+void MainWindow::readSettings() {
+    QSettings settings(QCoreApplication::organizationName(), QCoreApplication::applicationName());
+    const QByteArray geometry = settings.value("geometry", QByteArray()).toByteArray();
+    if (geometry.isEmpty()) {
+        const QRect availableGeometry = screen()->availableGeometry();
+        resize(availableGeometry.width() / 3, availableGeometry.height() / 2);
+        move((availableGeometry.width() - width()) / 2,
+             (availableGeometry.height() - height()) / 2);
+    } else {
+        restoreGeometry(geometry);
+    }
+}
+void MainWindow::writeSettings() {
+    QSettings settings(QCoreApplication::organizationName(), QCoreApplication::applicationName());
+    settings.setValue("geometry", saveGeometry());
+}
+
+void MainWindow::readData() {
+    rawReader = new RawReader("../../data/cbct_sample_z=507_y=512_x=512.raw", Z, Y, X);
+    volumeData = new VolumeData(rawReader->data(), dim, spacing, true);
+    emit readVolumeDataFinished();
+}
+
+void MainWindow::closeEvent(QCloseEvent *event) {
+    writeSettings();
+    event->accept();
+}
+
+void MainWindow::updateRayCasting() {
+    rayCasting->setVolumeData(volumeData);
+}
+```
+
+### src/main_window.h
+```
+﻿#pragma once
+
+#include <QFuture>
+#include <QMainWindow>
+#include <QtConcurrent>
+#include <QtWidgets>
+#include <functional>
+#include <glm/glm.hpp>
+
+#include "raw_reader.h"
+#include "ray_casting.h"
+
+class MainWindow : public QMainWindow {
+    Q_OBJECT
+   public:
+    MainWindow();
+    ~MainWindow();
+
+   protected:
+    void closeEvent(QCloseEvent *event) override;
+
+   private:
+    void readData();
+    void readSettings();
+    void writeSettings();
+    QSlider *createThresholdSlider(std::function<void(int)> callback, int initVal, int maxThreshold = 4946);
+
+    QFuture<void> readDataProcess;
+    QSlider *opacityThresholdSlider, *colorThresholdSlider;
+    RawReader *rawReader;
+    RayCasting *rayCasting;
+    VolumeData *volumeData;
+    const int Z = 507, Y = 512, X = 512;
+    glm::ivec3 dim{Z, Y, X};
+    glm::vec3 spacing{0.3f, 0.3f, 0.3f};
+   signals:
+    void readVolumeDataFinished();
+   private slots:
+    void updateRayCasting();
+};
+```
+
+### src/raw_readder.cpp
+```
+﻿#include <cassert>
+#include <fstream>
+#include <iostream>
+
+#include "raw_reader.h"
+
+RawReader::RawReader(std::string filename, const int Z, const int Y, const int X) {
+    std::ifstream(filename, std::ios::in | std::ios::binary);
+    // Copied from https://www.cplusplus.com/doc/tutorial/files/
+    std::streampos size;
+
+    std::ifstream file(filename, std::ios::in | std::ios::binary | std::ios::ate);
+    if (file.is_open()) {
+        size = file.tellg();
+        assert(size == Z * Y * X * sizeof(unsigned short));
+        m_data = (unsigned short *)malloc(size);
+        file.seekg(0, std::ios::beg);
+        file.read((char *)m_data, size);
+        file.close();
+
+        std::cout << "the entire file content is read" << std::endl;
+    } else
+        std::cout << "Unable to open file" << std::endl;
+}
+
+RawReader::~RawReader() {
+    free(m_data);
+}
+
+unsigned short *RawReader::data() const {
+    return m_data;
+}
+```
+
+### src/raw_reader.h
+```
+﻿#pragma once
+#include <string>
+class RawReader {
+   public:
+    RawReader(const std::string filename, const int Z, const int Y, const int X);
+    unsigned short* data() const;
+    ~RawReader();
+
+   private:
+    unsigned short* m_data;
+};
+```
+
+### src/ray_casting.cpp
+```
+﻿#include "ray_casting.h"
+
+// https://www.codenong.com/cs106436180/
+static void GLClearError() {
+    while (glGetError() != GL_NO_ERROR)
+        ;
+}
+static void GLCheckError() {
+    while (GLenum error = glGetError()) {
+        std::cout << "OpenGL Error(" << error << ")" << std::endl;
+    }
+}
+
+RayCasting::RayCasting(VolumeData* volumeData) : indexBuf(QOpenGLBuffer::IndexBuffer) {
+    setVolumeData(volumeData);
+}
+
+RayCasting::~RayCasting() {
+    arrayBuf.destroy();
+    indexBuf.destroy();
+}
+
+void RayCasting::setVolumeData(VolumeData* volumeData) {
+    this->volumeData = volumeData;
+    if (volumeData != nullptr) {
+        std::cout << "binding texture 3D image" << std::endl;
+        // 重新绑定 3D 纹理
+        glDeleteTextures(1, &volumeTexture);
+        glGenTextures(1, &volumeTexture);
+        glBindTexture(GL_TEXTURE_3D, volumeTexture);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        // 注意 depth 是最外面一层
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_R16UI, volumeData->dim[1], volumeData->dim[2], volumeData->dim[0], 0, GL_RED_INTEGER, GL_UNSIGNED_SHORT, volumeData->data);
+        glGenerateMipmap(GL_TEXTURE_3D);
+        glBindTexture(GL_TEXTURE_3D, 0);
+
+        update();
+    }
+}
+
+void RayCasting::initializeGL() {
+    initializeOpenGLFunctions();
+
+    glClearColor(backgroundColor.redF(), backgroundColor.greenF(), backgroundColor.blueF(), backgroundColor.alphaF());
+
+    initShaders();
+
+    // Enable depth buffer
+    glEnable(GL_DEPTH_TEST);
+    // Disable back face culling
+    glDisable(GL_CULL_FACE);
+
+    if (!arrayBuf.create()) {
+        std::cout << "arrayBuf create failed" << std::endl;
+    }
+    if (!arrayBuf.bind()) {
+        std::cout << "arrayBuf bind failed" << std::endl;
+    }
+    arrayBuf.allocate(vertices, sizeof(vertices));
+
+    if (!indexBuf.create()) {
+        std::cout << "indexBuf create failed" << std::endl;
+    }
+    if (!indexBuf.bind()) {
+        std::cout << "indexBuf bind failed" << std::endl;
+    }
+    indexBuf.allocate(indices, sizeof(indices));
+}
+void RayCasting::resizeGL(int w, int h) {
+}
+void RayCasting::paintGL() {
+    if (!volumeData) return;
+
+    // Clear color and depth buffer
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    QMatrix4x4 model, view, projection;
+
+    auto physicalSize = glm::vec3(volumeData->dim) * volumeData->spacing;
+    // 最长的边为 1，其他的边可能小一点，比例符合体数据原始物理尺寸
+    auto identityCubeSize = physicalSize / std::max({physicalSize.x, physicalSize.y, physicalSize.z});
+    QVector3D halfSideLen = QVector3D(identityCubeSize.x, identityCubeSize.y, identityCubeSize.z) / 2.f;
+    // 将边长为 2 的立方体变成满足 identityCubeSize 长宽高的长方体
+    model.scale(halfSideLen);
+
+    // 在 shader 里面 texture 采样的时候用的索引是没有旋转的，都是在 [0, 1) 区间内的采样，因此我们只能通过 view 的逆旋转表示 model 的旋转
+    view.rotate(QQuaternion(curr_quat[3], -curr_quat[0], -curr_quat[1], -curr_quat[2]));
+    auto lookAtMatrix = glm::lookAt(eye, lookat, up);
+    auto p = glm::value_ptr(lookAtMatrix);
+    view = QMatrix4x4(p).transposed() * view;
+
+    float aspectRatio = (float)width() / height();
+    projection.perspective(fov, aspectRatio, zNear, zFar);
+
+    auto mvpMatrix = projection * view * model;
+    program.setUniformValue("modelMatrix", model);
+    program.setUniformValue("viewMatrix", view);
+    program.setUniformValue("projectionMatrix", projection);
+    program.setUniformValue("mvpMatrix", mvpMatrix);
+
+    program.setUniformValue("viewportSize", QVector2D{(float)width(), (float)height()});
+    // raycasting 的计算过程都是在缩放之后的单位 identityCube 上进行的，计算出结果之后再进行 view 变换展示出来
+    // view 变换之后要保证眼睛在圆心，相当于倒推眼睛在哪里
+    // 同样 view 变换之后眼睛距离渲染平面的距离为 focalLength，视角为 fov，在 shader 中计算出来的光线方向也是需要进行 view 逆变换到世界坐标系的
+    program.setUniformValue("rayOrigin", view.inverted() * QVector3D({0.0, 0.0, 0.0}));
+    program.setUniformValue("aspectRatio", aspectRatio);
+    program.setUniformValue("focalLength", focalLength);
+
+    program.setUniformValue("top", halfSideLen);
+    program.setUniformValue("bottom", -halfSideLen);
+    program.setUniformValue("stepLength", 0.001f);
+    program.setUniformValue("backgroundColor", QVector3D(backgroundColor.redF(), backgroundColor.greenF(), backgroundColor.blueF()));
+    program.setUniformValue("gamma", 2.2f);
+
+    program.setUniformValue("normalMatrix", (view * model).normalMatrix());
+    program.setUniformValue("light.position", 1.2f, 1.0f, 2.0f);
+    program.setUniformValue("light.ambient", 0.2f, 0.2f, 0.2f, 1.f);
+    program.setUniformValue("light.diffuse", 0.5f, 0.5f, 0.5f, 1.f);
+    program.setUniformValue("light.specular", 1.0f, 1.0f, 1.0f, 1.f);
+    // material properties
+    program.setUniformValue("material.specular", 1.f, 1.f, 1.f, 0.f);
+    program.setUniformValue("material.shininess", 32.0f);
+    program.setUniformValue("reverseGradient", volumeData->reverseGradientDirection);
+
+    program.setUniformValue("opacityThreshold", opacityThreshold);
+    program.setUniformValue("colorThreshold", colorThreshold);
+
+    // Tell OpenGL which VBOs to use
+    if (!arrayBuf.bind()) {
+        std::cout << "arrayBuf bind failed" << std::endl;
+    }
+    if (!indexBuf.bind()) {
+        std::cout << "indexBuf bind failed" << std::endl;
+    }
+    program.setAttributeBuffer(0, GL_FLOAT, 0, 3, 0);
+    program.enableAttributeArray(0);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_3D, volumeTexture);
+
+    // glPolygonMode(GL_FRONT_AND_BACK,GL_FILL);
+    GLCheckError();
+    // type: Must be one of GL_UNSIGNED_BYTE, GL_UNSIGNED_SHORT, or GL_UNSIGNED_INT.
+    glDrawElements(GL_TRIANGLES, sizeof(indices) / sizeof(int), GL_UNSIGNED_INT, nullptr);
+    GLCheckError();
+}
+
+void RayCasting::initShaders() {
+    // Compile vertex shader
+    if (!program.addShaderFromSourceFile(QOpenGLShader::Vertex, ":/shaders/alpha_blending.vs"))
+        close();
+
+    // Compile fragment shader
+    if (!program.addShaderFromSourceFile(QOpenGLShader::Fragment, ":/shaders/alpha_blending.fs"))
+        close();
+
+    // Link shader pipeline
+    if (!program.link())
+        close();
+
+    // Bind shader pipeline for use
+    if (!program.bind())
+        close();
+}
+
+QPointF RayCasting::pixel_pos_to_view_pos(const QPointF& p) {
+    return QPointF(2.0 * float(p.x()) / width() - 1.0,
+                   1.0 - 2.0 * float(p.y()) / height());
+}
+
+void RayCasting::mousePressEvent(QMouseEvent* e) {
+    // Save mouse press position
+    prevMouse = e->localPos();
+    if (e->button() == Qt::MouseButton::LeftButton) {
+        mouseLeftPressed = true;
+        trackball(prev_quat, 0.0, 0.0, 0.0, 0.0);
+    } else if (e->button() == Qt::MouseButton::MiddleButton) {
+        mouseMiddlePressed = true;
+    } else if (e->button() == Qt::MouseButton::RightButton) {
+        mouseRightPressed = true;
+    }
+}
+
+void RayCasting::mouseReleaseEvent(QMouseEvent* e) {
+    if (e->button() == Qt::MouseButton::LeftButton) {
+        mouseLeftPressed = false;
+    } else if (e->button() == Qt::MouseButton::MiddleButton) {
+        mouseMiddlePressed = false;
+    } else if (e->button() == Qt::MouseButton::RightButton) {
+        mouseRightPressed = false;
+    }
+}
+void RayCasting::mouseMoveEvent(QMouseEvent* e) {
+    float rotScale = 1.0f;
+    float transScale = 2.0f;
+
+    auto mouse = e->localPos();
+    // 左键旋转
+    if (mouseLeftPressed) {
+        trackball(
+            prev_quat,
+            rotScale * (2.0f * prevMouse.x() - width()) / (float)width(),
+            rotScale * (height() - 2.0f * prevMouse.y()) / (float)height(),
+            rotScale * (2.0f * mouse.x() - width()) / (float)width(),
+            rotScale * (height() - 2.0f * mouse.y()) / (float)height());
+
+        add_quats(prev_quat, curr_quat, curr_quat);
+    }
+    // 中间键移动
+    else if (mouseMiddlePressed) {
+        eye[0] -= transScale * (mouse.x() - prevMouse.x()) / (float)width();
+        lookat[0] -= transScale * (mouse.x() - prevMouse.x()) / (float)width();
+        eye[1] += transScale * (mouse.y() - prevMouse.y()) / (float)height();
+        lookat[1] += transScale * (mouse.y() - prevMouse.y()) / (float)height();
+    }
+    // 右键缩放
+    else if (mouseRightPressed) {
+        eye[2] += transScale * (mouse.y() - prevMouse.y()) / (float)height();
+        lookat[2] += transScale * (mouse.y() - prevMouse.y()) / (float)height();
+    }
+    prevMouse = mouse;
+    // Request an update
+    update();
+}
+```
+
+### src/ray_casting.h
+```
+﻿#pragma once
+#include <QOpenGLFunctions>
+#include <QOpenGLWidget>
+#include <QtMath>
+#include <QtWidgets>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#include <iostream>
+
+#include "trackball.h"
+#include "volume_data.h"
+
+class RayCasting : public QOpenGLWidget, protected QOpenGLExtraFunctions {
+    Q_OBJECT
+   public:
+    explicit RayCasting(VolumeData* volumeData = nullptr);
+    ~RayCasting();
+    void setVolumeData(VolumeData* volumeData);
+    inline void setOpacityThreshold(float val) {
+        opacityThreshold = val;
+        update();
+    }
+    inline float getOpacityThreshold() {
+        return opacityThreshold;
+    }
+    inline float getColorThreshold() {
+        return colorThreshold;
+    }
+    inline void setColorThreshold(float val) {
+        colorThreshold = val;
+        update();
+    }
+
+   protected:
+    void mousePressEvent(QMouseEvent* e) override;
+    void mouseReleaseEvent(QMouseEvent* e) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+
+    void initializeGL() override;
+    void resizeGL(int w, int h) override;
+    void paintGL() override;
+
+    void initShaders();
+
+   private:
+    float opacityThreshold = 1800.f, colorThreshold = 2482.f;
+
+    QPointF pixel_pos_to_view_pos(const QPointF& p);
+
+    VolumeData* volumeData;
+    GLuint volumeTexture = 0;
+    QColor backgroundColor = QColor(41, 65, 71);
+
+    QOpenGLShaderProgram program;
+    QMatrix4x4 projection;
+    float zNear = 0.1f, zFar = 100.0f, fov = 60.0f;
+    float focalLength = 1.0 / qTan(M_PI / 180.0 * fov / 2.0);
+
+    QPointF prevMouse;
+    bool mouseLeftPressed = false, mouseRightPressed = false, mouseMiddlePressed = false;
+    float curr_quat[4] = {0, 0, 0, 1};
+    float prev_quat[4] = {0, 0, 0, 1};
+    // model 放在原点并且缩放到 [-0.5, 0.5] 区间，我们从 z=3 往 -z 方向看，确保能够看到 model 整体全貌，不管它有多大
+    glm::vec3 eye = {0, 0, 1.2},
+              lookat = {0, 0, 0}, up = {0, 1, 0};
+
+    QOpenGLBuffer arrayBuf;
+    QOpenGLBuffer indexBuf;
+
+    // 边长为 2，正中心在原点的一个立方体
+    float vertices[24] = {
+        -1.0f, -1.0f, 1.0f,
+        1.0f, -1.0f, 1.0f,
+        1.0f, 1.0f, 1.0f,
+        -1.0f, 1.0f, 1.0f,
+        -1.0f, -1.0f, -1.0f,
+        1.0f, -1.0f, -1.0f,
+        1.0f, 1.0f, -1.0f,
+        -1.0f, 1.0f, -1.0f,
+        //
+    };
+    int indices[36] = {
+        // front
+        0, 1, 2,
+        0, 2, 3,
+        // right
+        1, 5, 6,
+        1, 6, 2,
+        // back
+        5, 4, 7,
+        5, 7, 6,
+        // left
+        4, 0, 3,
+        4, 3, 7,
+        // top
+        2, 6, 7,
+        2, 7, 3,
+        // bottom
+        4, 5, 1,
+        4, 1, 0,
+        //
+    };
+};
+```
+
+### src/trackball.cpp
+```
+/*
+ * (c) Copyright 1993, 1994, Silicon Graphics, Inc.
+ * ALL RIGHTS RESERVED
+ * Permission to use, copy, modify, and distribute this software for
+ * any purpose and without fee is hereby granted, provided that the above
+ * copyright notice appear in all copies and that both the copyright notice
+ * and this permission notice appear in supporting documentation, and that
+ * the name of Silicon Graphics, Inc. not be used in advertising
+ * or publicity pertaining to distribution of the software without specific,
+ * written prior permission.
+ *
+ * THE MATERIAL EMBODIED ON THIS SOFTWARE IS PROVIDED TO YOU "AS-IS"
+ * AND WITHOUT WARRANTY OF ANY KIND, EXPRESS, IMPLIED OR OTHERWISE,
+ * INCLUDING WITHOUT LIMITATION, ANY WARRANTY OF MERCHANTABILITY OR
+ * FITNESS FOR A PARTICULAR PURPOSE.  IN NO EVENT SHALL SILICON
+ * GRAPHICS, INC.  BE LIABLE TO YOU OR ANYONE ELSE FOR ANY DIRECT,
+ * SPECIAL, INCIDENTAL, INDIRECT OR CONSEQUENTIAL DAMAGES OF ANY
+ * KIND, OR ANY DAMAGES WHATSOEVER, INCLUDING WITHOUT LIMITATION,
+ * LOSS OF PROFIT, LOSS OF USE, SAVINGS OR REVENUE, OR THE CLAIMS OF
+ * THIRD PARTIES, WHETHER OR NOT SILICON GRAPHICS, INC.  HAS BEEN
+ * ADVISED OF THE POSSIBILITY OF SUCH LOSS, HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, ARISING OUT OF OR IN CONNECTION WITH THE
+ * POSSESSION, USE OR PERFORMANCE OF THIS SOFTWARE.
+ *
+ * US Government Users Restricted Rights
+ * Use, duplication, or disclosure by the Government is subject to
+ * restrictions set forth in FAR 52.227.19(c)(2) or subparagraph
+ * (c)(1)(ii) of the Rights in Technical Data and Computer Software
+ * clause at DFARS 252.227-7013 and/or in similar or successor
+ * clauses in the FAR or the DOD or NASA FAR Supplement.
+ * Unpublished-- rights reserved under the copyright laws of the
+ * United States.  Contractor/manufacturer is Silicon Graphics,
+ * Inc., 2011 N.  Shoreline Blvd., Mountain View, CA 94039-7311.
+ *
+ * OpenGL(TM) is a trademark of Silicon Graphics, Inc.
+ */
+/*
+ * Trackball code:
+ *
+ * Implementation of a virtual trackball.
+ * Implemented by Gavin Bell, lots of ideas from Thant Tessman and
+ *   the August '88 issue of Siggraph's "Computer Graphics," pp. 121-129.
+ *
+ * Vector manip code:
+ *
+ * Original code from:
+ * David M. Ciemiewicz, Mark Grossman, Henry Moreton, and Paul Haeberli
+ *
+ * Much mucking with by:
+ * Gavin Bell
+ */
+#include "trackball.h"
+
+#include <math.h>
+
+/*
+ * This size should really be based on the distance from the center of
+ * rotation to the point on the object underneath the mouse.  That
+ * point would then track the mouse as closely as possible.  This is a
+ * simple example, though, so that is left as an Exercise for the
+ * Programmer.
+ */
+#define TRACKBALLSIZE (0.8)
+
+/*
+ * Local function prototypes (not defined in trackball.h)
+ */
+static float tb_project_to_sphere(float, float, float);
+static void normalize_quat(float[4]);
+
+static void vzero(float *v) {
+    v[0] = 0.0;
+    v[1] = 0.0;
+    v[2] = 0.0;
+}
+
+static void vset(float *v, float x, float y, float z) {
+    v[0] = x;
+    v[1] = y;
+    v[2] = z;
+}
+
+static void vsub(const float *src1, const float *src2, float *dst) {
+    dst[0] = src1[0] - src2[0];
+    dst[1] = src1[1] - src2[1];
+    dst[2] = src1[2] - src2[2];
+}
+
+static void vcopy(const float *v1, float *v2) {
+    register int i;
+    for (i = 0; i < 3; i++)
+        v2[i] = v1[i];
+}
+
+static void vcross(const float *v1, const float *v2, float *cross) {
+    float temp[3];
+
+    temp[0] = (v1[1] * v2[2]) - (v1[2] * v2[1]);
+    temp[1] = (v1[2] * v2[0]) - (v1[0] * v2[2]);
+    temp[2] = (v1[0] * v2[1]) - (v1[1] * v2[0]);
+    vcopy(temp, cross);
+}
+
+static float vlength(const float *v) {
+    return sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+}
+
+static void vscale(float *v, float div) {
+    v[0] *= div;
+    v[1] *= div;
+    v[2] *= div;
+}
+
+static void vnormal(float *v) { vscale(v, 1.0 / vlength(v)); }
+
+static float vdot(const float *v1, const float *v2) {
+    return v1[0] * v2[0] + v1[1] * v2[1] + v1[2] * v2[2];
+}
+
+static void vadd(const float *src1, const float *src2, float *dst) {
+    dst[0] = src1[0] + src2[0];
+    dst[1] = src1[1] + src2[1];
+    dst[2] = src1[2] + src2[2];
+}
+
+/*
+ * Ok, simulate a track-ball.  Project the points onto the virtual
+ * trackball, then figure out the axis of rotation, which is the cross
+ * product of P1 P2 and O P1 (O is the center of the ball, 0,0,0)
+ * Note:  This is a deformed trackball-- is a trackball in the center,
+ * but is deformed into a hyperbolic sheet of rotation away from the
+ * center.  This particular function was chosen after trying out
+ * several variations.
+ *
+ * It is assumed that the arguments to this routine are in the range
+ * (-1.0 ... 1.0)
+ */
+void trackball(float q[4], float p1x, float p1y, float p2x, float p2y) {
+    float a[3]; /* Axis of rotation */
+    float phi;  /* how much to rotate about axis */
+    float p1[3], p2[3], d[3];
+    float t;
+
+    if (p1x == p2x && p1y == p2y) {
+        /* Zero rotation */
+        vzero(q);
+        q[3] = 1.0;
+        return;
+    }
+
+    /*
+   * First, figure out z-coordinates for projection of P1 and P2 to
+   * deformed sphere
+   */
+    vset(p1, p1x, p1y, tb_project_to_sphere(TRACKBALLSIZE, p1x, p1y));
+    vset(p2, p2x, p2y, tb_project_to_sphere(TRACKBALLSIZE, p2x, p2y));
+
+    /*
+   *  Now, we want the cross product of P1 and P2
+   */
+    vcross(p2, p1, a);
+
+    /*
+   *  Figure out how much to rotate around that axis.
+   */
+    vsub(p1, p2, d);
+    t = vlength(d) / (2.0 * TRACKBALLSIZE);
+
+    /*
+   * Avoid problems with out-of-control values...
+   */
+    if (t > 1.0)
+        t = 1.0;
+    if (t < -1.0)
+        t = -1.0;
+    phi = 2.0 * asin(t);
+
+    axis_to_quat(a, phi, q);
+}
+
+/*
+ *  Given an axis and angle, compute quaternion.
+ */
+void axis_to_quat(float a[3], float phi, float q[4]) {
+    vnormal(a);
+    vcopy(a, q);
+    vscale(q, sin(phi / 2.0));
+    q[3] = cos(phi / 2.0);
+}
+
+/*
+ * Project an x,y pair onto a sphere of radius r OR a hyperbolic sheet
+ * if we are away from the center of the sphere.
+ */
+static float tb_project_to_sphere(float r, float x, float y) {
+    float d, t, z;
+
+    d = sqrt(x * x + y * y);
+    if (d < r * 0.70710678118654752440) { /* Inside sphere */
+        z = sqrt(r * r - d * d);
+    } else { /* On hyperbola */
+        t = r / 1.41421356237309504880;
+        z = t * t / d;
+    }
+    return z;
+}
+
+/*
+ * Given two rotations, e1 and e2, expressed as quaternion rotations,
+ * figure out the equivalent single rotation and stuff it into dest.
+ *
+ * This routine also normalizes the result every RENORMCOUNT times it is
+ * called, to keep error from creeping in.
+ *
+ * NOTE: This routine is written so that q1 or q2 may be the same
+ * as dest (or each other).
+ */
+
+#define RENORMCOUNT 97
+
+void add_quats(float q1[4], float q2[4], float dest[4]) {
+    static int count = 0;
+    float t1[4], t2[4], t3[4];
+    float tf[4];
+
+    vcopy(q1, t1);
+    vscale(t1, q2[3]);
+
+    vcopy(q2, t2);
+    vscale(t2, q1[3]);
+
+    vcross(q2, q1, t3);
+    vadd(t1, t2, tf);
+    vadd(t3, tf, tf);
+    tf[3] = q1[3] * q2[3] - vdot(q1, q2);
+
+    dest[0] = tf[0];
+    dest[1] = tf[1];
+    dest[2] = tf[2];
+    dest[3] = tf[3];
+
+    if (++count > RENORMCOUNT) {
+        count = 0;
+        normalize_quat(dest);
+    }
+}
+
+/*
+ * Quaternions always obey:  a^2 + b^2 + c^2 + d^2 = 1.0
+ * If they don't add up to 1.0, dividing by their magnitued will
+ * renormalize them.
+ *
+ * Note: See the following for more information on quaternions:
+ *
+ * - Shoemake, K., Animating rotation with quaternion curves, Computer
+ *   Graphics 19, No 3 (Proc. SIGGRAPH'85), 245-254, 1985.
+ * - Pletinckx, D., Quaternion calculus as a basic tool in computer
+ *   graphics, The Visual Computer 5, 2-13, 1989.
+ */
+static void normalize_quat(float q[4]) {
+    int i;
+    float mag;
+
+    mag = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    for (i = 0; i < 4; i++)
+        q[i] /= mag;
+}
+
+/*
+ * Build a rotation matrix, given a quaternion rotation.
+ *
+ */
+void build_rotmatrix(float m[4][4], const float q[4]) {
+    m[0][0] = 1.0 - 2.0 * (q[1] * q[1] + q[2] * q[2]);
+    m[0][1] = 2.0 * (q[0] * q[1] - q[2] * q[3]);
+    m[0][2] = 2.0 * (q[2] * q[0] + q[1] * q[3]);
+    m[0][3] = 0.0;
+
+    m[1][0] = 2.0 * (q[0] * q[1] + q[2] * q[3]);
+    m[1][1] = 1.0 - 2.0 * (q[2] * q[2] + q[0] * q[0]);
+    m[1][2] = 2.0 * (q[1] * q[2] - q[0] * q[3]);
+    m[1][3] = 0.0;
+
+    m[2][0] = 2.0 * (q[2] * q[0] - q[1] * q[3]);
+    m[2][1] = 2.0 * (q[1] * q[2] + q[0] * q[3]);
+    m[2][2] = 1.0 - 2.0 * (q[1] * q[1] + q[0] * q[0]);
+    m[2][3] = 0.0;
+
+    m[3][0] = 0.0;
+    m[3][1] = 0.0;
+    m[3][2] = 0.0;
+    m[3][3] = 1.0;
+}
+```
+
+### src/trackball.h
+```
+/*
+ * (c) Copyright 1993, 1994, Silicon Graphics, Inc.
+ * ALL RIGHTS RESERVED
+ * Permission to use, copy, modify, and distribute this software for
+ * any purpose and without fee is hereby granted, provided that the above
+ * copyright notice appear in all copies and that both the copyright notice
+ * and this permission notice appear in supporting documentation, and that
+ * the name of Silicon Graphics, Inc. not be used in advertising
+ * or publicity pertaining to distribution of the software without specific,
+ * written prior permission.
+ *
+ * THE MATERIAL EMBODIED ON THIS SOFTWARE IS PROVIDED TO YOU "AS-IS"
+ * AND WITHOUT WARRANTY OF ANY KIND, EXPRESS, IMPLIED OR OTHERWISE,
+ * INCLUDING WITHOUT LIMITATION, ANY WARRANTY OF MERCHANTABILITY OR
+ * FITNESS FOR A PARTICULAR PURPOSE.  IN NO EVENT SHALL SILICON
+ * GRAPHICS, INC.  BE LIABLE TO YOU OR ANYONE ELSE FOR ANY DIRECT,
+ * SPECIAL, INCIDENTAL, INDIRECT OR CONSEQUENTIAL DAMAGES OF ANY
+ * KIND, OR ANY DAMAGES WHATSOEVER, INCLUDING WITHOUT LIMITATION,
+ * LOSS OF PROFIT, LOSS OF USE, SAVINGS OR REVENUE, OR THE CLAIMS OF
+ * THIRD PARTIES, WHETHER OR NOT SILICON GRAPHICS, INC.  HAS BEEN
+ * ADVISED OF THE POSSIBILITY OF SUCH LOSS, HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, ARISING OUT OF OR IN CONNECTION WITH THE
+ * POSSESSION, USE OR PERFORMANCE OF THIS SOFTWARE.
+ *
+ * US Government Users Restricted Rights
+ * Use, duplication, or disclosure by the Government is subject to
+ * restrictions set forth in FAR 52.227.19(c)(2) or subparagraph
+ * (c)(1)(ii) of the Rights in Technical Data and Computer Software
+ * clause at DFARS 252.227-7013 and/or in similar or successor
+ * clauses in the FAR or the DOD or NASA FAR Supplement.
+ * Unpublished-- rights reserved under the copyright laws of the
+ * United States.  Contractor/manufacturer is Silicon Graphics,
+ * Inc., 2011 N.  Shoreline Blvd., Mountain View, CA 94039-7311.
+ *
+ * OpenGL(TM) is a trademark of Silicon Graphics, Inc.
+ */
+/*
+ * trackball.h
+ * A virtual trackball implementation
+ * Written by Gavin Bell for Silicon Graphics, November 1988.
+ */
+
+/*
+ * Pass the x and y coordinates of the last and current positions of
+ * the mouse, scaled so they are from (-1.0 ... 1.0).
+ *
+ * The resulting rotation is returned as a quaternion rotation in the
+ * first paramater.
+ */
+void trackball(float q[4], float p1x, float p1y, float p2x, float p2y);
+
+void negate_quat(float *q, float *qn);
+
+/*
+ * Given two quaternions, add them together to get a third quaternion.
+ * Adding quaternions to get a compound rotation is analagous to adding
+ * translations to get a compound translation.  When incrementally
+ * adding rotations, the first argument here should be the new
+ * rotation, the second and third the total rotation (which will be
+ * over-written with the resulting new total rotation).
+ */
+void add_quats(float *q1, float *q2, float *dest);
+
+/*
+ * A useful function, builds a rotation matrix in Matrix based on
+ * given quaternion.
+ */
+void build_rotmatrix(float m[4][4], const float q[4]);
+
+/*
+ * This function computes a quaternion based on an axis (defined by
+ * the given vector) and an angle about which to rotate.  The angle is
+ * expressed in radians.  The result is put into the third argument.
+ */
+void axis_to_quat(float a[3], float phi, float q[4]);
+```
+
+### src/volume_data.h
+```
+﻿#pragma once
+#include <glm/glm.hpp>
+#include <limits>
+
+class VolumeData {
+   public:
+    VolumeData(const unsigned short* data, const glm::ivec3 dim, const glm::vec3 spacing, const bool reverseGradientDirection, bool normalize = false)
+        : data(data),
+          dim(dim),
+          spacing(spacing),
+          reverseGradientDirection(reverseGradientDirection) {
+        if (normalize) {
+            DATA_MIN = std::numeric_limits<unsigned short>::max();
+            DATA_MAX = std::numeric_limits<unsigned short>::min();
+            for (int i = 0; i < dim[0]; i++) {
+                for (int j = 0; j < dim[1]; j++) {
+                    for (int k = 0; k < dim[2]; k++) {
+                        DATA_MIN = std::min(DATA_MIN, data[i * dim[1] * dim[2] + j * dim[2] + k]);
+                        DATA_MAX = std::max(DATA_MAX, data[i * dim[1] * dim[2] + j * dim[2] + k]);
+                    }
+                }
+            }
+            this->normailzedData = new float[dim[0] * dim[1] * dim[2]];
+            for (int i = 0; i < dim[0]; i++) {
+                for (int j = 0; j < dim[1]; j++) {
+                    for (int k = 0; k < dim[2]; k++) {
+                        this->normailzedData[i * dim[1] * dim[2] + j * dim[2] + k] = (float)(data[i * dim[1] * dim[2] + j * dim[2] + k] - DATA_MIN) / (DATA_MAX - DATA_MIN);
+                    }
+                }
+            }
+        }
+
+        std::cout << "VolumeData initialized" << std::endl;
+    }
+    ~VolumeData() {
+        delete[] this->normailzedData;
+    }
+
+    const unsigned short* data;
+    unsigned short DATA_MIN, DATA_MAX;
+    // 归一化到 0-1 之间之后的数据
+    float* normailzedData = nullptr;
+    glm::ivec3 dim;
+    glm::vec3 spacing{1.f, 1.f, 1.f};
+    bool reverseGradientDirection = false;
+};
+```
+
+### src/volume_rendering.cpp
+```
+﻿#include "volume_rendering.h"
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+//
+#include <stb_image_write.h>
+
+#include <ctime>
+#include <glm/gtx/string_cast.hpp>
+#include <iostream>
+
+VolumeRendering::VolumeRendering(const unsigned short* data, const glm::ivec3 dim, const glm::vec3 spacing, const bool reverseGradientDirection, const bool front2Back) {
+    clock_t time = clock();
+
+    this->data = data;
+    this->dim = dim;
+    this->spacing = spacing;
+    this->reverseGradientDirection = reverseGradientDirection;
+    this->front2Back = front2Back;
+
+    auto size = dim.x * dim.y * dim.z;
+    for (int i = 0; i < size; i++) {
+        DATA_MIN = std::min(DATA_MIN, data[i]);
+        DATA_MAX = std::max(DATA_MAX, data[i]);
+    }
+
+    printf("Volume Rendering initialized in %lf secs.\n", (float)(clock() - time) / CLOCKS_PER_SEC);
+}
+VolumeRendering::~VolumeRendering() {
+}
+
+std::vector<std::vector<glm::vec4>> VolumeRendering::runAlgorithm() {
+    clock_t time = clock();
+    std::vector<std::vector<glm::vec4>> imagePlane(
+        dim.x,
+        std::vector<glm::vec4>(
+            dim.y,
+            // 全黑的背景色
+            {0, 0, 0, 0}));
+
+    for (int i = 0; i < dim.x; i++) {
+        for (int j = 0; j < dim.y; j++) {
+            // 对于观察平面的一个像素，投射一条从 z = 0 到 z = dim.z 的光线
+            float q0 = 0, q1 = dim.z;
+            if (front2Back) {
+                // front-to-back
+                for (int k = 0; k < dim.z; k++) {
+                    auto cRGBA = getTransferedData({i, j, k});
+                    if (imagePlane[i][j].a > 0.95) break;
+
+                    imagePlane[i][j].r = cRGBA.a * cRGBA.r + (1 - cRGBA.a) * imagePlane[i][j].a * imagePlane[i][j].r;
+                    imagePlane[i][j].g = cRGBA.a * cRGBA.g + (1 - cRGBA.a) * imagePlane[i][j].a * imagePlane[i][j].g;
+                    imagePlane[i][j].b = cRGBA.a * cRGBA.b + (1 - cRGBA.a) * imagePlane[i][j].a * imagePlane[i][j].b;
+
+                    imagePlane[i][j].a = imagePlane[i][j].a + (1.f - imagePlane[i][j].a) * cRGBA.a;
+                }
+            } else {
+                // back-to-front
+                for (int k = dim.z - 1; k >= 0; k--) {
+                    auto cRGBA = getTransferedData({i, j, k});
+                    // 只需要累积颜色值即可，不需要累积不透明度
+                    imagePlane[i][j] = cRGBA.a * cRGBA + (1 - cRGBA.a) * imagePlane[i][j];
+                }
+            }
+        }
+    }
+
+    char* mem = (char*)malloc(sizeof(char) * 3 * dim.x * dim.y);
+    for (int i = 0; i < dim.x; i++) {
+        for (int j = 0; j < dim.y; j++) {
+            mem[i * dim.y * 3 + j * 3] = imagePlane[i][j].r * 255;
+            mem[i * dim.y * 3 + j * 3 + 1] = imagePlane[i][j].g * 255;
+            mem[i * dim.y * 3 + j * 3 + 2] = imagePlane[i][j].b * 255;
+        }
+    }
+    stbi_write_png("test.png", dim.x, dim.y, 3, mem, sizeof(char) * 3 * dim.y);
+
+    printf("Volume Rendering ran in %lf secs.\n", (float)(clock() - time) / CLOCKS_PER_SEC);
+    return imagePlane;
+}
+
+glm::vec4 VolumeRendering::transferFunction(float scalarValue) const {
+    float ratio = (scalarValue - DATA_MIN) / (DATA_MAX - DATA_MIN);
+    // 在 highlight ratio 附近的不透明度很高，其他区域基本为 0
+    float highlightRatio = 0.8;
+    float alpha = abs(ratio - highlightRatio) < 0.1 ? 0.9 : 0.01;
+    return {
+        // R
+        (DATA_MAX - scalarValue) / (DATA_MAX - DATA_MIN),
+        // G
+        1.f - abs((DATA_MAX + DATA_MIN) / 2.f - scalarValue) * 2 / (DATA_MAX - DATA_MIN),
+        // B
+        (scalarValue - DATA_MIN) / (DATA_MAX - DATA_MIN),
+        // A
+        alpha,
+    };
+}
+glm::vec4 VolumeRendering::getTransferedData(glm::ivec3 pos) const {
+    auto val = getData(pos);
+    return transferFunction(val);
+}
+```
+
+### src/volume_rendering.h
+```
+﻿#pragma once
+
+#include <array>
+#include <glm/glm.hpp>
+#include <vector>
+
+class VolumeRendering {
+   public:
+    VolumeRendering(const unsigned short* data, const glm::ivec3 dim, const glm::vec3 spacing, const bool reverseGradientDirection = false, const bool front2Back = true);
+    ~VolumeRendering();
+
+    /**
+     * 运行 Ray Casting 算法，生成一张二维图片
+     * 最简单的情况，假定观察平面完全平行于体数据
+     */
+    std::vector<std::vector<glm::vec4>> runAlgorithm();
+
+   private:
+    const unsigned short* data;
+    glm::ivec3 dim;
+    glm::vec3 spacing;
+    bool reverseGradientDirection = false;
+    bool front2Back = true;
+    unsigned short DATA_MIN = std::numeric_limits<unsigned short>::max(), DATA_MAX = std::numeric_limits<unsigned short>::min();
+
+    inline unsigned short getData(glm::ivec3 pos) const {
+        return data[pos.x * dim[1] * dim[2] + pos.y * dim[2] + pos.z];
+    };
+    /**
+     * 传输函数，将体数据的值转换为 RGBA 值
+     * 红色通道: 随着体素值线性下降 (1-0)
+     * 绿色通道：随着体素值先线性上升再线性下降 (0-1-0)
+     * 蓝色通道：随着体素值线性上升 (0-1)
+     * 不同明度：随着体素值线性上升 (0-0.08)
+     */
+    glm::vec4 transferFunction(float scalarValue) const;
+    glm::vec4 getTransferedData(glm::ivec3 pos) const;
+};
+```

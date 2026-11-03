@@ -1,0 +1,178 @@
+Casting Rays: Voxel Rendering Using Discrete Ray Tracing
+Monday, January 13, 2014
+Voxel Rendering Using Discrete Ray Tracing
+About
+About a year ago now, I decided to do some research into voxel rendering. Information on the subject was fairly limited however, and I ultimately chose to implement voxel rendering based on my own prior knowledge in related areas. The result was a working voxel renderer that utilizes discrete ray tracing to march through a voxel field and rendering the first voxel it intersects. The most interesting thing about this technique is how well it lends itself to parallel speed-ups as well as acceleration structures such as sparse voxel octrees, as made famous by Jon Olick during his time at id Software.
+At about the same time I had finished the renderer I decided to type up a small tutorial that would hopefully be of interest to someone trying to find out more about the subject but does not know where to start. Not really having any outlet to post this tutorial I simply put the text I had typed up in a folder somewhere where it mostly went unread. At this point I think posting the tutorial here makes perfect sense. This tutorial was written fairly hastily, and I will be updated to be more clear on some points, but I do hope it will still be of use to someone.
+Summary
+The algorithm in this paper is based on old methods for rendering geometry using ray casting in a similar fashion to Wolfenstein 3D. Such an algorithm is extended by one dimension to be able to handle rendering voxels in a fully three-dimensional context by discretely traversing a voxel volume along a ray. Ray traversal is performed using a three-dimensional form of digital differential analysis. As with most forms of ray tracing, the algorithm lends itself well to parallel computing, and can be extended to be more efficient using a sparse voxel octree structure.
+Prerequisite Knowledge
+Before reading any further there are some core concepts that this article will assume the reader already has a firm grasp on.
+First and foremost, the reader is assumed to have a decent grasp on programming, preferably C++. However, the basic principles the code should be clear enough that, coupled with the descriptions of the code, should make understanding the algorithms as expressed through C++ fairly obvious for any programmer.
+Secondly, the reader is assumed to have working knowledge of linear algebra. Such knowledge is fundamental to understanding the principles of the algorithm. Furthermore, some of the code in this article depends on code not presented in this article which require understanding of linear algebra to implement.
+Third, the reader is assumed to be familiar with graphics rendering as well as the concepts and jargon contained therein. Concepts like pixels, texels, view ports, color channels, and rasterization will not be further explained. No knowledge of specific graphics API:s is required.
+What is a Voxel?
+Over the years the term voxel has become somewhat dubious. Seen in isolation, a voxel can be said to be a cube. This has lead many to believe that any game that predominantly renders cubes is a voxel renderer. This is not necessarily true. Seen in context, a voxel is merely an index in an axis aligned three-dimensional grid of data, and, much like the texels in a texture, voxels must adhere to that grid at all times. A voxel can not move freely around the grid; in fact, a voxel can not “move” at all since it is merely an index, and, as such, has no notion of position.1 Because of this, it is not correct to view voxels as geometrical cubes. The cube shape is merely the visual representation of voxel data.
+An even more disputed term is voxel renderer. Voxels are data, and not an algorithm. As such, a voxel renderer could mean anything that visualizes voxel data, be that through ray tracing, ray casting, rasterization, or any other method. In essence, there might be no straight answer as to what a voxel renderer actually is. However, it stands to reason that a voxel renderer must use voxel data as the primary source of rendering data. Merely rendering cubes do not qualify as voxel rendering unless the cubes are stored as voxels. Thus, we know what a voxel renderer is not.
+What is Ray Tracing?
+Ray tracing is the process of following the progression of a ray from a starting point to an impact point. Generally, a ray consists of two components; a position (the origin), and a direction. As such, a ray has a starting point, but not an end point. Used for computer graphics, the starting point of a ray is generally the same as the position of the virtual camera. The direction of the ray is the normalized differential vector between the camera starting point and the position of the pixel on the view port that is currently being rendered. Given these initial conditions, a ray is traced for every pixel on the screen in order to render a complete scene.
+In many cases ray tracing is used to analytically determine an impact by iterating through a list of arbitrarily shaped objects in the scene and doing an intersection test for the current ray. However, for voxels, analytical ray tracing might be severely impractical. Iterating through a volume of voxels to perform a ray-cube intersection test is for many cases not going to be efficient enough for real-time use. By doubling dimensional resolution the volume has effectively grown by a factor of eight. A discrete method for finding intersections is therefore preferred where the maximum amount of intersection tests is limited to Pythagorean complexity rather than cubic. Furthermore, discrete ray tracing guarantees that the first intersection found is the closest of all possible intersections since the technique actually involves traversing through each voxel a ray intersects in the order that the ray intersects them.
+The Algorithm
+The basic algorithm for rendering voxels in this paper is based on the algorithm presented by Lode Vandevenne in his excellent ray casting tutorials for writing a Wolfenstein 3D styled renderer. The algorithm, which involves discretely stepping through a two-dimensional map by tracing a ray for every pixel column on the screen in order to find the closest intersection to a wall, manages to infer enough data from such an intersection to render a three-dimensional view of the two-dimensional map. There are severe limitations using this method for rendering though; Players are limited to one plane, meaning that the full Y (up) axis is lost, and the camera could not be arbitrarily rotated. While it may seem counter logical that such an algorithm used to render the graphics of one of the first first-person shooters ever made can be of any use today, upon closer inspection the ray caster can already be said to render voxels albeit locked to a single plane.
+Extending the algorithm by one dimension enables us to render much more complex and interesting geometry by removing the “one plane” restriction as well as allowing the camera a full six degrees of freedom. Such a change entails another two fundamental alterations of the original algorithm; First, the use of volumetrically stored data in place of two-dimensional data for geometry, and second, tracing rays for every pixel on the screen rather than for every column of pixels. Since the algorithm steps though the indexes of the volumetric data in the order that a ray traverses them, the algorithm belongs to a class of discrete ray tracing algorithms.
+Implementation
+This section of the article aims to provide C++ code of the components of the algorithm while at the same time explaining what the segments of code do and how they work.
+The algorithm can be broken down into two major sections; the main loop that initializes data and steps through each pixel on the screen, and the actual ray tracing which traverses the voxel volume until an impact point is found.
+Setup and Main Loops
+The first section of code handles the main function that will trace rays through the view port. A ray consists of two components; A position (origin), and a unit direction vector. The position of the ray equals the position of the camera and will remain the same throughout the rendering process. The direction of the vector will have to be recalculated for each point on the view port the ray is to pierce.
+Instead of calculating the normal of each ray, we can instead calculate the normals of the rays at the location of each of the four view port coordinates by normalizing the view port vectors. The direction for each pixel on the screen can then be bilinearly interpolated based on these four normalized vectors. See figure 1.
+Figure 1: Camera components. The red point is the camera position, the black frame is the view port, and the blue lines are the view port vectors. The normalized view port vectors then correspond to the direction of the rays to be traced at the corners of the view port.
+In code this corresponds to:
+```
+// Calculate normals at view point coordinates
+const Vec3 upperLeftNormal = normalize(camera.GetUpperLeftVector());
+const Vec3 upperRightNormal = normalize(camera.GetUpperRightVector());
+const Vec3 lowerLeftNormal = normalize(camera.GetLowerLeftVector());
+const Vec3 lowerRightNormal = normalize(camera.GetLowerRightVector());
+```
+The camera view port vectors in the code above are assumed to originate from (0, 0, 0), i.e. they are independent of camera position. If they depend on the camera position simply subtract the camera position before normalizing the vectors. However, the camera view port vectors above are assumed to rotate as the camera rotates. This then consolidates important camera properties such as direction and field of view.
+With the view port normals calculated we need to determine the interpolation deltas for every pixel on the screen in the y direction.
+```
+// Calculate the inverse of the screen dimensions
+const float invHeight = 1.f / (float)screen.GetHeight();
+const float invWidth = 1.f / (float)screen.GetWidth();
+
+// Left and right y deltas for normal interpolation
+const Vec3 leftNormalYDelta = (lowerLeftNormal - upperLeftNormal) * invHeight;
+const Vec3 rightNormalYDelta = (lowerRightNormal - upperRightNormal) * invHeight;
+
+// Interpolation variables
+Vec3 leftNormal = upperLeftNormal;
+Vec3 rightNormal = upperRightNormal;
+```
+The interpolation variables are initialized to the upper side of the view port. This is done due to the order in which we will traverse the pixels on the screen as the rendering process works its magic; top to bottom, left to right. As the rendering process creeps down the screen so are the interpolation variables incremented by the calculated deltas. The inverse screen width will be used later inside the main loops in order to complete the bilinear interpolation of the direction vectors.
+The next step initializes the origin of the ray:
+```
+Ray ray;
+ray.origin = camera.GetPosition();
+```
+Only the ray origin is initialized outside of the main loops since it is the only one of the two components1 of the ray that remains constant throughout the rendering process. The ray direction will constantly change as the pixel to be rendered on screen changes.
+There are two main loops; One iterates through the y (down) direction of the screen pixels, while the other iterates through the x (right) direction of the screen pixels. Starting with the first part of the y loop:
+```
+for (int y = 0; y < screen.GetHeight(); ++y) {
+  
+  ray.direction = leftNormal;
+  
+  // Calculate new x delta
+  const Vec3 normalXDelta = (rightNormal - leftNormal) * invWidth;
+```
+Here the ray direction is initialized to the left interpolation variable due to the order in which we iterate through the screen pixels in the x direction; Left to right. At this point we also calculate the final component of the bilinear interpolation which will be used later.
+```
+  for (int x = 0; x < screen.GetWidth(); ++x) {
+    // Trace a ray and render on screen
+    Color color = TraceRay(ray, volume);
+    screen.SetPixel(x, y, color);
+```
+As we step through the columns of pixels on the screen we also call the function for tracing our ray through the voxel volume in order to find the color of the closest intersecting voxel. This function plays such an important part of the algorithm that it is described in its own code walkthrough section. For now, a simple function call will suffice as a description.
+The closing sections of both for loops perform the bilinear interpolation on the interpolation variables.
+```
+    // Interpolate x
+    ray.direction += normalXDelta;
+  }
+
+  // Interpolate y
+  leftNormal += leftNormalYDelta;
+  rightNormal += rightNormalYDelta;
+}
+```
+The ray direction is incremented one step to the right, while the left and right normals are incremented one step down. As the code loops back to the beginning of the y loop the ray direction vector is once again set to the left normal. This time, however, the left normal has been incremented one step down. A new x delta is also calculated based upon the new left and right normal values.
+Tracing the Rays
+With the ray setup done for each pixel on the screen the next step will be to implement the heart of the voxel rendering algorithm; volume traversal along a ray.
+For discretely traversing the volume we will use a form of three-dimensional digital differential analysis1 which will guarantee that we always stop and test a voxel index at exactly one of the x, y, or z dividing planes. Figure 2 shows an example using a two-dimensional implementation of DDA.
+Figure 2: Two-dimensional digital differential analysis. The blue line is the ray, and the red point is the ray origin. The algorithm finds intersections (green) at the point of axial dividing planes in the order of occurrence with the ray origin as a starting point. The numbering indicates the order the intersections occur in, and what voxels they refer to. The final intersection point is omitted since the neighboring voxel is out of bounds.
+To start off, the function signature must be defined:
+```
+Color TraceRay(Ray ray, const VoxelVolume &volume)
+{
+```
+This indicates what was probably already evident from the previous code walkthrough section; That the function takes a ray and the voxel volume as parameters, and returns the color of the closest voxel intersection.
+The second part delves into the setup of the DDA algorithm:
+```
+  // Calculate distances to axis boundaries and direction of discrete DDA steps
+  int coord[3] = { int(ray.origin[0]), int(ray.origin[1]), int(ray.origin[2]) };
+  vec3 deltaDist;
+  vec3 next;
+  int step[3];
+  for (int i = 0; i < 3; ++i) {
+    const float x = (ray.direction[0] / ray.direction[i]);
+    const float y = (ray.direction[1] / ray.direction[i]);
+    const float z = (ray.direction[2] / ray.direction[i]);
+    deltaDist[i] = sqrt( x*x + y*y + z*z );
+    if (ray.direction[i] < 0.f) {
+      step[i] = -1;
+      next[i] = (ray.origin[i] - coord[i]) * deltaDist[i];
+    } else {
+      step[i] = 1;
+      next[i] = (coord[i] + 1.f – ray.origin[i]) * deltaDist[i];
+    }
+  }
+```
+First off, the starting point of the ray in volume coordinates is calculated by truncating the excess decimal values from the ray origin. These variables will be used later as indexes to access the volume. This is followed by determining the length of the individual components of a vector from one axis plane to the next based on the ray direction and calculated using Pythagora's theorem.
+If a ray direction dimension is less than zero then the direction that component will step in is negative one, while if a ray direction dimension is greater or equal to zero the direction that component will step in is positive one. This is due to the fact that we will always only step one voxel index away from the previous voxel index tested. At the same time we calculate the distance from the ray origin to the closest axis plane the ray intersects. The calculation differs depending on the sign of the ray direction component. Figure 3 clarifies this discrepancy in a two-dimensional example.
+Figure 3: DDA setup. The red point is the ray origin. The blue line is the ray. The green point is the coordinate of the grid cell the ray originates from. The numbers indicate the sign of the x and y components of the ray direction vector. As the x component of the ray's direction is positive the distance is calculated as [gridX +1 – positionX] * deltaX (+1 since the ray intersects the next axis plane in relation to the grid coordinate), while y is negative and calculated as [positionY – gridY] * deltaY. The multiplication is necessary in order to project the distance to the grid boundary.
+It should be noted that index 0 corresponds to the x axis, 1 to the y axis, and 2 to the z axis. Indexing through numbers allows us to make use of loops to perform much of the repetitive work. Do not worry all too much about the performance penalties of using loops at this point. If the compiler of choice has any sense it will unroll these loops in order to eliminate those inefficiencies.
+The next part of the algorithm performs the actual DDA:
+```
+  while (true) {
+    // Perform DDA
+    int side = 0;
+    for (int i = 1; i < 3; ++i) {
+      if (next[side] > next[i]) {
+        side = i;
+      }
+    }
+    next[side] += deltaDist[side];
+    coord[side] += step[side];
+```
+By finding the smallest component of one of our previously defined vectors we can determine what component of that vector to increment. At the same time we know what component of the volume coordinate to increment, thereby knowing what voxel coordinate the ray is currently traversing. The DDA algorithm is performed until either the ray leaves the volume, and thus no collision can ever be found, or a voxel intersection is determined.
+```
+    if (coord[side] < 0 || coord[side] >= volume.GetDimension(side)) {      
+      break;
+    }
+```
+The above code makes sure that the current map coordinates are safe to use as indexes for the volume in order to avoid access violations. Should that not be the case then the algorithms will break the loop and return a black color, as will be seen in the next code segment.
+The astute reader may notice that only the last altered map coordinate component is actually tested. This means that the other two components of the coordinate could access outside of the volume and not be detected by the stopping condition. This imposes the precondition that the ray origin must be guaranteed to be inside the volume at the time of rendering. This precondition is perfectly reasonable for voxel environments, but could be a severe limitation when rendering movable voxel characters. The algorithm can be safely extended to handle cases where the camera is located outside the volume, but since voxel characters generally suffer from a plethora of technical issues other than the aforementioned the presented technique might not be suitable for such rendering regardless.
+The final part of the algorithm involves retrieving the intersected voxel data, if any, and terminating the algorithm.
+```
+    // Sample volume data at calculated position and make collision calculations
+    Voxel voxel = volume.GetVoxel(coord[0], coord[1], coord[2]);
+    if (voxel.valid) {
+      voxel.color.r >>= side;
+      voxel.color.g >>= side;
+      voxel.color.b >>= side;
+      return voxel.color;
+    }
+  }
+  return RGB_BLACK; // No voxel found
+}
+```
+A voxel flagged as valid means that the current voxel index is occupied. This will act as the second stopping condition of the DDA algorithm. By bit shifting the integer color channel value by the last altered dimension we can achieve a crude, static lighting model. This sub-segment is completely optional, and can be safely removed if a different lighting model is chosen. The color of the voxel is then returned and rendered to the screen by the main loops. If no voxel was intersected the color black is returned instead.
+Further Improvements
+Undoubtedly, there are many ways in which the algorithm as presented above can be improved, both in terms of performance and in terms of visual fidelity.
+Performance could be improved by inserting voxel data into a sparse voxel octree which can quickly skip tracing large empty spaces, and comes with other benefits such as automatic LOD. Performance could also be improved by optimizing data storage for cache coherence, threading the rendering process, or rewriting the algorithm to be executed on the GPU.
+Secondary rays coupled with an actual lighting model could be introduced to produce shadows, reflections, and refractions that would greatly enhance visual appeal. This improvement is trivial to implement in the existing algorithm. The “blocky” nature of voxel geometry might however not lend itself well to realistic lighting. “Smoothing” out the voxels could help alleviate this issue and requires a normal to be stored at each voxel, but the rendering process would also have to be altered, making this improvement less than trivial.
+Source
+The source code for this project can be found here:
+SirJonthe/VoxelRayTrace at GitHub
+Posted by
+Jonathan Karlsson
+at
+1:59 PM
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+No comments:
+Post a Comment
+Newer Post
+Older Post
+Home
+Subscribe to:
+Post Comments (Atom)

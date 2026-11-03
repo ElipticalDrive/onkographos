@@ -1,0 +1,360 @@
+raytracing - How to avoid curvature artifact in raytracer? - Computer Graphics Stack Exchange
+OverflowAI is here! AI power for your Stack Overflow for Teams knowledge community. Learn more
+Teams
+Q&A for work
+Connect and share knowledge within a single location that is structured and easy to search.
+Learn more about Teams
+How to avoid curvature artifact in raytracer?
+Ask Question
+Asked
+2 years, 10 months ago
+Modified
+2 years, 9 months ago
+Viewed
+386 times
+0
+$\begingroup$
+I have a pretty simple raytracer that is rendering some SDFs, but when my camera is close to the object I see curves:
+I am not entirely sure where they are coming from, as I am using nothing but linear operations to render this.
+This is how I generate a ray:
+```
+vec3 GenerateRay(vec2 screen_position, float aspect_ratio, float fov)
+{
+    vec3 r = vec3(screen_position, -1.f / tan(radians(fov)));
+    r.y /= aspect_ratio;
+
+    return normalize(r);
+}
+```
+And after that all I do is ray march until I am inside the volume.
+This is the full shader:
+```
+#version 450
+#extension GL_ARB_separate_shader_objects : enable
+#extension GL_EXT_scalar_block_layout : enable
+#extension GL_NV_compute_shader_derivatives : enable
+
+layout (local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform MVPOnlyUbo
+{
+    mat4 model;
+    mat4 view;
+    mat4 proj;
+};
+
+layout(binding = 1, rgba16f) uniform image2D output_image;
+
+layout(binding = 2) uniform RayTracingData
+{
+    uint display_width;
+    uint display_height;
+};
+
+layout(binding = 3) uniform sampler2D albedo;
+
+#include <phong_lighting.glsl>
+
+float SphereFunction(vec3 position)
+{
+    return sqrt(dot(position, position)) - 64;
+}
+
+vec3 GenerateRay(vec2 screen_position, float aspect_ratio, float fov)
+{
+    vec3 r = vec3(screen_position, -1.f / tan(radians(fov)));
+    r.y /= aspect_ratio;
+
+    return normalize(r);
+}
+
+float SdRoundBox( vec3 p  )
+{
+    vec3 b = vec3(2, 2, 2);
+    float r = 0.5;
+    vec3 q = abs(p) - b;
+    return length(max(q,0.0)) + min(max(q.x,max(q.y,q.z)),0.0) - r;
+}
+
+vec3 Gradient(vec3 point)
+{
+    const float epsilon = 0.0001;
+    const float dx =
+          SdBoxSphere(vec3(point.x + epsilon, point.y, point.z))
+        - SdBoxSphere(vec3(point.x - epsilon, point.y, point.z));
+
+    const float dy =
+          SdBoxSphere(vec3(point.x, point.y + epsilon, point.z))
+        - SdBoxSphere(vec3(point.x, point.y - epsilon, point.z));
+
+    const float dz =
+          SdBoxSphere(vec3(point.x, point.y, point.z  + epsilon))
+        - SdBoxSphere(vec3(point.x, point.y, point.z  - epsilon));
+
+    return vec3(dx, dy, dz);
+}
+
+vec4 BiplanarMapping( sampler2D sam, in vec3 p, in vec3 n, in float k )
+{
+    // grab coord derivatives for texturing
+    vec3 dpdx = vec3(0.01);//dFdx(p);
+    vec3 dpdy = vec3(0.01);//dFdy(p);
+    n = abs(n);
+
+    // determine major axis (in x; yz are following axis)
+    ivec3 ma = (n.x>n.y && n.x>n.z) ? ivec3(0,1,2) :
+               (n.y>n.z)            ? ivec3(1,2,0) :
+                                      ivec3(2,0,1) ;
+    // determine minor axis (in x; yz are following axis)
+    ivec3 mi = (n.x<n.y && n.x<n.z) ? ivec3(0,1,2) :
+               (n.y<n.z)            ? ivec3(1,2,0) :
+                                      ivec3(2,0,1) ;
+    // determine median axis (in x;  yz are following axis)
+    ivec3 me = ivec3(3) - mi - ma;
+
+    // project+fetch
+    vec4 x = textureGrad( sam, vec2(   p[ma.y],   p[ma.z]),
+                               vec2(dpdx[ma.y],dpdx[ma.z]),
+                               vec2(dpdy[ma.y],dpdy[ma.z]) );
+    vec4 y = textureGrad( sam, vec2(   p[me.y],   p[me.z]),
+                               vec2(dpdx[me.y],dpdx[me.z]),
+                               vec2(dpdy[me.y],dpdy[me.z]) );
+
+    // blend factors
+    vec2 w = vec2(n[ma.x],n[me.x]);
+    // make local support
+    w = clamp( (w-0.5773)/(1.0-0.5773), 0.0, 1.0 );
+    // shape transition
+    w = pow( w, vec2(k/8.0) );
+    // blend and return
+    return (x*w.x + y*w.y) / (w.x + w.y);
+}
+
+void main()
+{
+    const float aspect_ratio = float(display_width) / float(display_height);
+    const float disp_x = gl_GlobalInvocationID.x;
+    const float disp_y = gl_GlobalInvocationID.y;
+
+    const float x = disp_x * 2 / display_width - 1;
+    const float y = disp_y * 2 / display_height - 1;
+
+    const vec3 r = (inverse(view) * vec4(GenerateRay(vec2(x, y), aspect_ratio, 45), 0)).xyz;
+    const vec3 cam_pos = (inverse(view) * vec4(0, 0, 0, 1)).xyz;
+
+    vec3 ray_pos = vec3(x, y, 0) + cam_pos;
+    vec4 x_color = vec4(0);
+
+    float last_distance = 0;
+    for(uint i = 0; i < 100; i++)
+    {
+        float sphere_radius = SdRoundBoxray_pos);
+        ray_pos += r * sphere_radius;
+        last_distance = sphere_radius;
+    }
+
+    const vec3 normal = normalize(Gradient(ray_pos));
+    vec3 albedo = BiplanarMapping( albedo, ray_pos, normal, 10 ).rgb;
+    float test = min(min(mod(ray_pos.x, 1.f), mod(ray_pos.y, 1.f)), mod(ray_pos.z, 1.f));
+    vec4 highlight = test <= 0.01 ? vec4(1, 0, 0, 1) : vec4(0);
+
+    vec4 color = BlinnPhong(
+        ray_pos,
+        normal,
+        cam_pos,
+        albedo,
+        vec3(100),
+        normalize(vec3(1, 1, 1)) * 0.3,
+        1)
+        + highlight;
+
+    x_color = color * int(last_distance < 0.01);
+
+    imageStore(
+        output_image,
+        ivec2(disp_x, disp_y),
+        x_color
+    );
+}
+```
+This image might make it more obvious:
+Same scene raymarched:
+raytracing
+shader
+artifacts
+signed-distance-field
+Share
+Improve this question
+Follow
+edited Jul 26, 2021 at 21:14
+Makogan
+asked Jul 21, 2021 at 22:04
+MakoganMakogan
+1,7261212 silver badges2828 bronze badges
+$\endgroup$
+20
+$\begingroup$
+This is not enough information to answer your question.
+$\endgroup$
+– lightxbulb
+Jul 22, 2021 at 10:43
+$\begingroup$
+What additional information is needed?
+$\endgroup$
+– Makogan
+Jul 22, 2021 at 19:00
+$\begingroup$
+Your highlight variable produces the red curves.
+$\endgroup$
+– lightxbulb
+Jul 23, 2021 at 16:35
+$\begingroup$
+Yes, that is correct.
+$\endgroup$
+– Makogan
+Jul 23, 2021 at 16:59
+$\begingroup$
+So are you not asking about the red curves? "but when my camera is close to the object I see curves"
+$\endgroup$
+– lightxbulb
+Jul 23, 2021 at 17:26
+|
+Show 15 more comments
+2 Answers
+2
+Sorted by:
+Reset to default
+Highest score (default)
+Date modified (newest first)
+Date created (oldest first)
+2
+$\begingroup$
+In raymarching, it's typical to change the direction of the ray according to the fragment coordinates, but leave the origin at vec3(0,0,0). In you code you add r, which is equivalent to vec3(x,y,1) to ray_pos, which starts at vec3(x,y,0). You scale x and y properly to lie from 0 to 1. So lets consider the angle of the ray along the x coordinate. Lets say x=1 and y=0 for a given array. If x=1, y=0, and z=1, then you get a 45 degree fov as desired. In your code, you would add an extra x=1 to your ray direction, leading to a ray direction of X=2, Y=0, and Z=1, which is an fov of 63 degrees. However, the problem is worse, since the "effective fov" will change as X and Y vary, leading to significant distortion. Try using vec3 ray_pos = cam_pos; and see if it fixes your problem.
+Other than that
+Make sure to separate the tracing code from the shading code
+Always check your normals
+In your sphere tracing loop, make sure to add breaking conditions for when the ray intersects the surface (SDF<0.0001 or similar epsilon), or exceeds some max distance (I like 2048.0). This can save you some unnecessary "back and forth" oscillation near the end of your march sequence.
+The following is my ray-marching code:
+github.com/mikeandike523/SDFBuilder/blob/main/f1.frag.
+Feel free to even lift code as long as you use it according to GNU GPL 3.0
+Thanks,
+Mike
+Share
+Improve this answer
+Follow
+answered Aug 14, 2021 at 0:16
+Michael SohnenMichael Sohnen
+20111 silver badge33 bronze badges
+$\endgroup$
+3
+$\begingroup$
+Silly me you are right adding that pixel based offset was a mistake.
+$\endgroup$
+– Makogan
+Aug 14, 2021 at 3:37
+$\begingroup$
+I am curious, did it work in the end? Also, take a look at these two youtube channels (art of code) youtube.com/channel/UCcAlTqd9zID6aNX3TzwxJXg, and Inigo Quilez,youtube.com/user/mari1234mari. Also, if you ever want to easily test a shader, use shadertoy.com.
+$\endgroup$
+– Michael Sohnen
+Aug 14, 2021 at 3:59
+1
+$\begingroup$
+Yes, it worked perfectly, I understand now the mistake I made : p
+$\endgroup$
+– Makogan
+Aug 14, 2021 at 19:09
+Add a comment
+|
+1
+$\begingroup$
+Some curvature artifacts are normal when doing raymarching or ray-tracing. And if you are careful, you can even find curvature artifacts in some rastered scenes if the triangles are small enough.
+It may be that your camera is too close with respect to the size of your cube.
+In the following render, which uses raymarching, the greatest dimension of the box is about 3.2 units. The camera is 4.5 units away from the center of the scene. The fov is 45 degrees, which is the same as in your code:
+It is also important to mention, that in some cases, you won't notice this same distortion effect in raster rendering, since only the vertices of large triangles are distorted, but the edges are always straight.
+Also I recommend testing your normal generation. You can do this by making the color of the material equal to the absolute value of the normal.
+Share
+Improve this answer
+Follow
+answered Aug 13, 2021 at 7:29
+Michael SohnenMichael Sohnen
+20111 silver badge33 bronze badges
+$\endgroup$
+4
+$\begingroup$
+The normals in that first image are wrong, they are the normals of a sphere. It was mostly negligence on my end to change them. What you are saying might make sense, although what is the underlying cause that creates the distortion? And is there a way to minimize it?
+$\endgroup$
+– Makogan
+Aug 13, 2021 at 7:35
+$\begingroup$
+1 -- Can you list the exact coordinates of your box and camera?
+$\endgroup$
+– Michael Sohnen
+Aug 13, 2021 at 23:32
+$\begingroup$
+the box is 2x2x2 centered at the origin. The camera (I don't have a way print the values right now) is quite close to it about 0.1 - 0.5 units away from it.
+$\endgroup$
+– Makogan
+Aug 13, 2021 at 23:39
+$\begingroup$
+When reviewing the question, I came across a MASSIVE FLAW in your program. In your main function, you type vec3 ray_pos = vec3(x, y, 0) + cam_pos;, You should not add vec(x,y,0), since you later add r, which contains information about the screen. In raymarching and raytracing, you always trace from the origin. I'm writing a new answer now describing why. Additionally, here is my implementation of raymarching: github.com/mikeandike523/SDFBuilder/blob/main/f1.frag. If you want to arrange a quick Zoom call to debug your code, comment here.
+$\endgroup$
+– Michael Sohnen
+Aug 13, 2021 at 23:56
+Add a comment
+|
+Not the answer you're looking for? Browse other questions tagged
+raytracing
+shader
+artifacts
+signed-distance-field
+or ask your own question.
+The Overflow Blog
+Spreading the gospel of Python
+OverflowAI and the holy grail of search
+Featured on Meta
+Our Partnership with OpenAI
+What deliverables would you like to see out of a working group?
+Related
+7
+Ray casting in fan configuration produces point cloud with curvature, how to eliminate curvature?
+6
+Ray Tracing Shadows: The Shadow Line Artifact
+2
+Vector Math for Raytracer
+1
+Inverted Normals in Raytracer
+4
+Visual Artifact in Wireframe Grid/Plane
+4
+Reducing artificial rings in mean curvature of mesh
+2
+Glowing objects in a raytracer? How it works?
+1
+How to avoid declaring sampler outside of statement?
+Hot Network Questions
+How does a snake climb the wall?
+Five integers are paired in all possible ways. The integers in each pair are added. The ten sums are 1,4,5,7,8,8,11,11,14,15. What are the integers
+Will a low PhD GPA be a problem for industry R&D positions?
+Use of the perfect to indicate "whenever I do someting"
+How to position two tcolorboxes next to each other on the same line and adjust the distance between them?
+What does "attic access required" mean in the context of a bathroom exhaust fan?
+Exceptional locus of rational map has codimension two
+What species would make good flying livestock?
+Do native speakers say "I'm [keen on/fond of] cloudy days"?
+Potential PhD advisor may lack qualifications
+Director forcing an all day meeting on an off day before a holiday
+Does 'ls' ignore Zsh glob sorting qualifiers?
+Does it matter where a prenuptial agreements is signed?
+Arguments for vs against filtering Internet Access to legal Websites on University Campus
+Looking for a book I read in the '70s, post-apocalypse/underground bunker
+How does this ramp generator circuit work?
+Delta method vs actual expectation
+Would a Democratic Meritocracy work?
+Why are the Lion Air and Ethiopian Airlines crashes being litigated in the US?
+Why is a Schmitt trigger useful for SPI?
+Is a dome really the most efficient way to contain gas in a vacuum?
+Do 'have got' and 'got' have the same meaning in American English?
+Curve Color Viewport Display settings. How can I see the individual chosen color in the viewport?
+Partition of unity without AC
+more hot questions
+Question feed

@@ -1,0 +1,321 @@
+Contribute to taojin-6/volumetric_kit_recon development by creating an account on GitHub.
+
+feat(tsdf): report which blocks a fuse actually wrote, and which need remeshing by taojin-6 · Pull Request #57 · taojin-6/volumetric_kit_recon · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+taojin-6
+commented
+Aug 9, 2026
+Copy link
+Copy Markdown
+Owner
+Marching cubes re-meshes the whole active set on every extract, and on a real
+scan almost none of it changed since the last one. Deciding whether incremental
+extraction is worth building needs one number nothing in this repo could produce:
+what fraction of the map does a frame actually change?
+Why the obvious answer was wrong
+The first attempt used machinery that already exists —
+compact_active_blocks_in_frustum as a proxy. It read 87% on Replica room0,
+which would have killed the feature. That was the fixture, not the truth:
+fx 600 over 1200 px is a 90° cone, and from inside a ~4 m room an 8 m cone
+contains nearly everything. The same proxy on an iPad walk read 2.4–29%,
+falling as the map grew. So neither the proxy nor room0 could answer it.
+What this adds
+tsdf_integrate sets a flag on a block when it actually writes a voxel —
+both the fuse path and the dynamic-clear path, since a receded surface leaving a
+stale mesh is exactly what dirty must catch. Not "was dispatched" (the dispatch
+covers every active block and returns early for most) and not "was in the
+frustum" (that is the whole view cone).
+Indexed by block slot (ptr / voxels_per_block), which is stable across
+frames and preserved by VoxelHashMap::resize, so flags accumulate correctly
+across several fused frames between remeshes — the compacted dispatch order
+could not. A plain store rather than an atomic: every writer stores the same 1.
+dirty_block_count() — blocks written since the last reset_dirty()
+dirty_remesh_block_count(grid) — that set dilated into −x/−y/−z
+reset_dirty()
+fuse_replica --dirty-every N reports both
+The dilation is correctness, not refinement
+A cell reads its eight corners as base + {0,1}³, so a block's cells reach one
+block in +x/+y/+z and no further. Inverted: a changed block invalidates the
+mesh of every block in its {0,−1}³ octant. Skip it and surface goes stale
+exactly at block seams, under Status::ok.
+Worth stating because it's the natural wrong guess: the radius is not a
+function of trunc_dist. Truncation decides which voxels are written (already
+reflected in the flags) and how far allocate_from_depth dilates the band;
+neither widens the meshing stencil. One block, bounded at 8×, and measured at
+1.30× — a dirty set is a contiguous surface patch, so dilating it adds roughly
+its perimeter, not its volume.
+Measured (room0, 200 frames, 1 cm voxel)
+written per frame
+61.05%
+after −x/−y/−z dilation
+75.31%
+dilation factor
+1.30×
+That is the worst case, and it is quoted as such: room0 is a single enclosed
+room the camera never leaves. The number that decides the feature is a device
+walk's — which this makes measurable.
+Test
+The suite pins the property that makes the counter worth having: written < active, strictly. Marking a block because the kernel visited it would
+satisfy every other assertion and leave a counter that cannot drive an
+incremental re-mesh. Plus: zero before any integrate, dilation only grows the set
+and stays bounded by the active set, and reset_dirty actually clears.
+26/26 tests pass on MoltenVK.
+Scope
+Measurement and API only — no extraction change. Incremental extraction itself is
+staged behind this: per-block contiguous emission (verifiable against the
+existing golden triangle-for-triangle invariant), then a persistent arena with
+dirty-only dispatch and a rebuilt index buffer, then compaction gated on
+release_through.
+🤖 Generated with Claude Code
+taojin-6
+self-assigned this
+Aug 9, 2026
+taojin-6
+mentioned this pull request
+Aug 9, 2026
+feat(examples): report where an extract's time goes, and measure the path that ships
+#58
+Merged
+taojin-6
+and others
+added 2 commits
+August 9, 2026 01:55
+feat(tsdf): report which blocks a fuse actually wrote, and which need…
+…
+30a49a3
+```
+… remeshing
+
+Marching cubes re-meshes the whole active set on every extract, and on a
+real scan almost none of it changed since the last one. Deciding whether
+incremental extraction is worth building needs one number nothing in this
+repo could produce: what FRACTION of the map does a frame actually
+change?
+
+The first attempt used machinery that already existed --
+compact_active_blocks_in_frustum as a proxy -- and it said 87% on Replica
+room0, which would have killed the feature. It was the fixture, not the
+truth: fx 600 over 1200 px is a 90-degree cone, and from inside a ~4 m
+room an 8 m cone contains nearly everything. The same proxy on an iPad
+walk read 2.4-29%, falling as the map grew. So the proxy could not
+answer it and room0 could not either.
+
+This measures it exactly. tsdf_integrate sets a flag on a block when it
+actually WRITES a voxel -- both the fuse path and the dynamic-clear path,
+since a receded surface leaving a stale mesh is precisely what dirty must
+catch. Not "was dispatched" (the dispatch covers every active block and
+returns early for most) and not "was in the frustum" (that is the whole
+view cone).
+
+Indexed by block SLOT (ptr / voxels_per_block), which is stable across
+frames and preserved by VoxelHashMap::resize, so flags accumulate
+correctly across several fused frames between remeshes -- the compacted
+dispatch order could not do that. A plain store rather than an atomic:
+every writer stores the same 1.
+
+dirty_remesh_block_count() then dilates into the -x/-y/-z octant, which
+is correctness rather than refinement. A cell reads its eight corners as
+base + {0,1}^3, so a block's cells reach one block in +x/+y/+z and no
+further; inverted, a changed block invalidates the mesh of every block in
+its {0,-1}^3 octant. Skip that and surface goes stale exactly at block
+seams, under Status::ok.
+
+Worth stating because it is the natural wrong guess: the radius is NOT a
+function of trunc_dist. Truncation decides which voxels are written
+(already reflected in the flags) and how far allocate_from_depth dilates
+the band; neither widens the meshing stencil. One block, bounded at 8x,
+and measured at 1.30x on room0 -- a dirty set is a contiguous surface
+patch, so dilating it adds roughly its perimeter, not its volume.
+
+Measured on room0 (200 frames, 1 cm): 61.05% written per frame, 75.31%
+after dilation. That is the WORST case and is why it is quoted -- room0
+is a single enclosed room the camera never leaves. The number that
+decides the feature is a device walk's, which this now makes measurable.
+
+The test pins the property that makes the counter worth having: written
+< active, STRICTLY. Marking a block because the kernel visited it would
+satisfy every other assertion here and leave a counter that cannot drive
+an incremental re-mesh.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+fix(tsdf): pack the block key without shifting a negative signed value
+…
+47a81c1
+```
+The dilation's coordinate key did `int64(c.x) << 42`, and block
+coordinates are routinely negative -- the world origin sits inside the
+scan. Shifting a negative signed value is undefined behaviour in C++17.
+
+Every build leg compiled it happily and the macOS suite passed; only the
+sanitizer leg saw it, which is precisely what that leg is for:
+
+  tsdf_integrator.cpp:331: runtime error: left shift of negative value -1
+
+Replaced with an exact 21-bits-per-axis packing over UNSIGNED values.
+That fixes a second, quieter defect at the same time: XOR-of-shifts can
+alias two distinct coordinates onto one key, which would have counted a
+non-active neighbour as active and silently over-reported the dilated
+set -- in a number whose whole purpose is deciding whether incremental
+extraction is worth building. The packing is a bijection for
+|coord| < 2^20, which every real grid is far inside (a 5 m walk at 5 mm
+voxels spans ~125 blocks).
+
+Reproduced and confirmed clean under a local UBSan build of the tsdf
+suite.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+taojin-6
+force-pushed
+the
+feat/tsdf-dirty-blocks
+branch
+from
+3ec317c to
+47a81c1
+Compare
+August 9, 2026 08:59
+fix(tsdf): a dirty block is one the fuse changed, against a grid we c…
+…
+4aeb7e0
+```
+…heck
+
+Review of the dirty-block reporting found fifteen defects. Four shape the API
+and the rest follow from them.
+
+The flag meant "a store happened", not "the field changed". Classic mode --
+the default, and what fuse_replica runs -- fuses the free-space cone ahead of
+the surface too, so the only narrowing above the mark was the occlusion
+return and the counter collapsed to a frustum survey, which is exactly what
+its header said it was not. It now compares the new tsdf/weight/color against
+the old and marks after the stores it describes, so a voxel converged at
+max_weight marks nothing. The dynamic-clear store was already guarded this
+way; the fuse store was guarded by nothing.
+
+A flag is keyed by block slot, which means nothing without a grid and nothing
+after a removal (the heap is LIFO, so the slot comes back meaning a different
+block). Neither was knowable to the caller, whose only instruction was a
+@PARAM sentence. VoxelBlockGrid publishes topology_epoch() -- bumped by
+remove/clear, not by resize, which preserves indices -- and the integrator
+records the grid and that epoch: a different grid resets and re-anchors, a
+removal refuses until reset_dirty().
+
+The flag array was reallocated and zeroed on every map grow, under a comment
+asserting the opposite, so a window straddling a resize forgot every block
+fused since the last reset. It carries forward now, mirroring
+VoxelBlockGrid::resize.
+
+dirty_remesh_block_count returns the block set instead of a count (a count
+cannot drive the incremental extract it exists for), takes the caller's
+already-compacted active set instead of compacting a second time, and gathers
+over active blocks testing their +{0,1}^3 octant -- which makes the existence
+filter structural and drops both hash sets. Tracking itself is now opt-in via
+TsdfIntegratorConfig::track_dirty_blocks: always-on cost every integrator a
+num_blocks*4 array and a store per voxel, paid by four consumers that read no
+flag.
+
+Also: the new Doxygen had been spliced into the middle of integrate()'s
+comment, leaving the tier's primary entry point undocumented and binding its
+contract to a nullary getter; the binding-count comment said 8 above a call
+passing 9; the flag buffer was the only storage buffer in integrate() with no
+maxStorageBufferRange guard; the per-block fact was stored per voxel with the
+divide recomputed at each site, now hoisted and atomicOr; and the two doc
+sites claiming the kernel needs no atomics are amended. The example's comment
+described the inverse of its code, its statistic averaged per-window ratios
+whose first window is degenerate by construction, and its "speedup" figure
+assumed extract cost is proportional to block count with zero fixed cost,
+which its own phase table refutes -- removed rather than corrected.
+
+Verified by mutation, because the original assertions could not fail: their
+dirty set was a contiguous run whose -z dilation is a no-op, so dropping the
+dilation, dropping the existence filter, inverting the octant and returning
+the active count all passed. The fixture is now a 2x2x2 cube straddling the
+band plus one off-camera block, so changed=4, remesh=8 and active=9 are three
+different numbers; eight mutations each fail a named line. Fusion numerics
+are untouched: room0 at 120 frames gives 832518 vertices / 277506 triangles
+with tracking on and off, matching main. Clean under ASan/UBSan on MoltenVK.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+Hide details
+View details
+taojin-6
+merged commit fcf2af4
+into
+main
+Aug 9, 2026
+12 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+taojin-6
+mentioned this pull request
+Aug 10, 2026
+docs: record why incremental extraction is a go, and why room0 said otherwise
+#60
+Merged
+taojin-6
+deleted the
+feat/tsdf-dirty-blocks
+branch
+September 28, 2026 22:33
+taojin-6
+mentioned this pull request
+Oct 26, 2026
+feat(sensor): the sender's frame slot is write-combined where it is copied (core 0.22.0)
+#284
+Merged
+taojin-6
+added a commit
+that referenced
+this pull request
+Oct 26, 2026
+docs(perf): the write-combined frame slot's one-camera set, measured
+…
+890ef9e
+```
+The spike sentence becomes the measured headline: codec_replica on Replica
+room0, RTX 4090, Release, P-frame sets 100-399, arrival to publish, the
+median of 5 interleaved runs an arm in one unpaced invocation. This PR on
+core #57 takes 1.806 / 1.972 ms p50 / p95, against 1.861 / 2.002 before
+the sender's batch (d3f1d15) and 1.946 / 2.114 on main's cached slot
+(f697b54); the frame's prep, host busy + device p50, is 0.452 ms, from
+0.554. The 15 streams are bit-identical. P6's row now says the set is
+faster with a write-combined slot.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GKxMyPpKQTn8cgZWwbWS1H
+```
+taojin-6
+added a commit
+that referenced
+this pull request
+Oct 26, 2026
+build: pin core 0.22.0 at core #57's merge
+…
+a13632c
+```
+core #57 merged as fa4638c, whose tree is the head this branch was tested
+against (36b6e86). The pin and the Homebrew key action move to it, and the
+TODO(d8) markers go.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GKxMyPpKQTn8cgZWwbWS1H
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

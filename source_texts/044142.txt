@@ -1,0 +1,1823 @@
+Fisheye-GS: Efficient Gaussian Splatting for Fisheye
+Cameras
+Anonymous Author(s)
+Affiliation
+Address
+email
+Abstract
+Recently, 3D Gaussian Splatting (3DGS) has gained attention for its high
+fidelity and real-time rendering. However, adapting 3DGS to different camera
+models, particularly fisheye lenses, poses challenges due to the unique 3D
+to 2D projection calculation. Additionally, there are inefficiencies in the tilebased splatting, especially for the extreme curvature and wide field of view of
+fisheye lenses, which are crucial for its broader real-life applications. To address
+these challenges, we introduce Fisheye-GS, a novel method that recalculates the
+projection transformation for fisheye cameras, and then optimizes the rendering
+process with the reduced number of overlapped tiles. Our method reduces
+computational redundancy and memory usage, significantly improving rendering
+speed and enabling 3DGS to be effectively used with a wider range of camera
+perspectives. With our optimization, we achieved a maximum rendering efficiency
+of 570 FPS at a high-definition resolution of 1752 × 1168.
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+1
+Introduction
+The advent of high-resolution fisheye cameras has transformed how we capture and interact with the
+world, providing a 180° or greater field of view that offers unique perspectives. These perspectives
+are essential for various real-world applications. In immersive virtual reality (VR), fisheye cameras
+enable the creation of panoramic environments that enhance the user experience by providing a
+more comprehensive and realistic field of vision [1]. This is crucial for applications such as VR
+gaming [2], virtual tourism [3], and training simulations [4], where a wide and uninterrupted view
+can significantly improve immersion and usability. In surveillance systems, fisheye cameras allow
+for broader area coverage with fewer cameras, reducing costs and complexity. They are particularly
+valuable in security and monitoring scenarios, such as in large public spaces[5], retail stores [6, 7],
+and traffic monitoring [8], where capturing every angle with high detail is vital for effective oversight
+and incident management.
+However, integrating fisheye imagery into novel view synthesis poses several challenges due to the
+inherent curvature and distortion. While Neural Radiance Fields (NeRF) [10] handles the distortions
+of fisheye lenses through its ray sampling approach, which can easily accommodate various camera
+models, the state-of-the-art 3D Gaussian Splatting (3DGS) [9] faces difficulties. The original 3DGS
+approach relies on perspective projections and is less adept at managing the extreme curvature and
+wide field of view of fisheye imagery, leading to inaccuracies and inefficiencies in rendering.
+In this work, we aim to integrate fisheye cameras with 3D Gaussian Splatting (3DGS) to fully
+unleash the potential of fisheye cameras in real-world applications that require real-time rendering
+performance. By combining the wide field of view provided by fisheye lenses with the efficient
+rendering capabilities of 3DGS, we seek to overcome the challenges associated with the curvature and
+distortion inherent in fisheye imagery. We identify the key challenge lies in accurately representing
+Submitted to 38th Conference on Neural Information Processing Systems (NeurIPS 2024). Do not distribute.
+Figure 1: Our Fisheye-GS. We have directly trained our 3DGS[9] model from images captured from
+fisheye cameras, can both achieve high visual quality and performance.
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+52
+53
+the distorted wide-field imagery captured by fisheye lenses within the 3DGS framework. To achieve
+this, we need to apply projection with geometric distortion for fisheye cameras while keeping their
+wide field of view and avoiding information loss from undistortion. Developing fast and memoryefficient methods is also vital to handle the computational demands of rendering high-resolution
+fisheye imagery within 3DGS without compromising quality.
+Our proposed method, Fisheye-GS, is the first work that seamlessly integrates fisheye camera data
+into 3D Gaussian Splatting, unlocking new possibilities for applications in virtual reality, gaming,
+security, and more. We achieve this by:
+• We first precisely calculate the equidistant projection transformation and derive the means and
+covariance of Gaussians for fisheye lenses. It is crucial for maintaining image quality and precision
+across the extreme curvature and wide field of view.
+• We then formulate the gradients required for optimization in the training phase and develop
+corresponding CUDA implementations, ensuring that the 3DGS model learns efficiently and
+produces distortion-free imagery.
+• Finally, we delve into eliminating computational redundancies and optimizing the CUDA kernel
+to greatly improve GPU performance which ensures that the proposed method is well-suited for
+real-time applications.
+56
+Extensive experiments and comparisons with existing methods demonstrate the effectiveness of
+Fisheye-GS in producing high-quality, distortion-free imagery, making it ideal for various 3D
+graphics applications.
+57
+2
+Related Work
+58
+2.1
+Novel View Synthesis
+59
+Neural Radiance Fields (NeRF). NeRF[10] represents a breakthrough in the field of novel view
+synthesis, which aims to generate realistic images of a 3D scene from any viewpoint. NeRF employs
+a fully connected deep neural network to encode a continuous volumetric scene function. This
+function maps a 3D point and a viewing direction to the corresponding RGB color and volume
+density. To enhance rendering quality, some methods directly refine the point sampling strategy in
+ray marching, resulting in more accurate modeling of the volume rendering process [11]. Others
+enhance rendering by reparameterizing the scene, which creates a more compact scene representation
+and simplifies the learning process [12, 13]. Despite many optimizations, NeRF still consumes a
+lot of time and computational power during the rendering process. NeRFs are typically represented
+as global MLPs encoding the entire scene space. However, this approach can be inefficient and
+costly when reconstructing complex and large-scale scenes. Some works focus on innovations in
+scene representations. They propose voxel grids [14] and octree-based [15]. Although these methods
+54
+55
+60
+61
+62
+63
+64
+65
+66
+67
+68
+69
+70
+2
+71
+72
+greatly enhance rendering speed, achieving real-time rendering remains difficult due to the inherent
+ray marching strategy in volume rendering.
+83
+3D Gaussian Splatting (3DGS). 3D Gaussian Splatting [9] models the scene with a set of Gaussian
+ellipsoids, allowing efficient rendering through rasterizing these Gaussian ellipsoids into images.
+While 3DGS produces high-quality reconstruction results, there is room for improvement in its
+rendering capabilities. [16, 17, 18, 19, 20] are designed to improve rendering performance under
+sparse views and challenging inputs. These methods enhance the robustness and accuracy of the
+rendered images in difficult scenarios.For anti-aliasing and improving both efficiency and quality,
+approaches like [21, 22, 23] are utilized. These techniques help in reducing aliasing artifacts
+and ensuring smooth transitions in the rendered images, providing a more visually appealing
+output.Anchor-based methods, such as [24, 25] focus on improving efficiency and quality by using
+hierarchical structures and anchor points. These methods enhance the computational efficiency and
+scalability of the rendering process, allowing for faster and more accurate scene reconstructions.
+84
+2.2
+85
+NeRF-based approaches. NeRF often assumes a pinhole camera model for simplicity, as it directly
+relates 3D points to their 2D projections without considering lens distortions. Specifically, NeRF uses
+rays cast from the camera center through the image plane to sample points in 3D space for volume
+rendering. NeRF’s flexibility in handling various camera models, as also integrated in [26], enables
+the reconstruction of a wide range of scenes from different types of input images.
+73
+74
+75
+76
+77
+78
+79
+80
+81
+82
+86
+87
+88
+89
+Various Camera Models for Radiance Fields
+For fisheye cameras, the direction d can be derived using the fisheye projection model. Given a 2D
+pixel coordinate (u, v) on the image plane, the corresponding 3D direction
+d = [x, y, z]T = [sin(θ) cos(γ), sin(θ) sin(γ), cos(θ)]T ,
+90
+91
+92
+93
+94
+95
+96
+97
+98
+99
+100
+101
+102
+103
+104
+105
+106
+107
+108
+109
+110
+111
+112
+113
+114
+115
+116
+where θ is the angle from the optical axis, and γ is the azimuthal
+angle represented
+with spherical
+
+
+u
+coordinate. These angles can be computed as with θ = π2 hv , γ = 2π w
+, where h and w are the
+height and width of the image, respectively.
+Various advanced models have also been developed for NeRF-based methods. For example, (1)
+SC-NeRF [27] addresses camera self-calibration for non-linear distortions by jointly learning scene
+geometry and camera parameters without traditional calibration objects. (2) For 360-degree panorama
+rendering, 360FusionNeRF [28] uses geometric supervision and semantic consistency with reprojection techniques and depth map extraction to improve geometry and realism. Similarly,
+OmniNeRF [29] combines omnidirectional distance fields (ODF) with neural radiance fields to
+enhance 3D reconstruction, particularly at scene edges. PERF [30] synthesizes novel views from a
+single 360-degree panorama using collaborative RGBD inpainting and an inpainting-and-erasing
+strategy, allowing extensive 3D roaming and demonstrating superiority in real-world applications. (3)
+Neuro Lens [31] proposes end-to-end optimization of the image formation process, including lens
+distortion and vignetting, integrating seamlessly with NeRF to enhance fidelity and realism.
+3DGS-based approaches. 3D Gaussian Splatting primarily works with perspective projections.
+Adapting it to work with fisheye and panoramic camera models, instead, involves additional
+considerations to handle specific distortions and projections associated with these types of images
+involving various approximations in the rasterization process. [32] suggests pre-processing fisheye
+images to correct for radial distortion, effectively converting them to a more standard perspective view
+before applying Gaussian Splatting. Alternatively, one can modify the projection process within the
+Gaussian Splatting pipeline to approximate the non-linear mapping, ensuring correct positioning and
+scaling of splats to fix the distortion. For example, [33] projects 3D Gaussians onto the tangent plane
+of the unit sphere, addressing challenges in spherical projections and enhancing rendering quality by
+leveraging structural priors from panoramic layouts. [34] introduces an optimal projection strategy
+for Gaussian splatting by analyzing projection errors and minimizing artifacts through function
+optimization, refining the projection of Gaussians to improve the overall accuracy and visual quality
+of 3D scene representations.
+3
+117
+3
+Preliminaries
+118
+3.1
+3D Gaussian Splatting
+119
+Definition. 3DGS represents a 3D model as a set of anisotropic 3D Gaussian functions and renders
+images via a differentiable tile-based rasterizer. Each Gaussian function is designated as the mean
+µ ∈ R3 , anisotropic covariance Σ ∈ R3×3 ,
+120
+121
+T
+1
+−1
+G(x) = e− 2 (x−µ) Σ
+122
+123
+124
+125
+126
+127
+128
+130
+131
+132
+133
+,
+(1)
+where x is an arbitrary position in the world coordinate system. To constrain the positive semidefinite form, the covariance is defined as Σ = RSST RT , where R ∈ SO(3) is the rotation matrix
+represented by quaternions and S = diag(s1 , s2 , s3 ) is the scaling matrix.
+Transformation. To project the Gaussian into the 2D plane, 3DGS applies the viewing
+transformation from the camera coordinate system φ ∈ R3 → R3 and the projective transformation
+ϕ ∈ R3 → R2 . We can model φ as the linear transformation φ(x) = Wx + b where W ∈ R3×3
+and b ∈ R3 . Then the projected mean µp ∈ R2 and covariance Σ′ ∈ R2×2 are given as follows:
+Σ′ = JWΣWT JT ,
+µp = ϕ(µc ) = ϕ(Wµ + b),
+129
+(x−µ)
+(2)
+where µc ∈ R3 is the mean in the camera coordinate system and J ∈ R2×3 is the Jacobian of ϕ.
+Notice that the Σ′ is the affine approximation. Then the projected 2D Gaussian can be modeled as an
+ellipse on the image plane.
+Rendering. To render the color C ∈ R3 of the pixel, 3DGS uses differentiable alpha blending from
+ellipses of N Gaussians intersecting the pixel according to the depth order:
+C=
+n
+X
+ci αi
+i=1
+i−1
+Y
+(1 − αj ),
+(3)
+j=1
+138
+where α is evaluated by projected 2D Gaussians. To determine intersections between pixels and 2D
+Gaussians, 3DGS applies the technique of dividing the image plane into several 16 × 16 tiles. Firstly
+each ellipse determines its axis-aligned bounding box. Then 3DGS traverses each bounding box
+to store the intersections and sorts them by tile IDs and depths. Finally, each pixel in a certain tile
+performs alpha blending on intersected Gaussians to render its color.
+139
+3.2
+140
+Fisheye cameras use wide-angle lenses with a large field of view, creating images with significant
+radial distortion to capture extensive scenes. These lenses project images with optical distortion at the
+edges, making fisheye cameras ideal for applications in target tracking and security. Unlike pinhole
+cameras, which form images on a plane, fisheye cameras form images on a spherical surface. Their
+projection models include equidistant, equisolid angle, orthogonal, and stereographic projections.
+134
+135
+136
+137
+141
+142
+143
+144
+145
+146
+Equidistant Projection Model for Fisheye Cameras
+We denote θ as the angle of incidence, and rd as the distance from the optical center to the projection
+point. In equidistant projection, this distance equals the arc length on the projection plane, given by:
+rd = f θ,
+147
+148
+149
+150
+151
+152
+(4)
+where f is the camera’s focal length. This model ensures equal distances for equal angles of incidence.
+For the point p ∈ R3 = (xc , yc , zc )T in camera space, the distance to the z-axis is:
+p
+lz = x2c + yc2 .
+(5)
+!
+p
+x2c + yc2
+The angle of incidence is θ = arctan
+. Using equidistant projection, the pixel
+zc
+coordinates are:
+fx θxc
+fy θyc
+x p = cx +
+, yp = cy +
+,
+(6)
+lz
+lz
+where fx and fy are the focal lengths in the x and y directions, and (cx , cy ) is the optical center’s
+pixel coordinate.
+4
+153
+4
+Methods
+157
+To apply fisheye cameras for 3DGS, we first derive the means and covariance of Gaussians according
+to equidistant projection transformation. Furthermore, the gradients for the training stage are derived
+in detail. We have also reduced the computational redundancy to optimize the GPU performance in
+CUDA implementations.
+158
+4.1
+154
+155
+156
+159
+160
+The Projection and Gradients of the Means
+Suppose the mean in camera space is µc = (xc , yc , zc )T and the mean in pixel coordinates is
+µp = (xp , yp )T , the projection of means is simply applying the equidistant projection model ϕ:
+µp = ϕ(µc ).
+161
+162
+(7)
+∂L
+Suppose the loss is L, then the gradients of projected mean ∂µ
+′ can be calculated by vanilla 3DGS.
+∂L
+To compute the mean in camera space ∂µ , we can apply the chain rule:
+c
+∂µp ∂L
+∂L
+=
+·
+.
+∂µc
+∂µc ∂µp
+(8)
+∂µ
+163
+Notice that ∂µpc is the Jacobian matrix of equidistant projection ϕ:
+
+
+
+
+fx x2c zc
+yc2 θ
+fx zc
+θ
+fx xc
+xc yc
++ 3
+− 3
+−
+
+∂µp
+lz2l2
+lz 
+lz2 l2
+lz
+l2 
+,
+Jϕ =
+=
+2
+2
+
+fy zc
+fy yc 
+θ
+fy yc zc
+xc θ
+∂µc
+xc yc
+−
+− 3
++ 3
+lz2 l2
+lz
+lz2 l2
+lz
+l2
+(9)
+164
+where l2 is the square length of the vector µp , i.e., l2 = x2c + yc2 + zc2 .
+165
+4.2
+166
+Using the Jacobian above, we can compute the projected covariance via equidistant projection. Let
+T = JW ∈ R2×3 , then we have the projected covariance Σ′ = TΣTT . As the matrix T is
+the function of µc , the projection above propagates gradients to both transformation matrix T and
+covariance Σ. GSplat [35] and Vanilla 3DGS implementation [9] have derived the gradients above
+from the covariance projection by matrix calculus. Since the view transformation matrix W is not a
+function of µ, we can just modify the partial derivative of the Jacobian matrix from Vanilla 3DGS to
+propagate the gradients:
+f S
+f S
+f S
+f S 
+f S
+2f x y 
+167
+168
+169
+170
+171
+172
+The Projection and Gradients of the Covariance
+x 1
+x 2
+∂J
+ l2 l5
+=  f 2Sz
+y 2
+∂xc
+l22 lz5
+l22 lz5
+fy S3
+l22 lz5
+x 2
+x 5
+l22 
+2fy xc yc  ,
+l22
+173
+ f S
+x 5
+∂J
+ l22
+=  2f x y
+y c c
+∂zc
+l22
+174
+where
+175
+176
+177
+2fx xc yc
+l22
+fy S6
+l22
+l22 lz5
+fy S4
+l22 lz5
+2f x z 
+x c c
+l22 
+2fy yc zc  ,
+l22
+S1 = xc (3S7 + x2c S8 ),
+S2 = yc (S7 + x2c S8 ),
+S3 = xc (S7 + yc2 S8 ),
+S4 = yc (3S7 + yc2 S8 ),
+S5 = x2c − yc2 − zc2 ,
+S6 = yc2 − x2c − zc2
+S7 = −l22 lz2 θ + l2 lz3 zc ,
+x 3
+∂J
+ l2 l5
+=  f 2Sz
+y 3
+∂yc
+l22 lz5
+y c c
+l22 
+fy S6  ,
+l22
+(10)
+(11)
+(12)
+S8 = 3l22 θ − 3l2 lz zc − 2lz3 zc
+Finally, the mean µ′ accumulates the gradients from the backpropagation of the projection of mean
+itself and its covariance to optimize the Gaussian’s position. The projection of covariance also
+propagates gradients to the covariance itself to adjust the shape.
+5
+Vanilla 3D-GS
+Ours
+Gaussians
+z
+Fisheye Lens
+θ
+f
+Equdistant Projection
+Gradients
+x
+Redundancy
+Ours
+(b) Computational Redundancy Elimination
+(a) Differentiable Equidistant Projection
+Figure 2: (a): Showcase for the differentiable equidistant projection. (b): Schematic of the operation
+to eliminate computational redundancy.
+178
+4.3
+179
+Although the CUDA kernels of 3DGS efficiently parallelize the training and rendering of the pinhole
+camera model, there remains redundant computation in the tile-based splatting. Thus we have
+optimized CUDA kernels to reduce the number of overlapped tiles during rendering and expanded
+the original CUDA implementation to accommodate fisheye cameras.
+180
+181
+182
+183
+184
+185
+186
+187
+188
+189
+190
+191
+192
+193
+194
+195
+196
+197
+198
+199
+200
+201
+202
+203
+204
+205
+206
+207
+208
+209
+Implementation Details
+In 3DGS, we need to determine the tiles covered by the Gaussian ellipsoid projection for subsequent
+rendering. The original 3DGS implement calculates the bounding box of the ellipse based on
+the major axis after the Gaussian ellipsoid projection, and then all tiles within the bounding box
+participate in the key-value binding and alpha blending of this Gaussian ellipsoid. However, many
+tiles within the bounding box are not actually covered by the projected ellipse, which introduces a lot
+of computational redundancy for subsequent key-value binding and alpha blending.
+In the original 3DGS, the size of the ellipse is often calculated according to the 3σ principle (σ is
+the standard deviation), without considering the opacity of the Gaussian ellipsoid. In statistics, it is
+generally believed that in a Gaussian distribution, data points with an absolute difference from the
+mean greater than 3σ are extremely rare. Considering that the contribution to the final result is related
+to the opacity of the Gaussian ellipsoids, we use Eq. (13) as a substitute to narrow the definition of
+the ellipse size:
+p
+(13)
+r = 2 ln(255σ) max(λ1 , λ2 ).
+As shown in Fig. 2(b), the bounding box defined by the major axis of the ellipse in the original 3DGS
+is often not tangent to the ellipse, which may encompass more tiles that do not need to be rendered.
+We can directly calculate the axis-aligned bounding box that is tangent to the ellipse, with a height of
+2h and a width of 2w, which is proved in the Appendix:
+p
+p
+w = Σ′11 , h = Σ′22 .
+(14)
+We combine the above two optimizations to redefine the size of the bounding box:
+q
+q
+w = 2 ln(255σ)Σ′11 , h = 2 ln(255σ)Σ′22 .
+(15)
+During the key-value binding process, the original 3DGS will perform key-value binding for all tiles
+within the bounding box, which will bind many tiles that are not covered by the ellipse, resulting in
+redundant computations in subsequent sorting and alpha blending.
+As shown in Fig. 2(c), we carefully determine whether there is an intersection between the tile and
+the ellipse during the key-value binding traversal of the bounding box tiles. If there is no intersection,
+then do not perform key-value binding for this tile. For each tile, if one of the following conditions is
+met, it can be said that there is an intersection between the ellipse and the tile, and key-value binding
+should be performed for this tile:
+• The center of the ellipse is inside the tile.
+• There is an edge e of the tile that either intersects with the ellipse or is inside the ellipse.
+6
+210
+211
+212
+213
+214
+215
+216
+217
+218
+Although eliminating redundant key-value pairs is the most effective method for optimizing compute
+workload and memory usage, we have also implemented additional optimizations to further reduce
+memory consumption and save memory bandwidth.
+Due to the significant size differences among the Gaussian ellipsoids, the original implementation
+of the second function exhibited severe load imbalance issues. We modified the thread organization
+in this section so that each warp is responsible for the computation of one Gaussian ellipsoid.
+Additionally, since the output order of key-value pairs is not important because they will be sorted,
+we replaced the original prefix sum with dynamic scheduling implemented by atomic addition,
+eliminating the array point_offsets and the CUDA library call for computing the prefix sum.
+223
+Finally, we fused the two CUDA kernels preprocessCUDA and duplicateWithKeys, eliminating
+the array radii, which stores the temporary information of bounding box size. Another significant
+advantage of kernel fusion is that it prevents all accesses to the array shs from being concentrated in
+the first CUDA kernel preprocessCUDA, thereby avoiding the reduction in computational efficiency
+caused by the bottleneck of memory bandwidth.
+224
+5
+Experiments
+225
+5.1
+Experimental Setup
+226
+Dataset. We have adopted 6 indoor scenes from Scannet++[32] dataset as our real world dataset,
+where the images are captured by fisheye cameras and resized to the resolution of 1752 × 1168. The
+dataset also provides point cloud, camera intrinsic and poses of each view as COLMAP[36] SfM
+format. We have also generated a synthetic dataset from [10] with Blender 3.6 by equidistant fisheye
+camera models. We generate 200 frames with the resolution of 800 × 800 by rotating around the
+model for the Lego scene, and 100 frames for other scenes. For each scene, we render the dataset
+separately for the field of view (FOV) settings of 120◦ and 180◦ . We use 7/8 of each scene as the
+training set for optimization and the rest as the test set for evaluation.
+219
+220
+221
+222
+227
+228
+229
+230
+231
+232
+233
+234
+235
+236
+237
+238
+Optimization. We have initialized Gaussians from COLMAP point cloud on Scannet++ dataset
+and randomly initialized 100000 points for synthetic dataset. For each, we train our models for
+30000 iterations and use the same hyperparameters, training strategy, and loss function as [9]. For
+the Scannet++ dataset, we randomize the background color for each iteration to model the walls of
+indoor scenes. Black backgrounds are used for training on synthetic datasets.
+243
+Baseline and Evaluation. We compare our method against original 3DGS[9] as our baseline.
+Because 3DGS is applied for the pinhole camera model, we have undistorted the images from the
+Scannet++ dataset for training. The baseline shares the same training technique as our method. For
+fair comparison, we evaluate the baseline according to ground-truth images before undistortion, using
+our Fisheye-Gs on both training results.
+244
+5.2
+245
+Visual Quality. We use visual PSNR, SSIM[37] and LPIPS[38] to test our method and the baseline
+on 6 real indoor scenes captured by fisheye cameras. As is shown in table 1, our method outperforms
+the baseline on each metric and scene on average. Fig. 3 shows that the baseline performs well on the
+central area of the image. However, artifacts frequently appear on the edge. Besides the interpolation
+of the undistortion process can lead to the loss of information, the difference between the pinhole and
+fisheye camera models plays a key role. The fisheye camera has a larger field of view (FOV) than
+the pinhole camera, so the undistortion process will clip the scenes on the edge of the image plane.
+Then the 3DGS struggles to learn the edge area of the scene. In other words, the corners of the scene
+can be more frequently viewed by our Fisheye-GS, add more geometry constraints, and show fewer
+artifacts in novel views.
+239
+240
+241
+242
+246
+247
+248
+249
+250
+251
+252
+253
+254
+255
+256
+257
+Evaluation
+Evaluation on Synthetic Dataset. As is shown in table 3 and fig 4, our Fisheye-GS can successfully
+model the scene from random initialization, and adapting different views. The results show our
+method can adapt to larger distortions like Lego in fig 4.
+7
+Scene
+Method #Gaussians PSNR SSIM LPIPS
+Baseline
+730320
+21.69 0.821
+0.215
+Utility Room
+Ours
+722639
+26.42 0.894 0.177
+Baseline
+1800937
+20.21
+0.72
+0.264
+Big Office
+Ours
+1442433
+24.95 0.849 0.223
+Baseline
+712107
+24.02
+0.87
+0.190
+Small Office
+Ours
+685902
+26.15 0.905 0.177
+Baseline
+704898
+25.54 0.867
+0.211
+Kitchen
+Ours
+594699
+30.63 0.933 0.179
+Baseline
+355658
+25.91 0.882
+0.223
+Bedroom
+Ours
+1442433
+31.89 0.946 0.191
+Baseline
+3558209
+19.19
+0.63
+0.316
+Tool Room
+Ours
+2605005
+27.12 0.855 0.223
+Table 1: Quantitative Comparison on Scannet++ dataset. Our Fisheye-GS achieves better quality
+compared to the baseline in all scenes and is evaluated by all metrics.
+Figure 3: Qualitative comparison between Fisheye-GS and the baseline. The baseline struggle to
+render on edges and corners due to the clipping and interpolation from undistortion.
+Scene
+Lego
+Mic
+Hotdog
+Ficus
+258
+259
+260
+FOV=120◦
+FOV=180◦
+#Gaussians PSNR SSIM LPIPS #Gaussians PSNR SSIM
+144794
+33.06 0.981 0.026
+50357
+30.62 0.9900
+47773
+43.16 0.997 0.002
+20371
+47.77 0.9986
+62145
+41.50 0.991 0.0128
+37519
+43.47 0.9956
+201956
+36.90 0.992 0.0084
+85475
+40.01 0.9962
+Table 3: Evaluation on synthetic dataset from different scenes and FOVs.
+LPIPS
+0.0141
+0.0013
+0.0055
+0.0041
+Performance Evaluation on Real World Dataset. Table 2 shows the performance before and after
+our optimizations. With these optimizations, we achieved performance of up to 570 FPS and about
+3.4× speed up ratio using A100 GPU. As for consumer GPU RTX 4090, due to its stronger computing
+8
+MaxTime
+Memory
+Intersects
+(ms)
+(MB)
+Efficient 405
+4.761
+3034430
+103.42
+Fisheye
+Vanilla
+121
+17.155
+13948372 1062.69
+A100
+Efficient 510
+4.399
+2415742
+89.26
+Pinhole
+Small
+Vanilla
+125
+17.711
+13145841 1035.06
+Office
+Efficient 286
+4.614
+3034430
+103.42
+Fisheye
+Vanilla
+213
+17.101
+13948372 1062.69
+RTX 4090
+Efficient 304
+4.455
+2415742
+89.26
+Pinhole
+Vanilla
+189
+15.000
+13145841 1035.06
+Efficient 570
+4.038
+2746724
+93.36
+Fisheye
+Vanilla
+166
+11.801
+9834303
+853.38
+A100
+Efficient 534
+3.793
+2801239
+94.61
+Pinhole
+Vanilla
+161
+10.785
+10945069
+891.80
+Kitchen
+Efficient 339
+4.095
+2746724
+93.36
+Fisheye
+Vanilla
+282
+12.002
+9834303
+853.38
+RTX 4090
+Efficient 342
+4.137
+2801239
+94.61
+Pinhole
+Vanilla
+264
+13.999
+10945069
+891.80
+Table 2: Performance Comparison on different GPU w/o efficient kernels
+Scene
+GPU
+Camera
+Kernel
+FPS
+Figure 4: Result on synthetic dataset, varying from scenes and FOVs
+262
+power but lower memory bandwidth, the acceleration effect is limited by the sort procedure. However,
+we still achieved good performance, meeting real-time rendering requirements.
+263
+5.3
+264
+268
+Our method derives and implements the fisheye camera model into 3DGS, and optimizes the
+implementation to achieve better rendering performance. However, our method ignores the
+approximation error of the projection. And because we explicitly compute the gradients, our method
+struggles to be generalized to other distortion models. Due to the lack of fisheye camera datasets, our
+method has not be tested by various types of scenes, like unbounded scenes, city-scale scenes, etc.
+269
+6
+261
+265
+266
+267
+270
+271
+272
+273
+274
+275
+276
+277
+278
+279
+Limitaion
+Conclusion
+This paper introduces a new approach, Fisheye-GS, aimed at addressing the adaptability issues of 3D
+Gaussian Splatting (3DGS) across different camera models, particularly fisheye lenses. Fisheye-GS
+recalculates the projection transformation for fisheye cameras and optimizes the rendering process
+by reducing the number of overlapped tiles, effectively minimizing computational redundancy and
+memory usage. These optimizations significantly enhance rendering speed, achieving a maximum
+efficiency of 570 frames per second at a high-definition resolution of 1752 x 1168. This paper
+demonstrates that Fisheye-GS can effectively expand the application range of 3DGS technology to
+various camera perspectives, which is crucial for its broader real-life applications. We anticipate
+that the outcomes of this study will provide robust support and new perspectives for research and
+development in related fields.
+9
+280
+281
+282
+283
+284
+285
+286
+287
+288
+289
+290
+291
+292
+293
+294
+295
+296
+297
+298
+299
+300
+301
+302
+303
+304
+305
+306
+307
+308
+309
+310
+311
+312
+313
+314
+315
+316
+317
+318
+319
+320
+321
+322
+323
+324
+325
+326
+327
+References
+[1] Yalin Xiong and Kenneth Turkowski. Creating image-based VR using a self-calibrating fisheye
+lens. In Proceedings of IEEE computer society conference on computer vision and pattern
+recognition, pages 237–243. IEEE, 1997.
+[2] Paul Bourke. idome: Immersive gaming with the Unity3D game engine. Computer Games and
+Allied Technology, 9, 2009.
+[3] Shaobo Zhang, Wanqing Zhao, Jun Wang, Hangzai Luo, Xiaoyi Feng, and Jinye Peng. A
+mixed-reality museum tourism framework based on HMD and fisheye camera. In Proceedings
+of the 15th ACM SIGGRAPH Conference on Virtual-Reality Continuum and Its Applications in
+Industry-Volume 1, pages 47–50, 2016.
+[4] Daniel Jakab, Brian Michael Deegan, Sushil Sharma, Eoin Martino Grua, Jonathan Horgan,
+Enda Ward, Pepijn van de Ven, Anthony Scanlan, and Ciarán Eising. Surround-view fisheye
+optics in computer vision and simulation: Survey and challenges. IEEE Transactions on
+Intelligent Transportation Systems, page 1–22, 2024.
+[5] Janusz Konrad, Mertcan Cokbas, Prakash Ishwar, Thomas DC Little, and Michael Gevelber.
+High-accuracy people counting in large spaces using overhead fisheye cameras. Energy and
+Buildings, 307:113936, 2024.
+[6] Franck Vandewiele, Cina Motamed, and Tarek Yahiaoui. Visibility management for object
+tracking in the context of a fisheye camera network. In 2012 Sixth International Conference on
+Distributed Smart Cameras (ICDSC), pages 1–6. IEEE, 2012.
+[7] Yunfei Yang and Hongwei Deng. EPformer: an efficient transformer-based approach for retail
+product detection in fisheye images. Journal of Electronic Imaging, 32(1):013017–013017,
+2023.
+[8] Liuyuan Deng, Ming Yang, Yeqiang Qian, Chunxiang Wang, and Bing Wang. CNN based
+semantic segmentation for urban traffic scenes using fisheye camera. In 2017 IEEE Intelligent
+Vehicles Symposium (IV), pages 231–236. IEEE, 2017.
+[9] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkuehler, and George Drettakis. 3D gaussian
+splatting for real-time radiance field rendering. ACM Transactions on Graphics (TOG), 42:1–14,
+2023.
+[10] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi,
+and Ren Ng. NeRF: Representing scenes as neural radiance fields for view synthesis.
+Communications of the ACM, 65(1):99–106, 2021.
+[11] Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin Shu, Kalyan Sunkavalli, and Ulrich
+Neumann. Point-nerf: Point-based neural radiance fields. 2022 IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR), pages 5428–5438, 2022.
+[12] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter Hedman. MipNeRF 360: Unbounded anti-aliased neural radiance fields. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, pages 5470–5479, 2022.
+[13] Jonathan T Barron, Ben Mildenhall, Matthew Tancik, Peter Hedman, Ricardo Martin-Brualla,
+and Pratul P Srinivasan. Mip-NeRF: A multiscale representation for anti-aliasing neural radiance
+fields. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages
+5855–5864, 2021.
+[14] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht, and Angjoo
+Kanazawa. Plenoxels: Radiance fields without neural networks. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, pages 5501–5510, 2022.
+[15] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and Angjoo Kanazawa. Plenoctrees for
+real-time rendering of neural radiance fields. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, pages 5752–5761, 2021.
+10
+328
+329
+330
+331
+332
+333
+334
+335
+336
+337
+338
+339
+340
+341
+342
+343
+344
+345
+346
+347
+348
+349
+350
+351
+352
+353
+354
+355
+356
+357
+358
+359
+360
+361
+362
+363
+364
+365
+366
+367
+368
+369
+370
+371
+372
+373
+374
+[16] Zehao Zhu, Zhiwen Fan, Yifan Jiang, and Zhangyang Wang. FSGS: Real-time few-shot view
+synthesis using gaussian splatting. arXiv preprint arXiv:2312.00451, 2023.
+[17] Haolin Xiong, Sairisheek Muttukuru, Rishi Upadhyay, Pradyumna Chari, and Achuta Kadambi.
+SparseGS: Real-time 360° sparse view synthesis using gaussian splatting. arXiv e-prints, pages
+arXiv–2312, 2023.
+[18] Jiahe Li, Jiawei Zhang, Xiao Bai, Jin Zheng, Xin Ning, Jun Zhou, and Lin Gu. DNGaussian:
+Optimizing sparse-view 3D gaussian radiance fields with global-local depth normalization.
+arXiv preprint arXiv:2403.06912, 2024.
+[19] David Charatan, Sizhe Li, Andrea Tagliasacchi, and Vincent Sitzmann. pixelSplat: 3D
+gaussian splats from image pairs for scalable generalizable 3D reconstruction. arXiv preprint
+arXiv:2312.12337, 2023.
+[20] Yuedong Chen, Haofei Xu, Chuanxia Zheng, Bohan Zhuang, Marc Pollefeys, Andreas Geiger,
+Tat-Jen Cham, and Jianfei Cai. MVSplat: Efficient 3D gaussian splatting from sparse multi-view
+images. arXiv preprint arXiv:2403.14627, 2024.
+[21] Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and Andreas Geiger. Mip-Splatting:
+Alias-free 3D gaussian splatting. arXiv preprint arXiv:2311.16493, 2023.
+[22] Zhiwen Yan, Weng Fei Low, Yu Chen, and Gim Hee Lee. Multi-scale 3D gaussian splatting for
+anti-aliased rendering. arXiv preprint arXiv:2311.17089, 2023.
+[23] Zhihao Liang, Qi Zhang, Wenbo Hu, Ying Feng, Lei Zhu, and Kui Jia. Analytic-splatting:
+Anti-aliased 3D gaussian splatting via analytic integration. arXiv preprint arXiv:2403.11056,
+2024.
+[24] Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin Wang, Dahua Lin, and Bo Dai. ScaffoldGS: Structured 3D gaussians for view-adaptive rendering. arXiv preprint arXiv:2312.00109,
+2023.
+[25] Kerui Ren, Lihan Jiang, Tao Lu, Mulin Yu, Linning Xu, Zhangkai Ni, and Bo Dai. OctreeGS: Towards consistent real-time rendering with lod-structured 3D gaussians. arXiv preprint
+arXiv:2403.17898, 2024.
+[26] Matthew Tancik, Ethan Weber, Evonne Ng, Ruilong Li, Brent Yi, Terrance Wang, Alexander
+Kristoffersen, Jake Austin, Kamyar Salahi, Abhik Ahuja, et al. NeRFstudio: A modular
+framework for neural radiance field development. In ACM SIGGRAPH 2023 Conference
+Proceedings, pages 1–12, 2023.
+[27] Yoonwoo Jeong, Seokjun Ahn, Christopher Choy, Anima Anandkumar, Minsu Cho, and Jaesik
+Park. Self-calibrating neural radiance fields. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, pages 5846–5854, 2021.
+[28] Shreyas Kulkarni, Peng Yin, and Sebastian Scherer. 360FusionNeRF: Panoramic neural radiance
+fields with joint guidance. In 2023 IEEE/RSJ International Conference on Intelligent Robots
+and Systems (IROS), pages 7202–7209. IEEE, 2023.
+[29] Jiaming Shen, Bolin Song, Zirui Wu, and Yi Xu. OmniNeRF: Hybriding omnidirectional
+distance and radiance fields for neural surface reconstruction. In 2022 2nd International
+Conference on Computational Modeling, Simulation and Data Analysis (CMSDA), pages 281–
+285. IEEE, 2022.
+[30] Guangcong Wang, Peng Wang, Zhaoxi Chen, Wenping Wang, Chen Change Loy, and Ziwei
+Liu. PERF: Panoramic neural radiance field from a single panorama. arXiv preprint
+arXiv:2310.16831, 2023.
+[31] Wenqi Xian, Aljaž Božič, Noah Snavely, and Christoph Lassner. Neural lens modeling. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
+8435–8445, 2023.
+11
+375
+376
+377
+378
+379
+380
+381
+382
+383
+384
+385
+386
+387
+388
+389
+390
+391
+392
+393
+[32] Chandan Yeshwanth, Yueh-Cheng Liu, Matthias Nießner, and Angela Dai. ScanNet++: A
+high-fidelity dataset of 3D indoor scenes. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, pages 12–22, 2023.
+[33] Jiayang Bai, Letian Huang, Jie Guo, Wen Gong, Yuanqi Li, and Yanwen Guo. 360-GS: Layoutguided panoramic gaussian splatting for indoor roaming. arXiv preprint arXiv:2402.00763,
+2024.
+[34] Letian Huang, Jiayang Bai, Jie Guo, and Yanwen Guo. GS++: Error analyzing and optimal
+gaussian splatting. arXiv preprint arXiv:2402.00752, 2024.
+[35] Vickie Ye and Angjoo Kanazawa. Mathematical supplement for the gsplat library. arXiv
+preprint arXiv:2312.02121, 2023.
+[36] Johannes L Schonberger and Jan-Michael Frahm. Structure-from-motion revisited. In
+Proceedings of the IEEE conference on computer vision and pattern recognition, pages 4104–
+4113, 2016.
+[37] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P Simoncelli. Image quality assessment:
+from error visibility to structural similarity. IEEE transactions on image processing, 13(4):600–
+612, 2004.
+[38] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The
+unreasonable effectiveness of deep features as a perceptual metric. In Proceedings of the
+IEEE conference on computer vision and pattern recognition, pages 586–595, 2018.
+12
+394
+395
+NeurIPS Paper Checklist
+1. Claims
+397
+Question: Do the main claims made in the abstract and introduction accurately reflect the
+paper’s contributions and scope?
+398
+Answer: [Yes]
+399
+Justification: Our abstract and introduction both claim the main countribution and scope.
+400
+Guidelines:
+396
+401
+402
+403
+404
+405
+406
+407
+408
+409
+410
+• The answer NA means that the abstract and introduction do not include the claims
+made in the paper.
+• The abstract and/or introduction should clearly state the claims made, including the
+contributions made in the paper and important assumptions and limitations. A No or
+NA answer to this question will not be perceived well by the reviewers.
+• The claims made should match theoretical and experimental results, and reflect how
+much the results can be expected to generalize to other settings.
+• It is fine to include aspirational goals as motivation as long as it is clear that these goals
+are not attained by the paper.
+2. Limitations
+411
+Question: Does the paper discuss the limitations of the work performed by the authors?
+412
+Answer: [Yes]
+413
+Justification: We discuss the limitations at the end of our paper.
+414
+Guidelines:
+415
+416
+417
+418
+419
+420
+421
+422
+423
+424
+425
+426
+427
+428
+429
+430
+431
+432
+433
+434
+435
+436
+437
+438
+439
+440
+441
+• The answer NA means that the paper has no limitation while the answer No means that
+the paper has limitations, but those are not discussed in the paper.
+• The authors are encouraged to create a separate "Limitations" section in their paper.
+• The paper should point out any strong assumptions and how robust the results are to
+violations of these assumptions (e.g., independence assumptions, noiseless settings,
+model well-specification, asymptotic approximations only holding locally). The authors
+should reflect on how these assumptions might be violated in practice and what the
+implications would be.
+• The authors should reflect on the scope of the claims made, e.g., if the approach was
+only tested on a few datasets or with a few runs. In general, empirical results often
+depend on implicit assumptions, which should be articulated.
+• The authors should reflect on the factors that influence the performance of the approach.
+For example, a facial recognition algorithm may perform poorly when image resolution
+is low or images are taken in low lighting. Or a speech-to-text system might not be
+used reliably to provide closed captions for online lectures because it fails to handle
+technical jargon.
+• The authors should discuss the computational efficiency of the proposed algorithms
+and how they scale with dataset size.
+• If applicable, the authors should discuss possible limitations of their approach to
+address problems of privacy and fairness.
+• While the authors might fear that complete honesty about limitations might be used
+by reviewers as grounds for rejection, a worse outcome might be that reviewers
+discover limitations that aren’t acknowledged in the paper. The authors should use
+their best judgment and recognize that individual actions in favor of transparency play
+an important role in developing norms that preserve the integrity of the community.
+Reviewers will be specifically instructed to not penalize honesty concerning limitations.
+3. Theory Assumptions and Proofs
+443
+Question: For each theoretical result, does the paper provide the full set of assumptions and
+a complete (and correct) proof?
+444
+Answer: [Yes]
+442
+13
+446
+Justification: We give the full set of assumptions and proof at our preliminaries, method and
+supplementary materials.
+447
+Guidelines:
+445
+448
+449
+450
+451
+452
+453
+454
+455
+456
+457
+458
+• The answer NA means that the paper does not include theoretical results.
+• All the theorems, formulas, and proofs in the paper should be numbered and crossreferenced.
+• All assumptions should be clearly stated or referenced in the statement of any theorems.
+• The proofs can either appear in the main paper or the supplemental material, but if
+they appear in the supplemental material, the authors are encouraged to provide a short
+proof sketch to provide intuition.
+• Inversely, any informal proof provided in the core of the paper should be complemented
+by formal proofs provided in appendix or supplemental material.
+• Theorems and Lemmas that the proof relies upon should be properly referenced.
+4. Experimental Result Reproducibility
+461
+Question: Does the paper fully disclose all the information needed to reproduce the
+main experimental results of the paper to the extent that it affects the main claims and/or
+conclusions of the paper (regardless of whether the code and data are provided or not)?
+462
+Answer: [Yes]
+463
+Justification: [TODO]
+464
+Guidelines: We have tested our method on various datasets and different machines with both
+Windows and Linux. We have also evaluated our method on different types of GPU.
+459
+460
+465
+466
+467
+468
+469
+470
+471
+472
+473
+474
+475
+476
+477
+478
+479
+480
+481
+482
+483
+484
+485
+486
+487
+488
+489
+490
+491
+492
+493
+494
+495
+496
+497
+• The answer NA means that the paper does not include experiments.
+• If the paper includes experiments, a No answer to this question will not be perceived
+well by the reviewers: Making the paper reproducible is important, regardless of
+whether the code and data are provided or not.
+• If the contribution is a dataset and/or model, the authors should describe the steps taken
+to make their results reproducible or verifiable.
+• Depending on the contribution, reproducibility can be accomplished in various ways.
+For example, if the contribution is a novel architecture, describing the architecture fully
+might suffice, or if the contribution is a specific model and empirical evaluation, it may
+be necessary to either make it possible for others to replicate the model with the same
+dataset, or provide access to the model. In general. releasing code and data is often
+one good way to accomplish this, but reproducibility can also be provided via detailed
+instructions for how to replicate the results, access to a hosted model (e.g., in the case
+of a large language model), releasing of a model checkpoint, or other means that are
+appropriate to the research performed.
+• While NeurIPS does not require releasing code, the conference does require all
+submissions to provide some reasonable avenue for reproducibility, which may depend
+on the nature of the contribution. For example
+(a) If the contribution is primarily a new algorithm, the paper should make it clear how
+to reproduce that algorithm.
+(b) If the contribution is primarily a new model architecture, the paper should describe
+the architecture clearly and fully.
+(c) If the contribution is a new model (e.g., a large language model), then there should
+either be a way to access this model for reproducing the results or a way to reproduce
+the model (e.g., with an open-source dataset or instructions for how to construct
+the dataset).
+(d) We recognize that reproducibility may be tricky in some cases, in which case
+authors are welcome to describe the particular way they provide for reproducibility.
+In the case of closed-source models, it may be that access to the model is limited in
+some way (e.g., to registered users), but it should be possible for other researchers
+to have some path to reproducing or verifying the results.
+5. Open access to data and code
+14
+500
+Question: Does the paper provide open access to the data and code, with sufficient
+instructions to faithfully reproduce the main experimental results, as described in
+supplemental material?
+501
+Answer: [No]
+502
+503
+Justification: Our method is implemented based on vanilla 3D Gaussian Splatting. And we
+have claimed the dataset with details we use.
+504
+Guidelines:
+498
+499
+505
+506
+507
+508
+509
+510
+511
+512
+513
+514
+515
+516
+517
+518
+519
+520
+521
+522
+523
+524
+• The answer NA means that paper does not include experiments requiring code.
+• Please see the NeurIPS code and data submission guidelines (https://nips.cc/
+public/guides/CodeSubmissionPolicy) for more details.
+• While we encourage the release of code and data, we understand that this might not be
+possible, so “No” is an acceptable answer. Papers cannot be rejected simply for not
+including code, unless this is central to the contribution (e.g., for a new open-source
+benchmark).
+• The instructions should contain the exact command and environment needed to run to
+reproduce the results. See the NeurIPS code and data submission guidelines (https:
+//nips.cc/public/guides/CodeSubmissionPolicy) for more details.
+• The authors should provide instructions on data access and preparation, including how
+to access the raw data, preprocessed data, intermediate data, and generated data, etc.
+• The authors should provide scripts to reproduce all experimental results for the new
+proposed method and baselines. If only a subset of experiments are reproducible, they
+should state which ones are omitted from the script and why.
+• At submission time, to preserve anonymity, the authors should release anonymized
+versions (if applicable).
+• Providing as much information as possible in supplemental material (appended to the
+paper) is recommended, but including URLs to data and code is permitted.
+6. Experimental Setting/Details
+527
+Question: Does the paper specify all the training and test details (e.g., data splits,
+hyperparameters, how they were chosen, type of optimizer, etc.) necessary to understand
+the results?
+528
+Answer: [Yes]
+529
+Justification: We have specify the training details at the beginning of our experiment part.
+530
+Guidelines:
+525
+526
+531
+532
+533
+534
+535
+536
+• The answer NA means that the paper does not include experiments.
+• The experimental setting should be presented in the core of the paper to a level of detail
+that is necessary to appreciate the results and make sense of them.
+• The full details can be provided either with the code, in appendix, or as supplemental
+material.
+7. Experiment Statistical Significance
+538
+Question: Does the paper report error bars suitably and correctly defined or other appropriate
+information about the statistical significance of the experiments?
+539
+Answer: [No]
+540
+542
+Justification: We have not randomized our experimental setting, excluding the background
+color on Scannet++ dataset in training stage. And the random method is to model the wall
+to block the background.
+543
+Guidelines:
+537
+541
+544
+545
+546
+547
+• The answer NA means that the paper does not include experiments.
+• The authors should answer "Yes" if the results are accompanied by error bars,
+confidence intervals, or statistical significance tests, at least for the experiments that
+support the main claims of the paper.
+15
+548
+549
+550
+551
+552
+553
+554
+555
+556
+557
+558
+559
+560
+561
+562
+563
+564
+• The factors of variability that the error bars are capturing should be clearly stated (for
+example, train/test split, initialization, random drawing of some parameter, or overall
+run with given experimental conditions).
+• The method for calculating the error bars should be explained (closed form formula,
+call to a library function, bootstrap, etc.)
+• The assumptions made should be given (e.g., Normally distributed errors).
+• It should be clear whether the error bar is the standard deviation or the standard error
+of the mean.
+• It is OK to report 1-sigma error bars, but one should state it. The authors should
+preferably report a 2-sigma error bar than state that they have a 96% CI, if the hypothesis
+of Normality of errors is not verified.
+• For asymmetric distributions, the authors should be careful not to show in tables or
+figures symmetric error bars that would yield results that are out of range (e.g. negative
+error rates).
+• If error bars are reported in tables or plots, The authors should explain in the text how
+they were calculated and reference the corresponding figures or tables in the text.
+8. Experiments Compute Resources
+567
+Question: For each experiment, does the paper provide sufficient information on the
+computer resources (type of compute workers, memory, time of execution) needed to
+reproduce the experiments?
+568
+Answer: [Yes]
+569
+570
+Justification: We have provided the GPU we choose, the memory usage and the frames per
+second in rendering stage.
+571
+Guidelines:
+565
+566
+572
+573
+574
+575
+576
+577
+578
+579
+580
+• The answer NA means that the paper does not include experiments.
+• The paper should indicate the type of compute workers CPU or GPU, internal cluster,
+or cloud provider, including relevant memory and storage.
+• The paper should provide the amount of compute required for each of the individual
+experimental runs as well as estimate the total compute.
+• The paper should disclose whether the full research project required more compute
+than the experiments reported in the paper (e.g., preliminary or failed experiments that
+didn’t make it into the paper).
+9. Code Of Ethics
+582
+Question: Does the research conducted in the paper conform, in every respect, with the
+NeurIPS Code of Ethics https://neurips.cc/public/EthicsGuidelines?
+583
+Answer: [Yes]
+584
+Justification: Yes, we have read and followed the NeurIPS Code of Ethics in every respect.
+585
+Guidelines:
+581
+586
+587
+588
+589
+590
+591
+• The answer NA means that the authors have not reviewed the NeurIPS Code of Ethics.
+• If the authors answer No, they should explain the special circumstances that require a
+deviation from the Code of Ethics.
+• The authors should make sure to preserve anonymity (e.g., if there is a special
+consideration due to laws or regulations in their jurisdiction).
+10. Broader Impacts
+593
+Question: Does the paper discuss both potential positive societal impacts and negative
+societal impacts of the work performed?
+594
+Answer: [NA]
+595
+Justification: Our method have no apparent societal impacts.
+596
+Guidelines:
+592
+597
+• The answer NA means that there is no societal impact of the work performed.
+16
+598
+599
+600
+601
+602
+603
+604
+605
+606
+607
+608
+609
+610
+611
+612
+613
+614
+615
+616
+617
+618
+619
+• If the authors answer NA or No, they should explain why their work has no societal
+impact or why the paper does not address societal impact.
+• Examples of negative societal impacts include potential malicious or unintended uses
+(e.g., disinformation, generating fake profiles, surveillance), fairness considerations
+(e.g., deployment of technologies that could make decisions that unfairly impact specific
+groups), privacy considerations, and security considerations.
+• The conference expects that many papers will be foundational research and not tied
+to particular applications, let alone deployments. However, if there is a direct path to
+any negative applications, the authors should point it out. For example, it is legitimate
+to point out that an improvement in the quality of generative models could be used to
+generate deepfakes for disinformation. On the other hand, it is not needed to point out
+that a generic algorithm for optimizing neural networks could enable people to train
+models that generate Deepfakes faster.
+• The authors should consider possible harms that could arise when the technology is
+being used as intended and functioning correctly, harms that could arise when the
+technology is being used as intended but gives incorrect results, and harms following
+from (intentional or unintentional) misuse of the technology.
+• If there are negative societal impacts, the authors could also discuss possible mitigation
+strategies (e.g., gated release of models, providing defenses in addition to attacks,
+mechanisms for monitoring misuse, mechanisms to monitor how a system learns from
+feedback over time, improving the efficiency and accessibility of ML).
+11. Safeguards
+622
+Question: Does the paper describe safeguards that have been put in place for responsible
+release of data or models that have a high risk for misuse (e.g., pretrained language models,
+image generators, or scraped datasets)?
+623
+Answer: [NA]
+624
+Justification: [TODO]
+625
+Guidelines: The paper poses no such risks.
+620
+621
+626
+627
+628
+629
+630
+631
+632
+633
+634
+635
+636
+• The answer NA means that the paper poses no such risks.
+• Released models that have a high risk for misuse or dual-use should be released with
+necessary safeguards to allow for controlled use of the model, for example by requiring
+that users adhere to usage guidelines or restrictions to access the model or implementing
+safety filters.
+• Datasets that have been scraped from the Internet could pose safety risks. The authors
+should describe how they avoided releasing unsafe images.
+• We recognize that providing effective safeguards is challenging, and many papers do
+not require this, but we encourage authors to take this into account and make a best
+faith effort.
+12. Licenses for existing assets
+639
+Question: Are the creators or original owners of assets (e.g., code, data, models), used in
+the paper, properly credited and are the license and terms of use explicitly mentioned and
+properly respected?
+640
+Answer: [Yes]
+641
+642
+Justification: The licenses for all assets used in our paper is mentioned and properly
+respected.
+643
+Guidelines:
+637
+638
+644
+645
+646
+647
+648
+649
+650
+• The answer NA means that the paper does not use existing assets.
+• The authors should cite the original paper that produced the code package or dataset.
+• The authors should state which version of the asset is used and, if possible, include a
+URL.
+• The name of the license (e.g., CC-BY 4.0) should be included for each asset.
+• For scraped data from a particular source (e.g., website), the copyright and terms of
+service of that source should be provided.
+17
+651
+652
+653
+654
+655
+656
+657
+658
+659
+• If assets are released, the license, copyright information, and terms of use in the
+package should be provided. For popular datasets, paperswithcode.com/datasets
+has curated licenses for some datasets. Their licensing guide can help determine the
+license of a dataset.
+• For existing datasets that are re-packaged, both the original license and the license of
+the derived asset (if it has changed) should be provided.
+• If this information is not available online, the authors are encouraged to reach out to
+the asset’s creators.
+13. New Assets
+661
+Question: Are new assets introduced in the paper well documented and is the documentation
+provided alongside the assets?
+662
+Answer: [NA]
+663
+Justification: The paper does not release new assets.
+664
+Guidelines:
+660
+665
+666
+667
+668
+669
+670
+671
+672
+673
+• The answer NA means that the paper does not release new assets.
+• Researchers should communicate the details of the dataset/code/model as part of their
+submissions via structured templates. This includes details about training, license,
+limitations, etc.
+• The paper should discuss whether and how consent was obtained from people whose
+asset is used.
+• At submission time, remember to anonymize your assets (if applicable). You can either
+create an anonymized URL or include an anonymized zip file.
+14. Crowdsourcing and Research with Human Subjects
+676
+Question: For crowdsourcing experiments and research with human subjects, does the paper
+include the full text of instructions given to participants and screenshots, if applicable, as
+well as details about compensation (if any)?
+677
+Answer: [NA]
+678
+Justification: Our paper does not involve crowdsourcing nor research with human subjects.
+679
+Guidelines:
+674
+675
+680
+681
+682
+683
+684
+685
+686
+687
+688
+689
+• The answer NA means that the paper does not involve crowdsourcing nor research with
+human subjects.
+• Including this information in the supplemental material is fine, but if the main
+contribution of the paper involves human subjects, then as much detail as possible
+should be included in the main paper.
+• According to the NeurIPS Code of Ethics, workers involved in data collection, curation,
+or other labor should be paid at least the minimum wage in the country of the data
+collector.
+15. Institutional Review Board (IRB) Approvals or Equivalent for Research with Human
+Subjects
+693
+Question: Does the paper describe potential risks incurred by study participants, whether
+such risks were disclosed to the subjects, and whether Institutional Review Board (IRB)
+approvals (or an equivalent approval/review based on the requirements of your country or
+institution) were obtained?
+694
+Answer: [NA]
+695
+Justification: Our paper does not involve crowdsourcing nor research with human subjects.
+696
+Guidelines:
+690
+691
+692
+697
+698
+699
+700
+701
+• The answer NA means that the paper does not involve crowdsourcing nor research with
+human subjects.
+• Depending on the country in which research is conducted, IRB approval (or equivalent)
+may be required for any human subjects research. If you obtained IRB approval, you
+should clearly state this in the paper.
+18
+702
+703
+704
+705
+706
+• We recognize that the procedures for this may vary significantly between institutions
+and locations, and we expect authors to adhere to the NeurIPS Code of Ethics and the
+guidelines for their institution.
+• For initial submissions, do not include any information that would break anonymity (if
+applicable), such as the institution conducting the review.
+19

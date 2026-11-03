@@ -1,0 +1,125 @@
+--- v002.md
++++ v003.md
+@@ -4,8 +4,8 @@
+ 
+ ## Overview
+-Direct volume ray casting is an image-order rendering technique that casts a ray through a 3D volume for every pixel, sampling scalar values, mapping them to RGBA via a transfer function, and compositing samples front-to-back using alpha blending to produce the final image [S2, S3]. It differs from [Isosurface and first-hit ray casting](20-isosurface-and-first-hit-ray-casting.md) by allowing all voxels to contribute to the final image rather than stopping at the first opaque surface [S1], and from [Distance-field ray marching](21-distance-field-ray-marching.md) by using uniform step sizes rather than distance-field-guided steps [G]. It replaces slice-stack methods by providing a solid volume appearance from any angle without edge-on gaps [S3].
++Direct volume ray casting is an image-order rendering technique that casts a ray through a 3D volume for every pixel, sampling scalar values, mapping them to RGBA via a transfer function, and compositing samples front-to-back using alpha blending to produce the final image [S2, S3]. It differs from [Isosurface and first-hit ray casting](20-isosurface-and-first-hit-ray-casting.md) by allowing all voxels to contribute to the final image rather than stopping at the first opaque surface [S5], and from [Distance-field ray marching](21-distance-field-ray-marching.md) by using uniform step sizes rather than distance-field-guided steps [G]. It replaces slice-stack methods by providing a solid volume appearance from any angle without edge-on gaps [S15].
+ 
+ ## Shared principles
+-The method relies on the volume rendering integral, discretized into a summation over sample points along a ray [S5]. The ray $r$ is parameterized by $\rho_r(\bar{\rho}) : \bar{R} \rightarrow \bar{R}^2$, entering the volume at $\bar{\rho} = 0$ and exiting at $\bar{\rho} = D$ [Volume Raycasting Discretization](831-volume-raycasting-discretization.md). The data model is sampled using $s(\bar{\rho})$ [Volume Raycasting Discretization](831-volume-raycasting-discretization.md).
++The method relies on the volume rendering integral, discretized into a summation over sample points along a ray [S3, S5]. The ray $r$ is parameterized by $r(t) = O + tD$, entering the volume at $t_{start}$ and exiting at $t_{end}$ [Volume Raycasting Discretization](831-volume-raycasting-discretization.md). The data model is sampled using $s(t)$ [Volume Raycasting Discretization](831-volume-raycasting-discretization.md).
+ 
+ The compositing is performed front-to-back [S2, S3, S5]. Let $C'_i$ be the accumulated color and $\alpha'_i$ be the accumulated opacity after sample $i$, with initial conditions $C'_0 = 0$ and $\alpha'_0 = 0$ [S2, S5]. For each sample $i$ along the ray:
+@@ -18,35 +18,59 @@
+ 5.  If $\alpha' \ge 1$ (or a specific threshold, typically 99%) [S2, S3], terminate the ray (early ray termination) [S2, S3, S4].
+ 
+-Rays are cast from the eyepoint, one for each pixel [S1, S4]. The volume is typically represented as a 3D texture [S4, S3]. Gradients for shading are calculated using a central difference operator [S1, S4]. To avoid normal discontinuities that cause visible rings on smooth surfaces, the gradient is computed using a two-voxel offset rather than a one-voxel offset [S1, S3]. Sampling is performed using trilinear interpolation [S1, S5]. A fixed random offset is applied to each ray's start position to prevent sample layers from appearing as bands [S3]. The final accumulated color is typically corrected with gamma 2.2 [S2].
++Rays are cast from the eyepoint, one for each pixel [S1, S4]. The volume is typically represented as a 3D texture [S4, S3]. Gradients for shading are calculated using a central difference operator [S1]. To avoid normal discontinuities that cause visible rings on smooth surfaces, the gradient is computed using a two-voxel offset rather than a one-voxel offset [S1]. Sampling is performed using trilinear interpolation [S1, S5]. A fixed random offset is applied to each ray's start position to prevent sample layers from appearing as bands [S3]. The final accumulated color is typically corrected with gamma 2.2 [S2].
+ 
+ ```python
++import random
++
++def vec3(x, y, z):
++    return [x, y, z]
++
++def pow_vec3(v, exponent):
++    return [v[0]**exponent, v[1]**exponent, v[2]**exponent]
++
++def compute_ray_exit(origin, direction, bounds):
++    # Slab intersection for axis-aligned box [G]
++    t0 = max((bounds[0][i] - origin[i]) / direction[i] if direction[i] != 0 else float('inf') for i in range(3))
++    t1 = min((bounds[1][i] - origin[i]) / direction[i] if direction[i] != 0 else float('inf') for i in range(3))
++    return max(t0, t1)
++
+ def direct_volume_raycast(volume_texture, camera, transfer_function, step_size=0.001, threshold=0.99):
+-    # Initialize output image
+-    image = zeros_like(camera.screen)
++    """
++    Renders a volume using fixed-step raycasting with front-to-back compositing.
++    """
++    h, w = camera.screen_height, camera.screen_width
++    # Initialize output image as a 2D array of vec3(0.0, 0.0, 0.0)
++    image = [[vec3(0.0, 0.0, 0.0) for _ in range(w)] for _ in range(h)]
+     
+-    for pixel in camera.screen:
+-        ray_origin, ray_direction = camera.cast_ray(pixel)
+-        accumulated_color = vec3(0.0)
+-        accumulated_opacity = 0.0
+-        
+-        # Ray initialization: fixed random offset to prevent banding [S3]
+-        t = random_float(0.0, step_size)
+-        
+-        while accumulated_opacity < threshold and t < ray_length:
+-            # Sample volume at current position using trilinear interpolation [S1, S5]
+-            scalar_value = volume_texture.sample_trilinear(ray_origin + t * ray_direction)
++    for y in range(h):
++        for x in range(w):
++            ray_origin, ray_direction = camera.cast_ray(x, y)
++            accumulated_color = vec3(0.0, 0.0, 0.0)
++            accumulated_opacity = 0.0
+             
+-            # Apply transfer function to get color and opacity [S2, S5]
+-            color, opacity = transfer_function(scalar_value)
++            # Ray initialization: fixed random offset to prevent banding [S3]
++            t = random.uniform(0.0, step_size)
+             
+-            # Front-to-back compositing [S2, S5]
+-            accumulated_color += (1.0 - accumulated_opacity) * opacity * color
+-            accumulated_opacity += (1.0 - accumulated_opacity) * opacity
++            # Compute ray exit distance from volume bounds [G]
++            t_end = compute_ray_exit(ray_origin, ray_direction, volume_bounds)
+             
+-            t += step_size
++            while accumulated_opacity < threshold and t < t_end:
++                # Sample volume at current position using trilinear interpolation [S1, S5]
++                scalar_value = volume_texture.sample_trilinear(ray_origin, t, ray_direction)
++                
++                # Apply transfer function to get color and opacity [S2, S5]
++                color, opacity = transfer_function(scalar_value)
++                
++                # Front-to-back compositing [S2, S5]
++                accumulated_color[0] += (1.0 - accumulated_opacity) * opacity * color[0]
++                accumulated_color[1] += (1.0 - accumulated_opacity) * opacity * color[1]
++                accumulated_color[2] += (1.0 - accumulated_opacity) * opacity * color[2]
++                accumulated_opacity += (1.0 - accumulated_opacity) * opacity
++                
++                t += step_size
++                
++            # Gamma correction [S2]
++            image[y][x] = pow_vec3(accumulated_color, 1.0/2.2)
+             
+-        # Gamma correction [S2]
+-        image[pixel] = pow(accumulated_color, vec3(1.0/2.2))
+-        
+     return image
+ ```
+@@ -66,15 +90,15 @@
+ Optimizes the reconstruction step using GPU linear filtering to reduce texture fetches.
+ 
+-### Distance Color Blending
+-A technique to enhance depth perception by dimming colors and shifting them towards a background color (often blue for aerial perspective) as they recede from the viewer [S6]. It uses an exponential function for non-linear progression [S6].
+-1.  Determine fraction of distance through volume $d_v$ for the sample [S6].
+-2.  Calculate blending factor $B = k_{ds} d_v^{k_{de}}$ [S6].
+-3.  Compute final color $c_d = (1 - B) c_v + B c_b$ [S6].
+-4.  Use $c_d$ as the final color [S6].
++### [Distance Color Blending](791-distance-color-blending.md)
++A technique to enhance depth perception by dimming colors and shifting them towards a background color (often blue for aerial perspective) as they recede from the viewer [791-distance-color-blending.md]. It uses an exponential function for non-linear progression [791-distance-color-blending.md].
++1. Determine fraction of distance through volume $d_v$ for the sample [791-distance-color-blending.md].
++2. Calculate blending factor $B = k_{ds} d_v^{k_{de}}$ [791-distance-color-blending.md].
++3. Compute final color $c_d = (1 - B) c_v + B c_b$ [791-distance-color-blending.md].
++4. Use $c_d$ as the final color [791-distance-color-blending.md].
+ 
+ Formula:
+ $$ c_d = (1 - k_{ds} d_v^{k_{de}}) c_v + k_{ds} d_v^{k_{de}} c_b $$
+-where $c_d$ is the depth-cued color, $c_v$ is the original voxel color, $c_b$ is the background color, $d_v$ is the fraction of distance through the volume, $k_{ds}$ controls the size/magnitude of the blending effect, and $k_{de}$ controls the rate of application (exponent) [S6].
+-Parameters: $c_b$ is the background color. If grey $(a,a,a)$, only intensity dimming occurs. If blue $(a,b,c)$ with $c>a,b$, a cool shift is introduced [S6].
++where $c_d$ is the depth-cued color, $c_v$ is the original voxel color, $c_b$ is the background color, $d_v$ is the fraction of distance through the volume, $k_{ds}$ controls the size/magnitude of the blending effect, and $k_{de}$ controls the rate of application (exponent) [791-distance-color-blending.md].
++Parameters: $c_b$ is the background color. If grey $(a,a,a)$, only intensity dimming occurs. If blue $(a,b,c)$ with $c>a,b$, a cool shift is introduced [791-distance-color-blending.md].
+ 
+ ## Background
+@@ -89,3 +113,4 @@
+ [S4] (PDF) GPU-Based Volume Rendering for Medical Imagery - ResearchGate, https://www.researchgate.net/publication/228912978_GPU-Based_Volume_Rendering_for_Medical_Imagery, fetched 2026-10-28
+ [S5] (PDF) Differentiable Direct Volume Rendering - ResearchGate, https://www.researchgate.net/publication/353510271_Differentiable_Direct_Volume_Rendering, fetched 2026-10-30 (unofficial)
+-[S6] Non-Photorealistic Rendering of Volume Models, https://userpages.cs.umbc.edu/ebert/npr/volillus.pdf, fetched 2026-10-27+[S6] Non-Photorealistic Rendering of Volume Models, https://userpages.cs.umbc.edu/ebert/npr/volillus.pdf, fetched 2026-10-27
++[S15] 3D: ray-cast volume rendering instead of a stack of slices, https://github.com/jamescarruthers/quick_dicom/pull/4, fetched 2026-10-27 (unofficial)

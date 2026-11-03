@@ -1,0 +1,462 @@
+Chapter 46. Improved GPU Sorting | NVIDIA Developer
+GPUGems
+GPUGems2
+GPUGems3
+GPU Gems 2
+GPU Gems 2 is now available, right here, online. You can purchase a beautifully printed version of this book, and others in the series, at a 30% discount courtesy of InformIT and Addison-Wesley.
+The CD content, including demos and content, is available on the web and for download.
+Chapter 46. Improved GPU
+Sorting
+Peter Kipfer
+Technische Universität München
+Rüdiger Westermann
+Technische Universität München
+Sorting is one of the most important algorithmic building blocks in computer science. Being able to efficiently
+sort large amounts of data is a critical operation. Although implementing sorting algorithms on the CPU is
+relatively straightforward—mostly a matter of choosing a particular sorting algorithm to use—sorting on the GPU
+is less easily implemented because the GPU is effectively a highly parallel single-instruction, multiple-data
+(SIMD) architecture. Given that the GPU can outperform the CPU both for memory-bound and compute-bound
+algorithms, finding ways to sort efficiently on the GPU is important. Furthermore, because reading back data
+from the GPU to the CPU to perform operations such as sorting is inefficient, sorting the data on the GPU is
+preferable.
+Buck and Purcell 2004 showed how the parallel bitonic merge sort algorithm could be used to sort data on the
+GPU. In this chapter, we show how to improve the efficiency of sorting on the GPU by making full use of the
+GPU's computational resources. We also demonstrate a sorting algorithm that does not destroy the ordering of
+nearly sorted arrays at intermediate steps of the algorithm. This can be useful for effects such as particle
+systems, where geometric objects need to be sorted according to viewer distance but small sorting errors can be
+tolerable temporarily in exchange for improved application response.
+46.1 Sorting Algorithms
+Sorting algorithms are among the most important building blocks of virtually every program. Computer graphics
+applications require visibility sorting for correctly rendering transparent objects and efficiently exploiting
+acceleration features such as the early-z test. In physics simulation, sorting is necessary for inserting the
+participating objects into spatial structures for collision detection.
+Sorting algorithms can be divided into two categories: data-driven ones and data-independent ones. In practice,
+the fastest algorithms are data-driven, which means that the step the algorithm takes depends on the value of
+the key currently under consideration. This may result in unexpected bad performance if the sequence to sort is
+already in order. The well-known Quicksort algorithm is one example. When sorting n items, it has
+O(n log(n)) complexity on average, which is provably optimal. But in the worst case,
+Quicksort has O(n 2) complexity, which is not acceptable. There are other sorting
+algorithms such as Heapsort that do not have this problem, but they exhibit more difficult data access patterns
+or require more comparison operations. Heapsort is most useful when you need only partially ordered lists (such
+as in a priority queue).
+The second category of algorithms, the data-independent ones, does not exhibit this discrepancy. As the
+algorithms do not change their processing according to the current key value, they always take the same
+processing path. This makes their operation sequence completely rigid, a fact that we can exploit to implement
+them on multiple processors, because the points at which communication must occur are known in advance. This
+feature is key when considering an implementation of sorting on the GPU, because the sorting program will run on
+the fragment processors, which cannot change their output location in memory based on input data values.
+46.2 A Simple First Approach
+Data-independent sorting algorithms can be represented as a sorting network, as shown in Figure 46-1. To study
+the general approach, let's look at a simple example. For simplicity, we assume that we are sorting a 1D array
+of keys. In the sorting network, each column is a series of compare operations that execute in parallel. We call
+this one pass of the sorting network. The input keys get sorted as they travel from left to right
+through the network. In this simple example, called odd-even transition sort, if the compare operation
+is less-than, as indicated by the direction of the arrows, small keys will move one row upward with
+each iteration, while large keys move downward. In the worst case, if the smallest key starts in position
+n, it will take n iterations to bring it all the way up to position 0. This sorting algorithm
+therefore has a complexity of O(n 2), which is not optimal.
+Figure 46-1 The Odd-Even Transition Sorting Network for Keys
+Implementation of this algorithm is easy, and it is easily parallelizable in nature. We render to two texture
+buffers in double-buffer mode. For each pass, we draw a full-size quad and execute a fragment program that
+fetches the key at its fragment's position, fetches the key at its neighbor's position from the source buffer,
+compares the two keys, and writes the result to the target buffer. Note that because we can write only one
+fragment at a time, comparing two keys involves processing two fragments; we perform a less-than
+comparison on the first and a greater-equal comparison on the second. The decision of which operation
+to perform can be computed with a modulo operation on the current row number. This also means that both
+fragments do two data (texture) fetches. This approach therefore needs twice the bandwidth of a CPU
+implementation that fetches the data once and then swap-writes the result according to the comparison result.
+46.3 Fast Sorting
+Although each pass of the simple network is very cheap, the number of passes to perform a complete sort will be
+too high to be acceptable in most (real-time) situations. Suppose we use the sorter within a particle engine to
+keep the particles in back-to-front order for correct transparent rendering with depth test turned on. We will
+run into serious performance problems with such an approach, because we will want to use a large number of
+particles (up to one million). Even with a faster sort, we might want to distribute the workload over several
+displayed frames, and we might even accept locally inexact ordering if it converges to the full sort within a
+short period of time.
+For such an application, what we would like to have is a fast yet smooth transition of the input into an
+ordered sequence. This will allow us to use intermediate results of the algorithm that converge to the correct
+sequence while we do more passes incrementally (Kolb et al. 2004). Figure 46-2 shows a sorting network that has
+the desired property: the odd-even merge sort (Sedgewick 1998). The idea is to sort all odd and all
+even keys separately and then merge them. Each step like this is called a stage of the sorting
+algorithm. The stages are then scaled and repeated for all powers of two until the whole field is merged. To
+sort the m keys of a stage, log(m) passes are needed. For sorting all n keys, we
+therefore need log(n) stages, resulting in an overall O(n log2(n)
++ log(n)) passes. This is more than the O(n log(n)) of Quicksort, but it is
+still optimal in the limit case, which is why odd-even merge sort is also called an optimal algorithm. Sorting
+one million keys therefore takes 210 passes, compared to one million passes for the simple first approach.
+Figure 46-2 The Odd-Even Merge Sorting Network for Keys
+46.3.1 Implementing Odd-Even Merge Sort
+We take the same approach as in the simple odd-even transition sort example shown earlier. The sorting
+algorithm is implemented in a fragment program. It is driven by two nested loops on the CPU that just transport
+stage, pass number, and some derived values via uniform parameters to the shader before drawing the quad. If we
+want to sort many items, we have to store them in a 2D texture. To sort the entire 2D field, the fragment
+program must convert the 1D array index into 2D texture coordinates. Listing 46-1 is GLSL code for the odd-even
+merge sort fragment shader.
+Example 46-1. The GLSL Fragment Program Implementing Odd-Even Merge Sort
+```
+uniform vec3 Param1;
+uniform vec3 Param2;
+uniform sampler2D Data;
+#define OwnPos gl_TexCoord[0]
+// contents of the uniform data fields
+#define TwoStage Param1.x
+#define Pass_mod_Stage Param1.y
+#define TwoStage_PmS_1 Param1.z
+#define Width Param2.x
+#define Height Param2.y
+#define Pass Param2.z
+void main(void)
+{
+  // get self
+  vec4 self = texture2D(Data, OwnPos.xy);
+  float i = floor(OwnPos.x * Width) + floor(OwnPos.y * Height) * Width;
+  // my position within the range to merge
+  float j = floor(mod(i, TwoStage));
+  float compare;
+  if ((j < Pass_mod_Stage) || (j > TwoStage_PmS_1))
+    // must copy->compare with self
+    compare = 0.0;
+  else
+    // must sort
+    if (mod((j + Pass_mod_Stage) / Pass, 2.0) < 1.0)
+      // we are on the left side->compare with partner on the right
+      compare = 1.0;
+    else
+      // we are on the right side->compare with partner on the left
+      compare = -1.0;
+  // get the partner
+  float adr = i + compare * Pass;
+  vec4 partner = texture2D(
+      Data, vec2(floor(mod(adr, Width)) / Width, floor(adr / Width) / Height));
+  // on the left it's a < operation; on the right it's a >= operation
+  gl_FragColor = (self.x * compare < partner.x * compare) ? self : partner;
+}
+```
+We now have an algorithmically efficient sorter. However, when taking a critical look at the code and how it
+uses the GPU resources, we notice some shortcomings that are typical of attempts to bring algorithms to the GPU.
+First, we still need twice the number of data fetches as the CPU. Second, the code seems to do many operations
+on uniform parameters. Can we pull them out of the fragment shader and save unnecessarily repeated computation?
+Third, the shader uses branching and thus may unnecessarily execute many operations even for values that only
+need to be copied. Also, what are the vertex unit and the rasterizer doing all the time? Almost nothing. Can we
+do better?
+46.4 Using All GPU Resources
+The GPU is optimized for very regular highly parallel access patterns. In the odd-even merge sort, some values
+get compared, while others just get copied. We would like to avoid this situation, because both cases take the
+same time to execute. We can do more comparisons per pass without penalty if we get rid of the copies. Overall,
+this will make the program even faster, because the determination of whether to copy or compare can be dropped.
+This is due to the network performing alternating odd-even accesses. In summary, we need a different sorting
+network.
+Figure 46-3 shows the sorting network for the bitonic merge sort algorithm (Batcher 1968), which
+builds both an ascending and a descending subsequence of keys (that is, a bitonic sequence) and then merges the
+two subsequences. Starting with n/2 two-item sequences, this continues until one fully sorted ascending
+sequence is left. This means we have to build log(n) bitonic sequences and merge them. The sorting
+network reflects this pattern, showing log(n) sorting stages, where the ith stage has to
+perform i passes. This results in a total complexity of O(n
+log2(n) + log(n)), which is the same as the odd-even merge sort. This is still not
+as fast as Quicksort, but remember that we do not have a bad worst-case complexity here.
+Figure 46-3 The Bitonic Merge Sorting Network for Keys
+The straightforward implementation would be to simply encode the stage and pass numbers in texture coordinates
+and have the fragment shader execute the "inner loop" of the sorting procedure (that is, one column of the
+network), as other work has shown (Purcell et al. 2003). However, from Figure 46-3, we note that this incurs
+only integer operations for computing the compare distance and change of compare operation. Moreover, these
+changes occur always at positions that are powers of two and do not straddle certain power-of-two boundaries.
+Unfortunately, integer operations that could efficiently detect these cases are not supported on current GPUs.
+They therefore have to be emulated by appropriate floating-point operations. Specifically, the operations that
+we need for the sorting procedure, such as modulo and bitwise operations, are possible only with floating-point
+arithmetic on the GPU. The straightforward implementation of this algorithm in a fragment shader will therefore
+not be as efficient as possible.
+We need a smarter solution, one that reduces the amount of work done in the fragment units and makes use of the
+vertex processors and the rasterizer (Kipfer et al. 2004). By rotating Figure 46-3 90 degrees to the right, we
+obtain Figure 46-4, for sorting a 1D array of n keys. Observe that in each pass, there are always
+groups of items that are treated alike (yellow or green boxes). This means that their sorting parameters are the
+same. Moreover, there is a strong relationship between neighboring groups: they sometimes have parameters with
+opposite values. These changes depend on the stage and pass and can be expressed as a simple modulo
+relationship. In sorting passes where there is more than one group, instead of drawing one single, big quad and
+computing the appropriate parameters in the fragment shader, we now draw several quads per sorting pass that
+exactly fit pairs of groups (one yellow and one green box) and together cover the entire buffer. On the right
+side of each quad, we perform the operation opposite that of the left side. To compute this flip, we observe
+that texture parameters specified in the vertex program are linearly interpolated by the rasterizer over the
+fragments. If we simply specify a flag value of +1 on the left side of the quad and a flag value of -1 on the
+right side, the fragment program can determine the current fragment's position within the quad by simply looking
+at the sign of the flag.
+Figure 46-4 Grouping Keys for the Bitonic Merge Sort
+The remaining two actions that have to be computed are to decide which compare operation to use and to locate
+the partner item to compare. Both can also be expressed using the interpolation technique. We first fix the
+compare operation to be a less-than operation. Multiplying the two key values with the interpolated
+flag value from the vertex shader now makes the operation implicitly flip to greater-equal halfway
+across the quad, which is exactly what we want. The same is done for the compare distance. Its absolute value is
+constant for the quad. We extract the sign of another interpolated flag value and multiply it with the absolute
+value in order to not scale the distance. The numeric precision of the interpolator on all current GPUs is high
+enough to prevent subpixel rounding problems.
+If we want to sort many items, we have to store them in a 2D texture. To sort an entire 2D field, we understand
+each row of the field to be one bitonic sequence of the whole field. We therefore perform the same sorting
+operations for every row. The quads we have introduced previously need simply to be extended vertically to cover
+all rows. Figure 46-5 shows the compare operation performed and the underlying quads that are rendered. If we
+now introduce another modulation to the compare operation according to the row number, we easily get rows
+completely sorted in alternating ascending/descending order. All that's left is to merge them in pairs, groups
+of 4, groups of 8, groups of 16, until the whole field is processed. Note that this uses the same sorting
+procedure along the columns that we used along the rows. We take the same approach for the columns as for the
+rows, using vertical compare distances (instead of horizontal) by simply transposing the quads that form each
+pass.
+Figure 46-5 Bitonic Merge Sort of Rows of a 2D Field
+The final optimization we make is to generalize the sorter to work on key/index pairs. Because the GPU
+processes four-vectors, we can pack two key/index pairs into one fragment. Because the last pass of each sorting
+stage only compares neighboring items (see Figure 46-3), this will happen inside the fragment, saving the second
+texture fetch. Packing two consecutive items also cuts the row width in half and consequently the overall number
+of fragments to process. We now do the same number of data fetches as a CPU implementation. Note that the
+concept of packing can also be used for the odd-even transition sort shader, but there it obviously helps only
+every other pass avoid the second data fetch.
+46.4.1 Implementing Bitonic Merge Sort
+For the sample application of sorting particles according to camera distance, we implement a small fragment
+program that computes the sorting keys (distance) and indices (particle numbers) and packs two of them into one
+RGBA texture value. Because we must touch every item to sort anyway, we take the opportunity and also perform
+the very first sorting pass while writing the packed representation. The first pass simply has to produce
+alternating ascending/descending pairs of keys—an operation that is internal to each fragment (see Figure
+46-3).
+All quads for one sorting pass are recorded in a display list. To sort the entire field, we just call the next
+list and swap the buffers until we're done. The display list records the vertices of the quads and two texture
+coordinates. The first texture coordinate holds all data that varies per quad (that is, the fragment position,
+the search direction, and the compare operation flag that is to be interpolated). The second texture coordinate
+holds data that is constant for the quad. Because we pack two consecutive items into one fragment, in the last
+pass of each stage, the fragment shader accesses the same items as the previous pass (compare Figure 46-4). We
+account for this by folding both passes into one, using a special shader for this case. Note that the fragment
+program does not need to perform a conversion from 1D indices to 2D texture coordinates, because this is done
+implicitly by the texture coordinates of the quads. Listing 46-2 shows the GLSL code for the special
+program.
+The program for passes greater than 1 along the rows skips the last compare operation in Listing 46-2 and
+returns the result variable. The program for passes along the columns differs just in building the
+adr variable: here x is 0 and y is computed according to the search direction.
+In summary, we need four programs to perform the sorting: The first one computes the key/index pairs and does
+the first sorting pass. The second performs row sorting for passes 0 and 1 of each stage simultaneously. The
+third does row sorting for all passes greater than 1 of each stage, and the fourth performs the column sort.
+When the sort is done, we have a permutation of the key/index pairs. The application can now reorder any data
+buffer according to the sorting criterion by simple indexed lookup.
+Example 46-2. GLSL Fragment Program Implementing the Combined Passes 1 and 0 for Row-wise Sorting of the
+Bitonic Merge Sort
+```
+uniform sampler2D PackedData;
+// contents of the texcoord data
+#define OwnPos gl_TexCoord[0].xy
+#define SearchDir gl_TexCoord[0].z
+#define CompOp gl_TexCoord[0].w
+#define Distance gl_TexCoord[1].x
+#define Stride gl_TexCoord[1].y
+#define Height gl_TexCoord[1].z
+#define HalfStrideMHalf gl_TexCoord[1].w
+void main(void)
+{
+  // get self
+  vec4 self = texture2D(PackedData, OwnPos);
+  // restore sign of search direction and assemble vector to partner
+  vec2 adr = vec2((SearchDir < 0.0) ? -Distance : Distance, 0.0);
+  // get the partner
+  vec4 partner = texture2D(PackedData, OwnPos + adr);
+  // switch ascending/descending sort for every other row
+  // by modifying comparison flag
+  float compare = CompOp * -(mod(floor(gl_TexCoord[0].y * Height), Stride) -
+                             HalfStrideMHalf);
+  // x and y are the keys of the two items
+  // -->multiply with comparison flag
+  vec4 keys = compare * vec4(self.x, self.y, partner.x, partner.y);
+  // compare the keys and store accordingly
+  // z and w are the indices
+  // -->just copy them accordingly
+  vec4 result;
+  result.xz = (keys.x < keys.z) ? self.xz : partner.xz;
+  result.yw = (keys.y < keys.w) ? self.yw : partner.yw;
+  // do pass 0
+  compare *= adr.x;
+  gl_FragColor =
+      (result.x * compare < result.y * compare) ? result : result.yxwz;
+}
+```
+46.5 Conclusion
+We have implemented the bitonic merge sort very efficiently on the GPU. Table 46-1 lists the number of passes
+required to sort various field sizes and the sorting performance obtained on a 425 MHz NVIDIA GeForce 6800 Ultra
+GPU. The CPU and the GPU sorted 16-bit key/16-bit index pairs.
+[1] Additional
+performance information can be found in Kipfer et al. 2004. Note that the CPU timings do not include the time
+that would be necessary for upload. A limitation of the bitonic merge sort is that we cannot distribute sorting
+passes over multiple displayed frames in order to make the system more responsive, because the intermediate
+stages of the sort do not maintain a globally ordered sequence. Because they always produce a bitonic pair (one
+ascending and one descending partial sequence), at least half of the field gets completely reordered in each
+stage.
+Table 46-1. Performance of the CPU and GPU Sorting Algorithms
+std::sort: 16-Bit Data, Pentium 4 3.0 GHz
+N
+Full Sorts/Sec
+Sorted Keys/Sec
+2562
+82.5
+5.4 M
+5122
+20.6
+5.4 M
+10242
+4.7
+5.0 M
+Odd-Even Merge Sort: 16-Bit Data, NVIDIA GeForce 6800 Ultra
+N
+Passes
+Full Sorts/Sec
+Sorted Keys/Sec
+2562
+136
+36.0
+2.4 M
+5122
+171
+7.8
+2.0 M
+10242
+210
+1.25
+1.3 M
+Bitonic Merge Sort: 16-Bit Float Data, NVIDIA GeForce 6800 Ultra
+N
+Passes
+Full Sorts/Sec
+Sorted Keys/Sec
+2562
+120
+90.07
+6.1 M
+5122
+153
+18.3
+4.8 M
+10242
+190
+3.6
+3.8 M
+The odd-even merge sort maintains the sort-while-drawing property, but the last pass of each stage performs a
+merge of the odd and the even items. This is not a good access pattern for the packing we have done. For this
+sorting algorithm, it thus does not make sense to combine the last two passes of each stage into a special
+program, as we did with the bitonic merge sort. The implementation therefore performs log(n) more
+passes than the bitonic merge sort. Although this results in inferior overall performance, the workload can be
+spread over several displayed frames.
+You now have two optimal sorting algorithms, each with its own advantages and drawbacks. Both, however, execute
+very efficiently on the GPU. So if your shiny new GPU algorithm requires sorting, there is no longer a need to
+return to the CPU. On the book's CD, you will find a small demo program implemented in C++, OpenGL, and GLSL
+that performs the GPU sorting techniques discussed in this chapter.
+46.6 References
+Batcher, Kenneth E. 1968. "Sorting Networks and Their Applications."
+Proceedings of AFIPS Spring Joint Computer Conference 32, pp. 307–314.
+Buck, Ian, and Tim Purcell. 2004. "A Toolkit for Computation on
+GPUs." In GPU Gems, edited by Randima Fernando, pp. 621–636. Addison-Wesley.
+Kipfer, Peter, Mark Segal, and Rüdiger Westermann. 2004. "UberFlow:
+A GPU-Based Particle Engine." In
+Proceedings of the SIGGRAPH/Eurographics Workshop on Graphics Hardware 2004, pp. 115–122.
+Kolb, A., L. Latta, and C. Rezk-Salama. 2004. "Hardware-Based
+Simulation and Collision Detection for Large Particle Systems." In
+Proceedings of the SIGGRAPH/Eurographics Workshop on Graphics Hardware 2004, pp. 123–131.
+Purcell, Tim, Craig Donner, Mike Cammarano, Henrik Wann Jensen, and
+Pat Hanrahan. 2003. "Photon Mapping on Programmable Graphics Hardware." In
+Proceedings of the SIGGRAPH/Eurographics Workshop on Graphics Hardware 2003, pp. 41–50.
+Sedgewick, Robert. 1998. Algorithms in C++, 3rd ed., Parts
+1–4. Addison-Wesley.
+Copyright
+Many of the designations used by manufacturers and sellers to distinguish their products are claimed as
+trademarks. Where those designations appear in this book, and Addison-Wesley was aware of a trademark claim, the
+designations have been printed with initial capital letters or in all capitals.
+The authors and publisher have taken care in the preparation of this book, but make no expressed or implied
+warranty of any kind and assume no responsibility for errors or omissions. No liability is assumed for
+incidental or consequential damages in connection with or arising out of the use of the information or programs
+contained herein.
+NVIDIA makes no warranty or representation that the techniques described herein are free from any Intellectual
+Property claims. The reader assumes all risk of any such claims based on his or her use of these techniques.
+The publisher offers excellent discounts on this book when ordered in quantity for bulk purchases or special
+sales, which may include electronic versions and/or custom covers and content particular to your business,
+training goals, marketing focus, and branding interests. For more information, please contact:
+U.S. Corporate and Government Sales
+(800) 382-3419
+corpsales@pearsontechgroup.com
+For sales outside of the U.S., please contact:
+International Sales
+international@pearsoned.com
+Visit Addison-Wesley on the Web: www.awprofessional.com
+Library of Congress Cataloging-in-Publication Data
+GPU gems 2 : programming techniques for high-performance graphics and general-purpose
+computation / edited by Matt Pharr ; Randima Fernando, series editor.
+p. cm.
+Includes bibliographical references and index.
+ISBN 0-321-33559-7 (hardcover : alk. paper)
+1. Computer graphics. 2. Real-time programming. I. Pharr, Matt. II. Fernando, Randima.
+T385.G688 2005
+006.66—dc22
+2004030181
+GeForce™ and NVIDIA Quadro® are trademarks or registered trademarks of NVIDIA Corporation.
+Nalu, Timbury, and Clear Sailing images © 2004 NVIDIA Corporation.
+mental images and mental ray are trademarks or registered trademarks of mental images, GmbH.
+Copyright © 2005 by NVIDIA Corporation.
+All rights reserved. No part of this publication may be reproduced, stored in a retrieval system, or
+transmitted, in any form, or by any means, electronic, mechanical, photocopying, recording, or otherwise,
+without the prior consent of the publisher. Printed in the United States of America. Published simultaneously in
+Canada.
+For information on obtaining permission for use of material from this work, please submit a written request
+to:
+Pearson Education, Inc.
+Rights and Contracts Department
+One Lake Street
+Upper Saddle River, NJ 07458
+Text printed in the United States on recycled paper at Quebecor World Taunton in Taunton, Massachusetts.
+Second printing, April 2005
+Dedication
+To everyone striving to make today's best computer graphics look primitive tomorrow
+Copyright
+Inside Back Cover
+Inside Front Cover
+Part I: Geometric Complexity
+Chapter 1. Toward Photorealism in Virtual Botany
+Chapter 2. Terrain Rendering Using GPU-Based Geometry Clipmaps
+Chapter 3. Inside Geometry Instancing
+Chapter 4. Segment Buffering
+Chapter 5. Optimizing Resource Management with Multistreaming
+Chapter 6. Hardware Occlusion Queries Made Useful
+Chapter 7. Adaptive Tessellation of Subdivision Surfaces with Displacement Mapping
+Chapter 8. Per-Pixel Displacement Mapping with Distance Functions
+Part II: Shading, Lighting, and Shadows
+Chapter 9. Deferred Shading in S.T.A.L.K.E.R.
+Chapter 10. Real-Time Computation of Dynamic Irradiance Environment Maps
+Chapter 11. Approximate Bidirectional Texture Functions
+Chapter 12. Tile-Based Texture Mapping
+Chapter 13. Implementing the mental images Phenomena Renderer on the GPU
+Chapter 14. Dynamic Ambient Occlusion and Indirect Lighting
+Chapter 15. Blueprint Rendering and "Sketchy Drawings"
+Chapter 16. Accurate Atmospheric Scattering
+Chapter 17. Efficient Soft-Edged Shadows Using Pixel Shader Branching
+Chapter 18. Using Vertex Texture Displacement for Realistic Water Rendering
+Chapter 19. Generic Refraction Simulation
+Part III: High-Quality Rendering
+Chapter 20. Fast Third-Order Texture Filtering
+Chapter 21. High-Quality Antialiased Rasterization
+Chapter 22. Fast Prefiltered Lines
+Chapter 23. Hair Animation and Rendering in the Nalu Demo
+Chapter 24. Using Lookup Tables to Accelerate Color Transformations
+Chapter 25. GPU Image Processing in Apple's Motion
+Chapter 26. Implementing Improved Perlin Noise
+Chapter 27. Advanced High-Quality Filtering
+Chapter 28. Mipmap-Level Measurement
+Part IV: General-Purpose Computation on GPUS: A Primer
+Chapter 29. Streaming Architectures and Technology Trends
+Chapter 30. The GeForce 6 Series GPU Architecture
+Chapter 31. Mapping Computational Concepts to GPUs
+Chapter 32. Taking the Plunge into GPU Computing
+Chapter 33. Implementing Efficient Parallel Data Structures on GPUs
+Chapter 34. GPU Flow-Control Idioms
+Chapter 35. GPU Program Optimization
+Chapter 36. Stream Reduction Operations for GPGPU Applications
+Part V: Image-Oriented Computing
+Chapter 37. Octree Textures on the GPU
+Chapter 38. High-Quality Global Illumination Rendering Using Rasterization
+Chapter 39. Global Illumination Using Progressive Refinement Radiosity
+Chapter 40. Computer Vision on the GPU
+Chapter 41. Deferred Filtering: Rendering from Difficult Data Formats
+Chapter 42. Conservative Rasterization
+Part VI: Simulation and Numerical Algorithms
+Chapter 43. GPU Computing for Protein Structure Prediction
+Chapter 44. A GPU Framework for Solving Systems of Linear Equations
+Chapter 45. Options Pricing on the GPU
+Chapter 46. Improved GPU Sorting
+Chapter 47. Flow Simulation with Complex Boundaries
+Chapter 48. Medical Image Reconstruction with the FFT

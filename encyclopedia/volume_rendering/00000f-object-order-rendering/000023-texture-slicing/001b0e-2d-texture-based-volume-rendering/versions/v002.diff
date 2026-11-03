@@ -1,0 +1,154 @@
+--- v001.md
++++ v002.md
+@@ -8,9 +8,9 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D scalar volume dataset (dimensions $D_x \times D_y \times D_z$), a camera view matrix (local-to-clip), and a transfer function (color/opacity mapping).
+-*   **Output:** A 2D image with accumulated color and opacity.
++*   **Input:** A 3D scalar volume dataset (dimensions $D_x \times D_y \times D_z$), a camera view matrix (local-to-clip), and a transfer function (color/opacity mapping) [S1, S2, S3].
++*   **Output:** A 2D image with accumulated color and opacity [S1, S3].
+ 
+ **Data Structures:**
+-1.  **2D Texture Stacks:** The volume is decomposed into three sets of 2D textures, one for each axis (X, Y, Z).
++1.  **2D Texture Stacks:** The volume is decomposed into three sets of 2D textures, one for each axis (X, Y, Z) [S3].
+     *   **Format:** `GL_LUMINANCE` (stores single-component opacity) [S3]. Note: `GL_INTENSITY` is unsupported on some legacy hardware [S3].
+     *   **Dimensions:** Power-of-two padding. If the original volume dimension is $D$, the texture width/height is the smallest power of two $P \ge D$ [S3].
+@@ -18,19 +18,15 @@
+     *   **Total Textures:** $N_{total} = D_x + D_y + D_z$ [S3].
+     *   **Memory:** $P^2 \times N_{total}$ bytes (assuming 1 byte per texel) [S3].
+-
+-2.  **Proxy Geometry:** Axis-aligned quadrilaterals (or triangle fans) representing the slices.
++2.  **Proxy Geometry:** Axis-aligned quadrilaterals (or triangle fans) representing the slices [S3].
+     *   **Texture Coordinates:** Computed in the vertex shader as an affine map of model coordinates (`vertexMC`), eliminating the need for a separate texture coordinate array [S2].
+     *   **Clipping:** Generated using a 256-case plane/cube clipping table to handle intersections with the volume bounding box [S2].
+-
+ 3.  **Transfer Function:** A 256x1 RGBA Look-Up Table (LUT) [S2].
+ 
+ **Numbered Steps:**
+-
+ 1.  **Preparation (Offline/Initialization):**
+     *   For each axis $A \in \{X, Y, Z\}$:
+-        *   Extract 2D slices perpendicular to $A$.
++        *   Extract 2D slices perpendicular to $A$ [S3].
+         *   Pad each slice to power-of-two dimensions ($P \times P$) [S3].
+         *   Upload to GPU as `GL_LUMINANCE` textures [S3].
+-
+ 2.  **Render Loop (Per Frame):**
+     *   **Axis Selection:** Calculate the angle between the volume's principal axes and the projection plane (or camera view direction). Select the axis $A_{best}$ with the smallest angle [S3].
+@@ -48,5 +44,5 @@
+         *   **Sub-cube crop:** Clip texture coordinates to valid volume bounds to prevent sampling outside the volume [S2].
+     *   **Rendering:**
+-        *   Bind the selected axis's texture stack.
++        *   Bind the selected axis's texture stack [S3].
+         *   Set blend state: `SRC_ALPHA / ONE_MINUS_SRC_ALPHA`, depth writing disabled [S2].
+         *   For each slice polygon (back-to-front):
+@@ -56,51 +52,65 @@
+ 
+ **Pseudocode:**
+-
+ ```python
+ def render_2d_texture_volume(volume_data, camera_matrix, transfer_function, max_planes, quality):
+-    """
+-    Renders a volume using 2D texture slicing.
+-    volume_data: 3D array (Dx, Dy, Dz)
+-    camera_matrix: 4x4 matrix (local-to-clip)
+-    transfer_function: 256x4 RGBA LUT
+-    max_planes: int, max slices allowed
+-    quality: float, scaling factor for slice count
+-    """
++    # Inputs: volume_data (Dx, Dy, Dz), camera_matrix (4x4 local-to-clip), 
++    # transfer_function (256x4 RGBA LUT), max_planes (int), quality (float)
++    # Assumes textures_X, textures_Y, textures_Z are pre-uploaded as P x P GL_LUMINANCE textures
+     
+-    # 1. Preparation (Assume textures are pre-uploaded)
+-    # Textures are stored in stacks: textures_X, textures_Y, textures_Z
+-    # Each texture is P x P (power of two)
++    # 1. Axis Selection
++    view_vector = normalize([-camera_matrix[0][2], -camera_matrix[1][2], -camera_matrix[2][2]])
++    axes = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
++    angles = [1.0 - dot(axis, view_vector) for axis in axes]
++    best_axis = ['X', 'Y', 'Z'][argmin(angles)]
+     
+-    # 2. Axis Selection
+-    # Calculate angles between volume axes and camera view vector
+-    angles = calculate_axis_angles(volume_axes, camera_matrix)
+-    best_axis = argmin(angles) # X, Y, or Z
++    # 2. Determine Slice Count
++    N = 2 * (10 + max_planes * (quality ** 3))
++    N = min(N, 10 * max_planes)
+     
+-    # 3. Determine Slice Count
+-    N = 2 * (10 + max_planes * (quality ** 3))
+-    N = min(N, 10 * max_planes) # Cap
++    # 3. Generate Slices
++    # Compute slice positions in legacy ratio space, then map to caller's box
++    slice_positions = [i / N for i in range(N)] # Legacy ratio space positions
++    polygons = []
++    for pos in slice_positions:
++        # Generate triangle-fan polygon using 256-case plane/cube clipping table [S2]
++        # Order polygons back-to-front relative to camera [S2]
++        polygons.append(generate_fan_polygon(pos, volume_box))
+     
+-    # 4. Generate Slices
+-    # Compute slice positions in legacy ratio space
+-    slice_positions = compute_slice_positions(camera_matrix, volume_box, N)
+-    
+-    # Generate geometry using 256-case clipping table
+-    # Returns list of polygons with back-to-front ordering
+-    polygons = generate_slice_polygons(slice_positions, volume_box)
+-    
+-    # 5. Render
++    # 4. Render
+     set_blend_mode(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)
+     set_depth_write(False)
+-    
+     bind_texture_stack(textures[best_axis])
+     
+     for poly in polygons:
+-        # Vertex Shader computes texcoords from vertexMC
+-        # Fragment Shader:
+-        #   lum = sample_2D_texture(poly.texcoords)
+-        #   color = lum * tissue_color
+-        #   blend(color, alpha=lum)
+-        
++        # Vertex shader computes texcoords as affine map of vertexMC [S2]
++        # Fragment shader samples 2D texture, multiplies luminance by tissue color [S3]
+         draw_polygon(poly)
++
++def dot(v1, v2):
++    return sum(a * b for a, b in zip(v1, v2))
++
++def normalize(v):
++    mag = dot(v, v) ** 0.5
++    return [x / mag for x in v]
++
++def argmin(lst):
++    return lst.index(min(lst))
++
++def generate_fan_polygon(plane_pos, volume_box):
++    # Uses 256-case plane/cube clipping table to intersect plane with box [S2]
++    # Returns a triangle-fan geometry with 3D texture coordinates
++    return {"vertices": [], "texcoords": [], "order": "back-to-front"}
++
++def set_blend_mode(src, dst):
++    pass # Configures hardware blending state
++
++def set_depth_write(enabled):
++    pass # Disables depth buffer writes
++
++def bind_texture_stack(stack):
++    pass # Binds the selected axis texture set to GPU
++
++def draw_polygon(poly):
++    pass # Rasterizes polygon, invoking vertex/fragment shaders
+ ```
+ 
+@@ -124,6 +134,6 @@
+ *   **Strengths:** Intuitive, easy to implement, leverages mature 2D texture hardware, efficient for interactivity [S1, S3].
+ *   **Limitations:** Severe artifacts from bilinear interpolation (banding), popping artifacts during axis switching, reduced accuracy compared to trilinear interpolation [S1, S3].
+-*   **When to Use:** Legacy hardware, simple interactive visualization where speed is prioritized over high-fidelity volume quality.
+-*   **When Not to Use:** High-quality offline rendering, scenes requiring precise trilinear interpolation, or when popping artifacts are unacceptable.
++*   **When to Use:** Legacy hardware, simple interactive visualization where speed is prioritized over high-fidelity volume quality [S1, S3].
++*   **When Not to Use:** High-quality offline rendering, scenes requiring precise trilinear interpolation, or when popping artifacts are unacceptable [S1, S3].
+ 
+ ## Background

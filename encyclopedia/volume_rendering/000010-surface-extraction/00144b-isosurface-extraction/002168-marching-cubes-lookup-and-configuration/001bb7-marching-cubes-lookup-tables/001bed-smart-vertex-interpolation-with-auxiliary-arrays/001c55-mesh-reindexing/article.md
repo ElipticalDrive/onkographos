@@ -1,0 +1,84 @@
+# Mesh Reindexing
+
+Also called: Global ID Assignment, Isosurface Point Deduplication, Vertex Deduplication via Mapping
+
+## Overview
+Mesh Reindexing deduplicates vertices generated during isosurface extraction by assigning contiguous global IDs to geometrically unique points and reconstructing the final vertex and index buffers [S1, S2]. It ensures that vertices shared by adjacent cells share the same index in the final output, preventing duplicate geometry [S1, S2].
+
+## How it works
+**Inputs:**
+- `vertexMapping`: A mapping from local edge/cell identifiers to vertex coordinates. In [S1], this is a `std::map<size_t, IdPoint>` where `IdPoint` contains `id`, `x`, `y`, `z` [S1]. In [S2], vertices are stored in a structure allowing lookup by coordinate string keys [S2].
+- `triangles`: A list of triangles, where each triangle references vertices by their local identifiers [S1].
+
+**Outputs:**
+- `vertices`: An array of unique vertex positions [S1].
+- `normals`: An array of unique vertex normals (if computed) [S1].
+- `faces`: An array of triangle indices referencing the unique `vertices` array [S1].
+
+**Data Structures:**
+- `PointIdMapping` (from [S1]): `std::map<size_t, IdPoint>`. Key is a unique edge ID (e.g., `edgeId(x, y, z, edgeIndex, xDim, yDim)`) [S1]. Value is `IdPoint` struct with `size_t id` and `float x, y, z` [S1].
+- `pointIndex` (from [S2]): A hash map or dictionary mapping a string representation of coordinates (e.g., `toString()`) to a global integer index [S2].
+- `isosurfacePoints` (from [S2]): A list/vector of unique vertex coordinates [S2].
+- `isosurfaceTriangles` (from [S2]): A list/vector of `vtkTriangle` or similar structures containing three global vertex indices [S2].
+
+**Steps:**
+1. **Initialize:** Prepare to iterate `vertexMapping` [S1]. Initialize `nextId = 0` [S1].
+2. **Iterate and Deduplicate:**
+   - For each entry in `vertexMapping` (or for each unique vertex coordinate):
+     - **Method A ([S1]):** Iterate through the `vertexMapping` map. Assign a sequential global ID to each vertex. `globalId = nextId++` [S1]. Store the mapping from the local key to `globalId` [S1].
+     - **Method B ([S2]):** Convert vertex coordinates to a string key using `toString()` [S2]. If `key` is not in `pointIndex`, insert the point into `isosurfacePoints` and store the new index in `pointIndex` [S2]. `nextId++` [S2]. Else, retrieve the existing index from `pointIndex[key]` [S2].
+3. **Update Triangle Indices:**
+   - For each triangle in the input list:
+     - Replace each local vertex identifier with its corresponding global ID from the mapping established in Step 2 [S1].
+     - In [S1], this involves looking up the global ID for each of the three points [S1].
+     - In [S2], create a `vtkTriangle` using the deduplicated vertex indices and insert it into `isosurfaceTriangles` [S2].
+4. **Construct Final Buffers:**
+   - Allocate a `Point` array for vertices of size `nextId` [S1].
+   - Copy coordinates from `vertexMapping` (or `isosurfacePoints`) into the final vertex array [S1].
+   - Allocate a `size_t` array for triangle indices of size `3 * faceCount` [S1].
+   - Copy the updated global point IDs from the triangles vector into the final face array [S1].
+   - [S1] also computes vertex normals by accumulating normals from adjacent triangles and normalizing them [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def mesh_reindex(vertex_mapping, triangles):
+    """
+    vertex_mapping: dict mapping local_id -> (x, y, z)
+    triangles: list of tuples (local_id_1, local_id_2, local_id_3)
+    Returns: (vertices, faces)
+    """
+    local_to_global = {}
+    next_id = 0
+    vertices = []
+    
+    # Step 2: Iterate and assign global IDs
+    for local_id in vertex_mapping:
+        local_to_global[local_id] = next_id
+        vertices.append(vertex_mapping[local_id])
+        next_id += 1
+        
+    # Step 3: Update triangle indices
+    faces = []
+    for tri in triangles:
+        global_ids = [local_to_global[local_id] for local_id in tri]
+        faces.append(global_ids)
+        
+    return vertices, faces
+```
+
+**Edge Cases and Pitfalls:**
+- **Degenerate Triangles:** Triangles with identical vertices (e.g., all three points are the same) should be filtered out before or during reindexing [S2].
+- **Precision:** Floating-point comparisons for deduplication must use a tolerance. Using string keys [S2] implies a specific formatting precision; slight floating-point errors may cause duplicate vertices to be treated as distinct if not handled with a tolerance-based hash or spatial grid [G].
+- **Boundary Conditions:** In [S1], specific edge cases at grid boundaries (`x == xDim - 1`, etc.) are handled explicitly to ensure all relevant edges are processed [S1].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Mesh Reindexing is a standard post-processing step in isosurface extraction algorithms like Marching Cubes [S1] and Marching Tetrahedra [S2]. It addresses the inherent redundancy in cell-based extraction methods where each cell independently computes vertices on shared edges [S1, S2]. The technique is used in custom implementations like those in ilastik [S1] and scientific visualization workflows involving VTK [S2].
+
+## Sources
+[S1] ilastik/marching_cubes, https://github.com/ilastik/marching_cubes, fetched 2026-10-26 (unofficial)
+[S2] andresbejarano/MarchingTetrahedra, https://github.com/andresbejarano/MarchingTetrahedra, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,234 @@
+Train, inspect, edit, automate, and export 3D Gaussian Splatting scenes from a single native application. - feat(rendering): add optional SteadySplats viewport resampling by lyehe · Pull Request #3728 · MrNeRF/LichtFeld-Studio
+
+feat(rendering): add optional SteadySplats viewport resampling by lyehe · Pull Request #3728 · MrNeRF/LichtFeld-Studio · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+lyehe
+commented
+Oct 22, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Add two optional 3DGS viewport modes: basic stochastic accumulation and SteadySplats spatial and temporal resampling. Alpha blending remains the default. The training loss is in #3726; the two PRs can be reviewed and merged on their own.
+The renderer follows SteadySplats, Algorithms 1-3 and section 4.3. It samples fragment visibility, keeps the nearest surviving radial depth, reuses four neighbors with a distinct K=4 occluder FIFO, and reprojects color history with soft rejection. It skips primitive depth sorting and retains the existing tile grouping operations.
+SteadySplats uses per-primitive spatiotemporal blue noise by default. Basic mode uses white noise as a reference. The 128 x 128 x 64 volume comes from the repository's reproducible offline generator. No third-party texture or SDK code is bundled.
+Each sample is shown at once. Refinement stops at 16 frames by default; the control permits up to 1024. The request, settings, and IPC proxy share one default. Camera and overlay redraws preserve history, including combined pivot-animation requests. Scene edits, mode changes, and resize reset history. Perspective background samples reproject as directions at infinity. Orthographic background samples bypass temporal reprojection.
+At rest, a separate running average follows the official web viewer. It averages spatial estimates for eight frames, then raw visibility samples, and blends into the temporal result with weight n/(n+8). This extends the paper's motion filter. Shared-memory neighborhood reads and reuse of unchanged projection/tile data reduce repeated work without changing sample weights or the full Catmull-Rom filter.
+The controls use the existing rendering panel, Python properties, MCP tools, saved settings, and all ten locale bundles. Support is limited to 3DGS without LOD. Depth views, exact-depth consumers, editing guides, offscreen previews, and exports retain alpha blending. Live viewport captures preserve stochastic history.
+Validation on Windows with CUDA 12.8 and RTX 5090:
+Application and focused test builds passed.
+17 Vulkan GPU tests passed, covering visibility, background mass, spatial weights, partial workgroups, temporal rejection, stationary averaging, and background reprojection under translation and rotation.
+37 viewport/settings/frame-ledger tests passed, including camera/overlay history retention and shared refinement defaults.
+118 Python checks passed, including STBN uniformity and spatial/temporal spectra.
+Property-view contracts match the upstream ROI-at-end field (Crop the trained model to the training crop box when training ends #3737), including its automatic placement in More Parameters.
+C++ formatting, diff checks, locale completeness, and UI string checks passed.
+Live bicycle checks covered camera movement, stationary refinement, and idle behavior. Linux runtime validation and broader scene/motion checks remain open.
+Basic history uses 32 bytes per pixel. SteadySplats history uses 160 bytes per pixel, including the stationary average, plus four bytes per Gaussian for radial depth keys. The shared STBN volume adds 1 MiB per renderer/device. Native HiGS remained faster during motion in the earlier local measurements; this PR makes no general frame-rate claim.
+feat(rendering): add optional SteadySplats viewport resampling
+cf238a2
+Copilot
+AI
+balanced review requested due to automatic review settings
+October 22, 2026 08:33
+Copilot
+AI
+reviewed
+Oct 22, 2026
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Copilot was unable to review this pull request because the user who requested the review has reached their quota limit.
+lyehe
+mentioned this pull request
+Oct 22, 2026
+feat(training): add optional SteadySplats color variance loss
+#3726
+Merged
+opsiclear-admin
+added 4 commits
+October 22, 2026 08:55
+perf(rendering): accelerate bounded stochastic refinement
+d16a553
+feat(rendering): add STBN and reuse stationary tile groups
+1059170
+fix(rendering): preserve native contracts in stochastic integration
+c87fefc
+fix(rendering): retain stationary background sample history
+12f3755
+lyehe
+marked this pull request as ready for review
+October 22, 2026 15:01
+opsiclear-admin
+and others
+added 13 commits
+October 22, 2026 17:38
+fix(rendering): stabilize SteadySplats history and refinement
+…
+2100be4
+```
+Preserve history across camera and overlay redraws, reproject perspective background samples, and match the web viewer stationary average. Stage neighborhood reads in shared memory and share the 16-frame default across request, settings, and IPC. Cover resets, projection, and viewport boundaries with focused tests.
+```
+fix(ci): align property contracts with current master
+db0f604
+Merge master d4bacb4 into review/3728
+…
+d0e4920
+```
+# Conflicts:
+#	tests/python/test_property_view.py
+```
+Drop formatter-only hunks from the render settings sources
+…
+d8ce2db
+```
+The member-pointer spacing in py_rendering.cpp and session_state.cpp came
+from a newer clang-format than CI's and is unrelated to the feature.
+```
+Report the shared refinement default in the Python property metadata
+…
+b8f2f31
+```
+prop_info('stochastic_max_frames')['default'] said 32 while the settings,
+request and IPC proxy default to DEFAULT_STOCHASTIC_REFINEMENT_FRAMES (16).
+```
+Free stochastic viewport memory when the mode is off
+…
+273a56c
+```
+Switching back to alpha blending kept every view's color history, occluder
+buffer, reuse weights and stationary average (160 B/pixel), the 1 MiB STBN
+volume and the separate sort-index copy (4 B/Gaussian) until the scene was
+released: at 920x948 the renderer stayed at 0.64 GiB instead of 0.49 GiB.
+
+Buffers a frame no longer needs are retired on the render timeline: basic
+mode drops the SteadySplats-only buffers, a non-stochastic view drops its
+history, and turning the setting off drops every view's history. With no
+history left, the STBN volume and the sort-index copy go too, and alpha
+blending aliases the indices onto the depth keys again.
+```
+Generate the STBN volume at build time instead of checking it in
+…
+e6d7bca
+```
+The 1 MiB volume is fully determined by its generator, which reproduces the
+checked-in file bit for bit (SHA-256 445ba27d...) in about 10 s. Build it as
+a host tool and let it write the C initializer, so the repository carries no
+binary blob, licence sidecar, asset README or .gitattributes rule, and CMake
+no longer hex-converts 1 MiB at configure time.
+
+The generator now checks the uniform byte histogram itself; the Python test
+that read the source-tree file goes. Spatial and temporal blue-noise quality
+stays covered end to end by the GPU sampling test.
+```
+Translate the transparency controls
+…
+3c82da2
+```
+The nine non-English locales carried the English strings.
+```
+Cut the stochastic rendering page down to what users need
+…
+850deae
+```
+The page described buffer layouts, cache invalidation and test targets. It
+now covers the modes, where to find them, Python and MCP, the limits, the
+paper's algorithm in brief and the memory cost; the color variance page links
+to it.
+```
+Stop compiling the ledger and settings tests twice
+…
+90daf13
+```
+stochastic_viewport_tests linked test_frame_demand_ledger.cpp and
+test_render_settings_defaults.cpp again although lichtfeld_frame_tests and
+lichtfeld_tests already run them.
+```
+Keep Catmull-Rom history fetches non-negative
+…
+835624d
+```
+The 16-tap filter undershoots next to a step: a black pixel beside white
+history resolved to -0.007 and fed the negative value back into the next
+frame. The authors' viewer clamps the fetch at zero; do the same. Neighborhood
+clipping stays off, as in the paper.
+```
+Document that meshes and camera frustums keep alpha blending
+…
+b94821d
+```
+Any mesh in the scene, shown camera frustums or the align tool's surface
+picking request exact depth for every frame, which turns the stochastic modes
+off without feedback.
+```
+Drop the test that only checks renderer contract throws
+353fd73
+MrNeRF
+commented
+Oct 25, 2026
+Copy link
+Copy Markdown
+Owner
+I read the paper and checked the code against it: Algorithms 1–3, the border rule, the STBN offsets and the viewer's at-rest average all match. Then I pushed fixes onto your branch, merged with current master:
+Memory: history, the STBN volume and the index copy are now freed when the mode is switched off. Before, ~0.15–0.34 GiB stayed resident until the scene was released.
+Python default: the property metadata now reports the shared refinement default (16; it said 32).
+STBN volume: generated at build time by the same generator, bit-identical, instead of checking in the 1 MiB binary.
+History reads: Catmull-Rom history fetches are clamped at zero, as in the viewer, so the −0.007 undershoot next to an edge no longer feeds back into history. There's a GPU test for it.
+Cleanup:
+the nine other locales are translated;
+the docs page is trimmed to what users need, and notes that meshes and camera frustums keep alpha blending;
+the ledger and settings tests are no longer compiled into a second binary;
+formatter-only hunks are gone;
+the contract-throw test is dropped.
+Measured at 1080p on an RTX 4080:
+Speed: at 5M Gaussians both modes are about 2× slower than alpha blending, since they skip HiGS and early termination. At 10M, stochastic is level with alpha or faster (19.7 vs 22.1 ms) and SteadySplats is within 10%.
+Reuse cache: saves 16–22% per refinement frame, so it stays.
+VRAM: SteadySplats adds ~330 MiB at 1080p.
+Hide details
+View details
+MrNeRF
+merged commit e5e2eca
+into
+MrNeRF:master
+Oct 25, 2026
+3 of 7 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+MrNeRF
+mentioned this pull request
+Oct 25, 2026
+Keep the STBN generator inside the I/O and error-debt gates
+#3820
+Merged
+This was referenced Oct 25, 2026
+2026-10-26｜LichtFeld SteadySplats、Rust 原生训练与 CT 二叉树 3DGS
+Shuang-su/gaussian-splatting-daily#83
+Closed
+2026-10-26｜LichtFeld SteadySplats、Rust 原生训练与 CT 二叉树 3DGS
+Shuang-su/gaussian-splatting-daily#84
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+4 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

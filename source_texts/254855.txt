@@ -1,0 +1,788 @@
+The Irreden Engine. Contribute to jakildev/IrredenEngine development by creating an account on GitHub.
+
+render: lighting fidelity polish — global sun, unified shadows, demos by jakildev · Pull Request #368 · jakildev/IrredenEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jakildev
+commented
+Apr 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+Replaces the engine's hardcoded per-face brightness multipliers with a Lambert + ambient shading model driven by a single global directional sun, and unifies shadows / lights across the voxel-pool and SDF rendering paths.
+Global sun. RenderManager owns sun direction / intensity / ambient. All voxel and SDF surfaces read the same FrameDataSun UBO each frame. Default sun direction (0.3, 0.2, -0.93) recovers the Z>X>Y face-shading order the old hardcoded multipliers gave us.
+All C_LightSource types implemented. POINT, SPOT, DIRECTIONAL previously did nothing; they now flow through COMPUTE_LIGHT_VOLUME and LIGHTING_TO_TRIXEL. DIRECTIONAL entities override the global sun for that canvas.
+Unified shadow paths with voxel-pool / SDF parity. Voxel pool uses occupancy-grid ray march; SDF uses analytic shape march. Both now exclude self-cells the same way: SDF via selfEntityId skipping in the analytic walk, voxel-pool via a per-entity bbox table built each frame in system_build_occupancy_grid and uploaded to a new OccupancyEntityBoundsBuffer SSBO. Top and side faces of voxel-pool cubes match the SDF cube's shading at all zoom levels (was self-shadowed at zoom ≥ 4 before this fix).
+Caster culling + alloc-free reuse. SDF caster collection frustum-culls + sun-cone-culls and reuses scratch vectors — no per-frame allocations, no CPU dirty-flag bookkeeping.
+Nine IRLighting* demos sharing one lighting_demo_scene.hpp scaffold (AO / SunShading / SunShadow / Emissive / Point / Spot / Directional / Combined / DebugOverlays). Each demo renders a voxel-pool row and an SDF row anchored to the floor so the two paths compare visually at every zoom.
++Z direction reconciled. AGENTS.md and the iso-basis docs now say +Z = down (gravity / iso-screen-down), validated against code (sdfCone, voxel-pool floor anchoring, Z_FACE outward normal (0, 0, -1)).
+Engine baseline updated. docs/agents/CLAUDE-BASELINE.md codifies a "no CPU-side dirty flags" preference — prefer culling, alloc-free reuse, and GPU-side computation.
+Voxel-pool / SDF parity (latest commit 72ac1a4)
+Before — voxel-pool cube (left) self-shadows on top + side faces; SDF cube (right) is clean:
+After — both cubes now match. Faces shade uniformly per-axis and floor shadows project identically:
+Follow-ups (already filed)
+Screen-space sun shadow map (O(1) lookup; replaces occupancy + analytic march) #358 — Screen-space sun shadow map (O(1) lookup). Lead follow-up. Would replace both the occupancy grid and the analytic SDF march with a single sun-aligned depth bake driven by the existing trixelDistances map. Full design at docs/design/screen-space-sun-shadow-map.md.
+Camera-anchored occupancy + light-volume grids #360 Camera-anchored occupancy + light-volume grids
+Multi-canvas occupancy SSBO collision (latent corruption) #361 Multi-canvas occupancy SSBO collision (latent corruption)
+Light-volume vs occupancy extent mismatch (silent edge clamping) #362 Light-volume vs occupancy extent mismatch
+Plumb SDF occlusion into point/spot light line-of-sight #364 Plumb SDF occlusion into point/spot line-of-sight
+HDR / tonemap / exposure / sky-term lighting pipeline #366 HDR / tonemap / exposure / sky-term pipeline
+render: unify voxel-pool and SDF rendering surfaces #369 Unify voxel-pool and SDF rendering surfaces — captures the parity drift this PR patches over (per-entity bbox is a focused workaround; long-term both paths flow through one shadow-casting interface).
+Test plan
+IrredenEngineTest: 348/348 green (adds GPUOccupancyEntityBoundsLayout, frame_data_sun_layout_test, light_volume_test, sun_direction_test, sun_lighting_test, sdf_test).
+All nine IRLighting* demos build and render correctly at zoom 1, 2, 4 with and without camera offset.
+IRLightingSunShadow --auto-screenshot shows voxel-pool / SDF cube parity at zoom 2 and 4 — see screenshots above.
+IRLightingSunShadow --debug-overlay shadow confirms voxel-pool tops are lit (black) and away-facing sides shadowed (magenta) at all zoom levels.
+IRLightingSunShading (sun shading without shadow ray) shows correct Z>X>Y face brightness order.
+IRLightingDirectional visibly differs from the default sun (override fields wired through DemoConfig).
+Cross-host smoke (Metal): demos build and render on macOS via cmake --preset macos-debug. (Authored on macOS, so this side is covered.)
+Cross-host smoke (Linux/OpenGL): demos build and render on WSL Ubuntu via cmake --preset linux-debug.
+Notes for reviewer
+The voxel-pool self-shadow fix went through two iterations. The earlier face-derived pos3D shift (pos3D.z -= 0.5 for Z, pos3D.x += 0.5 for X, etc.) papered over the most common case but rounded back into the surface voxel for some sun-direction signs at zoom ≥ 4. Replaced with explicit per-entity bbox exclusion that mirrors the analytic path's selfEntityId skipping. The pos3D shift is gone — both paths now use the same reconstructed pos3D plus one sunDir step as the ray origin.
+BUILD_OCCUPANCY_GRID now writes a second SSBO (OccupancyEntityBoundsBuffer, slot 4) alongside the occupancy bitfield. Sized for 256 voxel-pool entities; bump the constant if a creation hits the assert.
+BUILD_OCCUPANCY_GRID no longer reads C_ShapeDescriptor — only C_VoxelPool. Shape descriptors are shadow-tested via the analytic shapeCasters[] SSBO instead.
+creations/demos/lighting/ is the new home for these demos; creations/CMakelists.txt now adds it. (The existing typo in that filename — lowercase L — predates this PR.)
+The faceNormal() helper used in c_lighting_to_trixel.glsl could be extracted into ir_iso_common.glsl as a tiny follow-up; left inline here to keep PR scope tight.
+🤖 Generated with Claude Code
+Made with Cursor
+render: lighting fidelity polish — global sun, unified shadows, demos
+…
+45e0d67
+```
+Replaces the engine's hardcoded per-face brightness multipliers with a
+real Lambert + ambient shading model driven by a single global
+directional sun (RenderManager). Every voxel and SDF surface now reads
+the same `FrameDataSun` UBO each frame, so per-face shading order
+(Z > X > Y) is recovered via a tuned default sun direction
+(0.3, 0.2, -0.93) instead of baked color shifts.
+
+Lighting types are unified end-to-end. `C_LightSource{POINT, SPOT,
+DIRECTIONAL}` are wired through `COMPUTE_LIGHT_VOLUME` and
+`LIGHTING_TO_TRIXEL`; previously only EMISSIVE was implemented.
+DIRECTIONAL entities override the global sun for that canvas, with
+defaults that match the global so creations that don't customize see
+no visible change.
+
+Shadows handle voxel-pool and SDF surfaces consistently:
+
+- Voxel pool: occupancy-grid ray march in `c_compute_sun_shadow.glsl`,
+  rebuilt each frame from `C_VoxelPool` only (shape descriptors no
+  longer pollute the grid).
+- SDF: analytic shadow march against `shapeCasters[]`, fed by a CPU
+  collector that frustum-culls + sun-cone-culls casters and reuses
+  scratch vectors alloc-free.
+- Both paths share the same `pos3D` reconstruction, with a 0.5-voxel
+  shift along the face's outward normal so subdivision-mode
+  sub-pixel offsets on X / Y faces don't self-shadow against the
+  surface voxel itself (the bug that made voxel-pool tops dark at
+  zoom ≥ 4).
+
+Adds nine `IRLighting*` demos sharing one `lighting_demo_scene.hpp`
+scaffold (AO, sun shading, sun shadow, emissive, point, spot,
+directional, combined, debug overlays). Each demo renders a row of
+voxel-pool shapes and a row of matching SDF shapes anchored to the
+floor, so the two paths can be compared visually side-by-side at
+every zoom level.
+
+Reconciles `AGENTS.md`'s +Z convention with code reality: +Z is
+**down** (gravity / iso-screen-down), not up. Validated empirically
+against `sdfCone` orientation, voxel-pool floor anchoring, and
+`Z_FACE` outward-normal `(0, 0, -1)` in the lighting shader.
+
+Codifies a "no CPU-side dirty flags" preference in
+`docs/agents/CLAUDE-BASELINE.md`: prefer culling, alloc-free reuse,
+and GPU-side computation over per-frame dirty bookkeeping. The new
+shadow-caster collector and occupancy-grid build follow this rule.
+
+Tests: 347/347 green. Adds `frame_data_sun_layout_test`,
+`light_volume_test`, `sun_direction_test`, `sun_lighting_test`,
+`sdf_test`. Extracts SDF helpers into `engine/math/.../math/sdf.hpp`
+so demos and the shadow shader's CPU-side caster collection share
+one canonical evaluation path.
+
+Follow-up captured: `docs/design/screen-space-sun-shadow-map.md`
+proposes an O(1) screen-space shadow map that would replace both the
+occupancy grid + the analytic SDF march with a single sun-aligned
+depth bake. Filed as the lead follow-up issue (#358) along with the
+companion lighting work (#360–#366).
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+Made-with: Cursor
+```
+jakildev
+added
+the
+fleet:authored-on-macos
+PR was authored and smoke-tested on macOS Metal backend
+label
+Apr 28, 2026
+jakildev
+commented
+Apr 28, 2026
+View reviewed changes
+Comment thread
+engine/math/include/irreden/math/sdf.hpp
+namespace IRMath::SDF {
+// Mirrors IRRender::ShapeType values without depending on render headers.
+enum class ShapeType : std::uint32_t {
+jakildev
+Apr 28, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Does this just mean that the renderer should import the types from here?
+Comment thread
+engine/prefabs/irreden/render/systems/system_compute_light_volume.hpp
+Outdated
+const vec3 step = vec3(delta) / static_cast<float>(steps);
+for (int i = 1; i < steps; ++i) {
+const vec3 p = origin + step * static_cast<float>(i);
+const ivec3 cell = ivec3(glm::round(p));
+jakildev
+Apr 28, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Code smell here of using GLM outside of math library. There should be an IRMath wrapper. We need to codify this rule
+Comment thread
+engine/prefabs/irreden/render/systems/system_compute_light_volume.hpp
+Outdated
+}
+const float invRadius = 1.0f / static_cast<float>(radius);
+const int xMin = std::max(originVoxel.x - radius, -kLightVolumeHalfExtent);
+jakildev
+Apr 28, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Probably should use IRMath for min and max as well, which would have wrappers for glm, not std
+Comment thread
+engine/prefabs/irreden/render/systems/system_compute_light_volume.hpp
+Outdated
+const float halfAngleDeg = std::clamp(coneAngleDeg, 0.0f, 180.0f) * 0.5f;
+const float radians = halfAngleDeg * 0.01745329251994329577f;
+const float minDot = std::cos(radians);
+return glm::dot(toTarget / distance, coneDir) >= minDot;
+jakildev
+Apr 28, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+glm here. Ill stop marking, but do an audit of all occurances
+Comment thread
+engine/render/src/shaders/c_compute_sun_shadow.glsl
+Outdated
+return ((bits >> (flat & 31u)) & 1u) == 1u;
+}
+float sdfBox(vec3 p, vec3 halfExtents) {
+jakildev
+Apr 28, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Is there any way lall this sdf logic has crossover with the shape renderer, and we can move into common functionality?
+render: fix voxel-pool self-shadow via per-entity bbox exclusion
+…
+72ac1a4
+```
+Voxel-pool entities populate the occupancy grid with their own voxels,
+so the sun-shadow occupancy march was treating the surface voxel as
+its own occluder — top and side faces of a voxel-pool cube ended up
+self-shadowed at higher zoom levels, while the SDF cube next to it
+rendered cleanly. Earlier face-aware origin shifts patched the most
+common case but rounded back into the surface voxel for some sun
+directions, so the fix is to mirror the analytic path's
+selfEntityId-based exclusion instead of fighting the rounding.
+
+`system_build_occupancy_grid` now reads each contributing voxel's
+owner entity from `C_VoxelPool::getEntityIds()` (already populated by
+`system_update_voxel_set_children`) and accumulates a per-entity
+bbox in world-cell space. The packed list is uploaded to a new
+`OccupancyEntityBoundsBuffer` SSBO at slot 4, and the count is
+forwarded to the shadow shader through `FrameDataSun`. The shader
+linear-scans the (small) list to find the surface entity's bbox and
+skips occupancy hits that fall inside it during the march. The
+analytic SDF path is unchanged.
+
+Removed the now-unused face-derived `pos3D` shift in both the GLSL
+and MSL shaders so SDF and voxel-pool surfaces use the same ray
+origin (the reconstructed pos3D plus one sun-direction step).
+
+Layout test for `FrameDataSun` updated for the new
+`occupancyBoundsCount_` slot, and a new layout test pins
+`GPUOccupancyEntityBounds` at 48 bytes / std430 packing. All 348
+tests pass.
+
+Verified visually with `IRLightingSunShadow --auto-screenshot` at
+zoom 2 and 4: the voxel-pool cube (left) and the SDF cube (right)
+now have matching face shading and matching floor shadows. See
+`docs/pr-screenshots/claude-lighting-fidelity-polish/voxel-sdf-parity/`.
+
+Made-with: Cursor
+```
+This was referenced Apr 28, 2026
+render: unify voxel-pool and SDF rendering surfaces
+#369
+Closed
+render: SDF shapes don't self-shadow on visible faces
+#370
+Closed
+render: voxel-pool side faces show blocky AO / shading artifacts at high zoom
+#371
+Closed
+render: irmath round-half-up + sdf cascade/sun-orbit demos
+…
+e03b74b
+```
+Adds `IRMath::roundHalfUp` / `roundVec3HalfUp` (and GLSL/Metal mirrors
+in `ir_iso_common`) so every CPU↔GPU voxel-cell handshake — occupancy
+grid, AO surface voxel, sun-shadow ray-march cell — uses
+`floor(x + 0.5)` instead of `std::lround` (round-away-from-zero) or
+GLSL's implementation-defined `round()`. The previous mismatch was
+the root cause of the floor-shadow seam visible in the lighting
+demos at half-integer Z.
+
+Audits the touched render systems and shaders against the new
+"all math primitives flow through IRMath" baseline rule (codified in
+`docs/agents/CLAUDE-BASELINE.md`): replaces direct `glm::*` /
+`std::min/max/clamp/abs/cos/lround/sin` calls in
+`system_compute_light_volume`, `system_compute_sun_shadow`, and
+`system_shapes_to_trixel` with `IRMath` wrappers, and extends
+`IRMath` with `cos` / `sqrt` shims to cover the remaining gap.
+`IRMath::SDF::ShapeType` is now the canonical engine enum;
+`IRRender::ShapeType` becomes a `using` alias so the math-side SDF
+helpers and the renderer can never drift apart.
+
+Pulls SDF primitive evaluators (`sdfBox`, `sdfSphere`,
+`sdfCylinder`, `sdfEllipsoid`, `sdfTaperedBox`, `sdfCone`,
+`sdfTorus`, `sdfWedge`, `sdfCurvedPanel`) and the `evaluateSDF`
+dispatcher into shared `ir_sdf_common.{glsl,metal}` headers so the
+shape rasterizer and the sun-shadow analytic march compute byte-
+identical distances. Net delete: ~210 lines of duplicated shader
+math.
+
+Adds two new lighting demos that exercise the SDF-only path which
+the in-flight follow-up tickets will iterate on:
+- `IRLightingSdfCascade`: a 5x5 grid of varied SDF primitives plus
+  pillars, all on an SDF floor — gives a single scene to validate
+  SDF-on-SDF shadow casting density and self-shadow behavior.
+- `IRLightingSunOrbit`: animates the global sun direction so the
+  shadows sweep through every quadrant continuously, useful for
+  catching direction-dependent regressions.
+
+Both demos go through the same `lighting_demo_scene` config,
+extended with optional `geometryFn_` / `tickFn_` callbacks so future
+demos can plug in custom geometry or per-frame logic without
+duplicating the scaffold.
+
+Files four user-supplied artifact screenshots (#370–#374 capture the
+remaining lighting issues those tickets target) under
+`docs/pr-screenshots/claude-lighting-fidelity-polish/` so the PR
+trail keeps the visual context after the local screenshot dirs are
+cleaned.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+Made-with: Cursor
+```
+jakildev
+commented
+Apr 28, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+New commit pushed: `e03b74b` — addresses the latest review pass + new visual feedback.
+What's in this push
+Round-half-up via IRMath (review nit + new feedback)
+New `IRMath::roundHalfUp(float)` and `IRMath::roundVec3HalfUp(vec3)` in `engine/math/include/irreden/ir_math.hpp` implement `floor(x + 0.5)` with a doc-comment explaining the CPU↔GPU rounding contract.
+GLSL/Metal mirrors live in `ir_iso_common.{glsl,metal}`.
+All call sites switched: `system_build_occupancy_grid`, `c_compute_voxel_ao.{glsl,metal}`, `c_compute_sun_shadow.{glsl,metal}`.
+`IRMath` wrapper audit (review feedback)
+Replaced direct `glm::*` and `std::min/max/clamp/abs/cos/lround/sin` in `system_compute_light_volume`, `system_compute_sun_shadow`, `system_shapes_to_trixel` with `IRMath` equivalents.
+Added `IRMath::cos` / `IRMath::sqrt` to fill remaining gaps.
+New rule codified in `docs/agents/CLAUDE-BASELINE.md`: math primitives must flow through `IRMath` outside the math library.
+`ShapeType` canonicalization + shared SDF logic (review feedback)
+`IRMath::SDF::ShapeType` is now the canonical enum; `IRRender::ShapeType` is a `using` alias.
+New shared shader headers `engine/render/src/shaders/ir_sdf_common.glsl` and `metal/ir_sdf_common.metal` host the SDF primitive evaluators and `evaluateSDF` dispatcher.
+`c_shapes_to_trixel.{glsl,metal}` and `c_compute_sun_shadow.{glsl,metal}` now `#include` them and dropped ~210 lines of duplicated shader math.
+Two new lighting demos (new visual feedback request)
+`IRLightingSdfCascade`: 5x5 grid of varied SDF primitives + pillars on an SDF floor — exercises SDF-on-SDF shadow casting in isolation from voxel-pool entities.
+`IRLightingSunOrbit`: animated sun direction so shadows sweep through every quadrant continuously — useful for catching direction-dependent regressions.
+Both go through `lighting_demo_scene`, extended with optional `geometryFn_` / `tickFn_` callbacks.
+Artifact tickets filed
+The four user-supplied screenshots (`screenshot_000006.png` – `screenshot_000009.png`) are now committed under `docs/pr-screenshots/claude-lighting-fidelity-polish/lighting-artifacts/` so the visual context survives after local screenshot dirs are cleaned. New issues opened to track the remaining lighting work that this PR does not fix:
+render: SDF shapes don't self-shadow on visible faces #370 — SDF shapes don't self-shadow on visible faces
+render: voxel-pool side faces show blocky AO / shading artifacts at high zoom #371 — Voxel-pool side faces show blocky AO artifacts at high zoom
+render: SDF analytic shadow march produces concentric ring artifacts on smooth shapes #372 — SDF analytic shadow march produces concentric ring artifacts on smooth shapes
+render: SDF shadow caster wraps onto unrelated faces of voxel-pool receivers #373 — SDF shadow caster wraps onto unrelated faces of voxel-pool receivers
+render: emissive / point / spot lights aren't subdivided per-trixel #374 — Emissive / point / spot lights aren't subdivided per-trixel
+Verification
+`cmake --build build --target IRLightingDemos IrredenEngineTest IRShapeDebug` clean on macOS.
+`./build/IrredenEngineTest` — 348/348 pass.
+Live screenshot capture isn't available in the current sandbox (no display monitor); the linked tickets cover what the user-provided screenshots show.
+render: AO toggle, AO parity with SDFs, elevation-orbit demo
+…
+95a8328
+```
+Adds a toggleable Ambient Occlusion path so AO can be isolated when
+diagnosing other lighting bugs and brings AO into parity between
+voxel-pool and SDF entities. Previously AO read only voxel-pool cells
+out of the occupancy grid, so SDF cubes / spheres / cones never
+darkened crease cells against neighbors and looked like they were
+floating compared to the voxel-pool row.
+
+- `IRRender::setAOEnabled` / `getAOEnabled` API (+ render-manager state).
+- `FrameDataSun::aoEnabled_` field repurposes one of the existing
+  std140 padding ints, so the UBO size and offsets are unchanged
+  (offsetof check added to frame_data_sun_layout_test).
+- `c_compute_voxel_ao.{glsl,metal}` short-circuit to a constant 1.0
+  (no darkening) when the flag is 0; lighting then treats AO as a
+  no-op without rebinding textures.
+- `system_build_occupancy_grid` rasterizes `C_ShapeDescriptor` SDFs
+  into the same 256³ bitfield voxel-pool entities populate, using the
+  same alpha / visibility / `C_LightBlocker.castsShadow_` filter the
+  analytic shadow caster collection uses, so AO and the DDA shadow
+  march see one unified set of occluders.
+- Lighting demos pick the flag up via `--no-ao` / `--ao-off` CLI args;
+  default scene config flips it through `IRRender::setAOEnabled`.
+
+Also adds `IRLightingSunElevationOrbit` — the azimuth-orbit demo holds
+elevation fixed and only validates XY-face shading and shadow azimuth,
+so the Z-face lambert dot and vertical-shadow-projection regressions
+went unnoticed. The elevation-orbit demo holds azimuth fixed and
+animates elevation between ~5° and ~85° so Z-face brightness and
+shadow length both vary continuously.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+Made-with: Cursor
+```
+jakildev
+mentioned this pull request
+Apr 29, 2026
+Screen-space sun shadow map (O(1) lookup; replaces occupancy + analytic march)
+#358
+Closed
+jakildev
+commented
+Apr 30, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review — render: lighting fidelity polish — global sun, unified shadows, demos
+Verdict: approve (Opus recheck required — see below)
+Praise
+The voxel-pool self-shadow fix via OccupancyEntityBounds SSBO mirrors the analytic path's selfEntityId exclusion cleanly. The approach avoids per-face heuristics (pos3D.z -= 0.5) that broke at zoom ≥ 4 for some sun-direction signs.
+ir_sdf_common.glsl / ir_sdf_common.metal as a single authoritative source for the SDF dispatch eliminates the ~210-line duplication between c_shapes_to_trixel and c_compute_sun_shadow. The comment block enumerating the four update sites for new shapes is the right forward guide.
+FrameDataSun has a static_assert(sizeof == 48) — the size is correct (16+4+4+4+4+4+4+4+4 = 48 bytes). GPUOccupancyEntityBounds similarly asserts 48 bytes. Both match their shader-side std140/std430 counterparts.
+Lighting invariant #1 (grid-build iterates full pool, not the render-culled subset) is compliant: system_build_occupancy_grid.hpp does not include cull_viewport_state.hpp and does not call visibleIsoViewport. The SDF rasterization inner loop is also camera-independent.
+348/348 tests pass with six new test suites (GPUOccupancyEntityBoundsLayout, frame_data_sun_layout_test, light_volume_test, sun_direction_test, sun_lighting_test, sdf_test).
+Needs Opus to verify
+1. system_compute_sun_shadow.hpp:313-328 — beginTick vs endTick ordering for frameData update.
+The third lambda passed to createSystem<...>() at line 313 updates frameData.sunDirection_ and calls detail::resolveSun(). The per-entity tick at line 254 reads frameData.sunDirection_. If the third arg is the endTick (fires AFTER per-entity ticks), then on each frame the per-entity tick reads sun data from the PREVIOUS frame's endTick — a one-frame lag. If it's the beginTick, the order is correct. Sonnet cannot resolve this from reading the system CLAUDE.md alone. Opus should confirm the createSystem API wiring.
+2. system_build_occupancy_grid.hpp:61-64 + system_compute_sun_shadow.hpp:327 — inter-system state coupling via detail::occupancyEntityBoundsCount().
+BUILD_OCCUPANCY_GRID sets a function-local static int s_count (via detail::occupancyEntityBoundsCount()); COMPUTE_SUN_SHADOW's beginTick reads it to populate frameData.occupancyBoundsCount_. This is the T-064 anti-pattern applied across two system headers — the coupling is invisible without reading both includes. Opus should assess whether this should be moved to a field on C_OccupancyGrid (set by the build system, read by the shadow system via ECS), or whether the current approach is an acceptable pragmatic exception.
+3. system_compute_sun_shadow.hpp:226-228 — resource-creation ordering dependency.
+s_occupancySSBO = getNamedResource<Buffer>("OccupancyGridBuffer") succeeds only if system_build_occupancy_grid::create() already ran (it creates that named resource). There is no API-level enforcement of this ordering; it relies on registration order in registerPipeline(). A creation that registers COMPUTE_SUN_SHADOW before BUILD_OCCUPANCY_GRID will crash at runtime with a null dereference. Opus should confirm whether this is guarded elsewhere or is an acceptable documented invariant.
+Nits
+system_build_occupancy_grid.hpp:87-95 — four new function-local statics (s_boundsSSBO, s_boundsByEntity, s_boundsUpload, detail::occupancyEntityBoundsCount()). system_compute_sun_shadow.hpp:197-232 adds two more (frameData, shapeCastersByCanvas). These are all new additions in this PR, adding to the T-065 migration surface. They follow the existing pattern in the 12-file deviation list but expand it.
+system_compute_sun_shadow.hpp:304-306 — comment "Assumes a single matching canvas per frame. Switch to += with a beginTick reset if the filter ever matches multiple entities." This is a correctness note for a real latent bug path. Worth filing as a follow-up issue given that multi-canvas lighting demos are an explicit goal.
+system_build_occupancy_grid.hpp:287-292 — the IR_ASSERT(false, ...) + break for the 256-entity overflow: in a release build where asserts are stripped, the loop silently stops uploading bounds. The comment says "bump the constant if a creation needs more" which is the correct fix, but a warning log before the assert would help diagnose the issue in release builds.
+Test plan the author should run before merge
+IrredenEngineTest: 348/348 green (author confirmed)
+All nine IRLighting* demos build and render — before/after screenshots in PR body
+Authored on macOS; macOS Metal smoke is covered
+Cross-host smoke (Linux/OpenGL): build + run IRLightingDemos target on WSL Ubuntu. PR already has the outstanding checkbox.
+Opus recheck required: touches engine/render/src/shaders/ (GLSL + MSL compute — Lambert shading, analytic SDF shadow march, occupancy DDA), engine/prefabs/irreden/render/systems/ (shadow, AO, light-volume, occupancy-grid systems), UBO/SSBO layout assertions, and the beginTick ordering question above. The math through the shadow march and the inter-system occupancyEntityBoundsCount() coupling are the top two items for Opus judgment.
+🤖 Reviewed by Claude Sonnet 4.6 (sonnet-reviewer role)
+jakildev
+added
+the
+fleet:needs-linux-smoke
+PR needs linux-debug build + smoke-run validation
+label
+Apr 30, 2026
+jakildev
+commented
+Apr 30, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Opus recheck — render: lighting fidelity polish — global sun, unified shadows, demos
+Verdict: approve (concur with Sonnet, with two additional nits)
+Sonnet handed Opus three specific concerns plus the broader "math through the shadow march and inter-system occupancyEntityBoundsCount() coupling." I traced all four end-to-end, plus GLSL ↔ Metal parity across every touched shader, and the FrameDataSun UBO layout across the four sites that bind it. The PR lands cleanly. Two small additional nits below.
+Concur — Sonnet's three Opus questions all resolve
+1. system_compute_sun_shadow.hpp:313-328 — second lambda IS beginTick (no one-frame lag).
+createSystem at engine/system/include/irreden/ir_system.hpp:14-37 defines the parameter order as (name, functionTick, functionBeginTick, functionEndTick, ...). The third argument to createSystem<...>(...) here is the begin-tick. Per-frame ordering for COMPUTE_SUN_SHADOW is therefore:
+beginTick — s_program->use(), clear shapeCastersByCanvas, resolveSun(), write frameData.sunDirection_ / sunIntensity_ / sunAmbient_ / shadowsEnabled_ / aoEnabled_ / occupancyBoundsCount_ (the last from IRSystem::detail::occupancyEntityBoundsCount(), which BUILD_OCCUPANCY_GRID's per-entity tick has already populated this frame — see point 2).
+Per-entity tick — reads frameData.sunDirection_, collects + uploads casters, dispatches.
+frameData is fresh by the time the per-entity tick reads it. No one-frame lag.
+2. Inter-system detail::occupancyEntityBoundsCount() static — the value is fresh under the current pipeline order.
+I traced the full RENDER pipeline order (engine/render/CLAUDE.md "the pipeline, one frame"):
+```
+BUILD_OCCUPANCY_GRID   →   COMPUTE_VOXEL_AO   →   COMPUTE_SUN_SHADOW   →   COMPUTE_LIGHT_VOLUME   →   LIGHTING_TO_TRIXEL
+```
+Each system fires beginTick → all per-entity ticks → endTick before the next system runs. So:
+BUILD_OCCUPANCY_GRID's per-entity tick (line 99-305) sets detail::occupancyEntityBoundsCount() = static_cast<int>(s_boundsUpload.size()) after every populate+upload.
+COMPUTE_SUN_SHADOW's beginTick (line 313-328) reads it via frameData.occupancyBoundsCount_ = IRSystem::detail::occupancyEntityBoundsCount().
+By the time COMPUTE_SUN_SHADOW's beginTick fires, BUILD_OCCUPANCY_GRID's per-entity tick has already run, so s_count is the current frame's value. Correct.
+This is the T-064 anti-pattern (function-local static for system state, invisibly coupled across two system headers) and the count would be cleaner as a field on C_OccupancyGrid (set by build, read by shadow). Sonnet flagged this and so do I — it should be folded into the T-065 sweep, not fixed here. The PR doesn't make the deviation list materially worse and the existing convention in this file (s_shapeBuf, s_shapeTileDescBuf) is the same shape.
+3. Resource-creation ordering — same pattern used elsewhere; not a new risk.
+Both system_compute_voxel_ao.hpp:47 (OccupancyGridBuffer) and system_lighting_to_trixel.hpp:106 (ComputeSunShadowFrameData) already do cross-system getNamedResource lookups against buffers another system created. The convention is: pipeline registration order (= createSystem<NAME>() call order) satisfies the create-resource dependency, because the C++17 brace-init-list in registerPipeline({...}) evaluates left-to-right and each createSystem<NAME>() runs the corresponding System<NAME>::create() synchronously. The PR documents this in system_compute_sun_shadow.hpp:11-14 ("Pipeline order: must run after BUILD_OCCUPANCY_GRID").
+system_compute_voxel_ao.hpp:50-58 actually goes a step further and defers the ComputeSunShadowFrameData lookup into the lambdas (because AO is constructed before sun-shadow in pipeline order, so the resource doesn't exist at AO's create-time). That's a clean handling of the same pattern. No action needed for this PR.
+Concur — math through the shadow march
+I worked the BOX-vs-rasterizer convention end-to-end because it's the obvious place a 0.5-voxel inflation could sneak in: the rasterizer applies params - 1 for BOX (c_shapes_to_trixel.glsl:455-458, mirrored in .metal:491-493) and the CPU SDF occupancy rasterization applies IRMath::SDF::effectiveParams (system_build_occupancy_grid.hpp:209-210), but the new analytic shadow march in analyticShapeShadowHit passes shape.params directly to evaluateSDF. The math actually lines up correctly — the threshold values cancel the halfSize differential:
+Rasterizer: halfSize = (params-1)/2 = 3 for params=7. Cells carved where sdfBox(cell, 3) ≤ 0.5 → continuous extent [-3.5, 3.5].
+Occupancy grid (CPU SDF): same effective = params-1 = 6, halfSize = 3, cells set where sdfBox(cell, 3) ≤ 0. Same 7 cells per axis.
+Analytic shadow: halfSize = params/2 = 3.5, hit when sdfBox(p, 3.5) ≤ 0.05 → continuous extent [-3.55, 3.55].
+Difference: 0.05 voxels (the analytic threshold itself) past the geometric cell edge. Both representations describe the same continuous surface; the rasterizer's 0.5 threshold thickens its cell-center surface to the cell-edge boundary, and the shadow's 0.05 threshold matches that cell-edge boundary directly. Brilliantly, this also means SPHERE / CYLINDER / CONE / TORUS — none of which need the -1 conversion — also work consistently across rasterizer and shadow because the same threshold-vs-halfSize relationship holds. No 0.5-voxel inflation. No bug.
+Concur — GLSL ↔ Metal parity is clean
+I diffed every touched shader pair (c_compute_sun_shadow, c_compute_voxel_ao, c_lighting_to_trixel, c_shapes_to_trixel, ir_iso_common, ir_sdf_common). The Metal mirrors are functionally identical: same roundHalfUp (floor(x + 0.5) on both sides — matches IRMath::roundHalfUp at engine/math/include/irreden/ir_math.hpp:56-58), same evaluateSDF dispatch, same DDA cell-edge logic, same faceOutwardNormal returning the -X / -Y / -Z outward normals consistent with +Z = down and the iso view-direction (1,1,1).
+FrameDataSun UBO layout is consistent across every binding site — verified via test/render/frame_data_sun_layout_test.cpp pinning offsets at 0/16/20/24/28/32/36 and total size 48. The c_compute_sun_shadow shaders correctly label the field at offset 36 as padding (the shader doesn't read it; aoEnabled_ is consumed only by c_compute_voxel_ao); cosmetic naming inconsistency only.
+Concur — Sonnet's three nits
+All three are correct and worth carrying forward as nits, not blockers:
+New function-local statics expand the T-065 migration surface (six new sites this PR).
+The "Assumes a single matching canvas per frame" comment is correctness-relevant and worth a tracked follow-up given the multi-canvas lighting demos goal.
+The 256-entity overflow IR_ASSERT(false, ...) silently breaks in release builds — a spdlog::warn (or whatever the convention is for "soft warning fired during release-build hot path") before the break would help diagnose silent-truncation symptoms.
+Additional Opus nits
+system_compute_voxel_ao.hpp:108-123 partial subData write is fragile. AO's beginTick writes only aoEnabled_ at offsetof(FrameDataSun, aoEnabled_) to the shared ComputeSunShadowFrameData buffer. The other fields in the buffer carry over from the previous frame's COMPUTE_SUN_SHADOW beginTick. This works today because c_compute_voxel_ao reads only aoEnabled — but the partial-update pattern is invisible from the CPU-side struct definition, and a future change adding a new field that AO needs would silently read stale data. Worth a short comment block at the AO beginTick lambda saying "AO only writes aoEnabled_; other fields are stale-from-last-frame and AO must not read them. Sun-shadow's beginTick is the authoritative writer."
+system_compute_light_volume.hpp:86-88 allocates std::queue and std::unordered_set per light per frame. floodFillEmissive constructs both inside the per-light callback, and visited.reserve(radius³) allocates fresh per call. Demo-scale fine; production gameplay with N lights × 60 fps will see noticeable allocator churn. The PR description already flags GPU wavefront BFS as deferred (#358 / #360 / #361 et al.) so this is tracked. Worth adding a thread-local scratch (queue + set) at namespace scope to short-circuit the alloc, even before the GPU rewrite — follow-up not blocker.
+Verdict
+approve. Mainline math is correct end-to-end (rasterizer ↔ occupancy ↔ analytic shadow all converge on the same continuous surface across BOX / SPHERE / CYLINDER / CONE / TORUS); GLSL/Metal parity is clean; UBO/SSBO layouts pinned by tests; the inter-system static-state coupling works under the current pipeline order and is the right thing to fold into T-065 rather than fix here. The voxel-pool/SDF self-shadow fix via OccupancyEntityBounds SSBO mirrors the analytic path's selfEntityId exclusion correctly. fleet:needs-linux-smoke already correctly applied (render PR authored on macOS); the OpenGL backend is the lagging side that needs cross-host validation before merge.
+🤖 Reviewed by Claude Opus 4.7 (opus-reviewer role)
+jakildev
+added
+fleet:approved
+Fleet reviewer approved — ready for human merge
+fleet:has-nits
+PR is approved, but reviewer flagged optional improvements to address before merge
+and removed
+fleet:has-nits
+PR is approved, but reviewer flagged optional improvements to address before merge
+labels
+Apr 30, 2026
+This was referenced Apr 30, 2026
+render: COMPUTE_SUN_SHADOW single-canvas assumption in per-entity tick
+#380
+Closed
+render: COMPUTE_LIGHT_VOLUME per-light allocator churn in floodFillEmissive
+#381
+Closed
+render: nit cleanup — add overflow warn log + clarify AO partial-writ…
+…
+d430e86
+```
+…e comment
+
+`system_build_occupancy_grid`: add `IRE_LOG_WARN` before the
+`IR_ASSERT(false)` overflow guard so the truncation is visible in debug
+builds before the assert fires (both macros are no-ops in release).
+
+`system_compute_voxel_ao`: expand the beginTick comment to make the
+partial-write contract explicit — AO writes only `aoEnabled_`, all other
+`FrameDataSun` fields are stale-from-last-frame and must not be read by
+AO. COMPUTE_SUN_SHADOW's beginTick is the authoritative writer.
+
+Follow-up issues filed: #380 (single-canvas timing assumption in
+COMPUTE_SUN_SHADOW), #381 (per-light allocator churn in
+COMPUTE_LIGHT_VOLUME).
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+```
+jakildev
+merged commit ff89cf7
+into
+master
+Apr 30, 2026
+jakildev
+commented
+Apr 30, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Addressed nits from Sonnet and Opus reviews. Changed: (1) system_build_occupancy_grid.hpp: added IRE_LOG_WARN before the IR_ASSERT overflow guard; (2) system_compute_voxel_ao.hpp: expanded beginTick comment to make partial-write contract explicit — AO only writes aoEnabled_, other FrameDataSun fields are stale-from-last-frame and must not be read by AO, COMPUTE_SUN_SHADOW beginTick is authoritative. Follow-up issues filed: 380 (single-canvas timing assumption) and 381 (per-light allocator churn).
+This was referenced Apr 30, 2026
+T-062: modifier framework: lambda decay system + stateful-lambda design doc
+#351
+Merged
+T-065: render: migrate 12 prefab systems off function-local static onto SystemParams
+#382
+Merged
+review-pr: detect oversized churn on CONFLICTING PRs + forked-from-other-PR signal
+#388
+Closed
+T-056: render: SDF rasterization under arbitrary Z-yaw
+#334
+Merged
+jakildev
+added a commit
+that referenced
+this pull request
+May 1, 2026
+T-065: render: migrate 12 prefab systems off function-local static on…
+…
+3fe6f67
+```
+…to SystemParams
+
+Replace mutable function-local `static` state in 12 render system
+headers with `SystemParams` structs allocated via
+`std::make_unique<Params>()` in each `create()` and registered via
+`setSystemParams(systemId, std::move(paramsOwner))`. Lambda closures
+capture a raw `Params *p`; ownership lives on the `SystemManager` and
+the heap address is stable for the system's lifetime.
+
+Visual + perf identity: 6 IRShapeDebug --auto-screenshot shots
+byte-identical (cmp silent on every pair) against origin/master at
+zoom 1/2/4/8 plus an odd-offset shot. Lighting demos
+(IRLightingSunShadow, IRLightingSdfCascade) build cleanly against
+the migrated tree, exercising the analytic SDF march and
+occupancy-grid voxel-pool paths reworked by #368.
+
+Files migrated:
+- system_build_occupancy_grid.hpp
+- system_compute_sun_shadow.hpp
+- system_compute_voxel_ao.hpp
+- system_fog_to_trixel.hpp
+- system_framebuffer_to_screen.hpp
+- system_lighting_to_trixel.hpp
+- system_shapes_to_trixel.hpp
+- system_sprites_to_screen.hpp
+- system_text_to_trixel.hpp
+- system_trixel_to_framebuffer.hpp
+- system_trixel_to_trixel.hpp
+- system_voxel_to_trixel.hpp
+
+\`thread_local\` per-call scratch buffers in
+\`system_shapes_to_trixel.hpp\` (\`mask\`, \`tiles\`) remain unchanged
+intentionally — they are per-call scratch, not per-system state.
+
+\`system_compute_light_volume.hpp\` does not require migration; it has
+no function-local static state.
+
+Closes #344
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+```
+jakildev
+added a commit
+that referenced
+this pull request
+May 1, 2026
+T-065: render: migrate 12 prefab systems off function-local static on…
+…
+91ba4ca
+```
+…to SystemParams
+
+Replace mutable function-local `static` state in 12 render system
+headers with `SystemParams` structs allocated via
+`std::make_unique<Params>()` in each `create()` and registered via
+`setSystemParams(systemId, std::move(paramsOwner))`. Lambda closures
+capture a raw `Params *p`; ownership lives on the `SystemManager` and
+the heap address is stable for the system's lifetime.
+
+Visual + perf identity: 6 IRShapeDebug --auto-screenshot shots
+byte-identical (cmp silent on every pair) against origin/master at
+zoom 1/2/4/8 plus an odd-offset shot. Lighting demos
+(IRLightingSunShadow, IRLightingSdfCascade) build cleanly against
+the migrated tree, exercising the analytic SDF march and
+occupancy-grid voxel-pool paths reworked by #368.
+
+Files migrated:
+- system_build_occupancy_grid.hpp
+- system_compute_sun_shadow.hpp
+- system_compute_voxel_ao.hpp
+- system_fog_to_trixel.hpp
+- system_framebuffer_to_screen.hpp
+- system_lighting_to_trixel.hpp
+- system_shapes_to_trixel.hpp
+- system_sprites_to_screen.hpp
+- system_text_to_trixel.hpp
+- system_trixel_to_framebuffer.hpp
+- system_trixel_to_trixel.hpp
+- system_voxel_to_trixel.hpp
+
+\`thread_local\` per-call scratch buffers in
+\`system_shapes_to_trixel.hpp\` (\`mask\`, \`tiles\`) remain unchanged
+intentionally — they are per-call scratch, not per-system state.
+
+\`system_compute_light_volume.hpp\` does not require migration; it has
+no function-local static state.
+
+Closes #344
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+```
+jakildev
+added a commit
+that referenced
+this pull request
+May 1, 2026
+T-065: render: migrate 12 prefab systems off function-local static on…
+…
+efa543c
+```
+…to SystemParams (#382)
+
+Replace mutable function-local `static` state in 12 render system
+headers with `SystemParams` structs allocated via
+`std::make_unique<Params>()` in each `create()` and registered via
+`setSystemParams(systemId, std::move(paramsOwner))`. Lambda closures
+capture a raw `Params *p`; ownership lives on the `SystemManager` and
+the heap address is stable for the system's lifetime.
+
+Visual + perf identity: 6 IRShapeDebug --auto-screenshot shots
+byte-identical (cmp silent on every pair) against origin/master at
+zoom 1/2/4/8 plus an odd-offset shot. Lighting demos
+(IRLightingSunShadow, IRLightingSdfCascade) build cleanly against
+the migrated tree, exercising the analytic SDF march and
+occupancy-grid voxel-pool paths reworked by #368.
+
+Files migrated:
+- system_build_occupancy_grid.hpp
+- system_compute_sun_shadow.hpp
+- system_compute_voxel_ao.hpp
+- system_fog_to_trixel.hpp
+- system_framebuffer_to_screen.hpp
+- system_lighting_to_trixel.hpp
+- system_shapes_to_trixel.hpp
+- system_sprites_to_screen.hpp
+- system_text_to_trixel.hpp
+- system_trixel_to_framebuffer.hpp
+- system_trixel_to_trixel.hpp
+- system_voxel_to_trixel.hpp
+
+\`thread_local\` per-call scratch buffers in
+\`system_shapes_to_trixel.hpp\` (\`mask\`, \`tiles\`) remain unchanged
+intentionally — they are per-call scratch, not per-system state.
+
+\`system_compute_light_volume.hpp\` does not require migration; it has
+no function-local static state.
+
+Closes #344
+
+Co-authored-by: Claude Opus 4.6 <noreply@anthropic.com>
+```
+jakildev
+mentioned this pull request
+May 22, 2026
+Fix offset for mouse or something when rendering in STRETCH mode
+#60
+Closed
+jakildev
+added
+fleet:verified-linux
+Cross-host smoke passed on linux-debug
+and removed
+fleet:needs-linux-smoke
+PR needs linux-debug build + smoke-run validation
+labels
+May 24, 2026
+This was referenced Aug 7, 2026
+fleet: paginate fetch_human_approved past the old 30-item window (#2856)
+#2934
+Merged
+fleet/CI: generalize the path-list sync ratchet beyond fleet-tests.yml (#2929)
+#2930
+Merged
+tooling/fleet: register 3 unlinted executables in ruff.toml's extend-include
+#2936
+Merged
+fleet-claim: cleanup's local walk derives repo from the slug, not the caller
+#2940
+Merged
+scripts/fleet: derive --help header slices from content, not line numbers
+#2949
+Merged
+build/cmake: fix header-global matcher formatter-defeatability (#2916)
+#2944
+Merged
+fleet: needs-windows-smoke missing from merger skip set and fleet-rebase SKIP_LABEL_RE (#2888)
+#2953
+Merged
+fleet: role-sharing lint reaches the skill-sharing lane (#2893)
+#2966
+Merged
+fleet: fleet-dispatcher — add a catch-all arg arm so a bad flag exits non-zero (#2962)
+#2968
+Merged
+fleet: per-kind wake suppression for the union worker lane (#2700)
+#2964
+Merged
+reviewer roles: the documented verdict stamp bypasses fleet-review-verdict's claim guard (#2153) and is never gated on the review body landing
+#2843
+Closed
+fleet: live-first per-record cache readers (#2837)
+#2998
+Merged
+fleet: worker feedback lane skips PRs under a live fleet:reviewing-* claim (#2801)
+#2999
+Merged
+jakildev
+mentioned this pull request
+Aug 21, 2026
+fleet: the semantic-conflict resolver lane does not exclude PRs under a live fleet:reviewing-* claim — the #2801 hazard, one lane over
+#3001
+Closed
+5 tasks
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+fleet:approved
+Fleet reviewer approved — ready for human merge
+fleet:authored-on-macos
+PR was authored and smoke-tested on macOS Metal backend
+fleet:verified-linux
+Cross-host smoke passed on linux-debug
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

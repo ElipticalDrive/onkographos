@@ -1,0 +1,69 @@
+This post documents the implementation of a volume renderer, including ray marching, voxel based SDF construction.
+
+Implementation notes of volume rendering | Hexo
+2026-07-01
+Renderer
+This post documents the implementation of a volume renderer, including ray marching, voxel based SDF construction.
+Final rendering
+SDF-based Volume Rendering (128*128*128 voxel grid)
+Volume Rendering Basics
+Unlike conventional surface path tracing, volume rendering will account for radiance changes continuously along a ray as it travels through participating media such as fog or smoke. Within the medium, light is attenuated by absorption and out-scattering, with additional radiance may be introduced through in-scattering. These effects are described by the volume rendering equation.
+For a ray passing through the volume, the final radiance is approximated by the following discrete single-scattering equation:
+The total in scattering effect is evaluated over all ray-marching samples, where
+Here, is the final radiance returned along the camera ray .
+is the background sky radiance.
+is the total transmittance along the camera ray. Therefore,
+represents the portion of the sky radiance that remains visible after passing through the volume.
+is the total number of ray-marching steps, and is the length of each step.
+is the density of the medium at the -th sample position.
+is the scattering coefficient. The term approximates the amount of light scattered within the given ray-marching interval.
+is the intrinsic color of the volume. It acts as a color filter on the scattered radiance.
+is the radiance emitted by the point light.
+is the transmittance between the -th sample position and the light source. It is evaluated using a separate shadow ray-marching process.
+is the camera-ray transmittance evaluated approximately at the midpoint of the -th interval.
+The Henyey–Greenstein phase function describes the angular distribution of scattered light, controlled by the parameter g and the scattering angle between incoming light direction and the camera direction.
+For each ray-marching step, according to the Beer–Lambert law, the attenuation factor is
+where the extinction coefficient is the sum of the scattering and absorption coefficients:
+The camera transmittance is initialized as
+After each ray-marching step, it is multiplied by the attenuation factor of the current interval:
+Equivalently, the camera transmittance before processing sample can be written in exponential form as
+The transmittance at the midpoint of the current interval is approximated as
+Substituting the attenuation factor gives
+Let’s have a look at the code that implements such math equations:
+```
+12345678910111213141516171819202122232425262728293031323334353637383940414243444546474849505152535455565758596061
+```
+```
+color volume_camera::ray_color(const Ray& r,const VoxelGrid& grid, const double & sigma_s, const double &sigma_a, const color & volume_color){    // sky    vec3 unit_dir = unit_vector(r.direction);    double a = 0.5 * (-unit_dir.z() + 1.0);    color sky_color = (1.0 - a) * color(1.0, 1.0, 1.0) + a * color(0.5, 0.7, 1.0);    double t0 = 0.0;    double t1 = std::numeric_limits<double>::infinity();    if (!grid.hit_box(r, t0, t1))    {        return sky_color; //if the ray doesn't hit the voxel grid, then return the sky color    }    t0=std::max(t0,0.0);    if(t1<=t0){        return sky_color; //invalid interval    }    vec3 light_pos{2.0, 1.5, -1.5};    vec3 light_color{1.0,1.0,1.0};    double light_intensity=20.0;    vec3 light_radiance=light_color*light_intensity;    double sigma_t=sigma_s+sigma_a;    double g=0.2;        //set the step size to roughly half the smallest grid size    double step_size=std::min({grid.voxel_size.x(),grid.voxel_size.y(),grid.voxel_size.z()});    step_size*=0.5;    int ns=(int)std::ceil((t1-t0)/step_size);    ns=std::max(1,ns);    step_size=(t1-t0)/ns;    double T=1.0;    color in_scatter = vec3{0, 0, 0};    for(int i=0;i<ns;i++){        double t=t0+step_size*(i+random_double(0,1));  //jittered sampling within each integration step (reduces banding)        auto pos=r.at(t);        double sdf=grid.sample_sdf(pos); //get the sdf at this point         double density=sdf_to_density(sdf); //convert it to density         if(density<=0){            continue; //avoid useless computation outside the mesh         }        double Att=std::exp(-sigma_t*density*step_size);  //Beer-Lambert transmittance over one step (ray segment extinction)         double T_mid =T * std::sqrt(Att); //midpoint approximation of transmittance, T_camera included        vec3 to_light=light_pos-pos;        double dis_light=to_light.length();        vec3 to_light_n=unit_vector(to_light);        Ray light_ray{pos,to_light_n};        double lt0=0.0;        double lt1 = std::numeric_limits<double>::infinity();        grid.hit_box(light_ray,lt0,lt1);        double T_light = shadow_T_light_grid(sigma_t,light_ray,grid,lt1); //marching toward the light source to get the shadow transmittance        double cos_theta = -dot(to_light_n, unit_dir); //phase function         double ph = phase_hg(g, cos_theta);        color in_scatter_step = ph * light_radiance * T_light * sigma_s * step_size * density * volume_color; //core rendering equation for in scattering         in_scatter += T_mid * in_scatter_step;         T=T*Att; //gradually incremented along the way        if(T<0.001){            break; //since we apply the forward marching, when T is too small, we can use an early stop         }    }    return sky_color * T + in_scatter;}
+```
+Similarly, the shadow ray tracing toward the light source is shown below, where we march along the ray toward the light source.
+```
+123456789101112131415161718192021
+```
+```
+inline double shadow_T_light_grid(double sigma_t, const Ray& r, const VoxelGrid& grid, double leave_t){    double T_light=1.0;    double step_size=std::min({grid.voxel_size.x(),grid.voxel_size.y(),grid.voxel_size.z()});    step_size*=0.5;    int ns=(int)std::ceil((leave_t)/step_size);    ns=std::max(1,ns);    step_size=(leave_t)/ns;    for(int i=0;i<ns;i++){        double t=step_size * (i + random_double(0, 1));        auto pos=r.at(t);        double sdf=grid.sample_sdf(pos);        double density=sdf_to_density(sdf);        double Att=std::exp(-sigma_t*step_size*density); //same Beer-Lambert law for segment extinction        T_light=T_light*Att;        if(T_light<0.001){            break;        }            }        return T_light;}
+```
+VoxelGrid and Signed Distance field
+In the previous chapter, we saw that volume rendering requires a continuous density field in space, while a triangle mesh only provides a surface representation. To bridge this gap, we first voxelize the mesh into a regular grid, and then construct a signed distance field (SDF) to capture both inside/outside information and the distance to the closest surface. This SDF is finally converted into a smooth density field.
+Then, the shape of the object is no longer stored explicitly. Instead, it is implicitly defined by where the density becomes high in space. The “surface” appears naturally in the transition region of this density field. When we perform ray marching, rays accumulate absorption and scattering along their path. Dense regions block light and contribute to scattering, while empty regions do almost nothing. In this way, the shape is reconstructed indirectly through light transport rather than explicit geometry.
+Specifically, the class VoxelGrid divides a bounding box into voxels and with the index function . Then, for each voxel center, the unsigned distance to the closest triangle is computed, and its sign is determined using the even–odd ray casting method.
+```
+12345678
+```
+```
+auto p = grid.voxel_center(i, j, k);auto d = point_to_mesh_unsigned_d(p, mesh);int count = intersection_times(p, mesh, direction);if (is_inside(count)){    d = -d; // inside is negative}grid.set_value(i, j, k, d);
+```
+Then, linear interpolation is used to evaluate the distance (SDF value) at any point inside the bounding box.
+```
+123456789101112131415161718192021222324252627282930313233343536373839
+```
+```
+double lerp(double a, double b, double t) const{    return a + t * (b - a);}double sample_sdf(const vec3 &p) const{    vec3 pos = world_to_grid(p);    double x = std::clamp(pos.x(), 0.0, (double)(nx - 1));    double y = std::clamp(pos.y(), 0.0, (double)(ny - 1));    double z = std::clamp(pos.z(), 0.0, (double)(nz - 1));    int x0 = (int)(std::floor(x));    int x1 = std::min(x0 + 1, nx - 1);    double tx = x - x0;    int y0 = (int)(std::floor(y));    int y1 = std::min(y0 + 1, ny - 1);    double ty = y - y0;    int z0 = (int)(std::floor(z));    int z1 = std::min(z0 + 1, nz - 1);    double tz = z - z0;    double a000 = get_value(x0, y0, z0);    double a100 = get_value(x1, y0, z0);    double a010 = get_value(x0, y1, z0);    double a110 = get_value(x1, y1, z0);    double a001 = get_value(x0, y0, z1);    double a101 = get_value(x1, y0, z1);    double a011 = get_value(x0, y1, z1);    double a111 = get_value(x1, y1, z1);    //8 grid points to 4 (x-direction interpolation)    double x00 = lerp(a000, a100, tx);     double x01 = lerp(a010, a110, tx);    double x10 = lerp(a001, a101, tx);    double x11 = lerp(a011, a111, tx);    //4 grid points to 2 (y-direction interpolation)    double y00 = lerp(x00, x01, ty);    double y01 = lerp(x10, x11, ty);    //2 grid points to 1 (z-direction interpolation)    double res = lerp(y00, y01, tz);    return res;}
+```
+Finally, the SDF value can be mapped to a density field (e.g., assigning a density of 2 inside the mesh), which is then used for ray marching.
+```
+12345
+```
+```
+inline double sdf_to_density(double sdf){    constexpr double density_max = 2.0;    return sdf < 0.0 ? density_max : 0.0;}
+```

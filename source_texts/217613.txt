@@ -1,0 +1,110 @@
+Here is the corrected and physically accurate implementation of the volumeScatterNEE() function. The core issue was that DIRAC is defined as -1.0F. The original condition <= 0.0F mistakenly caught and discarded these delta-distribution l...
+
+DIRAC and volumeScatterNEE() · Issue #46 · nvpro-samples/vk_gltf_renderer · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+DIRAC and volumeScatterNEE() #46
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+DIRAC and volumeScatterNEE()#46
+Copy link
+Description
+tigrazone
+opened on Oct 20, 2026
+Issue body actions
+Here is the corrected and physically accurate implementation of the volumeScatterNEE() function.
+The core issue was that DIRAC is defined as -1.0F. The original condition <= 0.0F mistakenly caught and discarded these delta-distribution light sources (like point lights and the sun), causing the volume to ignore them entirely. By changing it to == 0.0F, we correctly filter out only invalid samples while preserving the DIRAC case for unbiased Multiple Importance Sampling (MIS).
+```
+#if GLTF_USE_SCATTER
+float3 volumeScatterNEE(IRaytracer raytracer, VolumeMedium medium, float3 scatterPos, float3 wiBeforeScatter, float3 throughput, inout uint seed)
+{
+    DirectLight directLight;
+    sampleLights(scatterPos, /*normal=*/wiBeforeScatter, wiBeforeScatter, seed, directLight, /*isVolumeSample=*/true);
+
+    // FIX: Previously, the condition `directLight.pdf <= 0.0F` incorrectly discarded 
+    // DIRAC light sources (punctual lights and the sun, where pdf == DIRAC == -1.0F). 
+    // This caused volume scattering to completely ignore direct lighting from point 
+    // lights, resulting in missing god-rays and biased/dark rendering. 
+    // By changing it to `== 0.0F`, we correctly filter out only invalid/zero-probability 
+    // samples while preserving the DIRAC case for unbiased Multiple Importance Sampling (MIS).
+    if(directLight.pdf == 0.0F)
+        return float3(0.0F);
+
+    float cosTheta = dot(wiBeforeScatter, directLight.direction);
+    float phasePdf = henyeyGreensteinPdf(cosTheta, float(medium.scatterAnisotropy));
+    
+    // For DIRAC lights, the phase function cannot sample them, so the MIS weight is 1.0.
+    float misWeight = (directLight.pdf == DIRAC) ? 1.0F : directLight.pdf / (directLight.pdf + phasePdf);
+
+    RayDesc shadowRay;
+    shadowRay.Origin    = scatterPos;
+    shadowRay.Direction = directLight.direction;
+    shadowRay.TMin      = 0.0F;
+    shadowRay.TMax      = directLight.distance;
+
+    // Trace shadow ray inside the volume to check for occlusion
+    float3 shadowFactor = raytracer.TraceShadow(shadowRay, seed, /*initialInside=*/true);
+
+    return throughput * directLight.radianceOverPdf * misWeight * phasePdf * shadowFactor;
+}
+#endif  // GLTF_USE_SCATTER
+```
+Why this is Unbiased and Physically Correct:
+Proper Delta Handling: Punctual lights and the sun have no surface area, meaning their solid angle PDF is technically a Dirac delta function (represented here as DIRAC = -1.0F). The Henyey-Greenstein phase function cannot sample these delta peaks. Therefore, the MIS balance heuristic correctly assigns a weight of 1.0 to the light sampling technique when pdf == DIRAC.
+Energy Conservation: By allowing the shadow ray to be traced for these lights, the renderer correctly calculates occlusion (e.g., shadows cast by objects inside the fog/smoke), preserving the physical accuracy of the light transport.
+Safe Early Exit: Changing the check to == 0.0F ensures that if sampleLights genuinely fails to find a valid light (or samples a light behind the scattering plane's horizon where PDF is forced to 0), it safely aborts without wasting compute on a shadow ray.
+Activity
+mklefrancois commented on Oct 21, 2026
+mklefrancois
+on Oct 21, 2026
+Collaborator
+More actions
+Thanks, @tigrazone.
+Good catch, and you’re right: the directLight.pdf <= 0.0F guard in volumeScatterNEE() throws away every punctual light, because DIRAC is -1. That made the == DIRAC branch of the MIS weight right below it unreachable. As a result, point, spot and directional lights added no direct lighting at scatter points inside a KHR_materials_scatter medium. Something I missed in my tests because I was using emissive surfaces.
+We’re taking the fix in a slightly different form:
+```
+if(directLight.pdf == 0.0F || all(directLight.radianceOverPdf == 0.0F))
+  return float3(0.0F);
+```
+The second condition skips samples that contribute nothing, such as a spot light whose cone misses the scatter point. That avoids tracing a shadow ray for nothing.
+Two small corrections to the reasoning in the issue:
+Volume samples never reject lights “behind the horizon”. sampleLights() aims the culling normal at the light when isVolumeSample is set. A pdf of 0 only means a failed emissive or environment sample, or no lights at all.
+The missing piece wasn’t really “energy conservation”. It was a missing term in the estimate: light sampling is the only way to reach a light that has no size, so dropping those samples removed their light completely.
+One thing to know when you test: the effect shows only with Shadow Transmission on, which is the default. With it off, the shadow ray stops at the medium’s own transmissive boundary. A punctual light reaching the medium through a surface that bends its light is a caustic path (not yet supported), which neither light sampling nor phase-function sampling can produce.
+The fix comes with a headless render test, tests/render/volume_scatter_punctual.py. It also includes two related fixes for transport in a medium: the last stretch of a shadow ray inside a medium is now dimmed, and emitters seen through a medium are now attenuated.
+All of it will be soon in a GitHub update.
+mklefrancois
+added a commit that references this issue on Oct 23, 2026
+Volume medium fixes, precise ray offset, and NEE shadow-ray skip
+...
+75fd8cb
+tigrazone
+closed this as completedon Oct 23, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,1699 @@
+Volume Rendering and Neural Radiance Fields
+===================================
+This is an implementation of the homework from Learning for 3D at CMU.
+
+##  0. Setup
+
+### 0.1 Environment setup
+You can use the python environment you've set up for past assignments, or re-install it with our `environment.yml` file:
+
+```bash
+conda env create -f environment.yml
+conda activate l3d
+```
+
+If you do not have Anaconda, you can quickly download it [here](https://docs.conda.io/en/latest/miniconda.html), or via the command line in with:
+
+```bash
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+chmod +x Miniconda3-latest-Linux-x86_64.sh
+bash Miniconda3-latest-Linux-x86_64.sh
+```
+
+### 0.2 Data
+
+The data for this assignment is provided in the github repo under `data/`. You do not need to download anything yourself.
+
+##  1. Differentiable Volume Rendering
+
+In the emission-absorption (EA) model that we covered in class, volumes are described by their *appearance* (e.g. emission) and *geometry* (absorption) at *every point* in 3D space. For part 1 of the assignment, you will implement a ***Differentiable Renderer*** for EA volumes, which you will use in parts 2 and 3. Differentiable renderers are extremely useful for 3D learning problems --- one reason is because they allow you to optimize scene parameters (i.e. perform inverse rendering) from image supervision only!
+
+##  1.1. Familiarize yourself with the code structure
+
+There are four major components of our differentiable volume rendering pipeline:
+
+* ***The camera***: `pytorch3d.CameraBase`
+* ***The scene***: `SDFVolume` in `implicit.py`
+* ***The sampling routine***: `StratifiedSampler` in `sampler.py`
+* ***The renderer***: `VolumeRenderer` in `renderer.py`
+
+`StratifiedSampler` provides a method for sampling multiple points along a ray traveling through the scene (also known as *raymarching*). Together, a sampler and a renderer describe a rendering pipeline. Like traditional graphics pipelines, this rendering procedure is independent of the scene and camera.
+
+The scene, sampler, and renderer are all packaged together under the `Model` class in `main.py`. In particular the `Model`'s forward method invokes a `VolumeRenderer` instance with a sampling strategy and volume as input.
+
+Also, take a look at the `RayBundle` class in `ray_utils.py`, which provides a convenient wrapper around several per-ray inputs to the volume rendering procedure.
+
+##  1.2. Outline of tasks
+
+In order to perform rendering, you will implement the following routines:
+
+1. **Ray sampling from cameras**: you will fill out methods in `ray_utils.py` to generate world space rays from a particular camera.
+2. **Point sampling along rays**: you will fill out the `StratifiedSampler` class to generate sample points along each world space ray
+3. **Rendering**: you will fill out the `VolumeRenderer` class to *evaluate* a volume function at each sample point along a ray, and aggregate these evaluations to perform rendering.
+
+##  1.3. Ray sampling (10 points)
+
+Take a look at the `render_images` function in `main.py`. It loops through a set of cameras, generates rays for each pixel on a camera, and renders these rays using a `Model` instance.
+
+### Implementation
+
+Your first task is to implement:
+
+1. `get_pixels_from_image` in `ray_utils.py` and
+2. `get_rays_from_pixels` in `ray_utils.py`
+
+which are used in `render_images`:
+
+```python
+xy_grid = get_pixels_from_image(image_size, camera) # TODO: implement in ray_utils.py
+ray_bundle = get_rays_from_pixels(xy_grid, camera) # TODO: implement in ray_utils.py
+```
+
+The `get_pixels_from_image` method generates pixel coordinates, ranging from `[-1, 1]` for each pixel in an image. The `get_rays_from_pixels` method generates rays for each pixel, by mapping from a camera's *Normalized Device Coordinate (NDC) Space* into world space.
+
+### Visualization
+
+You can run the code for part 1 with:
+
+```bash
+python main.py --config-name=box
+```
+
+Once you have implemented these methods, verify that your output matches the TA output by visualizing both `xy_grid` and `rays` with the `vis_grid` and `vis_rays` functions in the `render_images` function in `main.py`. **By default, the above command will crash and return an error**. However, it should reach your visualization code before it does. The outputs of grid/ray visualization should look like this:
+
+![Grid](ta_images/grid.png)    ![Rays](ta_images/rays.png)
+
+##  1.4. Point sampling (10 points)
+
+### Implementation
+
+Your next task is to fill out `StratifiedSampler` in `sampler.py`. Implement the forward method, which:
+
+1. Generates a set of distances between `near` and `far` and
+2. Uses these distances to sample points offset from ray origins (`RayBundle.origins`) along ray directions (`RayBundle.directions`).
+3. Stores the distances and sample points in `RayBundle.sample_points` and `RayBundle.sample_lengths`
+
+### Visualization
+
+Once you have done this, use the `render_points` method in `render_functions.py` in order to visualize the point samples from the first camera. They should look like this:
+
+![Sample points](ta_images/sample_points.png)
+
+##  1.5. Volume rendering (30 points)
+
+Finally, we can implement volume rendering! With the `configs/box.yaml` configuration, we provide you with an `SDFVolume` instance describing a box. You can check out the code for this function in `implicit.py`, which converts a signed distance function into a volume. If you want, you can even implement your own `SDFVolume` classes by creating new signed distance function class, and adding it to `sdf_dict` in `implicit.py`. Take a look at [this great web page](https://www.iquilezles.org/www/articles/distfunctions/distfunctions.htm) for formulas for some simple/complex SDFs.
+
+### Implementation
+
+You will implement
+
+1. `VolumeRenderer._compute_weights` and
+2. `VolumeRenderer._aggregate`.
+3. You will also modify the `VolumeRenderer.forward` method to render a depth map in addition to color from a volume
+
+From each volume evaluation you will get both volume density, and a color (`feature`):
+
+```python
+# Call implicit function with sample points
+implicit_output = implicit_fn(cur_ray_bundle)
+density = implicit_output['density']
+feature = implicit_output['feature']
+```
+
+You'll then use the following equation to render color along a ray:
+
+![Spiral Rendering of Part 1](ta_images/color.png)
+
+where `σ` is density, `Δt` is the length of current ray segment, and `L_e` is color:
+
+![Spiral Rendering of Part 1](ta_images/transmittance.png)
+
+Compute the weights `T * (1 - exp(-σ * Δt))` in `VolumeRenderer._compute_weights`, and perform the summation in `VolumeRenderer._aggregate`. Note that for the first segment `T = 1`.
+
+Use weights, and aggregation function to render *color* and *depth* (stored in `RayBundle.sample_lengths`). 
+
+### Visualization
+
+By default, your results will be written out to `images/part_1.gif`. Provide a visualization of the depth in your write-up.
+
+![Spiral Rendering of Part 1](ta_images/part_1.gif) ![Spiral Rendering of Part 1](ta_images/depth.png)
+
+
+##  2. Optimizing a basic implicit volume
+
+##  2.1. Random ray sampling (5 points)
+
+Since you have now implemented a differentiable volume renderer, we can use it to optimize the parameters of a volume! We have provided a basic training loop in the `train` method in `main.py`.
+
+Depending on how many sample points we take for each ray, volume rendering can consume a lot of memory on the GPU (especially during the backward pass of gradient descent). Because of this, it usually makes sense to sample a subset of rays from a full image for each training iteration. In order to do this, implement the `get_random_pixels_from_image` method in `ray_utils.py`, invoked here:
+
+```python
+xy_grid = get_random_pixels_from_image(cfg.training.batch_size, image_size, camera) # TODO: implement in ray_utils.py
+```
+
+##  2.2. Loss and training (5 points)
+Replace the loss in `train`
+
+```python
+loss = None
+```
+
+with mean squared error between the predicted colors and ground truth colors `rgb_gt`.
+
+Once you've done this, you can run train a model with
+
+```bash
+python main.py --config-name=train_box
+```
+
+This will optimize the position and side lengths of a box, given a few ground truth images with known camera poses (in the `data` folder). Report the center of the box, and the side lengths of the box after training, rounded to the nearest `1/100` decimal place.
+
+##  2.3. Visualization
+
+The code renders a spiral sequence of the optimized volume in `images/part_2.gif`. Compare this gif to the one below, and attach it in your write-up:
+
+![Spiral Rendering of Part 2](ta_images/part_2.gif)
+
+
+##  3. Optimizing a Neural Radiance Field (NeRF) (30 points)
+In this part, you will implement an implicit volume as a Multi-Layer Perceptron (MLP) in the `NeuraRadianceField` class in `implicit.py`. This MLP should map 3D position to volume density and color. Specifically:
+
+1. Your MLP should take in a `RayBundle` object in its forward method, and produce color and density for each sample point in the RayBundle.
+2. You should also fill out the loss in `train_nerf` in the `main.py` file.
+
+You will then use this implicit volume to optimize a scene from a set of RGB images. We have implemented data loading, training, checkpointing for you, but this part will still require you to do a bit more legwork than for Parts 1 and 2. You will have to write the code for the MLP yourself --- feel free to reference the NeRF paper, though you should not directly copy code from an external repository.
+
+## Implementation
+
+Here are a few things to note:
+
+1. For now, your NeRF MLP does not need to handle *view dependence*, and can solely depend on 3D position.
+2. You should use the `ReLU` activation to map the first network output to density (to ensure that density is non-negative)
+3. You should use the `Sigmoid` activation to map the remaining raw network outputs to color
+4. You can use *Positional Encoding* of the input to the network to achieve higher quality. We provide an implementation of positional encoding in the `HarmonicEmbedding` class in `implicit.py`.
+
+## Visualization
+You can train a NeRF on the lego bulldozer dataset with
+
+```bash
+python main.py --config-name=nerf_lego
+```
+
+This will create a NeRF with the `NeuralRadianceField` class in `implicit.py`, and use it as the `implicit_fn` in `VolumeRenderer`. It will also train a NeRF for 250 epochs on 128x128 images.
+
+Feel free to modify the experimental settings in `configs/nerf_lego.yaml` --- though the current settings should allow you to train a NeRF on low-resolution inputs in a reasonable amount of time. After training, a spiral rendering will be written to `images/part_3.gif`. Report your results. It should look something like this:
+
+![Spiral Rendering of Part 3](ta_images/part_3.gif)
+
+##  4. NeRF Extras (***Choose at least one!*** More than one is extra credit)
+
+###  4.1 View Dependence (10 pts)
+
+Add view dependence to your NeRF model! Specifically, make it so that emission can vary with viewing direction. You can NeRF or other papers for how to do this effectively --- if you're not careful, your network may overfit to the training images. Discuss the trade-offs between increased view dependence and generalization quality.
+
+###  4.2 Hierarchical Sampling (10 pts)
+
+NeRF employs two networks: a coarse network and a fine network. During the coarse pass, it uses the coarse network to get an estimate of geometry geometry, and during fine pass uses these geometry estimates for better point sampling for the fine network. Implement this hierarchical point-sampling strategy and discuss trade-offs (speed / quality).
+
+###  4.3 High Resolution Imagery (10 pts)
+
+Run NeRF on high-res imagery using the `nerf_lego_highres.yaml` config file. This will take a long time to train -- play around with some hyper parameters (point samples per ray, network capacity) and report your results
+# assignment3
+
+### __init__.py
+```
+# Copyright (c) Facebook, Inc. and its affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+```
+
+### data_utils.py
+```
+from pytorch3d.renderer import (
+    PerspectiveCameras,
+    look_at_view_transform
+)
+
+import numpy as np
+import torch
+
+
+# Basic data loading
+def dataset_from_config(
+    cfg,
+    ):
+    dataset = []
+
+    for cam_idx, cam_key in enumerate(cfg.cameras.keys()):
+        cam_cfg = cfg.cameras[cam_key]
+
+        # Create camera parameters
+        R, T = look_at_view_transform(
+            eye=(cam_cfg.eye,),
+            at=(cam_cfg.scene_center,),
+            up=(cam_cfg.up,),
+        )
+        focal = torch.tensor([cam_cfg.focal])[None]
+        principal_point = torch.tensor(cam_cfg.principal_point)[None]
+
+        # Assemble the dataset
+        image = None
+        if 'image' in cam_cfg and cam_cfg.image is not None:
+            image = torch.tensor(np.load(cam_cfg.image))[None]
+
+        dataset.append(
+            {
+                "image": image,
+                "camera": PerspectiveCameras(
+                    focal_length=focal,
+                    principal_point=principal_point,
+                    R=R,
+                    T=T,
+                ),
+                "camera_idx": cam_idx,
+            }
+        )
+
+    return dataset
+
+
+# Spiral cameras looking at the origin
+def create_surround_cameras(radius, n_poses=20, up=(0.0, 1.0, 0.0), focal_length=1.0):
+    cameras = []
+
+    for theta in np.linspace(0, 2 * np.pi, n_poses + 1)[:-1]:
+
+        if np.abs(up[1]) > 0:
+            eye = [np.cos(theta + np.pi / 2) * radius, 0, -np.sin(theta + np.pi / 2) * radius]
+        else:
+            eye = [np.cos(theta + np.pi / 2) * radius, np.sin(theta + np.pi / 2) * radius, 2.0]
+
+        R, T = look_at_view_transform(
+            eye=(eye,),
+            at=([0.0, 0.0, 0.0],),
+            up=(up,),
+        )
+
+        cameras.append(
+            PerspectiveCameras(
+                focal_length=torch.tensor([focal_length])[None],
+                principal_point=torch.tensor([0.0, 0.0])[None],
+                R=R,
+                T=T,
+            )
+        )
+    
+    return cameras
+
+
+def vis_grid(xy_grid, image_size):
+    xy_vis = (xy_grid + 1) / 2.001
+    xy_vis = torch.cat([xy_vis, torch.zeros_like(xy_vis[..., :1])], -1)
+    xy_vis = xy_vis.view(image_size[1], image_size[0], 3)
+    xy_vis = np.array(xy_vis.detach().cpu())
+
+    return xy_vis
+
+
+def vis_rays(ray_bundle, image_size):
+    rays = torch.abs(ray_bundle.directions)
+    rays = rays.view(image_size[1], image_size[0], 3)
+    rays = np.array(rays.detach().cpu())
+
+    return rays
+```
+
+### dataset.py
+```
+# Copyright (c) Facebook, Inc. and its affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+import os
+from typing import List, Optional, Tuple
+
+import numpy as np
+import requests
+import torch
+from PIL import Image
+from pytorch3d.renderer import PerspectiveCameras
+from torch.utils.data import Dataset
+
+import matplotlib.pyplot as plt
+
+
+DEFAULT_DATA_ROOT = os.path.join(
+    os.path.dirname(os.path.realpath(__file__)), "data"
+)
+
+DEFAULT_URL_ROOT = "https://dl.fbaipublicfiles.com/pytorch3d_nerf_data"
+
+ALL_DATASETS = ("lego", "fern", "pt3logo")
+
+
+def trivial_collate(batch):
+    """
+    A trivial collate function that merely returns the uncollated batch.
+    """
+    return batch
+
+
+class ListDataset(Dataset):
+    """
+    A simple dataset made of a list of entries.
+    """
+
+    def __init__(self, entries: List) -> None:
+        """
+        Args:
+            entries: The list of dataset entries.
+        """
+        self._entries = entries
+
+    def __len__(
+        self,
+    ) -> int:
+        return len(self._entries)
+
+    def __getitem__(self, index):
+        return self._entries[index]
+
+
+def get_nerf_datasets(
+    dataset_name: str,  # 'lego | fern'
+    image_size: Tuple[int, int],
+    data_root: str = DEFAULT_DATA_ROOT,
+    autodownload: bool = True,
+) -> Tuple[Dataset, Dataset, Dataset]:
+    """
+    Obtains the training and validation dataset object for a dataset specified
+    with the `dataset_name` argument.
+
+    Args:
+        dataset_name: The name of the dataset to load.
+        image_size: A tuple (height, width) denoting the sizes of the loaded dataset images.
+        data_root: The root folder at which the data is stored.
+        autodownload: Auto-download the dataset files in case they are missing.
+
+    Returns:
+        train_dataset: The training dataset object.
+        val_dataset: The validation dataset object.
+        test_dataset: The testing dataset object.
+    """
+
+    if dataset_name not in ALL_DATASETS:
+        raise ValueError(f"'{dataset_name}'' does not refer to a known dataset.")
+
+    print(f"Loading dataset {dataset_name}, image size={str(image_size)} ...")
+
+    cameras_path = os.path.join(data_root, dataset_name + ".pth")
+    image_path = cameras_path.replace(".pth", ".png")
+
+    if autodownload and any(not os.path.isfile(p) for p in (cameras_path, image_path)):
+        # Automatically download the data files if missing.
+        download_data((dataset_name,), data_root=data_root)
+
+    train_data = torch.load(cameras_path)
+    n_cameras = train_data["cameras"]["R"].shape[0]
+
+    _image_max_image_pixels = Image.MAX_IMAGE_PIXELS
+    Image.MAX_IMAGE_PIXELS = None  # The dataset image is very large ...
+    images = torch.FloatTensor(np.array(Image.open(image_path))) / 255.0
+    images = torch.stack(torch.chunk(images, n_cameras, dim=0))[..., :3]
+    Image.MAX_IMAGE_PIXELS = _image_max_image_pixels
+
+    scale_factors = [s_new / s for s, s_new in zip(images.shape[1:3], image_size)]
+
+    if abs(scale_factors[0] - scale_factors[1]) > 1e-3:
+        raise ValueError(
+            "Non-isotropic scaling is not allowed. Consider changing the 'image_size' argument."
+        )
+    scale_factor = sum(scale_factors) * 0.5
+
+    if scale_factor != 1.0:
+        print(f"Rescaling dataset (factor={scale_factor})")
+        images = torch.nn.functional.interpolate(
+            images.permute(0, 3, 1, 2),
+            size=tuple(image_size),
+            mode="bilinear",
+        ).permute(0, 2, 3, 1)
+
+    cameras = [
+        PerspectiveCameras(
+            **{k: v[cami][None] for k, v in train_data["cameras"].items()}
+        ).to("cpu")
+        for cami in range(n_cameras)
+    ]
+
+    train_idx, val_idx, test_idx = train_data["split"]
+
+    train_dataset, val_dataset, test_dataset = [
+        ListDataset(
+            [
+                {"image": images[i], "camera": cameras[i], "camera_idx": int(i)}
+                for i in idx
+            ]
+        )
+        for idx in [train_idx, val_idx, test_idx]
+    ]
+
+    return train_dataset, val_dataset, test_dataset
+
+
+def download_data(
+    dataset_names: Optional[List[str]] = None,
+    data_root: str = DEFAULT_DATA_ROOT,
+    url_root: str = DEFAULT_URL_ROOT,
+) -> None:
+    """
+    Downloads the relevant dataset files.
+
+    Args:
+        dataset_names: A list of the names of datasets to download. If `None`,
+            downloads all available datasets.
+    """
+
+    if dataset_names is None:
+        dataset_names = ALL_DATASETS
+
+    os.makedirs(data_root, exist_ok=True)
+
+    for dataset_name in dataset_names:
+        cameras_file = dataset_name + ".pth"
+        images_file = cameras_file.replace(".pth", ".png")
+        license_file = cameras_file.replace(".pth", "_license.txt")
+
+        for fl in (cameras_file, images_file, license_file):
+            local_fl = os.path.join(data_root, fl)
+            remote_fl = os.path.join(url_root, fl)
+
+            print(f"Downloading dataset {dataset_name} from {remote_fl} to {local_fl}.")
+
+            r = requests.get(remote_fl)
+
+            with open(local_fl, "wb") as f:
+                f.write(r.content)
+```
+
+### implicit.py
+```
+import torch
+import torch.nn.functional as F
+
+from ray_utils import RayBundle
+
+
+# Sphere SDF class
+class SphereSDF(torch.nn.Module):
+    def __init__(
+        self,
+        cfg
+    ):
+        super().__init__()
+
+        self.radius = torch.nn.Parameter(
+            torch.tensor(cfg.radius.val).float(), requires_grad=cfg.radius.opt
+        )
+        self.center = torch.nn.Parameter(
+            torch.tensor(cfg.center.val).float().unsqueeze(0), requires_grad=cfg.center.opt
+        )
+
+    def forward(self, ray_bundle):
+        sample_points = ray_bundle.sample_points.view(-1, 3)
+
+        return torch.linalg.norm(
+            sample_points - self.center,
+            dim=-1,
+            keepdim=True
+        ) - self.radius
+
+
+# Box SDF class
+class BoxSDF(torch.nn.Module):
+    def __init__(
+        self,
+        cfg
+    ):
+        super().__init__()
+
+        self.center = torch.nn.Parameter(
+            torch.tensor(cfg.center.val).float().unsqueeze(0), requires_grad=cfg.center.opt
+        )
+        self.side_lengths = torch.nn.Parameter(
+            torch.tensor(cfg.side_lengths.val).float().unsqueeze(0), requires_grad=cfg.side_lengths.opt
+        )
+
+    def forward(self, ray_bundle):
+        sample_points = ray_bundle.sample_points.view(-1, 3)
+        diff = torch.abs(sample_points - self.center) - self.side_lengths / 2.0
+
+        signed_distance = torch.linalg.norm(
+            torch.maximum(diff, torch.zeros_like(diff)),
+            dim=-1
+        ) + torch.minimum(torch.max(diff, dim=-1)[0], torch.zeros_like(diff[..., 0]))
+
+        return signed_distance.unsqueeze(-1)
+
+
+sdf_dict = {
+    'sphere': SphereSDF,
+    'box': BoxSDF,
+}
+
+
+# Converts SDF into density/feature volume
+class SDFVolume(torch.nn.Module):
+    def __init__(
+        self,
+        cfg
+    ):
+        super().__init__()
+
+        self.sdf = sdf_dict[cfg.sdf.type](
+            cfg.sdf
+        )
+
+        self.rainbow = cfg.feature.rainbow if 'rainbow' in cfg.feature else False
+        self.feature = torch.nn.Parameter(
+            torch.ones_like(torch.tensor(cfg.feature.val).float().unsqueeze(0)), requires_grad=cfg.feature.opt
+        )
+
+        self.alpha = torch.nn.Parameter(
+            torch.tensor(cfg.alpha.val).float(), requires_grad=cfg.alpha.opt
+        )
+        self.beta = torch.nn.Parameter(
+            torch.tensor(cfg.beta.val).float(), requires_grad=cfg.beta.opt
+        )
+
+    def _sdf_to_density(self, signed_distance):
+        # Convert signed distance to density with alpha, beta parameters
+        return torch.where(
+            signed_distance > 0,
+            0.5 * torch.exp(-signed_distance / self.beta),
+            1 - 0.5 * torch.exp(signed_distance / self.beta),
+        ) * self.alpha
+
+    def forward(self, ray_bundle):
+        sample_points = ray_bundle.sample_points.view(-1, 3)
+        depth_values = ray_bundle.sample_lengths[..., 0]
+        deltas = torch.cat(
+            (
+                depth_values[..., 1:] - depth_values[..., :-1],
+                1e10 * torch.ones_like(depth_values[..., :1]),
+            ),
+            dim=-1,
+        ).view(-1, 1)
+
+        # Transform SDF to density
+        signed_distance = self.sdf(ray_bundle)
+        density = self._sdf_to_density(signed_distance)
+
+        # Outputs
+        if self.rainbow:
+            base_color = torch.clamp(
+                torch.abs(sample_points - self.sdf.center),
+                0.02,
+                0.98
+            )
+        else:
+            base_color = 1.0
+
+        out = {
+            'density': -torch.log(1.0 - density) / deltas,
+            'feature': base_color * self.feature * density.new_ones(sample_points.shape[0], 1)
+        }
+
+        return out
+
+
+class HarmonicEmbedding(torch.nn.Module):
+    def __init__(
+        self,
+        in_channels: int = 3,
+        n_harmonic_functions: int = 6,
+        omega0: float = 1.0,
+        logspace: bool = True,
+        include_input: bool = True,
+    ) -> None:
+        super().__init__()
+
+        if logspace:
+            frequencies = 2.0 ** torch.arange(
+                n_harmonic_functions,
+                dtype=torch.float32,
+            )
+        else:
+            frequencies = torch.linspace(
+                1.0,
+                2.0 ** (n_harmonic_functions - 1),
+                n_harmonic_functions,
+                dtype=torch.float32,
+            )
+
+        self.register_buffer("_frequencies", omega0 *
+                             frequencies, persistent=False)
+        self.include_input = include_input
+        self.output_dim = n_harmonic_functions * 2 * in_channels
+
+        if self.include_input:
+            self.output_dim += in_channels
+
+    def forward(self, x: torch.Tensor):
+        embed = (x[..., None] * self._frequencies).view(*x.shape[:-1], -1)
+
+        if self.include_input:
+            return torch.cat((embed.sin(), embed.cos(), x), dim=-1)
+        else:
+            return torch.cat((embed.sin(), embed.cos()), dim=-1)
+
+
+class LinearWithRepeat(torch.nn.Linear):
+    def forward(self, input):
+        n1 = input[0].shape[-1]
+        output1 = F.linear(input[0], self.weight[:, :n1], self.bias)
+        output2 = F.linear(input[1], self.weight[:, n1:], None)
+        return output1 + output2.unsqueeze(-2)
+
+
+class MLPWithInputSkips(torch.nn.Module):
+    def __init__(
+        self,
+        n_layers: int,
+        input_dim: int,
+        output_dim: int,
+        skip_dim: int,
+        hidden_dim: int,
+        input_skips,
+    ):
+        super().__init__()
+
+        layers = []
+
+        for layeri in range(n_layers):
+            if layeri == 0:
+                dimin = input_dim
+                dimout = hidden_dim
+            elif layeri in input_skips:
+                dimin = hidden_dim + skip_dim
+                dimout = hidden_dim
+            else:
+                dimin = hidden_dim
+                dimout = hidden_dim
+
+            linear = torch.nn.Linear(dimin, dimout)
+            layers.append(torch.nn.Sequential(linear, torch.nn.ReLU(True)))
+
+        self.mlp = torch.nn.ModuleList(layers)
+        self._input_skips = set(input_skips)
+
+    def forward(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        y = x
+
+        for li, layer in enumerate(self.mlp):
+            if li in self._input_skips:
+                y = torch.cat((y, z), dim=-1)
+
+            y = layer(y)
+
+        return y
+
+
+# TODO (3.1): Implement NeRF MLP
+class NeuralRadianceField(torch.nn.Module):
+    def __init__(
+        self,
+        cfg,
+    ):
+        super().__init__()
+
+        self.harmonic_embedding_xyz = HarmonicEmbedding(
+            3, cfg.n_harmonic_functions_xyz)
+        self.harmonic_embedding_dir = HarmonicEmbedding(
+            3, cfg.n_harmonic_functions_dir)
+        #self.linear0 = torch.nn.Linear(3, 256)
+        #self.linear1 = torch.nn.Linear(39, 256)
+        self.linear1 = torch.nn.Linear(128, 4)
+        self.linear2 = torch.nn.Linear(128, 64)
+        self.relu = torch.nn.ReLU()
+        self.sigmoid = torch.nn.Sigmoid()
+
+        embedding_dim_xyz = self.harmonic_embedding_xyz.output_dim
+        embedding_dim_dir = self.harmonic_embedding_dir.output_dim
+
+        self.mlp = MLPWithInputSkips(
+            cfg.n_layers_xyz, embedding_dim_xyz, 128, embedding_dim_xyz, cfg.n_hidden_neurons_xyz, cfg.append_xyz)
+        print(cfg)
+
+    def forward(self, ray_bundle):
+        #print("sample points shape: {}".format(ray_bundle.sample_points.shape))
+        # print("sample points shape: {}".format(
+        #    ray_bundle.sample_points.view(-1, 3).shape))
+        #out = self.harmonic_embedding_xyz(ray_bundle.sample_points)
+        #out = self.linear1(ray_bundle.origins)
+        out = {"density": None, "feature": None}
+        dir_emb = self.harmonic_embedding_dir(ray_bundle.directions)
+        pos_emb = self.harmonic_embedding_xyz(
+            ray_bundle.sample_points.view(-1, 3))
+        raw_out = self.linear1(self.mlp(pos_emb, pos_emb))
+        out["density"] = self.relu(raw_out[:, 0])
+        out["feature"] = self.sigmoid(raw_out[:, 1:])
+
+        #out = self.linear1(self.relu(out))
+        #out = self.relu(out)
+        #out = self.sigmoid(out)
+        #print("density shape: {}".format(out["density"].shape))
+        #print("feature shape: {}".format(out["feature"].shape))
+        # out = {
+        #    'density': -torch.log(1.0 - density) / deltas,
+        #    'feature': base_color * self.feature * density.new_ones(sample_points.shape[0], 1)
+        # }
+
+        return out
+
+
+volume_dict = {
+    'sdf_volume': SDFVolume,
+    'nerf': NeuralRadianceField,
+}
+```
+
+### main.py
+```
+import os
+import warnings
+
+import hydra
+import numpy as np
+import torch
+import tqdm
+import imageio
+
+from omegaconf import DictConfig
+from PIL import Image
+from pytorch3d.renderer import (
+    PerspectiveCameras,
+    look_at_view_transform
+)
+import matplotlib.pyplot as plt
+
+from implicit import volume_dict
+from sampler import sampler_dict
+from renderer import renderer_dict
+from ray_utils import (
+    sample_images_at_xy,
+    get_pixels_from_image,
+    get_random_pixels_from_image,
+    get_rays_from_pixels
+)
+from data_utils import (
+    dataset_from_config,
+    create_surround_cameras,
+    vis_grid,
+    vis_rays,
+)
+from dataset import (
+    get_nerf_datasets,
+    trivial_collate,
+)
+from render_functions import (
+    get_points_renderer,
+    render_points,
+)
+
+
+# Model class containing:
+#   1) Implicit volume defining the scene
+#   2) Sampling scheme which generates sample points along rays
+#   3) Renderer which can render an implicit volume given a sampling scheme
+
+class Model(torch.nn.Module):
+    def __init__(
+        self,
+        cfg
+    ):
+        super().__init__()
+
+        # Get implicit function from config
+        self.implicit_fn = volume_dict[cfg.implicit_function.type](
+            cfg.implicit_function
+        )
+
+        # Point sampling (raymarching) scheme
+        self.sampler = sampler_dict[cfg.sampler.type](
+            cfg.sampler
+        )
+
+        # Initialize volume renderer
+        self.renderer = renderer_dict[cfg.renderer.type](
+            cfg.renderer
+        )
+
+    def forward(
+        self,
+        ray_bundle
+    ):
+        # Call renderer with
+        #  a) Implicit volume
+        #  b) Sampling routine
+
+        return self.renderer(
+            self.sampler,
+            self.implicit_fn,
+            ray_bundle
+        )
+
+
+def render_images(
+    model,
+    cameras,
+    image_size,
+    save=False,
+    file_prefix=''
+):
+    all_images = []
+    device = list(model.parameters())[0].device
+
+    for cam_idx, camera in enumerate(cameras):
+        print(f'Rendering image {cam_idx}')
+
+        torch.cuda.empty_cache()
+        camera = camera.to(device)
+        # TODO (1.3): implement in ray_utils.py
+        xy_grid = get_pixels_from_image(image_size, camera)
+        # TODO (1.3): implement in ray_utils.py
+        ray_bundle = get_rays_from_pixels(xy_grid, image_size, camera)
+
+        # TODO (1.3): Visualize xy grid using vis_grid
+        if cam_idx == 0 and file_prefix == '':
+            xy_vis = vis_grid(xy_grid, image_size)
+            plt.imsave("results/xy_grid.png", xy_vis)
+
+        # TODO (1.3): Visualize rays using vis_rays
+        if cam_idx == 0 and file_prefix == '':
+            vi_rays = vis_rays(ray_bundle, image_size)
+            plt.imsave("results/rays.png", vi_rays)
+
+        # TODO (1.4): Implement point sampling along rays in sampler.py
+        ray_bundle = model.sampler(ray_bundle)
+
+        # TODO (1.4): Visualize sample points as point cloud
+        if cam_idx == 0 and file_prefix == '':
+            render_points("results/points.png", ray_bundle.sample_points)
+            # pass
+
+        # TODO (1.5): Implement rendering in renderer.py
+        out = model(ray_bundle)
+
+        # Return rendered features (colors)
+        image = np.array(
+            out['feature'].view(
+                image_size[1], image_size[0], 3
+            ).detach().cpu()
+        )
+        all_images.append(image)
+
+        # TODO (1.5): Visualize depth
+        if cam_idx == 2 and file_prefix == '':
+            depth_im = np.array(out["depth"].view(
+                image_size[1], image_size[0]).detach().cpu())
+            plt.imsave("results/depth.png", depth_im)
+
+        # Save
+        if save:
+            plt.imsave(
+                f'{file_prefix}_{cam_idx}.png',
+                image
+            )
+
+    return all_images
+
+
+def render(
+    cfg,
+):
+    # Create model
+    model = Model(cfg)
+    model = model.cuda()
+    model.eval()
+
+    # Render spiral
+    cameras = create_surround_cameras(3.0, n_poses=20)
+    all_images = render_images(
+        model, cameras, cfg.data.image_size
+    )
+    imageio.mimsave('images/part_1.gif',
+                    [np.uint8(im * 255) for im in all_images])
+
+
+def train(
+    cfg
+):
+    # Create model
+    model = Model(cfg)
+    model = model.cuda()
+    model.train()
+
+    # Create dataset
+    train_dataset = dataset_from_config(cfg.data)
+    train_dataloader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=1,
+        shuffle=True,
+        num_workers=0,
+        collate_fn=lambda batch: batch,
+    )
+    image_size = cfg.data.image_size
+
+    # Create optimizer
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=cfg.training.lr
+    )
+
+    # Render images before training
+    cameras = [item['camera'] for item in train_dataset]
+    render_images(
+        model, cameras, image_size,
+        save=True, file_prefix='images/part_2_before_training'
+    )
+
+    # Train
+    t_range = tqdm.tqdm(range(cfg.training.num_epochs))
+
+    torch.autograd.set_detect_anomaly(True)
+    for epoch in t_range:
+        for iteration, batch in enumerate(train_dataloader):
+            image, camera, camera_idx = batch[0].values()
+            image = image.cuda()
+            camera = camera.cuda()
+
+            # Sample rays
+            # TODO (2.1): implement in ray_utils.py
+            xy_grid = get_random_pixels_from_image(
+                cfg.training.batch_size, image_size, camera)
+            ray_bundle = get_rays_from_pixels(xy_grid, image_size, camera)
+            rgb_gt = sample_images_at_xy(image, xy_grid.cuda())
+
+            # Run model forward
+            out = model(ray_bundle)
+
+            # TODO (2.2): Calculate loss
+            print(out["feature"].shape)
+            print(out["depth"].shape)
+            print(rgb_gt.shape)
+            loss = torch.nn.functional.mse_loss(out["feature"], rgb_gt)
+
+            # Backprop
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        if (epoch % 10) == 0:
+            t_range.set_description(f'Epoch: {epoch:04d}, Loss: {loss:.06f}')
+            t_range.refresh()
+
+    # Print center and side lengths
+    print("Box center:", tuple(
+        np.array(model.implicit_fn.sdf.center.data.detach().cpu()).tolist()[0]))
+    print("Box side lengths:", tuple(
+        np.array(model.implicit_fn.sdf.side_lengths.data.detach().cpu()).tolist()[0]))
+
+    # Render images after training
+    render_images(
+        model, cameras, image_size,
+        save=True, file_prefix='images/part_2_after_training'
+    )
+    all_images = render_images(
+        model, create_surround_cameras(3.0, n_poses=20), image_size, file_prefix='part_2'
+    )
+    imageio.mimsave('images/part_2.gif',
+                    [np.uint8(im * 255) for im in all_images])
+
+
+def create_model(cfg):
+    # Create model
+    model = Model(cfg)
+    model.cuda()
+    model.train()
+
+    # Load checkpoints
+    optimizer_state_dict = None
+    start_epoch = 0
+
+    checkpoint_path = os.path.join(
+        hydra.utils.get_original_cwd(),
+        cfg.training.checkpoint_path
+    )
+
+    if len(cfg.training.checkpoint_path) > 0:
+        # Make the root of the experiment directory.
+        checkpoint_dir = os.path.split(checkpoint_path)[0]
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        # Resume training if requested.
+        if cfg.training.resume and os.path.isfile(checkpoint_path):
+            print(f"Resuming from checkpoint {checkpoint_path}.")
+            loaded_data = torch.load(checkpoint_path)
+            model.load_state_dict(loaded_data["model"])
+            start_epoch = loaded_data["epoch"]
+
+            print(f"   => resuming from epoch {start_epoch}.")
+            optimizer_state_dict = loaded_data["optimizer"]
+
+    # Initialize the optimizer.
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=cfg.training.lr,
+    )
+
+    # Load the optimizer state dict in case we are resuming.
+    if optimizer_state_dict is not None:
+        optimizer.load_state_dict(optimizer_state_dict)
+        optimizer.last_epoch = start_epoch
+
+    # The learning rate scheduling is implemented with LambdaLR PyTorch scheduler.
+    def lr_lambda(epoch):
+        return cfg.training.lr_scheduler_gamma ** (
+            epoch / cfg.training.lr_scheduler_step_size
+        )
+
+    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, lr_lambda, last_epoch=start_epoch - 1, verbose=False
+    )
+
+    return model, optimizer, lr_scheduler, start_epoch, checkpoint_path
+
+
+def train_nerf(
+    cfg
+):
+    # Create model
+    model, optimizer, lr_scheduler, start_epoch, checkpoint_path = create_model(
+        cfg)
+
+    # Load the training/validation data.
+    train_dataset, val_dataset, _ = get_nerf_datasets(
+        dataset_name=cfg.data.dataset_name,
+        image_size=[cfg.data.image_size[1], cfg.data.image_size[0]],
+    )
+
+    train_dataloader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=1,
+        shuffle=True,
+        num_workers=0,
+        collate_fn=trivial_collate,
+    )
+
+    #criterion = torch.nn.MSELoss()
+
+    # Run the main training loop.
+    for epoch in range(start_epoch, cfg.training.num_epochs):
+        t_range = tqdm.tqdm(enumerate(train_dataloader))
+
+        for iteration, batch in t_range:
+            image, camera, camera_idx = batch[0].values()
+            image = image.cuda().unsqueeze(0)
+            camera = camera.cuda()
+
+            # Sample rays
+            xy_grid = get_random_pixels_from_image(
+                cfg.training.batch_size, cfg.data.image_size, camera
+            )
+            ray_bundle = get_rays_from_pixels(
+                xy_grid, cfg.data.image_size, camera
+            )
+            rgb_gt = sample_images_at_xy(image, xy_grid.cuda())
+
+            # Run model forward
+            out = model(ray_bundle)
+
+            # TODO (3.1): Calculate loss
+            loss = torch.nn.functional.mse_loss(out["feature"], rgb_gt)
+            #loss = criterion(out["feature"], rgb_gt)
+
+            # Take the training step.
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            t_range.set_description(f'Epoch: {epoch:04d}, Loss: {loss:.06f}')
+            t_range.refresh()
+
+        # Adjust the learning rate.
+        lr_scheduler.step()
+
+        # Checkpoint.
+        if (
+            epoch % cfg.training.checkpoint_interval == 0
+            and len(cfg.training.checkpoint_path) > 0
+            and epoch > 0
+        ):
+            print(f"Storing checkpoint {checkpoint_path}.")
+
+            data_to_store = {
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "epoch": epoch,
+            }
+
+            torch.save(data_to_store, checkpoint_path)
+
+        # Render
+        if (
+            epoch % cfg.training.render_interval == 0
+            and epoch > 0
+        ):
+            with torch.no_grad():
+                test_images = render_images(
+                    model, create_surround_cameras(
+                        4.0, n_poses=20, up=(0.0, 0.0, 1.0), focal_length=2.0),
+                    cfg.data.image_size, file_prefix='nerf'
+                )
+                imageio.mimsave('images/part_3.gif',
+                                [np.uint8(im * 255) for im in test_images])
+
+
+@ hydra.main(config_path='./configs', config_name='sphere')
+def main(cfg: DictConfig):
+    os.chdir(hydra.utils.get_original_cwd())
+
+    if cfg.type == 'render':
+        render(cfg)
+    elif cfg.type == 'train':
+        train(cfg)
+    elif cfg.type == 'train_nerf':
+        train_nerf(cfg)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### ray_utils.py
+```
+import math
+from typing import List, NamedTuple
+
+import torch
+import torch.nn.functional as F
+from pytorch3d.renderer.cameras import CamerasBase
+
+
+# Convenience class wrapping several ray inputs:
+#   1) Origins -- ray origins
+#   2) Directions -- ray directions
+#   3) Sample points -- sample points along ray direction from ray origin
+#   4) Sample lengths -- distance of sample points from ray origin
+
+class RayBundle(object):
+    def __init__(
+        self,
+        origins,
+        directions,
+        sample_points,
+        sample_lengths,
+    ):
+        self.origins = origins
+        self.directions = directions
+        self.sample_points = sample_points
+        self.sample_lengths = sample_lengths
+
+    def __getitem__(self, idx):
+        return RayBundle(
+            self.origins[idx],
+            self.directions[idx],
+            self.sample_points[idx],
+            self.sample_lengths[idx],
+        )
+
+    @property
+    def shape(self):
+        return self.origins.shape[:-1]
+
+    @property
+    def sample_shape(self):
+        return self.sample_points.shape[:-1]
+
+    def reshape(self, *args):
+        return RayBundle(
+            self.origins.reshape(*args, 3),
+            self.directions.reshape(*args, 3),
+            self.sample_points.reshape(*args, self.sample_points.shape[-2], 3),
+            self.sample_lengths.reshape(
+                *args, self.sample_lengths.shape[-2], 1),
+        )
+
+    def view(self, *args):
+        return RayBundle(
+            self.origins.view(*args, 3),
+            self.directions.view(*args, 3),
+            self.sample_points.view(*args, self.sample_points.shape[-2], 3),
+            self.sample_lengths.view(*args, self.sample_lengths.shape[-2], 1),
+        )
+
+    def _replace(self, **kwargs):
+        for key in kwargs.keys():
+            setattr(self, key, kwargs[key])
+
+        return self
+
+    def to(self, device):
+
+        self.origins = self.origins.to(device)
+        self.directions = self.directions.to(device)
+        self.sample_points = self.sample_points.to(device)
+        self.sample_lengths = self.sample_lengths.to(device)
+
+        return self
+
+
+# Sample image colors from pixel values
+def sample_images_at_xy(
+    images: torch.Tensor,
+    xy_grid: torch.Tensor,
+):
+    batch_size = images.shape[0]
+    spatial_size = images.shape[1:-1]
+
+    xy_grid = -xy_grid.view(batch_size, -1, 1, 2)
+
+    images_sampled = torch.nn.functional.grid_sample(
+        images.permute(0, 3, 1, 2),
+        xy_grid,
+        align_corners=True,
+        mode="bilinear",
+    )
+
+    return images_sampled.permute(0, 2, 3, 1).view(-1, images.shape[-1])
+
+
+# Generate pixel coordinates from in NDC space (from [-1, 1])
+def get_pixels_from_image(image_size, camera):
+    W, H = image_size[0], image_size[1]
+
+    # TODO (1.3): Generate pixel coordinates from [0, W] in x and [0, H] in y
+    x = torch.linspace(0, W - 1, W)
+    y = torch.linspace(0, H - 1, H)
+
+    # TODO (1.3): Convert to the range [-1, 1] in both x and y
+    p_W, p_H = (W - 1)/2, (H - 1)/2
+    x = (x - p_W)/p_W
+    y = (y - p_H)/p_H
+
+    # Create grid of coordinates
+    xy_grid = torch.stack(
+        tuple(reversed(torch.meshgrid(y, x))),
+        dim=-1,
+    ).view(W * H, 2)
+
+    return -xy_grid
+
+
+# Random subsampling of pixels from an image
+def get_random_pixels_from_image(n_pixels, image_size, camera):
+    xy_grid = get_pixels_from_image(image_size, camera)
+
+    # TODO (2.1): Random subsampling of pixel coordinates
+    xy_grid_sub = xy_grid.unsqueeze(1)
+    xy_grid_sub = xy_grid_sub.index_select(
+        0, torch.randperm(xy_grid_sub.shape[0]))
+
+    # Return
+    return xy_grid_sub.reshape(-1, 2)[:n_pixels]
+
+
+# Get rays from pixel values
+def get_rays_from_pixels(xy_grid, image_size, camera):
+    W, H = image_size[0], image_size[1]
+
+    # TODO (1.3): Map pixels to points on the image plane at Z=1
+    ndc_points = torch.cat(
+        (xy_grid, torch.ones(xy_grid.shape[0], 1)), 1).cuda()
+
+    ndc_points = torch.cat(
+        [
+            ndc_points,
+            torch.ones_like(ndc_points[..., -1:])
+        ],
+        dim=-1
+    )
+
+    # TODO (1.3): Use camera.unproject to get world space points on the image plane from NDC space points
+    #xyz_world = camera.unproject_points(ndc_points, world_coordinates=True)
+
+    # TODO (1.3): Get ray origins from camera center
+    #cam_mat = camera.get_camera_center()
+    #rays_o = cam_mat - xyz_world
+
+    # TODO (1.3): Get normalized ray directions
+    #rays_d = rays_o / torch.linalg.vector_norm(rays_o, dim=1).view(-1, 1)
+    world_points = camera.unproject_points(ndc_points)
+
+    # TODO (1.3): Get ray origins from camera center
+    rays_o = torch.ones_like(world_points).cuda() * \
+        camera.get_camera_center().squeeze(0)
+
+    # TODO (1.3): Get normalized ray directions
+    rays_d = world_points - rays_o
+    rays_d = rays_d / torch.linalg.norm(rays_d, dim=1, keepdim=True)
+
+    # Create and return RayBundle
+    return RayBundle(
+        rays_o,
+        rays_d,
+        torch.zeros_like(rays_o).unsqueeze(1),
+        torch.zeros_like(rays_o).unsqueeze(1),
+    )
+```
+
+### render_functions.py
+```
+import argparse
+import os
+import sys
+import datetime
+import time
+import math
+import json
+import torch
+
+import numpy as np
+from PIL import Image
+
+import matplotlib.pyplot as plt
+import pytorch3d
+import torch
+
+from pytorch3d.renderer import look_at_view_transform
+from pytorch3d.renderer import OpenGLPerspectiveCameras
+from pytorch3d.renderer import (
+    AlphaCompositor,
+    RasterizationSettings,
+    MeshRenderer,
+    MeshRasterizer,
+    PointsRasterizationSettings,
+    PointsRenderer,
+    PointsRasterizer,
+    HardPhongShader,
+)
+
+
+def get_device():
+    """
+    Checks if GPU is available and returns device accordingly.
+    """
+    if torch.cuda.is_available():
+        device = torch.device("cuda:0")
+    else:
+        device = torch.device("cpu")
+    return device
+
+
+def get_points_renderer(
+    image_size=512, device=None, radius=0.01, background_color=(1, 1, 1)
+):
+    """
+    Returns a Pytorch3D renderer for point clouds.
+
+    Args:
+        image_size (int): The rendered image size.
+        device (torch.device): The torch device to use (CPU or GPU). If not specified,
+            will automatically use GPU if available, otherwise CPU.
+        radius (float): The radius of the rendered point in NDC.
+        background_color (tuple): The background color of the rendered image.
+
+    Returns:
+        PointsRenderer.
+    """
+    if device is None:
+        if torch.cuda.is_available():
+            device = torch.device("cuda:0")
+        else:
+            device = torch.device("cpu")
+    raster_settings = PointsRasterizationSettings(
+        image_size=image_size, radius=radius,)
+    renderer = PointsRenderer(
+        rasterizer=PointsRasterizer(raster_settings=raster_settings),
+        compositor=AlphaCompositor(background_color=background_color),
+    )
+    return renderer
+
+
+def render_points(filename, points, image_size=256, color=[0.7, 0.7, 1], device=None):
+    # The device tells us whether we are rendering with GPU or CPU. The rendering will
+    # be *much* faster if you have a CUDA-enabled NVIDIA GPU. However, your code will
+    # still run fine on a CPU.
+    # The default is to run on CPU, so if you do not have a GPU, you do not need to
+    # worry about specifying the device in all of these functions.
+    if device is None:
+        device = get_device()
+
+    # Get the renderer.
+    points_renderer = get_points_renderer(image_size=256, radius=0.01)
+
+    # Get the vertices, faces, and textures.
+    # vertices, faces = load_cow_mesh(cow_path)
+    # vertices = vertices.unsqueeze(0)  # (N_v, 3) -> (1, N_v, 3)
+    # faces = faces.unsqueeze(0)  # (N_f, 3) -> (1, N_f, 3)
+    points = points.view(1, -1, 3).to(device)
+    textures = torch.ones(points.size()).to(device)*0.5   # (1, N_v, 3)
+    rgb = textures * torch.tensor(color).to(device)  # (1, N_v, 3)
+
+    point_cloud = pytorch3d.structures.pointclouds.Pointclouds(
+        points=points, features=rgb
+    )
+
+    R, T = look_at_view_transform(10.0, 10.0, 90)
+
+    # Prepare the camera:
+    cameras = OpenGLPerspectiveCameras(
+        R=R, T=T, device=device
+    )
+
+    rend = points_renderer(point_cloud.extend(2), cameras=cameras)
+
+    # Place a point light in front of the cow.
+    # lights = pytorch3d.renderer.PointLights(location=[[0.0, 1.0, -2.0]], device=device)
+
+    # rend = renderer(mesh, cameras=cameras, lights=lights)
+    rend = rend.detach().cpu().numpy()[0, ..., :3]  # (B, H, W, 4) -> (H, W, 3)
+    plt.imsave(filename, rend)
+
+    # The .cpu moves the tensor to GPU (if needed).
+    return rend
+```
+
+### renderer.py
+```
+import torch
+
+from typing import List, Optional, Tuple
+from pytorch3d.renderer.cameras import CamerasBase
+
+
+# Volume renderer which integrates color and density along rays
+# according to the equations defined in [Mildenhall et al. 2020]
+class VolumeRenderer(torch.nn.Module):
+    def __init__(
+        self,
+        cfg
+    ):
+        super().__init__()
+
+        self._chunk_size = cfg.chunk_size
+        self._white_background = cfg.white_background if 'white_background' in cfg else False
+
+    def _compute_weights(
+        self,
+        deltas,
+        rays_density: torch.Tensor,
+        eps: float = 1e-10
+    ):
+        # TODO (1.5): Compute transmittance using the equation described in the README
+        #T = torch.ones((deltas.shape[0], 1)).cuda()
+        #weights = torch.ones_like(deltas)
+        #trans = torch.exp(-rays_density * deltas + eps)
+        # for i in range(1, T.shape[1]):
+        # T[:, i] = T[:, i-1] * \
+        ##        torch.exp(-rays_density[:, i-1] * deltas[:, i-1] + eps)
+
+        # for i in range(1, deltas.shape[1]):
+        #    print((T[i-1, :] * torch.exp(-rays_density[:, i-1]
+        #          * deltas[:, i-1] + eps)).shape)
+        #    T = torch.vstack(
+        #        (T, T[i-1, :] * torch.exp(-rays_density[:, i-1] * deltas[:, i-1] + eps)))
+        #T = T.view(-1, deltas.shape[1], 1)
+        ## print(T[30000:30004, ...])
+        # print(deltas)
+
+        # TODO (1.5): Compute weight used for rendering from transmittance and density
+        #weights = T * (1 - trans)
+
+        N, d = deltas.size(0), deltas.size(1)  # deltas shape: (4096, 64, 1)
+
+        T = []
+        T_prev = torch.ones((N, 1)).cuda()
+
+        T.append(T_prev)
+
+        for i in range(0, d - 1):
+
+            T_curr = T_prev * \
+                torch.exp(- rays_density[:, i] * deltas[:, i] + eps)
+            T_prev = T_curr
+
+            T.append(T_curr)
+
+        T = torch.stack(T, dim=1)
+
+        # TODO (1.5): Compute weight used for rendering from transmittance and density
+
+        weights = T * (1. - torch.exp(- rays_density * deltas + eps))
+
+        return weights
+
+    def _aggregate(
+        self,
+        weights: torch.Tensor,
+        rays_feature: torch.Tensor
+    ):
+        # TODO (1.5): Aggregate (weighted sum of) features using weights
+        # print(rays_feature.shape, weights.shape, "stuff")
+        # print("OH YEAH OOOOOOOOOOOOOH YEAH H YEAH H YEAH H YEAH H YEAH H YEAH H YEAH H YEAH H YEAH H YEAH H YEAH H YEAH H YEAH ")
+        #feature = (weights * rays_feature).sum(dim=1)
+        # print(feature.shape, "feature")
+        N, d = weights.size(0), weights.size(1)
+
+        # print(weights.shape)
+        # print(rays_feature.shape)
+
+        feature = torch.sum(weights * rays_feature.view(N, d, -1), dim=1)
+
+        return feature
+
+    def forward(
+        self,
+        sampler,
+        implicit_fn,
+        ray_bundle,
+    ):
+        B = ray_bundle.shape[0]
+
+        # Process the chunks of rays.
+        chunk_outputs = []
+
+        for chunk_start in range(0, B, self._chunk_size):
+            cur_ray_bundle = ray_bundle[chunk_start:chunk_start +
+                                        self._chunk_size]
+
+            # Sample points along the ray
+            cur_ray_bundle = sampler(cur_ray_bundle)
+            n_pts = cur_ray_bundle.sample_shape[1]
+
+            # Call implicit function with sample points
+            implicit_output = implicit_fn(cur_ray_bundle)
+            density = implicit_output['density']
+            feature = implicit_output['feature']
+
+            # Compute length of each ray segment
+            depth_values = cur_ray_bundle.sample_lengths[..., 0]
+            deltas = torch.cat(
+                (
+                    depth_values[..., 1:] - depth_values[..., :-1],
+                    1e10 * torch.ones_like(depth_values[..., :1]),
+                ),
+                dim=-1,
+            )[..., None]
+
+            # Compute aggregation weights
+            weights = self._compute_weights(
+                deltas.view(-1, n_pts, 1),
+                density.view(-1, n_pts, 1)
+            )
+
+            # TODO (1.5): Render (color) features using weights
+            #feature = self._aggregate(weights, feature.view(-1, 64, 3))
+            feature = self._aggregate(weights, feature)
+
+            # TODO (1.5): Render depth map
+            #depth = self._aggregate(weights.squeeze(2), depth_values)
+            depth = self._aggregate(weights, depth_values)
+
+            # Return
+            cur_out = {
+                'feature': feature,
+                'depth': depth,
+            }
+
+            chunk_outputs.append(cur_out)
+
+        # Concatenate chunk outputs
+        out = {
+            k: torch.cat(
+                [chunk_out[k] for chunk_out in chunk_outputs],
+                dim=0
+            ) for k in chunk_outputs[0].keys()
+        }
+
+        return out
+
+
+renderer_dict = {
+    'volume': VolumeRenderer
+}
+```
+
+### sampler.py
+```
+import math
+from typing import List
+
+import torch
+from ray_utils import RayBundle
+from pytorch3d.renderer.cameras import CamerasBase
+
+
+# Sampler which implements stratified (uniform) point sampling along rays
+class StratifiedRaysampler(torch.nn.Module):
+    def __init__(
+        self,
+        cfg
+    ):
+        super().__init__()
+
+        self.n_pts_per_ray = cfg.n_pts_per_ray
+        self.min_depth = cfg.min_depth
+        self.max_depth = cfg.max_depth
+
+    def forward(
+        self,
+        ray_bundle,
+    ):
+        # TODO (1.4): Compute z values for self.n_pts_per_ray points uniformly sampled between [near, far]
+        z_vals = torch.linspace(
+            self.min_depth, self.max_depth, self.n_pts_per_ray).view(1, -1, 1).cuda()
+        N = ray_bundle.directions.shape[0]
+        d = z_vals.shape[1]
+        z_vals = z_vals.repeat(N, 1, 1)
+
+        # TODO (1.4): Sample points from z values
+        sample_points = z_vals * \
+            ray_bundle.directions.view(-1, 1, 3) + \
+            ray_bundle.origins.view(-1, 1, 3)
+
+        # Return
+        return ray_bundle._replace(
+            sample_points=sample_points,
+            sample_lengths=z_vals * torch.ones_like(sample_points[..., :1]),
+        )
+
+
+sampler_dict = {
+    'stratified': StratifiedRaysampler
+}
+```

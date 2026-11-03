@@ -1,0 +1,259 @@
+opengl - Storing rendering data for voxel game 1 VAO and VBO or 1 for every chunk - Game Development Stack Exchange
+Teams
+Q&A for work
+Connect and share knowledge within a single location that is structured and easy to search.
+Learn more about Teams
+Storing rendering data for voxel game 1 VAO and VBO or 1 for every chunk
+Ask Question
+Asked
+7 years, 5 months ago
+Modified
+7 years, 5 months ago
+Viewed
+438 times
+0
+\$\begingroup\$
+I have a minecraft style voxel game with placing and digging blocks. it runs at 400+ fps on my computer but when I added semi-transparent water it started running at ~40 fps. so a time per frame increase of 0.0175s or 8 times what is used to be. What I am currently doing is having a VAO and VBO for each chunk and every time a chunk is changed or loaded it finds all of the non occluded blocks and puts their positions into another buffer in the chunk. then I use instancing to render the whole chunk in one draw call so every frame I am doing ~300 draw calls.
+Once I added the water(using order independent transparency http://www.openglsuperbible.com/2013/08/20/is-order-independent-transparency-really-necessary/) I was individually calling gldrawelements() for every visible water block so around 9000 if half the visible area is ocean. I know using instancing with these blocks would help but then I have 2 VAOs for every chunk and 600+ draw calls of buffers with only a couple hundred blocks in them. would there be a better way to organize these things.
+opengl
+voxels
+vbo
+transparency
+vao
+Share
+Follow
+asked Jan 14, 2017 at 14:48
+Ben BeazleyBen Beazley
+9377 bronze badges
+\$\endgroup\$
+3
+\$\begingroup\$
+I think its the OIT that is killing your frames. I use a reflection buffer and refraction buffer for my water shader then draw it opaque and do some shader math to blend the two buffers.... refraction buffer is just the last frames backbuffer. Ill write an answer if you want?
+\$\endgroup\$
+– Justin William Stanley Bryant
+Commented
+Jan 15, 2017 at 0:09
+\$\begingroup\$
+@Justin William Stanley Bryant whats an OIT? and I've never heard of reflection or refraction buffers. An answer would be realy helpful
+\$\endgroup\$
+– Ben Beazley
+Commented
+Jan 15, 2017 at 1:41
+\$\begingroup\$
+OIT = order independent transparency, will write an answer soon
+\$\endgroup\$
+– Justin William Stanley Bryant
+Commented
+Jan 15, 2017 at 1:49
+Add a comment
+|
+1 Answer
+1
+Sorted by:
+Reset to default
+Highest score (default)
+Date modified (newest first)
+Date created (oldest first)
+1
+\$\begingroup\$
+I base my water shader off of this work, its directX based but I'm sure with a bit of work you can convert it over but ill go over how I do it so you have an idea\recipe.
+First up I make a copy of the current frames back buffer to use as the refraction buffer or you can draw everything again and use clip planes but I only do that for the reflection buffer to save a heap of draw calls at the cost of some artifacts in the refraction buffer.
+I then compute a reflection camera and then draw everything that I want to reflect into the reflection buffer using the reflection camera as the view matrix.
+Water Camera View:
+```
+    // play with the (0,0,0) value here to adjust the water camera offset
+    Dim WaterPos As Vector3 = BasePos + CType(Vector3.Transform(New Vector3(0, 0, 0), Matrix.RotationX(MathHelper.ToRadians(0)) * Matrix.RotationY(MathHelper.ToRadians(_yaw))), Vector3)  
+
+    WaterPos.Y = -WaterPos.Y + 175 * 2 // sets the camera Y cord(adjust 175 to water height +- 3-5)
+
+    //locks the pitch part of the rotation matrix 
+    Dim watertemp As Matrix = Matrix.RotationX(MathHelper.ToRadians(15)) * Matrix.RotationY(MathHelper.ToRadians(_yaw)) * Matrix.Translation(WaterPos)
+```
+I have the reflection buffer resolution set to 1/4 full screen resolution make sure it has the same aspect as the back buffer it the projection will fail, the normal perturbation(waves+wind) hides the jaggyness.
+When I come to render the water I just draw the water plain with an opaque blendstate and use this shader to blend it all togeather.
+Water shader:
+```
+WaterVertexToPixel WaterVS(float4 inPos : POSITION, float2 inTex: TEXCOORD)
+
+{
+
+WaterVertexToPixel Output = (WaterVertexToPixel)0;
+
+float4×4 preViewProjection = mul (xView, xProjection);
+
+float4×4 preWorldViewProjection = mul (xWorld, preViewProjection);
+
+float4×4 preReflectionViewProjection = mul (xReflectionView, xProjection);
+
+float4×4 preWorldReflectionViewProjection = mul (xWorld, preReflectionViewProjection);
+
+Output.Position = mul(inPos, preWorldViewProjection);
+Output.ReflectionMapSamplingPos = mul(inPos, preWorldReflectionViewProjection);
+
+Output.RefractionMapSamplingPos = mul(inPos, preWorldViewProjection);
+
+return Output;
+
+}
+
+void WaterPS(WaterVertexToPixel PSIn)
+
+{
+
+    float3 eyeVector = normalize(WorldCameraPos - WorldPos);
+
+float3 NormalData1 = 0;
+float3 NormalData2 = 0;
+
+NormalData1 = BumpMap1.Sample(samANISOTROPIC,texturecoords).rgb;
+NormalData2 = BumpMap2.Sample(samANISOTROPIC, texturecoords).rgb;
+
+float3 normalT = normalize(lerp(NormalData1 - 0.5, NormalData2 - 0.5, flowLerp) *2);
+  float2 perturbation = WaveHeight * normalT.rg;
+
+// Project Reflection Buffer To Water Surface
+ProjectedTexCoords.x = PSIn.ReflectionMapSamplingPos.x/PSIn.ReflectionMapSamplingPos.w/2.0f + 0.5f;
+
+ProjectedTexCoords.y =   PSIn.ReflectionMapSamplingPos.y/PSIn.ReflectionMapSamplingPos.w/2.0f + 0.5f;
+float2 perturbatedTexCoords = ProjectedTexCoords + perturbation;
+float4 reflectiveColor = tex2D(ReflectionSampler, perturbatedTexCoords);
+
+ // Project Refraction Buffer To Water Surface
+ProjectedRefrTexCoords.x = PSIn.RefractionMapSamplingPos.x/PSIn.RefractionMapSamplingPos.w/2.0f + 0.5f;
+
+ProjectedRefrTexCoords.y = -PSIn.RefractionMapSamplingPos.y/PSIn.RefractionMapSamplingPos.w/2.0f + 0.5f;
+    float2 perturbatedRefrTexCoords = ProjectedRefrTexCoords + perturbation;
+float4 refractiveColor = tex2D(RefractionSampler, perturbatedRefrTexCoords);
+
+
+float3 combinedColor;  
+
+//The Fresnel equations, deduced by Augustin-Jean Fresnel, describe the behaviour of light when moving between media of differing refractive indices.
+
+float fresnelTerm;
+
+fresnelTerm = dot(eyeVector, normalVector);
+fresnelTerm = 1 - fresnelTerm*1.3f;
+
+fresnelTerm = fresnelTerm * FresnelAdjust;
+
+//just to be sure that the value is between 0 and 1;
+fresnelTerm = fresnelTerm < 0 ? 0 : fresnelTerm;
+fresnelTerm = fresnelTerm > 1 ? 1 : fresnelTerm;
+
+
+// creating the combined color
+combinedColor = lerp(WaterColor, ReflectionColor.rgb, fresnelTerm);
+
+combinedColor = lerp(RefractionColor.rgb, combinedColor , alpha);
+
+return combinedColor ;
+
+}
+```
+I know you have a mine craft style world but I assume you would just apply the shader to each block or each chunk of blocks.
+when you come to draw the reflection buffer you will need to clip everything bellow the water or it looks funky also have a play with the cull mode as you may need to flip it.
+Clip plain:
+```
+ dim  reflectionPlane as plain = CreatePlane(120, New SharpDX.Vector3(0, -1, 0), True)
+    //Use this float4 on the GPU to clip my geometry when filling the reflection buffer, not sure how to do it in openGL
+
+    dim  planeConvert as vector4 = New SharpDX.Vector4(reflectionPlane.Normal, reflectionPlane.D)
+
+ Public Function CreatePlane(Height As Single, planeNormalDirection As SharpDX.Vector3, clipSide As Boolean) As SharpDX.Plane
+    planeNormalDirection.Normalize()
+    Dim planeCoeffs As New SharpDX.Vector4(planeNormalDirection, Height)
+    If clipSide Then
+        planeCoeffs *= -1
+    End If
+    Dim tempCoeffs As Single() = New Single(3) {}
+    tempCoeffs(0) = planeCoeffs.X
+    tempCoeffs(1) = planeCoeffs.Y
+    tempCoeffs(2) = planeCoeffs.Z
+    tempCoeffs(3) = planeCoeffs.W
+    Dim finalPlane As New SharpDX.Plane(tempCoeffs)
+    Return finalPlane
+End Function
+```
+I also have not tested that shader because I had to pull it out of my messy beast of a water shader but you should get the general idea.
+Vertex shader takes World, View, Projection and WaterView as inputs(float4x4).
+Pixel shader has two textures Relfection and Refraction, two normal maps for the details on the surface of the water.
+Maybe use bigger chunks and some GPU occlusion queries to cull out even more chunks you cant see.
+Share
+Follow
+answered Jan 15, 2017 at 2:39
+Justin William Stanley BryantJustin William Stanley Bryant
+76466 silver badges1616 bronze badges
+\$\endgroup\$
+3
+\$\begingroup\$
+wow that water looks nice! Do you have a suggestion on how I should store the data for the water blocks to be rendered because even without any effects it's laggy
+\$\endgroup\$
+– Ben Beazley
+Commented
+Jan 15, 2017 at 13:07
+\$\begingroup\$
+With the water blocks you could get away with drawing only the blocks on the very surface(I bet that's what you do). You could try putting all the water blocks into one buffer and drawing them in one draw call. Walk you octree to find visible blocks then walk your visible block list and put them into one big buffer. I guess for destruction you could have a second smaller buffer that holds the blocks that are within the biggest destruction area you have. Just some thinking, maybe we should turn this into a chat, I'm just not sure how
+\$\endgroup\$
+– Justin William Stanley Bryant
+Commented
+Jan 15, 2017 at 23:03
+\$\begingroup\$
+I switched to putting lol of the water blocks in one buffer and drawing it all at once. I decided that all of the transparent blocks could be drawn all at once in one buffer after the opaque blocks
+\$\endgroup\$
+– Ben Beazley
+Commented
+Jan 17, 2017 at 0:54
+Add a comment
+|
+You must log in to answer this question.
+Not the answer you're looking for? Browse other questions tagged
+opengl
+voxels
+vbo
+transparency
+vao
+.
+Featured on Meta
+Upcoming sign-up experiments related to tags
+Related
+8
+OpenGL VBO and VAO Confusion
+3
+OpenGL poor performace with instanced drawing
+0
+Opengl Best VAO model for voxel engine
+1
+Best strategy on VAO and texture coordinates for voxel rendering?
+0
+making special blocks in a voxel game OpenGL
+2
+How can I implement semi-transparent/semi-opaque voxels in a voxel game?
+Hot Network Questions
+Advice for job application to a university position as a non-student
+Would a PhD from Europe, Canada, Australia, or New Zealand be accepted in the US?
+How to find gaps in mathematics/theoretical physics/mathematical physics ? How to proceed after you found them?
+Short story: possibly titled "Snatch Me Another" from a Crave anthology
+Best course of action given problematic bottom plates in basement finishing
+A Boy Named Sue
+Were trained crocodiles used as a weapon in the Battle of Saraighat?
+Securing HTTP File Transfer over local network
+How can UserA programmatically replace a text string within a file they own that's located in /etc?
+Do differently rendered measure numbers convey meaning?
+Applying the Chain Rule for (Sin(x) + 1)
+Stability of an ideal Differentiator with a "classical" Op Amp vs using a transimpedance amplifier
+Comparing hazard ratios within the same model
+Delimiter sizes with unicode-math
+Clear jel to thicken the filling of a key lime pie?
+Variable is significant in multiple linear regression but not in t-test of the subgroups
+Short story about a group of astronauts/scientist that find a sentient planet that seems friendly but is not
+RAW, do transparent obstacles generally grant Total Cover?
+Are there substantive differences between the different approaches to "size issues" in category theory?
+Monodromic but not equivariant sheaves and Braden's theorem
+find -printf option is not working as expected, is it a bug?
+HTTP: how likely are you to be compromised by using it just once?
+How does a vehicle's brake affect the friction between the vehicle and ground?
+A member of NATO falls into civil war, who do the rest of the members back?
+more hot questions
+Question feed
+default

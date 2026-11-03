@@ -1,0 +1,514 @@
+3D & AR SDK for Android (Jetpack Compose + Filament), Apple (SwiftUI + RealityKit), Web, Flutter and React Native. Opens glTF/GLB, 3MF, STL, OBJ and PLY on Android and USDZ on Apple, at real size in AR. Assistant-ready: in-repo MCP server, AGENTS.md and llms.txt — no assistant-specific setup. - feat(sceneview): SplatNode P1 — static 3D Gaussian Splat rendering (#… · sceneview/sceneview@9dc0240
+
+feat(sceneview): SplatNode P1 — static 3D Gaussian Splat rendering (#… · sceneview/sceneview@9dc0240 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+File tree
+Expand file treeCollapse file tree
+Open diff view settings
+Filter options
+changelog.d
+2646-splatnode-p1.md
+llms.txt
+sceneview/src
+main
+assets/materials
+splat.filamat
+java/io/github/sceneview
+SceneScope.kt
+Splat.kt
+loaders
+MaterialLoader.kt
+node
+SplatNode.kt
+splat
+SplatBuffers.kt
+materials
+splat.mat
+test/java/io/github/sceneview/splat
+SplatBuffersTest.kt
+tools
+GenerateFilamat.sh
+Expand file treeCollapse file tree
+Open diff view settings
+Collapse file
+‎changelog.d/2646-splatnode-p1.md‎
+Copy file name to clipboard
++2Lines changed: 2 additions & 0 deletions
+Display the source diff
+Display the rich diff
+Original file line numberDiff line numberDiff line change
+@@ -0,0 +1,2 @@
+1+
+<!-- category: Added -->
+2+
+- **`SplatNode` — 3D Gaussian Splatting rendering on Android** (#2646, P1). New `SceneScope.SplatNode` composable (+ `rememberSplatCloud` and the underlying `io.github.sceneview.node.SplatNode`) renders a `SplatCloud` — the flat-array 3DGS data model shared in `sceneview-core` `commonMain` — as hardware-instanced camera-facing gaussian discs: per-splat centre/scale/colour/opacity fetched in the vertex shader from two RGBA16F data textures, isotropic gaussian falloff, premultiplied-alpha blending (new `splat.filamat`, compiled with the pinned matc 1.71.5 toolchain). Clouds above Filament's 65535 instances/draw cap are split into batches transparently; an optional `cameraPositionProvider` enables an off-main-thread back-to-front painter's sort keyed on camera motion, and `splatCount` truncates the draw for LOD/reveal effects. P1 scope: isotropic billboards + SH0 colour — anisotropic 2D-covariance ellipses and the `.ply`/`.spz` file loaders land in the follow-up #2646 workstreams.
+Collapse file
+‎llms.txt‎
+Copy file name to clipboardExpand all lines: llms.txt
++38Lines changed: 38 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -725,6 +725,44 @@ Reactive: `text`, `fontSize`, `textColor`, `backgroundColor`, `position`, `scale
+725725
+)
+726726
+```
+727727
+728+
+### SplatNode — 3D Gaussian Splatting (radiance-field captures) (#2646)
+729+
+Renders a `SplatCloud` (the KMP data model: flat `positions`/`scales`/`rotations`/`colors`/`opacities`
+730+
+arrays) as camera-facing gaussian discs — instanced quads, per-splat data in RGBA16F textures,
+731+
+premultiplied-alpha blending. Clouds above 65535 splats are split into multiple draws internally.
+732+
+```kotlin
+733+
+@Composable fun SplatNode(
+734+
+splatCloud: SplatCloud, // io.github.sceneview.core.splat.SplatCloud (must be non-empty)
+735+
+cameraPositionProvider: (() -> Position)? = null, // enables the back-to-front painter's sort
+736+
+splatCount: Int = splatCloud.count, // render only the first N texels — LOD / reveal hook
+737+
+position: Position = Position(x = 0f),
+738+
+rotation: Rotation = Rotation(x = 0f),
+739+
+scale: Scale = Scale(1f),
+740+
+apply: SplatNode.() -> Unit = {},
+741+
+content: (@Composable NodeScope.() -> Unit)? = null
+742+
+)
+743+
+744+
+@Composable fun rememberSplatCloud(vararg keys: Any?, creator: () -> SplatCloud): SplatCloud
+745+
+```
+746+
+747+
+Usage:
+748+
+```kotlin
+749+
+var cameraPosition by remember { mutableStateOf(Position()) }
+750+
+SceneView(
+751+
+cameraNode = cameraNode,
+752+
+onFrame = { cameraPosition = cameraNode.worldPosition }
+753+
+) {
+754+
+SplatNode(
+755+
+splatCloud = cloud, // e.g. from rememberSplatCloud { ... }
+756+
+cameraPositionProvider = { cameraPosition } // re-sorts off the main thread on camera motion
+757+
+)
+758+
+}
+759+
+```
+760+
+761+
+Current scope (P1): isotropic billboards (max-axis scale — anisotropic screen-space ellipses are
+762+
+planned) and SH degree 0 color. Without a `cameraPositionProvider` the compositing order stays
+763+
+as loaded (expect popping when orbiting). `.ply` / `.spz` file loaders arrive with the #2646
+764+
+loader workstream — until then build `SplatCloud` from arrays.
+765+
+728766
+### VideoNode — video on 3D plane
+729767
+```kotlin
+730768
+// Simple — asset path (recommended):
+Collapse file
+‎sceneview/src/main/assets/materials/splat.filamat‎
+Copy file name to clipboard
+14 KB
+Binary file not shown.
+Collapse file
+‎sceneview/src/main/java/io/github/sceneview/SceneScope.kt‎
+Copy file name to clipboardExpand all lines: sceneview/src/main/java/io/github/sceneview/SceneScope.kt
++74Lines changed: 74 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -25,6 +25,7 @@ import com.google.android.filament.MaterialInstance
+2525
+import com.google.android.filament.RenderableManager
+2626
+import com.google.android.filament.Scene as FilamentScene
+2727
+import com.google.android.filament.VertexBuffer
+28+
+import io.github.sceneview.core.splat.SplatCloud
+2829
+import io.github.sceneview.environment.Environment
+2930
+import io.github.sceneview.geometries.Capsule
+3031
+import io.github.sceneview.geometries.Cone
+@@ -63,6 +64,7 @@ import io.github.sceneview.node.PhysicsBody
+6364
+import io.github.sceneview.node.ReflectionProbeNode as ReflectionProbeNodeComposable
+6465
+import io.github.sceneview.node.ShapeNode as ShapeNodeImpl
+6566
+import io.github.sceneview.node.SphereNode as SphereNodeImpl
+67+
+import io.github.sceneview.node.SplatNode as SplatNodeImpl
+6668
+import io.github.sceneview.node.TextNode as TextNodeImpl
+6769
+import io.github.sceneview.node.TorusNode as TorusNodeImpl
+6870
+import io.github.sceneview.node.VideoNode as VideoNodeImpl
+@@ -1583,6 +1585,78 @@ open class SceneScope @RestrictTo(RestrictTo.Scope.LIBRARY_GROUP_PREFIX) constru
+15831585
+NodeLifecycle(node, content)
+15841586
+}
+15851587
+1588+
+// ── SplatNode ─────────────────────────────────────────────────────────────────────────────────
+1589+
+1590+
+/**
+1591+
+* A 3D Gaussian Splatting renderer node — draws a [SplatCloud] as camera-facing gaussian
+1592+
+* discs with view-dependent back-to-front compositing (#2646).
+1593+
+*
+1594+
+* ```kotlin
+1595+
+* var cameraPosition by remember { mutableStateOf(Position()) }
+1596+
+* SceneView(
+1597+
+* cameraNode = cameraNode,
+1598+
+* onFrame = { cameraPosition = cameraNode.worldPosition }
+1599+
+* ) {
+1600+
+* SplatNode(
+1601+
+* splatCloud = cloud,
+1602+
+* cameraPositionProvider = { cameraPosition }
+1603+
+* )
+1604+
+* }
+1605+
+* ```
+1606+
+*
+1607+
+* @param splatCloud The gaussians to render (must be non-empty). Changing the
+1608+
+* instance recreates the node.
+1609+
+* @param cameraPositionProvider Per-frame camera **world** position for the painter's sort;
+1610+
+* `null` keeps the as-loaded order (view-independent).
+1611+
+* @param splatCount Number of splats rendered, coerced to `0..splatCloud.count`.
+1612+
+* Defaults to the full cloud; lower it for LOD / reveal effects.
+1613+
+* @param position World-space position.
+1614+
+* @param rotation World-space rotation (Euler angles in degrees).
+1615+
+* @param scale Uniform or non-uniform scale.
+1616+
+* @param apply Additional configuration on the [SplatNodeImpl].
+1617+
+* @param content Optional child nodes.
+1618+
+*
+1619+
+* @see io.github.sceneview.node.SplatNode
+1620+
+* @see rememberSplatCloud
+1621+
+*/
+1622+
+@Composable
+1623+
+fun SplatNode(
+1624+
+splatCloud: SplatCloud,
+1625+
+cameraPositionProvider: (() -> Position)? = null,
+1626+
+splatCount: Int = splatCloud.count,
+1627+
+position: Position = Position(x = 0f),
+1628+
+rotation: Rotation = Rotation(x = 0f),
+1629+
+scale: Scale = Scale(1f),
+1630+
+apply: SplatNodeImpl.() -> Unit = {},
+1631+
+content: (@Composable NodeScope.() -> Unit)? = null
+1632+
+) {
+1633+
+val node = remember(engine, splatCloud) {
+1634+
+SplatNodeImpl(
+1635+
+materialLoader = materialLoader,
+1636+
+splatCloud = splatCloud,
+1637+
+cameraPositionProvider = cameraPositionProvider
+1638+
+).apply(apply)
+1639+
+}
+1640+
+SideEffect {
+1641+
+// Cheap var assignments — keep the latest lambda + count without re-keying the node.
+1642+
+node.cameraPositionProvider = cameraPositionProvider
+1643+
+node.splatCount = splatCount
+1644+
+}
+1645+
+// Transform props are component-keyed so a bare recomposition never re-applies the
+1646+
+// declared transform over one a gesture or a frame-loop driver wrote on the runtime
+1647+
+// node — see SphereNode for the full rationale (#2639, #2653).
+1648+
+DisposableEffect(node, position.x, position.y, position.z) {
+1649+
+node.position = position; onDispose {}
+1650+
+}
+1651+
+DisposableEffect(node, rotation.x, rotation.y, rotation.z) {
+1652+
+node.rotation = rotation; onDispose {}
+1653+
+}
+1654+
+DisposableEffect(node, scale.x, scale.y, scale.z) {
+1655+
+node.scale = scale; onDispose {}
+1656+
+}
+1657+
+NodeLifecycle(node, content)
+1658+
+}
+1659+
+15861660
+// ── ReflectionProbeNode ───────────────────────────────────────────────────────────────────────
+15871661
+15881662
+/**
+Collapse file
+‎sceneview/src/main/java/io/github/sceneview/Splat.kt‎
+Copy file name to clipboard
++33Lines changed: 33 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -0,0 +1,33 @@
+1+
+// Compose entry point for 3D Gaussian Splatting (#2646). Lives in its own file — not
+2+
+// SceneView.kt, which is at detekt's TooManyFunctions file cap — same package, so imports are
+3+
+// unaffected (the SurfaceMirroring.kt precedent, #2626).
+4+
+package io.github.sceneview
+5+
+6+
+import androidx.compose.runtime.Composable
+7+
+import androidx.compose.runtime.remember
+8+
+import io.github.sceneview.core.splat.SplatCloud
+9+
+10+
+/**
+11+
+* Creates and remembers a [SplatCloud] — the in-memory 3D Gaussian Splatting data model consumed
+12+
+* by [SceneScope.SplatNode] (#2646).
+13+
+*
+14+
+* [creator] runs once (and again whenever any of [keys] changes) — build or decode the cloud
+15+
+* there. Construction is pure CPU (no Filament calls), so a cheap synthetic cloud can be built
+16+
+* inline; keep heavy decoding out of composition by hoisting it behind your own state.
+17+
+*
+18+
+* ```kotlin
+19+
+* val cloud = rememberSplatCloud {
+20+
+* SplatCloud(count = n, positions = ..., scales = ..., rotations = ..., colors = ..., opacities = ...)
+21+
+* }
+22+
+* SceneView { SplatNode(splatCloud = cloud) }
+23+
+* ```
+24+
+*
+25+
+* File-based overloads (`.ply` / `.spz` via `SplatParser`) arrive with the #2646 loader
+26+
+* workstream (P1a).
+27+
+*
+28+
+* @param keys When any key changes, [creator] runs again and produces a new cloud.
+29+
+* @param creator Builds the [SplatCloud].
+30+
+*/
+31+
+@Composable
+32+
+fun rememberSplatCloud(vararg keys: Any?, creator: () -> SplatCloud): SplatCloud =
+33+
+remember(keys = keys) { creator() }
+Collapse file
+‎sceneview/src/main/java/io/github/sceneview/loaders/MaterialLoader.kt‎
+Copy file name to clipboardExpand all lines: sceneview/src/main/java/io/github/sceneview/loaders/MaterialLoader.kt
++41Lines changed: 41 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -95,6 +95,9 @@ class MaterialLoader(
+9595
+private val semanticsOverlayMaterial by lazy {
+9696
+createMaterial("$kMaterialsAssetFolder/semantics_overlay.filamat")
+9797
+}
+98+
+private val splatMaterial by lazy {
+99+
+createMaterial("$kMaterialsAssetFolder/splat.filamat")
+100+
+}
+98101
+99102
+private val materials = java.util.Collections.synchronizedList(mutableListOf<Material>())
+100103
+private val materialInstances = java.util.Collections.synchronizedList(mutableListOf<MaterialInstance>())
+@@ -478,6 +481,44 @@ class MaterialLoader(
+478481
+setSemanticsOpacity(opacity)
+479482
+}
+480483
+484+
+/**
+485+
+* Creates a [MaterialInstance] of the **Gaussian Splatting material** (`splat.filamat`) —
+486+
+* one per instanced draw batch of an [io.github.sceneview.node.SplatNode] (#2646).
+487+
+*
+488+
+* The material draws hardware-instanced camera-facing quads whose per-splat centre /
+489+
+* half-extent / colour / opacity are fetched **in the vertex shader** from the two square
+490+
+* `RGBA16F` data textures, indexed by `getInstanceIndex() + instanceOffset`. See
+491+
+* [io.github.sceneview.splat.SplatBuffers] for the exact texel layout contract.
+492+
+*
+493+
+* Both textures are sampled with `NEAREST` filtering and `CLAMP_TO_EDGE` wrapping: texels
+494+
+* are addressed exactly at their centres, and any interpolation would blend adjacent
+495+
+* splats' attributes into garbage.
+496+
+*
+497+
+* @param positionScaleTexture per-splat `xyz = centre (model space), w = billboard half-extent`.
+498+
+* @param colorOpacityTexture per-splat `rgb = linear colour, a = straight opacity`.
+499+
+* @param textureSize side of the two square data textures (the shader's `texWidth`).
+500+
+* @param instanceOffset global splat index of this batch's instance 0 — batches above
+501+
+* the 65535 instances/draw cap share the textures and shift
+502+
+* their indexing by this offset.
+503+
+*/
+504+
+@MainThread
+505+
+fun createSplatInstance(
+506+
+positionScaleTexture: Texture,
+507+
+colorOpacityTexture: Texture,
+508+
+textureSize: Int,
+509+
+instanceOffset: Int = 0
+510+
+): MaterialInstance = createInstance(splatMaterial).apply {
+511+
+val dataSampler = TextureSampler(
+512+
+TextureSampler.MinFilter.NEAREST,
+513+
+TextureSampler.MagFilter.NEAREST,
+514+
+TextureSampler.WrapMode.CLAMP_TO_EDGE
+515+
+)
+516+
+setTexture("splatPositionScale", positionScaleTexture, dataSampler)
+517+
+setTexture("splatColorOpacity", colorOpacityTexture, dataSampler)
+518+
+setParameter("texWidth", textureSize)
+519+
+setParameter("instanceOffset", instanceOffset)
+520+
+}
+521+
+481522
+fun destroyMaterial(material: Material) {
+482523
+if (material in materials) {
+483524
+// Filament's `Engine.destroyMaterial` implicitly destroys the material's own
+0 commit comments
+Comments
+0 (0)
+You can’t perform that action at this time.

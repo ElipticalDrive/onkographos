@@ -1,0 +1,149 @@
+Runtime Mipmap Generation – Ignacio Castaño
+Skip to content
+One of the advantages of runtime texture compression is that mipmaps can also be computed at runtime and do not need to be transmitted. In contrast, offline codecs must precompute mipmaps so they can be compressed and transmitted alongside the base image.
+Each mip level requires one quarter of the memory of its parent, so a full mipmap chain increases the total texture size by approximately 33%. In principle, offline codecs could attempt to exploit correlation between mip levels, but in practice they rarely do. In fact, rate-distortion optimized codecs often exceed the theoretical 33% overhead, because lower-resolution mip levels tend to have higher entropy and compress less efficiently.
+By generating mipmaps on the device, we eliminate the need to transmit them entirely, reducing the total transmitted texture data by 25%. This is a dramatic reduction by image codec standards, and can be achieved without any loss of quality. The tradeoff is that mipmaps must be generated at runtime, but fortunately this is a task that GPUs excel at.
+In offline pipelines, mipmap generation is usually performed on the CPU. An efficient implementation requires SIMD optimizations and tiling for parallelization, which add significant complexity.
+On the other hand, mipmap generation maps naturally to the compute programming model and benefits from the hardware filtering, color space conversion, and built-in border handling of the texture units. As a result a basic implementation is relatively trivial.
+For the implementation in spark.js I decided to keep it simple, aim for adequate performance, and focus on the following features:
+Linear-space filtering.
+A high quality low-pass filter.
+Alpha weighting and coverage preservation.
+Linear-space filtering
+Color textures are typically stored in gamma space or sRGB because this allocates more precision to dark values, where human vision is more sensitive. This reduces visible banding and allows textures to be stored accurately using 8-bit per component formats, as well as block-compressed formats with limited precision.
+Filtering, however, is a linear operation and must be performed in linear radiometric space. Averaging gamma-encoded values is not equivalent to averaging intensities. This is not merely a mathematical formality: gamma-space filtering introduces systematic bias, leading to incorrect brightness, inconsistent energy across mip levels, and a general darkening that causes fine details to fade out too quickly.
+Preserving energy across mip levels is one of the most important factors in the visual quality of mipmaps. This principle is well understood in the computer graphics community, and was widely disseminated among game developers through Jonathan Blow’s Inner Product articles on mipmapping:
+Mipmapping, Part 1
+Mipmapping, Part 2
+Modern graphics hardware supports sRGB textures natively. When an sRGB texture is sampled, the texture unit returns colors in linear space that the shader can operate on directly. Achieving correct linear filtering is then as simple as choosing the right texture format.
+However, there are some caveats. When loading texture values for compression, we want to access the raw values without conversion, while during filtering we want linear values. Also, when using a texture as storage from a compute shader, we are not allowed to provide linear values and have them converted to sRGB format. In fact, binding an sRGB texture for storage is not allowed at all.
+WebGPU supports these two use cases by allowing different views of the same texture with compatible formats. For this to work, the supported view formats must be provided in advance at texture creation time, as shown below:
+```
+texture = device.createTexture({
+    size: [width, height, 1],
+    format: "rgba8unorm",
+    viewFormats: ["rgba8unorm", "rgba8unorm-srgb"]
+})
+```
+By default, views use the primary format of the texture, but a different format can be specified explicitly. For example:
+```
+view = texture.createView({ 
+    format: "rgba8unorm-srgb",
+    usage: GPUTextureUsage.TEXTURE_BINDING
+})
+```
+Unfortunately, even though this feature is required by WebGPU, it is currently not supported in Firefox (see Bugzilla issue #1977241). To work around this limitation, spark.js also implements its downsampling filters using fragment shaders instead of compute shaders.
+When using a fragment shader, we can render directly to an sRGB render target and rely on the hardware to perform the conversion. This removes the need for multiple views of the same texture with different formats, and allows spark.js to work around the current implementation gaps in Firefox. However, this comes with a performance penalty, as the fragment shader implementation cannot take advantage of compute features that enable more efficient convolutions.
+A high quality low-pass filter
+From a signal-processing perspective, generating mipmaps is a resampling problem: as resolution decreases, high spatial frequencies must be suppressed to avoid aliasing. In continuous signal processing, the ideal reconstruction filter for this is the sinc function, which perfectly preserves frequencies below the cutoff while removing those above it.
+In practice, however, the sinc filter is not directly usable in a discrete setting. It has infinite spatial support, which makes it impractical and truncating it naively leads to strong ringing artifacts. To address this, the sinc is multiplied by a window function that limits its support and controls ringing, trading off frequency response for better spatial behavior. Common choices include Lanczos and Kaiser windows, which produce filters with finite support and more acceptable visual characteristics.
+This was my choice in the NVIDIA Texture Tools, and it is also what most production pipelines still use today. More recently, however, other approaches have come to my attention. In particular, Bart Wronski and Charles Bloom suggest designing filter weights with the knowledge that mipmaps will be reconstructed using bilinear filtering. One of my clients also reported great results using the magic kernel sharp filter. This piqued my curiosity and led me to experiment with it in spark.js.
+I haven’t done a formal evaluation yet, but the initial results look promising. A more thorough comparison will be needed in the future.
+Box Filter
+Magic Kernel Sharp
+Box Filter
+And on actual models you can also see that the results make a significant difference:
+Three.js
+Basis
+spark.js
+Three.js
+Note how spark.js preserves the brightness of the stitching in the helmet without loss in the high frequency details.
+One technique often used to improve the performance of convolution filters is to rely on bilinear filtering to load and combine two or four neighboring texels with a single texture sample. For this to be possible, the weights of the linear combination must all have the same sign. Unfortunately, most of the weights in the magic kernel alternate in signs, which prevents this optimization. It should still be possible to combine the central tap, but the potential gains are relatively small.
+Another common approach is to implement the filter in two separable passes, a vertical and a horizontal downsampling pass. However, for small convolutions like this it’s more critical to perform them in a single pass, using shared memory to amortize the texture loads and reduce memory traffic.
+A naive implementation like this would require 36 texture samples per thread (or 25 relying on bilinear filtering for the central taps):
+```
+var accum = vec4<f32>(0.0);
+
+// 4x4 taps around (base.x, base.y):
+for (var j = 0; j < 6; j = j + 1) {
+    let v = base.y + f32(j) * sizeRcp.y;
+
+    var row = vec4<f32>(0.0);
+    for (var i = 0; i < 6; i = i + 1) {
+        let u = base.x + f32(i) * sizeRcp.x;
+
+        row = row + w[i] * textureSampleLevel(src, smp, vec2f(u, v), 0);
+    }
+
+    accum = accum + w[j] * row;
+}
+```
+The tiled implementation, on the other hand, requires fewer samples. For a 8×8 workgroup and a 6×6 kernel, the tile size would need to be 20×20, which results in just 6.25 samples per thread.
+First, we use all he threads in the workgroup to sample the texture cooperatively:
+```
+const samplesPerThread = (N + W - 1u) / W;
+let threadIdx = local_id.y * WORKGROUP_SIZE + local_id.x;
+
+for (var s = 0u; s < samplesPerThread; s = s + 1u) {
+    let flatIdx = threadIdx + s * W;
+    if (flatIdx < N) {
+        let sharedY = flatIdx / TILE_SIZE;
+        let sharedX = flatIdx % TILE_SIZE;
+
+        let uv = base + vec2f(f32(sharedX), f32(sharedY)) * sizeRcp;
+
+        let color = textureSampleLevel(src, smp, uv, 0);
+        sharedData[0 * N + flatIdx] = color.r;
+        sharedData[1 * N + flatIdx] = color.g;
+        sharedData[2 * N + flatIdx] = color.b;
+        sharedData[3 * N + flatIdx] = color.a;
+    }
+}
+```
+We then issue a workgroup barrier and perform the convolution, just like we did before:
+```
+for (var j: 0; j < 6; j = j + 1) {
+  var row = 0.0;
+  for (var i = 0; i < 6; i = i + 1) {
+    let idx = (sharedBaseY + j) * TILE_SIZE + (sharedBaseX + i);
+    row = row + w[i] * sharedData[idx];
+  }
+  accum = accum + w[j] * row;
+}
+```
+Ideally, we want to perform the separable convolution in two passes: one to filter the rows and another to filter the columns. For best results, shared-memory addressing must be handled carefully to minimize bank conflicts. This is left as an exercise for the reader, or perhaps the subject of a future blog post.
+Alpha weighting and coverage preservation
+Lastly, my final goal was to correctly handle images with alpha. The first problem I wanted to address is color bleeding around alpha silhouettes.
+One common response to this problem is to suggest premultiplied alpha. However, in most cases I don’t have control over the source assets. The majority of color textures found in publicly available models are authored with straight (un-premultiplied) alpha.
+Alpha-weighted filtering addresses this issue elegantly without requiring changes to the source assets. The idea is simple: multiply the color with the alpha before filtering, and divide the filtered colors by the filtered alpha afterward to bring them back to the un-premultiplied state. Conveniently, this can be done when copying the colors into shared memory, and before writing the result to the output texture, so the performance and complexity impact is minimal.
+The following image shows the dramatic quality improvements achieved with this approach:
+three.js
+spark.js
+three.js
+Another problem I wanted to solve is the coverage loss caused by traditional alpha filtering, an issue I ran into while working on The Witness.
+Standard mipmap generation algorithms tend to produce progressively lower alpha coverage on textures that use alpha testing. As the mip levels get smaller, the percentage of texels that pass the alpha test decreases, causing foliage to thin out and even disappear at a distance.
+The solution I proposed back then worked well in practice and has since become a de facto standard across the industry, but at first glance it seemed too expensive to apply at runtime.
+Computing the alpha coverage for each mip level requires a parallel reduction, and this reduction must be repeated multiple times until the algorithm converges and a suitable alpha scale factor is found.
+The key observation is that textures are often known in advance, which allows these alpha scale factors to be precomputed and provided to the runtime as encoder parameters:
+```
+spark.encodeTexture(url, { mipsAlphaScale: [1.04, 1.12, 1.18, 1.09, 1.2 ] }
+```
+To make this more practical I’d like to propose a way to provide encoding parameters through glTF files. A tool like gltf-tex could then be used not just to encode textures in the desired delivery format, but also to determine the optimal filtering parameters for efficient runtime processing.
+three.js
+spark.js
+three.js
+Future improvements
+Separate alpha channels
+Currently the alpha weighting is applied to the color maps when the opacity is stored in the alpha channel. Ideally it should be possible to store the opacity in a separate texture, and apply the weighting to other textures of the same material (normal maps, and other PBR attributes).
+Normal map filtering
+Filtering normals in isolation from other material parameters does not produce the best results. Currently spark.js filters normals independently and renormalizes the result. This often leads to specular aliasing.
+In Mipmapping Normal Maps Toksvig made the clever observation that if normals are not renormalized after filtering, their length becomes inversely proportional to the variance of the normal distribution. This information can be exploited to adjust other parameters of the shading model, such as the roughness or the specular exponent, to reduce the aliasing of specular highlights.
+However, when using this technique, normal maps need to remain uncompressed, because compressed representations are implicitly normalized.
+A more practical approach that was popularized by Stephen Hill, is to extract the normal variance (or Toksvig factor) and use it to compute a new roughness factor and combine it with the existing roughness texture (if present).
+I think it would be very interesting to implement this technique as it would work seamlessly with existing glTF assets and would reduce the aliasing without any additional changes to the rendering pipeline. One approach would be to provide a normal map texture when encoding the corresponding roughness map, but perhaps it would be more valuable to have an API that encodes multiple textures at a time and associates a role or usage to each one of them.
+Polyphase filtering
+Typically mipmap textures have exactly 1/2 the number of texels than the parent mipmaps. This allows us to employ exactly the same kernel across all texels. However, when the extents of one mipmap are not multiples of two, the extents of the following mipmap will be rounded down. Note, whenever the size of a texture is not a power of two, this will necessarily happen at least at some mip levels!
+If you use the same kernel that would result in a phase shift, as the texels in the upper and lower mip do not align exactly. In order to avoid that you have to adjust the kernel weights for every pixel.
+For simple kernels like a box filter this can be done analytically as in NVIDIA’s technical report, but otherwise the kernel function needs to be evaluated multiple times. What CPU implementations usually do is to apply the filter in two passes, one for each dimension, and precompute these kernels for every column or row, so that the evaluation of the filter weights is amortized. I’m not sure what’s the best way to do this in the GPU and I would not be surprised if evaluating the weights, approximating them, or applying the phase shift analytically ended up being more efficient than precomputing them.
+Optimizations
+Numerous optimizations are possible. We currently issue a compute dispatch for every mipmap, but it’s possible to generate an entire mipmap chain with a single kernel. This is the approach taken by the very efficient AMD’s single pass downsampler (SPD). Recently this library was also ported to the Metal API.
+The BC encoders from Microsoft’s Advanced Technology Group use a similar approach. They combine the mipmap generation with the encoder in the same kernel to save bandwidth by not having to load the input texture twice. Additionally they compute and encode the tail of the mipmap chain in a single dispatch.
+None of these implementations support more than simple 2×2 reductions, but these ideas would be applicable when using a single-phase box kernel and it may make sense to do so when performance is a critical factor.
+Once I settle on the ideal downsampling filter, I plan to spend more cycles profiling and optimizing it. Beyond that, the WebGPU API imposes limitations that do not exist in native APIs, leaving substantial room for improvement. This will be a topic for a future post.
+Conclusions
+The mipmap generation functionality in spark.js is intentionally minimal, but already produces higher quality results than what’s available in popular frameworks like three.js, and in some cases even surpasses the quality of offline tools.
+This functionality has proven useful enough, that I think it’s worth using spark.js as a general texture loader. I’m considering adding an option to output uncompressed textures, for users who want to leverage the image processing functionality without using the Spark codecs.
+There are many possible areas for improvement, but future work will largely be driven by user demand. If you have custom needs or specific requirements, feel free to get in touch. I’m happy to help with any of your texture processing needs.
+1 Comment
+Pingback: Announcing spark.js 0.1 – Ignacio Castaño
+Leave a Comment Cancel reply

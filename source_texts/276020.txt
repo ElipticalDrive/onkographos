@@ -1,0 +1,476 @@
+GEOS Simulation Framework. Contribute to GEOS-DEV/GEOS development by creating an account on GitHub.
+
+Improve VTK mesh distribution via ParMETIS by klevzoff · Pull Request #1869 · GEOS-DEV/GEOS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+klevzoff
+commented
+Apr 5, 2022
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Resolves #1823
+Rebaseline required for the one test currently using VTKMesh.
+Issues remaining:
+How to update MPI neighbor list after redistribution - added neighbor detection via bounding box exchange between all ranks.
+Use of PartKway vs RefineKway - added option to control partition refinement.
+How to enforce partition contiguity - this is impossible with ParMETIS.
+Rebaseline: https://github.com/GEOSX/integratedTests/pull/215
+(one test only, no numeric diffs)
+Before:
+After:
+klevzoff
+added
+type: feature
+New feature or request
+flag: requires rebaseline
+Requires rebaseline branch in integratedTests
+labels
+Apr 5, 2022
+klevzoff
+requested review from
+Antoine948398,
+TotoGaz,
+francoishamon and
+jeannepellerin
+April 5, 2022 02:05
+klevzoff
+self-assigned this
+Apr 5, 2022
+klevzoff
+commented
+Apr 5, 2022
+View reviewed changes
+Comment thread
+src/coreComponents/mesh/generators/VTKMeshGeneratorTools.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/coreComponents/mesh/generators/VTKMeshGenerator.cpp
+Outdated
+Comment on lines
++335
+to
++327
+vtkIdType const minCellsOnAnyRank = MpiWrapper::min( loadedMesh.GetNumberOfCells() );
+if( minCellsOnAnyRank > 0 )
+{
+// We read a properly pre-partitioned mesh, so there should be nothing to do
+return vtkUnstructuredGrid::SafeDownCast( generator->GetOutputDataObject( 0 ) );
+}
+klevzoff
+Apr 5, 2022
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Does this criterion for skipping the redistribution seem reasonable to everyone? The idea is that if every rank already has at least some cells, then we've likely loaded an already properly partitioned .pvtu dataset.
+klevzoff
+commented
+Apr 5, 2022
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+@francoishamon whenever you have some time, could you please test this branch with meshes you previously had problems with? While this branch fixes some of my own problems, I'd like to see if it's a substantial improvement in general.
+EDIT: ParMETIS manual says
+```
+The graph must be initially distributed among the processors such that each processor has at least one vertex.
+```
+This may be a problem for the cases you mentioned where some ranks are completely empty after the kd-tree distribution. You'll likely get a ParMETIS error reported in the log (let me know what it says). We might need a separate fix for that.
+francoishamon
+commented
+Apr 6, 2022
+Copy link
+Copy Markdown
+@francoishamon whenever you have some time, could you please test this branch with meshes you previously had problems with? While this branch fixes some of my own problems, I'd like to see if it's a substantial improvement in general.
+EDIT: ParMETIS manual says
+```
+The graph must be initially distributed among the processors such that each processor has at least one vertex.
+```
+This may be a problem for the cases you mentioned where some ranks are completely empty after the kd-tree distribution. You'll likely get a ParMETIS error reported in the log (let me know what it says). We might need a separate fix for that.
+Thanks very much for working on that @klevzoff , I have not tried yet but I should be able to do it on Thursday (tomorrow) and report the results back to you.
+klevzoff
+commented
+Apr 7, 2022
+View reviewed changes
+Comment thread
+src/coreComponents/mesh/generators/ParMETISInterface.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+klevzoff
+commented
+Apr 19, 2022
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+Folks, I intend to merge this PR soon, can I get an (hopefully approving) review?
+Current state is as good as it's gonna get for now:
+Redistribution via ParMETIS works well for all meshes I've tested, it's enabled by default but optional, and additionally the number of partitioning refinement iterations can be controlled by the user (via XML attribute partitionRefinement, 1 is default, 0 to disable ParMETIS, higher values for better quality).
+MPI neighbor candidates are now detected via an all-to-all exchange of partition bounding boxes - this is much faster than building the whole ghosting layer via vtkGhostCellsGenerator filter. We then let GEOSX figure out exact neighbors and remove candidates that do not share common nodes.
+For pre-partitioned datasets (.pvtu), and only if partitionRefinement="0", we now don't do anything (i.e. keep original partitions) as long as every rank has at least a piece of the mesh, otherwise still redistribute as usual.
+There are some outstanding issues related to reading .pvtu datasets that I won't be able to fix immediately. Additional investigation needed for all of these:
+When reading on fewer ranks than partitions in file, some heap corruption occurs. I've put an explicit user-friendly error trigger in place for now.
+When reading on exact number of ranks, and with partitionRefinement="0", there are spurious ghosting errors in GEOSX.
+When reading on more ranks than partitions in file, and with partitionRefinement="0", some heap corruption or segfaults occur.
+francoishamon
+approved these changes
+Apr 19, 2022
+View reviewed changes
+francoishamon
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Thanks @klevzoff, this is great! For the case I tested, this is really a big improvement for the shape of the MPI partitions.
+Comment thread
+src/coreComponents/mesh/generators/ParMETISInterface.cpp
+Outdated
+Comment on lines
++90
+to
++97
+for( int iter = 0; iter < numRefinements; ++iter )
+{
+int const res = ParMETIS_V3_RefineKway( elemDist.data(), xadj, adjncy,
+nullptr, nullptr, &wgtflag,
+&numflag, &ncon, &npart, tpwgts.data(),
+&ubvec, options, &edgecut, part.data(), &comm );
+checkReturnValue( res, "RefineKway" );
+}
+francoishamon
+Apr 19, 2022
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I went back to the tests that we discussed (~6M cells, 64 ranks) and tested with:
+partitionRefinement="1"
+partitionRefinement="2"
+partitionRefinement="3"
+I think that with partitionRefinement="1" the quality is already significantly improved compared to the native VTK partitions. As partitionRefinement is increased, we see the improvement of the partitions, although the shape of the original VTK partitions is still visible for 3 (but it is not an issue at all). When the PR is merged, I will further test to see what happens if I choose 10, 20, etc
+klevzoff
+Apr 21, 2022
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Yes, I find that additional refinement iterations have very quickly diminishing returns. As soon as the imbalance tolerance limit is reached (hardcoded to 1.05 currently), ParMETIS does not seem eager to do too many changes. I do think that the partitions it produces look reasonable in most cases.
+Comment thread
+src/coreComponents/mesh/generators/VTKMeshGenerator.cpp
+*/
+std::unordered_set< int > computeMPINeighborRanks( std::vector< vtkBoundingBox > cuts )
+std::vector< int >
+findNeighborRanks( std::vector< vtkBoundingBox > boundingBoxes )
+francoishamon
+Apr 19, 2022
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+With the latest commit of the PR, I confirm that the new approach to find the neighbor ranks works very well. Previously I had to disable the ghosting to reach the end of initialization, but now everything goes smoothly, the ghost cells seem to be exchanged without issue, and the simulation can proceed.
+Comment thread
+src/coreComponents/mesh/generators/VTKMeshGenerator.cpp
+Comment on lines
++1054
+to
++1088
+GEOSX_LOG_LEVEL_RANK_0( 2, " reading the dataset..." );
+vtkSmartPointer< vtkUnstructuredGrid > loadedMesh = vtk::loadMesh( m_filePath );
+GEOSX_LOG_LEVEL_RANK_0( 2, " redistributing mesh..." );
+m_vtkMesh = vtk::redistributeMesh( *loadedMesh, comm, m_partitionRefinement );
+GEOSX_LOG_LEVEL_RANK_0( 2, " finding neighbor ranks..." );
+std::vector< vtkBoundingBox > boxes = vtk::exchangeBoundingBoxes( *m_vtkMesh, comm );
+std::vector< int > const neighbors = vtk::findNeighborRanks( std::move( boxes ) );
+domain.getMetisNeighborList().insert( neighbors.begin(), neighbors.end() );
+GEOSX_LOG_LEVEL_RANK_0( 2, " done!" );
+francoishamon
+Apr 19, 2022
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Thanks for all the logging that has been added to the mesh generators over multiple PRs, it is saving a lot of debugging time
+klevzoff
+added
+flag: ready to be merged
+flag: ready for review
+labels
+Apr 21, 2022
+klevzoff
+commented
+Apr 21, 2022
+Copy link
+Copy Markdown
+Contributor
+Author
+There are some outstanding issues related to reading .pvtu datasets that I won't be able to fix immediately. Additional investigation needed for all of these:
+When reading on fewer ranks than partitions in file, some heap corruption occurs. I've put an explicit user-friendly error trigger in place for now.
+When reading on exact number of ranks, and with partitionRefinement="0", there are spurious ghosting errors in GEOSX.
+When reading on more ranks than partitions in file, and with partitionRefinement="0", some heap corruption or segfaults occur.
+Update: all of these are caused by duplicate points that VTK produces when it merges partitions (either in the PVTU reader or the redistribution filter). The next VTK release will include fixes for the redistribution filter, as well as a new filter that can be used to "clean up" the mesh and remove duplicate points. As soon as it becomes available (likely within a month or two), I will update the code.
+For now, I implemented a simple duplicate point check using an unordered_set. It will detect the issue and terminate with a user-friendly error rather than segfault or heap corruption. The error message also includes a suggestion to pre-sanitize datasets using "Clean grid" filter in Paraview (which helps in some cases, but not universally).
+klevzoff
+added 6 commits
+April 21, 2022 14:12
+Improve VTK mesh distribution via ParMETIS
+de98251
+Add option for partition refinement iterations.
+7807f0c
+Implement neighbor detection via bounding box exchange.
+7045099
+Fix some issues with reading pvtu
+9c47c55
+Final fixes for reading pvtu. Improved mesh statistics output.
+4173d83
+Improve/cleanup VTK output code.
+…
+7864a1a
+```
+Fix Paraview error when region is empty on a rank.
+Restrict the point output to only include points adjacent to current region.
+Use parallel kernels where possible when building VTK data structures for cell regions.
+```
+TotoGaz
+approved these changes
+Apr 21, 2022
+View reviewed changes
+Comment thread
+src/coreComponents/mesh/generators/VTKMeshGeneratorTools.hpp
+* @return a vector of bounding boxes, one per rank in @p mpiComm
+*/
+std::vector< vtkBoundingBox >
+exchangeBoundingBoxes( vtkDataSet & dataSet, MPI_Comm mpiComm );
+TotoGaz
+Apr 21, 2022
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I assume vtkPartitionedDataSet & localParts and vtkDataSet & dataSet are not const correct?
+klevzoff
+Apr 21, 2022
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Yes, most of VTK is that way, unfortunately :( Some of the newer template data structures have const-correct APIs, but a lot of the older core classes don't.
+Comment thread
+src/coreComponents/mesh/generators/ParMETISInterface.hpp
+Outdated
+{
+/**
+* @brief Partition a finite element mesh according to its dual graph.
+TotoGaz
+Apr 21, 2022
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Why "finite element"? Do you mean conformal?
+klevzoff
+Apr 21, 2022
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I believe I copied that phrase from ParMETIS manual. "Finite element" here refers to the fact that the mesh is represented by elem-node map which is typical for FE codes. I agree this description is misleading, I will probably just drop the words "finite element".
+Comment thread
+src/coreComponents/mesh/generators/ParMETISInterface.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/coreComponents/mesh/generators/VTKMeshGeneratorTools.cpp
+redistribute( vtkPartitionedDataSet & localParts,
+MPI_Comm mpiComm )
+{
+// The code below is modified from vtkDIYKdTreeUtilities::Exchange():
+TotoGaz
+Apr 21, 2022
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Why don't you use the original code?
+klevzoff
+Apr 21, 2022
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The VTK code is a bit more general and complex than needed here. For example, it takes an additional block_assigner parameter which specifies the distribution of partitions. Our use case is simpler, since every local partition goes directly to only one target rank, and respectively every rank receives exactly one partition from every other. Therefore we can simplify some data structures used in exchange (e.g. use vector instead of vector<vector> for storing blocks) and do strictly less work, even if it's just O(1) less.
+TotoGaz
+Apr 21, 2022
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+But could we call the function from the lib directly, even if we have to set up some info a little more complex?
+klevzoff
+Apr 21, 2022
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Ah, I see what you mean. No, we can't call it directly (that would've been my choice too) because it's only exposed in a header vtkDIYKdTreeUtilities.h that VTK considers "private" and does not install.
+https://gitlab.kitware.com/vtk/vtk/-/blob/master/Filters/ParallelDIY2/CMakeLists.txt#L37
+Comment thread
+src/coreComponents/mesh/generators/VTKMeshGenerator.cpp
+Outdated
+for( int i = 0; i < numRanks; ++i )
+// GetCell() is not thread-safe, use serial policy
+forAll< serialPolicy >( numCells, [nodeCounts = nodeCounts.toView(), &grid] ( localIndex const cellIdx )
+TotoGaz
+Apr 21, 2022
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+If you're using no parallel feature, maybe doing simple for loops is OK?
+klevzoff
+Apr 21, 2022
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I'm actually refactoring this piece a little now that I've taken a second look. I found that VTK has a runtime indicator function that tells whether certain APIs of interest are thread-safe or not (I know, it's rather weird that it's runtime and not compile-time knowledge, but they have an option for switching internal storage type for connectivity arrays at runtime (!)). So I will be dispatching with either a serial or a parallel policy based on that, so the loop will stay as a RAJA kernel, but with POLICY passed as a template parameter.
+Comment thread
+src/coreComponents/mesh/generators/VTKMeshGenerator.cpp
+Comment on lines
++298
+to
++306
+/**
+* @brief Generate global point/cell IDs and redistribute the mesh among MPI ranks.
+* @param[in] loadedMesh the mesh that was loaded on one or several MPI ranks
+* @param[in] comm the MPI communicator
+* @param[in] useGraphPartitioning whether to
+* @param[in,out] mpiNeighbors the set of neighboring MPI ranks, will be updated
+*/
+TotoGaz
+Apr 21, 2022
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+doxygen is out of sync.
+klevzoff
+Apr 21, 2022
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Thanks, fixing
+klevzoff
+added 2 commits
+April 21, 2022 17:07
+Address comments
+6b3cb36
+Update integratedTests
+9fb951d
+klevzoff
+force-pushed
+the
+feature/klevzoff/vtk-mesh-distrib
+branch
+from
+fa1d9b8 to
+9fb951d
+Compare
+April 22, 2022 00:11
+Fixes for CUDA builds
+5d7261d
+klevzoff
+merged commit c078575
+into
+develop
+Apr 22, 2022
+klevzoff
+deleted the
+feature/klevzoff/vtk-mesh-distrib
+branch
+April 22, 2022 04:32
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+flag: ready for review
+flag: requires rebaseline
+Requires rebaseline branch in integratedTests
+type: feature
+New feature or request
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

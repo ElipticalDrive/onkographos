@@ -1,0 +1,158 @@
+# SSVDAG — Symmetry-aware Sparse Voxel DAGs
+
+**Real-time GPU raycasting of gigavoxel scenes from a losslessly compressed, symmetry-aware sparse voxel structure.**
+
+This is the reference implementation of the SSVDAG papers by
+[Alberto Jaspe-Villanueva](https://albertojaspe.net), Fabio Marton and Enrico Gobbetti
+(CRS4 Visual Computing):
+
+- **[SSVDAGs: Symmetry-aware Sparse Voxel DAGs](https://albertojaspe.net/publications/2016-I3D-ssvdags.html)**
+  *ACM SIGGRAPH Symposium on Interactive 3D Graphics and Games (i3D), 2016* — Best Papers Selection
+- **[Symmetry-aware Sparse Voxel DAGs (SSVDAGs) for compression-domain tracing of high-resolution geometric scenes](https://albertojaspe.net/publications/2017-JCGT-ssvdags.html)**
+  *Journal of Computer Graphics Techniques (JCGT), 2017* — extended journal version
+
+## What it does
+
+Voxelized geometry grows cubically with resolution, which makes high-resolution
+scenes explode in memory. A Sparse Voxel Octree (SVO) removes empty space; a
+Sparse Voxel DAG additionally merges *identical* subtrees. SSVDAGs go one step
+further and merge subtrees that are identical **up to a reflective symmetry**,
+encoding the mirror transform in the parent pointer — cutting the structure
+roughly in half again, losslessly, while remaining directly traversable on the
+GPU in the compressed domain:
+
+```
+OBJ mesh ──► SVO ──► DAG ──► SSVDAG (symmetry-aware DAG)
+                               │
+                               ▼
+                 real-time GPU raycasting (GLSL)
+```
+
+Typical numbers (see the papers for full benchmarks): a scene at 8K³–64K³
+resolution traced at hundreds of FPS from a structure of ~0.1–1 bits per voxel.
+
+## Tools
+
+| Tool           | Purpose |
+|----------------|---------|
+| `builder`      | Full pipeline: mesh → SVO → DAG → all encoded formats (`.svo`, `.dag`, `.dag4`, `.sdag1`…`.sdag4`), with statistics |
+| `builder_lite` | Minimal builder producing just the final encoded SDAG |
+| `viewer`       | Interactive GPU raycaster for encoded `.dag` / `.dag4` / `.sdag1` / `.sdag4` files |
+| `demo`         | Demo renderer (deferred shading, hard shadows, SSAO) on top of the same traversal |
+
+## Encoded formats
+
+The builder can emit the same voxelized scene at several compression stages,
+each directly traversable by the GPU raycaster:
+
+| Extension | Structure | Compression |
+|-----------|-----------|-------------|
+| `.svo`    | Raw sparse voxel octree | None — baseline. Empty space is skipped, but every subtree is stored explicitly |
+| `.dag`    | Sparse Voxel DAG | Identical subtrees merged, as in the original DAG paper by [Kämpe, Sintorn & Assarsson, *High Resolution Sparse Voxel DAGs*, SIGGRAPH 2013](https://doi.org/10.1145/2461912.2462024) |
+| `.dag4`   | DAG + compact node encoding | DAG with entropy-oriented node layout: variable-size pointers and tagged leaves |
+| `.sdag1`  | **Symmetry-aware DAG** | Subtrees identical *up to reflection* merged too — the core SSVDAG contribution, plain node encoding |
+| `.sdag4`  | **SSVDAG + compact node encoding** | Symmetry-aware merging *and* the variable-size entropy encoding — **the highest compression**, and the format benchmarked in the papers |
+
+As a reference point, a 1024³ sphere gives 21.3 bits/voxel encoded SVO →
+4.3 (`.dag`) → 2.4 (`.dag4`) → 0.69 (`.sdag1`) → **0.35 (`.sdag4`)**.
+The remaining variants (`.sdag2`, `.sdag3`, `.sdag5`) are intermediate
+experimental encodings kept for completeness.
+
+## Building
+
+Requirements:
+
+- CMake ≥ 3.24
+- A C++17 compiler (tested: MSVC 2022, GCC, Clang)
+- A GPU + driver supporting OpenGL 4.4
+
+All library dependencies (GLM, GLFW) are fetched automatically by CMake; the
+OpenGL loader (glad) is vendored under `external/`. Nothing to install manually.
+
+```sh
+cmake -S . -B build
+cmake --build build --config Release
+```
+
+Binaries land in `build/Release/` (multi-config generators) or `build/`
+(single-config). The viewer and demo load their GLSL shaders from the source
+tree (`shaders/`), whose location is baked in at configure time — run them
+from any directory.
+
+## Usage
+
+Voxelize a mesh at 2^N resolution and write encoded octrees:
+
+```sh
+# 10 levels = 1024^3, monolithic in-core build (step 0)
+builder model.obj 10 0 model.sdag1 model.dag
+
+# 13 levels = 8K^3, split build: top 5 levels + parallel per-subtree DAGs
+builder model.obj 13 4 model.sdag4
+```
+
+The third argument (`nBuildStep`) controls the divide-and-conquer build: `0`
+builds the whole SVO in memory; `k > 0` builds the top `k+1` levels, then
+constructs and DAG-compresses each occupied subtree independently and in
+parallel — required for resolutions whose full SVO would not fit in RAM.
+
+View an encoded file:
+
+```sh
+viewer model.sdag1
+```
+
+**Viewer controls**: drag = orbit · right-drag = zoom · middle-drag = pan ·
+arrows / `Q` `E` = walk & turn · `SPACE` = reset · `U` = toggle Y/Z-up ·
+`1`/`2` = draw level · `R` = render mode.
+
+**Demo extras**: `L` = place light at camera · `K` = shadows · `A` = SSAO
+(`5`/`6` radius) · `M` = materials · `P` = screenshot (+ reloadable camera/light
+info file).
+
+## Repository layout
+
+```
+src/voxelator     core library: scene loading, octree build, DAG/SSVDAG
+                  reduction, encoded formats
+src/voxelator_gl  OpenGL support library: camera, GLSL raycaster, HUD
+src/builder*      command-line building tools
+src/viewer        interactive raycasting viewer
+src/demo          demo renderer (deferred + SSAO)
+src/common        small self-contained helpers (AABB, timing, formatting,
+                  memory-mapped external array, paths)
+shaders/          GLSL raycasting & shading kernels
+external/glad     vendored OpenGL 4.4 loader
+```
+
+## Citing
+
+```bibtex
+@inproceedings{JaspeVillanueva2016SSVDAG,
+  author    = {Jaspe-Villanueva, Alberto and Marton, Fabio and Gobbetti, Enrico},
+  title     = {{SSVDAGs}: Symmetry-aware Sparse Voxel {DAGs}},
+  booktitle = {Proceedings of the 20th ACM SIGGRAPH Symposium on Interactive 3D Graphics and Games},
+  series    = {I3D '16},
+  year      = {2016},
+  pages     = {7--14},
+  doi       = {10.1145/2856400.2856420}
+}
+
+@article{JaspeVillanueva2017SSVDAG,
+  author  = {Jaspe-Villanueva, Alberto and Marton, Fabio and Gobbetti, Enrico},
+  title   = {Symmetry-aware Sparse Voxel {DAGs} ({SSVDAGs}) for compression-domain tracing of high-resolution geometric scenes},
+  journal = {Journal of Computer Graphics Techniques (JCGT)},
+  volume  = {6},
+  number  = {2},
+  year    = {2017},
+  pages   = {1--30}
+}
+```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+This is research code released for reproducibility; expect rough edges.
+Originally developed at the [CRS4 Visual Computing](https://www.crs4.it/vic/) group, Italy.
+More about the authors' work: [albertojaspe.net](https://albertojaspe.net).

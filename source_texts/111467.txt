@@ -1,0 +1,201 @@
+
+# 1. はじめに
+本記事では、スマートフォンで撮影した動画を元に3D Gaussian Splatting（以下、3DGS）モデルを作成し、NVIDIA Omniverse（Isaac Sim）に取り込むまでの一連の手順を解説する。具体的には、nerfstudioを用いた3DGSの生成、生成したPLYファイルのUSDZ形式への変換、そしてOmniverse上での表示確認までを行う。
+
+# 2. 手順
+## 2.1 3D Gaussian Splattingの作成
+### 2.1.1 3DGSの作成に用いるソフトウェア
+3DGSの作成にはnerfstudioを用いる。nerfstudioではコマンドを数回実行するだけで簡単に3DGSの作成ができる。
+
+https://github.com/nerfstudio-project
+
+### 2.1.2 nerfstudioの起動
+erfstudioにはPythonライブラリ版とDocker版があるが、今回はDocker版を使用する。
+カレントディレクトリを /workspace に指定して、Dockerコンテナを起動する。
+
+```bash
+docker run --gpus 'device=1' \
+    -u $(id -u):$(id -g) \
+    -v "$(pwd):/workspace/" \
+    -e HOME=/tmp \
+    -p 7007:7007 \
+    --rm \
+    -it \
+    --shm-size=12gb \
+    -e TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor_$(id -u) \
+    ghcr.io/nerfstudio-project/nerfstudio:latest 
+```
+
+なお、筆者の環境はRTX 5060tiとRTX3060のデュアルGPU環境であるが、5060tiがトレーニング時に使用されるとCUDAやPyTorchのバージョンに起因するエラーが発生したため、RTX 3060を使用するようにGPUを指定した。`--gpus 'device=1'`
+
+### 2.1.3 動画データをトレーニング用に前処理
+今回はスマホでダンベルを360度から撮影した動画を使用する。
+
+![frame_0032.jpg](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/c8f9aae6-eade-4978-ac1d-afe39edb03c7.jpeg)
+
+撮影した動画を、以下のコマンドで前処理する。
+
+```bash
+$ ns-process-data video --data workspace/videos/input.mp4 --output-dir workspace/colmap_output
+Number of frames in video: 609
+Extracting 305 frames in evenly spaced intervals
+[04:06:44] 🎉 Done converting video to images.                                                 process_data_utils.py:227
+[04:06:55] 🎉 Done extracting COLMAP features.                                                       colmap_utils.py:137
+[04:07:58] 🎉 Done matching COLMAP features.                                                         colmap_utils.py:151
+[04:19:26] 🎉 Done COLMAP bundle adjustment.                                                         colmap_utils.py:173
+[04:21:03] 🎉 Done refining intrinsics.                                                              colmap_utils.py:184
+[04:21:08] 🎉 🎉 🎉 All DONE 🎉 🎉 🎉                                                 video_to_nerfstudio_dataset.py:149
+           Starting with 609 video frames                                             video_to_nerfstudio_dataset.py:152
+           We extracted 305 images with prefix 'frame_'                               video_to_nerfstudio_dataset.py:152
+           Colmap matched 305 images                                                  video_to_nerfstudio_dataset.py:152
+           COLMAP found poses for all images, CONGRATS!                               video_to_nerfstudio_dataset.py:152
+```
+
+実行すると内部的にCOLMAP（複数の写真から、撮影したカメラの位置と被写体の3次元形状（点群）を復元するためのソフトウェア）が実行される。入力した動画はフレーム処理され、今回は305枚の画像として処理された。フレーム数は `--num-frames-target` で変更できるが、今回はデフォルトで実行した。
+
+### 2.1.4 トレーニング(COLMAPの出力から3DGSモデルを作成)実行
+2.1.3で出力先に指定したディレクトリを `--data` オプションに指定して、トレーニングを実行する。
+
+```bash
+ns-train splatfacto --data  workspace/colmap_output --output-dir workspace/train_output
+```
+
+上記コマンドを実行すると、Webアプリ（ビューア）が起動する。
+
+```bash
+
+╭─────────────── viser ───────────────╮
+│             ╷                       │
+│   HTTP      │ http://0.0.0.0:7007   │
+│   Websocket │ ws://0.0.0.0:7007     │
+│             ╵                       │
+╰─────────────────────────────────────╯
+```
+
+ブラウザでアクセスすると、3DGSモデルの作成状況をリアルタイムに確認することができる。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/0637e517-0723-41db-90c5-9af8076f3aa6.png)
+
+コンソールに Training Finished と出力されたらトレーニング完了。
+
+```bash
+29991 (99.97%)      11.44 M              23.651 ms            212.861 ms           23.85 M               
+29999 (100.00%)     11.20 M                                                                              
+----------------------------------------------------------------------------------------------------     
+Viewer running locally at: http://localhost:7007 (listening on 0.0.0.0)                                  
+╭─────────────────────────────────────────── 🎉 Training Finished 🎉 ────────────────────────────────────────────╮
+│                        ╷                                                                                       │
+│   Config File          │ workspace/train_output/colmap_output/splatfacto/2026-02-15_042150/config.yml          │
+│   Checkpoint Directory │ workspace/train_output/colmap_output/splatfacto/2026-02-15_042150/nerfstudio_models   │
+│                        ╵                                                                                       │
+```
+
+DGSモデルの作成が完了し、複数角度から確認できるようになる。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/d8997c97-ffe4-40c3-bac2-6729ba4656f0.png)
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/fac29c64-e368-4d44-8a06-ec9e2c7af5d6.png)
+
+### 2.1.5 3DGSモデルのエクスポート
+作成した3DGSモデルは、PLYファイル形式でエクスポートできる。`Export`タブから `Generate Command`を選択すると、エクスポート用のコマンドラインが表示される。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/0574ea9e-a17c-4267-a8a7-b91795b811db.png)
+
+上記をコピーして実行する。
+
+```
+ns-export gaussian-splat --load-config workspace/train_output/colmap_output/splatfacto/2026-02-15_042150/config.yml --output-dir workspace/splat/ 
+```
+
+エクスポートに成功すると、指定したディレクトリに`splat.ply`が出力される。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/17c24e50-3f6c-4639-8aff-5c3e28fd27bf.png)
+
+
+### 2.1.6 SuperSplatで出力した3DGSモデルを確認する
+出力した3DGSモデル(.ply)ファイルをブラウザで利用可能な3DGS編集ツールSuperSplatに取り込んで確認する。
+
+https://superspl.at/editor
+
+`splat.ply`をドラッグ&ドロップして正常に表示されればOK。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/38d25661-6bec-4dc2-b332-27c6d2de4095.png)
+
+## 2.2 PLYファイルのUSDZ形式への変換
+3DGSのPLYファイルは、そのままではNVIDIA Omniverseで扱えないため、NVIDIAが提供している「3DGRUT」というツールでUSDZ形式に変換する。
+
+https://github.com/nv-tlabs/3dgrut.git
+
+公式サイトの手順に従い、Dockerイメージをビルドして起動する。
+
+```bash
+git clone --recursive https://github.com/nv-tlabs/3dgrut.git
+cd 3dgrut
+docker build . -t 3dgrut
+xhost +local:root
+docker run -v --rm -it --gpus 'device=1' --net=host --ipc=host -v $PWD:/workspace --runtime=nvidia -e DISPLAY 3dgrut
+```
+
+変換を実行する。
+
+```bash
+python -m threedgrut.export.scripts.ply_to_usd ./splat.ply --output_file ./output.usdz
+```
+
+
+## 2.3 NVIDIA Omniverseに取り込む
+### 2.3.1 NVIDIA Omniverseのダウンロードと起動
+
+NVIDIA Omniverse（Isaac Sim）のビルド済みバイナリを以下のサイトからダウンロードする。
+
+https://docs.isaacsim.omniverse.nvidia.com/5.1.0/installation/download.html
+
+今回は Linux (x86_64) の 5.1.0 を選択。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/78b15454-d12a-461d-b1ec-35fd5067f366.png)
+
+ダウンロード完了後、zipを展開して以下のコマンドを実行する。
+
+```bash
+$ ./isaac-sim.selector.sh 
+```
+
+Isaac-simを選択して`START`。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/ae518308-51f8-4fe9-9b5a-8fab73f04d27.png)
+
+Isaac-simが起動する。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/2e9c1c3f-1cbc-427d-a79b-82c0e9080577.png)
+
+### 2.3.2 3DGSデータ(USDZ形式)の取り込み
+File -> Openを選択肢、USDZファイルを開く。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/66296acf-3399-4b71-a9ba-98c8ce776dd7.png)
+
+すると、何やらモヤのようなのものが表示された。これは失敗しているのではないかという嫌な予感...
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/3b19e0b9-cceb-4f54-acc0-a5877325cb80.png)
+
+視点を移動し、モヤのようなものの中を探索すると、ダンベルらしきものを発見。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/099b8e6e-e922-4e12-b3ce-c7a3c38a5f1b.png)
+
+近づいていくと、無事にダンベルの3Dモデルが存在することを確認できた。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/a5825d73-113f-4fa3-99a0-22e7963e1ed6.png)
+
+このモヤのようなものは、Omniverseに取り込む前にSuperSplatなどの3DGS編集ソフトで削除しておくべきだったようだ。SuperSplatであれば、削除したい範囲をドラッグ&ドロップで選択して Delete キーを押すだけで、簡単に削除できる。
+
+モヤ削除したい範囲を選択した様子:
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/e7de410f-28c9-45ef-9f37-80644eae7a4f.png)
+
+モヤを削除した様子1:
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/d23f8413-af95-49af-ba6d-e6e91279b158.png)
+
+モヤを削除した様子2:
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/f9d9ae27-9a83-4564-914e-b35192470632.png)
+
+
+# 3. まとめ
+本記事では、スマートフォンで撮影した動画から3D Gaussian Splattingモデルを作成し、NVIDIA Omniverseへ取り込む手順を解説した。nerfstudioを用いることで、コマンド数回の実行で3DGSの生成が可能であり、生成過程はWebブラウザ上でリアルタイムに確認できる。出力されたPLYファイルは、3DGRUTを用いてUSDZ形式に変換することで、Omniverse上で読み込めた。

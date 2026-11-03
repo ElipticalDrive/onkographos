@@ -1,0 +1,563 @@
+Differentiable Rendering for Pose Estimation in Proximity
+Operations
+Ramchander Rao Bhaskara∗
+Texas A&M University, College Station, TX 77843
+arXiv:2212.12668v1 [cs.CV] 24 Dec 2022
+Roshan Thomas Eapen†
+Pennsylvania State University, State College, PA 16801
+Manoranjan Majji‡
+Texas A&M University, College Station, TX 77843
+Differentiable rendering aims to compute the derivative of the image rendering function
+with respect to the rendering parameters. This paper presents a novel algorithm for 6-DoF
+pose estimation through gradient-based optimization using a differentiable rendering pipeline.
+We emphasize two key contributions: (1) instead of solving the conventional 2D to 3D correspondence problem and computing reprojection errors, images (rendered using the 3D model)
+are compared only in the 2D feature space via sparse 2D feature correspondences. (2) Instead
+of an analytical image formation model, we compute an approximate local gradient of the rendering process through online learning. The learning data consists of image features extracted
+from multi-viewpoint renders at small perturbations in the pose neighborhood. The gradients
+are propagated through the rendering pipeline for the 6-DoF pose estimation using nonlinear
+least squares. This gradient-based optimization regresses directly upon the pose parameters by
+aligning the 3D model to reproduce a reference image shape. Using representative experiments,
+we demonstrate the application of our approach to pose estimation in proximity operations.
+I. Introduction
+Space-borne navigation relies on accurate estimation of relative position and attitude, known as relative pose,
+between a target and a chaser spacecraft. Advances in computer vision have propelled both the utility and ubiquity of
+vision-based relative navigation, using visual sensors to estimate relative pose [1–3]. Vision-based pose estimation is
+widely implemented in positioning applications such as autonomous rendezvous and docking [4], proximity operations
+[5], and terrain relative navigation [6, 7]. In cooperative proximity operations, the computation of pose using image
+feature coordinates is classically achieved by solving Perspective-n-Point (PnP) problem [8]. The geometric configuration
+of the features of the target object is usually known, either from deployed fiducial markers or from transmission of state
+information [9, 10].
+However, the estimation of the relative pose between an uncooperative target and a chaser is a more involved process.
+Without assistance from the target, the chaser must lead the efforts in feature acquisition and tracking for correspondence.
+Also, because 2D images lack depth information, pose cannot be determined using a single image. Monocular or stereo
+vision pipelines use at least two frames to first estimate the 3D locations of the feature points and then determine the
+relative pose [11]. However, the estimation of 3D feature coordinates is associated with its own errors and therefore
+could potentially corrupt the pose estimation accuracy. If the geometric model of a target is known in advance or built
+online [12], the pose can be determined by mapping the feature points to the 3D locations on the target model [13].
+Otherwise, in a model-free approach, sparse 3D point clouds of a target can be constructed using Structure from Motion
+(SfM) [14].
+Traditionally, in the model-based relative navigation approach, pose is determined through the PnP algorithm after
+establishing correspondences between the 2D feature points and the 3D model points. This approach has two major
+drawbacks:
+∗ Graduate Student, Aerospace Engineering, Texas A&M University, College Station, TX 77843.
+† Assistant Professor, Aerospace Engineering, Pennsylvania State University, State College, PA 16801.
+‡ Associate Professor, Aerospace Engineering, Texas A&M University, College Station, TX 77843.
+1
+1) Robustness. Geometric methods, PnP or POSIT [15], solve the estimation problem as a function of pose only.
+However, rapid changes in illumination conditions could adversely affect the solution of feature correspondence
+and pose estimation problems.
+2) Accuracy limitations. Establishing 2D-3D correspondence as an initial step adds to the errors in pose estimation.
+Numerical approximations and pixel interpolations limit the precision of pose estimates.
+Mitigating these drawbacks, we build on our previous work [11] and propose a differentiable rendering pipeline for
+pose estimation.
+A. Differentiable Rendering
+Ray tracing tools aim to render physically realistic images of an object given its 3D geometry and texture under
+specified camera and illumination properties [11, 16]. This process is also termed forward rendering. On the other
+hand, computer vision is viewed as an inverse graphics process to search for the parameters of a model that are used to
+render the image in the first place [17, 18]. In essence, inverse graphics is an optimization approach to infer the 3D
+geometry and scene properties from an image, so that a graphics engine can reconstruct the observed image. In addition,
+Differentiable Rendering (DR) is a reverse engineering technique to model changes in the output of the rendered image
+with respect to changes in the parameters used to render the image [19–21]. In short, differentiable rendering is a
+technique of analysis by synthesis to estimate image generation parameters using iterative optimization rules [22].
+OpenDR framework, a first general-purpose differentiable rendering solution, is proposed by Loper et al. [18]. It
+embeds a forward graphics model to render images from scene parameters and to generate the image derivatives with
+respect to the model parameters using approximate numerical methods. Our operation is coherent in principle with
+OpenDR wherein for a given model of the scene geometry and image features, we define an observation error function
+and iteratively minimize the image differences by differentiating it with respect to the model parameters. We distinguish
+ourselves from OpenDR-like frameworks and other pose estimation pipelines in at least one of the following ways:
+1) The image formation model supplies pixel measurements as a function of pose parameters (only) but is sensitive
+to local illumination conditions.
+2) Online learning of the rendering function’s Jacobian for data-driven optimization. Data generated by uniform
+sampling of pose parameters along a current pose axis.
+3) Optimization in the 2D feature space without requiring to solve any 3D correspondence problem.
+4) Emphasis on physically accurate image rendering of virtual scenes to prioritize true-to-physics navigation
+scenarios.
+Other state-of-the-art pose estimation frameworks are based on supervised learning methods [21, 23, 24]. The
+neural rendering frameworks are a set of very robust pose estimation pipelines for terrestrial applications, but require
+extensive training under varied illumination conditions [25–29]. Offline learning frameworks for spacecraft navigation
+through neural nets are on the trickier end due to a) rapidly changing illumination conditions affected by occlusions due
+to fast relative motion between the chaser and the target satellite, and b) lack of extensive and elaborate training data sets
+for reliable pose estimation of unseen or partially observable objects.
+In this paper, we present the estimation of the 6-DoF pose from a single image by posing the forward rendering
+process as a function of the pose parameters. Our process does not assume constancy in illumination but relies on
+extraction of a set of common image features in each iteration towards convergence. The core of our method is an online
+learning approach to approximately compute the gradient of the rendering process with respect to the pose parameters.
+The online learning process is facilitated by systematic pose perturbations. The framework extracts feature points
+from RGB images with known poses and tracks the respective features in the images generated in the perturbed pose
+neighborhood. A local gradient (Jacobian) built from these feature differences iteratively refines the pose to fit the
+renderings of the 3D model to the reference image.
+The remainder of this paper is organized as follows. In Section II, a brief overview of the differentiable rendering
+pipeline is provided. Section III describes the method for estimating the Jacobian of the rendering process, and Section
+IV presents the nonlinear optimization problem for 6-DoF pose estimation. The results for the validation of the proposed
+pipeline to estimate the pose in proximity operations are presented in Section V.
+II. Preliminaries of Differentiable Rendering
+Given a single RGB reference image consisting of a target object, we present an end-to-end pipeline for novel 2D
+view synthesis and 6-DoF relative pose (rotation and translation) estimation. Using the object model and a valid initial
+guess for the pose, we render an image and extract a set of reference features that match with those of the reference
+2
+image. The reference features are tracked in the neighborhood of the pose guess to locally approximate the image
+rendering gradient with respect to the pose parameters. This provides a direction for gradient-based optimization
+to minimize misalignment error for precise 2D view reconstruction and pose estimation. Our overall architecture is
+highlighted in Fig. 1. The process of forward rendering and image formation kinematics are discussed below.
+Fig. 1 Differentiable rendering pipeline for pose estimation: 1) the framework utilizes a rendering engine to
+synthesize an RGB image of the object at an initial pose. Arbitrary views of the object are generated via small
+perturbations in the pose neighborhood. An approximate gradient of the image is numerically computed using
+the registered poses and their respective image renderings. The gradient is utilized to optimize the view to
+reproduce the 2D view geometry and estimate 6-DoF relative pose.
+A. Image Formation Model
+In this work, we utilize a perspective pinhole camera model to transform object geometry to view space. In
+perspective projection, given n 3D reference points a𝑖 , i = 1, 2, ..., 𝑛, in the object reference frame, and their transformed
+3D coordinates b𝑖 , in the view space, we seek to retrieve the proper orthogonal rotation matrix R and the translation
+vector t, of the camera relative to a target satellite. The projection transformation between the 3D reference points and
+the corresponding view space 3D coordinates is given by
+b𝑖 = Rai + t,
+𝑖 = 1, 2, ..., 𝑛
+(1)
+where R𝑇 R = 𝐼 and det(R) = 1.
+The perspective projection model extends the transformation in Eq. (1) from 3D view space coordinates to their
+corresponding 2D homogeneous image projections l𝑖 = [𝑢 𝑖 𝑣 𝑖 1] 𝑇 for given intrinsic camera parameters as
+𝑠l𝑖 = 𝐾 [𝑅 | t] [a𝑖
+1] 𝑇
+(2)
+where 𝑠 denotes the depth factor for the 𝑖-th point and 𝐾 is the matrix of calibrated intrinsic camera parameters
+corresponding to axis skew 𝛾, aspect ratio scaled focal lengths ( 𝑓 𝑥 , 𝑓 𝑦 ), and principal point offset (𝑥 0 , 𝑦 0 ):
+ 𝑓𝑥
+
+
+𝐾 = 0
+
+0
+
+𝛾
+𝑓𝑦
+0
+𝑥 0 
+
+𝑦0
+
+1 
+(3)
+The attitude kinematics used in this paper utilizes classical Rodrigues parameters (CRPs) [30] (Gibbs vector) to
+represent the orientation matrix R. CRPs facilitate posing an optimization problem via polynomial system solving, free
+3
+of any trigonometric functions. Let vector q = [𝑞 1 𝑞 2 𝑞 3 ] 𝑇 denote the CRPs, the rotation matrix R in terms of q can be
+obtained using the Cayley transform as:
+R = (𝐼 + [q×]) −1 (𝐼 − [q×])
+(4)
+where 𝐼 ∈ IR3×3 is an identity matrix, and operator [q×] ∈ IR3×3 converts a vector into a skew-symmetric matrix of the
+form:
+ 0
+−𝑞 3 𝑞 2 
+
+
+
+[q×] =  𝑞 3
+(5)
+0
+−𝑞 1 
+
+
+−𝑞 2 𝑞 1
+
+0 
+
+and the resulting parameterization in vector form is
+
+
+1
+𝑇
+𝑇
+(1
+−
+q
+q)
+[𝐼
+]
++
+2qq
+−
+2[q×]
+R=
+3×3
+1 + q𝑇 q
+(6)
+In what follows, we present several tools to construct a nonlinear optimization approach for the estimation of pose
+parameters p = [q t] 𝑇 . We begin with a brief description of the rendering process and direct the readers to our
+previous work [11] for a detailed description of the rendering algorithm.
+B. Forward Rendering
+Fig. 2 Forward Rendering Process: With the 3D model of the object, relative pose of the camera, and the scene
+illumination properties as the inputs, the rendering engine synthesizes RGB images at the output.
+The forward rendering process utilizes a ray-tracing based rendering engine that takes the 3D object model as input
+and renders a 2D image as described in Fig. 2. The virtual scene is constructed with the description of view geometry
+i.e., the relative pose between the camera and the object, the camera instrinsic parameters, and illumination attributes.
+We deploy physically based ray-tracing engine for rendering images that are physically accurate and empirically valid.
+Our pipeline is compatible for deployment with the Mitsuba [16] engine as well as our own engine called Navigation
+and Rendering Pipeline for Astronautics (NaRPA) [11]. In the next section, we present a method of estimating the
+gradient of the image rendering process with respect to the pose parameters.
+III. Estimating the Jacobian
+The image formation model is a nonlinear geometric relationship construct x𝑡 = f (p𝑡 ) between the degrees of
+freedom of the system p𝑡 and its corresponding output x𝑡 for any time 𝑡. Similar to the concept of inverse kinematics, the
+objective of differentiable rendering approach is to estimate p𝑡 from x𝑡 . A global search to identify the optimal p might
+be intractable for real-time applications due to the high-dimensional search space and highly nonlinear f. Alternately,
+the nonconvex and high-dimensional pose estimation problem is desirable to be optimized locally and serviceable using
+online numerical computations.
+A. Method
+Consider the set of 6-DoF camera pose parameters p = ( 𝑝 𝑖 )1≤𝑖 ≤6 describe the image feature measurements
+x = (𝑥 𝑗 )1≤ 𝑗 ≤𝑚 through the image formation process x = f (p). The goal is to estimate p from the observations x by
+solving a generalized inverse problem.
+4
+The nonlinear and non-invertible process f is only explicitly modeled as a function of p but is implicitly sensitive
+to illumination as well as the intrinsics of the capturing camera. We bypass the analytical description of the image
+formation model because of the complexities conditioned on not just the relative pose, but also the modeling of lens
+and illumination sources. Therefore, we seek a local numerical solution Δp = MΔx for some Δx in the neighborhood
+of zero and M to be computed. In this linear approximation, our approach allows to take the implicit parameters into
+account, in a small linear neighborhood, without supplementary computations. Ignoring higher-order terms, from the
+Taylor series expansion of x,
+Δx = J 𝑓 Δp
+(7)
+J 𝑓 being the Jacobian matrix that acts as a local gradient of the image formation model, in the neighborhood of some
+initial pose p.
+In this section, we propose a learning approach to numerically compute J 𝑓 . This is achieved by generating a random
+sample of 𝑁 𝑠 increments Δp, producing a 𝑛 × 𝑁 𝑠 matrix of perturbations p + Δp. The resulting 𝑚 × 𝑁 𝑠 matrix of
+corresponding measurement variations is calculated through f as Δx = f (p + Δp) − f (p). Then, the Jacobian of the
+image formation process is evaluated by resolving the linear system in Eq. (7) in the least-squares sense. If the 𝑛 × 𝑁 𝑠
+matrix composed of pose samples has a rank equal to 𝑛, the Jacobian J 𝑓 is computed from the right inverse of this
+matrix. This process is described in the next section.
+B. Realization
+In image based visual servoing, Jacobian is often used to design control laws for moving an end-effector to a desired
+pose based on visual feedback. Learning techniques for numerical estimation of the Jacobian are popularized to mitigate
+the need for a priori knowledge of kinematic structure and calibration parameters [31]. Traditionally, online learning to
+estimate the Jacobian based on visual features is aimed at tracking a target pose and not necessarily estimating the pose
+[32]. Learning the inverse Jacobian has also been shown to result in much better performance than inverting an estimate
+of the Jacobian [33]. From all of these previous studies, if a pose estimate is to be drawn, a finite difference scheme may
+be deployed to correct the pose parameters. This work uses the estimated Jacobian to compute a maximum likelihood
+estimate for the pose parameters that iteratively minimizes the feature errors. In any case, the learning model relies on
+the scheme of the pose perturbations for the Jacobian approximation.
+1. Pose Sampling
+Fig. 3
+Pose Sampling: Random sampling of rotation axis distributed uniformly on a spherical surface.
+Our pose perturbation methodology is to randomly sample from the space of camera poses (i.e., rotations and
+translations) from the 𝑆𝐸 (3) group. We bias the random pose samples to be about a reference pose vector. The pose
+5
+distribution in a 𝛿−neighborhood of the reference pose ensures that the set of reference features is likely tracked in the
+corresponding image samples.
+Our method samples poses from all six degrees of freedom in the pose space, unlike [34]. It is important to encode
+all the auto and cross coupled sensitivities in the Jacobian matrix using a minimum number of perturbations. Rotations
+in a small 𝛿− neighborhood of the camera axis will assist the image features to most likely be visible in the sampled
+images. We use axis-angle parameterization to achieve a uniform random distribution on 𝑆𝑂 (3) [35–37]. As shown in
+Fig. 3, the rotations are sampled from a uniform distribution of unit vectors in the unit-2 sphere, in the neighborhood
+of a reference axis (ê) as ê + Δê. A non-uniform angle distribution in [0, 𝜃] for a small 𝜃, yields uniform random
+rotation matrices [36]. These rotation matrices are converted to CRPs (q’s) as we use the Gibbs vector representation
+for orientation.
+The translational pose components are sampled from a bounded uniform random distribution along each of the
+axes. The distribution covers combined translations in the transverse as well as the forward motions. Our strategy is to
+uniformly space the samples in a bounding volume pose space such that the rendered images from adjacent samples
+have substantial overlap. Knowledge of perturbed camera pose is represented by p + Δp𝑖 , combining sample translations
+for position and sample Gibbs vectors for orientation. Fig. 4 illustrates the renders of a target object for three example
+camera poses.
+Fig. 4
+Pose sampling: Renders of the target with three different camera pose perturbations.
+Using four feature points, a vector x is thus defined as a set of eight feature coordinates:
+x = (𝑥1 , 𝑦 1 , . . . , 𝑥 4 , 𝑦 4 )
+(8)
+2. Online Learning
+In this section, we discuss the learning-based estimation of the Jacobian matrix for the image feature rendering
+process. For illustration, we choose the specific case of an object with four key-point features, which can be tracked
+across all the images rendered in the perturbed pose space. However, note that the method can be applied to any
+number of feature points (at least three). In addition, if the tracking of at least four features is unsuccessful, the method
+re-initializes with conservative pose samples.
+Tracking the features of the images rendered at all the perturbed poses, we numerically evaluate the local gradient of
+the image feature rendering process in the neighborhood of a reference pose. For all pose perturbations, we measure
+errors Δx𝑖 due to feature differences between the reference image features xref and the perturbed image features x𝑖 due
+to the variation in pose parameters Δx𝑖 . We write this error as follows.
+Δx𝑖 = xref − x𝑖
+6
+(9)
+Furthermore, for all pose perturbations, we populate the difference between the reference pose pref and a sampled
+pose p𝑖 by combining the differences in the rotation and translation components.
+ΔRi = RTref Ri
+(10)
+Δti = tref − ti
+(11)
+With the attitude represented using the Gibbs vector (q), the relative pose difference can be written as Δpi = [Δqi Δti ] 𝑇 .
+Ultimately, we linearize the nonlinear transformation, denoted by H, from the image feature space to the pose space
+for 𝑁 𝑠 perturbations about the reference pose, to write
+𝜕H
+[Δx1 , . . . , Δx 𝑁𝑠 ] =
+[Δp1 , . . . , Δp 𝑁𝑠 ]
+|
+{z
+} 𝜕p |
+{z
+}
+E
+(12)
+B
+For a sufficiently large number of pose samples, the gradient (Jacobian) of the image feature rendering process is
+computed by evaluating the right inverse of B as
+J𝑓 =
+𝜕H
+−1
+= E(B𝑇 (BB𝑇 ) )
+𝜕p
+(13)
+For 𝑁 𝑠 number of perturbations, the dimension of E is 8 × 𝑁 𝑠 , dimension of B is 6 × 𝑁 𝑠 and that of J 𝑓 is 8 × 6. There
+are 48 unknowns in J 𝑓 . This model is equivalent to a least square solution of a system of 𝑁 𝑠 equations with 8 unknowns
+for 6 right hand sides. The rank deficiencies in B can be avoided by randomly and carefully perturbing pose along all
+the 6 axes.
+IV. Pose Optimization Problem
+The least squares objective function L, for the optimization of pose in feature-based visual odometry, can be written
+as follows:
+∑︁
+L (S, X𝑝 , p) = min
+|| x̃ − h(s𝑖 , p̂)|| 2
+𝑠𝑖 ∈ S, x̃ ∈ X𝑝
+(14)
+p
+𝑖
+where S is a set of RGB images, X𝑝 is a set of features extracted from images in S, x̃ denote the features observed
+in the 2D image rendered at true pose. h(s𝑖 , p̂) is the measurement function that captures the geometric relationship
+between the predicted pose p̂ and the features of the image frame s𝑖 that is rendered at the predicted pose.
+Solving the objective of Eq. (14) involves the first-order approximation of the nonlinear measurement function
+h(s𝑖 , p̂) about an initial pose guess p̂ (i) :
+∑︁
+∑︁
+|| x̃ − h(s𝑖 , p̂)|| 2 =
+|| x̃ − h(s𝑖 , p̂ (i) ) − J 𝑓 (p − p̂ (i) )|| 2
+(15)
+𝑖
+𝑖
+Utilizing the Jacobian in Eq. (13) computed by online learning, we regress upon the relative pose parameters of the
+object with respect to the camera by minimizing the feature misalignment errors between the images synthesized at the
+predicted and the true poses. Levenberg-Marquardt (LM) algorithm for nonlinear least squares is used to iteratively
+update the pose parameters by correcting the initial pose values until convergence. The iterative procedure is represented
+as:
+
+ −1
+
+
+p̂𝑖+1 = p̂𝑖 + J𝑇 J + 𝜆diag(J𝑇 J)
+J𝑇 x̃ − h(s𝑖 , p̂ (i) )
+(16)
+where 𝜆 is the LM update parameter that adaptively modifies the reduction in error residuals.
+The method minimizes the pixel differences between the reference image features (rendered at target pose) and the
+matching features from image rendered at the initial pose guess. It dynamically updates the pose by an amount of 𝛿p
+until convergence, i.e., ||𝛿p|| < 𝜖 (for a small 𝜖). The algorithm 1 represents the sequences of steps involved in the pose
+estimation procedure.
+7
+Algorithm 1 Pose estimation algorithm
+Input: Reference image sref , initial pose guess p̂0 , LM update parameter 𝜆
+Output: Converged pose: p̂final
+1: Extract reference image features x̃ from the reference image.
+2: while ||𝛿p|| > 𝜖 do
+3:
+Render image at initial pose guess p̂ (i) .
+4:
+Extract features and match them with the reference features x̃ as h(s𝑖 , p̂ (i) ).
+5:
+Sample pose parameters around the initial pose guess p̂𝑖 .
+6:
+Render images at sampled pose values and match reference features in each of them.
+7:
+Calculate J 𝑓 via online learning and using Eq. (13).
+8:
+Calculate the least squares pose update p̂𝑖+1 using Eq. (16).
+9: end while
+10: return Converged pose: p̂final
+V. Results
+In this section, we present simulation results to demonstrate the application of differentiable rendering to estimate
+pose and realistically reproduce an observed image. For illustration, we simulate two proximity navigation scenarios for
+pose estimation during: (a) spacecraft approach maneuver toward the International Space Station (ISS), and (b) asteroid
+relative navigation. The pose optimization process is run until the pose converges to be within a minimum acceptable
+tolerance. We define the cost of the optimization process to be the squared sum of the residuals between the image
+features rendered at the reference and the predicted poses. Running the iterative optimization for cost convergence is
+equally meaningful. Moreover, to evaluate the pose refinement process, we consider the pixel-wise distance between the
+reference image and the image rendered at the regressed pose value.
+The ground truth is generated by forward rendering the known target model at the true pose. We estimate the
+pose parameters using differentiable rendering at each step to descend in the gradient direction using nonlinear
+optimization (Eq. (16)). Fig. 5 highlights the differentiable rendering philosophy to synthesize and estimate pose for
+view reproduction. The images synthesized in the first few iterations visually validate the convergence of the algorithm
+towards the true pose.
+Fig. 5 Pose estimation and view reproduction using the differentiable rendering method. Left: A target image
+of the ISS synthesized at the ground-truth pose parameters. Center: minimizing the image differences with
+numerical gradient computed by pose perturbations. Right: Pixel differences between the image rendered at
+the converged pose estimate and the reference image.
+8
+A. Evaluation Metrics
+The consistency in the estimation of the pose can be evaluated by comparing the estimated pose with the corresponding
+ground truth [38]. Given a ground truth pose p = [R t] 𝑇 and an estimated pose p̂ = [R̂ t̂] 𝑇 , the error in p̂ is
+measured by the differences in translation and orientation between p̂ and p. The translation error (||Δt||), measured in
+units of scene geometry, is evaluated by computing the absolute distance between the true and estimated translation
+vectors.
+||Δt|| = ||t − t̂|| 2
+(17)
+The rotation error is evaluated as the angle (∠ΔR) required to align the estimated and ground-truth orientations.
+
+
+tr(R−1 R̂) − 1
+∠ΔR = arccos
+(18)
+2
+Here, tr( 𝐴) represents the trace of a 3 × 3 matrix 𝐴.
+B. Feature Correspondence
+The differentiable rendering pipeline is illustrated in the Algorithm 1. The algorithm solves the feature-correspondence
+problem in two stages of each iteration. First, we find the correspondence between the reference image and the image
+rendered at the initial pose guess. Next, we find a feature correspondence between the reference image and the multiple
+images rendered at the sampled pose values.
+To realize feature correspondences, robust geometric feature detectors [39, 40], consistent with the type of image
+regions, are deployed to extract feature descriptors. Using the descriptors, the features of both images are matched.
+Blocking as many mismatched pairs as possible using outlier rejection, the best few feature matches between the images
+are selected as sparse measurements.
+The feature matching process is computationally inefficient but unavoidable when the two images are rendered from
+cameras that are far apart. However, the images rendered at the sampled poses are from camera views that are very
+close. Here, the Kanade-Lucas-Tomasi (KLT) feature-based tracking algorithm [41] allows for efficient and real-time
+feature correspondence between the reference image and the large number of views rendered at the sampled pose values.
+C. Experiments
+Two experiments are described to validate the performance of the proposed method to estimate the 6-DoF pose. In
+both the experiments, we start the optimization using an informed guess about the pose parameters. The guess has to be
+meaningful enough to find a minimum number of feature matches between the reference and the image rendered at the
+guessed pose.
+1) In the first experiment, starting from a random initial pose, we reproduce a reference image of the International
+Space Station (ISS) captured at a reference pose. In the process, we optimize the initial pose and converge toward
+the reference pose at which the reference image is rendered. We quantitatively evaluated the pose convergence in
+Fig. 6 and qualitatively illustrated the image convergence in Fig. 7. Translation and rotation errors after 10
+iterations are observed to be 0.12 m and 0.116◦ , respectively.
+Fig. 7d shows the absolute image difference between the reference ISS image and the image synthesized at the
+converged pose. Pixel differences indicate not only shape mismatches, but also illumination differences. In
+particular, the bright left half in Fig. 7d hints that the position of the illuminating source to be towards the left of
+the target object (ISS).
+9
+(a) Rotation errors (degrees)
+Fig. 6
+(b) Translation errors (meters)
+(c) Logarithmic cost
+Experiment 1 ("ISS"): Error metrics evaluated at each iteration of the pose optimization.
+(a) Iteration 1
+(b) Iteration 2
+(c) Iteration 10
+(d) Image difference
+Fig. 7 Experiment 1 ("ISS"): Optimization iterations in matching an image rendered at a random initial pose
+(blue) with the reference image (red). The fourth image represents pixel wise difference between the converged
+and the reference images.
+2) The second experiment involves navigation relative to the terrain of "Rheasilvia" ∗ . Starting from an initial pose
+guess, we match the reference image and also converge towards the target pose. We quantitatively evaluated the
+pose convergence in Fig. 8 and qualitatively illustrated the image convergence in Fig. 9. The translation and
+rotation errors obtained are observed to be 2.38 m and 2.11◦ , respectively.
+Fig. 9d shows the absolute image difference between the reference image and the image rendered at the converged
+pose. Noticeably, the pixel differences indicate not only the shape differences but also the illumination differences.
+(a) Rotation errors (degrees)
+Fig. 8
+(b) Translation errors (meters)
+(c) Logarithmic cost
+Experiment 2 ("Rheasilvia"): Error metrics evaluated at each iteration of the pose optimization.
+∗ The Rheasilvia basin: https://nasa3d.arc.nasa.gov/detail/vesta-rheasilvia
+10
+(a) Iteration 1
+(b) Iteration 2
+(c) Iteration 11
+(d) Image difference
+Fig. 9 Experiment 2 ("Rheasilvia"): Optimization iterations in matching an image rendered at a random
+initial pose (blue) with the reference image (red). The fourth image represents pixel wise difference between the
+converged and the reference images.
+VI. Conclusion
+In this paper, we have proposed a pipeline to estimate the 6-DoF pose of a target from a single image. Starting from
+an initial pose guess, we rendered multiple images by perturbing the guess, and thereby learned the local gradient of the
+image formation model in a derivative-free approach. By computing only the 2D feature differences, we obtained a
+least-squares estimate for the 6-DoF pose using differential corrections to the initial pose guess. To show the validity of
+the proposed algorithm, we presented two proximity operation experiments.
+Learning the local gradient of the image formation is feasible with the knowledge of the target’s 3D model. The
+availability of the model enables the rendering of images at different pose perturbations to facilitate feature-rich datasets
+for online learning. However, if a model is not readily available for an uncooperative target, a dense point cloud can
+be constructed from a LiDAR scanner or synthesized from multiview 3D reconstruction. The point cloud facilitates
+solving the 2D feature to 3D coordinate correspondence for pose estimation (refer to our previous work [11]).
+The proposed pipeline is sensitive to the establishment of a minimum number of 2D feature correspondences. Future
+work will be aimed at researching feature matching algorithms relevant to a target object’s texture, outlier rejection
+schemes, and guarantees for local minima. Image rendering is the computationally expensive step in the algorithm. For
+real-time implementation, high-speed computing architectures are to be explored.
+Furthermore, reasoning about the optimal pose sampling methods that accurately capture the gradient of the image
+formation model, remains an open research problem.
+References
+[1] Du, X., Liang, B., and Tao, Y., “Pose determination of large non-cooperative satellite in close range using coordinated cameras,”
+2009 International Conference on Mechatronics and Automation, IEEE, 2009, pp. 3910–3915.
+[2] Cropp, A., Palmer, P., McLauchlan, P., and Underwood, C., “Estimating pose of known target satellite,” Electronics Letters,
+Vol. 36, No. 15, 2000, pp. 1331–1332.
+[3] Zhang, H., Jiang, Z., and Elgammal, A., “Vision-based pose estimation for cooperative space objects,” Acta Astronautica,
+Vol. 91, 2013, pp. 115–122.
+[4] Liu, C., and Hu, W., “Relative pose estimation for cylinder-shaped spacecrafts using single image,” IEEE Transactions on
+Aerospace and Electronic Systems, Vol. 50, No. 4, 2014, pp. 3036–3056. https://doi.org/10.1109/TAES.2014.120757.
+[5] Junkins, J. L., Hughes, D. C., Wazni, K. P., and Pariyapong, V., “Vision-based navigation for rendezvous, docking and proximity
+operations,” 22nd Annual AAS Guidance and Control Conference, Breckenridge, CO, Vol. 99, 1999, p. 021.
+[6] Verras, A., Eapen, R. T., Simon, A. B., Majji, M., Bhaskara, R. R., Restrepo, C. I., and Lovelace, R., “Vision and Inertial
+Sensor Fusion for Terrain Relative Navigation,” AIAA Scitech 2021 Forum, 2021, p. 0646.
+[7] Bhaskara, R. R., and Majji, M., “FPGA Hardware Acceleration for Feature-Based Relative Navigation Applications,” arXiv
+preprint arXiv:2210.09481, 2022.
+11
+[8] Fischler, M. A., and Bolles, R. C., “Random sample consensus: a paradigm for model fitting with applications to image analysis
+and automated cartography,” Communications of the ACM, Vol. 24, No. 6, 1981, pp. 381–395.
+[9] Opromolla, R., Fasano, G., Rufino, G., and Grassi, M., “A review of cooperative and uncooperative spacecraft pose determination
+techniques for close-proximity operations,” Progress in Aerospace Sciences, Vol. 93, 2017, pp. 53–72.
+[10] Sung, K., Bhaskara, R., and Majji, M., “Interferometric Vision-Based Navigation Sensor for Autonomous Proximity Operation,”
+2020 AIAA/IEEE 39th Digital Avionics Systems Conference (DASC), IEEE, 2020, pp. 1–7.
+[11] Eapen, R. T., Bhaskara, R. R., and Majji, M., “NaRPA: Navigation and Rendering Pipeline for Astronautics,” arXiv preprint
+arXiv:2211.01566, 2022.
+[12] Wong, X. I., Majji, M., and Singla, P., “Photometric stereopsis for 3D reconstruction of space objects,” Handbook of Dynamic
+Data Driven Applications Systems, Springer, 2018, pp. 253–291.
+[13] Sharma, S., Ventura, J., and D’Amico, S., “Robust model-based monocular pose initialization for noncooperative spacecraft
+rendezvous,” Journal of Spacecraft and Rockets, Vol. 55, No. 6, 2018, pp. 1414–1429.
+[14] Capuano, V., Kim, K., Harvard, A., and Chung, S.-J., “Monocular-based pose determination of uncooperative space objects,”
+Acta Astronautica, Vol. 166, 2020, pp. 493–506.
+[15] DeMenthon, D. F., and Davis, L. S., “Model-based object pose in 25 lines of code,” International journal of computer vision,
+Vol. 15, No. 1, 1995, pp. 123–141.
+[16] Jakob, W., “Mitsuba physically-based renderer,” Dosegljivo: https://www. mitsuba-renderer. org/.[Dostopano: 19. 2. 2020],
+2013.
+[17] Baumgart, B. G., Geometric modeling for computer vision., Stanford University, 1974.
+[18] Loper, M. M., and Black, M. J., “OpenDR: An approximate differentiable renderer,” European Conference on Computer Vision,
+Springer, 2014, pp. 154–169.
+[19] Kato, H., Beker, D., Morariu, M., Ando, T., Matsuoka, T., Kehl, W., and Gaidon, A., “Differentiable rendering: A survey,”
+arXiv preprint arXiv:2006.12057, 2020.
+[20] Wu, Z., Jiang, W., and Yu, H., “Analytical derivatives for differentiable renderer: 3d pose estimation by silhouette consistency,”
+Journal of Visual Communication and Image Representation, Vol. 73, 2020, p. 102960.
+[21] Park, K., Mousavian, A., Xiang, Y., and Fox, D., “Latentfusion: End-to-end differentiable reconstruction and rendering for
+unseen object pose estimation,” Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, 2020,
+pp. 10710–10719.
+[22] Mansinghka, V. K., Kulkarni, T. D., Perov, Y. N., and Tenenbaum, J., “Approximate bayesian image interpretation using
+generative probabilistic graphics programs,” Advances in Neural Information Processing Systems, Vol. 26, 2013.
+[23] Kato, H., Ushiku, Y., and Harada, T., “Neural 3d mesh renderer,” Proceedings of the IEEE conference on computer vision and
+pattern recognition, 2018, pp. 3907–3916.
+[24] Eslami, S. A., Jimenez Rezende, D., Besse, F., Viola, F., Morcos, A. S., Garnelo, M., Ruderman, A., Rusu, A. A., Danihelka, I.,
+Gregor, K., et al., “Neural scene representation and rendering,” Science, Vol. 360, No. 6394, 2018, pp. 1204–1210.
+[25] Kehl, W., Manhardt, F., Tombari, F., Ilic, S., and Navab, N., “Ssd-6d: Making rgb-based 3d detection and 6d pose estimation
+great again,” Proceedings of the IEEE international conference on computer vision, 2017, pp. 1521–1529.
+[26] Xiang, Y., Schmidt, T., Narayanan, V., and Fox, D., “Posecnn: A convolutional neural network for 6d object pose estimation in
+cluttered scenes,” arXiv preprint arXiv:1711.00199, 2017.
+[27] Rad, M., and Lepetit, V., “Bb8: A scalable, accurate, robust to partial occlusion method for predicting the 3d poses of
+challenging objects without using depth,” Proceedings of the IEEE International Conference on Computer Vision, 2017, pp.
+3828–3836.
+[28] Sharma, S., Beierle, C., and D’Amico, S., “Pose estimation for non-cooperative spacecraft rendezvous using convolutional
+neural networks,” 2018 IEEE Aerospace Conference, IEEE, 2018, pp. 1–12.
+12
+[29] Park, T. H., Sharma, S., and D’Amico, S., “Towards robust learning-based pose estimation of noncooperative spacecraft,” arXiv
+preprint arXiv:1909.00392, 2019.
+[30] Schaub, H., Junkins, J. L., et al., “Stereographic orientation parameters for attitude dynamics: A generalization of the Rodrigues
+parameters,” Journal of the Astronautical Sciences, Vol. 44, No. 1, 1996, pp. 1–19.
+[31] Hosoda, K., and Asada, M., “Versatile visual servoing without knowledge of true jacobian,” Proceedings of IEEE/RSJ
+International Conference on Intelligent Robots and Systems (IROS’94), Vol. 1, IEEE, 1994, pp. 186–193.
+[32] Jagersand, M., Fuentes, O., and Nelson, R., “Experimental evaluation of uncalibrated visual servoing for precision manipulation,”
+Proceedings of International Conference on Robotics and Automation, Vol. 4, IEEE, 1997, pp. 2874–2880.
+[33] Lapresté, J.-T., Jurie, F., Dhome, M., and Chaumette, F., “An efficient method to compute the inverse jacobian matrix in visual
+servoing,” IEEE International Conference on Robotics and Automation, 2004. Proceedings. ICRA’04. 2004, Vol. 1, IEEE, 2004,
+pp. 727–732.
+[34] Olson, C. F., “Pose sampling for efficient model-based recognition,” International Symposium on Visual Computing, Springer,
+2007, pp. 781–790.
+[35] Miles, R. E., “On random rotations in Rˆ3,” Biometrika, Vol. 52, No. 3/4, 1965, pp. 636–639.
+[36] Shoemake, K., “Uniform random rotations,” Graphics Gems III (IBM Version), Elsevier, 1992, pp. 124–132.
+[37] Perez-Sala, X., Igual, L., Escalera, S., and Angulo, C., “Uniform sampling of rotations for discrete and continuous learning of
+2D shape models,” Robotic vision: Technologies for machine learning and vision applications, IGI Global, 2013, pp. 23–42.
+[38] Shavit, Y., and Ferens, R., “Introduction to camera pose estimation with deep learning,” arXiv preprint arXiv:1907.05272, 2019.
+[39] Bay, H., Tuytelaars, T., and Gool, L. V., “Surf: Speeded up robust features,” European conference on computer vision, Springer,
+2006, pp. 404–417.
+[40] Shi, J., et al., “Good features to track,” 1994 Proceedings of IEEE conference on computer vision and pattern recognition,
+IEEE, 1994, pp. 593–600.
+[41] Lucas, B. D., Kanade, T., et al., An iterative image registration technique with an application to stereo vision, Vol. 81, Vancouver,
+1981.
+13

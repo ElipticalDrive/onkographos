@@ -1,0 +1,114 @@
+A from-scratch Transformer and automatic differentiation engine in Python with extensive numerical tests. - Add finite-difference directional curvature diagnostics by Lei-TzuY · Pull Request #165 · Lei-TzuY/tiny-transformer-autograd
+
+Add finite-difference directional curvature diagnostics by Lei-TzuY · Pull Request #165 · Lei-TzuY/tiny-transformer-autograd · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Lei-TzuY
+commented
+Aug 29, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+add standalone engine.directional_curvature.directional_curvature() for central finite-difference parameter-space curvature diagnostics
+explicitly avoid claiming higher-order autograd: live autograd.grad() returns NumPy arrays and does not expose create_graph, so this helper is deliberately a numerical probe rather than an exact HVP
+evaluate a caller-supplied scalar loss at theta, theta + h*d, and theta - h*d
+run all three evaluations under no_grad() and replay the exact same NumPy global RNG state for each evaluation
+restore caller parameter values/bindings, gradient bindings/values, trainability metadata, and NumPy RNG after success or failure
+keep Tensor mutation versions monotonic, so pre-probe forward graphs remain correctly stale after any real perturbation
+compute the final central second difference with exact Fraction.from_float arithmetic and report binary64 curvature overflow/underflow explicitly
+preflight perturbation representability, destination writability, and write-vs-bound-parameter storage overlap before the first callback
+detect callback-side parameter/storage/gradient/trainability/version mutation and injected partial/silent writes
+serialize complete helper-managed probes with a process-local reentrant lock
+API
+```
+from engine.directional_curvature import directional_curvature
+
+report = directional_curvature(
+    loss_fn,
+    model.parameters(),
+    direction_arrays,
+    step=1e-3,
+)
+```
+The reported quantity is the central finite-difference estimate
+```
+[L(theta + h d) - 2 L(theta) + L(theta - h d)] / h^2
+```
+for exactly the caller-supplied direction d. The helper does not silently normalize the direction, so scaling d by two scales a quadratic directional curvature by four.
+Why numerical rather than exact HVP
+Current main's public engine.autograd.grad() isolates a VJP by running Tensor.backward() and returns independent NumPy arrays. It does not build a differentiable gradient graph or expose a create_graph mode. Therefore reverse-over-reverse Hessian-vector products are not currently available. This PR keeps that limitation explicit and adds a useful parameter-space curvature experiment without pretending finite differences are exact second-order autograd.
+RNG / loss semantics
+The loss callback takes no arguments and may close over data/model state. Each of the baseline/plus/minus evaluations starts from the exact same legacy NumPy global RNG state and executes under no_grad(). This removes ordinary dropout/augmentation sampling differences from the finite-difference numerator while avoiding graph construction for diagnostic forwards. The caller's RNG state is restored exactly before return or re-raise.
+The callback must return a finite real scalar, a shape-() NumPy array, or a scalar Tensor. Deferred generator/coroutine results, booleans, complex values, non-scalars, NaN, and infinity are rejected.
+Numerical design
+Perturbations are computed in binary64 with strict overflow handling. If ordinary vectorized theta ± h*d overflows, a slow exact-rational scalar fallback determines whether the final affine value itself is representable; genuinely unrepresentable perturbations are rejected before any callback runs. A probe is also rejected when the requested step rounds both positive/negative perturbations back onto the original parameters.
+The three validated loss values are converted with Fraction.from_float and the second difference plus division by h^2 is performed exactly over the represented binary64 inputs. This means huge equal losses do not overflow through an unnecessary 2*L(theta) intermediate, and true final curvature overflow/underflow is classified only at the final conversion back to float64. The JSON-safe report includes curvature, overflow/underflow flags, and curvature sign.
+Transaction / graph safety
+All parameter leaves and direction arrays are materialized once. The helper validates Tensor identity/leaf status, mutation-version metadata, data dtype/finiteness, direction count/shape/dtype/finiteness, perturbation representability, destination writability, and exact storage overlap before the baseline callback.
+Actual temporary writes use tracked Tensor.data[...]. Parameters are restored to entry values after plus/minus evaluation, but mutation versions are never rewound. A forward graph created before the probe therefore fails the existing stale-graph guard on later backward instead of being resurrected merely because numerical values were restored.
+After each callback, the helper verifies parameter storage identity, shape/value, mutation version, trainability, gradient binding/value, and gradient-shape metadata. Callback-side mutation is rejected. Cleanup is best-effort and reconnects the original Tensor storage when a callback replaced it; malformed trainability is normalized back to its entry bool and deliberately bumps the mutation version.
+Injected ndarray regressions cover a later destination that mutates then raises and a silent destination that ignores a requested write. Earlier parameters are restored and no half-perturbed model is returned.
+Concurrency
+One process-local threading.RLock covers the complete baseline/plus/minus/restoration sequence. A second helper-managed probe cannot enter its callback while another probe owns temporary parameter values. Same-thread nested probing on a disjoint parameter is reentrant. A nested probe on the same parameter changes its mutation version and is therefore rejected loudly by the outer callback-state verification rather than being silently accepted.
+Regression coverage
+tests/test_directional_curvature.py: scalar/multi-parameter quadratic hand calculations, direction scaling, scalar Tensor/real/0-D array loss outputs, no-grad execution, deterministic RNG replay/restoration, gradient preservation, stale-graph behavior, JSON safety, linear zero curvature, finite extreme directions, frozen leaves, and empty Tensor slices
+tests/test_directional_curvature_validation.py: validation precedence, step/collection/version/direction validation, integer/read-only direction support, extended precision rejection, zero/tiny/unrepresentable directions, read-only and overlapping parameter storage preflight, invalid loss outputs, exception cleanup, storage replacement, malformed trainability, and gradient rebinding
+tests/test_directional_curvature_numerics.py: huge-loss cancellation, positive/negative curvature overflow classification, curvature underflow classification, and strict NumPy error handling
+tests/test_directional_curvature_transaction.py: mutate-then-raise writes, silent writes, callback shape/value corruption, restoration, and monotonic versions
+tests/test_directional_curvature_concurrency.py: cross-thread complete-call serialization and same-thread reentrancy semantics
+Scope
+Base: a011903671efb97db0f73b50e081f4d45f5eab11
+Head: d1de3b1144a609d2130203cb185da0769b7905a3
+Compare: ahead 7, behind 0.
+Exactly six new paths, total +1365 / -0:
+src/engine/directional_curvature.py — +490
+tests/test_directional_curvature.py — +218
+tests/test_directional_curvature_concurrency.py — +125
+tests/test_directional_curvature_numerics.py — +104
+tests/test_directional_curvature_transaction.py — +139
+tests/test_directional_curvature_validation.py — +289
+No existing production file, autograd/JVP/gradcheck primitive, package export, trainer, optimizer/scheduler, checkpoint codec, model/generation, tokenizer, CLI, benchmark, packaging, or workflow file is modified.
+Verification
+GitHub Actions pull-request run 33280467156 (run #1465) passed on exact head d1de3b1144a609d2130203cb185da0769b7905a3 for Python 3.10, 3.11, 3.12, and 3.13. Actions tested PR merge result dbfce2eced16317535800d4273b1782678ab8be8 (Merge d1de3b1144a609d2130203cb185da0769b7905a3 into a011903671efb97db0f73b50e081f4d45f5eab11).
+Python 3.10 used CPython 3.10.21 and NumPy 2.2.6: 1457 passed, 22 subtests passed in 6.38s.
+Every matrix job passed installed-package/import and all four CLI help smokes, normal and streaming benchmark JSON smokes, full python -m pytest tests -q -W error, and python -m compileall -q src tests.
+The first complete PR CI run passed; no CI-driven production or test correction was required.
+No automatic merge requested.
+Lei-TzuY
+added 7 commits
+August 30, 2026 07:08
+Add finite-difference directional curvature probe
+187905e
+Test directional curvature core semantics
+9162481
+Harden directional curvature state restoration
+bc31cce
+Test directional curvature validation and restoration
+8e3494b
+Test directional curvature extreme numerical reporting
+b2c9233
+Test directional curvature transactional writes
+4591fda
+Test directional curvature concurrency semantics
+d1de3b1
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

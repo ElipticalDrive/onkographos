@@ -1,0 +1,238 @@
+Numo-like N-dimensional array for mruby, computed on the GPU via Vulkan Compute. Runs on Raspberry Pi 5 (VideoCore VII). - Add radix-2 FFT on Vulkan compute (#1) by yujiteshima · Pull Request #2 · yujiteshima/mruby-gpu-narray
+
+Add radix-2 FFT on Vulkan compute (#1) by yujiteshima · Pull Request #2 · yujiteshima/mruby-gpu-narray · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+yujiteshima
+commented
+Aug 8, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Closes #1.
+Merge this before #3. #3 (Vulkan error handling) is stacked on this branch. It changes dispatch_compute's signature, which the FFT code here calls from 12 sites, so the two cannot merge in either order.
+Backend choice: hand-written radix-2, not VkFFT
+#1 left the backend open between a hand-written Cooley–Tukey shader and integrating VkFFT. This PR takes the hand-written route.
+The deciding factor is that VkFFT's Vulkan backend generates its kernels at run time, so it needs glslang as a runtime dependency. That breaks the gem's "the only link dependency is the Vulkan loader" rule (CONTRIBUTING.md) and undoes the current design where glslangValidator is a build-time tool only. The README roadmap now records this reasoning, and keeps VkFFT as an option if the hand-written transform runs out of road.
+API
+```
+GPU::SFloat#rfft                    # -> GPU::SComplex, n-point DFT (n a power of two >= 2)
+GPU::SComplex#magnitude(k)          # -> GPU::SFloat, sqrt(re^2 + im^2)
+GPU::SComplex#power_spectrum(k)     # -> GPU::SFloat, re^2 + im^2
+GPU::SFloat#power_spectrum(k)       # convenience: rfft + power
+```
+k defaults to n / 2 — the non-redundant bins of a real-input transform, as sketched in the issue.
+```
+sig  = GPU::SFloat.cast(samples)
+bins = sig.power_spectrum   # rfft + |X|^2, all on the GPU
+bins.to_a                   # only now does anything reach the host
+```
+How it works
+1 + log2(n) dispatches over a single complex buffer of 2n interleaved floats. Nothing is copied to the host until #to_a.
+Shader
+Role
+Layout
+fft_bitrev
+widens real → complex and permutes into bit-reversed order
+2BUF
+fft_stage
+one pass per doubling half-size h = 1, 2, … n/2, in place
+1BUF (new)
+cmag
+reduces the spectrum back to a real GPU::SFloat
+2BUF
+Bit-reversing up front lets the butterflies run in natural order and in place. Each invocation of fft_stage owns one butterfly, and a pass's pairs partition [0, n) exactly — so the in-place writes cannot race within a pass, and the per-pass dispatch boundary is the barrier between passes.
+fft_stage needs only one storage buffer, so this adds a LAYOUT_1BUF descriptor set layout alongside the existing 3BUF/2BUF. Every push block stays within the existing 16-byte range, so no pipeline layout change was needed.
+GPU::SComplex reuses the existing NArray buffer type, so size / to_a / head are adjusted in mrblib for the two-floats-per-point layout. sum / mean are withdrawn there — summing interleaved re/im components is meaningless. They raise NoMethodError rather than NotImplementedError, because the latter is a ScriptError and would slip past an ordinary rescue => e (including the test helper's).
+What I verified, and where
+Built mruby 3.x with this gem and ran everything on Mesa lavapipe (software Vulkan, llvmpipe, Vulkan 1.4):
+44 tests pass, 16 of them new (ALL TESTS PASSED). The gem compiles with no warnings.
+examples/fft_spectrum.rb — a 50 Hz + 200 Hz signal peaks in bins 50 and 200 only, at powers 262144 (=512²) and 65536 (=256²), matching theory exactly.
+The shaders' index math was cross-checked against a naive reference DFT for n = 2…1024: max relative error 2e-7, i.e. FP32 round-off. The same check confirms the butterfly pairs partition [0, n) on every pass.
+All shaders compile with glslangValidator and pass spirv-val.
+Not verified on real hardware. I had no physical GPU available — no Raspberry Pi 5 / V3D and no discrete GPU. The last acceptance-criteria box in #1 ("runs on Pi 5 (V3D) and on desktop") is therefore still open, and the README's "Verified on" section says so explicitly rather than implying hardware coverage this PR does not have. Please run test/narray_test.rb and examples/fft_spectrum.rb on the Pi before merging.
+Two things worth a second opinion on real hardware:
+bitfieldReverse on V3DV — used by fft_bitrev, and core GLSL 4.50, but worth confirming on the Pi's driver.
+cos/sin precision in the twiddle factors. Fine on lavapipe; V3DV's transcendentals may differ enough to matter at larger n. A twiddle lookup table is the fallback if so.
+If either turns out to be a problem, note that #3 is what makes it diagnosable: on this branch alone, a driver that rejects fft_stage.spv is reported as Run \make -C shader` first.`
+Follow-ups (not in this PR)
+Left out to keep this focused; noted in the README roadmap:
+The log2(n) passes are log2(n) separate submit+fence round trips, since dispatch_compute waits on a fence per call. Batching them into one command buffer with vkCmdPipelineBarrier between passes is the obvious win for the streaming use case in Add FFT (spectral transform) on Vulkan compute #1.
+Inverse transform, real-input packing (halves the work), non-power-of-two lengths.
+Note on test dependencies
+The new tests use Math.cos / Math.sin, i.e. mruby-math from the default gembox. That is already the build configuration CONTRIBUTING.md prescribes, so no new requirement — just flagging it.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01JAgXRCCQ43jwXzeXKS6hG4
+Add radix-2 FFT on Vulkan compute (#1)
+…
+8fb6886
+```
+Implements the spectral transform from #1 with a hand-written radix-2
+Cooley-Tukey shader rather than VkFFT. VkFFT's Vulkan backend generates
+kernels at run time and so needs glslang as a *runtime* dependency, which
+would break the gem's "only link dependency is the Vulkan loader" rule.
+
+New API:
+
+  GPU::SFloat#rfft            -> GPU::SComplex, the n-point DFT (n a power
+                                 of two >= 2)
+  GPU::SComplex#magnitude(k)  -> GPU::SFloat, sqrt(re^2 + im^2)
+  GPU::SComplex#power_spectrum(k)
+  GPU::SFloat#power_spectrum(k)  convenience for rfft + power
+
+k defaults to n/2, the non-redundant bins of a real-input transform.
+
+The transform is 1 + log2(n) dispatches over a single complex buffer of 2n
+interleaved floats, which never leaves the GPU:
+
+  fft_bitrev  widens real -> complex and permutes into bit-reversed order,
+              so the butterflies afterwards run in natural order, in place
+  fft_stage   one pass per doubling half-size h = 1, 2, ... n/2; each
+              invocation owns one butterfly, and a pass's pairs partition
+              [0, n) exactly, so the in-place writes cannot race
+  cmag        reduces the spectrum back to a real GPU::SFloat
+
+fft_stage needs only one storage buffer, so this adds a LAYOUT_1BUF
+descriptor set layout alongside the existing 3BUF/2BUF. Push blocks stay
+within the existing 16-byte range.
+
+GPU::SComplex reuses the NArray buffer type, so size / to_a / head are
+adjusted in mrblib for the two-floats-per-point layout, and sum / mean are
+withdrawn since summing interleaved components is meaningless.
+
+Verified: 44 tests pass (16 new) on Mesa lavapipe, and the shader index math
+is checked against a reference DFT. Not yet run on Pi 5 / V3D or a discrete
+GPU -- the README says so.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JAgXRCCQ43jwXzeXKS6hG4
+```
+yujiteshima
+force-pushed
+the
+claude/github-stargazers-api-8ntj0g
+branch
+from
+23b5a81 to
+8fb6886
+Compare
+August 8, 2026 09:03
+yujiteshima
+mentioned this pull request
+Aug 8, 2026
+Check every Vulkan result instead of running on past failures
+#3
+Merged
+yujiteshima
+commented
+Aug 9, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Verified on real hardware
+Ran this branch on a physical GPU, which closes the gap this PR flagged ("Not verified on real hardware").
+Environment: Apple M5 GPU via MoltenVK, Vulkan 1.1.334, macOS 15 (Darwin 25.5.0), mruby 4.0.0 (d350b8d), clang. Note this is a newer mruby than the 3.x used here — it builds clean on both.
+Build
+no warnings; all 10 shaders compiled to SPIR-V
+test/narray_test.rb
+44 tests, 44 passed, 0 failed
+examples/fft_spectrum.rb
+bin 50 → power 262144 (=512²), bin 200 → 65536 (=256²) — matches theory exactly, same as your lavapipe run
+Independent cross-check against a reference DFT
+Re-running the PR's own tests does not really verify the PR, so I wrote a separate reference implementation and compared against it: a naive O(n²) DFT in double precision, over a signal deliberately mixing a DC offset, integer-frequency tones, a non-integer-frequency tone, and a Nyquist-adjacent tone. Error is relative to the reference peak.
+n
+max relative error
+n
+max relative error
+2
+1.030e-07
+128
+2.045e-07
+4
+1.191e-07
+256
+1.161e-07
+8
+1.076e-07
+512
+1.406e-07
+16
+1.070e-07
+1024
+2.072e-07
+32
+1.816e-07
+64
+1.618e-07
+All within FP32 round-off. Also checked:
+magnitude(k)² == power_spectrum(k) — max relative difference 9.319e-08
+rfft on n = 0, 1, 3 raises ArgumentError: rfft needs a power-of-two length >= 2
+#rfft → GPU::SComplex size n, #magnitude → GPU::SFloat size n/2, power_spectrum(8) → size 8
+On the bitfieldReverse concern: you flagged in #3 that V3DV might reject it in fft_stage. MoltenVK compiles and runs it correctly — the bit-reversal indexing is exact across every size above. That is one real driver down; V3D is still untested.
+Cross-check script
+```
+def ref_power(samples, k)
+  n = samples.size
+  re = 0.0; im = 0.0
+  n.times do |t|
+    ang = -2.0 * 3.141592653589793 * k * t / n
+    re += samples[t] * Math.cos(ang)
+    im += samples[t] * Math.sin(ang)
+  end
+  re * re + im * im
+end
+
+def make_signal(n)
+  Array.new(n) do |t|
+    0.7 +
+      1.3 * Math.sin(2 * 3.141592653589793 * 3 * t / n) +
+      0.5 * Math.cos(2 * 3.141592653589793 * 7.5 * t / n) +
+      0.2 * Math.sin(2 * 3.141592653589793 * (n / 4) * t / n)
+  end
+end
+
+[2, 4, 8, 16, 32, 64, 128, 256, 512, 1024].each do |n|
+  samples = make_signal(n)
+  got = GPU::SFloat.cast(samples).power_spectrum.to_a
+  ref = Array.new(got.size) { |k| ref_power(samples, k) }
+  peak = ref.max
+  worst = 0.0
+  got.each_index { |k| d = (got[k] - ref[k]).abs / peak; worst = d if d > worst }
+  puts "#{n}: #{worst}"
+end
+```
+Still open
+Raspberry Pi 5 / V3D. The board is powered down at the moment; I will run this branch there before merging.
+🤖 Generated with Claude Code
+yujiteshima
+merged commit 5f2b5d4
+into
+main
+Aug 11, 2026
+yujiteshima
+mentioned this pull request
+Sep 12, 2026
+Record dispatches into one batch and submit when a result is read
+#4
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

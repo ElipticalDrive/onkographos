@@ -1,0 +1,139 @@
+Today we're reinventing voxel ray traversal from 
+scratch to be able to render over 32 billion   voxels in real time. Most voxel games, like 
+Minecraft, convert their worlds into triangle   meshes to render them. To me, this has always 
+felt like a compromise: we waste time, memory,   and complexity converting perfectly good voxel 
+data into triangles because GPUs are optimized   for triangle rasterization. But what if we 
+could render the world directly — no triangles,   no meshing — and somehow do it fast enough for 
+real time? That's exactly what we'll do today.   We’ll go from the basics of what a voxel even is 
+to an algorithm capable of rendering billions of   voxels in real time by casting a ray for each 
+pixel on the screen using the GPU. And towards   the end of the video, I'll show you one simple 
+optimization technique that 10x'd the FPS. So,   how do we go from a bunch of voxels and a camera 
+to pixels on a screen? Well, to answer that,   we need to start at the very beginning — "What is 
+a Voxel?" The screen you're watching this video on   is made up of millions of physical pixels, behind 
+each of which is a logical pixel — a simple piece   of data that determines its color. This is 
+often an RGB color but it doesn't have to be;   it could just as well be a single luminance value 
+or literally anything else, and it would still be   a pixel. In my opinion, the only thing required 
+for something to be a pixel is that it's a small   building block of 2D space. In the same way we 
+can imagine 3D space as being made up of so-called   voxels. For simplicity, my voxels will each be a 
+single bit of data: on or off, one or zero, true   or false, solid or empty. But, like pixels, voxels 
+can store any kind of data you want. For example,   each voxel could hold an integer representing 
+a material type like air, stone, grass, dirt,   etc., etc. But the idea of a grid of voxels itself 
+doesn't help us a lot unless we can efficiently   read and write it to memory. Therefore, we’ll 
+use this flattening function to convert a 3D   coordinate to a 1D index, allowing us to 
+store the voxel data in an array of size   width times depth times height. You can think 
+of this function as taking each layer along   the y-axis and placing them side by side along the 
+x-axis, and then taking each row along the z-axis   and placing them end to end. There are other 
+methods that preserve spatial locality better to   improve memory performance, or ones that compress 
+the voxel data to use less memory overall,   but I'll talk more about those towards the end of 
+the video. Going forward, the visualizations will   be in 2D and the math and algorithms will be in 
+3D but all of it works in any dimension you want   with only a few minor modifications. Finally, we 
+need to be able to convert an arbitrary position   in space to the corresponding voxel coordinates 
+and for that we’ll just take the floor of each   component. If this position has the possibility of 
+being outside of the grid, due to numerical errors   or actually being outside, we'll have to clamp it 
+or check it to make sure we don't access out of   bounds. Now that we know what a voxel is, how do 
+we describe the idea of a pixel looking at one?   That’s where the mathematical concept of a ray 
+comes in — which leads us to the next question:   "What is a Ray?" In our case it will make the 
+most sense to define a ray, given by the origin   O and the non-zero direction D, as the set of all 
+points P that satisfy these two constraints. In   other words, all points from the given origin 
+along the given direction. The variable t is   a parameter that tells us how many multiples 
+of the direction we've moved from the origin.   Note that nowhere in this definition do we say 
+that the direction is normalized. It can be   whatever length you want as long as it's not zero. 
+So given a ray corresponding to some pixel we need   to figure out if it hits a voxel — and if so, 
+which one. The idea is to walk through the voxel   grid along that ray, in increasing values of t, 
+until we either find the first solid one or exit   the bounds of the grid. This is what’s known 
+as voxel ray traversal. Now that we know the   idea behind what voxel ray traversal is, we can 
+start to think about how we would implement it.   Let’s begin with a naive method, because every 
+good computer science problem starts with   something painfully slow and completely wrong. In 
+this case, that would be to just start at the ray   origin stepping forward in small delta t multiples 
+of the direction, checking for a solid voxel at   each step. This works but it has one major issue; 
+it can completely miss voxels which the ray should   intersect with. And if we try to minimize the 
+risk of this by decreasing the step size, we   could spend hundreds or thousands of iterations on 
+a single voxel which is very slow, not to mention   that it doesn't even fix the issue. So let's take 
+a step back and think about the problem again.   We have a grid and a ray and we want to determine 
+which voxels the ray intersects with in order. So   let's start simple; how do we find the first 
+voxel? If the origin is inside of the grid, we   know that the first voxel is just the floor of the 
+ray origin, but if it's outside, we somehow need   to calculate where the ray enters the axis-aligned 
+bounding box around the grid. For this we'll need   a Ray-AABB intersection algorithm. To do this we 
+will take the mathematical definition of a ray and   the mathematical definition of an AABB and solve 
+for the ray parameter t. After working through   the math and handling some edge-cases we arrive 
+at this algorithm, known as the slab method for   Ray-AABB intersection. Now, because it's almost 
+always faster to multiply than to divide, it makes   sense to precompute one over the direction and 
+store that in our ray struct. And then multiply   by that instead of divide by the direction. From 
+the Ray-AABB intersection algorithm we get the   values of t when the ray enters and exits the 
+bounding box. If we don't hit the bounding box,   we know that we won't hit a single voxel in the 
+grid either so we can return early. Otherwise we   use the first t-value with the ray definition to 
+calculate the point of entry. Since this point has   the chance of being slightly outside of the grid 
+due to floating-point errors, we'll need to use   the clamping version when we get the corresponding 
+voxel coordinate. Now that we know how to get the   first voxel that the ray intersects with, the only 
+thing we need for a complete voxel ray traversal   algorithm is a way to get the next voxel since 
+then we can just do that in a loop until we hit   a solid voxel or go out of bounds. So given a ray 
+which we know intersects with a given voxel, how   do we get the next voxel that the ray intersects 
+with? Well, we can imagine the voxel grid as being   made up of a stack of axis-aligned planes along 
+each axis. The ray travels through these planes,   and whenever it crosses one of them, we enter 
+a new voxel. So, to find the next voxel,   all we need to do is figure out which of these 
+planes the ray will exit the voxel through. The   lesser plane on each axis, just has the positions 
+of the components of v and the greater planes,   the components of v plus one. First of all, we can 
+notice that if the x-component of the direction   is positive we can never exit through the lesser 
+x-plane, and if it's negative we can never exit   through the greater x-plane. This applies to y and 
+z too which brings us down to one plane per axis   which we can determine the positions of based on 
+the sign of the direction. Because of some quirks   of floating-point zero we'll actually want to use 
+the sign of the inverse of the direction instead   of the sign of the direction directly. Now that 
+we know the position of the planes, we just need   to calculate which plane the ray intersects with 
+first. So let's focus on the x-plane. Since the   x-plane is defined as being all points for 
+which the x-coordinate is a certain value,   let's call it x_0, and the ray is defined as all 
+points that satisfy this equation, we just have to   solve for the value of t when the x-component of 
+P is equal to x_0. This is just a linear equation   and by solving it we get this, and I'll call it 
+t_x because it's the t-value to hit the x-plane.   Of course, we could just as well have done this 
+for the y-axis or the z-axis and the derivation   would've been the same. Now that we have the 
+three t-values, we just have to compare them to   see which one occurs first. From the sign of the 
+direction, we also know if we're supposed to step   in the positive or negative direction, in other 
+words, to get the next voxel in the traversal   we want to add the sign of the direction to the 
+component of the voxel coordinate, for which the   plane intersection t-value is lowest. And again 
+for the same reason, we'll use the sign of the   inverse instead. Putting it all together, we first 
+calculate the initial voxel using the Ray-AABB   intersection algorithm. Then we repeatedly step 
+to the next voxel by comparing the t-values for   the plane intersections and if we continue this 
+process until we hit a solid voxel or exit the   bounds of the grid, we will have traversed every 
+intersected voxel. One quick improvement. We can   see that each iteration, coord is increased by 
+the sign of the direction which means that t   is increased by the sign of the direction times 
+the inverse of the direction, in other words the   absolute value of the inverse of the direction. 
+Therefore, we can pull out the entirety of t and   increment it each iteration instead. The algorithm 
+that we now have is essentially the one described   by Amanatides and Woo in their 1987 paper 'A Fast 
+Voxel Traversal Algorithm for Ray Tracing'. Now   let's use the algorithm to render something and 
+for that, we of course need something to render.   Therefore, I've chosen the Stanford Bunny, a model 
+which is very popular in computer graphics. The   Stanford Bunny is a triangle mesh so we'll need to 
+voxelize it which I won't cover how to do in this   video but the algorithm is included in the GitHub 
+repository in the description below along with a   bare-bones implementation of this video's topic in 
+Rust and Vulkan. And now if we set up a camera and   shoot a ray for each pixel using a compute shader 
+running the algorithm, we get this. Right now,   the traversal only tells us whether we miss or 
+which voxel we hit. But with a bit of extra math,   we can efficiently compute which face of the voxel 
+we hit, where on the face we hit, and how far from   the camera it happened. This gives us everything 
+we need for basic shading and texturing, or even   launching secondary rays for ray tracing. Now it's 
+time for that one optimization that I alluded to   at the start of the video. Currently, at a grid 
+resolution of 2048 cubed and a screen resolution   of 1000 by 1000 we're getting about 12 FPS. 
+After this optimizations, we'll hit roughly 121   FPS — which is a 10x speedup. But before we get to 
+that, I want to cover an alternative optimization   which is almost as good but way easier to explain. 
+In the "What is a Voxel?" section of this video,   we covered the flattening function and I 
+mentioned that there are other ways of doing it.   It turns out that if we switch to this one, 
+known as a Z-order curve, we get 102 FPS which   is already over 8 times faster. You might be 
+thinking, "Wait, we just made the flattening   function way more complicated, and it got faster?" 
+Yeah! The reason why is that with a Z-order curve,   we place voxels that are nearby in space nearby 
+in memory. This has two main implications on the   GPU. First of all, since our voxel ray traversal 
+always steps from one voxel to a neighboring one,   this improves the likelihood that the next voxel 
+is already in the cache. And second of all, it   improves the likely hood that two nearby rays want 
+to access the same memory meaning that the GPU   doesn't have to read as much data into cache. All 
+in all, this means we spend less time waiting for   memory to read and more time actually traversing. 
+Now like I said before, there's actually a better   way to do this. Since we're doing the traversal on 
+the GPU, we have access to GPU specific structures   like 3D textures which are heavily optimized for 
+data locality using way more sophisticated methods   than Z-order curves. Switching to storing our 
+voxels in a 3D image brings us to 121 FPS which is   a 10 times improvement over the original 12. So by 
+rethinking how the voxel data is stored in memory,   first with a Z-order curve and then a 3D texture, 
+we brought our FPS from 12 to 121 without even   changing the algorithm itself. So there you 
+have it, from the definitions of voxels,   rays and traversals, to a complete real-time 
+rendering pipeline with zero triangles, capable   of rendering billions of voxels. Of course, 
+this is nowhere close to an end all be all;   there are huge improvement possibilities to both 
+the data structure and the algorithm. For example,   what if we could compress the data so that more 
+voxels can fit in less memory? Or what if we knew   that larger regions of the grid were completely 
+empty meaning that we could step through them in   their entirety all in one single iteration? 
+But I'll leave that for the next video where   I'll be covering sparse voxel octrees and an 
+improved voxel ray traversal algorithm that   takes advantage of the sparseness. Thank you 
+for watching, and till next time — goodbye.

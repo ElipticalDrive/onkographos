@@ -1,0 +1,107 @@
+A PathTracing Voxel Engine implemented from Godot and Vulkan.
+
+A Voxel PathTracing Engine - Jiayu He
+A Voxel PathTracing Engine
+A Voxel PathTracing Engine
+Intro
+This is a project that is still in development.
+I’ve had the plan to create a voxel engine for a long time. For me, voxel has many advantages, such as being easy to implement path tracing, ambient occlusion (VXAO), and global illumination (VXGI). It is well-suited for physical simulations like simulating smoke, and it’s great for quantifying the size of artistic resources while achieving a unified style.
+So, I’ve always been curious about whether an excellent voxel engine can cover all these advantages. Therefore, on the last weekend of 2023, I started the development of a voxel engine. At the same time, I happened to be studying the source code of the Godot engine, so I decided to start with Godot.
+Architecture
+I referred to the technical discussions of Teardown, where a large number of technical details are introduced. Firstly, Teardown uses the texture3D method for voxel storage. Teardown mainly focuses on object space-aligned voxels, and its rendering pipeline is not much different from ordinary deferred rendering. It stores a Gbuffer primarily for normal PBR rendering. The calculations for AO and reflection are done by sampling a world-space aligned voxel.
+On the contrary, I want to try a more global rendering algorithm. I plan to organize all voxels, meshes, and rigged meshes into a large world-space aligned voxel using compute shaders. Here, I will perform unified rendering and physics calculations. This approach has many advantages. Firstly, I can directly obtain global depth, normal, and material information. I don’t need to store them in advance. I can even complete ray tracing, PBR shading, and denoising (TAA) in a single pass. The Gbuffer in Teardown is a very significant overhead.
+The specific architecture of my project is as follows:
+Rendering
+Assuming we already have a world-space aligned Texture 3D, how should we go about path tracing? First, I bind a shader to a TextureRect with the same resolution as the camera. This fragment shader will simulate rays emanating from the camera’s frustum into the outside world.
+Firstly, we can perform an AABB check. Rays that extend beyond the boundaries of the voxel bounding box are not considered. For AABB detection, you can refer to my previous articles, similar to BVH collision.
+After completing the AABB check, we obtain the entry points of each ray for box collisions. From these entry points, we perform ray marching within the voxel field. I implemented this paper, which excellently explains how to perform ray marching using only 33 float points calculations. Specifically, ray marching involves continuously stepping along the ray’s direction and sampling this 3D texture with the new coordinates. The order in the condition below should be: 0 -> 1 -> 2 -> 3 -> 4. How do we derive this order?
+We first calculate two crucial times for the ray:
+The time it takes for the ray to collide with the next boundary along each axis, known as t_max. By comparing t_max for each axis, we can determine which axis the ray will collide with first, indicating the direction in which we need to step earliest.
+The time it takes for the ray to step to the unit voxel along each axis (t_step). This time is a constant value because the length of each step is consistent, and the ray’s direction is also consistent. Storing this value allows us to quickly update t_max after each step. Thus, after each step, we don’t need to re-solve t_max by dividing the distance by the speed. We only need to add the newly spent t_step.
+Once you understand this, you’ll find that the efficiency of voxel sampling is very high. I’m placing the code here for reference.
+```
+recordVolume raymarchVolume(ray r, inout recordVolume rec, box volumeAABB){
+    rec.hit = false;
+    int stepX = r.direction.x > 0.0f? 1 : -1;
+    int stepY = r.direction.y > 0.0f? 1 : -1;
+    int stepZ = r.direction.z > 0.0f? 1 : -1;
+    float tDeltaX = abs((_volumeSize/float(_volumeGrid.x))/r.direction.x);
+    float tDeltaY = abs((_volumeSize/float(_volumeGrid.y))/r.direction.y);
+    float tDeltaZ = abs((_volumeSize/float(_volumeGrid.z))/r.direction.z);
+    vec3 pos= r.origin + r.direction * rec.t;
+    int X = int(floor(pos.x /_volumeSize * _volumeGrid.x));
+    int Y = int(floor(pos.y /_volumeSize * _volumeGrid.y));
+    int Z = int(floor(pos.z /_volumeSize * _volumeGrid.z));
+    if( X == int(_volumeGrid.x)) X-= 1;
+    if( Y == int(_volumeGrid.y)) Y-= 1;
+    if( Z == int(_volumeGrid.z)) Z-= 1;
+    int nextX = r.direction.x > 0.0f? 1 : 0;
+    int nextY = r.direction.y > 0.0f? 1 : 0;
+    int nextZ = r.direction.z > 0.0f? 1 : 0;
+
+    vec3 nextPos = getPosbyIndex(X+nextX, Y+nextY, Z+nextZ);
+    float tMaxX = (nextPos.x - pos.x)/r.direction.x;
+    float tMaxY = (nextPos.y - pos.y)/r.direction.y;
+    float tMaxZ = (nextPos.z - pos.z)/r.direction.z;
+    float potentialTime = 0.0f; //record the hit intervel traveling time
+    vec3 potentialNormal = rec.normal;//record the hit normal
+    //if hit on the bounding box , then just sample and return
+    if(sample3D(X,Y,Z).a> _alphaClip){
+            rec.color =sample3D(X,Y,Z).rgb;
+            rec.hit = true;
+            rec.position = r.origin + r.direction*(rec.t);
+            rec.normal = potentialNormal;
+            return rec;
+    }
+    //if didn't hit on surface, then do the raymarching.
+    while(!rec.hit){
+        if(tMaxX < tMaxY){
+            if(tMaxX < tMaxZ){
+                X+=stepX;
+                potentialTime = tMaxX;
+                if((X >= int(_volumeGrid.x))|| (X < 0)) {
+                    break;
+                }
+
+                tMaxX += tDeltaX;
+                potentialNormal = vec3(-float(stepX), 0,0);
+            }else{
+                Z += stepZ;
+                potentialTime = tMaxZ;
+                if((Z<0)||(Z >= int(_volumeGrid.z))){
+                    break;
+                }
+                tMaxZ += tDeltaZ;
+                potentialNormal = vec3(0,0, -float(stepZ));
+            }
+        }else{
+            if(tMaxY < tMaxZ){
+                Y+=stepY;
+                potentialTime = tMaxY;
+                if((Y >= int(_volumeGrid.y))|| (Y < 0)) {
+                    break;
+                }
+                tMaxY += tDeltaY;
+                potentialNormal = vec3(0,-float(stepY),0);
+            }else{
+                Z += stepZ;
+                potentialTime = tMaxZ;
+                if((Z<0)||(Z >= int(_volumeGrid.z))){
+                    break;
+                }
+                tMaxZ += tDeltaZ;
+                potentialNormal = vec3(0,0, -float(stepZ));
+            }
+        }
+        if(sample3D(X,Y,Z).a> _alphaClip){
+            rec.color = sample3D(X,Y,Z).rgb;
+            rec.hit = true;
+            rec.normal = potentialNormal;
+            rec.position = r.origin + r.direction*(rec.t + potentialTime);
+            break;
+        }
+
+    }
+	return rec;
+```
+Results

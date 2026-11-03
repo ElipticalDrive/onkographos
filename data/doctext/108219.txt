@@ -1,0 +1,1119 @@
+# 3DGS From-Scratch: Differentiable Rasterizer Development
+
+This project implements a 3D Gaussian Splatting (3DGS) engine using Python and PyTorch. It moves beyond high-level abstractions to implement the differentiable rendering pipeline and volumetric accumulation from first principles. This implementation serves as a pedagogical deep-dive into the mechanics of radiance fields. By reconstructing the 3DGS pipeline from first principles, the objective was to move beyond the abstractions provided by production-ready frameworks and gain a granular, "under-the-hood" understanding of differentiable rendering, gradient-based parameter optimization, and the complex mathematical transformations required for screen-space projection.
+
+---
+
+## Installation
+
+Quick steps to create a conda environment from the repository `environment.yml` and run a simple training example.
+
+1) Create and activate the conda environment from `environment.yml`:
+
+```bash
+# run from the repository root
+conda env create -f environment.yml 
+conda activate gsplat
+```
+
+2) Start training:
+
+```bash
+python train.py
+```
+
+## Optimization & Loss Objectives
+
+The system optimizes Gaussian parameters by minimizing the discrepancy between rendered views and ground-truth images. The training relies on a composite loss function:
+
+$$
+\mathcal{L} = (1 - \lambda) \mathcal{L}_1 + \lambda \mathcal{L}_{D-SSIM}
+$$
+
+- **L1 (Mean Absolute Error):** Ensures pixel-level color accuracy.  
+- **SSIM:** Maintains structural integrity and high-frequency textures, preventing the model from producing "smeared" geometry.
+
+
+
+## Training Intuition: Differentiable Feedback
+
+The core of the learning process is the "Painter-Critic" loop, where every rendering decision is mathematically traceable:
+
+- **Forward Pass:** The virtual camera snapshots the current Gaussian swarm. Each Gaussian is projected to 2D using a Jacobian matrix (\(J\)) to linearize the depth transformation.
+
+- **Volumetric Integration:** Pixels are colored using alpha-blending, where each Gaussian's contribution is weighted by its density and the cumulative transparency (Transmittance) of the points in front of it.
+
+- **Backpropagation:** Since the rasterizer is fully differentiable, the loss is backpropagated to adjust specific physical attributes (spatial alignment, morphological scaling, and photometric coloring).
+
+
+
+## Performance & Severe Hardware Constraints
+
+![Example Output](https://github.com/metin-yat/mini-splat/blob/main/final_result.png)
+
+Due to significant hardware limitations and the high computational overhead of a non-optimized Python/PyTorch rasterizer, this demonstration utilizes a sparse set of only **500 Gaussians**. Consequently, the rendered images will appear significantly blurry and "cloudy." This is a direct result of under-parameterization and the inability to run the high-resolution, high-iteration training cycles required to resolve fine details. The system is currently capped by consumer-grade VRAM limits and the interpreter-bound nature of the custom rendering loop, preventing the dense point-cloud representation typical of production-level 3DGS.
+
+---
+
+## Future Roadmap
+
+- **CUDA Kernels:** Transitioning from PyTorch loops to C++/CUDA for real-time rasterization and efficient memory management.
+
+- **Spherical Harmonics:** Moving beyond fixed RGB to model view-dependent specularities. The current baseline utilizes 0th-degree Spherical Harmonics, effectively storing direct color values without accounting for directional lighting changes.
+
+- **Adaptive Density Control:** Implementing automated splitting and pruning of Gaussians based on gradient magnitude to optimize VRAM usage.
+
+---
+
+> This project explores the intersection of traditional graphics and gradient-based scene reconstruction. This implementation served as a foundational      exploration and a "from-scratch" proof of concept. Moving forward, I will transition to utilizing state-of-the-art published repositories that leverage high-performance CUDA kernels and Dockerized environments to achieve professional-grade reconstruction quality and real-time performance.
+
+### test_pcd.py
+```
+# -----------------------------------------------------------------------------
+# Point Cloud and GaussianModel Initialization Sanity Check
+#
+# This script is for quick/dirty manual validation:
+#   - Are the COLMAP outputs (cameras, points, colors) loading as expected?
+#   - Does the GaussianModel wrapper accept those points/colors and move to GPU?
+#   - Can we poke at covariance matrices and check their basic sanity?
+#
+# To run:
+#   - Stick your .env in place with COLMAP_OUTPUT_PATH and IMAGE_PATH variables
+#   - Fire this script. Inspect the scatterplot. Window MUST be closed before model test runs.
+# -----------------------------------------------------------------------------
+
+import os
+import torch
+import matplotlib.pyplot as plt
+from dotenv import load_dotenv
+from src.scene_loader import fetch_scene_data
+from src.utils.model import GaussianModel
+
+load_dotenv()  # Required for .env config env vars
+
+def run_hybrid_test():
+    # Select device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"--- Execution Device: {device.type.upper()} ---")
+
+    # Where's the stuff? Set via .env. Don't hardcode here.
+    model_path = os.getenv("COLMAP_OUTPUT_PATH")
+    images_path = os.getenv("IMAGE_PATH")
+
+    if not model_path or not images_path:
+        print("ERROR: COLMAP_OUTPUT_PATH and/or IMAGE_PATH are missing in environment file.")
+        return
+
+    # Try to load COLMAPy bits (camera info, points, rgb)
+    print("Loading COLMAP data...")
+    try:
+        cam_infos, xyz, rgb = fetch_scene_data(model_path, images_path)
+        print(f"-> Loaded camera/point cloud: {len(cam_infos)} cameras, {len(xyz)} points")
+    except Exception as e:
+        print(f"FAILED TO LOAD SCENE DATA:\n  {e}")
+        return
+
+    # Make an interactive scatter plot (downsample if tons of points)
+    fig = plt.figure(figsize=(10, 7))
+    ax = fig.add_subplot(111, projection='3d')
+    sampling_step = max(1, len(xyz) // 10000)  # Don't blow up matplotlib with dense clouds!
+    ax.scatter(
+        xyz[::sampling_step, 0],
+        xyz[::sampling_step, 1],
+        xyz[::sampling_step, 2],
+        c=rgb[::sampling_step],
+        s=1
+    )
+    ax.set_title("COLMAP Point Cloud (close window to continue to GaussianModel test)")
+    print("Close the 3D matplotlib window to continue...")
+    plt.show()
+
+    # Now, can we build a GaussianModel on CPU or GPU? Is 'create_from_pcd' happy?
+    print("\n--- Testing GaussianModel creation/population ---")
+    try:
+        model = GaussianModel().to(device)
+        model.create_from_pcd(xyz, rgb)
+        print(f"SUCCESS. {model.get_xyz.shape[0]} gaussians on: {model.get_xyz.device}")
+        print("Sample opacities (first 5):", model.get_opacity[:5].detach().cpu().numpy())
+    except Exception as e:
+        print("FAILED to initialize/seed GaussianModel:")
+        print("  ", e)
+        return
+
+    # Try poking at covariance, which internally needs log-exp-matrix business to be right
+    print("\n--- Covariance Sanity Check ---")
+    try:
+        covariances = model.get_covariance()
+        print(f"Covariance array shape: {covariances.shape}")
+        cov0 = covariances[0]
+        if torch.allclose(cov0, cov0.T, atol=1e-6):
+            print("Covariance sample 0 is symmetric, as expected.")
+        else:
+            print("Covariance sample 0 is NOT symmetric! (should NOT happen)")
+        print("Status: All basic GaussianModel/point cloud checks passed.")
+    except Exception as e:
+        print("Covariance calculation failed:")
+        print("  ", e)
+
+if __name__ == "__main__":
+    run_hybrid_test()
+```
+
+### train.py
+```
+import torch
+import torch.nn.functional as F
+from src.utils.model import GaussianModel
+from src.renderer import simple_rasterizer
+from src.scene_loader import fetch_scene_data
+from src.utils.config import Config
+import os
+from PIL import Image
+import numpy as np
+from tqdm import tqdm
+
+def ssim(img1, img2, window_size=11):
+    """Simple SSIM approximation for training loss."""
+    mu_x = F.avg_pool2d(img1, window_size, stride=1, padding=window_size//2)
+    mu_y = F.avg_pool2d(img2, window_size, stride=1, padding=window_size//2)
+
+    sigma_x = F.avg_pool2d(img1**2, window_size, stride=1, padding=window_size//2) - mu_x**2
+    sigma_y = F.avg_pool2d(img2**2, window_size, stride=1, padding=window_size//2) - mu_y**2
+    sigma_xy = F.avg_pool2d(img1 * img2, window_size, stride=1, padding=window_size//2) - mu_x * mu_y
+
+    C1 = 0.01**2
+    C2 = 0.03**2
+
+    ssim_map = ((2 * mu_x * mu_y + C1) * (2 * sigma_xy + C2)) / \
+               ((mu_x**2 + mu_y**2 + C1) * (sigma_x + sigma_y + C2))
+    return ssim_map.mean()
+
+def train():
+    output_dir = "./output"
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 1. Data and model setup
+    # Keep max_points and target_res conservative to avoid heavy hardware use
+    cam_infos, xyz, rgb = fetch_scene_data(
+        Config.SPARSE_PATH,
+        Config.IMAGES_PATH,
+        target_res=Config.RESOLUTION,
+        max_points=500
+    )
+
+    model = GaussianModel().cuda()
+    model.create_from_pcd(xyz, rgb)
+
+    optimizer = torch.optim.Adam([
+        {'params': [model._xyz], 'lr': 0.00016},
+        {'params': [model._features_dc], 'lr': 0.0025},
+        {'params': [model._opacity], 'lr': 0.05},
+        {'params': [model._scaling], 'lr': 0.005},
+        {'params': [model._rotation], 'lr': 0.001},
+    ])
+
+    print("Starting training...")
+    print(f"Planned iterations: {Config.ITERATIONS}")
+    progress_bar = tqdm(range(Config.ITERATIONS), desc="training")
+    for iteration in progress_bar:
+        # Randomly sample a camera each step
+        idx = np.random.randint(0, len(cam_infos))
+        viewpoint_cam = cam_infos[idx]
+
+        # Load and prepare ground-truth image
+        gt_image = Image.open(viewpoint_cam.image_path).convert("RGB")
+        gt_image = gt_image.resize((viewpoint_cam.width, viewpoint_cam.height))
+        gt_tensor = torch.from_numpy(np.array(gt_image)).float().cuda() / 255.0
+
+        # 2. Forward: projection then rasterization
+        cov2d, xyz_cam = model.project_gaussians_2d(viewpoint_cam)
+        image = simple_rasterizer(model, viewpoint_cam, cov2d, xyz_cam)
+
+        # 3. Loss (L1 + SSIM)
+        l1_loss = F.l1_loss(image, gt_tensor)
+
+        # SSIM expects shape (1, C, H, W)
+        img1 = image.permute(2, 0, 1).unsqueeze(0)
+        img2 = gt_tensor.permute(2, 0, 1).unsqueeze(0)
+        ssim_value = ssim(img1, img2)
+
+        # Total loss: 0.8 * L1 + 0.2 * (1 - SSIM)
+        loss = 0.8 * l1_loss + 0.2 * (1.0 - ssim_value)
+
+        # 4. Backward and step
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        progress_bar.set_postfix({
+            "Loss": f"{loss.item():.4f}",
+            "L1": f"{l1_loss.item():.4f}",
+            "Pts": model._xyz.shape[0]
+        })
+
+        # Save a sample every 100 iterations
+        if iteration % 100 == 0:
+            out_img = (image.detach().cpu().numpy() * 255).astype(np.uint8)
+            save_path = os.path.join(output_dir, f"render_{iteration}.png")
+            Image.fromarray(out_img).save(save_path)
+
+if __name__ == "__main__":
+    train()
+```
+
+### src/renderer.py
+```
+import torch
+
+def simple_rasterizer(model, camera, cov2d, xyz_cam):
+    """
+    Rasterize Gaussians to an image using alpha compositing.
+
+    Inputs:
+      model   - GaussianModel instance (provides colors, opacity)
+      camera  - CameraInfo with intrinsics/extrinsics
+      cov2d   - per-gaussian 2x2 covariances in image plane
+      xyz_cam - gaussian centers in camera coordinates (N, 3)
+    """
+    h, w = camera.height, camera.width
+    f = camera.fx
+    device = xyz_cam.device
+
+    # Convert 3D camera-space centers to 2D pixel coordinates
+    means2D_x = (xyz_cam[:, 0] * f / xyz_cam[:, 2]) + camera.cx
+    means2D_y = (xyz_cam[:, 1] * f / xyz_cam[:, 2]) + camera.cy
+    means2D = torch.stack([means2D_x, means2D_y], dim=-1)
+
+    # Depth sorting: back-to-front for alpha compositing
+    indices = torch.argsort(xyz_cam[:, 2], descending=True)
+
+    means2D = means2D[indices]
+    cov2d = cov2d[indices]
+    # Colors: (N, 1, 3) -> (N, 3)
+    colors = model.get_features()[indices].squeeze(1)
+    opacities = model.get_opacity[indices]
+
+    # Pixel grid (H, W, 2)
+    grid_y, grid_x = torch.meshgrid(torch.arange(h, device=device),
+                                    torch.arange(w, device=device),
+                                    indexing='ij')
+    pixel_coords = torch.stack([grid_x, grid_y], dim=-1).float()
+
+    canvas = torch.zeros((h, w, 3), device=device)
+    T = torch.ones((h, w, 1), device=device)  # Transmittance
+
+    # Alpha compositing over a limited set of gaussians for memory reasons
+    for i in range(len(indices)):
+        d = pixel_coords - means2D[i]
+        inv_cov = torch.inverse(cov2d[i])
+
+        # Gaussian density exponent (2D)
+        power = -0.5 * (d[:, :, 0]**2 * inv_cov[0, 0] +
+                        d[:, :, 1]**2 * inv_cov[1, 1] +
+                        2 * d[:, :, 0] * d[:, :, 1] * inv_cov[0, 1])
+
+        # Per-pixel alpha (clamped)
+        alpha = torch.clamp(torch.exp(power).unsqueeze(-1) * opacities[i], max=0.99)
+
+        # Composite color and update transmittance
+        canvas = canvas + colors[i] * alpha * T
+        T = T * (1 - alpha)
+
+    return canvas
+```
+
+### src/scene_loader.py
+```
+import os
+import torch
+import numpy as np
+from PIL import Image
+from src.utils.read_write_model import read_model, qvec2rotmat
+
+class CameraInfo:
+    def __init__(self, R, T, fx, fy, cx, cy, width, height, image_path, image_name):
+        self.R = R
+        self.T = T
+        self.fx = fx
+        self.fy = fy
+        self.cx = cx
+        self.cy = cy
+        self.width = width
+        self.height = height
+        self.image_path = image_path
+        self.image_name = image_name
+
+def fetch_scene_data(model_path, images_path, target_res=400, max_points=1000):
+    """
+    Load COLMAP cameras and points and return camera infos and subsampled point cloud.
+
+    Args:
+      model_path: path to COLMAP model folder
+      images_path: path to images folder
+      target_res: target pixel size for the image long edge
+      max_points: maximum number of points to load (hardware safety)
+    """
+    # Read COLMAP data
+    cameras_extrinsic, images_intrinsic, points3D = read_model(path=model_path, ext=".bin")
+
+    cam_infos = []
+
+    # Iterate over images and build CameraInfo objects
+    for idx, key in enumerate(images_intrinsic):
+        colmap_image = images_intrinsic[key]
+        colmap_cam = cameras_extrinsic[colmap_image.camera_id]
+
+        # 1. Original dimensions and scale
+        orig_w = colmap_cam.width
+        orig_h = colmap_cam.height
+        scale = target_res / max(orig_w, orig_h)
+        new_w = int(orig_w * scale)
+        new_h = int(orig_h * scale)
+
+        # 2. Rotation and translation (apply coordinate adjustments)
+        R = np.array(torch.from_numpy(qvec2rotmat(colmap_image.qvec)).float())
+        T = np.array(torch.from_numpy(colmap_image.tvec).float())
+        R[1:3, :] *= -1
+        T[1:3] *= -1
+
+        R = torch.from_numpy(R).float()
+        T = torch.from_numpy(T).float()
+
+        # 3. Scale intrinsics for the resized image
+        params = colmap_cam.params
+        if colmap_cam.model == "PINHOLE":
+            fx, fy, cx, cy = params[0] * scale, params[1] * scale, params[2] * scale, params[3] * scale
+        elif colmap_cam.model == "SIMPLE_PINHOLE":
+            fx = fy = params[0] * scale
+            cx, cy = params[1] * scale, params[2] * scale
+        else:
+            # Fallback scaling for other models
+            fx = fy = params[0] * scale
+            cx, cy = params[1] * scale, params[2] * scale
+
+        img_path = os.path.join(images_path, colmap_image.name)
+
+        # CameraInfo holds resized intrinsics for later projection
+        cam_info = CameraInfo(R=R, T=T, fx=fx, fy=fy, cx=cx, cy=cy,
+                              width=new_w, height=new_h,
+                              image_path=img_path, image_name=colmap_image.name)
+        cam_infos.append(cam_info)
+
+    # 4. Prepare the point cloud with subsampling
+    xyz = np.array([p.xyz for p in points3D.values()])
+    rgb = np.array([p.rgb for p in points3D.values()]) / 255.0
+
+    # If there are too many points, randomly subsample for safety
+    if len(xyz) > max_points:
+        print(f"Too many points ({len(xyz)}). Subsampling to {max_points} points...")
+        indices = np.random.choice(len(xyz), max_points, replace=False)
+        xyz = xyz[indices]
+        rgb = rgb[indices]
+
+    return cam_infos, xyz, rgb
+```
+
+### src/utils/config.py
+```
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class Config:
+    # DATA_PATH = os.getenv("DATA_PATH", "./data")
+    SPARSE_PATH = os.getenv("COLMAP_OUTPUT_PATH")
+    IMAGES_PATH = os.getenv("IMAGE_PATH")
+    
+    RESOLUTION = 500
+
+    # LEARNING_RATE = 1e-3
+    ITERATIONS = 5000
+```
+
+### src/utils/graphics_utils.py
+```
+import torch
+import numpy as np
+
+# Graphics utilities used by the rendering pipeline.
+# Only keep functions that are referenced in the codebase.
+
+def quaternion_to_rotation_matrix(q):
+    """
+    Convert batched quaternions (w, x, y, z) to 3x3 rotation matrices.
+
+    Args:
+      q: tensor of shape (N, 4)
+
+    Returns:
+      Tensor of shape (N, 3, 3) with rotation matrices.
+    """
+    norm = torch.sqrt(q[:, 0]*q[:, 0] + q[:, 1]*q[:, 1] + q[:, 2]*q[:, 2] + q[:, 3]*q[:, 3])
+    q = q / norm[:, None]
+
+    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+
+    res = torch.zeros((q.shape[0], 3, 3), device=q.device)
+
+    res[:, 0, 0] = 1 - 2 * (y*y + z*z)
+    res[:, 0, 1] = 2 * (x*y - w*z)
+    res[:, 0, 2] = 2 * (x*z + w*y)
+    res[:, 1, 0] = 2 * (x*y + w*z)
+    res[:, 1, 1] = 1 - 2 * (x*x + z*z)
+    res[:, 1, 2] = 2 * (y*z - w*x)
+    res[:, 2, 0] = 2 * (x*z - w*y)
+    res[:, 2, 1] = 2 * (y*z + w*x)
+    res[:, 2, 2] = 1 - 2 * (x*x + y*y)
+    return res
+```
+
+### src/utils/model.py
+```
+# -----------------------------------------------------------------------------
+# GaussianModel: a simple PyTorch module for per-point Gaussian parameters 
+# (position, color, scale, rotation, opacity) used in rendering and quick experiments.
+#
+# Usage:
+#   - Initialize from point cloud: create_from_pcd(xyz, rgb)
+#   - Query derived attributes: get_covariance(), project_gaussians_2d(camera)
+#
+# Notes:
+#   - Designed for easy testing (inputs: xyz (N, 3) and rgb (N, 3))
+#   - See test_pcd.py for example use with COLMAP outputs and basic validation.
+# -----------------------------------------------------------------------------
+
+import torch
+import torch.nn as nn
+import numpy as np
+from .graphics_utils import quaternion_to_rotation_matrix
+
+class GaussianModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        
+        # Main parameters that will be updated during training
+        self._xyz = nn.Parameter(torch.empty(0))           # Positions (N, 3)
+        self._features_dc = nn.Parameter(torch.empty(0))   # Colors (0th Degree SH - RGB) (N, 1, 3)
+        self._scaling = nn.Parameter(torch.empty(0))       # Scales (N, 3)
+        self._rotation = nn.Parameter(torch.empty(0))      # Rotations (Quaternion) (N, 4)
+        self._opacity = nn.Parameter(torch.empty(0))       # Opacity (N, 1)
+
+    @property
+    def get_scaling(self):
+        return torch.clamp(torch.exp(self._scaling), max=10.0) 
+
+    @property
+    def get_rotation(self):
+        # Quaternion should be unit-length (normalized)
+        return torch.nn.functional.normalize(self._rotation)
+
+    @property
+    def get_xyz(self):
+        return self._xyz
+
+    @property
+    def get_opacity(self):
+        # Opacity should be between 0 and 1
+        return torch.sigmoid(self._opacity)
+
+    def get_features(self):
+        return self._features_dc
+
+    def create_from_pcd(self, xyz, rgb):
+        """
+        Creates Gaussians from COLMAP points.
+        xyz: (N, 3) numpy array
+        rgb: (N, 3) numpy array (values between 0 and 1)
+        """
+        # Positions
+        fused_point_cloud = torch.tensor(np.asarray(xyz)).float().cuda()
+        
+        # Colors (RGB -> 0th Degree SH coefficient conversion)
+        fused_color = torch.tensor(np.asarray(rgb)).float().cuda().unsqueeze(1)
+        
+        # Scaling (use a fixed value for all points)
+        dist2 = torch.clamp_min(torch.ones_like(fused_point_cloud[:, 0]) * 0.1, 1e-7)
+
+        # For now derive a log-scale based on a small base distance to improve visibility.
+        scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3)
+
+        # Rotation (Initially identity quaternion [1,0,0,0])
+        # (N, 4): [w, x, y, z] with w=1 yields identity rotation
+        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+        rots[:, 0] = 1
+
+        # Opacity: store as logits for sigmoid
+        opacities = torch.logit(torch.clamp(0.5 * torch.ones((fused_point_cloud.shape[0], 1), device="cuda"), min=1e-4, max=0.99))
+
+        # Save the parameters
+        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+        self._features_dc = nn.Parameter(fused_color.requires_grad_(True))
+        self._scaling = nn.Parameter(scales.requires_grad_(True))
+        self._rotation = nn.Parameter(rots.requires_grad_(True))
+        self._opacity = nn.Parameter(opacities.requires_grad_(True))
+        
+        print(f"Model initialized with {self._xyz.shape[0]} Gaussians.")
+
+    def get_covariance(self):
+        """
+        Calculates the 3D Covariance matrix Sigma = R * S * S^T * R^T
+        """
+        # Scaling matrix construction
+        s = self.get_scaling
+        # Build a 3x3 per-gaussian diagonal matrix efficiently
+        L = torch.zeros((s.shape[0], 3, 3), device=s.device)
+        R = quaternion_to_rotation_matrix(self._rotation)
+        L[:, 0, 0] = s[:, 0]
+        L[:, 1, 1] = s[:, 1]
+        L[:, 2, 2] = s[:, 2]
+        M = torch.bmm(R, L)
+        # Sigma = M * M^T
+        covariance = torch.bmm(M, M.transpose(1, 2))
+        return covariance
+
+    def project_gaussians_2d(self, camera):
+        """
+        Projects 3D Gaussians to 2D image plane.
+        Σ' = J * W * Σ * W^T * J^T
+        """
+        xyz = self.get_xyz 
+        
+        # World to Camera coordinate transform
+        R_mat = camera.R.to(xyz.device)
+        T_vec = camera.T.to(xyz.device)
+        xyz_cam = (torch.matmul(R_mat, xyz.t()) + T_vec.unsqueeze(1)).t()
+        
+        z = xyz_cam[:, 2:3] + 1e-7  # Prevent division by zero
+        x = xyz_cam[:, 0:1]
+        y = xyz_cam[:, 1:2]
+
+        # Jacobian matrix (J) 
+        f = camera.fx 
+        J = torch.zeros((xyz.shape[0], 2, 3), device=xyz.device)
+        J[:, 0, 0] = f / z.squeeze()
+        J[:, 0, 2] = -(f * x.squeeze()) / (z.squeeze()**2)
+        J[:, 1, 1] = f / z.squeeze()
+        J[:, 1, 2] = -(f * y.squeeze()) / (z.squeeze()**2)
+
+        # 3D Covariance
+        cov3D = self.get_covariance() 
+
+        # Projection: Σ_2d = J * W * Σ * W^T * J^T
+        W = R_mat.unsqueeze(0).expand(xyz.shape[0], -1, -1)
+        M = torch.bmm(J, W) 
+        cov2d = torch.bmm(M, torch.bmm(cov3D, M.transpose(1, 2)))
+        
+        # Add a small diagonal bias for numerical stability
+        cov2d[:, 0, 0] += 0.3
+        cov2d[:, 1, 1] += 0.3
+        
+        return cov2d, xyz_cam
+```
+
+### src/utils/read_write_model.py
+```
+# Copyright (c) 2023, ETH Zurich and UNC Chapel Hill.
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+#     * Redistributions of source code must retain the above copyright
+#       notice, this list of conditions and the following disclaimer.
+#
+#     * Redistributions in binary form must reproduce the above copyright
+#       notice, this list of conditions and the following disclaimer in the
+#       documentation and/or other materials provided with the distribution.
+#
+#     * Neither the name of ETH Zurich and UNC Chapel Hill nor the names of
+#       its contributors may be used to endorse or promote products derived
+#       from this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+#
+# Author: Johannes L. Schoenberger (jsch-at-demuc-dot-de)
+
+import os
+import collections
+import numpy as np
+import struct
+import argparse
+
+
+CameraModel = collections.namedtuple(
+    "CameraModel", ["model_id", "model_name", "num_params"])
+Camera = collections.namedtuple(
+    "Camera", ["id", "model", "width", "height", "params"])
+BaseImage = collections.namedtuple(
+    "Image", ["id", "qvec", "tvec", "camera_id", "name", "xys", "point3D_ids"])
+Point3D = collections.namedtuple(
+    "Point3D", ["id", "xyz", "rgb", "error", "image_ids", "point2D_idxs"])
+
+
+class Image(BaseImage):
+    def qvec2rotmat(self):
+        return qvec2rotmat(self.qvec)
+
+
+CAMERA_MODELS = {
+    CameraModel(model_id=0, model_name="SIMPLE_PINHOLE", num_params=3),
+    CameraModel(model_id=1, model_name="PINHOLE", num_params=4),
+    CameraModel(model_id=2, model_name="SIMPLE_RADIAL", num_params=4),
+    CameraModel(model_id=3, model_name="RADIAL", num_params=5),
+    CameraModel(model_id=4, model_name="OPENCV", num_params=8),
+    CameraModel(model_id=5, model_name="OPENCV_FISHEYE", num_params=8),
+    CameraModel(model_id=6, model_name="FULL_OPENCV", num_params=12),
+    CameraModel(model_id=7, model_name="FOV", num_params=5),
+    CameraModel(model_id=8, model_name="SIMPLE_RADIAL_FISHEYE", num_params=4),
+    CameraModel(model_id=9, model_name="RADIAL_FISHEYE", num_params=5),
+    CameraModel(model_id=10, model_name="THIN_PRISM_FISHEYE", num_params=12)
+}
+CAMERA_MODEL_IDS = dict([(camera_model.model_id, camera_model)
+                         for camera_model in CAMERA_MODELS])
+CAMERA_MODEL_NAMES = dict([(camera_model.model_name, camera_model)
+                           for camera_model in CAMERA_MODELS])
+
+
+def read_next_bytes(fid, num_bytes, format_char_sequence, endian_character="<"):
+    """Read and unpack the next bytes from a binary file.
+    :param fid:
+    :param num_bytes: Sum of combination of {2, 4, 8}, e.g. 2, 6, 16, 30, etc.
+    :param format_char_sequence: List of {c, e, f, d, h, H, i, I, l, L, q, Q}.
+    :param endian_character: Any of {@, =, <, >, !}
+    :return: Tuple of read and unpacked values.
+    """
+    data = fid.read(num_bytes)
+    return struct.unpack(endian_character + format_char_sequence, data)
+
+
+def write_next_bytes(fid, data, format_char_sequence, endian_character="<"):
+    """pack and write to a binary file.
+    :param fid:
+    :param data: data to send, if multiple elements are sent at the same time,
+    they should be encapsuled either in a list or a tuple
+    :param format_char_sequence: List of {c, e, f, d, h, H, i, I, l, L, q, Q}.
+    should be the same length as the data list or tuple
+    :param endian_character: Any of {@, =, <, >, !}
+    """
+    if isinstance(data, (list, tuple)):
+        bytes = struct.pack(endian_character + format_char_sequence, *data)
+    else:
+        bytes = struct.pack(endian_character + format_char_sequence, data)
+    fid.write(bytes)
+
+
+def read_cameras_text(path):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::WriteCamerasText(const std::string& path)
+        void Reconstruction::ReadCamerasText(const std::string& path)
+    """
+    cameras = {}
+    with open(path, "r") as fid:
+        while True:
+            line = fid.readline()
+            if not line:
+                break
+            line = line.strip()
+            if len(line) > 0 and line[0] != "#":
+                elems = line.split()
+                camera_id = int(elems[0])
+                model = elems[1]
+                width = int(elems[2])
+                height = int(elems[3])
+                params = np.array(tuple(map(float, elems[4:])))
+                cameras[camera_id] = Camera(id=camera_id, model=model,
+                                            width=width, height=height,
+                                            params=params)
+    return cameras
+
+
+def read_cameras_binary(path_to_model_file):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::WriteCamerasBinary(const std::string& path)
+        void Reconstruction::ReadCamerasBinary(const std::string& path)
+    """
+    cameras = {}
+    with open(path_to_model_file, "rb") as fid:
+        num_cameras = read_next_bytes(fid, 8, "Q")[0]
+        for _ in range(num_cameras):
+            camera_properties = read_next_bytes(
+                fid, num_bytes=24, format_char_sequence="iiQQ")
+            camera_id = camera_properties[0]
+            model_id = camera_properties[1]
+            model_name = CAMERA_MODEL_IDS[camera_properties[1]].model_name
+            width = camera_properties[2]
+            height = camera_properties[3]
+            num_params = CAMERA_MODEL_IDS[model_id].num_params
+            params = read_next_bytes(fid, num_bytes=8*num_params,
+                                     format_char_sequence="d"*num_params)
+            cameras[camera_id] = Camera(id=camera_id,
+                                        model=model_name,
+                                        width=width,
+                                        height=height,
+                                        params=np.array(params))
+        assert len(cameras) == num_cameras
+    return cameras
+
+
+def write_cameras_text(cameras, path):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::WriteCamerasText(const std::string& path)
+        void Reconstruction::ReadCamerasText(const std::string& path)
+    """
+    HEADER = "# Camera list with one line of data per camera:\n" + \
+             "#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n" + \
+             "# Number of cameras: {}\n".format(len(cameras))
+    with open(path, "w") as fid:
+        fid.write(HEADER)
+        for _, cam in cameras.items():
+            to_write = [cam.id, cam.model, cam.width, cam.height, *cam.params]
+            line = " ".join([str(elem) for elem in to_write])
+            fid.write(line + "\n")
+
+
+def write_cameras_binary(cameras, path_to_model_file):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::WriteCamerasBinary(const std::string& path)
+        void Reconstruction::ReadCamerasBinary(const std::string& path)
+    """
+    with open(path_to_model_file, "wb") as fid:
+        write_next_bytes(fid, len(cameras), "Q")
+        for _, cam in cameras.items():
+            model_id = CAMERA_MODEL_NAMES[cam.model].model_id
+            camera_properties = [cam.id,
+                                 model_id,
+                                 cam.width,
+                                 cam.height]
+            write_next_bytes(fid, camera_properties, "iiQQ")
+            for p in cam.params:
+                write_next_bytes(fid, float(p), "d")
+    return cameras
+
+
+def read_images_text(path):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::ReadImagesText(const std::string& path)
+        void Reconstruction::WriteImagesText(const std::string& path)
+    """
+    images = {}
+    with open(path, "r") as fid:
+        while True:
+            line = fid.readline()
+            if not line:
+                break
+            line = line.strip()
+            if len(line) > 0 and line[0] != "#":
+                elems = line.split()
+                image_id = int(elems[0])
+                qvec = np.array(tuple(map(float, elems[1:5])))
+                tvec = np.array(tuple(map(float, elems[5:8])))
+                camera_id = int(elems[8])
+                image_name = elems[9]
+                elems = fid.readline().split()
+                xys = np.column_stack([tuple(map(float, elems[0::3])),
+                                       tuple(map(float, elems[1::3]))])
+                point3D_ids = np.array(tuple(map(int, elems[2::3])))
+                images[image_id] = Image(
+                    id=image_id, qvec=qvec, tvec=tvec,
+                    camera_id=camera_id, name=image_name,
+                    xys=xys, point3D_ids=point3D_ids)
+    return images
+
+
+def read_images_binary(path_to_model_file):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::ReadImagesBinary(const std::string& path)
+        void Reconstruction::WriteImagesBinary(const std::string& path)
+    """
+    images = {}
+    with open(path_to_model_file, "rb") as fid:
+        num_reg_images = read_next_bytes(fid, 8, "Q")[0]
+        for _ in range(num_reg_images):
+            binary_image_properties = read_next_bytes(
+                fid, num_bytes=64, format_char_sequence="idddddddi")
+            image_id = binary_image_properties[0]
+            qvec = np.array(binary_image_properties[1:5])
+            tvec = np.array(binary_image_properties[5:8])
+            camera_id = binary_image_properties[8]
+            image_name = ""
+            current_char = read_next_bytes(fid, 1, "c")[0]
+            while current_char != b"\x00":   # look for the ASCII 0 entry
+                image_name += current_char.decode("utf-8")
+                current_char = read_next_bytes(fid, 1, "c")[0]
+            num_points2D = read_next_bytes(fid, num_bytes=8,
+                                           format_char_sequence="Q")[0]
+            x_y_id_s = read_next_bytes(fid, num_bytes=24*num_points2D,
+                                       format_char_sequence="ddq"*num_points2D)
+            xys = np.column_stack([tuple(map(float, x_y_id_s[0::3])),
+                                   tuple(map(float, x_y_id_s[1::3]))])
+            point3D_ids = np.array(tuple(map(int, x_y_id_s[2::3])))
+            images[image_id] = Image(
+                id=image_id, qvec=qvec, tvec=tvec,
+                camera_id=camera_id, name=image_name,
+                xys=xys, point3D_ids=point3D_ids)
+    return images
+
+
+def write_images_text(images, path):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::ReadImagesText(const std::string& path)
+        void Reconstruction::WriteImagesText(const std::string& path)
+    """
+    if len(images) == 0:
+        mean_observations = 0
+    else:
+        mean_observations = sum((len(img.point3D_ids) for _, img in images.items()))/len(images)
+    HEADER = "# Image list with two lines of data per image:\n" + \
+             "#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n" + \
+             "#   POINTS2D[] as (X, Y, POINT3D_ID)\n" + \
+             "# Number of images: {}, mean observations per image: {}\n".format(len(images), mean_observations)
+
+    with open(path, "w") as fid:
+        fid.write(HEADER)
+        for _, img in images.items():
+            image_header = [img.id, *img.qvec, *img.tvec, img.camera_id, img.name]
+            first_line = " ".join(map(str, image_header))
+            fid.write(first_line + "\n")
+
+            points_strings = []
+            for xy, point3D_id in zip(img.xys, img.point3D_ids):
+                points_strings.append(" ".join(map(str, [*xy, point3D_id])))
+            fid.write(" ".join(points_strings) + "\n")
+
+
+def write_images_binary(images, path_to_model_file):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::ReadImagesBinary(const std::string& path)
+        void Reconstruction::WriteImagesBinary(const std::string& path)
+    """
+    with open(path_to_model_file, "wb") as fid:
+        write_next_bytes(fid, len(images), "Q")
+        for _, img in images.items():
+            write_next_bytes(fid, img.id, "i")
+            write_next_bytes(fid, img.qvec.tolist(), "dddd")
+            write_next_bytes(fid, img.tvec.tolist(), "ddd")
+            write_next_bytes(fid, img.camera_id, "i")
+            for char in img.name:
+                write_next_bytes(fid, char.encode("utf-8"), "c")
+            write_next_bytes(fid, b"\x00", "c")
+            write_next_bytes(fid, len(img.point3D_ids), "Q")
+            for xy, p3d_id in zip(img.xys, img.point3D_ids):
+                write_next_bytes(fid, [*xy, p3d_id], "ddq")
+
+
+def read_points3D_text(path):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::ReadPoints3DText(const std::string& path)
+        void Reconstruction::WritePoints3DText(const std::string& path)
+    """
+    points3D = {}
+    with open(path, "r") as fid:
+        while True:
+            line = fid.readline()
+            if not line:
+                break
+            line = line.strip()
+            if len(line) > 0 and line[0] != "#":
+                elems = line.split()
+                point3D_id = int(elems[0])
+                xyz = np.array(tuple(map(float, elems[1:4])))
+                rgb = np.array(tuple(map(int, elems[4:7])))
+                error = float(elems[7])
+                image_ids = np.array(tuple(map(int, elems[8::2])))
+                point2D_idxs = np.array(tuple(map(int, elems[9::2])))
+                points3D[point3D_id] = Point3D(id=point3D_id, xyz=xyz, rgb=rgb,
+                                               error=error, image_ids=image_ids,
+                                               point2D_idxs=point2D_idxs)
+    return points3D
+
+
+def read_points3D_binary(path_to_model_file):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::ReadPoints3DBinary(const std::string& path)
+        void Reconstruction::WritePoints3DBinary(const std::string& path)
+    """
+    points3D = {}
+    with open(path_to_model_file, "rb") as fid:
+        num_points = read_next_bytes(fid, 8, "Q")[0]
+        for _ in range(num_points):
+            binary_point_line_properties = read_next_bytes(
+                fid, num_bytes=43, format_char_sequence="QdddBBBd")
+            point3D_id = binary_point_line_properties[0]
+            xyz = np.array(binary_point_line_properties[1:4])
+            rgb = np.array(binary_point_line_properties[4:7])
+            error = np.array(binary_point_line_properties[7])
+            track_length = read_next_bytes(
+                fid, num_bytes=8, format_char_sequence="Q")[0]
+            track_elems = read_next_bytes(
+                fid, num_bytes=8*track_length,
+                format_char_sequence="ii"*track_length)
+            image_ids = np.array(tuple(map(int, track_elems[0::2])))
+            point2D_idxs = np.array(tuple(map(int, track_elems[1::2])))
+            points3D[point3D_id] = Point3D(
+                id=point3D_id, xyz=xyz, rgb=rgb,
+                error=error, image_ids=image_ids,
+                point2D_idxs=point2D_idxs)
+    return points3D
+
+
+def write_points3D_text(points3D, path):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::ReadPoints3DText(const std::string& path)
+        void Reconstruction::WritePoints3DText(const std::string& path)
+    """
+    if len(points3D) == 0:
+        mean_track_length = 0
+    else:
+        mean_track_length = sum((len(pt.image_ids) for _, pt in points3D.items()))/len(points3D)
+    HEADER = "# 3D point list with one line of data per point:\n" + \
+             "#   POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[] as (IMAGE_ID, POINT2D_IDX)\n" + \
+             "# Number of points: {}, mean track length: {}\n".format(len(points3D), mean_track_length)
+
+    with open(path, "w") as fid:
+        fid.write(HEADER)
+        for _, pt in points3D.items():
+            point_header = [pt.id, *pt.xyz, *pt.rgb, pt.error]
+            fid.write(" ".join(map(str, point_header)) + " ")
+            track_strings = []
+            for image_id, point2D in zip(pt.image_ids, pt.point2D_idxs):
+                track_strings.append(" ".join(map(str, [image_id, point2D])))
+            fid.write(" ".join(track_strings) + "\n")
+
+
+def write_points3D_binary(points3D, path_to_model_file):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::ReadPoints3DBinary(const std::string& path)
+        void Reconstruction::WritePoints3DBinary(const std::string& path)
+    """
+    with open(path_to_model_file, "wb") as fid:
+        write_next_bytes(fid, len(points3D), "Q")
+        for _, pt in points3D.items():
+            write_next_bytes(fid, pt.id, "Q")
+            write_next_bytes(fid, pt.xyz.tolist(), "ddd")
+            write_next_bytes(fid, pt.rgb.tolist(), "BBB")
+            write_next_bytes(fid, pt.error, "d")
+            track_length = pt.image_ids.shape[0]
+            write_next_bytes(fid, track_length, "Q")
+            for image_id, point2D_id in zip(pt.image_ids, pt.point2D_idxs):
+                write_next_bytes(fid, [image_id, point2D_id], "ii")
+
+
+def detect_model_format(path, ext):
+    if os.path.isfile(os.path.join(path, "cameras"  + ext)) and \
+       os.path.isfile(os.path.join(path, "images"   + ext)) and \
+       os.path.isfile(os.path.join(path, "points3D" + ext)):
+        print("Detected model format: '" + ext + "'")
+        return True
+
+    return False
+
+
+def read_model(path, ext=""):
+    # try to detect the extension automatically
+    if ext == "":
+        if detect_model_format(path, ".bin"):
+            ext = ".bin"
+        elif detect_model_format(path, ".txt"):
+            ext = ".txt"
+        else:
+            print("Provide model format: '.bin' or '.txt'")
+            return
+
+    if ext == ".txt":
+        cameras = read_cameras_text(os.path.join(path, "cameras" + ext))
+        images = read_images_text(os.path.join(path, "images" + ext))
+        points3D = read_points3D_text(os.path.join(path, "points3D") + ext)
+    else:
+        cameras = read_cameras_binary(os.path.join(path, "cameras" + ext))
+        images = read_images_binary(os.path.join(path, "images" + ext))
+        points3D = read_points3D_binary(os.path.join(path, "points3D") + ext)
+    return cameras, images, points3D
+
+
+def write_model(cameras, images, points3D, path, ext=".bin"):
+    if ext == ".txt":
+        write_cameras_text(cameras, os.path.join(path, "cameras" + ext))
+        write_images_text(images, os.path.join(path, "images" + ext))
+        write_points3D_text(points3D, os.path.join(path, "points3D") + ext)
+    else:
+        write_cameras_binary(cameras, os.path.join(path, "cameras" + ext))
+        write_images_binary(images, os.path.join(path, "images" + ext))
+        write_points3D_binary(points3D, os.path.join(path, "points3D") + ext)
+    return cameras, images, points3D
+
+
+def qvec2rotmat(qvec):
+    return np.array([
+        [1 - 2 * qvec[2]**2 - 2 * qvec[3]**2,
+         2 * qvec[1] * qvec[2] - 2 * qvec[0] * qvec[3],
+         2 * qvec[3] * qvec[1] + 2 * qvec[0] * qvec[2]],
+        [2 * qvec[1] * qvec[2] + 2 * qvec[0] * qvec[3],
+         1 - 2 * qvec[1]**2 - 2 * qvec[3]**2,
+         2 * qvec[2] * qvec[3] - 2 * qvec[0] * qvec[1]],
+        [2 * qvec[3] * qvec[1] - 2 * qvec[0] * qvec[2],
+         2 * qvec[2] * qvec[3] + 2 * qvec[0] * qvec[1],
+         1 - 2 * qvec[1]**2 - 2 * qvec[2]**2]
+    ])
+
+
+def rotmat2qvec(R):
+    Rxx, Ryx, Rzx, Rxy, Ryy, Rzy, Rxz, Ryz, Rzz = R.flat
+    K = np.array([
+        [Rxx - Ryy - Rzz, 0, 0, 0],
+        [Ryx + Rxy, Ryy - Rxx - Rzz, 0, 0],
+        [Rzx + Rxz, Rzy + Ryz, Rzz - Rxx - Ryy, 0],
+        [Ryz - Rzy, Rzx - Rxz, Rxy - Ryx, Rxx + Ryy + Rzz]]) / 3.0
+    eigvals, eigvecs = np.linalg.eigh(K)
+    qvec = eigvecs[[3, 0, 1, 2], np.argmax(eigvals)]
+    if qvec[0] < 0:
+        qvec *= -1
+    return qvec
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Read and write COLMAP binary and text models")
+    parser.add_argument("--input_model", help="path to input model folder")
+    parser.add_argument("--input_format", choices=[".bin", ".txt"],
+                        help="input model format", default="")
+    parser.add_argument("--output_model",
+                        help="path to output model folder")
+    parser.add_argument("--output_format", choices=[".bin", ".txt"],
+                        help="outut model format", default=".txt")
+    args = parser.parse_args()
+
+    cameras, images, points3D = read_model(path=args.input_model, ext=args.input_format)
+
+    print("num_cameras:", len(cameras))
+    print("num_images:", len(images))
+    print("num_points3D:", len(points3D))
+
+    if args.output_model is not None:
+        write_model(cameras, images, points3D, path=args.output_model, ext=args.output_format)
+
+
+if __name__ == "__main__":
+    main()
+```

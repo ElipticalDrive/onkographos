@@ -1,0 +1,462 @@
+This is the AMD-maintained fork of the LLVM git repository. This repository accepts pull requests and issues related to AMD fork-specific topics (amd/*). For all other issues/PRs, please submit upstream at https://github.com/llvm/llvm-project. - [OpenMP] xteam reduction and scan by ro-i · Pull Request #1691 · ROCm/llvm-project
+
+[OpenMP] xteam reduction and scan by ro-i · Pull Request #1691 · ROCm/llvm-project · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ro-i
+commented
+Mar 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+-------- DO NOT MERGE, this is just for discussion before going upstream --------
+This patch supersedes #1246 and includes:
+reduction/scan:
+removed warp-config template parameters for device runtime functions -> significant reduction in "API endpoints" and codegen complexity
+extracted shared primitives in XteamCommon.h for wave/block reduction/scan
+scan:
+completely rewritten, based on Single-pass Parallel Prefix Scan with Decoupled Look-back algorithm -> single-pass instead of two-phase approach -> also significant less codegen.
+Performance:
+reduction: no regressions
+scan (only compared simulations because codegen is broken in AOMP): significant performance gains
+(For more detailed performance data see the email I wrote.)
+Tests: it's expected that smoke xteam tests fail for now since the simulation tests target the old device runtime API. An updated version of ROCm/aomp#1895 would fix that, although we need to see when it would make sense to fix/land this testing update.
+Assisted-by: claude-4.6-opus-high
+ro-i
+added 25 commits
+March 8, 2026 09:36
+[OpenMP] device Xteamr: Clean up template parameters
+…
+2ba7b83
+```
+Remove the wave number and wave size template parameters from the entry
+points of the device xteam reduction functions. Replace the wave size
+parameter by a call to `__gpu_num_lanes()`, which is optimized out
+during compilation. Replace the wave number parameter by the constant
+`32`, which is on the safe side for its current usage situations (VLA
+size needs to be constant, max number of threads is 1024, min wave size
+is 32).
+```
+work on Xteam reduction and scan
+674c638
+adapt test_xteam...
+555d19c
+fix build stuff
+b353752
+misc fixes
+befff22
+fix build stuff
+e37af90
+restore infra to amd-staging
+7e51adc
+no need for cross-arch testing for now
+1338ec3
+update test_xteams.cpp
+a96105b
+improve single-kernel
+224c739
+switch back to two-kernel
+e0f0863
+misc fixes
+432b96d
+misc fixes
+6a05f6b
+cleanup and barrier/atomic work
+6268164
+cleanup and barrier/atomic work
+e98e360
+cleanup scan API parameters
+49f5ea4
+remove unnecessary variable
+69935cb
+fix formatting
+2264ef7
+make better use of macros to reduce duplications
+7ea0f51
+bring back is_inclusive parameter to fix no-loop scan; fix/adapt tests
+a791bce
+fix formatting
+86de9ba
+fix after rebase
+a1aa5c6
+cleanup codegen
+f7d4abf
+cleanup currently supported types; remove block_status restore for now
+07b72ac
+add link to paper
+98c1004
+ro-i
+requested review from
+CatherineMoore,
+gregrodgers,
+mjklemm,
+ronlieb and
+shiltian
+March 9, 2026 08:46
+ro-i
+requested a review
+from dhruvachak
+March 9, 2026 08:46
+ro-i
+added
+the
+testing only
+label
+Mar 9, 2026
+z1-cciauto
+commented
+Mar 9, 2026
+Copy link
+Copy Markdown
+Collaborator
+PSDB Link: https://compiler-ci.amd.com/job/compiler-psdb-amd-staging/4547
+ro-i
+mentioned this pull request
+Mar 9, 2026
+[OpenMP] device Xteamr: Clean up template parameters
+#1246
+Closed
+ro-i
+commented
+Mar 9, 2026
+Copy link
+Copy Markdown
+Author
+AI-Summary: xteam-reduction-scan vs origin/amd-staging
+35 files changed, 7,843 insertions, 14,721 deletions (net -6,878 lines)
+1. Scan Algorithm: From Two-Kernel Gather-Scatter to Single-Pass Decoupled Look-Back
+The most fundamental change is a complete rewrite of the cross-team scan algorithm.
+Baseline used a two-kernel approach:
+Kernel 1 (_xteam_scan): Performed an intra-team scan using a Blelloch-style double-buffer pattern in global memory (storage[]), writing intermediate results by ping-ponging between two halves of the array. Thread 0 of each team then stored the team aggregate in team_vals[] and atomically incremented a teams_done_ptr counter. The last team to arrive performed a cross-team scan over team_vals[] using a second Blelloch scan in LDS (partial_sums[]).
+Kernel 2 (_xteam_scan_phase2): A separate kernel that reconstructed final results by combining per-thread intra-team scan values with the cross-team prefix from team_vals[]. Had separate paths for no-loop (segment_size=1) and segmented scans. Wrote final results into storage or segment_vals arrays.
+Branch implements a single-pass decoupled look-back algorithm (Merrill & Garland, 2016):
+A single kernel _xteam_scan<T> performs the entire scan in one pass. Each block (team) computes its local scan using wave-level Kogge-Stone prefix scan with shfl_up primitives, then publishes its block aggregate and looks backward at predecessors:
+Uses a tri-state BlockStatus enum: BLOCK_INVALID, BLOCK_PARTIAL, BLOCK_COMPLETE.
+Block 0 immediately marks itself COMPLETE with its inclusive prefix.
+All other blocks store their aggregate and mark PARTIAL, then thread 0 spins looking at predecessor blocks. When it sees COMPLETE, it uses the predecessor's prefix directly; when it sees PARTIAL, it accumulates the aggregate and continues looking further back.
+Once a block's prefix is determined, it is marked COMPLETE and broadcast to all threads via LDS.
+The separate _xteam_scan_phase2 function and all __kmpc_xteams_phase2_* extern wrappers are entirely removed.
+The memory layout changed accordingly:
+Baseline: A single storage[] array of size 2 * NumTeams * NumThreads + 1 (used as a double-buffer), plus team_vals[] for cross-team aggregates, plus teams_done_ptr counter.
+Branch: A combined allocation split into [block_aggregates][block_prefixes][scan_result][block_status] where block_aggregates and block_prefixes are each NumTeams elements, scan_result holds the per-thread output, and block_status is a uint32_t array of NumTeams entries. The separate team_vals and teams_done_ptr captures are removed from the scan path.
+Memory ordering also changed: the baseline relied on seq_cst barrier synchronization after each tree-scan step (serializing all threads). The branch uses relaxed loads/stores with explicit fences before status updates, allowing forward progress without global barriers.
+The scan now takes an is_inclusive boolean parameter directly in the device runtime call (as Int1 in OMPKinds.def), whereas the baseline passed this only to phase 2. This means inclusive/exclusive scan behavior is now handled entirely within the single kernel.
+2. Elimination of Architecture-Specific Template Parameters
+Baseline: Both _xteam_reduction and _xteam_scan were parameterized on <T, _MaxNumWaves/_NW, _WSZ> (or <T, _MaxNumWaves, _WSZ, _IS_FAST> for reductions), where _NW was the number of waves per block and _WSZ was the warp size (32 or 64). This required a separate template instantiation for every combination of type, number-of-waves, and warp-size:
+Xteamr.cpp: 40 instantiations of _xteam_reduction<> (10 types x 2 warp sizes x 2 fast/normal).
+Xteams.cpp: 80 instantiations of _xteam_scan<> plus 24 instantiations of _xteam_scan_phase2<> (8 types x multiple NW/WSZ combos).
+Branch: Templates are parameterized only on type (and _IS_FAST for reductions):
+_xteam_reduction<T, _IS_FAST> and _xteam_scan<T>.
+Xteamr.cpp has 3 uses of _xteam_reduction<T> (inside macros that generate per-type wrappers).
+Xteams.cpp has 1 use of _xteam_scan<T> (inside a macro).
+Block size and warp size are queried at runtime via mapping::getNumberOfThreadsInBlock() and __gpu_num_lanes().
+This change propagated all the way to the extern "C" API symbols: names like __kmpc_xteamr_d_16x64 became __kmpc_xteamr_d, and __kmpc_xteams_d_16x64 became __kmpc_xteams_d. The OMPKinds.def entries dropped from 76 xteam-related declarations to 18.
+3. Shared Primitives Library (XteamCommon.h)
+A new file openmp/device/include/XteamCommon.h (427 lines) was introduced to consolidate GPU primitives that were previously duplicated between Xteamr.cpp and Xteams.cpp.
+Baseline: Each file (Xteamr.cpp and Xteams.cpp) contained its own copy of:
+Architecture-specific shuffle functions (shfl_xor_int, shfl_xor_d, shfl_xor_f, etc.) with #ifdef __AMDGPU__ / #ifdef __NVPTX__ blocks.
+Tag-dispatch structs and template specializations (_d_tag, _f_tag, _i_tag, __dispatch_tag<T>, etc.) to route types to the correct shuffle function.
+The Xteamr.cpp copy had only shfl_xor variants; the Xteams.cpp copy also needed shfl_up for prefix scans but used a different Blelloch scan approach with global memory.
+Branch: XteamCommon.h provides, in a namespace xteam:
+Shuffle primitives for both architectures: shfl_xor_int/shfl_up_int (AMDGPU via __builtin_amdgcn_ds_bpermute, NVPTX via __nvvm_shfl_sync_*), with float/double/complex variants built on top via __builtin_memcpy bit-casting (avoiding UB from unions, which the baseline Xteamr.cpp had used for shfl_xor_f).
+Type-generic overloads via macro-generated shfl_xor(T, lane_mask) and shfl_up(T, offset) for 12 types (double, float, int, unsigned int, long, unsigned long, short, unsigned short, __bf16, _Float16, double _Complex, float _Complex). This replaces the tag-dispatch pattern entirely.
+Wave-level operations: wave_reduce<T> (butterfly reduction via shfl_xor), wave_scan<T, is_inclusive> (Kogge-Stone via shfl_up), and convenience wrappers wave_inclusive_scan/wave_exclusive_scan.
+Block-level operations: block_reduce<T> (wave reduce + LDS cross-wave reduction), block_inclusive_scan<T>, block_exclusive_scan<T> (wave scan + LDS cross-wave scan).
+Utility functions: is_odd_power, ceil_to_power_of_two (these were scattered inline in the baseline).
+4. Codegen Simplification
+CGOpenMPRuntimeGPU.cpp (584 lines changed, net -349):
+getXteamRedOperation: The baseline had nested if (WarpSize == 32) / else branches for every type (8 types x 2 fast/normal x 2 warp sizes = 32 dispatch paths). The branch has a single dispatch per type since the runtime function names no longer encode warp size. This reduced the function from ~120 lines of switching to ~66.
+getXteamScanSum renamed to getXteamScanOp: The new function takes a RedOp parameter (add/min/max) and an IsInclusiveScan boolean, replacing the sum-only baseline. The parameter list changed: SumPtr, DTeamVals, DTeamsDonePtr, DScanStorage, NumTeams were replaced by DResult, DBlockStatus, DBlockAggregates, DBlockPrefixes. The _rf_lds function pointer parameter was removed from the scan API since the decoupled look-back doesn't need LDS reduction functions.
+getXteamScanPhaseTwo: Entirely removed (no second kernel).
+The 26 WarpSize == 32 || WarpSize == 64 conditionals in the baseline codegen were reduced to 1 remaining instance (likely for a different purpose).
+CGStmt.cpp (429 lines changed):
+EmitNoLoopXteamScanPhaseOneCode and EmitNoLoopXteamScanPhaseTwoCode (two separate functions) were merged into a single EmitNoLoopXteamScanCode.
+EmitXteamScanSum and EmitXteamScanPhaseTwo were merged into EmitXteamScanOp, which computes the combined memory layout ([block_aggregates][block_prefixes][scan_result][block_status]) and emits a single runtime call.
+The no-loop scan path now emits a before-scan block, the scan call, and an after-scan block, driven by OMPFirstScanLoop flag -- rather than the two-kernel pattern of emitting phase1 and phase2 separately.
+CGOpenMPRuntime.cpp (141 lines changed):
+The host-side allocation of d_scan_storage changed from sizeof(T) * (2 * NumTeams * NumThreads + 1) (double-buffer) to a layout containing block_aggregates + block_prefixes + scan_result + block_status with properly computed sizes.
+The number of kernel arguments for scan went from 10 to 9 (one fewer capture per reduction variable, since team_vals and teams_done_ptr are no longer needed as separate arguments).
+CGStmtOpenMP.cpp (91 lines changed):
+InitializeXteamRedCapturedVars was simplified -- for scan kernels, a single d_scan_storage pointer is captured rather than three separate pointers (d_team_vals, d_teams_done_ptr, d_scan_storage).
+CodeGenFunction.h and CodeGenModule.cpp: Updated declarations and analysis functions to reflect the merged scan path and new API parameter lists.
+5. Reduction Runtime Cleanup
+While the reduction algorithm itself was not fundamentally changed (it still uses block-level reduction + last-team gather), the implementation was significantly cleaned up:
+Duplicate shuffle code removed: ~150 lines of per-file shuffle implementations + ~80 lines of tag-dispatch boilerplate removed from Xteamr.cpp, replaced by #include "XteamCommon.h".
+_iteam_reduction simplified: The baseline had a separate template function for intra-team reduction. The branch implements it as a call to _xteam_reduction<T> with NumTeams == 1 and null team_vals/teams_done_ptr, using the existing single-team fast path.
+NVPTX double shuffle: The baseline used inline asm volatile for double shuffle on NVPTX. The branch uses the same __builtin_memcpy + two-int-shuffle approach as on AMDGPU, which is portable and avoids inline assembly.
+Extern wrappers: Macro-generated via _XTEAMR_DEF(T, TS), _XTEAMR_DEF_FAST_SUM(T, TS), _ITEAMR_DEF(T, TS) instead of hand-written per-type-per-warpsize functions. This went from 40 hand-written extern C functions in the baseline to ~20 macro-generated ones.
+Xteamr.cpp went from 1,081 lines to 282 lines; Xteamr.h from 690 to ~230 lines.
+6. Scan API Surface Changes
+Aspect
+Baseline
+Branch
+Scan function names
+__kmpc_xteams_d_16x64, _8x64, _4x64, _16x32, _8x32, _32x32 per type
+__kmpc_xteams_d per type
+Phase-2 functions
+__kmpc_xteams_phase2_* (6 variants per type)
+Removed entirely
+Scan types (OMPKinds.def)
+i, d, f, l (plus some in header only: cd, cf, ui, ul) x 6 block configs
+i, d, f, l
+Parameters (scan)
+(val, storage, r_ptr, team_vals, teams_done_ptr, rf, rf_lds, rnv, k, NumTeams)
+(val, result, block_status, block_aggregates, block_prefixes, rf, rnv, k, is_inclusive)
+rf_lds param in scan
+Required (for LDS reduction in Blelloch scan)
+Removed (decoupled look-back doesn't need it)
+NumTeams param in scan
+Explicit parameter
+Derived from mapping::getNumberOfBlocksInKernel()
+is_inclusive in scan
+Only in phase-2, as a runtime parameter
+In the single kernel, as Int1 (boolean)
+Kernel arguments per red-var
+3 (team_vals, teams_done_ptr, scan_storage)
+1 (scan_storage, sub-arrays computed from it)
+Total OMPKinds.def entries
+76 (xteamr + xteams + phase2)
+18 (xteamr + xteams)
+7. Test Changes
+Codegen tests (6 files, ~12,500 lines changed): Updated CHECK patterns to match new function names (no _16x64/_32x32 suffixes), updated argument counts, and adapted to the merged single-kernel scan codegen.
+Runtime tests (4 files, net -3,186 lines):
+test_xteamr.h and test_xteams.h were massively reduced by removing per-warpsize/per-blocksize test macro instantiations. The tests now invoke architecture-agnostic function names.
+test_xteamr.cpp and test_xteams.cpp were simplified accordingly.
+Cross-architecture testing (testing wave32 on wave64 hardware and vice versa) was removed.
+Offload tests (4 files, net -174 lines):
+No-loop scan tests updated to reflect single-pass behavior (no phase-2 kernel launch expected in output).
+Segmented scan tests updated for the new argument count (9 instead of 10).
+xteam_scan_3.cpp was heavily reduced, with notes about floating-point precision issues at segment boundaries due to non-associativity of FP addition in the cross-team scan.
+xteam_red_1.c: Minor update (team count change from 460 to 480).
+Summary of Key Design Decisions
+Runtime vs compile-time hardware abstraction: Warp size and block size are now queried at runtime (__gpu_num_lanes(), mapping::getNumberOfThreadsInBlock()) instead of being compile-time template parameters, eliminating the combinatorial explosion of function variants.
+Single-pass scan: Replacing the two-kernel Blelloch scan with a single-pass decoupled look-back removes a kernel launch, avoids the large double-buffer global memory allocation, and enables overlap of computation with cross-team synchronization. The trade-off is a spin-wait loop in thread 0 of each block during look-back.
+Shared primitive library: Consolidating wave/block primitives avoids code drift between reductions and scans and establishes a foundation for adding new cross-team collective operations.
+Simplified codegen: Fewer runtime function variants means less branching in the compiler and fewer entries to maintain in OMPKinds.def, reducing the surface area for bugs when adding new types or operations.
+ro-i
+commented
+Mar 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Author
+Most relevant TODOs that are still open:
+support more data types (some of the types, like complex, were declared before without actually being implemented)
+support multi-device
+ro-i
+commented
+Mar 9, 2026
+Copy link
+Copy Markdown
+Author
+Re AI-Summary: __gpu_num_lanes() is optimized out early by the backend compilation, btw
+ro-i
+commented
+Mar 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Author
+Regarding scan: even with a single-pass algorithm it may make sense to have a second kernel that is only responsible for writing back the results. In an earlier stage of my testing, I compared the following codes:
+```
+template <typename T>
+void scan_excl_dot_sim(const T *__restrict a, const T *__restrict b,
+                       T *__restrict out, uint64_t n) {
+  const uint64_t stride =
+      (n + XTEAM_TOTAL_NUM_THREADS - 1) / XTEAM_TOTAL_NUM_THREADS;
+
+#pragma omp target teams distribute parallel for num_teams(XTEAM_NUM_TEAMS)    \
+    num_threads(XTEAM_NUM_THREADS)                                             \
+    is_device_ptr(d_status, d_aggregates<T>, d_prefixes<T>, d_scan_out<T>)
+  for (uint64_t k = 0; k < XTEAM_TOTAL_NUM_THREADS; k++) {
+    const uint64_t start = k * stride;
+    const uint64_t end = (start + stride < n) ? start + stride : n;
+    T val0 = T(0);
+    for (uint64_t idx = start; idx < end; idx++)
+      val0 += a[idx] * b[idx];
+    get_kmpc_xteams_func<T>()(val0, d_scan_out<T>, d_status, d_aggregates<T>,
+                              d_prefixes<T>, get_rfun_sum_func<T>(), T(0), k);
+    T running = d_scan_out<T>[k];
+    for (uint64_t idx = start; idx < end; idx++) {
+      out[idx] = running;
+      running += a[idx] * b[idx];
+    }
+  }
+}
+```
+```
+template <typename T>
+void scan_excl_dot_sim_v1(const T *__restrict a, const T *__restrict b,
+                          T *__restrict out, uint64_t n) {
+  const uint64_t stride =
+      (n + XTEAM_TOTAL_NUM_THREADS - 1) / XTEAM_TOTAL_NUM_THREADS;
+
+#pragma omp target teams distribute parallel for num_teams(XTEAM_NUM_TEAMS)    \
+    num_threads(XTEAM_NUM_THREADS)                                             \
+    is_device_ptr(d_status, d_aggregates<T>, d_prefixes<T>, d_scan_out<T>)
+  for (uint64_t k = 0; k < XTEAM_TOTAL_NUM_THREADS; k++) {
+    const uint64_t start = k * stride;
+    const uint64_t end = (start + stride < n) ? start + stride : n;
+    T val0 = T(0);
+    for (uint64_t idx = start; idx < end; idx++)
+      val0 += a[idx] * b[idx];
+    get_kmpc_xteams_func<T>()(val0, d_scan_out<T>, d_status, d_aggregates<T>,
+                              d_prefixes<T>, get_rfun_sum_func<T>(), T(0), k);
+  }
+
+#pragma omp target teams distribute parallel for num_teams(XTEAM_NUM_TEAMS)    \
+    num_threads(XTEAM_NUM_THREADS)                                             \
+    is_device_ptr(d_scan_out<T>)
+  for (uint64_t k = 0; k < XTEAM_TOTAL_NUM_THREADS; k++) {
+    const uint64_t start = k * stride;
+    const uint64_t end = (start + stride < n) ? start + stride : n;
+    T running = d_scan_out<T>[k];
+    for (uint64_t idx = start; idx < end; idx++) {
+      out[idx] = running;
+      running += a[idx] * b[idx];
+    }
+  }
+}
+```
+_v1 has a designated kernel only for writing out. Since that kernel uses fewer hardware resources, it has higher occupancy and thus more latency hiding for this workload. This resulted for an array size of 177777777 for data type double in 27211 instead of 25694 MB/s (the absolute values don't really matter and may already be a little different due to changes that happened in the meantime; we're only interested in the diff in this context)
+ronlieb
+commented
+Mar 9, 2026
+Copy link
+Copy Markdown
+Collaborator
+[2026-03-09T11:39:39.244Z] Unexpected Fails: 4
+[2026-03-09T11:39:39.244Z] xteam-scan-no-loop
+[2026-03-09T11:39:39.244Z] xteamr
+[2026-03-09T11:39:39.244Z] xteamr_builtins
+[2026-03-09T11:39:39.244Z] xteamr_extended
+[2026-03-09T11:39:39.244Z]
+ro-i
+commented
+Mar 9, 2026
+Copy link
+Copy Markdown
+Author
+[2026-03-09T11:39:39.244Z] Unexpected Fails: 4 [2026-03-09T11:39:39.244Z] xteam-scan-no-loop [2026-03-09T11:39:39.244Z] xteamr [2026-03-09T11:39:39.244Z] xteamr_builtins [2026-03-09T11:39:39.244Z] xteamr_extended [2026-03-09T11:39:39.244Z]
+yeah, as I mentioned above, that's expected due to the API change
+ronlieb
+commented
+Mar 9, 2026
+Copy link
+Copy Markdown
+Collaborator
+we will need to remaster the 4 tests , unless
+there is some option to retain old behavior.
+or
+if the tests need to change, its likely easier to move 4 tests to smoke-dev, remaster tests. Land PR, then move tests back to smoke-limbo in amd-staging branch.
+or
+we need to in parallel land a PR for aomp:amd-staging with this PR.
+i prefer #2
+ro-i
+commented
+Mar 9, 2026
+Copy link
+Copy Markdown
+Author
+Yeah, I didn't put up an updated PR for this because as far as I discussed with @CatherineMoore, this PR here isn't landing on amd-staging, anyway. I'll directly go upstream. I just opened this PR so that it can be discussed as needed before the next steps.
+And when I'm going upstream, the API might change again, depending on upstream reviews. That's why I waited with those tests.
+ronlieb
+commented
+Mar 9, 2026
+Copy link
+Copy Markdown
+Collaborator
+Yeah, I didn't put up an updated PR for this because as far as I discussed with @CatherineMoore, this PR here isn't landing on amd-staging, anyway. I'll directly go upstream. I just opened this PR so that it can be discussed as needed before the next steps. And when I'm going upstream, the API might change again, depending on upstream reviews. That's why I waited with those tests.
+when these land in upstream, the merge that brings them in will fail npsdb, so we might as well move the 4 tests to smoke-dev now and thus avoid the revert problem
+fix size comment for xteams result_array
+0db44fb
+ro-i
+commented
+Mar 12, 2026
+View reviewed changes
+Comment thread
+openmp/device/src/Xteams.cpp
+const uint32_t lane_num = omp_thread_num % _XTEAM_WARP_SIZE;
+// LDS for wave totals during block scan
+static _RF_LDS T wave_totals[_XTEAM_MAX_NUM_WAVES];
+ro-i
+Mar 12, 2026
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+note to myself: bring this up in the discussion
+ro-i
+commented
+Mar 12, 2026
+View reviewed changes
+Comment thread
+openmp/device/src/Xteamr.cpp
+static __XTEAM_SHARED_LDS T xwave_lds[_MaxNumWaves];
+// LDS array for wave results
+static _RF_LDS T xwave_lds[_XTEAM_MAX_NUM_WAVES];
+ro-i
+Mar 12, 2026
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+note to myself: bring this up in the discussion
+z1-cciauto
+commented
+Mar 12, 2026
+Copy link
+Copy Markdown
+Collaborator
+PSDB Link: https://compiler-ci.amd.com/job/compiler-psdb-amd-staging/4609
+ro-i
+commented
+Mar 12, 2026
+View reviewed changes
+Comment thread
+openmp/device/include/XteamCommon.h
+}
+// Step 3: Reduce wave results in LDS
+for (unsigned offset = num_waves / 2; offset > 0; offset >>= 1) {
+ro-i
+Mar 12, 2026
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+todo: check for unroll
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+testing only
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

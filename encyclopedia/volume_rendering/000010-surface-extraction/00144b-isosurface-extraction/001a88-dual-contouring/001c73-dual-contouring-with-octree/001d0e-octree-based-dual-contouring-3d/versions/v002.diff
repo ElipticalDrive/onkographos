@@ -1,0 +1,394 @@
+--- v001.md
++++ v002.md
+@@ -4,181 +4,229 @@
+ 
+ ## Overview
+-Octree-Based Dual Contouring (3D) is a voxel-to-mesh extraction method that uses an octree to adaptively subdivide space, placing dual vertices at locations with the smallest reconstruction error [S1, unofficial]. It builds on [Dual Contouring with Octree](1271-dual-contouring-with-octree.md) by introducing a simplification phase that collapses internal nodes into pseudo-nodes when the Quadratic Error Function (QEF) error remains below a threshold, thereby reducing mesh complexity while preserving sharp features better than uniform approaches [S1, unofficial].
++Octree-Based Dual Contouring (3D) is a voxel-to-mesh extraction method that uses an octree to adaptively subdivide space, placing dual vertices at locations with the smallest reconstruction error [S1]. It builds on [Dual Contouring with Octree](1271-dual-contouring-with-octree.md) by introducing adaptive subdivision and a simplification phase that collapses internal nodes into pseudo-nodes when the Quadratic Error Function (QEF) error remains below a threshold, thereby reducing mesh complexity [S1].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-- **Input**: A 3D scalar field (voxel grid), grid dimensions, and configuration parameters (`threaded`, `threshold`, `randomize`).
+-- **Output**: A triangle mesh represented by a vertex buffer and index buffer.
++- **Input**: A 3D scalar field (voxel grid), grid dimensions, and configuration parameters (`threaded`, `threshold`, `randomize`) [S1].
++- **Output**: A triangle mesh represented by a vertex buffer and index buffer [S1].
+ 
+ **Data Structures**
+-The algorithm relies on an octree structure. The exact layouts are:
+-
+-1.  **OctreeNode**
+-    -   `type`: Enum (`None`, `Internal`, `Pseudo`, `Leaf`).
+-    -   `position`: `Vector3` (world space position of the node center).
+-    -   `size`: `int` (side length of the voxel cube).
+-    -   `children`: `OctreeNode[8]` (array of 8 child nodes, ordered in Z-order/Morton order).
+-    -   `draw_info`: Pointer to `OctreeDrawInfo`.
+-
+-2.  **OctreeDrawInfo**
+-    -   `index`: `int` (index in the vertex buffer).
+-    -   `corners`: `int` (bitmask of 8 bits, where bit $i$ is 1 if the sample at corner $i$ is negative, 0 otherwise).
+-    -   `position`: `Vector3` (the dual vertex position).
+-    -   `averageNormal`: `Vector3` (normalized average of edge intersection normals).
+-    -   `qef`: `QEFProper.QEFSolver` object (stores the QEF matrix and solution).
+-
+-3.  **Lookup Tables** (Static integer arrays)
+-    -   `edgevmap[12, 2]`: Maps edge index to the two corner indices it connects.
+-    -   `edgemask[3]`: Edge masks.
+-    -   `vertMap[8, 3]`: Vertex to corner mapping.
+-    -   `faceMap[6, 4]`: Face to corner mapping.
+-    -   `cellProcFaceMask[8, 3]`: Face processing mask.
+-    -   `cellProcEdgeMask[6, 5]`: Edge processing mask.
+-    -   `faceProcFaceMask[3, 4, 3]`: Face-to-face processing mask.
+-    -   `faceProcEdgeMask[3, 4, 6]`: Face-to-edge processing mask.
+-    -   `edgeProcEdgeMask[4, 2, 5]`: Edge-to-edge processing mask.
+-    -   `processEdgeMask[3, 4]`: Process edge mask.
++The algorithm relies on an octree structure with the following exact layouts [S1]:
++1. **OctreeNode**: `type` (enum: `None`, `Internal`, `Pseudo`, `Leaf`), `position` (`Vector3`), `size` (`int`), `children` (`OctreeNode[8]` in Z-order), `draw_info` (`OctreeDrawInfo` pointer) [S1].
++2. **OctreeDrawInfo**: `index` (`int`), `corners` (`int` bitmask), `position` (`Vector3`), `averageNormal` (`Vector3`), `qef` (`QEFSolver` object) [S1].
++3. **Lookup Tables**: Static integer arrays including `edgevmap[12,2]`, `edgemask[3]`, `vertMap[8,3]`, `faceMap[6,4]`, `cellProcFaceMask[8,3]`, `cellProcEdgeMask[6,5]`, `faceProcFaceMask[3,4,3]`, `faceProcEdgeMask[3,4,6]`, `edgeProcEdgeMask[4,2,5]`, `processEdgeMask[3,4]` [S1].
+ 
+ **Parameters**
+--   `threaded`: Controls multithreading depth. Safe values are 0 or 1. Values >1 generate $8^{threaded}$ tasks and typically degrade performance [S1, unofficial].
+--   `threshold`: The error threshold for simplification. If QEF error exceeds this, the node is not collapsed [S1, unofficial].
+--   `randomize`: Boolean flag. If true, the threshold $t$ used for recursive simplification is randomized as $rnd.NextDouble() \times rnd.NextDouble() \times 20.0f$ [S1, unofficial].
++- `threaded`: Controls multithreading depth. Safe values are 0 or 1. Values >1 generate $8^{\text{threaded}}$ tasks and typically degrade performance [S1].
++- `threshold`: The error threshold for simplification. If the QEF error exceeds this value, the node is not collapsed [S1].
++- `randomize`: Boolean flag. If true, the threshold $t$ used for recursive simplification is randomized as `rnd.NextDouble() * rnd.NextDouble() * 20.0f` [S1].
+ 
+ **Algorithm Steps**
+-
+-1.  **Construct Nodes**: Build the octree.
+-    -   If `size == 1`, call `ConstructLeaf`.
+-    -   Else, compute `child_size = size / 2`.
+-    -   Loop $i$ from 0 to 7:
+-        -   Calculate offset: `offset = Vector3(i/4, i%4/2, i%2)`.
+-        -   Create child with `size = child_size`, `position = position + offset * child_size`, `type = Internal`.
+-        -   If `threaded > 0` and `size > 2`, spawn a task to recursively call `ConstructNodes` on the child with `threaded - 1`. Else, call `ConstructNodes` on the child with `threaded = 0`.
+-        -   If child construction returns true, assign to `children[i]`, else `null`.
+-    -   Wait for all threads. If no children were created, return false.
+-
+-2.  **Construct Leaf**: Process a leaf voxel.
+-    -   If `size != 1`, return false.
+-    -   Initialize `corners = 0` and `samples[2, 2, 2]`.
+-    -   Loop $i$ from 0 to 7:
+-        -   Sample value at `position + Vector3(i/4, i%4/2, i%2)`.
+-        -   If `sample < 0`, set bit $i$ in `corners` (`corners |= 1 << i`).
+-    -   If `corners` is 0 or 255 (all samples positive or all negative), return false [S1, unofficial].
+-    -   Initialize `QEF3D` and `QEFSolver`. Initialize `average_normal` to Zero.
+-    -   Loop $i$ from 0 to 11 (edges):
+-        -   Get corner indices `c1, c2` from `edgevmap[i]`.
+-        -   Get signs `m1, m2` from `corners` bits `c1, c2`.
+-        -   If `m1 == m2`, continue (no intersection on this edge).
+-        -   Get sample values `d1, d2` and corner coordinates `p1, p2`.
+-        -   Compute intersection: `intersection = Sampler.GetIntersection(p1, p2, d1, d2) + position`.
+-        -   Compute normal: `normal = Sampler.GetNormal(intersection)`.
+-        -   Add `normal` to `average_normal`.
+-        -   Add `intersection` and `normal` to `qef` and `qefp`.
+-    -   Normalize `average_normal` (divide by intersection count).
+-    -   Set `draw_info.position` to `qefp.Solve(1e-6f, 4, 1e-6f)`.
+-    -   Set `draw_info.corners = corners`, `draw_info.averageNormal = normalized average_normal`, `draw_info.qef = qefp`.
+-    -   Set `type = Leaf`. Return true.
+-
+-3.  **Process Cell**: Traverse the tree to generate indices.
+-    -   If `type` is `Internal`:
+-        -   Loop $i$ from 0 to 7: If `children[i]` is not null, call `children[i].ProcessCell(indexes)`.
+-        -   Loop $i$ from 0 to 11:
+-            -   Get corner indices `c1, c2` from `cellProcFaceMask[i]`.
+-            -   `face_nodes[0] = children[c1]`, `face_nodes[1] = children[c2]`.
+-            -   Call `ProcessFace(face_nodes, cellProcFaceMask[i, 2], indexes)`.
+-        -   Loop $i$ from 0 to 5:
+-            -   Get `edge_nodes` from `children` using `cellProcEdgeMask[i]`.
+-            -   Call `ProcessEdge(edge_nodes, cellProcEdgeMask[i, 4], indexes)`.
+-
+-4.  **Process Face**: Handle face-level topology.
+-    -   If `nodes[0]` or `nodes[1]` is null, return.
+-    -   If either node is `Internal`:
+-        -   Loop $i$ from 0 to 3:
+-            -   Create `face_nodes[2]`.
+-            -   For $j$ from 0 to 1:
+-                -   If `nodes[j]` is not `Internal`, `face_nodes[j] = nodes[j].children[faceProcFaceMask[direction, i, j]]`.
+-                -   Else `face_nodes[j] = nodes[j]`.
+-            -   Call `ProcessFace(face_nodes, faceProcFaceMask[direction, i, 2], indexes)`.
+-    -   Define `orders` array `{{0,0,1,1}, {0,1,0,1}}`.
+-    -   Loop $i$ from 0 to 3:
+-        -   Create `edge_nodes[4]`.
+-        -   For $j$ from 0 to 3:
+-            -   If `nodes[orders[faceProcEdgeMask[direction, i, 0], j]]` is `Leaf` or `Pseudo`, `edge_nodes[j] = that node`.
+-            -   Else `edge_nodes[j] = node.children[faceProcEdgeMask[direction, i, 1+j]]`.
+-        -   Call `ProcessEdge(edge_nodes, faceProcEdgeMask[direction, i, 5], indexes)`.
+-
+-5.  **Process Edge**: Handle edge-level topology.
+-    -   If any of `nodes[0..3]` is null, return.
+-    -   If none of `nodes[0..3]` are `Internal`, call `ProcessIndexes(nodes, direction, indexes)`.
+-    -   Else:
+-        -   Loop $i$ from 0 to 1:
+-            -   Create `edge_nodes[4]`.
+-            -   For $j$ from 0 to 3:
+-                -   If `nodes[j]` is `Leaf` or `Pseudo`, `edge_nodes[j] = nodes[j]`.
+-                -   Else `edge_nodes[j] = nodes[j].children[edgeProcEdgeMask[direction, i, j]]`.
+-            -   Call `ProcessEdge(edge_nodes, edgeProcEdgeMask[direction, i, 4], indexes)`.
+-
+-6.  **Process Indexes**: Generate triangles for an edge configuration.
+-    -   Initialize `min_size=10000000`, `min_index=0`, `indices={-1,-1,-1,-1}`, `flip=false`, `sign_changed=false`.
+-    -   Loop $i$ from 0 to 3:
+-        -   Get edge from `processEdgeMask[direction, i]`.
+-        -   Get corner indices `c1, c2` from `edgevmap[edge]`.
+-        -   Get signs `m1, m2` from `nodes[i].draw_info.corners` bits `c1, c2`.
+-        -   If `nodes[i].size < min_size`, update `min_size`, `min_index=i`, `flip=(m1==1)`, `sign_changed=((m1==0 && m2!=0) || (m1!=0 && m2==0))`.
+-        -   Set `indices[i] = nodes[i].draw_info.index`.
+-    -   If `sign_changed`:
+-        -   If `!flip`:
+-            -   If `indices[0]!=indices[1] && indices[1]!=indices[3]`, add `{indices[0], indices[1], indices[3]}` to `indexes`.
+-            -   If `indices[0]!=indices[2] && indices[2]!=indices[3]`, add `{indices[0], indices[3], indices[2]}` to `indexes`.
+-        -   Else (`flip`):
+-            -   If `indices[0]!=indices[1] && indices[1]!=indices[3]`, add `{indices[0], indices[3], indices[1]}` to `indexes`.
+-            -   If `indices[0]!=indices[2] && indices[2]!=indices[3]`, add `{indices[0], indices[2], indices[3]}` to `indexes`.
+-
+-7.  **Simplify**: Collapse internal nodes.
+-    -   If `type` is not `Internal`, return.
+-    -   Initialize `signs` array `{-1...-1}`, `mid_sign=-1`, `is_collapsible=true`, `qef` solver, `random rnd`.
+-    -   Loop $i$ from 0 to 7:
+-        -   If `children[i]` is null, continue.
+-        -   If `randomize`, set $t = rnd.NextDouble() \times rnd.NextDouble() \times 20.0f$.
+-        -   Call `children[i].Simplify(t)`.
+-        -   If child type is `Internal`, set `is_collapsible=false`.
+-        -   Else, add `child.draw_info.qef.data` to `qef`.
+-        -   Set `mid_sign = (child.draw_info.corners >> (7-i)) & 1`.
+-        -   Set `signs[i] = (child.draw_info.corners >> i) & 1`.
+-    -   If `!is_collapsible`, return.
+-    -   Solve QEF: `pos = qef.Solve(1e-6f, 4, 1e-6f)`.
+-    -   Get `error = qef.GetError()`.
+-    -   If `error > threshold`, return.
+-    -   Create `draw_info`.
+-    -   Loop $i$ from 0 to 7:
+-        -   If `signs[i] == -1`, `draw_info.corners |= mid_sign << i`.
+-        -   Else `draw_info.corners |= signs[i] << i`.
+-    -   Calculate normal by summing `averageNormal` of non-null children (if `Leaf` or `Pseudo`), then normalize.
+-    -   Set `draw_info.position=pos`, `draw_info.averageNormal=normal`, `draw_info.qef=qef`.
+-    -   Set all children to null.
+-    -   Set `type = Pseudo`.
+-    -   Set `this.draw_info=draw_info`.
+-
+-8.  **Generate Vertex Buffer**: Collect final vertices.
+-    -   If `type != Internal`, recurse children.
+-    -   If `type != Internal` (i.e., leaf or pseudo) and `draw_info != null`:
+-        -   Set `draw_info.index = vertices.Count`.
+-        -   Compute color from `averageNormal`: `cn = averageNormal * 0.5f + 1.0f`; `cn.Normalize()`; `c = new Color(cn)`.
+-        -   Add `VertexPositionColorNormal(draw_info.position, c, draw_info.averageNormal)` to `vertices`.
++The method proceeds through tree construction, leaf processing, topology traversal, simplification, and vertex buffer generation [S1].
++
++```python
++def ConstructNodes(node, size, threaded):
++    if size == 1:
++        return ConstructLeaf(node, size)
++    child_size = size // 2
++    children = [None] * 8
++    for i in range(8):
++        offset = Vector3(i // 4, (i % 4) // 2, i % 2)
++        child = OctreeNode(position=node.position + offset * child_size, size=child_size, type=NodeType.Internal)
++        if threaded > 0 and size > 2:
++            child = spawn_task(ConstructNodes, child, child_size, threaded - 1)
++        else:
++            child = ConstructNodes(child, child_size, 0)
++        if child is not None:
++            children[i] = child
++    wait_for_tasks()
++    if all(c is None for c in children):
++        return False
++    node.children = children
++    return True
++
++def ConstructLeaf(node, size):
++    if size != 1:
++        return False
++    corners = 0
++    samples = [[0]*2 for _ in range(2)]
++    for i in range(8):
++        pos = node.position + Vector3(i // 4, (i % 4) // 2, i % 2)
++        val = sample_field(pos)
++        if val < 0:
++            corners |= 1 << i
++    if corners == 0 or corners == 255:
++        return False
++    qef = QEFSolver()
++    average_normal = Vector3.Zero
++    intersection_count = 0
++    for i in range(12):
++        c1, c2 = edgevmap[i]
++        m1 = (corners >> c1) & 1
++        m2 = (corners >> c2) & 1
++        if m1 == m2:
++            continue
++        d1, d2 = samples[c1 // 4][c1 % 4], samples[c2 // 4][c2 % 4]
++        p1, p2 = corner_coords(c1), corner_coords(c2)
++        intersection = Sampler.GetIntersection(p1, p2, d1, d2) + node.position
++        normal = Sampler.GetNormal(intersection)
++        average_normal += normal
++        qef.AddConstraint(intersection, normal)
++        intersection_count += 1
++    average_normal = average_normal / intersection_count
++    node.draw_info.position = qef.Solve(1e-6, 4, 1e-6)
++    node.draw_info.corners = corners
++    node.draw_info.averageNormal = average_normal
++    node.draw_info.qef = qef
++    node.type = NodeType.Leaf
++    return True
++
++def ProcessCell(node, indexes):
++    if node.type == NodeType.Internal:
++        for i in range(8):
++            if node.children[i] is not None:
++                node.children[i].ProcessCell(indexes)
++        for i in range(12):
++            c1, c2 = cellProcFaceMask[i]
++            face_nodes = [node.children[c1], node.children[c2]]
++            ProcessFace(face_nodes, cellProcFaceMask[i, 2], indexes)
++        for i in range(6):
++            edge_nodes = get_edge_nodes(node.children, cellProcEdgeMask[i])
++            ProcessEdge(edge_nodes, cellProcEdgeMask[i, 4], indexes)
++
++def ProcessFace(nodes, direction, indexes):
++    if nodes[0] is None or nodes[1] is None:
++        return
++    if nodes[0].type == NodeType.Internal or nodes[1].type == NodeType.Internal:
++        for i in range(4):
++            face_nodes = [None, None]
++            for j in range(2):
++                if nodes[j].type != NodeType.Internal:
++                    face_nodes[j] = nodes[j]
++                else:
++                    face_nodes[j] = nodes[j].children[faceProcFaceMask[direction, i, j]]
++            ProcessFace(face_nodes, faceProcFaceMask[direction, i, 2], indexes)
++    orders = [[0,0,1,1], [0,1,0,1]]
++    for i in range(4):
++        edge_nodes = [None] * 4
++        for j in range(4):
++            src_node = nodes[orders[faceProcEdgeMask[direction, i, 0], j]]
++            if src_node.type in (NodeType.Leaf, NodeType.Pseudo):
++                edge_nodes[j] = src_node
++            else:
++                edge_nodes[j] = src_node.children[faceProcEdgeMask[direction, i, 1+j]]
++        ProcessEdge(edge_nodes, faceProcEdgeMask[direction, i, 5], indexes)
++
++def ProcessEdge(nodes, direction, indexes):
++    if any(n is None for n in nodes):
++        return
++    if all(n.type != NodeType.Internal for n in nodes):
++        ProcessIndexes(nodes, direction, indexes)
++    else:
++        for i in range(2):
++            edge_nodes = [None] * 4
++            for j in range(4):
++                if nodes[j].type in (NodeType.Leaf, NodeType.Pseudo):
++                    edge_nodes[j] = nodes[j]
++                else:
++                    edge_nodes[j] = nodes[j].children[edgeProcEdgeMask[direction, i, j]]
++            ProcessEdge(edge_nodes, edgeProcEdgeMask[direction, i, 4], indexes)
++
++def ProcessIndexes(nodes, direction, indexes):
++    min_size = 10000000
++    min_index = 0
++    indices = [-1, -1, -1, -1]
++    flip = False
++    sign_changed = False
++    for i in range(4):
++        edge = processEdgeMask[direction, i]
++        c1, c2 = edgevmap[edge]
++        m1 = (nodes[i].draw_info.corners >> c1) & 1
++        m2 = (nodes[i].draw_info.corners >> c2) & 1
++        if nodes[i].size < min_size:
++            min_size = nodes[i].size
++            min_index = i
++            flip = (m1 == 1)
++            sign_changed = ((m1 == 0 and m2 != 0) or (m1 != 0 and m2 == 0))
++        indices[i] = nodes[i].draw_info.index
++    if sign_changed:
++        if not flip:
++            if indices[0] != indices[1] and indices[1] != indices[3]:
++                indexes.append([indices[0], indices[1], indices[3]])
++            if indices[0] != indices[2] and indices[2] != indices[3]:
++                indexes.append([indices[0], indices[3], indices[2]])
++        else:
++            if indices[0] != indices[1] and indices[1] != indices[3]:
++                indexes.append([indices[0], indices[3], indices[1]])
++            if indices[0] != indices[2] and indices[2] != indices[3]:
++                indexes.append([indices[0], indices[2], indices[3]])
++
++def Simplify(node, threshold, randomize):
++    if node.type != NodeType.Internal:
++        return
++    signs = [-1] * 8
++    mid_sign = -1
++    is_collapsible = True
++    qef = QEFSolver()
++    for i in range(8):
++        if node.children[i] is None:
++            continue
++        Simplify(node.children[i], threshold, randomize)
++        if node.children[i].type == NodeType.Internal:
++            is_collapsible = False
++        else:
++            qef.AddData(node.children[i].draw_info.qef.data)
++            mid_sign = (node.children[i].draw_info.corners >> (7 - i)) & 1
++            signs[i] = (node.children[i].draw_info.corners >> i) & 1
++    if not is_collapsible:
++        return
++    pos = qef.Solve(1e-6, 4, 1e-6)
++    error = qef.GetError()
++    if error > threshold:
++        return
++    node.draw_info = OctreeDrawInfo()
++    for i in range(8):
++        if signs[i] == -1:
++            node.draw_info.corners |= mid_sign << i
++        else:
++            node.draw_info.corners |= signs[i] << i
++    normal = Vector3.Zero
++    for i in range(8):
++        if node.children[i] is not None and node.children[i].type in (NodeType.Leaf, NodeType.Pseudo):
++            normal += node.children[i].draw_info.averageNormal
++    node.draw_info.position = pos
++    node.draw_info.averageNormal = normal.Normalize()
++    node.draw_info.qef = qef
++    node.children = [None] * 8
++    node.type = NodeType.Pseudo
++
++def GenerateVertexBuffer(node, vertices):
++    if node.type != NodeType.Internal:
++        for child in node.children:
++            if child is not None:
++                GenerateVertexBuffer(child, vertices)
++    if node.type != NodeType.Internal and node.draw_info is not None:
++        node.draw_info.index = len(vertices)
++        cn = node.draw_info.averageNormal * 0.5 + 1.0
++        cn = cn.Normalize()
++        color = Color(cn)
++        vertices.append(VertexPositionColorNormal(node.draw_info.position, color, node.draw_info.averageNormal))
++```
+ 
+ **Pitfalls**
+--   The provided QEF solver is a bruteforce offset search, not a proper linear solver. It applies offsets to a mass point to find the lowest error and should not be used as a reference implementation [S1, unofficial].
+--   The QEF solver is disabled in 3D DC by default. If enabled without simplification tweaks, high error tolerance causes sharp feature loss and mesh deformation [S1, unofficial].
+--   If `corners` is 0 or 255, the leaf node is empty and `ConstructLeaf` returns false, preventing the creation of an empty leaf [S1, unofficial].
+--   Threading is only enabled if `threaded > 0` and `size > 2`. If `size <= 2` or `threaded == 0`, recursion happens synchronously [S1, unofficial].
++- The provided QEF solver is a bruteforce offset search, not a proper linear solver. It applies offsets to a mass point to find the lowest error and should not be used as a reference implementation [S1].
++- The QEF solver is disabled in 3D DC by default. If enabled without simplification tweaks, high error tolerance causes sharp feature loss and mesh deformation [S1].
++- If `corners` is 0 or 255, the leaf node is empty and `ConstructLeaf` returns false, preventing the creation of an empty leaf [S1].
++- Threading is only enabled if `threaded > 0` and `size > 2`. If `size <= 2` or `threaded == 0`, recursion happens synchronously [S1].
+ 
+ ## Operating characteristics
+--   **Time Complexity**: Depends on the octree depth and the number of leaf nodes. The simplification step adds overhead but reduces the final vertex count.
+--   **Memory Complexity**: Proportional to the number of octree nodes. Internal nodes store pointers to children, while leaf/pseudo nodes store QEF data.
+--   **Performance**: Threading depth > 1 typically degrades performance due to task overhead [S1, unofficial].
+--   **Strengths**: Adaptive resolution allows for high detail where needed and coarser resolution elsewhere. Simplification reduces mesh complexity while preserving features better than uniform subsampling.
+--   **Limitations**: The QEF solver implementation is inefficient (bruteforce). 2D DC implementations in this codebase do not connect properly, and the adaptive variant lacks mesh simplification in 2D [S1, unofficial].
++- **Time Complexity**: Depends on the octree depth and the number of leaf nodes. The simplification step adds overhead but reduces the final vertex count [S1].
++- **Memory Complexity**: Proportional to the number of octree nodes. Internal nodes store pointers to children, while leaf/pseudo nodes store QEF data [S1].
++- **Performance**: Threading depth > 1 typically degrades performance due to task overhead [S1].
++- **Strengths**: Adaptive resolution allows for high detail where needed and coarser resolution elsewhere. Simplification reduces mesh complexity while preserving features better than uniform subsampling [S1].
++- **Limitations**: The QEF solver implementation is inefficient (bruteforce). 2D DC implementations in this codebase do not connect properly, and the adaptive variant lacks mesh simplification in 2D [S1].
+ 
+ ## Background
+-This implementation is part of an unofficial experimental codebase by Lin, hosted on GitHub [S1, unofficial]. It is designed for experimentation and is not implemented to the exact specification of original papers, with algorithms having their own namespace and minimal dependencies [S1, unofficial]. The code references work from `aewallin/dualcontouring` and `simplexnoise` [S1, unofficial].
++This implementation is part of an experimental codebase designed for testing, with algorithms organized in separate namespaces and minimal external dependencies [S1]. It is not implemented to the exact specification of original papers and is intended for experimentation rather than production use [S1].
+ 
+ ## Sources

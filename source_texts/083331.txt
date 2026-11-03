@@ -1,0 +1,277 @@
+Later optimisation, once #399 (projection blocking) and #398 (relaxation) are in and meshes reach millions of nodes. GPU-friendly steps (per node / per element, no global solve): transfinite interpolation filling the blocks; elliptic smo...
+
+GPU (wgpu compute) for the data-parallel steps of projection blocking and relaxation · Issue #409 · tangency-labs/fieldcraft · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+GPU (wgpu compute) for the data-parallel steps of projection blocking and relaxation #409
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+GPU (wgpu compute) for the data-parallel steps of projection blocking and relaxation#409
+Copy link
+Assignees
+Labels
+area:meshMeshers, mesh quality and geometry inMeshers, mesh quality and geometry inclaimedAssigned to a contributor; see CONTRIBUTING.mdAssigned to a contributor; see CONTRIBUTING.mdenhancementNew feature or requestNew feature or requestin progressBeing worked on by the core team; please don't start on itBeing worked on by the core team; please don't start on itsize: MSeveral daysSeveral days
+Description
+jyviko
+opened on Oct 15, 2026
+Issue body actions
+Later optimisation, once #399 (projection blocking) and #398 (relaxation) are in and meshes reach millions of nodes.
+GPU-friendly steps (per node / per element, no global solve):
+transfinite interpolation filling the blocks;
+elliptic smoothing (Winslow / Thomas–Middlecoff) — Jacobi-style sweeps, the dominant cost on big meshes;
+projection onto analytic surfaces (plane, cylinder, sphere, cone, torus); free-form faces stay on the CPU kernel;
+quality metrics per element;
+node relaxation (Node relaxation: relax spikes inside a sphere of influence, surface nodes sliding on the geometry (UV) #398) with a node colouring so neighbours never move in the same pass.
+Stays on the CPU: block planning, interval assignment, the provenance plan (#402), B-rep queries on free-form surfaces.
+How: wgpu compute shaders (already a dependency for rendering), behind the same API with a CPU fallback (results identical within tolerance; tests compare both). Must not break wasm (use WebGPU there or the CPU path).
+Worth it when: smoothing/projection time exceeds a few seconds — benchmark first on a 1M-node block mesh and report CPU vs GPU.
+Reactions are currently unavailable
+Activity
+Next
+jyviko
+added
+enhancementNew feature or requestNew feature or request
+size: MSeveral daysSeveral days
+area:meshMeshers, mesh quality and geometry inMeshers, mesh quality and geometry in
+on Oct 15, 2026
+bluecmd commented on Oct 17, 2026
+bluecmd
+on Oct 17, 2026
+Collaborator
+More actions
+#398 and #399 are in; could we take this one? The plan as written: transfinite fill, Winslow/Thomas–Middlecoff sweeps, projection onto the analytic surfaces and the per-element quality metrics as wgpu compute behind the existing API with the CPU path as the oracle (tests compare both within a tolerance), wasm untouched, and the CPU-vs-GPU benchmark on a 1M-node block mesh first to show it is worth it. We have an RTX 4090 and a GB10 to measure on.
+jyviko commented on Oct 17, 2026
+jyviko
+on Oct 17, 2026
+CollaboratorAuthor
+More actions
+Thank you @bluecmd! GPU meshing touches the core of the meshing work we're finishing right now, so let me look at how it lines up with that before saying yes; I'll come back here shortly.
+bluecmd commented on Oct 17, 2026
+bluecmd
+on Oct 17, 2026
+Collaborator
+More actions
+Numbers to inform that decision, measured on a Ryzen 9 7950X under Windows (upstream develop at 417c0c8), a 1 000 000-node / 970 299-hex tapered block through project_mesh with three Winslow sweeps, mean of three runs on a shared host:
+Stage
+Mean (s)
+Whole projection pipeline
+61.7
+Certified element quality (Bernstein determinant bounds, metrics)
+34.8
+Guarded Winslow smoothing (3 sweeps; 6.9 s per sweep, plus setup/finish)
+26.2
+Volume TFI, face TFI, plane projection, lattice
+< 0.4 together
+One relaxation sweep on 64 000 selected nodes (separate operation)
+141 (2.2 ms per node)
+Every stage is sequential today (no rayon in fieldcraft-mesh), so the honest comparison for a GPU port is against a multi-threaded CPU version as well, not only against this baseline. Transfinite fill and plane projection are not where the time goes: the certified quality and the guarded sweeps are 99 % of it, and both have the in-place acceptance order and the whole-element validity certificate to preserve. On a 100-sweep budget the tapered 8k- and 27k-node probes used all 100 sweeps; the regular cube stopped after one.
+One side finding from the same machine: hex::decompose::tests::a_plate_with_a_slot_gets_an_o_grid fails on clean 417c0c8 under Windows (minimum corner scaled Jacobian 0.3752 against the 0.5 asserted) while it passes on Linux and in CI; happy to open that as its own issue with the log.
+Part of #409.
+jyviko commented on Oct 17, 2026
+jyviko
+on Oct 17, 2026
+CollaboratorAuthor
+More actions
+Thank you @bluecmd, those numbers are really helpful for the decision; I'll come back on this after the 0.7.0 meshing release.
+jyviko commented on Oct 17, 2026
+jyviko
+on Oct 17, 2026
+CollaboratorAuthor
+More actions
+Go for it @bluecmd, it's yours! Thank you for taking it on.
+jyviko
+added
+in progressBeing worked on by the core team; please don't start on itBeing worked on by the core team; please don't start on it
+on Oct 17, 2026
+jyviko
+assigned
+bluecmd
+on Oct 17, 2026
+bluecmd commented on Oct 18, 2026
+bluecmd
+on Oct 18, 2026
+Collaborator
+More actions
+Linux baseline before any GPU work, with a multi-threaded CPU version as the comparison. Code: bluecmd/fieldcraft@aaf7969 (branch mesh-gpu on upstream develop e9ccf10), cargo test -p fieldcraft-mesh --release --lib tapered_block_benchmark -- --ignored --nocapture (project/bench.rs).
+Mesh: one tapered block (a square frustum, 2 wide at the bottom, 1 at the top, 1 high, six analytic planes), 99 divisions a side: 1 000 000 nodes, 970 299 hexes, project_mesh with Elliptic smoothing and 3 sweeps. The Windows harness from the earlier comment was not kept, so this block is a new one and its taper may differ; compare within this table, not with the 7950X numbers.
+How measured: mean of 3 runs per row. "Smoothing" is the pipeline minus the same pipeline with Smoothing::None. "Certified" is the element_quality loop timed on its own over the output mesh. Rows run one after another in one process.
+What changed for the threaded rows:
+The certified loop and the smoother's whole-mesh scaled-Jacobian scans run on fieldcraft-parallel blocks and are folded in element order, so the mesh is bit for bit the same as develop on any thread count ("Sequential" rows).
+"Coloured" also changes the sweep order. Movable nodes are put into classes no two of which share an element (greedy in node order: 8 classes on this grid). Each class moves in parallel against a frozen grid, so every move reads the same neighbours on 1 or N threads. It keeps the per-node guard (full / half / quarter step, accepted only if the scaled Jacobian and edge ratio around the node hold) and the whole-element certificate.
+amd64: Xeon D-1541 (8 cores / 16 threads, 2.1 GHz), Kubernetes pod limited to 14 CPUs on a lightly loaded node.
+Threads
+Sweep order
+Pipeline (s)
+Smoothing (s)
+Certified (s)
+min SJ
+mean SJ
+1
+sequential (develop)
+96.2
+28.6
+56.9
+0.8165
+0.9267
+1
+coloured
+92.2
+22.1
+57.8
+0.8165
+0.9267
+14
+sequential (develop)
+28.7
+17.5
+8.9
+0.8165
+0.9267
+14
+coloured
+16.2
+5.0
+9.0
+0.8165
+0.9267
+GB10 arm64: DGX Spark (10 Cortex-X925 + 10 Cortex-A725), 18 threads in its pod.
+Threads
+Sweep order
+Pipeline (s)
+Smoothing (s)
+Certified (s)
+min SJ
+mean SJ
+1
+sequential (develop)
+73.8
+15.7
+50.6
+0.8165
+0.9267
+1
+coloured
+74.1
+16.3
+50.6
+0.8165
+0.9267
+18
+sequential (develop)
+16.2
+11.1
+3.6
+0.8165
+0.9267
+18
+coloured
+8.1
+3.0
+3.6
+0.8165
+0.9267
+What this says:
+Certified quality dominates. It is 59–69 % of the sequential pipeline and runs 6× (amd64) to 14× (GB10) faster on threads, with no change to the result.
+The sweep order must change before a parallel smoother can help. The current sweep moves one node after another in place, and each acceptance check reads neighbours already moved in that sweep. Threading only the scans around it leaves smoothing at 11–17 s; the coloured order brings it to 3–5 s. On this block it costs nothing on one thread, and min/mean SJ agree to 4 decimals.
+After threading, the whole 1M-node pipeline takes 8 s on GB10 and 16 s on the D-1541. Of the 8 s, about 3.6 s is certified quality, 3.0 s smoothing and about 1.5 s the parts still sequential (TFI, targets, gap, boundary tags). That is what a GPU port can still win: a few seconds at 1M nodes, more as meshes grow.
+Question before going further: may the coloured order become the only order of project_mesh's guarded sweeps? It keeps results deterministic and independent of the thread count, but the meshes mesh.project produces would no longer match develop bit for bit; no oracle fixture uses a projected mesh. The GPU port needs that order too, so the CPU path would stay its exact oracle algorithm (same order, f64).
+Proposed next steps:
+PR 1 (CPU): the parallel certified loop and scans (bit-identical); if you agree, the coloured sweeps as the default order.
+PR 2 (GPU): a fieldcraft-mesh-gpu crate at L7 like lbm-gpu, behind a backend hook in mesh, wasm untouched. It covers the coloured Winslow sweep of free interior nodes, with boundary and curve nodes kept on the CPU, and a GPU pre-pass for certified quality. GB10's f64 rate is low, so the plan for the pre-pass: certify in f32 with a safety margin, and send only elements the f32 pass cannot settle back to the CPU's f64 Bernstein certificate. The certificate itself stays on the CPU. Tests compare the GPU path with the coloured CPU path within a stated tolerance.
+Part of #409.
+bluecmd
+added 4 commits that reference this issue on Oct 18, 2026
+mesh: parallel quality scans and a coloured sweep order in projection…
+...
+6e7e929
+mesh: certify trilinear hexahedra without allocating
+...
+235f9d2
+mesh: a sweep device for projection smoothing
+...
+31022bd
+mesh: straighten surface grid lines colour by colour on the coloured …
+...
+2f179f9
+8 remaining items
+Load more
+bluecmd
+added 8 commits that reference this issue on Oct 19, 2026
+mesh: a sweep device for projection smoothing
+...
+896f1e3
+mesh: straighten surface grid lines colour by colour on the coloured …
+...
+06d4bd2
+mesh-gpu: projection smoothing's sweeps on the GPU
+...
+8f67219
+mesh: parallel quality scans and a coloured sweep order in projection…
+...
+c283c87
+mesh: certify trilinear hexahedra without allocating
+...
+d04ac4f
+mesh: a sweep device for projection smoothing
+...
+806d101
+mesh: straighten surface grid lines colour by colour on the coloured …
+...
+52c13b9
+mesh-gpu: projection smoothing's sweeps on the GPU
+...
+a631ae2
+jyviko
+added 5 commits that reference this issue on Oct 19, 2026
+mesh: parallel quality scans and a coloured sweep order in projection…
+...
+2fd9279
+mesh: certify trilinear hexahedra without allocating
+...
+07e0743
+mesh: a sweep device for projection smoothing
+...
+54fd01b
+mesh: straighten surface grid lines colour by colour on the coloured …
+...
+705b727
+mesh-gpu: projection smoothing's sweeps on the GPU
+...
+93eff2e
+bluecmd
+added
+claimedAssigned to a contributor; see CONTRIBUTING.mdAssigned to a contributor; see CONTRIBUTING.md
+on Oct 25, 2026
+bluecmd commented on Oct 25, 2026
+bluecmd
+on Oct 25, 2026
+Collaborator
+More actions
+Claimed for agent coupled-exchanger-agent on bluecmd/fieldcraft:verify/gpu-mesh-parity-409 through the PR queue. GitHub assignee: @bluecmd. The agent may start once its queue receipt says granted. This is a reservation, not a claim of completion.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+bluecmd
+Labels
+area:meshMeshers, mesh quality and geometry inMeshers, mesh quality and geometry inclaimedAssigned to a contributor; see CONTRIBUTING.mdAssigned to a contributor; see CONTRIBUTING.mdenhancementNew feature or requestNew feature or requestin progressBeing worked on by the core team; please don't start on itBeing worked on by the core team; please don't start on itsize: MSeveral daysSeveral days
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

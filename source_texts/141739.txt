@@ -1,0 +1,116 @@
+This article details how to generate real-time volumetric cloud layers using OpenGL compute shaders driven by 3D Perlin-Worley noise textures. You will learn how to synthesize structural noise, configure 3D texture storage, build the raymarching compute p
+
+Volumetric Clouds with 3D Perlin-Worley Noise in OpenGL - opengl
+Volumetric
+Clouds with 3D Perlin-Worley Noise in OpenGL
+This article details how to generate real-time volumetric cloud
+layers using OpenGL compute shaders driven by 3D Perlin-Worley noise
+textures. You will learn how to synthesize structural noise, configure
+3D texture storage, build the raymarching compute pipeline, calculate
+realistic atmospheric scattering, and optimize sample evaluations for
+dynamic rendering.
+1. Generating 3D
+Perlin-Worley Noise Textures
+Real-time volumetric clouds rely on layered procedural noise to
+capture both broad shapes and wispy edge details. A base shape texture
+combines low-frequency Perlin noise with Worley (cellular) noise, while
+a secondary detail texture uses pure high-frequency Worley noise for
+erosion.
+Compute shaders generate these textures directly on the GPU into 3D
+texture objects (GL_TEXTURE_3D):
+Perlin-Worley Hybrid: Map Perlin noise to the broad
+cloud mass and invert Worley noise to carve hollows, producing a puffy
+cumulus appearance.
+Multi-Octave Worley: Store three octaves of Worley
+noise in separate color channels (G, B, A) across varying frequencies to
+use for detail erosion.
+In your compute shader, bind a 3D image with
+layout(rgba8, binding = 0) writeonly uniform image3D u_NoiseTexture;.
+Compute fractional coordinates using
+gl_GlobalInvocationID / texture_size, evaluate the noise
+equations, and write the output with imageStore().
+2. Defining the Cloud Layer
+Geometry
+Clouds exist within a distinct altitude envelope. Model this boundary
+as a spherical shell between an inner radius (cloud base, e.g., 1,500m)
+and an outer radius (cloud top, e.g., 4,000m) around the planet
+center.
+For every primary view ray:
+Intersect the camera ray with the inner and outer spheres.
+Discard rays pointing away from the boundary volume.
+Clamp the ray start to the camera position if the camera is already
+inside the cloud layer.
+Set the total ray length to the distance between the entry and exit
+points.
+3. Raymarching the Density
+Field
+A screen-space compute shader executes the raymarching process across
+the screen grid. Step through the cloud volume from the entry point
+along the view direction:
+```
+vec3 samplePos = rayStart;
+float stepSize = (rayEnd - rayStart) / float(SAMPLE_COUNT);
+float totalTransmittance = 1.0;
+vec3 totalLight = vec3(0.0);
+
+for(int i = 0; i < SAMPLE_COUNT; i++) {
+    if (totalTransmittance < 0.01) break; // Early ray termination
+
+    float density = SampleCloudDensity(samplePos);
+    if (density > 0.0) {
+        float lightEnergy = SampleLight(samplePos);
+        float stepOpticalDepth = density * stepSize * DENSITY_SCALE;
+        float stepTransmittance = exp(-stepOpticalDepth);
+        
+        totalLight += lightEnergy * totalTransmittance * (1.0 - stepTransmittance);
+        totalTransmittance *= stepTransmittance;
+    }
+    samplePos += rayDir * stepSize;
+}
+```
+4. Sampling Density and
+Weather
+SampleCloudDensity() maps the world-space coordinate to
+the cloud layer:
+Height Gradient: Attenuate the density using
+vertical remap functions to enforce flat cloud bases and rounded
+tops.
+Weather Map: Sample a 2D weather texture containing
+coverage, precipitation, and cloud-type attributes.
+Base Noise Sampling: Sample the primary 3D
+Perlin-Worley texture using low coordinates (tiling across
+kilometers).
+Erosion: Sample the secondary Worley noise texture,
+scaled up by frequency, to erode the edges of the base shape based on
+wind vectors and time.
+5. Volumetric
+Lighting and Phase Functions
+To illuminate the clouds:
+Secondary Raymarching: When a density sample
+exceeds zero, march a short ray toward the sun (usually 4 to 6 steps) to
+integrate optical thickness toward the light source.
+Beer's Law: Calculate solar attenuation using \(T = \exp(-d)\), where \(d\) is the integrated light-path
+density.
+Henyey-Greenstein Phase Function: Apply directional
+scattering based on the angle \(\theta\) between the view ray and the sun
+ray: \[P(\theta) = \frac{1 - g^2}{4\pi (1 +
+g^2 - 2g\cos\theta)^{1.5}}\] Combine a forward-scattering lobe
+(\(g \approx 0.8\)) with a mild
+backward-scattering lobe (\(g \approx
+-0.2\)) for edge highlights and silver linings.
+6. Performance
+Optimization Techniques
+Raymarching volumetric textures is computationally intensive.
+Implement the following strategies to maintain frame rates:
+Quarter-Resolution Raymarching: Execute the compute
+shader at half or quarter display resolution, storing the cloud color
+and depth.
+Bilateral Upsampling: Upscale the raymarched result
+to full resolution using a depth-aware bilateral filter to prevent edge
+bleeding against terrain.
+Temporal Reprojection: Jitter ray step offsets per
+frame using a 2D blue noise pattern, then reconstruct history frames
+using camera motion vectors.
+Adaptive Stepping: Double the ray step size when
+traversing empty air, and drop back to fine steps immediately upon
+encountering non-zero density.

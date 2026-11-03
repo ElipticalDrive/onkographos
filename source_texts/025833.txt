@@ -1,0 +1,1090 @@
+DiffusionShadow: Diffusion-based Shadow Caching for Neural Volume Rendering
+Kai-Chen Tunga , Qi Wub , David Bauera , Mengjiao Hanc , Silvio Rizzic , Kwan-Liu Maa
+a University of California, Davis, Davis, CA, United States
+b NVIDIA Spatial Intelligence Lab, Santa Clara, CA, United States
+c Argonne National Laboratory, Lemont, IL, United States
+Abstract
+arXiv:2609.30658v1 [cs.GR] 25 Sep 2026
+Implicit neural representations (INRs) have gained momentum in scientific visualization due to their compactness and scalability to
+large datasets, making them well suited for integration with direct volume rendering (DVR). However, real-time volume rendering
+of INR with advanced illumination effects, such as shadows, remains computationally expensive, as evaluating shadow terms via
+ray marching is costly. Alternatively, precomputing and storing shadows for many lighting directions is prohibitive in both memory
+and storage. To address this, we introduce a diffusion-based shadow caching framework that compresses a vast set of pre-calculated
+shadow INRs into a single diffusion model. Rather than focusing on generalizing to unseen directions, our method effectively
+memorizes and reconstructs a dense set of pre-trained lighting conditions on the fly. We first encode a collection of shadow
+coefficient volumes as shadow INRs, and then train a diffusion model conditioned on lighting direction to predict the corresponding
+shadow INR weights at inference time. This design integrates directly with standard INR renderers without additional runtime
+sampling. Experiments show that our approach achieves faster rendering than traditional methods while bypassing the massive
+storage bloat of independent INRs, producing shadows that closely match most of the reference results.
+Keywords:
+Implicit neural representations, Diffusion models, Volume rendering, Shadow caching, Neural rendering
+1. Introduction
+Implicit neural representations (INRs) have recently shown
+strong potential for scientific visualization due to their capability to approximate arbitrary volumetric fields in an extremely compact form while preserving high-fidelity reconstruction quality [1, 2]. By nature, these representations support
+continuous point queries in the volume domain, which makes
+them suitable for traditional direct volume rendering (DVR) algorithms, as samples can be queried directly without decoding
+an explicit representation of the volume [3].
+However, enabling shadow-based visualization for directly
+rendering these volumetric INR representations presents significant challenges.
+Traditional methods, such as casting secondary shadow rays,
+do not suit this task well. First, tracing divergent secondary rays
+disrupts the wavefront-style rendering schedule required to efficiently batch network queries. Second, computing a shadow
+ray for every sample introduces a prohibitive O(N 2 ) computational complexity (assuming N samples per primary ray). This
+overhead is further amplified when the volume is represented
+solely as an INR instead of a raw voxel grid, since each neural network query is orders of magnitude more expensive than
+Email addresses: kctung@ucdavis.edu (Kai-Chen Tung),
+qiwu@nvidia.com (Qi Wu), davbauer@ucdavis.edu (David Bauer),
+hanm@anl.gov (Mengjiao Han), srizzi@anl.gov (Silvio Rizzi),
+klma@ucdavis.edu (Kwan-Liu Ma)
+a direct voxel lookup. Together, these issues severely undermine the feasibility of interactive visualization with advanced
+illumination for INRs.
+Although several works have utilized the representational
+power of INRs to approximate and cache costly illumination
+terms in the rendering equation—such as shadow fields [4],
+photon-mapping fields [5], and irradiance fields [6, 7]— these
+pipelines still require training and storing a separate INR for
+each specific lighting condition. In a typical scenario where a
+user might adjust the light direction freely, precomputing and
+storing thousands of such INRs would incur prohibitive memory and storage costs, limiting practical deployment.
+On the other hand, denoising diffusion models [8] have recently emerged as the state-of-the-art method for high-fidelity
+synthesis. By formulating synthesis as learning the reverse of
+a noise-adding Markov process, diffusion methods avoid the
+training instabilities common in adversarial approaches [9].
+The same paradigm has been extended to 3D [10, 11, 12,
+13, 14] and even enables the creation of content parameterized
+as INRs [15, 16, 17]. Because diffusion models can be conditioned on external signals [18], they are well suited to address
+the aforementioned storage limitations. Instead of keeping a
+vast library of individual shadow INRs on disk, we can train
+a conditional diffusion model to memorize and reconstruct the
+weights of these INRs. Given a target lighting condition from
+the pre-trained set, the model effectively recovers the corresponding INR weights on the fly.
+In this work, our main driving application is enabling
+shadow-based visualization for directly rendering volumetric
+INR representations. To achieve this, we develop DiffusionShadow, a diffusion-based shadow caching framework that predicts shadow INR weights given specific lighting directions.
+We hypothesize that diffusion models can compress the large,
+discrete distribution of shadow coefficients across lighting directions into a unified weight space. By using the generative
+model to directly predict a separate SIREN-based shadow INR,
+we can co-render both the data INR and the shadow field, replacing expensive secondary-ray queries to the data INR with
+a single shadow INR evaluation per primary sample, thereby
+accelerating rendering.
+Our pipeline first trains a collection of SIREN INRs [19]
+on shadow coefficients computed under a dense set of sampled lighting directions. We then train a diffusion model,
+conditioned on the lighting-direction vector, to synthesize the
+shadow INR weights representing the corresponding shadow
+field. Once trained, the reconstructed shadow INRs, together
+with the data INR, integrate directly into interactive volume
+rendering systems. This supports real-time exploration with realistic shadows under the pre-trained lighting directions without incurring the high computational cost of on-the-fly shadow
+evaluation or the massive storage bloat of independent neural networks. We evaluate shadow reconstruction quality, visual fidelity, and rendering performance, demonstrating that our
+shadow INR achieves at least a 20× rendering speedup across
+all test datasets over naı̈ve INR-based shadow ray rendering
+while maintaining realistic shadows. We further compare our
+method with existing approaches and conduct ablation studies
+to analyze the impact of key design choices.
+We summarize our contributions as follows:
+• Diffusion-based Shadow INR Prediction: We introduce
+a novel diffusion caching framework that enables direct
+shadow INR prediction conditioned on lighting directions,
+eliminating the need for per-lighting-direction optimization at inference time.
+• Efficient Shadow Rendering for INR-based Volume Visualization: The generated shadow INRs are seamlessly
+integrated into an interactive INR-based volume renderer
+and co-rendered with the data INR, eliminating costly
+secondary-ray evaluation and enabling real-time rendering
+with realistic shadows.
+• Comprehensive Evaluation: We conduct extensive comparisons and ablation studies to analyze reconstruction
+quality, rendering performance, and the impact of key design choices, including geometry loss, rendering loss, and
+lighting direction sampling.
+2.1. Implicit Neural Representations (INRs)
+INRs [20] have gained widespread attention following the
+success of Neural Radiance Fields (NeRF) [7], which demonstrated that continuous coordinate-based networks can effectively model complex 3D scenes. While NeRF primarily focuses on novel view synthesis and scene reconstruction in computer vision, recent works have extended the concept of INR
+to the scientific visualization domain, where they show great
+potential for compressing and rendering large-scale scientific
+data due to their compact size and inherent support for random
+access reads. NeurComp [2] is one of the early works to use
+INRs to compress volumetric scalar field data. Coordnet [21]
+later introduced a unified coordinate-based INR framework to
+generalize on various tasks such as spatial and temporal super
+resolution. In addition to compression purpose, INR can also
+facilitate interactive visualization. Wu et al. [3] utilized INRs
+with a multi-resolution hash encoding [22] along with a sample streaming rendering algorithm and out-of-core sampling to
+achieve interactive visualization even for terascale datasets.
+Positional encoding layers are also essential components of
+INR models, transforming input coordinates into feature spaces
+that facilitate compact and efficient learning. Fourier feature
+mapping [23] and the positional encoding used in NeRF [7] employ sinusoidal transformations to capture high-frequency variations, while Instant-NGP [3, 22] introduces multi-resolution
+hash encoding to reduce network size requirements without sacrificing fidelity. Triplane encoding [24, 25] is another popular
+type of encoding, which decomposes 3D scenes into three orthogonal 2D feature planes. One important benefit of triplane
+encoding is that the trained triplanes can be directly used as inputs to 2D GANs [26] or image-based diffusion models [16] for
+generative modeling. Following this idea, we represent shadow
+coefficient volumes using a triplane encoding INR to exploit the
+efficiency of 2D diffusion models for learning, reconstruction
+and extrapolation.
+2.2. INR Parameterization
+Another line of research explores generating implicit neural
+representations (INRs) through weight-space prediction. In this
+process a network produces the parameters of another network.
+Ha et al. [27] first introduced this concept with hypernetworks,
+which generate the weights of a target network, allowing the
+target network to adapt its parameters dynamically based on
+input conditions. Building on this idea, Klocek et al. [28] applied hypernetworks to produce INR weights for image superresolution, while Sitzmann et al. [29] proposed Scene Representation Networks (SRNs), where an MLP hypernetwork is
+used to generate the weights of a neural network that represents
+a specific 3D scene. More recently, HyperINR [4] extended
+the concept to high-dimensional scientific data by interpolating
+INR encoding weights for time-varying volumes. Similarly, in
+the scientific visualization domain, HyperFLINT [30] employs
+a hypernetwork to model ensemble simulations, enabling flow
+field estimation and temporal interpolation conditioned on simulation parameters. Besides, HyperDiffusion [15] demonstrated
+that diffusion models can directly learn the distribution of INR
+2. Related Work
+We build on recent progress in the domain of INRs, INR
+parameterization, and machine learning-based global illumination. We also take inspiration from diffusion models, which
+have shown strong capabilities for synthesizing high-quality 3D
+content. Below, we survey the most relevant developments in
+each of these areas.
+2
+weight space to synthesize 3D shapes and 4D animations. In
+this spirit, our work focuses on INR weight generation, where
+a pretrained diffusion model learns to synthesize the triplane
+encoding weights representing shadow coefficient volumes.
+Beyond image-space generation, diffusion models have also
+been extended to 3D domains. For example, Zheng et al. [42]
+applied a 3D U-Net-based diffusion model directly to signed
+distance fields for 3D shape synthesis. SSDNeRF [43] used diffusion models in conjunction with NeRFs to achieve 3D reconstruction from images. Wang et al. [17] represented 3D avatars
+using triplanes and performed diffusion in the triplane space,
+while Shue et al. [44] adopted a similar triplane-based diffusion approach for mesh data. To further enhance scalability
+and generative quality, BlockFusion [16] introduced using an
+autoencoder to compress triplanes into a latent space, making
+them more suitable for diffusion models to learn and enabling
+large-scale 3D generation.
+2.3. Machine Learning-Based Global Illumination
+Global illumination (GI) encompasses a broad range of light
+transport effects, including ambient occlusion, indirect lighting, and shadows. Achieving real-time rendering with highquality global illumination remains computationally expensive,
+motivating the use of machine learning models to approximate these effects efficiently. A major line of research focuses on screen-space methods that operate directly on rendered images or G-buffers to approximate GI. Gao et al. [31]
+trained neural networks using shading attributes, view directions, and light directions to predict indirect illumination, which
+can be combined with direct illumination for realistic rendering. Nalbach et al. [32] employed convolutional neural networks (CNNs) to synthesize shading effects such as ambient occlusion from deferred shading buffers. Similarly, Deep Illumination [33] utilized generative adversarial networks (GANs) to
+learn mappings from G-buffers and direct illumination buffers
+to full global illumination images. Beyond screen-space rendering, several works extend deep learning to volumetric domains
+for achieving GI effects directly within 3D data. DVAO [34]
+applied 3D CNNs to predict ambient occlusion volumes and
+explored different strategies for conditioning the network on
+transfer functions. Bauer et al. [5] represented photon fields
+as neural networks and employed a neural path tracer to enable interactive global illumination in volumetric visualization.
+Unlike approaches that generate global illumination in the 2D
+image domain, operating directly within the volumetric domain
+enables integration into interactive visualization pipelines. Our
+method utilizes precomputed shadow coefficient volumes and
+employs diffusion-based prediction to reproduce shadow effects
+under direct volume rendering. The predicted results can be immediately incorporated into the rendering process without additional postprocessing.
+3. Methodology
+In this section, we first describe data preparation and the
+training pipeline used to generate shadow INR weights. Our
+training pipeline adopts a two-stage procedure inspired by HyperDiffusion [15]: (1) SIREN network overfitting (we use
+”overfitting” in the INR sense of fitting a network to a single
+signal), and (2) diffusion model training. Each stage is detailed
+in a dedicated subsection. We then explain the conditioning
+strategy and loss functions for the diffusion model and conclude
+with network design considerations.
+3.1. INR of Shadow Coefficients
+The single-scattering model [45] is an approximate yet
+widely used method for volume rendering to achieve realism. It is more efficient than explicitly simulating multiplescattering effects while still capturing salient features of volumetric data. This model augments the standard emissionabsorption volume-rendering equation with a reflection term of
+external illumination:
+Z
+L(x0 , ω) =
+T ω (t, 0) r(x t , ω, ω′ )g(x t , ω′ )Li (xt , ω) dt, (1)
+where r is the BRDF, Li is the incoming illumination from an infinitely distant directional light source ω′ , and g is the shadowcoefficient term representing the transmittance of the medium
+along the path from the point xt to the light source.
+A naı̈ve approach to computing shadow effects in direct volume rendering casts a secondary shadow ray toward the light
+source at every ray-marching sample. At each sample point,
+the shadow coefficient is the transmittance from the sample position xt to the boundary of the data volume along the light direction ω′ :
+2.4. Denoising Diffusion Models
+Recent years have seen denoising diffusion models [8, 35]
+become widely adopted in generative modeling. Denoising
+Diffusion Probabilistic Models (DDPM) [8] first demonstrated
+that diffusion models can synthesize high-quality images, rivaling other generative models such as GANs. Subsequent
+works [36, 37] further improved their architectures and training
+strategies, achieving higher sample quality, greater efficiency,
+and better coverage of the data distribution. However, training diffusion models directly in pixel space remains computationally expensive. To address this, latent diffusion model
+(LDM) [38] proposed learning diffusion in a compact latent
+space, significantly reducing computational cost while preserving high-fidelity image synthesis. More recent studies have also
+employed diffusion models to explore and overcome the challenges of generating images with complex illumination effects,
+such as shadows [39], reflections [40], and caustics [41].
+R∞
+g(x t , ω′ ) = e− 0 µ(xt −tω ) dt ,
+′
+(2)
+where µ is the extinction coefficient (assuming µ = 0 outside
+the volume, and ω′ points toward the light source). However,
+for directly rendering volumetric INR representations, evaluating this integral via secondary ray marching is computationally
+prohibitive. It imposes an O(N 2 ) computational complexity—
+where N is the average number of samples along a primary
+3
+Clean SIREN weights tokens
+SIREN Network 1
+Shadow
+Under
+Light 1
+Layer1
+Weights
+Shadow
+Under
+Light 2
+Layer1
+Weights
+Layer2
+Weights
+…
+Layer1
+Weights
+LayerN
+Weights
+SIREN Network 2
+Layer2
+Weights
+…
+Layer1
+Weights
+Layer2
+Weights
+Layer1
+Weights
+…
+LayerN
+Weights
+Generated
+Shadow
+Noisy SIREN weights tokens
+SIREN Network N
+Shadow
+Under
+Light N
+…
+Transformer Blocks
+LayerN
+Weights
+…
+…
+Layer2
+Weights
+Layer2
+Weights
+…
+LayerN
+Weights
+Diffusion
+Timestep
+Light
+Direction
+Gaussian Noise at timestep T
+LayerN
+Weights
+…
+Stage 1: SIREN Network Overfitting
+Stage 2: Diffusion Training
+Figure 1: Overview of our two-stage training pipeline. (1) SIREN Network Overfitting: encode each shadow coefficient volume as a SIREN network. (2) Diffusion
+Training: synthesize SIREN network weights conditioned on lighting directions to generate shadows under pre-trained lighting directions.
+O(2N) and maintains the wavefront execution required for efficient neural rendering.
+ray—and disrupts the wavefront execution necessary for efficient neural network querying. Alternatively, rasterizing precomputed shadow coefficients into a dense grid significantly
+increases memory usage, undermining the compression benefits of the data INR.
+To address these issues, we represent shadow coefficients as
+implicit neural representations (INRs), defining a conditional
+′
+function gω that maps a spatial location (x, y, z) to a scalar
+value:
+gω : R3 → R, (x, y, z) 7→ gω (x, y, z) = v.
+′
+′
+Why not use a 5D INR?
+For our problem, we acknowledge that a 5D INR that
+augments spatial coordinates with the light direction (e.g.,
+(x, y, z, θ, ϕ)) is a feasible solution, as demonstrated on related
+tasks in prior work [5, 4, 46, 21]. However, such direct INR parameterizations often struggle to cleanly disentangle spatial and
+conditional features, especially as condition complexity grows.
+In contrast, diffusion models offer an effective framework for
+high-dimensional sequence modeling. We therefore investigate
+diffusion models and view DiffusionShadow as an initial step
+toward a pretrained, generative caching paradigm for complex
+visualization tasks.
+(3)
+To facilitate downstream diffusion training, we use SIREN
+networks [19], composed of fully-connected layers with sine
+activation functions, to model each shadow-coefficient function
+under various lighting directions ω′ , as illustrated in Figure 1.
+Unlike piecewise-linear ReLU activations, the infinitely differentiable sine activations in SIREN networks are well-suited
+for modeling complex high-frequency signals and achieve fast
+convergence with proper initialization [19].
+For a given light direction, we train a corresponding SIREN
+network using a shadow-coefficient sampler that computes coefficients directly from the raw volume at arbitrary spatial
+coordinates via ray marching. This eliminates the need to
+store dense precomputed coefficient grids per lighting direction.
+However, storing independent INRs for thousands of lighting
+directions still introduces substantial storage bloat. To overcome this limitation, we rely on the high-capacity memory of
+diffusion models: we train a single diffusion model to compress
+a large, dense set of INRs representing shadow volumes under
+uniformly sampled lighting directions. Instead of focusing on
+generalizing shadows for unseen lighting conditions, the model
+reconstructs the appropriate pre-trained shadow INR weights
+on the fly, effectively caching thousands of INRs in one unified
+parameter space. By co-rendering the base data INR alongside
+this reconstructed shadow INR, we evaluate both fields concurrently. This reduces the runtime complexity from O(N 2 ) to
+3.2. Stage 1 Training - SIREN Network Overfitting
+To train a diffusion model that compresses and memorizes
+shadows across lighting directions, we first construct a sufficiently large dataset that captures the distribution of SIREN networks over possible light orientations. We use the Fibonaccisphere method [47] to sample lighting uniformly on the sphere.
+For each sampled light direction ω′ , we independently fit a
+SIREN network to represent the corresponding shadow coefficient volume. However, in preliminary experiments, we observe that training each SIREN with random initialization leads
+to unstable behavior in the subsequent diffusion training stage,
+often resulting in collapsed generations. We attribute this issue
+to the non-identifiability of the INR parameterization: the same
+′
+shadow-coefficient field gω can be represented by many distinct
+sets of network weights, leading to a highly inconsistent weight
+space that makes it difficult for the diffusion model to learn
+a stable distribution. Similar observations have been reported
+in prior work [16, 4], where the authors mitigate this issue
+by introducing a shared MLP to enforce a common parameter
+4
+space across instances. In contrast, our SIREN networks consist solely of fully connected layers without any shared components across different lighting conditions. To address this limitation, we adopt a preoptimization strategy following HyperDiffusion [15]: we first optimize a single SIREN network and
+use its weights to initialize all other SIREN networks. This significantly reduces weight variation across fitted networks and
+stabilizes the diffusion training process.
+Moreover, jointly optimizing all SIREN networks in a single
+training run is infeasible due to memory constraints, as training
+hundreds or thousands of networks simultaneously cannot fit
+into device memory. To address this, we partition the SIREN
+networks into subsets and jointly optimize one subset at a time.
+This strategy enables our method to scale to a large number
+of SIREN networks representing shadow coefficient volumes
+under diverse lighting conditions.
+Flattened SIREN Weights + Light Direction
+Per-token Encoder
+(Linear Projection)
+…
+Transformer Blocks x N
+LayerNorm
+LayerNorm
+Multi-head Self-attention
++
+LayerNorm
+Feed Forward (MLP)
++
+Positional
+Embedding
+Lighting
+Direction
+(3D Vector)
+LayerNorm
+Per-token Decoder
+(Linear Projection)
+…
+Output Flattened SIREN Weights
+Loss Functions. Since the SIREN network is trained to predict
+shadow coefficient values at arbitrary spatial coordinates, the
+objective of this stage is to minimize the difference between the
+network-predicted shadow coefficients and their corresponding
+ground-truth values. We employ the mean squared error (MSE)
+loss for this training and sampled 32,768 points for a single
+shadow coefficient volume in each training iteration.
+Figure 2: The architecture of our diffusion backbone. A GPT-2-style Transformer conditioned on lighting directions encoded via Fourier positional embedding [7]. The embedded lighting features are injected into the network as
+additional input tokens of the transformer (in-context conditioning).
+the mean and variance of the Gaussian distribution N used to
+sample the next shadow INR weights zt with additional noise.
+3.3. Stage 2 Training - Diffusion Model Training
+Diffusion Backbone. Our diffusion backbone is a transformerbased architecture (see Figure 2) composed of GPT-style transformer blocks [49, 50] without causal masking. We chunk
+shadow INR weights layer by layer, where the weights and biases of each layer are treated as individual input tokens. These
+tokens are mapped to and from the transformer via simple linear projections, allowing bidirectional self-attention to enable
+cross-layer interactions among SIREN weight tokens.
+Once trained, the diffusion model accurately reconstructs
+shadow INR representations for the requested pre-trained lighting direction by sampling from the learned distribution. This
+circumvents the need to read and decode thousands of independent networks from disk, highlighting the effectiveness of the
+diffusion model as a compressed shadow cache.
+To model the distribution of shadow fields represented by
+SIREN networks, we train a diffusion model directly in the
+space of SIREN networks parameters, which offers several advantages. First, by compressing volumetric data into SIREN
+networks, the diffusion model can operate on a compact representation, reducing both memory and computational costs
+compared to conventional 3D generative models. Second, this
+encoder-free representation allows us to treat network parameters as flattened sequential tokens, making them well-suited for
+transformer-based diffusion architectures. Such architectures
+can effectively model the complex correlations between weight
+tokens across different SIREN layers. Prior works [15, 48] have
+demonstrated that transformer-based diffusion models can effectively generate MLP weights, further supporting our design
+choice.
+Following the standard denoising diffusion paradigm, Gaussian noise is progressively added to shadow INR weights during training, and a diffusion neural backbone learns to reverse
+this process. We predict the clean shadow INR weights directly
+instead of the added noise at each diffusion timestep. During
+inference, the model samples from a Gaussian prior and iteratively denoises to generate new shadow INR weights consistent with the learned distribution. The forward diffusion process
+starting from a set of clean shadow INR weights z0 is defined
+as:
+
+ p
+(4)
+q(zt | zt−1 ) = N zt ; 1 − βt zt−1 , βt I
+Conditioning. To extract the appropriate shadow field, we condition the diffusion model on the lighting direction. Rather
+than searching through a database of INRs, querying the diffusion model with the pre-trained light vector reconstructs the
+required shadow INR weights instantly. The lighting direction
+is represented as a 3D vector and used as a conditional input.
+To provide a richer representation, we apply a positional embedding similar to that used in NeRF [7] to map the lighting
+vector into a higher-dimensional feature space. These embeddings are then appended to the input SIREN tokens and fed
+into the transformer (see Figure 2). This type of conditioning
+is commonly referred to as in-context conditioning in the literature [51, 52]. This design enables the network to index its
+unified weight space and retrieve the accurate shadow coefficients.
+where zt denotes the shadow INR weights at diffusion timestep
+t, obtained by adding Gaussian
+p noise to the previous shadow
+INR weights zt−1 . The term 1 − βt zt−1 preserves part of the
+signal from the previous step, and, together with βt I, they define
+Basic Loss Functions. As stated above, we let the transformer
+directly predict the clean shadow INR weights z0 . Hence, the
+5
+Table 1: Dataset used.
+basic training objective is defined as the MSE error between the
+clean shadow INR weights z0 and the predicted shadow INR
+weights zθ , formulated as follows:
+Ldiffusion = ∥ z0 − zθ ∥2
+Dataset
+Chameleon
+Mechhand
+Argon Bubble
+(5)
+Geometry Loss. To further improve shadow quality reconstructed from diffusion model, we introduce a geometry loss
+that directly supervises the diffusion model in the volumetric
+domain, rather than solely in SIREN weight space. Specifically, during each diffusion training iteration, we decode the
+generated shadow INR weights and evaluate them at sampled
+spatial locations. For each SIREN-volume pair, we pre-sample
+500,000 spatial points, storing their coordinates and corresponding ground-truth scalar values. This allows efficient supervision without requiring on-the-fly shadow computation or
+storing full volumetric grids during training.
+Resolution
+Dataset
+Resolution
+1024 × 1024 × 1080
+640 × 220 × 229
+128 × 128 × 256
+Zebrafish
+Vortex
+592 × 413 × 956
+128 × 128 × 128
+SIREN work [19]. Our SIREN network consists of 4 fullyconnected layers with 128 neurons (64 for smaller datasets) and
+residual blocks. Moreover, the transformer model used in the
+diffusion training follows the design of HyperDiffusion [15].
+The number of transformer blocks is 12, the embedding dimension per token is 720, and the number of attention heads is 16.
+Hyperparameters. All models were trained using the Adam
+optimizer with β1 = 0.9 and β2 = 0.999. The learning rate and
+its scheduling strategy were tailored to each training stage. For
+the SIREN network, the initial learning rate was set to 10−3 with
+a cosine decay schedule over 2000 epochs. The diffusion model
+used a learning rate of 2 × 10−4 with a StepLR scheduler (γ =
+0.9, step = 200) over 7000 epochs training with geometry loss
+and additional 2000 epochs training with rendering loss. Lastly,
+the number of diffusion timestep we used for all datasets is 500.
+Rendering Loss. While the shadow coefficient volumes decoded from the generated shadow INR weights can exhibit good
+reconstruction quality, we observe that the corresponding rendered images may still contain noticeable artifacts. This indicates that even small errors in the volumetric domain can be amplified to reflect in the rendered images. Motivated by the success of rendering-based supervision in neural rendering methods such as NeRF [7], we incorporate a rendering loss that supervises the model directly in image space by minimizing pixelwise discrepancies between rendered outputs and ground-truth
+images.
+Specifically, during training, we use the generated shadow
+coefficients to perform ray marching and render images, leveraging the differentiability of the rendering process to compute
+the loss and optimize the diffusion model. We pre-render a set
+of ground-truth images from multiple viewing angles, following a similar idea as NeRF, which learns implicit neural representations from multi-view images. This encourages the diffusion model to generate shadow INR weights that produce consistent renderings across different perspectives of the scene.
+However, evaluating the rendering loss at every training step
+is computationally expensive in both time and memory. To
+fit the training process within the available memory while retaining effective rendering supervision, we randomly sample
+a small subset of pixels (e.g., 24) from each image instead of
+computing the loss over the full resolution (e.g., 128×128) at
+every iteration. Moreover, we adopt a two-stage training strategy by first optimizing the diffusion model with the geometry
+loss for fast convergence, followed by fine-tuning with the rendering loss to improve the fidelity of the generated shadow INR
+weights in the rendered domain.
+Data Normalization and Standardization. In the SIREN
+overfitting stage, sampled shadow coefficients already lie in
+[0, 1], so no additional normalization is needed to improve the
+training stability and performance. However, we empirically
+found that performing data standardization on the input shadow
+INR weights is crucial for stable diffusion training, as it reduces
+the distribution mismatch between shadow INR weights and the
+Gaussian noise used in the diffusion process.
+4. Evaluation
+We evaluate our framework using multiple datasets and report both quantitative and qualitative results. The following
+subsections describe the datasets, system setup, implementation details, and evaluations of visual reconstruction quality,
+rendering performance, as well as comparisons with baseline
+approaches.
+4.1. Datasets
+We evaluated our method on a collection of anatomical,
+biomedical, and fluid simulation datasets to demonstrate its utility on complex anatomical and fluid structures. Specifically,
+we include Chameleon, Zebrafish, Mechhand, Vortex, and
+Argon Bubble, which feature both detailed external appearances and intricate internal boundaries. Several of these
+datasets particularly benefit from shadow-enhanced visualization, which improves the perception of spatial relationships between anatomical structures compared to direct volume rendering with Blinn-Phong shading. For example, Chameleon
+features an uneven body surface, where shadow cues enhance
+depth perception and make important features (e.g., the eyes)
+more distinguishable. Moreover, shadows in Vortex dataset
+help reveal the separation between neighboring vortex tubes,
+3.4. Network Design
+In the following, we outline the network design of our
+pipeline as well as our selection of hyperparameters and considerations for input data processing.
+Network Architecture. For the SIREN overfitting stage, we
+mainly followed the network architecture used in the NeurComp [2], whose network also builds on top of the original
+6
+Phong Shading
+Ground Truth
+SIREN
+Overfitting
+Generated
+(Ours)
+BlockFusion
+PSNR: 34.45 dB
+MS-SSIM: 0.988
+LPIPS: 0.027
+PSNR: 25.03 dB
+MS-SSIM: 0.943
+LPIPS: 0.058
+PSNR: 26.69 dB
+MS-SSIM: 0.952
+LPIPS: 0.053
+PSNR: 37.54 dB
+MS-SSIM: 0.989
+LPIPS: 0.028
+PSNR: 31.14 dB
+MS-SSIM: 0.974
+LPIPS: 0.045
+PSNR: 27.96 dB
+MS-SSIM: 0.962
+LPIPS: 0.050
+PSNR: 34.05 dB
+MS-SSIM: 0.988
+LPIPS: 0.032
+PSNR: 24.78 dB
+MS-SSIM: 0.965
+LPIPS: 0.050
+PSNR: 19.51 dB
+MS-SSIM: 0.926
+LPIPS: 0.073
+Vortex
+PSNR: 41.31 dB
+MS-SSIM: 0.997
+LPIPS: 0.022
+PSNR: 24.28 dB
+MS-SSIM: 0.956
+LPIPS: 0.068
+PSNR: 18.90 dB
+MS-SSIM: 0.881
+LPIPS: 0.120
+Argon Bubble
+PSNR: 37.11 dB
+MS-SSIM: 0.996
+LPIPS: 0.017
+PSNR: 25.25 dB
+MS-SSIM: 0.958
+LPIPS: 0.048
+PSNR: 19.69 dB
+MS-SSIM: 0.916
+LPIPS: 0.069
+Chameleon
+Zebrafish
+Mechhand
+Figure 3: Visualization of volume renderings for five different datasets (rows) with shadow reconstructed from the SIREN networks across training stages, DVR
+with Blinn-Phong shading, and baseline method - BlockFusion (columns).
+where one tube naturally casts shadows onto another. Some
+datasets reach resolutions of up to 10243 voxels, where computing shadow coefficients in real time becomes prohibitively expensive, demonstrating the necessity of a precomputed caching
+approach. All datasets used in our experiments, along with their
+respective resolutions, are summarized in Table 1.
+directions generated using the Fibonacci sphere method. To
+balance training efficiency and lighting directions’ coverage,
+we restricted the sampled lighting directions to a specific subregion of the sphere, selecting 2,000 directions from a total of
+8,000 points. This sub-region was chosen according to each
+dataset’s orientation and typical viewing perspective, focusing
+on the areas most commonly viewed by users (e.g., the frontfacing or head region of the dataset).
+Training Data Preparation. To facilitate diffusion model
+training, we prepared 2,000 shadow coefficient volumes for
+each dataset, corresponding to uniformly distributed lighting
+7
+4.2. System setup
+4.4.1. Visual Comparison
+Since the shadows produced in the SIREN overfitting stage
+serve as training targets for the diffusion model, we first examine the rendered results from this stage. As shown in Figure 3, the overfitting stage achieves high-fidelity reconstructions with sharp structural boundaries and well-preserved local
+details across datasets. We also observe slight grainy artifacts
+on the flat surfaces of Mechhand; however, the reconstruction
+still achieves a PSNR of over 34 dB.
+For the final results from diffusion training, all datasets
+largely preserve the overall shadow structure (e.g., large shadow
+regions), with Zebrafish showing the closest visual match to
+both the ground truth (31.14 dB PSNR) and the SIREN overfitting results. Nevertheless, some outputs exhibit minor color
+shifts, and certain fine details appear slightly smoothed. For
+example, the shadows in Vortex appear slightly blurred in regions with fine shadow structures, although the overall shadow
+distribution is well preserved.
+For additional context, we also include a comparison with
+ray marching-based volume rendering with Blinn-Phong shading, which highlights how incorporating shadow effects significantly enhances the realism of the rendered images. For example, in the Chameleon dataset, the shadow effects emphasize
+the uneven surface geometry of the head, making the concave
+regions around the eyes and cheeks much more apparent compared to the no-shadow rendering.
+All of our experiments ran on the Sophia and Polaris supercomputer at the Argonne Leadership Computing Facility.
+Sophia comprises 24 NVIDIA DGX A100 nodes, each with
+eight NVIDIA A100 Tensor Core GPUs providing 40 GB of
+memory per GPU. Polaris is a 560-node system, where each
+node is equipped with four NVIDIA A100 GPUs. For SIREN
+overfitting and diffusion training with geometry loss, each of
+the datasets only requires a single GPU to run the training.
+Since the diffusion training finetuned with rendering loss is
+more computationally expensive in terms of time and memory
+usage, we scaled it to use 1 node with 4 GPUs on Polaris for
+each dataset, which allows us to have larger batch size for more
+stable training and faster convergence.
+4.3. Implementation Details
+Our system is implemented in Python using PyTorch and PyTorch Lightning. We distribute diffusion training across multiple GPUs using the PyTorch Distributed Data Parallel (DDP)
+module. At inference time, we utilize the Tiny CUDA Neural
+Networks library [53] to accelerate SIREN network queries for
+volume rendering. To further improve rendering efficiency, we
+employ macro-cell-based adaptive sampling [54, 3] along primary rays, reducing unnecessary network evaluations in empty
+or low-density regions.
+Training Performance and Memory Usage. We report the
+training time and peak GPU memory usage for each stage of
+our pipeline. SIREN overfitting time varies with dataset size,
+with the largest dataset, Chameleon, requiring approximately
+1.5 hours, while peak memory usage remains nearly constant at
+14.50 GB across datasets because the same number of sample
+points is used in each training iteration. Diffusion training costs
+depend on the SIREN network architecture; here, we report results for SIRENs with 128 neurons per layer. Geometry-loss
+training takes approximately 6.5 hours on a single GPU with
+a peak memory usage of 19.62 GB, followed by 6.5 hours of
+rendering-loss fine-tuning on four GPUs, with a peak memory
+usage of 29.60 GB per GPU.
+4.5. Rendering Performance and Runtime Memory Usage
+A key advantage of our approach is that the predicted shadow
+INR enables advanced illumination for INR-based volume rendering. To validate this capability, we use a real-time INRbased volume renderer that co-renders the data INR and shadow
+INR. We evaluate rendering performance in frames per second (FPS) and compare our approach against a naı̈ve baseline
+that computes shadows by performing secondary ray sampling
+with the data INR, ensuring a fair comparison under our target deployment scenario in which all rendering operations are
+performed directly on the INR representations rather than the
+original volume. Both our method and the baseline are optimized with CUDA for network inference and employ macrocell-based adaptive sampling along primary rays (see subsection 4.3). The performance results are summarized in Table 2.
+The results show our method can achieve significantly faster
+rendering and lower runtime memory usage across all datasets,
+demonstrating the benefit of direct querying of precomputed
+shadow coefficients from the SIREN network. Additional implementation details are provided in the Appendix.
+4.4. Reconstruction Quality
+We evaluate the reconstruction fidelity of diffusion-produced
+shadow effects using both quantitative image-based metrics and
+qualitative visual comparisons. Specifically, we compare rendered images produced using diffusion-generated shadow INRs
+against those rendered with ground truth shadow coefficients,
+as presented in Figure 3. Additionally, we evaluate against
+several image-based metrics such as Peak Signal-to-Noise Ratio (PSNR), Multiscale Structural Similarity (MS-SSIM) and
+Learned Perceptual Image Patch Similarity (LPIPS).
+To provide a complete picture of reconstruction quality in the
+full training pipeline, we provide the results from the two training stages: the SIREN networks from the overfitting stage and
+diffusion training stage. Comparing these sets allows us to analyze differences and how reconstruction quality varies across
+the training pipeline.
+4.6. Baseline Comparison
+To assess the reconstruction quality against existing methods, we choose BlockFusion [16] and Deep Volumetric Ambient Occlusion [34] as the baseline, as both address 3D content
+prediction.
+8
+Table 2: Rendering performance (FPS) and GPU memory usage comparison
+between our method and the naive baseline. Higher FPS indicates faster rendering; lower memory indicates a smaller footprint. Our approach demonstrates
+significant speedups and reduced memory usage across all datasets.
+FPS ↑
+primarily to the VAE stage, which compresses the raw triplanes
+into latent representations. As shown in Figure 4, the reconstructed triplanes of Vortex lose high-frequency structural information, and these errors propagate to the subsequent diffusion stage, degrading the final reconstruction quality.
+Beyond reconstruction quality, our approach also offers substantially lower training cost than BlockFusion. Among BlockFusion’s three training stages, the VAE stage alone requires 60–
+75 hours on 8 GPUs, far longer than the roughly 5-hour triplane
+overfitting stage and 14-hour diffusion training stage on a single GPU. Despite this computational cost, it still fails to consistently produce high-quality reconstructions across all datasets.
+In contrast, our full training pipeline completes in less than
+one day using at most 4 GPUs, demonstrating substantially
+higher training efficiency than BlockFusion.
+Memory (GiB) ↓
+Dataset
+Ours
+Naı̈ve
+Ours
+Naı̈ve
+Chameleon
+Zebrafish
+Mechhand
+Argonne Bubble
+Vortex
+2.864
+11.125
+11.510
+12.155
+21.815
+0.021
+0.139
+0.284
+0.511
+0.616
+8.788
+5.342
+3.476
+3.748
+3.108
+18.664
+15.282
+9.972
+11.188
+8.656
+4.6.2. Deep Volumetric Ambient Occlusion
+Deep Volumetric Ambient Occlusion (DVAO) is a related
+work that uses deep learning techniques to predict precomputed illumination volumes—specifically ambient occlusion
+volumes, whose values depend on the transfer function—and
+are later used in direct volume rendering (DVR). Since our work
+also focuses on precomputed illumination volume prediction,
+DVAO serves as a relevant baseline for comparison. Unlike our
+approach, which operates on INR weights, DVAO utilizes a 3D
+U-Net architecture [55, 56] that directly takes raw scalar volumes as input and outputs the corresponding ambient occlusion
+volumes given a specific transfer function information.
+To evaluate how well this volume-to-volume prediction
+framework generalizes to our problem, we adapt their approach
+to predict shadow coefficient volumes. DVAO proposes several conditioning strategies to incorporate transfer function information into the U-Net. Among these, we adopt the Latent Concatenation strategy, which injects encoded conditioning features into the latent (bottleneck) layer of the network.
+This strategy is the most suitable for our setting, as it allows us
+to incorporate light direction information in a similar manner
+by encoding it with positional embeddings and injecting it into
+the latent space.
+We set up experiments following their approach by training on 2,000 shadow instances for each dataset, Zebrafish
+and MechHand, separately. Different from their original training setting, where multiple volumes are used as input, our task
+focuses on a single dataset. Therefore, the same raw volume
+from either Zebrafish or MechHand is used as the input to
+the U-Net, while different light directions are injected as conditioning variables and the corresponding shadow coefficient volumes are used as training targets. After training, we observe a
+consistent behavior across both datasets: the network produces
+nearly identical outputs despite different lighting directions being provided as conditioning input. This suggests that latentspace conditioning has limited influence on the U-Net output in
+this setting.
+We note that this comparison is not entirely equivalent to
+the original DVAO setting. In DVAO, the network is trained
+on multiple input volumes of the same data type (e.g., CT
+Figure 4: Failure Case of VAE-Reconstructed Triplanes. Visualization of
+Vortex triplanes from the triplane overfitting stage (left) and the VAE reconstruction stage (right). The overfitted triplanes are used as training targets for
+the VAE. However, the VAE fails to preserve high-frequency structural details.
+4.6.1. BlockFusion
+BlockFusion is a 3D scene generation method based on a
+latent diffusion model, where triplane encoding [24] is used
+to represent 3D geometry, and a VAE projects this representation into a latent space for diffusion training. This representation makes BlockFusion a suitable baseline for our work,
+as diffusion models can be trained to generate triplane-based
+INRs that represent shadow effects in our application. To adapt
+BlockFusion to our problem, we use triplane encoding to represent shadow coefficient volumes instead of mesh geometry, and
+train the diffusion model to predict the corresponding triplanebased shadow INRs. We keep the same diffusion architecture
+and training procedure as BlockFusion for a fair comparison,
+but revise the conditioning mechanism to incorporate embedded lighting direction vectors. In contrast to our encoder-free
+SIREN approach, BlockFusion requires an intermediate VAE
+compression step. Visualization results using shadow INRs
+generated by the BlockFusion diffusion model are shown in
+Figure 3.
+For the datasets such as Chameleon and Zebrafish, BlockFusion produces visually good results, while some shadow regions appear less dark than in the ground truth. For Chameleon,
+it achieves comparable evaluation metrics to our approach.
+However, BlockFusion struggles to reconstruct accurate shadows for datasets with more intricate shadow structures, such as
+Vortex, where even the primary shadow regions are not faithfully recovered (see Figure 3). We attribute this degradation
+9
+No ℒgeometry
+No ℒrender
+Only
+ℒgeometry
+PSNR: 18.19 dB
+MS-SSIM: 0.890
+LPIPS: 0.084
+ℒgeometry
++ ℒrender
+PSNR: 23.85 dB
+MS-SSIM: 0.940
+LPIPS: 0.060
+Ground
+Truth
+PSNR: 24.78 dB
+MS-SSIM: 0.965
+LPIPS: 0.050
+Figure 5: Diffusion-reconstructed shadows for Mechhand trained with different auxiliary loss configurations: no geometry/rendering loss (left), geometry loss only
+(center-left), geometry + rendering loss (center-right), and ground truth (right). From the first three sub-figures, we observe progressive visual improvement as
+auxiliary losses are added, with spotty artifacts gradually reduced. This result suggests the importance of incorporating volume-domain-supervision and rendering
+supervision in diffusion training.
+head scans), whereas in our problem each dataset has significantly different geometric structures, and the model is trained
+per dataset. As a result, the network receives the same volume
+as input and must rely primarily on the conditioning variable
+(light direction) to produce different outputs. This one-to-many
+mapping is difficult for a deterministic 3D CNN to learn, which
+may lead the network to converging to an average solution that
+ignores the conditioning signal. In contrast, diffusion models
+learn a conditional distribution instead of a deterministic mapping, which enables the generation of diverse outputs from random Gaussian noise given different conditioning inputs.
+Moreover, training a 3D CNN is highly memory-intensive.
+To fit within GPU memory constraints, the input volumes often need to be downsampled to lower resolutions (e.g., 643 or
+1283 ) for training, which inevitably sacrifices reconstruction
+quality and fine structural details. In contrast, our approach encodes volumes into INRs, where diffusion models are applied.
+This significantly reduces memory requirements and enables
+our method to scale to higher-resolution volumes while maintaining the reconstruction quality.
+with those obtained when both geometry and rendering losses
+are used. As shown in Figure 5, the spotty artifacts observed on
+Mechhand are reduced when rendering loss is included. This result indicates that incorporating pixel-wise rendering loss helps
+improve the visual quality of the rendered images with reconstructed shadows.
+5.3. Effect of Lighting Direction Sampling Density
+Finally, we investigate how the sampling density of lighting
+directions affects the reconstruction quality of shadow INRs
+produced by the diffusion model. We train two models on
+Zebrafish, one using 2,000 and the other 6,300 sampled lighting directions, with both sets sampled from the same spatial
+region. To efficiently evaluate a large number of shadow instances, we compute voxel-wise PSNR from sampled points in
+the reconstructed shadow coefficient volumes and report the average over each group.
+We then evaluate each model under two testing conditions:
+(1) lighting directions seen during training, and (2) an additional set of 500 unseen lighting directions sampled from the
+same region. This setup allows us to assess both reconstruction
+performance on observed lighting conditions and the model’s
+ability to predict to unseen directions within the same lighting
+space. The results are summarized in Table 3.
+The first observation is that the average reconstruction quality on the training set is very similar when training with 2,000
+and 6,300 lighting directions, with PSNR values of 29.57 dB
+and 29.32 dB, respectively. This suggests the potential of our
+approach to scale to a larger number of lighting conditions
+with minimal reconstruction quality degradation, which highlights the strong memorizing capacity of the diffusion model.
+However, the performance of the model on unseen test lighting directions is consistently lower than that on the training
+set. Our further analysis shows that reconstruction quality degrades as the unseen lighting directions become farther from
+the training lighting directions in the lighting space. We believe
+that more advanced conditioning strategies for diffusion models
+could help address these limitations and improve the quality to
+those unseen lighting conditions.
+5. Ablation Study
+In this ablation study, we evaluate the impact of key design
+choices in our training pipeline, including the geometry loss,
+rendering loss, and the sampling density of lighting directions,
+on shadow reconstruction quality.
+5.1. Diffusion with Geometry Loss
+We first ablate the geometry loss from the diffusion model
+training and compare the resulting shadow effects with those
+produced when geometry loss is included. As shown in the
+left-most image in Figure 5, the results trained without auxiliary losses, particularly geometry loss, show significant artifacts and noticeable color shifts in the reconstructed shadows. This observation further demonstrates the importance of
+volume-domain supervision in guiding the diffusion model.
+5.2. Diffusion with Rendering Loss
+Furthermore, we conduct an ablation study by removing the
+rendering loss from diffusion training and comparing the results
+10
+Table 3: Average reconstruction quality (PSNR) of shadow coefficient volumes
+for the training and test sets using 2,000 and 6,300 lighting instances. Both
+training sets are sampled from the same spatial lighting region. An additional
+500 lighting directions sampled from the same region are used for the test set.
+Number of Lights
+in Train Set
+Train Set Lights
+Test Set
+2000
+6300
+29.57
+29.32
+20.37
+20.70
+Generated (Ours)
+precomputed illumination fields, such as ambient occlusion,
+to demonstrate the broader applicability of diffusion-based
+shadow caching.
+7. Conclusion
+We introduce DiffusionShadow, a novel shadow caching
+framework for shadow coefficient volumes in direct volume
+rendering. Unlike conventional approaches that require costly
+ray-marching evaluations or demand immense storage for precomputed grids, DiffusionShadow uses a conditional diffusion
+model to cache thousands of lighting-dependent shadow fields
+into a unified weight space. By querying the diffusion model,
+our method instantly reconstructs the required shadow INR
+weights, acting as a highly compressed memory cache. The
+reconstructed shadow INR can then be co-rendered with the
+data INR, replacing expensive secondary-ray evaluation and
+substantially accelerating INR rendering with realistic shadows.
+Our findings highlight the effectiveness of diffusion models as a
+dense shadow cache and suggest future directions for scalable,
+memory-efficient illumination modeling in volume rendering.
+As neural rendering transitions from a research concept to a
+foundational technology, our work offers a practical approach
+for managing complex, multi-dimensional volumetric assets in
+demanding scientific applications.
+Ground Truth
+PSNR: 24.66 dB
+MS-SSIM: 0.922
+LPIPS: 0.116
+Figure 6: Limitations on high-frequency shadow reconstruction. While
+the overall illumination of Spider dataset remains plausible, fine shadow
+structures are over-smoothed, illustrating the difficulty of representing highfrequency shadow discontinuities with deep neural networks.
+Acknowledgments
+6. Discussion
+This work was supported by the U.S. Department of Energy, Office of Science (SC), Advanced Scientific Computing
+Research (ASCR), Competitive Portfolios Project, PIONEER:
+Program for Intelligent Optimization for Next-generation Experiments, Exploration, and Research, under Contract DEAC02-06CH11357. This research used resources of the Argonne Leadership Computing Facility, which is a U.S. Department of Energy Office of Science User Facility operated under
+contract DE-AC02-06CH11357.
+While our diffusion-based shadow caching framework
+demonstrates strong performance across multiple datasets, our
+experiments also reveal several limitations that suggest opportunities for improvement.
+The primary factor limiting the fidelity of the diffusionreconstructed shadows is the smoothing effect inherent in learning a vast, continuous weight space. Although our encoderfree method successfully bypasses the blurring introduced by
+the VAE in the baseline, directly predicting raw shadow INR
+weights with a Transformer can occasionally over-smooth highfrequency shadow details, as illustrated in Figure 6. This occurs
+because the diffusion model learns a smoothed distribution over
+the parameter space, which sometimes suppresses the sharp
+structural boundaries captured by individual overfitted SIREN
+networks.
+A natural direction to address this limitation is to increase
+the capacity of both the SIREN and diffusion models to better
+memorize high-frequency variations. Additionally, more expressive, multi-scale geometry-aware losses for diffusion training could further preserve sharp volumetric structures, although
+their high computational cost remains a challenge. Developing
+efficient sampling strategies for these losses may offer a practical balance between reconstruction fidelity and training efficiency.
+More broadly, diffusion models offer the potential for a unified caching framework that compresses multiple varied volumetric datasets into a single model without per-dataset training. We also envision extending the framework to other
+References
+[1] Q. Wu, J. A. Insley, V. A. Mateevitsi, S. Rizzi, M. E. Papka, K.-L. Ma,
+Distributed neural representation for reactive in situ visualization, IEEE
+Transactions on Visualization and Computer Graphics (2024).
+[2] Y. Lu, K. Jiang, J. A. Levine, M. Berger, Compressive neural representations of volumetric scalar fields, in: Computer graphics forum, Vol. 40,
+Wiley Online Library, 2021, pp. 135–146.
+[3] Q. Wu, D. Bauer, M. J. Doyle, K.-L. Ma, Interactive volume visualization via multi-resolution hash encoding based neural representation,
+IEEE Transactions on Visualization and Computer Graphics 30 (8) (2023)
+5404–5418.
+[4] Q. Wu, D. Bauer, Y. Chen, K.-L. Ma, Hyperinr: A fast and predictive hypernetwork for implicit neural representations via knowledge distillation,
+arXiv preprint arXiv:2304.04188 (2023).
+[5] D. Bauer, Q. Wu, K.-L. Ma, Photon field networks for dynamic real-time
+volumetric global illumination, IEEE Transactions on Visualization and
+Computer Graphics 30 (1) (2023) 975–985.
+[6] T. Müller, F. Rousselle, J. Novák, A. Keller, Real-time neural radiance
+caching for path tracing, arXiv preprint arXiv:2106.12372 (2021).
+[7] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi, R. Ng, Nerf: Representing scenes as neural radiance fields for view
+synthesis, in: ECCV, 2020.
+11
+[8] J. Ho, A. Jain, P. Abbeel, Denoising diffusion probabilistic models, Advances in neural information processing systems 33 (2020) 6840–6851.
+[9] I. J. Goodfellow, J. Pouget-Abadie, M. Mirza, B. Xu, D. Warde-Farley,
+S. Ozair, A. Courville, Y. Bengio, Generative adversarial nets, Advances
+in neural information processing systems 27 (2014).
+[10] B. Poole, A. Jain, J. T. Barron, B. Mildenhall, Dreamfusion: Text-to-3d
+using 2d diffusion, arXiv preprint arXiv:2209.14988 (2022).
+[11] J. Lorraine, K. Xie, X. Zeng, C.-H. Lin, T. Takikawa, N. Sharp, T.-Y.
+Lin, M.-Y. Liu, S. Fidler, J. Lucas, Att3d: Amortized text-to-3d object
+synthesis, in: Proceedings of the IEEE/CVF International Conference on
+Computer Vision, 2023, pp. 17946–17956.
+[12] C.-H. Lin, J. Gao, L. Tang, T. Takikawa, X. Zeng, X. Huang, K. Kreis,
+S. Fidler, M.-Y. Liu, T.-Y. Lin, Magic3d: High-resolution text-to-3d
+content creation, in: IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR), 2023.
+[13] X. Zeng, A. Vahdat, F. Williams, Z. Gojcic, O. Litany, S. Fidler, K. Kreis,
+Lion: Latent point diffusion models for 3d shape generation, in: Advances
+in Neural Information Processing Systems (NeurIPS), 2022.
+[14] X. Ren, J. Huang, X. Zeng, K. Museth, S. Fidler, F. Williams, Xcube:
+Large-scale 3d generative modeling using sparse voxel hierarchies, in:
+Proceedings of the IEEE/CVF conference on computer vision and pattern
+recognition, 2024, pp. 4209–4219.
+[15] Z. Erkoç, F. Ma, Q. Shan, M. Nießner, A. Dai, Hyperdiffusion: Generating implicit neural fields with weight-space diffusion, in: Proceedings
+of the IEEE/CVF international conference on computer vision, 2023, pp.
+14300–14310.
+[16] Z. Wu, Y. Li, H. Yan, T. Shang, W. Sun, S. Wang, R. Cui, W. Liu, H. Sato,
+H. Li, et al., Blockfusion: Expandable 3d scene generation using latent triplane extrapolation, ACM Transactions on Graphics (ToG) 43 (4) (2024)
+1–17.
+[17] T. Wang, B. Zhang, T. Zhang, S. Gu, J. Bao, T. Baltrusaitis, J. Shen,
+D. Chen, F. Wen, Q. Chen, et al., Rodin: A generative model for sculpting 3d digital avatars using diffusion, in: Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition, 2023, pp. 4563–
+4573.
+[18] A. Nichol, P. Dhariwal, A. Ramesh, P. Shyam, P. Mishkin, B. McGrew, I. Sutskever, M. Chen, Glide: Towards photorealistic image generation and editing with text-guided diffusion models, arXiv preprint
+arXiv:2112.10741 (2021).
+[19] V. Sitzmann, J. Martel, A. Bergman, D. Lindell, G. Wetzstein, Implicit
+neural representations with periodic activation functions, Advances in
+neural information processing systems 33 (2020) 7462–7473.
+[20] Y. Xie, T. Takikawa, S. Saito, O. Litany, S. Yan, N. Khan, F. Tombari,
+J. Tompkin, V. Sitzmann, S. Sridhar, Neural fields in visual computing
+and beyond, in: Computer graphics forum, Vol. 41, Wiley Online Library,
+2022, pp. 641–676.
+[21] J. Han, C. Wang, Coordnet: Data generation and visualization generation
+for time-varying volumes via a coordinate-based neural network, IEEE
+Transactions on Visualization and Computer Graphics 29 (12) (2022)
+4951–4963.
+[22] T. Müller, A. Evans, C. Schied, A. Keller, Instant neural graphics primitives with a multiresolution hash encoding, ACM transactions on graphics
+(TOG) 41 (4) (2022) 1–15.
+[23] M. Tancik, P. Srinivasan, B. Mildenhall, S. Fridovich-Keil, N. Raghavan,
+U. Singhal, R. Ramamoorthi, J. Barron, R. Ng, Fourier features let networks learn high frequency functions in low dimensional domains, Advances in neural information processing systems 33 (2020) 7537–7547.
+[24] A. Chen, Z. Xu, A. Geiger, J. Yu, H. Su, Tensorf: Tensorial radiance
+fields, in: European conference on computer vision, Springer, 2022, pp.
+333–350.
+[25] S. Fridovich-Keil, G. Meanti, F. R. Warburg, B. Recht, A. Kanazawa, Kplanes: Explicit radiance fields in space, time, and appearance, in: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, 2023, pp. 12479–12488.
+[26] E. R. Chan, C. Z. Lin, M. A. Chan, K. Nagano, B. Pan, S. De Mello,
+O. Gallo, L. J. Guibas, J. Tremblay, S. Khamis, et al., Efficient
+geometry-aware 3d generative adversarial networks, in: Proceedings of
+the IEEE/CVF conference on computer vision and pattern recognition,
+2022, pp. 16123–16133.
+[27] D. Ha, A. Dai, Q. V. Le, Hypernetworks, arXiv preprint
+arXiv:1609.09106 (2016).
+[28] S. Klocek, Ł. Maziarka, M. Wołczyk, J. Tabor, J. Nowak, M. Śmieja, Hypernetwork functional image representation, in: International Conference
+on Artificial Neural Networks, Springer, 2019, pp. 496–510.
+[29] V. Sitzmann, M. Zollhöfer, G. Wetzstein, Scene representation networks:
+Continuous 3d-structure-aware neural scene representations, Advances in
+neural information processing systems 32 (2019).
+[30] H. Gadirov, Q. Wu, D. Bauer, K.-L. Ma, J. B. Roerdink, S. Frey, Hyperflint: Hypernetwork-based flow estimation and temporal interpolation for
+scientific ensemble visualization, in: Computer Graphics Forum, Wiley
+Online Library, 2025, p. e70134.
+[31] D. Gao, H. Mu, K. Xu, Neural global illumination: Interactive indirect
+illumination prediction under dynamic area lights, IEEE Transactions on
+Visualization and Computer Graphics 29 (12) (2022) 5325–5341.
+[32] O. Nalbach, E. Arabadzhiyska, D. Mehta, H.-P. Seidel, T. Ritschel, Deep
+shading: convolutional neural networks for screen space shading, in:
+Computer graphics forum, Vol. 36, Wiley Online Library, 2017, pp. 65–
+78.
+[33] M. M. Thomas, A. G. Forbes, Deep illumination: Approximating dynamic global illumination with generative adversarial network, arXiv
+preprint arXiv:1710.09834 (2017).
+[34] D. Engel, T. Ropinski, Deep volumetric ambient occlusion, IEEE Transactions on Visualization and Computer Graphics 27 (2) (2020) 1268–
+1278.
+[35] J. Sohl-Dickstein, E. Weiss, N. Maheswaranathan, S. Ganguli, Deep unsupervised learning using nonequilibrium thermodynamics, in: International conference on machine learning, pmlr, 2015, pp. 2256–2265.
+[36] P. Dhariwal, A. Nichol, Diffusion models beat gans on image synthesis, Advances in neural information processing systems 34 (2021) 8780–
+8794.
+[37] A. Q. Nichol, P. Dhariwal, Improved denoising diffusion probabilistic
+models, in: International conference on machine learning, PMLR, 2021,
+pp. 8162–8171.
+[38] R. Rombach, A. Blattmann, D. Lorenz, P. Esser, B. Ommer, Highresolution image synthesis with latent diffusion models, in: Proceedings
+of the IEEE/CVF conference on computer vision and pattern recognition,
+2022, pp. 10684–10695.
+[39] A. Sarkar, H. Mai, A. Mahapatra, S. Lazebnik, D. A. Forsyth, A. Bhattad,
+Shadows don’t lie and lines can’t bend! generative models don’t know
+projective geometry... for now, in: Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, 2024, pp. 28140–28149.
+[40] A. Dhiman, M. Shah, R. Parihar, Y. Bhalgat, L. R. Boregowda, R. V.
+Babu, Reflecting reality: Enabling diffusion models to produce faithful
+mirror reflections, in: 2025 International Conference on 3D Vision (3DV),
+IEEE, 2025, pp. 824–834.
+[41] W. Uss, W. Kaliński, A. Kuznetsov, H. Anand, S. Kim, Cardioid Caustics
+Generation with Conditional Diffusion Models, in: D. Ceylan, T.-M. Li
+(Eds.), Eurographics 2025 - Short Papers, The Eurographics Association,
+2025. doi:10.2312/egs.20251030.
+[42] X.-Y. Zheng, H. Pan, P.-S. Wang, X. Tong, Y. Liu, H.-Y. Shum, Locally attentional sdf diffusion for controllable 3d shape generation, ACM Transactions on Graphics (ToG) 42 (4) (2023) 1–13.
+[43] H. Chen, J. Gu, A. Chen, W. Tian, Z. Tu, L. Liu, H. Su, Single-stage
+diffusion nerf: A unified approach to 3d generation and reconstruction,
+in: Proceedings of the IEEE/CVF international conference on computer
+vision, 2023, pp. 2416–2425.
+[44] J. R. Shue, E. R. Chan, R. Po, Z. Ankner, J. Wu, G. Wetzstein, 3d
+neural field generation using triplane diffusion, in: Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2023, pp. 20875–20886.
+[45] N. Max, Optical models for direct volume rendering, IEEE Transactions
+on Visualization and Computer Graphics 1 (2) (2002) 99–108.
+[46] Y.-T. Chen, N. Shi, X. Luo, W. Xu, H.-W. Shen, Explorable inr: an
+implicit neural representation for ensemble simulation enabling efficient
+spatial and parameter exploration, IEEE Transactions on Visualization
+and Computer Graphics (2025).
+[47] Á. González, Measurement of areas on a sphere using fibonacci and
+latitude–longitude lattices, Mathematical geosciences 42 (1) (2010) 49–
+64.
+[48] W. Peebles, I. Radosavovic, T. Brooks, A. A. Efros, J. Malik, Learning
+to learn with generative models of neural network checkpoints, arXiv
+preprint arXiv:2209.12892 (2022).
+12
+[49] A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A. N. Gomez,
+Ł. Kaiser, I. Polosukhin, Attention is all you need, Advances in neural
+information processing systems 30 (2017).
+[50] A. Radford, J. Wu, R. Child, D. Luan, D. Amodei, I. Sutskever, et al.,
+Language models are unsupervised multitask learners, OpenAI blog 1 (8)
+(2019) 9.
+[51] A. Dosovitskiy, L. Beyer, A. Kolesnikov, D. Weissenborn, X. Zhai, T. Unterthiner, M. Dehghani, M. Minderer, G. Heigold, S. Gelly, et al., An image is worth 16x16 words: Transformers for image recognition at scale,
+arXiv preprint arXiv:2010.11929 (2020).
+[52] W. Peebles, S. Xie, Scalable diffusion models with transformers, in: Proceedings of the IEEE/CVF international conference on computer vision,
+2023, pp. 4195–4205.
+[53] T. Müller, tiny-cuda-nn (4 2021).
+URL https://github.com/NVlabs/tiny-cuda-nn
+[54] J. Novák, A. Selle, W. Jarosz, Residual ratio tracking for estimating attenuation in participating media., ACM Trans. Graph. 33 (6) (2014) 179–1.
+[55] O. Ronneberger, P. Fischer, T. Brox, U-net: Convolutional networks for
+biomedical image segmentation, in: International Conference on Medical
+image computing and computer-assisted intervention, Springer, 2015, pp.
+234–241.
+[56] Ö. Çiçek, A. Abdulkadir, S. S. Lienkamp, T. Brox, O. Ronneberger, 3d
+u-net: learning dense volumetric segmentation from sparse annotation,
+in: International conference on medical image computing and computerassisted intervention, Springer, 2016, pp. 424–432.
+[57] S. Laine, T. Karras, T. Aila, Megakernels considered harmful: Wavefront
+path tracing on gpus, in: Proceedings of the 5th High-Performance Graphics Conference, 2013, pp. 137–143.
+Appendix A. Rendering Pipeline and Baseline Shadow Implementation
+Our INR-based volume renderer follows a wavefront-style
+[57] rendering architecture (ray marcher), similar to [3], composed of several specialized kernels: a coordinate kernel that
+collects sample-point coordinates along rays, a network inference kernel that batches these points through the neural network, and a shading kernel that performs color composition.
+The ray marcher processes ray samples in small batches, running all three kernels in sequence for each batch, and repeats
+until a per-ray termination criterion is satisfied. This design
+is well suited to machine learning frameworks, where network inference is naturally batch-oriented, and it avoids out-ofmemory issues that would arise from inferring all sample points
+along all rays at once.
+To incorporate shadow effects via an INR, we additionally infer a shadow INR alongside the primary network inference step
+to obtain shadow coefficients, which are then combined with
+the scalar field values to modulate shading during composition.
+For our baseline method, we introduce an additional, nested
+instance of this batched marching pipeline to evaluate shadow
+coefficients for each primary-ray sample point via secondaryray marching. Specifically, after collecting a batch of primaryray sample points, we pause primary-ray marching and diverge
+into an inner loop that iteratively marches the corresponding
+secondary rays in batches until they terminate. Only once
+shadow coefficients have been obtained for every sample point
+in the current primary batch does marching resume for the next
+batch of primary rays. This nested-loop structure, combined
+with the added cost of network inference for the secondary
+rays, makes the baseline’s rendering performance substantially
+lower, as shown in Table 2.
+13

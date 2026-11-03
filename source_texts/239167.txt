@@ -1,0 +1,93 @@
+Strategy: generate less, render less - options for scaling world distance This documents an architecture review of how the engine decides what work to do for chunks by distance and visibility, and the realistic options for doing less of ...
+
+Strategy: generate less, render less - options for scaling world distance · Issue #5368 · MovingBlocks/Terasology · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Strategy: generate less, render less - options for scaling world distance #5368
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Strategy: generate less, render less - options for scaling world distance#5368
+Copy link
+Description
+soloturn
+opened on Aug 18, 2026
+Issue body actions
+Strategy: generate less, render less - options for scaling world distance
+This documents an architecture review of how the engine decides what work to do for chunks by distance and visibility, and the realistic options for doing less of it. It came out of the performance investigation around #5363; the measurements referenced below are from that PR's discussion. High-level options first, with a recommended sequencing at the end. Nothing here is committed work - it is a map, so the next person does not have to re-derive it.
+Baseline: what the engine does today
+Generation: RelevanceSystem maintains a cubic box of chunks around each relevance entity. Everything inside is generated at full detail - full block data, lighting, entities - regardless of direction or visibility. Distance is only a priority order (nearest first), never a level of work.
+LOD: LodChunkProvider already exists: mesh-only chunks at power-of-two scales beyond the loaded region, generated via ScalableWorldGenerator sampling at scale. But it is a bolt-on - LOD chunks are a parallel world (PreLodChunk, own generation threads, own cache) that real chunks replace rather than refine.
+Rendering: per-frame frustum test per chunk AABB (Camera.hasInSight) in RenderableWorldImpl.queueVisibleChunks. Culling is frustum-only: a chunk buried behind a mountain, or a cave system under the player, is rendered if the camera points at it. Draw submission is one VAO bind + two uniform uploads + one glDrawElements per chunk per pass (OpaqueBlocksNode in CoreRendering, and 4 sibling nodes polling the same queues).
+Measured cost structure (from the feat(world): merge chunk light after ready, not as a pipeline stage #5363 harness): tessellation ~4ms per chunk, light merge ~2.7ms per chunk, all surrounding bookkeeping negligible. Per-chunk work dominates; the leverage is in doing that work for fewer or coarser chunks, not in micro-optimizing the pipeline around it.
+Options, ordered by leverage
+1. Occlusion culling (recommended first)
+In a voxel world most of the frustum is hidden: terrain is opaque, caves are enclosed. The proven CPU-side approach (Minecraft's "advanced cave culling", Tommaso Checchi) is:
+at mesh time, precompute per chunk a 6x6 face-to-face connectivity matrix - "can a ray enter face A and leave face B through non-opaque cells";
+each frame, flood-fill the chunk graph outward from the camera, descending only through connected faces.
+Kills underground and behind-terrain chunks entirely - commonly a large majority of the frustum. Fits the existing per-chunk mesh model, engine-repo only, no GL version change, testable headless. Standalone win that stays conceptually valid under every other option below.
+2. LOD as the primary representation (the strategic change)
+Replace the binary cubic "loaded region" with concentric detail rings (clipmap / octree): full chunks only in a small inner ring, then progressively coarser rings outward, where coarser means generated coarser - ScalableWorldGenerator already supports sampling at scale, so the hook exists. Per ring, generation cost drops ~8x per level; view distance stops being the single knob that scales everything.
+Hard parts are real: seams between rings (skirt geometry or transition cells), promotion/demotion as the player moves, and defining what simulation means in coarse rings (nothing - see option 3). This is essentially what Distant Horizons does for Minecraft. The existing LodChunkProvider shows the project already wants this and got halfway; the salvageable part is its scalable-generation path, not its parallel-world structure.
+3. Split "renderable" from "simulated" (the enabler underneath)
+Current relevance conflates three radii that should be independent:
+interaction - blocks changeable, entities tick: needs a few chunks;
+simulation - light propagation, block updates: modest;
+visual - should be huge and cheap: a mesh and nothing else, no entities, no block ticks, no per-block lighting at distance.
+The late-light-merging work in #5363 is a first step in this direction - it decoupled "visible" from "lighting finalized". Making the three tiers explicit in RelevanceSystem is what makes option 2 cheap to build.
+4. Surface-only generation at distance
+Within option 2: distant chunks are only ever seen from outside, so generation can produce a heightfield plus surface shell and skip interior density, caves and ores, hydrating to full 3D only on promotion inward. Requires generators to expose a surface pass.
+5. Direction-aware relevance
+Smallest change: the relevance box is symmetric but players look forward. Bias the region and generation priority toward the view direction, shrink it behind. Cheap, bounded, and mostly obsoleted by 2+3.
+6. GPU-driven rendering
+What it gains:
+Draw-call collapse: all chunk meshes in one shared buffer, one glMultiDrawElementsIndirect per pass instead of one glDrawElements per chunk - thousands of driver calls become a handful;
+Culling on the GPU: a compute pass tests chunk AABBs against the frustum and last frame's depth pyramid (Hi-Z), giving occlusion culling for free and deleting the CPU-side visibility loop, the four PriorityQueues and the distance comparator entirely;
+Uniform elimination: transforms in an SSBO indexed by gl_DrawID;
+composes naturally with LOD selection in the same compute pass.
+Why it is not the first move:
+it optimizes submission, and the measured bottleneck is producing meshes (tessellation), which it does not touch;
+the prerequisite ladder is long: GL 4.3+ (engine mesh path is GL30.* throughout), a shared-buffer suballocator with defragmentation for chunk churn, shader rework, depth-pyramid generation - or finishing one of the stalled backend branches (feature/bgfx-backend-rendering, feature/wgpu-*), which is evidence this ladder has defeated attempts before;
+it is a cross-repo breaking change: the draw loop lives in the CoreRendering module, the mesh code in the engine, and the RenderQueuesHelper contract between them dissolves;
+the cheap subset (option 1) captures the biggest single benefit - occlusion - without any of that.
+The counter-case is also real: if the goal is very large view distances via option 2, per-chunk draw calls eventually cannot carry the chunk count, and GPU-driven becomes necessary rather than optional. In that world the sequencing is still occlusion first, then indirect draw as part of a deliberate renderer-backend decision.
+Recommended sequencing
+Option 1 now: standalone, verifiable, engine-only.
+Option 3 as a design decision: make the three relevance tiers explicit.
+Option 2 built on 3, salvaging LodChunkProvider's scalable-generation hook.
+Option 6 only as part of finishing a renderer backend, when chunk counts demand it.
+Caveat
+These are architectural judgments from reading the code, not profiles. The one number trusted from measurement is that per-chunk work (tessellation + generation) dominates. Before committing to option 6 in particular, one profiling session on a running client - driver time vs tessellation vs game logic - would confirm whether draw submission is even in the top three costs.
+Activity
+Cervator
+added this to Terasology Inboxon Aug 18, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+Terasology Inbox
+Status
+No status
+Show more project fields
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

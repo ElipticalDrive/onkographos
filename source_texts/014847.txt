@@ -1,0 +1,928 @@
+Привет, Хабр! В первой части я рассказал про железо, сборку корпуса и немного затронул программную реализацию. В этой статье мы заглянем в исходники проекта и разберем математику,...
+
+Как я заставил ESP8266 рисовать 3 D, стрелять и летать: полный технический разбор кода / Хабр
+Обновить
+Neuero21 окт в 16:39
+Краткое содержание статьи
+Как я заставил ESP8266 рисовать 3 D, стрелять и летать: полный технический разбор кода
+Уровень сложностиСредний
+Время на прочтение19 мин
+Охват и читатели14K
+Arduino * C++ * Программирование микроконтроллеров * Разработка игр * DIY или Сделай сам
+Кейс
+Привет, Хабр!
+В первой части я рассказал про железо, сборку корпуса и немного затронул программную реализацию. В этой статье мы заглянем в исходники проекта и разберем математику, алгоритмы и оптимизацию под слабое железо.
+Код написан на C++ в Arduino IDE, весь проект живет в одном файле. У нас уже пять игр, которые переключаются конечным автоматом через gameState.
+Блок 1: Raycast — 3 D на коленке
+Сердце движка — DDA‑алгоритм (Digital Differential Analyzer). Мы не рендерим 3 D‑полигоны, мы пускаем 320 лучей из точки игрока и смотрим, где они пересекают сетку 32×32.
+Хранение карты
+```
+uint8_t worldMap[1024]; // 32x32
+```
+Используем uint8_t (1 байт), чтобы вся карта занимала ровно 1 КБ RAM.
+Индексация идет через y * 32 + x. Ноль — пустая клетка, единица — стена, двойка — база, тройка — кубик.
+```
+for(int x=0; x<320; x+=2){
+```
+ESP8266 не успевает передавать по SPI 320 вертикальных линий за кадр.
+Рисуя 160 линий и растягивая их на два пикселя (drawFastVLine(x, ...) и drawFastVLine(x+1, ...)), мы получаем двукратный прирост FPS. На экране 2.4 дюйма потеря одного столбца пикселей незаметна глазу.
+Математика луча (DDA)
+```
+float camX = 2.0*x/320.0-1.0; // От -1 до 1 (от левого края до правого)
+float rDX = dirX+planeX*camX, rDY = dirY+planeY*camX;
+float dDX = abs(1.0/rDX), dDY = abs(1.0/rDY); // Длина шага по сетке
+```
+Переменные dDX и dDY показывают, какое расстояние нужно пройти по лучу, чтобы пересечь одну вертикальную или горизонтальную линию сетки.
+Алгоритм шагает в цикле while(!hit), выбирая каждый раз кратчайший путь (вертикальный или горизонтальный). Как только worldMap возвращает >0 — мы попали в стену.
+Эффект рыбьего глаза
+```
+float pdist = (side == 0) ? (sDX - dDX) : (sDY - dDY);
+int lh = (int)(240 / pdist);
+```
+Если не корректировать расстояние, стены в центре экрана будут казаться выпуклыми.
+Формула (sDX - dDX) возвращает перпендикулярное расстояние до стены, убирая искажение.
+Текстура стен
+```
+float wallX = (side == 0) ? (posY + pdist * rDY) : (posX + pdist * rDX);
+wallX -= floor(wallX); 
+if (wallX < 0.05f || wallX > 0.95f) bC = 0x5AEB; 
+else bC = (side==1?0x7BEF:0xFFFF);               
+```
+Мы вычисляем точку попадания в стену, оставляем только дробную часть (wallX от 0.0 до 1.0).
+Если луч попал в клетку у самого края, рисуем темный шов. Это создает иллюзию текстуры без использования текстурных спрайтов, экономя память.
+Эффект фонаря (RGB565)
+```
+uint16_t applyLantern(uint16_t color, float dist) {
+  uint8_t r = (color >> 11) & 0x1F;
+  uint8_t g = (color >> 5) & 0x3F;
+  uint8_t b = color & 0x1F;
+  float factor = 1.0 - (dist / 12.0);
+  return tft.color565(r * factor * 8, g * factor * 4, b * factor * 8);
+}
+```
+Дисплей понимает 16-битный цвет.
+Чтобы сделать затухание, мы распаковываем цвет на R, G, B побитовыми сдвигами, умножаем на коэффициент расстояния и собираем обратно. Без этого функция просто умножила бы 16-битное число, и цвета бы «поплыли».
+Звезды и HUD
+```
+if (starY[i] < topWall[starX[i]]) tft.drawPixel(starX[i], starY[i], TFT_WHITE);
+```
+Чтобы звезды не просвечивали сквозь стены, мы во время рендера стен запоминаем высоту верхней точки стены в массив topWall[x].
+При отрисовке звезды проверяем, ниже ли она стены. Если да — не рисуем. HUD (Lvl:... Items:...) вынесен в самый конец, чтобы его не перекрыли стены.
+Коллизии и баг «застревания»
+```
+int nextX = (int)(posX + dirX*0.3);
+if(worldMap[(int)posY*32 + nextX] != 1 && worldMap[(int)posY*32 + nextX] != 2) posX += dirX*ms;
+```
+Типичная ошибка (и я на эти же грабли наступил, чего греха таить..) — проверять коллизию по текущей клетке. Если игрок оказался в стене, он застревает навсегда.
+Мы проверяем следующую клетку (nextX, nextY), раздельно по осям X и Y. Это позволяет «скользить» вдоль стен.
+Блок 2: Space Invaders — Боссы и бонусы
+Движение зигзагом
+```
+if (millis() - lastAlienMove > 500) {
+  alienX += (10 * alienDir); 
+  if (alienX > 180 || alienX < 5) { alienDir *= -1; alienY += 10; }
+}
+```
+Пришельцы двигаются группой. Когда группа упирается в край экрана, мы меняем направление и опускаем ее вниз на 10 пикселей.
+Бонусы и антибонусы
+```
+if (!bonusActive && random(5) == 1) { 
+  bonusActive = true; 
+  bonusType = random(1, 4); 
+}
+```
+С шансом 20% (1 к 5) из сбитого пришельца выпадает бонус.
+Типы бонусов:
+Жизнь: Дополнительная жизнь (lives++).
+Ускорение: Ускоренная стрельба игрока (rapidFireTimer = millis()+5000).
+Антибонус: Ускоренная стрельба врагов (enemyRapidFireTimer = millis()+5000).
+Босс и синусоида
+```
+int wave = sin(millis()*0.005)*10;
+tft.fillTriangle(bossX+5, bossY+20, bossX+8, bossY+20, bossX+5+wave, bossY+35, TFT_RED);
+```
+Каждый третий уровень — босс. Его щупальца (треугольники) качаются по синусоиде от millis(). Это создает эффект живого организма без сложной анимации спрайтов.
+При смерти босса мы запускаем цикл из 15 итераций:
+```
+tft.fillCircle(rx, ry, random(5, 15), TFT_WHITE);
+tone(BUZZER_PIN, (unsigned int)random(100, 800), 40);
+```
+Это создает эффект концентрических кругов и случайных звуков — классика старых аркад.
+Блок 3: Space Junker (Asteroids) — Инерция и физика
+Структуры данных
+```
+struct Asteroid { float x, y; float speedX, speedY; int size; bool active; };
+struct Bullet { float x, y; float speedX, speedY; bool active; };
+```
+Вместо массивов float asteroidX[10] используем структуры. Это делает код читаемым, а память расходуется так же.
+Инерция в вакууме
+```
+if (digitalRead(PIN_BTN_A) == LOW) {
+  junkerSpeedX += cos(junkerAngle) * 0.1;
+  junkerSpeedY += sin(junkerAngle) * 0.1;
+}
+```
+В космосе нет трения. Нажал на тягу — корабль ускорился. Отпустил — летит по инерции.
+Мы ограничиваем максимальную скорость (if (junkerSpeedX > 2) junkerSpeedX = 2;), чтобы корабль не улетал за кадр за одно нажатие клавиши.
+Телепортация
+```
+if (junkerX < 0) junkerX = 320; 
+if (junkerX > 320) junkerX = 0;
+```
+Улетел за правый край — появился слева. Простая математика, которая добавляет игре динамики.
+Автоматическая стрельба (Таймер)
+```
+if (digitalRead(PIN_BTN_B) == LOW) {
+  if (millis() - lastJunkerShot > 200) { 
+    lastJunkerShot = millis();
+    // ... вылет пули ...
+  }
+}
+```
+Чтобы не нажимать без остановки на кнопку, используем таймер millis().
+Зажал кнопку — стреляешь с частотой 5 выстрелов в секунду. delay() тут не подходит, он бы заморозил игру.
+Дробление астероидов
+```
+if (asteroids[j].size > 1) {
+  for (int k = 0; k < 2; k++) {
+    asteroids[m].size = asteroids[j].size - 1;
+    asteroids[m].speedX = cos(angle) * (asteroids[j].size == 3 ? 1.0 : 1.5);
+  }
+}
+```
+Пуля попала в большой астероид? Он не исчезает, а спавнит два новых, но меньшего размера (size - 1).
+Осколки летят в случайных направлениях и с большей скоростью. Это создает хаос на экране.
+Бесконечный спавн
+```
+bool allDestroyed = true;
+for (int i = 0; i < 10; i++) if (asteroids[i].active) allDestroyed = false;
+if (allDestroyed) { junkerScore += 50; /* Спавн новой волны */ }
+```
+На уничтожении астеридов игра не заканчивается.
+Мы проверяем, остались ли активные объекты, и если их нет — спавним новую волну и даем бонусные очки.
+Итог
+Мы используем рэйкастинг для 3 D, структуры и тригонометрию для «Астероидов», и конечный автомат, чтобы всё это дружило между собой. И да, в процессе написания игр и их отладки по традиции было произнесено немало непростительных заклинаний.. Стив застревал в текстурах, спавнился в треугольнике между стеной и базой в самом углу и не мог выйти... Забор после правок в попытках уменьшить размер кубиков нарезался на сегменты, как и сами кубики... Эти моменты разработки я опустил. Но самый главный баг, я так и не победил. Стив мерцает. Что бы я не делал. Даже превратив его в HUD, который, к слову, тоже мерцает. Смирился в итоге и отношусь как к неизбежному злу..
+Пробовал отрисовать Стива в квадрате под цвет пола
+Это попытка сделать меньше базу, на которую Стив носит кубики
+Попытки уменьшить кубики
+Вот полный код этого проекта.
+```
+#include <SPI.h>
+#include <TFT_eSPI.h>
+#include <EEPROM.h>
+
+TFT_eSPI tft = TFT_eSPI();
+
+// --- ПИНЫ И НАСТРОЙКИ ---
+#define PIN_JOY_X A0
+#define PIN_BTN_A D3 
+#define PIN_BTN_B D0 
+#define BUZZER_PIN D6
+
+#define SKIN 0xFD42
+#define SHIRT 0x255A
+#define PANTS 0x2235
+
+// Системные переменные
+int gameState = 0, menuSelection = 1;
+bool isPaused = false, lastBtnBState = HIGH;
+
+// ==========================================================
+// --- БЛОК 1: RAYCAST (MINECRAFT) ---
+// ==========================================================
+float posX = 2.5, posY = 2.5, dirX = 1.0, dirY = 0.0, planeX = 0.0, planeY = 0.66;
+bool hasItem = false; 
+int itemsInBase = 0, totalItemsInLevel = 10, currentLevel = 1;
+uint8_t worldMap[1024]; 
+int starX[40], starY[40];
+int topWall[320]; 
+
+void generateMap() {
+  for(int i=0; i<1024; i++) worldMap[i] = 0;
+  for(int i=0; i<32; i++) { worldMap[i]=1; worldMap[992+i]=1; worldMap[i*32]=1; worldMap[i*32+31]=1; }
+  for(int i=6; i<26; i++) { worldMap[16*32+i]=1; worldMap[i*32+16]=1; }
+  
+  // БАЗА (2) В ЦЕНТРЕ
+  worldMap[10*32+10]=2; worldMap[10*32+11]=2; 
+  worldMap[11*32+10]=2; worldMap[11*32+11]=2;
+
+  int count = 0; 
+  while(count < totalItemsInLevel) {
+    int rx = random(1, 31), ry = random(1, 31);
+    if(worldMap[ry*32+rx] == 0) { worldMap[ry*32+rx] = 3; count++; }
+  }
+}
+
+uint16_t applyLantern(uint16_t color, float dist) {
+  float range = 12.0; if(dist > range) return TFT_BLACK;
+  uint8_t r = (color >> 11) & 0x1F, g = (color >> 5) & 0x3F, b = color & 0x1F;
+  float factor = 1.0 - (dist / range); return tft.color565(r * factor * 8, g * factor * 4, b * factor * 8);
+}
+
+void loopRaycast() {
+  int val = analogRead(PIN_JOY_X);
+  float rot = (val < 400) ? 0.07 : (val > 600 ? -0.07 : 0);
+  if (rot != 0) {
+    float odX = dirX; dirX = dirX*cos(rot)-dirY*sin(rot); dirY = odX*sin(rot)+dirY*cos(rot);
+    float opX = planeX; planeX = planeX*cos(rot)-planeY*sin(rot); planeY = opX*sin(rot)+planeY*cos(rot);
+  }
+  
+  if (digitalRead(PIN_BTN_A) == LOW) {
+    float ms = 0.1; 
+    int nextX = (int)(posX + dirX*0.3);
+    int nextY = (int)(posY + dirY*0.3);
+    if(worldMap[(int)posY*32 + nextX] != 1 && worldMap[(int)posY*32 + nextX] != 2) posX += dirX*ms;
+    if(worldMap[nextY*32 + (int)posX] != 1 && worldMap[nextY*32 + (int)posX] != 2) posY += dirY*ms;
+  }
+  
+  static bool lastB = HIGH; bool curB = digitalRead(PIN_BTN_B);
+  if(curB == LOW && lastB == HIGH) {
+    int mx = (int)(posX + dirX*0.6), my = (int)(posY + dirY*0.6);
+    int target = worldMap[my*32+mx];
+    
+    if(!hasItem && target == 3) { 
+        worldMap[my*32+mx] = 0; hasItem = true; tone(BUZZER_PIN, 1200, 100); 
+    } 
+    else if(hasItem && target == 2) { 
+      hasItem = false; itemsInBase++; tone(BUZZER_PIN, 800, 150);
+      if(itemsInBase >= totalItemsInLevel) { currentLevel++; totalItemsInLevel++; itemsInBase = 0; generateMap(); }
+    }
+    delay(200);
+  }
+  lastB = curB;
+
+  tft.startWrite();
+  for(int x=0; x<320; x+=2){
+    float camX = 2.0*x/320.0-1.0; float rDX = dirX+planeX*camX, rDY = dirY+planeY*camX;
+    int mX = (int)posX, mY = (int)posY; float dDX = abs(1.0/rDX), dDY = abs(1.0/rDY), sDX, sDY; int stX, stY, side;
+    if(rDX < 0){ stX = -1; sDX = (posX-mX)*dDX; } else { stX = 1; sDX = (mX + 1.0 - posX) * dDX; }
+    if(rDY < 0){ stY = -1; sDY = (posY - mY) * dDY; } else { stY = 1; sDY = (mY + 1.0 - posY) * dDY; }
+    
+    bool hit = false; 
+    while(!hit){ 
+      if(sDX < sDY){ sDX += dDX; mX += stX; side = 0; } 
+      else { sDY += dDY; mY += stY; side = 1; } 
+      if(worldMap[mY*32+mX]>0) hit = true; 
+    }
+    
+    float pdist = (side == 0) ? (sDX - dDX) : (sDY - dDY); 
+    int lh = (int)(240 / pdist);
+    uint8_t cell = worldMap[mY*32+mX];
+    
+    float wallX = (side == 0) ? (posY + pdist * rDY) : (posX + pdist * rDX);
+    wallX -= floor(wallX); 
+
+    uint16_t bC;
+    if(cell == 1) {
+        if (wallX < 0.05f || wallX > 0.95f) bC = 0x5AEB; 
+        else bC = (side==1?0x7BEF:0xFFFF);                
+    }
+    else if(cell == 2) bC = TFT_YELLOW;                   
+    else bC = TFT_BLUE;                                   
+
+    uint16_t finalColor = applyLantern(bC, pdist);
+    
+    int ds = max(0, -lh/2+120); 
+    int de = min(239, lh/2+120); 
+
+    tft.drawFastVLine(x, 0, ds, 0x2104); 
+    tft.drawFastVLine(x, de, 240-de, 0x1082);
+    tft.drawFastVLine(x+1, 0, ds, 0x2104); 
+    tft.drawFastVLine(x+1, de, 240-de, 0x1082);
+
+    if (cell == 1) {
+        tft.drawFastVLine(x, ds, de-ds, finalColor);
+        tft.drawFastVLine(x+1, ds, de-ds, finalColor);
+    } else {
+        int blockH = (de - ds) / 2; 
+        int blockTop = de - blockH;
+        tft.drawFastVLine(x, blockTop, blockH, finalColor);
+        tft.drawFastVLine(x+1, blockTop, blockH, finalColor);
+    }
+    topWall[x] = ds;
+    topWall[x+1] = ds;
+  }
+  tft.endWrite(); 
+
+  for(int i=0; i<40; i++) {
+      if (starY[i] < topWall[starX[i]]) { 
+          tft.drawPixel(starX[i], starY[i], TFT_WHITE);
+      }
+  }
+
+  int bob = (digitalRead(PIN_BTN_A) == LOW) ? sin(millis()*0.01)*5 : 0;
+  int sx = 144, sy = 180 + bob; 
+  tft.fillRect(sx+8, sy, 16, 16, SKIN);   
+  tft.fillRect(sx, sy+16, 32, 24, SHIRT); 
+  tft.fillRect(sx+4, sy+40, 24, 24, PANTS); 
+  if(hasItem) tft.fillRect(sx+8, sy+20, 16, 16, TFT_BLUE); 
+
+  tft.fillRect(0, 0, 240, 20, TFT_BLACK); 
+  tft.setTextColor(TFT_GREEN, TFT_BLACK); 
+  tft.setCursor(5, 5); 
+  tft.printf("Lvl:%d Items:%d/%d", currentLevel, itemsInBase, totalItemsInLevel); 
+  yield();
+}
+
+// ==========================================================
+// --- БЛОК 2: SPACE INVADERS ---
+// ==========================================================
+int shipX = 160, lives = 4, score = 0, highScore = 0;
+bool aliens[15]; 
+int alienX = 10, alienY = 30, alienDir = 1, aliensCount = 15;
+int bulletX, bulletY; bool bulletActive = false;
+int enBulletX, enBulletY; bool enBulletActive = false;
+int bonusX, bonusY, bonusType; bool bonusActive = false;
+unsigned long lastAlienMove = 0, rapidFireTimer = 0, enemyRapidFireTimer = 0, shieldTimer = 0;
+bool isBossLevel = false; int bossHP, bossMaxHP = 5, bossX = 140, bossY = 30, bossDir = 2, levelCounter = 1;
+
+void drawUIInvaders() {
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK); tft.setCursor(5, 5);
+  tft.printf("SCORE:%d HI:%d LIVES:%d   ", score, highScore, lives); 
+}
+
+void resetInvadersLevel() {
+  aliensCount = 15; for(int i=0; i<15; i++) aliens[i] = true;
+  alienX = 10; alienY = 30; tft.fillScreen(TFT_BLACK); drawUIInvaders();
+}
+
+void bossExplosion() {
+  score += 100; isBossLevel = false; levelCounter++;
+  for (int i = 0; i < 15; i++) {
+    int rx = bossX + random(-10, 40); int ry = bossY + random(-10, 20);
+    tft.fillCircle(rx, ry, random(5, 15), TFT_WHITE);
+    tone(BUZZER_PIN, (unsigned int)random(100, 800), 40); delay(40);
+    tft.fillCircle(rx, ry, 15, TFT_BLACK);
+  }
+  resetInvadersLevel();
+}
+
+void loopInvaders() {
+  bool curB = digitalRead(PIN_BTN_B);
+  if (curB == LOW && lastBtnBState == HIGH) { 
+    isPaused = !isPaused; 
+    if (!isPaused) { tft.fillRect(110, 105, 100, 30, TFT_BLACK); }
+    delay(200); 
+  }
+  lastBtnBState = curB; 
+
+  if (isPaused) { tft.drawCentreString("PAUSE", 160, 110, 4); return; }
+
+  int xVal = analogRead(PIN_JOY_X); int oldX = shipX;
+  if (xVal < 400) shipX += 5; if (xVal > 600) shipX -= 5;
+  shipX = constrain(shipX, 0, 300);
+  if (shipX != oldX) { 
+    uint16_t clr = (shieldTimer > millis()) ? TFT_YELLOW : TFT_GREEN;
+    tft.fillRect(oldX, 210, 20, 10, TFT_BLACK); tft.fillRect(shipX, 210, 20, 10, clr); 
+  }
+
+  int pSpeed = (rapidFireTimer > millis()) ? 12 : 7;
+  if (digitalRead(PIN_BTN_A) == LOW && !bulletActive) { bulletActive=true; bulletX=shipX+10; bulletY=205; tone(BUZZER_PIN,1200,15); }
+  if (bulletActive) {
+    tft.drawFastVLine(bulletX, bulletY, 6, TFT_BLACK); bulletY -= pSpeed;
+    if (bulletY < 10) bulletActive = false;
+    else {
+      tft.drawFastVLine(bulletX, bulletY, 6, (rapidFireTimer > millis() ? TFT_CYAN : TFT_WHITE));
+      if (isBossLevel) { if (bulletX > bossX && bulletX < bossX+40 && bulletY > bossY && bulletY < bossY+20) { bulletActive=false; bossHP--; if(bossHP<=0) bossExplosion(); } }
+      else { for(int i=0; i<15; i++) if(aliens[i]) { int ax=alienX+(i%5)*25, ay=alienY+(i/5)*20; if(bulletX > ax && bulletX < ax+20 && bulletY > ay && bulletY < ay+15) 
+      { aliens[i]=false; bulletActive=false; aliensCount--; score+=10; tft.fillRect(ax, ay, 20, 15, TFT_BLACK); drawUIInvaders();
+        if (!bonusActive && random(5) == 1) { 
+          bonusActive = true; bonusX = ax + 6; bonusY = ay; bonusType = random(1, 4); 
+        } 
+      } } } 
+    }
+  }
+
+  if (isBossLevel) {
+    tft.fillRect(bossX-15, bossY-12, 75, 55, TFT_BLACK); bossX += bossDir; if(bossX>280 || bossX<0) bossDir*=-1;
+    int wave = sin(millis()*0.005)*10;
+    tft.fillTriangle(bossX+5, bossY+20, bossX+8, bossY+20, bossX+5+wave, bossY+35, TFT_RED);
+    tft.fillTriangle(bossX+33, bossY+20, bossX+36, bossY+20, bossX+35+wave, bossY+35, TFT_GREEN);
+    tft.fillRect(bossX, bossY, 40, 20, TFT_MAGENTA);
+    int barW = map(bossHP, 0, bossMaxHP, 0, 60); tft.drawRect(bossX-10, bossY-10, 60, 4, TFT_WHITE); tft.fillRect(bossX-10, bossY-10, barW, 4, TFT_RED);
+    if(!enBulletActive && random(40)==1){ enBulletActive=true; enBulletX=bossX+20-wave; enBulletY=bossY+35; }
+  } else {
+    if (millis() - lastAlienMove > 500) {
+      for(int i=0;i<15;i++) if(aliens[i]) tft.fillRect(alienX+(i%5)*25, alienY+(i/5)*20, 20, 15, TFT_BLACK);
+      alienX += (10 * alienDir); if (alienX > 180 || alienX < 5) { alienDir *= -1; alienY += 10; }
+      for(int i=0;i<15;i++) if(aliens[i]) tft.fillRect(alienX+(i%5)*25, alienY+(i/5)*20, 20, 15, TFT_RED);
+      lastAlienMove = millis();
+    }
+    int eChance = (enemyRapidFireTimer > millis()) ? 5 : 40;
+    if (!enBulletActive && random(eChance)==1) { int s=random(15); if(aliens[s]) { enBulletActive=true; enBulletX=alienX+(s%5)*25+10; enBulletY=alienY+(s/5)*20+15; } }
+  }
+
+  if (enBulletActive) {
+    tft.drawFastVLine(enBulletX, enBulletY, 8, TFT_BLACK); enBulletY += 5;
+    if (enBulletY > 240) enBulletActive = false;
+    else { tft.drawFastVLine(enBulletX, enBulletY, 8, TFT_YELLOW); if (enBulletX > shipX && enBulletX < shipX+20 && enBulletY > 210) 
+    { enBulletActive=false; lives--; tone(BUZZER_PIN, 100, 200); drawUIInvaders(); if(lives<=0) { if(score>highScore) { EEPROM.put(0, score); EEPROM.commit(); } gameState=0; } } }
+  }
+
+  if (bonusActive) {
+    tft.fillRect(bonusX, bonusY, 8, 8, TFT_BLACK); bonusY += 3;
+    if (bonusY > 240) bonusActive = false;
+    else { uint16_t bClr = (bonusType==1?TFT_RED : (bonusType==2?TFT_BLUE:TFT_YELLOW)); tft.fillRect(bonusX, bonusY, 8, 8, bClr);
+      if (bonusX > shipX && bonusX < shipX+20 && bonusY > 210) { bonusActive=false; tft.fillRect(bonusX, bonusY, 8, 8, TFT_BLACK); if(bonusType==1) lives++;
+      if(bonusType==2) rapidFireTimer=millis()+5000; if(bonusType==3) enemyRapidFireTimer=millis()+5000; drawUIInvaders(); }
+    }
+  }
+
+  if(aliensCount <= 0 && !isBossLevel) { levelCounter++; if(levelCounter%3==0) { isBossLevel=true; bossHP=5; tft.fillScreen(TFT_BLACK); } else resetInvadersLevel(); }
+  delay(15);
+}
+
+// ==========================================================
+// --- БЛОК 3: SPACE JUNKER (ASTEROIDS) ---
+// ==========================================================
+
+struct Asteroid { float x, y; float speedX, speedY; int size; bool active; };
+struct Bullet { float x, y; float speedX, speedY; bool active; };
+
+float junkerX, junkerY, junkerAngle, junkerSpeedX, junkerSpeedY;
+int junkerScore = 0, junkerLives = 3;
+Asteroid asteroids[10];
+Bullet bullets[5];
+unsigned long lastJunkerShot = 0;
+
+void resetAsteroids() {
+  junkerX = 160; junkerY = 120; junkerAngle = 0;
+  junkerSpeedX = 0; junkerSpeedY = 0; junkerScore = 0; junkerLives = 3;
+  lastJunkerShot = 0;
+
+  for (int i = 0; i < 10; i++) asteroids[i].active = false;
+  for (int i = 0; i < 5; i++) bullets[i].active = false;
+  
+  for (int i = 0; i < 4; i++) {
+    asteroids[i].active = true;
+    asteroids[i].x = random(0, 320); asteroids[i].y = random(0, 240);
+    float angle = random(0, 628) / 100.0;
+    asteroids[i].speedX = cos(angle) * 0.5; asteroids[i].speedY = sin(angle) * 0.5;
+    asteroids[i].size = 3;
+  }
+  tft.fillScreen(TFT_BLACK);
+}
+
+void drawUIJunker() {
+  tft.setTextColor(TFT_CYAN, TFT_BLACK); 
+  tft.setCursor(5, 5);
+  tft.printf("SCORE:%d", junkerScore);
+  
+  tft.setTextColor(TFT_RED, TFT_BLACK); 
+  tft.setCursor(260, 5);
+  tft.printf("LIVES:%d", junkerLives);
+}
+
+void loopAsteroids() {
+  int val = analogRead(PIN_JOY_X);
+  if (val < 300) junkerAngle -= 0.1;
+  if (val > 700) junkerAngle += 0.1;
+
+  if (digitalRead(PIN_BTN_A) == LOW) {
+    junkerSpeedX += cos(junkerAngle) * 0.1;
+    junkerSpeedY += sin(junkerAngle) * 0.1;
+  }
+
+  if (junkerSpeedX > 2) junkerSpeedX = 2; if (junkerSpeedX < -2) junkerSpeedX = -2;
+  if (junkerSpeedY > 2) junkerSpeedY = 2; if (junkerSpeedY < -2) junkerSpeedY = -2;
+
+  junkerX += junkerSpeedX; junkerY += junkerSpeedY;
+  if (junkerX < 0) junkerX = 320; if (junkerX > 320) junkerX = 0;
+  if (junkerY < 0) junkerY = 240; if (junkerY > 240) junkerY = 0;
+
+  if (digitalRead(PIN_BTN_B) == LOW) {
+    if (millis() - lastJunkerShot > 300) { 
+      lastJunkerShot = millis();
+      for (int i = 0; i < 5; i++) {
+        if (!bullets[i].active) {
+          bullets[i].active = true;
+          bullets[i].x = junkerX; bullets[i].y = junkerY;
+          bullets[i].speedX = cos(junkerAngle) * 4.0; bullets[i].speedY = sin(junkerAngle) * 4.0;
+          tone(BUZZER_PIN, 1200, 20); 
+          break;
+        }
+      }
+    }
+  }
+
+  for (int i = 0; i < 10; i++) {
+    if (asteroids[i].active) {
+      asteroids[i].x += asteroids[i].speedX; asteroids[i].y += asteroids[i].speedY;
+      if (asteroids[i].x < 0) asteroids[i].x = 320; if (asteroids[i].x > 320) asteroids[i].x = 0;
+      if (asteroids[i].y < 0) asteroids[i].y = 240; if (asteroids[i].y > 240) asteroids[i].y = 0;
+    }
+  }
+
+  for (int i = 0; i < 5; i++) {
+    if (bullets[i].active) {
+      bullets[i].x += bullets[i].speedX; bullets[i].y += bullets[i].speedY;
+      if (bullets[i].x < 0 || bullets[i].x > 320 || bullets[i].y < 0 || bullets[i].y > 240) bullets[i].active = false;
+    }
+  }
+
+  for (int i = 0; i < 5; i++) {
+    if (!bullets[i].active) continue;
+    for (int j = 0; j < 10; j++) {
+      if (!asteroids[j].active) continue;
+      float dx = bullets[i].x - asteroids[j].x; float dy = bullets[i].y - asteroids[j].y;
+      
+      if (sqrt(dx*dx + dy*dy) < 15) {
+        bullets[i].active = false; asteroids[j].active = false; junkerScore += 10; 
+        tone(BUZZER_PIN, (unsigned int)random(200, 400), 50);
+
+        if (asteroids[j].size > 1) {
+          for (int k = 0; k < 2; k++) {
+            for (int m = 0; m < 10; m++) {
+              if (!asteroids[m].active) {
+                asteroids[m].active = true;
+                asteroids[m].x = asteroids[j].x; asteroids[m].y = asteroids[j].y;
+                float angle = random(0, 628) / 100.0;
+                asteroids[m].speedX = cos(angle) * (asteroids[j].size == 3 ? 1.0 : 1.5);
+                asteroids[m].speedY = sin(angle) * (asteroids[j].size == 3 ? 1.0 : 1.5);
+                asteroids[m].size = asteroids[j].size - 1;
+                break;
+              }
+            }
+          }
+        }
+        break; 
+      }
+    }
+  }
+
+  for (int i = 0; i < 10; i++) {
+    if (!asteroids[i].active) continue;
+    float dx = junkerX - asteroids[i].x; float dy = junkerY - asteroids[i].y;
+    
+    if (sqrt(dx*dx + dy*dy) < 15) {
+      junkerLives--; tone(BUZZER_PIN, 80, 500); 
+      if (junkerLives <= 0) { gameState = 0; return; } 
+      else { junkerX = 160; junkerY = 120; junkerSpeedX = 0; junkerSpeedY = 0; delay(500); }
+    }
+  }
+
+  bool allDestroyed = true;
+  for (int i = 0; i < 10; i++) {
+    if (asteroids[i].active) { allDestroyed = false; break; }
+  }
+  
+  if (allDestroyed) {
+    junkerScore += 50; 
+    tone(BUZZER_PIN, 2000, 200); 
+    
+    for (int i = 0; i < 5; i++) {
+      asteroids[i].active = true;
+      asteroids[i].x = random(0, 320); 
+      asteroids[i].y = random(0, 240);
+      float angle = random(0, 628) / 100.0;
+      asteroids[i].speedX = cos(angle) * 0.5; 
+      asteroids[i].speedY = sin(angle) * 0.5;
+      asteroids[i].size = 3;
+    }
+  }
+
+  tft.fillScreen(TFT_BLACK);
+
+  for (int i = 0; i < 10; i++) {
+    if (asteroids[i].active) {
+      int r = (asteroids[i].size == 3) ? 12 : (asteroids[i].size == 2 ? 8 : 4);
+      tft.drawCircle(asteroids[i].x, asteroids[i].y, r, TFT_WHITE);
+      if (asteroids[i].size == 1) tft.fillCircle(asteroids[i].x, asteroids[i].y, 2, TFT_WHITE);
+    }
+  }
+
+  for (int i = 0; i < 5; i++) {
+    if (bullets[i].active) tft.fillRect(bullets[i].x, bullets[i].y, 2, 2, TFT_GREEN);
+  }
+
+  int noseX = junkerX + cos(junkerAngle) * 10; int noseY = junkerY + sin(junkerAngle) * 10;
+  int leftX = junkerX + cos(junkerAngle + 2.5) * 8; int leftY = junkerY + sin(junkerAngle + 2.5) * 8;
+  int rightX = junkerX + cos(junkerAngle - 2.5) * 8; int rightY = junkerY + sin(junkerAngle - 2.5) * 8;
+  
+  tft.drawLine(noseX, noseY, leftX, leftY, TFT_CYAN);
+  tft.drawLine(noseX, noseY, rightX, rightY, TFT_CYAN);
+  tft.drawLine(leftX, leftY, rightX, rightY, TFT_CYAN);
+
+  drawUIJunker();
+  delay(5); 
+}
+
+// ==========================================================
+// --- БЛОК 4: СОРТИРОВЩИК ---
+// ==========================================================
+int sortPlayerX = 160;
+int sortScore = 0, sortLives = 3;
+struct SortItem { float x, y; int type; bool active; }; // type 1 - кнопка А, type 2 - кнопка Б, type 3 - мусор
+SortItem items[5];
+unsigned long lastSpawn = 0;
+
+void resetSorter() {
+  sortPlayerX = 160; sortScore = 0; sortLives = 3;
+  for(int i=0; i<5; i++) items[i].active = false;
+  tft.fillScreen(TFT_BLACK);
+}
+
+void loopSorter() {
+  int val = analogRead(PIN_JOY_X);
+  if (val < 400) sortPlayerX += 5;
+  if (val > 600) sortPlayerX -= 5;
+  sortPlayerX = constrain(sortPlayerX, 10, 290);
+
+  // Спавн предметов
+  if (millis() - lastSpawn > 800) {
+    lastSpawn = millis();
+    for (int i = 0; i < 5; i++) {
+      if (!items[i].active) {
+        items[i].active = true;
+        items[i].x = random(30, 290);
+        items[i].y = 30;
+        items[i].type = random(1, 4); // 1, 2 или 3
+        break;
+      }
+    }
+  }
+
+  // Обработка кнопок
+  static bool lastA = HIGH; bool curA = digitalRead(PIN_BTN_A);
+  static bool lastB = HIGH; bool curB = digitalRead(PIN_BTN_B);
+
+  if (curA == LOW && lastA == HIGH) { // Нажали А
+    for (int i = 0; i < 5; i++) {
+      if (items[i].active && items[i].y > 180 && abs(items[i].x - sortPlayerX) < 30) {
+        if (items[i].type == 1) { sortScore += 10; tone(BUZZER_PIN, 1500, 100); }
+        else { sortLives--; tone(BUZZER_PIN, 200, 300); }
+        items[i].active = false;
+      }
+    }
+  }
+  if (curB == LOW && lastB == HIGH) { // Нажали Б
+    for (int i = 0; i < 5; i++) {
+      if (items[i].active && items[i].y > 180 && abs(items[i].x - sortPlayerX) < 30) {
+        if (items[i].type == 2) { sortScore += 10; tone(BUZZER_PIN, 1500, 100); }
+        else { sortLives--; tone(BUZZER_PIN, 200, 300); }
+        items[i].active = false;
+      }
+    }
+  }
+  lastA = curA; lastB = curB;
+
+  // Движение и проверка падения
+  for (int i = 0; i < 5; i++) {
+    if (items[i].active) {
+      items[i].y += 1.5;
+      if (items[i].y > 220) { // Упал на пол (не поймали)
+        if (items[i].type != 3) { sortLives--; tone(BUZZER_PIN, 100, 200); }
+        items[i].active = false;
+      }
+    }
+  }
+
+  if (sortLives <= 0) { gameState = 0; return; }
+
+  // Отрисовка
+  tft.fillScreen(TFT_BLACK);
+  
+  // Контейнеры
+  tft.fillRect(10, 200, 40, 40, TFT_RED); // Контейнер А
+  tft.fillRect(270, 200, 40, 40, TFT_BLUE); // Контейнер Б
+
+  // Игрок
+  tft.fillRect(sortPlayerX - 15, 210, 30, 30, TFT_GREEN);
+
+  // Предметы
+  for (int i = 0; i < 5; i++) {
+    if (items[i].active) {
+      if (items[i].type == 1) tft.fillCircle(items[i].x, items[i].y, 10, TFT_RED);
+      else if (items[i].type == 2) tft.fillRect(items[i].x - 10, items[i].y - 10, 20, 20, TFT_BLUE);
+      else tft.drawCircle(items[i].x, items[i].y, 10, TFT_WHITE); // Мусор (не трогать)
+    }
+  }
+
+  tft.setTextColor(TFT_WHITE, TFT_BLACK); tft.setCursor(5, 5);
+  tft.printf("SCORE:%d LIVES:%d", sortScore, sortLives);
+  delay(20);
+}
+
+// ==========================================================
+// --- БЛОК 5: СНАЙПЕР ---
+// ==========================================================
+int sniperX = 160, sniperScore = 0;
+struct Target { float x, y, speedX; int size; bool active; };
+Target targets[3];
+unsigned long lastTargetSpawn = 0;
+
+void resetSniper() {
+  sniperX = 160; sniperScore = 0;
+  for(int i=0; i<3; i++) targets[i].active = false;
+  tft.fillScreen(TFT_BLACK);
+}
+
+void loopSniper() {
+  int val = analogRead(PIN_JOY_X);
+  if (val < 400) sniperX += 5;
+  if (val > 600) sniperX -=5;
+  sniperX = constrain(sniperX, 10, 310);
+
+  // Спавн мишеней
+  if (millis() - lastTargetSpawn > 1000) {
+    lastTargetSpawn = millis();
+    for (int i = 0; i < 3; i++) {
+      if (!targets[i].active) {
+        targets[i].active = true;
+        targets[i].x = random(20, 300);
+        targets[i].y = 50;
+        targets[i].speedX = (random(0, 2) == 0) ? 1.5 : -1.5; // Летают влево-вправо
+        targets[i].size = random(10, 20); // Разный размер
+        break;
+      }
+    }
+  }
+
+  // Выстрел
+  static bool lastA = HIGH; bool curA = digitalRead(PIN_BTN_A);
+  if (curA == LOW && lastA == HIGH) {
+    tone(BUZZER_PIN, 800, 50);
+    for (int i = 0; i < 3; i++) {
+      if (targets[i].active && abs(targets[i].x - sniperX) < targets[i].size) {
+        // Попал
+        sniperScore += 20;
+        targets[i].active = false;
+        tone(BUZZER_PIN, 2000, 100); // Звук победы
+        break;
+      }
+    }
+  }
+  lastA = curA;
+
+  // Движение мишеней
+  for (int i = 0; i < 3; i++) {
+    if (targets[i].active) {
+      targets[i].x += targets[i].speedX;
+      if (targets[i].x < 20 || targets[i].x > 300) targets[i].speedX *= -1; // Отскок от краев
+    }
+  }
+
+  // Отрисовка
+  tft.fillScreen(TFT_BLACK);
+  
+  // Мишени
+  for (int i = 0; i < 3; i++) {
+    if (targets[i].active) {
+      tft.drawCircle(targets[i].x, targets[i].y, targets[i].size, TFT_RED);
+      tft.fillCircle(targets[i].x, targets[i].y, 3, TFT_RED);
+    }
+  }
+
+  // Пушка (Снайпер)
+  tft.fillRect(sniperX - 5, 200, 10, 30, TFT_CYAN); // Ствол
+  tft.fillCircle(sniperX, 200, 10, TFT_CYAN);       // Основание
+  tft.drawFastVLine(sniperX, 170, 30, TFT_GREEN);   // Лазерный прицел
+
+  tft.setTextColor(TFT_WHITE, TFT_BLACK); tft.setCursor(5, 5);
+  tft.printf("SCORE:%d", sniperScore);
+  delay(20);
+}
+
+// ==========================================================
+// --- БЛОК 6: SETUP & LOOP ---
+// ==========================================================
+
+void setup() {
+  EEPROM.begin(512); EEPROM.get(0, highScore);
+  pinMode(PIN_BTN_A, INPUT_PULLUP); pinMode(PIN_BTN_B, INPUT_PULLUP); pinMode(BUZZER_PIN, OUTPUT);
+  tft.init(); tft.setRotation(1); 
+  
+  randomSeed(analogRead(PIN_JOY_X));
+  for(int i=0; i<40; i++) {
+    starX[i] = random(0, 320); starY[i] = random(0, 100);
+  }
+  generateMap();
+}
+
+void loop() {
+  if (gameState == 0) {
+    static unsigned long lastMenuMove = 0;
+    int xVal = analogRead(PIN_JOY_X);
+    
+    if (millis() - lastMenuMove > 250) {
+      if (xVal < 400) {
+        menuSelection--;
+        if (menuSelection < 1) menuSelection = 5;
+        lastMenuMove = millis();
+        tone(BUZZER_PIN, 500, 20);
+      }
+      if (xVal > 600) {
+        menuSelection++;
+        if (menuSelection > 5) menuSelection = 1;
+        lastMenuMove = millis();
+        tone(BUZZER_PIN, 500, 20);
+      }
+    }
+
+    tft.setTextColor(menuSelection == 1 ? TFT_GREEN : TFT_WHITE, TFT_BLACK);
+    tft.drawCentreString("1. RAYCAST", 160, 20, 4);
+    tft.setTextColor(menuSelection == 2 ? TFT_GREEN : TFT_WHITE, TFT_BLACK);
+    tft.drawCentreString("2. INVADERS", 160, 60, 4);
+    tft.setTextColor(menuSelection == 3 ? TFT_GREEN : TFT_WHITE, TFT_BLACK);
+    tft.drawCentreString("3. JUNKER", 160, 100, 4);
+    tft.setTextColor(menuSelection == 4 ? TFT_GREEN : TFT_WHITE, TFT_BLACK);
+    tft.drawCentreString("4. SORTER", 160, 140, 4);
+    tft.setTextColor(menuSelection == 5 ? TFT_GREEN : TFT_WHITE, TFT_BLACK);
+    tft.drawCentreString("5. SNIPER", 160, 180, 4);
+
+    if (digitalRead(PIN_BTN_A) == LOW) { 
+      gameState = menuSelection; 
+      tft.fillScreen(TFT_BLACK); 
+      if(gameState == 2) resetInvadersLevel(); 
+      if(gameState == 3) resetAsteroids();
+      if(gameState == 4) resetSorter();
+      if(gameState == 5) resetSniper();
+      delay(300); 
+    }
+  } 
+  else if (gameState == 1) loopRaycast();
+  else if (gameState == 2) loopInvaders();
+  else if (gameState == 3) loopAsteroids();
+  else if (gameState == 4) loopSorter();
+  else if (gameState == 5) loopSniper();
+
+  if (digitalRead(PIN_BTN_A) == LOW && digitalRead(PIN_BTN_B) == LOW) {
+    delay(1000); 
+    if (digitalRead(PIN_BTN_A) == LOW && digitalRead(PIN_BTN_B) == LOW) { 
+      gameState = 0; tft.fillScreen(TFT_BLACK); delay(500); 
+    }
+  }
+}
+```
+Теги:
+raycasting
+gamedev
+esp8266
+diy-проекты
+c++
+Хабы:
+Arduino
+C++
+Программирование микроконтроллеров
+Разработка игр
+DIY или Сделай сам
+Если эта публикация вас вдохновила и вы хотите поддержать автора — не стесняйтесь нажать на кнопку
+Задонатить
+Нравится
++12
+Не нравится
+Добавить в закладки25
+Поделиться
+Комментарии47
+16K+
+Охват за 30 дней
+3
+Карма
+@Neuero
+Пользователь
+Подписаться
+Отправить сообщение
+Поток Геймдев доступен 24/7 благодаря поддержке друзей Хабра
+Хабр Курсы для всех
+РЕКЛАМА
+Большая витрина: от крупнейших школ до частных авторов. Сравнивайте по цене, длительности, формату и выбирайте самый подходящий курс!
+Перейти
+Перейти в поток Геймдев
+Комментарии Комментарии 47
+ЕЖЕДНЕВНЫЙ ХАБР | 26 ОКТ 2026
+Охват20K
+Закрыть
+Вышел открытый анлокер, который снимает ограничение матричных вычислений на GPU видеокарт Nvidia серий RTX30xx и RTX40xx
+Представлены открытые проекты GPU-unlock и GPU-unlock-ADA. Это анлокеры, которые снимают ограничение производителя на выполнение матричных вычислений на видеокартах Nvidia серий RTX30xx (на чипах GA102, GA103, GA104 и GA106) и RTX40xx.
+Пустили ботов по SSH на фейковый сервер с четырьмя H100: что они там делали
+25 лет Windows XP: ОС, которая не хочет уходить
+5 терминов из сферы ИИ, которые полезно знать каждому
+Добавить в закладки0Ещё
+Лучшие за суткиПохожие
+Показать лучшие за всё время
+Ваш аккаунт
+Войти
+Регистрация
+Разделы
+Статьи
+Новости
+Хабы
+Компании
+Авторы
+Песочница
+Информация
+Устройство сайта
+Для авторов
+Для компаний
+Документы
+Соглашение
+Конфиденциальность
+Услуги
+Корпоративный блог
+Медийная реклама
+Нативные проекты
+Образовательные программы
+Стартапам
+VKTelegramYoutubeЯндекс Дзен
+Настройка языкаТехническая поддержкаНа информационном ресурсе применяются рекомендательные технологии
+© 2006–2026, Habr

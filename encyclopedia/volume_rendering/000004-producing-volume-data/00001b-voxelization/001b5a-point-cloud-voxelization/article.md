@@ -1,0 +1,130 @@
+# Point Cloud Voxelization
+Also called: Voxelization from Point Cloud
+
+## Overview
+Point Cloud Voxelization converts a continuous 3D point cloud into a discrete, sparse voxel grid by mapping each point to a grid cell and aggregating data within occupied cells [S2, S3, unofficial]. Unlike mesh-based voxelization which determines occupancy via geometric intersection, this method relies on direct coordinate projection, making it suitable for unstructured point data [S2].
+
+## How it works
+**Inputs:**
+*   `points`: Array of shape $(N, F)$, where $N$ is the number of points and $F$ is the number of features. The first 3 features must be Cartesian coordinates $(x, y, z)$ [S3, unofficial].
+*   `voxel_size`: Array of shape $(3,)$ specifying voxel dimensions $(w, l, h)$ [S3, unofficial].
+*   `grid_range`: Array of shape $(6,)$ specifying the bounding box $(min_x, min_y, min_z, max_x, max_y, max_z)$ [S3, unofficial].
+*   `max_points_in_voxel`: Integer limit on points stored per voxel (default 60) [S3, unofficial].
+*   `max_num_voxels`: Integer limit on total allocated voxels (default 20000) [S3, unofficial].
+
+**Outputs:**
+*   `voxels`: Pre-allocated array of shape $(max\_num\_voxels, max\_points\_in\_voxel, F)$, returned sliced to $(V, max\_points\_in\_voxel, F)$ containing point data for $V$ active voxels [S3, unofficial].
+*   `coordinates`: Pre-allocated array of shape $(max\_num\_voxels, 3)$, returned sliced to $(V, 3)$ containing the integer grid coordinates of the $V$ active voxels [S3, unofficial].
+*   `num_points_per_voxel`: Pre-allocated array of shape $(max\_num\_voxels)$, returned sliced to $(V,)$ containing the count of valid points in each voxel [S3, unofficial].
+
+**Data Structures:**
+1.  `coor_to_voxelidx`: 3D NumPy array of shape $(grid\_size[2], grid\_size[1], grid\_size[0])$ with `dtype=int32`, initialized to $-1$. Maps voxel coordinates to a sparse index in the output arrays [S3, unofficial].
+2.  `voxels`: Pre-allocated 3D array of shape $(max\_num\_voxels, max\_points\_in\_voxel, F)$ [S3, unofficial].
+3.  `coors`: Pre-allocated 2D array of shape $(max\_num\_voxels, 3)$ with `dtype=int32` [S3, unofficial].
+4.  `num_points_per_voxel`: Pre-allocated 1D array of shape $(max\_num\_voxels)$ with `dtype=int32` [S3, unofficial].
+
+**Algorithm Steps:**
+1.  **Compute Grid Size:** Calculate the dimensions of the voxel grid in cells:
+    $$ grid\_size = \lfloor \frac{grid\_range[3:] - grid\_range[:3]}{voxel\_size} \rfloor $$
+    Cast result to `int32` [S3, unofficial].
+2.  **Compute Initial Coordinates:** For each point $p_i$ with coordinates $(x, y, z)$, compute the raw voxel index:
+    $$ coor_i = \lfloor \frac{(x, y, z) - grid\_range[:3]}{voxel\_size} \rfloor $$
+    Cast to `int32` [S3, unofficial].
+3.  **Boundary Masking:** Create a boolean mask to filter points outside the grid range. A point is valid if:
+    $$ 0 \le coor_i[0] < grid\_size[0] \quad \land \quad 0 \le coor_i[1] < grid\_size[1] \quad \land \quad 0 \le coor_i[2] < grid\_size[2] $$
+    Apply this mask to both `points` and `coor` arrays [S3, unofficial].
+4.  **Axis Reversal:** Reverse the coordinate axis order of the filtered points and coordinates (e.g., $[x, y, z] \to [z, y, x]$) to match memory layout conventions [S3, unofficial].
+5.  **Initialization:** Initialize `voxel_num = 0` [S3, unofficial].
+6.  **Iterate and Map:** Loop through each filtered point $i$ with coordinate $c$:
+    a. Look up `voxel_id = coor_to_voxelidx[tuple(c)]` [S3, unofficial].
+    b. If `voxel_id == -1` (new voxel):
+        i. Set `voxel_id = voxel_num`.
+        ii. Increment `voxel_num`.
+        iii. If `voxel_num > max_num_voxels`, break the loop [S3, unofficial].
+        iv. Set `coor_to_voxelidx[tuple(c)] = voxel_id` [S3, unofficial].
+        v. Set `coors[voxel_id] = c`.
+    c. Get `n_pts = num_points_per_voxel[voxel_id]` [S3, unofficial].
+    d. If `n_pts < max_points_in_voxel`:
+        i. Store point data: `voxels[voxel_id, n_pts] = points[i]` [S3, unofficial].
+        ii. Increment `num_points_per_voxel[voxel_id]` [S3, unofficial].
+7.  **Return Results:** Slice the output arrays to the active count: `voxels[:voxel_num]`, `coors[:voxel_num]`, `num_points_per_voxel[:voxel_num]` [S3, unofficial].
+
+**Pseudocode (Numba JIT Version):**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from numba import njit
+
+@njit
+def voxelize_jit(points, voxel_size, grid_range, max_points_in_voxel=60, max_num_voxels=20000):
+    points_copy = points.copy()
+    grid_size = np.floor((grid_range[3:] - grid_range[:3]) / voxel_size).astype(np.int32)
+    coor_to_voxelidx = np.full((grid_size[2], grid_size[1], grid_size[0]), -1, dtype=np.int32)
+    voxels = np.zeros((max_num_voxels, max_points_in_voxel, points_copy.shape[-1]), dtype=points_copy.dtype)
+    coors = np.zeros((max_num_voxels, 3), dtype=np.int32)
+    num_points_per_voxel = np.zeros(shape=(max_num_voxels,), dtype=np.int32)
+    coor = np.floor((points_copy[:, :3] - grid_range[:3]) / voxel_size).astype(np.int32)
+    mask = np.logical_and(
+        np.logical_and(
+            (coor[:, 0] >= 0) & (coor[:, 0] < grid_size[0]),
+            (coor[:, 1] >= 0) & (coor[:, 1] < grid_size[1])
+        ),
+        (coor[:, 2] >= 0) & (coor[:, 2] < grid_size[2])
+    )
+    coor = coor[mask, ::-1]
+    points_copy = points_copy[mask]
+    voxel_num = 0
+    for i, c in enumerate(coor):
+        voxel_id = coor_to_voxelidx[c[0], c[1], c[2]]
+        if voxel_id == -1:
+            voxel_id = voxel_num
+            voxel_num += 1
+            if voxel_num > max_num_voxels:
+                break
+            coor_to_voxelidx[c[0], c[1], c[2]] = voxel_id
+            coors[voxel_id] = c
+        n_pts = num_points_per_voxel[voxel_id]
+        if n_pts < max_points_in_voxel:
+            voxels[voxel_id, n_pts] = points_copy[i]
+            num_points_per_voxel[voxel_id] += 1
+    return voxels[:voxel_num], coors[:voxel_num], num_points_per_voxel[:voxel_num]
+```
+
+**Edge Cases and Pitfalls:**
+*   **Out-of-Bounds Points:** Points falling outside `grid_range` are discarded via the mask [S3, unofficial].
+*   **Capacity Limits:** If the number of unique voxels exceeds `max_num_voxels`, the loop breaks, leaving subsequent points unprocessed [S3, unofficial].
+*   **Point Overflow:** If a voxel contains more than `max_points_in_voxel` points, only the first `max_points_in_voxel` are stored; subsequent points are discarded [S3, unofficial].
+*   **Axis Convention:** The coordinate axis order is reversed (x,y,z $\to$ z,y,x) to align with the memory layout of `coor_to_voxelidx` [S3, unofficial].
+
+## Subtopics
+
+### [Octree Construction for Point Clouds](1070-octree-construction-for-point-clouds.md)
+A hierarchical spatial data structure used to organize point cloud objects for rendering, where each node contains a list of points and recursively subdivides its bounding volume into eight octants until a leaf condition is met. Choose this when memory efficiency or multi-resolution rendering is required over a flat grid.
+
+### [Voxel Grid Data Generation Pipeline](1208-voxel-grid-data-generation-pipeline.md)
+A broader pipeline context for generating voxel grid data, including preprocessing and post-processing steps beyond simple voxelization. Choose this when integrating voxelization into a larger rendering or processing workflow.
+
+### Nearest Neighbor Splatting
+A splatting method where a value at a continuous position is written to the single nearest voxel by rounding coordinates to integers [S5, unofficial]. Implementation uses a continuous-to-discrete conversion function to map coordinates to voxel indices, checking bounds before accumulation [S5, unofficial]. This method suffers from obvious aliasing problems [S5, unofficial].
+
+### Point Cloud to Gaussian Converter
+A converter that transforms point clouds into Gaussian ellipsoids using the same variance function as the mesh converter but determining distance based on point proximity [S6]. It determines $d_k$ as the distance to $m$ nearest points of the target points, then computes $\sigma_k = \frac{(d_k/2)^2}{\log(1/\zeta)}$ and $\Sigma_k = \text{diag}(\sigma_k, \sigma_k, \sigma_k)$ [S6].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ for coordinate computation and masking, where $N$ is the number of points. The main loop iterates over the filtered points, so it is $O(N_{filtered})$ [S3, unofficial]. Hashing via the dense `coor_to_voxelidx` array allows $O(1)$ lookup per point [S3, unofficial].
+*   **Memory Complexity:** Dominated by the pre-allocated buffers `voxels` and `coor_to_voxelidx` [S3, unofficial]. Memory usage is $O(max\_num\_voxels \times max\_points\_in\_voxel \times F + grid\_size[0] \times grid\_size[1] \times grid\_size[2])$ [S3, unofficial].
+*   **Performance:** The Numba JIT version (`voxelize_jit`) optimizes performance by avoiding Python overhead compared to the pure NumPy version (`voxelize`) [S3, unofficial].
+*   **Strengths:** Simple implementation; supports feature aggregation [S2, S3, unofficial].
+*   **Limitations:** Fixed capacity limits require careful tuning; dense coordinate map can be memory-intensive for large grids with small voxel sizes [S3, unofficial].
+*   **Measured performance and scaling:** Not given in the sources [S3, unofficial].
+
+## Background
+Point cloud voxelization creates a voxel grid from a point cloud where occupied voxels store aggregated point data [S2]. The sparse voxel grid implementation detailed here, including the JIT-optimized version, is provided by [S3, unofficial].
+
+## Sources
+[S2] Voxelization — Open3D 0.12.0 documentation, https://www.open3d.org/docs/0.12.0/tutorial/geometry/voxelization.html, fetched 2026-10-26
+[S3] danielhavir/voxelize3d, https://github.com/danielhavir/voxelize3d, fetched 2026-10-27 (unofficial)
+[S4] sgffoen/PointCloudVoxelization, https://github.com/sgffoen/PointCloudVoxelization, fetched 2026-10-27 (unofficial)
+[S5] Production Volume Rendering, https://cg.informatik.uni-freiburg.de/intern/seminar/volumeRenderingProductionFundamentals2011.pdf, fetched 2026-10-27 (unofficial)
+[S6] VoGE: A Differentiable Volume Renderer using Gaussian Ellipsoids for Analysis-by-Synthesis, https://doi.org/10.48550/arxiv.2205.15401, fetched 2026-10-26

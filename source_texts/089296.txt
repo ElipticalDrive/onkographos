@@ -1,0 +1,303 @@
+# TomoAnchor V2.0 GPU Based
+
+TomoAnchor V2.0 is a Zeiss Versa cone-beam CT reconstruction application with a desktop GUI, YAML/CLI workflows, legacy TIGRE FDK/MBIR support, fast anchor-guided MBIR-lite, and a second-generation GPU-resident PDHG solver path.
+
+The root launcher is `mbir.py`. The implementation lives under `tv_mbir_ct_recon/`.
+
+## What Is Included
+
+- Zeiss TIFF projection, flat/reference, dark, and metadata CSV loading.
+- Flat/dark correction, negative-log conversion, crop, binning, flips, drift correction, and center search.
+- TIGRE FDK reconstruction and FDK filter sweeps.
+- Legacy TV-MBIR solvers: `auto`, `admm`, `pdhg_low_memory`, and `streaming_subset_tv`.
+- New V2 solver: `pdhg_gpu_resident`.
+- Fast anchor-guided workflow with FDK sweep, conservative TV prior, confidence map, MBIR-lite, and held-out QC reports.
+- GUI panels for validation, progress, metrics, device monitor, preview slices, and tomogram inspection.
+- Headless cluster entry point for GPU-resident PDHG: `tomoanchor_gpu_pdhg.py`.
+- Slurm examples under `tv_mbir_ct_recon/examples/slurm/`.
+
+## Current GPU-Resident Solver Status
+
+`pdhg_gpu_resident` keeps the main solver state on the selected NVIDIA GPU during the PDHG loop. It keeps the volume, extrapolated volume, previous volume, gradient buffer, TV duals, projection data duals, measured projections, and projection batches on device.
+
+Important implementation notes:
+
+- Default resident projector backend: `matched_voxel`.
+- ASTRA is intentionally rejected for production resident PDHG because its 3-D CUDA FP/BP pair failed strict matched-adjoint checks.
+- LEAP/PyTorch support is present as an experimental backend and should only be used when its adjointness guard passes.
+- The legacy TIGRE Python path stages NumPy arrays through host memory and is not labeled true resident.
+- Current resident multi-GPU support is not a pooled-memory solver. For full memory pooling across two GPUs, volume-sharded resident PDHG still needs to be implemented.
+
+## Hardware Requirements
+
+Minimum for GUI and tests:
+
+- Windows or Linux.
+- Python 3.10.
+- 16 GB system RAM or more.
+
+Recommended for reconstruction:
+
+- NVIDIA GPU with a working driver.
+- CUDA 12 compatible runtime for the resident GPU path.
+- 24 GB+ VRAM for large MBIR tests.
+- 48 GB+ VRAM, or future volume-sharded multi-GPU support, for full-resolution 1000-cubed resident MBIR.
+
+## Core Python Packages
+
+Core application:
+
+- `numpy`
+- `scipy`
+- `pandas`
+- `tifffile`
+- `matplotlib`
+- `PyYAML`
+- `scikit-image`
+- `PyQt5` or `PySide6`
+- `pytest`
+- `CERN/TIGRE` from conda channel `ccpi`
+
+GPU-resident PDHG:
+
+- `cupy-cuda12x`
+- NVIDIA CUDA driver/runtime compatible with the installed CuPy package
+
+Optional experimental LEAP backend:
+
+- CUDA-enabled PyTorch
+- LLNL LEAP with `leapctype` / `leaptorch` CUDA support
+
+Do not install the unrelated PyPI package named `tigre`; use CERN/TIGRE from conda.
+
+## Environment Setup
+
+Install Miniconda or Anaconda first. Then from the repository root:
+
+```powershell
+conda env create -f tv_mbir_ct_recon/environment.yml
+conda activate tomogram-recon
+```
+
+Install the CUDA-matched CuPy package for the resident GPU solver:
+
+```powershell
+python -m pip install cupy-cuda12x
+```
+
+For optional LEAP/PyTorch experiments, install CUDA PyTorch in the same environment:
+
+```powershell
+python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+```
+
+Then install LEAP according to your local LEAP build instructions. LEAP is not required for the default `matched_voxel` resident backend.
+
+## Verify The Install
+
+Run the self-test:
+
+```powershell
+python mbir.py --self-test
+```
+
+Expected output includes:
+
+```text
+Self-test passed.
+TIGRE available: True
+```
+
+Run the non-GPU test suite:
+
+```powershell
+python -m pytest tv_mbir_ct_recon/tests -q
+```
+
+GPU tests automatically skip when CUDA/CuPy is unavailable.
+
+## Launch The GUI
+
+From the repository root:
+
+```powershell
+python mbir.py
+```
+
+or:
+
+```powershell
+python tv_mbir_ct_recon/app.py --gui
+```
+
+The GUI defaults to `pdhg_gpu_resident` in the MBIR solver panel. If you want the older TIGRE/ADMM path, select `auto` or `admm`.
+
+## Standard CLI Examples
+
+Preprocess only:
+
+```powershell
+python tv_mbir_ct_recon/app.py --config tv_mbir_ct_recon/examples/sample_config.yaml --preprocess-only
+```
+
+Run FDK:
+
+```powershell
+python tv_mbir_ct_recon/app.py --config tv_mbir_ct_recon/examples/sample_config.yaml --run-fdk
+```
+
+Run MBIR:
+
+```powershell
+python tv_mbir_ct_recon/app.py --config tv_mbir_ct_recon/examples/sample_config.yaml --run-mbir
+```
+
+Run headless GPU-resident PDHG:
+
+```powershell
+python tomoanchor_gpu_pdhg.py --config tv_mbir_ct_recon/examples/gpu_pdhg_config.yaml --gpus auto --batch-views auto
+```
+
+## Fast Anchor-Guided Workflow
+
+Run the complete fast workflow:
+
+```powershell
+python tv_mbir_ct_recon/app.py --config tv_mbir_ct_recon/examples/fast_recon_config.yaml --run-fast
+```
+
+Resume individual fast stages:
+
+```powershell
+python tv_mbir_ct_recon/app.py --config tv_mbir_ct_recon/examples/fast_recon_config.yaml --run-fdk-sweep
+python tv_mbir_ct_recon/app.py --config tv_mbir_ct_recon/examples/fast_recon_config.yaml --make-prior --fast-run-folder output/run_YYYYMMDD_HHMMSS
+python tv_mbir_ct_recon/app.py --config tv_mbir_ct_recon/examples/fast_recon_config.yaml --run-mbir-lite --fast-run-folder output/run_YYYYMMDD_HHMMSS
+python tv_mbir_ct_recon/app.py --config tv_mbir_ct_recon/examples/fast_recon_config.yaml --run-fast-qc --fast-run-folder output/run_YYYYMMDD_HHMMSS
+```
+
+## Suggested GUI Workflow
+
+1. Select projection, flat/reference, dark, metadata CSV, and output folders.
+2. Load and validate metadata.
+3. Preview raw and preprocessed images.
+4. Enter geometry and detector/volume sizes.
+5. Run FDK first and inspect orientation, center, angle sign, and voxel size.
+6. Run MBIR.
+7. Watch Progress, Metrics, Device Monitor, and MBIR Preview.
+8. Inspect saved outputs in the timestamped run folder.
+
+## GPU-Resident MBIR Memory Tips
+
+For `pdhg_gpu_resident`, the legacy Memory mode, Projection batch size, Ordered subsets, ADMM iterations, and CG settings are hidden because they are not used by the resident solver.
+
+Primary resident controls:
+
+- `GPU PDHG iterations`
+- `GPU PDHG batch views`
+- `PDHG TV dual dtype`
+- `GPU PDHG step safety`
+- `GPU PDHG power iterations`
+- `GPU PDHG checkpoint every`
+- `GPU PDHG preview every`
+- `GPU PDHG memory safety`
+
+If resident PDHG runs out of VRAM:
+
+1. Keep `PDHG TV dual dtype = float16`.
+2. Lower `GPU PDHG batch views`: try `auto`, `32`, `16`, `8`, `4`, then `1`.
+3. Reduce `Nz`, `Ny`, `Nx`, crop the ROI, or use `MBIR extra binning Y/X = 2`.
+4. Use `existing_fdk` or `zeros` initialization if FDK initialization is too large.
+5. Use a larger-memory GPU for full-resolution runs.
+
+Do not raise `GPU PDHG memory safety` to force a run that exceeds total VRAM. That only weakens the safety check.
+
+## Typical Data Layout
+
+```text
+dataset/
+  projections/
+    proj_000001.tif
+    proj_000002.tif
+  reference/
+    reference_001.tif
+  dark/
+    dark_001.tif
+  metadata/
+    projection_geometry.csv
+```
+
+The metadata CSV should include a projection filename column and an angle column. Optional radian-angle and drift-shift columns are supported.
+
+## Outputs
+
+TomoAnchor writes timestamped run folders under the configured output folder:
+
+```text
+output/run_YYYYMMDD_HHMMSS/
+  preprocessing/
+  alignment/
+  fdk/
+  mbir/
+  metrics/
+  fast_recon/
+    anchors/
+    fdk_sweep/
+    prior/
+    mbir_lite/
+    qc/
+```
+
+Large CT datasets, TIFF stacks, `.npy` volumes, `.npz` bundles, HDF5 files, local run folders, logs, and raw data folders are intentionally ignored by git.
+
+## Repository Layout
+
+```text
+.
+|-- mbir.py
+|-- tomoanchor_gpu_pdhg.py
+|-- config.mbir.yaml
+|-- tools/
+|-- tv_mbir_ct_recon/
+|   |-- app.py
+|   |-- environment.yml
+|   |-- requirements.txt
+|   |-- examples/
+|   |-- src/
+|   `-- tests/
+`-- README.md
+```
+
+## Useful Commands
+
+Run self-test:
+
+```powershell
+python mbir.py --self-test
+```
+
+Run focused GPU-resident tests:
+
+```powershell
+python -m pytest tv_mbir_ct_recon/tests/test_gpu_resident_pdhg.py tv_mbir_ct_recon/tests/test_gpu_projector_matched.py -q
+```
+
+Run all tests:
+
+```powershell
+python -m pytest tv_mbir_ct_recon/tests -q
+```
+
+## Notes For Developers
+
+- GUI help is embedded in `tv_mbir_ct_recon/src/gui/help_manual.py`.
+- GUI controls are defined in `tv_mbir_ct_recon/src/gui/main_window.py`.
+- Resident PDHG core is in `tv_mbir_ct_recon/src/gpu_pdhg_resident.py`.
+- Resident memory planning is in `tv_mbir_ct_recon/src/gpu_pdhg_memory.py`.
+- The matched resident projector is in `tv_mbir_ct_recon/src/gpu_projector_matched.py`.
+
+Before pushing changes, run:
+
+```powershell
+python mbir.py --self-test
+python -m pytest tv_mbir_ct_recon/tests -q
+```

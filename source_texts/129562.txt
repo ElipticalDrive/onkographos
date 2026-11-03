@@ -1,0 +1,345 @@
+parallel processing - CUDA stream compaction algorithm - Stack Overflow
+How are we doing? Please help us improve Stack Overflow. Take our short survey
+Collectives™ on Stack Overflow
+Find centralized, trusted content and collaborate around the technologies you use most.
+Learn more about Collectives
+How are we doing?
+Take our short survey
+CUDA stream compaction algorithm
+Ask Question
+Asked
+10 years, 11 months ago
+Modified
+4 years, 6 months ago
+Viewed
+7k times
+This question shows research effort; it is useful and clear
+11
+This question does not show any research effort; it is unclear or not useful
+Save this question.
+Show activity on this post.
+I'm trying to construct a parallel algorithm with CUDA that takes an array of integers and removes all of the 0's with or without keeping the order.
+Example:
+Global Memory: {0, 0, 0, 0, 14, 0, 0, 17, 0, 0, 0, 0, 13}
+Host Memory Result: {17, 13, 14, 0, 0, ...}
+The simplest way is to use the host to remove the 0's in O(n) time. But considering I have around 1000 elements, it probably will be faster to leave everything on the GPU and condense it first, before sending it.
+The preferred method would be to create an on-device stack, such that each thread can pop and push (in any order) onto or off of the stack. However, I don't think CUDA has an implementation of this.
+An equivalent (but much slower) method would be to keep attempting to write, until all threads have finished writing:
+```
+CopykernalRemoveSpacing(int * array, int * outArray, int arraySize) {
+    if (array[threadId.x] == 0)
+        return;
+
+    for (int i = 0; i < arraySize; i++) {
+
+         array = arr[threadId.x];
+
+         __threadfence();
+
+         // If we were the lucky thread we won! 
+         // kill the thread and continue re-reincarnated in a different thread
+         if (array[i] == arr[threadId.x])
+             return;
+    }
+}
+```
+This method has only benefit in that we would perform in O(f(x)) time, where f(x) is the average number of non-zero values there are in an array (f(x) ~= ln(n) for my implementation, thus O(ln(n)) time, but has a high O constant)
+Finally, a sort algorithm such as quicksort or mergesort would also solve the problem, and does in fact run in O(ln(n)) relative time. I think there might be an algorithm faster than this even, as we do not need to waste time ordering (swapping) zero-zero element pairs, and non-zero non-zero element pairs (the order does not need to be kept).
+So I'm not quite sure which method would be the fastest, and I still
+think there's a better way of handling this. Any suggestions?
+algorithm
+parallel-processing
+cuda
+stream-compaction
+Share
+Share a link to this question
+Copy linkCC BY-SA 3.0
+Short permalink to this question
+Improve this question
+Follow
+Follow this question to receive notifications
+edited May 13, 2021 at 17:36
+Peter Cordes
+384k5353 gold badges765765 silver badges1k1k bronze badges
+asked Dec 3, 2015 at 7:05
+Dane Bouchie
+44155 silver badges1212 bronze badges
+3
+14
+The algorithm is call stream compaction and this is a solved problem with good theoretical analyses and several very high performance of off the shelf implementations available via the search engine of your choice.
+talonmies
+–
+talonmies
+2015-12-03 07:25:48 +00:00
+Commented
+Dec 3, 2015 at 7:25
+2
+Thanks for the reference, google's got me from here
+Dane Bouchie
+–
+Dane Bouchie
+2015-12-03 07:33:47 +00:00
+Commented
+Dec 3, 2015 at 7:33
+4
+For the record, this operation is also called "left packing", as in AVX2 what is the most efficient way to pack left based on a mask? (for x86 using SIMD on the CPU, not GPU).
+Peter Cordes
+–
+Peter Cordes
+2021-05-11 18:11:23 +00:00
+Commented
+May 11, 2021 at 18:11
+Add a comment
+|
+3 Answers 3
+Sorted by:
+Reset to default
+Highest score (default)
+Trending (recent votes count more)
+Date modified (newest first)
+Date created (oldest first)
+This answer is useful
+14
+This answer is not useful
+Save this answer.
+Loading when this answer was accepted…
+Show activity on this post.
+What you are asking for is a classic parallel algorithm called stream compaction1.
+If Thrust is an option, you may simply use thrust::copy_if. This is a stable algorithm, it preserves relative order of all elements.
+Rough sketch:
+```
+Use with AICopy#include <thrust/copy.h>
+
+template<typename T>
+struct is_non_zero {
+    __host__ __device__
+    auto operator()(T x) const -> bool {
+        return x != 0;
+    }
+};
+
+// ... your input and output vectors here
+
+thrust::copy_if(input.begin(), input.end(), output.begin(), is_non_zero<int>());
+```
+If Thrust is not an option, you may implement stream compaction yourself (there is plenty of literature on the topic). It's a fun and reasonably simple exercise, while also being a basic building block for more complex parallel primitives.
+(1) Strictly speaking, it's not exactly stream compaction in the traditional sense, as stream compaction is traditionally a stable algorithm but your requirements do not include stability. This relaxed requirement could perhaps lead to a more efficient implementation?
+Share
+Share a link to this answer
+Copy linkCC BY-SA 4.0
+Short permalink to this answer
+Improve this answer
+Follow
+Follow this answer to receive notifications
+edited Jun 14, 2021 at 2:20
+KansaiRobot
+10.8k2323 gold badges120120 silver badges249249 bronze badges
+answered Dec 3, 2015 at 7:28
+user5631621
+3 Comments
+Add a comment
+Dane Bouchie
+Dane Bouchie Dec 3, 2015 at 7:54
+Referring to (1), Yeah, I'm curious as well. I like the idea of counting the number of non-zero elements, and then creating a specific map function for the total number of non-zero elements. Typically this map function is the prefix sum, but considering we don't need to order it, is there a function that is calculated faster?
+2015-12-03T07:54:38.107Z+00:00
+2
+Reply
+Copy link
+user5631621
+user5631621 Dec 3, 2015 at 8:47
+I guess it's akin to a "partial" stream compaction, where order is preserved locally across a warp (or block, depending on your implementation), but not globally. In other words this mean the prefix sum is also partial. Yes, it would be faster in the sense that the algorithm finishes earlier (there are less operations to do, since a global order is not required). Whether this would lead to actual better performance is hard to say, but it's a reasonable expectation that it would.
+2015-12-03T08:47:01.48Z+00:00
+0
+Reply
+Copy link
+Tyson Hilmer
+Tyson Hilmer Jun 18, 2018 at 11:38
+Regarding literature, here is a July 2017 article, with source code, that reports faster than thrust::copy_if.
+2018-06-18T11:38:16.183Z+00:00
+1
+Reply
+Copy link
+Add a comment
+This answer is useful
+8
+This answer is not useful
+Save this answer.
+Loading when this answer was accepted…
+Show activity on this post.
+Stream compaction is a well-known problem for which a lot of code was written (Thrust, Chagg to cite two libraries that implement stream compaction on CUDA).
+If you have a relatively new CUDA-capable device that supports intrinsic function as __ballot (compute capability >= 3.0) it is worth trying a small CUDA procedure that performs stream compaction much faster than Thrust.
+Here finds the code and minimal doc.
+https://github.com/knotman90/cuStreamComp
+It uses a ballotting function in a single kernel fashion to perform the compaction.
+Edit:
+I wrote an article explaining the inner workings of this approach. You can find it here if you are interested.
+Share
+Share a link to this answer
+Copy linkCC BY-SA 4.0
+Short permalink to this answer
+Improve this answer
+Follow
+Follow this answer to receive notifications
+edited Apr 12, 2022 at 7:09
+answered Jan 6, 2016 at 17:55
+Davide Spataro
+7,55211 gold badge2929 silver badges3737 bronze badges
+3 Comments
+Add a comment
+KansaiRobot
+KansaiRobot Jun 14, 2021 at 0:52
+would this work well on a Jetson device? How about a NVIDIA Drive machine?
+2021-06-14T00:52:14.857Z+00:00
+0
+Reply
+Copy link
+KansaiRobot
+KansaiRobot Jun 14, 2021 at 10:55
+Also, the code has no license that I can see. Can this be used in other peopke's code?
+2021-06-14T10:55:22.947Z+00:00
+0
+Reply
+Copy link
+Davide Spataro
+Davide Spataro Jun 15, 2021 at 6:49
+@KansaiRobot have not tried it on Jetson devices and it is released with LGPL-3.0 license.
+2021-06-15T06:49:35.757Z+00:00
+0
+Reply
+Copy link
+Add a comment
+This answer is useful
+5
+This answer is not useful
+Save this answer.
+Loading when this answer was accepted…
+Show activity on this post.
+With this answer, I'm only trying to provide more details to Davide Spataro's approach.
+As you mentioned, stream compaction consists of removing undesired elements in a collection depending on a predicate. For example, considering an array of integers and the predicate p(x)=x>5, the array A={6,3,2,11,4,5,3,7,5,77,94,0} is compacted to B={6,11,7,77,94}.
+The general idea of stream compaction approaches is that a different computational thread be assigned to a different element of the array to be compacted. Each of such threads must decide to write its corresponding element to the output array depending on whether it satisfies the relevant predicate or not. The main problem of stream compaction is thus letting each thread know in which position the corresponding element must be written in the output array.
+The approach in [1,2] is an alternative to Thrust's copy_if mentioned above and consists of three steps:
+Step #1. Let P be the number of launched threads and N, with N>P, the size of the vector to be compacted. The input vector is divided in sub-vectors of size S equal to the block size. The __syncthreads_count(pred) block intrinsic is exploited which counts the number of threads in a block satisfying the predicate pred. As a result of the first step, each element of the array d_BlockCounts, which has size N/P, contains the number of elements meeting the predicate pred in the corresponding block.
+Step #2. An exclusive scan operation is performed on the array d_BlockCounts. As a result of the second step, each thread knows how many elements in the previous blocks write an element. Accordingly, it knows the position where to write its corresponding element, but for an offset related to its own block.
+Step #3. Each thread computes the mentioned offset using warp intrinsic functions and eventually writes to the output array. It should be noted that the execution of step #3 is related to warp scheduling. As a consequence, the elements order in the output array does not necessarily reflect the elements order in the input array.
+Of the three steps above, the second is performed by CUDA Thrust’s exclusive_scan primitive and is computationally significantly less demanding than the other two.
+For an array of 2097152 elements, the mentioned approach has executed in 0.38ms on an NVIDIA GTX 960 card, in contrast to 1.0ms of CUDA Thrust’s copy_if. The mentioned approach appears to be faster for two reasons:
+1) It is specifically tailored to cards supporting warp intrinsic elements;
+2) The approach does not guarantee the output ordering.
+It should be noticed that we have tested the approach also against the code available at inkc.sourceforge.net. Although the latter code is arranged in a single kernel call (it does not employ any CUDA Thrust primitive), it has not better performance as compared to the three-kernels version.
+The full code is available here and is slightly optimized as compared to the original Davide Spataro's routine.
+```
+Use with AICopy[1] M.Biller, O. Olsson, U. Assarsson, “Efficient stream compaction on wide SIMD many-core architectures,” Proc. of the Conf. on High Performance Graphics, New Orleans, LA, Aug. 01 - 03, 2009, pp. 159-166.
+[2] D.M. Hughes, I.S. Lim, M.W. Jones, A. Knoll, B. Spencer, “InK-Compact: in-kernel stream compaction and its application to multi-kernel data visualization on General-Purpose GPUs,” Computer Graphics Forum, vol. 32, n. 6, pp. 178-188, 2013.
+```
+Share
+Share a link to this answer
+Copy linkCC BY-SA 3.0
+Short permalink to this answer
+Improve this answer
+Follow
+Follow this answer to receive notifications
+answered Feb 7, 2017 at 8:22
+Vitality
+21.7k55 gold badges120120 silver badges154154 bronze badges
+2 Comments
+Add a comment
+Tyson Hilmer
+Tyson Hilmer Sep 21, 2019 at 10:56
+Circa CUDA Toolkit 9 and the Volta architecture, the warp intrinsics used in both JackOLantern's and Spataro's code were deprecated for explicit warp level synchronization forms. Using an all-warp mask of 0xFFFFFFFF for these got the aforementioned code running, and verified correct (on my end). Thanks guys :)
+2019-09-21T10:56:49.747Z+00:00
+0
+Reply
+Copy link
+Tyson Hilmer
+Tyson Hilmer Sep 21, 2019 at 10:58
+Steps #1 and #3 both evaluate the predicate (redundantly). If your predicate is expensive, consider modifying #1 to write the result and #3 to read it.
+2019-09-21T10:58:54.143Z+00:00
+0
+Reply
+Copy link
+Start asking to get answers
+Find the answer to your question by asking.
+Ask question
+Explore related questions
+algorithm
+parallel-processing
+cuda
+stream-compaction
+See similar questions with these tags.
+The Overflow Blog
+Elevators, toasters, and the birth of Java
+A JSON schema Is not an AI governance layer
+Featured on Meta
+We’ve reworked automatic question deletion. Let’s talk about why
+How can we improve duplicate handling?
+Policy: Generative AI (e.g., ChatGPT) is banned
+You're doing it wrong: A plea for sanity in close voting
+10 people chatting
+Community activity
+Last 1 hr
+Users online activity
+2598 users online
+Number of questions asked 9 questions
+Number of questions that received an answer 5 answers
+Number of comments posted 28 comments
+Number of upvotes on posts 73 upvotes
+Popular tags
+Popular tags
+cc++javaadvicepython
+Linked
+0
+Is there any efficient way to compact a sparse array in OpenCL / CUDA?
+54
+AVX2 what is the most efficient way to pack left based on a mask?
+1
+Halide: Reduction over a domain for the specific values
+1
+AArch64 SVE/2 - Left pack elements from list
+Related
+3
+CUDA reduction of many small, unequally sized arrays
+5
+Thrust: Removing duplicates in key-value arrays
+5
+CUDA Stream compaction: understanding the concept
+1
+Parallel list reduction in CUDA
+0
+parallel reduction technique
+1
+Stream compaction within cuda kernel for maintaining priority queue
+2
+Improving the Efficiency of Compact/Scatter in CUDA
+2
+Stream compaction with Thrust; best practices and fastest way?
+2
+CUDA: Reduce algorithm
+0
+Stream compaction and transform based on the index in CUDA
+Hot Network Questions
+Large log when you use In-Memory OLTP on a low-end computer
+If an author uses a table to define the notation, can I copy it with a citation?
+Anime about creatures born from pollution
+Why would I ever comply instead of bargain when being attacked by pirates?
+Is there a reason why BMS controllers can't easily implement charge current limiting?
+In absence of lowest potential energy law, will a water droplet still form a spherical shape?
+Proving that the collinearity of centroid, orthocenter, and incenter implies a triangle is isosceles
+Rotating the wheel while keeping the freehub fixed creates a jerky feeling/movement, is this a typical sign of worn/damaged freehub?
+Covered interest parity for USD/COP: which public rates to use for the peso and dollar legs?
+Which RPG with a TVTropes page, states that the world / universe of humanity is special because it lacks magic / runs on physics?
+-ta and its aspect
+How does Derrida define the concept of an 'axis'?
+The legendary crossing of the strait: could it have actually happened?
+How do I ensure job safety and legal liability against AI related damage at work
+Quantum Field Theory in Curved Space-Times from the equivalence principle?
+Ordering a sum correctly
+Why magnetic field of the electromagnetic wave doesnt affect the dipole antenna?
+Why does Agda reject pattern matching on stuck constructors?
+When reading a textbook, how do I approach "learning" mathematical definitions?
+Does Hilbert's Foundations of Geometry hold a privileged position among the foundations of geometry?
+Who would have replaced Spock if Kirk wasn't available?
+How to enable the IC after some time with a low input?
+Sudoku GUI in C Win32
+Filipina residing in Romania travelling to my home country. I have 6-hour layover in South Korea. Do I need a visa?
+Question feed
+default

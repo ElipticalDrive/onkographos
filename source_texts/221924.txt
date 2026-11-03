@@ -1,0 +1,228 @@
+Phase 63.4 — GaussianSplatRenderer Overview The GaussianSplatRenderer implements 3D Gaussian Splatting (3DGS) for real-time, photorealistic novel view synthesis. Rather than representing scenes as continuous neural fields, 3DGS uses expl...
+
+Phase 63.4: GaussianSplatRenderer — 3D Gaussian Splatting & Differentiable Rasterization · Issue #1181 · web3guru888/asi-build · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Phase 63.4: GaussianSplatRenderer — 3D Gaussian Splatting & Differentiable Rasterization #1181
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Phase 63.4: GaussianSplatRenderer — 3D Gaussian Splatting & Differentiable Rasterization#1181
+Copy link
+Labels
+enhancementNew feature or requestNew feature or request
+Description
+web3guru888
+opened on Apr 14, 2026
+Issue body actions
+Phase 63.4 — GaussianSplatRenderer
+Overview
+The GaussianSplatRenderer implements 3D Gaussian Splatting (3DGS) for real-time, photorealistic novel view synthesis. Rather than representing scenes as continuous neural fields, 3DGS uses explicit anisotropic 3D Gaussian primitives that are rasterized via differentiable tile-based splatting. This module covers Gaussian initialization from SfM points, adaptive density control (densification/pruning), differentiable rasterization, and extensions for dynamic scenes, compression, and mesh extraction.
+Architecture
+```
+graph TB
+    subgraph GaussianSplatRenderer
+        INIT[SfMInitializer] --> GAUSS[GaussianPrimitives]
+        
+        subgraph Primitives
+            GAUSS --> POS[Positions μ]
+            GAUSS --> COV[Covariances Σ]
+            GAUSS --> SH_C[SH Coefficients]
+            GAUSS --> OPA[Opacities α]
+        end
+        
+        subgraph Rasterization
+            POS --> PROJ[GaussianProjector]
+            COV --> PROJ
+            PROJ --> TILE[TileSorter]
+            TILE --> BLEND[AlphaBlender]
+            SH_C --> BLEND
+            OPA --> BLEND
+            BLEND --> IMG[RenderedImage]
+        end
+        
+        subgraph DensityControl
+            IMG --> LOSS[Loss]
+            LOSS --> GRAD[GradientAnalyzer]
+            GRAD --> SPLIT[Splitter]
+            GRAD --> CLONE[Cloner]
+            GRAD --> PRUNE[Pruner]
+            SPLIT --> GAUSS
+            CLONE --> GAUSS
+            PRUNE --> GAUSS
+        end
+        
+        subgraph Extensions
+            DYN[DynamicGaussians]
+            COMP[GaussianCompressor]
+            MESH[MeshExtractor]
+        end
+    end
+```
+Loading
+Interface Definitions
+```
+interface Gaussian3D {
+  position: [number, number, number];         // μ: mean position
+  covariance: Float32Array;                    // Σ: 3x3 covariance (stored as scale + quaternion)
+  scale: [number, number, number];             // s: log-scale along each axis
+  rotation: [number, number, number, number];  // q: quaternion (wxyz)
+  shCoefficients: Float32Array;                // spherical harmonics (degree 0-3, RGB)
+  opacity: number;                             // α: logit opacity
+}
+
+interface GaussianCloud {
+  count: number;
+  positions: Float32Array;        // [N * 3]
+  scales: Float32Array;           // [N * 3] log-scales
+  rotations: Float32Array;        // [N * 4] quaternions
+  shCoefficients: Float32Array;   // [N * C * 3] SH coefficients per Gaussian
+  opacities: Float32Array;        // [N] logit opacities
+  shDegree: number;               // current SH degree (0-3)
+}
+
+interface GaussianSplatConfig {
+  // Initialization
+  initMethod: 'sfm_points' | 'random' | 'depth_guided';
+  initialPoints: number;
+  shDegreeMax: number;            // max SH degree (typically 3)
+  
+  // Rasterization
+  tileSize: number;               // tile size for sorting (16x16)
+  maxGaussiansPerTile: number;
+  nearPlane: number;
+  farPlane: number;
+  backgroundColor: [number, number, number];
+  
+  // Density control
+  densifyGradThreshold: number;   // gradient threshold for densification
+  densifyInterval: number;        // iterations between densify steps
+  densifySizeThreshold: number;   // max scale before splitting
+  pruneOpacityThreshold: number;  // min opacity before pruning
+  opacityResetInterval: number;   // iterations between opacity resets
+  maxGaussians: number;           // cap on total Gaussians
+  
+  // Training
+  positionLearningRate: number;
+  scaleLearningRate: number;
+  rotationLearningRate: number;
+  shLearningRate: number;
+  opacityLearningRate: number;
+  numIterations: number;
+  ssimLossWeight: number;         // weight for SSIM loss term
+}
+
+interface DynamicGaussianConfig extends GaussianSplatConfig {
+  temporalMode: '4d_gaussian' | 'deformation_field' | 'per_frame';
+  numTimesteps: number;
+  motionBasisCount: number;
+  temporalSmoothing: number;
+}
+
+interface GaussianCompressionConfig {
+  method: 'quantization' | 'pruning' | 'codebook' | 'compact_3dgs';
+  targetSize: number;             // target file size in MB
+  qualityPreset: 'low' | 'medium' | 'high';
+  quantizationBits: number;       // bits per parameter
+}
+
+interface RenderOutput {
+  image: ImageData;
+  depth: DepthMap;
+  alpha: Float32Array;            // [H * W] accumulated opacity
+  numGaussiansRendered: number;
+  renderTimeMs: number;
+}
+
+interface GaussianSplatRenderer {
+  // Initialization
+  initialize(config: GaussianSplatConfig): Promise<void>;
+  initFromSfM(points: PointCloud, cameras: CameraPose[]): Promise<GaussianCloud>;
+  initFromDepthMaps(depthMaps: DepthMap[], cameras: CameraPose[], images: ImageData[]): Promise<GaussianCloud>;
+  
+  // Training
+  trainStep(image: ImageData, camera: CameraPose): Promise<{ loss: number; psnr: number; numGaussians: number }>;
+  train(images: ImageData[], cameras: CameraPose[], config: GaussianSplatConfig): Promise<TrainingResult>;
+  
+  // Density control
+  densifyAndPrune(iteration: number): Promise<{ split: number; cloned: number; pruned: number }>;
+  resetOpacities(): void;
+  increaseSHDegree(): void;
+  
+  // Rendering
+  render(camera: CameraPose, width: number, height: number): Promise<RenderOutput>;
+  renderTiled(camera: CameraPose, width: number, height: number): Promise<RenderOutput>;
+  
+  // Export
+  extractMesh(method: 'marching_cubes' | 'poisson' | 'tsdf', resolution: number): Promise<TriangleMesh>;
+  exportPLY(path: string): Promise<void>;
+  exportSplat(path: string): Promise<void>;
+  
+  // Compression
+  compress(config: GaussianCompressionConfig): Promise<GaussianCloud>;
+  
+  // Serialization
+  saveCheckpoint(path: string): Promise<void>;
+  loadCheckpoint(path: string): Promise<void>;
+  
+  // Metrics
+  evaluateNovelViews(testImages: ImageData[], testCameras: CameraPose[]): Promise<{ psnr: number; ssim: number; lpips: number }>;
+}
+```
+Key Components
+SfMInitializer — Initialize Gaussians from Structure-from-Motion sparse point cloud with position, initial scale from nearest-neighbor distance, and random SH/rotation
+GaussianProjector — Project 3D Gaussians to 2D screen-space Gaussians using the Jacobian of the projective transformation: Σ' = J W Σ Wᵀ Jᵀ
+TileSorter — Assign projected Gaussians to screen tiles, sort by depth within each tile using GPU-friendly radix sort
+AlphaBlender — Front-to-back alpha compositing within each tile: C = Σ cᵢ · αᵢ · Πⱼ₌₁ⁱ⁻¹(1 - αⱼ)
+DensityController — Adaptive density control: clone small Gaussians with large gradients, split large Gaussians with large gradients, prune transparent Gaussians
+SphericalHarmonicsEvaluator — Evaluate view-dependent color from SH coefficients (degree 0: diffuse, degrees 1-3: view-dependent)
+DifferentiableRasterizer — Backward pass computing gradients through the rasterization pipeline for all Gaussian parameters
+DynamicGaussianTracker — Track Gaussian primitives across time for dynamic scene reconstruction (Luiten et al., 2024)
+GaussianCompressor — Reduce storage via SH coefficient quantization, opacity-based pruning, and codebook compression
+MeshExtractor — Extract triangle meshes from Gaussian representations using TSDF fusion or Poisson surface reconstruction
+Testing Strategy
+Unit tests for Gaussian projection math (compare with analytical 2D Gaussians)
+Tile sorting tests verifying correct depth ordering within tiles
+Alpha blending tests with known Gaussian configurations and expected pixel colors
+Training convergence tests on NeRF-Synthetic (Blender) dataset achieving PSNR > 33dB
+Density control tests verifying Gaussian count stabilization
+Real-time rendering benchmarks: >30 FPS at 1080p for indoor scenes
+Compression tests measuring quality vs. size trade-off
+Novel view synthesis evaluation against ground truth on Mip-NeRF 360 scenes
+References
+Kerbl et al. — 3D Gaussian Splatting for Real-Time Radiance Field Rendering (SIGGRAPH 2023)
+Luiten et al. — Dynamic 3D Gaussians: Tracking by Persistent Dynamic View Synthesis (3DV 2024)
+Wu et al. — 4D Gaussian Splatting for Real-Time Dynamic Scene Rendering (CVPR 2024)
+Fan et al. — Tri-MipRF: Tri-Mip Representation for Efficient Anti-Aliasing Neural Radiance Fields (ICCV 2023)
+Zwicker et al. — EWA Splatting (IEEE TVCG 2002)
+Yifan et al. — Differentiable Surface Splatting for Point-Based Geometry Processing (SIGGRAPH Asia 2019)
+Niedermayr et al. — Compressed 3D Gaussian Splatting for Accelerated Novel View Synthesis (CVPR 2024)
+Activity
+web3guru888
+added
+enhancementNew feature or requestNew feature or request
+on Apr 14, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or request
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

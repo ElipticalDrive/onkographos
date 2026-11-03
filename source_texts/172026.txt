@@ -1,0 +1,169 @@
+Code, mit dem Sie umfangreiche volumetrische Bilder effizient mit Deckkraft und Farbe in Windows Mixed Reality rendern können.
+
+Volumengrafik - Mixed Reality | Microsoft Learn
+Inhaltsverzeichnis
+Editormodus beenden
+Learn fragen
+Learn fragen
+Lesemodus
+Inhaltsverzeichnis
+Auf Englisch lesen
+Hinzufügen
+Zu Plänen hinzufügen
+Markdown kopieren
+Drucken
+Hinweis
+Für den Zugriff auf diese Seite ist eine Autorisierung erforderlich. Sie können versuchen, sich anzumelden oder das Verzeichnis zu wechseln.
+Für den Zugriff auf diese Seite ist eine Autorisierung erforderlich. Sie können versuchen, das Verzeichnis zu wechseln.
+Volumengrafik
+Feedback
+Wenn Sie noch nicht mit volumerendern sind, empfehlen wir Ihnen, unsere Übersicht zu lesen.
+Darstellen von 3D-Texturen
+Auf der CPU:
+```
+public struct Int3 { public int X, Y, Z; /* ... */ }
+ public class VolumeHeader  {
+   public readonly Int3 Size;
+   public VolumeHeader(Int3 size) { this.Size = size;  }
+   public int CubicToLinearIndex(Int3 index) {
+     return index.X + (index.Y * (Size.X)) + (index.Z * (Size.X * Size.Y));
+   }
+   public Int3 LinearToCubicIndex(int linearIndex)
+   {
+     return new Int3((linearIndex / 1) % Size.X,
+       (linearIndex / Size.X) % Size.Y,
+       (linearIndex / (Size.X * Size.Y)) % Size.Z);
+   }
+   /* ... */
+ }
+ public class VolumeBuffer<T> {
+   public readonly VolumeHeader Header;
+   public readonly T[] DataArray;
+   public T GetVoxel(Int3 pos)        {
+     return this.DataArray[this.Header.CubicToLinearIndex(pos)];
+   }
+   public void SetVoxel(Int3 pos, T val)        {
+     this.DataArray[this.Header.CubicToLinearIndex(pos)] = val;
+   }
+   public T this[Int3 pos] {
+     get { return this.GetVoxel(pos); }
+     set { this.SetVoxel(pos, value); }
+   }
+   /* ... */
+ }
+```
+Auf der GPU:
+```
+float3 _VolBufferSize;
+ int3 UnitVolumeToIntVolume(float3 coord) {
+   return (int3)( coord * _VolBufferSize.xyz );
+ }
+ int IntVolumeToLinearIndex(int3 coord, int3 size) {
+   return coord.x + ( coord.y * size.x ) + ( coord.z * ( size.x * size.y ) );
+ }
+ uniform StructuredBuffer<float> _VolBuffer;
+ float SampleVol(float3 coord3 ) {
+   int3 intIndex3 = UnitVolumeToIntVolume( coord3 );
+   int index1D = IntVolumeToLinearIndex( intIndex3, _VolBufferSize.xyz);
+   return __VolBuffer[index1D];
+ }
+```
+Schattierung und Verläufe
+Hier erfahren Sie, wie Sie ein Volume, z. B. MRI, für eine nützliche Visualisierung schattieren. Die primäre Methode besteht darin, ein "Intensitätsfenster" (min. und maximal) zu haben, in dem Sie Intensitäten sehen möchten, und einfach in diesen Bereich skalieren, um die Schwarzweißintensität zu sehen. Eine "Farbrampe" kann dann auf die Werte innerhalb dieses Bereichs angewendet und als Textur gespeichert werden, sodass verschiedene Teile des Intensitätsspektrums unterschiedliche Farben schattiert werden können:
+```
+float4 ShadeVol( float intensity ) {
+   float unitIntensity = saturate( intensity - IntensityMin / ( IntensityMax - IntensityMin ) );
+   // Simple two point black and white intensity:
+   color.rgba = unitIntensity;
+   // Color ramp method:
+   color.rgba = tex2d( ColorRampTexture, float2( unitIntensity, 0 ) );
+}
+```
+In vielen unserer Anwendungen speichern wir in unserem Volumen sowohl einen Rohintensitätswert als auch einen "Segmentierungsindex" (um verschiedene Teile wie Haut und Knochen zu segmentieren; diese Segmente werden von Experten in dedizierten Tools erstellt). Dies kann mit dem oben genannten Ansatz kombiniert werden, um eine andere Farbe oder sogar eine andere Farbrampe für jeden Segmentindex festzulegen:
+```
+// Change color to match segment index (fade each segment towards black):
+ color.rgb = SegmentColors[ segment_index ] * color.a; // brighter alpha gives brighter color
+```
+Volume Slicing in einem Shader
+Ein guter erster Schritt besteht darin, eine "Slicing-Ebene" zu erstellen, die sich durch das Volume bewegen, "es aufteilen" und wie die Scanwerte an jedem Punkt ausgeführt werden können. Dabei wird davon ausgegangen, dass es einen "VolumeSpace"-Cube gibt, der angibt, wo sich das Volume im Weltraum befindet, der als Referenz zum Platzieren der Punkte verwendet werden kann:
+```
+// In the vertex shader:
+ float4 worldPos = mul(_Object2World, float4(input.vertex.xyz, 1));
+ float4 volSpace = mul(_WorldToVolume, float4(worldPos, 1));
+```
+```
+// In the pixel shader:
+ float4 color = ShadeVol( SampleVol( volSpace ) );
+```
+Volumeablaufverfolgung in Shadern
+Verwenden der GPU zum Ausführen der Subvolume-Ablaufverfolgung (führt einige Voxels tief, dann Ebenen der Daten von hinten nach vorne):
+```
+float4 AlphaBlend(float4 dst, float4 src) {
+   float4 res = (src * src.a) + (dst - dst * src.a);
+   res.a = src.a + (dst.a - dst.a*src.a);
+   return res;
+ }
+ float4 volTraceSubVolume(float3 objPosStart, float3 cameraPosVolSpace) {
+   float maxDepth = 0.15; // depth in volume space, customize!!!
+   float numLoops = 10; // can be 400 on nice PC
+   float4 curColor = float4(0, 0, 0, 0);
+   // Figure out front and back volume coords to walk through:
+   float3 frontCoord = objPosStart;
+   float3 backCoord = frontPos + (normalize(cameraPosVolSpace - objPosStart) * maxDepth);
+   float3 stepCoord = (frontCoord - backCoord) / numLoops;
+   float3 curCoord = backCoord;
+   // Add per-pixel random offset, avoids layer aliasing:
+   curCoord += stepCoord * RandomFromPositionFast(objPosStart);
+   // Walk from back to front (to make front appear in-front of back):
+   for (float i = 0; i < numLoops; i++) {
+     float intensity = SampleVol(curCoord);
+     float4 shaded = ShadeVol(intensity);
+     curColor = AlphaBlend(curColor, shaded);
+     curCoord += stepCoord;
+   }
+   return curColor;
+ }
+```
+```
+// In the vertex shader:
+ float4 worldPos = mul(_Object2World, float4(input.vertex.xyz, 1));
+ float4 volSpace = mul(_WorldToVolume, float4(worldPos.xyz, 1));
+ float4 cameraInVolSpace = mul(_WorldToVolume, float4(_WorldSpaceCameraPos.xyz, 1));
+```
+```
+// In the pixel shader:
+ float4 color = volTraceSubVolume( volSpace, cameraInVolSpace );
+```
+Rendering des gesamten Volumes
+Wenn Sie den obigen Teilvolumcode ändern, erhalten Sie Folgendes:
+```
+float4 volTraceSubVolume(float3 objPosStart, float3 cameraPosVolSpace) {
+   float maxDepth = 1.73; // sqrt(3), max distance from point on cube to any other point on cube
+   int maxSamples = 400; // just in case, keep this value within bounds
+   // not shown: trim front and back positions to both be within the cube
+   int distanceInVoxels = length(UnitVolumeToIntVolume(frontPos - backPos)); // measure distance in voxels
+   int numLoops = min( distanceInVoxels, maxSamples ); // put a min on the voxels to sample
+```
+Szenenrendering mit gemischter Auflösung
+So rendern Sie einen Teil der Szene mit einer niedrigen Auflösung und setzen Sie ihn wieder ein:
+Einrichten von zwei Off-Screen-Kameras, eine, um jedem Auge zu folgen, die jeden Frame aktualisieren
+Richten Sie zwei Renderziele mit niedriger Auflösung (jeweils 200 x 200) ein, in die die Kameras gerendert werden.
+Einrichten eines Quads, das sich vor dem Benutzer bewegt
+Jeder Frame:
+Zeichnen Sie die Renderziele für jedes Auge mit niedriger Auflösung (Volumendaten, teure Shader usw.)
+Zeichnen Sie die Szene normal als vollständige Auflösung (Gitter, Benutzeroberfläche usw.)
+Zeichnen Sie ein Quad vor dem Benutzer, über die Szene, und projizieren Sie die Low-Res-Renders auf diese
+Ergebnis: Visuelle Kombination von Elementen mit voller Auflösung mit geringer Auflösung, aber volumenintensiven Daten mit hoher Dichte
+Feedback
+War diese Seite hilfreich?
+Ja
+No
+No
+Benötigen Sie Hilfe zu diesem Thema?
+Möchten Sie versuchen, Ask Learn zu verwenden, um Sie durch dieses Thema zu klären oder zu leiten?
+Learn fragen
+Learn fragen
+Lösung vorschlagen?
+Zusätzliche Ressourcen
+Zuletzt aktualisiert um
+2023-07-12

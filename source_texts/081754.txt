@@ -1,0 +1,386 @@
+I am currently having a case where the result look like this: If I shuffle around the triangles a bit so spans are added in a different order, the result looks like this: The order of the spans added looks like this for the two cases: Me...
+
+Order of triangles to rasterization matters · Issue #232 · recastnavigation/recastnavigation · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Order of triangles to rasterization matters #232
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Order of triangles to rasterization matters#232
+Copy link
+Labels
+area: Recasttype: bug
+Milestone
+2.0.0
+Description
+jakobbotsch
+opened on Sep 13, 2016
+Issue body actions
+I am currently having a case where the result look like this:
+If I shuffle around the triangles a bit so spans are added in a different order, the result looks like this:
+The order of the spans added looks like this for the two cases:
+```
+Mesh over ledge case:
+Adding 682-684 of 0
+Adding 548-549 of 0
+Adding 625-626 of 63
+Adding 685-686 of 63
+Adding 685-687 of 0
+Adding 686-688 of 0
+Adding 765-767 of 63
+Adding 765-767 of 63
+Adding 761-763 of 0
+Adding 69-70 of 63
+Result:
+69-70 of 63
+548-549 of 0
+625-626 of 63
+682-684 of 0
+685-688 of 63
+761-763 of 0
+765-767 of 63
+```
+```
+No mesh over ledge case:
+Adding 69-70 of 63
+Adding 765-767 of 63
+Adding 765-767 of 63
+Adding 682-684 of 0
+Adding 761-763 of 0
+Adding 548-549 of 0
+Adding 625-626 of 63
+Adding 685-686 of 63
+Adding 686-688 of 0
+Adding 685-687 of 0
+Result:
+69-70 of 63
+548-549 of 0
+625-626 of 63
+682-684 of 0
+685-688 of 0
+761-763 of 0
+765-767 of 63
+```
+The discrepancy is easy to see in the 685-688 span.
+Reactions are currently unavailable
+Activity
+jakobbotsch commented on Sep 13, 2016
+jakobbotsch
+on Sep 13, 2016
+MemberAuthor
+More actions
+The error looks to be around here:
+recastnavigation/Recast/Source/RecastRasterization.cpp
+Lines 128 to 133
+in
+15ebb8b
+if (cur->smax > s->smax)
+s->smax = cur->smax;
+// Merge flags.
+if (rcAbs((int)s->smax - (int)cur->smax) <= flagMergeThr)
+s->area = rcMax(s->area, cur->area);
+The flags should be merged before smax has been merged; otherwise the difference will always be 0 if the previous span ended before the new span ends.
+@memononen Does that sound correct?
+jakobbotsch commented on Sep 13, 2016
+jakobbotsch
+on Sep 13, 2016
+Last edited by jakobbotsch
+MemberAuthor
+More actions
+No, that will not fix the issue here. There is a more fundamental issue of doing the merging this way. Let's assume flagMergeThr = 1; then if we have intersecting spans with smax
+1 2 3
+they will end up with the max area of 1, 2, 3, while
+1 3 2
+will end up with the max area of 1, 2. This is regardless of changing the behavior as I described in previous post.
+I'm not quite sure how that could even be fixed though. Perhaps something that "wraps" spans of lower area type around spans of higher area type? So the spans in this issue would become something like
+```
+685-686 of 63
+687-688 of 0
+```
+which will be handled in rcFilterLowHangingWalkableObstacles.
+memononen commented on Sep 14, 2016
+memononen
+on Sep 14, 2016
+Member
+More actions
+If I look at the data correctly, this happens:
+```
+Mesh over ledge case:
+Adding 5-6 of 63
+Adding 5-7 of 0
+Adding 6-8 of 0
+Result:
+5-6 of 63
+5-7 of 63
+5-8 of 63
+
+No mesh over ledge case:
+Adding 5-6 of 63
+Adding 6-8 of 0
+Adding 5-7 of 0
+Result:
+5-6 of 63
+5-8 of 0
+5-8 of 0
+```
+I'm kind of surprised this has not happened more.
+I cannot think of any other solution than to only allow to merge spans of same type during addSpan() and then do final merge when converting to CHF.
+jakobbotsch commented on Sep 14, 2016
+jakobbotsch
+on Sep 14, 2016
+MemberAuthor
+More actions
+How do you think intersecting segments of different types should be handled?
+Should they both be stored (probably ordered by smax only)? Or should we do a tie breaker for the intersecting parts (eg. always prefer highest area type or something like that)?
+memononen commented on Sep 14, 2016
+memononen
+on Sep 14, 2016
+Last edited by memononen
+Member
+More actions
+I think it would be a good idea to have the segments as sorted list based on smin. And the final merge should be the same as inserting each span in smin order using the current algorithm.
+Doing merge while rasterizing gets rid of a lot of spans. We might end up having 2x or so spans.
+[edit] smin order is less important actually, more important is to have some kind of sorting so the order is consistent regardless of triangle input.
+jakobbotsch commented on Sep 14, 2016
+jakobbotsch
+on Sep 14, 2016
+Last edited by jakobbotsch
+MemberAuthor
+More actions
+Ok, I will try to play around with that. However I'm having a hard time wrapping my head around the problem we need to solve here.
+I realize that there can be multiple triangles with different flags touching the same voxels. That is the fundamental issue, and we need some way to handle this situation, and to properly end up with the correct flags in the final heightfield.
+To me it seems a good solution should be to always pick the flag of the top-most span. Since we are merging intersecting spans, there is a solid column of terrain here, and we will only generate mesh on top; so pick the top flag.
+Then we just need a rule for which flag to pick when there is no top-most span. Similarly to flagMergeThr we could just pick the max flag. It seems pretty arbitrary and the correct solution would probably be case-by-case depending on the input terrain, but picking max is ok.
+With this algorithm, we get the following:
+```
+Mesh over ledge case:
+Adding 5-6 of 63
+Adding 5-7 of 0
+Adding 6-8 of 0
+Result:
+5-6 of 63
+5-7 of 0
+5-8 of 0
+
+No mesh over ledge case:
+Adding 5-6 of 63
+Adding 6-8 of 0
+Adding 5-7 of 0
+Result:
+5-6 of 63
+5-8 of 0
+5-8 of 0
+```
+Both cases are equal, and it makes sense with the rasterization input (the triangles here are too steep).
+The only problem left is to properly handle the climbing here. To me it seems rcFilterLowHangingWalkableObstacles is the function that is supposed to handle this, but it does not check if we can climb from neighbors, only if there is a walkable span below that is within the climb height. So I don't quite understand how that works reliably at all. Do I misunderstand something here, and how does my rasterization change sound?
+Edit: I have made a mistake in the shuffling code. It was rasterizing in a different order, but with the default value for flagMergeThr which is 1 instead of max climb. The same mistake was in our code where we use R&D. So the screenshots are not right - fixing this will properly make both cases equal and fixes a bunch of these cases for us.
+Perhaps we don't even need to fix this then, as it seems sufficiently rare when passing the proper threshold, and the fix might be costly.
+memononen commented on Sep 15, 2016
+memononen
+on Sep 15, 2016
+Member
+More actions
+The idea behind picking max area type is to favor walkable areas when there's walkable and non-wealkable area close to each other.
+The reason for the current merge logic (take largest) is that many games have small geometry, which is not navigable based on slope. Think lo-res pebble or tree roots. Or even the vertical section of stairs. There were even more exotic cases on production levels. rcFilterLowHangingWalkableObstacles handles the same problem in case the obstacle is floating. This happens more when the cell height is small.
+An earlier version of Recast tried to reconstruct the slope from the rasterized data, but It was not very reliable. That would have solved the root cause (pun intended).
+jakobbotsch commented on Sep 15, 2016
+jakobbotsch
+on Sep 15, 2016
+MemberAuthor
+More actions
+So where is climbing actually handled? Because rcFilterLowHangingWalkableObstacles and the flag merging in rasterization only handles it within the same cell. Eg. if there is no walkable span below something that is obviously climbable it will be marked unnavigable due to slope. I assume this is just an approximation that turns out to work in practice and is efficient?
+I checked one of your old blog posts: http://digestingduck.blogspot.dk/2010/01/rough-fringes.html
+Ignoring efficiency, what stops us from marking neighbors within climb height of walkable neighbors as walkable? The only thing I could think of is the problem that should already be solved in rcFilterLedgeSpans under the Filtering Neighbours section in that post.
+memononen commented on Sep 15, 2016
+memononen
+on Sep 15, 2016
+Member
+More actions
+rcFilterLowHangingWalkableObstacles operates on two consecutive spans. If the bottom is walkable and top is not, and the top of spans are within threshold, then the top will be walkable too. Flag merging handles the case when the spans overlap.
+http://4.bp.blogspot.com/_-u6ZJlBFOL0/S2K_jaUWsHI/AAAAAAAAAKc/c2Rx7Rdwxgw/s400/fringe_bad_voxels.jpg
+Left: span merging, right: rcFilterLowHangingWalkableObstacles
+"...marking neighbors within climb height of walkable neighbors as walkable?"
+Does not compute :)
+jakobbotsch commented on Sep 15, 2016
+jakobbotsch
+on Sep 15, 2016
+MemberAuthor
+More actions
+I don't know if this helps. My Paint skills are not good 😄.
+Essentially, as far as I can tell, the climbing right now relies on there being some walkable terrain below the step. But this is not guaranteed. In my picture there, there is a span touching just one steep triangle. So it is marked unwalkable, even though the agent can climb over it. And since there is no terrain below it, it is never promoted to walkable.
+memononen commented on Sep 15, 2016
+memononen
+on Sep 15, 2016
+Member
+More actions
+Got it :)
+I think that kind of filter is doable. It is possible that it will ran into false positives. Digging out neighbour information of heightfield is not fun, but doable.
+jakobbotsch commented on Sep 15, 2016
+jakobbotsch
+on Sep 15, 2016
+MemberAuthor
+More actions
+Here is a possible false positive. But this one should already be handled in rcFilterLedgeSpans, correct?
+But if we could use this kind of algorithm we could use the simple deterministic rasterization algorithm I mentioned, and get rid of rcFilterLowHangingWalkableObstacles too.
+memononen commented on Sep 15, 2016
+memononen
+on Sep 15, 2016
+Member
+More actions
+If the filter is set up so that it will try to "fill in" only if the height diff between left and right is less than climb, then that above should not trigger the fill in.
+I don't see how your suggested filter will handle rcFilterLowHangingWalkableObstacles. Or solve the "always use top" merging.
+Single voxel sized non-walkable areas is one thing, but there are many others. I.e. the diagonal bar in the obstacle A (in the blog post) has two pixel wide gaps. Sometimes you have double sided geometry, i.e. non-walkable and walkable on top of each other, etc.
+I still think that the general solution is to only merge spans of same type and then do a final pass to merge the flags (maybe even together with low hanging spans).
+jakobbotsch commented on Sep 15, 2016
+jakobbotsch
+on Sep 15, 2016
+Last edited by jakobbotsch
+MemberAuthor
+More actions
+If the filter is set up so that it will try to "fill in" only if the height diff between left and right is less than climb, then that above should not trigger the fill in.
+I was concerned that the walkability flag may be migrated from span to span (i.e. bottom is walkable means we can climb one voxel up, next voxel is walkable means we can climb another up, etc.). I am probably not thinking in correct terms of how it would need to be implemented. We probably need to look at crossing the unnavigable spans.
+I don't see how your suggested filter will handle rcFilterLowHangingWalkableObstacles.
+Or solve the "always use top" merging.
+Mostly same way as previous case. If top is unnavigable because of a steep triangle, it will be marked navigable if we can climb across it.
+Single voxel sized non-walkable areas is one thing, but there are many others. I.e. the diagonal bar in the obstacle A (in the blog post) has two pixel wide gaps. Sometimes you have double sided geometry, i.e. non-walkable and walkable on top of each other, etc.
+Yes, it would need to be a more general solution, not just the 1-pixel wide version. I haven't even figured out when we should be able to climb over unnavigable voxels. When it has a walkable neighbor within agent radius that is within climb distance? I am not sure how climbing is usually performed in physics engines...
+I haven't worked a lot with this representation before so I probably still have some fundamental misunderstandings about it :)
+hymerman commented on Sep 16, 2016
+hymerman
+on Sep 16, 2016
+Member
+More actions
+Quick note; in my experience the 'climbing' is really 'stepping' and wouldn't be handled with e.g. bespoke climbing animations, but normal locomotion with IK to place the feet and alter pose. Actual climbing needs something more, e.g. off-mesh links. Physics-wise, on a basic level it's handled by bumping a capsule collider over the physics geometry (with an end cap radius of the climb height), but that's quite unreliable so many games use extra raycasts around characters to move the collider up/down if they need to step.
+jakobbotsch commented on Sep 16, 2016
+jakobbotsch
+on Sep 16, 2016
+MemberAuthor
+More actions
+@hymerman Thanks for the explanation. Do you know how this particular case of stepping is handled (with a non-vertical triangle but still steppable)? Is the check for flat terrain in 2D range of agent radius, below stepping height?
+hymerman commented on Sep 16, 2016
+hymerman
+on Sep 16, 2016
+Member
+More actions
+TL;DR: there are many ways, some will treat your example as walkable, some will not :( We can either be conservative and cause a break in the navmesh, demand good physics from users and join it up, or provide options for users to configure it to match the navmesh to how their physics works.
+The situation in your last diagram with the floating object? Annoyingly, it depends on the physics implementation - some games will happily move a character up that, some won't. As such it's hard to know what to do with the navmesh :(
+The best implementations (i.e. the ones that seem to map capsules most accurately to what humans would actually be able to do given the geometry) will indeed have a several raycast checks for flat terrain in 2D range (not necessarily agent radius, maybe a bit further), within step height, with a check that there's line of sight to that point so they're not stepping on terrain the other side of a thin wall. As such, the obstacle on the right in your example would be traversable.
+The most common implementation (i.e. the one everyone starts with and is all over the web in physics character controller tutorials) is applying lateral forces to a capsule with end cap radius ~= agent radius, and allowing contact resolution to move the character in the right direction. In that case, in your example the object probably won't be traversable as the capsule will probably collide with the slope first rather than the corner with the flat part, and that slope is steep enough that gravity will counteract the upwards component of the force.
+So here it looks like we need to either
+Be conservative and put a break in the navmesh there, so we don't generate paths that some codebases can't navigate
+Be a bit opinionated about how end users should make characters follow these paths, joining the navmesh in these cases and telling people they should have better character controllers
+Provide options to handle this in different ways
+Sorry, I feel like I've just made it more complicated than it was! Just thought I'd offer some observations about how I've seen things done out 'in the wild'. Take it with a pinch of salt, clearly I've only seen a tiny proportion of all games' implementations :)
+jakobbotsch commented on Sep 16, 2016
+jakobbotsch
+on Sep 16, 2016
+MemberAuthor
+More actions
+@hymerman Thanks so much for that. I think the best course of action is to treat it as a separate issue from this PR, and if we want to treat it, it should just be another filter that can be called/not called depending on what you want.
+In that case the issues will probably be pretty orthogonal. I will look into doing what Mikko suggested (with a final merging step doing CHF construction). If it turns out to be too slow/memory intensive I will probably not bother at all as it seems sufficiently rare.
+Thanks for the inputs all around!
+👍React with 👍1Reacted by Graham Pentheny
+hymerman commented on Sep 16, 2016
+hymerman
+on Sep 16, 2016
+Member
+More actions
+👍 Good call!
+jakobbotsch commented on Sep 16, 2016
+jakobbotsch
+on Sep 16, 2016
+MemberAuthor
+More actions
+Actually I may have been too fast. The floating obstacle is already handled by rcFilterLowHangingWalkableObstacles. The case I am talking about is this one:
+But I guess the same principle applies?
+hymerman commented on Sep 16, 2016
+hymerman
+on Sep 16, 2016
+Member
+More actions
+Yep, same thing physics- and animation-wise.
+👍React with 👍2Reacted by Jakob Botsch Nielsen and Graham Pentheny
+grahamboree commented on Sep 21, 2016
+grahamboree
+on Sep 21, 2016
+Last edited by grahamboree
+Member
+More actions
+My 2 cents: I think what Mikko outlined is a step in the right direction here: merge only same-flag spans, and then perform a final merge step when generating the chf. In that final merge step, though, we still have the same problem:
+e.g.
+```
+        |________Flag_0_________|
+|_______________Flag_1_________________|
+```
+could result in
+```
+|___1___|__________0_____________|__1___|
+```
+or
+```
+|__________________1___________________|
+```
+depending on the order in which spans with different flags are combined. Is this something we'd decree some logic on in the docs (e.g. prefer higher span flag numbers) and/or should we allow the user to control this? Seems like it has the potential of having a serious impact on the final result. Does combining it from highest to lowest smax solve this?
+jakobbotsch commented on Sep 22, 2016
+jakobbotsch
+on Sep 22, 2016
+MemberAuthor
+More actions
+@grahamboree It solves it in the way that it does something consistent, regardless of the order the triangles are passed in. However, it would retain the logic to always prefer the higher area types. Might be good to document that - but I don't really think there is a good clean way to allow users to pick the tie breakers on a case-by-case basis.
+👍React with 👍1Reacted by Graham Pentheny
+grahamboree commented on Sep 24, 2016
+grahamboree
+on Sep 24, 2016
+Member
+More actions
+@JanielS Yeah I think you're right. The only other thing we really could do is allow the user to specify something like "always prefer areas with id 1 over 5" but I'm not sure how useful that really is. Keeping things more or less consistent with what we've already got, and documenting this behavior is probably the best bet.
+hymerman
+added
+type: bug
+on May 9, 2017
+Daerst commented on Mar 17, 2021
+Daerst
+on Mar 17, 2021
+More actions
+Here's an error that's happening both in some custom code using Recast, as well as in latest Unity, with three simple cubes:
+The cube on the bottom has AreaID = Water (think e.g. an ocean), the large 'tower' block and the slope leading up to it have AreaID = Walkable. In our custom code we use 0 = NonWalkable, 1 = Walkable, 2 = Water. Unity uses 0 = Walkable, 1 = NonWalkable, and then 3 is the first user-defined area, though they're probably doing some internal remapping to play well with Recast's internal RC_NULL_AREA = 0.
+The issue that I'm seeing is that the Water area from below is being merged / propagated up all the way along the non-walkable upright triangle, where it even takes precedence over the Walkable because it has the larger ID:
+```
+// Merge flags. 
+if (rcAbs((int)s->smax - (int)cur->smax) <= flagMergeThr) 
+    s->area = rcMax(s->area, cur->area); 
+```
+I 'fixed' this by giving Walkable a large ID, but of course that's more of a workaround than a general solution.
+grahamboree
+added
+area: Recast
+on Jul 5, 2023
+grahamboree
+added this to the 2.0.0 milestone on Jul 5, 2023
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area: Recasttype: bug
+Type
+No type
+Projects
+No projects
+Milestone
+2.0.0No due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

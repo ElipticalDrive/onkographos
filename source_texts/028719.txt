@@ -1,0 +1,859 @@
+DrivingVoxels: Compositional Sparse Voxel Rasterization
+for Dynamic Driving Scene Reconstruction
+Tania Aguirre1,2
+Luis Roldão1
+Moussab Bennehar1
+Nathan Piasco1
+Dzmitry Tsishkou1
+Simone Rossi 2
+Pietro Michiardi2
+arXiv:2606.23031v1 [cs.CV] 22 Jun 2026
+1
+Noah’s Ark, Huawei Paris Research Center, France
+2
+EURECOM, France
+StreetGS [28]
+DrivingVoxels (ours)
+Train Time: 102 min. – PSNR = 23.89
+Train Time: 30 min. – PSNR = 23.90
+CD = 0.19 – F1@0.1m = 31.8%
+CD = 0.06 – F1@0.1m = 59.9%
+Static / Dynamic Scene Decomposition
+Fig. 1: Dynamic Scene Reconstruction and Decomposition Performance. Compared to state-of-the-art 3DGS approaches such as StreetGS [28] (left), DrivingVoxels (center) eliminates floating artifacts and geometric degradation, achieving superior structural
+accuracy (CD = 0.06, F1 = 59.9%) while reducing total optimization overhead by over
+3.3× (from 102 minutes down to 30 minutes). Our compositional multi-octree formulation
+cleanly decouples stationary background from independent moving actors (right).
+Abstract. Reconstructing dynamic urban scenes remains challenging due to the
+unbounded nature of driving environments and the presence of multiple dynamic
+objects. Currently, potentially faster sparse voxel methods are mainly designed for
+static scenarios. On the other hand, dynamic approaches based on 3D Gaussian
+Splatting, despite their high-fidelity, are often time-consuming for driving scenarios and exhibit uncontrollable memory growth in large scenes. To address these
+limitations, we present DrivingVoxels, a compositional sparse voxel rendering
+framework for dynamic driving scenes. Our method jointly rasterizes sparse voxels from multiple independent octrees within a single rendering pass. Each rigid
+dynamic object is represented by an octree defined in its local coordinate frame,
+while a separate static octree models the stationary background. DrivingVoxels adopts a fully explicit, neural-free representation together with a LiDAR-
+2
+T. Aguirre et al.
+guided structural initialization that efficiently captures scene geometry. We evaluate our framework on the PandaSet benchmark, demonstrating that DrivingVoxels performs on par on perceptual metrics and better on structural metrics for
+NVS and reconstruction—while requiring shorter training times than previous
+3DGS-base methods to an efficient optimization workflow anchored by a strong
+LiDAR prior.
+1
+Introduction
+Photorealistic reconstruction of driving environments is a key component for autonomous
+driving simulation, enabling applications such as novel view synthesis, sensor simulation,
+and closed-loop policy evaluation. Achieving this goal requires scene representations that are
+simultaneously scalable, geometrically consistent, and efficient to render.
+Novel view synthesis (NVS) has seen rapid progress with the introduction of Neural
+Radiance Fields (NeRF) [14] and 3D Gaussian Splatting (3DGS) [11]. NeRF offers a continuous, physically grounded volumetric representation but is bottlenecked by expensive
+ray-marching. Conversely, 3DGS achieves real-time speeds via explicit anisotropic Gaussians
+splatting, but frequently suffers from floating artifacts due to a lack of structural consistency. Sparse Voxel Rasterization (SVRaster) [18] was recently proposed to combine the fast
+tile-based rasterization of 3DGS with explicit sparse voxel primitives, eliminating floating
+artifacts via Morton-ordered depth sorting while maintaining a well-structured volumetric
+representation similar to NeRF.
+However, existing SVRaster formulations [12, 16, 18] assume a completely static world,
+preventing their use in autonomous driving simulations where scenes contain many moving
+actors like vehicles and pedestrians. This limitation comes from two main constraints in
+SVRaster. First, the efficient Morton-ordered depth sorting requires a single, fixed coordinate
+system, which means moving objects cannot easily be combined into a single global tree.
+Second, the sparse voxel octree structure is locked into place after it is created. While the
+system can prune or subdivide voxels during training, all new child voxels must still follow
+the rigid grid of the parent octree. Furthermore, gradients cannot change the actual positions
+of the voxel corners. As a result, a single static octree lacks the mathematical flexibility to
+track independent movements over time, restricting its capability entirely to static scenes.
+Latest Gaussian-based dynamic methods for driving scenarios, such as OmniRe [5] and
+StreetGaussians [28], address dynamic scenes by building scene graphs of per-object Gaussian representations in canonical spaces. While these methods are highly expressive, they still
+keep the main limitations of Gaussian primitives, such as ill-defined density fields, inaccurate surface normals, and unpredictable memory spikes during runtime. On the other hand,
+SaLF [3] uses a sparse voxel layout for simulation but places a local implicit field inside each
+voxel node. This design requires explicit hierarchical octree traversal alongside costly neural
+network calculations, which means it reintroduces the slow computational bottlenecks that
+explicit primitives are supposed to eliminate.
+Therefore, extending sparse voxel rasterization to dynamic urban environments requires
+overcoming the rigid single-octree assumption without sacrificing the efficiency advantages
+of voxel-based explicit rendering. To address such limitation, we introduce DrivingVoxels,
+DrivingVoxels
+3
+a compositional sparse voxel rendering framework for dynamic driving (Fig. 1). Our method
+extends the original SVRaster architecture [18] to handle independently moving actors without losing its neural-free, explicit representation. During rendering, we explicitly solve the
+depth ordering by computing the ray-box intersections between the camera rays and the
+bounding boxes of the moving vehicles. The traversal order between the static background
+voxels and the dynamic foreground voxels along each ray is fully defined by sorting these
+entry and exit points by camera distance. Using this sorting strategy, each moving actor
+is reconstructed in its own local canonical octree, mapped into world coordinates via rigid
+transformations, and smoothly composited into the final scene while correctly propagating
+transmittance across all octree boundaries.DrivingVoxels also scales the scene representation
+to match the layout of driving environments and integrates LiDAR data to guide the training
+process. To summarize, the main contributions of our work are:
+– A novel compositional multi-octree voxel renderer that jointly rasterizes independent
+voxel volumes while resolving cross-volume depth ordering without merging tree structures.
+– A LiDAR-guided background initialization pipeline combining visibility pruning, proximitybased voxel subdivision, and soft density priors to accelerate convergence in large outdoor
+scenes.
+– Our method achieves competitive perceptual quality and state-of-the-art geometry reconstruction with faster training times on PandaSet [25].
+2
+Related Work
+Neural Radiance Fields (NeRF). Neural Radiance Fields (NeRF) [14] provide a foundation
+for photorealistic 3D scene reconstruction from 2D images by modeling scenes as continuous
+volumetric fields, mapping 3D coordinates and viewing directions to volumetric properties via
+a multilayer perceptron (MLP). While NeRF variants offer continuous, physically grounded
+representations, scaling them to large scenes is heavily constrained by the expensive computational overhead of volumetric ray-marching. Various explicit and hybrid structures have
+been introduced such as multiresolution hash encodings and tensor factorizations to accelerate this bottleneck [1, 7, 13, 15, 19]. Despite these optimization advancements, continuous
+volumetric sampling remains a fundamental challenge for scaling implicit representations to
+unbounded environments.
+3D Gaussian Splatting (3DGS). The introduction of 3D Gaussian Splatting (3DGS) [11]
+shifted the research focus toward explicit point-based rasterization to achieve real-time performance, projecting learnable anisotropic Gaussians directly onto the image plane. However,
+because multiple overlapping Gaussians can cover the same spatial coordinate, the actual volume density is mathematically ill-defined [18]. While this unconstrained optimization excels
+at interpolating training views, the lack of structural constraints frequently causes primitives
+to fall into disorganized spatial configurations under novel perspectives. This can lead to
+inconsistent surface normal approximations and severe geometric degradation when rendering extrapolated viewpoints. Furthermore, this spatial overlap introduces severe ambiguity
+during multi-modal feature fusion, causing semantic bleeding where distinct feature field
+4
+T. Aguirre et al.
+values are blended across overlapping primitives [24]. As a result, unconstrained point-based
+splatting is fundamentally ill-suited for downstream applications that require exact physical
+boundaries, structurally sound constraints, or discrete spatial partitioning, such as physical
+simulation [27], autonomous navigation [8], or language-embedded scene understanding [24].
+To enforce strict structural boundaries, SVRaster [18] models the scene using explicit,
+axis-aligned sparse voxels with discrete radiance values. This non-overlapping spatial partitioning is rendered by a hardware-accelerated tile rasterization via Morton-ordered depth
+sorting, which successfully eliminates floating artifacts common in standard 3DGS. We
+build directly upon this explicit architecture to handle complex environments. A neuralfree, bounded voxel representation provides deterministic control over scene complexity and
+a predictable quality-efficiency tradeoff unavailable to unconstrained Gaussian primitives.
+Urban Scene Reconstruction. Photorealistic reconstruction of dynamic urban scenes is crucial
+for closed-loop autonomous driving simulation [6,22,23]. Early implicit frameworks separate
+scene elements into static backgrounds and dynamic agents via object-centric NeRF models
+to handle moving actors [2], scaling up via multi-resolution hash tables in SUDS [21] or modeling complex sensor characteristics in NeuRAD [20]. However, these continuous volumetric methods remain bottlenecked by MLP ray-marching, preventing interactive simulation
+scales. While recent urban frameworks have pivoted toward explicit 3DGS [11] to achieve
+real-time rendering and temporal dynamics through pipelines like StreetSurf [9], PVG [4],
+DrivingGaussian [31], StreetGaussians [28], and OmniRe [5], their unconstrained primitives
+introduce geometric floaters and unpredictable memory footprints.
+As an alternative, sparse voxel layouts enforce strict physical boundaries to mitigate these
+geometric artifacts. Representing a major step forward in this category, SaLF [3] proposes
+a multi-sensor layout built upon 3D voxel primitives. However, SaLF relies on optimizing
+a hybrid local implicit field within each voxel node, which requires complex hierarchical
+traversals and neural queries. In contrast, our framework, DrivingVoxels, maintains a strictly
+neural-free, explicit voxel representation. By executing a ray-interval sorting strategy across
+independent, moving octrees, we resolve depth-correct composition and exact transmittance
+propagation.
+3
+Method
+We tackle the challenge of dynamic urban scene synthesis by modeling the environment as
+a multi-octree composition of explicit sparse voxel fields. Rather than using unconstrained
+point cloud primitives like 3D Gaussian Splatting [11], which lead to ill-defined density fields,
+floaters and unconstrained memory spikes, our framework builds on top of an explicit sparse
+voxel layout introduced by SVRaster [18].
+As illustrated in Fig. 2, our method allows us to decompose dynamic sequences into
+a high quality stationary background (Obg ) representation in the world frame (Sec. 3.1),
+while simultaneously having a canonical asset representation (Oi ) for individual moving
+vehicles relying on tracking data (Sec. 3.2). After a proper initialization of each representation
+(Sec. 3.3), we feed these octrees into our rendering function (Sec. 3.4) to achieve scene
+reconstruction in a driving scenario. This architecture jointly rasterizes voxels from multiple
+DrivingVoxels
+5
+Fig. 2: Overview of the DrivingVoxels pipeline. Camera rays are cast into a compositional scene of a global static background octree Obg in the world frame and independent dynamic assets octrees (Oi ) in local canonical spaces. The ray path is decomposed into sequential front-to-back segments based on 3D bounding box intersections. Background segments
+are integrated in world space, while asset segments are transformed into local coordinates via
+inverse tracking matrices. These segments are rasterized in a single pass while continuously
+propagating transmittance across coordinate boundaries to resolve correct depth ordering
+for final RGB, depth, and normal supervision.
+independent grids in a single pass, correctly solving depth ordering and occlusion across
+octrees without requiring any modifications to their independent voxel structures.
+3.1
+Static Background Modeling
+The global background is represented by an octree Obg following the architectural primitives
+of SVRaster. The spatial layout of this hierarchical 3D voxel grid is aligned with an axisaligned bounding box (AABB), parameterized by the global scene center wc and the root
+octree scale ws in world coordinates, which defines the boundaries of the scene. Each grid
+node corresponds to a voxel at a specific octree level that dictates its physical dimensions.
+Following SVRaster, only the active leaf nodes are preserved in memory without keeping their
+parent ancestor structures. The higher level of the octree defines the finest grid resolution
+for the scene. Each leaf node voxel stores a view-dependent appearance c parameterized
+via Spherical Harmonics (SH) coefficients, alongside discrete raw volume densities (vgeo ) at
+its eight corners to define an internal continuous volume via trilinear interpolation. These
+corner densities and color are optimized during training. The structure is only modified
+during an adaptive pruning and progressive subdivision allowing the explicit voxel layout to
+dynamically refine and align with the structural details.
+Sky Modeling. Following prior work on sky-decoupled scene representation [5], we model the
+sky as a 2D spherical environment map surrounding the scene. The sky color Csky for a given
+camera ray is obtained by mapping its 3D viewing direction d into 2D map coordinates to
+sample the texture via bilinear interpolation. During training, the texture is updated via
+backpropagation. This design minimizes computational overhead by avoiding explicit voxel
+allocation, making it well-suited for unbounded outdoor autonomous driving environments.
+6
+T. Aguirre et al.
+a)
+b)
+c)
+Fig. 3: Overview of the DrivingVoxels initialization.We introduce a LiDAR-guided
+structural initialization pipeline: (a) Inner and outer bound volumes are initialized considering camera poses and frustums akin SVRaster [18] with additional height filtering to adapt
+to driving scenarios. (b) Leveraging LiDAR information, the octree is iteratively subdivided
+to create a finer surface shell around physical structures. (c) Raw corner densities are initialized based on an exponential decay prior according to the distance to the closest LiDAR
+point.
+3.2
+Dynamic Asset Modeling
+Each dynamic asset octree Oi models the persistent geometry and view-dependent appearance of an individual moving actor. We adopt the core primitive layout from SVRaster [18],
+representing each asset in an isolated canonical space where only leaf nodes are preserved. In
+this setup, the origin is centered on the object’s 3D bounding box, and the coordinates are
+aligned with the box axes. We leverage the annotated bounding box dimensions as structural
+prior to bound the volume before optimization. We avoid initializing dynamic assets with
+LiDAR point cloud to mitigate optimization errors due to temporal sensor misalignment and
+bounding box inaccuracy.
+The spatial state of N dynamic assets {Oi }N
+i=1 at any given timestep t is defined by a set
+of time-varying rigid transformations {Tti ∈ SE(3)}N
+i=1 taken from 3D tracking annotations.
+At runtime, these matrices map each asset octree from its local canonical frame into the
+global world space. This allows our framework to aggregate sparse multi-view observations
+of moving objects across the entire driving sequence.
+3.3
+Initialization
+To accurately model unbounded dynamic driving environments we propose a decoupled,
+multi-octree structural initialization strategy (Fig. 3). We apply separate initialization priors
+for the static background and the independent dynamic actors.
+Background. Mirroring standard 3D Gaussian Splatting frameworks that naturally seed
+primitive positions using available LiDAR points or sparse keypoints, we extend this practice
+to explicit voxel layouts. We introduce a LiDAR-guided structural initialization pipeline:
+1. Visibility Pruning: The volume is divided into an inner and an outer region following
+SVRaster implementation [18]. The inner region models the main scene volume, containing all camera poses, while the outer region models far-away structures at a coarser
+DrivingVoxels
+7
+resolution. The inner region is initialized first as a coarse uniform grid. Voxels are pruned
+if they are not visible by any training camera or fall below a minimum camera-height
+reference threshold. The outer region is represented at two coarse resolution levels to
+capture far away structures, with the same frustum and height filter applied.
+2. Proximity-Based Voxel Subdivision: The remaining grid is then refined through
+rounds of iterative subdivision. In each round, voxels closer than a distance threshold to
+a LiDAR point are subdivided, producing a progressively finer shell on physical surface
+while retaining a coarse resolution in empty space. The subdivision continues until the
+minimum voxel sizes falls below 30 cm.
+3. Soft Density Initialization Prior: Once the structural refinement is finished, voxel
+corner densities are initialized by proximity to the LiDAR point cloud. For each grid
+corner, the euclidean distance d to the nearest LiDAR point is computed and mapped to
+an initial density:
+\mathbf {v}_{\mathrm {geo}}^{\mathrm {init}} = \mathbf {v}_{\mathrm {far}} + (\mathbf {v}_{\mathrm {close}} - \mathbf {v}_{\mathrm {far}}) \cdot \exp \left (-\frac {2d^2}{s^2}\right ),
+(1)
+where s is minimum voxel size. Voxel corners closer to the LiDAR points are initialized
+with a density vclose while distant corners are assigned an empty density vfar . We set
+heuristically vclose = −2.0 and vfar = −10.0, the empty density defined by SVRaster [18].
+This approach creates smooth density gradients that provide the optimizer with a geometrically plausible starting point, even for coarse structures, while preserving the ability
+to recover surfaces missed by the LiDAR sensor.
+Assets. Unlike the static background, each asset begins as a uniform voxel grid aligned
+with bound local coordinates system, where the asset’s 3D bounding box serves as the prior
+geometric information. The boundary of each asset matches the largest dimension of the
+bounding of the box, scaled outward by 20%, to ensure a small margin around the asset
+init
+=
+geometry. Furthermore, all asset grids are initialized with a uniform empty density vgeo
+−10, independent of asset size or category.
+3.4
+Compositional Voxel Rendering
+To render a novel view at timestep t, we cast rays into our multi-octree scene representation.
+In the baseline framework, high rendering efficiency relies on a tile-based rasterizer that
+maps all intersected voxels into a single, strictly ordered front-to-back sequence via Morton
+ordering [18]. However, because independent moving objects change coordinates arbitrarily
+over time, their voxels cannot be sorted within a single global tree without costly runtime
+tree reconstruction. To overcome this limitation and enable the representation of dynamic
+scenes, we propose a macro-level ray-interval sorting strategy.
+For each ray r(τ ) = o + τ d, we calculate ray-box intersections against the oriented
+3D bounding boxes of all active dynamic assets (cf. Fig. 2, left), yielding camera distance
+i
+intervals {τini , τout
+}. Sorting these entry and exit thresholds by camera distance maps the ray
+path into an ordered front-to-back sequence of different segments:
+– Background Segments: Ray intervals falling entirely outside all dynamic bounding
+boxes are integrated using the static background octree Obg in world space.
+8
+T. Aguirre et al.
+i
+– Asset Segments: Within an active intersection interval [τini , τout
+], the ray is transformed
+i −1
+into the asset’s local canonical frame via (Tt ) and evaluated inside the canonical octree
+Oi .
+Each consecutive ray segment is processed by an accumulation function F, which performs local, hardware-accelerated Morton-ordered voxel traversals within that segment’s
+bounded interval. Throughout this process, we track a running global pixel state along the
+ray path, including its color, transmittance, depth, and normal vectors (we refer to supplementary material Sec. A for further details) . For any intersected voxel within a segment, we
+adopt the standard numerical integration, exponential-linear density activation, and alphacompositing formulas from the baseline framework [18]. These localized segment properties
+are then blended step-by-step into the global pixel state, strictly weighted by the accumulated transmittance. Passing this running state continuously between consecutive segment
+calls ensures mathematically correct multi-volume occlusion and precise transmittance tracking across all coordinate boundaries.
+After aggregating all foreground and background voxel segments into a total voxel color
+Cvoxels and final residual transmittance Tfinal , the final pixel color representation C is obtained
+by compositing with an infinite-depth sky model:
+\mathbf {C} = \mathbf {C}_{\text {voxels}} + \text {T}_{\text {final}} \cdot \mathbf {C}_{\text {sky}}
+(2)
+where Csky is the view-dependent color of the infinite sky background. Gradients flow through
+each voxel segment independently following SVRaster [18].
+3.5
+Training Details
+Multi-Modal Supervision Losses. We jointly optimize the multi-octree representation framework including background and dynamic octrees as well as our sky model end-to-end by
+using the following loss function:
+\mathcal {L} = \lambda _{\text {color}}\mathcal {L}_{\text {color}} + \lambda _{\text {depth}}\mathcal {L}_{\text {depth}} + \lambda _{\text {normal}}\mathcal {L}_{\text {normal}} + \lambda _{\text {sky}}\mathcal {L}_{\text {sky}},
+(3)
+where Lcolor is the reconstruction loss between rendered and observed images as defined
+in [18]. Ldepth is a L1 loss between rendered depth and sparse depth generated from LiDAR
+points projected into the camera. Lnormal maximizes the cosine similarity between rendered
+voxel normals and pseudo-ground-truth normals obtained with DepthAnythingV2 [29] and
+Lsky identifies sky pixels via zero-depth values and applies a sky prior mask that explicitly
+enforces maximum global ray transmittance through an MSE loss to eliminate floating voxels
+within sky region. Please refer to the supplementary material Sec. D for details of each loss
+term.
+Training Schedule. Rather than using a fixed iteration budget for all scenes, our method
+employs an adaptive training schedule that dynamically determines when to stop voxel subdivision. Since driving environments exhibit varying geometric complexity and dynamic content, the optimal training duration differs across scenes. To account for this variability, we
+periodically monitor reconstruction quality using SSIM. Once improvements plateau, the
+DrivingVoxels
+9
+framework terminates background refinement and freezes the voxel structure, preventing unnecessary subdivision while reducing training time. Additional details are provided in the
+supplementary material Sec. 3.5.
+4
+Experiments
+We evaluate our proposed framework, DrivingVoxels, across different driving scenarios to
+demonstrate its performance in dynamic scene reconstruction, geometry and downstream
+applications.
+Dataset and Evaluation metrics. We perform evaluation on the PandaSet dataset [25] which
+contains 103 driving scenes captured at 1920×1080 resolution together with 360° LiDAR
+measurements. We follow the literature [3,20,30] and use the standard 10 sequence evaluation
+set selecting every 2nd image in the sequence as training frames and the rest as test using
+the same protocol defined in SaLF [3].
+To evaluate novel view synthesis quality, we report standard perceptual metrics: PSNR,
+SSIM, and LPIPS (with a VGG backbone). To validate reconstructed geometric accuracy,
+we report Chamfer Distance (CD), Median error, and F1@0.1 scores computed against the
+accumulated ground-truth LiDAR point clouds following the StreetSurf protocol [9]. Runtime
+efficiency is verified via rendering frame rates (FPS) and mean per-scene training time across
+all sequences. Since the official SaLF codebase is not publicly available, we are unable to
+reproduce geometry metrics (CD, F1) for this baseline. We therefore restrict our direct
+quantitative comparison to the metrics reported in their original manuscript for this baseline,
+and acknowledge this as a limitation of our evaluation.
+Baselines and Implementation Details. We compare our approach against several state-ofthe-art dynamic urban reconstruction methods including radiance fields based UniSim [30]
+and NeuRAD [20], 3DGS-based OmniRe [5] and Street Gaussians [28] and recent voxelbased SaLF [3] (including both Base and Large variants). For OmniRe and Street Gaussians
+implementations we use the original DriveStudio codebase3 . We benchmark our method with
+the original training schedule defined in Sec. 3.5 and additionally report our results with fixed
+number of iterations set to 20K to evaluate performance gains resulting from larger training
+times, we refer to the later as DrivingVoxels@20K.
+4.1
+Comparison with State-of-the-Art Methods
+Evaluation data in Sec. 4.1 demonstrate that our framework better reconstructs the geometry of the scene, outperforming all baselines in all geometric metric. Specifically, DrivingVoxels achieves an L1 error of 0.044 m, nearly halving that of the closest competitor
+NeuRAD [20], while improving the F 1@0.1 score by over 10 points. Regarding efficiency,
+our model trains faster than most competing methods; although SaLF (base) trains slightly
+faster, our approach yields significantly higher geometric precision and structural fidelity
+(SSIM and LPIPS). DrivingVoxels@ 20k demonstrates that our training speed is not merely
+3
+https://github.com/ziyc/drivestudio
+10
+T. Aguirre et al.
+Perceptual
+Method
+Geometry
+Efficiency
+PSNR↑ SSIM↑ LPIPS↓ L1 (m)↓ CD (m)↓ F1@0.1 (%)↑ FPS↑ Train Time (h)↓
+‡
+UniSim [30]
+NeuRAD [20]‡
+OmniRe [5]∗
+StreetGS [28]∗
+SaLF (base) [3]‡
+SaLF (large) [3]‡
+25.63
+26.60
+25.60
+25.56
+25.48
+25.78
+DrivingVoxels (ours)
+24.99
+DrivingVoxels@20k (ours) 25.34
+0.745 0.288
+0.770 0.297
+0.789 0.248
+0.789 0.249
+0.744 0.373
+0.762 0.344
+0.100
+0.085
+0.129
+0.130
+0.142
+0.111
+0.594
+0.605
+-
+54.9
+54.8
+-
+1.3
+1.7
+44.9
+57.0
+54.5
+34.3
+1.67
+3.48
+1.94
+1.80
+0.31
+0.48
+0.772
+0.787
+0.044
+0.046
+0.242
+0.235
+65.6
+65.3
+26.0
+26.3
+0.41
+1.01
+0.299
+0.255
+‡ Results repoted on [3] original manuscript. ∗ Obtained using DriveStudio codebase [5]
+Table 1: Dynamic PandaSet Benchmark. On ten dynamic PandaSet sequences, DrivingVoxels achieves the best geometric accuracy and competitive perceptual quality.
+a result of cutting training short. Under its extended configuration, the framework reaches
+its highest performance, yielding the best overall Chamfer distance (0.235 m) and competitive perceptual scores (0.787 SSIM and 0.255 LPIPS). Compared to explicit point-based
+approaches (OmniRe, StreetGS), DrivingVoxels maintains competitive rendering quality
+while delivering superior geometric accuracy and efficiency; we attribute this advantage to
+the rigid spatial constraints of SVRaster, which limit unconstrained voxel placement [18].
+Finally, while SaLF (large) marginally leads in PSNR, DrivingVoxels@ 20k retains superior
+geometric consistency and structural fidelity.
+Fig. 4 shows the qualitative results of our method and baselines on the same scenes
+reported by SaLF [3]. In most scenarios StreetGS [28] achieves higher visual quality for individual foreground objects compared to the other baselines, reconstructing them with sharp
+details. However, this method frequently introduces severe floating artifacts and geometric
+degradation in complex regions. As illustrated in the third row of Fig. 4, the truck rendered
+by StreetGS and OmniRe displays a noisy appearance. In contrast, both SaLF [3] and our
+method handle these difficult areas significantly better, preserving a solid and continuous
+geometry for the vehicle without introducing floating noise.
+Geometry Extrapolation Quality. To evalMethod
+FID ↓
+uate geometric generalization beyond the
+‡
+training trajectory, we render novel views
+UniSim
+74.7
+NeuRAD‡
+72.3
+from an ego-trajectory laterally shifted by
+∗
+StreetGS
+72.6
+±2 meters from the original camera path.
+OmniRe∗
+71.6
+In the absence of ground-truth imagery for
+DrivingVoxels
+54.6
+this shifted-lane scenario, we report the
+DrivingVoxels @20k 53.5
+Fréchet Inception Distance (FID) to evalu‡ Results reported in [20].
+ate the perceptual realism of the extrapo∗ Obtained using DriveStudio [5].
+lated views. As shown in Tab. 2, our model
+optimized for 20k iterations achieves a lower Table 2: Shifted-Lane Extrapolation. On
+FID score (53.5) than StreetGS (72.6) and PandaSet DrivingVoxels reaches the lowest
+OmniRe (71.6). This improvement indicates FID under a 2 m lateral trajectory shift.
+DrivingVoxels
+Ground Truth
+OmniRe [5]
+StreetGS [28]
+SaLF [3]†
+11
+DrivingVoxels (ours)
+N/A
+N/A
+‡ Figures taken from [3] original manuscript.
+Fig. 4: Qualitative Comparison on Dynamic Driving Scenes. Across multiple PandaSet sequences [25], DrivingVoxels preserves coherent vehicle geometry and cleaner scene
+structure while avoiding the floating artifacts and ghosting visible in other baselines.
+that our explicit voxel layout maintains more reliable geometric constraints than unconstrained point-splatting methods during viewpoint extrapolation. We note that the baseline
+results for UniSim and NeuRAD are cited directly from the original NeuRAD manuscript [20];
+while they utilize identical training scenes, they differ slightly in their train test splits, yet
+our framework still demonstrates a clear performance advantage.
+4.2
+Ablation Study
+Background Grid Initialization. To cleanly isolate the geometric impact of our LiDAR-guided
+initialization pipeline on the static background representation (Obg ) we use five backgrounddominant PandaSet sequences containing sparse dynamic actors (for implementation details,
+see Supplementary Material ). To ensure a fair comparison, all variants are trained for a fixed
+window of 20k iterations. The evaluation compares our method against two distinct variants:
+1) w/o LiDAR subdivision which initializes the model from a pruned, coarse uniform grid
+without iterative LiDAR-guided subdivision. And 2) Binary density init. which replaces
+the soft normal distribution prior with a binary assignment (vclose or vfar ) based on a hard
+distance threshold.
+As shown in Tab. 3, removing LiDAR-guided subdivision results in the largest performance drop across all metrics (∆PSNR = 0.21 dB, ∆LPIPS = 0.017, ∆CD = 0.012 m).
+On the other hand, binary density initializations performs comparably to our method with
+12
+T. Aguirre et al.
+Perceptual
+Method
+PSNR↑ SSIM↑ LPIPS↓ CD(m)↓ F1@0.1(%m)↑
+w/o LiDAR subdivision 28.11
+Binary density init
+28.31
+Full (Ours @ 20k)
+Geometry
+0.845
+0.853
+0.203
+0.188
+0.204
+0.190
+40.57
+43.86
+28.32 0.854 0.186
+0.193
+43.23
+Table 3: Background Initialization Ablation. On five background-dominant PandaSet
+sequences, LiDAR-guided subdivision provides most of the gain, while binary density initialization perform similarly.
+Perceptual
+Geometry
+Method
+PSNR↑ SSIM↑ LPIPS↓ CD((m))↓ F1@0.1(%)↑
+w/o Ldepth
+w/o Lnormal
+w/o sky model
+25.32 0.806 0.234
+25.00 0.797 0.246
+24.90 0.795 0.245
+DrivingVoxels@20k (ours) 24.84
+0.793
+0.244
+0.644
+0.319
+0.233
+52.2
+49.0
+66.1
+0.231
+66.3
+Table 4: Supervision Loss Ablation. LiDAR depth supervision is most important for
+geometry, without which the model degrades in CD and F1.
+slight decrease on perceptual metrics and slight gain in geometry. We attribute this comparable performance to the subdivision attribute of our octree structure during training which
+enables to adapt the voxel sizes and their densities without the need of soft initialization.
+Nevertheless, we argue that a soft density initialization is generally better for scenes with
+very sparse LiDAR data or coarse initial grid.
+Supervision Losses. Tab. 4 ablates the contribution of our LiDAR and normal supervision
+losses as well as our sky-model supervision by individually removing each of such components
+and train each variant for 20K iterations. Results show that the most significant contribution
+in geometric accuracy comes from Ldepth contribution. In addition, Lnormal improves the
+F1@0.1 score from 49.0 % to 66.3 %. LiDAR provides accurate sparse supervision while
+dense normals improves geometry on areas with no LiDAR or with lack of texture (see
+Fig. 5). Both supervision signals complement each other improving geometry but penalizing
+perceptual metrics. We argue this trade-off results from the spatial misalignment between
+the LiDAR and camera sensor calibration. Although our sky model brings small contribution
+to quantitative metrics, it avoids allocation of large number of voxels for the sky, saving
+computational resources. Furthermore, the absence of groundtruth geometry at sky region
+hinders correct quantitative assessment of this component.
+4.3
+Applications
+Our 3D reconstruction framework naturally enables three downstream tasks for autonomous
+driving simulation, without requiring extra training pipelines: traffic scene editing, 3D se-
+DrivingVoxels
+w/o Lnormal
+w/o Lnormal
+w/o sky Model
+13
+DrivingVoxels
+Fig. 5: Effect of Each Supervision Signal on Reconstructed Depth. Quantitatively,
+removing normal supervision (Lnormal ) leads to a substantial degradation in geometric metrics, yielding the lowest overall F1@0.1 score. Disabling LiDAR depth supervision (Ldepth )
+similarly compromises global structural boundaries, while omitting the sky model results in
+inaccurate far-depth allocations in the background. Our full configuration effectively combines these complementary signals to produce the most geometrically coherent and uniform
+depth maps.
+Render
+Removal
+Pose Change
+Replacement
+Fig. 6: Post-Training Scene Editing with Explicit Voxel Assets. Because each dynamic actor is stored in its own voxel grid, DrivingVoxels supports direct scene manipulation
+after training. The examples show object removal, pose modification, and asset replacement
+without retraining while preserving consistent compositing with the surrounding scene.
+mantic segmentation and open vocabulary scene understanding. While these initial results
+leave room for future improvement, they show that our method is immediately useful for
+simulation task.
+Dynamic Scene Editing Operations. Our explicit voxel representation makes it easy to edit
+the scene after training. Since every moving object is saved in its own independent grid, we
+can simply remove an object to change the scene layout. In addition, by simply modifying
+the object transformations {Tti }, we can move the object along a new trajectory. We can
+also swap one object with another by replacing its voxel data in the scene graph, allowing
+us to replace a target vehicle with a different model while maintaining accurate rendering
+boundaries. In Fig. 6, we can visualize examples of these operations.
+3D Semantic Segmentation. Building on top of SVRaster [18] allows us to exploit its structured and non overlapping sparse voxel representation to map 2D pixel coordinates and
+explicit 3D primitives. As demonstrated by recent studies [24], feature fusion in a sparse
+voxel architecture outperforms unstructured 3DGS alternatives, as it eliminates the ambiguity and prevents semantic bleeding across object boundaries.
+We use the core rasterization engine by substituting the standard RGB color rendering step with a high-dimensional feature accumulation pass during the volume rendering
+pipeline [18]. This enables our model to create a robust multi-view feature fusion by projecting dense 2D semantic mask, obtained from SegFormer [26], into the 3D grid space. As
+14
+T. Aguirre et al.
+GT
+Segformer
+DrivingVoxels
+Fig. 7: Structured 3D Semantic Fusion Improves Scene Labels. We project per-view
+SegFormer predictions into the sparse voxel volume and fuse them across views using the
+reconstructed geometry. Compared with the raw monocular segmentation, the fused result is
+more spatially consistent and better aligned with the ground-truth layout, especially along
+roads, sidewalks, vegetation, and thin vertical structures.
+Render
+"Cross Walk"
+"Traffic Light"
+Fig. 8: Open-Vocabulary Scene Queries in 3D. By fusing language-aligned features into
+the reconstructed voxel volume, DrivingVoxels supports text-driven localization at inference
+time. The queries "Cross Walk" and "Traffic Light" activate the corresponding scene regions
+with accurate spatial grounding from the same reconstruction.
+shown in Fig. 7, the fused 3D segmentation map successfully corrects errors from the raw
+monocular inputs.
+Open Vocabulary Scene Understanding. Furthermore, the feature volume fuser can be expanded to open-vocabulary language fields [24]. We obtained a fuse 3D feature from the
+language-aligned features from the AM-RADIO foundation model [17]. Our architecture allows the user to perform unconstrained text-based queries at inference time without requiring
+network training by computing the pixel-wise cosine similarity between a CLIP-encoded text
+embedding vector and our fused 3D feature. As shown in Fig. 8, we obtain highly accurate
+3D segmentations for queries such as “Cross Walk” or “Traffic Light”.
+4.4
+Limitations
+Despite its strong geometric accuracy and efficient training, our method has several limitations. First, the explicit voxel representation favors geometric fidelity but can limit perceptual
+quality compared to point-based splatting methods, which can more freely allocate primitives to capture fine appearance details. Second, our pipeline assumes fixed camera poses and
+object tracks, making it sensitive to calibration, synchronization, and tracking errors which
+DrivingVoxels
+15
+strongly affect accuracy [10]. Third, the current formulation is restricted to rigid dynamic
+actors and does not explicitly model non-rigid motion. Finally, the minimum voxel resolution is coupled to the scene AABB size, creating a trade-off between representing distant
+structures and preserving fine geometric detail.
+5
+Conclusion
+We presented DrivingVoxels, a compositional sparse voxel rendering framework for dynamic
+driving scene reconstruction. Our method extends sparse voxel rasterization [18] to multioctree environments, enabling a single-pass rendering formulation that decouples a static
+background from independently moving actors. Combined with a LiDAR-guided structural
+initialization and ray-interval sorting, this design effectively reduces floating artifacts while
+maintaining efficient training.
+Experiments on the PandaSet benchmark [25] demonstrate state-of-the-art geometric reconstruction and competitive perceptual quality, while achieving faster training than prior
+methods. Beyond reconstruction accuracy, the proposed structured representation provides
+a stable foundation for downstream applications such as scene editing and semantic understanding, albeit with some trade-offs in perceptual flexibility due to its explicit voxel design.
+Future work includes joint optimization of camera and object poses, modeling of non-rigid
+dynamics, and decoupling distant scene regions from the global AABB to improve scalability
+and reconstruction fidelity in large-scale environments.
+References
+1. Chen, A., Xu, Z., Geiger, A., Yu, J., Su, H.: TensoRF: Tensorial radiance fields. In: Proc. of the European Conf.
+on Computer Vision (ECCV) (2022)
+2. Chen, Y., Dong, S., Wang, X., Cai, L., Zheng, Y., Yang, Y.: SG-NeRF: Neural surface reconstruction with scene
+graph optimization. In: Proc. of the European Conf. on Computer Vision (ECCV) (2024)
+3. Chen, Y., Haines, M., Wang, J., Baron-Lis, K., Manivasagam, S., Yang, Z., Urtasun, R.: SaLF: Sparse local fields
+for multi-sensor rendering in real-time. In: Proc. IEEE International Conf. on Robotics and Automation (ICRA)
+(2026)
+4. Chen, Y., Gu, C., Jiang, J., Zhu, X., Zhang, L.: Periodic vibration gaussian: Dynamic urban scene reconstruction
+and real-time rendering. International Journal of Computer Vision (IJCV) (2026)
+5. Chen, Z., Yang, J., Huang, J., de Lutio, R., Esturo, J.M., Ivanovic, B., Litany, O., Gojcic, Z., Fidler, S., Pavone,
+M., Song, L., Wang, Y.: OmniRe: Omni urban scene reconstruction. In: International Conf. on Learning Representations (ICLR) (2025)
+6. Djeghim, H., Piasco, N., Bennehar, M., Roldao, L., Tsishkou, D., Sidibé, D.: ViiNeuS: Volumetric initialization for
+implicit neural surface reconstruction of urban scenes with limited image overlap. In: IEEE Conf. on Computer
+Vision and Pattern Recognition (CVPR)) (2025)
+7. Fridovich-Keil, S., Yu, A., Tancik, M., Chen, Q., Recht, B., Kanazawa, A.: Plenoxels: Radiance fields without
+neural networks. In: IEEE Conf. on Computer Vision and Pattern Recognition (CVPR) (2022)
+8. Guédon, A., Lepetit, V.: SuGaR: Surface-aligned gaussian splatting for efficient 3d mesh reconstruction and
+high-quality mesh rendering. In: IEEE Conf. on Computer Vision and Pattern Recognition (CVPR) (2024)
+9. Guo, J., Deng, N., Li, X., Bai, Y., Shi, B., Wang, C., Ding, C., Wang, D., Li, Y.: StreetSurf: Extending multi-view
+implicit surface reconstruction to street views. arXiv:2306.04988 (2023)
+10. Herau, Q., Piasco, N., Bennehar, M., Rolado, L., Tsishkou, D.V., Liu, B., Migniot, C., Vasseur, P., Demonceaux,
+C.: Pose optimization for autonomous driving datasets using neural rendering models. arXiv:2504.15776 (2025)
+11. Kerbl, B., Kopanas, G., Leimkuehler, T., Drettakis, G.: 3D gaussian splatting for real-time radiance field rendering. ACM Transactions on Graphics (TOG) (2023)
+12. Li, J., Zhang, J., Zhang, Y., Bai, X., Zheng, J., Yu, X., Gu, L.: GeoSVR: Taming sparse voxels for geometrically
+accurate surface reconstruction. In: Advances in Neural Information Processing Systems (NeurIPS) (2025)
+16
+T. Aguirre et al.
+13. Liu, L., Gu, J., Lin, K.Z., Chua, T.S., Theobalt, C.: Neural sparse voxel fields. In: Advances in Neural Information
+Processing Systems (NeurIPS) (2020)
+14. Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng, R.: NeRF: Representing scenes
+as neural radiance fields for view synthesis. In: Proc. of the European Conf. on Computer Vision (ECCV) (2020)
+15. Müller, T., Evans, A., Schied, C., Keller, A.: Instant neural graphics primitives with a multiresolution hash
+encoding. ACM Transactions on Graphics (SIGGRAPH) (2022)
+16. Oh, S., Choe, J., Lee, D., Lee, D., Jeong, S., Wang, Y.C.F., Park, J.: SVRecon: Sparse voxel rasterization for
+surface reconstruction. arXiv:2511.17364 (2025)
+17. Ranzinger, M., Heinrich, G., Molchanov, P., Kautz, J.: AM-RADIO: Agglomerative model - reduce all domains
+into one. In: IEEE Conference on Computer Vision and Pattern Recognition (CVPR) (June 2024)
+18. Sun, C., Choe, J., Loop, C., Ma, W.C., Wang, Y.C.F.: Sparse voxels rasterization: Real-time high-fidelity radiance
+field rendering. In: IEEE Conf. on Computer Vision and Pattern Recognition (CVPR) (2025)
+19. Sun, C., Sun, M., Chen, H.: Direct voxel grid optimization: Super-fast convergence for radiance fields reconstruction. In: IEEE Conf. on Computer Vision and Pattern Recognition (CVPR) (2022)
+20. Tonderski, A., Lindström, C., Hess, G., Ljungbergh, W., Svensson, L., Petersson, C.: NeuRAD: Neural rendering
+for autonomous driving. In: IEEE Conf. on Computer Vision and Pattern Recognition (CVPR) (2024)
+21. Turki, H., Ramanathan, J., Mahajan, R., Bi, Z., Isola, P., Deva, R.: SUDS: Scalable unbounded dynamic scenes.
+In: IEEE Conf. on Computer Vision and Pattern Recognition (CVPR) (2023)
+22. WANG, F., Djeghim, H., Moutarde, F., Sidibé, D.: J-neus: Joint field optimization for neural surface reconstruction in urban scenes with limited image overlap. In: International Conference on 3D Vision (3DV) (2026)
+23. Wang, F., Louys, A., Piasco, N., Bennehar, M., Roldãao, L., Tsishkou, D.: Planerf: Svd unsupervised 3d plane
+regularization for nerf large-scale urban scene reconstruction. In: International Conference on 3D Vision (3DV)
+(2024)
+24. Wang, F., Piasco, N., Bennehar, M., Roldão, L., Tsishkou, D., Moutarde, F.: LESV: Language embedded sparse
+voxel fusion for open-vocabulary 3D scene understanding. arXiv:2604.01388 (2026)
+25. Xiao, P., Shao, Z., Hao, S., Zhang, Z., Chai, X., Jiao, J., Li, Z., Wu, J., Sun, K., Jiang, K., et al.: Pandaset:
+Advanced sensor suite dataset for autonomous driving. In: IEEE International Intelligent Transportation Systems
+Conference (ITSC) (2021)
+26. Xie, E., Wang, W., Yu, Z., Anandkumar, A., Alvarez, J.M., Luo, P.: Segformer: Simple and efficient design for
+semantic segmentation with transformers. In: Neural Information Processing Systems (NeurIPS) (2021)
+27. Yan, C., Qu, D., Xu, D., Zhao, B., Wang, Z., Wang, D., Li, X.: GS-SLAM: Dense visual slam with 3D gaussian
+splatting. In: IEEE Conf. on Computer Vision and Pattern Recognition (CVPR) (2024)
+28. Yan, Y., Lin, H., Zhou, C., Wang, W., Sun, H., Zhan, K., Lang, X., Zhou, X., Peng, S.: Street gaussians: Modeling
+dynamic urban scenes with gaussian splatting. In: Proc. of the European Conf. on Computer Vision (ECCV)
+(2024)
+29. Yang, L., Kang, B., Huang, Z., Zhao, Z., Xu, X., Feng, J., Zhao, H.: Depth anything v2. In: Advances in Neural
+Information Processing Systems (NeurIPS) (2024)
+30. Yang, Z., Chen, Y., Wang, J., Manivasagam, S., Ma, W.C., Yang, A.J., Urtasun, R.: UniSim: A neural closed-loop
+sensor simulator. In: IEEE Conf. on Computer Vision and Pattern Recognition (CVPR) (2023)
+31. Zhou, X., Lin, Z., Shan, X., Wang, Y., Sun, D., Yang, M.H.: DrivingGaussian: Composite gaussian splatting for
+surrounding dynamic autonomous driving scenes. In: IEEE Conf. on Computer Vision and Pattern Recognition
+(CVPR) (2024)
+DrivingVoxels
+A
+17
+Algorithmic Multi-Octree Render
+Our rendering pipeline handles a static background (Obg ) and a dynamic sequence of N independently moving foreground asset octrees {Oi }N
+i=1 simultaneously. Rather than performing
+complex runtime spatial tree sorting, we implement a macro-level ray-interval decomposition
+strategy. For each camera ray r(τ ) = o + τ d, we calculate explicit intersections with the oriented 3D bounding boxes of all active dynamic foreground assets to obtain a front-to-back
+pre-ordered sequence of intervals I.
+Each consecutive segment is processed by SVRaster volume rendering accumulation function F [18], which updates the global pixel properties state tuple S = (C, D, N, T, τcurr ) where
+C tracks accumulated color, D denotes rendered surface depth, N aggregates voxel normals, T
+tracks residual transmittance, and τcurr marks the active ray distance boundary. Specifically,
+F processes the camera ray parameters to filter the sorted voxel list of the target octree,
+isolating and evaluating only the primitives that reside within the active bounded interval
+i
+i
+[τin
+, τout
+]. By tracking and continuously passing this state tuple S across consecutive interval
+calls, our design guarantees mathematically correct multi-volume occlusion and exact transmittance propagation across all coordinate boundaries. This step-by-step composition pass
+is formally detailed in Algorithm 1.
+B
+Datasets
+Our evaluation is done in Pandaset sequences [25]. All experiments are done at original
+resolution using only the front-facing camera. Each sequence is split chronologically into 40
+training and 40 evaluation frames via even/odd indexing, resulting in total 400 training and
+400 evaluation frames.
+– Main Dataset Our primary evaluation follows the protocol defined by SaLF [3], using
+the following sequences: 001, 011, 016, 028, 053, 063, 084, 106, 123, and 158.
+– Static-Dominant Split: Consists of five background-dominant PandaSet sequences containing sparse dynamic actors (028, 029, 53, 55 and 63), specifically chosen to isolate
+background geometry from vehicle movements.
+– Supervision Ablation Dataset: A targeted subset of the primary benchmark sequences, consisting of sequences 011, 016, 028, 106, 158.
+All methods and baseline benchmarks are evaluated on hardware equivalent to an NVIDIA
+RTX 3090 GPU to ensure direct performance parity with reported execution timelines.
+C
+Baselines
+We benchmark our framework against representative approaches from three established lines
+of work in dynamic driving scene reconstruction:
+– Continuous Volumetric Frameworks: UniSim [30] and NeuRAD [20] model driving
+environments via continuous neural radiance fields optimized for closed-loop simulation.
+Following standard benchmarking practices, we report the performance metrics for both
+baselines directly as cited in the SaLF paper [3].
+18
+T. Aguirre et al.
+Algorithm 1 Scene Rendering with Segmented Volume Rendering at a timestep t.
+i N
+1: Input: Background octree Obg , asset octrees {Oi }N
+i=1 , transformations {Tt }i=1 , camera ray r, sorted intervals I.
+2: S ← (C = 0, D = 0, N = 0, D = 1) , τcurr ← 0
+3: for i ∈ {1, . . . , N } do
+▷ Render background before object entry
+4:
+i
+S ← F (Obg , r, [τcurr , τin
+], S)
+5:
+6:
+rlocal ← (Tti )−1 (r)
+i
+i
+S ← F (Oi , rlocal , [τin
+, τout
+], S)
+▷ Render object in canonical local space
+▷ Advance to next interval
+i
+7:
+τcurr ← τout
+8:
+if T < εstop then
+9:
+break
+10:
+end if
+11: end for
+▷ Render remaining background
+12: S ← F(Obg , r, [τcurr , τmax ], S)
+– Unconstrained Point-Based Splatting: OmniRe [5] and StreetGS [28] leverage objectcentric, anisotropic 3D Gaussian primitives. While achieving interactive rendering speeds,
+their unconstrained optimization layout frequently causes geometric degradation, floating
+artifacts, and unpredictable memory spikes in large outdoor environments. We evaluate
+these baselines using the implementations within the DriveStudio codebase under the paper legacy configuration, maintaining default hyperparameter schedules to ensure direct
+hardware performance parity.
+– Hybrid Voxel-Implicit Layouts: SaLF [3] (both Base and Large configurations) use a
+sparse voxel layout but embeds a local implicit field inside each voxel node. Our framework
+completely inherits this benchmark protocol. However, because their official source code
+is currently unavailable, obtaining a full set of metrics across all evaluation dimensions
+remains difficult, restricting our direct comparison to the values provided in their original
+publication.
+D
+Optimization Details
+Training Losses Our multi-octree framework and spherical sky model are jointly optimized
+end-to-end via a multi-modal supervision loss function:
+\mathcal {L} = \lambda _{\text {color}}\mathcal {L}_{\text {color}} + \lambda _{\text {depth}}\mathcal {L}_{\text {depth}} + \lambda _{\text {normal}}\mathcal {L}_{\text {normal}} + \lambda _{\text {sky}}\mathcal {L}_{\text {sky}}
+(4)
+Color Reconstruction Loss (Lcolor ) The primary photometric objective is a combination of
+an L1 pixel loss and a structural similarity (SSIM) term computed between the rendered
+image C and the ground-truth camera observation Cgt :
+\mathcal {L}_{\text {color}} = \lambda _{\text {MSE}} \lambda _{\text {MSE}} + \lambda _{\text {SSIM}} (1 - \text {SSIM}(C, C_{\text {gt}}))
+(5)
+Sparse Depth Supervision Loss (Ldepth ) To enforce strict geometric constraints and eliminate
+volumetric alignment ambiguities, we apply an L1 depth loss:
+\mathcal {L}_{\text {depth}} = \| D - D_{\text {LiDAR}} \|_1
+(6)
+DrivingVoxels
+19
+where D is the accumulated voxel depth along the camera ray path and DLiDAR represents
+the sparse, time-synchronized ground-truth depth values generated by projecting the 360◦
+LiDAR point cloud directly into the camera frame.
+Dense Surface Normal Loss (Lnormal ) To supplement areas where LiDAR points are sparse
+or surface texturing is uniform, we incorporate a geometric alignment term:
+\mathcal {L}_{\text {normal}} = 1 - \frac {N \cdot N_{\text {pseudo}}}{\|N\|_2 \|N_{\text {pseudo}}\|_2}
+(7)
+This loss maximizes the cosine similarity between our rendered voxel surface normals N
+and dense pseudo-ground-truth surface normals Npseudo generated by using the DepthAnythingV2 [29] foundation model and following SVRaster [18] computation from depth maps
+to normal maps.
+Sky Transmittance Mask Loss (Lsky ) To prevent the invalid allocation of sparse voxels in
+unbounded free space, we isolate the sky region using a binary mask Msky derived from
+zero-depth LiDAR boundaries. We enforce maximum global ray transmittance via a mean
+squared error (MSE) objective :
+\mathcal {L}_{\text {sky}} = \frac {1}{|\mathcal {M}_{\text {sky}}|} \sum _{i \in \mathcal {M}_{\text {sky}}} (T_{\text {final}, i} - 1)^2
+(8)
+where Tfinal is the residual transmittance accumulated at the terminal boundary of the multioctree composition pass. This ensures that background primitives are completely penalized
+within the sky dome, routing all background color generation exclusively through the 2D
+environment map.
+D.1
+Adaptive Optimization Schedule
+We adopt the ascending loss schedule of SVRaster [18]. To dynamically determine convergence, we monitor structural rendering improvements every 1,000 iterations using ∆SSIM =
+SSIMt − SSIMt−1000 . Once ∆SSIM falls below a threshold ϵ, background octree (Obg ) subdivision is deactivated. The background octree then undergoes two pruning cycles (2,000
+iterations total) to eliminate residual low-density voxels, followed by a final 3,000-iteration
+refinement phase with frozen subdivision and pruning. In contrast, the foreground asset octrees {Oi } bypass early deactivation and subdivide independently throughout training to
+accommodate their longer optimization window.
+E
+Additional Results
+Depth Map Visualization In Fig. 9, we provide extended qualitative visualizations of the
+reconstructed depth maps across multiple dynamic sequences, which are generated in a single
+pass by evaluating our multi-volume composite rendering function.
+20
+T. Aguirre et al.
+OmniRe [5]
+StreetGS [28]
+DrivingVoxels (ours)
+Fig. 9: Qualitative Comparison of Reconstructed Depth Maps. Across multiple PandaSet sequences [25], DrivingVoxels preserves sharp object boundaries, coherent vehicle geometry, and cleaner scene layout structures compared to point-based baseline alternatives.
+1M
+DrivingVoxel
+StreetGS
+LPIPS ↓
+0.300
+2M
+0.275
+3M
+0.250
+45
+60
+75
+90
+105
+Train time [min] ↓
+Fig. 10: Quality-efficiency tradeoff. Comparison of LPIPS versus training time for DrivingVoxels under different voxel budgets (1M, 2M, and 3M) against StreetGS. DrivingVoxels achieves a highly competitive perceptual quality while requiring significantly less training
+time, allowing a predictable control over the performance-efficiency tradeoff.
+Quality-Efficiency Tradeoffs Fig. 10 reports LPIPS and training time for DrivingVoxel under
+different maximum voxel budgets (1M, 2M, and 3M) alongside StreetGS. As shown in the
+DrivingVoxels
+21
+plot, DrivingVoxels reaches competitive perceptual quality much faster than StreetGS, with
+training time ranging from approximately 47 to 60 minutes compared to StreetGS’s 107
+minutes. While increasing the voxel budget from 1M to 3M drastically lowers the LPIPS error
+to approach StreetGS quality, it only marginally increases training overhead. These results
+confirm that limiting the total voxel allocation gives users direct and predictable control over
+the quality-efficiency tradeoff. This is a distinct advantage that Gaussian-based methods like
+StreetGS cannot offer, as their memory usage and primitive counts grow randomly during
+training.

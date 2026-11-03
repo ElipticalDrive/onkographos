@@ -1,0 +1,1396 @@
+Monod et al.
+Journal on Image and Video Processing
+(2026) 2026:1
+https://doi.org/10.1186/s13640-025-00669-0
+EURASIP Journal on Image
+and Video Processing
+Open Access
+RESEARCH
+Video restoration with a deep plug‑and‑play
+prior
+Antoine Monod1,2* , Julie Delon1, Andrés Almansa1, Eva Coupeté2 and Matias Tassano3
+*Correspondence:
+amonod@gopro.com
+1
+Laboratoire MAP5, Université
+Paris Cité, Paris, France
+2
+GoPro Inc., San Mateo, USA
+3
+Meta Reality Labs, Zurich,
+Switzerland
+Abstract
+Performing video restoration in embedded systems is a challenge. Indeed, state-of-theart learning-based methods in video restoration are specifically trained for given tasks,
+and often rely on huge networks, which makes them unsuitable when memory
+and computing resources are limited. In this paper, we explore the use of deep Plugand-Play (PnP) algorithms for video restoration. We distinguish ourselves from prior PnP
+work by directly writing PnP schemes on video sequences instead of separate images.
+Our experiments in video deblurring, super-resolution (SR), and pixel interpolation
+all show a clear benefit to using a network specifically designed for video denoising,
+as it yields better restoration performance than a single image network with similar
+denoising performance using the same PnP formulation, and more temporal stability
+than other image-based PnP works. Experiments also highlight that, while not always
+as effective as state-of-the-art single-task deep networks, our lightweight approach
+remains competitive for many video restoration tasks.
+Keywords: Video restoration, Bayesian imaging, Proximal methods, Plug-and-Play
+(PnP), Denoising, Deblurring, Super-resolution (SR), Interpolation, Convolutional Neural
+Network (CNN), Computational photography
+1 Introduction
+Designing image and video restoration methods for embedded systems is a complicated
+process. They typically have additional constraints and requirements when compared
+to the literature at large, such as limited storage and computing resources, or desirable
+reusability (i.e., using the same method for multiple tasks) and updatability. It is difficult
+to design systems that yield noteworthy performance when compared to state-of-the-art
+methods for a given task while following some of these principles.
+In this paper, we present a potential candidate for video restoration for embedded systems in the Deep Plug-and-Play (PnP) framework. Most inverse problems in video restoration can be written as:
+y = A(x) + n,
+(1)
+where y ∈ Rm is the degraded observation, x ∈ Rd is the unknown video or image to be
+recovered, A is a the degradation operator that is often linear, and n ∈ Rm is a realization
+from a known noise distribution. Such inverse problems are often ill-posed or at least
+© The Author(s) 2026. Open Access This article is licensed under a Creative Commons Attribution-NonCommercial-NoDerivatives 4.0
+International License, which permits any non-commercial use, sharing, distribution and reproduction in any medium or format, as long
+as you give appropriate credit to the original author(s) and the source, provide a link to the Creative Commons licence, and indicate if you
+modified the licensed material. You do not have permission under this licence to share adapted material derived from this article or parts of
+it. The images or other third party material in this article are included in the article’s Creative Commons licence, unless indicated otherwise
+in a credit line to the material. If material is not included in the article’s Creative Commons licence and your intended use is not permitted
+by statutory regulation or exceeds the permitted use, you will need to obtain permission directly from the copyright holder. To view a copy
+of this licence, visit http://​creat​iveco​mmons.​org/​licen​ses/​by-​nc-​nd/4.​0/.
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+Page 2 of 24
+ill-conditioned. In order to build reliable and robust estimators of x from y , it is common
+to use a Bayesian formalism, in which one assumes that the unknown x follows a law of
+density p(x), called the prior. By combining it with p(y|x), the likelihood of y given x
+(derived from the degradation model (1)), we obtain the posterior density p(x|y), whose
+maximum a posteriori (MAP) is generally sought:
+x̂ = argmax p(x|y) = argmax log p(y|x) + log p(x).
+x
+x
+(2)
+If n follows a Gaussian distribution N (0, σn2 Id), and writing α R(x) = − log p(x), estimating the MAP can be rewritten as the minimization problem:
+x̂ = argmin
+x
+1
+�y − A(x)�22 + α R(x).
+2σn2
+(3)
+For a long time, Bayesian restoration in digital imaging or video has relied on explicit
+priors expressing regularity assumptions on x either in the image space [1–4] or in
+transformed spaces [5–7]. When R is known and convex, there are numerous efficient
+numerical schemes to find the solutions of (3) [8]. In recent years, learning-based methods and end-to-end neural networks have outperformed traditional image and video
+restoration methods [9–14]. Training these networks requires large amounts of data and
+computing resources (which tend to increase year over year) and is often specific to a
+given degradation model.
+Plug-and-Play methods try to reconcile the Bayesian and learning-based worlds,
+by combining a likelihood defined explicitly according to (1) with a prior R implicitly
+defined by a denoising algorithm. This combination is done within an alternate optimization scheme that splits the data fidelity and regularization subproblems. While PnP
+approaches have been thoroughly explored for image restoration problems, there have
+been surprisingly few attempts to use them for video restoration, even though the potential applications in this field are numerous. As such, tackling video using a PnP approach
+is the subject of this publication. Its main contributions are the following:
+• We demonstrate the viability and versatility of the Deep Plug-and-Play framework
+for video restoration, where a single video denoising network can be repurposed for
+multiple video restoration tasks. To the best of our knowledge, this paper is the first
+one to do so. The resulting method, presented in Sect. 3, has a reduced memory footprint: only the weights of the denoising network have to be stored for several use
+cases, which makes the approach very interesting for embedded systems.
+• Through several different restoration experiments presented in Sect. 4, our approach
+is shown to compare favorably to single image PnP schemes in terms of image quality
+and temporal stability, even for restoration problems affecting each frame separately
+such as super-resolution or deblurring.
+• Although such a comparison is not very prevalent in the Plug-and-Play literature, we
+perform the inevitable comparison of our method to state-of-the-art learning-based
+ones. Experiments highlight that, while not always as effective as networks specifically trained for each restoration problem, this lightweight approach remain competitive for diverse video restoration tasks.
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+Page 3 of 24
+• The source code of all of our experiments, along with results stored as video files, are
+available on GitHub (https://​github.​com/​amonod/​pnp-​video).1
+2 Related works
+PnP methods can be traced back to the seminal work by Venkatakrishnan et al. [15]
+which uses Alternating Direction Method of Multipliers (ADMM) [16] optimization to
+decouple the data and regularization terms. Multiple PnP formulations of optimization
+algorithms have been proposed, such as ADMM [15, 17], Stochastic Gradient Descent
+(SGD) [18], Proximal Gradient Descent (PGD) [19]. primal-dual methods [20, 21], Iterative Soft-Threshold Algorithm (ISTA) [22, 23], Fast-ISTA (FISTA) [24] or Half-Quadratic
+Splitting (HQS) [25]. A large diversity of denoisers have been used for the regularization,
+but most recent PnP methods generally use deep neural networks [17, 18, 20, 26, 27].
+In [25], an analysis of the efficiency of the different deep denoisers for different image
+restoration tasks is provided. Deep plug-and-play methods can be used to solve different
+kinds of image restoration tasks, such as super-resolution [28], Gaussian denoising [29],
+or image deblurring [30], )and some works have extended the PnP paradigm to Poisson
+inverse problems [31, 32]. Theoretical aspects of deep plug-and-play algorithms have
+also been studied using bounded denoisers [33], or denoisers with Lipschitz residual [17,
+18], with symmetric Jacobian [34, 35], or equal to the gradient of some potential [19].
+In a related direction, deep unfolding networks (DUNs) [36–38] translate the truncated
+optimization schemes of PnP methods into end-to-end networks and yield excellent
+results in fewer iterations, while avoiding manual hyperparameter tuning. However,
+DUNs need a separate training for each restoration task, which makes them less suitable
+for embedded systems.
+To the best of our knowledge, this paper is the first one describing the use of neural
+networks in a PnP scheme for video restoration. In [39], the video denoiser FastDVDnet [12] is used in a PnP scheme, but to solve a specific problem of snapshot compressive
+imaging where the observation is a single frame. A PnP approach is developed in [40] for
+video super-resolution, but employs the patch-based single-image denoiser BM3D [41].
+3 Video plug‑and‑play
+3.1 PnP‑ADMM
+In this paper, we rely on PnP-ADMM (Alternating Direction Method of Multipliers),
+because we empirically found it to be the most stable (and the least sensitive to hyperparameters) alternate scheme for our use case. That said, other optimization schemes
+could also be used. Suppose that we want to minimize (3). ADMM relies on the augmented Lagrangian
+Lε (x, z, v) =
+1 1
+1
+�y − A(x)�22 +R(z) + �x − z�22 + v T (x − z)
+α 2σn2
+2ε
+(4)
+F (x,y)
+1
+The repository is currently private, but can be made accessible to the reviewers and will be public for the camera ready
+version.
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+Page 4 of 24
+that we wish to minimize in (x, z) and maximize in v . In this formulation, v plays the
+role of a Lagrange multiplier, and this whole saddle-point problem is optimized by alternating descent steps in x and z with an ascent step in v , which yields the scheme (setting
+u = εv):
+xk+1 ← argminLε (x, zk , uk /ε) = prox ε F (.,y) (zk − uk )
+(5)
+zk+1 ← argminLε (xk+1 , z, uk /ε) = proxεR (xk+1 + uk )
+(6)
+uk+1 ← uk + xk+1 − zk+1 ,
+(7)
+α
+x
+z
+where if the degradation operator A is linear and represented by a matrix A,
+proxτ F (.,y) (z) =
+τ ∗
+A A + Id
+σn2
+−1
+τ ∗
+A y+z ,
+σn2
+(8)
+with Id the identity matrix in dimension d and A∗ the adjoint matrix of A.
+Now, consider that we know how to build a denoiser Dε which can be expressed as the
+MAP estimator for a denoising problem (for an i.i.d. Gaussian noise of variance ε) with
+log-prior R . By definition of the MAP, Dε (x) = proxεR (x), so we can directly ‘plug’ this
+denoiser in Equation (6) of the optimization scheme. In practice, PnP schemes are successfully used even with denoisers that do not satisfy the denoising MAP property, and
+the study of their convergence is a very active research field [17–19, 23, 33, 42].
+3.2 Case of video sequences
+In the case of inverse problems on digital videos, we propose to use the previous scheme
+directly on a video x for K iterations, i.e., the proximal and denoising steps in the PnPADMM scheme are applied to the whole sequence at each step. This allows considering cases where the operator A cannot be written in a separable way over all images
+of the sequence (e.g. temporal blur). This also allows the use of networks specifically
+designed for video denoising, such as FastDVDnet [12]. Note that if one uses a singleframe denoiser (applied separately to each video frame), and if the degradation operator
+A is separable (i.e., can be written as a degradation on each frame of x separately), iterating PnP-ADMM on a whole video is equivalent to successively running PnP-ADMM on
+each frame. This is obviously no longer the case with video-specific denoisers that are
+applied to the video in a non-separable way.
+Several experiments conducted in the next section compare the performance of
+PnP-ADMM using either DRUNet, a single-image denoising network proposed for
+integration within PnP-HQS in [25], or FastDVDnet [12], a network designed for
+video denoising that leverages a 5-frame sliding window to produce temporally stable
+denoised videos with no explicit image alignment. We use these networks off-the-shelf
+with training weights provided by their original authors. Before studying the performance of these networks in PnP restoration, we evaluate their video Gaussian denoising
+performance as a potential indicator of maximum achievable performance in video PnP
+restoration. Also included to our comparison is GS-DRUNet, a single-image denoiser
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+Page 5 of 24
+designed as an explicit gradient step, used in GSPnP, a modified version of PnP-PGD
+in [19]. The range of noise levels seen in training is σ ∈ [5/255, 55/255] for FastDVDnet
+and σ ∈ [0, 50/255] for DRUNet and GS-DRUNet. We perform our comparison on the
+DAVIS-2017 [43] test set, in its 480p version. It consists of 30 video sequences of varying length. None of the networks have seen these sequences in training. Quantitative
+video denoising results of these networks can be seen in Table 1. FastDVDnet performs
+slightly better than DRUNet at most noise levels, with around 13× fewer parameters
+at half per frame runtime. We also notice that GS-DRUNet remains very competitive
+with DRUNet for σn ≤ 50/255 despite featuring roughly 50% less parameters. DRUNet
+performs best at σn = 100/255, a noise level not seen in training for all networks. This
+result is consistent with the findings of [44] where it is shown that unbiased L1 networks
+generalize better at noise levels outside the training range.
+4 Plug‑and‑play restoration experiments
+We are now interested in the performance of our PnP-ADMM method using the networks of Sect. 3.2 for three video restoration problems: non-blind deblurring, super-resolution and interpolation of random missing pixels. We evaluate said performance using
+typical reference-based quality metrics [45] such as PSNR, SSIM [46] and LPIPS [47].
+These results aim at presenting the viability of our lightweight and multi-task method,
+and at evaluating the impact of the chosen denoiser on the final result.
+4.1 Optimal setting of PnP parameters
+For a given video restoration problem, our formulation of PnP-ADMM has several
+parameters that can have an impact on final performance:
+• Dε, the Gaussian denoiser used as the proximal operator of the prior term.
+• ε, which represents the strength of said denoiser. When the denoiser is designed to
+handle varying levels of noise in a non-blind fashion (as is the case of FastDVDnet
+and DRUNet), ε can be set in the form of a noise map that is fed as an additional
+input to the denoiser.
+• α, which represents the tradeoff between the data fidelity and prior terms of Equation (3).
+• K, the total number of ADMM iterations. It needs to be large enough to allow convergence of the algorithm, but not too large in cases where convergence is not guaranteed.
+Table 1 Denoising: PSNR/SSIM on DAVIS-2017-test-480p [43] (8 CPU AMD 7F52 / 1 NVIDIA Tesla T4 /
+16GB RAM)
+σn
+10/255
+25/255
+50/255
+100/255
+#params
+Runtime (s/img)
+Noisy
+28.13/0.63
+20.17/0.31
+14.15/0.15
+08.13/0.05
+DRUNet [25]
+38.90/0.97
+34.40/0.92
+31.27/0.86
+28.32/0.78
+32.6M
+0.48
+GS-DRUNet [19]
+38.81/0.97
+34.30/0.92
+31.11/0.86
+24.39/0.50
+17.0M
+0.52
+FastDVDnet [12]
+39.20/0.97
+35.05/0.93
+31.97/0.88
+26.84/0.66
+2.5M
+0.23
+Bold indicates the best results
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+Page 6 of 24
+For a given problem and a given denoiser (i.e., A , σn and D are fixed), to find optimal values for said parameters, we perform a 2D grid search on ε and α for an empirically found
+sufficient number of iterations K. Since we have no guarantees that these values are optimal for every possible x , we perform that grid search on a subset of the data we wish
+to evaluate our method on (in our case, 256 × 256 center crops of the first 30 frames of
+the aerobatics, girl-dog, horsejump-stick and subway of DAVIS-2017-test480p [43]). We retain the (ε, α, K ) tuple that yields the higher PSNR on that subset for a
+given denoiser.
+An example of a grid search of (ε, α) for a given video deblurring problem is illustrated
+in Fig. 1.
+In the following experiments, we restrict each sequence to its first 30 frames to harmonize computation times and complexity per video. For each restoration problem, we find
+optimal values of the PnP parameters (ε, α, K ) for a given denoiser with a grid search
+on a subset of the test data. The parameter values obtained for our all video restoration
+problems studied in this work can be found in Appendix C.
+4.2 Non‑blind video deblurring
+Our first use case is relatively straightforward: we generate blurry videos by convolving each frame by a known 2D kernel and adding noise of standard deviation σn to the
+result. For the sake of simplicity, we assume a cyclic convolution operator k . The convolution with k can also be represented as a multiplication with a block circulant matrix H
+with circulant blocks. The degradation model becomes
+y = k ∗ x + n = H x + n.
+(9)
+To simulate blur that varies throughout the video (e.g. handheld camera shake), we
+randomly sample a motion kernel from the 8 used in [48] for each frame. This type of
+non-blind deconvolution problem can be solved on a frame-by-frame basis but is still
+relevant for video.
+For the sake of simplicity, let us assume that frames of x are periodic. Applying H can
+then be done very simply in the Fourier domain, writing F (Hx) = F (k)F (x), where k
+Fig. 1 Grid search of optimal (ε, α) for video deblurring (σn = 2.55/255)
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+Page 7 of 24
+denotes the 2D blur kernel, F (.) denotes the 2D Fourier transform, F (.) its conjugate
+and F −1 (.) its inverse. Using (8) with A = H and the fact that the operators H and H ∗ H
+are diagonal in the Fourier domain, we see that the proximal operator of the data fidelity
+term of (3) can be written as:
+�
+τ ∗
+H H + Id
+σn2
+�−1 �
+proxτ F (.,y) (z) =
+
+
+τ
+F
+(k)
+F
+(y)
++
+F
+(z)
+2
+σ
+.
+= F −1  n τ
+F (k)F (k) + 1
+σ2
+τ ∗
+H y+z
+σn2
+�
+(10)
+n
+4.2.1 Deblurring results
+Quantitative results of our PnP-ADMM method for video deblurring on DAVIS-2017test-480p [43] are presented in Table 2. The table also includes comparison to DPIR [25]
+and GSPnP [19], two state-of-the-art PnP image restoration methods. DPIR uses DRUNet in PnP-HQS with an annealing strategy on the noise level of their denoiser across
+iterations. GSPnP uses GS-DRUNet, the shallower version of DRUNet explicitly trained
+as the gradient step in the PGD algorithm. For both methods, we perform PnP restoration of each video frame sequentially, using the parameter values recommended by
+their respective authors for deblurring: (σ1 , σK , , K ) = (49, σn × 255, 0.23, 8) using the
+notations of [25], and (σ , ν , ǫ, K ) = (1.8σn , 0.1, 10−5 , 400) using the notations of [19].
+We turn off periodical geometric self-ensemble in DPIR as it could also be implemented
+in our method, but only yields marginal improvements and is not necessarily relevant to
+the comparisons of this article.
+With our video PnP-ADMM method, using FastDVDnet instead of DRUNet yields
+a higher PSNR/SSIM in almost all videos observed at both noise levels. The performance gap is smaller between PnP-ADMM using FastDVDnet and DPIR even though
+it also uses DRUNet; this suggests that using identical denoisers but a different optimization algorithm and a different hyperparameters can lead to different PnP restoration
+results. GSPnP also yields better performance than video PnP-ADMM with DRUNet,
+with a very similar performance profile to DPIR. Figure 2 showcases a visual comparison of deblurring results. FastDVDnet restores more image detail whereas DPIR yields
+smoother frames with somewhat less high frequency content. Videos in the supplementary show that our method with FastDVDnet yields the most temporally stable output.
+4.3 Video super‑resolution
+For video SR (VSR), we use the classical degradation model, where the low resolution
+(LR) video is obtained by downsampling the original high resolution (HR) video by a
+Table 2 Video deblurring: PSNR/SSIM on DAVIS-2017-test-480p [43]
+σn
+Blurred
+Ours—DRUNet
+Ours—FastDVDnet
+DPIR [25]
+GSPnP [19]
+2.55/255
+22.75/0.60
+36.20/0.94
+37.11/0.95
+36.97/0.95
+36.69/0.95
+7.65/255
+12.66/0.53
+32.07/0.86
+33.29/0.89
+32.92/0.89
+32.81/0.89
+Bold indicates the best results
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+Page 8 of 24
+Fig. 2 Video deblurring (σn = 2.55) on giant-slalom of DAVIS [43]. Ours—DRUNet and FastDVDnet are
+using optimal values of (ε, α)
+Table 3 Video super-resolution: PSNR/SSIM on DAVIS-2017-test-480p [43]
+s.f. Kernel
+σn
+Bicubic
+Ours—DRUNet Ours—FastDVDnet DPIR [25]
+GSPnP [19]
+27.76/0.82 36.47/0.96
+36.86/0.96
+35.62/0.95
+2.55/255 27.52/0.78 32.12/0.87
+32.37/0.87
+32.56/0.90 32.03/0.90
+7.65/255 26.06/0.62 29.86/0.81
+30.25/0.82
+30.59/0.85 30.39/0.85
+30.12/0.84
+29.75/0.84
+×2 Gauss. (σ = 1.6) 0
+×4 Gauss. (σ = 1.6) 0
+24.74/0.71 30.00/0.84
+N.A.
+N.A.
+2.55/255 24.61/0.69 29.23/0.81
+29.38/0.81
+29.31/0.82
+29.06/0.82
+7.65/255 23.78/0.56 28.18/0.77
+28.47/0.78
+28.29/0.78
+28.48/0.79
+N.A.
+23.98/0.67 30.07/0.84
+30.15/0.84
+29.70/0.83
+2.55/255 23.88/0.64 26.42/0.63
+27.46/0.71
+27.94/0.77 27.80/0.76
+7.65/255 23.17/0.52 26.37/0.70
+26.54/0.70
+26.53/0.71
+×4 Gauss. (σ = 3.2) 0
+26.84/0.72
+Bold indicates the best results
+scale factor s in each dimension after convolution by a known anti-aliasing kernel k .
+Writing H the d × d matrix representing the cyclic convolution operator and S the
+m × d downsampling matrix, the degradation model is
+y = SH x + n.
+(11)
+For the SR problem, as done in [19, 25], we use the closed-form expression proposed
+in [49] to compute the proximal operator of the data fidelity term. Please refer to Appendix B for a step-by-step derivation of the prox. based on [19].
+4.3.1 Comparison of PnP methods
+The quantitative results of our method are presented in Table 3. We again include
+DPIR [25] and GSPnP [19] to the comparison, with the recommended SR parameter
+values: (σ1 , σK , , K ) = (49, max(s, σn × 255), 0.23, 24) using the notations of [25], and
+(σ , ν , ǫ, K ) = (2σn , 0.065, 10−6 , 400) using the notations of [19]. Similarly to the previous restoration problem, PnP-ADMM with FastDVDnet produces better results than
+PnP-ADMM with DRUNet. We also observe that Ours—FastDVDnet outperforms
+DPIR in the noiseless case, and is competitive with DPIR and GSPnP in noisy cases. An
+example is illustrated in Fig. 3.
+4.3.2 Comparison to state‑of‑the‑art learning‑based methods
+Plug-and-Play methods combine advantages of model-based and learning-based methods and are reusable for different restoration problems with a single denoiser, but we do
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+Page 9 of 24
+Fig. 3 Video SR (×2/ Gauss. (σ = 1.6), σn = 0) on deer of DAVIS [43]
+Table 4 Video super-resolution: PSNR/SSIM/LPIPS on DAVIS-2017-test-480p [43]
+sf / kernel
+×4 / Gauss. (σ = 1.6)
+×4 / Gauss. (σ = 3.2)
+# params
+σn
+0
+2.55/255
+0
+2.55/255
+Bicubic
+25.07/0.71/0.40
+24.93/0.69/0.46
+24.44/0.67/0.53
+24.31/0.65/0.56
+Ours—DRUNet
+29.93/0.83/0.29
+29.18/0.80/0.36
+30.01/0.83/0.30
+26.42/0.65/0.61
+32.6M
+Ours—FastDVDnet
+30.08/0.83/0.27
+29.33/0.80/0.36
+30.12/0.83/0.28
+27.44/0.72/0.52
+2.5M
+EDVR [50]
+29.01/0.84/0.19
+28.00/0.77/0.32
+25.53/0.70/0.50
+25.18/0.66/0.54
+20.6M
+BasicVSR [51]
+29.61/0.86/0.18
+28.21/0.77/0.36
+25.90/0.71/0.49
+25.33/0.64/0.58
+6.3M
+BasicVSR++ [52]
+29.76/0.87/0.17
+28.46/0.79/0.33
+25.89/0.71/0.49
+25.41/0.65/0.58
+7.3M
+Bold indicates the best results
+not expect them to perform as good as state-of-the-art learning-based methods trained
+for a specific task. We put that expectation to the test by comparing our video PnP
+method to powerful deep learning video restoration methods. Said comparison is performed for the ×4 video SR task, as our other experiments feature degradation processes
+unlikely to be found in most works of the deep video restoration literature. We compare
+our method using DRUNet and FastDVDnet as regularizers to three state-of-the-art
+deep VSR methods: EDVR [50], BasicVSR [51] and BasicVSR++ [52] on two datasets:
+DAVIS-2017-test-480p [43] (used in our experiments so far), and Vid4 [53], a popular
+video SR dataset comprised four video sequences of varying resolution and length. Note
+that the LR degradation process used during training has a direct impact on the SR performance at test time. Sadly, off-the-shelf versions of EDVR are only trained with ×4
+bicubic downsampling, so performance on our convolution + downsampling use case
+will be reduced. On the other hand, we use the versions of BasicVSR and BasicVSR++
+trained specifically for Blur Downsampling (BD) that uses the Gaussian kernel of std. 1.6
+used in some of our experiments.
+Results are presented in Tables 4 and 5. As previously, Ours—FastDVDnet typically
+outperforms Ours—DRUNet. Since learning-based methods were not trained with additional noise and two out of three methods were trained with BD using a Gaussian kernel
+of std. 1.6, let us first look at columns (×4 / Gauss.(σ = 1.6), σn = 0). Learning-based
+methods yield better SSIM than our PnP method, including EDVR that was trained
+using bicubic downsampling: they are better at recovering textures of the HR video, and
+generally yield higher perceptual similarity. By contrast, our PnP method that denoises
+a least-squares data term tends to favor the PSNR, yielding frames perceived as blurrier.
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+Page 10 of 24
+Table 5 Video super-resolution: PSNR/SSIM/LPIPS on Vid4 [53]
+sf / kernel
+×4 / Gauss. (σ = 1.6)
+σn
+0
+×4 / Gauss. (σ = 3.2)
+2.55/255
+0
+2.55/255
+Bicubic
+20.37/0.51/0.54
+20.33/0.50/0.58
+19.85/0.45/0.70
+19.82/0.44/0.73
+Ours—DRUNet
+23.29/0.68/0.42
+23.10/0.66/0.46
+23.50/0.68/0.43
+21.89/0.54/0.67
+Ours—FastDVDnet
+24.01/0.72/0.38
+23.77/0.70/0.42
+23.78/0.70/0.40
+22.46/0.59/0.58
+EDVR [50]
+23.16/0.73/0.26
+22.99/0.68/0.32
+20.58/0.49/0.66
+20.48/0.47/0.67
+BasicVSR [51]
+24.03/0.78/0.22
+23.63/0.72/0.34
+20.84/0.50/0.64
+20.69/0.47/0.60
+BasicVSR++ [52]
+24.40/0.80/0.21
+23.97/0.74/0.30
+20.84/0.50/0.64
+20.71/0.47/0.70
+Bold indicates the best results
+Fig. 4 Super-resolution on aerobatics of DAVIS-2017-test-480p [43]
+Looking at the other columns of the tables, when learning-based methods encounter a
+LR degradation process different from the one seen during training (e.g., different blur
+kernel, noise added to downsampled frames), their performance decreases vastly. On
+the other hand, our PnP method handles any blur kernel and varying amounts of noise
+(and arbitrary downsampling factors) without retraining. This contrast is summarized in
+Fig. 4 with two different kernel and noise level combinations. Using FastDVDnet, we can
+handle multiple restoration tasks for less than 50% parameters than a single-degradation
+BasicVSR. More visual results can be found in the supplemental.
+4.4 Video interpolation of random missing pixels
+We evaluate a final use case of our Plug-and-Play video restoration method: interpolation, which consists in estimating the values of hidden pixels. We mask a proportion ρ of
+the pixels in the video according to a random spatio-temporal pattern (masking R,G,B,
+channels independently). This inverse problem can be seen as a special case of compressed sensing [54]. The degradation model can be expressed as y = M ⊙ x + n , where
+M is random with a proportion ρ of elements set to 0 and 1 elsewhere, and ⊙ denotes
+pixel-wise multiplication. The proximal operator of the data term is then
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+Page 11 of 24
+Table 6 Video pixel interpolation: PSNR/SSIM on DAVIS-2017-test-480p [43]
+ρ
+σn
+Masked
+Ours—DRUNet
+Ours—FastDVDnet
+GSPnP [19]
+0.5
+0
+9.44/0.14
+44.73/0.99
+45.00/0.99
+38.87/0.97
+2.55/255
+9.43/0.14
+39.89/0.97
+41.83/0.98
+37.41/0.95
+7.65/255
+9.40/0.12
+37.37/0.95
+38.08/0.96
+32.61/0.82
+0
+6.88/0.05
+26.14/0.82
+32.40/0.91
+28.41/0.80
+2.55/255
+6.88/0.04
+26.28/0.82
+32.22/0.91
+28.36/0.80
+7.65/255
+6.86/0.03
+26.70/0.81
+32.21/0.89
+27.97/0.77
+0.9
+Bold indicates the best results
+Fig. 5 Pixel interpolation (ρ = 0.9, σn = 0) on horsejump-stick of DAVIS [43]
+proxτ F (.,y) (x) = M ⊙
+σn2 x + τ y
++ (1 − M) ⊙ x.
+σn2 + τ
+(12)
+4.4.1 Results
+Results of our method for interpolation of missing pixels are shown in Table 6. We
+include GSPnP [19] to our comparison, with their parameter setting described for 50%
+of missing pixels and no noise: no backtracking procedure, σ = 50 for the first 10 iterations then σ = 10, τ = 1 (where relaxes the denoising step and τ is the fixed step size),
+= 0.1, K = 100 using the notations of [19]. While we cannot be sure that these parameters are optimal for the harder case where ρ = 0.9, we keep them as is because we have
+found no performance improvement by, e.g., increasing the number of iterations K. In
+this experiment, since the amount of missing pixels and their locations change from one
+frame to another, GSPnP and Ours—DRUNet that in effect operate on each frame separately clearly lag behind. Ours—FastDVDnet leverages its neighbor-using denoising step
+to provide a much more reliable and temporally stable interpolation of the video. A visual example is proposed in Fig. 5.
+4.5 Expansiveness of video denoising operators
+We have seen with our experiments that the original FastDVDnet can produce satisfactory results and early convergence in video PnP restoration. While this publication
+does not aim at providing new theoretical convergence guarantees of PnP methods, we
+can still have a better grasp of the empirical stability of our method by looking at the
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+Page 12 of 24
+expansiveness of the denoiser being used. First convergence proofs of PnP algorithms
+in the literature assumed strong properties on the denoiser, like boundedness or nonexpansiveness. In [17], a fixed-point convergence proof is provided for PnP-ADMM
+using a deep CNN denoiser D, if the residual of said denoiser Rσ = Id −Dσ is Lipschitzcontinuous. In practice, the authors train a residual denoising network R to be 1-Lipschitz by performing spectral normalization of each convolution layer of the network,
+through a power iteration at each training step, as done in [55]. The Lipschitzness of the
+residual is only empirically verified by tracking the expansiveness of R between iterates
+on a limited number of examples. Spectral norm as a proxy for the Lipschitz constant
+is also found in [56], where convergence guarantees arise if there exists a 1-Lipschitz
+operator Q = 2D − Id. In practice, the non-expansiveness of Q is obtained through a
+soft constraint during the training of the denoiser D, where it is fine-tuned with a loss
+where the reconstruction term is augmented a penalty term enforcing the Jacobian
+J(2Dσ −Id) to have spectral norm < 1. The spectral norm is again approximated using
+power iterations [55].
+In our method, we use of-the-shelf denoising networks simply trained for Gaussian
+noise removal, and we have no guarantees that they or their residual are nonexpansive
+or Lipschitz-continuous. Let us experimentally study the expansiveness of FastDVDnet
+(with its pretrained weights provided by the authors of [12]) for video denoising, and
+do the same for DRUNet. To do so, we first set ourselves to compute the spectral norm
+of the Jacobian of the denoising operators using power iterations until convergence as
+done in [42, 56]. We select 256 × 256 center crops of the first 30 frames of videos of the
+DAVIS-2017-test-480p [43] as our evaluation dataset. We also evaluate the expansiveness of the residual of both denoisers at noise levels σn ∈ {10, 25, 50, 100}/255.
+As can be seen in Table 7, neither vanilla FastDVDnet nor DRUNet (as discussed
+in [19, 42]) are 1-Lipschitz, and neither are their residuals. This means that we cannot
+directly build upon the theoretical convergence guarantees of [17] or [56] for PnP video
+restoration when using these operators. FastDVDnet consistently has a lower spectral
+norm than DRUNet however.
+Furthermore, in our PnP restoration experiments, we have noticed that video PnPADMM with FastDVDnet is significantly less prone to divergence than both video PnPADMM with DRUNet and DPIR [25]. To illustrate this, we perform x4 super-resolution
+using two different kernels at two noise levels on 4 video sequences, using our method
+and DPIR for 2000 iterations on purpose, in order to assess their long-term behavior. We
+Table 7 Maximal value of the spectral norm of the Jacobian of video denoising operators on
+256 × 256 30-frame videos of DAVIS-2017-test-480p [43] at various noise levels
+σn
+10/255
+25/255
+50/255
+100/255
+2.94
+4.08
+4.78
+2.67
+||J(DRUNet) ||S
+10.99
+8.30
+10.96
+6.91
+||J(Id −FastDVDnet) ||S
+1.94
+3.08
+3.78
+1.67
+||J(Id −DRUNet) ||S
+9.99
+7.30
+9.96
+5.92
+||J(2FastDVDnet−Id) ||S
+4.87
+7.15
+8.56
+4.33
+||J(2DRUNet−Id) ||S
+20.98
+15.61
+20.93
+12.83
+||J(FastDVDnet) ||S
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+do so by looking at the PSNR across iterations, as well as if ||xk+1 − xk ||/||x0 || decreases,
+and the expansiveness of the denoiser D. Some of the results are shown in Fig. 6. We
+observe on these long runs that PnP-ADMM with DRUNet is the least stable and can
+easily diverge on some experiments. DPIR is usually more stable than Ours—DRUNet
+(probably in part thanks to its annealing strategy) but also diverges in some cases. In
+contrast, Ours—FastDVDnet showcases greater stability and does not diverge.
+In future work, we would like to train nonexpansive versions of FastDVDnet and evaluate the impact of 1-Lipschitzness on denoising as well as PnP restoration. To do so, we
+would adopt a strategy of training with a soft constraint very similar to [42, 56]: we start
+Fig. 6 Long-term behavior of Video PnP-ADMM and DPIR [25] for x4 super-resolution with various blur
+kernels and noise levels on four 256 × 256 30-frame videos of DAVIS-2017-test-480p [43]
+Page 13 of 24
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+Page 14 of 24
+by pretraining FastDVDnet for standard Gaussian denoising with L2 loss, then fine-tune
+the network with a training loss that has an additional penalty term enforcing the spectral norm of the Jacobian of some operator to be < 1. We would conduct experiments
+with constraining the denoiser D itself, its residual Id −D (for fixed-point convergence
+guarantees as in [17]) or the operator 2D − Id (the denoiser then being the resolvent of a
+maximally monotone operator as in [56]).
+5 Conclusion
+In this work, we have explored the use of Deep PnP algorithms for lightweight and
+multi-task video restoration. Our experiments show that using a light and competitive video denoiser (FastDVDnet) as a regularizer outperforms using a state-of-the-art
+image denoiser (DRUNet) in PnP video schemes in the vast majority of problems tested
+(deblurring, super-resolution, pixel interpolation), both in terms of PSNR and temporal consistency. The performance delta is even larger when the degradation changes
+from one frame to another, as in our deblurring and pixel interpolation problems. This
+difference is quite remarkable, as FastDVDnet has 13× less parameters than DRUNet.
+Promising results for video pixel interpolation paves the way for other video restoration
+problems where the degradation operator cannot be separated frame by frame, such as
+frame interpolation or spatio-temporal deconvolution. While not as performant as single-task state-of-the-art deep networks, our method handles multiple tasks using one
+set of weights of a small denoising network, making it appealing for an on-device implementation in embedded systems, which we intend to experiment with in future work.
+Video results
+In addition to this document, we include video results of our video PnP-ADMM method
+(labeled ‘PnP-V FastDVDnet / DRUNet’ in the videos) and comparison to other methods
+(e.g., DPIR or learning-based method for x4 VSR) for all the experiments stored as.mp4
+files. They can be accessed from Google Drive by click​ing here.
+Derivation of the proximal operator of the video SR problem
+Recall the degradation model of the video SR:
+(11)
+y = SH x + n
+and the proximal operator of the data fidelity term:
+proxτ F (.,y) (z) =
+τ ∗
+A A + Id
+σn2
+−1
+τ ∗
+.
+A
+y
++
+z
+σn2
+(8)
+Replacing A by SH in (8), we deduce that the proximal operator of the data fidelity term
+can be written in this case:
+proxτ F (.,y) (z) =
+τ ∗ ∗
+H S SH + Id
+σn2
+−1
+τ ∗ ∗
+.
+H
+S
+y
++
+z
+σn2
+(B1)
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+Page 15 of 24
+Using this formulation directly is not possible since it requires to invert a huge d × d
+matrix, which is not diagonal in the frequency domain. Instead, as done in [19, 25], we
+use the closed-form expression proposed in [49]. First, following the notations of [19],
+we write ẑτ = στ2 H ∗ S ∗ y + z and observe that
+n
+proxτ F (.,y) (z) =
+τ ∗ ∗
+H S SH + Id
+σn2
+−1
+ẑτ = ẑτ −
+−1
+τ ∗ ∗ τ
+∗ ∗
+H
+S
+SHH
+S
++
+I
+SH ẑτ .
+m
+σn2
+σn2
+(B2)
+The m × m matrix SHH ∗ S ∗ + Im can be inverted much more easily in the Fourier
+domain. Following again the notations of [19], we write � = diag(F (k)) the d × d diagonal matrix containing the Fourier transform of the convolution kernel k on the diago
+nal. This matrix can also be written as a block diagonal matrix � = diag �1 , . . . , �s2 ,
+with blocks k (also diagonal) of size m × m. Now, writing � = �1 , . . . , �s2 ∈ Rm×d ,
+it follows easily that the operator SH corresponds to 1 s in the Fourier domain, i.e.,
+F (SH z) = 1 s�F (z) for all z ∈ Rd . Finally, the proximal operator of the data term can be
+computed explicitly as:
+−1
+τ
+τ
+∗
+−1
+∗
+proxτ F (.,y) (z) = ẑτ − 2 2 F
+�F (ẑτ ) .
+�
+�� + Im
+(B3)
+σn s
+σn2 s2
+Optimal PnP parameters per problem
+The values of the PnP parameters (ε, α, K ) selected for the experiments of Sect. 4 are
+shown in Tables 8, 9 and 10.
+Additional experiments
+Bayer to RGB video demosaicking
+In addition to deblurring, super-resolution and interpolation of random missing pixels,
+we evaluate a very recurring topic of digital photography: demosaicking [57]. Indeed, the
+vast majority of CMOS image sensors currently used in smartphones, cameras and various computer vision systems are monochrome sensors stacked with an array of per-pixel
+color filters (called color filter array/CFA). That array is typically the repetition of a 2 × 2
+pattern, where two green color filters are put diagonally and the other two filters are red
+and blue (called ‘Bayer’ pattern). This means that the sensor output is undersampled in
+Table 8 Video deblurring: selected values of (ε, α, K ) PnP-ADMM parameters
+σn
+DRUNet
+FastDVDnet
+√
+ε × 255
+2.55/255
+7.65/255
+20
+50
+α
+1.25
+1.25
+K
+√
+ε × 255
+10
+10
+20
+20
+α
+1
+0.5
+K
+20
+20
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+Page 16 of 24
+Table 9 Video super-resolution: selected values of (ε, α, K ) PnP-ADMM parameters
+s.f
+×2
+×4
+×4
+kernel
+Gauss. (σ = 1.6)
+Gauss. (σ = 1.6)
+Gauss. (σ = 3.2)
+0
+0
+0
+σn
+DRUNet
+FastDVDnet
+√
+ε × 255
+2.55/255
+2.55/255
+2.55/255
+40
+55
+60
+60
+60
+70
+α
+0.075
+1.25
+1
+1.25
+0.025
+0.25
+K
+√
+ε × 255
+10
+10
+10
+10
+10
+10
+20
+30
+55
+55
+50
+55
+α
+0.025
+0.5
+0.75
+0.75
+0.025
+0.25
+K
+20
+20
+20
+20
+20
+20
+Table 10 Video interpolation of random missing pixels: selected values of (ε, α, K ) PnP-ADMM
+parameters
+0.5
+ρ
+σn
+DRUNet
+FastDVDnet
+√
+ε × 255
+0.9
+0
+2.55/255
+7.65/255
+0
+2.55/255
+7.65/255
+30
+30
+30
+50
+50
+50
+α
+0.5
+3.0
+2.5
+2.75
+2.5
+2.75
+K
+√
+ε × 255
+200
+200
+200
+200
+200
+200
+20
+20
+20
+30
+30
+40
+α
+1.75
+3.0
+1.5
+2.25
+2.75
+1.5
+K
+200
+200
+200
+200
+200
+200
+terms of colors at each pixel location, and an interpolation algorithm must be used to
+recover red, green and blue values at each pixel. Videos are of course not spared from
+that problem since they also come from CMOS image sensors. The degradation model
+for a synthetic video demosaicking inverse problem can be written as:
+y = M ⊙ x + n,
+(D1)
+where M is a binary mask corresponding to the Bayer CFA pattern and ⊙ denotes pixelwise multiplication. Notice that this is actually the same degradation model as the interpolation problem of Sect. 4.3 with a different, fixed mask. The proximal operator of the
+data term is thus identical to the expression of Equation (12).
+Parameter setting of the demosaicking problem. For this specific problem only, we
+experiment with a variant of our method of video PnP-ADMM: an annealed version,
+where the strength of the denoiser ε changes across iterations. We are not the first to
+consider that kind of strategy, as variants of ADMM where the penalty parameter is
+updated at each iteration are already mentioned in [16], and similar annealing strategies
+were used both in PnP-ADMM [28, 33] and other schemes such as PnP-SGD [18] and
+PnP-HQS [25].
+We have seen in other restoration problems that the best value of α for a given denoiser
+and a given problem typically depends on the selected value of ε. This could be a problem for our annealing strategy, since we want ε to change across iterations (we might
+have to change α across iterations as well, making our 2D grid search strategy impossible
+in that case). Luckily, in the masking problem, when there is no noise (and we consider
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+Page 17 of 24
+this to be still valid for little noise), the data-fitting term takes the form of a hard constraint and its proximal operator admits a closed form that is independent of τ (and thus
+of α in our PnP-ADMM method since we have τ ≡ ε/α):
+proxτ F (.,y) (x) = (1 − M) ⊙ x + M ⊙ y.
+(D2)
+This expression that does not depend on α allows us to consider our strategy of annealing of ε while keeping the same α across iterations. Similarly to what is done in [25], we
+√
+√
+√
+uniformly sample ε from a large noise level ε0 to a small one εK −1 in log space. We
+√
+set εK −1 = 5/255 for FastDVDnet since it was trained for noise levels in [55, 5]/255,
+and appropriate denoising performance is not guaranteed at noise levels outside of
+this range (as shown in Table 1 of the main paper). Given that DRUNet was trained for
+noise levels in [50, 0]/255 and that it generalizes better to unseen noise levels, we set
+√
+εK −1 = 1/255 when using annealing with that network. An example of annealing of
+ε for K = 200 iterations (an empirically found sufficient number of iterations for PnPADMM applied to video demosaicking) is shown in Fig. 7.
+As done in other problems, we thus perform our grid search of optimal values of ε and
+α for FastDVDnet and DRUNet for Bayer RGGB to RGB demosaicking, at three noise
+levels σn = 0, σn = 2.55/255 and σn = 7.65/255. We perform that grid search both with
+and without annealing of ε to later compare the performance of both PnP-ADMM versions. The resulting parameter values are shown in Table 11.
+Besides from potentially increasing performance, another added benefit of decreasing
+ε across iterations is that it forces the distance between x and z to decrease when trying to minimize the augmented Lagrangian (Equation (4)), yielding additional stability of
+results in cases where the convergence of ADMM is not guaranteed. This is illustrated in
+Fig. 8.
+Results. As done in Sections 4.1 and 4.2, we include DPIR [25] to our performance
+comparison, with the parameter values recommended by the authors for demosaicking:
+(σ1 , σK , , K ) = (49, max(0.6, σn ∗ 255), 0.23, 40) using the notations of [25] (we disable
+here again the periodical geometric self-ensemble). It is interesting to note that for our
+method, we initialize with the mosaicked observation: z0 = y . In contrast, DPIR initializes to an already crudely demosaicked version of the observation (the authors of [25]
+Fig. 7 Example of annealing of ε with
+√
+εk ∈ [55, 5]/255 and K = 200
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+Page 18 of 24
+Table 11 Video demosaicking: selected values of (ε, α, K ) PnP-ADMM parameters
+σn
+DRUNet
+√
+α
+FastDVDnet
+K
+√
+α
+K
+√
+DRUNet
+α
+(annealing)
+K
+√
+FastDVDnet
+α
+(annealing)
+K
+ε × 255
+ε × 255
+ε0 × 255
+ε0 × 255
+0
+2.55/255
+7.65/255
+60
+60
+60
+0.25
+2.5
+3
+200
+200
+200
+20
+20
+20
+0.25
+3
+1.5
+200
+200
+200
+70
+70
+70
+0.25
+0.75
+0.5
+200
+200
+200
+30
+55
+50
+0.25
+1
+0.5
+200
+200
+200
+Fig. 8 Demosaicking (σn = 0): PSNR of split variables across iterations xk , zk with and without annealing
+√
+√
+(FastDVDnet, ε0 = ε = 20/255). Results are computed and averaged on 256 × 256 crops of the
+first 30 frames of sequences aerobatics, girl-dog, horsejump-stick and subway of
+DAVIS-2017-test-480p [43]
+use matlab’s demosaic function). We do not do so, as we only found marginal improvements to our PnP-ADMM results both in term of final performance and convergence
+speed. A drawback is that our method typically requires more iterations (100 to 200)
+than DPIR with its matlab initialization (40). Conversely, we found in our experiments
+that DPIR would also require more iterations with a mosaicked initialization, but we
+leave that out of our performance comparison, as no number of iterations K was provided by its authors for such a use case. Quantitative results of our PnP-ADMM methods on the 2017 test test of the DAVIS dataset [43] are available in Table 12.
+These results show the benefit of using an annealed version of PnP-ADMM for demosaicking. Similarly to the other restoration problems, they also show that FastDVDnet
+performs better than DRUNet in most scenarios. It is worth noting that DPIR performs
+better than our method (with annealing and either denoiser) in the noiseless case, but
+worse than our method (with annealing and either denoiser) at σn = 7.65/255.
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+Page 19 of 24
+Table 12 Video demosaicking: PSNR/SSIM on DAVIS-2017-test-480p [43] (each video limited to its
+30 first frames)
+0
+σn
+2.55/255
+7.65/255
+Mosaicked
+8.21/0.100
+8.21/0.096
+8.18/0.079
+Ours—DRUNet
+33.23/0.921
+32.20/0.879
+31.22/0.847
+Ours—FastDVDnet
+39.78/0.971
+38.78/0.964
+36.68/0.952
+Ours—DRUNet (annealing)
+45.15/0.992
+40.55/0.973
+36.75/0.951
+Ours—FastDVDnet (annealing)
+43.92/0.990
+41.04/0.981
+36.40/0.951
+DPIR [25]
+45.72/0.993
+40.05/0.972
+34.48/0.905
+Bold indicates the best results
+Table 13 Video 3D deconvolution: PSNR/SSIM on DAVIS-2017-test-480p [43] (each video limited to
+its 30 first frames)
+Kernel
+unif. (4 frames)
+σn
+2.55/255
+unif. (8 frames)
+7.65/255
+2.55/255
+7.65/255
+Convolved
+23.72/0.722
+22.71/0.536
+21.73/0.642
+21.04/0.466
+Ours—DRUNet
+35.71/0.928
+30.82/0.792
+33.73/0.923
+29.86/0.820
+Ours—FastDVDnet
+37.51/0.946
+32.75/0.866
+36.05/0.938
+30.51/0.839
+Bold indicates the best results
+Video 3D deconvolution
+Another experiment we conducted was 3D deconvolution. This use case is more of a toy
+example where the video degradation process cannot be directly applied to each individual frame. The convolution operation can again be represented by a multiplication
+with a block circulant matrix H with circulant blocks, but the cyclic convolution operator k will be 3D and thus have the ability to average values of pixels of multiple frames.
+Formally the forward degradation model is identical to Eq. 9. If the kernel is uniform of
+size d × 1 × 1, where d is the number of frames of interest, we are performing frame
+averaging.
+Results. In this case, per-frame PnP methods such as DPIR or GSPnP cannot be
+applied. However, we can still evaluate the usefulness of a video denoiser by comparing
+FastDVDnet to DRUNet in our video PnP-ADMM method. For each model, we reuse
+the optimal parameter setting for video deblurring (Table 8) in order to avoid rerunning
+the 2D grid search for this specific problem. Quantitative results of our method on the
+DAVIS test set [43] for uniform 3D kernels can be found in Table 13
+As in other experiments, FastDVDnet significantly outperforms DRUNet, once again
+showcasing the interest of using a multi-frame denoiser for video restoration. Figure 9
+showcases an example where FastDVDnet produces a lot less ghosting artifacts originating from the content of surrounding frames.
+If we were to apply a particular succession of 3D uniform and zero-valued kernels, we
+can obtain a 3D deconvolution case akin to temporal deblurring which could be applied
+to datasets such as GoPro [58] or REDS [59] where the blurry videos are obtained by
+averaging successive frames to produce a single blurry image resembling a long exposure image (the zero-valued kernels in this case are to take into account that all frames
+used to produce a blurry image will not be used in the subsequent blurry image, which is
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+Fig. 9 Video 3D deconvolution (unif. (8 frames), σn = 2.55) on the rollercoaster sequence of
+DAVIS-2017-test-480p [43]. Our video PnP-ADMM method with FastDVDnet produces more temporally stable
+results and less ghosting than Ours—DRUNet
+different from applying the same uniform 3D kernel). This experiment will be the subject
+of future work.
+Runtimes
+Plug-and-play methods are typically not real-time methods, because they imply multiple iterations of an alternate optimization algorithm, and each iteration itself includes
+a forward pass through a denoising algorithm. Our method is no exception. That said,
+our method is typically faster than DPIR when performing video restoration with similar
+initialization, since the number of iterations required by DPIR for a single frame must
+be multiplied by the number of frames of the video. In contrast, one iteration of our
+Page 20 of 24
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+method processes the whole video at once. Actual runtimes of course depend on the
+required number of iterations, which can in turn depend on the scene content, the difficulty of the problem, the type of initialization and the choice of parameters. Here are the
+runtimes with the parameters described in the article (8 CPU AMD, 1 NVIDIA A100,
+64GB RAM, DAVIS-2017-test-480p [43]):
+• Deblurring: Ours—FastDVDnet 1.2s/frame (20 it.), Ours—DRUNet 1.4s/frame (10
+it.), DPIR 2.7s/frame (8 it.)
+• sr: Ours—FastDVDnet 1.2s/frame (20 it.), Ours—DRUNet 1.4s/frame (10 it.), DPIR
+8.1s/frame (24 it.)
+• Interpolation: Ours—FastDVDnet 12 s/frame (200 it.), Ours—DRUNet 29 s/frame
+(200 it.)
+• Demosaicking: Ours—FastDVDnet 12 s/frame (200 it.), Ours—DRUNet 29 s/frame
+(200 it.), DPIR 14 s/frame (40 it.)
+We do not feature the runtimes of GSPnP here for two reasons: the first one is that the
+method was designed with theoretical convergence guarantees in mind and typically
+requires a greater number of iterations than our method and DPIR; the second one is
+that a fair runtime comparison would require intensive code refactoring of GsPnP (we
+managed to rewrite the code of DPIR to perform one iteration of PnP-HQS on a video
+by computing the data fidelity step sequentially for each frame, then the regularization
+step by denoising each video frame sequentially; however we could not reproduce this
+with GSPnP, and thus have to run the whole GSPnP algorithm separately for each video
+frame, which greatly increases runtime).
+Abbreviations
+PnP Plug-and-Play
+SR Super-resolution
+VSR Video SR
+LR Low resolution
+HR High resolution
+MAP Maximum a posteriori
+ADMM Alternating direction method of multipliers
+SGD Stochastic gradient descent
+PGD Proximal gradient descent
+ISTA Iterative Soft-Threshold Algorithm
+FISTA Fast-ISTA
+HQS Half-quadratic splitting
+DUN Deep unfolding network
+PSNR Peak signal-to-noise ratio
+SSIM Structural SIMilarity
+LPIPS Learned perceptual image patch similarity
+Supplementary Information
+The online version contains supplementary material available at https://​doi.​org/​10.​1186/​s13640-​025-​00669-0.
+Supplementary file1 (ZIP 647157 KB).
+Supplementary file1 (ZIP 117759 KB).
+Supplementary file1 (ZIP 312700 KB).
+Supplementary file1 (ZIP 1091837 KB).
+Supplementary file1 (ZIP 299716 KB).
+Supplementary file1 (ZIP 398255 KB).
+Page 21 of 24
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+Acknowledgements
+Some experiments conducted in this publication were performed using HPC/AI resources from GENCI-IDRIS (Grant
+2022-AD011012516R1). The authors would like to personally thank the IDRIS user support team for their assistance.
+Author Contributions
+AM performed the experiments conducted in this manuscript, and was the main contributor in writing it, with major
+contributions of JD, MT and AA, and corrections and suggestions of EC. All authors read and approved the final
+manuscript.
+Funding
+This publication was made possible by the funding of a PhD thesis under CIFRE convention 2019/0839. Andrés Almansa
+and Julie Delon would also like to mention the financial support from the French Research Agency through the PostProdLEAP project (ANR-19-CE23-0027-01).
+Availability of data and materials
+The experiments discussed in this article are performed on already available public datasets: – the 480p version of the
+2017 DAVIS test set [43] can be downloaded at https://​data.​vision.​ee.​ethz.​ch/​csergi/​share/​davis/​DAVIS-​2017-​test-​chall​
+enge-​480p.​zip. – Vid4 [53] is available at https://​drive.​google.​com/​drive/​folde​rs/​1An6h​F1oYk​eWxfO​BxxKm​073mv​gIFrB​
+NDA. The neural networks used in our experiments also use the weights provided by the original authors: – DRUNet [25]
+can be downloaded at https://​drive.​google.​com/​drive/​folde​rs/​13kfr​3qny7​S2xwG​9h7v9​5F5mk​Ws0Om​U0D?​usp=​shari​
+ng – FastDVDnet [12] can be downloaded at https://​github.​com/m-​tassa​no/​fastd​vdnet/​blob/​master/​model.​pth – GSDRUNet [19] can be downloaded at https://​plmbox.​math.​cnrs.​fr/f/​ab682​9cb93​37438​48bef/?​dl=1
+Declarations
+Competing interests
+As a GoPro employee, Antoine Monod holds stock in the company. Said company is mentioned in the article, which
+could imply a difficulty quantifiable financial gain or loss after the publication of the manuscript. Authors are also in the
+process of applying for a patent that relates to the content of the manuscript.
+Received: 27 February 2024 Accepted: 2 May 2025
+References
+1. L.I. Rudin, S. Osher, E. Fatemi, Nonlinear total variation based noise removal algorithms. Phys. D. Nonlinear Phenom.
+60(1), 259–268 (1992). https://​doi.​org/​10.​1016/​0167-​2789(92)​90242-F
+2. C. Louchet, L. Moisan, Posterior expectation of the total variation model: properties and experiments. SIAM J. Imag.
+Sci. 6(4), 2640–2684 (2013). https://​doi.​org/​10.​1137/​12090​2276
+3. A. Durmus, E. Moulines, M. Pereyra, Efficient bayesian computation by proximal markov chain monte carlo: When
+langevin meets moreau. SIAM J. Imag. Sci. 11(1), 473–506 (2018). https://​doi.​org/​10.​1137/​16M11​08340
+4. D. Krishnan, T. Tay, R. Fergus, Blind deconvolution using a normalized sparsity measure, in Proceedings of the IEEE
+conference on computer vision and pattern recognition. ed. by D. Krishnan (IEEE, New York, 2011), pp.233–240. https://​
+doi.​org/​10.​1109/​CVPR.​2011.​59955​21
+5. D.L. Donoho, I.M. Johnstone, Adapting to unknown smoothness via wavelet shrinkage. J. Am. Statist. Assoc. 90(432),
+1200–1224 (1995). https://​doi.​org/​10.​1080/​01621​459.​1995.​10476​626
+6. D. Zoran, Y. Weiss, From learning models of natural image patches to whole image restoration, in International conference on computer vision. ed. by D. Zoran (IEEE, Barcelona, 2011), pp.479–486. https://​doi.​org/​10.​1109/​ICCV.​2011.​
+61262​78
+7. J. Delon, A. Houdard, Denoising of photographic images and video (Springer International Publishing, Cham, 2018),
+pp.125–149. https://​doi.​org/​10.​1007/​978-3-​319-​96029-6_5
+8. A. Chambolle, T. Pock, An introduction to continuous optimization for imaging. Acta Numer. 25, 161–319 (2016)
+9. K. Zhang, W. Zuo, L. Zhang, FFDNet: Toward a fast and flexible solution for CNN-based image denoising. IEEE Transact. Image Proc. 27(9), 4608–4622 (2018)
+10. C. Yan, Z. Li, Y. Zhang, Y. Liu, X. Ji, Y. Zhang, Depth image denoising using nuclear norm and learning graph model.
+ACM Transact. Multimed. Comput. Commun. Appl. (TOMM) 16(4), 1–17 (2020)
+11. T. Brooks, B. Mildenhall, T. Xue, J. Chen, D. Sharlet, J. Barron, Unprocessing images for learned raw denoising, in Proceedings of the IEEE/CVF conference on computer vision and pattern recognition. ed. by T. Brooks (IEEE, New York, 2019)
+12. M. Tassano, J. Delon, T. Veit, Fastdvdnet: towards real-time deep video denoising without flow estimation, in Proceedings of the IEEE/CVF conference on computer vision and pattern recognition. ed. by M. Tassano (IEEE, New York, 2020),
+pp.1354–1363
+13. S.W. Zamir, A. Arora, S. Khan, M. Hayat, F.S. Khan, M.H. Yang, L. Shao, Multi-stage progressive image restoration, in
+2021 IEEE/CVF conference on computer vision and pattern recognition (CVPR). ed. by S.W. Zamir (IEEE, New York, 2021),
+pp.14816–14826. https://​doi.​org/​10.​1109/​CVPR4​6437.​2021.​01458
+14. H. Duan, W. Shen, X. Min, D. Tu, L. Teng, J. Wang, G. Zhai, Masked autoencoders as image processors. arXiv preprint
+(2023) arXiv:​2303.​17316
+15. S.V. Venkatakrishnan, C.A. Bouman, B. Wohlberg, Plug-and-play priors for model based reconstruction, in 2013 IEEE
+global conference on signal and information processing. ed. by S.V. Venkatakrishnan (IEEE, New york, 2013), pp.945–
+948. https://​doi.​org/​10.​1109/​Globa​lSIP.​2013.​67370​48
+Page 22 of 24
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+16. S. Boyd, N. Parikh, E. Chu, B. Peleato, J. Eckstein, Distributed optimization and statistical learning via the alternating
+direction method of multipliers. Found. Trends Mach. Learn. 3(1), 1–122 (2011). https://​doi.​org/​10.​1561/​22000​00016
+17. E. Ryu, J. Liu, S. Wang, X. Chen, Z. Wang, W. Yin, Plug-and-play methods provably converge with properly trained
+denoisers, in International conference on machine learning. ed. by E. Ryu (PMLR, New York, 2019), pp.5546–5557
+18. R. Laumont, V. De Bortoli, A. Almansa, J. Delon, A. Durmus, M. Pereyra, On maximum a posteriori estimation with
+plug and play priors and stochastic gradient descent. J. Mathem. Imag. Vis. 65(1), 140–163 (2023)
+19. S. Hurault, A. Leclaire, N. Papadakis, Gradient Step Denoiser for convergent Plug-and-Play, in International Conference on
+Learning Representations (2022) https://​openr​eview.​net/​forum?​id=​fPhKe​ld3Okz
+20. T. Meinhardt, M. Moller, C. Hazirbas, D. Cremers, Learning proximal operators: Using denoising networks for regularizing
+inverse imaging problems, in Proceedings of the IEEE International conference on computer vision (2017), pp. 1781–1790
+21. F. Heide, M. Steinberger, Y.T. Tsai, M. Rouf, D. Pająk, D. Reddy, O. Gallo, J. Liu, W. Heidrich, K. Egiazarian, J. Kautz, K. Pulli,
+FlexISP: a flexible camera image processing framework. ACM Transact. Graph. 33(6), 1–13 (2014). https://​doi.​org/​10.​
+1145/​26612​29.​26612​60
+22. R.G. Gavaskar, K.N. Chaudhury, Plug-and-play ISTA converges with kernel denoisers. IEEE Signal Proc. Lett. 27,
+610–614 (2020). https://​doi.​org/​10.​1109/​LSP.​2020.​29866​43
+23. X. Xu, Y. Sun, J. Liu, B. Wohlberg, U.S. Kamilov, Provable convergence of plug-and-play priors with MMSE denoisers.
+IEEE Signal Proc. Lett. 27, 1280–1284 (2020). https://​doi.​org/​10.​1109/​LSP.​2020.​30063​90
+24. U.S. Kamilov, H. Mansour, B. Wohlberg, A plug-and-play priors approach for solving nonlinear imaging inverse problems. IEEE Signal Proc. Lett. 24(12), 1872–1876 (2017)
+25. K. Zhang, Y. Li, W. Zuo, L. Zhang, L. Van Gool, R. Timofte, Plug-and-play image restoration with deep denoiser prior.
+IEEE Transact. Pattern Analy. Mach. Intell. 44(10), 6360–6376 (2021)
+26. U.S. Kamilov, C.A. Bouman, G.T. Buzzard, B. Wohlberg, Plug-and-play methods for integrating physical and learned
+models in computational imaging: theory, algorithms, and applications. IEEE Signal Proc. Mag. 40(1), 85–97 (2023).
+https://​doi.​org/​10.​1109/​MSP.​2022.​31995​95
+27. K. Wei, A. Aviles-Rivero, J. Liang, Y. Fu, H. Huang, C.B. Schönlieb, Tfpnp: tuning-free plug-and-play proximal algorithms
+with applications to inverse imaging problems. J Mach. Learn. Res. 23(16), 1–48 (2022)
+28. A. Brifman, Y. Romano, M. Elad, Turning a denoiser into a super-resolver using plug and play priors. IEEE Int Conf
+Image Proc (2016). https://​doi.​org/​10.​1109/​ICIP.​2016.​75325​89
+29. G.T. Buzzard, S.H. Chan, S. Sreehari, C.A. Bouman, Plug-and-play unplugged: optimization-free reconstruction using
+consensus equilibrium. SIAM J. Imag. Sci. 11(3), 2001–2020 (2018)
+30. X. Wang, S.H. Chan, Parameter-free plug-and-play ADMM for image restoration, in 2017 IEEE International conference on
+acoustics, speech and signal processing (ICASSP) (2017)
+31. A. Rond, R. Giryes, M. Elad, Poisson inverse problems by the plug-and-play scheme. J. Vis. Commun. Image Represent. 41, 96–108 (2016). https://​doi.​org/​10.​1016/j.​jvcir.​2016.​09.​009
+32. S. Hurault, U. Kamilov, A. Leclaire, N. Papadakis, Convergent Bregman Plug-and-Play Image Restoration for Poisson
+Inverse Problems, in Advances in Neural Information Processing Systems, vol. 36, ed. by A. Oh, T. Naumann, A. Globerson, K. Saenko, M. Hardt, S. Levine (Curran Associates, Inc., 2023), pp. 27251–27280. https://​proce​edings.​neuri​ps.​cc/​
+paper_​files/​paper/​2023/​file/​56db5​3e53d​b1b29​ae658​e53fb​764f0​67-​Paper-​Confe​rence.​pdf
+33. S.H. Chan, X. Wang, O.A. Elgendy, Plug-and-play ADMM for image restoration: fixed-point convergence and applications. IEEE Transact. Comput. Imag. 3(1), 84–98 (2016)
+34. Y. Romano, M. Elad, P. Milanfar, The little engine that could: regularization by denoising (RED). SIAM J. Imag. Sci. 10(4),
+1804–1844 (2016). https://​doi.​org/​10.​1137/​16M11​02884. arXiv:​1611.​02862
+35. E.T. Reehorst, P. Schniter, Regularization by denoising: clarifications and new interpretations. IEEE Trans. Comput.
+Imag. 5(1), 52–67 (2019). https://​doi.​org/​10.​1109/​TCI.​2018.​28803​26. arXiv:​1806.​02296
+36. S. Diamond, V. Sitzmann, F. Heide, G. Wetzstein, Unrolled optimization with deep priors. arXiv preprint. (2017) arXiv:​
+1705.​08041
+37. K. Zhang, L. Van Gool, R. Timofte, Deep Unfolding Network for Image Super-Resolution, in 2020 IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR) (IEEE, 2020-06), pp. 3214–3223. https://​doi.​org/​10.​1109/​CVPR4​2600.​
+2020.​00328
+38. C. Laroche, A. Almansa, M. Tassano, Deep Model-Based Super-Resolution With Non-Uniform Blur, in Proceedings of the
+IEEE/CVF Winter conference on applications of computer vision (WACV) (2023), pp. 1797–1808
+39. X. Yuan, Y. Liu, J. Suo, F. Durand, Q. Dai, Plug-and-play algorithms for video snapshot compressive imaging. IEEE Trans.
+Patt. Analys. Mach. Intell. 44(10), 7093–7111 (2021)
+40. V. Khorasani Ghassab, N. Bouguila, Plug-and-play video reconstruction using sparse 3d transform-domain block
+matching. Mach. Vis. Appl. 32(3), 76 (2021)
+41. K. Dabov, A. Foi, V. Katkovnik, K. Egiazarian, Image denoising by sparse 3-D transform-domain collaborative filtering.
+IEEE Trans. Image Proc. 16(8), 2080–2095 (2007). https://​doi.​org/​10.​1109/​TIP.​2007.​901238
+42. S. Hurault, A. Leclaire, N. Papadakis, Proximal denoiser for convergent plug-and-play optimization with nonconvex
+regularization. International conference on machine learning pp. 9483–9505 (2022)
+43. J. Pont-Tuset, F. Perazzi, S. Caelles, P. Arbeláez, A. Sorkine-Hornung, L. Van Gool, The 2017 davis challenge on video
+object segmentation. arXiv preprint (2017) arXiv:​1704.​00675
+44. S. Mohan, Z. Kadkhodaie, E.P. Simoncelli, C. Fernandez-Granda, Robust and interpretable blind image denoising via
+bias-free convolutional neural networks, in International Conference on Learning Representations (2020). https://​openr​
+eview.​net/​forum?​id=​HJlSm​C4FPS
+45. X. Min, H. Duan, W. Sun, Y. Zhu, G. Zhai, Perceptual video quality assessment: a survey. Sci. China Inform. Sci. 67(11),
+211301 (2024)
+46. Z. Wang, A. Bovik, H. Sheikh, E. Simoncelli, Image quality assessment: from error visibility to structural similarity. IEEE
+Trans. Image Proc. 13(4), 600–612 (2004). https://​doi.​org/​10.​1109/​TIP.​2003.​819861
+47. R. Zhang, P. Isola, A.A. Efros, E. Shechtman, O. Wang, The unreasonable effectiveness of deep features as a perceptual
+metric, in CVPR (2018)
+Page 23 of 24
+Monod et al. Journal on Image and Video Processing
+(2026) 2026:1
+48. A. Levin, Y. Weiss, F. Durand, W.T. Freeman, Understanding and evaluating blind deconvolution algorithms, in 2009 IEEE
+conference on computer vision and pattern recognition (2009), pp. 1964–1971. https://​doi.​org/​10.​1109/​CVPR.​2009.​
+52068​15
+49. N. Zhao, Q. Wei, A. Basarab, N. Dobigeon, D. Kouamé, J.Y. Tourneret, Fast single image super-resolution using a new
+analytical solution for 2 −2 problems. IEEE Trans Image Proc 25(8), 3683–3697 (2016). https://​doi.​org/​10.​1109/​TIP.​
+2016.​25670​75
+50. X. Wang, K.C. Chan, K. Yu, C. Dong, C.C. Loy, EDVR: Video restoration with enhanced deformable convolutional networks,
+in The IEEE conference on computer vision and pattern recognition workshops (CVPRW) (2019)
+51. K.C. Chan, X. Wang, K. Yu, C. Dong, C.C. Loy, Basicvsr: The search for essential components in video super-resolution
+and beyond. Proceedings of the IEEE/CVF conference on computer vision and pattern recognition pp. 4947–4956
+(2021)
+52. K.C. Chan, S. Zhou, X. Xu, C.C. Loy, BasicVSR++: Improving video super-resolution with enhanced propagation and alignment, in Proceedings of the IEEE conference on computer vision and pattern recognition (2022)
+53. C. Liu, D. Sun, On Bayesian adaptive video super resolution. IEEE Trans Patt Analy Mach Intell 36(2), 346–360 (2014).
+https://​doi.​org/​10.​1109/​TPAMI.​2013.​127
+54. D. Donoho, Compressed sensing. IEEE Trans. Inform. Theory 52(4), 1289–1306 (2006). https://​doi.​org/​10.​1109/​TIT.​
+2006.​871582
+55. T. Miyato, T. Kataoka, M. Koyama, Y. Yoshida. Spectral normalization for generative adversarial networks (2018). arXiv:​
+1802.​05957
+56. J.C. Pesquet, A. Repetti, M. Terris, Y. Wiaux, Learning maximally monotone operators for image recovery. SIAM J. Imag.
+Sci. 14(3), 1206–1237 (2021)
+57. B. Gunturk, J. Glotzbach, Y. Altunbasak, R. Schafer, R. Mersereau, Demosaicking: color filter array interpolation. IEEE
+Signal Proc. Mag. 22(1), 44–54 (2005)
+58. S. Nah, T.H. Kim, K.M. Lee, Deep multi-scale convolutional neural network for dynamic scene deblurring, in CVPR (2017)
+59. S. Nah, S. Baik, S. Hong, G. Moon, S. Son, R. Timofte, K.M. Lee, NTIRE 2019 Challenge on video deblurring and superresolution: dataset and study, in CVPR Workshops (2019)
+Publisher’s Note
+Springer Nature remains neutral with regard to jurisdictional claims in published maps and institutional affiliations.
+Page 24 of 24

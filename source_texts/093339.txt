@@ -1,0 +1,289 @@
+The goal of this topic is to track the feasibility and interest for implementing SSAO for volume rendering in VTK / 3DSlicer. 
+As highlighted by @lassoan in this post, SSAO for volumes could be a game-changer especially …
+
+Screen-space ambient occlusion for volume rendering - Development - 3D Slicer Community
+Screen-space ambient occlusion for volume rendering
+Development
+volume-rendering
+LucasGandel
+(Lucas Gandel)
+October 19, 2023, 9:16am
+1
+The goal of this topic is to track the feasibility and interest for implementing SSAO for volume rendering in VTK / 3DSlicer.
+As highlighted by @lassoan in this post, SSAO for volumes could be a game-changer especially for the recent (and outstanding) colorized volume visualization presented here.
+First tries look promising with a very simple opacity function resulting in a fully opaque representation of the volume (left: SSAO disabled; right: SSAO enabled):
+More details will follow in the posts below.
+LucasGandel
+(Lucas Gandel)
+October 19, 2023, 9:53am
+2
+Quick comparison of SSAO for surface and volume.
+The iso surface value used for extraction corresponds to the half of the volume’s scalar range.
+The opacity function used for volume rendering is a ramp with value 0.0 before the half of the volume’s scalar range, and 1.0 after. No gradient function was used.
+Volume-Surface-SSAO.PNG1205×1290 232 KB
+Inspecting the computed SSAO textures in RenderDoc shows how sensitive to normal computation the SSAO algorithm is. While the surface is perfectly smooth, voxels appear on the volume and make it appear darker. This effect should be mitigated when using a smooth transfer function and a gradient function to improve normals.
+SSAOTextures1920×788 143 KB
+lassoan
+(Andras Lasso)
+October 19, 2023, 11:35am
+3
+This is very exciting, thanks a lot for working on this!
+You can adjust SSAO parameters (see here or try interactively in the Lights module in Sandbox extension) to control the darkening. Small size scale will highlight small irregularities in the surface (I think this is what we see in the renderings above). By increasing the sIze scale you can simulate drop shadow (this is what we need). Further increasing the size scale the ambient occlusion becomes so blurred that it is not useful anymore. So, I would suggest to try to tune the SSAO parameters by adjusting the size scale, similarly how it is done in Sandbox extension.
+LucasGandel
+(Lucas Gandel)
+October 19, 2023, 12:42pm
+4
+This is very exciting, thanks a lot for working on this!
+I’m on vacation for the next two days, I couldn’t resist…
+You can adjust SSAO parameters…
+Right, I confirm the effect can be mitigated by playing with the ssao parameters. (Results bellow from left to right with SSAO OFF, SSAO radius = 1, SSAO radius = 10, SSAO radius = 100).
+SSAO_off_r1_r10_r100.PNG1920×437 104 KB
+However the “grain” effect is present in the computed normals so I definitely think better results can be achieved with better opacity parameters:
+image747×1149 180 KB
+Below are additional images using a wide ramp for the opacity function.
+lassoan
+(Andras Lasso)
+October 19, 2023, 1:23pm
+5
+This looks amazing!
+If the scalar opacity transfer function is a step function then some edge artifacts are indeed often appear. Therefore, usually the scalar opacity function has a ramp-like shape and the user adjusts steepness and maximum of the ramp to show details with sufficient sharpness and clarity but to avoid highlighting irrelevant surface imperfections.
+Can you make this avaialable somehow so that I can play with it?
+LucasGandel
+(Lucas Gandel)
+October 19, 2023, 2:06pm
+6
+Thank you! I confirm I mean a step function in my first post, a ramp was used after that for the last screenshot.
+I completely agree the best is that you give it a try as you are way more experienced than me at playing with such transfer function parameters.
+I’ll clean the current code (most of it is on the application side for now) and will explain the few changes required in VTK in a follow-up post (hopefully before tonight).
+In the meantime, I tried playing a bit with the data from @muratmaga and your new Colorize Volume module. It looks really promising, but again the rendering parameters should be optimized (this is plain VTK with default options):
+SSAO_mouse.drawio1142×370 25.1 KB
+LucasGandel
+(Lucas Gandel)
+October 19, 2023, 2:27pm
+7
+As I probably won’t have time to go further before tonight, and can’t wait to see if this performs well on your side. Here is a quick way to try it:
+VTK changes required: This commit from the volume-ssao branch
+The following shader replacement on the mapper:
+```
+  volume->GetProperty()->ShadeOn();
+
+  volume->GetShaderProperty()->AddFragmentShaderReplacement("//VTK::ComputeLighting::Dec", true,
+    "vec3 g_dataNormal; \n"\
+    "//VTK::ComputeLighting::Dec\n",
+    false);
+  volume->GetShaderProperty()->AddFragmentShaderReplacement("//VTK::RenderToImage::Dec", true,
+    "vec3 l_opaqueFragNormal;\n"
+    "vec3 l_opaqueFragPos;\n"
+    "bool l_updateDepth;\n",
+    false);
+
+  volume->GetShaderProperty()->AddFragmentShaderReplacement("//VTK::RenderToImage::Init", true,
+    "\
+    \n  l_opaqueFragPos = vec3(-1.0);\
+    \n  l_updateDepth = true;",
+    false);
+
+  volume->GetShaderProperty()->AddFragmentShaderReplacement("//VTK::RenderToImage::Impl", true,
+    "\
+    \n    if(!g_skip && g_srcColor.a > 0.0 && l_updateDepth)\
+    \n      {\
+    \n      l_opaqueFragPos = g_dataPos;\
+    \n      l_opaqueFragNormal = g_dataNormal;\
+    \n      l_updateDepth = false;\
+    \n      }",
+    false);
+
+
+  volume->GetShaderProperty()->AddFragmentShaderReplacement("//VTK::RenderToImage::Exit", true,
+    "\
+    \n  if (l_opaqueFragPos == vec3(-1.0))\
+    \n    {\
+\n gl_FragDepth = 1.0; \
+\n gl_FragData[1] = gl_FragData[1]; \
+    \n    }\
+    \n  else\
+    \n    {\
+    \n    vec4 depthValue = in_projectionMatrix * in_modelViewMatrix *\
+    \n                      in_volumeMatrix[0] * in_textureDatasetMatrix[0] *\
+    \n                      vec4(l_opaqueFragPos, 1.0);\
+    \n    depthValue /= depthValue.w;\
+    \n    gl_FragDepth = 0.5 * (gl_DepthRange.far - gl_DepthRange.near) * depthValue.z + 0.5 * (gl_DepthRange.far + gl_DepthRange.near);\
+    \n    gl_FragData[1] = in_modelViewMatrix * in_volumeMatrix[0] * in_textureDatasetMatrix[0] * vec4(l_opaqueFragPos, 1.0);\
+    \n    gl_FragData[2] = vec4(l_opaqueFragNormal, 0.0);\
+    \n    }",
+    false);
+```
+Important:
+Shading must be turned ON otherwise the shader fails to compile. Other non-default options have not been tested.
+The VTK commit above works around a problem with FBOs when the SSAO pass is activated, by commenting the depth buffer blit that is required for surfaces to occlude the volume. This should be fixed later.
+lassoan
+(Andras Lasso)
+October 19, 2023, 2:29pm
+8
+Awesome, thank you, I give it a try and post the results here!
+LucasGandel
+(Lucas Gandel)
+October 24, 2023, 7:25pm
+9
+The last line of the shader replacement above is wrong, normals must be normalized (which was causing the artefacts in the normal texture screenshot above). After replacing the last line with gl_FragData[2] = vec4(normalize(l_opaqueFragNormal), 0.0);\, the SSAO texture for volumes looks very similar to the one for surfaces
+SSAO_mouse.drawio1920×1444 85.7 KB
+There is possibly one remaining visual artefact between the opaque voxels and the background. But I guess this is because we write the depth of any voxel that has opacity greater than 0, using a configurable threshold could address this.
+LucasGandel
+(Lucas Gandel)
+October 24, 2023, 7:34pm
+10
+Interesting effect with high transparency: the depth is written for any voxel that is not fully transparent, but the corresponding color is barely visible. It results in a kind of shell:
+SSAO_mouse.drawio (1)1812×586 28 KB
+lassoan
+(Andras Lasso)
+October 24, 2023, 8:43pm
+11
+This looks amazing!
+I’ve been trying to reproduce this, but I don’t see any difference when I apply the shader replacementes and your VTK fix. Activating SSAO in the renderer (as I do it for surface rendering) has an effect on surface rendering, but not on volume rendering.
+Is there any extra step needed to activate this?
+Is gl_FragData[1] = gl_FragData[1]; line intentional?
+@pieper could you give it a try, too?
+I’m trying to use this code snippet to activate this in Slicer:
+```
+vrDisplayNode = slicer.util.getNodesByClass('vtkMRMLGPURayCastVolumeRenderingDisplayNode')[0]
+shaderPropertyNode = vrDisplayNode.GetOrCreateShaderPropertyNode(slicer.mrmlScene)
+shaderProperty = shaderPropertyNode.GetShaderProperty()
+
+shaderProperty.ClearAllFragmentShaderReplacements()
+
+shaderProperty.AddFragmentShaderReplacement("//VTK::ComputeLighting::Dec", True,
+    """
+    vec3 g_dataNormal;
+    //VTK::ComputeLighting::Dec
+    """, False)
+shaderProperty.AddFragmentShaderReplacement("//VTK::RenderToImage::Dec", True,
+    """
+    vec3 l_opaqueFragNormal;
+    vec3 l_opaqueFragPos;
+    bool l_updateDepth;
+    """, False)
+shaderProperty.AddFragmentShaderReplacement("//VTK::RenderToImage::Init", True,
+    """
+    l_opaqueFragPos = vec3(-1.0);
+    l_updateDepth = true;
+    """, False)
+shaderProperty.AddFragmentShaderReplacement("//VTK::RenderToImage::Impl", True,
+    """
+    if(!g_skip && g_srcColor.a > 0.0 && l_updateDepth)
+        {
+        l_opaqueFragPos = g_dataPos;
+        l_opaqueFragNormal = g_dataNormal;
+        l_updateDepth = false;
+        }
+    """, False)
+shaderProperty.AddFragmentShaderReplacement("//VTK::RenderToImage::Exit", True,
+    """
+    if (l_opaqueFragPos == vec3(-1.0))
+        {
+        gl_FragDepth = 1.0;
+        gl_FragData[1] = gl_FragData[1];
+        }
+    else
+        {
+        vec4 depthValue = in_projectionMatrix * in_modelViewMatrix *
+            in_volumeMatrix[0] * in_textureDatasetMatrix[0] *
+            vec4(l_opaqueFragPos, 1.0);
+        depthValue /= depthValue.w;
+        gl_FragDepth = 0.5 * (gl_DepthRange.far - gl_DepthRange.near) * depthValue.z + 0.5 * (gl_DepthRange.far + gl_DepthRange.near);
+        gl_FragData[1] = in_modelViewMatrix * in_volumeMatrix[0] * in_textureDatasetMatrix[0] * vec4(l_opaqueFragPos, 1.0);
+        gl_FragData[2] = vec4(normalize(l_opaqueFragNormal), 0.0);
+        }
+""", False)
+```
+pieper
+(Steve Pieper (Isomics, Inc.))
+October 24, 2023, 9:15pm
+12
+No, I’m not seeing anything either.
+LucasGandel
+(Lucas Gandel)
+October 25, 2023, 10:01am
+13
+Thank you both for trying, and sorry for the inconvenience. I just had a quick look (thank you for sharing the code to run in Slicer) and it was a bit tricky The Lights module enables SSAO directly using the API of the renderer, which internally only enables the opaque pass in the SSAO pass (see here). The solution is to either fix VTK to use a RenderStepPass instead of an opaque pass only, or to this directly in the Lights module by managing the renderer pass instead of using the SSAO public API.
+Here is a modified version of Lights.py that implements the second approach (it was faster as this is what I used in my VTK based example).
+cpinter
+(Csaba Pinter)
+October 25, 2023, 11:12am
+14
+Wow, I thought the opaque-only behavior was a limitation. @LucasGandel Thanks a lot for the explanation and the change in the Lights module! I think we should just update the module in SlicerSandbox as suggested. @lassoan if you agree I can do it after a bit of testing. Thank you!
+lassoan
+(Andras Lasso)
+October 25, 2023, 11:52am
+15
+Yes, please update the list guts module and send a pull request. Could you test if there are any disadvantages of using the new method (speed, artifacts in some special cases,…) because if there are then it could make sense to have an option to use the old or the new method. Check how things work with semi-transparent models, mix of surface and volume rendering, various volume rendering settings.
+LucasGandel
+(Lucas Gandel)
+October 25, 2023, 11:57am
+16
+Wait, I agree the opaque-only behavior should be a limitation, I think without the VTK change (hack) referenced here it can’t work (the volume disappears). And as pointed by Andras, transparent actors might be impacted too.
+In any case, the VTK hack is not an option, so while working on the true fix, we should consider testing the transparent pass too. Not sure when/if I can find time to do it, but always happy to help
+cpinter
+(Csaba Pinter)
+October 25, 2023, 12:03pm
+17
+I may be overlooking something, but I don’t know what is this hack. You referenced a line in the code above, that’s all I see. What is the change needed so that the modified Lights.py works with semi-transparent models with SSAO?
+I agree a fix in VTK would be nice, but VTK changes take their time so if it’s possible I’d like to use an intermediate solution in the meantime.
+Let me know how I can help. Thanks!
+LucasGandel
+(Lucas Gandel)
+October 25, 2023, 12:13pm
+18
+Sorry for not being clear, the solution is indeed spread across every posts above, but mainly this post is what is required. It references this VTK commit which is a huge hack. It remove support for occluding volume rendering with surface as it wipes out the depth buffer to workaround a bug caused by using the volume pass in the SSAO pass. This is why I say that changing the opaque pass with vtkRenderStepPass in the SSAO pass won’t work if you don’t use this hack.
+(I hope this helps, I will try to post later tonight the action that must be taken to replace this VTK hack with a clean commit )
+cpinter
+(Csaba Pinter)
+October 25, 2023, 12:26pm
+19
+Thanks! I saw that commit, but it is about volume rendering. And the Lights module affects surface rendering, so that commit should not be needed right? Just to be clearer on my side too, I’m interested in supporting SSAO for semi-transparent models for rendering polydata.
+lassoan
+(Andras Lasso)
+October 25, 2023, 12:54pm
+20
+Lights module is for all rendering. Only the SSAO feature was limited to surface rendering.
+We can make changes in Slicer’s VTK very quickly and easily, but we also need to get the all the changes integrated into VTK proper, too, to prevent divergence of Slicer’s VTK from upstream VTK.
+Until @LucasGandel has a chance to come up with a full fix of the VTK bug, we can only experiment with this in local developer builds. Once the proper fix is ready we can integrate it into Slicer’s VTK immediately and send a merge request to VTK upstream.
+We can add the shader replacements and transparent SSAO rendering step to Lights module for now. When everything is confirmed to be working well, then we’ll move all the changes to their proper places:
+VTK: add a transparent SSAO flag to the renderer; maybe add the shader code for volume rendering SSAO
+CTK: add SSAO options to ctkVTKAbstractView
+Slicer core: add shader replacements to Volume Rendering displayable manager (if not added to VTK)
+next page →
+Related topics
+Topic
+Replies
+Views
+Activity
+VTK multivolume/cinematic volume rendering
+Support
+56
+5396
+September 3, 2024
+Improve ambient occlusion in volume rendering
+Development
+volume-rendering
+10
+1217
+January 22, 2024
+Volume rendering colorized with segmentation
+Development
+segmentation
+,
+volume-rendering
+26
+2685
+October 16, 2023
+Highlighted VTK changes associated with Slicer 4.10: Virtual Reality, Rendering, Volume Rendering, Python Wraping, OpenGL performance and threading management
+Development
+0
+1889
+October 29, 2018
+Viewing a volume with two different volume rendering properties at same time
+Support
+volume-rendering
+9
+1732
+March 8, 2021

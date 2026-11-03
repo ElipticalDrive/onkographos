@@ -1,0 +1,444 @@
+Comprehensive optical design, optimization, and analysis in Python, including GPU-accelerated and differentiable ray tracing via PyTorch. - feat(nonsequential): differentiable Monte Carlo non-sequential ray tracer (beta) by HarrisonKramer · Pull Request #738 · optiland/optiland
+
+feat(nonsequential): differentiable Monte Carlo non-sequential ray tracer (beta) by HarrisonKramer · Pull Request #738 · optiland/optiland · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+HarrisonKramer
+commented
+Aug 16, 2026
+Copy link
+Copy Markdown
+Collaborator
+Summary
+Adds optiland.nonsequential, a Monte Carlo non-sequential ray tracer for illumination design, stray-light analysis, and non-imaging optics, with a differentiable PyTorch backend for gradient-based illumination design.
+The subpackage is architecturally independent of the sequential tracer: rays propagate freely and interact with surfaces in any order. It ships as a beta. The public API listed in optiland/nonsequential/__init__.py is stable and will not be removed without a deprecation cycle, while internals (backend classes, geometry helpers) may still change.
+70 library modules, 149 tests, 12 documentation notebooks.
+What's included
+Engine. NSQScene / NSQTracer with two backends behind a common TracerBackend ABC: NumPy (fast forward tracing, ray compaction) and PyTorch (fixed-depth wavefront loop, full autograd graph). All numerical code goes through optiland.backend, so both backends share one implementation of the geometry and interaction math.
+Sources. Point, collimated (tophat/Gaussian), and extended area sources, each with a Spectrum.
+Components. Refractive, reflective, and absorbing surfaces; compound Lens, Mirror, and Doublet builders that assemble faces, edges, and rims. Analytic geometry (conic, sphere, plane, annulus, cylindrical frustum) plus forward-only mesh geometry.
+Scatter. Specular, Lambertian, Harvey-Shack, and tabulated BSDFs.
+Detectors. Irradiance (with differentiable splatting), far-field, spectral, and ray-database.
+Interop. sequential_to_nonsequential() converts an existing Optic into a scene; versioned JSON scene serialization; 2D/3D viewers, with the shared visualization base refactored so sequential and non-sequential rendering reuse it.
+Differentiability
+With the torch backend, pass a requires_grad tensor straight into the ordinary config objects:
+```
+r1 = torch.tensor(120.0, dtype=torch.float64, requires_grad=True)
+scene.add_lens("L1", CoordinateSystem(z=100.0), LensConfig(
+    r1=r1, r2=float("inf"), thickness=5.0, material="N-BK7",
+    front_aperture_radius=12.0))
+loss = scene.trace(num_rays=20_000, seed=1).detectors["D1"].data.sum()
+loss.backward()        # -> r1.grad
+```
+Differentiable: component geometry (radius, conic, aperture), IrradianceDetector extents, source total_flux, material index, BSDF reflectance.
+Not differentiable in this release, and raising rather than detaching silently so a dead design variable is never mistaken for a live one: source geometry (sampling runs in NumPy), SpectralDetector extents, and visibility (which surface a ray hits is a discrete choice).
+Fresnel splitting uses a detached-sample / attached-weight estimator: the reflect/transmit branch is drawn from a detached probability while the throughput weight carries the attached reflectance, so the forward pass is unbiased and ∂flux/∂R is non-zero. One consequence worth knowing: a ghost ray carries the same per-ray flux as a direct ray, because reflection is represented by sampling the branch rather than by attenuating flux.
+Validation
+Gradients are checked against central finite differences with common random numbers, through a spatially varying loss (flux-weighted second moment of the irradiance map) with respect to geometric parameters, the combination illumination designers actually optimize. A flux-only loss cannot detect a landing-position error, and a non-geometric parameter never touches the intersection code, so both halves are necessary.
+case
+autograd vs finite difference
+slow lens (R=120), normal detector
+0.02%
+fast lens (R=45), normal detector
+0.04%
+fast lens (R=45), detector tilted 40 deg
+0.02%
+Physics is cross-validated against the sequential tracer, a mature and independently validated engine, on the same prescription. A unit test of Snell's law confirms one formula; this confirms the whole chain (intersection, normals, refraction, coordinate transforms). Marginal ray height is the edge-of-aperture ray, taken as the maximum on both sides:
+system
+marginal ray height, NSQ vs sequential
+biconvex singlet
+0.000%
+cemented doublet
+0.007%
+strong asphere (R=30, K=2.5, EPD 20)
+0.019%
+RMS spot radius is compared with a looser 3% tolerance (observed: 0.6% to 1.9%), since the engines sample the pupil differently, a hexapolar grid against uniform Monte Carlo, which changes the radial weighting.
+Also covered: flux-ledger closure (detected + absorbed + escaped + lost equals launched, to machine precision), conic normals against the finite-differenced sag, NumPy/torch forward agreement, non-finite-gradient safety cases, and a performance smoke test.
+Known limitations
+Tracked on the Limitations & Roadmap page.
+Visibility gradients are zero, the biggest physics gap. Silhouette, vignetting, and which-surface-hit boundaries contribute no gradient. Reparameterization (Loubet/Bangaru) is roadmap item Feature/robust materials #1.
+Mesh geometry is forward-only.
+Source geometry is not differentiable (see above).
+No polarization.
+Gradient mode is capped at ~1e5 rays x depth 16, since compaction is disabled to keep fixed tensor shapes for the autograd graph. Forward mode handles 1e7+ rays. Path Replay Backpropagation (roadmap Feat/custom surface #3) lifts this via the gradient_mode seam already present in TorchBackend.
+Test plan
+pytest tests/nonsequential/ : 149 passed, stable under random ordering
+pytest tests/visualization tests/test_backend.py tests/test_optic.py : 256 passed, no regressions in shared code
+All 12 NSQ notebooks re-executed end to end
+ruff check and ruff format --check clean across optiland/nonsequential/ and tests/nonsequential/
+🤖 Generated with Claude Code
+HarrisonKramer
+and others
+added 30 commits
+April 3, 2026 17:35
+feat: nsq bsdf, sources, and base geo
+310d02c
+feat: finalize draft nsq. detectors, tracer, backend
+f693ca0
+refactor: nsq to make API closer to sequential approach
+277ce9d
+feat: add draft viz and rework backend
+23976f5
+feat: refactor viz for SEQ and NSQ and add SEQ2NSQ converter
+89063d4
+feat: fix 2D/3D plotting
+d6c6400
+docs: update doc strings and standardize API
+0f5bb63
+Merge branch 'master' into feat/nonsequential
+bce1cd8
+feat: repair intersection logic, remove dead cone, update ray saving …
+…
+641a184
+```
+…logic
+```
+docs: add non-sequential docs
+4a683b3
+fix: color by bounce and surface z logging
+cdeebfd
+docs: add draft gallery notebooks
+c01cfba
+fix: apply Gaussian distribution
+92109ca
+docs: updat tutorials 1-3
+ccaed29
+Merge branch 'master' into feat/nonsequential
+fbb6f26
+Merge branch 'master' into feat/nonsequential
+bd8f69c
+Merge branch 'master' into feat/nonsequential
+9db5db6
+Merge branch 'master' into feat/nonsequential
+2539412
+feat: rework NSQ, add torch tracer
+e7fbc5a
+feat(nsq): PR7 — differentiable detector splatting
+…
+6ec603e
+```
+Replace hard pixel-binning in IrradianceDetector with differentiable
+bilinear splatting via a new be.index_add backend op. Add splat/splat_sigma
+fields to IrradianceDetectorConfig and SpectralDetectorConfig. Expose the
+attached flat flux buffer as IrradianceMap.data so that
+result.detectors['D1'].data.backward() propagates gradients through the
+detector image.
+
+- backend: add floor (NumPy) and index_add (NumPy + Torch) ops
+- detectors/configs: splat + splat_sigma fields on Irradiance/SpectralConfig
+- detectors/irradiance: full rewrite; bilinear (default) and hard modes
+- detectors/spectral: accept splat params, hard path unchanged (bilinear TODO)
+- results/irradiance_map: add data kwarg (attached be-array, flat ny*nx)
+- scene: pass splat/splat_sigma through _build_detector
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+feat(nsq): PR7 - differentiable detector splatting (bilinear/gaussian…
+…
+451c17b
+```
+…/hard)
+```
+feat: NSQ rework for differentiability, PR7-9
+3dfed7b
+docs(nsq): PR12 — beta notice, roadmap, call to action, worked exampl…
+…
+61f4e13
+```
+…e notebook
+
+Mark optiland/nonsequential as beta-release in the package docstring:
+- Prominent beta warning with API stability policy
+- v1 capability overview and quick-start snippet
+- Differentiability section documenting gradient-mode and forward-mode envelopes
+- v1 limitations (visibility gradients zero, mesh forward-only, memory cap, no polarisation)
+- 7-item roadmap (reparameterization, optimization integration, PRB, GUI, volumetrics, polarisation, Dr.Jit)
+- Call to action inviting users and contributors via GitHub issues
+
+Add docs/gallery/nonsequential/11_differentiable_optimization.ipynb:
+- Complete worked example: collimated source → singlet lens → irradiance detector
+- Baseline forward trace with irradiance visualization
+- Adam optimization loop minimizing MSE vs. flat irradiance target via loss.backward()
+- Loss curve + before/after irradiance map comparison
+- Inline notes on v1 envelope, limitations, and stability tips
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+feat(nsq): PR11 — converter + viz refresh
+…
+78b1b5d
+```
+- convert.py: fix _has_polarization_surfaces to use
+  surf.interaction_model.coating + BaseCoatingPolarized instead of the
+  deprecated surf.coating property; drop redundant inner `import math`
+- convert.py: expand module docstring with plain-float / differentiable-
+  ready note (how to re-wrap params as torch tensors post-conversion)
+- rays.py: add ray_paths kwarg to NSQRays2D.plot and NSQRays3D.plot so
+  callers can pass a pre-existing SimulationResult.ray_paths dict and
+  avoid a redundant trace; full Google-style docstrings + type hints
+- viewer_2d.py: thread result.ray_paths through to NSQRays2D.plot;
+  update docstring with color_by param and ray_paths note
+- viewer_3d.py: thread result.ray_paths through to NSQRays3D.plot;
+  update docstring with color_by param and ray_paths note
+- renderers/lens.py: fix DoubletRenderer2D contour inconsistency —
+  c1v/c2v now use e1b_v/e2b_v (matching c1h/c2h) instead of v1[0:1]/v2[0:1]
+- tests: add test_has_polarization_no_deprecation_warning (convert) and
+  test_nsq_viewer_2d_uses_existing_ray_paths (visualization)
+
+All 23 tests pass; ruff clean.
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+feat(nsq): PR12 — beta notice, roadmap, call to action, worked exampl…
+…
+fc3f996
+```
+…e notebook
+```
+feat(nsq): PR11 — converter + viz refresh
+ebdd72b
+feat(nsq): PR10 — versioned JSON serialization for NSQScene
+…
+c1f5727
+```
+Add scene.to_json(path) / NSQScene.from_json(path) for round-trip
+serialization of non-sequential scenes.  Introduces a new
+optiland/nonsequential/serialization.py with scene_to_dict /
+scene_from_dict / scene_to_json / scene_from_json.
+
+- Schema version: nsq_schema_version=1 at top level; loader raises
+  actionable ValueError on version mismatch or missing key.
+- Supports Lens, Mirror, Doublet components; PointSource,
+  CollimatedSource, ExtendedSource; IrradianceDetector, SpectralDetector,
+  FarFieldDetector, RayDatabaseDetector.
+- Catalog-name materials and string material refs round-trip cleanly.
+- Tensors serialized as plain floats (detached); requires_grad not persisted.
+- CoordinateSystem serialized with recursive reference_cs support.
+- Fixes pre-existing bug in _build_detector: RayDatabaseDetector was
+  being called with width/height kwargs it does not accept.
+- 18 new tests in tests/nonsequential/test_nsq_serialization.py; all pass.
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+feat(nsq): PR10 — versioned JSON serialization for NSQScene
+7a8a18c
+fix(nonsequential): clamp radicands and zero invalid t-values to prev…
+…
+f42cc27
+```
+…ent NaN gradients in PyTorch backward pass
+```
+chore(config): ignore doit.db databases and set napoleon_use_ivar to …
+…
+883b182
+```
+…True in docs/conf.py
+```
+HarrisonKramer
+and others
+added 7 commits
+June 10, 2026 16:02
+docs(nonsequential): add Tutorial 10a notebook, limitations & roadmap…
+…
+038a6eb
+```
+… page, and update README
+```
+docs: update API, gallery notebooks, developer guide, and cheat sheet…
+…
+ee3719c
+```
+… for non-sequential feature
+```
+Merge branch 'master' into feat/nonsequential
+…
+fc2c9b5
+```
+# Conflicts:
+#	optiland/visualization/system/optic_viewer.py
+```
+Merge remote-tracking branch 'origin/master' into feat/nonsequential
+…
+5ef9d47
+```
+# Conflicts:
+#	docs/learning_guide.rst
+#	optiland/backend/numpy_backend.py
+#	optiland/backend/torch_backend.py
+```
+Merge branch 'master' into feat/nonsequential
+bd1a141
+fix(nsq): make geometry differentiable through the public API; correc…
+…
+ae97112
+```
+…t conic normals
+
+Finalization pass on the NSQ beta. Five defects found by validating the
+merge-gate claims against finite differences and against the sequential
+tracer.
+
+Geometry parameters never reached the autograd graph. Every geometry,
+source, and detector constructor cast its input with float(), so
+LensConfig(r1=tensor) produced loss.requires_grad == False and r1.grad
+== None. The flagship notebook only worked by assigning a private
+attribute (scene.component_registry.compounds[0].surfaces[0].geometry
+.radius) to bypass the constructor. Scene parameters now pass tensors
+through intact via _utils.as_param; the notebook uses the public API.
+
+Conic surface normals were wrong. The radius-form expression for
+dsag/dx disagreed with the analytic derivative by up to 1.2% at the
+aperture edge, tilting every refracted ray on aspheric and fast
+surfaces. Replaced with the curvature form (dz/dr = c*r/S), which
+matches finite differences to 8 decimals. This also fixes flat
+surfaces: radius=inf produced inf*0, whose backward pass was NaN for
+every scene parameter, and radius=0 (the plano convention used by
+LensConfig) produced an infinite sag, so plano surfaces never
+intersected correctly.
+
+Detector hit distances were detached. The torch backend routed t
+through NumPy, dropping the direction * dt/dparam term from the
+splatted landing position. Negligible at normal incidence (0.1%), but
+26% for a fast lens with a tilted detector. t now stays attached; only
+the dispatch index is decided in NumPy.
+
+Non-finite gradients. Rays that miss a component carry t = inf;
+multiplying that inside a masked be.where backpropagates 0 * inf = NaN.
+RefractiveComponent already guarded this, but AbsorbingComponent and
+ReflectiveComponent did not, so any scene with a mirror or a lens edge
+could produce NaN gradients. Diverging Newton lanes are also frozen to
+finite values. be.grad_mode.enable(), Optiland's differentiable-mode
+switch, raised on the in-place normal writes in plane.py; normals are
+now built functionally.
+
+flux_conservation_error omitted total_flux_lost, so any scene that
+depth-kills rays reported a large error that was not real.
+
+Parameters that cannot carry gradients (source geometry, SpectralDetector
+extents) now raise NotImplementedError rather than detaching silently.
+
+Merge gate rebuilt. The previous gradient tests validated only
+total_flux, a linear scale factor that never touches the geometry, and
+test_visibility_grad_zero asserted only hasattr(). Added:
+
+- test_nsq_geometric_gradients.py: autograd vs finite differences for
+  lens radius, conic constant, and mirror radius through a spatial
+  (position-dependent) loss, including the tilted-detector case;
+  NaN-safety cases; the differentiable-parameter contract.
+- test_nsq_sequential_agreement.py: cross-validates NSQ against the
+  sequential tracer (singlet, doublet, strong asphere). Marginal ray
+  heights agree to 0.04%. The aspheric case fails with the old normal
+  formula.
+- Flux-ledger and conic-normal tests in test_nsq_basic.py.
+
+149 NSQ tests pass; all 12 NSQ notebooks re-executed; ruff clean.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+test(nsq): compare marginal ray height max-to-max in sequential cross…
+…
+b6e8d8a
+```
+…-validation
+
+The NSQ side read the marginal ray from the 99.5th percentile radius while
+the sequential side used the true maximum. For a uniformly sampled disk the
+99.5th percentile corresponds to pupil radius sqrt(0.995)*R rather than the
+edge, and under strong spherical aberration (image radius growing roughly as
+pupil cubed) that undershoots the marginal ray by ~0.7%. The strong-asphere
+case was reporting that 0.7% as an engine disagreement when it was an
+artefact of comparing two different statistics.
+
+Both sides now take the maximum. Ghost rays, which carry full per-ray flux
+under the detached-sample estimator and so cannot be separated by flux, are
+rejected by a gap criterion instead: the direct cluster runs continuously out
+to the marginal ray while ghosts sit several times further out.
+
+Measured agreement is now 0.000% (singlet), 0.007% (doublet) and 0.019%
+(strong asphere), stable to 0.019% worst case over eight seeds, so the
+tolerance tightens from 2% to 0.2%. The aspheric case still fails against the
+previous conic normal formula (5.6% deviation), confirming it retains its
+sensitivity.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+codecov
+Bot
+commented
+Aug 16, 2026
+Copy link
+Copy Markdown
+Codecov Report
+❌ Patch coverage is 81.02970% with 958 lines in your changes missing coverage. Please review.
+Files with missing lines
+Patch %
+Lines
+...land/nonsequential/visualization/renderers/lens.py
+30.76%
+135 Missing ⚠️
+optiland/nonsequential/visualization/rays.py
+28.73%
+124 Missing ⚠️
+optiland/nonsequential/detectors/spectral.py
+19.40%
+54 Missing ⚠️
+optiland/nonsequential/convert.py
+77.82%
+51 Missing ⚠️
+...quential/components/geometry/mesh/mesh_geometry.py
+15.25%
+50 Missing ⚠️
+...nd/nonsequential/visualization/renderers/mirror.py
+16.66%
+45 Missing ⚠️
+optiland/nonsequential/bsdf/tabulated.py
+22.22%
+42 Missing ⚠️
+optiland/nonsequential/sources/extended.py
+19.60%
+41 Missing ⚠️
+optiland/nonsequential/serialization.py
+79.25%
+39 Missing ⚠️
+optiland/nonsequential/backends/torch_backend.py
+84.95%
+34 Missing ⚠️
+... and 38 more
+📢 Thoughts on this report? Let us know!
+Hide details
+View details
+HarrisonKramer
+merged commit 23c9c38
+into
+master
+Aug 16, 2026
+11 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+HarrisonKramer
+deleted the
+feat/nonsequential
+branch
+August 16, 2026 19:14
+HarrisonKramer
+mentioned this pull request
+Aug 18, 2026
+feat(nsq): NSQ v2 -- full revamp (Scene IR, PCG32, volumes, coatings, sampling policy, diagnostics, validation suite)
+#741
+Merged
+4 tasks done
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

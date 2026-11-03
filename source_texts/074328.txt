@@ -1,0 +1,238 @@
+A 1.7.10 port of Cubic Chunks. Contribute to GTNewHorizons/CubicChunks1710 development by creating an account on GitHub.
+
+Feature smaller world saves by Jakfut · Pull Request #139 · GTNewHorizons/CubicChunks1710 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Jakfut
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Contributor
+Reduces world size by fixing compression of unused buffer space, sharing repeated metadata for empty cubes, and adding Zstd as the default compression. GZIP, LZ4 and uncompressed storage remain available.
+Also adds automatic region compaction during server/world startup to reclaim unused space, with a loading progress bar in singleplayer and progress logs on servers. It does not run during gameplay or shutdown.
+Existing compression settings are preserved, and existing worlds keep their storage format. Compact empty-cube storage is the default for new worlds.
+The total save size was reduced by around 30-50%.
+DarkShadow44
+reviewed
+Oct 14, 2026
+View reviewed changes
+Comment thread
+gradle.properties
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+docs/compact-empty-storage.md
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+docs/compact-empty-storage.md
+[Region compaction](region-compaction.md) automatically reclaims unused space in
+ordinary region files during server/world startup, never on gameplay dimension loads.
+## Format selection and compatibility
+DarkShadow44
+Oct 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Mind splitting that up a bit more? I feel like ZStd, new format and compaction could be their own commits at least, would be easier to review.
+Jakfut
+commented
+Oct 16, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+dict is per dim, trained, then shipped with the mod
+I dont think they are worth it with Zstd, so I did not add that
+Codec
+MiB
+Encode
+Decode
+LZ4 fast
+51.29
+188 ms
+75 ms
+LZ4 fast + dict
+45.95
+210 ms
+78 ms
+LZ4 HC3 + dict
+35.69
+1514 ms
+61 ms
+Zstd 1
+31.15
+459 ms
+226 ms
+Zstd 1 + dict
+30.03
+463 ms
+197 ms
+Zstd 3 + dict
+29.35
+598 ms
+198 ms
+GZIP 6
+29.71
+3242 ms
+575 ms
+Jakfut
+added 3 commits
+October 16, 2026 08:21
+Add Zstandard world compression with bounded decoding
+85fd5d0
+Store sectionless cubes in compact metadata tables
+ddad726
+Compact region files during server startup
+0496227
+Jakfut
+force-pushed
+the
+feature-smaller-world-saves
+branch
+from
+a7672ce to
+0496227
+Compare
+October 16, 2026 08:29
+Jakfut
+commented
+Oct 16, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+its now 3 separate commits, for easier review
+DarkShadow44
+commented
+Oct 16, 2026
+Copy link
+Copy Markdown
+Collaborator
+I did some testing with a ~1GB GTNH world (128 chunks pregen'd with DH)
+While your compact approach works, I have an idea that might be simpler and more effective: We could skip cubes completely if we can easily regen them.
+Most sectionless cubes carry almost no information: no blocks, entities, tile entities or ticks, and their only real state is a few flags plus the heightmap snapshot.
+In this world that is 61% of all cubes. Instead of writing them, we store one state byte per cube Y in the column (region2d) and rebuild the cube directly on load, without running the generator. The byte holds:
+skipped yes/no
+population (0 or 255)
+initLightDone, isSurfaceTracked
+whether the saved heightmap is entirely below or entirely above the cube (cubes whose heightmap crosses them are written normally)
+Conceptionally it's very similar to your idea, but it seems a lot simpler than the template approach.
+Not sure how far you want to go, but there's also other things we can improve - if we make a new format we might as well make it as effective as we can rather than have multiple format changes in succession:
+Clip:
+Every cube stores LastHeightMap as 256 absolute Y values, but only their position relative to the cube matters. Clamping them to [cubeBaseY, cubeBaseY + 17] gives identical results, stays compatible both ways, and saves ~4.6% here.
+Grouping:
+The idea is to group cubes in 2x4x2 or 1x16x1 sections - currently our cubes are very small and we miss out on a lot of compression potential. Of course, this might have overhead for loading/saving.
+Each record occupies whole 512 B sectors, and neighbouring cubes share most of their content, which per-record compression can't see. One Zstd stream per group of 16 cubes recovers nearly all of that. Saving a cube becomes read group, replace cube, recompress, write though.
+Palette:
+Per section, a palette of full block states:
+(id = Blocks | Add<<8 | BlocksB2Hi<<12, meta = Data | Data1High<<4 | Data2<<8, so it covers the ChunkAPI arrays)
+plus one byte per voxel, stored columnar inside the group.
+GTNH sections average 14 states and none had more than 256. Zstd doesn't seem to do this on its own since the data is spread out too much.
+Could also group columns, saves 38.9 -> 13.8 MB here
+If you want I could PR some changes unto your PR?
+Size comparison using zstd level1:
+Same world, written to real region files by a test command that re-encodes the stored cubes/columns (region2d + region3d):
+variant
+total MB
+vs today
+today on disk (gzip, with holes)
+1255.5
+1.00x
+today, rewritten without holes (gzip)
+1160.2
+1.08x
+compact (your table format)
+873.1
+1.44x
+proposed skipping approach
+844.5
+1.49x
+1x16x1 groups
+645.3
+1.95x
+skipping + 1x16x1
+618.5
+2.03x
+skip + 1x16x1 + clip
+617.2
+2.03x
+skip + palette (no groups)
+619.7
+2.03x
+2x4x2 + palette + clip
+365.5
+3.44x
+skip + 2x4x2 + palette
+359.4
+3.49x
+skip + 2x4x2 + palette + clip
+342.9
+3.66x
+[Note: "compact" was written by my test exporter using your eligibility rules and .cce format, not by your code, so your real numbers may differ slightly. It's 30% smaller than today's files, 25% smaller than today's format without holes.]
+Jakfut
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+I tested 3. a bunch
+doing a local palette almost doubles cube read/write time... but when using Java 21 SMID you can get that down to an only a 10% increase
+I also tested a bunch of other palette options, like 0-12 bit variable or an 8bit palette per dim, all ended up with roughly the same size savings but 8bit local seems like the cleanest option and works well with SMID
+Jakfut
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+for the grouping I would prefer 2x2x2 over the other options
+a bit worse compression for less view distance boundary overhead and also less overhead when a miner/other machine only has to touch a single cube
+also worth looking if it makes sense to do the palette over the group instead of over per cube at that point, but I have not tried anything with groupings yet
+RecursivePineapple
+added
+the
+Merge Into Prerelease
+PR will be added to -pre releases (via the dev branch).
+label
+Oct 23, 2026
+RecursivePineapple
+commented
+Oct 25, 2026
+Copy link
+Copy Markdown
+Collaborator
+I'm fine with adding SIMD classes, but we'll have to be careful to use factory methods to provide the compressor because MRJARs don't work with incubating APIs. It would probably be worth it to follow the same pattern as compression, by switching between palettized and non-palettized at runtime by checking the header (or some other variant field, I used headers because it was backwards-compatible with GZIP). I'm sure there's a way to check if the vector API is enabled, allowing us to disable the SIMD palette (de)compressor at runtime.
+Clip saved cube heights to the range lighting compares
+56ddaa2
+Jakfut
+mentioned this pull request
+Oct 26, 2026
+Rebuild cube io cache
+#154
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+Merge Into Prerelease
+PR will be added to -pre releases (via the dev branch).
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

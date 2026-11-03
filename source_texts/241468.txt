@@ -1,0 +1,201 @@
+A GPU-driven game engine written in Rust, with meshlet-based rendering and an editor. - chore: remove the SDF brush crate, keep the voxel storage by lobinuxsoft · Pull Request #565 · lobinuxsoft/kooch
+
+chore: remove the SDF brush crate, keep the voxel storage by lobinuxsoft · Pull Request #565 · lobinuxsoft/kooch · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+lobinuxsoft
+commented
+Jul 22, 2026
+Copy link
+Copy Markdown
+Owner
+ome_sdf held two unrelated things behind one name, and only one of them is dead.
+What it was
+Fate
+SDF_PRIMITIVES_WGSL + shaders
+CSG primitive library for the ray-marching renderer
+Deleted — that renderer went in the 2026-05-02 pivot; nothing has consumed this since
+sparse/
+Chunk-local sparse voxel storage with LOD (#136)
+Moved to ome_world::voxel
+The sparse module is the substrate Phase 2.5 extracts meshes from (#393, #397, #398), and it is the shape of data rapier 0.34's voxel collider consumes. Deleting it would have meant rewriting it. It now sits next to the rest of the streaming code, with its eight shaders and its WGSL validation tests (which brought naga + pollster dev-deps along).
+Also removed
+The seven Sdf* brush components from ome_ecs. Unlike the crate these were not opt-in: ome_ecs is core, so they compiled into every build and EcsPlugin registered all of them — describing geometry for a renderer that no longer exists.
+Their "SDF Shapes" spawn submenu in the editor.
+ome_gravity's dependency on ome_sdf, which its code never referenced.
+Two different things called SDF
+Worth stating, since the name is doing double duty and this PR only kills one of them:
+SDF as a rendering/authoring technique — CSG brushes, raymarching. Dead since the pivot; this PR removes the remains.
+SDF as a data format — a voxel storing a signed distance. Alive and load-bearing: dual contouring extracts meshes from exactly that, and rapier's voxel collider reads it directly, which is better than the SDF broadphase Broadphase con SDF bounds #42 proposed (closed as superseded).
+ome_bvh::SdfPrimitive is untouched for the same reason: despite the name it is the current chunk-content representation for world streaming (ome_world::content, content_sources/city), not a brush.
+Migration
+Scenes carrying Sdf* components still load — unknown components park in DynamicComponents instead of failing the load, so TestEngine2.0's scenes survive. Before that landed this removal would have emptied them.
+docs/MEMORY.md is updated: it claimed ome_sdf survived the pivot as authoring brushes, which is what this PR retires.
+1055 tests pass (down from 1072 — the deleted crate's own tests).
+lobinuxsoft
+added 3 commits
+July 21, 2026 21:09
+chore: remove the SDF brush crate, keep the voxel storage
+…
+fd0ff3f
+```
+`ome_sdf` held two unrelated things behind one name. The WGSL CSG
+primitive library fed the ray-marching renderer, which the 2026-05-02
+pivot already deleted — it has had no consumer since. The `sparse`
+module is something else entirely: chunk-local sparse voxel storage with
+LOD (#136), which is the substrate Phase 2.5 extracts meshes from
+(#393/#397/#398) and the data rapier 0.34's voxel collider consumes.
+
+So the crate is gone, but the storage moved to `ome_world::voxel`, next
+to the rest of the streaming code, with its shaders and its WGSL
+validation tests.
+
+Also removed: the seven `Sdf*` brush components from `ome_ecs` — always
+compiled, registered by `EcsPlugin`, and describing geometry for a
+renderer that no longer exists — their "SDF Shapes" spawn submenu, and
+`ome_gravity`'s dependency on `ome_sdf`, which it never used.
+
+Scenes carrying `Sdf*` components still load: unknown components park in
+`DynamicComponents` rather than failing the load.
+
+1055 tests pass. `ome_bvh::SdfPrimitive` is untouched — despite the name
+it is the current chunk-content representation for world streaming, not
+a brush.
+```
+refactor(bvh): SdfPrimitive is VolumePrimitive
+…
+5b6efe1
+```
+The name outlived what it described. This is an analytic shape instance
+— transform, type tag, per-type params — and it stayed alive after the
+ray-marcher was deleted because `ome_world` uses it as chunk content:
+the procedural city source emits boxes and cylinders, and the BVH
+indexes them. Calling it `SdfPrimitive` invites confusion with the brush
+components that were just removed for being dead.
+
+Renaming turned up that its documented WGSL contract points at
+`raymarch_main.wgsl`, which no longer exists — **no shader reads this
+type today**. The 64-byte layout is kept anyway, since every producer
+must agree on the stride handed to `OmeAccel` as opaque bytes, and the
+offset tests keep that guarantee honest. The docs now say that instead
+of citing a deleted file.
+
+The remaining "SDF" wording under `ome_world::voxel` is left alone: that
+is SDF as a data format — a voxel storing a signed distance, sampled and
+bounded by Lipschitz constants — not SDF as a rendering technique.
+```
+chore: remove the raymarch acceleration stack
+…
+c874c96
+```
+`ome_bvh` existed to accelerate the ray-marcher, and the ray-marcher was
+deleted in the 2026-05-02 pivot. Its own flags say so — `IS_RAYMARCH`,
+`ROLE_RAYMARCH_ADD/SUB/MASK`. The meshlet render path never touched it;
+it culls with its own Hi-Z hierarchy.
+
+Its only consumer was `ome_world::content`: the editor registered
+`ProceduralCitySource` at startup, which generated volume primitives for
+every streamed chunk and fed them into the BVH pool — where nothing read
+them. Not broken, disconnected, and disconnected since the pivot.
+
+So the whole chain goes: the BVH crate, `ChunkContent` and its source
+trait, the procedural city, `VolumePrimitive`, the editor's
+registration, and the `origin` parameter `process_queues` only needed to
+compute a content AABB. `Aabb` moves to `ome_core`, where a plain
+geometric type belongs — the voxel storage uses it in eight files and
+never cared about the acceleration structure hosting it.
+
+What stays is what serves planetary scale: distance-based chunk
+activation, LOD rings, focus caching, and the sparse voxel storage that
+terraforming edits and dual contouring both need.
+
+~14k lines. 882 tests pass.
+```
+lobinuxsoft
+commented
+Jul 22, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Scope grew after tracing what actually consumed this. Applying the rule — keep what serves the galactic system and terraformable planets, kill the rest — the whole chain turned out to be dead, not just the city:
+```
+ProceduralCitySource ──generates──> VolumePrimitive ──> ChunkContent ──> OmeAccel (ome_bvh)
+                                                                              │
+                                                                        read by: nobody
+```
+ome_bvh was the ray-marcher's acceleration structure. Its own flags say so: IS_RAYMARCH, ROLE_RAYMARCH_ADD/SUB/MASK. The meshlet render path never touched it — it culls with its own Hi-Z hierarchy. Its only declared consumer was ome_world.
+The city was registered and running. ome_editor_core::systems::startup registered ProceduralCitySource at editor startup, so every streamed chunk generated primitives and pushed them into the BVH pool, where nothing read them. Not broken — disconnected, and disconnected since the pivot deleted the renderer that closed the loop.
+Removed
+ome_bvh (12k lines), ome_world::content + its source trait, content_sources/city, VolumePrimitive, the editor's registration, and the origin parameter process_queues only carried to compute a content AABB.
+Aabb moved to ome_core. It is 250 lines of plain geometry that the voxel storage uses in eight files; it was in ome_bvh by accident of history, not because it belonged to an acceleration structure.
+Kept
+Everything that serves planetary scale: distance-based chunk activation, LOD rings, focus caching, and the sparse voxel storage with LOD — which is what terraforming edits write to and what dual contouring reads.
+~14k lines deleted. 882 tests pass, ome_editor builds and runs.
+If a future galactic-scale BVH is wanted, it should be designed against rapier and meshlets rather than inherited from a dead ray-marcher — the history has it if any of it is worth cherry-picking.
+lobinuxsoft
+mentioned this pull request
+Jul 22, 2026
+epic(world,ecs): partition the world into cells — scenes become streamable content, entities transit between cells
+#566
+Open
+10 tasks
+lobinuxsoft
+added 2 commits
+July 21, 2026 22:09
+docs: record that a scene is a chunked world (#566)
+…
+a363b09
+```
+A scene is a world, so it belongs in chunks rather than in one flat
+entity list — a galaxy does not fit in a file, an ECS, or an Inspector
+list. Entities are what fills the slot ChunkContent left behind.
+
+Ownership is spatial and derived from GlobalTransform rather than
+stored, and residency is not ownership: streaming decides what is
+instantiated, not what exists.
+```
+docs: correct the world/scene relationship (#566)
+…
+37135aa
+```
+The world is the runtime container and scenes are content loaded into
+it, not the other way round — Bevy writes a scene into a world, Unity's
+world holds scene section entities, Unreal's world holds levels.
+
+Scene and cell are orthogonal rather than nested: a scene spans many
+cells and several scenes can overlap one. Storage keyed by (scene, cell)
+keeps overlapping scenes, conflict-free parallel authoring, and the
+distinction between unloading a scene and unloading a cell.
+```
+lobinuxsoft
+merged commit 74e824f
+into
+development
+Jul 22, 2026
+lobinuxsoft
+mentioned this pull request
+Jul 22, 2026
+feat(physics): character controller — floating capsule by default, kinematic as the alternative
+#94
+Closed
+lobinuxsoft
+deleted the
+chore/remove-sdf-brushes
+branch
+August 3, 2026 08:39
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

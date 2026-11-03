@@ -1,0 +1,250 @@
+JavaScript 3D Library. Contribute to mrdoob/three.js development by creating an account on GitHub.
+
+WebGPURenderer: Depth-guard screen-space refraction in transmission. by mrdoob · Pull Request #34481 · mrdoob/three.js · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+mrdoob
+commented
+Sep 6, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Transmission samples the opaque scene copy at the refracted exit point without checking depth, so anything between the camera and a glass surface gets pulled into the glass as a ghost.
+Live demo (source modules via jsDelivr, WebGPU): issue on dev vs this PR.
+getIBLVolumeRefraction() now reads viewportDepthTexture() at the refracted coordinates and falls back to the unrefracted coordinates when that depth is closer than the surface, with a short blend (a tenth of the transmission distance) to avoid seams. Godot uses the same guard. Side effects: objects inside a double-sided volume are refracted once instead of twice, and in webgpu_loader_gltf_transmission and webgpu_caustics the olives and the duck's head no longer bleed into the glass next to them (screenshots updated).
+Cost: one depth sample per fragment, three with dispersion, plus one depth copy per frame while a transmissive material is visible.
+This also fixes a pre-existing bug the change exposed: standalone depth textures took their sample count from currentSamples, which is 0 while the frame buffer target is active and stale during async pipeline creation after compileAsync(), so the texture could end up multisampled while the binding was not (bind group validation error, e.g. in webgpu_loader_materialx). Renderer.framebufferSamples now reports the sample count of the framebuffer that copyFramebufferToTexture() reads from.
+WebGLRenderer is not covered, its transmission target has no resolved depth.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01FxYSw52JBRNLik4eeoqvit
+WebGPURenderer: Depth-guard screen-space refraction in transmission.
+…
+1cb0793
+```
+Transmission sampled the opaque scene copy at the refracted exit point
+without checking depth, so objects between the camera and a glass surface
+were pulled into it as ghosts. Sample the viewport depth at the refracted
+coordinates and fall back to the unrefracted coordinates when that depth is
+closer than the surface, with a short blend to avoid seams.
+
+Standalone depth textures (viewportDepthTexture) took their sample count
+from currentSamples, which is 0 while the internal frame buffer target is
+active and unknown during async pipeline creation, so the texture could end
+up multisampled while the shader was built against a single-sampled
+binding. Add Renderer.framebufferSamples and use it instead.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FxYSw52JBRNLik4eeoqvit
+```
+github-actions
+Bot
+commented
+Sep 6, 2026
+Copy link
+Copy Markdown
+📦 Bundle size
+Full ESM build, minified and gzipped.
+Before
+After
+Diff
+Core
+389.13
+102.11
+389.13
+102.11
++0 B
++0 B
+WebGL
+372.69
+87.97
+372.69
+87.97
++0 B
++0 B
+WebGPU
+709.03
+195.26
+709.53
+195.37
++501 B
++112 B
+WebGPU Nodes
+707.01
+194.94
+707.52
+195.06
++501 B
++113 B
+🌳 Bundle size after tree-shaking
+Minimal build including a renderer, camera, empty scene, and dependencies.
+Before
+After
+Diff
+WebGL
+516.1
+124.92
+516.1
+124.92
++0 B
++0 B
+WebGPU
+762.69
+204.82
+763.4
+205.03
++709 B
++200 B
+WebGPU Nodes
+711.35
+192.09
+711.55
+192.12
++199 B
++31 B
+mrdoob
+added this to the
+r187 milestone
+Sep 6, 2026
+mrdoob
+requested review from
+Mugen87 and
+sunag
+September 6, 2026 14:56
+Mugen87
+commented
+Sep 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+I'm not sure if this only appears on devices with a DPR > 1 but there is strange outline around the area where previously the red bar leaked into the transmissive object.
+There is also some distortion visible (the checker pattern does not line up).
+Mugen87
+commented
+Sep 7, 2026
+Copy link
+Copy Markdown
+Collaborator
+The solution does not work with enabled stencil buffer: https://jsfiddle.net/2voyq561/
+A runtime error occurs:
+THREE.WebGPUBackend: copyFramebufferToTexture: Source and destination formats do not match.", "depth24plus-stencil8", "depth24plus"
+That's because viewportDepthTexture() is just a default depth texture meaning depth24plus. As soon as the the default framebuffer uses a different depth texture configuration, transmission would fail:
+Post-processing with reversed depth buffer because pass node switches to depth32float.
+Rendering straight to the canvas (no tone mapping, linear output) with reversed depth buffer.
+Any render target set via setRenderTarget() whose user-provided depth texture is not UnsignedIntType.
+The copy in viewportDepthTexture() must be adaptive. That was previously a limitation but now it is exposed for each transmissive material and that introduces a regressions.
+Mugen87
+reviewed
+Sep 7, 2026
+View reviewed changes
+Comment thread
+src/nodes/functions/PhysicalLightingModel.js
+return smoothstep( 0.0, transmissionDistance.mul( 0.1 ).max( 1e-4 ), positionView.z.sub( sampleViewZ ) );
+} );
+Mugen87
+Sep 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Um, we already have viewportSafeUV() for the same idea (depth-compare the refracted uv).
+I think it would make more sense to use the TSL function it in the transmission code.
+Mugen87
+reviewed
+Sep 7, 2026
+View reviewed changes
+Comment thread
+src/renderers/webgpu/utils/WebGPUUtils.js
+// otherwise match the framebuffer the texture will be copied from (e.g. viewportDepthTexture())
+samples = this.backend.renderer.currentSamples;
+samples = this.backend.renderer.framebufferSamples;
+Mugen87
+Sep 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I believe this change and the one in Renderer are not required if compileAsync() is fixed instead.
+The root cause is that compileAsync() does not correctly configure the render state for the precompile.
+The better fix is: Set the framebuffer target when useFrameBufferTarget is true and restore the output target together with the other restores after the render lists have been processed.
+Mugen87
+Sep 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I can do a separate PR for that if you like. It's unrelated to the transmission issue.
+Mugen87
+Sep 8, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I've investigated this topic closer today and there is a larger issue in compileAsync(). Every time during the precompilation the control goes back to the event loop, the renderer state is not correctly restored. When the precompilation continues, the state isn't configured back again which means the compileAsync() can fail every time code evaluates the renderer state like samples or output target.
+Fixing this requires a bit more code than previously suggested. Working on that...
+Mugen87
+mentioned this pull request
+Sep 8, 2026
+WebGPURenderer: Ensure valid state in compileAsync().
+#34506
+Merged
+204a
+mentioned this pull request
+Sep 17, 2026
+WebGPUBackend: Skip generateMipmaps when the framebuffer copy dest has no mip chain.
+#34582
+Merged
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

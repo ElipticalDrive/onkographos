@@ -1,0 +1,122 @@
+Migrated from woguls/wozzits-window-engine #259 — originally opened by @woguls on 2026-07-07. Summary Represent the sky/environment as a spherical-Gaussian (SG) mixture — a few hundred directional lobes — instead of an 8K–32K HDRI. Becau...
+
+Spherical-Gaussian sky + authorable environment lighting (umbrella) · Issue #220 · brooteskan/wozzits · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Spherical-Gaussian sky + authorable environment lighting (umbrella) #220
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Spherical-Gaussian sky + authorable environment lighting (umbrella)#220
+Copy link
+Labels
+enhancementNew feature or requestNew feature or request
+Description
+brooteskan
+opened on Aug 7, 2026
+Issue body actions
+Migrated from woguls/wozzits-window-engine #259 — originally opened by @woguls on 2026-07-07.
+Summary
+Represent the sky/environment as a spherical-Gaussian (SG) mixture — a few hundred directional lobes — instead of an 8K–32K HDRI. Because a skybox is infinitely far and never parallaxes, the position dimension of 3D Gaussian splatting collapses and each "splat" becomes a directional basis function on the sphere (an SG / von Mises–Fisher lobe): {direction, sharpness, RGB}, no position/covariance/sorting/rasterization.
+The payoff is not the background pixels — it's that the same compact asset also yields analytic environment lighting (diffuse irradiance + specular reflections) in closed form, live, with no cubemap prefilter chain. Authorable end-to-end, behavior-drivable, and "based in reality yet completely authorable" (fit from a real HDRI, then knob freely).
+This is an umbrella. The seams below each stand alone (per the decomposition rule) and are listed with their boundary, standalone value, deliverables, and tests. This issue is the spec; child issues get spun off as seams are picked up.
+Prior art: SGs have shipped in AAA since ~2015 (Ready at Dawn, Physically Based Lighting in The Order: 1886, SIGGRAPH 2015). Every major engine already runs the "sky-as-view-direction-function → bake radiance cubemap → derive SH ambient + prefiltered specular" pipeline (Godot shader_type sky + Sky radiance process modes; UE Sky Atmosphere + Sky Light Real Time Capture; Unity procedural skybox + ambient SH; O3DE Atom Physical Sky + Global Skylight IBL). None use a free-fit SG mixture that serves render and lighting from one asset — that's the gap this fills.
+Core principle 1 — frequency split (two representations, not one)
+SGs are a smooth low-frequency basis (same failure mode as SH: they ring / blur on point-like features). So the sky signal is split by spatial frequency, each band on the representation that fits it:
+Low-freq → SG lobes: sun, moon disc, skyglow/horizon gradient, the diffuse Milky Way band (elongated → anisotropic SG), aurora sheets, cloud masses.
+High-freq points → NOT splats: individual stars, as an additive point layer (procedural hash-field and/or a real star catalog buffer). ~5,000 near-delta lobes would annihilate the compression win; points are cheap and correct.
+Stars carry negligible lighting energy, so they are excluded from the lighting bake by default — night illumination comes from the moon (one bright SG) + skyglow (a few low-λ SGs).
+Core principle 2 — appearance ≠ lighting (per-layer, per-channel, decoupled)
+The system is N layers, each tagged with a type and carrying independent channels. Physically-correct rendering locks these together (radiance you see = radiance that lights you); we cut that coupling and expose each channel as its own knob. Correct is the default wiring, not a constraint.
+Layer channel
+Feeds
+Operator by layer type
+appearance (weight, color)
+sky background pass
+SG: per-pixel lobe sum · Points: additive point sprites
+diffuse (weight, color)
+irradiance function E(n)
+SG: analytic SG⊛cosine · Points: aggregate-to-ambient (sum flux → a few fat lobes / SH-9), default 0
+specular (weight, color)
+prefiltered reflection L(R, roughness)
+SG: analytic SG×GGX-as-SG · Points: default 0
+promoteToLight (flag)
+analytic directional/point light (shadows)
+SG: emit a light at the lobe axis
+Consequences this unlocks (impossible in a texture pipeline):
+Lighting-only lobes — an invented fill/bounce light with no visible source; and its mirror, appearance-only features (stars, drawn but non-lighting).
+Independent recolor / rotate / fidelity — blue sky + warm light; spin reflections without spinning the visible sky; light diffuse from 12 fat lobes while appearance uses 300.
+Sun linkage as a knob — sun appearance is an SG disc; sun lighting can be promoted to an analytic directional light for real shadows; how tightly they track is a slider.
+Same data, two operators — the star buffer rasterizes as sharp points for appearance but integrates to smooth ambient for lighting.
+Why it's live, not a bake: SG irradiance (SG⊛clamped-cosine) and SG specular (SG×SG inner product) are closed-form. Dragging the sun lobe or a channel weight re-derives the lighting the same frame by evaluating a formula — no cubemap re-convolution (which would be hundreds of ms). The bake-to-cubemap path becomes optional (only if an external consumer needs a literal cubemap); the analytic path is native.
+Seams
+Seam A — SkyGaussianAsset + deterministic fitter (library + importer)
+Boundary: HDR panorama/cubemap → { SG lobes[], extracted point sources[] }. Pure library + CLI importer. No editor, no runtime.
+Standalone value: "compress any HDRI to a tiny asset," independently useful and testable.
+Approach: (1) extract point/high-freq sources first (sun → pinned high-λ lobe or directional light; stars → routed to the point layer, not lobes); (2) greedy residual placement (matching pursuit) on a solid-angle-weighted low-res sphere sampling (Fibonacci-sphere directions, ~a few thousand samples — not the 8K); (3) joint refinement (L-BFGS/Adam, closed-form SG gradients) + NNLS amplitude re-solve. Perceptual/log-domain loss so the sun doesn't dominate. Optional lighting term in the loss (preserve total irradiance) as a slider: appearance-fit ↔ lighting-fit.
+Determinism gotcha: greedy/EM init uses randomness → seed is an explicit asset param so re-baking the same HDRI is byte-identical (no Math.random/Date — matches engine reproducibility rules).
+Tests: recover a synthetic K-lobe env map to tolerance; PSNR (tonemapped) + irradiance-error regression on a reference HDRI; determinism (same seed → identical bytes); point-extraction unit (sun/star pixels removed from residual).
+Seam B — runtime SG sky render + analytic IBL + layer/channel model
+Boundary: the authorable render program(s) and lighting-derive that consume a lobe set. Defines the layer/channel data model (the table above). Two outputs: irradiance lobe buffer + specular lobe buffer, read by surface shading.
+Standalone value: "render and light a scene from a hand-authored or fitted lobe set" — usable with Seam A absent (author lobes by hand).
+Deliverables: sky background pass (full-screen, view-direction eval — no dome mesh); closed-form irradiance E(n) and specular L(R, roughness) HLSL (appendix); per-layer/per-channel weights as ParamBlock entries, live via SET_RENDERABLE_PARAM, behavior-drivable; promoteToLight → analytic light emission. Fits the #226 authorable-render-program track (StructuredBuffer + HLSL prelude), no per-look C++.
+Scope note on specular: this is environment (IBL) specular — the sky reflected in glossy/metal surfaces, blurred by roughness. Object-to-object reflection (SSR/planar/RT) is explicitly out of scope.
+Tests: analytic irradiance vs. brute-force cubemap-convolution reference within tolerance; specular vs. reference-prefiltered env at 2–3 roughnesses; matte/chrome sphere golden images; channel decoupling (zeroing diffuse kills lighting but not appearance).
+Seam C — star / point layer + authorable transform stack
+Boundary: the additive high-freq point layer + its non-destructive transform stack + the aggregate-to-ambient lighting operator.
+Standalone value: "a distortable, real-or-procedural starfield" — composes with B but is independently useful.
+Deliverables: point layer via procedural hash-field (default; cheap, no assets) and/or catalog buffer ({dir(RA/Dec), magnitude, B–V color, parallax, proper-motion}); transform stack = ordered nodes over (dir, mag, color) applied in a compute pre-pass on the immutable source buffer — Rotate, Precess, SwirlWarp(noise), Lens(center, strength), MagnitudeCurve (= limiting-magnitude / light-pollution), ColorLUT, Cull(class/distance), ProperMotionScrub(t); optional 3D reprojection (observer relocation using parallax→distance); aggregate-to-ambient reduction feeding B's diffuse channel; masked/regional distortion (reuse importance-painting). Deterministic seeded noise only.
+Tests: transform-stack determinism; identity stack = source; aggregate-flux conservation; cull/filter correctness against catalog attributes.
+Seam E — editor fitting & authoring panel (interactive)
+Boundary: artist-facing tool over A/B/C. Depends on all three.
+Standalone value: the "vector-tracing tool for skies" — auto-fit to 90%, then hand-author.
+Deliverables: live sky preview (reuses B's view-direction pass); budget/quality sliders (lobe count / error threshold, sun-extraction count, λ clamp, appearance↔lighting weight); progressive fit on a background thread with live PSNR + a "matte/chrome sphere lit by original vs. splats" side-by-side (shows lighting error, not just background); manual lobe editing (drag direction / tweak intensity·sharpness — reuses inspector param-edit + SET_RENDERABLE_PARAM); importance painting (weight the loss by a painted mask); transform-stack UI for the star layer.
+Dependencies: A ⟂ B (independent; B works on hand-authored lobes). C ⟂ A. E depends on A + B + C.
+David's design calls needed (blocking specifics)
+Lobe budget default and whether appearance/diffuse/specular get separate budgets (irradiance wants ~12; appearance ~300).
+Sun as SG vs. analytic directional light as the default for shadow-casting (or both, promoteToLight per-layer).
+Star layer default: procedural hash-field (no assets, stylized) vs. bundled catalog (accurate, constellations, date/latitude). Recommend hash-field default, catalog opt-in.
+Is the cubemap-bake path wanted at all, or analytic-only until a consumer demands a literal cubemap?
+Fitter shipping form — CLI importer only for v1, or importer + in-editor from the start (Seam A vs. jumping to E).
+Non-goals
+Object-to-object reflections (SSR/planar/RT). This is environment IBL only.
+Volumetric/atmospheric scattering through the scene (this is a background + IBL representation, not a participating-media solver).
+Physical accuracy as a constraint — correctness is the default value of the knobs, freely dial-able.
+Appendix — SG math (at-a-glance, all closed-form)
+SG lobe: G(ω; μ, λ, a) = a · exp(λ (μ·ω − 1)), axis μ∈S², sharpness λ>0 (= vMF κ), amplitude a∈ℝ³₊.
+Energy: ∫_{S²} G dω = a · (2π/λ)(1 − e^{−2λ}) — used for normalization and the point-layer aggregate-to-ambient reduction.
+Product of two SGs is an SG: λm = ‖λ1μ1 + λ2μ2‖, μm = (λ1μ1 + λ2μ2)/λm, am = a1 a2 e^{λm − λ1 − λ2}. Integrating the product gives the SG–SG inner product used for specular (env lobe · BRDF lobe) and for fitting.
+Diffuse irradiance E(n) = ∫ L(ω) max(0, n·ω) dω: per-lobe closed-form approximation (SG ⊛ clamped-cosine), see Wang et al. 2009 / common game-engine curve fit.
+Specular L(R, roughness): warp GGX into an SG about reflection dir R with λ_r ≈ f(roughness) (Frostbite/UE mapping), amplitude from BRDF·Fresnel; prefiltered radiance ≈ Σ_i ⟨G_env,i, G_brdf⟩ (SG–SG inner products).
+References: Wang et al., All-Frequency Rendering of Dynamic, Spatially-Varying Reflectance (SIGGRAPH Asia 2009); Xu et al., Anisotropic Spherical Gaussians (2013); Ready at Dawn, Physically Based Lighting in The Order: 1886 (SIGGRAPH 2015).
+Filed from a design discussion; seams to be spun off as child issues when picked up.
+Reactions are currently unavailable
+Activity
+brooteskan
+added
+enhancementNew feature or requestNew feature or request
+on Aug 7, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or request
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

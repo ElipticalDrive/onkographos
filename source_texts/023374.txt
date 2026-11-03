@@ -1,0 +1,796 @@
+FaCT-GS: Fast and Scalable CT
+Reconstruction with Gaussian Splatting
+Pawel Tomasz Pieta(B) , Rasmus Juul Pedersen , Sina Borgi ,
+Jakob Sauer Jørgensen , Jens Wenzel Andreasen ,
+and Vedrana Andersen Dahl
+Technical University of Denmark, Kongens Lyngby, Denmark
+{papi,rjupe,borgi,jakj,jewa,vand}@dtu.dk
+Abstract. Gaussian Splatting (GS) has emerged as a dominating technique for image rendering and has quickly been adapted for the Xray Computed Tomography (CT) reconstruction task. However, despite
+its growing popularity, the beneﬁts of GS are typically not substantial enough to motivate a transition from well-established reconstruction
+algorithms. This paper addresses the most signiﬁcant remaining limitations of the GS-based approach by introducing FaCT-GS, a framework
+for fast and ﬂexible CT reconstruction. Enabled by an in-depth optimization of the voxelization and rasterization pipelines, our new method is
+signiﬁcantly faster than its predecessors and scales well with projection
+and output volume size. Furthermore, the improved voxelization enables
+rapid ﬁtting of Gaussians to pre-existing volumes, which can serve as a
+prior for warm-starting the reconstruction, or simply as an alternative,
+compressed representation. FaCT-GS is over 4.× faster than the State of
+the Art GS CT reconstruction on standard .5122 projections, and over
+13.× faster on 2k projections. Implementation and data available through:
+https://papieta.github.io/fact-gs/.
+Keywords: Gaussian Splatting · CT reconstruction · Volumetric prior
+1
+Introduction
+In X-ray Computed Tomography (CT), the reconstructed 3D volume is obtained
+from a set of acquired X-ray projection images (or views), with reconstruction
+quality strongly dependent on the number of available projections. In sparse-view
+tomography, the number of projections is small, requiring specialized algorithms
+to achieve the best possible reconstruction quality.
+Classical sparse-view reconstruction algorithms [2,5,23,59] provide fast
+results, but often suﬀer from residual artifacts and reduced ﬁdelity, motivating continuous research into alternative, typically more advanced, approaches.
+Supplementary Information The online version contains supplementary material
+available at https://doi.org/10.1007/978-3-032-37464-6 13.
+c The Author(s) 2026
+P. Favaro et al. (Eds.): ECCV 2026, LNCS 17035, pp. 225–245, 2026.
+https://doi.org/10.1007/978-3-032-37464-6_13
+226
+P. T. Pieta et al.
+Fig. 1. Reconstruction results of select baselines and FaCT-GS given a ﬁxed time for
+a certain problem size. FaCT-GS provides superior CT reconstruction capabilities and
+scales exceptionally well with increasing projection size.
+Recently, novel scene representation techniques have been adapted to CT
+data [9,58,75–77] where they demonstrated a substantial improvement in reconstruction quality, albeit at a signiﬁcantly increased computational cost. The
+current State of the Art (SotA) approach, R.2 -Gaussian [76], is one of the few
+papers to directly address the performance-quality tradeoﬀ by implementing a
+complete Gaussian Splatting-based CT reconstruction pipeline, achieving both
+much faster execution time than its predecessors and better performance. Despite
+these advancements, learning-based approaches are not mature enough to serve
+as a practical alternative to classical methods. Even R.2 -Gaussian requires more
+than 9.× longer execution than a well-established and eﬀective FISTA [5], when
+reconstructing from a set of 75 projections of size 512.× 512 pixels. While such
+resolution is standard in diagnostic imaging, modern scanners routinely operate
+at 1k and 2k resolutions, substantially increasing the computational burden of
+the reconstruction.
+To facilitate the adoption of modern sparse-view reconstruction techniques,
+their performance must be better aligned with the practical requirements of the
+CT community. Motivated by this need, we introduce FaCT-GS, a fast and scalable Gaussian Splatting-based CT reconstruction pipeline. Inspired by recent
+advances in Gaussian Splatting acceleration, we re-implement and accelerate
+all core components of the reconstruction process, reducing execution time to
+approximately 2 min per scan (on 75 projections of .5122 size), with competitive
+results after only 45 s. Moreover, our pipeline exhibits substantially improved
+scalability, generating high-quality reconstructions in about 1 min for 1k projections and 4 min for 2k projections (Fig. 1).
+FaCT-GS: Fast and Scalable CT Reconstruction with Gaussian Splatting
+227
+We also redesign the model initialization strategy and propose two novel
+schemes: one based on the gradient of an FDK reconstruction, and one leveraging a pre-existing volumetric prior. The latter brings us closer to the capabilities
+of most classical algorithms, enabling an eﬃcient warm start of the optimization
+process. Finally, we highlight the compression properties of GS models, demonstrating that ﬁtting them to a volume results in a quality–compression tradeoﬀ
+comparable to representing the data as a stack of 2D JPEG images.
+2
+Background and Related Work
+CT Imaging and Reconstruction. When capturing X-ray projection data,
+the X-ray beam passes the scanned object on its way from the X-ray source to
+the detector. The beam is attenuated by the constituents of the scanned object,
+and the resulting intensity measured at the detector reﬂects the total attenuation
+along the beam path. By collecting projections from many directions – typically
+at least several hundred – it is possible to reconstruct a dense 3D representation
+of the object. Although CT reconstruction is an inverse and ill-posed problem, under favorable conditions, a fast and deterministic Feldkamp–Davis–Kress
+(FDK) algorithm [19] can yield highly accurate volumetric reconstructions.
+In many practical scenarios, the number of collected projections has to be
+limited. Each projection costs time and contributes to the cumulative dose of
+ionizing radiation – a problem especially critical in medical imaging [7,47]. Additionally, physical constraints of the scanning geometry may restrict the angular
+coverage or projection count [21,34,42]. When the number of projections is insufﬁcient – so-called sparse-view tomography – FDK reconstructions suﬀer from
+pronounced artifacts and degraded image quality that are not directly caused
+by the projection data.
+Traditional Sparse-View Tomography. A wide range of algorithms has
+been proposed to address reconstruction under limited projection conditions.
+In the majority of cases, these methods rely on iterative optimization procedures that drive the solution toward a global optimum, leading to an inherent
+tradeoﬀ between reconstruction quality and computational cost. Such iterative
+algorithms can be broadly divided into two groups: algebraic and learning-based.
+Classical algebraic methods, such as SIRT [23]/SART [2], ASD-POCS [59], and
+FISTA [5], formulate the tomographic inverse problem as a system of equations
+augmented with explicit smoothness or sparsity priors. Among these, FISTA is
+often preferred in practice due to its low computational cost (less than 1 min
+per scan on .5122 px projections) and ﬂexibility, allowing for non-diﬀerentiable
+regularization terms.
+Learning-Based Methods and NeRFs. With the rise of deep learning, the
+research focus shifted toward data-driven reconstruction approaches [1,3,16,33,
+228
+P. T. Pieta et al.
+62], often achieved through a combination of neural and standard reconstruction components. Importantly, they typically do not support a complete selfsupervised framework – a limitation which has been largely overcome through
+the recent advent of neural scene representations and Neural Radiance Fields [11,
+48,49,61,72,73], and their adaptation to CT [9,15,41,45,55,58,70,75,77]. These
+methods represent the volume using compact MLP-based ﬁeld models, enabling a
+simple and ﬂexible abstraction of the reconstruction process. Here, most notable
+mentions are IntraTomo [75], NAF [77], and NeAT [58], as the ﬁrst successful
+implementations, and SAX-NeRF [9], as a slower, but best-performing model so
+far. Despite their impressive reconstruction quality, NeRF-based methods remain
+substantially slower than classical algebraic techniques, typically requiring 15–
+30 min per scan. Calculating each pixel in a CT projection requires multiple
+neural network queries along the path of the X-ray, limiting the scalability of
+these methods.
+Gaussian Splatting. Most recently, Gaussian Splatting (GS) methods have
+emerged as a powerful alternative for scene representation [20,25,37,39,43,
+46,63,69,78]. The core of their approach is modelling a scene through a collection of optimized 3D Gaussians, oﬀering several advantages over NeRFs.
+Most importantly, 3D Gaussians can be projected analytically onto a 2D
+plane, eliminating the expensive per-ray query process. To date, only a handful of works have explored Gaussian Splatting for CT imaging and reconstruction [8,22,31,40,66,74,76], with the most notable one being R.2 -Gaussian [76]
+standing out as a complete pipeline tailored to the assumptions and requirements of CT imaging. Compared to NeRF-based methods, R.2 -Gaussian reports
+a reduced reconstruction time of approximately 10–15 min per scan, with satisfactory results available after just 3–4 minutes, positioning Gaussian Splatting
+as a particularly promising approach for CT reconstruction.
+Gaussian Splatting Acceleration. A growing body of concurrent works
+focuses on accelerating the Gaussian Splatting pipeline [17,18,24,26–28,46,53,
+56,67], primarily in the context of neural scene representation. While many of
+the proposed strategies are eﬀective, only a subset can be directly transferred to
+CT reconstruction, often requiring careful adaptation and re-evaluation. In this
+work, we adopt several of the most established and impactful techniques, while
+also proposing improvements targeted speciﬁcally for CT reconstruction.
+3
+Method
+Our overall CT reconstruction pipeline is built upon that of .R2 -Gaussian [76],
+which itself is derived from the original Gaussian Splatting for scene representation [37]. The attenuation ﬁeld to be reconstructed is modelled with a collection
+of learnable 3D Gaussian kernels .G3i , with each forming a density ﬁeld:
+1
+G3i (x | ρi , pi , Σ i ) = ρi exp − (x − pi ) Σ −1
+i (x − pi ) ,
+2
+.
+(1)
+FaCT-GS: Fast and Scalable CT Reconstruction with Gaussian Splatting
+229
+where .i is the index of the Gaussian, .x ∈ R3 is a position in space, and .ρi ,
+pi ∈ R3 and .Σ i ∈ R3×3 are the learnable parameters representing density, mean
+and covariance of the Gaussian. In contrast to neural scene representation, X-ray
+attenuation is not view-dependent, so the represented attenuation at .x can be
+directly computed through density summation of contributing splats:
+.
+M
+G3i (x | ρi , pi , Σ i ) .
+σ(x) =
+.
+(2)
+i=1
+Fig. 2. FaCT-GS optimization pipeline. We propose two initialization schemes: one,
+based on the gradient of the FDK reconstruction from collected projections, and one
+based on the Gaussians ﬁtted directly to a prior volume. We accelerate the core components of the pipeline: rasterization, voxelization, and compute-intensive loss functions.
+3.1
+Initialization
+When no prior information is available, Gaussians are initialized from a lowquality FDK reconstruction, with background regions removed via thresholding.
+In existing approaches, Gaussian means are typically sampled with probability
+proportional to the reconstruction intensity [74,76]. We instead sample with
+probability proportional to the gradient magnitude, which ensures Gaussians are
+primarily located near high-frequency features [78]. Gaussian densities are set
+based on the reconstructed intensities at the sampled positions and scaled down
+by a factor .k = 0.15. Each Gaussian is initialized with zero rotation (diagonal
+covariance matrix), and its scale is set equal to the nearest-neighbor distance.
+230
+3.2
+P. T. Pieta et al.
+X-ray Rasterization
+X-ray rasterization maps the set of Gaussians onto a discrete 2D image representing an X-ray projection. Each pixel value of a projection image is an integral
+of X-ray attenuation along a ray path .r(t) [50], which can be translated to a sum
+of integrals over the Gaussians intersected by the ray:
+M
+G3i r(t) | ρi , p̃i , Σ̃ i dt,
+I(r) =
+.
+r(t) = x̃0 + td̃,
+(3)
+i=1
+where .I(r) denotes the rendered pixel value, and .x̃, .p̃i , .Σ̃ i and .d̃ are the .x, pi ,
+Σi and ray direction projected into the ray/detector space. CT acquisition is
+commonly described using either a parallel-beam geometry, where rays are perpendicular to the detector plane, or a cone-beam geometry, where rays emanate
+from a single small source. The former involves simple view transformations,
+while the latter is typically described with a pinhole camera model [19,50].
+Since a projection of a 3D Gaussian to a plane yields a 2D Gaussian, Eq. (3)
+can be simpliﬁed to:
+.
+M
+G2i x̂ | μi ρi , p̂i , Σ̂ i ,
+I(x̂) =
+.
+(4)
+i=1
+where .x̂, .p̂i and .Σ̂ i are the .x̃, p̃i and .Σ̃i projected onto the 2D detector plane,
+and .μi is an integration factor introduced in [76]. For eﬃciency, contributions
+are accumulated only for Gaussians satisfying .|x̂− p̂i | < 3λMAX (Σ̂ i ), with .λMAX
+signifying the largest eigenvalue.
+3.3
+Voxelization
+Voxelization discretizes the 3D space into a regular grid and accumulates Gaussian contributions within each voxel, producing a dense volumetric representation of the reconstructed object. Algorithmically, voxelization is simpler than
+rasterization, as it avoids mapping and projecting the Gaussians onto a 2D plane.
+In practice, however, it is substantially more computationally expensive due to
+the cubic growth in the number of grid elements.
+3.4
+Optimization Loop
+During reconstruction, the Gaussians are rasterized into a 2D image (.Ir ) and
+compared to the available projection data (.Igt ) using L1 loss (.L1 ) and SSIM
+loss (.LSSIM ) [68]. Similarly to [76], at each iteration, we also voxelize a small,
+randomly sampled section of the volume (.Vpx3 ), but increase the sampling size
+from .83 to .323 . On that volume, we calculate 3D total variation (.LTV ) as a
+homogeneity regularization prior. The total loss at each step is thus:
+Ltotal = L1 (Ir , Igt ) + αSSIM LSSIM (Ir , Igt ) + αTV LTV (V323 ) ,
+.
+(5)
+FaCT-GS: Fast and Scalable CT Reconstruction with Gaussian Splatting
+231
+where .αSSIM and .αTV are SSIM and TV loss weigths, respectively. In the backward pass, the loss is used to prune, clone, or split the Gaussians (Adaptive
+Control), and to adjust their parameters based on the propagated gradient. A
+visualization of the reconstruction optimization loop can be found on Fig. 2.
+3.5
+Code Acceleration
+Voxelization and Rasterization. Prior works identify two primary performance bottlenecks in the original rasterization kernels: ineﬃcient splat bounding
+and backward pass stalling [17,26,27,46,56,67]. The former arises from the use
+of square bounding boxes for Gaussian-shaped ellipses, which substantially overestimates the aﬀected region for anisotropic and transparent Gaussians. Here, we
+follow [27,56,67] and constrain the range using axis-aligned, rectangular bounding boxes with factored-in density. The second bottleneck originates from the
+per-pixel backward pass calculation: neighboring pixels often contribute gradients to the same Gaussian, leading to frequent write conﬂicts and warp stalls.
+In line with [46], we address this issue by reformulating the backward pass in a
+per-Gaussian manner, thereby eliminating the majority of conﬂicts.
+We further clean up and streamline the pipeline to better match the requirements of CT imaging. In standard GS, splat contributions are accumulated in
+a speciﬁc order to model view-dependent occlusion. In CT, however, the integration order along the ray has no eﬀect on the measured signal. While this
+realization was already highlighted in R.2 -Gaussian, the ordering logic was not
+actually removed from the pipeline, incurring unnecessary overhead. We therefore remove it entirely. Finally, we reduce memory traﬃc by coalescing function
+parameters into compact float4 structs, combining position and radius in the
+voxelizer, and conics (projected covariances) with .μ in the rasterizer.
+Kernel Evaluation. We evaluate the performance impact of the optimized
+kernels using a simple, synthetic test case, and compare them against the baseline implementations from .R2 -Gaussian [76]. Gaussians are initialized with zero
+rotation and a uniform isotropic scale, and two test regimes are considered: (1) a
+ﬁxed number of Gaussians (.NG = 20,000) with varying image and volume resolutions (Fig. 3a), and (2) a ﬁxed image or volume size (approximately .Npx ≈ 106
+pixels) with varying .NG (Fig. 3b).
+Across all evaluated settings, execution times approximately follow powerlaw scaling, with the proposed kernels signiﬁcantly outperforming the baseline
+rasterizer and voxelizer. For instance, on the same GPU (RTX 4070 Ti SUPER),
+a baseline rasterizer requires 210 ms to process a 2K image, while ours completes
+the same task in 9.3 ms, corresponding to a 22.× acceleration. The computational
+cost of voxelization discussed in Sect. 3.3 implies that, in typical scenarios, a
+voxelized volume contains up to . Npx times more elements than a rasterized
+projection. This relationship, combined with the observed power-law scaling,
+indicates that the proposed acceleration has the most profound impact on the
+voxelization stage.
+232
+P. T. Pieta et al.
+Optimization Pipeline. The accelerated GS pipeline is no longer dominated
+by the rasterization/voxelization step. A substantial fraction of the runtime is
+spent in the forward and backward propagation through the individual operations of the loss functions. By fusing these operations within dedicated CUDA
+kernels, it is possible to reduce memory traﬃc and launch overhead. We apply
+this strategy to the most computationally expensive loss components:
+1. We replace the 2D SSIM loss (.LSSIM ) calculation with the fused-ssim [46]
+implementation, accelerating this step by 5–8 times,
+2. We introduce a fused CUDA kernel for 3D SSIM loss, reaching an 11.× acceleration. Although inspired by fused-ssim [46], directly extending its logic to
+3D would force an excessive use of thread block shared memory. Instead, the
+depth dimension is processed using a ring buﬀer, with each thread operating
+on a single Z-axis row.
+3. We implement a custom fused CUDA kernel for the 3D total variation loss
+(.LTV ), reaching a 3.× acceleration for the .V323 volume.
+Fig. 3. Eﬀective acceleration of the rasterization and voxelization components enabled
+through CUDA kernel optimization. Outlined relationships follow a power law. Plotted
+in log scale, baselines sourced from .R2 -Gaussian [76].
+3.6
+Volume Prior Initialization
+In established algebraic reconstruction methods such as SIRT or FISTA, the optimization can be warm-started from a volumetric prior (e.g., an existing reconstruction of the same or similar object), which – depending on the degree of
+similarity – can substantially accelerate convergence. For GS-based reconstruction, the most equivalent approach would either be to introduce a voxelizer-based
+Gaussian ﬁtting stage (Fig. 2, Option II) or, more indirectly, to generate synthetic projections from the prior volume and pre-ﬁt the GS model to this data.
+Both approaches have so far remained largely unexplored.
+Following the optimization of the GS pipeline, voxelization becomes fast
+enough for regular use during ﬁtting. This makes the voxelizer-based strategy
+FaCT-GS: Fast and Scalable CT Reconstruction with Gaussian Splatting
+233
+both more direct and likely more eﬀective. The procedure begins with a variant of the gradient-based Gaussian initialization (Sect. 3.1), where gradients are
+extracted from the ground-truth volume (.Vgt ), followed by an optimization loop.
+At each step the current Gaussian representation is voxelized (.Vr ) and evaluated
+against .Vgt using .L1 and a 3D variant of .LSSIM (weighted with .αSSIM ):
+Ltotal = L1 (Vr , Vgt ) + αSSIM LSSIM (Vr , Vgt ) .
+.
+(6)
+While – due to the number of processed voxels – a single step of this pipeline
+is slower than that of the reconstruction, the directness of the ﬁtting process signiﬁcantly decreases the number of necessary iterations. Furthermore, especially
+in the context of a reconstruction task, it may be neither necessary nor desirable
+to fully maximize the prior representation accuracy.
+4
+Experiments
+4.1
+Performance Evaluation
+For evaluation, we compare FaCT-GS against a representative set of sparseview CT reconstruction methods. From the traditional approaches, we choose
+FDK [19] as a baseline, SIRT [23] with a non-negativity constraint as a classical algebraic method, and FISTA [5] with total variation regularization due
+to its eﬀectiveness and widespread adoption in the CT community. From the
+learning-based approaches, we restrict our experiments to methods that provide
+a complete self-supervised pipeline. IntraTomo [75] and NAF [77] are chosen to
+represent NeRF-based solutions, while R.2 -Gaussian [76] serves as the current
+SotA Gaussian Splatting–based method. SIRT and FISTA are executed for 600
+and 100 iterations, respectively, where one iteration corresponds to processing
+the full set of projections. Hyperparameters for the learning-based methods are
+kept consistent with their original implementations. For direct comparability, R.2 Gaussian and FaCT-GS are both initialized with 50,000 Gaussians and trained
+for 400 iterations. A small section of experiments was also run for SAX-NeRF [9].
+Although it outperformed IntraTomo and NAF in reconstruction quality, its execution time (3–4 h per scan) renders it impractical for routine use. It is therefore
+excluded from further evaluation.
+We perform reconstruction on the test dataset introduced in [76], which comprises 15 real CT volumes with synthetically generated projections derived from
+publicly available datasets [4,38,57,65], as well as 3 cases with real projection
+data from the FIPS dataset [64]. In all experiments, reconstructed volumes have
+a resolution of .2563 . Projection sizes are set to .5122 for synthetic cases and
+2
+.560 for real acquisitions. Following [76], we evaluate three sparse-view settings
+with 25, 50, and 75 projections. All experiments were run on the same machine
+with an NVIDIA H100 GPU using CUDA 12.8.1. The three traditional methods,
+FDK, SIRT, and FISTA, were run using the Core Imaging Library version 25
+[36,54] with TIGRE [6] as the backend.
+234
+P. T. Pieta et al.
+Table 1. Quantitative results on the .5122 -projection dataset from [76]. Colors signify
+best , second-best , and third-best numbers. FDK reconstruction was instantaneous.
+Qualitative comparison of the reconstructions can be found in Supplementary Material.
+75-view
+PSNR SSIM
+Time
+50-view
+PSNR SSIM
+25-view
+Time
+PSNR SSIM Time
+FDK
+SIRT
+FISTA
+26.76 0.388
+33.96 0.844 2 m13 s
+55 s
+37.07 0.934
+24.42 0.296
+32.54 0.815 1 m37 s
+35.85 0.923
+46 s
+20.69 0.181
+30.11 0.764 1 m7 s
+33.51 0.898 39 s
+IntraTomo
+NAF
+R2 -Gaussian
+29.67 0.829 29 m24 s
+35.76 0.903 33 m21 s
+39.04 0.946
+9m
+29.24 0.821 19 m40 s
+34.41 0.891 22 m14 s
+38.09 0.939 5 m46 s
+28.71 0.808 9 m51 s
+31.61 0.849 11 m8 s
+35.23 0.912 2 m44 s
+FaCT-GS (Ours)
+FaCT-GS at 150 iter.
+39.05 0.950 1 m52 s
+38.33 0.946
+43 s
+37.97 0.943 1 m15 s
+37.34 0.939
+29 s
+35.33 0.92
+34.86 0.914
+38 s
+15 s
+Quantitative performance results are summarized in Table 1. A full FaCT-GS
+optimization run requires at most 1 min and 52 s (and only 38 s in the 25-view setting), achieving the highest SSIM and the second-highest PSNR across all methods. Compared to R.2 -Gaussian, under the same number of iterations, FaCT-GS
+provides more than a 4.5.× speedup. Notably, after only 150 iterations, FaCTGS already surpasses all competing methods in SSIM (matching R.2 -Gaussian at
+400 iterations), while requiring less than 45 s of ﬁtting. This makes FaCT-GS the
+only learning-based approach that outperforms FISTA both in terms of speed
+and reconstruction quality.
+4.2
+Scaling Capability
+We choose the three best-performing methods from Table 1 (FISTA, R.2 Gaussian, and FaCT-GS) and evaluate how well their runtime scales with
+increasing projection and volume size. For this purpose, we use a large CT scan
+of a coral (Fig. 1), and downscale it to volume sizes ranging from .2563 to .10243 .
+From each volume instance, we generate 50 projections, each with the width
+of twice the volume width (from .5122 to .20482 ) – similarly to the data used
+in Sect. 4.1.
+As larger volumes contain proportionally more structural detail, both
+FaCT-GS and R.2 -Gaussian require an increased number of Gaussians to maintain reconstruction ﬁdelity. We therefore double the Gaussian count for each
+doubling of projection/volume width, starting with 50,000 Gaussians for the
+projection size of .5122 . For each reconstruction, we evaluate two scenarios:
+1. Training each method for the same, predeﬁned number of 100 iterations
+(.Niter = 100) – simulating a user manually comparing the methods.
+FaCT-GS: Fast and Scalable CT Reconstruction with Gaussian Splatting
+235
+2. Training each method until it reaches 0.9 SSIM score – testing the actual
+convergence capability of each method.
+Fig. 4. Impact of increasing volume and projection size on the performance of chosen
+methods. For larger data sizes, FaCT-GS performs exceptionally well, providing faster
+and better reconstruction than both FISTA and R.2 -Gaussian at a fraction of the execution time. R.2 -Gaussian iteration speed scales better with data size, but FISTA reaches
+convergence quicker.
+In Scenario 1 (Fig. 4a), FaCT-GS achieves the fastest iteration speed across
+all reconstruction sizes. At the smallest volume, it is already 2.× faster than
+FISTA and 4.× faster than R.2 -Gaussian, and this advantage grows with increasing resolution. At the largest volume, FaCT-GS provides a 31.5.× speed-up over
+FISTA and a 13.× speed-up over R.2 -Gaussian, indicating that both competing
+methods scale substantially worse in iteration speed. In Scenario 2 (Fig. 4b),
+FISTA reaches an SSIM of 0.9 in the fewest iterations, which provides a modest advantage at the smallest reconstruction size. As projection and volume
+dimensions increase, this advantage is oﬀset by FISTA’s steeply rising periteration cost, causing its total runtime to grow faster than both R.2 -Gaussian and
+FaCT-GS. R.2 -Gaussian requires the most iterations, but its iteration time scales
+more moderately and its overall runtime intersects with FISTA at the largest
+tested volume. FaCT-GS requires more iterations than FISTA but fewer than
+R.2 -Gaussian, while maintaining the lowest per-iteration cost across all resolutions. Consequently, FaCT-GS is the fastest method for all but the smallest
+reconstruction size, improving from 0.8.× to approximately 16.× FISTA’s speed
+as reconstruction size increases.
+4.3
+Initialization Evaluation
+To assess the eﬀectiveness of the two proposed initialization strategies, we construct a small dataset containing four realistic instances of volume pairs, where
+one volume serves as the reconstruction target and the other as a prior. The
+dataset includes two brain MRI scans and two pancreas CT scans from the
+236
+P. T. Pieta et al.
+Medical Segmentation Decathlon [60], two walnut CT scans—one from the R.2 Gaussian/FIPS dataset [64,76] and one from HDTomo [35] (also used in Fig. 1),
+and a pair of cricket CT scans from the BugNIST dataset [32]. All volumes are
+preprocessed using the same settings as in Sect. 4.1, with 50 synthetic projections
+generated from each target volume.
+For each instance, we compute the 3D SSIM score between the target volume
+and the output from four initialization strategies:
+1. FDK Intensity: Baseline intensity-based Gaussian mean sampling from the
+FDK reconstruction of the 50 projections.
+2. FDK Gradient: Our gradient-based sampling variant of the above.
+3. Prior applied directly: Direct use of the prior volume for initialization, as
+carried out in algebraic methods such as SIRT or FISTA.
+4. FaCT-GS Rapid volume fit: Our prior-based initialization via a dedicated
+rapid volume ﬁtting stage.
+Fig. 5. Comparison of the output of reconstruction initialization strategies on four
+examples with a similar prior volume available. Gradient-based sampling better outlines
+the high-frequency features than intensity sampling. FaCT-GS rapid volume ﬁtting
+demonstrates a similar impact as using the prior directly – a standard approach in
+algebraic methods.
+FaCT-GS: Fast and Scalable CT Reconstruction with Gaussian Splatting
+237
+Table 2. Quantitative evaluation of
+volume ﬁtting and compression.
+Raw, float32
+uint8 (zipped)
+2D jpeg stack
+FaCT-GS (Ours)
+Size (MB)
+SSIM
+PSNR
+64
+4.52
+0.92
+0.84
+0.999
+0.981
+0.976
+114.9
+44.5
+44.2
+Fig. 6. Qualitative examples of the volume
+ﬁtting result.
+For the last method, the volume ﬁtting pipeline is executed for 50 iterations,
+incurring an additional overhead of approximately 2 s.
+The results are shown in Fig. 5. In all cases, the gradient-based approach
+provides an initial state with a moderately higher SSIM than intensity-based
+sampling, producing cleaner and more consistent delineation of edges and highfrequency structures. Both warm start strategies demonstrate the substantial
+beneﬁt of incorporating a volumetric prior, achieving signiﬁcantly higher SSIM
+scores than the FDK-based initializations. Our prior-integration strategy within
+the Gaussian Splatting pipeline attains the highest SSIM, indicating that the
+proposed approach successfully recreates the warm-start capability known from
+algebraic methods, and conﬁrming that a rapid 50-iteration ﬁtting stage is sufﬁcient for eﬀective reconstruction initialization.
+5
+Volume Fitting and Compression
+Beyond enabling prior-based initialization, the volume ﬁtting stage can be
+applied as a standalone optimization procedure, yielding a complete Gaussian
+representation of an arbitrary input volume. To demonstrate this capability,
+we perform volume ﬁtting on all ground-truth volumes from the R.2 -Gaussian
+dataset. Each model is optimized for 500 iterations using 40,000 Gaussians,
+resulting in an average ﬁtting time of 19 s.
+The Gaussian representation can also serve as an eﬃcient storage format.
+Each 3D Gaussian is parameterized by 11 values: a 3D position, 3D scale, 4D
+quaternion, and 1D density. Zhang et al. [78] demonstrated in the context of 2D
+image compression that this representation can be quantized to float16 with
+negligible quality degradation. Following this strategy, we reduce the storage size
+of each 3D splat to .11 × 2 = 22 bytes.
+Importantly, in CT imaging, preserving information ﬁdelity is often prioritized over storage eﬃciency, making volumetric compression a relatively underexplored area. Typically, volumes are stored either in raw float32 format, converted to uint8 (optionally combined with ZIP compression), or serialized as
+238
+P. T. Pieta et al.
+stacks of 2D JPEG images. More advanced and specialized compression techniques have been proposed [29,30,44,51], but they are rarely used in practice.
+For GS-based CT reconstruction, however, the Gaussian representation
+already is the most information-rich form of the reconstructed data. Given the
+proposed fast voxelizer, directly storing the Gaussian representation and voxelizing it on demand becomes a natural and eﬃcient strategy. We therefore use the
+volume ﬁtting task as a proxy for evaluating the compression properties of the
+Gaussian representation. We compare its storage size and representation quality
+against the raw volume as well as two practical baselines: ZIP-compressed uint8
+volumes and stacks of 2D JPEG images.
+Both the qualitative (Fig. 6) and quantitative (Table 2) results demonstrate
+that voxelizer-based ﬁtting enables accurate representation of arbitrary volumes, with the Gaussian-based representation reaching a near-perfect average
+SSIM score of 0.976 – much higher than any of the reconstruction methods
+from Table 1.
+The quantized Gaussian models require only 0.84 MB of storage, yielding
+a higher compression ratio than zipped uint8 and a slightly higher ratio than
+a stacked JPEG representation. In terms of ﬁdelity, the Gaussian representation
+exhibits a lower quality than uint8 (which is eﬀectively near-lossless), and performs comparably to the JPEG stack.
+6
+Discussion and Limitations
+Performance and Scalability. The results in Sects. 4.1 and 4.2 demonstrate
+that FaCT-GS achieves superior reconstruction quality at a lower execution
+time, with the performance gap widening as projection and volume resolution
+increase. The ability to reconstruct high-resolution volumes within 1–4 minutes
+has a profound impact on the eﬃciency and scalability of CT imaging, enabling
+time-sensitive applications such as in-line industrial inspection or time-resolved
+acquisition.
+While the observed gains stem primarily from the introduced optimizations,
+there is also a structural advantage inherent to GS-based reconstruction. Algebraic methods such as FISTA or SIRT iteratively update a discrete 3D voxel grid,
+making their computational cost dependent on both projection resolution and
+volume size. In contrast, GS-based reconstruction depends primarily on projection resolution – through rasterization logic, while a complete voxelization
+may only be done once at the end of optimization. Although larger volumes may
+require more Gaussians, their number typically scales much more slowly than the
+total voxel count. A similar volume-independence applies to NeRFs. However,
+their signiﬁcantly higher per-iteration cost makes this beneﬁt less impactful.
+An inherent limitation of the method is the requirement to manually select
+the number of Gaussians. Although adaptive control mitigates the potential
+negative impact of a sub-optimal choice, to our knowledge, no clear guidelines
+exist for determining the exact splat count for a given CT reconstruction task.
+At the same time, we observe that increasing the initial number of Gaussians
+FaCT-GS: Fast and Scalable CT Reconstruction with Gaussian Splatting
+239
+often yields only marginal improvements (demonstrated in the Supplementary
+Material ). In contrast, algebraic methods do not require such design choices
+and may therefore remain attractive in certain scenarios, despite their lower
+reconstruction performance.
+Warm Start Impact. Our experiments in Sect. 4.3 focus on demonstrating
+that – similarly to classical algebraic methods – the proposed strategy initializes the optimization closer to a state with a high-quality solution. It is implicitly assumed that reaching that solution then requires fewer iterations than in
+the cold-start scenario. In practice, however, identifying non-trivial cases where
+this assumption can be conﬁrmed is not always straightforward. Nevertheless,
+variants of warm-start strategies are successfully applied in many related contexts [12,13,52], and there exist several practical, albeit relatively trivial, scenarios where the lack of warm-start capability is a clear disadvantage. These include
+repetitive scans of identical or highly similar objects, long-term patient monitoring, or multi-resolution imaging. A small study on the impact of our warm
+start strategy on reconstruction speed is included in Supplementary Material.
+Compact Gaussian Representation. In Sect. 5, we demonstrate the volume
+ﬁtting capabilities of FaCT-GS and show that the resulting Gaussian state has
+similar compression parameters to a 2D JPEG stack. This property is particularly relevant for CT data, where volumetric datasets frequently reach tens to
+hundreds of gigabytes. Moreover, prior work suggests that the Gaussian representation can be used directly for downstream processing and analysis [10,14,71],
+further limiting the need for generating and storing the voxelized representation.
+7
+Conclusion
+Enabled by systematic optimization of the core rasterization, voxelization, and
+loss components, FaCT-GS consistently outperforms existing sparse-view reconstruction methods across both standard and high-resolution settings. This performance advantage, combined with the information-dense Gaussian representation for both reconstructed and pre-existing volumes, as well as the proposed
+warm-start capability, positions FaCT-GS as a practical, eﬃcient, and versatile
+tool, ready to be adapted in modern CT workﬂows. Implementation and data
+used in the study can be found at https://papieta.github.io/fact-gs/.
+Acknowledgements. The authors acknowledge funding from Villum Synergy
+through RENNER (REal-time acquisitioN and NEural Representation of structural
+properties), grant no. 00050097. Additional support was provided by the DEXTRA
+project (IFD3149-00001B) and the QUAITOM project (NNF21OC0069766). The
+authors also thank the 3D Imaging Center (3DIM) for its support in data acquisition.
+240
+P. T. Pieta et al.
+References
+1. Adler, J., Öktem, O.: Learned primal-dual reconstruction. IEEE Trans. Med. Imaging 37(6), 1322–1332 (2018). https://doi.org/10.1109/TMI.2018.2799231
+2. Andersen, A.H., Kak, A.C.: Simultaneous algebraic reconstruction technique
+(SART): a superior implementation of the art algorithm. Ultrason. Imaging 6(1),
+81–94 (1984). https://doi.org/10.1177/016173468400600107
+3. Anirudh, R., Kim, H., Thiagarajan, J.J., Mohan, K.A., Champley, K., Bremer, T.:
+Lose the Views: limited angle CT reconstruction via implicit sinogram completion.
+In: Proceedings of the IEEE Computer Society Conference on Computer Vision
+and Pattern Recognition, pp. 6343–6352 (2018). https://doi.org/10.1109/CVPR.
+2018.00664
+4. Armato, S.G., et al.: The lung image database consortium (LIDC) and image
+database resource initiative (IDRI): a completed reference database of lung nodules on CT scans. Med. Phys. 38(2), 915–931 (2011). https://doi.org/10.1118/1.
+3528204
+5. Beck, A., Teboulle, M.: A fast iterative shrinkage-thresholding algorithm for linear
+inverse problems. SIAM J. Imag. Sci. 2(1), 183–202 (2009). https://doi.org/10.
+1137/080716542
+6. Biguri, A., et al.: TIGRE v3: eﬃcient and easy to use iterative computed tomographic reconstruction toolbox for real datasets. Eng. Res. Exp. 7(1), 015011
+(2025). https://doi.org/10.1088/2631-8695/adbb3a
+7. Brenner, D.J., Hall, E.J.: Computed tomography - an increasing source of radiation
+exposure. N. Engl. J. Med. 357(22), 2277–2284 (2007). https://doi.org/10.1056/
+NEJMra072149
+8. Cai, Y., et al.: Radiative Gaussian Splatting for eﬃcient X-ray novel view synthesis.
+In: Leonardis, A., Ricci, E., Roth, S., Russakovsky, O., Sattler, T., Varol, G. (eds.)
+Computer Vision, ECCV 024. LNCS, vol. 15059, pp. 283–299. Springer, Cham
+(2024). https://doi.org/10.1007/978-3-031-73232-4 16
+9. Cai, Y., Wang, J., Yuille, A., Zhou, Z., Wang, A.: Structure-aware sparse-view Xray 3D reconstruction. In: Proceedings of the IEEE Computer Society Conference
+on Computer Vision and Pattern Recognition, pp. 11174–11183 (2024). https://
+doi.org/10.1109/CVPR52733.2024.01062
+10. Cen, J., Fang, J., Yang, C., Xie, L., Zhang, X., Shen, W., Tian, Q.: Segment any
+3D Gaussians. Proc. AAAI Conf. Artif. Intell. 39(2), 1971–1979 (2025). https://
+doi.org/10.1609/aaai.v39i2.32193
+11. Chen, A., et al.: MVSNeRF: fast generalizable radiance ﬁeld reconstruction from
+multi-view stereo. In: Proceedings of the IEEE International Conference on Computer Vision, pp. 14104–14113 (2021). https://doi.org/10.1109/ICCV48922.2021.
+01386
+12. Chen, G.H., Tang, J., Leng, S.: Prior image constrained compressed sensing
+(PICCS). In: Progress in Biomedical Optics and Imaging - Proceedings of SPIE,
+vol. 6856, p. 685618 (2008). https://doi.org/10.1117/12.770532
+13. Chen, Y., et al.: Discriminative prior - prior image constrained compressed sensing
+reconstruction for low-dose CT imaging. Sci. Rep. 7(1), 13868 (2017). https://doi.
+org/10.1038/s41598-017-13520-y
+14. Choi, S., Song, H., Kim, J., Kim, T., Do, H.: Click-Gaussian: interactive segmentation to any 3D Gaussians. In: Leonardis, A., Ricci, E., Roth, S., Russakovsky, O.,
+Sattler, T., Varol, G. (eds.) Computer Vision, ECCV 2024. LNCS, vol. 15061, pp.,
+289–305. Springer, Cham (2025). https://doi.org/10.1007/978-3-031-72646-0 17
+FaCT-GS: Fast and Scalable CT Reconstruction with Gaussian Splatting
+241
+15. Corona-Figueroa, A., Frawley, J., Taylor, S.B., Bethapudi, S., Shum, H.P., Willcocks, C.G.: MedNeRF: medical neural radiance ﬁelds for reconstructing 3D-aware
+CT-projections from a single X-ray. In: Proceedings of the Annual International
+Conference of the IEEE Engineering in Medicine and Biology Society. EMBS, vol.
+2022, pp. 3843–3848 (2022). https://doi.org/10.1109/EMBC48229.2022.9871757
+16. Dong, X., Vekhande, S., Cao, G.: Sinogram interpolation for sparse-view microCT with deep learning neural network. Prog. Biomed. Opt. Imaging Proc. SPIE
+10948, 109482O (2019). https://doi.org/10.1117/12.2512979
+17. Durvasula, S., Zhao, A., Chen, F., Liang, R., Sanjaya, P.K., Vijaykumar, N.:
+DISTWAR: fast diﬀerentiable rendering on raster-based rendering pipelines (2023).
+https://doi.org/10.48550/arXiv.2401.05345
+18. Fang, G., Wang, B.: Mini-splatting: representing scenes with a constrained number
+of Gaussians. In: Leonardis, A., Ricci, E., Roth, S., Russakovsky, O., Sattler, T.,
+Varol, G. (eds.) Computer Vision, ECCV 2024. LNCS, vol. 15135, pp. 165–181.
+Springer, Cham (2024). https://doi.org/10.1007/978-3-031-72980-5 10
+19. Feldkamp, L., Davis, L., Kress, J.: Practical cone-beam algorithm. J. Opt. Soc.
+Am. A 1(6), 612–619 (1984). https://doi.org/10.1364/JOSAA.1.000612
+20. Fridovich-Keil, S., Meanti, G., Warburg, F.R., Recht, B., Kanazawa, A.: K-planes:
+explicit radiance ﬁelds in space, time, and appearance. In: Proceedings of the 2023
+IEEE/CVF Conference on Computer Vision and Pattern Recognition, vol. 2023,
+pp. 12479–12488 (2023). https://doi.org/10.1109/CVPR52729.2023.01201
+21. Gao, H., Zhang, L., Xing, Y., Chen, Z., Zhang, J., Cheng, J.: Volumetric imaging
+from a multisegment straight-line trajectory and a practical reconstruction algorithm. Opt. Eng. 46(7), 077004 (2007). https://doi.org/10.1117/1.2756823
+22. Gao, Z., Planche, B., Zheng, M., Chen, X., Chen, T., Wu, Z.: DDGS-CT: directiondisentangled Gaussian Splatting for realistic volume rendering. Adv. Neural Inf.
+Process. Syst. 37 (2024)
+23. Gilbert, P.: Iterative methods for 3-dimensional reconstruction of an object from
+projections. J. Theor. Biol. 36(1), 105–117 (1972). https://doi.org/10.1016/00225193(72)90180-4
+24. Girish, S., Gupta, K., Shrivastava, A.: EAGLES: eﬃcient accelerated 3D Gaussians
+with lightweight encodings. In: Leonardis, A., Ricci, E., Roth, S., Russakovsky, O.,
+Sattler, T., Varol, G. (eds.) Computer Vision, ECCV 2024. LNCS, vol. 15121, pp.
+54–71. Springer, Cham (2025). https://doi.org/10.1007/978-3-031-73036-8 4
+25. Guédon, A., Lepetit, V.: SuGaR: surface-aligned Gaussian Splatting for eﬃcient
+3D mesh reconstruction and high-quality mesh rendering. In: Proceedings of the
+IEEE Computer Society Conference on Computer Vision and Pattern Recognition,
+pp. 5354–5363 (2024). https://doi.org/10.1109/CVPR52733.2024.00512
+26. Hahlbohm, F., Franke, L., Eisemann, M., Magnor, M.: Faster-GS: analyzing
+and improving Gaussian Splatting optimization (2026). https://doi.org/10.48550/
+arXiv.2602.09999
+27. Hanson, A., Tu, A., Lin, G., Singla, V., Zwicker, M., Goldstein, T.: Speedy-Splat:
+fast 3D Gaussian Splatting with sparse pixels and sparse primitives. In: Proceedings of the IEEE Computer Society Conference on Computer Vision and Pattern
+Recognition, pp. 21537–21546 (2025). https://doi.org/10.1109/CVPR52734.2025.
+02006
+28. Hanson, A., Tu, A., Singla, V., Jayawardhana, M., Zwicker, M., Goldstein, T.:
+PUP 3D-GS: principled uncertainty pruning for 3D Gaussian Splatting. In: 2025
+IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 5949–
+5958 (2025). https://doi.org/10.1109/CVPR52734.2025.00558
+242
+P. T. Pieta et al.
+29. Hosny, K.M., Khalid, A.M., Mohamed, E.R.: Eﬃcient compression of volumetric
+medical images using Legendre moments and diﬀerential evolution. Soft. Comput.
+24(1), 409–427 (2020). https://doi.org/10.1007/s00500-019-03922-7
+30. Ihm, I., Park, S.: Wavelet-based 3D compression scheme for interactive visualization of very large volume data. Comput. Graph. Forum 18(1), 3–15 (1999). https://
+doi.org/10.1111/1467-8659.00298
+31. Jecklin, S., et al.: Intraoperative 3D reconstruction from sparse arbitrarily posed
+real X-rays. Sci. Rep. 15(1), 43973 (2025). https://doi.org/10.1038/s41598-02527784-2
+32. Jensen, P.M., Dahl, V.A., Engberg, R., Gundlach, C., Kjer, H.M., Dahl, A.B.:
+BugNIST – a large volumetric dataset for object detection under domain shift.
+In: Leonardis, A., Ricci, E., Roth, S., Russakovsky, O., Sattler, T., Varol, G.
+(eds.) Computer Vision, ECCV 2024. LNCS, vol. 15090, pp. 18–36. Springer, Cham
+(2025). https://doi.org/10.1007/978-3-031-73411-3 2
+33. Jin, K.H., McCann, M.T., Froustey, E., Unser, M.: Deep convolutional neural network for inverse problems in imaging. IEEE Trans. Image Process. 26(9), 4509–
+4522 (2017). https://doi.org/10.1109/TIP.2017.2713099
+34. Jin, X., Li, L., Chen, Z., Zhang, L., Xing, Y.: Anisotropic total variation for limitedangle CT reconstruction. In: IEEE Nuclear Science Symposium Conference Record,
+pp. 2232–2238 (2010). https://doi.org/10.1109/NSSMIC.2010.5874180
+35. Jørgensen, J.S., Andersen, M.S., Gundlach, C.: HDTomo TXRM micro-CT
+datasets (2021). https://doi.org/10.5281/zenodo.4822516
+36. Jørgensen, J.S., et al.: Core Imaging Library - Part I: a versatile Python framework for tomographic imaging. Philos. Trans. Roy. Soc. A Math. Phys. Eng. Sci.
+379(2204), 20200192 (2021). https://doi.org/10.1098/rsta.2020.0192
+37. Kerbl, B., Kopanas, G., Leimkuehler, T., Drettakis, G.: 3D Gaussian Splatting
+for real-time radiance ﬁeld rendering. ACM Trans. Graph. 42(4), 3592433 (2023).
+https://doi.org/10.1145/3592433
+38. Klacansky, P.: Open SciVis datasets (2017). https://klacansky.com/open-scivisdatasets/
+39. Lee, J.C., Rho, D., Sun, X., Ko, J.H., Park, E.: Compact 3D Gaussian representation for radiance ﬁeld. In: Proceedings of the IEEE Computer Society Conference
+on Computer Vision and Pattern Recognition, pp. 21719–21728 (2024). https://
+doi.org/10.1109/CVPR52733.2024.02052
+40. Li, Y., Fu, X., Li, H., Zhao, S., Jin, R., Zhou, S.K.: 3DGR-CT: sparse-view CT
+reconstruction with a 3D Gaussian representation. Med. Image Anal. 103, 103585
+(2025). https://doi.org/10.1016/j.media.2025.103585
+41. Liu, J., Bai, X.: VolumeNeRF: CT volume reconstruction from a single projection
+view. In: Linguraru, M.G., et al. (eds.) Medical Image Computing and Computer
+Assisted Intervention, MICCAI 2024. LNCS, vol. 15007, pp. 743–753. Springer,
+Cham (2024). https://doi.org/10.1007/978-3-031-72104-5 71
+42. Longo, E., et al.: Flexible plenoptic X-ray microscopy. Photonics 9(2), 98 (2022).
+https://doi.org/10.3390/photonics9020098
+43. Lu, T., et al.: Scaﬀold-GS: structured 3D Gaussians for view-adaptive rendering. In: Proceedings of the IEEE Computer Society Conference on Computer
+Vision and Pattern Recognition, pp. 20654–20664 (2024). https://doi.org/10.1109/
+CVPR52733.2024.01952
+44. Lu, Y., Jiang, K., Levine, J.A., Berger, M.: Compressive neural representations of
+volumetric scalar ﬁelds. Comput. Graph. Forum 40(3), 135–146 (2021). https://
+doi.org/10.1111/cgf.14295
+FaCT-GS: Fast and Scalable CT Reconstruction with Gaussian Splatting
+243
+45. Maas, K.W., Pezzotti, N., Vermeer, A.J., Ruijters, D., Vilanova, A.: NeRF for
+3D reconstruction from X-ray angiography: possibilities and limitations. In: Eurographics Workshop on Visual Computing for Biomedicine, pp. 29–40 (2023).
+https://doi.org/10.2312/vcbm.20231210
+46. Mallick, S.S., Goel, R., Kerbl, B., Steinberger, M., Carrasco, F.V., De La Torre, F.:
+Taming 3DGS: high-quality radiance ﬁelds with limited resources. In: SIGGRAPH
+Asia 2024 Conference Papers, SA ’24 (2024). https://doi.org/10.1145/3680528.
+3687694
+47. McCollough, C.H., Primak, A.N., Braun, N., Koﬂer, J., Yu, L., Christner, J.:
+Strategies for reducing radiation dose in CT. Radiol. Clin. North Am. 47(1), 27–40
+(2009). https://doi.org/10.1016/j.rcl.2008.10.006
+48. Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng,
+R.: NeRF: representing scenes as neural radiance ﬁelds for view synthesis. In:
+Vedaldi, A., Bischof, H., Brox, T., Frahm, J.-M. (eds.) ECCV 2020. LNCS, vol.
+12346, pp. 405–421. Springer, Cham (2020). https://doi.org/10.1007/978-3-03058452-8 24
+49. Müller, T., Evans, A., Schied, C., Keller, A.: Instant neural graphics primitives with
+a multiresolution hash encoding. ACM Trans. Graph. 41(4), 102 (2022). https://
+doi.org/10.1145/3528223.3530127
+50. Natterer, F., Wübbeling, F.: Mathematical Methods in Image Reconstruction.
+Society for Industrial and Applied Mathematics (2001)
+51. Nguyen, K.G., Saupe, D.: Rapid high quality compression of volume data for visualization. Comput. Graph. Forum 20(3), 49–57 (2001). https://doi.org/10.1111/
+1467-8659.00497
+52. Niu, S., et al.: Iterative reconstruction for photon-counting CT using prior image
+constrained total generalized variation. Comput. Biol. Med. 103, 167–182 (2018).
+https://doi.org/10.1016/j.compbiomed.2018.10.022
+53. Papantonakis, P., Kopanas, G., Kerbl, B., Lanvin, A., Drettakis, G.: Reducing the
+memory footprint of 3D Gaussian Splatting. Proc. ACM Comput. Graph. Interact.
+Tech. 7(1), 16 (2024). https://doi.org/10.1145/3651282
+54. Pasca, E., et al.: Core Imaging Library (CIL) (2025). https://doi.org/10.5281/
+zenodo.16876762
+55. Pedersen, R.J., Besley, L., Jørgensen, J.S., Andreasen, J.W., Dahl, A.B., Dahl,
+V.A.: Adversarially informed neural ﬁelds for computed tomography reconstruction. In: Petersen, J., Dahl, V.A. (eds) Image Analysis, SCIA 2025. LNCS, vol.
+15725, pp. 131–144. Springer, Cham (2025). https://doi.org/10.1007/978-3-03195911-0 10
+56. Radl, L., Steiner, M., Parger, M., Weinrauch, A., Kerbl, B., Steinberger, M.:
+StopThePop: sorted Gaussian splatting for view-consistent real-time rendering.
+ACM Trans. Graph. 43(4), 64 (2024). https://doi.org/10.1145/3658187
+57. Roth, H., Farag, A., Turkbey, E.B., Lu, L., Liu, J., Summers, R.M.: Data from
+Pancreas-CT (2016). https://doi.org/10.7937/K9/TCIA.2016.tNB1kqBU
+58. Rückert, D., Wang, Y., Li, R., Idoughi, R., Heidrich, W.: NeAT: neural adaptive tomography. ACM Trans. Graph. 41(4), 55 (2022). https://doi.org/10.1145/
+3528223.3530121
+59. Sidky, E.Y., Pan, X.: Image reconstruction in circular cone-beam computed tomography by constrained, total-variation minimization. Phys. Med. Biol. 53(17), 4777–
+4807 (2008). https://doi.org/10.1088/0031-9155/53/17/021
+60. Simpson, A.L., et al.: A large annotated medical image dataset for the development and evaluation of segmentation algorithms (2019). https://arxiv.org/abs/
+1902.09063
+244
+P. T. Pieta et al.
+61. Sun, C., Sun, M., Chen, H.T.: Direct voxel grid optimization: super-fast convergence for radiance ﬁelds reconstruction. In: Proceedings of the IEEE Computer
+Society Conference on Computer Vision and Pattern Recognition, pp. 5449–5459
+(2022). https://doi.org/10.1109/CVPR52688.2022.00538
+62. Sun, Y., Liu, J., Xie, M., Wohlberg, B., Kamilov, U.: CoIL: coordinate-based internal learning for tomographic imaging. IEEE Trans. Comput. Imaging 7, 1400–1412
+(2021). https://doi.org/10.1109/TCI.2021.3125564
+63. Tang, J., Ren, J., Zhou, H., Liu, Z., Zeng, G.: DreamGaussian: generative Gaussian
+Splatting for eﬃcient 3D content creation. In: 12th International Conference on
+Learning Representations, ICLR 2024 (2024)
+64. The Finnish Inverse Problems Society: X-ray tomographic datasets. https://ﬁps.
+ﬁ/category/open-datasets/x-ray-tomographic-datasets/. Accessed 1 Mar 2026
+65. Verboven, P., et al.: www.x-plant.org - The CT database of plant organs (2022)
+66. Wang, F., et al.: X-ﬁeld: a physically grounded representation for 3D X-ray reconstruction. arXiv arXiv.org (2025). https://doi.org/10.48550/arxiv.2503.08596
+67. Wang, X., Yi, R., Ma, L.: AdR-Gaussian: accelerating Gaussian Splatting with
+adaptive radius. In: Proceedings of the Siggraph Asia 2024 Conference Papers, SA
+2024, p. 73 (2024). https://doi.org/10.1145/3680528.3687675
+68. Wang, Z., Bovik, A.C., Sheikh, H.R., Simoncelli, E.P.: Image quality assessment:
+from error visibility to structural similarity. IEEE Trans. Image Process. 13(4),
+600–612 (2004). https://doi.org/10.1109/TIP.2003.819861
+69. Wu, G., et al.: 4D Gaussian Splatting for real-time dynamic scene rendering. In: Proceedings of the IEEE Computer Society Conference on Computer
+Vision and Pattern Recognition, pp. 20310–20320 (2024). https://doi.org/10.1109/
+CVPR52733.2024.01920
+70. Xie, W., Schoonhoven, R., Van Leeuwen, T., Blaschko, M.B.: AC-IND: sparse
+CT reconstruction based on attenuation coeﬃcient estimation and implicit neural
+distribution. In: Proceedings of the 2025 IEEE Winter Conference on Applications
+of Computer Vision, WACV 2025, pp. 3074–3083 (2025). https://doi.org/10.1109/
+WACV61041.2025.00304
+71. Ye, M., Danelljan, M., Yu, F., Ke, L.: Gaussian Grouping: Segment and edit anything in 3D scenes. In: Leonardis, A., Ricci, E., Roth, S., Russakovsky, O., Sattler,
+T., Varol, G. (eds.) Computer Vision, ECCV 2024. LNCS, vol, 15087, pp. 162–179.
+Springer, Cham (2025). https://doi.org/10.1007/978-3-031-73397-0 10
+72. Yu, A., Li, R., Tancik, M., Li, H., Ng, R., Kanazawa, A.: PlenOctrees for realtime rendering of neural radiance ﬁelds. In: Proceedings of the IEEE International
+Conference on Computer Vision, pp. 5732–5741 (2021). https://doi.org/10.1109/
+ICCV48922.2021.00570
+73. Yu, A., Ye, V., Tancik, M., Kanazawa, A.: pixelNeRF: neural radiance ﬁelds from
+one or few images. In: Proceedings of the IEEE Computer Society Conference on
+Computer Vision and Pattern Recognition, pp. 4576–4585 (2021). https://doi.org/
+10.1109/CVPR46437.2021.00455
+74. Yu, W., Cai, Y., Zha, R., Fan, Z., Li, C., Yuan, Y.: X.2 -Gaussian: 4D radiative
+Gaussian Splatting for continuous-time tomographic reconstruction. In: Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV), pp.
+24728–24738 (2025)
+75. Zang, G., Idoughi, R., Li, R., Wonka, P., Heidrich, W.: IntraTomo: self-supervised
+learning-based tomography via sinogram synthesis and prediction. In: Proceedings
+of the IEEE International Conference on Computer Vision, pp. 1940–1950 (2021).
+https://doi.org/10.1109/ICCV48922.2021.00197
+FaCT-GS: Fast and Scalable CT Reconstruction with Gaussian Splatting
+245
+76. Zha, R., Lin, T.J., Cai, Y., Cao, J., Zhang, Y., Li, H.: R.2 -Gaussian: rectifying
+radiative Gaussian Splatting for tomographic reconstruction. Adv. Neural. Inf.
+Process. Syst. 37, 44907–44934 (2024)
+77. Zha, R., Zhang, Y., Li, H.: NAF: Neural attenuation ﬁelds for sparse-view CBCT
+reconstruction. In: Wang, L., Dou, Q., Fletcher, P.T., Speidel, S., Li, S. (eds.)
+Medical Image Computing and Computer Assisted Intervention, MICCAI 2022.
+LNCS, vol. 13436, pp. 442–452. Springer, Cham (2022). https://doi.org/10.1007/
+978-3-031-16446-0 42
+78. Zhang, Y., et al.: Image-GS: content-adaptive image representation via 2D Gaussians. In: Proceedings of the SIGGRAPH 2025 Conference Papers, p. 102 (202).
+https://doi.org/10.1145/3721238.3730596
+Open Access This chapter is licensed under the terms of the Creative Commons
+Attribution 4.0 International License (http://creativecommons.org/licenses/by/4.0/),
+which permits use, sharing, adaptation, distribution and reproduction in any medium
+or format, as long as you give appropriate credit to the original author(s) and the
+source, provide a link to the Creative Commons license and indicate if changes were
+made.
+The images or other third party material in this chapter are included in the
+chapter’s Creative Commons license, unless indicated otherwise in a credit line to the
+material. If material is not included in the chapter’s Creative Commons license and
+your intended use is not permitted by statutory regulation or exceeds the permitted
+use, you will need to obtain permission directly from the copyright holder.

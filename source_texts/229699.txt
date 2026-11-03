@@ -1,0 +1,191 @@
+CUDA accelerated rasterization of gaussian splatting - Add differentiable per-Gaussian masks and a MaskGaussian trainer by kaikai23 · Pull Request #1 · kaikai23/gsplat
+
+Add differentiable per-Gaussian masks and a MaskGaussian trainer by kaikai23 · Pull Request #1 · kaikai23/gsplat · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+kaikai23
+commented
+Aug 11, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+This PR adds optional differentiable per-Gaussian masks to gsplat's classic
+3DGS rasterizer and demonstrates them with the hard Gumbel-Softmax training
+scheme from MaskGaussian (CVPR 2025).
+The new gaussian_masks argument is optional, so existing callers and the
+unmasked rendering path retain their current behavior. When supplied, each
+mask multiplies its Gaussian's clamped base alpha inside the rasterizer. The
+backward pass explicitly propagates the corresponding mask gradient, including
+for hard-zero straight-through samples and saturated base alphas.
+What changed
+expose optional gaussian_masks: [..., N] through the public
+rasterization() API and the Python/C++/CUDA wrapper stack;
+implement forward and backward mask handling for packed and unpacked classic
+3DGS rasterization paths;
+keep the pure-PyTorch implementation aligned with the CUDA semantics;
+add a mask configuration to examples/simple_trainer.py with the paper's
+mask initialization, hard Gumbel-Softmax estimator, regularization, and
+ten-sample periodic pruning schedule;
+use deterministic score argmax for evaluation and PLY export;
+preserve mask parameters and optimizer state across densification and
+pruning;
+document the API and add a resumable, paired 13-scene benchmark runner and
+aggregation utility.
+API and compatibility
+gaussian_masks defaults to None. No mask tensors are allocated and no
+additional per-intersection mask operations are performed in the existing
+unmasked path. The initial implementation intentionally targets the classic
+3DGS projection/rasterization path; unsupported combinations fail early with a
+clear error instead of silently ignoring masks.
+Validation
+Local validation on an NVIDIA H200 with PyTorch 2.9.1 and CUDA 12.8:
+core CPU suite: 570 passed, 890 skipped;
+focused mask GPU tests: 10 passed;
+full GPU suite: 2092 passed, 138 skipped, 18 xpassed; the four remaining
+failures are confined to untouched 2DGS/eval3d test paths, while all focused
+mask tests pass;
+compression test with PLAS/torchpq/CuPy dependencies: passed;
+clean-snapshot JIT build and an explicit AOT wheel build of the 3DGS CUDA
+extension, followed by mask tests loaded from each new binary: passed;
+Sphinx warnings-as-errors build, Black, clang-format, and git diff --check:
+passed;
+unmasked and masked end-to-end trainer smoke tests: passed.
+Benchmark protocol
+The formal comparison uses all 13 scenes reported by MaskGaussian:
+Mip-NeRF360: bicycle, bonsai, counter, flowers, garden, kitchen, room, stump,
+and treehill;
+Tanks & Temples: train and truck;
+Deep Blending: drjohnson and playroom.
+Every trainer run uses 30,000 steps and seeds 42, 43, and 44. The beta matrix
+contains 39 default and 39 mask runs; the alpha matrix adds another 39
+mask runs while reusing the same paired baselines, for 117 formal runs in
+total. Runs are paired by scene and seed, and method order alternates between
+seeds to reduce order bias. Each run records PSNR, SSIM, LPIPS-VGG, active and
+total Gaussian counts, checkpoint and PLY sizes, peak GPU memory, wall-clock
+training time, and rendering FPS. Final statistics report paired
+mask-minus-default changes with sample standard deviations.
+Results
+The beta matrix completed all 78 runs. Across the 39 paired scene/seed
+comparisons, beta reduces active Gaussians in every scene and improves both
+training time and rendering FPS in every scene:
+Schedule
+Pairs
+ΔPSNR
+ΔSSIM
+ΔLPIPS
+Active GS
+Checkpoint
+PLY
+Peak memory
+Train time
+FPS
+beta (5e-4, steps 0–30k)
+39
+-0.119 ± 0.296
+-0.0009 ± 0.0025
++0.0030 ± 0.0017
+-57.1% ± 10.0%
+-52.9% ± 10.5%
+-57.1% ± 10.0%
+-17.3% ± 8.0%
+-7.6% ± 4.2%
++35.2% ± 18.3%
+alpha (0.1, steps 19k–20k)
+39
+-0.043 ± 0.130
+-0.0003 ± 0.0018
++0.0036 ± 0.0016
+-66.5% ± 7.5%
+-65.3% ± 7.7%
+-66.5% ± 7.5%
++7.2% ± 0.7%
+-3.8% ± 3.1%
++43.4% ± 22.9%
+Values are paired mask-minus-default means ± sample standard deviations. Alpha
+was evaluated in a second complete 13-scene × 3-seed matrix while reusing the
+same 39 baseline runs. It preserves PSNR more closely and produces smaller,
+faster final models, but increases peak training memory. Beta reduces peak
+training memory and training time more strongly. LPIPS-VGG increases slightly
+for both schedules, so these results support a quality/resource tradeoff rather
+than a claim of uniform quality improvement.
+Dataset-level alpha results:
+Dataset
+Pairs
+ΔPSNR
+ΔSSIM
+ΔLPIPS
+Active GS
+Train time
+FPS
+Mip-NeRF360
+27
+-0.066 ± 0.129
+-0.0007 ± 0.0016
++0.0034 ± 0.0013
+-64.7% ± 7.5%
+-3.4% ± 3.5%
++43.7% ± 27.1%
+Tanks & Temples
+6
+-0.055 ± 0.131
+-0.0009 ± 0.0010
++0.0047 ± 0.0030
+-66.2% ± 3.9%
+-4.3% ± 1.7%
++42.2% ± 8.9%
+Deep Blending
+6
++0.070 ± 0.085
++0.0021 ± 0.0004
++0.0030 ± 0.0010
+-75.2% ± 2.7%
+-5.2% ± 1.0%
++43.1% ± 8.5%
+Reproduction
+With the datasets in the layout documented in
+examples/benchmarks/mask_gaussian/README.md:
+```
+bash examples/benchmarks/mask_gaussian/run.sh
+```
+The runner resumes completed experiments and refuses to publish the final
+summary unless all expected methods, seeds, and scenes are present with finite
+metrics and their final checkpoint/PLY artifacts.
+Scope
+This PR does not add masks to 2DGS, 3DGUT, distributed rendering, or eval3d.
+Those paths have different forward/backward contracts and should be handled in
+separate changes with their own focused validation.
+kaikai23
+added 8 commits
+August 8, 2026 19:01
+feat: add differentiable per-Gaussian masks
+ce91ca7
+bench: record CUDA device metadata
+5674181
+test: align mask coverage with UT constraints
+8bfcb07
+bench: exclude intermediate PLY export from timing
+17e28ad
+bench: enable final PLY export
+4567328
+bench: balance paired experiment order
+da4f19b
+bench: document alpha schedule tradeoff
+9781196
+test: skip CUDA mask tests without a GPU
+7a3ff2d
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,204 @@
+Three raymarching techniques for rendering cube voxels -- plane intersections, sphere-assisted, and cube-assisted -- with performance benchmarks.
+
+Raymarching Voxel Rendering | Caleb Leak
+Skip to content
+Go back
+Raymarching Voxel Rendering
+Jun 3, 2017
+|
+Raymarching (not to be confused with ray tracing) is one of the most interesting ways to render voxels. It’s performant, parallelizes well, and doesn’t require much upfront computation. Of course it comes at a cost — it’s fragment shader heavy so you’ll like end up fillrate limited. Its complexity also makes it a tad fragile; a little floating point error buildup can cause tunneling and subtle artifacts.
+For a little context, take a look at Inigo Quilez’s excellent work and writeups with ray marching. One caveat is that his work primarily focuses on signed distance fields, which the techniques below are not — unsigned distance fields are closer to being accurate.
+So, on to the techniques. I’ll cover three primary techniques:
+Raymarching plane intersections. A set of NxNxN voxels can be divided up using N+ 1 planes along each axis. An easy approach to raymarching is to take a ray for each fragment and march it along each plane intersection until a non-empty voxel is found.
+Sphere assisted raymarching. This technique reduces the number of voxel lookups, though it’s not always a performance win. The basic idea is to store the shape information separate from the color information. Then, instead of storing the shape information directly, each empty voxel stores the radius of the empty space around it — representing the largest sphere that could fill the empty space centered a the current voxel. This allows for large steps through empty space.
+Cube assisted raymarching. Similar to the previous technique, except instead of the largest sphere, the shape information stores the largest cube possible around the current location. Why a cube instead of a sphere? Because it’s much much faster to compute — an order of magnitude faster. Its shape is slightly suboptimal, but still gets most of the speedup from the previous technique.
+Test setup
+Like in my previous tests, to compare these techniques I started by throwing a bunch of 32x32x32 voxel spheres at them and measuring the memory impact and per-frame render times. In addition, a degenerate case of a 32x32x32 voxel set with only a single solid voxel in its corner was added to demonstrate where the plane marching technique falls short.
+The same test machine and setup was used — 1920x1080 on Windows 10 using a GTX 980 Ti, Intel i7–4790k, and 16GB of main memory.
+I added an additional constraint that the previous tests didn’t have. All techniques must produce a pixel perfect match for their quad based brethren. This is important because it’s easy to cut a few corners and get a perf boost at the cost of accuracy — or to let floating point error cause close but incorrect results.
+Figure 1. The voxel object used.
+For each technique, the test is repeated for different numbers of objects to allow trends to emerge. The largest data set contains 16k voxel objects and is enough to strain the test system.
+I posted the full source for these tests on GitHub. I encourage you take a look — a source file is worth a thousand words.
+Raymarching Overview
+Raymarching is an interesting rendering technique. It takes a ray consisting of an origin p0 and a direction d . It then checks points along the ray for being inside a solid object. To do this, it iteratively marches along the ray, starting at p0 and taking non-uniform steps along the ray. At each step, the distance to the closest possible intersection is conservatively estimated — it can be overestimated, but must never be underestimated — and a step of that size is then taken.
+Figure 2. A raymarched voxel sphere rendered on the surface of a cube.
+Raymarching requires a termination criteria. In the case of signed distance fields (a typical example Google will turn up), this criteria is convergence. Step sizes will eventually approach zero and the intersection will be determined to have been found. In our case, we can simplify things by checking if the current point is inside a solid voxel.
+For rendering voxel objects, each object, no matter how many voxels it contains, is rendered using a cube. Six quads are sent into the render pipeline and the fragment shader does the hard work of finding the intersections by marching rays from the cube’s surface.
+Putting this together in a fragment shader, it becomes:
+```
+vec4 March(vec3 p0, vec3 d) {
+  float t = 0;
+  while (t < someMaxDistToCheck) {
+    vec3 p = p0 + d * t;
+    if (IsVoxelSolid(p)) {
+      return VoxelColor(p);
+    }
+    t += EstimateIntersectionDistance();
+  }
+  return vec4(0);
+}
+```
+The important piece here is distance estimation function, which the specific techniques will fill in.
+Raymarching Plane Intersections technique
+Figure 3. A voxel reindeer showing a single plane-ray intersection.
+This technique imagines planes separating each layer of voxels. A ray is then marched along each plane intersection and the voxels at the intersection points are checked for being solid.
+It’s important to check the the intersection points in the order in which the ray reaches them. The key here is that planes along all three axes will need to be checked each step, with the closest intersection being the step taken.
+Working in voxel-unit-space (i.e. where one voxel is 1x1x1 units in size) finding these intersections becomes easy. Simply check the fraction require to round up to the next integer (or down for negative directions) and then divide by the appropriate component of d to make it exact. This works out to be:
+```
+vec4 PlaneMarch(vec3 p0, vec3 d) {
+  float t = 0;
+  while (t <= maxDistToCheck) {
+    vec3 p = p0 + d * t;
+    vec4 c = textureLod(voxels, p / voxelGridSize, 0);
+    if (c.a > 0) {
+      return c;
+    }
+
+    vec3 deltas = (step(0, d) - fract(p)) / d;
+    t += max(mincomp(deltas), epsilon);
+  }
+
+  return vec4(0);
+}
+```
+Notice there’s a tiny epsilon to guarantee there’s always at least a small amount of progress.
+This technique works well, but notice how it will never move more than a single voxel at a time. Wouldn’t it be nice to skip over all of those empty voxels we check before reaching a solid one? Well, we can — at least some of them.
+Sphere Assisted Raymarching
+Figure 4. Degenerate case for the previous technique — lots of checking of empty voxels.
+In the previous technique, all voxel information was crammed in a single 3D texture, with the alpha channel giving information about whether or not the voxel is solid. This is straightforward and works well — especially since only a single texture needs to be swapped between objects. However, some degenerate cases will require many steps checking empty voxels.
+The worst case scenario for the previous technique is, rather ironically, an empty set of voxels. Each ray will have to pass through the entire object before deciding there’s nothing to hit and terminating. A less trivial case would be a voxel object with only a wall of solid voxels at the far end of the z-axis. Viewed with the wall on the far side, each ray will have to traverse the entire width of the object before finding its destination — obviously not ideal. Figure 4 shows this case.
+Enter sphere assisted raymarching to help. Instead of storing simply solid/not solid values in the alpha channel, we can store the distance to the nearest solid voxel. Then, when traversing an empty voxel, we can take a massive step across many empty voxels. Pretty neat, huh?
+Figure 5 is a cross section of what such a technique would generate. The blue cells represent the solid voxels. The white cells are empty, and store the amount of distance that can be safely moved before reaching a solid voxel.
+Figure 5. A cross section of a sphere-assisted shape.
+The hard part is generating this shape data. It’s important to notice that we’ve gone from normalized floating point values for the shape data to non-negative integers. To keep using normalized floats for the color channels, the shape data is split off into an integer 3D texture.
+The changes needed for the fragment shader are pretty minimal:
+```
+vec4 ShapeMarch(vec3 p0, vec3 d) {
+  float t = 0;
+  while (t <= maxDistToCheck) {
+    vec3 p = p0 + d * t;
+    uint shapeValue = textureLod(shape, p / voxelGridSize, 0).r;
+    if (shapeValue == 255) {
+      return textureLod(voxels, p / voxelGridSize, 0);
+    }
+
+    vec3 deltas = (step(0, d) - fract(p)) / d;
+    t += max(mincomp(deltas) + shapeValue, epsilon);
+  }
+
+  return vec4(0);
+}
+```
+Shape assisted raymarching. 255 is a constant representing a solid voxel.
+Cube Assisted Raymarching
+The biggest drawback of sphere assisted raymarching is the upfront workload. A simple implementation runs in O(n²) time, with n being the number of voxels. This gets big fast — up to ~1,000,000 steps for a simple 32x32x32 voxel set. Enter cubes to save the day.
+Similar to the sphere assisted raymarching, cube assisted raymarching checks how large of an object can be inserted around each empty cell; using cubes of course rather than spheres. This is slightly suboptimal in most cases, takes us from O(n²) upfront cost to O(n log n). How? Using a summed area table and a binary search for the right cube size.
+Summed area tables are a neat data structure often seen in computer vision. A full explanation is beyond the scope of this article, but the executive summary is that they store the sum of all prior cells at a specific location. Using this information, it’s quick to compute the area of an arbitrary box by subtracting off the parts we’re not interested in. Once created, the area of an arbitrary box can be computed in O(1) time.
+The algorithm for this is to (1) compute the summed area table and then (2) for each cell, binary search up to the maximum sized cube. Since area calculations using the table are O(1), each voxel takes only O(log n) time.
+Comparing the resulting shape to the previous, we can see it’s not as efficient, though it’s still pretty good:
+With our techniques in place, it’s time for some results.
+Results
+Render Time Results
+The standard test set shows plane marching with a moderate lead over both shape assisted techniques. On the low end, render times are very close. However, as the set size increases, plane marching takes a pretty clear lead.
+Time per frame (ms) — standard test case.
+Objects (k)Plane MarchingSphere AssistedCube Assisted
+11.20.80.8
+26.94.44.8
+32.63.23.1
+45.64.24.2
+53.65.35.2
+67.06.36.5
+74.37.37.4
+87.98.38.5
+95.29.59.5
+108.510.510.4
+116.611.311.3
+128.212.412.0
+138.013.513.1
+148.114.214.6
+158.615.515.2
+169.316.816.2
+Notice that how the performance hit for growing set sizes isn’t stable. This shows how our performance is both data and view dependent. The further the rays need to march into the object, the worse performance will be; one set of benchmarks can’t tell the whole story.
+To get a better idea of what’s going on, I also benchmarked a degenerate case — a single solid voxel in the far corner of a 32x32x32 voxel set. This example is a bit contrived since the ideal thing to do here would be to shrink the set to 1x1x1 but it illustrates a general problem. Notice how vastly different the results are in the figure below for plane marching.
+Time per frame (ms) — degenerate case.
+Objects (k)Plane MarchingSphere AssistedCube Assisted
+15.830.870.87
+211.371.862.00
+318.353.043.02
+423.984.224.20
+531.315.335.28
+635.916.346.50
+744.677.347.30
+853.928.518.57
+957.989.459.66
+1057.9410.7510.83
+1164.5011.7011.52
+1267.2712.9412.51
+1368.1113.3413.56
+1471.3914.9114.49
+1578.1915.3615.55
+1678.0216.5216.68
+Both of the shape assisted techniques remain relatively the same with good performance.
+Memory Impact
+Although not as taxing as other techniques when it comes to memory (particularly VAOs and display lists), raymarching isn’t the most compact technique.
+GPU memory used (MB).
+Objects (k)Plane MarchingSphere AssistedCube Assisted
+1141.0207.5207.4
+2259.5390.0390.0
+3387.7582.0582.1
+4516.0775.3775.2
+5644.3967.2967.3
+6772.11159.31159.2
+7900.31351.21351.3
+81019.61545.21545.1
+91156.01735.21744.0
+101285.31927.31927.2
+111412.02119.22119.5
+121541.32311.52311.1
+131668.02505.02505.2
+141797.32695.32695.2
+151925.22889.12889.2
+162055.23084.23084.1
+To perform easy efficient raymarching, the entire voxel set for each object needs to be loaded into memory. This is in contrast with quad based techniques which only require data for solid voxels.
+The one advantage raymarching has when it comes to memory is that it’s not data dependent. Any set of 32x32x32 voxels will take the same amount of memory regardless of their contents. Polygonal techniques will depend entirely on the data inside them, though they’re typically smaller.
+Main memory usage is negligible, as is to be expected with nearly all of the work taking place on the GPU:
+Main memory used (MB).
+Objects (k)Plane MarchingSphere AssistedCube Assisted
+110.910.511.4
+224.434.134.5
+329.344.042.9
+437.955.756.7
+539.766.762.2
+647.776.978.1
+751.183.683.0
+869.1102.2104.9
+961.8106.297.7
+1070.8124.7120.1
+1175.9123.8123.7
+1280.1139.2147.0
+1384.0150.2148.2
+1492.3157.1157.3
+1595.4167.2177.8
+16106.4199.9187.5
+Where to go from Here
+Cube assisted raymarching seems like the way to go. It has a low upfront cost and performs well even in the worst case.
+Looking towards the future, there are three particularly notable caveats:
+There are likely many performance gains to be had, so don’t take these render times to be absolute. Optimizing raymarching while maintaining accurate results is difficult — many potentially large optimizations were abandoned due to their numerical instability.
+Performance will be architecture dependent. I regret not having more platforms to benchmark as performance is likely to degrade quickly on both competing and older architectures.
+Lighting is going to be more complicated. With polygonal techniques, a normal can be passed down the pipeline cheaply. With raymarching, normals are generally found numerically by taking multiple samples, which could end up being costly and may create lighting artifacts.
+Of course there’s also flexibility in raymarching. The techniques here can be easily combined with other ones such as rounded cubes or union/subtraction/intersection. It’ll also be a boon when voxel resolution is greater than render resolution.
+3D hashing is a promising area thread to pull on to reduce memory overhead. For many voxel objects, only a small amount of colors will be used (compared to the size of the raw data set). By finding the final color after raymarching terminates via 3D hashing, a considerable amount of memory could be saved and the performance impact would likely be small — the bulk of the computation would still be the raymarching.
+That’s it. Like last time, be sure to poke around with the code on GitHub:
+cleak/VoxelPerf — Performance testing sandbox for voxel graphics
+graphics
+opengl
+voxels
+gamedev
+glsl
+Back To Top
+Share this post on:
+Share this post via WhatsApp Share this post on Facebook Share this post on X Share this post via Telegram Share this post on Pinterest Share this post via email
+Previous Post
+Fast Virtual Functions: Hacking the VTable for Fun and Profit
+Next Post
+Quads All the Way Down: Simple Voxel Rendering

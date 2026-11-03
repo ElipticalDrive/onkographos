@@ -1,0 +1,133 @@
+Repo: NikaGeospatial/onlymap-js Labels: enhancement, layers, 3d, epic Effort: High (genuinely new GPU engineering — a custom projection+spherical-harmonics shader plus a per-frame global depth sort — not a reskin of an existing layer. Th...
+
+Gaussian splatting layer — photoreal reality-capture scenes, georeferenced on the map · Issue #27 · NikaGeospatial/onlymap-js · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Gaussian splatting layer — photoreal reality-capture scenes, georeferenced on the map #27
+New issue
+Copy link
+New issue
+Copy link
+Open
+Task
+Open
+Gaussian splatting layer — photoreal reality-capture scenes, georeferenced on the map#27
+Task
+Copy link
+Assignees
+Labels
+new-featurea new implementationa new implementationnon-deck-nativeRequires external architecture over deck.gl to properly implementRequires external architecture over deck.gl to properly implement
+Description
+lawrencenika
+opened on Jul 22, 2026
+Issue body actions
+Repo: NikaGeospatial/onlymap-js
+Labels: enhancement, layers, 3d, epic
+Effort: High (genuinely new GPU engineering — a custom projection+spherical-harmonics shader plus a per-frame global depth sort — not a reskin of an existing layer. The WebGL2 worker-sort path is buildable today; a WebGPU radix-sort upgrade is gated on deck's WebGPU backend maturing. ~4–5 weeks for a solid single-scene v1.)
+Basis: OnlyMapJS source at v0.3.x (the lazy loadClass chunk seam behind COGLayer in layer-registry.ts, data-layer.ts registerFormat, deck's project module) + a survey of the 2026 3DGS web stack. Demand signal (3D deep-dive, table 4, row 8): the fastest-growing capability in the whole research set — 3DGS tooling ~$1–3B (2025) → ~$8–12B by 2033–34 (~19–24% CAGR); real estate (Zillow shipped it), heritage, film/VFX, surveying, e-commerce. Framed industry-wide as spatial computing's "JPEG moment." All external refs are plain-text, deliberately not hyperlinked — no cross-repo backlinks.
+Summary — the photoreal cousin of the point cloud, and a different beast to render
+A Gaussian splat scene is millions of tiny 3D anisotropic blobs (position, a covariance from rotation+scale, opacity, and color as spherical harmonics for view-dependent lighting). It's what capture apps (Luma, Polycam, Scaniverse) produce from a phone video — photoreal, with reflections and foliage that mesh photogrammetry butchers. It looks adjacent to the point-cloud ticket ([#24]), but the rendering is a different discipline: splats are translucent, anisotropic, view-dependent, and order-dependent, so they must be projected to 2D ellipses and alpha-blended strictly back-to-front, re-sorted every frame as the camera moves. That per-frame global sort of millions of primitives is the whole engineering problem — and it's why this can't be a variant of PointCloudLayer (a classic point cloud is the cheap, opaque, unordered subset — indeed it's the standard fallback representation when a splat viewer isn't available).
+No deck.gl-native splat layer exists anywhere today; every current map integration bolts a separate Three.js renderer alongside the map. A first-party deck.gl layer — sharing OnlyMapJS's camera, projection, and compositing instead of running a parallel engine — is the differentiator.
+```
+flowchart TB
+  F[".spz / .ply / .splat / .ksplat / .sog<br/>(capture-app output)"] -->|"registerFormat decoder (lazy)"| DEC["decode → per-splat<br/>position, covariance, opacity, SH"]
+  DEC --> ANCHOR["georeference:<br/>anchor {lng,lat,alt,heading,scale}<br/>→ decomposable model matrix (RTC)"]
+  ANCHOR --> LAYER["SplatLayer (custom, lazy loadClass chunk)"]
+  subgraph frame["every frame (camera moved)"]
+    LAYER --> PROJ["vertex: project Gaussian → 2D ellipse<br/>evaluate SH vs view dir"]
+    PROJ --> SORT{"global depth sort<br/>back-to-front"}
+    SORT -->|"v1: worker CPU counting sort<br/>→ reordered index buffer (~4fps, render stays 60)"| BLEND
+    SORT -.->|"later: WebGPU radix sort via luma Computation<br/>(gated on deck WebGPU backend)"| BLEND["fragment: 2D gaussian × α,<br/>alpha-blend in order"]
+  end
+  BLEND --> COMP["composite over MapLibre basemap<br/>(transparent pass, depth-write off, no picking)"]
+```
+Loading
+Corrected baseline — what OnlyMapJS gives you to build on
+The lazy custom-layer seam is exactly right for this. registerLayer({ loadClass }) loads a layer's chunk on first use (the COGLayer/raster.ts precedent). A splat layer is heavy (custom shaders + a sort worker) and belongs behind that chunk boundary — core/2D pages pay nothing.
+deck's project GLSL module handles map-space → clip-space and is what georeferences the splat means; the splat-specific math (2D covariance projection, SH evaluation) is all new shader code on top.
+registerFormat is the decode seam for .spz/.ply/.splat (lazy-import the parser, the arrow/COG precedent).
+The compositing model fits. deck already draws its overlay over the MapLibre basemap; a transparent splat layer composites the same way. But it needs its own render behavior (below), which is new.
+Evidence (described, never linked)
+The sort is the hard part, and it's real. Every frame, all splats must be ordered back-to-front by view depth before blending. Three production strategies: (1) CPU counting/radix sort in a Web Worker with double-buffering — the original web viewer's model (antimatter15/splat): the sort runs async at ~4 fps while render holds 60 fps, acceptable because depth order changes slowly under motion (popping only on hard cuts); a full ~1M-splat sort is ~150 ms single-shot, amortized by the worker. This is the portable, ship-today path and works on deck's WebGL2 backend. (2) GPU radix sort via WebGPU compute — reference renderers report 130–200+ fps and sort costs as low as ~0.6 ms/frame — but deck.gl's WebGPU backend is not production-ready at v9.3, so luma.gl's Computation radix sort is a later upgrade, not v1. (3) Sort-free OIT approximations (stochastic, weighted-blended) — tried and rejected by the ecosystem as grainy or wrong for stacked high-opacity splats. Honest bottom line: the correct look needs a real sort; v1 = worker CPU sort.
+Capacity (named renderers, varies by GPU/SH degree): desktop discrete GPU ~1–3M Gaussians at 30+ fps (more on WebGPU); mobile browsers ~0.5–1M.
+Formats — SPZ is the pragmatic web default. .ply is the uncompressed reference (~236 MB for 1M splats, SH3 — interchange only); .splat is compact but drops SH; .ksplat is a three.js-oriented compressed container; .spz (Niantic Spatial, MIT) is ~10× smaller than PLY (~22–28 MB), keeps full SH, and is gzip-friendly — the strong web default; .sog/SOGS (PlayCanvas) reorders Gaussians into WebP images (~20× compression, "the WebP of splatting"). The interoperability target is the glTF KHR_gaussian_splatting extension — Release Candidate published Feb 2026, ratification targeted Q2 2026 (uncompressed GPU-ready baseline; extends a glTF POINTS primitive; graceful point-cloud fallback). ⚠️ Compression is not in the baseline — SPZ and a Qualcomm codec are in-flight vendor proposals, so do not assume a ratified ..._compression_spz name yet. City-scale streaming/LOD is converging on 3D Tiles (hierarchy) + KHR_gaussian_splatting payloads, the architecture Cesium shipped (April 2026, hierarchical LOD down to sub-cm).
+Prior art to port from (plain text). antimatter15/splat (WebGL2, worker sort — the best port target for a deck layer), mkkellogg/GaussianSplats3D and sparkjsdev/spark (three.js), PlayCanvas SuperSplat (WebGPU compute + streaming/LOD), Babylon.js GaussianSplattingMesh (built-in, SPZ + SH), Niantic's spz tooling; WebGPU radix-sort references (web-splat, gaussian-splatting-webgpu). Map precedents: a MapLibre 3DGS plugin exists but overlays Three.js + Spark (RTC-georeferenced) rather than integrating with the map's own renderer; and GL (the cloud-native GIS app studied in [GIS-app parity study (GL) — capability audit, quick wins, and spin-out index #11]) added a splat layer to its MapLibre+deck stack in a recent release — same-family proof of demand. Neither is a deck.gl-native layer; that gap is the opportunity.
+Georeferencing — the map-library-critical bit. Capture apps emit an arbitrary local frame; placing it on the map means an anchor → model matrix (translate to lng/lat/alt, rotate to heading/up, uniform metric scale). The glTF spec constrains the node transform to be decomposable — translation + rotation + positive scale, no negative scale. Raw ECEF at Earth-radius scale destroys float precision, so use RTC (Relative-To-Center) or a local ENU/UTM frame anchored at the scene origin, then compose with deck's project. Do not forget: when the scene is rotated, the spherical-harmonics coefficients must be rotated too (Wigner-D), or view-dependent color comes out wrong — an easy, silent bug.
+Design — a custom SplatLayer (+ .spz format)
+A lazy-chunked custom layer plus a registerFormat decoder:
+Decode (registerFormat, lazy): .spz first (full-SH, small), then .ply/.splat/.ksplat; later a KHR_gaussian_splatting glTF path. Output: typed arrays of position + packed covariance + opacity + SH (SH packed into a data texture — it's large).
+Georeference: an anchor (longitude/latitude/altitude/heading/scale) → decomposable model matrix, applied in the vertex shader via project with RTC; SH rotated to match.
+Render: instanced billboard quads; vertex shader does the 2D covariance projection + SH-vs-view evaluation; transparent pass, blending on, depth-write off, no picking (picking a translucent stack is ill-defined). Composites over the MapLibre basemap like any deck overlay, but its internal back-to-front order is enforced by the sort, independent of deck layer order.
+Sort: v1 = Web Worker counting sort → reordered index buffer, double-buffered (the antimatter15/splat model), re-issued on camera move; render never blocks on it.
+```
+<!-- a phone-captured building facade, placed at a real corner, heading-aligned -->
+<om-layer id="facade" type="SplatLayer" data="scan.spz"
+  longitude="103.8519" latitude="1.2841" altitude="0"
+  heading="37" scale="1.0"></om-layer>
+```
+Implementation plan
+SplatLayer skeleton — custom Layer registered via loadClass (own chunk); instanced-quad geometry; attribute/texture packing for position/covariance/opacity/SH.
+Projection + SH shader — 2D covariance from J·W·Σ; ellipse basis; SH evaluation vs view direction; project-module georeferencing with RTC.
+Sort worker — counting/radix sort in a worker, double-buffered, reordered index buffer; re-trigger on view change; render decoupled.
+Transparent render integration — dedicated blend pass, depth-write off, pick-pass disabled; verify composite order over MapLibre and against any opaque deck layers.
+.spz decoder (registerFormat, lazy) → then .ply/.splat/.ksplat; anchor grammar + SH rotation.
+WebGPU sort upgrade (later, gated) — luma.gl Computation radix sort when deck's WebGPU backend is production-ready; WebGL2 worker sort stays the default/fallback.
+Doc-sync — README 3D + data-formats rows; docs/ splatting page (formats, georeferencing, the sort/perf honesty, SH-rotation gotcha); skill + llms.txt; html-data.ts + gen; architecture traceability + changelog; example (a single georeferenced SPZ scene) + dev/build-public.ts + npm run test:public.
+Non-goals
+City-scale streamed/LOD splats in v1 — single-scene first. Hierarchical LOD is the 3D Tiles + KHR_gaussian_splatting path (the Tile3DLayer/[Point cloud layers — LAS/LAZ/PLY direct, plus streamed 3D Tiles / COPC at scale #24] streaming substrate), a follow-up once the single-scene layer is solid.
+WebGPU radix sort as the v1 sort — deck's WebGPU backend isn't production-ready; worker CPU sort ships first.
+Picking / per-splat selection — undefined for a translucent stack; not in scope.
+Splat editing/training (SuperSplat territory) — render + place, not author.
+Relighting / SH re-baking beyond the rotation needed for placement — consume the captured appearance as-is.
+Authoring the capture — the scan comes from Luma/Polycam/Scaniverse; the library renders and georeferences it.
+Acceptance criteria
+A .spz scene renders photoreal with correct view-dependent color (SH evaluated), alpha-blended back-to-front, at interactive fps on a mid-range desktop GPU (~1M splats).
+The scene is placed at a real lng/lat with correct heading and metric scale via the anchor grammar; SH is rotated with the scene (no wrong-color-on-rotation bug).
+The sort runs in a worker; camera motion stays smooth (render never blocks on the sort); hard camera cuts may briefly pop (documented).
+Splats composite correctly over the MapLibre basemap (transparent, depth-write off); the layer is non-pickable by design.
+.ply/.splat also decode (SH where present); the layer lives in its own lazy chunk — core/2D pages unaffected (CI size check).
+All doc-sync surfaces updated, including the perf/sort honesty and the SPZ-vs-KHR format guidance.
+Open design questions (max 3)
+Format priority: lead with .spz (small, full SH, open — the pragmatic web default) and add KHR_gaussian_splatting glTF when it ratifies (Q2 2026), or invest in the glTF path first for standards alignment even though it's uncompressed? Proposed: .spz now, KHR as it lands, .ply/.splat for compatibility.
+Sort trigger cadence: re-sort every camera move (crisper, more worker churn) vs. re-sort past an angular/positional threshold (cheaper, occasional visible order error)? Proposed: threshold-gated, tuned to keep popping below perceptible.
+Depth interaction with opaque 3D: should splats depth-test against opaque deck geometry (3D Tiles buildings, terrain) so a splat scene can sit behind a building — requiring an opaque depth pre-pass — or render purely on top in v1? Proposed: on-top v1, depth-tested against opaque geometry as a fast-follow.
+Activity
+lawrencenika
+assigned
+howllian27
+on Jul 22, 2026
+lawrencenika
+added the
+Task
+issue type on Jul 22, 2026
+lawrencenika
+added
+new-featurea new implementationa new implementation
+on Jul 22, 2026
+Adam-Chan-Nika
+added
+non-deck-nativeRequires external architecture over deck.gl to properly implementRequires external architecture over deck.gl to properly implement
+on Jul 22, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+howllian27
+Labels
+new-featurea new implementationa new implementationnon-deck-nativeRequires external architecture over deck.gl to properly implementRequires external architecture over deck.gl to properly implement
+Type
+Task
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

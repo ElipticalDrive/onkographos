@@ -1,0 +1,209 @@
+Problem OloEngine now has OpenGL and Vulkan render backends, a render graph, deferred/forward paths, virtualized geometry, heap-backed Vulkan resources, and a CPU reference path tracer. Adding ray queries, a GPU path tracer, and ReSTIR d...
+
+Renderer architecture: one GPU scene for raster, ray queries, and path tracing · Issue #977 · drsnuggles8/OloEngineBase · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Renderer architecture: one GPU scene for raster, ray queries, and path tracing #977
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Renderer architecture: one GPU scene for raster, ray queries, and path tracing#977
+Copy link
+Labels
+architectureEngine architecture / cross-cutting designEngine architecture / cross-cutting designfeatureNew feature or requestNew feature or requestperformancePerformance / data-oriented optimizationPerformance / data-oriented optimization
+Description
+drsnuggles8
+opened on Aug 30, 2026
+Issue body actions
+Problem
+OloEngine now has OpenGL and Vulkan render backends, a render graph, deferred/forward paths, virtualized geometry, heap-backed Vulkan resources, and a CPU reference path tracer. Adding ray queries, a GPU path tracer, and ReSTIR directly to today's per-pass scene submission would create a second scene representation with different material IDs, transforms, lifetime rules, and visibility semantics.
+That is the failure mode to avoid: raster, hybrid RT, and path tracing must not become separate renderers that happen to read the same ECS.
+Goal
+Create one canonical, frame-versioned GPU Scene produced once from scene/ECS state and consumed by:
+raster/deferred/forward rendering;
+GPU culling and virtualized-geometry integration;
+Vulkan BLAS/TLAS construction;
+ray-query effects;
+the GPU path tracer;
+temporal validation and ReSTIR.
+The data model is RHI-neutral. Backend-specific code decides how buffers, device addresses, descriptor-heap entries, and OpenGL bindings are exposed.
+Effort note — this is expected to split
+Scored effort 13, which per docs/process/issue-scoring.md §4 means split it (the anchor is #435, "three rendering sub-features"). This issue defines the contract and the acceptance bar; the implementation should land as sub-issues along roughly these seams:
+instance + geometry records, stable identity, dirty-range upload, profiler counters;
+material records and the shader-layout parity mechanism;
+the canonical light/environment record;
+the first raster-path migration and the anti-duplication ratchet.
+File those as children rather than attempting one PR.
+Children
+Renderer: GPU Scene instance/geometry records, stable IDs, and incremental uploads (#977) #991 — instance/geometry records, stable IDs, dirty-range upload, profiler counters
+Renderer: canonical GPU Scene material records and shader-layout parity (#977) #992 — canonical material records and C++/shader layout parity
+Renderer: canonical GPU Scene light and environment records (#977) #993 — canonical light/environment records and photometric parity
+Renderer: migrate one raster path to GPU Scene and add an anti-duplication ratchet (#977) #994 — first raster-path migration and anti-duplication ratchet
+Canonical records
+Define compact, explicitly laid-out records along these lines:
+```
+struct GPUSceneInstance
+{
+    Matrix3x4 CurrentTransform;
+    Matrix3x4 PreviousTransform;
+    u32 GeometryIndex;
+    u32 MaterialIndex;
+    u32 InstanceId;
+    u32 VisibilityMask;
+    u32 Flags;
+    u32 Generation;
+};
+
+struct GPUSceneGeometry
+{
+    ResourceHandle VertexBuffer;
+    ResourceHandle IndexBuffer;
+    u64 VertexAddress;   // zero/unused on backends that do not expose one
+    u64 IndexAddress;
+    u32 VertexFormat;
+    u32 IndexType;
+    u32 FirstIndex;
+    u32 IndexCount;
+    u32 PrimitiveBase;
+    u32 Flags;
+};
+
+struct GPUSceneMaterial
+{
+    u32 BaseColorTexture;
+    u32 NormalTexture;
+    u32 ORMTexture;
+    u32 EmissiveTexture;
+    vec4 BaseColorFactor;
+    vec4 EmissiveAndFlags;
+    vec4 RoughnessMetallicAlpha;
+    u32 ClosureVersion;
+    // ...
+};
+```
+The exact layout should be chosen after an alignment/cache audit, but the semantic requirements are fixed. Note these are GPU-mirror structs and therefore follow the bare-PascalCase field / Pad0 padding convention in CLAUDE.md -> Conventions, not the m_ member style.
+Required properties
+Stable identity
+Stable instance IDs across frames while the entity/renderer instance remains the same.
+Stable material IDs with a generation/version so temporal history is rejected after incompatible edits.
+A primitive identity strategy for ordinary triangle meshes.
+Explicit policy for virtualized/software-raster geometry, procedural geometry, terrain, foliage, particles, fluids, and skinned meshes.
+Unsupported geometry must be marked — not silently omitted from RT while still contributing to raster depth/colour.
+Previous-frame state
+Previous transforms and deformation metadata must be produced at the same ownership boundary as current transforms. Motion vectors, temporal denoisers, TLAS updates, and ReSTIR all consume the same previous-frame truth.
+Incremental updates
+Dirty-range uploads for changed instances/materials.
+Generation-based removal/reuse rather than stale indices.
+Frame-safe resource retirement.
+Deterministic extraction order or explicit stable-index allocation.
+Profiling for extraction time, upload bytes, live capacity, fragmentation, and growth.
+Shared light/environment records
+Define a canonical light record consumable by clustered raster lighting (#435), NEE, and ReSTIR candidate generation. Preserve analytic light type/radius/shape and stable IDs. Environment/emissive distributions may be built by later issues but must have a home in this contract. docs/agent-rules/light-path-photometric-parity.md is the existing statement of why the three light evaluators must agree.
+RHI integration
+Vulkan resolves records through resource handles / device addresses / descriptor heap. Note full runtime-indexed bindless is still open (RHI: full bindless on Vulkan — runtime-indexed heap access in shaders (re-opens ADR 0011 amendment (50)) #805); this issue must work with the heap-backed model as it stands today and not assume RHI: full bindless on Vulkan — runtime-indexed heap access in shaders (re-opens ADR 0011 amendment (50)) #805 has landed.
+OpenGL consumes the same semantic buffers through the existing facade without requiring a Vulkan-shaped API leak.
+Shader layouts are generated or statically checked on both C++ and shader sides.
+First integration slice
+Convert one existing raster path to consume GPU Scene instance/material records with bitwise or threshold-equivalent output. Do not attempt to migrate every renderer in the first PR. Add adapter paths for legacy submission and a ratchet test preventing new direct scene-layout duplication.
+Acceptance criteria
+The GPU Scene is built once per view/frame and has a documented ownership/lifetime boundary.
+Instance/material/geometry/light records have static layout assertions and shader-reflection parity tests.
+Stable IDs survive ordinary movement and reject history after removal/reuse or incompatible material changes.
+Current/previous transforms drive both raster motion vectors and the future RT consumer contract.
+One raster path renders through the GPU Scene with no visual regression on OpenGL or Vulkan.
+Dirty updates do not rewrite the full scene buffer for a one-instance transform or one-material edit.
+Scene extraction/upload timings and memory/capacity are visible in the renderer profiler.
+Unsupported RT geometry categories are exposed in diagnostics and counted.
+A scene reload/backend switch cannot leave stale resource handles or generations.
+CPU tests cover allocation/reuse, generation rollover, deterministic extraction, and dirty-range merging.
+Explicitly out of scope
+Building BLAS/TLAS or invoking ray queries.
+Implementing a path tracer or ReSTIR.
+Rewriting every specialized renderer in one issue.
+Making OpenGL expose Vulkan device addresses.
+Delivering full runtime-indexed bindless (RHI: full bindless on Vulkan — runtime-indexed heap access in shaders (re-opens ADR 0011 amendment (50)) #805).
+Solving virtualized-geometry RT representation; this issue defines the policy/hook and diagnostics.
+Related work
+Completed Vulkan RHI epic RHI: add a Vulkan backend alongside OpenGL 4.6 — latest point release only, heap-bindless (no legacy descriptor path) #691 / rollout PR Vulkan Phase 9: rollout, one row order per backend, Renderer/Debug relocation (tools_gl_calls 236 → 0) #801.
+Virtualized-geometry roadmap Nanite / virtualized-geometry roadmap: gaps vs UE5.8 #654.
+CPU reference path tracer Renderer: offline reference path tracer for ground-truth GI / BRDF validation #709.
+Clustered/froxel lighting Renderer: clustered (froxel) lighting, volumetric froxel fog, and shadow light-prioritization #435.
+Open Vulkan bindless work RHI: full bindless on Vulkan — runtime-indexed heap access in shaders (re-opens ADR 0011 amendment (50)) #805.
+Score
+```
+capability: 13
+craft: 5
+stability: 8
+decay: 5
+effort: 13
+confidence: 0.8
+learning: 8
+fun: 8
+kano: table-stakes
+blocked_by: []
+blocks: []
+```
+Rated per issue-scoring · score = confidence × (capability + craft + stability + decay) / effort, derived by the picker.
+Activity
+drsnuggles8
+added
+featureNew feature or requestNew feature or request
+performancePerformance / data-oriented optimizationPerformance / data-oriented optimization
+architectureEngine architecture / cross-cutting designEngine architecture / cross-cutting design
+on Aug 30, 2026
+drsnuggles8 commented on Sep 1, 2026
+drsnuggles8
+on Sep 1, 2026
+OwnerAuthor
+More actions
+Registry sweep 2026-09-01: #991 landed in PR #1003 (merged 2026-09-01), so its checkbox is ticked and the stale blocked_by: [991] edges on #992, #993 and #994 are cleared. With the edge gone #992 (9.6) and #993 (6.4) are the top two unblocked issues in issue_scores.py rank; both are being started together in one worktree since they edit the same GPUScene files.
+drsnuggles8 commented on Sep 2, 2026
+drsnuggles8
+on Sep 2, 2026
+OwnerAuthor
+More actions
+PR #1011 merged 2026-09-02 and its worktree has been removed. It completes child items #992 and #993: canonical material records with C++/GLSL layout parity, and canonical light/environment records with stable identity/generation and the raster light adapter. This umbrella remains open for #994 and the later GPU Scene phases.
+drsnuggles8 commented on Sep 3, 2026
+drsnuggles8
+on Sep 3, 2026
+OwnerAuthor
+More actions
+PR #1026 merged 2026-09-03 and its worktree has been removed. It completes child #994: the classic raster mesh path now consumes canonical GPU Scene instance/material records, with the anti-duplication ratchet in place. Keeping this umbrella open for the later GPU Scene phases.
+drsnuggles8 commented on Sep 3, 2026
+drsnuggles8
+on Sep 3, 2026
+OwnerAuthor
+More actions
+All four children are now merged and closed: #991, #992, #993 and #994 (PR #1026, merged 2026-09-03). The body's child checklist and its stale blocked_by: [994] have been updated to match. This umbrella defined the contract rather than carrying implementation of its own, so it appears complete - flagging for closure. Closing it also unblocks #978 and #979, whose blocked_by still names it.
+drsnuggles8 commented on Sep 3, 2026
+drsnuggles8
+on Sep 3, 2026
+OwnerAuthor
+More actions
+Closing: all four children (#991, #992, #993, #994) are merged. This umbrella defined the contract and acceptance bar rather than carrying implementation of its own.
+drsnuggles8
+closed this as completedon Sep 3, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+architectureEngine architecture / cross-cutting designEngine architecture / cross-cutting designfeatureNew feature or requestNew feature or requestperformancePerformance / data-oriented optimizationPerformance / data-oriented optimization
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

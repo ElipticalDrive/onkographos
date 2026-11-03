@@ -1,0 +1,1542 @@
+LiDAR-NeRF: Novel LiDAR View Synthesis via
+Neural Radiance Fields
+arXiv:2304.10406v2 [cs.CV] 14 Jul 2023
+Tang Tao1∗ Longfei Gao2 Guangrun Wang3 Yixing Lao 4 Peng Chen2
+Hengshuang Zhao 4 Dayang Hao2 Xiaodan Liang1§ Mathieu Salzmann5 Kaicheng Yu2
+1
+Shenzhen Campus, Sun Yat-sen University 2 Autonomous Driving Lab, Alibaba Group
+3
+University of Oxford 4 The University of Hong Kong 5 CVLab, EPFL
+{trent.tangtao, kaicheng.yu.yt, hxdliang328}@gmail.com
+Novel LiDAR View Synthesis
+Point cloud
+LiDAR simulator
+Point cloud
+Unrealistic/unscalable
+Point cloud
+NeRFs
+Point cloud
+Cannot directly apply
+Point cloud
+Diﬀerentiable
+LiDAR renderer
+Point cloud
+Realistic/diﬀerentiable
+Support various conﬁg
+Train view
+Novel view
+Range image
+Nerual
+renderer
+x,y,z
+ray direction
+Range image
+LiDAR-NeRF
+density
+attributes
+radiance field
+distance
+ray-drop
+point clouds
+Figure 1: (Left) We introduce the task of novel view synthesis for LiDAR sensors. Given multiple
+LiDAR viewpoints of an object, novel LiDAR view synthesis aims to render a point cloud of the
+object from an arbitrary new viewpoint. (Right, Top) The mostly-closed related approaches to generating new LiDAR point clouds are some LiDAR simulators, which suffer from limited scalability
+and applicability, and fails to produce realistic LiDAR patterns. Furthermore, traditional NeRFs are
+not directly applicable to point clouds. (Right, Bottom) By contrast, we propose a novel differentiable framework, LiDAR-NeRF, with an associated neural radiance field, to avoid explicit 3D
+reconstruction and game engine usage. Our method enables end-to-end optimization and encompasses the 3D point attributes into the learnable field.
+Abstract: We introduce a new task, novel view synthesis for LiDAR sensors.
+While traditional model-based LiDAR simulators with style-transfer neural networks can be applied to render novel views, they fall short of producing accurate
+and realistic LiDAR patterns because the renderers rely on explicit 3D reconstruction and exploit game engines, that ignore important attributes of LiDAR points.
+We address this challenge by formulating, to the best of our knowledge, the first
+differentiable end-to-end LiDAR rendering framework, LiDAR-NeRF, leveraging
+a neural radiance field (NeRF) to facilitate the joint learning of geometry and the
+attributes of 3D points. However, simply employing NeRF cannot achieve satisfactory results, as it only focuses on learning individual pixels while ignoring local
+information, especially at low texture areas, resulting in poor geometry. To this
+end, we have taken steps to address this issue by introducing a structural regularization method to preserve local structural details. To evaluate the effectiveness of
+our approach, we establish an object-centric multi-view LiDAR dataset, dubbed
+NeRF-MVL. It contains observations of objects from 9 categories seen from 360degree viewpoints captured with multiple LiDAR sensors. Our extensive experiments on the scene-level KITTI-360 dataset, and on our object-level NeRF-MVL
+show that our LiDAR-NeRF surpasses the model-based algorithms significantly.
+Our project page.
+* Work done during an internship at DAMO Academy, Alibaba Group.
+†
+Corresponding Author.
+1
+Introduction
+Synthesizing novel views of a scene from a given camera has been a longstanding and prominent
+subject of research. A recent milestone in this area has been to combine differentiable rendering
+with neural radiance fields (NeRF) [1], resulting in a de-facto standard to render photo-realistic
+novel views by leveraging only a hundred or fewer input images with known camera poses. Impressively, this has already been shown to positively impact downstream tasks such as autonomous
+driving [2, 3, 4, 5]. In such an autonomous driving scenario, however, practical systems typically
+exploit not only images but also LiDAR sensors, which provide reliable 3D measurements of the environment. As such, it seems natural to seek to generate novel views not only in the image domain
+but also in the LiDAR one. However, the only methods that consider LiDAR point clouds for novel
+view synthesis [3, 5] only do so to boost training, thus still producing images as output. In other
+words, generating novel LiDAR views remains unexplored. Despite the 3D nature of this modality,
+this task remains challenging, as LiDARs only provide a partial view of the scene, corrupted by various attributes related to the LiDAR physical modeling. On the other hand, the mostly-closed related
+approaches are some LiDAR simulators [6, 7], which adopt a multi-step approach that reconstructs a
+3D mesh from the input point clouds and utilizes game engines to simulate a new point cloud. Nevertheless, the intricacy of this approach can limit its practicality and scalability. Moreover, as shown
+in Fig. 2, this strategy tends to produce unrealistic LiDAR patterns, as its explicit reconstruction and
+ray-casting overlook certain crucial features of LiDAR points.
+Gound Truth
+LiDARsim
+Car3
+PCGen
+Car1
+LiDAR-NeRF
+Car3
+Pole
+Car3
+Pole
+Car1
+Car2
+seats
+Car2
+Pole
+Car1
+Car2
+seats
+Figure 2: A comparison of novel view LiDAR point clouds generated from LiDARsim [6], PCGen [7], and our LiDAR-NeRF. LiDARsim suffers from inaccuracies in explicit 3D mesh reconstruction. PCGen overestimates object surfaces. Specifically, laser beams emitted by the LiDAR
+sensor can be influenced by surface material and normal direction, resulting in some beams penetrating car glass and reaching the seats (car1 and car2), while others are lost (car3). Although an
+additional style-transfer net can alleviate the problem of beam loss, it does not take into account special attributes like the transmission. As opposed to prior arts, our proposed method, LiDAR-NeRF,
+effectively encodes 3D information and multiple attributes, achieving high fidelity with ground truth.
+We encourage readers to zoom in for better observations.
+In this paper, we hereby present the pioneering differentiable rendering method for novel LiDAR
+view synthesis. Unlike RGB view synthesis, the output of a free viewpoint LiDAR sensor is a point
+cloud sampled from the surrounding 3D scene according to the given LiDAR sensor-specific pattern,
+as illustrated in Fig. 1. Consequently, the direct application of the NeRF formalism which relies on
+a photometric loss, is infeasible in this context. To overcome this challenge, we first convert point
+clouds with respect to a surface plane, serving as a 360-degree range pseudo image in which each
+pseudo pixel represents the distance between the LiDAR receiver and a world point hit by a laser
+beam. We then use a neural network to encode the 3D information and predict multiple attributes
+for each pseudo-pixel. Specifically, we regress the distance of each pseudo pixel, which represents
+their 3D coordinate, its intensity, which encodes the amount of reflected light that reaches the sensor
+at a pseudo pixel, and an attribute that we dub ray-drop, which encodes the probability of dropping
+a pseudo pixel. This last attribute reflects our observation that, in the real world, some laser beams
+of the LiDAR sensor are simply lost, due to the surface material and normal direction. As imagebased NeRFs, our LiDAR-NeRF leverages multi-view consistency, thus enabling the network to
+produce accurate geometry. Despite these efforts, the performance remains suboptimal, as NeRFs
+concentrate solely on learning individual pixels while neglecting local information, particularly in
+low-texture regions of large-scale scenes, resulting in subpar geometry. To address this issue, we
+propose a structural regularization to preserve local structural details, which in turn serve as a guide
+for NeRFs geometry to produce more accurate estimations.
+2
+Validating the effectiveness of our approach can be achieved by leveraging the existing autonomous
+driving datasets [8, 9, 10] that provide LiDAR data. However, as these datasets were acquired
+from a vehicle moving along the street, the objects they depict are observed with limited viewpoint
+variations, thus making them best suited for scene-level synthesis. This contrasts with object-level
+synthesis, as is more common in image novel-view synthesis [1, 11, 12]. We, therefore, establish
+an object-centric multi-view LiDAR dataset, which we dub the NeRF-MVL dataset, containing
+carefully calibrated sensor poses, acquired from multi-LiDAR sensor data from real autonomous
+vehicles. It contains more than 76k frames covering two types of collecting vehicles, three LiDAR
+settings, two collecting paths, and nine object categories.
+We evaluate our model’s scene-level and object-level synthesis ability on scenes from the challenging KITTI-360 dataset [8] and from our NeRF-MVL dataset both quantitatively and qualitatively.
+Our results demonstrate the superior performance of our approach compared to the baseline renderer
+in various metrics and visual quality, showcasing its effectiveness in LiDAR novel view synthesis.
+Overall, we make the following contributions: (1) We formulate the first differentiable framework,
+LiDAR-NeRF, for novel LiDAR view synthesis, which can render novel point clouds with point
+intensity and ray-drop probability without explicit 3D reconstruction. (2) We propose a structural
+regularization method to effectively preserve local structural details, thereby guiding the model towards more precise geometry estimations, leading to more faithful novel LiDAR view synthesis.
+(3) We establish the NeRF-MVL dataset from LiDAR sensors of real autonomous vehicles to evaluate the object-centric novel LiDAR view synthesis. (4) We demonstrate the effectiveness of our
+LiDAR-NeRF quantitatively and qualitatively in both scene-level and object-level novel LiDAR
+view synthesis.
+2
+Related Work
+Novel RGB view synthesis. Synthesizing novel RGB views of a scene from a set of captured
+images is a long-lasting problem. In particular, recent advances in NeRF have demonstrated their
+superior performance in synthesizing images, thanks to the pioneering work of NeRF [1]. Following this, many NeRF strategies have been proposed for acceleration [13, 14, 15] and generalization [16, 17, 18]. Noticeably, notions of depth have been used for novel RGB view synthesis [19, 20, 21]. In parallel, great progress has been made to handle complex environments, such
+as large-scale outdoor scenes [3, 4, 5], demonstrating the tremendous potential of NeRFs for realworld applications. Nevertheless, while these works improve quality and convergence speed, they
+still produce RGB images. In practical scenarios where multiple sensors, such as RGB cameras and
+LiDARs, are used, only synthesizing the image view is insufficient. In this work, drawing inspiration
+from NeRF [1], we introduce the first differentiable framework for novel LiDAR view synthesis.
+Model-based LiDAR simulators. There are model-based LiDAR simulators that can also be regarded as LiDAR renderers. In this context, early works [22, 23, 24, 25] employ graphics engines,
+such as CARLA [26] , to simulate LiDAR sensors. However, this yields a large sim-to-real domain
+gap, as their virtual worlds use handcrafted 3D assets and make simplified physics assumptions.
+More recent works, e.g., LiDARsim [6] and PCGen [7], employ a multi-step, data-driven approach
+to simulate point clouds from real data. They first leverage real data to reconstruct the 3D scene,
+and then utilize the reconstructed 3D scene to render novel LiDAR data via ray-casting. To close the
+sim-to-real gap, they further train a network to model the physics of LiDAR ray-dropping. However,
+the multiple steps involved in this approach affect its applicability and scalability. Additionally, this
+approach typically fails to generate authentic LiDAR patterns since its explicit reconstruction and
+ray-casting disregard some crucial attributes of LiDAR points. By contrast, as the first differentiable
+LiDAR renderer, our approach is simple and effective, yet produces realistic LiDAR data.
+3
+Novel LiDAR View Synthesis
+In this section, we first give a formal problem definition of novel LiDAR view synthesis, and introduce our LiDAR-NeRF in detail. Finally, we describe our object-level multi-view LiDAR dataset.
+3
+Problem definition. Novel LiDAR view synthesis aims to render an object or scene from an arbitrary new viewpoint given a set of existing observations acquired from other viewpoints. Formally,
+given a set D = {(Pi , Gi )}, where Pi is the LiDAR pose and Gi is the corresponding observed
+point cloud, we aim to define a rendering function f that can generate a new point cloud from an
+arbitrary new pose P ′ , i.e., G′ = fD (P ′ ).
+3.1
+LiDAR Model and Range Representation
+To produce accurate and realistic novel LiDAR views, we draw inspiration from the NeRF formalism. However, one cannot directly apply the traditional NeRFs, which leverage a per-pixel photometric error measure, to novel LiDAR view synthesis, where the observations are 3D points. To
+address this, we investigate the LiDAR model and convert point clouds into a range representation.
+Let us start with the LiDAR model as shown in the top of Fig. 3 (a), which works by emitting a laser
+beam and measuring the time it takes for the reflected light to return to the sensor. For a LiDAR with
+H laser beams in a vertical plane and W horizontal emissions, the returned attributes (e.g., distance
+d and intensity i) form an H × W range pseudo image. Specifically, for the 2D coordinates (h, w)
+in the range pseudo image, we have
+  
+
+α
+|fup | − hfv H −1
+,
+(1)
+=
+β
+− (2w − W ) πW −1
+where fv = |fdown | + |fup | is the vertical field-of-view of the LiDAR sensor. Conversely, each
+3Dpoint
+on a range pseudo image of size H × W
+
+ projected
+ (x,
+ y, z) in a LiDAR frame can be
+h
+1 − (arcsin(z, d) + |f
+|)f −1 H
+down  v
+. Note that if more than one point projects to the
+as w =
+1
+1 − arctan(y, x)π −1 W
+2
+same pseudo-pixel, only the point with the smallest distance is kept. The pixels with no projected
+points are filled with zeros. In addition to the distance, the range image can also encode other point
+features, such as intensity.
+3.2
+LiDAR-NeRF Framework
+Motivated by the impressive results of NeRF [1] for novel RGB view synthesis, we therefore introduce the first differentiable novel LiDAR view synthesis framework.
+Implicit fields to represent LiDAR sensor. As discussed in Sec. 3.1, LiDAR sensors use an active imaging system that differs from the passive imaging principle of cameras, requiring specific
+modeling of the sensor’s characteristics. Additionally, each pseudo pixel in the LiDAR range image corresponds to a real laser beam, which is more consistent with the rays in NeRF. Therefore,
+we reformulated NeRF to achieve novel LiDAR view synthesis. For a given LiDAR range image,
+the laser’s viewing directions θ of a pseudo pixel can be calculated using Eq. (1). The viewing directions in our proposed LiDAR-NeRF framework form a radial pattern, closely matching physical
+reality as depicted in Fig. 3 (a). The expected depth can be obtained byintegrating over samples as
+
+PN
+Pi−1
+D̂(r) = i=1 Ti 1 − exp(−σi δi ) ti . where Ti = exp − j=1 σj δj indicates the accumulated
+transmittance along ray r to the sampled point ti , and δi = ti+1 − ti is the distance between adjacent samples. The expected depth represents the distance from the LiDAR sensor, which is also
+represented by a pseudo pixel in the range image. Moreover, both the origin o and viewing direction
+θ of the ray are transformed to the global world coordinate system, allowing the sampled points t
+to be actual points in the real world and consistent across multiple LiDAR frames/range images, as
+shown in the top-right portion of Fig. 3 (b).
+With these geometry aspects in mind, we developed a framework that can: 1) synthesize a novel
+LiDAR frame with realistic geometry; 2) estimate LiDAR intensities over the scene; and 3) predict
+a binary ray-drop mask that specifies where rays will be dropped. Both ray-drop and intensity can be
+recorded as color features of LiDAR [27], and both are view-dependent. For the radiance field, we
+follow the traditional NeRFs, which use two successive MLPs. We utilize the first MLP to estimate
+the density σ and the expected distance d. The second MLP predicts a two-channel feature map
+as in [28]: Intensities i and ray-drop probabilities p, respectively. Then, in the same way as for
+4
+Realistic point clouds
+The same tree
+laser beam
+spinning
+……
+view 1
+view 1
+view n
+Multi-view rays
+laser beam
+Radiance field
+view n
+Multi-view consistency
+Distance
+Intensity
+LiDAR sensor
+Range image
+Ray-drop
+Sample and volume rendering
+Rendered novel LiDAR view
+(b) LiDAR-NeRF framework
+(a) LiDAR model and range image representation
+Range image
+Vertical gradient
+Horizontal gradient
+(c) Structural characteristics
+Figure 3: (a) (Top) The physical model of a LiDAR can be described as follow: each laser beam
+originates from the sensor origin and shoot outwards to a point in the real world or vanishes. One
+common pattern of laser beams is spinning in a 360-degree fashion. (Bottom) We convert the point
+clouds into a range image, where each pixel corresponds to a laser beam. Note that we highlight one
+object in the different views to facilitate the visualization. (b) Taking multi-view LiDAR range images with associated sensor poses as input, our model produces 3D representations of the distance,
+the intensity, and the ray-drop probability at each pseudo-pixel. We exploit multi-view consistency
+of the 3D scene to help our network produce accurate geometry. (c) The physical nature of LiDAR
+models results in point clouds exhibiting recognizable patterns, such as the ground primarily appearing as continuous straight lines. This pattern is also evident in the transformed range images,
+which display significant structural features, such as their horizontal gradient being almost zero in
+flat areas. As a result, these structural characteristics are essential for the network to learn.
+color, we can
+compute the per-view intensity
+and ray-drop
+probability by integrating
+along a ray r
+
+
+PN
+PN
+ˆ
+as I(r)
+= i=1 Ti 1 − exp(−σi δi ) ii , P̂ (r) = i=1 Ti 1 − exp(−σi δi ) pi . Altogether, our
+LiDAR-NeRF can be formalized as a function (σ, i, p) = f (x, θ), and is summarized in Fig. 3 (b).
+Structural regularization. Despite the success in learning individual pixels, NeRFs tend to overlook local information, particularly in low-texture regions, leading to poor geometry, as evidenced
+in Fig. 7. Therefore, it is crucial to identify a suitable regularization technique to guide NeRF
+geometry. Notably, LiDAR point clouds exhibit clear patterns, and the transformed range images
+display significant structural features, which are essential for the network to learn, as illustrated
+in Fig. 3 (c). Initially, we attempted to apply the prevalent geometry regularization techniques,
+such as the smoothness-loss used in RegNeRF [18] and the TV-loss used in Plenoxels [14] , which
+aims to smooth neighboring points. However, we found that these techniques were not effective
+in large-scale scenes, where the differences between neighboring points can be significant. Subsequently, we explored learning structural information from the ground truth through the gradient loss. However, we observed that this approach was still insufficient, as the gradient loss was
+dominated by the rich-texture areas where the NeRF model excels. Consequently, we propose a
+novel structural regularization strategy based on the gradient loss, where we restrict regularization
+to low-texture areas, such as the ground. Consequently, the structural regularization is defined as:
+Lreg = GˆM (R) − GM (R) 1 , where R is the set of training rays of local patches, and GM (·)
+denotes the gradient operation with low-texture areas mask.
+Loss function. Our loss function includes four objectives
+Ltotal = Ldistance + λ1 Lintensity (r) + λ2 Lraydrop (r) + λ3 Lreg ,
+(2)
+P
+P
+ˆ − I(r) 2 , Lraydrop (r) =
+with Ldistance (r) = r∈R D̂(r) − D(r) 1 , Lintensity (r) =
+I(r)
+2
+P
+2
+P̂ (r) − P (r) 2 , where R is the set of training rays, and λ are weight coefficients for each term.
+5
+LiDAR-T
+LiDAR-F
+LiDAR
+Pedestrian
+Small
+Safety barrier
+Car
+Warning sign
+Large
+Object Placement
+placement
+Traﬃc cone
+(a) Drive planning and sensor placement
+Tire
+Pier
+Bollard
+Plant
+(b) Dataset visualization
+Figure 4: (a) We design two square paths of collection, small and large with 7 and 15 meters in length
+respectively. (b) Our NeRF-MVL dataset encompasses 9 objects from common traffic categories.
+We align multiple frames here for better visualization.
+3.3
+NeRF-MVL Dataset
+As will be shown in our experiments, our approach can be applied to existing autonomous driving
+datasets [8, 9, 10] that have LiDAR sensors data. However, these datasets focus on scene-level
+LiDAR observations and thus depict views acquired from the vehicle driving along the scene, with
+fairly low diversity. In other words, they lack the challenging diversity of object-centric data similar
+to that used for novel RGB view synthesis. To facilitate future research in novel LiDAR view
+synthesis and verify the effectiveness of our LiDAR-NeRF, we therefore establish an object-centric
+multi-view LiDAR dataset, NeRF-MVL, with carefully calibrated sensor poses and gathering multiLiDAR sensor data from real autonomous vehicles.
+Data collection. We collect the dataset in an enclosed area, employing self-driving vehicles with
+multiple LiDAR sensors. The vehicles drive around the object in a square path twice, one large
+square and one small square, as shown in Fig. 4 (a). To provide more diverse perspectives, we
+use various types of vehicles with different sensor placements and specifications. See Tab. 3 of the
+appendix for sensor details.
+Data preparation. As shown in Fig. 4 (b), our NeRF-MVL dataset consists of nine objects from different common traffic categories. After collecting multi-path, multi-sensor data, for each object, we
+crop out the region of interest, i.e., the object1 . We carefully calibrate the LiDAR extrinsic parameters for every sensor, i.e., the relative location of the LiDAR to the ego body. The transformation
+matrix from the body coordinate system to the global world coordinate system is provided from the
+vehicle location based on GPS and IMU. Hence, in the dataset, we finally provide the calibration of
+the LiDAR to the global world, i.e., the lidar2world matrix, to align all the frames. Altogether, our
+NeRF-MVL dataset contains more than 76k frames covering two types of collecting vehicles, three
+LiDAR settings, two collecting paths, and nine objects.
+4
+Experiments
+We evaluate the scene-level and object-level synthesis ability of our LiDAR-NeRF both quantitatively and qualitatively. Additional results and details are provided in the supplementary material.
+Baseline renderers. As generating novel LiDAR views remains unexplored, we moderately adapt
+existing model-based LiDAR simulators, i.e., LiDARsim [6] and PCGen [7], as the baseline renderers. For exhaustive evaluation and comparisons, we also validate different settings of the baseline
+methods in Appendix B.4 and report the best value in the following sections.
+Dataset. We conduct scene-scale experiments on the challenging KITTI-360 [8] dataset, which
+was collected in suburban areas. We evaluate LiDAR-NeRF on LiDAR frames from 4 static suburb
+sequences as [29]. Each sequence contains 64 frames, with 4 equidistant frames for evaluation. We
+conduct the object-level experiments on our NeRF-MVL dataset. For fast validation, we extract a
+pocket version of the dataset with only 7.3k frames covering the nine categories.
+1
+The raw data will also be released to the community.
+6
+Metrics. For the novel LiDAR range images, we compute the usual metrics in depth estimation [30]:
+Root mean squared error (RMSE), and threshold accuracies (δ1, δ2, δ3). Moreover, we measure the
+structural quality using the SSIM [31]. To further evaluate the novel LiDAR view quality, we convert
+the rendered LiDAR range image to a point cloud between the original and the novel point clouds
+P
+P
+G1 , G2 . It is computed as C-D (G1 , G2 ) = |G11 | x∈G1 miny∈G2 ∥x − y∥22 + |G12 | y∈G2 minx∈G1 ∥y −
+x∥22 . We also report the F-Score between the two point clouds with a threshold of 5cm. For the novel
+intensity image, it is evaluated using mean absolute error (MAE).
+Table 1: Novel LiDAR view synthesis on scene-level KITTI-360 dataset and object-level NeRFMVL dataset. LiDAR-NeRF outperforms the baseline in all metrics. Note that on the object-centric
+NeRF-MVL with rich texture information, there is no need to apply structural regularization (SR).
+C-D↓
+F-score↑
+RMSE↓
+δ1↑
+δ2↑
+δ3↑
+SSIM↑
+MAE↓
+LiDARsim [6]
+PCGen [7]
+0.951
+0.187
+66.89
+87.16
+5.745
+4.328
+66.34
+76.90
+71.11
+79.72
+74.42
+81.38
+0.696
+0.550
+0.126
+0.245
+Ours-NeRF
+Ours-iNGP (w/ SR)
+0.143
+0.081
+85.93
+92.49
+4.050
+3.615
+78.13
+82.18
+79.79
+83.40
+80.42
+83.97
+0.545
+0.626
+0.235
+0.096
+LiDARsim [6]
+PCGen [7]
+0.022
+0.078
+96.01
+90.40
+5.984
+7.558
+83.43
+73.13
+83.43
+73.13
+83.43
+73.13
+0.612
+0.217
+4.143
+6.268
+Ours-NeRF
+Ours-iNGP
+0.028
+0.005
+92.81
+98.50
+3.864
+1.305
+93.65
+98.86
+93.65
+98.86
+93.65
+98.86
+0.462
+0.879
+2.642
+1.057
+Method
+KITTI-360 dataset
+NeRF-MVL dataset
+Ground Truth
+PCGen
+LiDARsim
+LiDAR-NeRF
+0
+Figure 5: Qualitative comparison on KITTI-360. Our LiDAR-NeRF produces more realistic
+LiDAR patterns with highly detailed structure and geometry (zoom-in for the best of views).
+4.1
+Scene-level Synthesis
+We first evaluate the effectiveness of our LiDAR-NeRF on scene-level novel LiDAR view synthesis.
+The results are provided at the top of Tab. 1. Our LiDAR-NeRF significantly outperforms the baseline renderers over all metrics. To be specific, LiDAR-NeRF is superior to the baseline renderers
+with a comfortable margin in terms of C-D (0.081 vs 0.187, 0.951) and δ1 (82.18 vs 76.90, 66.34).
+In Fig. 5, we provide qualitative results. Both methods are able to render general scene structures.
+While our LiDAR-NeRF produces more realistic LiDAR patterns and highly detailed structure and
+geometry. The baseline LiDAR simulator mimics the physical LiDAR model through explicit 3D
+reconstruction and ray-tracing via traditional renderers. As shown in Fig. 2, the explicit 3D mesh
+reconstruction of LiDAR point clouds suffers from inaccuracy and tends to overestimate the object’s
+surface. Consequently, these methods often produce unrealistic LiDAR patterns, as their explicit
+reconstruction and ray-casting neglect certain crucial features of LiDAR points. Specifically, the
+laser beams emitted by the LiDAR sensor can be affected by the surface material and normal direction, leading to the penetration of some beams through car glass and the loss of other beams. These
+effects are not fully considered in the explicit reconstruction process.
+4.2
+Object-level Synthesis
+We conduct object-level synthesis experiments on the nine common traffic objects in our NeRFMVL dataset. As shown in Tab. 1, our LiDAR-NeRF still significantly outperforms the baseline
+renderers by a large margin over all the metrics on all nine categories. Furthermore, the qualitative
+visualization in Fig. 6 evidence that our approach produces significantly high-quality point clouds.
+7
+Novel point
+GT point
+seats
+Ground Truth
+LiDAR-NeRF
+Results from diﬀerent viewpoints
+Figure 6: Qualitative results on NeRF-MVL dataset. LiDAR-NeRF can effectively encode 3D
+information and multiple attributes, enabling it to accurately model the behavior of beams as they
+penetrate car glass and reach seats. Moreover, the high quality of the results obtained from different
+viewpoints serves as compelling evidence of our method’s effectiveness.
+4.3
+Ablations
+Table 2: Ablations of our LiDAR-NeRF. We ablate different architectures and regularization.
+Component
+C-D↓
+F-score↑
+RMSE↓
+δ1↑
+δ2↑
+δ3↑
+SSIM↑
+MAE↓
+0.126
+0.088
+87.64
+92.00
+3.948
+3.577
+78.26
+80.40
+79.57
+81.47
+80.09
+81.87
+0.555
+0.605
+0.226
+0.101
+92.00
+92.91
+92.91
+92.98
+3.577
+3.576
+3.601
+3.511
+80.40
+80.48
+80.67
+82.25
+81.47
+81.50
+81.65
+83.28
+81.87
+81.92
+82.06
+83.73
+0.605
+0.606
+0.607
+0.635
+0.101
+0.104
+0.103
+0.096
+Architecture
+w/ NeRF [1]
+w/ iNGP [13]
+Regularization (w/ iNGP)
+w/o Reg
+Smooth loss
+Gradient loss
+Struc-Reg
+0.088
+0.085
+0.080
+0.077
+w/ NeRF
+w/ iNGP (w/o Struc-Reg)
+w/ Struc-Reg
+Figure 7: Qualitative evaluation of various configurations. The iNGP’s hybrid 3D grid architecture achieves more detailed structures. Our structural regularization significantly improves the
+geometry estimation and produces more realistic LiDAR patterns.
+Our investigation into various configurations within the LiDAR-NeRF framework includes an exploration of different architectures and regularization. As shown in Tab. 2 and Fig. 7, we examine
+the widely used NeRF [1] and the best performing Instance-NGP (iNGP) [13]. iNGP introduces a
+hybrid 3D grid structure with a multi-resolution hash encoding and lightweight MLPs that is more
+expressive than the vanilla NeRF and achieves better performance. Thus we chose to use iNGP
+as our base architecture. Additionally, we compare the structural regularization (Struc-Reg) of our
+LiDAR-NeRF with the aforementioned regularization in Sec. 3.2. The results in Tab. 2 and Fig. 7
+demonstrate the effectiveness of our structural regularization both quantitatively and qualitatively.
+5
+Conclusion
+We have introduced the new task of novel LiDAR view synthesis and proposed the first differentiable
+LiDAR renderer. Our proposed method, LiDAR-NeRF, jointly learns the geometry and attributes
+of 3D points with structural regularization, resulting in more accurate and realistic LiDAR patterns.
+We further established the NeRF-MVL dataset, which contains 9 objects over 360-degree LiDAR
+viewpoints acquired with multiple sensors. Our experiments on both scene-level and our object-level
+data have evidenced the superiority of our approach over model-based simulators. Importantly, our
+approach is simple and does not rely on explicit 3D reconstruction and rendering engines. We hope
+that our work can shed light on novel LiDAR view synthesis and inspire future research in this field.
+8
+References
+[1] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi, and R. Ng. Nerf: Representing
+scenes as neural radiance fields for view synthesis. Communications of the ACM, 65(1):99–106, 2021.
+[2] J. Ost, F. Mannan, N. Thuerey, J. Knodt, and F. Heide. Neural scene graphs for dynamic scenes. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 2856–
+2865, 2021.
+[3] K. Rematas, A. Liu, P. P. Srinivasan, J. T. Barron, A. Tagliasacchi, T. Funkhouser, and V. Ferrari. Urban
+radiance fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 12932–12942, 2022.
+[4] M. Tancik, V. Casser, X. Yan, S. Pradhan, B. Mildenhall, P. P. Srinivasan, J. T. Barron, and H. Kretzschmar. Block-nerf: Scalable large scene neural view synthesis. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, pages 8248–8258, 2022.
+[5] Z. Xie, J. Zhang, W. Li, F. Zhang, and L. Zhang. S-nerf: Neural radiance fields for street views. arXiv
+preprint arXiv:2303.00749, 2023.
+[6] S. Manivasagam, S. Wang, K. Wong, W. Zeng, M. Sazanovich, S. Tan, B. Yang, W.-C. Ma, and R. Urtasun. Lidarsim: Realistic lidar simulation by leveraging the real world. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, pages 11167–11176, 2020.
+[7] C. Li, Y. Ren, and B. Liu.
+arXiv:2210.08738, 2022.
+Pcgen: Point cloud generator for lidar simulation.
+arXiv preprint
+[8] Y. Liao, J. Xie, and A. Geiger. Kitti-360: A novel dataset and benchmarks for urban scene understanding
+in 2d and 3d. IEEE Transactions on Pattern Analysis and Machine Intelligence, 2022.
+[9] H. Caesar, V. Bankiti, A. H. Lang, S. Vora, V. E. Liong, Q. Xu, A. Krishnan, Y. Pan, G. Baldan, and
+O. Beijbom. nuscenes: A multimodal dataset for autonomous driving. In Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition, pages 11621–11631, 2020.
+[10] P. Sun, H. Kretzschmar, X. Dotiwalla, A. Chouard, V. Patnaik, P. Tsui, J. Guo, Y. Zhou, Y. Chai, B. Caine,
+et al. Scalability in perception for autonomous driving: Waymo open dataset. In Proceedings of the
+IEEE/CVF conference on computer vision and pattern recognition, pages 2446–2454, 2020.
+[11] L. Liu, J. Gu, K. Zaw Lin, T.-S. Chua, and C. Theobalt. Neural sparse voxel fields. Advances in Neural
+Information Processing Systems, 33:15651–15663, 2020.
+[12] A. Knapitsch, J. Park, Q.-Y. Zhou, and V. Koltun. Tanks and temples: Benchmarking large-scale scene
+reconstruction. ACM Transactions on Graphics (ToG), 36(4):1–13, 2017.
+[13] T. Müller, A. Evans, C. Schied, and A. Keller. Instant neural graphics primitives with a multiresolution
+hash encoding. ACM Transactions on Graphics (ToG), 41(4):1–15, 2022.
+[14] A. Yu, S. Fridovich-Keil, M. Tancik, Q. Chen, B. Recht, and A. Kanazawa. Plenoxels: Radiance fields
+without neural networks. arXiv preprint arXiv:2112.05131, 2021.
+[15] A. Chen, Z. Xu, A. Geiger, J. Yu, and H. Su. Tensorf: Tensorial radiance fields. In Computer Vision–
+ECCV 2022: 17th European Conference, Tel Aviv, Israel, October 23–27, 2022, Proceedings, Part XXXII,
+pages 333–350. Springer, 2022.
+[16] A. Yu, V. Ye, M. Tancik, and A. Kanazawa. pixelnerf: Neural radiance fields from one or few images.
+In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 4578–
+4587, 2021.
+[17] M. Kim, S. Seo, and B. Han. Infonerf: Ray entropy minimization for few-shot neural volume rendering.
+In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 12912–
+12921, 2022.
+[18] M. Niemeyer, J. T. Barron, B. Mildenhall, M. S. Sajjadi, A. Geiger, and N. Radwan. Regnerf: Regularizing neural radiance fields for view synthesis from sparse inputs. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, pages 5480–5490, 2022.
+[19] K. Deng, A. Liu, J.-Y. Zhu, and D. Ramanan. Depth-supervised nerf: Fewer views and faster training for
+free. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
+12882–12891, 2022.
+9
+[20] T. Neff, P. Stadlbauer, M. Parger, A. Kurz, J. H. Mueller, C. R. A. Chaitanya, A. Kaplanyan, and M. Steinberger. Donerf: Towards real-time rendering of compact neural radiance fields using depth oracle networks. In Computer Graphics Forum, pages 45–59. Wiley Online Library, 2021.
+[21] B. Roessle, J. T. Barron, B. Mildenhall, P. P. Srinivasan, and M. Nießner. Dense depth priors for neural
+radiance fields from sparse input views. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pages 12892–12901, 2022.
+[22] J.-E. Deschaud. Kitti-carla: a kitti-like dataset generated by carla simulator.
+arXiv:2109.00892, 2021.
+arXiv preprint
+[23] X. Yue, B. Wu, S. A. Seshia, K. Keutzer, and A. L. Sangiovanni-Vincentelli. A lidar point cloud generator:
+from a virtual world to autonomous driving. In Proceedings of the 2018 ACM on International Conference
+on Multimedia Retrieval, pages 458–464, 2018.
+[24] B. Wu, A. Wan, X. Yue, and K. Keutzer. Squeezeseg: Convolutional neural nets with recurrent crf for
+real-time road-object segmentation from 3d lidar point cloud. In 2018 IEEE international conference on
+robotics and automation (ICRA), pages 1887–1893. IEEE, 2018.
+[25] A. Xiao, J. Huang, D. Guan, F. Zhan, and S. Lu. Transfer learning from synthetic to real lidar point cloud
+for semantic segmentation. In Proceedings of the AAAI Conference on Artificial Intelligence, volume 36,
+pages 2795–2803, 2022.
+[26] A. Dosovitskiy, G. Ros, F. Codevilla, A. Lopez, and V. Koltun. Carla: An open urban driving simulator.
+In Conference on robot learning, pages 1–16. PMLR, 2017.
+[27] J. Park, Q.-Y. Zhou, and V. Koltun. Colored point cloud registration revisited. In Proceedings of the IEEE
+international conference on computer vision, pages 143–152, 2017.
+[28] B. Guillard, S. Vemprala, J. K. Gupta, O. Miksik, V. Vineet, P. Fua, and A. Kapoor. Learning to simulate
+realistic lidars. In 2022 IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS),
+pages 8173–8180. IEEE, 2022.
+[29] X. Fu, S. Zhang, T. Chen, Y. Lu, L. Zhu, X. Zhou, A. Geiger, and Y. Liao. Panoptic nerf: 3d-to-2d label
+transfer for panoptic urban scene segmentation. arXiv preprint arXiv:2203.15224, 2022.
+[30] C. Godard, O. Mac Aodha, M. Firman, and G. J. Brostow. Digging into self-supervised monocular depth
+estimation. In Proceedings of the IEEE/CVF international conference on computer vision, pages 3828–
+3838, 2019.
+[31] Z. Wang, A. C. Bovik, H. R. Sheikh, and E. P. Simoncelli. Image quality assessment: from error visibility
+to structural similarity. IEEE transactions on image processing, 13(4):600–612, 2004.
+[32] A. Pumarola, E. Corona, G. Pons-Moll, and F. Moreno-Noguer. D-nerf: Neural radiance fields for dynamic scenes. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+pages 10318–10327, 2021.
+[33] H. Jang and D. Kim. D-tensorf: Tensorial radiance fields for dynamic scenes.
+arXiv:2212.02375, 2022.
+arXiv preprint
+[34] A. Trevithick and B. Yang. Grf: Learning a general radiance field for 3d representation and rendering. In
+Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 15182–15192, 2021.
+[35] J. Tang. Torch-ngp: a pytorch implementation of instant-ngp, 2022. https://github.com/ashawkey/torchngp.
+[36] D. P. Kingma and J. Ba. Adam: A method for stochastic optimization. arXiv preprint arXiv:1412.6980,
+2014.
+[37] L. Yen-Chen. Nerf-pytorch. https://github.com/yenchenlin/nerf-pytorch/, 2020.
+[38] M. Kazhdan, M. Bolitho, and H. Hoppe. Poisson surface reconstruction. In Proceedings of the fourth
+Eurographics symposium on Geometry processing, volume 7, page 0, 2006.
+[39] Q.-Y. Zhou, J. Park, and V. Koltun. Open3d: A modern library for 3d data processing. arXiv preprint
+arXiv:1801.09847, 2018.
+[40] F. Langer, A. Milioto, A. Haag, J. Behley, and C. Stachniss. Domain transfer for semantic segmentation of
+lidar data using deep neural networks. In 2020 IEEE/RSJ International Conference on Intelligent Robots
+and Systems (IROS), pages 8263–8270. IEEE, 2020.
+10
+[41] K. Yu, T. Tao, H. Xie, Z. Lin, Z. Wu, Z. Xia, T. Liang, H. Sun, J. Deng, D. Hao, et al. Benchmarking the
+robustness of lidar-camera fusion for 3d object detection. arXiv preprint arXiv:2205.14951, 2022.
+[42] J. T. Barron, B. Mildenhall, M. Tancik, P. Hedman, R. Martin-Brualla, and P. P. Srinivasan. Mip-nerf:
+A multiscale representation for anti-aliasing neural radiance fields. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision, pages 5855–5864, 2021.
+11
+A
+Limitations and Future work
+As this paper is the first attempt at novel LiDAR view synthesis, there remains room for improvement. Our LiDAR-NeRF draws inspiration from the original NeRF formalism. As such, it is better
+suited to static scenes, and requires per-scene optimization. Fortunately, much progress is being
+made in handling dynamic scenes [32, 2, 33] and generalization [16, 34] in image-based NeRF,
+and we expect these advances to facilitate the development of counterparts for novel LiDAR view
+synthesis. Note that, in this work, we have considered the problem of synthesizing LiDAR data
+only, but jointly rendering LiDAR and images is a natural step forward. We therefore plan to extend our NeRF-MVL dataset to a multimodal one. Moreover, we are integrating various LiDAR
+renderers, including LiDAR simulators and our proposed LiDAR-NeRF framework, with the goal
+of developing a unified Codebase for novel LiDAR view synthesis that can benefit the community.
+Altogether, we hope that our work will inspire other researchers to contribute to the development of
+novel LiDAR view synthesis.
+B
+Additional Details
+B.1
+Ablation details
+All ablation experiments were conducted on the seq-1908-1971 of the KITTI-360 dataset, which is
+a large, clear scene with numerous objects, making it an ideal sequence for comparison.
+B.2
+LiDAR-NeRF details
+NeRF revisited. NeRF represents a scene as a continuous volumetric radiance field. For a given
+3D point x ∈ R3 and a viewing direction θ, NeRF learns an implicit function f that estimates the
+differential density σ and view-dependent RGB color c as (σ, c) = f (x, θ). Specifically, NeRF uses
+volumetric rendering to render image pixels. Given a pose P, it casts rays r originating from P’s
+center of projection o in direction d, i.e., r(t) = o+td. The implicit radiance field is then integrated
+along this ray, and the color is approximated by integrating over samples
+along the
+ lying
+ ray. This is
+
+PN
+Pi−1
+expressed as Ĉ(r) = i=1 Ti 1 − exp(−σi δi ) ci , where Ti = exp − j=1 σj δj indicates the
+accumulated transmittance along ray r to the sampled point ti , ci and σi are the corresponding color
+and density at ti , and δi = ti+1 − ti is the distance between adjacent samples. Moreover, per-view
+depth D̂(r) can also be approximated by calculating the expectation of the samples along the ray,
+
+PN
+i.e., D̂(r) = i=1 Ti 1 − exp(−σi δi ) ti .
+LiDAR-NeRF (w iNGP). Our LiDAR-NeRF is implemented based on torch-ngp [35], which introduces a hybrid 3D grid structure with a multi-resolution hash encoding and lightweight MLPs. We
+optimize our LiDAR-NeRF model per scene using a single NVIDIA GeForce RTX 3090 GPU. For
+each scene, we center the LiDAR point clouds by subtracting the origin of the global world coordinate system from the scene’s central frame. Then, the scene frames are scaled by a factor such that
+the region of interest falls within a unit cube, which is required by most positional encodings used
+in NeRFs. We use Adam [36] with a learning rate of 1e-2 to train our models. The coarse and fine
+networks are sampled 768 and 64 samples per ray, respectively. The finest resolution of the hash
+encoding is set to 32768. For structural regularization, we employ patch-wise training with a patch
+size of 2x8 and mask gradients smaller than the threshold of 0.1. The optimization process consists
+of a total of 30k steps, with λ1 = 1, λ2 = 1, and λ3 = 1e2. For our NeRF-MVL dataset, we first
+get the 3D box of each object, and then project to the range view. Only a few rays within the box
+are trained, so the network converges quickly.
+LiDAR-NeRF (w NeRF). The LiDAR-NeRF (w NeRF) is implemented based on nerf-pytorch [37].
+The coarse and fine networks are sampled 64 and 128 times, respectively, during training. The
+highest frequency of the coordinates is set to 215 . We use Adam [36] with a learning rate of 5e-4 to
+train our models. We set the loss weights to λ1 = 1, λ2 = 1, and optimize the total loss Ltotal for
+400k iterations with a batch size of 2048.
+12
+B.3
+NeRF-MVL details
+Table 3: LiDAR sensor configurations.
+Sensor
+Details
+LiDAR
+LiDAR-F
+Spinning, 64 beams, 10Hz capture frequency, 360◦ horizontal FOV, 0.6◦ horizontal resolution, -52.1◦ to +52.1◦ vertical FOV, ≤ 60m range, ±3cm accuracy.
+Spinning, 64 beams, 20Hz capture frequency, 360◦ horizontal FOV, 0.4◦ horizontal resolution, -25◦ to +15◦ vertical FOV, ≤ 200m range, ±2cm accuracy.
+Sensor location: F: front. T: top.
+LiDAR-T
+We provide detailed sensor specifications in Tab. 3.
+B.4
+Baseline details
+Timestamp
+Realistic point clouds
+Raycasting
+Reconstruction
+Multi-frames
+Alinged dense scene / mesh
+Raydrop
+Projected point clouds
+Final novel point clouds
+Figure 8: Baseline multi-step LiDAR simulator pipeline.
+As generating novel LiDAR views remains unexplored, we moderately adapt existing model-based
+LiDAR simulators as our baseline. Given a sequence of LiDAR frames, the objective is to generate
+novel LiDAR scenes with realistic geometry. In essence, the baseline, summarized in Fig. 8, follows
+the physics-based, multi-step approach of existing simulation pipelines [6, 7]. In short, they first
+gather a set of LiDAR frames, which are transformed into the global world coordinate system. The
+resulting aligned dense 3D scene or mesh is projected to the novel view via ray-casting. Finally,
+the problem of LiDAR ray-dropping is simulated to improve realism. Because the official codes
+of LiDARsim [6] and PCGen [7] are not publicly available, we re-implemented them following the
+papers as closely as possible. Below, we discuss the implementation in more detail.
+B.4.1
+LiDARsim
+Point cloud meshing and mesh-ray intersection. Following LiDARsim [6], our pipeline also consists of two steps: point cloud meshing and mesh-ray intersection. The point cloud meshing step
+is implemented based on the Poisson surface reconstruction algorithm [38], which is a modification
+from the original author’s Surfel-based meshing. The mesh-ray intersection step is implemented
+based on Intel Embree using the Open3D library [39]. The performance of Poisson surface reconstruction is sensitive to hyperparameters, namely the maximum depth of the tree and the weight
+threshold for selecting mesh vertices. For each dataset, we perform grid search of these two parameters on the training set and select the best-performing one on the test set.
+Ray-drop network. To train the ray-drop network, following LiDARsim [6], we concatenate range,
+intensity, incidence angle (in cosine), and the normal of surface hit as inputs. We then train a U-Net
+with 4 down-sampling (with 64, 128, 256, and 512 channels respectively) and 4 up-sampling layers
+(with 1024, 512, 256, and 128 channels respectively) to predict the ray-drop mask. We train on the
+training frames for 10 epochs. The final range image prediction is the ray-casted results multiplied
+by the ray-drop mask. We use this final range image for evaluation.
+B.4.2
+PCGen
+Ray-casting. Ray-casting defines the intersections between the laser beams and the dense point
+cloud. The standard approach is closest-point (CP) ray-casting [40], which projects the dense point
+cloud to a range image using Sec. 3.1, and, for each ray, selects the point with the smallest measured
+distance, as is commonly done in rendering pipelines with the so-called z-buffer. In real-world
+13
+scenarios, however, the calibration, sensor synchronization, and other properties [41] are affected
+by different noise sources, and the points in the dense point cloud do not strictly lie on the scene
+surface. Thus, considering only the closest point tends to render noisy ray-casted point clouds
+and more points in the z-buffer need to be taken into account. PCGen [7] propose the first peak
+averaging (FPA) raycasting, averaging the points within a certain threshold near the closest point,
+and weighting them by their inverse distance.
+Ray-drop network. Ray-casting yields a nearly perfect point cloud in the novel view. However, the
+laser returns of a real LiDAR sensor are affected by many factors, such as the distance to the scene,
+the incidence angle, and the material texture and reflectivity. To improve realism, we follow from
+PCGen [7] to employ a small surrogate MLP to learn the ray-drop, which we dub ray-drop MLP.
+Specifically, we model a ray’s return probability as p = M LP (θ ′ , d, i), where θ ′ , d, and i are the
+viewing direction in the local coordinate system, the distance, and the intensity of the ray. For the
+implementation of ray-drop MLP, it has 4 layers with a width of 128. It is trained with Adam [36]
+with a learning rate of 5e-3, and supervised with MSE loss for 10k iterations with a batch size of
+2048.
+C
+Additional Experimental Results
+C.1
+More results.
+Table 4: More results of novel LiDAR view synthesis on KITTI-360. LiDAR-NeRF outperforms
+the baseline over all sequences in all metrics.
+C-D↓
+F-score↑
+RMSE↓
+δ1↑
+δ2↑
+δ3↑
+SSIM↑
+MAE↓
+Seq 1538–1601
+Seq 1728–1791
+Seq 1908–1971
+Seq 3353–3416
+0.794
+0.819
+0.981
+1.211
+72.13
+65.38
+66.77
+63.29
+5.455
+6.083
+5.404
+6.038
+67.49
+67.20
+67.33
+63.35
+73.68
+70.86
+72.70
+67.20
+78.17
+74.11
+74.76
+70.64
+0.719
+0.694
+0.711
+0.660
+0.125
+0.122
+0.122
+0.133
+Average
+0.951
+66.89
+5.745
+66.34
+71.11
+74.42
+0.696
+0.126
+Seq 1538–1601
+Seq 1728–1791
+Seq 1908–1971
+Seq 3353–3416
+0.159
+0.194
+0.220
+0.173
+88.64
+83.87
+87.75
+88.37
+4.091
+4.560
+4.029
+4.633
+75.64
+76.19
+77.35
+78.40
+79.62
+79.37
+79.95
+79.92
+82.08
+81.35
+81.05
+81.05
+0.558
+0.545
+0.559
+0.536
+0.254
+0.243
+0.238
+0.244
+Average
+0.187
+87.16
+4.328
+76.90
+79.72
+81.38
+0.550
+0.245
+Sequence
+LiDARsim [6]
+PCGen [7]
+LiDAR-NeRF (w/ NeRF)
+Seq 1538–1601
+Seq 1728–1791
+Seq 1908–1971
+Seq 3353–3416
+0.148
+0.148
+0.126
+0.150
+84.88
+83.88
+87.64
+87.31
+4.007
+4.207
+3.948
+4.039
+76.66
+78.44
+78.26
+79.15
+79.09
+80.35
+79.57
+80.14
+79.85
+81.09
+80.09
+80.63
+0.527
+0.549
+0.555
+0.550
+0.242
+0.239
+0.226
+0.233
+Average
+0.143
+85.93
+4.050
+78.13
+79.79
+80.42
+0.545
+0.235
+LiDAR-NeRF (w/ iNGP and StrucReg)
+Seq 1538–1601
+Seq 1728–1791
+Seq 1908–1971
+Seq 3353–3416
+0.073
+0.088
+0.077
+0.086
+92.55
+90.95
+92.98
+93.46
+3.530
+3.766
+3.511
+3.654
+80.76
+82.91
+82.25
+82.78
+82.71
+84.26
+83.28
+83.36
+83.52
+84.91
+83.73
+83.71
+0.597
+0.646
+0.635
+0.625
+0.102
+0.091
+0.096
+0.094
+Average
+0.081
+92.49
+3.615
+82.18
+83.40
+83.97
+0.626
+0.096
+14
+KITTI-360 dataset. We report detailed results on the four sequences of the KITTI-360 dataset in
+Tab. 4. Our LiDAR-NeRF consistently outperforms the baseline over all sequences in all metrics.
+Table 5: Novel LiDAR view synthesis on NeRF-MVL. Our LiDAR-NeRF outperforms the baseline
+in all metrics.
+C-D↓
+F-score↑
+RMSE↓
+δ1↑
+δ2↑
+δ3↑
+SSIM↑
+MAE↓
+Bollard
+Car
+Pedestrian
+Pier
+Plant
+Safety barrier
+Tire
+Traffic cone
+Warning sign
+0.011
+0.067
+0.011
+0.016
+0.018
+0.015
+0.021
+0.013
+0.024
+98.92
+94.06
+97.91
+95.33
+93.81
+97.95
+95.45
+99.59
+91.05
+5.751
+6.331
+4.788
+6.606
+5.315
+6.697
+6.936
+5.861
+5.569
+84.64
+82.35
+90.20
+78.67
+86.45
+78.29
+75.53
+88.14
+86.57
+84.64
+82.37
+90.20
+78.67
+86.45
+78.29
+75.53
+88.14
+86.57
+84.64
+82.37
+90.20
+78.67
+86.45
+78.29
+75.53
+88.14
+86.57
+0.518
+0.645
+0.748
+0.510
+0.667
+0.565
+0.566
+0.628
+0.663
+2.172
+1.426
+4.353
+2.541
+0.852
+5.801
+0.457
+19.14
+0.546
+Average
+0.022
+96.01
+5.984
+83.43
+83.43
+83.43
+0.612
+4.143
+Bollard
+Car
+Pedestrian
+Pier
+Plant
+Safety barrier
+Tire
+Traffic cone
+Warning sign
+0.021
+0.446
+0.063
+0.017
+0.021
+0.070
+0.026
+0.014
+0.020
+96.71
+72.23
+92.43
+96.92
+91.33
+74.88
+94.84
+98.52
+95.77
+9.928
+5.829
+4.364
+9.534
+6.729
+5.382
+8.748
+8.698
+8.810
+57.43
+86.37
+92.61
+58.11
+76.26
+87.33
+62.58
+71.80
+65.72
+57.43
+86.37
+92.61
+58.11
+76.26
+87.33
+62.58
+71.80
+65.72
+57.43
+86.37
+92.61
+58.11
+76.26
+87.33
+62.58
+71.80
+65.72
+0.082
+0.331
+0.472
+0.088
+0.280
+0.207
+0.095
+0.223
+0.171
+4.046
+0.123
+6.073
+4.557
+1.475
+5.689
+0.714
+32.26
+1.472
+Average
+0.078
+90.40
+7.558
+73.13
+73.13
+73.13
+0.217
+6.268
+Object-Category
+LiDARsim [6]
+PCGen [7]
+LiDAR-NeRF (w/ NeRF)
+Bollard
+Car
+Pedestrian
+Pier
+Plant
+Safety barrier
+Tire
+Traffic cone
+Warning sign
+0.028
+0.033
+0.018
+0.014
+0.019
+0.045
+0.039
+0.026
+0.033
+90.48
+92.77
+96.33
+96.68
+96.30
+89.59
+89.52
+92.72
+90.87
+3.805
+4.044
+3.299
+3.701
+3.349
+3.693
+3.640
+4.747
+4.296
+93.56
+93.14
+95.70
+93.52
+95.02
+93.87
+93.27
+92.66
+92.62
+93.56
+93.14
+95.70
+93.52
+95.02
+93.87
+93.27
+92.66
+92.62
+93.56
+93.14
+95.70
+93.52
+95.02
+93.87
+93.27
+92.66
+92.62
+0.245
+0.544
+0.627
+0.353
+0.571
+0.517
+0.448
+0.428
+0.424
+0.426
+0.457
+6.454
+0.837
+0.472
+4.070
+0.100
+10.88
+0.082
+Average
+0.028
+92.81
+3.864
+93.65
+93.65
+93.65
+0.462
+2.642
+LiDAR-NeRF (w/ iNGP)
+Bollard
+Car
+Pedestrian
+Pier
+Plant
+Safety barrier
+Tire
+Traffic cone
+Warning sign
+0.007
+0.005
+0.001
+0.004
+0.001
+0.018
+0.001
+0.002
+0.006
+98.54
+99.33
+99.97
+98.14
+99.36
+92.41
+100.0
+100.0
+98.77
+0.974
+2.256
+1.381
+1.047
+0.415
+2.624
+0.563
+1.221
+1.266
+99.13
+97.85
+99.24
+99.08
+99.80
+96.63
+99.64
+99.32
+99.13
+99.13
+97.85
+99.24
+99.08
+99.80
+96.63
+99.64
+99.32
+99.13
+99.13
+97.85
+99.24
+99.08
+99.80
+96.63
+99.64
+99.32
+99.13
+0.786
+0.842
+0.941
+0.889
+0.976
+0.622
+0.965
+0.949
+0.948
+0.723
+0.436
+1.650
+0.671
+0.464
+2.640
+0.174
+2.493
+0.259
+Average
+0.005
+98.50
+1.305
+98.86
+98.86
+98.86
+0.879
+1.057
+15
+NeRF-MVL dataset. We report detailed results on nine object categories of NeRF-MVL dataset in
+Tab. 5. Our LiDAR-NeRF consistently outperforms the baseline over all categories in all metrics.
+C.2
+More ablations of LiDAR-NeRF.
+Table 6: Ablation of LiDAR-NeRF (w NeRF) training strategies.
+Scale Contract Cos-lr
+✗
+✗
+✓
+✓
+✗
+✓
+✗
+✗
+✓
+✓
+✗
+✓
+C-D↓ F-score↑ RMSE↓
+δ1↑
+δ2↑
+δ3↑
+SSIM↑ MAE↓
+132.4
+0.129
+0.146
+0.126
+00.07
+79.63
+77.81
+78.26
+00.62
+81.09
+79.33
+79.57
+2.087
+81.64
+79.81
+80.09
+0.296
+0.575
+0.549
+0.555
+00.19
+87.08
+84.07
+87.64
+9.910
+3.849
+3.978
+3.948
+0.491
+0.231
+0.225
+0.226
+LiDAR-NeRF (w NeRF). We ablate the training strategies of our LiDAR-NeRF (w NeRF) in Tab. 6.
+In the training process, we scale (Scale) the scene frames with a factor such that the region of interest
+falls within a unit cube. There is also a parameterization function (contract) used in [42, 5] as:
+
+x/r,
+if ∥x∥ ≤ r,
+(3)
+contract(x) =
+x
+br
+) ∥x∥
+, otherwise.
+(1 + b − ∥x∥
+Where r and b are the radius parameters to decide the mapping boundary. We set r = 10 and b = 1
+for the scene point clouds. As expected, without the parameterization function, the model hardly
+learned anything. While the ’Scale’ and ’Contract’ functions achieve comparable results. Moreover,
+we employ a cosine schedule with one thousand iterations to warm up the learning rate (Cos-lr) to
+stable training, which slightly improves the performance.
+Table 7: Ablation of baseline simulators.
+C-D↓ F-score↑ RMSE↓ δ1↑
+δ2↑
+δ3↑ SSIM↑ MAE↓
+Method
+Component
+LiDARsim [6]
+Mesh ray-casting 1.026
++ Ray-drop U-Net 0.981
+64.62
+66.77
+5.674
+5.404
+52.09 57.90 60.15 0.592
+67.33 72.70 74.76 0.711
+0.156
+0.122
+PCGen [7]
+0.259
+CP ray-casting
++ FPA ray-casting 0.248
++ Ray-drop MLP 0.220
+83.87
+85.43
+87.75
+4.312
+4.332
+4.029
+65.06 67.86 69.09 0.153
+65.21 67.93 69.13 0.155
+77.35 79.95 81.05 0.220
+0.274
+0.280
+0.238
+C.3
+More ablations of baseline.
+For exhaustive evaluation and fair comparisons, we also validate different settings of the baseline
+methods as follows. In Tab. 7, we investigate the different components of baseline simulators.
+LiDARsim. For LiDARsim [6], the ray-drop U-Net can both boost the performance and demonstrate
+its effectiveness.
+PCGen. For PCGen [7], the FPA z-buffer ray-casting and ray-drop MLP can both boost the performance and demonstrate their effectiveness.
+It is worth noting that training the ray-drop network necessitates considerable effort, entailing the
+initial rendering of training sets, followed by the construction of paired training sets for the ray-drop
+network, comprising the rendered outcomes and their corresponding ground truth. Subsequently,
+it is imperative to meticulously adjust the model’s architecture and training parameters to achieve
+superior results for each scene or object.
+D
+Additional Qualitative Visualization.
+Scene editing. As our LiDAR-NeRF can effectively synthesize novel LiDAR views at both scene
+level and object level, it can be exploited to achieve scene editing. We provide an example for
+16
+novel scene arrangements, which corresponds to editing the scene from the KITTI-360 dataset by
+fusing novel objects from our NeRF-MVL dataset. Given the 6D pose (3D translation and yaw,
+pitch, and roll rotations) of the new object, we first render the corresponding novel view of the
+object, and then paste it to the desired position in the scene. Furthermore, it is worth mentioning
+that our method has the capability to adjust the intrinsics of LiDAR, thereby addressing the issue of
+inconsistent LiDAR patterns resulting from the use of different LiDAR devices in the NeRF-MVL
+and KITTI-360 datasets. As illustrated in Fig. 9, our LiDAR-NeRF can render the corresponding
+novel view, and the yield augmented scene has realistic occlusion effects and a consistent LiDAR
+pattern, compared with the common cope-paste strategy. We provide more visualizations in the
+video in the supplementary material.
+Qualitative results on KITTI-360. We provide more qualitative results on KITTI-360 dataset in
+Fig. 10, which shows that our LiDAR-NeRF produces high-quality point clouds fidelity with the
+ground truth.
+Video demo. In addition to the figures, we have attached a video demo in the supplementary materials, which consists of hundreds of frames that provide a more comprehensive evaluation of our
+proposed approach.
+17
+Original scene
+Augmented scene
+Copy paste
+LiDAR-NeRF
+LiDAR-NeRF
+Adjust intrinsics
+Figure 9: Scene editing. The augmented scene from our LiDAR-NeRF has realistic occlusion
+effects and consistent LiDAR pattern thanks to our pseudo range-image formalism, compared with
+the common cope-paste strategy.
+18
+GT point
+Novel point
+Figure 10: Qualitative results on KITTI-360. The high quality of the results from different viewpoints demonstrates the effectiveness of our method.
+19

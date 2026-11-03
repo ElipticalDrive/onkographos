@@ -1,0 +1,273 @@
+cram is a computational room acoustics module to simulate and explore various acoustic properties of a modeled space - feat(ard): voxelization and rectangular decomposition (Phases 2 and 3) by rdmiller · Pull Request #192 · 10log/cram
+
+feat(ard): voxelization and rectangular decomposition (Phases 2 and 3) by rdmiller · Pull Request #192 · 10log/cram · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+rdmiller
+commented
+Sep 22, 2026
+Copy link
+Copy Markdown
+The geometry pipeline that feeds the solver. Neither phase has a counterpart in the reference — it reads a pre-baked .rec box list produced by an offline MATLAB step (Partition::readFromRecFile) — so this is all new code rather than a port.
+Stacked on #191, which is stacked on #190. The diff here is the 7 Phase 2/3 files only. GitHub will retarget as each merges.
+What's here
+File
+Role
+voxelize.ts
+Rasterize surface triangles into a grid, then flood-fill the air region
+voxelize-room.ts
+Thin Room adapter, kept out of the core
+decompose.ts
+Greedy box growth + validateDecomposition
+decompose.spec.ts carries the first end-to-end test of Phases 2–5: a shoebox and an L-shaped room go from triangles, through the voxelizer and decomposition, into real partitions with real interfaces, and a pulse driven in one partition reaches another through the seam. That's the sequence Phase 6's driver will run.
+184 ARD tests pass (was 144); eslint clean; zero tsc errors.
+A claim in the plan that turned out to be wrong
+Phase 3 asserted that growing the longest run first "noticeably reduces the box count and therefore the interface area". It doesn't. Measured against a fixed x→y→z order:
+shape
+fixed
+longest-first
+corridor, L, cross, T, comb, staircase, pillared room, ball
+—
+ties on all eight
+200 randomized air masks
+mean 202.9
+mean 207.5 — 172 losses to 17 wins
+The stronger variant — try all six orders per seed, keep the largest box — also ties on every room-like shape and comes out slightly worse on random masks (205.2 vs 202.8), because greedily maximizing one box leaves worse leftovers.
+The reason is structural: the slab rule already extends maximally along each axis in turn, so for near-rectilinear geometry the result is order-independent. The option is kept but defaulted off, with a test pinning the negative result so the idea isn't rediscovered. Cutting the box count — and with it the interface area, where the error lives — needs a different lever: seed selection, or a merge pass.
+Other departures from the spec
+No BVH in the voxelizer. The spec called for a three-mesh-bvh box-vs-triangle query per candidate cell. Scattering each triangle into the cells its own bounding box covers is strictly better: work is proportional to the surface area in cells — the solid cells actually produced — rather than grid volume × log(triangles), and it needs no acceleration structure. The overlap test is exact either way: full 13-axis SAT, because a conservative AABB test thickens oblique walls into a blob, changing the air volume and with it the modal frequencies.
+Pure core, separate adapter. voxelize.ts has no three, no stores, no DOM, so the geometry is testable on plain triangle lists. voxelize-room.ts is the thin adapter — the same split radiance/patch.ts already uses between buildPatchesFromTriangles and buildPatchesFromRoom.
+Thin boxes are marked fdtd, not merged. Merging was the spec's first suggestion, but the union of two boxes is only a box in special cases, so a merge pass would succeed rarely and silently leave the rest. Marking the kind always works and Phase 4 already implements the partition — which is exactly why the reference keeps an FDTD partition around.
+Leaks reported, not thrown. voxelize sets leaked and a warning; decompose is what refuses. A caller may still want the grid in order to find which surface is open.
+Design notes worth a look
+Leak detection. The grid is padded a cell on every side, so the exterior always touches the rim. If the fill reaches it, either the seed was outside or the surfaces don't close — and a gap of one cell drains the interior, making the "air region" the whole bounding box. Silently decomposing that would produce large, quiet nonsense.
+Sealed voids are excluded. The fill is 6-connected from a seed, so a closet nobody opened stays solid — it isn't part of the room's acoustic volume.
+validateDecomposition checks the cover is a true partition: every air cell in exactly one box, no box touching solid, assignment agreeing with the boxes. Cheap next to a simulation and worth running before Phase 6 spends minutes on a bad cover.
+Mutation-checked
+injected bug
+tests failed
+slab test only examines the seed row (boxes would overlap)
+7
+flood fill ignores walls
+5
+thin-box detection disabled
+1
+conservative AABB instead of exact SAT
+1
+Known limits
+Staircasing. Non-axis-aligned surfaces become stair steps. Intrinsic to grid methods, not a choice here, and part of why the plan keeps ARD to the low-frequency band.
+Corner attribution. Where two surfaces meet, the shared cell is attributed to whichever triangle reached it first. Phase 6 may want an area-weighted rule for per-band absorption at corners.
+Same 4 pre-existing failures in dir-angle-conversions.spec.ts / temperature-air-absorption.spec.ts, unchanged and unrelated.
+Next
+Phases 1–5 are now done and tested together. What remains is Phase 6 onward — the simulation driver and worker, the solver class, the UI wiring — plus §5's cost envelope, which is the open question the numerics can't answer.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01HUuVL5ALKyoGFhUnacVsjA
+Generated by Claude Code
+feat(ard): voxelization and rectangular decomposition (Phases 2 and 3)
+…
+e6a63da
+```
+The geometry pipeline that feeds the solver. Neither phase has a
+counterpart in the reference: it reads a pre-baked .rec box list from an
+offline MATLAB step, so this is all new code.
+
+Phase 2 — voxelization
+  voxelize.ts       Rasterize surface triangles into a grid with an exact
+                    13-axis SAT overlap test, then 6-connected flood fill
+                    the air from a seed. Only the component reachable
+                    from the seed becomes air, which discards the
+                    exterior and any sealed void.
+  voxelize-room.ts  Thin Room adapter, kept separate so the core has no
+                    three, no stores and no DOM and can be tested on
+                    plain triangle lists — the split radiance/patch.ts
+                    already uses.
+
+Phase 3 — decomposition
+  decompose.ts      Greedy box growth after Raghuvanshi §4, plus
+                    validateDecomposition, which checks the cover is a
+                    true partition of the air region.
+
+Departures from the plan, each with a reason:
+
+- No BVH in the voxelizer. Scattering each triangle into the cells its
+  bounding box covers makes the work proportional to the surface area in
+  cells rather than grid volume times log(triangles), and needs no
+  acceleration structure. The overlap test is exact either way.
+
+- The plan's axis-ordering claim does not hold, so the heuristic is
+  defaulted off. It asserted that growing the longest run first
+  "noticeably reduces the box count". Measured against a fixed x-y-z
+  order it ties on every room-like shape tried — corridor, L, cross, T,
+  comb, staircase, pillared room, ball — and on 200 random air masks it
+  is worse: 172 losses to 17 wins, mean 207.5 boxes against 202.9.
+  Trying all six orders per seed and keeping the largest box also ties
+  everywhere room-like and is slightly worse on random masks. The slab
+  rule already extends maximally per axis, so for near-rectilinear
+  geometry the result is order-independent. The option stays, with a
+  test pinning the negative result.
+
+- Thin boxes are marked fdtd rather than merged into a neighbour. The
+  union of two boxes is only a box in special cases, so a merge pass
+  would succeed rarely and silently leave the rest.
+
+- Leaks are reported rather than thrown. voxelize sets leaked and a
+  warning; decompose refuses. A caller may still want the grid to find
+  which surface is open.
+
+decompose.spec.ts carries the first end-to-end test of Phases 2-5: a
+shoebox and an L-shaped room go from triangles through the voxelizer and
+decomposition into real partitions with real interfaces, and a pulse
+driven in one partition reaches another through the seam.
+
+184 ARD tests pass (was 144). Mutation-checked: a slab test that only
+examines the seed row fails 7, disabling thin-box detection fails 1, a
+conservative AABB voxelization fails 1, and a flood fill that ignores
+walls fails 5.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HUuVL5ALKyoGFhUnacVsjA
+```
+rdmiller
+commented
+Sep 22, 2026
+View reviewed changes
+rdmiller
+left a comment
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review — Phases 2–3 (voxelize + decompose)
+Stacked cleanly on #191; diff is the 7 Phase 2/3 files only (not polluted). End-to-end path into Phase 4/5 partitions looks right, and the e2e tests correctly use Courant 0.4 (safe for rank-3 FDTD).
+Must-fix before Phase 6 wires sources
+nearestFreeCell exterior bias — wall / near-wall seeds on −x/−y/−z false-leak a closed room; decompose then throws. Reproduced locally (see inline).
+Strengthen the wall-seed test so relocation cannot regress without failing CI.
+Non-blocking
+Indexed-geometry defense in voxelize-room (match TessellateModifier).
+Share stencil-depth constant with interface.ts.
+Longest-axis-first default-off + negative pinning tests are a good call; validateDecomposition is the right guardrail for Phase 6.
+Submitting as COMMENT (own PR — REQUEST_CHANGES is not available). Please treat items 1–2 as merge blockers.
+Comment thread
+src/compute/ard/voxelize.ts
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/compute/ard/voxelize.ts
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/compute/ard/__tests__/voxelize.spec.ts
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/compute/ard/decompose.ts
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/compute/ard/voxelize-room.ts
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+fix(ard): address PR #192 review comments
+…
+883e05d
+```
+Must-fix
+- Seed relocation preferred the exterior on -x/-y/-z walls. The search
+  returned the first free cell found walking k, then j, then i, which
+  for a wall on a low-index face is the pad cell outside the room. The
+  fill then flooded the exterior of a watertight cube, leaked went true
+  and decompose threw. Reproduced before fixing: a closed unit cube at
+  dx = 0.1 gave airCount 866 and leaked for -x, -y and -z seeds, against
+  729 for an interior seed; +faces passed only because their low-index
+  neighbour happens to be interior.
+
+  This is not limited to seeds exactly on the mesh. Math.round maps any
+  point within half a cell of a wall-cell centre onto that wall, so a
+  source anywhere in the half-cell band inside a -face took the same
+  path — which is where wall-mounted speakers go.
+
+  Fixed by deciding relocation on whether the fill stays sealed rather
+  than on scan order: candidates are ordered by radius then by distance
+  to the grid centre, each is filled, and the first enclosed one wins.
+  Ordering only affects how fast the right candidate is found; the fill
+  check is what makes it correct. A seed that is already in free space
+  is never relocated, so a genuinely open room still reports its leak
+  instead of having it papered over.
+
+- Strengthened the wall-seed test, which had asserted only the warning
+  string and so let the bug ship. Now parametrized over all six faces
+  and over half-cell-inward seeds, asserting leaked === false and an
+  airCount matching a centre-seeded control, plus that decompose accepts
+  the grid and produces identical boxes. Verified against the old
+  behaviour: it fails exactly the three broken faces, the three
+  near-wall seeds, and the decompose case.
+
+Non-blocking
+- Stencil depth is now defined once. partition.ts derives INTERFACE_DEPTH
+  from STENCIL_6TH itself; interface.ts re-exports it and decompose.ts
+  imports it for DEFAULT_MIN_BOX_EDGE. Previously the two declared 3
+  independently and could drift, marking boxes dct that cannot supply
+  the taps interface.ts goes on to read.
+
+- voxelize-room expands an index buffer instead of reading positions as
+  consecutive triples. Surface builds non-indexed geometry today, so
+  this is defence, but an imported or re-loaded model carrying an index
+  would have produced shared-vertex soup, a holed shell and a leak that
+  is very hard to trace back here. TessellateModifier guards the same
+  way. Tested for vertex reuse, world transform, and that an indexed
+  cube voxelizes to a byte-identical grid.
+
+201 ARD tests pass (was 184).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HUuVL5ALKyoGFhUnacVsjA
+```
+rdmiller
+mentioned this pull request
+Sep 22, 2026
+feat(ard): simulation driver and worker (Phase 6)
+#193
+Merged
+rdmiller
+changed the base branch from
+claude/ard-partitions-interfaces
+to
+varese-dev
+September 23, 2026 02:01
+rdmiller
+merged commit ca1f6a7
+into
+varese-dev
+Sep 23, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

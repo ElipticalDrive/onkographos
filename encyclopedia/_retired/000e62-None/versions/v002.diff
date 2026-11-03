@@ -1,0 +1,144 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-The Secant Method for Surface Depth Refinement is an iterative root-finding algorithm used to refine the depth value $d$ where a signed distance function (SDF) or occupancy logit crosses a threshold [S1, unofficial]. It estimates the next intersection point using linear interpolation between two bracketing points, offering a faster convergence rate than bisection for smooth functions [S1, unofficial]. It sets itself apart from its sibling [Bisection Method for Surface Depth Refinement](1033-bisection-method-for-surface-depth-refinement.md) by using the slope between two points rather than the midpoint, and from [Neubauer's Ray-Voxel Intersection Algorithm](975-neubauer-s-ray-voxel-intersection-algorithm.md) by operating on continuous neural field evaluations rather than discrete voxel traversal [S1, unofficial].
++The Secant Method for Surface Depth Refinement is an iterative root-finding algorithm used to refine the depth value $d$ where a signed distance function (SDF) or occupancy logit crosses a threshold [S1, unofficial]. It estimates the next intersection point using linear interpolation between two bracketing points [S1, unofficial].
+ 
+ ## How it works
+@@ -23,5 +23,5 @@
+ 
+ **Data Structures:**
+-- Arrays $d_{low}, d_{high}, f_{low}, f_{high}, d_{pred}$ are parallel vectors of size $N$ (number of rays), supporting batched processing.
++- Arrays $d_{low}, d_{high}, f_{low}, f_{high}, d_{pred}$ are parallel vectors of size $N$ (number of rays), supporting batched processing [S1, unofficial].
+ 
+ **Steps:**
+@@ -34,13 +34,13 @@
+       $$ p_{mid} = ray0 + d_{pred} \cdot ray\_direction $$
+       [S1, unofficial]
+-   b. **Evaluation**: Evaluate the function $f_{mid}$ at $p_{mid}$. This involves calling the decoder with the point and context, subtracting the threshold, and disabling gradient tracking:
++   b. **Evaluation**: Evaluate the function $f_{mid}$ at $p_{mid}$ [S1, unofficial]. This involves calling the decoder with the point and context, subtracting the threshold, and disabling gradient tracking:
+       $$ f_{mid} = decoder(p_{mid}, c, only\_occupancy=True) - logit\_tau $$
+       [S1, unofficial]
+-   c. **Bracket Update**: Identify indices where $f_{mid} < 0$ as $ind_{low}$.
++   c. **Bracket Update**: Identify indices where $f_{mid} < 0$ as $ind_{low}$ [S1, unofficial].
+       - If $ind_{low}$ contains any true values, update the lower bracket:
+         $$ d_{low}[ind_{low}] = d_{pred}[ind_{low}] $$
+         $$ f_{low}[ind_{low}] = f_{mid}[ind_{low}] $$
+         [S1, unofficial]
+-      - Identify indices where $f_{mid} \ge 0$ (i.e., $ind_{low} == 0$). If these exist, update the upper bracket:
++      - Identify indices where $f_{mid} \ge 0$ (i.e., $ind_{low} == 0$) [S1, unofficial]. If these exist, update the upper bracket:
+         $$ d_{high}[ind_{low}==0] = d_{pred}[ind_{low}==0] $$
+         $$ f_{high}[ind_{low}==0] = f_{mid}[ind_{low}==0] $$
+@@ -58,49 +58,52 @@
+     
+     Args:
+-        ray0: Tensor of shape (N, 3), ray origins.
+-        ray_direction: Tensor of shape (N, 3), ray directions.
+-        d_low: Tensor of shape (N,), lower depth bounds.
+-        d_high: Tensor of shape (N,), upper depth bounds.
+-        f_low: Tensor of shape (N,), function values at d_low.
+-        f_high: Tensor of shape (N,), function values at d_high.
++        ray0: List of (x, y, z) tuples, ray origins.
++        ray_direction: List of (dx, dy, dz) tuples, ray directions.
++        d_low: List of floats, lower depth bounds.
++        d_high: List of floats, upper depth bounds.
++        f_low: List of floats, function values at d_low.
++        f_high: List of floats, function values at d_high.
+         n_secant_steps: int, number of iterations.
+-        decoder: Function(p, c, only_occupancy=True) -> Tensor(N).
++        decoder: Function(p, c, only_occupancy=True) -> float.
+         c: Context/camera parameters.
+         logit_tau: float, threshold.
+         
+     Returns:
+-        d_pred: Tensor of shape (N,), refined depths.
++        d_pred: List of floats, refined depths.
+     """
++    N = len(d_low)
+     # Step 1: Initialize prediction
+-    # Avoid division by zero if f_high == f_low, though typically f_low < 0 < f_high
+-    denom = f_high - f_low
++    denom = [f_high[i] - f_low[i] for i in range(N)]
+     # Guard against zero denominator [G]
+-    denom = torch.where(denom == 0, torch.ones_like(denom) * 1e-8, denom)
+-    d_pred = -f_low * ((d_high - d_low) / denom) + d_low
++    denom = [d if d != 0.0 else 1e-8 for d in denom]
++    d_pred = [-f_low[i] * ((d_high[i] - d_low[i]) / denom[i]) + d_low[i] for i in range(N)]
+     
+     for _ in range(n_secant_steps):
+         # Step 2a: Compute 3D points
+-        p_mid = ray0 + d_pred.unsqueeze(1) * ray_direction.unsqueeze(0) # Broadcasting for (N, 3)
++        p_mid = [(ray0[i][0] + d_pred[i] * ray_direction[i][0],
++                  ray0[i][1] + d_pred[i] * ray_direction[i][1],
++                  ray0[i][2] + d_pred[i] * ray_direction[i][2]) for i in range(N)]
+         
+         # Step 2b: Evaluate function without gradients
+-        with torch.no_grad():
+-            f_mid = decoder(p_mid, c, only_occupancy=True) - logit_tau
++        f_mid = [decoder(p_mid[i], c, only_occupancy=True) - logit_tau for i in range(N)]
+             
+         # Step 2c: Update brackets
+-        ind_low = f_mid < 0
++        ind_low = [i for i in range(N) if f_mid[i] < 0]
+         
+         # Update lower bracket where f_mid < 0
+-        d_low[ind_low] = d_pred[ind_low]
+-        f_low[ind_low] = f_mid[ind_low]
+-        
++        for i in ind_low:
++            d_low[i] = d_pred[i]
++            f_low[i] = f_mid[i]
++            
+         # Update upper bracket where f_mid >= 0
+-        ind_high = ~ind_low
+-        d_high[ind_high] = d_pred[ind_high]
+-        f_high[ind_high] = f_mid[ind_high]
+-        
++        ind_high = [i for i in range(N) if f_mid[i] >= 0]
++        for i in ind_high:
++            d_high[i] = d_pred[i]
++            f_high[i] = f_mid[i]
++            
+         # Step 2d: Recalculate prediction
+-        denom = f_high - f_low
+-        denom = torch.where(denom == 0, torch.ones_like(denom) * 1e-8, denom)
+-        d_pred = -f_low * ((d_high - d_low) / denom) + d_low
++        denom = [f_high[i] - f_low[i] for i in range(N)]
++        denom = [d if d != 0.0 else 1e-8 for d in denom]
++        d_pred = [-f_low[i] * ((d_high[i] - d_low[i]) / denom[i]) + d_low[i] for i in range(N)]
+         
+     return d_pred
+@@ -113,5 +116,4 @@
+ - **Division by Zero**: If $f_{high} == f_{low}$, the denominator in the interpolation formula becomes zero. A small epsilon or fallback to bisection is required [G].
+ - **Non-Bracketing**: The method assumes $f_{low} < 0$ and $f_{high} > 0$ (or vice versa). If the initial segment does not bracket a root, the method may diverge or converge to a non-root extremum [G].
+-- **Discontinuities**: The method assumes continuity. If the field function is discontinuous, the linear interpolation may yield inaccurate results compared to methods designed for discontinuities [S2, unofficial].
+ 
+ ## Subtopics
+@@ -121,17 +123,16 @@
+ 
+ ### False Position Algorithm
+-A root-finding algorithm combining linear interpolation and the midpoint algorithm. It finds the exact intersection point even if the field function is not continuous [S2, unofficial]. Implementation is in `IsoMesher::intersect_xaxis()`, `IsoMesher::intersect_yaxis()`, and `IsoMesher::intersect_zaxis()`. The algorithm used is determined by the preprocessor symbol `FALSE_POSITION` [S2, unofficial]. It is no worse than the midpoint algorithm in terms of iterations and usually better, making it the preferred choice for finding exact intersection points [S2, unofficial].
++A root-finding algorithm combining linear interpolation and the midpoint algorithm [S2, unofficial]. It finds the exact intersection point even if the field function is not continuous [S2, unofficial]. Implementation is in `IsoMesher::intersect_xaxis()`, `IsoMesher::intersect_yaxis()`, and `IsoMesher::intersect_zaxis()` [S2, unofficial]. The algorithm used is determined by the preprocessor symbol `FALSE_POSITION` [S2, unofficial]. It is no worse than the midpoint algorithm in terms of iterations and usually better, making it the preferred choice for finding exact intersection points [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(n_{secant\_steps} \cdot N)$, where $N$ is the number of rays. Each step involves a decoder evaluation and vector operations.
+-- **Memory Complexity**: $O(N)$ for storing the bracketing arrays and intermediate points.
+-- **Performance**: Converges faster than bisection for smooth functions due to superlinear convergence, but slower convergence than Newton's method if derivatives are unavailable [S1, unofficial].
+-- **Strengths**: Simple to implement, robust for monotonic functions, no derivative calculation required.
+-- **Limitations**: Can fail if the function is not continuous or if the initial brackets do not contain a root. Sensitive to the choice of initial brackets [S1, unofficial].
+-- **When to Use**: When a fast, derivative-free root-finding method is needed for smooth implicit surfaces or neural fields.
+-- **When Not to Use**: When the function is discontinuous (use False Position or Bisection) or when high precision is required with minimal iterations (use Newton's method if derivatives are available).
++- **Time Complexity**: $O(n_{secant\_steps} \cdot N)$, where $N$ is the number of rays [G]. Each step involves a decoder evaluation and vector operations [S1, unofficial].
++- **Memory Complexity**: $O(N)$ for storing the bracketing arrays and intermediate points [G].
++- **Strengths**: Simple to implement, robust for monotonic functions, no derivative calculation required [G].
++- **Limitations**: Can fail if the function is not continuous or if the initial brackets do not contain a root [G].
++- **When to Use**: When a fast, derivative-free root-finding method is needed for smooth implicit surfaces or neural fields [G].
++- **When Not to Use**: When the function is discontinuous (use False Position or Bisection) or when high precision is required with minimal iterations (use Newton's method if derivatives are available) [G].
+ 
+ ## Background
+-The Secant Method is a classical root-finding algorithm that approximates the derivative using finite differences. In the context of volume rendering and neural fields, it is used to refine the depth of surface intersections detected during ray marching [S1, unofficial]. The method is particularly relevant in differentiable volumetric rendering where precise surface localization is required for gradient-based optimization [S1, unofficial].
++The Secant Method is a classical root-finding algorithm that approximates the derivative using finite differences [G]. In the context of volume rendering and neural fields, it is used to refine the depth of surface intersections detected during ray marching [S1, unofficial].
+ 
+ ## Sources

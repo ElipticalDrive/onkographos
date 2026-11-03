@@ -1,0 +1,131 @@
+global illumination - Light Propagation Volumes: Anisotropic filtering of volume data - Game Development Stack Exchange
+Light Propagation Volumes: Anisotropic filtering of volume data
+Ask Question
+Asked
+12 years, 10 months ago
+Modified
+12 years, 1 month ago
+Viewed
+2k times
+Report this ad
+This question shows research effort; it is useful and clear
+9
+This question does not show any research effort; it is unclear or not useful
+Save this question.
+Show activity on this post.
+I've implemented the Cascaded Light Propagation Volumes algorithm (no indirect shadowing yet) for real-time diffuse global illumination detailed here and here. It works fine but I'm still trying to fix one artifact in particular.
+Short summary
+You may skip this if you already know how the algorithm works.
+The algorithm works by storing lighting information in the form of spherical harmonics in a 3D grid, where initially the data in each cell of the grid comes from rendering an extended shadow map (reflective shadow map) that also includes color and normal information, besides depth. The idea is that essentially all pixels seen by a light source are the cause of the first bounce of indirect illumination, so you store the required information alongside the ordinary depth buffer you use for shadow mapping, and sample all the data to initialize the 3D grid. The information in the 3D grid is then propagated iteratively by (for each iteration) propagating the information in one cell to all of its 6 direct neighbours (above, below, left,right, top, bottom). To light the scene using the information in the grid, you apply a full screen pass over your scene, and for each rasterized pixel you have the world space position of the rasterized surface available (e.g. from G-Buffers in deferred shading), so you know which cell of the grid a certain pixel on screen belongs to.
+This is working fine for the most part, here are two images without simulated GI and just a hardcoded ambient term, and next to it an image with the LPV algorithm. Notice colored reflections on surfaces, better depth detail, etc.
+Problem
+When looking up the cells during the lighting stage, trilinear interpolation (using hardware texture filters) is used to smoothly interpolate data between the center of a cell, its neighboring cells, and the actual looked up texture coordinate. Essentially, this interpolation mimics the propagation of the lighting information at the center of a cell to the concrete pixels around the center where the information is looked up. This is required because otherwise the lighting would look very rough and ugly. However, since trilinear interpolation doesn't take into account the direction of light propagation of lighting information encoded in a cell (remember, it's in spherical harmonics), the light can be incorrectly propagated to the looked up pixel. For example, if the radiance encoded in the cell only propagates towards (1,0,0) ("the right"), everything that's to the left of the center of the cell should receive less light than what is stored at the center, and everything that's to the right should receive more, but trilinear interpolation does not take that into account.
+This causes light bleeding incorrectly trough walls when the cell sizes in the grid are big compared to the surfaces in the scene (this is necessary because you need big cells to propagate light far into the scene with as few propagation iterations as possible). This is what it looks like:
+As you can see (from the shadow outlines at the top right), the scene is lit by a directional light source somewhere above the scene to the top left. And since there is only one cell separating the outside of the atrium and the inside, the light bleeds through and the wall to the left is incorrectly illuminated.
+Actual question
+The author suggests a form of manual anisotropic filtering to fix this. He gives a radiance gradient (I'm assuming of the SH coefficients sampled from the current cell) towards direction of the surface normal n as:
+And states
+Thus, by comparing the radiance directional derivative with the actual
+radiance direction, it can be calculated whether the radiance
+distribution starts further than its trilinear interpolation for this
+point.
+My question(s):
+In the equation, the function c(x) seem to be the SH coefficients at point (x). So the radiance gradient seems to be computed like a normal numerical derivate as the weighted difference of SH coefficients at points x - (n/2) and x + (n/2). However, what is c(x) in my context? Currently I'm assuming that c(x) refers to the trilinearly interpolated coefficients at surface location(x), but I'm not sure at all, since I don't know how that is supposed to give you more information about the directional distribution of the SH coefficients.
+And how is that gradient then used to change how the sampled lighting from the cell is applied to the surfaces, exactly? The author just writes "comparing the radiance directional derivative with the actual radiance direction", but this is pretty vague.
+He mentions using a "central differencing scheme" and references these slides for the central differencing of SH coefficients, and also references this paper which shows the derivations of the gradient, but right now I can't draw any useful conclusions from them.
+global-illumination
+Share
+Share a link to this question
+Copy linkCC BY-SA 3.0
+Short permalink to this question
+Follow
+Follow this question to receive notifications
+edited Dec 29, 2013 at 16:42
+asked Dec 29, 2013 at 15:59
+TravisG
+4,44255 gold badges4141 silver badges6464 bronze badges
+Add a comment
+|
+1 Answer 1
+Sorted by:
+Reset to default
+Highest score (default)
+Date modified (newest first)
+Date created (oldest first)
+This answer is useful
+4
+This answer is not useful
+Save this answer.
+Loading when this answer was accepted…
+Show activity on this post.
+The central difference has been introduced by an AMD paper when they did some demo with crystal flying in a tunel, from memory.
+The c function doesnt have to be something precise, just an idea of, e.g, radiance, so just evaluate the SH using your current normal.
+Then what you do with that, is that you down-tone, using an empirical factor, the radiance using this differential. But only do you downtone if the differential implies the light flow goes away from your current normal.
+Basically the idea is to empirically detect the fact that if you go in the direction opposed to the normal of your wall, the light flow is diminishing slowly, because it propagages in the air (on the other side). But if you probe a bit in front of your normal, you will notice a sudden drop of flux, it means the cell you are sampling now is actually a leak.
+I have found that it works in 70% of the cases, but if applied carelessly, it can creates very strange black holes effects, or hue shifts (pink, green...) on very dark areas that contains a light leak otherwize. This is because you have 3 LPV for each colors, the central difference tends to give different results. If you are capable, try to use the greyscale lightness to evaluate the central difference dampner, and use a common reduction factor to all color channels later.
+Without this hack, normally you should not get much radiance at all anyway, because the normal you use to evaluate the SH is opposed to the flux direction. Howver as you notice, the 2-bands SH used in LPV are not enough in fact, and have a strong DC component that gives this powerful leaks. This is why LPV is impractical for geometries that are not tightly controlled by an LPV-aware artist, that will give every wall a minimal thickness to reduce leaks.
+Also some companies (like square enix) use manually designed blocker walls to kill the leaks, like the geometry volume should give you. (the geometry volume helps to reduce the leaks, but the RSM retroprojection to voxelize the scene is too partial in most cases and creates aliasing at the LPV cell level which gives the leaks an even worse look because they vary intensity weirdly).
+You can only suck it down and try to mitigate the problems by giving LPV a less-strong final word on the final indirect light, use a constant term with a weight (0.5 ?) and the LPV could contribute to the remaining 0.5 of the indirect light. Also try to implement the geometry volume, it will diminish the problem. And finally the central difference.
+Share
+Share a link to this answer
+Copy linkCC BY-SA 3.0
+Short permalink to this answer
+Follow
+Follow this answer to receive notifications
+answered Sep 9, 2014 at 1:42
+v.oddou
+2,35311 gold badge1414 silver badges2121 bronze badges
+1
+as an improvement over 50% of constant ambient, a technique called "ambient BRDF" (by tri-Ace) can be used.
+v.oddou
+–
+v.oddou
+2015-09-10 01:05:36 +00:00
+Commented
+Sep 10, 2015 at 1:05
+Add a comment
+|
+You must log in to answer this question.
+Start asking to get answers
+Find the answer to your question by asking.
+Ask question
+Explore related questions
+global-illumination
+See similar questions with these tags.
+The Overflow Blog
+Elevators, toasters, and the birth of Java
+A JSON schema Is not an AI governance layer
+Featured on Meta
+We’ve reworked automatic question deletion. Let’s talk about why
+How can we improve duplicate handling?
+Related
+1
+How do I render light propagation volume without aliasing?
+Hot Network Questions
+HNN-extensions contain a free group
+How does Derrida define the concept of an 'axis'?
+Story identification: a teacher/researcher is executed, their knowledge transferred to their students
+Is it possible to translate εν ω katecheisthai in Rom. 7:6 as “in him (Christ) to whom we belonged”?
+Filipina residing in Romania travelling to my home country. I have 6-hour layover in South Korea. Do I need a visa?
+Five staff, one keypad, and a liar
+Ordering a sum correctly
+Ramifications of Exponential Time Hypothesis disproof and ECDLP
+Archive vs repository
+at one's command
+Trying to recall the name of a British humorous and satirical archive footage series
+Can abilities that require spending movement be used under the affects of Tasha's Mind Whip?
+Why does env -i echo hello execute successfully?
+Can the vertices of every hypercube be covered by an optimal simple closed polygonal curve?
+What is the current state of Markham Airport? (CNU8)
+What does Paul mean by "be known to God" in Galatians 4:9?
+Why does Jesus utter such a staggering denunciation for towns in Galilee where he preached and did miracles over quite a long time?
+Is it known why Airbus perceived that passengers would have a preference for four engines? (A340)
+Why does my program work in C23 and not in C11?
+Does Hilbert's Foundations of Geometry hold a privileged position among the foundations of geometry?
+Anime about creatures born from pollution
+Exactness of the Suspension functor for Banach algebras
+How do I ensure job safety and legal liability against AI related damage at work
+Can I swap new ears onto an old work electric box?
+Question feed
+default
+Report this ad

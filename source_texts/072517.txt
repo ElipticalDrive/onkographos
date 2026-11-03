@@ -1,0 +1,1841 @@
+IEEE TRANSACTIONS ON VISUALIZATION AND COMPUTER GRAPHICS, VOL. 0, NO. 0, 2026
+1
+CC-4DGS: Computational Deformation and
+Point-Cloud Compression for Storage-Efficient
+Dynamic Gaussian Splatting
+Kyungdae Park , Graduate Student Member, IEEE, and Chae Eun Rhee , Senior Member, IEEE
+arXiv:2609.02184v1 [cs.CV] 2 Sep 2026
+Abstract—Dynamic four-dimensional (4D) Gaussian Splatting
+has emerged as a powerful explicit representation for high-quality
+view synthesis, yet existing methods still require tens to hundreds
+of megabytes per scene due to their heavy reliance on large multiresolution hash tables and high-dimensional Gaussian attributes.
+This paper presents CC-4DGS, a storage-efficient and scalable
+framework that rethinks both deformation modeling and canonical
+attribute storage. First, we introduce a computational deformation
+field (CDF) that replaces large multi-resolution learnable hash
+tables with deterministic dense hash encoding and compact neural
+decoders, enabling on-the-fly synthesis of deformation features while
+reducing deformation storage to only 1–3 MB per scene. Second, we
+propose a compression of canonical point-cloud attributes (CCA)
+pipeline that compresses high-dimensional spherical harmonic appearance terms and auxiliary Gaussian attributes via conditional autoencoding, selective quantization, and residual codebooks, achieving
+3–5× point-cloud reduction with negligible quality loss. Together,
+these components yield a unified representation that preserves realtime rendering performance while reducing total storage to 20–30
+MB. Extensive experiments across the N3DV and Technicolor Light
+Field datasets demonstrate that CC-4DGS achieves reconstruction
+accuracy comparable to state-of-the-art methods such as Swift4D,
+while offering significantly improved storage efficiency and favorable
+runtime–memory trade-offs.
+Index Terms—4D Gaussian splatting, dynamic scene representation, hash encoding, novel view synthesis, real-time rendering,
+storage efficiency.
+T
+I. Introduction
+HREE-dimensional (3D) scene representation has become a fundamental component in various fields such
+Received 11 December 2025; revised 21 July 2026; accepted 3 August
+2026. This work was supported in part by the National Research Foundation
+of Korea (NRF) grant funded by the Korea government (MSIT) under Grant
+RS-2025-00562356, in part by the Institute of Information & Communications
+Technology Planning & Evaluation (IITP) through the Information Technology
+Research Center (ITRC) grant funded by the Korea government (MSIT) under
+Grant RS-2021-II212052, and in part by the Institute of Information & Communications Technology Planning & Evaluation (IITP) through the Artificial
+Intelligence Semiconductor Support Program to Nurture the Best Talents, funded
+by the Korea government (MSIT), under Grant IITP-2026-RS-2023-00253914.
+Recommended for acceptance by J. Hou. (Corresponding author: Chae Eun
+Rhee.)
+Kyungdae Park is with the Department of Artificial Intelligence Semiconductor Engineering, Hanyang University, Seoul 04763, South Korea (e-mail: kdpark@hanyang.ac.kr).
+Chae Eun Rhee is with the Department of Electronic Engineering, Hanyang
+University, Seoul 04763, South Korea (e-mail: crhee@hanyang.ac.kr).
+The source code is publicly available at https://github.com/KyungdaePark/
+CC-4DGS.
+Digital Object Identifier 10.1109/TVCG.2026.3721136
+as robotics, autonomous driving, and virtual/augmented reality.
+Recently, there has been a growing demand for four-dimensional
+(4D) video data, which captures not only static 3D scenes
+but also dynamic changes over time—beyond the limitations of
+conventional two-dimensional (2D) imagery. 4D video enables
+natural and consistent scene rendering under varying viewpoints
+and environmental conditions, significantly enhancing immersion
+and system responsiveness. However, such high-dimensional data
+inherently requires substantial storage, posing serious challenges
+for transmission and long-term archiving, especially under limited
+network bandwidth and storage capacity. In mobile and edge
+computing environments in particular, real-time processing or
+streaming of high-resolution video remains highly constrained.
+Therefore, developing technologies for the efficient compression,
+storage, and rendering of 3D and 4D data is critical, and the
+importance of such research continues to grow.
+Contemporary neural network-based 3D video techniques
+are broadly categorized into implicit and explicit representations.
+Implicit approaches such as Neural Radiance Fields (NeRF) [1]
+offer high visual fidelity but require thousands of multi-layer
+perceptron (MLP) evaluations per ray, making them impractical for real-time applications. In contrast, explicit methods
+including 3D Gaussian Splatting (3DGS) [2], Plenoxels [3],
+and Instant-NGP [4] enable fast rendering by storing largescale voxel grids or Gaussian primitives. When extended to
+4D video, however, explicit representations incur substantial
+memory overhead, as seen in Grid4D [5], 4DGS [6], and
+SaRO-GS [7], which often require hundreds of megabytes to
+several gigabytes due to per-frame parameters or massive hash
+tables along the temporal axis. To mitigate these costs, recent techniques such as Scaffold-GS [8] and MoDec-GS [9]
+reduce redundancy through parameter sharing, pruning, and
+entropy-based regularization, bringing storage down to several
+tens of megabytes; yet they still rely on millions of explicit
+parameters, limiting scalability for network streaming, mobile
+and edge deployment, and cloud storage. More recent efforts—including Motion-Aware 3DGS [10], FRPGS [11], and
+StreetSurfGS [12]—further improve efficiency by removing Gaussian redundancy, and Swift4D [13] demonstrates competitive
+reconstruction quality on challenging dynamic scenes. Nevertheless, even state-of-the-art dynamic 4DGS pipelines remain
+dependent on explicit Gaussian structures, large hash tables, and
+high-dimensional per-Gaussian features, keeping the per-scene
+footprint in the tens-of-megabytes range. While compression
+1077-2626 © 2026 IEEE. All rights reserved, including rights for text and data mining, and training of artificial intelligence and similar technologies.
+Personal use is permitted, but republication/redistribution requires IEEE permission. See https://www.ieee.org/publications/rights/index.html for more information.
+2
+IEEE TRANSACTIONS ON VISUALIZATION AND COMPUTER GRAPHICS, VOL. 0, NO. 0, 2026
+techniques can alleviate some redundancy, it remains insufficient to capture the diversity and temporal complexity of dynamic
+scenes, indicating the need for a more fundamental rethinking of
+data structures and representation strategies.
+We target dynamic 4DGS methods that use a canonical Gaussian set with a learned deformation field, such as 4DGS [6],
+Swift4D [13], and Grid4D [5], rather than native 4D primitive
+representations such as 4D-GS [14]. To overcome the fundamental storage bottlenecks of 4DGS, we introduce a unified twofold strategy that rethinks both the deformation and appearance
+storage of Gaussian representations. First, we replace the large
+multi-resolution learnable hash tables used by prior dynamic
+4DGS methods with a computational deformation field (CDF),
+in which deformation features are computed on-the-fly by a
+compact decoder rather than retrieved from a stored hash table.
+Concretely, the CDF is implemented as a compact multi-MLP
+module that directly predicts 4D motion from dense hash-encoded
+coordinates, eliminating the dominant source of storage overhead
+in prior work such as Grid4D and Swift4D. Our computational
+deformation module remains highly expressive while reducing
+the deformation footprint to only 1–3 MB per scene. Second,
+we introduce a learned compression of canonical point-cloud
+attributes (CCA) pipeline that targets the canonical Gaussian
+attributes—particularly the high-dimensional spherical harmonic
+(SH) appearance terms, which account for the majority of storage in existing dynamic 3DGS and 4DGS systems. Through
+conditional autoencoding, quantization, and residual codebook
+modeling, our method compresses SH components and auxiliary
+attributes with negligible quality loss, reducing the point-cloud
+storage by 3–5× compared to uncompressed canonical representations. Together, CDF and CCA form CC-4DGS, a unified framework that substantially reduces both deformation and appearance
+storage without sacrificing visual fidelity or real-time rendering
+speed. CC-4DGS achieves competitive reconstruction accuracy
+compared to recent high-quality methods such as Swift4D, while
+lowering Deform-module storage to 1–3 MB and total storage to
+20–30 MB per scene.
+II. Related Works
+A. Neural Representations for Static and Dynamic Scenes
+Neural radiance fields (NeRF) [1] model view-dependent color
+and density as an implicit MLP, achieving high-fidelity novel
+view synthesis but requiring thousands of network evaluations
+per ray. To improve efficiency, explicit voxel-based representations
+such as Plenoxels [3] and NSVF [15] replace most MLP queries
+with fast grid interpolation. Instant-NGP [4] further introduces
+multi-resolution hash grids that adapt spatial resolution to scene
+complexity, enabling real-time training and rendering. Building
+on this line of work, 3D Gaussian Splatting (3DGS) [2] represents
+scenes with explicit Gaussian primitives and rasterization-based
+splatting, offering interpretable parameters and high frame rates.
+Extending static representations to dynamic scenes requires
+modeling temporal coherence in addition to spatial structure.
+Early dynamic NeRF methods augment the radiance field with
+time and directly learn a 4D plenoptic function [16], [17], while
+later works such as HexPlane [18] and K-Planes [19] factor
+the 4D domain into low-rank or multi-plane grids. Canonicalspace approaches [16], [17] instead learn a deformation field
+from a static template to observed frames, improving temporal
+consistency but still incurring significant MLP cost. However,
+as scene complexity and motion diversity increase, implicit
+formulations often struggle to balance accuracy, computational
+overhead, and storage, motivating a shift toward more explicit and
+modular representations. Our work follows the explicit Gaussian
+paradigm rather than implicit NeRF, and focuses on reducing the
+storage footprint of dynamic 3DGS-style representations.
+B. Dynamic Gaussian Splatting and Storage-Efficient Extensions
+Dynamic Gaussian Splatting methods aim to exploit the explicit and compact nature of Gaussian primitives while modeling time-varying scenes. A widely adopted formulation defines
+Gaussians in a canonical space and learns a deformation field that
+maps them to observed states over time. Deformable 3D Gaussians [20], 4DGS [6], and GauFRe [21] employ multi-resolution
+grids or compact MLPs to parameterize such deformations, while
+E-D3DGS [22] introduces per-Gaussian latent embeddings to
+enrich the deformation capacity beyond coordinate-based fields.
+Grid4D [5] and Swift4D [13] further adopt Instant-NGP-style
+multi-resolution hash grids to predict canonical-to-observed offsets, achieving strong reconstruction quality at the cost of large
+hash tables and high-dimensional per-Gaussian features. Other
+works bypass a canonical template entirely by placing Gaussians
+directly in the 4D spatio-temporal domain (x, y, z, t), as in 4DGS [14], Ex4DGS [23], SaRO-GS [7], and SpaceTime-GS [24].
+While this fully explicit formulation captures complex nonrigid
+motion, it often requires a large number of primitives, leading
+to model sizes that commonly reach hundreds of megabytes per
+scene. Recent monocular-input variants such as MoDGS [25] and
+Decoupling Dynamic Monocular Videos [26] extend dynamic
+Gaussian reconstruction to single-camera capture, targeting a
+different input setting than the multi-view dynamic 4DGS we
+address.
+A complementary line of research focuses on reducing the storage demands inherent to dynamic Gaussian splatting. ScaffoldGS and MoDec-GS [8], [9] employ anchor-based feature sharing
+and temporally adaptive scaffolds to shrink parameter counts,
+though sizable feature tables or dense per-point attributes often
+remain. Additional efforts investigate more compact or streamable
+4D Gaussian representations: 4DGC [27] combines differentiable
+quantization with a lightweight implicit entropy model, while
+MEGA [28] reduces memory through a compact color representation and entropy-constrained deformation, and 4DGV [29]
+leverages an H.265-based motion-layering pipeline to compress
+deformation offsets. In an adjacent data domain, DPC-as-2DVideos [30] re-represents dynamic point cloud sequences as
+2D video for compression, targeting point-cloud rather than
+Gaussian dynamic data. GIFStream [31] compresses deformationfield 4DGS through a feature-stream representation tailored to immersive video, and Light4GS [32] further reduces 4DGS footprint
+PARK AND RHEE: CC-4DGS: STORAGE-EFFICIENT DYNAMIC GAUSSIAN SPLATTING
+via a context-model entropy coder. Dynamics-Aware Gaussian
+Splatting Streaming [33] extends this streaming direction with
+on-the-fly 4D reconstruction guided by motion-aware decomposition. DASH [34] explores hash-based acceleration through a
+4D hash encoding combined with dynamic–static decomposition
+for improved real-time rendering. Collectively, these approaches
+highlight the central trade-offs among deformation modeling,
+storage overhead, and reconstruction fidelity, underscoring the
+need for increasingly compact and scalable representations for
+dynamic 4D scenes. Concurrently, Fov-GS [35] and FUGS [36]
+enrich dynamic 3D Gaussian splatting with foveated rendering
+and frequency-aware uncertainty modeling, improving real-time
+rendering performance and robustness to complex motion, yet
+they largely retain comparable parameter counts. Compression
+efforts targeting static 3DGS, such as CompGS [37] and EAGLES [38], reduce per-Gaussian attribute storage through vector
+quantization or compact attribute encodings, but do not address deformation-field storage; their attribute-level compression
+strategies complement our canonical-side CCA pipeline rather
+than serving as direct dynamic-4DGS baselines. In contrast,
+we redesign the deformation and point-cloud representations to
+reduce storage footprint and improve the rate–distortion trade-off.
+C. Hash-Based Embeddings and Learnable Hash-Table-Free
+Feature Learning
+Large-scale recommendation systems face a similar scalability
+issue when storing embeddings for millions of categorical IDs.
+Deep Hash Embedding (DHE) [39] replaces explicit embedding
+tables with multiple universal hash functions followed by a compact MLP, computing embeddings on-the-fly and greatly reducing
+storage while mitigating hash collisions. The deformation features
+in dynamic 3DGS share a similar flavor: they live in a large, highdimensional and potentially sparse domain, and naive table-based
+parameterizations quickly become memory-inefficient as spatial
+and temporal resolution increase. In practice, the dimensionality
+and density variability of deformation features make fixed hash
+tables particularly brittle, as they cannot adapt their capacity to local spatio-temporal complexity without incurring substantial overhead. Inspired by this learnable hash-table-free design philosophy,
+our method adopts a similar hash–MLP strategy for dynamic
+scene representation, replacing learnable multi-resolution hash
+grids for deformation features with a compact neural function
+that generates features at query time. This learnable hash-tablefree deformation field serves as a storage-efficient counterpart
+to our subsequent compression of the canonical Gaussian point
+cloud.
+III. Preliminaries
+A. Principles of 3D Gaussian Splatting
+3DGS [2] explicitly represents a scene using a collection of 3D
+Gaussian kernels, offering superior computational efficiency and
+interpretability compared to implicit models like NeRF [1]. Each
+Gaussian primitive is parameterized by a center position µ ∈ R3 ,
+a spatial covariance matrix Σ ∈ R3×3 , an opacity o ∈ R, and
+a color vector c encoded via SH coefficients. In practice, the
+3
+covariance matrix Σ is decomposed into a scaling matrix S and a
+rotation matrix R to ensure positive semi-definiteness, expressed
+as Σ = RSS ⊤ R⊤ . For rendering, each 3D Gaussian is projected
+p
+p
+onto the 2D image plane, and we denote by µi and Σi the center
+(mean) and covariance of its 2D footprint for the i-th primitive.
+The per-pixel opacity contribution of this primitive at pixel p is
+modeled as
+
+
+1
+αi (p) = oi exp − (p − µpi )⊤ (Σpi )−1 (p − µpi ) .
+2
+(1)
+The final pixel color C(p) is then computed via alpha-blending
+of the sorted primitives:
+C(p) =
+N
+X
+ci αi (p)
+i=1
+i−1
+Y
+j=1
+
+1 − αj (p) .
+(2)
+where αi represents the opacity of the i-th Gaussian after
+projection.
+B. Dynamic Scene Representation and Storage Challenges
+To extend 3DGS to dynamic scenes, 4DGS frameworks typically define primitives in a canonical space that undergo timevarying deformation to match observed primitives in world
+space. Specifically, a canonical Gaussian G is transformed into a
+deformed primitive G′ at time t via a learned deformation ∆G:
+G′ = G + ∆G,
+where ∆G = Φ(f, t).
+(3)
+Here, Φ is a deformation network that predicts offsets based on
+the primitive’s spatio-temporal features f and the current time
+t. A critical limitation of recent approaches is their reliance on
+massive multi-resolution hash tables or voxel grids to store these
+features f . This dependence results in a dramatic increase in
+model size, often ranging from hundreds of megabytes to several
+gigabytes per scene. Such significant storage overhead imposes
+severe constraints on scalability, streaming, and deployment on
+memory-constrained edge devices.
+IV. Proposed CC-4DGS Framework
+A. Overview
+Fig. 1 shows the overall CC-4DGS framework. Starting from
+COLMAP [40] initialization, the scene is represented as canonical
+Gaussians, which are separated into static and dynamic subsets.
+Dynamic Gaussians are updated through the CDF, which predicts
+time-dependent deformation fields that warp each Gaussian from
+its canonical position to the target frame t. The deformation
+is computed on-the-fly using dense hash encoding, hash feature
+decoders, and a lightweight deformation network—avoiding the
+large learnable multi-resolution hash tables commonly used in
+prior methods and thereby enabling a far more storage-efficient
+deformation pathway (Sections IV-B and IV-C). The canonical
+Gaussian attributes are further compressed through the CCA
+module, which applies autoencoding, quantization, and residual
+codebooks to reduce both appearance and geometry storage
+(Section IV-D). Together, these components form a compact and
+scalable representation for dynamic 4D scenes.
+4
+IEEE TRANSACTIONS ON VISUALIZATION AND COMPUTER GRAPHICS, VOL. 0, NO. 0, 2026
+Optimization
+CDF
+Training Videos
+Compression
+𝑡
+Dynamic GS
+COLMAP
+h(µ̃) =
+Frame #0
+Split
+Dynamic GS
+Init.
+Initial 3DGS
+Dense Hash
+Encoding
+CCA
+Canonical GS
+Static GS
+Hash Feature
+Decoder
+Deformation
+CDF : Computational Deformation Field
+AutoEncoder
+Codebook
+Quantization
+CCA : Compression of Canonical point-cloud Attributes
+Fig. 1. Overview of the proposed CC-4DGS framework. The pipeline begins with
+COLMAP pose estimation, followed by a coarse initialization (Init.) to generate
+the base Canonical Gaussians. These primitives are then separated into static
+and dynamic subsets (Dynamic GS Split). To minimize storage overhead, the
+CDF replaces learnable hash tables with a deterministic dense hash encoding
+and a Hash Feature Decoder, computing deformations on-the-fly during the
+main optimization. Finally, the CCA module compresses the optimized attributes
+via autoencoding and quantization (dashed lines). Disk icons indicate the final
+compressed components persisted in storage.
+B. Computational Deformation Field
+1) Learning Vertex Features without Hash Tables: The
+core challenge in designing a computational deformation field
+(synthesized per query by a neural decoder rather than retrieved
+from learnable tables) is to efficiently synthesize high-fidelity
+spatial features for every Gaussian without relying on large multiresolution hash tables. To address this, we introduce the Hash
+Feature Decoder framework, which forms the central component
+of our CDF and enables on-the-fly computation of deformation
+fields. As illustrated in Fig. 2, the pipeline proceeds through four
+integral stages: grid construction, hash encoding, neural decoding,
+and feature interpolation.
+The process commences with the Multi-Resolution Voxel Grid
+Construction (Fig. 2(a)). Given a primitive’s center coordinate
+µ ∈ R3 in canonical space, we first normalize it to the unit
+cube µ̂ ∈ [0, 1]3 . This continuous coordinate is discretized into
+an integer voxel index v = ⌊R · µ̂⌋ at a specific grid resolution
+R. To capture the local geometry surrounding the primitive, we
+generate the eight corner vertices µ̃ of the enclosing voxel by
+applying binary offsets to v:
+∀(dx, dy, dz) ∈ {0, 1}3 .
+(4)
+In Fig. 2(a), the vertices labeled P1 through P4 (colored in red
+and blue) visualize this multi-resolution spatial discretization.
+Subsequently, we employ a Dense Hash Encoding strategy (Fig. 2(b)) to map these spatial coordinates into a highdimensional latent space. Instead of relying on a single lookup,
+each vertex coordinate µ̃ is projected through k parallel universal
+µ̃(dx,dy,dz) = v + (dx, dy, dz),
+hash functions. Parameterized by a matrix A ∈ Zk×3 and a
+vector b ∈ Zk , the hashing operation is formulated as:
+
+µ̃A⊤ + b
+
+mod P
+
+mod m,
+(5)
+where P is a large prime and m denotes the modulo basis. The
+resulting integer vector is then normalized to [−1, 1]k , yielding
+a dense, real-valued signature ĥ(µ̃).
+This signature serves as the input to the Hash Feature Decoder
+as depicted in Fig. 2(c). Departing from conventional methods
+that retrieve static features from explicit tables, our approach
+leverages a lightweight decoding network to synthesize vertexspecific features on-the-fly. Specifically, the decoder comprises
+a sequence of Linear Layers interleaved with Mish activation
+functions and LayerNorm, enabling a compact yet non-linear
+mapping of the hashed latent codes.
+In the final stage, Trilinear Interpolation ensures spatial continuity (Fig. 2(d)). The decoded features are mapped back to
+their corresponding grid vertices (visualized as colored feature
+vectors) and aggregated via weighted interpolation to derive the
+final spatial feature fvoxel at the primitive center µ.
+Our architecture differs from conventional grid-based hashing.
+By replacing large-scale hash tables with a dynamic Hash Feature
+Decoder, we effectively eliminate the memory bottleneck of
+explicit storage. Simultaneously, the DHE multi-hash construction
+reduces exact-signature collisions and the decoder maps the
+resulting high-dimensional signatures to continuous deformation
+features, thereby providing a favorable balance between storage
+efficiency, computational fidelity, and representational capacity.
+2) Collision-Resilient Multi-Resolution Design: Although
+multi-resolution grid representations have demonstrated substantial expressive capacity, they often incur prohibitive memory
+footprints due to their reliance on deep hierarchies (e.g., typically 16 levels in prior works [4], [5], [13]). To address this
+limitation, we use the DHE multi-hash construction together
+with resolution-specific neural decoders to employ a streamlined
+voxel grid hierarchy comprising only 4 to 5 resolution levels.
+By allocating a dedicated lightweight decoding network to each
+resolution, our framework effectively decouples the learning of
+global geometry from fine-grained details. This strategy ensures
+that the model maintains representational fidelity comparable to
+deeper hierarchies, while significantly optimizing computational
+and storage efficiency.
+The collision-resilient behavior of this design is primarily
+supported by the DHE multi-hash construction. Exact ambiguity
+would require two distinct coordinates to share the same signature
+across all hash dimensions; in our actual N3DV query domain, the
+full (k=128) signatures produced zero exact duplicates across all
+queried voxel-corner coordinate sets. The Hash Feature Decoder
+then learns a joint mapping from these high-dimensional signatures to continuous deformation features, rather than explicitly
+resolving arbitrary hash collisions.
+3) Time Encoding and Deformation Field Estimation:
+While the Hash Feature Decoder robustly encodes static spatial
+geometry, high-fidelity modeling of dynamic scenes necessitates
+the rigorous integration of temporal variations. To this end, we
+employ a frequency-based positional encoding followed by a
+PARK AND RHEE: CC-4DGS: STORAGE-EFFICIENT DYNAMIC GAUSSIAN SPLATTING
+Canonical Space and Gaussians
+𝝁
+) = 𝒏𝒐𝒓𝒎𝒂𝒍𝒊𝒛𝒆𝒅 (𝑥, 𝑦, 𝑧)
+(a) Multi-Resolution
+Voxel Grid Construction
+Voxel Reuse
+P1
+𝑓%&'$(
+P2
+P3
+P3
+h(µ̃) =
+P4
+3
+deformation
+Deformed Space and Gaussians
+(𝛥𝝁, 𝛥𝒔, 𝛥𝒓, 𝛥𝑜, 𝛥𝒄)
+P4
+!!
+→
+"
+Frequency Encoding
+"
+µ̃ A + b mod P mod m
+𝑓!"
+FiLM
+fusion
+𝑓#$%&'
+Opacity
+Trunk
+LayerNorm
+LayerNorm
+Linear Layer
+Linear Layer
+Mish
+Mish
+Linear Layer
+Linear Layer
+Mish
+Mish
+Linear Layer
+Linear Layer
+Non-Shared Vertex
+voxel A
+(d) Trilinear Interpolation
+Rotation
+Spherical
+harmonics
+TimeMLP
+(e) Time Encoding
+Scale
+P4
+: (𝝁
+;)
+𝒉
+𝑓!"#$
+~
+P3
+𝑓()*&
+Normalize to [-1, 1]
+𝝁
+#
+t
+P4
+P2
+4-Linear
++
+P1
+P2
+Normalize to [-1, 1]
+P1
+(𝝁, 𝒔, 𝒓, 𝑜, 𝒄)
+(f) Deformation Field Estimation Network
+Position
+P1
+P3
+𝝁
+#
+𝝁 = (𝑥, 𝑦, 𝑧)
+(b) Dense Hash Encoding
+"
+𝝁
+P2
+5
+(c) Hash Feature Decoder
+2-Linear
+2-Linear
+2-Linear
+2-Linear
+2-Linear
+out=3
+∆𝝁
+out=3
+∆s
+out=4
+∆r
+out=1
+∆o
+out=48
+∆𝒄
+Branch
+Shared Vertex
+Gaussian Primitive
+voxel B
+(g) Voxel Reuse
+Fig. 2. Overview of the proposed CDF. The normalized center µ̂ is used to generate multi-resolution voxel vertices µ̃ (a), which are hashed and encoded into
+vectors h(µ̃) (b). These vectors are passed through resolution-specific Hash Feature Decoders (which map the DHE multi-hash signatures to deformation features
+rather than resolving collisions) to generate vertex features (c), which are interpolated to obtain the spatial feature fvoxel (d). A separate temporal feature ftime (e)
+is combined with fvoxel and fed into the deformation network (f) to produce time-varying Gaussians. To reduce redundancy, the Voxel Reuse module (g) identifies
+shared vertices (red) between adjacent voxels to avoid re-computation.
+lightweight temporal encoder to represent the input timestamp
+t with high precision, as illustrated in Fig. 2(e). First, the scalar
+timestamp is expanded into a high-dimensional vector γ(t) using
+sinusoidal functions:
+h 
+i
+L
+γ(t) = t, sin(2πfl t), cos(2πfl t) l=1 ,
+(6)
+where fl = 2l−1 represents the frequency of the l-th band, and
+L denotes the total number of frequency bands. This encoding is
+subsequently processed by a shallow neural module (TimeMLP)
+to yield the high-level temporal feature ftime .
+To effectively synthesize spatiotemporal context, we integrate
+this temporal feature ftime with the spatial feature fvoxel
+retrieved from the grid. Critically, rather than resorting to
+naive concatenation, we adopt a Feature-wise Linear Modulation
+(FiLM) [41] mechanism. This design ensures that temporal
+dynamics condition the underlying spatial structure explicitly. We
+first project the voxel feature into a latent space via a linear
+transformation to obtain the spatial hidden state hspatial :
+hspatial = Ws fvoxel + bs .
+(7)
+In parallel, a compact FiLM generator network takes ftime as
+input and regresses the channel-wise scale γ(ftime ) and shift
+β(ftime ) vectors. The unified spatiotemporal feature is then
+computed via affine modulation:
+fST = γ(ftime ) ⊙ hspatial + β(ftime ),
+(8)
+where ⊙ denotes element-wise multiplication. By initializing γ
+near unity and β near zero, the network begins training as a
+quasi-static model, progressively learning to selectively amplify
+or suppress spatial channels to capture time-varying phenomena.
+Subsequently, the fused feature fST drives the Deformation Field Estimation Network (Fig. 2(f)) to predict the timedependent evolution of each Gaussian primitive. As depicted
+in the figure, the architecture follows a Trunk-Branch design:
+a shared trunk of four linear layers extracts global deformation context, which is then distributed to task-specific branches
+(prediction heads). Each branch consists of two linear layers to
+independently regress offsets for specific attributes (position ∆µ,
+scale ∆s, rotation ∆r, opacity ∆o, and SH coefficients ∆c).
+All intermediate layers utilize Rectified Linear Units (ReLU) for
+non-linearity. This framework facilitates a continuous dynamic
+mapping from the canonical Gaussian space to the observation
+space as defined in Eq. (9):
+∆θ = fθ (fST ) for θ ∈ {µ, s, r, o, c}.
+(9)
+These predicted offsets are applied additively to the canonical
+attributes, realizing smooth dynamic transitions in position, orientation, and appearance during the rasterization process.
+C. Overcoming the Computational Overhead of CDF
+1) Vertex Reuse for Redundant-Compute Reduction: While
+the proposed CDF eliminates the massive storage overhead of the
+large learnable multi-resolution hash tables used by prior methods
+by synthesizing features on-the-fly, this procedural generation introduces a computational cost. Specifically, as detailed in the grid
+construction phase, multiple Gaussian primitives residing within
+the same or adjacent voxels inevitably reference identical vertex
+coordinates µ̃. Naive execution would thus trigger redundant hash
+encoding and neural decoding operations for these shared vertices.
+To mitigate this computational redundancy, we implement a
+Vertex Reuse mechanism as illustrated in Fig. 2(g). Prior to
+feature inference, we aggregate all query vertex coordinates µ̃
+derived from the normalized Gaussian centers µ̂ and filter them
+to construct a unique vertex set. The decoding network is then
+evaluated exclusively on this unique set. Subsequently, each Gaussian retrieves its required vertex features via index-based lookups
+from this precomputed buffer, followed by trilinear interpolation.
+By maintaining a lightweight mapping between primitives and
+6
+IEEE TRANSACTIONS ON VISUALIZATION AND COMPUTER GRAPHICS, VOL. 0, NO. 0, 2026
+Rotation 𝒓 Scale 𝒔
+Opacity 𝑜 Dynamic 𝑑
+z
+Position 𝝁
+Quant.
+condition
+Codebook
+𝑥
+𝒓𝒆𝒔! residual
+y
+SH-AC only
+SH - AC
+z
+SH - DC
+Color (SH)
+𝑎!"
+AutoEncoder
+𝑎'!"
+Fig. 3. Pipeline of the proposed CCA. To optimize storage efficiency while
+maintaining visual fidelity, Gaussian attributes are categorized and processed via
+three distinct pathways. (Left) Crucial attributes, including Position (µ) and SHDC components, are retained in full precision to prevent geometric collapse.
+(Top) Scalar attributes (r, s, o, d) undergo Selective Quantization, where dynamic
+logits d are specifically pre-processed via µ-law companding. (Bottom) Highdimensional SH-AC features are compressed by a Conditional Autoencoder that
+leverages geometric context (condition block) to maximize encoding efficiency.
+Residual errors (resi ) are further captured by a Vector Quantization Codebook.
+Blue dashed boxes and disk icons indicate the final compressed components stored
+in the archive.
+unique vertices in memory, we ensure efficient retrieval without
+re-computation. This strategy is particularly advantageous in highresolution voxel grids, where the ratio of Gaussians to unique
+vertices is high. By effectively amortizing the inference cost
+across spatially adjacent primitives, the Vertex Reuse module
+significantly reduces the computational load and GPU memory
+footprint, thereby enhancing the real-time rendering frame rate.
+2) Spatial-Temporal Feature Caching: Although the Vertex
+Reuse strategy minimizes redundant computations within a single
+frame, the naive re-evaluation of the spatial decoder for every
+frame remains a bottleneck compared to the O(1) lookup complexity of conventional hash tables. To bridge this performance
+gap, we introduce a Spatiotemporal Feature Caching scheme that
+exploits the temporal invariance of the canonical space. Our
+framework inherently decouples the feature generation process
+into a spatial component fvoxel and a temporal component ftime .
+Since the canonical Gaussian primitives are static, their associated
+spatial features fvoxel remain constant throughout the sequence.
+Conversely, the temporal feature ftime is dynamic and strictly
+dependent on the timestamp t. Leveraging this property, we
+compute the spatial features fvoxel only during the initialization
+phase (or the first frame) and cache the results in a persistent
+buffer, denoted as fvoxel cached . For all subsequent frames, the system bypasses the spatial decoder entirely, retrieving fvoxel cached
+from memory and fusing it with the newly computed ftime .
+This approach effectively eliminates the overhead of repetitive
+spatial decoding while preserving the flexibility to model complex
+temporal dynamics, resulting in a substantial improvement in
+rendering speed without compromising visual fidelity.
+D. Compression of Canonical Point-Cloud Attributes
+Although the proposed CDF substantially improves the storage efficiency of the deformation field, the canonical point
+cloud—consisting of millions of primitives—still dominates the
+overall memory footprint. To address this issue, we design a hybrid compression framework that accounts for the sensitivity and
+dimensional characteristics of each attribute group. CCA combines well-established compression primitives—autoencoding,
+scalar quantization, and codebook-based residual coding—into
+an attribute-aware pipeline tailored to the canonical Gaussian set
+of our dynamic 4DGS framework. Fig. 3 illustrates the overall
+processing pipeline of the proposed CCA. The input Gaussian
+attributes are categorized into three groups based on their characteristics and processed through separate pathways. First, spatial
+positions (µ) and the DC component of the spherical harmonics
+(SH-DC), which are highly sensitive to information loss and
+critical for visual fidelity, are preserved without compression and
+stored directly, as indicated by the blue dashed box. Second, the
+remaining scalar attributes—rotation r, scale s, opacity o, and
+the dynamic indicator d—are routed to the quantization module
+along the upper path of the figure. Third, the AC component
+of the spherical harmonics (SH-AC), which account for the
+majority of the storage cost, are processed through the lower
+path comprising an autoencoder and a codebook-based residual
+representation. A central condition block aggregates geometric
+attributes and injects them into the autoencoder, enabling the
+model to exploit correlations between geometry and appearance
+during compression.
+The detailed mechanisms of each processing pathway are
+described next.
+1) Compression of SH-AC Appearance Components: As
+illustrated along the lower pathway of Fig. 3, the SH-AC components, which account for approximately 70% of the total data size,
+are compressed using a conditional autoencoder. Instead of using
+only the SH-AC vector aAC as input, we construct a joint input
+vector u = [ aAC , y ] by concatenating the SH-AC features with
+the conditioning attributes y = (µ, s, o, r, d) comprising the perGaussian position, scale, opacity, rotation, and dynamic indicator,
+as shown in the central portion of the figure. The encoder maps
+u into a low-dimensional latent vector z, which is subsequently
+quantized and stored as a compact bitstream. This conditioning
+mechanism enables the model to capture correlations between
+geometry and appearance, thereby improving compression efficiency. To further correct reconstruction errors, a codebook
+module, shown on the right side of the figure, is employed. The
+residual vector resi between the original and reconstructed SHAC features is computed and then encoded using K-means–based
+vector quantization with a 256-entry residual codebook, storing
+the codebook and one assignment index per Gaussian. This twostage design allows the system to recover fine-grained texture
+details with minimal additional storage overhead.
+2) Quantization of Geometry and Scalar Attributes: For the
+attributes routed through the upper path of Fig. 3, a selective
+quantization strategy is applied based on their sensitivity. As
+noted earlier, the spatial positions µ are stored with full 32-bit
+precision in order to prevent geometric distortions. In contrast,
+rotation, scale, and opacity are less sensitive to quantization errors
+and are therefore compressed using 12-bit linear quantization. The
+dynamic indicator d exhibits a long-tailed distribution, and simple
+linear quantization is insufficient to preserve its fine-grained
+variations. To address this issue, we apply µ-law companding,
+PARK AND RHEE: CC-4DGS: STORAGE-EFFICIENT DYNAMIC GAUSSIAN SPLATTING
+defined in (10):
+ln(1 + µ|d|)
+d˜ = sign(d)
+.
+ln(1 + µ)
+(10)
+This transformation allocates higher effective resolution to the
+region where important information is concentrated. Finally, the
+outputs from all processing paths are combined with lightweight
+metadata and stored after lossless compression using Zstandard [42], as indicated by the blue dashed box in the figure.
+E. Loss Functions and Regularization
+During training, at each iteration, the predicted deformations
+are applied to each Gaussian’s attributes, including position, scale,
+rotation, opacity, and SH coefficients. The rendered output is
+supervised using a standard pixel-wise L1 reconstruction loss
+and SSIM loss. However, despite accurate deformation prediction
+by our model, we still observe abrupt changes in the deformation fields of explicit voxel-based representations for a small
+subset of scenes. To address this, inspired by Grid4D [5], we
+introduce a smoothness regularization loss applied directly to
+the embedded feature vectors prior to the deformation network
+inference, enhancing efficiency. In practice, we observe such
+artifacts only in a few challenging scenes, and thus enable the
+smoothness regularization solely for those scenes that exhibit noticeable temporal flickering. Specifically, for a Gaussian primitive
+located at canonical coordinates µ = (x, y, z) and timestamp t,
+we randomly sample small spatial and temporal perturbations
+ϵ = (ϵx , ϵy , ϵz ) and ϵt , drawn uniformly from [−δ, δ] with
+δ = 0.005. We denote the concatenated deformation outputs
+derived from embedded features as d and d′ for original and
+perturbed inputs, respectively. Our smoothness regularization loss
+then penalizes the difference between these outputs:
+Lsmooth = ∥d − d′ ∥22
+(11)
+The final loss function combines reconstruction accuracy and
+smoothness regularization:
+Ltotal = λc L1 + (1 − λc )(1 − LSSIM ) + λr Lsmooth ,
+(12)
+where λr balances between the fidelity of reconstruction and the
+smoothness of the deformation fields. The weight λr is linearly
+increased as training progresses. By enforcing similarity among
+deformation parameters within local spatio-temporal neighborhoods, this regularization effectively suppresses flickering artifacts and stabilizes the rendering of dynamic regions.
+V. Performance Evaluation
+A. Experimental Environment
+1) Experimental Configuration: To evaluate the performance
+of CC-4DGS, we compare it against representative dynamic
+Gaussian splatting methods, including 4DGS [6], 4D-GS [14],
+E-D3DGS [22], and the hash-table–based approaches Grid4D [5]
+and Swift4D [13]. For a fair assessment of storage efficiency,
+point cloud compression using the CCA module is applied equally
+to Swift4D and our method, enabling comparison under identical compressed-geometry conditions. All experiments follow a
+7
+single-step initialization protocol based on a single canonical
+point cloud. COLMAP [40] is applied only to the first frame to
+obtain initial geometry, and subsequent deformations are learned
+solely from 2D supervision. This setting isolates the effect of
+removing large hash tables, ensuring an unbiased comparison.
+Methods such as SaRO-GS, SpaceTime-GS, Ex4DGS [7], [23],
+[24] and streaming-oriented approaches including 4DGC, 4DGV,
+and 3DGStream [27], [29], [43] rely on continuous geometric
+priors and therefore operate under different assumptions; they are
+excluded from our main comparison. All baseline methods are
+evaluated using their official implementations. Pretrained weights
+are used when available, and otherwise models are retrained
+following their official configurations. These restrictions apply to
+the direct head-to-head comparisons in Table I and Table II; for
+additional context, the lower block of Table I compiles reference
+values from recent compression-oriented 4DGS work using each
+method’s own reported numbers, including methods (e.g., the
+streaming-task 4DGC) that fall outside the protocol above.
+2) Datasets and Evaluation Metrics: The evaluation uses
+two real-world datasets containing dynamic scenes: Neural 3D
+Video (N3DV) [44] and Technicolor Light Field [45]. N3DV
+provides multiview sequences at 2704 × 2028 and 30 frames
+per second (FPS), captured by 18–21 cameras over roughly 10
+seconds. Following prior work, all videos are downsampled to
+half resolution, and views with severe blur artifacts are excluded.
+The Technicolor dataset contains dynamic scenes recorded with
+a 4 × 4 camera array, each providing synchronized 2048 × 1044
+video. As in E-D3DGS [22], the central view is used, and
+five representative scenes (Birthday, Fabien, Painter,
+Theater, Trains) with 50 frames each are selected for
+training and evaluation. Quantitative evaluation uses PSNR and
+SSIM, while rendering speed is measured in FPS on a single
+NVIDIA RTX 4090 GPU. Storage cost is reported separately for
+the deformation module and the point cloud to highlight their
+respective contributions to total model size.
+3) Implementation Details for Evaluation: All experiments are
+implemented in PyTorch [46] and conducted on a single NVIDIA
+RTX 4090 GPU. Hyperparameters follow those of 4DGS and
+Swift4D, adjusted to fit our model architecture. Unlike conventional hash-grid approaches that store vertex embeddings in large
+XOR-based hash tables, CC-4DGS stores no such learnable hash
+tables to reduce storage. We employ modulation-based universal
+hash functions with dense hash encoding, and use lightweight
+neural decoders at each grid level to map hash-encoded integers to continuous features. Each grid level uses a sufficiently
+large bucket size m and a prime P to limit hash collisions,
+as preliminary tests showed that smaller m values noticeably
+degrade PSNR. Due to GPU memory constraints, the number
+of multi-resolution grids is restricted to four or five. We also
+incorporate the dynamic-score strategy from Swift4D, applying
+deformation only to Gaussians whose learned dynamic score d
+exceeds a threshold ζ , which avoids unnecessary computation
+in static regions and improves training and rendering efficiency.
+CC-4DGS follows a three-stage schedule: 5K iterations for coarse
+initialization, 3K iterations for fitting the per-Gaussian dynamic
+score d, and 20K iterations for the main optimization stage where
+the deformation field is jointly optimized with the Gaussian set
+8
+IEEE TRANSACTIONS ON VISUALIZATION AND COMPUTER GRAPHICS, VOL. 0, NO. 0, 2026
+(28K total per N3DV scene). Swift4D shares the same coarse
+and dynamic-score stages but uses its official 13K main-stage
+configuration, and we account for this schedule difference in the
+optimization-cost analysis (Sec. VI-E).
+B. Quantitative Results
+Quantitative results on the N3DV dataset are presented in
+Table I. In terms of reconstruction quality, the proposed method
+achieves slightly higher performance than Swift4D [13], reaching
+PSNR values in the low 32 dB range and an SSIM of approximately 0.94, placing it among the top-performing 4D Gaussian–based methods. Although Swift4D attains higher FPS due to
+its 4D grid–based hash table and selective processing of dynamic
+Gaussians, the CDF pathway in our framework maintains realtime rendering performance through the combination of feature
+caching and dynamic separation. The specific impact of feature
+caching is analyzed in Sec. VI-B. In terms of storage, using
+the CDF component alone reduces model size to a few tens of
+megabytes, significantly smaller than Swift4D. When combined
+with CCA, the total storage further decreases to approximately 30
+MB, with only 0.01–0.02 dB of PSNR loss. This result is also
+notable when compared to the lightweight baseline 4DGS [6],
+which achieves around 31.6 dB PSNR while requiring a larger
+model size. A detailed analysis of the storage–quality trade-off is
+provided in Sec. V-D.
+For the Technicolor Light Field dataset, Table II provides a
+summary of the quantitative comparison. Since E-D3DGS [22]
+also initializes a canonical point cloud using COLMAP at t=0,
+it serves as the primary baseline. The CDF configuration of
+our method achieves approximately 0.5 dB higher PSNR (from
+32.83 to 33.29 dB), improved SSIM (from 0.900 to 0.912), and a
+substantial increase in rendering speed (from 46.2 to 64.7 FPS)
+compared to E-D3DGS. When combined with CCA, the full
+system further reduces the model size to around 32 MB while
+maintaining virtually unchanged quality, achieving PSNR 33.3
+dB, SSIM 0.912, and roughly 64 FPS. These results indicate
+that, even with the additional decoder computation, CC-4DGS
+effectively leverages point cloud compression to deliver higher
+PSNR than the available E-D3DGS baseline while substantially
+lowering storage cost on the Technicolor dataset.
+Across both the N3DV and Technicolor datasets, the proposed
+CC-4DGS consistently demonstrates a superior trade-off among
+storage efficiency, reconstruction quality, and rendering speed
+under the shared setting of using the same initial COLMAP prior.
+In particular, the full configuration with CDF+CCA provides
+comparable reconstruction quality to representative methods such
+as 4DGS, Swift4D, and E-D3DGS, while maintaining a model
+size of only a few tens of megabytes, establishing it as a highly
+storage-efficient representation.
+The lower block of Table I additionally situates CC-4DGS
+among recent 4DGS compression and streaming methods that
+report N3DV numbers under their own evaluation settings.
+Because resolution, GPU, and task formulation differ across
+these methods, this block is a context-level comparison rather
+than a direct head-to-head benchmark: it shows that CC-4DGS
+occupies a high-fidelity operating point, reporting higher PSNR
+TABLE I
+Quantitative comparison on the N3DV dataset. The upper block reports
+methods evaluated under our single-step protocol (Sec. V-A) at
+1352 × 1014; within this block the best (bold) and
+second-best (underlined) values in each column are highlighted. The
+lower block lists recent 4DGS compression/streaming methods using
+values reported in their respective papers under heterogeneous settings
+(resolution, GPU, task). These values serve as contextual references
+rather than a direct head-to-head comparison and are excluded from the
+best/second-best highlighting.
+Method
+PSNR(dB)↑
+SSIM↑
+FPS↑
+Storage(MB)↓
+Evaluated in our environment (RTX 4090, 1352 × 1014)
+4D-GS [14]
+31.39
+0.944
+105.3
+4DGS [6]
+31.58
+0.937
+126.8
+E-D3DGS [22]
+30.85
+0.941
+78.2
+Grid4D [5]
+31.20
+0.937
+111.9
+0.944
+136.2
+Swift4D [13]
+32.06
+Swift4D(+CCA)
+32.03
+0.944
+138.2
+Ours(CDF)
+32.07
+0.943
+111.9
+Ours(CDF+CCA)
+32.06
+0.943
+113.4
+2193
+41
+56
+280
+146
+94
+86
+30
+Reported values from recent methods (heterogeneous settings; not re-run)
+Light4GS [32]§
+31.69
+—¶
+37†
+5
+GIFStream [31]
+31.75
+0.938
+95
+10
+MEGA [28]
+31.49
+0.942¶ 77.4†
+25
+4DGC [27]⋆
+31.58
+0.943
+168†
+150
+Recent-method rows are reproduced from each paper’s reported numbers (no re-runs). Unless
+noted, recent methods report at 1352×1014, matching our setting. § Light4GS is evaluated
+at 1024×768. ¶ SSIM values use the same single-scale definition as ours; MEGA’s reported
+DSSIM1 is converted to SSIM, whereas Light4GS reports only an MS-SSIM–based D-SSIM
+and is therefore omitted (—). † FPS measured on a different GPU than our RTX 4090; not
+directly comparable (unmarked FPS use the same RTX 4090 as ours). ⋆ Streaming-task
+method; storage is computed from the reported per-frame bitrate (∼0.5 MB/frame) over a
+300-frame N3DV sequence.
+TABLE II
+Quantitative comparison of rendering quality, speed, and storage on the
+Technicolor dataset (2048 × 1044 resolution). The best results for each
+column are highlighted.
+Model
+PSNR(dB)↑ SSIM↑ FPS↑ Storage(MB)↓
+E-D3DGS [22]
+Ours(CDF)
+Ours(CDF+CCA)
+32.83
+33.29
+33.30
+0.900
+0.912
+0.912
+46.2
+64.7
+64.6
+58
+93
+32
+(32.06 dB) than the listed recent baselines at the cost of larger
+total storage than bitrate-oriented methods such as GIFStream
+(10 MB) and Light4GS (5 MB). It is therefore best read as a
+storage–quality–speed operating-point comparison rather than a
+uniform-dominance claim.
+C. Qualitative Results
+We conduct qualitative comparisons on representative scenes
+from the N3DV and Technicolor Light Field datasets. Figs. 4
+and 5 present side-by-side visual results for each scene,
+including the ground truth (GT), 4DGS [6], Grid4D [5],
+Swift4D [13], E-D3DGS [22], and our method (Ours(CDF)
+and Ours(CDF+CCA)). Specifically, regions containing highfrequency textures or thin structures—such as hat logos, fingers,
+flames, paper decorations, and leaves—as well as areas involving
+fast motion are magnified to reveal fine-grained differences among
+the methods.
+9
+sear steak
+flame salmon
+flame steak
+coffee martini
+PARK AND RHEE: CC-4DGS: STORAGE-EFFICIENT DYNAMIC GAUSSIAN SPLATTING
+GT
+Ours
+(CDF)
+Ours
+(CDF+CCA)
+Swift4D
+Grid4D
+4DGS
+Qualitative comparison on the N3DV dataset. We compare rendering results for representative scenes (coffee_martini, flame_steak,
+flame_salmon, sear_steak) across the ground truth (GT), the proposed method (Ours(CDF), Ours(CDF+CCA)), Swift4D [13], Grid4D [5], and 4DGS [6].
+For each scene, the left column shows the full-frame image, while the right column presents magnified regions containing high-frequency details and rapid motion,
+such as facial features, fingers, flame boundaries, and bottle labels, to highlight fine-grained differences among the methods. Despite the additional point-cloud
+compression, Ours(CDF+CCA) maintains visual quality that is nearly indistinguishable from Ours(CDF) to the human eye.
+Fig. 4.
+Visual fidelity and detail preservation As shown in Fig. 4,
+existing dynamic 3DGS methods often exhibit over-smoothing
+in high-frequency regions, resulting in blurred edges and loss
+of fine structures. For example, in the coffee_martini
+scene, both the hat logo and finger contours appear noticeably
+degraded in 4DGS and Grid4D, whereas CC-4DGS preserves
+sharp edges and textures close to those of the ground truth. A
+similar trend is observed in the flame_steak scene, where our
+method reconstructs thin and semi-transparent flame structures
+more clearly, while Swift4D and Grid4D produce foggy artifacts
+around the flames. These differences are consistently observed
+in flame_salmon and sear_steak. In flame_salmon,
+prior methods fail to maintain the layered structure and silhouettes
+of distant background elements, whereas CC-4DGS preserves
+their separation more faithfully. In sear_steak, existing approaches tend to blur specular highlights or distort label edges
+10
+IEEE TRANSACTIONS ON VISUALIZATION AND COMPUTER GRAPHICS, VOL. 0, NO. 0, 2026
+Birthday
+GT
+Ours
+(CDF)
+Ours
+E-D3DGS
+(CDF+CCA)
+Train
+GT
+Ours
+(CDF)
+Ours
+E-D3DGS
+(CDF+CCA)
+Theater
+GT
+Ours
+(CDF)
+Ours
+E-D3DGS
+(CDF+CCA)
+Fig. 5. Qualitative comparison on the Technicolor Light Field dataset. We compare the rendering results of the GT, the proposed method (Ours(CDF),
+Ours(CDF+CCA)), and E-D3DGS across the Birthday, Theater, and Train scenes. To assess texture preservation and geometric stability, we highlight
+regions containing complex textures and thin structures—such as paper decorations, fabric folds, leaves, and building surfaces—as well as areas exhibiting large depth
+parallax, and present magnified views for detailed inspection.
+on reflective objects, while CC-4DGS more accurately reproduces
+highlight shapes and texture details, resulting in clearer detail in
+these examples.
+Complex backgrounds and high-resolution details. The Technicolor Light Field dataset contains higher-resolution imagery
+with numerous fine-scale structures across the scene, making
+even small reconstruction errors more noticeable. As shown in
+the Birthday and Theater scenes in Fig. 5, our method
+preserves thin structures and intricate patterns—such as paper
+decorations, fabric folds, and stage ornaments—with clear definition even at high resolution. In contrast, E-D3DGS often
+exhibits over-smoothing in the same regions, where textures blend
+together or fine patterns disappear. Similar differences appear in
+the Train scene: our method maintains distinguishable details
+in high-frequency regions such as grass blades and brick surfaces,
+whereas E-D3DGS tends to blur or merge these patterns, resulting
+in a simplified appearance. These observations suggest that CC4DGS more faithfully preserves fine textures and structural details
+in high-resolution environments like Technicolor.
+Effect of CCA on Visual Quality. As shown in Fig. 4 and Fig. 5,
+Ours(CDF+CCA) maintains visual quality nearly identical to that
+of Ours(CDF) across most scenes. This is because the canonical
+geometry and appearance attributes are separated and re-encoded
+in a compression-friendly manner, allowing essential visual cues
+to be preserved even under lossy compression. Consequently,
+storage can be substantially reduced with negligible quality
+degradation, demonstrating that CC-4DGS achieves an effective
+trade-off between reconstruction quality and storage cost.
+D. Storage and Rate Distortion Analysis
+This section analyzes the storage distribution and the resulting
+rate–distortion trade-off to demonstrate why the proposed CDFbased deformation representation is significantly more storageefficient than approaches relying on large 4D hash tables. Table III
+compares model size on the N3DV dataset by separating it into
+the Deform module and the Point Cloud. The Deform component
+includes the parameters responsible for predicting time-varying
+properties such as position, scale, and opacity, corresponding
+to large multi-resolution hash grids in Swift4D [13] and to the
+CDF module in our method. The Point Cloud contains canonical
+geometry and appearance attributes. As shown in the table, most
+storage differences arise from the Deform module. Grid4D and
+Swift4D must store up to 16 levels of 3D/4D hash grids, resulting
+in Deform module sizes of 221.1 MB and 68.4 MB, respectively.
+In contrast, CC-4DGS eliminates the large learnable hash tables
+of prior methods and instead uses lightweight neural decoders
+to map dense hash encodings at each grid level, reducing the
+Deform module size to approximately 1.9 MB. For the Point
+Cloud, applying the same CCA compression to all methods
+leads to similar storage usage in the tens of megabytes range.
+Consequently, differences in total storage stem primarily from the
+deformation design. Notably, Ours(CDF+CCA) maintains more
+PARK AND RHEE: CC-4DGS: STORAGE-EFFICIENT DYNAMIC GAUSSIAN SPLATTING
+TABLE IV
+Storage breakdown of the Deform module on the N3DV dataset.
+Deform-Grid denotes the multi-resolution grids or hash tables used for
+deformation, and Deform-Net refers to the weights of the deformation
+MLP. The Best results for each column are highlighted.
+Size(MB)↓
+Size(MB)↓
+Size(MB)↓
+(Deform-Grid) (Deform-Net) (Deform-Total)
+Model
+Grid4D [5]
+Swift4D [13]
+Ours
+32.25
+32.00
+0.2
+0.7
+1.1
+220.9
+67.7
+0.8
+(a) Total deployable model size
+CDF-Default
+31.25
+31.00
+Model
+Size(MB)↓ Size(MB)↓ Size(MB)↓
+(Deform) (Point Cloud)
+(Total)
+Grid4D [5]
+Swift4D [13]
+Swift4D(+CCA)
+221.1
+68.4
+68.4
+58.8
+77.4
+25.7
+279.9
+145.8
+94.1
+Ours(CDF)
+Ours(CDF+CCA)
+1.9
+1.9
+84.4
+27.7
+86.4
+29.6
+Table III and Table IV decompose the default storage budget into point-cloud and deformation components. To evaluate whether this storage advantage persists beyond the default
+operating point, Fig. 6 reports rate–distortion operating points
+obtained by down-sweeping each method’s deformation capacity
+from its scene-specific default, averaged over six N3DV scenes.
+The CCA profile is fixed at CCA-Default for both methods.
+For CC-4DGS we vary the CDF capacity (CDF-Small / Mid
+/ Default); for Swift4D we vary the hash-grid capacity relative to
+each scene’s default hash-grid size H ∗ (Hash-Small ≡ H ∗ −4
+/ Mid ≡ H ∗ −2 / Default ≡ H ∗ ). Panel (a) reports total
+deployable model size, and panel (b) isolates the Deform-module
+storage. Both methods span a similar PSNR range across the
+sweep (≈ 30.4–32.0 dB), but their storage envelopes differ by
+an order of magnitude: all three CC-4DGS configurations stay
+under 30 MB total and under 2 MB in Deform-module storage,
+whereas Swift4D spans 31–94 MB total and 5–68 MB in the
+Deform module across the same capacity tiers. Panel (b) makes
+this gap explicit: even Swift4D’s most aggressively shrunk hashgrid configuration uses more Deform-module storage than CC4DGS at its full capacity, confirming that the storage advantage
+is not merely due to point-cloud compression but also reflects the
+compact CDF representation.
+Table V reports a complementary sweep along the CCA bitrate
+axis. While Fig. 6 varies the deformation capacity under a fixed
+CCA profile, here we hold the CDF configuration at its default
+and vary the CCA profile across Low, Mid, and Default rates.
+Reducing the CCA profile from Default to Low shrinks the total
+30.50
+30.25
+Hash-Default
+31.75
+CDF-Mid
+Hash-Mid
+30.75
+TABLE III
+Storage breakdown on the N3DV dataset. The total model size is
+decomposed into the Deform module and the Point Cloud components. The
+Deform module includes parameters for predicting time-varying Gaussian
+attributes, while the Point Cloud corresponds to canonical geometry and
+appearance storage. The Best results for each column are highlighted.
+CDF-Default
+32.00
+PSNR (dB)
+31.50
+221.1
+68.4
+1.9
+(b) Deform-module storage
+32.25
+Hash-Default
+31.75
+PSNR (dB)
+than a 60 MB reduction in total size compared to Swift4D+CCA
+and Grid4D.
+To further examine differences within the Deform module,
+Table IV decomposes its storage into Deform-Grid and DeformNet. For Grid4D and Swift4D, the majority of the storage is
+consumed by the multi-resolution 3D/4D hash grids in DeformGrid, while the parameters used to predict deformations (DeformNet) remain below 1 MB. In contrast, the proposed method
+eliminates the large learnable hash tables of prior methods,
+reducing Deform-Grid to approximately 0.8 MB and allocating
+the remaining 1.1 MB to a compact neural network. This
+indicates that prior methods devote most of their bit budget to
+storing large lookup tables, whereas our design reallocates the
+same order of megabytes toward lightweight learned parameters.
+11
+31.50
+CDF-Mid
+31.25
+Hash-Mid
+31.00
+30.75
+Hash-Small
+CDF-Small
+30 40 50
+Swift4D
+CC-4DGS (Ours)
+60
+70
+80
+Total deployable model size (MB)
+90
+30.50
+100
+30.25
+Hash-Small
+CDF-Small
+100
+Swift4D
+CC-4DGS (Ours)
+101
+Deform-module size (MB, log scale)
+102
+Fig. 6. Rate–distortion operating points on N3DV, averaged over six scenes.
+We report three operating points per method under a fixed CCA profile (CCADefault). For CC-4DGS, we vary the CDF capacity (CDF-Small / Mid / Default);
+for Swift4D, we vary the hash-grid capacity relative to each scene’s default H ∗
+(Hash-Small ≡ H ∗ −4 / Mid ≡ H ∗ −2 / Default ≡ H ∗ ). Panel (a) reports
+the total deployable model size (linear scale); panel (b) isolates the Deformmodule storage (log scale). CC-4DGS reaches PSNR comparable to the default
+Swift4D configuration while requiring substantially smaller total and Deformmodule storage.
+model size from 29.67 MB to 23.46 MB, a 21% reduction, while
+PSNR drops by only 0.14 dB on the 6-scene N3DV average. CCA
+therefore acts as a controllable bitrate knob that is decoupled from
+the deformation pathway.
+TABLE V
+CCA bitrate sweep on the N3DV dataset (6-scene average) under a fixed
+CDF-Default configuration. The three profiles differ in the per-attribute
+quantization bit budgets and the residual K -means codebook size.
+“Scalar attr.” is the shared bit width applied to scale, opacity, and
+rotation. Lowering the profile from Default to Low reduces the total
+model size by about 21% while losing only about 0.14 dB PSNR.
+Profile
+AE latent
+(bits)
+Codebook
+(entries)
+Scalar attr.
+(bits)
+Dynamic
+(bits)
+Total
+(MB)↓
+PSNR
+(dB)↑
+SSIM↑
+Low
+Mid
+Default
+10
+12
+14
+64
+128
+256
+8
+10
+12
+10
+12
+16
+23.46
+26.71
+29.67
+31.92
+32.04
+32.06
+0.942
+0.943
+0.943
+E. Long-sequence Stress Test
+To probe behavior beyond the standard 300-frame protocol, we
+run a stress test on the flame_salmon scene of N3DV at sequence lengths {300, 600, 900, 1200} frames. Training iterations
+and densification/pruning schedules are scaled in proportion to
+the sequence length so that each frame receives comparable training exposure, and CC-4DGS and Swift4D are compared under
+identical schedules. As Table VI reports, both methods degrade
+gradually as the sequence becomes longer: CC-4DGS goes from
+29.62 dB at 300 frames to 29.12 dB at 1200 frames (−0.50 dB),
+while Swift4D goes from 29.48 dB to 28.24 dB (−1.25 dB),
+12
+IEEE TRANSACTIONS ON VISUALIZATION AND COMPUTER GRAPHICS, VOL. 0, NO. 0, 2026
+with CC-4DGS retaining up to a +0.88 dB advantage at 1200
+frames. This single-scene stress test does not prove general longduration scalability, but indicates that the proposed frequencybased time encoding with depth-3 TimeMLP does not exhibit a
+disproportionately worse long-sequence failure mode than the 4D
+hash-grid baseline in this setting.
+TABLE VI
+Long-sequence stress test on the flame salmon scene of N3DV. Sequence
+length is scaled from 300 to 1200 frames, with training iterations and
+densification/pruning schedules scaled in proportion. For each length,
+the better result between CC-4DGS and Swift4D in each column is shown
+in bold.
+Length
+CC-4DGS
+PSNR (dB)↑
+CC-4DGS
+SSIM↑
+Swift4D
+PSNR (dB)↑
+Swift4D
+SSIM↑
+300
+600
+900
+1200
+29.62
+28.91
+29.22
+29.12
+0.922
+0.917
+0.916
+0.915
+29.48
+28.90
+28.61
+28.24
+0.923
+0.915
+0.913
+0.908
+VI. Ablation Study
+This section evaluates how the key components of CC-4DGS
+affect reconstruction quality, rendering speed, and memory usage
+through a series of ablation studies. Long-sequence behavior is
+evaluated separately as a stress test in Sec. V-E; this section
+focuses on component-level ablations. We first compare singlehash and dense hash encoding to assess their impact on dynamic
+scene reconstruction (Fig. 7). We then analyze per-frame rendering time on six N3DV sequences by selectively enabling vertex
+reuse and feature caching (Table VII, Fig. 8). Finally, we evaluate
+the FiLM-based fusion path and the TimeMLP depth and timeencoding format that together define the CDF temporal pathway
+across all six N3DV scenes (Tables VIII and IX).
+A. Benefits of Dense Multi-Hash Encoding
+This experiment evaluates the effect of dense hash encoding
+by varying the number of hash functions per Gaussian (k ). For
+a fair comparison, the voxel grid resolution and bucket size are
+fixed, and only the single-hash (k = 1) and dense (k = 128)
+configurations are compared. With k = 1, different Gaussians
+are more likely to map to the same hash index, leading to
+blur and ghosting artifacts in regions of fast motion or fine
+texture. As illustrated in Fig. 7, the cut_roasted_beef
+scene shows accumulating motion blur under k = 1, whereas
+k = 128 preserves clear silhouettes and consistent poses over
+time. The dense configuration combines multiple hash outputs
+to generate richer input features, reducing the impact of hash
+collisions and enabling finer spatiotemporal detail to be captured
+at the same voxel resolution. This results in a PSNR improvement
+from 31.37 dB to 33.38 dB, with the largest gains observed in
+later frames. These findings indicate that dense hash encoding
+effectively mitigates collision-induced degradation and allows
+stable reconstruction quality across time, even when using a
+limited-resolution voxel grid.
+t=10
+k=1
+t=97
+GT
+k=128 (Ours)
+k=1
+t=270
+GT
+k=128 (Ours)
+k=1
+GT
+k=128 (Ours)
+Fig. 7. Effect of dense hash encoding on dynamic reconstruction quality.
+Qualitative comparison on the cut_roasted_beef scene from N3DV at
+three timestamps (t = 10, 97, 270). For each timestamp, the top row shows the
+GT. The bottom-left images (k = 1) correspond to single-hash encoding, where
+each Gaussian is mapped using only one hash function. The bottom-right images
+(k = 128, Ours) show the results of dense hash encoding, in which multiple
+hash functions are aggregated per Gaussian. With k = 1, early frames (t = 10)
+appear relatively sharp, but accumulated motion in later frames (t = 97, 270)
+produces severe blur and ghosting around fast-moving regions such as the arms,
+causing duplicated silhouettes. In contrast, with k = 128, these artifacts are
+greatly suppressed, yielding sharper boundaries and more consistent temporal
+reconstruction. As deformation behavior is unaffected by CCA, this ablation is
+evaluated on the raw CDF output without CCA compression.
+B. Acceleration Effects of Vertex Reuse and Feature Caching
+We evaluate the impact of vertex reuse and feature caching
+on rendering speed and peak GPU memory. Since CC-4DGS
+separates spatial and temporal feature computation, enabling
+feature caching allows spatial hash features to be computed once
+and reused across all subsequent frames, requiring only the timedependent branch to be evaluated. Vertex reuse further reduces
+redundant hash encodings by merging duplicated spatial vertices
+into a unique set, decreasing both computation and memory
+usage. Table VII and Fig. 8 break down rendering time into
+the “grid” path (dense hash encoding and decoder operations)
+and the “other” path (deformation network, rasterization, and
+shading). When caching is enabled, the grid time in the steady
+state (t > 0) drops to approximately 0.8 ms, which is faster than
+the 1.8 ms required by Swift4D’s hash-table lookup. This improvement arises because Swift4D must repeatedly fetch features
+from large hash tables and perform interpolation at every frame,
+whereas CC-4DGS reuses precomputed spatial features. Despite
+this advantage, the end-to-end FPS of Swift4D remains slightly
+higher due to its highly optimized CUDA kernels (tiny-cuda-nn),
+while CC-4DGS relies on standard PyTorch operations. Thus,
+the remaining performance gap stems from implementation-level
+differences rather than limitations of the CC-4DGS architecture.
+Vertex reuse yields additional benefits by amortizing the one-time
+cost of building the unique-vertex map. Although t = 0 incurs
+extra preprocessing overhead, the reduced number of active grid
+vertices in later frames significantly lowers cumulative rendering
+time and peak memory usage. This explains why the full configuration achieves the lowest peak memory and why reuse-only
+notably improves the total runtime compared to the no-cache, noreuse baseline. Finally, full and cache-only configurations show
+nearly identical steady-state grid time (0.8 ms), and the small
+PARK AND RHEE: CC-4DGS: STORAGE-EFFICIENT DYNAMIC GAUSSIAN SPLATTING
+𝒕=𝟎
+Swift4D
+Cache ✗
+Reuse ✗
+Cache ✓
+Reuse ✗
+Cache ✗
+Reuse ✓
+Cache ✓
+Reuse ✓
+0
+2.10 MB between the two settings, so the gap reflects the fusion
+mechanism rather than a storage-budget asymmetry. We therefore
+treat FiLM as a CDF design choice that improves reconstruction
+on average over direct concatenation, with the magnitude varying
+by scene, rather than a component that is uniformly preferable
+across every sequence.
+Per-Frame (𝒕 > 𝟎)
+5 10 15 20 25 30 35 40 45 50 55 0
+5
+Dense Hash Encoding
+Hash Feature Decoder
+Hash Table Lookup
+TimeMLP Forward
+10
+15
+20
+13
+25
+Unique Vertex
+Mapping
+Fig. 8. Breakdown of the hash-grid path (“grid” in Table VII) at the first frame
+(t = 0, left) and in the steady state (t > 0, right) on the N3DV dataset. Bars
+correspond to Swift4D and our four variants, where “Cache” denotes feature
+caching and “Reuse” denotes vertex reuse. The stacked segments decompose the
+grid time into dense hash encoding, deformation hash MLP forward, hash-table
+lookup or time-MLP forward, and the unique-vertex mapping stage that is present
+only when vertex reuse is enabled.
+TABLE VII
+Rendering time and peak GPU memory on the N3DV dataset (6 scenes).
+Time measurements are in milliseconds (ms). Values for t = 0 and t > 0
+denote per-frame latency, while Total represents the accumulated time
+for the entire sequence. Peak mem is given in gigabytes (GB). The best
+results for each column are highlighted.
+TABLE VIII
+FiLM ON/OFF ablation on the six N3DV scenes. For each scene the CDF
+capacity, hash configuration, and training schedule are held fixed at the
+manuscript default and only the FiLM module is toggled.
+∆PSNR=ON−OFF. Evaluations use the raw CDF output without CCA
+compression. The full per-scene matrix is reported so that the
+scene-dependent behavior of FiLM is visible. In the Average row, the better
+of the two settings per metric is shown in bold.
+Scene
+FiLM ON
+FiLM OFF
+FiLM ON FiLM OFF
+∆PSNR
+PSNR (dB)↑ PSNR (dB)↑
+SSIM↑
+SSIM↑
+coffee_martini
+cook_spinach
+cut_roasted_beef
+flame_salmon_1
+flame_steak
+sear_steak
+29.33
+32.89
+32.41
+29.05
+33.37
+33.82
+28.81
+28.70
+33.42
+29.62
+32.67
+31.61
++0.52
++4.19
+−1.01
+−0.57
++0.70
++2.21
+0.920
+0.951
+0.949
+0.921
+0.958
+0.957
+0.918
+0.922
+0.951
+0.922
+0.955
+0.951
+Average
+31.81
+30.80
++1.01
+0.942
+0.936
+t = 0 (ms) t > 0 (ms) Total↓ Peak mem↓
+Method
+grid other grid other
+(ms)
+(GB)
+Swift4D [13]
+Ours (full: cache+reuse)
+Ours (cache only)
+Ours (reuse only)
+Ours (no cache, no reuse)
+17.2
+54.5
+49.0
+52.5
+49.4
+2,233
+2,751
+2,816
+4,278
+9,807
+5.8
+5.6
+6.1
+5.8
+6.7
+18.1 1.8
+39.6 0.8
+41.2 0.8
+37.1 5.6
+40.1 24.1
+5.5
+8.1
+8.3
+8.4
+8.4
+difference in total sequence time (about 65 ms) is within the range
+of rasterization/other-module variation and measurement noise.
+This indicates that feature caching alone nearly saturates gridpath efficiency, while vertex reuse mainly contributes to memory
+reduction and long-term runtime savings.
+C. Effect of FiLM Fusion
+The CDF pathway fuses the spatial deformation feature
+fvoxel with the temporal feature ftime through FiLM [41]based channel-wise modulation rather than direct concatenation,
+as described in Sec. IV-B. To evaluate this design choice on more
+than a single scene, we report the full FiLM ON/OFF matrix
+across all six N3DV scenes in Table VIII. For each scene we
+keep the manuscript’s default CDF capacity, hash configuration,
+and training schedule fixed, and only toggle the FiLM module.
+Evaluations are performed on the raw CDF output without CCA
+so that quantization noise does not interfere with the fusion
+comparison.
+Across the six scenes the average ∆PSNR=ON−OFF is
++1.01 dB, indicating that FiLM contributes positively on average. The behavior is, however, scene-dependent: FiLM ON
+improves four scenes (coffee_martini, cook_spinach,
+flame_steak, sear_steak) by +1.90 dB on average, while FiLM OFF is preferable on two scenes
+(cut_roasted_beef, flame_salmon_1) by −0.79 dB
+on average. The Deform-module storage differs by only 2.29 vs
+D. TimeMLP Depth and Time Encoding Format
+The CDF temporal branch encodes the scalar time variable
+t through frequency-based positional encoding followed by a
+TimeMLP with three hidden layers (Sec. IV-B). To examine both
+design choices on N3DV, we ablate (i) the TimeMLP depth, by
+changing the number of hidden layers from three to one or five
+while keeping frequency-based time encoding, and (ii) the timeencoding format, by replacing the frequency encoding with the
+raw scalar t while keeping the default depth. All other settings
+(CDF capacity, hash configuration, training schedule, evaluation
+iteration) are held at the per-scene manuscript default. Table IX
+reports the six-scene averages.
+Reducing the TimeMLP depth from three to one lowers the
+average PSNR by 1.01 dB, while increasing the depth from
+three to five also reduces PSNR by 0.74 dB. The default
+depth therefore sits at the better point in this range under our
+protocol, with no further gain from a deeper TimeMLP. Replacing
+the frequency encoding with the raw scalar t at the default
+depth decreases the average PSNR by 1.66 dB, indicating that
+the frequency-based time encoding contributes substantially to
+learning the deformation field. We therefore retain frequencybased time encoding with a depth-3 TimeMLP as the default
+CDF temporal pathway.
+14
+IEEE TRANSACTIONS ON VISUALIZATION AND COMPUTER GRAPHICS, VOL. 0, NO. 0, 2026
+TABLE IX
+TimeMLP depth and time-encoding format ablation on the six N3DV
+scenes. Each variant overrides a single knob (TimeMLP depth or
+time-encoding format) on top of the per-scene manuscript default; all
+other settings are preserved. ∆PSNR is reported relative to the default.
+The best result in each column is highlighted.
+Variant
+Default (depth 3 + frequency)
+depth 1 + frequency
+depth 5 + frequency
+depth 3 + raw t
+PSNR (dB)↑
+SSIM↑
+∆PSNR (dB)
+32.06
+31.05
+31.32
+30.40
+0.943
+0.941
+0.942
+0.937
+—
+−1.01
+−0.74
+−1.66
+E. Optimization Cost
+We also report the overall optimization time per scene. On
+our hardware (a single RTX 4090 GPU), Swift4D converges in
+about 25 minutes, while 4DGS and Grid4D each take around
+60 minutes. Our method finishes in roughly 64–65 minutes
+per standard 300-frame N3DV scene at the default 20K mainstage budget. Our training time is longer than Swift4D’s and
+comparable to other dynamic 3DGS methods. An optimization
+time below 1.5 hours per scene is practical for offline content
+creation, given the storage savings and the preserved real-time
+rendering speed at test time. Decomposing this wall-clock gap
+into schedule length and per-iteration cost, the measured mainstage per-iteration time is about 90 ms for Swift4D and about
+169 ms for CC-4DGS, reflecting an approximately 1.9× periteration computation overhead. In exchange, the Deform-module
+storage is reduced from 68.4 MB in Swift4D to 1.9 MB
+in CC-4DGS (Table IV); that is, CC-4DGS trades additional
+optimization computation for substantially smaller deployable
+deformation storage. We note that this per-iteration overhead is
+largely implementation-level rather than intrinsic to the CDF: the
+decoder is currently built from standard PyTorch operators (such
+as LayerNorm and Mish) rather than a fused CUDA kernel, and
+re-expressing it with fused-kernel-compatible operations so that
+it can run on optimized fused-MLP backends can substantially
+reduce this cost.
+VII. Limitations and Future Directions
+As Sec. V-E shows, both CC-4DGS and Swift4D exhibit gradual quality decrease as the sequence length grows. This reflects a
+shared limitation of the canonical-plus-deformation 4DGS family
+that CC-4DGS belongs to: a fixed-capacity canonical point set
+together with a fixed-capacity deformation pathway must absorb
+an increasing temporal extent. Streaming-oriented works such
+as 4DGV [29] and 4DGC [27] address this by partitioning the
+sequence into group-of-pictures (GoP) units with per-segment
+models, trading training-time integration for streaming-friendly
+per-segment storage. These methods represent an alternative direction; hierarchical temporal encoding or GoP-style segmentation
+within the CC-4DGS framework is left as future work.
+The computation-over-storage principle behind CC-4DGS, in
+which a stored trainable hash table is replaced by a small
+neural decoder evaluated on the fly, has natural extensions to
+other dynamic 4DGS methods that use a trainable deformation
+hash grid, such as Swift4D [13], Grid4D [5], and 4DGV [29].
+Static representations such as Instant-NGP [4] and hash-grid
+compression schemes such as HAC [47] differ in renderingquery count, entropy and rate-distortion objectives, and per-vertex
+compression baselines, and would require a separate design rather
+than a direct port.
+CC-4DGS adopts the dynamic-score-based decomposition of
+Swift4D [13] to gate the deformation pathway, while the dynamic
+mask itself is learned from scratch. Recent dynamic-static decomposition and streaming methods, including Motion Layering [29]
+and Dynamics-Aware Gaussian Splatting Streaming [33], estimate
+dynamic and static regions either as a preprocessing step or
+jointly with reconstruction. These external motion or dynamicregion priors could replace or initialize the dynamic mask in CC4DGS, potentially shortening the dynamic-score warm-up stage.
+Integrating such priors is a complementary direction and is left
+as future work.
+VIII. Conclusion
+In this work, we introduced CC-4DGS, a storage-efficient
+framework for dynamic Gaussian splatting that jointly addresses
+the deformation and point-cloud storage bottlenecks of prior
+4DGS systems. By replacing multi-resolution hash tables with
+the CDF and compressing canonical Gaussian attributes through
+the CCA pipeline, our method achieves substantial reductions in
+both deformation and appearance storage while maintaining high
+visual fidelity and real-time rendering performance. Experiments
+on the N3DV and Technicolor datasets demonstrate that CC4DGS offers a significantly more favorable trade-off among storage, reconstruction quality, and runtime efficiency than existing
+approaches. Future work will explore more adaptive hashing
+and neural decoding strategies, as well as extensions to longer
+and more complex dynamic sequences and real-time streaming
+scenarios.
+References
+[1] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi,
+and R. Ng, “NeRF: Representing scenes as neural radiance fields for view
+synthesis,” in Proc. Eur. Conf. Comput. Vis., 2020, pp. 405–421.
+[2] B. Kerbl, G. Kopanas, T. Leimkuehler, and G. Drettakis, “3d gaussian
+splatting for real-time radiance field rendering,” ACM Trans. Graph., vol. 42,
+no. 4, pp. 1–14, Jul. 2023.
+[3] S. Fridovich-Keil, A. Yu, M. Tancik, Q. Chen, B. Recht, and A. Kanazawa,
+“Plenoxels: Radiance fields without neural networks,” in Proc. IEEE/CVF
+Conf. Comput. Vis. Pattern Recognit., 2022, pp. 5501–5510.
+[4] T. Müller, A. Evans, C. Schied, and A. Keller, “Instant neural graphics
+primitives with a multiresolution hash encoding,” ACM Trans. Graph.,
+vol. 41, no. 4, pp. 1–15, 2022.
+[5] J. Xu, Z. Fan, J. Yang, and J. Xie, “Grid4d: 4d decomposed hash encoding
+for high-fidelity dynamic gaussian splatting,” Proc. Adv. Neural Inf. Process.
+Syst., vol. 37, pp. 123 787–123 811, 2024.
+[6] G. Wu et al., “4d gaussian splatting for real-time dynamic scene rendering,”
+in Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit., 2024, pp. 20 310–
+20 320.
+[7] J. Yan, R. Peng, L. Tang, and R. Wang, “4d gaussian splatting with
+scale-aware residual field and adaptive optimization for real-time rendering
+of temporally complex dynamic scenes,” in Proc. 32nd ACM Int. Conf.
+Multimedia, 2024, pp. 7871–7880.
+[8] T. Lu et al., “Scaffold-gs: Structured 3d gaussians for view-adaptive
+rendering,” in Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit., 2024,
+pp. 20 654–20 664.
+[9] S. Kwak, J. Kim, J. Y. Jeong, W.-S. Cheong, J. Oh, and M. Kim, “Modec-gs:
+Global-to-local motion decomposition and temporal interval adjustment for
+compact dynamic 3d gaussian splatting,” in Proc. IEEE/CVF Conf. Comput.
+Vis. Pattern Recognit., 2025, pp. 11 338–11 348.
+PARK AND RHEE: CC-4DGS: STORAGE-EFFICIENT DYNAMIC GAUSSIAN SPLATTING
+[10] Z. Guo, W. Zhou, L. Li, M. Wang, and H. Li, “Motion-aware 3D Gaussian
+splatting for efficient dynamic scene reconstruction,” IEEE Trans. Circuits
+Syst. Video Technol., vol. 35, no. 4, pp. 3119–3133, Apr. 2025.
+[11] W. Li, X. Pan, J. Lin, P. Lu, D. Feng, and W. Shi, “Frpgs: Fast, robust, and
+photorealistic monocular dynamic scene reconstruction with deformable 3d
+gaussians,” IEEE Trans. Circuits Syst. Video Technol., vol. 35, no. 9, pp.
+9119–9131, Sep. 2025.
+[12] X. Cui et al., “Streetsurfgs: Scalable urban street surface reconstruction with
+planar-based gaussian splatting,” IEEE Trans. Circuits Syst. Video Technol.,
+vol. 35, no. 9, pp. 8780–8793, Sep. 2025.
+[13] J. Wu et al., “Swift4D: Adaptive divide-and-conquer Gaussian splatting for
+compact and efficient reconstruction of dynamic scene,” in Proc. Int. Conf.
+Learn. Representations, 2025, pp. 8276–8293.
+[14] Z. Yang, H. Yang, Z. Pan, and L. Zhang, “Real-time photorealistic dynamic
+scene representation and rendering with 4d gaussian splatting,” in Proc. Int.
+Conf. Learn. Representations, 2024, pp. 9142–9159.
+[15] L. Liu, J. Gu, K. Zaw Lin, T.-S. Chua, and C. Theobalt, “Neural sparse voxel
+fields,” Proc. Adv. Neural Inf. Process. Syst., vol. 33, pp. 15 651–15 663,
+2020.
+[16] A. Pumarola, E. Corona, G. Pons-Moll, and F. Moreno-Noguer, “D-nerf:
+Neural radiance fields for dynamic scenes,” in Proc. IEEE/CVF Conf.
+Comput. Vis. Pattern Recognit., 2021, pp. 10 318–10 327.
+[17] K. Park et al., “Nerfies: Deformable neural radiance fields,” in Proc.
+IEEE/CVF Int. Conf. Comput. Vis., 2021, pp. 5865–5874.
+[18] A. Cao and J. Johnson, “Hexplane: A fast representation for dynamic
+scenes,” in Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit., 2023,
+pp. 130–141.
+[19] S. Fridovich-Keil, G. Meanti, F. R. Warburg, B. Recht, and A. Kanazawa,
+“K-planes: Explicit radiance fields in space, time, and appearance,” in Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit., 2023, pp.
+12 479–12 488.
+[20] Z. Yang, X. Gao, W. Zhou, S. Jiao, Y. Zhang, and X. Jin, “Deformable
+3d gaussians for high-fidelity monocular dynamic scene reconstruction,” in
+Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit., 2024, pp. 20 331–
+20 341.
+[21] Y. Liang et al., “GauFRe: Gaussian deformation fields for real-time dynamic
+novel view synthesis,” in Proc. IEEE/CVF Winter Conf. Appl. Comput. Vis.,
+2025, pp. 2642–2652.
+[22] J. Bae, S. Kim, Y. Yun, H. Lee, G. Bang, and Y. Uh, “Per-gaussian
+embedding-based deformation for deformable 3d gaussian splatting,” in
+Proc. Eur. Conf. Comput. Vis., 2024, pp. 321–335.
+[23] J. Lee, C. Won, H. Jung, I. Bae, and H.-G. Jeon, “Fully explicit dynamic
+gaussian splatting,” Proc. Adv. Neural Inf. Process. Syst., vol. 37, pp. 5384–
+5409, 2024.
+[24] Z. Li, Z. Chen, Z. Li, and Y. Xu, “Spacetime gaussian feature splatting for
+real-time dynamic view synthesis,” in Proc. IEEE/CVF Conf. Comput. Vis.
+Pattern Recognit., 2024, pp. 8508–8520.
+[25] Q. Liu et al., “MoDGS: Dynamic Gaussian splatting from casually-captured
+monocular videos with depth priors,” in Proc. Int. Conf. Learn. Representations, 2025, pp. 97 048–97 074.
+[26] M. You and J. Hou, “Decoupling dynamic monocular videos for dynamic
+view synthesis,” IEEE Trans. Vis. Comput. Graph., vol. 31, no. 9, pp. 5146–
+5157, Sep. 2025.
+[27] Q. Hu et al., “4dgc: Rate-aware 4d gaussian compression for efficient
+streamable free-viewpoint video,” in Proc. IEEE/CVF Conf. Comput. Vis.
+Pattern Recognit., 2025, pp. 875–885.
+[28] X. Zhang et al., “Mega: Memory-efficient 4d gaussian splatting for dynamic
+scenes,” in Proc. IEEE/CVF Int. Conf. Comput. Vis., 2025, pp. 27 828–
+27 838.
+[29] P. Dai et al., “4d gaussian videos with motion layering,” ACM Trans. Graph.,
+vol. 44, no. 4, pp. 1–14, 2025.
+[30] Y. Zeng, J. Hou, Q. Zhang, S. Ren, and W. Wang, “Dynamic 3D point
+cloud sequences as 2D videos,” IEEE Trans. Pattern Anal. Mach. Intell.,
+vol. 46, no. 12, pp. 9371–9386, 2024.
+[31] H. Li, S. Li, X. Gao, A. Batuer, L. Yu, and Y. Liao, “GIFStream: 4D
+Gaussian-based immersive video with feature stream,” in Proc. IEEE/CVF
+Conf. Comput. Vis. Pattern Recognit., 2025, pp. 21 761–21 770.
+[32] M. Liu et al., “Light4GS: Lightweight compact 4D Gaussian splatting
+generation via context model,” IEEE Trans. Circuits Syst. Video Technol.,
+vol. 36, no. 6, pp. 7992–8005, Jun. 2026.
+[33] Z. Liu et al., “Dynamics-aware Gaussian splatting streaming towards fast
+on-the-fly 4D reconstruction,” IEEE Trans. Vis. Comput. Graph., vol. 32,
+no. 7, pp. 6810–6824, Jul. 2026.
+15
+[34] J. Chen, Z. Hu, P. Wu, H. Zhu, H. Li, and X. Sun, “Dash: 4d hash encoding
+with self-supervised decomposition for real-time dynamic scene rendering,”
+in Proc. IEEE/CVF Int. Conf. Comput. Vis., 2025, pp. 26 349–26 359.
+[35] R. Fan, J. Wu, X. Shi, L. Zhao, Q. Ma, and L. Wang, “Fov-gs: Foveated 3d
+gaussian splatting for dynamic scenes,” IEEE Trans. Vis. Comput. Graph.,
+vol. 31, no. 5, pp. 2975–2985, 2025.
+[36] M. Shao, Y. Qiao, K. Zhang, and L. Meng, “Frequency-aware uncertainty
+gaussian splatting for dynamic scene reconstruction,” IEEE Trans. Vis.
+Comput. Graph., vol. 31, no. 5, pp. 3558–3568, 2025.
+16
+IEEE TRANSACTIONS ON VISUALIZATION AND COMPUTER GRAPHICS, VOL. 0, NO. 0, 2026
+[37] K. L. Navaneet, K. P. Meibodi, S. A. Koohpayegani, and H. Pirsiavash,
+“CompGS: Smaller and faster Gaussian splatting with vector quantization,”
+in Proc. Eur. Conf. Comput. Vis., 2024, pp. 330–349.
+[38] S. Girish, K. Gupta, and A. Shrivastava, “EAGLES: Efficient accelerated
+3D Gaussians with lightweight encodings,” in Proc. Eur. Conf. Comput.
+Vis., 2024, pp. 54–71.
+[39] W.-C. Kang et al., “Learning to embed categorical features without embedding tables for recommendation,” in Proc. 27th ACM SIGKDD Conf.
+Knowl. Discov. Data Mining, 2021, pp. 840–850.
+[40] J. L. Schonberger and J.-M. Frahm, “Structure-from-motion revisited,” in
+Proc. IEEE Conf. Comput. Vis. Pattern Recognit., 2016, pp. 4104–4113.
+[41] E. Perez, F. Strub, H. De Vries, V. Dumoulin, and A. Courville, “Film:
+Visual reasoning with a general conditioning layer,” in Proc. AAAI Conf.
+Artif. Intell., vol. 32, no. 1, 2018, pp. 3942–3951.
+[42] Y. Collet, “Zstandard–fast real-time compression algorithm,” 2016,
+Accessed: Nov. 17, 2025.
+. [Online]. Available: https://facebook.
+github.io/zstd/
+[43] J. Sun, H. Jiao, G. Li, Z. Zhang, L. Zhao, and W. Xing, “3dgstream: On-thefly training of 3d gaussians for efficient streaming of photo-realistic freeviewpoint videos,” in Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit.,
+2024, pp. 20 675–20 685.
+[44] T. Li et al., “Neural 3d video synthesis from multi-view video,” in Proc.
+IEEE/CVF Conf. Comput. Vis. Pattern Recognit., 2022, pp. 5521–5531.
+[45] N. Sabater et al., “Dataset and pipeline for multi-view light-field video,”
+in Proc. IEEE Conf. Comput. Vis. Pattern Recognit. Workshops, 2017, pp.
+1743–1753.
+[46] A. Paszke et al., “Pytorch: An imperative style, high-performance deep
+learning library,” in Proc. Adv. Neural Inf. Process. Syst., 2019, pp. 8024–
+8035.
+[47] Y. Chen, Q. Wu, W. Lin, M. Harandi, and J. Cai, “HAC: Hash-grid assisted
+context for 3D gaussian splatting compression,” in Proc. Eur. Conf. Comput.
+Vis., 2024, pp. 422–438.
+Kyungdae Park (Graduate Student Member, IEEE)
+received the BS degree in information and communication engineering from Inha University, Incheon,
+South Korea, in 2024. He is currently working toward
+the integrated MS–PhD degree with the Department
+of Artificial Intelligence Semiconductor Engineering,
+Hanyang University, Seoul, South Korea. His research
+interests include neural rendering, light field video
+processing, and dynamic scene reconstruction.
+Chae Eun Rhee (Senior Member, IEEE) received the
+BS, MS, and PhD degrees in electrical engineering
+and computer science from Seoul National University,
+Seoul, South Korea, in 2000, 2002, and 2011, respectively. From 2002 to 2005, she was an engineer with
+Digital TV Development Group, Samsung Electronics
+Company, Ltd., Suwon City, Korea, focusing on bus
+architecture and MPEG decoder development. From
+2013 to 2023, she was a faculty member with the
+Department of Electrical and Computer Engineering,
+Inha University. In 2024, she joined the Department of
+Electronic Engineering, Hanyang University, Korea, where she is currently a professor. Her research interests include video coding algorithms and architectures,
+immersive video systems, and hardware design for AI applications.

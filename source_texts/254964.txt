@@ -1,0 +1,330 @@
+:sparkles:  An advanced 3D Gaussian Splatting renderer for THREE.js - DRAFT: Restructured Splat setup aimed at singular Splat object by mrxz · Pull Request #196 · sparkjsdev/spark
+
+DRAFT: Restructured Splat setup aimed at singular Splat object by mrxz · Pull Request #196 · sparkjsdev/spark · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+mrxz
+commented
+Oct 20, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+This is a PR exploring the benefits of refactoring the project to have a simplified/straightforward Splat object at the core. Advanced features can then be layered on top. This reduces coupling between the various features, avoiding a combinatory explosion and allows for dedicated purpose-built implementations that users can opt-in. The base case of loading and rendering a singular splat has the main focus.
+Note
+Despite being a Pull Request, the changes are so extensive that going through the diffs is impractical. The following text aims to provide the global overview of the changes, but checking out the branch directly is encouraged.
+Global overview
+The main class is Splat, which extends THREE.Mesh and is intended to be used in a similar fashion. The individual splat properties are provided by any instances adhering to the SplatData interface. This aims to abstract the CPU and GPU representation of the splat properties. Loading splats can be done using the SplatLoader, which returns Splat instances.
+The following parts have been removed or replaced:
+SparkRenderer/SparkViewpoint/SparkAccumulator: The Splat class handles it's own sorting and rendering.
+SparkControls: No longer part of the library, though still used in the examples
+SplatEdit
+SplatSkinning
+generators
+dyno
+The following parts have been retained:
+SplatWorker
+Rust project for sorting and raycasting
+Loaders for the various splat file formats. Callbacks have been unified into a SplatEncoder interface, improving load times by reducing indirections and abstracting CPU representation of the splat properties from the loaders.
+The splatVertex.glsl/splatFragment.glsl shaders
+PackedSplats: reduced to a read-only and only "one of" the possible SplatData implementations
+Procedural splat functions for creating splats from images, text, etc... Exposed as factory methods on the Splat class: Splat.fromImage/fromText/....
+Three.js
+Spark integrates into the Three.js rendering pipeline. However the SplatMesh does not behave in ways one would expect from Three.js objects. In part due to the (implicit) SparkRenderer. With these indirections out of the way it becomes easier to align with idiomatic Three.js code. This should help people familiar with Three.js use Spark as well as improve interoperability with other Three.js libraries or frameworks.
+Cloning a splat can be done using .clone() instead of having to do new SplatMesh({ packedSplats: source.packedSplats });
+Rendering related properties can be set on the splat, including visible/layers/renderOrder/frustumCulled, whereas SplatMesh only supported visible and the others would needed to be set on the SparkRenderer affecting all splat meshes
+The splat.geometry now has a boundingSphere and (approximate) boundingBox.
+Loading is handled entirely outside of Splat, so no .initialized flag. A Splat instance is the splat object in question. The SplatLoader returns a promise that can be awaited giving a ready to use Splat.
+In general the goal is to avoid hacks (like the implicit SparkRenderer insertion) and workarounds (like SparkRenderer.renderEnvMap). Instead making sure standard Three.js approaches just work or require minimal logic to get working in user-code.
+Global Sorting
+The biggest feature regression in this branch is the lack of global sorting. This means that combining multiple (overlapping) splats won't always render correctly. As mentioned before the idea is to layer more complex features on top of the base implementation.
+Scenario
+Envisioned solution
+Multiple non-overlapping static splats
+Works fine as default Three.js sorting handles this. For performance might still want to combine them
+Multiple overlapping static splats
+Either combine ahead of time, or implement utilities for merging splats. Akin to BufferGeometryUtils.mergeGeometries
+Multiple overlapping moving splats
+Introduce a BatchedSplat analogous to BatchedMesh that allows splats to be combined into a single draw-call, yet retain their own transform
+Multiple dynamic splats
+(Re)introduce the "compute shader" semantic of PackedSplats and combine them in a dedicated DynamicSplat class.
+API
+The API surface is kept as minimal as possible. The main classes exposed to the consuming projects are Splat and SplatLoader. This part isn't particularly fleshed out and can still easily change.
+Common use-case of loading a splat is as follows:
+```
+const loader = new SplatLoader();
+const splat = await loader.loadAsync(splatURL);
+```
+For procedural splats there is Splat.construct/.fromImageUrl/.fromText:
+```
+const imageSplat = await Splat.fromImageUrl(imageURL);
+const textSplat = Splat.fromText("Hello World", {
+  font: "Arial",
+  fontSize: 60,
+  color: new THREE.Color(0xE420B7),
+});
+```
+New possibilities
+Some things became very hard to implement or even try out in the old setup. Changing the way the splat properties were encoded/packed on the CPU/GPU impacted all other parts. This is now mostly abstracted away and allows alternative representations to be implemented geared towards different use-cases.
+Likewise the SplatData is in principal assumed to be static. For sorting this means that a readback step is not strictly necessary and alternative sorting methods can be implemented and tested.
+Another avenue that could improve the out-of-the-box DX is that SplatLoader returns a Splat instance instead of SplatData. While not utilized yet in this branch, the idea is that the loaders could provide additional metadata (e.g. trained with AA or not, bounding boxes). Currently when file formats expose such information it is simply lost, whereas it could be used to set the right properties automatically.
+Examples
+Several of the examples have been updated/ported. Below is a table detailing which examples have been updated, which haven't, and what would be needed:
+Examples
+Status
+Notes
+Hello World
+✔️
+Environment Map
+✔️
+Interactivity
+✔️
+Multiple Splats
+✔️
+The multiple instances do cause individual sort operations and draw calls. Would improve with a BatchedSplat implementation
+Multiple Viewpoints
+✔️
+Splat handles different cameras/viewpoints
+Procedural Splats
+✔️
+Uses the BatchedSplat implementation to handle sorting among the different splats
+Raycasting
+✔️
+Precise raycasting depends on PackedSplats representation. Instead of implementing raycasting, GPU picking might be a better option (can also take shader hooks into account)
+Dynamic Lighting
+⚠️
+Crudely ported using shader hooks to demonstrate struct datatypes, but result isn't identical to SplatEdit based original
+Particle Animation
+⚠️
+Generation of clouds work, no movement animation and flashing when regenerating
+Particle Simulation
+❌
+Not ported. Generators could be implemented as a dynamic SplatData source, though this example would require both dynamic splat properties and global sorting
+Splat Painter
+❌
+Not ported. Would require something like DynamicSplat
+Splat Reveal Effects
+⚠️
+Implemented using shader hooks, some effects don't work correctly due to changes in splat order. Possible solution would be to apply same shader hooks to sorting (though this couples shader hooks to sorting implementation)
+Splat Shader Effects
+❌
+Not ported
+Splat Transitions
+❌
+Not ported
+Stochastic splat sorting
+✔️
+Stochastic rendering is still part of Splat as it suppresses sorting
+SOGS Compression
+✔️
+WebXR
+✔️
+Splat detects WebXR sessions and camera to avoid double sorting
+GLSL Shaders
+✔️
+Debug Coloring
+⚠️
+Implemented using shader hooks, flipped normal logic not ported
+Depth of Field
+✔️
+Implemented using shader hooks, DoF is not part of Splat any more
+Splat Texture
+❌
+Not ported
+Editor
+❌
+Not ported
+Closing remarks
+Obviously moving the project in this direction would be a big change. I do think there's merit in a simple foundation that aligns with the most common use-case. Currently users run into trade-offs and limitations stemming from the SparkRenderer/SplatAccumulator setup or PackedSplat representation. While many of these can be worked around, the initial impression left behind isn't ideal. Flipping this around and having the base-case work out-of-the-box as good as possible and instead requiring the user to opt for things like global sorting will work better IMHO. I'd expect people to react more positively to diving into the docs to see how to combine/sort multiple splats, compared to wondering why their splat doesn't quite render correctly.
+mrxz
+force-pushed
+the
+slim-poc
+branch
+2 times, most recently
+from
+25baee2 to
+13391ff
+Compare
+October 20, 2025 15:15
+dmarcos
+commented
+Oct 21, 2025
+Copy link
+Copy Markdown
+Contributor
+Beautiful work!
+dmarcos
+commented
+Oct 21, 2025
+Copy link
+Copy Markdown
+Contributor
+In the near future, I would also love to see an experimental WebGPUSplat to be used with WebGPURenderer
+dmarcos
+commented
+Oct 21, 2025
+Copy link
+Copy Markdown
+Contributor
+For Multiple dynamic splats Can you elaborate (Re)introduce the "compute shader" semantic of PackedSplats and combine them in a dedicated DynamicSplat class?
+mrxz
+commented
+Oct 21, 2025
+Copy link
+Copy Markdown
+Collaborator
+Author
+For Multiple dynamic splats Can you elaborate (Re)introduce the "compute shader" semantic of PackedSplats and combine them in a dedicated DynamicSplat class?
+If you want to dynamically alter the splat properties you can use shader hooks. But if you alter the positions of the splats, this can impact the required sorting. For a single Splat instance this can still be achieved by applying the same shader hooks to the readback shader, or by simulating on the CPU. But things become more complex if you want to combine multiple splats that can/will overlap with each other while having different dynamic behaviour.
+This means you'll need global sorting and apply dynamic behaviour to a subset of the splats. In that case being able to run a shader to update each splat entirely on the GPU would be a solution (as is currently possible on main). It would also greatly simplify porting the Particle Simulation, Splat Painter and Interactive Holes examples. The drawback being that it would require both PackedSplats (or at least a representation that can be GPU encoded) and the readback sorting (as the latest splat centers reside in GPU memory).
+A DynamicSplat would then be there to ensure these constraints are met. Possibly re-encode to the PackedSplats representation, and run the "compute shader" each frame.
+dmarcos
+reviewed
+Oct 21, 2025
+View reviewed changes
+Comment thread
+examples/depth-of-field/index.html
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+dmarcos
+commented
+Oct 21, 2025
+Copy link
+Copy Markdown
+Contributor
+Can we remove dist from the PR?
+dmarcos
+commented
+Oct 22, 2025
+Copy link
+Copy Markdown
+Contributor
+Looks like the dist directory is still part of the PR
+mrxz
+force-pushed
+the
+slim-poc
+branch
+from
+72d85d9 to
+df1f998
+Compare
+October 24, 2025 20:09
+mrxz
+commented
+Oct 24, 2025
+Copy link
+Copy Markdown
+Collaborator
+Author
+Looks like the dist directory is still part of the PR
+Should be resolved now, rebased against the wrong commit the first time around.
+mrxz
+mentioned this pull request
+Oct 31, 2025
+Add an option to use linearToOutputTexel.
+#210
+Closed
+mrxz
+commented
+Nov 4, 2025
+Copy link
+Copy Markdown
+Collaborator
+Author
+Added a CPU based sorting approach and a basic BatchedSplat implementation, which allows combining multiple Splat objects into one draw call, while still allowing individual transform matrices. Both are still pretty crude, but do illustrate the general idea for these features.
+For the CPU sorting it can be improved by:
+Implementing the inner sorting routine in Rust as opposed to JS
+Allow the user to indicate that their scene is static (no or infrequent changes to splat transforms), in which case the splat centers could be transformed once and re-used in subsequent sort operations
+Pass additional metadata of the splats (min/max bounding box) to adjust the depth range used for sorting, making better use of the available precision.
+The BatchedSplat implementation currently rebuilds the combined splat data whenever a splat is added/removed. This is done on the CPU side. This was easier to implement and suffices in cases where the BatchedSplat is generated once or only changes infrequently. Ultimately more performant approaches could be taken where the GPU representation of the splats are (texture copied) to the combined splat data (GPU -> GPU, instead of CPU -> CPU -> GPU).
+The interface is currently based on BatchedMesh from Three.js. Since the requirements are different, I think deviating from it and making use of proxy/tracking entities will create a more convenient API. Rough idea:
+```
+const splat1 = await loader.loadAsync(splatURL);
+scene.add(splat1);
+
+const splat2 = await loader.loadAsync(splatURL);
+
+const batchedSplat = new BatchedSplat(2);
+scene.add(batchedSplat);
+
+// Adds splat1 to the batch, sets splat1.visible = false and 'tracks' it transform
+batchedSplat.addSplat(splat1);
+// Adds (raw) splat data to the batch, returns a proxy entity that can be placed in the scenegraph
+const splatProxy = batchedSplat.addSplatData(splat2.splatData);
+
+// Changes to the splatProxy take effect in the batchedSplat
+scene.add(splatProxy); 
+```
+Restructured Splat setup aimed at singular Splat object
+c74b2db
+mrxz
+force-pushed
+the
+slim-poc
+branch
+from
+52afe52 to
+c74b2db
+Compare
+November 6, 2025 13:42
+mrxz
+commented
+Dec 5, 2025
+Copy link
+Copy Markdown
+Collaborator
+Author
+Quick observation regarding memory usage. I compared the hello-world example between the main branch and this branch. Despite defaulting to an extended representation for splats (2x the size of PackedSplats) the total memory usage was lower. Especially on the GPU side, the main branch uses 28.7 MiB whereas only 24.59 MiB was used in slim-poc.
+A large contributing factor is the SplatAccumulator pool. Each accumulator might grow to be able to hold all splats in a scene, and worst case this would happen to all 5 accumulators. For hello-world only 3 accumulators end up being used, giving the following breakdown:
+2.72 MiB for packedSplatsTexture
+2.72 MiB for sh2Texture
+2.72 MiB for sh3Texture
+1.36 MiB for sh1Texture
+3x 2.72 MiB for accumulator
+0.34 MiB for readback
+For the slim-poc branch this was the following:
+8.15 MiB for shTexture
+0.34 MiB for readback
+5.44 MiB for packedSplats
+In other words, despite using more data per splat (and per sh coefficient) the memory usage is lower. Furthermore there are possibilities to reduce memory usage even further. With the potential of CPU sorting no readback texture would be needed. And it's even possible to free the splat buffers on the CPU side (as long as we keep the centers) to save even more memory.
+querielo
+commented
+Dec 8, 2025
+Copy link
+Copy Markdown
+Contributor
+Added a CPU based sorting approach and a basic BatchedSplat implementation, which allows combining multiple Splat objects into one draw call, while still allowing individual transform matrices.
+@mrxz Would it be possible to update the matrices every frame?
+mrxz
+commented
+Dec 11, 2025
+Copy link
+Copy Markdown
+Collaborator
+Author
+@mrxz Would it be possible to update the matrices every frame?
+Yes, the matrices can be updated every frame. They'll also take effect immediately, avoiding the 1+ frame latency as described in #205.
+The way it works is similar to Three.js' BatchedMesh. The 4x4 matrices are packed into a texture and uploaded when needed.. The procedural-splats example in this branch uses BatchedSplat and updates the matrices each frame, for example.
+Though as mentioned the API is still a bit crude and it can definitely be improved to automatically update the matrices from proxy objects.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

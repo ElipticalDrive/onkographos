@@ -1,0 +1,194 @@
+Performant ray tracing on CPU and GPU. Contribute to JuliaGeometry/Raycore.jl development by creating an account on GitHub.
+
+Add sorted all-hit TLAS traversal for ray path rasterization by VEZY · Pull Request #19 · JuliaGeometry/Raycore.jl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+VEZY
+commented
+Jun 28, 2026
+Copy link
+Copy Markdown
+This PR adds all_hits! for StaticTLAS traversal to collect every unique hit along a ray into caller-provided buffers, sorted by distance.
+I need this to implement the rasterization algorithm for ArchimedLight, because it uses the full sequence of intersections along each ray to compute rediffusion.
+What changed
+Implements all_hits! and exports it. We first add a single-pass TLAS/BLAS traversal that writes triangle metadata, hit distance, per-ray hit count and overflow status. Then we keep the closest max_hits hits when the output stack is full. Suppress duplicate hits with matching metadata and near-identical distance.
+I added some tests in test/test_instanced_bvh.jl.
+Important note: I used Codex to implement this feature.
+VEZY
+added 7 commits
+June 28, 2026 12:24
+Add all-hit TLAS traversal API
+77f09d0
+Add all_hits duplicate and overflow tests
+e2751ff
+Add all_hits KernelAbstractions kernel coverage
+b68f6c5
+Exercise all_hits in dynamic backend kernel tests
+1644a57
+Update test_instanced_bvh.jl
+acf8e38
+Metadata type should stay open (whatever the user is passing)
+b2a54d6
+Allow raw all_hits stacks
+2452f7b
+VEZY
+commented
+Jun 29, 2026
+Copy link
+Copy Markdown
+Author
+Sorry, I just noticed that I accidentally included formatting changes in test/test_instanced_bvh.jl. I have format-on-save enabled in VS Code, and it seems our formatter settings differ. I can roll back if needed.
+VEZY
+added 3 commits
+June 29, 2026 11:06
+Add instance indices to all_hits!
+…
+70567de
+```
+Extend `all_hits!` to accept and populate an `instance_indices_out` buffer with 1-based TLAS instance indices alongside hit metadata and distances.
+
+Duplicate suppression now also checks the instance index, so coplanar hits from different instances are correctly retained as separate hits.
+```
+Update instanced-bvh.jl
+…
+c761a29
+```
+rename variables consistantly with other functions (e.g. closest_hit)
+```
+Increase traversal stack capacity
+4a2b3be
+SimonDanisch
+commented
+Jun 30, 2026
+Copy link
+Copy Markdown
+Member
+No worries ;) Happy to get this in once ready :)
+only change the stack size for all_hits!
+d886123
+VEZY
+commented
+Jun 30, 2026
+Copy link
+Copy Markdown
+Author
+@SimonDanisch, I have a question: I can't manage to build a correct TLAS on the GPU (I use Metal).
+When I build the mutable TLAS on KernelAbstractions.CPU(), call Raycore.sync!(tlas), then Adapt.adapt the resulting tlas.static_tlas arrays to Metal, Metal traversal matches the CPU RayCore reference exactly on my test scenes.
+But when I build the TLAS directly on the Metal backend, using (roughly):
+```
+tlas = Raycore.TLAS(metal_backend)
+push!(tlas, mesh_or_instances...)
+Raycore.sync!(tlas)
+static_tlas = tlas.static_tlas
+```
+and then run the same RayCore traversal kernels on Metal, I get very different hit stacks. I checked, and the issue shows up before ArchimedLight's reductions, it's the raw RayCore outputs that differ at the hit level, even for missing hits.
+So my current fix is to build it on the CPU first and adapt it to the GPU, so instead of:
+```
+tlas_build_backend = metal_backend
+```
+I do:
+```
+tlas_build_backend = KernelAbstractions.CPU()
+static_tlas = Adapt.adapt(metal_backend, tlas.static_tlas)
+```
+A few observations from my diagnostics:
+Increasing max_hits_per_pixel from 32 to 256 did not fix the mismatch. I thought that it overflowed at first, but neither CPU nor Metal reported hit-buffer overflow.
+Instance index and metadata decoding appear correct when using the CPU-built static TLAS.
+I tried to disable duplicate suppression (from all_hits!) but it's not that either.
+Does RayCore currently support building TLAS directly on Metal.jl? If so, did you see weird things happening with TLAS(metal_backend), push! or sync! or am I the only one? Maybe I missed something that I should have done?
+I can try and provide a minimal reproducer if it's useful. Else I can try debugging myself, but I don't have the expertise so I'll probably rely heavily on AI tools.
+SimonDanisch
+commented
+Jun 30, 2026
+Copy link
+Copy Markdown
+Member
+Yeah metal has a problem with the used atomics ( i think in the KA.sort! implementation).
+If you have claude or so, I'd love to still find a solution which builds correctly on metal, maybe even by fixing the atomics in Metal.jl itself! Otherwise I'd be happy about a good work around.
+@jkrumbiegel had a pr at some point to just build on CPU for Metal.
+VEZY
+mentioned this pull request
+Jun 30, 2026
+Re-enable direct GPU TLAS construction
+VEZY/ArchimedLight.jl#42
+Closed
+VEZY
+commented
+Jun 30, 2026
+Copy link
+Copy Markdown
+Author
+OK @SimonDanisch let's give it a try. I have Codex Pro for a bit, let's put it to good use. So should I start in Metal directly or KA?
+SimonDanisch
+commented
+Jun 30, 2026
+Copy link
+Copy Markdown
+Member
+I think the problem is:
+```
+perm = AK.sortperm(morton_codes)
+```
+So the MWE might just be:
+```
+using Metal
+import AcceleratedKernels as AK
+codes = rand(UInt32, 10_000)
+mt_codes = MtlArray(codes)
+perm = AK.sortperm(mt_codes)
+Array(perm) == sortperm(codes)
+```
+I would prompt to make this work first without touching AK, since as far as I can tell the code is correct on other platforms, so if we really want to have Metal work like all the other platforms, and deliver on the promise to be able to just switch out the backends, the fix should go into metal.
+If that's really hard, and there's a small fix in how the AK kernel could be rewritten, I guess that'd be a compromise we could also settle on, but I'd definitely try to avoid it.
+This was referenced Jun 30, 2026
+Add ordered atomics
+JuliaGPU/Metal.jl#870
+Closed
+Add atomic memory orderings for Metal
+JuliaConcurrent/Atomix.jl#79
+Closed
+VEZY
+commented
+Jun 30, 2026
+Copy link
+Copy Markdown
+Author
+Thanks a lot @SimonDanisch, I opened a PR on Metal and another on Atomix. The issue was that Metal atomics were always treated as relaxed, which is fast but does not guarantee that GPU threads see each other’s BVH writes before continuing the refit. That should be fixed now. Let's wait for a merge and release of both packages (if they agree).
+Use AK's mapreduce for the computing the scene's AABB
+…
+4dd18dd
+```
+This allows to give a neutral value for GPU padding/workgroup lanes
+```
+VEZY
+commented
+Jul 1, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Author
+I use AK.mapreduce now for computing the scene AABB (see 4dd18dd). Is that fine? It gives the ability to add a neutral value. If you think the CPU backend should rely on Base.mapreduce, I could do something like that instead:
+```
+scene_aabb = backend isa KA.CPU ? mapreduce(world_bound, ∪, primitives, init=init) : AK.mapreduce(world_bound, ∪, primitives; init=init, neutral=init)
+```
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

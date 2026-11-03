@@ -1,0 +1,279 @@
+Contribute to tue-robotics/geolib2 development by creating an account on GitHub.
+
+Add a bounding volume hierarchy for mesh ray, sphere and point queries by MatthijsBurgh · Pull Request #91 · tue-robotics/geolib2 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+MatthijsBurgh
+commented
+Oct 19, 2026
+Copy link
+Copy Markdown
+Member
+Stacked on #89. Please merge that first; this PR will then retarget to master. It is independent of #90.
+Summary
+Shape::intersect(Ray), Shape::intersect(point, radius) and Shape::contains loop over every triangle of the mesh. This PR adds MeshBVH, a bounding volume hierarchy: a tree of axis-aligned boxes over the triangles, split at the median, with at most 4 triangles per leaf. It makes these queries O(log N). Box, CompositeShape, HeightMap and Octree have their own implementations and are not affected, but CompositeShape children that are plain meshes do benefit.
+Design
+Lazy and cached: Mesh::getBVH() builds the tree on first use and caches it until the mesh is changed. Every mutating Mesh method clears the cache, now including filterOverlappingVertices, which did not clear the caches before.
+Thread-safe: the tree is immutable, and the cache is a shared_ptr accessed with std::atomic_load/std::atomic_store. Threads that query a fresh shape at the same time each get a valid tree. Copies of a mesh share the tree, which keeps its own copy of the triangles, so it stays valid when the original mesh is destroyed.
+contains: a winding number needs every triangle, so the tree alone does not speed it up. For closed meshes, the signed number of ray crossings equals the winding number exactly, and counting them only visits nodes along the ray.
+Closedness is checked on vertex positions rather than indices, so triangle soups work. Positions are snapped to a grid of 1e-9 × the mesh size, because "duplicated" vertices are often not bit-identical; for example, a UV sphere's pole is a ring of vertices about 1e-16 apart. Merging vertices that close only leaves gaps far too small to change the crossing count.
+A crossing near an edge or vertex, or a ray lying in a triangle's plane, is detected. The query then retries with another ray direction and finally falls back to the solid-angle winding number.
+Open meshes always use the solid-angle winding number, so their results are unchanged from Fix and improve collision checking of shapes and sensors #89.
+The root box of the tree serves as a bounding-box early-out for all queries.
+Benchmark (Release, base = #89, 4096-triangle UV sphere)
+base
+this PR
+contains, 20k points
+487 ms
+8.8 ms
+intersect(sphere), 20k
+450 ms
+7.6 ms
+intersect(ray), 20k
+369 ms
+23 ms
+All three return identical results: the same inside/hit counts and the same ray distance sum.
+Known limitation
+Mesh's other caches (getMaxRadius, getTriangles) are still lazily filled without synchronization, as before. Copying a Mesh while another thread builds its tree is also unsynchronized. Neither is new to this PR.
+Test plan
+New test_mesh_bvh:
+20 randomly posed boxes, with shared vertices and as triangle soups, × 500 points: contains, intersect(sphere) and intersect(ray) (distance to 1e-6) all match Box exactly
+analytic sphere bounds
+nearly coincident vertices
+open meshes
+overlapping closed meshes (winding number 2)
+empty mesh
+cache invalidation and sharing between copies
+concurrent first use from 8 threads
+valgrind: no leaks, no errors
+colcon test: 148 tests (gtests + clang-format/clang-tidy/lint), 0 failures
+🤖 Generated with Claude Code
+Add a bounding volume hierarchy for mesh ray, sphere and point queries
+…
+4807651
+```
+Shape::intersect(Ray), Shape::intersect(point, radius) and
+Shape::contains looped over all triangles. Add MeshBVH, a bounding volume
+hierarchy of axis aligned boxes (median split, max 4 triangles per leaf),
+which is built lazily by Mesh::getBVH() and cached until the mesh changes.
+
+- Thread safe: the hierarchy is immutable and the cache is a shared_ptr
+  accessed with std::atomic_load/std::atomic_store. Copies of a mesh
+  share it. It holds its own copy of the triangles, so it stays valid
+  independently of the mesh.
+- contains: for closed meshes (edges matched by vertex position snapped to
+  a grid of 1e-9 times the mesh size, so triangle soups and nearly
+  coincident vertices are handled), the winding number is determined by
+  counting signed ray crossings using the hierarchy. On a crossing near an
+  edge or vertex, other ray directions are tried, falling back to the
+  solid angle winding number. Open meshes always use the solid angle
+  winding number, so the results do not change.
+- The root box of the hierarchy is used as a bounding box early-out.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+MatthijsBurgh
+requested a review
+from IasonTheodorou
+October 19, 2026 09:16
+MeshBVH: only treat exactly zero direction components as parallel, li…
+…
+78c6b60
+```
+…ke Ray
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+MatthijsBurgh
+mentioned this pull request
+Oct 19, 2026
+Cull objects outside the laser angle range, do not fill the default triangle map
+#92
+Open
+4 tasks done
+MatthijsBurgh
+requested a balanced review from Copilot
+October 19, 2026 09:21
+Copilot started reviewing on behalf of
+MatthijsBurgh
+October 19, 2026 09:24
+View session
+Copilot
+AI
+reviewed
+Oct 19, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 Changes recommended
+Ray pruning and containment introduce correctness regressions, and coordinate quantization can exceed integer limits.
+4 open issues
+Absolute coordinate quantization overflows for distant meshes · New
+Vertex snapping hides open components and enables false containment · New
+Tiny ray direction components are incorrectly treated as zero · New
+Winding-number early-out rejects valid open-mesh containment · New
+What changed in this PR
+Adds a cached bounding volume hierarchy to accelerate generic mesh queries, building on #89’s collision fixes.
+Changes:
+Routes ray, sphere, and containment queries through MeshBVH.
+Adds lazy caching, invalidation, and shared tree ownership.
+Adds geometry, cache, and concurrent-query tests.
+File
+Description
+test/​test_mesh_bvh.cpp
+Tests geometry queries and cache behavior.
+src/​Shape.cpp
+Delegates mesh queries to the hierarchy.
+src/​MeshBVH.cpp
+Implements tree construction and queries.
+src/​Mesh.cpp
+Builds and caches the hierarchy.
+include/​geolib/​MeshBVH.h
+Defines the hierarchy API and storage.
+include/​geolib/​Mesh.h
+Declares cache access and invalidation.
+CMakeLists.txt
+Registers the implementation and tests.
+Review effort: Balanced
+Comment thread
+src/MeshBVH.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/MeshBVH.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/MeshBVH.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/MeshBVH.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+MeshBVH: address review on closedness, ray pruning and open meshes
+…
+5edbd49
+```
+- Quantize vertex positions relative to the bounding box of the triangles,
+  and only for vertices used by triangles. Absolute coordinates overflowed
+  for meshes far from the origin, which could map all vertices to the same
+  key and report an open mesh as closed. Non-finite meshes are open.
+- Mark triangles which collapse when snapping their vertices to the grid.
+  A ray crossing such a triangle is handled as degenerate (other direction,
+  then winding number), as its edges are ignored in the closedness check.
+- Use the exact-zero aware inverse direction for the ray traversal, instead
+  of the one from Ray, which treated components below 1e-9 as zero.
+- Only use the bounding box early-out in contains for closed meshes; the
+  winding number of an open mesh can be above 0.5 outside its bounding box.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+MatthijsBurgh
+mentioned this pull request
+Oct 19, 2026
+Fix and improve collision checking of shapes and sensors
+#89
+Open
+3 tasks done
+MatthijsBurgh
+and others
+added 2 commits
+October 19, 2026 12:09
+Merge improve-collision-checking into mesh-bvh
+…
+f5fe5aa
+```
+Conflict in Shape.cpp resolved by keeping the delegation to MeshBVH. The
+barycentric tolerance for ray-triangle intersections from
+improve-collision-checking is applied in MeshBVH::intersect instead, which
+fixes ShapeRay.ThroughVertex.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Merge branch 'improve-collision-checking' into mesh-bvh
+4986efe
+MatthijsBurgh
+requested a balanced review from Copilot
+October 19, 2026 11:58
+Copilot
+AI
+reviewed
+Oct 19, 2026
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Copilot was unable to review this pull request because the user who requested the review has reached their quota limit.
+An organization owner can choose the repository organization as the billing source for reviews requested by members with a paid Copilot license. Learn about Copilot code review billing.
+MatthijsBurgh
+and others
+added 3 commits
+October 19, 2026 14:00
+Merge improve-collision-checking into mesh-bvh
+…
+c15a681
+```
+Conflict in Shape.cpp resolved by keeping the delegation to MeshBVH. The
+triple product barycentric weights in closestPointOnTriangle are applied to
+its copy in MeshBVH.cpp instead, which fixes ShapeSphere.SliverTriangle.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Merge branch 'improve-collision-checking' into mesh-bvh
+28a8dea
+Address review: lost edge hits, crossing degeneracies, thread safety
+…
+b639568
+```
+- Ray-box test of the hierarchy nodes: use a small relative tolerance.
+  Roundoff made rays through edges or vertices, or through flat nodes
+  (common for axis aligned geometry), miss nodes: 3799 of 40000 rays aimed
+  at vertices, edges and faces of 200 boxes were lost or got a farther hit.
+- countCrossings: skip zero area triangles instead of treating every ray
+  near them as degenerate (which disabled the fast path), and treat nearly
+  parallel crossings as degenerate instead of skipping them (which could
+  miss a crossing far along the ray, giving a wrong contains result).
+- Thread safety: Shape queries only use the immutable hierarchy, which now
+  provides the bounding sphere radius, instead of the unsynchronized
+  max radius cache of Mesh (reported as data race by ThreadSanitizer).
+  Copying a Mesh loads the hierarchy atomically, and copies only the
+  geometry, so it does not read caches another thread might be filling.
+- invalidateCache: plain reset instead of an atomic store, which took a
+  lock on every addPoint/addTriangle (building a mesh is 45% faster).
+- Ray traversal visits the nearest child first and uses the inverse
+  direction of the Ray (44% faster ray queries in the benchmark).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

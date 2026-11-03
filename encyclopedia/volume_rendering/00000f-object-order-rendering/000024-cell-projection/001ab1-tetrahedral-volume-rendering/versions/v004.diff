@@ -1,0 +1,106 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Tetrahedral Volume Rendering (TetVR) is a cell-projection method that renders unstructured tetrahedral meshes by projecting individual tetrahedra onto the screen and compositing them in depth order [S3]. It solves the problem of accurately visualizing complex, non-uniform volumetric data (such as finite element analysis results or dark matter simulations) where regular grid-based ray marching fails or introduces sampling artifacts [S5]. Unlike [Projected Tetrahedra](877-projected-tetrahedra.md) which often relies on explicit isosurface extraction or simpler blending, TetVR supports arbitrary isosurface values and partial pre-integration directly within the projection pipeline, enabling hybrid volume/isosurface visualization [S2]. It differs from [Exact Visibility Ordering for Cell Projection Volume Rendering (SXMPVO)](944-exact-visibility-ordering-for-cell-projection-volume-renderi.md) by using hardware rasterization and screen-space classification to determine visibility order, trading exact topological correctness for GPU acceleration [S3].
++Tetrahedral Volume Rendering (TetVR) is a cell-projection method that renders unstructured tetrahedral meshes by projecting individual tetrahedra onto the screen and compositing them in depth order [S3]. It solves the problem of accurately visualizing complex, non-uniform volumetric data (such as finite element analysis results or dark matter simulations) where regular grid-based ray marching fails or introduces sampling artifacts [S5]. Unlike [Projected Tetrahedra](877-projected-tetrahedra.md) which often relies on explicit isosurface extraction or simpler blending, this method supports arbitrary isosurface values via density addition [S2] and partial pre-integration for color computation [S3], enabling hybrid volume/isosurface visualization. It differs from [Exact Visibility Ordering for Cell Projection Volume Rendering (SXMPVO)](944-exact-visibility-ordering-for-cell-projection-volume-renderi.md) by using hardware rasterization and screen-space classification to determine visibility order, trading exact topological correctness for GPU acceleration [S3].
+ 
+ ## How it works
+@@ -41,15 +41,20 @@
+     *   For each tetrahedron:
+         *   Perform 4 texture lookups using indices from the Tetrahedral Texture to get vertex positions, scalars, and gradients from Vertex and Gradient Textures [S3].
+-        *   Project the 4 vertices to screen space [S3].
++        *   Project the 4 vertices to screen space.
+         *   Compute 4 cross-product tests to determine projection class and vertex layout:
+             ```python
++            def project_to_screen(v, view_proj_matrix):
++                clip = view_proj_matrix @ v
++                return clip.xyz / clip.w
++
+             def cross_z(v1, v2):
+                 return v1[0] * v2[1] - v1[1] * v2[0]
+ 
+-            vec1 = v_proj1 - v_proj0
+-            vec2 = v_proj2 - v_proj0
+-            vec3 = v_proj3 - v_proj0
+-            vec4 = v_proj1 - v_proj2
+-            vec5 = v_proj1 - v_proj3
++            v_proj = [project_to_screen(v, view_proj_matrix) for v in vertices]
++            vec1 = v_proj[1] - v_proj[0]
++            vec2 = v_proj[2] - v_proj[0]
++            vec3 = v_proj[3] - v_proj[0]
++            vec4 = v_proj[1] - v_proj[2]
++            vec5 = v_proj[1] - v_proj[3]
+             t1 = sign(cross_z(vec1, vec2)) + 1
+             t2 = sign(cross_z(vec2, vec3)) + 1
+@@ -78,4 +83,55 @@
+         *   **Partial Pre-Integration (PT):** Instead of average scalar values, use the $\psi$ table [MA04]. Retrieve colors $C_f$ and $C_b$ from a 1D transfer function texture based on $s_f$ and $s_b$. Use $C_f, C_b$, and $l$ to index a 2D $\psi$ table. Retrieve value for final color [S3].
+         *   **Isosurface Rendering:** If an isovalue is specified, check if it is within the range of interpolated front/back scalar values. If so, the isosurface crosses the tetrahedron. Use Phong illumination. Interpolated gradients act as normal vectors. Combine front and back gradients with weights relative to the distance between the isosurface and the intersection points [S3].
++
++### Pseudocode
++```python
++def classify_projection(vertices, view_proj_matrix):
++    v_proj = [project_to_screen(v, view_proj_matrix) for v in vertices]
++    vec1 = v_proj[1] - v_proj[0]
++    vec2 = v_proj[2] - v_proj[0]
++    vec3 = v_proj[3] - v_proj[0]
++    vec4 = v_proj[1] - v_proj[2]
++    vec5 = v_proj[1] - v_proj[3]
++    t1 = sign(cross_z(vec1, vec2)) + 1
++    t2 = sign(cross_z(vec2, vec3)) + 1
++    t3 = sign(cross_z(vec3, vec4)) + 1
++    t4 = sign(cross_z(vec4, vec5)) + 1
++    return t1, t2, t3, t4
++
++def accumulate_color(t, c0, c1, alpha):
++    if alpha == 0:
++        A = 1.0
++        c_acc = c0 + 0.5 * t * (c0 - c1)
++        a_acc = 0.0
++    else:
++        A = exp(-alpha * t)
++        c_acc = (1.0 - A) * c0 + ((t + 1.0 / alpha) * A - 1.0 / alpha) * (c0 - c1)
++        a_acc = 1.0 - A
++    return c_acc, a_acc
++
++def ray_march(ray_origin, ray_direction, tetrahedron, view_proj_matrix):
++    # 1. Intersect ray with tetrahedron faces to find entry/exit points
++    t_entry, t_exit = intersect_tetrahedron(ray_origin, ray_direction, tetrahedron)
++    if t_entry is None: return 0.0, 0.0
++    
++    # 2. Subdivide ray segment within tetrahedron
++    t_total = t_exit - t_entry
++    N_sub = 10  # Typical subdivision count
++    dt = t_total / N_sub
++    c_acc = vec3(0.0)
++    a_acc = 0.0
++    
++    for i in range(N_sub):
++        t_sub = (i + 0.5) * dt
++        c0 = interpolate_color(t_entry + t_sub, tetrahedron)
++        c1 = interpolate_color(t_entry + t_sub + dt, tetrahedron)
++        alpha = interpolate_opacity(t_entry + t_sub, tetrahedron)
++        
++        c_sub, a_sub = accumulate_color(dt, c0, c1, alpha)
++        c_acc = c_acc + (1.0 - a_acc) * c_sub
++        a_acc = a_acc + (1.0 - a_acc) * a_sub
++        
++    return c_acc, a_acc
++```
+ 
+ ### Formulas
+@@ -155,5 +211,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The first pass is $O(N)$ where $N$ is the number of tetrahedra, performed in parallel on the GPU. The sorting step is $O(N \log N)$ or $O(N)$ depending on the sort algorithm (bucket sort for rotating, mergesort for static) [S3]. The second pass is $O(P)$ where $P$ is the number of pixels, as each pixel is shaded once [S3].
++*   **Time Complexity:** The first pass is $O(N)$ where $N$ is the number of tetrahedra, performed in parallel on the GPU. The sorting step is $O(N \log N)$ or $O(N)$ depending on the sort algorithm (bucket sort for rotating, mergesort for static) [S3]. The second pass is $O(T)$ where $T$ is the number of projected triangles, as it renders triangle fans via `glMultiDrawElements` [S3].
+ *   **Memory Complexity:** Requires storage for the Tetrahedral, Vertex, Gradient, and Classification textures, plus MRT frame buffers and global arrays. The space requirement is very large, limiting the size of volumes that can be rendered on graphics cards with less memory [S2].
+ *   **Measured Performance:** On a Intel Pentium IV 3.6 GHz, 2 GB RAM, with a nVidia GeForce 6800 256 MB graphics card, PTINT achieved 11.30 fps on the Blunt Fin dataset and 4.07 fps on the Oxygen Post dataset (512x512 viewport, rotating model) [S3]. This compared favorably to GATOR (5.20 fps, 1.82 fps), VICP GPU (4.10 fps, 4.47 fps), and HARC (6.09 fps, 2.36 fps) [S3].
+@@ -161,5 +217,5 @@
+ *   **Limitations:** Large memory footprint. Orthogonal projection is required for certain optimizations (geometry shader approach) [S2]. Numerical instability of exact integration formulas requires approximation (sub-intervals) [S1]. Degenerate cases must be handled explicitly [S3].
+ *   **When to use:** When rendering unstructured tetrahedral meshes with high accuracy is required, especially for finite element data or dark matter simulations. When differentiable rendering is needed for mesh optimization [S1, S5].
+-*   **When not to use:** When memory is severely constrained. When perspective projection is required, the MRT-based approach should be used instead of the geometry shader optimization, as the latter requires orthogonal projection [S2, S3]. When real-time performance on low-end hardware is critical without simplification [S3].
++*   **When not to use:** When memory is severely constrained. When perspective projection is required, the MRT-based approach should be used instead of the geometry shader optimization, as the latter requires orthogonal projection [S2, S3].
+ 
+ ## Background

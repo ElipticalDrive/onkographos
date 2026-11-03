@@ -1,0 +1,346 @@
+TandemFoilSet velocity prediction - senpai active problem package (seeded from tcapelle/kagent) - [charlie-pai2i-24h-r5][nezuko] Fourier positional encoding on spatial coords (NeRF-style) by morganmcg1 · Pull Request #3631 · morganmcg1/TandemFoilSet-Balanced
+
+[charlie-pai2i-24h-r5][nezuko] Fourier positional encoding on spatial coords (NeRF-style) by morganmcg1 · Pull Request #3631 · morganmcg1/TandemFoilSet-Balanced · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+morganmcg1
+commented
+May 16, 2026
+Copy link
+Copy Markdown
+Owner
+Hypothesis: Fourier-encoded spatial coordinates (NeRF-style positional encoding) — target OOD geometry generalization
+PR #3519 (your work) tested Fourier embedding on the conditioning vector (Re, AoA, NACAs, gap, stagger) and found that enriched cond features hurt OOD geometry splits (val_geom_camber_rc +5.5%, val_geom_camber_cruise +3.4%) while modestly helping in-distribution single_in_dist (−5.2%). The mechanism: a richer cond basis let the FiLM MLP make sharper conditional modulations that overfit to in-distribution flow-param structure but didn't transfer to held-out geometry.
+The flip-side experiment: apply Fourier features to the spatial path instead — encode (x, y) and optionally (dsdf) with multi-frequency sin/cos basis before the input MLP. This is the original NeRF / Tancik et al. 2020 use case, and targets the OOD camber splits directly: a denser positional basis lets the network represent fine-scale surface curvature regardless of whether the foil shape was seen at training time.
+This is mechanistically the opposite of #3519: instead of enriching how the global flow vector reaches every block, we enrich how the spatial coordinates of each mesh point reach the input. The hypothesis: improved spatial representation will compound with FiLM (per-block flow conditioning operates on cleaner spatial features) and benefit OOD geometry splits where the spatial representation must extrapolate.
+Baseline to beat
+Current merged baseline (PR #3465 T_max=25 + PR #3466 Bernoulli + PR #3315 Cautious AdamW + PR #3373 bf16 + PR #3265 FiLM + PR #3337 surf-L1 + PR #3281 EMA + PR #3266 scale-inv):
+val_avg/mae_surf_p = 75.4040
+test_avg/mae_surf_p = 65.8592
+Beat 75.40 on val_avg to be a merge candidate. Per-split current baseline (from BASELINE.md):
+val_single_in_dist = 84.88, val_geom_camber_rc = 85.90, val_geom_camber_cruise = 57.65, val_re_rand = 73.19.
+Predicted impact
+val_avg/mae_surf_p: −3% to −7%. Biggest expected gain on geom_camber_rc (val=85.90) and geom_camber_cruise (val=57.65) — the OOD geometry splits that should benefit most from richer spatial representation. Modest gains on single_in_dist and re_rand.
+Mechanism: Tancik et al. 2020 ("Fourier Features Let Networks Learn High Frequency Functions in Low Dimensional Domains") showed that MLP-based coordinate-conditioned networks have a strong low-frequency bias, fixed by Fourier features. The Transolver input MLP that ingests [x, y, dsdf, NACA_dims, ...] has the same bias — adding Fourier features should enable sharper representations of foil surface curvature.
+Compound with FiLM: orthogonal — FiLM conditions every block on the (raw) cond vector; spatial Fourier features only change the input MLP's receptive field for spatial structure. Mask agreement should stay at ~0.62.
+Arms (two)
+Arm
+What gets Fourier-encoded
+n_freqs
+σ
+Predicted val_avg
+A: position-only
+(x, y)
+6
+0.5
+70 – 74
+B: position + sdf
+(x, y, dsdf)
+6
+0.5
+69 – 73
+Arm A is the minimal NeRF-style encoding: enrich the 2D position (x, y) coordinates with [sin(σπ·2^k · x), cos(σπ·2^k · x), sin(σπ·2^k · y), cos(σπ·2^k · y)] for k in range(n_freqs). Adds 2 × 2 × n_freqs = 24 extra input dims for n_freqs=6.
+Arm B extends the encoding to include the signed distance function value dsdf, which encodes proximity to the foil surface. SDFs are inherently multi-scale (large gradient near the surface, smooth far away), so multi-frequency encoding may help the network represent boundary-layer pressure structure better. Adds 3 × 2 × n_freqs = 36 extra input dims.
+σ=0.5 is conservative: spatial coords are normalized to roughly [−1, 1], so max freq = 0.5π·2^5 = 16π. This gives ~8 cycles across the unit interval at the highest freq — well above the natural foil-curvature scale but below the aliasing regime that hurt PR #3519's Arm B at σ=2.
+Why this should work mechanically
+Low-frequency bias in MLPs is well-documented. Sitzmann et al. (SIREN), Mildenhall et al. (NeRF), and Tancik et al. all show that standard MLPs cannot represent high-frequency spatial signals without explicit positional encoding. Foil surface pressure has sharp peaks near leading edges and stagnation points — these are high-frequency spatial structures.
+Direct attack on OOD geometry weakness. The current model represents foil shape via the NACA digit encoding (input MLP) and the dsdf channel (per-point distance to surface). When the camber values are out of training distribution, the input MLP must extrapolate a 4-digit NACA → continuous shape mapping. Richer Fourier-encoded spatial coords give the network a representation of the queried position that is independent of the foil shape, so the per-block FiLM modulation can apply geometry-agnostic spatial functions.
+Compounds with FiLM, not redundant. FiLM conditions the spatial features on (raw) flow params; Fourier-encoded positions enrich the spatial features themselves. The two are operating at different layers of the network.
+Conservative σ avoids your [charlie-pai2i-24h-r5][nezuko] Fourier-embedded FiLM conditioning #3519 failure mode. σ=0.5 with n_freqs=6 puts the max freq at 16π — well below the aliasing regime that hurt Arm B (σ=2 with k=8 → 256π). The PR [charlie-pai2i-24h-r5][nezuko] Fourier-embedded FiLM conditioning #3519 negative cause was extreme high-freq mapping; this is calibrated to spatial-coord scale.
+Implementation outline (train.py only)
+You already implemented FourierEmbedFiLM(n_freqs, sigma, raw_dim) for #3519 (concat-residual pattern). The same building block applies here, just at a different input slot.
+CLI flags:
+```
+parser.add_argument("--fourier_pos_freqs", type=int, default=0,
+                    help="Fourier frequencies for spatial coordinates. 0 disables.")
+parser.add_argument("--fourier_pos_sigma", type=float, default=0.5,
+                    help="Sigma for spatial Fourier embedding (frequencies = sigma * pi * 2^k).")
+parser.add_argument("--fourier_pos_include_sdf", action="store_true",
+                    help="Include dsdf in Fourier embedding (in addition to x, y).")
+```
+At input pre-processing (before input MLP):
+```
+# x is the input tensor; the spatial dims are at known indices.
+# From the data layout: spatial coords are x[:, :, 0] (x), x[:, :, 1] (y).
+# The dsdf channel is at a specific index — check `data/__init__.py` or
+# print the first few values to confirm (likely x[:, :, 2] or similar).
+
+if cfg.fourier_pos_freqs > 0:
+    SPATIAL_INDICES = [0, 1]
+    if cfg.fourier_pos_include_sdf:
+        SDF_INDEX = ???  # CONFIRM from data layout
+        SPATIAL_INDICES.append(SDF_INDEX)
+    coords = x[:, :, SPATIAL_INDICES]  # [B, N, len(SPATIAL_INDICES)]
+    # Build frequency multipliers: sigma * pi * 2^k for k in range(n_freqs)
+    freqs = (cfg.fourier_pos_sigma * math.pi *
+             torch.pow(2.0, torch.arange(cfg.fourier_pos_freqs, device=x.device, dtype=x.dtype)))
+    # [B, N, len(SPATIAL_INDICES), n_freqs] = coord * freq
+    coords_x_freq = coords.unsqueeze(-1) * freqs[None, None, None, :]
+    sin_feats = torch.sin(coords_x_freq).flatten(2, 3)  # [B, N, len*n_freqs]
+    cos_feats = torch.cos(coords_x_freq).flatten(2, 3)  # [B, N, len*n_freqs]
+    # Concat to input: [raw_x, sin_feats, cos_feats]
+    x_aug = torch.cat([x, sin_feats, cos_feats], dim=-1)
+    # IMPORTANT: input MLP first-layer dim needs to grow to accommodate this.
+    # Either re-build the model with new input_dim, OR reduce the augmentation
+    # via a small projection layer first.
+else:
+    x_aug = x
+```
+Input MLP shape change. The Transolver input MLP first linear has shape [X_DIM, n_hidden]. With Fourier augmentation, the effective input dim becomes X_DIM + 2*len(SPATIAL_INDICES)*n_freqs. Easiest: pass the augmented dim through to the model constructor as a new arg. Confirm parameter count delta is small (~1% increase, comparable to your [charlie-pai2i-24h-r5][nezuko] Fourier-embedded FiLM conditioning #3519 +1.4%).
+DO NOT modify the cond path. Keep FiLM exactly as merged. The cond vector (Re, AoAs, NACAs, gap, stagger) stays raw — this is the explicit pivot away from [charlie-pai2i-24h-r5][nezuko] Fourier-embedded FiLM conditioning #3519.
+Keep everything else unchanged: Cautious AdamW, bf16, FiLM, surf-L1, EMA, scale-inv, Bernoulli residual, NaN sanitization, T_max=25/eta_min_factor=0.10.
+What to commit
+train.py with Fourier positional encoding gated by --fourier_pos_freqs > 0.
+models/model-charliepai2i24h5-nezuko-fourier_pos_k6_s05-<TIMESTAMP>/{metrics.jsonl, metrics.yaml, config.yaml} for arm A.
+models/model-charliepai2i24h5-nezuko-fourier_pos_k6_s05_sdf-<TIMESTAMP>/{metrics.jsonl, metrics.yaml, config.yaml} for arm B.
+Reproduce
+```
+cd target/
+
+# Arm A: Fourier encode (x, y), n_freqs=6, sigma=0.5
+python train.py --agent charliepai2i24h5-nezuko \
+    --experiment_name "charliepai2i24h5-nezuko/fourier_pos_k6_s05" \
+    --fourier_pos_freqs 6 --fourier_pos_sigma 0.5 \
+    --t_max 25 --eta_min_factor 0.10 \
+    --surf_p_l1_weight 1.0 --bernoulli_residual freestream \
+    --epochs 50
+
+# Arm B: Fourier encode (x, y, dsdf), n_freqs=6, sigma=0.5
+python train.py --agent charliepai2i24h5-nezuko \
+    --experiment_name "charliepai2i24h5-nezuko/fourier_pos_k6_s05_sdf" \
+    --fourier_pos_freqs 6 --fourier_pos_sigma 0.5 --fourier_pos_include_sdf \
+    --t_max 25 --eta_min_factor 0.10 \
+    --surf_p_l1_weight 1.0 --bernoulli_residual freestream \
+    --epochs 50
+```
+Both arms should complete within the 30-min wall-clock cap (added input dims are trivial cost). Expected ~17 epochs per arm.
+Risk / failure modes
+σ too large → high-freq overfitting (your [charlie-pai2i-24h-r5][nezuko] Fourier-embedded FiLM conditioning #3519 Arm B failure mode revisited on spatial path). Mitigation: starting at σ=0.5 which gives max freq 16π over a unit-coord domain. If both arms regress, try σ=0.25 in a follow-up.
+Encoding dsdf adds OOM-of-magnitude variation. dsdf can range over 5+ orders of magnitude (close to vs far from foil surface). Applying log10 or normalizing dsdf to [−1, 1] before Fourier encoding may be more numerically stable. Arm B encodes raw dsdf — if it diverges or shows training instability in the first 1–2 epochs, log the issue and retry with dsdf_normalized = sign(dsdf) * log(1 + |dsdf|).
+The input MLP can't absorb extra dims. Easy fix: project the Fourier-augmented input through a small linear Linear(aug_dim, X_DIM) before passing to the original input MLP. This preserves the model architecture and only adds a thin adapter.
+NaN-safe evaluate_split must remain intact. Same caveat — propagate the test_geom_camber_cruise/000020.pt mask workaround.
+What I'm explicitly NOT doing here
+Not changing FiLM, the cond path, or the architecture beyond input dims.
+Not using learned σ (RFF). That's a clean follow-up if Arm A wins but the result is marginal.
+Not encoding NACA digits with Fourier — they're categorical-like integer codes, and Fourier-encoding them would produce aliasing artifacts similar to [charlie-pai2i-24h-r5][nezuko] Fourier-embedded FiLM conditioning #3519's Arm B.
+Suggested follow-up if this wins
+Learnable σ (RFF): Tancik et al.'s learned-σ variant. Single hyperparam, simpler to tune.
+Position encoding only at certain attention levels: apply Fourier features at the input AND at every slice-attention block (similar to NeRF's coarse+fine sampling).
+Hierarchical position encoding: combine low-σ (geometry-level) and high-σ (surface-pressure-detail) bases.
+Compound with per-feature σ on cond (your [charlie-pai2i-24h-r5][nezuko] Fourier-embedded FiLM conditioning #3519 suggested follow-up Loss: Huber/L1 sweep — close train/eval metric gap #1): if spatial Fourier wins, the per-feature σ idea for cond may also help, but the geometry-extrapolation cost of [charlie-pai2i-24h-r5][nezuko] Fourier-embedded FiLM conditioning #3519 needs to be addressed first.
+SENPAI-RESULT marker
+```
+SENPAI-RESULT: {"terminal":true,"status":"complete","pending_arms":false,"metric_artifacts":["<arm-A-path>/metrics.jsonl","<arm-B-path>/metrics.jsonl"],"primary_metric":{"name":"val_avg/mae_surf_p","value":<better-of-the-two>},"test_metric":{"name":"test_avg/mae_surf_p","value":<matching-test>}}
+```
+Include: per-split val/test deltas vs current baseline (75.40 val / 65.86 test), per-epoch FiLM magnitude stats (sanity check — these should NOT change much from baseline, since cond path is unchanged), confirmation of spatial coord indices used, parameter count delta vs baseline.
+morganmcg1
+added
+status:wip
+Work in progress
+icml-appendix-charlie-pai2i-24h-r5
+Advisor branch: icml-appendix-charlie-pai2i-24h-r5
+student:charliepai2i24h5-nezuko
+Assigned to student charliepai2i24h5-nezuko
+labels
+May 16, 2026
+morganmcg1
+pushed a commit
+that referenced
+this pull request
+May 16, 2026
+research: loop 11 — close #3519 Fourier FiLM (OOD regression), assign #…
+…
+e290c42
+```
+…3631 Fourier spatial-pos
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+morganmcg1
+commented
+May 16, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+ADVISOR: Major baseline update — rebase required before submitting results.
+Your branch base (ecc27b5) is from Loop 10, which predates three merges that significantly changed the target:
+Schedule T_max alignment: match wall-clock epochs, drop warmup #3465 T_max=25 alignment — schedule fix worth −12.42% val_avg (86.09 → 75.40).
+Bernoulli pressure residual: predict p minus p_Bernoulli #3466 Bernoulli pressure residual — also merged in Loop 10/11 era. Note: argparse for bernoulli_residual was discovered to be silently broken in subsequent runs (PR [charlie-pai2i-24h-r5][frieren] Verify + enable Bernoulli pressure residual on compile baseline #3694 is the in-flight fix).
+[charlie-pai2i-24h-r5][fern] torch.compile() for more effective epochs within wall-clock cap #3582 torch.compile() — Loop 13 merge, val_avg 75.40 → 61.20 (−18.83%). Unlocks 32 effective epochs vs 17, drops VRAM 35.5 → 24.4 GB.
+Current baseline to beat:
+val_avg/mae_surf_p = 61.2023 (fern's compile PR [charlie-pai2i-24h-r5][fern] torch.compile() for more effective epochs within wall-clock cap #3582 — MERGED at commit 34f7c61)
+test_avg/mae_surf_p = 54.0076
+Per-split current baseline:
+val_geom_camber_cruise = 47.46, val_geom_camber_rc = 67.07
+val_re_rand = 64.86, val_single_in_dist = 65.44
+Action items:
+Rebase your charliepai2i24h5-nezuko/fourier-spatial-position branch onto current advisor tip (ade9ebf) — this brings in torch.compile() integration, T_max=25, and bf16 autocast (already in your base).
+Re-run both arms with --torch_compile — the compile flag is now part of the merged baseline; head-to-head must include it.
+Compare against val_avg < 61.20 (was 75.40 when PR was created — 18.83% lower target now).
+Re-base guidance:
+```
+cd target/
+git fetch origin
+git checkout charliepai2i24h5-nezuko/fourier-spatial-position
+
+# Your local "M train.py" changes (your Fourier positional encoding) need to be preserved.
+# Stash, rebase, then re-apply:
+git stash push -m "fourier-positional-encoding-impl"
+git rebase origin/icml-appendix-charlie-pai2i-24h-r5
+git stash pop
+
+# Resolve any conflicts in train.py — most likely you'll need to:
+# - Re-apply your Fourier encoding on top of the new compile-enabled train.py
+# - The forward path may have slight changes from compile integration but the input MLP path should be the same target
+
+git push --force-with-lease origin charliepai2i24h5-nezuko/fourier-spatial-position
+```
+Important Fourier encoding context — your hypothesis (Fourier spatial encoding for OOD geometry) is still valid and arguably more interesting now:
+The compile baseline closes the in-dist gap considerably (single_in_dist went from 122.19 → 65.44).
+OOD geometry splits (camber_rc=67.07, camber_cruise=47.46) are still the worst-performing relative to in-dist.
+Fourier positional encoding should target exactly this remaining gap: a denser positional basis for OOD geometry extrapolation.
+Reproduce template:
+```
+cd target/
+python train.py --agent charliepai2i24h5-nezuko \
+    --experiment_name "charliepai2i24h5-nezuko/fourier_pos_<arm>" \
+    --torch_compile \
+    --t_max 25 --eta_min_factor 0.10 \
+    --surf_p_l1_weight 1.0 \
+    --epochs 50
+    # ... plus whatever Fourier-encoding-specific flags you added
+```
+About the metrics from the run that just completed (at ~05:00 UTC): if you committed them, that was on the OLD base — those results aren't comparable to 61.20. The training run was at the old 75.40 baseline. You can keep the metrics directory for reference but the next runs should be on the rebased branch.
+Pod state note: the rate-limit storm earlier this loop hit you hard — your pod couldn't see the PR from ~05:00 to 05:20. That's why nothing was pushed during that window. Now that you can see the PR again, please push your local train.py changes (if not done already), rebase, and resubmit.
+Let me know if you hit any rebase conflicts.
+assign charliepai2i24h5-nezuko: fourier-spatial-position
+46c144d
+morganmcg1
+force-pushed
+the
+charliepai2i24h5-nezuko/fourier-spatial-position
+branch
+from
+a0b82aa to
+46c144d
+Compare
+May 16, 2026 07:23
+morganmcg1
+commented
+May 16, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+ADVISOR: Quick correction — the baseline moved again to val_avg < 54.06.
+I see you force-pushed at 07:23 UTC (after my 05:26 baseline-update comment that pointed at 61.20). Between those timestamps PR #3666 (thorfinn lr=1e-3 + compile) merged at 06:42 UTC, dropping val_avg 61.20 → 54.0564 (test_avg 54.01 → 48.1422).
+Updated baseline (current best, commit 92658ac):
+Metric
+Value
+val_avg/mae_surf_p
+54.0564
+test_avg/mae_surf_p
+48.1422
+val_geom_camber_rc
+68.829
+val_geom_camber_cruise
+36.021
+val_re_rand
+55.047
+val_single_in_dist
+56.328
+Decision rule for Fourier positional encoding: beat val_avg < 54.06. Note that OOD-geometry splits (camber_rc, camber_cruise) still have residual MAE 36–69 — your Fourier-encoding hypothesis is exactly targeted at this remaining gap.
+Action: add --lr 1e-3 to your reproduce command. The merged baseline is now lr=1e-3, not lr=5e-4. The compile stack + lr=1e-3 has NO epoch-1 instability (TF32 neutralizes it). Updated template:
+```
+cd target/
+python train.py --agent charliepai2i24h5-nezuko \
+    --experiment_name "charliepai2i24h5-nezuko/fourier_pos_<arm>_lr1e3" \
+    --torch_compile \
+    --lr 1e-3 --t_max 25 --eta_min_factor 0.10 \
+    --surf_p_l1_weight 1.0 \
+    --epochs 50
+    # + your Fourier-encoding-specific flags
+```
+If your run was already started without --lr 1e-3, that's OK — just include it on the next run. Report epoch-1 val_avg in your results to confirm no spike.
+morganmcg1
+pushed a commit
+that referenced
+this pull request
+May 16, 2026
+research: loop 18 — close #3702 (tanjiro self-closed); assign #3785 w…
+…
+9a5668d
+```
+…d-sweep; baseline-update #3547 #3631 to 54.06
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+morganmcg1
+commented
+May 16, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+ADVISOR: Rebase needed + baseline has moved again. Two merges have landed since your last sync:
+PR [charlie-pai2i-24h-r5][thorfinn] LR sweep with torch.compile (32-epoch budget) #3666 (lr=1e-3 + compile) — merged earlier, val_avg 61.20 → 54.06
+PR Capacity revisit with bf16: sweep n_hidden 192 and 256 #3463 (n_hidden=192 + lr=1e-3 + compile) — just merged, val_avg 54.06 → 53.1915
+Your branch has a merge conflict with the updated icml-appendix-charlie-pai2i-24h-r5. Please:
+Rebase onto origin/icml-appendix-charlie-pai2i-24h-r5 (now at commit 1fb5910)
+Re-run your Fourier spatial positional encoding experiment on the new full stack (--torch_compile --n_hidden 192 --lr 1e-3 --t_max 25 --eta_min_factor 0.10 --surf_p_l1_weight 1.0)
+Beat val_avg < 53.19 to be a merge candidate
+The mechanistic case for spatial Fourier encoding helping on OOD geometry splits (particularly camber_rc which has significant remaining headroom) is still strong.
+morganmcg1
+commented
+May 16, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+ADVISOR: Baseline moved again — PR #3771 (thorfinn lr=1.5e-3 + compile) just merged: val_avg = 50.7001. Your Fourier spatial encoding (#3631) now needs to beat val_avg < 50.70 on the lr=1.5e-3 stack. Updated reproduce command:
+```
+cd target/
+python train.py --agent charliepai2i24h5-nezuko \
+    --experiment_name "charliepai2i24h5-nezuko/fourier_spatial_lr1p5e3_compile" \
+    --torch_compile --lr 1.5e-3 \
+    --t_max 25 --eta_min_factor 0.10 \
+    --surf_p_l1_weight 1.0 \
+    [your Fourier flags] \
+    --epochs 50
+```
+Rebase onto current advisor branch 24bc62d and re-run. The OOD-geometry motivation is unchanged but the bar is higher.
+morganmcg1
+commented
+May 16, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+ADVISOR: Baseline update (third in three loops — please rebase before reproducing).
+New round-5 baseline: val_avg=45.4964, test_avg=38.3732 (#3809 grad_clip=0.5 + lr=1e-3 + compile + n_hidden=192).
+Stack changes since your initial assignment:
+Capacity revisit with bf16: sweep n_hidden 192 and 256 #3463: n_hidden=192
+[charlie-pai2i-24h-r5][thorfinn] LR continuation sweep: lr=1.5e-3 vs 2e-3 on compile baseline #3771: lr=1.5e-3 → reverted by [charlie-pai2i-24h-r5][frieren] Gradient clipping sweep: clip_norm=1.0 vs 0.5 on lr=1e-3 + compile #3809 (clip arm used lr=1e-3)
+[charlie-pai2i-24h-r5][frieren] Gradient clipping sweep: clip_norm=1.0 vs 0.5 on lr=1e-3 + compile #3809: grad_clip_norm=0.5 (NEW). Mean ‖g‖ pre-clip ≈ 7.4; outlier steps were hitting 200–273. Clipping fires ~100% of steps and lowered val_avg by 5.2 points (−10.3%).
+When you rebase from icml-appendix-charlie-pai2i-24h-r5, you will pick up the new --grad_clip_norm CLI flag (default None for backward compat; baseline uses 0.5). Please add --grad_clip_norm 0.5 to your reproduce command so you are on the current stack. Target to beat: 45.50 val_avg, 38.37 test_avg.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+icml-appendix-charlie-pai2i-24h-r5
+Advisor branch: icml-appendix-charlie-pai2i-24h-r5
+status:wip
+Work in progress
+student:charliepai2i24h5-nezuko
+Assigned to student charliepai2i24h5-nezuko
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

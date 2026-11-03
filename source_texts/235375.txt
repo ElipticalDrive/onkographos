@@ -1,0 +1,169 @@
+LichtFeld Studio: Where reality and the digital world blend. - OMG4 4D Gaussian Splat integration — Milestone 1 by Copilot · Pull Request #5 · solipsist-studios/LichtFeld-Studio
+
+OMG4 4D Gaussian Splat integration — Milestone 1 by Copilot · Pull Request #5 · solipsist-studios/LichtFeld-Studio · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Copilot
+AI
+commented
+Mar 3, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Implements M1 of OMG4 integration: load pre-trained 4D Gaussian Splat models and render them in real-time with time-scrubbing via the Sequencer playhead.
+Core Data Model (SplatData4D)
+New SplatData4D extends SplatData with temporal fields: _t (center), _scaling_t (log-scale), _rotation_r (right-isoclinic quaternion), plus time_duration and rot_4d flags
+Computed getters mirror OMG4's GaussianModel: get_scaling_t() → exp(_scaling_t), get_rotation_r() → normalized, get_cov_t() → temporal variance, get_marginal_t(timestamp) → exp(-0.5·dt²/σ_t)
+Serialization round-trips with magic header for versioning
+SPLAT_4D added to NodeType enum; Scene::addSplat4D / getSplat4D follow the addTimeSampledModel pattern
+4D Rasterization Backend
+condition_4d.cu: CUDA kernel ports build_scaling_rotation_4d + Schur complement from OMG4's gaussian_model.py. For each Gaussian at playhead time τ:
+Builds 4×4 L = R_l @ R_r @ diag(s) from left/right isoclinic quaternions
+Computes Σ = L·Lᵀ, extracts Σ₁₁, Σ₁₂, σ_t
+Conditioned 3D cov: Σ₃d = Σ₁₁ − Σ₁₂·Σ₁₂ᵀ/σ_t; mean offset: Δμ = (Σ₁₂/σ_t)·dt; marginal opacity: α·exp(−0.5·dt²/σ_t)
+RenderingEngine::renderGaussians4D: conditions the 4D model at the current playhead time, constructs a temporary SplatData with conditioned means/opacity (logit-converted), delegates to existing renderGaussians
+SplatRasterPass: detects visible SPLAT_4D nodes and routes to renderGaussians4D; FrameContext gains current_time populated from RenderContext::current_time (already driven by the Sequencer GlobalTimeContext)
+OMG4 I/O
+formats/omg4_loader: ZIP index inspection to detect 4D keys (t, scaling_t, rotation_r) in .pth files; LZMA magic check for .xz. Native full decoding (SVQ/Huffman/MLP) deferred — returns a descriptive error directing users to the Python plugin
+Omg4Loader (IDataLoader): registered in LoaderService; .pth/.xz added to extension detection in loader.cpp
+omg4_loader.py: Python plugin that uses PyTorch to load .pth checkpoints and OMG4's reference GaussianModel.decode() for .xz, returning numpy arrays ready to pass to C++
+Also fixed
+Restored orphaned Scene::addCropBox function signature (pre-existing bug exposed when editing surrounding code)
+Original prompt
+Overview
+Implement Milestone 1 (M1) of OMG4 integration into LichtFeld Studio: the ability to load pre-trained OMG4 4D Gaussian Splat models and render them in real-time with time scrubbing via the existing Sequencer playhead.
+This covers Phase 1 (Core Data Model), Phase 2 (4D Rasterization Backend), and the loader portion of Phase 4 (I/O).
+Reference: The OMG4 paper is at https://arxiv.org/html/2510.03857v1 and the reference implementation is at https://github.com/MinShirley/OMG4
+Phase 1: Core Data Model — SplatData4D
+1.1 Create SplatData4D class
+Create a new class SplatData4D that extends the existing SplatData (in src/core/include/core/splat_data.hpp) with additional temporal attributes required by 4D Gaussian Splatting.
+New file: src/core/include/core/splat_data_4d.hpp
+SplatData4D should inherit from or wrap SplatData and add:
+Tensor _t — temporal center position [N, 1]
+Tensor _scaling_t — temporal scale in log-space [N, 1]
+Tensor _rotation_r — right-isoclinic 4D rotation quaternion [N, 4]
+float time_duration[2] — the time range (e.g., [-0.5, 0.5] or [0.0, 10.0])
+bool rot_4d — flag indicating whether 4D rotation is used
+Add computed getters mirroring OMG4's GaussianModel:
+get_t() — returns _t
+get_scaling_t() — returns exp(_scaling_t) (activated)
+get_rotation_r() — returns normalize(_rotation_r)
+get_cov_t(scaling_modifier) — computes the temporal variance component from the 4×4 covariance
+get_marginal_t(timestamp, scaling_modifier) — computes the Gaussian temporal marginal exp(-0.5 * (t - timestamp)^2 / sigma_t)
+Also add raw tensor accessors (t_raw(), scaling_t_raw(), rotation_r_raw()) following the same pattern as SplatData's existing means_raw(), scaling_raw(), etc.
+Add serialization support (serialize/deserialize) that extends SplatData's serialization with the 4D fields.
+New file: src/core/splat_data_4d.cpp
+Implement the SplatData4D methods. The key math to port from OMG4 is the 4D covariance conditioning. From OMG4's gaussian_model.py:
+```
+def build_covariance_from_scaling_rotation_4d(scaling, scaling_modifier, rotation_l, rotation_r, dt=0.0):
+    L = build_scaling_rotation_4d(scaling_modifier * scaling, rotation_l, rotation_r)
+    actual_covariance = L @ L.transpose(1, 2)
+    cov_11 = actual_covariance[:,:3,:3]
+    cov_12 = actual_covariance[:,0:3,3:4]
+    cov_t = actual_covariance[:,3:4,3:4]
+    current_covariance = cov_11 - cov_12 @ cov_12.transpose(1, 2) / cov_t
+    symm = strip_symmetric(current_covariance)
+    mean_offset = cov_12.squeeze(-1) / cov_t.squeeze(-1) * dt
+    return symm, mean_offset.squeeze(-1)
+```
+This computes the Schur complement to condition the 4D Gaussian on time, yielding a 3D covariance and a spatial mean offset.
+1.2 Add NodeType::SPLAT_4D to the Scene graph
+In src/core/include/core/scene.hpp:
+Add SPLAT_4D to the NodeType enum
+Add std::unique_ptr<SplatData4D> model_4d to SceneNode
+In src/core/scene.cpp:
+Add NodeId addSplat4D(const std::string& name, std::unique_ptr<SplatData4D> model, NodeId parent = NULL_NODE)
+Add SplatData4D* getSplat4D(const std::string& name) and const variant
+Follow the same patterns used by the existing addTimeSampledModel() / getTimeSampledModel() methods
+Phase 2: 4D Rasterization Backend
+2.1 CUDA kernel for 4D→3D conditioning
+New file: src/cuda/condition_4d.cu (or placed alongside existing CUDA code in src/rendering/rasterizer/)
+Implement a CUDA kernel condition_4d_gaussians_kernel that:
+Takes as input: means [N,3], t_centers [N,1], scaling_xyzt [N,4], rotation_l [N,4], rotation_r [N,4], opacities [N], and a scalar float playhead_time
+For each Gaussian i:
+Compute dt = playhead_time - t_centers[i]
+Build the 4×4 scaling-rotation matrix L using build_scaling_rotation_4d() (port from OMG4's utils/general_utils.py)
+Compute the 4×4 covariance: Σ = L @ L^T
+Extract Σ_11 [3×3], Σ_12 [3×1], σ_t [scalar]
+Compute conditioned 3D covariance: Σ_3d = Σ_11 - Σ_12 @ Σ_12^T / σ_t
+Compute mean offset: Δμ = (Σ_12 / σ_t) * dt
+Compute marginal opacity: α_t = α * exp(-0.5 * dt² / σ_t)
+Output: conditioned means_3d [N,3] (original means + offset), conditioned opacities_3d [N], and conditioned 3D covariance parameters (or equivalent scale/rotation that the existing rasterizer expects)
+The build_scaling_rotation_4d function constructs a 4×4 matrix from 4D scaling and left/right isoclinic rotations. From OMG4's reference:
+Build rotation_l (4×4 left-isoclinic) and rotation_r (4×4 right-isoclinic) from the two quaternions
+Build diagonal scaling matrix S from 4D scaling
+L = rotation_l @ rotation_r @ S
+Provide a C++ host wrapper: void condition_4d_gaussians(...) that launches the kernel.
+2.2 Integrate 4D conditioning into the rendering pipeline
+In `src/rendering...
+This pull request was created from Copilot chat.
+💡 You can make Copilot smarter by setting up custom instructions, customizing its development environment and configuring Model Context Protocol (MCP) servers. Learn more Copilot coding agent tips in the docs.
+Initial plan
+da7c56e
+Copilot
+AI
+assigned
+Copilot and
+sipkode
+Mar 3, 2026
+Copilot started work on behalf of
+sipkode
+March 3, 2026 05:23
+View session
+Copilot
+AI
+and others
+added 2 commits
+March 3, 2026 05:47
+feat: implement OMG4 4D Gaussian Splat integration (Milestone 1)
+…
+b52f1e5
+```
+- Add SplatData4D class extending SplatData with temporal attributes
+- Add SPLAT_4D node type to scene graph with addSplat4D/getSplat4D
+- Add CUDA conditioning kernel (condition_4d.cu) for 4D→3D projection
+- Add renderGaussians4D to rendering engine interface and implementation
+- Integrate 4D rendering into SplatRasterPass with time-scrubbing support
+- Add OMG4 loaders (.pth checkpoint, .xz compressed) with format detection
+- Register Omg4Loader in the loader service
+- Add Python plugin for OMG4 model loading (omg4_loader.py)
+- Add unit tests for SplatData4D
+
+Co-authored-by: sipkode <19314267+sipkode@users.noreply.github.com>
+```
+fix: restore addCropBox function signature in scene.cpp (pre-existing…
+…
+de1c498
+```
+… orphaned code)
+
+Co-authored-by: sipkode <19314267+sipkode@users.noreply.github.com>
+```
+Copilot
+AI
+changed the title
+[WIP] Implement SplatData4D class for OMG4 integration
+OMG4 4D Gaussian Splat integration — Milestone 1
+Mar 3, 2026
+Copilot finished work on behalf of
+sipkode
+March 3, 2026 05:52
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,151 @@
+# Adjoint Beer-Lambert Marching
+
+Also called: Optical depth gradient march, Single-pass adjoint
+
+## Overview
+Adjoint Beer-Lambert Marching computes the gradient of the Beer-Lambert line integral with respect to pose parameters in a single forward-like pass, avoiding the storage or recomputation of per-iteration state required by naive reverse-mode differentiation of the marching loop [S1, unofficial]. It differs from the naive reverse-mode transform of the marching loop, which synthesizes per-iteration state handling, by costing roughly one forward march (1-1.5x forward cost) instead of ~7x, providing a significant speedup and eliminating the need to re-render the forward intensity [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Pose parameters $\theta$ (6 degrees of freedom: 3 translation, 3 rotation), volume density field $\mu(x)$, ray origin $s(\theta)$, ray direction $d(\theta)$, near/far intersection distances $t_{near}, t_{far}$, incident intensity $i_0$, and loss gradient $\frac{\partial L}{\partial I}$ [S1, unofficial].
+*   **Outputs:** Rendered intensity $I$ and pose gradient $\frac{\partial L}{\partial \theta}$ [S1, unofficial].
+
+**Data Structures:**
+*   **Pose Jacobian State:** A precomputed set of six-component vectors for $\frac{\partial s}{\partial \theta}$, $\frac{\partial d}{\partial \theta}$, $\frac{\partial t_{near}}{\partial \theta}$, and $\frac{\partial t_{far}}{\partial \theta}$ [S1, unofficial]. These are computed once per pixel using three Euler derivative matrices applied to constant vectors and slab-face formulas for intersection derivatives [S1, unofficial].
+*   **Accumulators:** Scalar $A$ for optical depth, and six-component vector $G$ for $\frac{\partial A}{\partial \theta}$ [G].
+
+**Formulas:**
+The rendered intensity is:
+$$ I = i_0 \ e^{-A} $$
+where the optical depth $A$ is:
+$$ A = \sum_i \mu(x_i)\ \Delta t $$
+The gradient of the loss $L$ with respect to pose $\theta$ is:
+$$ \frac{\partial L}{\partial \theta} = - \frac{\partial L}{\partial I}\ I \frac{\partial A}{\partial \theta} $$
+The pose derivative of the optical depth is computed as:
+$$ \frac{\partial A}{\partial \theta} = \sum_i \nabla\mu(x_i)\cdot\frac{\partial x_i}{\partial \theta}\ \Delta t + \sum_i \mu(x_i) \ \frac{\partial \Delta t}{\partial \theta} $$
+where the sample position is $x_i = s(\theta) + t_i(\theta) d(\theta)$, and its derivative is:
+$$ \frac{\partial x_i}{\partial \theta} = \frac{\partial s}{\partial \theta} + t_i \frac{\partial d}{\partial \theta} + d \frac{\partial t_i}{\partial \theta} $$
+The term $\frac{\partial \Delta t}{\partial \theta}$ is derived from the derivatives of the near and far boundaries [S1, unofficial]. The trilinear gradient $\nabla\mu(x_i)$ is computed from the eight corner values fetched during the march [S1, unofficial].
+
+**Steps:**
+1.  **Precompute Ray Jacobians:** For the current pixel, compute the six-component vectors $\frac{\partial s}{\partial \theta}$, $\frac{\partial d}{\partial \theta}$, $\frac{\partial t_{near}}{\partial \theta}$, and $\frac{\partial t_{far}}{\partial \theta}$ using closed-form expressions (Euler derivative matrices and slab-face intersection formulas) [S1, unofficial].
+2.  **Initialize Accumulators:** Set $A = 0$ and $G = \mathbf{0}_6$ [G].
+3.  **Marching Loop:** For each sample $i$ along the ray from $t_{near}$ to $t_{far}$ with step size $\Delta t$:
+    a.  Compute sample position $x_i = s(\theta) + t_i d(\theta)$ [G].
+    b.  Fetch the eight corner density values of $\mu$ around $x_i$ for trilinear interpolation [G].
+    c.  Compute interpolated density $\mu(x_i)$ and its gradient $\nabla\mu(x_i)$ from the eight corners. This is considered free arithmetic cost [S1, unofficial].
+    d.  Compute $\frac{\partial x_i}{\partial \theta}$ using the precomputed Jacobians and current $t_i, d(\theta)$ [S1, unofficial].
+    e.  Compute the contribution to the optical depth gradient:
+        $$ \delta G = \nabla\mu(x_i) \cdot \frac{\partial x_i}{\partial \theta}\ \Delta t + \mu(x_i) \ \frac{\partial \Delta t}{\partial \theta} $$
+        For a fixed step size, $\frac{\partial \Delta t}{\partial \theta}$ is zero [S1, unofficial].
+    f.  Update accumulators: $A \leftarrow A + \mu(x_i) \Delta t$ and $G \leftarrow G + \delta G$ [G].
+4.  **Final Gradient:** Compute the final pose gradient:
+    $$ \frac{\partial L}{\partial \theta} = - \frac{\partial L}{\partial I}\ I \ G $$
+    [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adjoint_beer_lambert_march(
+    theta: list,          # Pose parameters (6 floats)
+    mu: Volume,           # Trilinear volume field
+    s: list,              # Ray origin s(theta) (3 floats)
+    d: list,              # Ray direction d(theta) (3 floats)
+    t_near: float,        # Near intersection t_near(theta)
+    t_far: float,         # Far intersection t_far(theta)
+    dt: float,            # Step size
+    dL_dI: float,         # Loss gradient wrt intensity
+    i0: float             # Incident intensity
+) -> tuple:
+    # 1. Precompute Ray Jacobians (Closed-form)
+    # ds_dtheta, dd_dtheta, dt_near_dtheta, dt_far_dtheta are 6-vectors
+    # Computed via three Euler derivative matrices applied to constant vectors
+    # and slab-face intersection formulas [S1, unofficial]
+    ds_dtheta = compute_origin_jacobian(theta)
+    dd_dtheta = compute_direction_jacobian(theta)
+    dt_near_dtheta = compute_near_jacobian(theta)
+    dt_far_dtheta = compute_far_jacobian(theta)
+
+    # 2. Initialize Accumulators
+    A = 0.0
+    G = Vec6(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    # 3. Marching Loop
+    t = t_near
+    while t < t_far:
+        # Sample position
+        x = add3(s, mul3(d, t))
+
+        # Fetch 8 corners and compute trilinear interpolation
+        # mu_val is density, grad_mu is 3D gradient [S1, unofficial]
+        mu_val, grad_mu = trilinear_sample_and_gradient(mu, x)
+
+        # Compute dx/dtheta = ds/dtheta + t * dd/dtheta + d * dt/dtheta
+        # For internal steps with fixed step size, dt/dtheta is 0 [S1, unofficial]
+        dt_dtheta = 0.0
+        dx_dtheta = add6(add6(ds_dtheta, mul6(dd_dtheta, t)), mul6(Vec3_to_Vec6(d), dt_dtheta))
+
+        # Contribution to gradient: dA/dtheta = sum(grad_mu . dx/dtheta * dt + mu * d(dt)/dtheta)
+        # Second term is zero for fixed dt [S1, unofficial]
+        delta_G = add6(mul6(grad_mu_to_Vec6(grad_mu), dot3(grad_mu, dx_dtheta_to_Vec3(dx_dtheta)) * dt), mul6(G, 0.0))
+
+        # Update accumulators
+        A += mu_val * dt
+        G = add6(G, delta_G)
+
+        t += dt
+
+    # 4. Final Gradient
+    I = i0 * exp(-A)
+    dL_dtheta = mul6(G, -dL_dI * I)
+
+    return I, dL_dtheta
+
+# Helper definitions to ensure self-contained valid Python
+class Vec6:
+    def __init__(self, x, y, z, w, u, v):
+        self.v = [x, y, z, w, u, v]
+    def __add__(self, other): return Vec6(*(a+b for a,b in zip(self.v, other.v)))
+    def __mul__(self, scalar): return Vec6(*(a*scalar for a in self.v))
+    def __repr__(self): return str(self.v)
+
+def add3(a, b): return [a[i]+b[i] for i in range(3)]
+def mul3(a, s): return [a[i]*s for i in range(3)]
+def add6(a, b): return Vec6(*(a.v[i]+b.v[i] for i in range(6)))
+def mul6(a, s): return Vec6(*(a.v[i]*s for i in range(6)))
+def dot3(a, b): return sum(x*y for x,y in zip(a,b))
+def grad_mu_to_Vec6(g): return Vec6(g[0], g[1], g[2], 0.0, 0.0, 0.0)
+def dx_dtheta_to_Vec3(dx): return [dx.v[0], dx.v[1], dx.v[2]]
+def Vec3_to_Vec6(v): return Vec6(v[0], v[1], v[2], 0.0, 0.0, 0.0)
+def compute_origin_jacobian(theta): return Vec6(1,0,0,0,0,0) # Placeholder for Euler matrix product [G]
+def compute_direction_jacobian(theta): return Vec6(0,1,0,0,0,0) # Placeholder for Euler matrix product [G]
+def compute_near_jacobian(theta): return Vec6(0,0,1,0,0,0) # Placeholder for slab-face formula [G]
+def compute_far_jacobian(theta): return Vec6(0,0,0,1,0,0) # Placeholder for slab-face formula [G]
+def trilinear_sample_and_gradient(vol, x): return 0.0, [0.0, 0.0, 0.0] # Standard trilinear fetch & gradient [G]
+```
+
+**Parameters:**
+*   `MAX_STEPS`: Typically 2048 [S1, unofficial].
+*   `dt`: Step size, e.g., 1.0 mm [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Trilinear gradient computation is exact given the fetched corners, but floating-point accumulation of $A$ and $G$ may suffer from precision loss in large volumes [G].
+*   **Boundaries:** The derivative of the integration limits ($t_{near}, t_{far}$) with respect to pose must be correctly accounted for via $\frac{\partial \Delta t}{\partial \theta}$ [S1, unofficial].
+*   **Degenerate Input:** If the ray does not intersect the volume, $A=0$ and $G=0$ [G].
+
+## Subtopics
+
+## Operating characteristics
+*   **Time Complexity:** Roughly one forward march (1-1.5x forward cost) [S1, unofficial].
+*   **Memory Complexity:** O(1) per pixel, as it avoids storing per-iteration state [S1, unofficial].
+*   **Measured Performance:** On an RTX PRO 6000 Blackwell with a 256 px detector, 1.0 mm step, and $128^3$ volume, the naive backward pass takes ~1.8 ms (7x the 0.16 ms marching kernel). The adjoint method is estimated to bound the optimization step near 1.0 to 1.1 ms [S1, unofficial].
+*   **Scaling:** Scales linearly with the number of samples, but avoids the overhead of state management in reverse mode [S1, unofficial].
+*   **Strengths:** Significantly faster than naive reverse-mode differentiation (5.5x save), eliminates the need to re-render the forward intensity [S1, unofficial].
+*   **Limitations:** Requires closed-form derivatives of ray parameters, which may be complex to derive for arbitrary ray tracing methods [S1, unofficial].
+
+## Background
+Originating from the need to optimize differentiable volume rendering pipelines, this method addresses the performance bottleneck of reverse-mode automatic differentiation in marching loops [S1, unofficial]. It leverages the mathematical property that the adjoint of a Beer-Lambert line integral is a single forward-like march [S1, unofficial].
+
+## Sources
+[S1] fix(fluoro): bwd pass is almost an order of magnitude of fwd, https://github.com/isaac-for-healthcare/i4h-sensor-simulation/issues/70, fetched 2026-10-27 (unofficial)

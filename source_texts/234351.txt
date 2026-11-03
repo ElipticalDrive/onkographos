@@ -1,0 +1,495 @@
+HPC Campaign manager with remote data access. . Contribute to ornladios/hpc-campaign development by creating an account on GitHub.
+
+Draft: Add generic scalar data representations and Gaussian splats by dpugmire · Pull Request #99 · ornladios/hpc-campaign · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+dpugmire
+commented
+Jul 24, 2026
+Copy link
+Copy Markdown
+Collaborator
+Summary
+This PR introduces a generic alternate data representation model for HPC Campaign archives and uses it for both structured scalar fields and a new 2D Gaussian-splat field format.
+The central semantic change is that SCALAR_FIELD and GAUSSIAN_SPLAT are treated as alternate encodings of ground-truth scalar data—not as images and not as visualization types. A consumer may render either representation with a chosen colormap, derive contours, sample values, or perform other scalar-field operations. An IMAGE visualization sequence remains a fixed rendering whose visual choices have already been baked into its pixels.
+The implementation adds:
+generic representation/source/item/time/metric tables;
+Python APIs for creating representations and appending independently addressable timesteps;
+a GAUSSIAN_SPLAT dataset type and embedded payload format;
+command-line ingestion for Gaussian-splat .npz files;
+command-line representation manifests supporting both creation and append;
+structured and human-readable info() output;
+a correction to scalar-field semantics so scalar fields use the generic representation relationship rather than visualization-sequence items;
+focused tests for storage, binary layout, provenance, sparse source steps, multi-source mappings, interpolation contracts, append behavior, validation, CLI workflows, and reporting; and
+detailed documentation of the current contract, limitations, and future design decisions.
+This work intentionally does not change the ACA version. The archive version remains 0.7.
+Motivation
+The original simulation output in an ADIOS2 or HDF5 dataset is the ground truth. Consumers may also need alternate representations with different accuracy, size, decode cost, and interaction characteristics:
+a dense structured scalar field;
+a compact Gaussian basis;
+future MGARD-reduced data;
+future ZFP-compressed data;
+or other field encodings.
+Those representations all need the same higher-level information:
+Which source dataset and variable they represent.
+Which source step corresponds to each stored item.
+The physical/logical time of each item.
+Whether and how temporal interpolation is supported.
+How parameters correspond across keyframes.
+What output field the representation produces.
+What accuracy or quality metrics were measured.
+A visualization sequence solves a different problem. It records fixed rendered products, visualization roles, thumbnails, and rendering metadata. Making scalar fields or Gaussian bases visualization items incorrectly couples data representation to one presentation method and introduces image-specific concepts such as vis_type and resolution records where they do not belong.
+This PR separates those concepts while retaining the existing fixed-image visualization path.
+Conceptual model
+The relationship introduced here is:
+```
+ground-truth dataset + variable(s)
+                |
+                v
+       generic representation
+          /      |       \
+      item 0   item 1   item 2
+      step 0   step 10  step 25
+```
+A representation:
+has one output field_name;
+has one homogeneous item format;
+references one or more ground-truth source variables;
+contains an ordered, appendable collection of item datasets;
+defines temporal interpolation and parameter correspondence explicitly; and
+may carry both per-item and aggregate metrics.
+Each item is exactly one complete, independently addressable output timestep. This makes timestep boundaries unambiguous and avoids requiring a consumer to parse a concatenated multi-frame blob merely to locate timestep N.
+Source steps may be sparse. Representation item orders 0, 1, and 2 can map to ground-truth steps 0, 10, and 25.
+Generic archive schema
+The PR adds five relationship tables:
+representation
+Stores:
+unique representation name;
+output field name;
+homogeneous item format;
+temporal interpolation mode;
+parameter correspondence mode; and
+representation-level JSON metadata.
+representation_source
+Stores each ground-truth input:
+representation ID;
+source campaign dataset ID;
+source variable name;
+a unique label within the representation; and
+optional source-specific JSON metadata.
+The source label defaults to the variable name. Labels allow two variables with different datasets or roles to be mapped independently on every item.
+representation_item
+Stores:
+representation ID;
+item order;
+item dataset ID;
+logical/physical output time; and
+optional item-level JSON metadata.
+The item dataset contains one complete timestep. Items in one representation must use the same dataset format and pass format-specific compatibility checks.
+representation_item_source
+Stores the explicit source selection for each item/source pair.
+Every selection must include a non-negative source step. It may also include:
+a physical time; and
+future selection information such as spatial subsets or components.
+For a single source—or multiple sources sampled at the same step/time—the API provides source_step and source_time convenience arguments. For independently sampled sources, source_selections maps source labels to selection objects.
+If all selections have the same source time, the item logical_time defaults to that value. If sources have different times, logical_time must be provided explicitly.
+representation_metric
+Stores either per-item or aggregate metrics:
+metric name;
+numeric value;
+units;
+norm;
+relative/absolute flag; and
+JSON metadata describing the evaluation.
+Metric values must be finite. Metric names remain extensible because a controlled vocabulary has not yet been defined.
+Field naming
+Every representation explicitly names the scalar field it produces.
+For a representation with exactly one source variable, field_name defaults to that source variable name.
+For a representation with multiple source variables, field_name is required because no unambiguous default exists.
+This supports simple alternate encodings of one variable as well as derived quantities such as a density field produced from pressure and temperature.
+Temporal behavior
+Temporal behavior is stored rather than inferred:
+temporal_interpolation="none" means only stored items are defined.
+temporal_interpolation="linear" declares that a consumer may linearly interpolate representation parameters between adjacent stored items.
+The currently supported correspondence rules are format-specific:
+SCALAR_FIELD uses grid-index.
+GAUSSIAN_SPLAT uses stable-index.
+For Gaussian splats, stable indexing means Gaussian i must describe the same temporal track in adjacent items. The archive writer validates structural compatibility, including a fixed Gaussian count, but semantic track identity remains a producer contract.
+Gaussian-splat dataset format
+The first Gaussian format is a 2D anisotropic scalar basis.
+For N Gaussians, one item contains:
+Component
+Shape
+Meaning
+centers
+[N, 2]
+Gaussian centers in [x, y] order
+log_scales
+[N, 2]
+Natural logarithm of the two standard deviations
+angles
+[N]
+Orientation in radians
+amplitudes
+[N]
+Peak, unnormalized scalar contribution
+bias
+scalar or [1]
+Constant field offset
+All components are converted to finite little-endian float32 data.
+Binary payload
+The embedded payload uses structure-of-arrays order:
+```
+centers | log_scales | angles | amplitudes | bias
+```
+The exact byte length is:
+```
+(6 * N + 1) * sizeof(float32)
+```
+Item metadata records every component’s shape, byte offset, and byte length so readers do not need to infer offsets from prose.
+Reconstruction
+For point p and Gaussian i:
+```
+d = p - center[i]
+c = cos(angle[i])
+s = sin(angle[i])
+
+u = d.x*c + d.y*s
+v = -d.x*s + d.y*c
+
+sigma_x = exp(log_scale_x[i])
+sigma_y = exp(log_scale_y[i])
+
+field(p) =
+    bias
+    + sum_i amplitude[i]
+      * exp(-0.5 * ((u/sigma_x)^2 + (v/sigma_y)^2))
+```
+The kernel is intentionally unnormalized: amplitude[i] is the value contributed at the Gaussian center, not an integral-normalized density weight.
+The archive metadata explicitly records:
+format version;
+model name;
+spatial dimensions;
+Gaussian count;
+dtype and byte order;
+payload layout, encoding, and compression;
+scale encoding;
+angle units;
+coordinate order;
+kernel convention;
+rotation convention;
+reconstruction expression;
+coordinate/value spaces and transforms;
+component offsets and lengths; and
+total payload size.
+Coordinate and value spaces
+Coordinate and reconstructed-value spaces are explicit:
+physical
+normalized
+Normalized spaces require typed transform descriptors. Transform metadata is deliberately extensible, but a non-empty type is mandatory so consumers can reject transforms they do not understand rather than silently interpreting normalized values as physical values.
+The documentation defines a portable affine convention:
+```
+{
+  "type": "affine",
+  "physical_from_stored": {
+    "scale": [4.4, -5.0],
+    "offset": [0.2, 2.5]
+  }
+}
+```
+For values, the corresponding scalar rule is:
+```
+physical_value = scale * stored_value + offset
+```
+Producer-specific typed descriptors can retain existing transform metadata, such as the M3D-C1 R/Z normalization contract.
+Gaussian-splat APIs
+The Python API accepts NumPy-compatible arrays:
+```
+manager.gaussian_splat_data(
+    {
+        "centers": centers,
+        "log_scales": log_scales,
+        "angles": angles,
+        "amplitudes": amplitudes,
+        "bias": bias,
+    },
+    name="splats/pressure.000010.raw",
+    coordinate_space="normalized",
+    coordinate_transform=coordinate_transform,
+    value_space="normalized",
+    value_transform=value_transform,
+)
+```
+The command-line API accepts an .npz containing those five arrays:
+```
+hpc_campaign manager run.aca gaussian-splat pressure.000010.npz \
+  --name splats/pressure.000010.raw \
+  --metadata-json pressure-space.json
+```
+The Gaussian dataset stores the representation parameters. The generic representation relationship separately records what variable and timestep those parameters represent.
+Generic representation APIs
+Creation:
+```
+repid = manager.create_representation(
+    name="output/representations/pressure/gaussian",
+    representation_format="GAUSSIAN_SPLAT",
+    sources=[{"dataset": "output", "variable": "pressure"}],
+    temporal_interpolation="linear",
+)
+```
+Append:
+```
+manager.append_representation_item(
+    representation=repid,
+    dataset="splats/pressure.000010.raw",
+    source_step=10,
+    source_time=0.5,
+    metrics=[
+        {
+            "name": "rmse",
+            "value": 0.02,
+            "units": "Pa",
+            "norm": "L2",
+        }
+    ],
+)
+```
+Aggregate metric:
+```
+manager.add_representation_metric(
+    representation=repid,
+    name="mean_rmse",
+    value=0.015,
+    units="Pa",
+    norm="L2",
+)
+```
+Representation CLI manifests
+A creation manifest includes name, format, and sources, and may append one or more items:
+```
+{
+  "name": "output/representations/pressure/gaussian",
+  "format": "GAUSSIAN_SPLAT",
+  "sources": [
+    {"dataset": "output", "variable": "pressure"}
+  ],
+  "temporal_interpolation": "linear",
+  "items": [
+    {
+      "dataset": "splats/pressure.000010.raw",
+      "source_step": 10,
+      "source_time": 0.5
+    }
+  ]
+}
+```
+An append-only manifest can contain just the existing representation name and new items. This makes repeated producer invocations append new keyframes without replacing earlier items.
+--replace requires a complete creation manifest. It replaces the representation relationship, source mappings, item associations, and metrics, but does not delete the underlying item datasets.
+Scalar-field semantic correction
+SCALAR_FIELD now uses the same generic relationship:
+it identifies ground-truth source variables through representation_source;
+each scalar dataset is one representation item/timestep;
+source steps and times are explicit;
+item compatibility is checked through scalar-field metadata; and
+temporal behavior is represented without vis_type, visualization roles, or image resolution.
+Consequently:
+SCALAR_FIELD is removed from supported visualization-sequence item formats;
+visualization sequences accept only fixed IMAGE items;
+scalar-field replicas no longer receive image resolution records; and
+image-association output no longer reports scalar fields as images.
+This is an intentional public-behavior change. The codebase is pre-beta and backward compatibility was explicitly not required for this correction.
+Information and inspection
+Manager.info() now exposes structured representation records containing:
+representation definition;
+source datasets, variables, and labels;
+ordered items;
+logical times;
+source selections;
+per-item metrics; and
+aggregate metrics.
+Human-readable manager output includes a new Data Representations section.
+Gaussian datasets also report their format-specific metadata and embedded replicas through the existing dataset information model.
+Validation and failure behavior
+The implementation rejects:
+unsupported representation formats;
+empty or duplicate representation names;
+missing sources;
+duplicate source labels;
+multi-source representations without an explicit output field;
+missing or deleted source/item datasets;
+item datasets whose format does not match the representation;
+scalar items with incompatible shape, dtype, byte order, layout, encoding, or compression;
+Gaussian items with incompatible model, count, dtype, layout, conventions, spaces, or transforms;
+missing source steps;
+negative or non-integral source steps;
+non-finite source times, logical times, Gaussian parameters, or metric values;
+incomplete or unknown multi-source selections;
+mixed use of source_selections and source-step convenience arguments;
+asynchronous source times without an explicit item logical time;
+normalized Gaussian coordinates or values without typed transforms;
+malformed Gaussian component shapes; and
+payload lengths that do not match (6*N + 1) * 4.
+ACA version and compatibility
+The ACA version remains:
+```
+0.7
+```
+The schema changes are additive for new representation tables and the Gaussian-specific metadata table. No upgrade step or version increment is included.
+The behavior change for scalar-field visualization-sequence items is intentional: new code rejects them and directs structured field data to the representation relationship.
+Documentation
+docs/source/data_representations.rst provides:
+the conceptual distinction between ground truth, alternate representations, and fixed visualizations;
+the complete generic relationship;
+multi-source examples;
+source selection and time semantics;
+metrics;
+the exact Gaussian payload layout and reconstruction formula;
+coordinate/value transform conventions;
+Python API examples;
+CLI and manifest examples;
+table-level archive schema documentation; and
+an extensive list of unresolved future design considerations.
+The new page is linked from the documentation index and referenced by both Python and CLI usage guides.
+Tests and verification
+The following checks were run:
+```
+pytest -q tests/test_data_representations.py tests/test_visualization_sequence.py
+26 passed
+
+pytest -q --ignore=tests/test_manager.py
+29 passed
+
+ruff check hpc_campaign tests/test_data_representations.py tests/test_visualization_sequence.py
+All checks passed
+
+pylint ...
+10.00/10
+
+python -m compileall -q hpc_campaign
+passed
+
+git diff --check
+passed
+```
+The complete suite currently reports 39 passed, 4 failed. The four failures are existing tests/test_manager.py fixture failures because upstream/master does not contain:
+data/heat.bp
+data/T00000.png
+Those failures occur before exercising this PR’s functionality.
+A manual smoke test also decoded the preserved real M3D-C1 adaptive pressure model and wrote it through the new API:
+```
+1,842 Gaussians
+44,212-byte payload
+```
+The stored count and payload size matched the expected v1 layout.
+Out of scope
+This PR does not:
+change the campaign viewer;
+render Gaussian splats;
+compute contours in hpc_campaign;
+add Gaussian fitting code;
+migrate fixed IMAGE visualization sequences to the generic representation schema;
+add MGARD or ZFP payload implementations;
+change the ACA version;
+add dependencies; or
+attempt backward compatibility for scalar fields previously stored as visualization-sequence items.
+Future considerations
+The detailed documentation records the following follow-up areas:
+Image representation migration
+Determine whether fixed visualization sequences should eventually use the generic representation relationship while retaining thumbnails, visualization roles, and rendering metadata.
+Additional codecs
+Add format-specific metadata and capability negotiation for MGARD, ZFP, and other compressed/reduced representations.
+Higher-dimensional and multi-component Gaussian models
+Define separate versioned payload contracts for 3D, vector, tensor, multi-channel, and uncertainty fields.
+Changing Gaussian topology
+Support variable Gaussian counts, pruning, densification, split/merge events, and explicit cross-keyframe correspondence maps.
+Angle and axis interpolation
+Define canonical ellipse-axis ordering, angle unwrapping, periodic shortest-path interpolation, and handling of equivalent rotated ellipses.
+Richer temporal models
+Define cubic tracks, motion/acceleration models, and per-interval interpolation modes.
+Time semantics
+Standardize units, epochs, calendars, simulation cycles, and tolerances for logical and source times.
+Asynchronous multi-source fields
+Standardize resampling and alignment rules when source variables use different steps and physical times.
+Spatial selections
+Define a shared vocabulary for bounds, mesh regions, components, ghost zones, and index selections.
+Transform registry
+Standardize coordinate systems, axis order, handedness, units, affine and non-affine maps, and viewer capability checks.
+Metric vocabulary and uncertainty
+Standardize RMSE, PSNR, relative norms, contour displacement, sampling masks, quadrature weights, calibration, and probabilistic uncertainty semantics.
+Storage and random access
+Consider compression, quantization, chunking, checksums, GPU alignment, byte-range access, and consolidated multi-item payloads.
+Representation selection policy
+Allow clients to choose among representations by accuracy, size, decode cost, device support, requested operation, and error tolerance.
+Exact versus approximate semantics
+Make losslessness, error bounds, and fitness for requested operations machine-readable.
+Lifecycle and provenance
+Define foreign-key behavior, deletion policy, immutable provenance, derivation DAGs, and cycle detection.
+Concurrent append and finalization
+Define reservations, multiple producers, recovery from partial writes, and a finalized/complete representation state.
+Integrity and confidentiality
+Specify checksums, authenticated encryption, key handling, and reporting of missing, truncated, or corrupt items.
+Schema and capability evolution
+Before stable interoperability, define migrations and reader behavior for unknown formats, transform types, and representation capabilities even though this pre-beta change intentionally retains ACA 0.7.
+Viewer support
+Add explicit format/transform/interpolation capability discovery and fail visibly for unsupported representations rather than falling back to image semantics.
+Reviewer guidance
+The most important review questions are:
+Does the source/item relationship capture enough provenance for single- and multi-source derived fields?
+Is one dataset per representation timestep the desired random-access boundary?
+Are explicit source steps plus optional source times sufficient for the first implementation?
+Is fixed Gaussian count plus stable index identity the correct v1 interpolation contract?
+Are coordinate/value spaces and typed transforms explicit enough for an independent viewer?
+Is rejecting scalar fields as visualization-sequence items the desired semantic correction?
+Are per-item and aggregate metrics sufficiently extensible without prematurely standardizing names?
+Which future capability/version negotiation should be addressed before viewer integration?
+Add generic scalar data representations
+7062032
+dpugmire
+commented
+Jul 24, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+@pnorbert
+I'm still wrestling with this change.... I'm not happy the details of gaussian splatting are in the API. This feels off.... It seems like it should be more on the rendering side.... Perhaps it's just a blob with a recipe for decoding that only the viewer knows about.
+I guess this would be related to how reduced representations are going to be handled.
+dpugmire
+changed the title
+Add generic scalar data representations and Gaussian splats
+Draft: Add generic scalar data representations and Gaussian splats
+Jul 24, 2026
+dpugmire
+added 2 commits
+August 12, 2026 17:15
+Unify variable representations
+87e7ab2
+Preserve manager script permissions
+21d5f2b
+dpugmire
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+This PR is being replaced with #100 .
+Closing for now.
+dpugmire
+closed this
+Aug 14, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

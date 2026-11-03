@@ -1,0 +1,451 @@
+Python library for loading and using triangular meshes. - Binvox voxel IO/representations by jackd · Pull Request #437 · mikedh/trimesh
+
+Binvox voxel IO/representations by jackd · Pull Request #437 · mikedh/trimesh · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jackd
+commented
+May 27, 2019
+Copy link
+Copy Markdown
+Contributor
+Hi Mike,
+Apologies for making this rather large. I understand you might not be looking to extend functionality in this direction, but I was writing this stuff for my own work anyway and so figured I'd offer it up. As an overview:
+The original motivation was just to add binvox support.
+binvox uses run-length-encodings, and many operations can be performed on the RLE rather than the dense version - see trimesh.rle and the trimesh.voxel.VoxelBase implementation VoxelRle.
+for some reason the binvox specification is for axis ordering 'xzy'. I've implemented this in a separate VoxelTranspose class, which represents a lazily transposed VoxelBase.
+The Binary RLE (brle-prefixed) stuff isn't commonly used AFAIK, but it's an obvious direction to take things if you ask me and I've found it useful in my own work.
+I'm very happy to restructure it/remove parts/add additional tests to your liking - I just thought I'd seek some high-level feedback before I go over everything with a fine tooth-comb.
+Thanks again for the package!
+jackd
+added 4 commits
+May 25, 2019 20:45
+initial voxel implementation
+08cfaa8
+binvox IO/testing
+6807609
+added rle classes, extra ops and integration
+1db51d6
+resolved merge conflicts
+b90e0b1
+mikedh
+commented
+May 27, 2019
+Copy link
+Copy Markdown
+Owner
+This looks awesome and no worries about size haha! I don't actually use trimesh.voxel in my work so it may be slightly neglected, thanks for working on it! This is going to take me a little while to go through, but some initial thoughts on this and the voxel functionality in general:
+Maybe we should group all the voxel stuff into a submodule? something like: trimesh.voxel.base (the class definitions), trimesh.voxel.runlength, trimesh.voxel.operations (marching cubes, etc), trimesh.voxel.creation (the ray method, subdivision method, etc). We recently did something similar on trimesh.visual recently and I thought it was a pretty nice cleanup, and you can get backwards compatibility by importing the methods in the __init__.py file.
+Should Voxel objects inherit from trimesh.parent.Geometry so we force compatibility with nice helper properties like bounds, extents, etc?
+How does this binvox importer benchmark against the binvox-rw-py?
+Could you add a small binvox file so unit tests can run in CI?
+jackd
+commented
+May 27, 2019
+Copy link
+Copy Markdown
+Contributor
+Author
+Maybe we should group all the voxel stuff into a submodule?
+I'll get onto that
+Should Voxel objects inherit from trimesh.parent.Geometry
+I don't think that would be too hard. How would you feel about implementing apply_transform lazily to allow for non-axis aligned bounding boxes? Might also be a better way of dealing with transposed axes now that I think about it?
+How does this binvox importer benchmark against the binvox-rw-py?
+I haven't done the explicit benchmark, but parsing of the binvox file itself is almost identical (it's just reading a short header then running np.fromstring. binvox-rw-py has dense and sparse interfaces, but doesn't have a run-lenght interface/operation implementations. Where dense/sparse implementations are more efficient I've provided to_sparse and to_dense so those implementations are always available - though naive use of the RLE implementations may result in worse performance in cases.
+Could you add a small binvox file so unit tests can run in CI?
+I'll go dig up a bunny :)
+I'll try and get that sorted today. Thanks!
+major refactoring - tests/formating to fix
+93ddf08
+jackd
+commented
+May 28, 2019
+Copy link
+Copy Markdown
+Contributor
+Author
+Did a fairly major re-write and... well... it's fairly breaking. Can make it unbreaking, but I feel it would be a lot less elegant.
+In particular, I've separated origin/pitch from most base classes (with the exception of VoxelMesh) and implemented it in a separate TransformedVoxel class which wraps a base implementation and handles any homogeneous transformation (including translation, non-uniform scaling and axes transposes).
+Partial non-breaking could be achieved by renaming classes and having factory methods by the origin name, i.e.
+```
+class DenseVoxel(...)  # old Voxel class
+  ...
+
+def Voxel(matrix, origin, pitch):
+  return DenseVoxel(matrix).apply_scale(pitch).apply_translation(origin)
+```
+or I could fold the transform-related methods into the base class, thus making all voxel implementations have an associated transform (default to the identity).
+Question: should apply_transform mutate the object calling it, create/return a mutated version or am I free to choose? I know there are often efficiencies, but I get very scared working with mutable objects...
+Plenty of fixes to make yet, just ran out of time today (and might finish off on a different PC later).
+mikedh
+commented
+May 30, 2019
+Copy link
+Copy Markdown
+Owner
+Hey, sorry I thought I responded to this yesterday but it looks like I didn't press comment 😞
+Did a fairly major re-write and... well... it's fairly breaking. Can make it unbreaking, but I feel it would be a lot less elegant.
+I think we should aim to make it the API as nice as we can and do a "major" release, rather than adding a shim stuff. I might bake in some other API changes too 😄
+Question: should apply_transform mutate the object calling it, create/return a mutated version or am I free to choose? I know there are often efficiencies, but I get very scared working with mutable objects...
+Up to you! With meshes there are a bunch of other properties you can preserve in a transform (normals, colors, etc) so mutability is a little easier to justify. Though I'm blanking on anything similar with voxels. I like how you changed apply_transform to return the object.
+This is looking great!
+jackd
+added 3 commits
+May 30, 2019 22:51
+encodings refactoring
+9023250
+fixed ABC
+c0dcf00
+fixed super calls
+67e4ef2
+jackd
+commented
+May 30, 2019
+Copy link
+Copy Markdown
+Contributor
+Author
+So... I hate to do the multiple major refactorings things, but when you say things like "I think we should aim to make it the API as nice as we can and do a "major" release" I get a little excited. I think the latest push is much more elegant. Key points:
+there's now only one Voxel class. VoxelMesh was refactored into a MeshVoxelizer in creation and is no longer a Voxel - it just creates voxels from meshes while caches intermediate results.
+all voxels now come with a transformation - even if it's the identity. To reduce uneccessary operations I've created Transformation classes that do some basic caching and have potential for optimized point/matrix transformations (e.g. the identity transform does nothing, rather than multiplying by an identity matrix). There's potential for more optimization here (e.g. a Translation or Scale variant) but I spent a while going down that route and decided it was probably just premature optimization at this point. Obviously everything else in the library uses simple matrices, and maybe these optimizations aren't worth the overhead/code complication factor.
+I've written the code assuming Encodings, Transformations and Voxels are immutable... but I'll have to go through and make sure I haven't left any leaks. I'm still using DataStore and Cache which means there are lots of uneccessary checks going on, but if you're happy with the immutability I can switch these out.
+different ndarray encodings have been moved into a separate class (Encodings) which provide a numpy-like interfaces to things which are conceptually nd arrays. There's a dense, run length and binary run length encoding version, plus various lazy implementations for flipping and transposing. A sparse implementation seems an obvious addition, though (a) I'm not entirely sure what the best way to go about this is and (b) I don't need it for my current work, and this is a fairly deep rabbit hole as it is. I'm happy to think about that later, but I don't think it's necessary right now. The flipping/transpose could be folded into the transform, but that makes saving/loading from binvox a bit trickier (it saves xzy axis order for some reason, so keeping flip/transpose operations separate from continuous rotations is handy).
+Added a simple example script.
+If you're happy to break some other minor things not directly related to voxel stuff, how do these sound:
+I've made a slight tweak to util.grid_linspace. I'll survive with this rolled back, but I don't see much argument for not having it. I also feel returning a stack version of the shaped arrays makes more sense (ie grid_linspace(range(10), [n1, n2, ..., nk]).shape == (10, 10, ..., 10, k). That would involve touching the code in a few places, but nothing crazy.
+DataStore feels like it should be a collections.Mapping. The only thing that throws a spanner in the works is this empty default return. Any issue with me making that an error (users could replace any questionable calls with store.get(key, np.empty((0,)))?
+mikedh
+commented
+May 30, 2019
+Copy link
+Copy Markdown
+Owner
+Nice! I did some testing and it was working well! With regards to the voxel architecture change, it’d be nice to get some feedback from other users. Hopefully I summarized this correctly:
+Voxels Architecture Change: Transformation Objects
+Previously, voxels were represented as an (n, 3) array of integers for filled cells, as well as a cell pitch (float) and origin ((3,) float). This PR replaces both pitch and origin with a Transformation object, which has a scale, rotation, and translation.
+Does anyone who uses voxels have thoughts on this change? Pinging people who have made voxel-related PR’s:
+@wkentaro @willmycroft @LinJiarui @rjaworzyn @Marviel
+Other Notes
+Transformation.volume is a little confusing, as it is not actually a volume. Maybe Transformation.volume_scale? I got that it's the product of [scale x, scale y, scale z] but I did a bit of a double take at the name.
+Are the subclasses of Transformations super necessary (InverseTransformation, _IdentityTransform)? Not religiously opposed, but it seems like there is some duplication going on we might be able to avoid with a few checks inside a single class.
+Couldn’t we make a property pitch for Voxel objects which extracts the scale from the Transformation object for convince and partial backwards compatibility, something simple like: trimesh.transformations.scale_from_matrix(self.transform.matrix)[0]?
+So it looks like the output shape of grid_linspace is still (n, dimension), and the shape is still the same? This looks like it just changes the order?
+Re: DataStore as collections.Mapping, sounds good if we can get tests to pass!
+I will probably make it so if you do a trimesh.load(‘stuff.binvox) it returns a Voxel object at some point
+Some of the methods still could use docstrings (we try for numpydoc style with varying success).
+I didn’t get a chance to go through or test all of it (haha there’s a lot of it :) but the idea of Encodings sounds good!
+wkentaro
+commented
+May 30, 2019
+Copy link
+Copy Markdown
+Contributor
+Voxels Architecture Change: Transformation Objects
+So below codes are equivalent? If so, that looks good to me.
+But I'm not sure why we need Transformation class.
+This package has consistently used 4x4 numpy array for homogeneous transformation (and None usually treated to an identity matrix).
+What it is for?
+```
+voxel = trimesh.voxel.Voxel(matrix=matrix, pitch=0.01, origin=(0.1, 0.3, 0.5))
+```
+```
+T = trimesh.transformations.translation_matrix([0.1, 0.3, 0.5]) @ trimesh.transformations.scale_matrix(0.01)
+voxel = trimesh.voxel.Voxel(matrix=matrix, transform=T)
+```
+mikedh
+commented
+May 30, 2019
+Copy link
+Copy Markdown
+Owner
+Yeah @wkentaro that's a good point, my preference for transformations is also straight (4, 4) numpy arrays and None for identity, and do the caching elsewhere if possible. Re-crc'ing is consistent and quite fast so holding on to the TrackedArray is probably not necessary for speed:
+```
+In [1]: import numpy as np
+
+In [2]: import trimesh
+
+In [3]: mat = trimesh.transformations.random_rotation_matrix()
+
+In [4]: mat
+Out[4]: 
+array([[ 0.85129397,  0.17240416,  0.49555563,  0.        ],
+       [-0.43738622,  0.75486193,  0.4887502 ,  0.        ],
+       [-0.28981351, -0.6328193 ,  0.71801662,  0.        ],
+       [ 0.        ,  0.        ,  0.        ,  1.        ]])
+
+In [6]: trimesh.caching.tracked_array(mat).crc()
+Out[6]: 142630585
+
+In [7]: trimesh.caching.tracked_array(mat).crc()
+Out[7]: 142630585
+
+In [8]: trimesh.caching.tracked_array(mat).crc()
+Out[8]: 142630585
+
+In [9]: %timeit trimesh.caching.tracked_array(mat).crc()
+The slowest run took 8.17 times longer than the fastest. This could mean that an intermediate result is being cached.
+100000 loops, best of 3: 6.01 µs per loop
+
+In [10]: %timeit trimesh.caching.tracked_array(mat).fast_hash()
+The slowest run took 10.14 times longer than the fastest. This could mean that an intermediate result is being cached.
+100000 loops, best of 3: 6.15 µs per loop
+```
+jackd
+commented
+May 31, 2019
+Copy link
+Copy Markdown
+Contributor
+Author
+I'm definitely not sold on Transformations myself - which I know sounds odd coming from the person who introduced them. I've removed and then re-implemented them a couple of times already. I think the use cases as they apply to voxels is only a subset of the full possibilities, and this PR is big enough as it is. There are a few minor conveniences to having them around for voxels though so I've only implemented a subset.
+I'll put my argument for them here, but I'm very happy to remove them and just use matrices if nobody's convinced.
+1 A separate object for caching
+Certain operations are intrinsic to the transform itself and independent of the occupancy grid (per-voxel volume and pitch / origin if we choose to use them). This could probably be done with just a different Cache object, but from what I can tell that wouldn't work nicely with @caching.cache_decorator and it doesn't seem to fit the overall style of the rest of trimesh.
+2 Visitor pattern for optimized implementations (not implemented)
+Geometry objects have apply_translation, apply_scale methods which fallback to apply_transformation if not overriden (as a side note, this could be extended to include apply_transpose) indicating optimized implementations can be supported. Generally, Transformations are supposed to represent lazy transforms, so we could use a visitor pattern to still leverage those optimized implementations.
+```
+class Scale(Transformation):
+  def apply_to(self, other):
+    return other.apply_scale(self._data)
+
+class Translation(Transformation):
+  def apply_to(self, other):
+    return other.apply_translation(self._data)
+
+###############################
+class Geometry(object):
+  def apply_transform(self, transform):
+    if isinstance(transform, Transformation):
+      return transform.apply_to(self)
+    else:
+      # matrix fallback
+      return self.apply_matrix_transform(transform)
+
+  def apply_scale(self, scale):
+    return self.apply_matrix_transform(transformations.scale_matrix(scale))
+```
+3 Compound mutable transformations
+```
+>>> scale = Scale(2)
+>>> translation = Translation([1, 2, 3])
+>>> combined = CompoundTransformation(translate, scale) # translate then scale
+>>> print(combined.matrix)
+[
+ [2, 0, 0, 2],
+ [0, 2, 0, 4],
+ [0, 0, 2, 6],
+ [0, 0, 0, 1]
+]
+>>> scale.scale = 3
+>>> print(combined.matrix)
+[
+ [3, 0, 0, 3],
+ [0, 3, 0, 6],
+ [0, 0, 3, 9],
+ [0, 0, 0, 1]
+]
+```
+4 Generic lazy transformations
+Something like the following might be useful.
+```
+rotation = Rotation(angle=0, axis=(0, 0, 1))
+base_scene = Scene()
+base_scene.add_geometry(primitives.Box())
+scene = LazyTransformedGeometry(base_scene, transform=rotation)
+# rendering loop
+def tick():
+      # rotate
+      rotation.angle += 1.0
+      scene.draw()
+```
+Which would be equivalent to
+```
+angle = 0
+def tick():
+  global angle
+  angle += 1.0
+  rotation = rotation_matrix(angle=angle, axis=(0, 0, 1))
+  scene = base_scene.copy().apply_transform(rotation)
+  scene.draw()
+```
+In terms of implementation this is actually worse since Trimesh.apply_transform operates in-place, hence the required copy - but this is more intended to illustrate the possible interface.
+For convenience/backwards compatibility I would suggest all publicly exposed interfaces that accept transformations should also accept 4x4 matrices.
+I agree that consistency is more important than most of the minor potential optimization discussed. I also accept this adds a layer of abstraction/code complexity that might not be worth it.
+jackd
+commented
+May 31, 2019
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+@mikedh with regards to your specific notes above:
+Transformation.volume is a little confusing, as it is not actually a volume.
+On the contrary, this is the volume - of the parallelpiped resulting from transforming a unit cube. I agree it could definitely use a better name/documentation.
+Are the subclasses of Transformations super necessary
+Absolutely not. In fact, if we want mutable transformations it might be simplest just to have the one with cached decomposition. I like a separate inverse class because it prevents thrashing (x.inverse.inverse is x), so you can make better use of caches and avoid potential numerical drift. It also means if y = x.inverse then y is ALWAYS the inverse of x - even if x is mutated. This may not be desired, but it suits my way of thinking.
+Couldn’t we make a property pitch for Voxel objects which extracts the scale from the Transformation ...
+We absolutely could. The only issue I have is what to do when you have non-uniform scaling/shearing, or how to efficiently calculate it in the presence of rotation. Do we raise an error? Return the cube root of the volume? In situations where it's ambiguous/only defined in a limited number of contexts, I'd rather just expose information about the transformation itself and let users interrogate it directly.
+For backwards compatibility (i.e. supporting implementations made when shearing/rotation/non-uniform scaling wasn't possible) I'd be happy to go with the "raise an error if invalid" option - maybe with a deprecated tag?
+So it looks like the output shape of grid_linspace is still (n, dimension), and the shape is still the same? This looks like it just changes the order?
+This is correct. I've tried and failed multiple times to understand the motivation behind the default meshgrid behaviour (i.e. without indexing='ij'). If order isn't important it doesn't matter, but if it is I can't see a situation where the default ordering would be preferable.
+Some of the methods still could use docstrings
+Yep, absolutely. It's probably a little rude presenting this stuff in incomplete form, but I'm hoping it's interpretable enough for you to get your head around the ideas. If we're going to end up scrapping large swathes of it (e.g. Transformations) I'd rather skip the time spent documenting perfectly. Once I'm clear on a general direction everyone's happy with I'll dig out the fine tooth comb and throw a documentation/testing party - it'll be wild.
+mikedh
+commented
+May 31, 2019
+Copy link
+Copy Markdown
+Owner
+Thanks for the detailed rebuttal! I'm still going through line by line and will try to post more detailed feedback this weekend.
+My initial sense with regards to Transformations is that that the performance benefits are not worth breaking user expectations, i.e. that a transformation is always a (4, 4) float or None, as it is elsewhere. Although elsewhere we're able to get a lot of the benefits you described by doing some very simple matrix checks (i.e. early exiting if np.allclose(matrix, np.eye(4)), but without np.allclose as it is crazy slow for some reason haha).
+Thanks for working through this! Also don't worry about the docstrings, I don't mind going through and writing them, though sometimes it takes a bit to figure out what the heck a method is doing :)
+jackd
+commented
+Jun 3, 2019
+Copy link
+Copy Markdown
+Contributor
+Author
+Very happy to revert Transformations to 4x4 matrices.
+elsewhere we're able to get a lot of the benefits you described by doing some very simple matrix checks
+If you can give me an example I'll do my best to keep things consistent.
+I've got a few other things to get done early this week, so I might wait for any other feedback you might have before getting started.
+mikedh
+commented
+Jun 4, 2019
+Copy link
+Copy Markdown
+Owner
+Awesome thanks! I didn't make it all the way through (😁 ) but I did skim everything and here were some assorted thoughts, I'll try to make another pass soon so we can get this puppy merged:
+I really like having the origin and pitch information in one matrix!
+Here's the simple check we do for identity matrices in mesh.apply_transform.
+Performance seems good in testing!
+It would be sweet if trimesh.load('bunny.binvox') returned a voxel object.
+On the contrary, this is the volume - of the parallelpiped resulting from transforming a unit cube. I agree it could definitely use a better name/documentation.
+The way I would interpret that example is, "if you apply the transform to a unit cube, the matrix applies scaling to each axis, which results in a scaling of the volume." I'm just saying the matrix applies scale to geometry, which may have physically meaningful properties like length and volume, but the matrix itself has no volume, hence my argument for calling this property of transformation matrices something like volume -> volume_scale
+We absolutely could. The only issue I have is what to do when you have non-uniform scaling/shearing, or how to efficiently calculate it in the presence of rotation. Do we raise an error? Return the cube root of the volume? In situations where it's ambiguous/only defined in a limited number of contexts, I'd rather just expose information about the transformation itself and let users interrogate it directly.
+I would probably return None for matrices with shear, or raise an exception. It seems likely that the majority of users are not going to have that case, but most people will want to know the voxel pitch, ideally without having to figure out how to extract it from a matrix.
+removed MeshVoxelizer, separated voxelization from filling, added mor…
+…
+63f0989
+```
+…phology ops
+```
+jackd
+commented
+Jun 4, 2019
+Copy link
+Copy Markdown
+Contributor
+Author
+... ... ... I can't stop adding shit. I'm sorry - it's just not apparent things are missing until I start trying to clean things up. Summary of latest changes:
+added SparseEncoding and changed voxelize methods to return Voxels
+added an additional voxelize method based on binvox tool
+added 2 additional fill implementations
+removed MeshVoxelizer. Trimesh.voxelized still exists with an almost identical interface.
+I've moved fill methods to the Voxel class (they were originally in MeshVoxelizer).
+Voxels are now mutable, and apply_transform, fill and strip methods all operate in-place.
+Transforms... have been removed from the interface. They're slightly prettier descendent is still there hiding in a private property for some light caching behind the scenes, but this is purely an implementation detail (and the actual implementation is significantly more concise than earlier versions).
+trimesh.load('bunny.binvox') now works.
+added some light encoding wrappers around other scipy.ndimage.morphology functions.
+caching.DataStore now implements collections.Mapping, and raises a KeyError if one attempts to access attributes that are not present in the underlying data dict. Old behaviour can be replicated by replacing data[key] with data.get(key, np.empty((0,))).
+added a bunch of docstrings.
+Questions
+I think Voxel is an incorrect name for what we have. VoxelGrid maybe?
+pitch and scale refer to the same thing - should we use just one or the other? I'd rather use scale because it's consistent with matrix transformations in other sections of the package - could support both and put in some deprecated warnings. That said, scale is usually a size 3 array rather than a uniform value... so maybe both could exist? Less ambiguity in translation vs origin - they're exactly the same.
+should Voxel expose dense/sparse_indices etc directly, or just access to the encoding (which exposes those methods)? Currently we do the later, which leads to simpler/more flexible code but tighter coupling.
+Trimesh.voxelized uses key rather than method from previous versions. I feel key is more appropriate - or maybe even something like 'impl' - but it breaks back-compatibility, so happy to change it back. Same with Voxel.fill, though that didn't exist before so no back-compatibility concerns.
+I've included the binvox CL tool (1-clause BSD) for voxelizing meshes. Would you prefer to look for a version on users $PATH? It looks like that's what you do with other similar stuff, but this one is only 480kb...
+added sparse stripped impl + tests, removed _Transform._inverse
+0856331
+mikedh
+commented
+Jun 9, 2019
+Copy link
+Copy Markdown
+Owner
+Nice! I'm good to merge whenever and make a final once-over pass, just let me know when you're ready. Thanks again for the PR, this is a huge improvement!
+I think Voxel is an incorrect name for what we have. VoxelGrid maybe?
+Sounds good to me!
+pitch and scale refer to the same thing - should we use just one or the other? I'd rather use scale because it's consistent with matrix transformations in other sections of the package - could support both and put in some deprecated warnings. That said, scale is usually a size 3 array rather than a uniform value... so maybe both could exist? Less ambiguity in translation vs origin - they're exactly the same.
+Adding scale is a-ok with me, but I think we should keep pitch.
+should Voxel expose dense/sparse_indices etc directly, or just access to the encoding (which exposes those methods)? Currently we do the later, which leads to simpler/more flexible code but tighter coupling.
+Trimesh.voxelized uses key rather than method from previous versions. I feel key is more appropriate - or maybe even something like 'impl' - but it breaks back-compatibility, so happy to change it back. Same with Voxel.fill, though that didn't exist before so no back-compatibility concerns.
+I kind of prefer method here, as IMHO key is a little overloaded haha.
+I've included the binvox CL tool (1-clause BSD) for voxelizing meshes. Would you prefer to look for a version on users $PATH? It looks like that's what you do with other similar stuff, but this one is only 480kb...
+I'd prefer it to be separate, though I'm happy to throw up a copy into an S3 bucket so our CI doesn't hammer the original host hahah. If you check out on PyPi, our total package size is less than 400kb, which is nice for the "I just want an STL importer" crowd.
+renamings and documentation tweaks
+4dcb166
+jackd
+commented
+Jun 10, 2019
+Copy link
+Copy Markdown
+Contributor
+Author
+Changes made. Only question outstanding is regarding exposing dense/sparse_indices directly from VoxelGrid or via encoding only (I think you got part way through responding and got distracted?).
+I don't really know what I'm doing when it comes to docker builds, but I through a bash script in there for getting binvox.
+I'll be overseas from Wednesday for a month (don't suppose I'll see you at CVPR?) and while I plan to be doing bits and pieces of work I might not have a lot of time to spare for this. Sorry for the bad timing, but feel free to take any liberties you want.
+Changelog summarising main changes below. Not sure if you want to include it anywhere.
+CHANGELOG
+The Voxel class has undergone a major rewrite and been renamed VoxelGrid. It is now defined by separate encoding and transformation_matrix objects and can be thought of as a 3D occupancy grid with unit side lengths that is transformed lazily by an arbitrary transformation matrix. It now implements Geometry in its own right.
+Main changes compared to the old Voxel class:
+VoxelGrid.pitch and VoxelGrid.origin are still provided for ease-of-transition, but for new code prefer to use Voxel.transformation_matrix directly. Note that VoxelGrid.pitch is ill-defined for transformation matrices which aren't diagonal apart from the translation part and will raise an error when computed if so.
+trimesh.voxel.encoding.Encodings classes have been added which represent various encodings of ND arrays - e.g. dense, sparse, run-length-encoding etc. Most methods mimic numpy equivalents, though not all numpy implementations are required so an Encoding is not a numpy array. As a fallback, they contain dense which gives the dense numpy array.
+VoxelMesh class has been removed.
+Trimesh.voxelized has a new method - binvox - which uses the binvox CL tool.
+Filling in voxels can be achieved using Voxel.fill (operates in-place) and now supports a number of implementations.
+Added functionality:
+hollow: remove internal voxels
+strip: strip leading/trailing planes of zeros
+revoxelized: create a new VoxelGrid based on a different shape with the same bounds.
+Smaller tweaks
+util.grid_linspace and util.grid_arange now using meshgrid with indexing='ij'. As a result, the returned arrays have the same rows, just in different orders.
+caching.DataStore now implements collections.Mapping, and raises a KeyError if one attempts to access attributes that are not present in the underlying data dict. Old behaviour can be replicated by replacing data[key] with data.get(key, np.empty((0,))).
+Various apply_transforms now return the object having the transformation applied to (previous versions returned None). This makes chaining operations easier in some instances. Note they still mutate the object.
+mikedh
+commented
+Jun 11, 2019
+Copy link
+Copy Markdown
+Owner
+No worries and thanks for all the work on this!
+Actually a handoff sounds like a great way to handle a PR of this size 😁, I'll merge into a branch Wednesday evening and then take over testing and development until I can get it into master.
+Enjoy the trip to CVPR!
+mikedh
+changed the base branch from
+master
+to
+release/major
+June 15, 2019 18:53
+mikedh
+merged commit b6c5a00
+into
+mikedh:release/major
+Jun 15, 2019
+mikedh
+mentioned this pull request
+Jun 19, 2019
+Major Release (3.0.0)
+#467
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

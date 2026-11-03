@@ -1,0 +1,185 @@
+Hi there.  I usually write rendering code rather than blog posts. This is a first. Let’s see how it... Tagged with webgpu, graphics, visualization, webdev.
+
+Kiln: WebGPU-Native Out-of-Core Volume Rendering for Multi-GB Datasets - DEV Community
+Hi there.
+I usually write rendering code rather than blog posts. This is a first. Let’s see how it goes.
+My first encounter with volume rendering was back in 2012 — volume raycasting and processing with OpenSceneGraph, C++ and CUDA, applied to subsurface data visualization during my master's thesis.
+It stuck with me.
+Since then it has been an on-and-off topic I keep coming back to.
+The question that pulled me back this time: how practical is WebGPU nowadays for volume rendering, and what does it actually take to handle large volumetric datasets in a browser?
+WebGPU volume rendering examples exist, but most assume the dataset is small enough to download in full prior to rendering.
+Kiln aims to handle datasets where a complete download would be impossible or at least impractical due to the large size of the datasets.
+Capable WebGL viewers exist as well. The motivation here, however, is to build the system fully around WebGPU from the beginning.
+So what is Kiln?
+Kiln is a WebGPU-native out-of-core rendering system for large virtualized volumetric data.
+Live demo for you to break - it requires a modern WebGPU-enabled browser with 16-bit texture support.
+Kiln streams multi-GB datasets over HTTP and renders them at interactive frame-rates with a fixed, modest VRAM budget, using a page cache, virtual texture indirection and compute shader based volume ray-marching.
+A technique similar to what games use for terrain, but applied to volumetric data. Volume virtualization, in other words.
+Figure 1: Kiln UI overview with Chameleon dataset. Credits on linked repository
+Apart from the out-of-core architecture Kiln supports different rendering modes such as DVR, MIP and ISO rendering which are common visualization modes in modern volume rendering.
+Figure 2: From left to right Direct Volume Rendering (DVR), Maximum Intensity Projection (MIP) and Iso-surfaces (ISO)
+Moreover, because debugging dynamically paged volume bricks can be challenging, the renderer provides dedicated visualization modes — including color-coded LOD level display and an option to toggle the indirection mechanism — to inspect atlas content and monitor loading or eviction behavior.
+Figure 3: Disabled coordinate indirection on the left, color encoded LOD levels on the right
+Alongside these visualization modes, the user interface also provides a detailed performance panel to keep track of rendering behavior in real time.
+Figure 4: Performance metrics in Kiln UI
+It displays statistics such as time to first render, frame time, and dataset properties like resolution, file size, number of LOD levels.
+A separate section shows streaming-related metrics — including atlas occupancy, loaded bricks, network throughput, and the total amount of downloaded data.
+All rendering parameters are encoded in the URL. Found an interesting view? Hit the share button and the current camera position, transfer function, and rendering settings are copied to your clipboard as a shareable link.
+Volume what?
+If you're a web developer, you might not have heard of volume rendering.
+But the challenges will sound familiar: streaming huge datasets, managing limited GPU memory, progressive loading - the same issues you face with terrain, point clouds, or any visualization where data exceeds available resources.
+A volumetric dataset is a 3D grid of scalar values. Every cell in the grid stores a single measurement — density, intensity, absorption — depending on how the data was acquired.
+A CT scanner measures X-ray absorption through tissue. A micro-CT does the same at finer resolution. A seismic survey measures how sound waves reflect through rock.
+Different instruments, different physical phenomena, same result: a regular 3D array of numbers.
+In this data there are no surfaces, no polygons, no meshes. Traditional rasterization does not help much in this case.
+Instead you need techniques that work directly with the scalar field — the most common being raymarching: cast a ray through the volume for each pixel, sample the density at regular intervals, and accumulate color and opacity as you go.
+Volume raymarching is conceptually simple and surprisingly powerful and is implemented in medical imaging workstations, seismic interpretation tools, and fluid simulation visualization.
+The core challenge
+The chameleon dataset used in the demo above is 2.1 GB. This beechnut is over 3 GB.
+These are still moderate sizes as other real world datasets can be orders of magnitude larger. Easily.
+And even though VRAM capacity by itself would not be a constraint for these examples, you would spend quite some time downloading the data before seeing a single pixel. That is a dead end for anything interactive.
+So instead of rendering the whole volume as a single monolithic block we have to decide what is the minimum subset of data needed to render a particular view. And how do we get exactly that — nothing more, nothing less — as fast as possible?
+This is not a new problem.
+Scientific visualization has been dealing with it for decades using out-of-core techniques. Geospatial applications stream terrain tiles at multiple resolutions. Game engines page virtual textures from disk. On the web, Zarr-based viewers stream large array data chunk by chunk.
+The insight is always the same: only a small fraction of the full dataset is visible at any moment, and that fraction changes predictably as the camera moves.
+Kiln adapts similar out-of-core techniques to volumetric data in browser environments.
+How Kiln solves it
+A source dataset (such as raw 16-bit) is pre-processed into a brick pyramid — a multi-resolution hierarchy where each level is a downsampled version of the previous one, split into fixed-size 64³ chunks called bricks.
+The bricks are subsequently compressed and stored server-side in structured binary blobs for efficient retrieval.
+Brick size is actually 66³ for easier interpolation during sampling, but for now let's keep it simple. We will cover the details in a follow-up post.
+Figure 5: LOD bricking - The finest level contains the full resolution data. Coarser levels cover larger regions with fewer samples.
+Kiln supports a custom binary format and provides the tooling for decomposing input volumes into this brick pyramid.
+At runtime, only the bricks relevant to the current view are fetched using HTTP range-reads and kept in a fixed-size GPU cache (512 slots by default). The fetched bricks are decompressed asynchronously in dedicated worker threads before being uploaded to the GPU.
+Bricks far from the camera use coarse LOD. Bricks close to the camera use fine LOD. As the camera moves, the cache updates: new bricks stream in over HTTP, old ones are evicted.
+The logical layout of the volume (its brick coordinates in the pyramid) is decoupled from where those bricks currently reside in GPU memory.
+A compact indirection texture stores this mapping: for each logical brick, it records which cache slot currently holds it.
+During rendering, each sample taken along a ray first resolves this indirection to locate the correct brick in the cache, and then performs the actual density lookup in local brick coordinates.
+Figure 6: Rendering overview - Normalized box coordinates are used to sample the indirection table, indirected coordinates locate the target brick in the page cache, density sampling is eventually done in local brick coordinates
+The rest of the dataset stays on the server, untouched until the camera gets close enough to request it.
+The rendering pipeline is agnostic to the data format. In other words, Kiln renders whatever bricks you throw at it, regardless of source.
+For instance, the custom binary format was implemented first for simplicity and consolidating the pipeline.
+Zarr support was added later without touching rendering code internals. Local filesystem providers could be added the same way.
+The result is a volume rendering system with a fixed, modest VRAM footprint—around 300 MB at 5123 (512 slots) for 16-bit data—regardless of dataset size.
+You can scale the atlas to 7683 (1728 slots) or 10243 (4096 slots) for larger volumes or high-DPI screens (SSE selection gets more demanding), but the minimal config proves what's possible.
+And one part of this project was to see what can be achieved with the minimal amount of GPU resources.
+Results
+The current version was tested on two datasets: the Chameleon (using Kiln's custom binary format) and the Beechnut (using the experimental Zarr loader).
+Both datasets reside on S3 behind a default CloudFront distribution and are rendered at full 16-bit precision.
+Tests ran on a MacBook M2 Pro, an Asus Zenfone 10 (Adreno 740) over home Wi-Fi (~80 Mbps per fast.com).
+First Render measures the time from page load until the first visible LOD-0 brick is fully uploaded to the GPU and composited. Data streamed reflects only the bricks required to produce the first visible frame at the coarsest LOD level. Atlas Occupancy is the initial occupancy for the first visible render.
+Dataset
+Format
+Resolution
+Full Size
+First Render
+Data Streamed
+Atlas Occupancy
+Chameleon
+Sharded binary
+1024 × 1024 × 1080
+2160 MB
+M2: 544 ms
+Zenfone: 655 ms
+M2: 0.73 MB
+Zenfone: 0.77 MB
+2 / 512 (0.4%)
+Beechnut
+OME-Zarr
+1024 × 1024 × 1546
+3092 MB
+M2: 1079 ms
+Zenfone: 2162 ms
+M2: 1.10 MB
+Zenfone: 2.19 MB
+18 / 512 (4%)
+Volume raymarching is texture bandwidth intensive. Each frame samples the volume millions of times.
+Older or mobile GPUs may struggle to maintain 60 FPS at full resolution.
+An additional test on a Surface Book 2 (GTX 1050) required reducing render scale to 0.25 for smooth performance.
+Dedicated GPUs from the last 3-4 years should handle higher resolutions comfortably.
+Limitations
+The current architecture of Kiln comes with specific trade-offs and constraints:
+Kiln is a research-grade prototype developed to explore modern WebGPU volume rendering techniques.
+It is not a production-ready, battle-tested engine and may contain bugs, incomplete features, and rough edges. Users should expect ongoing development and breaking changes.
+The current configuration supports volumes up to ~2048³ voxels (at 64³ brick size). Larger datasets would require adjusting indirection table dimensions and page cache size. While the architecture supports this, it hasn't been tested beyond the 3 GB beechnut dataset at the time of writing.
+Because data is fetched on demand, the user experience is inherently tied to the quality of the internet connection. This could be partially mitigated by implementing a data provider for a local filesystem.
+Moreover, there is currently no smart pre-fetching strategy or offline capabilities.
+Kiln cannot render raw volume files directly. Datasets must be pre-processed and compressed, which adds an offline ingestion step and increases total storage requirements by roughly 15–20%.
+As a WebGPU-native application, Kiln requires modern browsers (Chrome 113+, Edge, or Safari with features enabled) and compatible GPU drivers. It does not provide a fallback for older WebGL-only environments.
+Summary
+Kiln is a WebGPU-native out-of-core rendering system designed specifically for large virtualized volumetric data.
+Kiln processes bricks in its core—hence the name.
+It overcomes the "monolithic download" bottleneck by decoupling the logical 3D grid from physical GPU memory, allowing multi-GB datasets to run within a modest, fixed sized VRAM budget.
+The system natively runs on WebGPU, which enables a compute-driven architecture for efficient ray marching and gives the renderer room to expand with future features and optimizations.
+It implements asynchronous data streaming via HTTP range-reads and non-blocking texture uploads, ensuring that the interactive frame rate remains stable even as new high-resolution bricks are pulled from the server.
+Moreover, Kiln maintains a full 16-bit precision path from the compressed source binary to the final shader output, preserving scientific data integrity.
+It manages memory deterministically through a Least Recently Used (LRU) eviction strategy, which ensures predictable performance across a wide range of hardware.
+Thanks for reading.
+For more details, source code and documentation, visit the repository on GitHub.
+Credits
+Sample datasets from the Open SciVis Datasets collection:
+Chameleon - CT scan of Chamaeleo calyptratus. Digital Morphology, 2003.
+Beechnut - MicroCT scan of a dried beechnut. Computer-Assisted Paleoanthropology group and Visualization and MultiMedia Lab, University of Zurich.
+Collapse
+Expand
+Martin Panknin
+Martin Panknin
+Martin Panknin
+Follow
+Rendering Engineer
+Joined
+Jan 30, 2026
+•
+May 20
+Dropdown menu
+Copy link
+Hide
+Meanwhile Kiln (0.2.1) is part of the OME-NGFF ecosystem. The project was accepted to the official OME-NGFF tools registry, making it a recognized viewer for real-world OME-Zarr datasets alongside other established tools from this domain.
+OME Community Portal
+OME-NGFF (Next Generation File Format) is the community-driven open standard for storing and sharing large bioimaging datasets in the cloud already adopted by some major research institutions and public repositories worldwide.
+What's new in 0.2.1:
+Improved support for OME-Zarr datasets
+Local filesystem streaming
+Histogram in the transfer function editor
+Auto-leveling from OME-Zarr metadata
+Improved share links and usability fixes
+For reference:
+Live demo: Chameleon
+Source: Github
+Collapse
+Expand
+Martin Panknin
+Martin Panknin
+Martin Panknin
+Follow
+Rendering Engineer
+Joined
+Jan 30, 2026
+•
+Mar 3
+• Edited on Mar 3
+• Edited
+Dropdown menu
+Copy link
+Hide
+Since publishing, the default atlas size in Kiln has been increased from 512 to 1000 slots.
+The benchmarks and results shown in this article were generated with the original 512-slot configuration and remain correct — the change was made later to improve practical streaming behavior.
+Collapse
+Expand
+Martin Panknin
+Martin Panknin
+Martin Panknin
+Follow
+Rendering Engineer
+Joined
+Jan 30, 2026
+•
+Jul 16
+Dropdown menu
+Copy link
+Hide
+Meanwhile this project has moved to a new domain.
+kilnrender.com
+For further actions, you may consider blocking this person and/or reporting abuse
+We're a place where coders share, stay up-to-date and grow their careers.
+Log in
+Create account

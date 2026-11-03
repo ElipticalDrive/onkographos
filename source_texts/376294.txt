@@ -1,0 +1,300 @@
+I wrote a 3D engine, part 1.
+
+Adventures in WebGL and frustum culling - paavohtl's blog
+Table of contents
+Makaron Crisis
+The new engine
+Frustum culling and instancing optimizations
+SimpleCuller
+ThreadedCuller
+WasmCuller
+OctreeCuller
+DoNothingCuller
+Summary and future
+So, I’ve been working on a little web-based 3D engine in TypeScript, WebGL and a bit of Rust for either 3 weeks or 9 months, depending entirely on how you count. It’s primarily intended for making demos, so it’s like a game engine which only has to play a single real-time rendered cutscene before it can call it a day and most likely crash. I’m planning to write a couple of articles about the various challenges I’ve faced and the solutions I’ve come up with, and this is the first one. This was actually supposed to be just a single article focused on the shortcomings of the WebGL developer experience, but my little side rant about frustum culling got a bit out of hand (there’s a table and a diagram and everything), and you’re currently witnessing the aftermath of that.
+But first, we need to talk about a pasta shortage.
+Makaron Crisis
+The first version was created during the making of a demo called Makaron Crisis, a surreal and deeply allegorical short film about the Finnish macaroni shortage of 2023. It was either my first or second demo, once again depending on how you count, and regardless of your counting preferences came first in the beginner friendly Instanssi 2024 demo competition. You can see it below, or experience it yourself in the discomfort of your own browser — non-mobile Chrome or Firefox only, hard refresh it a couple of times if it doesn’t work the first time, and prepare to wait a bit for shaders to compile.
+The first version of the engine used ray marched signed distance fields for most aspects of rendering, meaning it doesn’t really use polygons at all except for the fullscreen quad. Instead everything is dreamt up using a mathematical function which can be evaluated at any point in space and time, and that function gets evaluated several times per frame for every single pixel on the screen. This technique shines at creating abstract and geometrically complex visuals like 3D fractals, but the downside is that it’s rather difficult to create anything that looks like a real-world object or creature. An elbow macaroni was about the most complex shape I could manage on my own, and even that seemed to violate the complex mathematical laws of signed distance fields in some way I’m not capable of understanding, causing some rather odd artifacts in the rendering. I’m not Inigo Quilez, so for me SDFs are kind of a technical and / or artistic dead end, at least when using them as the primary rendering technique.
+The new engine
+A couple of weeks ago I copy-pasted the Makaron Crisis source code into a new Git repository and ripped out the SDF rendering code (except the bits that were used for text), replacing it with a more traditional rasterized 3D rendering pipeline. I started by implementing a GLTF model loader with just the functionality I needed, then I wrote the basic infrastructure for rendering models with Blinn-Phong shading, then I started thinking about optimization and things escalated from there. At the time of writing my engine has a list of features most game developers from the early to mid 2010s would consider barely acceptable:
+Traditional mutable OOP scene graph with support for object hierarchies; not too different from Unity or Godot.
+GLTF model loading with support for multiple materials per mesh. No animation support.
+Instancing: all objects with the same mesh and material are rendered in a single draw call.
+Frustum culling: objects outside of the camera view and not rendered. The rest of the article is all about this.
+Deferred shading: the scene is rendered into several textures which are then used to calculate the final image in multiple passes.
+Physically based rendering using a metallic / roughness workflow and support for normal maps. No image-based lighting yet, but I used to have really cool (and extremely non-physical) retro environment mapping in a previous version which still used Blinn-Phong.
+High number (at least hundreds) of point lights using light volumes. No shadows or spot lights yet.
+One directional light with somewhat filtered hard shadows using cascaded shadow mapping. Four cascades, every object casts and receives shadows, no LODs. I learned from the best.
+Barely functional skybox rendering using a cubemap texture. The faces of the skybox are all jumbled up but I haven’t bothered to fix it yet.
+Basic SSAO for ambient occlusion.
+Particle systems; forward rendered using instanced quad billboards with alpha blending.
+The particle system is mostly implemented in Rust. The JS side sets up the simulation parameters and updates the positions of particle emitters, but otherwise the hot loop is entirely in Rust.
+I’d love to add normal maps to get some lighting on the particles, but the issue is finding / creating sprites with normal maps. Blender seems capable of rendering out volumetric effects with normals, but I found the volumetric effects to be really crashy and slow even on a beefy desktop PC.
+HDR rendering pipeline with bloom and tone mapping with the ACES curve. Not actual modern HDR output mind you, because the web platform doesn’t support it yet.
+Largely the same post processing pipeline from Makaron Crisis with all the 2005 to 2012 era post processing effects you’d expect: FXAA, per-pixel motion blur, film grain, vignette, chromatic aberration, and a few others.
+Here’s what it looks like in a test scene. Every single cube is an individual object primarily to benchmark the engine.
+And here’s a screenshot of me testing how well motion blur mixes with alpha blended particles. Please don’t pay any attention to the weird distortion around the smoke clouds.
+If you hovered over or clicked any of the links in the list above, you probably noticed that most of them lead to Learn OpenGL. It was an invaluable source of information while implementing all of this, and I’ve copied a lot of math(s) heavy GLSL code straight from there with gusto. The tutorials were originally intended for OpenGL 3.3 but since WebGL2 is based on OpenGL ES 3.0 they are like 95% compatible, at least for all the APIs I care about. For the GLTF loader I got everything I needed to know from Khronos Group’s official GLTF tutorial.
+Frustum culling and instancing optimizations
+Some background: culling is a family of rendering optimizations where the things the camera can’t see are not rendered. This saves a lot of processing time as long as the engine can cull objects faster than it can render them. Sounds simple enough, how hard can it be?
+At least in my use case the most important way to cull objects is frustum culling. The view frustum is a flat-topped pyramid with the tip at the camera’s position and the base at the far clipping plane, and frustum culling is simply about determining whether or not objects intersect with this shape or not. In practice this means doing some linear algebra with the object’s bounding volume (a sphere or box containing every vertex of the object) and the six planes of the frustum. It’s not a particularly expensive operation, but with thousands of objects and a time budget measured in milliseconds it does add up.
+And no, it wasn’t invented for Horizon: Zero Dawn.
+My engine uses instancing for all rendering, so every visible object’s 164 bytes of instance data consisting of the model matrix, the normal matrix and the previous model matrix (for calculating motion vectors) are copied to a buffer and sent to the GPU every frame. This seems rather wasteful — in my test scene only one object moves and everything else is static, so ideally the instance data for the static objects could be sent to the GPU just once and then reused for every frame. But from what I’ve gathered WebGL2 doesn’t really offer a way to do this; the only two ways to pass per-instance data to an instanced draw call are either via vertex attributes — which is what I’m using right now — or via uniform buffer objects and gl_InstanceId, which would otherwise be perfect for this except for the fact UBOs are limited to 64KB in size. Using UBOs would limit the number of objects I could render in a single draw call to about 400; a far cry from the thousands I can render now. Realistically 400 instances of one model is more than enough outside of rare scenarios, but I like the simplicity of the current solution and don’t want to add significant complexity to support splitting a render batch into multiple draw calls. WebGPU and big boy OpenGL do have a solution for this in the form of storage buffers, which are apparently quite similar to UBOs except their size is not as limited, if at all.
+This is the area of the engine I’ve been optimizing the most, and it was surprisingly difficult to beat the baseline “simple” culler. For context, my test scene has about 13K objects totalling around 5.5 million triangles, and about a quarter of them are visible at any given time when panning the camera around. I’ve been using Chrome’s and Firefox’s built-in performance tools for finding bottlenecks, and the engine itself has quite a lot of built-in metrics for measuring frametime and the time spent in each phase of the rendering pipeline. For benchmarking micro-optimizations I used an NPM package called benny.
+So, here are some performance measurements from every frustum culling implementation currently present in the engine. I’ve tested most of them with every object in the scene using either a sphere or an oriented bounding box (basically an axis-aligned bounding box combined with a transformation matrix) as the bounding volume. The timings below are from Chrome 127 and Firefox 128 on a Windows PC with an NVidia RTX 4080 Super and a Ryzen 7 5800X. All of the engine’s built-in metrics use performance.now() and I’ve set the correct cross origin headers, so the measurements should actually be accurate to up to 5 microseconds.
+Culler
+Browser
+Bounding volume
+Average frametime (ms)
+Simple
+Chrome
+Sphere
+2.3
+Simple
+Chrome
+OBB
+5.0
+Simple
+Firefox
+Sphere
+3.5
+Simple
+Firefox
+OBB
+6.7
+WASM
+Chrome
+Sphere
+2.3
+WASM
+Chrome
+OBB
+2.4
+WASM
+Firefox
+Sphere
+3.8
+WASM
+Firefox
+OBB
+3.1
+Octree
+Chrome
+Sphere
+1.6
+Octree
+Firefox
+Sphere
+2.6
+Do nothing
+Chrome
+Any
+3.2
+Do nothing
+Firefox
+Any
+4.1
+Some caveats: there was some run-to-run variance in both browsers and with all implementations. The frame times are averages over 5 seconds. To convert a frametime to FPS, divide 1000 by the frametime.
+I’ll explain each implementation and their various iterations in more detail below, including one that didn’t make it this far.
+SimpleCuller
+The version I implemented first is rather simple, hence the name: every frame, the scene is traversed depth-first and every object in the scene with a mesh is pushed into an array. The array of cullables is processed in one go. This has seen minor improvements over time — for example from micro-optimizing frustum-AABB/OBB and frustum-sphere intersection tests — but the basic idea has remained the same.
+The most notable things about the measurements above are that you can see how much slower oriented bounding boxes are to check than spheres, and how much slower Firefox is than Chrome. Knowing the implementation, it makes intuitive sense why OBBs are slower than spheres: the sphere test is just one vector transformation and up to six dot products, while the OBB test involves transforming all eight corners of the box and then performing up to six dot products for each corner.
+The keen-sensed among you might ask: your engine is already running at hundreds of frames per second, so why even optimize it? Two reasons: I don’t want the CPU side of the rendering pipeline bottlenecking the rest of engine if that’s in any way possible, and I just like optimizing things. A frametime measured in a handful of milliseconds sounds good, but the vast majority of that time is spent in the culler. Here’s a poorly drawn diagram to illustrate this:
+This took me an embarrassingly long time to draw.
+Not everything is exactly to scale, but I think it gets the point across. Culling consumes between 55 and 70 percent of the frame time; an order of magnitude more than any other phase of the update loop. Optimizing culling is worth it because even halving its time would result in a significant speedup. It also just doesn’t feel right that processing an array of 13K objects amounting to about 1 megabyte of relevant data takes 7.5 times longer than rasterizing, shading and post processing millions of triangles with several render passes, generating hundreds of megabytes of intermediate data in the process. Yeah, I know that GPUs are really good at that sort of thing and mine is the second fastest consumer GPU created by mankind, but still, I don’t accept this state of affairs.
+Commence the optimization!
+ThreadedCuller
+Clickbait version: this little trick almost ruined my engine! 😳
+The next version I built used a web worker. Getting things set up was a bit of a pain partly because of Spectre / Meltdown mitigations. Shared memory parallelism requires the use of SharedArrayBuffer, which the browser doesn’t let you instantiate unless the server serving the page sets specific headers. I don’t really want to depend on a server, so I worked around it with a service worker, which added it’s own set of problems.
+Here’s how it worked: the main thread collects batches of cullable objects and serializes them into a fixed-size shared buffer, until the buffer is full. The main thread then notifies the worker using Atomics.notify() and creates a promise that resolves when the worker is done. The worker reads the data from the shared buffer, parses it back to JS objects, culls them, writes the indices of the visible objects back to the shared buffer and notifies the main thread. The main thread then reads the indices, queues the visible objects for rendering and checks if there’s more data to process and if so, starts the process again. After all objects have been queued for culling the main thread waits for the worker to finish all the work before continuing to actually render the scene.
+Getting the synchronization right wasn’t trivial, because the web platform doesn’t have any high-level synchronization primitives like semaphores, mutexes or channels: you get shared memory and atomic operations, and that’s it. Ultimately I didn’t even get it right, as even in my so-called finished implementation every few frames some object would be erroneously culled for a single frame — though it was more likely just a bug in the serialization / deserialization code than a synchronization issue.
+Even waiting was surprisingly challenging; Atomics.wait() cannot be called in the main thread, so I tried Atomics.waitAsync() which Firefox doesn’t support yet. That required me to change my entire rendering loop to be asynchronous.
+But at least we got a ridiculous speedup, right? Well, no. The performance was significantly worse than with the simple culler, and the reasons for that are at at least threefold:
+Serialization and deserialization was surprisingly slow. I don’t have exact numbers anymore, but from what I recall serialization took almost as much time as the culling itself.
+Overhead from synchronization and from making the rendering loop asynchronous was significant. Making the rendering loop asynchronous meant that every frame needed to wait for the event loop once for every culling batch, which added several milliseconds of latency.
+Most importantly: I only had one worker, and there was nothing for the main thread to do while the worker was culling. I only realized this after I had already implemented the whole thing. Obviously multithreading doesn’t help if you’re not actually using multiple threads.
+There are many ways I could have improved on this (like implementing a worker pool and using busy waiting instead of async / await), but the results were so disappointing that I didn’t bother. By the end of this, the following statements were true:
+My engine no longer worked in Firefox (my browser of choice) because it doesn’t support Atomics.waitAsync().
+Having a service worker tweak the headers to enable SharedArrayBuffer meant that page has to be reloaded once on the first visit: the service worker is installed on the first load but only starts injecting headers after a reload.
+Instead of loading a single bundle of JS my engine now consisted of a main bundle, a web worker bundle and a service worker bundle. Thankfully Parcel made this relatively painless.
+My render loop was now async, which initially caused the canvas to flicker because without extra synchronization my engine would try to render multiple frames at once.
+The culler had random glitches I couldn’t figure out.
+The engine was slower than before.
+I ripped out the whole thing in a grand display of nerd rage and want back to the drawing board. That’s why there are no measurements for this version.
+WasmCuller
+Perhaps my problem was that I wasn’t using any Rust yet. So let’s fix that.
+I followed the first few steps of the wasm-bindgen guide to integrate WebAssembly-compiled Rust into my engine. Long story short, that also involved changing the project’s bundler from from Parcel to Vite, because Parcel 2 doesn’t really support WASM properly, and even Vite requires an extra plugin to handle the code generated by wasm-bindgen / wasm-pack. I also configured the Rust side to emit WASM with SIMD instructions enabled.
+Using glam as the linear algebra library, I ported my culling code to Rust in a matter of minutes. I’m using glMatrix for vectors and matrices on the JS side, and unsurprisingly glam is a lot more pleasant to work with. Most of that comes from two limitations of JavaScript: lack of operator overloading, and the fact that objects are always passed by reference. I’ve had several mysterious bugs in the JS/TS code because I mutated a vector received as an argument, and the changes were reflected in the caller. You could of course make vectors and matrices immutable, but that creates a lot more garbage (which hopefully escape analysis eliminates, but doesn’t seem to), and when you do enough math(s) that starts to matter.
+The design of the WASM culler is broadly similar to the web worker one, but it went through a couple of different iterations.
+Iteration 1
+In the first version batches of cullable objects were serialized into a single Float32Array and passed to Rust, which — to avoid any deserialization overhead — was then reinterpreted as a slice of structs using bytemuck. Initially this seemed to work wonderfully, as my metrics showed that culling now took only a fraction of a millisecond. However, actual frametimes didn’t improve at all and in fact got slightly worse, at least when using bounding spheres. After adjusting my metrics and getting some performance profiles from the browser I realized that all of the time saved from culling was, again, spent on serialization and WASM call overhead. My “culling time” metric was only measuring the time spent calling Rust, but it didn’t measure the time spent on serialization, because technically speaking it happened during the scene traversal phase. Still, I was somewhat happy with the modest improvement to the OBB culling time, and decided to leave the WASM culler as the default implementation until I had motivation to improve it further.
+I stopped working on culling for a few days and decided to focus on building actual features for the engine, and one of those features was particle systems. Since I had already set up Rust for culling, I decided to implement the simulation part of the particle system in Rust as well. Implementation proceeded without much trouble, until I noticed that my engine was no longer rendering anything at all. Wait, how? I hadn’t touched anything related to rendering or culling, nor had I even changed the TypeScript code at all since beginning to work on particle systems. I looked in the browser console and saw a panic message from bytemuck, complaining about incompatible memory alignment. I did the usual troubleshooting steps of clearing all caches, rebuilding everything, restarting the browser and eventually checking out the code from the previous commit, where everything worked fine. So what in my particle system code — that wasn’t even being called — could have caused this?
+Turns out what I was doing with bytemuck and arrays passed from JS to Rust was a ticking time bomb. The problem was indeed memory alignment, or rather lack thereof. In order to correctly transmute a slice of floats into a slice of structs, the original slice must be correctly aligned in memory; in other words, the memory address of the first element must be evenly divisible by the required minimum alignment of the struct. In Rust you can get that number using std::mem::align_of (or just align_of in Rust 1.80), and it’s also shown by rust-analyzer in VS Code when you hover over a type. I was vaguely aware of this requirement, but I foolishly thought it wouldn’t be an issue because there’s no way to affect memory alignment in JavaScript. bytemuck performs both compile time and runtime checks to ensure that transmuting data is safe, and at first it didn’t complain about alignment and worked perfectly fine. Thanks to bytemuck’s compile time checks I had already made sure that my structs had a predictable memory layout using #[repr(C)] and that there were no unexpected padding bytes.
+One of the little facts about the universe we currently inhabit that I didn’t know was that passing a Float32Array to Rust does in fact result in a copy: wasm-bindgen generates code that allocates a new buffer in WASM memory and copies the data from the JS array to the new buffer. How and where that buffer is allocated is an implementation detail of wasm-bindgen, but it seems like the address is more or less stable, and in the versions of the WASM binary before adding any particle stuff the alignment just happened to be correct. Adding a new export to the WASM binary changed the alignment, and the next time the culler was called it panicked. On one hand I was relieved that bytemuck caught the issue with its runtime checks, but on the other hand I was frustrated that I had care about memory alignment when interfacing with a language that doesn’t even have pointers.
+From what I’ve gathered there’s no simple solution to this. Transmuting data passed from JS to Rust is almost always going to fail, because there’s no way to control the alignment of the intermediate buffer. I think in theory wasm-bindgen could add an attribute or a wrapper type for annotating arguments to signal a particular alignment requirement, but I have no idea how complex or generally useful that would be. The “official” solution for passing data structures from JS to Rust is to use serde_wasm_bindgen to generate parsing code which converts dynamically typed JsValues to Rust structs, but that seems extremely wasteful for simple data like this. Admittedly I haven’t tried it yet, perhaps it’s blazing fast.
+Iteration 2
+I wanted to fix my culler fast so that I could get back to working on particle systems, so out of curiosity I implemented an even simpler version of the WASM culler. I created a CullingInput struct on the Rust side which simply wraps two vectors for the two types of bounding volumes, and provides a couple of methods:
+set_camera for updating the view-projection matrix of the camera.
+add_sphere and add_obb for adding a cullable object to the culler.
+cull to perform the culling and return a list of indices of visible objects
+clear to clear the culler’s internal state.
+I then exposed this struct and the aforementioned methods (plus new) to JavaScript using wasm-bindgen. So the idea was that instead of explicitly serializing cullables to a stream of floats JS would create one CullingInput object on startup, and then every frame it would add all the cullables to it using the add_* methods, call cull to receive the indices of the visible objects, and then reset the culler for the next frame. This is how I imagine WASM is supposed to be used, at least in the world of marketing and unrealistic expectations: you implement the performance critical gory details in a lower level language, but expose a high level interface indistinguishable from one written in JS. wasm-bindgen handles the interface part rather well, but there’s a cost: performance.
+I knew that calls between JS and WASM are relatively slow, but I didn’t know how slow until I measured it. Call overhead is likely vanishingly small if you only call a function every few seconds or even every frame, but if you call it thousands of times per frame it once again adds up. I don’t have exact performance figures here because I can’t be bothered to port this version to the current engine, but this iteration for the lack of a better word intensified the performance profile of the first one: culling was even faster because I had eliminated all non-trivial copies and allocations, but adding objects to the culler was several times slower. Overall rendering performance was significantly worse than with the simple culler but hey, at least the WASM culler was working again. I changed the default culler back to the simple one and went back to working on particle systems.
+Iteration 3
+When I encountered the memory alignment issue I asked for some help and clarification on Rust’s official Discord channel, and that’s exactly what I got. In addition to learning that what I attempted to do was stupid and fundamentally a bad idea (my words, not theirs), I also learned that there is a way to share memory between JS and Rust without copying it. The Rust bindings for Float32Array provided by js-sys include a few extra methods beyond what JS provides, and one of them is view_mut_raw. This little gem of a function creates a Float32Array from a raw pointer and a length, and that array can be relatively safely shared with JavaScript. This allowed me to create kind of a hybrid between the first and second iterations: the cullables would be passed to WASM once again by serializing them into a Float32Array, but this time that array was a mutable view directly into the WASM memory. The solution was still wrapped into a nice (though slightly less) high-level interface, but with radically reduced overhead.
+Culler
+Browser
+Bounding volume
+Average frametime (ms)
+Diff (ms)
+WASM
+Chrome
+Sphere
+2.3
++ 0.0
+WASM
+Chrome
+OBB
+2.4
+- 2.6
+WASM
+Firefox
+Sphere
+3.8
++ 0.3
+WASM
+Firefox
+OBB
+3.1
+- 3.6
+The diff column shows the frametime difference to the simple culler.
+The end result is the fastest of the three WASM cullers, but it’s still not the panacea I was hoping it would be. Sphere culling performance is about the same or slightly worse than with the simple culler, but when culling OBBs the frametime is less than half than what it used to be, and the performance difference between the two types of cullables is almost eliminated. WASM is — say it with me now — blazing fast, but serialization remains the primary bottleneck.
+There’s one data point I still don’t understand: in Firefox, culling OBBs is faster than culling spheres, even though theoretically with the algorithm I’m using the OBBs should in the worst case require eight times more vector transformations and dot products than spheres. There is some run-to-run variance in the measurements, but I’ve managed to reproduce this several times. Looking briefly at the generated WASM didn’t reveal anything either, so it must be some kind of optimization Firefox is doing. In general it seems that Firefox is better at optimizing WASM code than Chrome, but general JS performance still makes it lose to Chrome in every single scenario.
+Possible future optimization?
+There was one more optimization I tried to make, but didn’t get very far with: if we can create a Float32Array from memory living over in the WASM land and if glMatrix uses Float32Arrays for vectors and matrices, then why not just allocate all non-temporary vectors and matrices in WASM to begin with? This should, in theory, reduce some of the serialization overhead, because instead of copying 64 byte matrices I could probably get away with two or four byte indices into a global buffer. I tried to implement this starting with 4x4 matrices, but I think I got something wrong because the returned matrices behaved weirdly: sometimes writes to them would be ignored, sometimes the array would become detached from the WASM memory and sometimes the matrix would be all NaNs. Though this was just testing on the top level of the module and console logging the result, so maybe the garbage collector was a bit too eager to clean up the memory. I also have no idea what the performance implication would be for the JS side; is accessing memory from WASM slower than accessing “native” JS memory? Probably worth investigating further when I have the time.
+OctreeCuller
+Last weekend, in a state of sleep deprivation and general frustration, I started writing an octree implementation in a restaurant car of a train. I wrote a quadtree implementation a few years back for OpenSAGE — as it happens it was replaced with a more efficient one a few hours ago as I’m writing this — so I kind of knew what was involved.
+An octree is a 3D space partitioning data structure designed to confuse teenage programmers who just want to make their own Minecraft, why is this so hard send help speed up spatial queries. It’s a tree kinda like a binary tree, but instead of having two children each non-leaf node has eight, corresponding to the eight octants (sub-cubes) of the parent node. Here’s a picture I made in Blender:
+Unlike in this picture, real octrees don’t have gaps; in fact in some cases the cubes overlap. I thought they would make the illustration clearer but perhaps not.
+The point of this is the same as with a search index or a hash table: to reduce the number of objects that need to be checked. An octree stores points or shapes and some associated data (like the object index or pointer) in its leaves (the cubes that are not subdivided further). To find all of the objects that intersect with a given volume (like a camera frustum), you start by finding the leaf nodes that intersect, and then check the objects in those leaves. And in fact if you’re happy with slightly less accurate results you can consider every object in every intersecting leaf to be intersecting with the volume, and skip the second step entirely. This should offer a logarithmic speedup over the linear search used by my previous cullers, at least in theory.
+In practice though octrees are unfortunately more complicated than that. David Geier’s excellent advanced octrees series of blog posts covers some of the many implementation decisions you have to make when building an octree. Some of the most relevant ones for me were:
+When to subdivide and when to stop
+The main point of the octree is to subdivide the space into smaller and smaller cubes until each cube ideally contains only a few objects. When a new value is inserted into the octree, the tree is traversed from the root to the correct leaf node, and the value is inserted into that leaf. If the leaf already contains the maximum number of values, the leaf is subdivided into eight new leaves and the values are redistributed. What that maximum number should be is a tradeoff between the cost of traversing the tree and the cost of checking the objects in the leaves. Most implementations I’ve seen online have used a fairly small maximum number, like 8 or 16, but the number I chose is a biiiiit higher. More on that later. Also, to avoid the tree growing indefinitely in pathological cases (for example when you have a lot of objects in the same spot), the tree should have a maximum depth.
+How to handle non-point objects
+The textbook version of the octree is designed for points, not shapes. Points are simple, because it’s mostly unambiguous which leaf they belong to. Shapes are more complicated, because technically speaking they consist of an infinite number of points, which is a bit too many. There are three common ways to tackle this:
+Only store the shape in the leaf that contains its center. Simple, but not very accurate. It’s only viable if the shape is small, uniform and well, point-like. If you did this in an octree intended for frustum culling you would regularly miss objects that are partially inside the frustum.
+Store the shape in every leaf that intersects with it. This produces accurate results, but it comes with a few tradeoffs. First, there’s the obvious memory overhead of duplicating the same node in multiple leaves, but if it’s just a pointer or a reference to a GC-managed object it’s not that bad. Second, duplicating the object doesn’t just make insertion slower, but deletion and updating as well, because you can’t stop after finding the first leaf that contains it. And third, your queries can and will now return the same object multiple times, so you might have to deduplicate the results afterwards.
+Store the shape in the smallest leaf that fully contains it: when inserting, check if the shape is fully contained by the child nodes of the current node, and if it is, insert it into that one which will then recursively check its children, until a leaf is found. If the shape is not fully contained by any of the child nodes, insert it into the current node. Using this method means your non-leaf aka internal nodes can also contain objects, and that’s a bit awkward: you can’t enforce a maximum number of objects in the internal nodes, because they are already subdivided.
+I used both methods 2 and 3 for my octree implementation. 2 is used for static objects which can never move or be removed, solving the deletion and updating problem. 3 is used for dynamic objects, which I’ll cover… right about now.
+How to handle dynamic objects
+An octree that contains every object in the scene is a fairly large and complex beast that can take a while to build, so ideally you build it once and only update it when you really have to. And that’s exactly what I did. Each object in my scene graph is designated as either static or dynamic. Both kinds of objects are inserted into the octree when the scene is created, but only the dynamic ones are re-inserted when their transforms change.
+Some people have recommended having two separate octrees for static and dynamic objects. I started with that, but ended up with a hybrid solution: each node of the tree has two arrays; one for static and one for dynamic objects. Both kinds can be inserted, but only the dynamic objects support deletion and updating. Dynamic objects do not have a maximum number of objects per leaf and therefore never cause a leaf to subdivide. I based this design on the assumption that there are relatively few dynamic objects in the scene, and wherever they appear they are close to static objects.
+There are some other optimizations you can make to speed up the re-insertion process, but I won’t cover that because I haven’t tried any of them yet for the simple reason that my test scene has only one moving mesh. Let’s cross that bridge when we get there.
+Results
+Here are the measurements from the first “finished” version of the octree culler. Diff is still relative to the simple culler. My implementation only supports spheres for now, which is why there’s no OBB data.
+Culler
+Browser
+Bounding volume
+Average frametime (ms)
+Diff (ms)
+Octree
+Chrome
+Sphere
+2.1
+- 0.2
+Octree
+Firefox
+Sphere
+3.1
+- 0.4
+However, in the process of writing this post I decided to play around with some of the parameters of the octree and apply select micro-optimizations. That gave me the following results:
+Culler
+Browser
+Bounding volume
+Average frametime (ms)
+Diff (ms)
+Octree
+Chrome
+Sphere
+1.7
+- 0.6
+Octree
+Firefox
+Sphere
+3.4
+- 0.1
+Chrome got a lot faster compared to the previous iteration, but Firefox continues to baffle and got a bit slower. Let’s try going with just a coarse check and skip the intersection checks for items in intersecting leaf nodes:
+Culler
+Browser
+Bounding volume
+Average frametime (ms)
+Diff (ms)
+Octree
+Chrome
+Sphere
+1.6
+- 0.7
+Octree
+Firefox
+Sphere
+2.6
+- 0.9
+Curious and curiouser. Chrome barely benefitted at all, but Firefox got a lot faster. Maybe I could…. no, let’s finish this article first. The caveat with this final set of numbers is that coarse culling results in more instances being rendered, but since rendering is about as fast as it gets on my GPU it results in a net speedup. On a lower-end GPU or with a more complex scene you’d probably see the opposite effect.
+Regarding performance, I’m happy that I finally got a significant speedup over the simple culler, but I was still expecting more. 1.6 milliseconds is a good result (corresponding to over 600 frames per second), but culling still consumes 50-65% of the frame time. I’m doing so much less work now compared to the simple culler: 99.99% of the objects no longer have their bounding volumes transformed and checked every frame, and octree should mean that the engine performs significantly fewer intersection checks.
+There’s one more weird thing. The commonly cited optimal number of objects per leaf is 8 or 16, but with experimentation and benchmarking I found 128 to 256 to be the optimal range for my engine. That seems to somewhat defeat the purpose of an octree, and I can’t really explain why that is. It can’t be cache friendliness or autovectorization because every object is a separate allocation. Either the optimal number is actually highly dependent on the specific use case, or I have a bug somewhere. Here’s some output from a benny benchmark, showing that 256 is the optimal number of objects per leaf when looking purely at culling performance:
+```
+Running "Octree" suite...
+Progress: 100%
+
+  Query Frustum 8:
+    2 300 ops/s, ±1.58%   | slowest, 66.7% slower
+
+  Query Frustum 16:
+    3 857 ops/s, ±0.50%   | 44.16% slower
+
+  Query Frustum 32:
+    4 769 ops/s, ±0.55%   | 30.95% slower
+
+  Query Frustum 64:
+    6 336 ops/s, ±0.43%   | 8.27% slower
+
+  Query Frustum 128:
+    6 509 ops/s, ±0.40%   | 5.76% slower
+
+  Query Frustum 256:
+    6 907 ops/s, ±0.37%   | fastest
+
+  Query Frustum 512:
+    6 780 ops/s, ±0.48%   | 1.84% slower
+
+  Query Frustum 16384:
+    3 974 ops/s, ±0.32%   | 42.46% slower
+
+Finished 8 cases!
+  Fastest: Query Frustum 256
+  Slowest: Query Frustum 8
+```
+Here’s a last minute plot twist: I decided to re-benchmark the simple culler minutes before publication and after all the general optimizations I made to the engine in the process of writing this article, and it can now cull spheres in about 1.9 milliseconds on Chrome. So the octree culler is still faster, but the gap is now really small relative to the amount of effort expended.
+DoNothingCuller
+Finally, for fun I decided to test what the performance would be if I didn’t cull anything at all: just pretend that every single object is visible all the time. The results were interesting, but also misleading without further context.
+Culler
+Browser
+Bounding volume
+Average frametime (ms)
+Do nothing
+Chrome
+Any
+3.2
+Do nothing
+Firefox
+Any
+4.1
+The times are significantly worse than with both the simple and octree cullers, so all of this was worth it, right? Well, the times are worse because the engine is now uploading 3-4 times more instance data to the GPU than before. But: since we’re rendering all of the objects all of the time, we could now simply re-use the same instance data from frame to frame, and only update the dynamic objects with new data when they change. Rendering still only takes fractions of a millisecond, so I think not culling at all would be overall the fastest solution. As long your scene isn’t too complex and your GPU is a monster, that is.
+Graphics programming is like this 99% of the time.
+Summary and future
+There are a lot of things I could still try to optimize frustum culling further, but I’ve had my fill for now.
+The biggest letdown of this whole optimization journey was the WASM culler. I foolishly expected that packing all the necessary data into cache-friendly arrays and using a SIMD-enabled linear algebra library would reduce the cost of culling to almost nothing, but the reality was that getting data into those arrays is so slow that it makes the whole thing mostly not worth it. I think this is the core challenge with WASM in an application like this: WASM call overhead is relatively high, but you can amortize that overhead by doing a lot of work in a single call, but preparing the data to make that call eats a lot of CPU cycles, potentially more than you save by doing the work in WASM. Another option is to move more and more of your application logic into WASM but that’s easier said than done. One thing I might try is to convert the octree culler to WASM and see if that makes any difference.
+I was also somewhat disappointed by both Firefox’s and Chrome’s built in profilers for code like this. Chrome / V8 is so happy to inline everything that when profiling something complex like the octree culler you basically get a single line saying OctreeCuller.cull() took some number of milliseconds, and that’s about it. I mean I get it from performance POV, but for optimizing tight loops like this it’s not particularly helpful. Firefox’s profiler is a bit better on that front, but at least in this case I’m not sure if it’s actually accurately measuring the execution time of my code, or just its own profiling overhead. It would be nice if advanced users could more easily peek at the JIT-compiled machine code like you can with native languages and C#.
+Looking at this whole ordeal from a different perspective, I think I could have avoided all of this if the web platform had fast built-in linear algebra, or even the ability to make use of SIMD instructions. I think every single use case for 3D rendering requires some kind of linear algebra, and it’s a bit weird — though in line with the web platform’s general philosophy — that you have to bring your own library for that. Alternatively and / or additionally, the platform could provide a built in high level API for frustum culling with support for a few common bounding volume types, because I think that’s another thing that every 3D engine needs. Hold those thoughts — my next article will be all about my experiences on why WebGL and the whole web platform kinda sucks for 3D.
+If you’re interested in creating another account you are never going to actually use, consider following me on Bluesky, where I’ll be posting about my projects, new articles and not much else. See you in part 2, if I get around to writing it.

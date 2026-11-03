@@ -1,0 +1,89 @@
+A pbrt-v4-style physically based renderer with CPU, OptiX (NVIDIA) and Metal (macOS) backends, plus BDPT, MLT and SPPM, tested against closed-form results. - Metal: render pbrt homogeneous-medium spheres correctly (E1, A8) by WxpMomota · Pull Request #225 · WxpMomota/photonsmith
+
+Metal: render pbrt homogeneous-medium spheres correctly (E1, A8) by WxpMomota · Pull Request #225 · WxpMomota/photonsmith · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+WxpMomota
+commented
+Oct 4, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+E1 (Homogeneous Medium) rendered almost black on Metal (cpu=0.2787, metal=0.0894). The parked theory was that medium spheres cast no shadow. That turned out to be backwards for E1, and chasing it found four separate bugs:
+Loader: the scene's Material "interface" fog sphere had no case in the pbrt loader, so it became an opaque gray sphere that blocked the light. It now maps to the bounded-medium sphere (materialType 28).
+Inside rays: shadeHomogeneousMediumSphere assumed the ray starts outside the sphere. After a scatter inside, the exit distance came out negative and the ray was stepped backwards.
+MIS distance: the emissive-hit MIS weight measured distance from the sphere exit instead of the previous bounce, so BSDF and light-sampling weights didn't sum to 1 (Metal ~33% too bright even with thin fog).
+Shadow-ray attenuation: shadow rays now get blocked with probability 1 - exp(-sigma_t * chord) for each medium sphere crossed, an unbiased transmittance estimate that avoids editing the ~70 NEE call sites. The medium's own scatter-point NEE drops its hand-rolled exp(-sigma_t * dist), which charged the full distance.
+Results (macOS parity sweep)
+E1: cpu=0.2023 vs metal=0.1944, worst 6x6 block ~18-22% (was 69% off). Visually matches the CPU render.
+A8 (Cornell Smoke) flips FAIL -> pass as a bonus.
+No other scene changed status. Full ctest: 10/10.
+Not covered / follow-ups
+Only homogeneous media on interface-material spheres. Cloud/RGB-grid (materialType 29/30) are still ignored for shadow rays, and a medium on a real surface material (E3) is still a known gap.
+Separate pre-existing finding: 15 sweep scenes report metal=nan brightness yet print "pass" because NaN comparisons never trip the tolerance.
+🤖 Generated with Claude Code
+Metal: render pbrt homogeneous-medium spheres correctly (E1, A8)
+…
+1ce2a30
+```
+E1 (Homogeneous Medium) rendered nearly black on Metal (cpu=0.2787,
+metal=0.0894). The earlier theory - medium spheres cast no shadow - was
+backwards: the scene's "interface" fog sphere had no case in the pbrt
+loader, so it became an opaque gray Lambertian sphere that blocked the
+light. Fixing that exposed three bugs in the existing materialType-28
+(bounded homogeneous medium) path:
+
+- Loader: an interface-material sphere bounding a homogeneous medium now
+  maps to materialType 28 (albedo = sigma_s/sigma_t, sigma_t/sceneScale,
+  HG g), instead of the gray fallback.
+- shadeHomogeneousMediumSphere assumed the ray starts outside the
+  sphere. A continuation ray after a scatter INSIDE it got a negative
+  exit distance and was stepped backwards. It now treats an inside
+  origin as entry=0, exit=accepted root.
+- The MIS weight at an emissive hit used the distance from the sphere
+  exit point instead of from the previous bounce, so BSDF and light
+  sampling weights no longer summed to 1 (Metal ~33% too bright even
+  with very thin fog). The kernel now carries the skipped distance.
+- Shadow rays crossing a medium sphere were ignored entirely (floor lit
+  through ~2.7 optical depths of fog was 1.5-1.8x too bright). The
+  sphere intersection function now blocks them with probability
+  1 - exp(-sigma_t * chord): unbiased attenuation without touching the
+  ~70 NEE call sites. The medium's own scatter-point NEE drops its
+  hand-rolled exp(-sigma_t * dist), which charged the full distance.
+
+Parity: E1 cpu=0.2023 metal=0.1944 (worst block 18%), A8 flips FAIL ->
+pass; no other scene's status changed. Parity-check header updated.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+Hide details
+View details
+WxpMomota
+merged commit c4acfad
+into
+main
+Oct 5, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+WxpMomota
+deleted the
+fix/metal-medium-sphere-shadow
+branch
+October 5, 2026 02:01
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

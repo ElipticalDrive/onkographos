@@ -1,0 +1,1056 @@
+Contribute to openvdb/fvdb-core development by creating an account on GitHub.
+
+Adopt NanoVDB VoxelBlockManager: cached per-grid handles and occupancy-independent active-voxel iteration by swahtz · Pull Request #747 · openvdb/fvdb-core · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+swahtz
+commented
+Aug 21, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Summary
+Adopts NanoVDB's VoxelBlockManager (VBM) for per-active-voxel iteration on CUDA. The leaf scan launches one thread per 512-slot leaf position and discards inactive slots. The VBM decode costs O(1) per active voxel, in registers, so its cost tracks active voxels instead of leaf slots. A batch's VBMs are built together in one launch, and a batch is iterated in one launch.
+First step of #817, which tracks the remaining consumers and follow-ups.
+Depends on AcademySoftwareFoundation/openvdb#2291 for buildVoxelBlockManagerBatch. Until it merges, get_nanovdb.cmake pins NanoVDB to its head (swahtz/openvdb 29165acb, on top of develop/nanovdb). The pin moves back to AcademySoftwareFoundation/openvdb before this merges.
+Changes
+VbmCache: lazily built VBMs for every grid of a GridBatchData (~0.16 B/voxel), reached through GridBatchData::vbm() / vbmAt(bi).
+The first use builds all of the batch's VBMs into one buffer with one memset and one kernel. Grid g's VBM starts at block floor(cumVoxels_g / 128) + g, which leaves room for every grid without a scan (at most one unused block per grid), so the build kernel derives each grid's entry from the batch's device-side voxel offsets and metadata. Sizes come from host metadata, and the build never synchronizes the host.
+Each GridBatchData, views included, owns its own cache. Never invalidated (topology is immutable) and never serialized.
+The buffer is one tensor from the CUDA caching allocator, read through typed uint32_t/uint64_t pointers. The build event is created only when a second stream first acquires the cache; that stream waits on it and record_stream()s the buffer once, and later calls from it skip both.
+The destructor takes no device guard, so freeing a grid in a forked child cannot throw.
+forEachActiveVoxelVbmCUDA: one launch per batch. Each 128-thread group takes one VBM block and finds its grid by binary search on the batch's compact voxel offsets (8 bytes per grid). Blocks between grids are skipped.
+reinitialize_sdf: stencil kernels use the register decode instead of the shared-memory one, and reuse the cached VBM instead of rebuilding it every call.
+BasePerActiveVoxelProcessor (.ijk, morton/hilbert): CUDA path iterates via the VBM. CPU and PrivateUse1 keep the leaf scan.
+PadGrid: uses allocateProcessedRootTiles, since the newer develop/nanovdb deprecates allocateProcessedRoot.
+Benchmark: single-grid occupancy sweep, build cost, and batches of 1-256 random or shell grids from 32³ to 256³, warm and cold.
+Performance
+active_voxel_iteration_benchmark, RTX PRO 6000 Blackwell (sm_120), CUDA 13.4, median of 5.
+Batches
+Each grid is either a 25% random subsample of a dim³ box (every leaf present, about a quarter full) or a 3-voxel-thick spherical shell inscribed in it (the narrow-band case). Warm reuses the batch's VBMs. Cold runs on a freshly built batch, so the VBM path includes the build. Speedup is leaf scan ÷ VBM.
+Approximate voxels per grid:
+dim
+random
+shell
+32
+8k
+5k
+64
+66k
+19k
+128
+524k
+79k
+256
+4.2M
+316k
+Random:
+grids
+dim
+warm leaf scan
+warm VBM
+warm ×
+cold leaf scan
+cold VBM
+cold ×
+1
+32
+8.59 µs
+8.96 µs
+0.96×
+9.18 µs
+16.4 µs
+0.56×
+64
+32
+22.7 µs
+13.9 µs
+1.63×
+28.1 µs
+26.1 µs
+1.08×
+256
+32
+65.7 µs
+29.7 µs
+2.21×
+97.6 µs
+45.8 µs
+2.13×
+4
+64
+15.1 µs
+10.4 µs
+1.45×
+15.2 µs
+18.1 µs
+0.84×
+16
+64
+35.7 µs
+17.1 µs
+2.09×
+36.0 µs
+25.3 µs
+1.42×
+256
+64
+628 µs
+205 µs
+3.06×
+628 µs
+208 µs
+3.02×
+1
+128
+20.3 µs
+11.9 µs
+1.71×
+22.3 µs
+19.7 µs
+1.13×
+4
+128
+57.1 µs
+23.9 µs
+2.39×
+74.3 µs
+32.6 µs
+2.28×
+64
+128
+1.12 ms
+369 µs
+3.04×
+1.12 ms
+367 µs
+3.05×
+256
+128
+4.45 ms
+1.52 ms
+2.94×
+4.45 ms
+1.52 ms
+2.93×
+1
+256
+105 µs
+37.1 µs
+2.83×
+138 µs
+46.3 µs
+2.98×
+16
+256
+2.20 ms
+696 µs
+3.16×
+2.20 ms
+695 µs
+3.16×
+64
+256
+8.79 ms
+2.88 ms
+3.05×
+8.76 ms
+2.86 ms
+3.06×
+Shell:
+grids
+dim
+warm leaf scan
+warm VBM
+warm ×
+cold leaf scan
+cold VBM
+cold ×
+1
+32
+8.72 µs
+9.06 µs
+0.96×
+9.07 µs
+15.6 µs
+0.58×
+16
+64
+19.8 µs
+12.1 µs
+1.64×
+20.1 µs
+20.9 µs
+0.96×
+64
+64
+55.3 µs
+22.7 µs
+2.44×
+73.3 µs
+34.7 µs
+2.11×
+1
+128
+10.5 µs
+9.28 µs
+1.13×
+12.6 µs
+17.1 µs
+0.74×
+4
+128
+18.7 µs
+11.3 µs
+1.65×
+23.6 µs
+19.6 µs
+1.20×
+16
+128
+51.7 µs
+21.2 µs
+2.44×
+68.6 µs
+31.2 µs
+2.20×
+256
+128
+1.02 ms
+305 µs
+3.36×
+1.03 ms
+306 µs
+3.35×
+1
+256
+17.8 µs
+11.2 µs
+1.59×
+22.1 µs
+21.2 µs
+1.04×
+4
+256
+45.7 µs
+19.9 µs
+2.30×
+60.9 µs
+28.4 µs
+2.14×
+64
+256
+901 µs
+286 µs
+3.15×
+901 µs
+284 µs
+3.17×
+Warm, the VBM reaches ~3× from a few hundred thousand voxels per batch for both shapes. Below ~30k voxels both paths are launch-bound at ~9 µs and the VBM is up to 4% slower.
+Cold, the build adds a fixed ~7 µs per batch over the leaf scan (VbmBuild alone, including its sync, is 11.8-12.0 µs at any occupancy). It pays for itself at about 300-500k active voxels per batch, for both shapes. We accept that cost: it is paid once per batch, it does not grow with grid count, and large or reused batches win.
+One grid, by leaf occupancy
+Random subsamples of a 160³ box, warm cache:
+leaf occupancy
+leaf scan
+VBM
+speedup
+100%
+32.8 µs
+33.3 µs
+0.98×
+95%
+33.3 µs
+35.0 µs
+0.95×
+90%
+33.0 µs
+33.4 µs
+0.99×
+80%
+32.5 µs
+30.7 µs
+1.06×
+70%
+32.3 µs
+27.9 µs
+1.16×
+50%
+32.1 µs
+22.3 µs
+1.44×
+30%
+31.9 µs
+16.8 µs
+1.90×
+20%
+31.9 µs
+14.1 µs
+2.26×
+10%
+31.6 µs
+11.5 µs
+2.75×
+5%
+31.2 µs
+9.97 µs
+3.13×
+narrow shell (22%)
+17.5 µs
+11.1 µs
+1.58×
+Dense single grids are within 5% of the leaf scan, and the VBM wins from 80% occupancy down. The per-grid kernel this replaces was 1.1× faster on dense grids; the batched kernel's grid lookup costs that back, and buys the batch wins above.
+End to end
+reinitialize_sdf (order 3, repeated calls, 396k-voxel narrow shell) took 889 µs on main at f655b758 and 715 µs here (1.24×), measured before the batched rework. Its kernels are unchanged by the rework.
+Notes
+Block width. The decode's rank step reads 2^L/64 jumpMap words per voxel. At L=9 (512) the VBM was ~12% slower than the leaf scan on dense grids. L=7 keeps it at parity.
+Launch shape. VBM kernels use 256-thread blocks. A <<<blockCount, 512>>> launch with __launch_bounds__(512) silently dropped work from a register-heavy callback on sm_120 / CUDA 13.0.
+GatherScatterDefault stays on the leaf scan. Its topology build is bound by counter-atomic contention, which Warp-aggregate the per-tap counter atomics in the conv topology build #838 addresses first. Routing it through the VBM is tracked in Extend VoxelBlockManager iteration across CUDA ops (follow-ups to #747) #817.
+Testing
+VbmCacheTest (8): decode parity vs the leaf scan, value index == slot, views match their parent bitwise, empty grids, block-edge sizes, cross-stream lifetime, CPU builders sequential, and decode parity on 13 CUDA builders.
+pytest: .ijk/morton CPU-vs-CUDA parity including sliced batches and large batches with leading, interior and trailing empty grids; reinitialize_sdf sliced-view parity; fork safety with a warm cache.
+```
+./build.sh install gtests benchmarks
+build/<build-dir>/gtests/VbmCacheTest                               # 8 passed
+cd tests && pytest unit/test_active_grid_coords_vbm.py unit/test_fork_safety.py unit/test_sdf.py \
+    unit/test_morton_hilbert.py unit/test_sliced_batch.py unit/test_basic_ops.py unit/test_batching.py \
+    unit/test_dual.py unit/test_batched_topology_builder.py unit/test_conv_semantics_integration.py \
+    unit/test_sample.py unit/test_ray_marching.py                   # 1021 passed, 5 skipped
+build/<build-dir>/gbenchmarks/active_voxel_iteration_benchmark --benchmark_repetitions=5
+```
+🤖 Generated with Claude Code
+swahtz
+requested a review
+from a team
+as a code owner
+August 21, 2026 06:13
+swahtz
+requested review from
+fwilliams and
+harrism
+August 21, 2026 06:13
+swahtz
+force-pushed
+the
+vbm-adoption-core
+branch
+3 times, most recently
+from
+dcf5c51 to
+9e48153
+Compare
+August 21, 2026 12:31
+swahtz
+marked this pull request as draft
+September 9, 2026 23:57
+swahtz
+added this to the
+v0.7 milestone
+Sep 9, 2026
+swahtz
+mentioned this pull request
+Sep 11, 2026
+Finish adopting NanoVDB's injectable CUDA memory resources (openvdb #2232): move grid storage off the dual-space TorchDeviceBuffer
+#770
+Closed
+swahtz
+force-pushed
+the
+vbm-adoption-core
+branch
+from
+9e48153 to
+34f693b
+Compare
+October 13, 2026 01:08
+swahtz
+marked this pull request as ready for review
+October 13, 2026 01:33
+swahtz
+force-pushed
+the
+vbm-adoption-core
+branch
+from
+34f693b to
+495399d
+Compare
+October 13, 2026 01:55
+This was referenced Oct 13, 2026
+Extend VoxelBlockManager iteration across CUDA ops (follow-ups to #747)
+#817
+Open
+forEachVoxelCUDA using VBM
+#74
+Closed
+Add masked implicit GEMM sparse conv backend
+#819
+Draft
+matthewdcong
+reviewed
+Oct 28, 2026
+View reviewed changes
+Comment thread
+src/fvdb/detail/utils/cuda/ForEachVbmCUDA.cuh
+Outdated
+TORCH_CHECK(batchHdl.device().is_cuda(), "Grid batch must be on a CUDA device");
+TORCH_CHECK(batchHdl.device().has_index(), "Grid batch device must have an index");
+c10::cuda::CUDAGuard deviceGuard(batchHdl.device());
+const at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream(batchHdl.device().index());
+matthewdcong
+Oct 28, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Prefer auto stream = ... here for conciseness and in the call to forEachACtiveVoxelVbmKernel below you can just specify stream instead of stream.stream() as CUDAStream has an implicit conversion to cudaStream_t.
+swahtz
+Oct 29, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Done. It's const auto stream = at::cuda::getCurrentCUDAStream(...) now, and the launch takes stream directly.
+matthewdcong
+reviewed
+Oct 28, 2026
+View reviewed changes
+Comment thread
+src/fvdb/detail/utils/SimpleOpHelper.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+matthewdcong
+reviewed
+Oct 28, 2026
+View reviewed changes
+Comment thread
+src/fvdb/detail/VbmCache.cu
+Outdated
+/*firstOffset=*/1,
+/*lastOffset=*/uint64_t(numVoxels));
+nanovdb::tools::cuda::buildVoxelBlockManager<kLog2BlockWidth>(
+batch.deviceGridPtrAt(bi), handle, stream.stream());
+matthewdcong
+Oct 28, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I don't think stream.stream() is needed here either with the implicit conversion above.
+swahtz
+Oct 29, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Done. The build call and the event record both take stream directly. The only explicit unwrap left is stream.unwrap() for record_stream, because that takes a c10::Stream rather than a cudaStream_t.
+matthewdcong
+reviewed
+Oct 28, 2026
+View reviewed changes
+Comment thread
+src/fvdb/detail/VbmCache.cu
+Outdated
+C10_CUDA_CHECK(cudaEventRecord(entry.builtOn, stream.stream()));
+entry.builtStream = stream.stream();
+entry.view = GridVbm{reinterpret_cast<const uint32_t *>(entry.firstLeafID.data_ptr()),
+matthewdcong
+Oct 28, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+prefer something as close to firstLeafID.const_data_ptr<uint32_t> as possible here (even if it's just removing the const cast portion if the tensor can't be made native uint32)
+swahtz
+Oct 29, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+firstLeafID is now a native kUInt32 tensor (and jumpMap is kUInt64), so the view uses mFirstLeafID.const_data_ptr<uint32_t>() and mJumpMap.const_data_ptr<uint64_t>() with no casts.
+swahtz
+Oct 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actually, this changed a bit after the cold-build optimization work. The VBM's two arrays now share one allocation, a kUInt64 tensor, so a cold build makes one torch::empty and one record_stream instead of two. jumpMap reads through mutable_data_ptr<uint64_t>(). firstLeafID is packed after it and takes one reinterpret_cast<uint32_t *>(jumpMap + jumpMapWords). I tried narrow(...).view(torch::kUInt32) to avoid the cast, but it added about 1.5 µs of tensor dispatch to every cold build, roughly a fifth of the remaining fixed cost. So one commented cast stays.
+matthewdcong
+reviewed
+Oct 28, 2026
+View reviewed changes
+Comment thread
+src/fvdb/detail/VbmCache.h
+c10::DeviceIndex deviceIdx = -1;
+};
+std::mutex mMutex;
+matthewdcong
+Oct 28, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Do we have multiple host threads modifying this cache? Is the mutex necessary?
+swahtz
+Oct 29, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Not from Python today, since no fvdb binding releases the GIL. I'd still make an argument for keeping it for two reasons:
+The cache is built lazily behind a const GridBatchData &, and several Python grid objects and views can share one GridBatchData. The usual C++ contract is that const calls are safe to make concurrently, and a lazy build that writes members breaks that without a lock.
+Autograd runs C++ backward functions on its own per-device threads without the GIL. Nothing in backward touches the VBM yet, but the channel-folded ops in Extend VoxelBlockManager iteration across CUDA ops (follow-ups to #747) #817 (pools, refine, inject) will, and their backward could then race the forward of another op on the same grid.
+An uncontended std::mutex costs tens of nanoseconds, which is small next to the kernel launch it guards. In the reworked cache, the lock also protects the list of streams that have waited on the build (the fix for @harrism's repeated cudaStreamWaitEvent comment). So std::call_once alone wouldn't cover everything.
+harrism
+requested changes
+Oct 29, 2026
+View reviewed changes
+harrism
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Thanks for this. The occupancy-independent iteration is a clear win, and caching the VBM on GridBatchData with view-stable byte-offset keys looks right to me. I checked that views resolve grids by physical offset the same way, and that featureIdx = cumVoxelsAt(bi) + slot - 1 matches the leaf scan's baseOffset + getValue - 1.
+Two things I think need fixing before merge, both inline: the cold build's header read isn't ordered after the current stream, and ~VbmCache can call std::terminate (including in forked DataLoader workers, which #815 just fixed for grid teardown). I'd also like a measurement on a batched workload, since the path changes from one batch-wide launch to per-grid launches with a host sync per new grid.
+Smaller: the cold build's blocking copy also makes .ijk/morton on a fresh grid fail under CUDA-graph capture. The PR notes this and openvdb#2291 removes it, but since these were capturable before, a line in the docs (or a clear error) would help until then.
+Comment thread
+src/fvdb/detail/VbmCache.cu
+Outdated
+uint64_t(nBlocks),
+/*firstOffset=*/1,
+/*lastOffset=*/uint64_t(numVoxels));
+nanovdb::tools::cuda::buildVoxelBlockManager<kLog2BlockWidth>(
+harrism
+Oct 29, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+At the pinned NanoVDB (0ab0a81e), buildVoxelBlockManager reads lowerCount through DeviceGridTraits::getTreeData, which is a plain cudaMemcpy on the legacy default stream. fvdb isn't built with per-thread default streams, and torch's pool streams are created cudaStreamNonBlocking, so that copy isn't ordered after stream.
+Scenario: build a grid under torch.cuda.stream(s) and call .ijk on it immediately. The header read can run before the builder's writes on s land. That gives a wrong lowerCount (a short VBM, or an out-of-bounds node read for a garbage count), and the bad entry is cached for the life of the grid. The leaf-scan path never read device memory from the host, so it didn't have this exposure. (BuildPaddedGrid/PadGrid already make the same read, so it's not new to fvdb, but this PR puts it on the .ijk/morton path.)
+Since the build blocks anyway, a cheap interim fix is to C10_CUDA_CHECK(cudaStreamSynchronize(stream.stream())) before calling buildVoxelBlockManager, until openvdb#2291 removes the read.
+swahtz
+Oct 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Fixed by removing the read rather than syncing around it. The cache now builds all of a batch's VBMs at once through buildVoxelBlockManagerBatch from openvdb#2291, which this PR pins to for now. The build is sized entirely from host metadata (voxel and leaf counts, block bases), and each grid's entry is derived inside the build kernel from the batch's device-side voxel offsets. Nothing is read back from the device, so there is no host sync and no unordered copy on the .ijk/morton path.
+BuildPaddedGrid and PadGrid still make the getTreeData read you mentioned. That predates this PR, so I've left it out of scope here.
+Comment thread
+src/fvdb/detail/VbmCache.cu
+Outdated
+VbmCache::~VbmCache() {
+for (auto &[key, entry]: mEntries) {
+if (entry.builtOn) {
+c10::cuda::CUDAGuard guard(entry.deviceIdx);
+harrism
+Oct 29, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+If constructing this CUDAGuard throws, the exception escapes an implicitly noexcept destructor and calls std::terminate; the _WARN on cudaEventDestroy doesn't help with that. It can throw in a child forked after CUDA initialized, which is the case #815 fixed for grid teardown (merged after this branch was cut). With this PR, any grid whose .ijk, morton or reinitialize_sdf ran before a DataLoader fork would abort the worker when the child frees it. The same applies to teardown at process exit after the CUDA runtime has started unloading.
+The merged tests/unit/test_fork_safety.py won't catch it after a rebase, because it never touches .ijk, so the cache is empty and the loop body never runs. Suggest dropping the guard (or catching around it, so the destroy is best-effort), and extending the fork test to warm the cache, e.g. call grid.ijk before the fork.
+swahtz
+Oct 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Fixed. The destructor no longer takes a device guard, and it destroys the event with C10_CUDA_IGNORE_ERROR, so teardown in a forked child or at process exit is best-effort and can't throw. test_fork_safety.py now calls grid.ijk before the fork, so the child frees a grid whose cache is built.
+One limit remains, and it's PyTorch's rather than ours. If a batch's VBMs are acquired from a second stream, the cache record_stream()s its buffer for that stream. Freeing any record_stream()ed tensor in a forked child aborts, because PyTorch's allocator records an event on the recorded stream at free time, and that throws in the child. I reproduced it with a plain tensor and no fVDB. Single-stream use never calls record_stream(), and the build event is now created only for a second stream, so the common DataLoader case frees normally. The limit is documented in VbmCache.h (e184a04).
+Comment thread
+src/fvdb/detail/utils/cuda/ForEachVbmCUDA.cuh
+Outdated
+const at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream(batchHdl.device().index());
+for (int64_t bi = 0; bi < batchHdl.batchSize(); ++bi) {
+const auto vbm = batchHdl.vbmCache().get(batchHdl, bi);
+harrism
+Oct 29, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This turns one batch-wide launch (the leaf scan over totalLeaves) into, per grid: a cache lookup under the mutex, a kernel launch, and on first use a blocking build. Grids are immutable, so code that makes new grids pays the host sync on every new grid. For example, _sdf.py's band loop calls dilated.ijk on a fresh grid each iteration, as does a training step that builds a new batch of grids.
+The benchmarks in the description are all single-grid. Could you add a data point for a batch of many small, freshly built grids (say 64-256 grids, cold cache) against main? If it regresses, keeping the leaf scan for cold or large batches, or building all of a batch's VBMs with a single sync, might be worth it.
+swahtz
+Oct 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This and making those benchmarks made me make some deeper changes to openvdb#2291 to allow for batched VBM creation. This was reworked along the lines you suggested.
+Each batch now gets one build (one memset and one kernel, with no host sync) and one iteration launch over all of its grids, in place of one launch and one blocking build per grid. The description has the data point you asked for: batches of 1-256 grids, random or narrow-shell, from 32³ to 256³, warm and cold. They're compared against the leaf-scan kernel that main uses, in active_voxel_iteration_benchmark, not as a Python timing against main itself.
+Cold batches still pay a fixed cost of about 7 µs over the leaf scan. The VBM pays that back at about 300-500k active voxels per batch, and wins up to ~3x above that. Below it, small fresh batches are slower. One fresh 32³ grid takes about 16 µs against 9 µs with the leaf scan, which is roughly the _sdf.py band-loop case. We decided to accept that rather than keep the leaf scan for cold batches: it's a fixed cost once per batch, it doesn't grow with grid count, and it no longer syncs the host.
+Comment thread
+src/fvdb/detail/VbmCache.cu
+Outdated
+Comment on lines
++36
+to
++43
+if (entry.builtOn && stream.stream() != entry.builtStream) {
+// Execution ordering: this consumer stream must see the finished build.
+C10_CUDA_CHECK(cudaStreamWaitEvent(stream.stream(), entry.builtOn, 0));
+// Lifetime ordering: register the consumer stream with the caching allocator so
+// that destroying the owning GridBatchData while this stream's kernels are still
+// in flight cannot recycle the buffers under them.
+entry.firstLeafID.record_stream(stream.unwrap());
+entry.jumpMap.record_stream(stream.unwrap());
+harrism
+Oct 29, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Minor: every hit from a stream other than the build stream repeats cudaStreamWaitEvent plus two record_stream calls, per grid and per op call, under mMutex, even when that stream has already waited. Keeping a small set of already-synchronized streams in the Entry would make repeat hits free for apps that run on a non-default stream.
+swahtz
+Oct 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Fixed. The cache remembers which streams have already waited on the build, so a repeat hit from one of them skips cudaStreamWaitEvent and record_stream entirely. The VBM now lives in one buffer, so the first hit from a new stream makes one record_stream call instead of two. The build event is also created lazily, on the first acquire from a second stream, so single-stream use never creates one.
+Comment thread
+src/fvdb/detail/VbmCache.h
+Outdated
+/// on the recorded build event and is registered with the caching allocator as a user of
+/// the entry's buffers before this returns.
+/// @return The grid's VBM view, or a zero GridVbm (blockCount == 0) for an empty grid.
+GridVbm get(const GridBatchData &batch, int64_t bi);
+harrism
+Oct 29, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Nit: get takes any GridBatchData, but entries are keyed only by cumBytesAt(bi). So a.vbmCache().get(b, i) with a batch that doesn't share this cache's storage would silently return another grid's VBM. Every call site also passes the same batch twice (batch.vbmCache().get(batch, bi)). A GridBatchData::vbmAt(bi) accessor, with get private or a TORCH_CHECK that the batch owns this cache, would close that off.
+swahtz
+Oct 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Fixed. GridBatchData::vbm() and vbmAt(bi) replace vbmCache().get(batch, bi). The cache records the batch that built it, and acquire checks it's called with that batch. Views no longer share their parent's cache keyed by byte offset: every GridBatchData, views included, owns its own.
+Comment thread
+src/fvdb/detail/utils/cuda/ForEachVbmCUDA.cuh
+Outdated
+// Sequential OnIndex invariant: the decoded voxel's value index equals its slot
+// (firstOffset + i), so the batch-wide feature index is baseVoxelOffset +
+// (firstOffset + i) - 1 (matching the legacy path's baseOffset + getValue - 1).
+const int64_t featureIdx = baseVoxelOffset + int64_t(firstOffset + i) - 1;
+harrism
+Oct 29, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Nit: the slot-equals-value-index shortcut relies on the grid being sequential, which NanoVDB only checks with NANOVDB_ASSERT (compiled out in release). Grids from fvdb's builders are fine. A grid that's ill-formed already breaks the leaf scan too (e.g. a ValueIndex grid retyped by LoadNanovdb's copyIndexGridToHandle without renumbering), so this isn't new. But a cheap isSequential check from host metadata when the cache entry is built would turn silent mis-ordering into an error.
+swahtz
+Oct 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Agreed that silent mis-ordering should be an error, but I don't think an isSequential() check at cache build would catch the case you describe. isSequential() checks that the nodes are fixed-size, which is always true for OnIndexGrid, and that the grid header has its breadth-first flag set. A ValueIndex grid that copyIndexGridToHandle retypes to ValueOnIndex keeps its breadth-first layout and header flag, so the check passes. What breaks is the numbering: the leaf offsets still count every value slot, so the active-voxel indices have gaps. Checking the flag at cache build would also mean reading the grid header back from the device, the kind of host sync this PR removes.
+Every foreign grid enters fVDB through copyIndexGridToHandle in LoadNanovdb.cpp, on the host before upload, so that's the place to catch it: reject a ValueIndex source, or renumber it to ValueOnIndex, plus a host-side isSequential() check while the header is in reach. It already breaks the leaf scan too, so I've filed it separately as #841 rather than folding it into this PR.
+This was referenced Oct 29, 2026
+Warp-aggregate the per-tap counter atomics in the conv topology build
+#838
+Open
+NanoVDB: per-leaf and batched VBM builds; cache leafCount for async rebuilds
+AcademySoftwareFoundation/openvdb#2291
+Open
+swahtz
+and others
+added 6 commits
+October 30, 2026 11:26
+Add lazily-built per-grid VoxelBlockManager cache to GridBatchData
+…
+3097a69
+```
+VbmCache builds one NanoVDB VBM (firstLeafID + jumpMap) per grid on
+first use and keeps it for the life of the batch. Topology is immutable
+after construction, so entries never need invalidation; the cache is
+shared with sliced/indexed views (entries are keyed by the grid's byte
+offset into the shared buffer, the only view-stable identity) and is
+never serialized.
+
+The VBM block width is 128 voxels (kLog2BlockWidth = 7): the decode's
+rank step scans 2^L/64 jumpMap words per voxel, and at 128 the register
+decode is faster than the legacy leaf scan at every occupancy including
+fully dense grids (see the active-voxel iteration benchmark), while 128
+also remains a sane CUDA block width for consumers whose launch shape
+derives from the VBM block width. Metadata cost is ~0.16 B per active
+voxel.
+
+Entry buffers are torch::Tensor storage from PyTorch's CUDA caching
+allocator, so their lifetime is stream-safe: get() makes a consumer
+stream that differs from the build stream wait on the recorded build
+event (execution ordering) and record_stream()s the buffers for it
+(lifetime ordering), so destroying the owning GridBatchData while a
+cross-stream consumer kernel is still in flight cannot recycle the
+buffers under it. The NanoVDB handle only sees non-owning views, and
+only for the duration of the in-place buildVoxelBlockManager call,
+which is sized from host metadata to avoid the blocking device read of
+activeVoxelCount that the allocating overload performs.
+
+VbmCacheTest pins the decode contract: bitwise coordinate parity with
+activeGridCoords, the sequential OnIndex invariant (decoded value index
+== slot), view sharing, empty grids, non-multiple-of-block-width sizes,
+cross-stream consumption with the owner destroyed mid-flight, and
+isSequential() across every grid production path (which the register
+decode requires).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Migrate reinitialize_sdf to the register VBM decode and cached handles
+…
+f23e114
+```
+Two changes to the eikonal solver:
+
+- VBM_FACES_BEGIN now uses the per-slot register decodeInverseMap instead
+  of the cooperative shared-memory decodeInverseMaps, dropping 3 KB of
+  shared memory and a __syncthreads from every stencil kernel block.
+- The per-batch-item, per-call VoxelBlockManager rebuild is replaced by
+  GridBatchData's cached handles, so repeated calls on the same grid
+  reuse the one-time build.
+
+A regression test pins sliced-view parity with an equivalently
+constructed standalone batch, which covers the cache's byte-offset keying
+for views.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Use VBM-backed iteration for per-active-voxel processors on CUDA
+…
+8f0c79c
+```
+Adds forEachActiveVoxelVbmCUDA: a 256-thread grid-stride kernel over each
+grid's cached VBM, decoding one (leafIndex, voxelOffset) per active voxel
+in registers. BasePerActiveVoxelProcessor's CUDA branch switches to it, so
+ActiveGridCoords (Grid.ijk / GridBatch.ijk) and SerializeEncode
+(morton/hilbert) stop scanning totalLeaves*512 slots and discarding the
+inactive ones -- at N% leaf occupancy the leaf scan wastes (100-N)% of
+its threads, while the VBM launch is occupancy-independent. CPU and
+PrivateUse1 keep the leaf scan (the VBM cache is CUDA-only).
+
+The launch shape is deliberately grid-stride at 256 threads rather than
+one-thread-per-slot at <<<blockCount, 512>>>: decodeInverseMap takes the
+in-block slot position explicitly, so the kernel shape is independent of
+the VBM's 512-slot blocks, and a 512-wide __launch_bounds__ caps the
+per-thread register budget in a way that was observed to silently drop
+work from a register-heavy callback.
+
+Parity is pinned bitwise against the CPU leaf scan, including through
+sliced GridBatch views (shared cache entries) and batches containing
+empty grids.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Add active-voxel iteration benchmark: leaf scan vs cached VBM decode
+…
+430603f
+```
+Sweeps leaf occupancy from 100% down to 5% (random subsamples of a dense
+box, plus a narrow spherical shell) with an ActiveGridCoords-style body,
+comparing the legacy totalLeaves*512 leaf scan against VBM-backed
+iteration, plus the one-time VbmCache build cost.
+
+Measured on sm_120 at the 128-voxel VBM block width: the leaf scan's
+time is flat (it always visits every leaf slot) while the VBM path's
+time tracks the active-voxel count, and the VBM path is faster at every
+occupancy -- 1.16x on a fully dense grid, 1.28x at 70%, 1.55x at 50%,
+2.9x at 10%, and 1.65x on a narrow spherical shell. (At the original
+512-voxel block width the decode's 8-word jumpMap rank made it ~12%
+slower than the scan on dense grids, with a crossover near 70%
+occupancy; the narrower block eliminates that regime entirely.) The
+one-time VBM build is ~24 us per grid regardless of occupancy.
+
+dispatch::forEachActiveVoxel deliberately stays on the leaf scan: its
+one consumer (the GatherScatterDefault topology build) is dominated by
+its K-tap probe loop rather than by iteration, and routing it through
+the fused VBM kernel measured 10-25% slower end to end. Probe-dominated
+consumers need the probe count reduced (count-buffer + prefix
+restructuring), not cheaper iteration.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Pin NanoVDB to openvdb #2291 for the batched VBM build
+…
+8e31d72
+```
+Point get_nanovdb.cmake at the head of AcademySoftwareFoundation/openvdb#2291
+(swahtz/openvdb 23a08814), which adds buildVoxelBlockManagerBatch on top of
+develop/nanovdb. Move the pin back to AcademySoftwareFoundation/openvdb once
+#2291 merges.
+
+The newer develop/nanovdb deprecates TopologyBuilder::allocateProcessedRoot,
+so PadGrid now uses allocateProcessedRootTiles.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Build a batch's VoxelBlockManagers together and iterate a batch in on…
+…
+8d6a40e
+```
+…e launch
+
+VbmCache now builds every grid's VBM of a GridBatchData with one upload, one
+memset and one buildVoxelBlockManagerBatch launch, sized from host metadata,
+so a cold build no longer synchronizes the host. forEachActiveVoxelVbmCUDA
+launches once per batch instead of once per grid: each 128-thread group takes
+one VBM block and finds its grid by binary search on the entries' block bases.
+
+- GridBatchData::vbm() and vbmAt(bi) replace vbmCache().get(batch, bi), and
+  the cache checks it is called with the batch that owns it.
+- Views build their own VBMs instead of sharing the parent's per-grid
+  entries keyed by byte offset.
+- The buffers are native kUInt32/kUInt64 tensors, read through
+  const_data_ptr<T>() without casts.
+- Streams that already waited on the build are remembered, so repeat calls
+  from a non-build stream skip cudaStreamWaitEvent and record_stream.
+- The destructor no longer takes a device guard, so freeing a grid in a
+  forked child cannot throw; test_fork_safety now warms the cache first.
+- New tests for large batches with empty grids, and batch benchmarks for
+  many small grids, warm and cold.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+force-pushed
+the
+vbm-adoption-core
+branch
+from
+495399d to
+8d6a40e
+Compare
+October 29, 2026 22:37
+swahtz
+and others
+added 5 commits
+October 30, 2026 12:08
+Benchmark VBM batches up to 256^3 with random and shell grids
+…
+4fe74f1
+```
+The batch benchmarks now cover 32^3 to 256^3 boxes and add a 3-voxel-thick
+spherical shell beside the 25% random subsample. Batch inputs are generated
+on the GPU, which keeps setup for the large cold cases to seconds.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Cut the host-side cost of the cold VBM build
+…
+0657ced
+```
+Most of the cold build's fixed cost was host-side tensor dispatch before
+any CUDA call, not GPU work. Three changes remove most of it:
+
+- Fill the per-grid entries on the device from the batch's grid metadata
+  with one single-block kernel, instead of uploading them through a pinned
+  tensor and a non-blocking copy.
+- Keep jumpMap, the entries and firstLeafID in one allocation, so there is
+  one torch::empty and one record_stream.
+- Create and record the build event only when a second stream first
+  acquires the cache. The build stream is in order, so the later record
+  still follows the build.
+
+VbmBuild drops from ~22 us to ~15 us, and the extra cold cost of one small
+grid over the leaf scan from ~19 us to ~10 us.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Derive VBM placement from grid metadata and drop the entries fill
+…
+0cb06f5
+```
+Each grid's VBM now starts at block floor(cumVoxels / kBlockWidth) + g.
+A grid spans at most one block more than its share of the batch's
+voxels, so this leaves room for every grid without a scan over the
+grids' block counts, at the cost of at most one unused block per grid.
+The iteration kernel already skips slots past a grid's voxels, so the
+unused blocks are never decoded.
+
+With no scan, BatchVbmLayout derives every grid's entry from the batch's
+device-side voxel offsets and grid metadata, and serves both as
+buildVoxelBlockManagerBatch's entry source and as the iteration kernel's
+grid lookup. That removes the fillEntriesKernel launch and the entries
+region of the buffer. The lookup searches the compact voxel offsets
+rather than the per-grid metadata, which kept warm iteration at its
+previous speed.
+
+Pins NanoVDB to the new head of AcademySoftwareFoundation/openvdb#2291
+(29165acb), which accepts an entry source and allows gaps between grids.
+
+VbmBuild drops from ~15.5 us to ~12 us, and the extra cold cost of one
+small grid over the leaf scan from ~10.5 us to ~7 us.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Type the VBM buffer as uint64 and drop the byte-pointer casts
+…
+bccb642
+```
+The VBM buffer was a uint8 tensor carved up with two reinterpret_casts.
+It is now a uint64 tensor: jumpMap reads straight through
+mutable_data_ptr<uint64_t>(), and firstLeafID, packed two per word after
+it, takes one uint32 pointer into the same allocation.
+
+A narrow().view(kUInt32) slice would avoid the remaining cast but added
+about 1.5 us of tensor dispatch to every cold build, so the pointer stays.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Document the forked-child limit of cross-stream VBM use
+…
+e184a04
+```
+A batch whose VBMs were acquired from a second stream has its buffer
+record_stream()ed, and like any such tensor it aborts a forked child
+that frees it: PyTorch's allocator records an event on the recorded
+stream at free time, which fails in the child. Single-stream use never
+calls record_stream() and frees normally. Say so in VbmCache's stream
+safety notes.
+
+The fork test's comment claimed the child also frees the build event.
+Since the event is now created only for a second stream, single-stream
+use never creates one, so the comment now says buffer only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+mentioned this pull request
+Oct 30, 2026
+from_nanovdb retypes ValueIndex grids to ValueOnIndex without renumbering, corrupting per-voxel queries
+#841
+Open
+swahtz
+added 2 commits
+October 30, 2026 19:38
+Make the VBM cache robust to failed builds, devices, and graph capture
+…
+79f9952
+```
+build() set the owner before steps that can throw, so a failed first
+build, such as an out-of-memory error, left the cache marked built and
+later calls returned an unbuilt VBM. It now builds into locals and sets
+the members only once every throwing step has succeeded.
+
+acquire() takes a device guard, so its event calls run on the owner's
+device rather than the current one.
+
+The build event is now recorded right after the build launch. Recording
+it lazily used the build stream's handle long after the build, when the
+stream might be gone, and made other streams wait on unrelated work.
+
+The build cannot run during CUDA graph capture, so first use inside a
+capture raises and asks for a warmup. A capturing stream other than the
+build stream waits on the build through an external event node.
+
+vbmAt normalizes negative grid indices like the other per-grid
+accessors.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Skip CUDA graph capture test without the caching allocator
+…
+73f1b47
+```
+CI sets PYTORCH_NO_CUDA_MEMORY_CACHING=1, which makes every allocation a raw
+cudaMalloc, and cudaMalloc is illegal during stream capture.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

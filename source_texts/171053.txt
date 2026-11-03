@@ -1,0 +1,386 @@
+4 posts published by mikolalysenko during July 2012
+
+July 2012 – 0 FPS
+Skip to content
+I just got back to the US after spending 3 months in Berlin, and I’ve now got plenty of ideas kicking around that I need to get on to paper. Recall that lately I’ve been blogging about solid modeling and in particular, we talked about meshing isosurfaces last time. However, in the examples from our previous discussion we only looked at some fairly small volumes. If our ultimate goal is to create something like Minecraft, where we use large volumetric objects to represent terrain, then we have to contend with the following difficult question:
+How do we efficiently render large, dynamic, volumetric terrains?
+One source of inspiration is to try generalizing from the 2D case. From the mid-90’s to the early 2000’s this was a hot topic in computer graphics, and many techniques were discovered, like the ROAM algorithm or Geometry Clipmaps. One thing that seems fundamental to all of these approaches is that they make use of the concept of level-of-detail, which is the idea that the complexity of geometry should scale inversely with the viewing distance. There at least a couple of good reasons why you might want to do this:
+Simplifying the geometry of distant objects can potentially speed up rendering by reducing the total number of vertices and faces which need to be processed.
+Also, rendering distant objects at a high resolution is likely to result in aliasing, which can be removed by filtering the objects before hand. This is the same principle behind mip-mapping, which is used to reduce artefacts in texture mapping distant objects.
+Level of detail is a great concept in both theory and practice, and today it is applied almost everywhere. However, level of detail is more like a general design principle than an actual concrete algorithm. Before you can use it in a real program, you have to say what it means to simplify geometry in the first place. This motivates the following more specific question:
+How do we simplify isosurfaces?
+Unfortunately, there probably isn’t a single universal answer to the question of what it means to `simplify` a shape, but clearly some definitions are more useful than others. For example, you would hardly take me seriously if I just defined some geometry to be `simpler’ if it happened to be the output from some arbitrarily defined `simplification algorithm’ I cooked up. A more principled way to go about it is to define simplification as a type of optimization problem:
+Given some input shape , a class of simpler shapes and a metric on the space of all shapes, find some approximate shape such that is minimized:
+The intuition behind this is that we want to find a shape which is the best approximation of that we can hope to find subject to some information constraint. This constraint is embodied in that class , which we could take to be the set of all shapes having a strictly shorter description than (for example, we could require that has fewer vertices, edges, faces, voxels, etc.). This is of course only a meta-definition, and to make it concrete we need to plug in a metric, . The choice of this metric determines what shapes you consider to be good approximations.
+While there are as many different approaches to this problem as there are metrics, for the purposes of discussion we shall classify them into two broad categories:
+Surface: Metrics that operate on meshed isosurfaces.
+Volumetric: Metrics which operate directly on the sampled potential function.
+I’ll eventually write a bit about both of these formulations, but today I’ll be focusing on the first one:
+Surface Simplification
+Of these two general approaches, by far the most effort has been spent on mesh simplification. There are a many high quality resources out there already, so I won’t waste much space talking about the basics here, and instead refer you to the following reference:
+D. Luebke. (2001)”A Developer’s Survey of Mesh Simplification Algorithms” IEEE Computer Graphics and Applications.
+Probably the most important class of metrics for surface simplification are the so-called quadratic error metrics. These approaches were described by Michael Garland and Paul Heckbert back in 1997:
+M. Garland, P. Heckbert. (1997) “Surface Simplification Using Quadratic Error Metrics” SIGGRAPH 1997
+Intuitively, quadratic error metrics measure the difference in the discrete curvature of two meshes locally. For piecewise linear meshes, this makes a lot of sense, because in flat regions you don’t need as many facets to represent the same shape. Quadratic error metrics work exceptionally well — both in theory and in practice — and are by far the dominant approach to mesh simplification. In fact, they have been so successful that they’ve basically eliminated all other competition, and now pretty much every approach to mesh simplification is formulated within this framework. Much of the work on mesh simplification today, instead focuses on the problem of implementing and optimizing. These technical difficulties are by no means trivial, and so what I will discuss here are some neat tricks that can help with simplifying isosurface meshes.
+One particularly interesting paper that I’d like to point out is the following:
+D. Attali, D. Cohen-Steiner, H. Edelsbrunner. (2005) “Extraction and Simplification of Iso-surfaces in Tandem” Eurographics Symposium on Geometry Processing.
+This article was brought to my attention by Carlos Scheid in the comments on my last post. The general idea is that if you run your favorite mesh simplification algorithm in parallel while you do isosurface extraction, then you can avoid having to do simplification in one shot. This is a pretty neat general algorithm design principle: often it is much faster to execute an algorithm incrementally than it is to do it in one shot. In this case, the speed up ends up being on the order of . This is probably the fastest method I’ve seen for simplifying an isosurface, but the speed comes at the cost of greater implementation complexity. But, if you are planning on doing mesh simplification, and you feel confident in your coding skills, then there is no practical reason not to use this technique.
+I also learned of another neat reference from Miguel Cepero’s blog:
+J. Wu, L. Kobbelt. (2002) “Fast Mesh Decimation by Multiple-Choice Techniques” VMV 2002
+It describes an incredibly simple Monte-Carlo algorithm for simplifying meshes. The basic idea is that instead of using a priority queue to select the edge with least error, you just pick some constant number of edges (say 10) at random, then collapse the edge in this set with least error. It turns out that for sufficiently large meshes, this process converges to the optimal simplified mesh quite well. According to Miguel, it is also quite a bit faster than the standard heap/binary search tree implementation of progressive meshes. Of course Attali et al.’s incremental method should be even faster, but I still think this method deserves some special mention due to its extreme simplicity.
+General purpose surface simplification is usually applied to smaller, discrete objects, like individual characters or static set pieces. Typically, you precalculate several simplified versions of each mesh and cache the results; then at run time, you just select an appropriate level of detail depending on the distance to the camera and draw that. This has the advantage that only a very small amount of work needs to be done each frame, and that it is quite efficient for smaller objects. Unfortunately, this technique does not work so well for larger objects like terrain. If an object spans many levels of detail, ideally you’d want to refine parts of it adaptively depending on the configuration viewer.
+This more ambitious approach requires dynamically simplifying the mesh. The pioneering work in this problem is the following classic paper by Hugues Hoppe:
+H. Hoppe. (1997) “View-dependent refinement of progressive meshes” ACM SIGGRAPH 1997
+Theoretically, this type of approach sounds really great, but in practice it faces a large number of technical challenges. In particular, the nature of progressive meshing as a series of sequential edge collapses/refinements makes it difficult to compute in parallel, especially on a GPU. As far as I know, the current state of the art is still the following paper:
+L. Hu, P. Sander, H. Hoppe. (2010) “Parallel View-Dependent Level-of-Detail Control” IEEE Trans. Vis. Comput. Graphics. 16(5)
+The technology described in that document is quite impressive, but it has a several drawbacks that would prevent us from using it in volumetric terrain.
+The first point is that it requires some fairly advanced GPU features, like geometry shaders and hardware tesselation. This rules out a WebGL implementation, which is quite unfortunate.
+The second big problem is that even though it is by far the fastest known method for continuous view-dependent level of detail, it still is not quite good enough for real time game. If you have a per-frame budget of 16 ms total, you can’t afford to spend 22 ms just generating the geometry — and note that those are the times reported in the paper, taking into account amortization over multiple frames :(. Even if you throw in every optimization in the book, you are still looking at a huge amount of work per frame just to compute the level of detail.
+Another blocking issue is that this approach is does not work with dynamic geometry, since it requires a lot of precalculated edge collapses. While it might be theoretically possible to update these things incrementally, in practice it would probably require reworking this algorithm from scratch,.
+Finally, it also is not clear (at least to me) how one would adapt this type of method to deal with large, streaming, procedural worlds, like those in Minecraft. Large scale mesh simplification is by nature a global operation, and it is difficult to convert this into something that works well with paging or chunked data.
+Next Time
+Since this post has now grown to about 1700 words, I think I’ll break it off here. Next time we’ll look at volumetric isosurface simplification. This is a nice alternative to surface simplification, since it is a bit easier to implement view dependent level of detail. However, it has its own set of problems that we’ll soon discuss. I still haven’t found a solution to this problem which I am completely happy with. If anyone has some good references or tips on rendering large volumetric data sets, I’d be very interested to hear about it.
+Last time we formulated the problem of isosurface extraction and discussed some general approaches at a high level. Today, we’re going to get very specific and look at meshing in particular.
+For the sake of concreteness, let us suppose that we have approximated our potential field by sampling it onto a cubical grid at some fixed resolution. To get intermediate values, we’ll just interpolate between grid points using the standard trilinear interpolation. This is like a generalization of Minecraft-style voxel surfaces. Our goal in this article is to figure out how to extract a mesh of the implicit surface (or zero-crossings of ). In particular, we’re going to look at three different approaches to this problem:
+Marching Cubes
+By far the most famous method for extracting isosurfaces is the marching cubes algorithm. In fact, it is so popular that the term `marching cubes’ is even more popular than the term `isosurface’ (at least according to Google)! It’s quite a feat when an algorithm becomes more popular than the problem which it solves! The history behind this method is very interesting. It was originally published back in SIGGRAPH 87, and then summarily patented by the Lorensen and Cline. This fact has caused a lot of outrage, and is been widely cited as one of the classic examples of patents hampering innovation. Fortunately, the patent on marching cubes expired back in 2005 and so today you can freely use this algorithm in the US with no fear of litigation.
+Much of the popularity of marching cubes today is due in no small part to a famous article written by Paul Bourke. Back in 1994 he made a webpage called “Polygonizing a Scalar Field”, which presented a short, self-contained reference implementation of marching cubes (derived from some earlier work by Cory Gene Bloyd.) That tiny snippet of a C program is possibly the most copy-pasted code of all time. I have seen some variation of Bloyd/Bourke’s code in every implementation of marching cubes that I’ve ever looked at, without exception. There are at least a couple of reasons for this:
+Paul Bourke’s exposition is really good. Even today, with many articles and tutorials written on the technique, none of them seem to explain it quite as well. (And I don’t have any delusions that I will do any better!)
+Also their implementation is very small and fast. It uses some clever tricks like a precalculated edge table to speed up vertex generation. It is difficult to think of any non-trivial way to improve upon it.
+Finally, marching cubes is incredibly difficult to code from scratch.
+This last point needs some explaining, Conceptually, marching cubes is rather simple. What it does is sample the implicit function along a grid, and then checks the sign of the potential function at each point (either +/-). Then, for every edge of the cube with a sign change, it finds the point where this edge intersects the volume and adds a vertex (this is just like ray casting a bunch of tiny little segments between each pair of grid points). The hard part is figuring out how to stitch some surface between these intersection points. Up to the position of the zero crossings, there are different possibilities, each of which is determined by the sign of the function at the 8 vertices of the cube:
+Some of the marching cubes special cases. (c) Wikipedia, created by Jean-Marie Favreau.
+Even worse, some of these cases are ambiguous! The only way to resolve this is to somewhat arbitrarily break the symmetry of the table based on a case-by-case analysis. What a mess! Fortunately, if you just download Bloyd/Bourke’s code, then you don’t have to worry about any of this and everything will just work. No wonder it gets used so much!
+Marching Tetrahedra
+Both the importance of isosurface extraction and the perceived shortcomings of marching cubes motivated the search for alternatives. One of the most popular was the marching tetrahedra, introduced by Doi and Koide. Besides the historical advantage that marching tetrahedra was not patented, it does have a few technical benefits:
+Marching tetrahedra does not have ambiguous topology, unlike marching cubes. As a result, surfaces produced by marching tetrahedra are always manifold.
+The amount of geometry generated per tetrahedra is much smaller, which might make it more suitable for use in say a geometry shader.
+Finally, marching tetrahedra has only cases, a number which can be further reduced to just 3 special cases by symmetry considerations. This is enough that you can work them out by hand.
+Exercise: Try working out the cases for marching tetrahedra yourself. (It is really not bad.)
+The general idea behind marching tetrahedra is the same as marching cubes, only it uses a tetrahedral subdivision. Again, the standard reference for practical implementation is Paul Bourke (same page as before, just scroll down a bit.) While there is a lot to like about marching tetrahedra, it does have some draw backs. In particular, the meshes you get from marching tetrahedra are typically about 4x larger than marching cubes. This makes both the algorithm and rendering about 4x slower. If your main consideration is performance, you may be better off using a cubical method. On the other hand, if you really need a manifold mesh, then marching tetrahedra could be a good option. The other nice thing is that if you are obstinate and like to code everything yourself, then marching tetrahedra may be easier since there aren’t too many cases to check.
+The Primal/Dual Classification
+By now, both marching cubes and tetrahedra are quite old. However, research into isosurface extraction hardly stopped in the 1980s. In the intervening years, many new techniques have been developed. One general class of methods which has proven very effective are the so-called `dual’ schemes. The first dual method, surface nets, was proposed by Sarah Frisken Gibson in 1999:
+S.F. Gibson, (1999) “Constrained Elastic Surface Nets” Mitsubishi Electric Research Labs, Technical Report.
+The main distinction between dual and primal methods (like marching cubes) is the way they generate surface topology. In both algorithms, we start with the same input: a volumetric mesh determined by our samples, which I shall take the liberty of calling a sample complex for lack of a better term. If you’ve never heard of the word cell complex before, you can think of it as an n-dimensional generalization of a triangular mesh, where the `cells’ or facets don’t have to be simplices.
+In the sample complex, vertices (or 0-cells) correspond to the sample points; edges (1-cells) correspond to pairs of nearby samples; faces (2-cells) bound edges and so on:
+Here is an illustration of such a complex. I’ve drawn the vertices where the potential function is negative black, and the ones where it is positive white.
+Both primal and dual methods walk over the sample complex, looking for those cells which cross the 0-level of the potential function. In the above illustration, this would include the following faces:
+Primal Methods
+Primal methods, like marching cubes, try to turn the cells crossing the bounary into an isosurface using the following recipe:
+Edges crossing the boundary become vertices in the isosurface mesh.
+Faces crossing the boundary become edges in the isosurface mesh.
+…
+n-cells crossing the boundary become (n-1)-cells in the isosurface mesh.
+One way to construct a primal mesh for our sample complex would be the following:
+This is pretty nice because it is easy to find intersection points along edges. Of course, there is some topological ambiguity in this construction. For non-simplicial cells crossing the boundary it is not always clear how you would glue the cells together:
+As we have seen, these ambiguities lead to exponentially many special cases, and are generally a huge pain to deal with.
+Dual Methods
+Dual methods on the other hand use a very different topology for the surface mesh. Like primal methods, they only consider the cells which intersect the boundary, but the rule they use to construct surface cells is very different:
+For every edge crossing the boundary, create an (n-1) cell. (Face in 3D)
+For every face crossing the boundary, create an (n-2) cell. (Edge in 3D)
+…
+For every d-dimensional cell, create an (n-d) cell.
+…
+For every n-cell, create a vertex.
+This creates a much simpler topological structure:
+The nice thing about this construction is that unlike primal methods, the topology of the dual isosurface mesh is completely determined by the sample complex (so there are no ambiguities). The disadvantage is that you may sometimes get non-manifold vertices:
+Make Your Own Dual Scheme
+To create your own dual method, you just have to specify two things:
+A sample complex.
+And a rule to assign vertices to every n-cell intersecting the boundary.
+The second item is the tricky part, and much of the research into dual methods has focused on exploring the possibilities. It is interesting to note that this is the opposite of primal methods, where finding vertices was pretty easy, but gluing them together consistently turned out to be quite hard.
+Surface Nets
+Here’s a neat puzzle: what happens if we apply the dual recipe to a regular, cubical grid (like we did in marching cubes)? Well, it turns out that you get the same boxy, cubical meshes that you’d make in a Minecraft game (topologically speaking)!
+Left: A dual mesh with vertex positions snapped to integer coordinates. Right: A dual mesh with smoothed vertex positions.
+So if you know how to generate Minecraft meshes, then you already know how to make smooth shapes! All you have to do is squish your vertices down onto the isosurface somehow. How cool is that?
+This technique is called “surface nets” (remember when we mentioned them before?) Of course the trick is to figure out where you place the vertices. In Gibson’s original paper, she formulated the process of vertex placement as a type of global energy minimization and applied it to arbitrary smooth functions. Starting with some initial guess for the point on the surface (usually just the center of the box), her idea is to perturb it (using gradient descent) until it eventually hits the surface somewhere. She also adds a spring energy term to keep the surface nice and globally smooth. While this idea sounds pretty good in theory, in practice it can be a bit slow, and getting the balance between the energy terms just right is not always so easy.
+Naive Surface Nets
+Of course we can often do much better if we make a few assumptions about our functions. Remember how I said at the beginning that we were going to suppose that we approximated by trilinear filtering? Well, we can exploit this fact to derive an optimal placement of the vertex in each cell — without having to do any iterative root finding! In fact, if we expand out the definition of a trilinear filtered function, then we can see that the 0-set is always a hyperboloid. This suggests that if we are looking for a 0-crossings, then a good candidate would be to just pick the vertex of the hyperboloid.
+Unfortunately, calculating this can be a bit of a pain, so let’s do something even simpler: Rather than finding the optimal vertex, let’s just compute the edge crossings (like we did in marching cubes) and then take their center of mass as the vertex for each cube. Surprisingly, this works pretty well, and the mesh you get from this process looks similar to marching cubes, only with fewer vertices and faces. Here is a side-by-side comparison:
+Left: Marching cubes. Right: Naive surface nets.
+Another advantage of this method is that it is really easy to code (just like the naive/culling algorithm for generating Minecraft meshes.) I’ve not seen this technique published or mentioned before (probably because it is too trivial), but I have no doubt someone else has already thought of it. Perhaps one of you readers knows a citation or some place where it is being used in practice? Anyway, feel free to steal this idea or use it in your own projects. I’ve also got a javascript implementation that you can take a look at.
+Dual Contouring
+Say you aren’t happy with a mesh that is bevelled. Maybe you want sharp features in your surface, or maybe you just want some more rigorous way to place vertices. Well my friend, then you should take a look at dual contouring:
+T. Ju, F. Losasso, S. Schaefer, and J. Warren. (2004) “Dual Contouring of Hermite Data” SIGGRAPH 2004
+Dual contouring is a very clever solution to the problem of where to place vertices within a dual mesh. However, it makes a very big assumption. In order to use dual contouring you need to know not only the value of the potential function but also its gradient! That is, for each edge you must compute the point of intersection AND a normal direction. But if you know this much, then it is possible to reformulate the problem of finding a nice vertex as a type of linear least squares problem. This technique produces very high quality meshes that can preserve sharp features. As far as I know, it is still one of the best methods for generating high quality meshes from potential fields.
+Of course there are some downsides. The first problem is that you need to have Hermite data, and recovering this from an arbitrary function requires using either numerical differentiation or applying some clunky automatic differentiator. These tools are nice in theory, but can be difficult to use in practice (especially for things like noise functions or interpolated data). The second issue is that solving an overdetermined linear least squares problem is much more expensive than taking a few floating point reciprocals, and is also more prone to blowing up unexpectedly when you run out of precision. There is some discussion in the paper about how to manage these issues, but it can become very tricky. As a result, I did not get around to implementng this method in javascript (maybe later, once I find a good linear least squares solver…)
+Demo
+As usual, I made a WebGL widget to try all this stuff out (caution: this one is a bit browser heavy):
+Click here to try the demo in your browser!
+This tool box lets you compare marching cubes/tetrahedra and the (naive) surface nets that I described above. The Perlin noise examples use the javascript code written by Kas Thomas. Both the marching cubes and marching tetrahedra algorithms are direct ports of Bloyd/Bourke’s C implementation. Here are some side-by-side comparisons.
+Left-to-right: Marching Cubes (MC), Marching Tetrahedra (MT), Surface Nets (SN)
+MC: 15268 verts, 7638 faces. MT: 58580 verts, 17671 faces. SN: 3816 verts, 3701 faces.
+MC: 1140 verts, 572 faces. MT: 4200 verts, 1272 faces. SN: 272 verts, 270 faces.
+MC: 80520 verts, 40276 faces. MT: 302744 verts, 91676 faces. SN: 20122 verts, 20130 faces.
+MC: 172705 verts, 88071 faces. MT: 639522 verts, 192966 faces. SN: 41888 verts, 40995 faces.
+A few general notes:
+The controls are left mouse to rotate, right mouse to pan, and middle mouse to zoom. I have no idea how this works on Macs.
+I decided to try something different this time and put a little timing widget so you can see how long each algorithm takes. Of course you really need to be skeptical of those numbers, since it is running in the browser and timings can fluctuate quite randomly depending on totally arbitrary outside forces. However, it does help you get something of a feel for the relative performance of each method.
+In the marching tetrahedra example there are frequently many black triangles. I’m not sure if this is because there is a bug in my port, or if it is a problem in three.js. It seems like the issue might be related to the fact that my implementation mixes quads and triangles in the mesh, and that three.js does not handle this situation very well.
+I also didn’t implement dual contouring. It isn’t that much different than surface nets, but in order to make it work you need to get Hermite data and solve some linear least squares problems, which is hard to do in Javascript due to lack of tools.
+Benchmarks
+To compare the relative performance of each method, I adapted the experimental protocol described in my previous post. As before, I tested the experiments on a sample sinusoid, varying the frequency over time. That is, I generated a volume volume plot of
+Over the range . Here are the timings I got, measured in milliseconds
+Frequency
+Marching Cubes
+Marching Tetrahedra
+Surface Nets
+0
+29.93
+57
+24.06
+1
+43.62
+171
+29.42
+2
+61.48
+250
+37.78
+3
+93.31
+392
+47.72
+4
+138.2
+510
+51.36
+5
+145.8
+620
+74.54
+6
+186
+784
+83.99
+7
+213.2
+922
+97.34
+8
+255.9
+1070
+112.4
+9
+272.1
+1220
+109.2
+10
+274.6
+1420
+124.3
+By far marching tetrahedra is the slowest method, mostly on account of it generating an order of magnitude more triangles. Marching cubes on the other hand, despite generating nearly 2x as many primitives was still pretty quick. For small geometries both marching cubes and surface nets perform comparably. However, as the isosurfaces become more complicated, eventually surface nets win just on account of creating fewer primitives. Of course this is a bit like comparing apples-to-oranges, since marching cubes generates triangles while surface nets generate quads, but even so surface nets still produce slightly less than half as many facets on the benchmark. To see how they stack up, here is a side-by-side comparison of the number of primitives each method generates for the benchmark:
+Frequency
+Marching Cubes
+Marching Tetrahedra
+Surface Nets
+0
+0
+0
+0
+1
+15520
+42701
+7569
+2
+30512
+65071
+14513
+3
+46548
+102805
+22695
+4
+61204
+130840
+29132
+5
+77504
+167781
+37749
+6
+92224
+197603
+43861
+7
+108484
+233265
+52755
+8
+122576
+263474
+58304
+9
+139440
+298725
+67665
+10
+154168
+329083
+73133
+Conclusion
+Each of the isosurface extraction methods has their relative strengths and weaknesses. Marching cubes is nice on account of the free and easily usable implementations, and it is also pretty fast. (Not to mention it is also the most widely known.) Marching tetrahedra solves some issues with marching cubes at the expense of being much slower and creating far larger meshes. On the other hand surface nets are much faster and can be extended to generate high quality meshes using more sophisticated vertex selection algorithms. It is also easy to implement and produces slightly smaller meshes. The only downside is that it can create non-manifold vertices, which may be a problem for some applications. I unfortunately never got around to properly implementing dual contouring, mostly because I’d like to avoid having to write a robust linear least squares solver in javascript. If any of you readers wants to take up the challenge, I’d be interested to see what results you get.
+PS
+I’ve been messing around with the wordpress theme a lot lately. For whatever reason, it seems like the old one I was using would continually crash Chrome. I’ve been trying to find something nice and minimalist. Hopefully this one works out ok.
+My god… I’ve now written three blog posts about Minecraft. If you are at all like me, you may be getting just a bit tired of all those cubes. To avoid fatigue, I think now is a good time to change things up. So today let’s talk about something cool and different — like how to deal with smooth blobby shapes:
+A rendering of Goursat’s surface.
+Blobby Objects
+But before we get too far ahead of ourselves, we need to say what exactly a blobby object is. The term `blobby object’ is one of Jim Blinn’s many contributions to computer graphics, though some of the basic ideas go back much further. In fact mathematicians have known about blobs for centuries (before they even had calculus!) Conceptually, the basic idea of a blobby object is quite simple, though it can be a bit tricky to formalize it properly.
+The theoretical basis for blobby object modeling is the concept of an implicit solid. The idea is that we can represent a solid object by a contour of a smooth function. I found the following beautiful picture from wikipedia that illustrates the concept:
+Public domain illustration of a 2D implicit set. (c) Wikimedia, created by Oleg Alexandrov.
+Now we want to get a solid (that is a closed regular set) — not just any old sublevel set. Fortunately, the definition is pretty simple once you’ve seen it and get used to it. Given any continuous function, , it determines a set which we call the regularized 0-sublevel,
+(Here I’m using the symbol to denote the closure operator.) Unpacked, this means that is the closure (of the preimage of (the open interval ) ). Our definition of is a little bit different than the standard (but unfortunately slightly broken) definition which you see quite frequently:
+Spiritually, this is the right idea but technically it doesn’t quite work. It is true that in many situations, these two definitions give similar results. For example, let’s consider the 1D function . This has a pair of roots at , and looks like this:
+In this case, both and will give us the same result, that is the interval . Where things break down however is near the edge cases. If for example we took the function :
+Then would give us a point while is empty! Now you might ask, why should we prefer one definition over the other. There are at least a couple good reasons:
+First, is not necessarily a solid. This means that it is not always uniquely determined by its boundary, and that certain mass properties (like volume, inertia, momentum, etc.) may fail to be well defined. On the other hand, is always a nice solid object, and so we don’t ever have to worry about such pathologies.
+Closely related to the first point, it is very difficult to define regularized Boolean operation on the latter representation, while it is possible to perform CSG operations regularized sublevels using Rvachev functions. (Maybe I will say more about this at some point in the future.)
+Finally, it is not even practically possible to numerically compute anyway! The reason for this is that most general purpose methods for finding 0-sets use sampling to check for places where f crosses the 0-axis (this is an application of the intermediate value theorem from calculus). If we include these isolated 0 points in our definition, then we are in the hopeless situation where we must be infinitely lucky to get one of our sample points to even detect them! (And if you get really unlucky and one of them actually does show up, then there is a good chance your code might even break if you are using the definition!)
+To boil all this down to a pithy remark:
+The reason we prefer over is that it detects 0-crossings — not 0-values!
+My personal reason for preferring over is that it is what is actually used in practice anyway. In fact, even when most people say they are using , what they end up actually computing is , because the only thing they can actually compute are the crossings!
+Isosurface Extraction
+Now that we’ve hopefully got a decent mental picture of what we want to find, let’s try to figure out how to compute something with it. In particular, we are most interested in finding the boundary of the implicit set. An obvious application would be to draw it, but knowing the boundary can be equally useful for other tasks as well; like computing mass properties for example.
+In light of our previous definition, the boundary of our implicit solid is going to be the set of all 0-crossings of f. One perspective is that computing the boundary is like a higher dimensional generalization of root finding. Thinking metaphorically for a moment and confusing 0-values with 0-crossing, it is like saying that instead of trying to find solutions for:
+We are now looking for all solutions to the more general problem:
+In the first case, we get some points as an output, while in the second case the solution set will look like some surface.
+Implicit Function Theorem
+It turns out that at least when f is smooth, we can convert implicit sets locally into parametric surfaces. This is the content of the implicit function theorem. Finding such a parametric surface is as good as solving the equation. For example, say we had a paraboloid given by:
+Then we could parameterize the 0-set by the surface:
+When you have a parametric solution, life is good. Unfortunately, for more complicated equations (like Perlin noise for example), finding a parametric solution is generally intractable. It also doesn’t work so well if your implicit function happens to come from some type of sampled geometry, such as a distance field or a point cloud. As a result, exact parametric solutions are generally too much to hope for.
+Ray Tracing
+A more general solution to the problem of isosurface extraction is ray tracing, which is basically a form of dimensionality reduction. The idea is that instead of trying to find the whole isosurface, we instead just look to query it locally. What we do is define some ray (or more generally any curve) , and then try to solve for the place where f composed with crosses 0:
+This is now a standard 1D root-finding problem, and we could solve it using either symbolically or using techniques from calculus, like bisection or Newton’s method. For example, in path tracing, one usually picks a collection of rays corresponding to the path light would take bouncing through the scene. Then all we need to do is check where these individual rays meet the surface, rather than compute the entire thing all at once (though it can still become very expensive).
+Meshing
+For most interesting functions, it is neither possible to find a parametric description, nor is ray tracing really fast enough. Instead, it is often more practical to look at finding some polygonal approximation of the implicit surface instead. Broadly speaking, this process has two parts:
+First, we approximate by sampling
+Then, from this sampled version of , we try to find some mesh which approximates .
+Of course there are many details hidden within this highly abstract description. I wrote up a fairly lengthy exposition, but ended up more than tripling the length of this post! So, I think now is a good time to take a break.
+Next Time
+Next time we’ll talk about how to put all this stuff into practice. The focus is going to be on meshing, since this is probably the most important thing to deal with in practice. As a sneak preview of things to come, here is a demo that I put together. I promise all (well ok at least something) will be explained in the coming post!
+Click here to see a preview of the demo!
+Last time, I wrote about how to generate meshes in a Minecraft-style voxel engine. I got a lot of interesting feedback, and so today I’m going to do a follow up highlighting some of the points that came up in the various discussions. I’ll also talk about yet another interesting approach to generating meshes, which occurred to me in the mean time. But first, I would like to take a moment to address some specific comments relating to greedy meshing:
+Multiple Voxel Types
+By far, the most frequent question about greedy meshing was how to extend it to handle multiple voxel types and different normal directions. This surprised me somewhat, though it is perhaps understandable since I did not spend much time explaining it in the previous post. The general idea is pretty simple. What you do is group blocks together according to their type, and then do the meshing on each part separately:
+That’s it! This same idea works for normals too. All you need to do is add an extra bit to keep track of the orientation. To show that this isn’t so difficult, I made an updated demo that shows how some of these methods work for different voxel types.
+T-Junctions
+Now this one is pretty bizarre. By far the most common criticism of the greedy method I saw on reddit was that the meshes contain many T-vertices. I’m not really sure why so many people latched on to this concept, but it is certainly true that greedy meshing will produce them. What is less clear though is what the harm of having a T-junction is.
+Intuitively, one would assume that as long as you have a pair of colinear edges, subdividing one of them shouldn’t make much difference (at least that’s what one would hope anyway). After thinking fairly hard about rendering, I couldn’t come up with a good reason why this would be a problem, and so I decided to code up a demo to test it:
+Click here to see the T-Junction Demo!
+Surprisingly, no matter how I messed with the parameters I couldn’t get any visible discontinuity to show up! Here are some pictures:
+The mesh with edges drawn on to show the T-junctions.
+The mesh without edges drawn on.
+In summary, I’m not sure that there is actually a problem with T-junctions. You can try out the demo yourself if you aren’t convinced. If anyone can come up with a plausible scenario where one of the greedy meshes has visible rendering artefacts, I’d be quite interested to see it. I’ve heard old ghost stories that on some ancient ATi cards, when the moon is full, these type of cracks actually do appear and make a big difference; but I unfortunately do not have access to such hardware. If you can manage to get a crack to show up in this demo (using WebGL), please take a screen shot and post a comment.
+From Quads to Triangles
+That much concludes what I have to say about greedy meshing. The next thing I want to discuss is an efficient alternative to greedy meshing. The inspiration for this idea comes from a comment made by fr0stbyte on the last post. Implicitly, he asked the question of whether triangles could be used to create better meshes than quads. Thinking about this made me realize that there is a much more direct way to optimize Minecraft-type meshes using standard computational geometry techniques. Ultimately, we can just think of this problem as just plain-old ordinary polygon triangulation, and solve it using purely classical methods. Starting from scratch, it is by no means a trivial thing to figure out how to triangulate a polygon, however it is by now very well understood and something of a standard technique (which makes me feel very foolish for having overlooked such a basic connection earlier 😐 ).
+One of the most frequently used methods for polygon triangulation is the monotone decomposition algorithm due to Fournier et al. The basic algorithm proceeds in two steps:
+Decompose your polygon into monotone polygons.
+Triangulate each monotone polygon.
+The second step can be done in optimal linear time on the number of vertices of the monotone polygon, and is quite well documented elsewhere. I won’t spend any time discussing it here, and instead I’ll just point you to a standard tutorial or text book. The more interesting problem in this context is how to do the first step efficiently. It can be shown that for non-simple polygons (of which our regions generally are), it requires at least operations to perform a monotone subdivision, where is the number of vertices.
+However, in the case of Minecraft-style meshing, we can actually do much better. The key thing is to realize that the number of voxels is strictly much greater than the number of vertices. This suggests that we can cover the cost of generating the monotone subdivision by the fixed cost of walking along the voxels, and still get an algorithm out at the end of the day (where this is the number of voxels, not the number of vertices). One way that we could do both at the same time is to adapt the standard sweep line algorithm for monotone decomposition to process the polygon as we march over the volume. Here is how this works in pseudocode for a single slice:
+Initialize polygons, frontier to empty list
+For each scan line:
+Run length encode scan line
+Set pf = pointer to start of frontier, pr = pointer to start of runs
+While pf and pr are not at the end of their respective lists:
+Let r = *pr and p = *pf be the run and polygon at current positions
+If r overlaps with the bottom of pf and is the same type:
+Merge r with p
+Increment pr and pf and continue
+If the end of r is past the bottom right of p:
+Close off p and remove from frontier
+Increment pf
+If the bottom end of p is past the end of r:
+Turn r into a new monotone polygon
+Increment pr
+Close off all remaining polygons on the frontier
+That looks like a terrible mess, but hopefully it makes some sense. If it helps, here is some actual javascript which implements this method. The time complexity of this approach is dominated by the cost of voxel traversal, and so it is again.
+WebGL Demo!
+Without further ado, here is the link:
+Click here to see the WebGL demo!
+The main changes from last time are the addition of different colors and types for voxels, the extension to handle orientations and the addition of a new algorithm. Here are some pictures for comparison:
+Left: Naive culling, Middle: Greedy, Right: Monotone
+Naive: 26536 verts, 6634 quads. Greedy: 7932 verts, 1983 quads. Monotone: 7554 verts, 4306 tris.
+Naive: 19080 verts, 4770 quads. Greedy: 8400 verts, 2100 quads. Monotone: 8172 verts, 4572 tris.
+Naive: 1344 verts, 336 quads. Greedy: 264 verts, 66 quads. Monotone: 204 verts, 104 tris.
+While monotone meshing is at least conceptually straightforward, the mesh quality isn’t noticeably different. One thing to keep in mind is that the primitive counts for the monotone mesh are in triangles, while the other two measurements are given in quads. Thus, there is a factor of two difference between the quantities. In all of the examples, the monotone mesh had the fewest vertices. The reason for this is that the monotone triangle decomposition code pushes all the vertices up front, while the greedy mesher emits a new set of vertices per each quad. It would be interesting to see if the greedy mesh vertex count could be reduced using some similar method. On the other hand, the adjusted primitive count (taking each quad as 2 triangles) swings both ways. On the terrain example, greedy meshing was a little better, while on the triangle example monotone wins by a similar margin.
+In the end it is hard to declare a clear winner from this data. Both greedy and monotone meshing have their advantages and draw backs, and there are situations where the primitive count advantage can swing easily from one to the other. One slight edge should be given to the greedy method in terms of code complexity, though only barely. On the other hand, if your rendering is vertex shader limited, you may gain some small FPS boost by switching to monotone meshing since the vertex count is typically lower. This saves a bit of GPU memory, which is always nice, but the savings are so small that I’d have a hard time believing it is that big of a deal.
+Overtime Shoot Out
+To break the stalemate, let’s race the different meshers against each other. Recall that in terms of performance, the cost of each algorithm can be broken down into two factors:
+The size of the underlying voxel grid, .
+The number of surface primitives, .
+One way to think of these two parameters is that measures the overhead of running any algorithm on its own, (that is the cost of running the algorithm on an empty volume), while measures the algorithm dependent overhead which is determined by the complexity of the surface and the type of mesh generation. Since it is mesh generation that we want to study, ideally we’d like to keep fixed and let vary. Another way to say this is that we want to construct some family of volumes with ever increasing surface areas. A simple way to do this is to use trig functions of increasingly higher frequency. For example, consider the following volume which is described b a functional equation:
+.
+As increases, the number of chambers increases as well, along with the surface area. This gives us a pretty good way to control for the complexity of surfaces in an experiment. I implemented this idea in a node.js script that takes as input a mesher and runs it on a volume of some specified size. To control for cache warm up and JIT issues, the script runs each program some number of iterations on a non-empty volume (in my experiments, I found 10 iterations to be sufficient on a volume where ). Garbage collection costs are amortized by repeated runs (10 in this case). All experiments were performed on a 65x65x65 volume with .
+Here is the data from running this benchmark on the naive culling method:
+```
+Naive Meshing Results:
+```
+```
+ 0  81.80      0     0
+ 1 129.05  82488 20622
+ 2 147.85 114696 28674
+ 3 166.50 146016 36504
+ 4 180.80 178792 44698
+ 5 206.10 209256 52314
+ 6 208.45 243672 60918
+ 7 258.85 272304 68076
+ 8 267.60 306640 76660
+ 9 278.45 334968 83742
+10 297.15 371496 92874 
+```
+```
+
+```
+The first column is . The second column is the average time required to mesh the volume in milliseconds. The third and fourth columns are the number of vertices and faces respectively. These results shouldn’t be too surprising. As the frequency increases, the number of surface elements goes up, and so it ends up taking longer to generate the mesh. In the 0 frequency case, you get an empty volume, and so the time required is reduced to just the overhead of iterating over the volume. Just for fun, here are the results for stupid meshing:
+```
+Stupid Meshing Results:
+```
+```
+ 0    6.95       0      0
+ 1 2733.65 3293184 823296
+ 2 2848.05 3292128 823032
+ 3 2727.35 3293184 823296
+ 4 2673.40 3289032 822258
+ 5 2729.50 3293184 823296
+ 6 2741.10 3293088 823272
+ 7 2687.75 3293184 823296
+ 8 2729.20 3286512 821628
+ 9 2682.40 3293184 823296
+10 2772.95 3293136 823284
+```
+```
+
+```
+This may at first seem a little bizarre, but it makes sense. For stupid meshing, iterating over the volume is basically `free’. The only limit at the end is the memory bandwidth. Another weird thing is that the number of primitives in the stupid mesh does not scale with surface area, but rather with volume. In this case, the volume of each region is relatively constant and so the run-time quickly spikes to 2.7 seconds or so, then stays flat as the frequency changes.
+Anyway, let’s now get to the main point, which is how well greedy and monotone meshing stack up:
+```
+Greedy Meshing:                          Monotone Meshing:
+```
+```
+ 0  92.40      0     0                    0  79.00      0      0
+ 1  99.10  20712  5178                    1  92.20  20202  11034
+ 2 103.10  44068 11017                    2 110.10  43326  23631
+ 3 110.35  61644 15411                    3 122.30  60420  32778
+ 4 126.00  87984 21996                    4 144.60  86328  47319
+ 5 134.25 102024 25506                    5 155.80 100056  54033
+ 6 151.40 129344 32336                    6 192.10 127074  68871
+ 7 153.60 142416 35604                    7 197.40 139476  75273
+ 8 167.85 172140 43035                    8 227.60 167410  92843
+ 9 164.90 182256 45564                    9 239.60 178302  96081
+10 198.30 213452 53363                   10 297.60 209838 113559
+```
+A victory for greedy meshing! Not only did it beat monotone meshing, but for sufficiently complicated geometry it is also the fastest method overall. Though this is not exactly a fair apples-to-apples comparison, since greedy meshing spits out quads while monotone meshing generates triangles. This fact alone is enough to account for nearly a 30% difference in performance, and explains some, but not all of the discrepancy between these two charts. The remainder of the overhead is most likely due to the fact that Monotone meshing is a more complex algorithm and that it has to do a bit more work per triangle, while greedy meshing is a bit simpler, but does more work per voxel.
+While I believe that the general conclusions of these benchmarks are valid, I wouldn’t say that this definitively proves greedy meshing is faster than monotone meshing. Javascript is far from the best language to use for doing benchmarks, and these implementations are not particularly tuned for performance. There may also be subtle bugs lurking in the code somewhere, like silent out of bounds accesses, that could end up having disastrous consequences for performance (and account for nearly the entire gap between the two algorithms). I’ve also tried to control for as many variables as I could, but it is still possible that I overlooked something and that there is some systemic bias in these results.
+Conclusion
+We’ve now seen at least two different ways to do better than naive meshing in Minecraft, and there are probably many others out there. Portponky from r/gamedev sent me some C++ code to generate meshes, though I’ve not yet looked at it carefully enough to figure out how to port it to Javascript (sorry!). I am still quite curious about it though, since it seems to be doing something quite different than either the greedy method or monotone triangulation. Anyway, that’s all for now. If you have any questions or other interesting thoughts you’d like to share, please leave a comment!
+Subscribe
+Subscribed
+0 FPS
+Have a WordPress.com account? Log in now.
+0 FPS
+View site in Reader
+Manage subscriptionsSign upLog in
+Report this content
+Collapse this bar
+Loading Comments...

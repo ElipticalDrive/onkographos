@@ -1,0 +1,650 @@
+Compressing the Incompressible with ISABELA:
+In-situ Reduction of Spatio-temporal Data
+Sriram Lakshminarasimhan1,2, Neil Shah1 , Stephane Ethier3 , Scott Klasky2 ,
+Rob Latham4 , Rob Ross4 , and Nagiza F. Samatova1,2,
+1
+North Carolina State University, Raleigh, NC 27695, USA
+Oak Ridge National Laboratory, Oak Ridge, TN 37830, USA
+3
+Princeton Plasma Physics Laboratory, Princeton, NJ 08543, USA
+4
+Argonne National Laboratory, Argonne, IL 60439, USA
+samatova@csc.ncsu.edu
+2
+Abstract. Modern large-scale scientiﬁc simulations running on HPC
+systems generate data in the order of terabytes during a single run.
+To lessen the I/O load during a simulation run, scientists are forced to
+capture data infrequently, thereby making data collection an inherently
+lossy process. Yet, lossless compression techniques are hardly suitable for
+scientiﬁc data due to its inherently random nature; for the applications
+used here, they oﬀer less than 10% compression rate. They also impose
+signiﬁcant overhead during decompression, making them unsuitable for
+data analysis and visualization that require repeated data access.
+To address this problem, we propose an eﬀective method for In-situ
+Sort-And-B-spline Error-bounded Lossy Abatement (ISABELA) of scientiﬁc data that is widely regarded as eﬀectively incompressible. With ISABELA, we apply a preconditioner to seemingly random and noisy data
+along spatial resolution to achieve an accurate ﬁtting model that guarantees a ≥ 0.99 correlation with the original data. We further take advantage of temporal patterns in scientiﬁc data to compress data by ≈ 85%,
+while introducing only a negligible overhead on simulations in terms of
+runtime. ISABELA signiﬁcantly outperforms existing lossy compression methods, such as Wavelet compression. Moreover, besides being a
+communication-free and scalable compression technique, ISABELA is
+an inherently local decompression method, namely it does not decode
+the entire data, making it attractive for random access.
+Keywords: Lossy Compression, B-spline, In-situ Processing, Data-intensive
+Application, High Performance Computing.
+1
+Introduction
+Spatio-temporal data produced by large-scale scientiﬁc simulations easily reaches
+terabytes per run. Such data volume poses an I/O bottleneck—both while writing the data into the storage system during simulation and while reading the
+data back during analysis and visualization. To alleviate this bottleneck, scientists have to resort to subsampling, such as capturing the data every sth timestep.
+
+Corresponding author.
+E. Jeannot, R. Namyst, and J. Roman (Eds.): Euro-Par 2011, LNCS 6852, Part I, pp. 366–379, 2011.
+c
+ Springer-Verlag Berlin Heidelberg 2011
+Compressing the Incompressible with ISABELA
+367
+This process leads to an inherently lossy data reduction.
+In-situ data processing—or processing the data in-tandem with the simulation
+by utilizing either the same compute nodes or the staging nodes—is emerging
+as a promising approach to address the I/O bottleneck [12]. To complement existing approaches, we propose an eﬀective method for In-situ Sort-And-B-spline
+Error-bounded Lossy Abatement (ISABELA) of scientiﬁc data.
+ISABELA is particularly designed for compressing spatio-temporal scientiﬁc
+data that is characterized as being inherently noisy and random-like, and thus
+commonly believed to be uncompressible [16]. In fact, any lossless compression
+technique [3,13] is capable of reducing such data by no more than a 10% of
+its original size, besides being computationally intensive and, therefore, hardly
+suitable for in-situ processing (see Section 3).
+The intuition behind ISABELA stems from the following three observations.
+First, while being almost random and noisy in its natural form—when sorted—
+scientiﬁc data exhibits a very strong signal-to-noise ratio due to its monotonic
+and smooth behavior in its sorted form. Second, prior work done in curve ﬁtting
+[7,17] have shown that monotone curve ﬁtting, such as monotone B-splines, can
+oﬀer some attractive features for data reduction, including, but not limited to,
+their goodness of ﬁt with signiﬁcantly fewer coeﬃcients to store. Finally, the
+monotonicity property of the sorted data gets preserved in most of its positions
+with respect to adjacent time steps. Hence, this property of monotonic inheritance across temporal resolution oﬀers yet another venue for improvement of the
+overall data compression ratio.
+While intuitively simple, ISABELA has addressed a number of technical
+challenges imposed by end-user’s requirements. One of the most important factors for the user’s adoption of any lossy data reduction technology is the assurance that the user-acceptable error-bounds are respected. Since curve ﬁtting
+accuracy is often data-dependent, ISABELA must be robust in its approximation. While curve ﬁtting operations are traditionally time consuming, performing the compression in-situ, mandates ISABELA to be fast. Finally, while
+data sorting—as a pre-conditioner for data reduction—is “a blessing,” it is “a
+curse” at the same time; reordering the data requires keeping track of the new
+position indices to associate the decoded data with its original ordering. While
+management of spline coeﬃcients could be viewed as a light-weight task, the
+heavy-weight index management forces ISABELA to make some non-trivial
+decisions between the data compression rates and the data accuracy.
+2
+A Motivating Example
+Much of the work for in-situ data reduction in this paper stems from a Gyrokinetic Tokamak Simulation (GTS) [15] for studying plasma micro-turbulence in
+the core of magnetically conﬁned fusion plasmas of toroidal devices in nuclear
+reactors. On current petaﬂop systems, such as NCCS/ORNL Jaguarpf, the GTS
+code, utilizing ADIOS [11] for its intensive I/O, has demonstrated weak scaling
+for up to 65,536 cores on the 8-core per node conﬁguration.
+368
+S. Lakshminarasimhan et al.
+The entire GTS data set can be broadly divided into: (1) checkpoint data to
+restart the simulation in case of an execution failure (C&R); (2) analysis (A)
+data, such as density and potential ﬂuctuations, for performing various postprocessing physics analyses, and (3) diagnostics data used, for example, for code
+validation and veriﬁcation (V&V) (see Table 1).
+Table 1. Summary of GTS output data by diﬀerent categories
+Category Write Frequency Read Access Size/Write Total Size
+C&R
+Every 1-2 hours
+Once or never A few TBs
+≈TBs
+A
+Every 10th time step Many times A few GBs
+≈TBs
+V&V
+Every 2nd time step A few times A few MBs
+≈GBs
+Unlike C&R data that requires lossless compression, analysis (A) data is inherently lossy, and as such, it can tolerate some error-bounded loss in its accuracy.
+What is more important is that it is the analysis data that is being accessed
+many times by diﬀerent scientists using various analysis and visualization tools
+or Matlab physics analysis codes. Therefore, aggressive data compression that
+could enable interactive analytical data exploration is of paramount concern, and
+is, therefore, the main focus of ISABELA. For illustrative purposes, throughout
+the paper, we will use temporal snapshots of the GTS analysis data consisting of
+one-dimensional 64-bit double precision ﬂoating point arrays of 172,111 values
+each for Potential and Density ﬂuctuations.
+3
+Problem Statement
+The inherent complexity of scientiﬁc spatio-temporal data drastically limits the
+applicability of both lossless and lossy data compression techniques and presents
+a number of challenges for new method development. Such data not only consists of ﬂoating-point values, but also exhibits randomness without any distinct
+repetitive bit and/or byte patterns (also known as high entropy data, and hence,
+uncompressible [5,14]). Thus, applying standard lossless compression methods
+does not result in an appreciable data reduction.
+Table 2 illustrates the compression rates achieved and the time required to compress and decode 12,836KB of GTS analysis data by state-of-the-art methods.
+In addition, scientiﬁc data often exhibits a large degree of ﬂuctuations in values
+across even directly adjacent locations in the array. These ﬂuctuations render lossy
+multi-resolution compression approaches like Wavelets [6] ineﬀective.
+The compression ratio CRM (D) of a compression method M for data D of
+size |D| reduced to size |DM | is deﬁned by Eq. 1:
+CRM (D) =
+|D| − |DM |
+× 100%.
+|D|
+(1)
+The accuracy of lossy encoding techniques is measured using Pearson’s correlation coeﬃcient (ρ) and Normalized Root Mean Square Error between an
+Compressing the Incompressible with ISABELA
+369
+N −dimensional original data vector D = (d0 , d1 , . . . , dN −1 ) and decompressed
+data vector D = (d0 , d1 , . . . , dN −1 ) deﬁned by Eq. 2:
+
+N −1
+ 2
+
+RM SEM (D, D )
+i=0 (di − di )
+N RM SEM (D) =
+=
+.
+(2)
+Range(D)
+max(D) − min(D)
+Table 2. Performance of examplar lossless and lossy data compression methods
+Metric
+FPC LZMA ZIP BZ2 ISABELA Wavelets B–splines
+Lossless?
+Yes
+Yes Yes Yes
+No
+No
+No
+CRM (%)
+3.12 2.72 1.13 1.11
+81.44*
+22.51*
+0*
+Compression (sec.)
+0.58 7.01 1.03 3.96
+0.93
+0.62
+0.78
+Decompression (sec.) 0.56 1.38 0.49 1.18
+1.05
+0.58
+0.82
+∗
+CR achieved by lossy models for 0.99 correlation and 0.01 NRMSE fixed accuracy. All runs are
+performed on an Intel Core 2 Duo 2.2 GHz processor with 4 GB RAM, openSUSE Linux v11.3.
+4
+Theory and Methodology
+Existing multi-resolution compression methods often work well on image data or
+time-varying signal data. For scientiﬁc data-intensive simulations, however, data
+compression across the temporal resolution requires data for many timesteps be
+buﬀered in memory that is, obviously, not a viable option. Applying lossy compression techniques on this data across the spatial resolution requires a signiﬁcant
+tradeoﬀ between the compression ratio and the accuracy. Hence, to extract the
+best results out of the existing approximation techniques, a transformation of
+this data layout becomes necessary.
+Fig. 1. A slice of GTS Potential: (A) original; (B) sorted; (C) decoded after B–splines
+ﬁtting to original; and (D) decoded after B–splines ﬁtting to sorted
+370
+4.1
+S. Lakshminarasimhan et al.
+Sorting-Based Data Transformation
+Sorting changes the data distribution in the spatial domain, from a highly irregular signal (Fig. 1, A) to a smooth and monotonous curve (Fig. 1, B). The
+rationale behind sorting—as a pre-conditioner for a compression method—is
+that ﬁtting on a monotonic curve can provide a model that is more accurate
+than the one on unordered and randomly distributed data. Figure 1 illustrates
+the signiﬁcant contrast in how closely (D) or poorly (C) the decompressed data
+approximates the original data when the B−splines curve ﬁtting [2] operates on
+sorted versus unsorted data, respectively.
+4.2
+Cubic B−Splines Fitting
+Sorting the data in an increasing order provides a sequence of values whose rate
+of change is guaranteed to be the slowest. Although this sequence resembles a
+smooth curve, performing curve ﬁtting using non-linear polynomial interpolation
+becomes diﬃcult for complex shape curves. Computing interpolation constants
+for higher-order polynomials in order to ﬁt these complex curves is computationally intensive for in-situ processing.
+A more eﬀective technique is by using B−splines curve ﬁtting. A B−splines
+curve is a sequence of piecewise lower order parametric curves joined together via
+knots. Cubic B−splines are composed of polynomial functions of degree d = 3,
+which have faster interpolation time and produce “smooth” curves (i.e., secondorder diﬀerentiable) at the knot locations. The shape of the B−splines curve
+is determined by a knot sequence that describes the span of the piecewise segments, and a set of basis functions that inﬂuences the segments of the curve.
+Because of this property splines can control the local shape of the curve without
+aﬀecting the shape of the curve globally. This also implies that both curve ﬁtting and interpolation are eﬃcient operations and can provide location-speciﬁc
+data decoding without decompressing all the data. While sorting rearranges the
+points, location-speciﬁc decoding is still possible by performing an additional
+single level translation of data location from the original to the sorted vector,
+and then retrieving the interpolated value on the sorted B−spline curve.
+4.3
+Maximizing Compression Ratio via Window Splitting
+In this section, we look at approaches to maximizing the compression ratio, while
+maintaining an accurate approximation model. Let us assume that the original
+data D is a vector of size N , namely D = (d0 , d1 , . . . , dN −1 ). This way we can
+associate a value di with each index value i ∈ I = {0, 1, . . . , N − 1}. Let us also
+assume that each vector element, di ∈ R, is stored as a 64-bit double-precision
+value. Therefore, storing the original data requires |D| = N × 64 bits.
+Assuming that D is a discrete approximation of some curve, its B−splines
+interpolation DB requires storing only B−splines constants—the knot vector
+and the basis coeﬃcients—in order to reconstruct the curve. Let C denote the
+Compressing the Incompressible with ISABELA
+371
+number of such 64-bit double-precision constants. Then storing the compressed
+data after B-splines curve ﬁtting requires |DB | = C × 64 bits.
+The random-like nature of D (see Fig. 1, (A)) requires C ∼ N to provide
+accurate lossy compression, and hence, leads to a poor compression rate (see
+Table 2, last column). However, applying B-splines interpolation after sorting
+D requires only a few constants, C = O(1) << N , in order to provide high
+decompression accuracy (see Fig. 1, (D)).
+While signiﬁcantly reducing the number of B−splines constants C, sorting D
+will reorder the vector elements via some permutation π of its indices, namely
+π
+I → Iπ = {i1 , i2 , . . . , iN }, such that dij ≤ dij+1 , ∀ij ∈ Iπ . As a result, we need
+to keep track of the new index Iπ so that we could associate the decompressed
+sorted vector Dπ back to the original vector D by using its correct index I. Since
+each index value ij requires log2 N bits, the total storage requirement for Iπ is
+thus |Iπ | = N × log2 N bits. Therefore, the vector length N is the only factor
+that determines the storage requirements for the index Iπ .
+One way to optimize the overall compression ratio, CRISABELA , is to ﬁrst
+split the entire vector D into ﬁxed-sized windows of size W0 , or D = Dk ,
+k
+Di ∩ Dj = ∅,
+ I = {(k − 1)W0 , (k − 1)W0 + 1, . . . , kW0 }, i, j, k ∈ 1, NW , i = j,
+and NW =
+N
+W0
+. Then, the B−splines interpolation is applied to each window
+k
+D separately.
+With this strategy, ISABELA’s storage requirement for the compressed data
+is deﬁned by Eq. 3:
+|DISABELA | =
+NW
+
+k
+(|DB
+| + |Iπk |),
+(3)
+k=1
+= NW × (C × 64 + W0 × log2 W0 )
+Substituting Eq. 3 into Eq. 1 and simplifying the resulting equation, we obtain
+the following compression ratio for ISABELA deﬁned by Eq. 4:
+CRISABELA (D) = (1 −
+C
+log2 (W0 )
+−
+) × 100%
+64
+W0
+(4)
+From Eq. 4, we can analytically deduce the trade-oﬀ between the window size
+W0 and the number of B−splines constants C that give the best compression
+ratio. For example, for W0 > 65, 536, the size of the index alone would consume
+more than 25% of the original data. We found that C = 30 and W0 = 1024 allows
+ISABELA to achieve both > 0.99 correlation and < 0.05 NRMSE between the
+original and decompressed GTS data. Also, ﬁxing W0 = 1024 balances the cost of
+storing both the index and the ﬁtting coeﬃcients giving an overall compression
+rate of 81.4% per time step.
+4.4
+Error Quantization for Guaranteed Point-by-Point Accuracy
+The above sorting-based curve ﬁtting model ensures accurate approximation
+only on a per window basis and not on a per point basis. As a result, in certain
+372
+S. Lakshminarasimhan et al.
+locations, the B−splines estimated data deviates from the actual by a margin
+exceeding a deﬁned tolerance. For example, almost 95% of the approximated
+GTS Potential values average a 2% relative error, where the percentage of the
+relative error () at each index i between D = (d0 , d1 , ..., dN −1 ) and DISABELA =
+d −d
+(d0 , d1 , ..., dN −1 ) is deﬁned as i = idi i × 100%. While the number of such
+location points is reasonably low due to accurate ﬁtting achieved by B−splines
+on monotonic data, ISABELA guarantees that a user-speciﬁed point-by-point
+error is respected by utilizing an error quantization strategy.
+Storing relative errors between estimated and actual values enables us to
+reconstruct the data with high accuracy. Quantization of these errors into 32-bit
+integers results in a large degree of repetition, where majority of the values lie
+between [-2, 2]. These integer values lend themselves to high compression rates
+(75% − 90%) with standard lossless compression libraries. These compressed
+relative errors are stored along with the index during encoding. Upon decoding,
+applying these relative errors ensures decompressed values to be within a userdeﬁned threshold τ for per point relative error.
+4.5
+Exploiting Δ–Encoding for Temporal Index Compression
+To a large extent, the ordering of the sorted data values is similar between
+adjacent timesteps, i.e., the monotonicity property of the data extends to index
+integer values. Hence, we apply a diﬀerential encoding scheme to the index vector
+Iπ before compressing the index using standard lossless compression libraries.
+[Note that subsequent scheme is applied to each individual data window Dn .]
+Suppose that at timestep t0 , we ﬁrst build the index Iπ (t0 ) consisting of
+no redundant values, essentially, incompressible. Hence, this index is stored as
+is. But, at the next timestep t0 + 1, the diﬀerence in index values ΔI+1 =
+Iπ (t0 + 1) − Iπ (t0 ) is small (see Fig. 2) due to monotonicity of the original data
+values Dn and, hence, the sorted values across adjacent timesteps.
+Thus, instead of storing the index values at each timestep, we store the index
+values at t0 , denoted as the reference index, along with the compressed pairwise
+index diﬀerences ΔI+1 between adjacent timesteps. But, in order to recover the
+Fig. 2. Illustration of Δ–encoding of the index across temporal resolution
+Compressing the Incompressible with ISABELA
+373
+data at time t0 + δt, we must read in both the reference index Iπ (t0 ) and all
+the first-order diﬀerences ΔI+1 between adjacent timesteps in the time window
+(t0 , t0 +δt). Therefore, the higher value of δt will adversely aﬀect reading time. To
+address this problem, we instead store and compress a higher-order diﬀerence,
+ΔI+j = Iπ (t0 + j) − Iπ (t0 ), where j ∈ (1, δt), for the growing value of δt until the
+size of the compressed index crosses a user-deﬁned threshold. Once the threshold
+is crossed, the index for the current timestep is stored as is, and is considered as
+the new reference index.
+5
+Results
+Evaluation of a lossy compression algorithm primarily depends on the accuracy
+of the ﬁtting model and the compression ratio (CR) achieved. As this compression is performed in-situ, analysis of the time taken to perform the compression
+assumes signiﬁcance as well. Here, we evaluate ISABELA with emphasis on the
+aforementioned factors, using normalized root mean standard error (N RM SE)
+and Pearson correlation (ρ) between the original and decompressed data as accuracy metrics. [Note that achieving N RM SE ∼ 0, ρ ∼ 1, and CR ∼ 100%
+would indicate excellent performance.]
+Wavelets
+B -S plines
+1.05
+IS A B E L A
+P ears on c orrelation c oeffi c ient
+P ears on c orrelation c oeffic ient
+1.2
+1
+0.8
+0.6
+0.4
+0.2
+Non-L inear
+L inear
+1
+0.95
+0.9
+0.85
+0.8
+0
+0
+20
+40
+60
+80
+100
+Window Id
+120
+140
+(a)
+160
+0
+20
+40
+60
+80
+100
+Window Id
+120
+140
+160
+(b)
+Fig. 3. Accuracy (ρ): (a) Per window correlation for Wavelets, B−splines, and ISABELA with ﬁxed CR = 81% for GTS Density. (b) Per window correlation for GTS
+linear and non-linear stage Potential decompressed by ISABELA.
+5.1
+Per Window Accuracy
+In this section, we compare the Pearson correlation (ρ) between the original and
+decompressed data using Wavelets and B-Splines on original data and using ISABELA. The following parameters are ﬁxed in this experiment: CR = 81% for
+Density, W0 = 1024, CB−spline = 150, and CISABELA = 30. Wavelet coeﬃcients
+are thresholded to achieve the same compression rate. Figure 3(a) illustrates that
+ISABELA performs exceptionally well even for much smaller C values due to
+374
+S. Lakshminarasimhan et al.
+80
+L inear
+85
+Non-L inear
+76.9
+76.1
+76.6
+77.0
+75.4
+75.3
+75
+74.3
+70
+68.7
+67.7 67.5
+F las h - Veloc ity
+G T S - P otential
+78.9
+78.5
+77.8
+68.2
+65
+60
+C ompres s ion R atio (C R )
+Overall c ompres s ion ratio (C R )
+the monotonic nature of the sorted data. In fact, ρ > 0.99 for almost all the windows. However, both Wavelets and B−splines exhibit a large degree of variation
+and poor accuracy across diﬀerent windows. This translates to NRMSE values
+that are one-to-two orders of magnitude larger than the average 0.005 NRMSE
+value produced by ISABELA.
+ISABELA performs exceptionally well on data from the linear stages of the
+GTS simulation (ﬁrst few thousand timesteps), as shown in Fig. 3(b). Yet, the
+performance for the non-linear stages (timestep ≈ 10, 000), where the simulation
+is characterised by a large degree of turbulence, is of particular importance to
+scientists. Figure 3(b), with intentionally magniﬁed correlation values, shows
+that accuracy for the non-linear stages across windows drops indeed. Unlike
+Wavelets (Fig. 3(a)), however, this correlation does not drop below 0.92.
+80
+75
+70
+65
+60
+0.1
+0.5
+1
+2
+3
+4
+Maximum relative error (%) at eac h point
+(a)
+5
+1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19
+Times tep Id
+(b)
+Fig. 4. Compression ratio (CR) performance: (a) For various per point relative error
+thresholds (τ ) in GTS Potential during linear and non-linear stages of the simulation.
+(b) For various timesteps with τ = 1% at each point (for GTS Potential: t1 = 1, 000,
+Δt = 1, 500; for Velocity in Flash: t1 = 3, 000, Δt = 3, 500.
+5.2
+Trade-Oﬀ between Compression and Per Point Accuracy
+To alleviate the aforementioned problem, we apply error quantization, as described in Sec. 4.4. In both linear and non-linear stages of GTS simulation, the
+compression ratios are similar when the per point relative error (τ ) is ﬁxed (see
+Fig. 4(a)). This is because the relative error in consecutive locations for the
+sorted data tends to be similar. This property lends well to encoding schemes.
+Thus, even when the error tends to be higher in the non-linear stage, compared
+with the linear stage, the compression rates are highly similar. For τ = 0.1% at
+each point, the CR lowers to an around 67.6%. This implies that by capturing
+99.9% of the original values, the data from the simulation is reduced to less than
+one-third of its total size.
+Figure 4(b) shows the compression ratio (with τ = 1%) over the entire simulation run using the GTS fusion simulation and Flash astrophysics simulation
+codes. For GTS Potential data, the compression ratio remains almost the same
+Compressing the Incompressible with ISABELA
+375
+across all stages of the simulation. With Flash, after error quantization, most
+relative errors are 0’s. Compressing these values results in negligible storage
+overhead, and hence CR remains at 80% for the majority of timesteps.
+5.3
+Eﬀect of Δ–encoding on Index Compression
+In this section, we show that compressing along the time dimension further
+improves ISABELA’s overall compression of spatio-temporal scientiﬁc datasets
+by up to 2%—5%. Table 3 show the compression rates achieved for diﬀerent
+orders of ΔI+j , j = 1, 2, 3. While increasing W0 improves spatial compression
+to a certain extent, it severely diminishes the reduction of the index along the
+temporal resolution. This is due to the fact that with larger windows and a
+larger δt between timesteps, the diﬀerence in index values lacks the repetitiveness
+necessary to be compressed well by standard lossless compression libraries.
+Table 3. Impact of Δ–encoding on CR for Potential (Density)
+W0 Without Δ–encoding
+ΔI+1
+ΔI+2
+ΔI+3
+512
+80.08 (80.08)
+81.83 (84.14) 81.87 (85.09) 81.68 (85.36)
+1024
+81.44 (81.44)
+83.14 (85.65) 83.21 (86.57) 82.98 (86.76)
+2,048
+81.34 (81.34)
+83.03 (85.56) 83.07 (86.44) 82.88 (86.66)
+4,096
+80.51 (80.51)
+82.14 (84.64) 82.21 (85.51) 82.03 (85.76)
+8,192
+79.32 (79.32)
+80.99 (83.38) 81.04 (84.24) 80.83 (84.46)
+5.4
+Compression Time
+The overhead induced on the runtime of the simulation due to in-situ data
+compression is the net sum of the times taken to sort D, build Iπ , and perform
+cubic B−spline ﬁtting. However, for a ﬁxed window size W0 , sorting and building
+the index is computationally less expensive compared to B−spline ﬁtting. When
+executed in serial, ISABELA compresses data at ≈12 MB/s rate, the same
+as gzip, compression level 6, as shown in Table 2. Within the context of the
+running simulation, each core is expected to generate around 10 MB of data every
+10 seconds that can be reduced to ≈2 MB in 0.83 seconds using ISABELA.
+Additionaly, to further reduce the impact of in-situ compression on the main
+computation, ISABELA can be executed at the I/O nodes rather than at the
+compute nodes [1,18].
+In the case of compression, parallelization is achieved by compressing each
+window independently. However, a more ﬁne-grain parallelization can be applied
+to decompression, as each point in the B−spline curve can be reconstructed
+independently. To evaluate the scalability and parallelization characteristics of
+ISABELA decompression, we evaluate the time taken for decompression against
+serial, OpenMP and GPU-based implementations in a single node environment.
+Figure 5 shows the performance of decompression of all three implementations.
+The serial implementation is faster when decompressing less than 1,000 points,
+376
+S. Lakshminarasimhan et al.
+but as the number of decompressed points increases, both GPU and OpenMP
+versions oﬀer the advantage in terms of computational time. This is especially
+true with a GPU-based implementation, which is better suited for ﬁne-grain
+parallel computation.
+Fig. 5. Computational time for serial, CPU-parallelized, and GPU-parallelized versions
+of ISABELA’s B−spline reconstruction part. 8 OpenMP threads were used in this
+particular plot, corresponding to two quad core Intel Xeon X5355 processors.
+5.5
+Performance for Fixed Compression
+In this section, we evaluate the performance of ISABELA and Wavetlets
+on 13 public scientiﬁc datasets (from numerical simulations, observations, and
+parallel messages) [3] for the ﬁxed CR = 81%. We compare the averages of
+ρa and N RM SEa of ISABELA and Wavelets across 400 windows (see Table
+4). Out of the 13 datasets, eleven (three) datasets exhibit ρa = 0.98 with
+ISABELA (Wavelets). The N RM SEa values for Wavelets are consistently
+an order of magnitude higher than for ISABELA. Wavelets outperform ISABELA on obs spitzer consisting of a large number of piecewise linear segments for most of its windows. Cubic B−splines do not estimate well when
+segments are linear.
+6
+Related Work
+Lossy compression methods based spline ﬁtting or Wavelets have been primarily
+used in the ﬁeld of visualization, geometric modeling, and signal processing.
+Very few studies applied such techniques when neither spatial nor temporal
+correlation of data can be directly exploited. Chou et al. [4] and Lee et al. [9]
+explored spline ﬁtting for random data to optimize the location of control points
+to reduce approximation error. In contrast, we aim to transform the data to take
+advantage of the accuracy and easily-expressible qualities of splines.
+Compressing the Incompressible with ISABELA
+377
+Table 4. ISABELA vs. Wavelets for ﬁxed CR = 81% and W0 = 1, 024.
+ρa
+N RM SEa
+Wavelets
+ISABELA
+Wavelets
+ISABELA
+msg sppm
+0.400 ± 0.287 0.982 ± 0.017 0.203 ± 0.142 0.051 ± 0.015
+msg bt
+0.754 ± 0.371 0.981 ± 0.054 0.112 ± 0.151 0.038 ± 0.024
+msg lu
+0.079 ± 0.187 0.985 ± 0.031 0.422 ± 0.103 0.048 ± 0.015
+msg sp
+0.392 ± 0.440 0.967 ± 0.051 0.307 ± 0.243 0.064 ± 0.033
+msg sweep3d 0.952 ± 0.070 0.998 ± 0.006 0.075 ± 0.036 0.004 ± 0.003
+num brain
+0.994 ± 0.008 0.983 ± 0.028 0.010 ± 0.011 0.011 ± 0.005
+num comet
+0.988 ± 0.018 0.994 ± 0.025 0.020 ± 0.020 0.010 ± 0.006
+num control 0.614 ± 0.219 0.993 ± 0.017 0.083 ± 0.037 0.009 ± 0.002
+num plasma 0.605 ± 0.062 0.994 ± 0.004 0.277 ± 0.038 0.033 ± 0.004
+obs error
+0.278 ± 0.203 0.994 ± 0.004 0.303 ± 0.091 0.024 ± 0.009
+obs info
+0.717 ± 0.136 0.993 ± 0.006 0.181 ± 0.078 0.026 ± 0.016
+obs spitzer
+0.992 ± 0.001 0.742 ± 0.004 0.005 ± 0.000 0.030 ± 0.000
+obs temp
+0.611 ± 0.114 0.994 ± 0.011 0.096 ± 0.025 0.009 ± 0.003
+Lossless compression techniques [3,8,10,13] have been recently applied to ﬂoating point data. Unlike most lossless compression algorithms, the techniques presented in [3,10] are speciﬁcally designed for fast online compression of data.
+Lindstrom and Isenberg [10] introduced a method for compressing ﬂoating-point
+values of 2D and 3D grids that functions by predicting each ﬂoating point value
+in the grid and recording the diﬀerence between the predictive estimator and the
+actual data value. They also provide the option of discarding least signiﬁcant
+bits of the delta and making the compresion lossy. However, the number of signiﬁcant precision bits that can be saved is limited to 16, 32, 48, or 64 for double
+precision data. When applied to a one-dimensional data from GTS simulation,
+storing only 16 signiﬁcant bits provided a compression of 82%, which is comparable with ISABELA’s, but more than 75% of points had per-point relative
+error of over 1%. By storing 32 bits, the per-point relative error was found to
+be within 0.1%, but the compression rate achieved (58.2%) was 13% less than
+ISABELA’s. Morever, like other lossless algorithms, location- speciﬁc decoding
+is not possible.
+Most lossy compression techniques either use Wavelets or some form of data
+quantization to compress the data sets that are fed as input to visualization
+tools. However, visualization community focuses on providing multi-resolution
+view-dependent level of detail. The error rate tolerated with lossy compression
+techniques on data used for visualization tend to be higher when compared to the
+data used for analysis. Hence, very little work exists that accurately compresses
+non-image or seemingly random data, even outside the scientiﬁc community.
+In fact, to the best of our knowledge, ISABELA is the ﬁrst approach to use
+B−spline ﬁtting in the context of reduction for data that is essentially random.
+378
+7
+S. Lakshminarasimhan et al.
+Summary
+This paper describes ISABELA, an eﬀective in-situ method designed to compress spatio-temporal scientiﬁc data. ISABELA compresses data over both
+the spatial and temporal resolutions. For the former, it essentially applies data
+sorting, as a pre-conditioner, that signiﬁcantly improves the eﬃcacy of cubic
+B-spline spatial compression. For the latter, it uses Δ–encoding of the higherorder diﬀerences in index values to further reduce index storage requirements.
+By capturing the relative per point errors and applying error quantization, ISABELA provides over 75% compression on data from GTS, while ensuring
+99% accuracy on all values. On 13 other scientiﬁc datasets ISABELA provides
+excellent approximation and reduction, consistently outperforming extensively
+used Wavelets compression.
+Acknowledgements. This work was supported in part by the U.S. Department
+of Energy, Oﬃce of Science (SciDAC SDM Center, DE-AC02-06CH11357, DEFC02-10ER26002/DE-SC0004935, DE-FOA-0000256, DE-FOA-0000257) and the
+U.S. National Science Foundation (CCF-1029711 (Expeditions in Computing)).
+Oak Ridge National Laboratory is managed by UT-Battelle for the LLC U.S.
+D.O.E. under contract no. DEAC05-00OR22725.
+References
+1. Abbasi, H., Lofstead, J., Zheng, F., Klasky, S., Schwan, K., Wolf, M.: Extending
+I/O through high performance data services. In: Cluster Computing, Austin, TX,
+IEEE International (September 2007)
+2. De Boor, C.: A Practical Guide to Splines. Springer, Heidelberg (1978)
+3. Burtscher, M., Ratanaworabhan, P.: FPC: A high-speed compressor for doubleprecision ﬂoating-point data (2009),
+http://www.csl.cornell.edu/~ burtscher/research/FPC/
+4. Chou, J., Piegl, L.: Data reduction using cubic rational B-splines. IEEE Comput.
+Graph. Appl. 12, 60–68 (1992)
+5. Cover, T.M., Thomas, J.: Elements of information theory. Wiley-Interscience, New
+York (1991)
+6. Frazier, M.W.: An introduction to Wavelets through linear algebra, p. 501.
+Springer, Heidelberg (1999)
+7. He, X., Shi, P.: Monotone B-spline smoothing. Journal of the American Statistical
+Association 93(442), 643–650 (1998)
+8. Isenburg, M., Lindstrom, P., Snoeyink, J.: Lossless compression of predicted
+ﬂoating-point geometry. Computer-Aided Design 37(8), 869–877 (2005); CAD 2004
+Special Issue: Modelling and Geometry Representations for CAD
+9. Lee, S., Wolberg, G., Shin, S.Y.: Scattered data interpolation with multilevel Bsplines. IEEE Trans. on Viz. and Comp. Graphics 3(3), 228–244 (1997)
+10. Lindstrom, P., Isenburg, M.: Fast and eﬃcient compression of ﬂoating-point data.
+IEEE Trans. on Viz. and Comp. Graphics 12(5), 1245–1250 (2006)
+11. Lofstead, J., Zheng, F., Klasky, S., Schwan, K.: Adaptable, metadata rich IO methods for portable high performance IO. In: IPDPS 2009, Rome, Italy (May 2009)
+Compressing the Incompressible with ISABELA
+379
+12. Ma, K., Wang, C., Yu, H., Tikhonova, A.: In-situ processing and visualization for
+ultrascale simulations. Journal of Physics: Conference Series 78(1), 012043 (2007)
+13. Ratanaworabhan, P., Ke, J., Burtscher, M.: Fast lossless compression of scientiﬁc
+ﬂoating-point data. In: Proc. of the DCC (2006)
+14. Sayood, K.: Introduction to data compression. Morgan Kaufmann Publishers Inc.,
+San Francisco (1996)
+15. Wang, W.X., al, e.: Gyro-kinetic simulation of global turbulent transport properties
+in Tokamak experiments. Physics of Plasmas 13(9), 092505 (2006)
+16. Welch, T.A.: A technique for high-performance data compression. Computer 17,
+8–19 (1984)
+17. Wold, S.: Spline functions in data analysis. American Statistical Association and
+American Society for Quality 16(1), 1–11 (1974)
+18. Zheng, F., al, e.: PreDatA–preparatory data analytics on peta-scale machines. In:
+IPDPS, Atlanta, GA (April 2010)

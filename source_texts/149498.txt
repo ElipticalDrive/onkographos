@@ -1,0 +1,122 @@
+TojiCode: Building the Game: Part 6 - Isosurface Landscapes
+Pages
+Home
+Demos
+WebGL Resources
+GitHub
+Twitter
+Thursday, June 28, 2012
+Building the Game: Part 6 - Isosurface Landscapes
+See the code for this post, or all posts in this series.
+See the live editor demo.
+Well, it's been a long time coming, but I'm finally back with another official installment in the Building the Game Series! As mentioned previously I'm want to take the series in a different direction now, and as such this post represents a bit of backtracking from the previous one but I'm hoping that it will be a more productive direction in the end.
+So let's talk gameplay for a second. Without divulging too much about what I want the final game to be I'll say that I want the primary setting to be outdoors. There's a couple of reasons for this:
+The game concept I have in mind will work better with large levels (Large as in several of kilometers) which almost automatically means "outdoors"
+Landscapes are a lot easier for a programmer to generate than and still have it look good. While procedurally generated building are certainly possible it's a lot trickier to pull off.
+So landscapes it is! Now, graphics developers have a long and storied history of building landscapes. Especially popular is the ever-present heightmap, which can yield some very nice looking results and have some fairly desirable properties from a programmers point of view. You can determine vertex buffer sizes early on, they're fast to manipulate, you can generate most of them on the GPU, they're easy to do LOD system for, collision detection is super simple, and so on and so forth. And as such, many professional games use them to great effect. (See: Unreal Engine games, Crysis, Skyrim, Battlefield series...)
+So that's great, and very tempting. In fact, when I first decided I wanted an outdoors environment it's the first thing I tried. I had a simple fractal heightmap demo running in about half an hour, and it was very workable but unfortunately there was a rather large cloud hanging over the approach that kept nagging at me saying "this could be better!"
+That cloud was named Minecraft.
+Let's be honest, while Minecraft isn't exactly pushing the boundaries of the graphics world it has redefined what many players expect from a dynamically generated environment. It's allure could probably even be described with a single word: Caves. It there anything quite as exciting as running around your little cubist world and coming across some little crack in the ground only to discover that it's actually the entrance to a mile long network of underground caverns, lava flows, and mineral veins? It's incredibly enticing, and feels like the very essence of adventure.
+So yeah, I want caves. And arches, and overhangs, and other bits of extreme geometry that, sadly, don't play well with heightmaps. There are ways to do it, certainly, but it's almost always a hack that involves stitching more detailed meshes into holes that you punch in the base map. I'd rather have a solution that's more unified. So while we're looking to Minecraft for inspiration, might as well also pull a page from their bag of tricks in terms of their landscape generation methods, which Notch was kind enough to outline in his blog.
+What it boils down to is clever application of 3D perlin noise to generate a density map, also known as an Isosurface. Typically with an isosurface you will have a cloud of values in a given range (say [-1, 1]) and you render a surface at the points in the cloud where the value crosses over a certain threshold (ie: 0). In Minecraft's case they represent this visually by voxelizing values less than 0, but I didn't want that blocky style for my game so I needed a different way to render my landscapes. A simple and fairly safe bet for that was to triangulate the isosurface with the well known Marching Cubes algorithm.
+Marching cubes is a pretty simple algorithm at it's core, with the most complex bit of it being the fairly large lookup table that need to be built in order to properly describe the triangulation. Fortunately for me, Nicolas of PhiloGL fame had already put together a marching cubes WebGL implementation that had all of the important bits in place already. I picked up his code as my baseline and massaged it till it worked with my needs. I also did a fair amount of optimization on top of his implementation (which was already reasonably speedy) because I wanted the surfaces to generate fast enough that you could modify them semi-interactively (I'll get to that in a bit.)
+There's a couple of interesting points to talk about in terms of the optimization of the core loop. Most of it boiled down to two things: re-using variables and caching values.
+With the marching cubes algorithim, the triangulation is evaluated by dividing the area into cubes (naturally) and evaluating each separately. This means that you're looking at 8 separate points (the cube corners) at once. In Nicolas' original code, he calculated all of the grid points like so (pseudocode):
+```
+for (xmin to xmax) {
+    for(ymin to ymax) {
+        for(zmin to zmax) {
+            var p0 = {
+                x: x - 1,
+                y: y - 1,
+                z: z - 1
+            };
+            // ... Repeat for all 8 corners
+
+            var values = [
+                isoFunc(p0.x, p0.y, p0.z),
+                // ... Again for all 8 corners
+            ];
+
+            triangulate([p0...p7], values);
+        }
+    }
+}
+```
+This is very straightforward and easy to understand and code, but has a couple of downsides. You're creating new structures and arrays with every iteration, which is slow and creates a lot of garbage. Also, because of the way the values are laid out you end up re-evalating the isosurface values for a given position up to 8 times. Depending on the surface function, that can be an expensive thing.
+In my version, I allocate Float32Arrays to hold all the data outside the loop. Typed arrays are expensive to create, but much faster to access than objects or even normal javascript arrays, so this single allocation and multiple assignment pattern works well.
+```
+var values = new Float32Array(8),
+    p0 = new Float32Array(3);
+    // and p1..p7 for each corner
+
+    var points = [p0, p1...p7];
+
+for (xmin to xmax) {
+    for(ymin to ymax) {
+        for(zmin to zmax) {
+            p0[0] = x - 1;
+            p0[1] = y - 1;
+            p0[2] = z - 1;
+            // ... Repeat for all 8 corners
+
+            values[0] = isoFunc(p0[0], p0[1], p0[2]);
+            // ... Repeat for all 8 corners
+
+            triangulate(points, values);
+        }
+    }
+}
+```
+Additionally I take advantage of the pattern of iteration over the isosurface values and only update X and Y positions when needed. I also am able to reuse 4 isosurface values from the previous loop iteration every time, which cuts the number of isosurface evaluations roughly in half.
+```
+for (xmin to xmax) {
+    p0[0] = x - 1;
+    // ... Repeat for all X values
+    for(ymin to ymax) {
+        p0[1] = y - 1;
+        // ... Repeat for all Y values
+        for(zmin to zmax) {
+            p0[2] = z - 1;
+            // ... Repeat for all Z values
+
+            values[0] = values[4];
+            values[1] = values[5];
+            values[2] = values[6];
+            values[3] = values[7];
+            values[4] = isoFunc(p4[0], p4[1], p4[2]);
+            values[5] = isoFunc(p5[0], p5[1], p5[2]);
+            values[6] = isoFunc(p6[0], p6[1], p6[2]);
+            values[7] = isoFunc(p7[0], p7[1], p7[2]);
+
+            triangulate(points, values);
+        }
+    }
+}
+```
+Under this system I still end up querying most of the isosurface values ~4 times. I could take this one step further and create a Float32Array that has width*height*depth elements and query each value exactly once, but I'm not sure if I want to allocate the additional memory. That's something to experiment with, at least.
+In the end these were very simple changes to make and not anything terribly clever or hard to follow, but they actually make a significant difference in performance. The exact speed will depend on the iso function and size of the surface, but in one of my tests a 32x32x32 surface went from 120ms to generate to 80ms. 33% improvement isn't too shabby! It also makes a big difference to break the workload of surface generation into several different workers, which is what I do in the live demo.
+So with the technicalities of the surface triangulation out of the way the next thing to look at is the actual algorithm used for the landscape.
+There's many different resources online that talk about ways to approach this (Notch's post that I linked earlier being one of them), but some of the more in depth ones are:
+Generating Complex Procedural Terrains Using the GPU
+More on Minecraft-type world gen
+Procedural landscapes using Perlin Noise
+Minecraft Like Rendering Experiments in OpenGL 4
+There's two big takeaways I get from these articles: There's no "right" way to do this, and much of it is simply playing around with values to see what looks and feels best.
+That "playing around" concept is important, and it applies to so much more than just landscape generation. Player health, weapon damage, gravity, jump height, player speed, enemy attributes... basically every part of the game is something that is subject to experimentation. You will never get these things right on the first try, and so it's very important to get used to iterating fast and often.
+Brett Victor has an absolutely amazing presentation on exactly that subject called Inventing on Principle. If you haven't seen it yet I cannot encourage you enough to put this article on hold and go watch it now! In it he covers the value of taking that feedback loop of tweaking and testing your code and making it as small and as tight as possible through some truly ingenious techniques.
+(Seriously, just go watch it! I'll wait!)
+In that spirit, I decided to make my demo for this post a live isosurface editor. The algorithm used to create the surface you see is right there on the page and ready for you to edit. The surface updates as soon as you make a change, so you can instantly see how your changes affect the final product. It's not quite as smooth as Brett's magical editors, but it should be snappy enough to make the tough work of getting to that "sweet spot" much faster. I've also implemented a simple save and share mechanism so that you can show off your creations to the rest of the world.
+As for the algorithm I actually used (the default one on the live demo), it's pretty simple and doesn't yield terribly good results. You see, I'm still playing with it too! I'm also curious to see what kind of surfaces come out of readers of this blog using the editor, and will probably try and pull in some of the bits of community created content that I like. Past that the exact algorithm will probably continue to evolve for a long as this project is in development, but the key is that I've got enough right now to move on to the next step.
+Another thing that I feel bears mentioning is the visual style of the landscape shown here, flat shaded and no textures. That's actually the style that I want to try and pursue for the game at the moment. It may get tweaked as I go, but the current style makes it easy to throw together a lot of resources and have them look consistent. Plus, there's still a lot of cool effects that you could pull out without going crazy with texture maps (and it makes it load faster too!)
+To assist in generating this look, I built a utility class that transforms: FacetedMesh. Given an indexed or non-index Vertex array (provided as a Float32Array) it will do all the heavy lifting to generate the flat-shaded geometry. It should be usable for far more than just the landscape, however.
+What is the next step? Collision detection! I want to actually walk around on these things! I've actually got the code for it working right now, but it will take a bit to clean it up and write the associated post. I'll tell you right out the gate that it was far more complicated than I had anticipated, the collision code easily took 3 times longer than the isosurface stuff outlined here, but I feel like the final product will be very beneficial in the end as it allows for a lot of flexibility.
+After that I want to pull in some of the mesh rendering code I've already done to get some simple character models in place, and then I want to jump on the networking side of things so we can actually start interacting with other players. I'm not going to promise a timeline for when I'll get these posts up but I can promise you that it will be far far less than the half a year it took to get to this one.
+Posted by
+Brandon Jones
+at
+9:04 PM
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Newer Post
+Older Post
+Home

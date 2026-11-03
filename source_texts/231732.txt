@@ -1,0 +1,170 @@
+laz/ply viewer for pointcloud inspection. Contribute to znkim/lazberry-ply development by creating an account on GitHub.
+
+Add 3D Gaussian Splatting PLY rendering (v0.6.0) by znkim · Pull Request #18 · znkim/lazberry-ply · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+znkim
+commented
+Oct 2, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+Adds rendering for 3D Gaussian Splatting PLY files, with no new dependencies.
+Detection/parsing (src/splat.js, src/ply.js): binary or ASCII PLYs with f_dc_*, opacity, scale_*, rot_* are treated as splats. Color = 0.5 + SH_C0 · f_dc, opacity = sigmoid, scale = exp, rotation normalized.
+GPU data: center, 3D covariance (already mapped to the viewer's Z-up, radius-normalized space), and RGBA packed into an RGBA32UI texture (48 B/splat).
+Rendering (src/viewer.js): instanced quads, per-splat EWA projection in the vertex shader (perspective and ISO), premultiplied alpha blending with depth test against the grid/bbox but no depth writes.
+Sorting (src/splat-sort-worker.js): 16-bit counting sort back-to-front, re-run in a worker only when the view direction changes.
+UI: "Gaussian splats" toggle and "Splat scale" slider; Type shows "Gaussian splat"; points are off by default for splat files; point-normal controls hidden (3DGS normals are zero).
+Sample: test-data/sample-splat.ply (5,240 splats, 1.3 MB) generated deterministically by scripts/generate-splat-sample.mjs.
+The PLY header fix (binary data starting with a newline byte) originally in this branch shipped separately in Release v0.5.3: fix binary PLY data skipped after end_header #20 (v0.5.3); main was merged in here.
+Version bumped to 0.6.0.
+Known limitations: SH degree 0 only (no view-dependent color); compressed splat formats not supported; far-away floaters enlarge the bounding box so the scene may start small.
+Closes #17
+Verification
+npm test passes (new tests/splat.test.mjs).
+npm run build:pages passes; npm run test:pages passes.
+docs/ was regenerated and committed.
+The viewer was checked in Chrome with an 80k-splat synthetic file: correct anisotropy/axis mapping, correct occlusion after re-sorting while orbiting, ISO projection and close zoom render correctly, no console errors. Not yet checked with a real trained scene.
+package.json version updated to 0.6.0.
+Screenshots
+Not attached; open test-data/sample-splat.ply in the viewer to reproduce.
+🤖 Generated with Claude Code
+Add 3D Gaussian Splatting PLY rendering (v0.6.0)
+…
+ad1e52d
+```
+Detect 3DGS PLY files (f_dc_*, opacity, scale_*, rot_*) and render them
+as depth-sorted anisotropic Gaussian splats in WebGL2:
+
+- Decode SH DC color, sigmoid opacity, exp scale, and normalized rotation
+- Pack center, covariance, and color into an RGBA32UI texture
+- Project covariance per splat in the vertex shader (perspective and ISO)
+- Re-sort back-to-front in a dedicated worker when the view direction changes
+- Add Gaussian splats toggle and splat scale control
+- Include a small synthetic sample and its generator script
+
+Also fix the PLY header parser skipping binary data that starts with a
+newline byte after end_header.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Copilot
+AI
+balanced review requested due to automatic review settings
+October 2, 2026 02:30
+Copilot started reviewing on behalf of
+znkim
+October 2, 2026 02:31
+View session
+Copilot
+AI
+reviewed
+Oct 2, 2026
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Copilot encountered an error and was unable to review this pull request. You can try again by re-requesting a review.
+chatgpt-codex-connector
+Bot
+reviewed
+Oct 2, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: ad1e52d926
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+src/viewer.js
+const edgeFS=`#version 300 es
+precision highp float;in vec2 uv;uniform sampler2D depthTexture;uniform sampler2D normalTexture;uniform vec2 texel;uniform vec3 edgeColor;out vec4 outColor;void main(){float centerDepth=texture(depthTexture,uv).r;if(centerDepth>=.999999)discard;vec3 centerNormal=texture(normalTexture,uv).rgb;float depthEdge=0.;float normalEdge=0.;vec2 offsets[2]=vec2[2](vec2(texel.x,0),vec2(0,texel.y));for(int i=0;i<2;i++){float sampleDepth=texture(depthTexture,uv+offsets[i]).r;vec3 sampleNormal=texture(normalTexture,uv+offsets[i]).rgb;depthEdge=max(depthEdge,abs(centerDepth-sampleDepth));normalEdge=max(normalEdge,length(centerNormal-sampleNormal));}float edge=max(smoothstep(.00012,.0014,depthEdge),smoothstep(.16,.38,normalEdge));if(edge<.08)discard;outColor=vec4(edgeColor,edge*.9);}`;
+const splatVS=`#version 300 es
+precision highp float;precision highp int;precision highp usampler2D;uniform usampler2D splats;uniform mat4 projection;uniform mat4 modelView;uniform vec2 viewport;uniform int perRow;uniform bool orthographic;uniform float splatScale;in vec2 corner;in uint splatIndex;out vec4 color;out vec2 offset;void main(){int index=int(splatIndex);ivec2 base=ivec2(index%perRow*3,index/perRow);uvec4 a=texelFetch(splats,base,0),b=texelFetch(splats,base+ivec2(1,0),0),c=texelFetch(splats,base+ivec2(2,0),0);vec4 cam=modelView*vec4(uintBitsToFloat(a.xyz),1);vec4 clip=projection*cam;float limit=1.2*clip.w;if(clip.w<=0.||abs(clip.z)>clip.w||abs(clip.x)>limit||abs(clip.y)>limit){gl_Position=vec4(0,0,2,1);return;}vec3 upper=uintBitsToFloat(b.xyz);vec2 lower=uintBitsToFloat(c.xy);float c11=uintBitsToFloat(b.w);mat3 cov=mat3(upper.x,upper.y,upper.z,upper.y,c11,lower.x,upper.z,lower.x,lower.y)*(splatScale*splatScale);vec2 focal=vec2(projection[0][0],projection[1][1])*viewport*.5;mat3 jacobian=orthographic?mat3(focal.x,0,0,0,focal.y,0,0,0,0):mat3(-focal.x/cam.z,0,0,0,-focal.y/cam.z,0,focal.x*cam.x/(cam.z*cam.z),focal.y*cam.y/(cam.z*cam.z),0);mat3 t=jacobian*mat3(modelView);mat3 screen=t*cov*transpose(t);float xx=screen[0][0]+.3,xy=screen[0][1],yy=screen[1][1]+.3,mid=.5*(xx+yy),radius=length(vec2(.5*(xx-yy),xy)),major=mid+radius,minor=max(mid-radius,.1);vec2 axis=vec2(xy,major-xx);axis=dot(axis,axis)>1e-12?normalize(axis):(xx>=yy?vec2(1,0):vec2(0,1));offset=corner*3.;vec2 pixels=offset.x*min(sqrt(major),1024.)*axis+offset.y*min(sqrt(minor),1024.)*vec2(-axis.y,axis.x);gl_Position=vec4(clip.xy/clip.w+pixels*2./viewport,clip.z/clip.w,1);color=vec4(float(a.w&255u),float(a.w>>8&255u),float(a.w>>16&255u),float(a.w>>24))/255.;}`;
+chatgpt-codex-connector
+Bot
+Oct 2, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Cull using the projected splat bounds
+When a large splat is near a viewport edge—especially after zooming in—the center can exceed the fixed 1.2 * clip.w limit while the projected quad still covers visible pixels. This branch then discards the entire splat before its covariance-derived extent is calculated, producing holes and abrupt popping during pan or rotation; culling should account for the projected major/minor radii.
+Useful? React with 👍 / 👎.
+Comment thread
+src/viewer.js
+const splatState={texture:gl.createTexture(),vao:gl.createVertexArray(),order:gl.createBuffer(),corners:gl.createBuffer(),worker:null,busy:false,pending:null,direction:null,count:0,perRow:1};
+gl.bindBuffer(gl.ARRAY_BUFFER,splatState.corners);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);gl.bindVertexArray(splatState.vao);gl.enableVertexAttribArray(splatLoc.corner);gl.vertexAttribPointer(splatLoc.corner,2,gl.FLOAT,false,0,0);gl.bindBuffer(gl.ARRAY_BUFFER,splatState.order);gl.enableVertexAttribArray(splatLoc.index);gl.vertexAttribIPointer(splatLoc.index,1,gl.UNSIGNED_INT,0,0);gl.vertexAttribDivisor(splatLoc.index,1);gl.bindVertexArray(null);
+function disposeSplats(){splatState.worker?.terminate();Object.assign(splatState,{worker:null,busy:false,pending:null,direction:null,count:0})}
+function loadSplats(){disposeSplats();if(!model.splat)return;const positions=centered(model.positions),radius=Math.max(...model.max.map((value,index)=>value-model.min[index]))||1,packed=packSplats(positions,model.colors,model.splat,radius,gl.getParameter(gl.MAX_TEXTURE_SIZE));gl.bindTexture(gl.TEXTURE_2D,splatState.texture);for(const parameter of [gl.TEXTURE_MIN_FILTER,gl.TEXTURE_MAG_FILTER])gl.texParameteri(gl.TEXTURE_2D,parameter,gl.NEAREST);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32UI,packed.width,packed.height,0,gl.RGBA_INTEGER,gl.UNSIGNED_INT,packed.data);const direction=splatDirection(viewRotation());gl.bindBuffer(gl.ARRAY_BUFFER,splatState.order);gl.bufferData(gl.ARRAY_BUFFER,sortSplatsByDepth(positions,direction),gl.DYNAMIC_DRAW);const worker=new Worker(new URL('./splat-sort-worker.js',import.meta.url),{type:'module'});worker.onmessage=({data})=>{if(splatState.worker!==worker)return;gl.bindBuffer(gl.ARRAY_BUFFER,splatState.order);gl.bufferSubData(gl.ARRAY_BUFFER,0,data.order);splatState.busy=false;if(splatState.pending){const next=splatState.pending;splatState.pending=null;postSplatSort(next)}requestAnimationFrame(render)};worker.postMessage({positions},[positions.buffer]);Object.assign(splatState,{worker,direction,count:packed.count,perRow:packed.perRow})}
+chatgpt-codex-connector
+Bot
+Oct 2, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Preserve the loaded scene when splat packing fails
+When packSplats rejects a scene that exceeds the GPU texture capacity, disposeSplats() has already terminated and cleared the previous splat renderer, and applyModel has already assigned the rejected model. The surrounding catch only reports the error, leaving a previously loaded scene with mismatched model/UI/buffers or no splats; pack and validate the new data before destructively replacing the current state.
+Useful? React with 👍 / 👎.
+Merge remote-tracking branch 'origin/main' into feature/gaussian-splat
+…
+1d7964b
+```
+# Conflicts:
+#	docs/assets/index-O9p3ek6s.js
+#	docs/assets/point-worker-1s29y4U8.js
+#	docs/index.html
+#	package-lock.json
+#	package.json
+```
+Hide details
+View details
+znkim
+merged commit b413175
+into
+main
+Oct 2, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

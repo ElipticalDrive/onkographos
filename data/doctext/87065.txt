@@ -1,0 +1,6069 @@
+# README #
+
+Volume Rendering application using CUDA toolkit 7.5 with OpenGL in Visual Studio 2013
+
+## Project Configuration ##
+- Need GLFW, stb_image, GLM, and GLAD. 
+- Add include folder with all .h files, lib folder with al .lib files and the .dll files in the root folder.
+- Only volume raw file format supported by now.
+
+
+## Executable Parameters #
+The program can run without any parameters and will load a volume of size 256x256x256 located in "./RAW/volume.raw". Some parameters can be passed to the program in the following way: 
+
+```sh
+$ program <volume_path> <width> <height> <depth> <bits> <scalex> <scaley> <scalez> <block_width> <block_height> [<transfer_func_path>]
+```
+
+where `<volume_path>` is the path of the file containing the volume; `<width>`, `<height>`, and `<depth>` the dimensions of the volume; `<bits>` the number of bits per scalar (only 8 and 16 bits supported); `<scalex>`, `<scaley>`, and `<scalez>` the scale of the volume in every direction; `<block_width>`, and `<block_height>` the number of threads per block and `<transfer_function_path>` is the path of the file containing the initial set up of the transfer function. The last parameter is optional, in which case, the identity function is loaded.
+
+## Set up of the Transfer Function File#
+
+The file has the following configuration:
+
+```sh
+<num_points>
+<scalar_value0> <r> <g> <b> <a>
+<scalar_value1> <r> <g> <b> <a>
+...
+<scalar_valueN> <r> <g> <b> <a>
+```
+
+where  `<num_points>` is the number of points indicated. Then, for each point there are four float values, indicating the scalar value ([0, 255]) and the corresponding RGBA normalized color ([0.0f,1.0f] ) for that scalar value in ascending order. Color for scalar values no indicated in the file are interpolated. At least the first (scalar = 0) and the last (scalar = 255) values must be indicated.
+
+## External Libraries and Compilation
+
+The following externa libraries/ projects were used in the develop of this program:
+
+* [GLFW 3.2](http://www.glfw.org/), for OpenGL context and window management.
+* [glad](https://github.com/Dav1dde/glad), for OpenGL 4.5 extension loader.
+* [OpenGL Mathematics (GLM)](http://glm.g-truc.net/), as a mathematic library.
+* [STB Image 2.12](https://github.com/nothings/stb), for image loading.
+* [CUDA Toolkit 7.5](https://developer.nvidia.com/cuda-toolkit), to enable the use of CUDA.
+
+To compile in Visual Studio, the header files must be put in a "include" folder as follows:
+
+    - VRCUDA/include/glad/ (glad files)
+    - VRCUDA/include/GLFW/ (GLFW files)
+    - VRCUDA/include/glm/ (GLM files)
+	- VRCUDA/include/KHR/ (file included with glad)
+	- VRCUDA/include/ (stb_image file)
+
+The GLFW libs libraries must be set on a folder "lib" that must be organized as follows:
+
+    - VRCUDA/lib/x86/ (x86 libs)
+	- VRCUDA/lib/x64/ (x64 libs)
+	
+The project also uses a transfer function class that be obtained [here](https://github.com/franjaviersans/transfer-function-glfw3).
+
+## Screenshots
+
+The following is a screenshot of the program running:
+
+<p align="center">
+  <img src ="./screenshot/render.png" />
+</p>
+
+### VRCUDA/shaders/TransferFunction.frag
+```
+#version 450 core
+
+
+uniform int Usetexture;
+uniform sampler2D tex;
+
+in vec2 vVertexTexture;
+in vec4 vVertexColor;
+
+layout(location = 0) out vec4 vFragColor;
+
+void main(void)
+{
+	if(Usetexture == 1){
+		vFragColor = texture(tex, vVertexTexture) * vVertexColor;
+	}else{
+		vFragColor = vVertexColor;
+	}
+}
+```
+
+### VRCUDA/shaders/TransferFunction.vert
+```
+#version 450 core
+
+uniform mat4 mProjection, mModelView;
+uniform int Mode;
+uniform vec4 vColor1, vColor2, vColor3, vColor4;
+
+
+layout(location = 0) in vec2 vVertexCoord;
+layout(location = 3) in vec2 vTextureCoord;
+
+out vec2 vVertexTexture;
+out vec4 vVertexColor;
+
+
+void main()
+{
+	if(Mode == 0){
+		vVertexColor = vColor1;
+	}else if(Mode >= 1){
+		if(gl_VertexID == 0) vVertexColor = vColor1;
+		if(gl_VertexID == 1) vVertexColor = vColor2;
+		if(gl_VertexID == 2) vVertexColor = vColor3;
+		if(gl_VertexID == 3) vVertexColor = vColor4; 
+		
+	}
+
+	vVertexTexture = vTextureCoord;
+
+	if(Mode >= 2){
+		if(Mode == 2 && gl_VertexID == 3){
+			gl_Position = mProjection * mModelView * vec4(-0.5f,-0.5f,0.0f,1.0f);
+		}else if( Mode == 3 && gl_VertexID == 2){
+			gl_Position = mProjection * mModelView * vec4(0.5f,-0.5f,0.0f,1.0f);
+		}else{
+			gl_Position = mProjection * mModelView * vec4(vVertexCoord,0.0f,1.0f);
+		}
+	}else gl_Position = mProjection * mModelView * vec4(vVertexCoord,0.0f,1.0f);
+	
+}
+```
+
+### VRCUDA/shaders/hit.frag
+```
+#version 450 core
+
+in vec3 vVolumeCoordinates;
+
+layout(location = 0) out vec3 vFragColor;
+
+void main(void)
+{
+	vFragColor = vVolumeCoordinates;
+}
+```
+
+### VRCUDA/shaders/hit.vert
+```
+#version 450 core
+
+uniform mat4 mMVP;
+
+layout(location = 0) in vec3 vVertex;
+layout(location = 3) in vec3 vTexture;
+
+out vec3 vVolumeCoordinates;
+
+void main()
+{
+	vVolumeCoordinates = vTexture;
+	gl_Position = mMVP * vec4(vVertex,1.0f);
+}
+```
+
+### VRCUDA/shaders/textureQuad.frag
+```
+#version 450 core
+
+
+layout(binding = 0) uniform sampler2D tex;
+
+in vec2 vVertexTexture;
+
+layout(location = 0) out vec4 vFragColor;
+
+void main(void)
+{
+	vFragColor = texture(tex, vVertexTexture);
+}
+```
+
+### VRCUDA/shaders/textureQuad.vert
+```
+#version 450 core
+
+uniform mat4 mTransform;
+
+layout(location = 0) in vec2 vVertexCoord;
+layout(location = 3) in vec2 vTextureCoord;
+
+out vec2 vVertexTexture;
+
+void main()
+{
+	vVertexTexture = vTextureCoord;
+
+	gl_Position = mTransform * vec4(vVertexCoord,0.0f,1.0f);
+	
+}
+```
+
+### VRCUDA/src/CubeIntersection.cpp
+```
+// $Id: $
+//
+// Author: Francisco Sans franjaviersans@gmail.com
+//
+// Complete history on bottom of file
+
+#define FILE_REVISION "$Revision: $"
+
+#include "CubeIntersection.h"
+#include "TextureManager.h"
+#include <stdlib.h>
+#include <iostream>
+
+
+
+/**
+* Default constructor
+*/
+CCubeIntersection::CCubeIntersection(bool front, GLuint W, GLuint H) :m_bFront(front), m_uiWidth(W), m_uiHeight(H)
+{
+	//load the shaders
+	try{
+		m_program.compileShader("shaders/hit.vert", GLSLShader::VERTEX);
+		m_program.compileShader("shaders/hit.frag", GLSLShader::FRAGMENT);
+		m_program.link();
+	}
+	catch (GLSLProgramException & e) {
+		std::cerr << e.what() << std::endl;
+		exit(EXIT_FAILURE);
+	}
+
+	m_iFrameBuffer = -1;
+	depthrenderbuffer = -1;
+
+	SetResolution(W,H);
+};
+
+/**
+* Default destructor
+*/
+CCubeIntersection::~CCubeIntersection()
+{
+	glDeleteFramebuffers(1,&m_iFrameBuffer);
+	glDeleteFramebuffers(1,&depthrenderbuffer);
+}
+
+/**
+* Set resolution
+*
+* @params ResW new window width resolution
+* @params ResH new window hegith resolution
+*
+*/
+void CCubeIntersection::SetResolution(GLuint ResW, GLuint ResH)
+{
+	m_uiWidth = ResW;
+	m_uiHeight = ResH;
+
+	//If it exists, unload
+	TextureManager::Inst().UnloadTexture((m_bFront) ? TEXTURE_FRONT_HIT : TEXTURE_BACK_HIT);
+
+	//Create texture!!
+	glActiveTexture(GL_TEXTURE0);
+
+	//Create new empty textures
+	TextureManager::Inst().CreateTexture2D((m_bFront) ? TEXTURE_FRONT_HIT : TEXTURE_BACK_HIT, m_uiWidth, m_uiHeight, GL_RGBA16F, GL_RGBA, GL_FLOAT, GL_NEAREST, GL_NEAREST);
+
+
+	//Generate Render Buffer
+	if(m_iFrameBuffer == -1)
+	{
+		glGenFramebuffers(1, &m_iFrameBuffer);
+	}
+	
+	glBindFramebuffer(GL_FRAMEBUFFER, m_iFrameBuffer);
+
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, TextureManager::Inst().GetID((m_bFront) ? TEXTURE_FRONT_HIT : TEXTURE_BACK_HIT), 0);
+	glDrawBuffer(GL_COLOR_ATTACHMENT0);
+
+	// The depth buffer
+	if(depthrenderbuffer == -1)
+	{
+		glGenRenderbuffers(1, &depthrenderbuffer);
+	}
+	
+	glBindRenderbuffer(GL_RENDERBUFFER, depthrenderbuffer);
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, m_uiWidth, m_uiHeight);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthrenderbuffer);
+
+	glBindRenderbuffer(GL_RENDERBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+}
+
+/**
+* Method to Draw the Quad
+*/
+void CCubeIntersection::Draw(glm::mat4 &m_mMVP)
+{
+
+	//Bind the FrameBuffer to draw
+	glBindFramebuffer(GL_FRAMEBUFFER, m_iFrameBuffer);
+
+	//Draw in all the screen
+	glViewport(0, 0, m_uiWidth, m_uiHeight);
+
+	//Set which face to draw
+	glEnable(GL_CULL_FACE);
+	glEnable(GL_DEPTH_TEST);
+	glFrontFace(GL_CCW);
+
+	if (m_bFront)glCullFace(GL_BACK);
+	else		glCullFace(GL_FRONT);
+
+	glClearColor(0.0f, 0.0f, 0.0f, 0.f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+	//Draw a Cube
+	m_program.use();
+	{
+		m_program.setUniform("mMVP", m_mMVP);
+		VBOCube::Instance().Draw();
+	}
+
+
+	//Reset culling
+	glCullFace(GL_BACK);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+
+/**
+* Function to use the texture
+*/
+void CCubeIntersection::Use(GLenum activeTexture)
+{
+	glActiveTexture(activeTexture);
+	TextureManager::Inst().BindTexture((m_bFront) ? TEXTURE_FRONT_HIT : TEXTURE_BACK_HIT);
+}
+
+
+/**
+* Debug Texture
+*/
+void CCubeIntersection::Debug()
+{
+	
+}
+
+#undef FILE_REVISION
+
+// Revision History:
+// $Log: $
+// $Header: $
+// $Id: $
+```
+
+### VRCUDA/src/CubeIntersection.h
+```
+// $Id: $
+//
+// Author: Francisco Sans franjaviersans@gmail.com
+//
+// Complete history on bottom of file
+
+#ifndef CUBEINTER_H
+#define CUBEINTER_H
+
+//Includes
+#include "Definitions.h"
+#include "VBOCube.h"
+#include "GLSLProgram.h"
+
+
+class CCubeIntersection
+{
+	//Functions
+
+	public:
+		///Default constructor
+		CCubeIntersection(bool front, GLuint W, GLuint H);
+
+		///Default destructor
+		~CCubeIntersection();
+
+		///Set resolution
+		void SetResolution(GLuint ResW, GLuint ResH);
+
+		///Method to Draw the Quad
+		void Draw(glm::mat4 &);
+
+		///Debug Texture
+		void Debug();
+
+		///Use texture
+		void Use(GLenum);
+
+	//Variables
+	private:
+		GLuint m_iFrameBuffer, depthrenderbuffer, m_uiWidth, m_uiHeight, txtHit;
+		GLSLProgram m_program;
+		bool m_bFront;
+};
+
+
+#endif //FBOQuad_H
+```
+
+### VRCUDA/src/Definitions.h
+```
+#ifndef Definitions_H
+#define Definitions_H
+
+//decide if the volume is lit
+//#define LIGHTING
+
+// decide if is ray/box intersection or by OpenGL images
+//#define NOT_RAY_BOX
+
+// decide to display the results or not
+//#define NOT_DISPLAY
+
+//decide if the performance time is going to be used
+//#define MEASURE_TIME
+#ifdef MEASURE_TIME
+#include <Windows.h>
+#endif
+
+#define NUM_CYCLES 300
+
+#define BUFFER_OFFSET(i) (reinterpret_cast<void*>(i))
+#define WORLD_COORD_LOCATION	0
+#define COLOR_COORD_LOCATION	1
+#define NORMAL_COORD_LOCATION	2
+#define TEXTURE_COORD_LOCATION	3
+
+#define TEXTURE_TRANSFER_FUNC	0
+#define TEXTURE_TRANSFER_FUNC0	1
+#define TEXTURE_TRANSFER_FUNC1	2
+#define TEXTURE_TRANSFER_FUNC2	3
+#define TEXTURE_BACK_HIT		4
+#define TEXTURE_VOLUME			5
+#define TEXTURE_FRONT_HIT		6
+#define TEXTURE_FINAL_IMAGE		7
+
+
+#pragma comment (lib, "opengl32.lib")
+#define PROJECT_DIR "./"
+#ifdef WIN64_
+	#if (_DEBUG)
+		#pragma comment (lib,"./lib/x64/glfw3d.lib")
+	#else
+		#pragma comment (lib,"./lib/x64/glfw3.lib")
+	#endif
+#else
+	#if (_DEBUG)
+		#pragma comment (lib,"./lib/x86/glfw3d.lib")
+	#else
+		#pragma comment (lib,"./lib/x86/glfw3.lib")
+	#endif	
+#endif
+
+#include "../include/glad/glad.h"
+#include "../include/GLFW/glfw3.h"
+#include "../include/glm/glm.hpp"
+#include "../include/glm/gtc/matrix_transform.hpp"
+#include "../include/glm/gtc/type_ptr.hpp"
+#include "../include/glm/gtx/quaternion.hpp"
+
+
+
+#endif
+```
+
+### VRCUDA/src/FinalImage.cpp
+```
+// $Id: $
+//
+// Author: Francisco Sans franjaviersans@gmail.com
+//
+// Complete history on bottom of file
+
+#define FILE_REVISION "$Revision: $"
+
+#include "FinalImage.h"
+#include "TextureManager.h"
+#include <stdlib.h>
+#include <iostream>
+
+
+
+/**
+* Default constructor
+*/
+CFinalImage::CFinalImage(GLuint W, GLuint H) :m_uiWidth(W), m_uiHeight(H)
+{
+	//load the shaders
+	try{
+		m_program.compileShader("shaders/textureQuad.vert", GLSLShader::VERTEX);
+		m_program.compileShader("shaders/textureQuad.frag", GLSLShader::FRAGMENT);
+		m_program.link();
+	}
+	catch (GLSLProgramException & e) {
+		std::cerr << e.what() << std::endl;
+		exit(EXIT_FAILURE);
+	}
+
+	SetResolution(W, H);
+};
+
+/**
+* Default destructor
+*/
+CFinalImage::~CFinalImage()
+{
+
+}
+
+/**
+* Set resolution
+*
+* @params ResW new window width resolution
+* @params ResH new window hegith resolution
+*
+*/
+void CFinalImage::SetResolution(GLuint ResW, GLuint ResH)
+{
+	m_uiWidth = ResW;
+	m_uiHeight = ResH;
+
+	//If it exists, unload
+	TextureManager::Inst().UnloadTexture(TEXTURE_FINAL_IMAGE);
+
+	//Create texture!!
+	glActiveTexture(GL_TEXTURE0);
+
+	//Create new empty textures
+	TextureManager::Inst().CreateTexture2D(TEXTURE_FINAL_IMAGE, m_uiWidth, m_uiHeight, GL_RGBA8, GL_RGBA, GL_FLOAT, GL_LINEAR, GL_LINEAR);
+
+	m_program.use();
+	{
+		glm::mat4 trans = glm::translate(glm::mat4(1), glm::vec3(0.5, 0.5, 0.0f));
+		glm::mat4 scale = glm::scale(glm::mat4(1), glm::vec3(m_uiWidth, m_uiHeight, 1.0f));
+		glm::mat4 proy = glm::ortho(0.0f, float(m_uiWidth), 0.0f, float(m_uiHeight), -1.0f, 1.0f);
+		glm::mat4 mat = proy * scale * trans;
+		m_program.setUniform("mTransform", mat);
+	}
+}
+
+/**
+* Method to Draw the Quad
+*/
+void CFinalImage::Draw()
+{
+	//Draw a Cube
+	m_program.use();
+	{
+		VBOCube::Instance().Draw();
+	}
+}
+
+
+/**
+* Function to use the texture
+*/
+void CFinalImage::Use(GLenum activeTexture)
+{
+	glActiveTexture(activeTexture);
+	TextureManager::Inst().BindTexture(TEXTURE_FINAL_IMAGE);
+}
+
+
+#undef FILE_REVISION
+
+// Revision History:
+// $Log: $
+// $Header: $
+// $Id: $
+```
+
+### VRCUDA/src/FinalImage.h
+```
+// $Id: $
+//
+// Author: Francisco Sans franjaviersans@gmail.com
+//
+// Complete history on bottom of file
+
+#ifndef FINAL_H
+#define FINAL_H
+
+//Includes
+#include "Definitions.h"
+#include "VBOCube.h"
+#include "GLSLProgram.h"
+
+
+class CFinalImage
+{
+	//Functions
+
+public:
+	///Default constructor
+	CFinalImage(GLuint W, GLuint H);
+
+	///Default destructor
+	~CFinalImage();
+
+	///Set resolution
+	void SetResolution(GLuint ResW, GLuint ResH);
+
+	///Method to Draw the Quad
+	void Draw();
+
+	///Use texture
+	void Use(GLenum);
+
+	//Variables
+private:
+	GLuint m_uiWidth, m_uiHeight;
+	GLSLProgram m_program;
+};
+
+
+#endif //FBOQuad_H
+```
+
+### VRCUDA/src/GLSLProgram.cpp
+```
+#include "GLSLProgram.h"
+
+
+#include <fstream>
+using std::ifstream;
+using std::ios;
+
+#include <sstream>
+#include <sys/stat.h>
+
+namespace GLSLShaderInfo {
+	struct shader_file_extension {
+		const char *ext;
+		GLSLShader::GLSLShaderType type;
+	};
+
+	struct shader_file_extension extensions[] =
+	{
+		{ ".vs", GLSLShader::VERTEX },
+		{ ".vert", GLSLShader::VERTEX },
+		{ ".gs", GLSLShader::GEOMETRY },
+		{ ".geom", GLSLShader::GEOMETRY },
+		{ ".tcs", GLSLShader::TESS_CONTROL },
+		{ ".tes", GLSLShader::TESS_EVALUATION },
+		{ ".fs", GLSLShader::FRAGMENT },
+		{ ".frag", GLSLShader::FRAGMENT },
+		{ ".cs", GLSLShader::COMPUTE }
+	};
+}
+
+GLSLProgram::GLSLProgram() : handle(0), linked(false) { }
+
+GLSLProgram::~GLSLProgram() {
+	if (handle == 0) return;
+
+	// Query the number of attached shaders
+	GLint numShaders = 0;
+	glGetProgramiv(handle, GL_ATTACHED_SHADERS, &numShaders);
+
+	// Get the shader names
+	GLuint * shaderNames = new GLuint[numShaders];
+	glGetAttachedShaders(handle, numShaders, NULL, shaderNames);
+
+	// Delete the shaders
+	for (int i = 0; i < numShaders; i++)
+		glDeleteShader(shaderNames[i]);
+
+	// Delete the program
+	glDeleteProgram(handle);
+
+	delete[] shaderNames;
+}
+
+void GLSLProgram::compileShader(const std::string fileName)
+throw(GLSLProgramException) {
+	int numExts = sizeof(GLSLShaderInfo::extensions) / sizeof(GLSLShaderInfo::shader_file_extension);
+
+	// Check the file name's extension to determine the shader type
+	std::string ext = getExtension(fileName.c_str());
+	GLSLShader::GLSLShaderType type = GLSLShader::VERTEX;
+	bool matchFound = false;
+	for (int i = 0; i < numExts; i++) {
+		if (ext == GLSLShaderInfo::extensions[i].ext) {
+			matchFound = true;
+			type = GLSLShaderInfo::extensions[i].type;
+			break;
+		}
+	}
+
+	// If we didn't find a match, throw an exception
+	if (!matchFound) {
+		std::string msg = "Unrecognized extension: " + ext;
+		throw GLSLProgramException(msg);
+	}
+
+	// Pass the discovered shader type along
+	compileShader(fileName, type);
+}
+
+std::string GLSLProgram::getExtension(const char * name) {
+	std::string nameStr(name);
+
+	size_t loc = nameStr.find_last_of('.');
+	if (loc != std::string::npos) {
+		return nameStr.substr(loc, std::string::npos);
+	}
+	return "";
+}
+
+void GLSLProgram::compileShader(const std::string fileName,
+	GLSLShader::GLSLShaderType type, const std::string header)
+	throw(GLSLProgramException)
+{
+	if (!fileExists(fileName))
+	{
+		std::string message = std::string("Shader: ") + fileName + " not found.";
+		throw GLSLProgramException(message);
+	}
+
+	if (handle <= 0) {
+		handle = glCreateProgram();
+		if (handle == 0) {
+			throw GLSLProgramException("Unable to create shader program.");
+		}
+	}
+
+	ifstream inFile(fileName, ios::in);
+	if (!inFile) {
+		std::string message = std::string("Unable to open: ") + fileName;
+		throw GLSLProgramException(message);
+	}
+
+	// Get file contents
+	std::stringstream code;
+	code << inFile.rdbuf();
+	inFile.close();
+
+	compileShader(header, code.str(), type, fileName);
+}
+
+void GLSLProgram::compileShader(const std::string header, const std::string source,
+	GLSLShader::GLSLShaderType type,
+	const std::string fileName)
+	throw(GLSLProgramException)
+{
+	if (handle <= 0) {
+		handle = glCreateProgram();
+		if (handle == 0) {
+			throw GLSLProgramException("Unable to create shader program.");
+		}
+	}
+
+	GLuint shaderHandle = glCreateShader(type);
+	std::string final_code = header + source;
+	const char * c_code = final_code.c_str();
+	glShaderSource(shaderHandle, 1, &c_code, NULL);
+
+	// Compile the shader
+	glCompileShader(shaderHandle);
+
+	// Check for errors
+	int result;
+	glGetShaderiv(shaderHandle, GL_COMPILE_STATUS, &result);
+	if (GL_FALSE == result) {
+		// Compile failed, get log
+		int length = 0;
+		std::string logString;
+		glGetShaderiv(shaderHandle, GL_INFO_LOG_LENGTH, &length);
+		if (length > 0) {
+			char * c_log = new char[length];
+			int written = 0;
+			glGetShaderInfoLog(shaderHandle, length, &written, c_log);
+			logString = c_log;
+			delete[] c_log;
+		}
+		std::string msg = std::string(fileName) + ": shader compliation failed\n";
+		msg += logString;
+
+		throw GLSLProgramException(msg);
+
+	}
+	else {
+		// Compile succeeded, attach shader
+		glAttachShader(handle, shaderHandle);
+	}
+}
+
+void GLSLProgram::link() throw(GLSLProgramException)
+{
+	if (linked) return;
+	if (handle <= 0)
+		throw GLSLProgramException("Program has not been compiled.");
+
+	glLinkProgram(handle);
+
+	int status = 0;
+	glGetProgramiv(handle, GL_LINK_STATUS, &status);
+	if (GL_FALSE == status) {
+		// Store log and return false
+		int length = 0;
+		std::string logString;
+
+		glGetProgramiv(handle, GL_INFO_LOG_LENGTH, &length);
+
+		if (length > 0) {
+			char * c_log = new char[length];
+			int written = 0;
+			glGetProgramInfoLog(handle, length, &written, c_log);
+			logString = c_log;
+			delete[] c_log;
+		}
+
+		throw GLSLProgramException(std::string("Program link failed:\n") + logString);
+	}
+	else {
+		uniformLocations.clear();
+		linked = true;
+	}
+}
+
+void GLSLProgram::use() throw(GLSLProgramException)
+{
+	if (handle <= 0 || (!linked))
+		throw GLSLProgramException("Shader has not been linked");
+	glUseProgram(handle);
+}
+
+int GLSLProgram::getHandle()
+{
+	return handle;
+}
+
+bool GLSLProgram::isLinked()
+{
+	return linked;
+}
+
+void GLSLProgram::bindAttribLocation(GLuint location, const char * name)
+{
+	glBindAttribLocation(handle, location, name);
+}
+
+void GLSLProgram::bindFragDataLocation(GLuint location, const char * name)
+{
+	glBindFragDataLocation(handle, location, name);
+}
+
+void GLSLProgram::setUniform(const char *name, float x, float y, float z)
+{
+	GLint loc = getUniformLocation(name);
+	glUniform3f(loc, x, y, z);
+}
+
+void GLSLProgram::setUniform(const char *name, const vec3 & v)
+{
+	this->setUniform(name, v.x, v.y, v.z);
+}
+
+void GLSLProgram::setUniform(const char *name, const vec4 & v)
+{
+	GLint loc = getUniformLocation(name);
+	glUniform4f(loc, v.x, v.y, v.z, v.w);
+}
+
+void GLSLProgram::setUniform(const char *name, const vec2 & v)
+{
+	GLint loc = getUniformLocation(name);
+	glUniform2f(loc, v.x, v.y);
+}
+
+void GLSLProgram::setUniform(const char *name, const mat4 & m)
+{
+	GLint loc = getUniformLocation(name);
+	glUniformMatrix4fv(loc, 1, GL_FALSE, &m[0][0]);
+}
+
+void GLSLProgram::setUniform(const char *name, const mat3 & m)
+{
+	GLint loc = getUniformLocation(name);
+	glUniformMatrix3fv(loc, 1, GL_FALSE, &m[0][0]);
+}
+
+void GLSLProgram::setUniform(const char *name, float val)
+{
+	GLint loc = getUniformLocation(name);
+	glUniform1f(loc, val);
+}
+
+void GLSLProgram::setUniform(const char *name, int val)
+{
+	GLint loc = getUniformLocation(name);
+	glUniform1i(loc, val);
+}
+
+void GLSLProgram::setUniform(const char *name, GLuint val)
+{
+	GLint loc = getUniformLocation(name);
+	glUniform1ui(loc, val);
+}
+
+void GLSLProgram::setUniform(const char *name, bool val)
+{
+	int loc = getUniformLocation(name);
+	glUniform1i(loc, val);
+}
+
+void GLSLProgram::printActiveUniforms() {
+	GLint numUniforms = 0;
+	glGetProgramInterfaceiv(handle, GL_UNIFORM, GL_ACTIVE_RESOURCES, &numUniforms);
+
+	GLenum properties[] = { GL_NAME_LENGTH, GL_TYPE, GL_LOCATION, GL_BLOCK_INDEX };
+
+	printf("Active uniforms:\n");
+	for (int i = 0; i < numUniforms; ++i) {
+		GLint results[4];
+		glGetProgramResourceiv(handle, GL_UNIFORM, i, 4, properties, 4, NULL, results);
+
+		if (results[3] != -1) continue;  // Skip uniforms in blocks 
+		GLint nameBufSize = results[0] + 1;
+		char * name = new char[nameBufSize];
+		glGetProgramResourceName(handle, GL_UNIFORM, i, nameBufSize, NULL, name);
+		printf("%-5d %s (%s)\n", results[2], name, getTypeString(results[1]));
+		delete[] name;
+	}
+}
+
+void GLSLProgram::printActiveUniformBlocks() {
+	GLint numBlocks = 0;
+
+	glGetProgramInterfaceiv(handle, GL_UNIFORM_BLOCK, GL_ACTIVE_RESOURCES, &numBlocks);
+	GLenum blockProps[] = { GL_NUM_ACTIVE_VARIABLES, GL_NAME_LENGTH };
+	GLenum blockIndex[] = { GL_ACTIVE_VARIABLES };
+	GLenum props[] = { GL_NAME_LENGTH, GL_TYPE, GL_BLOCK_INDEX };
+
+	for (int block = 0; block < numBlocks; ++block) {
+		GLint blockInfo[2];
+		glGetProgramResourceiv(handle, GL_UNIFORM_BLOCK, block, 2, blockProps, 2, NULL, blockInfo);
+		GLint numUnis = blockInfo[0];
+
+		char * blockName = new char[blockInfo[1] + 1];
+		glGetProgramResourceName(handle, GL_UNIFORM_BLOCK, block, blockInfo[1] + 1, NULL, blockName);
+		printf("Uniform block \"%s\":\n", blockName);
+		delete[] blockName;
+
+		GLint * unifIndexes = new GLint[numUnis];
+		glGetProgramResourceiv(handle, GL_UNIFORM_BLOCK, block, 1, blockIndex, numUnis, NULL, unifIndexes);
+
+		for (int unif = 0; unif < numUnis; ++unif) {
+			GLint uniIndex = unifIndexes[unif];
+			GLint results[3];
+			glGetProgramResourceiv(handle, GL_UNIFORM, uniIndex, 3, props, 3, NULL, results);
+
+			GLint nameBufSize = results[0] + 1;
+			char * name = new char[nameBufSize];
+			glGetProgramResourceName(handle, GL_UNIFORM, uniIndex, nameBufSize, NULL, name);
+			printf("    %s (%s)\n", name, getTypeString(results[1]));
+			delete[] name;
+		}
+
+		delete[] unifIndexes;
+	}
+}
+
+void GLSLProgram::printActiveAttribs() {
+	GLint numAttribs;
+	glGetProgramInterfaceiv(handle, GL_PROGRAM_INPUT, GL_ACTIVE_RESOURCES, &numAttribs);
+
+	GLenum properties[] = { GL_NAME_LENGTH, GL_TYPE, GL_LOCATION };
+
+	printf("Active attributes:\n");
+	for (int i = 0; i < numAttribs; ++i) {
+		GLint results[3];
+		glGetProgramResourceiv(handle, GL_PROGRAM_INPUT, i, 3, properties, 3, NULL, results);
+
+		GLint nameBufSize = results[0] + 1;
+		char * name = new char[nameBufSize];
+		glGetProgramResourceName(handle, GL_PROGRAM_INPUT, i, nameBufSize, NULL, name);
+		printf("%-5d %s (%s)\n", results[2], name, getTypeString(results[1]));
+		delete[] name;
+	}
+}
+
+const char * GLSLProgram::getTypeString(GLenum type) {
+	// There are many more types than are covered here, but
+	// these are the most common in these examples.
+	switch (type) {
+	case GL_FLOAT:
+		return "float";
+	case GL_FLOAT_VEC2:
+		return "vec2";
+	case GL_FLOAT_VEC3:
+		return "vec3";
+	case GL_FLOAT_VEC4:
+		return "vec4";
+	case GL_DOUBLE:
+		return "double";
+	case GL_INT:
+		return "int";
+	case GL_UNSIGNED_INT:
+		return "unsigned int";
+	case GL_BOOL:
+		return "bool";
+	case GL_FLOAT_MAT2:
+		return "mat2";
+	case GL_FLOAT_MAT3:
+		return "mat3";
+	case GL_FLOAT_MAT4:
+		return "mat4";
+	default:
+		return "?";
+	}
+}
+
+void GLSLProgram::validate() throw(GLSLProgramException)
+{
+	if (!isLinked())
+		throw GLSLProgramException("Program is not linked");
+
+	GLint status;
+	glValidateProgram(handle);
+	glGetProgramiv(handle, GL_VALIDATE_STATUS, &status);
+
+	if (GL_FALSE == status) {
+		// Store log and return false
+		int length = 0;
+		std::string logString;
+
+		glGetProgramiv(handle, GL_INFO_LOG_LENGTH, &length);
+
+		if (length > 0) {
+			char * c_log = new char[length];
+			int written = 0;
+			glGetProgramInfoLog(handle, length, &written, c_log);
+			logString = c_log;
+			delete[] c_log;
+		}
+
+		throw GLSLProgramException(std::string("Program failed to validate\n") + logString);
+
+	}
+}
+
+int GLSLProgram::getUniformLocation(const char * name)
+{
+	std::map<std::string, int>::iterator pos;
+	pos = uniformLocations.find(name);
+
+	if (pos == uniformLocations.end()) {
+		uniformLocations[name] = glGetUniformLocation(handle, name);
+	}
+
+	return uniformLocations[name];
+}
+
+bool GLSLProgram::fileExists(const std::string & fileName)
+{
+	struct stat info;
+	int ret = -1;
+
+	ret = stat(fileName.c_str(), &info);
+	return 0 == ret;
+}
+```
+
+### VRCUDA/src/GLSLProgram.h
+```
+#ifndef GLSLPROGRAM_H
+#define GLSLPROGRAM_H
+
+#ifdef WIN32
+#pragma warning( disable : 4290 )
+#endif
+
+#include <string>
+#include <map>
+
+#include "Definitions.h"
+
+#include "../include/glm/glm.hpp"
+using glm::vec2;
+using glm::vec3;
+using glm::vec4;
+using glm::mat4;
+using glm::mat3;
+
+#include <stdexcept>
+
+class GLSLProgramException : public std::runtime_error {
+public:
+	GLSLProgramException(const std::string & msg) :
+		std::runtime_error(msg) { }
+};
+
+namespace GLSLShader {
+	enum GLSLShaderType {
+		VERTEX = GL_VERTEX_SHADER,
+		FRAGMENT = GL_FRAGMENT_SHADER,
+		GEOMETRY = GL_GEOMETRY_SHADER,
+		TESS_CONTROL = GL_TESS_CONTROL_SHADER,
+		TESS_EVALUATION = GL_TESS_EVALUATION_SHADER,
+		COMPUTE = GL_COMPUTE_SHADER
+	};
+};
+
+class GLSLProgram
+{
+private:
+	int  handle;
+	bool linked;
+	std::map<std::string, int> uniformLocations;
+
+
+	bool fileExists(const std::string & fileName);
+	std::string getExtension(const char * fileName);
+
+	// Make these private in order to make the object non-copyable
+	GLSLProgram(const GLSLProgram & other) { }
+	GLSLProgram & operator=(const GLSLProgram &other) { return *this; }
+
+public:
+	GLSLProgram();
+	~GLSLProgram();
+
+	void   compileShader(const std::string fileName) throw (GLSLProgramException);
+	void   compileShader(const std::string fileName, GLSLShader::GLSLShaderType type, const std::string header = "") throw (GLSLProgramException);
+	void   compileShader(const std::string header, const std::string source, GLSLShader::GLSLShaderType type,
+		const std::string fileName) throw (GLSLProgramException);
+
+	void   link() throw (GLSLProgramException);
+	void   validate() throw(GLSLProgramException);
+	void   use() throw (GLSLProgramException);
+
+	int    getHandle();
+	bool   isLinked();
+
+	void   bindAttribLocation(GLuint location, const char * name);
+	void   bindFragDataLocation(GLuint location, const char * name);
+
+	GLint  getUniformLocation(const char * name);
+
+	void   setUniform(const char *name, float x, float y, float z);
+	void   setUniform(const char *name, const vec2 & v);
+	void   setUniform(const char *name, const vec3 & v);
+	void   setUniform(const char *name, const vec4 & v);
+	void   setUniform(const char *name, const mat4 & m);
+	void   setUniform(const char *name, const mat3 & m);
+	void   setUniform(const char *name, float val);
+	void   setUniform(const char *name, int val);
+	void   setUniform(const char *name, bool val);
+	void   setUniform(const char *name, GLuint val);
+
+	void   printActiveUniforms();
+	void   printActiveUniformBlocks();
+	void   printActiveAttribs();
+
+	const char * getTypeString(GLenum type);
+};
+
+#endif // GLSLPROGRAM_H
+```
+
+### VRCUDA/src/TextureManager.cpp
+```
+//**********************************************
+//Singleton Texture Manager class
+//Written by Ben English
+//benjamin.english@oit.edu
+//
+//For use with OpenGL and the FreeImage library
+//**********************************************
+
+#include "TextureManager.h"
+#include <iostream>
+#define STB_IMAGE_IMPLEMENTATION
+#include "../include/stb_image.h"
+
+
+TextureManager & TextureManager::Inst()
+{
+	static TextureManager m_inst;	// Guaranteed to be destroyed.
+									// Instantiated on first use.
+
+	return m_inst;
+}
+
+TextureManager::TextureManager()
+{
+	// call this ONLY when linking with FreeImage as a static library
+	#ifdef FREEIMAGE_LIB
+		FreeImage_Initialise();
+	#endif
+}
+
+//these should never be called
+//TextureManager::TextureManager(const TextureManager& tm){}
+//TextureManager& TextureManager::operator=(const TextureManager& tm){}
+	
+TextureManager::~TextureManager()
+{
+	// call this ONLY when linking with FreeImage as a static library
+	#ifdef FREEIMAGE_LIB
+		FreeImage_DeInitialise();
+	#endif
+
+	UnloadAllTextures();
+}
+
+bool TextureManager::LoadTexture2D(const char* filename, const unsigned int texID, 
+									GLenum image_format, GLint internal_format, 
+									GLint level, GLint border)
+{
+
+	
+	//image width and height
+	int width(0), height(0);
+	//OpenGL's image ID to map to
+	GLuint gl_texID;
+	
+	int comp(0);
+
+	stbi_set_flip_vertically_on_load(true);
+
+	//pointer to the image data
+	unsigned char* bits = stbi_load(filename, &width, &height, &comp, 0);
+	
+	//if this somehow one of these failed (they shouldn't), return failure
+	if((bits == 0) || (width == 0) || (height == 0))
+		return false;
+	
+	//if this texture ID is in use, unload the current texture
+	if(m_texID.find(texID) != m_texID.end())
+		glDeleteTextures(1, &(m_texID[texID].id));
+
+	//generate an OpenGL texture ID for this texture
+	glGenTextures(1, &gl_texID);
+	//store the texture ID mapping
+	m_texID[texID].id = gl_texID;
+	m_texID[texID].type = GL_TEXTURE_2D;
+	//bind to the new texture ID
+	glBindTexture(GL_TEXTURE_2D, gl_texID);
+	//store the texture data for OpenGL use
+	glTexImage2D(GL_TEXTURE_2D, level, internal_format, width, height,
+		border, image_format, GL_UNSIGNED_BYTE, bits);
+
+
+	//Free FreeImage's copy of the data
+	stbi_image_free(bits);
+
+	//return success
+	return true;
+}
+
+/**
+* Create an empty texture
+* @params Width the width of the texture
+* @params Height the height of the texture
+* @params internalFormat the internal format of the texture
+* @params pixelFormat the pixel format of the texture
+* @params pixelType the pixel type of the texture
+* @params minFilter the minification filter of the texture
+* @params magFilter the magnification texture of the texture
+* @params data the data of te texture (if any is present)	
+*
+*/
+void TextureManager::CreateTexture2D( const unsigned int texID, GLuint Width, GLuint Height, 
+								GLint internalFormat, GLenum pixelFormat, GLenum pixelType,
+								GLint minFilter, GLint magFilter,
+								GLvoid* data)
+{	
+
+	//OpenGL's image ID to map to
+	GLuint gl_texID;
+
+	//if this texture ID is in use, unload the current texture
+	if(m_texID.find(texID) != m_texID.end())
+		glDeleteTextures(1, &(m_texID[texID].id));
+
+	//generate an OpenGL texture ID for this texture
+	glGenTextures(1, &gl_texID);
+	//store the texture ID mapping
+	m_texID[texID].id = gl_texID;
+	m_texID[texID].type = GL_TEXTURE_2D;
+	//bind to the new texture ID
+	glBindTexture(GL_TEXTURE_2D, gl_texID);
+	//store the texture data for OpenGL use
+
+	glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, Width,Height, 0, pixelFormat, pixelType, data);
+	glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,magFilter);
+	glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,minFilter);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+}
+
+
+/**
+* Create an empty texture
+* @params Width the width of the texture
+* @params Height the height of the texture
+* @params internalFormat the internal format of the texture
+* @params pixelFormat the pixel format of the texture
+* @params pixelType the pixel type of the texture
+* @params minFilter the minification filter of the texture
+* @params magFilter the magnification texture of the texture
+* @params data the data of te texture (if any is present)
+* @params border[4] the color of the border
+*
+*/
+void TextureManager::CreateEmptyTexture2DClampToBorder( const unsigned int texID, GLuint Width, GLuint Height, 
+								GLint internalFormat, GLenum pixelFormat, GLenum pixelType,
+								GLint minFilter, GLint magFilter,
+								GLvoid* data, GLfloat border[4])
+{
+	//OpenGL's image ID to map to
+	GLuint gl_texID;
+
+	//if this texture ID is in use, unload the current texture
+	if(m_texID.find(texID) != m_texID.end())
+		glDeleteTextures(1, &(m_texID[texID].id));
+
+	//generate an OpenGL texture ID for this texture
+	glGenTextures(1, &gl_texID);
+	//store the texture ID mapping
+	m_texID[texID].id = gl_texID;
+	m_texID[texID].type = GL_TEXTURE_2D;
+	//bind to the new texture ID
+	glBindTexture(GL_TEXTURE_2D, gl_texID);
+	//store the texture data for OpenGL use
+
+	glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, Width,Height, 0, pixelFormat, pixelType, data);
+	glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+	glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,magFilter);
+	glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,minFilter);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+}
+
+///Create an empty texture
+void TextureManager::CreateTexture1D( const unsigned int texID, GLuint size, 
+							GLint internalFormat, GLenum pixelFormat, GLenum pixelType,
+							GLint minFilter, GLint magFilter,
+							GLvoid* data)
+{
+	//OpenGL's image ID to map to
+	GLuint gl_texID;
+
+	//if this texture ID is in use, unload the current texture
+	if(m_texID.find(texID) != m_texID.end())
+		glDeleteTextures(1, &(m_texID[texID].id));
+
+	//generate an OpenGL texture ID for this texture
+	glGenTextures(1, &gl_texID);
+	//store the texture ID mapping
+	m_texID[texID].id = gl_texID;
+	m_texID[texID].type = GL_TEXTURE_1D;
+	//bind to the new texture ID
+	glBindTexture(GL_TEXTURE_1D, gl_texID);
+	//store the texture data for OpenGL use
+
+	glTexImage1D(GL_TEXTURE_1D, 0, internalFormat, size, 0, pixelFormat, pixelType, data);
+	glTexParameteri(GL_TEXTURE_1D,GL_TEXTURE_WRAP_S,GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_1D,GL_TEXTURE_MAG_FILTER,magFilter);
+	glTexParameteri(GL_TEXTURE_1D,GL_TEXTURE_MIN_FILTER,minFilter);
+	glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_BASE_LEVEL, 0);
+	glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAX_LEVEL, 0);
+}
+
+
+///Create an empty texture
+void TextureManager::CreateTexture3D( const unsigned int texID, GLuint width, GLuint Height, GLuint Depth, 
+							GLint internalFormat, GLenum pixelFormat, GLenum pixelType,
+							GLint minFilter, GLint magFilter,
+							GLvoid* data)
+{
+	//OpenGL's image ID to map to
+	GLuint gl_texID;
+
+	//if this texture ID is in use, unload the current texture
+	if(m_texID.find(texID) != m_texID.end())
+		glDeleteTextures(1, &(m_texID[texID].id));
+
+	//generate an OpenGL texture ID for this texture
+	glGenTextures(1, &gl_texID);
+	//store the texture ID mapping
+	m_texID[texID].id = gl_texID;
+	m_texID[texID].type = GL_TEXTURE_3D;
+	//bind to the new texture ID
+	glBindTexture(GL_TEXTURE_3D, gl_texID);
+	//store the texture data for OpenGL use
+
+	glTexImage3D(GL_TEXTURE_3D, 0, internalFormat, width, Height, Depth, 0, pixelFormat, pixelType, data);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_3D,GL_TEXTURE_MAG_FILTER,magFilter);
+	glTexParameteri(GL_TEXTURE_3D,GL_TEXTURE_MIN_FILTER,minFilter);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_BASE_LEVEL, 0);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAX_LEVEL, 0);
+}
+	
+	
+
+bool TextureManager::UnloadTexture(const unsigned int texID)
+{
+	bool result(true);
+	//if this texture ID mapped, unload it's texture, and remove it from the map
+	if(m_texID.find(texID) != m_texID.end())
+	{
+		glDeleteTextures(1, &(m_texID[texID].id));
+		m_texID.erase(texID);
+	}
+	//otherwise, unload failed
+	else
+	{
+		result = false;
+	}
+
+	return result;
+}
+
+bool TextureManager::BindTexture(const unsigned int texID)
+{
+	bool result(true);
+	//if this texture ID mapped, bind it's texture as current
+	if(m_texID.find(texID) != m_texID.end())
+		glBindTexture(m_texID[texID].type, m_texID[texID].id);
+	//otherwise, binding failed
+	else
+		result = false;
+
+	return result;
+}
+
+void TextureManager::UnloadAllTextures()
+{
+	//start at the begginning of the texture map
+	std::map<unsigned int, tex>::iterator i = m_texID.begin();
+
+	//Unload the textures untill the end of the texture map is found
+	while(i != m_texID.end()){
+		glDeleteTextures(1, &(i->second.id));
+		++i;
+	}
+	
+
+	//clear the texture map
+	m_texID.clear();
+}
+
+
+///Get OpenGL ID
+GLuint TextureManager::GetID(const unsigned int texID){
+	//if this texture ID mapped, bind it's texture as current
+	if(m_texID.find(texID) != m_texID.end())
+		return  m_texID[texID].id;
+	//otherwise, binding failed
+	else
+		return 1000;
+}
+```
+
+### VRCUDA/src/TextureManager.h
+```
+//**********************************************
+//Singleton Texture Manager class
+//Originally Written by Ben English
+//benjamin.english@oit.edu
+//
+//For use with OpenGL and the FreeImage library
+//**********************************************
+
+#ifndef TextureManager_H
+#define TextureManager_H
+
+
+#include "Definitions.h"
+#include <map>
+
+class TextureManager
+{
+public:
+	static TextureManager &Inst();
+	virtual ~TextureManager();
+
+	//load a texture an make it the current texture
+	//if texID is already in use, it will be unloaded and replaced with this texture
+	bool LoadTexture2D(const char* filename,	//where to load the file from
+						const unsigned int texID,			//arbitrary id you will reference the texture by
+															//does not have to be generated with glGenTextures
+						GLenum image_format = GL_RGB,		//format the image is in
+						GLint internal_format = GL_RGB,		//format to store the image in
+						GLint level = 0,					//mipmapping level
+						GLint border = 0);					//border size
+
+	///Create an empty texture 2D
+	void CreateTexture2D( const unsigned int texID, GLuint Width = 512, GLuint Height  = 512, 
+							GLint internalFormat = GL_RGB, GLenum pixelFormat = GL_RGB, GLenum pixelType = GL_UNSIGNED_BYTE,
+							GLint minFilter = GL_NEAREST, GLint magFilter = GL_NEAREST,
+							GLvoid* data = 0);
+
+	///Create an empty texture with a border 2D
+	void CreateEmptyTexture2DClampToBorder( const unsigned int texID, GLuint Width = 512, GLuint Height  = 512, 
+							GLint internalFormat = GL_RGB, GLenum pixelFormat = GL_RGB, GLenum pixelType = GL_UNSIGNED_BYTE,
+							GLint minFilter = GL_NEAREST, GLint magFilter = GL_NEAREST,
+							GLvoid* data = 0, GLfloat border[4] = NULL);
+
+	///Create an empty texture 1D
+	void CreateTexture1D( const unsigned int texID, GLuint size = 512, 
+							GLint internalFormat = GL_RGB, GLenum pixelFormat = GL_RGB, GLenum pixelType = GL_UNSIGNED_BYTE,
+							GLint minFilter = GL_NEAREST, GLint magFilter = GL_NEAREST,
+							GLvoid* data = 0);
+
+	///Create an empty texture 3D
+	void CreateTexture3D( const unsigned int texID, GLuint width = 512, GLuint Height  = 512, GLuint Depth  = 512, 
+							GLint internalFormat = GL_RGB, GLenum pixelFormat = GL_RGB, GLenum pixelType = GL_UNSIGNED_BYTE,
+							GLint minFilter = GL_NEAREST, GLint magFilter = GL_NEAREST,
+							GLvoid* data = 0);
+
+	//free the memory for a texture
+	bool UnloadTexture(const unsigned int texID);
+
+	//set the current texture
+	bool BindTexture(const unsigned int texID);
+
+	//free all texture memory
+	void UnloadAllTextures();
+
+	///Get OpenGL ID
+	GLuint GetID(const unsigned int texID);
+
+protected:
+
+	struct tex{
+		GLuint id;
+		GLenum type;
+	};
+
+	TextureManager();
+	TextureManager(const TextureManager& tm);
+	TextureManager& operator=(const TextureManager& tm);
+
+	std::map<unsigned int, tex> m_texID;
+};
+
+#endif
+```
+
+### VRCUDA/src/Timer.cpp
+```
+#include "Timer.h"
+
+#ifdef MEASURE_TIME
+TimerManager::TimerManager(){
+
+}
+
+void TimerManager::Init(){
+	LARGE_INTEGER temp;
+	QueryPerformanceFrequency((LARGE_INTEGER *)&temp);
+	freq = ((double)temp.QuadPart) / 1000.0; //convert to the time needed
+}
+
+void TimerManager::Start(){
+	QueryPerformanceCounter((LARGE_INTEGER *)&start_time);	//set start time
+}
+
+void TimerManager::Stop(){
+	QueryPerformanceCounter((LARGE_INTEGER *)&end_time);	//set start time
+}
+
+double TimerManager::GetTime(){
+	return (end_time.QuadPart - start_time.QuadPart) / freq;
+}
+
+double TimerManager::GetAverageTime(int count){
+	return GetTime() / count;
+}
+#endif
+```
+
+### VRCUDA/src/Timer.h
+```
+#ifndef Timer_H
+#define Timer_H
+
+
+#include "Definitions.h"
+
+
+#ifdef MEASURE_TIME
+class TimerManager
+{
+public:
+	TimerManager();
+	void Init();
+	void Start();
+	void Stop();
+	double GetTime();
+	double GetAverageTime(int count);
+
+private:
+	double freq;
+	LARGE_INTEGER start_time, end_time;
+};
+#endif
+
+#endif
+```
+
+### VRCUDA/src/TransferFunction.cpp
+```
+#include "TransferFunction.h"
+#include <fstream>
+#include <iostream>
+
+bool operator<(const ControlPoint &point1, const ControlPoint &point2)
+{
+	if (point1.scalar > point2.scalar) return true;
+	if (point1.scalar == point2.scalar)
+		if (point1.color.a < point2.color.a)return true;
+	return false;
+}
+
+//Default constructor
+TransferFunction::TransferFunction(void) : m_imageW(IMAGEWIDHT), m_imageH(IMAGEHEIGHT), m_ptsCounter(0), m_lastPicking(0), m_dragDrop(false), m_dragDropColor(false), m_dragDropPicker(false), m_pointSelected(1), m_palleteCreated(false), m_updateTexture(true)
+{
+	m_baseColors[0] = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+	m_baseColors[1] = glm::vec4(1.0f, 1.0f, 0.0f, 1.0f);
+	m_baseColors[2] = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f);
+	m_baseColors[3] = glm::vec4(0.0f, 1.0f, 1.0f, 1.0f);
+	m_baseColors[4] = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f); 
+	m_baseColors[5] = glm::vec4(1.0f, 0.0f, 1.0f, 1.0f); 
+
+	m_currentColor = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+	m_PosHue = glm::ivec2(MINWPC + 6, MINHPC + 6);
+
+
+	m_isHistogram = false;
+	m_histogram_scale = 1.0f;
+	m_scalingHistogram = false;
+}
+
+//Default constructor
+TransferFunction::~TransferFunction(void)
+{
+	glDeleteVertexArrays(1, &m_iVAO);
+	glDeleteBuffers(1, &m_iVBO);
+	glDeleteBuffers(1, &m_iVBOIndex);
+}
+
+
+//Function to init context
+void TransferFunction::InitContext(int *windowsW, int *windowsH, const char * file, int posx, int posy)
+{
+
+	//Create texture!!
+	glActiveTexture(GL_TEXTURE0);
+
+	//Create new empty textures
+	TextureManager::Inst().CreateTexture1D(TEXTURE_TRANSFER_FUNC, 256, GL_RGBA16F, GL_RGBA, GL_FLOAT, GL_NEAREST, GL_NEAREST);
+
+	glGenVertexArrays(1, &m_iVAO);
+	glGenBuffers(1, &m_iVBO);
+	glGenBuffers(1, &m_iVBOIndex);
+
+
+	//Load the tetures!!
+	glActiveTexture(GL_TEXTURE0);
+
+	string ruta = PROJECT_DIR + string("assets/transferFunction.png");
+
+	//Graphic
+	if (!TextureManager::Inst().LoadTexture2D(ruta.c_str(), TEXTURE_TRANSFER_FUNC0, GL_RGBA, GL_RGBA)){
+		printf("Problem loading a %s\n", ruta.c_str());
+		exit(EXIT_FAILURE);
+	}
+
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+
+	//Point
+	ruta = PROJECT_DIR + string("assets/point.png");
+	if (!TextureManager::Inst().LoadTexture2D(ruta.c_str(), TEXTURE_TRANSFER_FUNC1, GL_RGBA, GL_RGBA)){
+		printf("Problem loading a %s\n", ruta.c_str());
+		exit(EXIT_FAILURE);
+	}
+
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+
+	//Cursor
+	ruta = PROJECT_DIR + string("assets/selector.png");
+	if (!TextureManager::Inst().LoadTexture2D(ruta.c_str(), TEXTURE_TRANSFER_FUNC2, GL_RGBA, GL_RGBA)){
+		printf("Problem loading a %s\n", ruta.c_str());
+		exit(EXIT_FAILURE);
+	}
+
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+
+	//Set the GUI to visible
+	m_isVisible = true;
+
+	m_windowsW = windowsW;
+	m_windowsH = windowsH;
+
+	//Original position of the user
+	if (posx == -1 || posy == -1) m_corner = true;
+	else m_corner = false;
+
+	m_realposx = posx;
+	m_realposx = posy;
+
+	Resize(windowsW, windowsH);
+
+	loadFile(file);
+
+	//Initiate the GUI invisible
+	m_isVisible = false;
+
+	//Load the shaders
+	try{
+		m_program.compileShader(PROJECT_DIR + string("shaders/TransferFunction.vert"), GLSLShader::VERTEX);
+		m_program.compileShader(PROJECT_DIR + string("shaders/TransferFunction.frag"), GLSLShader::FRAGMENT);
+		m_program.link();
+	}
+	catch (GLSLProgramException & e) {
+		std::cerr << e.what() << std::endl;
+		exit(EXIT_FAILURE);
+	}
+}
+
+bool TransferFunction::loadFile(const char * file)
+{
+	bool load = false;
+	m_ptsCounter = 0;
+
+
+	if (file != NULL){
+
+
+		std::ifstream input(file, std::ios::in);
+
+		if (!input.is_open()){
+			printf("Couldn't load transfer function file: %s", file);
+		}
+		else{
+
+			int N;
+			input >> N;
+
+			for (int i = 0; i < N; ++i){
+				int s;
+				float r, g, b, a;
+				input >> s;
+				input >> r >> g >> b >> a;
+				m_controlPointVector[m_ptsCounter].scalar = s;
+				m_controlPointVector[m_ptsCounter].color = glm::vec4(r, g, b, a);
+				m_controlPointVector[m_ptsCounter].hsv = RGBtoHSV(glm::vec3(m_controlPointVector[m_ptsCounter].color));
+				++m_ptsCounter;
+			}
+
+			input.close();
+			load = true;
+		}
+
+	}
+
+	if (!load){
+		//Set the first point
+		m_controlPointVector[m_ptsCounter].scalar = 0;
+		m_controlPointVector[m_ptsCounter].color = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
+		m_controlPointVector[m_ptsCounter].hsv = RGBtoHSV(glm::vec3(m_controlPointVector[m_ptsCounter].color));
+		++m_ptsCounter;
+
+		//Set the last point
+		m_controlPointVector[m_ptsCounter].scalar = 255;
+		m_controlPointVector[m_ptsCounter].color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+		m_controlPointVector[m_ptsCounter].hsv = RGBtoHSV(glm::vec3(m_controlPointVector[m_ptsCounter].color));
+		++m_ptsCounter;
+	}
+
+	//sort the points
+	SortPoints();
+
+	//Set the controllers at position 0
+	m_pointSelected = 1;
+	m_PosTF = ScalarAlphaToScreenPosTF(m_controlPointVector[m_pointSelected].scalar, m_controlPointVector[m_pointSelected].color.a);
+	m_PosHue = HSVToScreenPosHue(m_controlPointVector[m_pointSelected].hsv);
+	m_PosSV = HSVToScreenPosSV(m_controlPointVector[m_pointSelected].hsv);
+	//modify current color
+	setCurrentColor();
+	UpdatePallete();
+
+	//Set non selected point by now
+	m_pointSelected = 0;
+
+	return load;
+}
+
+//Function to rezise the windows
+void TransferFunction::Resize(int *windowsW, int *windowsH){
+
+	m_windowsW = windowsW;
+	m_windowsH = windowsH;
+
+	//Set the position of the transfer function
+	if (m_corner)	m_posx = m_realposx = (*windowsW >  SIZEW) ? *windowsW - SIZEW : 0;
+	else		m_posx = m_realposx = (*windowsW - m_realposx < SIZEW) ? ((*windowsW < SIZEW) ? 0 : *windowsW - SIZEW) : m_realposx;
+
+	//Dont let it pass the corner
+	if (m_realposx <0) m_realposx = m_posx = 0;
+
+	//Set the position of the transfer function
+	if (m_corner){
+		m_posy = *windowsH - SIZEH;
+		m_realposy = 0;
+	}
+	else{
+		if (m_realposy + SIZEH > *windowsH) m_realposy = *windowsH - SIZEH;
+		else m_realposy = m_realposy;
+
+		m_posy = (*windowsH - m_realposy - SIZEH < 0) ? ((*windowsH < SIZEH) ? *windowsH - SIZEH : 0) : *windowsH - m_realposy - SIZEH;
+
+
+	}
+
+	//Dont let it pass the corner
+	if (m_posy + SIZEH > *windowsH)	m_posy = *windowsH - SIZEH, m_realposy = 0;
+}
+
+//Function to display the transfer function
+void TransferFunction::Display()
+{
+	if (!m_isVisible)
+		return;
+
+	glViewport(m_posx, m_posy, SIZEW, SIZEH);
+
+	m_mProjMatrix = glm::ortho(0.0f, float(SIZEW), 0.0f, float(SIZEH));
+
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glEnable(GL_BLEND);
+
+	glDisable(GL_DEPTH_TEST);
+
+	glActiveTexture(GL_TEXTURE0);
+	TextureManager::Inst().BindTexture(TEXTURE_TRANSFER_FUNC0);
+
+	//>>>>>>>>>>>>>>>Drawing the image with the control points
+	float ww = float(m_imageW), hh = float(m_imageH);
+
+	float alpha = 0.5f;
+
+	if (m_dragDropWindow) alpha = 0.7f;
+
+	glm::vec4 color = glm::vec4(1.0f, 1.0f, 1.0f, alpha);
+
+	m_mModelViewMatrix =
+		glm::scale(glm::translate(glm::mat4(),
+		glm::vec3(ww*0.5f, -hh*0.5f + SIZEH, 0.0f)),	//Translate by half + to its position
+		glm::vec3(ww, hh, 1.0f));							//Scale
+
+	//Enable the shader
+	m_program.use();
+
+	m_program.setUniform("mProjection", m_mProjMatrix);
+	
+
+	//Draw a Cube
+	m_program.setUniform("vColor1", color);
+	m_program.setUniform("Usetexture", 1);
+	m_program.setUniform("text", 0);
+	m_program.setUniform("Mode", 0);
+	m_program.setUniform("mModelView", m_mModelViewMatrix);
+	VBOQuad::Instance().Draw();
+	//>>>>>>>>>>>>>>>END Drawing the image with the control points
+
+	//>>>>>>>>>>>>>>>Draw the color chooser
+	float iniH = float(SIZEH - (m_imageH + 2)), iniW;
+	float hh2 = float(m_imageH) + 2, hh3 = float(m_imageH) + 30, sizeW = float(m_imageW) / 6.0f, sizeH = 30;
+
+	for (int i = 0; i<6; i++)
+	{
+		m_mModelViewMatrix =
+			glm::scale(glm::translate(glm::mat4(),
+			glm::vec3(sizeW*0.5f + sizeW * i, -sizeH*0.5f + iniH, 0.0f)),	//Translate by half + to its position
+			glm::vec3(sizeW, sizeH, 1.0f));									//Scale
+
+		//Draw a Cube
+		m_program.setUniform("vColor1", m_baseColors[i]);
+		m_program.setUniform("vColor2", m_baseColors[(i + 1) % 6]);
+		m_program.setUniform("vColor3", m_baseColors[(i + 1) % 6]);
+		m_program.setUniform("vColor4", m_baseColors[i]);
+		m_program.setUniform("Usetexture", 0);
+		m_program.setUniform("Mode", 1);
+		m_program.setUniform("mModelView", m_mModelViewMatrix);
+		VBOQuad::Instance().Draw();
+	}
+	//>>>>>>>>>>>>>>>END Draw the color chooser
+
+
+	//>>>>>>>>>>>>>>>Draw the selector
+	glActiveTexture(GL_TEXTURE0);
+	TextureManager::Inst().BindTexture(TEXTURE_TRANSFER_FUNC2);
+
+	sizeW = sizeW / 6.0f;
+	color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+
+	m_mModelViewMatrix =
+		glm::scale(glm::translate(glm::mat4(),
+		glm::vec3(sizeW*0.5f + m_PosHue.x, -sizeH*0.5f + iniH, 0.0f)),	//Translate by half + to its position
+		glm::vec3(sizeW, sizeH, 1.0f));											//Scale
+
+	//Draw a Quad
+	m_program.setUniform("vColor1", color);
+	m_program.setUniform("Usetexture", 1);
+	m_program.setUniform("text", 0);
+	m_program.setUniform("Mode", 0);
+	m_program.setUniform("mModelView", m_mModelViewMatrix);
+	VBOQuad::Instance().Draw();
+	//>>>>>>>>>>>>>>>END Draw the selector
+
+	//>>>>>>>>>>>>>>>Draw the other image
+	color = glm::vec4(1.0f, 1.0f, 1.0f, alpha);
+
+	iniH = float(SIZEH - (m_imageH + 34));
+	sizeW = float(m_imageW);
+	sizeH = float(m_imageH);
+
+	m_mModelViewMatrix =
+		glm::scale(glm::translate(glm::mat4(),
+		glm::vec3(sizeW*0.5f, -sizeH*0.5f + iniH, 0.0f)),	//Translate by half + to its position
+		glm::vec3(sizeW, sizeH, 1.0f));											//Scale
+
+	//Draw a Quad
+	m_program.setUniform("vColor1", glm::vec4(0.0f, 0.0f, 0.0f, alpha));
+	m_program.setUniform("vColor2", glm::vec4(0.0f, 0.0f, 0.0f, alpha));
+	m_program.setUniform("vColor3", m_currentColor);
+	m_program.setUniform("vColor4", glm::vec4(1.0f, 1.0f, 1.0f, alpha));
+	m_program.setUniform("Usetexture", 0);
+	m_program.setUniform("Mode", 1);
+	m_program.setUniform("mModelView", m_mModelViewMatrix);
+	VBOQuad::Instance().Draw();
+	//>>>>>>>>>>>>>>>END Draw the other image
+
+
+
+	//>>>>>>>>>>>>>>>END Draw HISTOGRAM
+	if (m_isHistogram){
+		glm::ivec2 pos = ScalarAlphaToScreenPosTF(0, 0);
+		m_mModelViewMatrix =	glm::translate(glm::scale(glm::translate(glm::mat4(), 
+								glm::vec3(MINW, SIZEH - MAXH, 0)),  //translate to its position
+								glm::vec3(1.0f, m_histogram_scale, 1.0)),  //scale by some factor
+								glm::vec3(-MINW, -(SIZEH - MAXH), 0.0f)) //translate to origin
+								;
+
+		m_program.setUniform("vColor1", glm::vec4(1.0f, 0.75f, 0.0f, 0.5f));
+
+		m_program.setUniform("Mode", 0);
+		m_program.setUniform("mModelView", m_mModelViewMatrix);
+		m_program.setUniform("Usetexture", 0);
+
+		//draw histogram!!!
+		glBindVertexArray(m_iVAO);
+			glDrawElements(GL_TRIANGLES, histogram_size, GL_UNSIGNED_INT, 0);
+		glBindVertexArray(0);
+	}
+	//>>>>>>>>>>>>>>>END Draw HISTOGRAM
+
+	//>>>>>>>>>>>>>>>Draw Colors in graphics
+	static float GrsfAlpha = 0.5;
+
+	for (int point = 1; point < m_ptsCounter; point++){
+
+		glm::ivec2 Pos0 = ScalarAlphaToScreenPosTF(m_controlPointVector[point-1].scalar, m_controlPointVector[point-1].color.a);
+		glm::ivec2 Pos1 = ScalarAlphaToScreenPosTF(m_controlPointVector[point].scalar, m_controlPointVector[point].color.a);
+
+		//Draw upper triangle		
+		sizeW = float(abs(Pos1.x - Pos0.x));
+		sizeH = float(abs(Pos1.y - Pos0.y));
+
+		iniH = float(std::min(Pos1.y, Pos0.y));
+		iniW = float(std::min(Pos1.x, Pos0.x));
+
+		m_mModelViewMatrix =
+			glm::scale(glm::translate(glm::mat4(),
+			glm::vec3(sizeW*0.5f + iniW, -sizeH*0.5f + SIZEH - iniH, 0.0f)),	//Translate by half + to its position
+			glm::vec3(sizeW, sizeH, 1.0f));											//Scale
+
+
+		m_program.setUniform("vColor1", glm::vec4(m_controlPointVector[point - 1].color.x, m_controlPointVector[point - 1].color.y, m_controlPointVector[point - 1].color.z, GrsfAlpha));
+		m_program.setUniform("vColor2", glm::vec4(m_controlPointVector[point].color.x, m_controlPointVector[point].color.y, m_controlPointVector[point].color.z, GrsfAlpha));
+		m_program.setUniform("vColor3", glm::vec4(m_controlPointVector[point].color.x, m_controlPointVector[point].color.y, m_controlPointVector[point].color.z, GrsfAlpha));
+		m_program.setUniform("vColor4", glm::vec4(m_controlPointVector[point - 1].color.x, m_controlPointVector[point - 1].color.y, m_controlPointVector[point - 1].color.z, GrsfAlpha));
+		m_program.setUniform("Usetexture", 0);
+		if (Pos0.y > Pos1.y) m_program.setUniform("Mode", 2);
+		else m_program.setUniform("Mode", 3);
+		m_program.setUniform("mModelView", m_mModelViewMatrix);
+		VBOQuad::Instance().Draw();
+
+
+		//Draw lower quad
+		sizeW = float(Pos1.x - Pos0.x);
+		sizeH = float(MAXH - std::max(Pos1.y, Pos0.y));
+
+		if (sizeH > 0){
+			m_mModelViewMatrix =
+				glm::scale(glm::translate(glm::mat4(),
+				glm::vec3(sizeW*0.5f + iniW, sizeH*0.5f + SIZEH - MAXH, 0.0f)),	//Translate by half + to its position
+				glm::vec3(sizeW, sizeH, 1.0f));											//Scale
+
+			/*m_program.setUniform("vColor1", glm::vec4(m_controlPointVector[point - 1].color.x, m_controlPointVector[point - 1].color.y, m_controlPointVector[point - 1].color.z, GrsfAlpha));
+			m_program.setUniform("vColor2", glm::vec4(m_controlPointVector[point].color.x, m_controlPointVector[point].color.y, m_controlPointVector[point].color.z, GrsfAlpha));
+			m_program.setUniform("vColor3", glm::vec4(m_controlPointVector[point].color.x, m_controlPointVector[point].color.y, m_controlPointVector[point].color.z, GrsfAlpha));
+			m_program.setUniform("vColor4", glm::vec4(m_controlPointVector[point - 1].color.x, m_controlPointVector[point - 1].color.y, m_controlPointVector[point - 1].color.z, GrsfAlpha));*/
+			m_program.setUniform("Mode", 1);
+			m_program.setUniform("mModelView", m_mModelViewMatrix);
+			VBOQuad::Instance().Draw();
+		}
+
+	}
+	//>>>>>>>>>>>>>>>END Colors in graphics
+
+
+	//>>>>>>>>>>>>>>>Draw each point
+	glActiveTexture(GL_TEXTURE0);
+	TextureManager::Inst().BindTexture(TEXTURE_TRANSFER_FUNC1);
+
+	for (int point = 0; point < m_ptsCounter; point++)
+	{
+		if (point != m_pointSelected - 1) color = glm::vec4(1.0f, 1.0f, 1.0f, 0.5f);
+		else color = glm::vec4(0.0f, 0.8f, 1.0f, alpha);
+
+
+		glm::ivec2 pos = ScalarAlphaToScreenPosTF(m_controlPointVector[point].scalar, m_controlPointVector[point].color.a);
+
+		m_mModelViewMatrix =
+			glm::scale(glm::translate(glm::mat4(),
+			glm::vec3(pos.x, -pos.y + SIZEH, 0.0f)),	//Translate to its position
+			glm::vec3(10.0f, 10.0f, 1.0f));											//Scale
+
+		//Draw a Quad
+		m_program.setUniform("vColor1", color);
+		m_program.setUniform("Usetexture", 1);
+		m_program.setUniform("Mode", 0);
+		m_program.setUniform("mModelView", m_mModelViewMatrix);
+		VBOQuad::Instance().Draw();
+	}
+	//>>>>>>>>>>>>>>>END Draw each point
+
+
+	//>>>>>>>>>>>>>>>Draw circle selector
+	color = glm::vec4(1.0f, 1.0f, 1.0f, alpha);
+
+	m_mModelViewMatrix =
+		glm::scale(glm::translate(glm::mat4(),
+		glm::vec3(m_PosSV.x, -5.0f - m_PosSV.y + SIZEH, 0.0f)),	//Translate to its position
+		glm::vec3(10, 10, 1.0f));											//Scale
+
+	//Draw a Quad
+	m_program.setUniform("vColor1", color);
+	m_program.setUniform("Usetexture", 1);
+	m_program.setUniform("Mode", 0);
+	m_program.setUniform("mModelView", m_mModelViewMatrix);
+	VBOQuad::Instance().Draw();
+	//>>>>>>>>>>>>>>>END Draw circle selector
+
+	glDisable(GL_BLEND);
+	glEnable(GL_DEPTH_TEST);
+
+	glViewport(0, 0, *m_windowsW, *m_windowsH);
+}
+
+//Function to process the mouse button
+bool TransferFunction::MouseButton(int w, int h, int button, int action)
+{
+	if (!m_isVisible)
+		return false;
+
+	int oldh = h, oldw = w;
+	w -= m_realposx;
+	h -= m_realposy;
+
+	if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS)
+	{
+		//Graphic area
+		if (w >= MINW - 5 && w <= MAXW + 5 && h >= MINH - 5 && h <= MAXH + 5)
+		{
+			//If you dont pick a control point
+			if (!Picking(w, h))
+			{
+				//Add a point if you can
+				if (m_ptsCounter < MAXPOINT - 1)
+				{
+					if (h < MINH) h = MINH;
+					if (h > MAXH) h = MAXH;
+					if (w < MINW) w = MINW;
+					if (w > MAXW) w = MAXW;
+
+					m_PosTF.x = w;
+					m_PosTF.y = h;
+					m_pointSelected = ++m_ptsCounter;
+					UpdateColorPoint();
+
+					SortPoints();
+
+					//Allow this point to drag and drop
+					Picking(w, h);
+
+					
+					
+				}
+			}
+			else
+			{
+				//If we pick a point update the color chooser and the color selector
+				m_PosTF = ScalarAlphaToScreenPosTF(m_controlPointVector[m_pointSelected - 1].scalar, m_controlPointVector[m_pointSelected - 1].color.a);
+				m_PosHue = HSVToScreenPosHue(m_controlPointVector[m_pointSelected - 1].hsv);
+				m_PosSV = HSVToScreenPosSV(m_controlPointVector[m_pointSelected - 1].hsv);
+				setCurrentColor();
+			}
+
+			//Either way update the pallete
+			UpdatePallete();
+
+			return true;
+		}
+		else if (w >= MINWSC && w <= MAXWSC && h >= MINHSC && h <= MAXHSC)
+		{
+			//Allways allow picking the color selector
+			m_dragDropColor = true;
+
+			//Move to the position of the mouse
+			m_PosHue.x = w;
+
+			//Update the pallete!!!
+			if (m_pointSelected != 0) UpdateColorPoint();
+			UpdatePallete();
+			return true;
+		}
+		else if (w >= MINWPC && w <= MAXWPC && h >= MINHPC && h <= MAXHPC)
+		{
+			//Allways allow picking the color picker
+			m_dragDropPicker = true;
+
+			//Clamp coordinates
+			h = h - 5;
+			if (w < MINWPC + 5) w = MINWPC + 5; if (w > MAXWPC - 5) w = MAXWPC - 5;
+			if (h < MINHPC + 5) h = MINHPC + 5; if (h > MAXHPC - 5) h = MAXHPC - 5;
+
+			//Change its position
+			m_PosSV.x = w;
+			m_PosSV.y = h;
+
+			//Update the pallete!!!
+			if (m_pointSelected != 0) UpdateColorPoint();
+			UpdatePallete();
+			return true;
+		}
+		else if (w >= 0 && w <= 365 && h >= 0 && h <= 455)
+		{
+			//If you dont select anything drag the GUI
+			m_antx = oldw;
+			m_anty = oldh;
+			m_dragDropWindow = true;
+
+			return true;
+		}
+	}
+	else if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_PRESS)
+	{
+		
+		if (DeletePoint(w, h)){
+			//Delete a point with right click
+			return true;
+		}
+		else{
+			//scale histogram
+			m_antx = oldw;
+			m_anty = oldh;
+			m_scalingHistogram = true;
+			
+			return true;
+		}
+
+		return false;
+	}
+	else if (action == GLFW_RELEASE)
+	{
+		//Reset all te drag and drops
+		m_dragDrop = false;
+		m_dragDropColor = false;
+		m_dragDropPicker = false;
+		m_dragDropWindow = false;
+		m_scalingHistogram = false;
+	}
+
+	return false;
+}
+
+//funtion with the mouse movement actions
+bool TransferFunction::CursorPos(int w, int h)
+{
+	if (!m_isVisible)
+		return false;
+
+	int oldh = h, oldw = w;
+	w -= m_realposx;
+	h -= m_realposy;
+
+	static int DIVBASESC = MAXWSC / 6;
+
+	if (m_dragDrop)
+	{
+		//Drag and drop the points
+		if (w > MAXW) w = MAXW;	if (h > MAXH) h = MAXH;
+		if (w < MINW) w = MINW;	if (h < MINH) h = MINH;
+
+		if (m_lastPicking - 1 != 0 && m_lastPicking != m_ptsCounter) m_PosTF.x = w;
+		m_PosTF.y = h;
+
+		if (m_pointSelected != 0) UpdateColorPoint();
+		SortPoints();
+		UpdatePallete();
+
+		return true;
+	}
+	else if (m_dragDropColor)
+	{
+		if (w > MAXWSC - 5) w = MAXWSC - 5;	if (w < MINWSC) w = MINWSC;
+
+		//Allways allow picking the color selector
+		m_dragDropColor = true;
+
+		//Move to the position of the mouse
+		m_PosHue.x = w;
+
+		//Update the point!!!
+		if (m_pointSelected != 0) UpdateColorPoint();
+		UpdatePallete();
+
+		return true;
+	}
+	else if (m_dragDropPicker)
+	{
+		//Allways allow picking the color picker
+		h = h - 5;
+		if (w < MINWPC + 5) w = MINWPC + 5; if (w > MAXWPC - 5) w = MAXWPC - 5;
+		if (h < MINHPC + 5) h = MINHPC + 5; if (h > MAXHPC - 5) h = MAXHPC - 5;
+
+		//Change its position
+		m_PosSV.x = w;
+		m_PosSV.y = h;
+
+		//Update the selected Point!!!
+		if (m_pointSelected != 0) UpdateColorPoint();
+		UpdatePallete();
+
+		return true;
+	}
+	else if (m_dragDropWindow)
+	{
+		//Translate by the difference of the 2 clicks
+		int tx = oldw - m_antx;
+		int ty = oldh - m_anty;
+
+		//Update the new coordinates
+		if (m_corner) m_corner = false;
+
+		m_realposx += tx;
+		m_realposy += ty;
+
+		//Resize the window
+		Resize(m_windowsW, m_windowsH);
+
+		m_antx = oldw;
+		m_anty = oldh;
+
+		return true;
+	}
+	else if (m_scalingHistogram)
+	{
+
+		int tx = oldw - m_antx;
+		int ty = oldh - m_anty;
+
+		//scale histogram by mouse
+		m_histogram_scale += -ty * 0.05f;
+
+		//don't let scale below 1.0f
+		if (m_histogram_scale < 1.0f) m_histogram_scale = 1.0f;
+
+		m_antx = oldw;
+		m_anty = oldh;
+	}
+
+	return false;
+}
+
+//Function to delete a point
+bool TransferFunction::DeletePoint(int w, int h)
+{
+	int saveLastSelectedPoint = m_pointSelected;
+
+	//Check if there is a point
+	if (Picking(w, h))
+	{
+		if (m_lastPicking != 1 && m_lastPicking != m_ptsCounter)
+		{
+			if (saveLastSelectedPoint == m_lastPicking)
+				m_pointSelected = 0;
+			else
+				m_pointSelected = saveLastSelectedPoint;
+
+			SortPoints(m_lastPicking - 1);
+			UpdatePallete();
+			m_pointSelected = 0;
+			m_lastPicking = -1;
+			m_ptsCounter--;
+		}
+		else
+			m_pointSelected = 0;
+
+		m_dragDrop = false;
+		return true;
+	}
+
+	return false;
+}
+
+//Function to do picking
+bool TransferFunction::Picking(int x, int y)
+{
+	//Search for the point
+	for (int point = 0; point < m_ptsCounter; point++){
+
+		glm::ivec2 pos = ScalarAlphaToScreenPosTF(m_controlPointVector[point].scalar, m_controlPointVector[point].color.a);
+
+		//Take advantage of the point's sorting
+		if (x < pos.x - 5) break;
+
+		//The right coordinate
+		if (pos.x + 5 > x && pos.x - 5 < x &&
+			pos.y + 5 > y && pos.y - 5 < y){
+			m_pointSelected = m_lastPicking = point + 1;
+			m_dragDrop = true;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+//Function to sort the points
+void TransferFunction::SortPoints(int jumpPoint)
+{
+	std::priority_queue< ControlPoint > pilaState;
+	int less = (jumpPoint == -1) ? 0 : 1;
+
+	//Insert the points in a priority queue
+	for (int point = 0; point < m_ptsCounter; point++){
+		if (point != jumpPoint){
+			m_controlPointVector[point].drag = ((m_dragDrop) && (point == m_lastPicking - 1));
+			m_controlPointVector[point].selected = (point == m_pointSelected - 1);
+			pilaState.push(m_controlPointVector[point]);
+		}
+	}
+
+	//Put them back into the array
+	for (int point = 0; point < m_ptsCounter - less; point++){
+
+		m_controlPointVector[point] = pilaState.top();
+		if (m_controlPointVector[point].drag) m_lastPicking = point + 1;
+		if (m_controlPointVector[point].selected) m_pointSelected = point + 1;
+
+		m_controlPointVector[point].drag = false;
+		m_controlPointVector[point].selected = false;
+		pilaState.pop();
+
+	}
+}
+
+//Function to update pallete of colors
+void TransferFunction::UpdatePallete()
+{
+	int index = 0;
+
+	//interpolation between two scalar values
+	for (int point = 1; point < m_ptsCounter; point++)
+	{
+		int dist = m_controlPointVector[point].scalar - m_controlPointVector[point - 1].scalar;
+		int stepsNumber = dist;
+
+		float floatStepSize = 1.0f / float(dist);
+
+		for (int step = 0; step < stepsNumber; step++, index++)
+		{
+			glm::vec4 currentColor = m_controlPointVector[point - 1].color * (1.0f - (floatStepSize * (float)step)) + m_controlPointVector[point].color * (floatStepSize * (float)step);
+			m_colorPalette[index][0] = currentColor.x;
+			m_colorPalette[index][1] = currentColor.y;
+			m_colorPalette[index][2] = currentColor.z;
+			m_colorPalette[index][3] = currentColor.w;
+		}
+	}
+
+	//If there are positions to fill
+	if (index < 256)
+	{
+		glm::vec4 color = m_controlPointVector[m_ptsCounter - 1].color;
+
+		for (int step = index; step < 256; step++, index++)
+		{
+			m_colorPalette[index][0] = color.x;
+			m_colorPalette[index][1] = color.y;
+			m_colorPalette[index][2] = color.z;
+			m_colorPalette[index][3] = color.w;
+		}
+	}
+
+	//Load the new texture
+	TextureManager::Inst().BindTexture(TEXTURE_TRANSFER_FUNC);
+	glTexSubImage1D(GL_TEXTURE_1D, 0, 0, 256, GL_RGBA, GL_FLOAT, m_colorPalette);
+}
+
+
+/**
+* Function to use the texture
+*/
+void TransferFunction::Use(GLenum activeTexture)
+{
+	glActiveTexture(activeTexture);
+	TextureManager::Inst().BindTexture(TEXTURE_TRANSFER_FUNC);
+}
+
+
+/**
+* Function to save to a file the transfer function
+*/
+bool TransferFunction::SaveToFile(string filename)
+{
+	std::ofstream out(filename, std::ios::out);
+	if (!out.is_open()) return false;
+	out << m_ptsCounter << std::endl;
+	for (int point = 0; point < m_ptsCounter; point++)
+	{
+		out << m_controlPointVector[point].scalar << " " <<
+			m_controlPointVector[point].color.r << " " <<
+			m_controlPointVector[point].color.g << " " <<
+			m_controlPointVector[point].color.b << " " <<
+			m_controlPointVector[point].color.a << std::endl;
+	}
+	out.close();
+
+	return true;
+}
+
+
+//convert from rgb to hsv
+HSV TransferFunction::RGBtoHSV(glm::vec3 colorRGB){
+	float cmax = fmaxf(colorRGB.r, fmaxf(colorRGB.g, colorRGB.b));
+	float cmin = fminf(colorRGB.r, fminf(colorRGB.g, colorRGB.b));
+	float cdif = cmax - cmin;
+	
+	
+	HSV hsv;
+
+	hsv.v = cmax;
+	
+	if (cdif < 0.00001f) //undefined
+	{
+		hsv.s = 0;
+		hsv.h = 0; // undefined, maybe nan?
+		return hsv;
+	}
+
+	
+	hsv.h = 0;
+
+	if (fabsf(cdif) <  0.001f) 0;
+	else if (fabsf(cmax - colorRGB.r) < 0.001f) hsv.h = fmod((colorRGB.g - colorRGB.b) / cdif, 6.0f);
+	else if (fabsf(cmax - colorRGB.g) < 0.001f)	hsv.h = 2.0f + (colorRGB.b - colorRGB.r) / cdif;
+	else if (fabsf(cmax - colorRGB.b) < 0.001f)	hsv.h = 4.0f + (colorRGB.r - colorRGB.g) / cdif;
+
+	hsv.h = (hsv.h * 60.0f);
+
+	hsv.h = ((hsv.h < 0.0f) ? (360.0f + hsv.h) : hsv.h) / 360.0f;
+
+	hsv.s = 0;
+	if (fabsf(cmax) < 0.001f) hsv.s = 0;
+	else hsv.s = cdif / cmax;
+
+	
+
+	return hsv;
+}
+
+
+//Convert from hsv to rgb
+glm::vec3 TransferFunction::HSVtoRGB(HSV hsv){
+	float c = hsv.v * hsv.s;
+	float hPrime = hsv.h * 360.0f / 60.0f;
+	float x = c * (1.0f - fabsf(fmodf(hPrime, 2) - 1.0f));
+	float m = hsv.v - c;
+	glm::vec3 rgb;
+
+	if (hPrime < 1){
+		rgb = glm::vec3(c,x,0.0f);
+	}
+	else if (hPrime< 2)
+	{
+		rgb = glm::vec3(x, c, 0.0f);
+	}
+	else if (hPrime < 3)
+	{
+		rgb = glm::vec3(0.0f, c, x);
+	}
+	else if (hPrime < 4)
+	{
+		rgb = glm::vec3(0.0f, x, c);
+	}
+	else if (hPrime < 5)
+	{
+		rgb = glm::vec3(x, 0.0f, c);
+	}
+	else if (hPrime < 6)
+	{
+		rgb = glm::vec3(c, 0.0f, x);
+	}
+
+	return glm::vec3(rgb.r + m, rgb.g + m, rgb.b + m);
+}
+
+
+//methods to transform from scree coordinates to color and scalar
+int TransferFunction::ScreenPosToScalar(){
+	return int((m_PosTF.x - MINW) / (float)(MAXW - MINW) * 255);
+}
+
+float TransferFunction::ScreenPosToAlpha(){
+	return 1.0f - ((float)(m_PosTF.y - MINH) / (float)(MAXH - MINH));
+}
+
+glm::vec3 TransferFunction::ScreenPosToRGB(){
+	//get saturation and value
+	float ts = (float)m_PosSV.x / (float)MAXWPC;
+	float tv = 1.0f - (float)(m_PosSV.y - MINHPC) / (float)(MAXHPC - MINHPC);
+
+	HSV hsv;
+	//get hue
+	hsv.h = (m_PosHue.x - MINWSC) / float(MAXWSC - MINWSC);
+	hsv.s = ts;
+	hsv.v = tv;
+
+	//transform it to RGB
+	glm::vec3 final = HSVtoRGB(hsv);
+
+	return final;
+}
+
+
+//method to transform from color to screen coordinates
+glm::ivec2 TransferFunction::ScalarAlphaToScreenPosTF(int scalar, float alpha){
+	glm::ivec2 pos;
+
+	pos.x = int((scalar / 255.0f) * (MAXW - MINW) + MINW);
+	pos.y = int((1.0f - alpha) * (MAXH - MINH) + MINH);
+
+	return pos;
+}
+
+glm::ivec2 TransferFunction::HSVToScreenPosHue(HSV hsv){
+	glm::ivec2 pos;
+
+	pos.x = int(hsv.h*(MAXWSC - MINWSC) + MINWSC);
+	pos.y = int(0*(MAXHSC - MINHSC) + MINHSC);
+
+	return pos;
+}
+
+glm::ivec2 TransferFunction::HSVToScreenPosSV(HSV hsv){
+	glm::ivec2 pos;
+
+	pos.x = int(hsv.s*(MAXWPC - MINWPC) + MINWPC);
+	pos.y = int((1.0f - hsv.v)*(MAXHPC - MINHPC) + MINHPC);
+	return pos;
+}
+
+float TransferFunction::ScreenPosToHue(){
+	return (m_PosHue.x - MINWSC) / float(MAXWSC - MINWSC);
+}
+
+//set the current color to draw in the sturation/value chooser
+void TransferFunction::setCurrentColor(){
+	//Set the current color on the interface
+	HSV hsv;
+	hsv.h = m_controlPointVector[m_pointSelected - 1].hsv.h; 
+	if (hsv.h == 0.0f) hsv.h = ScreenPosToHue();
+	hsv.s = 1.0f;
+	hsv.v = 1.0f;
+	m_currentColor = glm::vec4(HSVtoRGB(hsv), 1.0f);
+}
+
+//Update the color of a point
+void TransferFunction::UpdateColorPoint()
+{
+	// get the scalar and alpha from the screen position
+	int scalar = ScreenPosToScalar();
+	float alpha = ScreenPosToAlpha();
+	
+	//get the color from the hue, saturation, and value from screen
+	glm::vec3 color = ScreenPosToRGB();
+
+	//set the values to the point
+	m_controlPointVector[m_pointSelected - 1].scalar = scalar;
+	m_controlPointVector[m_pointSelected - 1].color = glm::vec4(color, alpha);
+	m_controlPointVector[m_pointSelected - 1].hsv = RGBtoHSV(glm::vec3(m_controlPointVector[m_pointSelected - 1].color));
+
+	//update the current color to draw it properly
+	setCurrentColor();
+}
+
+//set if the pallete needs to be updated
+void TransferFunction::SetUpdate(bool value){
+	m_updateTexture = value;
+}
+
+//check if texture needs update
+bool TransferFunction::NeedUpdate(){
+	return m_updateTexture;
+}
+
+//set if the transfer function is visible
+void TransferFunction::SetVisible(bool value){
+	m_isVisible = value;
+}
+
+//function to set 
+void TransferFunction::SetHistogram(int *histogram, int size){
+
+
+	//search for the max value
+	int maxid = 0;
+	for (int i = 1; i < size; ++i)
+		if (histogram[i] > histogram[maxid])
+			maxid = i;
+
+	float *normHist = new float[size]; 
+
+
+	//Normalize
+	float maxVal = float(histogram[maxid]);
+	for (int i = 0; i < size; ++i) normHist[i] = histogram[i] / float(maxVal);
+
+
+	//create VBO
+	float *vboHisto = new float[size * 4 * 2];
+	unsigned int *Indexes = new unsigned int[size * 6];
+
+
+
+	unsigned int vertex = 0, index = 0;
+	glm::ivec2 ini = ScalarAlphaToScreenPosTF(0, 0.0f);
+	float init = MINW;
+	float step = (MAXW - MINW) / float(size);
+
+	//create a quad for every scalar value
+	for (int i = 0; i < size; ++i){
+		float heigh = (1.0f - normHist[i]) * (MAXH - MINH) + MINH;
+
+		init += step;
+
+		int ver = vertex / 2;
+
+		//quad index
+		Indexes[index] = ver + 0;
+		index++;
+		Indexes[index] = ver + 1;
+		index++;
+		Indexes[index] = ver + 2;
+		index++;
+
+		Indexes[index] = ver + 0;
+		index++;
+		Indexes[index] = ver + 2;
+		index++;
+		Indexes[index] = ver + 3;
+		index++;
+
+
+
+		// quad coordinates
+		vboHisto[vertex] = (float)init;
+		vertex++;
+		vboHisto[vertex] = (float)(-ini.y + SIZEH);
+		vertex++;
+
+		vboHisto[vertex] = (float)(init + step);
+		vertex++;
+		vboHisto[vertex] = (float)(-ini.y + SIZEH);
+		vertex++;
+
+		vboHisto[vertex] = (float)(init + step);
+		vertex++;
+		vboHisto[vertex] = (float)(-heigh + SIZEH);
+		vertex++;
+
+		vboHisto[vertex] = (float)init;
+		vertex++;
+		vboHisto[vertex] = (float)(-heigh + SIZEH);
+		vertex++;
+
+
+		
+	}
+
+	// bind buffer for positions and copy data into buffer
+	// GL_ARRAY_BUFFER is the buffer type we use to feed attributes
+	glBindBuffer(GL_ARRAY_BUFFER, m_iVBO);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_iVBOIndex);
+
+		// feed the buffer, and let OpenGL know that we don't plan to
+		// change it (STATIC) and that it will be used for drawing (DRAW)
+		glBufferData(GL_ARRAY_BUFFER, vertex * sizeof(GL_FLOAT), vboHisto, GL_STATIC_DRAW);
+
+		//Set the index array
+		glBufferData(GL_ELEMENT_ARRAY_BUFFER, index * sizeof(GL_UNSIGNED_INT), Indexes, GL_STATIC_DRAW);
+
+
+
+	//Generate the VAO
+	glBindVertexArray(m_iVAO);
+
+		// bind buffer for positions and copy data into buffer
+		// GL_ARRAY_BUFFER is the buffer type we use to feed attributes
+		glBindBuffer(GL_ARRAY_BUFFER, m_iVBO);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_iVBOIndex);
+
+			glEnableVertexAttribArray(WORLD_COORD_LOCATION);
+			glVertexAttribPointer(WORLD_COORD_LOCATION, 2, GL_FLOAT, GL_FALSE, sizeof(GL_FLOAT) * 2, BUFFER_OFFSET(0)); //Vertex
+
+	//Unbind the vertex array	
+	glBindVertexArray(0);
+
+
+	//Disable Buffers and vertex attributes
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+
+
+
+	delete []normHist;
+	delete []vboHisto;
+	delete []Indexes;
+
+	m_isHistogram = true;
+	histogram_size = index;
+}
+```
+
+### VRCUDA/src/TransferFunction.h
+```
+#ifndef TransferFunction_H
+#define TransferFunction_H
+
+
+#include "Definitions.h"
+#include "GLSLProgram.h"
+#include "TextureManager.h"
+#include "VBOQuad.h"
+#include <algorithm>
+#include <queue>
+#include <string>
+
+using std::string;
+
+#define NULLNUM 0
+#define NUMOFCOLORS 256
+
+#define IMAGEWIDHT 360
+#define IMAGEHEIGHT 210
+#define MINW 47
+#define MINH 26
+#define MAXW 328
+#define MAXH 155
+#define MAXPOINT 100
+
+#define MINWSC 0
+#define MINHSC 212
+#define MAXWSC 355
+#define MAXHSC 232
+
+#define MINWPC 0
+#define MINHPC 241
+#define MAXWPC 360
+#define MAXHPC 448
+
+#define SIZEW 365
+#define SIZEH 455
+
+
+
+struct HSV{
+	float h;
+	float s;
+	float v;
+};
+
+
+struct ControlPoint
+{
+
+public:
+	HSV hsv;
+	glm::vec4 color;
+	int scalar;
+
+	bool drag;
+	bool selected;
+
+	ControlPoint(){}
+};
+
+class TransferFunction
+{
+private:
+	int *m_windowsW, *m_windowsH;
+	int m_imageW, m_imageH, m_ptsCounter;
+	int m_lastPicking, m_posx, m_posy, m_antx, m_anty, m_realposx, m_realposy;
+	bool m_palleteCreated, m_dragDropWindow, m_corner;
+
+	ControlPoint m_controlPointVector[MAXPOINT];
+	glm::vec4 m_baseColors[6];
+	int m_pointSelected;
+	glm::vec4 m_currentColor;
+	glm::mat4x4 m_mProjMatrix, m_mModelViewMatrix;
+
+	//position of the selectos on the screen
+	glm::ivec2 m_PosTF, m_PosHue, m_PosSV;
+
+
+	//Shaders programs
+	GLSLProgram m_program;
+
+	GLuint m_iVAO, m_iVBO, m_iVBOIndex, histogram_size;
+	float m_histogram_scale;
+	GLfloat m_colorPalette[256][4];
+
+	bool  m_dragDrop, m_dragDropColor, m_dragDropPicker, m_updateTexture, m_isVisible, m_isHistogram, m_scalingHistogram;
+
+	bool Picking(int x, int y);
+	//sort the point with the scalar value
+	void SortPoints(int jumpPoint = -1);
+	//update the current color point from screen cursor positions
+	void UpdateColorPoint();
+	bool DeletePoint(int w, int h);
+	//methods to transform between color spaces
+	HSV RGBtoHSV(glm::vec3 colorRGB);
+	glm::vec3 HSVtoRGB(HSV hsv);
+	//method to transform from color to screen coordinates
+	glm::ivec2 ScalarAlphaToScreenPosTF(int scalar, float alpha);
+	glm::ivec2 HSVToScreenPosHue(HSV hsv);
+	glm::ivec2 HSVToScreenPosSV(HSV hsv);
+	//methods to transform from scree coordinates to color and scalar
+	int ScreenPosToScalar();
+	float ScreenPosToAlpha();
+	glm::vec3 ScreenPosToRGB();
+	float ScreenPosToHue();
+	//method to set the current color
+	void setCurrentColor();
+
+public:
+	TransferFunction(void);
+	~TransferFunction(void);
+
+	bool loadFile(const char * file);
+	void Display();
+	void InitContext(int *windowsW, int *windowsH, const char * file = NULL, int posx = -1, int posy = -1);
+	bool MouseButton(int w, int h, int button, int action);
+	bool CursorPos(int w, int h);
+	void Resize(int *windowsW, int *windowsH);
+	void UpdatePallete();
+	void Use(GLenum activeTexture);
+	bool SaveToFile(std::string filename);
+	void SetUpdate(bool value);
+	void SetVisible(bool value);
+	bool NeedUpdate();
+	void SetHistogram(int *histogram, int size);
+};
+
+#endif
+```
+
+### VRCUDA/src/VBOCube.cpp
+```
+// $Id: $
+//
+// Author: Francisco Sans franjaviersans@gmail.com
+//
+// Complete history on bottom of file
+
+#define FILE_REVISION "$Revision: $"
+
+#include "VBOCube.h"
+
+/**
+* Class VBOCube.
+* Creates a Cube using VBO with the corresponding texture coordinates
+*
+*					(0,1,1) v7		(1,1,1) v6
+*					 *-------------* 
+*				   / |			 / |
+*	     v3(0,1,0)*-------------*(1,1,0) v2
+*				  |v4|(0,0,1)|  |  |
+*				  |	 *----------|--* (1,0,1) v5
+*				  |	/			| /
+*		 v0(0,0,0)*-------------*(1,0,0) v1
+*/
+
+/**
+* Default constructor
+*/
+VBOCube::VBOCube()
+{
+
+	Init();
+}
+
+
+/**
+* Default destructor
+*/
+VBOCube::~VBOCube()
+{
+
+	glDeleteBuffers(1, &m_iVBO);
+	glDeleteBuffers(1, &m_iVBOIndex);
+	glDeleteVertexArrays(1, &m_iVAO);
+}
+
+/**
+* Method to Init cube
+*/
+void VBOCube::Init(){
+
+
+	GLfloat Vertex[] = {//World					//Color
+						-0.5f,-0.5f,0.5f,		0.0f,0.0f,0.0f,	//v0
+						0.5f,-0.5f,0.5f,		1.0f,0.0f,0.0f,	//v1
+						0.5f,0.5f,0.5f,			1.0f,1.0f,0.0f,	//v2
+						-0.5f,0.5f,0.5f,		0.0f,1.0f,0.0f,	//v3
+						-0.5f,-0.5f,-0.5f,		0.0f,0.0f,1.0f,	//v4
+						0.5f,-0.5f,-0.5f,		1.0f,0.0f,1.0f,	//v5
+						0.5f,0.5f,-0.5f,		1.0f,1.0f,1.0f,	//v6
+						-0.5f,0.5f,-0.5f,		0.0f,1.0f,1.0f,	//v7
+						}; 
+
+	GLuint Indices[] = {0,1,2,0,2,3,	//front
+						4,7,6,4,6,5,	//back
+						4,0,3,4,3,7,	//left
+						1,5,6,1,6,2,	//right
+						3,2,6,3,6,7,	//top
+						4,5,1,4,1,0,	//bottom
+						}; 
+
+	glGenBuffers(1, &m_iVBO);
+	glGenBuffers(1, &m_iVBOIndex);
+
+	// bind buffer for positions and copy data into buffer
+	// GL_ARRAY_BUFFER is the buffer type we use to feed attributes
+	glBindBuffer(GL_ARRAY_BUFFER, m_iVBO);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_iVBOIndex);
+ 
+		// feed the buffer, and let OpenGL know that we don't plan to
+		// change it (STATIC) and that it will be used for drawing (DRAW)
+		glBufferData(GL_ARRAY_BUFFER, 48 * sizeof(GL_FLOAT), Vertex, GL_STATIC_DRAW);
+
+		//Set the index array
+		glBufferData(GL_ELEMENT_ARRAY_BUFFER, 36 * sizeof(GL_UNSIGNED_INT), Indices, GL_STATIC_DRAW);
+
+
+
+	//Generate the VAO
+	glGenVertexArrays(1, &m_iVAO);
+    glBindVertexArray(m_iVAO );
+
+		// bind buffer for positions and copy data into buffer
+		// GL_ARRAY_BUFFER is the buffer type we use to feed attributes
+		glBindBuffer(GL_ARRAY_BUFFER, m_iVBO);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_iVBOIndex);
+
+		glEnableVertexAttribArray(WORLD_COORD_LOCATION);
+		glVertexAttribPointer(WORLD_COORD_LOCATION, 3, GL_FLOAT, GL_FALSE, sizeof(GL_FLOAT) * 6, BUFFER_OFFSET(0)); //Vertex
+		glEnableVertexAttribArray(TEXTURE_COORD_LOCATION);
+		glVertexAttribPointer(TEXTURE_COORD_LOCATION, 3, GL_FLOAT, GL_FALSE, sizeof(GL_FLOAT) * 6, BUFFER_OFFSET(sizeof(GL_FLOAT) * 3)); //Texture	
+		
+	//Unbind the vertex array	
+	glBindVertexArray(0);
+
+
+	//Disable Buffers and vertex attributes
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+}
+
+/**
+* Method to Draw the Cube
+*/
+void VBOCube::Draw()
+{
+	
+	glBindVertexArray(m_iVAO);
+		glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
+	glBindVertexArray(0);
+
+}
+
+
+/**
+* Method to Setup rendering cube
+*/
+void VBOCube::Setup()
+{
+	glBindVertexArray(m_iVAO);
+}
+
+/**
+* Method to only draw cube
+*/
+void VBOCube::OnlyDraw()
+{
+	glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
+}
+
+/** 
+* Method to Stop rendering cube
+*/
+void VBOCube::Stop()
+{
+	glBindVertexArray(0);
+}
+
+/**
+* Creates an instance of the model
+*
+* @return an instance of this class
+*/
+VBOCube & VBOCube::Instance() 
+{
+	static VBOCube m_cube;	// Guaranteed to be destroyed.
+							// Instantiated on first use.
+ 
+   return m_cube;
+
+
+}
+
+#undef FILE_REVISION
+
+// Revision History:
+// $Log: $
+// $Header: $
+// $Id: $
+```
+
+### VRCUDA/src/VBOCube.h
+```
+// $Id: $
+//
+// Author: Francisco Sans franjaviersans@gmail.com
+//
+// Complete history on bottom of file
+
+#ifndef VBOCube_H
+#define VBOCube_H
+
+//Includes
+#include "Definitions.h"
+
+
+/**
+* Class FBOCube.
+* Creates a Cube using FBO with the corresponding texture coordinates
+*
+*					(-.5,.5,-.5) v7		(.5,.5,-.5) v6
+*					 *-------------* 
+*				   / |		     / |
+*	 v3(-.5,.5,.5)*-------------*(.5,.5,.5) v2
+*	(-.5,-.5,-.5) |v4|          |  |
+*				  |	 *----------|--* (.5,-.5,-.5) v5
+*				  |	/	    	| /
+*   v0(-.5,-.5,.5)*-------------*(.5,-.5,.5) v1
+*/
+class VBOCube
+{
+	//Functions
+
+	public:
+		
+
+		///Default destructor
+		~VBOCube();
+
+		///Method to Draw the Quad
+		void Draw();
+
+		///Method to Setup rendering cube
+		void Setup();
+
+		///Method to only draw cube
+		void OnlyDraw();
+
+		///Method to Stop rendering cube
+		void Stop();
+
+		//Method to Init cube
+		void Init();
+
+		///Creates an instance of the model
+		static VBOCube & Instance() ;
+
+	private:
+
+		///Default constructor
+		VBOCube();
+
+	//Variables
+
+	private:
+		GLuint m_iVAO;
+		GLuint m_iVBO;
+		GLuint m_iVBOIndex;
+};
+
+
+#endif //FBOCube_H
+```
+
+### VRCUDA/src/VBOQuad.cpp
+```
+// $Id: $
+//
+// Author: Francisco Sans franjaviersans@gmail.com
+//
+// Complete history on bottom of file
+
+#define FILE_REVISION "$Revision: $"
+
+#include "VBOQuad.h"
+#include <stdlib.h>
+
+
+/**
+* Default constructor
+*/
+VBOQuad::VBOQuad()
+{
+
+	GLfloat Vertex[] = {//Word          Texture
+						-0.5f,-0.5f,	0.0f,0.0f,
+						0.5f,-0.5f,		1.0f,0.0f,
+						0.5f,0.5f,		1.0f,1.0f,
+						-0.5f,0.5f,		0.0f,1.0f
+						}; 
+
+
+	GLuint Indices[] = {0,1,2,0,2,3}; 
+
+
+
+	glGenBuffers(1, &m_iVBO);
+	glGenBuffers(1, &m_iVBOIndex);
+
+	// bind buffer for positions and copy data into buffer
+	// GL_ARRAY_BUFFER is the buffer type we use to feed attributes
+	glBindBuffer(GL_ARRAY_BUFFER, m_iVBO);
+ 
+		// feed the buffer, and let OpenGL know that we don't plan to
+		// change it (STATIC) and that it will be used for drawing (DRAW)
+		glBufferData(GL_ARRAY_BUFFER, 16 * sizeof(GL_FLOAT), Vertex, GL_STATIC_DRAW);
+
+		//bind buffer for positions and copy data into buffer
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_iVBOIndex);
+		glBufferData(GL_ELEMENT_ARRAY_BUFFER, 6 * sizeof(GL_UNSIGNED_INT), Indices, GL_STATIC_DRAW);
+
+
+	//Generate the VAO
+	glGenVertexArrays(1, &m_iVAO);
+    glBindVertexArray(m_iVAO );
+
+		// bind buffer for positions and copy data into buffer
+		// GL_ARRAY_BUFFER is the buffer type we use to feed attributes
+		glBindBuffer(GL_ARRAY_BUFFER, m_iVBO);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_iVBOIndex);
+
+		glEnableVertexAttribArray(WORLD_COORD_LOCATION);
+		glVertexAttribPointer(WORLD_COORD_LOCATION, 2, GL_FLOAT, GL_FALSE, sizeof(GL_FLOAT)*4, BUFFER_OFFSET(0)); //Vertex
+		glEnableVertexAttribArray(TEXTURE_COORD_LOCATION);
+		glVertexAttribPointer(TEXTURE_COORD_LOCATION, 2, GL_FLOAT, GL_FALSE, sizeof(GL_FLOAT)*4, BUFFER_OFFSET(sizeof(GL_FLOAT)*2)); //Text Coord
+		
+	//Unbind the vertex array	
+	glBindVertexArray(0);
+
+
+	//Disable Buffers and vertex attributes
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+}
+
+/**
+* Creates an instance of the model
+*
+* @return an instance of this class
+*/
+VBOQuad & VBOQuad::Instance()
+{
+
+	static VBOQuad m_quad;	 // Guaranteed to be destroyed.
+							// Instantiated on first use.
+ 
+   return m_quad;
+
+
+}
+
+/**
+* Default destructor
+*/
+VBOQuad::~VBOQuad()
+{
+
+	glDeleteBuffers(1, &m_iVBO);
+	glDeleteBuffers(1, &m_iVBOIndex);
+	glDeleteVertexArrays(1, &m_iVAO);
+}
+
+/**
+* Method to Draw the Quad
+*/
+void VBOQuad::Draw()
+{
+
+	//Bind Buffers
+	glBindVertexArray(m_iVAO );
+
+		glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+
+	//Unbid Buffer
+	glBindVertexArray(0);
+
+}
+
+
+/**
+* Method start up Quad rendering
+*/
+void VBOQuad::StartUp()
+{
+	//Bind Buffers
+	glBindVertexArray(m_iVAO );
+}
+
+
+/**
+* Method to only Draw the Quad
+*/
+void VBOQuad::OnlyDraw()
+{
+	glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+}
+
+
+/**
+* Method to stop Quad rendering
+*/
+void VBOQuad::Stop(){
+	//Unbid Buffer
+	glBindVertexArray(0);
+}
+
+
+#undef FILE_REVISION
+
+// Revision History:
+// $Log: $
+// $Header: $
+// $Id: $
+```
+
+### VRCUDA/src/VBOQuad.h
+```
+// $Id: $
+//
+// Author: Francisco Sans franjaviersans@gmail.com
+//
+// Complete history on bottom of file
+
+#ifndef VBOQuad_H
+#define VBOQuad_H
+
+//Includes
+#include "Definitions.h"
+
+/**
+* Class FBOQuad.
+* Creates a Quad using FBO with the corresponding texture coordinates
+*
+*           (-0.5,0.5)*------*(0.5,0.5)
+*					  |		 |
+*					  |      |
+*          (-0.5,-0.5)*------*(0.5,-0.5)
+*/
+class VBOQuad
+{
+	//Functions
+
+	public:
+		///Default destructor
+		~VBOQuad();
+
+		///Method to Draw the Quad
+		void Draw();
+
+		///Method start up Quad rendering
+		void StartUp();
+
+		///Method to only Draw the Quad
+		void OnlyDraw();
+
+		///Method to stop Quad rendering
+		void Stop();
+
+		///Creates an instance of the model
+		static VBOQuad & Instance() ;
+
+	private:
+		///Default constructor
+		VBOQuad();
+
+
+	//Variables
+
+	private:
+		GLuint m_iVBO;
+		GLuint m_iVBOIndex;
+		GLuint m_iVAO;
+};
+
+
+#endif //FBOQuad_H
+```
+
+### VRCUDA/src/Volume.cpp
+```
+// $Id: $
+//
+// Author: Francisco Sans franjaviersans@gmail.com
+//
+// Complete history on bottom of file
+
+#define FILE_REVISION "$Revision: $"
+
+#include "Volume.h"
+#include <fstream>
+#include <iostream>
+#include "TextureManager.h"
+
+using namespace std;
+
+/**
+* Default constructor
+*/
+Volume::Volume()
+{
+	Init();
+	volume = NULL;
+}
+
+
+/**
+* Default destructor
+*/
+Volume::~Volume()
+{
+	if (volume != NULL) delete [] volume;
+}
+
+
+void Volume::Init()
+{
+	
+}
+
+void Volume::Load(string filename, GLuint width, GLuint height, GLuint depth, GLboolean bits, GLuint offset)
+{
+	//Read texture from file
+	std::ifstream textureFile(filename, std::ios::binary);
+
+	if (!textureFile.is_open()){
+		cout << "Couldn't load file volume: " << filename << endl;
+		exit(0);
+	}
+
+	int length = -1;
+	textureFile.seekg(0, textureFile.end);
+	length = int(textureFile.tellg());
+
+	if (length < width * height * depth * ((bits) ? sizeof(unsigned char) : sizeof(unsigned short))){
+		cout << "Bad volume size or wrong file!" << endl;
+		exit(0);
+	}
+
+	textureFile.seekg(0, textureFile.beg);
+
+
+	if (bits){
+		int file_offset = width * height * offset;
+		char * memtexture = new char[length - file_offset];
+
+		textureFile.seekg(file_offset); //Skip some slices
+		textureFile.read((char *)memtexture, length - file_offset);
+
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+		//Create Texture
+		TextureManager::Inst().CreateTexture3D(TEXTURE_VOLUME, width, height, depth, GL_RED, GL_RED, GL_UNSIGNED_BYTE, GL_LINEAR, GL_LINEAR, memtexture);
+		delete[] memtexture;
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+	}
+	else{
+		int file_offset = width * height * sizeof(unsigned short) * offset;
+		short * memtexture = new short[(length - file_offset) / sizeof(unsigned short)];
+
+		textureFile.seekg(file_offset); //Skip some slices
+		textureFile.read((char *)memtexture, length - file_offset);
+
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 2);
+		//Create Texture
+		TextureManager::Inst().CreateTexture3D(TEXTURE_VOLUME, width, height, depth, GL_RED, GL_RED, GL_UNSIGNED_SHORT, GL_LINEAR, GL_LINEAR, memtexture);
+		delete[] memtexture;
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+	}
+
+	textureFile.close();
+
+	m_fWidht = (float)width;
+	m_fHeigth = (float)height;
+	m_fDepth = (float)depth;
+	m_fDiagonal = sqrtf(float(width * width + height * height + depth * depth));
+	voxelSize = glm::vec3(1.0f / width, 1.0f / height, 1.0f / depth);
+
+	GLenum err = GL_NO_ERROR;
+	while ((err = glGetError()) != GL_NO_ERROR)
+	{
+		std::cout << "Problem loading volume " << err << std::endl;
+	}
+}
+
+void Volume::Use(GLenum activeTexture)
+{
+	glActiveTexture(activeTexture);
+	TextureManager::Inst().BindTexture(TEXTURE_VOLUME);
+}
+
+glm::vec3 Volume::getVoxelSize(){
+	return voxelSize;
+}
+
+
+#undef FILE_REVISION
+
+// Revision History:
+// $Log: $
+// $Header: $
+// $Id: $
+```
+
+### VRCUDA/src/Volume.h
+```
+// $Id: $
+//
+// Author: Francisco Sans franjaviersans@gmail.com
+//
+// Complete history on bottom of file
+
+#ifndef VOLUME_H
+#define VOLUME_H
+
+//Includes
+#include "Definitions.h"
+#include <string>
+
+
+/**
+* Class Volume.
+* Class to load a volume from a file and store it in a 3D texture to display.
+*/
+class Volume
+{
+	//Functions
+
+	public:
+
+		float m_fDiagonal, m_fWidht, m_fHeigth, m_fDepth;
+		glm::vec3 voxelSize;
+		char * volume;
+		
+
+		///Default constructor
+		Volume();
+
+		///Default destructor
+		~Volume();
+
+		///
+		void Init();
+
+		///
+		void Load(std::string, GLuint, GLuint, GLuint, GLboolean, GLuint);
+
+		///
+		void Use(GLenum );
+
+		///
+		glm::vec3 getVoxelSize();
+
+	//Variables
+
+	private:
+};
+
+
+#endif //FBOCube_H
+```
+
+### VRCUDA/src/helper_math.h
+```
+/**
+* Copyright 1993-2013 NVIDIA Corporation.  All rights reserved.
+*
+* Please refer to the NVIDIA end user license agreement (EULA) associated
+* with this source code for terms and conditions that govern your use of
+* this software. Any use, reproduction, disclosure, or distribution of
+* this software and related documentation outside the terms of the EULA
+* is strictly prohibited.
+*
+*/
+
+/*
+*  This file implements common mathematical operations on vector types
+*  (float3, float4 etc.) since these are not provided as standard by CUDA.
+*
+*  The syntax is modeled on the Cg standard library.
+*
+*  This is part of the Helper library includes
+*
+*    Thanks to Linh Hah for additions and fixes.
+*/
+
+#ifndef HELPER_MATH_H
+#define HELPER_MATH_H
+
+#include <cuda_runtime.h>
+
+typedef unsigned int uint;
+typedef unsigned short ushort;
+
+
+#ifndef __CUDACC__
+#include <math.h>
+
+
+
+
+
+////////////////////////////////////////////////////////////////////////////////
+// host implementations of CUDA functions
+////////////////////////////////////////////////////////////////////////////////
+
+inline float fminf(float a, float b)
+{
+	return a < b ? a : b;
+}
+
+inline float fmaxf(float a, float b)
+{
+	return a > b ? a : b;
+}
+
+inline int max(int a, int b)
+{
+	return a > b ? a : b;
+}
+
+inline int min(int a, int b)
+{
+	return a < b ? a : b;
+}
+
+inline float rsqrtf(float x)
+{
+	return 1.0f / sqrtf(x);
+}
+
+#endif
+
+
+
+typedef struct
+{
+	float4 m[4];
+} float4x4;
+
+
+
+////////////////////////////////////////////////////////////////////////////////
+// constructors
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 make_float2(float s)
+{
+	return make_float2(s, s);
+}
+inline __host__ __device__ float2 make_float2(float3 a)
+{
+	return make_float2(a.x, a.y);
+}
+inline __host__ __device__ float2 make_float2(int2 a)
+{
+	return make_float2(float(a.x), float(a.y));
+}
+inline __host__ __device__ float2 make_float2(uint2 a)
+{
+	return make_float2(float(a.x), float(a.y));
+}
+
+inline __host__ __device__ int2 make_int2(int s)
+{
+	return make_int2(s, s);
+}
+inline __host__ __device__ int2 make_int2(int3 a)
+{
+	return make_int2(a.x, a.y);
+}
+inline __host__ __device__ int2 make_int2(uint2 a)
+{
+	return make_int2(int(a.x), int(a.y));
+}
+inline __host__ __device__ int2 make_int2(float2 a)
+{
+	return make_int2(int(a.x), int(a.y));
+}
+
+inline __host__ __device__ uint2 make_uint2(uint s)
+{
+	return make_uint2(s, s);
+}
+inline __host__ __device__ uint2 make_uint2(uint3 a)
+{
+	return make_uint2(a.x, a.y);
+}
+inline __host__ __device__ uint2 make_uint2(int2 a)
+{
+	return make_uint2(uint(a.x), uint(a.y));
+}
+
+inline __host__ __device__ float3 make_float3(float s)
+{
+	return make_float3(s, s, s);
+}
+inline __host__ __device__ float3 make_float3(float2 a)
+{
+	return make_float3(a.x, a.y, 0.0f);
+}
+inline __host__ __device__ float3 make_float3(float2 a, float s)
+{
+	return make_float3(a.x, a.y, s);
+}
+inline __host__ __device__ float3 make_float3(float4 a)
+{
+	return make_float3(a.x, a.y, a.z);
+}
+inline __host__ __device__ float3 make_float3(int3 a)
+{
+	return make_float3(float(a.x), float(a.y), float(a.z));
+}
+inline __host__ __device__ float3 make_float3(uint3 a)
+{
+	return make_float3(float(a.x), float(a.y), float(a.z));
+}
+
+inline __host__ __device__ int3 make_int3(int s)
+{
+	return make_int3(s, s, s);
+}
+inline __host__ __device__ int3 make_int3(int2 a)
+{
+	return make_int3(a.x, a.y, 0);
+}
+inline __host__ __device__ int3 make_int3(int2 a, int s)
+{
+	return make_int3(a.x, a.y, s);
+}
+inline __host__ __device__ int3 make_int3(uint3 a)
+{
+	return make_int3(int(a.x), int(a.y), int(a.z));
+}
+inline __host__ __device__ int3 make_int3(float3 a)
+{
+	return make_int3(int(a.x), int(a.y), int(a.z));
+}
+
+inline __host__ __device__ uint3 make_uint3(uint s)
+{
+	return make_uint3(s, s, s);
+}
+inline __host__ __device__ uint3 make_uint3(uint2 a)
+{
+	return make_uint3(a.x, a.y, 0);
+}
+inline __host__ __device__ uint3 make_uint3(uint2 a, uint s)
+{
+	return make_uint3(a.x, a.y, s);
+}
+inline __host__ __device__ uint3 make_uint3(uint4 a)
+{
+	return make_uint3(a.x, a.y, a.z);
+}
+inline __host__ __device__ uint3 make_uint3(int3 a)
+{
+	return make_uint3(uint(a.x), uint(a.y), uint(a.z));
+}
+
+inline __host__ __device__ float4 make_float4(float s)
+{
+	return make_float4(s, s, s, s);
+}
+inline __host__ __device__ float4 make_float4(float3 a)
+{
+	return make_float4(a.x, a.y, a.z, 0.0f);
+}
+inline __host__ __device__ float4 make_float4(float3 a, float w)
+{
+	return make_float4(a.x, a.y, a.z, w);
+}
+inline __host__ __device__ float4 make_float4(int4 a)
+{
+	return make_float4(float(a.x), float(a.y), float(a.z), float(a.w));
+}
+inline __host__ __device__ float4 make_float4(uint4 a)
+{
+	return make_float4(float(a.x), float(a.y), float(a.z), float(a.w));
+}
+
+inline __host__ __device__ int4 make_int4(int s)
+{
+	return make_int4(s, s, s, s);
+}
+inline __host__ __device__ int4 make_int4(int3 a)
+{
+	return make_int4(a.x, a.y, a.z, 0);
+}
+inline __host__ __device__ int4 make_int4(int3 a, int w)
+{
+	return make_int4(a.x, a.y, a.z, w);
+}
+inline __host__ __device__ int4 make_int4(uint4 a)
+{
+	return make_int4(int(a.x), int(a.y), int(a.z), int(a.w));
+}
+inline __host__ __device__ int4 make_int4(float4 a)
+{
+	return make_int4(int(a.x), int(a.y), int(a.z), int(a.w));
+}
+
+
+inline __host__ __device__ uint4 make_uint4(uint s)
+{
+	return make_uint4(s, s, s, s);
+}
+inline __host__ __device__ uint4 make_uint4(uint3 a)
+{
+	return make_uint4(a.x, a.y, a.z, 0);
+}
+inline __host__ __device__ uint4 make_uint4(uint3 a, uint w)
+{
+	return make_uint4(a.x, a.y, a.z, w);
+}
+inline __host__ __device__ uint4 make_uint4(int4 a)
+{
+	return make_uint4(uint(a.x), uint(a.y), uint(a.z), uint(a.w));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// negate
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 operator-(float2 &a)
+{
+	return make_float2(-a.x, -a.y);
+}
+inline __host__ __device__ int2 operator-(int2 &a)
+{
+	return make_int2(-a.x, -a.y);
+}
+inline __host__ __device__ float3 operator-(float3 &a)
+{
+	return make_float3(-a.x, -a.y, -a.z);
+}
+inline __host__ __device__ int3 operator-(int3 &a)
+{
+	return make_int3(-a.x, -a.y, -a.z);
+}
+inline __host__ __device__ float4 operator-(float4 &a)
+{
+	return make_float4(-a.x, -a.y, -a.z, -a.w);
+}
+inline __host__ __device__ int4 operator-(int4 &a)
+{
+	return make_int4(-a.x, -a.y, -a.z, -a.w);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// addition
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 operator+(float2 a, float2 b)
+{
+	return make_float2(a.x + b.x, a.y + b.y);
+}
+inline __host__ __device__ void operator+=(float2 &a, float2 b)
+{
+	a.x += b.x;
+	a.y += b.y;
+}
+inline __host__ __device__ float2 operator+(float2 a, float b)
+{
+	return make_float2(a.x + b, a.y + b);
+}
+inline __host__ __device__ float2 operator+(float b, float2 a)
+{
+	return make_float2(a.x + b, a.y + b);
+}
+inline __host__ __device__ void operator+=(float2 &a, float b)
+{
+	a.x += b;
+	a.y += b;
+}
+
+inline __host__ __device__ int2 operator+(int2 a, int2 b)
+{
+	return make_int2(a.x + b.x, a.y + b.y);
+}
+inline __host__ __device__ void operator+=(int2 &a, int2 b)
+{
+	a.x += b.x;
+	a.y += b.y;
+}
+inline __host__ __device__ int2 operator+(int2 a, int b)
+{
+	return make_int2(a.x + b, a.y + b);
+}
+inline __host__ __device__ int2 operator+(int b, int2 a)
+{
+	return make_int2(a.x + b, a.y + b);
+}
+inline __host__ __device__ void operator+=(int2 &a, int b)
+{
+	a.x += b;
+	a.y += b;
+}
+
+inline __host__ __device__ uint2 operator+(uint2 a, uint2 b)
+{
+	return make_uint2(a.x + b.x, a.y + b.y);
+}
+inline __host__ __device__ void operator+=(uint2 &a, uint2 b)
+{
+	a.x += b.x;
+	a.y += b.y;
+}
+inline __host__ __device__ uint2 operator+(uint2 a, uint b)
+{
+	return make_uint2(a.x + b, a.y + b);
+}
+inline __host__ __device__ uint2 operator+(uint b, uint2 a)
+{
+	return make_uint2(a.x + b, a.y + b);
+}
+inline __host__ __device__ void operator+=(uint2 &a, uint b)
+{
+	a.x += b;
+	a.y += b;
+}
+
+
+inline __host__ __device__ float3 operator+(float3 a, float3 b)
+{
+	return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
+}
+inline __host__ __device__ void operator+=(float3 &a, float3 b)
+{
+	a.x += b.x;
+	a.y += b.y;
+	a.z += b.z;
+}
+inline __host__ __device__ float3 operator+(float3 a, float b)
+{
+	return make_float3(a.x + b, a.y + b, a.z + b);
+}
+inline __host__ __device__ void operator+=(float3 &a, float b)
+{
+	a.x += b;
+	a.y += b;
+	a.z += b;
+}
+
+inline __host__ __device__ int3 operator+(int3 a, int3 b)
+{
+	return make_int3(a.x + b.x, a.y + b.y, a.z + b.z);
+}
+inline __host__ __device__ void operator+=(int3 &a, int3 b)
+{
+	a.x += b.x;
+	a.y += b.y;
+	a.z += b.z;
+}
+inline __host__ __device__ int3 operator+(int3 a, int b)
+{
+	return make_int3(a.x + b, a.y + b, a.z + b);
+}
+inline __host__ __device__ void operator+=(int3 &a, int b)
+{
+	a.x += b;
+	a.y += b;
+	a.z += b;
+}
+
+inline __host__ __device__ uint3 operator+(uint3 a, uint3 b)
+{
+	return make_uint3(a.x + b.x, a.y + b.y, a.z + b.z);
+}
+inline __host__ __device__ void operator+=(uint3 &a, uint3 b)
+{
+	a.x += b.x;
+	a.y += b.y;
+	a.z += b.z;
+}
+inline __host__ __device__ uint3 operator+(uint3 a, uint b)
+{
+	return make_uint3(a.x + b, a.y + b, a.z + b);
+}
+inline __host__ __device__ void operator+=(uint3 &a, uint b)
+{
+	a.x += b;
+	a.y += b;
+	a.z += b;
+}
+
+inline __host__ __device__ int3 operator+(int b, int3 a)
+{
+	return make_int3(a.x + b, a.y + b, a.z + b);
+}
+inline __host__ __device__ uint3 operator+(uint b, uint3 a)
+{
+	return make_uint3(a.x + b, a.y + b, a.z + b);
+}
+inline __host__ __device__ float3 operator+(float b, float3 a)
+{
+	return make_float3(a.x + b, a.y + b, a.z + b);
+}
+
+inline __host__ __device__ float4 operator+(float4 a, float4 b)
+{
+	return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);
+}
+inline __host__ __device__ void operator+=(float4 &a, float4 b)
+{
+	a.x += b.x;
+	a.y += b.y;
+	a.z += b.z;
+	a.w += b.w;
+}
+inline __host__ __device__ float4 operator+(float4 a, float b)
+{
+	return make_float4(a.x + b, a.y + b, a.z + b, a.w + b);
+}
+inline __host__ __device__ float4 operator+(float b, float4 a)
+{
+	return make_float4(a.x + b, a.y + b, a.z + b, a.w + b);
+}
+inline __host__ __device__ void operator+=(float4 &a, float b)
+{
+	a.x += b;
+	a.y += b;
+	a.z += b;
+	a.w += b;
+}
+
+inline __host__ __device__ int4 operator+(int4 a, int4 b)
+{
+	return make_int4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);
+}
+inline __host__ __device__ void operator+=(int4 &a, int4 b)
+{
+	a.x += b.x;
+	a.y += b.y;
+	a.z += b.z;
+	a.w += b.w;
+}
+inline __host__ __device__ int4 operator+(int4 a, int b)
+{
+	return make_int4(a.x + b, a.y + b, a.z + b, a.w + b);
+}
+inline __host__ __device__ int4 operator+(int b, int4 a)
+{
+	return make_int4(a.x + b, a.y + b, a.z + b, a.w + b);
+}
+inline __host__ __device__ void operator+=(int4 &a, int b)
+{
+	a.x += b;
+	a.y += b;
+	a.z += b;
+	a.w += b;
+}
+
+inline __host__ __device__ uint4 operator+(uint4 a, uint4 b)
+{
+	return make_uint4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);
+}
+inline __host__ __device__ void operator+=(uint4 &a, uint4 b)
+{
+	a.x += b.x;
+	a.y += b.y;
+	a.z += b.z;
+	a.w += b.w;
+}
+inline __host__ __device__ uint4 operator+(uint4 a, uint b)
+{
+	return make_uint4(a.x + b, a.y + b, a.z + b, a.w + b);
+}
+inline __host__ __device__ uint4 operator+(uint b, uint4 a)
+{
+	return make_uint4(a.x + b, a.y + b, a.z + b, a.w + b);
+}
+inline __host__ __device__ void operator+=(uint4 &a, uint b)
+{
+	a.x += b;
+	a.y += b;
+	a.z += b;
+	a.w += b;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// subtract
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 operator-(float2 a, float2 b)
+{
+	return make_float2(a.x - b.x, a.y - b.y);
+}
+inline __host__ __device__ void operator-=(float2 &a, float2 b)
+{
+	a.x -= b.x;
+	a.y -= b.y;
+}
+inline __host__ __device__ float2 operator-(float2 a, float b)
+{
+	return make_float2(a.x - b, a.y - b);
+}
+inline __host__ __device__ float2 operator-(float b, float2 a)
+{
+	return make_float2(b - a.x, b - a.y);
+}
+inline __host__ __device__ void operator-=(float2 &a, float b)
+{
+	a.x -= b;
+	a.y -= b;
+}
+
+inline __host__ __device__ int2 operator-(int2 a, int2 b)
+{
+	return make_int2(a.x - b.x, a.y - b.y);
+}
+inline __host__ __device__ void operator-=(int2 &a, int2 b)
+{
+	a.x -= b.x;
+	a.y -= b.y;
+}
+inline __host__ __device__ int2 operator-(int2 a, int b)
+{
+	return make_int2(a.x - b, a.y - b);
+}
+inline __host__ __device__ int2 operator-(int b, int2 a)
+{
+	return make_int2(b - a.x, b - a.y);
+}
+inline __host__ __device__ void operator-=(int2 &a, int b)
+{
+	a.x -= b;
+	a.y -= b;
+}
+
+inline __host__ __device__ uint2 operator-(uint2 a, uint2 b)
+{
+	return make_uint2(a.x - b.x, a.y - b.y);
+}
+inline __host__ __device__ void operator-=(uint2 &a, uint2 b)
+{
+	a.x -= b.x;
+	a.y -= b.y;
+}
+inline __host__ __device__ uint2 operator-(uint2 a, uint b)
+{
+	return make_uint2(a.x - b, a.y - b);
+}
+inline __host__ __device__ uint2 operator-(uint b, uint2 a)
+{
+	return make_uint2(b - a.x, b - a.y);
+}
+inline __host__ __device__ void operator-=(uint2 &a, uint b)
+{
+	a.x -= b;
+	a.y -= b;
+}
+
+inline __host__ __device__ float3 operator-(float3 a, float3 b)
+{
+	return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+inline __host__ __device__ void operator-=(float3 &a, float3 b)
+{
+	a.x -= b.x;
+	a.y -= b.y;
+	a.z -= b.z;
+}
+inline __host__ __device__ float3 operator-(float3 a, float b)
+{
+	return make_float3(a.x - b, a.y - b, a.z - b);
+}
+inline __host__ __device__ float3 operator-(float b, float3 a)
+{
+	return make_float3(b - a.x, b - a.y, b - a.z);
+}
+inline __host__ __device__ void operator-=(float3 &a, float b)
+{
+	a.x -= b;
+	a.y -= b;
+	a.z -= b;
+}
+
+inline __host__ __device__ int3 operator-(int3 a, int3 b)
+{
+	return make_int3(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+inline __host__ __device__ void operator-=(int3 &a, int3 b)
+{
+	a.x -= b.x;
+	a.y -= b.y;
+	a.z -= b.z;
+}
+inline __host__ __device__ int3 operator-(int3 a, int b)
+{
+	return make_int3(a.x - b, a.y - b, a.z - b);
+}
+inline __host__ __device__ int3 operator-(int b, int3 a)
+{
+	return make_int3(b - a.x, b - a.y, b - a.z);
+}
+inline __host__ __device__ void operator-=(int3 &a, int b)
+{
+	a.x -= b;
+	a.y -= b;
+	a.z -= b;
+}
+
+inline __host__ __device__ uint3 operator-(uint3 a, uint3 b)
+{
+	return make_uint3(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+inline __host__ __device__ void operator-=(uint3 &a, uint3 b)
+{
+	a.x -= b.x;
+	a.y -= b.y;
+	a.z -= b.z;
+}
+inline __host__ __device__ uint3 operator-(uint3 a, uint b)
+{
+	return make_uint3(a.x - b, a.y - b, a.z - b);
+}
+inline __host__ __device__ uint3 operator-(uint b, uint3 a)
+{
+	return make_uint3(b - a.x, b - a.y, b - a.z);
+}
+inline __host__ __device__ void operator-=(uint3 &a, uint b)
+{
+	a.x -= b;
+	a.y -= b;
+	a.z -= b;
+}
+
+inline __host__ __device__ float4 operator-(float4 a, float4 b)
+{
+	return make_float4(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w);
+}
+inline __host__ __device__ void operator-=(float4 &a, float4 b)
+{
+	a.x -= b.x;
+	a.y -= b.y;
+	a.z -= b.z;
+	a.w -= b.w;
+}
+inline __host__ __device__ float4 operator-(float4 a, float b)
+{
+	return make_float4(a.x - b, a.y - b, a.z - b, a.w - b);
+}
+inline __host__ __device__ void operator-=(float4 &a, float b)
+{
+	a.x -= b;
+	a.y -= b;
+	a.z -= b;
+	a.w -= b;
+}
+
+inline __host__ __device__ int4 operator-(int4 a, int4 b)
+{
+	return make_int4(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w);
+}
+inline __host__ __device__ void operator-=(int4 &a, int4 b)
+{
+	a.x -= b.x;
+	a.y -= b.y;
+	a.z -= b.z;
+	a.w -= b.w;
+}
+inline __host__ __device__ int4 operator-(int4 a, int b)
+{
+	return make_int4(a.x - b, a.y - b, a.z - b, a.w - b);
+}
+inline __host__ __device__ int4 operator-(int b, int4 a)
+{
+	return make_int4(b - a.x, b - a.y, b - a.z, b - a.w);
+}
+inline __host__ __device__ void operator-=(int4 &a, int b)
+{
+	a.x -= b;
+	a.y -= b;
+	a.z -= b;
+	a.w -= b;
+}
+
+inline __host__ __device__ uint4 operator-(uint4 a, uint4 b)
+{
+	return make_uint4(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w);
+}
+inline __host__ __device__ void operator-=(uint4 &a, uint4 b)
+{
+	a.x -= b.x;
+	a.y -= b.y;
+	a.z -= b.z;
+	a.w -= b.w;
+}
+inline __host__ __device__ uint4 operator-(uint4 a, uint b)
+{
+	return make_uint4(a.x - b, a.y - b, a.z - b, a.w - b);
+}
+inline __host__ __device__ uint4 operator-(uint b, uint4 a)
+{
+	return make_uint4(b - a.x, b - a.y, b - a.z, b - a.w);
+}
+inline __host__ __device__ void operator-=(uint4 &a, uint b)
+{
+	a.x -= b;
+	a.y -= b;
+	a.z -= b;
+	a.w -= b;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// multiply
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 operator*(float2 a, float2 b)
+{
+	return make_float2(a.x * b.x, a.y * b.y);
+}
+inline __host__ __device__ void operator*=(float2 &a, float2 b)
+{
+	a.x *= b.x;
+	a.y *= b.y;
+}
+inline __host__ __device__ float2 operator*(float2 a, float b)
+{
+	return make_float2(a.x * b, a.y * b);
+}
+inline __host__ __device__ float2 operator*(float b, float2 a)
+{
+	return make_float2(b * a.x, b * a.y);
+}
+inline __host__ __device__ void operator*=(float2 &a, float b)
+{
+	a.x *= b;
+	a.y *= b;
+}
+
+inline __host__ __device__ int2 operator*(int2 a, int2 b)
+{
+	return make_int2(a.x * b.x, a.y * b.y);
+}
+inline __host__ __device__ void operator*=(int2 &a, int2 b)
+{
+	a.x *= b.x;
+	a.y *= b.y;
+}
+inline __host__ __device__ int2 operator*(int2 a, int b)
+{
+	return make_int2(a.x * b, a.y * b);
+}
+inline __host__ __device__ int2 operator*(int b, int2 a)
+{
+	return make_int2(b * a.x, b * a.y);
+}
+inline __host__ __device__ void operator*=(int2 &a, int b)
+{
+	a.x *= b;
+	a.y *= b;
+}
+
+inline __host__ __device__ uint2 operator*(uint2 a, uint2 b)
+{
+	return make_uint2(a.x * b.x, a.y * b.y);
+}
+inline __host__ __device__ void operator*=(uint2 &a, uint2 b)
+{
+	a.x *= b.x;
+	a.y *= b.y;
+}
+inline __host__ __device__ uint2 operator*(uint2 a, uint b)
+{
+	return make_uint2(a.x * b, a.y * b);
+}
+inline __host__ __device__ uint2 operator*(uint b, uint2 a)
+{
+	return make_uint2(b * a.x, b * a.y);
+}
+inline __host__ __device__ void operator*=(uint2 &a, uint b)
+{
+	a.x *= b;
+	a.y *= b;
+}
+
+inline __host__ __device__ float3 operator*(float3 a, float3 b)
+{
+	return make_float3(a.x * b.x, a.y * b.y, a.z * b.z);
+}
+inline __host__ __device__ void operator*=(float3 &a, float3 b)
+{
+	a.x *= b.x;
+	a.y *= b.y;
+	a.z *= b.z;
+}
+inline __host__ __device__ float3 operator*(float3 a, float b)
+{
+	return make_float3(a.x * b, a.y * b, a.z * b);
+}
+inline __host__ __device__ float3 operator*(float b, float3 a)
+{
+	return make_float3(b * a.x, b * a.y, b * a.z);
+}
+inline __host__ __device__ void operator*=(float3 &a, float b)
+{
+	a.x *= b;
+	a.y *= b;
+	a.z *= b;
+}
+
+inline __host__ __device__ int3 operator*(int3 a, int3 b)
+{
+	return make_int3(a.x * b.x, a.y * b.y, a.z * b.z);
+}
+inline __host__ __device__ void operator*=(int3 &a, int3 b)
+{
+	a.x *= b.x;
+	a.y *= b.y;
+	a.z *= b.z;
+}
+inline __host__ __device__ int3 operator*(int3 a, int b)
+{
+	return make_int3(a.x * b, a.y * b, a.z * b);
+}
+inline __host__ __device__ int3 operator*(int b, int3 a)
+{
+	return make_int3(b * a.x, b * a.y, b * a.z);
+}
+inline __host__ __device__ void operator*=(int3 &a, int b)
+{
+	a.x *= b;
+	a.y *= b;
+	a.z *= b;
+}
+
+inline __host__ __device__ uint3 operator*(uint3 a, uint3 b)
+{
+	return make_uint3(a.x * b.x, a.y * b.y, a.z * b.z);
+}
+inline __host__ __device__ void operator*=(uint3 &a, uint3 b)
+{
+	a.x *= b.x;
+	a.y *= b.y;
+	a.z *= b.z;
+}
+inline __host__ __device__ uint3 operator*(uint3 a, uint b)
+{
+	return make_uint3(a.x * b, a.y * b, a.z * b);
+}
+inline __host__ __device__ uint3 operator*(uint b, uint3 a)
+{
+	return make_uint3(b * a.x, b * a.y, b * a.z);
+}
+inline __host__ __device__ void operator*=(uint3 &a, uint b)
+{
+	a.x *= b;
+	a.y *= b;
+	a.z *= b;
+}
+
+inline __host__ __device__ float4 operator*(float4 a, float4 b)
+{
+	return make_float4(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w);
+}
+inline __host__ __device__ void operator*=(float4 &a, float4 b)
+{
+	a.x *= b.x;
+	a.y *= b.y;
+	a.z *= b.z;
+	a.w *= b.w;
+}
+inline __host__ __device__ float4 operator*(float4 a, float b)
+{
+	return make_float4(a.x * b, a.y * b, a.z * b, a.w * b);
+}
+inline __host__ __device__ float4 operator*(float b, float4 a)
+{
+	return make_float4(b * a.x, b * a.y, b * a.z, b * a.w);
+}
+inline __host__ __device__ void operator*=(float4 &a, float b)
+{
+	a.x *= b;
+	a.y *= b;
+	a.z *= b;
+	a.w *= b;
+}
+
+inline __host__ __device__ int4 operator*(int4 a, int4 b)
+{
+	return make_int4(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w);
+}
+inline __host__ __device__ void operator*=(int4 &a, int4 b)
+{
+	a.x *= b.x;
+	a.y *= b.y;
+	a.z *= b.z;
+	a.w *= b.w;
+}
+inline __host__ __device__ int4 operator*(int4 a, int b)
+{
+	return make_int4(a.x * b, a.y * b, a.z * b, a.w * b);
+}
+inline __host__ __device__ int4 operator*(int b, int4 a)
+{
+	return make_int4(b * a.x, b * a.y, b * a.z, b * a.w);
+}
+inline __host__ __device__ void operator*=(int4 &a, int b)
+{
+	a.x *= b;
+	a.y *= b;
+	a.z *= b;
+	a.w *= b;
+}
+
+inline __host__ __device__ uint4 operator*(uint4 a, uint4 b)
+{
+	return make_uint4(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w);
+}
+inline __host__ __device__ void operator*=(uint4 &a, uint4 b)
+{
+	a.x *= b.x;
+	a.y *= b.y;
+	a.z *= b.z;
+	a.w *= b.w;
+}
+inline __host__ __device__ uint4 operator*(uint4 a, uint b)
+{
+	return make_uint4(a.x * b, a.y * b, a.z * b, a.w * b);
+}
+inline __host__ __device__ uint4 operator*(uint b, uint4 a)
+{
+	return make_uint4(b * a.x, b * a.y, b * a.z, b * a.w);
+}
+inline __host__ __device__ void operator*=(uint4 &a, uint b)
+{
+	a.x *= b;
+	a.y *= b;
+	a.z *= b;
+	a.w *= b;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// divide
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 operator/(float2 a, float2 b)
+{
+	return make_float2(a.x / b.x, a.y / b.y);
+}
+inline __host__ __device__ void operator/=(float2 &a, float2 b)
+{
+	a.x /= b.x;
+	a.y /= b.y;
+}
+inline __host__ __device__ float2 operator/(float2 a, float b)
+{
+	return make_float2(a.x / b, a.y / b);
+}
+inline __host__ __device__ void operator/=(float2 &a, float b)
+{
+	a.x /= b;
+	a.y /= b;
+}
+inline __host__ __device__ float2 operator/(float b, float2 a)
+{
+	return make_float2(b / a.x, b / a.y);
+}
+
+inline __host__ __device__ float3 operator/(float3 a, float3 b)
+{
+	return make_float3(a.x / b.x, a.y / b.y, a.z / b.z);
+}
+inline __host__ __device__ void operator/=(float3 &a, float3 b)
+{
+	a.x /= b.x;
+	a.y /= b.y;
+	a.z /= b.z;
+}
+inline __host__ __device__ float3 operator/(float3 a, float b)
+{
+	return make_float3(a.x / b, a.y / b, a.z / b);
+}
+inline __host__ __device__ void operator/=(float3 &a, float b)
+{
+	a.x /= b;
+	a.y /= b;
+	a.z /= b;
+}
+inline __host__ __device__ float3 operator/(float b, float3 a)
+{
+	return make_float3(b / a.x, b / a.y, b / a.z);
+}
+
+inline __host__ __device__ float4 operator/(float4 a, float4 b)
+{
+	return make_float4(a.x / b.x, a.y / b.y, a.z / b.z, a.w / b.w);
+}
+inline __host__ __device__ void operator/=(float4 &a, float4 b)
+{
+	a.x /= b.x;
+	a.y /= b.y;
+	a.z /= b.z;
+	a.w /= b.w;
+}
+inline __host__ __device__ float4 operator/(float4 a, float b)
+{
+	return make_float4(a.x / b, a.y / b, a.z / b, a.w / b);
+}
+inline __host__ __device__ void operator/=(float4 &a, float b)
+{
+	a.x /= b;
+	a.y /= b;
+	a.z /= b;
+	a.w /= b;
+}
+inline __host__ __device__ float4 operator/(float b, float4 a)
+{
+	return make_float4(b / a.x, b / a.y, b / a.z, b / a.w);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// min
+////////////////////////////////////////////////////////////////////////////////
+
+inline  __host__ __device__ float2 fminf(float2 a, float2 b)
+{
+	return make_float2(fminf(a.x, b.x), fminf(a.y, b.y));
+}
+inline __host__ __device__ float3 fminf(float3 a, float3 b)
+{
+	return make_float3(fminf(a.x, b.x), fminf(a.y, b.y), fminf(a.z, b.z));
+}
+inline  __host__ __device__ float4 fminf(float4 a, float4 b)
+{
+	return make_float4(fminf(a.x, b.x), fminf(a.y, b.y), fminf(a.z, b.z), fminf(a.w, b.w));
+}
+
+inline __host__ __device__ int2 min(int2 a, int2 b)
+{
+	return make_int2(min(a.x, b.x), min(a.y, b.y));
+}
+inline __host__ __device__ int3 min(int3 a, int3 b)
+{
+	return make_int3(min(a.x, b.x), min(a.y, b.y), min(a.z, b.z));
+}
+inline __host__ __device__ int4 min(int4 a, int4 b)
+{
+	return make_int4(min(a.x, b.x), min(a.y, b.y), min(a.z, b.z), min(a.w, b.w));
+}
+
+inline __host__ __device__ uint2 min(uint2 a, uint2 b)
+{
+	return make_uint2(min(a.x, b.x), min(a.y, b.y));
+}
+inline __host__ __device__ uint3 min(uint3 a, uint3 b)
+{
+	return make_uint3(min(a.x, b.x), min(a.y, b.y), min(a.z, b.z));
+}
+inline __host__ __device__ uint4 min(uint4 a, uint4 b)
+{
+	return make_uint4(min(a.x, b.x), min(a.y, b.y), min(a.z, b.z), min(a.w, b.w));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// max
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 fmaxf(float2 a, float2 b)
+{
+	return make_float2(fmaxf(a.x, b.x), fmaxf(a.y, b.y));
+}
+inline __host__ __device__ float3 fmaxf(float3 a, float3 b)
+{
+	return make_float3(fmaxf(a.x, b.x), fmaxf(a.y, b.y), fmaxf(a.z, b.z));
+}
+inline __host__ __device__ float4 fmaxf(float4 a, float4 b)
+{
+	return make_float4(fmaxf(a.x, b.x), fmaxf(a.y, b.y), fmaxf(a.z, b.z), fmaxf(a.w, b.w));
+}
+
+inline __host__ __device__ int2 max(int2 a, int2 b)
+{
+	return make_int2(max(a.x, b.x), max(a.y, b.y));
+}
+inline __host__ __device__ int3 max(int3 a, int3 b)
+{
+	return make_int3(max(a.x, b.x), max(a.y, b.y), max(a.z, b.z));
+}
+inline __host__ __device__ int4 max(int4 a, int4 b)
+{
+	return make_int4(max(a.x, b.x), max(a.y, b.y), max(a.z, b.z), max(a.w, b.w));
+}
+
+inline __host__ __device__ uint2 max(uint2 a, uint2 b)
+{
+	return make_uint2(max(a.x, b.x), max(a.y, b.y));
+}
+inline __host__ __device__ uint3 max(uint3 a, uint3 b)
+{
+	return make_uint3(max(a.x, b.x), max(a.y, b.y), max(a.z, b.z));
+}
+inline __host__ __device__ uint4 max(uint4 a, uint4 b)
+{
+	return make_uint4(max(a.x, b.x), max(a.y, b.y), max(a.z, b.z), max(a.w, b.w));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// lerp
+// - linear interpolation between a and b, based on value t in [0, 1] range
+////////////////////////////////////////////////////////////////////////////////
+
+inline __device__ __host__ float lerp(float a, float b, float t)
+{
+	return a + t*(b - a);
+}
+inline __device__ __host__ float2 lerp(float2 a, float2 b, float t)
+{
+	return a + t*(b - a);
+}
+inline __device__ __host__ float3 lerp(float3 a, float3 b, float t)
+{
+	return a + t*(b - a);
+}
+inline __device__ __host__ float4 lerp(float4 a, float4 b, float t)
+{
+	return a + t*(b - a);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// clamp
+// - clamp the value v to be in the range [a, b]
+////////////////////////////////////////////////////////////////////////////////
+
+inline __device__ __host__ float clamp(float f, float a, float b)
+{
+	return fmaxf(a, fminf(f, b));
+}
+inline __device__ __host__ int clamp(int f, int a, int b)
+{
+	return max(a, min(f, b));
+}
+inline __device__ __host__ uint clamp(uint f, uint a, uint b)
+{
+	return max(a, min(f, b));
+}
+
+inline __device__ __host__ float2 clamp(float2 v, float a, float b)
+{
+	return make_float2(clamp(v.x, a, b), clamp(v.y, a, b));
+}
+inline __device__ __host__ float2 clamp(float2 v, float2 a, float2 b)
+{
+	return make_float2(clamp(v.x, a.x, b.x), clamp(v.y, a.y, b.y));
+}
+inline __device__ __host__ float3 clamp(float3 v, float a, float b)
+{
+	return make_float3(clamp(v.x, a, b), clamp(v.y, a, b), clamp(v.z, a, b));
+}
+inline __device__ __host__ float3 clamp(float3 v, float3 a, float3 b)
+{
+	return make_float3(clamp(v.x, a.x, b.x), clamp(v.y, a.y, b.y), clamp(v.z, a.z, b.z));
+}
+inline __device__ __host__ float4 clamp(float4 v, float a, float b)
+{
+	return make_float4(clamp(v.x, a, b), clamp(v.y, a, b), clamp(v.z, a, b), clamp(v.w, a, b));
+}
+inline __device__ __host__ float4 clamp(float4 v, float4 a, float4 b)
+{
+	return make_float4(clamp(v.x, a.x, b.x), clamp(v.y, a.y, b.y), clamp(v.z, a.z, b.z), clamp(v.w, a.w, b.w));
+}
+
+inline __device__ __host__ int2 clamp(int2 v, int a, int b)
+{
+	return make_int2(clamp(v.x, a, b), clamp(v.y, a, b));
+}
+inline __device__ __host__ int2 clamp(int2 v, int2 a, int2 b)
+{
+	return make_int2(clamp(v.x, a.x, b.x), clamp(v.y, a.y, b.y));
+}
+inline __device__ __host__ int3 clamp(int3 v, int a, int b)
+{
+	return make_int3(clamp(v.x, a, b), clamp(v.y, a, b), clamp(v.z, a, b));
+}
+inline __device__ __host__ int3 clamp(int3 v, int3 a, int3 b)
+{
+	return make_int3(clamp(v.x, a.x, b.x), clamp(v.y, a.y, b.y), clamp(v.z, a.z, b.z));
+}
+inline __device__ __host__ int4 clamp(int4 v, int a, int b)
+{
+	return make_int4(clamp(v.x, a, b), clamp(v.y, a, b), clamp(v.z, a, b), clamp(v.w, a, b));
+}
+inline __device__ __host__ int4 clamp(int4 v, int4 a, int4 b)
+{
+	return make_int4(clamp(v.x, a.x, b.x), clamp(v.y, a.y, b.y), clamp(v.z, a.z, b.z), clamp(v.w, a.w, b.w));
+}
+
+inline __device__ __host__ uint2 clamp(uint2 v, uint a, uint b)
+{
+	return make_uint2(clamp(v.x, a, b), clamp(v.y, a, b));
+}
+inline __device__ __host__ uint2 clamp(uint2 v, uint2 a, uint2 b)
+{
+	return make_uint2(clamp(v.x, a.x, b.x), clamp(v.y, a.y, b.y));
+}
+inline __device__ __host__ uint3 clamp(uint3 v, uint a, uint b)
+{
+	return make_uint3(clamp(v.x, a, b), clamp(v.y, a, b), clamp(v.z, a, b));
+}
+inline __device__ __host__ uint3 clamp(uint3 v, uint3 a, uint3 b)
+{
+	return make_uint3(clamp(v.x, a.x, b.x), clamp(v.y, a.y, b.y), clamp(v.z, a.z, b.z));
+}
+inline __device__ __host__ uint4 clamp(uint4 v, uint a, uint b)
+{
+	return make_uint4(clamp(v.x, a, b), clamp(v.y, a, b), clamp(v.z, a, b), clamp(v.w, a, b));
+}
+inline __device__ __host__ uint4 clamp(uint4 v, uint4 a, uint4 b)
+{
+	return make_uint4(clamp(v.x, a.x, b.x), clamp(v.y, a.y, b.y), clamp(v.z, a.z, b.z), clamp(v.w, a.w, b.w));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// dot product
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float dot(float2 a, float2 b)
+{
+	return a.x * b.x + a.y * b.y;
+}
+inline __host__ __device__ float dot(float3 a, float3 b)
+{
+	return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+inline __host__ __device__ float dot(float4 a, float4 b)
+{
+	return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+}
+
+inline __host__ __device__ int dot(int2 a, int2 b)
+{
+	return a.x * b.x + a.y * b.y;
+}
+inline __host__ __device__ int dot(int3 a, int3 b)
+{
+	return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+inline __host__ __device__ int dot(int4 a, int4 b)
+{
+	return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+}
+
+inline __host__ __device__ uint dot(uint2 a, uint2 b)
+{
+	return a.x * b.x + a.y * b.y;
+}
+inline __host__ __device__ uint dot(uint3 a, uint3 b)
+{
+	return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+inline __host__ __device__ uint dot(uint4 a, uint4 b)
+{
+	return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// length
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float length(float2 v)
+{
+	return sqrtf(dot(v, v));
+}
+inline __host__ __device__ float length(float3 v)
+{
+	return sqrtf(dot(v, v));
+}
+inline __host__ __device__ float length(float4 v)
+{
+	return sqrtf(dot(v, v));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// normalize
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 normalize(float2 v)
+{
+	float invLen = rsqrtf(dot(v, v));
+	return v * invLen;
+}
+inline __host__ __device__ float3 normalize(float3 v)
+{
+	float invLen = rsqrtf(dot(v, v));
+	return v * invLen;
+}
+inline __host__ __device__ float4 normalize(float4 v)
+{
+	float invLen = rsqrtf(dot(v, v));
+	return v * invLen;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// floor
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 floorf(float2 v)
+{
+	return make_float2(floorf(v.x), floorf(v.y));
+}
+inline __host__ __device__ float3 floorf(float3 v)
+{
+	return make_float3(floorf(v.x), floorf(v.y), floorf(v.z));
+}
+inline __host__ __device__ float4 floorf(float4 v)
+{
+	return make_float4(floorf(v.x), floorf(v.y), floorf(v.z), floorf(v.w));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// frac - returns the fractional portion of a scalar or each vector component
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float fracf(float v)
+{
+	return v - floorf(v);
+}
+inline __host__ __device__ float2 fracf(float2 v)
+{
+	return make_float2(fracf(v.x), fracf(v.y));
+}
+inline __host__ __device__ float3 fracf(float3 v)
+{
+	return make_float3(fracf(v.x), fracf(v.y), fracf(v.z));
+}
+inline __host__ __device__ float4 fracf(float4 v)
+{
+	return make_float4(fracf(v.x), fracf(v.y), fracf(v.z), fracf(v.w));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// fmod
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 fmodf(float2 a, float2 b)
+{
+	return make_float2(fmodf(a.x, b.x), fmodf(a.y, b.y));
+}
+inline __host__ __device__ float3 fmodf(float3 a, float3 b)
+{
+	return make_float3(fmodf(a.x, b.x), fmodf(a.y, b.y), fmodf(a.z, b.z));
+}
+inline __host__ __device__ float4 fmodf(float4 a, float4 b)
+{
+	return make_float4(fmodf(a.x, b.x), fmodf(a.y, b.y), fmodf(a.z, b.z), fmodf(a.w, b.w));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// absolute value
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 fabs(float2 v)
+{
+	return make_float2(fabs(v.x), fabs(v.y));
+}
+inline __host__ __device__ float3 fabs(float3 v)
+{
+	return make_float3(fabs(v.x), fabs(v.y), fabs(v.z));
+}
+inline __host__ __device__ float4 fabs(float4 v)
+{
+	return make_float4(fabs(v.x), fabs(v.y), fabs(v.z), fabs(v.w));
+}
+
+inline __host__ __device__ int2 abs(int2 v)
+{
+	return make_int2(abs(v.x), abs(v.y));
+}
+inline __host__ __device__ int3 abs(int3 v)
+{
+	return make_int3(abs(v.x), abs(v.y), abs(v.z));
+}
+inline __host__ __device__ int4 abs(int4 v)
+{
+	return make_int4(abs(v.x), abs(v.y), abs(v.z), abs(v.w));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// reflect
+// - returns reflection of incident ray I around surface normal N
+// - N should be normalized, reflected vector's length is equal to length of I
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float3 reflect(float3 i, float3 n)
+{
+	return i - 2.0f * n * dot(n, i);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// cross product
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float3 cross(float3 a, float3 b)
+{
+	return make_float3(a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// smoothstep
+// - returns 0 if x < a
+// - returns 1 if x > b
+// - otherwise returns smooth interpolation between 0 and 1 based on x
+////////////////////////////////////////////////////////////////////////////////
+
+inline __device__ __host__ float smoothstep(float a, float b, float x)
+{
+	float y = clamp((x - a) / (b - a), 0.0f, 1.0f);
+	return (y*y*(3.0f - (2.0f*y)));
+}
+inline __device__ __host__ float2 smoothstep(float2 a, float2 b, float2 x)
+{
+	float2 y = clamp((x - a) / (b - a), 0.0f, 1.0f);
+	return (y*y*(make_float2(3.0f) - (make_float2(2.0f)*y)));
+}
+inline __device__ __host__ float3 smoothstep(float3 a, float3 b, float3 x)
+{
+	float3 y = clamp((x - a) / (b - a), 0.0f, 1.0f);
+	return (y*y*(make_float3(3.0f) - (make_float3(2.0f)*y)));
+}
+inline __device__ __host__ float4 smoothstep(float4 a, float4 b, float4 x)
+{
+	float4 y = clamp((x - a) / (b - a), 0.0f, 1.0f);
+	return (y*y*(make_float4(3.0f) - (make_float4(2.0f)*y)));
+}
+
+
+
+
+
+
+
+// transform vector by matrix with translation
+inline __host__ __device__  float4 multiplication(const float4x4 &M, const float4 &v)
+{
+	float4 r;
+	r.x = dot(v, M.m[0]);
+	r.y = dot(v, M.m[1]);
+	r.z = dot(v, M.m[2]);
+	r.w = dot(v, M.m[3]);
+	return r;
+}
+
+#endif
+```
+
+### VRCUDA/src/kernel.cu
+```
+#include "kernel.cuh"
+
+typedef unsigned char VolumeType;
+
+#define checkCudaErrors(val) check( (val), #val, __FILE__, __LINE__)
+
+#define opacityThreshold 0.99
+
+
+texture<VolumeType, 3, cudaReadModeNormalizedFloat> volume;         // 3D texture
+texture<float4, 2, cudaReadModeElementType>         transferFunction; // 1D transfer function texture
+#ifdef NOT_RAY_BOX
+texture<float4, 2, cudaReadModeElementType>         texFirst, texLast;
+#endif
+surface<void, cudaSurfaceType2D> surf;
+
+
+
+__constant__ unsigned int constantWidth, constantHeight;
+__constant__ float constantH;
+
+#ifdef LIGHTING
+__constant__ float3 c_diffColor;
+__constant__ float3 c_lightDir;
+__constant__ float3 c_voxelJump;
+#endif
+
+#ifndef NOT_RAY_BOX
+__constant__ float constantAngle, cosntantNCP;
+__constant__ float4x4 c_invViewMatrix;  // inverse view matrix
+
+struct Ray
+{
+	float4 o;   // origin
+	float4 d;   // direction
+};
+
+// intersect ray with a box
+// http://www.siggraph.org/education/materials/HyperGraph/raytrace/rtinter3.htm
+
+__device__
+int intersectBox(Ray r, float *tnear, float *tfar)
+{
+	float3 boxmin = make_float3(-.5f, -.5f, -.5f);
+	float3 boxmax = make_float3(.5f, .5f, .5f);
+	/*float3 boxmin = make_float3(-1.f, -1.f, -1.f);
+	float3 boxmax = make_float3(1.f, 1.f, 1.f);*/
+	// compute intersection of ray with all six bbox planes
+	float3 invR = make_float3(1.0f) / make_float3(r.d);
+	float3 tbot = invR * (boxmin - make_float3(r.o));
+	float3 ttop = invR * (boxmax - make_float3(r.o));
+
+	// re-order intersections to find smallest and largest on each axis
+
+	float3 tmin = make_float3(FLT_MAX);
+	float3 tmax = make_float3(0.0f);
+
+	tmin = fminf(tmin, fminf(ttop, tbot));
+	tmax = fmaxf(tmax, fmaxf(ttop, tbot));
+
+	// find the largest tmin and the smallest tmax
+	float largest_tmin = fmaxf(fmaxf(tmin.x, tmin.y), fmaxf(tmin.x, tmin.z));
+	float smallest_tmax = fminf(fminf(tmax.x, tmax.y), fminf(tmax.x, tmax.z));
+
+	*tnear = largest_tmin;
+	*tfar = smallest_tmax;
+
+	return smallest_tmax > largest_tmin;
+}
+
+#endif
+
+
+/**
+Kernel to do the volume rendering
+*/
+__global__ void volumeRenderingKernel(/*uchar4 * result, const int width, const int height, float3 * firsHit, float3 * lastHit*/){
+	unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+	unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+
+	if (x < constantWidth && y < constantHeight){
+		/*float sample = tex3D(volume, float(x) / constantWidth, float(y) / constantHeight, 0.5f);
+		float4 color = tex1D(transferFunction, sample);
+
+		result[tpos] = make_uchar4(color.x * 255, color.y * 255, color.z * 255, 255);*/
+		//result[tpos] = make_uchar4(color.x * 255, color.y * 255, color.z * 255, 255);
+		float2 Pos = make_float2(x, y);
+
+		//Flip the Y axis
+		//Pos.y = constantHeight - Pos.y;
+
+#ifndef NOT_RAY_BOX
+		//ok u and v between -1 and 1
+		float u = (((x + 0.5f) / (float)constantWidth)*2.0f - 1.0f);
+		float v = (((y + 0.5f) / (float)constantHeight)*2.0f - 1.0f);
+
+		// calculate eye ray in world space
+		Ray eyeRay;
+		float tangent = tan(constantAngle); // angle in radians
+		float ar = (float(constantWidth) / constantHeight);
+		eyeRay.o = multiplication(c_invViewMatrix, make_float4(0.0f, 0.0f, 0.0f, 1.0f));
+		eyeRay.d = normalize(make_float4(u * tangent * ar, v * tangent, -cosntantNCP, 0.0f));
+		eyeRay.d = multiplication(c_invViewMatrix, eyeRay.d);
+		eyeRay.d = normalize(eyeRay.d);
+
+		// find intersection with box
+		float tnear, tfar;
+		int hit = intersectBox(eyeRay, &tnear, &tfar);  // this must be wrong....anything else seems to be ok now
+
+
+		float4 bg = make_float4(0.15f); //bg color here
+
+		if (hit){
+
+			if (tnear < cosntantNCP)
+				tnear = cosntantNCP;     // clamp to near plane
+
+
+			//float3 last = firsHit[tpos];
+			//float3 first = lastHit[tpos];
+
+			float3 first = make_float3(eyeRay.o + eyeRay.d*tnear);
+			float3 last = make_float3(eyeRay.o + eyeRay.d*tfar);
+			first = make_float3(first.x + 0.5f, first.y + 0.5f, 1.0f - (first.z + 0.5f));
+			last = make_float3(last.x + 0.5f, last.y + 0.5f, 1.0f - (last.z + 0.5f));
+
+			//Get direction of the ray
+			float3 direction = last - first;
+			float3 trans = first;
+#else
+		float4 first = tex2D(texFirst, x, y);
+		float4 last = tex2D(texLast, x, y);
+
+		//Get direction of the ray
+		float3 direction = make_float3(last) - make_float3(first);
+		float3 trans = make_float3(first);
+#endif
+		float D = length(direction);
+		direction = normalize(direction);
+
+		float4 color = make_float4(0.0f);
+		color.w = 1.0f;
+
+		float3 rayStep = direction * constantH;
+
+		for (float t = 0; t <= D; t += constantH){
+
+			//Sample in the scalar field and the transfer function
+#ifdef NOT_RAY_BOX
+			float scalar = tex3D(volume, trans.x, trans.y, trans.z);
+#else
+			float scalar = tex3D(volume, trans.x, trans.y, trans.z); //convert to texture space
+#endif
+			float4 samp = tex2D(transferFunction, scalar, 0.5f);
+			//float scalar = 0.1;
+			//float4 samp = make_float4(0.0f);
+
+			//Calculating alpa
+			samp.w = 1.0f - expf(-0.5 * samp.w);
+
+			//Acumulating color and alpha using under operator 
+			samp.x = samp.x * samp.w;
+			samp.y = samp.y * samp.w;
+			samp.z = samp.z * samp.w;
+
+			//calculate lighting for the sample color
+#ifdef LIGHTING
+
+			// sample neightbours
+			float3 normal;
+			//sample right
+			normal.x = tex3D(volume, trans.x + c_voxelJump.x, trans.y, trans.z) - scalar;
+			normal.y = tex3D(volume, trans.x, trans.y + c_voxelJump.y, trans.z) - scalar;
+			normal.z = tex3D(volume, trans.x, trans.y, trans.z - c_voxelJump.z) - scalar;
+
+			//normalize normal
+			normal = normalize(normal);
+
+			float d = max(dot(c_lightDir, normal), 0.0f);
+
+			samp.x = samp.x * d * c_diffColor.x;
+			samp.y = samp.y * d * c_diffColor.y;
+			samp.z = samp.z * d * c_diffColor.z;
+#endif
+
+			color.x += samp.x * color.w;
+			color.y += samp.y * color.w;
+			color.z += samp.z * color.w;
+			color.w *= 1.0f - samp.w;
+
+			//Do early termination of the ray
+			if (1.0f - color.w > opacityThreshold) break;
+
+			//Increment ray step
+			trans += rayStep;
+		}
+
+		color.w = 1.0f - color.w;
+
+		//Write to the texture
+		uchar4 ucolor = make_uchar4(color.x * 255, color.y * 255, color.z * 255, color.w * 255);
+		surf2Dwrite(ucolor, surf, x * sizeof(uchar4), y, cudaBoundaryModeClamp);
+
+#ifndef NOT_RAY_BOX
+		}
+	else{
+		bg.w = 1.0f;
+
+		//Write to the texture
+		uchar4 ucolor = make_uchar4(bg.x * 255, bg.y * 255, bg.z * 255, bg.w * 255);
+		surf2Dwrite(ucolor, surf, x * sizeof(uchar4), y, cudaBoundaryModeClamp);
+	}
+#endif
+	}
+}
+
+
+CUDAClass::CUDAClass(dim3 dim)
+{
+	//d_lastHit = d_FirstHit = NULL;
+	d_texture = d_volume = NULL;
+	block_dim = dim;
+	checkCudaErrors(cudaSetDevice(0));
+	// Otherwise pick the device with highest Gflops/s
+
+
+	/*d_pos = NULL;
+	d_normal = NULL;
+	d_tex = NULL;
+	d_id = NULL;
+	d_octree = NULL;
+	d_texture = NULL;
+	d_texW = d_texH = -1;*/
+
+#ifdef LIGHTING
+	glm::vec3 diffColor = glm::vec3(1.0, 0.0, 1.0f);
+	checkCudaErrors(cudaMemcpyToSymbol(c_diffColor, glm::value_ptr(diffColor), sizeof(float3)));
+#endif
+
+
+}
+
+CUDAClass::~CUDAClass()
+{
+
+	/*	destroyObject();*/
+
+	if (d_texture != NULL)
+	{
+		checkCudaErrors(cudaFreeArray(d_texture));
+		cudaUnbindTexture(transferFunction);
+	}
+	if (d_volume != NULL)
+	{
+		checkCudaErrors(cudaFreeArray(d_volume));
+		cudaUnbindTexture(volume);
+	}
+	/*if (d_FirstHit != NULL) checkCudaErrors(cudaFree(d_FirstHit));
+	if (d_lastHit != NULL) checkCudaErrors(cudaFree(d_lastHit));*/
+
+	//d_lastHit = d_FirstHit = NULL;
+	d_texture = d_volume = NULL;
+
+
+	checkCudaErrors(cudaDeviceReset());
+}
+
+
+// Helper function for using CUDA to add vectors in parallel.
+void CUDAClass::cudaRC(/*, unsigned int width, unsigned int height, float h, float4 *d_buffer, float4 *d_lastHit*/)
+{
+
+
+	volumeRenderingKernel << < grid_dim, block_dim >> >();
+
+
+	// Check for any errors launching the kernel
+	checkCudaErrors(cudaGetLastError());
+
+	// cudaDeviceSynchronize waits for the kernel to finish, and returns
+	// any errors encountered during the launch.
+	checkCudaErrors(cudaDeviceSynchronize());
+}
+
+
+void CUDAClass::destroyObject()
+{
+	/*if (d_pos != NULL) checkCudaErrors(cudaFree(d_pos));
+	if (d_normal != NULL) checkCudaErrors(cudaFree(d_normal));
+	if (d_tex != NULL) checkCudaErrors(cudaFree(d_tex));
+	if (d_id != NULL) checkCudaErrors(cudaFree(d_id));
+	if (d_octree != NULL) checkCudaErrors(cudaFree(d_octree));
+	d_pos = NULL;
+	d_normal = NULL;
+	d_tex = NULL;
+	d_id = NULL;
+	d_octree = NULL;*/
+}
+
+
+void CUDAClass::cudaSetVolume(unsigned int width, unsigned int height, unsigned int depth, float diagonal)
+{
+	// create 3D array
+	const cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<VolumeType>();
+
+	// set texture parameters
+	volume.normalized = true;                      // access with normalized texture coordinates
+	volume.filterMode = cudaFilterModeLinear;      // linear interpolation
+	volume.addressMode[0] = cudaAddressModeClamp;  // clamp texture coordinates
+	volume.addressMode[1] = cudaAddressModeClamp;
+	volume.addressMode[2] = cudaAddressModeClamp;
+
+	// bind array to 3D texture
+	checkCudaErrors(cudaGraphicsGLRegisterImage(&cudaResource_volume,
+		TextureManager::Inst().GetID(TEXTURE_VOLUME),
+		GL_TEXTURE_3D, cudaGraphicsMapFlagsReadOnly)); //Register the texture in a resource
+
+	checkCudaErrors(cudaGraphicsMapResources(1, &cudaResource_volume, 0)); // Map the resource
+	checkCudaErrors(cudaGraphicsSubResourceGetMappedArray(&d_volume, cudaResource_volume, 0, 0)); //Get the mapped array
+
+	checkCudaErrors(cudaBindTextureToArray(volume, d_volume, channelDesc)); // Map the array to the surface
+
+	checkCudaErrors(cudaGraphicsUnmapResources(1, &cudaResource_volume, 0)); // Unmap the resource
+
+
+	//Set the step
+	float step = 1.f / diagonal;
+	checkCudaErrors(cudaMemcpyToSymbol(constantH, &step, sizeof(float)));
+}
+
+void CUDAClass::cudaSetTransferFunction(unsigned int width)
+{
+	//Create channel description for 2D texture
+	const cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float4>();
+
+	// set texture parameters
+	transferFunction.normalized = true;
+	transferFunction.filterMode = cudaFilterModeLinear;
+	transferFunction.addressMode[0] = cudaAddressModeClamp;
+	transferFunction.addressMode[1] = cudaAddressModeClamp;
+
+
+	// bind array to 2D texture
+	checkCudaErrors(cudaGraphicsGLRegisterImage(&cudaResource_TF,
+		TextureManager::Inst().GetID(TEXTURE_TRANSFER_FUNC),
+		GL_TEXTURE_2D, cudaGraphicsMapFlagsReadOnly)); //Register the texture in a resource
+
+	checkCudaErrors(cudaGraphicsMapResources(1, &cudaResource_TF, 0)); // Map the resource
+	checkCudaErrors(cudaGraphicsSubResourceGetMappedArray(&d_volume, cudaResource_TF, 0, 0)); //Get the mapped array
+
+	checkCudaErrors(cudaBindTextureToArray(transferFunction, d_volume)); // Map the array to the surface
+
+	checkCudaErrors(cudaGraphicsUnmapResources(1, &cudaResource_TF, 0)); // Unmap the resource
+
+}
+
+
+void CUDAClass::cudaSetImageSize(unsigned int width, unsigned int height, float NCP, float angle){
+
+	checkCudaErrors(cudaMemcpyToSymbol(constantWidth, &width, sizeof(unsigned int)));
+	checkCudaErrors(cudaMemcpyToSymbol(constantHeight, &height, sizeof(unsigned int)));
+
+#ifndef NOT_RAY_BOX
+	checkCudaErrors(cudaMemcpyToSymbol(constantAngle, &angle, sizeof(float)));
+	checkCudaErrors(cudaMemcpyToSymbol(cosntantNCP, &NCP, sizeof(float)));
+#endif
+
+	Width = width;
+	Height = height;
+
+	//Update grid dimension
+	grid_dim = dim3((Width + block_dim.x) / block_dim.x, (Height + block_dim.y) / block_dim.y, 1);
+
+	// bind array to 2D texture
+	checkCudaErrors(cudaGraphicsGLRegisterImage(&cudaResource_final,
+		TextureManager::Inst().GetID(TEXTURE_FINAL_IMAGE),
+		GL_TEXTURE_2D, cudaGraphicsRegisterFlagsSurfaceLoadStore)); //Register the texture in a resource
+
+	checkCudaErrors(cudaGraphicsMapResources(1, &cudaResource_final, 0)); // Map the resource
+	checkCudaErrors(cudaGraphicsSubResourceGetMappedArray(&d_final, cudaResource_final, 0, 0)); //Get the mapped array
+
+	checkCudaErrors(cudaBindSurfaceToArray(surf, d_final)); // Map the array to the surface
+
+	checkCudaErrors(cudaGraphicsUnmapResources(1, &cudaResource_final, 0)); // Unmap the resource
+
+
+#ifdef NOT_RAY_BOX
+	// bind array to 2D texture
+	checkCudaErrors(cudaGraphicsGLRegisterImage(&cudaResource_First,
+		TextureManager::Inst().GetID(TEXTURE_FRONT_HIT),
+		GL_TEXTURE_2D, cudaGraphicsRegisterFlagsSurfaceLoadStore)); //Register the texture in a resource
+
+	checkCudaErrors(cudaGraphicsMapResources(1, &cudaResource_First, 0)); // Map the resource
+	checkCudaErrors(cudaGraphicsSubResourceGetMappedArray(&d_textureFirst, cudaResource_First, 0, 0)); //Get the mapped array
+
+	checkCudaErrors(cudaBindTextureToArray(texFirst, d_textureFirst)); // Map the array to the surface
+
+	checkCudaErrors(cudaGraphicsUnmapResources(1, &cudaResource_First, 0)); // Unmap the resource
+
+
+	// bind array to 2D texture
+	checkCudaErrors(cudaGraphicsGLRegisterImage(&cudaResource_Last,
+		TextureManager::Inst().GetID(TEXTURE_BACK_HIT),
+		GL_TEXTURE_2D, cudaGraphicsRegisterFlagsSurfaceLoadStore)); //Register the texture in a resource
+
+	checkCudaErrors(cudaGraphicsMapResources(1, &cudaResource_Last, 0)); // Map the resource
+	checkCudaErrors(cudaGraphicsSubResourceGetMappedArray(&d_textureLast, cudaResource_Last, 0, 0)); //Get the mapped array
+
+	checkCudaErrors(cudaBindTextureToArray(texLast, d_textureLast)); // Map the array to the surface
+
+	checkCudaErrors(cudaGraphicsUnmapResources(1, &cudaResource_Last, 0)); // Unmap the resource
+#endif
+}
+
+
+#ifdef LIGHTING
+void CUDAClass::cudaUpdateLight(const float * lightDir){
+	checkCudaErrors(cudaMemcpyToSymbol(c_lightDir, lightDir, sizeof(float3)));
+}
+
+void CUDAClass::cudaUpdateVoxelSize(const float * voxelJump){
+	checkCudaErrors(cudaMemcpyToSymbol(c_voxelJump, voxelJump, sizeof(float3)));
+}
+#endif
+
+#ifndef NOT_RAY_BOX
+void CUDAClass::cudaUpdateMatrix(const float * matrix){
+	checkCudaErrors(cudaMemcpyToSymbol(c_invViewMatrix, matrix, sizeof(float4x4)));
+}
+#endif
+
+void CUDAClass::Use(GLenum activeTexture){
+
+	// copy from pbo to texture
+	glActiveTexture(activeTexture);
+	TextureManager::Inst().BindTexture(TEXTURE_FINAL_IMAGE);
+}
+```
+
+### VRCUDA/src/kernel.cuh
+```
+#ifndef KERNELGPU_H
+#define KERNELGPU_H
+
+
+#include "Definitions.h"
+#include "TextureManager.h"
+
+#include <cuda_runtime.h>
+#include <cuda_gl_interop.h>
+#include <device_launch_parameters.h>
+
+//
+//#include "cuda_texture_types.h"
+#define __CUDA_INTERNAL_COMPILATION__
+//#include <math.h>
+//#include <math_functions.h>
+#include "helper_math.h"
+//#include <math_functions.hpp>
+#undef __CUDA_INTERNAL_COMPILATION__
+//#include <math.h>
+#include <float.h>
+
+
+
+//#include "cudaGL.h"
+
+#include <stdio.h>
+
+
+
+template<typename T>
+void check(T err, const char* const func, const char* const file, const int line) {
+	if (err != cudaSuccess) {
+		printf("CUDA error at %s : %d \n", file, line);
+		printf("%s %s \n", cudaGetErrorString(err), func);
+		system("pause");
+	}
+}
+
+
+class CUDAClass
+{
+public:
+	CUDAClass(dim3 dim = dim3(16,16,1));
+	~CUDAClass();
+	
+
+	void destroyObject();
+#ifndef NOT_RAY_BOX
+	void cudaUpdateMatrix(const float * matrix);
+#endif
+#ifdef LIGHTING
+	void cudaUpdateLight(const float * lightDir);
+	void cudaUpdateVoxelSize(const float * voxelJump);
+#endif
+	void cudaRC();
+	void cudaSetVolume(unsigned int width, unsigned int height, unsigned int depth, float diagonal);
+	void cudaSetImageSize(unsigned int width, unsigned int height, float NCP, float angle);
+	void cudaSetTransferFunction(unsigned int width = 256);
+	void Use(GLenum activeTexture);
+
+
+private:
+	int Width, Height;
+	//float4 *d_lastHit, *d_FirstHit;
+	cudaArray *d_volume, *d_texture, *d_final;
+	unsigned int num_vert, num_tri;
+	cudaGraphicsResource_t cudaResource_TF, cudaResource_volume, cudaResource_final; // CUDA Graphics Resource
+	dim3 block_dim, grid_dim;
+
+#ifdef NOT_RAY_BOX
+	cudaArray *d_textureFirst, * d_textureLast;
+	cudaGraphicsResource_t cudaResource_First, cudaResource_Last;
+#endif
+};
+
+#endif
+```
+
+### VRCUDA/src/main.cpp
+```
+#include "kernel.cuh"
+#include "Definitions.h"
+#include "GLSLProgram.h"
+#include "TransferFunction.h"
+#include "TextureManager.h"
+#include "CubeIntersection.h"
+#include "VBOCube.h"
+#include "VBOQuad.h"
+#include "Volume.h"
+#include "FinalImage.h"
+#include "Timer.h"
+#include <iostream>
+#include <fstream>
+
+using std::cout;
+using std::endl;
+
+
+
+namespace glfwFunc
+{
+	GLFWwindow* glfwWindow;
+	int WINDOW_WIDTH = 1024;
+	int WINDOW_HEIGHT = 768;
+	std::string strNameWindow = "CUDA Volume Ray Casting";
+
+	const float NCP = 1.0f;
+	const float FCP = 10.0f;
+	const float fAngle = 45.f * (3.14f / 180.0f); //In radians
+
+	//Declare the transfer function
+	TransferFunction *g_pTransferFunc;
+
+
+	
+	char * volume_filepath = "./Raw/volume.raw";
+	char * transfer_func_filepath = NULL;
+	glm::ivec3 vol_size = glm::ivec3(256, 256, 256);
+	dim3 block_dimension(16, 16, 1);
+	glm::mat4 scale = glm::mat4();
+	bool bits8 = true;
+	int offset = 0;
+
+	//Class to wrap cuda code
+	CUDAClass * cuda;
+
+	float color[]={1,1,1};
+	bool pintar = false;
+
+	glm::mat4x4 mProjMatrix, mModelViewMatrix, mMVP;
+
+	//Variables to do rotation
+	glm::quat quater = glm::quat(0.8847f, -.201f, 0.398f, -0.1339f), q2; //begin with a diagonal view
+	glm::mat4x4 RotationMat = glm::mat4x4();
+	float angle = 0;
+	float *vector=(float*)malloc(sizeof(float)*3);
+	double lastx, lasty;
+	bool pres = false;
+
+#ifdef NOT_RAY_BOX
+	CCubeIntersection *m_BackInter, *m_FrontInter;
+#endif
+	CFinalImage *m_FinalImage;
+
+#ifdef MEASURE_TIME
+	std::ofstream time_file("Time.txt", std::ios::out);
+	// helper variable
+	TimerManager timer;
+	int num;
+#endif
+
+
+	Volume *volume = NULL;
+
+	
+	///< Callback function used by GLFW to capture some possible error.
+	void errorCB(int error, const char* description)
+	{
+		printf("%s\n",description );
+	}
+
+
+	///
+	/// The keyboard function call back
+	/// @param window id of the window that received the event
+	/// @param iKey the key pressed or released
+	/// @param iScancode the system-specific scancode of the key.
+	/// @param iAction can be GLFW_PRESS, GLFW_RELEASE or GLFW_REPEAT
+	/// @param iMods Bit field describing which modifier keys were held down (Shift, Alt, & so on)
+	///
+	void keyboardCB(GLFWwindow* window, int iKey, int iScancode, int iAction, int iMods)
+	{
+		if (iAction == GLFW_PRESS)
+		{
+			switch (iKey)
+			{
+				case GLFW_KEY_ESCAPE:
+				case GLFW_KEY_Q:
+					glfwSetWindowShouldClose(window, GL_TRUE);
+					break;
+				case GLFW_KEY_SPACE:
+				{
+					static bool visible = false;
+					visible = !visible;
+					g_pTransferFunc->SetVisible(visible);
+				}
+					break;
+				case GLFW_KEY_S:
+					g_pTransferFunc->SaveToFile("TransferFunction.txt");
+					break;
+			}
+		}
+	}
+
+	inline int TwEventMousePosGLFW3(GLFWwindow* window, double xpos, double ypos)
+	{ 
+	
+		g_pTransferFunc->CursorPos(int(xpos), int(ypos));
+		if (pres){
+			//Rotation
+			float dx = float(xpos - lastx);
+			float dy = float(ypos - lasty);
+
+			if (!(dx == 0 && dy == 0)){
+				//Calculate angle and rotation axis
+				float angle = sqrtf(dx*dx + dy*dy) / 50.0f;
+
+				//Acumulate rotation with quaternion multiplication
+				q2 = glm::angleAxis(angle, glm::normalize(glm::vec3(dy, dx, 0.0f)));
+				quater = glm::cross(q2, quater);
+
+				lastx = xpos;
+				lasty = ypos;
+			}
+		}
+		return false;
+	}
+
+	int TwEventMouseButtonGLFW3(GLFWwindow* window, int button, int action, int mods)
+	{ 
+		pres = false;
+
+		double x, y;   
+		glfwGetCursorPos(window, &x, &y);  
+
+		if (!g_pTransferFunc->MouseButton((int)x, (int)y, button, action)){
+			
+			if(button == GLFW_MOUSE_BUTTON_LEFT){
+				if(action == GLFW_PRESS){
+					lastx = x;
+					lasty = y;
+					pres = true;
+				}
+
+				return true;
+			}else{
+				if(action == GLFW_PRESS){			
+				}
+				
+			}
+			
+			return false;
+		}
+
+		return true;
+	}
+	
+	///< The resizing function
+	void resizeCB(GLFWwindow* window, int iWidth, int iHeight)
+	{
+
+		WINDOW_WIDTH = iWidth;
+		WINDOW_HEIGHT = iHeight;
+
+		if(iHeight == 0) iHeight = 1;
+		float ratio = iWidth / float(iHeight);
+		glViewport(0, 0, iWidth, iHeight);
+
+		mProjMatrix = glm::perspective(float(fAngle), ratio, 1.0f, 10.0f);
+
+		// Update size in some buffers!!!
+#ifdef NOT_RAY_BOX
+		m_BackInter->SetResolution(iWidth, iHeight);
+		m_FrontInter->SetResolution(iWidth, iHeight);
+#endif
+		m_FinalImage->SetResolution(iWidth, iHeight);
+		g_pTransferFunc->Resize(&WINDOW_WIDTH, &WINDOW_HEIGHT);
+		
+		//Set image Size
+		cuda->cudaSetImageSize(iWidth, iHeight, NCP, fAngle/2.0f);
+		
+	}
+
+	///< Function to warup opencl
+	void WarmUP(unsigned int cycles, bool measure = false){
+
+
+#ifdef MEASURE_TIME
+		if (measure){
+			timer.Start();
+		}
+#endif
+
+
+		for (int i = 0; i < cycles; ++i) {
+			RotationMat = glm::mat4_cast(glm::normalize(quater));
+
+			mModelViewMatrix = glm::translate(glm::mat4(), glm::vec3(0.0f, 0.0f, -2.0f)) *
+				RotationMat * scale;
+
+			mMVP = mProjMatrix * mModelViewMatrix;
+
+#ifndef NOT_RAY_BOX
+			cuda->cudaUpdateMatrix(glm::value_ptr(glm::transpose(glm::inverse(mModelViewMatrix))));
+#else
+			//Obtain Back hits
+			m_BackInter->Draw(mMVP);
+			//Obtain the front hits
+			m_FrontInter->Draw(mMVP);
+#endif
+
+#ifdef LIGHTING
+			vec3 lightDir = vec3(inverse(mModelViewMatrix) * vec4(0.0, 0.0, -1.0f, 0.0f));
+			lightDir = normalize(lightDir);
+			cuda->cudaUpdateLight(glm::value_ptr(lightDir));
+#endif
+
+			//CUDA volume ray casting
+			cuda->cudaRC();
+
+		}
+
+#ifdef MEASURE_TIME
+		if (measure){
+			timer.Stop();
+			time_file << timer.GetAverageTime(cycles) << endl;
+			time_file.close();
+		}
+#endif
+	}
+
+	///< The main rendering function.
+	void draw()
+	{	
+		RotationMat = glm::mat4_cast(glm::normalize(quater));
+
+		mModelViewMatrix =  glm::translate(glm::mat4(), glm::vec3(0.0f,0.0f,-2.0f)) * 
+							RotationMat * scale; 
+
+
+		mMVP = mProjMatrix * mModelViewMatrix;
+
+#ifndef NOT_RAY_BOX
+		cuda->cudaUpdateMatrix(glm::value_ptr(glm::transpose(glm::inverse(mModelViewMatrix))));
+#else
+		//Obtain Back hits
+		m_BackInter->Draw(mMVP);
+		//Obtain the front hits
+		m_FrontInter->Draw(mMVP);
+#endif
+
+#ifdef LIGHTING
+		vec3 lightDir = vec3(inverse(mModelViewMatrix) * vec4(0.0, 0.0, -1.0f, 0.0f));
+		lightDir = normalize(lightDir);
+		cuda->cudaUpdateLight(glm::value_ptr(lightDir));
+#endif
+
+
+		//CUDA volume ray casting
+		cuda->cudaRC();
+
+
+		
+		
+
+		//Draw the quad with the final result
+		glClearColor(0.15f, 0.15f, 0.15f, 1.f);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		
+		//Blend with bg
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+		cuda->Use(GL_TEXTURE0); //Use the texture
+		m_FinalImage->Draw();
+		glDisable(GL_BLEND);
+
+
+
+		//Draw the AntTweakBar
+		//TwDraw();
+
+		//Draw the transfer function
+		g_pTransferFunc->Display();
+
+		glfwSwapBuffers(glfwWindow);
+	}
+	
+
+
+	///
+	/// Init all data and variables.
+	/// @return true if everything is ok, false otherwise
+	///
+	bool initialize()
+	{
+		//Init GLEW
+		//load with glad
+		if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+			printf("Something went wrong!\n");
+			exit(-1);
+		}
+		printf("OpenGL version: %s\n", glGetString(GL_VERSION));
+		printf("GLSL version: %s\n", glGetString(GL_SHADING_LANGUAGE_VERSION));
+		printf("Vendor: %s\n", glGetString(GL_VENDOR));
+		printf("Renderer: %s\n", glGetString(GL_RENDERER));
+
+
+		glEnable(GL_DEPTH_TEST);
+		glEnable(GL_CULL_FACE);
+		glFrontFace(GL_CCW);
+		glCullFace(GL_BACK);
+
+
+		cuda = new CUDAClass(block_dimension);
+
+
+		//Init the transfer function
+		g_pTransferFunc = new TransferFunction();
+		g_pTransferFunc->InitContext(&WINDOW_WIDTH, &WINDOW_HEIGHT, transfer_func_filepath, -1, -1);
+
+		cuda->cudaSetTransferFunction(256);
+
+		
+		// send window size events to AntTweakBar
+		glfwSetWindowSizeCallback(glfwWindow, resizeCB);
+		glfwSetMouseButtonCallback(glfwWindow, (GLFWmousebuttonfun)TwEventMouseButtonGLFW3);
+		glfwSetCursorPosCallback(glfwWindow, (GLFWcursorposfun)TwEventMousePosGLFW3);
+		glfwSetKeyCallback(glfwWindow, (GLFWkeyfun)keyboardCB);
+
+
+		//Create volume
+		volume = new Volume();
+		volume->Load(volume_filepath, vol_size.x, vol_size.y, vol_size.z, bits8, offset);
+
+		cuda->cudaSetVolume(vol_size.x, vol_size.y, vol_size.z, volume->m_fDiagonal);
+
+#ifdef LIGHTING
+		cuda->cudaUpdateVoxelSize(glm::value_ptr(volume->getVoxelSize()));
+#endif
+		
+
+
+#ifdef NOT_RAY_BOX
+		m_BackInter = new CCubeIntersection(false, WINDOW_WIDTH, WINDOW_HEIGHT);
+		m_FrontInter = new CCubeIntersection(true, WINDOW_WIDTH, WINDOW_HEIGHT);
+#endif
+		m_FinalImage = new CFinalImage(WINDOW_WIDTH, WINDOW_HEIGHT);
+
+#ifdef MEASURE_TIME
+		// get the tick frequency from the OS
+		timer.Init();
+		num = 0;
+#endif
+
+
+		return true;
+	}
+
+
+	/// Here all data must be destroyed + glfwTerminate
+	void destroy()
+	{
+#ifdef NOT_RAY_BOX
+		delete m_BackInter;
+		delete g_pTransferFunc;
+#endif
+		TextureManager::Inst().UnloadAllTextures();
+		glfwTerminate();
+		glfwDestroyWindow(glfwWindow);
+	}
+}
+
+int main(int argc, char** argv)
+{
+
+#ifdef NOT_RAY_BOX
+	cout << "Using image intersection" << endl;
+#else
+	cout << "Using ray box intersection" << endl;
+#endif
+
+#ifdef LIGHTING
+	cout << "Using lighting" << endl;
+#else
+	cout << "Without lighting" << endl;
+#endif
+
+#ifdef NOT_DISPLAY
+	cout << "NOT display" << endl;
+#else
+	cout << "Display result in screen" << endl;
+#endif
+
+#ifdef MEASURE_TIME
+	cout << "Measuring time" <<endl;
+#else
+	cout << "NOT Measuring time" << endl;
+#endif
+
+	if (argc == 12 || argc == 13) {
+
+		//Copy volume file path
+		glfwFunc::volume_filepath = new char[strlen(argv[1]) + 1];
+		strncpy_s(glfwFunc::volume_filepath, strlen(argv[1]) + 1, argv[1], strlen(argv[1]));
+
+		//Volume size
+		int width = atoi(argv[2]), height = atoi(argv[3]), depth = atoi(argv[4]);
+		glfwFunc::vol_size = glm::ivec3(width, height, depth);
+
+		//number of bits;
+		int bits = atoi(argv[5]);
+		glfwFunc::bits8 = (bits == 8);
+
+		//scale factor of the volume
+		glfwFunc::scale = glm::scale(glm::mat4(), glm::vec3(atof(argv[6]), atof(argv[7]), atof(argv[8])));
+
+		//offset
+		glfwFunc::offset = atoi(argv[9]);
+
+		//working group size
+		glfwFunc::block_dimension.x = atoi(argv[10]);
+		glfwFunc::block_dimension.y = atoi(argv[11]);
+
+		
+
+		//Copy volume transfer function path
+		if (argc == 13){
+			glfwFunc::transfer_func_filepath = new char[strlen(argv[12]) + 1];
+			strncpy_s(glfwFunc::transfer_func_filepath, strlen(argv[12]) + 1, argv[12], strlen(argv[12]));
+		}
+
+	}
+	else if (argc > 13) {
+		printf("Too many arguments supplied!!!! \n");
+	}
+
+	
+
+
+	glfwSetErrorCallback(glfwFunc::errorCB);
+	if (!glfwInit())	exit(EXIT_FAILURE);
+	glfwFunc::glfwWindow = glfwCreateWindow(glfwFunc::WINDOW_WIDTH, glfwFunc::WINDOW_HEIGHT, glfwFunc::strNameWindow.c_str(), NULL, NULL);
+	if (!glfwFunc::glfwWindow)
+	{
+		glfwTerminate();
+		exit(EXIT_FAILURE);
+	}
+
+	glfwMakeContextCurrent(glfwFunc::glfwWindow);
+	if (!glfwFunc::initialize()) exit(EXIT_FAILURE);
+	glfwFunc::resizeCB(glfwFunc::glfwWindow, glfwFunc::WINDOW_WIDTH, glfwFunc::WINDOW_HEIGHT);	//just the 1st time
+
+	//WarmUP!!!!
+	glfwFunc::WarmUP(20);
+
+
+#ifndef NOT_DISPLAY
+	// main loop!
+#ifndef MEASURE_TIME
+	while (!glfwWindowShouldClose(glfwFunc::glfwWindow))
+	{
+#else
+	glfwFunc::timer.Start();
+	while (glfwFunc::num <= NUM_CYCLES)
+	{
+#endif
+
+#ifndef MEASURE_TIME
+		if (glfwFunc::g_pTransferFunc->NeedUpdate()) // Check if the color palette changed    
+		{
+			glfwFunc::g_pTransferFunc->UpdatePallete();
+			glfwFunc::g_pTransferFunc->SetUpdate(false);
+		}
+#endif
+		glfwFunc::draw();
+
+#ifndef MEASURE_TIME
+		glfwPollEvents();	//or glfwWaitEvents()
+#else
+		++glfwFunc::num;
+#endif	
+	}
+
+#ifdef MEASURE_TIME
+	
+	glfwFunc::timer.Stop();
+	glfwFunc::time_file << glfwFunc::timer.GetAverageTime(glfwFunc::num) << endl;
+	glfwFunc::time_file.close();
+#endif
+#else
+
+	glfwFunc::WarmUP(NUM_CYCLES, true);
+
+#endif
+
+	glfwFunc::destroy();
+	return EXIT_SUCCESS;
+}
+```

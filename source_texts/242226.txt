@@ -1,0 +1,675 @@
+A physically-based path tracer in safe Rust, USD-native, capable of rendering production datasets like Moana and ALab. - Several light samples per vertex by doubleailes · Pull Request #224 · doubleailes/Crust
+
+Several light samples per vertex by doubleailes · Pull Request #224 · doubleailes/Crust · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+doubleailes
+commented
+Oct 7, 2026
+Copy link
+Copy Markdown
+Owner
+Implements the OpenSpec change multiple-light-samples-per-vertex: crust:lightSamples / --light-samples N (the first vertex of each path) and crust:lightSamplesIndirect / --light-samples-indirect M (every later surface or volume vertex), both default 1.
+What changes
+Stratified picks. The N picks at a vertex take (i + u) / N, so a light with selection probability p is picked N·p times, give or take one (pinned: pmfs 0.5/0.25/0.25 at N = 4 give 2/1/1 at every vertex). Only the pick is stratified — tying the point-on-light coordinates to the same slice would bias which part of a light each sample sees; the design record says why.
+Multi-sample MIS. LightList::density(pdf, pmf, samples) takes the vertex's count, so both MIS halves state it. NEE weights with and divides by N·p (the division is the average — the first draft divided by N twice and the agreement test caught it at 38% of its reference). The bounce side weights with the count PrevVertex carries from the vertex it left: surface and volume bounces, escaped light, hidden-light crossings.
+LPE routing. One L event per contributing light sample; C.*[LO] stays pinned bitwise to the beauty at (4, 2), (4, 4) and (2, 3), and partitions still sum.
+Unchanged by default. The surface block is an always-inlined, closure-free function the vertex calls straight-line for its first sample, with a cold loop for the rest. Every sample scene and both Kitchen sets are bit-identical to main's 16 spp goldens; cornellbox at 2 spp on one thread counts 4,231,470,450 instructions against 4,233,257,504 (−0.04%). (cornellbox_guided differs between any two multi-threaded runs of main itself; it is identical single-threaded.)
+Verified
+Strategy agreement (light-only, BSDF-only, power and balance MIS, and the one-sample renderer) on a floor under a sphere light, a rect light and a dome at (4, 4), (4, 1), (1, 4), (3, 2), and in samples/fog.usda at (1, 4) and (4, 4) — crates/crust-core/tests/light_samples.rs.
+RMSE between N = 4 and N = 1 falls 2.0–2.8× from 4 to 16 spp on three samples: noise, not bias.
+Import and CLI parse tests, a refused 0 included; fmt, clippy -D warnings, cargo test --workspace, zola build.
+Measurement and the default
+Equal-time efficiency at 16 spp against 1024 spp unclamped references (four seeds; the full table, protocol and caveats are in openspec/specs/lighting/design.md, "Several light samples per vertex"). Four camera-vertex samples cut the error at equal time by 37% on veach_mis and 32% on ALab, where direct area light at a diffuse first hit is the noise; they cost 10–45% on dome-lit cornellbox, the glossy openpbr_showcase and instancing, the volume scenes, and the Playground (glass first hits). The indirect count never pays on its own. Both defaults stay at 1; --light-samples 4 is the recommendation for interiors and area-lit sets, and no default-change proposal follows.
+Lessons recorded in the design record
+Reaching the instruction budget took six builds. The decisive cause was not the loop: the per-sample block is inlined twice, and two closures inside it (the pick, the shadow-ray visibility) got a second call site, so LLVM stopped inlining them, at 0.65% each. A block inlined twice must contain no closure worth inlining.
+Note: learned-light-selection-by-default also modifies the "Light selection" requirement; whichever change archives second must restate it with both applied.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_0132J2WcGDkTAko7MD1F6HgZ
+qodo-code-review
+Bot
+commented
+Oct 7, 2026
+Copy link
+Copy Markdown
+Contributor
+PR Summary by Qodo
+Add configurable light samples per path vertex
+✨ Enhancement 🧪 Tests 📝 Documentation 🕐 40+ Minutes
+AI Description
+```
+• Add separate light-sample counts for first and later vertices through USD settings and CLI flags.
+• Stratify light selection and apply multi-sample MIS across surface, volume, and bounce
+ contributions.
+• Preserve one-sample rendering and route each contributing sample into light path expressions.
+```
+Diagram
+```
+graph TD
+  USD["USD settings"] --> Settings["Render settings"] --> Renderer["Renderer"] --> Path["Path tracer"] --> Lights["Light list"]
+  CLI["CLI flags"] --> Settings
+  Path --> Route["LPE routing"]
+```
+Loading
+High-Level Assessment
+The following are alternative approaches to this PR:
+1. Independent light picks
+➕ Simpler sampling logic and no stratified pick coordinate.
+➖ Light counts fluctuate more at each vertex, potentially missing important lights despite multiple samples.
+2. Adaptive per-vertex allocation
+➕ Could spend extra shadow rays only where they improve equal-time image quality.
+➖ Requires a variance or efficiency estimate and substantially more estimator and performance validation.
+Recommendation: Keep the PR’s stratified, configurable counts with both defaults at one. The reported scene-dependent efficiency gains do not justify a universal increase; adaptive allocation is a worthwhile separate follow-up rather than part of this estimator change.
+Files changed (21) +1291 / -269
+Enhancement (8) +645 / -210
+lib.rsExport the count-aware single-path entry point +1/-1
+Export the count-aware single-path entry point
+```
+• Re-exports 'ray_color_with_light_samples' for callers that need explicit per-vertex counts.
+```
+crates/crust-core/src/lib.rs
+list.rsScale light-strategy density by the vertex sample count +19/-7
+Scale light-strategy density by the vertex sample count
+```
+• Adds a sample-count argument to 'LightList::density' so both sides of MIS can use the same effective density. Preserves the historical uniform-selection calculation when the count is one.
+```
+crates/crust-core/src/light/list.rs
+settings.rsImport first-vertex and indirect light-sample counts +24/-2
+Import first-vertex and indirect light-sample counts
+```
+• Reads both 'crust:lightSamples' attributes into render settings, defaulting to one and warning before replacing values below one.
+```
+crates/crust-core/src/scene/usd_import/settings.rs
+mod.rsPass configured counts into path tracing +3/-1
+Pass configured counts into path tracing
+```
+• Exports the count-aware path entry point and includes both settings in the renderer’s path context.
+```
+crates/crust-core/src/tracer/mod.rs
+path.rsImplement multi-sample surface and volume lighting +462/-181
+Implement multi-sample surface and volume lighting
+```
+• Adds independent sample domains and stratified light picks, with a straight-line first surface sample to preserve the one-sample path. Applies count-aware MIS to NEE and competing surface, phase, escape, and crossed-light contributions, while emitting per-sample LPE events.
+```
+crates/crust-core/src/tracer/path.rs
+route.rsTrack an LPE light event for every NEE contribution +35/-18
+Track an LPE light event for every NEE contribution
+```
+• Replaces the single light recorded per vertex with a light symbol per NEE entry. Uses reusable per-entry masks when gathering expressions across multiple samples.
+```
+crates/crust-core/src/tracer/route.rs
+settings.rsExpose separate first-vertex and indirect sample counts +35/-0
+Expose separate first-vertex and indirect sample counts
+```
+• Adds default-one counts, a builder that enforces a minimum of one, and getters for both settings.
+```
+crates/crust-core/src/tracer/settings.rs
+main.rsAdd independent light-sample CLI overrides +66/-0
+Add independent light-sample CLI overrides
+```
+• Adds both render flags, rejects counts below one, and preserves the scene’s other count when only one flag is supplied. Includes parsing and override tests.
+```
+crates/crust-render/src/main.rs
+Tests (5) +322 / -22
+tests.rsTest unchanged first draws and stratified pick frequencies +84/-0
+Test unchanged first draws and stratified pick frequencies
+```
+• Checks that a single sample retains its original random draw and that additional samples occupy distinct pick strata. Verifies exact 2/1/1 selection counts for three lights with four samples.
+```
+crates/crust-core/src/tracer/tests.rs
+light_samples.rsCheck multi-sample estimator agreement on surfaces and fog +173/-0
+Check multi-sample estimator agreement on surfaces and fog
+```
+• Adds surface and volume scenes comparing multi-sample MIS against single-sample and single-strategy estimates across first-vertex and indirect count combinations.
+```
+crates/crust-core/tests/light_samples.rs
+lights.rsTest count-scaled and historical light densities +4/-2
+Test count-scaled and historical light densities
+```
+• Checks four-sample density scaling and retains the one-sample uniform-selection rounding assertion.
+```
+crates/crust-core/tests/lights.rs
+lpe.rsValidate multi-sample LPE beauty and partitions +33/-20
+Validate multi-sample LPE beauty and partitions
+```
+• Exercises multiple count combinations alongside guiding, clamping, windows, and hidden lights. Checks bitwise beauty agreement and partition sums.
+```
+crates/crust-core/tests/lpe.rs
+usd_inline.rsTest USD light-sample import and invalid values +28/-0
+Test USD light-sample import and invalid values
+```
+• Verifies authored counts, default-one behavior, and fallback when either authored count is below one.
+```
+crates/crust-core/tests/usd_inline.rs
+Documentation (8) +324 / -37
+architecture.mdDocument count-aware MIS pairing +5/-0
+Document count-aware MIS pairing
+```
+• Explains why NEE division already averages the samples and why bounce weighting must use the count from its previous vertex.
+```
+docs/architecture.md
+light_sampling.mdDescribe implemented per-vertex light sampling +17/-6
+Describe implemented per-vertex light sampling
+```
+• Replaces the proposed sampling approach with the implemented independent sample domains, stratified picks, count-aware MIS, and scene-dependent performance findings.
+```
+docs/light_sampling.md
+design.mdRecord sampling, routing, and compatibility decisions +60/-16
+Record sampling, routing, and compatibility decisions
+```
+• Documents why only light picks are stratified, how multi-sample MIS is normalized, and how LPE events are stored. Records one-sample image and instruction-count checks.
+```
+openspec/changes/multiple-light-samples-per-vertex/design.md
+tasks.mdMark implementation and verification tasks complete +14/-11
+Mark implementation and verification tasks complete
+```
+• Marks settings, estimator, routing, tests, measurement, and documentation complete. Records the decision to retain default counts of one.
+```
+openspec/changes/multiple-light-samples-per-vertex/tasks.md
+design.mdRecord the estimator and equal-time measurements +167/-3
+Record the estimator and equal-time measurements
+```
+• Documents sampling and MIS behavior, LPE routing, validation, and scene-by-scene efficiency measurements. Explains why additional samples remain opt-in.
+```
+openspec/specs/lighting/design.md
+design.mdSpecify sample-domain and pick-coordinate behavior +8/-1
+Specify sample-domain and pick-coordinate behavior
+```
+• Describes the original domain used by the first light sample, separate domains for later samples, and stratification limited to light picks.
+```
+openspec/specs/rendering/design.md
+command-line.mdDocument both light-sample render flags +32/-0
+Document both light-sample render flags
+```
+• Adds flag reference entries, their costs and defaults, and an example using extra samples only at the first vertex.
+```
+site/content/docs/reference/command-line.md
+render-settings.mdDocument per-vertex USD light-sample attributes +21/-0
+Document per-vertex USD light-sample attributes
+```
+• Adds both attributes to the render-settings example and explains their defaults, validation, and first-versus-later-vertex behavior.
+```
+site/content/docs/usd/render-settings.md
+qodo-code-review
+Bot
+commented
+Oct 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Code Review by Qodo
+🐞 Bugs (0) 📘 Rule violations (0) 🔗 Cross-repo conflicts (0) 📜 Skill insights (0)
+1. Extra light samples distort weighting ✗ Dismissed
+Description
+```
+LightList::density multiplies the base light density by samples instead of returning only the
+light PDF multiplied by its selection PMF. Any vertex using more than one light sample reaches
+surface NEE, volume NEE, escaped emission, and bounce-emission MIS with a count-scaled density.
+```
+Code
+crates/crust-core/src/light/list.rs[R396-402]
+```
++    pub fn density(&self, light_pdf: PdfSolidAngle, pmf: f32, samples: u32) -> PdfSolidAngle {
++        let one = if self.pmf.is_empty() {
+            light_pdf.get() / self.lights.len() as f32
+        } else {
+            light_pdf.get() * pmf
+-        })
++        };
++        PdfSolidAngle::from_measure(one * samples as f32)
+```
+Relevance
+●● Moderate
+```
+Current design explicitly requires count-scaled MIS density, but the finding cites a conflicting
+checklist rule.
+```
+ⓘ Recommendations generated based on similar findings in past PRs
+Evidence
+```
+The checklist requires the MIS density to be exactly light.pdf * pmf for both NEE and bounce
+paths. The changed implementation computes the base density and then returns one * samples, while
+the updated tests explicitly assert that a count of four multiplies the density.
+```
+Rule 2236872: Ensure consistent light PMF and MIS density computation across NEE and bounce paths
+crates/crust-core/src/light/list.rs[396-402]
+crates/crust-core/tests/lights.rs[1262-1264]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+`LightList::density` must compute the MIS density as the light PDF multiplied by the selection PMF. The new `samples` multiplier makes the method return a different quantity and propagates count-scaled densities through NEE and bounce MIS paths.
+
+## Fix Focus Areas
+- crates/crust-core/src/light/list.rs[396-402]
+- crates/crust-core/src/tracer/path.rs[630-630]
+- crates/crust-core/src/tracer/path.rs[1694-1702]
+- crates/crust-core/src/tracer/path.rs[1835-1864]
+
+## Recommended Fix
+Make `LightList::density` return exactly `light_pdf * pmf` using the existing uniform-selection division form where required, remove the sample-count multiplication from this method, and update its callers and tests so the compliance-required density contract is preserved.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+2. Rare light picks select zero-weight lights ✓ Resolved
+Description
+```
+stratified_pick can round the last slice's (index + u) / count to exactly 1.0 for a valid
+near-one f32 draw, even when the count is two. If a power- or cache-selected light list ends with
+a zero-probability light, pick_index_at clamps the exhausted CDF search to that light, and NEE can
+divide a nonzero contribution by its 1e-6 PDF floor.
+```
+Code
+crates/crust-core/src/tracer/path.rs[80]
+```
++        (index as f32 + u) / count as f32
+```
+Relevance
+●● Moderate
+```
+Plausible rare floating-point correctness bug, but no closely matching historical precedent confirms
+team treatment.
+```
+ⓘ Recommendations generated based on similar findings in past PRs
+Evidence
+```
+For u = 0.99999994, 1.0 + u rounds to 2.0 in f32, so the new expression returns 1.0 at
+count two. Both CDF lookups search for an entry greater than u and clamp an exhausted search to
+the final light; power and learned tables permit trailing zero-PMF entries with CDF 1.0. The
+surface NEE path accepts that pick and floors its density before dividing the contribution.
+```
+crates/crust-core/src/tracer/path.rs[76-80]
+crates/crust-core/src/light/list.rs[317-338]
+crates/crust-core/src/light/list.rs[413-443]
+crates/crust-core/src/light_cache.rs[417-439]
+crates/crust-core/src/tracer/path.rs[1763-1770]
+crates/crust-core/src/tracer/path.rs[1835-1863]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+Floating-point rounding can turn the final stratified light pick into `1.0`, allowing CDF lookup to select a trailing zero-probability light.
+
+## Fix Focus Areas
+- crates/crust-core/src/tracer/path.rs[76-81]
+- crates/crust-core/src/tracer/tests.rs[407-424]
+
+## Recommended Fix
+Clamp the computed pick to the greatest representable `f32` below `1.0`, preserving the unchanged one-sample path. Add a test using a near-one draw in the final slice at counts two and four.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+3. A huge authored light-sample count hangs the render ✓ Resolved
+Description
+```
+light_sample_count and parse_count accept any count of at least 1 with no upper bound, and
+volume_nee and extra_surface_light_samples then loop that many times at every vertex. A mistyped
+value such as crust:lightSamples = 1000000000 gives no warning and makes the render effectively
+never finish. Separately, counts above i32::MAX wrap negative in nee_sampler's index as i32.
+```
+Code
+crates/crust-core/src/scene/usd_import/settings.rs[R274-276]
+```
++    match custom_i32(prim, name) {
++        Some(n) if n >= 1 => n as u32,
++        Some(n) => {
+```
+Relevance
+●●● Strong
+```
+Recent reliability reviews accepted fixes for unchecked large budgets causing overflow or
+nontermination in rendering loops.
+```
+PR-#184
+ⓘ Recommendations generated based on similar findings in past PRs
+Evidence
+```
+The import only refuses values below 1. The CLI parser only refuses 0. The estimator loops over the
+full count at every vertex, so cost grows linearly with the count and nothing caps it.
+```
+crates/crust-core/src/scene/usd_import/settings.rs[273-281]
+crates/crust-render/src/main.rs[277-284]
+crates/crust-core/src/tracer/path.rs[1913-1937]
+crates/crust-core/src/tracer/path.rs[1654-1656]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+Light sample counts have no upper bound, so a mistyped value multiplies the work at every vertex with no warning.
+
+## Fix Focus Areas
+- crates/crust-core/src/scene/usd_import/settings.rs[273-281]
+- crates/crust-render/src/main.rs[277-284]
+- crates/crust-core/src/tracer/settings.rs[334-338]
+
+## Recommended Fix
+Define a sane maximum (for example 256). In the importer, warn and clamp values above it. In the CLI, reject them as a usage error. In `with_light_samples`, clamp to it as well.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+4. The default of one light sample is written in four places ✓ Resolved
+Description
+```
+light_sample_count hardcodes 1 both for an unauthored attribute and for a refused value, while
+RenderSettings::default and with_light_samples's .max(1) carry their own copies. If the
+default ever changes (the follow-up the tasks mention), a scene with no RenderSettings prim, a
+scene with an unauthored attribute and a scene with a refused value could end up with different
+counts.
+```
+Code
+crates/crust-core/src/scene/usd_import/settings.rs[R273-281]
+```
++fn light_sample_count(prim: &Prim, name: &str) -> u32 {
++    match custom_i32(prim, name) {
++        Some(n) if n >= 1 => n as u32,
++        Some(n) => {
++            warn!("{name} = {n} is below 1 — taking one light sample");
++            1
++        }
++        None => 1,
++    }
+```
+Relevance
+●●● Strong
+```
+Recent precedent accepted naming shared defaults for importer fallback branches, matching this
+split-default pattern.
+```
+PR-#177
+ⓘ Recommendations generated based on similar findings in past PRs
+Evidence
+```
+The literal default appears in settings.rs Default (light_samples: 1), in light_sample_count
+(refused value and None => 1), and in the CLI test. This is the same split-default pattern that
+was fixed for dome visibility.
+```
+crates/crust-core/src/tracer/settings.rs[191-192]
+crates/crust-core/src/scene/usd_import/settings.rs[273-281]
+PR-#177
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+The light sample default of 1 is written out separately in the importer, in RenderSettings::default and in the clamps, so the copies can drift apart.
+
+## Fix Focus Areas
+- crates/crust-core/src/scene/usd_import/settings.rs[273-281]
+- crates/crust-core/src/tracer/settings.rs[188-193]
+
+## Recommended Fix
+Add `pub const DEFAULT_LIGHT_SAMPLES: u32 = 1;` in tracer/settings.rs. Use it in `Default`, and in `light_sample_count` for both the refused branch and the `None` branch, including the warning text.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+5. A finished task still says point coordinates are stratified ✓ Resolved
+Description
+```
+Task 2.1 is now ticked but still says the surface loop stratifies the 'pick and point dimensions
+(design D1)'. The revised D1, the code (stratified_pick only touches the pick coordinate) and the
+docs all say that stratifying the point coordinates would add bias, so a later reader following the
+task list could put that bias back.
+```
+Code
+openspec/changes/multiple-light-samples-per-vertex/tasks.md[R11-14]
+```
++- [x] 2.1 Loop the surface NEE block over N (camera vertex) or M (later
+      vertices) samples with stratified pick and point dimensions (design D1),
+      averaging the contributions. Verify: at N = 1, a unit test shows the
+      draws equal today's.
+-- [ ] 2.2 Carry the count in `PrevVertex`. Use `count · density` in
+```
+Relevance
+●●● Strong
+```
+Recent reviews accepted correcting completed-task documentation that contradicted implementation or
+design requirements.
+```
+PR-#200
+PR-#165
+ⓘ Recommendations generated based on similar findings in past PRs
+Evidence
+```
+The tasks.md wording contradicts design.md D1's 'Only the pick is stratified' section and the
+implementation in path.rs.
+```
+openspec/changes/multiple-light-samples-per-vertex/tasks.md[11-14]
+openspec/changes/multiple-light-samples-per-vertex/design.md[43-48]
+crates/crust-core/src/tracer/path.rs[67-82]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+Task 2.1 still describes stratified point dimensions, which the final design rejects as biased.
+
+## Fix Focus Areas
+- openspec/changes/multiple-light-samples-per-vertex/tasks.md[11-14]
+
+## Recommended Fix
+Change the text to 'with a stratified pick only (design D1; the point-on-light coordinates come unstratified from each sample's own sub-domain)'.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+Context sources
+✅ Compliance rules (platform): 127 rules
+✅ Cross-repo context — repo relationships
+Explored: repo: doubleailes/openqmc-rs (sha: f695f95b) — View relationship
+Review mode: Auto: 🧠 Deep: Large, bug-dense renderer change spans MIS, volumes, routing, settings, and sampling.
+Tip of the day
+```
+💡 Did you know, you can route each severity your way: inline, summary, both, or drop
+```
+More tips ↗ | Customize Qodo ↗ | Qodo docs ↗
+qodo-code-review
+Bot
+reviewed
+Oct 7, 2026
+View reviewed changes
+Comment thread
+crates/crust-core/src/light/list.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/crust-core/src/tracer/path.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/crust-core/src/scene/usd_import/settings.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/crust-core/src/scene/usd_import/settings.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+openspec/changes/multiple-light-samples-per-vertex/tasks.md
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+doubleailes
+added a commit
+that referenced
+this pull request
+Oct 7, 2026
+Bound the light sample counts and keep the stratified pick below 1
+…
+5d7dfd7
+```
+Review fixes (Qodo, #224):
+
+- `stratified_pick`'s last slice could round `(count − 1 + u) / count` to
+  exactly 1.0 for a draw within an ulp of 1, and a pick of 1.0 lands past
+  the whole CDF on the last light even when that light has probability
+  zero — a `1e-6` density floor under a real contribution. The pick is
+  clamped to the largest f32 below 1; the one-sample path is untouched.
+- `DEFAULT_LIGHT_SAMPLES` and `MAX_LIGHT_SAMPLES` (1024): the default was
+  written in four places, and the counts had no upper bound, so a mistyped
+  `1000000000` was a render that never ends. `with_light_samples` clamps,
+  the importer warns above the maximum, the CLI refuses it.
+- Task 2.1's wording no longer says the point-on-light coordinates are
+  stratified; the design rejects that as a bias.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0132J2WcGDkTAko7MD1F6HgZ
+```
+doubleailes
+mentioned this pull request
+Oct 7, 2026
+Blend the learned light-selection tables and floor the lights seen nearby
+#227
+Closed
+doubleailes
+and others
+added 2 commits
+October 7, 2026 17:38
+Several light samples per vertex
+…
+f1794c4
+```
+`crust:lightSamples` / `--light-samples N` (the first vertex of each path)
+and `crust:lightSamplesIndirect` / `--light-samples-indirect M` (every
+later surface or volume vertex), both default 1 and at least 1.
+
+- The N picks at a vertex are stratified to `(i + u) / N`, so a light of
+  selection probability p is picked N·p times, give or take one. Only the
+  pick is stratified: tying the point-on-light coordinates to the same
+  slice would bias which part of a light each sample sees.
+- Multi-sample MIS: `LightList::density` takes the vertex's sample count,
+  so both MIS halves state it. NEE weights with and divides by N·p (the
+  division is the average); the bounce side weights with the count
+  `PrevVertex` carries from the vertex it left, escaped light and
+  hidden-light crossings included.
+- Light path expressions route one `L` event per contributing sample;
+  `C.*[LO]` stays pinned bitwise to the beauty.
+- The surface block is an always-inlined, closure-free function the
+  vertex calls straight-line for its first sample, with a cold loop for
+  the rest: every sample scene is bit-identical to main at N = M = 1 and
+  cornellbox counts 0.04% fewer instructions (callgrind, 2 spp).
+
+Measured at equal time against 1024 spp unclamped references: four
+camera-vertex samples are 1.59× more efficient on veach_mis and 1.46× on
+ALab, and a 10–45% loss on dome-lit, glossy and volume scenes, so both
+defaults stay at 1. The table, the protocol and the recommendation are in
+the lighting design record.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0132J2WcGDkTAko7MD1F6HgZ
+```
+Bound the light sample counts and keep the stratified pick below 1
+…
+e1d63a5
+```
+Review fixes (Qodo, #224):
+
+- `stratified_pick`'s last slice could round `(count − 1 + u) / count` to
+  exactly 1.0 for a draw within an ulp of 1, and a pick of 1.0 lands past
+  the whole CDF on the last light even when that light has probability
+  zero — a `1e-6` density floor under a real contribution. The pick is
+  clamped to the largest f32 below 1; the one-sample path is untouched.
+- `DEFAULT_LIGHT_SAMPLES` and `MAX_LIGHT_SAMPLES` (1024): the default was
+  written in four places, and the counts had no upper bound, so a mistyped
+  `1000000000` was a render that never ends. `with_light_samples` clamps,
+  the importer warns above the maximum, the CLI refuses it.
+- Task 2.1's wording no longer says the point-on-light coordinates are
+  stratified; the design rejects that as a bias.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0132J2WcGDkTAko7MD1F6HgZ
+```
+doubleailes
+force-pushed
+the
+multiple-light-samples-per-vertex
+branch
+from
+1fa2c36 to
+e1d63a5
+Compare
+October 7, 2026 15:38
+Hide details
+View details
+doubleailes
+merged commit 25cb5f1
+into
+main
+Oct 7, 2026
+15 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+doubleailes
+deleted the
+multiple-light-samples-per-vertex
+branch
+October 7, 2026 16:29
+This was referenced Oct 8, 2026
+MIS for shadow-linked lights: the link twin
+#239
+Merged
+Diagnose how to render a scene faster or cleaner (add-diagnostic-command)
+#242
+Merged
+openspec: propose progressive-cancellable-render
+#250
+Merged
+Honour the render camera's exposure (camera-exposure)
+#269
+Merged
+inspect: crust light-paths, the light paths behind a few pixels
+#293
+Merged
+Place prims on the rendered surface from an MCP session
+#306
+Merged
+This was referenced Oct 15, 2026
+Import UsdGeomNurbsCurves as round curves
+#311
+Merged
+Expand husk frame variables in output paths
+#312
+Merged
+Identity and primvar AOVs, and OpenEXRId ID mattes
+#330
+Open
+Read a uniform or constant UV chart per face or per mesh
+#364
+Merged
+This was referenced Oct 22, 2026
+Adopt Arnold's .tx convention
+#373
+Merged
+Precomp: sample and display filters authored on the render settings
+#382
+Merged
+Render non-square pixels: honour pixelAspectRatio and adjustPixelAspectRatio
+#413
+Merged
+qodo-code-review
+Bot
+mentioned this pull request
+Oct 30, 2026
+crust-core: the delegate asks its host only for .mtlx references (host-facts-mtlx-only)
+#432
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

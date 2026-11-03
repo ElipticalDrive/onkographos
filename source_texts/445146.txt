@@ -1,0 +1,285 @@
+Issue Description VK_KHR_opacity_micromap requires every entry point whose ray queries traverse acceleration structures containing opacity micromaps to declare the OpacityMicromapIdKHR execution mode (SPV_KHR_opacity_micromap) with its E...
+
+SPIR-V: no way to emit OpacityMicromapIdKHR for RayQuery (VK_KHR_opacity_micromap)" · Issue #13438 · shader-slang/slang · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+SPIR-V: no way to emit OpacityMicromapIdKHR for RayQuery (VK_KHR_opacity_micromap)" #13438
+New issue
+Copy link
+New issue
+Copy link
+Open
+Feature
+Open
+SPIR-V: no way to emit OpacityMicromapIdKHR for RayQuery (VK_KHR_opacity_micromap)"#13438
+Feature
+Copy link
+Assignees
+Labels
+SPIR-VraytracingBugs affecting a raytracing API.Bugs affecting a raytracing API.reproducedProvided instructions confirmed to reproduce the issueProvided instructions confirmed to reproduce the issue
+Milestone
+Q4 2026 (Fall)
+Description
+mklefrancois
+opened on Oct 5, 2026
+Issue body actions
+Issue Description
+VK_KHR_opacity_micromap requires every entry point whose ray queries traverse acceleration structures containing opacity micromaps to declare the OpacityMicromapIdKHR execution mode (SPV_KHR_opacity_micromap) with its Enable operand set to true. This applies whenever VK_EXT_opacity_micromap is not enabled. See VUID-vkCmdDispatch-micromap-11636; the same rule exists for vkCmdTraceRaysKHR and the draw commands. Per SPV_KHR_opacity_micromap, if the mode is absent or false, the traversal result is undefined. Ray tracing pipelines are not affected, since they opt in through VK_PIPELINE_CREATE_RAY_TRACING_OPACITY_MICROMAP_BIT_KHR.
+Slang has no way to request this execution mode:
+RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS is defined in hlsl.meta.slang but never used.
+RayQuery takes only one template parameter, so the DXR 1.2 / SM 6.9 spelling RayQuery<RAY_FLAG_NONE, RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS> does not compile.
+No slangc option enables it (see Additional context).
+The only way we found is inline spirv_asm.
+Reproduced with the latest release, v2026.19.
+Reproducer Code
+rq_omm.slang:
+```
+[[vk::binding(0)]] RaytracingAccelerationStructure tlas;
+[[vk::binding(1)]] RWStructuredBuffer<float> outb;
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void main(uint3 id : SV_DispatchThreadID)
+{
+    RayDesc r;
+    r.Origin    = float3(0);
+    r.Direction = float3(0, 0, 1);
+    r.TMin      = 0;
+    r.TMax      = 1e9;
+
+    // DXR 1.2 spelling of "this ray query honors opacity micromaps"
+    RayQuery<RAY_FLAG_NONE, RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS> q;
+    q.TraceRayInline(tlas, RAY_FLAG_NONE, 0xFF, r);
+    while (q.Proceed()) {}
+    outb[0] = q.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 1 : 0;
+}
+```
+```
+slangc rq_omm.slang -target spirv-asm -profile spirv_1_6 -o rq_omm.spvasm
+```
+With the single-parameter form RayQuery<RAY_FLAG_NONE> q; the shader compiles, but the SPIR-V contains no micromap capability, extension or execution mode. The only execution mode is OpExecutionMode %main LocalSize 1 1 1.
+Expected Behavior
+A supported way to opt a ray-query entry point into opacity micromaps on the SPIR-V target. For example, RayQuery<..., RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS> (matching DXR 1.2), or an entry-point attribute, lowering to:
+```
+OpCapability RayTracingOpacityMicromapExecutionModeKHR
+OpExtension "SPV_KHR_opacity_micromap"
+OpExecutionModeId %main OpacityMicromapIdKHR %enable
+```
+Ideally %enable could be a specialization constant. The Vulkan rule is written in terms of a specialization constant, and GLSL already provides this (see Additional context). It would let one SPIR-V module serve both the micromap and non-micromap cases.
+Actual Behavior
+The two-parameter form fails to compile:
+```
+error[E39999]: too many arguments to call
+  --> rq_omm.slang:15:5
+   |
+15 | RayQuery<RAY_FLAG_NONE, RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS> q;
+   | ^^^^^^^^ too many arguments to call (got 2, expected 1)
+---'
+note[E40011]: candidate: struct RayQuery<uint rayFlagsGeneric>
+--> hlsl.meta.slang:21535:8
+```
+Nothing in Slang emits OpacityMicromapIdKHR or RayTracingOpacityMicromapExecutionModeKHR. We checked the v2026.19 output and searched source/slang on master (6ba151d, 2026-10-02).
+As a result, an application using only VK_KHR_opacity_micromap gets undefined ray-query traversal when its acceleration structures contain micromaps. On our driver, a ray-query path tracer produced the same output as with micromaps disabled, while the ray tracing pipeline on the same scene did use them. The validation layers do not flag the missing execution mode.
+Environment
+Slang: v2026.19 (latest release); also reproduced with v2026.12
+OS: Windows 11 Enterprise (10.0.26200)
+GPU / driver: NVIDIA RTX PRO 4500 Blackwell, driver 616.92, Vulkan 1.4.351
+Vulkan SDK: 1.4.363.0
+Environment variables: none
+Additional context
+Options tried with v2026.19. None of these emit the execution mode:
+-capability <cap> and -profile spirv_1_6+<cap> with spvRayTracingOpacityMicromapKHR, spvRayTracingOpacityMicromapExecutionModeKHR, spvRayTracingOpacityMicromapEXT, SPV_KHR_opacity_micromap, SPV_EXT_opacity_micromap: all fail with "unknown profile". slangc -h capability lists no micromap capability.
+-emit-spirv-via-glsl: compiles, but the generated GLSL only declares GL_EXT_ray_query.
+-experimental-feature, -enable-experimental-passes, -profile sm_6_9, -std next: no micromap output, and the two-parameter RayQuery form still fails.
+Prior art in GLSL. glslang (Vulkan SDK 1.4.363) supports this through the GLSL extension GL_EXT_opacity_micromap_ray_query_mode. The EXT suffix is the GLSL extension's own naming; it targets SPV_KHR_opacity_micromap, not VK_EXT_opacity_micromap. Declaring its built-in specialization constant:
+```
+#extension GL_EXT_opacity_micromap_ray_query_mode : require
+layout(constant_id = 2) gl_EnableOpacityMicromapEXT;
+```
+produces (glslangValidator --target-env vulkan1.4, passes spirv-val):
+```
+OpCapability RayTracingOpacityMicromapExecutionModeKHR
+OpExtension "SPV_KHR_opacity_micromap"
+OpExecutionModeId %main OpacityMicromapIdKHR %45
+OpDecorate %45 SpecId 2
+%45 = OpSpecConstantFalse %bool
+```
+The application enables micromaps for ray queries by setting specialization constant 2 to true, so a single module serves both cases. Slang has no equivalent. (For completeness: it is not available through -allow-glsl either — the declaration fails with "declaration does not declare anything" — but we are looking for a native Slang/HLSL-style opt-in, not GLSL syntax.)
+Workaround. Inline SPIR-V at the top of each ray-query entry point. It compiles with v2026.19 and passes spirv-val --target-env vulkan1.4:
+```
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void main(uint3 id : SV_DispatchThreadID)
+{
+    spirv_asm {
+        OpCapability RayTracingOpacityMicromapExecutionModeKHR;
+        OpExtension "SPV_KHR_opacity_micromap";
+        %ommEnable = OpSpecConstantTrue $$bool;
+        OpExecutionModeId $main OpacityMicromapIdKHR %ommEnable
+    };
+    // ... RayQuery code ...
+}
+```
+With this in place, ray queries honor the micromaps and the output matches the ray tracing pipeline. Drawbacks:
+The spirv_asm block must reference the enclosing entry point by name.
+It must be repeated in every entry point that uses ray queries, including ray-generation shaders that mix TraceRay and RayQuery.
+Its capability is only valid on devices exposing VK_KHR_opacity_micromap, so applications must compile a separate variant for those devices. A specialization-constant opt-in would avoid that.
+Questions:
+Is spirv_asm with $entryPoint inside the entry point a supported pattern to rely on until a proper feature exists?
+Is mapping RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS to this execution mode on SPIR-V the intended direction? Or would a specialization-constant opt-in like GLSL's gl_EnableOpacityMicromapEXT be preferred?
+References:
+VK_KHR_opacity_micromap spec
+SPV_KHR_opacity_micromap (OpacityMicromapIdKHR = 6031, capability RayTracingOpacityMicromapExecutionModeKHR = 6032)
+glslang test: rayQuery-opacityMicromapRayQueryMode.comp
+Activity
+nv-slang-bot commented on Oct 5, 2026
+nv-slang-botBot
+on Oct 5, 2026 – with nv-slang-bot
+Contributor
+More actions
+Status: Triaged. I reproduced the Slang behavior on master 6ba151dcf, and checked the DXC source and the glslang output quoted in the issue. Classification: feature request (SPIR-V target plus the core-module RayQuery type).
+Link: Related: Support HLSL DXR 1.3 #7292 (DXR 1.3 tracker; its "Opacity Micromaps" item is still open).
+Verdict: The three gaps you list are real:
+RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS (hlsl.meta.slang:21837) is the only micromap reference in source/. It was added with the SER work (Enable back PR #9230 for SER enabling which were reverted in #9375 #9504) and never wired up.
+RayQuery<let rayFlagsGeneric : RAY_FLAG = RAY_FLAG_NONE> (:21843) has one parameter, so the two-argument form fails with E39999.
+There is no capability atom, and Slang never emits OpacityMicromapIdKHR or RayTracingOpacityMicromapExecutionModeKHR by itself; the only route is spirv_asm. The bundled SPIRV-Headers already define both.
+For comparison, in DXC a nonzero second RayQuery argument selects DXIL AllocateRayQuery2 (SM 6.9). DXC's -spirv backend lowers every RayQuery specialization to the same type, so the argument has no effect on its SPIR-V output. There is no existing SPIR-V mapping to copy.
+Q1 (spirv_asm). Your $main form works for direct SPIR-V output. I checked it with spirv-val --target-env vulkan1.4, including two entry points that each name themselves. That form is not documented or tested, though. $main is an ordinary reference to the function, and OpExecutionModeId is emitted verbatim. A spec-constant variant also works today:
+```
+[vk::constant_id(2)] const bool kEnableOMM = false;
+// inside the entry point:
+spirv_asm {
+    OpCapability RayTracingOpacityMicromapExecutionModeKHR;
+    OpExtension "SPV_KHR_opacity_micromap";
+    OpExecutionModeId $main OpacityMicromapIdKHR $kEnableOMM
+};
+```
+This produces OpDecorate %kEnableOMM SpecId 2 and OpSpecConstantFalse, and passes spirv-val. It has two limits:
+It needs SPIR-V 1.4 or later; spirv-val rejects the extension under a 1.3 profile.
+It only works for direct SPIR-V. -emit-spirv-via-glsl doesn't accept these blocks.
+spirv_asm also has an __entryPoint pseudo-operand meant for exactly this. The user guide doesn't cover it, and it has no end-to-end SPIR-V test. It applies OpExecutionMode to every entry point that calls the enclosing function, so it could live in one shared helper. With OpExecutionModeId, however, it currently fails with an internal error (E99997, "Unhandled case in emitSPIRVAsm"), because slang-emit-spirv.cpp:11924 special-cases only OpExecutionMode. That is a bug we can fix regardless of the answer to Q2.
+Q2 (direction). This is for the maintainers to decide. The options are:
+(A) A second RayQuery template parameter, matching DXR 1.2. If a query reachable from an entry point sets RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS, Slang emits the capability, the extension and OpacityMicromapIdKHR with a constant true. The HLSL target forwards the argument for SM 6.9. One caveat: DXR sets the flag per query object, while SPIR-V sets the mode per entry point, so a single flagged query enables micromaps for the whole entry point. This option also gives no spec-constant toggle.
+(B) An explicit per-entry-point opt-in that can take a spec constant, like gl_EnableOpacityMicromapEXT. It would be a new Vulkan-only feature whose spelling is a design decision, and it can be combined with (A). In the glslang output you quoted, the capability is declared unconditionally. A spec constant therefore switches the mode on or off, but the module still declares a capability that the device must support.
+(C) Fix OpExecutionModeId with __entryPoint in spirv_asm, and document it. This is small and independent of (A) and (B).
+Next-action: A maintainer chooses (A), (B) or both. (C) could be done independently.
+Blocker: The design choice for Q2.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+nv-slang-bot
+added
+raytracingBugs affecting a raytracing API.Bugs affecting a raytracing API.
+reproducedProvided instructions confirmed to reproduce the issueProvided instructions confirmed to reproduce the issue
+SPIR-V
+on Oct 5, 2026
+nv-slang-bot
+added the
+Feature
+issue type on Oct 5, 2026
+jhelferty-nv
+assigned
+kaizhangNV
+on Oct 5, 2026
+jhelferty-nv
+added this to the Q4 2026 (Fall) milestone on Oct 7, 2026
+albertrodriguezclo commented on Oct 16, 2026
+albertrodriguezclo
+on Oct 16, 2026
+Contributor
+More actions
+A related gap on the same path, for the ray flag rather than the execution mode.
+RAY_FLAG_FORCE_OMM_2_STATE (0x400) is accepted, but no capability or extension is declared for it. The SPIR-V grammar lists RayTracingOpacityMicromapKHR (alias RayTracingOpacityMicromapEXT) as the capability of the ForceOpacityMicromap2StateKHR ray flag.
+```
+RaytracingAccelerationStructure as;
+RWStructuredBuffer<float4> o;
+[numthreads(64,1,1)] void main(uint3 t:SV_DispatchThreadID) {
+  RayDesc r; r.Origin=0; r.Direction=float3(0,0,1); r.TMin=0; r.TMax=1e9;
+  RayQuery<RAY_FLAG_FORCE_OMM_2_STATE> q; q.TraceRayInline(as, RAY_FLAG_FORCE_OMM_2_STATE, 0xff, r);
+  while(q.Proceed()){}
+  o[t.x]=q.CommittedRayT();
+}
+```
+slangc rq_omm.slang -target spirv -entry main -stage compute (master e493105) declares only RayQueryKHR / SPV_KHR_ray_query. spirv-val accepts it because the flags are an <id> operand of OpRayQueryInitializeKHR, so nothing catches it before the driver.
+The same holds for RAY_FLAG_SKIP_TRIANGLES / RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES, whose capability is RayTraversalPrimitiveCullingKHR: RayQuery<RAY_FLAG_SKIP_TRIANGLES> also declares only RayQueryKHR.
+A fix seems to need two decisions, so I have not opened a PR:
+Which extension. SPV_KHR_opacity_micromap (with VK_KHR_opacity_micromap) or SPV_EXT_opacity_micromap (with VK_EXT_opacity_micromap, which has been available much longer). The capability is the same enumerant (5381) either way. Perhaps the same choice as for OpacityMicromapIdKHR in this issue, which exists only in the KHR extension.
+When to declare it. The capability can only be inferred when the flags are a compile-time constant (the RayQuery<...> generic argument, or a literal passed to TraceRayInline / TraceRay). Declaring it whenever the flags are a runtime value would make the module require the micromap feature on every device. So: declare it only for constant flags that contain the bit, and leave runtime flags to an explicit capability (-capability)?
+If you agree with "constant flags only, plus a capability atom for explicit opt-in", I can send a PR that covers both the micromap and the primitive-culling flags.
+👀React with 👀1Reacted by nv-slang-bot
+nv-slang-bot commented on Oct 16, 2026
+nv-slang-botBot
+on Oct 16, 2026 – with nv-slang-bot
+Contributor
+More actions
+Thanks. I reproduced both halves on master e49310561. RayQuery<…> / TraceRayInline with RAY_FLAG_FORCE_OMM_2_STATE, RAY_FLAG_SKIP_TRIANGLES or RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES, and pipeline TraceRay with RAY_FLAG_FORCE_OMM_2_STATE | RAY_FLAG_SKIP_TRIANGLES, all compile with only Shader plus RayQueryKHR (or RayTracingKHR) declared. No micromap or culling capability is added. This happens whether the constant flag comes from the template argument or the call argument. Nothing in source/slang mentions RayTracingOpacityMicromapKHR or RayTraversalPrimitiveCullingKHR.
+One correction: current SPIRV-Tools does reject the micromap case. With the spirv-val bundled at master (SPIRV-Tools v2026.4), I get:
+```
+error: The ForceOpacityMicromap2StateKHR flag requires the RayTracingOpacityMicromapKHR and RayQueryKHR or RayTracingKHR capabilities
+  OpRayQueryInitializeKHR %q %47 %uint_1024 ...
+```
+SLANG_RUN_SPIRV_VALIDATION=1 reports the same error. The check only fires when the flags operand is a constant. The validator has no equivalent check for SkipTriangles/SkipAABBs, so the primitive-culling half really does pass validation silently.
+For comparison:
+DXC -spirv adds RayTraversalPrimitiveCullingKHR only when the template flags plus any constant call flags include SKIP_TRIANGLES/SKIP_PROCEDURAL_PRIMITIVES (SpirvEmitter.cpp → CapabilityVisitor.cpp). Its lib/SPIRV has no dedicated capability or extension handling for FORCE_OMM_2_STATE.
+glslang adds the capabilities only on an explicit source opt-in. layout(primitive_culling) (which needs GL_EXT_ray_flags_primitive_culling) gives RayTraversalPrimitiveCullingKHR. GL_EXT_opacity_micromap gives RayTracingOpacityMicromapEXT plus SPV_EXT_opacity_micromap, but only in the ray-tracing pipeline stages, not for a compute-stage ray query.
+I'd keep this on #13438 rather than a new issue, since it's the same SPIR-V opacity-micromap gap. Your question 1 (KHR vs EXT extension) overlaps with the open A/B question above (a second RayQuery template parameter vs. a spec-constant opt-in). Both of those emit OpacityMicromapIdKHR, which exists only in SPV_KHR_opacity_micromap, so the extension choice for the flag capability is probably best settled together with A/B. That decision, and "constant flags only plus an opt-in capability atom", are for a maintainer to make. I've left both open.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+albertrodriguezclo commented on Oct 19, 2026
+albertrodriguezclo
+on Oct 19, 2026
+Contributor
+More actions
+Thanks for checking, and for the correction. It comes down to the SPIRV-Tools version: the spirv-val I used (Vulkan SDK 1.4.341, SPIRV-Tools v2026.1) accepts this module, and the ForceOpacityMicromap2StateKHR capability check only arrived in newer SPIRV-Tools (it's in the vulkan-sdk-1.4.363.0 tag). So with a current validator the constant-flag case is caught at validation time, while runtime flags and the primitive-culling flags still pass silently, as you say.
+Agreed on keeping it here and settling the extension choice together with A/B. The PR offer stands once a maintainer picks a direction.
+👀React with 👀1Reacted by nv-slang-bot
+mklefrancois commented on Oct 20, 2026
+mklefrancois
+on Oct 20, 2026
+Author
+More actions
+Thanks both. From the application side: (A) is sufficient for us, plus (C). We already recompile per scene to keep the capability off devices without VK_KHR_opacity_micromap, because a spec constant would still leave RayTracingOpacityMicromapExecutionModeKHR declared. So (B) wouldn't let us ship a single module, and the DXR 1.2 spelling is the better fit. On the extension: we target VK_KHR_opacity_micromap, and OpacityMicromapIdKHR only exists in the KHR extension, so KHR for this path makes sense to us. +1 to "constant flags only, plus an opt-in capability atom" for the ray-flag half.
+👀React with 👀1Reacted by nv-slang-bot
+nv-slang-bot commented on Oct 20, 2026
+nv-slang-botBot
+on Oct 20, 2026 – with nv-slang-bot
+Contributor
+More actions
+Status: The reporter has stated their preferences: (A), a second RayQuery template parameter that enables OpacityMicromapIdKHR, plus (C), with the KHR extension for this execution-mode path. For the ray-flag half they want the capability declared only for constant flags, with an opt-in capability atom otherwise. These are user preferences, not maintainer decisions. The ray-flag commenter has offered a PR once a direction is set.
+Link: reporter's answer: SPIR-V: no way to emit OpacityMicromapIdKHR for RayQuery (VK_KHR_opacity_micromap)" #13438 (comment). Ray-flag half: SPIR-V: no way to emit OpacityMicromapIdKHR for RayQuery (VK_KHR_opacity_micromap)" #13438 (comment)
+Verdict: Still open for a maintainer:
+Implementation scope: (A), (B), or both.
+For the ray-flag capabilities: which extension to use (SPV_KHR_opacity_micromap or SPV_EXT_opacity_micromap), and when to declare them.
+(C) does not depend on that choice and is still unfixed on master 7251cc60b: spirv_asm special-cases only OpExecutionMode (slang-emit-spirv.cpp:11981), so OpExecutionModeId __entryPoint … still fails with E99997.
+Next-action: Maintainer direction on the points above.
+Blocker: Maintainer decision.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+albertrodriguezclo commented on Oct 20, 2026
+albertrodriguezclo
+on Oct 20, 2026
+Contributor
+More actions
+Thanks @mklefrancois, that helps. Using KHR for both the execution mode and the ray-flag capability keeps the two halves consistent, which I think is the simplest outcome.
+(C) doesn't depend on the A/B choice, so I'll send a small PR for it now. In spirv_asm, OpExecutionModeId gets the same __entryPoint handling as OpExecutionMode (slang-emit-spirv.cpp, the SpvOpExecutionMode case is the only one today), plus an end-to-end SPIR-V test with OpacityMicromapIdKHR and a spec-constant operand, checked with spirv-val, and a short note in the user guide. That gives a supported way to write the workaround once in a shared helper instead of naming each entry point.
+For (A) and the ray-flag capabilities ("constant flags only, plus an opt-in capability atom"), I'll wait for a maintainer to confirm the direction, and then I can take both, since they sit on the same RayQuery path.
+👀React with 👀1Reacted by nv-slang-bot
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+kaizhangNV
+Labels
+SPIR-VraytracingBugs affecting a raytracing API.Bugs affecting a raytracing API.reproducedProvided instructions confirmed to reproduce the issueProvided instructions confirmed to reproduce the issue
+Type
+Feature
+Projects
+No projects
+Milestone
+Q4 2026 (Fall)
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

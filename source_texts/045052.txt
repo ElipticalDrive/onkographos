@@ -1,0 +1,348 @@
+Purpose Implement and benchmark an algorithm/layout-level redesign for ERWT3D focused on the contest requirement: physical layout optimization slice pre-alignment fast indexing no redundant X/Y/Z full copies storage ratio < 1.5x balanced...
+
+Axis-balanced layout and slice-to-tile index under 1.5x storage · Issue #43 · Chuan1937/ERWT3D · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Axis-balanced layout and slice-to-tile index under 1.5x storage #43
+New issue
+Copy link
+New issue
+Copy link
+Closed as not planned
+Closed as not planned
+Axis-balanced layout and slice-to-tile index under 1.5x storage#43
+Copy link
+Description
+Chuan1937
+opened on May 16, 2026
+Issue body actions
+Purpose
+Implement and benchmark an algorithm/layout-level redesign for ERWT3D focused on the contest requirement:
+```
+physical layout optimization
+slice pre-alignment
+fast indexing
+no redundant X/Y/Z full copies
+storage ratio < 1.5x
+balanced high-performance X/Y/Z slicing
+```
+This issue follows the HDD profiling results from PR #42:
+```
+50G no-write: ~94-96 s
+50G packed:   ~141-148 s
+coverage:     ~100% superblocks touched
+```
+The conclusion from profiling is that I/O scheduling has mostly reached a sequential-scan-like regime. Further major gains require a better data layout and indexing strategy, not just larger read windows.
+Background and algorithm references
+This issue should borrow ideas from mature multidimensional array and spatial-indexing systems:
+```
+1. Chunked multidimensional arrays, as used by Zarr/HDF5-style formats.
+2. Morton/Z-order physical ordering for mapping 3D tile coordinates to a 1D file order while preserving spatial locality.
+3. Hilbert/space-filling curve ordering as a higher-locality alternative to Morton order.
+4. R-tree/Hilbert R-tree style spatial indexing concepts: group nearby multidimensional objects and use bounding boxes / linearized keys for fast lookup.
+5. Lightweight auxiliary indices similar in spirit to chunk-level metadata/index structures, without full X/Y/Z data replicas.
+```
+References to use in design notes:
+```
+- Zarr stores large multidimensional arrays as chunk grids for random access and parallel I/O.
+- Z-order/Morton order maps multidimensional coordinates to one dimension by bit interleaving while preserving locality.
+- Hilbert R-tree uses space-filling curves to impose a locality-preserving linear order on multidimensional rectangles.
+- R-tree-style spatial indexing groups nearby objects using bounding boxes, enabling efficient filtering.
+```
+Current baseline to beat
+From latest results:
+```
+20G no-write: ~37.5 s
+20G packed:   ~58-63 s
+50G no-write: ~94-96 s
+50G packed:   ~141-148 s
+storage ratio: ~1.04-1.08x
+current tile/superblock: 64^3 float32 = 1MB
+```
+Target:
+```
+50G no-write < 80 s if possible
+50G packed   < 120 s if possible
+storage ratio < 1.5x always
+```
+Core idea
+Current 64^3 superblock layout is likely not optimal for balanced X/Y/Z slicing under the contest workload. Implement a new layout/index path:
+```
+axis-balanced tile shape
++ Morton3D or Hilbert3D physical tile order
++ slice-to-tile fast index
++ decode-once scatter-many execution
++ compact metadata/index under 1.5x storage
+```
+This should turn ERWT3D from only an I/O-scheduled format into a contest-optimized 3D storage structure with explicit physical layout and indexing.
+Part A: Tile shape sweep
+Add support for configurable tile shape at conversion time:
+```
+--tile-x N
+--tile-y N
+--tile-z N
+```
+Test at least:
+```
+64x64x64  baseline
+32x32x32
+16x16x16
+128x32x32
+32x128x32
+32x32x128
+64x32x32
+32x64x32
+32x32x64
+16x64x64
+64x16x64
+64x64x16
+```
+For each tile shape, record:
+```
+raw_size_bytes
+erwt3d_size_bytes
+index_size_bytes
+storage_ratio
+superblocks_total / tiles_total
+superblocks_touched_x/y/z
+superblocks_touched_all_axis
+bytes_actual_read
+read_coverage_ratio
+T_no_write_20G
+T_packed_20G
+T_no_write_50G
+T_packed_50G
+X/Y/Z separate timing
+```
+Output:
+```
+docs/results/layout_tile_shape_sweep.csv
+```
+Part B: Physical tile ordering
+Add physical order option:
+```
+--tile-order linear|morton3d|hilbert3d
+```
+B1. Morton3D
+Implement Morton/Z-order key for tile coordinates:
+```
+morton_key = bit_interleave(tile_x, tile_y, tile_z)
+```
+Write tiles in Morton key order and store tile directory:
+```
+tile_id
+logical_tx, logical_ty, logical_tz
+morton_key
+file_offset
+byte_size
+tile_shape
+```
+B2. Hilbert3D optional
+If feasible, implement Hilbert3D order or include it as an experimental comparison. If implementation cost is high, leave it behind a separate flag and first complete Morton3D.
+Benchmark:
+```
+linear vs morton3d vs hilbert3d if available
+```
+Metrics:
+```
+window_count
+pread_calls
+bytes_actual_read
+physical_seek_distance_est
+T_no_write
+T_packed
+```
+Output:
+```
+docs/results/layout_morton_vs_linear.csv
+docs/results/layout_hilbert_experimental.csv  # optional
+```
+Part C: Slice-to-tile fast index
+Build a compact index for direct slice lookup:
+```
+X_slice[k] -> tile_id list
+Y_slice[k] -> tile_id list
+Z_slice[k] -> tile_id list
+
+tile_id -> file_offset, byte_size, tile coordinate, physical order key
+```
+This index must not duplicate data values. It is metadata only.
+Add a CLI option:
+```
+--slice-index on|off
+```
+Index design options:
+```
+1. dense offset table for regular tile grids
+2. compressed tile_id lists per slice
+3. bitset / range list if compact
+4. physical-order sorted tile lists for each slice
+```
+For each index design, report:
+```
+index_size_mb
+index_build_time_ms
+slice_lookup_time_ms
+storage_ratio_with_index
+```
+Output:
+```
+docs/results/layout_slice_index.csv
+```
+Part D: Decode-once scatter-many
+Current contest workload touches nearly all superblocks. The critical algorithm is to process each tile once and scatter it to all target slices that need it.
+Implement contest execution path:
+```
+1. collect X/Y/Z target slices
+2. use slice-to-tile index to produce tile -> target-output mappings
+3. deduplicate tile_id
+4. sort tiles by physical file offset
+5. read each tile once
+6. decode each tile once
+7. scatter to all X/Y/Z output buffers that intersect this tile
+8. release tile or keep in bounded tile cache
+```
+Add:
+```
+--contest-exec-mode current|decode-once-scatter-many
+--contest-tile-cache-mb N
+```
+Metrics:
+```
+unique_tiles_read
+tile_decode_count
+tile_reuse_count
+avg_outputs_per_tile
+T_read_ms
+T_decode_ms
+T_scatter_ms
+T_total_no_write_ms
+memory_peak_mb
+```
+Output:
+```
+docs/results/layout_decode_reuse.csv
+```
+Part E: Layout/index under 1.5x storage verification
+For every new layout, verify:
+```
+storage_ratio = erwt3d_file_size / raw_float32_size
+storage_ratio_with_index < 1.5x
+no full X/Y/Z data copies
+index metadata only
+```
+Output:
+```
+docs/results/layout_storage_ratio.csv
+```
+If a layout exceeds 1.5x, mark it rejected:
+```
+REJECTED_STORAGE_RATIO
+```
+Part F: Correctness
+Every layout and index variant must pass:
+```
+20G and 50G
+X/Y/Z
+100 random + 10 continuous
+boundary slices: first / middle / last
+max_abs_error = 0 preferred
+relative_error_max < 1e-3 required
+mismatch_count = 0 preferred
+checksum recorded
+```
+Output:
+```
+docs/results/layout_correctness.csv
+```
+Benchmark stages
+Stage 1: 20G sweep
+Run all tile shapes and layout orders on 20G first:
+```
+no-write mode
+packed mode
+repeat 1 warm initially
+```
+Reject variants that are clearly slower or exceed storage ratio.
+Stage 2: 50G candidate validation
+Move only top 2-3 variants to 50G:
+```
+no-write mode
+packed mode
+repeat 3 warm
+at least 1 cold if feasible
+```
+Stage 3: final decision
+Compare against current baseline:
+```
+50G no-write: ~94-96 s
+50G packed:   ~141-148 s
+```
+Output final decision:
+```
+docs/results/layout_decision.csv
+```
+Decision labels:
+```
+LAYOUT_CONTEST_DEFAULT
+FAST_BUT_LARGE_INDEX
+FAST_BUT_MEMORY_HEAVY
+REJECTED_SLOW
+REJECTED_STORAGE_RATIO
+REJECTED_INCORRECT
+```
+Required result files
+```
+docs/results/layout_tile_shape_sweep.csv
+docs/results/layout_morton_vs_linear.csv
+docs/results/layout_hilbert_experimental.csv
+docs/results/layout_slice_index.csv
+docs/results/layout_decode_reuse.csv
+docs/results/layout_storage_ratio.csv
+docs/results/layout_correctness.csv
+docs/results/layout_decision.csv
+```
+Implementation notes
+Morton3D should be implemented first because it is simpler than Hilbert3D and easy to explain.
+Hilbert3D is optional/experimental unless Morton3D gives no benefit.
+The slice-to-tile index should be compact and deterministic.
+The index should be stored inside ERWT3D metadata or in a sidecar only for experimentation; final solution should prefer integrated metadata.
+Do not add full data replicas along X/Y/Z.
+Keep memory controlled by --memory-limit-mb.
+The benchmark must distinguish warm and cold results.
+Expected outcome
+This issue should determine whether ERWT3D can beat the current near-full-file sequential read bottleneck by changing tile shape, physical order, and indexing. If the best layout still touches nearly 100% of tiles, document that the contest workload is intrinsically full-volume for the current storage ratio and that remaining improvements are limited to decode/cache/scatter and hardware throughput.
+Reactions are currently unavailable
+Activity
+Chuan1937
+added 2 commits that reference this issue on May 16, 2026
+feat: Morton3D tile ordering with tile directory (Parts A+B, issue #43)
+...
+1cb5d85
+feat: decode profiling proves 14x duplication (Issue #43)
+...
+12dab2a
+Chuan1937
+closed this as not plannedon May 21, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

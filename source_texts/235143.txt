@@ -1,0 +1,169 @@
+# gaussian-projection-bench
+
+**How wrong is the splat? A small numerical study of the two ways a 3D Gaussian is turned into a 2D one (EWA linearisation and the unscented transform) through pinhole, fisheye and equirectangular cameras, measured against a Monte-Carlo reference whose own noise floor is reported.**
+
+[![CI](https://github.com/guilhem0908/gaussian-projection-bench/actions/workflows/ci.yml/badge.svg)](https://github.com/guilhem0908/gaussian-projection-bench/actions/workflows/ci.yml)
+
+[Results](#results) - [Quickstart](#quickstart) - [How it works](#how-it-works) - [Limitations](#limitations)
+
+![Animation: an isotropic 3D Gaussian slides from the centre to the edge of a 180-degree fisheye image, then from the equator to the pole of an equirectangular image. The grey Monte-Carlo density of its projection is overlaid with the EWA ellipse in orange and the unscented-transform ellipse in blue with its seven sigma points; two heat maps show the error of each method over the whole sweep.](docs/hero.gif)
+
+*A deliberately large Gaussian, so that the differences show at screen size. Ellipses are drawn at 2 σ; the unscented one uses sigma points along the camera axes. Every frame comes from `scripts/reproduce.py`.*
+
+## Why this exists
+
+During my research internship at AIST (Tsukuba, Japan) I rendered 360-degree panoramas from 3D Gaussian Splatting scenes. Most Gaussian renderers assume a perspective camera, so I rendered six pinhole views and stitched them; the renderer I used later, NVIDIA's 3DGUT, replaces the linearised projection with an unscented transform precisely to support distorted cameras. I wanted to know what each approximation costs, in pixels, and what projecting straight into an equirectangular image would cost near the poles. This repository is a personal side project that answers this with a reference whose precision is measured; it was written with AI assistance (see the commit trailers), is not part of the internship work and uses none of its code or data.
+
+## Results
+
+<!-- verdict:start -->
+**With the exact camera Jacobian, EWA's error is a centre shift that passes half a pixel (2-Wasserstein) once a splat's standard deviation exceeds 18 px at 45° in a pinhole, 23 px at the edge of a 180° fisheye and 27 px at latitude 60° of a panorama; the unscented transform with 3DGUT's sigma points removes the shift and moves those limits to 44, 44 and 41 px, where a covariance error of its own takes over; at latitude 87.5° both miss a splat only 3.2 px thick, by 2.36 and 1.85 px.**
+<!-- verdict:end -->
+
+<!-- points:start -->
+Setup: three images 1024 px high with the same centre resolution of 325.9 px per radian (a 180° fisheye circle, a 2048 x 1024 panorama, a pinhole of the same focal length). Gaussians are isotropic unless stated; σ/d is the standard deviation over the distance to the camera, so σ/d = 0.01 is a 3.3 px splat at the image centre. *Shift* is the distance between the approximated and the reference centre, *W2* the 2-Wasserstein distance between the approximated and the reference Gaussian, both in pixels. The *noise floor* is the W2 distance between two independent halves of the reference. *UT* uses 3DGUT's sigma points (α = 1, β = 2, κ = 0) and is the median over 32 random sigma-point frames; *UT α=0.001* is the small-spread textbook setting.
+
+| Camera | Position | σ/d | Splat σ (px) | EWA shift | EWA W2 | UT shift | UT W2 | UT α=0.001 W2 | Noise floor |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Pinhole | 45° off-axis | 0.1 | 69.3 × 47.6 | 6.95 | 8.23 | 0.23 | 1.99 | 3.82 | 0.069 |
+| Pinhole | 70° off-axis | 0.01 | 28.0 × 9.5 | 0.77 | 0.77 | 0.002 | 0.026 | 0.068 | 0.002 |
+| Fisheye | image centre | 0.1 | 32.7 × 32.6 | 0.003 | 0.077 | 0.041 | 0.38 | 0.077 | 0.012 |
+| Fisheye | 90° off-axis (image edge) | 0.01 | 5.1 × 3.3 | 0.026 | 0.026 | <0.001 | <0.001 | <0.001 | <0.001 |
+| Fisheye | 90° off-axis (image edge) | 0.1 | 51.3 × 32.6 | 2.58 | 2.58 | 0.075 | 0.81 | 0.19 | 0.035 |
+| Equirectangular | latitude 60° | 0.1 | 66.7 × 32.3 | 2.86 | 3.24 | 0.42 | 1.99 | 1.58 | 0.048 |
+| Equirectangular | latitude 85° | 0.01 | 37.6 × 3.2 | 0.19 | 0.31 | 0.045 | 0.22 | 0.25 | 0.008 |
+| Equirectangular | latitude 87.5° | 0.01 | 77.1 × 3.2 | 0.38 | 2.36 | 0.73 | 1.85 | 2.34 | 0.098 |
+<!-- points:end -->
+
+<!-- cells:start -->
+Whole sweep: one isotropic Gaussian per cell, field position every 2.5° (off-axis angle up to 80° for the pinhole and 90° for the fisheye, latitude up to 87.5°) x 16 sizes from σ/d = 0.001 to 0.316. Pinhole cells whose Gaussian comes within 6 standard deviations of the camera plane have no finite reference and are left out. A cell counts as *below* or *above* EWA only when the two W2 errors differ by more than the noise floor.
+
+| Camera | Cells with a reference | EWA > 0.5 px | UT > 0.5 px | UT α=0.001 > 0.5 px | UT below EWA | UT above EWA |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Pinhole | 420 of 528 | 121 (28.8%) | 57 (13.6%) | 73 (17.4%) | 415 (98.8%) | 0 (0.0%) |
+| Fisheye | 592 of 592 | 150 (25.3%) | 126 (21.3%) | 77 (13.0%) | 501 (84.6%) | 79 (13.3%) |
+| Equirectangular | 576 of 576 | 188 (32.6%) | 164 (28.5%) | 156 (27.1%) | 513 (89.1%) | 55 (9.5%) |
+<!-- cells:end -->
+
+![Nine heat maps over field position (horizontal) and Gaussian size (vertical). Top row: 2-Wasserstein error of EWA for the pinhole, fisheye and equirectangular cameras. Middle row: the same for the unscented transform. Bottom row: their ratio, blue where the unscented transform is more accurate and red where EWA is.](docs/heatmaps.png)
+
+<!-- anisotropy:start -->
+Anisotropic Gaussians: largest standard deviation σ/d = 0.1, 48 random orientations per shape; median (worst) W2 error in pixels.
+
+| Camera, position | Shape | EWA median (max) | UT median (max) | UT α=0.001 median (max) | UT below EWA |
+| :--- | :--- | ---: | ---: | ---: | ---: |
+| Pinhole, 45° off-axis | isotropic | 8.23 (8.30) | 1.84 (2.90) | 3.84 (3.88) | 48 of 48 |
+| Pinhole, 45° off-axis | disc 10:1 | 6.28 (9.65) | 0.93 (1.77) | 2.53 (3.95) | 48 of 48 |
+| Pinhole, 45° off-axis | needle 10:1 | 2.37 (9.27) | 0.13 (0.72) | 0.48 (3.53) | 48 of 48 |
+| Fisheye, 80° off-axis | isotropic | 2.08 (2.09) | 0.61 (0.98) | 0.13 (0.13) | 48 of 48 |
+| Fisheye, 80° off-axis | disc 10:1 | 1.80 (3.66) | 0.56 (0.99) | 0.36 (0.85) | 38 of 48 |
+| Fisheye, 80° off-axis | needle 10:1 | 1.92 (2.70) | 0.18 (0.83) | 0.42 (0.57) | 48 of 48 |
+| Equirectangular, latitude 60° | isotropic | 3.23 (3.25) | 2.17 (3.57) | 1.56 (1.59) | 43 of 48 |
+| Equirectangular, latitude 60° | disc 10:1 | 3.79 (7.42) | 1.68 (2.90) | 1.63 (2.99) | 43 of 48 |
+| Equirectangular, latitude 60° | needle 10:1 | 3.32 (7.45) | 0.81 (1.91) | 1.25 (2.95) | 48 of 48 |
+<!-- anisotropy:end -->
+
+<!-- notes:start -->
+- **Order of the error.** Fitted log-log slope of the W2 error against σ/d (EWA / unscented, σ/d ≤ 0.05, resolved points only): pinhole at 45°: 2.01 / 2.99; fisheye at 60°: 2.00 / 2.99; equirectangular at 60°: 2.00 / 2.97. A slope of 2 is the signature of a centre shift, 3 of a covariance error.
+- **Centre versus covariance.** α = 0.001 keeps the linearised covariance and only corrects the centre. Against 3DGUT's wide sigma points it is worse on the pinhole (3.82 against 1.99 px at 45°, σ/d = 0.1) and better on the fisheye (0.19 against 0.81 px at the edge): the wide points improve the covariance of a perspective camera and degrade that of an equidistant one, where at the image centre they are worse than plain EWA (0.38 against 0.077 px).
+- **The unscented result depends on the splat's rotation, even for a sphere.** Over 32 random sigma-point frames of one isotropic Gaussian, the largest W2 error is typically 3.4x (pinhole), 2.8x (fisheye), 3.9x (equirectangular) the smallest (median over cells). The tables report the median frame.
+- **Poles.** Highest swept latitude up to which the W2 error stays below 0.5 px (EWA / unscented / α = 0.001): 85° / 85° / 85° for σ/d = 0.01; 15° / 30° / 42.5° for σ/d = 0.1. The sweep stops at 87.5°.
+- **Reference.** 8 seeds x 100,000 samples per case (800,000 projections). 0 of them fell outside a camera domain over the 1588 evaluated cells. At σ/d = 0.01 and 1,000,000 samples, plain Monte-Carlo has a W2 floor of 0.0156 px, antithetic pairs with the control variate 0.00021 px (73x lower); the floor falls with the sample count at slopes between -0.53 and -0.47 (expected -0.5).
+- **CPU cost.** Projecting 100,000 Gaussians takes 54 to 68 ms with EWA and 192 to 259 ms with the unscented transform (NumPy, one process). The whole reproduction took 232 s on 6 processes of a 32-thread CPU; no GPU is used.
+<!-- notes:end -->
+
+![Four line charts of the 2-Wasserstein error on logarithmic axes: against Gaussian size for the pinhole at 45 degrees, the fisheye edge and the panorama at 60 degrees latitude, and against latitude for a small splat. EWA, the two unscented schemes and the noise floor of the reference are shown, with the band spanned by the sigma-point frames.](docs/error_curves.png)
+
+## How it works
+
+```mermaid
+flowchart LR
+    G["3D Gaussian<br/>mean, R S"] --> E["EWA<br/>J Σ Jᵀ at the mean"]
+    G --> U["Unscented transform<br/>7 sigma points, exact camera"]
+    G --> M["Monte-Carlo reference<br/>antithetic pairs, control variate"]
+    E --> D["Centre shift, W2, KL<br/>against the reference"]
+    U --> D
+    M --> D
+    M --> F["Split-half noise floor"]
+    D --> R["results/*.csv, summary.json<br/>figures, README tables"]
+    F --> R
+```
+
+**Cameras** (x right, y down, z forward; `cameras.py`), with $`r=\sqrt{x^2+y^2}`$ and analytic Jacobians checked against finite differences: pinhole $`u = f x/z`$; equidistant fisheye $`u = f \theta x/r`$ with $`\theta=\operatorname{atan2}(r,z)`$; equirectangular $`u = k\operatorname{atan2}(x,z)`$, $`v = k\operatorname{atan2}(y,\sqrt{x^2+z^2})`$. All three depend on the direction of a point only, so depth and size act through the single ratio σ/d.
+
+**EWA** keeps the first-order term of the camera $`\pi`$ at the mean: $`\mu' = \pi(\mu)`$, $`\Sigma' = J \Sigma J^\top`$. **The unscented transform** projects the mean and the six points $`x_i = \mu \pm \sqrt{3} \sigma_i r_i`$ along the splat's own axes with the exact camera, then takes $`\mu' = \tfrac16\sum_i \pi(x_i)`$ and $`\Sigma' = \tfrac16\sum_i (\pi(x_i)-\mu')(\pi(x_i)-\mu')^\top + 2 (\pi(\mu)-\mu')(\pi(\mu)-\mu')^\top`$ (the 3DGUT parameters α = 1, β = 2, κ = 0).
+
+**The reference** samples the 3D Gaussian, projects every sample exactly and takes the mean and covariance: the Gaussian closest to the true projected density in KL divergence. With $`l = A(x-\mu)`$ and the residual $`r = \pi(x) - \pi(\mu) - l`$, the identities $`\mathbb{E}[\pi] = \pi(\mu) + \mathbb{E}[r]`$ and $`\operatorname{Cov}[\pi] = A\Sigma A^\top + \mathbb{E}[l r^\top] + \mathbb{E}[r l^\top] + \operatorname{Cov}[r]`$ hold for any matrix $`A`$; with $`A = J`$ only a small residual is left to sample (a control variate, on antithetic pairs $`\mu \pm \delta`$). The reference is split into two independent halves and their distance is reported as its noise floor.
+
+**Errors** between two Gaussians are closed-form: $`W_2^2 = \lVert\mu_a-\mu_b\rVert^2 + \operatorname{tr}\Sigma_a + \operatorname{tr}\Sigma_b - 2\sqrt{\operatorname{tr}(\Sigma_a\Sigma_b) + 2\sqrt{\det\Sigma_a \det\Sigma_b}}`$ (valid for 2 × 2 matrices) and the KL divergence, which does not depend on the image resolution. Derivations and the reasons behind each choice are in [docs/design.md](docs/design.md).
+
+## Quickstart
+
+```bash
+git clone https://github.com/guilhem0908/gaussian-projection-bench.git
+cd gaussian-projection-bench
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+pytest                                      # unit tests, result regression, figure rendering
+python scripts/check_readme.py              # README numbers == committed results
+python scripts/reproduce.py --skip-sweeps   # rebuild summary, figures and README from results/*.csv
+python scripts/reproduce.py                 # recompute everything, Monte-Carlo sweeps included
+```
+
+Windows PowerShell:
+
+```powershell
+git clone https://github.com/guilhem0908/gaussian-projection-bench.git
+cd gaussian-projection-bench
+python -m venv .venv; .venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+pytest
+python scripts\check_readme.py
+python scripts\reproduce.py --skip-sweeps
+python scripts\reproduce.py
+```
+
+Python 3.10 or newer, CPU only. All random streams derive from one seed; a full run rewrites `results/`, `docs/` and the numbers above. Timings (`results/timing.json` and the CPU-cost line) depend on the machine; with a different NumPy or SciPy release the CSV and JSON values can differ from the committed ones in the last digits, but the numbers quoted in this README stay the same (checked by repeating the full run with NumPy 2.5.3 after the committed run with 2.3.5).
+
+## Repository layout
+
+```text
+src/gpbench/
+  cameras.py       pinhole, equidistant fisheye, equirectangular: projection, Jacobian, back-projection
+  gaussians.py     Gaussian3D (mean, R S), random rotations, field directions
+  projection.py    EWA linearisation, unscented transform, sigma-point schemes
+  reference.py     Monte-Carlo reference: antithetic pairs, control variate, noise floor, Mardia statistics
+  metrics.py       centre shift, 2-Wasserstein, KL, covariance error (closed forms)
+  experiments.py   the sweeps, their seeds, and how one case becomes one row
+  summary.py       result tables -> results/summary.json
+  report.py        summary -> the generated blocks of this README
+  figures.py       heat maps, error curves, animated hero
+scripts/
+  reproduce.py     one command for tables, summary, figures and README numbers
+  check_readme.py  fails when the README and the committed results disagree
+tests/             Jacobians vs finite differences, exactness on an affine camera, quadrature cross-check
+results/           field.csv, anisotropy.csv, reference_convergence.csv, summary.json, timing.json
+docs/              hero.gif, heatmaps.png, error_curves.png, reference_floor.png, design.md
+```
+
+## Limitations
+
+- **Moments, not pixels.** The reference is the mean and covariance of the projected distribution, the quantity both methods estimate. A renderer integrates density along each ray and blends many splats; no claim is made here about rendered image quality.
+- **Synthetic, one Gaussian at a time.** No trained scene is used, so the tables say how large the error is for a given splat, not how often such splats occur in practice.
+- **EWA is given the exact Jacobian of each camera.** A pinhole rasteriser applied to a distorted image makes a different, larger error that is not measured here.
+- **The pinhole reference does not always exist.** Dividing by depth makes the projected moments diverge once the Gaussian reaches the camera plane; those cells are left out, and they are where a renderer has to clip.
+- **Near a pole no Gaussian fits.** The projected density wraps around the pole (its kurtosis leaves the Gaussian value), so there the reference itself is only a moment match and its noise floor grows.
+- **Not a reproduction of 3DGUT.** Only its sigma-point parameters are reused; the 3DGUT paper reports its own projection study for pinhole and fisheye cameras, and nothing here says that 3DGUT supports equirectangular cameras. No rolling shutter, no lens distortion polynomial, no anti-aliasing dilation.
+
+## References
+
+- M. Zwicker, H. Pfister, J. van Baar, M. Gross, [EWA Splatting](https://doi.org/10.1109/TVCG.2002.1021576), IEEE TVCG, 2002.
+- B. Kerbl, G. Kopanas, T. Leimkühler, G. Drettakis, [3D Gaussian Splatting for Real-Time Radiance Field Rendering](https://arxiv.org/abs/2308.04079), ACM TOG, 2023.
+- Q. Wu, J. Martinez Esturo, A. Mirzaei, N. Moenne-Loccoz, Z. Gojcic, [3DGUT: Enabling Distorted Cameras and Secondary Rays in Gaussian Splatting](https://arxiv.org/abs/2412.12507), CVPR 2025; code in [nv-tlabs/3dgrut](https://github.com/nv-tlabs/3dgrut).
+- S. Julier, J. Uhlmann, [Unscented Filtering and Nonlinear Estimation](https://doi.org/10.1109/JPROC.2003.823141), Proceedings of the IEEE, 2004.
+- E. Wan, R. van der Merwe, [The Unscented Kalman Filter for Nonlinear Estimation](https://doi.org/10.1109/ASSPCC.2000.882463), IEEE AS-SPCC, 2000.
+- J. Kannala, S. Brandt, [A Generic Camera Model and Calibration Method for Conventional, Wide-Angle, and Fish-Eye Lenses](https://doi.org/10.1109/TPAMI.2006.153), IEEE TPAMI, 2006.
+- D. Dowson, B. Landau, [The Fréchet Distance between Multivariate Normal Distributions](https://doi.org/10.1016/0047-259X(82)90077-X), Journal of Multivariate Analysis, 1982.
+- Tools: [NumPy](https://numpy.org), [Matplotlib](https://matplotlib.org), [Pillow](https://python-pillow.org), [pytest](https://pytest.org), [Ruff](https://docs.astral.sh/ruff/).
+
+Guilhem Carmouze - robotics engineering student, UPSSITECH (University of Toulouse) - LinkedIn https://www.linkedin.com/in/guilhem-carmouze/ - https://guilhem0908.github.io

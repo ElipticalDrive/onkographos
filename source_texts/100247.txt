@@ -1,0 +1,1296 @@
+arXiv:2408.06286v1 [cs.CV] 12 Aug 2024
+Mipmap-GS: Let Gaussians Deform with Scale-specific Mipmap for
+Anti-aliasing Rendering
+Jiameng Li1 Yue Shi2,3 Jiezhang Cao2 Bingbing Ni3 Wenjun Zhang3
+Kai Zhang4 Luc Van Gool2,5
+1
+University of Stuttgart 2 ETH Zürich 3 Shanghai Jiaotong University
+4
+Nanjing University 5 INSAIT, Sofia University
+Abstract
+3D Gaussian Splatting (3DGS) has attracted great attention in novel view synthesis because of its superior rendering efficiency and high fidelity. However, the trained Gaussians suffer from severe zooming degradation due to nonadjustable representation derived from single-scale training. Though some methods attempt to tackle this problem
+via post-processing techniques such as selective rendering
+or filtering techniques towards primitives, the scale-specific
+information is not involved in Gaussians. In this paper, we
+propose a unified optimization method to make Gaussians
+adaptive for arbitrary scales by self-adjusting the primitive properties (e.g., color, shape and size) and distribution
+(e.g., position). Inspired by the mipmap technique, we design pseudo ground-truth for the target scale and propose
+a scale-consistency guidance loss to inject scale information into 3D Gaussians. Our method is a plug-in module, applicable for any 3DGS models to solve the zoomin and zoom-out aliasing. Extensive experiments demonstrate the effectiveness of our method. Notably, our method
+outperforms 3DGS in PSNR by an average of 9.25 dB for
+zoom-in and 10.40 dB for zoom-out on the NeRF Synthetic
+dataset. Our project website: https://github.com/
+renaissanceee/Mipmap-GS.
+1. Introduction
+With the development of implicit methods [2, 3, 37, 58],
+Novel View Synthesis (NVS) gains significant attention in
+virtual reality [8, 14, 73], augmented reality [44, 46, 53],
+and 3D generation [10, 15, 31, 32, 34, 39, 42, 49, 63, 65].
+Recently, 3D Gaussian Splatting [25] shows state-of-the-art
+rendering quality with fast speed, due to the primitive-based
+representation and rasterization technique. However, 3DGS
+suffers from severe aliasing or blurriness when zooming in
+or out, leading to compromised user experience in interaction applications.
+Typically trained on single-scale images, 3DGS is sen-
+Zoom-in
+Erosion
+Zoom-out
+Dilation
+Figure 1. Aliasing at different observation distances.
+sitive to sampling rates that deviate from training set [28,
+59, 67]. This characteristic bears similarity to Neural Radiance Field (NeRF) [35], as discussed in Mip-NeRF [2].
+Viewpoint
+When changing the observation distance, image resolutionDistance
+or camera focal length, Fig. 1 illustrates the zoom-out dilation and zoom-in erosion in 3DGS, both of which called
+aliasing in our paper following [67]. The quality degradation at unseen scales comes from the mismatch between
+the learned Gaussian fields and out-of-distribution sampling
+rates. Specifically, the 3D Gaussians are projected into the
+image plane and go through a 2D dilation filter before the
+rasterizer to smooth the shrinkage bias [67]. However, nondeformable Gaussians and constant dilation factor (which is
+set to be 0.3) do not seamlessly align with varying settings
+in Fig. 2. When zooming in, the shrunk Gaussians in screen
+space are not adequately smoothed, leading to needle-like
+spikes on the screen. Even worse, the finer pixel gridding in
+zoom-in leads to empty areas where no Gaussian is splatted
+or shaded, leading to structure missing. Conversely, zooming out encounters excessive brightness and thickness, since
+too many Gaussians contribute to a single pixel.
+To address the challenges of zooming in and out, most
+existing methods have unsatisfactory performance due to
+the lack of deformable representation. To accommodate the
+decreased sampling rate in zoom-out, [59] proposes a selective rendering method, which aggregates many small primitives for a few large ones locally. However, the selection
+process inevitably introduces manually selected parameters
+and only applies in zoom-out. Inspires by [74], [67] introduces a 3D filter for frequency constraint, which works to
+smooth the zoom-in shrink, and replaces the original 2D dilation filter with a Mip filter inspired by [74]. Although applicable for arbitrary scale rendering, the Mip filter in [67]
+New Scale Gaussian
+New Scale Gaussian
+Erosion
+(ellipsoid)
+Dilation
+3DGS
+Mip Filter
+Base Gaussian
+3DGS
+Erosion
+(circular) 3D Filter
+Weak Dilation
+Mip-Splatting
+Mip-Splatting
+(Before Zoom-out)
+Base Gaussian
+(Before Zoom-in)
+No Erosion
+No Dilation
+Ours
+Ours
+(a) Zoom-out
+(b) Zoom-in
+Figure 2. Comparison of 3DGS, Mip-Splatting and ours in zoom-out and zoom-in scenarios. 3DGS (top) lacks scale sensitivity and
+exhibits strong degradation. Mip-Splatting (middle) introduces a 2D Mip filter and 3D smooth filter to regulate scales heuristically while
+leaving 3D Gaussians unaware of the varying footprint in pixel space. Ours (bottom) adopts scale-adaptive Gaussians for explicit pixel
+coverage optimization. The projection in previous pixel coverage is illustrated in the dashed line.
+lacks scale information and the 3D smooth filter suppresses
+the high-frequency components, which inevitably sacrifices
+some finer details [28]. Thus, there is an urgent need to
+explore methods that adapt the source signal itself to essentially accommodate varying sampling rates.
+In this paper, we propose a novel scale-adaptive optimization method for 3D Gaussian Splatting, addressing the challenge of zoom-in and zoom-out rendering.
+Specifically, we construct mipmap-like pseudo ground-truth
+(pseudo-GT) to provide scale-specific information in a selfsupervised way. A mipmap represents a signal (e.g. image
+or texture map) at a set of discrete downsampling scales and
+selects the appropriate scale for anti-aliasing rendering [2].
+We change the once-created and precomputed mipmap to
+scale-specific mipmap-like pseudo-GT on novel views during test time. To deform Gaussians with the mipmap, we
+introduce a scale-aware guidance loss. By self-supervised
+optimization, our method fits for arbitrary-scale rendering.
+Our contributions are summarized as follows:
+• We propose a scale-adaptive optimization approach with
+scale-aware guidance loss. Different from existing methods, our deformable Gaussians are self-adjusted for
+zoom-in and -out.
+• Our method designs mipmap-like pseudo-GT on observation scales for test-time adaptation, which provides prior
+information for zooming deformation.
+• Rather than training from scratch, our approach makes
+use of base Gaussians and converges within 1K iterations,
+offering computational advantages.
+• Serving as a plug-in module, our method is applicable in
+any 3DGS models to address the zoom-in and -out issues,
+and improves the PSNR of 3DGS over 9dB.
+2. Related Work
+2.1. Novel View Synthesis
+Novel View Synthesis aims to generate images from new
+viewpoints based on a set of source-view images, enabling
+the creation of previously uncaptured views and scene reconstruction. We will introduce two main branches according to different scene representations, i.e. explicit and implicit methods.
+Explicit methods describe the scene in discrete spatial
+structures like point cloud [40, 52, 55], mesh [21] and voxel
+grid [30]. Yet, explicit methods require large memory usage
+and perform not well on low-resolution scenes [17, 48].
+As a pioneer of implicit representations, NeRF [35] utilizes Multi-Layer Perceptron (MLP) to store scene information implicitly, which maps view-related spatial positions
+and view directions to color and volume density values. To
+speed up the training or rendering of NeRF, [7, 16, 37, 58]
+represent the scene by grid-based feature, point-based feature and hash encoding. In multi-scale rendering works
+[2, 3, 20, 22, 38], Mip-NeRF [2] mitigates aliasing at
+smaller rendering resolutions by replacing pixel-wise ray
+sampling and rendering of NeRF with conical frustums. Despite the significant performance of NeRFs, the volumetric
+ray marching necessitates high computation afford.
+2.2. 3D Gaussian Splatting
+Combining explicit and implicit methods for scene representation [8], 3DGS [25] learns a Gaussian field that holds
+discrete geometry centers and continuously optimized attributes. Due to its supervisor fidelity and speed, Gaussian Splatting [25] appears to be an appealing alternative
+to NeRF [2]. Unlike the MLP architecture and ray marching techniques in NeRF, 3DGS employs primitive-based
+splatting and fast rasterizer, enjoying high parallelism in
+GPU [25, 64]. The learnable parameters in 3D Gaussians
+are directly optimized, including geometry information of
+mean and covariance matrix, and color information including opacity and spherical harmonic (SH) coefficients. The
+growth and pruning of Gaussians are conducted by adaptive
+density control considering the accumulated gradients and
+opacity contributions, which adjust the scene coverage and
+granularity efficiently.
+3DGS has been applied in many tasks, such as sparseview reconstruction [6, 9, 11, 54, 60], 3D generation [50,
+57, 69] and dynamic scenes [1, 18, 41, 61]. To improve the
+rendering quality, Pixel-GS [72] proposes a scaled gradient field optimized by pixel coverage weighted loss, while
+[70] introduces frequency spectrum as guidance. [19] put
+forward generalized exponential splatting to sharpen highfrequency details, and [23] simplifies 3D Gaussians to 2D
+Gaussians for surface reconstruction. Scaffold-GS [33]
+leverages anchor points and MLP to arrange view-adaptive
+Gaussians, which also brings storage benefits. [5, 12, 62]
+revise the density control strategy of 3DGS during optimization. [68] propose Gaussian-Opacity-Field (GOF) for
+surface alignment and mesh extraction, and a novel densification method. [56] leverages 3DGS to synthesize data
+factory under different focal lengths.
+2.3. Zoom-out and Zoom-in
+Despite the superior NVS capacity of NeRF and 3DGS,
+they face degradation when rendering at unseen scales, i.e.
+zoom-out and zoom-in.
+When zooming out, the disparity between decreased
+sampling rate and high-frequency components causes aliasing. Mipmap and Level-of-Detail (LOD) techniques are
+leveraged in traditional computer graphics for anti-aliasing
+rendering. In NeRF-related works, [2–4] render conical
+frustums instead of rays and apply pre-filtering to the input
+positional encoding to resist aliasing. For 3DGS, [43, 59]
+adopt LoD representation for efficient and anti-aliasing rendering, while inevitably introducing hyperparameter tuning
+in level selection. Analytic-Splatting [28] treats each pixel
+as an area instead of separate points to deal with pixel footprint changes.
+Zoom-in entails moving from a global view to local
+details. Previous NeRF-based methods leverage supersampling strategy with depth regularization [51], and postprocessing steps [24, 29] to address this issue. [45, 66] takes
+SR prior from images and video respectively for HR rendering. Mip-Splatting [67] introduces a 3D smooth filter
+to regulate high-frequency components of each primitive.
+[67] re-calculates and updates the scale of the 3D filter during training. In the testing stage, each primitive is subjected
+to the integrated 3D filter before being projected to screen
+space. Unlike previous methods, we propose scale-specific
+supervision to mimic mipmap. Rather than storing a precomputed data structure and interpolating between levels,
+we derive mipmap-like pseudo-GT on the fly and use it to
+refine the 3D model further.
+3. Preliminaries
+3.1. 3D Gaussian Splatting
+3DGS [25, 74] represents scenes as a set of 3D Gaussian primitives {Gk | k = 1, . . . , K}, with geometry center
+µk ∈ R3×1 and covariance matrix Σk ∈ R3×3 . Each 3D
+Gaussian is parameterized as:
+−1
+⊤
+1
+Gk (x) = e− 2 (x−µk ) Σk (x−µk ) ,
+(1)
+where Σk is further expressed by orthogonal rotation matrix R ∈ R3×3 and diagonal scale matrix S ∈ R3×3 :
+Σ = RSS ⊤ R⊤ . During rendering, primitives overlapped
+at pixel x are sorted according to depth order {1, . . . , K}.
+Then the view-dependent pixel color c(x) modeled by
+spherical harmonics is calculated by :
+c(x) =
+K
+X
+ck α k
+k−1
+Y
+(1 − αi ),
+(2)
+i=1
+k=1
+where αk is calculated by evaluating a projected 2D Gaussian G2D
+multiplied with a learned opacity [64], and fik
+nally attends to the pixel color c(x) with the primitive color
+ck . Each primitive properties are optimized across all the
+training views coupled with density control intermittently.
+Shrinkage bias and 2D dilation. In practice, 3D Gaussians are truncated to calculate pixel color with shrinkage
+bias [67]. The extreme shrink is expressed as δ impulse,
+which becomes needle-like spikes in renderings. In addition, the tiny Gaussians (smaller than 1 pixel) with trivial
+contributions are hard to optimize. Therefore, a 2D dilation operation is designed before rasterization to undo the
+shrinkage bias:
+1
+⊤
+2D
+−1
+− 2 (x−µk ) (Σk +sI)
+G2D
+k (x) = e
+(x−µk )
+,
+(3)
+where s is set to be 0.3. Working as a low-pass filter, the
+dilation operation smoothes the shrinkage bias to achieve
+faithful rendering in Fig. 3a.
+1 pix
+(a) Faithful
+(b) Zoom-in
+(c) Zoom-out
+Figure 3. A toy 3DGS model under multi-scale rendering. The
+splatted Gaussians (dark) go through 2D dilation (light) for faithful
+rendering (a). However, the varying shrinkage bias and constant
+dilation cause zoom-in spikes (c) and zoom-out thickness (d).
+3.2. Motivation
+Despite the promising NVS results at basic scale (consistent with the training scale), zoom-in and -out rendering will
+bring two challenges for out-of-distribution generalization:
+Eqn. 4
+Adaptive GS (× 𝑁)
+↑ r(·)
+↓
+Rendering × 𝑁
+− Loss
+Pseudo-GT
+(Mipmap)
+↑
+Zoom-in Mipmap × 𝑁
+Base GS (× 1)
+Initial Input
+Gradient Flow
+↑ Upsampling
+Operation Flow
+↓ Downsampling
+3DGS
+↓
+1
+Adaptive GS (× 𝑁)
+1
+Rendering × 𝑁
+Mipmap-GS
+Zoom-out Mipmap ×
+1
+𝑁
+Pseudo-GT
+Figure 4. Pipeline. We adjust single-scale trained base Gaussians for arbitrary zoom factors supervised by mipmap-like pseudo-GT. The
+core component is the mipmap proposal module, which constructs scale-specific mipmap by upsampling or downsampling novel views.
+Varying sampling rates. 3DGS leverages a group of Gaussian ellipsoids for scene representation, akin to a Gaussian
+mixture model. During pixel shading, pixel grids are allocated according to the current sampling rate. Then, Gaussians overlapped in one pixel are accumulated with shrinkage bias [67]. When the sampling rate changes, the varying
+shrinkage bias leads to confusion during accumulation. In
+Fig. 3, we simply illustrate different sampling rates and
+the shrunk Gaussian signals in 1D. The learned Gaussian
+field samples two signals at basic scale (Fig. 3a), while a
+zoom-in pixel (Fig. 3b) only captures a blue signal, and a
+zoom-out pixel (Fig. 3c) accumulates the orange signal for
+excessive contribution.
+Constant dilation. The pixel coverage during shading is
+decided jointly by projected Gaussians and dilation operation. The 2D dilation operation in 3DGS [25] is designed to
+amplify tiny Gaussians (marked as blue) smaller than one
+pixel (marked as grey) in Fig. 3a. However, the constant
+dilation doesn’t fit for decreased pixel coverage in zoom-in,
+causing thin structures and empty areas with no splats (Fig.
+3b). Conversely, maintaining the same dilation for zoomout leads to excessively wide coverage and thick structures,
+which also undermines the rendering efficiency. In Fig. 3c,
+the green Gaussian was not meant to fall into the grey pixel,
+but due to inherited dilation, it gets included for pixel shading. The intuitive solution of super-sampling is sub-optimal
+due to the computational burden.
+To mitigate the misalignment, [67] conducts both 3D and
+2D smoothing using two smoothing filters, while [47] introduces a scale-adaptive 2D filter. These filters partially revise the scale of Gaussians to fit multi-scale rendering, yet
+the overall distribution doesn’t actually change. [43, 59] arrange Gaussians hierarchically by LoD architecture, while
+the level selection is not accurate for pixel coverage and
+performs sensitive to hyper-parameters. Therefore, it’s impossible to fit multi-scale rendering with fixed Gaussians.
+We propose Mipmap-GS to provide deformable Gaussians
+optimized via scale-specific mipmap.
+4. Proposed Method
+To solve the mismatched pixel coverage and Gaussians at
+new scales, we deform Gaussians interactively to fit for
+varying zoom factors. First, we construct mipmap-like
+pseudo-GT at the observation scale, see Sec. 4.1. Then, we
+introduce scale-adaptive Gaussians in Sec. 4.2, which are
+deformed from base Gaussians. Finally, we describe optimization details in Sec. 4.3, including scale-aware guidance
+loss and active pruning strategy.
+4.1. Mipmap-like Pseudo-GT
+Instead of conducting time-consuming multi-scale training, our method optimizes scale-adaptive Gaussians using
+mipmap-like pseudo-GT. Considering the NVS capacity of
+3DGS, we first splat the set of base Gaussians into novel
+views at the basic scale (×1), which faces no degradation.
+Then, we construct new scale pseudo-GT with mipmap resizing function r(x). For zoom-in adaptation, novel-view
+renderings are upsampled to ×N using super-resolution
+methods like SwinIR [27]. Similarly, to create a scalespecific mipmap for zoom-out, the rendered images are
+downsampled to ×1/N of the original resolution. Compared with the zoom-in process which needs to generate details for extended pixels, the downsampling step involves
+less textural deterioration to mimic fading away. Therefore,
+we simply adopt bilinear interpolation as r(x) to generate
+the LR mipmap. Note that mipmap is originally defined as
+a pre-calculated image sequence with progressively lower
+resolutions. Here, we use mipmap to refer to pseudo-GT at
+both lower and higher resolutions.
+x8
+x1/4
+x4
+x1/8
+3DGS
+Ours
+Figure 5. Visualization of Gaussians. 3DGS [25] use fixed Gaussians for multi-scale rendering, while our adaptive adjustment provides
+deformable Gaussians towards various zoom factors.
+4.2. Scale-Adaptive 3D Gaussians
+As introduced in Sec. 3.1, 3DGS [25] projects Gaussian ellipsoids into image space as a set of α-blended 2D Gaussians to accumulate the pixel color. The 3D shrinkage
+bias and 2D dilation restoration cooperate to fit the training scale. However, taking place in different spaces, these
+two operations work independently while not seamlessly
+aligned. As illustrated in Sec. 3.2, the existing space gap
+causes two challenges at multi-scale rendering, since dramatically varied sampling rates exceed the control range of
+the constant dilation, leading to aliasing results in Fig. 5.
+To bridge the gap, we create the scale-specific mipmap
+r(x̂) from base Gaussians G. Then, we deform G into optimized Gaussians Gopt by photometric loss between the rendered image x and scale-specific mipmap r(x̂):
+Gopt = G − β∇L(x, r(x̂)),
+(4)
+where β is the learning rate. Notably, our method solves
+the aliasing essentially since the scale prior directly informs
+of the new sampling rate to address two challenges in Sec.
+3.2, instead of introducing filters to ease the issues caused
+by constant dilation. The scale-adaptive Gaussians leverage deformable attributes and distribution to fit any scale
+rendering. As a test-time adaptation method, our method
+keeps the scale consistency between 3D primitives and 2D
+pixel coverage for wide-coverage inference contexts.
+4.3. Optimization
+Illustrated in Alg. 1, we first generate the novel view x̂ by
+base Gaussians G. Then, x̂ is upsampled or downsampled
+into r(x̂) via mipmap function, serving as the pseudo-GT.
+We define the scale-aware guidance loss in adaptation as:
+L(x, r(x̂)) = ||x − r(x̂)||2 .
+primitive number K opt of Gopt is smaller than the previous
+number K. The density control in 3DGS [25] stops halfway
+through the optimization process, leaving many low opacity
+Gaussians with trivial contribution [13, 26, 33, 36]. In contrast, we keep active pruning during the whole process for
+a more compact representation, see more in supplementary
+materials. The storage size reduction by our active pruning is more obvious in zoom-out situations where the decreased spatial resolution requires fewer Gaussians to represent. What’s more, our adjustment needs merely 3% iterations compared with training from scratch. Bringing
+neither interference towards the original pipeline nor new
+hyper-parameters, our method is compatible with subsequent works like Scaffold-GS [33], shown in Tab. 1.
+(5)
+Here we use ℓ2 loss and discuss other losses in Sec. 5.3. The
+deformation from G to Gopt is finished within 1K iterations.
+Except for performance improvement, we also realize
+compact scene representation. In Alg. 1, the optimized
+Algorithm 1: Adaptive optimization of our method
+Input: base Gaussians {Gk | k = 1, . . . , K},
+viewpoints {Vj | j = 1, . . . , J}, scale N ,
+iteration S
+Output: optimized Gaussians
+opt
+{Gopt
+k | k = 1, . . . , K }
+for i = 0, ..., S do
+select vj ∈ Vj randomly
+render {Gk } to basic scale image x̂j , see Eqn.
+(2)
+construct mipmap r(x̂j ) by ×N upsampling
+(zoom-in) or × N1 downsampling (zoom-out)
+render {Gik } to new scale image xj , see Eqn.
+(2)
+optimize {Gik } = arg min{Gik } L(xj , r(x̂j ))
+if i mod 100 == 0 then
+densify or prune
+end
+end
+S+1
+return {Gopt
+}
+k } = {Gk
+Method
+NeRF [35]
+Mip-NeRF [2]
+Instant-NGP [37]
+3DGS [25]
+3DGS+EWA [25, 74]
+Scaffold-GS [33]
+Pixel-GS [72]
+Octree-GS [43]
+Analytic-Splatting [28]
+Mip-Splatting [67]
+Scaffold-Ours
+3DGS-Ours
+SSIM
+0.962
+0.970
+0.969
+0.951
+0.971
+0.953
+0.947
+0.950
+0.977
+0.977
+0.971
+0.977
+×1/2
+PSNR
+32.43
+33.31
+33.00
+27.14
+31.66
+27.48
+27.96
+27.30
+34.21
+34.00
+32.71
+34.18
+LPIPS
+0.041
+0.031
+0.033
+0.031
+0.024
+0.030
+0.032
+0.061
+0.019
+0.019
+0.026
+0.019
+SSIM
+0.964
+0.969
+0.964
+0.875
+0.959
+0.886
+0.866
+0.888
+0.977
+0.978
+0.975
+0.978
+×1/4
+PSNR
+30.29
+30.91
+29.84
+21.39
+27.82
+21.83
+22.67
+21.97
+31.49
+31.85
+32.46
+32.51
+LPIPS
+0.044
+0.036
+0.046
+0.067
+0.033
+0.061
+0.070
+0.063
+0.021
+0.019
+0.023
+0.021
+SSIM
+0.951
+0.961
+0.947
+0.763
+0.940
+0.781
+0.748
+0.787
+0.969
+0.973
+0.976
+0.976
+×1/8
+PSNR
+26.70
+27.97
+26.33
+17.59
+24.62
+18.03
+19.09
+18.15
+28.42
+28.67
+30.81
+30.64
+LPIPS
+0.067
+0.052
+0.075
+0.127
+0.047
+0.116
+0.133
+0.114
+0.031
+0.026
+0.028
+0.026
+(a) Zoom-out.
+Method
+NeRF [35]
+Mip-NeRF [2]
+NeRF-SR [51]
+3DGS [25]
+Scaffold-GS [33]
+Pixel-GS [72]
+Mip-Splatting [67]
+Scaffold-Ours
+3DGS-Ours
+SSIM
+0.921
+0.944
+0.946
+0.907
+0.770
+0.897
+0.960
+0.968
+0.964
+×2
+PSNR
+27.54
+29.36
+29.77
+23.38
+21.14
+24.95
+30.08
+30.79
+31.23
+LPIPS
+0.100
+0.057
+0.045
+0.068
+0.097
+0.070
+0.051
+0.043
+0.041
+×4
+PSNR
+25.56
+25.47
+28.07
+19.93
+17.35
+21.26
+27.12
+28.20
+28.29
+SSIM
+0.881
+0.876
+0.921
+0.832
+0.800
+0.823
+0.917
+0.936
+0.927
+LPIPS
+0.170
+0.159
+0.071
+0.128
+0.163
+0.133
+0.105
+0.078
+0.081
+SSIM
+0.832
+0.824
+0.807
+0.819
+0.886
+0.911
+0.897
+×8
+PSNR
+23.47
+18.52
+16.01
+19.69
+25.71
+26.59
+26.43
+LPIPS
+0.207
+0.153
+0.177
+0.161
+0.136
+0.153
+0.119
+(b) Zoom-in.
+Table 1. Zoom-out and zoom-in comparisons on NeRF Synthetic dataset [2]. JJJJ
+5. Experiments
+paper, [25, 28, 33, 67, 68, 72] are trained for 30K iterations,
+and [43] for 40K iterations.
+5.1. Experimental Setup
+Datasets. We conduct experiments on the NeRF Synthetic
+dataset [35] and the Mip-NeRF 360 dataset [2], measuring
+the effect of our continuous optimization approach. The
+Blender dataset has 8 synthetic objects with no background,
+which is widely used in NeRF methods. And we adopt the
+common split of 100/100/200 for training/validation/test.
+The more challenging Mip-NeRF 360 dataset [3] consists
+of 9 real-world unbounded scenes. We
+follow the split facMic_107
+tor 8 and report the average metrics over all scenes.
+Implementation Details. All the experiments are conducted on a single A100 GPU. The settings of density control, learning rate schedule and hyper-parameters are consistent with the original paper. After single-scale training,
+we regard rendering the set of Gaussians directly to different resolutions as the baseline setting following [67]. We
+also test Scaffold-GS [33] with our adaptation to illustrate
+the plugin effects of our method.
+chair_36
+Evaluation metrics. The rendering
+quality at each viewship_1
+point is evaluated by Structural Similarity Index Measure
+(SSIM), Peak Signal-to-Noise Ratio (PSNR) and LPIPS
+[71]. Higher SSIM and PSNR values and lower LPIPS
+scores indicate better-rendering results.
+Baselines. We take 3DGS [25], Scaffold-GS [33] and PixelGS [72] as the baseline Gaussian Splatting models. In
+addition, Mip-Splatting [67], Analytic-Splatting [28] and
+Octree-GS [43] are treated as SOTA anti-aliasing methods
+based on 3DGS. We also test the performance of GOF [68],
+since it inherits the anti-aliasing functions from [67]. 3DGS
++ EWA [74] replaces the original dilation with the EWA filter [74], introduced in [67]. Following the setting in their
+3DGS
+Mip-Splatting
+Ours
+GT
+x2
+x4
+x8
+Figure 6. Comparison of zoom-in results on NeRF Synthetic
+dataset [2].
+Method
+Mip-NeRF 360 [3]
+Instant-NGP [37]
+zip-NeRF [4]
+3DGS [25]
+Octree-GS [43]
+Analytic-Splatting [28]
+Mip-Splatting [67]
+GOF [68]
+3DGS-Ours
+SSIM
+0.864
+0.712
+0.892
+0.774
+0.793
+0.713
+0.812
+0.803
+0.854
+×1/2
+PSNR
+29.19
+25.23
+30.00
+26.66
+27.13
+25.70
+27.44
+27.17
+28.57
+SSIM
+0.727
+0.639
+0.696
+0.740
+0.775
+0.808
+0.802
+0.799
+×2
+PSNR
+25.18
+24.76
+23.27
+23.49
+25.90
+27.39
+27.05
+27.17
+LPIPS
+0.136
+0.251
+0.099
+0.291
+0.261
+0.350
+0.233
+0.251
+0.156
+SSIM
+0.912
+0.809
+0.933
+0.721
+0.805
+0.791
+0.799
+0.825
+0.828
+×1/4
+PSNR
+30.45
+26.84
+31.57
+22.87
+26.44
+27.04
+27.16
+27.61
+28.34
+LPIPS
+0.077
+0.142
+0.056
+0.241
+0.199
+0.216
+0.209
+0.185
+0.199
+SSIM
+0.931
+0.877
+0.954
+0.763
+0.784
+0.880
+0.744
+0.838
+0.854
+×1/8
+PSNR
+30.86
+28.42
+32.52
+25.36
+23.92
+29.44
+27.03
+27.21
+28.57
+LPIPS
+0.058
+0.092
+0.037
+0.250
+0.182
+0.106
+0.326
+0.155
+0.154
+×4
+PSNR
+24.16
+24.27
+20.87
+20.69
+23.70
+26.47
+26.17
+26.22
+LPIPS
+0.370
+0.445
+0.421
+0.394
+0.369
+0.305
+0.313
+0.302
+SSIM
+0.706
+0.698
+0.559
+0.603
+0.643
+0.765
+0.758
+0.761
+×8
+PSNR
+24.10
+24.27
+20.27
+19.21
+22.81
+26.22
+25.90
+25.91
+LPIPS
+0.428
+0.475
+0.494
+0.477
+0.449
+0.392
+0.411
+0.399
+(a) Zoom-out.
+Method
+Mip-NeRF 360 [3]
+Instant-NGP [37]
+zip-NeRF [4]
+3DGS [25]
+3DGS+EWA [25, 74]
+Mip-Splatting [67]
+GOF [68]
+3DGS-Ours
+LPIPS
+0.260
+0.367
+0.257
+0.243
+0.236
+0.205
+0.206
+0.209
+SSIM
+0.670
+0.626
+0.565
+0.619
+0.667
+0.754
+0.744
+0.744
+(b) Zoom-in.
+Table 2. Zoom-out and zoom-in comparisons on Mip-NeRF 360 dataset [3].
+Mip-Splatting
+Ours
+GT
+x 1/8
+x 1/4
+x 1/2
+x 1/8
+x 1/4
+x 1/2
+3DGS
+Figure 7. Comparison of zoom-out results on Mip-NeRF 360 dataset [3].
+5.2. Comparisons with State-of-the-Art
+Zoom-out. Following settings introduced by [67], the baseline model is trained on full-resolution (x1) images and rendered at different resolutions (×1/2, ×1/4, ×1/8) to simulate the zoom-out effect. We derive renderings at the same
+resolution with respect to training, then downsample them
+into zoom-out pseudo-GT. Since downsampling from HR
+images involves minimal loss of information, this process
+often preserves most of the essential details of the original scene representation. The results in Tab. 1a and Tab.
+2a show the improvement after our dynamic optimization.
+The rendering results at ×1/2, ×1/4, ×1/8 in Fig. 7 show
+the zoom-out comparison of 3DGS, Mip-Splatting and ours.
+The cropped wheel shown in Fig. 7 rendered by 3DGS [25]
+is dilated with thick spokes, most severe at ×1/8, and filters in Mip-Splatting only mitigate the dilation to some extent. The result after our adaptation achieves the best visual
+effects and improves PSNR by 5dB compared with 3DGS
+[25]. Although Scaffold-GS [33] and Pixel-GS [72] improve the full resolution rendering quality with a revised
+primitive growth strategy, the lack of multi-scale deformation compromises their robustness for unseen settings. Besides, our optimization for zoom-out converges faster than
+for zoom-in from Fig. 8a, and shows more remarkable improvement on Blender dataset. We ascribe the discrepancies
+in lifting effects to the quality of pseudo-GT. As Blender
+PSNR (dB)
+Zoom-out
+Zoom-in
+dataset consists of isolated objects without background, the
+supervision from pseudo-GT is intensive and of high quality
+during the adaptation stage. In comparison, the pseudo-GT
+provided for Mip-NeRF 360 has limited quality to cover the
+correct scene information and provides weaker guidance for
+adaptive optimization.
+Number of Primitives. We find that decreasing the number
+of splatted Gaussians in a certain range doesn’t influence the
+rendering performance. Given a trained 3DGS model, rendering merely high-opacity primitives leads to comparable
+performance while up to 25% reduction on the number of
+splatted primitives in Fig. 9. In Mip-Splatting [67], fewer
+primitives yield even slightly better results, which further
+proves the redundancy. Based on these analyses, we keep
+active pruning throughout optimization.
+PSNR: 27.25
+Gaussians: 4730240
+Loss Functions. Originally, 3DGS takes SSIM and L1-loss
+weighted at 0.8 and 0.2 for training [25], while it is simplified to L2 loss in our optimization. We illustrate the metrics
+using different loss functions in Fig. 8b.
+25
+22
+22
+x1/2
+x1/4
+x2
+x4
+x8
+19
+0
+0.1k
+0.5k
+0
+1k
+0.1k
+0.5k
+1k
+(a) Training Iterations (PSNR in dB).
+30
+29
+L1
+28.57
+SSIM
+L1+SSIM
+28.34
+L2
+L2+SSIM
+28.57
+29
+L1
+SSIM
+L1+SSIM
+L2
+3DGS
+PSNR: 27.49
+Gaussians: 3769591
+Mip-Splatting
+Mip-Splatting*
+3DGS*
+View Consistency. Although we adopt SwinIR [27] to construct mipmap independently for each image without scenelevel fine-tuning, the injected appearance is further refined
+within the 3D model for view-consistency, see Fig. 10.
+L2+SSIM
+27.17
+27
+27
+26
+26
+25
+26.22
+25.91
+(a) 3DGS-LR
+x1/8
+x2
+x4
+x8
+(b) Loss Functions (PSNR in dB).
+Figure 8. Ablation on training iterations and loss functions (MipNeRF 360 dataset [3]).
+Method
+3DGS [25]
+3DGS-Ours
+Scaffold-GS [33]
+Mip-Splatting [67]
+Zoom-out Zoom-in
+2h30m
+8m
++40s
++75s
+3h7m
+12m
+2h40m r_74 8m
+Table 3. Comparison of training time on bicycle scene. (Ours:
+average time over three scales.)
+(c) Ours
+(b) SwinIR
+(d) GT
+Figure 10. Our method refines view-consistency in 3D model.
+24
+25
+x1/4
+PSNR: 27.32
+Gaussians: 4637644
+28
+28
+x1/2
+PSNR: 27.13
+Gaussians: 3629451
+Figure 9. Results of selective rendering on bicycle scene trained at
+×1/8. (*: selective rendering with opacity> 0.01)
+8872
+x1/8
+19
+3DGS [25]
+22.60
+19.36
+5.4. Further Study
+Training Iterations. Starting from trained Gaussians, our
+optimization needs much less training time to converge. As
+shown in Fig. 8a, our method converges within 0.5K iterations for zoom-out and 1K iterations for zoom-in, both on
+the order of seconds, see Tab. 3. In comparison, the filter update in Mip-Splatting [67] needs more time and is not
+compatible with 3DGS variations, e.g. [33].
+25
++syn.
+30.24
+22.67
+Optimization Views. As shown in Tab. 4, the performance
+drops when using training views (+train) because it focuses
+on known-view fitting instead of novel views. We choose
+test views to retain the original novel-view performance and
+further improve the zooming quality. As a test-time learning
+strategy, our method also works with synthetic views sampled from the estimated camera trajectory. Here we report
+optimization results with 50 synthetic views (+syn.)
+5.3. Ablation Study
+28
++train
+29.80
+22.01
+Table 4. Comparison of optimization views on bicycle scene.
+Zoom-in. The zoom-in baseline models are trained on
+×1/8 downsampled images and rendered at ×2, ×4, ×8.
+As shown in Tab.2b and 1b, our method improves the zoomin rendering quality of both 3DGS [25] and Schaffold-GS
+[33]. As one of the SOTA methods on super-resolution,
+SwinIR [27] provides HR pseudo-GT with abundant details
+for zoom-in deformation. In Fig. 6, zoom-in rendering of
+3DGS exhibits needle-like aliasing due to intrinsic shrinkage bias, and Mip-Splatting [67] faces a high-frequency
+trade-off. Our method adjusts the Gaussians into suitable
+pixel coverage and generates novel views with high fidelity.
+28
+Ours+test
+30.84
+24.23
+Application in Dynamic Scenes. Our method is applicable
+in dynamic 3DGS models for anti-aliasing rendering. Fig.
+11 shows our plug-in effect in [61] with no disturbance on
+the deformation network.
+Zoom-out
+Yang et al. (x1)
+Ours (x1/8)
+Yang et al. (x1/8)
+Figure 11. Our method is applicable in dynamic scenes, e.g. to
+solve zoom-out dilation in [61].
+29.72
+30.05
+29.72
+30.05
+6. Conclusion
+We present a unified method to fit scale-adaptive Gaussians for alias-free novel view synthesis.
+Given an
+unseen scale at test-time, the designed mipmap-like
+pseudo-GT allows adaptive adjustment of 3D Gaussians
+consistent with the zoom factor. Our method involves
+minimal modification towards the 3DGS pipeline and
+is applicable for any pre-trained Gaussian Splatting
+model as a plug-in module to mitigate aliasing for
+out-of-distribution generalization. Finally, our method
+converges on the order of seconds and helps to remove primitive redundancy, maintaining the fine scene
+representation without sacrificing real-time efficiency.
+References
+[1] Jeongmin Bae, Seoha Kim, Youngsik Yun, Hahyun Lee, Gun
+Bang, and Youngjung Uh. Per-gaussian embedding-based
+deformation for deformable 3d gaussian splatting. In ECCV,
+2024. 3
+[2] Jonathan T Barron, Ben Mildenhall, Matthew Tancik, Peter
+Hedman, Ricardo Martin-Brualla, and Pratul P Srinivasan.
+Mip-nerf: A multiscale representation for anti-aliasing neural radiance fields. In CVPR, pages 5855–5864, 2021. 1, 2,
+3, 6
+[3] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P
+Srinivasan, and Peter Hedman. Mip-nerf 360: Unbounded
+anti-aliased neural radiance fields. In CVPR, pages 5470–
+5479, 2022. 1, 2, 6, 7, 8
+[4] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P
+Srinivasan, and Peter Hedman. Zip-nerf: Anti-aliased gridbased neural radiance fields. In ICCV, 2023. 3, 7
+[5] Samuel Rota Bulò, Lorenzo Porzi, and Peter Kontschieder.
+Revising densification in gaussian splatting. arXiv preprint
+arXiv:2404.06109, 2024. 3
+[6] David Charatan, Sizhe Li, Andrea Tagliasacchi, and Vincent
+Sitzmann. pixelsplat: 3d gaussian splats from image pairs for
+scalable generalizable 3d reconstruction. In CVPR, 2024. 3
+[7] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and
+Hao Su. Tensorf: Tensorial radiance fields. In ECCV, pages
+333–350. Springer, 2022. 2
+[8] Guikun Chen and Wenguan Wang. A survey on 3d gaussian
+splatting. arXiv preprint arXiv:2401.03890, 2024. 1, 2
+[9] Yuedong Chen, Haofei Xu, Chuanxia Zheng, Bohan Zhuang,
+Marc Pollefeys, Andreas Geiger, Tat-Jen Cham, and Jianfei
+Cai. Mvsplat: Efficient 3d gaussian splatting from sparse
+multi-view images. In ECCV, 2024. 3
+[10] Zilong Chen, Feng Wang, and Huaping Liu. Text-to-3d using
+gaussian splatting. arXiv preprint arXiv:2309.16585, 2023.
+1
+[11] Jaeyoung Chung, Jeongtaek Oh, and Kyoung Mu Lee.
+Depth-regularized optimization for 3d gaussian splatting in
+few-shot images. arXiv preprint arXiv:2311.13398, 2023. 3
+[12] Lue Fan, Yuxue Yang, Minxing Li, Hongsheng Li, and
+Zhaoxiang Zhang. Trim 3d gaussian splatting for accurate
+geometry representation. arXiv preprint arXiv:2406.07499,
+2024. 3
+[13] Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia Xu, and Zhangyang Wang. Lightgaussian: Unbounded
+3d gaussian compression with 15x reduction and 200+ fps.
+arXiv preprint arXiv:2311.17245, 2023. 5
+[14] Ben Fei, Jingyi Xu, Rui Zhang, Qingyuan Zhou, Weidong
+Yang, and Ying He. 3d gaussian as a new vision era: A
+survey. arXiv preprint arXiv:2402.07181, 2024. 1
+[15] Qijun Feng, Zhen Xing, Zuxuan Wu, and Yu-Gang Jiang.
+Fdgaussian: Fast gaussian splatting from single image
+via geometric-aware diffusion model.
+arXiv preprint
+arXiv:2403.10242, 2024. 1
+[16] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong
+Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels:
+Radiance fields without neural networks. In CVPR, pages
+5501–5510, 2022. 2
+[17] Sara Fridovich-Keil, Giacomo Meanti, Frederik Rahbæk
+Warburg, Benjamin Recht, and Angjoo Kanazawa. K-planes:
+Explicit radiance fields in space, time, and appearance. In
+CVPR, pages 12479–12488, 2023. 2
+[18] Zhiyang Guo, Wengang Zhou, Li Li, Min Wang, and
+Houqiang Li. Motion-aware 3d gaussian splatting for
+efficient dynamic scene reconstruction. arXiv preprint
+arXiv:2403.11447, 2024. 3
+[19] Abdullah Hamdi, Luke Melas-Kyriazi, Guocheng Qian, Jinjie Mai, Ruoshi Liu, Carl Vondrick, Bernard Ghanem, and
+Andrea Vedaldi. Ges: Generalized exponential splatting for
+efficient radiance field rendering. In CVPR, 2024. 3
+[20] Dongting Hu, Zhenkai Zhang, Tingbo Hou, Tongliang Liu,
+Huan Fu, and Mingming Gong. Multiscale representation
+for real-time anti-aliasing neural rendering. In CVPR, pages
+17772–17783, 2023. 2
+[21] Ronghang Hu, Nikhila Ravi, Alexander C Berg, and Deepak
+Pathak. Worldsheet: Wrapping the world in a 3d sheet for
+view synthesis from a single image. In ICCV, pages 12528–
+12537, 2021. 2
+[22] Wenbo Hu, Yuling Wang, Lin Ma, Bangbang Yang, Lin Gao,
+Xiao Liu, and Yuewen Ma. Tri-miprf: Tri-mip representation
+for efficient anti-aliasing neural radiance fields. In ICCV,
+pages 19774–19783, 2023. 2
+[23] Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and
+Shenghua Gao. 2d gaussian splatting for geometrically accurate radiance fields. In ACM TOG, pages 1–11, 2024. 3
+[24] Xudong Huang, Wei Li, Jie Hu, Hanting Chen, and Yunhe
+Wang. Refsr-nerf: Towards high fidelity and super resolution
+view synthesis. In CVPR, pages 8244–8253, 2023. 3
+[25] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler,
+and George Drettakis. 3d gaussian splatting for real-time
+radiance field rendering. In ACM TOG, 2023. 1, 2, 3, 4, 5, 6,
+7, 8
+[26] Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko,
+and Eunbyung Park. Compact 3d gaussian representation for
+radiance field. arXiv preprint arXiv:2311.13681, 2023. 5
+[27] Jingyun Liang, Jiezhang Cao, Guolei Sun, Kai Zhang, Luc
+Van Gool, and Radu Timofte. Swinir: Image restoration using swin transformer. In CVPR, pages 1833–1844, 2021. 4,
+8
+[28] Zhihao Liang, Qi Zhang, Wenbo Hu, Ying Feng, Lei Zhu,
+and Kui Jia. Analytic-splatting: Anti-aliased 3d gaussian
+splatting via analytic integration. In ECCV, 2024. 1, 2, 3, 6,
+7
+[29] Chien-Yu Lin, Qichen Fu, Thomas Merth, Karren Yang, and
+Anurag Ranjan. Fastsr-nerf: Improving nerf efficiency on
+consumer devices with a simple super-resolution pipeline. In
+WACV, pages 6036–6045, 2024. 3
+[30] Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and
+Christian Theobalt. Neural sparse voxel fields. In NeurIPS,
+pages 15651–15663, 2020. 2
+[31] Ruoshi Liu, Rundi Wu, Basile Van Hoorick, Pavel Tokmakov, Sergey Zakharov, and Carl Vondrick. Zero-1-to-3:
+Zero-shot one image to 3d object. In CVPR, pages 9298–
+9309, 2023. 1
+[32] Yuan Liu, Cheng Lin, Zijiao Zeng, Xiaoxiao Long, Lingjie
+Liu, Taku Komura, and Wenping Wang. Syncdreamer: Generating multiview-consistent images from a single-view image. arXiv preprint arXiv:2309.03453, 2023. 1
+[33] Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin
+Wang, Dahua Lin, and Bo Dai. Scaffold-gs: Structured 3d
+gaussians for view-adaptive rendering. In CVPR, 2024. 3, 5,
+6, 7, 8
+[34] Luke Melas-Kyriazi, Iro Laina, Christian Rupprecht, and
+Andrea Vedaldi. Realfusion: 360deg reconstruction of any
+object from a single image. In CVPR, pages 8446–8455,
+2023. 1
+[35] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik,
+Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. In ECCV, 2020. 1, 2, 6
+[36] Wieland Morgenstern, Florian Barthel, Anna Hilsmann, and
+Peter Eisert. Compact 3d scene representation via selforganizing gaussian grids. arXiv preprint arXiv:2312.13299,
+2023. 5
+[37] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. In ACM TOG, 2022. 1, 2, 6, 7
+[38] Seungtae Nam, Daniel Rho, Jong Hwan Ko, and Eunbyung
+Park. Mip-grid: Anti-aliased grid representations for neural
+radiance fields. In NeurIPS, 2024. 2
+[39] Ben Poole, Ajay Jain, Jonathan T Barron, and Ben Mildenhall. Dreamfusion: Text-to-3d using 2d diffusion. ICLR,
+2023. 1
+[40] Charles R Qi, Hao Su, Kaichun Mo, and Leonidas J Guibas.
+Pointnet: Deep learning on point sets for 3d classification
+and segmentation. In CVPR, pages 652–660, 2017. 2
+[41] Zhiyin Qian, Shaofei Wang, Marko Mihajlovic, Andreas
+Geiger, and Siyu Tang. 3dgs-avatar: Animatable avatars via
+deformable 3d gaussian splatting. In CVPR, pages 5020–
+5030, 2024. 3
+[42] Jiawei Ren, Liang Pan, Jiaxiang Tang, Chi Zhang, Ang Cao,
+Gang Zeng, and Ziwei Liu. Dreamgaussian4d: Generative 4d gaussian splatting. arXiv preprint arXiv:2312.17142,
+2023. 1
+[43] Kerui Ren, Lihan Jiang, Tao Lu, Mulin Yu, Linning Xu,
+Zhangkai Ni, and Bo Dai. Octree-gs: Towards consistent
+real-time rendering with lod-structured 3d gaussians. arXiv
+preprint arXiv:2403.17898, 2024. 3, 4, 6, 7
+[44] Gernot Riegler and Vladlen Koltun. Free view synthesis. In
+ECCV. Springer, 2020. 1
+[45] Yuan Shen, Duygu Ceylan, Paul Guerrero, Zexiang Xu,
+Niloy J Mitra, Shenlong Wang, and Anna Früstück. Supergaussian: Repurposing video models for 3d super resolution.
+In ECCV, 2024. 3
+[46] Yujiao Shi, Hongdong Li, and Xin Yu. Self-supervised visibility learning for novel view synthesis. In CVPR, pages
+9675–9684, 2021. 1
+[47] Xiaowei Song, Jv Zheng, Shiran Yuan, Huan-ang Gao, Jingwei Zhao, Xiang He, Weihao Gu, and Hao Zhao. Sags: Scale-adaptive gaussian splatting for training-free antialiasing. arXiv preprint arXiv:2403.19615, 2024. 4
+[48] Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct voxel
+grid optimization: Super-fast convergence for radiance fields
+reconstruction. In CVPR, pages 5459–5469, 2022. 2
+[49] Jiaxiang Tang, Jiawei Ren, Hang Zhou, Ziwei Liu, and Gang
+Zeng. Dreamgaussian: Generative gaussian splatting for efficient 3d content creation. In ICLR, 2023. 1
+[50] Jiaxiang Tang, Zhaoxi Chen, Xiaokang Chen, Tengfei Wang,
+Gang Zeng, and Ziwei Liu. Lgm: Large multi-view gaussian model for high-resolution 3d content creation. In ECCV,
+2024. 3
+[51] Chen Wang, Xian Wu, Yuan-Chen Guo, Song-Hai Zhang,
+Yu-Wing Tai, and Shi-Min Hu. Nerf-sr: High quality neural
+radiance fields using supersampling. In ACM MM, pages
+6445–6454, 2022. 3, 6
+[52] Jinglu Wang, Bo Sun, and Yan Lu. Mvpnet: Multi-view
+point regression networks for 3d object reconstruction from
+a single image. In AAAI, pages 8949–8956, 2019. 2
+[53] Qianqian Wang, Zhicheng Wang, Kyle Genova, Pratul P
+Srinivasan, Howard Zhou, Jonathan T Barron, Ricardo
+Martin-Brualla, Noah Snavely, and Thomas Funkhouser. Ibrnet: Learning multi-view image-based rendering. In CVPR,
+pages 4690–4699, 2021. 1
+[54] Christopher Wewer, Kevin Raj, Eddy Ilg, Bernt Schiele, and
+Jan Eric Lenssen. latentsplat: Autoencoding variational
+gaussians for fast generalizable 3d reconstruction. arXiv
+preprint arXiv:2403.16292, 2024. 3
+[55] Olivia Wiles, Georgia Gkioxari, Richard Szeliski, and Justin
+Johnson. Synsin: End-to-end view synthesis from a single
+image. In CVPR, pages 7467–7477, 2020. 2
+[56] Renlong Wu, Zhilu Zhang, Yu Yang, and Wangmeng Zuo.
+Dual-camera smooth zoom on mobile phones. In ECCV,
+2024. 3
+[57] Dejia Xu, Ye Yuan, Morteza Mardani, Sifei Liu, Jiaming
+Song, Zhangyang Wang, and Arash Vahdat. Agg: Amortized generative 3d gaussians for single image to 3d. arXiv
+preprint arXiv:2401.04099, 2024. 3
+[58] Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin Shu,
+Kalyan Sunkavalli, and Ulrich Neumann. Point-nerf: Pointbased neural radiance fields. In CVPR, pages 5438–5448,
+2022. 1, 2
+[59] Zhiwen Yan, Weng Fei Low, Yu Chen, and Gim Hee Lee.
+Multi-scale 3d gaussian splatting for anti-aliased rendering.
+In CVPR, 2024. 1, 3, 4
+[60] Chen Yang, Sikuang Li, Jiemin Fang, Ruofan Liang, Lingxi
+Xie, Xiaopeng Zhang, Wei Shen, and Qi Tian. Gaussianobject: Just taking four images to get a high-quality 3d object
+with gaussian splatting. arXiv preprint arXiv:2402.10259,
+2024. 3
+[61] Ziyi Yang, Xinyu Gao, Wen Zhou, Shaohui Jiao, Yuqing
+Zhang, and Xiaogang Jin. Deformable 3d gaussians for highfidelity monocular dynamic scene reconstruction. In CVPR,
+2024. 3, 8
+[62] Zongxin Ye, Wenyu Li, Sidun Liu, Peng Qiao, and Yong
+Dou. Absgs: Recovering fine details in 3d gaussian splatting. In ACM MM, 2024. 3
+[63] Taoran Yi, Jiemin Fang, Guanjun Wu, Lingxi Xie, Xiaopeng
+Zhang, Wenyu Liu, Qi Tian, and Xinggang Wang. Gaussiandreamer: Fast generation from text to 3d gaussian splatting
+with point cloud priors. arXiv preprint arXiv:2310.08529,
+2023. 1
+[64] Wang Yifan, Shihao Wu, Hui Huang, Daniel Cohen-Or, and
+Olga Sorkine-Hornung. Patch-based progressive 3d point set
+upsampling. In CVPR, pages 5958–5967, 2019. 2, 3
+[65] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa.
+pixelnerf: Neural radiance fields from one or few images. In
+CVPR, pages 4578–4587, 2021. 1
+[66] Xiqian Yu, Hanxin Zhu, Tianyu He, and Zhibo Chen. Gaussiansr: 3d gaussian super-resolution with 2d diffusion priors.
+arXiv preprint arXiv:2406.10111, 2024. 3
+[67] Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and
+Andreas Geiger. Mip-splatting: Alias-free 3d gaussian splatting. arXiv preprint arXiv:2311.16493, 2023. 1, 3, 4, 6, 7,
+8
+[68] Zehao Yu, Torsten Sattler, and Andreas Geiger. Gaussian
+opacity fields: Efficient and compact surface reconstruction in unbounded scenes. arXiv preprint arXiv:2404.10772,
+2024. 3, 6, 7
+[69] Bowen Zhang, Yiji Cheng, Jiaolong Yang, Chunyu Wang,
+Feng Zhao, Yansong Tang, Dong Chen, and Baining Guo.
+Gaussiancube: Structuring gaussian splatting using optimal transport for 3d generative modeling. arXiv preprint
+arXiv:2403.19655, 2024. 3
+[70] Jiahui Zhang, Fangneng Zhan, Muyu Xu, Shijian Lu, and
+Eric Xing. Fregs: 3d gaussian splatting with progressive frequency regularization. In CVPR, pages 21424–21433, 2024.
+3
+[71] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman,
+and Oliver Wang. The unreasonable effectiveness of deep
+features as a perceptual metric. In CVPR, pages 586–595,
+2018. 6
+[72] Zheng Zhang, Wenbo Hu, Yixing Lao, Tong He, and Hengshuang Zhao. Pixel-gs: Density control with pixel-aware
+gradient for 3d gaussian splatting. In ECCV, 2024. 3, 6, 7
+[73] Tinghui Zhou, Shubham Tulsiani, Weilun Sun, Jitendra Malik, and Alexei A Efros. View synthesis by appearance flow.
+In ECCV, pages 286–301, 2016. 1
+[74] Matthias Zwicker, Hanspeter Pfister, Jeroen Van Baar, and
+Markus Gross. Ewa volume splatting. In Proceedings Visualization, 2001. VIS’01., pages 29–538, 2001. 1, 3, 6, 7

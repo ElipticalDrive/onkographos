@@ -1,0 +1,1322 @@
+DOI: 10.1111/cgf.70636
+Pacific Graphics 2026
+Y. He, N. Thürey, and L. Liu
+(Guest Editors)
+COMPUTER GRAPHICS forum
+Volume 45 (2026), Number 7
+HLoD: Screen-Space Hierarchical Level-of-Detail
+Traversal for 3D Gaussian Splatting
+Jan U. Müller1,2
+, Jakob Sommer1
+and Reinhard Klein1,2
+1 University of Bonn, Germany
+2 Lamarr Institute for Machine Learning and Artificial Intelligence, Germany
+Edges are collapsed by comparing pixel-projection threshold to projected pixel-size.
+Explicit Gaussian forest hierarchy is jointly
+optimized.
+T = 3 (Fine Detail)
+T =9
+T = 15
+T = 21 (Coarse Detail)
+5.9 ms 27.6 PSNR
+5.1 ms 27.3 PSNR
+4.3 ms 26.6 PSNR
+3.9 ms 25.9 PSNR
+Figure 1: HLoD jointly optimizes an explicit hierarchy of Gaussians, enabling smooth, adaptive level-of-detail transitions based on pixelprojection thresholds. Fine details are selectively collapsed into coarser parents, scaling performance dynamically with scene complexity and
+user controls. Size distribution adapts to local details which permits large Gaussians at high levels (red) in uniform background regions.
+Abstract
+While 3D Gaussian Splatting (3DGS) provides high-quality novel-view synthesis, its lack of an inherent hierarchy forces
+rasterization effort to scale with fine scene details rather than perceptually visible features. Existing Level of Detail (LoD)
+approaches typically address this by training discrete levels as independent models, relying on fixed selection thresholds that do
+not ensure smooth perceptual transitions. We introduce Hierarchical Level of Detail (HLoD) for 3DGS, a method that jointly
+optimizes Gaussian levels into a single, explicit parent-child hierarchy. To maintain a valid tree topology during adaptive density
+control, HLoD performs hierarchy-aware pruning and parent-child regularization, combined with scale safeguards to ensure
+spatial consistency across frequency bands. Unlike prior methods, HLoD avoids fixed size thresholds per level, preserving the
+ability to assign point density based on local geometric detail. At runtime, an efficient GPU traversal dynamically collapses
+fine sibling groups into their trained coarse parents based on local pixel-projection thresholds. Crucially, by integrating this
+traversal directly into the optimization process alongside strategies to balance photometric supervision between fine details and
+coarse nodes, HLoD maintains perceptually gradual LoD transitions that remain stable under inhomogeneous point distributions.
+Our evaluation demonstrates that HLoD achieves competitive reconstruction quality while enabling continuous control over the
+performance-quality trade-off along two axes: dynamically adjusting pixel-projection thresholds for spatially local LoD, and
+selectively rendering hierarchical subsets for adaptive memory scaling. Achieving these seamless transitions requires minimal
+traversal overhead while allowing overall performance to scale dynamically with scene complexity. Finally, we establish that
+joint optimization is structurally essential, as post-hoc hierarchical assignments fundamentally fail to preserve visual fidelity.
+CCS Concepts
+• Computing methodologies → Point-based models; Visibility; Reconstruction; Volumetric models;
+© 2026 The Author(s). Computer Graphics Forum published by Eurographics - The European
+Association for Computer Graphics and John Wiley & Sons Ltd.
+This is an open access article under the terms of the Creative Commons Attribution License, which
+permits use, distribution and reproduction in any medium, provided the original work is properly
+cited.
+CGF 45-2 | e70636
+https://www.eg.org
+https://diglib.eg.org
+2 of 13
+J. Müller, J. Sommer, & R. Klein / HLoD-GS
+1. Introduction
+Explicit radiance fields such as 3D Gaussian Splatting [KKL∗ 23]
+(3DGS) provide high-quality real-time view synthesis, but their
+primitive sets are largely unstructured. Adaptive density control
+places Gaussians where the photometric loss requires them, yet
+the final model does not record which fine primitives refine which
+coarser scene elements. This limits controllable level-of-detail (LoD)
+rendering: a standard 3DGS model can be rendered quickly, but it
+does not directly provide a local mechanism for replacing a group
+of fine splats by a compatible coarse representative.
+Existing Gaussian LoD methods address this limitation by training discrete, scale-bounded representations. These levels provide
+useful operating points for different budgets, but they are typically
+stored as independent models. In particular, FLoD [SCSU25] trains
+a coarse-to-fine sequence of scale-constrained Gaussian sets, yet the
+resulting levels do not contain explicit parent-child relationships.
+Consequently, LoD selection is driven by global model choices or
+broad camera-distance bands. Such strategies can be efficient, but
+they cannot express a local screen-space decision in which one region of a view remains fine while another region of the same view
+is replaced by trained coarse ancestors.
+We present HLoD (Hierarchical Level of Detail), a training and
+rendering pipeline that demonstrates how scale-bounded 3DGS levels can be jointly trained into a single explicit parent-child hierarchy.
+The goal is to adaptively reduce the number of rendered Gaussians
+through local hierarchical substitution, a capability absent in vanilla
+3DGS and independent-level LoD methods. At render time, HLoD
+traverses the tree from fine to coarse and collapses a complete sibling
+group to its trained parent when all children project below a pixel
+threshold. The active representation is therefore selected per group
+in screen-space rather than per camera in world space. Homogeneous or low-footprint regions, such as flat walls, floors, or smooth
+background areas, can be represented by larger coarse Gaussians,
+while foreground structures, silhouettes, foliage, fabric, and other
+high-frequency details remain at finer levels within the same view,
+which is illustrated by LoD heatmaps. Unlike the depth-ordered
+bands of distance-based FLoD [SCSU25], HLoD forms spatially interleaved hierarchy cuts governed by local projected structure rather
+than global camera distance.
+Maintaining such a hierarchy during optimization is non-trivial.
+Adaptive density control freely clones, splits, prunes, and moves
+primitives to reduce photometric error, whereas a traversable hierarchy requires stable structural relationships between coarse parents and fine descendants. HLoD addresses this tension through an
+append-only training schedule that keeps all previously optimized
+levels live while newly spawned Gaussians store explicit parent
+links and birth-level tags. Stochastic rendering paths that either restrict traversal to the current level or temporarily cap the hierarchy
+ensure that both newly created fine primitives and coarser collapse
+parents receive photometric supervision in the roles they will later
+play at inference. Hierarchy-aware density control, together with a
+scale-upper hinge and a parent-child Mahalanobis regularizer, helps
+preserve geometric compatibility under densification and pruning.
+Shifting from global distance bands to local screen-space adaptivity introduces a fundamental trade-off between structural flexibility
+and rendering dynamics. By design, HLoD maintains fine primitives
+whenever locally required, which naturally yields higher active primitive counts than aggressive global selection. Additionally, structural
+simplification does not strictly guarantee proportional speedups:
+replacing a dense cluster of small children with a broad coarse
+ancestor can increase tile overdraw during rasterization. The resulting performance benefits are therefore scene-dependent. While our
+streamlined CUDA traversal provides practical speed and memory
+gains on several indoor scenes, expansive outdoor scenes can become bottlenecked by rasterization overhead. Ultimately, HLoD
+serves as a capability-driven representation that trades raw uniform
+speed for granular, screen-space LoD control.
+Across a set of real-world captures, HLoD preserves high-fidelity
+reconstruction quality while exposing spatially local, multi-level
+active sets within a single model. Our evaluations demonstrate that
+this structure must be explicitly learned, as heuristic post-training
+assignments of parent-child links severely degrade image quality.
+Furthermore, by evaluating cumulative prefixes of the hierarchy, we
+show that each appended level contributes usable detail. This smooth
+progression from valid coarse approximations to high-quality final
+renders confirms our representation as a effective cumulative hierarchy. Ultimately, we demonstrate that scale-bounded Gaussian LoD
+levels can form a coherent, traversable hierarchy, enabling local
+screen-space replacement decisions unavailable to vanilla 3DGS
+and independent-level LoD methods. Our contributions are:
+• An explicit, traversable hierarchy for 3DGS that enables local
+screen-space substitution. By collapsing fine primitives to their
+coarse ancestors based on projected size, intermediate levels provide coherent quality-budget tradeoffs that are not achieved by
+post-training assignments.
+• A fine-to-coarse traversal mechanism integrated directly into the
+training process. By balancing photometric supervision between
+hierarchy levels, it generates spatially mixed active sets based on
+local geometric complexity rather than global camera distance.
+• A training schedule using hierarchy-aware density control in
+combination with scale parent-child distance regluarisation to
+maintain valid hierarchy under adaptive densification and pruning.
+The code of our work is available at https://github.com/
+serio42/hlod-gs.
+2. Related Work
+Structured Gaussian Representations. 3DGS [KKL∗ 23] stores
+anisotropic Gaussians rendered via front-to-back alpha compositing. While its adaptive density control places detail where photometric loss demands it, the final primitive set remains structurally
+flat and unordered with respect to later LoD selection. ScaffoldGS [LYX∗ 24] replaces independent primitives with anchors that
+decode small sets of view-adaptive neural Gaussians; however, LoD
+remains implicit in learned anchor activation rather than forming
+a persistent, traversable hierarchy. A parallel direction improves
+the training-time geometry of primitive sets. Lyu et al. [LTC∗ 26]
+introduce structure-aware anisotropic splitting driven by a per-axis
+frequency-violation metric. While this resolves under-sampled regions earlier, the resulting structure remains flat and lacks the topological relationships required for dynamic LoD collapse.
+To suppress the uncontrolled geometric drift that arises un© 2026 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+J. Müller, J. Sommer, & R. Klein / HLoD-GS
+der purely photometric optimization, [XWB26] introduce anchorconstrained densification (ACD), which uniformly bounds the displacement and radius of newly spawned child Gaussians relative to
+stratified seed-point anchors. While both ACD and HLoD’s Mahalanobis family regularizer prevent descendants from drifting outside
+the support of their parent structures, their mechanisms differ. ACD
+applies a uniform hard constraint during the densification step. In
+contrast, the Mahalanobis hinge in HLoD serves as a soft geometric
+loss that specifically anchors each descendant to its oldest LoD-1
+ancestor’s ellipsoid. This explicit regularization preserves the parentchild spatial proximity strictly required to make coherent, dynamic
+tree-traversal decisions at runtime.
+Discrete Gaussian LoD. FLoD [SCSU25] is the most direct predecessor to our work. It trains a sequence of Gaussian levels with
+specific scale bounds and combines them post-hoc based on camera distance. However, these levels function as discrete entities
+lacking explicit parent-child relationships between corresponding
+primitives. Octree-GS [RJL∗ 25] arranges anchors into an octree
+where finer levels cumulatively refine a coarse base. However, this
+hierarchy solely governs anchor activations without establishing a
+parent-child tree of Gaussians. LapisGS [SMGO25] and Scalable
+Gaussian Soup [SQZ25] propose layered or multi-quality representations tailored for specific deployment constraints. However, none
+of these approaches equip a scale-bounded sequence with explicit
+parent-child links or support dynamic, local screen-space traversal.
+Large-scene LoD. Hierarchical 3DGS [KMK∗ 24] chunks large
+captures into a projected-size hierarchy without end-to-end
+photometric optimization. Similarly, methods like CityGaussian [LLF∗ 24], VastGaussian [LLT∗ 24], LODGE [KRM∗ 25], Virtualized 3D Gaussians [YXJ∗ 25], and LoD-of-Gaussians [WKR∗ 26]
+focus on spatial partitioning, out-of-core CPU-to-GPU streaming,
+and memory-bounded rendering for web- and city-scale scenes.
+These out-of-core and partitioning strategies are orthogonal yet
+complementary to HLoD, which focuses on dynamic screen-space
+traversal via photometrically exchangeable parent-child hierarchies.
+To address traversal bottlenecks in city-scale Level-of-Gaussians
+(LoG) hierarchies, FilterGS [WYT∗ 26] replaces explicit fine-tocoarse tree-walking with parallel GPU filters that select active Gaussians and eliminate redundant Gaussian tile coverage. FilterGS is
+complementary to HLoD, operating strictly downstream on the
+rendering side of a pre-existing hierarchy without providing photometric guarantees for parent-child coherence. HLoD addresses this
+upstream problem by jointly training these relationships, ensuring
+a collapsed sibling group is photometrically exchangeable with its
+parent. Furthermore, our GPU-fused traversal kernel achieves minimal selection overhead, remaining competitive with parallel filtering
+in our targeted single-scene setting.
+Non-Hierarchical LoD and Compression. As the primary continuous LoD alternative to HLoD in the single-scene setting, CLoDGS [CSL∗ 26] creates a continuous LoD spectrum by augmenting
+each Gaussian with a learnable, distance-dependent opacity decay.
+However, this mechanism is purely global: because decay depends
+solely on camera distance, far-foreground objects and true background surfaces receive identical reduction. In contrast, HLoD triggers collapses based on the local screen-space footprint of sibling
+© 2026 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+3 of 13
+groups, allowing high-frequency structures with large projected
+sizes to resist aggressive collapse. Furthermore, because CLoD-GS
+rasterizes the entire primitive set, its computational workload scales
+less efficiently than HLoD, which structurally reduces the active
+primitive count through tree traversal.
+Frequency-Aware Gaussian Splatting Decomposition [LSA26]
+introduces a perceptually driven LoD structure. Instead of grouping
+Gaussians by geometric scale, it assigns them to levels of a Laplacian
+pyramid to capture specific image-frequency subbands. While this
+supports applications like foveated rendering, its LoD criterion relies
+on perceptual frequency rather than geometric scale. These criteria
+are orthogonal: a flat, low-frequency background wall at close range
+occupies coarse levels in Frequency-Aware GSD but can reach
+deeper hierarchy levels in HLoD, whereas a distant, textured surface
+behaves oppositely.
+Beyond continuous and perceptual criteria, several recent methods address scalability through global ordering or post-hoc compression rather than local hierarchies. Matryoshka Gaussian Splatting [GZA∗ 26] learns a globally ordered list of splats to reconstruct
+scenes across different budgets, lacking explicit parent-child topology. Similarly, GoDe [DSRG∗ 25] reorganizes a trained model into
+progressive layers for scalable compression, and Iterative Gaussian Synopsis [LZD∗ 26] compresses full-resolution models through
+learnable pruning. Like discrete methods, these approaches do not
+explicitly optimize for dynamic, localized screen-space traversal.
+Scale-aware Filtering. Mip-Splatting [YCH∗ 24] demonstrates
+that standard 3DGS aliases or erodes when rendered at sampling
+rates that differ from training, mitigating this issue with 3D and
+2D smoothing filters. Multi-Scale 3DGS [YLCL24] and LoDGS [YGC25] address these artifacts through scale-specific Gaussian
+sets and adaptive filtering. HLoD leverages this insight, drawing its
+mip floor directly from the Nyquist-scale criterion of Mip-Splatting
+to ensure anti-aliased rendering during hierarchical traversal.
+FilterGS targets large-scale traversal acceleration but takes an
+existing hierarchy as given. CLoD-GS eliminates discrete levels
+entirely but provides no per-group selection guarantee. FrequencyAware GSD reorganises LoD by perceptual frequency rather than
+geometric scale. ACD strengthens densification geometry but does
+not address hierarchy maintenance.
+3. Preliminaries
+3DGS [KKL∗ 23] represents a scene using anisotropic 3D Gaussians
+{g}, each parameterized by a mean µ, opacity α, view-dependent
+spherical harmonics (SH) colour c, and covariance Σ = RSST RT , factored into a quaternion rotation R and scale S for stable optimization.
+Gaussians are projected to 2D using a local affine approximation,
+yielding the screen-space covariance Σ′ = JW ΣW T J T , where W
+is the viewing transformation and J the Jacobian. For tile-based
+culling, the rasteriser computes a bounding radius from the maximum eigenvalue of Σ′ for view v:
+p
+σ px (g; v) = 3 λmax (Σ′ (g; v)).
+(1)
+4 of 13
+J. Müller, J. Sommer, & R. Klein / HLoD-GS
+Figure 2: Overview of our end-to-end hierarchical training pipeline. We organize 3D Gaussians into a localized, coarse-to-fine forest,
+periodically expanding the hierarchy. During training, we use a stochastic selection to decouple photometric supervision from the camera
+distribution. This randomly alternates between restricting the active set to the currently optimizing level, truncating the hierarchy to a random
+depth, or performing full traversal. The screen-space tree traversal dynamically collapses fine Gaussians into their parent based on their
+projected footprint. The selected active set is then optimized end-to-end using a joint objective of photometric loss and geometric regularizers.
+Pixels accumulate colour via front-to-back α-blending over depthsorted splats:
+N
+i−1
+C = ∑ ci αi ∏ (1 − α j ).
+i=1
+(2)
+j=1
+Parameters are optimised via stochastic gradient descent using a
+photometric loss against ground-truth images C∗ :
+Lphoto = (1 − λ)L1 (C,C∗ ) + λLD-SSIM (C,C∗ ),
+(3)
+with standard practice setting λ = 0.2.
+Interleaved with this optimization process, Adaptive Density Control (ADC) dynamically adjusts the scene topology based on viewspace positional gradients. Gaussians with large gradients are densified: under-reconstructed primitives are cloned and shifted along the
+gradient, while oversized primitives are split into two smaller Gaussians with a downscaled covariance. To eliminate floaters and escape
+local minima, ADC continuously prunes transparent Gaussians and
+periodically resets all opacities to near-zero.
+Flexible Level of Detail (FLoD). FLoD [SCSU25] trains a sequence of discrete, independent LoD models indexed from the
+coarsest level 1 to the finest Lmax . To control the degree of detail, a
+(l)
+per-level scale lower bound smin = τ0 ρ1−l (for l < Lmax ) constrains
+the minimum Gaussian size at each stage. Training proceeds strictly
+level-by-level. Once level l converges, its Gaussians are cloned to
+initialize level l+1. To maintain a consistent size s(g) for a Gaussian g across this transition despite the newly lowered bound, the
+learnable scale parameter sopt(g) is adjusted via:
+
+
+(l+1)
+sopt (g) = log s(g) − smin .
+(4)
+Additionally, to prevent excessive density and rendering artifacts
+during level training, FLoD applies an overlap pruning criterion. A
+Gaussian g with centre µ(g) is removed if the average Euclidean
+distance to its three nearest spatial neighbours N3 (g) falls below a
+predefined threshold τoverlap :
+1
+(l)
+∑ ∥µ(g) − µ(g j )∥2 < τoverlap .
+3 g ∈N
+(g)
+j
+3
+(5)
+At runtime, a selective rendering strategy selects each Gaussian from
+a discrete level based on its distance to the camera. The selected
+subsets from each level are combined and passed to the standard rasteriser. Crucially, because these trained levels are stored as entirely
+independent scene reconstructions, there is no hierarchy linking fine
+Gaussians to their coarser ancestors.
+4. Hierarchical Level-of-Detail Traversal for 3DGS
+HLoD introduces an end-to-end trained parent-child hierarchy for
+3D Gaussian Splatting, enabling view-dependent LoD within a single model. Our structure allows fine Gaussians to dynamically collapse into coarse parents via efficient edge collapse, seamlessly
+adapting to the active camera while preserving the ability to allocate
+point density based on local geometric detail. Section 4.1 defines
+our data structure and the GPU traversal algorithm that efficiently
+computes the appropriate LoD cut for the current view. Section 4.2
+outlines the append-only training schedule and the structural safeguards required for topological validity, while Section 4.3 details
+the regularizers that ensure perceptual stability across transitions.
+4.1. Gaussian Hierarchy Traversal
+Our scene parameterization builds upon the 3DGS formulation [KKL∗ 23], where each primitive stores a spatial mean, scaling
+vector, rotation quaternion, opacity, and spherical harmonic coefficients for view-dependent color. Rather than maintaining an unstructured point cloud, we organize the scene as a forest of Gaussians.
+Each tree represents a localized, coarse-to-fine hierarchy. At the
+coarsest level, each root Gaussian acts as an independent particle.
+We use Gl to denote the set of Gaussians across all trees at level l.
+To establish this tree structure, we augment each Gaussian g
+with two additional properties: a birth level ℓb (g) ∈ {1, . . . , Lmax }
+indicating the depth at which the primitive is introduced (where Lmax
+is a predefined maximum tree depth), and a parent index π(g) linking
+the Gaussian to its coarser ancestor. The entire hierarchy is jointly
+trained as a cumulative representation of the scene. Consequently,
+rendering at a specific detail level l evaluates the subset G≤l , which
+comprises all Gaussians from the root down to level l. By rasterizing
+© 2026 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+J. Müller, J. Sommer, & R. Klein / HLoD-GS
+5 of 13
+4.2. End to End Hierarchical Training
+Figure 3: Active-set selection within a Gaussian hierarchy (T =
+9px). Active Gaussians are outlined in black. The left panel applies
+the synchronous collapse rule: a sibling group is replaced by its
+parent only when every child projects below T . The right panel
+drops this rule, so a parent is admitted to the active set even though
+some of its children still project above T , producing across-level
+overlap between coarse and fine Gaussians.
+this subset, coarse parents establish the base structure while their
+descendants incrementally inject finer details.
+Screen-Space Tree Traversal. To extract a spatially varying representation during rendering, we dynamically traverse the forest to
+adapt the local resolution based on the projected screen footprint of
+each primitive. Given a view v and a pixel threshold T , the traversal selects a view-dependent active set Av . To determine when a
+collapse should occur, we directly compare the threshold T against
+the screen-space footprint of each Gaussian, utilizing the rasterizer
+radius σpx (g; v) given in Equation (1).
+To determine whether a parent or its children are part of Av , we
+use a synchronous group collapse rule: a sibling group S with parent
+p is collapsed if every g ∈ S satisfies σpx (g; v) < T . When this
+condition is met, the sibling group S are added to Av and otherwise
+parent p is added. Defining the collapse synchronously maintains a
+structural invariant, ensuring a parent is never rendered alongside
+a subset of its children. Figure 3 illustrates the mechanics of both
+synchronous and partial collapse on a simple scene. If a partial
+collapse were permitted, a coarse parent would spatially overlap with
+its remaining active children. Such cross-level overlap can introduce
+blending artifacts and complicate the joint optimization, hindering
+the model’s ability to learn smooth LoD transitions. Relying on
+synchronous collapses prevents this overlap while still preserving
+spatial adaptivity across the view.
+While traversal works in either direction, we default to a fineto-coarse traversal for parallel GPU efficiency. Starting with the
+finest-level Gaussians in Av , we evaluate active primitives in parallel at each level. Proceeding bottom-up from level Lmax to level
+2, we assign a parallel thread to each active child at the current
+depth. These threads concurrently compute their screen-space radius
+σpx (g; v) and atomically flag their shared parent p if any sibling in
+the group S exceeds the pixel threshold T . A subsequent voting step
+applies the group collapse rule to update Av . Finally, the index list is
+compacted and passed to the 3DGS rasterizer. Because early culling
+filters non-contributing families, the overhead scales with active set
+size rather than total scene complexity. We refer the reader to the
+supplemental for further implementation details.
+© 2026 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+We initialize the forest by instantiating the root level from a
+Structure-from-Motion point cloud, following 3DGS [KKL∗ 23].
+Rather than optimizing discrete levels independently, we jointly
+train the hierarchy by integrating the screen-space tree traversal directly into the forward pass. For each training view v, we determine
+the active set Av by collapsing the cumulative model G≤l using
+a fixed pixel threshold T . This allows the optimization to directly
+minimize the photometric error of the locally adapted representation.
+Periodically, following FLoD [SCSU25], we increase the maximum forest depth by appending a new level l. For each active parent,
+we spawn two child Gaussians that inherit their parent’s parameters
+but undergo a scale reduction to capture higher spatial frequencies. The cumulative model is then updated to G≤l = G≤l−1 ∪ Gl ,
+expanding the parameter pool for the subsequent training phase.
+Finally, we assign the appropriate birth level and parent index to
+each new primitive to maintain the explicit topological links.
+Relying solely on screen-space traversal during training introduces a structural supervision imbalance. Because the collapse criterion depends on the projected footprint, coarse Gaussians are rarely
+optimized unless the training cameras are sufficiently distant. Conversely, newly spawned fine Gaussians may lack sufficient gradients
+if they immediately collapse under the pixel threshold T . To decouple photometric supervision from the camera distribution, we
+introduce a randomized active-set selection during the forward pass.
+At each training step, we randomly modify the active set Av
+via one of three strategies. With probability pcur , we bypass the
+traversal and restrict Av entirely to primitives born at the currently
+optimizing level l, ensuring new Gaussians receive direct supervision regardless of their projected size. Alternatively, with probability
+pcap , we artificially truncate the hierarchy by uniformly sampling a
+maximum depth M ≤ l and executing the traversal on the restricted
+subset G≤M . This forces coarse Gaussians to act as active parents,
+exposing them to gradients even from close views. For the remaining
+probability, we perform the standard unconstrained traversal. All
+three sampling strategies utilize the same photometric loss, enabling
+the cumulative model to maintain consistent quality across all LoDs.
+Applying 3DGS [KKL∗ 23] ADC and the overlap pruning introduced by FLoD [SCSU25] directly to the Gaussian hierarchy can
+inadvertently create orphan nodes. To maintain a consistent tree
+hierarchy, we apply pruning exclusively to the newest level of the
+model and adjust the removal criteria. We restrict the FLoD overlap
+evaluation to consider only same-level neighbors, preventing parentchild pairs from being incorrectly discarded as redundant geometry.
+During opacity and overlap pruning, if an operation would eliminate
+all children of a given parent, we preserve the single child with
+the highest opacity. This safeguard prevents orphaned parents and
+ensures overlap evaluation operates strictly across adjacent levels
+rather than skipping levels. Before appending a new level, a cleanup
+pass removes any low-opacity primitives that survived solely due to
+this intervention, yielding a clean structure prior to the next periodic
+increase of the forest depth.
+6 of 13
+J. Müller, J. Sommer, & R. Klein / HLoD-GS
+4.3. Geometric Regularisation
+While our hierarchy-aware pruning maintains a consistent tree structure, the splitting of Gaussians during ADC introduces a risk of
+spatial divergence. Without geometric restrictions, child Gaussians
+could drift physically far from their parents or grow disproportionately large, breaking the assumption that each tree represents a
+localized, coarse-to-fine refinement of the scene. If a sibling group
+is not spatially cohesive with its parent, substituting the group during the screen-space traversal can introduce visual popping and
+structural artifacts. To preserve spatial cohesion across the hierarchy, we introduce two geometric regularizers alongside the primary
+photometric loss.
+To prevent child Gaussians from growing physically larger than
+their parents, we introduce a soft scale penalty. Rather than applying hard constraints that can disrupt optimization, we penalize
+(l−1)
+primitives that exceed the level-specific lower bound smin from
+FLoD [SCSU25], which serves as a natural upper boundary for
+Gaussians residing at level l:
+
+
+3
+1
+(ℓb (g)−1)
+Lsu =
+ReLU s(g)i − smin
+.
+(6)
+∑
+∑
+3|Gl≥2 | g∈G i=1
+l≥2
+This one-sided approach allows children to freely capture fine details
+while smoothly shrinking oversized Gaussians back to an appropriate relative size. To prevent the opposite extreme of primitives
+shrinking to subpixel dimensions, we bound the optimization from
+below using a Nyquist mip floor m(g) = minv dv (g)/(2 fv ), where
+fv is the focal length of view v, following Mip-Splatting [YCH∗ 24].
+Together, this soft penalty and the mip floor ensure that Gaussians
+stably represent localized geometric details without diverging into
+oversized structural overlaps or subpixel artifacts.
+To maintain spatial cohesion between hierarchical levels, we
+apply a Mahalanobis regularization term. Specifically, for each child
+Gaussian g, we evaluate the squared Mahalanobis distance between
+its mean position µ(g) and its parent π(g). We define this spatial
+penalty over the set of direct children Gch as follows:
+
+
+1
+2
+Lmaha =
+ReLU dM
+(µ(g), π(g))) − κ .
+(7)
+∑
+|Gch | g∈Gch
+√
+This term penalizes children that drift beyond the κ ellipsoid of
+their parent, while permitting free optimization inside this support
+volume. To prevent fine details from inadvertently displacing coarse
+geometry, the parent’s parameters are detached from this gradient
+computation. This one-directional constraint ensures the child remains bounded within its parent’s effective volume, preserving the
+parent as a valid geometric proxy during a detail collapse.
+Combined, these spatial and scale regularizers supplement the primary photometric reconstruction loss Lphoto . The entire hierarchy is
+optimized end-to-end via gradient descent using the joint objective:
+L = Lphoto + λsu Lsu + λmaha Lmaha .
+(8)
+5. Results
+We first evaluate the quality-performance trade-off of HLoD to validate it as a Level of Detail (LoD) system, demonstrating how its
+screen-space aware edge collapses dynamically balance rendering
+speed and visual fidelity. Next, we benchmark peak image quality and performance against state-of-the-art baselines. Finally, we
+present ablation studies to justify our core architectural choices,
+including the structural necessity of joint optimization compared to
+naive post-hoc hierarchical assignments.
+Implementation. Our implementation is built upon the FLoD codebase [SCSU25], inheriting the original 3DGS CUDA rasterizer without modification to ensure a fair baseline comparison. The geometric
+regularizers are implemented in PyTorch whereas the screen-space
+tree traversal for dynamic edge collapses is integrated via a custom
+CUDA extension. The memory footprint of our hierarchy only requires storing two additional 64-bit integers per Gaussian to keep
+track of its level and parent index.
+Unless specified otherwise, HLoD inherits default hyperparameter
+configurations from FLoD and adopts the standard 3DGS densification schedule within each level. For the hierarchy structure, we use
+an initial scale bound of τ0 =0.05, a scale ratio of ρ=2.0, a collapse
+threshold of T =9, and a branching factor of two children per level.
+Regularization weights are set to λsu =0.01 for spatial regularization
+and λmaha =0.005 for Mahalanobis regularization. During traversal, the current-level and capped-traversal sampling probabilities are
+pcur =0.03 and pcap =0.05, respectively. Finally, we disable the EWA
+screen-space filter to avoid artificially inflating the 2D footprints
+with a low-pass filter. This is valid because we utilize the mip-floor
+to constrain the size. We refer the reader to the supplemental for a
+list of all hyperparameters and training schedules.
+Experimental Setup. Our evaluation adheres to the standard
+3DGS evaluation protocol for dataset selection, resolution scaling, and train-test splits across all nine scenes from MipNeRF 360 [BMV∗ 22], the Truck and Train scenes from Tanks and
+Temples [KPZK17], and the Dr. Johnson and Playroom scenes from
+Deep Blending [HPP∗ 18]. Additional experiments are conducted
+on the block_all from Matrix-City [LJX∗ 23], as well as the building
+and rubble scenes from the Mill-19 [TRS22], where we utilize the
+provided train and test splits.
+Quantitative image quality is assessed using Peak Signal-to-Noise
+Ratio (PSNR), Structural Similarity Index (SSIM) [WBSS04], and
+Learned Perceptual Image Patch Similarity (LPIPS) [ZIE∗ 18], with
+all baseline metrics recomputed using their official author implementations. Additionally, we use FLIP [ANAM∗ 20,RSP∗ 24] to evaluate
+transition smoothness. To evaluate computational efficiency, we
+measure Frames Per Second (FPS) and peak VRAM consumption.
+Training and evaluation on standard 3DGS datasets used an NVIDIA
+RTX 4090 while large-scale dataset used an NVIDIA A100.
+5.1. Level of Detail and Performance Scaling
+We evaluate HLoD’s capacity to provide seamless, continuous
+performance-quality trade-offs by comparing its dynamic siblingcollapse mechanism against discrete and constrained hierarchical
+baselines. A fundamental limitation of discrete LoD representations,
+such as FLoD, is their reliance on strict, distance-based selection
+thresholds. As illustrated in Figure 4, this inherently produces visible transition seams where the this distance threshold switches
+© 2026 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+7 of 13
+J. Müller, J. Sommer, & R. Klein / HLoD-GS
+Reference (GT)
+FLoD [SCSU25]
+FLIP Error
+HLoD (Ours)
+RGB Prediction
+LoD Level
+FLIP Error
+Truck
+RGB Prediction
+LoD Level
+NA : 464k, 300 FPS
+NA : 2.46M, 124 FPS
+NA : 809k, 198 FPS
+NA : 995k, 123 FPS
+NA : 584k, 212 FPS
+Kitchen
+Garden
+NA : 602k, 264 FPS
+Figure 4: Qualitative comparison of FLoD selective rendering versus HLoD, with active Gaussian counts (NA ) and FPS. The heatmap
+visualizes active LoD levels, mapping shallower to deeper nodes from cool to warm colors. Crucially, color reflects hierarchical depth rather
+than physical scale. HLoD may place larger Gaussians at deeper levels in homogeneous regions compared to more complex areas. Boundary
+discontinuities at FLoD-SV’s LoD transitions produce visible seams and dark lines, appearing as sharp heatmap color shifts and high FLIP
+map errors. We invite the reader to watch the accompanying video for a comparison of motion artefacts.
+Image Quality (PSNR)
+28
+FLoD
+FLoD-SV
+HLoD (T = 9)
+HLoD (varying T)
+Freq-GS
+Hier-GS
+Octree-GS
+Octree-GS Prog.
+26
+24
+22
+20
+200
+400
+600
+800
+1000
+Rendering Performance (FPS)
+Figure 5: Pareto front illustrating the trade-off between rendering
+performance (FPS) and image quality (PSNR) across various methods. HLoD demonstrates dynamic performance scaling based on
+both the threshold parameter T and cumulative LoD levels.
+between scene representations, manifesting as high-error streaks in
+its FLIP maps and motion artifacts in our supplementary video. In
+contrast, HLoD evaluates a screen-space projection criterion (T ) at
+the level of local sibling groups rather than across the entire camera
+view. Consequently, the resulting active rendering levels in HLoD
+are spatially interleaved based on local geometric complexity: lowfrequency regions (e.g., walls, floors, or sky) smoothly collapse
+© 2026 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+to coarse ancestors, while high-frequency features (e.g., foliage or
+sharp silhouettes) remain at finer depths. This targeted collapse reduces active rendered Gaussians (NA ) by up to 67% and increases
+frame rates (FPS) compared to FLoD. Because the hierarchy is
+jointly optimized, these varying active depths composite without
+systematic seams, blurred transition bands, or coverage holes, yielding a coherent final image with consistently lower perceptual FLIP
+error. Furthermore, qualitative comparisons against HierarchicalGS [KMK∗ 24] (Figure 7) demonstrate that varying the collapse
+threshold T in HLoD gracefully reduces detail without introducing
+aliasing. Where Hierarchical-GS exhibits jagged edges and abrupt
+transitions from aliased to excessively blurred states, HLoD preserves edge fidelity across thresholds, validating our architectural
+decision to avoid forcing a strict size hierarchy during optimization.
+We quantify these continuous scaling capabilities on the MipNeRF 360 dataset by analyzing the Pareto front of rendering speed
+versus image quality (Figure 5). HLoD consistently defines the optimal frontier across the performance spectrum. While the finest
+discrete level of FLoD (L5 ) achieves the highest peak quality, it incurs a substantial rendering bottleneck. Attempting to mitigate this
+via FLoD’s selective rendering (FLoD-SV) mode yields negligible
+framerate improvements due to significant selection overhead. Conversely, at the high-performance end of the spectrum, the coarsest
+level of FLoD (L1 ) suffers severe structural degradation and drops
+to approximately 21 dB. Similarly, truncating Octree-GS [RJL∗ 25]
+8 of 13
+J. Müller, J. Sommer, & R. Klein / HLoD-GS
+−−−−−−−−−−−−−−−−−−−−−→
+HLoD (Ours)
+GT
+Fine
+Octree-GS
+Coarse
+NA : 7.8k
+NA : 48.4k
+NA : 132.6k
+NA : 425.5k
+NA : 10.1k
+NA : 50.7k
+NA : 170.3k
+NA : 604.0k
+Figure 6: Qualitative comparison of novel views rendered at increasing cumulative LoD levels by Octree-GS [RJL∗ 25] and HLoD, alongside
+the number of rendered Gaussians (NA )
+HLoD
+T =3
+T =9
+T = 15
+T = 21
+T =9
+Figure 7: Qualitative comparison of Hierarchical-GS and HLoD at
+varying screen-space thresholds (T ).
+more stable than the > 2 dB drop observed in Hierarchical-GS under similar sweeps. Because collapsed, coarser Gaussians cover
+larger screen areas, the rasterizers fill-rate increases. As a result,
+while the reduction in primitive count does not yield strictly linear
+framerate scaling when transitioning from T =3 to T =9, the scaling
+behaves predictably at higher thresholds such as T =15 and T =21.
+Ultimately, this ensures the computational budget remains stable and
+visual fidelity stays highly robust against aggressive traversal collapse. Which is further demonstrated by the disparity maps and level
+heatmaps in Figure 8. The varying thresholds yields no abrupt jumps
+in depth as level selections shift and the minor and low-frequent fardistance variations likely stem from slight density changes altering
+the expected depth.
+to early representation levels results in a 7.8 dB quality drop (from
+27.26 dB at L5 to 19.41 dB at L1 ), placing its non-adaptive levels
+below HLoD’s Pareto frontier. In contrast, when HLoD is restricted
+to its coarsest levels (G≤2 ), it maintains coherent scene geometry
+at over 23 dB while exceeding 800 FPS. Notably, modulating the
+screen-space threshold T across a given cumulative HLoD model
+reveals a highly stable degradation profile. Increasing T effectively
+prunes the active point count (Table 7), yet the corresponding drop in
+image quality remains bounded to less than 1 dB. This is markedly
+Further, we compare cumulative models of HLoD against OctreeGS [RJL∗ 25] in Figure 6. Due to anchor sparsity, Octree-GS exhibits
+a severe bias towards dark, artifact-heavy images at early truncation
+levels. In contrast, HLoD avoids this issue entirely, as every cumulative level provides a valid, non-sparse scene representation at a
+distinct fidelity. While Octree-GS marginally outperforms HLoD at
+the absolute finest level (e.g., 303.9 FPS versus 261.0 FPS on the
+Tanks and Temples dataset), HLoD provides a more favorable performance trade-off across intermediate representation on the Pareto
+curve. Consequently, HLoD is preferable in scenarios requiring progressive transmission or dynamic runtime scaling. In these use cases,
+T = 21
+Figure 8: Pixel threshold impact on depth. Top: Gaussian LoD
+heatmaps. Bottom: Corresponding disparity maps showing geometric depth changes. Compare with teaser for perceptual effects.
+T = 15
+T =3
+Hierarchical-GS
+© 2026 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+9 of 13
+J. Müller, J. Sommer, & R. Klein / HLoD-GS
+Table 1: Quantitative comparison of different Gaussian Splatting methods on common datasets. Higher is better for PSNR, SSIM, and FPS (↑)
+and lower is better for LPIPS (↓). We used the publically available code to reproduce the results. Cells are colored to highlight the best ,
+second best , and third best performing methods.
+MipNeRF-360
+Tanks & Temples
+DeepBlending
+PSNR ↑ SSIM ↑
+LPIPS ↓ FPS ↑
+PSNR ↑ SSIM ↑ LPIPS ↓
+FPS ↑
+PSNR ↑ SSIM ↑ LPIPS ↓ FPS ↑
+Octree-3DGS [RJL∗ 25]
+Frequency-GS [LSA26]
+27.76
+26.79
+0.827
+0.809
+0.200
+0.207
+234.1
+229.8
+24.26
+23.42
+0.867
+0.849
+0.199
+0.156
+174.4
+354.4
+29.40
+29.62
+0.895
+0.911
+0.280
+0.191
+339.9
+344.4
+3DGS [KKL∗ 23]
+Hierarchical-GS [KMK∗ 24]
+FLoD [SCSU25]
+FLoD-SV [SCSU25]
+27.43
+27.10
+28.03
+27.53
+0.815
+0.797
+0.824
+0.813
+0.214
+0.219
+0.212
+0.227
+179.0
+128.9
+151.8
+153.8
+23.72
+24.03
+24.48
+23.08
+0.846
+0.861
+0.852
+0.822
+0.178
+0.154
+0.182
+0.223
+209.8
+73.2
+245.0
+348
+29.46
+29.18
+29.09
+28.80
+0.900
+0.889
+0.897
+0.897
+0.247
+0.242
+0.254
+0.255
+214.9
+112.4
+170.8
+198.0
+HLoD (Ours)
+27.75
+0.818
+0.216
+253.9
+24.20
+0.847
+0.185
+324.4
+29.50
+0.899
+0.251
+418.4
+maintaining visual coherence, predictable quality transitions, and
+visual stability across varying computational budgets is beneficial.
+5.2. Quantitative Evaluation
+To evaluate peak reconstruction fidelity, we compare the highestquality settings of HLoD (T =3) against the finest discrete levels
+of prior state-of-the-art approaches (Table 1). Although HLoD is
+optimized at T =9, rendering at T =3 maximizes visual fidelity (see
+Table 7) while actively maintaining the dynamic screen-space collapse mechanism. This contrasts with Hierarchical-GS, which must
+effectively disable its traversal (T =0) to reach its maximum reported
+quality. Across the evaluated datasets, HLoD achieves highly competitive visual metrics for PSNR, SSIM, and LPIPS. Specifically,
+it renders faster than all baseline methods on the Mip-NeRF 360
+and Deep Blending datasets. On the Tanks and Temples dataset, it
+remains highly competitive in framerate while achieving the best
+PSNR among the faster-rendering methods. These results also show
+that HLoD delivers a strong performance-quality trade-off even
+at high fidelity levels. Regarding the baselines, our reproductions
+yielded slightly higher metrics for FLoD and Octree-GS than originally published. Conversely, Frequency-GS [LSA26] exhibited
+a drop in peak PSNR when evaluated under the standard 3DGS
+lower-resolution training protocol, as opposed to the full-resolution
+optimization used in its original publication. This indicates a distinct sensitivity to training resolution. As shown in our qualitative
+comparison (Figure 9), this sensitivity manifests as noticeable blurriness along edges and within highly detailed regions. Nevertheless,
+Frequency-GS retains strong LPIPS scores, which corroborates the
+perceptual benefits of its frequency-supervised training. HLoD, on
+the other hand, has a quantitative gap in LPIPS compared to methods
+like Frequency-GS. We hypothesize that this perceptual difference
+stems from the inherent mechanics of our hierarchical collapse. As
+fine Gaussians merge into coarser parents, the resulting edges between adjacent coarse splats might introduce incorrect frequencies
+into the image, to which LPIPS appears to be sensitive to. Beyond
+these evaluated baselines, our comparative analysis is naturally restricted to public implementations, leaving a direct comparison with
+the closed-source CLoD-GS [CSL∗ 26] for future work.
+When analyzing runtime resources and peak GPU memory alloca© 2026 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+Table 2: Resource costs for HLoD (T = 3), grouped by rendering
+backend. NA is average rendered Gaussians (millions) across test
+views; Mem. is peak GPU memory (MB). Cells highlight best ,
+second best , and third best results.
+MipNeRF360
+Tanks & Temples Deep Blending
+NA ↓
+Mem.↓
+NA ↓
+Mem.↓
+NA ↓
+Mem.↓
+Freq.-GS [LSA26]
+HLoD-gspalt (Ours)
+0.463
+1.320
+0.644
+462
+815
+787
+0.466
+0.633
+0.609
+461
+375
+637
+0.039
+0.729
+0.283
+135
+530
+480
+3DGS [KKL∗ 23]
+Hier.-GS [KMK∗ 24]
+FLoD [SCSU25]
+FLoD-SR [SCSU25]
+HLoD-3DGS (Ours)
+3.36
+3.385
+2.341
+1.359
+0.644
+1227
+3295
+2409
+2745
+1953
+2.40
+4.898
+1.382
+0.437
+0.609
+930
+4594
+1471
+1141
+1450
+2.18
+4.021
+1.756
+1.358
+0.283
+1109
+3788
+1961
+2699
+1563
+Octree-GS [RJL∗ 25]
+tion (Table 2), it is crucial to account for the underlying rasterization
+backend. Octree-GS uses a tightly integrated custom rasterizer, and
+Frequency-GS utilizes gsplat [YLK∗ 25]. Both inherently establish a
+lower memory floor than the standard 3DGS backend used by HLoD,
+FLoD, and Hierarchical-GS. However, while the backend dictates
+this baseline memory utilization, the selection mechanism governs
+the actual number of actively rendered Gaussians (NA ). Through
+efficient traversal, HLoD systematically reduces this active primitive
+count compared to FLoD. Among the evaluated baselines, OctreeGS is the only approach that consistently renders fewer Gaussians
+than HLoD. Additionally, comparing the active count (NA ) against
+the total number of Gaussians (NT ) in Table 6 reveals that HLoD
+achieves a stable reduction factor when compared to FLoD-SV. This
+reduction in active primitives directly yields a smaller memory footprint for HLoD, and places it second across datasets under both
+gsplat and 3DGS backends except on Tanks and Temples.
+The computational efficiency of HLoD is primarily driven by
+its minimal traversal overhead, a critical bottleneck in prior adaptive methods. Table 6 decomposes the average frametime into hierarchy selection and rasterization phases. Unlike FLoD-SV and
+Hierarchical-GS, which suffer from substantial selection penalties
+10 of 13
+J. Müller, J. Sommer, & R. Klein / HLoD-GS
+Frequency-GS
+HLoD (Ours)
+Room
+Train
+Groundtruth
+Figure 9: Qualitative visual comparison corresponding to our quantitative benchmarks. The zoom-ins highlight the differences in fine detail
+preservation and artifact reduction between Frequency-GS and HLoD against the Groundtruth.
+Table 3: Quality and performance metrics of HLoD (T = 3) on largescale scenes. Total and active Gaussians count NT /NA in millions.
+PSNR
+NT
+NA
+Table 4: Cumulative LoD representations rendered with screenspace traversal (T =9). Rendered Gaussian count NA in millions.
+FPS
+Block_all 26.57 42.65 0.542 82.5
+Rubble 25.24 27.20 0.781 112.8
+Building 22.50 37.11 0.803 92.1
+(e.g., up to 5.46 ms for Hierarchical-GS on Tanks & Temples), HLoD
+requires less than 0.75 ms for traversal across all tested datasets.
+This extremely lightweight screen-space evaluation allows HLoD
+to convert its reduction in active primitives directly into end-to-end
+framerate gains. We note that the framerates derived from Table 6
+are marginally lower than the end-to-end FPS reported in Table 1;
+this minor discrepancy is an artifact of the synchronization required
+to accurately profile these sub-phases. Evaluating on large-scale
+scenes (Table 3) confirms that HLoD maintains real-time framerates
+even with higher Gaussian counts (NT ). See the supplemental for
+qualitative results.
+Finally, the resource scalability of HLoD is further quantified in
+Table 4. Even at heavily truncated cumulative levels (e.g., G≤2 ), the
+method maintains a PSNR of approximately 23 dB using only a fraction of the total geometry (e.g., 16,000 points on Mip-NeRF 360).
+This quantitative stability reinforces our previous qualitative observations, confirming that the joint optimization of HLoD successfully
+guarantees every depth level in the hierarchy serves as a valid, structurally coherent representation of the scene. To further validate the
+perceptual and transitional stability between these levels using our
+traversal, we report FLIP error metrics in Table 5. As qualitatively
+shown in Figure 4, FLIP is sensitive to perceptual degradation at
+discontinuous level transitions. HLoD compares favorably to FLoD
+MipNeRF360
+Tanks & Temples
+Deep Blending
+Level PSNR↑
+NA
+PSNR↑
+NA
+PSNR↑
+NA
+22.98
+24.37
+26.10
+27.71
+0.016
+0.066
+0.165
+0.509
+20.31
+21.66
+23.05
+24.02
+0.021
+0.069
+0.143
+0.459
+26.71
+28.15
+28.84
+29.02
+0.007
+0.035
+0.079
+0.215
+G≤2
+G≤3
+G≤4
+G≤5
+Table 5: Average ground-truth FLIP error↓ (Ref.) and FLIP score↓
+on videos of scene trajectories (Traj).
+MipNeRF360 Tanks & Temples Deep Blending
+Ref.
+Traj.
+Ref.
+Traj.
+Ref.
+Traj.
+FLoD-SR 0.142 0.058 0.213
+HLoD
+0.137 0.054 0.202
+0.043
+0.038
+0.148
+0.137
+0.022
+0.019
+for both FLIP error between reconstruction and ground-truth images
+as well as FLIP score on video trajectories interpolated from test
+cameras [RSP∗ 24], indicating smoother level transitions.
+5.3. Ablation Studies
+Screen-space Threshold. As detailed in Table 7, we determine
+the optimal screen-space threshold by sweeping T ∈ {3, 9, 15, 21}.
+Although HLoD is trained at T =9, it achieves its best overall performance across all datasets at T =3. We observe a clear monotonic relationship where increasing the threshold correspondingly
+reduces both the image quality and the number of actively ren© 2026 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+11 of 13
+J. Müller, J. Sommer, & R. Klein / HLoD-GS
+Table 6: Average test-view runtime breakdown into the selection
+and renderind time (ms). Total number of Gaussian NT in millions.
+Synchronisation between steps results in lower FPS than Table 2.
+Method
+Dataset
+NT
+Sel. Render Total
+Mip-NeRF 360 4.71 2.10
+Hierarchical-GS T & T
+6.93 5.46
+Deep Blending 5.96 4.70
+5.81
+3.50
+9.72
+7.91
+9.00
+14.42
+FLoD-SV
+Mip-NeRF 360 4.28 1.70
+T&T
+3.25 0.86
+Deep Blending 2.90 1.47
+5.21
+2.11
+4.51
+6.91
+2.97
+5.98
+HLoD
+Mip-NeRF 360 4.11 0.70
+T&T
+3.24 0.56
+Deep Blending 2.90 0.57
+3.48
+2.63
+1.91
+4.17
+3.19
+2.47
+Table 7: Screen-space threshold sweep (T ∈ {3, 9, 15, 21}) for
+HLoD at full LOD 5, Number of active Gaussians NA in millions.
+Best quality per dataset in bold.
+Dataset
+T
+PSNR↑ SSIM↑ LPIPS↓ NA ↓ FPS↑
+Mip-NeRF 360
+3
+9
+15
+21
+27.75
+27.71
+27.41
+27.06
+0.818
+0.811
+0.801
+0.787
+0.216
+0.229
+0.243
+0.262
+0.64
+0.51
+0.41
+0.35
+253.9
+250.7
+267.9
+272.9
+Tanks & Temples
+3
+9
+15
+21
+24.20
+24.02
+23.63
+23.39
+0.846
+0.840
+0.827
+0.819
+0.185
+0.194
+0.213
+0.225
+0.61
+0.46
+0.32
+0.28
+324.4
+320.2
+378.5
+401.7
+Deep Blending
+3
+9
+15
+21
+29.50
+29.02
+28.98
+28.60
+0.899
+0.895
+0.894
+0.889
+0.251
+0.263
+0.270
+0.278
+0.28
+0.22
+0.16
+0.12
+418.4
+427.4
+463.8
+467.5
+dered Gaussians. Interestingly, rendering at T =3 yields marginally
+higher framerates on the Mip-NeRF 360 and Tanks & Temples
+datasets compared to the T =9 baseline. We suspect this is because
+the coarser, collapsed Gaussians present at T =9 cover larger screen
+areas, which increases the rasterizer’s fill-rate.
+Randomized Active-set Selection. The current-level and cappedtraversal probabilities address complementary failure modes (Figure 10, top rows). Without the capped-traversal probability, the
+LoD 4 active set contains visibly deformed Gaussians from coarser
+levels that were never trained for their future collapse role. Conversely, without the current-level probability, fine Gaussians with
+a projected footprint below T at spawn receive zero image-space
+gradients, leaving “black holes” in the active set. Visualizing the gradient update frequency (Figure 10, bottom row) confirms that both
+mechanisms are necessary and cannot substitute for one another. The
+visualization exposes a heavily polarized, non-overlapping distribution where Gaussians receive either high or near-zero supervision
+from each mechanism. Relying solely on random truncation or training only the finest level leaves persistent under-supervised regions.
+EWA Low-pass and Mip floor. At the training resolution the
+three variants (EWA + mip floor, mip floor only, EWA only) are
+© 2026 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+pcap = pcur = 0
+pcap = pcur = 0
+pcap = 0.05, pcur = 0
+pcap = 0.05pcur = 0.03
+pcap = 0, pcur = 0.03
+Figure 10: Top: Level 4 (G(4) ) trained with and without randomized
+active-set selection. Bottom: Heatmap visualizing the number of
+gradient updates each Gaussian in G(4) received. The colormap
+scales from blue (low) to red (high), while black indicates Gaussians
+that received zero image-space gradients after adding LoD 5.
+within 0.4 dB of each other. As soon as the render resolution departs
+from training, the mip-floor-only variant is consistently the most
+resolution-robust, gaining up to 1.9 dB on Kitchen. We therefore
+disable EWA and enable the mip floor as the default. This observation aligns with the findings in the Mip-Splatting [YCH∗ 24], which
+originally introduced the mip floor. Consequently, we establish the
+mip floor as our default and disable EWA.
+Scale and Mahalanobis Regularisers. To evaluate the impact of
+our structural losses, we ablate the Mahalanobis and scale regularizers. As illustrated in Figure 11, removing the Mahalanobis
+regularizer leads to spatial drift, where child Gaussians migrate
+away from their parents to satisfy local photometric gradients. Similarly, ablating the scale regularization causes fine-level Gaussians
+to expand and cover low-frequency backgrounds, compromising
+the intended frequency separation between levels. These observations demonstrate that explicit geometric guardrails are essential for
+maintaining a traversable hierarchy under adaptive density control.
+Furthermore, while the scale loss does not substantially improve
+overall image quality (varying by less than 0.15,dB across the full
+λsu sweep), it effectively limits the fraction of Gaussians exceeding their LoD scale band (Figure 12). This constraint ensures that
+traversal collapse decisions remain structurally meaningful.
+Post-training Hierarchical Assignment. To verify the necessity of
+our learned hierarchical structure, we ablate our method by replacing the optimized parent-child links with post-training geometric
+assignments based on Kullback-Leibler divergence or Mahalanobis
+distance. This straightforward geometric matching fails to reproduce
+the trained hierarchy, resulting in a significant drop in rendering
+quality (such as PSNR falling from 27.71 dB to 24.81 dB on MipNeRF 360 scenes) due to an overly aggressive traversal collapse that
+activates fewer Gaussians. Furthermore, these heuristic assignments
+severely disrupt the tree’s structural balance, leaving up to 42% of
+coarse Gaussians completely childless. This confirms that parentchild relations must be jointly optimized during training rather than
+attached post-training; full quantitative results and detailed struc-
+12 of 13
+J. Müller, J. Sommer, & R. Klein / HLoD-GS
+w/o Regluarization
+λmaha = 0.005
+Figure 11: Qualitative effect of Mahalanobis regularization, with
+each hierarchy tree randomly colored across its Gaussian nodes.
+Figure 13: Relative runtime (fine-to-coarse v s. coarse-to-fine)
+across total Gaussians NT . Ratios < 1 means fine-to-coarse is faster.
+scales across different hierarchical trees. Because these scales are
+constrained solely through soft regularization, there is no strict guarantee on the magnitude of the visual jump when child Gaussians
+collapse into their parent. Investigating adaptive scaling strategies
+to mitigate these residual background artifacts remains a promising
+direction for future work.
+6. Conclusion
+Figure 12: Scale regularization sweep on the "Bonsai" scene. Top:
+Percentage of Gaussians exceeding the per-level scale bound. Bottom: Total versus active Gaussians per-view on the test split.
+tural analyses of this experiment are provided in the supplemental.
+Performance Scaling. Fine-to-coarse traversal remains faster up
+to 5 × 107 Gaussians in highly detailed scenes (see Figure 13),
+while coarse-to-fine traversal becomes more efficient beyond 7.5 ×
+106 Gaussians for evenly distributed scenes like DrJohnson. On
+average, the crossover point occurs at 1.5 × 107 Gaussians. Because
+all evaluated 3DGS scenes fall below this threshold, fine-to-coarse
+traversal serves as our default, though larger scenes exceeding this
+point count still achieve real-time framerates (see the supplemental
+material for methodology).
+5.4. Limitations
+Despite its dynamic scaling capabilities, HLoD presents certain limitations. Maintaining the stability of the learned hierarchy requires
+explicit geometric guardrails. Without Mahalanobis and scale regularization, the model suffers from spatial drift and improper expansion into low-frequency backgrounds, which disrupts the intended
+frequency separation between levels. Even with these regularizers
+active, their soft nature leaves room for minor structural variations.
+Consequently, while HLoD generally maintains smooth transitions,
+it can still introduce sparse but visible pop-in artifacts during camera
+motion. We observe these artifacts exclusively at greater distances
+from the camera, leaving foreground objects unaffected. We hypothesize that this behavior stems from inhomogeneous Gaussian
+We introduced Hierarchical Level of Detail (HLoD) for 3D Gaussian
+Splatting, addressing the lack of inherent hierarchy and overcoming
+the limitations of discrete LoD representations. By jointly optimizing Gaussian levels into an explicit parent-child hierarchy, HLoD
+provides continuous performance-quality trade-offs that successfully
+composite without the systematic seams, coverage holes, and blurred
+transition bands typical of distance-based models. Our dynamic
+screen-space traversal evaluates local sibling groups rather than the
+entire camera view. Consequently, low-frequency regions smoothly
+collapse to coarse ancestors while high-frequency features remain
+preserved at finer depths. Our evaluations demonstrate that HLoD
+achieves highly competitive visual fidelity across PSNR, SSIM, and
+LPIPS metrics, while rendering faster than state-of-the-art baselines
+on datasets such as Mip-NeRF 360 and Deep Blending. This efficiency is driven by an extremely lightweight traversal overhead of
+less than 0.75 ms, which allows the method to convert reductions
+in active primitives directly into end-to-end framerate gains. Ultimately, HLoD establishes a highly robust and stable framework that
+ensures the computational budget and visual fidelity remain resilient
+against aggressive pruning.
+Acknowledgements. This research has been funded by the Federal
+Ministry of Education and Research under grant no. 01IS22094A
+WEST-AI, by the Federal Ministry of Education and Research of
+Germany as well as the state of North-Rhine Westphalia as part
+of the Lamarr-Institute for Machine Learning and Artificial Intelligence, by the Ministry of Culture and Science North RhineWestphalia under grant number PB22-063A (InVirtuo 4.0: Experimental Research in Virtual Environments) and by the state of North
+Rhine-Westphalia as part of the Excellency Start-up Center.NRW
+(U-BO-GROW) under grant number 03ESCNW18B. Open Access
+funding enabled and organized by Projekt DEAL
+References
+[ANAM∗20] ANDERSSON P., NILSSON J., AKENINE-MÖLLER T., OSKARSSON M., Å STRÖM K., FAIRCHILD M. D.: Flip: A difference
+evaluator for alternating images. Proc. ACM Comput. Graph. Interact.
+Tech. (2020). 6
+[BMV∗ 22]
+BARRON J. T., M ILDENHALL B., V ERBIN D., S RINIVASAN
+© 2026 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+J. Müller, J. Sommer, & R. Klein / HLoD-GS
+P. P., H EDMAN P.: Mip-nerf 360: Unbounded anti-aliased neural radiance
+fields. In Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition (2022). 6
+[CSL∗ 26] C HENG Z., S UN M., L IU Y., G E Z., TANG L., X U M., L I Y.,
+PAN P.: CLod-GS: Continuous level-of-detail via 3d gaussian splatting.
+In The Fourteenth International Conference on Learning Representations
+(2026). 3, 9
+[DSRG∗ 25] D I S ARIO F., R ENZULLI R., G RANGETTO M., S UGIMOTO
+A., TARTAGLIONE E.: Gode: Gaussians on demand for progressive level
+of detail and scalable compression. arXiv preprint arXiv:2501.13558
+(2025). 3
+[GZA∗ 26] G UO Z., Z HANG B., A KTAS H., F OGARTY K., H U J., A SLAN
+N. K., L I W., BAYKAL C., M IAO A., B ENGTSON J., ET AL .: Matryoshka gaussian splatting. arXiv preprint arXiv:2603.19234 (2026).
+3
+[HPP∗ 18]
+H EDMAN P., P HILIP J., P RICE T., F RAHM J.-M., D RETTAKIS
+G., B ROSTOW G.: Deep blending for free-viewpoint image-based rendering. ACM Transactions on Graphics (ToG) (2018). 6
+[KKL∗ 23] K ERBL B., KOPANAS G., L EIMKÜHLER T., D RETTAKIS G.,
+ET AL .: 3d gaussian splatting for real-time radiance field rendering. ACM
+Trans. Graph. (2023). 2, 3, 4, 5, 9
+[KMK∗ 24] K ERBL B., M EULEMAN A., KOPANAS G., W IMMER M.,
+L ANVIN A., D RETTAKIS G.: A hierarchical 3d gaussian representation
+for real-time rendering of very large datasets. ACM Transactions On
+Graphics (TOG) (2024). 3, 7, 9
+[KPZK17] K NAPITSCH A., PARK J., Z HOU Q.-Y., KOLTUN V.: Tanks
+and temples: Benchmarking large-scale scene reconstruction. ACM Transactions on Graphics (ToG) (2017). 6
+[KRM∗ 25]
+K ULHANEK J., R AKOTOSAONA M.-J., M ANHARDT F.,
+T SALICOGLOU C., N IEMEYER M., S ATTLER T., P ENG S., T OMBARI
+F.: LODGE: Level-of-detail large-scale gaussian splatting with efficient
+rendering. In The Thirty-ninth Annual Conference on Neural Information
+Processing Systems (2025). 3
+[LJX∗ 23] L I Y., J IANG L., X U L., X IANGLI Y., WANG Z., L IN D., DAI
+B.: Matrixcity: A large-scale city dataset for city-scale neural rendering
+and beyond. In Proceedings of the IEEE/CVF International Conference
+on Computer Vision (2023). 6
+[LLF∗ 24] L IU Y., L UO C., FAN L., WANG N., P ENG J., Z HANG Z.:
+Citygaussian: Real-time high-quality large-scale scene rendering with
+gaussians. In European Conference on Computer Vision (2024), Springer.
+3
+[LLT∗ 24] L IN J., L I Z., TANG X., L IU J., L IU S., L IU J., L U Y., W U
+X., X U S., YAN Y., ET AL .: Vastgaussian: Vast 3d gaussians for large
+scene reconstruction. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (2024). 3
+[LSA26] L AVI Y., S EGRE L., AVIDAN S.: Frequency-aware gaussian
+splatting decomposition. In 2026 International Conference on 3D Vision
+(3DV) (2026), IEEE. 3, 9
+[LTC∗ 26] LYU L., T EWARI A., C HEN J., L EIMKÜHLER T., T HEOBALT
+C.: Faster 3d gaussian splatting convergence via structure-aware densification. In Special Interest Group on Computer Graphics and Interactive
+Techniques Conference Conference Papers (2026), SIGGRAPH Conference Papers ’26. 2
+[LYX∗ 24] L U T., Y U M., X U L., X IANGLI Y., WANG L., L IN D., DAI
+B.: Scaffold-gs: Structured 3d gaussians for view-adaptive rendering. In
+Proceedings of the IEEE/CVF conference on computer vision and pattern
+recognition (2024). 2
+[LZD∗ 26] L U Y., Z HOU Y., DAI Y., L I G., H E S.: Unfolding 3d gaussian
+splatting via iterative gaussian synopsis. arXiv preprint arXiv:2604.11685
+(2026). 3
+[RJL∗ 25] R EN K., J IANG L., L U T., Y U M., X U L., N I Z., DAI B.:
+Octree-gs: Towards consistent real-time rendering with lod-structured 3d
+gaussians. IEEE Transactions on Pattern Analysis and Machine Intelligence (2025). 3, 7, 8, 9
+© 2026 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+13 of 13
+[RSP∗ 24] R ADL L., S TEINER M., PARGER M., W EINRAUCH A., K ERBL
+B., S TEINBERGER M.: Stopthepop: Sorted gaussian splatting for viewconsistent real-time rendering. ACM Transactions on Graphics (TOG)
+(2024). 6, 10
+[SCSU25] S EO Y., C HOI Y. S., S ON H., U H Y.: Flod: Integrating flexible
+level of detail into 3d gaussian splatting for customizable rendering. ACM
+Trans. Graph. (2025). 2, 3, 4, 5, 6, 7, 9
+[SMGO25] S HI Y., M ORIN G., G ASPARINI S., O OI W. T.: Lapisgs:
+Layered progressive 3d gaussian splatting for adaptive streaming. In 2025
+International Conference on 3D Vision (3DV) (2025), IEEE. 3
+[SQZ25] S HEN J., Q IAN Y., Z HAN X.: Lod-gs: Achieving levels of detail
+using scalable gaussian soup. In Proceedings of the Computer Vision and
+Pattern Recognition Conference (2025). 3
+[TRS22] T URKI H., R AMANAN D., S ATYANARAYANAN M.: Meganerf: Scalable construction of large-scale nerfs for virtual fly-throughs.
+In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR) (2022). 6
+[WBSS04] WANG Z., B OVIK A. C., S HEIKH H. R., S IMONCELLI E. P.:
+Image quality assessment: from error visibility to structural similarity.
+IEEE transactions on image processing (2004). 6
+[WKR∗ 26] W INDISCH F., KÖHLER T., R ADL L., D’ URSO M., S TEINER
+M., S CHMALSTIEG D., S TEINBERGER M.: A lod of gaussians: Out-ofcore training and rendering for seamless ultra-large scene reconstruction.
+In Proceedings of the Special Interest Group on Computer Graphics
+and Interactive Techniques Conference Conference Papers (2026), SIGGRAPH Conference Papers ’26, Association for Computing Machinery.
+3
+[WYT∗ 26] WANG Y., Y U H., TANG J., G AO Y., WANG X., Y UE Y.,
+YANG Y.: Filtergs: Traversal-free parallel filtering and adaptive shrinking
+for large-scale lod 3d gaussian splatting. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR) (2026).
+3
+[XWB26] X U J., WANG Y., B U F.: Toward clean and efficient 3d gaussian
+representations. Applied Optics (2026). 3
+[YCH∗ 24] Y U Z., C HEN A., H UANG B., S ATTLER T., G EIGER A.:
+Mip-splatting: Alias-free 3d gaussian splatting. In Proceedings of the
+IEEE/CVF conference on computer vision and pattern recognition (2024).
+3, 6, 11
+[YGC25] YANG Z., G ONG B., C HEN K.: Lod-gs: Level-of-detailsensitive 3d gaussian splatting for detail conserved anti-aliasing. arXiv
+preprint arXiv:2507.00554 (2025). 3
+[YLCL24] YAN Z., L OW W. F., C HEN Y., L EE G. H.: Multi-scale
+3d gaussian splatting for anti-aliased rendering. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(2024). 3
+[YLK∗ 25] Y E V., L I R., K ERR J., T URKULAINEN M., Y I B., PAN Z.,
+S EISKARI O., Y E J., H U J., TANCIK M., ET AL .: gsplat: An open-source
+library for gaussian splatting. Journal of Machine Learning Research
+(2025). 9
+[YXJ∗ 25] YANG X., X U L., J IANG L., L IN D., DAI B.: Virtualized
+3d gaussians: Flexible cluster-based level-of-detail system for real-time
+rendering of composed scenes. In Proceedings of the Special Interest
+Group on Computer Graphics and Interactive Techniques Conference
+Conference Papers (2025). 3
+[ZIE∗ 18] Z HANG R., I SOLA P., E FROS A. A., S HECHTMAN E., WANG
+O.: The unreasonable effectiveness of deep features as a perceptual metric.
+In Proceedings of the IEEE conference on computer vision and pattern
+recognition (2018). 6

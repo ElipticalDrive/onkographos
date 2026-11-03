@@ -1,0 +1,131 @@
+Procedural universe substrate for atomr: hierarchical seeded generation, sparse voxels, metric LOD. - feat: finish Rec 1 — raymarch-by-default + first-person voxel editing by cognect · Pull Request #14 · rustakka/atomr-worlds
+
+feat: finish Rec 1 — raymarch-by-default + first-person voxel editing by cognect · Pull Request #14 · rustakka/atomr-worlds · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+cognect
+commented
+Jun 8, 2026
+Copy link
+Copy Markdown
+Collaborator
+Finishes Advanced Voxel Architectures Rec 1: the GPU DAG raymarcher becomes the default render path, and first-person voxel editing lands.
+Raymarch-by-default
+RenderConfig::default().shading: LegacyVertexColor → RaymarchDagShading.
+Mesh path stays fully reachable via --shading mesh / RenderPreset::Legacy.
+Smoke: a bare run reports ray_spawns=358, mesh_spawns=0; --shading mesh reports mesh_spawns=306.
+First-person voxel editing
+Picker — atomr-worlds-voxel::world_dda::world_ray_first_solid, a pure f64 Amanatides–Woo DDA over the unbounded 1 m/voxel grid (explicitly not WGSL-mirrored, so it's outside the raymarch determinism gate).
+Input — crate::modes::edit: aim with the camera, left-click carves / right-click places; single-voxel + sphere/cube brushes (Tab cycles tool, [/] size it, digits pick material). Gated on the cursor already being grabbed so the focus click doesn't also carve.
+Host stays authoritative — single voxels send WriteVoxel (integer pos); brushes send WriteRegion with center = (cell+0.5)·mpv mirroring the host apply_region. The client only predicts the touched bricks (InteractionUnit::affected_voxels, the same call the host uses) and re-fetches authoritative bytes — nothing render/DAG-derived flows into GetBrick.
+Flicker-free refresh — fetch_and_build extracted so streamed and edited bricks build identically; spawn_edited_brick make-before-break swap reuses spawn_brick_entity verbatim (every ShadingMode, both render paths). Size-gated: ≤16 bricks sync in place, larger brushes re-stream async.
+HUD — crosshair + tool/material/radius readout + 3D selection highlight, all harness-gated off.
+Release A/B (perf_raymarch_ab.toml, sprint fly-through) — data, not a gate
+metric
+mesh
+raymarch
+ratio
+p50
+1997 µs
+2566 µs
+1.29×
+p99
+18191 µs
+37234 µs
+2.05×
+mean
+4074 µs
+3847 µs
+0.94×
+VRAM
+10.45 MB
+552 KB
+~18.9× less
+Per the confirmed decision, the flip is committed regardless of p50; the frag_depth/early-Z overdraw ceiling is the named follow-up lever (single-pass/compute node).
+Tests
+cargo test --workspace green (645 passed, 0 failed): world_dda unit tests, client↔host contract tests against a real LocalHost, refresh-filter unit test, and a headless ECS test for the make-before-break swap. README / ADVANCED_VOXEL_ARCHITECTURES / RENDERING / IMPLEMENTATION docs + roadmap memory updated.
+🤖 Generated with Claude Code
+feat(client): finish Rec 1 — raymarch-by-default + first-person voxel…
+…
+2c20cfe
+```
+… editing
+
+Completes Advanced Voxel Architectures Rec 1: the GPU DAG raymarcher becomes
+the default render path, and first-person voxel editing lands.
+
+## Raymarch-by-default
+- Flip `RenderConfig::default().shading` LegacyVertexColor -> RaymarchDagShading.
+- Mesh path stays fully reachable via `--shading mesh` / `RenderPreset::Legacy`.
+- Bare-run smoke: ray_spawns=358, mesh_spawns=0 (raymarch is the default).
+
+## First-person voxel editing
+- `atomr-worlds-voxel::world_dda::world_ray_first_solid` — a pure f64
+  Amanatides-Woo picker over the unbounded 1 m/voxel grid (WorldRayHit:
+  cell/normal/place_cell/material/t_entry). Explicitly NOT WGSL-mirrored, so it
+  stays out of the raymarch determinism gate.
+- `crate::modes::edit` — EditState (material/tool/radius/reach/last_hit),
+  tool+material selection (digits / Tab / [ ]), and `fp_edit_voxels`: aim with
+  the camera, left-click carves, right-click places; single-voxel + sphere/cube
+  brushes. Gated on the cursor already being grabbed so the focus click doesn't
+  also carve.
+- Host stays the sole mutator: single voxels send WriteVoxel (integer pos),
+  brushes send WriteRegion with voxel_center_metric = (cell+0.5)*mpv (mirrors
+  the host apply_region). The client only predicts touched bricks via
+  InteractionUnit::affected_voxels (the same call the host uses) and re-fetches
+  authoritative bytes — nothing render/DAG-derived flows into GetBrick.
+- Flicker-free live refresh: `fetch_and_build` extracted from BrickGenWorkers so
+  streamed and edited bricks build identically; `spawn_edited_brick` does a
+  make-before-break swap reusing spawn_brick_entity verbatim (works for every
+  ShadingMode + both render paths). Refresh is size-gated: <=16 bricks sync in
+  place, larger brushes drop entries and re-stream async.
+- Resident Arc<Brick> on LOD-0 LoadedChunk feeds the picker with zero host
+  round-trips.
+- HUD: centered crosshair + tool/material/radius readout + a 3D selection
+  highlight cube, all skipped under the harness.
+
+## Release A/B (harness/scenes/perf_raymarch_ab.toml, sprint fly-through)
+Recorded as data, not a gate (decision: commit to raymarch-default regardless;
+mesh stays one flag away). raymarch / mesh:
+- p50  1997 -> 2566 us  (1.29x)
+- p99  18191 -> 37234 us (2.05x)
+- mean 4074 -> 3847 us  (0.94x, raymarch lower)
+- VRAM dag_bytes 552 KB vs mesh_bytes_est 10.45 MB (~18.9x less)
+- acquire_us_mean 3.4 us << p50
+Does not clear the strict p50<=1.10x bar; the frag_depth/early-Z overdraw ceiling
+is the p50 cost and the single-pass/compute node is the named follow-up lever.
+
+## Tests
+`cargo test --workspace` green (645 passed): world_dda unit tests, client<->host
+contract tests (real LocalHost: WriteVoxel touches exactly one voxel; brush
+center math lands on target and the prediction covers it), refresh-filter unit
+test, and a headless ECS test for the make-before-break swap. Docs + roadmap
+memory updated.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+cognect
+merged commit 01d2314
+into
+main
+Jun 8, 2026
+cognect
+deleted the
+feat/rec1-finish-raymarch-default-editing
+branch
+June 11, 2026 21:58
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

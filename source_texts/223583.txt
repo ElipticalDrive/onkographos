@@ -1,0 +1,305 @@
+This issue is a feature proposal. Feel free to upvote (with 👍 ), comment and provide your use-cases if you're interested by this feature. Context This proposal aims to remove the hard-coded depth-first traversal of the quadtree/octree wh...
+
+[Proposal][Architecture] Per-update custom update traversal · Issue #2630 · iTowns/itowns · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[Proposal][Architecture] Per-update custom update traversal #2630
+New issue
+Copy link
+New issue
+Copy link
+Open
+Feature
+Open
+[Proposal][Architecture] Per-update custom update traversal#2630
+Feature
+Copy link
+Assignees
+Labels
+architecture 🏬enhancement 🚀help wanted 📢proposal 👍Proposal of a new featureProposal of a new featureto-specify
+Description
+Desplandis
+opened on Nov 5, 2025
+Issue body actions
+This issue is a feature proposal. Feel free to upvote (with 👍 ), comment and provide your use-cases if you're interested by this feature.
+Context
+This proposal aims to remove the hard-coded depth-first traversal of the quadtree/octree when updating a geometry layer and replace it with per-layer customizable traversal strategies. The depth-first strategy is not always optimal and leads to performance issues in some identified use-cases (see below).
+Description of the proposal
+This proposal will describe the current architecture as well as different possible replacements (from non-breaking to hard breaking changes) to allow different geometry layers to use different traversal strategies. Each proposed implementation will be linked to a "proof of concept" branch to assert its feasibility.
+Identified use-cases
+A non-exhaustive (feel free to complete) list :
+PointCloudLayer due to the current traversal strategy do not prioritize the expected nodes when querying plus queries too much nodes. The postUpdate step limits a posteriori the rendering to the greatest priority loaded nodes (within the point budget). Since the priority changes with respect to the loaded nodes, this causes pop-in/pop-out effects (especially for huge datasets). We could use a priority queue to limit a priori during the update step(s) the queried nodes (with respect to the point budget).
+Implementation
+In the following, let:
+G denote the current geometry layer updated (this does not include FeatureGeometryLayer BTW)
+l an attached layer to $G$ (usually a RasterLayer/FeatureGeometryLayer)
+S the set of changes (i.e. nodes of L, L itself, the camera and/or the view) triggering the update
+For ease of understanding, we made the following assumptions:
+the current context is implicitly passed to the methods
+the attached layers are all ready
+Current implementation
+Let's start with our current implementation. The geometry layer interface could be defined as:
+```
+interface GeometryLayer<Node, O extends Object3D>  {
+     attached: AttachedLayer[]
+     preUpdate(changes: S) -> Node[]
+     update(n: Node) -> Node[]
+     postUpdate(changes: S)
+     getObjectToUpdateForAttached(n: Node) -> O[]
+}
+```
+where Node is either a:
+TileMesh for TiledGeometryLayer
+PointCloudNode for PointCloudLayer
+??? for OGC3DTilesLayer
+Note that:
+The preUpdate method returns a common ancestor node from S which is used to start the update traversal (it can also be used to pre-compute node-independant results: e.g. pre-SSE)
+The update procedure returns the children of a node (given they pass culling and other tests)
+getObjectToUpdateForAttached is kinda peculiar since it returns the set of Object3D currently loaded by the current node (and optionally the parent Object3D). For each object o and each attached layer l, o and its parent are passed to the update procedure of l. Since the function is usually of the form (n: Node) => [n.obj] (e.g. for TiledGeometryLayer this is equivalent to an identity function), I suppose this is some kind of leftover of passing 3D objects to be textured by attached layers. I think we could drop it (should I open an issue?).
+An attached layer interface could be defined as:
+```
+interface AttachedLayer<O extends Object3D> {
+    preUpdate(changes: S)
+    update(o: O, parent: O | undefined)
+}
+```
+Note that despite their names, preUpdate and update do not have the same semantics as geometry layers!
+A pseudo-code of the current implementation:
+```
+def updateElements(nodes: Node[]):
+  for n in nodes:
+     # update the geometry layer node n
+     children: Node[] = G.update(C, n)
+     # Update the attached layers for this node
+     objs : Object3D[] = G.getObjectToUpdateForAttached(n) # meh...
+     for o in objs:
+        for l in L.attached:
+          l.update(o, o.parent)
+     updateElements(children)
+
+for l in L.attached:
+    l.preUpdate(ctx, changes)
+roots: Node[] = G.preUpdate(changes)
+updateElements(roots)  # depth-first update
+G.postUpdate(changes)
+```
+Sequence diagram
+```
+sequenceDiagram
+    participant M as Main Loop
+    participant l as Attached Layer (l)
+    participant L as Geometry Layer (G)
+
+    loop For each l in G.attached
+        M->>l: l.preUpdate(changes)
+        l->>M: undefined
+    end
+    M->>L: G.preUpdate(changes)
+    L->>M: nodes : Node[]
+
+    loop for each n in nodes (updateElements)
+        M->>L: G.update(n)
+        L->>M: children: Node[]
+        M->>L: G.getObjectToUpdateForAttachedLayers(n)
+        L->>M: objs: Object3D[]
+        loop for each o in objs
+            loop for each l in G.attached
+                M->>l: l.update(o, o.parent)
+                l->>M: undefined
+            end
+        end
+        M->>M: updateElements(children)
+    end
+
+    M->>L: G.postUpdate(changes)
+    L->>M: undefined
+```
+Loading
+Proposed Implementation A : "Layer takes all"
+The main loop only call the update (or an updateAll if we do not wish to introduce breaking changes) method once. Implementation details are not exposed to MainLoop (this is kinda similar to OGC3DTilesLayer which returns nulls from preUpdate). However for uniformity, we'll have to ensure that each layer implementation expects the same sets of property from attached layers...
+A non-breaking implementation:
+```
+for l in L.attached:
+    l.preUpdate(changes)
+roots: Node[] = G.preUpdate(changes)
+G.updateAll(roots)
+G.postUpdate(changes)
+```
+The update(All) default implementation (depth-first) would be more or less the same that updateElements.
+Proposed Implementation B : "The iterator"
+The main loop calls iterator (or whatever we wish to name it) which returns an iterator over nodes (default: depth-first iterator). We could propose the following non-breaking implementation :
+```
+function* depthFirstTraversal(this: GeometryLayer<Node>, nodes: Node[]): Iterator<Node> {
+    // Iterate - update - yield the result
+    for (const node of nodes) {
+        children = this.update(node);
+        yield node;
+        yield* depthFirstTraversal(children);
+    }
+]
+
+// GeometryLayer.ts
+class GeometryLayer<Node> {
+    iterator(roots: Node[]): Iterator<Node> {
+        return depthFirstTraversal(this, roots); // default iterator
+    }
+}
+```
+```
+class PriorityQueueIterator<Node> {
+    constructor(layer: GeometryLayer<Node>, roots: Node[]) {
+        this.layer= layer;
+        this.currentPointBudget = 0;
+        this.priorityQueue = new PriorityQueue<Node>(roots);
+    }
+
+    *[Symbol.iterator](): Iterator<Node> {
+        while (!this.priorityQueue.isEmpty() && this.currentPointBudget < this.layer.pointBudget) {
+            const node = this.priorityQueue.dequeue();
+            this.currentPointBudget += node.numberOfPoints;
+            const children = this.layer.update(node);
+            yield node;
+
+            children.forEach(child => this.priorityQueue.enqueue(child, child.priority));
+        }
+    }
+}
+
+// PointCloudLayer.ts
+class PointCloudLayer extends GeometryLayer<PointCloudNode> {
+     iterator(roots: Node[]): Iterator<Node> {
+        return new DepthFirstIterator(this, roots)
+    }
+}
+```
+And the updated pseudo-code of MainLoop:
+```
+for l in L.attached:
+    l.preUpdate(ctx, changes)
+roots: Node[] = G.preUpdate(C, changes)
+# custom update traversal
+for n in G.iterator(roots):
+    objs: Object3D[] = G.getObjectToUpdateForAttached(n)
+    for o in objs:
+        for l in L.attached:
+            l.update(C, o, o.parent)
+G.postUpdate(C, changes)
+```
+Potential Problems
+Breaking changes in the low-level Layer API:
+GeometryLayer#preUpdate
+GeometryLayer#update
+Honestly, I don't think many users customize this..
+Potential Solutions
+Depends on the chosen architecture
+Documentation
+👍React with 👍3Reacted by Neptilo, Jaillot Vincent and airnez
+Activity
+Desplandis
+assigned
+Desplandis
+,
+AnthonyGlt
+,
+gchoqueux
+,
+jailln
+and
+Neptilo
+on Nov 5, 2025
+Desplandis
+added
+proposal 👍Proposal of a new featureProposal of a new feature
+on Nov 5, 2025
+AnthonyGlt
+assigned
+airnez
+on Nov 5, 2025
+Desplandis
+added the
+Feature
+issue type on Nov 5, 2025
+Desplandis
+added
+enhancement 🚀
+help wanted 📢
+to-specify
+architecture 🏬
+on Nov 5, 2025
+Desplandis
+assigned
+ftoromanoff
+and
+mgermerie
+on Nov 5, 2025
+Desplandis commented on Jan 8, 2026
+Desplandis
+on Jan 8, 2026
+Last edited by Desplandis
+ContributorAuthor
+More actions
+Following the discussion with @jailln and @Neptilo on 10/12/2025, we converged on the following proposals.
+Layer-managed update loops
+Updates should be handled internally by each geometry layer. This implies:
+For each layer, Layer#update is called exactly once per update cycle (instead of being called for each node in a depth-first fashion)
+Layer#preUpdate and Layer#postUpdate are removed with their logic merged into Layer#update. If needed, we could expose layer events to allow users to hook into pre and post update phases (I have a use-case for benchmarking ;))
+All hard-coded depth-first traversal code is removed from MainLoop
+A set of shared utils will be introduced:
+tree traversal helpers (depth-first, priority-based, etc...)
+priority and SSE computation
+computation of the common ancestor of nodes that trigger an update
+Apply this model to all geometry layers
+Geometry layers vs raster layers
+We noted that, although both being layers, Layer#update does not have the same semantics for geometry layers and raster layers.
+Geometry layers are part of the update cycle, while raster layers are "just" texture providers. For raster layers, the notion of an update is misleading and should be replaced by an explicit texture retrieval mechanism.
+Sources
+Similar to 3d-tiles-renderer-js, we propose splitting the current scheduler workflow into two chained queues: a download queue and a parsing queue.
+This separation would allow network requests to be issues while other resources are being parsed. This could also provide finer-grained control over concurrency (e.g. limiting to 6 concurrent download and 2 concurrent parsing tasks).
+As a proof of value, this approach could be experimented as part of the upcoming refactoring of point-cloud sources.
+Conclusion
+I think we could split the proposal into 3 sub-proposals, but I would like inputs from both of you before proceding. @AnthonyGlt @Desplandis @Neptilo @airnez @ftoromanoff @gchoqueux @jailln @mgermerie
+🎉React with 🎉1Reacted by Jaillot Vincent
+jailln commented on Jan 16, 2026
+jailln
+on Jan 16, 2026
+Contributor
+More actions
+looking forward to this @Desplandis 😍
+Neptilo commented on Jan 21, 2026
+Neptilo
+on Jan 21, 2026
+Contributor
+More actions
+I think we could split the proposal into 3 sub-proposals, but I would like inputs from both of you before proceding.
+@Desplandis If some of those 3 proposals require more technical details, sure! Otherwise, I think the present issue is enough.
+👍React with 👍1Reacted by Desplandis
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+AnthonyGlt
+Desplandis
+Neptilo
+airnez
+ftoromanoff
+gchoqueux
+jailln
+mgermerie
+Labels
+architecture 🏬enhancement 🚀help wanted 📢proposal 👍Proposal of a new featureProposal of a new featureto-specify
+Type
+Feature
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,439 @@
+glTF – Runtime 3D Asset Delivery. Contribute to KhronosGroup/glTF development by creating an account on GitHub.
+
+KHR_materials_volume by proog128 · Pull Request #1726 · KhronosGroup/glTF · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+proog128
+commented
+Dec 12, 2019
+Copy link
+Copy Markdown
+Contributor
+An extension for the metallic-roughness material that adds volumetric parameters for effects like refraction and subsurface scattering. It requires KHR_materials_transmission (#1698) and should be combined with KHR_materials_ior (#1718). At the moment, it lacks a suitable model and parameters for rasterizer implementations.
+proog128
+added 6 commits
+December 6, 2019 17:32
+Added KHR_materials_volume.
+25cbc3f
+Added implementation details.
+52e090e
+Added more details.
+6e3aa63
+Added the term "extinction coefficient".
+dc227b1
+Swapped V and L to use common path tracing convention.
+25c8ab7
+Added images to explain refraction, absorption and SSS.
+4a26990
+MiiBond
+commented
+Dec 12, 2019
+Copy link
+Copy Markdown
+Contributor
+Very nice start.
+For realtime rasterizers, I feel that it is necessary for this extension to support a thickness texture. It’s very difficult, in practice, to make rasterizers efficiently render volumetric properties of a closed mesh. It’s not impossible, of course, and some viewers (like ours at Adobe) may opt to go this route if that is a critical feature but, in general, performance-minded game engines aren’t going to support this.
+Thickness textures allow you to very efficiently define thin volumes like panels of glass. For example, the window panes of an old building where the glass at the bottom is thicker and rippled. Modeling this (and rendering this) as a volume is far more difficult and costly.
+So, I suggest a dual-mode extension where either thickness is defined or the true volume of the mesh (must be closed) is used. The thickness texture would be accompanied by min/max scaling factors to scale the 0-1 texture values. A constant thickness could be defined by just supplying the min factor and no texture. A boolean flag (or maybe just the presence of the min/max values) could indicate that the thickness mode should be used.
+Here are some more thoughts related to this:
+The thickness texture could probably be read from a channel of the transmissionTexture. This would save a sampler. Is it weird to have a single texture include info for properties in two different extensions?
+What is the expected behaviour of the volume when scaling the object? Presumably, scene units are used so the appearance changes as the mesh gets larger. This would have to apply to the min/max thickness values too, right? Real-world scale would be critical for correct rendering. Should there be an option not to scale volume properties?
+What requirements do we define for rasterizers to be compliant with this extension? Are they required to render more than one layer of transparency with volumetric features? This is definitely non-trivial and I wouldn’t expect rasterizers, in general, to be able to do this. SketchFab, for example, doesn’t render refractive objects through other refractive objects. https://help.sketchfab.com/hc/en-us/articles/202602073-Transparency-Opacity#refraction.
+If the true volume mode is intended to be used for the asset, I suggest that rasterizers be allowed to use a constant thickness rather than the actual volume. Otherwise, I fear support for this extension will be very low.
+We should specify how renderers should treat overlapping volumes. How do the properties combine? Or, since rasterizers aren’t going to be able to handle this, in general, maybe we should disallow overlapping volumes or at least discourage it in the spec?
+proog128
+commented
+Dec 13, 2019
+Copy link
+Copy Markdown
+Contributor
+Author
+For realtime rasterizers, I feel that it is necessary for this extension to support a thickness texture. [...] Thickness textures allow you to very efficiently define thin volumes like panels of glass. [...]
+For this reason a thickness texture would also make sense for ray tracers. We have to be a bit careful how the thickness is interpreted so that it works for path tracing, light tracing, and rasterizers. The following definition should work:
+The material can be either thin-walled or volumetric, the user has to choose via a Boolean parameter. Thin-walled means that the mesh geometry defines two surfaces: the actual surface and a "virtual" surface underneath that is not modeled, but implicitly given by the thickness texture. This applies to both closed and non-closed meshes. Non-closed meshes could be rippled windows, leaves, ... Closed meshes could be light bulbs, ...
+Volumetric means that the mesh geometry defines a surface boundary. The mesh has to be closed. It is possible to have nested closed objects, which could make them hollow like thin-walled closed meshes, but I guess that's a rare case.
+In the volumetric case, a thickness texture can (or must) be provided to help rasterizers render the volumetric properties. Ray tracers will ignore the texture. That means that the texture must not be used for artistic effects, it is basically an automatically generated texture, the "baked" volume thickness at each surface point.
+Please tell me what you think about it, I will update the document accordingly.
+What is the expected behaviour of the volume when scaling the object? [...]
+That's a good question. sigmaT should probably be given in world space, because I am not sure if applying non-uniform scaling to the distance works well...
+We should specify how renderers should treat overlapping volumes. How do the properties combine? [...]
+I'd suggest attaching priority values to shapes/nodes in the scene graph that determine which of several overlapping objects "wins". The technique is described in this paper, and I think a lot of ray tracers implement it like this. Not sure if this is really a problem we can (or have to) solve for rasterizers.
+I am afraid I don't have answers to the other questions, maybe others with more experience in rasterization and glTF have thoughts on it.
+MiiBond
+commented
+Dec 13, 2019
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Okay, so the two modes would toggled with a boolean and would work like this?
+isThinWalled == false:
+mesh must be closed.
+thickness texture must be defined and is meant to represent the approximate thickness at each point on the surface
+renderers can optionally ignore thickness texture if they can calculate the true volume of the mesh
+isThinWalled == true:
+mesh can be open or closed.
+thickness is used by all renderers and calculated from the thickness texture and min/max values.
+Is that right?
+MiiBond
+commented
+Dec 14, 2019
+Copy link
+Copy Markdown
+Contributor
+Do you think we could add some more information about how the single-scatter albedo and attenuation coeff are used to calculate the colour of transmitted light?
+proog128
+commented
+Dec 16, 2019
+Copy link
+Copy Markdown
+Contributor
+Author
+[...] Is that right?
+Yes. It is just an idea at the moment, I don't know it if works well. The volumetric part with participating media inside the volume boundary should be easy. The tricky part is the thin configuration: the combination of thin, rough transmission with the dipole approximation.
+Do you think we could add some more information about how the single-scatter albedo and attenuation coeff are used to calculate the colour of transmitted light?
+Of course. I think this will mostly be important for thin materials. The implementation for volumes/homogeneous participating media should use brute-force SSS as reference solution. Maybe we can shortly describe the algorithm (sample distance according to attenuation coeff, weight with albedo, sample phase function and spawn scatter ray), but there is probably enough literature out there that we don't have to go into details for ray tracing. If you already have ideas, it would be great if you could add it to the PR.
+proog128
+commented
+Dec 18, 2019
+Copy link
+Copy Markdown
+Contributor
+Author
+The more I think about the idea, the less I like it. Maybe we should concentrate first on the volumetric part and keep thin-walled for later. I looked at a few ray tracers (V-Ray, Corona, Arnold, Maxwell, Iray, ...) and they all seem to require properly modeled volumes for random walk SSS. Although we might be able to come up with a good solution for thin-walled with thickness textures, it won't help if the renderers out there do not support it...
+MiiBond
+commented
+Dec 18, 2019
+Copy link
+Copy Markdown
+Contributor
+I understand the concern. The problem is, glTF is mainly used (and intended) for real-time rendering. An extension that only supports closed volumes might not get much support.
+We could leave open the option for the runtime to fallback to a constant thickness rather than adhere to the actual volume. But, in that case, maybe just going ahead and including the thickness texture is the way to proceed?
+A related question about SSS; I know that this extension can be used for SSS but, in realtime, there are usually SSS approximation techniques that don't involve complex transparency or refraction. Do we leave it up to the runtime to fallback to these approximations when the scattering parameters hit a certain threshold? Or do we define a separate SSS extension for the explicit purpose of real-time SSS?
+proog128
+commented
+Dec 19, 2019
+Copy link
+Copy Markdown
+Contributor
+Author
+[...] But, in that case, maybe just going ahead and including the thickness texture is the way to proceed?
+Yes, I agree. To sum up:
+We include the thickness texture and make closed meshes mandatory.
+We add a thickness factor (or minThickness, maxThickness) for the texture, which can be used as a constant thickness if texture is not available.
+We describe that the thickness texture has to match the volume of the mesh, i.e., it has to contain the baked thickness of the volume.
+Renderers can now freely choose between the two representations. Ray tracing uses the mesh. Real-time could use the mesh (some depth map and shadow map based volume approximations) or the thickness map. This will give us consistent renderings in real-time and ray tracing.
+Did I miss anything? If not, I will go on and add the parameters to the document.
+A related question about SSS [...]
+I am also unsure about that. A separate extension which limits the range of supported effects to SSS would certainly help real-time renderers, but on the other hand it adds redundancy.
+MiiBond
+commented
+Dec 19, 2019
+Copy link
+Copy Markdown
+Contributor
+I'm not sure about the "make closed meshes mandatory" part. For commerce-related assets it might be fine (assuming those assets are CAD or not created for realtime initially anyway) but, for game assets, I'm not sure that it's reasonable to expect every pane of glass to have two sides and an appropriate thickness. If we don't want an explicit flag for this, perhaps having a closed mesh is a suggestion and not a requirement in the spec?
+proog128
+commented
+Dec 19, 2019
+Copy link
+Copy Markdown
+Contributor
+Author
+Maybe this use-case can be covered by KHR_materials_transmission extension alone? If KHR_materials_volume is not enabled, the surface is automatically thin-walled and, therefore, doesn't require closed meshes. The volumetric effects in a thin glass pane can be squeezed into effects on the surface. Absorption becomes the surface color (transmission only). Roughness can be used to build ground glass. Milk glass can be achieved with a combination of these effects and, if needed, a clearcoat layer. A thickness texture is not needed in these cases: thickness will influence surface color and roughness, so it can be baked into the base color texture and the roughness texture (saving texture lookups and computations in the shader).
+donmccurdy
+added this to the
+PBR Next milestone
+Dec 24, 2019
+proog128
+added 4 commits
+January 8, 2020 11:46
+Align notation with core spec.
+901d32e
+Added thickness texture.
+4149c67
+Update schema.
+1c8008e
+Place images side-by-side in Github markdown.
+81e157c
+proog128
+force-pushed
+the
+KHR_materials_volume
+branch
+from
+caea754 to
+81e157c
+Compare
+January 8, 2020 12:08
+proog128
+mentioned this pull request
+Jan 9, 2020
+KHR_materials_clearcoat and KHR_materials_specular
+#1677
+Closed
+koiava
+reviewed
+Jan 9, 2020
+View reviewed changes
+Comment thread
+extensions/2.0/Khronos/KHR_materials_volume/README.md
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+koiava
+reviewed
+Jan 9, 2020
+View reviewed changes
+Comment thread
+extensions/2.0/Khronos/KHR_materials_volume/README.md
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Do not mention TIR.
+00bc2e5
+UX3D-nopper
+added
+extension
+needs discussion
+Issue or PR requires working group discussion to resolve.
+labels
+Feb 12, 2020
+UX3D-nopper
+commented
+Feb 19, 2020
+Copy link
+Copy Markdown
+Contributor
+Need to merg with #1766
+UX3D-nopper
+mentioned this pull request
+Feb 19, 2020
+KHR_materials_subsurface extension branch.
+#1766
+Closed
+bsdorra
+commented
+Jan 18, 2021
+Copy link
+Copy Markdown
+Contributor
+Added suggested changes and removed references to KHR_materials_translucency
+bsdorra
+and others
+added 5 commits
+January 18, 2021 16:24
+Fix TOC
+74c9075
+Merge remote-tracking branch 'upstream/master' into KHR_materials_volume
+262261a
+Make compatible to new Appendix B.
+e5c297c
+Make compatible to new Appendix B.
+a30002b
+Add figure.
+d250b2e
+emackey
+reviewed
+Jan 22, 2021
+View reviewed changes
+Comment thread
+extensions/2.0/Khronos/KHR_materials_volume/schema/glTF.KHR_materials_volume.schema.json
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+bsdorra
+and others
+added 2 commits
+January 25, 2021 19:04
+Update extensions/2.0/Khronos/KHR_materials_volume/schema/glTF.KHR_ma…
+…
+aab749d
+```
+…terials_volume.schema.json
+
+Co-authored-by: Ed Mackey <elm19087@gmail.com>
+```
+Change thickness/attenuationDistance description
+…
+f616d7b
+```
+- Remove explicit unit info 'meters'
+- Add node/world space info
+```
+abwood
+mentioned this pull request
+Feb 1, 2021
+Added support for KHR_materials_volume.
+jkuhlmann/cgltf#133
+Merged
+mrdoob
+mentioned this pull request
+Mar 30, 2021
+Add SSRrPass (screen space refraction)
+mrdoob/three.js#21420
+Merged
+donmccurdy
+commented
+Apr 2, 2021
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+@emackey @proog128 Just to flag that while this extension appears to be nearing consensus, there are still several un-resolved comment threads in this PR. I say "unresolved" in the sense that the GitHub "Resolve Conversation" button has not been pressed; whether the questions were resolved elsewhere I'm not sure.
+The definition of thicknessFactor still does seem ambiguous (i.e. no units are mentioned), that may require a bit more wording. In Slack @echadwick-wayfair interepreted "relative to the local coordinate system of the mesh's node" as meaning thicknessFactor=0.5 is 50% of the mesh depth, where I'd read it as 0.5m in the local coordinate system, to be converted into world units similarly to vertex data.
+proog128
+commented
+Apr 3, 2021
+Copy link
+Copy Markdown
+Contributor
+Author
+@donmccurdy Thanks for bringing this up! From my point of view all conversations are resolved and the button could be pressed. Not sure what the others think?
+The wording may be improved though. If I remember correctly, we settled on the following behavior:
+Thickness Factor: Given in scene units. Scales with the transformation of the parent node(s), i.e., is given in "node space" (not sure if "node space" is a familiar term in glTF).
+Attenuation Distance: Given in scene units. Does not scale with the transformation of the parent node(s), i.e., is given in world space.
+Scene unit is meters in glTF (defined in the main spec) and as such we perhaps shouldn't repeat it here again.
+So maybe the following is less ambigous:
+Thickness Factor:
+Description: Thickness of the volume in meters.
+Detailed Description/Readme: The thickness of the volume beneath the surface. The value is relative to thickness scales with the local coordinate system transformation matrix of the mesh's node. [...]
+Attenuation Distance:
+Description: Average distance that light travels in the medium before interacting with a particle.
+Description/Detailed Description/Readme: Density of the medium given as the average distance that light travels in the medium before interacting with a particle. The value is given in world space. The attenuation distance is defined in world space and does not scale with the transformation matrix of the mesh's node.
+echadwick-artist
+commented
+Apr 3, 2021
+Copy link
+Copy Markdown
+Contributor
+I'm trying to resolve the appropriate attenuation settings for the hanging amber beads in the StainedGlassLamp asset.
+glTF Sample Viewer screenshot:
+Dimensions of the beads model, in z-up coordinate space. The node has no additional transform in glTF, it should be 1-to-1.
+Dimensions of a single bead (although all the beads are actually in a single mesh in the glTF):
+The current material. I'm just not sure what to use for thicknessFactor and attenuationDistance.
+So if I want the beads to show some attenuation on the thickest beads, would I use something like this?
+thicknessFactor: 1
+attenuationDistance: 0.013 (thickest depth across a single bead)
+I'm not using a thickness texture, thus I don't have per-texel values to scale, so I would want the mesh itself to determine thickness. In other words, I want the thickness to be per-bead. Is that right?
+proog128
+commented
+Apr 3, 2021
+Copy link
+Copy Markdown
+Contributor
+Author
+@echadwick-wayfair The thicknessFactor tells the renderer how large the geometry is, so the 0.013 must go into the thicknessFactor. A ray tracer would ignore this value, because it can infer it from the mesh. A rasterizer needs a correct thickness. It's crucial that the thicknessFactor matches the actual thickness of the geometry, otherwise the renderings will be inconsistent between rasterizer and ray tracer.
+Once thickness is set up, you can adjust the attenuationDistance and attenuationColor such that it has the intended look.
+Update contributor list
+77d55aa
+lexaknyazev
+reviewed
+Apr 5, 2021
+View reviewed changes
+Comment thread
+extensions/2.0/Khronos/KHR_materials_volume/schema/glTF.KHR_materials_volume.schema.json
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+emackey
+and others
+added 3 commits
+April 5, 2021 15:11
+More contributors
+e7cdd9a
+Fix maximum of attenuation color.
+b37c6af
+Clean up info about coordinate spaces and add more details regarding …
+…
+780f5b4
+```
+…thickness texture.
+```
+proog128
+commented
+Apr 6, 2021
+Copy link
+Copy Markdown
+Contributor
+Author
+Based on the feedback from yesterday I tried to improve the description of attenuation distance and the section about the thickness texture. Please have another look and let me know what you think.
+emackey
+commented
+Apr 6, 2021
+Copy link
+Copy Markdown
+Member
+Looks good to me. Thanks!
+echadwick-artist
+commented
+Apr 6, 2021
+Copy link
+Copy Markdown
+Contributor
+Thanks for the changes, the thicknessTexture is easier to understand now!
+Improve wording.
+87f3e4a
+Popov72
+commented
+Apr 8, 2021
+Copy link
+Copy Markdown
+Thickness Factor: Given in scene units. Scales with the transformation of the parent node(s), i.e., is given in "node space" (not sure if "node space" is a familiar term in glTF).
+For the "Scales with the transformation of the parent node(s)" part, should the spec indicates how to derive the final value from the x/y/z scaling values of the parent node(s)? In the non-uniform scaling case, should we take max(scaleX, scaleY, scaleZ) as the scale value to multiply thicknessFactor with? Or is it an implementation detail? And/or should the spec indicates that nodes with a thickness map should not have non-uniform scaling?
+Adding @emackey and @MiiBond as there is a discussion about this here
+lexaknyazev
+reviewed
+Apr 11, 2021
+View reviewed changes
+Comment thread
+extensions/2.0/Khronos/KHR_materials_volume/schema/glTF.KHR_materials_volume.schema.json
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Add boilerplate.
+a5f3f2f
+emackey
+commented
+Apr 14, 2021
+Copy link
+Copy Markdown
+Member
+We'll add a non-normative note discouraging folks from using nonuniform scales. That can go in a new PR when it's ready.
+Merging this. Status will remain "Draft" for at least a few more weeks, but it will be hosted in the main glTF repository.
+emackey
+merged commit 08100f6
+into
+KhronosGroup:master
+Apr 14, 2021
+donmccurdy
+mentioned this pull request
+Aug 24, 2021
+Manage KHR_materials_volume
+KhronosGroup/glTF-Blender-IO#1454
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+extension
+needs discussion
+Issue or PR requires working group discussion to resolve.
+12 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

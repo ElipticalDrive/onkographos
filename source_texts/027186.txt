@@ -1,0 +1,333 @@
+three.js - Volume rendering is more transparent from one direction that another - Stack Overflow
+current community
+chat
+blog
+Stack Overflow
+Meta Stack Overflow
+Stack Overflow Careers
+your communities
+Sign up or log in to customize your list.
+more stack exchange communities
+Stack Exchange
+sign up
+log in
+tour
+help
+Tour
+Start here for a quick overview of the site
+Help Center
+Detailed answers to any questions you might have
+Meta
+Discuss the workings and policies of this site
+stack overflow careers
+Stack Overflow
+Questions
+Tags
+Users
+Badges
+Unanswered
+Ask Question
+Take the 2-minute tour
+×
+Stack Overflow is a question and answer site for professional and enthusiast programmers. It's 100% free, no registration required.
+Volume rendering is more transparent from one direction that another
+up vote
+1
+down vote
+favorite
+I'm trying to get my head around volume rendering using three.js and ray marching GLSL. I've got some data I synthesised from a numpy array.
+The cube of data being rendered is more opaque on one side, graduating to being transparent on the other side - like this (ignore the wire frame, that's just for a bit of orientation)
+however, when you look at the cube from the more transparent end, the transparency seems to "block out" the less transparent end (hope that makes sense). Like this:
+I don't know if this is related, but I also have a problem that when the camera is slightly inside the cube, it stops rendering properly. It cuts off the bit nearest to the camera, like this:
+Is this a related issue, or is it just a limitation of the method.
+The code is here
+https://github.com/niallrobinson/test-volume-rendering/blob/master/viewer.htmlhttps://github.com/niallrobinson/test-volume-rendering/blob/master/viewer.js
+https://github.com/niallrobinson/test-volume-rendering/blob/master/viewer.html
+and the second pass shaders look like this:
+```
+<script id="vertexShaderFirstPass" type="x-shader/x-vertex">
+    varying vec3 worldSpaceCoords;
+    void main(){
+        //Set the world space coordinates of the back faces vertices as output.
+        worldSpaceCoords = position + vec3(0.5, 0.5, 0.5); //move it from [-0.5;0.5] to [0,1]
+        gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+    }
+</script>
+
+<script id="fragmentShaderFirstPass" type="x-shader/x-fragment">
+    varying vec3 worldSpaceCoords;
+    void main(){
+        //The fragment's world space coordinates as fragment output.
+        gl_FragColor = vec4( worldSpaceCoords.x , worldSpaceCoords.y, worldSpaceCoords.z, 1 );
+    }
+</script>
+
+
+<!-- second pass shaders -->
+<script id="vertexShaderSecondPass" type="x-shader/x-vertex">
+    varying vec3 worldSpaceCoords;
+    varying vec4 projectedCoords;
+
+    void main()
+    {
+        worldSpaceCoords = (modelMatrix * vec4(position + vec3(0.5, 0.5, 0.5), 1.0 )).xyz;
+        gl_Position = projectionMatrix *  modelViewMatrix * vec4( position, 1.0 );
+        projectedCoords =  projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+    }
+</script>
+
+<script id="fragmentShaderSecondPass" type="x-shader/x-fragment">
+    varying vec3 worldSpaceCoords;
+    varying vec4 projectedCoords;
+
+    uniform sampler2D firstPassTexture, dataTexture; //i.e. tex and cubeTex
+    uniform float steps;
+    uniform float alphaCorrection;
+    const int MAX_STEPS = 512;
+
+    vec3 dataDims = vec3(4, 4, 4);
+
+    vec4 sampleAs3DTexture(sampler2D tex, vec3 pos) {
+        // pos is in UV coords i.e. 0->1. We also want to interrogate out texture in the range 0->1
+        // however, our 3D dimensions are conceptually 4,4,4
+        float nTiles = dataDims.z;
+        float tileWidth = 1.0 / nTiles;
+        float p = pos.y * tileWidth + pos.x / nTiles;
+        float q = pos.z;
+
+        lowp vec4 sample = texture2D(tex, vec2(p, q)); //I think this fn might convert from 255 range to 0->1 range
+        vec4 returnSample = vec4(0.7, 0., 0., sample.x * alphaCorrection); // alpha is 255 in png so overwrite
+        return returnSample;
+    }
+
+    // max 2d size is 4096 x 4096
+
+    void main( void ) {
+        //Transform the coordinates it from [-1;1] to [0;1]
+        vec2 firstPassTexCoord = vec2(((projectedCoords.x / projectedCoords.w) + 1.0 ) / 2.0,
+                        ((projectedCoords.y / projectedCoords.w) + 1.0 ) / 2.0 );
+
+        //The back position is the world space position stored in the texture.
+        vec3 backPos = texture2D(firstPassTexture, firstPassTexCoord).xyz;
+
+        //The front position is the world space position of the second render pass.
+        vec3 frontPos = worldSpaceCoords;
+
+        //The direction from the front position to back position.
+        vec3 dir = backPos - frontPos;
+
+        float rayLength = length(dir);
+
+        //Calculate how long to increment in each step.
+        float delta = 1.0 / steps;
+
+        //The increment in each direction for each step.
+        vec3 deltaDirection = normalize(dir) * delta;
+        float deltaDirectionLength = length(deltaDirection);
+
+        //Start the ray casting from the front position.
+        vec3 currentPosition = frontPos;
+
+        //The color accumulator.
+        vec4 accumulatedColor = vec4(0.0);
+
+        //The alpha value accumulated so far.
+        float accumulatedAlpha = 0.0;
+
+        //How long has the ray travelled so far.
+        float accumulatedLength = 0.0;
+
+        //vec4 dataSample;
+        vec4 dataSample;
+
+        float alphaSample;
+
+        //Perform the ray marching iterations
+        for(int i = 0; i < MAX_STEPS; i++){
+            //Get the voxel intensity value from the 3D texture.    
+            dataSample = sampleAs3DTexture(dataTexture, currentPosition);
+
+            //Allow the alpha correction customization
+            alphaSample = dataSample.a;
+
+            //Perform the composition.
+            accumulatedColor += (1.0 - accumulatedAlpha) * dataSample * alphaSample;
+            //accumulatedColor += dataSample;
+
+            //Store the alpha accumulated so far.
+            accumulatedAlpha += alphaSample;
+
+            //Advance the ray.
+            currentPosition += deltaDirection;
+            accumulatedLength += deltaDirectionLength;
+
+            //If the length traversed is more than the ray length, or if the alpha accumulated reaches 1.0 then exit.
+            if(accumulatedLength >= rayLength || accumulatedAlpha >= 1.0 )
+                break;
+        }
+        gl_FragColor = accumulatedColor;
+    }
+
+</script>
+```
+Thanks in advance everyone
+EDIT: After a bit of experimentation, it seems that the problem is that only the outside of the cube is being rendered. If I put a blob of data in the middle of the cube, you don't see anything.
+EDIT: Infact, its only rendering data on the frontside surface. If I reverse the ray marching direction (i.e. change it to towards the camera), you can only view it on the backside surface
+three.js glsl webgl volume-rendering raymarching
+share|improve this question
+edited Feb 9 at 15:29
+asked Feb 6 at 15:54
+nrob
+1919
+1
+Your 3rd picture is simply the near plane on the camera. You can minimize the effect by using a smaller number in your camera definition, but don't make it too small or you'll get strange artifacts because of floating point precision errors.
+–
+Brendan Annable
+Feb 9 at 12:54
+thanks - that has made that clipping thing go away - good call. btw note the edit on the OP about only rendering the outside of the cube.
+–
+nrob
+Feb 9 at 15:15
+add a comment |
+1 Answer
+1
+active
+oldest
+votes
+up vote
+1
+down vote
+accepted
+Think its sorted! The data returned from the tex lookup was a vec4. That was then being used to increment accumulatedColor. I changed accumulatedColor to a vec3 and only incremented it by .xyz and that seemed to do the trick
+Thanks to everyone who took a look
+share|improve this answer
+answered Feb 9 at 16:31
+nrob
+1919
+add a comment |
+Not the answer you're looking for? Browse other questions tagged three.js glsl webgl volume-rendering raymarching or ask your own question.
+asked
+4 months ago
+viewed
+93 times
+active
+3 months ago
+Related
+11
+volume rendering (using glsl) with ray casting algorithm
+1
+THREE.js - How to view-align slices in volume rendering?
+0
+embed webgl in powerpoint or render animated gif from webgl
+6
+Three.js png texture - alpha renders as white instead as transparent
+0
+When removing lights from scene, currentLights value in renderer is not being decremented
+1
+Render transparencies correctly with z-buffer
+1
+Three.js Render Environment Map From Center
+3
+Volume rendering in WebGL
+2
+Volume rendering artefacts when looking along the z-plane
+1
+hazy artefact on OS X WebGL on sides of volume rendering
+Hot Network Questions
+A slave's tongue has been cut out. How can we restore her ability to speak?
+How viable is a party of only arcane casters?
+Why is zero the only infinitesimal real number?
+I think my 11 month old is afraid of his dad
+Primes Without 1's
+How to define a new counter independent of section
+Is there a name for the abbreviated syntax used in signs?
+Dragon breaking sound barriers unaided
+How do I create a teardrop in html?
+In the Film Master and Commander, why do they start towing their rowboats after they beat to quarters?
+Why did Luke want to join the Imperial Academy?
+Do the planets really orbit the Sun?
+Is it okay to leave early if my boss does?
+Could not get along with any advisor, is it ego?
+Why doesn't this magnetic perpetual motion machine work?
+Can I copy Steam game files from a Mac onto a PC?
+Is it ethical to publish homework?
+Arranging problem: 4 couples, 8 seats in a row... Am I making this too simple?
+Wordplay in name "Le coup du lapin"
+Eccentric Millionaire Probability Paradox
+The new rioters weapon of choice
+Why are male officers referred to by their superiors as 'Mister [surname]' whilst female officers typically aren't in Star Trek?
+Cluelessly searching for words II
+Why do undead have darkvision in 4E?
+more hot questions
+question feed
+lang-c
+tour
+help
+blog
+chat
+data
+legal
+privacy policy
+work here
+advertising info
+mobile
+contact us
+feedback
+Technology
+Life / Arts
+Culture / Recreation
+Science
+Other
+Stack Overflow
+Server Fault
+Super User
+Web Applications
+Ask Ubuntu
+Webmasters
+Game Development
+TeX - LaTeX
+Programmers
+Unix & Linux
+Ask Different (Apple)
+WordPress Development
+Geographic Information Systems
+Electrical Engineering
+Android Enthusiasts
+Information Security
+Database Administrators
+Drupal Answers
+SharePoint
+User Experience
+Mathematica
+Salesforce
+more (14)
+Photography
+Science Fiction & Fantasy
+Graphic Design
+Seasoned Advice (cooking)
+Home Improvement
+Personal Finance & Money
+Academia
+more (10)
+English Language & Usage
+Skeptics
+Mi Yodeya (Judaism)
+Travel
+Christianity
+Arqade (gaming)
+Bicycles
+Role-playing Games
+more (21)
+Mathematics
+Cross Validated (stats)
+Theoretical Computer Science
+Physics
+MathOverflow
+more (7)
+Stack Apps
+Meta Stack Exchange
+Area 51
+Stack Overflow Careers
+site design / logo © 2015 stack exchange inc; user contributions licensed under cc by-sa 3.0
+with attribution required
+rev 2015.6.9.2644

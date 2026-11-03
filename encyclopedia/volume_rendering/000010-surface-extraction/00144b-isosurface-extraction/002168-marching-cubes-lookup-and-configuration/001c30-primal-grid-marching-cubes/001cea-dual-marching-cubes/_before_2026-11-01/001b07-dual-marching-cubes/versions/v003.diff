@@ -1,0 +1,231 @@
+--- v002.md
++++ v003.md
+@@ -15,15 +15,15 @@
+     *   `size`: `usize` ($N$).
+     *   `primal_grid`: `PrimalGrid<D>` storing the input field values.
+-    *   `duals`: Array of two layers `[Vec<(Vec3, D)>; 2]`. Each layer has size $(N-1) \times (N-1)$. Each element is a tuple of `Vec3` (position) and `D` (distance/value) [S1, unofficial].
++    *   `duals`: Array of two layers `[Vec<(Vec3, D)>; 2]`. Each layer has size $(N-1) \times (N-1)$ [S1, unofficial]. Each element is a tuple of `Vec3` (position) and `D` (distance/value) [S1, unofficial].
+ *   **Intersection:** Contains `edges` (crossed edges), `is_out` (boolean flags), and `cell_indices` mapping edges to cells [S2, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Initialization:** Create `DualGrid` with size $N$. Initialize `duals` layers with size $(N-1) \times (N-1)$. Each element is initialized to `(Vec3::zero(), D::zero())` [S1, unofficial].
++1.  **Initialization:** Create `DualGrid` with size $N$ [S1, unofficial]. Initialize `duals` layers with size $(N-1) \times (N-1)$ [S1, unofficial]. Each element is initialized to `(Vec3::zero(), D::zero())` [S1, unofficial].
+ 2.  **Intersection Computation:** If an `Intersection` object is not provided, compute intersections from the grid at the given level without normals: `get_intersection(grid, level, false)` [S2, unofficial].
+-3.  **Traversal Setup:** Define `vertex_callback` taking `&[Vec3; 8]` (primal corners) and `&[D; 8]` (primal values) returning `Option<Vec3>`. Define `cube_callback` taking `&[(usize, usize, usize); 8]` (dual indices), `&[Vec3; 8]` (dual corners), and `&[D; 8]` (dual values) [S1, unofficial].
+-4.  **Dual Vertex Computation:** For each primal cube, compute the dual vertex position and value. If `vertex_callback` is `Some`, call it with `primal_corners` and `primal_values`. Otherwise, default to `lerp(primal_corners[0], primal_corners[6], 0.5)` [S1, unofficial]. Calculate the index in the `duals` layer based on `z % 2`. Store `(vertex, lerp(primal_values[0], primal_values[6], 0.5))` at `duals[z % 2][y * size_minus_one + x]` [S1, unofficial].
+-5.  **Callback Invocation:** If `x > 0 && y > 0 && z > 0`, iterate `i` from 0 to 7. Compute `keys[i]` using `CORNERS` offsets. Retrieve corner and value from `duals` using `(z + CORNERS[i][2]) % 2` as layer index. Call `cube_callback` with `keys`, `corners`, and `values` [S1, unofficial].
+-6.  **Mesh Generation:** Build a dual mesh from per-cell vertices. One quad is created around every crossed edge from the per-cell vertices (aligned with `cell_indices`), split into triangles and welded into an indexed mesh [S2, unofficial]. Alternatively, for a simple splatting algorithm: visit each edge of the lattice that has a sign change. Determine which patch the edge lies in for each of the four voxels sharing this edge. Compute the dual vertex value (assumed to be the centroid of the midpoints of the edges associated with this vertex) for each of the four voxels. Render the quad patch connecting these four dual vertices [S3, unofficial].
++3.  **Traversal Setup:** Define `vertex_callback` taking `&[Vec3; 8]` (primal corners) and `&[D; 8]` (primal values) returning `Option<Vec3>` [S1, unofficial]. Define `cube_callback` taking `&[(usize, usize, usize); 8]` (dual indices), `&[Vec3; 8]` (dual corners), and `&[D; 8]` (dual values) [S1, unofficial].
++4.  **Dual Vertex Computation:** For each primal cube, compute the dual vertex position and value [S1, unofficial]. If `vertex_callback` is `Some`, call it with `primal_corners` and `primal_values` [S1, unofficial]. Otherwise, default to `lerp(primal_corners[0], primal_corners[6], 0.5)` [S1, unofficial]. Calculate the index in the `duals` layer based on `z % 2` [S1, unofficial]. Store `(vertex, lerp(primal_values[0], primal_values[6], 0.5))` at `duals[z % 2][y * size_minus_one + x]` [S1, unofficial].
++5.  **Callback Invocation:** If `x > 0 && y > 0 && z > 0`, iterate `i` from 0 to 7 [S1, unofficial]. Compute `keys[i]` using `CORNERS` offsets [S1, unofficial]. Retrieve corner and value from `duals` using `(z + CORNERS[i][2]) % 2` as layer index [S1, unofficial]. Call `cube_callback` with `keys`, `corners`, and `values` [S1, unofficial].
++6.  **Mesh Generation:** Build a dual mesh from per-cell vertices [S2, unofficial]. One quad is created around every crossed edge from the per-cell vertices (aligned with `cell_indices`), split into triangles and welded into an indexed mesh [S2, unofficial]. Alternatively, for a simple splatting algorithm: visit each edge of the lattice that has a sign change [S3, unofficial]. Determine which patch the edge lies in for each of the four voxels sharing this edge [S3, unofficial]. Compute the dual vertex value (assumed to be the centroid of the midpoints of the edges associated with this vertex) for each of the four voxels [S3, unofficial]. Render the quad patch connecting these four dual vertices [S3, unofficial].
+ 7.  **Normals Handling:** If intersection data includes normals, patch vertices are placed using the same QEF (Quadratic Error Function) as dual contouring to reproduce sharp features; without normals, the centroid of the patch's crossings is used [S2, unofficial].
+ 
+@@ -32,5 +32,5 @@
+ ```python
+ import math
+-from typing import List, Tuple, Optional
++from typing import List, Tuple, Optional, Callable
+ 
+ class Vec3:
+@@ -40,5 +40,4 @@
+     def __sub__(self, o): return Vec3(self.x-o.x, self.y-o.y, self.z-o.z)
+     def __mul__(self, s): return Vec3(self.x*s, self.y*s, self.z*s)
+-    def __truediv__(self, s): return Vec3(self.x/s, self.y/s, self.z/s)
+     def lerp(self, o, t): return self*(1-t) + o*t
+     def cross(self, o): return Vec3(self.y*o.z-self.z*o.y, self.z*o.x-self.x*o.z, self.x*o.y-self.y*o.x)
+@@ -49,55 +48,58 @@
+ 
+ def get_intersection(grid: List[List[List[float]]], level: float, normals: bool) -> dict:
++    """Computes edge crossings and returns 4 surrounding voxels per edge [G]."""
+     edges = []
+-    for z in range(len(grid)-1):
+-        for y in range(len(grid[0])-1):
+-            for x in range(len(grid[0][0])-1):
+-                vals = [grid[z+dz][y+dy][x+dx] for dz in (0,1) for dy in (0,1) for dx in (0,1)]
+-                for i in range(12):
+-                    e0, e1 = [(0,0,0),(1,0,0),(0,1,0),(0,0,1),(1,1,0),(1,0,1),(0,1,1),(1,1,1)][i*2], [(0,0,0),(1,0,0),(0,1,0),(0,0,1),(1,1,0),(1,0,1),(0,1,1),(1,1,1)][i*2+1]
+-                    if (vals[e0] - level) * (vals[e1] - level) < 0:
+-                        edges.append({"voxels": [(x,y,z), (x+1,y,z), (x,y+1,z), (x,y,z+1)], "edge_id": i})
++    nx, ny, nz = len(grid[0][0]), len(grid[0]), len(grid)
++    for z in range(nz - 1):
++        for y in range(ny - 1):
++            for x in range(nx - 1):
++                # Check the 3 edges meeting at (x,y,z) along +x, +y, +z
++                for dx, dy, dz in [(1,0,0), (0,1,0), (0,0,1)]:
++                    v0 = grid[z+dz][y+dy][x+dx]
++                    v1 = grid[z][y][x]
++                    if (v0 - level) * (v1 - level) < 0:
++                        # Find 4 voxels sharing this edge
++                        voxels = []
++                        for ox in range(-1, 2, 2):
++                            for oy in range(-1, 2, 2):
++                                for oz in range(-1, 2, 2):
++                                    voxels.append((x+ox, y+oy, z+oz))
++                        edges.append({"voxels": voxels})
+     return {"edges": edges, "is_out": [], "cell_indices": []}
+ 
+-def weld_and_split(vertices: List[Vec3], indices: List[int]) -> Tuple[List[Vec3], List[int]]:
+-    # Merge duplicate vertices and ensure consistent winding
++def weld_vertices(vertices: List[Vec3], indices: List[int]) -> Tuple[List[Vec3], List[int]]:
++    """Merge duplicate vertices and return indexed mesh [G]."""
+     unique_verts = []
+     vert_map = {}
+-    for v in vertices:
+-        key = (round(v.x, 6), round(v.y, 6), round(v.z, 6))
+-        if key not in vert_map:
+-            vert_map[key] = len(unique_verts)
+-            unique_verts.append(v)
+     new_indices = []
+     for i in range(0, len(indices), 3):
+-        a, b, c = vert_map[(round(vertices[indices[i]].x,6), round(vertices[indices[i]].y,6), round(vertices[indices[i]].z,6))], \
+-                   vert_map[(round(vertices[indices[i+1]].x,6), round(vertices[indices[i+1]].y,6), round(vertices[indices[i+1]].z,6))], \
+-                   vert_map[(round(vertices[indices[i+2]].x,6), round(vertices[indices[i+2]].y,6), round(vertices[indices[i+2]].z,6))]
+-        # Fix winding if inward
+-        v0, v1, v2 = unique_verts[a], unique_verts[b], unique_verts[c]
+-        if (v1-v0).cross(v2-v0).dot(v2-v0) < 0:
+-            a, b = b, a
+-        new_indices.extend([a, b, c])
++        a, b, c = indices[i], indices[i+1], indices[i+2]
++        def get_idx(v):
++            key = (round(v.x, 6), round(v.y, 6), round(v.z, 6))
++            if key not in vert_map:
++                vert_map[key] = len(unique_verts)
++                unique_verts.append(v)
++            return vert_map[key]
++        new_indices.extend([get_idx(vertices[a]), get_idx(vertices[b]), get_idx(vertices[c])])
+     return unique_verts, new_indices
+ 
+-def dual_marching_cubes(grid: List[List[List[float]]], level: float = 0.0, method: str = "vega", intersection: Optional[dict] = None) -> Tuple[List[Vec3], List[int]]:
++def dual_marching_cubes(
++    grid: List[List[List[float]]],
++    level: float = 0.0,
++    method: str = "vega",
++    intersection: Optional[dict] = None,
++    vertex_callback: Optional[Callable] = None,
++    cube_callback: Optional[Callable] = None
++) -> Tuple[List[Vec3], List[int]]:
+     N = len(grid)
+     size_minus_one = N - 1
+ 
+-    # Initialize DualGrid
+-    duals = [[None] * (size_minus_one * size_minus_one) for _ in range(2)]
+-    for layer in range(2):
+-        for i in range(len(duals[layer])):
+-            duals[layer][i] = (Vec3(0.0, 0.0, 0.0), 0.0)
+-
+-    # Compute intersections if not provided
++    # Initialize DualGrid: 2 layers of size (N-1)*(N-1) [S1, unofficial]
++    duals = [[(Vec3(0.0, 0.0, 0.0), 0.0) for _ in range(size_minus_one * size_minus_one)] for _ in range(2)]
++    
+     if intersection is None:
+         intersection = get_intersection(grid, level, normals=False)
+-
+-    # Helper for default vertex position
+-    def default_vertex_callback(primal_corners: List[Vec3], primal_values: List[float]) -> Vec3:
+-        return lerp(primal_corners[0], primal_corners[6], 0.5)
+-
+-    # Step 1: Compute Dual Vertices
++        
++    # Step 1: Compute Dual Vertices [S1, unofficial]
+     for z in range(N - 1):
+         for y in range(N - 1):
+@@ -110,24 +112,27 @@
+                             primal_corners.append(Vec3(x + dx, y + dy, z + dz))
+                             primal_values.append(grid[z + dz][y + dy][x + dx])
+-
+-                vertex = default_vertex_callback(primal_corners, primal_values)
+-                value = primal_values[0] * 0.5 + primal_values[6] * 0.5
+-
++                            
++                # Dual Vertex Computation [S1, unofficial]
++                if vertex_callback is not None:
++                    vertex = vertex_callback(primal_corners, primal_values)
++                else:
++                    vertex = lerp(primal_corners[0], primal_corners[6], 0.5)
++                    
++                value = lerp(primal_values[0], primal_values[6], 0.5)
++                
++                # Store in dual grid based on z % 2 [S1, unofficial]
+                 layer_idx = z % 2
+-                duals[layer_idx][y * size_minus_one + x] = (vertex, value)
+-
+-    # Step 2: Invoke Cube Callback & Build Mesh
++                idx = y * size_minus_one + x
++                duals[layer_idx][idx] = (vertex, value)
++                
++    # Step 2: Invoke Cube Callback [S1, unofficial]
+     vertices = []
+     indices = []
+-
+-    CORNERS = [
+-        [0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0],
+-        [0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1]
+-    ]
+-
++    CORNERS = [[0,0,0], [1,0,0], [0,1,0], [1,1,0], [0,0,1], [1,0,1], [0,1,1], [1,1,1]]
++    
+     for z in range(N - 1):
+         for y in range(N - 1):
+             for x in range(N - 1):
+-                # Boundary condition: callback only if x>0, y>0, z>0
++                # Boundary condition: callback only if x>0, y>0, z>0 [S1, unofficial]
+                 if x > 0 and y > 0 and z > 0:
+                     keys = []
+@@ -140,29 +145,28 @@
+                         corners.append(duals[layer][idx][0])
+                         values.append(duals[layer][idx][1])
+-                    # cube_callback(keys, corners, values) would generate triangles here
+-                    pass
+-
+-    # Step 3: Build Mesh from Dual Vertices (from crossed edges)
++                    if cube_callback is not None:
++                        cube_callback(keys, corners, values)
++                        
++    # Step 3: Splatting Algorithm / Mesh Generation [S2, unofficial][S3, unofficial]
+     for edge in intersection["edges"]:
+-        voxels = edge.get("voxels", [])
+         quad_vertices = []
+-        for voxel in voxels:
++        for voxel in edge["voxels"]:
+             vx, vy, vz = voxel
+             layer = vz % 2
+             idx = vy * size_minus_one + vx
+             quad_vertices.append(duals[layer][idx][0])
+-
++            
+         if len(quad_vertices) == 4:
+             v0, v1, v2, v3 = quad_vertices
++            # Ensure consistent winding
+             normal = (v1 - v0).cross(v2 - v0)
+             if normal.dot(v3 - v0) < 0:
+                 v2, v3 = v3, v2
+-            v_idx_start = len(vertices)
++            v_start = len(vertices)
+             vertices.extend([v0, v1, v2, v3])
+-            indices.extend([v_idx_start, v_idx_start + 1, v_idx_start + 2, v_idx_start, v_idx_start + 2, v_idx_start + 3])
+-
+-    # Weld vertices and split quads into triangles
+-    vertices, indices = weld_and_split(vertices, indices)
+-
++            indices.extend([v_start, v_start+1, v_start+2, v_start, v_start+2, v_start+3])
++            
++    # Weld vertices and split quads into triangles [S2, unofficial]
++    vertices, indices = weld_vertices(vertices, indices)
+     return vertices, indices
+ ```
+@@ -179,9 +183,9 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1, unofficial].
++*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+ *   **Performance:** Not given in the sources.
+-*   **Strengths:** Eliminates poorly shaped triangles common in Marching Cubes [S3, unofficial]. Maintains topological correctness and separating properties. Handles multiple surface sheets per cell better than Dual Contouring [S2, unofficial].
+-*   **Limitations:** The mesh ends half a cell short of the grid boundary [S2, unofficial]. Requires careful handling of boundary conditions. The dual topology can be complex to manage for certain operations.
++*   **Strengths:** Eliminates poorly shaped triangles common in Marching Cubes [S3, unofficial]. Maintains topological correctness and separating properties [S3, unofficial]. Handles multiple surface sheets per cell better than Dual Contouring [S2, unofficial].
++*   **Limitations:** The mesh ends half a cell short of the grid boundary [S2, unofficial]. Requires careful handling of boundary conditions [S1, unofficial].
+ *   **When to use:** When quad meshes are preferred for rendering or further processing, and when the input data has sharp features that can be captured with normals.
+ *   **When not to use:** When strict boundary adherence is required without post-processing, or when the overhead of dual grid management is prohibitive.

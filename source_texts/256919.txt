@@ -1,0 +1,531 @@
+GPU-based system matrix calculation for SPECT and PET system, especially for complex geometry systems. Home made and worked well on my systems. :) - Multi-GPU Monte Carlo system matrix (140.5/511 keV), element visualizer, ScatterGen fixes and scatter model v2 by zxc18772763792 · Pull Request #2 · zxc18772763792/GPU-Based-System-Matrix-Calculation-for-SPECT-PET
+
+Multi-GPU Monte Carlo system matrix (140.5/511 keV), element visualizer, ScatterGen fixes and scatter model v2 by zxc18772763792 · Pull Request #2 · zxc18772763792/GPU-Based-System-Matrix-Calculation-for-SPECT-PET · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+zxc18772763792
+commented
+Oct 13, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+Two new modules (MCGen_MultiGPU/, Visualizer/), a new default scatter model and bug fixes in ScatterGen_RayTracing_CircularHole, and an example that compares the analytic matrix with the Monte Carlo one component by component.
+ScatterGen: scatter model v2 (default; -model legacy keeps the old kernels)
+First-order (single Compton) scatter, integrated over the volume where the scatter happens.
+Crystal scatter:
+The Compton interactions of the beam in crystal j (PE[j,v]·μ_C/μ_PE) are spread over points filling j, with Gauss–Legendre nodes across j.
+Each point is weighted by the transmission of the incoming beam to it: collimator layers and holes, the crystals on the way, and j itself.
+From each point, the scattered photon goes to the visible faces of detector crystal i. The faces are divided into cells of equal angle (≤ 0.1 rad) seen from the scatter point.
+Each cell has an exact solid angle, Klein–Nishina angle, energy and window. The window is averaged over sub-points where the energies cross a window edge.
+The photon is attenuated in j and in the crystals in between, then photo-absorbed in i. The chord through i is sub-sampled where it drops to 0 towards the face edges.
+Collimator scatter:
+Scatter points fill the tungsten: a thin shell around every hole, plus the rest of the plate for penetrable plates.
+The plate grid (24×24) excludes holes and shells per sub-point.
+Incoming and scattered photons are attenuated exactly through all layers and their holes, using the same hole grid as PEGen.
+Validation in examples/analytic_vs_mc (reference: MCGen with physics = single_scatter, i.e. the same physics definition):
+v2 / first-order MC
+crystal scatter
+collimator scatter
+140.5 keV, photopeak / wide window
+0.972 / 0.977
+0.950 / 0.953
+511 keV, photopeak / wide window
+0.993 / 0.993
+0.993 / 1.000
+About 1.3 % of the 140.5 keV crystal-scatter deficit comes from the PE matrix it is normalised to (0.987 of the MC).
+The 140.5 keV collimator values are within the MC noise (±4 %).
+The crystal-scatter shape TVD at 140.5 keV dropped from 0.26/0.22 to 0.06/0.05.
+The legacy kernels were off by factors of 0.002–24 on the same example.
+Earlier v2 deficit: the previous v2 was 5 % low in wide windows. That was five larger, partly cancelling errors:
+the incoming beam was assumed uniform in j
+coarse face patches at the window edge near 90° (−53 %…+9 % per scatter point)
+the chord at the face edges
+the scatter-point grid
+aliasing of the hole exclusion in the plate grid (+5.5 %)
+The example ReadMe gives the details.
+Independent checks:
+Plate without holes: 0.1 % from a numpy reference.
+Single hole: 2.12e-10, between the numpy (2.05e-10) and MC (2.20e-10 ± 6 %) references.
+Single voxels: per-crystal-pair checks against MC event logs.
+Cost: on 4 CPU cores this example takes 206–6947 s for crystal scatter and 1938–4806 s for collimator scatter (the previous v2 took 20–608 s and 809–1880 s; legacy ~20 s).
+The GPU version compiles with 179–208 registers per thread and no spills, so 16×16 blocks fit.
+Faster settings (S2_CELL_ANG, S2_XT_MIN, S2_BK_N) and their accuracy cost are documented.
+ScatterGen fixes
+Energy resolution of scattered photons: FWHM/E ∝ E^-1/2 (sqrt(E0/E')). It was inverted, in all three modules.
+Rotations: each rotation uses its own PE matrix.
+Buffer overrun: fixed the per-rotation output copy in scatter().
+-components: also writes the crystal-scatter and collimator-scatter matrices separately.
+Plate edges: unchanged by design. The analytic model assumes entry through the entrance window, and the MC sets the real shielding (shield_outside_collimator). This is documented.
+MCGen_MultiGPU/: multi-GPU Monte Carlo photon transport (140.5 keV / 511 keV)
+Reads the same Params_*.dat files and writes the same float32 [rotation][detector][voxel] layout.
+Physics:
+photoelectric absorption with K fluorescence
+Klein–Nishina Compton scattering
+Rayleigh scattering with form factors
+an xraylib material database (1–1100 keV)
+Gaussian energy windows
+Tracking: delta tracking with exact flights through the holes.
+Multi-GPU:
+voxel chunks distributed over the GPUs
+per-history Philox streams, so results don't depend on the GPU count
+a CPU backend running the same physics code
+Unbiased importance sampling: a defensive mixture of the whole assembly, the crystal block and the hole apertures. The figure of merit improves 5–10×.
+Physics modes: full, primary_pe (the analytic PE definition) and single_scatter (the analytic scatter definition).
+Optional outputs: components, relative errors, spectrum, tracks and a summary JSON.
+Visualizer/, tools/, examples/
+Visualizer/: WebGL2 element visualizer with explicit axis directions and orientation tests, plus serve.py for large matrices.
+tools/:
+make_demo_params.py (now with --window)
+compare_sysmat.py
+analytic_cpu/: the original analytic CUDA kernels compiled for the CPU, for checks without a GPU
+examples/analytic_vs_mc/run_example.sh [tc99m|511] [gpu|cpu]: runs on one GPU or CPU and produces a report and detector images. Reference CPU results are committed.
+Validation (CPU; this environment has no GPU)
+MC vs exact integral: 1.00004 ± 0.0001.
+Full physics vs an independent numpy MC: all |z| ≤ 2.1.
+MC vs the analytic PE kernel: 0.987 at 140.5 keV (0.996 with a finer grid) and 0.998 at 511 keV.
+Scatter model v2 vs single-scatter MC: see the table above.
+Beyond first order: under full physics, scatter/primary is about 2.1× the first-order value (multiple scatter, Rayleigh, K x-rays, same-crystal interactions), so MC components are recommended when these matter.
+CUDA: MCGen and ScatterGen compile and link with nvcc 13.4. Not yet run on a GPU.
+Test plan
+Build on a GPU machine: PEGen_RayTracing_CircularHole/bd, ScatterGen_RayTracing_CircularHole/bd, cd MCGen_MultiGPU && ./bd
+cd examples/analytic_vs_mc && ./run_example.sh tc99m gpu && ./run_example.sh 511 gpu, then compare run_*/report.md with reference_cpu/report_*.md
+Check the ScatterGen v2 GPU run time on the real system geometry; relax the S2_* quadrature macros if needed (see the example ReadMe for the accuracy cost)
+Run MCGen with -gpus 0 and then with all GPUs to confirm the results match and check throughput
+python3 Visualizer/serve.py --data examples/analytic_vs_mc/run_tc99m and open http://127.0.0.1:8765
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01UJ5ErMGH6TcvGuxY12Qgyr
+claude
+added 3 commits
+October 13, 2026 15:21
+Add multi-GPU Monte Carlo system matrix generator (MCGen_MultiGPU)
+…
+cc935f6
+```
+Monte Carlo photon transport for SPECT/PET system matrices, tuned for
+140.5 keV and 511 keV. Reads the same four parameter files and writes the
+same float32 [rotation][detector][voxel] layout as the analytic modules.
+
+- Shared host/device core (mc_core.h): Philox4x32-10 per-history streams,
+  photoelectric + K fluorescence, Klein-Nishina Compton, Rayleigh with
+  form factors, delta tracking with region majorants, exact flight through
+  holes, uniform grids for holes and crystals, per-crystal readout with
+  Gaussian energy-window response, primary/collimator/crystal-scatter
+  classes.
+- Multi-GPU backend: one host thread per GPU pulling voxel chunks from a
+  shared queue, adaptive launches, float per-launch tallies flushed into
+  double accumulators, cudaMemcpy2D gather. Results do not depend on the
+  number of GPUs; rotation ranges can be split across machines.
+- CPU backend running the same physics (also used for validation).
+- Unbiased direction biasing (defensive mixture of projected rectangles).
+- Material database generated with xraylib (1-1100 keV) for W, Pb, W
+  alloys, Au, Pt, NaI, CsI, LYSO, LSO, BGO, GAGG, LaBr3, CeBr3, CZT, ...
+- Example configs for Tc-99m and 511 keV, physics self tests, and
+  tools/make_demo_params.py + tools/compare_sysmat.py.
+
+Validated against an exact integral (MC/exact = 1.00004 +- 0.0001) and
+element by element against the analytic PE kernel at 140.5 and 511 keV.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UJ5ErMGH6TcvGuxY12Qgyr
+```
+Add browser-based element visualizer
+…
+12b358e
+```
+Zero-dependency WebGL2 viewer (works from file:// or via serve.py) for
+collimator plates, holes, crystals and the FOV, with picking, section
+planes, colouring by attenuation / resolution / flag / system-matrix
+projection, an x-z layout map, streamed system-matrix rows, columns and
+sensitivity maps, Monte Carlo spectra and photon tracks, geometry
+consistency checks, and a Chinese / English interface. serve.py (stdlib
+only) serves a data directory with HTTP Range and strided reads so
+multi-GB matrices on a remote GPU server can be inspected over SSH.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UJ5ErMGH6TcvGuxY12Qgyr
+```
+Document the Monte Carlo module and visualizer; ignore build outputs
+…
+fe28012
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UJ5ErMGH6TcvGuxY12Qgyr
+```
+zxc18772763792
+mentioned this pull request
+Oct 13, 2026
+Fix energy-resolution scaling for Compton-scattered photons in scatter kernels
+#3
+Merged
+claude
+added 6 commits
+October 13, 2026 15:52
+Visualizer: make every axis direction explicit and test it
+…
+e0855fe
+```
+- Orientation gizmo that turns with the camera, +x/+y/+z labels at the
+  axis tips, axis length rounded and stated, live note of which world
+  axis points screen-right / screen-up.
+- Preset views named by viewing direction (along +y, -y, -z, -x) and
+  matched to the 2D views; the old "side" preset looked from -x so +y
+  pointed left. Selectable vertical (orbit) axis z or y.
+- Voxel image: physical / numpy / MATLAB orientation modes with axis
+  arrows, (0,0) corner label and an arrow towards the detector for the
+  current rotation; selected voxel marked in 3D.
+- Layout map states its viewing direction and can be mirrored (-y).
+- tests/orientation.test.js: pixel-level checks of all of the above,
+  including the crystal rotation sign against the computation code.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UJ5ErMGH6TcvGuxY12Qgyr
+```
+MC: hole-aperture importance sampling, independent full-physics check
+…
+09657c2
+```
+- New mixture component that aims photons at the entrance apertures of
+  the collimator holes each voxel can see through (channel acceptance,
+  up to 32 holes per voxel, list depends only on voxel and rotation).
+  Weights use the full mixture density, so the estimator stays unbiased
+  (checked MC-vs-MC with different seeds and against the analytic
+  kernel). Figure of merit: 7x (parallel hole) and 5-10x (pinhole) at
+  140.5 keV; it does not pay off when septal penetration dominates, so
+  hole_bias/detector_bias default to "auto" (on when the target plate
+  has mu*T >= 5 at E0).
+- tests/reference_mc.py: separate numpy Monte Carlo (own geometry, cone
+  source, Kahn's Klein-Nishina) reproducing photopeak, Compton, edge-to-
+  peak and total deposit efficiencies of a crystal within statistics at
+  140.5 and 511 keV.
+- ReadMe: sampling scheme, FOM table, new config keys, validation.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UJ5ErMGH6TcvGuxY12Qgyr
+```
+ScatterGen: fix energy-resolution scaling and per-rotation bugs
+…
+1e03892
+```
+- Scattered-photon energy resolution now scales as FWHM/E ~ E^-1/2
+  (sqrt(E0/E')): the old sqrt(E'/E0) made resolution better at lower
+  energy. Fixed in all three scatter modules.
+- Each rotation's crystal scatter now uses that rotation's PE matrix
+  (main passed rotation 0's matrix every time).
+- scatter() copied numRotation x the per-rotation buffer into dst, which
+  read past the host buffers and wrote past `out` on the last rotation.
+- New -components flag: also write Scatter_Crystal_SysMat_* and
+  Scatter_Collimator_SysMat_*.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UJ5ErMGH6TcvGuxY12Qgyr
+```
+Add analytic-vs-MC component comparison example and CPU analytic harness
+…
+2f79b51
+```
+- tools/analytic_cpu: compiles the original PEGen/ScatterGen CUDA kernels
+  (extracted verbatim) for the CPU, for checks without a GPU.
+- examples/analytic_vs_mc: single-GPU (or CPU) pipeline comparing the PE,
+  crystal-scatter and collimator-scatter components with MCGen_MultiGPU
+  at 140.5 keV and 511 keV.
+- make_demo_params.py: --window for a fixed energy window.
+- Docs: state the entrance-window convention of the analytic model and
+  that the MC needs the real shielding.
+- MC: read the fluorescence key in every mode (no false warning).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UJ5ErMGH6TcvGuxY12Qgyr
+```
+Example: check the PE kernel with the parameter-file materials
+…
+071d78a
+```
+With the database materials, primary_pe also kills photons on Rayleigh
+scattering, which the analytic coefficients do not contain (~3 % at
+140.5 keV in 6 mm NaI). With the same coefficients the analytic PE matrix
+agrees with the MC to 1.4 % (0.4 % with a finer sub-element grid).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UJ5ErMGH6TcvGuxY12Qgyr
+```
+Example: analytic vs MC results at 140.5 keV and 511 keV
+…
+afac0a3
+```
+CPU runs of the original kernels against MCGen (1e9 histories per run):
+- PE kernel: analytic/MC 0.987 (140.5 keV; 0.996 with a finer grid) and
+  0.998 (511 keV) with the same coefficients. (With database materials
+  Rayleigh lowers the primary_pe MC by 4.8 % / 17 %.)
+- Analytic PE omits same-crystal Compton+absorption full-energy events:
+  -6 % in NaI at 140.5 keV, -25 % in LYSO at 511 keV.
+- Crystal scatter: ~0 in the photopeak window (centre-to-centre ~90 deg),
+  5-9x too high in wide windows (theta x phi solid angle counts the
+  crystal thickness twice).
+- Collimator scatter: 7-20x too high at 140.5 keV, 5-8x too low at
+  511 keV (no tungsten attenuation of the scattered photon, no scatter
+  in the bulk of a penetrable plate).
+Reference reports and detector images are in reference_cpu/; the report
+labels the wide window from the MC summary.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UJ5ErMGH6TcvGuxY12Qgyr
+```
+zxc18772763792
+changed the title
+Add multi-GPU Monte Carlo system matrix generator (140.5/511 keV) and element visualizer
+Add multi-GPU Monte Carlo system matrix (140.5/511 keV), element visualizer, ScatterGen fixes and analytic-vs-MC example
+Oct 14, 2026
+claude
+added 5 commits
+October 14, 2026 01:37
+ScatterGen: volume-integrated single-scatter model (v2); MC single_sc…
+…
+903bf7a
+```
+…atter mode
+
+ScatterGen_RayTracing_CircularHole now uses scatter model v2 by default
+(-model legacy keeps the old kernels):
+- crystal scatter: scatter points fill the scatter crystal, weighted by
+  the attenuation of the incoming beam; the scattered photon goes to
+  patches of the visible faces of the detector crystal (exact rectangle
+  solid angles, Klein-Nishina angle and energy per patch), attenuated in
+  the scatter crystal and the crystals in between, photo-absorbed in the
+  detector crystal; chord and shadowing averaged over entry points.
+- collimator scatter: a thin shell around every hole (exponential depth
+  quadrature) plus the rest of the plate, with exact transmission through
+  all layers and holes (hole hash grid as in PEGen) on both paths.
+- mu(E'): photoelectric ~ E^-3, Compton ~ Klein-Nishina total.
+
+MCGen_MultiGPU: physics = single_scatter (one Compton at most, PE-only
+scoring, no re-absorption in the scatter crystal), the exact first-order
+reference for the analytic model.
+
+tools/analytic_cpu runs the new kernels (-model, -skip for validation);
+the example adds the mc_single run and SCATTER_MODEL. Validation numbers
+follow in the example ReadMe.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UJ5ErMGH6TcvGuxY12Qgyr
+```
+ScatterGen v2: fix absorption across far faces, hole-rim quadrature
+…
+515ac93
+```
+Checked against independent references (a numpy volume integral for a
+plate without holes, a numpy next-event estimator for one hole) and the
+single-scatter Monte Carlo:
+- Absorption in the detector crystal and shadowing by its neighbours are
+  averaged over at least S2_CHORD_N^2 entry points per face. With one
+  patch per distant face the centre-ray chord overestimated absorption
+  (collimator scatter at 511 keV was ~20 % high).
+- Hole shell: y nodes cluster at the front and back faces (rim scatter
+  comes from within ~1/mu of them) and depth nodes mix two attenuation
+  scales, each node weighted by the summed densities. The old midpoint
+  nodes missed the rims (one hole, 14 deg off axis: 0.45 of the reference,
+  now 1.12; central voxel of the 140 keV example: 0.90 -> 0.94 of MC).
+- Scatter points whose incoming weight is < 1e-5 of the largest are
+  skipped (same result, ~1/3 less time).
+- scatter_cpu: -skip and -holes options for validation runs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UJ5ErMGH6TcvGuxY12Qgyr
+```
+Example ReadMe: scatter model v2 results against the first-order MC
+…
+09e0fae
+```
+Model v2 vs physics=single_scatter (photopeak / wide window):
+crystal scatter 0.979 / 0.950 at 140.5 keV and 1.005 at 511 keV,
+collimator scatter 0.946 / 0.945 and 1.036; legacy kernels 0.002-24x.
+Also documents the physics beyond first order (multiple scatter,
+Rayleigh, K x-rays, same-crystal interactions) and the run time.
+The 511 keV wide-window numbers follow when that run finishes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UJ5ErMGH6TcvGuxY12Qgyr
+```
+Example: 140.5 keV reference report with scatter model v2
+…
+787a43a
+```
+The flood figure now compares the analytic components with the first
+MC run (mc_single, the reference of the model) and names it in the
+panel titles. MC ReadMe points to the v2 validation.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UJ5ErMGH6TcvGuxY12Qgyr
+```
+Example: 511 keV results with scatter model v2; accuracy in ReadMe
+…
+ca67903
+```
+511 keV wide window vs the single-scatter MC: crystal scatter 0.952,
+collimator scatter 0.998 (photopeak: 1.005 / 1.036). The 5 % deficit of
+crystal scatter in wide windows does not change with finer quadrature
+(0.2 %), so it is a model approximation (uniform irradiation of the
+scatter crystal). Reference report and figure regenerated.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UJ5ErMGH6TcvGuxY12Qgyr
+```
+zxc18772763792
+changed the title
+Add multi-GPU Monte Carlo system matrix (140.5/511 keV), element visualizer, ScatterGen fixes and analytic-vs-MC example
+Multi-GPU Monte Carlo system matrix (140.5/511 keV), element visualizer, ScatterGen fixes and scatter model v2
+Oct 14, 2026
+claude
+added 5 commits
+October 14, 2026 11:17
+Scatter model v2: fix the 5 % wide-window crystal-scatter deficit
+…
+0f7a809
+```
+Crystal scatter (crystalScatterV2):
+- weight the scatter points in crystal j by the transmission of the
+  incoming beam to each point (collimator layers and holes, crystals on
+  the way, j itself) instead of the attenuation inside j only
+- faces of the detector crystal are divided into cells of equal angle
+  seen from the scatter point (<= 0.1 rad), with exact solid angle,
+  Klein-Nishina angle, energy and window per cell; at 511 keV the lower
+  edge of a wide window lies near 90 deg, the direction of the
+  neighbouring crystals, and the old patches (at most 8x8 per face) gave
+  -53 %...+9 % per scatter point
+- the chord through the detector crystal, which drops to 0 near the
+  face edges the rays run towards, is sub-sampled in those cells
+- Gauss-Legendre nodes across the scatter crystal, at least 2 points
+
+Collimator scatter: the collimator attenuation is traced per patch and
+scaled to the energy of every cell; the bulk grid (24x24) excludes holes
+and shells per sub-point instead of per cell centre (aliasing, +5.5 %),
+Gauss-Legendre nodes through the thickness.
+
+511 keV wide window, single voxel, against MC physics=single_scatter:
+crystal scatter 0.953 -> 0.990, collimator scatter 0.99 -> 0.99-1.01.
+Example result tables are being recomputed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UJ5ErMGH6TcvGuxY12Qgyr
+```
+Scatter model v2: average the energy window over sub-points near its …
+…
+32b650c
+```
+…edges
+
+In the photopeak window all of the crystal scatter comes from scatter
+angles around the lower window edge (about 27 deg at 511 keV, angular
+width of the resolution about 0.13 rad), so the window evaluated at the
+centre of 0.1 rad face cells was 3 % low (511 keV photopeak, single
+voxel: 0.963 -> 0.991 of the first-order MC; wide window unchanged).
+The window is averaged over 3x3 sub-points only in patches whose
+energies reach an edge zone of the window and change by more than
+sigma/4 across a cell, which keeps the cost of far faces unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UJ5ErMGH6TcvGuxY12Qgyr
+```
+Example: 140.5 keV reference report with the corrected scatter quadra…
+…
+e151ee0
+```
+…ture
+
+Crystal scatter against the first-order MC: photopeak 0.979 -> 0.972,
+wide window 0.950 -> 0.977; per-voxel 5-95 % range [0.90, 1.06] ->
+[0.92, 1.02] and [0.87, 1.05] -> [0.94, 1.01]; shape TVD 0.26 -> 0.06
+and 0.22 -> 0.05.  Collimator scatter 0.946 -> 0.950, 0.945 -> 0.953.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UJ5ErMGH6TcvGuxY12Qgyr
+```
+Example: 511 keV reference report and ReadMe for the corrected scatte…
+…
+0c60694
+```
+…r quadrature
+
+Scatter model v2 against the first-order MC (crystal / collimator):
+140.5 keV photopeak 0.972 / 0.950, wide 0.977 / 0.953; 511 keV
+photopeak 0.993 / 0.993, wide 0.993 / 1.000 (before: 0.979 / 0.946,
+0.950 / 0.945, 1.005 / 1.036, 0.952 / 0.998).  The example ReadMe lists
+the five errors behind the old 5 % deficit and how they partly cancelled,
+the single-geometry checks rerun with the final kernels (plate without
+holes 0.1 % from the numpy reference, single hole 2.12e-10 between the
+numpy and MC references), the new run times (2.5-11x slower on the CPU)
+and the macros that trade accuracy for speed.  Main ReadMe: accuracy
+within 3 % (crystal) and 5 % (collimator) at 140.5 keV, 1 % at 511 keV.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UJ5ErMGH6TcvGuxY12Qgyr
+```
+Example: per-step wall times and MC throughput in run_<case>/timing.md
+…
+73c468f
+```
+run_example.sh records the wall time of PEGen, the two ScatterGen runs and
+the four MC runs (GPU or CPU mode) and the MC histories/s from the logs, so
+one single-GPU run gives the efficiency table.  The example ReadMe lists the
+CPU reference throughput (1e9 histories per MC run: 3.8-10.7e6 hist/s on 4
+threads).  MCGen ReadMe: accuracy of scatter model v2 updated.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UJ5ErMGH6TcvGuxY12Qgyr
+```
+zxc18772763792
+marked this pull request as ready for review
+October 15, 2026 07:29
+Merge branch 'main' into claude/adoring-ramanujan-mhfdmb
+c0a52e7
+zxc18772763792
+merged commit 1248cf6
+into
+main
+Oct 15, 2026
+zxc18772763792
+pushed a commit
+that referenced
+this pull request
+Oct 17, 2026
+Fix build: duplicate declaration left by merging two energy-resolutio…
+…
+95769ad
+```
+…n fixes
+
+PR #2 and PR #3 both fixed the energy-resolution scaling of scattered
+photons; the merge kept both lines, so energy_resolution_detector_scatterphoton
+was declared twice in the same scope and none of the three ScatterGen
+modules compiled (nvcc: "has already been declared in the current scope").
+Keep one declaration with the explanatory comment.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UJ5ErMGH6TcvGuxY12Qgyr
+```
+zxc18772763792
+mentioned this pull request
+Oct 17, 2026
+Code review: fix the build, PE-kernel regressions and many bugs; tidy the repository
+#4
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,168 @@
+Contribute to taojin-6/volumetric_kit_recon development by creating an account on GitHub.
+
+feat(tsdf): adaptive voxel hashing refined by depth residual, with a live viewer by taojin-6 · Pull Request #169 · taojin-6/volumetric_kit_recon · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+taojin-6
+commented
+Oct 5, 2026
+Copy link
+Copy Markdown
+Owner
+Re-opens #162, which was merged by accident and is reverted by #168. These are the same five commits re-applied on top of the revert (new SHAs, identical tree). The base is the revert branch, so the diff shows the full change; once #168 merges, GitHub retargets this PR to main.
+Adaptive resolution built from the existing infrastructure, as a tier API: tsdf::AdaptiveGrid fuses into a stack of ordinary VoxelBlockGrids at halving voxel sizes (2 cm, 1 cm, 5 mm by default) and gives a block finer voxels only where the depth is systematically off the coarser level's surface. adaptive_viewer drives it end to end on Replica, one Orbbec camera or the four-camera rig. This replaces the retired octree trial (#138–#155, tag archive/hierarchical-octree-trial); DECISIONS.md records why.
+tsdf::AdaptiveGrid (include/volumetric_kit/recon/tsdf/adaptive_grid.hpp)
+create(device, allocator, AdaptiveGridConfig), fuse(std::vector<FrameInput>) — the integrator's own set type, host or device depth, optional colour — owned_blocks(level) for the culled extract, level(l), stats(l), sensor_floor(), set_refine_offset(). Pimpl, move-only, Status/Result.
+The coarsest level fuses every frame. A finer level allocates only from depth masked to refined coarser blocks (GPU mask) and integrates the whole frame, so it still carves free space. A block's parent is its coordinate halved in the coarser hash; nothing stores a pointer. Each level allocates and integrates once per set and grows its map when it fills. Every level is a complete grid, so stamps, GC, extraction and the codec work on it unchanged.
+Criterion: a depth point's residual is the coarser TSDF at it over the TSDF's gradient length (distance along the normal, independent of view angle). Residuals sum per 2×2×2-voxel cell across sets; a check turns each cell into its systematic offset, mean² − variance / n, so sensor noise cancels. The median coarsest block's offset is the sensor's floor. A block refines when its offset exceeds floor + refine_offset and its remaining noise; it coarsens after calm_checks checks below floor + half of it, or once its surface is gone (Dynamic cleared it). A block merely out of view keeps its detail. Coarsening removes the finer blocks it leaves.
+Kernels: adaptive_residual.comp, adaptive_offset.comp, adaptive_mask.comp (+ adaptive_common.glsl).
+adaptive_viewer meshes each level's owned blocks and draws them together. Live frames are prepared on the GPU (GpuFramePrep, H.265). Options: dynamic TSDF with weight cap 20 by default live, --color 3840x2160, a live threshold slider, level colours, mouse orbit/pan/zoom.
+Measured (Apple M5 Max, Release)
+room0, 400 preloaded frames, all three levels, re-meshed and textured whenever the renderer took the last mesh: 7.2 ms host per fused frame (171 remeshes); 571 of 8,692 2 cm blocks refine over a 0.14 mm floor.
+Offline prototype study (not in this PR), eps = 1 mm: 0.86× the voxels of uniform 1 cm; mesh within 0.26 / 0.46 mm (accuracy / coverage p95) of uniform 5 mm, against 0.79 / 0.86 mm for uniform 1 cm.
+Femto Mega, one camera: per-frame residual noise ~3.4 mm; floor ~3 mm (host-registered depth) / ~7 mm (GPU-prepared), equal at 2 cm and 1 cm. About 6% of 2 cm blocks refine at eps = 1 mm.
+Four-camera rig, GPU path: ~24–29 sets/s; ~16 ms per set at 1280×720 colour, ~23 ms at 4K (camera-capped at 25 fps).
+Validation
+Release builds warning-clean: full build with tests, examples and the Orbbec/FFmpeg viewers; and a viewer build without Orbbec (the viewer CI leg's configuration).
+ctest: 62/62 pass, including the new recon_tsdf_adaptive_grid (wall + sphere: refines only near the sphere, coarsens and removes finer blocks once it leaves, refuses invalid configs/frames, move semantics). It runs with the Khronos layer where installed and fails on any validation error; it passes with synchronization validation forced on locally.
+Live runs: Replica, one camera and the four-camera rig.
+Known limits / next
+Refinement cannot tell calibration error or ToF bias from shape: on the rig (calibration currently stale — a camera was moved) overlapping floor refines. Next: check that a refined block's offset actually fell at the finer level, and revert it otherwise.
+A small object cut by block boundaries splits its evidence (a block is judged from two sampled cells).
+Seams between levels are not stitched; the viewer textures from the set's first camera only.
+Each level submits its own allocate/integrate; owned_blocks compacts on the host.
+🤖 Generated with Claude Code
+taojin-6
+and others
+added 5 commits
+October 5, 2026 00:43
+feat(examples): refine uniform grid levels by depth residual, live
+…
+db097a8
+```
+Fuse into ordinary uniform grids at halving voxel sizes (2 cm, 1 cm,
+5 mm) and give a block finer voxels where the depth is systematically
+off the coarser grid's surface. Residuals are measured along the normal
+(TSDF over its gradient length), summed per cell over frames so sensor
+noise cancels, and judged against the median block's offset, the
+sensor's own floor. A finer level allocates from depth masked to refined
+blocks and integrates the full depth; its parent is key / 2 in the
+coarser hash.
+
+adaptive_viewer meshes each level's own blocks through the culled
+extract and draws them together, from Replica, one Orbbec camera or a
+rig on the GPU frame path, with a live threshold slider and level
+colours.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+docs: record the adaptive-resolution design and retire the octree trial
+…
+cfb7ca0
+```
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+feat(tsdf): adaptive grid refined by depth residual
+…
+3cc5ac9
+```
+Promote the adaptive levels from the viewer prototype into the tsdf
+tier as tsdf::AdaptiveGrid: a stack of ordinary VoxelBlockGrids at
+halving voxel sizes, fed the integrator's FrameInput sets (host or
+device depth, optional colour), each level allocating and integrating
+once per set and growing its map when it fills. owned_blocks(level)
+lists what each level meshes for the culled extract.
+
+A refined block coarsens when its offset stays near the sensor floor,
+or once its surface is gone (Dynamic cleared it); a block merely out of
+view keeps its detail. A block is judged from two sampled cells.
+
+adaptive_viewer now drives the tier and keeps only its level-colour
+paint. A GPU test covers refinement near detail, coarsening after the
+detail leaves, refusals and moves, with validation errors counted.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+docs: document tsdf::AdaptiveGrid
+…
+c72e1ab
+```
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+fix(tsdf): address the adaptive grid review
+…
+1205a4a
+```
+- Keep each coarse level's cell sums in a `residual` grid attribute, so
+  removal, clearing, GC and growth keep them with their blocks rather
+  than handing a reused slot another block's history or resetting on
+  growth; tag the refinement flags with their block's coordinate.
+- Halve a cell's count and scale its sums by the same ratio, so an odd
+  count keeps its mean; stop a cell at 8192 samples so its sum of squares
+  stays inside an int.
+- Refuse a set's colour before a check or the residuals change state,
+  through the new TsdfIntegrator::check.
+- Refuse min_cells outside 1..64; treat zero depth as missing.
+- Stage host depth once per set, compact each level once per check and
+  read back only the listed blocks' scores; time the grow as "resize".
+- Share the tier's depth camera struct and the viewers' OrbitView and
+  ScrollInput; fix adaptive_viewer's single-camera calibration lookup;
+  drop its unused "adaptive upload" row; mark deferred work TODO(tsdf).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+taojin-6
+self-assigned this
+Oct 5, 2026
+taojin-6
+deleted the branch
+main
+October 5, 2026 07:24
+taojin-6
+closed this
+Oct 5, 2026
+taojin-6
+reopened this
+Oct 5, 2026
+taojin-6
+changed the base branch from
+revert-162-feat/adaptive-levels-viewer
+to
+main
+October 5, 2026 07:25
+This was referenced Oct 8, 2026
+feat(mesh): MeshExchange, one fuse-to-render handoff, replacing the viewers' copies
+#202
+Merged
+ci: drop the Ubuntu 22.04 leg
+#212
+Merged
+taojin-6
+mentioned this pull request
+Oct 16, 2026
+ci: the build step honours the runner's parallel level
+#247
+Merged
+5 tasks done
+This was referenced Oct 27, 2026
+feat(examples): rig_viewer prints a per-set table, rig counters and atlas-copy time at exit
+#297
+Merged
+feat(sensor): H.265 4K25 Orbbec defaults; colour exposure from the calibration, written at open and read back
+#298
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

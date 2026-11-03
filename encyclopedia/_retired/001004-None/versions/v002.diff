@@ -1,0 +1,246 @@
+--- v001.md
++++ v002.md
+@@ -4,46 +4,44 @@
+ 
+ ## Overview
+-Proposal Network Sampling is a method for importance sampling in volume rendering that directly estimates the Probability Density Function (PDF) along a ray using a coarse neural network, known as the proposal network [S1]. It solves the problem of inefficient uniform sampling by concentrating samples on high-contribution areas (such as surfaces) while spreading them in empty or occluded regions, providing more accurate transmittance estimation than spatial skipping methods [S1]. It differs from its parent, Hierarchical Sampling, by explicitly learning a PDF estimator via gradient descent rather than relying solely on pre-computed static weights, and from siblings like Inverse Opacity Calculation by using a neural network to model the density distribution rather than analytical inversion [S1].
++Proposal Network Sampling is a method for importance sampling in volume rendering that directly estimates the Probability Density Function (PDF) along a ray using a coarse neural network, known as the proposal network [S1]. It solves the problem of inefficient uniform sampling by concentrating samples on high-contribution areas (such as surfaces) while spreading them in empty or occluded regions, providing more accurate transmittance estimation than spatial skipping methods [S1]. It builds on [Hierarchical Sampling (Inverse CDF Sampling)](973-hierarchical-sampling-inverse-cdf-sampling.md) by learning the sampling distribution dynamically rather than relying on static weights.
+ 
+ ## How it works
+-The method uses a coarse Multi-Layer Perceptron (MLP) to predict volume density $\sigma$ at discrete sample points along a ray. These densities are used to construct a piece-wise constant PDF and a piece-wise linear transmittance estimator, which are then used to draw samples via inverse CDF sampling.
+-
+-**Inputs:**
+-- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$.
+-- Near and far clipping distances $t_n, t_f$.
+-- Number of coarse samples $N_c$.
+-- Proposal Network (coarse MLP) $\mathcal{M}_c$.
+-
+-**Outputs:**
+-- A set of fine sample distances $\{t_j\}$ drawn from the estimated PDF.
+-
+-**Data Structures:**
+-- **Proposal Network:** A standard MLP taking 3D position $\mathbf{x}$ as input and outputting scalar density $\sigma$.
+-- **Sample Points:** A sorted array of distances $t_1, t_2, \dots, t_{N_c}$ along the ray.
+-- **Densities:** An array $\sigma_i = \mathcal{M}_c(\mathbf{o} + t_i \mathbf{d})$.
++**Inputs:** Ray origin $\mathbf{o}$ and direction $\mathbf{d}$, near and far clipping distances $t_n, t_f$, number of coarse samples $N_c$, and a proposal network (coarse MLP) $\mathcal{M}_c$ [S1].
++**Outputs:** A set of fine sample distances $\{t_j\}$ drawn from the estimated PDF [S1].
++**Data Structures:** 
++- **Proposal Network:** A standard MLP taking 3D position $\mathbf{x}$ as input and outputting scalar volume density $\sigma$ [S1].
++- **Sample Points:** A sorted array of distances $t_1, t_2, \dots, t_{N_c}$ along the ray [S1].
++- **Densities:** An array $\sigma_i = \mathcal{M}_c(\mathbf{o} + t_i \mathbf{d})$ [S1].
+ 
+ **Steps:**
++1. Generate $N_c$ sample distances $t_i$ uniformly along the ray segment $[t_n, t_f]$ [G].
++2. Evaluate the proposal network at each sample position to obtain densities $\sigma(t_i)$ [S1].
++3. Compute the transmittance estimator $T(t_i) = \exp(-\sum_{j=1}^{i-1} \sigma(t_j) \Delta t_j)$, where $\Delta t_j$ is the distance between consecutive samples [S1].
++4. Compute the discrete PDF estimator $p(t_i) = \sigma(t_i) \exp(-\sigma(t_i) \Delta t_i)$ [S1].
++5. Update the transmittance estimator through gradient descent using the volumetric rendering loss [S1].
++6. Draw $N_f$ uniform random numbers $u_k \in [0, 1]$ and use inverse CDF sampling to find fine sample distances $\{t'_k\}$ [G].
+ 
+-1.  **Sample Positions:** Generate $N_c$ sample distances $t_i$ uniformly or according to a previous distribution along the ray segment $[t_n, t_f]$.
+-2.  **Evaluate Density:** Query the proposal network for each sample position to obtain densities $\sigma(t_i)$ [S1].
+-3.  **Compute Transmittance Estimator:** Calculate the transmittance $T(t_i)$ at each sample point. The transmittance represents the probability of light passing through the volume up to that point. The update rule for the transmittance estimator during optimization is derived from the density:
+-    $$ T(t_i) = \exp\left(-\sum_{j=1}^{i-1} \sigma(t_j) \Delta t_j\right) $$
+-    where $\Delta t_j$ is the distance between sample $j$ and $j+1$ (or half-distances if using midpoints) [S1]. Note: In some implementations, this is updated via gradient descent through the rendering loss, effectively maintaining an estimator that minimizes the difference between the rendered color and the ground truth [S1].
+-4.  **Compute PDF Estimator:** Construct the discrete PDF $p(t_i)$ for each bin. The PDF is defined as the probability of absorption occurring in the interval associated with $t_i$:
+-    $$ p(t_i) = \sigma(t_i) \Delta t_i \exp\left(-\sum_{j=1}^{i-1} \sigma(t_j) \Delta t_j\right) $$
+-    Simplified, this is often expressed as:
+-    $$ p(t_i) = \sigma(t_i) \exp(-\sigma(t_i) \Delta t_i) \cdot T(t_i) \quad \text{(approximate local form)} $$
+-    However, the standard definition for the probability mass of the $i$-th interval given the piece-wise constant assumption is:
+-    $$ p(t_i) = \sigma(t_i) \Delta t_i \cdot T(t_i) $$
+-    where $T(t_i)$ is the transmittance arriving at $t_i$ [S1].
+-5.  **Normalize PDF:** Ensure $\sum_i p(t_i) = 1$. If the proposal network outputs unnormalized densities, normalization is required.
+-6.  **Inverse CDF Sampling:** Compute the cumulative distribution function (CDF) from the PDF:
+-    $$ CDF(t_i) = \sum_{j=1}^{i} p(t_j) $$
+-    Draw $N_f$ uniform random numbers $u_k \in [0, 1]$. For each $u_k$, find the interval $i$ such that $CDF(t_{i-1}) \leq u_k < CDF(t_i)$ and interpolate the sample distance $t'_k$ within that interval.
+-7.  **Fine Rendering:** Use the sampled distances $\{t'_k\}$ to query the fine network (if present) and render the final color.
++**Formulas:**
++- Transmittance estimator: $T(t_i) = \exp(-\sum_{j=1}^{i-1} \sigma(t_j) \Delta t_j)$, where $T(t_1) = 1.0$ [S1].
++- PDF estimator: $p(t_i) = \sigma(t_i) \exp(-\sigma(t_i) \Delta t_i)$ [S1].
++- Cumulative Distribution Function (CDF): $CDF(t_i) = \sum_{j=1}^{i} p(t_j)$ [G].
++- Inverse CDF interpolation: $t'_k = t_{i} + (t_{i+1} - t_{i}) \frac{u_k - CDF(t_i)}{CDF(t_{i+1}) - CDF(t_i)}$ for the interval $i$ where $CDF(t_i) \leq u_k < CDF(t_{i+1})$ [G].
++
++**Parameters:**
++- Dilation factor $\epsilon_k$ for resampling level $k$: $\epsilon_k = \frac{a}{\prod_{k'=1}^{k-1} n_{k'}} + b$, where $n_{k'}$ is the sample count at level $k'$ [S2].
++- Hyperparameter $a = 0.5$ determines dilation relative to expected bin size [S2].
++- Hyperparameter $b = 0.0025$ determines dilation in absolute terms [S2].
++- Typical values for $N_c$ and $N_f$: Not given in the sources.
++
++**Edge Cases and Pitfalls:**
++- **Aliasing:** The piece-wise linearity assumption for estimating transmittance along the ray introduces aliasing effects (z-aliasing) [S1].
++- **No Skipping:** Samples are always spread out throughout the entire space without any skipping, which can be inefficient in large empty regions [S1].
++- **Rotationally Aliased Proposal:** The proposal MLP is supervised only on rays corresponding to input pixels, leading to rotational aliasing artifacts that can be mitigated by histogram dilation [S2].
+ 
+ **Pseudocode:**
++```python
++import math
++import random
+ 
+-```python
+ def proposal_network_sampling(ray_origin, ray_direction, t_near, t_far, n_coarse, proposal_mlp, n_fine):
+     """
+@@ -62,91 +60,62 @@
+         fine_samples: (n_fine,) array of sampled distances along the ray.
+     """
+-    # Step 1: Generate coarse sample positions
+-    # Uniform sampling along the ray for initial proposal
+-    t_coarse = np.linspace(t_near, t_far, n_coarse)
+-    
+-    # Step 2: Evaluate density using proposal network
+-    # Positions in 3D space
+-    positions = ray_origin + t_coarse[:, np.newaxis] * ray_direction[np.newaxis, :]
+-    sigma = proposal_mlp(positions) # Shape: (n_coarse,)
+-    
+-    # Step 3: Compute Transmittance Estimator T(t_i)
+-    # T(t_i) = exp(- sum_{j=1}^{i-1} sigma(t_j) * dt_j)
+-    # dt is the distance between samples. For uniform sampling, dt is constant.
+-    dt = t_coarse[1] - t_coarse[0]
+-    
+-    # Cumulative sum of sigma * dt
+-    # We need the integral of sigma from start to t_i
+-    # cumulative_sigma_dt[i] = sum_{j=0}^{i-1} sigma[j] * dt
+-    cumulative_sigma_dt = np.cumsum(sigma * dt)
+-    
+-    # Transmittance at each point i is exp(-cumulative_sigma_dt[i])
+-    # Note: T(t_0) should be 1.0 (no attenuation before first sample)
+-    T = np.exp(-np.concatenate(([0.0], cumulative_sigma_dt[:-1])))
+-    
+-    # Step 4: Compute PDF p(t_i)
+-    # p(t_i) = sigma(t_i) * dt * T(t_i)
+-    # This represents the probability mass of the interval ending at t_i (or centered at t_i)
+-    # Using the definition from [S1]: p(t_i) = sigma(t_i) * exp(-sigma(t_i)*dt) is a local approximation
+-    # But for hierarchical sampling, we need the mass of the bin.
+-    # Standard volumetric rendering probability for bin i:
+-    # p_i = T(t_i) * (1 - exp(-sigma(t_i) * dt))
+-    # Approximation for small dt: p_i approx T(t_i) * sigma(t_i) * dt
+-    
+-    # Using the exact form for piece-wise constant density:
+-    # Probability of absorption in interval [t_i, t_{i+1}] is T(t_i) - T(t_{i+1})
+-    # T(t_{i+1}) = T(t_i) * exp(-sigma(t_i) * dt)
+-    # So p_i = T(t_i) * (1 - exp(-sigma(t_i) * dt))
+-    
+-    transmittance_out = T * np.exp(-sigma * dt)
+-    pdf = T - transmittance_out
+-    
++    # Step 1: Generate coarse sample distances uniformly along the ray
++    dt = (t_far - t_near) / n_coarse
++    t_coarse = [t_near + i * dt for i in range(n_coarse)]
++
++    # Step 2: Evaluate proposal network to get densities
++    positions = [(ray_origin[0] + t * ray_direction[0],
++                  ray_origin[1] + t * ray_direction[1],
++                  ray_origin[2] + t * ray_direction[2]) for t in t_coarse]
++    sigma = [proposal_mlp(pos) for pos in positions]
++
++    # Step 3: Compute transmittance estimator T(t_i)
++    # T(t_i) = exp(- sum_{j=1}^{i-1} sigma(t_j) * dt)
++    T = [1.0] * n_coarse
++    cumulative = 0.0
++    for i in range(1, n_coarse):
++        cumulative += sigma[i-1] * dt
++        T[i] = math.exp(-cumulative)
++
++    # Step 4: Compute PDF estimator p(t_i)
++    # p(t_i) = sigma(t_i) * exp(-sigma(t_i) * dt)
++    pdf = [sigma[i] * math.exp(-sigma[i] * dt) for i in range(n_coarse)]
++
+     # Step 5: Normalize PDF
+-    pdf_sum = np.sum(pdf)
++    pdf_sum = sum(pdf)
+     if pdf_sum > 0:
+-        pdf = pdf / pdf_sum
++        pdf = [p / pdf_sum for p in pdf]
+     else:
+-        # Fallback to uniform if network fails
+-        pdf = np.ones(n_coarse) / n_coarse
+-        
++        pdf = [1.0 / n_coarse] * n_coarse
++
+     # Step 6: Compute CDF
+-    cdf = np.cumsum(pdf)
+-    # Ensure CDF ends at 1.0
+-    cdf[-1] = 1.0
+-    
+-    # Step 7: Inverse CDF Sampling for fine samples
+-    u = np.random.uniform(0, 1, n_fine)
+-    
+-    # Find indices in CDF
+-    # np.searchsorted returns indices where u should be inserted to maintain order
+-    indices = np.searchsorted(cdf, u, side='right') - 1
+-    indices = np.clip(indices, 0, n_coarse - 2) # Clamp to valid intervals
+-    
+-    # Interpolate within the interval
+-    cdf_prev = cdf[indices]
+-    cdf_next = cdf[indices + 1]
+-    t_prev = t_coarse[indices]
+-    t_next = t_coarse[indices + 1]
+-    
+-    # Linear interpolation in CDF space
+-    # t_sample = t_prev + (t_next - t_prev) * (u - cdf_prev) / (cdf_next - cdf_prev)
+-    denom = cdf_next - cdf_prev
+-    # Avoid division by zero
+-    denom = np.where(denom == 0, 1.0, denom)
+-    
+-    fine_samples = t_prev + (t_next - t_prev) * (u - cdf_prev) / denom
+-    
++    cdf = [0.0] * n_coarse
++    cdf[0] = pdf[0]
++    for i in range(1, n_coarse):
++        cdf[i] = cdf[i-1] + pdf[i]
++
++    # Step 7: Inverse CDF sampling for fine samples
++    fine_samples = []
++    for _ in range(n_fine):
++        u = random.uniform(0.0, 1.0)
++        # Find interval i such that cdf[i] <= u < cdf[i+1]
++        idx = 0
++        while idx < n_coarse - 1 and cdf[idx] < u:
++            idx += 1
++        idx = min(idx, n_coarse - 2)
++        # Linear interpolation within the interval
++        t_prev = t_coarse[idx]
++        t_next = t_coarse[idx + 1]
++        cdf_prev = cdf[idx]
++        cdf_next = cdf[idx + 1]
++        denom = cdf_next - cdf_prev
++        if denom == 0:
++            t_sample = t_prev
++        else:
++            t_sample = t_prev + (t_next - t_prev) * (u - cdf_prev) / denom
++        fine_samples.append(t_sample)
++
+     return fine_samples
+ ```
+-
+-**Parameters:**
+-- $N_c$: Number of coarse samples. Typical values range from 32 to 128 depending on scene complexity [S1].
+-- $N_f$: Number of fine samples. Typically 64-256 [S1].
+-- Dilation factor $\epsilon$: Used in variants to reduce aliasing. $a=0.5, b=0.0025$ [S2].
+-
+-**Edge Cases and Pitfalls:**
+-- **Aliasing:** The piece-wise linearity assumption for transmittance estimation introduces aliasing effects (z-aliasing) [S1].
+-- **No Skipping:** Unlike spatial skipping methods, samples are always spread out throughout the entire space, which can be inefficient in large empty regions [S1].
+-- **Rotationally Aliased Proposal:** The proposal MLP is supervised only on rays corresponding to input pixels, leading to rotational aliasing artifacts. This is mitigated by histogram dilation [S2].
+ 
+ ## Subtopics
+@@ -157,5 +126,5 @@
+ - **Method:**
+     1. Compute probability density $\hat{p}_i = \hat{w}_i / (\hat{s}_{i+1} - \hat{s}_i)$ from histogram $(\hat{s}, \hat{w})$ [S2].
+-    2. Dilate by computing $\max_{s-\epsilon \leq s' < s+\epsilon} \hat{\boldsymbol{p}}_{\hat{\boldsymbol{s}}}(s')$, where $\hat{\boldsymbol{p}}_{\hat{\boldsymbol{s}}}(s)$ is the interpolation into the step function defined by $\hat{s}, \hat{p}$ [S2].
++    2. Dilate by computing $\max_{s-\epsilon \leq s' < s+\epsilon} \hat{\boldsymbol{p}}_{\hat{\mathbf{s}}}(s')$, where $\hat{\boldsymbol{p}}_{\hat{\mathbf{s}}}(s)$ is the interpolation into the step function defined by $\hat{s}, \hat{p}$ [S2].
+     3. Construct new intervals with endpoints $\text{sort}(\hat{s} \cup \hat{s} - \epsilon \cup \hat{s} + \epsilon)$ [S2].
+     4. Compute max of all intervals in the expanded set [S2].
+@@ -167,10 +136,10 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N_c + N_f)$ per ray, where $N_c$ is the number of coarse samples and $N_f$ is the number of fine samples. The proposal network evaluation is $O(N_c)$.
+-- **Memory Complexity:** $O(N_c)$ to store densities and transmittance values.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
+ - **Measured Performance:** Provides more accurate transmittance estimation than spatial skipping, concentrating samples on high-contribution areas [S1]. However, it is less efficient in large empty regions because it does not skip empty space [S1].
+ - **Strengths:** Accurate transmittance estimation; adapts to scene content via learned PDF; compatible with hierarchical sampling [S1].
+ - **Limitations:** Introduces aliasing due to piece-wise linearity assumption; samples are always spread out, leading to higher sample counts in empty space compared to spatial skipping [S1].
+-- **When to use:** When high-quality rendering is required and the scene has complex geometry or varying density, and computational budget allows for denser sampling in empty regions.
++- **When to use:** When high-quality rendering is required and the scene has complex geometry or varying density, and computational budget allows for denser sampling in empty regions [S1].
+ - **When not to use:** When real-time performance is critical and the scene has large empty volumes, where spatial skipping (e.g., Occupancy Grid) would be more efficient [S1].
+ 

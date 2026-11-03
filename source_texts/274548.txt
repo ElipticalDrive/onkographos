@@ -1,0 +1,544 @@
+最近「ちょうどこれ欲しかったんだよ」という記事を見つけた.
+[【Unity】ComputeShaderでランタイムにSDFマップを生成するエクスペリメント](https://techblog.kayac.com/unity_advent_calendar_2018_23)
+
+**SDF (Signed Distance Field)** というのは、まぁ、つまりアレだ、
+**ビットマップなのに輪郭がイイ感じにキレイにレンダリングできる魔法のテクニック** だ [^1].
+
+[^1]: 詳細はリンク先を読んでいただきたい.
+
+*「Unity の [Text Mesh Pro](https://assetstore.unity.com/packages/essentials/beta-projects/textmesh-pro-84126) がやってるようなやつ」* 
+
+と言えば、「あぁあれね」と思う人もいるだろう. 
+
+
+## 今回のテーマ
+
+
+GPUの世界では割と苦手分野だったフォントレンダリングが、SDF を駆使すれば自由自在になる.
+
+素晴らしいテクニックだが **弱点** があって、それは **前処理が必要** なことだ.
+あらかじめ元の画像から **SDF画像** を作っておく必要がある.
+
+![Slide2.jpg](https://qiita-image-store.s3.amazonaws.com/0/140877/580b0755-1834-ffbf-5618-135250b073d3.jpeg)
+
+**何千何万の文字**を持つ我々東洋人にとって **事前に文字を作っておく**というのは**微妙に面倒**な話だ.
+
+前処理なのは、当然**事前にやっておかないと重たいから**だ.
+この **SDF生成をシェーダーで実装することで高速化しよう** というのが本稿のテーマだ.
+
+
+
+前述の記事が同じテーマなのだが、私にとって **残念な点が3つ** ある.
+
+* あちらは **Unity** で実装しているが、私は **OpenGL ES / WebGL** で動かしたい. 
+* あちらは **コンピュートシェーダー** を使っているが、私はどこにでもある普通の **フラグメントシェーダー** で動かしたい.
+* あちらは **丁寧に図を使って説明** してくれているが、**私の頭が悪くてイマイチ何言ってるのかわからない** .
+
+
+幸いなことに、あちらさんも参照したソースコードを紹介してくれている.
+アルゴリズムというのは、案外ソースコード読むのが一番理解が早かったりする.
+
+というわけで、私も [SDF Texture Generator](https://catlikecoding.com/sdf-toolkit/docs/texture-generator/) [^2]を参考に GLSL で SDF を Generate してみることにする .
+
+[^2]: 対象コードは MITライセンスなので商用利用も安心だ. 私が書いた GLSL コードも MIT ということにしておくので、商用・非商用問わず使っていただいて構わない.
+
+
+## 1. 初期化
+
+### Pixel クラス
+
+**SDFTextureGenerator.cs** では、1ピクセルごとに以下のような情報を記憶・計算する.
+
+```cs
+private class Pixel {
+    public float alpha, distance;
+    public Vector2 gradient;
+    public int dX, dY;
+}
+```
+
+シェーダーで値の記憶はできない[^6].
+フラグメントシェーダーを使う場合、一旦テクスチャという形で出力することになる. 
+RGBA の代わりに `vec4(dX, dY, distance, alpha)` を1ピクセルとして出力するのがちょうどよい.
+残りの `gradient` を MRT(Multiple render targets) でもう一枚のテクスチャに出力することにする.
+
+[^6]: 制限がある、というべきか. 語弊があるかもしれないが、端的に言いにくいのでわかっている人は適当に読み流してほしい.
+
+
+### Generate() メソッド
+
+**SDFTextureGenerator.cs** の main 関数ともいうべきメソッドである.
+
+```cs:SDFTextureGenerator.cs
+        :
+    // 図形の内側に向かって行う処理
+    if(maxInside > 0f){
+        for(y = 0; y < height; y++){
+            for(x = 0; x < width; x++){
+                pixels[x, y].alpha = 1f - source.GetPixel(x, y).a;
+            }
+        }
+        ComputeEdgeGradients();
+        GenerateDistanceTransform();
+        if(postProcessDistance > 0f){
+            PostProcess(postProcessDistance);
+        }
+            :
+    }
+    // 図形の外側に向かって行う処理
+    if(maxOutside > 0f){
+        for(y = 0; y < height; y++){
+            for(x = 0; x < width; x++){
+                pixels[x, y].alpha = source.GetPixel(x, y).a;
+            }
+        }
+        ComputeEdgeGradients();
+        GenerateDistanceTransform();
+        if(postProcessDistance > 0f){
+            PostProcess(postProcessDistance);
+        }
+            :
+    }
+        :
+```
+
+ほとんど同じことを 2回やっている.
+
+察するに、これは画像輪郭の内側の処理と外側の処理だ.
+2つの処理はよく見ると異なる部分がある.
+
+```cs
+pixels[x, y].alpha = 1f - source.GetPixel(x, y).a;
+```
+
+この `1 - a` というのは白黒反転だ.
+**白から黒に向かって勾配をつける処理** を白黒反転して行えば **黒から白に向かって勾配をつける処理** になる.
+こうしておけば、後の処理を共通化できるというわけだ.
+
+![Slide3.png](https://qiita-image-store.s3.amazonaws.com/0/140877/3b205a12-f8d7-5bd2-5c92-377567637069.png)
+
+ともあれ、主要な処理が 
+
+* `ComputeEdgeGradients()`
+* `GenerateDistanceTransform()`
+* `PostProcess()` 
+
+の3つらしいことがわかる.
+
+
+### ComputeEdgeGradients()
+
+周囲8ピクセルから勾配を求めて `Pixel.gradient` に格納する処理だ.
+これはシェーダーで素直に書けたので、私が書いた GLSL のみ載せる.
+
+```glsl:GLSL
+#define SQRT2 1.41421356237
+#define ALPHA a             // 別のチャンネルを使いたい場合に変更できる
+uniform sampler2D image;
+
+vec2 ComputeEdgeGradients(ivec2 pos)
+{
+    // estimate gradient of edge pixel using surrounding pixels
+    float g = 
+        - texelFetch(image, pos + ivec2(-1, -1), 0).ALPHA
+        - texelFetch(image, pos + ivec2(-1,  1), 0).ALPHA
+        + texelFetch(image, pos + ivec2( 1, -1), 0).ALPHA
+        + texelFetch(image, pos + ivec2( 1,  1), 0).ALPHA;
+    
+    return normalize(vec2(
+        g + texelFetch(image, pos + ivec2(1, 0), 0).ALPHA - texelFetch(image, pos + ivec2(-1, 0), 0).ALPHA * SQRT2,
+        g + texelFetch(image, pos + ivec2(0, 1), 0).ALPHA - texelFetch(image, pos + ivec2(0, -1), 0).ALPHA * SQRT2
+    ));
+}
+
+```
+
+### InitializeDistance()
+
+
+次の `GenerateDistanceTransform()` は大きいので少し区切る.
+
+```cs:SDFTextureGenerator.cs
+private static void GenerateDistanceTransform () {
+    // perform anti-aliased Euclidean distance transform
+    int x, y;
+    Pixel p;
+    
+    // initialize distances
+    for(y = 0; y < height; y++){ 
+        for(x = 0; x < width; x++){
+            p = pixels[x, y];
+            p.dX = 0;
+            p.dY = 0;
+            if(p.alpha <= 0f){
+                // outside
+                p.distance = 1000000f;
+            }
+            else if (p.alpha < 1f){
+                // on the edge
+                p.distance = ApproximateEdgeDelta(p.gradient.x, p.gradient.y, p.alpha);
+            }
+            else{
+                // inside
+                p.distance = 0f;
+            }
+        }
+    }
+        :
+```
+
+最初に `dX`, `dY`, `distance` を初期化している.
+このうち `distance` の初期化部分を関数化して GLSL で書いてみた.
+
+```glsl:GLSL
+float InitializeDistance(vec2 grad, float alpha)
+{
+    if (alpha <= 0.0) {
+        // outside
+        return 10000.0;    // 浮動小数点数の精度が心もとないので気持ち小さめにする.
+    } else if (alpha < 1.0) {
+        // on the edge
+        return ApproximateEdgeDelta(grad, alpha);
+    } else {
+        // inside
+        return 0.0;
+    }
+}
+```
+
+### ApproximateEdgeDelta()
+
+この中で使われる `ApproximateEdgeDelta()` も簡単だったので GLSL のみ載せる.
+
+```glsl:GLSL
+// 英語のコメントは元のコードよりそのまま引用.
+float ApproximateEdgeDelta(vec2 grad, float a) 
+{
+    if (grad.x == 0.0 || grad.y == 0.0) {
+        // linear function is correct if both gx and gy are zero
+        // and still fair if only one of them is zero
+        return 0.5 - a;
+    }
+    // reduce symmetrical equation to first octant only
+    grad = abs(normalize(grad));
+    float gmax = max(grad.x, grad.y);
+    float gmin = min(grad.x, grad.y);
+
+    // compute delta
+    float a1 = 0.5 * gmin / gmax;
+    if (a < a1) {
+        // 0 <= a < a1
+        return 0.5 * (gmax + gmin) - sqrt(2.0 * gmax * gmin * a);
+    }
+    if (a < (1.0 - a1)) {
+        // a1 <= a <= 1 - a1
+        return (0.5 - a) * gmax;
+    }
+    // 1-a1 < a <= 1
+    return -0.5 * (gmax + gmin) + sqrt(2.0 * gmax * gmin * (1.0 - a));
+}
+```
+
+### 1st step main()
+
+以上で、 `Pixel` クラスのフィールドの初期化が終わった.
+1度のシェーダープログラムでできるのはここまでだろう.
+
+
+これらを踏まえて、1st Step は以下のように実装した.
+
+```glsl:GLSL
+#define ALPHA a             // 別のチャンネルを使いたい場合に変更できる
+in vec2 texCoord;
+layout(location = 0) out vec4 pixelInside;
+layout(location = 1) out vec4 pixelOutside;
+layout(location = 2) out vec4 gradient;
+uniform sampler2D image;
+
+// 紹介済みの関数定義は省略
+
+void main()
+{
+    ivec2 pos = ivec2(texCoord * vec2(textureSize(image, 0)));
+    ivec2 pos = ivec2(texCoord * resolution);
+    vec2 grad = ComputeEdgeGradients(pos);
+    float alpha = texelFetch(image, pos, 0).ALPHA;
+
+    gradient.xy = grad;
+    gradient.a = 1.0;    // 途中結果を画像で見たいときのため.
+
+    // 図形の内側に向かって行う処理
+    pixelInside.xy = vec2(0.0);
+    pixelInside.z = InitializeDistance(-grad, 1.0 - alpha); // 勾配逆向き・白黒反転
+    pixelInside.a = 1.0 - alpha;
+
+    // 図形の外側に向かって行う処理
+    pixelOutside.xy = vec2(0.0);
+    pixelOutside.z = InitializeDistance(grad, alpha);
+    pixelOutside.a = alpha;
+}
+```
+
+3枚のテクスチャを使って計算結果を出力する.
+元のコードでは勾配(`ComputeEdgeGradients()`)を内・外それぞれで計算していたが、先の図を見れば分かる通り、2つの勾配は180度正反対なだけなので、2度計算する必要はない.
+
+## 2. SSED-8アルゴリズム
+
+ここからが [先に紹介した記事](https://techblog.kayac.com/unity_advent_calendar_2018_23) でも問題とされていたステップだ[^3].
+
+[^3]: そして、わけがわからなかったのもここだ.
+
+
+紹介記事を読んだだけでは、正直何を言っているのかよくわからなかったのだが、ソースコードを読んで、自分で試行錯誤してみたらわかった(気がする).
+
+つまり、GLSLでは以下の処理を何回か反復すればよい、ということだ.
+
+```glsl:GLSL
+in vec2 texCoord;
+out vec4 outColor;
+uniform sampler2D image;
+
+void main()
+{
+    ivec2 pos = ivec2(texCoord * vec2(textureSize(image, 0)));
+    vec4 p = texelFetch(image, pos, 0);
+    if (p.z > 0.0) {
+        // 八方のピクセルの情報から自分の情報を更新する.
+        p = UpdateDistance(p, pos, ivec2(-1,  0));
+        p = UpdateDistance(p, pos, ivec2(-1, -1));
+        p = UpdateDistance(p, pos, ivec2( 0, -1));
+        p = UpdateDistance(p, pos, ivec2( 1, -1));
+        p = UpdateDistance(p, pos, ivec2( 1,  0));
+        p = UpdateDistance(p, pos, ivec2( 1,  1));
+        p = UpdateDistance(p, pos, ivec2( 0,  1));
+        p = UpdateDistance(p, pos, ivec2(-1,  1));
+    }
+    outColor = p;
+}
+```
+
+`UpdateDistance()` は、隣接ピクセルの情報から自身の情報を更新する処理だ.
+隣のピクセルが**どのような勾配でどのくらいの標高にあるか**から、自分の勾配や標高を知ることができる.
+
+ただし、このときの隣接ピクセルは、**既に自分の情報が更新されていなければならない**.
+
+**更新するためには隣接ピクセルに聞く必要があるが、聞くためには更新済みピクセルが必要** というアンビバレンスな問題をうまく解決するためには、計算の順序が大事になってくる. [^4]
+
+[^4]: このへんのくだりを、紹介サイトでは「距離ベクターの伝搬」と表現していると思われる.
+
+
+しかし、**シェーダーでは隣のピクセルが計算した結果を知ることができない**.
+
+そこでどうするかというと、とりあえず、**知らない者同士で隣り合うピクセル全員に聞いて**、一旦自分の値を更新する.
+
+更新結果を出力して、それをもう一度入力として同じ処理を行うと、**さっきより1ピクセルまわりのことを知っているピクセル** から情報を得ることができる.
+
+さらに同じ処理を行うと、こんどは **2ピクセルまわりのことを知っているピクセル** から情報を得られたことになる.
+
+これを繰り返していくと、徐々に値の精度が上がっていくことになるだろう.
+
+では、何回繰り返すべきか.
+おそらく、どのくらい先まで勾配をつけたいかによって決まる.
+フォントの場合は、フォントサイズにもよるが 4～8ピクセルもあれば十分だ.
+直感的には、同じ回数だけ繰り返せば良いように思われる.
+
+![Slide4-2.png](https://qiita-image-store.s3.amazonaws.com/0/140877/9f0625b8-73ec-fab2-8660-31028404745d.png)
+
+
+
+上記は 8ピクセルの勾配をつけた場合のレンダリング結果だ.
+8パスでかなりイイ感じになっていることがわかる.
+
+
+### UpdateDistance()
+
+話の流れで先に出力結果を出してしまったが、せっかくなので残りのコードも紹介する.
+
+先のコードから呼び出されていた `UpdateDistance()` は、GLSL で以下のように書けた.
+
+```glsl:GLSL
+vec4 UpdateDistance(vec4 p, ivec2 pos, ivec2 o)
+{
+    vec4 neighbor = texelFetch(image0, pos + o, 0);
+    ivec2 ndelta = ivec2(neighbor.xy);
+    vec4 closest = texelFetch(image0, pos + o - ndelta, 0);
+    
+    if (closest.a == 0.0 || o == ndelta) {
+        // neighbor has no closest yet
+        // or neighbor's closest is p itself
+        return p;
+    }
+    vec2 delta = neighbor.xy - vec2(o);
+    float dist = length(delta) + ApproximateEdgeDelta(delta, closest.a);
+    if (dist < p.z) {
+        p.xy = delta;
+        p.z = dist;
+    }
+    return p;
+}
+```
+
+## 3. 最終出力
+
+最初に作った外側計算用の画像と、白黒反転した内側計算用の画像、それぞれに対して SSED-8 処理を8回行う.
+最後に、この2枚の計算結果を足し合わせて最終出力を得る. 
+
+白黒反転した方はここで忘れずに戻しておく.
+
+```glsl:GLSL
+in vec2 texCoord;
+out vec4 outColor;
+uniform sampler2D insidePixels;  // 内向きの計算結果
+uniform sampler2D outsidePixels; // 外向きの計算結果
+uniform float maxInside;         // 内側に何ピクセル勾配をつけるか
+uniform float maxOutside;        // 外側に何ピクセル勾配をつけるか
+uniform vec2 resolution;
+
+void main() {
+    float idist = texture(insidePixels, texCoord).z;
+    float odist = texture(outsidePixels, texCoord).z;
+
+    // 元コードはゼロ除算しないように場合分けしているが、省略する.
+    float dist = 0.5 + (clamp(idist / maxInside, 0.0, 1.0) - clamp(odist / maxOutside, 0.0, 1.0)) * 0.5;
+
+    // 最終結果は1チャンネルなので、白黒画像にするもよし、アルファ画像にするもよし.
+    outColor.rgb = vec3(dist);
+    outColor.a = 1.0;
+}
+```
+
+やったー できたー. やればできるもんだね.
+
+
+### あれ? gradient は...?
+
+ここまで読んだ方の100%が気づいていないと思われるが、 初期化の際につくった `gradient` 画像がその後一切でてこない.
+
+そういえば、元にした `SDFTextureGenerator.cs` にはもう一つ処理があった.
+
+実は、効果が微妙だったのでなかったことにして終わらせようとも思ったが[^5]、もう少し頑張って書いてみることにする.
+
+[^5]: 書くのがちょっと面倒になってきたので... 読むのが面倒になった方はここで終わってもほぼ問題ない.
+
+
+
+## 4. Post Process
+
+```cs:SDFTextureGenerator.cs
+    ComputeEdgeGradients();
+    GenerateDistanceTransform();
+    if(postProcessDistance > 0f){
+        PostProcess(postProcessDistance);
+    }
+```
+
+最後に `PostProcess()` という処理を行っている.
+`gradient` はここで使っている.
+
+`if` でくくられていることからもわかるように、なきゃないで結果は出る.
+まぁ、おそらくより高精度な結果を得たい場合に使うのだろうと推察される.
+
+まあ、移植しましたよ、一応.
+
+```glsl:GLSL
+uniform sampler2D gradients;
+uniform float postProcessDistance;
+
+float PostProcess(sampler2D pixels, ivec2 pos, float gradSign)
+{
+    vec4 p = texelFetch(pixels, pos, 0);
+    if (postProcessDistance <= 0.0) return p.z;
+    // adjust distances near edges based on the local edge gradient
+    if ((p.x == 0.0 && p.y == 0.0) || p.z >= postProcessDistance) {
+        // ignore edge, inside, and beyond max distance
+        return p.z;
+    }
+    ivec2 dpos = ivec2(p.xy);
+    vec4 closest = texelFetch(pixels, pos - dpos, 0);
+    vec2 g = texelFetch(gradients, pos - dpos, 0).xy * gradSign;
+    if (g == vec2(0.0)) {
+        // ignore unknown gradients (inside)
+        return p.z;
+    }
+    
+    // compute hit point offset on gradient inside pixel
+    float df = ApproximateEdgeDelta(g, closest.a);
+    float t = p.y * g.x - p.x * g.y;
+    float u = -df * g.x + t * g.y;
+    float v = -df * g.y - t * g.x;
+    
+    // use hit point to compute distance
+    if (abs(u) <= 0.5 && abs(v) <= 0.5) {
+        return length(p.xy + vec2(u, v));
+    }
+    return p.z;
+}
+```
+
+`gradSign` はオリジナルのパラメータで、内向きか外向きかで `gradient` の符号を変えるために用意した[^7].
+
+[^7]: ホラ、私は gradient を片方しか計算してないから.
+
+この関数を使って、先程の最終出力シェーダーを書き換える.
+
+
+```glsl:GLSL
+in vec2 texCoord;
+out vec4 outColor;
+uniform sampler2D insidePixels;
+uniform sampler2D outsidePixels;
+uniform float maxInside;         // 内側に何ピクセル勾配をつけるか
+uniform float maxOutside;        // 外側に何ピクセル勾配をつけるか
+
+// 紹介済みの関数定義は省略
+
+void main() {
+    // float idist = texture(insidePixels, texCoord).z;
+    // float odist = texture(outsidePixels, texCoord).z;
+
+    ivec2 pos = ivec2(texCoord * vec2(textureSize(insidePixels, 0)));
+    float idist = PostProcess(insidePixels, pos, -1.0);
+    float odist = PostProcess(outsidePixels, pos, 1.0);
+
+    // 元コードはゼロ除算しないように場合分けしているが、省略する.
+    float dist = 0.5 + (clamp(idist / maxInside, 0.0, 1.0) - clamp(odist / maxOutside, 0.0, 1.0)) * 0.5;
+
+    // 最終結果は1チャンネルなので、白黒画像にするもよし、アルファ画像にするもよし.
+    outColor.rgb = vec3(dist);
+    outColor.a = 1.0;
+}
+```
+
+`PostProcess` を適用した結果がこちらだ.
+
+![クリップボード01.png](https://qiita-image-store.s3.amazonaws.com/0/140877/b63a82f9-77e7-a9d7-075a-6bd05836ad3c.png)
+
+
+・・・ごめん、効果が全然わからない.
+よくわからないから、 `postProcessDistance` がいくつくらいが適切かもわからない.
+
+だれか詳しい人教えてくれ.
+
+## さいごに
+
+`PostProcess` がなければ、`gradient` テクスチャもいらないので、少しだけコードがシンプルになる.
+それでもいいような気がする.
+
+なお、私の発言にはなんら学術的な裏付けもない.
+そちらの方に興味がある方は、こんな野良文書より論文等を参照されたい.
+
+また、よくご存知の方は、意見・補足・訂正等なんでも大歓迎なので本文に間違いが認められた場合、遠慮なく、やさしく指摘してほしい.
+
+
+おっと、忘れてた.
+一番肝心なのは**速くなったか**ということだ.
+
+とはいえ、正しく評価するのは結構面倒なので、手元にある分の情報だけお話すると、
+
+**ノートPC 4コアCPU8スレッド並列処理で 290ms** 
+
+だったものが、このシェーダープログラムでは
+
+**30fpsくらい**
+
+で動作した. いい加減な比較だが **10倍弱** くらいは速くなったんじゃないだろうか.

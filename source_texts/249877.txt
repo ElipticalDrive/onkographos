@@ -1,0 +1,1565 @@
+Interactive browser visualizations for materials science: crystal structures/molecules, trajectories, convex hulls, phase diagrams, Fermi surfaces, bands+DOS, Brillouin zones, etc. - Add isosurface visualization for volumetric data by janosh · Pull Request #300 · janosh/matterviz
+
+Add isosurface visualization for volumetric data by janosh · Pull Request #300 · janosh/matterviz · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+janosh
+commented
+Feb 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+closes #246
+Adds parsing and rendering of volumetric data files: VASP CHGCAR/AECCAR/ELFCAR/LOCPOT and Gaussian .cube format, with auto-detection by filename pattern and content sniffing
+Renders isosurfaces via marching cubes with two-pass transparency (back faces then front faces), positive/negative lobes, wireframe mode, and interactive isovalue slider
+Integrates into the existing Structure component with drag-and-drop support, auto-computes sensible default isovalue from data percentiles
+Moves marching cubes algorithm from fermi-surface/ to shared $lib/marching-cubes.ts for reuse, fixes fractional coordinate spacing for periodic grids (1/n not 1/(n-1))
+Fixes depthWrite on Lattice transparent materials to prevent z-ordering conflicts with isosurface rendering
+Includes demo page at /isosurface with 10 example files covering molecules (.cube orbitals, ESP), crystals (CHGCAR, ELFCAR), slabs (LOCPOT), and spin-polarized systems
+60 unit tests for parsing and type utilities
+Adds 2D crystallographic plane slicing with interactive Miller-index input and a color-mapped preview
+Supports multiple independently configurable isosurface layers and volume selection
+Add isosurface visualization for CHGCAR and .cube volumetric data
+…
+9b2eab5
+```
+- Parse VASP CHGCAR/AECCAR/ELFCAR/LOCPOT and Gaussian .cube volumetric files
+  with auto-detection by filename and content sniffing
+- Render isosurfaces using marching cubes with two-pass transparency,
+  positive/negative lobes, wireframe mode, and interactive isovalue controls
+- Move marching cubes from fermi-surface/ to shared $lib/marching-cubes.ts;
+  fix fractional coordinate spacing for periodic grids (1/n not 1/(n-1))
+- Integrate into Structure component with drag-and-drop support and
+  auto-isosurface settings based on data range
+- Add depthWrite={false} to Lattice transparent materials to prevent
+  depth buffer conflicts with isosurface rendering
+- Add demo page with 10 example files (molecules, crystals, slabs) covering
+  .cube orbitals/ESP, CHGCAR charge density, ELFCAR, LOCPOT, spin-polarized
+- Add 60 unit tests for parsing and type utilities
+```
+janosh
+added
+enhancement
+New feature or request
+structure
+3d Structure viewer
+parsers
+File / data parsers
+labels
+Feb 7, 2026
+Auto-sync typed.py from component_manifest.toml
+86d076e
+coderabbitai
+Bot
+reviewed
+Feb 7, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 3
+🤖 Fix all issues with AI agents
+```
+In `@src/lib/isosurface/parse.ts`:
+- Around line 283-285: The unit detection currently only inspects
+voxel_lines[0][0] to set is_bohr and unit_scale, which misses cases where axes 2
+or 3 use a different sign; update the logic so you check all three axis lines
+(e.g., use voxel_lines.every(line => line[0] > 0)) to set is_bohr, then compute
+unit_scale using BOHR_TO_ANGSTROM accordingly, and add a brief comment noting
+that mixed-sign axis definitions are non-standard and that we treat units as
+Bohr only if all three axes are positive.
+- Around line 339-342: The ParsedStructure currently always sets pbc: [true,
+true, true]; change this to compute a pbc flag instead and use it when building
+the structure so non-periodic .cube files (molecules) get pbc:
+[false,false,false]. Inspect the parsed header/lattice information (use the same
+logic/flag you add, e.g., isPeriodic or derive from lattice vectors in lattice /
+lattice_params) to decide periodicity, then construct lattice: { matrix:
+lattice, pbc: computedPbc, ...lattice_params } so downstream code sees correct
+periodicity for molecular vs periodic cubes.
+
+In `@src/lib/isosurface/types.ts`:
+- Around line 31-46: grid_data_range does not handle empty or fully-empty grids
+and returns Infinity/-Infinity; update the function (grid_data_range) to
+defensively detect when grid is empty or no numeric values were found (e.g., no
+planes/rows/vals), and in that case return a safe default such as { min: 0, max:
+0, abs_max: 0 } (or nulls if callers prefer) instead of Infinity values;
+implement the check after iterating (or before) using the min_val/max_val
+sentinel values to decide the empty case and return the safe defaults so callers
+like IsosurfaceControls.svelte receive sane ranges.
+```
+🧹 Nitpick comments (5)
+src/lib/marching-cubes.ts (1)
+458-469: Normal computation uses unclamped grid indices.
+When compute_gradient is called at Line 459-468, the indices ix + ox1, etc. can exceed grid bounds for non-periodic grids (e.g., ix = nx-1 and ox1 = 1 yields nx). While compute_gradient clamps internally, this produces zero gradients at cube edges spanning the boundary, resulting in flat normals. This is visually acceptable but could be documented.
+src/lib/isosurface/parse.ts (1)
+96-100: Fallback element assignment may misidentify species in old VASP files.
+When element symbols are missing (VASP 4 format), the fallback cycles through only 10 elements. Files with more than 10 species would get incorrect element assignments, though this is a rare edge case for legacy files.
+src/lib/isosurface/Isosurface.svelte (1)
+91-101: Using subarray creates a view that shares the underlying buffer.
+Float32Array.subarray() returns a view into the original buffer. Three.js BufferAttribute should handle this correctly, but if there's any mutation of the original array later, it could cause rendering issues. This is unlikely to be a problem here since the arrays are local, but worth noting.
+src/routes/(demos)/isosurface/+page.svelte (2)
+44-58: Consider extracting mean calculation to a shared utility.
+This manual grid iteration duplicates the pattern used in grid_data_range. Consider extending grid_data_range to optionally return the mean, or create a companion grid_data_stats utility that computes min/max/mean in a single pass.
+♻️ Suggested approach
+In src/lib/isosurface/types.ts, modify grid_data_range or create a new function:
+```
+export function grid_data_stats(grid: number[][][]): {
+  min: number
+  max: number
+  mean: number
+  abs_max: number
+} {
+  let min = Infinity
+  let max = -Infinity
+  let sum = 0
+  let count = 0
+  for (const plane of grid) {
+    for (const row of plane) {
+      for (const val of row) {
+        if (val < min) min = val
+        if (val > max) max = val
+        sum += val
+        count++
+      }
+    }
+  }
+  return {
+    min,
+    max,
+    mean: count > 0 ? sum / count : 0,
+    abs_max: Math.max(Math.abs(min), Math.abs(max)),
+  }
+}
+```
+Then use this single utility in the demo page instead of separate grid_data_range and grid_mean calculations.
+217-224: Reactive dependency pattern works but is fragile.
+The manual dependency touching with [active_volume_idx, slice_axis, slice_position] works but requires maintenance if render_slice gains new dependencies. This is an acceptable workaround for Svelte 5's automatic dependency tracking, but document the coupling to help future maintainers.
+💡 Alternative: inline the render call
+Consider inlining the render directly in the effect to make dependencies explicit:
+```
+$effect(() => {
+  if (!show_slice || !volumetric_data || !slice_canvas) return
+  const vol = volumetric_data[active_volume_idx]
+  if (!vol) return
+  // ... render logic directly here, making all deps visible to Svelte
+})
+```
+Or add a comment noting the coupling:
+```
+// NOTE: render_slice reads active_volume_idx, slice_axis, slice_position
+// If adding new dependencies to render_slice, add them here too
+```
+Comment thread
+src/lib/isosurface/parse.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/lib/isosurface/parse.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/lib/isosurface/types.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Improve isosurface module: precompute data range, debounce rendering,…
+…
+c22a890
+```
+… fix bugs
+
+- Precompute DataRange (min/max/mean) during grid construction in flat_to_3d_grid,
+  store on VolumetricData to avoid redundant full-grid scans on every slider change
+- Debounce marching cubes in Isosurface.svelte (30ms) to prevent excessive
+  recomputation during isovalue slider drags
+- Fix BufferGeometry leak on component unmount (missing dispose cleanup)
+- Fix ConvexHull4D gizmo type in component_manifest.toml (dict | bool, not just bool)
+- Add .cube to VSCode extension file patterns to fix 3 failing CI tests
+- Remove broad try/catch in parse_chgcar/parse_cube, add granular bounds guards
+- Use Math.abs for CHGCAR cell volume divisor (handles left-handed lattices)
+- Detect non-periodic molecules in .cube parser via origin heuristic
+- Use ImageData for slice rendering instead of fillRect per pixel
+- Use direct $state mutation instead of spread reassignment for Svelte 5 reactivity
+- Simplify barrel re-exports to export * in element, rdf, tooltip, icons, isosurface
+- Simplify IsosurfaceControls $derived, remove redundant Three.js default props
+- Add marching-cubes tests and expand isosurface parse/types test coverage
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+```
+coderabbitai
+Bot
+reviewed
+Feb 8, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 1
+🤖 Fix all issues with AI agents
+```
+In `@tests/vitest/marching-cubes.test.ts`:
+- Line 32: The test contains a single-line multiple variable declarator "const
+dx = ix - center, dy = iy - center, dz = iz - center" which violates the
+single-var-declarator lint rule; replace it with three separate const statements
+(e.g., const dx = ix - center; const dy = iy - center; const dz = iz - center;)
+in the same test scope to resolve the lint error while keeping the existing
+variable names (dx, dy, dz) used by the surrounding assertions.
+```
+🧹 Nitpick comments (6)
+src/lib/isosurface/parse.ts (1)
+350-356: Consider logging a warning when matrix inversion fails.
+When matrix_inverse_3x3 throws (likely due to a degenerate lattice), the silent fallback to identity makes the abc fractional coordinates unreliable. A console.warn would help debugging without breaking the parse.
+💡 Optional improvement
+```
+   try {
+     lattice_inv = math.matrix_inverse_3x3(lattice_transposed)
+   } catch {
+-    // Non-periodic system (molecule), use identity
++    // Non-periodic system (molecule) or degenerate lattice, use identity
++    console.warn(`.cube: lattice matrix is singular, fractional coords may be unreliable`)
+     lattice_inv = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+   }
+```
+src/lib/isosurface/Isosurface.svelte (1)
+106-116: Skipping extraction when isovalue is exactly zero may be overly restrictive.
+At line 108, isovalue === 0 returns null. For some volumetric data (e.g., spin density), a zero isovalue could be meaningful. Consider whether this check is intentional or if it should only guard against missing data.
+src/lib/isosurface/IsosurfaceControls.svelte (1)
+50-60: Isovalue slider minimum is set to step, which may be very small.
+When abs_max is large, step = abs_max / 200 could still be a reasonable minimum. However, for very small data ranges, the minimum isovalue might be too restrictive. Consider using a small fixed minimum (e.g., 1e-6) as a floor if data ranges vary significantly.
+src/routes/(demos)/isosurface/+page.svelte (2)
+140-155: Slice data extraction allocates a new array on every render.
+Line 140 creates new Array(width * height) on each call to render_slice. For large grids or rapid slider changes, this could cause GC pressure. Consider reusing a typed array if performance becomes an issue.
+💡 Optional: reuse Float64Array for slice data
+```
+// At module level or in state:
+let slice_buffer: Float64Array | null = null
+
+function render_slice() {
+  // ... existing code ...
+  const size = width * height
+  if (!slice_buffer || slice_buffer.length < size) {
+    slice_buffer = new Float64Array(size)
+  }
+  // Use slice_buffer instead of slice_data
+}
+```
+219-242: URL parameters applied after load may cause brief visual inconsistency.
+Lines 231-239 apply URL params inside .then() after load_file completes. This means auto_isosurface_settings sets initial values in load_file, then URL params override them. This works correctly but may cause a brief visual flash if the isosurface renders before the override is applied.
+Consider applying URL params synchronously after parsing within load_file, or suppress rendering until params are applied.
+src/lib/structure/Structure.svelte (1)
+616-617: Direct mutation of bindable props within helper function.
+Lines 616-617 directly assign to structure and volumetric_data inside try_parse_volumetric. While this works in Svelte 5 with $bindable, it makes the function impure and harder to test in isolation. Consider returning the parsed data and letting the caller assign, or document that this function has side effects.
+This is a minor stylistic concern; the current approach works correctly.
+Comment thread
+tests/vitest/marching-cubes.test.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+janosh
+temporarily deployed
+to
+github-pages
+February 8, 2026 12:19 — with
+GitHub Actions
+Inactive
+Add tests, fix callers, simplify demo page
+…
+f64ed86
+```
+- Add marching-cubes tests (geometry validation, options, lattice
+  transforms, vertex normals)
+- Fix auto_isosurface_settings callers to pass data_range not grid
+- Fix types.test.ts to match new DataRange signature
+- Add parse tests for data_range, element suffixes, pbc detection,
+  non-orthogonal lattice, multi-line data, incomplete data
+- Guard grid_data_range against empty grids
+- Export DataRange type from isosurface index
+- Replace isovalue preset buttons with range slider + number input
+- Simplify colormap to branchless formula
+- Address PR review comments (unit convention comment, lint fix)
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+```
+janosh
+temporarily deployed
+to
+github-pages
+February 8, 2026 12:50 — with
+GitHub Actions
+Inactive
+Optimize parser, add real DFT examples, curate demo files
+…
+e17457b
+```
+- Rewrite volumetric parsers to avoid splitting entire file into lines:
+  use character-scanning parse_float_block() with pre-allocated Float64Array
+  and offset-based read_line()/read_lines() for headers only
+- Add real DFT files: Fe₃O₄ and NiO(SOC) CHGCAR, ELFCAR from pymatgen,
+  caffeine HOMO/LUMO .cube from Psi4 (all MIT licensed)
+- Remove 7 redundant/low-contrast examples (GaAs, MgO, ethylene, esp,
+  pymatgen nospin/spin/LOCPOT) to maximize variety among 12 remaining files
+- Add multi-layer isosurface support with per-layer isovalue, color, opacity
+- Use indexed BufferGeometry with computeVertexNormals() instead of manual
+  normal computation, reducing vertex data and simplifying build_geometry
+- Add VolumetricData.periodic flag for correct coordinate scaling
+  (periodic grids use 1/N spacing, non-periodic use 1/(N-1))
+- Replace Math.sqrt(x**2+y**2+z**2) with Math.hypot() across codebase
+- Rename single-letter variables (a→lat_a, t→lerp/tet, v→val) in
+  generate_examples.py, marching-cubes.ts, and demo page
+- Convert test helpers to arrow functions, remove local vec_length
+- Make canvas background transparent for correct dark mode rendering
+- Use export type * for isosurface type re-exports in lib/index.ts
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+```
+janosh
+temporarily deployed
+to
+github-pages
+February 8, 2026 13:30 — with
+GitHub Actions
+Inactive
+Compact controls layout, downsample large example files
+…
+9d32c79
+```
+- Rearrange IsosurfaceControls into fewer rows: layers/neg-lobe/wireframe
+  on one line, opacity + color pickers on another
+- Add descriptive tooltips via svelte-multiselect attachment to all controls
+- Use clearer labels: "Neg. lobe", "Wireframe", "Isovalue:", "+ Color"
+- Downsample real DFT files by stride 2 (Fe3O4 72³→36³, NiO 56³→28³,
+  caffeine 111×98×64→56×49×32, ELFCAR 18×18×70→9×9×35) with 4-digit
+  precision — reduces total example data from 15 MB to 1.7 MB
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+```
+coderabbitai
+Bot
+reviewed
+Feb 8, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 1
+🤖 Fix all issues with AI agents
+```
+In `@src/routes/`(demos)/isosurface/+page.svelte:
+- Around line 312-370: The viewer container currently lacks an ondragover
+handler and doesn't call preventDefault in drop handlers, causing the browser to
+navigate away on file drop; update the outer div event handlers around
+dragover_hint and Structure so ondragover={(e: DragEvent) => {
+e.preventDefault(); dragover_hint = true }} and change ondrop to accept the
+event and call e.preventDefault(); e.stopPropagation(); dragover_hint = false
+(and forward the event to the nested Structure drop logic if needed), and revert
+the overlay CSS to pointer-events: none so the overlay remains visual but does
+not intercept pointer events—this ensures the nested Structure component
+receives the actual drop.
+```
+🧹 Nitpick comments (2)
+tests/vitest/fermi-surface/marching-cubes.test.ts (1)
+211-214: Consider using Math.hypot here as well for consistency.
+Lines 119 and 159 now use Math.hypot(...normal), but this test still uses the manual Math.sqrt() calculation.
+♻️ Suggested refactor
+```
+     // Shared vertices (0, 1) should have unit-length averaged normals
+     for (const idx of [0, 1]) {
+-      const len = Math.sqrt(
+-        normals[idx][0] ** 2 + normals[idx][1] ** 2 + normals[idx][2] ** 2,
+-      )
++      const len = Math.hypot(...normals[idx])
+       expect(len).toBeCloseTo(1.0, 5)
+     }
+```
+src/lib/structure/Structure.svelte (1)
+266-286: Consider supporting volumetric files via structure_string prop.
+The structure_string parsing path uses parse_any_structure directly, bypassing the unified parse_file_content workflow. This means volumetric files (CHGCAR, .cube) provided via structure_string won't be recognized and their isosurface data won't be loaded.
+If volumetric file support via structure_string is intended, consider using the unified parsing flow:
+♻️ Suggested refactor
+```
+   $effect(() => { // Parse structure from string when structure_string is provided
+     if (!structure_string || data_url) return
+     loading = true
+     error_msg = undefined
+     try {
+-      const parsed = parse_any_structure(structure_string, `string`)
+-      if (parsed) {
+-        structure = parsed
+-        untrack(() => emit_file_load_event(parsed, `string`, structure_string))
+-      } else {
+-        throw new Error(`Failed to parse structure from string`)
+-      }
++      const parsed = parse_file_content(structure_string, `string`)
++      untrack(() => emit_file_load_event(parsed, `string`, structure_string))
+     } catch (err) {
+       error_msg = `Failed to parse structure from string: ${
+         err instanceof Error ? err.message : String(err)
+       }`
+       untrack(() => on_error?.({ error_msg, filename: `string` }))
+     } finally {
+       loading = false
+     }
+   })
+```
+Comment thread
+src/routes/(demos)/structure/isosurface/+page.svelte
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+janosh
+temporarily deployed
+to
+github-pages
+February 8, 2026 13:38 — with
+GitHub Actions
+Inactive
+coderabbitai
+Bot
+reviewed
+Feb 8, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 3
+🤖 Fix all issues with AI agents
+```
+In `@src/lib/isosurface/IsosurfaceControls.svelte`:
+- Around line 199-236: Reformat the style block in IsosurfaceControls.svelte so
+it matches the project's Deno formatter rules: run the Deno formatter (deno fmt)
+on the file (or the repo) and commit the normalized output; ensure the CSS
+selectors and nested rules (.compact-row, label, .grid-info, .layer-row,
+input[type='color'], input[type='checkbox'], .layer-value) remain semantically
+identical but use the formatter's spacing and indentation conventions so the CI
+formatting check passes.
+- Around line 20-27: Compute a guarded safe_abs_max from data_range.abs_max
+(e.g., let safe_abs_max = $derived(data_range.abs_max > 0 ? data_range.abs_max :
+0.001)) and then use safe_abs_max everywhere instead of raw data_range.abs_max:
+derive step from safe_abs_max (step = $derived(safe_abs_max / 200)) and set
+slider max attributes to safe_abs_max (and ensure min uses step which will now
+always be <= safe_abs_max). Update references in IsosurfaceControls.svelte for
+data_range, step, and slider maxs to use the new safe_abs_max derived value so
+range inputs cannot get min > max for constant grids.
+- Around line 10-23: The active_volume_idx can become out-of-bounds when volumes
+changes; add a guard that clamps or resets active_volume_idx whenever volumes
+updates (e.g., ensure active_volume_idx = Math.max(0,
+Math.min(active_volume_idx, volumes.length - 1)) or set to 0 if volumes is
+empty) so the selector remains visible and data_range (the $derived based on
+volumes[active_volume_idx]) uses a valid index; implement this as a reactive
+update tied to volumes (or a derived store) that adjusts active_volume_idx
+whenever volumes length changes.
+```
+Comment thread
+src/lib/isosurface/IsosurfaceControls.svelte
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/lib/isosurface/IsosurfaceControls.svelte
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/lib/isosurface/IsosurfaceControls.svelte
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Add IsosurfaceControls component tests
+…
+76370aa
+```
+- 15 tests covering single-layer and multi-layer rendering, volume
+  selector visibility, checkbox states, color pickers, grid info,
+  slider ranges, and tooltip presence
+- Test fixtures use minimal VolumetricData with known data_range
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+```
+coderabbitai
+Bot
+reviewed
+Feb 8, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 3
+🤖 Fix all issues with AI agents
+```
+In `@src/routes/`(demos)/isosurface/+page.svelte:
+- Around line 1-16: This file fails Deno formatting; open the Svelte file with
+the <script lang="ts"> block that imports parse_volumetric_file,
+parse_any_structure, auto_isosurface_settings and uses onMount (the isosurface
+page component) and run the Deno formatter (deno fmt) on it (or on the repo) so
+imports/spacing are normalized and CI formatting checks pass.
+
+In `@tests/vitest/isosurface/IsosurfaceControls.test.ts`:
+- Around line 84-91: The test "hides volume selector when only one volume"
+declares an unused local variable selects; remove the unused declaration to fix
+the pipeline failure. Edit the test block that calls mount_controls({ volumes:
+[make_volume()] }) and delete the const selects =
+document.querySelectorAll(`select`) line (or use it if you intended to assert on
+select count), leaving the rest of the assertions intact.
+- Around line 73-82: The test "renders wireframe checkbox unchecked by default"
+declares an unused variable `checkboxes` which causes the pipeline failure; edit
+the test to remove the unused declaration (the line with `const checkboxes =
+document.querySelectorAll<HTMLInputElement>(\`input[type="checkbox"]\`)`) and
+keep the rest of the logic that locates the label and `wireframe_cb` via
+`mount_controls()` so the assertion on `wireframe_cb?.checked` remains
+unchanged.
+```
+🧹 Nitpick comments (1)
+tests/vitest/isosurface/IsosurfaceControls.test.ts (1)
+62-71: Consider using a cleanup utility instead of innerHTML = "".
+While the static analysis warning about XSS is a false positive (this is test code with an empty string literal), using @testing-library/svelte cleanup or a Vitest beforeEach/afterEach hook would be more idiomatic and maintainable.
+♻️ Alternative approach using afterEach
+```
++import { afterEach } from 'vitest'
++
++afterEach(() => {
++  document.body.innerHTML = ``
++})
++
+ describe(`IsosurfaceControls`, () => {
+   // ...
+   test(`shows negative color picker only when show_negative is true`, () => {
+     mount_controls({ settings: { ...DEFAULT_ISOSURFACE_SETTINGS, show_negative: false } })
+     const color_inputs = document.querySelectorAll<HTMLInputElement>(`input[type="color"]`)
+     expect(color_inputs.length).toBe(1) // only positive color
+
+-    document.body.innerHTML = ``
+     mount_controls({ settings: { ...DEFAULT_ISOSURFACE_SETTINGS, show_negative: true } })
+```
+Comment thread
+src/routes/(demos)/structure/isosurface/+page.svelte
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+tests/vitest/isosurface/IsosurfaceControls.test.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+tests/vitest/isosurface/IsosurfaceControls.test.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+janosh
+temporarily deployed
+to
+github-pages
+February 8, 2026 13:46 — with
+GitHub Actions
+Inactive
+Add HKL slice, multi-layer isosurface, perf optimizations, shared Mil…
+…
+8d259f8
+```
+…lerIndexInput
+
+- Add HKL plane slicing with trilinear interpolation (slice.ts)
+- Add shared MillerIndexInput.svelte component, used by isosurface + Fermi demos
+- Extract compute_in_plane_basis to $lib/math.ts (DRY fermi-surface + isosurface)
+- Multi-layer isosurface rendering with per-layer colors and controls
+- Indexed geometry + Three.js normals + rAF for faster isosurface updates
+- Skip marching cubes gradient normals (normals: false option)
+- Fix periodic flag: use volume.periodic instead of hardcoded true
+- Fix show_negative checkbox in multi-layer mode
+- Theme-aware cross-section slice colormap
+- Always show slice, replace XYZ buttons with HKL inputs
+- Add generate_layers, LAYER_COLORS, IsosurfaceLayer types
+- Tests for slice, layers, trilinear interpolation
+```
+janosh
+force-pushed
+the
+isosurface-visualization
+branch
+from
+7f85f83 to
+8d259f8
+Compare
+February 8, 2026 13:51
+Fix drop overlay, clamp volume index, guard slider range
+…
+d44a454
+```
+- Drop overlay: remove pointer-events: auto so drops reach Structure
+- Clamp active_volume_idx to 0 when it exceeds volumes.length
+- Guard slider max with Math.max(abs_max, 0.001) for zero-range data
+```
+janosh
+temporarily deployed
+to
+github-pages
+February 8, 2026 14:00 — with
+GitHub Actions
+Inactive
+coderabbitai
+Bot
+reviewed
+Feb 8, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 3
+🤖 Fix all issues with AI agents
+```
+In `@src/lib/isosurface/parse.ts`:
+- Around line 409-428: The header parsing currently assumes header.lines[2..5]
+contain valid numeric tokens; validate tokens for line2 and each voxel_lines
+entry before using them (check length and that mapped Numbers are not NaN), and
+if any token is missing/NaN throw/return a clear, early error describing the
+malformed .cube header; specifically, add guards around the computed values
+(line2, n_atoms, has_orbital_header, raw_origin, voxel_lines, and n_grid) so you
+detect missing tokens or NaNs and surface a descriptive message (e.g., "Invalid
+.cube header: missing or non-numeric token in header.lines[2]") instead of
+letting NaNs propagate into lattice/origin math.
+- Around line 591-602: The current CHGCAR detection uses a fixed 5000-char scan
+window starting at find_line_offset(...) which can miss the grid-dimension line
+for large coordinate blocks; update the scan_end calculation used with
+scan_pos/read_line/parse_chgcar to use a dynamic window (e.g.,
+Math.min(content.length, scan_pos + Math.max(5000, lines.length *
+<avgCharsPerLine>)) or simply allow scanning to the end for safety) so the regex
+/^\s*\d+\s+\d+\s+\d+\s*$/ is found reliably; adjust the logic in parse.ts where
+scan_pos and scan_end are computed so large files don't produce false negatives.
+
+In `@src/lib/MillerIndexInput.svelte`:
+- Around line 13-39: format_hkl and parse_hkl don't support multi‑digit
+components: format_hkl currently concatenates numbers without separators and
+parse_hkl reads only single digits, breaking round‑trip for values like 10; fix
+by changing format_hkl to emit a clear separator (e.g. commas or spaces) between
+components (reference format_hkl and hkl_text) and update parse_hkl to split on
+that separator OR to parse signed multi‑digit integers (consume optional leading
+'-' then one or more digits) into a Vec3; apply the same change to the other
+parsing/formatting pair referenced around the second occurrence (the
+parse/format functions used elsewhere in the file).
+```
+🧹 Nitpick comments (1)
+tests/vitest/fermi-surface/marching-cubes.test.ts (1)
+107-113: Add assertions to prevent vacuous normals test passes.
+If result.normals is empty or out of sync with vertices, the loop still passes. Add length checks to catch missing/mismatched normals.
+✅ Suggested test tightening
+```
+  test(`normals have unit length`, () => {
+    const grid = create_gradient_grid(4, 4, 4, `y`, 0, 2)
+    const result = marching_cubes(grid, 1.0, identity_lattice)
+ 
++   expect(result.normals.length).toBeGreaterThan(0)
++   expect(result.normals.length).toBe(result.vertices.length)
+     for (const normal of result.normals) {
+       expect(Math.hypot(...normal)).toBeCloseTo(1.0, 3)
+     }
+  })
+```
+Comment thread
+src/lib/isosurface/parse.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/lib/isosurface/parse.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/lib/MillerIndexInput.svelte
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+coderabbitai
+Bot
+reviewed
+Feb 8, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 1
+🤖 Fix all issues with AI agents
+```
+In `@src/lib/isosurface/parse.ts`:
+- Around line 474-499: The atom parsing loop assumes atom_line has at least 5
+numeric tokens before accessing atom_line[2..4]; add validation after
+splitting/mapping (e.g., check atom_line.length >= 5 and that entries 2–4 are
+finite numbers) and handle invalid lines by logging a clear warning (including
+the line content or atom_idx) and skipping that atom or throwing a controlled
+error; update the block around read_line, atom_line, raw_xyz, and sites.push so
+you only construct raw_xyz/abc/xyz and call atomic_number_to_symbol when the
+tokens are valid.
+```
+🧹 Nitpick comments (1)
+src/lib/isosurface/parse.ts (1)
+456-460: Consider documenting the periodicity detection limitation.
+The heuristic (origin_magnitude < 1e-6) assumes molecular .cube files have non-zero origins. This may misclassify periodic systems with shifted origins or molecules centered at the origin. The current approach is reasonable for most cases, but downstream code relying on periodic should be aware of potential edge cases.
+Comment thread
+src/lib/isosurface/parse.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+janosh
+temporarily deployed
+to
+github-pages
+February 8, 2026 16:06 — with
+GitHub Actions
+Inactive
+Fix multi-digit Miller parsing, validate .cube header, widen CHGCAR scan
+…
+976e1d8
+```
+- MillerIndexInput: support multi-digit HKL via spaced/comma format
+- .cube parser: validate header line 3 and voxel lines for NaN/missing tokens
+- CHGCAR auto-detection: increase scan window from 5K to 25K chars
+```
+janosh
+force-pushed
+the
+isosurface-visualization
+branch
+from
+cd3bba9 to
+976e1d8
+Compare
+February 8, 2026 16:15
+janosh
+temporarily deployed
+to
+github-pages
+February 8, 2026 16:21 — with
+GitHub Actions
+Inactive
+coderabbitai
+Bot
+reviewed
+Feb 8, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 1
+🤖 Fix all issues with AI agents
+```
+In `@src/lib/isosurface/slice.ts`:
+- Around line 109-110: The code computes lattice_inv with
+math.matrix_inverse_3x3(lattice) but for Cartesian→fractional conversion you
+must invert the transpose of the lattice (frac = inverse(lattice^T) * cart), so
+change the computation to transpose the 3x3 lattice first and then invert it
+(use math.transpose_3x3_matrix(lattice) and then math.matrix_inverse_3x3 on that
+result) where lattice_inv is set in slice.ts to ensure correct fractional
+coordinates for non-orthogonal lattices; keep references to lattice_inv and
+math.matrix_inverse_3x3 and math.transpose_3x3_matrix when making the change.
+```
+🧹 Nitpick comments (1)
+src/lib/MillerIndexInput.svelte (1)
+9-9: Text input may reset while user types partial values.
+Since hkl_text is derived from value, and the input uses value={hkl_text}, typing a partial value (e.g., "1" when intending "111") will fail to parse, leaving value unchanged, and the input will reset to the previous formatted value on the next render cycle. This can be disorienting.
+Consider using local state for the text field that only syncs to value on valid parse, and syncs from value only on blur or when value changes externally.
+Also applies to: 57-65
+Comment thread
+src/lib/isosurface/slice.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Fix lattice transpose in HKL slice, validate .cube atoms, tighten tests
+…
+0f660ac
+```
+- Fix missing transpose before inversion in slice.ts (wrong frac coords
+  for non-orthogonal lattices)
+- Add periodic option to parse_cube for explicit override of heuristic
+- Validate .cube atom lines have 5+ finite tokens, skip malformed
+- Add non-vacuous normals assertions in fermi-surface marching-cubes test
+- Add tests for periodic override, malformed header, malformed atoms
+```
+janosh
+temporarily deployed
+to
+github-pages
+February 8, 2026 16:31 — with
+GitHub Actions
+Inactive
+Simplify demo page, DRY example generators, fix ColorBar
+…
+4d6c2bc
+```
+- Replace hand-rolled drop overlay, error msg, colorbar with
+  DragOverlay, StatusMessage, ColorBar components
+- Fix $effect infinite loop: use window.location instead of
+  reactive page.url in update_url
+- Fix ColorBar vertical tick offset (margin instead of padding)
+- Simplify MillerIndexInput to single text field
+- DRY generate_examples.py with shared helpers (991→392 lines)
+- Move isosurface route under /structure/ in nav
+```
+Hide details
+View details
+janosh
+merged commit 4f3ce6c
+into
+main
+Feb 8, 2026
+6 of 7 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+janosh
+deleted the
+isosurface-visualization
+branch
+February 8, 2026 16:38
+janosh
+temporarily deployed
+to
+github-pages
+February 8, 2026 16:42 — with
+GitHub Actions
+Inactive
+janosh
+mentioned this pull request
+Feb 8, 2026
+Feature Request] Support for Isosurface Visualization (VASP CHGCAR and Gaussian .cube files
+#246
+Closed
+janosh
+added a commit
+that referenced
+this pull request
+Feb 18, 2026
+Add isosurface visualization for volumetric data (#300)
+…
+020488f
+```
+* Add isosurface visualization for CHGCAR and .cube volumetric data
+
+- Parse VASP CHGCAR/AECCAR/ELFCAR/LOCPOT and Gaussian .cube volumetric files
+  with auto-detection by filename and content sniffing
+- Render isosurfaces using marching cubes with two-pass transparency,
+  positive/negative lobes, wireframe mode, and interactive isovalue controls
+- Move marching cubes from fermi-surface/ to shared $lib/marching-cubes.ts;
+  fix fractional coordinate spacing for periodic grids (1/n not 1/(n-1))
+- Integrate into Structure component with drag-and-drop support and
+  auto-isosurface settings based on data range
+- Add depthWrite={false} to Lattice transparent materials to prevent
+  depth buffer conflicts with isosurface rendering
+- Add demo page with 10 example files (molecules, crystals, slabs) covering
+  .cube orbitals/ESP, CHGCAR charge density, ELFCAR, LOCPOT, spin-polarized
+- Add 60 unit tests for parsing and type utilities
+
+* Auto-sync typed.py from component_manifest.toml
+
+* Improve isosurface module: precompute data range, debounce rendering, fix bugs
+
+- Precompute DataRange (min/max/mean) during grid construction in flat_to_3d_grid,
+  store on VolumetricData to avoid redundant full-grid scans on every slider change
+- Debounce marching cubes in Isosurface.svelte (30ms) to prevent excessive
+  recomputation during isovalue slider drags
+- Fix BufferGeometry leak on component unmount (missing dispose cleanup)
+- Fix ConvexHull4D gizmo type in component_manifest.toml (dict | bool, not just bool)
+- Add .cube to VSCode extension file patterns to fix 3 failing CI tests
+- Remove broad try/catch in parse_chgcar/parse_cube, add granular bounds guards
+- Use Math.abs for CHGCAR cell volume divisor (handles left-handed lattices)
+- Detect non-periodic molecules in .cube parser via origin heuristic
+- Use ImageData for slice rendering instead of fillRect per pixel
+- Use direct $state mutation instead of spread reassignment for Svelte 5 reactivity
+- Simplify barrel re-exports to export * in element, rdf, tooltip, icons, isosurface
+- Simplify IsosurfaceControls $derived, remove redundant Three.js default props
+- Add marching-cubes tests and expand isosurface parse/types test coverage
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+* Add tests, fix callers, simplify demo page
+
+- Add marching-cubes tests (geometry validation, options, lattice
+  transforms, vertex normals)
+- Fix auto_isosurface_settings callers to pass data_range not grid
+- Fix types.test.ts to match new DataRange signature
+- Add parse tests for data_range, element suffixes, pbc detection,
+  non-orthogonal lattice, multi-line data, incomplete data
+- Guard grid_data_range against empty grids
+- Export DataRange type from isosurface index
+- Replace isovalue preset buttons with range slider + number input
+- Simplify colormap to branchless formula
+- Address PR review comments (unit convention comment, lint fix)
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+* Optimize parser, add real DFT examples, curate demo files
+
+- Rewrite volumetric parsers to avoid splitting entire file into lines:
+  use character-scanning parse_float_block() with pre-allocated Float64Array
+  and offset-based read_line()/read_lines() for headers only
+- Add real DFT files: Fe₃O₄ and NiO(SOC) CHGCAR, ELFCAR from pymatgen,
+  caffeine HOMO/LUMO .cube from Psi4 (all MIT licensed)
+- Remove 7 redundant/low-contrast examples (GaAs, MgO, ethylene, esp,
+  pymatgen nospin/spin/LOCPOT) to maximize variety among 12 remaining files
+- Add multi-layer isosurface support with per-layer isovalue, color, opacity
+- Use indexed BufferGeometry with computeVertexNormals() instead of manual
+  normal computation, reducing vertex data and simplifying build_geometry
+- Add VolumetricData.periodic flag for correct coordinate scaling
+  (periodic grids use 1/N spacing, non-periodic use 1/(N-1))
+- Replace Math.sqrt(x**2+y**2+z**2) with Math.hypot() across codebase
+- Rename single-letter variables (a→lat_a, t→lerp/tet, v→val) in
+  generate_examples.py, marching-cubes.ts, and demo page
+- Convert test helpers to arrow functions, remove local vec_length
+- Make canvas background transparent for correct dark mode rendering
+- Use export type * for isosurface type re-exports in lib/index.ts
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+* Compact controls layout, downsample large example files
+
+- Rearrange IsosurfaceControls into fewer rows: layers/neg-lobe/wireframe
+  on one line, opacity + color pickers on another
+- Add descriptive tooltips via svelte-multiselect attachment to all controls
+- Use clearer labels: "Neg. lobe", "Wireframe", "Isovalue:", "+ Color"
+- Downsample real DFT files by stride 2 (Fe3O4 72³→36³, NiO 56³→28³,
+  caffeine 111×98×64→56×49×32, ELFCAR 18×18×70→9×9×35) with 4-digit
+  precision — reduces total example data from 15 MB to 1.7 MB
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+* Add IsosurfaceControls component tests
+
+- 15 tests covering single-layer and multi-layer rendering, volume
+  selector visibility, checkbox states, color pickers, grid info,
+  slider ranges, and tooltip presence
+- Test fixtures use minimal VolumetricData with known data_range
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+* Add HKL slice, multi-layer isosurface, perf optimizations, shared MillerIndexInput
+
+- Add HKL plane slicing with trilinear interpolation (slice.ts)
+- Add shared MillerIndexInput.svelte component, used by isosurface + Fermi demos
+- Extract compute_in_plane_basis to $lib/math.ts (DRY fermi-surface + isosurface)
+- Multi-layer isosurface rendering with per-layer colors and controls
+- Indexed geometry + Three.js normals + rAF for faster isosurface updates
+- Skip marching cubes gradient normals (normals: false option)
+- Fix periodic flag: use volume.periodic instead of hardcoded true
+- Fix show_negative checkbox in multi-layer mode
+- Theme-aware cross-section slice colormap
+- Always show slice, replace XYZ buttons with HKL inputs
+- Add generate_layers, LAYER_COLORS, IsosurfaceLayer types
+- Tests for slice, layers, trilinear interpolation
+
+* Fix drop overlay, clamp volume index, guard slider range
+
+- Drop overlay: remove pointer-events: auto so drops reach Structure
+- Clamp active_volume_idx to 0 when it exceeds volumes.length
+- Guard slider max with Math.max(abs_max, 0.001) for zero-range data
+
+* Fix multi-digit Miller parsing, validate .cube header, widen CHGCAR scan
+
+- MillerIndexInput: support multi-digit HKL via spaced/comma format
+- .cube parser: validate header line 3 and voxel lines for NaN/missing tokens
+- CHGCAR auto-detection: increase scan window from 5K to 25K chars
+
+* Fix lattice transpose in HKL slice, validate .cube atoms, tighten tests
+
+- Fix missing transpose before inversion in slice.ts (wrong frac coords
+  for non-orthogonal lattices)
+- Add periodic option to parse_cube for explicit override of heuristic
+- Validate .cube atom lines have 5+ finite tokens, skip malformed
+- Add non-vacuous normals assertions in fermi-surface marching-cubes test
+- Add tests for periodic override, malformed header, malformed atoms
+
+* Simplify demo page, DRY example generators, fix ColorBar
+
+- Replace hand-rolled drop overlay, error msg, colorbar with
+  DragOverlay, StatusMessage, ColorBar components
+- Fix $effect infinite loop: use window.location instead of
+  reactive page.url in update_url
+- Fix ColorBar vertical tick offset (margin instead of padding)
+- Simplify MillerIndexInput to single text field
+- DRY generate_examples.py with shared helpers (991→392 lines)
+- Move isosurface route under /structure/ in nav
+```
+coderabbitai
+Bot
+mentioned this pull request
+Feb 25, 2026
+Improve isosurface render ordering and comparison sync
+#316
+Merged
+yyttrcchj
+mentioned this pull request
+Feb 26, 2026
+Bug: Isosurface visualization (PR #300) freezes on Web UI and missing in VS Code extension
+#317
+Closed
+janosh
+added a commit
+that referenced
+this pull request
+Feb 27, 2026
+Add isosurface visualization for volumetric data (#300)
+…
+4f913c5
+```
+* Add isosurface visualization for CHGCAR and .cube volumetric data
+
+- Parse VASP CHGCAR/AECCAR/ELFCAR/LOCPOT and Gaussian .cube volumetric files
+  with auto-detection by filename and content sniffing
+- Render isosurfaces using marching cubes with two-pass transparency,
+  positive/negative lobes, wireframe mode, and interactive isovalue controls
+- Move marching cubes from fermi-surface/ to shared $lib/marching-cubes.ts;
+  fix fractional coordinate spacing for periodic grids (1/n not 1/(n-1))
+- Integrate into Structure component with drag-and-drop support and
+  auto-isosurface settings based on data range
+- Add depthWrite={false} to Lattice transparent materials to prevent
+  depth buffer conflicts with isosurface rendering
+- Add demo page with 10 example files (molecules, crystals, slabs) covering
+  .cube orbitals/ESP, CHGCAR charge density, ELFCAR, LOCPOT, spin-polarized
+- Add 60 unit tests for parsing and type utilities
+
+* Auto-sync typed.py from component_manifest.toml
+
+* Improve isosurface module: precompute data range, debounce rendering, fix bugs
+
+- Precompute DataRange (min/max/mean) during grid construction in flat_to_3d_grid,
+  store on VolumetricData to avoid redundant full-grid scans on every slider change
+- Debounce marching cubes in Isosurface.svelte (30ms) to prevent excessive
+  recomputation during isovalue slider drags
+- Fix BufferGeometry leak on component unmount (missing dispose cleanup)
+- Fix ConvexHull4D gizmo type in component_manifest.toml (dict | bool, not just bool)
+- Add .cube to VSCode extension file patterns to fix 3 failing CI tests
+- Remove broad try/catch in parse_chgcar/parse_cube, add granular bounds guards
+- Use Math.abs for CHGCAR cell volume divisor (handles left-handed lattices)
+- Detect non-periodic molecules in .cube parser via origin heuristic
+- Use ImageData for slice rendering instead of fillRect per pixel
+- Use direct $state mutation instead of spread reassignment for Svelte 5 reactivity
+- Simplify barrel re-exports to export * in element, rdf, tooltip, icons, isosurface
+- Simplify IsosurfaceControls $derived, remove redundant Three.js default props
+- Add marching-cubes tests and expand isosurface parse/types test coverage
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+* Add tests, fix callers, simplify demo page
+
+- Add marching-cubes tests (geometry validation, options, lattice
+  transforms, vertex normals)
+- Fix auto_isosurface_settings callers to pass data_range not grid
+- Fix types.test.ts to match new DataRange signature
+- Add parse tests for data_range, element suffixes, pbc detection,
+  non-orthogonal lattice, multi-line data, incomplete data
+- Guard grid_data_range against empty grids
+- Export DataRange type from isosurface index
+- Replace isovalue preset buttons with range slider + number input
+- Simplify colormap to branchless formula
+- Address PR review comments (unit convention comment, lint fix)
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+* Optimize parser, add real DFT examples, curate demo files
+
+- Rewrite volumetric parsers to avoid splitting entire file into lines:
+  use character-scanning parse_float_block() with pre-allocated Float64Array
+  and offset-based read_line()/read_lines() for headers only
+- Add real DFT files: Fe₃O₄ and NiO(SOC) CHGCAR, ELFCAR from pymatgen,
+  caffeine HOMO/LUMO .cube from Psi4 (all MIT licensed)
+- Remove 7 redundant/low-contrast examples (GaAs, MgO, ethylene, esp,
+  pymatgen nospin/spin/LOCPOT) to maximize variety among 12 remaining files
+- Add multi-layer isosurface support with per-layer isovalue, color, opacity
+- Use indexed BufferGeometry with computeVertexNormals() instead of manual
+  normal computation, reducing vertex data and simplifying build_geometry
+- Add VolumetricData.periodic flag for correct coordinate scaling
+  (periodic grids use 1/N spacing, non-periodic use 1/(N-1))
+- Replace Math.sqrt(x**2+y**2+z**2) with Math.hypot() across codebase
+- Rename single-letter variables (a→lat_a, t→lerp/tet, v→val) in
+  generate_examples.py, marching-cubes.ts, and demo page
+- Convert test helpers to arrow functions, remove local vec_length
+- Make canvas background transparent for correct dark mode rendering
+- Use export type * for isosurface type re-exports in lib/index.ts
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+* Compact controls layout, downsample large example files
+
+- Rearrange IsosurfaceControls into fewer rows: layers/neg-lobe/wireframe
+  on one line, opacity + color pickers on another
+- Add descriptive tooltips via svelte-multiselect attachment to all controls
+- Use clearer labels: "Neg. lobe", "Wireframe", "Isovalue:", "+ Color"
+- Downsample real DFT files by stride 2 (Fe3O4 72³→36³, NiO 56³→28³,
+  caffeine 111×98×64→56×49×32, ELFCAR 18×18×70→9×9×35) with 4-digit
+  precision — reduces total example data from 15 MB to 1.7 MB
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+* Add IsosurfaceControls component tests
+
+- 15 tests covering single-layer and multi-layer rendering, volume
+  selector visibility, checkbox states, color pickers, grid info,
+  slider ranges, and tooltip presence
+- Test fixtures use minimal VolumetricData with known data_range
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+* Add HKL slice, multi-layer isosurface, perf optimizations, shared MillerIndexInput
+
+- Add HKL plane slicing with trilinear interpolation (slice.ts)
+- Add shared MillerIndexInput.svelte component, used by isosurface + Fermi demos
+- Extract compute_in_plane_basis to $lib/math.ts (DRY fermi-surface + isosurface)
+- Multi-layer isosurface rendering with per-layer colors and controls
+- Indexed geometry + Three.js normals + rAF for faster isosurface updates
+- Skip marching cubes gradient normals (normals: false option)
+- Fix periodic flag: use volume.periodic instead of hardcoded true
+- Fix show_negative checkbox in multi-layer mode
+- Theme-aware cross-section slice colormap
+- Always show slice, replace XYZ buttons with HKL inputs
+- Add generate_layers, LAYER_COLORS, IsosurfaceLayer types
+- Tests for slice, layers, trilinear interpolation
+
+* Fix drop overlay, clamp volume index, guard slider range
+
+- Drop overlay: remove pointer-events: auto so drops reach Structure
+- Clamp active_volume_idx to 0 when it exceeds volumes.length
+- Guard slider max with Math.max(abs_max, 0.001) for zero-range data
+
+* Fix multi-digit Miller parsing, validate .cube header, widen CHGCAR scan
+
+- MillerIndexInput: support multi-digit HKL via spaced/comma format
+- .cube parser: validate header line 3 and voxel lines for NaN/missing tokens
+- CHGCAR auto-detection: increase scan window from 5K to 25K chars
+
+* Fix lattice transpose in HKL slice, validate .cube atoms, tighten tests
+
+- Fix missing transpose before inversion in slice.ts (wrong frac coords
+  for non-orthogonal lattices)
+- Add periodic option to parse_cube for explicit override of heuristic
+- Validate .cube atom lines have 5+ finite tokens, skip malformed
+- Add non-vacuous normals assertions in fermi-surface marching-cubes test
+- Add tests for periodic override, malformed header, malformed atoms
+
+* Simplify demo page, DRY example generators, fix ColorBar
+
+- Replace hand-rolled drop overlay, error msg, colorbar with
+  DragOverlay, StatusMessage, ColorBar components
+- Fix $effect infinite loop: use window.location instead of
+  reactive page.url in update_url
+- Fix ColorBar vertical tick offset (margin instead of padding)
+- Simplify MillerIndexInput to single text field
+- DRY generate_examples.py with shared helpers (991→392 lines)
+- Move isosurface route under /structure/ in nav
+```
+coderabbitai
+Bot
+mentioned this pull request
+Mar 4, 2026
+Isosurface performance: grid downsampling, debounced rendering, UI fixes
+#322
+Merged
+janosh
+added a commit
+that referenced
+this pull request
+Mar 10, 2026
+Add isosurface visualization for volumetric data (#300)
+…
+918f89f
+```
+* Add isosurface visualization for CHGCAR and .cube volumetric data
+
+- Parse VASP CHGCAR/AECCAR/ELFCAR/LOCPOT and Gaussian .cube volumetric files
+  with auto-detection by filename and content sniffing
+- Render isosurfaces using marching cubes with two-pass transparency,
+  positive/negative lobes, wireframe mode, and interactive isovalue controls
+- Move marching cubes from fermi-surface/ to shared $lib/marching-cubes.ts;
+  fix fractional coordinate spacing for periodic grids (1/n not 1/(n-1))
+- Integrate into Structure component with drag-and-drop support and
+  auto-isosurface settings based on data range
+- Add depthWrite={false} to Lattice transparent materials to prevent
+  depth buffer conflicts with isosurface rendering
+- Add demo page with 10 example files (molecules, crystals, slabs) covering
+  .cube orbitals/ESP, CHGCAR charge density, ELFCAR, LOCPOT, spin-polarized
+- Add 60 unit tests for parsing and type utilities
+
+* Auto-sync typed.py from component_manifest.toml
+
+* Improve isosurface module: precompute data range, debounce rendering, fix bugs
+
+- Precompute DataRange (min/max/mean) during grid construction in flat_to_3d_grid,
+  store on VolumetricData to avoid redundant full-grid scans on every slider change
+- Debounce marching cubes in Isosurface.svelte (30ms) to prevent excessive
+  recomputation during isovalue slider drags
+- Fix BufferGeometry leak on component unmount (missing dispose cleanup)
+- Fix ConvexHull4D gizmo type in component_manifest.toml (dict | bool, not just bool)
+- Add .cube to VSCode extension file patterns to fix 3 failing CI tests
+- Remove broad try/catch in parse_chgcar/parse_cube, add granular bounds guards
+- Use Math.abs for CHGCAR cell volume divisor (handles left-handed lattices)
+- Detect non-periodic molecules in .cube parser via origin heuristic
+- Use ImageData for slice rendering instead of fillRect per pixel
+- Use direct $state mutation instead of spread reassignment for Svelte 5 reactivity
+- Simplify barrel re-exports to export * in element, rdf, tooltip, icons, isosurface
+- Simplify IsosurfaceControls $derived, remove redundant Three.js default props
+- Add marching-cubes tests and expand isosurface parse/types test coverage
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+* Add tests, fix callers, simplify demo page
+
+- Add marching-cubes tests (geometry validation, options, lattice
+  transforms, vertex normals)
+- Fix auto_isosurface_settings callers to pass data_range not grid
+- Fix types.test.ts to match new DataRange signature
+- Add parse tests for data_range, element suffixes, pbc detection,
+  non-orthogonal lattice, multi-line data, incomplete data
+- Guard grid_data_range against empty grids
+- Export DataRange type from isosurface index
+- Replace isovalue preset buttons with range slider + number input
+- Simplify colormap to branchless formula
+- Address PR review comments (unit convention comment, lint fix)
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+* Optimize parser, add real DFT examples, curate demo files
+
+- Rewrite volumetric parsers to avoid splitting entire file into lines:
+  use character-scanning parse_float_block() with pre-allocated Float64Array
+  and offset-based read_line()/read_lines() for headers only
+- Add real DFT files: Fe₃O₄ and NiO(SOC) CHGCAR, ELFCAR from pymatgen,
+  caffeine HOMO/LUMO .cube from Psi4 (all MIT licensed)
+- Remove 7 redundant/low-contrast examples (GaAs, MgO, ethylene, esp,
+  pymatgen nospin/spin/LOCPOT) to maximize variety among 12 remaining files
+- Add multi-layer isosurface support with per-layer isovalue, color, opacity
+- Use indexed BufferGeometry with computeVertexNormals() instead of manual
+  normal computation, reducing vertex data and simplifying build_geometry
+- Add VolumetricData.periodic flag for correct coordinate scaling
+  (periodic grids use 1/N spacing, non-periodic use 1/(N-1))
+- Replace Math.sqrt(x**2+y**2+z**2) with Math.hypot() across codebase
+- Rename single-letter variables (a→lat_a, t→lerp/tet, v→val) in
+  generate_examples.py, marching-cubes.ts, and demo page
+- Convert test helpers to arrow functions, remove local vec_length
+- Make canvas background transparent for correct dark mode rendering
+- Use export type * for isosurface type re-exports in lib/index.ts
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+* Compact controls layout, downsample large example files
+
+- Rearrange IsosurfaceControls into fewer rows: layers/neg-lobe/wireframe
+  on one line, opacity + color pickers on another
+- Add descriptive tooltips via svelte-multiselect attachment to all controls
+- Use clearer labels: "Neg. lobe", "Wireframe", "Isovalue:", "+ Color"
+- Downsample real DFT files by stride 2 (Fe3O4 72³→36³, NiO 56³→28³,
+  caffeine 111×98×64→56×49×32, ELFCAR 18×18×70→9×9×35) with 4-digit
+  precision — reduces total example data from 15 MB to 1.7 MB
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+* Add IsosurfaceControls component tests
+
+- 15 tests covering single-layer and multi-layer rendering, volume
+  selector visibility, checkbox states, color pickers, grid info,
+  slider ranges, and tooltip presence
+- Test fixtures use minimal VolumetricData with known data_range
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+* Add HKL slice, multi-layer isosurface, perf optimizations, shared MillerIndexInput
+
+- Add HKL plane slicing with trilinear interpolation (slice.ts)
+- Add shared MillerIndexInput.svelte component, used by isosurface + Fermi demos
+- Extract compute_in_plane_basis to $lib/math.ts (DRY fermi-surface + isosurface)
+- Multi-layer isosurface rendering with per-layer colors and controls
+- Indexed geometry + Three.js normals + rAF for faster isosurface updates
+- Skip marching cubes gradient normals (normals: false option)
+- Fix periodic flag: use volume.periodic instead of hardcoded true
+- Fix show_negative checkbox in multi-layer mode
+- Theme-aware cross-section slice colormap
+- Always show slice, replace XYZ buttons with HKL inputs
+- Add generate_layers, LAYER_COLORS, IsosurfaceLayer types
+- Tests for slice, layers, trilinear interpolation
+
+* Fix drop overlay, clamp volume index, guard slider range
+
+- Drop overlay: remove pointer-events: auto so drops reach Structure
+- Clamp active_volume_idx to 0 when it exceeds volumes.length
+- Guard slider max with Math.max(abs_max, 0.001) for zero-range data
+
+* Fix multi-digit Miller parsing, validate .cube header, widen CHGCAR scan
+
+- MillerIndexInput: support multi-digit HKL via spaced/comma format
+- .cube parser: validate header line 3 and voxel lines for NaN/missing tokens
+- CHGCAR auto-detection: increase scan window from 5K to 25K chars
+
+* Fix lattice transpose in HKL slice, validate .cube atoms, tighten tests
+
+- Fix missing transpose before inversion in slice.ts (wrong frac coords
+  for non-orthogonal lattices)
+- Add periodic option to parse_cube for explicit override of heuristic
+- Validate .cube atom lines have 5+ finite tokens, skip malformed
+- Add non-vacuous normals assertions in fermi-surface marching-cubes test
+- Add tests for periodic override, malformed header, malformed atoms
+
+* Simplify demo page, DRY example generators, fix ColorBar
+
+- Replace hand-rolled drop overlay, error msg, colorbar with
+  DragOverlay, StatusMessage, ColorBar components
+- Fix $effect infinite loop: use window.location instead of
+  reactive page.url in update_url
+- Fix ColorBar vertical tick offset (margin instead of padding)
+- Simplify MillerIndexInput to single text field
+- DRY generate_examples.py with shared helpers (991→392 lines)
+- Move isosurface route under /structure/ in nav
+```
+coderabbitai
+Bot
+mentioned this pull request
+Apr 23, 2026
+Tile volumetric data when creating supercells
+#333
+Merged
+Stardust0831
+mentioned this pull request
+Jul 11, 2026
+Feature request: multi-volume isosurfaces with cross-volume scalar coloring
+#375
+Closed
+This was referenced Jul 11, 2026
+Multi-volume isosurfaces with cross-volume scalar coloring
+#376
+Merged
+Improve responsive structure controls and public APIs
+#413
+Merged
+coderabbitai
+Bot
+mentioned this pull request
+Jul 24, 2026
+Add volumetric cross-section views
+#415
+Merged
+janosh
+added a commit
+that referenced
+this pull request
+Jul 31, 2026
+Add isosurface visualization for volumetric data (#300)
+…
+3d5586c
+```
+* Add isosurface visualization for CHGCAR and .cube volumetric data
+
+- Parse VASP CHGCAR/AECCAR/ELFCAR/LOCPOT and Gaussian .cube volumetric files
+  with auto-detection by filename and content sniffing
+- Render isosurfaces using marching cubes with two-pass transparency,
+  positive/negative lobes, wireframe mode, and interactive isovalue controls
+- Move marching cubes from fermi-surface/ to shared $lib/marching-cubes.ts;
+  fix fractional coordinate spacing for periodic grids (1/n not 1/(n-1))
+- Integrate into Structure component with drag-and-drop support and
+  auto-isosurface settings based on data range
+- Add depthWrite={false} to Lattice transparent materials to prevent
+  depth buffer conflicts with isosurface rendering
+- Add demo page with 10 example files (molecules, crystals, slabs) covering
+  .cube orbitals/ESP, CHGCAR charge density, ELFCAR, LOCPOT, spin-polarized
+- Add 60 unit tests for parsing and type utilities
+
+* Auto-sync typed.py from component_manifest.toml
+
+* Improve isosurface module: precompute data range, debounce rendering, fix bugs
+
+- Precompute DataRange (min/max/mean) during grid construction in flat_to_3d_grid,
+  store on VolumetricData to avoid redundant full-grid scans on every slider change
+- Debounce marching cubes in Isosurface.svelte (30ms) to prevent excessive
+  recomputation during isovalue slider drags
+- Fix BufferGeometry leak on component unmount (missing dispose cleanup)
+- Fix ConvexHull4D gizmo type in component_manifest.toml (dict | bool, not just bool)
+- Add .cube to VSCode extension file patterns to fix 3 failing CI tests
+- Remove broad try/catch in parse_chgcar/parse_cube, add granular bounds guards
+- Use Math.abs for CHGCAR cell volume divisor (handles left-handed lattices)
+- Detect non-periodic molecules in .cube parser via origin heuristic
+- Use ImageData for slice rendering instead of fillRect per pixel
+- Use direct $state mutation instead of spread reassignment for Svelte 5 reactivity
+- Simplify barrel re-exports to export * in element, rdf, tooltip, icons, isosurface
+- Simplify IsosurfaceControls $derived, remove redundant Three.js default props
+- Add marching-cubes tests and expand isosurface parse/types test coverage
+
+
+* Add tests, fix callers, simplify demo page
+
+- Add marching-cubes tests (geometry validation, options, lattice
+  transforms, vertex normals)
+- Fix auto_isosurface_settings callers to pass data_range not grid
+- Fix types.test.ts to match new DataRange signature
+- Add parse tests for data_range, element suffixes, pbc detection,
+  non-orthogonal lattice, multi-line data, incomplete data
+- Guard grid_data_range against empty grids
+- Export DataRange type from isosurface index
+- Replace isovalue preset buttons with range slider + number input
+- Simplify colormap to branchless formula
+- Address PR review comments (unit convention comment, lint fix)
+
+
+* Optimize parser, add real DFT examples, curate demo files
+
+- Rewrite volumetric parsers to avoid splitting entire file into lines:
+  use character-scanning parse_float_block() with pre-allocated Float64Array
+  and offset-based read_line()/read_lines() for headers only
+- Add real DFT files: Fe₃O₄ and NiO(SOC) CHGCAR, ELFCAR from pymatgen,
+  caffeine HOMO/LUMO .cube from Psi4 (all MIT licensed)
+- Remove 7 redundant/low-contrast examples (GaAs, MgO, ethylene, esp,
+  pymatgen nospin/spin/LOCPOT) to maximize variety among 12 remaining files
+- Add multi-layer isosurface support with per-layer isovalue, color, opacity
+- Use indexed BufferGeometry with computeVertexNormals() instead of manual
+  normal computation, reducing vertex data and simplifying build_geometry
+- Add VolumetricData.periodic flag for correct coordinate scaling
+  (periodic grids use 1/N spacing, non-periodic use 1/(N-1))
+- Replace Math.sqrt(x**2+y**2+z**2) with Math.hypot() across codebase
+- Rename single-letter variables (a→lat_a, t→lerp/tet, v→val) in
+  generate_examples.py, marching-cubes.ts, and demo page
+- Convert test helpers to arrow functions, remove local vec_length
+- Make canvas background transparent for correct dark mode rendering
+- Use export type * for isosurface type re-exports in lib/index.ts
+
+
+* Compact controls layout, downsample large example files
+
+- Rearrange IsosurfaceControls into fewer rows: layers/neg-lobe/wireframe
+  on one line, opacity + color pickers on another
+- Add descriptive tooltips via svelte-multiselect attachment to all controls
+- Use clearer labels: "Neg. lobe", "Wireframe", "Isovalue:", "+ Color"
+- Downsample real DFT files by stride 2 (Fe3O4 72³→36³, NiO 56³→28³,
+  caffeine 111×98×64→56×49×32, ELFCAR 18×18×70→9×9×35) with 4-digit
+  precision — reduces total example data from 15 MB to 1.7 MB
+
+
+* Add IsosurfaceControls component tests
+
+- 15 tests covering single-layer and multi-layer rendering, volume
+  selector visibility, checkbox states, color pickers, grid info,
+  slider ranges, and tooltip presence
+- Test fixtures use minimal VolumetricData with known data_range
+
+
+* Add HKL slice, multi-layer isosurface, perf optimizations, shared MillerIndexInput
+
+- Add HKL plane slicing with trilinear interpolation (slice.ts)
+- Add shared MillerIndexInput.svelte component, used by isosurface + Fermi demos
+- Extract compute_in_plane_basis to $lib/math.ts (DRY fermi-surface + isosurface)
+- Multi-layer isosurface rendering with per-layer colors and controls
+- Indexed geometry + Three.js normals + rAF for faster isosurface updates
+- Skip marching cubes gradient normals (normals: false option)
+- Fix periodic flag: use volume.periodic instead of hardcoded true
+- Fix show_negative checkbox in multi-layer mode
+- Theme-aware cross-section slice colormap
+- Always show slice, replace XYZ buttons with HKL inputs
+- Add generate_layers, LAYER_COLORS, IsosurfaceLayer types
+- Tests for slice, layers, trilinear interpolation
+
+* Fix drop overlay, clamp volume index, guard slider range
+
+- Drop overlay: remove pointer-events: auto so drops reach Structure
+- Clamp active_volume_idx to 0 when it exceeds volumes.length
+- Guard slider max with Math.max(abs_max, 0.001) for zero-range data
+
+* Fix multi-digit Miller parsing, validate .cube header, widen CHGCAR scan
+
+- MillerIndexInput: support multi-digit HKL via spaced/comma format
+- .cube parser: validate header line 3 and voxel lines for NaN/missing tokens
+- CHGCAR auto-detection: increase scan window from 5K to 25K chars
+
+* Fix lattice transpose in HKL slice, validate .cube atoms, tighten tests
+
+- Fix missing transpose before inversion in slice.ts (wrong frac coords
+  for non-orthogonal lattices)
+- Add periodic option to parse_cube for explicit override of heuristic
+- Validate .cube atom lines have 5+ finite tokens, skip malformed
+- Add non-vacuous normals assertions in fermi-surface marching-cubes test
+- Add tests for periodic override, malformed header, malformed atoms
+
+* Simplify demo page, DRY example generators, fix ColorBar
+
+- Replace hand-rolled drop overlay, error msg, colorbar with
+  DragOverlay, StatusMessage, ColorBar components
+- Fix $effect infinite loop: use window.location instead of
+  reactive page.url in update_url
+- Fix ColorBar vertical tick offset (margin instead of padding)
+- Simplify MillerIndexInput to single text field
+- DRY generate_examples.py with shared helpers (991→392 lines)
+- Move isosurface route under /structure/ in nav
+```
+Repository owner
+deleted a comment from
+coderabbitai Bot
+Sep 7, 2026
+Hide environments
+Show environments
+This branch was previously deployed
+1 inactive
+deployment
+github-pages
+—
+4d6c2bcc
+Deployed
+Feb 8, 2026 by
+janosh
+via build / deploy #2207
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+enhancement
+New feature or request
+parsers
+File / data parsers
+structure
+3d Structure viewer
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

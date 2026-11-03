@@ -1,0 +1,391 @@
+A lightweight Minecraft-inspired voxel sandbox written in Rust. - GPU compute chunk meshing: device limits, voxel pool, standard-block shader (M0-M2) by euxaristia · Pull Request #18 · euxaristia/VoxelPopuli
+
+GPU compute chunk meshing: device limits, voxel pool, standard-block shader (M0-M2) by euxaristia · Pull Request #18 · euxaristia/VoxelPopuli · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+euxaristia
+commented
+Jul 14, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Work in progress toward moving chunk meshing off the CPU. Flying forward causes major frame stutters; the root cause was measured with real instrumentation (not guessed): MeshSnapshot::capture does a synchronous main-thread copy of each chunk's neighbor-bordered voxel data before every mesh dispatch, costing 13-17ms per dispatch batch against a 5ms/frame budget at 200Hz. A GPU compute mesher only fixes this if chunk data lives persistently on the GPU, so the shader reads neighbors directly instead of gathering a CPU snapshot per dispatch.
+This PR covers the first three milestones of that rewrite:
+M0: request the adapter's real device limits in request_device instead of wgpu's tiny defaults (256MB buffer / 128MB storage-binding), which would reject the voxel pool outright. Confirmed on an RTX 5070: ~2GB storage-binding limit, ~4GB buffer limit.
+M1: persistent GPU voxel pool (src/renderer.rs) mirroring the CPU chunk pool's ring buffer, synced incrementally on chunk generation and after each relight rather than gathered per mesh dispatch. Sized to a separate, smaller GPU_POOL_VIEW_DISTANCE (~315MB at radius 20) to bound VRAM independently of the larger CPU streaming/collision radius.
+M2: compute shader (assets/shaders/chunk_mesh_test.wgsl) porting the CPU mesher's standard-block path (face culling, AO, smooth per-vertex lighting, partial-height blocks like snow layers/torches/bells) to read directly from the GPU pool. Verified against the CPU mesher on a real chunk: 8820/8820 vertices match after canonical sorting.
+Known gap: water, lava, and wheat are not yet ported to the compute shader (explicitly skipped). The CPU mesher still does all real rendering today — the new compute shader only runs as a one-shot startup diff test (World::run_gpu_mesh_m2_test), gated behind a one-time flag in main.rs, with no effect on gameplay or visuals.
+Full plan and remaining milestones (M3: indirect draw wiring, M4: multi-chunk arena allocation, M5: full pipeline swap with a CPU/GPU toggle, M6: delete the CPU mesher) are in the hashed-splashing-haven plan doc from this session.
+Test plan
+cargo check / cargo build --release clean
+M0: adapter limits print correctly at startup, no behavior change, confirmed via screenshot (319 FPS, normal rendering)
+M1: pool allocates at the logged size (1681 slots / 315.2 MiB), no wgpu validation errors across multiple runs, confirmed no visual change via screenshot
+M2: CPU-vs-GPU vertex diff passes (8820/8820 match) on a real chunk near spawn
+Water/lava/wheat parity (tracked as follow-up, not in this PR)
+Actual in-game stutter fix (comes later, in M5, once the compute mesher replaces the CPU path for real rendering)
+feat(render): start GPU compute chunk meshing (M0-M2)
+…
+4c96bd8
+```
+Root cause of the flying-forward stutter was measured (not guessed):
+MeshSnapshot::capture, a synchronous main-thread copy of each chunk's
+neighbor-bordered voxel data, costs 13-17ms per dispatch batch. A GPU
+compute mesher only fixes this if chunk data lives persistently on the
+GPU so the shader can read neighbors directly instead of gathering a
+CPU snapshot per dispatch.
+
+M0: request the adapter's real device limits instead of wgpu's tiny
+defaults (256MB buffer / 128MB storage-binding), which would reject
+the voxel pool outright.
+
+M1: persistent GPU voxel pool mirroring the CPU chunk pool's ring
+buffer, synced incrementally on chunk generation and after each
+relight (not gathered per mesh dispatch). Sized to a smaller,
+decoupled GPU_POOL_VIEW_DISTANCE to bound VRAM (~315MB at radius 20)
+separately from the larger CPU streaming radius.
+
+M2: compute shader (chunk_mesh_test.wgsl) porting the CPU mesher's
+standard-block path (face culling, AO, smooth per-vertex lighting,
+partial-height blocks) to read directly from the GPU pool. Verified
+against the CPU mesher on a real chunk: 8820/8820 vertices match
+after canonical sorting. Water, lava, and wheat are not yet ported;
+the CPU mesher still handles all rendering today, this shader only
+runs as a one-shot startup diff test.
+
+Full plan and remaining milestones (M3-M6): hashed-splashing-haven
+plan doc.
+```
+coderabbitai
+Bot
+commented
+Jul 14, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Caution
+Review failed
+The pull request is closed.
+ℹ️ Recent review info
+⚙️ Run configuration
+Configuration used: Organization UI
+Review profile: CHILL
+Plan: Pro
+Run ID: 0aed90ee-cfd7-4d8d-9813-116c882bfdd7
+📥 Commits
+Reviewing files that changed from the base of the PR and between 4c96bd8 and ff37fc0.
+📒 Files selected for processing (8)
+assets/shaders/chunk_mesh_test.wgsl
+src/atlas.rs
+src/chunk.rs
+src/item.rs
+src/main.rs
+src/renderer.rs
+src/village.rs
+src/world.rs
+📝 Walkthrough
+Walkthrough
+Adds a persistent GPU voxel pool, a WGSL compute shader for opaque chunk meshing, atlas metadata generation, chunk upload integration, direct and indirect GPU draws, and CPU-versus-GPU mesh verification.
+Changes
+GPU mesh verification
+Layer / File(s)
+Summary
+Atlas and shader meshing contracts
+assets/shaders/chunk_mesh_test.wgsl, src/atlas_table.rs
+Defines GPU atlas entries, pooled voxel reads, face visibility, ambient occlusion, lighting, vertex emission, and compute dispatch for standard blocks.
+GPU pool and compute dispatch
+src/renderer.rs
+Allocates GPU voxel storage, uploads chunk data, dispatches compute meshing, decodes test readbacks, and supports direct or indirect M3 draws.
+World synchronization and mesh comparison
+src/world.rs, src/main.rs
+Initializes and refreshes GPU chunk slots, runs CPU-versus-GPU mesh checks, and registers the atlas table module.
+Chunk GPU views and mesh metrics
+src/chunk.rs
+Exposes flat byte views for blocks, light, and liquids. Records periodic mesh vertex-count statistics.
+Supporting formatting updates
+src/atlas.rs, src/item.rs, src/village.rs
+Reformats existing code without changing its behaviour.
+Estimated code review effort: 4 (Complex) | ~60 minutes
+Sequence Diagram(s)
+```
+sequenceDiagram
+  participant World
+  participant Chunk
+  participant Renderer
+  participant GPUVoxelPool
+  participant ChunkMeshShader
+  World->>Chunk: read gpu_bytes
+  World->>Renderer: upload chunk data
+  Renderer->>GPUVoxelPool: store voxel arrays and slot metadata
+  Renderer->>ChunkMeshShader: dispatch compute meshing
+  ChunkMeshShader-->>Renderer: write vertices and indirect count
+  Renderer-->>World: return decoded vertices or draw GPU mesh
+  World->>World: compare CPU and GPU vertices
+```
+Loading
+Possibly related PRs
+euxaristia/VoxelPopuli#5: Shares chunk and block/atlas handling.
+euxaristia/VoxelPopuli#12: Provides Bell atlas metadata used by the new atlas table.
+euxaristia/VoxelPopuli#17: Provides renderer and WGSL infrastructure used by GPU meshing.
+Poem
+A rabbit hops through voxel light,
+GPU quads take graceful flight.
+Atlas tiles and counters gleam,
+CPU checks the shader dream.
+“PASS!” says Bun, beneath the moon.
+🚥 Pre-merge checks | ✅ 5
+✅ Passed checks (5 passed)
+Check name
+Status
+Explanation
+Title check
+✅ Passed
+The title captures the main change set: GPU chunk meshing with device limits, voxel pool, and the standard-block shader.
+Description check
+✅ Passed
+The description clearly matches the PR’s GPU meshing rewrite milestones and test plan.
+Docstring Coverage
+✅ Passed
+No functions found in the changed files to evaluate docstring coverage. Skipping docstring coverage check.
+Linked Issues check
+✅ Passed
+Check skipped because no linked issues were found for this pull request.
+Out of Scope Changes check
+✅ Passed
+Check skipped because no linked issues were found for this pull request.
+✨ Finishing Touches
+📝 Generate docstrings
+Create stacked PR
+Commit on current branch
+Comment @coderabbitai help to get the list of available commands.
+coderabbitai
+Bot
+reviewed
+Jul 14, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Caution
+Some comments are outside the diff and can’t be posted inline due to platform limitations.
+⚠️ Outside diff range comments (1)
+src/chunk.rs (1)
+2103-2166: 🚀 Performance & Scalability | 🟠 Major | ⚡ Quick win
+VERTEX_COUNT_SAMPLES grows unbounded and gets progressively more expensive to process.
+samples is never capped or cleared — every upload_mesh call pushes another entry for the lifetime of the process. Every 64th push then clones the entire (ever-growing) vector and sorts it just to print quantiles, so the cost of this periodic stat computation keeps increasing the longer a session runs, on a path invoked whenever a chunk mesh finishes (a moderately hot path during exploration/edits). This is flagged as temporary M1 instrumentation, but as merged code it runs in every build until explicitly removed.
+Cap or reset the buffer so the cost stays bounded, e.g.:
+⚡ Proposed fix
+```
+ fn record_vertex_count_sample(count: u32) {
+     let mut samples = VERTEX_COUNT_SAMPLES.lock().unwrap();
+     samples.push(count);
+     if samples.len() % 64 == 0 {
+         let mut sorted = samples.clone();
+         sorted.sort_unstable();
+         let p50 = sorted[sorted.len() / 2];
+         let p99 = sorted[(sorted.len() * 99 / 100).min(sorted.len() - 1)];
+         let max = *sorted.last().unwrap();
+         let avg = sorted.iter().map(|&v| v as u64).sum::<u64>() / sorted.len() as u64;
+         println!(
+             "Chunk mesh vertex counts ({} samples): avg={} p50={} p99={} max={} (36 bytes/vertex)",
+             sorted.len(),
+             avg,
+             p50,
+             p99,
+             max
+         );
++        samples.clear();
+     }
+ }
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@src/chunk.rs` around lines 2103 - 2166, Bound the temporary instrumentation
+in record_vertex_count_sample by capping or resetting VERTEX_COUNT_SAMPLES after
+each quantile report, so the vector cannot grow for the process lifetime and
+periodic cloning/sorting remains bounded. Preserve the existing 64-sample
+reporting behavior and statistics while ensuring subsequent samples start from a
+bounded buffer.
+```
+🧹 Nitpick comments (2)
+src/renderer.rs (2)
+680-682: 🩺 Stability & Availability | 🔵 Trivial | ⚡ Quick win
+Prefer bytemuck::cast_slice over a hand-rolled unsafe reinterpret.
+cast_slice is already imported/used in this same file for atlas_data/params/meta. Reusing it here removes the unsafe block and adds the alignment/length checks (panicking clearly instead of silently truncating on bytes.len() % 4 != 0, or risking UB if the mapped range's pointer isn't 4-byte aligned).
+♻️ Proposed fix
+```
+-fn bytemuck_words(bytes: &[u8]) -> &[u32] {
+-    unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u32, bytes.len() / 4) }
+-}
++fn bytemuck_words(bytes: &[u8]) -> &[u32] {
++    cast_slice(bytes)
++}
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@src/renderer.rs` around lines 680 - 682, Replace the unsafe reinterpretation
+in bytemuck_words with bytemuck::cast_slice, reusing the existing import and
+preserving the &[u8] to &[u32] conversion while enforcing alignment and length
+validation.
+```
+115-127: 📐 Maintainability & Code Quality | 🔵 Trivial | ⚡ Quick win
+Stale doc comment: this pool is read by a compute shader, in this same PR.
+The comment says "Populated in M1; not yet read by any compute shader," but gpu_mesh_test_run (added later in this same file/PR) binds pool.blocks, pool.light, and pool.slot_meta and dispatches a compute shader that reads them. Worth updating so future readers don't assume this pool is still write-only.
+✏️ Suggested comment update
+```
+-// Persistent GPU-resident mirror of World's chunk pool, so chunk meshing can
+-// read neighbor voxels directly instead of gathering a CPU-side snapshot per
+-// dispatch (see hashed-splashing-haven plan). Populated in M1; not yet read
+-// by any compute shader.
++// Persistent GPU-resident mirror of World's chunk pool, so chunk meshing can
++// read neighbor voxels directly instead of gathering a CPU-side snapshot per
++// dispatch (see hashed-splashing-haven plan). Populated in M1; read by the
++// M2 test compute shader (gpu_mesh_test_run) only, not yet by the real
++// render path.
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@src/renderer.rs` around lines 115 - 127, Update the documentation comment
+above GpuVoxelPool to remove the stale statement that it is not read by compute
+shaders, and describe that gpu_mesh_test_run binds and reads its GPU buffers
+during compute dispatch.
+```
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Outside diff comments:
+In `@src/chunk.rs`:
+- Around line 2103-2166: Bound the temporary instrumentation in
+record_vertex_count_sample by capping or resetting VERTEX_COUNT_SAMPLES after
+each quantile report, so the vector cannot grow for the process lifetime and
+periodic cloning/sorting remains bounded. Preserve the existing 64-sample
+reporting behavior and statistics while ensuring subsequent samples start from a
+bounded buffer.
+
+---
+
+Nitpick comments:
+In `@src/renderer.rs`:
+- Around line 680-682: Replace the unsafe reinterpretation in bytemuck_words
+with bytemuck::cast_slice, reusing the existing import and preserving the &[u8]
+to &[u32] conversion while enforcing alignment and length validation.
+- Around line 115-127: Update the documentation comment above GpuVoxelPool to
+remove the stale statement that it is not read by compute shaders, and describe
+that gpu_mesh_test_run binds and reads its GPU buffers during compute dispatch.
+```
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Organization UI
+Review profile: CHILL
+Plan: Pro Plus
+Run ID: 45ec8569-912c-49d0-ac80-f5cf08931864
+📥 Commits
+Reviewing files that changed from the base of the PR and between fa7bad2 and 4c96bd8.
+📒 Files selected for processing (6)
+assets/shaders/chunk_mesh_test.wgsl
+src/atlas_table.rs
+src/chunk.rs
+src/main.rs
+src/renderer.rs
+src/world.rs
+coderabbitai
+Bot
+previously approved these changes
+Jul 14, 2026
+View reviewed changes
+fix: remove temporary M3 GPU mesh test draws and reset spawn camera p…
+…
+0080262
+```
+…itch
+```
+euxaristia
+dismissed
+coderabbitai[bot]’s stale review
+via
+0080262
+July 21, 2026 21:28
+euxaristia
+commented
+Aug 5, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@coderabbitai full review
+coderabbitai
+Bot
+commented
+Aug 5, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+⚠️ Action not completed
+Review rate limited.
+Your included review limit is currently reached under our Fair Usage Limits Policy. Your recent PR review activity is in the 95th percentile or higher among CodeRabbit users, so adaptive limits apply. This review may still proceed through usage-based billing if eligible. Your next included review will be available in 26 minutes.
+chore: resolve Cargo.lock conflict with main
+ff37fc0
+Hide details
+View details
+euxaristia
+merged commit 4aca087
+into
+main
+Aug 5, 2026
+1 of 2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+euxaristia
+deleted the
+feature/gpu-chunk-meshing
+branch
+August 5, 2026 23:47
+This was referenced Aug 6, 2026
+perf: fix flying-forward chunk-streaming stutter
+#23
+Merged
+refactor(main): extract player physics and HUD rendering into dedicated modules
+#26
+Merged
+feat: implement fluid physics, buckets, beds, doors, and torch 3D model with dynamic lighting
+#29
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

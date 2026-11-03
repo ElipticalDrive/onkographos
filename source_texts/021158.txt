@@ -1,0 +1,1570 @@
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+1
+Volume Rendering with Metric–Phase Fields for Thin Structures and
+Sign-Ambiguous Geometry
+arXiv:2610.13088v1 [cs.CV] 9 Oct 2026
+Junkai Deng, Jiayi Kong, Xuhui Chen, Guanli Hou, Fei Hou, Junhui Hou, Wenping Wang, Ying He
+Abstract—Neural implicit surface methods that couple volume
+rendering with signed distance functions (SDFs), such as VolSDF
+and NeuS, achieve high-quality multi-view reconstruction for
+watertight objects. However, these approaches rely on a globally
+consistent inside–outside partition of space. This assumption
+becomes fragile for thin structures (e.g., sheets, tubes, and thin
+walls) and can break down for sign-ambiguous geometry (e.g.,
+surfaces with boundary, non-manifold junctions, and closely
+spaced surface components), often resulting in spurious closures
+or loss of fine structures. Unsigned distance field (UDF) formulations relax the global sign requirement and better support non-watertight geometry, but are substantially harder to
+optimize: near the surface, unsigned distances exhibit cusplike non-differentiability, which complicates stable, occlusionaware rendering and surface extraction. We propose PhaseSurf,
+a neural volume rendering framework built on Metric–Phase
+Fields (MPFs). MPFs decompose geometry into a nonnegative
+metric field capturing unsigned proximity and a continuous phase
+field providing a soft sign cue. By coupling the two through
+residual phase injection, MPFs yield a signed composite implicit
+function with stable near-surface gradients while retaining UDFlike robustness in sign-ambiguous regions. This design enables
+direct iso-surface extraction using standard Marching Cubes and
+avoids the failure modes of both pure SDF- and UDF-based
+formulations. We further introduce MPF-specific training losses
+that enforce metric consistency, stabilize phase transitions near
+the interface, and suppress spurious geometry in free space.
+Experiments on multi-view datasets with thin structures and signambiguous geometry show that PhaseSurf produces more stable
+reconstructions and higher-quality geometry than UDF-based
+methods and recent 3DGS pipelines, while avoiding artifacts
+typical of SDF-based approaches.
+Index Terms—Multi-view reconstruction, Neural implicit surfaces, Volume rendering, Thin structures, Sign-ambiguous geometry
+0.100
+(b) Metric
+(d) Indicator
+0.000
+−0.100
+(a) Reference
+(f) NSH
+(c) Phase
+(g) CAP-UDF
+(e) MPF
+(h) MPF
+Fig. 1: MPF on a challenging toy model. The model consists of two closely spaced open sheets, four slender tubular
+connections, and a closed spherical component. The sheets
+are single-layer surfaces with boundaries, whereas the sphere
+admits a well-defined inside-outside partition. The attachments
+form non-manifold junctions, and the tubes introduce narrow
+passages and nontrivial topology. Together, these features
+pose challenges to both SDF- and UDF-based reconstruction. (a) Two views of the reference model. (b)–(e) Crosssectional visualizations of the metric field r, phase field θ,
+phase indicator P , and composite field ϕ, respectively. (f)–
+(h) Reconstructions produced by NSH [3], CAP-UDF [4], and
+MPF. Both baselines struggle to recover the thin structures,
+resulting in incomplete or distorted geometry. In contrast, MPF
+more faithfully preserves the thin sheets, tubular connections,
+and overall structure.
+I. I NTRODUCTION
+Recovering high-quality 3D geometry from posed multiview images is a central problem in vision and graphics.
+Neural volume rendering has made this task practical by optimizing 3D representations directly from photometric supervision. However, standard volume rendering formulations that
+represent geometry implicitly through volumetric density fields
+often produce blurred geometry, and the extracted surfaces
+can be noisy or poorly defined. To obtain sharper and more
+Junkai Deng, Jiayi Kong, Guanli Hou and Ying He are with College of
+Computing and Data Science, Nanyang Technological University, Singapore.
+Xuhui Chen and Fei Hou are with the Key Laboratory of System Software
+(Chinese Academy of Sciences), Institute of Software, Chinese Academy of
+Sciences, and the University of Chinese Academy of Sciences.
+Junhui Hou is with the Department of Computer Science, City University
+of Hong Kong, Hong Kong SAR, China.
+Wenping Wang is with Department of Computer Science & Engineering,
+Texas A&M University, Texas, USA.
+faithful reconstructions, a line of work bridges volume rendering with implicit surface representations by modeling scene
+geometry as the zero level set of a learned signed distance
+function (SDF). Representative methods such as VolSDF [1]
+and NeuS [2], along with many follow-up works, convert
+signed distances into rendering weights and achieve strong
+reconstruction and view synthesis performance. Despite their
+success, SDF-based formulations implicitly assume a globally
+consistent inside–outside partition. This assumption is natural
+for watertight solids, but becomes ambiguous for open surfaces
+and sign-ill-posed configurations frequently encountered in
+practice, including clothing and cloth folds, thin sheets, layered
+structures, and non-manifold attachments. On such shapes,
+enforcing a single globally signed field biases optimization
+toward watertight explanations, often producing spurious clo-
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+sures, thickness inflation, or missing sheets.
+Unsigned distance fields (UDFs) offer an appealing alternative by removing the need for a global sign and naturally
+supporting open surfaces. However, learning UDFs within
+a volume rendering framework is substantially more challenging. Near the interface, a UDF behaves like an absolute
+value function and exhibits a cusp, complicating gradientbased optimization. More importantly, volume rendering requires converting distances into unbiased and occlusion-aware
+rendering weights; without sign information, designing stable
+weight functions becomes delicate. As a result, recent methods
+often rely on two-stage optimization or specialized training
+strategies to achieve robust convergence [5].
+In point-cloud reconstruction, S2 DF [6] addresses this nondifferentiability by learning a scaled squared distance field
+that remains differentiable at the zero level set. However,
+this idea does not directly translate to posed multi-view
+reconstruction: S2 DF remains an unsigned, nonnegative field
+and therefore does not provide an inherent sign change for
+occlusion reasoning, while the squared-distance formulation
+yields vanishing gradients on the surface, weakening normal
+cues and near-surface regularization under purely photometric supervision. Moreover, S2 DF relies on explicit surface
+anchoring and second-order (Hessian-based) regularization,
+which are expensive to evaluate densely along camera rays
+and difficult to constrain from images alone.
+Extracting the zero level set from a learned UDF or S2 DF
+is considerably more difficult than from sign-based representations, where standard Marching Cubes can be applied
+directly. In the absence of sign information, surface extraction
+typically requires additional cues, such as using gradient
+directions to detect zero crossings [7], which can be unreliable
+due to unstable UDF gradients, or resorting to optimizationbased extraction methods [8], [9], which are computationally
+expensive and significantly slower.
+In this work, we adopt Metric–Phase Fields (MPFs) [10]
+as a geometric backbone for neural volume rendering. MPFs
+decouple geometry into (i) a metric field r(x) ≥ 0 that
+captures unsigned proximity in a UDF-like manner, and (ii) a
+continuous phase field θ(x) that provides a soft sign/side cue
+via P (x) = tanh(β θ(x)). The metric and phase components
+are coupled through residual phase injection to form a signed
+composite implicit function ϕ(x) = r(x)P (x) + θ(x) with
+stable near-surface gradients. The metric branch retains the
+robustness of unsigned representations for open and thin structures, while the phase branch supplies signed behavior where
+meaningful, enabling standard iso-surface extraction and SDFstyle regularization near the interface. In sign-ambiguous
+regions such as thin sheets or tubes, boundaries, and nonmanifold junctions, MPFs tend to form a double cover—a
+narrow two-sided shell—that supports a local sign change even
+when the enclosed volume is arbitrarily thin (Fig. 1).
+MPFs have demonstrated advantages in reconstructing thin
+and open geometry from unoriented point clouds [10]. Our
+goal is to bring these advantages to posed multi-view reconstruction by integrating MPFs into a differentiable volume rendering pipeline. Since the composite field φ is signed, we can
+directly adopt the NeuS [2] signed-field-to-opacity mapping
+2
+to obtain occlusion-aware rendering weights concentrated near
+{φ = 0}. Nevertheless, integrating MPFs into NeuS/VolSDFstyle frameworks is not a simple drop-in replacement. Unlike
+an SDF, φ is not inherently distance-calibrated; under purely
+photometric supervision, its scale and near-surface gradients
+can become poorly conditioned. Moreover, the MPF decomposition introduces additional degrees of freedom: many different
+pairs (r, θ) can induce similar rendered colors, so photometric
+supervision alone does not uniquely determine how the two
+branches should share responsibility. Finally, sign-ambiguous
+regimes such as open boundaries and thin structures are
+especially challenging under multi-view supervision, where
+only 2D photometric cues mediated by visibility are available.
+Preserving thin and open geometry without spurious closures
+or floaters therefore requires MPF-tailored regularization.
+Building on these insights, we introduce PhaseSurf, a neural
+volume rendering framework that addresses the above challenges by rendering with the signed composite field φ while
+enforcing MPF-specific geometric constraints. Residual phase
+injection ensures non-vanishing gradients near the interface,
+and additional coupling and regularization terms stabilize optimization in sign-ambiguous regions. This design preserves the
+advantages of SDF-based surface rendering, including standard
+Marching Cubes extraction, while substantially improving
+modeling capacity for open surfaces and thin structures. Evaluation on datasets with sign-ambiguous geometry and thin
+structures shows consistent improvements in reconstruction
+fidelity and training stability over strong SDF- and UDF-based
+baselines, as well as recent 3D Gaussian Splatting (3DGS)
+pipelines.
+II. R ELATED W ORK
+We briefly review the most relevant work on SDF-, UDFand 3DGS-based 3D reconstruction from posed multi-view
+images.
+a) SDF Methods: A main line of work couples differentiable rendering with signed distance functions to obtain
+sharp geometry from multi-view supervision. Early approaches
+such as DVR [11] and IDR [12] learn implicit surfaces
+through differentiable surface rendering. Building on NeRFstyle volume rendering, later methods integrate SDFs into
+volumetric rendering to jointly optimize geometry and appearance, notably UNISURF [13], VolSDF [1], and NeuS [2],
+which achieve high-quality reconstruction and view synthesis.
+Follow-up work improves fidelity and/or efficiency, including
+HF-NeuS [14], Neuralangelo [15], and NeuS2 [16].
+b) UDF Methods: To relax the watertight assumption
+implicit in SDF-based formulations, several methods learn
+unsigned distance functions from multi-view photometric supervision. Representative approaches include NeUDF [17]
+and NeuralUDF [18], which introduce UDF-specific mappings from distances to rendering weights or densities, as
+well as 2S-UDF [5], which improves robustness via a twostage optimization strategy. NeAT [19] also targets arbitrarytopology reconstruction by augmenting SDF modeling with
+a validity field. Recent work explores learned or data-driven
+rendering priors to stabilize UDF learning and improve surface
+extraction.
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+c) 3DGS Methods: 3D Gaussian Splatting represents
+scenes using explicit Gaussian primitives and enables efficient optimization and real-time rendering [20]. Because
+Gaussians do not directly define an explicit surface, extracting high-quality geometry typically requires additional constraints or dedicated meshing pipelines, such as SuGaR [21],
+2DGS [5], Gaussian surfels [22], GOF [23], PGSR [24],
+and GS2Mesh [25]. Hybrid approaches combine Gaussians
+with implicit surfaces to improve geometric quality, including
+3DGSR [26], NeuSG [27], and GSDF [28], while additional
+regularization schemes aim to improve multi-view geometric
+consistency.
+d) Challenges: Despite significant progress, reconstructing high-quality surfaces for sign-ambiguous geometries (e.g.,
+open boundaries, thin sheets, and non-manifold junctions)
+from posed images remains challenging. SDF-based renderers
+couple geometry and sign in a single field and assume a globally consistent inside–outside partition; when this assumption
+is violated, they often favor watertight explanations, leading
+to spurious closures, thickness inflation, or missing thin parts.
+UDF-based formulations remove the global sign requirement
+but introduce their own difficulties under image-only supervision: cusp-like behavior near the interface makes optimization fragile, and converting unsigned distances into stable,
+occlusion-aware rendering weights is non-trivial; reliable surface extraction often requires additional cues or costly postprocessing. 3DGS methods excel at efficient view synthesis,
+but they represent geometry indirectly through opacity distributions over Gaussians, making meshing sensitive to heuristics
+and regularization; thin or open structures may therefore be
+over-smoothed, fragmented, or affected by floaters. These
+challenges are amplified in sign-ambiguous regions, where
+purely 2D supervision provides weak geometric constraints.
+Metric–Phase Fields have recently shown promising results
+for reconstructing thin sheets and other sign-ambiguous geometries from unoriented point clouds. However, extending
+MPFs from point-cloud reconstruction to posed multi-view
+images introduces additional challenges. In point-cloud settings, surface samples are directly available and provide strong
+geometric supervision for learning the metric and phase fields.
+In contrast, multi-view reconstruction relies only on indirect
+photometric cues mediated through visibility and rendering. As
+a result, the additional degrees of freedom introduced by the
+metric–phase decomposition must be carefully regularized to
+avoid degenerate solutions. This motivates integrating MPFs
+into a volume rendering framework with MPF-specific constraints that stabilize optimization while preserving flexibility
+for open and thin structures.
+III. P RELIMINARIES
+A. Implicit Functions for Surface Representations
+Let S ⊂ R3 denote the (unknown) target surface and let
+3
+X = {pi }N
+i=1 ⊂ R be an unoriented point cloud sampled
+from S. For a query point x ∈ R3 , we write ∥ · ∥2 for the
+Euclidean norm and ∇ for the spatial gradient. We denote the
+unsigned distance to S by dist(x, S) = miny∈S ∥x − y∥2 .
+A common way to represent S is as the zero level set of a
+scalar field. A signed distance function s : R3 → R satisfies
+3
+s(x) = ±dist(x, S), where the sign is determined by a globally consistent inside–outside partition. When differentiable,
+an SDF obeys the Eikonal condition ∥∇s(x)∥2 = 1 in a
+tubular neighborhood of S, away from singularities such as the
+medial axis. An unsigned distance function discards the sign,
+u(x) = dist(x, S) ≥ 0, and therefore naturally accommodates
+open surfaces and sign-ambiguous configurations. However, u
+is generally not differentiable on the interface {u = 0} (cusplike behavior), and it does not exhibit a sign change across S,
+making standard iso-surfacing difficult.
+Metric–phase fields [10] decouple metric proximity from
+phase/sign information by learning two continuous fields: an
+unsigned metric field r : R3 → R≥0 , and a phase field
+θ : R3 → R. The phase field induces a bounded indicator
+
+P (x) = tanh β θ(x) ∈ (−1, 1),
+(1)
+where β > 0 is a learnable scaling coefficient controlling the
+sharpness of the phase transition (larger β yields a steeper
+transition and faster saturation). MPFs combine metric and
+phase via a gated-metric formulation with residual phase
+injection:
+φ(x) = r(x) P (x) + θ(x).
+(2)
+The reconstructed surface is extracted as the zero level set
+Sb = {x ∈ R3 : φ(x) = 0}. Intuitively, r(x) captures
+unsigned proximity (UDF-like behavior), while θ(x) encodes a
+soft inside–outside preference where such a notion is meaningful. The gated product rP injects signed behavior away from
+the surface, and the additive residual θ stabilizes optimization
+and gradients near {φ = 0}.
+MPFs unify desirable properties of SDFs and UDFs, which
+are particularly useful for sign-ambiguous geometry such as
+thin structures, open boundaries, and non-manifold junctions.
+(i) Sign consistency and coincident zero sets. Since tanh(·) is
+odd and strictly increasing and β > 0, one has sign(P (x)) =
+sign(θ(x)) and P (x) = 0 ⇔ θ(x) = 0. Because r(x) ≥ 0,
+the product r(x)P (x) has the same sign as θ(x) (or is zero).
+Hence, for any x with θ(x) ̸= 0,
+
+
+sign φ(x) = sign θ(x) ,
+φ(x) = 0 ⇔ θ(x) = 0. (3)
+(ii) Stable near-surface gradients via residual phase injection.
+Differentiating (2) yields
+
+
+∇φ(x) = P (x) ∇r(x) + 1 + r(x) β sech2 (βθ(x)) ∇θ(x).
+(4)
+Crucially, near the interface where r(x) ≈ 0, the factor
+multiplying ∇θ(x) is close to 1, providing a non-vanishing
+gradient pathway to the phase branch and stabilizing optimization around the zero level set. (iii) First-order agreement
+at constrained samples. In point-based learning, one typically
+enforces both r(p) = 0 and φ(p) = 0 for samples p ∈ X.
+Since φ(p) = 0 ⇒ θ(p) = 0 by (3), substituting r(p) = 0
+and P (p) = 0 into (4) gives
+∇φ(p) = ∇θ(p),
+(5)
+so interface normals computed from ∇φ are stable and coincide with those of θ at constrained samples. By enforcing
+an on-surface unit-gradient (Eikonal) constraint on θ, (5)
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+implies that ϕ exhibits a sign change across the interface,
+unlike a UDF which is nonnegative everywhere. (iv) Double
+covering in sign-ambiguous regions. In regions where a globally consistent inside–outside labeling is ill-defined (e.g., thin
+sheets, boundaries, and non-manifold junctions), MPFs tend to
+form a narrow two-sided shell around the underlying surface.
+This induced double covering exhibits opposite signs on its
+two sides and therefore supports a meaningful sign change,
+even though the enclosed volume can be arbitrarily thin. (v)
+Standard iso-surface extraction. Unlike UDFs, the composite
+field φ is signed and exhibits sign changes across the surface,
+so Sb = {φ = 0} can be extracted directly using standard
+Marching Cubes. Figure 1 illustrates MPFs on a 3D toy model
+with thin sheets, boundaries, and non-manifold junctions.
+4
+ℒsurf , ℒalign , ℒanchor
+ℒfar , ℒeik
+𝑟
+𝜑
+Spatial
+coordinates
+Volume
+rendering
+Alpha
+𝜃
+Alpha
+composition
+𝐟
+MPF Network
+Spatial coordinates
+Camera parameters
+Color
+ℒrgb
+ℒmask
+Color Network
+Fig. 2: Pipeline. For each 3D sample along camera rays, the
+MPF network predicts an unsigned metric r(x) ≥ 0, a phase
+θ(x), and a feature f (x). We form the signed composite field
+φ(x) = r(x) tanh(βθ(x)) + θ(x) and use NeuS-style signedfield volume rendering to compute occlusion-aware weights.
+The radiance MLP predicts view-dependent color, and the
+volume rendering network produces RGB (supervised by input
+images) and accumulated opacity α (optionally supervised by
+masks).
+B. Differentiable Volume Rendering with Implicit Functions
+We assume posed multi-view images with known camera
+intrinsics and extrinsics. For a pixel with ray origin o ∈ R3 and
+unit direction d ∈ S2 , we consider the camera ray r(t) = o +
+td. Neural volume rendering models appearance using a color
+field c(x, d) ∈ [0, 1]3 and a nonnegative density (opacity) field
+σ(x) ≥ 0, which determines the probability of ray termination.
+The rendered pixel color isR given by the standard volume
+rendering integral
+R t C(r) = T (t)σ(r(t))c(r(t), d)dt, where
+T (t) = exp(− 0 σ(r(u))du) is the accumulated transmittance along the ray. In practice, the integral is approximated
+by sampling points along the ray and performing alpha compositing.
+Surface-based neural rendering methods parameterize geometry by a signed implicit field f : R3 → R whose zero
+level set {f = 0} represents the surface. The key idea
+is to convert signed values f (x) into densities or opacities
+so that rendering weights concentrate near the interface and
+remain occlusion-aware. A common strategy defines a smooth
+occupancy via a monotone
+ cumulative density function (CDF),
+Φ(x) = CDF f (x)/γ , where γ > 0 controls the thickness
+of the transition band. Different choices of CDF lead to
+different renderers, e.g., the Laplace CDF in VolSDF [1] and
+the logistic-CDF-based formulation in NeuS [2], and a more
+general setting in UNIS [29].
+Given posed images, model parameters are optimized using photometric supervision by minimizing the discrepancy
+b
+between the rendered color C(r)
+and the ground-truth pixel
+⋆
+color C (r), aggregated over rays from all training views.
+This photometric loss is typically combined with geometric
+regularizers on f (e.g., Eikonal-style constraints) to stabilize
+optimization.
+IV. P ROPOSED M ETHOD
+Given posed multi-view images, our goal is to reconstruct
+a surface that may contain sign-ambiguous structures such as
+thin sheets, open boundaries, and non-manifold junctions. We
+build on the NeuS pipeline [2] and replace the SDF geometry
+backbone by an MPF. Concretely, we represent geometry using
+two coupled fields: an unsigned metric field r(x) ≥ 0 and a
+phase field θ(x), and form the signed composite implicit function φ(x) = r(x) P (x) + θ(x), whose zero level set {φ = 0}
+defines the reconstructed surface. Since φ is signed, we can
+directly adopt NeuS-style rendering to obtain occlusion-aware
+weights concentrated around the interface. The key difference
+from NeuS is our MPF-specific regularization: under purely
+photometric supervision, the metric and phase branches can
+otherwise drift or collapse. We therefore augment the RGB
+loss with a set of losses tailored to MPFs to stabilize optimization near the interface and preserve UDF-like robustness
+in sign-ambiguous regions.
+A. MPF Geometry and Appearance Networks
+As illustrated in Fig. 2, our model contains two neural
+components: (i) an MPF geometry network that predicts the
+metric–phase decomposition and a geometry feature, and (ii)
+a radiance network that predicts view-dependent color. The
+composite field φ is used for NeuS-style signed surface
+rendering, while MPF-specific regularizers are applied to the
+predicted fields to stabilize image-only training.
+a) Geometry network (MPF): We parameterize MPF
+geometry with an MLP that maps a 3D query point x to
+an unsigned metric field r(x) ≥ 0, a phase field θ(x) ∈ R,
+and a learned feature vector f (x) for appearance. Following
+NeuS [2], we adopt a shared trunk with lightweight heads.
+Given x, we apply positional encoding γ(x) and compute a
+shared representation h(x) = Fψ (γ(x)). Two scalar heads
+predict r̃(x) = gr (h(x)) and θ(x) = gθ (h(x)), while an additional head (or intermediate activation) outputs the appearance
+feature f (x). Non-negativity of the metric branch is enforced
+by construction via r(x) = softplus(r̃(x)). From the phase
+field we derive a bounded indicator P (x) = tanh(β θ(x)),
+where β > 0 controls the sharpness of the phase transition and is learned with a positive parameterization (e.g.,
+β = softplus(β̃)). The signed composite implicit function
+is then formed as φ(x) = r(x) P (x) + θ(x), and geometry
+is extracted from the zero level set {φ = 0}. Surface
+normals are computed from the composite field via automatic
+differentiation as n(x) = ∇x φ(x)/(∥∇x φ(x)∥2 + ε). A
+key practical benefit of residual phase injection is improved
+conditioning near the interface: around {φ = 0}, the metric
+term becomes small, while the additive phase term provides a
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+direct, non-vanishing gradient pathway. This stabilizes normal
+estimation and supports robust optimization with ray-sampled
+regularizers, including anchoring, alignment, and Eikonal-style
+constraints.
+b) Appearance network (radiance): We model viewdependent radiance using a rendering MLP cω , following
+NeuS. Given a query point x and a viewing direction
+d, the radiance network takes as input the encoded position and direction, the normal from the geometry network, and the learned feature f (x),and predicts c(x, d) =
+sigmoid cω γ(x), γ(d), n(x), f (x) ∈ [0, 1]3 . Importantly,
+the radiance network predicts color only; opacity is derived
+from the signed composite field φ via the NeuS-style mapping
+described in Section IV-B. This design mirrors the standard
+NeuS pipeline and isolates the effect of replacing the SDF
+geometry backbone with an MPF.
+5
+φ and the phase field θ to encourage well-conditioned signed
+behavior near the interface:
+
+n
+1 XX
+2
+wi (∥∇φ(r(ti ))∥2 − 1) +
+Lsurf =
+|R|n
+r∈R i=1
+
+2
+(∥∇θ(r(ti ))∥2 − 1) . (7)
+Although ∇φ ≈ ∇θ near the interface, we intentionally
+include both terms to improve stability early in training when
+the predicted interface (and thus the near-surface set) can be
+noisy. Second, to prevent degenerate decompositions under
+purely photometric supervision (e.g., metric collapse or phase
+dominance), we align the gradients of the metric and phase
+fields near the surface:
+
+n
+D
+E2 
+1 XX
+c
+c
+wi 1 − ∇ri , ∇θi
+, (8)
+Lalign =
+|R|n
+i=1
+r∈R
+B. Volume Rendering with MPFs
+For each pixel ray r(t) = o + td, we sample depths t1 <
+t2 < · · · < tn and evaluate the composite field φi = φ(r(ti ))
+and color ci = c(r(ti ), d). We adopt the same signed-fieldto-opacity mapping as NeuS [2]. Specifically, we define an
+occupancy function via a monotone CDF, Φi = CDF (φi /s),
+where s > 0 controls the width of the transition band (learned
+as in NeuS).
+The per-interval opacity is estimated from the change of
+occupancy along the ray, αi = clip[0,1] ((Φi −Φi+1 )/(Φi +ε)),
+with a small ε for numericalQstability. Rendering weights are
+then computed as wi = αi j<i (1 − αj ) and the rendered
+Pn
+color is b
+C(r) = i=1 wi ci . Since φ is signed, this formulation
+produces well-conditioned zero crossings and occlusion-aware
+weights, while MPFs retain flexibility in sign-ambiguous regions through the metric/phase decomposition.
+C. Training Objective
+We optimize all network parameters by combining standard
+photometric supervision with MPF-specific geometric regularization.
+a) Photometric supervision: Let R denote the set of
+camera rays corresponding to pixels sampled from the training
+images. The RGB loss is
+1 X b
+∥C(r) − C ⋆ (r)∥1 .
+(6)
+Lrgb =
+|R|
+r∈R
+b) Near-surface regularization: In MPF learning, several
+constraints are naturally imposed in a narrow band around
+the surface. In point-cloud reconstruction, such constraints
+can be enforced using explicit surface samples. In multi-view
+reconstruction, however, we do not have direct 3D supervision;
+instead, we exploit the fact that NeuS-style rendering weights
+concentrate near the zero level set of the signed composite
+field. We therefore use the rendering weights {wi } as soft
+indicators of near-surface locations along each ray and apply
+the following regularizers at high-weight samples. First, we
+enforce an Eikonal-style constraint on both the composite field
+c i = ∇r(r(ti ))/(∥∇r(r(ti ))∥2 + ε) (and analogously
+where ∇r
+c i ), and the squared inner product makes the constraint
+for ∇θ
+orientation-invariant, which is desirable for sign-ambiguous
+regions where a consistent global orientation may not exist.
+Finally, we anchor the MPF interface to the rendered surface
+by encouraging both the composite field and the metric field
+to be small at near-surface samples:
+n
+
+1 XX 
+Lanchor =
+wi |φ(r(ti ))| + r(r(ti )) . (9)
+|R|n
+i=1
+r∈R
+Together, these near-surface terms make φ behave SDF-like
+where rendering requires stable signed gradients, while keeping the metric–phase decomposition well-conditioned.
+c) Free-space regularization: Away from the surface,
+MPFs should exhibit stable and unambiguous behavior: the
+metric branch should behave like an unsigned distance field,
+while the phase branch should saturate to a clear sign. We
+apply the following regularizers to samples in free space (i.e.,
+low rendering weights). We define wfree
+= 1 − exp(−100|r|)
+i
+to account for occluded surfaces. First, we encourage the
+metric field r to approximate an unsigned distance field by
+enforcing an Eikonal-style constraint:
+n
+Leik =
+1 X X free
+2
+wi (∥∇r(r(ti ))∥2 − 1) .
+|R|n
+i=1
+(10)
+r∈R
+Second, we adopt a common regularizer found in UDF reconstruction literatures [18], [5] that prevents large regions
+with near-zero UDF values by encouraging the UDF to be as
+large as possible. In our case, this is achieved by regularizing
+r which should resemble the UDF of the geometry. We
+additionally constraint the absolute value of the composite
+field (|φ|) as well.
+n
+1 X X free
+wi exp(−αf (r(r(ti )) + |φ(r(ti ))|)) .
+|R|
+r∈R i=1
+(11)
+Here αf = 50 controls the sharpness of the barrier. This loss
+is active where the sample point is at least a little distance
+away from the surface. We don’t apply this loss exactly on
+Lfar =
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+6
+the surface to prevent this loss from messing up with the
+actual surface. Together, these terms encourage r to remain
+a stable unsigned proximity measure away from the surface,
+while θ yields a clear, well-separated phase, reducing spurious
+structures in unobserved regions.
+d) Optional silhouette supervision: When foreground
+masks are available,
+we additionally supervise the accumulated
+b = Pn wi using an ℓ1 loss:
+opacity A(r)
+i=1
+Lmask =
+1 X b
+A(r) − A⋆ (r) .
+|R|
+1
+(12)
+r∈R
+This provides a strong geometric cue that reduces the ambiguity of purely photometric training, especially for thin/open
+structures.
+The total training loss is a weighted sum of four components:
+L=
+Lrgb
+|{z}
+photometric supervision
++ λanchor Lanchor + λsurf Lsurf + λalign Lalign
+{z
+}
+|
+near-surface regularization
++ λeik Leik + λfar Lfar
+{z
+}
+|
+free-space regularization
++
+λ
+L
+| mask{z mask}
+.
+optional silhouette supervision
+(13)
+We follow the standard NeuS training pipeline for optimization
+and ray sampling, and normalize each scene to a fixed bounding volume. For initialization, we adopt NeuS-style sphere
+initialization to obtain a well-conditioned signed field at the
+start of optimization: we initialize the phase branch θ (and
+thus the composite field φ) to approximate the signed distance
+of a coarse sphere, and initialize the metric branch r as
+a nonnegative, distance-like field (e.g., roughly proportional
+to |θ|) so that training begins with stable zero crossings
+and meaningful gradients. When coarse geometric priors are
+available (e.g., a visual hull, sparse SfM points, or depthbased initialization), we can initialize θ from the corresponding
+coarse implicit surface instead of a sphere. During training,
+we jointly optimize the network parameters together with the
+NeuS sharpness parameter s (controlling the transition width)
+and the phase scale β. To balance the loss terms and avoid
+the early collapse of the metric–phase decomposition, we use
+a warm-up schedule: in the first Twarm = 50, 000 iterations,
+we optimize primarily with Lrgb and near-surface terms and
+Leik that directly stabilize the rendered interface (e.g., Lanchor
+and Lsurf , and Lmask when masks are available). We then
+progressively enable the coupling and free-space regularizers
+by ramping λalign and λfar from 0 to their target values. In
+practice, we choose λ such that the four groups in Eq. (13)
+contribute comparable gradient magnitudes. Optionally, we
+treat rendering weights as soft selectors and stop gradients
+through wi when used inside regularization losses, preventing
+trivial solutions that reduce the penalty by reshaping the
+weight distribution.
+e) Remarks: In our work, the regularization losses look
+similar to the one used by the original MPF literature [10].
+However, MPF is designed for surface reconstruction from
+known point clouds, while our work focuses on reconstruction
+from multi-view images.
+In the point cloud reconstruction task, a subset of ground
+truth location are known as priors in the form of input point
+clouds. This information not only makes the separation of
+near surface and far-away points easy, but also makes the
+definition of various losses (Lanchor , Lsurface , Lalign , Lfar )
+straightforward. In this case, Lanchor and Lsurface act as
+supervision losses.
+In the multi-view images reconstruction task however, such
+ground truth is not available. The location of the surface is
+dynamic and can change anytime. This poses a fundamental
+distinction between our work and the original MPF. In our
+work, we use a simple hypothesis that the surface location in
+every iteration of training can be roughly determined from the
+rendering weights of each sample along the ray. In our case,
+the only supervision losses are Lrgb and the optional Lmask ,
+while the other loss terms Lanchor , Lsurface , Lalign , Lfar are
+regularization terms.
+The two tasks – reconstruction from point clouds and
+reconstruction from multi-view images – are related. But in
+our case, they are fundamentally different and the adaptation
+is therefore nontrivial.
+V. E XPERIMENTS
+A. Experiment Settings
+a) Datasets: The common benchmarks, such as
+DTU [30] and Tanks & Temples (T&T) [31], are widely
+adopted for assessing multi-view reconstruction quality from
+posed images. However, these datasets primarily contain
+regular object- or scene-level geometry and are dominated
+by closed or nearly watertight surfaces, with few thin-sheet
+structures or non-manifold junctions. To evaluate behavior
+beyond the watertight assumption, we test on garment
+models selected from DeepFashion3D [32], which contains
+garment-like surfaces with boundaries and thin structures. We
+also introduce the Thin Structure and Sign-Ambiguous (TSSA)
+benchmark, a curated collection of challenging geometries
+exhibiting thin structures and sign ambiguity. It comprises
+eight real and synthetic scenes, featuring open surfaces, thin
+tubes and sheets, closely spaced layers, and non-manifold
+junctions, precisely the regimes where SDF-based methods
+tend to produce spurious closures and UDF-based methods
+often struggle with stable rendering and surface extraction.
+For each scene, we use 120 images for training and evaluating
+novel view synthesis quality.
+b) Baselines: Since our primary focus is reconstructing
+sign-ambiguous geometry, where the watertight assumptions
+underlying SDF-based methods are often violated, we mainly
+compare against UDF- and 3D Gaussian Splatting approaches.
+Specifically, we include GaussianUDF [33], a state-of-theart UDF-based method, as well as recent 3DGS pipelines
+including PGSR [24], GeoSVR [34] and GGGS [35]. For completeness, we also report results for NeuS [2], HF-NeuS [14]
+and Neuralangelo [15], the classical SDF-based neural rendering methods. We assess geometric accuracy using Chamfer
+Distance (CD) and normal consistency (NC) whenever groundtruth 3D geometry is available. The normal consistency is
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+7
+TABLE I: Chamfer distance comparison on the DTU dataset [30].
+DTU
+24
+37
+40
+55
+63
+65
+69
+83
+97 105 106 110 114 118 122 Mean
+VolSDF [1]
+1.14 1.26 0.81 0.49 1.25 0.70 0.72 1.29 1.18 0.70 0.66 1.08 0.42 0.61 0.55
+NeuS [2]
+1.00 1.37 0.93 0.43 1.10 0.65 0.57 1.48 1.09 0.83 0.52 1.20 0.35 0.49 0.54
+.
+HF-NeuS [14] 0.76 1.32 0.70 0.39 1.06 0.63 0.63 1.15 1.12 0.80 0.52 1.22 0.33 0.49 0.50
+Neuralangelo [15] 0.37 0.72 0.35 0.35 0.87 0.54 0.53 1.29 0.97 0.73 0.47 0.74 0.32 0.41 0.43
+Ours
+0.94 0.87 0.75 0.39 1.05 0.63 0.58 1.34 1.01 0.96 0.50 1.19 0.36 0.46 0.49
+measured as cosine similarity between the ground-truth normal
+and the predicted normal.
+B. Results and Comparisons
+a) Results on the DTU dataset: Table I shows the
+Chamfer distance metrics among our method and representative implicit-field methods including VolSDF and NeuS. We
+particularly found that our method can resolve thin structures
+better than baseline methods, as shown in Figure 3, which
+can be attributed to our decomposition greatly increases the
+express capability of the neural network that encodes the
+implicit representation of the geometry, which as a result can
+better represent sign changes and ambiguity in a small region
+that require significant changes of the implicit representation
+value.
+On the other hand, however, our expressiveness can have
+adverse effects on regions with high specular lights or shadows that change dramatically across viewing angles and lack
+enough consistent color or texture cues for the geometry, as
+shown in Figure 4. A less expressive neural network usually
+favors a flat surface in this region, which is usually the desired
+behavior. But our enhanced expression capability results in a
+greater tendency to distort the surface to create dents or holes
+in these regions in order to compensate for the color changes.
+This results in the slightly inferior Chamfer distance metrics
+in some test cases in Table I.
+b) Results on our dataset: Figure 5 shows comparison
+results on the real scenes from our TSSA dataset. SDF-based
+methods often suffer from spurious closures when reconstructing sign-ambiguous geometry, whereas UDF-based approaches
+generally recover the correct topology but may struggle with
+stable optimization and surface extraction. In comparison,
+PhaseSurf consistently achieves higher reconstruction accuracy
+according to the quantitative metrics. 3DGS-based methods
+perform well on both closed and open surfaces in terms of
+rendering quality; however, they often struggle with thin or
+closely spaced structures, sometimes producing missing parts
+on TSSA scenes and introducing many floating artifacts that
+do not correspond to real geometry. In contrast, PhaseSurf
+demonstrates strong robustness to thin and sign-ambiguous
+geometry, yielding stable and reliable reconstructions across
+the TSSA dataset.
+Furthermore, Figure 6 shows comparison results on the
+synthetic scenes from our TSSA dataset. Our method also
+produces significantly better geometric results. In these cases,
+SDF-based methods such as NeuS often produce spurious closures or thickness inflation in sign-ambiguous regions, while
+UDF-based methods may suffer from unstable optimization
+0.86
+0.84
+0.77
+0.61
+0.77
+and fragmented surfaces. 3DGS baselines frequently generate
+incomplete or noisy meshes after surface extraction.
+Take the LEGO scene as an example (Figure 6 row 1).
+The conveyor belt contains many small circular openings,
+which introduce significant sign ambiguity due to the thin plate
+structure and closely spaced boundaries. NeuS and PGSR fail
+to recover most of these holes and instead produce overly
+smoothed surfaces that close the openings. In addition, PGSR
+introduces an unwanted planar surface on the inner side of the
+bucket (highlighted by the green box), which does not exist in
+the ground-truth geometry. GaussianUDF struggles to reconstruct the overall structure and produces fragmented geometry.
+GGGS yields better hole recovery than other baselines, but
+the reconstructed surface remains noisy and lacks smoothness.
+In contrast, our method accurately reconstructs the thin plate
+and preserves the hole openings with clean and well-defined
+boundaries.
+We also report the quantitative geometric results (CD and
+NC) in Table II and Table III for synthetic cases, where the
+ground truth mesh is available. The quantitative metrics further
+confirm that our method consistently reconstructs complete
+and coherent geometry in these challenging scenarios. This
+improvement stems from the MPF representation, which decouples metric proximity from sign information and enables
+occlusion-aware rendering while preserving UDF-like flexibility in sign-ambiguous regions.
+c) Additional results: In this section, we conduct experiments on UDF reconstruction methods, present representative qualitative results on the Deep Fashion3D dataset [32]
+commonly used in UDF reconstruction evaluation, as well as
+the Tanks & Temples dataset [31] that focuses on scene-level
+reconstruction.
+We compare against NeUDF [17], a widely-accepted
+method of UDF reconstruction, to our dataset. Theoretically,
+UDFs are capable of reconstructing geometries of arbitrary
+topology, including the thin structures and sign-ambiguous
+structures present in our data. However, in practice, optimizing
+UDFs with neural networks is very challenging.
+We present training results of NeUDF on our dataset in
+Figure 7. In these cases, the meshes produced by NeUDF is of
+very poor quality, which can be attributed to both the unstable
+nature of UDF learning, and the lack of robust mesh extraction
+methods for UDFs.
+Deep Fashion3D [32] is a garment dataset composed of
+various clothes of single layers and open surfaces, which
+is inherently suitable for UDF reconstruction. Since MPF is
+a signed field, reconstructing open surfaces—such as clothing—results in a two-layered watertight shell. Our approach
+offers more stable training than UDF-based methods and
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+8
+Viewed from back
+Viewed from
+opposite side
+NeuS
+VolSDF
+HF-NeuS
+Ours
+Fig. 3: Visualizations and local enlarged views of the reconstructed results on the DTU dataset [30]. For each showcased data,
+we present an enlarged local rendering that corresponds to the input camera view in the upper row. We render the same part
+of the mesh of each method in a novel angle that can better demonstrate the difference of each method in the lower row. In
+the top two rows, scissors and screwdrivers are stacked on top a set of bricks. All methods except our method reconstructs
+spurious structures that connect the tools to the surface below. In the bottom two rows, the teeth of the toy bear represents
+a layer of thin surface, and all methods except our method cannot faithfully reconstruct the thin plane structure and connects
+to the face behind the teeth. Our method is more flexible with representation of the implicit geometry and produces the best
+result at preventing complex structures from connecting together, as well as reconstructing thin surfaces.
+TABLE II: Geometry reconstruction results on the TAAS-Synthetic dataset measured by Chamfer Distance (CD, in 10−3 units).
+We report the directional scores from ground truth to prediction (gt→pred), from prediction to ground truth (pred→gt), and
+their bidirectional mean. Lower CD values indicate better geometric accuracy. Best results are shown in bold, and second-best
+results are underlined. “NA” indicates reconstruction failure.
+High-Heeled Shoe
+Method
+GaussianUDF
+GGGS
+NeuS
+PGSR
+HF-NeuS
+Neuralangelo
+Ours
+mean (↓)
+pred→gt (↓)
+gt→pred (↓)
+mean (↓)
+pred→gt (↓)
+gt→pred (↓)
+10.319
+6.299
+9.707
+7.607
+11.883
+11.224
+4.762
+4.260
+6.021
+8.936
+6.591
+10.449
+4.959
+4.190
+16.379
+6.577
+10.477
+8.622
+13.317
+17.489
+5.335
+7.582
+5.977
+6.442
+8.294
+6.277
+10.087
+4.985
+5.771
+4.694
+4.925
+5.266
+4.882
+5.691
+4.700
+9.393
+7.260
+7.959
+11.322
+7.672
+14.483
+5.269
+mean (↓)
+pred→gt (↓)
+gt→pred (↓)
+mean (↓)
+pred→gt (↓)
+gt→pred (↓)
+7.693
+4.398
+5.826
+4.771
+6.722
+5.862
+4.079
+5.490
+4.455
+5.626
+4.900
+6.156
+5.973
+4.280
+9.895
+4.342
+6.026
+4.642
+7.288
+5.750
+3.877
+9.038
+NA
+10.280
+7.516
+13.153
+6.753
+5.745
+5.590
+NA
+4.752
+8.373
+5.496
+5.343
+4.451
+12.486
+NA
+15.808
+6.659
+20.809
+8.162
+7.039
+LEGO
+Method
+GaussianUDF
+GGGS
+NeuS
+PGSR
+HF-NeuS
+Neuralangelo
+Ours
+Tank
+Figurine
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+9
+TABLE III: Geometry reconstruction results on the TAAS-Synthetic dataset measured by Normal Consistency (NC, %). We
+report the directional scores from ground truth to prediction (gt→pred), from prediction to ground truth (pred→gt), and their
+bidirectional mean. Higher NC values indicate better geometric accuracy. Best results are shown in bold, and second-best
+results are underlined. “NA” indicates reconstruction failure.
+High-Heeled Shoe
+Method
+GaussianUDF
+GGGS
+NeuS
+PGSR
+HF-NeuS
+Neuralangelo
+Ours
+pred→gt (↑)
+gt→pred (↑)
+mean (↑)
+pred→gt (↑)
+gt→pred (↑)
+89.49
+90.91
+86.31
+91.46
+86.01
+85.21
+96.49
+94.55
+88.96
+85.03
+92.03
+86.99
+91.57
+96.46
+84.43
+92.87
+87.59
+90.88
+85.03
+78.85
+96.53
+61.16
+70.48
+72.76
+65.09
+73.80
+63.17
+74.13
+63.17
+71.19
+74.54
+69.17
+75.00
+66.38
+74.53
+59.14
+69.77
+70.99
+61.02
+72.60
+59.97
+73.73
+LEGO
+Method
+GaussianUDF
+GGGS
+NeuS
+PGSR
+HF-NeuS
+Neuralangelo
+Ours
+Tank
+mean (↑)
+Figurine
+mean (↑)
+pred→gt (↑)
+gt→pred (↑)
+mean (↑)
+pred→gt (↑)
+gt→pred (↑)
+50.21
+63.81
+59.61
+65.71
+55.68
+61.41
+71.20
+48.75
+64.78
+60.38
+65.72
+57.09
+60.62
+71.37
+51.67
+62.83
+58.84
+65.71
+54.26
+62.20
+71.02
+60.77
+NA
+71.40
+79.73
+72.70
+80.94
+80.97
+49.47
+NA
+88.24
+81.89
+95.81
+85.90
+85.73
+72.08
+NA
+54.55
+77.57
+49.60
+75.99
+76.22
+Fig. 4: Limitation: Our enhanced expressive capability may
+cause the reconstructed surface to have an increased tendency
+to dent under high specular lighting or shadow conditions,
+where color changes drastically at different viewing angles
+and lacking adequate color consistency cues.
+benefits from more established mesh extraction techniques.
+Conversely, as shown in Figure 8 at the top row, UDF methods
+often produce broken meshes such as the strap in the dress.
+In addition, UDF methods usually require heavy smoothing
+losses for UDF learning stability that sacrifice fine detail, as
+shown in the same figure in the bottom, our method preserves
+more decorative creases on the cloth.
+We also demonstrate a test case in the Tanks & Temples
+dataset [31]. In this case, we observe that our method and
+Neuralangelo can better resolve the arm in front of the chest.
+Other methods incorrectly connects the arm to the body. This
+result is consistent to our observation on the DTU dataset
+presented in Figure 3, where our method excels in better
+resolving ambiguous geometries.
+C. Ablation studies
+In our method, the regularizers are categorized into two
+categories: near-surface regularization and free-space regularization. They reflect the interactions between the metric and
+phase branches. We provide ablation studies on these two
+types of regularizations. As shown in Figure 10, without nearsurface regularization, the model has difficulties learning thin
+structures. Without free-surface regularization, the extracted
+mesh is noisy and contains floaters.
+1) The effect of near surface regularizers: Near-surface
+regularization ensures SDF-like behavior near the surface of
+the object which is required for representing the intricate
+details of the object. Figure 11 on the left shows the results
+of removing individual near-surface regularizers. Without the
+regularizations, the metric field and the phase field cannot be
+adequately separated and constrained, often leading to suboptimal learning results and consequently cannot accurately
+reconstruct the intricate details of the object. We specially
+observed that Lsurf , which enforces the Eikonal constraint of
+the composite field ϕ and the phase field θ, is critical for the
+stability of the surface. As shown in Figure 12, removing Lsurf
+completely deteriorates the reconstruction quality.
+2) The effect of free space regularizers: The Free-space
+regularizers aims to stabilize the neural fields and prevent
+floaters. Figure 11 on the right demonstrates the effect of
+removing the free-space regularizers Leik and Lfar . We observe
+that removing Leik , which encourages the metric field r to
+exhibit UDF behavior and abide to the Eikonal constraint
+away from the surface, will make the implicit geometry
+unstable, introducing floating geometry into the extracted mesh
+in Figure 11, even making training completely collapse in the
+Lego and Shoe test case. Lfar suppresses large regions of nearzero values. This is important for the implicit geometry field
+to accurately represent the geometry as well as for the mesh
+extraction method to successfully extract the mesh surface. We
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+Reference
+NeuS
+HF-NeuS
+Neuralangelo
+10
+PGSR
+GeoSVR
+GaussianUDF
+GGGS
+Ours
+GaussianUDF
+GGGS
+Ours
+NA
+NA
+Reference
+NeuS
+HF-NeuS
+Neuralangelo
+PGSR
+GeoSVR
+Fig. 5: Results on custom dataset for the real captured test cases. The umbrella scene contains thin structures, such as the
+umbrella rod and the retention strap, highlighted by colored boxes. The flower scene features open boundaries (e.g., petals),
+thin structures (e.g., the stem), and fine-scale geometric details (e.g., leaf veins). The basket scene contains dense thin lattice
+structures formed by narrow grid bars on the basket walls and base. NeuS and 3DGS-based baselines exhibit missing or
+fragmented geometry in these thin regions and struggle to recover delicate venation patterns. Finally, the cup scene is an open
+model and many baseline methods produce extravagant structures in such open scenes. In contrast, our method reconstructs
+these structures more completely and consistently, producing sharper and more faithful fine details.
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+11
+Reference
+NeuS
+HF-NeuS
+Neuralangelo
+PGSR
+GaussianUDF
+GGGS
+Ours
+Reference
+NeuS
+HF-NeuS
+Neuralangelo
+PGSR
+GaussianUDF
+GGGS
+Ours
+Fig. 6: Results on the TAAS-Synthetic dataset. Red boxes highlight challenging thin or sign-ambiguous structures. None of
+the baseline methods (NeuS, PGSR, GaussianUDF, and GGGS) is able to recover the complete geometry: they often produce
+missing parts, fragmented structures, or floating artifacts. In contrast, our method reconstructs the full geometry more faithfully
+and preserves fine structures. GeoSVR fails to produce any mesh for these cases and is therefore excluded from the comparison.
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+Umbrella
+Flower
+LEGO
+Shoe
+Basket
+12
+Cup
+Tank
+Figurine
+NeuS
+VolSDF
+HF-NeuS
+NeuS2
+Neuralangelo
+Ours
+Fig. 7: Results of NeUDF on our dataset.
+Fig. 9: Qualitative results on the Ignatius test case from the
+Tanks & Temples dataset [31]. With the lack of the relevant
+view angles, only our method and Neuralangelo can correctly
+reconstruct the arm of the sculpture and separate the arm from
+the chest.
+GT
+2S-UDF
+Ours
+GT
+NeUDF
+Ours
+Full model
+Fig. 8: Compared to UDF-centered reconstruction methods,
+our method produces two-layered watertight mesh that represents a layer of thin shell around the open surface. This
+sidesteps two major problems with UDF. Top: Implicit UDF
+methods have difficulties accurately learning the zero turning point on the surface, posing challenges to UDF mesh
+extraction and often produces fragmented meshes; our method
+constructs a more complete mesh. Bottom: Implicit UDF methods require heavy smooth terms for successful convergence,
+resulting in loss of details. Our method can better capture the
+decorative details of the surface.
+observe that removing Lfar for the metric and phase fields will
+make our method fail to reconstruct the thin stem.
+w/o near
+w/o free
+Fig. 10: Qualitative comparison of our full model and our
+model without near surface regularization and free space
+regularization respectively. Without near surface regularization
+the model has difficulties learning thin structures, whereas
+without free space regularization the learned surface becomes
+noisy.
+D. Remarks on Mesh Extraction Methods
+The choice of mesh extraction technique is an important part
+of the reconstruction pipeline. For 3DGS-based reconstruction
+methods, a majority of them rely on TSDF fusion technique,
+and for implicit field-based reconstruction methods, standard
+marching cubes can be used. Marching Tetrahedra is another
+iso-surface extraction method that works on tetrahedral grids.
+Compared to the classical Marching Cubes algorithm, it avoids
+certain ambiguity cases and is often used in pipelines where
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+Full model
+w/o Lanchor
+w/o Lsurf
+13
+w/o Lalign
+w/o Leik
+w/o Lfar
+Fig. 11: Qualitative comparison on the individual losses.
+rors during mesh extraction. Even if the error is not triggered,
+the final mesh file after extraction is also very large, often
+reaching hundreds of megabytes even into gigabytes. Such
+resource-intensive extraction procedures limit their practical
+use in large-scale experiments. Table IV presents an overview
+of mesh extraction methods used by different reconstruction
+methods.
+w/o Lsurf
+Fig. 12: Omitting Lsurf will make the training unstable, resulting in a completely degraded reconstruction quality compared
+to other methods.
+surfaces are reconstructed from volumetric discretizations or
+tetrahedral meshes.
+TSDF fusion, as used by many 3DGS-based reconstruction
+methods, works by first rendering depth maps and then integrating depth maps into a volumetric truncated signed distance
+field (TSDF) and extracting the zero level set using volumetric
+fusion techniques [36], [37].
+For PGSR and GeoSVR, meshes are extracted using TSDF
+fusion since this is the only extraction method supported by
+these pipelines.
+GGGS supports both TSDF fusion and Marching Tetrahedra. In our experiments, we adopt the latter for its higher
+efficiency and lower memory usage. GaussianUDF represents geometry using an implicit unsigned distance field and
+therefore requires the MeshUDF algorithm [38] for surface
+extraction.
+In contrast, NeuS and our method are based on implicit
+signed fields, allowing direct iso-surface extraction using the
+standard Marching Cubes algorithm. This approach is both
+efficient and robust and avoids the additional post-processing
+steps often required by TSDF-based pipelines.
+Overall, a majority of 3DGS-based surface reconstruction
+methods still rely on TSDF Fusion pipeline. This pipeline
+brings two problems.
+The first problem is the resource consumption of such
+method. The voxel grid produced by integrating depth maps
+is usually very dense and requires a very large amount of
+memory space, as a result, they often trigger Segmentation
+Fault errors. For example, on the TAAS-synthetic dataset,
+GeoSVR can learn the radiance field but fails to generate triangle meshes from the learned Gaussian primitives. The TSDF
+fusion step repeatedly reports Segmentation Fault er-
+TABLE IV: Comparison of mesh extraction strategies used by
+different reconstruction methods.
+Marching
+Cubes
+Method
+PGSR
+GeoSVR
+GaussianUDF
+GGGS
+NeuS
+HF-NeuS
+Neuralangelo
+Ours
+Marching
+Tetrahedra
+TSDF Fusion
+MeshUDF
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+Furthermore, this pipeline is sensitive to noise in the Gaussian primitives and often produces a large number of floating
+artifacts, as illustrated in Figure 13. To mitigate these artifacts,
+these methods typically apply a post-processing step based
+on connected-component analysis to clean the reconstructed
+mesh. However, for scenes containing thin structures and signambiguous geometry, the raw meshes generated by 3DGS
+pipelines are often fragmented and exhibit low geometric
+integrity due to the lack of strong global geometric constraints.
+Consequently, the cleaning process frequently removes not
+only noise but also legitimate structures, leading to incomplete
+reconstructions. In contrast, implicit-field-based approaches,
+such as NeuS and our method, produce geometries with
+stronger global consistency and therefore do not require such
+post-processing steps. Nevertheless, NeuS still struggles to
+faithfully reconstruct thin structures, whereas our method
+preserves these structures more accurately.
+VI. C ONCLUSION AND D ISCUSSION
+We presented PhaseSurf, a neural volume rendering framework based on Metric–Phase Fields for stable multi-view
+reconstruction of sign-ambiguous geometry. By decoupling
+geometry into an unsigned metric field and a continuous
+phase field, MPFs maintain the robustness of UDF-like representations for open and thin structures while providing a
+stable signed signal for occlusion-aware rendering and wellbehaved gradients near the zero level set, enabling iso-surface
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+PGSR [24]
+14
+GeoSVR [34]
+GGGS [35]
+Ours
+Fig. 13: 3DGS-based reconstruction pipelines often rely on a post-processing step to clean the extracted meshes. Due to the
+lack of strong global geometric constraints, reconstructed components may become noisy or disconnected. Here we show the
+raw meshes extracted from PGSR, GeoSVR, and GGGS, where the first two contain noticeable noise and floaters, together
+with the corresponding meshes after the cleaning step. Although post-processing removes these artifacts, it also eliminates thin
+structures such as the leaves, resulting in missing geometry. In contrast, our method preserves global geometric integrity and
+does not require filtering or denoising post-processing.
+extraction using standard Marching Cubes. Integrating MPF
+into a volume rendering pipeline requires more than just a
+direct replacement of SDFs; our framework addresses key
+challenges in rendering weight design, optimization stability,
+and supervision ambiguity through residual phase injection
+and MPF-specific geometric regularization.
+Extensive experiments on standard benchmarks and datasets
+with open surfaces, thin sheets, and non-manifold configurations demonstrate that our method improves reconstruction fidelity and training stability compared to representative
+SDF, UDF, and 3DGS-based approaches, especially in signambiguous cases where existing methods struggle. These results suggest that MPFs provide a new geometry backbone
+for extending neural volume rendering beyond the traditional
+watertight SDF assumption.
+a) Limitations and future directions.: A current limitation of PhaseSurf is its training efficiency. In its present
+form, training a single scene typically takes on the order of
+10+ hours, which is comparable to NeuS-style SDF-based
+volume rendering methods. This cost mainly stems from dense
+geometry queries and gradient evaluations along camera rays
+using an implicit MLP representation. Improving training efficiency is therefore an important direction for future work. One
+promising approach is to incorporate explicit spatial data structures, such as voxel grids or octrees, following frameworks
+like Voxurf [39], to accelerate geometry queries and reduce
+unnecessary evaluations in empty space. Because a majority
+of time is used to calculate the gradients of the implicit field
+and calculate the computational graph to the gradient to enable
+optimization with respect to the losses, another promising
+approach is to adopt numerical gradients instead of analytical
+gradients as pioneered by Neuralangelo [15]. We observe that
+using numerical gradients can reduce the training time by half
+without significantly impacting the results. Another direction
+is to adopt multi-resolution hash encodings, as in InstantNGP [40], which have been shown to significantly improve
+convergence speed and scalability for neural fields.
+As an implicit-field based reconstruction method, our
+method performs comparable to NeuS but inferior than Gaussian Splatting methods in novel view synthesis. Table V reports
+the quantitative comparison on novel view synthesis using
+PSNR and SSIM. This result is expected: our method is
+comparable performance to NeuS because both approaches
+adopt a similar differentiable volume rendering architecture;
+while 3DGS methods explicitly optimize radiance fields by
+fitting dense Gaussian primitives to the observed images,
+which naturally favors photometric fidelity. In contrast, our
+method focuses on learning a well-conditioned geometric field.
+Although this design may sacrifice a small amount of rendering accuracy, it leads to significantly more reliable surface
+reconstruction. Finally, hybrid representations that combine the
+efficient rendering and optimization properties of 3D Gaussian
+Splatting [20] with the robust geometric modeling capabilities
+of MPFs represent an exciting avenue for future research,
+potentially combining the strengths of both paradigms.
+TABLE V: Quantitative rendering results on the TAAS-Real
+(top) and TAAS-Synthetic (bottom) datasets. Each entry reports PSNR (↑) / SSIM (↑). Best results are shown in bold,
+and second-best results are underlined.
+Method
+GaussianUDF
+GeoSVR
+NeuS
+PGSR
+Ours
+Method
+GaussianUDF
+GeoSVR
+NeuS
+PGSR
+Ours
+Basket
+Umbrella
+Cup
+Flower
+28.247 / 0.909
+26.492 / 0.883
+27.907 / 0.857
+26.050 / 0.880
+28.033 / 0.861
+32.023 / 0.916
+28.429 / 0.930
+32.137 / 0.857
+29.053 / 0.900
+32.128 / 0.855
+26.244 / 0.918
+23.440 / 0.890
+29.145 / 0.919
+23.993 / 0.887
+28.991 / 0.917
+27.308 / 0.862
+26.529 / 0.869
+25.425 / 0.728
+25.659 / 0.843
+25.734 / 0.730
+High-Heeled Shoe
+Tank
+LEGO
+Figurine
+24.847 / 0.921
+21.002 / 0.875
+23.103 / 0.851
+25.763 / 0.923
+23.465 / 0.853
+31.791 / 0.933
+28.796 / 0.913
+33.288 / 0.931
+32.952 / 0.945
+32.646 / 0.929
+25.413 / 0.931
+23.546 / 0.899
+24.854 / 0.908
+25.065 / 0.925
+24.966 / 0.914
+27.818 / 0.874
+27.239 / 0.870
+28.764 / 0.858
+29.924 / 0.898
+29.222 / 0.862
+R EFERENCES
+[1] L. Yariv, J. Gu, Y. Kasten, and Y. Lipman, “Volume rendering of
+neural implicit surfaces,” in Advances in Neural Information Processing
+Systems, M. Ranzato, A. Beygelzimer, Y. Dauphin, P. Liang, and J. W.
+Vaughan, Eds., vol. 34. Curran Associates, Inc., 2021, pp. 4805–4815.
+[2] P. Wang, L. Liu, Y. Liu, C. Theobalt, T. Komura, and W. Wang, “NeuS:
+Learning neural implicit surfaces by volume rendering for multi-view
+reconstruction,” in Advances in Neural Information Processing Systems,
+M. Ranzato, A. Beygelzimer, Y. Dauphin, P. Liang, and J. W. Vaughan,
+Eds., vol. 34. Curran Associates, Inc., 2021, pp. 27 171–27 183.
+[3] Z. Wang, Y. Zhang, R. Xu, F. Zhang, P.-S. Wang, S. Chen, S. Xin,
+W. Wang, and C. Tu, “Neural-singular-hessian: Implicit neural representation of unoriented point clouds by enforcing singular hessian,” ACM
+Transactions on Graphics, vol. 42, no. 6, pp. 1–14, Dec. 2023.
+[4] J. Zhou, B. Ma, S. Li, Y.-S. Liu, Y. Fang, and Z. Han, “CAP-UDF:
+Learning unsigned distance functions progressively from raw point
+clouds with consistency-aware field optimization,” IEEE Transactions
+on Pattern Analysis and Machine Intelligence, vol. 46, no. 12, pp. 7475–
+7492, 2024.
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+[5] J. Deng, F. Hou, X. Chen, W. Wang, and Y. He, “2S-UDF: A novel
+two-stage UDF learning method for robust non-watertight model reconstruction from multi-view images,” in 2024 IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR), 2024, pp. 5084–
+5093.
+[6] C. Yang, Y. Zhou, G. Wei, L. Ma, J. Hou, Y. Liu, and W. Wang,
+“Monge-ampere regularization for learning arbitrary shapes from point
+clouds,” IEEE Transactions on Pattern Analysis and Machine Intelligence, vol. 47, no. 8, pp. 6809–6822, 2025.
+[7] S. Ren, J. Hou, X. Chen, Y. He, and W. Wang, “GeoUDF: Surface
+reconstruction from 3d point clouds via geometry-guided distance representation,” in 2023 IEEE/CVF International Conference on Computer
+Vision (ICCV), 2023, pp. 14 168–14 178.
+[8] F. Hou, X. Chen, W. Wang, H. Qin, and Y. He, “Robust zero levelset extraction from unsigned distance fields based on double covering,”
+ACM Transactions on Graphics, vol. 42, no. 6, pp. 1–15, Dec. 2023.
+[9] X. Chen, F. Yu, F. Hou, W. Wang, Z. Zhang, and Y. He, “Dcudf2:
+Improving efficiency and accuracy in extracting zero level sets from
+unsigned distance fields,” IEEE Transactions on Visualization and Computer Graphics, vol. 31, no. 10, pp. 9052–9065, 2025.
+[10] J. Kong, X. Chen, C. Zong, F. Hou, J. Hou, W. Wang, and Y. He,
+“Metric–phase fields: Decoupling distance and sign for thin-structure
+reconstruction from unoriented point clouds,” 2026. [Online]. Available:
+https://arxiv.org/abs/2605.25503
+[11] M. Niemeyer, L. Mescheder, M. Oechsle, and A. Geiger, “Differentiable
+volumetric rendering: Learning implicit 3D representations without 3D
+supervision,” in 2020 IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), 2020, pp. 3501–3512.
+[12] L. Yariv, Y. Kasten, D. Moran, M. Galun, M. Atzmon, B. Ronen, and
+Y. Lipman, “Multiview neural surface reconstruction by disentangling
+geometry and appearance,” in Advances in Neural Information Processing Systems, H. Larochelle, M. Ranzato, R. Hadsell, M. Balcan, and
+H. Lin, Eds., vol. 33. Curran Associates, Inc., 2020, pp. 2492–2502.
+[13] M. Oechsle, S. Peng, and A. Geiger, “UNISURF: Unifying neural
+implicit surfaces and radiance fields for multi-view reconstruction,” in
+2021 IEEE/CVF International Conference on Computer Vision (ICCV),
+2021, pp. 5569–5579.
+[14] Y. Wang, I. Skorokhodov, and P. Wonka, “HF-NeuS: Improved surface
+reconstruction using high-frequency details,” in Advances in Neural
+Information Processing Systems, S. Koyejo, S. Mohamed, A. Agarwal,
+D. Belgrave, K. Cho, and A. Oh, Eds., vol. 35. Curran Associates,
+Inc., 2022, pp. 1966–1978.
+[15] Z. Li, T. Müller, A. Evans, R. H. Taylor, M. Unberath, M.-Y. Liu, and
+C.-H. Lin, “Neuralangelo: High-fidelity neural surface reconstruction,”
+in 2023 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2023, pp. 8456–8465.
+[16] Y. Wang, Q. Han, M. Habermann, K. Daniilidis, C. Theobalt, and
+L. Liu, “NeuS2: Fast learning of neural implicit surfaces for multiview reconstruction,” in 2023 IEEE/CVF International Conference on
+Computer Vision (ICCV), 2023, pp. 3272–3283.
+[17] Y.-T. Liu, L. Wang, J. Yang, W. Chen, X. Meng, B. Yang, and
+L. Gao, “NeUDF: Leaning neural unsigned distance fields with volume
+rendering,” in 2023 IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), 2023, pp. 237–247.
+[18] X. Long, C. Lin, L. Liu, Y. Liu, P. Wang, C. Theobalt, T. Komura, and
+W. Wang, “NeuralUDF: Learning unsigned distance fields for multi-view
+reconstruction of surfaces with arbitrary topologies,” in 2023 IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR), 2023,
+pp. 20 834–20 843.
+[19] X. Meng, W. Chen, and B. Yang, “NeAT: Learning neural implicit
+surfaces with arbitrary topologies from multi-view images,” in 2023
+IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), 2023, pp. 248–258.
+[20] B. Kerbl, G. Kopanas, T. Leimkuehler, and G. Drettakis, “3D gaussian
+splatting for real-time radiance field rendering,” ACM Transactions on
+Graphics, vol. 42, no. 4, pp. 1–14, Jul. 2023.
+[21] A. Guédon and V. Lepetit, “SuGaR: Surface-aligned gaussian splatting
+for efficient 3D mesh reconstruction and high-quality mesh rendering,”
+in 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2024, pp. 5354–5363.
+[22] P. Dai, J. Xu, W. Xie, X. Liu, H. Wang, and W. Xu, “High-quality
+surface reconstruction using gaussian surfels,” in ACM SIGGRAPH
+2024 Conference Papers, ser. SIGGRAPH ’24. New York, NY, USA:
+Association for Computing Machinery, 2024.
+[23] Z. Yu, T. Sattler, and A. Geiger, “Gaussian opacity fields: Efficient adaptive surface reconstruction in unbounded scenes,” ACM Transactions on
+Graphics, vol. 43, no. 6, pp. 1–13, Nov. 2024.
+15
+[24] D. Chen, H. Li, W. Ye, Y. Wang, W. Xie, S. Zhai, N. Wang, H. Liu,
+H. Bao, and G. Zhang, “PGSR: Planar-based gaussian splatting for
+efficient and high-fidelity surface reconstruction,” IEEE Transactions on
+Visualization and Computer Graphics, vol. 31, no. 9, pp. 6100–6111,
+2025.
+[25] Y. Wolf, A. Bracha, and R. Kimmel, “GS2Mesh: Surface reconstruction
+from gaussian splatting via novel stereo views,” in Computer Vision –
+ECCV 2024, A. Leonardis, E. Ricci, S. Roth, O. Russakovsky, T. Sattler,
+and G. Varol, Eds. Cham: Springer Nature Switzerland, 2025, pp. 207–
+224.
+[26] X. Lyu, Y.-T. Sun, Y.-H. Huang, X. Wu, Z. Yang, Y. Chen, J. Pang,
+and X. Qi, “3DGSR: Implicit surface reconstruction with 3D gaussian
+splatting,” ACM Transactions on Graphics, vol. 43, no. 6, pp. 1–12, Nov.
+2024.
+[27] H. Chen, C. Li, Y. Wang, and G. H. Lee, “NeuSG: Neural implicit
+surface reconstruction with 3D gaussian splatting guidance,” 2025.
+[Online]. Available: https://arxiv.org/abs/2312.00846
+[28] M. Yu, T. Lu, L. Xu, L. Jiang, Y. Xiangli, and B. Dai, “GSDF:
+3DGS meets SDF for improved neural rendering and reconstruction,”
+in Advances in Neural Information Processing Systems, A. Globerson,
+L. Mackey, D. Belgrave, A. Fan, U. Paquet, J. Tomczak, and C. Zhang,
+Eds., vol. 37. Curran Associates, Inc., 2024, pp. 129 507–129 530.
+[29] J. Deng, H. Niu, J. Li, F. Hou, and Y. He, “UNIS: A unified framework
+for achieving unbiased neural implicit surfaces in volume rendering,” in
+2025 IEEE/CVF International Conference on Computer Vision (ICCV),
+2025, pp. 27 671–27 680.
+[30] H. Aanæs, R. R. Jensen, G. Vogiatzis, E. Tola, and A. B. Dahl,
+“Large-scale data for multiple-view stereopsis,” International Journal
+of Computer Vision, vol. 120, no. 2, pp. 153–168, Nov. 2016.
+[31] A. Knapitsch, J. Park, Q.-Y. Zhou, and V. Koltun, “Tanks and temples:
+benchmarking large-scale scene reconstruction,” ACM Transactions on
+Graphics, vol. 36, no. 4, pp. 1–13, Jul. 2017.
+[32] Z. Heming, C. Yu, J. Hang, C. Weikai, D. Dong, W. Zhangye,
+C. Shuguang, and H. Xiaoguang, “Deep Fashion3D: A dataset and
+benchmark for 3D garment reconstruction from single images,” in
+Computer Vision – ECCV 2020. Springer International Publishing,
+2020, pp. 512–530.
+[33] S. Li, Y.-S. Liu, and Z. Han, “Gaussianudf: Inferring unsigned distance
+functions through 3d gaussian splatting,” in 2025 IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR), 2025, pp. 27 113–
+27 123.
+[34] J. Li, J. Zhang, Y. Zhang, X. Bai, J. Zheng, X. Yu, and L. Gu, “GeoSVR:
+Taming sparse voxels for geometrically accurate surface reconstruction,”
+in Advances in Neural Information Processing Systems, D. Belgrave,
+C. Zhang, H. Lin, R. Pascanu, P. Koniusz, M. Ghassemi, and N. Chen,
+Eds., vol. 38. Curran Associates, Inc., 2025, pp. 108 809–108 837.
+[35] B. Zhang, C. Jiang, H. Li, S. Shen, and P. Tan, “Geometry-grounded
+gaussian splatting,” 2026. [Online]. Available: https://arxiv.org/abs/
+2601.17835
+[36] B. Curless and M. Levoy, “A volumetric method for building complex models from range images,” in Proceedings of the 23rd Annual
+Conference on Computer Graphics and Interactive Techniques, ser.
+SIGGRAPH ’96. New York, NY, USA: Association for Computing
+Machinery, 1996, p. 303–312.
+[37] R. A. Newcombe, S. Izadi, O. Hilliges, D. Molyneaux, D. Kim,
+A. J. Davison, P. Kohi, J. Shotton, S. Hodges, and A. Fitzgibbon,
+“KinectFusion: Real-time dense surface mapping and tracking,” in 2011
+10th IEEE International Symposium on Mixed and Augmented Reality,
+2011, pp. 127–136.
+[38] B. Guillard, F. Stella, and P. Fua, “MeshUDF: Fast and differentiable
+meshing of unsigned distance field networks,” in Computer Vision –
+ECCV 2022, S. Avidan, G. Brostow, M. Cissé, G. M. Farinella, and
+T. Hassner, Eds. Cham: Springer Nature Switzerland, 2022, pp. 576–
+592.
+[39] T. Wu, J. Wang, X. Pan, X. Xu, C. Theobalt, Z. Liu, and D. Lin, “Voxurf:
+Voxel-based efficient and accurate neural surface reconstruction,” in
+International Conference on Learning Representations (ICLR), 2022.
+[40] T. Müller, A. Evans, C. Schied, and A. Keller, “Instant neural graphics
+primitives with a multiresolution hash encoding,” ACM Transactions on
+Graphics, vol. 41, no. 4, pp. 1–15, Jul. 2022.

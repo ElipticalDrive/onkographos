@@ -1,0 +1,1548 @@
+Codec-Gauge: Learning Compression-Friendly Gauges for Transformer KV
+Caches
+Yitao Jiang1 , Yaoqing Yang1 , Luyang Zhao2 , Muhao Chen3 , Devin Balkcom1
+1
+Department of Computer Science, Dartmouth College, Hanover, NH
+Department of Electrical and Computer Engineering, Clemson University, Clemson, SC
+3
+Department of Mechanical and Aerospace Engineering, University of Houston, Houston, TX
+1
+{yitao.jiang.gr, yaoqing.yang, devin.balkcom}@dartmouth.edu
+2
+luyangz@clemson.edu
+3
+muhaochen@uh.edu
+2
+arXiv:2607.20538v1 [cs.LG] 10 Jul 2026
+Abstract
+Long-context Transformer inference increasingly relies
+on KV-cache compression or quantization. Rotation and
+transform-coding results indicate that the channel basis of
+each key/value vector can affect how faithfully a fixed backend preserves model behavior. We introduce Codec-Gauge, a
+post-training cache-coordinate layer that learns small orthogonal channel transforms, or gauges, around existing backends.
+Its frequency-distribution objective combines a token–channel
+DCT spectral-centroid loss with a smooth rate proxy to concentrate KV energy in low-frequency codec-facing layouts.
+We evaluate actual compression/decompression with measured bytes and rolling compressed-history scoring. Across six
+models at 3, 4, and 6 bits/value, learned gauges reduce zfp KL
+divergence by 44.0% on average relative to raw coordinates
+and outperform random, Hadamard, DCT, and PCA/KLT controls; the same gauges improve quality preservation for blockuniform and KIVI-style quantization. A 27B extension and
+task-prompt likelihoods reproduce the quality trend, while serial storage/timing measurements validate the implemented
+compressed-cache paths.
+Introduction
+Long-context Transformer inference is increasingly constrained by the memory and bandwidth cost of KV caches.
+During autoregressive decoding, each layer stores past key
+and value tensors, and this cache grows linearly with batch
+size, context length, number of layers, number of KV
+heads, and head dimension. Attention kernels and memory managers improve access locality, while multi-query and
+grouped-query attention reduce stored KV heads ((Shazeer
+2019; Ainslie et al. 2023; Dao et al. 2022; Kwon et al. 2023));
+nevertheless, the cache remains a large runtime object that
+must be stored, moved, and repeatedly consumed. This paper isolates a complementary variable: the coordinate basis
+presented to a compression or quantization backend. CodecGauge learns this basis from frozen-model KV tensors to improve fidelity at the same measured rate while leaving model
+weights, attention semantics, and backend coding rules unchanged (Figure 1).
+A large body of work reduces this cost by changing cache
+precision, cache retention, or model representation ((Liu et al.
+2024c; Hooper et al. 2024; Kang et al. 2024; Yang et al. 2024;
+Lin et al. 2025b; Zhang et al. 2023; Xiao et al. 2024; Li et al.
+Train Gauge
+KV cache
+(𝑋)
+Gauge Matrix
+𝐺 ∈ 𝑅 𝑑 ×𝑑
+Gauge-space KV
+(𝑍)
+Token prefill
+Training loss
+2D DCT on
+token-channel
+𝑍 = 𝐺𝑋
+𝐿𝑓𝑟𝑒𝑞
+𝐿𝑟ate
+Train
+KV cache
+(𝑋)
+Use Gauge at Inference
+Token input
+Trained Gauge
+(𝐺)
+𝑍 = 𝐺𝑋
+Model
+Inverse gauge
+（𝐺 −1 = 𝐺 𝑇 )
+KV caches
+(𝑋 = 𝐺 −1 𝑍)
+Codec /
+Quantizer
+Attention
+Codec path (zfp)
+Compressed
+bytes
+Encoder
+...
+Gauge-space KV
+(𝑍 = 𝐺𝑋)
+Output
+Quantization path（KIVI / Uniform）
+Decoder
+Quantizer
+Quantized
+KVs
+Dequantize
+...
+Figure 1: Overview of Codec-Gauge. A one-time posttraining stage learns orthogonal gauges from frozen-model
+KV tensors. At inference, the gauge maps KV tensors into
+codec-facing coordinates before compression or quantization, and the inverse gauge restores recovered KV states before attention.
+2024; DeepSeek-AI 2024; Chang et al. 2025; Nawrot et al.
+2024; Gelberg et al. 2026)). Codec-Gauge is motivated by
+two related observations: transform coding shows that a basis
+change can concentrate signal energy into coefficients that
+are easier to preserve at a fixed rate ((Ahmed, Natarajan, and
+Rao 1974; Lindstrom 2014)), and LLM quantization shows
+that orthogonal channel rotations can change low-bit error
+behavior without changing the represented function ((Chee
+et al. 2023; Tseng et al. 2024; Ashkboos et al. 2024; Liu
+et al. 2025; Su et al. 2025; Saxena and Roy 2025)). Together,
+these observations motivate learning, after pretraining, the
+representation geometry presented to a fixed backend. Although model channels have no native spatial order, a codec
+consumes a concrete memory layout, so the learned channel
+basis can change the smoothness and coefficient structure of
+the stored KV field.
+This paper studies geometry as a first-class compression
+variable. Codec-Gauge learns an orthogonal gauge over KV
+channel groups so that existing compression and quantization backends see a more compression-friendly representation, while model weights, attention semantics, and backend
+implementations remain fixed. By KV coordinates, we mean
+the channel basis used to represent each key or value vector
+within a head. The gauge is an invertible change of this basis:
+it can mix channel coordinates within each group, but it never
+mixes tokens, heads, or layers, and it never removes cache entries. At inference time, cached keys and values are mapped
+into the learned gauge before compression or quantization
+and mapped back before attention. Along a no-error path,
+the gauge and inverse preserve the cache up to numerical
+precision; under lossy backends, the gauge changes the geometry seen by the backend and therefore changes recovery
+error and quality retained after decompression.
+We use a matched-rate experimental design. Within each
+comparison, the model, token stream, backend, measured bit
+budget, and evaluator are fixed, and only the cache-coordinate
+map is varied. This makes identity, random orthogonal, fixed
+transform, data-derived, and learned gauges comparable under the same backend, so improvements can be attributed to
+cache geometry rather than to a changed quantizer, eviction
+rule, packing format, kernel, or scheduler.
+Our main target is fixed-rate numerical compression of
+continuous KV tensors. We use GPU zfp compression as
+the primary codec because its block-transform structure
+makes coefficient concentration and local smoothness directly relevant to reconstruction quality at a fixed rate ((Lindstrom 2014)). The key technical choice is a frequencydistribution loss on the codec-facing token–channel layout:
+a DCT spectral-centroid term moves KV energy toward
+lower frequencies, while a smooth log-amplitude proxy favors coefficient distributions with fewer significant transform coefficients. All quality claims use actual compression/decompression and rolling compressed-history scoring,
+where newly created KV entries traverse the same gauge and
+backend path.
+The codec remains outside the training loop: fitting the
+gauge uses no reconstruction, language-modeling, logit, or
+task-output loss.
+We use coordinate controls to identify the effect of this
+training objective. Identity uses the raw cache basis, while
+random orthogonal gauges capture generic rotation and
+outlier-redistribution effects known from quantization ((Chee
+et al. 2023; Tseng et al. 2024; Ashkboos et al. 2024; Liu
+et al. 2025; Sun et al. 2025; Su et al. 2025; Saxena and Roy
+2025)). Hadamard and DCT provide fixed structured transforms, PCA/KLT provides a data-derived basis, and learned
+gauges test the proposed frequency-distribution objective under the same backend and measured rates. These controls separate codec-facing gauge learning from both raw-coordinate
+compression and generic orthogonal preprocessing.
+Backend compatibility. The learned gauge is a fixed percheckpoint transform, not a per-token payload, and changes
+neither a backend’s coding rule nor its bit budget. It is applied
+at the KV tensor interface; our measurements use explicit recovery and include that cost in timing, tying quality, storage,
+and latency to the same implemented path.
+Across six language models and multiple matched bitsper-value settings, learned gauges reduce KV reconstruction
+error and rolling suffix degradation for zfp beyond identity, random, fixed-transform, and PCA/KLT controls. In
+the same trained coordinates, block-uniform and KIVI-style
+quantizers ((Liu et al. 2024c)) also preserve output quality
+better than their raw-coordinate versions. A larger 27B model
+check and task-prompt likelihoods reproduce the coordinate
+effect, while serial context-length measurements verify realized storage and recovery cost. For zfp, learned gauges
+reduce KL divergence, logit MSE, top-1 flip rate, and KV
+NRMSE by 44.0%, 43.3%, 24.5%, and 18.3% at the main
+operating points.
+This paper makes four contributions. First, we formulate
+KV-cache coordinate geometry as a post-training variable
+for improving compression fidelity under fixed backends.
+Second, we introduce Codec-Gauge, an orthogonal cachecoordinate layer that wraps existing compression and quantization backends without changing attention semantics. Third,
+we design a frequency-distribution objective that trains this
+layer from frozen KV tensors using codec-facing token–
+channel spectral structure, without language-modeling loss,
+logit matching, task supervision, or model-weight updates.
+Fourth, we provide paired evidence that learned gauges improve actual zfp GPU compression under matched measured
+rates and also improve quality retention for block-uniform
+and KIVI-style quantization paths.
+Related Work
+KV-cache quantization and rotations. KV-cache quantization reduces stored key/value precision through asymmetric granularity, outlier handling, correction terms, mixed precision, or serving co-design ((Liu et al. 2024c; Hooper et al.
+2024; Kang et al. 2024; Yang et al. 2024; Lin et al. 2025b)).
+Coordinate transforms are also central to LLM quantization, including incoherence processing, outlier-removing rotations, learned rotations, distribution flattening, adaptive
+KV rotations, and Hadamard-based correction ((Chee et al.
+2023; Tseng et al. 2024; Ashkboos et al. 2024; Liu et al.
+2025; Sun et al. 2025; Su et al. 2025; Saxena and Roy 2025)).
+Codec-Gauge uses a cache-geometric frequency objective for
+a fixed numerical codec rather than a scalar quantization loss,
+then reuses the same trained coordinates for scalar low-bit
+paths.
+Token, page, and dynamic cache selection. Another line
+of work reduces the number of cache entries retained or accessed, using heavy hitters, attention sinks, model-internal
+patterns, prompt observations, layer-wise budgets, or queryaware sparsity ((Zhang et al. 2023; Xiao et al. 2024; Ge et al.
+2024; Li et al. 2024; Cai et al. 2025; Tang et al. 2024)). InfiniGen, RocketKV, and CacheGen emphasize dynamic cache
+management, multi-stage compression, or cache streaming
+((Lee et al. 2024; Behnam et al. 2025; Liu et al. 2024b)).
+Codec-Gauge instead operates on the dense tensor coordinates of retained entries, so it can be layered with retention
+and paging policies.
+Transform and numerical KV compression. Frequencydomain and transform-coding methods treat KV caches as
+Symbol
+Meaning
+B
+T
+L
+Batch size
+Prefix/context length stored in cache
+Number of standard softmax-attention KV
+layers
+Number of KV heads in layer l
+Head dimension in layer l
+Key and value caches in layer l
+Unified cache tensor, s ∈ {K, V }
+Gauge channel group dimension; g = dl is
+full-head
+Number of channel groups in layer l
+Gauge for layer/type/head/group
+Gauge-space cache tensor
+Codec compression and decompression maps
+Compressed byte buffer
+Decoded transformed-coordinate and recovered cache tensors
+Hl
+dl
+Kl , Vl
+Xl,s
+g
+Rl
+Gl,s,h,r
+Zl,s
+C, D
+Bc
+Ẑl,s , X̂l,s
+Table 1: Notation for cache gauge training.
+structured numerical signals. FreqKV, FAEDKV, and KVTC
+exploit frequency or transform-domain redundancy ((Kai
+et al. 2026; Li et al. 2025; Staniszewski and Łańcucki
+2026)), while DCT and zfp show how spectral concentration and local smoothness affect array rate-distortion behavior ((Ahmed, Natarajan, and Rao 1974; Lindstrom 2014)).
+Codec-Gauge contributes a learned coordinate layer for this
+setting: the gauge shapes the numerical field seen by an existing codec’s token–channel layout, and compression is performed by the backend itself.
+Architectural, low-rank, and training-aware KV representations. Several methods reduce KV state by changing
+model structure or learning a different cache representation,
+including latent KV states, low-rank projection, depth redundancy, dynamic memory compression, training for compressible KV, and adaptive orthogonal projections ((DeepSeek-AI
+2024; Chang et al. 2025; Liu et al. 2024a; Nawrot et al. 2024;
+Gelberg et al. 2026; Lin et al. 2025a)). Codec-Gauge keeps
+the checkpoint frozen: a small invertible gauge is trained for
+an existing model and evaluated around an explicit compression/decompression path.
+Problem Statement and Overview
+Table 1 summarizes the notation. We consider the standard
+key/value cache produced by softmax-attention Transformers
+during autoregressive inference. For layer l, the cache for the
+previous T tokens is:
+Kl , Vl ∈ RB×Hl ×T ×dl ,
+MT = {(Kl , Vl )}L
+l=1 .
+The number of cache elements in FP16 or BF16 storage is:
+NKV (T ) =
+L
+X
+2BHl T dl ,
+l=1
+which grows linearly with context length. We only consider
+key/value tensors exposed by standard softmax attention; recurrent or linear-attention states are outside the gauge and
+compression object studied here.
+Codec-Gauge learns a cache-coordinate gauge without
+changing tokens, attention architecture, or model weights.
+Let Xl,s denote a layer-l cache tensor with s ∈ {K, V }. For
+each layer, cache type, head, and channel group, we learn an
+invertible gauge Gl,s,h,r . The group dimension g partitions
+the head dimension into Rl = dl /g groups; when g = dl ,
+the gauge acts on the full head. For group r = 1, . . . , Rl ,
+Xl,s [b, h, t, r] ∈ Rg ,
+and the transformed cache is:
+Zl,s [b, h, t, r] = Gl,s,h,r Xl,s [b, h, t, r].
+The transform mixes channels only within a group; it neither
+mixes nor removes tokens.
+At inference time, the backend observes the transformedcoordinate cache rather than the raw cache:
+Z = GX,
+Bc = C(Z),
+Ẑ = D(Bc ),
+X̂ = G−1 Ẑ,
+where C and D are the compression/decompression or quantization/reconstruction maps of a fixed backend, and Bc is
+the compressed buffer consumed only through the decoded
+cache X̂. Without backend error, G−1 GX = X and model
+behavior is unchanged up to numerical precision. Under
+lossy backends, the gauge leaves attention semantics fixed
+but changes the numerical geometry seen by the backend,
+and therefore the structure of recovery error and downstream
+output perturbation, meaning changes in likelihoods, logits,
+and top-token rankings relative to the full-cache reference.
+The evaluation target is direct: for a frozen Transformer,
+fixed data distribution, fixed backend, and matched actual
+bits/value, a learned gauge should reduce KV reconstruction
+error and rolling suffix output perturbation relative to raw
+and control coordinates.
+Method and Evaluation Design
+Gauge Parameterization and Training
+Given a frozen Transformer fθ , Codec-Gauge learns only
+cache-coordinate parameters and does not update model
+weights. For each layer l, cache type s ∈ {K, V }, head h,
+and channel group r, we parameterize an orthogonal gauge
+as:
+Gl,s,h,r = exp(Al,s,h,r − A⊤
+l,s,h,r ),
+⊤
+G−1
+l,s,h,r = Gl,s,h,r ,
+where exp(·) is the matrix exponential. Since A − A⊤ is
+skew-symmetric, the resulting small group-level gauge is
+orthogonal and invertible without an orthogonality penalty.
+The group dimension g sets the channel subspace covered
+by each gauge: smaller groups restrict mixing, while fullhead gauges provide higher expressivity. We evaluate g =
+8, 16, 32, and full-head gauges, and report g = 16 as the
+representative grouped setting.
+The gauge is a fixed model-side object, not a per-token
+cache payload. Explicit application costs O(N
+P KV g) multiplyadds, and learned parameters scale as O( l 2Hl dl g) rather
+than with context length. Some recovery operations can be
+folded into downstream projections; key-side fusion depends
+on positional encoding and kernel layout. Our implementation uses explicit key/value recovery and charges that cost in
+timing.
+Gauge training uses FineWeb-Edu sample-10BT ((Penedo
+et al. 2024)). For each model, we collect 64 non-overlapping
+4096-token windows, run frozen-model prefill, collect standard softmax-attention KV tensors, and optimize the gauge
+for 25 epochs with AdamW. This one-time per-checkpoint
+step uses Tb = 16, λf = 1.0, λr = 0.02, and τ = 0.04
+for every checkpoint, with no model-specific tuning. Evaluation windows are recorded from disjoint FineWeb-Edu
+documents with a different seed. The objective depends only
+on cache geometry; it does not include language-modeling
+loss, logit matching, or task-output supervision.
+Gauge Training Objective
+For a transformed cache tensor X ′ = GX, we partition the
+token dimension into blocks of length Tb and apply a twodimensional orthonormal DCT to each Tb ×dl token–channel
+block:
+U = DCT2D (block(X ′ )).
+The training objective is
+Ltrain = λf Lfreq + λr Lrate .
+The frequency term is a spectral centroid under the token–
+channel layout exposed to the codec. Although the gauge
+may be grouped, this statistic spans the complete head layout
+presented to zfp. The DCT supplies a differentiable statistic, and the gauge chooses a channel basis whose observed
+KV energy becomes concentrated in low token and layout
+frequencies. Channel frequency refers to memory order after
+the basis change, not intrinsic spatial order; token order remains unchanged. For coefficient position (u, v), define the
+normalized radius
+s
+2 
+2
+1
+u
+v
+ρ(u, v) = √
++
+.
+Tb − 1
+dl − 1
+2
+2
+With coefficient energy Eu,v = Uu,v
+, we define
+P
+u,v Eu,v ρ(u, v)
+.
+Lfreq = P
+u,v Eu,v + ϵ
+Minimizing this term shifts energy toward lower radial frequencies in the codec-facing layout. Since the gauge acts
+only on channel groups, it learns how each token-frequency
+component is represented across channel-layout modes, making neighboring coordinates in the fixed codec layout carry
+more correlated, low-frequency energy. Token order, channel
+grouping, and the zfp field layout are fixed across identity,
+random, fixed-transform, PCA/KLT, and learned conditions,
+so the coordinate map is the isolated variable. We track spectral concentration as 1 − Lfreq .
+The rate term is a smooth log-amplitude proxy:
+ 
+
+|Uu,v |
+,
+Lrate = Eu,v log 1 +
+τ
+with τ = 0.04. Because the gauge and DCT are energypreserving transforms, this concave penalty favors concentrating energy into fewer significant coefficients. Together
+with Lfreq , it provides a differentiable codec-layout objective; held-out evaluation uses measured backend bytes and
+post-decode model behavior rather than the proxy itself. After training, the gauge is fixed for all evaluation windows.
+Compression Conditions
+The main evaluation grid evaluates each backend under identity, random, and learned coordinates. Identity compresses
+raw KV cache; random uses a sampled orthogonal gauge
+with the same block structure as the learned gauge; learned
+uses the trained gauge. Random captures the known benefits
+of generic rotation and outlier redistribution in quantization
+((Chee et al. 2023; Ashkboos et al. 2024; Liu et al. 2025; Su
+et al. 2025; Saxena and Roy 2025)), so gains beyond it test
+the value of the learned codec-layout geometry.
+The primary backend is GPU zfp compression applied to
+continuous KV tensors at 2-, 3-, 4-, 6-, and 8-bit/value. The
+implementation encodes contiguous FP32-transformed tensors with native CUDA zfp, decodes them, applies the inverse
+gauge, and records the actual compressed bytes. The CUDA
+extension presents each tensor as a two-dimensional zfp field
+with nx = dl and ny = numel/dl ; reported bytes include
+the zfp payload and a fixed shape header. Block-uniform uses
+one range per Tb × dl block, whereas the KIVI-style path
+uses per-channel key and per-token value ranges ((Liu et al.
+2024c)); both use the same bit settings. Each main evaluation
+batch contains 49 conditions: one full-cache baseline, three
+no-compression sanity rows, and 15 rows each for zfp, blockuniform quantization, and KIVI-style quantization. A separate zfp coordinate-control run evaluates identity, learned,
+three random gauges, Hadamard, DCT, and PCA/KLT controls at 3, 4, and 6 bits/value. PCA/KLT uses an uncentered
+second-moment eigenbasis computed at the same layer, K/V,
+head, and group granularity.
+Evaluation Design
+We evaluate six checkpoints spanning multiple providers
+and cache implementations: Qwen3-0.6B, Qwen3.5-0.8B,
+Llama-3.2-1B, Gemma-3-1B, Phi-4 Mini Instruct, and
+Ministral-3-3B-Base-2512. The set includes grouped-query
+softmax-attention decoders, hybrid-cache behavior where
+only standard tensor KV layers are gauged, and longcontext/windowed attention variants. We additionally run a
+larger Gemma-3-27B model under zfp at the intermediate
+rates.
+Output quality is measured with paired rolling
+compressed-history scoring over 256 evaluation windows per
+model. Each window has 2,048 prefix tokens, one teacherforced rolling input token, and 384 scored target tokens. All
+conditions consume the same ground-truth input token, but
+compressed conditions maintain their own histories, so every KV token passes through the condition’s gauge, backend,
+decode, and inverse-gauge path.
+Cache-side metrics include compressed bytes, actual
+bits/value, KV MSE, KV NRMSE, key/value NRMSE, and
+maximum absolute error. Output-side metrics include paired
+delta-NLL:
+∆NLL = NLLcompressed − NLLfull ,
+KL divergence
+10−1
++41%
++50%
++51%
+Logit MSE
+KL divergence
++47%
++49%
++41%
++30%
+10−2
++10%
+100
++43%
+10−1
++34%
++17%
+10−2
+10−3
+3
+4
+zfp
+6
+3
+4
+6
+Uniform
+3
+4
+6
+KIVI
+3
+4
+zfp
+6
+3
+Identity
++19%
++35%
++43%
+101
+0
+Top-1 flip rate
++35%
++43%
++43%
++46%
+10
+Logit MSE
+4
+6
+Uniform
+3
+4
+6
+KIVI
+Top-1 flip rate (%)
+101 +37%
+80
+Random
++23%
+Learned
++24%
+60
++23%
+40
++32%
++31%
+20
+0
++22%
++16% +8%
+3
+4
+zfp
+3
+6
+4
+6
+Uniform
+3
+4
+6
+KIVI
+Nominal rate / precision (bits per value)
+Figure 2: Aggregate output-distribution perturbation under g = 16 gauges at 3, 4, and 6 bits/value. Lower is better; KL divergence
+and logit MSE use log axes, and top-1 flip rate is a percentage. Error bars summarize the standard error across six model means.
+Annotations report the mean paired learned-gauge reduction relative to identity coordinates across the six models.
+This aggregation is invariant to model-specific batching.
+Main analyses use 3, 4, and 6 bits/value; 2-bit and 8-bit
+results remain in the released outputs as boundary conditions.
+Sanity rows validate no-compression invariants: identityclone checks cache cloning, and random/learned inverse rows
+check the G−1 G round trip. In the g = 16 run, identity clone
+has zero cache error, while random and learned inverse rows
+have maximum cache NRMSE below 5.1 × 10−8 .
+We also run a serial context-length evaluation for fullcache, zfp-4, block-uniform-4, and KIVI-4 paths. The 4-bit
+setting provides a matched comparison between fixed-rate
+numerical compression and low-bit quantization. We record
+KV allocation growth relative to a one-token origin and total
+decode-plus-model time normalized by the full-cache path,
+including compression-path recovery.
+For task-prompt checks, we score RULER needle retrieval
+and variable tracking ((Hsieh et al. 2024)) together with
+LongBench-v2 multiple-choice prompts ((Bai et al. 2025))
+under the same zfp rates and coordinate conditions.
+Results
+Across implemented backend paths, learned gauges reduce
+cache reconstruction error and output perturbation. Coordinate controls and held-out spectra identify the source of this
+ΔNLL / token
+Reduction vs identity (%)
+as well as KL(pfull ∥pcompressed ), logit MSE, top-1 flip rate,
+and top-5 overlap. These paired metrics keep the model,
+input tokens, and reference logits fixed while measuring loss,
+distribution shift, and top-k stability. The evaluator writes
+raw sums and counts. Actual bits/value are computed from
+measured compressed bytes. Paper figures post-process the
+released raw files as:
+P
+∆NLL
+,
+∆NLL/token = P
+target tokens
+s
+P
+KV SSE
+KV NRMSE = P
+,
+KV reference SSE
+P
+top1 flips
+top1 flip rate = P
+.
+target tokens
+KL divergence
+40%
+40%
+20%
+20%
+0%
+0%
+−20%
+−20%
+Top-1 flip rate
+KV NRMSE
+30.0%
+20.0%
+20.0%
+15.0%
+10.0%
+10.0%
+0.0%
+5.0%
+−10.0%
+Random
+Hadamard
+DCT
+PCA/KLT
+Learned
+0.0%
+Coordinate control
+Figure 3: Coordinate-control checks for zfp compression at
+3, 4, and 6 bits/value. Bars report error reduction relative to
+identity coordinates; higher is better, and error bars are standard errors across the 18 model–rate pairs. Random averages
+three orthogonal gauges. Hadamard, DCT, and PCA/KLT
+provide fixed or data-derived structured controls.
+effect; a 27B extension and task prompts test its extent, while
+serial measurements verify the realized storage path.
+Compression Quality Under Matched Rates
+The main quantitative analyses use 3, 4, and 6 bits/value.
+The 2-bit setting often enters a severe-distortion regime,
+while 8 bits/value approaches a high-fidelity boundary where
+transform-only numerical noise can become comparable to
+the remaining compression perturbation; both boundary settings are retained in released outputs.
+Figure 2 shows absolute paired quality metrics; percentage
+labels summarize reductions at matched settings. For fixedrate zfp compression, learned gauges reduce KL divergence,
+logit MSE, and top-1 flip rate by 44.0%, 43.3%, and 24.5% on
+average relative to identity coordinates. The corresponding
+zfp actual bits/value are measured from compressed bytes
+DCT energy maps
+0.45
+Random
+Learned
+concentration 0.570 +/- 0.003
+concentration 0.709 +/- 0.007
+−2.50
+12
+0.40
+0.35
+0.30
+Rate proxy
+Identity
+concentration 0.570 +/- 0.003
+14
+frequency loss
+Token frequency
+Objective value
+total loss
+2.6
+2.4
+−2.75
+10
+−3.00
+8
+−3.25
+6
+4
+−3.50
+2
+−3.75
+log10 normalized DCT energy
+Gauge training
+0
+0
+5
+10
+15
+20
+25
+0
+25
+50
+75
+Epoch
+100
+125 0
+25
+50
+75
+100
+125 0
+25
+50
+75
+100
+125
+Channel frequency
+Figure 4: Gauge training dynamics and spectral cache geometry. Left: mean objective terms across six models with standard-error
+bands. Right: representative normalized DCT energy maps from Qwen3-0.6B; the reported concentration means and standard
+errors aggregate all 268 standard-attention K/V layer maps across the six models. Learned gauges concentrate energy in lower
+token–channel frequencies.
+and match the target rates to within 6 × 10−5 bits/value, so
+the gains come from cache geometry rather than hidden rate
+differences. Cache reconstruction follows the same trend:
+learned gauges reduce zfp KV NRMSE by 18.3% over the
+same operating points.
+The same learned gauge also improves scalar low-bit paths.
+For block-uniform quantization, learned gauges reduce KL
+divergence, logit MSE, and top-1 flip rate by 44.2%, 42.1%,
+and 26.1%, respectively. For KIVI-style quantization, the
+corresponding reductions are 27.2%, 31.3%, and 15.2%.
+Both quantizers improve all three output metrics in every
+one of the 18 model–rate pairs. Thus, a gauge trained only
+from cache geometry can improve quality preservation for
+common coordinate-sensitive quantizers without languagemodeling, logit, or task-output losses during gauge training.
+Coordinate Controls
+Figure 3 evaluates a structured control set under the same zfp
+backend. Random orthogonal gauges reduce KL by 8.5% on
+average, Hadamard by 18.3%, and DCT by 15.5%. PCA/KLT
+improves KV NRMSE but worsens the output metrics on average, showing that ordering directions by second-moment
+reconstruction does not determine where decoding error affects attention logits. Learned gauges reduce KL by 44.0%
+and improve all 18 model–rate pairs relative to both identity
+coordinates and the random-gauge average. Among the evaluated controls, the frequency-trained gauge therefore provides the largest and most consistent improvement under
+matched backend settings and measured rates.
+Mechanism
+The training objective directly targets frequency concentration in the codec-facing token–channel layout. Figure 4 confirms that the objective transfers to held-out evaluation windows: identity and random gauges average approximately
+0.570 spectral concentration, while learned gauges reach
+0.709. The total training loss decreases by 30.1%, and the
+frequency term by 33.4%. These measurements connect the
+training signal to the observed zfp rate-distortion behavior:
+the gauge creates a more spectrally concentrated storage-
+facing channel layout for the numerical codec, and actual
+compression/decompression then yields lower cache and output perturbation.
+For scalar quantization, the mechanism also includes range
+redistribution and outlier smoothing, effects already known
+to aid low-bit LLM inference ((Ashkboos et al. 2024; Liu
+et al. 2025; Su et al. 2025)). Learned gauges still reduce
+output perturbation beyond random gauges in the aggregate
+quantizer rows, indicating that frequency-shaped geometry
+contributes useful structure even when the backend’s error
+mechanism differs from zfp’s.
+Scale, Task, and Storage Checks
+Figure 5 adds scale, task-prompt, and storage/timing evidence. On Gemma-3-27B, learned gauges reduce zfp KL by
+32.1%, 39.5%, and 49.3% at 3, 4, and 6 bits/value, following
+the same direction as the six-model matrix.
+Task-prompt scoring shows the same paired-distribution
+trend. Averaged across tasks, models, and rates, learned
+gauges lower correct-answer KL from 0.772 to 0.537 and
+correct-answer delta-NLL from 0.819 to 0.571 relative to
+the full-cache reference. Accuracy is also recorded, but these
+moderate-compression settings rarely move the full-cache
+answer across a decision boundary; likelihood and ranking
+metrics therefore provide higher-resolution evidence of quality preservation.
+The serial context-length run measures persistent KV allocation growth and recovery cost in the implemented path.
+Allocation is reported as growth over a one-token origin,
+isolating context-dependent KV memory from fixed model
+weights and persistent allocator state. At the longest measured context, zfp-4 uses 4.000 actual bits/value, and its
+allocation growth is essentially aligned with the 4-bit blockuniform path, while KIVI-4 uses a larger effective payload.
+Within this serial implementation, zfp-4 has lower measured
+decode overhead than the quantization paths. These measurements validate that fixed-rate numerical compression attains
+its intended persistent KV-storage reduction while including
+explicit cache recovery and model decoding in the measured
+path.
+Task prompts
+Identity
+0.8
+Random
+Learned
+0.6
+0.4
+0.2
+0.0
+3
+4
+Correct-answer KL
+KL divergence
+Gemma-3-27B
+1.5
+1.0
+0.5
+0.0
+6
+le
+Need
+zfp rate
+Decode time
+Full KV
+100
+10
+zfp-4
+Decode / full
+KV growth (GiB)
+Storage growth
+ing
+h-v2
+Track
+Benc
+Long
+−1
+10−2
+2.0
+Uniform-4
+KIVI-4
+1.5
+1.0
+128
+512
+2k
+Context
+8k
+32k
+128
+512
+2k
+8k
+32k
+Context
+Figure 5: Validation beyond the six-model matrix. Top left:
+zfp KL on Gemma-3-27B. Top right: correct-answer KL
+averaged over 3, 4, and 6 bits/value for each task family;
+error bars are standard errors across the three rate-specific
+model means. Bottom: persistent KV-allocation growth and
+decode-plus-model time for the learned-coordinate paths in
+the serial context-length run; timing includes explicit cache
+recovery.
+Discussion and Limitations
+Codec-Gauge improves KV-cache compression quality by
+training the gauge exposed to a backend. Figure 3 shows
+that the improvement is not explained by generic rotation,
+fixed transform coding, or a data-derived basis alone; Figure 4 shows the intended storage-facing spectral mechanism.
+The gauge shapes the codec-facing frequency distribution in
+a fixed token/channel layout, then is tested through actual
+compression, decompression, inverse recovery, and rollingcache scoring.
+The quantization rows broaden the finding. Orthogonal
+rotations and incoherence processing are already strong tools
+for low-bit quantization, and random gauges capture part of
+that effect. The learned frequency-distribution objective still
+reduces output perturbation on top of random gauges for
+block-uniform and KIVI-style paths, without quantizationspecific losses, language-modeling loss, or logit supervision.
+The training objective remains outside both codec and
+model-output loops: it differentiates through neither zfp nor
+a quantizer and uses no reconstruction or output loss. Its
+transfer to held-out zfp compression and two scalar quantizers therefore supports a representation-level geometric effect
+rather than adaptation to one decoder’s artifacts.
+The practical consequence is fidelity headroom at a fixed
+cache budget: the same backend configuration and measured
+rate produce a recovered cache closer to the full-cache reference. Because gauge parameters are fixed per checkpoint
+and do not scale with context length, their storage cost is
+amortized as the retained context grows.
+The paired rolling metrics measure cache-induced distri-
+butional change under fixed tokens and reference logits. KL,
+logit MSE, delta-NLL, and top-1 flips quantify how much the
+compressed-cache model deviates from the full-cache model
+before a discrete answer changes. Prompts from these three
+task families add likelihood-based checks in long-context
+task formats; thresholded accuracy is also reported, but is
+a lower-resolution view when moderate compression rarely
+changes the selected answer.
+The evaluated checkpoints span multiple providers, attention variants, and cache implementations. The 27B model
+check follows the same trend at a larger scale, while the sixmodel matrix tests architectural diversity. Results are also
+stable across g = 8, 16, 32, and full-head gauges; g = 16 is
+used as a representative middle setting.
+Modern KV-cache systems jointly choose precision, packing, paging, eviction, and scheduling. Codec-Gauge acts at
+the retained-tensor interface: quantizers and cache managers
+retain these backend decisions, while the gauge changes only
+the coordinates presented to them. Holding the remaining
+system choices fixed therefore isolates the observed ratedistortion improvement as a representation-side effect.
+Timing includes explicit key/value recovery rather than
+assuming fusion. Deployment-oriented implementations can
+specialize this path through kernel fusion, backend-specific
+packing, and paged-KV integration without changing the
+learned coordinate objective. The coordinate controls, two
+quantization paths, task prompts, 27B extension, and measured storage/timing paths together establish the effect beyond a single model, transform, or evaluation metric.
+Conclusion
+We introduced Codec-Gauge, a post-training coordinateshaping method for Transformer KV caches. Learned gauges
+improve zfp fixed-rate compression beyond raw and control
+coordinates under matched measured bits/value, and also improve output preservation for block-uniform and KIVI-style
+quantization paths. The method keeps the model and backend
+fixed, learns only small orthogonal KV-coordinate maps from
+frozen-model cache tensors, and evaluates the result through
+actual compression, decompression, and rolling-cache scoring.
+The broader conclusion is that KV-cache compressibility
+is not only a property of the backend or the checkpoint in its
+original basis: the coordinates exposed to a codec or quantizer are an actionable variable. Training this gauge with a
+frequency-distribution objective improves cache reconstruction and output-distribution stability at storage rates realized
+by actual compressed-cache paths, without changing attention semantics. Cache-coordinate shaping therefore complements existing KV compression, quantization, and serving
+pipelines while separating a reusable representation-side optimization from backend-specific engineering choices.
+Generative AI use. Generative AI tools assisted with
+manuscript preparation, code, figures, and reference checks;
+the authors verified all outputs and take full responsibility.
+References
+Ahmed, N.; Natarajan, T.; and Rao, K. R. 1974. Discrete
+Cosine Transform. IEEE Transactions on Computers, C23(1): 90–93.
+Ainslie, J.; Lee-Thorp, J.; de Jong, M.; Zemlyanskiy, Y.; Lebrón, F.; and Sanghai, S. 2023. GQA: Training Generalized
+Multi-Query Transformer Models from Multi-Head Checkpoints. In Proceedings of the 2023 Conference on Empirical
+Methods in Natural Language Processing, 4895–4901. Association for Computational Linguistics.
+Ashkboos, S.; Mohtashami, A.; Croci, M. L.; Li, B.;
+Cameron, P.; Jaggi, M.; Alistarh, D.; Hoefler, T.; and Hensman, J. 2024. QuaRot: Outlier-Free 4-Bit Inference in Rotated LLMs. In Advances in Neural Information Processing
+Systems.
+Bai, Y.; Tu, S.; Zhang, J.; Peng, H.; Wang, X.; Lv, X.; Cao,
+S.; Xu, J.; Hou, L.; Dong, Y.; Tang, J.; and Li, J. 2025. LongBench v2: Towards Deeper Understanding and Reasoning
+on Realistic Long-context Multitasks. In Proceedings of the
+63rd Annual Meeting of the Association for Computational
+Linguistics (Volume 1: Long Papers), 3639–3664. Association for Computational Linguistics.
+Behnam, P.; Fu, Y.; Zhao, R.; Tsai, P.-A.; Yu, Z.; and Tumanov, A. 2025. RocketKV: Accelerating Long-Context
+LLM Inference via Two-Stage KV Cache Compression. In
+Proceedings of the 42nd International Conference on Machine Learning, volume 267 of Proceedings of Machine
+Learning Research, 3358–3392. PMLR.
+Cai, Z.; Zhang, Y.; Gao, B.; Liu, Y.; Li, Y.; Liu, T.; Lu, K.;
+Xiong, W.; Dong, Y.; Hu, J.; and Xiao, W. 2025. PyramidKV:
+Dynamic KV Cache Compression Based on Pyramidal Information Funneling. In Conference on Language Modeling.
+Chang, C.-C.; Lin, W.-C.; Lin, C.-Y.; Chen, C.-Y.; Hu, Y.-F.;
+Wang, P.-S.; Huang, N.-C.; Ceze, L.; Abdelfattah, M. S.; and
+Wu, K.-C. 2025. Palu: KV-Cache Compression with LowRank Projection. In International Conference on Learning
+Representations.
+Chee, J.; Cai, Y.; Kuleshov, V.; and De Sa, C. 2023. QuIP:
+2-Bit Quantization of Large Language Models with Guarantees. In Advances in Neural Information Processing Systems,
+volume 36.
+Dao, T.; Fu, D. Y.; Ermon, S.; Rudra, A.; and Ré, C. 2022.
+FlashAttention: Fast and Memory-Efficient Exact Attention
+with IO-Awareness. In Advances in Neural Information Processing Systems, volume 35.
+DeepSeek-AI. 2024. DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model.
+arXiv:2405.04434.
+Ge, S.; Zhang, Y.; Liu, L.; Zhang, M.; Han, J.; and Gao,
+J. 2024. Model Tells You What to Discard: Adaptive KV
+Cache Compression for LLMs. In International Conference
+on Learning Representations.
+Gelberg, Y.; Eitan, Y.; Bronstein, M.; Gal, Y.; and Maron, H.
+2026. Training Transformers for KV Cache Compressibility.
+arXiv:2605.05971.
+Hooper, C. R. C.; Kim, S.; Mohammadzadeh, H.; Mahoney,
+M. W.; Shao, Y. S.; Keutzer, K.; and Gholami, A. 2024.
+KVQuant: Towards 10 Million Context Length LLM Inference with KV Cache Quantization. In Advances in Neural
+Information Processing Systems.
+Hsieh, C.-P.; Sun, S.; Kriman, S.; Acharya, S.; Rekesh, D.;
+Jia, F.; and Ginsburg, B. 2024. RULER: What’s the Real
+Context Size of Your Long-Context Language Models? In
+Conference on Language Modeling.
+Kai, J.; Wang, Y.; Zeng, B.; Bai, H.; Jiang, B.; He, Z.; and
+Lin, Z. 2026. FreqKV: Key-Value Compression in Frequency
+Domain for Context Window Extension. In International
+Conference on Learning Representations.
+Kang, H.; Zhang, Q.; Kundu, S.; Jeong, G.; Liu, Z.; Krishna,
+T.; and Zhao, T. 2024. GEAR: An Efficient Error Reduction
+Framework for KV Cache Compression in LLM Inference. In
+Proceedings of The 4th NeurIPS Efficient Natural Language
+and Speech Processing Workshop, volume 262 of Proceedings of Machine Learning Research, 305–321. PMLR.
+Kwon, W.; Li, Z.; Zhuang, S.; Sheng, Y.; Zheng, L.; Yu, C. H.;
+Gonzalez, J. E.; Zhang, H.; and Stoica, I. 2023. Efficient
+Memory Management for Large Language Model Serving
+with PagedAttention. In Proceedings of the 29th Symposium
+on Operating Systems Principles, 611–626.
+Lee, W.; Lee, J.; Seo, J.; and Sim, J. 2024. InfiniGen: Efficient Generative Inference of Large Language Models with
+Dynamic KV Cache Management. In Proceedings of the
+18th USENIX Symposium on Operating Systems Design and
+Implementation, 155–172. USENIX Association.
+Li, R.; Fu, Y.; Sheng, M.; Long, X.; Yu, H.; and Li, P. 2025.
+FAEDKV: Infinite-Window Fourier Transform for Unbiased
+KV Cache Compression. In Findings of the Association
+for Computational Linguistics: EMNLP 2025, 16856–16866.
+Association for Computational Linguistics.
+Li, Y.; Huang, Y.; Yang, B.; Venkitesh, B.; Locatelli, A.; Ye,
+H.; Cai, T.; Lewis, P.; and Chen, D. 2024. SnapKV: LLM
+Knows What You are Looking for Before Generation. In
+Advances in Neural Information Processing Systems.
+Lin, B.; Zeng, Z.; Xiao, Z.; Kou, S.; Hou, T.; Gao, X.; Zhang,
+H.; and Deng, Z. 2025a. MatryoshkaKV: Adaptive KV Compression via Trainable Orthogonal Projection. In International Conference on Learning Representations.
+Lin, Y.; Tang, H.; Yang, S.; Zhang, Z.; Xiao, G.; Gan, C.; and
+Han, S. 2025b. QServe: W4A8KV4 Quantization and System Co-Design for Efficient LLM Serving. In Proceedings
+of Machine Learning and Systems, volume 7.
+Lindstrom, P. 2014. Fixed-Rate Compressed Floating-Point
+Arrays. IEEE Transactions on Visualization and Computer
+Graphics, 20(12): 2674–2683.
+Liu, A.; Liu, J.; Pan, Z.; He, Y.; Haffari, G.; and Zhuang,
+B. 2024a. MiniCache: KV Cache Compression in Depth
+Dimension for Large Language Models. In Advances in
+Neural Information Processing Systems, volume 37.
+Liu, Y.; Li, H.; Cheng, Y.; Ray, S.; Huang, Y.; Zhang, Q.; Du,
+K.; Yao, J.; Lu, S.; Ananthanarayanan, G.; Maire, M.; Hoffmann, H.; Holtzman, A.; and Jiang, J. 2024b. CacheGen: KV
+Cache Compression and Streaming for Fast Large Language
+Model Serving. In Proceedings of the ACM SIGCOMM
+Conference, 38–56.
+Liu, Z.; Yuan, J.; Jin, H.; Zhong, S.; Xu, Z.; Braverman, V.;
+Chen, B.; and Hu, X. 2024c. KIVI: A Tuning-Free Asymmetric 2bit Quantization for KV Cache. In Proceedings
+of the 41st International Conference on Machine Learning,
+volume 235 of Proceedings of Machine Learning Research,
+32332–32344. PMLR.
+Liu, Z.; Zhao, C.; Fedorov, I.; Soran, B.; Choudhary, D.;
+Krishnamoorthi, R.; Chandra, V.; Tian, Y.; and Blankevoort,
+T. 2025. SpinQuant: LLM Quantization with Learned Rotations. In International Conference on Learning Representations.
+Nawrot, P.; Łańcucki, A.; Chochowski, M.; Tarjan, D.; and
+Ponti, E. 2024. Dynamic Memory Compression: Retrofitting
+LLMs for Accelerated Inference. In Proceedings of the
+41st International Conference on Machine Learning, volume 235 of Proceedings of Machine Learning Research,
+37396–37412. PMLR.
+Penedo, G.; Kydlíček, H.; Ben Allal, L.; Lozhkov, A.;
+Mitchell, M.; Raffel, C.; Von Werra, L.; and Wolf, T. 2024.
+The FineWeb Datasets: Decanting the Web for the Finest Text
+Data at Scale. In Advances in Neural Information Processing
+Systems, volume 37, 30811–30849.
+Saxena, U.; and Roy, K. 2025. KVLinC: KV Cache Quantization with Hadamard Rotation and Linear Correction.
+arXiv:2510.05373.
+Shazeer, N. 2019. Fast Transformer Decoding: One WriteHead is All You Need. arXiv:1911.02150.
+Staniszewski, K.; and Łańcucki, A. 2026. KV Cache Transform Coding for Compact Storage in LLM Inference. In
+International Conference on Learning Representations.
+Su, Z.; Wei, H.; Chen, Z.; Shen, W.; Li, L.; Yu, H.; and
+Yuan, K. 2025. RotateKV: Accurate and Robust 2-Bit KV
+Cache Quantization for LLMs via Outlier-Aware Adaptive
+Rotations. In Proceedings of the Thirty-Fourth International
+Joint Conference on Artificial Intelligence, 6200–6208.
+Sun, Y.; Liu, R.; Bai, H.; Bao, H.; Zhao, K.; Li, Y.; Hu, J.; Yu,
+X.; Hou, L.; Yuan, C.; Jiang, X.; Liu, W.; and Yao, J. 2025.
+FlatQuant: Flatness Matters for LLM Quantization. In Proceedings of the 42nd International Conference on Machine
+Learning, volume 267 of Proceedings of Machine Learning
+Research, 57587–57613. PMLR.
+Tang, J.; Zhao, Y.; Zhu, K.; Xiao, G.; Kasikci, B.; and Han,
+S. 2024. QUEST: Query-Aware Sparsity for Efficient LongContext LLM Inference. In Proceedings of the 41st International Conference on Machine Learning, volume 235 of
+Proceedings of Machine Learning Research, 47901–47911.
+PMLR.
+Tseng, A.; Chee, J.; Sun, Q.; Kuleshov, V.; and De Sa, C.
+2024. QuIP#: Even Better LLM Quantization with Hadamard
+Incoherence and Lattice Codebooks. In Proceedings of the
+41st International Conference on Machine Learning, volume
+235 of Proceedings of Machine Learning Research, 48630–
+48656. PMLR.
+Xiao, G.; Tian, Y.; Chen, B.; Han, S.; and Lewis, M. 2024.
+Efficient Streaming Language Models with Attention Sinks.
+In International Conference on Learning Representations.
+Yang, J. Y.; Kim, B.; Bae, J.; Kwon, B.; Park, G.; Yang, E.;
+Kwon, S. J.; and Lee, D. 2024. No Token Left Behind: Reliable KV Cache Compression via Importance-Aware Mixed
+Precision Quantization. arXiv:2402.18096.
+Zhang, Z.; Sheng, Y.; Zhou, T.; Chen, T.; Zheng, L.; Cai, R.;
+Song, Z.; Tian, Y.; Ré, C.; Barrett, C.; Wang, Z.; and Chen,
+B. 2023. H2 O: Heavy-Hitter Oracle for Efficient Generative
+Inference of Large Language Models. In Advances in Neural
+Information Processing Systems, volume 36.
+Appendix
+The complete code, configurations, checkpoints, and experiment outputs are available at https://huggingface.co/cccat6/
+Codec-Gauge. The repository contains raw outputs for the
+gauge-size sweep, coordinate controls, 27B model check,
+task scoring, memory diagnostics, reproduction scripts,
+configurations, checkpoints, generated experiment results,
+CUDA/zfp build notes, and hardware/software environment
+records. The released configurations record the exact checkpoint identifiers and experiment settings used for all reported
+runs.
+Item
+Formal run configuration
+GPU
+CPU / memory
+OS / driver
+Python stack
+Codec dependency
+Dataset
+Gauge training
+Evaluation
+Gauge sizes
+Backends
+NVIDIA RTX PRO 6000 Blackwell, 97,887 MiB VRAM, compute capability 12.0
+AMD Ryzen 9 9950X, 16 cores / 32 threads, 123 GiB RAM
+Ubuntu 24.04.4 LTS, NVIDIA driver 595.71.05, CUDA 13.2 reported by NVIDIA-SMI
+Python 3.12.3, PyTorch 2.12.1+cu130, Transformers 5.12.1, Datasets 5.0.0
+External CUDA zfp 1.0.1 build linked against CUDA 13 runtime; nvCOMP not used
+FineWeb-Edu sample-10BT train split, text field text, global seed 123
+64 windows, 4,096 tokens/window, 25 gauge epochs
+256 windows/model, seq_len=2,432, prefix_len=2,049
+full-head, 32, 16, and 8; main figures use group size 16
+CUDA zfp at 2, 3, 4, 6, 8 bits/value; block-uniform and KIVI-style quantizers at 2, 3, 4, 6, 8 bits
+Appendix Table 1: Formal-run environment and experiment
+scale used for the released results. The complete sanitized
+hardware and software record is included in the released
+artifact.
+Metric
+Definition and interpretation
+Actual bits/value
+Measured compressed bytes divided by the number of represented KV values; includes codec payloads and quantized representations used by the evaluated path.
+Reconstruction error between recovered and full-cache KV tensors; NRMSE normalizes the summed squared error by fullcache KV energy.
+Difference between compressed-cache and full-cache teacherforced negative log-likelihood on the same target tokens.
+KL(pfull ∥pcompressed ) between next-token distributions
+from full-cache and compressed-cache histories.
+Mean squared difference between full-cache and compressedcache logits before softmax.
+Fraction of target positions where the highest-probability token
+under the compressed-cache logits differs from the full-cache
+highest-probability token.
+Overlap between the five highest-probability tokens under fullcache and compressed-cache logits.
+Task-prompt versions of the distribution and likelihood metrics
+restricted to the candidate answer or target answer used by the
+prompt evaluator.
+KV MSE / NRMSE
+Delta-NLL
+KL divergence
+Logit MSE
+Top-1 flip rate
+Top-5 overlap
+Correct-answer KL / delta-NLL
+Appendix Table 2: Metric definitions used in the full-matrix,
+task-prompt, and storage analyses. The cache metrics measure reconstruction of internal KV tensors, while the output
+metrics measure how much the recovered-cache model deviates from the full-cache reference distribution.
+Backend
+zfp
+Block-uniform
+KIVI-style
+KL
+Logit MSE
+Top-1 flip
+KV NRMSE
+44.0% (18/18)
+44.2% (18/18)
+27.2% (18/18)
+43.3% (18/18)
+42.1% (18/18)
+31.3% (18/18)
+24.5% (18/18)
+26.1% (18/18)
+15.2% (18/18)
+18.3% (18/18)
+33.7% (18/18)
+11.9% (15/18)
+Appendix Table 3: Exact aggregate learned-gauge reductions
+for the main g = 16 matrix. Each cell reports the mean reduction relative to identity coordinates over six models and
+the 3, 4, and 6 bits/value operating points, followed by the
+number of model–rate pairs improved out of 18. The table
+complements the main figures by making the magnitude and
+consistency of the effect explicit: zfp and block-uniform improve on every paired condition across all four metrics, while
+KIVI-style quantization remains positive on average and wins
+most KV-NRMSE pairs despite its stronger backend-specific
+quantization structure.
+Coordinate control
+KL
+Logit MSE
+Top-1 flip
+KV NRMSE
+Random orthogonal
+Hadamard
+DCT
+PCA/KLT
+Learned gauge
+8.5% (15/18)
+18.3% (15/18)
+15.5% (16/18)
+-16.2% (10/18)
+44.0% (18/18)
+8.6% (15/18)
+18.4% (16/18)
+15.1% (16/18)
+-5.5% (10/18)
+43.4% (18/18)
+4.6% (13/18)
+9.5% (16/18)
+8.1% (15/18)
+-5.1% (9/18)
+24.5% (18/18)
+-0.1% (7/18)
+1.4% (6/18)
+2.3% (8/18)
+5.5% (18/18)
+18.3% (18/18)
+Appendix Table 4: Exact zfp coordinate-control summary at the intermediate operating points. All controls use the same backend,
+token stream, measured rates, and evaluator; only the cache-coordinate map changes. The fixed and data-derived transforms often
+help, confirming that cache coordinates matter, but their improvements are uneven across output and reconstruction metrics. The
+learned gauge is the only control that improves every model–rate pair for all four metrics, supporting the frequency-distribution
+objective as more than a generic rotation effect.
+Qwen3-0.6B
+Qwen3.5-0.8B
+101
+10
+100
+0
+10−1
+10−1
+10−2
+10−2
+10−3
+10−3
+2
+3
+4
+zfp
+6
+8
+2
+3
+4
+6
+Uniform
+8
+2
+3
+4
+KIVI
+6
+8
+2
+Llama-3.2-1B
+3
+4
+zfp
+6
+8
+2
+3
+4
+6
+Uniform
+8
+2
+3
+4
+KIVI
+6
+8
+6
+8
+2
+3
+4
+6
+Uniform
+8
+2
+3
+4
+KIVI
+6
+8
+6
+8
+2
+3
+4
+6
+Uniform
+8
+2
+3
+4
+KIVI
+6
+8
+Gemma-3-1B
+101
+10
+KL divergence
+100
+0
+10−1
+10−1
+10−2
+10−2
+10−3
+10−3
+2
+3
+4
+zfp
+6
+8
+2
+3
+4
+6
+Uniform
+8
+2
+3
+4
+KIVI
+6
+8
+2
+Phi-4 Mini Instruct
+101
+101
+3
+4
+zfp
+Ministral-3-3B
+100
+100
+10−1
+10−1
+10−2
+10−2
+10−3
+2
+3
+4
+zfp
+6
+8
+2
+3
+4
+6
+Uniform
+8
+2
+3
+4
+KIVI
+6
+8
+2
+3
+4
+zfp
+Nominal rate / precision (bits per value)
+Identity
+Random
+Learned
+Appendix Figure 1: Per-model KL divergence for the main g = 16 matrix across all evaluated zfp, block-uniform, and KIVI
+settings. Each subplot keeps the model fixed and compares identity, random, and learned coordinates under matched backend
+settings and measured rates. The learned gauge improves the main trend across model families rather than relying on one
+checkpoint or one backend setting, while the random-gauge rows show the strength of generic orthogonal controls.
+Learned reduction vs identity (%)
+KL divergence
+Logit MSE
+Top-1 flip rate
+KV NRMSE
+40.0%
+60%
+50%
+40.0%
+30.0%
+40%
+40%
+30.0%
+30%
+20.0%
+20.0%
+20%
+20%
+10.0%
+10.0%
+10%
+0%
+g=8
+g=16
+g=32
+full head
+0%
+g=8
+g=16
+g=32
+zfp
+full head
+0.0%
+Uniform
+g=8
+g=16
+g=32
+full head
+0.0%
+g=8
+g=16
+g=32
+full head
+KIVI
+Appendix Figure 2: Gauge-size sweep over g = 8, 16, 32, and full-head gauges at the intermediate operating points. The same
+learned-coordinate effect appears across group sizes, showing that the conclusion is not tied to a single matrix dimension. The
+main text uses g = 16 as a representative middle setting: it is compact enough to keep the gauge local and inexpensive, while
+preserving the trend observed in both smaller and larger gauges.
+Reduction vs identity (%)
+KL divergence
+Top-1 flip rate
+KV NRMSE
+40%
+50%
+20.0%
+25%
+20%
+15.0%
+0%
+10.0%
+0%
+−25%
+−50%
+5.0%
+−20%
+−75%
+0.0%
+3
+4
+3
+6
+4
+zfp rate (bits/value)
+3
+6
+4
+zfp rate (bits/value)
+Random
+Hadamard
+6
+zfp rate (bits/value)
+DCT
+PCA/KLT
+Learned
+Appendix Figure 3: Coordinate-control breakdown for zfp by rate, with the identity zero baseline omitted to expose the relative
+spread among non-identity controls. Random, Hadamard, DCT, PCA/KLT, and learned gauges are all evaluated through the
+same zfp compression/decompression path. The learned gauge provides the most consistent positive reduction across output
+perturbation and KV reconstruction metrics, while PCA/KLT illustrates why a reconstruction-oriented data basis alone is not
+sufficient for the codec-facing objective.
+ΔNLL / token
+KL divergence
+Metric value
+0.3
+Top-1 flip rate
+60
+0.8
+0.6
+0.2
+KV NRMSE
+0.4
+0.3
+40
+0.4
+0.2
+0.1
+20
+0.2
+0.1
+0.0
+3
+4
+0.0
+6
+zfp rate
+3
+4
+0
+6
+3
+4
+zfp rate
+Identity
+0.0
+6
+3
+zfp rate
+Random
+4
+6
+zfp rate
+Learned
+Appendix Figure 4: Gemma-3-27B metrics under identity, random, and learned gauges. This run uses the same zfp backend
+and intermediate operating points as the main coordinate study, but on a substantially larger checkpoint. The larger-model check
+follows the same direction as the six-model matrix, supporting the interpretation that the learned cache-coordinate effect is not
+restricted to the small-model sweep.
+Correct-answer delta NLL
+Correct-answer KL
+Accuracy (%)
+1.50
+1.5
+60
+1.00
+1.0
+Percent
+Metric value
+1.25
+0.75
+0.50
+0.5
+40
+20
+0.25
+0.0
+0.00
+le
+Need
+ing
+Track
+B
+Long
+-v
+ench
+2
+0
+le
+Need
+Identity
+ing
+Track
+Random
+B
+Long
+-v
+ench
+2
+le
+Need
+ing
+Track
+Long
+h-v2
+Benc
+Learned
+Appendix Figure 5: Task-prompt scoring breakdown by task family. The prompts cover needle-style retrieval, variable tracking,
+and LongBench-v2-style multiple-choice checks under the same compressed-cache conditions. Accuracy is included, but the
+likelihood-based columns are the intended diagnostic signal here: when moderate compression leaves many discrete decisions
+unchanged, correct-answer likelihood and perturbation metrics reveal the quality margin that accuracy alone can hide.
+Training objective
+Training concentration
+g=32
+Loss
+full head
+0.40
+0.35
+Spectral concentration
+g=16
+Spectral concentration
+g=8
+0.45
+Final concentration
+0.75
+0.70
+0.65
+0.60
+0.30
+0
+10
+5
+15
+20
+25
+0
+5
+Epoch
+10
+15
+20
+25
+0.6
+0.4
+0.2
+0.0
+g=8
+g=16
+g=32
+full head
+Epoch
+Identity
+Random
+Learned
+Appendix Figure 6: Gauge training and spectral concentration across gauge sizes. The loss curves verify that each gauge size
+learns the intended frequency-distribution objective, and the concentration bars show that the final gauges consistently reshape
+the codec-facing spectrum. This supports the main mechanism claim: the learned coordinate system changes the numerical
+geometry seen by the backend rather than only exploiting a single rate or a single model.
+No-compression perturbation
+Delta NLL
+KV NRMSE
+KL
+0.00000
+2.0
+1e−8
+0.00125
+−0.00005
+1.5
+0.00100
+0.00075
+−0.00010
+1.0
+0.00050
+−0.00015
+0.5
+0.00025
+Full
+Clone
+0.00000
+Random
+inv.
+Learned
+inv.
+Full
+Clone
+0.0
+Random
+inv.
+Learned
+inv.
+Full
+Clone
+Random
+inv.
+Learned
+inv.
+Appendix Figure 7: No-compression sanity checks for the full cache, cache clone, random-gauge inverse, and learned-gauge
+inverse paths. These rows isolate implementation and numerical round-trip error without lossy compression or quantization.
+Perturbations remain near numerical noise, which verifies that the losses reported in the main matrix arise from backend
+compression or quantization after coordinate shaping, not from the gauge transform itself.

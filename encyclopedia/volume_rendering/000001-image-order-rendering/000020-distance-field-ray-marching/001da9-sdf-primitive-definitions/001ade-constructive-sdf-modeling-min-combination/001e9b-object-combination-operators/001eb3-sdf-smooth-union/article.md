@@ -1,0 +1,116 @@
+# SDF Smooth Union
+
+Also called: LogSumExp SDF Union, S-Union, Smooth Minimum, Smooth Union, Smooth Union SDF Operator
+
+## Overview
+SDF Smooth Union is a constructive operator that blends two Signed Distance Function (SDF) values, $a$ and $b$, into a single smooth distance field, replacing the sharp edge of a boolean union with a rounded transition controlled by a parameter $k$ [S1, unofficial][S2, unofficial][S3, unofficial]. It sets itself apart from the standard `min` operator by providing a continuous, differentiable transition between shapes [S1, unofficial][S2, unofficial][S4, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Inputs: Two scalar SDF values $a$ and $b$ (distances from the query point to two primitives), and a smoothing parameter $k > 0$ [S1, unofficial][S2, unofficial][S4, unofficial].
+- Output: A single scalar smooth union distance $d_{union}$ [S1, unofficial][S2, unofficial].
+
+**Data Structures:**
+No complex data structures are required; the operation is element-wise on scalar distances [G]. If material information is carried (as in [S5, unofficial]), the operator may also blend material attributes, but the core distance calculation is scalar.
+
+**Steps:**
+1. Compute the interpolation weight $h$ based on the difference between $b$ and $a$, scaled by $k$, and clamp it to $[0, 1]$ [S4, unofficial].
+2. Interpolate between $b$ and $a$ using $h$ [S2, unofficial].
+3. Subtract a cubic correction term $k \cdot h \cdot (1.0 - h)$ from the interpolated value [S4, unofficial].
+
+**Formulas:**
+There are two primary implementations found in the sources: the Cubic Smooth Minimum and the LogSumExp (Log-Sum-Exp) Smooth Minimum [G].
+
+1. **Cubic Smooth Minimum:**
+   $$h = \text{clamp}\left(0.5 + 0.5 \frac{b - a}{k}, 0.0, 1.0\right)$$
+   $$d_{union} = \text{mix}(b, a, h) - k \cdot h \cdot (1.0 - h)$$
+   Where $\text{mix}(x, y, t) = x(1-t) + y \cdot t$ [S2, unofficial].
+
+2. **LogSumExp Smooth Minimum:**
+   $$d_{union} = -\frac{1}{k} \ln \left( e^{-k \cdot a} + e^{-k \cdot b} \right)$$
+   Or equivalently using the log-sum-exp function:
+   $$d_{union} = \frac{1}{-k} \text{logsumexp}(-k \cdot a, -k \cdot b)$$ [S3, unofficial].
+
+**Parameters:**
+- $k$: The smoothing factor or blend radius [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial]. Larger values create a smoother, wider blend between the shapes [S1, unofficial]. Typical values range from 0.1 to 1.0 depending on scene scale, with 1.0f cited as a typical value in [S4, unofficial] and 0.5 or 0.33 used for primitive vs scene blending in [S5, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Parameter $k$ Scale: The parameter $k$ must be significantly smaller than the size of the objects to maintain validity [S1, unofficial][S2, unofficial].
+- Numerical Stability: In the LogSumExp implementation, direct computation of $e^{-k \cdot i}$ can overflow if $-k \cdot i$ is large positive. Subtracting the maximum value before exponentiation is required for stability [G].
+
+**Pseudocode (Cubic Implementation):**
+The cubic implementation is explicitly provided in [S4, unofficial] and [S1, unofficial][S2, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def smooth_union_cubic(a: float, b: float, k: float) -> float:
+    """
+    Computes the smooth union of two SDF values using the cubic approximation.
+    """
+    if k <= 0:
+        # Fallback to standard min if k is invalid [G]
+        return min(a, b)
+        
+    h = 0.5 + 0.5 * (b - a) / k
+    if h < 0.0:
+        h = 0.0
+    elif h > 1.0:
+        h = 1.0
+        
+    mixed_val = b * (1.0 - h) + a * h
+    correction = k * h * (1.0 - h)
+    
+    return mixed_val - correction
+```
+
+**Pseudocode (LogSumExp Implementation):**
+The LogSumExp implementation is provided in [S3, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def smooth_union_logsumexp(a: float, b: float, k: float) -> float:
+    """
+    Computes the smooth union of two SDF values using the LogSumExp approximation.
+    """
+    if k <= 0:
+        return min(a, b) [G]
+        
+    val_a = -k * a
+    val_b = -k * b
+    
+    max_val = max(val_a, val_b)
+    log_sum = math.log(math.exp(val_a - max_val) + math.exp(val_b - max_val)) + max_val
+    
+    return -log_sum / k
+```
+
+## Subtopics
+
+### [Polynomial Smooth Minimum](1827-polynomial-smooth-minimum.md)
+A blending function for combining two SDFs to create organic, metaball-like merges using a cubic smoothing function, controlled by a blend radius parameter $k$. It sets itself apart by providing a continuous, differentiable transition without branching or trigonometry, suitable for organic shapes.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per pair of SDFs. The cubic method involves basic arithmetic operations (add, multiply, clamp). The LogSumExp method involves exponentials and logarithms, which are more expensive but still constant time [G].
+- **Memory Complexity:** $O(1)$. No additional storage is required beyond the input scalars and the output scalar [G].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** The method scales linearly with the number of SDFs to be combined if applied recursively or in a tree structure [S5, unofficial].
+- **Strengths:** Produces visually smooth, organic transitions between primitives; differentiable (enabling gradient-based optimization in some contexts [S1, unofficial][S2, unofficial]).
+- **Limitations:** Does not preserve exact distance properties (the result is an approximation, not a true SDF in the strict sense everywhere); artifacts can occur if $k$ is too large relative to object size [S1, unofficial][S2, unofficial].
+- **When to use:** When creating organic merges, metaballs, or soft intersections where sharp boolean edges are undesirable [G].
+- **When not to use:** When exact distance preservation is critical for ray marching stability in complex non-orthogonal configurations, or when sharp edges are desired (use standard `min`) [G].
+
+## Background
+The concept of smooth union in SDFs originated from the need to create organic shapes and avoid the visual artifacts of sharp boolean operations in ray marching [G]. The cubic smooth minimum operator was popularized by Inigo Quilez in his online articles on SDFs [S4, unofficial]. The LogSumExp approximation is derived from the soft-minimum function used in machine learning and optimization [G]. These operators are widely used in real-time ray marching for creating metaballs, fluid-like interactions, and smooth architectural details [G].
+
+## Sources
+[S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)
+[S2] skmhrk1209/Sphere-Tracing-PyTorch3D, https://github.com/skmhrk1209/Sphere-Tracing-PyTorch3D, fetched 2026-10-26 (unofficial)
+[S3] kyle-rosa/ray_marching, https://github.com/kyle-rosa/ray_marching, fetched 2026-10-26 (unofficial)
+[S4] An Introduction to Raymarching - Maxime Garcia, https://typhomnt.github.io/teaching/ray_tracing/raymarching_intro/, fetched 2026-10-27 (unofficial)
+[S5] cahekp/Raymarching, https://github.com/cahekp/Raymarching, fetched 2026-10-27 (unofficial)

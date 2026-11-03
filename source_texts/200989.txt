@@ -1,0 +1,254 @@
+Contribute to DeGrootResearchGroup/aquaflux development by creating an account on GitHub.
+
+feat(radiation): cull the shadow mask's candidates with a grid over the triangles (#490) by ctdegroot · Pull Request #498 · DeGrootResearchGroup/aquaflux · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ctdegroot
+commented
+Sep 23, 2026
+Copy link
+Copy Markdown
+Member
+Closes part of #490 -- see What this does not do below; the issue stays open.
+What happens today
+RayCastOcclusion tests every ray against every triangle with no early exit and no spatial structure, so a receiver mask costs n_receivers x n_facets x n_triangles. On the Sozzi reactor (1.6M cells, 7,516 lamp facets, 53,500 wall triangles) that is 6.6e14 intersections -- weeks at the measured 120-150 Mtest/s. The Sozzi comparison only avoids it because that fluid is three convex cylinders and a bespoke Occluder answers visibility analytically, which is a description of one reactor rather than a method.
+What this adds
+TriangleGrid (aquaflux/radiation/grid.py): each triangle registered in the voxels its bounding box spans, each segment walked through the voxels it crosses (Amanatides & Woo's 3D-DDA), only what those voxels hold tested, stopping at the first blocker. Selected with RayCastOcclusion(grid=True), an integer, or a per-axis triple.
+False is the default. This changes cost, not answers, and the answers are what the shipped path is trusted for -- so the default is not touched here.
+The measurement the issue asked for
+The specification's "~20 triangles tested per ray" was an assumption. Measured on the reactor's own geometry (validation/sozzi_radiation/ray_acceleration_probe.py, 4,000 sampled cell-to-facet rays against 53,500 wall triangles; jax 0.10.2, CPU, x64, macOS arm64, 11 cores):
+grid
+occupied voxels
+tri/occupied voxel (mean / max)
+steps per ray (mean / max)
+tested per ray, early exit (mean / p95)
+steps to first occupied voxel
+32³
+1,896
+60.7 / 303
+16.8 / 48
+380 / 1,142
+41.9
+64³
+8,399
+22.3 / 77
+32.8 / 97
+121 / 469
+12.2
+128³
+40,681
+9.7 / 36
+65.4 / 183
+52 / 200
+4.8
+The assumption was optimistic by about 2.5x at the best resolution measured, and the method survives anyway: 52 against 53,500 is ~1,000x fewer tests.
+Why it is host code, not a traced kernel
+Under a trace the trip count and the per-voxel triangle count must both be static, so every ray pays the longest walk against the fullest voxel whether or not it finds anything: 183 x 36 = 6,588 tests a ray, an 8x saving rather than 1,000x, with none of the early exit. The mask is frozen and built from geometry alone, so nothing about it has to be traceable. Only the intersection test itself is traced, on the compacted (ray, triangle) pairs, through the same predicate the unaccelerated path uses.
+Correctness
+A grid decides what is worth testing, never what counts as a hit, so the tests are exactness tests rather than tolerances:
+bit equality against segment_is_cut at resolutions None, 1, 3, 16, (2,7,5) over 3,000 segments (one voxel is the brute force; a rectangular grid catches an axis transposed in the flattening);
+exclusions and the near margin re-checked on the grid's own candidates;
+no segment from inside a closed drum reaches outside -- an under-registered triangle leaks exactly there, as a bright spot rather than an error;
+RayCastOcclusion(grid=...) against the ungridded strategy, facet to facet on a self-shadowing drum, at three resolutions.
+Watertightness is unchanged: both paths go through _watertight_hit, and the window-and-exclusion rule is now one shared _counts_as_hit so they cannot drift.
+Mutation pass, 5 mutations, 4 red. Registering by centroid instead of bounding box, stopping after the first voxel, dropping the exclusions, and sizing the grid per axis rather than by extent all go red. One survived and is dismissed rather than patched: forcing every ray to start inside the grid. Rays entering diagonally through a far face were constructed deliberately and gave 0 disagreements -- the walk's stepping comes from the ray, so a clipped start still covers the true path. The entry point saves steps; it does not decide correctness. The separate early-out for a segment that misses the box entirely is load-bearing and has its own test.
+Also here: what an emitter's facet count buys
+validation/sozzi_radiation/lamp_resolution.py, against an analytic lamp refined to 270,336 facets, on 8,000 sampled cells:
+lamp
+facets
+power W
+near the lamp (<5 mm), median / p99
+rest of the chamber, median / p99
+the case's STL
+7,516
+35.2596
+1.95% / 7.28%
+1.08% / 2.63%
+8 x 16
+288
+34.4966
+25.4% / 52.6%
+8.82% / 26.3%
+16 x 32
+1,152
+35.205
+10.4% / 27.7%
+2.21% / 8.38%
+24 x 64
+3,360
+35.3374
+4.08% / 13.4%
+0.84% / 2.28%
+32 x 128
+8,704
+35.3837
+1.42% / 6.51%
+0.38% / 0.88%
+48 x 256
+25,728
+35.4169
+0.43% / 2.77%
+0.15% / 0.35%
+64 x 512
+67,584
+35.4285
+0.15% / 0.98%
+0.07% / 0.17%
+Error falls about in proportion to the facet count, and the near-lamp band sets the requirement, because absorption is evaluated once per facet along the centroid path. This bears directly on #492: the mesh's own lampWall patch carries 48,550 faces for about what 25,728 analytic facets buy.
+What this does not do
+The ray count is untouched, and at mesh scale it is the binding cost: 1.6M cells against 7,516 facets is 1.2e10 segments however cheaply each is answered. The grid makes scenes up to a few times 1e8 rays practical; beyond that the facet count has to come down, or the mask has to be built on a coarser emitter than the gather uses. That option is worth more than the grid at full scale and is noted on Radiation: accelerate the segment-triangle test, or arbitrary geometry cannot be shadowed at all #490.
+Radiation: accelerate the segment-triangle test, or arbitrary geometry cannot be shadowed at all #490's first acceptance criterion is NOT met here: the accelerated mask has not been run end to end against compare_fluence.py's analytic-opening field on the full reactor. That is hours of machine time and belongs in its own run; the issue stays open for it. What is established here is exactness against the unaccelerated test, and the per-ray cost on the real geometry.
+Checks
+ruff check / ruff format clean, comment-hygiene greps clean, Stale-Record Check run (two entries corrected in the design record: the ray mask's geometry-independence is a property of the ungridded path only, and _bucket is now triangles.padded_length). The local fast tier has not been run yet -- another session's validation case holds the machine, and the gate refuses to start beside one; it will be run and reported here.
+🤖 Generated with Claude Code
+Christopher DeGroot
+and others
+added 3 commits
+September 23, 2026 12:26
+feat(radiation): cull the shadow mask's candidates with a grid over t…
+…
+27ab818
+```
+…he triangles
+
+`RayCastOcclusion` tested every ray against every triangle, which put a real
+reactor out of reach: 1.6M cells, 7,516 lamp facets and 53,500 wall triangles is
+6.6e14 intersections, weeks at the measured 120-150 Mtest/s.
+
+`TriangleGrid` registers each triangle in the voxels its bounding box spans and
+walks each segment through them, testing only what those voxels hold and stopping
+at the first blocker. Measured on that reactor's own geometry, a 128-cubed grid
+tests 52 triangles a ray instead of 53,500, and reaches a blocker after about 5
+steps.
+
+It is deliberately host code. Under a trace the walk needs a static trip count and
+a static per-voxel triangle count, so every ray would pay the longest walk against
+the fullest voxel -- 6,588 tests a ray, an 8x saving rather than 1,000x, with none
+of the early exit. The mask is frozen and built from geometry alone, so nothing
+about it has to be traceable; only the intersection test itself is traced, on the
+compacted (ray, triangle) pairs.
+
+Selected with `RayCastOcclusion(grid=True)`, an integer, or a per-axis triple.
+`False` stays the default: this changes cost, not answers, and the answers are what
+the shipped path is trusted for.
+
+The window-and-exclusion rule is factored into `_counts_as_hit`, shared by the block
+kernel and the new pair kernel so the two cannot drift, and `_bucket` moves to
+`triangles.padded_length` now that the grid needs the same bucketing the silhouette
+clip already used.
+
+Tests compare the grid against the unaccelerated test for bit equality at five
+resolutions, assert no segment escapes a closed drum, and compare the two strategies
+facet to facet on that drum.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+validation(radiation): what a ray costs with a grid, and what a lamp'…
+…
+3af14a2
+```
+…s facets buy
+
+Two harnesses on the Sozzi reactor, and the design record they settle.
+
+`ray_acceleration_probe.py` measures the specification's "~20 triangles tested per
+ray", which was an assumption and had never been measured. At 128-cubed it is 52
+with early exit (9.7 triangles in the average occupied voxel, 65 voxels entered, 5
+to reach the first occupied one), so the assumption was optimistic by about 2.5x
+and the method survives anyway. It also measures what a traced walk would have to
+pay -- 183 steps times 36 triangles, 6,588 tests a ray -- which is what decided the
+implementation.
+
+`lamp_resolution.py` measures what the emitter's facet count buys, against an
+analytic lamp refined to 270,336 facets. The tutorial's 7,516-facet STL lands at
+1.95% near the lamp and 1.08% elsewhere; error falls about in proportion to the
+facet count, and the near-lamp band sets the requirement, because absorption is
+evaluated once per facet along the centroid path. The mesh's own lampWall patch
+carries 48,550 faces for about what 25,728 analytic facets buy.
+
+Two corrections to the record in the same change: the ray mask's cost is
+geometry-independent only without a grid (the grid's early exit is exactly what
+breaks that), and `_bucket` is now `triangles.padded_length`.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+test(radiation): give the grid comparison a body that actually shadow…
+…
+c5750a4
+```
+…s itself
+
+The strategy-level comparison was built on a closed drum, which is convex -- every
+sight line between two of its interior facets stays inside it and meets nothing, so
+both paths returned a hidden fraction of zero for every pair and the equality
+assertion compared zero against zero.
+
+The test's own one-sidedness check caught this, which is what it is there for. A
+partition plate across the drum's middle puts geometry between the facets; the
+docstring described the old fixture and is rewritten with it.
+
+Verified by mutation: stopping the walk after its first voxel now turns all three
+parametrizations red, which the drum-only version would not have noticed.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+ctdegroot
+commented
+Sep 23, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Local fast tier: 2497 passed, 1 skipped (12:10), and the three CI failures are fixed.
+The failure was in this PR's own strategy-level test, and the guard inside it is what caught it: the fixture was closed_drum, which is convex, so every sight line between two of its interior facets stays inside the body and meets nothing. Both paths returned a hidden fraction of zero for every pair, and the bit-equality assertion was comparing zero against zero -- a test that could not have failed. assert 0.2 < blocked.mean() < 0.9 is the only reason it did not ship as false coverage.
+Fixed by putting a partition plate across the drum's middle, so facets on opposite sides are genuinely blocked by it (its edges sit at 0.95 of the radius, clear of the wall). The docstring described the old fixture and is rewritten.
+Mutation-verified, which the previous version would have failed: stopping the grid walk after its first voxel now turns all three parametrizations red. The mutation was reverted and grid.py is unchanged from the commit above.
+Hide details
+View details
+ctdegroot
+merged commit 0a2f62c
+into
+main
+Sep 24, 2026
+23 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+ctdegroot
+deleted the
+radiation/ray-acceleration
+branch
+September 24, 2026 01:25
+This was referenced Sep 24, 2026
+fix(radiation): three defects the grid only showed on a real reactor, and #490's acceptance run
+#502
+Merged
+docs(validation): describe the three Sozzi harnesses the README never gained
+#508
+Merged
+Radiation: the gather's chunk_size counts RECEIVERS, so a fine emitter makes one chunk enormous
+#509
+Closed
+Radiation: no public occluder takes a triangle mesh, so the grid is only reachable as self-occlusion
+#510
+Closed
+Radiation: validate DOSE on the Sozzi reactor, not just the fluence rate — the tier the G work was for
+#511
+Closed
+Radiation: accelerate the segment-triangle test, or arbitrary geometry cannot be shadowed at all
+#490
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,137 @@
+A refreshingly simple data-driven game engine built in Rust - Add `GpuBatchedMesh3d`: GPU-authored mesh instances drawn through the mesh-material pipeline. by tychedelia · Pull Request #25978 · bevyengine/bevy
+
+Add `GpuBatchedMesh3d`: GPU-authored mesh instances drawn through the mesh-material pipeline. by tychedelia · Pull Request #25978 · bevyengine/bevy · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+tychedelia
+commented
+Sep 30, 2026
+Copy link
+Copy Markdown
+Member
+Objective
+Let user compute shaders author mesh instances that the standard mesh pipeline draws: culled per view, drawn with any Material, with shadows, prepass, and deferred, as one indirect draw per batch. This is the low-level primitive that GPU particle systems need to draw lit meshes (see #20569), and the piece bevy_hanabi's lighting request (djeedai/bevy_hanabi#215) would build on.
+Today every MeshInputUniform slot is owned by one entity and written from ECS extraction. The only way to draw compute-written instances is a custom render command with a hand-rolled instance buffer (custom_shader_instancing), which gets no material, culling, or shadow support.
+Solution
+We add a new kind of renderable GpuBatchedMesh3d (please feel free to bikeshed) entity, paired with a MeshMaterial3d, reserves a persistent output buffer of max_capacity GpuMeshInstance slots. A producer writes them from compute in the GpuInstanceBatchSystems::Publish set in the rendergraph. A renderer-owned materialize pass then copies the slots into a GPU-only tail of the mesh preprocessing input and culling buffers, applying a CPU-owned template for mesh, material, and flags. A range-unpacking pass expands the batch into ordinary preprocessing work items, from which point they appear as if they were "regular" mesh-materials.
+Design points:
+Producers write GpuMeshInstance slots into the reservation's output buffer. The renderer builds the actual mesh inputs from them each frame, so changing a batch's mesh or material needs no re-reservation.
+The output buffer persists across frames, so a producer can skip frames and the last published instances keep drawing.
+In sorted phases a batch is one item, ordered by its entity's Aabb center. Instances within it aren't sorted, since we'd need DGC for that.
+The only new trait method is GetFullBatchData::get_instance_batch. It defaults to None, so Mesh2d and third-party batchers are unaffected.
+Changes outside the new module that reviewers should look at:
+Mesh3dVisibility is now the visibility class of 3D mesh draws, required by Mesh3d and by GpuBatchedMesh3d, instead of Mesh3d itself.
+MeshCullingData gains a per-slot is_active: u32 in its trailing padding, read by mesh_preprocess under frustum culling. Stride is unchanged.
+Merged sorted phase items now get an empty batch_range, and render_range draws each item with a non-empty range instead of skipping batch_range.len() items. That length used to count both instances drawn and items consumed, which instance batches break. This also fixes a bug on main where the transmission node could redraw a merged item multiple times.
+Retained transparent items keep the sort center they were queued with (2D: Changes to Z-ordering of entities with custom materials (not sprites) not reflected properly in rendering #24826). Batches refresh theirs in place each frame in PhaseSort. When Re-sort retained transparent phase items when their entity moves #25708 lands, we can get rid of the batch specific system.
+Not supported here: motion vectors, transmissive materials, per-instance sorting, 2D.
+Testing
+gpu_particles example.
+Ran gpu_particles, transparency_3d, mesh2d, and mesh2d_alpha_mode on macOS/Metal (M2 Max) with GPU preprocessing fully supported, no validation errors.
+Showcase
+cargo run --release --example gpu_particles
+Migration Guides
+Mesh3dVisibility is the visibility class of 3D meshes.
+Merged sorted phase items have an empty batch_range
+Disclosure: claude code was used to review and fix a variety of bugs to ensure no regressions in rendering.
+tychedelia
+added 2 commits
+September 29, 2026 22:17
+Add GpuBatchedMesh3d: GPU-authored mesh instances drawn through the m…
+…
+36e79e2
+```
+…esh pipeline.
+```
+Merge branch 'main' into gpu-instance-batch-upstream
+917cd5f
+Zeophlite
+added
+A-Rendering
+Drawing game state to the screen
+D-Complex
+Quite challenging from either a design or technical perspective. Ask for help!
+S-Needs-Review
+Needs reviewer attention (from anyone!) to move forward
+labels
+Sep 30, 2026
+github-project-automation
+Bot
+added this to Rendering
+Sep 30, 2026
+github-project-automation
+Bot
+moved this to Needs SME Triage
+in Rendering
+Sep 30, 2026
+stuartparmenter
+reviewed
+Oct 3, 2026
+View reviewed changes
+Comment thread
+crates/bevy_pbr/src/gpu_instance_batch/gpu_instance.wesl
+// One instance slot published by a GPU producer. Zeroed slots are inactive.
+struct GpuMeshInstance {
+world_from_local: mat3x4<f32>,
+is_active: u32,
+stuartparmenter
+Oct 3, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Could we just make this flags and say make bit 0 = active? then we can more easily add flags for history / motion vectors, etc
+DaAlbrecht
+added
+the
+AI-Assisted
+Discloses the use of AI in any way
+label
+Oct 16, 2026
+Zeophlite
+added
+the
+S-Merge-Conflicts
+Merge conflicts :( Add this label on top of other S- labels.
+label
+Oct 17, 2026
+catilac
+commented
+Oct 25, 2026
+Copy link
+Copy Markdown
+So happy this is happening!
+catilac
+mentioned this pull request
+Oct 25, 2026
+Get off of our divergent bevy fork
+processing/libprocessing#189
+Open
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+A-Rendering
+Drawing game state to the screen
+AI-Assisted
+Discloses the use of AI in any way
+D-Complex
+Quite challenging from either a design or technical perspective. Ask for help!
+S-Merge-Conflicts
+Merge conflicts :( Add this label on top of other S- labels.
+S-Needs-Review
+Needs reviewer attention (from anyone!) to move forward
+5 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

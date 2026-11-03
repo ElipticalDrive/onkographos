@@ -1,0 +1,162 @@
+Hello, 
+From textbooks, NDC space is clip space / w. However, I found some weird code in Core.hlsl in package com.unity.render-pipelines.universal. 
+struct VertexPositionInputs
+{
+    float3 positionWS; // World space pos&hellip;
+
+Confused on NDC space - Unity Engine - Unity Discussions
+Confused on NDC space
+Unity Engine
+Shaders
+zhutianlun810
+December 18, 2020, 3:41am
+1
+Hello,
+From textbooks, NDC space is clip space / w. However, I found some weird code in Core.hlsl in package com.unity.render-pipelines.universal.
+```
+struct VertexPositionInputs
+{
+    float3 positionWS; // World space position
+    float3 positionVS; // View space position
+    float4 positionCS; // Homogeneous clip space position
+    float4 positionNDC;// Homogeneous normalized device coordinates
+};
+```
+```
+VertexPositionInputs GetVertexPositionInputs(float3 positionOS)
+{
+    VertexPositionInputs input;
+    input.positionWS = TransformObjectToWorld(positionOS);
+    input.positionVS = TransformWorldToView(input.positionWS);
+    input.positionCS = TransformWorldToHClip(input.positionWS);
+   
+    float4 ndc = input.positionCS * 0.5f;
+    input.positionNDC.xy = float2(ndc.x, ndc.y * _ProjectionParams.x) + ndc.w;
+    input.positionNDC.zw = input.positionCS.zw;
+       
+    return input;
+}
+```
+I can’t understand the way Unity computing NDC space. What does it try to do?
+bgolus
+December 18, 2020, 9:18am
+2
+NDC is not just clipSpace.xy / clipSpace.w. Homogeneous clip space’s x & y have a -w to w range (for what’s in view), but NDC’s x & y have a 0.0 to 1.0 range. They’re essentially screen space UVs. Dividing homogeneous clip space by its w just makes it non-homogeneous clip space, not NDC. NDC is closer to (clipSpace.xy / clipSpace.w) * 0.5 + 0.5. So the above code is basically solving that equation a little differently by doing:
+```
+(clipSpace.xy * 0.5 + clipSpace.w * 0.5) / clipSpace.w
+```
+Only, it’s not doing the divide by w, so it rescales the xy values to a 0.0 to w range.
+But why not divide by w?
+The key here is that “homogeneous” term. Note the comment for positionNDC refers to it as “Homogeneous normalized device coordinates”, and not just “normalized device coordinates”. That’s not a mistake. The term homogeneous here refers to the fact it’s a coordinate in a projective space. Essentially is the value multiplied by w, which for a perspective projection happens to be the linear depth. If you want to dig into exactly what homogeneous coordinates are, be my guest, I honestly still can’t chew through it. But the key thing is having values multiplied by the w allows those values to be correct when being linearly interpolated in a perspective projection space by dividing by w afterwards.
+Basically, if you divide by w in the vertex shader, then try to use the value to sample a screen space texture, it won’t line up any more and instead will warp mid triangle. If you’re familiar with non-perspective correct texture mapping, like the original PS1, that’s the kind of thing it’ll look like.
+So, if you dig deep enough in the shader code, you’ll find the few places it does actually use that float4 version of the positionNDC, it divides by w in the fragment shader, converting the value from homogeneous NDC to “regular” NDC.
+10 Likes
+bhsf9
+April 15, 2021, 6:12am
+3
+Thanks for the reply, “(clipSpace.xy * 0.5 + clipSpace.w + 0.5)” is it a typo? Should it be (clipSpace.xy * 0.5 + clipSpace.w *0.5)?
+bgolus
+April 15, 2021, 6:42pm
+4
+Yep, that was a typo. Fixed, ty.
+bhsf9
+April 16, 2021, 2:08am
+5
+Hello,bgolus. you mean that multiplying vertices attribution by w in the vertex shader should cancel out the perspective correction in the subsequent rasterization stage, right? make affine effect happen?
+T4world
+July 1, 2021, 10:18am
+6
+hello bgolus ,I can not understand you explicaton,can you give me some references?
+SuzukaChan
+August 22, 2022, 6:06pm
+7
+Hello, bgolus. since u pointed out the positionNDC.xy is essentially the screen space UV. I am wondering what’s the difference between normalized screen space uv and screen space uv(positionNDC.xy)
+I tested with GetNormalizedScreenSpaceUV() function. The color seems slightly brighter with positionNDC.xy
+just wondering the usage scenarios of the two different ways and if it is possible to get the normalzied screen space with this positionNDC.xy instead of using that function
+bgolus
+August 22, 2022, 10:29pm
+8
+positionNDC is still a homogenous coordinate, meaning you need to divide by w in the fragment shader.
+GetNormalizedScreenSpaceUV(positionCS.xy) should be equivalent to positionNDC.xy / positionNDC.w
+2 Likes
+acnestis
+May 6, 2023, 8:31am
+9
+THANKS to Bgolus. Here’s my understanding (I hope I understand it right >.<)
+Although the variable “GetVertexPositionInputs().positionNDC” contains “positionNDC” in its name, it is actually 【Homogeneous Normalized Device Coordinates】 (not strictly NDC coordinates), and it can be divided by w to obtain screen space UV.
+It can be divided by w to obtain screen space UV — then shouldn’t it be called “Homogeneous Screen Space Coordinates”? Whatever…NDC space and screen space only differ by a remapping from [-1,+1] to [0,+1], maybe it’s better not to dwell on this point.
+In summary, this calculation transforms the vertex from clip space to a new space, where the xy components are remapped from range [-w,+w] to [0,+w] (The new space seems to be equivalent to one quadrant of the original clip space?). Later in the fragment shader, dividing it by w , and you get the screen space UV within the range [0,+1].
+What if I want to calculate the vertex in the NDC space, what should I name it?
+Actually there is no need to worry about the NDC space.
+During the Vertex Shader stage, we only need to calculate positionCS and assign it to a field with the SV_POSITION semantic. We don’t need to worry about space transformations like clip space → NDC space → screen space. During the Rasterization stage, the GPU handles the transformation from clip space to screen space and passes the screen space fragment data to the Fragment Shader stage.
+The reason you consider NDC space important is that most books explaining space transformations mention the concept of NDC space. It helps to understand the transformation from clip space to screen space. However, in practice, shaders execute from the Vertex Shader to Rasterization and then to the Fragment Shader. When writing shaders, we are actually working on the Vertex Shader and Fragment Shader, and these two stages do not use or require NDC space.
+In conclusion, when writing shaders, positionCS is all we need in the Vertex Shader stage; there’s no need to compute vertex coordinate in NDC space.
+The important question is why cannot I calculate the screenUV in the vertex shader, and pass it to the fragment shader?
+Because every attribute you access in the Fragment Shader is calculated from “perspective correct barycentric interpolation”. A useful link here: https://www.comp.nus.edu.sg/~lowkl/publications/lowk_persp_interp_techrep.pdf
+(α, β, γ) is the barycentric coordinate of that fragment(pixel) in the triangle ABC.
+I_A, I_B, and I_C are the attribute values of the vertex A, B and C.
+Z_A, Z_B, and Z_C are the camera space depth of the vertex A, B and C.
+Z_t is the camera space depth of that fragment(pixel).
+I_t is the interpolated value of that fragment(pixel).
+Assuming I_A is the positionNDC of vertex A, dividing it by the camera space depth of point A yields the new attribute Q_A. Obviously Q_A is indeed the screenUV of vertex A. Therefore, performing barycentric interpolation between Q_A, Q_B, and Q_C, the fragment will naturally result in screenUV as well.
+```
+Fragment：
+float2 screenUV = i.positionNDC.xy / i.positionNDC.w;
+```
+If you pass vertex A’s screenUV as I_A into the above formula, the result you receive in the fragment shader stage will be the interpolated value of (screenUV/depth), not screenUV.
+1 Like
+Przemyslaw_Zaworski
+May 6, 2023, 8:48am
+10
+See file version2.xls (link in video description)
+Related topics
+Topic
+Replies
+Views
+Activity
+Why SRP positionNDC is from (0,1) instead of (-1,1)
+Unity Engine
+Graphics
+2
+1883
+May 2, 2020
+Shaders: What is clip space?
+Questions & Answers
+legacy-topics
+1
+30589
+December 18, 2017
+What does UnityObjectToClipPos return?
+Unity Engine
+Shaders
+,
+iOS
+,
+2022-3-LTS
+,
+Intermediate
+,
+Game-Development
+,
+Conversation
+,
+Windows-Editor
+,
+Question
+2
+292
+July 24, 2024
+Why must i do that? (float2 uv = i.screenPos.xy / i.screenPos.w)
+Unity Engine
+Shaders
+1
+1302
+January 31, 2021
+HLSL equivalent of Camera.ScreenToWorldPoint?
+Unity Engine
+Shaders
+,
+Question
+3
+571
+December 6, 2023

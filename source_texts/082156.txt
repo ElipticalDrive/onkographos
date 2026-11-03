@@ -1,0 +1,108 @@
+Summary Refactor world storage, cave generation, and meshing toward the architecture Minecraft itself uses, so we can have deep, open, interesting caves without the memory/throughput blow-up we hit on feat/38-caves (#38). The current spi...
+
+Refactor world storage + cave generation toward Minecraft's architecture (paletted sections / procedural overlay) · Issue #56 · kevinrufino/minecraft-clone-react · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Refactor world storage + cave generation toward Minecraft's architecture (paletted sections / procedural overlay) #56
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Refactor world storage + cave generation toward Minecraft's architecture (paletted sections / procedural overlay)#56
+Copy link
+Labels
+enhancementNew feature or requestNew feature or request
+Description
+kevinrufino
+opened on Jun 16, 2026
+Issue body actions
+Summary
+Refactor world storage, cave generation, and meshing toward the architecture Minecraft itself uses, so we can have deep, open, interesting caves without the memory/throughput blow-up we hit on feat/38-caves (#38).
+The current spike got caves looking good (cheese caverns + spaghetti tunnels, see isCave) but exposed a structural limit: every solid block is materialized as a JS object in a single flat map (REF_ALLCUBES), and four systems treat "absent from that map" as "air." Deepening the world from y=-7 to y=-64 multiplied per-chunk block volume ~7×, almost all of it invisible buried stone that we still generate, mesh, serialize, and hold in RAM.
+This issue captures (a) how Minecraft solves the same problems and (b) a phased plan to adopt the relevant ideas here.
+Current state (after #38)
+World is infinite in X/Z; chunks are chunkSize=8 columns, generated full-height from minY to the surface in columnBlocks / initialFill.
+minY = -64, heightFactor = 12 (constants.js).
+Caves: single-noise "cheese" caverns + two-noise "spaghetti" tunnels in isCave.
+REF_ALLCUBES (a flat key -> {pos, texture} map) is the single source of truth, and these all assume it contains every solid block:
+Collision — Player.js:164-165, 247
+Digging / reveal-neighbor — Cubes.jsx:297-307
+Water flow — Cubes.jsx:230, 245
+Face culling — meshGen.js:31-39 (culls a face only when the neighbor is present in the map)
+The core problem
+Because "not in the map = air," we cannot drop buried stone without breaking collision, water, digging, and culling simultaneously. So depth costs scale with volume, not with the visible surface — which is all the player ever sees or touches. The wasted work happens three times per buried block: worker generation (isCave noise sampling), mesh iteration (6 neighbor lookups in genFaceArrays), and memory + postMessage transfer of the full block map.
+How Minecraft does it
+1. Storage: paletted 16×16×16 sections, not a flat block list
+A column is split vertically into sections (sub-chunks) of 16³ blocks. Each section is a PalettedContainer: a small palette of the distinct block states present, plus a bit-packed index array of 4096 entries where each index uses ceil(log2(paletteSize)) bits (min 4).
+The decisive optimization: a section containing one block state (all stone, or all air) collapses to a single palette entry — no per-block storage at all. A solid-stone region underground costs ~one entry instead of 4096 objects. This is precisely why Mojang could expand the world from 256 tall to −64 → 320 (384 tall) in 1.18 without RAM exploding.
+2. Cave generation: positional density functions (1.18 "noise caves")
+Caves are pure functions of (x, y, z) evaluated from layered 3D noise / density functions — deterministic across chunk borders, no worm-tracing. Vanilla composes several types:
+Cheese caves — large open rooms from a single 3D field's "hollowness" threshold (what our cheese term approximates).
+Spaghetti caves — long thin tubes that connect cave systems.
+Noodle caves — even thinner (1–5 block) connectors.
+Aquifers — local liquid tables that fill caves with water, or lava below y=0, instead of leaving every cave air-filled.
+Parameters vary with depth, and caves carve surface entrances so they're discoverable.
+3. Rendering: per-section meshing + culling
+Meshing happens per 16³ section; an edit re-meshes only the affected section(s), not the whole column.
+Only non-empty sections are meshed/rendered.
+Frustum + occlusion culling skip sections outside view or fully hidden behind solid neighbors (cave-culling). Render distance became cylindrical in 1.18.
+Proposed refactor (phased — each phase shippable on its own)
+Phase 1 — One block accessor (getBlock(x,y,z)) ⭐ unblocks everything
+Introduce a single read API and route all four consumers (collision, water, digging, meshing) through it instead of touching REF_ALLCUBES directly. No behavior change yet — pure indirection. This is the seam that lets later phases swap the backing store.
+Phase 2 — Procedural base + edit overlay (kills the memory blow-up)
+Because terrain is 100% deterministic, we don't need to store unmodified terrain at all. Back getBlock with:
+the pure terrain/cave function (surfaceHeight + isCave + bedrock + aquifer rules), plus
+an edit overlay: a sparse set of player-placed blocks and a removed-set so dug procedural blocks don't reappear.
+Meshing switches from "neighbor present in map?" to "getBlock(neighbor) solid?". Buried stone is then free (computed, never stored). This is the direct fix for the buried-block problem and the alternative to full section storage if we want a smaller change first.
+Phase 3 — Vertical sections + paletted storage (the full Minecraft model)
+Split chunks into 16³ (or 8³ to match chunkSize) sections with paletted/run-length storage and the uniform-section collapse. Mesh per section; re-mesh only edited sections; skip empty/occluded sections when meshing and rendering. Layer this on the Phase 1 accessor.
+Phase 4 — Richer caves (the "better cave generation" ask)
+Add noodle caves (thin connectors) and tune cheese/spaghetti so big rooms link up.
+Add aquifers: water tables that flood deep caves, lava below a threshold y.
+Depth-scaled parameters (rarer/bigger near the bottom) and surface entrances so caves are discoverable.
+Expose ore-friendly walls (sets up future ore generation).
+Acceptance criteria
+All block reads for collision, water, digging, and meshing go through a single accessor.
+Unmodified buried terrain is not stored as per-block objects (computed on demand and/or collapsed into uniform sections).
+Memory per loaded chunk and postMessage payload size drop substantially vs. current feat/38-caves (capture before/after numbers).
+Digging into deep stone correctly reveals neighbors; player cannot fall through or clip into unmodified terrain; water still flows; chunk-border faces still cull.
+Caves include at least cheese + spaghetti + noodle types and at least one aquifer/liquid behavior, with surface entrances.
+World depth can be increased back toward Minecraft-like values (e.g. minY ≤ -64) without the previous slowdown.
+Out of scope
+Biomes, ore generation, lighting/shadows, structures. (Phase 4 should leave hooks for ores.)
+Risk
+The data-model change touches collision and digging — the highest-regression-risk areas. Phase 1 (the accessor seam) plus before/after manual tests of dig/place/fall/water on deep terrain should gate Phases 2–3.
+References
+Chunk format / PalettedContainer: https://minecraft.wiki/w/Chunk_format
+Noise caves (cheese / spaghetti / noodle / aquifers): https://minecraft.wiki/w/Cave
+1.18 height −64 → 320: https://www.sportskeeda.com/minecraft/news-minecraft-1-18-terrain-build-limits-players-revealed
+Origin: Add Caves #38 (feat/38-caves)
+Reactions are currently unavailable
+Activity
+kevinrufino
+added
+enhancementNew feature or requestNew feature or request
+on Jun 16, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or request
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

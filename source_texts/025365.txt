@@ -1,0 +1,163 @@
+# RealFireThreeJS
+
+**A study of heat, motion, and light.** A live 3D fire and smoke experiment built with Three.js, WebGPU compute shaders, and volumetric rendering.
+
+[**Launch the experiment →**](https://SamG-Coder.github.io/RealFireThreeJS/) · [MIT license](LICENSE)
+
+![RealFire running in a real WebGPU browser: a turbulent flame rising from a circular burner into a volumetric smoke plume, with live simulation controls.](docs/preview.png)
+
+The screenshot above is captured from the running application. The fire is a simulated volume; there are no flame sprites, recorded footage, or generated image assets.
+
+## Run locally
+
+Requires Node.js 22.12+ and a browser with WebGPU support and an enabled GPU adapter.
+
+```sh
+npm ci
+npm run dev
+```
+
+Open the localhost URL printed by Vite. WebGPU requires a secure context: localhost works; remote access requires HTTPS. If the browser cannot create a WebGPU device, the application shows an explanation instead of substituting a different renderer.
+
+```sh
+npm run build
+npm run preview
+```
+
+## Explore
+
+| Control | Effect |
+| --- | --- |
+| Drag / scroll | Orbit the volume / move closer |
+| Hearth / Torch / Smolder | Change emitter and flow parameters, then restart |
+| Fuel supply | Inject more or less fuel; set to zero to extinguish |
+| Vorticity | Adjust confinement and turbulent stirring |
+| Crosswind | Apply lateral acceleration |
+| Smoke yield | Change soot produced by combustion |
+| Inspect field | Radiance, temperature, soot, or velocity |
+| Pause / Space | Freeze or resume simulation while retaining camera control |
+| Reignite | Clear the grid and restart |
+| H | Hide the interface |
+| ↓ PNG | Download the current rendered view |
+| Quality | Auto, Light, Balanced, or High; changing it restarts the page |
+| Dream mode / D | Toggle a warmer, softer fire-viewing effect |
+| Dreaminess | Set the effect from 0–100%; zero restores the original look |
+
+## Dream mode
+
+Dream mode starts at 60%: warm highlight diffusion, gentle soft focus, a subtle edge vignette, and a faint heat shimmer near the glowing flame. The halo varies slowly with simulation time. Tap **Dream mode** to switch it off or restore your last chosen strength; on phones it is near the top of **Tune fire**.
+
+The effect operates on the rendered image and does not change the fluid simulation. A separable Gaussian blur runs at one-quarter width and height, followed by a small composition shader; it never repeats the volume ray march. The two blur passes are skipped when Dream is off and in diagnostic field views. Light quality keeps its existing 30 fps and resolution budgets.
+
+Pause freezes the effect along with the fire, and an idle paused view still submits no GPU work. `prefers-reduced-motion` disables the added shimmer and slow glow variation while retaining the static soft glow. Temperature, soot, and velocity inspection bypass Dream entirely.
+
+## On your phone
+
+The scene stays visible above a compact bottom toolbar. Tap **Tune fire** to open the scrollable controls, drag with one finger to orbit, and pinch with two fingers to zoom. Pause and Restart stay available with the controls closed. Buttons and sliders have at least 44-pixel touch targets; portrait, landscape, and safe-area insets are supported.
+
+<img src="docs/mobile.png" alt="Phone view with unobstructed fire and a compact bottom toolbar" width="280"> <img src="docs/mobile-controls.png" alt="Expanded phone controls with large touch targets" width="280">
+
+Auto selects Light for coarse-pointer devices or viewports narrower than 600 pixels, and Balanced otherwise. Any device can explicitly choose another profile. A browser and device that support WebGPU are still required.
+
+| Profile | Grid | Cells | Pressure iterations | Rendering |
+| --- | --- | ---: | ---: | --- |
+| Light | 32 × 64 × 32 | 65,536 | 12 | 30 fps cap, 70% linear volume resolution, 0.6 MP ceiling, 2 shadow samples, no bloom |
+| Balanced | 48 × 96 × 48 | 221,184 | 16 | 60 fps cap, 1.8 MP ceiling, 4 shadow samples, HDR bloom |
+| High | 64 × 128 × 64 | 524,288 | 24 | 60 fps cap, 2.6 MP ceiling, finer volume steps, HDR bloom |
+
+Resolution ceilings apply to the rendering pipeline, independently of device pixel ratio. A 3× phone display does not cause nine times as many volume rays. Grid selection is fixed at startup; selecting a different quality reloads the page to release the previous GPU resources.
+
+## Optimisation
+
+- **One GPU queue submission per simulation step**, down from 19, with ordered dispatches retaining inter-kernel dependencies.
+- **Cached vorticity:** each cell's curl is evaluated once per step, instead of repeatedly at neighbouring cells.
+- **Scalar pressure buffers:** pressure and divergence use one float per cell instead of four. Including the new curl cache, Balanced field storage drops from 23.625 MiB to 19.406 MiB; Light needs 5.75 MiB.
+- **Bounded ray-march and post-processing resolution**, fewer shadow samples in Light, and no shadow march for empty smoke or diagnostic views.
+- **No GPU work when hidden or paused and idle.** Camera damping can finish after pausing, and orbiting still redraws the frozen simulation.
+- Only the needed Latin font subsets are shipped.
+
+A local headless Edge benchmark of the same 221,184-cell simulation measured a median **0.64 ms/step before and 0.17 ms/step after**, approximately **3.7× faster**. It measures five batches of 60 fixed steps, including CPU submission and waiting for GPU completion, after a 30-step warmup. Rendering is excluded; these are single-desktop measurements, not phone FPS claims. Run `npm run benchmark` to measure your own device.
+
+## The simulation
+
+In Balanced quality, the GPU evolves **221,184 cells on a 48 × 96 × 48 grid** in a 3 × 6 × 3 simulation domain. Each cell stores velocity, temperature above ambient, fuel, soot, and reaction rate. Cubic cell spacing is `h = 3 / grid width`; the fixed step is `dt = 1/60` in every profile.
+
+The model follows an incompressible fluid approximation:
+
+```text
+∂u/∂t + (u · ∇)u = −∇p + buoyancy + confinement + stirring + wind
+∇ · u ≈ 0
+∂T/∂t + u · ∇T = heat release − cooling
+∂F/∂t + u · ∇F = fuel source − reaction
+∂S/∂t + u · ∇S = soot yield × reaction − dissipation
+```
+
+Each step performs midpoint backtracing and trilinear semi-Lagrangian advection, fuel-limited ignition and combustion, thermal buoyancy, vorticity confinement, divergence calculation, **12–24 Jacobi pressure iterations depending on quality**, and pressure-gradient subtraction. A time-varying curl field supplies unresolved turbulent stirring. Open sides and top use a dissipative sponge layer; the floor restricts normal velocity. Fuel enters only at the burner: this experiment does not model fire spreading across surfaces.
+
+The projection reduces divergence; a finite-iteration, collocated solver does not enforce incompressibility exactly. Scalars use normalized visual simulation units, not calibrated material properties. The time accumulator is capped at two steps per frame to avoid a spiral of death, so simulation time can progress slower than wall time on slower GPUs.
+
+## The light
+
+The renderer marches camera rays through the actual 3D state buffers with trilinear interpolation and integrates emission and attenuation front to back:
+
+```text
+transmittance(ds) = exp(−extinction × ds)
+L += transmittance_so_far × (emission + scattering)
+     × (1 − transmittance(ds)) / extinction
+```
+
+- Temperature-dependent incandescence uses Planck's law at three representative visible wavelengths, an inexpensive RGB approximation rather than full spectral colour integration.
+- Advected soot absorbs light; a short secondary density march approximates smoke self-shadowing.
+- Small procedural variations add detail inside the simulated fields. Noise alone cannot create fire in an empty grid.
+- The burner and floor use analytic ray intersections. Their warm lighting is an artistic approximation.
+- A half-float HDR target feeds ACES tone mapping, with Three.js bloom in Balanced and High.
+
+This is a physically motivated **visual experiment**, not a validated combustion or fire-safety solver. It simplifies chemistry, oxygen availability, radiation, boundaries, and turbulence. It does not model compressibility, flame propagation through solids, or combustion expansion.
+
+## Project map
+
+```text
+src/simulation.js   GPU field storage, fluid kernels, pressure projection
+src/volume.js       WGSL ray marcher, emission, smoke, burner and floor
+src/main.js         Three.js renderer, HDR pipeline, controls and timing
+src/quality.js      Grid specialisation and rendering budgets
+src/dream.js        Quarter-resolution Gaussian glow and Dream composition
+src/style.css       Interface
+scripts/inspect.mjs Browser capture and shader error inspection
+scripts/verify.mjs  GPU readback and browser integration checks
+scripts/mobile.mjs  Phone layout, touch gestures, quality and idle checks
+scripts/benchmark.mjs Fixed-step solver benchmark with GPU completion
+scripts/dream.mjs   Dream toggles, rendering, diagnostic bypass and reduced motion
+.github/workflows/ GitHub Pages build and deployment
+```
+
+The package lock pins the dependency graph. Fonts are bundled locally, so the published experiment does not depend on a font service. GitHub Actions builds and deploys the `main` branch to Pages.
+
+## Verification
+
+With the development server running and Microsoft Edge installed:
+
+```sh
+npm run test:gpu
+npm run test:mobile
+npm run test:dream
+npm run benchmark
+```
+
+Set `TEST_URL` to test a deployed build and `BROWSER_CHANNEL` to select another installed Playwright Chromium channel. The test requires an actual WebGPU adapter; it is not a CPU mock. It checks shader validation errors, finite nonnegative scalar fields, smoke above the emitter, divergence reduction, pause, diagnostic views, fuel cutoff, all presets, reset, and mobile control visibility.
+
+All three grid profiles passed the numerical checks in headless Microsoft Edge with WebGPU. In one six-second Balanced run, projection reduced interior divergence RMS from approximately **0.82 to 0.42**. Ten simulated seconds after fuel cutoff, integrated heat fell from approximately **13,929 to 3.41** and soot from **6,268 to 58.3**. These are solver diagnostics, not physical measurements or cross-device performance guarantees.
+
+Phone tests use Chromium's touch and viewport emulation at 390 × 844, 320 × 568, and 844 × 390 with 3× DPR. They check one-finger orbit, two-finger pinch, panel bounds and scrolling, touch target sizes, no horizontal overflow, idle GPU suspension, and quality changes. Physical iOS and Android hardware has not been tested.
+
+## References
+
+The implementation is original code informed by these techniques:
+
+- Mark Harris, [Fast Fluid Dynamics Simulation on the GPU, GPU Gems chapter 38](https://developer.nvidia.com/gpugems/gpugems/part-vi-beyond-triangles/chapter-38-fast-fluid-dynamics-simulation-gpu): advection, pressure projection, and scalar transport.
+- Keenan Crane, Ignacio Llamas, and Sarah Tariq, [Real-Time Simulation and Rendering of 3D Fluids, GPU Gems 3 chapter 30](https://developer.nvidia.com/gpugems/gpugems3/part-v-physics-simulation/chapter-30-real-time-simulation-and-rendering-3d-fluids): 3D grids and volume rendering.
+- [Three.js WebGPURenderer](https://threejs.org/docs/pages/WebGPURenderer.html) and [Three.js Shading Language](https://threejs.org/docs/pages/TSL.html).
+
+## License
+
+[MIT](LICENSE), copyright © 2026 Samuel Grahame. Dependencies retain their own licenses; the bundled DM Sans and Manrope fonts use the SIL Open Font License.

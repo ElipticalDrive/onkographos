@@ -1,0 +1,2067 @@
+RayGauss: Volumetric Gaussian-Based Ray Casting
+for Photorealistic Novel View Synthesis
+Hugo Blanc, Jean-Emmanuel Deschaud, Alexis Paljic
+Centre for Robotics, Mines Paris - PSL, PSL University, 75006 Paris, France
+arXiv:2408.03356v2 [cs.CV] 4 Feb 2025
+{hugo.blanc,jean-emmanuel.deschaud,alexis.paljic}@minesparis.psl.eu
+Abstract
+Differentiable volumetric rendering-based methods
+made significant progress in novel view synthesis. On
+one hand, innovative methods have replaced the Neural
+Radiance Fields (NeRF) network with locally parameterized structures, enabling high-quality renderings in a
+reasonable time. On the other hand, approaches have used
+differentiable splatting instead of NeRF’s ray casting to
+optimize radiance fields rapidly using Gaussian kernels,
+allowing for fine adaptation to the scene. However, differentiable ray casting of irregularly spaced kernels has been
+scarcely explored, while splatting, despite enabling fast
+rendering times, is susceptible to clearly visible artifacts.
+Our work closes this gap by providing a physically consistent formulation of the emitted radiance c and density
+σ, decomposed with Gaussian functions associated with
+Spherical Gaussians/Harmonics for all-frequency colorimetric representation. We also introduce a method enabling
+differentiable ray casting of irregularly distributed Gaussians using an algorithm that integrates radiance fields slab
+by slab and leverages a BVH structure. This allows our
+approach to finely adapt to the scene while avoiding splatting artifacts. As a result, we achieve superior rendering
+quality compared to the state-of-the-art while maintaining
+reasonable training times and achieving inference speeds
+of 25 FPS on the Blender dataset. The associated code is
+available at: github.com/hugobl1/ray gauss.
+1. Introduction
+Novel View Synthesis (NVS), which combines existing
+views of a scene to generate images from unknown viewpoints, saw significant advancements with the publication
+of Neural Radiance Fields (NeRF) [21]. This novel approach leverages a differentiable physical rendering algorithm [19], to learn radiance fields through a neural network,
+enabling the generation of high-quality photorealistic im-
+Figure 1. Our method (RayGauss) compared to the main radiance
+field rendering methods
+ages. Since then, several works aimed at improving NeRF’s
+performance, some focusing on finding more efficient representations of radiance fields in terms of computation time
+and rendering quality. Various data structures were investigated to substitute the neural network and represent the
+radiance fields: voxel grids [8] [30] [22], sets of tetrahedra [17], point clouds [32] [12], hybrid representations [6].
+These structures have the advantage of enabling the representation of radiance fields using local parameters, thereby
+reducing computation times by limiting field evaluation to
+local parameters instead of relying on a neural network representing the entire scene. These methods also aim to enhance rendering quality by allowing a more precise representation of radiance fields through data structures better
+suited to the scene’s geometry.
+Our work follows this approach by proposing a novel
+definition of radiance fields based on their decomposition
+into a weighted sum of locally supported elliptical basis functions with optimizable positions, orientations, and
+scales. Unlike voxel grid-based methods, this allows for
+finer adaptation to the scene’s geometry without limiting
+representation resolution. Furthermore, a combination of
+spherical harmonics (SH) and spherical Gaussians (SG)
+is associated with these basis functions to better represent high-frequency color variations such as specular reflec-
+tions. Additionally, we use volume ray casting, which produces high-quality images with fewer simplifications than
+splatting-based methods like 3D Gaussian Splatting [12].
+Indeed, splatting algorithms simplify the scene using multiple approximations, allowing faster rendering but causing
+many artifacts when deviating from the training views, such
+as flickering due to a sudden change in primitives ordering [26]. For these reasons, our approach achieves higher
+rendering quality by combining the best of both worlds:
+Firstly, radiance fields are represented by elliptical functions associated with efficient SH/SG radiance parameters
+that adapt very well to the scene geometry and appearance.
+Secondly, the Volume Raycasting algorithm avoids the artifacts of Splatting, such as flickering.
+Furthermore, implementing the Raycasting algorithm
+with sparse primitives is challenging because evaluating the
+radiance fields at a given point requires knowing which
+primitives/basis functions contribute to the calculations,
+which is much less straightforward than when using a voxel
+grid, for example. Therefore, we introduce a ray casting
+algorithm for sparse basis functions that sequentially integrates the radiance field slab-by-slab, meaning it accumulates colorimetric properties along the ray in slab of space
+corresponding to multiple samples, rather than processing
+individual samples [14]. The implementation of this algorithm and its backpropagation relies on a Bounding Volume
+Hierarchy (BVH) implemented on GPU with the OptiX library. This allows interactive rendering times and reasonable training times. Thus, our contributions are as follows:
+• Volume Ray Casting of radiance fields decomposed
+into elliptical basis functions combined with SH/SG
+for efficient adaptation to geometry and appearance.
+• Efficient implementation of Volume Ray Casting and
+its backpropagation using a slab-by-slab integration algorithm along the ray and leveraging a Bounding Volume Hierarchy for fast ray-ellipsoı̈d intersection.
+2. Background and Related Work
+We will introduce the theoretical basis of radiative transfer due to its essential role in our method and modern NVS
+approaches. Next, we will discuss the NeRF method and
+subsequent research on scene representation. Finally, we
+will discuss 3D Gaussian Splatting [12] and its flexible
+scene representation using Gaussians while highlighting the
+weaknesses of the splatting algorithm.
+Radiative Transfer and Volume Rendering: Recent
+approaches to Novel View Synthesis, such as NeRF [21],
+Instant-NGP [22], and 3D Gaussian Splatting [12], leverage a differentiable volume rendering equation to optimize
+scene representation from images (Fig. 1). Their rendering
+equations are derived from the radiative transfer equation in
+an absorbing and emitting medium, which models the variation in radiance as it travels through an infinitesimal volume
+element at position x in direction ω [19] [35]:
+(ω · ∇)L(x, ω) = −σ(x)L(x, ω) + σ(x)c(x, ω)
+(1)
+where L(x, ω) is the radiance at position x in direction ω,
+σ(x) the absorption coefficient and c(x, ω) the emitted radiance [4]. The first term quantifies the absorption of radiance, and the second term its emission. The solution to this
+non-homogeneous linear differential equation is:
+Z ∞
+c(y, ω)σ(y)T (x, y) dy
+(2)
+L(x, ω) =
+0
+by integrating along the ray reaching x in the direction ω
+defined
+by the points y(t) = x − tω, and where T (x, y) =
+R
+− 0t σ(x−sω) ds
+e
+is the transmittance between x and y. This
+expression appears in the literature of Volumetric Light
+Transport Simulation [23]. In the context of volumetric rendering, a modified parameterization is used: fictive rays denoted by r(t) = o + td originate from the camera center
+o and traverse the scene opposite to the light direction, assimilating d to −ω. In computer vision, the focus is on the
+ray’s color, interpreting radiance L as the color C of the
+ray, and the absorption coefficient σ renamed density. This
+parameterization leads to the classic volumetric rendering
+equation [21] [35]:
+Z ∞
+C(r) =
+c(r(t), d)σ(r(t))T (t) dt,
+(3)
+0
+Rt
+T (t) = e− 0 σ(r(s)) ds
+This equation is the basis for recent Novel View Synthesis
+approaches like NeRF and 3D Gaussian Splatting.
+NeRF and Scene Representation: NeRF optimizes a
+neural network representing the fields c and σ using training
+images and their corresponding camera poses [21]. During
+training, images are rendered by ray-casting from training
+poses and compared to ground truth using a loss function,
+allowing the update of network parameters via gradient descent. During inference, the trained network generates realistic images from new camera poses by ray casting.
+More precisely, NeRF uses the differentiable Volume
+Ray Casting algorithm inspired by Max computations in
+[19]. It consists in launching rays in the 3D space to compute a discretized version of equation 3 using N samples t˜i
+along the ray:
+C(r) =
+N
+X
+(1 − exp(−σi ∆t)) ci Ti
+i=0
+
+Ti = exp −
+i−1
+X
+j=0
+
+σj ∆t
+(4)
+where ∆t the discretization step, and the i-th field values
+denoted as σi = σ(r(t˜i )) and ci = c(r(t˜i ), d), this amounts
+to assuming that the fields are piecewise constant in samples
+neighborhood. The reader interested in the computational
+details can find more information in [19] [20].
+NeRF’s key contribution is using a differentiable volumetric rendering algorithm to learn scene parameters with
+a neural network. Later research improved scene representation by using different structures to locally store parameters, reducing reliance on a costly global neural network
+and enhancing appearance through better local parameter
+adaptation. Moreover, due to their sparse nature, some data
+structures can apply classic ray-casting acceleration strategies such as empty space skipping [9]. Among these structures, one can notably mention voxel grids [30], grids with
+hash encoding [22], grids of small MLPs [27], sets of tetrahedrons [17], and point clouds [32]. Our hypothesis is that
+point clouds are best suited to adapt to scenes. Each point
+can host a locally supported function, such as Gaussian
+functions [12], representing local scene details. Optimizing
+these functions’ positions and shapes enables precise adaptation to scene geometry, unlike voxel grids constrained by
+their resolution. Furthermore, to the best of our knowledge,
+no method currently allows for optimizing a scene represented only by irregularly spaced basis functions with the
+ray-casting algorithm without coarse approximations. The
+approach in Point-NeRF [32] is interesting but requires using a MVSNet, which proves cumbersome. Additionally,
+its expression of c and σ involves using a neural network
+and only considers the eight closest neighbors in its calculations. The NeuRBF approach [6] is also promising, as
+it uses a hybrid representation with adaptive RBFs for fine
+details and grid-based RBFs for efficient continuous representation. The use of grid-based RBFs is needed because
+the algorithm relies on a limited number of nearest adaptive RBFs (5 for Blender dataset), causing discontinuities.
+Like Point-NeRF, this limits its ability to fully exploit the
+approximation power of sparse basis functions. Moreover,
+as discussed in the following section, 3D Gaussian Splatting
+and numerous point cloud rendering methods [34] make the
+splatting approximation, which can cause visible artifacts
+such as flickering when changing viewpoints. This choice
+is due to the scarcity of algorithms that efficiently perform
+ray casting on local basis functions associated with points.
+Gaussian Splatting: 3D Gaussian Splatting [12] made
+a breakthrough by using a differentiable splatting algorithm
+to render a scene represented by Gaussians. It draws inspiration from the classic Elliptical Weighted Average (EWA)
+Splatting approach [35]. The main advantages of this approach are the use of Gaussians, which allow for efficient
+adaptation to the scene geometry, and an efficient tile-based
+rasterizer, which enables fast rendering of the scene. Starting from a set of 3D Gaussians associated with color pa-
+rameters ci and opacity αi , the splatting algorithm projects
+the 3D Gaussians into the camera space, performs a global
+sorting by their depth, and sequentially adds their contribution from the nearest to the farthest for each pixel color C
+using the equation:
+C=
+X
+i∈N
+ci αi′
+i−1
+Y
+(1 − αj′ )
+j=1
+αi′ = αi × exp
+(5)
+
+
+1
+′
+′
+(x
+−
+µ
+)
+− (x′ − µ′i )⊤ Σ′−1
+i
+i
+2
+Where x′ the pixel coordinates in the camera frame, µ′i and
+Σ′i are the mean and covariance of the Gaussian projected
+into the camera frame, and N denotes the set of Gaussians.
+More implementation details are available in the original
+paper [12] and the following review [5]. Like the discretized
+equation of ray casting, the splatting formulation 5 is also
+an approximation of Eq. 3. However, the approximations
+used differ: Gaussians are assumed to be non-overlapping,
+which does not hold for complex surfaces. Indeed, multiple overlapping Gaussians are required for precise scene
+geometry reconstruction. Then, each Gaussian contributes
+at most once per ray, aggregated at a distance corresponding to the depth of the Gaussian (Gaussian mean projected
+along the viewing direction). Also, the sequential addition
+of Gaussian contributions based on global depth is an approximation. It does not account for the proper intersection between the Gaussians and a given ray, further reducing
+the coherence of the representation. Finally, the projection
+of Gaussians into the camera frame is also an approximation introduced in [35]. Thus, we use the ray casting algorithm to suffer fewer approximations because we hypothesize that, given a high enough sampling rate, it maintains
+better coherence in scene representation during training and
+inference and should yield better graphical results.
+3. Scene Representation
+Our rendering model is based on Eq. 4. Thus, the performance of our approach greatly depends on the formulation
+of our functions σ and c. The main idea of our work is to approximate these fields through a decomposition using irregularly spatially distributed basis functions while maintaining physical coherence. This will allow for better adaptation
+to the geometry of the represented scene without resolution
+limits. Thus, for a set of basis functions {ϕl , ψl }l=1,..,N ,
+our fields will be of the form:
+σ(x) =
+N
+X
+σ̃l ϕl (x)
+l=1
+c(x, d) =
+N
+X
+l=1
+(6)
+cl (d)ψl (x)
+Figure 2. Test set images from the Mip-NeRF 360 Dataset
+In what follows, we will explain the choices of weights and
+basis functions we made to best approximate the scene with
+the fields σ and c while maintaining physical consistency in
+the σ/c relationship.
+(d · ∇)L(x, d) = −
+N
+X
+!
+σl (x) L(x, d) +
+As we will see, the expression previously given in Equation 6 can be physically assimilated to the case of a scene
+composed of N independent emissive and absorbing entities, each distributed over the support of their basis function with their dedicated density σl and emissive radiance
+cl [29] [16]. Indeed, given a basis function ϕl for l ∈ [1, N ],
+the evolution of the density σl of the l-th entity in the scene
+is such that:
+σl (x) = σ̃l · ϕl (x)
+(7)
+where σ̃l is the maximum density with 0 < ϕl (x) < 1.
+On the other hand, we choose an emitted radiance c that
+depends only on the direction of emission d and is constant
+in space.
+cl (x, d) = cl (d)
+(8)
+This representation allows us to depict objects whose appearance changes according to the viewing direction. We
+will develop this aspect further.
+Then, to derive a physically coherent total density σ and
+total emitted radiance term c for the scene, we can revisit the
+radiative transfer equation 1 for the case of N independent
+entities with distinct density σl (x) and emissive radiance cl ,
+in which case it is expressed as follows:
+σl (x)cl
+l=1
+l=1
+3.1. Irregularly Spatially-Distributed Emissive and
+Absorptive Primitives
+N
+X
+(9)
+where: (d · ∇)L(x, d) is the rate of change of radiance
+L(x, d) [29] [16]. The previous radiative transfer equation
+allows for considering variations in radiance due to absorption phenomena (first term) and emission phenomena (second term) due to each independent entity. We recall that
+the radiative transfer equation for a medium described by
+global density function σ(x) and global emitted radiance
+field c(x, d) is given by Eq. 1. Thus, we deduce that it is
+possible to place ourselves within this framework by defining the density field as follows:
+σ(x) =
+N
+X
+l=1
+σl (x) =
+N
+X
+σ̃l ϕl (x)
+(10)
+l=1
+Furthermore, the emitted radiance field can then be defined
+as:
+PN
+cl (d)σ̃l ϕl (x)
+c(x, d) = Pl=1
+(11)
+N
+m=1 σ̃m ϕm (x)
+As initially intended, we find a formulation with a weighted
+sum of basis functions. Moreover, this formulation allows
+us to maintain consistent physical behavior during rendering, avoiding some visual artifacts while using a flexible
+basis function.
+3.2. Selection of the basis function
+where:
+The base function class must allow our primitives to
+adapt optimally to the scene’s geometry. In particular, we
+study radial and elliptical basis functions to leverage their
+approximation power [24]. Thus, each basis function ϕl is
+centered at µl and evolves with r = d(x, µl ), where d is the
+Euclidean distance for radial functions or the Mahalanobis
+distance for elliptical functions. Moreover, we restrict ourselves to decreasing functions with respect to r, allowing us
+to use point clouds representing a raw depiction of the scene
+as an initialization for the center µl of the basis functions.
+Indeed, the positions of the points provide a nice prior for
+regions that highly interact with light.
+More specifically, we have chosen anisotropic Gaussian
+functions as our basis function class, as this gives the best
+results among the functions studied (see Tab. 4). A given
+basis function can thus be expressed as follows:
+
+
+1
+G(x; µ, Σ) = exp − (x − µ)T Σ−1 (x − µ)
+2
+(12)
+Where µ is the mean vector,
+p Σ is the covariance matrix.
+Here, we can notice that (x − µ)T Σ−1 (x − µ) is the
+Mahalanobis distance associated with the matrix Σ. To
+achieve a more suitable parameterization, the covariance
+matrix Σ, being positive and symmetric, will be decomposed according to the spectral theorem into a rotation matrix R and a scaling matrix S such that Σ = RSST RT .
+The rotation R, as part of the covariance matrix Σ decomposition, can be expressed in terms of unit quaternions
+q ∈ R4 such that R = R(q), and the scaling matrix S
+can be expressed in terms of s = (sx , sy , sz ) such that
+S = diag(sx , sy , sz ). Thus, we will refer to our Gaussian
+basis functions as G(x; µ, q, s). We can now describe our
+density field σ(x) and emitted radiance field c(x, d) as follows:
+σ(x) =
+N
+X
+(13)
+3.3. Direction-dependent emitted radiance
+To correctly represent objects whose color appearance
+varies by observation direction, we made the emitted radiance of our primitives dependent on the viewing direction.
+One parameterization that gave the best results was a combination of spherical harmonics and spherical Gaussians, such
+that emitted radiance of l-th primitive is:
+cl (d) = clow,l (d) + chigh,l (d)
+j
+L1 X
+X
+c̃l,jm Yjm (d)
+j=0 m=−j
+chigh,l (d) =
+L2
+X
+kl,j e
+(15)
+λl,j (d·pl,j −1)
+j=0
+Yjm (d) is the spherical harmonic of degree j and order m
+associated with its coefficient c̃l,jm ∈ R3 , while kl,j ∈ R3
+is the coefficient of the j-th spherical gaussian with lobe
+sharpness λl,j ∈ R and lobe direction pl,j ∈ R3 .
+This choice is motivated by low-degree Spherical Harmonics being better suited to represent low-frequency variations. In contrast, Spherical Gaussians can represent
+any frequency, including high frequencies. Thus, their
+combined use allows for representing both low and highfrequency phenomena. Similar considerations can be found
+for different applications in articles such as MixLight [11].
+4. Scene initialization and optimization
+Our goal is to use the scene representation discussed earlier and optimize its parameters P = {(σ̃l , c̃l , µl , ql , sl ) |
+l = 1, . . . , N }, where c̃l denotes the set of colorimetric parameters of the l-th basis function, σ̃l its density parameter,
+µl , ql , sl the parameters determining the shape of the base
+function. Once the parameters are optimized, the objective
+is to infer images that faithfully represent the scene.
+4.1. Scene initialization
+To initialize this representation, we leverage sparse point
+clouds obtained via Structure from Motion (SfM), where
+the position and color of these points are used to initialize
+colorimetric parameters and the center of the basis functions
+µl . Additionally, unit quaternions are initialized to match
+the identity matrix, and the scale parameters are initialized
+to the average distance from each point to its three nearest
+neighbors.
+4.2. Scene Optimization
+σ̃l G(x; µl , ql , sl )
+l=1
+PN
+l=1 cl (d)σ̃l G(x; µl , ql , sl )
+c(x, d) = PN
+m=1 σ̃m G(x; µm , qm , sm )
+clow,l (d) =
+(14)
+After initialization, we optimize the representation using stochastic gradient descent, relying on training images
+paired with their camera poses. Iteratively, over the training
+set, we generate the scene image from the current camera
+pose and compare it to the current training image using a
+given loss function. We then compute loss gradients with
+respect to scene parameters for backpropagation updates.
+In particular, the loss function L is a weighted sum of the
+L1 loss function and the structural dissimilarity (DSSIM):
+L = (1 − λ) · L1 + λ · DSSIM
+where λ is a weighting factor between the L1 loss and
+DSSIM, we follow best practices developed in 3D Gaussian Splatting [12]. Furthermore, we are in a similar case to
+Figure 3. Overview of our slab-by-slab Ray Casting algorithm: When a given ray intersects the scene’s bounding box, the ray is
+processed by successive slabs. For a given slab, we check the intersection with the Gaussians using the BVH. Then, the attributes of the
+slab are calculated to update the current color and transmittance of the ray.
+3D Gaussian Splatting regarding adaptive control of primitives. Indeed, we also deal with primitives irregularly distributed in space. For this reason, we rely on the point cloud
+densification heuristics described in [12]. Additionally, we
+remove outlier points with density below a fixed threshold
+σϵ and progressively unlock colorimetric parameters, starting with spherical harmonics from low to high degree and
+then spherical Gaussians, to enforce model coherence from
+low to high frequencies.
+5. Spatially irregularly distributed base functions ray casting
+This approach has been scarcely explored due to the major obstacle of implementing an algorithm that enables efficient differentiable volume ray casting for a scene defined
+with irregularly distributed basis functions. Firstly, since
+the support of our basis functions is unbounded in the chosen case (Gaussian functions), it would potentially require
+evaluating all basis functions to compute σ and c at any spatial position. This promises to slow down the rendering of
+our images significantly. To mitigate this, we truncate our
+basis functions to a local domain. The criterion retained to
+determine this domain for each primitive is as follows:
+(
+σl (x) if σl (x) ≥ σϵ
+σl (x)approx =
+(16)
+0
+if σl (x) < σϵ
+where σϵ is a fixed threshold, this amounts to disregarding areas with a density coefficient below a given threshold.
+These areas have minimal interaction with light and, therefore, have little influence on the resulting color. Thus, for a
+low threshold, this approximation appears acceptable. Now
+that the influence of each primitive is confined to a specific
+domain, we implement a differentiable algorithm capable
+of computing an image through volume ray casting with
+radial or elliptical basis functions truncated to a finite domain. We rely on a bounding volume hierarchy (BVH) to
+achieve this, drawing inspiration from the work conducted
+by [15]. Thus, to compute the color associated with a given
+ray, we construct a BVH containing ellipsoids if the chosen
+base is elliptical or spheres if it is radial. These geometric
+figures represent the level set associated with the previous
+truncation. Once the acceleration structure has been built,
+we launch each ray in parallel in the acceleration structure,
+in practice using the Nvidia OptiX framework. Integration
+along the ray is done sequentially by slabs of samples, each
+containing a fixed number of samples (see Fig. 3). By doing
+this, our approach avoids the drawbacks of naive methods:
+integrating sample-by-sample is slow due to repeated neighborhood calculations. While, calculating σ and c attributes
+for all samples in one pass limits the number of samples,
+requires a large buffer, and prevents early ray termination.
+Our method sequentially calculates neighborhoods for entire slabs and stores slab attributes in a small fixed-size
+buffer, reducing costly calculations and allowing efficient
+early ray termination at the slab level.
+6. Implementation and Experiments
+6.1. Implementation
+Our implementation relies on the PyTorch library for
+managing the optimization framework, combined with a
+Python binding of Nvidia Optix [25] using the Cupy library.
+Thus, the computationally intensive parts of our algorithm,
+including BVH management, ray casting, and derivative
+calculations, are implemented with the Optix library and
+custom CUDA kernels. Details on our optimization parameters can be found in supplementary materials.
+Figure 4. Test set images from the Blender Dataset
+6.2. Results and Evaluation
+To quantify our method’s performance, we tested it on
+two widely used NVS datasets: the Blender dataset [21]
+and the Mip-NeRF 360°dataset [2]. This allows us to test
+our method across a wide range of situations. The Blender
+dataset includes 8 scenes with complex objects exhibiting
+non-Lambertian effects, each with 100 training images, 200
+test images, and exact camera parameters for 360° views.
+The Mip NeRF 360° dataset comprises 9 scenes: 5 outdoor
+and 4 indoor, each featuring a central object with a complex background. Each scene includes images with camera parameters estimated by COLMAP [28]. We evaluate
+our method by downscaling images by a factor of 8 for this
+dataset due to large image size. Moreover, we compare our
+results mainly with 3D Gaussian Splatting [12] and subsequent research papers such as Mip-Splatting [33] due to the
+similarity in the representation. The results in Tables 1 and
+2 are from state-of-the-art methods, except those marked
+with *, which were recalculated using available code.
+Results on the Blender dataset: For synthetic scenes
+in the Blender dataset, we provide quantitative comparisons
+in Tab. 1 and qualitative comparisons in Fig. 4 with stateof-the-art methods. Quantitative results show that our approach surpasses state-of-the-art results on most individual
+scenes. Additionally, our average PSNR of 34.53 dB highlights our model’s superior adaptation to scene geometry
+and appearance compared to other state-of-the-art methods.
+Qualitative results also support this, for example, with a
+boat hull better reconstructed in the ship scene compared to
+3D Gaussian Splatting reconstruction (Figure 4). NeuRBF
+[6] performs well, similar to our method, but has an infer-
+ence time of a few seconds per image—about 100x longer
+than ours (25 FPS on Blender dataset, see Tab. 3)—and
+does not support the Mip-NeRF360 dataset.
+NeRF [21]
+Zip-NeRF [3]
+Instant-NGP [22]
+Mip-NeRF360 [2]
+Point-NeRF [32]
+Gaussian Splatting [12]*
+Mip-Splatting [33]*
+PointNeRF++ [31]
+NeuRBF [6]*
+RayGauss (ours)
+Chair
+34.17
+34.84
+35.00
+35.65
+35.40
+35.85
+36.03
+36.32
+36.54
+37.20
+Drums
+25.08
+25.84
+26.02
+25.60
+26.06
+26.22
+26.29
+26.11
+26.38
+27.14
+Ficus
+30.39
+33.90
+33.51
+33.19
+36.13
+35.00
+35.33
+34.43
+35.01
+35.11
+Hotdog
+36.82
+37.14
+37.40
+37.71
+37.30
+37.81
+37.98
+37.45
+38.44
+38.30
+Lego
+33.31
+34.84
+36.39
+36.10
+35.04
+35.87
+36.03
+36.75
+37.35
+37.10
+Materials
+30.03
+31.66
+29.78
+29.90
+29.61
+30.00
+30.29
+30.32
+34.12
+31.36
+Mic
+34.78
+35.15
+36.22
+36.52
+35.95
+35.40
+35.63
+36.85
+36.16
+38.11
+Ship
+29.30
+31.38
+31.10
+31.26
+30.97
+30.95
+30.50
+31.34
+31.73
+31.95
+Avg.
+31.74
+33.10
+33.18
+33.24
+33.30
+33.39
+33.51
+33.70
+34.47
+34.53
+Table 1. PSNR scores for Blender dataset.
+Results on the Mip-NeRF 360 Dataset: Regarding
+Mip-NeRF 360, we provide quantitative results in Tab. 2
+and qualitative comparisons in Fig. 2. A general trend is
+that our approach performs better on most indoor scenes
+than state-of-the-art methods like Mip-Splatting [2], and
+slightly worse on outdoor scenes. This may be due to the
+adaptive control of gaussians strategy, which adapts well in
+Gaussian Splatting [12] but may perform worse with our
+approach. Nevertheless, we achieved better overall results
+than Mip-Splatting and 3D Gaussian Splatting, with an average PSNR of 29.71 dB, +0.56 dB higher than 3D Gaussian Splatting. Zip-NeRF performs slightly better on MipNeRF 360 but requires over 7 hours of training per scene
+and about 1.5 seconds per image for inference, which is significantly higher than our approach (see Tab. 3).
+Performance Analysis: We discuss here results in Tab.
+3, which show the performance of our approach compared
+to Gaussian Splatting. These metrics were obtained using an RTX 4090 GPU with 24GB of RAM on 800x800
+pixel images. Our approach has slower training and infer-
+NeRF [21]*
+Instant-NGP [22]*
+Gaussian Splatting [12]*
+Mip-Splatting [33]*
+Zip-NeRF [3]*
+RayGauss (ours)
+bonsai
+22.10
+27.04
+33.42
+33.44
+36.10
+35.22
+Indoor
+counter kitchen
+22.34
+22.00
+24.25
+23.44
+30.21
+33.40
+30.43
+34.30
+30.13
+32.85
+31.79
+35.43
+room
+24.46
+27.30
+32.95
+33.30
+34.20
+32.95
+bicycle
+19.35
+23.69
+27.33
+27.62
+28.10
+27.21
+flowers
+19.49
+21.41
+23.71
+23.79
+24.25
+23.53
+Outdoor
+garden stump
+22.70
+21.43
+25.64
+22.56
+29.58
+27.78
+29.78
+27.89
+30.24
+27.78
+29.91
+27.13
+treehill
+21.02
+22.22
+24.00
+24.25
+25.72
+24.26
+Avg.
+21.65
+24.17
+29.15
+29.42
+29.93
+29.71
+Table 2. PSNR scores for Mip-NeRF 360 dataset. All methods
+are trained and tested on downsampled images by a factor of 8.
+ence times compared to Gaussian Splatting due to the computational cost of ray casting. Generally, our computation
+times depend mainly on the number of rays, while Gaussian
+Splatting’s times are influenced by the number of projected
+primitives. However, our training times remain reasonable
+(30 minutes per scene on Blender) and real-time inference
+is achieved on Blender, although slower on Mip-NeRF 360.
+We also note that our method generates fewer primitives for
+better visual quality. Thus, Gaussian Splatting likely adds
+more Gaussians to compensate for splatting artifacts.
+Gaussian Splatting [12]*
+RayGauss (ours)
+Gaussian Splatting [12]*
+RayGauss (ours)
+Number of Gaussians Training Time
+Blender dataset
+295k
+10 min
+205k
+30 min
+Mip-NeRF 360
+2.7M
+15 min
+2.3M
+1h 30 min
+Inference Time
+400 FPS
+25 FPS
+130 FPS
+5 FPS
+Table 3. Comparison of Gaussian Splatting and RayGauss performance on Blender and Mip-NeRF 360 datasets. Numbers
+are averaged per scene on each dataset.
+6.3. Ablation Studies
+Method \Metrics
+(Gaussian Splatting [12]) Spherical Harmonics*
+(Ours) Spherical Harmonics
+(Ours) Isotropic Gaussian
+(Ours) Anisotropic Gaussian
+(Ours) Anisotropic Inverse Multiquadric
+(Ours) Anisotropic Inverse Quadratic
+(Ours) Anisotropic C 0 Matérn
+(Ours) Anisotropic Bump
+(Ours) Anisotropic Wendland
+(Ours) Anisotropic Gaussian
+(Ours) RGB
+(Ours) Spherical Harmonics
+(Ours) Spherical Gaussians
+(Ours) Spherical Gaussians + Spherical Harmonics
+PSNR ↑
+33.39
+33.75
+33.44
+34.53
+30.84
+32.95
+33.83
+34.18
+34.09
+34.53
+30.39
+33.75
+34.40
+34.53
+SSIM ↑
+0.969
+0.972
+0.969
+0.974
+0.962
+0.967
+0.972
+0.972
+0.972
+0.974
+0.961
+0.972
+0.973
+0.974
+Table 4. Evaluation of different aspects of our method: Rendering Algorithm, Basis Function, and Colorimetric Parameters
+by averaging PSNR and SSIM scores on Blender Dataset
+In this section, we quantify the influence of the different
+components of our approach. Thus, we test different configurations by averaging our PSNR and SSIM results on the
+NeRF-Synthetic dataset. Results are summarized in Tab. 4.
+Additionally, we prioritize PSNR analysis to assess the dif-
+ferent approaches, as this metric has been found more effective than SSIM or LPIPS according to recent studies [18].
+3D Gaussian Splatting: We first compare our method
+with Gaussian basis function and colorimetric parameters
+similar to 3D Gaussian Splatting (Spherical Harmonics) and
+find that we achieve a +0.36 dB improvement, demonstrating that our ray-casting algorithm offers superior rendering
+quality while avoiding splatting artifacts, as seen in the supplementary videos, which highlights the absence of flickering and splatting artifacts compared to Gaussian Splatting.
+Basis function: We then conduct tests to confirm
+the choice of the Gaussian function. Results show the
+anisotropic Gaussian outperforms the isotropic one by
++1.09 dB on average. Various classical basis functions
+were also tested, including those with locally native support
+(such as the Bump function) or globally supported (such as
+the Inverse Quadratic function). Several showed promising results, notably the Wendland function. However, the
+anisotropic Gaussian performs best with at least a +0.35
+dB difference (see Tab. 4). This justifies the choice of the
+anisotropic Gaussian as the basis function.
+Colorimetric parameters: We analyze the impact of
+different radiance c parameterizations: RGB without directional dependence, 16 spherical harmonics (SH), 16 spherical Gaussians (SG), and the combination of 16 SH and SG
+functions yielding the best results: 9 SH (order 2) and 7 SG.
+We observe that parameterizations with directional dependence (SH, SG, and SH+SG) significantly improve quality.
+Then, the parameterization providing the best quantitative
+results is the combination of SH and SG. This can be justified because SHs are robust for representing low-frequency
+phenomena, while SGs can adapt to high frequencies.
+7. Conclusions, Limitations and Future Work
+Limitations and Future Work Although our approach
+enables high-quality rendering, it has some limitations. Ray
+casting is computationally intensive, especially with irregularly distributed Gaussians, which results in training times
+that are not as fast as the current fastest methods, such as
+Gaussian Splatting. Furthermore, there is still progress in
+achieving photorealism, for example, by modeling more
+complex phenomena such as light scattering. Another approach could be to convert our model into a surface model
+to more easily handle problematic such as scene relighting.
+Conclusion Our approach leverages volume ray casting on Gaussian basis functions associated with Spherical
+Harmonics/Gaussians colorimetric parameters to optimize
+scene radiance fields and generate state-of-the-art photorealistic renderings, as quantitative and qualitative results
+demonstrate. Furthermore, we achieve reasonable training
+times and fast inference times thanks to our implementation
+of a slab-by-slab ray casting algorithm using a BVH.
+References
+[1] Jonathan T. Barron, Ben Mildenhall, Matthew Tancik, Peter
+Hedman, Ricardo Martin-Brualla, and Pratul P. Srinivasan.
+Mip-nerf: A multiscale representation for anti-aliasing neural radiance fields. In 2021 IEEE/CVF International Conference on Computer Vision (ICCV), pages 5835–5844, 2021.
+16
+[2] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P.
+Srinivasan, and Peter Hedman. Mip-nerf 360: Unbounded
+anti-aliased neural radiance fields. In 2022 IEEE/CVF
+Conference on Computer Vision and Pattern Recognition
+(CVPR), pages 5460–5469, 2022. 7, 17
+[3] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P.
+Srinivasan, and Peter Hedman. Zip-nerf: Anti-aliased gridbased neural radiance fields. In 2023 IEEE/CVF International Conference on Computer Vision (ICCV), pages
+19640–19648, 2023. 7, 8, 17, 18
+[4] Subrahmanyan Chandrasekhar. Radiative transfer. Quarterly
+Journal of the Royal Meteorological Society, 76(330):498–
+498, 1950. 2
+[5] Guikun Chen and Wenguan Wang. A survey on 3d gaussian
+splatting, 2024. 3
+[6] Zhang Chen, Zhong Li, Liangchen Song, Lele Chen, Jingyi
+Yu, Junsong Yuan, and Yi Xu. Neurbf: A neural fields representation with adaptive radial basis functions. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV), pages 4182–4194, October 2023. 1,
+3, 7, 17
+[7] Kangle Deng, Andrew Liu, Jun-Yan Zhu, and Deva Ramanan. Depth-supervised nerf: Fewer views and faster training for free. In 2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 12872–12881,
+2022. 15
+[8] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong
+Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels:
+Radiance fields without neural networks. In 2022 IEEE/CVF
+Conference on Computer Vision and Pattern Recognition
+(CVPR), pages 5491–5500, 2022. 1
+[9] Markus Hadwiger, Ali K. Al-Awami, Johanna Beyer, Marco
+Agus, and Hanspeter Pfister. Sparseleap: Efficient empty
+space skipping for large-scale volume rendering. IEEE
+Transactions on Visualization and Computer Graphics,
+24(1):974–983, 2018. 3
+[10] Eric Haines, Johannes Günther, and Tomas Akenine-Möller.
+Precision Improvements for Ray/Sphere Intersection, pages
+87–94. Apress, Berkeley, CA, 2019. 12
+[11] Xinlong Ji, Fangneng Zhan, Shijian Lu, Shi-Sheng Huang,
+and Hua Huang. Mixlight: Borrowing the best of both spherical harmonics and gaussian models, 2024. 5
+[12] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkuehler,
+and George Drettakis. 3d gaussian splatting for real-time radiance field rendering. ACM Trans. Graph., 42(4), jul 2023.
+1, 2, 3, 5, 6, 7, 8, 14, 16, 17, 18
+[13] Diederik Kingma and Jimmy Ba. Adam: A method for
+stochastic optimization. In International Conference on
+Learning Representations (ICLR), San Diega, CA, USA,
+2015. 13
+[14] Aaron Knoll, R. Keith Morley, Ingo Wald, Nick Leaf, and
+Peter Messmer. Efficient Particle Volume Splatting in a Ray
+Tracer, pages 533–541. Apress, Berkeley, CA, 2019. 2
+[15] Aaron Knoll, Ingo Wald, Paul Navratil, Anne Bowen, Khairi
+Reda, Michael E. Papka, and Kelly Gaither. Rbf volume ray
+casting on multicore and manycore cpus. Computer Graphics Forum, 33(3):71–80, 2014. 6
+[16] Kubát, J. Radiative transfer in stellar atmospheres. EAS Publications Series, 43:1–18, 2010. 4
+[17] J. Kulhanek and T. Sattler. Tetra-nerf: Representing neural radiance fields using tetrahedra. In 2023 IEEE/CVF International Conference on Computer Vision (ICCV), pages
+18412–18423, Los Alamitos, CA, USA, oct 2023. IEEE
+Computer Society. 1, 3
+[18] H. Liang, T. Wu, P. Hanji, F. Banterle, H. Gao, R. Mantiuk,
+and C. Öztireli. Perceptual quality assessment of nerf and
+neural view synthesis methods for front-facing views. Computer Graphics Forum, 43(2):e15036, 2024. 8
+[19] N. Max. Optical models for direct volume rendering.
+IEEE Transactions on Visualization and Computer Graphics, 1(2):99–108, 1995. 1, 2, 3
+[20] Nelson Max and Min Chen. Local and Global Illumination
+in the Volume Rendering Integral. In Hans Hagen, editor,
+Scientific Visualization: Advanced Concepts, volume 1 of
+Dagstuhl Follow-Ups, pages 259–274. Schloss Dagstuhl –
+Leibniz-Zentrum für Informatik, Dagstuhl, Germany, 2010.
+3
+[21] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik,
+Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. In Andrea Vedaldi, Horst Bischof, Thomas Brox, and
+Jan-Michael Frahm, editors, Computer Vision – ECCV 2020,
+pages 405–421, Cham, 2020. Springer International Publishing. 1, 2, 7, 8, 16, 17, 18
+[22] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM Trans. Graph., 41(4), jul 2022.
+1, 2, 3, 7, 8, 16, 17, 18
+[23] Jan Novák, Iliyan Georgiev, Johannes Hanika, and Wojciech
+Jarosz. Monte carlo methods for volumetric light transport simulation. Computer Graphics Forum, 37(2):551–576,
+2018. 2
+[24] J. Park and I. W. Sandberg. Universal approximation using radial-basis-function networks. Neural Computation,
+3(2):246–257, 1991. 5
+[25] Steven G. Parker, James Bigler, Andreas Dietrich, Heiko
+Friedrich, Jared Hoberock, David Luebke, David McAllister, Morgan McGuire, Keith Morley, Austin Robison, and
+Martin Stich. Optix: a general purpose ray tracing engine.
+ACM Trans. Graph., 29(4), jul 2010. 6, 11
+[26] Lukas Radl, Michael Steiner, Mathias Parger, Alexander Weinrauch, Bernhard Kerbl, and Markus Steinberger.
+StopThePop: Sorted Gaussian Splatting for View-Consistent
+Real-time Rendering. ACM Transactions on Graphics,
+4(43), 2024. 2
+[27] Christian Reiser, Songyou Peng, Yiyi Liao, and Andreas
+Geiger. Kilonerf: Speeding up neural radiance fields with
+thousands of tiny mlps. In 2021 IEEE/CVF International
+Conference on Computer Vision (ICCV), pages 14315–
+14325, 2021. 3
+[28] Johannes L. Schönberger and Jan-Michael Frahm. Structurefrom-motion revisited. In 2016 IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pages 4104–
+4113, 2016. 7, 14
+[29] Knut Stamnes, Gary E. Thomas, and Jakob J. Stamnes. Radiative Transfer in the Atmosphere and Ocean. Cambridge
+University Press, 2 edition, 2017. 4
+[30] Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct voxel
+grid optimization: Super-fast convergence for radiance fields
+reconstruction. In 2022 IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), pages 5449–5459,
+2022. 1, 3
+[31] Weiwei Sun, Eduard Trulls, Yang-Che Tseng, Sneha Sambandam, Gopal Sharma, Andrea Tagliasacchi, and Kwang
+Moo Yi. PointNeRF++: A multi-scale, point-based Neural
+Radiance Field. arXiv e-prints, page arXiv:2312.02362, Dec.
+2023. 7, 17
+[32] Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin Shu,
+Kalyan Sunkavalli, and Ulrich Neumann. Point-nerf: Pointbased neural radiance fields. In 2022 IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR), pages
+5428–5438, 2022. 1, 3, 7, 17
+[33] Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and
+Andreas Geiger. Mip-splatting: Alias-free 3d gaussian splatting. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 19447–
+19456, June 2024. 7, 8, 14, 16, 17, 18
+[34] Qiang Zhang, Seung-Hwan Baek, Szymon Rusinkiewicz,
+and Felix Heide. Differentiable point-based radiance fields
+for efficient view synthesis. In SIGGRAPH Asia 2022 Conference Papers, SA ’22, New York, NY, USA, 2022. Association for Computing Machinery. 3
+[35] M. Zwicker, H. Pfister, J. van Baar, and M. Gross. Ewa volume splatting. In Proceedings Visualization, 2001. VIS ’01.,
+pages 29–538, 2001. 2, 3
+Supplementary
+RayGauss: Volumetric Gaussian-Based Ray Casting
+for Photorealistic Novel View Synthesis
+1. Overview
+position µ.
+Also, we have studied two types of basis functions: those
+with local, or more precisely compact, support that vanish
+for r > 1, and those with global support. We describe below
+these different functions.
+Functions with local/compact support: The studied
+functions with compact support are as follows:
+In this supplementary material, we first provide technical details about our method: an explicit description of the
+different basis functions tested and their influence on various aspects of the algorithm, details about our OptiX implementation, and a description of optimization details. Next,
+we address secondary features specific to our approach: the
+ability to simultaneously cast rays from different viewpoints
+compared to splatting and the possibilities enabled by the
+OptiX API [25]. Finally, we discuss additional tests conducted on the hyperparameters of our algorithm: the sampling step ∆t and the density threshold σϵ . We then compare our method to state-of-the-art approaches attempting
+to produce an antialiased scene representation. For this purpose, we test our approach by adding brute force supersampling to study its potential for antialiasing.
+• The Bump function is defined as:
+(
+1− 1
+e 1−r2 if r < 1
+ϕBump (r) =
+0
+if r ≥ 1
+(17)
+• Wendland functions denote a class of functions, and
+here we use one of the most commonly employed:
+(
+(1 − r)4+ (4r + 1) if r ≤ 1
+ϕWendland (r) =
+(18)
+0
+if r > 1
+2. Description of the different basis functions
+and their intersection
+It can be noted that the Bump function has been slightly
+modified compared to its usual expression, as it has been
+multiplied by e1 , so that ϕBump (0) = 1, which corresponds
+to the behavior of the other basis functions studied and facilitates experiments.
+Functions with global support: The studied functions
+with global support are as follows:
+We provide more details here on the different tested basis
+functions and the resulting treatments. Our implementation
+is flexible and allows easy modification of the basis function used. Such modification impacts the following aspects
+of the code: construction of the Bounding Volume Hierarchy, intersection program, and weights evaluation for each
+sample, as explained below.
+• The inverse multiquadric function:
+2.1. Explicit expressions of the studied basis functions
+1
+1 + r2
+(19)
+1
+1 + r2
+(20)
+ϕInv Multi (r) = √
+As explained in the main article, we limit ourselves to
+the study of decreasing radial and elliptical basis functions,
+which can be expressed depending on r(x) = d2 (x,µ)
+in
+R
+the radial case or r(x) = dM (x, µ) in the elliptical case.
+Here, R ∈ R can be interpreted as a shape parameter, d2
+denotes
+the Euclidean distance in R3 , and dM (x, µ) =
+p
+(x − µ)T Σ−1 (x − µ) represents the Mahalanobis distance associated with the covariance matrix Σ and mean
+• The inverse quadratic function:
+ϕInv Quad (r) =
+• The C0 -Matérn function:
+ϕC0-Matérn (r) = exp(−r)
+11
+(21)
+• The Gaussian function:
+ 2
+r
+ϕGaussian (r) = exp −
+2
+(22)
+Also, the expression used to evaluate weights for each
+sample corresponds to one of the expressions given above,
+depending on the tested case. In addition, as specified in
+the main article, global support functions are truncated to
+consider only their value within a domain restricted by the
+following condition:
+(
+σl (x) if σl (x) ≥ σϵ
+(23)
+σl (x)approx =
+0
+if σl (x) < σϵ
+where:
+σl (x) = σ̃l · ϕl (x)
+(24)
+with ϕl the l-th basis function and σ̃l the associated density parameter. This allows considering only functions with
+a non-negligible contribution at a given point by setting a
+sufficiently low threshold. Moreover, no domain truncation
+is necessary for compactly supported functions, as they naturally vanish outside a compact domain by their definition.
+After modification, the support of these functions corresponds to a solid sphere if the functions are radial or to a
+solid ellipsoid if they are elliptical. Since elliptical functions yield better results in our case, we will subsequently
+explain only the case of ellipsoids (which is also a generalization of spheres). Additionally, the OptiX API we
+use does not natively support intersection with ellipsoids
+but allows for the definition of a custom intersection program. This works by defining two aspects: the definition
+of axis-aligned bounding boxes (AABBs) that encompass
+each primitive and the definition of the custom primitive intersection (ellipsoid in our case). Thus, for a given ray and
+a given slab assimilated to a segment, we test the intersection of the segment with primitives in the following way:
+OptiX first finds an intersection with the AABBs, and for
+the intersected AABBs, it executes the custom program defined by us, calculating the intersection between a segment
+and an ellipsoid. Furthermore, the ellipsoid depends on the
+basis function used. So, as previously mentioned, the basis
+function influences the construction of the BVH through the
+provided AABBs and the custom intersection program. We
+will discuss these two points below.
+2.2. Ellipsoid definition for the basis function
+To calculate the intersection of a ray with the support of a
+basis function, we must first explicitly define its expression.
+In the case of truncated global functions, by using equations
+23 and 24, we derive that the support of the l-th truncated
+global function is the set of points satisfying the condition:
+ϕl (r(x)) ≥
+σϵ
+σ̃l
+(25)
+Also, since all tested global support basis functions are
+invertible and decreasing, ϕ−1
+is decreasing, and:
+l
+σϵ
+r(x) ≤ ϕ−1
+)
+(26)
+l (
+σ̃l
+Here, since we are considering the elliptical case, we have:
+q
+σϵ
+(x − µl )T Σl −1 (x − µl ) ≤ ϕ−1
+)
+(27)
+l (
+σ̃l
+And thus (by the growth of the square function on R+ ):
+2
+
+−1
+−1 σϵ
+T
+(x − µl ) Σl (x − µl ) ≤ ϕl ( )
+(28)
+σ̃l
+where we can recognize the equation of an ellipsoid.
+The expression is simpler in the case of locally/compactly supported functions. Indeed, the tested
+functions vanish starting from r = 1. Therefore, we can
+deduce the equation of the ellipsoid in this case:
+(x − µl )T Σl −1 (x − µl ) ≤ 1
+(29)
+2.3. Tightest axis-aligned bounding box definition
+The OptiX API optimizes Ray-AABB intersection.
+Also, our goal here is to build the BVH using the tightest
+axis-aligned bounding boxes enclosing previous ellipsoids
+to avoid unnecessary intersection calculations. In this elliptical case, the resulting axis-aligned bounding box (AABB)
+has a slightly complex expression. It is bounded by the following coordinates:
+q
+x = µx ± s̃2x R21,1 + s̃2y R21,2 + s̃2z R21,3 ,
+q
+(30)
+y = µy ± s̃2x R22,1 + s̃2y R22,2 + s̃2z R22,3 ,
+q
+z = µz ± s̃2x R23,1 + s̃2y R23,2 + s̃2z R23,3 .
+where Ri,j are the coordinates of the rotation matrix R associated with the ellipsoid
+as described in the main article.
+ 
+σϵ
+Moreover, s̃ = s · ϕ−1
+in the case of truncated global
+l
+σ̃l
+functions and s̃ = s in the case of compactly supported
+basis functions. Here, s refers to the diagonal of the scale
+matrix S defined in the main paper.
+In the radial case,this is straightforward as we take the
+σϵ
+cube of side 2Rϕ−1
+l
+σ̃l centered on µ in the case of truncated global functions and the cube of side 2R centered on
+µ, in the case of compactly supported basis functions.
+2.4. Custom intersection definition
+To implement the intersection, we use the ellipsoid equations 28 and 29, depending on the basis function, and calculate the intersection of the current segment with this ellipsoid. In particular, we leverage the optimized Ray-Sphere
+intersection introduced in [10] and adapted for the case of
+ellipsoids.
+3. Optix Raycasting
+Here we describe the details of our RayCasting algorithm implementation using the OptiX API. This API works
+by allowing the definition of several custom programs that
+define the behavior of the rendering pipeline. The different
+programs of interest in our case are as follows:
+• Ray Generation: This program is called first and is executed in parallel for each pixel, launching rays into
+the BVH.
+• Intersection: Defines the ray-primitive intersection
+with our custom primitive, an ellipsoid in our case.
+• Any-Hit: This program is called when the Intersection
+program finds a new intersection along the ray, allowing custom processing of the intersected primitives.
+From these three programs, we can define our raycasting algorithm. In particular, the Ray Generation program calculates the origin and direction of the ray associated with a given pixel, then a slab size corresponding to a
+multiple of ∆t is fixed. This slab size is the same for all
+rays to maintain inter-ray coherence. In practice, in most
+cases, we treat 8 samples per slab. Next, if a given ray intersects the axis-aligned bounding box associated with the set
+of primitives, then this ray intersects the scene. So we start
+probing the space traversed by the ray, proceeding slab by
+slab. For a given segment on the ray, we launch the traversal
+of the BVH. The intersection program computes the intersection of the segment with ellipsoids in the scene. The
+any-hit program collects the primitives intersecting the segment by storing their index in a large pre-allocated buffer.
+In practice, the buffer size is set to store at most 512 or 1024
+primitives depending on the scene, thus allowing us to have
+more than enough primitives per buffer (between 512 and
+1024 for 8 samples). This choice was made to ensure fast
+code execution. Once the primitives contributing locally are
+collected, we can calculate the value of σ and c for each of
+the samples in the slab, then accumulate them in the form of
+an intermediate color and transmittance of the ray. We can
+then use the early termination strategy, which ends the calculation when the current transmittance becomes lower than
+a threshold: T < Tϵ . When the threshold is low, this strategy allows us to disregard the samples whose contribution
+will be negligible compared to the overall color of the ray.
+If early termination isn’t applied and we are still within the
+bounds of the scene, we can then move to the next slab and
+repeat the same process. We provide the ray generation and
+any-hit programs for performing ray casting in algorithm 1
+and 2. The intersection program is not described in detail as
+it corresponds to the ellipsoid-segment intersection.
+Algorithm 1 Any-Hit Program
+Input: np : number of intersected primitives, nmax : maximum
+number of primitives, hitBuffer: buffer storing primitive indices,
+iR : index of the current ray
+Output: np , hitBuffer
+1: iP ← optixGetPrimitiveIndex()
+▷ Current primitive index
+2: hitBuffer[iR × nmax + np ] ← iP
+3: np ← np + 1
+4: if np ≥ nmax then
+5:
+optixTerminateRay()
+▷ Terminate if max. primitives
+6: end if
+7: optixIgnoreIntersection()
+▷ Continue Traversal
+Algorithm 2 Ray Generation Program
+Input: iR : index of the current ray, bboxmin : minimum bounds
+of the bounding box, bboxmax : maximum bounds of the bounding box, ∆t: step size, B: size of the buffer, Tϵ : transmittance
+threshold, hitBuffer: buffer storing primitive indices, P: global parameters (primitive parameters and ray colors)
+Output: P: update parameters
+1: o, d ← ComputeRay(iR )
+▷ Ray origin, direction
+2: t0 , t1 ← IntersectBBox(o, d, bboxmin , bboxmax )
+3: ∆S ← ∆t × B
+▷ Slab size
+4: T ← 1.0
+▷ Ray transmittance
+5: CR ← (0.0, 0.0, 0.0)
+▷ Ray color
+6: if t0 < t1 then
+▷ Check if ray intersects bounding box
+7:
+tS ← t0
+▷ Current slab distance along the ray
+8:
+while tS < t1 and T > Tϵ do
+9:
+np ← 0
+▷ Number of primitives
+10:
+tmin S ← max(t0 , tS )
+11:
+tmax S ← min(t1 , tS + ∆S)
+12:
+▷ Collect the intersected primitives
+13:
+Traversal(hitBuffer, o, d, tmin S , tmax S , np )
+14:
+if np == 0 then
+15:
+tS ← tS + ∆S
+16:
+continue
+17:
+end if
+18:
+densityBuffer ← (0.0)B
+19:
+colorBuffer ← (0.0, 0.0, 0.0)B
+20:
+▷ Update ray color and density
+21:
+UpdateRay(iR , np , ∆t, tS , o, d, densityBuffer,
+colorBuffer, CR , T, P)
+22:
+tS ← tS + ∆S
+23:
+end while
+24: end if
+25: P.ray colors[iR ] ← CR
+4. Optimization details
+This section provides further details on the optimization
+parameters used in our experiments. We use the Adam gradient descent optimization algorithm [13]. We recall that
+the parameters optimized by our approaches are as follows:
+P = {(σ̃l , c̃l , µl , ql , sl ) | l = 1, . . . , N } where σ̃l is the
+density parameter of the l-th primitive, c̃l summarizes the
+colorimetric parameters: lobe λl,j , lobe direction pl,j , coefficients kl,j , for the j − th Spherical Gaussian and coefficients c̃l,jm for Spherical Harmonic of degree j and order
+m, while µl , ql , and sl are the mean position, quaternion,
+and scale parameter used to evaluate the basis function of
+the l-th primitive. The initial parameters are obtained from
+a point cloud created by Structure-From-Motion methods
+such as Colmap [28].
+We will now describe the main parameters of our optimization, starting with the learning rates. In the context of evaluations on the Blender dataset, we employed a
+learning rate for density with exponential decay, starting at
+5 × 10−1 and decreasing to 3 × 10−2 over 30,000 iterations.
+The learning rates for other parameters were set as follows:
+1.0×10−3 for constant color parameters (RGB), 2.6×10−4
+for Spherical Harmonics coefficients, 3.6 × 10−4 for Spherical Gaussians coefficients, 4.5 × 10−2 for lobe sharpness,
+3.0 × 10−3 for lobe direction, 1.2 × 10−2 for scale parameters, 2.2 × 10−4 for quaternions, and a learning rate
+with exponential decay starting from 1.7 × 10−5 and reaching 1.0 × 10−6 after 30,000 iterations for mean positions.
+We optimize the scene using a white background to place
+ourselves in evaluation conditions like other state-of-theart methods. In the case of the Mip-NeRF360 dataset, we
+use similar learning rates except for the density, for which
+we use a learning rate with exponential decay starting from
+5 × 10−1 and reaching 1 × 10−4 in 30,000 iterations. This
+allows us to accelerate the beginning of the optimization,
+particularly for outdoor scenes with a large number of Gaussians. Furthermore, we train with a black background on
+this dataset to place ourselves in evaluation conditions similar to Gaussian Splatting and current state-of-the-art methods [12] [33].
+More generally, we optimize the scene by backpropagation, with the optimization taking 30,000 iterations (1 image per iteration). Quaternions are renormalized after each
+optimization step to maintain a valid rotation matrix representation. The process of Adaptive Gaussian Control is
+similar to that used in 3D Gaussian Splatting [12], periodically increasing, every idensif y iterations, the number of
+Gaussians in the scene using a heuristic based on the condition ∇Lµl > ∇Lϵ , where ∇Lµl denotes the gradient on the
+mean position of the basis functions and ∇Lϵ the threshold
+from which densification is applied. In our case, we densify every 500 iterations for Mip-NeRF360 and 300 iterations for Blender dataset, starting from the 500th iteration
+up to the 15,000th iteration, and we set ∇Lϵ = 0.00002
+for the Mip-NeRF 360 dataset and ∇Lϵ = 0.00004 for the
+Blender dataset. Furthermore, we remove primitives whose
+density parameter σ̃ is below a threshold, set to 0.1 for our
+experiments on the Blender dataset and 0.01 on the MipNeRF 360 dataset. Finally, as described in the main paper, we gradually unlock the colorimetric parameters from
+the lowest frequency representation to the potentially higher
+frequency one: harmonics of degree 0, 1, 2, and finally, 7
+spherical Gaussians, resulting in 16 functions to represent
+the color of a primitive. The unlocking of these parameters
+occurs every 1000 iterations. We can specify here that the
+spherical harmonic and spherical gaussian coefficients, as
+well as the lobe sharpness, are initialized to zero, while the
+lobe axes are randomly initialized on the unit sphere and
+constrained to it during optimization. Also, one can refer
+to Algorithm 3 to gain a broader view of the optimization
+process.
+Algorithm 3 RayGauss Scene Optimization
+Input: (Ii )N
+i=1 :N training images, imax maximum number of
+iterations, ∇Lϵ gradient threshold for densification, σϵ density
+threshold for prunning
+Output: optimized primitive parameters P
+N
+1: (Vi )N
+i=1 , P̃ ← SFM((Ii )i=1 ) ▷ Camera, Sparse Point Cloud
+2: P ← InitPrim(P̃ )
+▷ Initialize primitive parameters
+3: T ← InitBVH(P )
+▷ Bounding Volume Hierarchy
+4: i ← 0
+5: while i < imax do
+6:
+V, I ← SampleTrainView()
+7:
+Iˆ ← RayCast(V, P, T )
+ˆ I)
+8:
+L ← Loss(I,
+9:
+P ← AdamOptim(∇L)
+10:
+for (σ̃l , c̃l , µl , ql , sl ) in P do
+11:
+if IsAdaptControlIter(i) then
+12:
+if ∇Lµl > ∇Lϵ then
+13:
+P ← CloneSplit((σ̃l , c̃l , µl , ql , sl ))
+14:
+end if
+15:
+if σ̃l < σϵ then
+16:
+RemovePrimitive()
+17:
+end if
+18:
+end if
+19:
+if IsUnlockIter(i) then
+20:
+c̃l ← UnlockColorSHSG(i)
+21:
+end if
+22:
+end for
+23:
+T ← UpdateBVH(T, P )
+24: end while
+Furthermore, it should be noted that the number of parameters in our representation is 87NP , where NP is the
+number of primitives. Specifically, we have the following parameter counts: 3 for the mean position µ, 3 for the
+scale parameter s, 4 for the quaternions q, 1 for the density parameter σ̃, 27 for spherical harmonic coefficients, 21
+for spherical Gaussian coefficients, 7 for lobe parameters,
+and 21 for lobe direction parameters. Moreover, as mentioned earlier, our current implementation requires allocating a buffer of size Nmax,P × Nray , where Nmax,P is the
+maximum number of primitives per ray per slab allowed,
+and Nray the number of rays launched. Therefore, the limiting factor of our implementation in terms of memory mainly
+depends on the allocation of these data.
+5. Uncorrelated ray casting
+One of the advantages of ray casting compared to splatting lies in the fact that multiple independent rays from
+different cameras can be rendered simultaneously. In ray
+casting, which is an image-order rendering method, rays
+are treated independently and can originate from various
+viewpoints. In contrast, splatting, which is an object-order
+method, projects primitives onto the image plane and then
+sorts them. This primitive processing benefits splatting
+when rendering an entire image, as it allows for quickly
+computing the color of each pixel by summing the contributions of primitives projected onto it. However, this approach
+loses its advantage when considering the color of a single
+ray, for instance. Thus, in practice, several applications can
+be considered based on this observation: training is done
+iteratively on individual images in 3D Gaussian Splatting,
+whereas our training can easily use batches of rays from different images. Furthermore, supervision may require casting independent rays if the supervision data is sparse, for instance, if we want to supervise ray depth using a point cloud
+representing the surface as supervision data [7]. In this case,
+our approach is more suitable than the splatting algorithm
+because it can natively handle uncorrelated rays from different viewpoints. Another application would be adaptive
+supersampling, which consists of successively casting rays
+in the image plane to reduce rendering artifacts by focusing
+on the most challenging regions. This type of approach is
+more suited to ray casting as improving the rendering quality may only require casting a few additional rays. These
+last two applications are beyond the scope of this article.
+Additionally, tests were conducted by training with batches
+of rays. However, training in batches does not allow for
+the use of supervision functions such as structural similarity
+(SSIM), and in practice, we obtained poorer results compared to training image by image. However, conducting
+more experiments to explore this aspect further would be
+interesting.
+6. OptiX API applications
+Our method is supported by Nvidia OptiX, a framework
+designed initially for GPU ray tracing. Its flexible API
+allows for efficiently combining different types of primitives, associated intersections, and rendering algorithms.
+Consequently, our approach has the potential to be combined with more traditional rendering methods using standard primitives, such as meshes rendered by classic ray tracing, through the API used. Thus, our approach could be integrated into complex environments mixing different types
+of primitives that can be rendered using the single OptiX
+API.
+7. Analysis of ∆t and σϵ
+In this section, we present a study of the influence of
+two parameters on the final rendering quality, training and
+rendering times:
+• ∆t is the distance between two samples along a ray
+• σϵ corresponds both to the density under which a
+Gaussian is removed but also to the limits of the Gaussians for the calculation of intersections
+Tab. 5 studies the influence of the parameter ∆t on the
+Blender dataset. The results come from training on the
+Blender Dataset with PSNR averaged over the 8 scenes
+of this synthetic dataset. The gray line corresponds to the
+choice of the parameter ∆t for all other experiments (main
+article and supplementary). We observe that increasing the
+space ∆t makes it possible to speed up training but also
+rendering times at the cost of a reduction in graphic quality.
+∆t
+0.00125
+0.0025
+0.005
+0.01
+PSNR ↑
+34.53
+34.53
+34.52
+33.90
+Training Time
+46 min
+32 min
+24 min
+20 min
+Rendering Time
+17.4 FPS
+25.8 FPS
+42.8 FPS
+50.1 FPS
+Table 5. Study of the influence of the parameter ∆t on the
+Blender dataset. ∆t is the distance between two samples along a
+ray. Values are averaged per scene. In gray, the parameter used in
+other experiments. Rendering time is for 800x800 pixels image.
+Tab. 6 studies the influence of the parameter σϵ on the
+Blender dataset. The results come from training on the
+Blender Dataset with PSNR averaged over the 8 scenes of
+this synthetic dataset. We can see that increasing σϵ speeds
+up the training and rendering times of the method. On
+the contrary, by decreasing σϵ , we increase the size of the
+Gaussians when calculating the intersections with the rays,
+which increases the training and rendering times, while improving the quality of rendering. The gray line also corresponds to the choice of the parameter σϵ for all other experiments on Blender dataset (main article and supplementary),
+for Mip-NeRF360, we use σϵ = 0.01.
+σϵ
+1.0
+0.1
+0.01
+PSNR ↑
+34.52
+34.53
+34.54
+Training Time per scene
+26 min
+32 min
+35 min
+Rendering Time
+29.4 FPS
+25.8 FPS
+23.5 FPS
+Table 6. Study of the influence of the parameter σϵ on the
+Blender dataset. σϵ determines the limit of Gaussians for calculating intersections. Values are average per scene. In gray, the parameter used in other experiments. Rendering time is for 800x800
+pixels image.
+8. RayGauss and Anti-aliasing
+Like NeRF [21], Instant-NGP [22] and Gaussian Splatting [12], RayGauss is a method that does not have an antialiasing mechanism, unlike the Mip-NeRF [1] and MipSplatting [33] methods.
+To study the level of aliasing of RayGauss, we followed the protocol defined by Mip-Splatting [33] SingleScale vs Multi-Scale with the Blender dataset, which consists of training the methods with full resolution images
+(800x800 pixels) then testing the rendered at different resolutions (1, 1/2, 1/4, 1/8) to mimic zoom-out effects. We
+can see the results with the PSNR metric on Tab. 7. RayGauss manages to maintain good rendering quality on all
+scales compared to Gaussian Splatting (due to rasterization
+and dilation of Gaussians in 2D) and remains competitive
+compared to methods with anti-aliasing (Mip-NeRF [1] and
+Mip-Splatting [33]).
+Gaussian Splatting [33]
+NeRF [21]
+Instant-NGP [22]
+MipNeRF [1]
+Mip-Splatting [33]
+RayGauss (ours)
+Full Res.
+33.33
+31.48
+33.09
+33.08
+33.36
+34.53
+1/2 Res.
+1/4 Res.
+1/8 Res.
+26.95
+32.43
+33.00
+33.31
+34.00
+33,90
+21.38
+30.29
+29.84
+30.91
+31.85
+30,01
+17.69
+26.70
+26.33
+27.97
+28.67
+26,36
+Avg.
+24.84
+30.23
+30.57
+31.31
+31.97
+31.20
+Table 7. PSNR score for Single-scale Training and Multi-scale
+Testing on the Blender dataset. All methods are trained on fullresolution images (800x800 pixels) and evaluated at four different resolutions (800x800, 400x400, 200x200 and 100x100 pixels),
+lower resolutions simulating zoom-out effects.
+A brute-force anti-aliasing method consists in multiplying the number of rays per pixel. The basic RayGauss method launches a single ray through the center of
+each pixel for training and rendering. We studied the effect of casting 4 rays per pixel for training and rendering, a variant called RayGauss4x. Training and rendering
+times are approximately 3 times longer than the basic RayGauss method. We then calculated the PSNR scores on
+Blender with several scales (Tab. 8) and compared it with
+the Mip-Splatting method. To be fair, we also increased
+the rasterization resolution of Mip-splatting by 4 at each
+scale (during training and rendering), a variant called MipSplatting4x. In this configuration, RayGauss4x is superior to Mip-Splatting4x on almost all scales on the Blender
+dataset.
+9. Detailed results
+Tab. 9 and Tab. 10 show the detailed results of the main
+paper with metrics PSNR, SSIM, and LPIPS on the Blender
+and Mip-NeRF 360 datasets. Some methods have no available code, so we were not able to report information about
+SSIM and LPIPS (for example, for PointNeRF++).
+Mip-Splatting4x [33]*
+RayGauss4x (ours)
+Full Res.
+33.51
+34.60
+1/2 Res.
+1/4 Res.
+1/8 Res.
+35.23
+36.43
+35.71
+36.02
+33.92
+33.11
+Avg.
+34.59
+35.04
+Table 8. PSNR score for Single-scale Training and Multiscale Testing on the Blender dataset with 4x Super Sampling.
+Methods are trained on full-resolution images (800x800 pixels)
+with 4x supersampling and evaluated at four different resolutions
+(800x800, 400x400, 200x200 and 100x100 pixels) with 4x supersampling, lower resolutions simulating zoom-out effects.
+All methods with an * have been retrained using the
+available code:
+• NeRF and Instant-NGP with their respective
+model using the nefstudio framework v1.1.3:
+https : / / github . com / nerfstudio project/nerfstudio
+• Gaussian Splatting: https : / / github . com /
+graphdeco-inria/gaussian-splatting
+• Mip-Splatting:
+https : / / github . com /
+autonomousvision/mip-splatting
+NeRF [21]
+Zip-NeRF [3]
+Instant-NGP [22]
+Mip-NeRF360 [2]
+Point-NeRF [32]
+Gaussian Splatting [12]*
+Mip-Splatting [33]*
+PointNeRF++ [31]
+NeuRBF [6]*
+RayGauss (ours)
+Chair
+34.17
+34.84
+35.00
+35.65
+35.40
+35.85
+36.03
+36.32
+36.54
+37.20
+Drums
+25.08
+25.84
+26.02
+25.60
+26.06
+26.22
+26.29
+26.11
+26.38
+27.14
+Ficus
+30.39
+33.90
+33.51
+33.19
+36.13
+35.00
+35.33
+34.43
+35.01
+35.11
+PSNR ↑
+Hotdog Lego
+36.82
+33.31
+37.14
+34.84
+37.40
+36.39
+37.71
+36.10
+37.30
+35.04
+37.81
+35.87
+37.98
+36.03
+37.45
+36.75
+38.44
+37.35
+38.30
+37.10
+Materials
+30.03
+31.66
+29.78
+29.90
+29.61
+30.00
+30.29
+30.32
+34.12
+31.36
+Mic
+34.78
+35.15
+36.22
+36.52
+35.95
+35.40
+35.63
+36.85
+36.16
+38.11
+Ship
+29.30
+31.38
+31.10
+31.26
+30.97
+30.95
+30.50
+31.34
+31.73
+31.95
+Avg.
+31.74
+33.10
+33.18
+33.24
+33.30
+33.39
+33.51
+33.70
+34.47
+34.53
+NeRF [21]
+Zip-NeRF [3]
+Instant-NGP [22]
+Mip-NeRF360 [2]
+Point-NeRF [32]
+Gaussian Splatting [12]*
+Mip-Splatting [33]*
+Point-NeRF++ [31]
+NeuRBF [6]*
+RayGauss (ours)
+Chair
+0.975
+0.983
+0.983
+0.984
+0.988
+0.988
+0.988
+0.990
+Drums
+0.925
+0.944
+0.931
+0.935
+0.955
+0.956
+0.944
+0.960
+Ficus
+0.967
+0.985
+0.979
+0.987
+0.988
+0.988
+0.987
+0.988
+SSIM ↑
+Hotdog Lego
+0.979
+0.968
+0.984
+0.980
+0.982
+0.980
+0.982
+0.978
+0.986
+0.983
+0.987
+0.984
+0.987
+0.986
+0.988
+0.986
+Materials
+0.953
+0.969
+0.949
+0.948
+0.960
+0.962
+0.979
+0.969
+Mic
+0.987
+0.991
+0.991
+0.990
+0.992
+0.992
+0.992
+0.995
+Ship
+0.869
+0.929
+0.893
+0.892
+0.893
+0.900
+0.925
+0.914
+Avg.
+0.953
+0.971
+0.961
+0.962
+0.968
+0.970
+0.974
+0.974
+NeRF [21]
+Zip-NeRF [3]
+Instant-NGP [22]
+Mip-NeRF360 [2]
+Point-NeRF [32]
+Gaussian Splatting [12]*
+Mip-Splatting [33]*
+Point-NeRF++ [31]
+NeuRBF [6]*
+RayGauss (ours)
+Chair
+0.026
+0.017
+0.018
+0.023
+0.011
+0.012
+0.016
+0.009
+Drums
+0.071
+0.050
+0.069
+0.078
+0.037
+0.037
+0.061
+0.030
+Ficus
+0.032
+0.015
+0.022
+0.022
+0.011
+0.011
+0.016
+0.011
+LPIPS ↓
+Hotdog Lego
+0.030
+0.031
+0.020
+0.019
+0.024
+0.018
+0.037
+0.024
+0.017
+0.015
+0.018
+0.015
+0.021
+0.015
+0.015
+0.012
+Materials
+0.047
+0.032
+0.053
+0.072
+0.034
+0.033
+0.032
+0.026
+Mic
+0.012
+0.007
+0.011
+0.014
+0.006
+0.005
+0.008
+0.004
+Ship
+0.150
+0.091
+0.119
+0.124
+0.118
+0.107
+0.114
+0.088
+Avg.
+0.050
+0.031
+0.042
+0.049
+0.031
+0.030
+0.035
+0.024
+Table 9. PSNR, SSIM and LPIPS (with VGG network) scores on the Blender dataset. All methods are trained on the train set with
+full-resolution images (800x800 pixels) and evaluated on the test set with full-resolution images (800x800 pixels).
+NeRF [21]*
+Instant-NGP [22]*
+Gaussian Splatting [12]*
+Mip-Splatting [33]*
+Zip-NeRF [3]*
+RayGauss (ours)
+bonsai
+22.10
+27.04
+33.42
+33.44
+36.10
+35.22
+counter
+22.34
+24.25
+30.21
+30.43
+30.13
+31.79
+kitchen
+22.00
+23.44
+33.40
+34.30
+32.85
+35.43
+room
+24.46
+27.30
+32.95
+33.30
+34.20
+32.95
+PSNR ↑
+bicycle flowers
+19.35
+19.49
+23.69
+21.41
+27.33
+23.71
+27.62
+23.79
+28.10
+24.25
+27.21
+23.53
+garden
+22.70
+25.64
+29.58
+29.78
+30.24
+29.91
+stump
+21.43
+22.56
+27.78
+27.89
+27.78
+27.13
+treehill
+21.02
+22.22
+24.00
+24.25
+25.72
+24.26
+Avg.
+21.65
+24.17
+29.15
+29.42
+29.93
+29.71
+NeRF [21]*
+Instant-NGP [22]*
+Gaussian Splatting [12]*
+Mip-Splatting [33]*
+Zip-NeRF [3]*
+RayGauss (ours)
+bonsai
+0.652
+0.923
+0.970
+0.971
+0.978
+0.978
+counter
+0.690
+0.769
+0.942
+0.945
+0.932
+0.958
+kitchen
+0.658
+0.736
+0.972
+0.976
+0.951
+0.976
+room
+0.815
+0.920
+0.963
+0.966
+0.965
+0.971
+SSIM ↑
+bicycle flowers
+0.371
+0.462
+0.658
+0.604
+0.856
+0.730
+0.871
+0.752
+0.865
+0.754
+0.859
+0.742
+garden
+0.653
+0.829
+0.924
+0.931
+0.918
+0.929
+stump
+0.482
+0.563
+0.833
+0.845
+0.829
+0.810
+treehill
+0.506
+0.611
+0.734
+0.744
+0.769
+0.748
+Avg.
+0.588
+0.735
+0.880
+0.889
+0.885
+0.886
+NeRF [21]*
+Instant-NGP [22]*
+Gaussian Splatting [12]*
+Mip-Splatting [33]*
+Zip-NeRF [3]*
+RayGauss (ours)
+bonsai
+0.127
+0.076
+0.037
+0.032
+0.021
+0.024
+counter
+0.217
+0.207
+0.062
+0.057
+0.059
+0.042
+kitchen
+0.207
+0.199
+0.029
+0.027
+0.034
+0.024
+room
+0.119
+0.094
+0.052
+0.045
+0.037
+0.036
+LPIPS ↓
+bicycle flowers
+0.360
+0.320
+0.315
+0.308
+0.121
+0.238
+0.103
+0.189
+0.113
+0.168
+0.110
+0.183
+garden
+0.161
+0.143
+0.056
+0.050
+0.061
+0.051
+stump
+0.326
+0.212
+0.142
+0.130
+0.145
+0.156
+treehill
+0.387
+0.389
+0.230
+0.197
+0.158
+0.187
+Avg.
+0.247
+0.216
+0.107
+0.092
+0.088
+0.090
+Table 10. PSNR, SSIM and LPIPS (with VGG network) scores on the Mip-NeRF 360 dataset. All methods are trained and tested on
+downsampled images by a factor of 8.

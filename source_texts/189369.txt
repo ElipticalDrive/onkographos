@@ -1,0 +1,185 @@
+Embree ray tracing kernels repository. Contribute to RenderKit/embree development by creating an account on GitHub.
+
+Fixed robust node intersection for parallel rays by stefanatwork · Pull Request #589 · RenderKit/embree · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+stefanatwork
+commented
+Mar 5, 2026
+Copy link
+Copy Markdown
+Collaborator
+Problem
+The original code computed tNear and tFar slab distances in a single expression: (bound - org) * rdir. When a ray direction component is exactly 0.0f, rdir becomes inf, and (bound - org) * inf can produce NaN (specifically when bound == org, yielding 0 * inf = NaN). This caused rays parallel to a slab to either incorrectly miss or hit BVH nodes.
+What changed
+Separated loads from arithmetic — The AABB bound values (lowerX/Y/Z, upperX/Y/Z) are now loaded into named variables first, so they can be reused for the parallel-ray check.
+Initial slab distances computed normally — tNearX0..tFarZ0 are computed as before, but stored as intermediate values.
+Parallel-ray detection — Three boolean masks (parX, parY, parZ) check if each ray direction component is exactly zero.
+Outside-slab detection — For each parallel axis, outX/Y/Z checks whether the ray origin lies outside the bounding box on that axis. A ray parallel to a slab and outside it can never intersect.
+Infinity substitution via select — For parallel axes, tNear is forced to -inf and tFar to +inf, effectively making that slab a no-op in the max/min reduction (the slab is "infinitely wide"). This avoids NaN propagation.
+Final mask includes outX|outY|outZ — Even though the slab distances are now clean, nodes are explicitly rejected if the ray is parallel to and outside the box on any axis: (tNear <= tFar) & !(outX | outY | outZ).
+In summary
+This is a correctness fix for the robust BVH node intersection when rays are axis-aligned (direction component = 0). It prevents NaN results from 0 * inf and properly handles the case where a parallel ray is outside the bounding box slab.
+Fixed robust node intersection for parallel rays:
+…
+7fc448a
+```
+Problem
+The original code computed tNear and tFar slab distances in a single expression: (bound - org) * rdir. When a ray direction component is exactly 0.0f, rdir becomes inf, and (bound - org) * inf can produce NaN (specifically when bound == org, yielding 0 * inf = NaN). This caused rays parallel to a slab to either incorrectly miss or hit BVH nodes.
+
+What changed
+Separated loads from arithmetic — The AABB bound values (lowerX/Y/Z, upperX/Y/Z) are now loaded into named variables first, so they can be reused for the parallel-ray check.
+
+Initial slab distances computed normally — tNearX0..tFarZ0 are computed as before, but stored as intermediate values.
+
+Parallel-ray detection — Three boolean masks (parX, parY, parZ) check if each ray direction component is exactly zero.
+
+Outside-slab detection — For each parallel axis, outX/Y/Z checks whether the ray origin lies outside the bounding box on that axis. A ray parallel to a slab and outside it can never intersect.
+
+Infinity substitution via select — For parallel axes, tNear is forced to -inf and tFar to +inf, effectively making that slab a no-op in the max/min reduction (the slab is "infinitely wide"). This avoids NaN propagation.
+
+Final mask includes outX|outY|outZ — Even though the slab distances are now clean, nodes are explicitly rejected if the ray is parallel to and outside the box on any axis: (tNear <= tFar) & !(outX | outY | outZ).
+
+In summary
+This is a correctness fix for the robust BVH node intersection when rays are axis-aligned (direction component = 0). It prevents NaN results from 0 * inf and properly handles the case where a parallel ray is outside the bounding box slab.
+```
+stefanatwork
+requested a review
+from Copilot
+March 5, 2026 08:31
+stefanatwork
+self-assigned this
+Mar 5, 2026
+Copilot
+AI
+reviewed
+Mar 5, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Fixes robust BVH node intersection for axis-aligned (parallel) rays by preventing NaN-driven miss/hit misclassification and explicitly rejecting rays parallel to slabs when the origin lies outside the AABB.
+Changes:
+Splits AABB bound loads into named intermediates and computes initial slab distances into temporary variables.
+Adds parallel-axis detection and outside-slab rejection masks.
+Substitutes ±infinity for parallel axes to remove those slabs from the min/max reduction and updates the final hit mask accordingly.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+kernels/bvh/node_intersector1.h
+Comment on lines
++556
+to
++562
+const vbool<N> parX = ray.dir.x == vfloat<N>(0.0f);
+const vbool<N> parY = ray.dir.y == vfloat<N>(0.0f);
+const vbool<N> parZ = ray.dir.z == vfloat<N>(0.0f);
+const vbool<N> outX = parX & ((ray.org.x < lowerX) | (ray.org.x > upperX));
+const vbool<N> outY = parY & ((ray.org.y < lowerY) | (ray.org.y > upperY));
+const vbool<N> outZ = parZ & ((ray.org.z < lowerZ) | (ray.org.z > upperZ));
+Copilot
+AI
+Mar 5, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The outside-slab check uses lower*/upper* values that are loaded via ray.near*/ray.far*. Those offsets can represent swapped bounds depending on ray direction/sign conventions (and can be sensitive to -0.0), which can invert the slab range and incorrectly mark origins as outside. For the outside-slab test, compare against the true min/max bounds per axis (e.g., compute minX = min(lowerX, upperX) and maxX = max(lowerX, upperX) (same for Y/Z) and then test org < min or org > max).
+Suggested change
+const vbool<N> parX = ray.dir.x == vfloat<N>(0.0f);
+const vbool<N> parY = ray.dir.y == vfloat<N>(0.0f);
+const vbool<N> parZ = ray.dir.z == vfloat<N>(0.0f);
+const vbool<N> outX = parX & ((ray.org.x < lowerX) | (ray.org.x > upperX));
+const vbool<N> outY = parY & ((ray.org.y < lowerY) | (ray.org.y > upperY));
+const vbool<N> outZ = parZ & ((ray.org.z < lowerZ) | (ray.org.z > upperZ));
+const vfloat<N> minX = min(lowerX, upperX);
+const vfloat<N> maxX = max(lowerX, upperX);
+const vfloat<N> minY = min(lowerY, upperY);
+const vfloat<N> maxY = max(lowerY, upperY);
+const vfloat<N> minZ = min(lowerZ, upperZ);
+const vfloat<N> maxZ = max(lowerZ, upperZ);
+const vbool<N> parX = ray.dir.x == vfloat<N>(0.0f);
+const vbool<N> parY = ray.dir.y == vfloat<N>(0.0f);
+const vbool<N> parZ = ray.dir.z == vfloat<N>(0.0f);
+const vbool<N> outX = parX & ((ray.org.x < minX) | (ray.org.x > maxX));
+const vbool<N> outY = parY & ((ray.org.y < minY) | (ray.org.y > maxY));
+const vbool<N> outZ = parZ & ((ray.org.z < minZ) | (ray.org.z > maxZ));
+Copilot uses AI. Check for mistakes.
+Comment thread
+kernels/bvh/node_intersector1.h
+Comment on lines
++549
+to
++559
+const vfloat<N> tNearX0 = (lowerX - ray.org.x) * ray.rdir_near.x;
+const vfloat<N> tNearY0 = (lowerY - ray.org.y) * ray.rdir_near.y;
+const vfloat<N> tNearZ0 = (lowerZ - ray.org.z) * ray.rdir_near.z;
+const vfloat<N> tFarX0 = (upperX - ray.org.x) * ray.rdir_far.x;
+const vfloat<N> tFarY0 = (upperY - ray.org.y) * ray.rdir_far.y;
+const vfloat<N> tFarZ0 = (upperZ - ray.org.z) * ray.rdir_far.z;
+const vbool<N> parX = ray.dir.x == vfloat<N>(0.0f);
+const vbool<N> parY = ray.dir.y == vfloat<N>(0.0f);
+const vbool<N> parZ = ray.dir.z == vfloat<N>(0.0f);
+Copilot
+AI
+Mar 5, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This still evaluates (bound - org) * rdir for parallel lanes, so the original 0 * inf invalid operation (and resulting NaN) can still be produced before being overwritten by select. If the goal is to fully avoid generating NaNs / FP invalid exceptions (e.g., when FP exceptions/status flags matter), consider masking the operands before the multiply for par* lanes (e.g., adjust the delta and/or reciprocal direction for parallel lanes) so the multiply never computes 0 * inf in the first place.
+Suggested change
+const vfloat<N> tNearX0 = (lowerX - ray.org.x) * ray.rdir_near.x;
+const vfloat<N> tNearY0 = (lowerY - ray.org.y) * ray.rdir_near.y;
+const vfloat<N> tNearZ0 = (lowerZ - ray.org.z) * ray.rdir_near.z;
+const vfloat<N> tFarX0 = (upperX - ray.org.x) * ray.rdir_far.x;
+const vfloat<N> tFarY0 = (upperY - ray.org.y) * ray.rdir_far.y;
+const vfloat<N> tFarZ0 = (upperZ - ray.org.z) * ray.rdir_far.z;
+const vbool<N> parX = ray.dir.x == vfloat<N>(0.0f);
+const vbool<N> parY = ray.dir.y == vfloat<N>(0.0f);
+const vbool<N> parZ = ray.dir.z == vfloat<N>(0.0f);
+/* detect parallel rays per axis */
+const vbool<N> parX = ray.dir.x == vfloat<N>(0.0f);
+const vbool<N> parY = ray.dir.y == vfloat<N>(0.0f);
+const vbool<N> parZ = ray.dir.z == vfloat<N>(0.0f);
+/* mask reciprocal directions for parallel lanes to avoid 0 * inf */
+const vfloat<N> safe_rdir_near_x = select(parX, vfloat<N>(0.0f), ray.rdir_near.x);
+const vfloat<N> safe_rdir_near_y = select(parY, vfloat<N>(0.0f), ray.rdir_near.y);
+const vfloat<N> safe_rdir_near_z = select(parZ, vfloat<N>(0.0f), ray.rdir_near.z);
+const vfloat<N> safe_rdir_far_x = select(parX, vfloat<N>(0.0f), ray.rdir_far.x);
+const vfloat<N> safe_rdir_far_y = select(parY, vfloat<N>(0.0f), ray.rdir_far.y);
+const vfloat<N> safe_rdir_far_z = select(parZ, vfloat<N>(0.0f), ray.rdir_far.z);
+const vfloat<N> tNearX0 = (lowerX - ray.org.x) * safe_rdir_near_x;
+const vfloat<N> tNearY0 = (lowerY - ray.org.y) * safe_rdir_near_y;
+const vfloat<N> tNearZ0 = (lowerZ - ray.org.z) * safe_rdir_near_z;
+const vfloat<N> tFarX0 = (upperX - ray.org.x) * safe_rdir_far_x;
+const vfloat<N> tFarY0 = (upperY - ray.org.y) * safe_rdir_far_y;
+const vfloat<N> tFarZ0 = (upperZ - ray.org.z) * safe_rdir_far_z;
+Copilot uses AI. Check for mistakes.
+Copilot started reviewing on behalf of
+stefanatwork
+March 5, 2026 08:48
+View session
+Merge branch 'master' into sw/robust_node_intersections
+2a9856b
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

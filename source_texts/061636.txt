@@ -1,0 +1,1883 @@
+A SUBMISSION TO IEEE TRANSACTION ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+1
+Segment Anything in 3D with Radiance Fields
+arXiv:2304.12308v5 [cs.CV] 16 Apr 2024
+Jiazhong Cen, Jiemin Fang, Zanwei Zhou, Chen Yang,
+Lingxi Xie, Xiaopeng Zhang, Wei Shen, and Qi Tian, Fellow, IEEE
+Abstract—The Segment Anything Model (SAM) emerges as a powerful vision foundation model to generate high-quality 2D
+segmentation results. This paper aims to generalize SAM to segment 3D objects. Rather than replicating the data acquisition and
+annotation procedure which is costly in 3D, we design an efficient solution, leveraging the radiance field as a cheap and off-the-shelf
+prior that connects multi-view 2D images to the 3D space. We refer to the proposed solution as SA3D, short for Segment Anything in
+3D. With SA3D, the user is only required to provide a 2D segmentation prompt (e.g., rough points) for the target object in a single
+view, which is used to generate its corresponding 2D mask with SAM. Next, SA3D alternately performs mask inverse rendering and
+cross-view self-prompting across various views to iteratively refine the 3D mask of the target object. For one view, mask inverse
+rendering projects the 2D mask obtained by SAM into the 3D space with guidance of the density distribution learned by the radiance
+field for 3D mask refinement; Then, cross-view self-prompting extracts reliable prompts automatically as the input to SAM from the
+rendered 2D mask of the inaccurate 3D mask for a new view. We show in experiments that SA3D adapts to various scenes and
+achieves 3D segmentation within seconds. Our research reveals a potential methodology to lift the ability of a 2D segmentation model
+to 3D. Our code is available at https://github.com/Jumpat/SegmentAnythingin3D.
+Index Terms—3D Segmentation, Radiance Fields, 3D Gaussian Splatting, Segment Anything Model.
+✦
+1
+I NTRODUCTION
+T
+HE computer vision community has been pursuing a vision foundation model that can perform basic tasks (e.g.,
+segmentation) in any scenario. In these studies, the Segment
+Anything Model (SAM) [1] stands out as a representative
+work, due to its ability to segment anything in 2D images.
+However, how to extend the ability of SAM to 3D scenes
+remains mostly uncovered. One may choose to replicate the
+pipeline of SAM to collect and semi-automatically annotate
+a large set of 3D scenes. Yet obtaining and annotating 3D
+data densely is much more complex than its 2D counterpart,
+making this data-driven approach impractical.
+We realize that an alternative and efficient solution lies
+in equipping the 2D foundation model (i.e., SAM) with 3D
+perception via a 3D representation model. In other words,
+there is no need to establish a 3D foundation model from
+scratch. We draw inspirations from radiance fields [2], [3],
+[4], [5], [6], [7], a set of novel 3D representations. Radiance
+fields act as a bridge to connect 2D multi-view images to the
+3D world with the differentiable rendering technology. In
+this paper, we propose the integration of SAM with radiance
+fields to facilitate 3D segmentation.
+As shown in Figure 1, our solution is named Segment
+Anything in 3D (SA3D). Given any radiance field trained
+on a set of 2D images, SA3D takes prompts (e.g., click
+points on the object) in a single view as input, which is
+used to generate a 2D mask in this view with SAM. Next,
+SA3D alternately performs two steps across various views
+to iteratively refine the 3D mask of the object. In each round,
+•
+J. Cen, Z. Zhou, C. Yang, and W. Shen are with MoE Key Lab of Artificial
+Intelligence, AI Institute, Shanghai Jiao Tong University, Shanghai,
+200240, China. (Corresponding author: W. Shen.)
+•
+J. Fang, L. Xie, X. Zhang and Q. Tian are with Huawei Inc., China.
+(Project lead: J. Fang.)
+the first step is mask inverse rendering, in which the previous 2D segmentation mask obtained by SAM is projected
+into the 3D space via density-guided inverse rendering for
+3D mask refinement. The second step is cross-view selfprompting, which uses the radiance field to render the 2D
+segmentation mask (which may be inaccurate) based on the
+3D mask from another view. Then a few point prompts
+are automatically generated from the rendered mask and
+used to prompt SAM to produce a more complete and
+accurate 2D mask. The above procedure is executed iteratively until all necessary views have been sampled. With this
+streamlined pipeline, SA3D can achieve 3D segmentation
+within minutes. Noticing that the segmentation process of
+SAM unfolds into two phases, i.e. a time-consuming feature
+extraction phase and a quick mask decoding phase, we
+further propose to pre-cache the features extracted by the
+SAM encoder for essential views. This simple modification
+notably accelerates the inference speed of SA3D. As a result,
+when integrating with an efficient representation like 3DGS [7], SA3D can segment a 3D object from a scene in high
+quality within 2 seconds at the fastest. This acceleration
+benefits the wider application of SA3D.
+We evaluate the performance of SA3D with various
+segmentation settings (e.g., object and part-level) across
+multiple datasets [8], [9], [10], [11], [12] to demonstrate its effectiveness and efficiency. Without re-training/re-designing
+SAM or the radiance field, SA3D easily and efficiently
+adapts to a variety of scenarios, including forward-facing
+and 360◦ scenes. SA3D offers an efficient tool for 3D segmentation in radiance fields and reveals a generic methodology to lift 2D segmentation models to the 3D space.
+Through comprehensive experiments, we demonstrate the
+compatibility of SA3D with different radiance fields and
+provide deeper discussions on its working mechanism.
+The preliminary version of this paper appeared as a
+conference paper [13]. We make extensions in this journal
+A SUBMISSION TO IEEE TRANSACTION ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+Radiance Field
+Fig. 1. Given a pre-trained radiance field, SA3D takes prompts from one
+single rendered view as input and outputs the 3D segmentation result
+for the specific target.
+version as follows: i) We adapt SA3D for more representative radiance fields, especially 3D-GS [7], showing its adaptability and achieving a notable promotion in segmentation
+speed; ii) We introduce a feature cache mechanism that
+further enhances segmentation speed by over 6.9 times1
+by addressing the speed bottleneck imposed by the SAM
+forward pass; iii) We provide an expanded set of experimental results, including comprehensive ablation studies
+that deeply analyze the segmentation performance of SA3D
+when applied to different radiance fields. These experiments
+aim to provide deeper insights into the working mechanism
+of SA3D.
+The remaining part of the paper is organized as follows.
+In Section 2 we introduce related works including radiance
+fields, existing 2D / 3D segmentation methods and segmentation in radiance fields. Then we review preliminaries of
+our method in Section 3. In Section 4, we first introduce
+the overall pipeline of our proposed SA3D and then explain
+each components of it in detail. In Section 5, we evaluate our
+method quantitatively and qualitatively on various datasets
+to demonstrate its effectiveness. This section also includes
+extensive experiments to analyze each component of SA3D
+in depth. We further provide more discussions about the
+working mechanism in Section 6. We finally draw a conclude in Section 7.
+of unstructured 3D Gaussians to represent the 3D scene
+and utilizes an efficient rasterization algorithm to replace
+the volume rendering. 3D-GS holds on par quality while
+reaching real-time rendering speed. Thus, it is regarded as a
+potential game changer in the area of radiance fields. Based
+on 3D-GS, there are a lot of studies focusing on enhancing
+its rendering quality, reducing its storage costs, or lifting it
+to 4D representation [7], [22], [23], [24], [25], [26], [27], [28],
+[29], [30], [31]. In this paper, we analyze the segmentation
+performance of SA3D across representative radiance fields,
+aiming to demonstrate the adaptability of our method and
+provide deeper insights into its working mechanism.
+2.2
+R ELATED W ORK
+2.1
+Radiance Fields
+NeRF (Neural Radiance Field) [2] represents 3D scenes
+as continuous functions parameterized by MLPs that map
+from a 3D coordinate to properties of the scene at the corresponding location. It leverages the differentiable volume
+rendering technique to translate a 3D scene’s continuous
+representation into 2D images. Nevertheless, vanilla-NeRF
+has unfavorable limitations of lengthy training progress
+and slow rendering speed. These limitations motivate an
+explosion of follow-up methods devoted to accelerating
+optimization and rendering [3], [4], [5], [14], [15], [16], [17],
+[18], [19], [20], [21]. Though some breakthroughs have been
+achieved, the reliance on low-efficient volume rendering
+still hinders real-time rendering. Recently, Kerbl et al. [7]
+proposed a real-time rendering technique, 3D Gaussian
+Splatting (3D-GS). Unlike previous studies, it adopts a set
+1. Concrete acceleration depends on specific scenes. See Table 9 for
+more details.
+2D Segmentation
+Since FCN [32] has been proposed, research on 2D image
+segmentation has experienced a rapid growth. Various subfields of segmentation have been explored deeply by numerous studies [33], [34], [35], [36], [37], [38]. With transformers [39], [40] entering the field of segmentation, many
+new segmentation architectures [41], [42], [43], [44], [45]
+have been proposed and the whole field of segmentation
+has been further developed. A significant breakthrough in
+this field is the Segment Anything Model (SAM) [1]. As
+an emerging vision foundation model, SAM aims to unify
+the 2D segmentation task by introducing a prompt-based
+segmentation paradigm. The emergence of SAM triggered a
+new round of research boom, with numerous studies aiming
+to refine its capabilities. These enhancements range from
+efficient fine-tuning techniques [46], [47], [48] to methods for
+distillation-based acceleration [49], [50]. Furthermore, SAM
+has been extended into various domains, including but not
+limited to medical image analysis [51], [52], [53], [54], concealed object detection [55], [56], image editing [57], remote
+sensing [58] and 3D bird’s eye view (BEV) sensing [59].
+An analogous model to SAM is SEEM [60], which exhibits
+impressive open-vocabulary segmentation capabilities.
+2.3
+2
+2
+3D Segmentation and Perception
+Numerous methods have explored 3D segmentation with
+various types of 3D representations. These representations
+include RGB-D images [61], [62], [63], [64], point clouds [65],
+[66], [67] and grid space such as voxels [68], [69], [70],
+cylinders [71] and bird’s eye view space [72], [73]. Although
+3D segmentation has been developed for a period of time,
+compared with 2D segmentation, the scarcity of labeled data
+and high computational complexity makes it difficult to
+design a segmentation foundation model similar to SAM.
+Recently, to tackle this limitation of data scarcity, many
+studies [11], [74], [75], [76], [77], [78], [79], [80], [81] propose
+to inject the perception ability of 2D vision-language models
+(VLM) like CLIP [82] into 3D representations by projecting
+and fusing multi-view 2D visual features with corresponding 3D features. Then, with fused 3D features these methods
+can perform language-driven 3D perception task like localization and reasoning. Different from these methods, SA3D
+specializes in providing fine-grained segmentation based on
+input prompts, focusing more on detailed visual analysis
+than scene understanding through language.
+A SUBMISSION TO IEEE TRANSACTION ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+2.4
+Segmentation in Radiance Fields
+Inspired by the success of NeRFs in 3D consistent novel
+view synthesis, numerous studies have delved into the
+realm of 3D segmentation within NeRFs.
+Zhi et al. [83] propose Semantic-NeRF, a method that incorporates semantics into appearance and geometry, which
+demonstrates the potential of NeRFs in label propagation and refinement. NVOS [9] introduces an interactive
+approach to select 3D objects from NeRFs by training a
+lightweight multi-layer perception (MLP) using customdesigned 3D features. Other approaches, e.g. N3F [84],
+DFF [85], LERF [11], LangSplat [74], ISRF [86], NeRFSOS [87], Feature3DGS [88] and FMGS [89] aim to lift 2D
+visual features to 3D through aligning additional feature
+fields with multi-view 2D features. In inference stage, segmentation is conducted by feature matching between textual
+features or 2D visual features with 3D features. Different
+from the paradigm of feature alignment, Mirzaei et al. [10]
+propose MVSeg as a component of their NeRF inpainting framework SPIn-NeRF. MVSeg propagates a 2D mask
+across different views with the help of 2D self-supervised
+models like DINO [90] and employs these masks as labels
+for training a Semantic-NeRF model. However, the mask
+propagation of MVSeg solely relies on 2D visual feature similarities and does not incorporate 3D location information.
+This omission makes the obtained masks noisy, leading to
+bad performance of MVSeg in complex scenes. In comparison, the cross-view self-prompting mechanism employed by
+SA3D adequately addresses this issue.
+Recently, many studies [91], [92], [93], [94] propose to automatically generate masks from multi-view images within
+the training set of radiance field models using SAM. Then,
+these masks are distilled into 3D feature fields with specifically designed loss functions. Once the 3D feature fields
+are trained, 3D interactive segmentation or grouping can
+be performed via 3D feature matching. In these methods,
+all 3D features are derived from automatically extracted
+masks, suggesting that subsequent segmentation will fail
+to capture objects overlooked during the automatic mask
+extraction phase. The absence of human intervention makes
+it challenging to ensure the accurate segmentation of all objects of interest. In contrast, SA3D can conduct accurate 3D
+segmentation that aligns properly with user requirements.
+There are also many instance segmentation and semantic
+segmentation approaches [95], [96], [97], [98], [99], [100],
+[101] combined with NeRFs. These methods predominantly
+concentrate on segmenting objects belonging to some predefined classes. In contrast, SA3D is able to segment objects
+belonging to any classes by harnessing the capacity of a 2D
+segmentation foundation model.
+3.1
+3.1.1
+3
+Radiance Fields
+Neural Radiance Fields (NeRFs)
+Given a training dataset I of multi-view 2D images,
+NeRFs [2] learn a function fθ : (x, d) → (c, σ), which maps
+the spatial coordinates x ∈ R3 and the view direction d ∈ S2
+of a point into the corresponding color c ∈ R3 and volume
+density σ ∈ R. θ denotes the learnable parameters of the
+function f . Generally, to render an image Iθ , each pixel
+undergoes a ray casting process where a ray r(t) = xo +td is
+projected through the camera pose. Here, xo is the camera
+origin, d is the ray direction, and t denotes the distance
+of a point along the ray from the origin. The RGB color
+Iθ (r) at the location determined by ray r is obtained via the
+differentiable volume rendering algorithm:
+Z tf
+ω(r(t))c(r(t), d)dt,
+(1)
+Iθ (r) =
+tn
+Rt
+where ω(r(t)) = exp(− tn σ(r(s))ds) · σ(r(t)), and tn and
+tf denote the near and far bounds of the ray, respectively.
+3.1.2
+3D Gaussian Splatting (3D-GS)
+As a recent advancement of radiance field, 3D-GS has many
+different attributes. Rather than learning the function fθ for
+query-based rendering, 3D-GS adopts a set of 3D Gaussians
+G to preserve the properties (e.g., color and opacity) required
+by rendering. The mean of each Gaussian represents its
+position in the 3D space and the covariance represents the
+scale. Given a specific camera pose, 3D-GS projects the 3D
+Gaussians to 2D and then computes the color C of a ray
+by blending a set of ordered Gaussians Gr overlapping the
+ray r. Let gi denote the i-th Gaussian in Gr , this process is
+formulated as:
+|Gr |
+X
+Iθ (r) =
+ωgi cgi ,
+(2)
+i=1
+Qi−1
+where ωgi = αgi j=1 (1 − αgj ) and cgi is the color of
+Gaussian gi . αgi is given by evaluating a 2D Gaussian with
+covariance Σ multiplied with a learned per-Gaussian opacity. The introduction of 3D Gaussians and the rasterization
+algorithm enables 3D-GS to avoid querying empty spaces
+during rendering. This leads to significant improvements in
+rendering and training speed.
+3.2
+Segment Anything Model (SAM)
+SAM [1] employs an encoder-decoder architecture. The
+encoder Se takes an image I as input and outputs the
+corresponding features fI :
+fI = Se (I).
+(3)
+The decoder Sd takes the features and a set of prompts P
+as input, and outputs the corresponding 2D segmentation
+mask MSAM in the form of a bitmap, i.e.,
+3
+P RELIMINARIES
+In this section, we provide a brief background of fundamentals used in SA3D. We first revisit radiance fields in
+Section 3.1 and then introduce the Segment Anything Model
+(SAM) in Section 3.2.
+MSAM = Sd (fI , P).
+(4)
+The prompts p ∈ P can be points, boxes, texts, and masks.
+In the computational overhead of SAM, the majority is
+expended on the encoder, and the decoder accounts for only
+a minimal portion.
+A SUBMISSION TO IEEE TRANSACTION ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+4
+Fig. 2. The overall pipeline of SA3D. Given a set of multi-view 2D images and a radiance field trained on it, SA3D first employs the SAM encoder
+to extract all features from the images and builds a cache. Then SA3D takes prompts in a single view for the target object as input and uses
+SAM to produce a 2D mask in this view with these prompts. Subsequently, SA3D performs an alternated process of mask inverse rendering and
+cross-view self-prompting to refine the 3D mask of the target object. Mask inverse rendering is performed to project the 2D mask obtained by the
+SAM decoder into the 3D space according to the learned density distribution embedded in the radiance field for 3D mask refinement. Cross-view
+self-prompting is conducted to extract reliable prompts automatically as the input to the SAM decoder from the rendered 2D mask given a novel
+view. This alternated process is executed iteratively until we get the accurate 3D mask.
+4
+M ETHOD
+In this section, we first introduce the overall pipeline of
+SA3D. Then, we explain the design of each component in
+SA3D in detail.
+4.1
+Overall Pipeline
+We assume that we already have a radiance field trained on
+a set of multi-view images I . As shown in Figure 2, before
+the segmentation process begins, the SAM encoder Se is first
+employed to extract the features of all images in I , which
+are used to construct a feature cache F = {fI |I ∈ I}.
+At the beginning of segmentation, an image I(1) from
+a specified view is rendered with the pre-trained radiance
+field. A set of prompts (e.g., in this paper, we often use a set
+of points), P (1) , is introduced and fed into SAM along with
+(1)
+the rendered image. The 2D segmentation mask MSAM of
+the according view is obtained, which is then projected into
+the 3D space to form a coarse 3D mask with the proposed
+mask inverse rendering technique (Section 4.3). Then a 2D
+segmentation mask M(n) from a new view in I is rendered
+from the 3D mask. The rendered mask may be inaccurate,
+especially in the preliminary stage. We propose a crossview self-prompting method (Section 4.4) to extract point
+prompts P (n) from the rendered mask. These extracted
+prompts, combined with the cached features fI(n) of the corresponding image I(n) , are then fed into the SAM decoder to
+(n)
+generate a refined 2D segmentation mask MSAM . This mask
+is also projected into the 3D space for refinement. The above
+procedure is executed iteratively with more views traversed.
+Meanwhile, the 3D mask becomes more and more accurate.
+The whole process bridges 2D segmentation results with 3D
+ones efficiently. Note that no other parameter needs to be
+optimized except for the 3D mask.
+4.2
+3D Mask Representation
+We design two 3D mask representations to fit the two types
+of radiance fields, i.e. NeRFs and 3D-GS, for better efficiency
+and effectiveness.
+For NeRFs, we simply adopt 3D voxel grids V ∈
+RL×W ×H to represent the 3D mask, where each grid vertex
+stores a zero-initialized soft mask confidence score. Based
+on these voxel grids, each pixel of the 2D mask from one
+view is rendered as
+Z tf
+M(r) =
+ω(r(t))V(r(t))dt,
+(5)
+tn
+where V(r(t)) denotes the mask confidence score at the
+location r(t) obtained from voxel grids V2 .
+For 3D-GS, we adopt a slightly different design, where
+a zero-initialized mask confidence score mgi , is integrated
+as a new attribute for each 3D Gaussian gi . This is because
+that in 3D-GS, a 3D Gaussian is a basic unit for rendering.
+This requires a Gaussian to be wholly assigned to either
+the segmentation target or the background. Thus, there is
+no benefit to use additional mask grids for mask representation. Under this design, the mask rendering process can
+seamlessly use the differentiable rasterization algorithm as
+described in Equation (2):
+M(r) =
+|Gr |
+X
+ωgi mgi .
+(6)
+i=1
+2. V(r(t)) is computed by trilinearly interpolating vertex values of
+the 3D mask grids.
+A SUBMISSION TO IEEE TRANSACTION ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+Moreover, this modification brings the following advantages: 1) Reduced GPU memory usage. The number of 3D
+Gaussians in a scene rarely surpasses 10 million, contrasting
+sharply with the 32.77 million entries required by a 3203
+resolution mask grid. Attaching an attribute to each Gaussian is thus significantly more memory-efficient; 2) Lower
+computation consumption. Storing mask confidence in grids
+necessitates additional querying during the rendering phase
+to access each Gaussian’s confidence score, thereby increasing the computational overhead.
+4.3
+As shown in Equation (1) and (2), the color of each pixel
+in a rendered image I is determined by a sum of weighted
+colors along the corresponding ray. The weight ω(r(t)) (or
+{ωgi |gi ∈ Gr } for 3D-GS) reveals the object structure within
+the 3D space, where a high weight indicates the corresponding point close to the object’s surface. Mask inverse
+rendering aims to project the 2D mask of I into the 3D space
+to form the 3D mask based on these weights.
+Denote MSAM (r) as the corresponding mask generated
+by SAM. When MSAM (r) = 1, the goal of mask inverse
+rendering is to increase V(r(t)) (or {mgi |gi ∈ Gr } for 3DGS) with respect to ω . In practice, this can be optimized
+using the gradient descent algorithm. For this purpose, we
+define the mask projection loss as the negative product
+between MSAM (r) and M(r):
+X
+Lproj = −
+MSAM (r) · M(r),
+(7)
+r∈R(I)
+where R(I) denotes the ray set of the image I.
+The mask projection loss is constructed based on the
+assumption that both the geometry from the radiance field
+and the segmentation results of SAM are accurate. However,
+in practice, this is not always the case. We append a negative
+refinement term to the loss to optimize the 3D mask grids
+according to multi-view mask consistency:
+X
+Lproj = −
+MSAM (r) · M(r)
++λ
+X
+(1 − MSAM (r)) · M(r),
+(8)
+r∈R(I)
+where λ is a hyper-parameter to determine the magnitude of
+the negative term. With this negative refinement term, only
+if SAM consistently predicts a region as foreground from
+different views, SA3D marks its corresponding 3D region as
+foreground.
+4.4
+1.1 Select a point with the
+highest confidence
+1.3 3D distance-based
+confidence decay
+(Equation (9-11))
+1.2 Mask out
+a square region
+2.1 Select a new point with
+the highest confidence
+2.2 Mask out
+square regions
+2.3 Confidence decay
+(Equation (9-11))
+Repeat
+the process
+Fig. 3. Illustration of the proposed self-prompting strategy. It converts
+the 2D-rendered mask of a new view into corresponding point prompts,
+leveraging the 3D geometry prior and 2D-rendered mask confidence.
+Mask Inverse Rendering
+r∈R(I)
+5
+Cross-view Self-prompting
+Mask inverse rendering enables projecting 2D masks into
+the 3D space to form the 3D mask of a target object.
+To construct an accurate 3D mask, substantial 2D masks
+from various views need to be projected. SAM can provide
+high-quality segmentation results given proper prompts.
+However, manually selecting prompts from every view is
+time-consuming and impractical. We propose a cross-view
+self-prompting mechanism to produce prompts for different
+views automatically.
+Specifically, we first render a 2D segmentation mask
+M(n) for a new view from the 3D mask according to Equation (5) (or Equation (6) for 3D-GS). This mask is usually
+inaccurate, especially at the preliminary iteration of SA3D.
+Then we obtain some point prompts from the rendered
+mask with a specific strategy. The above process is named
+cross-view self-prompting. While there are multiple possible
+solutions for this strategy, we present a feasible one that has
+been demonstrated to be effective.
+4.4.1 Self-prompting Strategy
+Given an inaccurate 2D rendered mask M(n) , the selfprompting strategy aims to extract a set of prompt points Ps
+from it, which can help SAM to generate 2D segmentation
+result as accurate as possible. It is important to note that
+M(n) is not a typical 2D bitmap, but rather a confidence
+score map computed using Equation (5). We propose a
+simple yet effective self-prompting strategy using this confidence score and the 3D geometry prior provided by the
+radiance field, as shown in Figure 3. Since each image pixel
+p corresponds to a ray r in a rendered view, we use p for
+an easier demonstration of the prompt selection strategy on
+images.
+As Ps is initialized to an empty set, the first prompt
+point p0 is selected as the point with the highest mask confidence score: p0 = arg maxp {M(n) (p)|p ∈ R(I(n) )}3 . To
+select new prompt points, we first mask out square-shaped
+regions4 on M(n) centered with each existing point prompt
+p̂ ∈ Ps . Considering the depth z(p) can be estimated by the
+pre-trained NeRF, we transform the 2D pixel p to the 3D
+point G(p) = [x(G(p)), y(G(p)), z(G(p)]⊤ :
+
+
+
+
+x(G(p))
+x(p)
+y(G(p)) = z(p)K−1 y(p)
+(9)
+z(G(p))
+1
+where x(p), y(p) denote the 2D coordinates of p, and K
+denotes the camera intrinsics. The new prompt point is
+expected to have a high confidence score while being close
+to existing prompt points. Considering the two factors, we
+introduce a decay term to the confidence score. Let d(·, ·)
+3. I(n) is the RGB image of the corresponding view. R(I(n) ) denotes
+rays within I(n) . We use pixel p rather than ray r for clarity and brevity
+since pixels have one-to-one correspondence with rays.
+4. The side length of the region is set as the radius of a circle whose
+area is equal to the binarized rendered mask M̄(n) , where M̄(n) (p) =
+1(M(n) (p) > 0). 1 denotes the indicator function.
+A SUBMISSION TO IEEE TRANSACTION ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+Scene
+360-garden
+Artifacts
+Unremoved
+Artifacts
+Removed
+Ambiguous
+Gaussians
+the negative refinement term in Equation (8) can detect and
+eliminate most of ambiguous Gaussians.
+Note that this operation is only adopted in qualitative
+experiments. The ambiguous Gaussians do not affect the
+quantitative results before the background is removed.
+5
+Fig. 4. Illustration of ambiguous Gaussians at the interface between
+two objects. The proposed ambiguous Gaussians removal method can
+alleviate such phenomenon effectively.
+denote the min-max normalized Euclidean distance. For
+each remaining point p in M(n) , the decay term is
+∆M(n) (p) = min{M(n) (p̂) · d(G(p), G(p̂)) | p̂ ∈ Ps }. (10)
+Then a decayed mask confidence score M̃(n) (p) is computed as
+M̃(n) (p) = M(n) (p) − ∆M(n) (p).
+(11)
+The remaining point with the highest decayed score, i.e.,
+p∗ = arg maxp {M̃(n) (p)|p ∈ R(I(n) )}, is added to the
+prompt set: Ps = Ps ∪ {p∗ }. The above selection process is
+repeated until either the number of prompts |Ps | reaches a
+predefined threshold np or the maximum value of M̃(n) (p)
+is smaller than 0.
+4.4.2
+IoU-aware View Rejection
+When the target object is rendered in heavily occluded
+views, SAM may produce incorrect segmentation results
+and degrade the quality of the 3D mask. To avoid such
+situations, we introduce an additional view rejection mechanism based on the intersection-over-union (IoU) between
+(n)
+the rendered mask M(n) and the SAM prediction MSAM . If
+the IoU falls below a predefined threshold τ , it indicates a
+poor overlap between the two masks. The prediction from
+SAM is rejected, and the mask inverse rendering step is
+skipped in this iteration.
+4.5
+Eliminating Ambiguous Gaussians in 3D-GS
+In 3D-GS, an intuitive way to retrieve the segmentation target is to discard 3D Gaussians with a mask confidence score
+below a predetermined threshold (0 in default). However,
+since the 3D Gaussians are trained to fix multi-view RGB
+images without considering the concept of objects, there
+are multiple ambiguous Gaussians at the interface between
+two objects. As shown in Figure 4, after the background
+is removed, these Gaussians appear and impair the geometry correctness of the segmentation target. We provide
+an optional removal strategy to eliminate these ambiguous
+Gaussians.
+During the segmentation process, we retain all 2D masks
+extracted by SAM and their corresponding Intersection over
+Union (IoU) scores used for the IoU-aware view rejection
+mechanism. After completing segmentation, we remove
+3D Gaussians classified as background and reapply the
+preserved masks for another round of inverse rendering.
+Views with IoU scores below the threshold τ remain to be
+discarded. Since in this step, the occlusions are removed,
+6
+E XPERIMENTS
+In this section, we integrate SA3D with different representative radiance fields including vanilla-NeRF [2], TensoRF [5],
+and 3D-GS [7] to form three variants, i.e., SA3D-NeRF,
+SA3D-TensoRF and SA3D-GS. Vanilla-NeRF employs an
+MLP to model the 3D scene and is a kind of pure implicit
+representation. TensoRF employs Vector-Matrix (VM) decomposition and a lightweight MLP decoder to construct
+the 3D scene, which is a hybrid representation. 3D-GS
+employs the explicit 3D Gaussians without any neural networks to represent the 3D scene. Experiments demonstrate
+that SA3D can be adapted to various kinds of radiance fields
+seamlessly. We quantitatively and qualitatively evaluate the
+segmentation performance of SA3D on various datasets,
+further demonstrating the versatility of SA3D, which can
+conduct instance segmentation, part segmentation, and textprompted segmentation etc.
+5.1
+Datasets
+For quantitative experiments, we use the Neural Volumetric Object Selection (NVOS) [9], SPIn-NeRF [10], and
+Replica [8] datasets. The NVOS [9] dataset is based on
+the LLFF dataset [102], which includes several forwardfacing scenes. For each scene, NVOS provides a reference
+view with scribbles and a target view with 2D segmentation masks annotated. Similar to NVOS, SPIn-NeRF [10]
+annotates some data manually to evaluate interactive 3D
+segmentation performance. These annotations are based on
+some widely-used NeRF datasets [2], [12], [15], [102], [103].
+The Replica [8] dataset provides high-quality reconstruction
+ground truths of various indoor scenes, including clean
+dense geometry, high-resolution and high-dynamic-range
+textures, glass and mirror surface information, semantic
+classes, planar segmentation, and instance segmentation
+masks. For qualitative analysis, we use the LLFF [102]
+dataset and the MIP-360 dataset [6]. SA3D is further applied
+to the LERF [11] dataset, which contains more realistic and
+challenging scenes.
+5.2
+Implementation Details
+We implement SA3D using PyTorch [104]. The SA3D model
+is built and trained on a single Nvidia Geforce RTX3090
+GPU. Vanilla-NeRF [2] is pre-trained with 200,000 iterations
+for all scenes. TensoRF [5] is pre-trained with 20,000 iterations for LLFF [102] and MIP-360 [6] and 40,000 iterations for
+other datasets. For all scenes we choose the VM-48 variant
+of TensoRF. 3D-GS [7] is pre-trained with 30,000 iterations
+for all scenes. During the training of the 3D-GS, we reuse all
+hyper-parameters from its official implementation.
+During segmentation, the resolution of mask grids for
+NeRFs is set to 3203 . For vanilla-NeRF, due to the limitations
+of the GPU memory, the mask of a view is rendered in
+chunks (32768 rays in each chunk). The learning rates of the
+A SUBMISSION TO IEEE TRANSACTION ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+TABLE 1
+Quantitative results on NVOS. ‘FC’ denotes the feature cache. The time
+cost of compared methods is estimated according to the description in
+their papers.
+Method
+Graph-cut (3D) [9], [105]
+NVOS [9]
+ISRF [86]
+OmniSeg3D [94]
+SA3D-TensoRF (w/o FC) [13]
+SA3D-TensoRF (w/ FC)
+SA3D-NeRF (w/ FC)
+SA3D-GS (w/ FC)
+*
+mIoU (%)
+mAcc (%)
+Time (s)
+39.4
+70.1
+83.8
+91.7
+90.3
+90.1
+88.5
+92.2
+73.6
+92.0
+96.4
+98.4
+98.2
+98.2
+97.8
+98.5
+150*+ 2.3
+900*+ 0.1
+45
+30*+ 15
+30*+ 200
+30*+ 2
+The additional training time cost by ISRF and OmniSeg3D to
+train feature fields. SA3D does not involve additional training,
+so we report the time cost of feature caching instead.
+mask grids and the mask confidence scores for 3D-GS are set
+to 1. In default, the coefficient λ for the negative refinement
+term is set to 0.15, the number of prompts np is set to 3 and
+the threshold τ for the IoU-aware rejection mechanism is set
+to 0.5.
+5.3
+Quantitative Results
+5.3.1 The NVOS Dataset
+For fair comparisons, we follow the experimental setting of
+the original NVOS [9]. We first scribble on the reference view
+(provided by the NVOS dataset) to conduct 3D segmentation, and then render the 3D segmentation result on the
+target view and evaluate the IoU and pixel-wise accuracy
+with the provided ground truth. Note that the scribbles
+are preprocessed to meet the requirements of SAM. As
+shown in Table 1, SA3D outperforms previous approaches
+by large margins, i.e., +0.5 mIoU over the OmniSeg3D, +6.5
+mIoU over the ISRF and +20.2 mIoU over the NVOS. The
+results of SA3D-TensoRF without feature cache are inherited
+from [13]. Introducing the feature cache does not affect the
+segmentation accuracy. The slight number discrepancies in
+the result tables are due to refinements in our implementation of cross-view self-prompting.
+5.3.2 The SPIn-NeRF Dataset
+We follow SPIn-NeRF [10] to conduct label propagation for
+evaluation. Given a specific reference view of a target object,
+the 2D ground-truth mask of this view is available. The
+prompt input operation is omitted, while the 2D groundtruth mask of the target object from the reference view is
+directly used for the initialization of the 3D mask grids. This
+is reasonable since in most situations users can refine their
+input prompts to help SAM generate a 2D mask as accurately as possible from the reference view. Once the 3D mask
+grids are initialized, the subsequent steps are exactly the
+same as described in Section 4. With the 3D mask finalized,
+the 2D masks in other views are rendered to calculate the
+IoU with the 2D ground-truth masks. Results can be found
+in Table 2. SA3D is demonstrated to be superior in both
+forward-facing and 360◦ scenes. The performance of SA3DNeRF is marginally inferior to that of its counterparts utilizing different radiance fields, as shown in both Table 1 and
+Table 2. This discrepancy is attributed to the sub-optimal
+7
+3D geometry learned by the Vanilla-NeRF. Specifically, 2D
+masks often project onto artifacts and floaters within the
+Vanilla-NeRF model or erroneously pass through the object
+surface and project onto the background. Advancements in
+radiance field technology also lead to better segmentation
+results.
+In Tables 2 and 3, “Single view” refers to conducting
+mask inverse rendering exclusively for the 2D groundtruth mask of the reference view. This process is equivalent
+to mapping the 2D mask to the 3D space based on the
+corresponding depth information, without any subsequent
+learnable/updating step. We present these results to demonstrate the gain of the alternated process in our framework.
+As shown in Table 2, SA3D outperforms MVSeg [10] in most
+scenes. Taking SA3D-GS as an example, it achieves +9.6
+mIoU on Truck and +17.1 mIoU on Lego. Besides, compared
+with the “Single view” model, a significant promotion is
+achieved, i.e. +18.6 mIoU, which further proves the effectiveness of our method.
+5.3.3
+The Replica Dataset
+We use the processed Replica data with 2D instance labels
+provided by Zhi et al. [83] to evaluate the segmentation
+performance of SA3D. We retrieve all views containing
+each object and specify one reference view. With a similar
+setting of experiments on the SPIn-NeRF dataset, we use the
+ground-truth mask of the reference view and perform SA3D
+to conduct label propagation for evaluation. For each scene
+in Replica, around 20 objects are chosen for evaluation.
+As shown in Table 3, the mean IoU (mIoU) is reported
+for all available objects in different scenes. We exclude the
+pixel-wise accuracy metric since an object only appears
+in a few views in the indoor scenes of Replica, where
+the pixel-wise accuracy is too high to serve as a reliable
+metric. Besides, SA3D-NeRF is not evaluated on the Replica
+dataset, primarily due to its inferior reconstruction quality
+and notably slow inference speed: Assessing a single object
+with SA3D-NeRF on Replica takes over an hour, indicating
+vanilla-NeRF is unsuitable for segmenting scenes with a
+large number of objects.
+In complex indoor scenes of Replica, MVSeg’s strategy based on cross-view 2D feature similarities proves to
+be ineffective, which generates numerous inaccurate 2D
+pseudo-labels, even using the Semantic-NeRF [83] for refinement. Consequently, the final 3D segmentation results
+of MVSeg even underperform those achieved by the “Single view” method. SA3D-GS exhibits unexpectedly lower
+performance. We carefully check the results and find this
+is largely due to the sub-optimal geometry that 3D-GS
+learned from the Replica dataset, which manifests as numerous translucent artifacts that confuse the inverse-rendering
+process and, consequently, interfere with the self-prompting
+outcomes. This deficiency is likely due to the weak texture
+details provided by the Replica dataset, which result in poor
+point cloud initialization by Colmap [106], [107]. During
+the training phase, incorrect 3D points become translucent
+floaters as 3D-GS tends to overfit certain views in the
+absence of multi-view consistency constraints, which are
+typically enforced by detailed textures. Improvements in 3D
+geometry in 3D-GS may overcome this challenge.
+A SUBMISSION TO IEEE TRANSACTION ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+8
+TABLE 2
+Quantitative results on the SPIn-NeRF dataset. ‘FC’ denotes the feature cache. ‘TRF’ denotes ‘TensoRF’.
+SA3D-TRF (w/o FC) [13]
+SA3D-TRF (w/ FC)
+SA3D-NeRF (w/ FC)
+SA3D-GS (w/ FC)
+IoU (%)
+Acc (%)
+IoU (%)
+Acc (%)
+IoU (%)
+Acc (%)
+IoU (%)
+Acc (%)
+IoU (%)
+Acc (%)
+IoU (%)
+Acc (%)
+Orchids
+Leaves
+Fern
+Room
+Horns
+Fortress
+79.4
+78.7
+95.2
+73.4
+85.3
+94.1
+96.0
+98.6
+99.3
+96.5
+97.1
+99.1
+92.7
+94.9
+94.3
+95.6
+92.8
+97.7
+98.8
+99.7
+99.2
+99.4
+98.7
+99.7
+83.6
+97.2
+97.1
+88.2
+94.5
+98.3
+96.9
+99.9
+99.6
+98.3
+99.0
+99.8
+87.9
+97.5
+97.3
+90.4
+95.4
+98.4
+97.8
+99.9
+99.6
+98.6
+99.2
+99.8
+70.4
+96.4
+93.1
+87.5
+95.6
+97.1
+93.3
+99.8
+99.0
+98.3
+99.2
+99.6
+84.7
+97.2
+96.7
+93.7
+95.3
+98.1
+97.2
+99.8
+99.5
+99.2
+99.2
+99.7
+Fork
+Pinecone
+Truck
+Lego
+69.4
+57.0
+37.9
+76.0
+98.5
+92.5
+77.9
+99.1
+87.9
+93.4
+85.2
+74.9
+99.5
+99.2
+95.1
+99.2
+89.4
+92.9
+90.8
+92.2
+99.6
+99.1
+96.7
+99.8
+89.8
+93.1
+96.1
+90.9
+99.6
+99.1
+98.7
+99.7
+86.4
+90.9
+80.2
+86.8
+99.4
+98.9
+92.9
+99.6
+87.9
+91.6
+94.8
+92.0
+99.5
+99.0
+98.2
+99.7
+mean
+74.6
+95.5
+90.9
+98.9
+92.4
+98.9
+93.7
+99.2
+88.4
+98.0
+93.2
+99.1
+Scenes
+Single view [13]
+MVSeg [10]
+TABLE 3
+Quantitative results on Replica (mIoU). ‘FC’ denotes the feature cache.
+5.4
+Scenes
+office0
+office1
+office2
+office3
+office4
+room0
+room1
+room2
+mean
+Time (s/object)
+Single view [13]
+MVSeg [10]
+SA3D-TensoRF (w/o FC) [13]
+SA3D-TensoRF (w/ FC)
+SA3D-GS (w/ FC)
+68.7
+31.4
+84.4
+86.2
+82.1
+56.5
+40.4
+77.0
+78.2
+72.7
+68.4
+30.4
+88.9
+87.2
+81.3
+62.2
+30.5
+84.4
+83.6
+83.2
+57.0
+25.4
+82.6
+81.5
+65.7
+55.4
+31.1
+77.6
+79.1
+79.9
+53.8
+40.7
+79.8
+77.5
+79.0
+56.7
+29.2
+89.2
+88.1
+88.9
+59.8
+32.4
+83.0
+82.7
+79.1
+1430
+67.6
+30.2
+2.5
+Qualitative Results
+We visualize the segmentation results of SA3D under three
+segmentation settings: object segmentation, part segmentation, and text-prompting segmentation. The first two are
+the core functions of SA3D. As shown in Figure 5, SA3D
+demonstrates its capability to segment diverse 3D objects
+across different scenes of different radiance fields, even
+when the objects are of small scales. Besides, SA3D can
+also handle challenging part segmentation. For instance,
+SA3D can segment distinct components of complex objects,
+such as the bucket, small wheel, and dome light of the
+Lego bulldozer. Furthermore, it exhibits a remarkable ability
+to accurately delineate individual elements from densely
+grouped objects, as evidenced by its precise segmentation
+of a single flower from within a bouquet. Figure 6 demonstrates the potential of SA3D in combining with cross-modal
+models. Given a text phrase, the corresponding object can be
+accurately cut out. The text-prompting segmentation is built
+upon Grounding-DINO [108], a model capable of generating
+bounding boxes for objects based on text prompts. These
+bounding boxes serve as input prompts for SA3D in the
+segmentation process. It is noteworthy that SA3D is capable
+of simultaneously segmenting multiple objects by augmenting the 3D mask with an additional dimension to account
+for distinct objects, as shown in Figure 7.
+In Figure 8, we demonstrate the superior alignment
+of SA3D with the specific requirements in comparison to
+feature-field-based approaches like OmniSeg3D [94]. Despite experimenting with various prompts and adjusting
+the score threshold (a hyper-parameter in OmniSeg3D for
+filtering 3D points based on feature similarity), OmniSeg3D
+consistently fails to segment the T-rex skull accurately. As
+stated in Section 2.4, this is because that the 2D masks used
+to train the feature field in these methods are generated
+automatically with SAM, which might not align with targets
+with unseen granularities. As a result, the trained feature
+field is certain to encounter failures when the required
+segmentation granularity differs from the granularities involved in training. Concretely, in the automated mask generation process, the T-rex skull is seldom segmented as
+a cohesive entity. Consequently, the feature fields trained
+using these automatically derived masks fail to segment the
+T-rex skull in its entirety. This limitation of feature-fieldbased methods has also been revealed by GARField [93].
+5.5
+Ablative Studies and Parameter Discussion
+In this section, we perform ablations to analyze the effectiveness of different modules and designs. Unless otherwise
+stated, SA3D refers to SA3D-TensoRF without the feature
+cache.
+5.5.1
+Number of Views
+The process of mask inverse rendering and cross-view selfprompting is alternated across different views. By default,
+we utilize all available views in the training set I . However,
+to expedite the 3D segmentation procedure, the number of
+views can be reduced. As shown in Table 4, We perform
+experiments on two representative scenes from the SPInNeRF [10] dataset to demonstrate this characteristic. The
+views are uniformly sampled from the sorted training set.
+In forward-facing scenes where the range of the camera
+poses is limited, satisfactory results can be achieved by
+selecting only a few views. In 3D-GS, utilizing an NVIDIA
+RTX 3090 GPU, the 3D segmentation process across five
+views is finished within 2 seconds. Thanks to the feature
+cache, when views increase in a broader camera range, the
+segmentation results improve while the time cost increases
+A SUBMISSION TO IEEE TRANSACTION ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+9
+Fig. 5. Some visualization results in different scenes (LERF-donuts [11], LERF-figurines, 360-kitchen [6], LERF-bouquet, T&T-truck [12] and LERFnerfgun).
+TABLE 4
+Ablation on different numbers of views for 3D mask generation. Numbers in parentheses represent the view percentage of total training views. ‘FC’
+denotes the feature cache.
+Number of Views
+Fortress
+(forward facing)
+SA3D-TensoRF (w/o FC) [13]
+SA3D-TensoRF (w/ FC)
+SA3D-GS (w/ FC)
+Number of Views
+Lego
+(360◦ )
+SA3D-TensoRF (w/o FC) [13]
+SA3D-TensoRF (w/ FC)
+SA3D-GS (w/ FC)
+Text:
+“The table”
+Text:
+“The vase”
+5 (10%)
+IoU (%) / Time (s)
+9 (20%)
+IoU (%) / Time (s)
+21 (50%)
+IoU (%) / Time (s)
+43 (100%)
+IoU (%) / Time (s)
+97.8 / 7.6
+98.0 / 6.0
+97.2 / 1.6
+98.3 / 12.8
+98.4 / 7.4
+98.1 / 2.2
+98.3 / 29.0
+98.5 / 12.8
+98.1 / 2.5
+98.3 / 59.0
+98.4 / 20.3
+98.1 / 3.7
+11 (10%)
+IoU (%) / Time (s)
+21 (20%)
+IoU (%) / Time (s)
+51 (50%)
+IoU (%) / Time (s)
+103 (100%)
+IoU (%) / Time (s)
+84.5 / 23.5
+76.1 / 17.6
+84.4 / 1.9
+84.8 / 43.5
+88.1 / 21.7
+88.2 / 2.3
+91.5 / 103.8
+90.7 / 50.1
+88.8 / 3.2
+92.2 / 204.9
+90.9 / 96.3
+92.0 / 4.6
+Text:
+“The bonsai”
+Fig. 7. Segmenting multiple objects simultaneously by extending the 3D
+mask to 4D in LLFF-chesstable [102].
+Fig. 6. 3D segmentation results of SA3D with the text prompts in 360garden [6].
+negligibly. Increasing the view count from 11 to 103 brings
+only an additional 2.7 seconds in processing time.
+5.5.2 Hyper-parameters
+SA3D mainly involves three hyper-parameters: the IoU rejection threshold τ , the loss balance coefficient λ in Equation (8), and the number of self-prompting points np . As
+shown in Table 5, too small τ values lead to unstable SAM
+predictions, introducing noises to the 3D mask; too large
+τ values impede the 3D mask from getting substantial information. Table 6 indicates slightly introducing a negative
+term with the λ factor can reduce noise for mask projection.
+However, a too-large negative term may make the mask
+completion process unstable and cause degraded performance. The selection of np depends on the specific seg-
+A SUBMISSION TO IEEE TRANSACTION ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+10
+mechanism and finally, the segmentation results will involve
+unwanted background regions.
+TABLE 7
+Ablation on the confidence decay term of the self-prompting strategy.
+w/ Confidence Decay
+w/o Confidence Decay
+IoU (%)
+Acc (%)
+IoU (%)
+Acc (%)
+Fern
+Flower
+Fortress
+Horns-center
+Horns-left
+Leaves
+Orchids
+Trex
+82.9
+94.6
+98.3
+96.2
+90.2
+93.2
+85.5
+82.0
+94.4
+98.7
+99.7
+99.3
+99.4
+99.6
+97.3
+97.4
+82.9
+94.6
+98.4
+96.2
+88.8
+93.2
+85.4
+64.0
+94.4
+99.7
+99.7
+99.3
+99.3
+99.6
+97.3
+93.3
+mean
+90.3
+98.2
+87.9
+97.7
+Scenes
+Fig. 8. Compared with OmniSeg3D (a feature-field-based radiance field
+segmentation approach), SA3D can successfully segment the T-rex
+skull, while OmniSeg fails. Target of interest is labeled with the green
+frame, prompts are labeled as blue dots and the failures of OmniSeg3D
+are labeled as red boxes.
+Input image with prompts
+3 self-prompting points
+6 self-prompting points
+10 self-prompting points
+Fig. 9. Results of different self-prompting points numbers np on the
+LLFF-trex [102] scene.
+mentation target, as SAM tends to produce over-segmented
+results that capture finer details of objects. As shown in
+Figure 9, for objects with a relatively large scale and complex
+structures, a bigger np produces better results. Empirically,
+setting np to 3 can meet the requirements of most situations.
+TABLE 5
+Ablation on different IoU-aware rejection threshold τ on the Replica
+office 0.
+τ
+0.3
+0.4
+0.5
+0.6
+0.7
+mIoU
+74.9
+79.7
+84.4
+81.3
+82.0
+TABLE 6
+Ablation on different negative term coefficient λ on the Replica office 0.
+λ
+0.05
+0.1
+0.15
+0.3
+0.5
+mIoU
+79.1
+82.9
+84.4
+84.9
+83.3
+5.5.3 Self-prompting Strategy
+Without the 3D distance based confidence decay (Equation (10)), our self-prompting strategy degrades to a simple
+2D NMS (Non-Maximum Suppression), which selects a
+prompt point with the highest confidence score and then
+mask out a region around it. To show the efficacy of our design, we conduct experiments using the NVOS benchmark
+and present per-scene results for in-depth analysis.
+Table 7 shows that a simple NMS self-prompting is
+enough for most cases. But for hard cases like ‘LLFF-trex’ (a
+T-rex skeleton, as shown in Figure 9), where a large number
+of depth jumps, the confidence decay term contributes a
+lot. In such a situation, inaccurate masks bleed through
+gaps in the foreground onto the background. Suppose the
+self-prompting mechanism generates prompts on these inaccurate regions. In that case, SAM may produce plausible segmentation results that can cheat the IoU-rejection
+5.5.4 2D Segmentation Models
+In addition to SAM, we also incorporate four other promptbased 2D segmentation models [60], [109], [110], [111] into
+our framework to demonstrate the generalization ability
+of SA3D. The evaluation results on the NVOS dataset are
+shown in Table 8. With different 2D segmentation models,
+SA3D performs stably. Though the performance of SA3D
+with SEEM [60] is somewhat lower than with SAM, it can
+support more kinds of input prompts like reference images.
+These results indicate the potential of SA3D for integration
+with diverse segmentation models to support various 3D
+segmentation tasks.
+5.5.5 Time Cost Analysis with Different Representations
+In Section 5.3, we show that SA3D performs stably when
+integrated with different radiance fields. In this section,
+we focus on analyzing the time consumption associated
+with these different radiance fields. Table 9 illustrates that,
+across both forward-facing and 360◦ scenes, SA3D with
+3D-GS achieves optimal efficiency. With the feature cache
+disabled, the primary bottleneck for SA3D-GS shifts to the
+self-prompting phase, particularly due to the time-intensive
+SAM encoder forward pass. For vanilla-NeRF and TensoRF,
+time is mainly spent on mask rendering and mask inverse
+rendering. The segmentation speed of SA3D-GS, exceeding
+10 frames per second, approaches real-time performance.
+Though the effectiveness of the feature cache, it is important
+to note that the feature cache is designed to expedite the
+segmentation of multiple objects within the same scene.
+When focusing on a single object, the total time for feature
+extraction and segmentation aligns closely with using SA3D
+without the feature cache.
+5.5.6 Resolution of Mask Grids
+We explore the impact of the resolution of 3D mask grids V
+on segmentation performance. As indicated in Table 10, our
+evaluation spans the spectrum from varying resolutions of
+mask grids to employing a Multi-Layer Perceptron (MLP)
+for representing the 3D mask, the latter of which theoretically offers infinite resolution. Our findings reveal that
+the resolution of mask grids has a negligible influence on
+segmentation outcomes. This minimal impact is attributed
+A SUBMISSION TO IEEE TRANSACTION ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+11
+TABLE 8
+Ablation on different 2D segmentation models.
+SAM [1]
+mIoU (%)
+90.3
+SEEM [60]
+mAcc (%)
+98.2
+mIoU (%)
+86.0
+mAcc (%)
+97.0
+SimpleClick [110]
+mIoU (%)
+87.7
+mAcc (%)
+97.8
+RITM [109]
+mIoU (%)
+81.2
+FocalClick [111]
+mAcc (%)
+96.3
+mIoU (%)
+88.9
+mAcc (%)
+98.1
+TABLE 9
+Analysis of time consumption with different kinds of radiance fields. ‘FC’ denotes the feature cache. The ‘Self-prompting’ phase involves
+generating prompts, querying SAM (or SAM decoder) for segmentation, and loss calculation.
+Time per Step (ms)↓
+Scene
+Radiance Field
+Resolution
+Speed (fps) ↑
+Mask Rendering
+Self-prompting
+Inverse Rendering
+Horns [102]
+Vanilla-NeRF (w/ FC)
+TensoRF (w/ FC)
+3D-GS (w/ FC)
+3D-GS (w/o FC)
+378 × 504
+756 × 1008
+1200 × 1600
+1200 × 1600
+0.2
+2.9
+17.7
+1.9
+4211.8
+263.7
+8.3
+8.3
+12.5
+18.1
+40.7
+508.1
+249.9
+65.1
+6.4
+6.4
+Pinecone [12]
+Vanilla-NeRF (w/ FC)
+TensoRF (w/ FC)
+3D-GS (w/ FC)
+3D-GS (w/o FC)
+363 × 484
+363 × 484
+1200 × 1600
+1200 × 1600
+0.2
+4.3
+13.2
+1.9
+3909.4
+195.8
+10.7
+10.7
+12.0
+17.7
+48.4
+515.8
+229.0
+15.9
+15.7
+15.7
+TABLE 10
+Ablation on the resolution of 3D mask grids.
+3203 Grids (default)
+mIoU (%)
+90.3
+mAcc (%)
+98.2
+1603 Grids
+mIoU (%)
+90.1
+mAcc (%)
+98.2
+803 Grids
+mIoU (%)
+89.2
+to the inherent characteristics of segmentation masks: if a
+point is located within a mask, it is very likely to be considered part of the corresponding segment. Thus, adopting
+low resolution grids with simple trilinear interpolation is
+enough to obtain a competitive segmentation result. Conversely, adopting an MLP for the 3D mask representation
+significantly hampers performance. This decline is linked
+to the challenges in achieving stable optimization with implicit representations. SA3D’s effectiveness relies on robust
+optimization, as its cross-view self-prompting mechanism
+depends on the rapid convergence of mask representation.
+The process involves using the 3D mask to immediately
+render a 2D mask in a novel view after a single iteration of
+mask inverse rendering. The MLP’s behavior is unstable due
+to the intertwined nature of its parameters, complicating
+control over the outcome. This analysis indicates that for
+NeRFs, a set of explicit mask grids with proper resolution is
+the most suitable 3D mask representation.
+5.5.7
+Ambiguous Gaussians Removal for SA3D-GS
+In Section 4.5 we introduce an ambiguous Gaussians removal strategy for SA3D-GS. We provide more qualitative
+results to illustrate and demonstrate its effectiveness intuitively. Results are shown in Figure 10. Our experiments
+point out that there are more ambiguous Gaussians at the
+border of two objects that share similar color. For example,
+due to the reflective effect of the metal basin, it appears a
+similar color to the table below. After removing the background the segmented basin has more artifacts than the
+segmented jar. This issue roots in the optimization goal of
+3D-GS. The training objective of 3D-GS is to fit the RGB color
+mAcc (%)
+98.1
+403 Grids
+mIoU (%)
+88.0
+mAcc (%)
+97.8
+MLP
+mIoU (%)
+80.9
+mAcc (%)
+96.4
+Fig. 10. The effect of the ambiguous Gaussians removal strategy for
+SA3D-GS. Experiments are conducted on 360-counter [6]. Corresponding segmentation time cost is labelled below each segmentation result.
+This strategy can eliminate ambiguous Gaussians at the border of the
+segmented target within one second.
+of multi-view images. Thus, for adjacent objects sharing
+similar color, 3D-GS tends to use one or few Gaussians to
+model their border.
+This supplementary phase of ambiguous Gaussians removal bypasses the requirements for the SAM decoder,
+cross-view self-prompting, and IoU computations. It can
+be finished within one second and thus bring negligible
+additional time to the overall pipeline. However, this simplicity has its limitations. Some ambiguous Gaussians contribute significantly to rendering the segmentation target,
+with the occluded parts being relatively small. As a result,
+during the removal phase, the received gradient from the
+negative refinement term is still smaller than the positive
+term. Consequently, these Gaussians cannot be eliminated
+naively. Nevertheless, our simple initial exploration provides a good trade-off between effectiveness and computational efficiency.
+A SUBMISSION TO IEEE TRANSACTION ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+12
+shown in Table 3, the performance of SA3D-GS is slightly
+below the expectation. In Figure 12, we show that this degradation is mainly caused by the artifacts learned by 3D-GS.
+As a synthesized dataset, the rendered images in Replica [8]
+lack detailed textures that guide the reconstruction of both
+Colmap [106], [107] (the technique utilized by 3D-GS to
+obtain initial point clouds from the multi-view images) and
+3D-GS. This indulges 3D-GS in overfitting particular views
+and generating numerous translucent artifacts in the space.
+During mask inverse rendering, the 2D masks are projected
+onto these artifacts and rendered wrongly in other views,
+leading to bad performance.
+Fig. 11. The 2D segmentation result by SAM and the 3D segmentation
+result by SA3D of the LLFF-fern [102] scene and 360-bonsai [6] scene.
+SA3D produces more details that are missing in the SAM segmentation
+result.
+7
+C ONCLUSION
+Fig. 12. Comparison of the reconstruction quality of TensoRF [5] and
+3D-GS [7] in Replica-office4 [8]. After 2D masks are projected onto
+the translucent artifacts, it will be rendered wrongly in another view,
+explaining the poor performance of SA3D-GS shown in Table 3.
+In this paper, we propose SA3D, a framework that generalizes 2D SAM to segment 3D objects with radiance fields
+as the structural prior. Based on any trained radiance field
+and a set of prompts in a single view, SA3D performs an
+iterative procedure that involves rendering novel 2D views,
+self-prompting SAM for 2D segmentation, and projecting
+the segmentation back into the 3D space to refine a 3D mask.
+Extensive experiments are conducted for analysis, offering
+valuable perspectives on the development of segmentation
+foundation models and radiance fields. Our research sheds
+light on a resource-efficient methodology that lifts vision
+foundation models from 2D to 3D. Our future work may
+include improving learned 3D geometry of radiance fields
+with the help of segmentation models and supporting automatic panoptic segmentation.
+6
+ACKNOWLEDGMENTS
+TensoRF
+3D-GS
+Artifacts in 3D-GS
+3D Gaussians as Point Cloud
+Top View
+Side View
+Side View
+D ISCUSSION
+We provide more discussions to better understand the working mechanism of SA3D.
+First, radiance fields can help to improve the segmentation quality of SAM. In Figure 11, we show that SA3D
+can eliminate segmentation errors of SAM and effectively
+capture details such as holes and edges. 2D segmentation
+models often face challenges in accurately capturing object
+details such as small holes and gaps due to limitations in
+resolution. Even though SAM exhibits fine-grained segmentation capabilities, this issue still persists. The ability to
+improve SAM’s performance stems from the fine-grained
+depth estimation (or the geometry information) provided
+by radiance fields. The utilization of such information to aid
+segmentation has been a long-standing problem [11], [83],
+[112]. Specific to SA3D, the geometry information is utilized
+through the incorporation of a negative refinement term
+in the projection loss (Equation (8)). When SAM overlooks
+small holes and gaps, the mask passes through these regions
+and gets projected onto the background behind the object.
+However, with a viewpoint switched, these inaccuratelysegmented regions shift from being behind the target object to the side. In these new views, SAM’s foreground
+prediction no longer includes these regions. Consequently,
+the mask confidence score for these regions is effectively
+suppressed by the negative refinement term.
+However, from the other side, this phenomenon also
+implies that wrongly learned geometry will confuse the
+segmentation model and lead to worse performance. As
+This work was supported by NSFC 62322604, NSFC
+62176159, Natural Science Foundation of Shanghai
+21ZR1432200, and Shanghai Municipal Science and Technology Major Project 2021SHZDZX0102. We thank Dr. Weichao
+Qiu for his insightful suggestions for this work.
+R EFERENCES
+[1]
+[2]
+[3]
+[4]
+[5]
+[6]
+[7]
+[8]
+[9]
+A. Kirillov, E. Mintun, N. Ravi, H. Mao, C. Rolland, L. Gustafson,
+T. Xiao, S. Whitehead, A. C. Berg, W.-Y. Lo et al., “Segment
+anything,” in ICCV, 2023.
+B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi, and R. Ng, “Nerf: Representing scenes as neural
+radiance fields for view synthesis,” in ECCV, 2020.
+T. Müller, A. Evans, C. Schied, and A. Keller, “Instant neural
+graphics primitives with a multiresolution hash encoding,” ACM
+TOG, 2022.
+C. Sun, M. Sun, and H. Chen, “Direct voxel grid optimization:
+Super-fast convergence for radiance fields reconstruction,” in
+CVPR, 2022.
+A. Chen, Z. Xu, A. Geiger, J. Yu, and H. Su, “Tensorf: Tensorial
+radiance fields,” in ECCV, 2022.
+J. T. Barron, B. Mildenhall, D. Verbin, P. P. Srinivasan, and P. Hedman, “Mip-nerf 360: Unbounded anti-aliased neural radiance
+fields,” in CVPR, 2022.
+B. Kerbl, G. Kopanas, T. Leimkühler, and G. Drettakis, “3d
+gaussian splatting for real-time radiance field rendering,” ACM
+TOG, 2023.
+J. Straub, T. Whelan, L. Ma, Y. Chen, E. Wijmans, S. Green, J. J. Engel, R. Mur-Artal, C. Ren, S. Verma et al., “The replica dataset: A
+digital replica of indoor spaces,” arXiv preprint arXiv:1906.05797,
+2019.
+Z. Ren, A. Agarwala, B. C. Russell, A. G. Schwing, and O. Wang,
+“Neural volumetric object selection,” in CVPR, 2022.
+A SUBMISSION TO IEEE TRANSACTION ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+[10]
+[11]
+[12]
+[13]
+[14]
+[15]
+[16]
+[17]
+[18]
+[19]
+[20]
+[21]
+[22]
+[23]
+[24]
+[25]
+[26]
+[27]
+[28]
+[29]
+[30]
+[31]
+[32]
+[33]
+[34]
+[35]
+[36]
+A. Mirzaei, T. Aumentado-Armstrong, K. G. Derpanis, J. Kelly,
+M. A. Brubaker, I. Gilitschenski, and A. Levinshtein, “SPIn-NeRF:
+Multiview segmentation and perceptual inpainting with neural
+radiance fields,” in CVPR, 2023.
+J. Kerr, C. M. Kim, K. Goldberg, A. Kanazawa, and M. Tancik,
+“Lerf: Language embedded radiance fields,” in ICCV, 2023.
+A. Knapitsch, J. Park, Q.-Y. Zhou, and V. Koltun, “Tanks and
+temples: Benchmarking large-scale scene reconstruction,” ACM
+TOG, 2017.
+J. Cen, Z. Zhou, J. Fang, c. yang, W. Shen, L. Xie, D. Jiang,
+X. ZHANG, and Q. Tian, “Segment anything in 3d with nerfs,”
+in NeurIPS, 2023.
+C. Sun, M. Sun, and H. Chen, “Improved direct voxel grid
+optimization for radiance fields reconstruction,” arXiv preprint
+arXiv:2212.13545, 2022.
+S. Fridovich-Keil, A. Yu, M. Tancik, Q. Chen, B. Recht, and
+A. Kanazawa, “Plenoxels: Radiance fields without neural networks,” in CVPR, 2022.
+S. J. Garbin, M. Kowalski, M. Johnson, J. Shotton, and J. Valentin,
+“Fastnerf: High-fidelity neural rendering at 200fps,” in ICCV,
+2021.
+C. Reiser, S. Peng, Y. Liao, and A. Geiger, “Kilonerf: Speeding
+up neural radiance fields with thousands of tiny mlps,” in ICCV,
+2021, pp. 14 335–14 345.
+A. Yu, R. Li, M. Tancik, H. Li, R. Ng, and A. Kanazawa, “Plenoctrees for real-time rendering of neural radiance fields,” in ICCV,
+2021.
+T. Neff, P. Stadlbauer, M. Parger, A. Kurz, J. H. Mueller, C. R. A.
+Chaitanya, A. Kaplanyan, and M. Steinberger, “Donerf: Towards
+real-time rendering of compact neural radiance fields using depth
+oracle networks,” in EGSR, 2021.
+Y. Wei, S. Liu, J. Zhou, and J. Lu, “Depth-guided optimization
+of neural radiance fields for indoor multi-view stereo,” IEEE
+TPAMI, 2023.
+R. Liang, J. Zhang, H. Li, C. Yang, Y. Guan, and N. Vijaykumar,
+“Spidr: Sdf-based neural point fields for illumination and deformation,” arXiv preprint arXiv:2210.08398, 2022.
+G. Chen and W. Wang, “A survey on 3d gaussian splatting,” arXiv
+preprint arXiv:2401.03890, 2024.
+Z. Yu, A. Chen, B. Huang, T. Sattler, and A. Geiger, “Mipsplatting: Alias-free 3d gaussian splatting,” in CVPR, 2024.
+G. Wu, T. Yi, J. Fang, L. Xie, X. Zhang, W. Wei, W. Liu, Q. Tian,
+and X. Wang, “4d gaussian splatting for real-time dynamic scene
+rendering,” in CVPR, 2024.
+Z. Yang, H. Yang, Z. Pan, X. Zhu, and L. Zhang, “Real-time
+photorealistic dynamic scene representation and rendering with
+4d gaussian splatting,” in ICLR, 2024.
+Y. Duan, F. Wei, Q. Dai, Y. He, W. Chen, and B. Chen, “4d gaussian
+splatting: Towards efficient novel view synthesis for dynamic
+scenes,” in ICLR, 2024.
+J. Luiten, G. Kopanas, B. Leibe, and D. Ramanan, “Dynamic 3d
+gaussians: Tracking by persistent dynamic view synthesis,” in
+3DV, 2024.
+B. Lee, H. Lee, X. Sun, U. Ali, and E. Park, “Deblurring 3d
+gaussian splatting,” arXiv preprint arXiv:2401.00834, 2024.
+Z. Zhu, Z. Fan, Y. Jiang, and Z. Wang, “Fsgs: Real-time fewshot view synthesis using gaussian splatting,” arXiv preprint
+arXiv:2312.00451, 2023.
+K. Katsumata, D. M. Vo, and H. Nakayama, “An efficient 3d gaussian representation for monocular/multi-view dynamic scenes,”
+arXiv preprint arXiv:2311.12897, 2023.
+C. Yang, S. Li, J. Fang, R. Liang, L. Xie, X. Zhang, W. Shen,
+and Q. Tian, “Gaussianobject: Just taking four images to get a
+high-quality 3d object with gaussian splatting,” arXiv preprint
+arXiv:2402.10259, 2024.
+E. Shelhamer, J. Long, and T. Darrell, “Fully convolutional networks for semantic segmentation,” IEEE TPAMI, 2017.
+V. Badrinarayanan, A. Kendall, and R. Cipolla, “Segnet: A deep
+convolutional encoder-decoder architecture for image segmentation,” IEEE TPAMI, 2017.
+K. He, G. Gkioxari, P. Dollár, and R. B. Girshick, “Mask R-CNN,”
+in ICCV, 2017.
+A. Kirillov, K. He, R. B. Girshick, C. Rother, and P. Dollár,
+“Panoptic segmentation,” in CVPR, 2019.
+L. Chen, G. Papandreou, I. Kokkinos, K. Murphy, and A. L. Yuille,
+“Deeplab: Semantic image segmentation with deep convolutional
+[37]
+[38]
+[39]
+[40]
+[41]
+[42]
+[43]
+[44]
+[45]
+[46]
+[47]
+[48]
+[49]
+[50]
+[51]
+[52]
+[53]
+[54]
+[55]
+[56]
+[57]
+[58]
+[59]
+[60]
+[61]
+13
+nets, atrous convolution, and fully connected crfs,” IEEE TPAMI,
+2018.
+H. Zhao, J. Shi, X. Qi, X. Wang, and J. Jia, “Pyramid scene parsing
+network,” in CVPR, 2017.
+W. Shen, Z. Peng, X. Wang, H. Wang, J. Cen, D. Jiang, L. Xie,
+X. Yang, and Q. Tian, “A survey on label-efficient deep image
+segmentation: Bridging the gap between weak supervision and
+dense prediction,” IEEE TPAMI, 2023.
+A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A. N.
+Gomez, L. Kaiser, and I. Polosukhin, “Attention is all you need,”
+in NeurIPS, 2017.
+A. Dosovitskiy, L. Beyer, A. Kolesnikov, D. Weissenborn, X. Zhai,
+T. Unterthiner, M. Dehghani, M. Minderer, G. Heigold, S. Gelly,
+J. Uszkoreit, and N. Houlsby, “An image is worth 16x16 words:
+Transformers for image recognition at scale,” in ICLR, 2021.
+S. Zheng, J. Lu, H. Zhao, X. Zhu, Z. Luo, Y. Wang, Y. Fu,
+J. Feng, T. Xiang, P. H. S. Torr, and L. Zhang, “Rethinking
+semantic segmentation from a sequence-to-sequence perspective
+with transformers,” in CVPR, 2021.
+B. Cheng, A. G. Schwing, and A. Kirillov, “Per-pixel classification
+is not all you need for semantic segmentation,” in NeurIPS, 2021.
+B. Cheng, I. Misra, A. G. Schwing, A. Kirillov, and R. Girdhar,
+“Masked-attention mask transformer for universal image segmentation,” in CVPR, 2022.
+R. Strudel, R. G. Pinel, I. Laptev, and C. Schmid, “Segmenter:
+Transformer for semantic segmentation,” in ICCV, 2021.
+E. Xie, W. Wang, Z. Yu, A. Anandkumar, J. M. Alvarez, and
+P. Luo, “Segformer: Simple and efficient design for semantic
+segmentation with transformers,” in NeurIPS, 2021.
+Z. Peng, Z. Xu, Z. Zeng, L. Xie, Q. Tian, and W. Shen, “Parameter
+efficient fine-tuning via cross block orchestration for segment
+anything model,” in CVPR, 2024.
+Z. Peng, Z. Xu, Z. Zeng, X. Yang, and W. Shen, “Sam-parser:
+Fine-tuning sam efficiently by parameter space reconstruction,”
+in AAAI, 2024.
+L. Ke, M. Ye, M. Danelljan, Y.-W. Tai, C.-K. Tang, F. Yu et al.,
+“Segment anything in high quality,” in NeurIPS, 2023.
+X. Zhao, W. Ding, Y. An, Y. Du, T. Yu, M. Li, M. Tang, and J. Wang,
+“Fast segment anything,” arXiv preprint arXiv:2306.12156, 2023.
+C. Zhang, D. Han, Y. Qiao, J. U. Kim, S.-H. Bae, S. Lee, and C. S.
+Hong, “Faster segment anything: Towards lightweight sam for
+mobile applications,” arXiv preprint arXiv:2306.14289, 2023.
+J. Ma, Y. He, F. Li, L. Han, C. You, and B. Wang, “Segment
+anything in medical images,” Nature Communications, 2024.
+M. A. Mazurowski, H. Dong, H. Gu, J. Yang, N. Konz, and
+Y. Zhang, “Segment anything model for medical image analysis:
+an experimental study,” MedIA, 2023.
+J. Wu, R. Fu, H. Fang, Y. Liu, Z. Wang, Y. Xu, Y. Jin, and T. Arbel,
+“Medical sam adapter: Adapting segment anything model for
+medical image segmentation,” arXiv preprint arXiv:2304.12620,
+2023.
+R. Deng, C. Cui, Q. Liu, T. Yao, L. W. Remedios, S. Bao, B. A.
+Landman, L. E. Wheless, L. A. Coburn, K. T. Wilson et al.,
+“Segment anything model (sam) for digital pathology: Assess
+zero-shot segmentation on whole slide imaging,” arXiv preprint
+arXiv:2304.04155, 2023.
+G.-P. Ji, D.-P. Fan, P. Xu, B. Zhou, M.-M. Cheng, and L. Van Gool,
+“Sam struggles in concealed scenes–empirical study on” segment
+anything”,” SCIS, 2023.
+L. Tang, H. Xiao, and B. Li, “Can sam segment anything?
+when sam meets camouflaged object detection,” arXiv preprint
+arXiv:2304.04709, 2023.
+T. Yu, R. Feng, R. Feng, J. Liu, X. Jin, W. Zeng, and Z. Chen,
+“Inpaint anything: Segment anything meets image inpainting,”
+arXiv preprint arXiv:2304.06790, 2023.
+K. Chen, C. Liu, H. Chen, H. Zhang, W. Li, Z. Zou, and Z. Shi,
+“Rsprompter: Learning to prompt for remote sensing instance
+segmentation based on visual foundation model,” IEEE TGRS,
+2024.
+D. Zhang, D. Liang, H. Yang, Z. Zou, X. Ye, Z. Liu, and X. Bai,
+“Sam3d: Zero-shot 3d object detection via segment anything
+model,” SCIS, 2023.
+X. Zou, J. Yang, H. Zhang, F. Li, L. Li, J. Wang, L. Wang, J. Gao,
+and Y. J. Lee, “Segment everything everywhere all at once,” in
+NeurIPS, 2023.
+W. Wang and U. Neumann, “Depth-aware cnn for rgb-d segmentation,” in ECCV, 2018.
+A SUBMISSION TO IEEE TRANSACTION ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+[62]
+[63]
+[64]
+[65]
+[66]
+[67]
+[68]
+[69]
+[70]
+[71]
+[72]
+[73]
+[74]
+[75]
+[76]
+[77]
+[78]
+[79]
+[80]
+[81]
+[82]
+[83]
+[84]
+[85]
+[86]
+[87]
+[88]
+Z. Wu, G. Allibert, C. Stolz, C. Ma, and C. Demonceaux, “Depthadapted cnns for rgb-d semantic segmentation,” arXiv preprint
+arXiv:2206.03939, 2022.
+Y. Xing, J. Wang, and G. Zeng, “Malleable 2.5 d convolution:
+Learning receptive fields along the depth-axis for rgb-d scene
+parsing,” in ECCV, 2020.
+H. Chu, W.-C. Ma, K. Kundu, R. Urtasun, and S. Fidler, “Surfconv: Bridging 3d and 2d convolution for rgbd images,” in CVPR,
+2018.
+C. R. Qi, H. Su, K. Mo, and L. J. Guibas, “Pointnet: Deep learning
+on point sets for 3d classification and segmentation,” in CVPR,
+2017.
+C. R. Qi, L. Yi, H. Su, and L. J. Guibas, “Pointnet++: Deep
+hierarchical feature learning on point sets in a metric space,” in
+NeurIPS, 2017.
+H. Zhao, L. Jiang, J. Jia, P. H. Torr, and V. Koltun, “Point transformer,” in ICCV, 2021.
+J. Huang and S. You, “Point cloud labeling using 3d convolutional neural network,” in ICPR, 2016.
+H. Tang, Z. Liu, S. Zhao, Y. Lin, J. Lin, H. Wang, and S. Han,
+“Searching efficient 3d architectures with sparse point-voxel convolution,” in ECCV, 2020.
+Z. Liu, H. Tang, Y. Lin, and S. Han, “Point-voxel cnn for efficient
+3d deep learning,” in NeurIPS, 2019.
+H. Zhou, X. Zhu, X. Song, Y. Ma, Z. Wang, H. Li, and D. Lin,
+“Cylinder3d: An effective 3d framework for driving-scene lidar
+semantic segmentation,” arXiv preprint arXiv:2008.01550, 2020.
+D. Ye, Z. Zhou, W. Chen, Y. Xie, Y. Wang, P. Wang, and
+H. Foroosh, “Lidarmultinet: Towards a unified multi-task network for lidar perception,” in AAAI, 2023.
+N. Gosala and A. Valada, “Bird’s-eye-view panoptic segmentation using monocular frontal view images,” IEEE RA-L, 2022.
+M. Qin, W. Li, J. Zhou, H. Wang, and H. Pfister, “Langsplat: 3d
+language gaussian splatting,” in CVPR, 2024.
+S. Peng, K. Genova, C. Jiang, A. Tagliasacchi, M. Pollefeys,
+T. Funkhouser et al., “Openscene: 3d scene understanding with
+open vocabularies,” in CVPR, 2023.
+R. Ding, J. Yang, C. Xue, W. Zhang, S. Bai, and X. Qi, “Pla:
+Language-driven open-vocabulary 3d scene understanding,” in
+CVPR, 2023.
+H. Ha and S. Song, “Semantic abstraction: Open-world 3d scene
+understanding from 2d vision-language models,” in CoRL, 2022.
+J. Zhang, R. Dong, and K. Ma, “Clip-fo3d: Learning free openworld 3d scene representations from 2d dense clip,” in ICCV,
+2023.
+M. Liu, Y. Zhu, H. Cai, S. Han, Z. Ling, F. Porikli, and H. Su,
+“Partslip: Low-shot part segmentation for 3d point clouds via
+pretrained image-language models,” in CVPR, 2023.
+J. Yang, R. Ding, Z. Wang, and X. Qi, “Regionplc: Regional
+point-language contrastive learning for open-world 3d scene
+understanding,” in CVPR, 2023.
+K. M. Jatavallabhula, A. Kuwajerwala, Q. Gu, M. Omama,
+T. Chen, S. Li, G. Iyer, S. Saryazdi, N. Keetha, A. Tewari et al.,
+“Conceptfusion: Open-set multimodal 3d mapping,” in RSS,
+2023.
+A. Radford, J. W. Kim, C. Hallacy, A. Ramesh, G. Goh, S. Agarwal, G. Sastry, A. Askell, P. Mishkin, J. Clark, G. Krueger, and
+I. Sutskever, “Learning transferable visual models from natural
+language supervision,” in ICML, 2021.
+S. Zhi, T. Laidlow, S. Leutenegger, and A. J. Davison, “In-place
+scene labelling and understanding with implicit scene representation,” in ICCV, 2021.
+V. Tschernezki, I. Laina, D. Larlus, and A. Vedaldi, “Neural
+feature fusion fields: 3d distillation of self-supervised 2d image
+representations,” in 3DV, 2022.
+S. Kobayashi, E. Matsumoto, and V. Sitzmann, “Decomposing
+nerf for editing via feature field distillation,” in NeurIPS, 2022.
+R. Goel, D. Sirikonda, S. Saini, and P. Narayanan, “Interactive
+segmentation of radiance fields,” in CVPR, 2023.
+Z. Fan, P. Wang, Y. Jiang, X. Gong, D. Xu, and Z. Wang, “Nerfsos: Any-view self-supervised object segmentation on complex
+scenes,” ICLR, 2023.
+S. Zhou, H. Chang, S. Jiang, Z. Fan, Z. Zhu, D. Xu, P. Chari,
+S. You, Z. Wang, and A. Kadambi, “Feature 3dgs: Supercharging
+3d gaussian splatting to enable distilled feature fields,” in CVPR,
+2024.
+[89]
+14
+X. Zuo, P. Samangouei, Y. Zhou, Y. Di, and M. Li, “Fmgs:
+Foundation model embedded 3d gaussian splatting for holistic
+3d scene understanding,” arXiv preprint arXiv:2401.01970, 2024.
+[90] M. Caron, H. Touvron, I. Misra, H. Jégou, J. Mairal, P. Bojanowski,
+and A. Joulin, “Emerging properties in self-supervised vision
+transformers,” in ICCV, 2021.
+[91] J. Cen, J. Fang, C. Yang, L. Xie, X. Zhang, W. Shen, and Q. Tian,
+“Segment any 3d gaussians,” arXiv preprint arXiv:2312.00860,
+2023.
+[92] M. Ye, M. Danelljan, F. Yu, and L. Ke, “Gaussian grouping: Segment and edit anything in 3d scenes,” arXiv preprint
+arXiv:2312.00732, 2023.
+[93] C. M. Kim, M. Wu, J. Kerr, K. Goldberg, M. Tancik, and
+A. Kanazawa, “Garfield: Group anything with radiance fields,”
+in CVPR, 2024.
+[94] H. Ying, Y. Yin, J. Zhang, F. Wang, T. Yu, R. Huang, and L. Fang,
+“Omniseg3d: Omniversal 3d segmentation via hierarchical contrastive learning,” in CVPR, 2024.
+[95] K. Stelzner, K. Kersting, and A. R. Kosiorek, “Decomposing
+3d scenes into objects via unsupervised volume segmentation,”
+arXiv preprint arXiv:2104.01148, 2021.
+[96] H. Yu, L. J. Guibas, and J. Wu, “Unsupervised discovery of object
+radiance fields,” in ICLR, 2022.
+[97] X. Liu, J. Chen, H. Yu, Y. Tai, and C. Tang, “Unsupervised multiview object segmentation using radiance field propagation,” in
+NeurIPS, 2022.
+[98] Y. Liu, B. Hu, J. Huang, Y.-W. Tai, and C.-K. Tang, “Instance
+neural radiance field,” in ICCV, 2023.
+[99] W. Bing, L. Chen, and B. Yang, “Dm-nerf: 3d scene geometry
+decomposition and manipulation from 2d images,” in ICLR, 2023.
+[100] X. Fu, S. Zhang, T. Chen, Y. Lu, L. Zhu, X. Zhou, A. Geiger, and
+Y. Liao, “Panoptic nerf: 3d-to-2d label transfer for panoptic urban
+scene segmentation,” in 3DV, 2022.
+[101] S. Vora, N. Radwan, K. Greff, H. Meyer, K. Genova, M. S.
+Sajjadi, E. Pot, A. Tagliasacchi, and D. Duckworth, “Nesf: Neural
+semantic fields for generalizable semantic segmentation of 3d
+scenes,” TMLR, 2022.
+[102] B. Mildenhall, P. P. Srinivasan, R. O. Cayon, N. K. Kalantari,
+R. Ramamoorthi, R. Ng, and A. Kar, “Local light field fusion:
+practical view synthesis with prescriptive sampling guidelines,”
+ACM TOG, 2019.
+[103] Y. Lin, P. Florence, J. T. Barron, T. Lin, A. Rodriguez, and P. Isola,
+“Nerf-supervision: Learning dense object descriptors from neural
+radiance fields,” in ICRA, 2022.
+[104] A. Paszke, S. Gross, F. Massa, A. Lerer, J. Bradbury, G. Chanan,
+T. Killeen, Z. Lin, N. Gimelshein, L. Antiga, A. Desmaison,
+A. Köpf, E. Z. Yang, Z. DeVito, M. Raison, A. Tejani, S. Chilamkurthy, B. Steiner, L. Fang, J. Bai, and S. Chintala, “Pytorch:
+An imperative style, high-performance deep learning library,” in
+NeurIPS, 2019.
+[105] C. Rother, V. Kolmogorov, and A. Blake, “”grabcut”: interactive
+foreground extraction using iterated graph cuts,” ACM TOG,
+2004.
+[106] J. L. Schönberger and J.-M. Frahm, “Structure-from-motion revisited,” in CVPR, 2016.
+[107] J. L. Schönberger, E. Zheng, M. Pollefeys, and J.-M. Frahm,
+“Pixelwise view selection for unstructured multi-view stereo,”
+in ECCV, 2016.
+[108] S. Liu, Z. Zeng, T. Ren, F. Li, H. Zhang, J. Yang, C. Li,
+J. Yang, H. Su, J. Zhu et al., “Grounding dino: Marrying dino
+with grounded pre-training for open-set object detection,” arXiv
+preprint arXiv:2303.05499, 2023.
+[109] K. Sofiiuk, I. A. Petrov, and A. Konushin, “Reviving iterative
+training with mask guidance for interactive segmentation,” in
+ICIP, 2022.
+[110] Q. Liu, Z. Xu, G. Bertasius, and M. Niethammer, “Simpleclick: Interactive image segmentation with simple vision transformers,”
+in ICCV, 2023.
+[111] X. Chen, Z. Zhao, Y. Zhang, M. Duan, D. Qi, and H. Zhao,
+“Focalclick: Towards practical interactive image segmentation,”
+in CVPR, 2022.
+[112] Z. Zhang, Z. Cui, C. Xu, Z. Jie, X. Li, and J. Yang, “Joint taskrecursive learning for semantic segmentation and depth estimation,” in ECCV, 2018.

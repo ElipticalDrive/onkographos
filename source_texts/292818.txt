@@ -1,0 +1,443 @@
+LCOV - 0 A.D. test coverage report - source/simulation2/helpers/Grid.h
+LCOV - code coverage report
+Current view:
+top level - source/simulation2/helpers - Grid.h (source / functions)
+Hit
+Total
+Coverage
+Test:
+0 A.D. test coverage report
+Lines:
+99
+165
+60.0 %
+Date:
+2023-01-19 00:18:29
+Functions:
+69
+111
+62.2 %
+```
+          Line data    Source code
+```
+```
+       1             : /* Copyright (C) 2020 Wildfire Games.
+       2             :  * This file is part of 0 A.D.
+       3             :  *
+       4             :  * 0 A.D. is free software: you can redistribute it and/or modify
+       5             :  * it under the terms of the GNU General Public License as published by
+       6             :  * the Free Software Foundation, either version 2 of the License, or
+       7             :  * (at your option) any later version.
+       8             :  *
+       9             :  * 0 A.D. is distributed in the hope that it will be useful,
+      10             :  * but WITHOUT ANY WARRANTY; without even the implied warranty of
+      11             :  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+      12             :  * GNU General Public License for more details.
+      13             :  *
+      14             :  * You should have received a copy of the GNU General Public License
+      15             :  * along with 0 A.D.  If not, see <http://www.gnu.org/licenses/>.
+      16             :  */
+      17             : 
+      18             : #ifndef INCLUDED_GRID
+      19             : #define INCLUDED_GRID
+      20             : 
+      21             : #include "simulation2/serialization/SerializeTemplates.h"
+      22             : 
+      23             : #include <cstring>
+      24             : 
+      25             : #ifdef NDEBUG
+      26             : #define GRID_BOUNDS_DEBUG 0
+      27             : #else
+      28             : #define GRID_BOUNDS_DEBUG 1
+      29             : #endif
+      30             : 
+      31             : /**
+      32             :  * Basic 2D array, intended for storing tile data, plus support for lazy updates
+      33             :  * by ICmpObstructionManager.
+      34             :  * @c T must be a POD type that can be initialised with 0s.
+      35             :  */
+      36             : template<typename T>
+      37             : class Grid
+      38             : {
+      39             :     friend struct SerializeHelper<Grid<T>>;
+      40             : protected:
+      41             :     // Tag-dispatching internal utilities for convenience.
+      42             :     struct default_type{};
+      43             :     struct is_pod { operator default_type() { return default_type{}; }};
+      44        3113 :     struct is_container { operator default_type() { return default_type{}; }};
+      45             : 
+      46             :     // helper to detect value_type
+      47             :     template <typename U, typename = int> struct has_value_type : std::false_type { };
+      48             :     template <typename U> struct has_value_type <U, decltype(std::declval<typename U::value_type>(), 0)> : std::true_type { };
+      49             : 
+      50             :     template <typename U, typename A, typename B> using if_ = typename std::conditional<U::value, A, B>::type;
+      51             : 
+      52             :     template<typename U>
+      53             :     using dispatch = if_< std::is_pod<U>, is_pod,
+      54             :                           if_<has_value_type<U>, is_container,
+      55             :                         default_type>>;
+      56             : 
+      57             : public:
+      58         142 :     Grid() : m_W(0), m_H(0), m_Data(NULL)
+      59             :     {
+      60         142 :     }
+      61             : 
+      62          19 :     Grid(u16 w, u16 h) : m_W(w), m_H(h), m_Data(NULL)
+      63             :     {
+      64          19 :         resize(w, h);
+      65          19 :     }
+      66             : 
+      67       18669 :     Grid(const Grid& g) : m_W(0), m_H(0), m_Data(NULL)
+      68             :     {
+      69       18669 :         *this = g;
+      70       18669 :     }
+      71             : 
+      72             :     using value_type = T;
+      73             : public:
+      74             : 
+      75             :     // Ensure that o and this are the same size before calling.
+      76        1037 :     void copy_data(T* o, default_type) { std::copy(o, o + m_H*m_W, &m_Data[0]); }
+      77       17641 :     void copy_data(T* o, is_pod) { memcpy(m_Data, o, m_W*m_H*sizeof(T)); }
+      78             : 
+      79       18678 :     Grid& operator=(const Grid& g)
+      80             :     {
+      81       18678 :         if (this == &g)
+      82           0 :             return *this;
+      83             : 
+      84       18678 :         if (m_W == g.m_W && m_H == g.m_H)
+      85             :         {
+      86       15559 :             copy_data(g.m_Data, dispatch<T>{});
+      87       15559 :             return *this;
+      88             :         }
+      89             : 
+      90        3119 :         m_W = g.m_W;
+      91        3119 :         m_H = g.m_H;
+      92        3119 :         SAFE_ARRAY_DELETE(m_Data);
+      93        3119 :         if (g.m_Data)
+      94             :         {
+      95        3119 :             m_Data = new T[m_W * m_H];
+      96        3119 :             copy_data(g.m_Data, dispatch<T>{});
+      97             :         }
+      98        3119 :         return *this;
+      99             :     }
+     100             : 
+     101           0 :     void swap(Grid& g)
+     102             :     {
+     103           0 :         std::swap(m_Data, g.m_Data);
+     104           0 :         std::swap(m_H, g.m_H);
+     105           0 :         std::swap(m_W, g.m_W);
+     106           0 :     }
+     107             : 
+     108       18830 :     ~Grid()
+     109             :     {
+     110       18830 :         SAFE_ARRAY_DELETE(m_Data);
+     111       18830 :     }
+     112             : 
+     113             :     // Ensure that o and this are the same size before calling.
+     114        1037 :     bool compare_data(T* o, default_type) const { return std::equal(&m_Data[0], &m_Data[m_W*m_H], o); }
+     115       17629 :     bool compare_data(T* o, is_pod) const { return memcmp(m_Data, o, m_W*m_H*sizeof(T)) == 0; }
+     116             : 
+     117       18666 :     bool operator==(const Grid& g) const
+     118             :     {
+     119       18666 :         if (!compare_sizes(&g))
+     120           0 :             return false;
+     121             : 
+     122       18666 :         return compare_data(g.m_Data, dispatch<T>{});
+     123             :     }
+     124        2074 :     bool operator!=(const Grid& g) const { return !(*this==g); }
+     125             : 
+     126        3061 :     bool blank() const
+     127             :     {
+     128        3061 :         return m_W == 0 && m_H == 0;
+     129             :     }
+     130             : 
+     131        1047 :     u16 width() const { return m_W; };
+     132        1042 :     u16 height() const { return m_H; };
+     133             : 
+     134             : 
+     135             :     bool _any_set_in_square(int, int, int, int, default_type) const
+     136             :     {
+     137             :         static_assert(!std::is_same<T, T>::value, "Not implemented.");
+     138             :         return false; // Fix warnings.
+     139             :     }
+     140          63 :     bool _any_set_in_square(int i0, int j0, int i1, int j1, is_pod) const
+     141             :     {
+     142             : #if GRID_BOUNDS_DEBUG
+     143          63 :         ENSURE(i0 >= 0 && j0 >= 0 && i1 <= m_W && j1 <= m_H);
+     144             : #endif
+     145        2913 :         for (int j = j0; j < j1; ++j)
+     146             :         {
+     147        2880 :             int sum = 0;
+     148      222768 :             for (int i = i0; i < i1; ++i)
+     149      219888 :                 sum += m_Data[j*m_W + i];
+     150        2880 :             if (sum > 0)
+     151          30 :                 return true;
+     152             :         }
+     153          33 :         return false;
+     154             :     }
+     155             : 
+     156          63 :     bool any_set_in_square(int i0, int j0, int i1, int j1) const
+     157             :     {
+     158          63 :         return _any_set_in_square(i0, j0, i1, j1, dispatch<T>{});
+     159             :     }
+     160             : 
+     161        1039 :     void reset_data(default_type) { std::fill(&m_Data[0], &m_Data[m_H*m_W], T{}); }
+     162        2104 :     void reset_data(is_pod) { memset(m_Data, 0, m_W*m_H*sizeof(T)); }
+     163             : 
+     164             :     // Reset the data to its default-constructed value (usually 0), not changing size.
+     165        3155 :     void reset()
+     166             :     {
+     167        3155 :         if (m_Data)
+     168        3143 :             reset_data(dispatch<T>{});
+     169        3155 :     }
+     170             : 
+     171             :     // Clear the grid setting the size to 0 and freeing any data.
+     172       16624 :     void clear()
+     173             :     {
+     174       16624 :         resize(0, 0);
+     175       16624 :     }
+     176             : 
+     177       19767 :     void resize(u16 w, u16 h)
+     178             :     {
+     179       19767 :         SAFE_ARRAY_DELETE(m_Data);
+     180       19767 :         m_W = w;
+     181       19767 :         m_H = h;
+     182             : 
+     183       19767 :         if (!m_W && !m_H)
+     184       16624 :             return;
+     185             : 
+     186        3143 :         m_Data = new T[m_W * m_H];
+     187        3143 :         ENSURE(m_Data);
+     188        3143 :         reset();
+     189             :     }
+     190             : 
+     191             :     // Add two grids of the same size
+     192             :     void add(const Grid& g)
+     193             :     {
+     194             : #if GRID_BOUNDS_DEBUG
+     195             :         ENSURE(g.m_W == m_W && g.m_H == m_H);
+     196             : #endif
+     197             :         for (int i=0; i < m_H*m_W; ++i)
+     198             :             m_Data[i] += g.m_Data[i];
+     199             :     }
+     200             : 
+     201           0 :     void bitwise_or(const Grid& g)
+     202             :     {
+     203           0 :         if (this == &g)
+     204           0 :             return;
+     205             : 
+     206             : #if GRID_BOUNDS_DEBUG
+     207           0 :         ENSURE(g.m_W == m_W && g.m_H == m_H);
+     208             : #endif
+     209           0 :         for (int i = 0; i < m_H*m_W; ++i)
+     210           0 :             m_Data[i] |= g.m_Data[i];
+     211             :     }
+     212             : 
+     213      117588 :     void set(int i, int j, const T& value)
+     214             :     {
+     215             : #if GRID_BOUNDS_DEBUG
+     216      117588 :         ENSURE(0 <= i && i < m_W && 0 <= j && j < m_H);
+     217             : #endif
+     218      117588 :         m_Data[j*m_W + i] = value;
+     219      117588 :     }
+     220             : 
+     221     2241632 :     T& operator[](std::pair<u16, u16> coords) { return get(coords.first, coords.second); }
+     222             :     T& get(std::pair<u16, u16> coords) { return get(coords.first, coords.second); }
+     223             : 
+     224           0 :     T& operator[](std::pair<u16, u16> coords) const { return get(coords.first, coords.second); }
+     225             :     T& get(std::pair<u16, u16> coords) const { return get(coords.first, coords.second); }
+     226             : 
+     227   284255722 :     T& get(int i, int j)
+     228             :     {
+     229             : #if GRID_BOUNDS_DEBUG
+     230   284255722 :         ENSURE(0 <= i && i < m_W && 0 <= j && j < m_H);
+     231             : #endif
+     232   284255722 :         return m_Data[j*m_W + i];
+     233             :     }
+     234             : 
+     235         118 :     T& get(int i, int j) const
+     236             :     {
+     237             : #if GRID_BOUNDS_DEBUG
+     238         118 :         ENSURE(0 <= i && i < m_W && 0 <= j && j < m_H);
+     239             : #endif
+     240         118 :         return m_Data[j*m_W + i];
+     241             :     }
+     242             : 
+     243             :     template<typename U>
+     244       18666 :     bool compare_sizes(const Grid<U>* g) const
+     245             :     {
+     246       18666 :         return g && m_W == g->m_W && m_H == g->m_H;
+     247             :     }
+     248             : 
+     249             :     u16 m_W, m_H;
+     250             :     T* m_Data;
+     251             : };
+     252             : 
+     253             : 
+     254             : /**
+     255             :  * Serialize a grid, applying a simple RLE compression that is assumed efficient.
+     256             :  */
+     257             : template<typename T>
+     258             : struct SerializeHelper<Grid<T>>
+     259             : {
+     260           1 :     void operator()(ISerializer& serialize, const char* name, Grid<T>& value)
+     261             :     {
+     262           1 :         size_t len = value.m_H * value.m_W;
+     263           1 :         serialize.NumberU16_Unbounded("width", value.m_W);
+     264           1 :         serialize.NumberU16_Unbounded("height", value.m_H);
+     265           1 :         if (len == 0)
+     266           0 :             return;
+     267           1 :         u32 count = 1;
+     268           1 :         T prevVal = value.m_Data[0];
+     269           6 :         for (size_t i = 1; i < len; ++i)
+     270             :         {
+     271           5 :             if (prevVal == value.m_Data[i])
+     272             :             {
+     273           0 :                 count++;
+     274           0 :                 continue;
+     275             :             }
+     276           5 :             serialize.NumberU32_Unbounded("#", count);
+     277           5 :             Serializer(serialize, name, prevVal);
+     278           5 :             count = 1;
+     279           5 :             prevVal = value.m_Data[i];
+     280             :         }
+     281           1 :         serialize.NumberU32_Unbounded("#", count);
+     282           1 :         Serializer(serialize, name, prevVal);
+     283             :     }
+     284             : 
+     285           0 :     void operator()(IDeserializer& deserialize, const char* name, Grid<T>& value)
+     286             :     {
+     287             :         u16 w, h;
+     288           0 :         deserialize.NumberU16_Unbounded("width", w);
+     289           0 :         deserialize.NumberU16_Unbounded("height", h);
+     290           0 :         u32 len = h * w;
+     291           0 :         value.resize(w, h);
+     292           0 :         for (size_t i = 0; i < len;)
+     293             :         {
+     294             :             u32 count;
+     295           0 :             deserialize.NumberU32_Unbounded("#", count);
+     296             :             T el;
+     297           0 :             Serializer(deserialize, name, el);
+     298           0 :             std::fill(&value.m_Data[i], &value.m_Data[i+count], el);
+     299           0 :             i += count;
+     300             :         }
+     301           0 :     }
+     302             : };
+     303             : 
+     304             : 
+     305             : /**
+     306             :  * Similar to Grid, except optimised for sparse usage (the grid is subdivided into
+     307             :  * buckets whose contents are only initialised on demand, to save on memset cost).
+     308             :  */
+     309             : template<typename T>
+     310             : class SparseGrid
+     311             : {
+     312             :     NONCOPYABLE(SparseGrid);
+     313             : 
+     314             :     enum { BucketBits = 4, BucketSize = 1 << BucketBits };
+     315             : 
+     316           0 :     T* GetBucket(int i, int j)
+     317             :     {
+     318           0 :         size_t b = (j >> BucketBits) * m_BW + (i >> BucketBits);
+     319           0 :         if (!m_Data[b])
+     320             :         {
+     321           0 :             m_Data[b] = new T[BucketSize*BucketSize]();
+     322             :         }
+     323           0 :         return m_Data[b];
+     324             :     }
+     325             : 
+     326             : public:
+     327           0 :     SparseGrid(u16 w, u16 h) : m_W(w), m_H(h), m_DirtyID(0)
+     328             :     {
+     329           0 :         ENSURE(m_W && m_H);
+     330             : 
+     331           0 :         m_BW = (u16)((m_W + BucketSize-1) >> BucketBits);
+     332           0 :         m_BH = (u16)((m_H + BucketSize-1) >> BucketBits);
+     333             : 
+     334           0 :         m_Data = new T*[m_BW*m_BH]();
+     335           0 :     }
+     336             : 
+     337           0 :     ~SparseGrid()
+     338             :     {
+     339           0 :         reset();
+     340           0 :         SAFE_ARRAY_DELETE(m_Data);
+     341           0 :     }
+     342             : 
+     343           0 :     void reset()
+     344             :     {
+     345           0 :         for (size_t i = 0; i < (size_t)(m_BW*m_BH); ++i)
+     346           0 :             SAFE_ARRAY_DELETE(m_Data[i]);
+     347             : 
+     348             :         // Reset m_Data by value-constructing in place with placement new.
+     349           0 :         m_Data = new (m_Data) T*[m_BW*m_BH]();
+     350           0 :     }
+     351             : 
+     352           0 :     void set(int i, int j, const T& value)
+     353             :     {
+     354             : #if GRID_BOUNDS_DEBUG
+     355           0 :         ENSURE(0 <= i && i < m_W && 0 <= j && j < m_H);
+     356             : #endif
+     357           0 :         GetBucket(i, j)[(j % BucketSize)*BucketSize + (i % BucketSize)] = value;
+     358           0 :     }
+     359             : 
+     360           0 :     T& get(int i, int j)
+     361             :     {
+     362             : #if GRID_BOUNDS_DEBUG
+     363           0 :         ENSURE(0 <= i && i < m_W && 0 <= j && j < m_H);
+     364             : #endif
+     365           0 :         return GetBucket(i, j)[(j % BucketSize)*BucketSize + (i % BucketSize)];
+     366             :     }
+     367             : 
+     368             :     u16 m_W, m_H;
+     369             :     u16 m_BW, m_BH;
+     370             :     T** m_Data;
+     371             : 
+     372             :     size_t m_DirtyID; // if this is < the id maintained by ICmpObstructionManager then it needs to be updated
+     373             : };
+     374             : 
+     375             : /**
+     376             :  * Structure holding grid dirtiness informations, for clever updates.
+     377             :  */
+     378          36 : struct GridUpdateInformation
+     379             : {
+     380             :     bool dirty;
+     381             :     bool globallyDirty;
+     382             :     Grid<u8> dirtinessGrid;
+     383             : 
+     384             :     /**
+     385             :      * Update the information with additionnal needed updates, then erase the source of additions.
+     386             :      * This can usually be optimized through a careful memory management.
+     387             :      */
+     388           0 :     void MergeAndClear(GridUpdateInformation& b)
+     389             :     {
+     390           0 :         ENSURE(dirtinessGrid.compare_sizes(&b.dirtinessGrid));
+     391             : 
+     392           0 :         bool wasDirty = dirty;
+     393             : 
+     394           0 :         dirty |= b.dirty;
+     395           0 :         globallyDirty |= b.globallyDirty;
+     396             : 
+     397             :         // If the current grid is useless, swap it
+     398           0 :         if (!wasDirty)
+     399           0 :             dirtinessGrid.swap(b.dirtinessGrid);
+     400             :         // If the new grid isn't used, don't bother updating it
+     401           0 :         else if (dirty && !globallyDirty)
+     402           0 :             dirtinessGrid.bitwise_or(b.dirtinessGrid);
+     403             : 
+     404           0 :         b.Clean();
+     405           0 :     }
+     406             : 
+     407             :     /**
+     408             :      * Mark everything as clean
+     409             :      */
+     410           3 :     void Clean()
+     411             :     {
+     412           3 :         dirty = false;
+     413           3 :         globallyDirty = false;
+     414           3 :         dirtinessGrid.reset();
+     415           3 :     }
+     416             : };
+     417             : 
+     418             : #endif // INCLUDED_GRID
+```
+Generated by: LCOV version 1.13

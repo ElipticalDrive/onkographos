@@ -1,0 +1,179 @@
+The `SparseGrid` class is the central data structure in svox2 (Plenoxels) that efficiently represents volumetric scenes using a sparse voxel grid. Rather than storing data for every point in a dense g
+
+SparseGrid | sxyu/svox2 | DeepWiki
+Index your code with Devin
+DeepWiki
+DeepWiki
+sxyu/svox2
+Index your code with
+Devin
+Edit WikiShare
+Last indexed: 20 April 2025 (ee80e2)
+Overview
+Installation & Setup
+Core Components
+SparseGrid
+Camera and Rays
+Basis Functions
+Training and Optimization
+Optimization Pipeline
+Hyperparameter Tuning
+Rendering
+Volume Rendering
+Rendering Options and Evaluation
+Data Handling
+Dataset Formats and Loading
+Data Visualization
+CUDA Acceleration
+Custom CUDA Kernels
+Testing and Debugging
+Menu
+SparseGrid
+Relevant source files
+svox2/csrc/include/data_spec.hpp
+svox2/csrc/include/data_spec_packed.cuh
+svox2/svox2.py
+The SparseGrid class is the central data structure in svox2 (Plenoxels) that efficiently represents volumetric scenes using a sparse voxel grid. Rather than storing data for every point in a dense grid, it only allocates memory for non-empty voxels, allowing for high-resolution representations with manageable memory usage. This page documents the implementation, interfaces, and usage of the SparseGrid class.
+For information about how rays interact with this grid, see Camera and Rays. For details on different basis functions used to represent view-dependent effects, see Basis Functions.
+Overview
+SparseGrid stores scene information in a sparse format using:
+Density values (opacity) at each voxel
+View-dependent color information using various basis representations
+A link structure that maps 3D coordinates to data indices
+The class supports operations for sampling points in the grid, volume rendering, and gradient-based optimization.
+```
+usesSparseGrid+density_data: Parameter+sh_data: Parameter+links: Tensor+basis_data: Parameter+background_data: Parameter+sample()+volume_render()+resample()+world2grid()/grid2world()RenderOptions+backend: String+step_size: float+sigma_thresh: float+stop_thresh: float
+```
+Sources: svox2/svox2.py335-1088
+Data Structure
+The SparseGrid represents a 3D scene with the following key components:
+Links Tensor: A 3D tensor of indices mapping grid coordinates to data indices in the sparse arrays. Empty voxels are marked with -1.
+Density Data: Stores opacity values for each non-empty voxel.
+Feature Data: Stores color/appearance information using various basis representations (e.g., spherical harmonics).
+Optional Background Model: For representing distant scene elements without requiring a large grid.
+```
+SparseGrid StructureOptional Componentsindex ≥ 0index ≥ 0index = -1Volume Rendering3D Grid Coordinates (i,j,k)links[i,j,k]density_data[index]sh_data[index]Empty Voxel (No Data)basis_databackground_data
+```
+Sources: svox2/svox2.py335-533 svox2/csrc/include/data_spec.hpp18-52
+Initialization
+SparseGrid can be initialized with various parameters to control grid resolution, bounds, and basis function types:
+ParameterDescription
+resoGrid resolution (int or [x, y, z])
+radiusHalf-size of grid in world units
+centerCenter of grid in world units
+basis_typeType of basis function (SH, 3D texture, MLP)
+basis_dimDimension of basis functions
+use_z_orderWhether to use Z-order curve for data layout
+use_sphere_boundWhether to use spherical bounding instead of cubic
+When initializing, the grid can be constrained to a sphere rather than a cube by setting use_sphere_bound=True, which helps reduce memory usage for scenes that are roughly spherical.
+Sources: svox2/svox2.py355-535
+Core Properties
+The SparseGrid has several key properties that reveal information about its configuration:
+```
+# Get the number of data channels (density + color)data_dim = grid.data_dim   # Check if using a 3D learned texture basisbasis_reso = grid.basis_reso   # Whether the grid includes a background modeluses_bg = grid.use_background   # Grid shape as [x_res, y_res, z_res, data_dim]shape = grid.shape
+```
+Sources: svox2/svox2.py537-559
+Sampling
+One of the key operations of SparseGrid is sampling density and color values at arbitrary 3D points using trilinear interpolation:
+```
+CUDA Sample PathPyTorch Sample PathYesNoInput: points (N, 3)Is CUDA available?CUDA accelerated samplingPyTorch implementationConvert to grid coordinatesFind surrounding voxels (8 corners)Get values from linksTrilinear interpolation_SampleGridAutogradFunctionC++ sample_gridOutput: density, color
+```
+The sample method retrieves density and color values at specified 3D points:
+```
+density, color = grid.sample(points,                            use_kernel=True,  # Use CUDA if available                           grid_coords=False,  # Whether points are in grid coords                           want_colors=True)  # Whether to compute colors
+```
+Sources: svox2/svox2.py576-652 svox2/svox2.py186-223
+Volume Rendering
+Volume rendering is the process of generating 2D images from the 3D grid by simulating light transport through the volume:
+```
+Rendering OptionsInput: rays (origins, dirs)Backend selectionCompute ray-grid intersectionsMarch along raysSample grid at each stepAccumulate color & densityApply view-dependent effectsOutput: rendered colorstep_size: step distancesigma_thresh: density thresholdstop_thresh: early terminationbackground_brightness: 0-1
+```
+The volume rendering can be performed with different backends:
+CUDA backend (default): Highly optimized for performance
+PyTorch backend: For debugging and gradient checking
+For a single camera view:
+```
+# Render from specific cameraimage = grid.volume_render_image(camera) # Render specific rayscolor = grid.volume_render(rays) # Render with fused gradients (for optimization)color = grid.volume_render_fused(rays, rgb_gt)
+```
+Sources: svox2/svox2.py1036-1142 svox2/svox2.py226-288
+Coordinate Transformation
+The grid operates in a normalized coordinate system, requiring conversions between world coordinates and grid coordinates:
+```
+# Convert world coordinates to grid coordinatesgrid_points = grid.world2grid(world_points) # Convert grid coordinates to world coordinatesworld_points = grid.grid2world(grid_points)
+```
+These transformations use the grid's radius and center parameters to map between coordinate systems:
+```
+Grid CoordinatesWorld Coordinatesworld2grid()grid2world()Range: center ± radiusRange: 0 to reso-1
+```
+Sources: svox2/svox2.py1496-1524
+Resampling and Grid Modification
+SparseGrid supports dynamic resolution changes through the resample method, which creates a new grid at higher resolution while maintaining sparsity:
+```
+Apply thresholdOriginal GridSample density at new resolutionWeight or Sigma ThresholdingCreate sparse maskOptional: Dilate maskReindex linksSample colors at sparse locationsCreate new sparse grid
+```
+The resample method is crucial for multi-resolution optimization strategies:
+```
+# Increase grid resolution while preserving datagrid.resample(    reso=256,                # New resolution    sigma_thresh=5.0,        # Density threshold    weight_thresh=0.01,      # Weight threshold (if cameras provided)    dilate=2                 # Dilation of mask for preserving neighborhoods)
+```
+The grid can also be modified to use a different basis dimension:
+```
+# Change the number of spherical harmonics coefficientsgrid.resize(basis_dim=16)  # Must be a square number for SH
+```
+Sources: svox2/svox2.py1223-1425 svox2/svox2.py1451-1486
+Performance Optimization
+Performance is a critical aspect of SparseGrid, especially for interactive rendering and efficient training:
+```
+Acceleration MethodsMethod callsAccelerated opsSparseGrid in PythonC++ BindingsCUDA Kernelsgrid.accelerate()use_kernel=TrueSparse indexing
+```
+The accelerate() method builds a distance transform table to speed up ray marching through empty space:
+```
+# Build acceleration structure for faster renderinggrid.accelerate()  # Only works on CUDA
+```
+Sources: svox2/svox2.py1487-1494
+Integration with PyTorch
+The SparseGrid class extends nn.Module, making it fully compatible with the PyTorch ecosystem:
+Parameters like density_data and sh_data are PyTorch nn.Parameter objects
+Gradient computation is supported for optimization
+Custom autograd functions are implemented for efficient backpropagation
+It can be used with PyTorch's optimization algorithms
+This integration enables end-to-end differentiable rendering and optimization.
+Sources: svox2/svox2.py335-336 svox2/svox2.py186-288
+C++ and CUDA Implementation Details
+The core operations of SparseGrid are implemented as CUDA kernels for performance:
+```
+CUDA KernelsC++ BridgePython Interface_to_cpp()Pack for GPUSparseGrid in svox2.pySparseGridSpecPackedSparseGridSpecsample_gridvolume_render_cuvolvolume_render_nvol
+```
+The data structures are packed into GPU-friendly formats to minimize memory transfers and maximize computation efficiency.
+Sources: svox2/csrc/include/data_spec.hpp18-52 svox2/csrc/include/data_spec_packed.cuh11-62
+Usage Example
+Here's a simplified example of how SparseGrid is typically used:
+```
+# Create a new gridgrid = SparseGrid(    reso=128,    radius=1.0,    center=[0.0, 0.0, 0.0],    basis_type=BASIS_TYPE_SH,    basis_dim=9) # Set rendering optionsgrid.opt.step_size = 0.5grid.opt.sigma_thresh = 1e-10grid.opt.stop_thresh = 1e-7 # Render from a cameraimage = grid.volume_render_image(camera) # Optimize the gridoptimizer = torch.optim.Adam([    {'params': grid.density_data, 'lr': 0.1},    {'params': grid.sh_data, 'lr': 0.01}]) # ... training loop ... # Save the optimized gridgrid.save("model.npz", compress=True)
+```
+Summary
+The SparseGrid class is the foundation of the svox2/Plenoxels system, providing an efficient representation for volumetric scenes. Key advantages include:
+Memory Efficiency: Stores only non-empty voxels
+Speed: CUDA-accelerated operations for sampling and rendering
+Flexibility: Supports different basis functions for view-dependent effects
+Differentiability: End-to-end gradients for optimization
+Scalability: Allows dynamic resampling for multi-resolution optimization
+Understanding how SparseGrid works is essential for effectively using the svox2 library and developing novel neural rendering techniques.
+Sources: svox2/svox2.py335-1537
+Dismiss
+Refresh this wiki
+Enter email to refresh
+On this page
+SparseGrid
+Overview
+Data Structure
+Initialization
+Core Properties
+Sampling
+Volume Rendering
+Coordinate Transformation
+Resampling and Grid Modification
+Performance Optimization
+Integration with PyTorch
+C++ and CUDA Implementation Details
+Usage Example
+Summary

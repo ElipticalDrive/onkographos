@@ -1,0 +1,464 @@
+Gaussian Splat Renderer for the Godot Engine. Contribute to klausi3D/godotGS development by creating an account on GitHub.
+
+gaussian_splatting: make the per-tile raster cap drop loud and honour its project setting (#1137) by klausi3D · Pull Request #1138 · klausi3D/godotGS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+klausi3D
+commented
+Oct 2, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Refs #1137
+Base: f98243887a7 (origin/master). Risk class: R3: GLSL edits in tile_binning.glsl and both tile rasterizers, plus the C4b telemetry contract (ADR addendum included). classify_change.py fails closed to R3 for any GLSL change.
+What this changes
+At the default gpu_preset="high", the rasterizers keep only the nearest 12,288 records of a 16 px tile and drop the rest, which leaves tile-shaped holes in far views of real scans. This PR fixes the two side defects. It does not change the default cap, because the measurements below show that removing the loss costs a lot of frame time. That decision is the maintainer's (see "Decision needed").
+The loss is now visible in production (C4b, third channel). Both rasterizers OR GS_OVERFLOW_DROP_RASTER_TILE_CAP into the resident overflow_drop_signal. The fragment path now counts too, once per tile from the tile-origin fragment, which matches the compute path. The signal word is a channel bitmask, so the binning sites move from atomicMax(…,1) to atomicOr(GS_OVERFLOW_DROP_BINNING). The layout is unchanged (88 bytes).
+Per-frame production counters. The always-on readback now copies the whole 88-byte snapshot instead of 4 bytes, still in one async copy, and keeps the sampled frame's overflow_splats_clamped / overflow_tile_count. get_overflow_stats() gains sampled_dropped_records, sampled_raster_truncated_tiles (tiles the rasterizer truncated; binning drops count only in records), sampled_drop_frame_serial, overflow_drop_events, raster_tile_cap_drop_events and raster_tile_cap. The raster channel has its own warning, shown once per renderer, which names the setting and the cap in force.
+The setting is honoured. max_raster_splats_per_tile now follows the max_overlap_records rule. 0 is the new registered default and means "auto" (the preset's cap, or 65,536 under custom). A positive value overrides any named preset. Before this PR, the editor showed 65,536 while 12,288 was in force.
+Why the cap exists, and what raising it costs
+It is a loop bound, not memory. The compute rasterizer already streams a tile through shared memory in batches of GS_TILE_SPLAT_CAPACITY = 1024 (tile_rasterizer_compute.glsl:229-283), so shared memory does not depend on the cap. The records already exist in the sorted overlap buffers, so raising the cap costs 0 VRAM. What the cap bounds is time: one 256-thread workgroup walks all records of its tile serially, so the densest tile is the critical path of the raster pass. The cost is roughly linear in min(peak tile depth, cap), about 0.3 ms per 1,000 records on an RTX 3090. Saturated tiles exit early, so the extra time is spent only where the dropped records would actually show.
+It cannot sensibly be derived from the record budget. The record budget is a VRAM quantity, while the cap trades per-tile latency against content. An adaptive cap would need a frame-time controller, and that is out of scope here.
+Measured cost. RTX 3090, Vulkan, 960x540. Each cell is the median of 40 frames: raster pass GPU ms / whole-viewport GPU ms. "Holes" counts pixels that differ by more than 8 levels from the 65,536 arm. The camera is at m x fit distance.
+scan, view
+peak records/tile
+12,288 (default)
+32,768
+65,536
+holzbank d3 (23 m)
+16,478
+4.58 / 7.41, 89 px holes
+5.30 / 8.10, 0
+5.18 / 7.76, 0
+holzbank d6 (47 m)
+19,679
+4.92 / 7.00, 520 px
+7.57 / 9.63, 0
+7.20 / 9.28, 0
+lamp d3 (9.5 m)
+21,449
+4.50 / 12.16, 1,573 px
+7.21 / 14.92, 0
+7.20 / 14.89, 0
+lamp d6 (19 m)
+37,008
+4.37 / 10.74, 1,229 px
+10.82 / 17.23, 25 px
+11.73 / 18.12, 0
+tischgruppe d12 (27 m)
+17,534
+3.92 / 4.91, 123 px
+5.81 / 6.81, 0
+5.44 / 6.43, 0
+weg-gartenanlage d1 (fitted, 14 m)
+53,277
+4.33 / 14.52, 2,295 px
+9.91 / 20.13, 313 px
+15.10 / 25.39, 0
+weg-gartenanlage d6 (81 m)
+26,420
+3.62 / 12.21, 315 px
+7.91 / 16.21, 0
+7.93 / 16.32, 0
+holzbank 1080p d8 (62 m)
+22,060
+4.87 / 7.74, 376 px
+6.73 / 9.61, 0
+6.88 / 9.60, 0
+At the default, all four scans lose content at ordinary distances. Removing the loss adds +33% to +75% whole-viewport GPU time in those views (+2.3 to +10.9 ms on a 3090). 32,768 still leaves holes. Near views (1x for holzbank, lamp and tischgruppe) are unaffected.
+Pixel evidence (local, agent session scratchpad tilecap/holz_d6_cap_compare.png and weg_d1_cap_compare.png): holzbank d6 at the default shows rectangular black tiles under the seat (x 448-511, y 256-287, matching #1137); 32,768 and 65,536 draw the grass there. weg d1 at the default has several 16 px black blocks along the path edge; 32,768 still has one; 65,536 has none.
+Decision (recorded)
+Maintainer decision, 2026-10-02: Option A. Keep the default cap of 12,288. Keep the new warning, the counters, and the honoured setting. Document the holes as an alpha limitation until HLOD (#1136) lands. That entry is in docs/development/known-public-alpha-limitations.md with status Active. It is not ledger-accepted: no acceptance-bar §8.1 row and no public_alpha_issue_ledger entry exist yet. That formalisation, an R3 manifest edit, is a follow-up if wanted. The fact that the test project runs at cap 65,536, so CI never exercises the shipped default, is filed separately as #1139.
+Options that were considered
+A. Keep 12,288 (this PR). The loss is now a warning plus counters, and a project can opt in with the setting. HLOD (docs: ADR — hierarchical LOD for streamed splat worlds, accepted (Refs #1131) #1136) is the cure, because it lowers far-field tile depth. Document it as a known alpha limitation.
+B. high = 32,768. Fixes holzbank, tischgruppe and most lamp/weg views. Up to +60% viewport GPU (lamp d6). weg d1 and lamp d6 keep holes.
+C. high = 65,536. No loss on any measured scan. Up to +75% viewport GPU (weg d1: 14.5 to 25.4 ms).
+A structural fix (splitting a hot tile across several workgroups and merging the results) would remove the critical path. It is not small enough for alpha.
+Evidence
+Settings test ([Config] Explicit max_raster_splats_per_tile overrides a named preset's cap (#1137)): registered default is 0, each preset keeps its cap at 0, an explicit value wins in both directions, and custom with 0 gives 65,536.
+GPU tests (TileRenderer batch):
+"A tile past the per-tile raster cap raises the production drop telemetry". This runs through the real instance pipeline with 6,000 records in one tile. Control: under an explicit cap of 8,192 it must stay silent. Then under an explicit cap of 4,096: sampled drops > 0, a raster-cap event, and the warning.
+"A per-tile raster cap drop warns and fills the production drop counters". This drives the readback state machine. It checks the warning text, that the raster channel and the binning channel are counted separately, that the per-frame counters return to 0, and that the warning is shown once per renderer.
+Headless [Config] doctests: 64/64 pass, including the new case.
+GPU TileRenderer batch, fixed binary (f9499a3), 2026-10-03: 14/14 cases and 94/94 assertions pass. This includes both new cases and the existing C4b and clamp-parity cases.
+The new tests fail with the fix reverted. Same build family: shader atomicOr writers and the readback's raster-cap branch reverted, everything else kept. Result: 0/2 cases, 6 failing assertions.
+The dense-tile case reports raster_cap_events=0 while max_sampled_dropped=1904, so the tile was truncated and nothing said so.
+The state-machine case fails on the warning text and on raster_tile_cap_drop_events.
+The fixed binary passes 2/2 and 18/18, and its log shows the warning.
+Codex review round 1 (86ee7a9):
+P1: the drop signal is now a read-and-reset, so a second channel's bit can no longer be erased unseen.
+P2: the fragment path counts drops once per tile.
+New GPU case: fragment per-tile count. The rewritten C4b sticky case and a new phase in the state-machine case cover P1.
+TileRenderer batch: 15/15 on this head. With ec69133's readback and fragment shader restored: 12/15. The three failures are exactly those checks, and the fragment case reports 214,272 dropped tiles in a 1,024-tile frame.
+Shader matrix: compile_shaders.py, 96/96 PASS.
+python -B tests/ci/run_module_tests.py --guard-only: exit 0.
+The RequiresGPU snapshot was re-pinned with the repo's functions: 165 to 167, 99 to 101 in named batches.
+Note: the repo test project runs gpu_preset="custom" with cap 65,536, so CI visual gates never exercised the shipped 12,288 default.
+Single-vendor blind spot: all GPU evidence and timings are from NVIDIA (RTX 3090) only. AMD and Intel are unmeasured, both for the cost per record and for the fragment-path atomics.
+Not verified: the fragment rasterizer path at runtime. The default path is compute (raster_path=compute in every probe row). The fragment path compiles in the shader matrix and is exercised only by the existing clamp-parity case.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+gaussian_splatting: make the per-tile raster cap drop loud and honour…
+…
+f9499a3
+```
+… its project setting (#1137)
+
+The rasterizers truncate a tile to GS_MAX_RASTER_SPLATS_PER_TILE records and drop its
+farthest records. At the default gpu_preset="high" (12288) this cuts tile-shaped holes into
+far views of real scans, and nothing said so: only the debug-gated readback counted it, the
+fragment path counted nothing, and the project setting (registered as 65536) was never read
+under a named preset.
+
+- Both rasterizers now OR GS_OVERFLOW_DROP_RASTER_TILE_CAP into the resident C4b drop signal
+  (the fragment path counts once per tile, from the tile-origin fragment). The signal word is
+  a channel bitmask; the binning sites switch from atomicMax(1) to atomicOr(BINNING).
+- The always-on readback copies the whole 88-byte snapshot (one async copy, as before) and
+  keeps the sampled frame's dropped records/tiles as production per-frame counters. The
+  raster channel warns once per renderer and has its own raster_tile_cap_drop_events
+  counter; both are in get_overflow_stats().
+- max_raster_splats_per_tile follows the max_overlap_records rule: 0 (new default) = the
+  preset's cap, a positive value overrides any preset.
+
+The default cap is unchanged: removing the loss costs up to +75% viewport GPU time on the
+measured scans (no VRAM), which is a maintainer decision.
+
+Refs #1137
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+```
+chatgpt-codex-connector
+Bot
+commented
+Oct 2, 2026
+Copy link
+Copy Markdown
+You have reached your Codex usage limits for code reviews. You can see your limits in the Codex usage dashboard.
+klausi3D
+commented
+Oct 2, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@codex review
+chatgpt-codex-connector
+Bot
+commented
+Oct 2, 2026
+Copy link
+Copy Markdown
+You have reached your Codex usage limits for code reviews. You can see your limits in the Codex usage dashboard.
+docs: disclose the per-tile raster cap holes as a known alpha limitat…
+…
+3c68341
+```
+…ion (#1137)
+
+Maintainer decision 2026-10-02 (option A): keep the default cap of 12,288, now warned and
+counted, until hierarchical LOD (#1136) lands. The entry is Active, not ledger-accepted:
+there is no acceptance-bar row or public_alpha_issue_ledger entry for it yet.
+
+Refs #1137
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+```
+klausi3D
+mentioned this pull request
+Oct 2, 2026
+CI renders the test project with a non-default GPU sorting config, so the shipped per-tile raster cap is never exercised
+#1139
+Open
+Merge origin/master into gs/1137-tile-record-cap
+…
+ec69133
+```
+Re-pins the RequiresGPU snapshot on the merged tree with the repo's own functions (166 -> 168,
+running in a named batch 100 -> 102) and regenerates docs/reference/project-settings.md for
+the new max_raster_splats_per_tile default (0 = auto).
+
+Refs #1137
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+```
+klausi3D
+commented
+Oct 3, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@codex review
+chatgpt-codex-connector
+Bot
+reviewed
+Oct 3, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: ec69133deb
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+modules/gaussian_splatting/renderer/tile_render_debug_stats.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+modules/gaussian_splatting/renderer/tile_render_debug_stats.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+klausi3D
+and others
+added 2 commits
+October 3, 2026 21:01
+Merge origin/master into gs/1137-tile-record-cap
+…
+392f8c7
+```
+Keeps both new known-limitations sections (#1137 and master's splat-shadow entry) and
+re-pins the RequiresGPU snapshot on the merged tree with the repo's own functions
+(167 -> 169, running in a named batch 101 -> 103).
+
+Refs #1137
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+```
+gaussian_splatting: read-and-reset the C4b drop signal; count fragmen…
+…
+86ee7a9
+```
+…t-path drops per tile (#1137 review)
+
+P1: with two channels in the sticky signal word, the frame-start re-arm could erase a bit
+another channel set while a readback of the first was in flight, losing that channel's
+warning and counter. The poll now clears the signal word right after recording its copy, in
+the same command stream (RenderingDevice orders the clear after the copy), so every bit is
+seen by exactly one readback. clear_counters only clears the per-frame prefix, and
+overflow_signal_needs_clear is removed. The poll runs on every rendered frame, because the
+rasterizers write the signal too.
+
+P2: the fragment rasterizer ran the availability-clamp atomics in every fragment of a tile,
+so sampled_dropped_tiles/records over-counted up to 256x. They now count once per tile, from
+the tile-origin fragment, which matches the compute path.
+
+Tests: the C4b sticky test is rewritten for read-and-reset. The #1137 state-machine test
+gains the lost-second-channel phase. A new GPU case checks the fragment-path tile count
+against the frame's tile total. RequiresGPU snapshot re-pinned with the repo's own functions
+(169 -> 170).
+
+Refs #1137
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+```
+klausi3D
+commented
+Oct 4, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@codex review
+chatgpt-codex-connector
+Bot
+reviewed
+Oct 4, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 86ee7a9691
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+modules/gaussian_splatting/renderer/render_debug_state_orchestrator.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+klausi3D
+and others
+added 2 commits
+October 4, 2026 02:48
+Merge origin/master into gs/1137-tile-record-cap
+…
+676287e
+```
+Re-pins the RequiresGPU snapshot on the merged tree with the repo's own functions
+(169 -> 172, running in a named batch 103 -> 106).
+
+Refs #1137
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+```
+gaussian_splatting: name the tile drop counter for what it counts (#1137
+…
+cb8b4f6
+```
+ review)
+
+Tile binning drops records one at a time and has no per-tile once-flag, so
+overflow_tile_count only ever counts tiles the rasterizer truncated: past the per-tile
+raster cap, or with the whole record range beyond the overlap budget. The production field
+is renamed sampled_dropped_tiles -> sampled_raster_truncated_tiles, and the header, API
+docs, ADR, limitations page and warning text now say exactly that. sampled_dropped_records
+still counts records from every channel, so it can be non-zero while the tile counter is 0.
+
+Refs #1137
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+```
+chatgpt-codex-connector
+Bot
+reviewed
+Oct 4, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: cb8b4f6ccb
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+modules/gaussian_splatting/renderer/tile_render_debug_stats.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+klausi3D
+mentioned this pull request
+Oct 4, 2026
+sampled_dropped_records double-counts the clipped tail of the overlap-budget boundary tile
+#1147
+Open
+Hide details
+View details
+klausi3D
+merged commit 58add91
+into
+master
+Oct 4, 2026
+21 of 23 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+klausi3D
+deleted the
+gs/1137-tile-record-cap
+branch
+October 4, 2026 07:33
+klausi3D
+mentioned this pull request
+Oct 4, 2026
+Default per-tile raster cap (12288, gpu_preset=high) silently drops far content: tile-shaped holes in far views of a 252k-splat scan
+#1137
+Closed
+Shuang-su
+mentioned this pull request
+Oct 4, 2026
+2026-10-05：Godot tile 丢失告警、LichtFeld 启动/显存优化与 Spirula HDR
+Shuang-su/gaussian-splatting-daily#47
+Closed
+This was referenced Oct 5, 2026
+Overlap-record overflow recovery and persistent truncation (accepted alpha limitation)
+#54
+Open
+docs: move #1089 to Recently resolved on the known-limitations page
+#1206
+Merged
+klausi3D
+added a commit
+that referenced
+this pull request
+Oct 9, 2026
+docs: move #1089 to Recently resolved on the known-limitations page (#…
+…
+8cab213
+```
+…1206)
+
+#1089 (shadow-casting splats darkening themselves; the starter template
+rendering dark) closed on 2026-10-03, fixed by #1113 (7a9b170, #1095
+slice 1). The page still listed it as Active in the summary table and in
+its own section. Verified on master: render_shadow_depth_map blits only a
+depth image its own pass rasterized and otherwise returns
+SHADOW_SKIP_NO_CASTER_RASTERED.
+
+- Remove the #1089 Active row and section; add a Recently resolved row
+  with the fixing PR, date, the closing comment's evidence and the commit.
+- "Splats cast no shadows" now references #1095 primarily, carries a
+  status line and a summary row.
+- #1137 is closed, but #1138 only made the drops visible and kept the
+  default cap, so the entry stays Active and now says so.
+- The #1092 resolved row no longer claims the issue is open.
+- Rewrap two lines that began with "#NNNN" and rendered as extra H1s.
+
+Refs #1089, refs #1095
+
+
+Claude-Session: https://claude.ai/code/session_01SPhdvUqyqhoyzvtaqBwzBA
+
+Co-authored-by: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

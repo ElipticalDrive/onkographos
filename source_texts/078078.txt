@@ -1,0 +1,238 @@
+Contribute to WrackedFella/moho development by creating an account on GitHub.
+
+fix(voxel): valid indices and grid-aligned geometry for mixed and blocky chunks by WrackedFella · Pull Request #196 · WrackedFella/moho · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+WrackedFella
+commented
+Oct 8, 2026
+Copy link
+Copy Markdown
+Owner
+Requested by Justin · project thread
+Issue
+Closes #183 (ENG-F22-16, mixed smooth and blocky chunks mesh with valid indices and aligned geometry)
+Summary
+Before: a chunk mixing smooth (material < 100) and blocky (≥ 100) blocks emitted blocky indices past the end of its vertex array, and its smooth part sat half a block off. Blocky cubes were centred on the block corner, spanning [V−0.5, V+0.5].
+After: every index of a mixed chunk is in range, its smooth part lands where an all-smooth chunk's would, and every blocky cube fills [V, V+1], matching the smooth path, the coarse LOD path and moho_game raycasting.
+How:
+Index offset: append_mesh_with_offset added the smooth vertex count on top of target.vertices.len(), which already includes it. Deleted it; mixed chunks use append_mesh.
+Smooth alignment: the mixed path had its own copy of "density field → marching cubes → world space" and skipped the -0.5 density-to-world shift. generate_smooth_mesh(.., only_smooth) is now the one pipeline both paths use, so the shift can't drift between them (removes create_density_field_for_chunk and the per-attribute copy loop).
+Blocky shift: FaceDirection::vertices_and_normal now uses 0/1 corners. The fix is in the source table, so both the all-blocky and mixed paths get it. Winding and AO corner order are unchanged.
+Heads-up for #173: blocky vertex positions moved by +0.5 on every axis. Block V now spans exactly [V, V+1]; any test pinning blocky positions should expect that.
+Spec deviation: none in scope. The design bullet "the mixed path applies the same density-to-world shift" is implemented by sharing the smooth pipeline rather than copying the constant.
+Test evidence
+just check passes (532 run, 532 passed, 2 skipped; fmt, clippy -D warnings, doctests, comment refs, layering OK)
+New or changed tests fail without the change (test commits precede the fix: ef9f844, 75bb18a)
+Gate class: domain; tests reviewed before implementation by devflow:test-critic (findings below)
+Tests (moho_core/tests/mesh_alignment.rs unless noted):
+mixed_chunk_indices_are_in_range: smooth block + two blocky blocks; every index < vertex count, every vertex referenced, no triangle mixes geometry types. Failed on dev with "index 95 out of range for 72 vertices".
+mixed_chunk_smooth_part_is_aligned: smooth part centred on (5.5, 5.5, 5.5) and the blocky cube in the same chunk spans [12, 13]. Failed on dev: centred at 6.
+mesh_is_centered_on_the_voxel_it_represents: replaces the smooth-only test with the spec's three-row table (smooth LOD 0, blocky LOD 0, smooth 2³ cell LOD 1). Blocky row failed on dev with bbox 4.5..5.5; the two smooth rows are regression guards.
+mixed_chunk_away_from_origin_is_placed_at_its_world_position: chunk (−1, 1, 0); added for a surviving mutant.
+blocky.rs isolated_block_faces_lie_on_the_plane_their_normal_names: added from the reviewer's finding that a bbox can't catch a face on the wrong plane.
+Test review (devflow:test-critic, 2 rounds)
+Round 1: KEEP 1 / STRENGTHEN 2 / MERGE 0 / REMOVE 0 / 1 gap. Accepted all:
+Index test only checked the max index; index_offset + index or bare index fixes stay in range but draw the wrong vertices. Added a second blocky block, the every-vertex-referenced check and the per-triangle geometry-type check.
+Blocky cubes inside a mixed chunk weren't position-checked (a fix in append_mesh only, or a whole-mesh −0.5 shift, would pass). Added the [12, 13] assertion.
+The LOD 1 row filtered by geometry type, coupling it to how coarse vertices are tagged. Bounds now cover all vertices.
+Round 2: KEEP 3, nothing material left. Open findings: none.
+Mutation testing
+just mutants on the final diff: 16 caught / 0 missed / 3 unviable (19 mutants). An earlier run missed chunk_pos * chunk_size → / in generate_smooth_mesh, because every test used chunk (0,0,0); the away-from-origin test kills it. cargo-mutants was installed with cargo install since scripts/cloud-tools.sh's binstall can't reach the GitHub API from cloud threads.
+Quality passes
+/devflow:comment-audit run on the diff: one bug-history paragraph removed from the alignment test doc, the density-shift comment tightened from 14 lines to 5.
+Adversarial challenge: one round. A mixed chunk at a negative chunk position had valid indices and correct smooth centre (−10.5, 21.5, 5.5) and blocky span; no failing test, so no second round (the same scenario later became the mutant-killing test).
+Refactor (/simplify, 4 angles): shared smooth pipeline applied (simplification, reuse and altitude angles all flagged the duplicated transform). Efficiency: clean.
+Independent review (devflow:reviewer): 2 material findings, both fixed (the surviving mutant; the per-face plane test). Nit fixed: unwrap_or(0) on a checked-non-empty max became expect. Nit left: the parameterized test's message doesn't say which bound failed; it prints the full bbox, which is enough.
+/devflow:wiki: none needed; no wiki page describes mesh vertex conventions, and wiki/architecture/world-streaming.md still matches.
+GitNexus detect_changes / impact not run: the GitNexus tools aren't available in this cloud session. Consumers were checked by text search instead (below).
+Risk and manual verification
+Blast radius: blocky geometry moves +0.5 on every axis. Consumers checked: moho_game/src/raycast.rs already treats block V as [V, V+1]; physics trimeshes (src/app/event_loop/generation_processor.rs, event_processor.rs, src/app/physics_controller.rs) are built from chunk vertices and follow automatically, and no longer receive out-of-range indices from mixed chunks; the renderer uses geometry_type only for the AO blend. Nothing in the game places material ≥ 100 yet, so no saved scene holds old-position blocky geometry.
+Platform: pure geometry math with no target-specific code; full-platform CI not triggered.
+Out of scope (per spec): culling faces between adjacent blocky blocks (SG-F3); greedy meshing.
+File move: [ENG-F10-03] Voxel terrain builds as a strategy-line crate #140 (ENG-F10-03) moves these files; this should land before its branch is cut or be rebased after.
+Board: Status changes left for Justin to set by hand (board GraphQL is unreachable from cloud threads): Status → In review.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01Rmq55xGSicE5XBJ4FMAxpC
+Generated by Claude Code
+claude
+added 7 commits
+October 8, 2026 13:56
+test(voxel): pin mixed-chunk indices and alignment, and blocky voxel …
+…
+ef9f844
+```
+…span
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Rmq55xGSicE5XBJ4FMAxpC
+```
+test(voxel): strengthen mixed-chunk index and alignment tests after r…
+…
+75bb18a
+```
+…eview
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Rmq55xGSicE5XBJ4FMAxpC
+```
+fix(voxel): valid indices and grid-aligned geometry for mixed and blo…
+…
+c9c3b24
+```
+…cky chunks
+
+Mixed chunks double-counted the smooth vertex offset in blocky indices and
+skipped the smooth path's density-to-world shift. Blocky cubes were centred
+on the block corner; they now fill [V, V+1] like the smooth and coarse paths.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Rmq55xGSicE5XBJ4FMAxpC
+```
+refactor(voxel): share the smooth meshing pipeline between smooth and…
+…
+5dd5480
+```
+… mixed chunks
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Rmq55xGSicE5XBJ4FMAxpC
+```
+style(voxel): tighten comments on the density shift and alignment test
+…
+7cfe60d
+```
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Rmq55xGSicE5XBJ4FMAxpC
+```
+test(voxel): pin chunk-origin placement of a mixed chunk away from th…
+…
+d68b98f
+```
+…e origin
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Rmq55xGSicE5XBJ4FMAxpC
+```
+test(voxel): pin each blocky face to the plane its normal names
+…
+7431210
+```
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Rmq55xGSicE5XBJ4FMAxpC
+```
+WrackedFella
+self-assigned this
+Oct 8, 2026
+Hide details
+View details
+WrackedFella
+merged commit 3d2e300
+into
+dev
+Oct 8, 2026
+8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+WrackedFella
+pushed a commit
+that referenced
+this pull request
+Oct 8, 2026
+docs(ENG-F22-06): card matches the tests as built
+…
+2464ce7
+```
+Blocky AO vertices use #196's [0,1] cube, get_height repeats over fresh
+grids and pins in-chunk order and the column filter, and the outer-shell
+comment is dropped rather than reworded.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012thhwgkwXArY5gFwKTq5Q1
+```
+WrackedFella
+mentioned this pull request
+Oct 8, 2026
+test(voxel): ENG-F22-06, voxel grid and meshing tests fail for wrong implementations
+#223
+Merged
+4 tasks done
+WrackedFella
+added a commit
+that referenced
+this pull request
+Oct 8, 2026
+test(voxel): ENG-F22-06, voxel grid and meshing tests fail for wrong …
+…
+77e1ed1
+```
+…implementations (#223)
+
+* test(voxel): ENG-F22-06, voxel grid and meshing tests fail for wrong implementations
+
+Each test was shown red against its card row's wrong implementation and
+pins behaviour the code already has. Blocky AO vertices use the [0,1]
+local cube from #196.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012thhwgkwXArY5gFwKTq5Q1
+
+* test(voxel): ENG-F22-06, get_height pins in-chunk scan order and any chunk order
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012thhwgkwXArY5gFwKTq5Q1
+
+* test(voxel): ENG-F22-06, comment audit
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012thhwgkwXArY5gFwKTq5Q1
+
+* test(voxel): ENG-F22-06, coarse mesh pins exactly 512 +X vertices
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012thhwgkwXArY5gFwKTq5Q1
+
+* test(voxel): ENG-F22-06, get_height ignores other columns' chunks
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012thhwgkwXArY5gFwKTq5Q1
+
+* docs(ENG-F22-06): card matches the tests as built
+
+Blocky AO vertices use #196's [0,1] cube, get_height repeats over fresh
+grids and pins in-chunk order and the column filter, and the outer-shell
+comment is dropped rather than reworded.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012thhwgkwXArY5gFwKTq5Q1
+
+---------
+
+Co-authored-by: Claude <noreply@anthropic.com>
+```
+WrackedFella
+deleted the
+claude/eng-f22-16-hybrid-meshing-s7lwq5
+branch
+October 9, 2026 02:22
+WrackedFella
+mentioned this pull request
+Oct 9, 2026
+[ENG-F22-06] Voxel grid and meshing tests fail for wrong implementations
+#173
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

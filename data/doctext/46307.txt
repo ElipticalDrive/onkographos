@@ -1,0 +1,2267 @@
+<p align="center">
+  <h1 align="center">NeRF from Scratch</h1>
+  <p align="center">
+    A clean, from-scratch PyTorch implementation of <strong>Neural Radiance Fields</strong> for novel view synthesis.
+    <br />
+    Supports Blender synthetic and LLFF real-world datasets.
+  </p>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/python-3.8+-blue.svg" alt="Python 3.8+">
+  <img src="https://img.shields.io/badge/pytorch-1.12+-ee4c2c.svg" alt="PyTorch 1.12+">
+  <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License">
+  <img src="https://img.shields.io/badge/from-scratch-orange.svg" alt="From Scratch">
+</p>
+
+---
+
+## Highlights
+
+- **Complete NeRF pipeline** -- positional encoding, volume rendering, hierarchical sampling, training, and novel view synthesis
+- **Coarse + Fine networks** -- hierarchical rendering with importance sampling for efficient ray marching
+- **Two dataset types** -- Blender synthetic (360-degree) and LLFF real-world (forward-facing)
+- **Stratified + hierarchical sampling** -- coarse uniform samples + fine inverse CDF samples in high-density regions
+- **NDC support** -- Normalized Device Coordinates for forward-facing scenes
+- **Novel view rendering** -- test views, 360-degree orbit videos, depth maps
+- **PSNR/SSIM metrics** -- quantitative evaluation during training
+
+---
+
+## Theory
+
+### Neural Radiance Fields
+
+A NeRF represents a 3D scene as a continuous volumetric function $F_\Theta : (\mathbf{x}, \mathbf{d}) \rightarrow (\mathbf{c}, \sigma)$ mapping position $\mathbf{x} = (x, y, z)$ and viewing direction $\mathbf{d} = (\theta, \phi)$ to color $\mathbf{c} = (r, g, b)$ and volume density $\sigma$.
+
+### Volume Rendering
+
+The expected color along a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ is:
+
+$$\hat{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i \cdot \alpha_i \cdot \mathbf{c}_i$$
+
+where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ and $T_i = \prod_{j=1}^{i-1}(1 - \alpha_j)$.
+
+### Positional Encoding
+
+To overcome the spectral bias of MLPs, inputs are lifted to a higher-dimensional space:
+
+$$\gamma(p) = \left(\sin(2^0 \pi p),\, \cos(2^0 \pi p),\, \ldots,\, \sin(2^{L-1} \pi p),\, \cos(2^{L-1} \pi p)\right)$$
+
+- **Position**: $L = 10$ (3D -> 63D)
+- **Direction**: $L = 4$ (3D -> 27D)
+
+### Hierarchical Sampling
+
+1. **Coarse pass**: $N_c = 64$ stratified uniform samples per ray
+2. **Fine pass**: $N_f = 128$ additional samples via inverse CDF, concentrated in high-density regions
+
+---
+
+## Architecture
+
+```
+Input: position (x,y,z) + direction (theta,phi)
+         |
+  Positional Encoding (L=10 for pos, L=4 for dir)
+         |
+  [Linear(63 -> 256) + ReLU] x 4 layers
+         |
+         +-- skip connection (concat pos encoding) --+
+         |                                            |
+  [Linear(256+63 -> 256) + ReLU] x 4 layers  <------+
+         |
+         +-> [Linear(256 -> 1) + ReLU] --> sigma (density)
+         |
+  [Linear(256 -> 256)] (feature)
+         |
+  concat with dir encoding (27-dim)
+         |
+  [Linear(256+27 -> 128) + ReLU]
+  [Linear(128 -> 3) + Sigmoid] --> RGB color
+```
+
+**Key design choices:**
+- **Skip connection at layer 4** -- preserves spatial information
+- **View-dependent color** -- direction injected only into the color head (handles specular reflections)
+- **View-independent density** -- enforces multiview-consistent geometry
+
+---
+
+## Quick Start
+
+### Installation
+
+```bash
+git clone https://github.com/damn8daniel/nerf-from-scratch.git
+cd nerf-from-scratch
+pip install -r requirements.txt
+```
+
+### Data
+
+**Blender Synthetic** -- download from [NeRF synthetic dataset](https://drive.google.com/drive/folders/128yBriW1IG_3NJ5Rp7APSTZsJqdJdfc1):
+
+```
+data/nerf_synthetic/lego/
+├── transforms_train.json
+├── transforms_val.json
+├── transforms_test.json
+├── train/ *.png
+├── val/ *.png
+└── test/ *.png
+```
+
+**LLFF Real-World** -- download from [LLFF data](https://drive.google.com/drive/folders/128yBriW1IG_3NJ5Rp7APSTZsJqdJdfc1):
+
+```
+data/nerf_llff_data/fern/
+├── images/ *.jpg
+└── poses_bounds.npy
+```
+
+### Train
+
+```bash
+# Blender synthetic
+python train.py \
+    --datadir ./data/nerf_synthetic/lego \
+    --dataset_type blender \
+    --expname lego \
+    --n_iters 200000 \
+    --white_bkgd \
+    --batch_size 1024
+
+# LLFF real-world
+python train.py \
+    --datadir ./data/nerf_llff_data/fern \
+    --dataset_type llff \
+    --expname fern \
+    --n_iters 200000 \
+    --use_ndc
+```
+
+### Render Novel Views
+
+```bash
+# Test views
+python render.py --datadir ./data/nerf_synthetic/lego --dataset_type blender \
+    --expname lego --render_test --white_bkgd
+
+# 360-degree video
+python render.py --datadir ./data/nerf_synthetic/lego --dataset_type blender \
+    --expname lego --n_views_video 120 --white_bkgd
+```
+
+---
+
+## Key Hyperparameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--n_samples_coarse` | 64 | Coarse samples per ray |
+| `--n_samples_fine` | 128 | Fine samples per ray |
+| `--pos_enc_freqs` | 10 | Position encoding frequencies |
+| `--dir_enc_freqs` | 4 | Direction encoding frequencies |
+| `--net_width` | 256 | MLP hidden layer width |
+| `--net_depth` | 8 | MLP depth |
+| `--lr` | 5e-4 | Initial learning rate |
+| `--batch_size` | 1024 | Rays per batch |
+
+---
+
+## Expected Results
+
+On the Lego scene (Blender synthetic) after 200k iterations:
+
+| Metric | Expected |
+|--------|----------|
+| PSNR | ~31--32 dB |
+| SSIM | ~0.96 |
+| Training time | ~12--15 hours (single GPU) |
+
+---
+
+## Project Structure
+
+```
+nerf-from-scratch/
+├── model.py          # NeRF MLP with positional encoding
+├── rendering.py      # Volume rendering, stratified & hierarchical sampling
+├── rays.py           # Ray generation, camera utilities, NDC
+├── train.py          # Training loop with coarse + fine networks
+├── dataset.py        # Blender synthetic & LLFF data loading
+├── render.py         # Novel view synthesis, orbit video, depth maps
+├── config.py         # Hyperparameters and CLI arguments
+├── utils.py          # Image I/O, metrics (PSNR, SSIM), checkpointing
+└── requirements.txt
+```
+
+---
+
+## Tech Stack
+
+- **PyTorch** >= 1.12 -- model and training
+- **NumPy** -- ray math and data loading
+- **imageio** + **imageio-ffmpeg** -- image/video I/O
+- **Pillow** -- image processing
+- **matplotlib** -- visualization
+- **scipy** -- interpolation utilities
+
+---
+
+## References
+
+- Mildenhall, B., et al. [NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis](https://arxiv.org/abs/2003.08396) (ECCV 2020)
+- [NeRF Project Page](https://www.matthewtancik.com/nerf)
+- [Original Implementation (TensorFlow)](https://github.com/bmild/nerf)
+
+---
+
+## License
+
+MIT
+
+### config.py
+```
+"""
+NeRF configuration and hyperparameters.
+"""
+
+import argparse
+
+
+def get_config():
+    parser = argparse.ArgumentParser(description="NeRF: Neural Radiance Fields")
+
+    # Data
+    parser.add_argument("--datadir", type=str, required=True, help="Path to dataset")
+    parser.add_argument(
+        "--dataset_type",
+        type=str,
+        default="blender",
+        choices=["blender", "llff"],
+        help="Dataset type",
+    )
+    parser.add_argument(
+        "--downscale", type=int, default=1, help="Image downscale factor"
+    )
+    parser.add_argument(
+        "--testskip", type=int, default=8, help="Skip every N test images"
+    )
+
+    # Model
+    parser.add_argument(
+        "--net_depth", type=int, default=8, help="Number of layers in MLP"
+    )
+    parser.add_argument(
+        "--net_width", type=int, default=256, help="Hidden layer width"
+    )
+    parser.add_argument(
+        "--skip_layer", type=int, default=4, help="Skip connection layer index"
+    )
+    parser.add_argument(
+        "--pos_enc_freqs",
+        type=int,
+        default=10,
+        help="Number of positional encoding frequencies for position",
+    )
+    parser.add_argument(
+        "--dir_enc_freqs",
+        type=int,
+        default=4,
+        help="Number of positional encoding frequencies for direction",
+    )
+    parser.add_argument(
+        "--use_viewdirs",
+        action="store_true",
+        default=True,
+        help="Use view-dependent color",
+    )
+
+    # Rendering
+    parser.add_argument(
+        "--n_samples_coarse",
+        type=int,
+        default=64,
+        help="Number of coarse samples per ray",
+    )
+    parser.add_argument(
+        "--n_samples_fine",
+        type=int,
+        default=128,
+        help="Number of fine samples per ray",
+    )
+    parser.add_argument(
+        "--near", type=float, default=2.0, help="Near clipping plane"
+    )
+    parser.add_argument(
+        "--far", type=float, default=6.0, help="Far clipping plane"
+    )
+    parser.add_argument(
+        "--use_ndc",
+        action="store_true",
+        default=False,
+        help="Use NDC coordinates (for forward-facing scenes)",
+    )
+    parser.add_argument(
+        "--lindisp",
+        action="store_true",
+        default=False,
+        help="Sample linearly in disparity",
+    )
+    parser.add_argument(
+        "--perturb",
+        type=float,
+        default=1.0,
+        help="Perturbation for stratified sampling (0=off, 1=on)",
+    )
+    parser.add_argument(
+        "--raw_noise_std",
+        type=float,
+        default=0.0,
+        help="Noise std for density regularization",
+    )
+    parser.add_argument(
+        "--white_bkgd",
+        action="store_true",
+        default=False,
+        help="White background (for synthetic data)",
+    )
+
+    # Training
+    parser.add_argument(
+        "--n_iters", type=int, default=200000, help="Number of training iterations"
+    )
+    parser.add_argument("--batch_size", type=int, default=1024, help="Batch size (rays)")
+    parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate")
+    parser.add_argument(
+        "--lr_decay", type=int, default=250, help="LR decay rate (in thousands)"
+    )
+    parser.add_argument(
+        "--chunk", type=int, default=1024 * 32, help="Chunk size for network eval"
+    )
+    parser.add_argument(
+        "--netchunk",
+        type=int,
+        default=1024 * 64,
+        help="Chunk size for network forward pass",
+    )
+
+    # Logging
+    parser.add_argument("--expname", type=str, default="experiment", help="Experiment name")
+    parser.add_argument("--logdir", type=str, default="./logs", help="Log directory")
+    parser.add_argument(
+        "--i_print", type=int, default=100, help="Print loss every N iters"
+    )
+    parser.add_argument(
+        "--i_img", type=int, default=500, help="Log image every N iters"
+    )
+    parser.add_argument(
+        "--i_weights", type=int, default=10000, help="Save weights every N iters"
+    )
+    parser.add_argument(
+        "--i_testset", type=int, default=50000, help="Render test set every N iters"
+    )
+    parser.add_argument(
+        "--i_video", type=int, default=50000, help="Render video every N iters"
+    )
+
+    # Render
+    parser.add_argument(
+        "--render_only",
+        action="store_true",
+        default=False,
+        help="Only render (no training)",
+    )
+    parser.add_argument(
+        "--render_test",
+        action="store_true",
+        default=False,
+        help="Render test set instead of path",
+    )
+    parser.add_argument(
+        "--render_factor",
+        type=int,
+        default=0,
+        help="Downscale factor for rendering",
+    )
+    parser.add_argument(
+        "--n_views_video",
+        type=int,
+        default=120,
+        help="Number of views for 360-degree video",
+    )
+
+    args = parser.parse_args()
+    return args
+```
+
+### dataset.py
+```
+"""
+Dataset loading for NeRF.
+
+Supports two standard formats:
+  1. Blender synthetic scenes (transforms_*.json with RGBA images)
+  2. LLFF real-world forward-facing scenes (poses_bounds.npy)
+
+Both formats provide:
+  - Images: [N, H, W, 3] in float32 [0, 1]
+  - Poses: [N, 4, 4] camera-to-world matrices
+  - Camera intrinsics (focal length)
+  - Train/val/test splits
+"""
+
+import os
+import json
+import numpy as np
+import imageio.v2 as imageio
+
+
+def load_blender_data(basedir, downscale=1, testskip=1):
+    """
+    Load a Blender synthetic dataset.
+
+    Directory structure:
+        basedir/
+            transforms_train.json
+            transforms_val.json
+            transforms_test.json
+            train/ *.png
+            val/ *.png
+            test/ *.png
+
+    Each JSON file contains camera_angle_x and a list of frames with
+    file_path and 4x4 transform_matrix.
+
+    Args:
+        basedir: path to dataset root
+        downscale: downscale factor for images
+        testskip: skip every N-th test/val image
+
+    Returns:
+        images: dict with 'train', 'val', 'test' arrays [N, H, W, 3]
+        poses: dict with 'train', 'val', 'test' arrays [N, 4, 4]
+        hwf: [H, W, focal] after downscaling
+        i_split: dict of index arrays for each split
+    """
+    splits = ["train", "val", "test"]
+    all_imgs = []
+    all_poses = []
+    counts = [0]
+
+    for s in splits:
+        meta_path = os.path.join(basedir, f"transforms_{s}.json")
+        with open(meta_path, "r") as f:
+            meta = json.load(f)
+
+        imgs = []
+        poses = []
+        skip = 1 if s == "train" else testskip
+
+        for i, frame in enumerate(meta["frames"]):
+            if i % skip != 0:
+                continue
+            fname = os.path.join(basedir, frame["file_path"] + ".png")
+            img = imageio.imread(fname)
+            imgs.append(img)
+            poses.append(np.array(frame["transform_matrix"], dtype=np.float32))
+
+        imgs = np.array(imgs, dtype=np.float32) / 255.0  # [N, H, W, 4] RGBA
+        poses = np.array(poses, dtype=np.float32)  # [N, 4, 4]
+
+        all_imgs.append(imgs)
+        all_poses.append(poses)
+        counts.append(counts[-1] + imgs.shape[0])
+
+    # Concatenate all splits
+    images = np.concatenate(all_imgs, axis=0)
+    poses = np.concatenate(all_poses, axis=0)
+
+    i_split = {
+        "train": np.arange(counts[0], counts[1]),
+        "val": np.arange(counts[1], counts[2]),
+        "test": np.arange(counts[2], counts[3]),
+    }
+
+    H, W = images.shape[1:3]
+
+    # Compute focal length from camera angle
+    camera_angle_x = json.load(
+        open(os.path.join(basedir, "transforms_train.json"))
+    )["camera_angle_x"]
+    focal = 0.5 * W / np.tan(0.5 * camera_angle_x)
+
+    # Downscale if needed
+    if downscale > 1:
+        H = H // downscale
+        W = W // downscale
+        focal = focal / downscale
+        imgs_downscaled = np.zeros((images.shape[0], H, W, images.shape[3]))
+        for i in range(images.shape[0]):
+            from PIL import Image
+
+            pil_img = Image.fromarray((images[i] * 255).astype(np.uint8))
+            pil_img = pil_img.resize((W, H), Image.LANCZOS)
+            imgs_downscaled[i] = np.array(pil_img, dtype=np.float32) / 255.0
+        images = imgs_downscaled
+
+    # Handle alpha channel: composite RGBA onto white background
+    if images.shape[-1] == 4:
+        alpha = images[..., 3:4]
+        images = images[..., :3] * alpha + (1.0 - alpha)  # white background
+
+    hwf = [int(H), int(W), focal]
+
+    return images, poses, hwf, i_split
+
+
+def load_llff_data(basedir, downscale=1, recenter=True, bd_factor=0.75):
+    """
+    Load an LLFF (Local Light Field Fusion) dataset.
+
+    Directory structure:
+        basedir/
+            images/ *.jpg or *.png
+            poses_bounds.npy  (N, 17) array
+
+    poses_bounds.npy contains for each image:
+        - 3x5 pose matrix (3x3 rotation + 3x1 translation + 3x1 [H, W, focal])
+          stored column-major as 15 values
+        - 2 depth bounds (near, far)
+
+    Args:
+        basedir: path to dataset root
+        downscale: downscale factor
+        recenter: whether to recenter poses
+        bd_factor: factor for adjusting near plane based on depth bounds
+
+    Returns:
+        images: [N, H, W, 3] float32
+        poses: [N, 4, 4] camera-to-world matrices
+        hwf: [H, W, focal]
+        i_split: dict of index arrays
+        bds: [N, 2] near/far depth bounds
+    """
+    # Load poses and bounds
+    poses_arr = np.load(os.path.join(basedir, "poses_bounds.npy"))  # [N, 17]
+    poses = poses_arr[:, :-2].reshape(-1, 3, 5)  # [N, 3, 5]
+    bds = poses_arr[:, -2:]  # [N, 2]
+
+    # Load images
+    imgdir = os.path.join(basedir, "images")
+    if downscale > 1:
+        imgdir_ds = os.path.join(basedir, f"images_{downscale}")
+        if os.path.exists(imgdir_ds):
+            imgdir = imgdir_ds
+
+    imgfiles = sorted(
+        [
+            os.path.join(imgdir, f)
+            for f in os.listdir(imgdir)
+            if f.lower().endswith((".png", ".jpg", ".jpeg"))
+        ]
+    )
+
+    assert len(imgfiles) == poses.shape[0], (
+        f"Mismatch: {len(imgfiles)} images vs {poses.shape[0]} poses"
+    )
+
+    # Read images
+    imgs = []
+    for f in imgfiles:
+        img = imageio.imread(f)
+        imgs.append(img)
+    images = np.stack(imgs, axis=0).astype(np.float32) / 255.0
+
+    # Downscale if no pre-downscaled directory exists
+    if downscale > 1 and not os.path.exists(
+        os.path.join(basedir, f"images_{downscale}")
+    ):
+        from PIL import Image as PILImage
+
+        H, W = images.shape[1:3]
+        H_new, W_new = H // downscale, W // downscale
+        imgs_ds = np.zeros((images.shape[0], H_new, W_new, 3), dtype=np.float32)
+        for i in range(images.shape[0]):
+            pil_img = PILImage.fromarray((images[i] * 255).astype(np.uint8))
+            pil_img = pil_img.resize((W_new, H_new), PILImage.LANCZOS)
+            imgs_ds[i] = np.array(pil_img, dtype=np.float32) / 255.0
+        images = imgs_ds
+
+    # Extract intrinsics from poses
+    H, W, focal = poses[0, :, -1]
+    H, W = int(H), int(W)
+    if downscale > 1:
+        H = H // downscale
+        W = W // downscale
+        focal = focal / downscale
+
+    hwf = [H, W, focal]
+
+    # Convert LLFF pose format to standard 4x4
+    # LLFF uses [down, right, backwards] convention -> convert to [right, up, backwards]
+    poses_hwf = poses[:, :, 4:]
+    poses = poses[:, :, :4]
+
+    # Fix coordinate convention: LLFF -> OpenGL
+    # LLFF: [right, up, back] but stored as [down, right, back]
+    poses = np.concatenate(
+        [poses[:, :, 1:2], -poses[:, :, 0:1], poses[:, :, 2:]], axis=-1
+    )
+
+    # Make 4x4
+    bottom = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+    poses_4x4 = np.zeros((poses.shape[0], 4, 4), dtype=np.float32)
+    poses_4x4[:, :3, :4] = poses
+    poses_4x4[:, 3, :] = bottom
+    poses = poses_4x4
+
+    # Recenter poses
+    if recenter:
+        poses = recenter_poses(poses)
+
+    # Scale bounds
+    if bd_factor is not None:
+        sc = 1.0 / (bds.min() * bd_factor)
+        poses[:, :3, 3] *= sc
+        bds *= sc
+
+    # Use 1/8 of images for test
+    n_images = images.shape[0]
+    i_test = np.arange(0, n_images, 8)
+    i_train = np.array([i for i in range(n_images) if i not in i_test])
+    i_val = i_test  # Use test set for validation
+
+    i_split = {"train": i_train, "val": i_val, "test": i_test}
+
+    return images, poses, hwf, i_split, bds
+
+
+def recenter_poses(poses):
+    """
+    Recenter poses so that the average pose is at the origin.
+
+    Args:
+        poses: [N, 4, 4] camera poses
+
+    Returns:
+        poses: [N, 4, 4] recentered poses
+    """
+    # Compute average pose
+    avg_pose = np.mean(poses[:, :3, :], axis=0)  # [3, 4]
+
+    # Build 4x4 from average
+    avg_4x4 = np.eye(4, dtype=np.float32)
+    avg_4x4[:3, :] = avg_pose
+
+    # Invert average and apply to all poses
+    avg_inv = np.linalg.inv(avg_4x4)
+    poses = avg_inv @ poses
+
+    return poses
+
+
+def load_dataset(args):
+    """
+    Load dataset based on type specified in args.
+
+    Returns:
+        images: [N, H, W, 3]
+        poses: [N, 4, 4]
+        hwf: [H, W, focal]
+        i_split: dict
+        near, far: scene bounds
+        render_poses: [M, 4, 4] poses for novel view rendering
+    """
+    from rays import generate_spherical_path, get_intrinsic_matrix
+
+    if args.dataset_type == "blender":
+        images, poses, hwf, i_split = load_blender_data(
+            args.datadir, downscale=args.downscale, testskip=args.testskip
+        )
+        near, far = args.near, args.far
+        render_poses = generate_spherical_path(
+            n_views=args.n_views_video, radius=4.0
+        )
+
+    elif args.dataset_type == "llff":
+        images, poses, hwf, i_split, bds = load_llff_data(
+            args.datadir, downscale=args.downscale
+        )
+        near = float(bds.min()) * 0.9
+        far = float(bds.max()) * 1.0
+        render_poses = generate_spherical_path(
+            n_views=args.n_views_video, radius=np.mean(np.linalg.norm(poses[:, :3, 3], axis=-1))
+        )
+
+    else:
+        raise ValueError(f"Unknown dataset type: {args.dataset_type}")
+
+    H, W, focal = hwf
+    K = get_intrinsic_matrix(focal, H, W)
+
+    print(f"Dataset: {args.dataset_type}")
+    print(f"Images: {images.shape}")
+    print(f"Poses: {poses.shape}")
+    print(f"H={H}, W={W}, focal={focal:.2f}")
+    print(f"Near={near:.2f}, Far={far:.2f}")
+    print(f"Train: {len(i_split['train'])}, Val: {len(i_split['val'])}, Test: {len(i_split['test'])}")
+
+    return images, poses, hwf, K, i_split, near, far, render_poses
+```
+
+### model.py
+```
+"""
+NeRF MLP architecture with positional encoding.
+
+The network takes a 3D position x and viewing direction d, and outputs
+volume density sigma and view-dependent RGB color c.
+
+Architecture:
+  - Positional encoding maps inputs to higher-dimensional space using
+    sin/cos functions at multiple frequencies.
+  - 8-layer MLP with ReLU activations and a skip connection at layer 4.
+  - Density head outputs a single scalar (density sigma).
+  - Color head takes the feature vector concatenated with encoded direction,
+    passes through one extra layer, and outputs RGB.
+"""
+
+import torch
+import torch.nn as nn
+
+
+class PositionalEncoding(nn.Module):
+    """
+    Maps input x to gamma(x) = (sin(2^0 pi x), cos(2^0 pi x), ...,
+                                  sin(2^{L-1} pi x), cos(2^{L-1} pi x))
+
+    This allows the network to learn high-frequency functions from
+    low-dimensional inputs, overcoming the spectral bias of MLPs.
+
+    For a D-dimensional input with L frequency bands, the output
+    dimension is D * 2L (+ D if include_input is True).
+    """
+
+    def __init__(self, n_freqs, input_dim=3, include_input=True, log_sampling=True):
+        super().__init__()
+        self.n_freqs = n_freqs
+        self.input_dim = input_dim
+        self.include_input = include_input
+
+        if log_sampling:
+            freq_bands = 2.0 ** torch.linspace(0.0, n_freqs - 1, steps=n_freqs)
+        else:
+            freq_bands = torch.linspace(
+                2.0**0, 2.0 ** (n_freqs - 1), steps=n_freqs
+            )
+
+        self.register_buffer("freq_bands", freq_bands)
+
+        self.out_dim = 0
+        if include_input:
+            self.out_dim += input_dim
+        self.out_dim += input_dim * n_freqs * 2  # sin and cos for each freq
+
+    def forward(self, x):
+        """
+        Args:
+            x: [..., D] input tensor
+        Returns:
+            [..., out_dim] positionally encoded tensor
+        """
+        out = []
+        if self.include_input:
+            out.append(x)
+
+        for freq in self.freq_bands:
+            out.append(torch.sin(freq * x))
+            out.append(torch.cos(freq * x))
+
+        return torch.cat(out, dim=-1)
+
+
+class NeRF(nn.Module):
+    """
+    Neural Radiance Field MLP.
+
+    Architecture:
+        Input: positional encoding of 3D position (and optionally direction)
+        Layers 0-3: Linear(W) + ReLU
+        Layer 4: Linear(W + pos_enc_dim) + ReLU  [skip connection]
+        Layers 5-7: Linear(W) + ReLU
+        Density head: Linear(W) -> 1  (sigma, activated with ReLU)
+        Feature: Linear(W) -> W
+        Color layers: Linear(W + dir_enc_dim) -> W//2 -> 3  (RGB, activated with Sigmoid)
+
+    Args:
+        pos_enc_freqs: Number of positional encoding frequency bands for position
+        dir_enc_freqs: Number of positional encoding frequency bands for direction
+        net_depth: Number of layers in the main MLP trunk
+        net_width: Width of hidden layers
+        skip_layer: Index of the layer with skip connection
+        use_viewdirs: Whether to condition color on viewing direction
+    """
+
+    def __init__(
+        self,
+        pos_enc_freqs=10,
+        dir_enc_freqs=4,
+        net_depth=8,
+        net_width=256,
+        skip_layer=4,
+        use_viewdirs=True,
+    ):
+        super().__init__()
+
+        self.use_viewdirs = use_viewdirs
+        self.skip_layer = skip_layer
+
+        # Positional encoding
+        self.pos_encoder = PositionalEncoding(pos_enc_freqs, input_dim=3)
+        self.dir_encoder = PositionalEncoding(dir_enc_freqs, input_dim=3)
+
+        pos_enc_dim = self.pos_encoder.out_dim
+        dir_enc_dim = self.dir_encoder.out_dim
+
+        # Main MLP trunk
+        layers = []
+        layers.append(nn.Linear(pos_enc_dim, net_width))
+        for i in range(1, net_depth):
+            if i == skip_layer:
+                # Skip connection: concatenate original positional encoding
+                layers.append(nn.Linear(net_width + pos_enc_dim, net_width))
+            else:
+                layers.append(nn.Linear(net_width, net_width))
+        self.trunk = nn.ModuleList(layers)
+
+        # Density head: single scalar output
+        self.density_head = nn.Linear(net_width, 1)
+
+        # Color head (view-dependent)
+        if use_viewdirs:
+            self.feature_layer = nn.Linear(net_width, net_width)
+            self.color_layer0 = nn.Linear(net_width + dir_enc_dim, net_width // 2)
+            self.color_head = nn.Linear(net_width // 2, 3)
+        else:
+            self.color_head = nn.Linear(net_width, 3)
+
+        self.relu = nn.ReLU(inplace=True)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x, dirs=None):
+        """
+        Args:
+            x: [batch, 3] 3D positions
+            dirs: [batch, 3] viewing directions (unit vectors)
+
+        Returns:
+            rgb: [batch, 3] predicted color
+            sigma: [batch, 1] volume density
+        """
+        # Positional encoding
+        pos_enc = self.pos_encoder(x)
+        h = pos_enc
+
+        # Forward through trunk with skip connection
+        for i, layer in enumerate(self.trunk):
+            if i == self.skip_layer:
+                h = torch.cat([h, pos_enc], dim=-1)
+            h = self.relu(layer(h))
+
+        # Density (non-negative via ReLU)
+        sigma = self.relu(self.density_head(h))
+
+        # Color
+        if self.use_viewdirs and dirs is not None:
+            dir_enc = self.dir_encoder(dirs)
+            feature = self.feature_layer(h)
+            h_color = torch.cat([feature, dir_enc], dim=-1)
+            h_color = self.relu(self.color_layer0(h_color))
+            rgb = self.sigmoid(self.color_head(h_color))
+        else:
+            rgb = self.sigmoid(self.color_head(h))
+
+        return rgb, sigma
+
+
+def create_nerf(args):
+    """
+    Create coarse and fine NeRF models.
+
+    Returns:
+        coarse_model: NeRF model for coarse sampling
+        fine_model: NeRF model for fine (hierarchical) sampling
+    """
+    model_kwargs = dict(
+        pos_enc_freqs=args.pos_enc_freqs,
+        dir_enc_freqs=args.dir_enc_freqs,
+        net_depth=args.net_depth,
+        net_width=args.net_width,
+        skip_layer=args.skip_layer,
+        use_viewdirs=args.use_viewdirs,
+    )
+
+    coarse_model = NeRF(**model_kwargs)
+    fine_model = NeRF(**model_kwargs)
+
+    print(
+        f"Coarse model parameters: {sum(p.numel() for p in coarse_model.parameters()):,}"
+    )
+    print(
+        f"Fine model parameters: {sum(p.numel() for p in fine_model.parameters()):,}"
+    )
+
+    return coarse_model, fine_model
+```
+
+### rays.py
+```
+"""
+Ray utilities for NeRF.
+
+Handles camera models, ray generation from pixels, and coordinate transforms.
+
+Camera model:
+    We use a pinhole camera with intrinsic matrix K and extrinsic [R|t].
+    For each pixel (u, v), the ray origin is the camera center, and the
+    ray direction is computed by unprojecting the pixel through K^{-1}.
+
+NDC (Normalized Device Coordinates):
+    For forward-facing scenes (LLFF), we convert rays to NDC space where
+    the near plane maps to -1 and all rays are bounded.
+"""
+
+import numpy as np
+import torch
+
+
+def get_rays(H, W, K, c2w):
+    """
+    Generate rays for all pixels in an image.
+
+    Args:
+        H: image height
+        W: image width
+        K: [3, 3] camera intrinsic matrix
+        c2w: [4, 4] camera-to-world transformation matrix
+
+    Returns:
+        rays_o: [H, W, 3] ray origins in world space
+        rays_d: [H, W, 3] ray directions in world space (not normalized)
+    """
+    device = c2w.device
+
+    # Pixel coordinates
+    j, i = torch.meshgrid(
+        torch.arange(H, dtype=torch.float32, device=device),
+        torch.arange(W, dtype=torch.float32, device=device),
+        indexing="ij",
+    )
+
+    # Unproject pixels to camera space directions
+    # (u - cx) / fx, (v - cy) / fy, -1 (OpenGL convention: camera looks along -z)
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+
+    dirs = torch.stack(
+        [(i - cx) / fx, -(j - cy) / fy, -torch.ones_like(i)], dim=-1
+    )  # [H, W, 3]
+
+    # Rotate ray directions from camera space to world space
+    # dirs @ c2w[:3, :3].T
+    rays_d = torch.sum(dirs[..., None, :] * c2w[:3, :3], dim=-1)  # [H, W, 3]
+
+    # Ray origin is the camera center in world space
+    rays_o = c2w[:3, 3].expand_as(rays_d)  # [H, W, 3]
+
+    return rays_o, rays_d
+
+
+def get_rays_np(H, W, K, c2w):
+    """
+    Numpy version of get_rays for data preprocessing.
+
+    Args:
+        H, W: image dimensions
+        K: [3, 3] intrinsic matrix (numpy)
+        c2w: [4, 4] camera-to-world matrix (numpy)
+
+    Returns:
+        rays_o: [H, W, 3] ray origins
+        rays_d: [H, W, 3] ray directions
+    """
+    i, j = np.meshgrid(
+        np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing="xy"
+    )
+
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+
+    dirs = np.stack([(i - cx) / fx, -(j - cy) / fy, -np.ones_like(i)], axis=-1)
+
+    rays_d = np.sum(dirs[..., np.newaxis, :] * c2w[:3, :3], axis=-1)
+    rays_o = np.broadcast_to(c2w[:3, 3], rays_d.shape).copy()
+
+    return rays_o, rays_d
+
+
+def ndc_rays(H, W, focal, near, rays_o, rays_d):
+    """
+    Convert rays from world space to Normalized Device Coordinates (NDC).
+
+    NDC maps the viewing frustum to a cube [-1, 1]^3, which is useful for
+    forward-facing scenes where the depth range can be very large.
+
+    The mapping is:
+        o'_x = -f/(W/2) * o_x/o_z
+        o'_y = -f/(H/2) * o_y/o_z
+        o'_z = 1 + 2*near/o_z
+
+    Args:
+        H, W: image dimensions
+        focal: focal length
+        near: near plane distance
+        rays_o: [..., 3] ray origins
+        rays_d: [..., 3] ray directions
+
+    Returns:
+        rays_o_ndc: [..., 3] transformed origins
+        rays_d_ndc: [..., 3] transformed directions
+    """
+    # Shift ray origins to near plane
+    t = -(near + rays_o[..., 2:3]) / rays_d[..., 2:3]
+    rays_o = rays_o + t * rays_d
+
+    # Projection
+    o0 = -1.0 / (W / (2.0 * focal)) * rays_o[..., 0:1] / rays_o[..., 2:3]
+    o1 = -1.0 / (H / (2.0 * focal)) * rays_o[..., 1:2] / rays_o[..., 2:3]
+    o2 = 1.0 + 2.0 * near / rays_o[..., 2:3]
+
+    d0 = (
+        -1.0
+        / (W / (2.0 * focal))
+        * (rays_d[..., 0:1] / rays_d[..., 2:3] - rays_o[..., 0:1] / rays_o[..., 2:3])
+    )
+    d1 = (
+        -1.0
+        / (H / (2.0 * focal))
+        * (rays_d[..., 1:2] / rays_d[..., 2:3] - rays_o[..., 1:2] / rays_o[..., 2:3])
+    )
+    d2 = -2.0 * near / rays_o[..., 2:3]
+
+    rays_o_ndc = torch.cat([o0, o1, o2], dim=-1)
+    rays_d_ndc = torch.cat([d0, d1, d2], dim=-1)
+
+    return rays_o_ndc, rays_d_ndc
+
+
+def get_intrinsic_matrix(focal, H, W):
+    """
+    Build a 3x3 camera intrinsic matrix from focal length and image size.
+
+    Args:
+        focal: focal length in pixels
+        H, W: image height and width
+
+    Returns:
+        K: [3, 3] intrinsic matrix
+    """
+    K = np.array(
+        [[focal, 0, 0.5 * W], [0, focal, 0.5 * H], [0, 0, 1]], dtype=np.float32
+    )
+    return K
+
+
+def generate_spiral_path(c2w, up, rads, focal, zrate, n_rots, N):
+    """
+    Generate a spiral camera path for rendering novel views.
+
+    Args:
+        c2w: [3, 5] average camera pose (rotation + translation + hwf)
+        up: [3] up direction
+        rads: [3] radii for the spiral
+        focal: focal length
+        zrate: rate of z-axis change
+        n_rots: number of full rotations
+        N: number of views to generate
+
+    Returns:
+        render_poses: [N, 4, 4] camera-to-world matrices
+    """
+    render_poses = []
+    rads = np.array(list(rads) + [1.0])
+    hwf = c2w[:, 4:5]
+
+    for theta in np.linspace(0.0, 2.0 * np.pi * n_rots, N + 1)[:-1]:
+        # Camera position on the spiral
+        c = np.dot(
+            c2w[:3, :4],
+            np.array([np.cos(theta), -np.sin(theta), -np.sin(theta * zrate), 1.0])
+            * rads,
+        )
+        # Look-at direction
+        z = normalize(c - np.dot(c2w[:3, :4], np.array([0, 0, -focal, 1.0])))
+        render_poses.append(viewmatrix(z, up, c))
+
+    return np.stack(render_poses, axis=0)
+
+
+def generate_spherical_path(n_views=120, radius=4.0, height=0.0):
+    """
+    Generate a 360-degree spherical camera path.
+
+    Args:
+        n_views: number of views
+        radius: distance from origin
+        height: camera height
+
+    Returns:
+        poses: [n_views, 4, 4] camera-to-world matrices
+    """
+    poses = []
+    for i in range(n_views):
+        theta = 2.0 * np.pi * i / n_views
+        # Camera position on circle
+        cam_pos = np.array(
+            [radius * np.cos(theta), height, radius * np.sin(theta)]
+        )
+        # Look at origin
+        forward = normalize(-cam_pos)
+        up = np.array([0.0, 1.0, 0.0])
+        right = normalize(np.cross(forward, up))
+        up = np.cross(right, forward)
+
+        c2w = np.eye(4, dtype=np.float32)
+        c2w[:3, 0] = right
+        c2w[:3, 1] = up
+        c2w[:3, 2] = -forward
+        c2w[:3, 3] = cam_pos
+        poses.append(c2w)
+
+    return np.stack(poses, axis=0)
+
+
+def normalize(v):
+    """Normalize a vector."""
+    return v / (np.linalg.norm(v) + 1e-10)
+
+
+def viewmatrix(z, up, pos):
+    """
+    Construct a camera-to-world matrix from look direction, up vector, and position.
+
+    Args:
+        z: [3] forward direction (camera -z axis)
+        up: [3] up direction
+        pos: [3] camera position
+
+    Returns:
+        c2w: [4, 4] camera-to-world matrix
+    """
+    vec2 = normalize(z)
+    vec0 = normalize(np.cross(up, vec2))
+    vec1 = normalize(np.cross(vec2, vec0))
+    c2w = np.eye(4, dtype=np.float32)
+    c2w[:3, 0] = vec0
+    c2w[:3, 1] = vec1
+    c2w[:3, 2] = vec2
+    c2w[:3, 3] = pos
+    return c2w
+
+
+def average_poses(poses):
+    """
+    Compute the average pose from a set of poses.
+
+    Args:
+        poses: [N, 3, 4] or [N, 4, 4] camera poses
+
+    Returns:
+        avg_pose: [3, 4] average pose
+    """
+    # Average translation
+    center = poses[:, :3, 3].mean(axis=0)
+
+    # Average rotation via SVD of mean rotation
+    mean_rot = poses[:, :3, :3].mean(axis=0)
+    U, _, Vt = np.linalg.svd(mean_rot)
+    avg_rot = U @ Vt
+
+    avg_pose = np.concatenate([avg_rot, center[:, None]], axis=1)
+    return avg_pose
+```
+
+### render.py
+```
+"""
+Render novel views from a trained NeRF model.
+
+Supports:
+  - Rendering test set views with metrics
+  - 360-degree video generation
+  - Depth map extraction
+  - Custom camera path rendering
+"""
+
+import os
+import argparse
+import numpy as np
+import torch
+
+from model import NeRF, create_nerf
+from rendering import batchify_render
+from rays import get_rays, ndc_rays, get_intrinsic_matrix, generate_spherical_path
+from dataset import load_dataset
+from utils import save_image, save_video, to8b, compute_ssim
+from config import get_config
+
+
+@torch.no_grad()
+def render_image(coarse_model, fine_model, pose, H, W, K, near, far, args, device):
+    """
+    Render a single image from a given camera pose.
+
+    Args:
+        coarse_model, fine_model: NeRF models
+        pose: [4, 4] camera-to-world matrix (numpy or tensor)
+        H, W: image dimensions
+        K: [3, 3] intrinsic matrix
+        near, far: depth bounds
+        args: config args
+        device: torch device
+
+    Returns:
+        rgb: [H, W, 3] rendered image (numpy)
+        depth: [H, W] depth map (numpy)
+        disp: [H, W] disparity map (numpy)
+    """
+    if isinstance(pose, np.ndarray):
+        pose = torch.tensor(pose, dtype=torch.float32, device=device)
+    K_tensor = torch.tensor(K, dtype=torch.float32, device=device) if isinstance(K, np.ndarray) else K
+
+    rays_o, rays_d = get_rays(H, W, K_tensor, pose)
+
+    focal = K[0, 0] if isinstance(K, np.ndarray) else K[0, 0].item()
+    if args.use_ndc:
+        rays_o, rays_d = ndc_rays(H, W, focal, 1.0, rays_o, rays_d)
+
+    rays_o = rays_o.reshape(-1, 3)
+    rays_d = rays_d.reshape(-1, 3)
+
+    result = batchify_render(
+        rays_o, rays_d,
+        chunk=args.chunk,
+        coarse_model=coarse_model,
+        fine_model=fine_model,
+        near=near,
+        far=far,
+        n_samples_coarse=args.n_samples_coarse,
+        n_samples_fine=args.n_samples_fine,
+        perturb=False,
+        raw_noise_std=0.0,
+        white_bkgd=args.white_bkgd,
+        lindisp=args.lindisp,
+        netchunk=args.netchunk,
+    )
+
+    key = "rgb_fine" if "rgb_fine" in result else "rgb_coarse"
+    depth_key = "depth_fine" if "depth_fine" in result else "depth_coarse"
+    disp_key = "disp_fine" if "disp_fine" in result else "disp_coarse"
+
+    rgb = result[key].reshape(H, W, 3).cpu().numpy()
+    depth = result[depth_key].reshape(H, W).cpu().numpy()
+    disp = result[disp_key].reshape(H, W).cpu().numpy()
+
+    return rgb, depth, disp
+
+
+def render_test_views(args, coarse_model, fine_model, images, poses, hwf, K,
+                      i_split, near, far, device, output_dir):
+    """Render all test views and compute metrics."""
+    H, W, focal = hwf
+    os.makedirs(output_dir, exist_ok=True)
+
+    psnrs, ssims = [], []
+    for idx, test_i in enumerate(i_split["test"]):
+        rgb, depth, disp = render_image(
+            coarse_model, fine_model, poses[test_i],
+            H, W, K, near, far, args, device,
+        )
+
+        target = images[test_i]
+        psnr = float(-10 * np.log10(np.mean((rgb - target) ** 2)))
+        ssim = compute_ssim(rgb, target)
+        psnrs.append(psnr)
+        ssims.append(ssim)
+
+        # Save RGB
+        save_image(os.path.join(output_dir, f"rgb_{idx:03d}.png"), rgb)
+
+        # Save depth map (normalized for visualization)
+        depth_norm = (depth - depth.min()) / (depth.max() - depth.min() + 1e-8)
+        save_image(os.path.join(output_dir, f"depth_{idx:03d}.png"),
+                   np.stack([depth_norm] * 3, axis=-1))
+
+        # Save disparity map
+        disp_norm = (disp - disp.min()) / (disp.max() - disp.min() + 1e-8)
+        save_image(os.path.join(output_dir, f"disp_{idx:03d}.png"),
+                   np.stack([disp_norm] * 3, axis=-1))
+
+        print(f"  [{idx+1}/{len(i_split['test'])}] PSNR={psnr:.2f}, SSIM={ssim:.4f}")
+
+    print(f"\nMean PSNR: {np.mean(psnrs):.2f}")
+    print(f"Mean SSIM: {np.mean(ssims):.4f}")
+
+    # Save metrics
+    with open(os.path.join(output_dir, "metrics.txt"), "w") as f:
+        f.write(f"Mean PSNR: {np.mean(psnrs):.2f}\n")
+        f.write(f"Mean SSIM: {np.mean(ssims):.4f}\n")
+        for i, (p, s) in enumerate(zip(psnrs, ssims)):
+            f.write(f"  View {i}: PSNR={p:.2f}, SSIM={s:.4f}\n")
+
+
+def render_360_video(args, coarse_model, fine_model, hwf, K, near, far,
+                     device, output_path, n_views=120, radius=4.0):
+    """
+    Generate a 360-degree video by rendering from a circular camera path.
+
+    Args:
+        output_path: path to save the .mp4 video
+        n_views: number of frames
+        radius: camera orbit radius
+    """
+    H, W, focal = hwf
+    render_poses = generate_spherical_path(n_views=n_views, radius=radius)
+
+    frames = []
+    depth_frames = []
+
+    for i, pose in enumerate(render_poses):
+        rgb, depth, _ = render_image(
+            coarse_model, fine_model, pose,
+            H, W, K, near, far, args, device,
+        )
+        frames.append(rgb)
+
+        # Normalize depth for visualization
+        depth_norm = (depth - depth.min()) / (depth.max() - depth.min() + 1e-8)
+        depth_frames.append(np.stack([depth_norm] * 3, axis=-1))
+
+        if (i + 1) % 10 == 0:
+            print(f"  Rendered {i+1}/{n_views} views")
+
+    # Save RGB video
+    save_video(output_path, frames, fps=30)
+    print(f"Saved RGB video to {output_path}")
+
+    # Save depth video
+    depth_path = output_path.replace(".mp4", "_depth.mp4")
+    save_video(depth_path, depth_frames, fps=30)
+    print(f"Saved depth video to {depth_path}")
+
+
+def extract_depth_maps(args, coarse_model, fine_model, poses, hwf, K,
+                       near, far, device, output_dir):
+    """Extract depth maps for all given poses."""
+    H, W, focal = hwf
+    os.makedirs(output_dir, exist_ok=True)
+
+    for i, pose in enumerate(poses):
+        _, depth, disp = render_image(
+            coarse_model, fine_model, pose,
+            H, W, K, near, far, args, device,
+        )
+
+        # Save raw depth as numpy
+        np.save(os.path.join(output_dir, f"depth_{i:03d}.npy"), depth)
+
+        # Save visualized depth
+        depth_norm = (depth - depth.min()) / (depth.max() - depth.min() + 1e-8)
+        save_image(
+            os.path.join(output_dir, f"depth_vis_{i:03d}.png"),
+            np.stack([depth_norm] * 3, axis=-1),
+        )
+
+        print(f"  Extracted depth map {i+1}/{len(poses)}")
+
+
+def main():
+    args = get_config()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Load data
+    images, poses, hwf, K, i_split, near, far, render_poses = load_dataset(args)
+    H, W, focal = hwf
+
+    # Create and load models
+    coarse_model, fine_model = create_nerf(args)
+    coarse_model = coarse_model.to(device)
+    fine_model = fine_model.to(device)
+
+    # Load checkpoint
+    ckpt_path = os.path.join(args.logdir, args.expname, "checkpoints", "latest.pt")
+    if os.path.exists(ckpt_path):
+        ckpt = torch.load(ckpt_path, map_location=device)
+        coarse_model.load_state_dict(ckpt["coarse_model"])
+        if "fine_model" in ckpt:
+            fine_model.load_state_dict(ckpt["fine_model"])
+        print(f"Loaded checkpoint from {ckpt_path}")
+    else:
+        print(f"WARNING: No checkpoint found at {ckpt_path}")
+
+    coarse_model.eval()
+    fine_model.eval()
+
+    output_dir = os.path.join(args.logdir, args.expname, "render_output")
+    os.makedirs(output_dir, exist_ok=True)
+
+    if args.render_test:
+        # Render test views
+        print("Rendering test views...")
+        render_test_views(
+            args, coarse_model, fine_model, images, poses, hwf, K,
+            i_split, near, far, device,
+            os.path.join(output_dir, "test_views"),
+        )
+    else:
+        # Render 360 video
+        print("Rendering 360-degree video...")
+        render_360_video(
+            args, coarse_model, fine_model, hwf, K, near, far, device,
+            os.path.join(output_dir, "360_video.mp4"),
+            n_views=args.n_views_video,
+        )
+
+        # Extract depth maps
+        print("\nExtracting depth maps...")
+        extract_depth_maps(
+            args, coarse_model, fine_model,
+            render_poses[:10],  # First 10 poses
+            hwf, K, near, far, device,
+            os.path.join(output_dir, "depth_maps"),
+        )
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### rendering.py
+```
+"""
+Volume rendering for NeRF.
+
+Implements the core volume rendering equation:
+
+    C(r) = integral_{t_n}^{t_f} T(t) * sigma(r(t)) * c(r(t), d) dt
+
+where:
+    T(t) = exp(-integral_{t_n}^{t} sigma(r(s)) ds)
+
+is the accumulated transmittance along the ray from t_n to t.
+
+In practice, we approximate this integral with quadrature:
+    C_hat = sum_{i=1}^{N} T_i * alpha_i * c_i
+
+where:
+    alpha_i = 1 - exp(-sigma_i * delta_i)
+    T_i = prod_{j=1}^{i-1} (1 - alpha_j)
+    delta_i = t_{i+1} - t_i
+
+This module also implements hierarchical sampling: first sample coarsely,
+then resample around high-density regions using inverse CDF sampling
+on the coarse weights.
+"""
+
+import torch
+import torch.nn.functional as F
+
+
+def sample_stratified(rays_o, rays_d, near, far, n_samples, perturb=True, lindisp=False):
+    """
+    Stratified sampling along rays.
+
+    Divides [near, far] into N evenly-spaced bins and draws one sample
+    uniformly at random from each bin.
+
+    Args:
+        rays_o: [N_rays, 3] ray origins
+        rays_d: [N_rays, 3] ray directions
+        near: float, near plane distance
+        far: float, far plane distance
+        n_samples: int, number of samples per ray
+        perturb: bool, whether to add noise within each bin
+        lindisp: bool, if True sample linearly in disparity (1/depth)
+
+    Returns:
+        pts: [N_rays, n_samples, 3] sampled 3D points
+        z_vals: [N_rays, n_samples] depth values along each ray
+    """
+    N_rays = rays_o.shape[0]
+    device = rays_o.device
+
+    # Evenly spaced t values
+    t_vals = torch.linspace(0.0, 1.0, steps=n_samples, device=device)
+
+    if lindisp:
+        # Sample linearly in inverse depth (disparity)
+        z_vals = 1.0 / (1.0 / near * (1.0 - t_vals) + 1.0 / far * t_vals)
+    else:
+        z_vals = near * (1.0 - t_vals) + far * t_vals
+
+    z_vals = z_vals.expand(N_rays, n_samples)
+
+    if perturb:
+        # Stratified: add uniform noise within each bin
+        mids = 0.5 * (z_vals[..., 1:] + z_vals[..., :-1])
+        upper = torch.cat([mids, z_vals[..., -1:]], dim=-1)
+        lower = torch.cat([z_vals[..., :1], mids], dim=-1)
+        t_rand = torch.rand_like(z_vals)
+        z_vals = lower + (upper - lower) * t_rand
+
+    # Compute 3D sample positions: r(t) = o + t*d
+    pts = rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]
+
+    return pts, z_vals
+
+
+def sample_hierarchical(rays_o, rays_d, z_vals, weights, n_importance, perturb=True):
+    """
+    Hierarchical sampling based on coarse network weights.
+
+    Uses inverse CDF sampling to concentrate samples in regions
+    where the coarse network predicts high density.
+
+    Args:
+        rays_o: [N_rays, 3] ray origins
+        rays_d: [N_rays, 3] ray directions
+        z_vals: [N_rays, N_coarse] coarse depth values
+        weights: [N_rays, N_coarse] rendering weights from coarse pass
+        n_importance: int, number of additional importance samples
+        perturb: bool, whether to add noise
+
+    Returns:
+        pts: [N_rays, N_coarse + n_importance, 3] all sample points (sorted)
+        z_vals_combined: [N_rays, N_coarse + n_importance] combined depth values
+        z_samples: [N_rays, n_importance] importance-sampled depth values
+    """
+    device = rays_o.device
+
+    # Get PDF from weights (avoid zero weights)
+    weights = weights[..., 1:-1] + 1e-5  # [N_rays, N_coarse - 2]
+    pdf = weights / torch.sum(weights, dim=-1, keepdim=True)
+    cdf = torch.cumsum(pdf, dim=-1)
+    cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], dim=-1)
+
+    # Inverse CDF sampling
+    if perturb:
+        u = torch.rand(list(cdf.shape[:-1]) + [n_importance], device=device)
+    else:
+        u = torch.linspace(0.0, 1.0, steps=n_importance, device=device)
+        u = u.expand(list(cdf.shape[:-1]) + [n_importance])
+
+    # Find bins in CDF
+    u = u.contiguous()
+    inds = torch.searchsorted(cdf, u, right=True)
+    below = torch.clamp(inds - 1, min=0)
+    above = torch.clamp(inds, max=cdf.shape[-1] - 1)
+    inds_g = torch.stack([below, above], dim=-1)  # [N_rays, n_importance, 2]
+
+    # Gather CDF and bin values
+    matched_shape = [*inds_g.shape[:-1], cdf.shape[-1]]
+    cdf_g = torch.gather(cdf.unsqueeze(-2).expand(matched_shape), -1, inds_g)
+    bins_mid = 0.5 * (z_vals[..., 1:] + z_vals[..., :-1])
+    matched_shape_bins = [*inds_g.shape[:-1], bins_mid.shape[-1]]
+    bins_g = torch.gather(bins_mid.unsqueeze(-2).expand(matched_shape_bins), -1, inds_g)
+
+    # Linear interpolation
+    denom = cdf_g[..., 1] - cdf_g[..., 0]
+    denom = torch.where(denom < 1e-5, torch.ones_like(denom), denom)
+    t = (u - cdf_g[..., 0]) / denom
+    z_samples = bins_g[..., 0] + t * (bins_g[..., 1] - bins_g[..., 0])
+
+    # Combine coarse and fine samples, sort by depth
+    z_vals_combined, _ = torch.sort(torch.cat([z_vals, z_samples], dim=-1), dim=-1)
+
+    # Compute 3D points
+    pts = rays_o[..., None, :] + rays_d[..., None, :] * z_vals_combined[..., :, None]
+
+    return pts, z_vals_combined, z_samples
+
+
+def volume_render(raw_rgb, raw_sigma, z_vals, rays_d, raw_noise_std=0.0, white_bkgd=False):
+    """
+    Perform volume rendering (alpha compositing) along rays.
+
+    Implements the discrete approximation:
+        C = sum_i T_i * (1 - exp(-sigma_i * delta_i)) * c_i
+
+    where T_i = prod_{j<i} exp(-sigma_j * delta_j) is the transmittance.
+
+    Args:
+        raw_rgb: [N_rays, N_samples, 3] predicted RGB from network
+        raw_sigma: [N_rays, N_samples, 1] predicted density from network
+        z_vals: [N_rays, N_samples] depth values
+        rays_d: [N_rays, 3] ray directions (for computing distances)
+        raw_noise_std: float, noise std for density regularization
+        white_bkgd: bool, if True composite onto white background
+
+    Returns:
+        rgb_map: [N_rays, 3] rendered color
+        depth_map: [N_rays] expected depth
+        acc_map: [N_rays] accumulated opacity
+        weights: [N_rays, N_samples] rendering weights
+        disp_map: [N_rays] disparity map (inverse depth)
+    """
+    # Compute distances between adjacent samples
+    dists = z_vals[..., 1:] - z_vals[..., :-1]
+    # Last distance is infinite (or a large number)
+    dists = torch.cat(
+        [dists, torch.full_like(dists[..., :1], 1e10)], dim=-1
+    )  # [N_rays, N_samples]
+
+    # Scale distances by ray direction magnitude
+    dists = dists * torch.norm(rays_d[..., None, :], dim=-1)
+
+    # Density with optional noise
+    sigma = raw_sigma.squeeze(-1)  # [N_rays, N_samples]
+    if raw_noise_std > 0.0:
+        noise = torch.randn_like(sigma) * raw_noise_std
+        sigma = sigma + noise
+
+    # Alpha: opacity of each sample
+    # alpha_i = 1 - exp(-sigma_i * delta_i)
+    alpha = 1.0 - torch.exp(-F.relu(sigma) * dists)
+
+    # Transmittance: T_i = prod_{j<i} (1 - alpha_j)
+    # Use exclusive cumulative product
+    transmittance = torch.cumprod(
+        torch.cat([torch.ones_like(alpha[..., :1]), 1.0 - alpha + 1e-10], dim=-1),
+        dim=-1,
+    )[..., :-1]
+
+    # Rendering weights: w_i = T_i * alpha_i
+    weights = transmittance * alpha  # [N_rays, N_samples]
+
+    # Composite: C = sum(w_i * c_i)
+    rgb_map = torch.sum(weights[..., None] * raw_rgb, dim=-2)  # [N_rays, 3]
+
+    # Depth: expected depth E[t] = sum(w_i * t_i)
+    depth_map = torch.sum(weights * z_vals, dim=-1)  # [N_rays]
+
+    # Disparity map (inverse depth)
+    disp_map = 1.0 / torch.clamp(depth_map, min=1e-10)
+
+    # Accumulated opacity
+    acc_map = torch.sum(weights, dim=-1)  # [N_rays]
+
+    # White background compositing
+    if white_bkgd:
+        rgb_map = rgb_map + (1.0 - acc_map[..., None])
+
+    return rgb_map, depth_map, acc_map, weights, disp_map
+
+
+def render_rays(
+    rays_o,
+    rays_d,
+    coarse_model,
+    fine_model=None,
+    near=2.0,
+    far=6.0,
+    n_samples_coarse=64,
+    n_samples_fine=128,
+    perturb=True,
+    raw_noise_std=0.0,
+    white_bkgd=False,
+    lindisp=False,
+    netchunk=1024 * 64,
+):
+    """
+    Full rendering pipeline: coarse + fine (hierarchical) sampling.
+
+    Args:
+        rays_o: [N_rays, 3] ray origins
+        rays_d: [N_rays, 3] ray directions
+        coarse_model: NeRF model for coarse pass
+        fine_model: NeRF model for fine pass (optional)
+        near, far: clipping planes
+        n_samples_coarse: coarse samples per ray
+        n_samples_fine: additional fine samples per ray
+        perturb: stratified sampling perturbation
+        raw_noise_std: density noise for regularization
+        white_bkgd: white background flag
+        lindisp: linear in disparity sampling
+        netchunk: chunk size for network evaluation
+
+    Returns:
+        dict with 'rgb_coarse', 'rgb_fine', 'depth_coarse', 'depth_fine', etc.
+    """
+    viewdirs = rays_d / torch.norm(rays_d, dim=-1, keepdim=True)
+
+    # ---- Coarse pass ----
+    pts_coarse, z_vals_coarse = sample_stratified(
+        rays_o, rays_d, near, far, n_samples_coarse,
+        perturb=perturb, lindisp=lindisp,
+    )
+
+    # Evaluate coarse network
+    rgb_c, sigma_c = run_network(
+        coarse_model, pts_coarse, viewdirs, netchunk
+    )
+
+    # Volume render coarse
+    rgb_coarse, depth_coarse, acc_coarse, weights_coarse, disp_coarse = volume_render(
+        rgb_c, sigma_c, z_vals_coarse, rays_d,
+        raw_noise_std=raw_noise_std, white_bkgd=white_bkgd,
+    )
+
+    result = {
+        "rgb_coarse": rgb_coarse,
+        "depth_coarse": depth_coarse,
+        "acc_coarse": acc_coarse,
+        "disp_coarse": disp_coarse,
+    }
+
+    # ---- Fine pass (hierarchical) ----
+    if fine_model is not None and n_samples_fine > 0:
+        pts_fine, z_vals_fine, _ = sample_hierarchical(
+            rays_o, rays_d, z_vals_coarse, weights_coarse,
+            n_samples_fine, perturb=perturb,
+        )
+
+        # Evaluate fine network
+        rgb_f, sigma_f = run_network(
+            fine_model, pts_fine, viewdirs, netchunk
+        )
+
+        # Volume render fine
+        rgb_fine, depth_fine, acc_fine, weights_fine, disp_fine = volume_render(
+            rgb_f, sigma_f, z_vals_fine, rays_d,
+            raw_noise_std=raw_noise_std, white_bkgd=white_bkgd,
+        )
+
+        result["rgb_fine"] = rgb_fine
+        result["depth_fine"] = depth_fine
+        result["acc_fine"] = acc_fine
+        result["disp_fine"] = disp_fine
+
+    return result
+
+
+def run_network(model, pts, viewdirs, netchunk):
+    """
+    Evaluate the NeRF network on batched points, chunked for memory.
+
+    Args:
+        model: NeRF model
+        pts: [N_rays, N_samples, 3] query points
+        viewdirs: [N_rays, 3] viewing directions
+        netchunk: max points per forward pass
+
+    Returns:
+        rgb: [N_rays, N_samples, 3]
+        sigma: [N_rays, N_samples, 1]
+    """
+    N_rays, N_samples = pts.shape[:2]
+    pts_flat = pts.reshape(-1, 3)
+
+    # Expand viewdirs to match points
+    viewdirs_flat = viewdirs[:, None, :].expand_as(pts).reshape(-1, 3)
+
+    # Chunk evaluation
+    all_rgb = []
+    all_sigma = []
+    for i in range(0, pts_flat.shape[0], netchunk):
+        chunk_pts = pts_flat[i : i + netchunk]
+        chunk_dirs = viewdirs_flat[i : i + netchunk]
+        rgb, sigma = model(chunk_pts, chunk_dirs)
+        all_rgb.append(rgb)
+        all_sigma.append(sigma)
+
+    rgb = torch.cat(all_rgb, dim=0).reshape(N_rays, N_samples, 3)
+    sigma = torch.cat(all_sigma, dim=0).reshape(N_rays, N_samples, 1)
+
+    return rgb, sigma
+
+
+def batchify_render(rays_o, rays_d, chunk=1024 * 32, **kwargs):
+    """
+    Render rays in smaller batches to avoid OOM.
+
+    Args:
+        rays_o: [N, 3] all ray origins
+        rays_d: [N, 3] all ray directions
+        chunk: batch size
+        **kwargs: passed to render_rays
+
+    Returns:
+        dict of concatenated results
+    """
+    all_results = {}
+    for i in range(0, rays_o.shape[0], chunk):
+        result = render_rays(
+            rays_o[i : i + chunk],
+            rays_d[i : i + chunk],
+            **kwargs,
+        )
+        for k, v in result.items():
+            if k not in all_results:
+                all_results[k] = []
+            all_results[k].append(v)
+
+    return {k: torch.cat(v, dim=0) for k, v in all_results.items()}
+```
+
+### train.py
+```
+"""
+Training script for NeRF.
+
+Training procedure:
+  1. Sample a random training image and random batch of rays.
+  2. Run coarse and fine networks via hierarchical volume rendering.
+  3. Compute photometric loss (MSE) on both coarse and fine outputs.
+  4. Backpropagate and update weights.
+  5. Periodically log PSNR/SSIM, save checkpoints, render test views.
+"""
+
+import os
+import time
+import numpy as np
+import torch
+import torch.optim as optim
+
+from model import create_nerf
+from rendering import batchify_render
+from rays import get_rays, ndc_rays, get_intrinsic_matrix
+from dataset import load_dataset
+from utils import (
+    img2mse,
+    mse2psnr,
+    compute_ssim,
+    save_image,
+    save_video,
+    create_log_dir,
+    save_checkpoint,
+    load_checkpoint,
+    get_learning_rate,
+    set_learning_rate,
+    to8b,
+)
+from config import get_config
+
+
+def train():
+    args = get_config()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # Create log directory
+    log_dir = create_log_dir(args)
+
+    # Load data
+    images, poses, hwf, K, i_split, near, far = load_dataset(args)[:7]
+    render_poses = load_dataset.__wrapped__(args)[-1] if hasattr(load_dataset, '__wrapped__') else None
+
+    # Re-call to get render_poses properly
+    _, _, _, _, _, _, _, render_poses = load_dataset(args)
+
+    H, W, focal = hwf
+
+    # Precompute all rays for training
+    print("Precomputing rays...")
+    rays_rgb_train = []
+    for i in i_split["train"]:
+        pose = torch.tensor(poses[i], dtype=torch.float32, device=device)
+        K_tensor = torch.tensor(K, dtype=torch.float32, device=device)
+        rays_o, rays_d = get_rays(H, W, K_tensor, pose)
+
+        # NDC conversion for forward-facing scenes
+        if args.use_ndc:
+            rays_o, rays_d = ndc_rays(H, W, focal, 1.0, rays_o, rays_d)
+
+        target = torch.tensor(images[i], dtype=torch.float32, device=device)
+
+        rays_o = rays_o.reshape(-1, 3)
+        rays_d = rays_d.reshape(-1, 3)
+        target = target.reshape(-1, 3)
+
+        rays_rgb_train.append(torch.cat([rays_o, rays_d, target], dim=-1))
+
+    rays_rgb_train = torch.cat(rays_rgb_train, dim=0)  # [N_total, 9]
+    print(f"Total training rays: {rays_rgb_train.shape[0]:,}")
+
+    # Shuffle rays
+    perm = torch.randperm(rays_rgb_train.shape[0])
+    rays_rgb_train = rays_rgb_train[perm]
+
+    # Create models
+    coarse_model, fine_model = create_nerf(args)
+    coarse_model = coarse_model.to(device)
+    fine_model = fine_model.to(device)
+
+    # Optimizer
+    params = list(coarse_model.parameters()) + list(fine_model.parameters())
+    optimizer = optim.Adam(params, lr=args.lr, betas=(0.9, 0.999))
+
+    # Load checkpoint if exists
+    start_iter = 0
+    ckpt_path = os.path.join(log_dir, "checkpoints", "latest.pt")
+    if os.path.exists(ckpt_path):
+        start_iter = load_checkpoint(ckpt_path, coarse_model, fine_model, optimizer)
+
+    # Training loop
+    print(f"\nStarting training from iteration {start_iter}...")
+    batch_idx = start_iter * args.batch_size % rays_rgb_train.shape[0]
+
+    for step in range(start_iter, args.n_iters):
+        t0 = time.time()
+
+        # Learning rate decay
+        lr = get_learning_rate(step, args.lr, args.lr_decay)
+        set_learning_rate(optimizer, lr)
+
+        # Sample batch of rays
+        if batch_idx + args.batch_size > rays_rgb_train.shape[0]:
+            # Reshuffle
+            perm = torch.randperm(rays_rgb_train.shape[0])
+            rays_rgb_train = rays_rgb_train[perm]
+            batch_idx = 0
+
+        batch = rays_rgb_train[batch_idx : batch_idx + args.batch_size]
+        batch_idx += args.batch_size
+
+        rays_o = batch[:, :3]
+        rays_d = batch[:, 3:6]
+        target_rgb = batch[:, 6:9]
+
+        # Render
+        result = batchify_render(
+            rays_o,
+            rays_d,
+            chunk=args.chunk,
+            coarse_model=coarse_model,
+            fine_model=fine_model,
+            near=near,
+            far=far,
+            n_samples_coarse=args.n_samples_coarse,
+            n_samples_fine=args.n_samples_fine,
+            perturb=args.perturb > 0,
+            raw_noise_std=args.raw_noise_std,
+            white_bkgd=args.white_bkgd,
+            lindisp=args.lindisp,
+            netchunk=args.netchunk,
+        )
+
+        # Photometric loss (MSE) on both coarse and fine
+        loss_coarse = img2mse(result["rgb_coarse"], target_rgb)
+        loss = loss_coarse
+
+        if "rgb_fine" in result:
+            loss_fine = img2mse(result["rgb_fine"], target_rgb)
+            loss = loss + loss_fine
+
+        # Backprop
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        dt = time.time() - t0
+
+        # Logging
+        if step % args.i_print == 0:
+            psnr = mse2psnr(loss_coarse)
+            psnr_fine = mse2psnr(loss_fine) if "rgb_fine" in result else psnr
+            print(
+                f"[Iter {step:6d}] loss={loss.item():.5f} "
+                f"psnr_c={psnr.item():.2f} psnr_f={psnr_fine.item():.2f} "
+                f"lr={lr:.2e} dt={dt:.3f}s"
+            )
+
+        # Save checkpoint
+        if step % args.i_weights == 0 and step > 0:
+            path = os.path.join(log_dir, "checkpoints", f"step_{step:06d}.pt")
+            save_checkpoint(path, coarse_model, fine_model, optimizer, step)
+            save_checkpoint(ckpt_path, coarse_model, fine_model, optimizer, step)
+            print(f"  Saved checkpoint at step {step}")
+
+        # Render test view
+        if step % args.i_img == 0 and step > 0:
+            render_test_view(
+                args, coarse_model, fine_model, images, poses, hwf, K,
+                i_split, near, far, device, log_dir, step,
+            )
+
+        # Render full test set
+        if step % args.i_testset == 0 and step > 0:
+            render_test_set(
+                args, coarse_model, fine_model, images, poses, hwf, K,
+                i_split, near, far, device, log_dir, step,
+            )
+
+        # Render video
+        if step % args.i_video == 0 and step > 0:
+            render_video_path(
+                args, coarse_model, fine_model, render_poses, hwf, K,
+                near, far, device, log_dir, step,
+            )
+
+    print("Training complete!")
+
+
+@torch.no_grad()
+def render_test_view(args, coarse_model, fine_model, images, poses, hwf, K,
+                     i_split, near, far, device, log_dir, step):
+    """Render a single test view for monitoring."""
+    coarse_model.eval()
+    fine_model.eval()
+
+    H, W, focal = hwf
+    test_idx = i_split["test"][0]
+
+    pose = torch.tensor(poses[test_idx], dtype=torch.float32, device=device)
+    K_tensor = torch.tensor(K, dtype=torch.float32, device=device)
+
+    rays_o, rays_d = get_rays(H, W, K_tensor, pose)
+    if args.use_ndc:
+        rays_o, rays_d = ndc_rays(H, W, focal, 1.0, rays_o, rays_d)
+
+    rays_o = rays_o.reshape(-1, 3)
+    rays_d = rays_d.reshape(-1, 3)
+
+    result = batchify_render(
+        rays_o, rays_d, chunk=args.chunk,
+        coarse_model=coarse_model, fine_model=fine_model,
+        near=near, far=far,
+        n_samples_coarse=args.n_samples_coarse,
+        n_samples_fine=args.n_samples_fine,
+        perturb=False, raw_noise_std=0.0,
+        white_bkgd=args.white_bkgd, lindisp=args.lindisp,
+        netchunk=args.netchunk,
+    )
+
+    key = "rgb_fine" if "rgb_fine" in result else "rgb_coarse"
+    rgb = result[key].reshape(H, W, 3).cpu().numpy()
+    target = images[test_idx]
+
+    psnr = float(-10 * np.log10(np.mean((rgb - target) ** 2)))
+    ssim = compute_ssim(rgb, target)
+
+    save_image(os.path.join(log_dir, "renders", f"test_{step:06d}.png"), rgb)
+    print(f"  Test view PSNR={psnr:.2f}, SSIM={ssim:.4f}")
+
+    coarse_model.train()
+    fine_model.train()
+
+
+@torch.no_grad()
+def render_test_set(args, coarse_model, fine_model, images, poses, hwf, K,
+                    i_split, near, far, device, log_dir, step):
+    """Render the full test set and compute metrics."""
+    coarse_model.eval()
+    fine_model.eval()
+
+    H, W, focal = hwf
+    test_dir = os.path.join(log_dir, "renders", f"testset_{step:06d}")
+    os.makedirs(test_dir, exist_ok=True)
+
+    psnrs, ssims = [], []
+    K_tensor = torch.tensor(K, dtype=torch.float32, device=device)
+
+    for idx, test_i in enumerate(i_split["test"]):
+        pose = torch.tensor(poses[test_i], dtype=torch.float32, device=device)
+        rays_o, rays_d = get_rays(H, W, K_tensor, pose)
+        if args.use_ndc:
+            rays_o, rays_d = ndc_rays(H, W, focal, 1.0, rays_o, rays_d)
+
+        rays_o = rays_o.reshape(-1, 3)
+        rays_d = rays_d.reshape(-1, 3)
+
+        result = batchify_render(
+            rays_o, rays_d, chunk=args.chunk,
+            coarse_model=coarse_model, fine_model=fine_model,
+            near=near, far=far,
+            n_samples_coarse=args.n_samples_coarse,
+            n_samples_fine=args.n_samples_fine,
+            perturb=False, raw_noise_std=0.0,
+            white_bkgd=args.white_bkgd, lindisp=args.lindisp,
+            netchunk=args.netchunk,
+        )
+
+        key = "rgb_fine" if "rgb_fine" in result else "rgb_coarse"
+        rgb = result[key].reshape(H, W, 3).cpu().numpy()
+        target = images[test_i]
+
+        psnr = float(-10 * np.log10(np.mean((rgb - target) ** 2)))
+        ssim = compute_ssim(rgb, target)
+        psnrs.append(psnr)
+        ssims.append(ssim)
+
+        save_image(os.path.join(test_dir, f"{idx:03d}.png"), rgb)
+
+    print(f"  Test set: mean PSNR={np.mean(psnrs):.2f}, mean SSIM={np.mean(ssims):.4f}")
+
+    coarse_model.train()
+    fine_model.train()
+
+
+@torch.no_grad()
+def render_video_path(args, coarse_model, fine_model, render_poses, hwf, K,
+                      near, far, device, log_dir, step):
+    """Render a video along the render path."""
+    coarse_model.eval()
+    fine_model.eval()
+
+    H, W, focal = hwf
+    K_tensor = torch.tensor(K, dtype=torch.float32, device=device)
+
+    frames = []
+    for i, pose in enumerate(render_poses):
+        pose = torch.tensor(pose, dtype=torch.float32, device=device)
+        rays_o, rays_d = get_rays(H, W, K_tensor, pose)
+        if args.use_ndc:
+            rays_o, rays_d = ndc_rays(H, W, focal, 1.0, rays_o, rays_d)
+
+        rays_o = rays_o.reshape(-1, 3)
+        rays_d = rays_d.reshape(-1, 3)
+
+        result = batchify_render(
+            rays_o, rays_d, chunk=args.chunk,
+            coarse_model=coarse_model, fine_model=fine_model,
+            near=near, far=far,
+            n_samples_coarse=args.n_samples_coarse,
+            n_samples_fine=args.n_samples_fine,
+            perturb=False, raw_noise_std=0.0,
+            white_bkgd=args.white_bkgd, lindisp=args.lindisp,
+            netchunk=args.netchunk,
+        )
+
+        key = "rgb_fine" if "rgb_fine" in result else "rgb_coarse"
+        rgb = result[key].reshape(H, W, 3).cpu().numpy()
+        frames.append(rgb)
+
+        if (i + 1) % 10 == 0:
+            print(f"  Rendered {i + 1}/{len(render_poses)} views")
+
+    video_path = os.path.join(log_dir, "renders", f"video_{step:06d}.mp4")
+    save_video(video_path, frames, fps=30)
+    print(f"  Saved video to {video_path}")
+
+    coarse_model.train()
+    fine_model.train()
+
+
+if __name__ == "__main__":
+    train()
+```
+
+### utils.py
+```
+"""
+Utility functions for NeRF.
+"""
+
+import os
+import numpy as np
+import torch
+import imageio.v2 as imageio
+
+
+def to8b(x):
+    """Convert float image [0,1] to uint8 [0,255]."""
+    return (255 * np.clip(x, 0, 1)).astype(np.uint8)
+
+
+def img2mse(x, target):
+    """Mean squared error between two images."""
+    return torch.mean((x - target) ** 2)
+
+
+def mse2psnr(mse):
+    """Convert MSE to PSNR."""
+    return -10.0 * torch.log10(mse)
+
+
+def compute_ssim(img1, img2, window_size=11, C1=0.01**2, C2=0.03**2):
+    """
+    Compute SSIM between two images.
+    Images should be [H, W, 3] numpy arrays in [0, 1].
+    """
+    from scipy.ndimage import uniform_filter
+
+    mu1 = uniform_filter(img1, size=window_size)
+    mu2 = uniform_filter(img2, size=window_size)
+
+    mu1_sq = mu1 * mu1
+    mu2_sq = mu2 * mu2
+    mu1_mu2 = mu1 * mu2
+
+    sigma1_sq = uniform_filter(img1 * img1, size=window_size) - mu1_sq
+    sigma2_sq = uniform_filter(img2 * img2, size=window_size) - mu2_sq
+    sigma12 = uniform_filter(img1 * img2, size=window_size) - mu1_mu2
+
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / (
+        (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
+    )
+    return float(np.mean(ssim_map))
+
+
+def save_image(path, img):
+    """Save a numpy image [H,W,3] in [0,1] to disk."""
+    imageio.imwrite(path, to8b(img))
+
+
+def save_video(path, frames, fps=30):
+    """Save list of numpy frames to mp4 video."""
+    imageio.mimwrite(path, [to8b(f) for f in frames], fps=fps, quality=8)
+
+
+def create_log_dir(args):
+    """Create experiment log directory."""
+    basedir = args.logdir
+    expname = args.expname
+    log_dir = os.path.join(basedir, expname)
+    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(os.path.join(log_dir, "renders"), exist_ok=True)
+    os.makedirs(os.path.join(log_dir, "checkpoints"), exist_ok=True)
+    return log_dir
+
+
+def load_checkpoint(path, coarse_model, fine_model, optimizer):
+    """Load a training checkpoint."""
+    ckpt = torch.load(path, map_location="cpu")
+    coarse_model.load_state_dict(ckpt["coarse_model"])
+    if fine_model is not None and "fine_model" in ckpt:
+        fine_model.load_state_dict(ckpt["fine_model"])
+    optimizer.load_state_dict(ckpt["optimizer"])
+    start_iter = ckpt["global_step"]
+    print(f"Loaded checkpoint from {path} at iteration {start_iter}")
+    return start_iter
+
+
+def save_checkpoint(path, coarse_model, fine_model, optimizer, global_step):
+    """Save a training checkpoint."""
+    ckpt = {
+        "global_step": global_step,
+        "coarse_model": coarse_model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+    }
+    if fine_model is not None:
+        ckpt["fine_model"] = fine_model.state_dict()
+    torch.save(ckpt, path)
+
+
+def get_learning_rate(step, lr_init, lr_decay_steps, lr_decay_rate=0.1):
+    """Exponential learning rate decay."""
+    return lr_init * (lr_decay_rate ** (step / (lr_decay_steps * 1000)))
+
+
+def set_learning_rate(optimizer, lr):
+    """Set the learning rate for all parameter groups."""
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = lr
+```

@@ -1,0 +1,978 @@
+Grid-GCN for Fast and Scalable Point Cloud Learning
+Qiangeng Xu
+arXiv:submit/2956224 [cs.CV] 6 Dec 2019
+Abstract
+Due to the sparsity and irregularity of the point cloud
+data, methods that directly consume points have become
+popular. Among all point-based models, graph convolutional networks (GCN) lead to notable performance by fully
+preserving the data granularity and exploiting point interrelation. However, point-based networks spend a significant amount of time on data structuring (e.g., Farthest
+Point Sampling (FPS) and neighbor points querying), which
+limit the speed and scalability. In this paper, we present a
+method, named Grid-GCN, for fast and scalable point cloud
+learning. Grid-GCN uses a novel data structuring strategy,
+Coverage-Aware Grid Query (CAGQ). By leveraging the
+efficiency of grid space, CAGQ improves spatial coverage
+while reducing the theoretical time complexity. Compared
+with popular sampling methods such as Farthest Point Sampling (FPS) and Ball Query, CAGQ achieves up to 50×
+speed-up. With a Grid Context Aggregation (GCA) module,
+Grid-GCN achieves state-of-the-art performance on major point cloud classification and segmentation benchmarks
+with significantly faster runtime than previous studies. Remarkably, Grid-GCN achieves the inference speed of 50fps
+on ScanNet using 81920 points per scene as input. The code
+will be released.
+Figure 1: Overview of the Grid-GCN model. (a) Illustration
+of the network architecture for point cloud segmentation. Our
+model consists of several GridConv layers, and each can be
+used in either a downsampling or an upsampling process. A
+GridConv layer includes two stages: (b) For the data structuring stage, a Coverage-Aware Grid Query (CAGQ) module
+achieves efficient data structuring and provides point groups
+for efficient computation. (c) For the convolution stage, a Grid
+Context Aggregation (GCA) module conducts graph convolution on the point groups by aggregating local context information.
+most point clouds[49], significant computation power may
+be consumed by processing no information.
+Another family of models for point cloud data processing is Point-based models. In contrast to volumetric models,
+point-based models enable efficient computation but suffer
+from inefficient data structuring. For example, PointNet
+[28] consumes the point cloud directly without quantization and aggregates the information at the last stage of the
+network, so the accurate data locations are intact but the
+computation cost grows linearly with the number of points.
+Later studies [29, 45, 40, 36] apply a downsampling strategy
+at each layer to aggregate information into point group centers, therefore extracting fewer representative points layer
+by layer (Figure 1(a)). More recently, graph convolutional
+networks (GCN) [31, 38, 20, 47] are proposed to build a local graph for each point group in the network layer, which
+can be seen as an extension of the PointNet++ architecture
+[29]. However, this architecture incurs high data structuring cost (e.g., FPS and k-NN). Liu et al. [26] show that the
+1. Introduction
+Point cloud data is popular in applications such as autonomous driving, robotics, and unmanned aerial vehicles.
+Currently, LiDAR sensors can generate millions of points
+a second, providing dense real-time representations of the
+world. Many approaches are used for point cloud data processing. Volumetric models are a family of models that
+transfer point cloud to spatially quantized voxel grids and
+use a volumetric convolution to perform computation in the
+grid space [27, 44, 27]. Using grids as data structuring
+methods, volumetric approaches associate points to locations in grids, and 3D convolutional kernels gather information from neighboring voxels. Although grid data structures are efficient, high voxel resolution is required to preserve the granularity of the data location. Since computation and memory usage grows cubically with the voxel
+resolution, it is costly to process large point clouds. In addition, since approximately 90% of the voxels are empty for
+1
+data structuring cost in three popular point-based models
+[22, 45, 40] is up to 88% of the overall computational cost.
+In this paper, we also examine this issue by showing the
+trends of data structuring overhead in terms of scalability.
+This paper introduces Grid-GCN, an approach that
+blends the advantages of volumetric models and pointbased models, to achieve efficient data structuring and efficient computation at the same time. As illustrated in Figure
+1, our model consists of several GridConv layers to process the point data. Each layer includes two stages: a data
+structuring stage that samples the representative centers and
+queries neighboring points; a convolution stage that builds
+a local graph on each point group and aggregates the information to the center.
+To achieve efficient data structuring and computation,
+we design a Coverage-Aware Grid Query (CAGQ) module, which 1) accelerates the center sampling and neighbor
+querying, and 2) provides more complete coverage of the
+point cloud to the learning process. The data structuring
+efficiency is achieved through voxelization, and the computational efficiency is obtained through performing computation only on occupied areas. We demonstrate CAGQ’s
+outstanding speed and space coverage in Section 4.
+To further exploit the point relationships during information aggregation, we also describe a novel graph convolution module, named Grid Context Aggregation (GCA).
+The module performs Grid context pooling to extract context features of the grid neighborhood, which benefits the
+edge relation computation without adding extra overhead.
+We demonstrate the Grid-GCN model on two tasks:
+point cloud classification and segmentation. Specifically,
+we perform the classification task on the ModelNet40 and
+ModelNet10 dataset [42], and achieve the state-of-the-art
+overall accuracy of 93.1% (no voting), while being on average 5× faster than other models. We also perform the
+segmentation tasks on the ScanNet [7] and the S3DIS [1]
+dataset, and achieve 10× speed-up on average than other
+models. Notably, our model demonstrates its ability on realtime large-scale point-based learning by processing 81920
+points in a scene within 20 ms. (see Section 5.3.1).
+2. Related Work
+Voxel-based methods for 3D learning To extend the
+success of convolutional neural network models[11, 12] on
+2D images, Voxnet and its variants [27, 42, 37, 4, 5] start
+to transfer point cloud or depth map to occupancy grid and
+apply volumetric convolution. To address the problem of
+cubically increased memory usage, OctNet[30] constructs
+tree structures for occupied voxels to avoid the computation
+in the empty space. Although efficient in data structuring,
+the drawback of the volumetric approach is the low computational efficiency and the loss of data granularity.
+Point-based methods for point cloud learning Point-
+based models are first proposed by [28, 29], which pursues the permutation invariant by using pooling to aggregate the point features. Approaches such as kernel correlation [2, 41] and extended convolutions [35] are proposed to
+better capture local features. To solve the ordering ambiguity, PointCNN [22] predicts the local point order, and RSNet
+[13] sequentially consumes points from different directions.
+The computation cost in point-based methods grows linearly with the number of input points. However, the cost
+of data structuring has become the performance bottleneck
+on large-scale point clouds.
+Data structuring strategies for point data Most pointbased methods [29, 22, 36, 25] use FPS [9] to sample evenly
+spread group centers. FPS picks the point that maximizes
+the distance to the selected points. If the number of centers
+is not very small, the method takes O(N 2 ) computation.
+An approximate algorithm [8] can be O(N logN ). Random
+Point Sampling (RPS) has the smallest possible overhead,
+but it’s sensitive to density imbalance. Our CAGQ module has the same complexity as RPS, but it performs the
+sampling and neighbors querying in one shot, which is even
+faster than RPS with Ball Query or k-NN (see Table 2). KPConv [35] uses a grid sub-sampling to pick points in occupied voxels. Unlike our CAGQ, the strategy cannot query
+points in the voxel neighbors. CAGQ also has a CoverageAware Sampling (CAS) algorithm that optimizes the center
+selections, which can achieve better coverage than FPS.
+Alternatively, SO-Net [21] builds a self-organizing map.
+KDNet [14] uses kd-tree to partition the spaces. PATs[46]
+uses Gumble Subset Sampling to replace FPS. SPG [18]
+uses a clustering method to group points as super points.
+All of these methods are either slow in speed or need structure preprocessing. The lattice projection in SPLATNet
+[32, 10] preserves more point details than voxel space, but
+it is slower. Studies such as VoxelNet [49, 19] combines
+the point-based and volumetric methods by using PointNet [28] inside each voxel and applying voxel convolution.
+A concurrent high-speed model PVCNN [26] uses similar
+approaches but does not reduce the number of points in
+each layer progressively. Grid-GCN, on the other hand, can
+down-sample a large number of points through CAGQ, and
+aggregate information by considering point relationships in
+a local graph.
+GCN for point cloud learning Graph convolutional networks have been widely applied on point cloud learning
+[40, 17, 16]. A local graph is usually built for each point
+group, and GCN aggregates point data according to relations between points. SpecConv[36] blends the point features by using a graph Fourier transformation. Other studies
+model the edge feature between centers and nodes. Among
+them, [45, 25, 16, 40, 47] use the geometric relations, while
+[5, 38] explore semantic relations between the nodes. Apart
+from those features, our proposed Grid Context Aggrega-
+Figure 2: Illustration of Coverage-Aware Grid Query (CAGQ). Assume we want to sample M = 2 point groups and query
+K = 5 node points for each group. (a) The input is N points (grey). The voxel id and number of points is listed for each
+occupied voxel. (b) We build voxel-point index and store up to nv = 3 points (yellow) in each voxel. (c) Comparison of
+different sampling methods: FPS and RPS prefer the two centers inside the marked voxels. Our RVS could randomly pick any
+two occupied voxels (e.g. (2,0) and (0,0)) as center voxels. If our CAS is used, voxel (0,2) will replace (0,0). (d) Context points
+of center voxel (2,1) are the yellow points in its neighborhood (we use 3 × 3 as an example). CAGQ queries 5 points (yellow
+points with blue ring) from these context points, then calculate the locations of the group centers.
+tion module considers coverage and extracts the context features to compute the semantic relation.
+3. Methods
+3.1. Method Overview
+As shown in Figure 1, Grid-GCN is built on a set of GridConv layers. Each GridConv layer processes the information of N points and maps them to M points. The downsampling GridConv (N > M ) is repeated several times until a final feature representation is learned. This representation can be directly used for tasks such as classification
+or further up-sampled by the upsampling GridConv layers
+(N < M ) in segmentation tasks.
+GridConv consists of two modules:
+1. A Coverage-Aware Grid Query (CAGQ) module that
+samples M point groups from N points. Each group includes K node points and a group center. In the upsampling
+process, CAGQ takes centers directly through long-range
+connections, and only queries node points for these centers.
+2. A Grid Context Aggregation (GCA) module that
+builds a local graph for each point group and aggregates
+the information to the group centers. The M group centers
+are passed as data points for the next layer.
+We list all the notations and acronyms in the supplementary for clarity.
+3.2. Coverage-Aware Grid Query (CAGQ)
+In this subsection, we discuss the details of the CAGQ
+module. Given a point cloud, CAGQ aims to effectively
+structure the point cloud, and ease the process of center
+sampling and neighbor points querying. To perform CAGQ,
+we first voxelize the input space by setting up a voxel size
+(vx , vy , vz ). We then map each point to a voxel index
+V id(u, v, w) = f loor( vxx , vyy , vzz ). Here we only store up
+to nv points in each voxel.
+Let Ov denote all of the non-empty voxels. We then sample M center voxels Oc ⊆ Ov . For each center voxel vi ,
+we define its voxel neighbors as π(vi ), and call the stored
+points inside π(vi ) as context points. Since we build the
+point-voxel index in the previous step, CAGQ can quickly
+retrieve context points for each vi .
+After that, CAGQ picks K node points from the context
+points of each vi . We calculate the barycenter of node points
+in a group, as the location of the group center. This entire
+process is shown in Figure 2.
+Two problems remain to be solved here. (1) How do we
+sample center voxels Oc ⊆ Ov . (2) How do we pick K
+nodes from context points in π(vi ).
+To solve the first problem, we propose our center voxels
+sampling framework, which includes two methods:
+1. Random Voxel Sampling (RVS): Each occupied voxel
+will have the same probability of being picked. The
+group centers calculated inside these center voxels are more
+evenly distributed than centers picked on input points by
+RPS. We discuss the details in Section 4.
+2. Coverage-Aware Sampling (CAS): Each selected center voxel can cover up to λ occupied voxel neighbors. The
+goal of CAS is to select a set of center voxels Oc such that
+they can cover the most occupied space. Seeking the optimal solution to this problem requires iterating all combinations of selections. Therefore, we employ a greedy algorithm to approach the optimal solution: We first randomly
+pick M voxels from Ov as incumbents; From all of the un-
+picked voxels, we iteratively select one to challenge a random incumbent each time. If adding this challenger (and in
+the meantime removes the incumbent) gives us better coverage, we replace the incumbent with the challenger. For a
+challenger vC and an incumbent vI , the heuristics are calculated as:
+(
+1, if x = 0.
+(1)
+δ(x) =
+0, otherwise.
+Hadd =
+X
+δ(CV ) − β ·
+V ∈π(VC )
+Hrmv =
+X
+CV
+λ
+δ(CV − 1)
+(2)
+(3)
+V ∈π(VI )
+where λ is the amount of neighbors of a voxel and CV is
+the number of incumbents covering voxel V . Hadd represents the coverage gain if adding VC (penalize by a term of
+over-coverage). Hrmv represents the coverage loss after removing VI . If Hadd > Hrmv , we replace the incumbent by
+the challenger voxel. If we set β as 0, each replacement is
+guaranteed to improve the space coverage.
+Comparisons of those methods are further discussed in
+section 4.
+Node points querying CAGQ also provides two strategies to pick K node points from context points in π(vi ).
+1. Cube Query: We randomly select K points from context points. Compared to the Ball Query used in PointNet++
+[29], Cube Query can cover more space when point density is imbalanced. In the scenario of Figure 2, Ball Query
+samples K points from all raw points (grey) and may never
+sample any node point from voxel (2,1) which only has 3
+raw points.
+2. K-Nearest Neighbors: Unlike traditional k-NN where
+the search space is all points, k-NN in CAGQ only need to
+search among the context points, making the query substantially faster (We also provide an optimized method in the
+supplementary materials). We will compare these methods
+in the next section.
+3.3. Grid Context Aggregation
+For each point group provided by CAGQ, we use a Grid
+Context Aggregation (GCA) module to aggregate features
+from the node points to the group center. We first construct
+a local graph G(V, E), where V consists of the group center
+and K node points provided by CAGQ. We then connect
+each node point to the group center. GCA projects a node
+point’s features fi to fei . Based on the edge relation between
+the node and the center, GCA calculates the contribution
+of fei and aggregates all these features as the feature of the
+center fec . Formally, the GCA module can be described as
+fec,i = e(χi , fi ) ∗ M(fi )
+fec = A({fec,i }, i ∈ 1, ..., K)
+Figure 3: The red point is the group center. Yellow points
+are its node points. Black points are node points of the yellow points in the previous layer. The coverage weight is an
+important feature as it encodes the number of black points
+that have been aggregated to each yellow point.
+where fec,i is the contribution from a node, and χi is the
+xyz location of the node. M is a multi-layer perceptron
+(MLP), e is the edge attention function, and A is the aggregation function. The edge attention function e has been
+explored by many previous studies [45, 5, 38]. In this work,
+we design a new edge attention function with the following improvements to better fit into our network architecture
+(Figure 4):
+Coverage Weight Previous studies [45, 25, 16, 40, 47]
+use χc of the center and χi of a node to model edge attention
+as a function of geometric relation (Figure 4b). However,
+the formulation ignores the underlying contribution of each
+node point from previous layers. Intuitively, node points
+with more information from previous layers should be given
+more attention. We illustrate this scenario in Figure 3. With
+that in mind, we introduce the concept of coverage weight,
+which is defined as the number of points that have been aggregated to a node in previous layers. This value can be easily computed in CAGQ, and we argue that coverage weight
+is an important feature in calculating edge attention (see our
+ablation studies in Table 6).
+Grid Context Pooling Semantic relation is another important aspect when calculating the edge attention. In previous works [5, 38], semantic relation is encoded by using the group center’s features fc and a node point’s features fi , which requires the group center to be selected from
+node points. In CAGQ, since a group center is calculated as
+the barycenter of the node points, we propose Grid context
+pooling that extracts context features fcxt by pooling from
+all context points, which sufficiently covers the entire grid
+space of the local graph. Grid context pooling brings the
+following benefits:
+• fcxt models the features of a virtual group center, which
+allows us to calculate the semantic relation between the
+center and its node points.
+(4)
+• Even when group center is picked on a physical point,
+fcxt is still a useful feature representation as it covers
+more points in the neighborhood, instead of only the
+points in the graph.
+(5)
+• Since we have already associated context points to its
+Figure 4: Different strategies to compute the contribution ff
+c,i from a node ni to its center c. fi , χi are the feature maps and the
+location of ni . ei is the edge feature between ni and c calculated from the edge attention function. (a) Pointnet++ [29] ignores
+ei . (b) computes ei based on low dimensional geometric relation between ni and c. (c) also consider semantic relation between
+the center and the node point, but c has to be sampled on one of the points from the previous layer. (d). Grid-GCN’s geo-relation
+also includes the coverage weight. It pools a context feature fcxt from all stored neighbors to provide a semantic reference in ei
+computing.
+center voxel in CAGQ, there is no extra point query
+overhead. fcxt is shared across all edge computation in
+a local graph, and the pooling is a light-weighted operation requiring no learnable weights, which introduces
+little computational overhead.
+GCA module is summarized in Figure 4d, and the edge attention function can be model as
+e = mlp(mlpgeo (χc , χi , wi ), mlpsem (fcxt , fi ))
+(6)
+4. Analysis of CAGQ
+To analyze the benefit of CAGQ, we test the occupied space coverage and the latency of different sampling/querying methods under different conditions on ModelNet40 [42]. Center sampling methods include Random
+Point Sampling (RPS), Farthest Point Sampling (FPS), our
+Random Voxel Sampling (RVS), and our Coverage-Aware
+Sampling (CAS). Neighbor querying methods include Ball
+Query, Cube query, and K-Nearest Neighbors. The conditions include different numbers of input points, node numbers in a point group, and numbers of point groups, which
+are denoted by N , K, and M . We summarize the qualitative and quantitative evaluation result in Table 2 and Figure
+5. The reported occupied space coverage is calculated as
+the ratio between the number of voxels occupied by node
+points of all groups, and the number of voxels occupied by
+the original N points. Results under more conditions are
+presented in the supplementary.
+4.1. Space Coverage
+In Figure 5a, the centers sampled by RPS are concentrated in the areas with higher point density, leaving most
+space uncovered. In Figure 5b, FPS picks the points that
+are far away from each other, mostly on the edges of the 3D
+shape, which causes the gap between centers. In Figure 5c,
+our CAS optimizes the voxel selection and covers 75.2% of
+occupied space. Table 2 lists the percentage of space coverage by RPS, FPS, RVS, and CAS. CAS leads the space
+coverage in all cases (30 % more than RPS). FPS has no
+advantage over RVS when K is small.
+The factors that benefit CAGQ in space coverage can be
+summarized as follows:
+• Instead of sampling centers from N points, RVS samples center voxels from occupied space, therefore it is
+more resilient to point density imbalance (Figure 5).
+• CAS further optimizes the result of RVS by conducting
+a greedy candidate replacement. Each replacement is
+guaranteed to result in better coverage.
+• CAGQ stores the same number of points in each occupied voxel. The context points are more evenly distributed, so are the K node points picked from the context points. Consequently, the strategy reduces the coverage loss caused by density imbalance in a local area.
+4.2. Time complexity
+We summarize the time complexity of different methods
+in Table 1. The detailed deduction is presented in the supplementary. Table 2 shows the empirical results of latency.
+We see that our CAS is much faster than FPS and achieves
+50× speed-up. CAS + Cube Query can even outperform
+RPS + Ball Query when the size of the input point cloud is
+large. This is due to the higher neighborhood query speed.
+Because of better time complexity, RVS + k-NN leads the
+performance under all conditions and achieves 6× speed-up
+over FPS + k-NN.
+5. Experiments
+We evaluate Grid-GCN on multiple datasets: ModelNet10 and ModelNet40[42] for object classification,
+ScanNet[7] and S3DIS[1] for semantic segmentation. Following the convention of PVCNN [26], we report latency
+(a) Random Point Sampling
+(b) Farthest Point Sampling
+(c) Coverage-Aware Sampling
+Figure 5: The visualization of the sampled group center and the queried node points by RPS, FPS, and CAS. The blue and green
+balls indicate Ball Query. The red squares indicate Cube Query. The ball and cube have the same volume. (a) RPS covers 45.6%
+of the occupied space, while FPS covers 65% and CAS covers 75.2%.
+Sample
+RPS
+FPS[9]
+RVS*
+CAS*
+centers O(N )
+O(N logN ) O(N )
+O(N )
+Query Ball Query Cube Query* k-NN[6] CAGQ k-NN*
+nodes O(M N )
+O(M K) O(M N ) O(M nv )
+Table 1: Time complexity: We sample M centers from N
+points and query K neighbors for each center. We have limited the maximum number of points in each voxel to nv . In
+practice, K < N , and nv is usually of the same magnitude
+to K. FPS has O(N 2 ) but approximate algorithm can be
+O(N logN )[8]. * indicates our methods. See the supplementary for deduction details.
+and performance in each level of accuracy. We collect the
+result of other models either from published papers or the
+authors. All the latency results are reported under the corresponding batch size and number of input points. All experiments are conducted on a single RTX 2080 GPU. Training
+details are listed in the supplementary.
+5.1. 3D Object Classification
+Datasets and settings We conduct the classification
+tasks on the ModelNet10 and ModelNet40 dataset[42].
+ModelNet10 is composed of 10 object classes with 3991
+training and 908 testing objects. ModelNet40 includes 40
+different classes with 9843 training objects and 2468 testing objects. We prepare our data following the convention of PointNet[28], which uses 1024 points with 3 channels of spatial location as input. Several studies use normal
+[29, 15], octree [39], or kd-tree for input, and [25, 24] use
+voting for evaluation.
+Evaluation To compare with different models with different levels of accuracy and speed, we train Grid-GCN
+with 4 different settings to balance performance and speed
+(Details are shown in section 5.3). The variants are in the
+number of feature channels and the number of node points
+in a group in the first layer (see Table 6). The results are
+shown in Table 3. We report our results without voting.
+For all of the four settings, our Grid-GCN model not only
+achieves state-of-the-art performance on both ModelNet10
+and ModelNet40 datasets, but has the best speed-accuracy
+trade-off. Although Grid-GCN uses the CAGQ module for
+data structuring, it has similar latency as PointNet which has
+no data structuring step while its accuracy is significantly
+higher than PointNet.
+5.2. 3D Scene Segmentation
+Dataset and Settings We evaluate our Grid-GCN on two
+large-scale point cloud segmentation datasets: ScanNet[7]
+and Stanford 3D Large-Scale Indoor Spaces (S3DIS) [1].
+ScanNet consists of 1513 scanned indoor scene, and each
+voxel is annotated in 21 categories. We follow the experiment setting in [7] and use 1201 scenes for training, and
+312 scenes for testing. Following the routine and evaluation
+protocol in PointNet++[29], we sample 8192 points during
+training and 3 spatial channels for each point. S3DIS contains 6 large-scale indoor areas with 271 rooms. Each point
+is labeled with one of 13 categories. Since area 5 is the only
+area that doesn’t have overlaps with other areas, we follow
+[34, 22, 26] to train on area 1-4 and 6, and test on area 5. In
+each divided section, 4096 points are sampled for training,
+and we adopt the evaluation method from [22].
+Evaluation We report the overall voxel labeling accuracy (OA) and the runtime latency for ScanNet[7]. We
+trained two versions of the Grid-GCN model, with a full
+model using 1 × K node points and a compact model using
+0.5 × K node points. Results on are reported in Table 4.
+Since the segmentation tasks generally use more input
+points than the classification model, our advantage of data
+structuring becomes outstanding. With the same amount
+of input points (32768) in a batch, Grid-GCN out-speed
+PointNet++ 4.5× while maintaining the same level of accuracy. Compared with more sophisticated models such as
+PointCNN [22] and A-CNN [15], Grid-GCN is 25× and
+12× faster, respectively, while achieving the state-of-the-art
+performance in accuracy. Remarkably, Grid-GCN can run
+as fast as 50 to 133 FPS with state-of-the-art performance,
+which is desired in real-time applications.
+Center sampling
+Neighbor querying
+N
+K
+M
+8
+8
+8
+128
+1024
+128
+32
+128 128
+8
+64
+8
+1024
+8192
+128 256
+128 1024
+32 1024
+32 10240
+81920
+128 1024
+128 10240
+RPS FPS RVS* CVS*
+Ball Ball Cube Cube
+Occupied space coverage(%)
+12.3 12.9
+13.1
+14.9
+64.0 72.5
+82.3
+85.6
+60.0 70.1
+61.0
+74.7
+93.6 99.5
+95.8
+99.7
+19.2 22.9
+22.1
+25.1
+82.9 96.8
+92.4
+94.4
+79.9 90.7
+80.0
+93.5
+98.8 99.9
+99.5 100.0
+70.6 86.3
+78.3
+91.6
+98.8 99.2 100.0 100.0
+72.7 88.2
+79.1
+92.6
+99.7 100.0 100.0 100.0
+RPS
+Ball
+FPS
+Ball
+RVS* CVS* RPS
+FPS
+Cube Cube k-NN k-NN
+Latency (ms) with batch size = 1
+0.29
+0.50
+0.51
+0.74
+0.84
+0.85
+0.32
+0.78
+0.44
+0.68
+1.47
+1.74
+0.37
+0.53
+0.96
+1.18
+22.23 21.08
+0.38
+0.69
+1.03
+1.17
+32.48 32.54
+0.64
+1.16
+0.66
+0.82
+1.58
+1.80
+0.81
+4.90
+0.54
+0.87
+1.53
+5.36
+1.19
+1.19
+1.17
+1.41
+21.5
+21.5
+1.22
+5.25
+1.40
+1.76
+111.4 111.7
+8.30 33.52
+3.34
+6.02
+19.49 43.69
+8.93 260.48 4.22
+9.35
+20.38 272.48
+9.68 34.72
+4.32
+8.71
+71.99 93.02
+10.73 258.49 5.83 11.72 234.19 442.87
+RVS*
+k-NN
+CVS*
+k-NN
+0.51
+0.52
+2.24
+6.85
+0.65
+0.93
+15.19
+24.18
+8.76
+9.65
+50.7
+69.02
+0.77
+0.72
+2.74
+7.24
+0.76
+0.97
+17.68
+27.65
+10.05
+17.44
+61.94
+83.32
+Table 2: Performance comparisons of data structuring methods, run on ModelNet40[42]. Center sampling methods include
+RPS, FPS, CAGQ’s RVS and CAS. Neighbor querying methods include Ball Query, Cube query and K-Nearest Neighbors.
+Condition variables include N points, M groups and K neighbors per group. Occupied space coverage = num. of occupied
+voxels of queried points / num. of occupied voxels of the original N points.
+ModelNet40 ModelNet10 latency
+OA mAcc OA mAcc (ms)
+OA ⩽ 91.5
+PointNet[28]
+16×1024 89.2 86.2
+15.0
+SCNet[43]
+16×1024 90.0 87.6
+SpiderCNN[45] 8 × 1024 90.5
+85.0
+O-CNN[39]
+octree
+90.6
+90.0
+SO-net[21]
+8 × 2048 90.8 87.3 94.1 93.9
+Grid-GCN1
+16×1024 91.5 88.6 93.4 92.1
+15.9
+OA ⩽ 92.0
+3DmFVNet[3] 16×1024 91.6
+95.2
+39.0
+PAT[46]
+8 × 1024 91.7
+88.6
+Kd-net[14]
+kd-tree
+91.8 88.5 94.0 93.5
+26.8
+PointNet++[29] 16×1024 91.9 90.7
+Grid-GCN2
+16×1024 92.0 89.7 95.8 95.3
+21.8
+OA > 92.0
+DGCNN[40]
+16×1024 92.2 90.2
+89.7
+PCNN[2]
+16×1024 92.3
+94.9
+226.0
+Point2Seq[23] 16×1024 92.6
+A-CNN[15]
+16×1024 92.6 90.3 95.5 95.3
+68.0
+KPConv[35]
+16×6500 92.7
+125.0
+Grid-GCN3
+16×1024 92.7 90.6 96.5 95.7
+26.2
+Grid-GCNf ull 16×1024 93.1 91.3 97.5 97.4
+42.2
+Input (xyz as default)
+Table 3: Results on ModelNet10 and ModelNet40[42]. Our
+full model achieves the state-of-the-art accuracy. With model
+reduction, our compact models Grid-GCN1−3 also out speed
+other models. We discuss the details in the ablation studies.
+We show the quantitative results on S3DIS in Table 5
+and visual result in Figure 6. Our compact version of GridGCN is generally 4× to 14× faster than other models with
+data structuring. Notably, even compared with PointNet
+Input (xyz as default)
+OA < 84.0
+PointNet[28]
+8 × 4096
+OctNet[30]
+volume
+PointNet++[29]
+8 × 4096
+Grid-GCN(0.5×K) 4 × 8192
+OA ⩾ 84.0
+SpecGCN[36]
+PointCNN[22]
+12×2048
+Shellnet[48]
+Grid-GCN(1×K)
+4 × 8192
+A-CNN[15]
+1 × 8192
+Grid-GCN(1×K)
+1 × 8192
+OA latency (ms)
+73.9
+76.6
+83.7
+83.9
+20.3
+72.3
+16.6
+84.8
+85.1
+85.2
+85.4
+85.4
+85.4
+250.0
+20.8
+92.0
+7.48
+Table 4: Results on ScanNet[7]. Grid-GCN achieves 10×
+speed-up on average over other models. Under batch size
+of 4 and 1, we test our model with 1×K neighbor nodes. A
+compact model with 0.5 × K is also reported.
+that has no data structuring at all, we are still 1.6× faster
+while achieves 12% performance gain in mIOU. For our full
+model, we are still the fastest and achieve 2× speed-up over
+PVCNN++[26], a state-of-the-art study focusing on speed
+improvement.
+5.3. Ablation Studies
+In the experiment on ModelNet10 and ModelNet40[42],
+our full model has 3 GridConv layers. As shown in Table 6,
+we conduct reductions on the number of the output feature
+channels from GridConv layers, the number of nodes K in
+the first GridConv layer, and whether to use Grid context
+pooling and coverage weight. On one hand, reducing the
+number of channels from Grid-GCNf ull gives Grid-GCN3
+K Channels Pooling Weight
+Grid-GCN0 32 (32,64,256)
+No
+No
+Grid-GCN1 32 (32,64,256)
+No
+Yes
+Grid-GCN2 32 (64,128,256) No
+Yes
+Grid-GCN3 64 (64,128,256) Yes
+Yes
+Grid-GCNf ull 64 (128,256,512) Yes
+Yes
+OA
+91.1
+91.5
+92.0
+92.7
+93.1
+latency
+15.4ms
+15.9ms
+21.8ms
+26.2ms
+42.2ms
+Table 6: Ablation studies on ModelNet40[42]. Our models have
+3 layers of GridConv. K is the number of node points in the
+first GridConv. We also change the number of the output feature
+channels from these 3 layers. Grid context pooling (shorted as
+pooling here) are also removed for Grid-GCN0−2 . Grid-GCN0
+also removes coverage weight in edge relation.
+Num. of points (N )
+Num. of clusters (M )
+PointNet++
+Grid-GCN
+(a) Ground Truth
+(b) Ours
+Figure 6: Semantic segmentation results on S3DIS [1] area 5.
+Input (xyzrgb as default)
+mIOU OA latency(ms)
+mIOU< 54.0
+PointNet[28]
+8 × 4096
+41.09
+20.9
+DGCNN[40]
+8 × 4096
+47.94 83.64 178.1
+SegCloud[34]
+48.92
+RSNet[13]
+8 × 4096
+51.93
+111.5
+PointNet++[29]
+8 × 4096
+52.28
+DeepGCNs[20]
+1 × 4096
+52.49
+45.63
+TanConv[33]
+8 × 4096
+52.8 85.5
+Grid-GCN(0.5×Ch) 8 × 4096
+53.21 85.61
+12.9
+mIOU> 54.0
+3D-UNet[5]
+8 × 963 volume 54.93 86.12 574.7
+PointCNN[22]
+57.26 85.91
+PVCNN++[26]
+8 × 4096
+57.63 86.87
+41.1
+Grid-GCN(1×Ch)
+8 × 4096
+57.75 86.94
+25.9
+Table 5: Results on S3DIS[1] area 5. Grid-GCN is on average
+8× faster than other models. We halve the output channels of
+GridConv for Grid-GCN(0.5×Ch) .
+37% speed-up. On the other hand, reducing K and removing Grid context pooling from Grid-GCN3 doesn’t give
+Grid-GCN2 much speed benefit but incurs a loss on accuracy. This demonstrates the efficiency and effectiveness of
+CAGQ and Grid context pooling. Coverage weight is useful
+as well because it introduces little overhead in latency but
+increases the overall accuracy.
+5.3.1
+Scalability Analysis
+We also test our model’s scalability by gradually increasing
+the number of input points on ScanNet [7]. We compare our
+2048
+512
+4.7
+4.3
+4096
+1024
+8.6
+4.7
+16384
+2048
+19.9
+8.1
+40960
+4096
+64.6
+12.3
+81920
+8192
+218.9
+19.8
+Table 7: Inference time (ms) on ScanNet[7] under different
+scales. We compare Grid-GCN with PoinNet++[29] on different numbers of input points per scene. The batch size is 1.
+M is the number of point groups on the first network layer.
+model with PointNet++ [29], one of the most efficient pointbased method. We report the results in Table 7. Under the
+setting of 2048 points, the latency of two models are similar. However, when increasing the input point from 4096 to
+81920, Grid-GCN achieves up to 11× speed-up over PointNet++, which shows the dominating capability of our model
+in processing large-scale point clouds.
+6. Conclusion
+In this paper, we propose Grid-GCN for fast and scalable point cloud learning. Grid-GCN achieves efficient
+data structuring and computation by introducing CoverageAware Grid Query (CAGQ). CAGQ drastically reduces data
+structuring cost through voxelization and provides point
+groups with complete coverage of the whole point cloud.
+A graph convolution module Grid Context Aggregation
+(GCA) is also proposed to incorporate the context features
+and coverage information in the computation. With both
+modules, Grid-GCN achieves state-of-the-art accuracy and
+speed on various benchmarks. Grid-GCN, with its superior performance and unparalleled efficiency, can be used in
+large-scale real-time point cloud processing applications.
+References
+[1] I. Armeni, A. Sax, A. R. Zamir, and S. Savarese. Joint 2D3D-Semantic Data for Indoor Scene Understanding. ArXiv
+e-prints, Feb. 2017. 2, 5, 6, 8
+[2] Matan Atzmon, Haggai Maron, and Yaron Lipman. Point
+convolutional neural networks by extension operators. arXiv
+preprint arXiv:1803.10091, 2018. 2, 7
+[3] Yizhak Ben-Shabat, Michael Lindenbaum, and Anath Fischer. 3dmfv: Three-dimensional point cloud classification
+in real-time using convolutional neural networks. IEEE
+Robotics and Automation Letters, 3(4):3145–3152, 2018. 7
+[4] Andrew Brock, Theodore Lim, James M Ritchie, and
+Nick Weston. Generative and discriminative voxel modeling with convolutional neural networks. arXiv preprint
+arXiv:1608.04236, 2016. 2
+[5] Özgün Çiçek, Ahmed Abdulkadir, Soeren S Lienkamp,
+Thomas Brox, and Olaf Ronneberger. 3d u-net: learning
+dense volumetric segmentation from sparse annotation. In
+International conference on medical image computing and
+computer-assisted intervention, pages 424–432. Springer,
+2016. 2, 4, 8
+[6] Thomas Cover and Peter Hart. Nearest neighbor pattern
+classification. IEEE transactions on information theory,
+13(1):21–27, 1967. 6
+[7] Angela Dai, Angel X. Chang, Manolis Savva, Maciej Halber, Thomas Funkhouser, and Matthias Nießner. Scannet:
+Richly-annotated 3d reconstructions of indoor scenes. In
+Proc. Computer Vision and Pattern Recognition (CVPR),
+IEEE, 2017. 2, 5, 6, 7, 8
+[8] Y Eldar. Irregular image sampling using the voronoi diagram. PhD thesis, M. Sc. thesis, Technion-IIT, Israel, 1992.
+2, 6
+[9] Yuval Eldar, Michael Lindenbaum, Moshe Porat, and
+Yehoshua Y Zeevi. The farthest point strategy for progressive image sampling. IEEE Transactions on Image Processing, 6(9):1305–1315, 1997. 2, 6
+[10] Xiuye Gu, Yijie Wang, Chongruo Wu, Yong Jae Lee, and
+Panqu Wang. Hplflownet: Hierarchical permutohedral lattice
+flownet for scene flow estimation on large-scale point clouds.
+In Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition, pages 3254–3263, 2019. 2
+[11] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+Deep residual learning for image recognition. In Proceedings of the IEEE conference on computer vision and pattern
+recognition, pages 770–778, 2016. 2
+[12] Gao Huang, Zhuang Liu, Laurens Van Der Maaten, and Kilian Q Weinberger. Densely connected convolutional networks. In Proceedings of the IEEE conference on computer
+vision and pattern recognition, pages 4700–4708, 2017. 2
+[13] Qiangui Huang, Weiyue Wang, and Ulrich Neumann. Recurrent slice networks for 3d segmentation of point clouds.
+In Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition, pages 2626–2635, 2018. 2, 8
+[14] Roman Klokov and Victor Lempitsky. Escape from cells:
+Deep kd-networks for the recognition of 3d point cloud models. In Proceedings of the IEEE International Conference on
+Computer Vision, pages 863–872, 2017. 2, 7
+[15] Artem Komarichev, Zichun Zhong, and Jing Hua. A-cnn:
+Annularly convolutional neural networks on point clouds.
+In Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition, pages 7421–7430, 2019. 6, 7
+[16] Shiyi Lan, Ruichi Yu, Gang Yu, and Larry S Davis. Modeling
+local geometric structure of 3d point clouds using geo-cnn.
+In Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition, pages 998–1008, 2019. 2, 4
+[17] Loic Landrieu and Mohamed Boussaha. Point cloud oversegmentation with graph-structured deep metric learning. arXiv
+preprint arXiv:1904.02113, 2019. 2
+[18] Loic Landrieu and Martin Simonovsky. Large-scale point
+cloud semantic segmentation with superpoint graphs. In Proceedings of the IEEE Conference on Computer Vision and
+Pattern Recognition, pages 4558–4567, 2018. 2
+[19] Truc Le and Ye Duan. Pointgrid: A deep network for 3d
+shape understanding. In Proceedings of the IEEE conference
+on computer vision and pattern recognition, pages 9204–
+9214, 2018. 2
+[20] Guohao Li, Matthias Müller, Guocheng Qian, Itzel C Delgadillo, Abdulellah Abualshour, Ali Thabet, and Bernard
+Ghanem. Deepgcns: Making gcns go as deep as cnns. arXiv
+preprint arXiv:1910.06849, 2019. 1, 8
+[21] Jiaxin Li, Ben M Chen, and Gim Hee Lee. So-net: Selforganizing network for point cloud analysis. In Proceedings of the IEEE conference on computer vision and pattern
+recognition, pages 9397–9406, 2018. 2, 7
+[22] Yangyan Li, Rui Bu, Mingchao Sun, Wei Wu, Xinhan Di,
+and Baoquan Chen. Pointcnn: Convolution on x-transformed
+points. In Advances in Neural Information Processing Systems, pages 820–830, 2018. 2, 6, 7, 8
+[23] Xinhai Liu, Zhizhong Han, Yu-Shen Liu, and Matthias
+Zwicker. Point2sequence: Learning the shape representation
+of 3d point clouds with an attention-based sequence to sequence network. In Proceedings of the AAAI Conference on
+Artificial Intelligence, volume 33, pages 8778–8785, 2019. 7
+[24] Yongcheng Liu, Bin Fan, Gaofeng Meng, Jiwen Lu, Shiming
+Xiang, and Chunhong Pan. Densepoint: Learning densely
+contextual representation for efficient point cloud processing. In Proceedings of the IEEE International Conference
+on Computer Vision, pages 5239–5248, 2019. 6
+[25] Yongcheng Liu, Bin Fan, Shiming Xiang, and Chunhong
+Pan. Relation-shape convolutional neural network for point
+cloud analysis. In Proceedings of the IEEE Conference
+on Computer Vision and Pattern Recognition, pages 8895–
+8904, 2019. 2, 4, 6
+[26] Zhijian Liu, Haotian Tang, Yujun Lin, and Song Han. Pointvoxel cnn for efficient 3d deep learning. arXiv preprint
+arXiv:1907.03739, 2019. 1, 2, 5, 6, 7, 8
+[27] Daniel Maturana and Sebastian Scherer. Voxnet: A 3d convolutional neural network for real-time object recognition.
+In 2015 IEEE/RSJ International Conference on Intelligent
+Robots and Systems (IROS), pages 922–928. IEEE, 2015. 1,
+2
+[28] Charles R Qi, Hao Su, Kaichun Mo, and Leonidas J Guibas.
+Pointnet: Deep learning on point sets for 3d classification
+and segmentation. In Proceedings of the IEEE Conference on
+Computer Vision and Pattern Recognition, pages 652–660,
+2017. 1, 2, 6, 7, 8
+[29] Charles Ruizhongtai Qi, Li Yi, Hao Su, and Leonidas J
+Guibas. Pointnet++: Deep hierarchical feature learning on
+point sets in a metric space. In Advances in neural information processing systems, pages 5099–5108, 2017. 1, 2, 4, 5,
+6, 7, 8
+[30] Gernot Riegler, Ali Osman Ulusoy, and Andreas Geiger.
+Octnet: Learning deep 3d representations at high resolutions.
+In Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition, pages 3577–3586, 2017. 2, 7
+[31] Martin Simonovsky and Nikos Komodakis. Dynamic edgeconditioned filters in convolutional neural networks on
+graphs. In Proceedings of the IEEE conference on computer
+vision and pattern recognition, pages 3693–3702, 2017. 1
+[32] Hang Su, Varun Jampani, Deqing Sun, Subhransu Maji,
+Evangelos Kalogerakis, Ming-Hsuan Yang, and Jan Kautz.
+Splatnet: Sparse lattice networks for point cloud processing.
+In Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition, pages 2530–2539, 2018. 2
+[33] Maxim Tatarchenko, Jaesik Park, Vladlen Koltun, and QianYi Zhou. Tangent convolutions for dense prediction in 3d.
+In Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition, pages 3887–3896, 2018. 8
+[34] Lyne Tchapmi, Christopher Choy, Iro Armeni, JunYoung
+Gwak, and Silvio Savarese. Segcloud: Semantic segmentation of 3d point clouds. In 2017 International Conference
+on 3D Vision (3DV), pages 537–547. IEEE, 2017. 6, 8
+[35] Hugues Thomas, Charles R Qi, Jean-Emmanuel Deschaud,
+Beatriz Marcotegui, François Goulette, and Leonidas J
+Guibas. Kpconv: Flexible and deformable convolution for
+point clouds. arXiv preprint arXiv:1904.08889, 2019. 2, 7
+[36] Chu Wang, Babak Samari, and Kaleem Siddiqi. Local spectral graph convolution for point set feature learning. In Proceedings of the European Conference on Computer Vision
+(ECCV), pages 52–66, 2018. 1, 2, 7
+[37] Dominic Zeng Wang and Ingmar Posner. Voting for voting
+in online point cloud object detection. In Robotics: Science
+and Systems, volume 1, pages 10–15607, 2015. 2
+[38] Lei Wang, Yuchun Huang, Yaolin Hou, Shenman Zhang, and
+Jie Shan. Graph attention convolution for point cloud semantic segmentation. In Proceedings of the IEEE Conference
+on Computer Vision and Pattern Recognition, pages 10296–
+10305, 2019. 1, 2, 4
+[39] Peng-Shuai Wang, Yang Liu, Yu-Xiao Guo, Chun-Yu Sun,
+and Xin Tong. O-CNN: Octree-based Convolutional Neural Networks for 3D Shape Analysis. ACM Transactions on
+Graphics (SIGGRAPH), 36(4), 2017. 6, 7
+[40] Yue Wang, Yongbin Sun, Ziwei Liu, Sanjay E Sarma,
+Michael M Bronstein, and Justin M Solomon. Dynamic
+graph cnn for learning on point clouds. ACM Transactions
+on Graphics (TOG), 38(5):146, 2019. 1, 2, 4, 7, 8
+[41] Wenxuan Wu, Zhongang Qi, and Li Fuxin. Pointconv: Deep
+convolutional networks on 3d point clouds. In Proceedings
+of the IEEE Conference on Computer Vision and Pattern
+Recognition, pages 9621–9630, 2019. 2
+[42] Zhirong Wu, Shuran Song, Aditya Khosla, Fisher Yu, Linguang Zhang, Xiaoou Tang, and Jianxiong Xiao. 3d
+shapenets: A deep representation for volumetric shapes. In
+Proceedings of the IEEE conference on computer vision and
+pattern recognition, pages 1912–1920, 2015. 2, 5, 6, 7, 8
+[43] Saining Xie, Sainan Liu, Zeyu Chen, and Zhuowen Tu. Attentional shapecontextnet for point cloud recognition. In
+Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition, pages 4606–4615, 2018. 7
+[44] Christopher B Choy Danfei Xu, JunYoung Gwak, and Kevin
+Chen Silvio Savarese. 3d-r2n2: A unified approach for single and multi-view 3d object reconstruction. arXiv preprint
+arXiv:1604.00449, 2016. 1
+[45] Yifan Xu, Tianqi Fan, Mingye Xu, Long Zeng, and Yu Qiao.
+Spidercnn: Deep learning on point sets with parameterized
+convolutional filters. In Proceedings of the European Conference on Computer Vision (ECCV), pages 87–102, 2018.
+1, 2, 4, 7
+[46] Jiancheng Yang, Qiang Zhang, Bingbing Ni, Linguo Li,
+Jinxian Liu, Mengdie Zhou, and Qi Tian. Modeling point
+clouds with self-attention and gumbel subset sampling. In
+Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition, pages 3323–3332, 2019. 2, 7
+[47] Kuangen Zhang, Ming Hao, Jing Wang, Clarence W de
+Silva, and Chenglong Fu. Linked dynamic graph cnn: Learning on point cloud via linking hierarchical features. arXiv
+preprint arXiv:1904.10014, 2019. 1, 2, 4
+[48] Zhiyuan Zhang, Binh-Son Hua, and Sai-Kit Yeung.
+Shellnet: Efficient point cloud convolutional neural networks using concentric shells statistics. arXiv preprint
+arXiv:1908.06295, 2019. 7
+[49] Yin Zhou and Oncel Tuzel. Voxelnet: End-to-end learning
+for point cloud based 3d object detection. In Proceedings
+of the IEEE Conference on Computer Vision and Pattern
+Recognition, pages 4490–4499, 2018. 1, 2

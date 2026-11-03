@@ -1,0 +1,367 @@
+CHAPTER 45
+FAST VOLUMETRIC GRADIENT
+SHADING APPROXIMATIONS FOR
+SCIENTIFIC RAY TRACING
+Carson Brownlee and David DeMarle
+Intel Corporation
+ABSTRACT
+In scientific visualization, direct volume rendering requirements range from
+fast approximations for interactive data exploration to photorealism with
+physically based shading for renderings destined for the general public.
+Gradient shaded lighting is a common non-physically based shading method
+used in scientific volume visualization that increases the level of realism and
+helps distinguish features in the data over simple forward ray marching.
+Gradient shading comes at a significant runtime cost over simple ray casting,
+especially as secondary rays are calculated at each sample point for lighting
+effects such as shadows and ambient occlusion. In this chapter we examine
+the simple optimization of shading at the single point of highest contribution.
+In practice this method gives most of the benefits of full gradient shading that
+help in feature detection and realism, with an order of magnitude
+performance improvement.
+45.1
+INTRODUCTION
+Direct volume rendering has been a staple of scientific visualization of
+three-dimensional scalar fields since the 1980s [2]. Advances in rendering
+algorithms and hardware acceleration have enabled an offline process to be
+computed interactively, and then in real time, even for large-scale volumes [4].
+Direct volume rendering computes a piecewise-linear approximation of the
+volume rendering integral, calculating color attenuation and opacity based on
+extinction coefficients along a viewing ray x(λ) at distance λ:
+Z D
+ Rλ
+′
+′
+I=
+c s(x(λ)) e– 0 α(s(x(λ )))dλ dλ.
+(45.1)
+0
+The color c is calculated based on a transfer function at the scalar value s,
+© NVIDIA 2021
+A. Marrs, P. Shirley, I. Wald (eds.), Ray Tracing Gems II, https://doi.org/10.1007/978-1-4842-7185-8_45
+725
+RAY TRACING GEMS II
+Figure 45-1. A scan of a human head rendered with simple volume ray casting (right) and with
+shadows and ambient occlusion (left). Reducing the number of shading samples enables this
+common scientific rendering method to be done at interactive to real-time rates.
+c(s(x(λ))). Similarly, the opacity α is calculated based on a transfer function
+based on the scalar value, α(s(x(λ))).
+To show surface illumination at each point, c can be modified to use lighting
+information for shading based on the gradient of the scalar field at point x,
+∇s(x). Figure 45-1 shows direct volume rendering with simple line of sight ray
+marching on the right and the same image but with shading, ambient
+occlusion, and shadows on the left. The piecewise-linear approximation of the
+integral is shown in illustrated form in Figure 45-2. Figure 45-1 shows images
+produced from the integration shown in Figure 45-2a for ray casting and
+Figure 45-2b for ray tracing with secondary rays. For ray casting, this is an
+(a)
+(b)
+Figure 45-2. (a) Direct volume rendering using line of sight ray marching. (b) Ray casting shadow
+rays calculated at every sample point along the eye ray.
+726
+CHAPTER 45. FAST VOLUMETRIC GRADIENT SHADING APPROXIMATIONS FOR SCIENTIFIC RAY TRACING
+O(n) computation per viewing ray, for n volume samples. Gradient shading
+adds multiple additional volume lookups at each point to compute ∇s(x),
+while adding a single shadow ray or ambient occlusion sample at each point
+makes it an O(n2 ) computation for each viewing ray. We refer to the full
+gradient shading method as FG and a faster approximation using a single
+shading point as single shot gradient shading, SSG.
+These approaches are used in the Visualization Toolkit (VTK) [7]. VTK is the
+backbone of many of the most commonly used open source visualization
+programs such as ParaView [8] and VisIt [1]. VTK has two primary ray traced
+rendering options in Intel OSPRay [9] and NVIDIA OptiX [6], and all of VTK’s
+volume renderers support gradient shading. ParaView has supported built-in
+ray tracing of volumes via OSPRay 1.x since version 5.2, including support for
+SSG shading up through 5.8. Note that in ParaView 5.9, with the introduction
+of major OSPRay 2.x features including path traced volume rendering,
+ParaView temporarily lost SSG rendering because it was not part of OSPRay
+2’s initial feature set due to a number of feature regressions with the SciVis
+renderer. This feature is being reintroduced in OSPRay 2.6 and should
+reappear in ParaView 5.10. ParaView 5.9 with a OSPRay 2.6 pre-release is
+used here for all results and images.
+45.2
+APPROACH
+The approach utilized is very simple in form and implementation: calculate an
+average of all gradients weighted by alpha contribution, then calculate
+shading and secondary rays from the single point of highest contribution,
+Pmax , using the averaged gradient. Alternatively, the highest contributing
+gradient could be used, but averaging minimizes view-dependent changes in
+the resulting gradient. Pseudocode for both full gradient shading and using a
+single shading point, determined with the useSingleShadeHeuristic
+variable, is as follows:
+1
+2
+3
+4
+5
+6
+7
+8
+9
+void TraceVolumeRay ()
+{
+float4 finalColor = {0,0,0,0};
+while (! steppingDone) {
+// Compute color and opacity at current sample point.
+sample = Volume_getValue(distance);
+color = mapThroughLookupTable (sample);
+alpha = (1.f - finalAlpha) *
+(1.f - exp(-color.a * dt * densityScale));
+10
+11
+12
+13
+// Compute gradient shading lighting.
+float4 ns = Volume_getGradient(distance);
+if (useSingleShadeHeuristic ) {
+727
+RAY TRACING GEMS II
+// Remember point of highest density for deferred shading.
+if (highestContribution < alpha) {
+highestContribution = alpha;
+highestContributionDistance = distance;
+}
+// Accumulate alpha and gradient.
+finalAlpha += alpha;
+gradient += ns * alpha;
+} else {
+// At every point , cast rays for contributions to integrate.
+shading = computeShading(distance , ns);
+color = lerp(gradientShadingScale , color , shading);
+}
+finalColor.blend(color , alpha);
+steppingDone = increase (& distance);
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+}
+29
+30
+if (useSingleShadeHeuristic ) {
+// At a single , point cast rays for contribution.
+float3 ns = normalize(gradient);
+shading = computeShading(highestContribtionDistance , ns);
+singleShading = shading * finalAlpha;
+finalColor = lerp(gradientShadingScale , finalColor , singleShading);
+}
+31
+32
+33
+34
+35
+36
+37
+38
+}
+Alternate methods for reducing the number of samples required include
+using isosurfaces (meshes or implicit) or utilizing methods such as delta
+tracking progressively over many passes. Isosurfaces at peaks of the transfer
+function minimize shading operations, however the transfer function
+corresponding to a set of isosurfaces consists of a set of impulses in opacity.
+The more a user-defined transfer function deviates from this form, the less
+the resulting image would match the base gradient shaded image. With
+regards to delta tracking, OSPRay’s path tracing algorithm utilizes Woodcock
+style delta tracking [5], which reduces bias in sampling volumes compared to
+fixed-step ray marching. ParaView’s OSPRay-based path tracing thus uses
+the same implementation. The images and performance numbers shown in
+Section 45.3.2 demonstrate the core problem we solve, that too many passes
+are still needed to achieve a noise free image. Denoising reduces the number
+of samples needed, but introduces its own overhead and unacceptable levels
+of feature blurring at lower sample counts.
+45.3
+RESULTS
+All runs are performed on a dual socket Intel Xeon Gold 5220, with 36 total
+cores, 256 GB of RAM, and a GeForce RTX 2060. The GPU is used only for
+display in these results as OSPRay is currently CPU-only. An unmodified
+version of ParaView 5.9.0 is used with a pre-release version of OSPRay 2.6
+728
+CHAPTER 45. FAST VOLUMETRIC GRADIENT SHADING APPROXIMATIONS FOR SCIENTIFIC RAY TRACING
+Figure 45-3. Brain (left) and cloud (right) data sets with respective transfer functions.
+that supports single shading. The data sets used are an example scan of a
+human head with a tumor from the 3D Slicer [3] project and the Disney
+cloud [10], shown in Figure 45-3. The color and opacity transfer functions are
+shown below their respective renderings, with opacity relating to the height of
+the control points over the transfer function range. For the following
+comparisons, we will relate three different rendering methods:
+> Full gradient (FG): Gradient shading where each eye ray sample point
+computes a gradient and secondary rays at each sample point.
+> Single shot gradient (SSG): Gradient shading where only a single
+sampling point along the ray is used for gradient shading operations.
+> Path traced (PT): Path tracing using Woodcock-style delta tracking. We
+include this as a another physically based method of shading based on
+volume gradients increasingly used in scientific visualization and now
+standard in studio rendering.
+45.3.1
+IMAGE QUALITY COMPARISON
+Figures 45-4 and 45-5 show path traced images of the cloud and brain data
+sets. The first image with a single sample per pixel (spp) is very noisy. At
+4 spp the denoiser is enabled, which reduces noise, but the image becomes
+very blurry. Though the image starts to look significantly better, we feel that
+the blurred-over features of the data are likely unacceptable for scientific
+visualization applications until higher sample counts are used at around
+32 spp. PT with 32 spp is faster than 32 ambient occlusion (AO) samples with
+729
+RAY TRACING GEMS II
+Figure 45-4. Cloud path traced. From left to right: 1 spp, 4 spp (denoised), and 32 spp (denoised).
+Figure 45-5. Brain path traced. From left to right: 1 spp, 4 spp (denoised), and 32 spp (denoised).
+Figure 45-6. Cloud ray traced with gradient shading using FG. From left to right: ray casting,
+shadows, and shadows and AO.
+Figure 45-7. Cloud ray traced with SSG. From left to right: ray casting, shadows, and shadows
+and AO. SSG produces lighter highlights and darker shadows.
+FG due to the increased number of samples for the AO rays using the FG
+method compared to the stochastic sampling of secondary rays using delta
+tracking with PT.
+Figures 45-6 and 45-7 show renderings of the cloud data sets with FG and
+SSG shading, respectively. SSG shading exhibits higher contrast in shadows
+and highlights as the shaded color is not averaged over multiple samples.
+730
+CHAPTER 45. FAST VOLUMETRIC GRADIENT SHADING APPROXIMATIONS FOR SCIENTIFIC RAY TRACING
+Figure 45-8. Brain ray traced with gradient shading with FG. From left to right: ray casting,
+shadows, and shadows and AO.
+Figure 45-9. Brain ray traced with SSG. From left to right: ray casting, shadows, and shadows
+and AO.
+This becomes even more apparent as shadow and ambient occlusion rays are
+added, where the highest contributing point tends to be deeper inside the
+volume. Pixel parity with FG shading is not paramount in a scientific
+visualization context as the primary aim is enhanced identification of areas of
+curvature and proximity, though FG is not a physically based rendering
+algorithm to begin with. SSG also has a drawback of view-dependent shading
+points as the point of greatest contribution changes based on viewing angle;
+however, in practice no users have reported differences between the two and
+have been happy with the added fidelity of shadows and ambient occlusions
+introduced in ParaView. Figures 45-8 and 45-9 show the same comparisons
+using the brain data set. Here, the most striking difference is when ambient
+occlusion is added. SSG in this instance significantly intensifies occlusion
+inside the skull surface, enhancing the bone surface.
+45.3.2
+PERFORMANCE COMPARISON
+Table 45-1 shows recorded performance numbers for various methods
+rendered at 1080p resolution inside of ParaView. Performance increases for
+single shading varies between ca. 5× to ca. 50× for a single shadow ray to a
+shadow ray and 32 ambient occlusion samples. Though dramatically different
+methods, the single shade method is significantly faster than delta tracking
+with a single sample per pixel. The 1 spp delta tracking method does not use
+731
+RAY TRACING GEMS II
+Ray Tracing (s)
+Model
+Brain FG
+Brain SSG
+Cloud FG
+Cloud SSG
+Ray Cast
+0.102
+0.091
+0.329
+0.180
+Shadows
+0.486
+0.097
+1.07
+0.207
+Shadows & 1 AO
+1.25
+0.142
+3.62
+0.265
+Shadows & 32 AO
+24.3
+0.454
+73.9
+1.95
+Path Tracing (s)
+Model
+Cloud PT
+Brain PT
+1 spp
+0.643
+0.401
+4 spp (denoised)
+2.44
+1.49
+32 spp (denoised)
+19.0
+11.7
+Table 45-1. Performance numbers for the brain and cloud models using FG, SSG, and PT. Ray
+casting computes only direct illumination, shadows adds a single shadow ray, shadows and 1 AO
+adds one shadow and one ambient occlusion ray, and shadows and 32 AO adds a single shadow
+ray and 32 ambient occlusion rays.
+a denoiser, while the denoiser is used for 4 spp and 32 spp. In the current use,
+we feel that the path traced image is not sufficiently crisp until at least 32 spp,
+with lower sample counts making features in the data difficult to discern.
+45.4
+CONCLUSION
+Single shot gradient shading provides an order of magnitude faster
+approximation for scientific visualization that, in practice, is a ready stand-in
+for full gradient shading. Interactive rates are maintained for high sample
+counts without the need for many passes and denoising. The method
+introduces error compared to the full gradient shading baseline, but given the
+non-physically based nature of gradient shading, this does not seem to be a
+significant issue in practice. This simple method was vital to adding
+secondary rays to basic scientific direct volume rendering in VTK.
+REFERENCES
+732
+[1]
+Childs, H. et al. VisIt: An end-user tool for visualizing and analyzing very large data.
+https://escholarship.org/uc/item/69r5m58v, 2012.
+[2]
+Engel, K., Kraus, M., and Ertl, T. High-quality pre-integrated volume rendering using
+hardware-accelerated pixel shading. In Proceedings of the ACM
+SIGGRAPH/EUROGRAPHICS Workshop on Graphics Hardware, pages 9–16, 2001. DOI:
+10.1145/383507.383515.
+CHAPTER 45. FAST VOLUMETRIC GRADIENT SHADING APPROXIMATIONS FOR SCIENTIFIC RAY TRACING
+[3]
+Fedorov, A., Beichel, R., Kalpathy-Cramer, J., Finet, J., Fillion-Robin, J.-C., Pujol, S.,
+Bauer, C., Jennings, D., Fennessy, F., Sonka, M., Buatti, J., Aylward, S., Miller, J. V.,
+Pieper, S., and Kikinis, R. 3D slicer as an image computing platform for the Quantitative
+Imaging Network. Magnetic Resonance Imaging, 30(9):1323–1341, 2012. DOI:
+10.1016/j.mri.2012.05.001.
+[4]
+Meißner, M., Hoffmann, U., and Straßer, W. Enabling classification and shading for 3D
+texture mapping based volume rendering using OpenGL and extensions. In Proceedings
+of the Conference on Visualization ’99: Celebrating Ten Years, pages 207–214, 1999.
+[5]
+Morgan, L. and Kotlyar, D. Weighted-delta-tracking for Monte Carlo particle transport.
+Annals of Nuclear Energy, 85:1184–1188, 2015. DOI: 10.1016/j.anucene.2015.07.038.
+[6]
+NVIDIA. NVIDIA OptiX ray tracing engine. https://developer.nvidia.com/optix, 2021.
+Accessed February 8, 2021.
+[7]
+Schroeder, W. J., Martin, K. M., and Lorensen, W. E. The design and implementation of an
+object-oriented toolkit for 3D graphics and visualization. In Proceedings of Seventh Annual
+IEEE Visualization ’96, pages 93–100, 1996. DOI: 10.1109/VISUAL.1996.567752.
+[8]
+Squillacote, A. H., Ahrens, J., Law, C., Geveci, B., Moreland, K., and King, B. The ParaView
+Guide. Kitware, 2007.
+[9]
+Wald, I., Johnson, G., Amstutz, J., Brownlee, C., Knoll, A., Jeffers, J., Günther, J., and
+Navratil, P. OSPRay—A CPU ray tracing framework for scientific visualization. IEEE
+Transactions on Visualization and Computer Graphics, 23(1):931–940, 2017. DOI:
+10.1109/TVCG.2016.2599041.
+[10]
+Walt Disney Animation Studios. Data sets: Clouds.
+https://www.disneyanimation.com/data-sets/?drawer=/resources/clouds/, 2020.
+Accessed February 8, 2021.
+Open Access This chapter is licensed under the terms of the Creative Commons
+Attribution-NonCommercial-NoDerivatives 4.0 International License
+(http://creativecommons.org/licenses/by-nc-nd/4.0/), which permits any
+noncommercial use, sharing, distribution and reproduction in any medium or format, as long as you give
+appropriate credit to the original author(s) and the source, provide a link to the Creative Commons license
+and indicate if you modified the licensed material. You do not have permission under this license to share
+adapted material derived from this chapter or parts of it.
+The images or other third party material in this chapter are included in the chapter’s Creative Commons
+license, unless indicated otherwise in a credit line to the material. If material is not included in the chapter’s
+Creative Commons license and your intended use is not permitted by statutory regulation or exceeds the
+permitted use, you will need to obtain permission directly from the copyright holder.
+733

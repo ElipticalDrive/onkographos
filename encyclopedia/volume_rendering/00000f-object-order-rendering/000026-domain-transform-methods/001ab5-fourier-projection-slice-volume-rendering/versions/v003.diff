@@ -1,0 +1,142 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,5 @@
+ # Fourier Projection-Slice Volume Rendering
+ 
+-Also called: Attenuation-only rendering via Fourier projection-slice theorem, Fourier Volume Rendering, Fourier projection rendering, Frequency Domain Volume Rendering
++Also called: Fourier projection rendering, Fourier approach to volume rendering, Attenuation-only rendering via Fourier projection-slice theorem, Frequency Domain Volume Rendering
+ 
+ ## Overview
+@@ -12,5 +12,5 @@
+ 
+ **Data Structures:**
+-*   **3D Spectrum:** An array of $N^3$ complex coefficients (or real coefficients if using Hartley transform). Requires 32-bit floating point precision for accuracy, increasing memory by a factor of 4 compared to 8-bit input volume [S1]. If using standard complex FFT, it requires 16 bytes per voxel (pair of 64-bit doubles) [S2, S4, S5].
++*   **3D Spectrum:** An array of $N^3$ complex coefficients (or real coefficients if using a Hartley transform). Requires 32-bit floating point precision for accuracy, increasing memory by a factor of 4 compared to 8-bit input volume [S1]. If using standard complex arithmetic, it requires 16 bytes per voxel (pair of 64-bit doubles) [S2, S4, S5].
+ *   **2D Slice:** An array of $N^2$ coefficients extracted from the 3D spectrum [S1].
+ 
+@@ -18,5 +18,5 @@
+ *   $N$: Side length of the cubical volume. Assumed to be an integer power of two for FFT efficiency [S1].
+ *   $V$: Normalized viewing direction vector. Defines the orientation of the slice in frequency space. Note: $V$ points away from the eye [S1].
+-*   $W$: Nonzero width of the interpolating filter used during slice extraction. Typical value: 4 (4^3 tap filter) [S1].
++*   $W$: Nonzero width of the interpolating filter used during slice extraction. Typical value: 4 (a $4^3$ tap filter) [S1].
+ *   $k_2$: Factor by which volume width is increased via zero-padding. Typical value: $k_2 = 4/3$ (16% margin) [S1].
+ *   $M$: Resolution of the projection slice ($M \times M$). Must be high enough to prevent aliasing [S3].
+@@ -26,5 +26,5 @@
+ 1.  **Preprocessing (Frequency Domain Transformation):**
+     Compute the 3D discrete Fourier transform (DFT) of the scalar volume $f(\mathbf{x})$ [S1]. For real volumes, a Discrete Hartley Transform (DHT) may be substituted to halve memory and time [S1, S3].
+-    *   *Vignetting Correction:* To cope with vignetting (attenuation of the periphery due to non-ideal filter response), premultiply the volume data $f(\mathbf{x})$ by the reciprocal of the filter response $P_m(\mathbf{x}) = 1/H(\mathbf{x})$ before the forward transformation [S2, S4, S5]. Here $H(\mathbf{s})$ is the interpolation filter in frequency space, and $h(\mathbf{x})$ is its spatial response [S2, S4]. Specifically, $P_m(\mathbf{x}) = 1/h(\mathbf{x})$ or $1/h(1/\mathbf{x})$ depending on notation [S2, S4, S5].
++    *   *Vignetting Correction:* To cope with vignetting (attenuation of the periphery due to non-ideal filter response), premultiply the volume data $f(\mathbf{x})$ by the reciprocal of the filter response $P_m(\mathbf{x}) = 1/h(\mathbf{x})$ before the forward transformation [S2, S4]. Here $H(\mathbf{s})$ is the interpolation filter in frequency space, and $h(\mathbf{x})$ is its spatial response [S2, S4].
+     *   *Zero Padding:* Surround the data with a margin of zeros to avoid ghosting artifacts. A typical margin is 16% ($k_2=4/3$) [S1].
+ 
+@@ -52,46 +52,54 @@
+     volume: 3D list of lists of lists of floats, shape (N, N, N).
+     viewing_direction: list of 3 floats, normalized vector V pointing away from eye.
+-    Returns: 2D list of lists of floats, shape (N, N), the projection image.
++    Returns: 2D list of lists of floats, shape (M, M), the projection image.
+     """
+     N = len(volume)
+-    margin = int(N * (4/3 - 1) / 2)
+-    padded_size = N + 2 * margin
+-    
++    k2 = 4.0 / 3.0
++    margin = int(N * (k2 - 1) / 2)
++    padded_size = int(N * k2)
++    M = N
++
+     # 1. Preprocessing: Zero Padding
+-    padded_volume = [[[0.0 for _ in range(padded_size)] for _ in range(padded_size)] for _ in range(padded_size)]
++    padded_volume = [[[0.0] * padded_size for _ in range(padded_size)] for _ in range(padded_size)]
+     for i in range(N):
+         for j in range(N):
+             for k in range(N):
+-                padded_volume[i+margin][j+margin][k+margin] = volume[i][j][k]
++                padded_volume[i + margin][j + margin][k + margin] = volume[i][j][k]
+ 
+     # 2. Vignetting Correction
+-    corrected_volume = [[[0.0 for _ in range(padded_size)] for _ in range(padded_size)] for _ in range(padded_size)]
++    # Premultiply by reciprocal of filter spatial response h(x) [S2, S4]
++    corrected_volume = [[[0.0] * padded_size for _ in range(padded_size)] for _ in range(padded_size)]
+     for i in range(padded_size):
+         for j in range(padded_size):
+             for k in range(padded_size):
+-                h_val = spatial_filter_response(i - margin, j - margin, k - margin)
++                x, y, z = i - margin, j - margin, k - margin
++                h_val = spatial_filter_response(x, y, z)
+                 corrected_volume[i][j][k] = padded_volume[i][j][k] / max(h_val, 1e-8)
+ 
+     # 3. Forward 3D FFT
+-    spectrum = FFT3D(corrected_volume)
++    spectrum = fft3d(corrected_volume)
+ 
+     # 4. Slice Extraction
+-    u, v = generate_orthonormal_basis(viewing_direction)
+-    M = N
+-    slice_2d = [[[0.0 for _ in range(M)] for _ in range(M)] for _ in range(2)]
++    # Generate orthonormal basis (U, T) for the plane perpendicular to V
++    U, T = generate_orthonormal_basis(viewing_direction)
++    center = padded_size // 2
++    slice_2d = [[[0.0] * M for _ in range(M)] for _ in range(2)]
++
+     for i in range(M):
+         for j in range(M):
+-            sx = u[0] * (i - M/2) + v[0] * (j - M/2)
+-            sy = u[1] * (i - M/2) + v[1] * (j - M/2)
+-            sz = u[2] * (i - M/2) + v[2] * (j - M/2)
++            # Map 2D pixel indices to 3D frequency coordinates
++            sx = center + U[0] * (i - M / 2) + T[0] * (j - M / 2)
++            sy = center + U[1] * (i - M / 2) + T[1] * (j - M / 2)
++            sz = center + U[2] * (i - M / 2) + T[2] * (j - M / 2)
++            # Interpolate complex spectrum at (sx, sy, sz)
+             slice_2d[0][i][j], slice_2d[1][i][j] = interpolate_3d_complex(spectrum, sx, sy, sz)
+ 
+     # 5. Inverse 2D FFT
+-    projection = IFFT2D(slice_2d)
++    projection = ifft2d(slice_2d)
+     return projection
+ 
+ def spatial_filter_response(x, y, z):
+     # [G] Returns the spatial response h(x) of the interpolation filter.
+-    # Standard tricubic spline response is used here.
++    # Typically a separable kernel (e.g., 4^3 tap tricubic spline).
+     return 1.0
+ 
+@@ -101,17 +109,28 @@
+     u = cross(V, arbitrary)
+     u = normalize(u)
+-    v = cross(V, u)
+-    v = normalize(v)
+-    return u, v
++    t = cross(V, u)
++    t = normalize(t)
++    return u, t
+ 
+ def interpolate_3d_complex(grid, x, y, z):
+     # [G] Standard 3D grid interpolation (e.g., tricubic spline) for complex values.
+     return 0.0, 0.0
++
++def fft3d(data):
++    # [G] Standard radix-2 3D FFT algorithm
++    pass
++
++def ifft2d(data):
++    # [G] Standard radix-2 2D IFFT algorithm
++    pass
+ ```
+ 
+ ## Subtopics
+ 
+-### Implementation Details for Fourier Volume Rendering
+-This variant focuses on practical optimizations for the base algorithm [S1]. It involves edge enhancing and nonlinearly windowing the input data before adding a 16% margin of zeros to avoid ghosting [S1]. Slices are extracted using a tricubic interpolating spline [S1]. A key optimization is replacing the FFT with a Fast Hartley Transform (FHT), which halves per-view rendering time and memory requirements for real-valued data [S1]. Further speedups can be achieved by optimizing the filter and trimming zero padding [S1]. This implementation was tested on a 36 MHz Silicon Graphics 4D/320 VGX [S1].
++### [Implementation Details for Fourier Volume Rendering](846-implementation-details-for-fourier-volume-rendering.md)
++This variant focuses on practical optimizations for the base algorithm. Slices are extracted using a tricubic interpolating spline. A key optimization is replacing the FFT with a Fast Hartley Transform (FHT), which halves per-view rendering time and memory requirements for real-valued data. Further speedups can be achieved by optimizing the filter and trimming zero padding.
++
++### [Depth Cueing via Linear Attenuation](966-depth-cueing-via-linear-attenuation.md)
++A shading model that approximates exponential attenuation with locally varying coefficients by linear attenuation with a constant coefficient, allowing the integrand to be expressed as a Fourier projection. This restores depth perception to the otherwise occlusion-free X-ray projections.
+ 
+ ## Operating characteristics
+@@ -141,3 +160,5 @@
+ [S3] GPU-based Frequency Domain Volume Rendering - TU Wien, https://www.cg.tuwien.ac.at/research/publications/2004/Viola-2004-GPU/Viola-2004-GPU-Paper.pdf, fetched 2026-10-27
+ [S4] FREQUENCY DOMAIN VOLUME RENDERING Takashi Totsuka Marc Levoy ..., http://i.stanford.edu/pub/cstr/reports/csl/tr/93/570/CSL-TR-93-570.pdf, fetched 2026-10-27
+-[S5] Frequency Domain Volume Rendering, https://graphics.stanford.edu/papers/fvr/fvr.pdf, fetched 2026-10-27+[S5] Frequency Domain Volume Rendering, https://graphics.stanford.edu/papers/fvr/fvr.pdf, fetched 2026-10-27
++[S6] Frequency Domain Volume Rendering, https://graphics.stanford.edu/papers/fvr/fvr.pdf, fetched 2026-10-27
++[S7] Fourier Projection-Slice Theorem in Volume Rendering, https://www.scribd.com/document/796298963/Marc-Levoy-Volume-rendering-using-the-Fourier-projection-slice-theorem, fetched 2026-10-27 [S7, unofficial]

@@ -1,0 +1,75 @@
+# volumetric_kit_ios
+
+The iOS application shell of the `volumetric_kit` family: ARKit capture →
+[`volumetric_kit_recon`](https://github.com/taojin-6/volumetric_kit_recon)
+fusion on
+[`volumetric_kit_grid`](https://github.com/taojin-6/volumetric_kit_grid)'s
+voxel grid and meshing →
+[`volumetric_kit_gfx`](https://github.com/taojin-6/volumetric_kit_gfx)
+rendering, all on MoltenVK, on a phone.
+
+This repo holds only what is genuinely iOS: the cross-compilation toolchain, the
+app targets, and the Xcode packaging. The libraries stay independent siblings —
+neither needed a single source change to build for iOS.
+
+[AGENTS.md](AGENTS.md) is the shared working guide for Codex and Claude Code;
+`CLAUDE.md` imports it. Use its task map for the relevant build, architecture,
+and platform sections below.
+
+## Why there is a repo here at all
+
+The family's rule is that each library builds and releases on its own.
+An iOS app needs an Xcode project, a bundle identifier, a signing team, and a
+provisioning profile — none of which belong in a library that also ships on
+Linux and Windows. So the app lives here and consumes both libraries the way any
+other downstream would.
+
+The one thing iOS genuinely needs is a **Vulkan implementation**: the platform
+ships no ICD loader and no `libvulkan`, so MoltenVK's static library *is* Vulkan
+here, linked directly (and therefore with no validation layers on device).
+`cmake/ios.toolchain.cmake` names the platform and points `MoltenVK_ROOT` at
+the fetched release; volumetric_kit_core's iOS module (`cmake/vkc_ios.cmake`)
+then sets `Vulkan_LIBRARY` / `Vulkan_INCLUDE_DIR` from it, so every
+`find_package(Vulkan)` in the siblings makes `Vulkan::Vulkan` from MoltenVK's
+iOS xcframework.
+
+## Build
+
+```sh
+brew install shaderc glm         # once — glslc and glm's headers, host tools
+tools/fetch_moltenvk.sh          # once — pulls MoltenVK's iOS release
+
+cmake -S . -B build-ios -G Xcode \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/ios.toolchain.cmake \
+  -DVI_DEVELOPMENT_TEAM=<your team id>
+
+cd build-ios && xcodebuild -project volumetric_kit_ios.xcodeproj \
+  -target compute_smoke -configuration Debug -allowProvisioningUpdates build
+```
+
+Find your team id with `security find-identity -v -p codesigning` (the
+parenthesised code) or in Xcode → Settings → Accounts.
+
+`CMakeLists.txt` fetches the siblings by commit, in this order:
+
+| Sibling | What the apps take from it |
+| --- | --- |
+| `volumetric_kit_core` | the shared device, `Status`, the scenario parser |
+| `volumetric_kit_sensor` | the camera parameters, colour encoding and conventions ARKitCapture fills (`sensor_interface`), and the `PixelBufferImporter` the keyframes use (`sensor_apple`) |
+| `volumetric_kit_grid` | the voxel block grid and Marching Cubes (`grid_volume`, `grid_mesh`) |
+| `volumetric_kit_recon` | TSDF fusion and the projective texturer (`recon_tsdf`, `recon_texture`) |
+| `volumetric_kit_gfx` | the renderer |
+
+FetchContent keeps a name's first declaration, so these pins are the ones every
+sibling builds against, recon's own core, sensor and grid pins included. Each
+floor is its pin's version (`vkc_require_core`, `vkc_require_sibling`), so a
+local checkout older than the pin is refused. To build against one instead of
+the pinned remote:
+
+```sh
+-DFETCHCONTENT_SOURCE_DIR_VOLUMETRIC_KIT_RECON=/path/to/volumetric_kit_recon
+```
+
+A checkout that needs a newer core, sensor or grid fails to configure or
+compile against these; point that sibling at a matching checkout too, with its
+own `-DFETCHCONTENT_SOURCE_DIR_VOLUMETRIC_KIT_<NAME>`.

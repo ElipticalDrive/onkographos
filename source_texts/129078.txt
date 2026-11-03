@@ -1,0 +1,121 @@
+GPU voxelization transforms continuous 3D polygonal meshes into a discrete, regular volumetric grid stored in GPU memory. This guide details how modern OpenGL pipelines achieve real-time surface and solid voxelization by projecting geometry along its domi
+
+GPU Voxelization Using OpenGL Image Atomics - opengl
+GPU Voxelization
+Using OpenGL Image Atomics
+GPU voxelization transforms continuous 3D polygonal meshes into a
+discrete, regular volumetric grid stored in GPU memory. This guide
+details how modern OpenGL pipelines achieve real-time surface and solid
+voxelization by projecting geometry along its dominant axis, rasterizing
+fragments without a traditional framebuffer, and utilizing
+fragment-stage image atomic operations to write directly into 3D
+textures without concurrency conflicts.
+The Problem with
+Standard Rasterization
+Standard graphics pipelines project 3D primitives onto a 2D viewport
+determined by camera perspective. For volumetric representations, this
+presents two distinct challenges:
+Projection Loss: A triangle perpendicular to the
+projection plane will degenerate into a line or disappear entirely,
+leaving holes in the voxel grid.
+Race Conditions: Multiple fragments originating
+from different triangles, or overlapping segments of the same triangle,
+may map to the identical voxel cell simultaneously.
+Dominant Axis Projection
+To guarantee maximum surface coverage, each triangle must be
+rasterized along the Cartesian axis where its projected area is
+largest.
+In an OpenGL pipeline, this selection occurs in the Geometry Shader.
+The shader calculates the triangle's face normal:
+```
+vec3 normal = cross(v1 - v0, v2 - v0);
+vec3 absNormal = abs(normal);
+```
+The component with the maximum magnitude determines the dominant
+projection plane:
+If \(|N_z| \ge |N_x|\) and \(|N_z| \ge |N_y|\), project onto the
+XY-plane (standard view).
+If \(|N_x| \ge |N_y|\) and \(|N_x| \ge |N_z|\), swizzle coordinates to
+project onto the YZ-plane.
+If \(|N_y| \ge |N_x|\) and \(|N_y| \ge |N_z|\), swizzle coordinates to
+project onto the ZX-plane.
+The geometry shader applies an orthographic projection matrix
+matching the resolution of the target 3D voxel grid (e.g., \(128^3\) or \(256^3\)) along the chosen axis. The
+original world-space positions are passed to the fragment shader as
+interpolants.
+Conservative Rasterization
+Standard rasterization generates a fragment only if a triangle covers
+the center point of a pixel. Thin geometry or edges may cross a voxel's
+spatial bounds without covering the pixel center, resulting in missing
+voxels.
+To ensure watertight voxel grids, the hardware or pipeline must apply
+conservative rasterization:
+Hardware Extension:
+GL_NV_conservative_raster enables this automatically via
+glEnable(GL_CONSERVATIVE_RASTER_NV).
+Software Fallback: The geometry shader expands the
+2D projected triangle vertices outward along their edge normals by half
+a voxel's diagonal width.
+Fragment Mapping to 3D Space
+Because the pipeline targets an arbitrary 3D grid rather than a
+display screen, color writes and depth tests are disabled on the
+host:
+```
+glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+glDisable(GL_DEPTH_TEST);
+glDisable(GL_CULL_FACE);
+```
+Inside the fragment shader, the interpolated world-space position is
+converted into normalized coordinates within the voxel bounding box
+\([0, 1]\), and then scaled to integer
+grid coordinates:
+```
+ivec3 voxelCoord = ivec3(normalizedWorldPos * voxelGridResolution);
+```
+Writing with OpenGL Image
+Atomics
+When multiple fragments map to the same voxelCoord,
+standard writes (imageStore) cause read-modify-write data
+races, leading to corrupted data or lost fragments. OpenGL solves this
+using atomic functions on shader image variables bound to a 3D
+texture.
+Setting up the Storage
+The voxel grid is typically backed by a 3D texture using an unsigned
+integer format, such as GL_R32UI:
+```
+glTexStorage3D(GL_TEXTURE_3D, 1, GL_R32UI, size, size, size);
+glBindImageTexture(0, voxelTexture, 0, GL_TRUE, 0, GL_READ_WRITE, GL_R32UI);
+```
+Executing Atomic Updates
+In the fragment shader, the texture is declared as a coherent
+image:
+```
+layout(binding = 0, r32ui) uniform coherent uimage3D voxelGrid;
+```
+Depending on the intended output, atomic operations handle voxel
+integration:
+Binary Occupancy (Masking): To mark a voxel as
+occupied, an atomic bitwise-OR operation sets a specific bit or
+flag:
+```
+imageAtomicOr(voxelGrid, voxelCoord, 1u);
+```
+Averaging Attributes (e.g., Colors or Normals):
+Because atomic floating-point addition is not universally supported on
+images, values are often packed into integer bitfields. Alternatively,
+multiple attributes can be written by using multiple 3D textures, using
+imageAtomicAdd to accumulate values alongside a separate
+counter buffer to compute averages in a subsequent pass:
+```
+imageAtomicAdd(countGrid, voxelCoord, 1u);
+imageAtomicAdd(colorGridR, voxelCoord, uint(color.r * 255.0));
+```
+Bit-Packing: Custom composite data can be packed
+into a single 32-bit unsigned integer using bit-shifts
+((R << 24) | (G << 16) | (B << 8) | A)
+and written using imageAtomicMax to preserve dominant
+high-intensity colors or surface markers.
+By decoupling rasterization from the framebuffer and resolving
+concurrent fragment writes directly within 3D texture memory, this
+approach converts complex geometric meshes into solid or shell voxel
+structures in a single render pass.

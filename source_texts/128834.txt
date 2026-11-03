@@ -1,0 +1,396 @@
+A physically-based path tracer in safe Rust, USD-native, capable of rendering production datasets like Moana and ALab. - Render UsdGeomCamera projection = orthographic by doubleailes · Pull Request #400 · doubleailes/Crust
+
+Render UsdGeomCamera projection = orthographic by doubleailes · Pull Request #400 · doubleailes/Crust · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+doubleailes
+commented
+Oct 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+UsdGeomCamera.projection was never read, so a camera with projection = "orthographic" rendered as a perspective camera with the same lens, and nothing warned.
+An orthographic camera now generates primary rays parallel to its −Z axis (Camera::orthographic). Each ray starts on a window whose size is the conformed horizontalAperture × verticalAperture in tenths of a scene unit. The window is centred on the camera's position, moved by horizontalApertureOffset / verticalApertureOffset, which are also in tenths of a scene unit. focalLength, fStop and focusDistance play no part, so there is no depth of field. A projection token other than orthographic reads as perspective, as in USD.
+Every reader of the projection follows it:
+CameraFrame::proj drops the perspective divide, and motion_vector skips its near clip, which an affine projection does not need. A non-finite hit still reads zero.
+The primary ray cone is one pixel wide and does not spread (Camera::primary_cone).
+Adaptive dicing and implicit-shape sizing use a pixel rate that doesn't change with distance and a box-shaped view volume (Frustum::orthographic). The box moves with a shifted window, and lens shift's off_axis_gain doesn't apply to it.
+Camera clipping (UsdGeomCamera clippingRange and clippingPlanes are ignored #391) needs nothing of its own. clippingRange is measured along the view axis from the camera's position, which is the plane the orthographic rays start on.
+depth and distance keep their documented meanings: depth is measured along the view axis, and distance is Euclidean from the camera position. Off axis, an orthographic hit's distance is therefore larger than its depth.
+The branch is rebased onto main (at e4a9a114) as two commits:
+The feature, composed with Unauthored verticalAperture frames narrower than USD on wide images #388's conformed vertical aperture, lens shift (UsdGeomCamera aperture offsets are ignored #390, Honour UsdGeomCamera aperture offsets (lens shift) #399) and clipping (UsdGeomCamera clippingRange and clippingPlanes are ignored #391).
+The fixes from the Qodo review.
+Perspective cameras take main's code unchanged.
+Closes #389
+Capability
+usd-scene-import, aovs, rendering (ray cones). I updated openspec/specs/usd-scene-import/design.md: a new "Orthographic projection" entry, including how it combines with lens shift and clipping, plus the adaptive-dicing note that said orthographic "does not arise". I also added an "Orthographic projection" requirement, with an offset scenario, to its spec.md. The spec was edited in place, as a bug fix, rather than through openspec/changes/. Say if you want it moved into a change.
+Image impact
+Bit-identical for perspective cameras. Partial evidence: I did not run scripts/check_images.sh. samples/cornellbox.usda at -s 16, rendered with release builds of main and the first version of this branch, gives crust diff: 0/230400 differing pixels, max abs diff 0. That comparison was made before the rebase onto lens shift and clipping. The perspective arithmetic in get_ray, the ray cone, proj and motion_vector is unchanged, the frustum test >= -0.0 is equivalent to >= 0.0, and the perspective lens-shift and clipping code is main's as is.
+Orthographic cameras change intentionally (they were wrong before). A 200×200 render of a 10 × 10-unit window shows two unit spheres at the same 20 px radius, 35 units apart in depth.
+Performance
+No claim made. Perspective adds one well-predicted branch in get_ray and in the cone construction per camera ray. Not measured.
+Checklist
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --no-fail-fast
+Both halves of any pair in docs/architecture.md § Invariants changed together (get_ray ↔ CameraFrame::proj, pinned by proj_inverts_get_ray_at_any_depth, which now includes an orthographic camera; a shifted orthographic window is inverted in an_orthographic_window_moves_with_its_offsets)
+No new unsafe, no new RNG outside openqmc, no asset decoding in crust-core
+Logging levels follow the rules (one DEBUG line per camera build)
+User documentation in site/ updated: a new "Orthographic cameras" section in site/content/docs/usd/render-settings.md, covering the offsets and clipping
+A new CRUST_* switch: not applicable, none added
+New tests:
+In usd_inline.rs: an_orthographic_camera_frames_its_apertures_with_parallel_rays and an_unknown_projection_reads_as_perspective.
+In camera_buffer_ray.rs: orthographic_rays_are_parallel_and_leave_the_window and an_orthographic_primary_cone_is_a_pixel_wide_and_does_not_widen.
+In camera_clipping.rs: an_orthographic_camera_clips_by_the_same_depths.
+In the import's camera.rs: an_orthographic_window_is_the_conformed_apertures_in_tenths and an_orthographic_window_moves_with_its_offsets.
+In aov.rs: an_orthographic_motion_vector_does_not_shrink_with_depth, orthographic_distance_is_from_the_camera_position_not_its_depth and a_non_finite_orthographic_hit_has_a_zero_motion_vector.
+In adaptive.rs: an_orthographic_projection_is_distance_free_and_culls_to_its_window, which includes a shifted window.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01LKK6XXrrkDaKYYqChXC7yM
+qodo-code-review
+Bot
+commented
+Oct 24, 2026
+Copy link
+Copy Markdown
+Contributor
+PR Summary by Qodo
+Render USD orthographic cameras with parallel rays
+🐞 Bug fix 🧪 Tests 📝 Documentation 🕐 40+ Minutes
+AI Description
+```
+• Read USD camera projection so orthographic cameras render parallel rays through their conformed
+ aperture window.
+• Align AOVs, ray cones, and adaptive dicing with orthographic projection while preserving
+ perspective behavior.
+• Add projection tests and document camera behavior, including the unsupported clipping range.
+```
+Diagram
+```
+graph TD
+  USD["USD Camera"] --> Importer["Camera Importer"] --> Camera["Core Camera"] --> Tracer["Ray Tracer"]
+  Importer --> Projection["Screen Projection"] --> Dicing["Adaptive Dicing"]
+  Camera --> AOV["Camera AOVs"]
+```
+Loading
+High-Level Assessment
+The following are alternative approaches to this PR:
+1. Shared projection model
+➕ A projection enum and shared geometry could reduce the chance of ray, AOV, and dicing behavior diverging.
+➖ It would broaden this bug fix into a cross-module refactor despite there being only two effective projection modes.
+Recommendation: Keep the targeted projection branches for this fix: they preserve existing perspective paths and are covered across the affected readers. Consider a shared projection model if further camera modes or projection-dependent behavior are added.
+Files changed (13) +513 / -24
+Bug fix (6) +323 / -23
+aov.rsMake motion vectors and distance AOV projection-aware +35/-2
+Make motion vectors and distance AOV projection-aware
+```
+• Orthographic motion vectors use affine projection without perspective near-plane clipping, and distance reports depth from the ray's image plane. Tests cover projection inversion, depth-independent motion, and distance.
+```
+crates/crust-core/src/aov.rs
+camera.rsAdd orthographic rays, projection, and primary cones +91/-6
+Add orthographic rays, projection, and primary cones
+```
+• Adds a lens-free orthographic camera whose parallel rays start across a centered window. Its camera frame projects points without a perspective divide, while primary cones retain pixel width without spreading; the perspective paths remain intact.
+```
+crates/crust-core/src/camera.rs
+adaptive.rsUse distance-free sizing and box culling for orthographic views +97/-7
+Use distance-free sizing and box culling for orthographic views
+```
+• Orthographic screen rates no longer shrink with distance, and offset frustum planes bound the window in front of the camera. Projection and plane offsets also participate in the screen-rate cache key, with tests for sizing and culling.
+```
+crates/crust-core/src/scene/usd_import/adaptive.rs
+camera.rsRead USD projection and build its conformed orthographic window +89/-3
+Read USD projection and build its conformed orthographic window
+```
+• Reads 'projection', treating only 'orthographic' as orthographic and other tokens as perspective. Builds the ray camera and adaptive screen projection from conformed apertures converted to scene units, with a framing test.
+```
+crates/crust-core/src/scene/usd_import/camera.rs
+mod.rsSelect the matching adaptive view volume +8/-3
+Select the matching adaptive view volume
+```
+• Passes projection mode into adaptive subdivision and constructs a box-shaped orthographic frustum or the existing perspective frustum as appropriate.
+```
+crates/crust-core/src/scene/usd_import/mod.rs
+mod.rsAttach projection-aware cones to primary rays +3/-2
+Attach projection-aware cones to primary rays
+```
+• Uses the camera's cone calculation so orthographic rays begin a pixel wide without spread while perspective rays retain their prior cone arithmetic.
+```
+crates/crust-core/src/tracer/mod.rs
+Tests (4) +126 / -0
+implicit.rsMark implicit-shape test projection as perspective +1/-0
+Mark implicit-shape test projection as perspective
+```
+• Updates the existing screen-projection test fixture for the new projection flag.
+```
+crates/crust-core/src/scene/usd_import/implicit.rs
+mesh.rsMark mesh test projections as perspective +2/-0
+Mark mesh test projections as perspective
+```
+• Updates subdivision and displacement test fixtures to explicitly retain perspective screen projection.
+```
+crates/crust-core/src/scene/usd_import/mesh.rs
+camera_buffer_ray.rsTest orthographic ray origins and cone footprints +52/-0
+Test orthographic ray origins and cone footprints
+```
+• Checks parallel directions, window positions, lens independence, ray metadata, and constant-width orthographic cones alongside perspective cone behavior.
+```
+crates/crust-core/tests/camera_buffer_ray.rs
+usd_inline.rsTest USD orthographic import and unknown-token fallback +71/-0
+Test USD orthographic import and unknown-token fallback
+```
+• Verifies aperture-based framing, parallel lens-independent rays, and a sphere's apparent size through an imported orthographic camera. Also checks that an unknown projection token reads as perspective.
+```
+crates/crust-core/tests/usd_inline.rs
+Documentation (3) +64 / -1
+design.mdDocument orthographic camera and dicing design +17/-1
+Document orthographic camera and dicing design
+```
+• Describes the conformed window, projection-dependent AOVs and ray cones, distance-free dicing, and box-shaped view volume. Notes that 'clippingRange' remains unread.
+```
+openspec/specs/usd-scene-import/design.md
+spec.mdSpecify orthographic projection requirements +23/-0
+Specify orthographic projection requirements
+```
+• Adds requirements for parallel rays, aperture units, absence of depth of field, consistent screen-space readers, and perspective fallback. Includes window-framing and unknown-token scenarios.
+```
+openspec/specs/usd-scene-import/spec.md
+render-settings.mdExplain orthographic camera settings to users +24/-0
+Explain orthographic camera settings to users
+```
+• Adds an authored USD example and explains aperture conversion, aspect conformance, depth-of-field behavior, visible region, and the unsupported clipping range.
+```
+site/content/docs/usd/render-settings.md
+qodo-code-review
+Bot
+commented
+Oct 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Code Review by Qodo
+🐞 Bugs (0) 📘 Rule violations (0) 🔗 Cross-repo conflicts (0) 📜 Skill insights (0)
+1. Off-axis hits get wrong camera distance ✓ Resolved
+Description
+```
+CameraFrame::distance returns view-axis depth for orthographic cameras, so the distance AOV
+becomes identical to depth rather than measuring distance from the camera position. For an
+off-axis hit at (10, 0, −5) with the camera at the origin, it reports 5 instead of the documented
+Euclidean distance of about 11.18.
+```
+Code
+crates/crust-core/src/camera.rs[R45-48]
+```
++        if self.orthographic {
++            self.depth(p)
++        } else {
++            (p - self.origin).length()
+```
+Evidence
+```
+The unchanged AOV specification and public documentation distinguish Euclidean distance from
+view-axis depth. The changed helper returns depth for orthographic cameras, and the AOV sampling
+path calls that helper for every surface or volume first hit.
+```
+openspec/specs/aovs/spec.md[42-46]
+site/content/docs/usd/aovs.md[209-210]
+crates/crust-core/src/camera.rs[34-49]
+crates/crust-core/src/aov.rs[869-874]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+The orthographic `distance` AOV now returns view-axis depth, contrary to the existing contract that it measures Euclidean distance from the camera position.
+
+## Fix Focus Areas
+- crates/crust-core/src/camera.rs[41-50]
+- crates/crust-core/src/aov.rs[869-874]
+
+## Recommended Fix
+Keep `depth` as the view-axis measurement, but calculate the `distance` AOV from the camera position for both projections. Add an off-axis orthographic hit test that distinguishes the two values.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+2. Orthographic motion vectors can show NaN ✓ Resolved
+Description
+```
+The new orthographic branch of motion_vector projects both ends of the path with cam.proj and
+returns the difference directly. The perspective branch returns (0, 0) for a hit point that is not
+finite, but the orthographic branch never checks and passes the NaN through to the motion-vector
+AOV.
+```
+Code
+crates/crust-core/src/aov.rs[R817-821]
+```
++    if cam.orthographic {
++        // An affine projection: every depth projects, and nothing is clipped.
++        let ((s0, t0), (s1, t1)) = (cam.proj(p0), cam.proj(p1));
++        return ((s1 - s0) * cam.width, (t1 - t0) * cam.height);
++    }
+```
+Evidence
+```
+The perspective branch returns (0, 0) when the depth is NaN. The orthographic branch has no
+equivalent guard and returns the raw projection difference.
+```
+crates/crust-core/src/aov.rs[815-830]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+The orthographic branch of `motion_vector` returns the projected difference without the finite check the perspective branch gets through its `is_nan` test, so a non-finite hit point yields NaN in the motion-vector AOV.
+
+## Fix Focus Areas
+- crates/crust-core/src/aov.rs[817-821]
+
+## Recommended Fix
+Before returning from the orthographic branch, return `(0.0, 0.0)` if either projected component is not finite.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+Context sources
+⚠️ Tickets: not configured — No jira, linear integration is connected for the linked tickets
+✅ Cross-repo context — repo relationships
+Explored: repo: doubleailes/Mantle (sha: 66c27540) — View relationship
+Review mode: Auto: 🧠 Deep: Broad camera semantics span many independent rendering and import paths.
+Tip of the day
+```
+💡 Did you know, you can enable the Remediation agent and Qodo fixes findings in a dedicated fix PR
+```
+More tips ↗ | Customize Qodo ↗ | Qodo docs ↗
+qodo-code-review
+Bot
+reviewed
+Oct 24, 2026
+View reviewed changes
+Comment thread
+crates/crust-core/src/camera.rs
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/crust-core/src/aov.rs
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+doubleailes
+pushed a commit
+that referenced
+this pull request
+Oct 24, 2026
+Orthographic camera: keep the distance AOV's meaning, guard NaN vectors
+…
+6e3077a
+```
+Address the Qodo review of #400:
+
+- The `distance` AOV is the distance from the camera position under
+  either projection, as the AOV spec and docs say; the orthographic
+  branch had returned the view-axis depth. CameraFrame::distance is gone.
+  Pinned by orthographic_distance_is_from_the_camera_position_not_its_depth.
+- The orthographic branch of motion_vector returns (0, 0) for a
+  non-finite hit, as the perspective branch does, instead of NaN. Pinned
+  by a_non_finite_orthographic_hit_has_a_zero_motion_vector.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LKK6XXrrkDaKYYqChXC7yM
+```
+claude
+added 2 commits
+October 24, 2026 21:35
+Render UsdGeomCamera projection = orthographic (#389)
+…
+4d1d5c5
+```
+`projection` was never read: an orthographic camera rendered as a
+perspective one with the same lens, silently. It now generates parallel
+rays along the camera's -Z from a window centred on the eye, the
+conformed apertures in tenths of a scene unit; focalLength and the lens
+play no part.
+
+Every reader of the projection follows it: CameraFrame::proj drops the
+perspective divide (motion_vector its near clip), the distance AOV is the
+depth, the primary ray cone is a pixel wide with no spread, and adaptive
+dicing reads a distance-free pixel rate and a box-shaped view volume.
+Perspective cameras take the same arithmetic as before.
+
+It composes with what main already honours: the aperture offsets (#390)
+are tenths of a unit too, so the orthographic camera takes the same
+Camera::with_window_shift and its dicing box moves with the window (no
+off_axis_gain); camera clipping (#391) measures from the eye plane, which
+the orthographic rays start on, with nothing of its own.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LKK6XXrrkDaKYYqChXC7yM
+```
+Orthographic camera: keep the distance AOV's meaning, guard NaN vectors
+…
+eaaf7b0
+```
+Address the Qodo review of #400:
+
+- The `distance` AOV is the distance from the camera position under
+  either projection, as the AOV spec and docs say; the orthographic
+  branch had returned the view-axis depth. CameraFrame::distance is gone.
+  Pinned by orthographic_distance_is_from_the_camera_position_not_its_depth.
+- The orthographic branch of motion_vector returns (0, 0) for a
+  non-finite hit, as the perspective branch does, instead of NaN. Pinned
+  by a_non_finite_orthographic_hit_has_a_zero_motion_vector.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LKK6XXrrkDaKYYqChXC7yM
+```
+doubleailes
+force-pushed
+the
+fix/orthographic-camera-389
+branch
+from
+92303e2 to
+eaaf7b0
+Compare
+October 24, 2026 21:43
+Hide details
+View details
+doubleailes
+merged commit 37c87d0
+into
+main
+Oct 25, 2026
+15 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+doubleailes
+deleted the
+fix/orthographic-camera-389
+branch
+October 25, 2026 05:20
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

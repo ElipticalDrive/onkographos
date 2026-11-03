@@ -1,0 +1,963 @@
+The articles Image Texture as ShaderPass uniform and 
+Signed Distance Fields for fun and profit reminded me that I briefly looked into Signed Distance Fields (SDF) in 2018 after the articles Clipping Solids (SDF function…
+
+How do you integrate Signed Distance Fields (SDF) into a basic three.js scene? - Questions - three.js forum
+How do you integrate Signed Distance Fields (SDF) into a basic three.js scene?
+Questions
+sdf
+hofk
+February 3, 2025, 5:24pm
+1
+The articles Image Texture as ShaderPass uniform and
+Signed Distance Fields for fun and profit reminded me that I briefly looked into Signed Distance Fields (SDF) in 2018 after the articles Clipping Solids (SDF functions) and Clipping Solids (SDF) Modelling / Sculpting.
+I abandoned it at the time because of other things. Now it has sparked my interest again.
+In order to be able to experiment, I have tried to create a test environment with three.js that is as minimal as possible.
+After some research ( also AI see AI - trustworthy or not? - #18 by hofk )
+I have a small script: SignedDistanceFields (SDF)
+2025-02-03 18.13.11552×357 22.7 KB
+However, the three.js scene is completely overlaid and OrbitControls, AxesHelper and other things are not effective.
+I have not yet been able to find out whether this is even possible with the EffectComposer variant.
+Does it make more sense to use ShaderMaterial as the basis?
+My knowledge of shaders is more on a basic level, I have a link to this at Collection of examples from discourse.threejs.org
+see ShaderBeginner.
+Interesting links to SDF
+Inigo Quilez :: computer graphics, mathematics, shaders, fractals, demoscene and more
+Inigo Quilez :: computer graphics, mathematics, shaders, fractals, demoscene and more
+Intro to Signed Distance Fields
+https://www.youtube.com/watch?v=rZ96YYUghpc (only German)
+The code
+```
+<!DOCTYPE html>
+<!-- @author hofk -->
+  <head>
+    <meta charset="UTF-8" />
+    <title>SignedDistanceFields (SDF)</title>
+  </head>
+ <body></body>
+ 
+<script type="module">
+
+import * as THREE from "../jsm/three.module.173.js";
+import { OrbitControls} from '../jsm/OrbitControls.173.js';
+import { EffectComposer } from "../jsm/EffectComposer.173.js";
+import { RenderPass } from "../jsm/RenderPass.173.js";
+import { ShaderPass } from "../jsm/ShaderPass.173.js";
+
+const WIDTH = 800;
+const HIGHT = 800;
+const scene = new THREE.Scene( );
+const camera = new THREE.PerspectiveCamera( 65, WIDTH / HIGHT, 0.01, 1000);
+camera.position.set( 1, 3, 12 );
+const renderer = new THREE.WebGLRenderer( { antialias: true } );
+renderer.setSize( WIDTH, HIGHT );
+document.body.appendChild( renderer.domElement );
+/*
+const controls = new OrbitControls( camera, renderer.domElement );
+const axesHelper = new THREE.AxesHelper( 10 );
+scene.add( axesHelper );
+*/
+
+const customShader = {
+    
+    uniforms: {
+        time: { value: 0.0 },
+        resolution: { value: new THREE.Vector2( WIDTH, HIGHT ) },
+        cameraPos: { value: camera.position },
+        projInv: { value: new THREE.Matrix4( ) },
+        viewInv: { value: new THREE.Matrix4( ) }
+    },
+    
+    vertexShader:`
+        varying vec2 vUv;
+        void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+        }
+    `,
+    
+    fragmentShader:`
+        uniform float time;
+        uniform vec2 resolution;
+        uniform vec3 cameraPos;
+        uniform mat4 projInv;
+        uniform mat4 viewInv;
+        varying vec2 vUv;
+        
+        // SDF primitives   see https://iquilezles.org/articles/distfunctions/
+        // ...................................................................
+        float sdSphere( vec3 p, float s ) {
+            return length( p ) - s;
+        }
+        
+        float sdTorus( vec3 p, vec2 t ) {
+            vec2 q = vec2( length( p.xz ) - t.x, p.y );
+            return length( q ) - t.y;
+        }
+        
+        float sdRoundBox( vec3 p, vec3 b, float r ) {
+            vec3 q = abs( p ) - b + r;
+            return length( max( q, 0.0 ) ) + min( max( q.x, max( q.y, q.z ) ), 0.0 ) - r;
+        }
+        //....................................................................
+        
+        // raymarching 
+        float raymarch(vec3 cp, vec3 rd) { // cp: cameraPos, rd: ray direction
+        
+            float t = 0.;
+            const int MAX_STEPS = 100; // try other values 10 ... 200
+            
+            for (int i = 0; i < MAX_STEPS; i ++) {
+            
+                vec3 pos = cp + rd * t; // new position on ray
+                
+                float dSph = sdSphere( pos, 1.0 );
+                float dTor = sdTorus( pos, vec2( 0.9, 0.2 ) );
+                
+                float dSub = max( -dSph, dTor ); // SDF Subtraction
+                  
+                float dRBox = sdRoundBox( pos, vec3( 0.3, 0.15, 2.1 ), 0.1 );              
+                
+                float d = min( dSub, dRBox );
+                                
+                if ( d < 0.001 ) return t; // hit
+                
+                t += d;
+                
+                if ( t > 100.0 ) break;
+                
+            }
+            
+            return -1.0; // no match
+            
+        }
+        
+        void main( ) {
+        
+            vec2 ndc = vUv * 2.0 - 1.0;             // conversion vUv (0..1) =>  NDC (-1..1)
+            vec4 clipPos = vec4( ndc, -1.0, 1.0 );  // clip space ray
+            vec4 viewPos = projInv * clipPos;       // unproject into the viewspace
+            viewPos = viewPos / viewPos.w;          // viewspace coordinates
+            vec4 worldPos = viewInv * viewPos;      // unproject into the worldspace
+            
+            // ray direction: from  cameraPos to unprojected pixel
+            
+            float distFactor = 0.25;   // filling size
+            vec3 rd = normalize( worldPos.xyz - cameraPos * distFactor ); 
+            vec3 cp = cameraPos;
+            
+            float t = raymarch( cp, rd );
+            vec3 col;
+            
+            if ( t > 0.0 ) {
+            
+            // hit: color depending on t
+            col = vec3( 0.5 + 0.5 * sin( t + time ),
+                        0.5 + 0.5 * sin( t + time + 0.5 ),
+                        0.5 + 0.5 * sin( t + time + 2.0 ) );
+                    
+            //col = vec3(0.5,0.7,0.4);
+            
+            } else {
+                
+                col = vec3( 0.7, 0.7, 0.7 ); // no hit: background color  
+                
+            }
+            
+            gl_FragColor = vec4(col, 1.0);
+        }
+        `
+};
+
+const composer = new EffectComposer( renderer );
+composer.addPass( new RenderPass( scene, camera ) );
+const shaderPass = new ShaderPass( customShader );
+shaderPass.renderToScreen = true;
+composer.addPass( shaderPass );
+
+const clock = new THREE.Clock( );
+
+function animate( ) {
+    
+    requestAnimationFrame( animate );
+    customShader.uniforms.time.value = clock.getElapsedTime( );
+    
+    //customShader.uniforms.projInv.value.copy( camera.projectionMatrix ).invert( );
+    //customShader.uniforms.viewInv.value.copy( camera.matrixWorld );
+  
+    composer.render( );
+    
+}
+
+animate( );
+
+</script>
+
+</html>
+```
+SDFs in the scene - raymarching
+Witch's Swill [SDF, MeshStandardMaterial]
+Mugen87
+February 3, 2025, 8:19pm
+2
+Maybe related: Add `SDFGeometryGenerator` addon. by santi-grau · Pull Request #26837 · mrdoob/three.js · GitHub
+SDFGeometryGenerator was part of the main repo for a couple of releases but removed since it was a too specific module with a dependency to WebGLRenderer. Still, it might be usable for app-specific code:
+Demo: three.js webgl - SDF Geometry
+Is there a library for Javascript distance functions?
+hofk
+February 3, 2025, 8:37pm
+3
+Thank you.
+I’ll take a closer look tomorrow.
+gkjohnson
+February 4, 2025, 6:56am
+4
+That demo is generating a 3d geometry based on a signed distance field function vs rendering the SDF shape via raymarching as in the post here, so it’s a bit different, I think.
+However, the three.js scene is completely overlaid and OrbitControls, AxesHelper and other things are not effective.
+I’m not sure how OrbitControls is related or not working since it doesn’t render anything - but your shader snippet is not setting gl_FragDepth in the fragment shader so there is no way for objects to intersect visually with your SDF object. Setting the depth correctly should allow the item to write to the depth buffer correctly. Things get a bit more complicated when using EffectComposer for this (since the depth buffer from rendering the rest of the scene may not be available) and transparent objects (since you need to check the depth when raymarching to determine the ray termination). But in a simple case this should be all you need.
+Unfortunately it doesn’t look like any of the “volume” examples in the three.js examples write to gl_FragDepth but maybe one or two of them should as a demonstration.
+Lawrence3DPK
+February 4, 2025, 9:28am
+5
+To add to your interesting links on sdf, there’s some great examples in this repo which may also hold some answers
+hofk
+February 4, 2025, 5:50pm
+6
+In principle, it works (extra mesh not visible).
+SDF-GeometryGenerator
+2025-02-04 18.24.101015×679 133 KB
+the code:
+```
+<!DOCTYPE html>
+<!-- @ hofk customized from https://rawcdn.githack.com/mrdoob/three.js/r168/examples/webgl_geometry_sdf.html --> 
+<head>
+	<title>SDF-GeometryGenerator</title>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+</head>
+<body></body>
+ 
+<script type="module">
+
+import * as THREE from '../jsm/three.module.160.js';
+import { OrbitControls } from '../jsm/OrbitControls.160.js';
+import { SDFGeometryGenerator } from '../jsm/SDFGeometryGenerator.160.js';
+ 
+let renderer,  meshFromSDF, scene, camera, clock, controls;
+
+const settings = {
+	res: 4,
+	bounds: 1.0,
+	autoRotate: false,
+	wireframe: true,
+	material: 'normal',
+	vertexCount: '10'
+};
+  
+
+const shader = /* glsl */`
+
+    float sdSphere( vec3 p, float s ) {
+        return length( p ) - s;
+    }
+    
+    float sdTorus( vec3 p, vec2 t ) {
+        vec2 q = vec2( length( p.xz ) - t.x, p.y );
+        return length( q ) - t.y;
+    }
+    
+    float sdRoundBox( vec3 p, vec3 b, float r ) {
+        vec3 q = abs( p ) - b + r;
+        return length( max( q, 0.0 ) ) + min( max( q.x, max( q.y, q.z ) ), 0.0 ) - r;
+    }
+        
+    float dist( vec3 p ) {
+
+        float dSph = sdSphere( p, 0.4 );
+        float dTor = sdTorus( p, vec2( 0.4, 0.15 ) );
+        
+        float dSub = max( -dSph, dTor ); // SDF Subtraction
+          
+        float dRBox = sdRoundBox( p, vec3( 0.2, 0.1, 0.99 ), 0.1 );              
+        
+        float d = min( dSub, dRBox );
+        
+        return d;
+        
+    }
+    
+`;
+
+init();
+
+function init() {
+
+	const w = window.innerWidth;
+	const h = window.innerHeight;
+    
+    camera = new THREE.OrthographicCamera( w / - 2, w / 2, h / 2, h / - 2, 0.01, 1600 );
+	camera.position.z = 1100;
+	scene = new THREE.Scene();
+	clock = new THREE.Clock();
+
+	renderer = new THREE.WebGLRenderer( { antialias: true } );
+	renderer.setPixelRatio( window.devicePixelRatio );
+	renderer.setSize( window.innerWidth, window.innerHeight );
+	renderer.setAnimationLoop( animate );
+	document.body.appendChild( renderer.domElement );
+
+	controls = new OrbitControls( camera, renderer.domElement );
+	controls.enableDamping = true;
+
+	window.addEventListener( 'resize', onWindowResize );
+ 
+	compile();
+    
+    // mesh not visible  
+    const mesh = new THREE.Mesh( new THREE.SphereGeometry( 0.6 ), new THREE.MeshNormalMaterial( ) );
+    scene.add( mesh );
+    
+}
+
+function compile() {
+
+	const generator = new SDFGeometryGenerator( renderer );
+	const geometry = generator.generate( Math.pow( 2, settings.res + 2 ), shader, settings.bounds );
+	geometry.computeVertexNormals();
+
+	if ( meshFromSDF ) { // updates mesh
+
+		meshFromSDF.geometry.dispose();
+		meshFromSDF.geometry = geometry;
+
+	} else { // inits meshFromSDF : THREE.Mesh
+
+		meshFromSDF = new THREE.Mesh( geometry, new THREE.MeshBasicMaterial() );
+		scene.add( meshFromSDF );
+
+		const scale = Math.min( window.innerWidth, window.innerHeight ) / 2 * 0.66;
+		meshFromSDF.scale.set( scale, scale, scale );
+
+		setMaterial();
+
+	}
+
+	settings.vertexCount = geometry.attributes.position.count;
+    
+}
+
+function setMaterial() {
+
+	meshFromSDF.material.dispose();
+
+	if ( settings.material == 'depth' ) {
+
+		meshFromSDF.material = new THREE.MeshDepthMaterial();
+
+	} else if ( settings.material == 'normal' ) {
+
+		meshFromSDF.material = new THREE.MeshNormalMaterial();
+
+	}
+
+	meshFromSDF.material.wireframe = settings.wireframe;
+
+}
+
+function onWindowResize() {
+
+	const w = window.innerWidth;
+	const h = window.innerHeight;
+
+	renderer.setSize( w, h );
+
+	camera.left = w / - 2;
+	camera.right = w / 2;
+	camera.top = h / 2;
+	camera.bottom = h / - 2;
+
+	camera.updateProjectionMatrix();
+
+}
+
+function render() {
+
+	renderer.render( scene, camera );
+
+}
+
+function animate() {
+
+	controls.update();
+
+	if ( settings.autoRotate ) {
+
+		meshFromSDF.rotation.y += Math.PI * 0.05 * clock.getDelta();
+
+	}
+
+	render();
+
+}
+
+</script>
+
+</html>
+```
+Is there a library for Javascript distance functions?
+hofk
+February 5, 2025, 9:12am
+7
+I have tried to find out something about this. Because my experience with shader is rather limited, I probably didn’t do anything useful. There is no error, but no other view either.
+Updated version: 01_SignedDistanceFields (SDF)
+The source that @Lawrence3DPK gave is quite complex.
+You can find the following code segments there, but I’m not sure if they can help solve the problem.
+three-raymarcher/src/shaders/raymarcher.vert at 5f26d57e5bb0a345b286dd163a280bc147824cee · danielesteban/three-raymarcher · GitHub
+```
+void main() {
+  gl_Position = vec4(position.xy, 0, 1);
+  float aspect = resolution.y / resolution.x;
+  vec2 uv = vec2(position.x, position.y * aspect);
+  float cameraDistance = (1.0 / tan(cameraFov / 2.0)) * aspect;
+  ray = normalize(vec3(uv, -cameraDistance) * mat3(viewMatrix));
+}
+```
+three-raymarcher/src/shaders/raymarcher.frag at 5f26d57e5bb0a345b286dd163a280bc147824cee · danielesteban/three-raymarcher · GitHub
+```
+void main() {
+  vec4 color = vec4(0.0);
+  float distance = cameraNear;
+  march(color, distance);
+  fragColor = saturate(sRGBTransferOETF(color));
+  float z = (distance >= MAX_DISTANCE) ? cameraFar : (distance * dot(cameraDirection, ray));
+  float ndcDepth = -((cameraFar + cameraNear) / (cameraNear - cameraFar)) + ((2.0 * cameraFar * cameraNear) / (cameraNear - cameraFar)) / z;
+  gl_FragDepth = ((gl_DepthRange.diff * ndcDepth) + gl_DepthRange.near + gl_DepthRange.far) / 2.0;
+}
+```
+three-raymarcher/src/shaders/screen.frag at 5f26d57e5bb0a345b286dd163a280bc147824cee · danielesteban/three-raymarcher · GitHub
+```
+void main() {
+  fragColor = texture(colorTexture, uv);
+  gl_FragDepth = texture(depthTexture, uv).r;
+}
+```
+gkjohnson
+February 5, 2025, 3:03pm
+8
+Setting gl_FragDepth is a bit more complicated than I remembered. I made a PR to add depth calculation to the webgl_volume_instancing example so there’s at least one demonstration. You can see the PR here.
+These are the important lines (modified to be more general):
+```
+// calculate the final point in the ndc coords
+vec4 ndc = projectionMatrix * viewMatrix * vec4( worldPoint, 1.0 );
+ndc /= ndc.w;
+
+// map the ndc coordinate to depth
+// https://stackoverflow.com/questions/10264949/glsl-gl-fragcoord-z-calculation-and-setting-gl-fragdepth
+float far = gl_DepthRange.far;
+float near = gl_DepthRange.near;
+gl_FragDepth = ( ( ( far - near ) * ndc.z ) + near + far ) / 2.0;
+```
+“worldPoint” is the final intersected point in the raymarching logic.
+“ndc” is the world point transformed into normalized device coordinates by multiplying the world coordinate by the camera view matrix and projection matrix (both uniforms).
+Then the final transformation to a gl_FragDepth value is explained in the referenced stack overflow link.
+seanwasere
+February 5, 2025, 3:53pm
+9
+I’ve been experimienting a bit with SDF lately, and it seems that you can kind of mix threejs geometry with SDF using gl_FragDepth
+The black plane with all the repeated spheres is a SDF scene, the cube is a classic threejs box geometry.
+hofk
+February 5, 2025, 7:13pm
+10
+Thanks for the contributions.
+@gkjohnson
+Will have to see if I can figure out how exactly gl_FragDepth needs to be integrated in my example. I already have a vec 2 ndc, but it apparently has a different meaning. As a non-expert, I put together some things from examples and tried until it fit.
+@seanwasere
+In the original post I wrote: “Does it make more sense to use ShaderMaterial as the basis?”
+It looks like it does. I have also worked with ShaderMaterial a bit and the gl_FragDepth problem does not occur.
+But it’s just a plane mesh and doesn’t look integrated. I thought I could achieve a better integration into the scene with the other variant. But I’m not sure if it really makes a difference. If I can still manage it, we’ll see.
+hofk
+February 7, 2025, 11:05am
+11
+I have now tried the shader material variant.
+This works as expected. You don’t even need gl_FragDepth .
+2025-02-07 12.01.14499×469 79.9 KB
+UPDATE:
+gl_FragDepth added
+With gl_FragDepth = p.z + 1.0; it looks even better.
+2025-02-07 14.16.41810×741 72.7 KB
+SDF-ShaderMaterial
+The Code;
+```
+<!DOCTYPE html>
+
+<head>
+<meta charset="UTF-8" />
+<title>SDF-ShaderMaterial</title>
+</head>
+<body></body>
+
+<script type="module">
+
+// local import  
+import * as THREE from "../jsm/three.module.173.js";
+import { OrbitControls} from '../jsm/OrbitControls.173.js';
+
+const scene = new THREE.Scene( );
+const camera = new THREE.PerspectiveCamera( 65, window.innerWidth / window.innerHeight, 0.01, 100 );
+camera.position.set( 1, 3, 9 );
+const renderer = new THREE.WebGLRenderer( { antialias: true } );
+renderer.setClearColor( 0xdedede );
+renderer.setSize( window.innerWidth, window.innerHeight );
+document.body.appendChild( renderer.domElement );
+const controls = new OrbitControls( camera, renderer.domElement );
+ 
+const shaderMaterial = new THREE.ShaderMaterial( {
+    vertexShader: `
+        varying vec2 vUv;
+        void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+        }
+    `
+    ,
+    
+    fragmentShader: ` 
+    varying vec2 vUv;
+    
+    // SDF primitives   see https://iquilezles.org/articles/distfunctions/
+    // ...................................................................
+    
+    float sdSphere( vec3 p, float radius ) {
+        return length( p ) - radius;
+    }
+    
+    float sdTorus( vec3 p, vec2 t ) {
+        vec2 q = vec2( length( p.xz ) - t.x, p.y );
+        return length( q ) - t.y;
+    }
+    
+    float sdRoundBox( vec3 p, vec3 b, float r ) {
+        vec3 q = abs( p ) - b + r;
+        return length( max( q, 0.0 ) ) + min( max( q.x, max( q.y, q.z ) ), 0.0 ) - r;
+    }
+    
+    //....................................................................
+    
+    void main( ) {
+        
+        vec2 uv = vUv * 2.0 - 1.0;
+        vec3 cp = vec3( -0.5, 1.8, -6.0 ); // camera position
+        vec3 cd = vec3( 0.0, 0.5, 0.0 );   //camera line of sight
+        
+        vec3 dir = normalize( cd - cp );
+        vec3 x = normalize( cross( dir, vec3( 0.0, 1.0, 0.0 ) ) );
+        vec3 y = cross( x, dir );
+        vec3 cPlane = uv.x * x + uv.y * y;
+        
+        vec3 rd = normalize( cPlane + dir );
+        vec3 col = vec3( 1.0, 1.0, 1.0 );
+        
+        float t = 0.01; // or  0.0;
+        
+        const int MAX_STEPS = 128; // try other values 10 ... 200
+        
+        for ( int i = 0; i < MAX_STEPS; i ++) {
+        
+            vec3 p = cp + rd * t; // new position on ray
+            
+            float dSph = sdSphere( p, 1.0 );
+            float dTor = sdTorus( p, vec2( 0.9, 0.2 ) );
+            
+            float dSub = max( -dSph, dTor );    // SDF Subtraction
+            
+            float dRBox = sdRoundBox( p, vec3( 0.3, 0.15, 2.1 ), 0.1 ); 
+            
+            float d = min( dSub, dRBox );       // SDF Union
+
+            gl_FragDepth = p.z + 1.0;  //  added
+
+            if ( d < 0.01 ) {
+                
+                col = vec3( 0.5 + 0.5 * sin( d + t ),
+                                   0.5 + 0.5 * sin( d + t + 1.0 ),
+                                   0.5 + 0.5 * sin( d + t + 2.0 ) );
+                
+                break;
+                
+            }
+            
+            if ( t > 128.0 ) { t = -1.0; break; }
+            
+            t += d;
+            
+        }
+        
+        if ( t > 0.0 ) {
+        
+            gl_FragColor = vec4( col, 1.0 );
+            
+        }
+        
+        if ( t < 0.0 ) {
+            
+             gl_FragColor = vec4( vec3( 0.87059, 0.87059, 0.87059 ), 1.0 );  //  0.87059  => 0xdedede
+             
+        }
+        
+    }    
+    `   
+} );
+
+const shaderPlane = new THREE.PlaneGeometry( 20, 20 );
+const mesh = scene.add( new THREE.Mesh( shaderPlane, shaderMaterial ) );
+
+const sphMesh = new THREE.Mesh( new THREE.SphereGeometry( 2, 12, 12 ), new THREE.MeshBasicMaterial( { color: 0xff0000, wireframe: true } ) ); 
+
+scene.add( sphMesh );
+sphMesh.position.set( 0, 1, 0 );
+
+window.addEventListener(
+    'resize',( ) => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix( );
+        renderer.setSize( window.innerWidth, window.innerHeight );
+    },
+    false
+)
+
+const clock = new THREE.Clock( );
+let t;
+
+function animate( ) {
+
+    requestAnimationFrame( animate );
+    
+    t = clock.getDelta( )
+    
+    sphMesh.rotation.y += 0.2 * t;
+    sphMesh.rotation.z += 0.2 * t;
+    
+    renderer.render( scene, camera );
+
+}
+
+animate()
+
+</script>
+
+</html>
+```
+I might be able to do this with the other version and gl_FragDepth.
+hofk
+February 7, 2025, 8:18pm
+12
+I delved deeper into the problem, studied examples and also a little AI.
+The result 03_SignedDistanceFields (SDF)
+2025-02-07 21.06.17701×591 95.2 KB
+The three.js scene is behind the SDF, which is static and not influenced by OrbitControls. I asked, can it also be integrated?
+I got: One possibility should be raymarching directly in the scene:
+“If you want your SDF body to behave exactly like a normal 3D object, you would have to integrate the raymarching calculation into a shader of a mesh, which then exists as a regular object in the scene. This mesh could then also be influenced by OrbitControls. However, this is much more complex to implement.”
+I think you have to intervene in the core of three.js?
+The Code:
+```
+<!DOCTYPE html>
+
+  <head>
+    <meta charset="UTF-8" />
+    <title> 03_SignedDistanceFields (SDF)</title>
+  </head>
+ <body></body>
+ 
+<script type="module">
+
+// local import  
+import * as THREE from "../jsm/three.module.173.js";
+import { OrbitControls} from '../jsm/OrbitControls.173.js';
+import { EffectComposer } from "../jsm/EffectComposer.173.js";
+import { RenderPass } from "../jsm/RenderPass.173.js";
+import { ShaderPass } from "../jsm/ShaderPass.173.js";
+
+const WIDTH = 800;
+const HIGHT = 800;
+const scene = new THREE.Scene( );
+scene.background = new THREE.Color( ).setRGB( 0.87059, 0.87059, 0.87059 );   //  0.87059  => 0xdedede
+const camera = new THREE.PerspectiveCamera( 65, WIDTH / HIGHT, 0.01, 1000);
+camera.position.set( 1, 3, 12 );
+const renderer = new THREE.WebGLRenderer( { antialias: true } );
+renderer.setSize( WIDTH, HIGHT );
+document.body.appendChild( renderer.domElement );
+const controls = new OrbitControls( camera, renderer.domElement );
+
+const axesHelper = new THREE.AxesHelper( 10 );
+scene.add( axesHelper );
+
+const sphMesh = new THREE.Mesh( new THREE.SphereGeometry( 2, 12, 12 ), new THREE.MeshBasicMaterial( { color: 0xff0000, wireframe: true } ) ); 
+
+scene.add( sphMesh );
+sphMesh.position.set( 0, 1, 6 );
+
+const customShader = {
+    
+    uniforms: {
+        tDiffuse: { value: null },
+        time: { value: 0.0 },
+        resolution: { value: new THREE.Vector2( WIDTH, HIGHT ) },
+        cameraPos: { value: camera.position },
+        projInv: { value: new THREE.Matrix4( ) },
+        viewInv: { value: new THREE.Matrix4( ) },
+        viewMatrix: { value: new THREE.Matrix4() },
+        projectionMatrix: { value: new THREE.Matrix4() },
+        cameraNear: { value: camera.near },
+        cameraFar: { value: camera.far }
+            
+    },
+    
+    vertexShader:`
+        uniform sampler2D tDiffuse;
+        varying vec2 vUv;
+        void main( ) {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+        }
+    `,
+    
+    fragmentShader:`
+        uniform sampler2D tDiffuse;
+        uniform float time;
+        uniform vec2 resolution;
+        uniform vec3 cameraPos;
+        uniform mat4 projInv;
+        uniform mat4 viewInv;
+        //uniform mat4 viewMatrix;
+        uniform mat4 projectionMatrix;
+        varying vec2 vUv;
+        
+        // SDF primitives   see https://iquilezles.org/articles/distfunctions/
+        // ...................................................................
+        float sdSphere( vec3 p, float s ) {
+            return length( p ) - s;
+        }
+        
+        float sdTorus( vec3 p, vec2 t ) {
+            vec2 q = vec2( length( p.xz ) - t.x, p.y );
+            return length( q ) - t.y;
+        }
+        
+        float sdRoundBox( vec3 p, vec3 b, float r ) {
+            vec3 q = abs( p ) - b + r;
+            return length( max( q, 0.0 ) ) + min( max( q.x, max( q.y, q.z ) ), 0.0 ) - r;
+        }
+        //....................................................................
+        
+        vec3 pos = vec3( 0.0, 0.0, 0.0 );
+        
+        // raymarching 
+        float raymarch(vec3 cp, vec3 rd) { // cp: cameraPos, rd: ray direction
+        
+            float t = 0.0;
+            const int MAX_STEPS = 128; // try other values 10 ... 200
+            
+            for (int i = 0; i < MAX_STEPS; i ++) {
+            
+                pos = cp + rd * t; // new position on ray
+                
+                float dSph = sdSphere( pos, 1.0 );
+                float dTor = sdTorus( pos, vec2( 0.9, 0.2 ) );
+                
+                float dSub = max( -dSph, dTor ); // SDF Subtraction
+                  
+                float dRBox = sdRoundBox( pos, vec3( 0.3, 0.15, 2.1 ), 0.1 );              
+                
+                float d = min( dSub, dRBox ); // SDF Union          
+                                
+                if ( d < 0.001 ) return t; // hit
+                
+                t += d;
+                
+                if ( t > 128.0 ) break;
+                
+            }
+            
+            return -1.0; // no match
+            
+        }
+        
+        void main( ) {
+        
+            vec4 sceneColor = texture2D( tDiffuse, vUv );
+
+            vec2 ndc = vUv * 2.0 - 1.0;             // conversion vUv (0..1) =>  NDC (-1..1)
+            vec4 clipPos = vec4( ndc, -1.0, 1.0 );  // clip space ray
+            vec4 viewPos = projInv * clipPos;       // unproject into the viewspace
+            viewPos = viewPos / viewPos.w;          // viewspace coordinates
+            vec4 worldPos = viewInv * viewPos;      // unproject into the worldspace
+            
+            // ray direction: from  cameraPos to unprojected pixel
+            
+            float distFactor = 0.25;   // filling size
+            vec3 rd = normalize( worldPos.xyz - cameraPos * distFactor ); 
+            vec3 cp = cameraPos;
+            
+            float t = raymarch( cp, rd );
+            
+            vec4 sdfResult;
+            
+            if ( t > 0.0 ) {
+                
+                // hit: color depending on t
+                vec3 col = vec3( 0.5 + 0.5 * sin( t + time ),
+                            0.5 + 0.5 * sin( t + time + 1.0 ),
+                            0.5 + 0.5 * sin( t + time + 2.0 ) );
+                            
+                vec4 eyePos = viewMatrix * vec4(pos, 1.0);
+                vec4 clipHit = projectionMatrix * eyePos;
+                clipHit /= clipHit.w;
+                // Mapping von NDC z-Wert ([-1,1]) in [0,1]:
+                float depth = clipHit.z * 0.5 + 0.5;
+                gl_FragDepth = depth;
+                          
+                sdfResult = vec4( col, 1.0 );
+                
+            } else {
+                
+                sdfResult = vec4( 0.0, 0.0, 0.0, 0.0 );
+                
+            }
+            
+            gl_FragColor = mix( sceneColor, sdfResult, sdfResult.a );
+            
+        }
+        `,
+    
+};
+
+const composer = new EffectComposer( renderer );
+const renderPass = new RenderPass(scene, camera);
+composer.addPass( renderPass );
+
+const shaderPass = new ShaderPass( customShader );
+shaderPass.renderToScreen = true;
+shaderPass.material.transparent = true;
+shaderPass.material.blending = THREE.NormalBlending;
+composer.addPass( shaderPass );
+
+const clock = new THREE.Clock( ); // not used
+
+function animate( ) {
+    
+    requestAnimationFrame( animate );
+    customShader.uniforms.time.value = clock.getElapsedTime( ); // not used
+      
+    customShader.uniforms.projInv.value.copy( camera.projectionMatrix ).invert( );
+    customShader.uniforms.viewInv.value.copy( camera.matrixWorld );
+    customShader.uniforms.projectionMatrix.value.copy( camera.projectionMatrix );
+    customShader.uniforms.viewMatrix.value.copy( camera.matrixWorldInverse );
+    
+    composer.render( );
+    
+}
+
+animate( );
+
+</script>
+</html>
+```
+prisoner849
+February 12, 2025, 10:47am
+13
+Recalled about a topic with SDF and a box: Three.js Custom Shader Object Coordinate - #4 by prisoner849
+hofk
+February 12, 2025, 11:15am
+14
+Thanks for the tip.
+I should look through my collection more often.
+There it is in 2021
+2025-02-12 12.11.41778×162 24 KB
+It would have saved me a bit of a headache, but on the other hand, it’s healthy and I’ve learned something new.
+With this variant it will certainly be perfect, I’ll take a closer look now.
+prisoner849
+February 12, 2025, 7:14pm
+15
+That was pure fun to make this.
+Video:
+Demo: https://codepen.io/prisoner849/full/vEYYPwz
+Boxes are usual meshes. The reflective blob is three SDF spheres, drawn on the box’s surface (used a wireframe helper to show its limits)
+SDF shapes from imported points
+hofk
+February 12, 2025, 7:15pm
+16
+Unfortunately, it only runs up to revision 136, from 137 onwards only a white cube rotates. No console message.
+The pure three.js part is small, I think it’s the shader code?
+Update:
+It has overlapped, I mean https://codepen.io/prisoner849/full/YzpBPbm
+prisoner849
+February 12, 2025, 7:24pm
+17
+Mine works with r173 (latest)
+hofk
+February 13, 2025, 9:44am
+18
+I used the code from
+https://codepen.io/prisoner849/full/YzpBPbm
+I have commented out everything that is not essential for the SDF.
+Furthermore, it runs up to r136, not at r137 and 173.
+see
+https://hofk.de/main/threejs/_SDF/01_SDF-Shader-Raymarching.html
+hofk
+February 13, 2025, 2:00pm
+19
+My exercise example now works in this variant up to r136.
+https://hofk.de/main//threejs/_SDF/02_SDF-Shader-Raymarching.html
+2025-02-13 14.57.59901×575 105 KB
+prisoner849
+February 13, 2025, 2:16pm
+20
+Try to change the final line gl_FragColor = vec4( col, 0. ); to gl_FragColor = vec4( col, 1. );, and see, if it works with the latest version.
+next page →
+Related topics
+Topic
+Replies
+Views
+Activity
+SDFs in the scene - raymarching
+Resources
+sdf
+,
+raymarching
+31
+1340
+March 20, 2025
+Generation of SDFGeometry online and locally
+Resources
+geometry
+,
+buffergeometry
+,
+gltf
+,
+sdf
+38
+1476
+October 21, 2026
+Raycast for meshes and SDFs
+Questions
+mesh
+,
+raycast
+,
+sdf
+18
+308
+March 19, 2025
+Witch's Swill [SDF, MeshStandardMaterial]
+Showcase
+standard-material
+,
+sdf
+3
+246
+February 19, 2025
+Personal Project - Ray Tracing Distance Fields
+Showcase
+3
+1344
+March 6, 2022

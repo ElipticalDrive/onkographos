@@ -1,0 +1,220 @@
+Problem The 3D Gaussian Splatting paper's key training-time mechanism is densification — periodically SPLIT Gaussians whose accumulated gradient magnitude exceeds a threshold (they cover too much space) and PRUNE Gaussians whose opacity ...
+
+GaussianSplatting densification (split/prune during training) not exposed through the facade · Issue #1835 · ooples/AiDotNet · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+GaussianSplatting densification (split/prune during training) not exposed through the facade #1835
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+GaussianSplatting densification (split/prune during training) not exposed through the facade#1835
+Copy link
+Description
+ooples
+opened on Jul 9, 2026
+Issue body actions
+Problem
+The 3D Gaussian Splatting paper's key training-time mechanism is densification — periodically SPLIT Gaussians whose accumulated gradient magnitude exceeds a threshold (they cover too much space) and PRUNE Gaussians whose opacity has collapsed to near-zero. This grows the initial cloud (~100k random Gaussians) into millions of specialized ones over the training run, and is what gives real GS its paper-quality output.
+GaussianSplattingOptions exposes fields like DensificationInterval, SplitPositionJitter, SplitScaleFactor, SplitOpacityFactor — the config knobs exist. But nothing in the facade path (ConfigureModel → BuildAsync) invokes densification during training. The Gaussian count stays fixed at whatever the constructor produced.
+Combined with #1833 (facade optimizer settings silently ignored for GS), this caps GS quality at "random-init cloud with tiny gradient updates" — which is what the Week 11 Session B demo demonstrates visually (a few blurry blobs, unchanged across camera angles, regardless of training epochs).
+Fix direction (agreed in design discussion)
+Model-internal densification, following DDPM's specialization pattern.
+DDPM handles its specialization (noise-prediction training, timestep sampling) entirely inside its inherited NeuralNetworkBase.Train(input, target) path — callers see a uniform Train(x, y) API; the specialized behavior is internal. No callback infrastructure was needed. GS densification is the same shape of problem — an interleaved-during-training operation that mutates the model — so it applies the same pattern.
+Concretely: densification lives inside GaussianSplatting.TrainOnImageBatch (per #1834's IImageTrainable<T>). GaussianSplattingOptions.DensificationInterval and friends drive the schedule; the model decides when to densify based on its options. Facade calls TrainOnImageBatch per iteration; the model runs its gradient step + interleaves densification when the schedule fires. No new callback interface, no divergence from how DDPM already works.
+Why this exceeds industry standard
+Reference GS implementations (gsplat, nerfstudio, INRIA's official 3DGS repo) hardcode densification inside their training scripts. Users configure via YAML sections but the schedule is baked in — one code path per fork.
+AiDotNet with model-internal densification: densification is a first-class configurable property of GaussianSplattingOptions — same options object exposes densification + hyperparameters + rendering all in one place. Reference impls fragment these across YAML sections (model config vs. training config vs. optimizer config).
+No new callback infrastructure to teach; no divergence from how DDPM (and future specialized models) work. Uniform mental model.
+Beyond-industry excellence goals
+Four goals, all agreed to during design discussion:
+1. All densification config in one strongly-typed options object (already partially there)
+GaussianSplattingOptions already exposes DensificationInterval, SplitPositionJitter, SplitScaleFactor, SplitOpacityFactor, SplitOpacityMax. Extend to cover every industry-standard knob:
+DensificationStartIteration — when to begin densifying (skip first N iters while cloud stabilizes)
+DensificationEndIteration — when to stop (near end of training, freeze the cloud)
+GradientNormThreshold — the actual split trigger (paper: τ_pos = 0.0002)
+OpacityPruneThreshold — opacity below which a Gaussian is culled (paper: 0.005)
+MaxGaussianCount — hard ceiling to prevent OOM
+GradientAccumulationWindow — how many iterations of gradient norm to average for the split decision
+All nullable, all industry-standard defaults (from the 3DGS paper), user can override any.
+2. Adaptive densification schedule (data-driven, not fixed interval)
+Reference impls use a fixed every N iterations schedule. AiDotNet exceeds by exposing an AdaptiveSchedule option (default off, matches industry when off) that triggers densification when observed signals warrant it:
+Gradient norm variance drops (cloud has stabilized enough that split noise won't destabilize)
+Loss plateaus (cloud can't improve without more capacity)
+Adaptive schedule is fully customizable via a strategy interface; industry-standard fixed-interval schedule remains the default.
+3. Post-training densification pruning + compression pass
+After training, run a compression pass:
+Prune all Gaussians below OpacityPruneThreshold
+Merge nearby Gaussians whose bounding ellipses overlap by > threshold
+Quantize spherical harmonics (float32 → int8 with a per-Gaussian scale)
+Reference impls do this manually as post-processing scripts. AiDotNet exposes it as a first-class option: CompressOnBuildComplete = true (default false — industry-standard: user runs their own post-processing). When enabled, BuildAsync returns with the compressed cloud. Fully customizable via CompressionOptions (per-technique on/off).
+4. Per-attribute learning rate schedules for split children
+When a Gaussian is split, the two children inherit modified hyperparameters:
+Position LR decreases (they're now local — small movements matter more, big jumps destabilize)
+Scale LR increases (they're smaller — need more updates per step to converge)
+Opacity LR unchanged
+Paper implements this manually. AiDotNet exposes via SplitChildLearningRateScales — nullable per-attribute multipliers, industry-standard defaults from the paper, user can override.
+Wiring surface
+ConfigureModel (existing) — no change; GaussianSplattingOptions extended.
+ConfigureOptimizer (existing) — feeds into the per-attribute schedules (per GaussianSplatting facade training silently ignores ConfigureOptimizer settings (LR, betas, weight decay) — uses internal updates instead #1833's hyperparameter routing).
+No new Configure* methods.
+Related
+Facade BuildAsync throws on radiance-field models: feature-selection guard misses 1-D-encoded neural inputs #1826 / fix(facade): unblock BuildAsync for radiance-field models (#1826) #1829 — original facade unblock chain
+GaussianSplatting facade training silently ignores ConfigureOptimizer settings (LR, betas, weight decay) — uses internal updates instead #1833 — GS optimizer hyperparameter routing (densification per-attribute LR schedules use this)
+[Feature Request] Image-space (photometric) NeRF / radiance-field training via the facade #1834 — image-space training path (IImageTrainable<T> is where GS's TrainOnImageBatch lives; densification runs inside it)
+Activity
+ooples
+added 13 commits that reference this issue on Jul 9, 2026
+feat(radiance-field): image-space (photometric) training path via IDa…
+...
+9044d9e
+feat(gaussian-splatting): densification schedule via GaussianSplattin…
+...
+e60271d
+feat(radiance-field): #1834 excellence goals + fix NeRF/InstantNGP Tr…
+...
+2254b74
+feat(gaussian-splatting): #1835 excellence goals — adaptive schedule …
+...
+a5a96bf
+fix(build): green the solution after #1834/#1835/#1836 excellence-goa…
+...
+a264b57
+fix(gaussian-splatting): GS.RenderImage produced all-zero output (rot…
+...
+4cb95ac
+feat(radiance-field): image-space (photometric) training path via IDa…
+...
+10487c0
+feat(gaussian-splatting): densification schedule via GaussianSplattin…
+...
+34047a7
+feat(radiance-field): #1834 excellence goals + fix NeRF/InstantNGP Tr…
+...
+46d38c0
+feat(gaussian-splatting): #1835 excellence goals — adaptive schedule …
+...
+6050e8b
+fix(build): green the solution after #1834/#1835/#1836 excellence-goa…
+...
+f659b34
+fix(gaussian-splatting): gS.RenderImage produced all-zero output (rot…
+...
+d870a4f
+fix: consolidated AiDotNet fixes + excellence goals + audit pass (#1832…
+...
+1ca524d
+ooples commented on Aug 14, 2026
+ooples
+on Aug 14, 2026
+OwnerAuthor
+More actions
+Triage note (PR #1789 sweep): checked against the #1789 branch — zero related commits, so that PR neither fixes nor affects this issue. Leaving it open and unlinked; it remains genuine outstanding work.
+ooples
+added 2 commits that reference this issue on Sep 5, 2026
+Drive training callbacks from the image-space epoch loop
+...
+4d9a563
+fix(training): drive callbacks from the image-space epoch loop
+...
+e9b7f2f
+ooples commented on Sep 5, 2026
+ooples
+on Sep 5, 2026
+OwnerAuthor
+More actions
+Re-audit against master (origin/master @ a22d7e78bf (2026-09-05))
+Why this correction exists. The Triage note (PR #1789 sweep) comment on this issue was produced by checking the #1789 branch, which was cut on 2026-07-05. That sweep ran on 2026-08-14, the day before #1789 merged. Any fix that reached master in that 5.5-week window outside #1789 was invisible to it, so those verdicts are false-negative-prone. Re-verified below against master itself.
+Verdict: DONE - recommend close
+Shipped by PR #1838 (merged as 1ca524d4e2, 2026-07-10). Densification is exposed and schedulable through the facade - 20 citing lines:
+src/NeuralRadianceFields/Data/IDensificationSchedule.cs:4 - "Densification firing schedule for GaussianSplatting (GaussianSplatting densification (split/prune during training) not exposed through the facade #1835 excellence goal Adding new Normalization options #2)."
+src/NeuralRadianceFields/Models/GaussianSplatting.cs:668 - "GaussianSplatting densification (split/prune during training) not exposed through the facade #1835 densification-schedule getters. Each returns the caller's explicit override"
+src/Models/Options/GaussianSplattingOptions.cs:13 and :37 - EnableDensification = true, plus the split/prune schedule knobs
+src/Models/Options/GaussianCompressionOptions.cs:7 - "(GaussianSplatting densification (split/prune during training) not exposed through the facade #1835 excellence goal Added new normalization options #3)"
+DensificationInterval is round-tripped in model state (GaussianSplatting_T_.State.g.cs:16)
+Posted by an automated re-audit of all 45 open issues against master on 2026-09-05. Every figure above was measured on the tree or read from CI run artifacts; none is carried over from a previous comment.
+ooples commented on Sep 5, 2026
+ooples
+on Sep 5, 2026
+OwnerAuthor
+More actions
+Triage decision (2026-09-05): staying OPEN.
+Verification went further than code inspection here, and it changed the verdict.
+What is genuinely delivered. Densification is exposed through the facade and does fire from the training loop — not merely configurable:
+GaussianSplatting.cs:2133 — if (EnableDensification && schedule.ShouldFire(_trainingStep, lossValue, meanGradNorm)) DensifyAndPrune(gradients);
+EnableDensification = true by default (GaussianSplattingOptions.cs:37)
+IDensificationSchedule ("GaussianSplatting densification (split/prune during training) not exposed through the facade #1835 excellence goal Adding new Normalization options #2"), GaussianCompressionOptions ("GaussianSplatting densification (split/prune during training) not exposed through the facade #1835 excellence goal Added new normalization options #3"), SplitChildLearningRateScales ("GaussianSplatting densification (split/prune during training) not exposed through the facade #1835 excellence goal Added new regression and normalization options #4")
+Split/prune knobs exposed: OpacityPruneThreshold, GradientNormThreshold, DensificationInterval, DensificationStartIteration/EndIteration
+Short-run auto-scaling so the paper window [500, 15000] does not silently never fire on smaller MaxIterations, with explicit values still overriding
+Why it is not closed. Training with densification enabled crashes on the step after the first split:
+```
+System.ArgumentException : Flat gradient length (224) must match ParameterCount (112).
+```
+DensifyAndPrune resizes the parameter surface but never invalidates the cached parameter layout, so ParameterCount keeps describing the previous cloud. Filed as #2089 with the full diagnosis, and fixed there (one line: InvalidateParameterCountCache() alongside the existing MarkSpatialIndexDirty()), with regression tests that train through the real path.
+Existing tests missed this because GaussianSplattingDensificationTests drives the internal RunDensifyAndPruneForTest hook rather than the training loop, and ImageTrainingPathTests sets EnableDensification = false.
+Remaining work to close this issue: confirm #2089's fix lands, then re-verify that a densification-enabled run trains to completion through the facade. The exposure work itself is done and should not be redone.
+ooples
+added 2 commits that reference this issue on Sep 6, 2026
+feat(models): reproduce the paper training recipe for 10 models
+...
+dd4ed2a
+feat(optimizers): report what the paper says, what was applied, and e…
+...
+e821cc5
+ooples commented on Oct 12, 2026
+ooples
+on Oct 12, 2026
+OwnerAuthor
+More actions
+Verified fixed on master (8b19edc848), so closing with the evidence rather than a change.
+Densification is both implemented and reachable through the facade:
+GaussianSplattingOptions exposes EnableDensification (default true),
+DensificationInterval, DensificationStartIteration, DensificationEndIteration and a
+pluggable DensificationSchedule.
+The model acts on them during training: src/NeuralRadianceFields/Models/GaussianSplatting.cs:2118
+resolves the schedule (FixedIntervalDensificationSchedule by default, the reference
+behaviour) and :2129 fires split/prune when EnableDensification && schedule.ShouldFire(step, loss, meanGradNorm).
+AdaptiveDensificationSchedule is there for the loss/gradient-driven variant
+(src/NeuralRadianceFields/Data/IDensificationSchedule.cs:45).
+Both arms are asserted rather than argued:
+GaussianSplattingDensificationFiresDuringTrainingTests.TrainOnImageBatch_WithDensificationEnabled_MutatesTheGaussianCloud
+and ..._WithDensificationDisabled_LeavesTheCloudUntouched, plus
+GaussianSplattingFacadeHyperparameterRoutingTests for the facade routing. Run just now on
+master, net10.0: 17 passed, 0 failed across those classes and the ConvTasNet set in #2298.
+ooples commented on Oct 12, 2026
+ooples
+on Oct 12, 2026
+OwnerAuthor
+More actions
+Closing: implemented and reachable through the facade, verified above (both densification arms asserted and passing).
+ooples
+closed this as completedon Oct 12, 2026
+ooples
+added a commit that references this issue on Oct 13, 2026
+fix: copy a nested options object instead of aliasing it, and test wh…
+...
+d87617f
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

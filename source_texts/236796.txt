@@ -1,0 +1,592 @@
+Differentiable 3D Gaussian Splatting for PyTorch on Apple Metal/MPS - Fix 3DGS/2DGS bugs and align training with the reference implementations by tchauffi · Pull Request #5 · tchauffi/metalsplat
+
+Fix 3DGS/2DGS bugs and align training with the reference implementations by tchauffi · Pull Request #5 · tchauffi/metalsplat · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+tchauffi
+commented
+Sep 22, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Fixes bugs found in two reviews of the codebase and aligns training with the reference 3DGS / Mip-Splatting / 2DGS implementations (each claim checked against their source). One commit per fix.
+Bugs (first review)
+Rasterizer backward with tile_size < 16 (3DGS and 2DGS): gradient staging assumed 256 threads per tile; smaller tiles read uninitialised shared memory, which gave wrong gradients and possible out-of-bounds atomics. The forward pass was unaffected.
+Opacity reset kept stale Adam moments: after each reset, opacities recovered too slowly, and the next densify cull removed about 76% of the 2DGS model. The reset now zeroes the opacity's Adam moments, as the reference does.
+Hard edges at tile borders and at the image border: tile boxes and projection culling stopped at 3σ, but an opaque gaussian still draws out to about 3.33σ. Tile boxes are now opacity-aware (sqrt(2 ln(255·opacity))), and projection culls at the maximum extent.
+SH color not clamped at 0, unlike the reference and every viewer.
+PLY export ignored the 3D filter, so exported scenes looked different in external viewers; save_ply(..., filter_3d=) now bakes it in.
+PSNR was computed on unclamped predictions; one shared losses.psnr now clamps to [0, 1].
+Held-out eval views leaked into training through the 3D filter, the initial scale and the camera extent.
+Bugs (second review)
+SH evaluation read other gaussians' coefficients when the active degree was above the stored one (eval_sh defaulted to degree 3). It now validates the degree, and the kernel gates every band on the stored count.
+No input checks at the Metal op boundary: an int64 background rendered black, and an abs_grad_accum left at a stale size took atomic adds past its end. The wrappers now check dtype, device and shape.
+3DGS depth and final_T reported requires_grad=True but their gradient was dropped, so a depth loss trained nothing. They are now marked non-differentiable.
+The 3DGS reference rasterizer composited the gaussian that exhausts transmittance; the kernel drops it. The oracle was up to ~5e-3 off, under the tests' tolerance.
+Densify stopped pruning once at max_points, and one round could overshoot the cap. The cap is now hard, and pruning always runs.
+2DGS tile bounds were a 3DGS EWA box × 2.5 margin. They still clipped some tilted near-camera splats (4 of 480 drawn splats in random scenes) and were ~2.5× too wide per axis otherwise. Bounds are now the exact screen box of the splat's alpha-cutoff ellipse under the projective transform, and opacity-aware.
+Model rebuilds went through the activations (densify, prune, seed, cleanup): logit's clamp capped every raw opacity at ±9.2, and quaternions were renormalized under migrated Adam moments. Rebuilds now copy raw parameters losslessly.
+COLMAP fy/cy were scaled by the width ratio; they now use the height ratio (garden: cy 420.2 → 420.0).
+Seeding's fallback depth came from every gaussian in front of the camera instead of those in frame.
+Saving a model with zero gaussians crashed.
+.gitignore's data/ also matched src/metalsplat/data/, so new files there would never be committed.
+Structure
+Shared model base: GaussianModel and Gaussian2DModel subclass one SplatModel, with lossless row operations (select, cat, raw_rows, with_rows).
+Less duplication: one split/clone/prune core for both pipelines. Prune, seed and cleanup accept either model, and the 3DGS/2DGS copies of .ply I/O and Metal helpers are merged. The .ply parser now rejects non-float properties instead of misreading them. The Metal helpers live in kernels/common.metal, which the kernel loader inlines via a local #include.
+metalsplat.training.GaussianTrainingState keeps the optimizer, accumulators and 3D filter in step with the model through densify/seed/prune. Both training scripts use it.
+Clearer environment requirements: render() on CPU raises a clear "needs MPS" error, and the README no longer calls the references a CPU fallback. KMP_DUPLICATE_LIB_OK is set only when a COLMAP scene is loaded, not on import.
+API changes
+2DGS projection and rasterization:
+project_gaussians_2dgs returns (means2d, depths, rects, valid, transform, normal) and takes filter_size / opacities.
+rasterize_gaussians_2dgs takes rects instead of radii / conics.
+render_2dgs drops eps2d, which only fed the old bound.
+eval_sh defaults to the degree the coefficients hold.
+Densify: max_points is a hard cap. prune_low_opacity_2dgs is now an alias of prune_low_opacity.
+Aligned with the reference
+3D filter: sampling_scale scales the variance, as in Mip-Splatting (* 0.2 ** 0.5); the old filter was about 2.2× too narrow.
+Learning rates: SH base color 0.0025 and higher bands /20 (new per-coefficient lr_scale in SparseAdam), scales 0.005, rotations 0.001, held constant.
+Density control: split and clone first, then prune the result; world-size pruning at 0.1 × camera extent (3DGS and 2DGS); split threshold at percent_dense × camera extent (3DGS). The reference's 20 px screen-size prune is deliberately not reproduced: its densification_postfix zeroes max_radii2D first, so it never fires. Enforcing it deleted foreground gaussians.
+Results (garden, 4000-step runs; main vs this branch)
+3DGS
+2DGS
+Held-out PSNR at step 4000
+21.84 → 24.05 dB*
+22.79 → 24.06 dB
+* The 3DGS "before" number is from an older log, so the comparison is only approximate. The 2DGS gain is mostly recovery from the opacity-reset collapse; before the reset, main was slightly ahead (24.13 vs 23.62 dB at step 2000).
+The second review's changes were checked on the trained garden models:
+Renders: bit-identical to before when using the old intrinsics. The exact 2DGS tile bounds make 2DGS rendering 2× faster (14.1 → 6.9 ms per held-out view).
+.ply output: byte-identical.
+Training scripts: on a short smoke schedule the refactored scripts match the old ones within GPU atomic-add nondeterminism.
+Not done
+No full 30k (3DGS) / 15k (2DGS) run yet, so the README numbers (23.5 dB / 0.741 SSIM) are not updated.
+Existing .ply files were exported without the baked 3D filter; re-export them.
+Existing trained models were fitted to the old fy/cy, so under the corrected intrinsics they score slightly lower (−0.05 dB 3DGS, −0.005 dB 2DGS) until retrained.
+Tests
+321 tests pass (up from 251 on main). They include regression tests that fail on the old code: tile-size gradients, tile-border edge, image-border cull, SH out-of-bounds read, saturated-pixel oracle, 2DGS footprint coverage on the splats the old bound clipped, and lossless rebuilds.
+🤖 Generated with Claude Code
+tchauffi
+and others
+added 30 commits
+September 22, 2026 21:40
+Fix rasterizer backward for small tiles, clamp SH colour, bake 3D fil…
+…
+cd35ff2
+```
+…ter on export
+
+- rasterize/rasterize_2dgs backward: stage the gaussian batch with a
+  strided loop. With tile_size < 16 the threadgroup has fewer threads
+  than BACKWARD_BATCH slots, so the tail of each batch was read
+  uninitialised (garbage gradients, possible out-of-bounds atomics).
+- colors_from_view: clamp SH colour at 0 like the reference rasterizer,
+  so training can't rely on negative colour that external viewers clamp.
+- save_ply: optional filter_3d bakes the Mip-Splatting 3D filter into
+  the written scales/opacities; train_garden passes it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Match reference 3DGS: 3D filter scale, learning rates, large-gaussian…
+…
+a8a4dc7
+```
+… pruning
+
+- compute_3d_filter: sampling_scale is a variance factor, as in
+  Mip-Splatting (distance / focal * 0.2 ** 0.5); the radius was sqrt(5)x
+  too small.
+- SparseAdam: optional per-group lr_scale; sh_lr_scale gives DC 1x and
+  higher bands 1/20, the reference's f_dc / f_rest split.
+- train_garden: reference learning rates (SH 0.0025 with rest /20,
+  scales 0.005, quats 0.001), constant as in the reference, instead of a
+  shared decayed 0.01.
+- densify_and_prune: optional pruning of gaussians whose max projected
+  radius exceeds max_screen_size or whose scale exceeds max_world_size;
+  they are no longer split or cloned. RenderAux exposes radii.
+- train_garden: tracks max radii and prunes at 20px / 0.1 x camera extent
+  after the first opacity reset, as in the reference.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Clamp predictions in PSNR evaluation, share one psnr()
+…
+a497ee6
+```
+Rendered colour is only bounded below, so values above 1 were counted as
+error although every saved image and viewer clips them. Adds
+losses.psnr (clamps pred to [0, 1], as the reference evaluation does)
+and uses it in train_garden, train_garden_2dgs and evaluate instead of
+three unclamped copies.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Prune after split/clone like the reference; drop screen-size pruning
+…
+ec7b3ef
+```
+a8a4dc7 enforced the reference's 20px screen-size prune, but the
+reference zeroes max_radii2D in densification_postfix before the check,
+so it never fires there. Enforcing it deleted legitimately large
+foreground gaussians near the cameras, leaving black holes in eval
+renders by step 4000.
+
+densify_and_prune now splits and clones first and prunes the resulting
+set (opacity, world size, and optionally screen size for surviving
+originals), as the reference does: an oversized gaussian with a high
+gradient is split rather than dropped, and clones of low-opacity
+gaussians are pruned with their parent. train_garden keeps only the
+world-size check (0.1 x camera extent).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Opacity-aware tile bounding boxes: no hard edge at tile borders
+…
+edcd151
+```
+Tile boxes stopped at a fixed 3 sigma, but the rasterizer composites any
+gaussian whose alpha is still >= 1/255, which for an opaque one reaches
+~3.33 sigma. A gaussian still contributing was cut off at the tile
+border. The box now extends to sqrt(2 ln(255 * opacity)) sigmas (as
+gsplat does), exactly where alpha crosses the cutoff; faint gaussians get
+tighter boxes, and ones that never reach 1/255 are culled.
+
+Opacity is an optional input to bin_and_sort_gaussians; only the 3DGS
+rasterizer passes it, so 2DGS keeps the fixed 3 sigma.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Split at percent_dense x camera extent, like the reference
+…
+ea3e8b0
+```
+train_garden used the median nearest-neighbour spacing of the sparse
+points (0.116 on garden) as the split/clone boundary. The reference uses
+percent_dense (0.01) x the camera extent (0.049 on garden). Documents
+that densify_and_prune's scene_scale is this boundary.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Derive camera-based quantities from training views only
+…
+7ba0f7e
+```
+train_garden computed the 3D filter, the initial gaussian scale and the
+camera extent (split threshold, world-size pruning) from all cameras,
+including the held-out eval views, so those views shaped the model they
+score. Both scripts now use the training cameras only; the reference
+also computes its extent from training views.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Fix save_ply / load_ply docstrings
+…
+4e6e5a9
+```
+save_ply writes a flat-RGB model with 24 zero f_rest entries (the
+degree-2 layout), not a degree-0-only file; load_ply reads files up to
+degree 3, not only degree <= 2.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Cull at the maximum alpha extent so the image border isn't cut off
+…
+18bacf7
+```
+Projection culled a gaussian when its 3-sigma circle missed the image,
+but an opaque gaussian still composites out to sqrt(2 ln 255) ~= 3.33
+sigma, so gaussians just outside the frame that still reach it were
+dropped, cutting the border clean. The culling radius is now
+MAX_SIGMA_EXTENT; opacity isn't known at projection time, and tiling
+tightens the box per gaussian anyway. 2DGS keeps its 3-sigma base radius
+(its 2.5x margin already covers the frame edge).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Align 2DGS density control and SH learning rates with the reference
+…
+bec7d87
+```
+- densify_and_prune_2dgs: split and clone first, then prune the result
+  (opacity, and optionally world size), as the official 2DGS repo does:
+  large high-gradient splats split instead of being dropped, and clones
+  of low-opacity splats are pruned with them.
+- train_garden_2dgs: world-size pruning at 0.1 x camera extent after the
+  first opacity reset; higher SH bands at feature_lr / 20 via lr_scale.
+- camera_extent moves into metalsplat.camera, shared by both scripts.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Zero opacity Adam moments on opacity reset, like the reference
+…
+fc48264
+```
+reset_opacity kept the opacity's Adam moments. The raw-opacity gradient
+scales with the sigmoid slope, ~10x smaller at 0.01 than before the
+reset, so the stale second moment shrank every post-reset step and
+opacities could not recover before the next densify cull: on the 2DGS
+garden run one reset pruned 77% of the model (249k -> 58k). reset_opacity
+now takes the optimizer and zeroes exp_avg / exp_avg_sq for the opacity
+(keeping the step count), as the reference's replace_tensor_to_optimizer
+does. Both training scripts pass it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Stop SH evaluation reading other gaussians' coefficients
+…
+ca207f8
+```
+sh_forward evaluated every band up to active_degree without checking how
+many coefficients the buffer stores per gaussian, so an active degree
+above the stored one read the next gaussian's coefficients (and past the
+end of the buffer for the last one). eval_sh defaulted active_degree to
+3, which made eval_sh(degree_1_coeffs, dirs) hit it, and the model
+constructors accepted any active_sh_degree.
+
+- eval_sh defaults to the degree the buffer holds and raises for a
+  higher one or a coefficient count that is not a whole degree.
+- sh_forward gates each band on num_coeffs too, as sh_backward already
+  did, so the kernel cannot read out of bounds even if called directly.
+- GaussianModel / Gaussian2DModel reject active_sh_degree > sh_degree.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Validate tensors at the Metal op boundary
+…
+17a9404
+```
+The kernels index raw float32 buffers by gaussian id and stride with no
+bounds checks, so a bad input was wrong memory rather than an error: an
+int64 background was reinterpreted as float bits and rendered black, a
+non-float32 input was misread, and an abs_grad_accum / pixel_count_accum
+not reallocated after a densify, seed or prune took atomic adds past its
+end.
+
+The op wrappers now check every per-gaussian input for dtype, device and
+shape, and the in-place accumulators for size and contiguity (a copy
+would silently swallow the kernel's adds). The background is converted to
+float32 on the right device, since nothing depends on its identity.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Mark forward-only render outputs non-differentiable
+…
+b43cbe9
+```
+The 3DGS depth map and both pipelines' final_T have no backward (the
+rasterizers ignore their incoming gradients), yet they came out with
+requires_grad=True, so a loss on 3DGS depth trained nothing without any
+error. They, and the projection's integer radii / 0-1 valid flag, are
+now marked with ctx.mark_non_differentiable. 2DGS depth, which has a real
+backward, is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Make the 3DGS reference rasterizer stop where the kernel does
+…
+9d707f4
+```
+The kernel breaks before compositing the gaussian that would take a
+pixel's transmittance below 1e-4; the reference gated on the
+pre-update transmittance and composited it, so on saturated pixels the
+oracle the kernel is certified against was off by up to that gaussian's
+weight (~5e-3 in the new test), under the existing tests' 2e-3 tolerance.
+It now uses the same sticky exhausts/stopped logic rasterize_2dgs_ref
+already had, and a tight-tolerance saturated-pixel test covers forward
+and backward.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Keep pruning at the densify cap and make the cap hard
+…
+9d3520a
+```
+densify_and_prune and densify_and_prune_2dgs returned early once the
+model reached max_points, which also skipped their pruning, so opacity
+and world-size pruning stopped for the rest of the densify window. And
+below the cap a round could overshoot it by its whole candidate count.
+
+Candidate selection is now shared (densify.select_candidates): nothing
+is selected at the cap, and below it the candidates are cut to the
+max_points - N highest-gradient ones (each adds exactly one gaussian
+net). Split/clone/prune then always runs, and a round that changes
+nothing still returns the model unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Bin 2DGS splats by their exact screen footprint
+…
+bda6b2f
+```
+2DGS reused the 3DGS EWA (local-affine) projection, with the missing
+third scale set to 1e-6, to bound each splat for tile binning, inflated
+by a 2.5x margin and blind to opacity. The affine approximation
+underestimates a tilted or near-camera disk's perspective footprint, so
+the margin still missed some (4 of 480 drawn splats, 320 composited
+pixels, in random near-camera scenes), and it made every face-on splat's
+box ~2.5x too wide per axis.
+
+The footprint is now exact. The rasterizer draws where min(rho_uv,
+rho_screen) is under the alpha cutoff: the perspective image of the
+local ellipse u^2+v^2 <= c^2, whose dual conic T diag(c^2,c^2,-1) T^T
+gives a closed-form bounding box (the whole frame if the ellipse reaches
+the camera plane), joined with the screen filter's disk. The cutoff is
+opacity-aware as in 3DGS; validity uses full opacity.
+
+- Tiling bins per-gaussian rectangles (bin_and_sort_rects); 3DGS keeps
+  bin_and_sort_gaussians, which derives them from its conic.
+- project_gaussians_2dgs returns (means2d, depths, rects, valid,
+  transform, normal) and takes filter_size and opacities; the EWA path
+  (whose gradients were always zero) and eps2d are gone, also from
+  render_2dgs. rasterize_gaussians_2dgs takes rects instead of
+  radii/conics.
+
+On the trained garden model the renders are bit-identical and 2x faster
+(14.1 -> 6.9 ms per eval view); 3DGS renders are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Share one model implementation between 3DGS and 2DGS
+…
+f3e73a4
+```
+GaussianModel and Gaussian2DModel were two copies of the same ~100
+lines -- constructor, activations, colour/SH handling, random() --
+differing only in the number of scale axes (and 2DGS's rotmat/normals
+properties). Two copies is how fixes drift between the pipelines, and
+the next change adds row operations both need. They now subclass
+metalsplat.splat_model.SplatModel and declare NUM_SCALE_AXES; behaviour
+and public API are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Rebuild models from raw parameters, not through the activations
+…
+ceda77e
+```
+Densify, prune, seed and cleanup rebuilt the model through its
+constructor from activated values -- exp, sigmoid, normalize -- and back.
+logit clamps at 1e-4, so every rebuild capped every raw opacity (and
+plain-RGB colour) at +-9.2, and quaternions came back normalized under
+Adam moments accumulated for their unnormalized values. The standalone
+prune alone did this every 100 steps, to every gaussian.
+
+SplatModel gains lossless row operations (raw_rows, with_rows, select,
+cat), and every rebuild uses them: carried-over gaussians are now
+bit-identical, a split child is its parent's raw rows with the offset
+added to its mean and log(1.6) taken off its raw scales, and only
+freshly seeded gaussians are built from activated values. The two
+densify functions share the resulting split/clone/prune step
+(densify.split_clone_prune) instead of carrying two copies of it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Let pruning, seeding and cleanup take either model type
+…
+c0fed2a
+```
+With the shared model base and lossless row operations, nothing in
+prune_low_opacity, seed_uncovered_regions or metalsplat.cleanup depends
+on the model being 3DGS, yet they were typed and built for GaussianModel
+only, with prune_low_opacity_2dgs a verbatim copy -- the drift the
+review found (2DGS had no seeding or cleanup at all).
+
+- prune_low_opacity takes any SplatModel; prune_low_opacity_2dgs is now
+  an alias for it.
+- seed_uncovered_regions seeds the model's own type and scale count.
+- prune_isolated / damp_view_dependence accept a Gaussian2DModel.
+- densify2dgs's docstring no longer describes itself as a deliberate
+  parallel copy; README / render_video_2dgs say cleanup now accepts a
+  2DGS model (the orbit is still rendered without it).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Share the .ply reader/writer between the 3DGS and 2DGS exports
+…
+411fb61
+```
+export.py and export2dgs.py were two copies of the header writer, the
+header parser, the colour/SH column layout and the SH-degree detection,
+differing only in the number of scale_* properties. That now lives once
+in metalsplat._ply; the two modules keep only their model-specific parts
+(the 3D filter bake, the viewer-compatible scale_2). Written files are
+byte-identical to before on both trained garden models.
+
+The parser also stops misreading what it cannot handle: a non-float
+vertex property (which changes the per-vertex stride) or a vertex
+element after another element is now an error, and trailing elements
+after the vertex data are ignored instead of failing the reshape.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Share Metal helpers across kernels through a local include
+…
+e6f69cc
+```
+project.metal and project_2dgs.metal each carried their own copy of the
+row-major matrix loader, quat_to_rotmat, its hand-derived backward and
+the sqrt(2 ln 255) culling constant. torch.mps.compile_shader compiles a
+single source string, so the Metal compiler cannot resolve a local
+#include; the kernel loader now expands `#include "x.metal"` itself
+(each file at most once per library), and the shared code lives once in
+kernels/common.metal.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Keep per-gaussian training state together through densify/seed/prune
+…
+e3c9254
+```
+Every densify, seed and prune replaces the model, and the training
+scripts then had to rebuild and migrate the optimizer, reallocate
+grad_accum / grad_count / pixel_count and carry the 3D filter by hand --
+three call sites per script, two scripts. Missing one piece was not an
+error: an accumulator at the old size took the rasterizer's atomic adds
+for the wrong gaussians.
+
+metalsplat.training.GaussianTrainingState owns the model, its optimizer
+(built by a factory; scheduled per-group learning rates carry over), the
+accumulators and the 3D filter, and replace_model(model, source_index,
+parent_index) moves all of them at once. Both training scripts use it,
+and the helpers they duplicated (estimate_scene_scale,
+calibrate_initial_scale, save_image -- the last also copied into both
+fit_image scripts) now live there once.
+
+Smoke-trained on a compressed garden schedule, the old and new scripts
+match to within GPU atomic nondeterminism (e.g. 2DGS 18.09 vs 18.10 dB,
+186568 vs 186579 gaussians after 150 steps).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Allow exporting a model with no gaussians
+…
+d39abb7
+```
+Densify and prune can take a model to zero gaussians (a compressed
+schedule that prunes right after an opacity reset does), and then
+save_ply / save_ply_2dgs failed on an SH model: reshape(0, -1) cannot
+infer the f_rest width. The width is now explicit, and an empty model
+round-trips through both formats.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Say plainly that rendering needs MPS
+…
+1b8f1b3
+```
+The README (and several reference/ docstrings) called the pure-PyTorch
+references a "CPU-compatible fallback", but render() / render_2dgs()
+never dispatch to them: on CPU they failed inside the kernel dispatch
+with torch's generic "Passed CPU tensor to MPS op". Only tiling actually
+falls back.
+
+Every Metal op wrapper now checks the device first and raises a
+ValueError that says the kernels need 'mps' tensors and what the
+references are for; the README and docstrings describe the references
+as CPU-runnable implementations for small scenes, not a render backend.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Set KMP_DUPLICATE_LIB_OK only when a COLMAP scene is loaded
+…
+c687b6b
+```
+Importing metalsplat.data.colmap (and so metalsplat.data) set
+KMP_DUPLICATE_LIB_OK=TRUE for the whole process as an import side
+effect, a flag Intel documents as unsafe in general. It is needed --
+torch and pycolmap each bundle an OpenMP runtime and the process aborts
+on the second -- but only once pycolmap actually loads.
+
+pycolmap is now imported lazily inside load_colmap_scene, which sets the
+flag right before (still only if the caller has not set it either way),
+and the README's Requirements say so.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Stop .gitignore's data/ rule from matching the metalsplat.data package
+…
+6d5e745
+```
+`data/` ignored every directory named data, including
+src/metalsplat/data/: tracked files there needed `git add -f`, and a new
+module in the package would have been silently left out of commits. It
+is meant for the scene data at the repo root, so it is now `/data/`.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Rescale COLMAP intrinsics per axis
+…
+ce57fe2
+```
+load_colmap_scene scaled fx, fy, cx and cy all by the width ratio. A
+downsampled image's height rounds independently of its width (garden's
+1297x840 from 5187x3361: 0.250048 vs 0.249926), so fy/cy came out
+slightly off -- cy at 420.2 instead of the image centre 420.0. The
+vertical intrinsics now use the height ratio.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Seed at the depth of what the camera actually sees
+…
+ef26d0e
+```
+seed_uncovered_regions places a new gaussian for an uncovered pixel at a
+fallback depth its comment describes as a high percentile of this
+camera's *visible* gaussians, but it took the percentile over every
+gaussian in front of the camera -- including geometry far off to the
+side, which says nothing about this view's depth. It now uses the
+gaussians whose centre is in frame, falling back to everything in front
+only if none are.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Fix documentation that no longer matches the code
+…
+c559ad9
+```
+- README: tiling runs Metal kernels (it said "no kernel"); the headline
+  3DGS figures came from a 15000-step full-resolution run while the
+  script now defaults to 30000 steps at half resolution, which it now
+  says; the 2DGS module map describes the shared model base and densify
+  core; the OpenMP note says to set the flag before importing pycolmap
+  directly.
+- render() no longer claims radii feed a screen-size prune (dropped).
+- train_garden.py's docstring said SH_DEGREE=2 (it is 3), and
+  train_garden_2dgs.py said its standalone prune runs past DENSIFY_STOP
+  (PRUNE_STOP stops it there).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Hide details
+View details
+tchauffi
+merged commit 84e8c3a
+into
+main
+Sep 27, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+tchauffi
+deleted the
+bug-fix
+branch
+September 27, 2026 16:42
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

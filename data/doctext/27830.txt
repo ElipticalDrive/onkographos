@@ -1,0 +1,1085 @@
+# GPU Isosurface Ray Casting
+
+A real-time **GPU-based isosurface ray casting** implementation developed for a Scientific Visualization exercise.
+
+Instead of extracting an explicit polygon mesh, the renderer directly searches for an isosurface while tracing rays through a volumetric scalar field.
+
+The implementation includes:
+
+- GPU ray marching
+- Isosurface intersection detection
+- Bisection-based hit refinement
+- Surface normal computation using central differences
+- Shadow ray traversal
+- Lambertian shading
+- Interactive control of isovalue, step size, refinement iterations, and shadows
+
+---
+
+## Demo
+
+<p align="center">
+  <img src="demo/isosurface-demo.gif"
+       alt="GPU Isosurface Ray Casting Demo"
+       width="900">
+</p>
+
+<p align="center">
+  <b>Real-time GPU isosurface ray casting</b>
+</p>
+
+The full recording is available here:
+
+```text
+demo/isosurface-demo.mkv
+```
+
+---
+
+## Overview
+
+An isosurface represents all positions in a scalar field where the scalar value is equal to a chosen isovalue.
+
+For a scalar field
+
+```text
+f(x)
+```
+
+and an isovalue
+
+```text
+c
+```
+
+the isosurface is defined by:
+
+```text
+f(x) = c
+```
+
+Instead of first generating a triangle mesh using an algorithm such as Marching Cubes, this project directly finds the visible surface by tracing rays through the volume.
+
+For every rendered pixel, a ray is constructed:
+
+```text
+x(t) = o + t d
+```
+
+where:
+
+```text
+o = ray origin
+d = ray direction
+t = distance along the ray
+```
+
+The algorithm searches along this ray for the first location where the scalar field crosses the selected isovalue.
+
+---
+
+## Rendering Pipeline
+
+```text
+                     Camera
+                       │
+                       ▼
+                 Construct Ray
+                       │
+                       ▼
+              Enter Volume Bounds
+                       │
+                       ▼
+                  Ray Marching
+                       │
+                       ▼
+               Detect Sign Change
+                       │
+                       ▼
+             Bisection Refinement
+                       │
+                       ▼
+               Refined Hit Point
+                       │
+              ┌────────┴─────────┐
+              │                  │
+              ▼                  ▼
+       Compute Normal       Shadow Ray
+              │                  │
+              └────────┬─────────┘
+                       ▼
+                Lambert Shading
+                       │
+                       ▼
+                  Final Color
+```
+
+---
+
+## 1. Isosurface Detection
+
+The isosurface is detected while marching through the volume.
+
+For the ray
+
+```text
+x(t) = o + t d
+```
+
+we define the signed function
+
+```text
+g(t) = f(x(t)) - c
+```
+
+The isosurface is reached whenever:
+
+```text
+g(t) = 0
+```
+
+Instead of expecting a ray sample to land exactly on the surface, consecutive samples are checked for a sign change.
+
+For two ray positions:
+
+```text
+ta
+tb
+```
+
+the intersection condition is:
+
+```text
+g(ta) * g(tb) <= 0
+```
+
+A sign change means that the isosurface lies somewhere between the two samples.
+
+Conceptually:
+
+```text
+Ray direction →
+
+----●---------●---------●---------●----
+
+   g > 0     g > 0     g < 0
+                       ↑
+                 sign change
+
+        Isosurface lies here
+```
+
+The first interval containing a sign change is stored and passed to the refinement stage.
+
+---
+
+## 2. Bisection Hit Refinement
+
+Ray marching only gives an interval containing the intersection.
+
+To obtain a more accurate surface position, the interval is refined using the **bisection method**.
+
+Starting with:
+
+```text
+[ta, tb]
+```
+
+the midpoint is calculated:
+
+```text
+tm = (ta + tb) / 2
+```
+
+The scalar field is evaluated at the midpoint:
+
+```text
+g(tm) = f(x(tm)) - c
+```
+
+The interval containing the sign change is kept:
+
+```text
+if g(ta) * g(tm) <= 0
+
+    tb = tm
+
+else
+
+    ta = tm
+```
+
+This process is repeated for several refinement iterations.
+
+After refinement:
+
+```text
+thit = (ta + tb) / 2
+```
+
+and the final surface position is:
+
+```text
+xhit = o + thit * d
+```
+
+Increasing the number of refinement iterations improves intersection accuracy without requiring a very small ray-marching step everywhere.
+
+---
+
+## 3. Surface Normal Computation
+
+To shade the isosurface, a surface normal is required.
+
+The normal is estimated from the scalar field gradient using **central differences**.
+
+For the x direction:
+
+```text
+gx = f(x + h, y, z) - f(x - h, y, z)
+```
+
+For the y direction:
+
+```text
+gy = f(x, y + h, z) - f(x, y - h, z)
+```
+
+For the z direction:
+
+```text
+gz = f(x, y, z + h) - f(x, y, z - h)
+```
+
+Together:
+
+```text
+gradient = (gx, gy, gz)
+```
+
+The surface normal is the normalized negative gradient:
+
+```text
+n = -gradient / |gradient|
+```
+
+The negative gradient is used so that the normal points outward toward the lighter medium.
+
+---
+
+## 4. Shadow Ray Traversal
+
+To improve depth perception, the implementation supports shadows.
+
+After finding the visible isosurface point:
+
+```text
+xhit
+```
+
+a secondary ray is cast toward the light.
+
+```text
+               Light
+                 *
+                /
+               /
+              /
+      shadow ray
+            /
+           ●  xhit
+```
+
+The shadow ray starts slightly away from the surface to avoid immediately intersecting the same surface because of numerical precision.
+
+The ray is then marched through the volume.
+
+If the isosurface is encountered again before leaving the volume:
+
+```text
+shadow = 0
+```
+
+The point is occluded.
+
+If no intersection is found:
+
+```text
+shadow = 1
+```
+
+The point is fully illuminated.
+
+---
+
+## 5. Lambertian Shading
+
+The final surface color uses Lambertian diffuse lighting.
+
+The lighting term is:
+
+```text
+L = max(0, dot(n, l))
+```
+
+where:
+
+```text
+n = surface normal
+l = light direction
+```
+
+The resulting color is:
+
+```text
+color = baseColor * L
+```
+
+When shadows are enabled:
+
+```text
+color = baseColor * L * shadow
+```
+
+This provides a simple but effective visualization of the surface geometry.
+
+---
+
+## Algorithm Summary
+
+For each pixel:
+
+```text
+1. Construct a ray through the volume.
+
+2. March along the ray.
+
+3. Sample the scalar field.
+
+4. Detect the first isovalue sign change.
+
+5. Refine the intersection with bisection.
+
+6. Compute the gradient at the hit position.
+
+7. Convert the gradient into a surface normal.
+
+8. Cast a shadow ray toward the light.
+
+9. Calculate Lambertian illumination.
+
+10. Write the final pixel color.
+```
+
+---
+
+## Important Parameters
+
+### Isovalue
+
+The isovalue determines which scalar value is visualized.
+
+Changing it reveals different structures contained in the volume.
+
+A lower or higher isovalue can therefore produce a significantly different visible surface.
+
+### Ray Step Size
+
+The step size controls the distance between samples during ray marching.
+
+Smaller values:
+
+```text
++ more accurate intersection detection
++ less chance of missing small structures
+- more samples
+- higher rendering cost
+```
+
+Larger values:
+
+```text
++ fewer samples
++ faster traversal
+- lower accuracy
+- possible missed intersections
+```
+
+### Refinement Iterations
+
+Bisection refinement improves the final intersection position after a sign change has already been detected.
+
+More iterations give a more accurate hit position but require additional scalar-field evaluations.
+
+### Shadows
+
+Shadow rays provide additional visual information about the shape and depth of the isosurface.
+
+Without shadows, some surface regions may be more difficult to distinguish.
+
+---
+
+## Project Structure
+
+```text
+.
+├── shaders/
+│   └── ...
+│
+├── demo/
+│   ├── isosurface-demo.gif
+│   └── isosurface-demo.mkv
+│
+├── main.cpp
+├── CMakeLists.txt
+├── README.md
+└── .gitignore
+```
+
+> The exact shader filenames depend on the provided exercise framework.
+
+---
+
+## Build
+
+The project uses **CMake**.
+
+Create a build directory:
+
+```bash
+mkdir build
+cd build
+```
+
+Configure:
+
+```bash
+cmake ..
+```
+
+Build:
+
+```bash
+cmake --build .
+```
+
+After compilation, run the generated executable from the build directory.
+
+---
+
+## Technologies
+
+- C++
+- OpenGL
+- GLSL
+- GPU Ray Casting
+- Volume Rendering
+- CMake
+
+---
+
+## Key Concepts Demonstrated
+
+| Technique | Purpose |
+|---|---|
+| Ray Marching | Traverses the volumetric scalar field |
+| Sign Change Detection | Locates intervals containing the isosurface |
+| Bisection | Refines the surface intersection |
+| Central Differences | Estimates the scalar-field gradient |
+| Surface Normals | Provide orientation for lighting |
+| Shadow Rays | Detect occlusion from the light |
+| Lambert Shading | Provides diffuse surface illumination |
+
+---
+
+## Result
+
+The project renders an implicit isosurface directly from volumetric data without first constructing a polygon mesh.
+
+Combining GPU ray marching with bisection refinement provides an efficient way to locate the visible surface.
+
+Central-difference normals provide the information required for lighting, while secondary shadow rays improve the perception of surface shape and depth.
+
+---
+
+## Demo Files
+
+Animated preview:
+
+```text
+demo/isosurface-demo.gif
+```
+
+Full recording:
+
+```text
+demo/isosurface-demo.mkv
+```
+
+---
+
+### main.cpp
+```
+#include <init_vislab.hpp>
+
+#include <vislab/app/trackball_interactor.hpp>
+#include <vislab/field/regular_field.hpp>
+#include <vislab/geometry/mesh.hpp>
+#include <vislab/gpu/interfaces.hpp>
+#include <vislab/gpu/types.hpp>
+#include <vislab/render/gpu_mesh.hpp>
+#include <vislab/render/gpu_perspective_camera.hpp>
+#include <vislab/render/gpu_regular_field.hpp>
+#include <vislab/render/render_context.hpp>
+#include <vislab/scene/perspective_camera.hpp>
+
+#include "amira_reader.hpp"
+#include "application.hpp"
+
+#include <filesystem>
+#include <iostream>
+#include <memory>
+
+using namespace vislab;
+
+class IsocontourDemo : public scivis::Application
+{
+public:
+    void init([[maybe_unused]] const vislab::SwapchainContext& stx) override
+    {
+        // camera
+        mCamera = std::make_shared<PerspectiveCamera>();
+        mCamera->setLookAt(Eigen::Vector3d(0.0, 0.0, 0.0));
+        mCamera->setPosition(Eigen::Vector3d(0.5, 1.3, -0.1));
+        mCamera->setUp(Eigen::Vector3d(0, 0, -1));
+        mCamera->setNear(0.01);
+        mCamera->setFar(100.0);
+        mGpuCamera = std::make_unique<GpuPerspectiveCamera>(device.get(), mCamera.get());
+
+        // interactor
+        auto trackball = std::make_shared<TrackballInteractor>();
+        trackball->setCamera(mCamera);
+        setInteractor(trackball);
+
+        // load field
+        readFile();
+
+        // GPU volume wrapper
+        mGpuField = std::make_unique<GpuRegularSteadyScalarField3f>(
+            device.get(),
+            mField.get(),
+            ETextureBindFlags::ShaderResource,
+            EMemoryType::DeviceLocal,
+            "VolumeField");
+
+        // cube geometry
+        createCubeGeometry();
+
+        // load shaders
+        ShaderBinary vsBin = scivis::Backend::getShader(device.get(), "isocontour", SHADER_DIR, EShaderStage::Vertex);
+        ShaderBinary fsBin = scivis::Backend::getShader(device.get(), "isocontour", SHADER_DIR, EShaderStage::Fragment);
+
+        // pipeline
+        RenderPipelineDesc rp{};
+        rp.vertexShader   = vsBin;
+        rp.fragmentShader = fsBin;
+        rp.vertexLayout   = mGpuCube->getVertexLayout();
+        mPipeline         = device->createRenderPipeline(rp);
+
+        // constant buffer
+        Constants constants;
+        constants.domainMin            = mField->getDomain().min().cast<float>();
+        constants.domainMax            = mField->getDomain().max().cast<float>();
+        constants.stepSize             = 1.f * float(mField->getGrid().getSpacing().minCoeff());
+        constants.isovalue             = 0.333f;
+        constants.lightAngle           = 0.1f;
+        constants.enableShadows        = 1;
+        constants.refinementIterations = 5;
+        mGpuConstants                  = GpuConstantBuffer<Constants>(device.get(), constants, "Constants");
+    }
+
+    void update([[maybe_unused]] double dt, [[maybe_unused]] double total) override
+    {
+    }
+
+    void gui() override
+    {
+        ImGui::Begin("SciVis", 0, ImGuiWindowFlags_AlwaysAutoResize);
+
+        ImGui::SliderFloat("stepSize", &mGpuConstants.getData().stepSize, 0.001f, 0.01f);
+        ImGui::SliderFloat("isovalue", &mGpuConstants.getData().isovalue, 0, 1);
+        ImGui::SliderFloat("lightAngle", &mGpuConstants.getData().lightAngle, 0, 1);
+        ImGui::SliderInt("refine iter.", &mGpuConstants.getData().refinementIterations, 0, 10);
+        ImGui::Checkbox("shadows", (bool*)&mGpuConstants.getData().enableShadows);
+
+        ImGui::Separator();
+
+        // close button
+        if (ImGui::Button("Close Window"))
+            exit(0);
+
+        ImGui::End();
+    }
+
+    void render(ICommandList* cmd, const RenderContext& ctx) override
+    {
+        // -------- Updates ---------
+
+        // update camera
+        mCamera->setWidth(ctx.width);
+        mCamera->setHeight(ctx.height);
+        mGpuCamera->update(cmd);
+
+        // update constant buffer
+        mGpuConstants.update(cmd);
+
+        // -------- Rendering ---------
+
+        // set viewport
+        cmd->setViewport(0, 0, float(ctx.width), float(ctx.height));
+
+        // clear
+        const float clearColor[4] = { 0, 0, 0, 1 };
+        cmd->clearRenderTarget(ctx.renderTarget, clearColor);
+        cmd->clearDepthStencil(ctx.depthTarget, 1.0f);
+
+        // set render pipeline
+        cmd->setRenderPipeline(mPipeline.get());
+
+        // bind constant buffers
+        mGpuCamera->bind(cmd, EShaderStage::Vertex | EShaderStage::Fragment, 0);
+        mGpuConstants.bind(cmd, EShaderStage::Vertex | EShaderStage::Fragment, 1);
+
+        // bind volume (SRV + sampler)
+        mGpuField->bindSampler(cmd, EShaderStage::Fragment, 0);
+        mGpuField->bindSRV(cmd, EShaderStage::Fragment, 0);
+
+        // bind and draw mesh
+        mGpuCube->bind(cmd, EVertexStream::Position);
+        mGpuCube->draw(cmd);
+    }
+
+private:
+    void readFile()
+    {
+        // read file
+        mField = scivis::AmiraReader::readAs<RegularSteadyScalarField3f>((datasetPath / "head.am").string());
+        if (!mField)
+        {
+            std::cout << "Data file not found! Place the head.am in your dataset folder and check that the command line argument points correctly to the dataset folder." << std::endl;
+            exit(1);
+        }
+
+        // rescale and recenter domain
+        Eigen::AlignedBox3d domain = mField->getDomain();
+        double scale               = (domain.max() - domain.min()).maxCoeff();
+        mField->setDomain(Eigen::AlignedBox3d((domain.min() / scale) - domain.center() / scale,
+                                              (domain.max() / scale) - domain.center() / scale));
+    }
+
+    void createCubeGeometry()
+    {
+        mCube.setMeshTopology(EMeshTopology::TriangleList);
+        mCube.getPositions().setValues({ { 0.f, 0.f, 0.f },
+                                         { 1.f, 0.f, 0.f },
+                                         { 1.f, 1.f, 0.f },
+                                         { 0.f, 1.f, 0.f },
+                                         { 0.f, 0.f, 1.f },
+                                         { 1.f, 0.f, 1.f },
+                                         { 1.f, 1.f, 1.f },
+                                         { 0.f, 1.f, 1.f } });
+        mCube.getIndexCollection().setValues({ 0u, 1u, 2u, 0u, 2u, 3u,
+                                               4u, 6u, 5u, 4u, 7u, 6u,
+                                               0u, 4u, 5u, 0u, 5u, 1u,
+                                               3u, 2u, 6u, 3u, 6u, 7u,
+                                               0u, 3u, 7u, 0u, 7u, 4u,
+                                               1u, 5u, 6u, 1u, 6u, 2u });
+        mGpuCube = std::make_unique<GpuMesh>(device.get(), &mCube);
+    }
+
+    // Volume data
+    std::shared_ptr<RegularSteadyScalarField3f> mField;
+    std::unique_ptr<GpuRegularSteadyScalarField3f> mGpuField;
+
+    // Camera data
+    std::shared_ptr<PerspectiveCamera> mCamera;
+    std::unique_ptr<GpuPerspectiveCamera> mGpuCamera;
+
+    // Constant data
+    struct Constants
+    {
+        Eigen::Vector3f domainMin;
+        float stepSize;
+
+        Eigen::Vector3f domainMax;
+        float isovalue;
+
+        float lightAngle;
+        int enableShadows;
+        int refinementIterations;
+    };
+    GpuConstantBuffer<Constants> mGpuConstants;
+
+    // cube mesh
+    Mesh3f mCube;
+    std::unique_ptr<GpuMesh> mGpuCube;
+
+    // Render pipeline
+    std::unique_ptr<IRenderPipeline> mPipeline;
+};
+
+int main(int argc, char* argv[])
+{
+    IsocontourDemo app;
+    return app.run(argc, argv,
+                   scivis::EGraphicsDevice::OpenGL,
+                   1280, 720);
+}
+```
+
+### shaders/glsl/isocontour.frag
+```
+#version 430 core
+
+// ---------------------------------------------------------------------------
+// Constant Buffers
+// ---------------------------------------------------------------------------
+layout(std140, binding = 0) uniform CameraUBO {
+    mat4 uView;
+    mat4 uProj;
+    vec3 uCameraPos;
+    float _pad0;
+};
+
+layout(std140, binding = 1) uniform VolumeUBO {
+    vec3  uDomainMin;
+    float uStepSize;
+
+    vec3  uDomainMax;
+    float uIsovalue;
+
+    float uLightAngle;
+    int   uEnableShadows;
+    int   uRefinementIterations;
+    float _pad1;
+};
+
+// ---------------------------------------------------------------------------
+// Textures and Samplers
+// ---------------------------------------------------------------------------
+layout(binding = 0) uniform sampler3D volumeTex;
+
+// ---------------------------------------------------------------------------
+// Input / Output
+// ---------------------------------------------------------------------------
+in VS_OUT {
+    vec4 clipPos;
+    vec3 tex;    // [0,1]^3 cube coords
+    vec3 world;  // world-space cube coords
+} fs_in;
+
+layout(location = 0) out vec4 outColor;
+
+// ---------------------------------------------------------------------------
+// Sample scalar field (world -> texture)
+// ---------------------------------------------------------------------------
+float sampleDensityWorld(vec3 worldPos)
+{
+    vec3 tx = (worldPos - uDomainMin) / (uDomainMax - uDomainMin);
+    return textureLod(volumeTex, tx, 0.0).r;
+}
+
+// ---------------------------------------------------------------------------
+// Ray-box intersection
+// ---------------------------------------------------------------------------
+bool intersectDomainBox(vec3 origin, vec3 dir, out float tMin, out float tMax)
+{
+    vec3 invD = 1.0 / dir;
+
+    vec3 t0 = (uDomainMin - origin) * invD;
+    vec3 t1 = (uDomainMax - origin) * invD;
+
+    vec3 tmin3 = min(t0, t1);
+    vec3 tmax3 = max(t0, t1);
+
+    tMin = max(max(tmin3.x, tmin3.y), tmin3.z);
+    tMax = min(min(tmax3.x, tmax3.y), tmax3.z);
+
+    return tMax > tMin;
+}
+
+// ---------------------------------------------------------------------------
+// Isosurface helpers
+// ---------------------------------------------------------------------------
+// Signed distance to isosurface
+float sampleIso(vec3 p)
+{
+    return sampleDensityWorld(p) - uIsovalue;
+}
+
+bool hasSignChange(float dPrev, float dCurr)
+{
+    return dPrev * dCurr <= 0.0;
+}
+
+// ---------------------------------------------------------------------------
+// TODO 2: Hit refinement via bisection
+// Refine the isosurface hit within [ta, tb] using uRefinementIterations
+// iterations of the bisection method. Return the refined tHit.
+// ---------------------------------------------------------------------------
+float refineIsoHitBisection(vec3 origin, vec3 dir, float ta, float tb, float da, float db)
+{
+    // TODO 2: implement bisection refinement
+    for (int i = 0; i < uRefinementIterations; ++i)
+    {
+        float tMid = 0.5 * (ta + tb);
+        float dMid = sampleIso(origin + tMid * dir);
+
+        if (hasSignChange(da, dMid))
+        {
+            tb = tMid;
+            db = dMid;
+        }
+        else
+        {
+            ta = tMid;
+            da = dMid;
+        }
+    }
+
+    return 0.5 * (ta + tb); // placeholder
+}
+
+// ---------------------------------------------------------------------------
+// TODO 3: Normal computation
+// Compute the density gradient using central differences with step size
+// uStepSize and return the normalized negative gradient.
+// ---------------------------------------------------------------------------
+vec3 computeNormal(vec3 p)
+{
+    // TODO 3: compute central differences and normalize
+     float h = uStepSize;
+
+    float dx = sampleDensityWorld(p + vec3(h, 0.0, 0.0)) -
+               sampleDensityWorld(p - vec3(h, 0.0, 0.0));
+
+    float dy = sampleDensityWorld(p + vec3(0.0, h, 0.0)) -
+               sampleDensityWorld(p - vec3(0.0, h, 0.0));
+
+    float dz = sampleDensityWorld(p + vec3(0.0, 0.0, h)) -
+               sampleDensityWorld(p - vec3(0.0, 0.0, h));
+
+    vec3 grad = vec3(dx, dy, dz);
+
+    return normalize(-grad);
+}
+
+// ---------------------------------------------------------------------------
+// TODO 4: Shadow ray traversal
+// Cast a ray toward the light direction and determine whether the isosurface
+// is encountered again before leaving the volume.
+// Return 0.0 if in shadow, 1.0 if fully lit.
+// ---------------------------------------------------------------------------
+float traceShadowRay(vec3 origin, vec3 dir, float stepSize)
+{
+    // TODO 4: implement shadow ray traversal
+    float t = 2.0 * stepSize;
+
+    while (true)
+    {
+        vec3 p = origin + t * dir;
+
+        if (p.x < uDomainMin.x || p.y < uDomainMin.y || p.z < uDomainMin.z ||
+            p.x > uDomainMax.x || p.y > uDomainMax.y || p.z > uDomainMax.z)
+        {
+            break;
+        }
+
+        if (sampleDensityWorld(p) >= uIsovalue)
+        {
+            return 0.0;
+        }
+
+        t += stepSize;
+    }
+
+    return 1.0;
+}
+
+// ---------------------------------------------------------------------------
+// TODO 5: Shading
+// Compute Lambertian shading using the normal and light direction.
+// If shadows are enabled, modulate the result by the shadow factor.
+// ---------------------------------------------------------------------------
+vec3 shadeIsoPoint(vec3 pHit, vec3 lightDirWorld)
+{
+    // TODO 5: implement shading (normal, Lambert term, optional shadows)
+     vec3 normal = computeNormal(pHit);
+
+    float diffuse = max(0.0, dot(normal, lightDirWorld));
+
+    float shadow = 1.0;
+
+    if (uEnableShadows != 0)
+    {
+        shadow = traceShadowRay(pHit, lightDirWorld, uStepSize);
+    }
+
+    vec3 baseColor = vec3(1.0);
+
+    return baseColor * diffuse * shadow;
+}
+
+// ---------------------------------------------------------------------------
+// TODO 1: Primary ray integration (isosurface detection)
+// March along the ray inside the volume, detect the first sign change of
+// g(t) = f(x(t)) - uIsovalue, refine the hit, and shade it.
+// ---------------------------------------------------------------------------
+struct IsoResult {
+    vec3 color;
+    bool hit;
+};
+
+IsoResult integrateIsoRayWorld(vec3 origin, vec3 dir, float tStart, float tEnd)
+{
+    IsoResult res;
+    res.color = vec3(0.0);
+    res.hit   = false;
+
+    // Compute light direction from angle parameter
+    float a = uLightAngle * 6.28318; // 2*pi
+    vec3 lightDirWorld = normalize(vec3(cos(a), sin(a), -1.0));
+
+    // TODO 1:
+    // - march along the ray in steps of uStepSize
+    // - evaluate sampleIso along the ray
+    // - detect the first interval [ta, tb] with a sign change
+    // - refine the hit using refineIsoHitBisection()
+    // - compute the hit position and shade it using shadeIsoPoint()
+    // - set res.hit and res.color accordingly
+    float tPrev = tStart;
+float dPrev = sampleIso(origin + tPrev * dir);
+
+for (float tCurr = tStart + uStepSize; tCurr <= tEnd; tCurr += uStepSize)
+{
+    float dCurr = sampleIso(origin + tCurr * dir);
+
+    if (hasSignChange(dPrev, dCurr))
+    {
+        float tHit = refineIsoHitBisection(
+            origin,
+            dir,
+            tPrev,
+            tCurr,
+            dPrev,
+            dCurr
+        );
+
+        vec3 pHit = origin + tHit * dir;
+
+        res.color = shadeIsoPoint(pHit, lightDirWorld);
+        res.hit = true;
+
+        break;
+    }
+
+    tPrev = tCurr;
+    dPrev = dCurr;
+}
+
+    return res;
+}
+
+// ---------------------------------------------------------------------------
+// Main Fragment Shader
+// ---------------------------------------------------------------------------
+void main()
+{
+    vec3 rayOrigin = uCameraPos;
+    vec3 rayDir    = normalize(fs_in.world - uCameraPos);
+
+    float tMin, tMax;
+    intersectDomainBox(rayOrigin, rayDir, tMin, tMax);
+
+    if (tMax <= tMin)
+    {
+        outColor = vec4(0.0);
+        return;
+    }
+
+    float tStart = max(tMin, 0.0);
+    float tEnd   = tMax;
+
+    IsoResult iso = integrateIsoRayWorld(rayOrigin, rayDir, tStart, tEnd);
+
+    if (!iso.hit)
+    {
+        outColor = vec4(0.0);
+        return;
+    }
+
+    outColor = vec4(iso.color, 1.0);
+}
+```
+
+### shaders/glsl/isocontour.vert
+```
+#version 430 core
+
+// ---------------------------------------------------------------------------
+// Constant Buffers
+// ---------------------------------------------------------------------------
+layout(std140, binding = 0) uniform CameraUBO {
+    mat4 uView;
+    mat4 uProj;
+    vec3 uCameraPos;
+    float _pad0;
+};
+
+layout(std140, binding = 1) uniform VolumeUBO {
+    vec3  uDomainMin;
+    float uStepSize;
+
+    vec3  uDomainMax;
+    float uIsovalue;
+
+    float uLightAngle;
+    int   uEnableShadows;
+    int   uRefinementIterations;
+    float _pad1;
+};
+
+// ---------------------------------------------------------------------------
+// Injected Helpers
+// ---------------------------------------------------------------------------
+vec4 mulView(vec3 worldPos, mat4 viewMat);
+vec4 mulProj(vec4 viewPos, mat4 projMat);
+
+// ---------------------------------------------------------------------------
+// Input / Output
+// ---------------------------------------------------------------------------
+layout(location = 0) in vec3 inPos;
+
+out VS_OUT {
+    vec4 clipPos;
+    vec3 tex;
+    vec3 world;
+} vs_out;
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+void main()
+{
+    // Map cube vertex from [0,1]^3 to world space
+    vec3 worldPos = mix(uDomainMin, uDomainMax, inPos);
+
+    vs_out.world = worldPos;
+    vs_out.tex   = inPos;
+
+    vec4 viewPos = mulView(worldPos, uView);
+    vs_out.clipPos = mulProj(viewPos, uProj);
+
+    gl_Position = vs_out.clipPos;
+}
+```

@@ -1,0 +1,5040 @@
+Preprint
+G AUSS W HAT YOU N EED : C OMPACT G AUSSIAN
+S PLATTING ACROSS S CENE S CALES
+Afif Boudaoud∗
+ETH Zürich
+Jiayi Liu∗
+ETH Zürich
+Alexandru Calotoiu
+ETH Zürich
+Torsten Hoefler
+ETH Zürich
+arXiv:2609.31248v1 [cs.CV] 25 Sep 2026
+A BSTRACT
+3D Gaussian Splatting reconstructs a scene as a collection of Gaussian primitives
+from a set of posed photographs called the capture. The number of primitives
+used to represent the scene affects reconstruction quality, storage, and rendering
+cost. How to select this number automatically across capture scales remains unresolved: configurations effective on standard benchmarks can leave larger captures
+with too few Gaussians to reconstruct fine details. We observe that the surface
+to represent, given by the capture’s extent and resolution, is known before training, whereas its content complexity becomes apparent during training, through
+the reconstruction quality on the training views. We introduce TangoGS, which
+combines capture-derived model sizing with training-based adaptation: the capture determines the scale of the model, and training feedback determines its final
+size within that scale. Before training, TangoGS derives a learning allowance
+for model growth from the capture’s total pixels after discounting views that reobserve the same scene points. During training, reconstruction quality guides how
+many Gaussians to add and remove. On 13 standard benchmark scenes, TangoGS
+matches the mean PSNR of the best-performing evaluated baseline, LeGS, with
+48% fewer Gaussians. On eight large captures, the same configuration automatically scales to larger models when necessary, achieving the highest mean PSNR
+among evaluated methods: 0.54 dB above the runner-up with 2.3× as many Gaussians. Together, capture-derived learning allowances and training-quality guided
+density control enable a state-of-the-art quality–size compromise across scene
+scales without retuning.
+1
+I NTRODUCTION
+3D Gaussian Splatting (Kerbl et al., 2023) represents a scene as Gaussians learned from photographs.
+During training, density control determines the number of Gaussians through densification (adding
+Gaussians) and pruning (removing them). On a single large capture, our evaluated models range
+from 87K to 7.4M Gaussians and span 5 dB in PSNR. Selecting the Gaussian count therefore requires balancing reconstruction quality against storage within this broad search space of model sizes.
+We group existing density controllers by how they determine Gaussian count: Fixed-threshold methods add and remove Gaussians by comparing per-Gaussian signals, such as gradient magnitude and
+opacity, against preset cutoffs (Hanson et al., 2025). Preset-budget methods use a target count or
+cap specified per scene or derived from the capture using a dataset-specific multiplier (Mallick et al.,
+2024; Kheradmand et al., 2024; Liao et al., 2025). Automatic methods estimate a budget from observed growth or let the count emerge from learned masks and per-Gaussian density-control actions (Chen et al., 2025; Lee et al., 2024; Ning et al., 2026). Applied unchanged to larger captures,
+settings released for standard benchmarks can leave too few Gaussians to reconstruct fine detail, as
+our transfer experiments show (Section 3.3). The challenge is to balance reconstruction quality and
+model size across capture scales without the repeated training runs that manual retuning requires.
+Two kinds of information determine how many Gaussians a capture requires. The first is surface:
+the extent and resolution of the observed scene indicate how much of it the model must represent
+and are measurable before training. The second is content complexity: equally sized captures may
+∗
+Equal contribution. Correspondence: Afif Boudaoud (afif.boudaoud@inf.ethz.ch).
+1
+Preprint
+(a) Learning allowance
+(b) Training adaptation
+(c) Results
+Mip-NeRF 360 · Deep Blending
+Tanks & Temples · 13 scenes
+render
+shared SfM
+tracks
+learning
+allowance Tcap
+pixels ÷ track length
+sublinear mapping
+learning population
+densify toward
+ρ×Tcap
+prune
+ρ
+quality feedback
+TangoGS
+0.92M (28.04 dB)
+LeGS
+1.79M (28.08 dB)
+TangoGS favors smaller models
+near quality saturation.
+Low PSNR
++
+×
+prune
+densify
+less
+more
+High PSNR
++
+×
+prune
+densify
+more
+less
+The capture sets the learning allowance;
+the training feedback
+decides how much of it to keep.
+8 larger captures · no retuning
+∆PSNR (dB)
+posed images
+1.5
+1
+0.5
+0
++0.54 dB vs. LiteGS
+2.3× more Gaussians
+Mill19 US3D Zip-NeRF
+TangoGS automatically scales
+models for visible quality gains.
+Figure 1: TangoGS overview. The capture sets a learning allowance. Quality feedback controls
+growth, pruning and the final population retained for continued optimization.
+depict a uniform surface or intricate vegetation, requiring different numbers of Gaussians. How well
+the model fits this content during training provides an indication of its complexity.
+We therefore combine capture-derived model sizing with training-based adaptation. Before training, TangoGS1 divides the capture’s total pixel count by the average number of images observing
+each scene point, discounting overlapping coverage. A fixed conversion shared across captures maps
+this adjusted pixel count to a learning allowance, a Gaussian budget for model growth (Fig. 1a). During training, a factor computed from mean training-view PSNR sets the densification target and the
+fraction of Gaussians retained during pruning, adapting model size within this allowance (Fig. 1b).
+Our contributions are threefold:
+• A design principle. We show that combining a capture-derived learning allowance with
+density control guided by training quality yields a state-of-the-art quality–size compromise
+across scene scales. A single configuration calibrated on standard benchmarks serves both
+standard and large captures.
+• A density controller. TangoGS derives a learning allowance from the capture’s total pixel
+count adjusted for overlapping coverage, and uses training-view PSNR to set the densification target and the fraction of Gaussians retained during pruning. To the best of our
+knowledge, this is the first density controller to couple a learning allowance derived from
+pixel count and overlapping coverage with PSNR-guided densification and pruning.
+• An empirical survey across capture scales. We organize density controllers by how
+they set and adapt model size, and rerun 13 released implementations under a common
+evaluation protocol on 13 standard scenes from Mip-NeRF 360 (Barron et al., 2022),
+Tanks & Temples (Knapitsch et al., 2017) and Deep Blending (Hedman et al., 2018), and
+on eight large captures from Mill19 (Turki et al., 2022), UrbanScene3D (Lin et al., 2022)
+and Zip-NeRF (Barron et al., 2023). We examine how quality–size trade-offs shift from
+standard to large captures, giving practitioners a common basis for choosing a controller
+suited to their capture scale and quality–size priorities.
+On the 13 standard scenes, TangoGS matches LeGS’s (Ning et al., 2026) mean PSNR with roughly
+half as many Gaussians and lies on the PSNR–count frontier for every dataset (Section 3.2). Transferred unchanged to eight large captures, it achieves the highest mean PSNR and lowest mean
+learned perceptual image patch similarity (LPIPS) (Zhang et al., 2018) among evaluated methods.
+Compared with the perceptual-quality runner-up, reference 3DGS (Kerbl et al., 2023), TangoGS
+uses 1.06× as many Gaussians, achieves 0.63 dB higher mean PSNR, and lowers LPIPS on seven
+1
+Code and reproduction instructions: https://github.com/affifboudaoud/TangoGS.
+2
+Preprint
+of eight captures. In neither regime does an evaluated baseline achieve lower mean LPIPS with
+fewer Gaussians. Ablations confirm both components’ contributions: replacing the capture-derived
+allowance with a fixed one reduces large-capture PSNR by at least 0.43 dB, while disabling feedback
+adaptation inflates the Gaussian count by at least 1.9× without improving PSNR.
+2
+M ETHOD
+Standard 3DGS initializes one Gaussian per sparse 3D point reconstructed by structure-from-motion
+(SfM) with COLMAP (Schönberger & Frahm, 2016), which estimates camera poses and triangulates
+points from features matched across images. Training fits each Gaussian’s position, shape, opacity,
+and color to the capture’s images (Kerbl et al., 2023). To recover fine detail beyond the sparse
+initialization, scheduled densification clones or splits Gaussians, while pruning removes those contributing least to rendered images. After density control ends, the final population is optimized for
+the remaining training iterations.
+TangoGS intervenes at three stages (Fig. 1): the capture sets the learning allowance before training
+(Section 2.1); training quality adjusts growth and pruning within that allowance (Section 2.2); and
+the same signal selects the final population retained for continued optimization (Section 2.3).
+2.1
+S ETTING THE L EARNING A LLOWANCE
+An SfM point’s track length is the number of images observing it, indicating how often a scene point
+is re-observed. Summing track lengths over the M tracked points gives O image–point observations,
+so the mean track length t̄SfM = O/M is the average number of images observing a point. For ncap
+capture images at loaded resolution W × H, the total pixel count is X = ncap W H. Dividing by the
+mean track length discounts repeated observations, giving the track-adjusted pixel count:
+X̃ =
+X
+t̄SfM
+=
+XM
+M
+=
+.
+O
+O/X
+(1)
+Read this way, X̃ grows with the number of distinct scene points and shrinks when the same points
+are observed more often, so it approximates observed surface rather than the amount of imagery.
+Duplicating every image and its observations doubles both X and O, leaving X̃ unchanged, so
+redundant views do not inflate the allowance. Extracting more features from the same images yields
+more points; if their track-length distribution stays similar, M and O grow in proportion and X̃ stays
+unchanged, so the allowance depends on the capture rather than on how finely it was reconstructed.
+With the same points and observations, halving both image dimensions divides X̃ by four: coarser
+images carry less detail to fit. We then convert X̃ into the learning allowance Tcap (Fig. 1a) in two
+steps:
+p
+Tlin = g X̃,
+Tcap = Tref Tlin .
+(2)
+The first step converts track-adjusted pixels to Gaussians at a fixed rate g, measured in Gaussians
+per track-adjusted pixel. The second takes the geometric mean of Tlin and a pivot Tref , making
+the allowance grow with the square root of the track-adjusted pixel count: four times the pixels
+gives twice the allowance. The pivot sets the overall level; a capture with Tlin = Tref receives an
+allowance of exactly Tref Gaussians.
+Deriving the constants. We set Tref to the geometric mean of Tlin over the 13 standard scenes
+detailed in Section 3.1, about 2.46M Gaussians. The square-root mapping therefore preserves the
+geometric mean allowance while reducing the spread between scenes. Because Tref also scales with
+g, this rate sets the overall allowance scale without changing the ratios between captures. We use
+g ≃ 0.0634 Gaussians per track-adjusted pixel, placing that scale near reference 3DGS’s mean final
+count of about 2.5M Gaussians on these scenes.
+2.2
+Q UALITY F EEDBACK D URING L EARNING
+At each growth or pruning event, let P be the mean per-image PSNR over the just-completed training epoch. From P , we compute a keep ratio ρ that scales the learning allowance Tcap into the
+3
+Preprint
+densification target Tadapt (Fig. 1b):
+1
+ρ = − c (P − P ∗ ),
+Tadapt = ρ Tcap ,
+s = 1.7, c = 0.0075, P ∗ = 20 dB. (3)
+s
+The floor P ∗ is the PSNR of an image reconstructed with RMSE 0.1; a run that has not reached it
+still fits the scene only coarsely, so at or below the floor the ratio is at least 1/s and the final selection
+in Section 2.3 removes nothing. Above the floor the ratio falls by c per dB: lower training quality
+permits more capacity, while higher quality allows more aggressive pruning; Section 3.5 shows the
+ratios this produces for every benchmark capture. We set c and s on the standard scenes and apply
+them unchanged to the large captures.
+At each growth event, budgeted densification (Mallick et al., 2024; Liao et al., 2025) adds Gaussians
+up to a target that ramps linearly from the initial point count to Tadapt over the growth window.
+Some events are followed by a soft prune, which ranks Gaussians present before growth using a
+sensitivity score (Hanson et al., 2025) and keeps the top fraction ρ. Newly created Gaussians are
+exempt until they have trained, and removed capacity can be regrown at later events.
+Scaling the growth schedule with the iteration count. Each training iteration uses one view, and
+an epoch covers all training views. Under the fixed iteration count that 3DGS implementations share,
+captures with more views complete fewer epochs, so fixed spacing in epochs would give them fewer
+growth events. We therefore space growth events five epochs apart for runs of at least 150 epochs,
+typical of standard scenes. For shorter runs, we reduce the spacing proportionally, to a minimum of
+one epoch, keeping the number of growth events roughly constant. Soft prunes follow a separate,
+sparser schedule, allowing growth frequency to increase without additional pruning.
+2.3
+S ELECTING R ETAINED C APACITY
+After growth ends, we select the retained count in a single prune. Its strength matches the effect
+of continuing periodic pruning until training ends. We consider a reference schedule with pruning
+events spaced 8% of the total training iterations apart, and let h count its remaining events. For a
+population of Npre Gaussians entering this event, the retained count NG is obtained by applying the
+keep fraction f = min(1, sρ), h times:
+NG = Npre · f h
+(4)
+Because removed Gaussians in this stage cannot be regrown, the multiplier s > 1 makes each
+reference prune retain a larger fraction than a soft prune at ρ. At or below P ∗ , f = 1, so the final
+selection removes nothing (Eq. (3)). We rank Gaussians by their sensitivity score, the accumulated,
+opacity-weighted effect on training views, keep the NG highest, and optimize that population for the
+rest of training. We implement the three stages in LiteGS (Liao et al., 2025), keeping its renderer
+and optimizer.
+3
+E XPERIMENTS
+Quality differences between 3DGS models cannot be attributed to size alone: Gaussian placement,
+optimization trajectories, training schedules, and hyperparameters also differ across implementations. We therefore make two comparisons on each capture set. Against LiteGS: its released default
+provides the closest comparison, since TangoGS builds on it, differing only in density control and
+training profile. Against state-of-the-art baselines: comparisons across released implementations
+assess which methods best suit different captures.
+3.1
+S ETUP
+We rerun thirteen released baselines on two sets of captures. The 13 standard scenes are nine
+Mip-NeRF 360 scenes (Barron et al., 2022), truck / train from Tanks & Temples (Knapitsch et al.,
+2017), and drjohnson / playroom from Deep Blending (Hedman et al., 2018). These standard 3DGS
+benchmarks serve as TangoGS’s development regime and as a reproduction check against published
+baseline results. We use released COLMAP reconstructions, every-eighth-frame test splits, and standard resolutions. The eight large captures are Mill19 rubble / building (Turki et al., 2022), UrbanScene3D residence / sci-art (Lin et al., 2022), and Zip-NeRF alameda / london / nyc / berlin (Barron
+4
+Preprint
+Mip-NeRF 360 (9)
+28.5
+24.5
+28.0
+24.0
+23.5
+23.0
+Deep Blending (2)
+30.5
+higher quality
+Test PSNR (dB)
+Tanks & Temples (2)
+25.0
+30.0
+27.5
+27.0
+29.5
+smaller model
+0
+1
+2
+3
+0
+Fixed constant
+Automatic budget
+3DGS
+Speedy-Splat
+TangoGS
+DashGaussian
+CDC-GS
+Compact 3DGS
+1
+2
+3
+Final primitives (M)
+LeGS
+FastGS
+LP-3DGS
+ControlGS
+0
+1
+2
+3
+Preset count
+LiteGS
+Taming
+3DGS-MCMC
+Mini-Splatting
+Figure 2: Benchmark quality–size trade-offs. Points are dataset means. Color identifies the scale
+mechanism and shape the method. Full results: Supplementary §C.
+et al., 2023). We report PSNR and SSIM (Wang et al., 2004) (higher is better), VGG LPIPS (Zhang
+et al., 2018) (lower is better), and final Gaussian count. All re-runs use one Nvidia GH200.
+3.2
+E VALUATION ON S TANDARD B ENCHMARKS
+LiteGS uses the same default target of 1M Gaussians for every scene. TangoGS adapts capacity
+per scene (Fig. 2): it uses 18% more Gaussians on bicycle and 14% fewer on stump, improving
+PSNR by 0.85 dB and 0.33 dB, respectively, and lowering LPIPS on both (Supplementary §C). The
+largest quality cost of downsizing occurs on truck: at 0.68× LiteGS’s count, TangoGS stays within
+0.1 dB in PSNR but has 0.026 higher LPIPS. At matched count on truck, TangoGS leads by 0.07 dB,
+while LiteGS retains a 0.013 LPIPS advantage, showing that the perceptual gap cannot be explained
+by size alone. Across all 13 scenes, LiteGS trained to TangoGS’s per-scene counts trails by 0.21 dB
+mean PSNR with worse LPIPS (Supplementary §E).
+State-of-the-art baselines.
+• Preset-budget methods. Taming 3DGS (Mallick et al., 2024) and 3DGS-MCMC (Kheradmand
+et al., 2024) fill their per-scene presets, using 2.3× to 3.6× as many Gaussians as TangoGS without higher mean PSNR. Taming 3DGS assigns bonsai and counter the same released budget of
+1.2M Gaussians, reaching 32.4 dB and 29.0 dB, respectively. From allowances within 6% of each
+other, TangoGS’s quality feedback retains 0.78M on bonsai and 1.06M on the harder counter,
+exceeding Taming 3DGS’s PSNR by 0.6 dB and 0.7 dB, respectively.
+• Automatic methods remain influenced by inherited thresholds: DashGaussian (Chen et al., 2025),
+LP-3DGS (Zhang et al., 2024) and Compact 3DGS (Lee et al., 2024) use nearly constant fractions
+of reference 3DGS’s count across scenes (0.85×, 0.43× and 0.52×, respectively). LP-3DGS uses
+2.41M Gaussians on garden versus 0.47M on bonsai, a 5× difference, yet trails TangoGS on
+both; TangoGS retains 0.82M on garden and 0.78M on bonsai. ControlGS (Zhang et al., 2025)
+selects smaller models with lower mean quality. Local growth and pruning follow image gradients
+with uneven PSNR gains: LeGS uses 2.1× to 4.1× our count on the five outdoor scenes, gaining
+0.46 dB on garden at 4.1× but losing 0.31 dB on treehill at 2.4×. On the remaining eight scenes,
+it matches TangoGS within 0.04 dB at 1.3× the count.
+3.3
+T RANSFER TO L ARGER C APTURES
+All methods use standard-scene settings and a requested 60k iterations.
+LiteGS. Every aerial initialization exceeds LiteGS’s default 1M target, restricting growth and leaving final counts near initialization, above the requested budget. On these scenes, quality feedback
+retains 37% to 54% of TangoGS’s 5.3M to 8.5M learning allowances, yielding 2.0M to 4.6M Gaus5
+Preprint
+TangoGS count relative to
+best other method
+0.50×
+Mill19-rubble
+Capture
+Mill19-building
+0.47×
+US3D-residence
+2.34×
+US3D-sci-art
+2.24×
+ZipNeRF-alameda
+3.13×
+ZipNeRF-london
+4.83×
+ZipNeRF-nyc
+1.99×
+ZipNeRF-berlin
+2.78×
+higher quality
+−3
+Fixed constant
+3DGS (reference)
+Speedy-Splat
+Test PSNR relative to reference 3DGS (dB)
+Automatic budget
+TangoGS
+DashGaussian
+CDC-GS
+Compact 3DGS
+−2
+−1
+0
++1
+Preset count
+LeGS
+FastGS
+LP-3DGS
+ControlGS
+LiteGS
+Taming (15× rule)
+Mini-Splatting
+Figure 3: Transfer of released settings. PSNR relative to reference 3DGS at 60k iterations; The
+count column gives TangoGS’s count relative to the highest-PSNR method. Speedy-Splat on building (−4.43 dB) and 3DGS-MCMC are omitted; full results and diagnostics: Supplementary §D.
+sians. Across all eight captures, TangoGS improves PSNR by 0.26 dB to 0.97 dB and lowers LPIPS
+by 0.029 to 0.067, at 2.32× LiteGS’s mean count. At TangoGS’s selected counts, LiteGS still trails
+by 0.28 dB mean PSNR with worse LPIPS.
+State-of-the-art baselines.
+• A preset budget helps only if growth can reach it. Taming 3DGS caps growth at its budget but only
+densifies Gaussians whose accumulated gradient passes reference 3DGS’s threshold. It reaches its
+released standard-scene budgets, near reference 3DGS’s counts. On aerial captures, its released
+15× SfM-point multiplier requests 24M to 32M Gaussians, but few qualify, filling only 7% to
+12% of the budget. Zip-NeRF’s interiors lack a released Taming 3DGS capture class; all three
+multipliers (2×, 5×, 15× SfM points) yield 0.30M to 0.44M Gaussians. The gradient threshold
+therefore dominates model size across these captures. Taming 3DGS trails TangoGS by 0.45 dB
+to 2.14 dB on seven captures, matches it within 0.01 dB on sci-art, and has higher LPIPS on all
+eight.
+• Automatic methods remain sensitive to standard growth and pruning settings on larger captures.
+LP-3DGS, Compact 3DGS and ControlGS retain only 6% to 46% of reference 3DGS’s population
+and trail TangoGS by 0.7 dB to 3.0 dB. Automatic growth also remains constrained by inherited
+thresholds: DashGaussian stays near reference 3DGS’s counts, while LeGS ends below the SfM
+initialization on every aerial capture. FastGS (Ren et al., 2026) likewise produces small models
+with lower PSNR. CDC-GS (Dong et al., 2025) grows larger aerial models, but still trails TangoGS
+except on rubble, where it matches PSNR at twice our count. Automatic count selection therefore
+does not ensure quality–size transfer (Supplementary §D).
+• Fixed-threshold Speedy-Splat (Hanson et al., 2025) prunes a released 80% of the population grown
+by reference 3DGS, ending at 0.06M to 0.58M Gaussians, 0.9 dB to 4.9 dB behind TangoGS.
+How much effort does retuning require? A difficulty in retuning these baselines to match TangoGS’s quality–size compromise is that growth and pruning thresholds have no direct interpretation in terms of final model size or reconstruction quality. For example, 3DGS, Taming 3DGS,
+DashGaussian, and Speedy-Splat control densification using the inherited gradient threshold; LeGS
+likewise uses ordinary and absolute-gradient thresholds to select growth candidates. The effect of a
+cutoff depends on the capture’s gradient distribution, which evolves during training, and changing
+it alters subsequent growth and optimization. Consequently, finding an effective setting can require
+repeated training runs, alongside adjustments to pruning thresholds or regularization strengths. This
+6
+Preprint
+empirical parameter selection is the additional deployment effort that TangoGS avoids through capture conditioning and training feedback (Supplementary §G).
+Contribution Portability. To test whether the controller transfers across implementations, we run
+it on reference 3DGS through Taming 3DGS’s released code. It matches Taming’s released settings
+within 0.1 dB on the 13-scene mean with 3.2× fewer Gaussians, and exceeds them on the large
+captures by 0.8 dB at 2.2× the count (Supplementary §H).
+3.4
+A BLATIONS : C APTURE C ONDITIONING AND A DAPTATION
+We evaluate all four combinations of TangoGS’s two components on all 21 captures, holding the
+training profile, growth and pruning schedules, views and iteration count fixed (Fig. 4). Disabling
+the learning allowance replaces capture-derived allowances with LiteGS’s fixed default of 1M Gaussians. Disabling count adaptation removes quality feedback and sensitivity ranking, reverting to
+LiteGS’s density control, which grows to the allowance and prunes only transparent Gaussians or
+those never rendered.
+Learning allowance
+Count adaptation
+C
+Fixed allowance
+Fixed at 1M
+Quality feedback
+A
+No count adaptation
+From capture
+None (threshold pruning)
+F
+Both
+Fixed at 1M
+None (threshold pruning)
+TangoGS (complete)
+From capture
+Quality feedback
+0
+−0.25
+−0.50
+−0.75
+−1.00
+0
+−0.25
+−0.50
+−0.75
+−1.00
+0.5 1 1.5 2 2.5 3
+0
+−0.01
+−0.02
+−0.03
+−0.04
+−0.05
+smaller model
+higher quality
+Standard benchmarks: Mip-NeRF 360, Tanks and Temples, Deep Blending (13 scenes, 2 seeds)
+∆PSNR (dB) ↑
+∆SSIM ↑
+∆LPIPS ↓
+−0.02
+0
++0.02
++0.04
++0.06
+0.5 1 1.5 2 2.5 3
+0.5 1 1.5 2 2.5 3
+Large captures: Mill19, UrbanScene3D, Zip-NeRF (8 scenes, 2 seeds)
+∆PSNR (dB) ↑
+∆SSIM ↑
+∆LPIPS ↓
+−0.02
+0
++0.02
++0.04
++0.06
+0
+−0.01
+−0.02
+−0.03
+−0.04
+−0.05
+0.5 1 1.5 2 2.5 3
+0.5 1 1.5 2 2.5 3
+Mean final Gaussian count / complete TangoGS
+0.5 1 1.5 2 2.5 3
+Figure 4: Capture scale and adaptation ablation. Points show quality changes and count ratios
+relative to complete TangoGS (star). Complete results: Supplementary §E.
+Without adaptation, the allowance is fully spent: final counts are 2.6× TangoGS’s on standard
+scenes and 1.9× on large captures (Fig. 4). On standard scenes, this lowers LPIPS by 0.021 without
+improving PSNR. Quality feedback depends on training PSNR alone, so it compresses a fixed 1M
+allowance as strongly as a capture-derived one. The components are therefore complementary:
+only the complete method reaches the highest PSNR of the combinations below the fully spent
+allowance’s count in both regimes, at about half that count.
+3.5
+Q UALITY F EEDBACK VARIATION AND I TS E FFECT ON C APACITY
+Figure 5 plots the keep ratio of every capture over training; since the ratio is a fixed function of
+training PSNR, the right axis reads back the PSNR behind each value, for example 31.8 dB for
+a ratio of 0.5, and the dotted line marks the 20 dB floor below which the final selection removes
+7
+Preprint
+1.7ρ = 1: terminal step retains all
+0.58
+Sci-Art
+Residence
+0.56
+Treehill
+Alameda
+20
+24
+0.54
+28
+0.52
+0.50
+ρ = 0.5
+32
+Training PSNR (dB)
+Keep ratio ρ
+0.60
+Bonsai
+0.48
+Dr Johnson
+13 standard captures
+8 large captures
+0.46
+0.0
+Playroom
+36
+terminal reading
+0.2
+0.4
+0.6
+0.8
+1.0
+Training progress (epoch / last growth epoch)
+Figure 5: Keep ratio of every capture during training.
+nothing. The terminal reading (dots) is taken after the last opacity decay, which briefly lowers
+training PSNR, so it sits above the last learning reading.
+Scenes that end training above 33 dB (Kitchen, Bonsai, Room, Dr Johnson, Playroom) read ρ between 0.46 and 0.49 and keep 56% to 64% of the grown population at the terminal step. Those
+between 27 dB and 31 dB read 0.51 to 0.53 and keep 70% to 82%. Those below 27 dB, among them
+five of the eight large captures, read 0.54 to 0.58 and keep 82% to 97%; on Sci-Art and Residence
+the retained fraction sρ reaches 0.98, so the terminal step removes almost nothing and the growth
+target alone sets the final size.
+Whether these differences matter depends on where a capture sits. Holding ρ = 0.5 throughout
+changes Room and Dr Johnson by at most 4% in count and 0.08 dB, since their adaptive ratio already ends near 0.5. On Garden the adaptive ratio of 0.54 retains 1.29× the Gaussians for 0.15 dB
+higher PSNR and 0.014 lower LPIPS; on Building, Rubble and Sci-Art the ratios of 0.55 to 0.58
+retain 1.45× to 1.66× for 0.13 dB to 0.16 dB and 0.006 to 0.019 lower LPIPS. The fixed 0.5 rule
+approximates the adaptive rule on the captures with the highest training PSNR and selects smaller,
+lower-quality models on the others.
+3.6
+A BLATION : T HE C APTURE S TATISTIC
+TangoGS: track-adjusted pixels
+Total pixels
+28.03
+27.93
+smaller model
+0.83
+8 large captures: PSNR (dB) ↑
+higher quality
+13 standard captures: PSNR (dB) ↑
+28.14
+SfM points
+24.77
+24.67
+24.56
+1.05
+0.94
+Mean final Gaussians (M)
+3.07
+Duplicated views: final Gaussians / untransformed
+1.6×
+−0.03
+total-pixel allowance 1.41×
+−0.02
+1.4×
+−0.01
+1.2×
+0
+1×
++0.01
+0.8×
++0.02
+13 standard captures 8 large captures
+3.90
+3.48
+Mean final Gaussians (M)
+Duplicated views: ∆LPIPS ↓
+13 standard captures 8 large captures
+Figure 6: Capture statistic ablation. Top: standard and large-capture PSNR versus model size.
+Bottom: count and LPIPS changes after duplicating every view, held-out evaluation unchanged.
+8
+Preprint
+We compare three capture statistics for the learning allowance: track-adjusted pixels (ours), total pixels, and SfM point count, each normalized on the same 13 standard captures (Fig. 6). On
+the benchmarks all three reach the same mean quality, within 0.04 dB and 0.003 LPIPS, but SfM
+points spend more Gaussians for it: track-adjusted pixels use 4% fewer on standard scenes and 12%
+fewer on large captures, with total pixels in between. SfM-point allowances follow the matchedobservation density per image pixel (Eq. (1)) rather than the capture itself: 1.3× to 1.7× ours on
+aerial captures and 0.5× to 0.8× on Zip-NeRF interiors, with the larger model gaining at most
+0.3 dB in each case (Supplementary §F).
+Redundant views then separate the two pixel√statistics. Duplicating every image adds no information
+but multiplies the total-pixel allowance by 2 and increases the mean final count by 36% to 38%.
+The track-adjusted allowance stays unchanged, with final counts within about 10% of the original.
+Both nevertheless lose large-capture PSNR when duplication halves the number of training epochs:
+size invariance does not ensure rendering invariance.
+All three statistics reach similar mean quality, but SfM points allocate more Gaussians for it, and of
+the two pixel statistics only track adjustment keeps the allowance invariant to redundant views.
+4
+R ELATED W ORK
+We group prior density controllers by the three decisions TangoGS automates:
+Choosing a Gaussian budget. Budgeted methods expose a target Gaussian count or cap. Taming 3DGS (Mallick et al., 2024) derives its target from the number of points reconstructed by SfM,
+with multipliers chosen by dataset class. LiteGS (Liao et al., 2025) grows toward a supplied target,
+3DGS-MCMC (Kheradmand et al., 2024) samples under a preset cap, and Mini-Splatting (Fang &
+Wang, 2024) reorganizes Gaussians within a constrained count. TangoGS also uses an explicit learning allowance, computed before training from image count, resolution, and repeated observations of
+scene points using one global conversion.
+Adapting model size during training. Compact 3DGS (Lee et al., 2024) and LP-3DGS (Zhang
+et al., 2024) learn retention masks; ControlGS (Zhang et al., 2025) balances uniform splitting and
+opacity regularization with one global parameter. DashGaussian (Chen et al., 2025) estimates budgets from observed growth and coordinates densification with image resolution; SIG (Xue et al.,
+2026) coordinates both using frequency-based measures of reconstruction progress. GS2 (Yang
+et al., 2026) weighs reconstruction gains against model complexity to stop densification, with
+opacity-regularized pruning. RLGS (Li et al., 2025) learns to adjust learning rates and densification
+settings, with evaluation on budgeted backbones; Prune Wisely (Wang et al., 2026a) uses reconstruction loss to schedule pruning toward a preset target. Smart Target Point Control (Bisht & Kolb,
+2026) tracks a supplied count along a prescribed training trajectory; BlitzGS (Wang et al., 2026b)
+combines importance-based pruning, a spawn gate, and density-control feedback. Our contribution
+is the policy coupling a capture-derived learning allowance to quality feedback during growth and
+final retention, using established budgeted growth and score-based pruning.
+Choosing where to grow and prune. Local refinement guides growth using image errors (Rota Bulò et al., 2024; Baranowski et al., 2026), gradient magnitude and direction (Ye et al.,
+2024; Zhou et al., 2026), second-order information (Wang et al., 2025), or perceptual importance (Zhou & Ni, 2025). FastGS (Ren et al., 2026), CDC-GS (Dong et al., 2025), and LeGS (Ning
+et al., 2026) guide growth and pruning through cross-view errors, local image complexity relative
+to Gaussian density, and learned per-Gaussian actions, respectively. SPARE-GS (Chen et al., 2026)
+allocates regional growth and pruning quotas from a budget based on the current Gaussian count.
+TangoGS decides only how much to grow and retain, setting targets for LiteGS’s budgeted growth
+and keep fractions for sensitivity pruning (Hanson et al., 2025).
+5
+C ONCLUSION
+Our central contribution is to distinguish capture scale from content complexity when selecting the
+capacity of a Gaussian scene representation. The extent and resolution of the observed surface in9
+Preprint
+form how much capacity to make available before training; reconstruction quality provides feedback
+on how much to retain as the content is learned. Our experiments support treating these as complementary decisions: adaptation within an unsuitable allowance can restrict reconstruction quality,
+while setting capacity from capture scale alone can retain unnecessary Gaussians, reducing compactness. This motivates a design principle for density control across scales: use the capture to
+establish the capacity scale and learning feedback to adapt its use.
+10
+Preprint
+AI USE STATEMENT
+In this work, we used generative AI tools to design and give feedback on methodology and experiments, to implement methods, to clean and reformat datasets, and to interpret results. Additionally,
+we used generative AI tools to generate tables and figures from experiment logs and to edit the text
+of this paper for readability. All AI-generated code was read and tested by the authors, every reported number is extracted from training and evaluation logs by scripts that are checked against the
+tables in this paper, and all experimental conclusions were examined and confirmed by the authors.
+R EFERENCES
+Bartłomiej Baranowski, Stefano Esposito, Patricia Gschoßmann, Anpei Chen, and Andreas Geiger.
+Conegs: Error-guided densification using pixel cones for improved reconstruction with fewer
+primitives. In International Conference on 3D Vision (3DV), pp. 989–999, 2026. doi: 10.1109/
+3DV69130.2026.00099. URL https://baranowskibrt.github.io/conegs/.
+Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter Hedman. Mipnerf 360: Unbounded anti-aliased neural radiance fields. In IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), pp. 5460–5469, 2022. URL https://jonbarron.
+info/mipnerf360/.
+Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter Hedman. ZipNeRF: Anti-aliased grid-based neural radiance fields. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV), pp. 19697–19705, 2023. URL https:
+//jonbarron.info/zipnerf/.
+Pratik Singh Bisht and Andreas Kolb. Smart target point control for gaussian splatting methods.
+arXiv preprint arXiv:2605.16158, 2026. URL https://arxiv.org/abs/2605.16158.
+Youyu Chen, Junjun Jiang, Kui Jiang, Xiao Tang, Zhihao Li, Xianming Liu, and Yinyu Nie. Dashgaussian: Optimizing 3d gaussian splatting in 200 seconds. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR), pp. 11146–11155, 2025. URL
+https://arxiv.org/abs/2503.18402.
+Zhang Chen, Shuai Wan, Fuzheng Yang, Jiazhi Xia, Weiyao Lin, and Junhui Hou. SPAREGS: Structural parsimony and resource efficiency for 3D Gaussian splatting. arXiv preprint
+arXiv:2607.16624, 2026. URL https://arxiv.org/abs/2607.16624.
+Zhemeng Dong, Junjun Jiang, Youyu Chen, Jiaxin Zhang, Kui Jiang, and Xianming Liu. Reframing
+gaussian splatting densification with complexity-density consistency of primitives. In Advances in
+Neural Information Processing Systems (NeurIPS), 2025. URL https://cdc-gs.github.
+io/.
+Guangchi Fang and Bing Wang. Mini-splatting: Representing scenes with a constrained number of gaussians. In European Conference on Computer Vision (ECCV), pp. 165–181,
+2024. URL https://www.ecva.net/papers/eccv_2024/papers_ECCV/html/
+9866_ECCV_2024_paper.php.
+Alex Hanson, Allen Tu, Geng Lin, Vasu Singla, Matthias Zwicker, and Tom Goldstein. Speedysplat: Fast 3d gaussian splatting with sparse pixels and sparse primitives. In Proceedings of the
+Computer Vision and Pattern Recognition Conference (CVPR), pp. 21537–21546, 6 2025. URL
+https://arxiv.org/abs/2412.00578.
+Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis, and Gabriel
+Brostow. Deep blending for free-viewpoint image-based rendering. ACM Transactions on
+Graphics, 37(6):257:1–257:15, 2018. URL https://repo-sam.inria.fr/fungraph/
+deep-blending/.
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3d gaussian splatting for real-time radiance field rendering. ACM Transactions on Graphics, 42(4), 7 2023. URL
+https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/.
+11
+Preprint
+Shakiba Kheradmand, Daniel Rebain, Gopal Sharma, Weiwei Sun, Yang-Che Tseng, Hossam Isack, Abhishek Kar, Andrea Tagliasacchi, and Kwang Moo Yi. 3d gaussian splatting as markov chain monte carlo. In Advances in Neural Information Processing Systems
+(NeurIPS), 2024. URL https://proceedings.neurips.cc/paper_files/paper/
+2024/file/93be245fce00a9bb2333c17ceae4b732-Paper-Conference.pdf.
+Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and temples: Benchmarking
+large-scale scene reconstruction. ACM Transactions on Graphics, 36(4), 2017. URL https:
+//doi.org/10.1145/3072959.3073599.
+Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko, and Eunbyung Park. Compact 3d gaussian representation for radiance field. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp. 21719–21728, 2024. URL https:
+//openaccess.thecvf.com/content/CVPR2024/html/Lee_Compact_3D_
+Gaussian_Representation_for_Radiance_Field_CVPR_2024_paper.html.
+Zhan Li, Huangying Zhan, Changyang Li, Qingan Yan, and Yi Xu. Rlgs: Reinforcement learningbased adaptive hyperparameter tuning for gaussian splatting. arXiv preprint arXiv:2508.04078,
+2025. URL https://arxiv.org/abs/2508.04078.
+Kaimin Liao. Litegs: A high-performance modular framework for gaussian splatting training. arXiv
+preprint arXiv:2503.01199v1, 2025. URL https://arxiv.org/abs/2503.01199v1.
+Version 1; superseded by the five-author version.
+Kaimin Liao, Hua Wang, Zhi Chen, Luchao Wang, and Yaohua Tang. Litegs: A high-performance
+framework to train 3dgs in subminutes via system and algorithm codesign. arXiv preprint
+arXiv:2503.01199, 2025. URL https://arxiv.org/abs/2503.01199v3.
+Liqiang Lin, Yilin Liu, Yue Hu, Xingguang Yan, Ke Xie, and Hui Huang. Capturing, reconstructing,
+and simulating: The UrbanScene3D dataset. In Proceedings of the European Conference on
+Computer Vision (ECCV), 2022. URL https://www.ecva.net/papers/eccv_2022/
+papers_ECCV/html/3218_ECCV_2022_paper.php.
+Saswat Subhajyoti Mallick, Rahul Goel, Bernhard Kerbl, Markus Steinberger, Francisco Vicente
+Carrasco, and Fernando De la Torre. Taming 3dgs: High-quality radiance fields with limited
+resources. In SIGGRAPH Asia 2024 Conference Papers, pp. 2:1–2:11, 2024. doi: 10.1145/
+3680528.3687694. URL https://arxiv.org/abs/2406.15643.
+Zhenhua Ning, Xin Li, Jun Yu, Guangming Lu, Yaowei Wang, and Wenjie Pei. Beyond heuristics:
+Learnable density control for 3d gaussian splatting. In International Conference on Machine
+Learning (ICML), 2026. URL https://arxiv.org/abs/2605.00408v2.
+Shiwei Ren, Tianci Wen, Yongchun Fang, and Biao Lu. Fastgs: Training 3d gaussian splatting in
+100 seconds. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp.
+26094–26103, 2026. URL https://arxiv.org/abs/2511.04283.
+Samuel Rota Bulò, Lorenzo Porzi, and Peter Kontschieder. Revising densification in gaussian splatting.
+In European Conference on Computer Vision (ECCV), pp. 347–362,
+2024. URL https://www.ecva.net/papers/eccv_2024/papers_ECCV/html/
+8041_ECCV_2024_paper.php.
+Johannes L. Schönberger and Jan-Michael Frahm. Structure-from-motion revisited. In 2016 IEEE
+Conference on Computer Vision and Pattern Recognition (CVPR), pp. 4104–4113, 2016. doi:
+10.1109/CVPR.2016.445. URL https://openaccess.thecvf.com/content_cvpr_
+2016/html/Schonberger_Structure-From-Motion_Revisited_CVPR_2016_
+paper.html.
+Haithem Turki, Deva Ramanan, and Mahadev Satyanarayanan.
+Mega-NeRF: Scalable construction of large-scale NeRFs for virtual fly-throughs.
+In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR),
+2022.
+URL https://openaccess.thecvf.com/content/CVPR2022/html/
+Turki_Mega-NERF_Scalable_Construction_of_Large-Scale_NeRFs_for_
+Virtual_Fly-Throughs_CVPR_2022_paper.html.
+12
+Preprint
+Haoran Wang, Guoxi Huang, Fan Zhang, David Bull, and Nantheera Anantrasirichai. Prune
+wisely, reconstruct sharply: Compact 3d gaussian splatting via adaptive pruning and differenceof-gaussian primitives. In IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), 2026a. URL https://arxiv.org/abs/2602.24136.
+Peihao Wang, Yuehao Wang, Dilin Wang, Sreyas Mohan, Zhiwen Fan, Lemeng Wu, Ruisi Cai, YuYing Yeh, Zhangyang Wang, Qiang Liu, and Rakesh Ranjan. Steepest descent density control
+for compact 3D Gaussian splatting. In IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), 2025. URL https://arxiv.org/abs/2505.05587.
+Zhongtao Wang, Huishan Au, Yilong Li, Mai Su, Haojie Jin, Yisong Chen, Meng Gai, Fei Zhu,
+and Guoping Wang. BlitzGS: City-scale gaussian splatting at lightning speed. arXiv preprint
+arXiv:2605.13794, 2026b. URL https://arxiv.org/abs/2605.13794v2.
+Zhou Wang, A.C. Bovik, H.R. Sheikh, and E.P. Simoncelli. Image quality assessment: from error visibility to structural similarity. IEEE Transactions on Image Processing, 13(4):600–612,
+2004. doi: 10.1109/TIP.2003.819861. URL https://ece.uwaterloo.ca/˜z70wang/
+publications/ssim.pdf.
+Weiyi Xue, Fan Lu, Chi Zhang, Tianhang Wang, Sanqing Qu, Zehan Zheng, Boyuan Zheng,
+Junqiao Zhao, and Guang Chen. Signal structure-aware Gaussian splatting for large-scale
+scene reconstruction. In International Conference on Learning Representations (ICLR),
+2026. URL https://proceedings.iclr.cc/paper_files/paper/2026/hash/
+f67449c7ab72f441d3a713b046c6818c-Abstract-Conference.html.
+Xianben Yang, Tao Wang, Yuxuan Li, Yi Jin, and Haibin Ling. Gs2 : Graph-based spatial distribution
+optimization for compact 3d gaussian splatting. arXiv preprint arXiv:2604.01884, 2026. URL
+https://arxiv.org/abs/2604.01884.
+Zongxin Ye, Wenyu Li, Sidun Liu, Peng Qiao, and Yong Dou. Absgs: Recovering fine details in 3d
+gaussian splatting. In ACM International Conference on Multimedia (ACM MM), pp. 1053–1061,
+2024. URL https://doi.org/10.1145/3664647.3681361.
+Fengdi Zhang, Yibao Sun, Hongkun Cao, and Ruqi Huang. Controlgs: Consistent structural compression control for deployment-aware gaussian splatting. arXiv preprint arXiv:2505.10473,
+2025. URL https://arxiv.org/abs/2505.10473v3.
+Richard Zhang, Phillip Isola, Alexei A. Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of deep features as a perceptual metric. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp. 586–595, 2018. URL
+https://openaccess.thecvf.com/content_cvpr_2018/html/Zhang_The_
+Unreasonable_Effectiveness_CVPR_2018_paper.html.
+Zhaoliang Zhang, Tianchen Song, Yongjae Lee, Li Yang, Cheng Peng, Rama Chellappa, and Deliang Fan.
+Lp-3dgs:
+Learning to prune 3d gaussian splatting.
+In Advances in Neural Information Processing Systems (NeurIPS), 2024.
+URL
+https://proceedings.neurips.cc/paper_files/paper/2024/hash/
+dd51dbce305433cd60910dc5b0147be4-Abstract-Conference.html.
+Hongbi Zhou and Zhangkai Ni. Perceptual-gs: Scene-adaptive perceptual densification for gaussian
+splatting. In International Conference on Machine Learning (ICML), volume 267 of Proceedings
+of Machine Learning Research, pp. 79089–79114, 2025. URL https://proceedings.
+mlr.press/v267/zhou25s.html.
+Zheng Zhou, Yu-Jie Xiong, Jia-Chen Zhang, Chun-Ming Xia, Xihe Qiu, and
+Hongjian Zhan.
+Gradient-direction-aware density control for 3D Gaussian splatting.
+In International Conference on Learning Representations (ICLR), 2026.
+URL
+https://proceedings.iclr.cc/paper_files/paper/2026/hash/
+24402f5a0df4ab461aa759ca2ecb8df6-Abstract-Conference.html.
+13
+Preprint
+S UPPLEMENTARY M ATERIAL
+This supplement contains:
+• Section A: qualitative comparisons.
+• Section B: TangoGS method details, including training protocol, allowance computation,
+quality feedback, and sensitivity pruning.
+• Section C: complete per-scene results on the 13 standard scenes and the reproduction check
+against published numbers.
+• Section D: complete results on the eight large captures.
+• Section E: controller ablations, covering capture conditioning, LiteGS at the selected final
+count, and fixed keep ratios.
+• Section F: capture-statistic studies on natural captures and under exact view duplication.
+• Section G: details on the difficulty of tuning baselines on larger captures and the controls
+to tune for each technique.
+• Section H: controller evaluation on reference 3DGS.
+• Section I: quality, saved model storage and native rendering throughput for all benchmark
+models.
+• Section J: How good is the quality–size compromise chosen by TangoGS?
+A
+Q UALITATIVE R ESULTS
+We begin with visual comparisons on the eight large captures, highlighting fine structures and textures reconstructed by TangoGS. The comparisons use the same models as the quantitative evaluation: TangoGS with the shared configuration, LiteGS (Liao et al., 2025) at its 1M default,
+LeGS (Ning et al., 2026), CDC-GS (Dong et al., 2025) and reference 3DGS (Kerbl et al., 2023).
+We render matching test views and compare the same regions across methods, with ground-truth
+images checked for consistency across implementations. The crops (240 or 140 pixels square) are
+selected using rendering error to illustrate visible differences in detail; results averaged over all test
+views are reported in Section D.
+In each figure, the first column locates the window in its full test view; the remaining columns display
+the same region. Labels give crop PSNR and the final count of the displayed model. Renders are
+unmodified apart from cropping.
+14
+Preprint
+Ground truth
+LiteGS
+LeGS
+CDC-GS
+Ref. 3DGS
+Ours
+24.3 dB
+0.98M
+25.2 dB
+0.37M
+25.5 dB
+0.98M
+25.0 dB
+1.06M
+32.8 dB
+1.96M
+24.4 dB
+0.98M
+23.5 dB
+0.50M
+24.2 dB
+0.91M
+22.0 dB
+0.87M
+31.5 dB
+3.05M
+21.6 dB
+0.96M
+23.3 dB
+0.58M
+22.5 dB
+0.80M
+23.7 dB
+0.63M
+29.7 dB
+2.80M
+23.8 dB
+0.98M
+21.3 dB
+0.37M
+23.6 dB
+0.94M
+22.8 dB
+0.77M
+29.1 dB
+2.71M
+Berlin
+London
+Alameda
+NYC
+Test view
+Figure A.1: Selected windows on the handheld captures (Zip-NeRF). Comparators blur thin
+structure that TangoGS recovers: a door panel and keyhole (NYC), drawer fronts (Alameda), shutter
+slats (London) and wood grain (Berlin).
+Residence
+Sci-Art
+Building
+Rubble
+Test view
+Ground truth
+LiteGS
+LeGS
+CDC-GS
+Ref. 3DGS
+Ours
+27.7 dB
+1.69M
+27.6 dB
+1.51M
+24.7 dB
+5.90M
+25.2 dB
+6.00M
+30.5 dB
+2.96M
+19.7 dB
+1.60M
+16.8 dB
+0.92M
+9.0 dB
+5.85M
+13.4 dB
+7.42M
+25.7 dB
+3.51M
+19.2 dB
+2.13M
+20.4 dB
+1.48M
+23.4 dB
+3.16M
+23.1 dB
+2.58M
+31.6 dB
+4.58M
+25.4 dB
+1.95M
+23.5 dB
+1.79M
+23.6 dB
+6.81M
+27.7 dB
+5.32M
+31.6 dB
+4.57M
+Figure A.2: Selected windows on the aerial captures. Vehicles (Rubble), a grass edge (Building),
+soil texture (Sci-Art) and parking-lot markings (Residence) that comparators smooth over. Reference 3DGS and CDC-GS use up to about twice as many Gaussians as TangoGS on these captures
+without recovering them.
+15
+Preprint
+B
+P ROTOCOLS AND I MPLEMENTATION
+B.1
+C ONFIGURATION AND EVALUATION
+Every default TangoGS result averages two training runs with random seeds 4114 and 4115, using
+one configuration across all 21 captures. The seeds fix the training-view order and all stochastic optimization draws. All official training views participate in optimization. Requested iteration
+counts are 30k on standard scenes and 60k on large captures; position learning-rate decay spans the
+corresponding count.
+Standard benchmarks hold out every eighth name-sorted frame; Mip-NeRF 360 uses half-resolution
+indoor and quarter-resolution outdoor images. Mill19 and UrbanScene3D use official validation
+splits. Zip-NeRF uses a sorted every-eighth hold-out, half resolution, and a 1600-pixel width cap.
+Reported means weight captures equally. PSNR and VGG LPIPS definitions are shared across
+implementations.
+B.2
+M ETADATA AND EXACT ALLOWANCE
+The capture image count includes held-out images; W × H is the loaded resolution. Mean track
+length is the number of valid image–point observations divided by unique tracked points in the
+supplied sparse model. This model covers all capture views on standard scenes, Zip-NeRF, and the
+all-view Rubble triangulation. For Building, Residence, and Sci-Art, separate training and validation
+sparse models are supplied: images are counted across both splits, but tracks come from the training
+model.
+The implemented allowance is
+h
+i
+Tlin = round 0.90 round(0.07040234 X̃) ,
+
+
+Tcap = round Tref (Tlin /Tref )0.5 .
+(5)
+Nested rounding implements the main paper’s effective g = 0.063362106 to integer precision. The
+reference Tref = 2,462,476 is the rounded geometric mean of the 13 standard linear allowances.
+These constants define one reproducible operating point, without per-capture selection or a claim of
+minimum model size.
+B.3
+Q UALITY FEEDBACK AND SENSITIVITY PRUNING
+The implementation uses ρ = 0.7382 − 0.0075P , where P is the mean per-image training PSNR
+from the preceding calibration epoch. Rounding the intercept in the main paper’s equation places
+the final no-removal threshold at approximately 19.995 dB. The map is unclipped; a guard aborts an
+event that would remove more than 90% of the population.
+Sensitivity score and storage. The pruning score adapts Speedy-Splat’s image-sensitivity ranking (Hanson et al., 2025). LiteGS’s scoring kernel substitutes a unit upstream image multiplier during the photometric-loss backward pass. Scores accumulate over the epoch before pruning, without
+additional scoring renders or changes to optimization gradients. The culling map scatters visiblecluster scores back to original Gaussian indices. At joint growth/pruning events, growth anticipates
+the following removal; only Gaussians scored before growth are eligible for pruning. Parameters and
+Adam buffers are unclustered, filtered, and reclustered into Morton-ordered groups of 128. Removal
+counts round down to a multiple of 128, preserving smaller remainders.
+B.4
+T RAINING SCHEDULE AND BASELINE COMPATIBILITY
+All epoch-based intervals scale with the run’s epoch count as described in the main text, with a
+shared spacing unit of 150 epochs. Densification starts at 2% of training and ends at 80%, where
+the final count is selected; soft prunes begin at about 9% of training. Quality is recalibrated from
+the preceding epoch at every growth event and at final selection. Optimizer settings follow released
+LiteGS except for an SH-rest learning-rate divisor of 20, a split/clone threshold of 0.001, and opacity
+decay (factor 0.5, floor 1/128) in place of resets.
+Baseline readers accept SIMPLE RADIAL/RADIAL cameras through their pinhole intrinsics and
+read official validation identities from sparse/0/test.txt when provided. LP-3DGS has its
+16
+Preprint
+missing top-k rasterizer restored; CDC-GS guards against empty sampling sets. LeGS and FastGS
+use the benchmark’s images 4/images 2 resolutions. Other settings follow the releases; Section C compares our runs with published results.
+C
+B ENCHMARK R ESULTS AND R EPRODUCTION
+The dataset tables report quality, final count, and training time for all evaluated methods under
+the protocol in Section B. Times are wall-clock measurements on one GH200; those for TangoGS
+include loading, scoring and diagnostic overhead.
+C.1
+DATASET COMPARISONS
+Mip-NeRF 360.
+Table C.1 reports means over the nine Mip-NeRF 360 scenes.
+Table C.1: Mip-NeRF 360 (9 scenes). Released baseline settings and the shared TangoGS configuration. Quality and final count are dataset means. Time is training wall-clock on one GH200; the
+TangoGS prototype includes loading, scoring and diagnostic overhead. A dash denotes unavailable
+timing.
+Method
+PSNR↑ SSIM↑ LPIPS↓
+NG Time
+TangoGS
+LeGS
+LiteGS
+3DGS
+Taming
+3DGS-MCMC
+DashGaussian
+Speedy-Splat
+FastGS
+CDC-GS
+LP-3DGS
+Compact 3DGS
+ControlGS
+Mini-Splatting
+Tanks & Temples.
+28.21
+28.30
+28.07
+27.53
+27.83
+27.98
+27.70
+26.91
+27.48
+27.74
+27.42
+27.02
+27.76
+27.28
+0.831
+0.837
+0.821
+0.816
+0.822
+0.835
+0.820
+0.786
+0.798
+0.826
+0.815
+0.800
+0.823
+0.821
+0.198
+0.183
+0.210
+0.211
+0.204
+0.185
+0.209
+0.283
+0.257
+0.191
+0.216
+0.238
+0.213
+0.213
+0.97M
+2.08M
+0.99M
+2.74M
+3.21M
+3.10M
+2.43M
+0.32M
+0.38M
+2.73M
+1.35M
+1.43M
+0.85M
+0.49M
+194s
+367s
+168s
+795s
+483s
+1408s
+330s
+550s
+148s
+8946s
+1505s
+1047s
+4877s
+718s
+Table C.2 reports means over Truck and Train.
+Table C.2: Tanks & Temples (2 scenes). Released baseline settings and the shared TangoGS configuration. Quality and final count are dataset means. Time is training wall-clock on one GH200; the
+TangoGS prototype includes loading, scoring and diagnostic overhead. A dash denotes unavailable
+timing.
+Method
+PSNR↑ SSIM↑ LPIPS↓
+NG Time
+TangoGS
+LeGS
+LiteGS
+3DGS
+Taming
+3DGS-MCMC
+DashGaussian
+Speedy-Splat
+FastGS
+CDC-GS
+LP-3DGS
+Compact 3DGS
+ControlGS
+Mini-Splatting
+24.77
+24.68
+24.85
+23.85
+24.21
+24.53
+24.15
+23.37
+24.17
+24.35
+23.66
+23.38
+23.96
+23.15
+0.868
+0.866
+0.868
+0.853
+0.855
+0.871
+0.853
+0.819
+0.843
+0.866
+0.845
+0.835
+0.853
+0.831
+17
+0.153
+0.155
+0.144
+0.168
+0.169
+0.146
+0.178
+0.241
+0.208
+0.149
+0.185
+0.199
+0.166
+0.210
+0.79M 208s
+1.37M 320s
+0.99M 196s
+1.58M 552s
+1.83M 342s
+1.85M 856s
+1.22M 273s
+0.18M 352s
+0.24M 140s
+1.59M 8458s
+0.61M 1314s
+0.84M 696s
+0.82M 2849s
+0.20M 504s
+Preprint
+Deep Blending.
+Table C.3 reports means over Dr Johnson and Playroom.
+Table C.3: Deep Blending (2 scenes). Released baseline settings and the shared TangoGS configuration. Quality and final count are dataset means. Time is training wall-clock on one GH200; the
+TangoGS prototype includes loading, scoring and diagnostic overhead. A dash denotes unavailable
+timing.
+Method
+PSNR↑ SSIM↑ LPIPS↓
+NG Time
+TangoGS
+LeGS
+LiteGS
+3DGS
+Taming
+3DGS-MCMC
+DashGaussian
+Speedy-Splat
+FastGS
+CDC-GS
+LP-3DGS
+Compact 3DGS
+ControlGS
+Mini-Splatting
+C.2
+30.55
+30.48
+30.34
+29.71
+30.17
+29.56
+29.67
+29.63
+29.92
+29.69
+29.61
+29.84
+29.60
+29.96
+0.915
+0.914
+0.911
+0.907
+0.910
+0.905
+0.905
+0.903
+0.904
+0.907
+0.906
+0.905
+0.906
+0.908
+0.228
+0.229
+0.232
+0.239
+0.234
+0.233
+0.246
+0.268
+0.267
+0.234
+0.248
+0.254
+0.254
+0.253
+0.84M
+0.90M
+0.99M
+2.48M
+2.80M
+2.95M
+1.95M
+0.25M
+0.22M
+1.83M
+0.69M
+1.05M
+0.46M
+0.35M
+115s
+248s
+158s
+900s
+416s
+1176s
+245s
+558s
+126s
+4980s
+1418s
+1007s
+4600s
+660s
+I NDIVIDUAL SCENES AND SEEDS
+Table C.4 gives released LiteGS results per scene.
+Table C.4: Released LiteGS on standard scenes. TorchMetrics SSIM; final counts and training
+time on one GH200. Individual TangoGS results follow in Table C.5.
+Capture Method
+PSNR SSIM LPIPS N (M) Time (s)
+bicycle
+LiteGS (1M)
+bonsai
+LiteGS (1M)
+counter
+LiteGS (1M)
+drjohnson LiteGS (1M)
+flowers
+LiteGS (1M)
+garden
+LiteGS (1M)
+kitchen
+LiteGS (1M)
+playroom LiteGS (1M)
+room
+LiteGS (1M)
+stump
+LiteGS (1M)
+train
+LiteGS (1M)
+treehill
+LiteGS (1M)
+truck
+LiteGS (1M)
+24.84 0.736
+33.17 0.951
+29.84 0.919
+29.79 0.909
+21.71 0.620
+27.55 0.857
+32.37 0.932
+30.88 0.913
+32.63 0.931
+27.13 0.791
+23.14 0.839
+23.37 0.651
+26.57 0.896
+0.263
+0.172
+0.170
+0.237
+0.315
+0.134
+0.114
+0.226
+0.183
+0.214
+0.174
+0.323
+0.113
+0.99
+0.99
+0.99
+0.99
+0.99
+0.99
+0.99
+0.99
+0.99
+1.00
+0.99
+0.99
+0.99
+Table C.5 records both TangoGS training seeds, including their training times.
+18
+146
+185
+194
+159
+176
+146
+185
+156
+174
+149
+208
+159
+184
+Preprint
+Table C.5: TangoGS: individual standard results. One standard-calibrated configuration on every
+capture. SSIM uses the reference estimator here; headline cross-method tables retain the TorchMetrics convention for the LiteGS implementation.
+Capture Seed NG (M) PSNR
+SSIM LPIPS Time (s)
+bicycle
+4114
+bicycle
+4115
+bonsai
+4114
+bonsai
+4115
+counter
+4114
+counter
+4115
+drjohnson 4114
+drjohnson 4115
+flowers
+4114
+flowers
+4115
+garden
+4114
+garden
+4115
+kitchen
+4114
+kitchen
+4115
+playroom 4114
+playroom 4115
+room
+4114
+room
+4115
+stump
+4114
+stump
+4115
+train
+4114
+train
+4115
+treehill
+4114
+treehill
+4115
+truck
+4114
+truck
+4115
+C.3
+1.166 25.6566 0.78402 0.21295
+1.170 25.7212 0.78427 0.21289
+0.787 33.0257 0.95151 0.17264
+0.768 33.0668 0.95075 0.17209
+1.061 29.6930 0.92130 0.16658
+1.055 29.7756 0.92161 0.16632
+0.989 29.9837 0.91573 0.22488
+0.984 30.0160 0.91561 0.22433
+1.228 21.9932 0.64108 0.29578
+1.230 21.9956 0.64114 0.29632
+0.815 27.6615 0.86062 0.13501
+0.817 27.5961 0.86040 0.13526
+0.895 32.4567 0.93565 0.11234
+0.896 32.3310 0.93510 0.11262
+0.693 31.0566 0.91768 0.23145
+0.696 31.1410 0.91669 0.23179
+0.876 32.6144 0.93317 0.17847
+0.876 32.5989 0.93330 0.17816
+0.855 27.4521 0.80808 0.19909
+0.854 27.4689 0.80833 0.19979
+0.917 22.9956 0.84698 0.16861
+0.917 23.1280 0.84964 0.16706
+1.073 23.3206 0.66118 0.31295
+1.078 23.2984 0.66047 0.31309
+0.672 26.4662 0.89309 0.13945
+0.669 26.4828 0.89345 0.13864
+203
+206
+243
+243
+250
+239
+126
+129
+152
+217
+189
+190
+231
+231
+107
+99
+140
+144
+113
+117
+244
+246
+188
+188
+142
+202
+R EPRODUCTION AGAINST PUBLISHED RESULTS
+Table C.6 compares re-runs with published PSNR. Nine of twelve scored baselines differ by less than
+0.35 dB on every dataset they report; the exceptions are reference 3DGS (+0.71 dB), DashGaussian
+(+0.38 dB), and ControlGS (−0.39 dB). LeGS uses its evaluation script’s configuration, which differs from its training script on six scenes and reproduces published means within 0.13 dB. Scene
+sets and reconstructions can differ across publications, so we compare methods under a common
+protocol.
+19
+Preprint
+Table C.6: Reproduced versus published PSNR. Re-run values use released settings; ∆ is re-run
+minus published, with |∆| ≥ 0.35 dB in bold. a Both Mip-NeRF 360 means exclude Flowers and
+Treehill, matching the seven scenes reported by MCMC. b Historical LiteGS v1 (Liao, 2025), with
+its own reconstruction and no stated count; context only, without a scored difference. c CDC-GS
+reports three-seed means and a Mip-NeRF 360 reference baseline 0.26 dB above ours.
+Mip-NeRF 360
+Tanks & Temples
+Deep Blending
+Method
+Run
+Pub.
+∆
+Run
+Pub.
+∆
+Run
+∆
+Pub.
+3DGS
+27.53 27.21 +0.32 23.85 23.14 +0.71 29.71 29.41 +0.30
+Speedy-Splat
+26.91 26.94 -0.03 23.37 23.45 -0.08 29.63 29.32 +0.31
+Mini-Splatting 27.28 27.34 -0.06 23.15 23.18 -0.03 29.96 29.98 -0.02
+Compact 3DGS 27.02 27.08 -0.06 23.38 23.32 +0.06 29.84 29.79 +0.05
+LP-3DGS
+27.42 27.47 -0.05 23.66 23.60 +0.06 29.61
+–
+–
+DashGaussian 27.70 27.81 -0.11 24.15 23.83 +0.32 29.67 29.29 +0.38
+Taming 3DGS 27.83 27.79 +0.04 24.21 24.04 +0.17 30.17 30.14 +0.03
+ControlGS
+27.76 27.90 -0.14 23.96 24.35 -0.39 29.60 29.81 -0.21
+3DGS-MCMCa 29.55 29.89 -0.34 24.53 24.29 +0.24 29.56 29.67 -0.11
+LiteGS (1M)b 28.07 27.98
+– 24.85
+–
+– 30.34
+–
+–
+FastGS
+27.48 27.56 -0.08 24.17 24.15 +0.02 29.92 30.03 -0.11
+LeGS
+28.30 28.30 -0.00 24.68 24.74 -0.06 30.48 30.35 +0.13
+CDC-GSc
+27.74 28.02 -0.28 24.35 24.42 -0.07 29.69 29.84 -0.15
+D
+L ARGER -C APTURE R ESULTS
+The tables report results for every evaluated baseline on all eight large captures, using 60k iterations
+with shared splits and resolutions. TangoGS uses the configuration in Section B. Reported counts are
+the final populations achieved. LiteGS uses its released 1M allowance; Taming uses its 15× SfMpoint multiplier on aerial captures and all three released multipliers on Zip-NeRF, whose interiors
+fit none of its capture classes.
+D.1
+P ER - CAPTURE COMPARISONS
+Mill19.
+Table D.1 compares the methods on Rubble and Building.
+Table D.1: Rubble and Building. Released-baseline results at 60k iterations. Counts N are in
+millions; metric conventions follow Section B.
+Rubble
+Building
+Method
+PSNR SSIM LPIPS
+TangoGS
+3DGS
+LiteGS (1M)
+DashGaussian
+Speedy-Splat
+3DGS-MCMC
+LeGS
+FastGS
+CDC-GS
+Taming (15×)
+LP-3DGS
+Compact 3DGS
+Mini-Splatting
+ControlGS
+25.63 0.772
+25.51 0.783
+24.66 0.718
+24.57 0.758
+24.20 0.683
+22.48 0.585
+24.36 0.707
+23.86 0.676
+25.65 0.774
+25.18 0.730
+24.69 0.734
+22.91 0.656
+23.20 0.620
+23.81 0.661
+N PSNR SSIM LPIPS
+0.282 2.96
+0.268 6.00
+0.349 1.69
+0.292 6.13
+0.404 0.58
+0.507 6.00
+0.355 1.51
+0.398 0.73
+0.278 5.90
+0.334 2.89
+0.333 1.63
+0.408 1.42
+0.468 0.23
+0.411 0.81
+20
+21.67 0.747
+21.20 0.744
+21.06 0.698
+19.36 0.662
+16.77 0.516
+18.26 0.531
+20.08 0.656
+19.88 0.635
+20.20 0.699
+20.69 0.679
+19.73 0.630
+18.76 0.573
+18.10 0.507
+19.51 0.603
+N
+0.271 3.51
+0.277 7.42
+0.333 1.60
+0.355 4.31
+0.531 0.19
+0.526 7.42
+0.376 0.92
+0.405 0.49
+0.317 5.85
+0.348 2.11
+0.409 0.60
+0.469 0.51
+0.555 0.09
+0.430 0.45
+Preprint
+UrbanScene3D.
+Table D.2 compares the methods on Residence and Sci-Art.
+Table D.2: Residence and Sci-Art. Released-baseline results at 60k iterations. Counts N are in
+millions; metric conventions follow Section B.
+Residence
+Sci-Art
+Method
+PSNR SSIM LPIPS
+TangoGS
+3DGS
+LiteGS (1M)
+DashGaussian
+Speedy-Splat
+3DGS-MCMC
+LeGS
+FastGS
+CDC-GS
+Taming (15×)
+LP-3DGS
+Compact 3DGS
+Mini-Splatting
+ControlGS
+21.06 0.738
+20.70 0.724
+20.81 0.707
+20.26 0.709
+20.16 0.668
+19.14 0.604
+20.27 0.696
+20.08 0.682
+20.78 0.728
+20.59 0.709
+20.34 0.696
+19.50 0.643
+19.28 0.608
+19.75 0.641
+N PSNR SSIM LPIPS
+0.273 4.57
+0.293 5.32
+0.316 1.95
+0.304 6.11
+0.375 0.53
+0.439 5.32
+0.328 1.79
+0.350 0.78
+0.290 6.81
+0.315 2.93
+0.331 1.32
+0.396 1.23
+0.445 0.15
+0.391 0.82
+21.82 0.800
+20.96 0.784
+21.56 0.785
+20.96 0.780
+20.61 0.741
+11.81 0.420
+20.50 0.767
+20.28 0.758
+21.20 0.787
+21.83 0.785
+20.61 0.763
+19.47 0.713
+19.04 0.666
+20.07 0.725
+N
+0.230 4.58
+0.268 2.58
+0.258 2.13
+0.272 3.09
+0.345 0.31
+0.669 2.58
+0.289 1.48
+0.305 0.60
+0.263 3.16
+0.267 2.05
+0.301 0.86
+0.370 0.65
+0.432 0.13
+0.349 0.65
+Zip-NeRF: Alameda and London. Table D.3 reports the first two handheld captures, including
+all three released Taming multipliers.
+Table D.3: Alameda and London. Released-baseline results at 60k iterations. Counts N are in
+millions; metric conventions follow Section B.
+Alameda
+London
+Method
+PSNR SSIM LPIPS
+TangoGS
+3DGS
+LiteGS (1M)
+DashGaussian
+Speedy-Splat
+3DGS-MCMC
+LeGS
+FastGS
+CDC-GS
+Taming (2×)
+Taming (5×)
+Taming (15×)
+LP-3DGS
+Compact 3DGS
+Mini-Splatting
+ControlGS
+23.29 0.772
+22.99 0.736
+23.00 0.743
+22.89 0.731
+21.54 0.671
+14.50 0.525
+21.98 0.711
+22.00 0.700
+22.83 0.731
+22.87 0.719
+22.90 0.719
+22.83 0.719
+22.15 0.708
+21.52 0.691
+20.11 0.663
+22.28 0.704
+N PSNR SSIM LPIPS
+0.331 3.05
+0.394 0.87
+0.381 0.98
+0.397 0.99
+0.484 0.06
+0.640 0.87
+0.420 0.50
+0.442 0.17
+0.399 0.91
+0.421 0.44
+0.421 0.44
+0.422 0.43
+0.434 0.23
+0.455 0.22
+0.488 0.16
+0.432 0.35
+21
+26.96 0.846
+25.88 0.809
+26.11 0.816
+26.14 0.815
+25.00 0.761
+17.36 0.607
+26.18 0.816
+25.18 0.781
+26.15 0.814
+25.44 0.790
+25.42 0.791
+25.42 0.792
+25.57 0.797
+24.95 0.777
+25.69 0.798
+25.09 0.782
+N
+0.304 2.80
+0.376 0.63
+0.360 0.96
+0.366 0.85
+0.452 0.06
+0.565 0.63
+0.365 0.58
+0.424 0.12
+0.369 0.80
+0.407 0.30
+0.408 0.30
+0.407 0.30
+0.396 0.22
+0.422 0.17
+0.389 0.30
+0.412 0.29
+Preprint
+Zip-NeRF: NYC and Berlin.
+baseline settings.
+Table D.4 reports the remaining handheld captures with the same
+Table D.4: NYC and Berlin. Released-baseline results at 60k iterations. Counts N are in millions;
+metric conventions follow Section B.
+NYC
+Berlin
+Method
+PSNR SSIM LPIPS
+TangoGS
+3DGS
+LiteGS (1M)
+DashGaussian
+Speedy-Splat
+3DGS-MCMC
+LeGS
+FastGS
+CDC-GS
+Taming (2×)
+Taming (5×)
+Taming (15×)
+LP-3DGS
+Compact 3DGS
+Mini-Splatting
+ControlGS
+28.37 0.872
+27.12 0.843
+27.73 0.855
+26.81 0.832
+25.49 0.797
+15.04 0.607
+26.76 0.827
+25.88 0.805
+27.10 0.839
+26.32 0.819
+26.29 0.819
+26.23 0.818
+26.30 0.820
+25.37 0.800
+25.46 0.804
+25.83 0.806
+Individual TangoGS seeds.
+N PSNR SSIM LPIPS
+0.272 1.96
+0.324 1.06
+0.305 0.98
+0.333 1.03
+0.397 0.08
+0.599 1.06
+0.343 0.37
+0.384 0.12
+0.328 0.98
+0.363 0.37
+0.363 0.37
+0.364 0.37
+0.358 0.21
+0.383 0.19
+0.375 0.22
+0.372 0.28
+28.38 0.915
+27.80 0.894
+27.95 0.903
+27.59 0.892
+26.58 0.868
+17.57 0.726
+27.16 0.886
+26.64 0.873
+27.93 0.898
+27.45 0.885
+27.40 0.885
+27.42 0.884
+27.10 0.883
+26.27 0.867
+26.66 0.876
+26.69 0.870
+N
+0.243 2.71
+0.294 0.77
+0.275 0.98
+0.296 0.98
+0.341 0.08
+0.485 0.77
+0.306 0.37
+0.331 0.14
+0.285 0.94
+0.313 0.42
+0.312 0.42
+0.312 0.42
+0.314 0.23
+0.335 0.20
+0.322 0.26
+0.329 0.28
+Table D.5 records both training seeds on every large capture.
+Table D.5: TangoGS: individual large results. One standard-calibrated configuration on every capture. SSIM uses the reference estimator here; headline cross-method tables retain the TorchMetrics
+convention for the LiteGS implementation.
+Capture Seed NG (M) PSNR
+SSIM LPIPS Time (s)
+alameda 4114
+alameda 4115
+berlin
+4114
+berlin
+4115
+building 4114
+building 4115
+london
+4114
+london
+4115
+nyc
+4114
+nyc
+4115
+residence 4114
+residence 4115
+rubble
+4114
+rubble
+4115
+sciart
+4114
+sciart
+4115
+D.2
+3.050 23.3636 0.77488 0.33054
+3.058 23.2152 0.77307 0.33118
+2.711 28.4364 0.91594 0.24299
+2.713 28.3163 0.91573 0.24307
+3.512 21.7843 0.75075 0.27014
+3.516 21.5522 0.74882 0.27146
+2.798 27.0006 0.84716 0.30403
+2.803 26.9115 0.84672 0.30390
+1.963 28.3463 0.87360 0.27238
+1.961 28.3921 0.87390 0.27194
+4.568 21.0046 0.73915 0.27345
+4.568 21.1228 0.74282 0.27248
+2.960 25.6237 0.77489 0.28218
+2.955 25.6357 0.77596 0.28172
+4.582 21.7996 0.80364 0.22923
+4.577 21.8426 0.80111 0.23040
+540
+557
+563
+562
+446
+450
+509
+509
+463
+464
+513
+513
+451
+452
+616
+615
+B EHAVIOR OF RELEASED BASELINES
+Transfer controls. LiteGS’s allowance is below aerial initialization counts; Taming’s gradient eligibility threshold can prevent growth from reaching its budget. MCMC is sensitive to its outdoor
+opacity regularizer: changing 0.01 to the released Deep Blending value 0.001 reduces its PSNR
+deficit relative to reference 3DGS to 0.36 dB on NYC and 1.44 dB on Sci-Art. Restoring only the
+default position learning-rate decay length leaves NYC at 14.49 dB. The tables retain the released
+22
+Preprint
+outdoor regularizer; these limited probes do not establish that retuned baselines would remain inferior.
+Regularization and pruning. LP-3DGS, Compact 3DGS and ControlGS use sparsity or opacity
+regularization. With their released penalty weights, they retain only 6% to 46% of reference 3DGS’s
+population, below the SfM initialization on every aerial capture. Final counts are 0.17M to 0.35M
+on Zip-NeRF and 0.45M to 1.63M on aerial captures, with PSNR 0.7 dB to 3.0 dB below TangoGS.
+FastGS (Ren et al., 2026) applies opacity and multi-view consistency thresholds for final pruning,
+leaving 0.12M to 0.78M Gaussians and PSNR 1.0 dB to 2.5 dB below TangoGS.
+Growth and candidate thresholds. DashGaussian starts with a ceiling of six times the initial
+count and raises it only through densification permitted by reference 3DGS’s gradient threshold.
+Its counts remain near reference 3DGS’s on every capture: 0.85M to 1.03M on Zip-NeRF versus
+0.63M to 1.06M, with PSNR 0.4 dB to 2.3 dB below TangoGS across all captures. LeGS gates
+growth candidates by ordinary or absolute-gradient thresholds and pruning candidates by opacity.
+Limited eligible growth and continued pruning leave it below the SfM initialization on every aerial
+capture and at 0.37M to 0.58M on Zip-NeRF. Its mean count falls from 1.8M on standard scenes
+to 0.9M, with PSNR 0.8 dB to 1.6 dB below TangoGS. CDC-GS (Dong et al., 2025) lowers the
+reference threshold according to local frequency and adds or removes fixed population fractions
+using a consistency score. Its growth follows reference 3DGS’s pattern: 3.2M to 6.8M on aerial
+captures but 0.8M to 1.0M on Zip-NeRF. It trails TangoGS by 0.3 dB to 1.5 dB except on rubble,
+where it matches PSNR at twice our count.
+E
+C ONTROLLER A BLATIONS
+E.1
+C APTURE CONDITIONING AND ADAPTATION
+The component controls vary allowance and adaptation independently, giving four combinations
+across all 21 captures. The fixed-allowance control uses LiteGS’s released 1M default. The noadaptation control removes sensitivity ranking and quality-based growth and retention, leaving
+opacity-threshold and zero-weight pruning. The growth/pruning schedule, camera order, learning
+rates and iteration count are shared. The controls therefore test capture scale and the complete
+adaptive density-control policy. Tables E.1 and E.2 give per-capture means for each intervention;
+individual default seeds appear in Sections C and D.
+23
+Preprint
+Table E.1: Component controls: standard captures. Interventions defined in Section E; reference
+SSIM. Default runs are listed in Table C.5.
+Capture Intervention
+N (M) PSNR SSIM LPIPS
+bicycle
+Fixed allowance
+No adaptation
+Both disabled
+bonsai
+Fixed allowance
+No adaptation
+Both disabled
+counter
+Fixed allowance
+No adaptation
+Both disabled
+drjohnson Fixed allowance
+No adaptation
+Both disabled
+flowers
+Fixed allowance
+No adaptation
+Both disabled
+garden
+Fixed allowance
+No adaptation
+Both disabled
+kitchen
+Fixed allowance
+No adaptation
+Both disabled
+playroom Fixed allowance
+No adaptation
+Both disabled
+room
+Fixed allowance
+No adaptation
+Both disabled
+stump
+Fixed allowance
+No adaptation
+Both disabled
+train
+Fixed allowance
+No adaptation
+Both disabled
+treehill
+Fixed allowance
+No adaptation
+Both disabled
+truck
+Fixed allowance
+No adaptation
+Both disabled
+0.481 25.227 0.7421 0.2836
+2.504 25.734 0.7937 0.1752
+0.978 25.455 0.7711 0.2245
+0.279 32.325 0.9425 0.1958
+2.790 33.237 0.9533 0.1596
+0.963 33.031 0.9510 0.1718
+0.359 29.367 0.9127 0.1897
+2.976 29.760 0.9217 0.1561
+0.968 29.664 0.9196 0.1686
+0.312 29.970 0.9124 0.2470
+3.214 29.937 0.9115 0.2191
+0.953 30.056 0.9137 0.2313
+0.523 21.862 0.6088 0.3563
+2.437 21.662 0.6400 0.2657
+0.987 21.731 0.6232 0.3108
+0.404 26.992 0.8283 0.1961
+2.051 27.981 0.8763 0.1004
+0.969 27.582 0.8604 0.1293
+0.325 31.792 0.9257 0.1318
+2.819 32.472 0.9368 0.1064
+0.984 32.328 0.9341 0.1132
+0.288 30.848 0.9148 0.2508
+2.501 30.898 0.9140 0.2061
+0.992 31.051 0.9167 0.2206
+0.302 32.302 0.9259 0.2006
+2.827 32.783 0.9346 0.1698
+0.947 32.394 0.9314 0.1818
+0.426 27.120 0.7855 0.2441
+2.116 27.283 0.8035 0.1791
+0.991 27.181 0.7956 0.2046
+0.493 22.944 0.8378 0.1916
+1.820 23.103 0.8493 0.1526
+0.962 22.843 0.8425 0.1700
+0.533 23.297 0.6448 0.3639
+2.063 23.165 0.6558 0.2796
+0.985 23.218 0.6515 0.3179
+0.422 26.312 0.8859 0.1595
+1.565 26.594 0.9015 0.1006
+0.967 26.477 0.8985 0.1121
+24
+Preprint
+Table E.2: Component controls: large captures. Interventions defined in Section E; reference
+SSIM. Default runs are listed in Table D.5.
+Capture Intervention
+N (M) PSNR SSIM LPIPS
+alameda
+Fixed allowance
+No adaptation
+Both disabled
+berlin
+Fixed allowance
+No adaptation
+Both disabled
+building Fixed allowance
+No adaptation
+Both disabled
+london
+Fixed allowance
+No adaptation
+Both disabled
+nyc
+Fixed allowance
+No adaptation
+Both disabled
+residence Fixed allowance
+No adaptation
+Both disabled
+rubble
+Fixed allowance
+No adaptation
+Both disabled
+sciart
+Fixed allowance
+No adaptation
+Both disabled
+E.2
+0.499 22.902 0.7440 0.3843
+6.153 23.202 0.7669 0.3366
+0.978 22.944 0.7496 0.3722
+0.433 27.706 0.8982 0.2847
+6.222 28.246 0.9144 0.2418
+0.963 27.918 0.9040 0.2713
+0.734 20.884 0.6918 0.3433
+5.925 21.343 0.7406 0.2689
+1.603 20.843 0.6969 0.3281
+0.423 26.248 0.8159 0.3649
+5.363 26.409 0.8292 0.3312
+0.886 26.172 0.8196 0.3547
+0.392 27.615 0.8512 0.3190
+5.235 28.350 0.8742 0.2627
+0.986 27.934 0.8609 0.2973
+0.876 20.682 0.7009 0.3289
+6.967 21.135 0.7362 0.2772
+1.951 20.802 0.7100 0.3133
+0.615 24.328 0.6922 0.3926
+6.022 25.700 0.7830 0.2640
+1.694 24.745 0.7223 0.3442
+0.756 21.123 0.7744 0.2803
+7.706 21.307 0.7967 0.2346
+2.133 20.867 0.7709 0.2760
+L ITE GS AT THE SELECTED FINAL COUNT
+Table E.3 compares the methods at equal final count. For each capture and seed, native LiteGS
+receives the final count selected by the corresponding TangoGS run, without a quality-based budget
+search. Initialization, splits, resolution, SH degree, seeds and actual optimizer-update counts match.
+LiteGS retains its own optimizer profile, density-control rules and event dates. We analytically invert
+its budget ramp, whose last growth event precedes its nominal endpoint; all 42 saved models match
+the supplied count exactly.
+At equal final count, TangoGS improves mean PSNR by 0.210 dB on standard scenes and 0.281 dB
+on large captures, with lower mean LPIPS in both regimes. The exceptions are Counter in PSNR,
+Truck in SSIM and LPIPS, and Residence with a loss of 0.002 dB PSNR. The comparison tests
+complete training profiles, including population trajectories and learning rates. Mean training populations are 0.724M versus 0.586M on standard scenes and 2.474M versus 2.255M on large captures
+(TangoGS versus LiteGS). Matching final size and optimizer updates therefore does not match training work.
+25
+Preprint
+Table E.3: LiteGS at the final counts selected by TangoGS. All 42 paired counts match exactly.
+Differences are TangoGS minus native LiteGS, using TorchMetrics SSIM. Positive PSNR/SSIM and
+negative LPIPS favor TangoGS. Training profiles and populations differ.
+Capture Shared N (M) ∆PSNR ∆SSIM ∆LPIPS
+E.3
+Standard captures
+bicycle
+1.168 +0.7927 +0.0396
+bonsai
+0.778 +0.0508 +0.0012
+counter
+1.058 -0.0722 +0.0016
+drjohnson
+0.987 +0.2744 +0.0049
+flowers
+1.229 +0.2406 +0.0102
+garden
+0.816 +0.2102 +0.0080
+kitchen
+0.896 +0.1070 +0.0019
+playroom
+0.695 +0.3435 +0.0028
+room
+0.876 +0.0652 +0.0029
+stump
+0.855 +0.3976 +0.0188
+train
+0.917 +0.1159 +0.0077
+treehill
+1.076 +0.1321 +0.0059
+truck
+0.670 +0.0668 -0.0011
+Mean
+0.925 +0.2096 +0.0080
+-0.0424
+-0.0034
+-0.0026
+-0.0134
+-0.0072
+-0.0111
+-0.0022
+-0.0017
+-0.0071
+-0.0219
+-0.0098
+-0.0065
++0.0130
+-0.0089
+Large captures
+alameda
+berlin
+building
+london
+nyc
+residence
+rubble
+sciart
+Mean
+-0.0293
+-0.0176
+-0.0192
+-0.0486
+-0.0163
+-0.0202
+-0.0268
+-0.0145
+-0.0241
+3.054 +0.1157 +0.0171
+2.712 +0.2981 +0.0073
+3.514 +0.1179 +0.0133
+2.800 +0.8359 +0.0279
+1.962 +0.3983 +0.0102
+4.568 -0.0022 +0.0130
+2.957 +0.2086 +0.0191
+4.579 +0.2766 +0.0057
+3.268 +0.2811 +0.0142
+F IXED KEEP RATIO
+The control in Table E.4 fixes ρ = 0.5 throughout learning and final selection on six captures,
+preserving the allowance, ranking, schedule, views and iteration count. The adaptive rule retains
+more Gaussians on Garden and the three aerial captures, improving quality with larger models.
+Table E.4: Fixed versus adaptive keep ratio. Six captures. Only the keep ratio changes; ρT is its
+terminal value. Reference SSIM.
+Capture Feedback
+ρT N (M) PSNR
+SSIM LPIPS
+Fixed ρ = 0.5 0.500
+TangoGS
+0.501
+drjohnson Fixed ρ = 0.5 0.500
+TangoGS
+0.507
+garden
+Fixed ρ = 0.5 0.500
+TangoGS
+0.536
+building Fixed ρ = 0.5 0.500
+TangoGS
+0.569
+rubble
+Fixed ρ = 0.5 0.500
+TangoGS
+0.551
+sciart
+Fixed ρ = 0.5 0.500
+TangoGS
+0.578
+room
+0.911 32.6891 0.93355 0.17760
+0.876 32.6066 0.93323 0.17831
+0.998 30.0246 0.91558 0.22447
+0.987 29.9998 0.91567 0.22461
+0.631 27.4832 0.85365 0.14944
+0.816 27.6288 0.86051 0.13513
+2.119 21.5224 0.73753 0.28731
+3.514 21.6682 0.74979 0.27080
+2.034 25.4979 0.76245 0.30085
+2.957 25.6297 0.77543 0.28195
+2.976 21.6654 0.79935 0.23622
+4.579 21.8211 0.80237 0.22982
+Isolating the keep ratio’s contribution. The keep ratio is not a hyperparameter of TangoGS: it is
+computed at every event from the preceding epoch’s training PSNR through one linear map whose
+26
+Preprint
+two constants are set once on the standard scenes and applied unchanged to the large captures.
+Section 3.5 of the main paper plots the ratio this map produces for every capture over training.
+During training it ranges from 0.61 at the first growth events, where training PSNR on nine captures
+is still below the 20 dB floor, to 0.46 late in training; within a run it falls as training PSNR rises,
+by 0.04 to 0.09 on the standard captures and 0.02 to 0.07 on the large captures, which never fall
+below 0.51. Every value along this trajectory acts on the model, since it sets the densification target
+at that growth event and the fraction kept at that soft prune, and the terminal value, between 0.50
+and 0.58 across captures, then sets the fraction retained at final selection, 56% to 97%. The same
+section, together with Table E.4, shows that this variation contributes to the result: a constant 0.5
+held throughout learning and final selection reproduces the adaptive rule on Room and Dr Johnson,
+whose adaptive ratio ends near 0.5, within 4% in count and 0.08 dB, but on Garden, Building, Rubble
+and Sci-Art the adaptive ratios of 0.54 to 0.58 retain 1.29× to 1.66× the Gaussians for 0.13 dB to
+0.16 dB higher PSNR and 0.006 to 0.019 lower LPIPS. A constant that matches one capture is
+therefore off for the others, within a dataset as well as across datasets: Room and Garden both
+belong to Mip-NeRF 360, yet their adaptive ratios end at 0.50 and 0.54, so no constant calibrated
+for that dataset reproduces both, and no constant reproduces the fall within a run. Sweeping constant
+ratios, or calibrating one constant per dataset, would recover the adaptive value only by training each
+capture at several settings and selecting afterwards. That search is the per-capture tuning TangoGS
+removes: the ratio is an output of training, read from a signal available in every run, so we isolate
+its contribution against the single constant above rather than against a swept or per-dataset constant
+that would reintroduce the search.
+E.4
+T RAINING COST
+Table E.5 reports both final size and the training population averaged over optimizer updates, accounting for growth/pruning after optimization. Subprocess times include loading, the additional
+scoring backward, and diagnostic work on one GH200. A shared iteration count does not imply
+equal FLOPs.
+Table E.5: Final size and training cost. Equal-capture means. Training population is averaged over
+optimizer updates; time includes loading, scoring and diagnostics. Quality, saved storage and FPS
+follow Section I.
+Regime Final N Training N Time PSNR LPIPS MB FPS
+(M)
+(M)
+(s) (dB)
+Standard
+Large
+0.925
+3.268
+0.724 183.8 28.04 0.196 229 567
+2.474 514.0 24.65 0.276 811 387
+F
+C APTURE -S TATISTIC S TUDIES
+F.1
+NATURAL CAPTURES
+Total-pixel and SfM-point controls use the same β = 0.5, center Tref = 2,462,476, standard metadata normalization, quality feedback, ranking, initialization and schedule as TangoGS on all 21
+captures.
+Total-pixel control. Table F.1 gives per-capture differences from the total-pixel control. Track
+adjustment and total pixels give similar quality: on large captures, track adjustment uses 4.6% fewer
+Gaussians with 0.007 dB lower PSNR and 0.00064 higher LPIPS.
+27
+Preprint
+Table F.1: Track adjustment versus Total pixels. All 21 captures. Ratios are TangoGS/control;
+quality changes are TangoGS minus control. Only the metadata allowance changes.
+Capture T ratio N ratio ∆PSNR ∆SSIM ∆LPIPS
+alameda 0.9136
+berlin
+0.8806
+bicycle
+1.1484
+bonsai
+0.8435
+building 1.0118
+counter
+0.9862
+drjohnson 1.2162
+flowers
+1.1586
+garden
+0.9405
+kitchen
+0.8513
+london
+0.9641
+nyc
+1.0141
+playroom 1.0323
+residence 0.9316
+room
+0.8428
+rubble
+1.0388
+sciart
+0.9250
+stump
+1.1865
+train
+0.9428
+treehill
+1.0819
+truck
+0.8811
+0.9137 +0.0604 -0.00018 +0.00182
+0.8807 +0.0192 -0.00008 +0.00191
+1.1393 +0.0555 +0.00426 -0.00905
+0.8494 -0.0557 -0.00056 +0.00247
+1.0110 +0.0033 +0.00073 +0.00047
+0.9862 +0.0071 -0.00001 +0.00031
+1.2072 -0.0757 -0.00041 -0.00249
+1.1487 -0.0063 +0.00355 -0.00885
+0.9438 -0.0453 -0.00181 +0.00333
+0.8546 +0.0386 -0.00000 +0.00116
+0.9641 +0.0214 +0.00023 +0.00082
+1.0139 +0.0191 +0.00032 -0.00033
+1.0256 +0.0306 +0.00006 -0.00066
+0.9332 -0.1737 -0.00237 +0.00202
+0.8456 -0.0881 -0.00050 +0.00223
+1.0381 -0.0027 +0.00188 -0.00244
+0.9269 +0.0006 -0.00130 +0.00088
+1.1675 +0.0432 +0.00318 -0.00836
+0.9384 +0.2047 +0.00065 +0.00050
+1.0779 +0.0530 +0.00140 -0.00446
+0.8836 -0.0582 -0.00152 +0.00509
+SfM-point control. Table F.2 gives per-capture differences from the SfM-point control. Relative
+to the SfM-point control, track adjustment uses 30% fewer Gaussians on aerial captures with 0.16 dB
+lower PSNR and 0.0143 higher LPIPS, but 47% more on Zip-NeRF with 0.082 dB higher PSNR and
+0.0093 lower LPIPS.
+Table F.2: Track adjustment versus SfM points. All 21 captures. Ratios are TangoGS/control;
+quality changes are TangoGS minus control. Only the metadata allowance changes.
+Capture T ratio N ratio ∆PSNR ∆SSIM ∆LPIPS
+alameda 1.3244
+berlin
+1.4053
+bicycle
+1.3510
+bonsai
+0.7876
+building 0.6852
+counter
+0.9606
+drjohnson 1.4620
+flowers
+1.5487
+garden
+0.6995
+kitchen
+0.7186
+london
+1.8909
+nyc
+1.3949
+playroom 1.6108
+residence 0.7386
+room
+1.0987
+rubble
+0.5909
+sciart
+0.7151
+stump
+1.4655
+train
+0.5458
+treehill
+1.1248
+truck
+0.5400
+1.3201 +0.0243 +0.00334 -0.00696
+1.4006 +0.0588 +0.00246 -0.00611
+1.3265 +0.0775 +0.01028 -0.02063
+0.7951 -0.0905 -0.00091 +0.00338
+0.6934 -0.2278 -0.01223 +0.01589
+0.9626 +0.0282 +0.00027 +0.00026
+1.4362 +0.0852 -0.00002 -0.00538
+1.5118 -0.0120 +0.01286 -0.02758
+0.7147 -0.2302 -0.00931 +0.01872
+0.7265 -0.1398 -0.00087 +0.00273
+1.8743 +0.1537 +0.00773 -0.01685
+1.3846 +0.0915 +0.00276 -0.00710
+1.5754 +0.1273 +0.00108 -0.01008
+0.7447 -0.1451 -0.00601 +0.00749
+1.0998 +0.0544 +0.00067 -0.00115
+0.6028 -0.2729 -0.01949 +0.02850
+0.7223 +0.0018 -0.00416 +0.00542
+1.4204 +0.0885 +0.00893 -0.02003
+0.5527 +0.2015 -0.00289 +0.01506
+1.1156 +0.0508 +0.00202 -0.00756
+0.5506 -0.1036 -0.00637 +0.02216
+28
+Preprint
+F.2
+V IEW DUPLICATION
+Every registered image is aliased once with identical pixels, pose and observations. Registered
+views, total pixels and mean track length double; sparse points stay unchanged. Aliases of held-out
+views belong to neither split; evaluation uses the parent’s untransformed held-out views. Track√
+adjusted and point-based allowances remain unchanged, while total-pixel allowances grow by 2.
+The fixed-iteration protocol halves the epoch count; the normalized growth clock preserves growth
+opportunities. The track-adjusted and total-pixel variants cover all 21 captures with two seeds; the
+point-based variant covers four captures.
+Table F.3 reports the resulting changes in final count and quality. Track-adjusted final counts stay
+within approximately 0.91–1.10× their originals, while total-pixel counts grow to 1.27–1.54×. Both
+variants lose PSNR on large captures under the halved epoch count (0.34 and 0.27 dB, respectively),
+with the largest losses on aerial captures.
+29
+Preprint
+Table F.3: Exact view duplication. Counts are in millions, and quality changes are duplicated
+minus
+original (reference SSIM). Allowance ratios are 1 for track-adjusted pixels/SfM points and
+√
+2 for total pixels. Final rows are equal-capture means.
+Capture Statistic
+N orig. N dup. ∆PSNR ∆SSIM ∆LPIPS
+bicycle
+Track-adjusted
+bicycle
+Total pixels
+bonsai
+Track-adjusted
+bonsai
+Total pixels
+counter
+Track-adjusted
+counter
+Total pixels
+drjohnson Track-adjusted
+drjohnson Total pixels
+flowers
+Track-adjusted
+flowers
+Total pixels
+garden
+Track-adjusted
+garden
+Total pixels
+garden
+SfM points
+kitchen
+Track-adjusted
+kitchen
+Total pixels
+playroom Track-adjusted
+playroom Total pixels
+room
+Track-adjusted
+room
+Total pixels
+room
+SfM points
+stump
+Track-adjusted
+stump
+Total pixels
+train
+Track-adjusted
+train
+Total pixels
+treehill
+Track-adjusted
+treehill
+Total pixels
+truck
+Track-adjusted
+truck
+Total pixels
+truck
+SfM points
+building Track-adjusted
+building Total pixels
+rubble
+Track-adjusted
+rubble
+Total pixels
+residence Track-adjusted
+residence Total pixels
+sciart
+Track-adjusted
+sciart
+Total pixels
+alameda Track-adjusted
+alameda Total pixels
+berlin
+Track-adjusted
+berlin
+Total pixels
+london
+Track-adjusted
+london
+Total pixels
+nyc
+Track-adjusted
+nyc
+Total pixels
+nyc
+SfM points
+standard Track-adjusted
+standard Total pixels
+large
+Track-adjusted
+large
+Total pixels
+1.168
+1.025
+0.778
+0.916
+1.058
+1.073
+0.987
+0.817
+1.229
+1.070
+0.816
+0.865
+1.142
+0.896
+1.048
+0.695
+0.677
+0.876
+1.036
+0.796
+0.855
+0.732
+0.917
+0.977
+1.076
+0.998
+0.670
+0.759
+1.217
+3.514
+3.476
+2.957
+2.849
+4.568
+4.895
+4.579
+4.940
+3.054
+3.342
+2.712
+3.079
+2.800
+2.904
+1.962
+1.935
+1.417
+0.925
+0.923
+3.268
+3.428
+1.207
+1.471
+0.857
+1.408
+1.022
+1.447
+0.969
+1.119
+1.179
+1.421
+0.809
+1.190
+1.134
+0.854
+1.395
+0.660
+0.896
+0.824
+1.381
+0.754
+0.814
+0.957
+0.874
+1.297
+1.070
+1.378
+0.613
+0.962
+1.104
+3.553
+4.889
+2.920
+3.914
+4.405
+6.548
+4.458
+6.669
+3.091
+4.751
+2.694
+4.320
+2.700
+3.941
+1.937
+2.687
+1.398
+0.904
+1.256
+3.220
+4.715
+30
++0.036 +0.0012
++0.089 +0.0108
+-0.024 -0.0001
++0.190 +0.0015
+-0.063 -0.0007
++0.038 +0.0004
++0.020 +0.0005
++0.074 +0.0004
+-0.030 -0.0034
+-0.074 +0.0044
+-0.066 -0.0015
++0.112 +0.0075
+-0.087 -0.0013
+-0.075 -0.0004
++0.056 +0.0009
+-0.124 -0.0000
++0.117 -0.0004
++0.085 -0.0009
+-0.054 -0.0010
++0.023 -0.0011
++0.033 +0.0008
++0.148 +0.0077
+-0.349 -0.0042
+-0.014 +0.0000
+-0.015 +0.0002
++0.015 +0.0036
+-0.055 +0.0008
++0.017 +0.0045
+-0.010 +0.0007
+-0.520 -0.0207
+-0.417 -0.0105
+-0.357 -0.0116
+-0.219 +0.0015
+-0.308 -0.0180
+-0.374 -0.0128
+-0.762 -0.0100
+-0.704 -0.0070
+-0.171 -0.0057
+-0.058 -0.0013
+-0.305 -0.0036
+-0.300 -0.0020
+-0.169 -0.0054
+-0.080 -0.0017
+-0.099 -0.0011
++0.004 +0.0015
+-0.079 -0.0010
+-0.048 -0.0006
++0.055 +0.0031
+-0.337 -0.0095
+-0.268 -0.0040
+-0.0020
+-0.0231
+-0.0013
+-0.0051
+-0.0002
+-0.0045
++0.0006
+-0.0040
++0.0044
+-0.0158
++0.0023
+-0.0159
++0.0020
++0.0007
+-0.0022
+-0.0037
+-0.0100
++0.0020
+-0.0010
++0.0026
++0.0071
+-0.0100
++0.0031
+-0.0068
+-0.0022
+-0.0217
+-0.0083
+-0.0199
+-0.0074
++0.0128
++0.0014
++0.0069
+-0.0117
++0.0161
++0.0083
++0.0111
++0.0053
++0.0064
+-0.0021
++0.0053
++0.0000
++0.0072
++0.0002
++0.0010
+-0.0056
++0.0010
++0.0002
+-0.0108
++0.0084
+-0.0005
+Preprint
+G
+R ETUNING R EQUIREMENTS FOR L ARGE C APTURES
+Our large-capture comparisons evaluate the transfer of released configurations. Table G.1 identifies
+candidate controls to revisit when adapting each evaluated implementation, grouping methods by
+how they set model size. The entries identify calibration requirements, not measured retuning difficulty. LeGS and FastGS supply per-scene settings; CDC-GS uses uniform released defaults in our
+runs. Broader related work appears in the main paper.
+Table G.1: Candidate retuning controls for large captures. Entries describe the evaluated implementations and retain the scale-mechanism groups used in the main paper. They identify controls to
+investigate, not measured tuning effort or guaranteed remedies.
+Method
+Controls to revisit
+Calibration issue
+Fixed-threshold
+3DGS (Kerbl et al.,
+2023)
+Speedy-Splat (Hanson
+et al., 2025)
+Preset-budget
+Taming 3DGS (Mallick
+et al., 2024)
+Mini-Splatting (Fang &
+Wang, 2024)
+3DGS-MCMC (Kheradmand et al., 2024)
+LiteGS (Liao et al.,
+2025)
+Automatic
+DashGaussian (Chen
+et al., 2025)
+Compact 3DGS (Lee
+et al., 2024)
+LP-3DGS (Zhang
+et al., 2024)
+ControlGS (Zhang
+et al., 2025)
+CDC-GS (Dong et al.,
+2025)
+FastGS (Ren et al.,
+2026)
+LeGS (Ning et al.,
+2026)
+TangoGS (ours)
+Growth gradient threshold
+Growth threshold; pruning
+fraction
+SfM multiplier; growth
+threshold
+Population limits; sampling
+fraction
+Population cap; opacity
+regularization
+Target count
+Threshold has no direct count or quality
+interpretation.
+Retention depends on the population
+admitted by growth.
+A larger budget need not admit more
+growth candidates.
+Capacity before simplification and final
+retention both need selection.
+Raising the cap does not remove the
+opacity penalty.
+Default target can fall below
+initialization; useful capacity is unknown.
+Growth threshold; budget
+estimation
+Mask regularization
+Estimated budgets still depend on eligible
+growth.
+Penalty has no direct retained-count or
+quality interpretation.
+Mask regularization
+Learned retention still depends on the
+chosen penalty.
+Opacity regularization
+One global control still needs calibration
+to the capture.
+Growth threshold; population Local adaptation retains threshold and
+fractions
+fraction choices.
+Opacity and consistency
+Final pruning depends on both threshold
+thresholds
+choices.
+Gradient and opacity
+Policy acts within the eligible growth and
+thresholds
+pruning candidates.
+Shared allowance mapping
+and quality feedback
+Global constants; no per-capture selection
+in our evaluation.
+Explicit capacity versus indirect controls. A target count makes capacity explicit, but the useful
+count for a new capture remains to be selected. Thresholds and regularization weights are less direct:
+their effect depends on the capture and changes the subsequent growth, pruning and optimization
+trajectory. Automatic count selection can therefore retain a calibration requirement; interacting
+growth and retention controls may require several trials.
+Evidence from the evaluated controls. Taming 3DGS illustrates a growth bottleneck that budget
+changes do not resolve: on aerial captures it fills only 7% to 12% of its requested budget, while all
+31
+Preprint
+three released multipliers yield only 0.30M to 0.44M Gaussians on Zip-NeRF. These results motivate testing the inherited gradient threshold that limits eligible growth. Conversely, 3DGS-MCMC
+improves substantially after a single regularizer change: reducing the opacity penalty from 0.01 to
+the released Deep Blending value 0.001 leaves PSNR deficits of 0.36 dB on NYC and 1.44 dB on
+Sci-Art relative to reference 3DGS (Section D). For LiteGS, supplying TangoGS’s selected final
+counts still leaves a mean PSNR gap of 0.28 dB on large captures, with worse mean LPIPS (Section E). This control matches final size and optimizer-update counts, but retains different training
+profiles.
+Scope of the comparison. TangoGS uses global constants and one configuration across all 21 captures, without per-capture selection. Retuned baselines may improve; measuring the effort requires
+a specified quality–resource target, validation protocol and record of search trials or compute.
+32
+Preprint
+H
+T HE C ONTROLLER ON R EFERENCE 3DGS
+To test whether the controller depends on LiteGS, we run it unchanged on reference 3DGS (Kerbl
+et al., 2023) through the released Taming 3DGS (Mallick et al., 2024) code. The port changes only
+what the controller replaces: Taming’s target count becomes the quality-scaled allowance, and its
+fixed pruning fractions become the soft prunes and the single terminal selection of the main paper,
+with the growth and pruning schedule mapped from LiteGS’s epochs onto Taming’s iteration clock.
+The sensitivity score is Speedy-Splat’s (Hanson et al., 2025) released scoring pass, computed by
+Taming’s rasterizer, and growth draws candidates from every Gaussian as in LiteGS. Everything else,
+including Taming’s optimizer settings, importance sampling, and evaluation script, is the released
+code; with the controller disabled, the tree reproduces released Taming 3DGS on garden and train
+within the trainer’s run-to-run spread. Allowances and constants are those of the main experiments;
+the large captures use the common 60k iterations of Section D.
+Table H.1 compares the two on the same substrate. On the standard scenes, the controller lands
+within 0.3 dB of Taming’s released configuration on every dataset with 2.3× to 3.6× fewer Gaussians, ahead on Tanks & Temples and behind on the other two. On the large captures it is 0.8 dB
+above Taming’s released multiplier on average and ahead on seven of eight, at 1.0× to 2.2× its
+count on the aerial captures and 5× to 9× on Zip-NeRF, where Taming’s gradient qualifier holds its
+released multiplier below 0.5M Gaussians.
+Table H.1: The controller on reference 3DGS. Released Taming 3DGS and the same controller
+run on its code, both under the reference evaluation script. Standard scenes are dataset means over
+the two-seed mean per scene; large captures use the common 60k iterations and one seed. Counts in
+millions.
+Capture
+Method
+PSNR SSIM LPIPS N (M)
+Mip-NeRF 360 Taming 3DGS
+Mip-NeRF 360 TangoGS on Taming 3DGS
+Tanks & Temples Taming 3DGS
+Tanks & Temples TangoGS on Taming 3DGS
+Deep Blending
+Taming 3DGS
+Deep Blending
+TangoGS on Taming 3DGS
+27.83 0.822
+27.61 0.812
+24.21 0.855
+24.49 0.863
+30.17 0.910
+30.08 0.912
+0.204
+0.216
+0.169
+0.166
+0.234
+0.242
+3.21
+0.96
+1.83
+0.78
+2.80
+0.78
+Rubble
+Rubble
+Building
+Building
+Residence
+Residence
+Sciart
+Sciart
+Alameda
+Alameda
+London
+London
+Nyc
+Nyc
+Berlin
+Berlin
+25.18 0.730
+25.70 0.766
+20.69 0.679
+21.36 0.731
+20.59 0.709
+20.96 0.733
+21.83 0.785
+21.24 0.803
+22.83 0.719
+23.58 0.765
+25.42 0.792
+26.87 0.844
+26.23 0.818
+28.14 0.865
+27.42 0.884
+28.49 0.912
+0.334
+0.296
+0.348
+0.286
+0.315
+0.284
+0.267
+0.239
+0.422
+0.350
+0.407
+0.315
+0.364
+0.287
+0.312
+0.256
+2.89
+2.90
+2.11
+3.47
+2.93
+4.51
+2.05
+4.52
+0.43
+3.01
+0.30
+2.71
+0.37
+1.87
+0.42
+2.60
+Taming 3DGS (15×)
+TangoGS on Taming 3DGS
+Taming 3DGS (15×)
+TangoGS on Taming 3DGS
+Taming 3DGS (15×)
+TangoGS on Taming 3DGS
+Taming 3DGS (15×)
+TangoGS on Taming 3DGS
+Taming 3DGS (15×)
+TangoGS on Taming 3DGS
+Taming 3DGS (15×)
+TangoGS on Taming 3DGS
+Taming 3DGS (15×)
+TangoGS on Taming 3DGS
+Taming 3DGS (15×)
+TangoGS on Taming 3DGS
+33
+Preprint
+I
+Q UALITY, M ODEL S TORAGE AND R ENDERING T HROUGHPUT
+I.1
+M EASUREMENT PROTOCOL
+We measure the saved models evaluated in Sections C and D, including both TangoGS seeds and all
+three Taming multipliers on Zip-NeRF. Storage is the size of the files required to load the evaluated
+model, in decimal MB (106 bytes), excluding training state, input point clouds, images and evaluation outputs. For TangoGS and the other PLY-based methods this is the final point cloud; Compact
+3DGS additionally requires its learned color network. The evaluated Compact 3DGS runs do not
+contain serialized compressed archives. We therefore report their saved checkpoint size and, separately, the implementation’s encoded-payload estimate, which accounts for quantized parameters,
+codebooks and the color network. That estimate is not a measurement of compressed-file bytes.
+Each checkpoint is rendered in its own implementation on one NVIDIA GH200, using the same
+held-out cameras, resolution and rendering settings as its quality evaluation. We verify the loaded
+Gaussian count and reproduce test PSNR before timing. After two complete warm-up passes, we
+time ten complete passes and report the number of test views divided by the median pass duration,
+with CUDA synchronization at both boundaries. Timing includes native view-dependent preprocessing, culling and rasterization, but excludes model and image loading, quality metrics, saving
+images, and Compact 3DGS’s one-time color-feature precomputation. The rendering measurements
+therefore compare complete native implementations; they do not isolate the speed effect of density
+control or compare models at matched quality.
+I.2
+AGGREGATE COMPARISON
+Table I.1 averages seeds within each capture, then weights captures equally. Higher PSNR and lower
+LPIPS indicate better reconstruction quality; Gaussian counts and SSIM are reported in Sections C
+and D.
+On standard scenes, TangoGS uses less saved storage than both LiteGS and reference 3DGS while
+achieving higher mean native rendering throughput. On large captures, its higher quality accompanies larger saved models and lower FPS than LiteGS.
+Table I.1: Quality, storage and rendering throughput. Equal-capture means; two seeds per capture for TangoGS. PSNR is in dB; MB measures saved model size. Taming uses its released standard
+budgets and 15× on large captures. The last row gives Compact 3DGS's separate encoded-payload
+estimate, not saved-file bytes.
+Standard (13)
+Large (8)
+Method
+TangoGS
+LeGS
+LiteGS
+3DGS
+Taming
+3DGS-MCMC
+DashGaussian
+Speedy-Splat
+FastGS
+CDC-GS
+LP-3DGS
+Compact 3DGS
+ControlGS
+Mini-Splatting
+Encoded estimate
+PSNR ↑ LPIPS ↓ MB ↓ FPS ↑ PSNR ↑ LPIPS ↓ MB ↓ FPS ↑
+28.04
+28.08
+27.92
+27.30
+27.63
+27.69
+27.45
+26.78
+27.35
+27.52
+27.18
+26.89
+27.46
+27.06
+0.196
+0.186
+0.203
+0.209
+0.203
+0.186
+0.210
+0.274
+0.251
+0.191
+0.216
+0.234
+0.212
+0.219
+229
+445
+246
+625
+728
+715
+538
+71
+82
+600
+282
+122
+195
+106
+567
+520
+538
+203
+220
+187
+249
+1047
+993
+218
+467
+277
+161
+806
+24.65
+23.41
+24.11
+24.02
+23.77
+17.02
+23.57
+22.54
+22.98
+23.98
+23.31
+22.34
+22.88
+22.19
+0.276
+0.348
+0.322
+0.312
+0.346
+0.554
+0.327
+0.416
+0.380
+0.316
+0.360
+0.405
+0.391
+0.434
+811
+233
+350
+764
+356
+764
+729
+59
+98
+786
+165
+83
+122
+47
+387
+881
+601
+216
+329
+549
+285
+1163
+1215
+225
+706
+553
+193
+1074
+–
+–
+47
+–
+–
+–
+35
+–
+34
+Preprint
+I.3
+S TANDARD SCENES
+The per-capture tables pair test PSNR and VGG LPIPS with the storage and throughput of the same
+checkpoints.
+Table I.2 reports Bicycle and Flowers from Mip-NeRF 360.
+Table I.2: Per-capture quality, storage and throughput. PSNR (dB) and VGG LPIPS evaluate
+the same saved checkpoints as MB and FPS. The last row is Compact 3DGS's encoded-payload
+estimate. TangoGS entries average both seeds.
+Bicycle
+Flowers
+Method
+TangoGS
+LeGS
+LiteGS
+3DGS
+Taming
+3DGS-MCMC
+DashGaussian
+Speedy-Splat
+FastGS
+CDC-GS
+LP-3DGS
+Compact 3DGS
+ControlGS
+Mini-Splatting
+Encoded estimate
+PSNR ↑ LPIPS ↓ MB ↓ FPS ↑ PSNR ↑ LPIPS ↓ MB ↓ FPS ↑
+25.69
+25.73
+24.84
+25.20
+25.50
+25.69
+25.41
+24.85
+24.81
+25.48
+25.17
+24.87
+25.37
+25.21
+0.213
+0.167
+0.263
+0.208
+0.195
+0.169
+0.196
+0.304
+0.296
+0.170
+0.216
+0.252
+0.234
+0.225
+290
+840
+246
+1231
+1485
+1463
+1166
+152
+119
+1277
+583
+180
+237
+131
+608
+446
+673
+116
+144
+107
+185
+842
+1046
+153
+277
+159
+149
+793
+21.99
+22.04
+21.71
+21.57
+21.82
+22.05
+21.94
+21.42
+21.35
+21.64
+21.50
+21.06
+21.76
+21.58
+0.296
+0.282
+0.315
+0.335
+0.334
+0.292
+0.322
+0.394
+0.389
+0.281
+0.343
+0.377
+0.309
+0.327
+305
+651
+246
+718
+897
+718
+664
+91
+111
+815
+387
+136
+359
+142
+436
+477
+476
+242
+220
+151
+270
+1024
+930
+208
+413
+284
+133
+735
+–
+–
+64
+–
+–
+–
+51
+–
+Table I.3 continues the Mip-NeRF 360 outdoor scenes with Garden and Stump.
+Table I.3: Per-capture quality, storage and throughput. PSNR (dB) and VGG LPIPS evaluate
+the same saved checkpoints as MB and FPS. The last row is Compact 3DGS's encoded-payload
+estimate. TangoGS entries average both seeds.
+Garden
+Stump
+Method
+TangoGS
+LeGS
+LiteGS
+3DGS
+Taming
+3DGS-MCMC
+DashGaussian
+Speedy-Splat
+FastGS
+CDC-GS
+LP-3DGS
+Compact 3DGS
+ControlGS
+Mini-Splatting
+Encoded estimate
+PSNR ↑ LPIPS ↓ MB ↓ FPS ↑ PSNR ↑ LPIPS ↓ MB ↓ FPS ↑
+27.63
+28.09
+27.55
+27.49
+27.78
+27.81
+27.67
+26.84
+27.29
+27.82
+27.38
+26.90
+27.17
+26.88
+–
+0.135 202
+0.089 836
+0.134 246
+0.106 1026
+0.100 1273
+0.096 1290
+0.111 814
+0.183 133
+0.157 164
+0.094 994
+0.110 598
+0.142 176
+0.156 225
+0.150 140
+795
+400
+786
+162
+191
+140
+254
+931
+932
+178
+308
+188
+186
+815
+27.46
+27.40
+27.13
+26.64
+26.97
+27.31
+27.09
+26.69
+26.52
+26.85
+26.61
+26.29
+26.62
+27.22
+0.199
+0.177
+0.214
+0.215
+0.201
+0.171
+0.205
+0.259
+0.282
+0.207
+0.219
+0.256
+0.210
+0.199
+212
+569
+247
+1063
+1207
+1178
+890
+127
+86
+1032
+499
+152
+262
+151
+676
+505
+612
+200
+209
+118
+274
+897
+1026
+218
+375
+252
+168
+782
+–
+–
+–
+–
+56
+–
+63
+35
+Preprint
+Table I.4 reports the remaining outdoor scene, Treehill, and the indoor scene Room.
+Table I.4: Per-capture quality, storage and throughput. PSNR (dB) and VGG LPIPS evaluate
+the same saved checkpoints as MB and FPS. The last row is Compact 3DGS's encoded-payload
+estimate. TangoGS entries average both seeds.
+Treehill
+Room
+Method
+TangoGS
+LeGS
+LiteGS
+3DGS
+Taming
+3DGS-MCMC
+DashGaussian
+Speedy-Splat
+FastGS
+CDC-GS
+LP-3DGS
+Compact 3DGS
+ControlGS
+Mini-Splatting
+Encoded estimate
+PSNR ↑ LPIPS ↓ MB ↓ FPS ↑ PSNR ↑ LPIPS ↓ MB ↓ FPS ↑
+23.31
+23.00
+23.37
+22.51
+23.06
+22.93
+23.05
+22.52
+22.85
+22.46
+22.42
+22.58
+22.53
+22.67
+0.313 267
+0.303 629
+0.323 247
+0.324 824
+0.313 935
+0.275 824
+0.308 873
+0.442
+92
+0.416
+90
+0.295 1014
+0.331 420
+0.342 169
+0.321 240
+0.314 142
+–
+–
+61
+630
+529
+600
+203
+201
+162
+235
+1176
+1062
+198
+380
+206
+148
+751
+32.61
+32.62
+32.63
+31.54
+32.05
+32.24
+31.68
+30.75
+31.70
+32.12
+31.42
+30.63
+32.11
+31.05
+0.178
+0.181
+0.183
+0.205
+0.199
+0.187
+0.212
+0.267
+0.227
+0.185
+0.212
+0.218
+0.200
+0.201
+217
+259
+245
+323
+384
+372
+289
+29
+53
+277
+110
+80
+121
+97
+473
+577
+516
+198
+206
+199
+217
+971
+1086
+200
+504
+349
+131
+661
+–
+–
+–
+34
+–
+Table I.5 reports Counter and Kitchen.
+Table I.5: Per-capture quality, storage and throughput. PSNR (dB) and VGG LPIPS evaluate
+the same saved checkpoints as MB and FPS. The last row is Compact 3DGS's encoded-payload
+estimate. TangoGS entries average both seeds.
+Counter
+Kitchen
+Method
+TangoGS
+LeGS
+LiteGS
+3DGS
+Taming
+3DGS-MCMC
+DashGaussian
+Speedy-Splat
+FastGS
+CDC-GS
+LP-3DGS
+Compact 3DGS
+ControlGS
+Mini-Splatting
+Encoded estimate
+PSNR ↑ LPIPS ↓ MB ↓ FPS ↑ PSNR ↑ LPIPS ↓ MB ↓ FPS ↑
+29.73
+29.82
+29.84
+29.07
+29.04
+29.34
+28.97
+28.20
+29.07
+29.26
+28.88
+28.59
+29.74
+28.40
+0.166
+0.170
+0.170
+0.191
+0.190
+0.178
+0.200
+0.265
+0.212
+0.181
+0.197
+0.213
+0.179
+0.191
+262
+207
+246
+268
+295
+298
+210
+25
+53
+210
+109
+81
+165
+102
+490
+493
+459
+208
+218
+183
+232
+1072
+926
+213
+456
+274
+98
+509
+32.39
+32.58
+32.37
+31.31
+31.83
+31.80
+31.40
+29.84
+31.65
+31.92
+31.38
+30.52
+31.81
+31.19
+0.112
+0.112
+0.114
+0.122
+0.118
+0.118
+0.134
+0.198
+0.132
+0.118
+0.125
+0.135
+0.121
+0.126
+222
+354
+246
+392
+401
+446
+310
+29
+97
+239
+199
+116
+159
+106
+554
+387
+521
+178
+202
+168
+186
+1100
+789
+206
+381
+223
+126
+552
+–
+–
+34
+–
+–
+–
+45
+–
+36
+Preprint
+Table I.6 completes Mip-NeRF 360 with Bonsai.
+Table I.6: Per-capture quality, storage and throughput. PSNR (dB) and VGG LPIPS evaluate
+the same saved checkpoints as MB and FPS. The last row is Compact 3DGS's encoded-payload
+estimate. TangoGS entries average both seeds.
+Bonsai
+Method
+TangoGS
+LeGS
+LiteGS
+3DGS
+Taming
+3DGS-MCMC
+DashGaussian
+Speedy-Splat
+FastGS
+CDC-GS
+LP-3DGS
+Compact 3DGS
+ControlGS
+Mini-Splatting
+PSNR ↑ LPIPS ↓ MB ↓ FPS ↑
+Encoded estimate
+33.05
+33.41
+33.17
+32.43
+32.43
+32.67
+32.04
+31.09
+32.07
+32.15
+32.03
+31.74
+32.70
+31.30
+0.172
+0.164
+0.172
+0.190
+0.188
+0.178
+0.191
+0.237
+0.200
+0.184
+0.196
+0.203
+0.187
+0.186
+193
+308
+246
+264
+294
+322
+210
+32
+69
+245
+116
+84
+125
+90
+448
+508
+441
+288
+246
+213
+259
+1122
+979
+254
+544
+372
+140
+615
+–
+–
+35
+–
+Table I.7 reports Truck and Train from Tanks & Temples.
+Table I.7: Per-capture quality, storage and throughput. PSNR (dB) and VGG LPIPS evaluate
+the same saved checkpoints as MB and FPS. The last row is Compact 3DGS's encoded-payload
+estimate. TangoGS entries average both seeds.
+Truck
+Train
+Method
+TangoGS
+LeGS
+LiteGS
+3DGS
+Taming
+3DGS-MCMC
+DashGaussian
+Speedy-Splat
+FastGS
+CDC-GS
+LP-3DGS
+Compact 3DGS
+ControlGS
+Mini-Splatting
+Encoded estimate
+PSNR ↑ LPIPS ↓ MB ↓ FPS ↑ PSNR ↑ LPIPS ↓ MB ↓ FPS ↑
+26.47
+26.58
+26.57
+25.46
+25.91
+26.45
+25.90
+25.14
+25.78
+26.22
+25.37
+25.06
+25.32
+25.00
+0.139
+0.128
+0.113
+0.142
+0.129
+0.110
+0.149
+0.190
+0.177
+0.118
+0.152
+0.162
+0.141
+0.163
+166
+472
+246
+512
+641
+645
+354
+63
+63
+512
+198
+104
+179
+54
+594
+449
+483
+231
+245
+159
+318
+1100
+1006
+271
+537
+317
+186
+1045
+23.06
+22.78
+23.14
+22.24
+22.50
+22.61
+22.41
+21.59
+22.56
+22.48
+21.95
+21.70
+22.59
+21.30
+0.168
+0.182
+0.174
+0.195
+0.208
+0.182
+0.207
+0.292
+0.239
+0.180
+0.218
+0.236
+0.191
+0.257
+227
+209
+246
+272
+269
+273
+248
+26
+57
+274
+106
+90
+227
+46
+414
+491
+382
+225
+308
+280
+266
+1022
+875
+264
+621
+313
+175
+1084
+–
+–
+42
+–
+–
+–
+37
+–
+37
+Preprint
+Table I.8 reports Dr Johnson and Playroom from Deep Blending.
+Table I.8: Per-capture quality, storage and throughput. PSNR (dB) and VGG LPIPS evaluate
+the same saved checkpoints as MB and FPS. The last row is Compact 3DGS's encoded-payload
+estimate. TangoGS entries average both seeds.
+Dr Johnson
+Playroom
+Method
+TangoGS
+LeGS
+LiteGS
+3DGS
+Taming
+3DGS-MCMC
+DashGaussian
+Speedy-Splat
+FastGS
+CDC-GS
+LP-3DGS
+Compact 3DGS
+ControlGS
+Mini-Splatting
+PSNR ↑ LPIPS ↓ MB ↓ FPS ↑ PSNR ↑ LPIPS ↓ MB ↓ FPS ↑
+Encoded estimate
+I.4
+30.00
+29.96
+29.79
+29.35
+29.78
+29.42
+29.20
+29.13
+29.52
+29.47
+29.07
+29.23
+29.26
+29.38
+0.225
+0.232
+0.237
+0.236
+0.234
+0.234
+0.249
+0.267
+0.272
+0.233
+0.249
+0.254
+0.258
+0.257
+245
+244
+246
+775
+812
+843
+590
+78
+63
+577
+202
+126
+116
+94
+566
+713
+522
+159
+214
+240
+238
+1130
+1089
+190
+563
+280
+226
+1008
+31.10
+30.99
+30.88
+30.07
+30.57
+29.70
+30.13
+30.14
+30.33
+29.90
+30.14
+30.45
+29.93
+30.53
+0.232
+0.225
+0.226
+0.241
+0.234
+0.232
+0.243
+0.269
+0.263
+0.236
+0.246
+0.254
+0.250
+0.250
+172
+202
+246
+456
+577
+620
+375
+46
+45
+329
+139
+93
+115
+79
+692
+790
+529
+235
+251
+310
+303
+1217
+1163
+275
+717
+391
+229
+1129
+–
+–
+48
+–
+–
+–
+38
+–
+A ERIAL CAPTURES
+Table I.9 reports Rubble and Building from Mill19, using the same measurement protocol.
+Table I.9: Per-capture quality, storage and throughput. PSNR (dB) and VGG LPIPS evaluate
+the same saved checkpoints as MB and FPS. The last row is Compact 3DGS's encoded-payload
+estimate. TangoGS entries average both seeds.
+Rubble
+Building
+Method
+TangoGS
+LeGS
+LiteGS
+3DGS
+Taming (15×)
+3DGS-MCMC
+DashGaussian
+Speedy-Splat
+FastGS
+CDC-GS
+LP-3DGS
+Compact 3DGS
+ControlGS
+Mini-Splatting
+Encoded estimate
+PSNR ↑ LPIPS ↓ MB ↓ FPS ↑ PSNR ↑ LPIPS ↓ MB ↓ FPS ↑
+25.63
+24.36
+24.66
+25.51
+25.18
+22.48
+24.57
+24.20
+23.86
+25.65
+24.69
+22.91
+23.81
+23.20
+0.282
+0.355
+0.349
+0.268
+0.334
+0.507
+0.292
+0.404
+0.398
+0.278
+0.333
+0.408
+0.411
+0.468
+733
+374
+420
+1488
+716
+1488
+1521
+143
+182
+1464
+404
+130
+202
+56
+441
+765
+666
+152
+294
+241
+242
+948
+1037
+152
+470
+345
+197
+1217
+21.67
+20.08
+21.06
+21.20
+20.69
+18.26
+19.36
+16.77
+19.88
+20.20
+19.73
+18.76
+19.51
+18.10
+0.271
+0.376
+0.333
+0.277
+0.348
+0.526
+0.355
+0.531
+0.405
+0.317
+0.409
+0.469
+0.430
+0.555
+872
+228
+398
+1841
+524
+1841
+1070
+48
+121
+1450
+150
+79
+110
+22
+443
+953
+555
+108
+246
+175
+269
+1120
+1179
+140
+729
+522
+219
+1465
+–
+–
+49
+–
+–
+–
+34
+–
+38
+Preprint
+Table I.10 reports Residence and Sci-Art from UrbanScene3D.
+Table I.10: Per-capture quality, storage and throughput. PSNR (dB) and VGG LPIPS evaluate
+the same saved checkpoints as MB and FPS. The last row is Compact 3DGS's encoded-payload
+estimate. TangoGS entries average both seeds.
+Residence
+Sci-Art
+Method
+TangoGS
+LeGS
+LiteGS
+3DGS
+Taming (15×)
+3DGS-MCMC
+DashGaussian
+Speedy-Splat
+FastGS
+CDC-GS
+LP-3DGS
+Compact 3DGS
+ControlGS
+Mini-Splatting
+PSNR ↑ LPIPS ↓ MB ↓ FPS ↑ PSNR ↑ LPIPS ↓ MB ↓ FPS ↑
+21.06
+20.27
+20.81
+20.70
+20.59
+19.14
+20.26
+20.16
+20.08
+20.78
+20.34
+19.50
+19.75
+19.28
+0.273
+0.328
+0.316
+0.293
+0.315
+0.439
+0.304
+0.375
+0.350
+0.290
+0.331
+0.396
+0.391
+0.445
+1133
+444
+484
+1320
+727
+1320
+1516
+130
+194
+1689
+327
+119
+204
+37
+381
+638
+672
+131
+232
+257
+196
+890
+1010
+117
+433
+307
+132
+1045
+21.82
+20.50
+21.56
+20.96
+21.83
+11.81
+20.96
+20.61
+20.28
+21.20
+20.61
+19.47
+20.07
+19.04
+–
+–
+46
+–
+–
+Encoded estimate
+I.5
+0.230 1136
+0.289 367
+0.258 529
+0.268 640
+0.267 507
+0.669 640
+0.272 766
+0.345
+77
+0.305 150
+0.263 785
+0.301 214
+0.370
+87
+0.349 161
+0.432
+31
+–
+36
+309
+736
+575
+195
+249
+236
+247
+1016
+996
+198
+570
+450
+183
+1166
+–
+H ANDHELD CAPTURES
+The Zip-NeRF comparisons include all three released Taming multipliers.
+Table I.11 reports Alameda and London.
+Table I.11: Per-capture quality, storage and throughput. PSNR (dB) and VGG LPIPS evaluate
+the same saved checkpoints as MB and FPS. The last row is Compact 3DGS's encoded-payload
+estimate. TangoGS entries average both seeds.
+Alameda
+London
+Method
+TangoGS
+LeGS
+LiteGS
+3DGS
+Taming (2×)
+Taming (5×)
+Taming (15×)
+3DGS-MCMC
+DashGaussian
+Speedy-Splat
+FastGS
+CDC-GS
+LP-3DGS
+Compact 3DGS
+ControlGS
+Mini-Splatting
+Encoded estimate
+PSNR ↑ LPIPS ↓ MB ↓ FPS ↑ PSNR ↑ LPIPS ↓ MB ↓ FPS ↑
+23.29
+21.98
+23.00
+22.99
+22.87
+22.90
+22.83
+14.50
+22.89
+21.54
+22.00
+22.83
+22.15
+21.52
+22.28
+20.11
+0.331
+0.420
+0.381
+0.394
+0.421
+0.421
+0.422
+0.640
+0.397
+0.484
+0.442
+0.399
+0.434
+0.455
+0.432
+0.488
+757
+124
+242
+215
+108
+109
+108
+215
+245
+16
+42
+227
+56
+63
+86
+39
+364
+981
+581
+283
+379
+387
+387
+851
+335
+1341
+1355
+309
+884
+683
+208
+1077
+26.96
+26.18
+26.11
+25.88
+25.44
+25.42
+25.42
+17.36
+26.14
+25.00
+25.18
+26.15
+25.57
+24.95
+25.09
+25.69
+0.304
+0.365
+0.360
+0.376
+0.407
+0.408
+0.407
+0.565
+0.366
+0.452
+0.424
+0.369
+0.396
+0.422
+0.412
+0.389
+694
+144
+237
+155
+74
+74
+74
+155
+211
+14
+30
+198
+55
+60
+73
+74
+448
+993
+720
+362
+473
+469
+468
+1042
+398
+1427
+1483
+361
+968
+813
+239
+908
+–
+–
+29
+–
+–
+–
+28
+–
+39
+Preprint
+Table I.12 reports NYC and Berlin.
+Table I.12: Per-capture quality, storage and throughput. PSNR (dB) and VGG LPIPS evaluate
+the same saved checkpoints as MB and FPS. The last row is Compact 3DGS's encoded-payload
+estimate. TangoGS entries average both seeds.
+NYC
+Berlin
+Method
+TangoGS
+LeGS
+LiteGS
+3DGS
+Taming (2×)
+Taming (5×)
+Taming (15×)
+3DGS-MCMC
+DashGaussian
+Speedy-Splat
+FastGS
+CDC-GS
+LP-3DGS
+Compact 3DGS
+ControlGS
+Mini-Splatting
+Encoded estimate
+PSNR ↑ LPIPS ↓ MB ↓ FPS ↑ PSNR ↑ LPIPS ↓ MB ↓ FPS ↑
+28.37
+26.76
+27.73
+27.12
+26.32
+26.29
+26.23
+15.04
+26.81
+25.49
+25.88
+27.10
+26.30
+25.37
+25.83
+25.46
+0.272
+0.343
+0.305
+0.324
+0.363
+0.363
+0.364
+0.599
+0.333
+0.397
+0.384
+0.328
+0.358
+0.383
+0.372
+0.375
+487
+93
+244
+263
+93
+92
+92
+263
+257
+21
+30
+242
+53
+61
+70
+54
+390
+1028
+515
+260
+438
+418
+429
+788
+325
+1374
+1430
+279
+907
+747
+230
+980
+28.38
+27.16
+27.95
+27.80
+27.45
+27.40
+27.42
+17.57
+27.59
+26.58
+26.64
+27.93
+27.10
+26.27
+26.69
+26.66
+0.243
+0.306
+0.275
+0.294
+0.313
+0.312
+0.312
+0.485
+0.296
+0.341
+0.331
+0.285
+0.314
+0.335
+0.329
+0.322
+672
+91
+242
+190
+103
+104
+104
+190
+242
+21
+34
+234
+58
+61
+70
+65
+320
+957
+526
+237
+324
+325
+323
+804
+267
+1184
+1234
+248
+688
+559
+136
+734
+–
+–
+28
+–
+–
+–
+29
+–
+40
+Preprint
+J
+C APACITY S ELECTION AGAINST AN O FFLINE S WEEP
+We evaluate Bicycle and Bonsai (standard), Rubble and Residence (aerial), and London and Berlin
+(handheld), using seed 4114 throughout. For each capture, we multiply TangoGS’s automatic learning allowance by 0.25, 0.5, 0.75, 1, 1.5, and 2, keeping the controller, optimizer, ranking, views,
+resolution and training horizon fixed. The six 1× endpoints reuse the paper’s automatic models; the
+thirty other endpoints use the same training implementation. The sweeps are offline references and
+provide no per-capture tuning to TangoGS.
+Quality–size objective. Relative to the 2×-allowance reference r, a model qualifies if its losses
+are at most 0.30 dB PSNR and 0.020 VGG LPIPS, jointly. Among evaluated endpoints, N ∗ is the
+smallest Gaussian count meeting these limits. We essentially want to see what is the smallest model
+in comparison to the 2× reference that meets these quality limits, and how TangoGS’s automatic
+selection compares to that. We report whether the automatic model qualifies and, when it does,
+its excess count Nauto /N ∗ − 1 i.e. how much more Gaussians it uses than the smallest qualifying
+model.
+Result. The automatic model satisfies the limits on 4/6 captures. Residence and London match
+the smallest evaluated qualifying count; Bonsai and Berlin use 33.2% and 32.5% more Gaussians,
+respectively. Bicycle and Rubble require the 1.5×-allowance endpoint to meet both limits.
+Conclusion. TangoGS selects a useful quality–size operating point without per-capture search: on
+4/6 captures, spanning all three regimes, it meets the joint quality target with at most 1.34× the
+smallest evaluated qualifying count. This directly supports the capacity-selection decision beyond
+comparisons with released baseline settings. Bicycle and Rubble identify the remaining quality
+headroom, requiring a larger allowance to reach the target.
+Table J.1: Capacity selection with seed 4114. Counts are millions of Gaussians; Nr is the 2×allowance reference and N ∗ is the smallest evaluated model satisfying both quality limits. Excess
+count is reported only for qualifying automatic models.
+Capture
+Nauto
+Nr
+N ∗ Excess Qualifies
+Bicycle
+Bonsai
+Rubble
+Residence
+London
+Berlin
+1.166
+0.787
+2.960
+4.568
+2.798
+2.711
+2.233
+1.531
+5.765
+8.991
+5.588
+5.413
+1.709
+0.591
+4.375
+4.568
+2.798
+2.046
+–
+33.2%
+–
+0.0%
+0.0%
+32.5%
+no
+yes
+no
+yes
+yes
+yes
+Table J.2: Automatic-model quality losses relative to the 2×-allowance reference. Negative values
+favor the automatic model. SSIM is descriptive; qualification uses PSNR and LPIPS. The joint limits
+are 0.30 dB PSNR and 0.020 VGG LPIPS.
+Capture
+PSNR loss (dB) SSIM loss LPIPS loss
+Bicycle
+Bonsai
+Rubble
+Residence
+London
+Berlin
+0.160
+0.175
+0.408
+0.248
+-0.019
+-0.039
+41
+0.0151
+0.0015
+0.0253
+0.0128
+0.0035
+0.0022
+0.0356
+0.0088
+0.0364
+0.0161
+0.0149
+0.0101
+Preprint
+6
+4
+2
+0
+0.27
+Bonsai
+4
+3
+2
+1
+0
+0.52
+1
+1.9
+Count / automatic
+0.26
+1
+0
+0.56
+1.1
+Count / automatic
+2
+2
+1
+0
+0.26
+4
+2
+0
+0.3
+Worst loss / tolerance
+2
+6
+0.51
+1
+1.9
+Count / automatic
+London
+Worst loss / tolerance
+Worst loss / tolerance
+Residence
+0.3
+Rubble
+Worst loss / tolerance
+Worst loss / tolerance
+Worst loss / tolerance
+Bicycle
+0.51
+1
+Count / automatic
+Allowance sweep
+2
+0.56
+1
+1.9
+Count / automatic
+Berlin
+2.0
+1.5
+1.0
+0.5
+0.0
+0.26
+0.51
+1
+Count / automatic
+2
+Smallest qualifying
+Automatic
+Figure J.1: Quality–size objective with one seed. The vertical coordinate is the larger of the PSNR
+and LPIPS losses divided by their respective limits; values at most one satisfy both limits. Stars
+mark TangoGS’s automatic point and open circles the smallest evaluated qualifying model. Lines
+connect evaluated endpoints.
+Why the two captures miss the target. On Bicycle, the automatic model loses only 0.160 dB
+PSNR relative to the reference, but LPIPS increases by 0.0356, exceeding the 0.020 limit. This
+divergence is consistent with TangoGS's reliance on training PSNR for capacity feedback: meeting a PSNR target does not ensure the corresponding LPIPS margin. Rubble misses both limits,
+with losses of 0.408 dB PSNR and 0.0364 LPIPS. The 1.5×-allowance models meet both limits in
+each case, demonstrating recoverable quality. Bicycle therefore motivates perceptual feedback as a
+potential extension to the capacity policy.
+42
+Preprint
+Bicycle
+0.80
+25.50
+25.25
+25.00
+0.32
+VGG LPIPS ↓
+0.78
+SSIM ↑
+PSNR (dB) ↑
+25.75
+0.76
+0.74
+0.72
+0.61 1.2
+2.2
+Gaussians (M)
+0.32
+0.30
+0.25
+0.20
+0.61 1.2
+2.2
+Gaussians (M)
+0.32
+0.61 1.2
+2.2
+Gaussians (M)
+33.0
+32.5
+VGG LPIPS ↓
+0.950
+SSIM ↑
+PSNR (dB) ↑
+Bonsai
+0.945
+0.940
+32.0
+0.21
+0.4 0.79 1.5
+Gaussians (M)
+0.21
+0.20
+0.19
+0.18
+0.17
+0.4 0.79 1.5
+Gaussians (M)
+0.21
+0.4 0.79 1.5
+Gaussians (M)
+Rubble
+0.80
+0.35
+25.5
+25.0
+0.76
+0.74
+0.72
+24.5
+0.89
+VGG LPIPS ↓
+0.78
+SSIM ↑
+PSNR (dB) ↑
+26.0
+1.7
+3.1
+5.8
+Gaussians (M)
+0.89
+0.30
+0.25
+1.7
+3.1
+5.8
+Gaussians (M)
+Allowance sweep
+2× reference
+Automatic
+Quality limit
+0.89
+1.7
+3.1
+5.8
+Gaussians (M)
+Figure J.2: Quality–count curves for Bicycle, Bonsai and Rubble. Stars mark the automatic operating points, squares the 2×-allowance references and dotted lines the PSNR and LPIPS limits relative
+to those references.
+43
+Preprint
+21.1
+21.0
+VGG LPIPS ↓
+0.75
+21.2
+SSIM ↑
+PSNR (dB) ↑
+Residence
+0.74
+0.73
+0.72
+20.9
+0.30
+0.28
+0.26
+1.4
+2.6
+4.8
+Gaussians (M)
+9
+1.4
+2.6
+4.8
+Gaussians (M)
+9
+1.4
+2.6
+4.8
+Gaussians (M)
+9
+0.72
+1.4
+2.8
+5.6
+Gaussians (M)
+London
+0.85
+0.34
+26.8
+26.7
+VGG LPIPS ↓
+26.9
+SSIM ↑
+PSNR (dB) ↑
+27.0
+0.84
+0.83
+26.6
+0.72
+1.4
+2.8
+5.6
+Gaussians (M)
+0.72
+0.32
+0.30
+1.4
+2.8
+5.6
+Gaussians (M)
+Berlin
+0.27
+28.2
+VGG LPIPS ↓
+0.915
+28.3
+SSIM ↑
+PSNR (dB) ↑
+28.4
+0.910
+28.1
+0.26
+0.25
+0.24
+0.905
+28.0
+0.7
+1.4
+2.7
+5.4
+Gaussians (M)
+0.7
+1.4
+2.7
+5.4
+Gaussians (M)
+Allowance sweep
+2× reference
+Automatic
+Quality limit
+0.7
+1.4
+2.7
+5.4
+Gaussians (M)
+Figure J.3: Quality–count curves for Residence, London and Berlin, with the same conventions as
+Fig. J.2.
+44

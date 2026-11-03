@@ -1,0 +1,360 @@
+Just a small repo to play with this chip. Contribute to jose-villegas/autana development by creating an account on GitHub.
+
+render_lab: Crytek Sponza with baked direct light, on the r3d engine layer by jose-villegas · Pull Request #438 · jose-villegas/autana · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jose-villegas
+commented
+Sep 27, 2026
+Copy link
+Copy Markdown
+Owner
+Crytek Sponza in render_lab, with baked direct light and a camera flying through it. There are two scenes: Sponza (17.4k triangles) and Sponza Lite (8.7k triangles).
+```
+flowchart LR
+  obj[Sponza OBJ, fetched and checksummed] --> dens[densify] --> bake[bake sun + sky per vertex, Embree] --> weld[weld, averaged colour] --> simp[meshoptimizer, colour as an attribute] --> oct[cluster octree] --> gen[sponza_*_mesh_generated.c]
+  gen --> r3d[render/r3d_lit: cull, transform, span raster on 2 cores] --> half[184x224, doubled to the panel]
+```
+Loading
+Engine (render/r3d_*):
+An octree cull of clusters against the frustum.
+A Z-buffered Gouraud span rasterizer in fixed point, with 32-bit edges for on-screen triangles.
+The two cores split the rows at a balanced split row.
+Rendering runs in the app's update(), overlapped with the previous frame's panel send.
+Bake (launcher/tools/r3d, with a pinned meshoptimizer v1.3 submodule): this can be reused for other meshes. Sibenik is next.
+Board (diagnostics build, both cores, before present)
+Mesh
+Triangles
+Mean frame
+fps
+Sponza
+17,375
+63.9 ms
+15.7
+Sponza Lite
+8,651
+46.5 ms
+21.5
+Lite, old quadric bake
+8,672
+49.1 ms
+20.4
+Decimation against a dense 574k-triangle reference, 40 flythrough poses, RMSE
+Overall
+Columns
+Fabric
+Arches
+Props
+Slivers
+Quadric (before)
+27.1
+31.8
+26.2
+19.9
+33.4
+31%
+meshoptimizer (now)
+18.6
+23.6
+21.3
+19.4
+32.3
+13%
+Known gaps
+The columns still lose their capitals.
+r3d_span_stop_after is a measurement switch that is still in the rasterizer.
+The buffers move into the app arena (shell: PSRAM app arena lent to the running app, reset on every switch #431) once that merges.
+Host tests pass. The board perf suite passes (2 of 2).
+jose-villegas
+added 30 commits
+September 27, 2026 02:59
+render_lab: Crytek Sponza flythrough with baked direct light (work in…
+…
+982ad5a
+```
+… progress)
+
+Decimated Sponza with sun and sky light baked per vertex (tools/gen_sponza.py),
+an octree of clusters, a z-buffered span rasterizer on both cores, a looping
+camera path held clear of every triangle, host visibility oracle and a device
+perf suite. App partition grown to 8 MB for the diagnostics image.
+```
+render_lab: Sponza at half resolution, fixed-point span stepping, per…
+…
+1b4901f
+```
+…-cluster row skip
+
+Measured on the board (diagnostics build, both cores, before present):
+mean frame 205 ms -> 118 ms (4.9 -> 8.5 fps). Half resolution doubled into
+the framebuffer; rows and spans step in fixed point anchored at each
+triangle's first row; each core skips clusters outside its rows; tiny
+triangles draw flat; transformed vertices shrink to 16 bytes.
+```
+render_lab: Sponza bake split only where the sun's shadow changes, 8.…
+…
+2104c37
+```
+…8 colour, split row walk
+
+17.4k triangles instead of 43.7k: materials decimated harder, then the
+welded mesh is split where sun exposure changes along an edge rather than
+wherever an edge is long. Colours step in 8.8 so a sliver's steep gradient
+is never clamped into a wrong-coloured line. Rows walk each half of the
+triangle with its left edge known, in 32 bits unless a vertex is far off
+screen. Board, diagnostics build: mean frame 114 ms -> 73 ms (13.6 fps)
+before the row walk change.
+```
+render_lab: 32-bit edge setup for on-screen triangles
+…
+7cbaace
+```
+A 64-bit conversion from float is a library call on this chip; six per
+triangle cost more than walking its rows.
+```
+render_lab: sky written while doubling instead of clearing the colour…
+…
+05f9fa1
+```
+… buffer
+
+Measured on the board: 15.1 fps mean, 9.7 ms for a frame with no
+geometry. The perf suite now times that empty frame.
+```
+render_lab: sponza perf suite measures two-core contention
+0662775
+Merge remote-tracking branch 'origin/main' into feature/crytek-sponza…
+…
+c8f0bb5
+```
+…-direct-light-a00d20
+```
+render_lab: Sponza renders in update(), overlapped with the panel send
+…
+9d458a9
+```
+render_lab scenes gain an optional update(), called from the app's own
+update() while the previous frame is still being sent. Sponza draws its
+half-resolution frame there and only doubles it into the framebuffer in
+frame().
+```
+render_lab: Sponza and Sponza Lite, one scene per bake
+…
+28dde82
+```
+gen_sponza.py takes --name so a second bake gets its own files and
+symbols; its defaults reproduce the 17.4k-triangle bake byte for byte.
+Sponza Lite is the 8.7k-triangle bake on the same flythrough. Every
+suite_sponza check runs over both.
+```
+tools/mesh: the Sponza bake's generic stages as shared mesh tools
+…
+e223cf4
+```
+Loading, decimation, light-driven splitting, baked light, the cluster
+octree and a cached, hash-checked model fetch move out of gen_sponza.py
+into launcher/tools/mesh/, with pinned requirements. gen_sponza.py keeps
+only Sponza's own settings and the lit_mesh_t output; both bakes
+regenerate byte for byte.
+```
+render: the baked-light renderer moves out of render_lab into the r3d…
+…
+305e9a4
+```
+… layer
+
+lit_mesh, lit_pipeline, lit_frame, span_raster and camera_path become
+main/render/r3d_lit_*, r3d_span and r3d_path, their symbols prefixed r3d_;
+fast_float.h goes to util/. The pipeline's host suite becomes the engine
+suite suite_r3d_lit.c. render/ writes panel-format uint16_t pixels rather
+than including gfx/, which shares its tier. The offline bake,
+launcher/tools/mesh, becomes launcher/tools/r3d. render_lab keeps only
+Sponza: the scenes, the flythrough, the generated meshes and gen_sponza.py.
+Both bakes regenerate with unchanged data.
+```
+tools/r3d: the Sponza bake simplifies with meshoptimizer, colour as a…
+…
+57441c0
+```
+…n attribute
+
+The bake densifies, lights, welds and then runs one meshoptimizer v1.3
+simplifyWithUpdate pass with colour as an attribute; props keep 30% of
+the budget. Against a dense reference the 8.7k Lite drops from 27.1 to
+18.6 RMSE, beats the quadric bake on columns, fabric, arches and props,
+and cuts slivers from 31% to 13%. The quadric path stays behind
+--simplifier quadric.
+```
+Merge remote-tracking branch 'origin/main' into feature/crytek-sponza…
+…
+073d279
+```
+…-direct-light-a00d20
+```
+render_lab: the Sponza perf suite reports frame cost for both bakes
+5be539a
+render: r3d_lit_pipeline includes stddef, the stray visibility tool goes
+df9ef29
+tools/r3d: lit_mesh.py clusters, validates and writes a lit mesh; the…
+…
+d256ba4
+```
+… README names no app
+
+gen_sponza.py ends in one write_lit_mesh() call. Both bakes regenerate
+byte-identical.
+```
+render: r3d_lit shares r3d_vec3f_t, r3d_viewport_t and r3d_ray.h's qu…
+…
+2ab7184
+```
+…arter mapping
+
+r3d_quarter_axes() is the one quarter mapping; r3d_physical_to_upright()
+and r3d_lit_view_look() both derive from it, so the agreement test goes.
+r3d_path includes only the vector header; the unused fast_float include
+leaves r3d_lit_pipeline.c.
+```
+render: r3d_lit_frame carves colour and depth from its scratch and sp…
+…
+f847192
+```
+…lits rows in 64 buckets
+
+The scene makes one allocation and logs when it fails; the frame asserts
+core 1 finished before the next stage reads its work.
+```
+render_lab: sponza_view_at owns the lens and render size; suite_sponz…
+…
+b208cfc
+```
+…a checks each bake with r3d_lit_mesh_expect_valid
+```
+render: tests for the two-core frame, near clip, row skip, screen rej…
+…
+6b066b4
+```
+…ect, wide edges and the path
+
+Each seen red under its mutation: the frame against one full draw, both
+halves and the colour of a near-plane cut, windows drawn with cluster
+rows, triangles over each screen side, a triangle past 32-bit edges, the
+span-end clamp, the flat path's average, the path's minimum leg time and
+look direction, and the shipped bakes' coverage along the flythrough.
+```
+docs: render/ as it now is, the two-core frame order, and the lit fra…
+…
+37c575f
+```
+…me's PSRAM exception
+
+The roadmap records the bulk PSRAM writes with their measured cost and
+that gfx takes the doubling over; decision 4 notes its first piece.
+The partition prose and the zeta generator lose figures the 8M factory
+partition made false.
+```
+tools/r3d: tests for the bake modules, skipped without the pinned env…
+…
+6623ada
+```
+…ironment
+
+Conforming splits, merges that keep facing, the majority label after
+simplifying, the cluster tree's order and lit_mesh validation, each seen
+red under a mutation.
+```
+suite_r3d_lit: draw_parts keeps its working arrays static, under the …
+…
+42fc7f3
+```
+…stack ceiling
+```
+render: r3d_span_triangle, r3d_lit_draw and r3d_lit_transform split u…
+…
+a64c0d0
+```
+…nder the complexity ceiling
+```
+render, render_lab: the lit-mesh code clears the MISRA tidy gate
+…
+1015880
+```
+Parenthesised arithmetic, one declaration per statement, uppercase float
+suffixes, explicit int-to-float conversions and checked snprintf results,
+most of it clang-tidy's own fix-its.
+```
+scene_sponza: the status fallback writes an escaped NUL, not a raw byte
+4d6e6fb
+Merge remote-tracking branch 'origin/main' into feature/crytek-sponza…
+…
+d70d791
+```
+…-direct-light-a00d20
+```
+suite_r3d_lit: one shared test mesh and heap band buffers, off the se…
+…
+32d9535
+```
+…lf-test image's DRAM
+```
+Merge remote-tracking branch 'origin/main' into feature/crytek-sponza…
+…
+4e27d83
+```
+…-direct-light-a00d20
+```
+docs, tools/r3d: round two review fixes
+…
+518ca51
+```
+The roadmap's lit-frame exception names the suite that measures it rather
+than copying figures, the tools tree lists r3d/, the Render Lab lines
+mention the baked-light scene, and the perf suite header lists everything
+it logs. lit_mesh validation refuses more triangles or clusters than the
+uint16 offsets hold.
+```
+jose-villegas
+added 2 commits
+September 27, 2026 22:42
+render: the single-precision rule lives in r3d_vec3f.h, the header ev…
+…
+d3343dc
+```
+…erything includes
+```
+Merge remote-tracking branch 'origin/main' into feature/crytek-sponza…
+…
+16f547b
+```
+…-direct-light-a00d20
+```
+Hide details
+View details
+jose-villegas
+merged commit 071cd44
+into
+main
+Sep 27, 2026
+12 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+jose-villegas
+deleted the
+feature/crytek-sponza-direct-light-a00d20
+branch
+September 27, 2026 20:55
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

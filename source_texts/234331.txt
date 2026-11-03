@@ -1,0 +1,153 @@
+Summary On Cesium for Unreal v2.29.0 (UE 5.8.1, Linux, headless -game + Movie Render Queue), a Gaussian splat tileset's spherical-harmonic bands 1–3 have no effect on the rendered image. The SH data is present in the tiles, the loader ac...
+
+Gaussian splat SH bands 1–3 load and compile but do not affect the rendered image (v2.29.0, UE 5.8.1 Linux, headless MRQ) · Issue #1884 · CesiumGS/cesium-unreal · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Gaussian splat SH bands 1–3 load and compile but do not affect the rendered image (v2.29.0, UE 5.8.1 Linux, headless MRQ) #1884
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Gaussian splat SH bands 1–3 load and compile but do not affect the rendered image (v2.29.0, UE 5.8.1 Linux, headless MRQ)#1884
+Copy link
+Labels
+bugSomething isn't workingSomething isn't workingneeds triageNew issues in need of triage to determine reproducibility, scope, and urgencyNew issues in need of triage to determine reproducibility, scope, and urgency
+Description
+DarkHorseConsulting
+opened on Aug 25, 2026
+Issue body actions
+Summary
+On Cesium for Unreal v2.29.0 (UE 5.8.1, Linux, headless -game + Movie Render Queue), a Gaussian splat tileset's spherical-harmonic bands 1–3 have no effect on the rendered image. The SH data is present in the tiles, the loader accepts it without warnings, the compute shader contains the evaluation, and the frame is nevertheless identical to one rendered with --sh 0.
+I could not locate the break in the ~50 minutes I had, so this is a measurement report rather than a diagnosis. Everything I ruled out is listed below so nobody repeats it.
+How it was measured
+The subtle part is that at a training viewpoint the real band-1 contribution is only 1–2 levels out of 255, which is below what a visual check or even a naive pixel diff will reliably show. So the test amplifies it:
+Tile the same PLY at --sh 3, --sh 1 and --sh 0, render the same camera → frames differ by ≤ 1/255.
+Multiply every f_rest_* coefficient in the PLY by 8 (band-1 mean |c| 0.039 → 0.31, i.e. a ~40-level colour swing at any view direction), re-tile, render the same camera → max Δ 2/255, 0.0 % of pixels differing by more than 8.
+An 8× amplification of the view-dependent term producing a 2/255 change means the term is not reaching the output at all.
+What was verified (and is therefore not the cause)
+Link
+How it was checked
+Result
+SH survives PLY → SPZ tiling
+gunzipped bufferView 0 of tiles/4/9.glb; SH block is the trailing n×45 bytes, decoded uint8 − 128
+mean 3.5/128 ≈ 0.027 ✓; the ×8 copy decodes to 27.8 ✓
+glTF declares the accessors
+KHR_gaussian_splatting: SH_DEGREE_{1,2,3}_COEF_*, float, placeholder accessors without bufferView (SPZ supplies the data)
+present
+Accessor type mismatch
+Accessors are declared VEC4 by the tiler, while the loader reads AccessorView<glm::vec3>. Patched the tiler to emit VEC3, re-tiled the ×8 PLY, re-rendered
+no change — not the cause (patch reverted)
+Loader
+CesiumGltfGaussianSplatComponent.cpp, countShCoeffsOnPrimitive / writeShCoeffs — these warn on a missing attribute or an invalid accessor
+no SH warnings in any render log
+GPU upload
+CesiumGaussianSplatDataInterface.cpp, updatePerSplatData
+uploads SphericalHarmonics plus per-tile (count, offset, firstSplat)
+Compute shader
+Shaders/Private/CesiumGaussianSplatCompute.usf ~176–242
+evaluates bands 1–3 with the graphdeco basis, unconditionally, OutColor = InColor + SHColor
+Niagara binding
+GaussianSplatSystem.uasset
+compiled script calls ComputeSplat(..., OutColor, ...); the DI is GPUComputeSim only, so there is no CPU fallback path to blame
+Remaining candidates
+Not investigated, in rough order of my suspicion:
+The CameraPosition input the Niagara graph feeds the shader (Result2 / Result5) — if the view vector is wrong or zero, the SH evaluation would collapse to a constant.
+The element type the SPZ decoder actually produces inside cesium-native, versus what the accessor claims.
+The Colors + SH sum being clamped or overwritten before it reaches the material.
+Separately, and probably worth its own issue
+In updatePerSplatData the SH buffer is allocated with × 2 × sizeof(float) but initialised and locked at a 16-byte stride, which appears to force a re-allocation on every update. It reads as a performance bug rather than a functional one, and it is not the cause of the above — noting it here so it is not lost. Happy to file it separately if you would prefer.
+Impact
+View-dependent shading — specular sheen on glass and water, the shift in appearance as a camera orbits — does not appear in Unreal renders from a Cesium splat tileset today. For matte subjects (brick, terrain) this is barely noticeable, which is probably why it has gone unreported; for glazing it reads visibly flat.
+Environment
+Cesium for Unreal v2.29.0, prebuilt Linux binaries, dropped into Engine/Plugins/Marketplace
+Unreal Engine 5.8.1, prebuilt Linux editor, Vulkan
+Linux x86_64 (Fedora, kernel 7.1.8), NVIDIA GTX 1660 6 GB
+Headless -game launch driving Movie Render Queue (no editor session)
+Tileset produced locally with splat-transform 3.3.0 → 3dgs-ply-3dtiles-converter 0.6.2 (3D Tiles 1.1, KHR_gaussian_splatting + _compression_spz_2), no Cesium ion involved
+Source splat trained in Brush (10k steps, ~501k splats, 3 SH bands)
+I can supply the tileset, the ×8-amplified variant, and the render logs if they would help.
+Activity
+j9liu
+added
+bugSomething isn't workingSomething isn't working
+needs triageNew issues in need of triage to determine reproducibility, scope, and urgencyNew issues in need of triage to determine reproducibility, scope, and urgency
+on Sep 2, 2026
+j9liu commented on Sep 2, 2026
+j9liu
+on Sep 2, 2026
+Collaborator
+More actions
+Hi @DarkHorseConsulting, thanks for the bug report! We'd appreciate if you could share some sample data that exposes these issues, and screenshots of what you're seeing. Otherwise we won't have a good way to triage this bug :(
+DarkHorseConsulting commented on Sep 2, 2026
+DarkHorseConsulting
+on Sep 2, 2026
+Author
+More actions
+Thanks @j9liu — sample data and screenshots below.
+Everything here comes from one run, one scene, one camera pose, re-tiled three ways, so the only variable is the SH content. Dataset is a small building exterior of our own (~49k splats in the tile attached); no third-party or client content, so it is fine to share.
+Screenshots — same pose, three SH variants
+#
+tileset
+expected
+rendered
+01_render_sh3_normal.png
+--sh 3 (baseline)
+—
+—
+02_render_sh0_stripped.png
+--sh 0, bands removed entirely
+visibly flatter
+max Δ 1/255 vs baseline
+03_render_sh_band1_x8.png
+every f_rest_* × 8 (band-1 mean |c| 0.039 → 0.31, a ~40-level swing)
+obvious
+max Δ 2/255 vs baseline
+In all three comparisons 0.000 % of pixels differ by more than 8 levels. Removing the SH entirely and amplifying it 8× produce the same image as the baseline, to within noise.
+Sample data — the amplification is present in the shipped tile
+Two matched tiles, same tile ID, from the baseline and ×8 tilesets — in cesium-1884-tiles.zip, since GitHub will not take a bare .glb:
+tile_10_77__sh3_normal.glb (2.1 MB)
+tile_10_77__sh_band1_x8.glb (2.9 MB)
+Both carry 49,037 splats. Decoding the SPZ SH block out of each — gunzip bufferView 0, take the trailing n × 45 bytes, read as uint8 − 128 — gives:
+```
+tile_10_77  sh3 normal : mean |SH-128| =  3.89
+tile_10_77  band1 x8   : mean |SH-128| = 31.08     (= 3.89 x 8, as intended)
+```
+So the 8× amplification is verifiably in the bytes that reach the renderer, and the rendered frame still moves by 2/255. That is the whole bug in two files: the data changes by 8×, the image does not change at all.
+Environment
+Cesium for Unreal v2.29.0
+Unreal Engine 5.8.1, Linux
+Headless -game + Movie Render Queue (-MoviePipelineConfig), NVIDIA GTX 1660, driver 555.58.02
+Tiles produced by our own PLY → 3D Tiles (KHR_gaussian_splatting, SPZ) path
+To reproduce
+Load either tileset, place the camera at the pose in the screenshots.
+Render both. They will match to within 2/255.
+If it helps, swapping only the .glb between the two runs is enough — no retiling needed.
+Also available
+If the single tile pair is not enough to triage, I still have the three complete matched tilesets from this run (--sh 3 56 MB, --sh 0 23 MB, band-1 ×8 76 MB) and the source PLYs. Say the word and I will arrange a transfer in whatever form suits you.
+The updatePerSplatData allocation-stride point from the original report still stands and is unrelated to this; happy to file it separately if you would prefer it tracked on its own.
+cesium-1884-tiles.zip
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+bugSomething isn't workingSomething isn't workingneeds triageNew issues in need of triage to determine reproducibility, scope, and urgencyNew issues in need of triage to determine reproducibility, scope, and urgency
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

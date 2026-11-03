@@ -1,0 +1,1211 @@
+GPU Data Access on Complex Geometries for
+D3Q19 Lattice Boltzmann Method
+Gregory Herschlag
+Seyong Lee and Jeffrey S. Vetter
+Amanda Randles
+Departments of Biomedical Engineering Computer Science and Math Division Department of Biomedical Engineering
+Duke University
+Oak Ridge National Laboratory
+and Mathematics, Duke University
+Durham, North Carolina 27708-0281
+Oak Ridge, Tennessee 37831
+Durham, North Carolina 27708-0281
+Email: amanda.randles@duke.edu
+Email: lees2@ornl.gov, vetter@ornl.gov
+Email: gjh@math.duke.edu
+Abstract—GPU performance of the lattice Boltzmann method
+(LBM) depends heavily on memory access patterns. When LBM
+is advanced with GPUs on complex computational domains,
+geometric data is typically accessed indirectly, and lattice data
+is typically accessed lexicographically in the Structure of Array
+(SoA) layout. Although there are a variety of existing access
+patterns beyond the typical choices, no study has yet examined
+the relative efficacy between them. Here, we compare a suite of
+memory access schemes via empirical testing and performance
+modeling. We find strong evidence that semi-direct addressing is
+the superior addressing scheme for the majority of cases examined: Semi-direct addressing increases computational speed and
+often reduces memory consumption. For lattice layout, we find
+that the Collected Structure of Arrays (CSoA) layout outperforms
+the SoA layout. When compared to state-of-the-art practices,
+our recommended addressing modifications lead to performance
+gains between 10-40% across different complex geometries, fluid
+volume fractions, and resolutions. The modifications also lead to
+a decrease in memory consumption by as much as 17%. Having
+discovered these improvements, we examine a highly resolved
+arterial geometry on a leadership class system. On this system
+we present the first near-optimal strong results for LBM with
+arterial geometries run on GPUs. We also demonstrate that
+the above recommendations remain valid for large scale, many
+device simulations, which leads to an increased computational
+speed and average memory usage reductions. To understand these
+observations, we employ performance modeling which reveals
+that semi-direct methods outperform indirect methods due to a
+reduced number of total loads/stores in memory, and that CSoA
+outperforms SoA and bundling due to improved caching behavior.
+The lattice Boltzmann method (LBM) is increasingly being
+used to study problems in computational fluid dynamics. LBM
+is attractive due to its computational simplicity, which allows
+for large scale parallel implementations that exhibit favorable
+strong and weak scaling properties [2], [11], [30], [38]–[41].
+LBM has enabled the first solutions of full body arterial
+flows [40] and the possibility of porous media simulations
+at unprecedented scales [30].
+LBM updates each lattice point with the same set of rules,
+and this single instruction, multiple thread (SIMT) algorithm is
+suited for acceleration with graphics processing units (GPUs).
+There is a significant quantity of work implementing LBM
+on GPUs, and many of these studies consider dense cubic
+geometries in which all lattice positions are fluid points (e.g.,
+[9]–[11], [17], [18], [22], [23], [34]–[36], [42], [50]). A few
+studies using GPUs examine problems involving complex
+geometries, where the lattice points within a computational
+bounding box may be either fluid or solid; complex geometries
+include the examples of arterial flows and porous media
+simulations mentioned above [2]–[5], [30], [32], [43].
+There are a variety of memory storage techniques to track
+both geometric information and the data at each lattice point.
+For dense, cubic geometries, direct addressing schemes are
+universally employed and studied. For complex domains,
+however, the strategy for memory storage may influence both
+the performance and memory consumption of the algorithm;
+this fact was demonstrated for LBM on CPUs in [29]. There
+is no corresponding study that examines the relative efficacy
+of memory storage techniques for LBM on GPUs.
+We begin such a study by examining the computational
+cost of different data storage strategies for solving LBM on
+complex geometries with GPUs. To track geometric data, we
+analyze direct, semi-direct, and indirect addressing schemes,
+along with several other schemes that we classify as locallydirect methods. Lattice data is stored according to the ordering
+of the lattice points, and the layout of the data. In terms of
+ordering, we analyze lexicographic and two-grid ordering. In
+terms of layout, we analyze the standard SoA layout, bundling
+[29], and collected SoA layout (CSoA) [6].
+We find strong evidence that semi-direct addressing is
+superior for arterial and porous media geometries that use
+LBM, improving computational speed and reducing memory
+consumption; in comparison to indirect addressing schemes,
+semi-direct schemes improve computational speed by 5-20%
+over the majority of examined geometries and across different devices. We determine that the CSoA memory layout
+consistently provides computational acceleration with minimal
+coding effort and negligible memory increase; in comparison
+to SoA, CSoA improves computational speed by 5-20% over
+the majority of examined geometries.
+The above work is valid for a single GPU, however large
+scale simulations may require many devices working in parallel. We implement the semi-direct and indirect addressing
+schemes along with both SoA and CSoA layouts on the leadership class Titan supercomputer. Our code base validates that
+the performance gains and memory reductions are consistent
+for computations that employ multiple GPUs. Our code is also
+the first to (i) show near-optimal strong scaling for arterial
+geometries when employing LBM on GPUs, and (ii) utilize a
+communication scheme to allow for semi-direct methods both
+to maintain their accelerated computational speed and to scale
+effectively to many-GPU computations.
+The mechanisms of the performance gains are revealed with
+performance modeling. Our results are surprising considering
+that currently indirect addressing and SoA layouts are most
+heavily utilized in practice.
+I. T HE L ATTICE B OLTZMANN M ETHOD
+In the current work, we consider the D3Q19 lattice scheme,
+in which the spatial lattice is cubic and the local velocity
+distribution is discretized into Q = 19 discrete velocities. For
+the collision operator, we employ the Bhatnagar, Gross and
+Krook (BGK) collision operator [7]. For boundary conditions
+we use half-way bounce back [51]. We update resulting
+stencil computation for D3Q19 with the pull method (stream
+occurs before collision within the kernel; e.g., [17], [42])
+which typically has superior performance to the push method
+(collision occurs before stream within the kernel) on GPUs.
+For more details on LB methods, see [47].
+II. DATA STORAGE SCHEMES
+There are three primary issues in storing data for LBM: (i)
+how to order the lattice points into a one dimensional memory
+space, (ii) how to store and access the Q elements of the
+distribution, and (iii) how to retain geometric information. We
+denote these issues as ‘(memory) ordering,’ ‘(memory) layout,’
+and ‘(memory) addressing,’ respectively.
+A. Memory ordering
+To store information on a collection of two or three dimensional lattice points, lattice points must be ordered in
+memory along a single dimension. The standard ordering is
+lexicographic (dictionary order) in which consecutive coordinate values are compared to decide the order. For example,
+the lattice point (1, 2, 3) precedes the point (3, 2, 1) in any
+lexicographic ordering in which the x coordinate is compared
+before the z coordinate. Conversely, (1, 2, 3) is preceded by
+(3, 2, 1) in any lexicographic ordering in which the z coordinate is compared before the x coordinate. Lexicographical
+ordering is the predominant method; often the z-coordinate is
+the first coordinate examined and the x coordinate is the last.
+In addition to lexicographical ordering, lattice points may be
+ordered by a multi-grid scheme. Although less common, this
+ordering has been employed by the HemeLB project [31] with
+a two-grid approach. In this approach, a coarse grid is given
+a width of b lattice points and the fine grid is required to have
+a width of one lattice point. Points are ordered according to
+the coarse grid location lexicographically (cubes of side length
+b); lattice points within the same coarse grid block are locally
+lexicographically ordered (see the regular locally-direct row
+in Figure 1). More-than-two-multi-grid orderings have also
+been employed. The most common is an oct-tree [13], [19],
+Lattice
+Positions
+Addressing
+Direct
+Semi-direct
+Indirect
+reg. Loc.-dir.
+Fiber
+(ir. Loc.-dir.)
+White - fluid
+Gray - solid
+Ordering
+Neighbor lookup example:
+(Position to Index) finding P3 =(3,0) from P10 =(2,1)
+P10x +êx +Mx (P10y -êy )=P3
+9 10 11 12 13 14 15 16
+1 2 3 4 5 6 7 8
+2
++1 +8× (1
+-1 )=3
+SD[P10x +êx +Mx (P10y -êy )]=P3
+SD[2
++1 +8× (1
+-1 )]=3
+6 7 x x x x 8 9
+1 2 3 x x x 4 5
+I[P10 ,(êx ,-êy )] = P3
+I[7, (1, -1 )] = 3
+Blocks addressed indirectly
+3 4 7 8 x x 11 12
+B
+B
+x
+B
+1 12 5 26 x x 9 310
+or semi-directly
+Iy [P10 ,-êy ]+êx = P2 +êx = P10
+6 7 8 x x x 9 10
+1 2 3 x x x 4 5
+Iy [3 ,-1 ]+1 = 2 +1 = 3
+P9 P10 P11 P12 P13 P14 P15 P16
+P1 P2 P3 P4 P5 P6 P7 P8
+Fig. 1. To exemplify the considered addressing schemes, examples are
+provided for a D2Q9 lattice scheme. An 8×2 (Mx ×My ) lattice grid is labeled
+by position Pi , and fluid/solid points are specified by grey scale. All orderings
+(middle column) are lexicographic except for the regular locally-direct scheme
+(reg. Loc.-Dir.) which has two-grid order. An example of how each scheme
+accesses neighbor lattice points is presented: starting from position P10 , data
+at position P3 is accessed. In the third column, the top equation displays the
+accessed position, and the bottom the memory index.
+although these schemes have not yet been implemented on
+GPUs.
+The above orderings use the same lattice ordering for the Q
+distribution elements, however there are other techniques that
+employ a different ordering for each element. For example,
+the SHIFT method [27] considers a unique ordering for each
+element of the velocity distribution. When considering the
+standard algorithmic structure of LBM on GPUs, it is unclear
+if the SHIFT method would be competitive on GPUs and
+therefore is not analyzed in the current work.
+There are also orderings that consider sets of irregular
+cuboids of lattice points that cover the geometry of interest:
+Points are lexicographically ordered within each cuboid [13];
+similar to the multi-grid ordering, lattice points are locally
+lexicographically ordered within the coarse blocks. We explore
+one such schemes in the fiber addressing scheme mentioned
+below (see Section II-C4).
+B. Memory layout
+Historically, there are two primary ideas for laying out the
+Q elements of distribution data in memory. The first is called
+the Array of Structures (AoS) in which the distribution data at
+each node is stored in a contiguous chunk of memory and these
+contiguous chunks are stored adjacently. The second is referred
+to as Structure of Arrays (SoA) in which Q arrays store one of
+the Q elements of the distribution for each lattice point; these
+Q arrays are stored adjacently (see Figure 2). Given the lth
+ordered lattice point of NL lattice points, the qth distribution
+element of this point will be stored at memory location
+g(l,q) = l × Q + q,
+for AoS, and
+(1)
+g(l,q) = q × NL + l,
+for SoA.
+(2)
+SoA takes advantage of how GPUs read from memory,
+allowing for contiguous memory accesses along a warp when
+either reading within collide (during push) or writing within
+stream (during pull); SoA is therefore the standard layout on
+GPUs (e.g., [2]–[5], [10], [11], [17], [18], [22], [23], [32],
+A system of 4 lattice points to be addressed in memory:
+Layout
+C. Memory addressing
+How addressed in memory
+AoS
+SoA
+CSoA (stride 2)
+Bundling (stride 2)
+...
+...
+...
+...
+Fig. 2. A system of four lattice points is laid out in memory with four different
+schemes. CSoA and Bundling are demonstrated with stride lengths of 2. If
+a stride length of 4 was used, CSoA would have been identical to SoA. For
+bundling, all vectors pointing upwards appear before the dotted black line.
+[34]–[36], [42], [50]). With the SoA layout, varying the index
+q requires consecutive memory reads spaced by NL positions
+for each thread. To reduce this spacing while maintaining the
+advantage of using SoA on a GPU, we consider a type of
+addressing that holds smaller sub-collections of the lattice in
+the SoA framework. This addressing scheme has been deemed
+Collected Structure of Arrays (CSoA) [6]; it has also been
+called Array of Structure of Array (ASA [46] or AoSoA [48]),
+and tiled-AoS [24]; we will use the notation CSoA in this work
+as it is specific to LBM. CSoA necessitates choosing a stride
+length, s, for the length of the sub-collections. Given s, the
+qth element of a distribution at the lth ordered lattice point is
+located at
+g(l,q) = (bl/sc × Q + q) × s + l mod s.
+(3)
+To achieve aligned reads or writes on the GPU, s must be a
+multiple of 32 for single precision floating point numbers and
+16 for double precision. In the present work s = 64 (see Figure
+2 for an example with s = 2). If s = 1, CSoA is equivalent to
+AoS, and, if s = NL , CSoA is equivalent to SoA. Therefore
+CSoA is a generalized layout that includes both AoS and SoA.
+CSoA requires storage space for dNL /se × s × Q pieces of
+data. In typical applications NL
+s, and additional required
+memory is negligibly small.
+Another notable memory layout is called bundling [29],
+[30]. Bundling groups subsets of distribution elements and
+stores them in contiguous groups; in existing applications
+three groups of distribution elements are formed: those with
+positive, negative, or zero z direction. Originally applied on
+CPUs, bundling laid out each group in the AoS-like structure,
+however recently an adaptation was made in [30] which is
+similar to laying out each bundled subgroup in a CSoA layout
+with a stride length of s = 16. For example, with Q = 19,
+there are 5 distributional velocities with positive z component.
+An index representing one of these directions qz+ ∈ {i}4i=0 at
+the lth ordered node is accessed in the corresponding group
+array at location
+g(l,qz+ ) = (bl/16c × 5 + qz+ ) × 16 + l mod 16.
+(4)
+Velocities in different subgroups are still far away in a linear
+memory space with bundling.
+1) Direct addressing: Direct addressing tracks geometric
+information by embedding a computational domain in a (minimal) bounding box. All lattice points (both fluid and solid)
+within the embedding are ordered. Including the solid lattice
+points allows for implicit look-ups: For example, in a lexicographically ordered cuboid with dimensions (M, N, O), the
+lattice point with relative position (i, j, k) is stored in ordered
+position l = (kN + j)M + i. Looking up neighboring lattice
+positions is also done implicitly: continuing the example, one
+neighbor in the slowest lattice dimension has ordered position
+l = ((k + 1)N + j)M + i. With only the three lattice
+dimensions, one may map between the lattice geometry and
+location in memory space (for a 2D example, see Figure 1).
+For a given bounding box, the amount of memory needed
+for direct addressing is
+NG M N OQ × sizeof(FLOAT) bytes,
+(5)
+where sizeof(FLOAT) gives the number of bytes used by a
+floating point number, and NG is the number of grids used
+to store lattice data (in the current work NG = 2, i.e., an
+AB pattern). In complex geometries, fluid volume fractions
+of a minimal bounding box may be small. In many arterial
+geometries, for example, a minimal bounding box has a fluid
+volume fraction of 2%-10% – the majority of stored lattice
+information is superfluous, and high resolution simulations are
+not feasible due to memory constraints. Furthermore, direct
+addressing at small fluid volume fractions slows performance
+as GPU warps may have only a few activated threads. To
+avoid storing unneeded data and to activate GPU warps on a
+higher fraction of threads, a variety of alternative addressing
+schemes have been utilized, and we discuss these schemes for
+the remainder of this section.
+2) Indirect addressing: Indirect addressing abandons implicit addressing and instead tracks local geometry by maintaining a neighbor-list for each fluid point [8], [37], [44].
+Each fluid point requires memory storage for the Q elements
+of the distribution along with Q − 1 memory addresses of
+the neighboring lattice points (see Figure 1). The collection
+of all neighbor lists is often referred to as a connectivity
+matrix (with dimensions NF × (Q − 1); NF is the number of
+fluid lattice points in the computational domain). Neighborlists are ordered based on an enumeration of the position
+vectors in the particle distribution and have memory layout
+identical to the fluid list (AoS, SoA, CSoA, or bundled),
+ensuring that consecutive GPU threads may read neighbor data
+in consecutive memory locations. If a particular direction does
+not have a fluid neighbor, an out of bounds index may be used.
+Typical implementations lexicographically order the fluid
+points [2]–[5], [32], [33]. To the best of our knowledge,
+indirect addressing ordered lexicographically is the only sparse
+domain decomposition that has been applied to LBM on
+GPUs, with two exceptions in semi-direct addressing mentioned below.
+Memory consumption of indirect addressing is dependent
+on the fluid volume fraction within the minimal bounding
+box. If p percent of a minimal bounding box (with dimensions
+(M, N, O)) is fluid, memory consumption is approximately
+
+pM N O NG Q×sizeof(FLOAT)+(Q−1)×sizeof(INT) bytes, (6)
+where the interior sum represents the distribution data and
+the connectivity data respectively. Memory consumption scales
+linearly in p, with zero memory consumption as p → 0.
+3) Semi-direct addressing: Semi-direct addressing uses implicit addressing while keeping the memory consumption
+low by only storing distributions at fluid nodes. On CPUs,
+this compression is achieved with a directly addressed array
+of pointers which point to structures containing distribution
+information at fluid nodes, and to the null pointer at non-fluid
+nodes [28].
+There are only two works that we know of that utilize semidirect addressing on a GPU [1], [33]; the former uses the
+original approach for CPUs, whereas the latter lays out the
+pointers and data contiguously in memory. The first method
+is more flexible, whereas the latter is more computationally
+efficient due to the ability to align reads or writes.
+In the present work, we utilized the approach of [33] by
+contiguously storing all fluid lattice data in a single array
+with a given layout and order. To encode the connectivity
+data, a directly addressed vector of integers stores the memory
+location of each lattice point within the sparse contiguous
+collection of fluid distributions (see Figure 1). If the lattice
+point with position (i, j, k) is not a fluid point, then an outof-bounds index is stored in this directly addressed integer
+vector. The directly addressed vector is used to determine the
+memory locations of neighboring lattice points. To encode a
+map from the fluid data to directly addressed integer vector, a
+third array is kept that associates the integer (kN + j)M + i
+with each fluid point at position (i, j, k).
+Memory consumption of semi-direct addressing depends on
+the fluid volume fraction p and will consume approximately
+
+M N O (1+p)sizeof(INT)+(pNG Q)sizeof(FLOAT) bytes, (7)
+where the first term in the sum holds the directly addressed
+memory locations and the map from the indirect to direct
+index, and the second term holds the stored lattice data.
+4) Locally-direct addressing: We now introduce a class of
+addressing schemes that have not been previously explored
+in the context of LBM on GPUs. The idea is to break the
+irregular domain into a collection of cuboids; each cuboid is
+directly addressed, and data structures are used to determine
+the relationship between cuboids. The cuboids may either be
+of identical sizes and placed on regular intervals, or may have
+irregular sizes and placed arbitrarily.
+Regular locally-direct addressing: Regular locally-direct addressing relies on subdomains having predictable relationships.
+One natural idea is presented in [16], [31], in which the authors
+utilize a two-grid approach for CPUs. The coarse mesh is
+indirectly addressed with a well defined connectivity matrix.
+If a single lattice point within a coarse mesh location is a fluid
+point, then all fine lattice point data within the structure is kept
+and directly addressed; otherwise no lattice data is stored. It
+is also possible to address the coarse mesh semi-directly (see
+Figure 1).
+We choose to only examine a 3D thread block that spans
+a full coarse lattice block, so that the threads within a block
+access each locally direct subdomain. We restrict the domain
+to a cubic coarse mesh with a stride of b lattice points in
+all directions (in [31] CPUs were examined with b = 2 and
+b = 8). On GPUs, b = 2 would contain 8 threads per coarse
+lattice site, which would not span a full warp. The choice b = 4
+would lead to 64 threads per block. The choice b = 8 leads
+to 512 threads per block which is reasonable, but large. Other
+choices of thread block size would either not be a multiple of
+32 (meaning we would not align with warps) or would be too
+large. Due to these considerations, we only examine the case
+of two layer grids with b = 4.
+Memory consumption of two-gird regular locally-direct
+addressing depends on the number of coarse mesh nodes to
+be addressed. Describing the fluid volume fraction of coarse
+mesh as pM G , simulations require either
+pM G NG M N OQ×sizeof(FLOAT)
++(Q−1)pM G Mc Nc Oc ×sizeof(INT), or
+pM G NG M N OQ×sizeof(FLOAT)
++(1+pM G )Mc Nc Oc ×sizeof(INT) bytes,
+(8)
+(9)
+depending on if we use an indirect, or semi-direct method for
+the coarse mesh (respectively); Mc , Nc , and Oc represent the
+padded dimensions for the coarse space (e.g., Mc = dM/be).
+In the highly resolved case, pM G ≈ p and Mc ≈ M/b; this implies that regular locally-direct methods may use significantly
+less memory for fine resolutions.
+Irregular locally-direct addressing: Cuboid subdomains
+need not have regular relationships. An example is illustrated
+in [13] where the authors use irregular domain decomposition
+to place directly addressed cuboids within subdomains to cover
+all fluid points; the subdomains are chosen to balance between
+minimizing fluid volume fractions while maintaining large
+collections of nodes to be directly addressed together. The
+authors advance the algorithm in parallel on CPUs. While
+irregular locally-direct addressing is promising for applications
+using GPUs, developing an algorithm to dynamically divide
+the domain into subdomains with high volume fraction is
+beyond the scope of this work
+Instead, we examine a fiber based addressing that is a
+type of locally-direct addressing. In the fiber addressing,
+subdomains are contiguous regions that have the same indices
+in two directions; this is to say that we consider collections of
+points with identical values of j, k in the y and z directions,
+and are contiguous. Each subdomain is linearly addressed from
+smallest to largest index i in the x direction, making the fibers
+locally directly addressed with a lexicographic order.
+Each fiber must be able to access a given neighboring fiber.
+To achieve this, a four dimensional neighbor list is kept for
+each lattice point – each lattice point, located at (i, j, k) has
+access to the fluid data at positions (i, j ±1, k) and (i, j, k±1).
+The neighbors (i ± 1, j, k) are stored directly by incrementing
+or decrementing the index of the memory location by one.
+
+pext M N O 2Q×sizeof(FLOAT)+4×sizeof(INT) bytes,
+D:I
+I:I
+SD:I
+rLD.I:I
+rLD.SD:I
+iLD.f:I
+1.0
+D. Comparison of Memory Consumption
+One of the major concerns in large scale, realistic, LBM
+computations on GPUs is memory consumption. To approximate memory consumption for each of the above addressing
+schemes, we must approximate pext and pM G over arbitrary
+fluid domains; in general pext > p and pM G > p, but on a
+highly resolved complex domain pext ≈ pM G ≈ p. Taking
+this assumption of high resolution provides an estimate for
+optimal memory consumption, and with it we examine the relative memory consumptions of the above addressing schemes
+against indirect addressing. Indirect addressing is chosen to be
+the standard with which to compare other schemes because,
+on complex domains, it is used most prevalently. We plot the
+ratio of memory consumptions with each addressing scheme
+against the memory consumption of indirect addressing as a
+function of fluid volume fraction in Figure 3 (i.e., equations 5
+and 7–10 against equation 6).
+Locally direct schemes are the least memory intensive. Over
+the majority of fluid volume fractions, locally direct schemes
+lead to memory savings of between 15-20% when compared
+with indirect addressing. Semi-direct addressing consumes less
+memory than indirect addressing for p > (Q − 2)−1 ; for Q =
+19, this corresponds to p ≈ 6%.
+E. Description of tested kernels
+SD/I transition at (Q-2)-1
+0.9
+0.8
+0.001
+(10)
+where pext is the volume fraction of the fluid lattice points
+together with solid nearest neighbors. At high resolution,
+pext ≈ p. When compared to indirect addressing, this fiber
+method saves (Q − 5) × sizeof(INT) bytes per fluid node.
+Both regular and irregular locally-direct addressing methods
+comprise a huge number of possible addressing schemes. The
+described methods only begin to examine the possibilities
+within these schemes.
+0.01
+0.1
+Fluid volume fraction
+1
+Fig. 3. The plot displays the ratio of optimal memory consumption between
+direct to indirect (D:I), indirect to indirect (I:I), semi-direct to indirect (SD:I),
+regular locally-direct with coarse blocks indirectly or semi-directly addressed
+to indirect (rLD.I:I and rLD.SD:I, resp.), and irregular locally-direct with
+fibers to indirect (iLD.f:I). The assumptions made are NG = 2, pext =
+pM G = p, b = 4, and Q = 19.
+Scheme
+Reference
+D(`,S)
+[18,23,41]
+D(`,C)
+[6]
+I(`,S)
+e.g. [32]
+I(`,B)
+[30]
+SD(`,S)
+[1,32]
+TABLE I
+T ESTED GPU KERNELS THAT HAVE APPEARED IN THE LITERATURE . T HE
+SCHEME ABBREVIATIONS ARE DESCRIBED IN EQUATION 11.
+A list of previously examined kernels is given in Table I.
+For direct and regular locally-direct addressing kernels with
+two-grid ordering, the block structure on the GPU is (b, b, b)
+(with b = 4), and the grid structures are (Mc , Nc , Oc ) and
+(NC , 1, 1), respectively, where NC is the number of coarse
+grid blocks. For indirect, semi-direct, and irregular locallydirect methods, the block structure is (Bs , 1, 1) (with Bs = 64)
+and the grid structure is (dNf /Bs e, 1, 1). All kernels are run
+at double precision.
+The choice of addressing scheme is not enough to ensure
+optimal performance, and certain optimization strategies must
+be employed for CUDA kernels (e.g., [33]). Our optimization
+strategies are consistent across kernels. To test their efficacy,
+we examine the D(`,S) scheme on a 1283 lattice at 100%
+fluid volume fraction and double precision. We find it runs
+at 99.2% of the measured memory bandwidth and 68.9%
+of the theoretical memory bandwidth at 100% fluid volume
+fraction. To calculate the observed memory bandwidth, we use
+the method from [49] and approximate the bandwidth to be
+2 · Q · S106 · sizeof(FLOAT) bytes s−1 , where S is the speed in
+mega-fluid lattice updates per second (MFLUPS; s = 1659.9
+in the above test; measured bandwidth was ).
+III. G EOMETRIC TEST SUITE
+We examine a suite of different addressing schemes. In order
+to describe memory layout we adopt the convention
+{Addressing}({ordering},{layout})
+Relative Memory Consumption
+To access other neighbors, multiple neighbor-lists are linked.
+One consequence of this addressing scheme is that the domain
+must be extended to include all non-fluid lattice points that
+have a fluid neighbor. The reason for this extension may be
+seen through example: if the lattice point at (i, j, k) requires
+data at (i ± 1, j + 1, k), but the lattice point (i, j + 1, k) is not
+a fluid point, the above extension there allows access data at
+(i ± 1, j + 1, k) (see Figure 1).
+Memory consumption for fiber addressing is
+(11)
+where addressing may be D, I, SD, rLD.I, rLD.SD, or iLD.f
+for direct, indirect, semi-direct, regular locally-direct with
+coarse indirect, regular locally-direct with coarse semi-direct,
+or irregular locally-direct with fibers, respectively; ordering
+may be ` or 2G for lexicographic or two-grid ordering,
+respectively; layout may be S, C, or B for SoA, CSoA, or
+bundling, respectively.
+We examine two examples of complex domains for real
+world LBM applications – porous media [30], [43] and arterial
+flows [2], [3], [38]. We also examine an embedded cube which
+was the test geometry used in [29].
+To test on a real porous media data set, we use the 10243
+data provided by [20], [21]. Each data position holds an 8bit grey scale value – larger values are more likely to be
+solid and smaller values more likely to be fluid. To distinguish
+fluid points from solid points, we set a threshold value: All
+data points above the threshold are considered to be solid (for
+an example see Figure 4). For grids that differ in size from
+D(`,S) I(`,C) SD(`,C) rLD.I(2G,C) iLD.f(`,S)
+373
+1337
+1485
+423
+361
+TABLE II
+F OR EACH ADDRESSING SCHEME , KERNELS WITH THE HIGHEST AVERAGE
+PERFORMANCE ARE DISPLAYED . K ERNEL PERFORMANCE , IN MFLUPS,
+IS AVERAGED OVER THE RANGE OF POROUS MEDIA VOLUME FRACTIONS .
+Addressing
+Avg. MFLUPS
+Fig. 4. We present the arterial (aortic) geometry (left) and a section of the
+porous media geometry (right). The porous media geometry has side lengths
+that are 1/16 of the full geometry; solid/fluid points are distinguished at a
+threshold value of 204.
+Porous Media
+1600
+SD(ℓ,C)
+SD(ℓ,B)
+1400
+I(ℓ,C)
+I(ℓ,B)
+SD(ℓ,S)
+1200
+I(ℓ,S) I(2G,S)
+1000
+I(ℓ,S)
+Indirect
+Semi-direct
+Embedded Cube
+SD(ℓ,C)
+1600
+SD(ℓ,B)
+I(ℓ,C)
+SD(ℓ,S)
+1400
+I(ℓ,B)
+I(ℓ,S)
+1200
+I(ℓ,S)
+0.5
+I(2G,S)
+Indirect
+1.0
+Semi-direct
+0.5
+1.0
+Fig. 5. Volume fraction vs mega-fluid lattice updates per second (MFLUPS)
+is plotted for a suite of pull kernels run at double precision. The minimal
+computational cuboid is fixed to be 1283 . In the semi-direct panels, we include
+the standard I(`,S) kernel for direct comparison. The performance of direct
+and locally direct methods decays as volume fraction decreases; these methods
+are typically outperformed by semi-direct and indirect and are not shown.
+10243 , weighted averages determine the grey scale value at
+each lattice point. Varying the threshold value changes the
+fluid volume fraction. When considering an embedded cube
+which represents an idealized porous media, the size of the
+cube determines the fluid volume fraction.
+To test on a realistic arterial flow, we consider an aorta with
+data taken from [14], [15] (see Figure 4).
+A. Hardware
+We examine single GPU results on an NVIDIA Tesla P100
+GPU and an NVIDIA Tesla K40 GPU; results on the K40
+are qualitatively similar, with the exception that GPU kernels
+using no shared memory kernels tend to outperform kernels
+that use shared memory; all kernels were tested on the K40
+with the exception of the bundling layouts for semi-direct
+addressing, which was not adapted for non-shared memory.
+Multi-GPU tests are performed on the Titan supercomputer at
+ORNL, which uses NVIDIA Tesla K20x GPUs. All devices
+have ECC enabled and utilized standard clock speeds.
+IV. S INGLE GPU R ESULTS
+Varying volume fraction: We examine performance over
+a wide range of fluid volume fractions over the embedded
+cube and porous media geometries. The minimal bounding
+box is fixed to be a lattice grid of 1283 . The computational
+performances on the Tesla P100 GPU are presented for a
+variety of indirect and semi-direct addressing schemes in figure
+5; ten time steps are taken over each tested volume fraction and
+kernel. We present kernels using shared memory only because
+they outperform kernels without shared memory on the P100.
+Surprisingly, semi-direct addressing outperforms indirect
+addressing by roughly 20% over most volume fractions and
+both geometries; this is unexpected as the two methods were
+observed to perform similarly on CPUs [29]. In fact, the
+SD(`,C) kernel preforms nearly identically to the optimized
+direct kernels, achieving a memory bandwidth of 97.3%
+of the measured device bandwidth. For both indirect and
+semi-direct schemes, the CSoA layout (I(`,C) ; SD(`,C) ; stride
+length 64) outperforms both SoA and bundling layouts (I(`,S) ;
+SD(`,S) ; I(`,B) ; SD(`,B) ). The performance gain depends on
+the geometry and addressing choice, and varies between 5
+and 20% over SoA. Lexicographic ordering is also found to
+be slightly superior to two-grid ordering when considering
+indirect addressing (I(`,S) ; I(2G,S) ).
+Direct and locally direct schemes have competitive performance for large fluid volume fractions, but their performance
+decays as fluid volume fraction shrinks. For the embedded
+cube, indirect addressing outperforms direct and locally-direct
+schemes for volume fractions below 30%; for the porous
+media, indirect addressing outperforms direct and locallydirect schemes for volume fractions below 94%. Above these
+volume fractions, the direct and locally direct methods perform
+quite well; however, below these volume fractions the performance drops precipitously. To illustrate this drop, average
+performances over the range of fluid volume fractions are
+presented in Table II for the porous media geometry.
+Varying resolution: The above tests fix a resolution and
+change volume fraction. The choice of resolution, however,
+may have a large impact on performance. To test the effect
+of grid resolution, we examine the aorta with grid spacings
+ranging from 1.57mm to 0.196mm, and the porous media on
+grid spacings ranging from 117.2µm to 29.3µm. The aorta has
+a fluid volume fraction of around 2.2%. The porous media uses
+a variable threshold to ensure a 20% fluid volume fraction over
+all grid resolutions. We plot computational performance with
+respect to grid resolution in Figure 6.
+In both geometries, indirect addressing schemes provide
+more consistent performance with respect to semi-direct
+schemes; however, semi-direct methods typically outperform
+indirect addressing. Indirect addressing outperforms semidirect addressing only at low resolution in the aorta. Furthermore, CSoA is found to be the superior layout.
+Regular locally-direct methods (not shown in Figure 6)
+become competitive with indirect methods at the two lower
+grid spacings in the aorta. However, for all other cases, locallydirect addressing methods are significantly outperformed by
+200
+Aorta
+1600
+500
+Grid spacing (μm)
+1000 2000 200
+500
+1000 2000
+SD(ℓ,C)
+I(ℓ,C)
+1400
+SD(ℓ,S)
+1200
+1000
+800
+1600
+I(ℓ,S)
+I(ℓ,S)
+I(2G,S)
+I(ℓ,B)
+Indirect
+SD(ℓ,B)
+Semi-direct
+Porous Media
+SD(ℓ,C)
+SD(ℓ,B)
+SD(ℓ,S)
+I(ℓ,C)
+I(ℓ,B)
+1400
+I(ℓ,S)
+I(ℓ,S)
+1200
+I(2G,S)
+50
+100
+200
+50
+Grid spacing (μm)
+100
+200
+Fig. 6. Resolution vs. performance is examined on the aorta (top) and porous
+media with 20% fluid volume fraction (bottom). The performance of indirect
+addressing (left) is more consistent than semi-direct addressing (right); however, semi-direct methods typically outperform indirect methods. Direct and
+locally direct methods are typically outperformed by the displayed addressing
+schemes; however, regular locally direct methods become competitive with
+indirect schemes at low grid spacing (not shown).
+both semi-direct and indirect addressing.
+Grid orientation effects: The orientation of the geometry
+may have an effect on overall performance, as rotations may
+change the way and magnitude of the contiguous lattice points.
+To test this, we have investigated the effect of the orientation
+of the grid on an aorta and cylinder. Although there are minor
+effects, performance is robust with respect to orientation.
+V. M ULTIPLE -GPU R ESULTS
+We next confirm that the performance gains found on
+single GPUs scale when using multiple GPUs. We adapt the
+HARVEY code base [41] to run on GPUs with pull algorithms
+with four separate kernels for the memory schemes I(`,S) ,
+I(`,C) , SD(`,S) , and SD(`,C) . HARVEY is an LBM fluid
+solver designed for large scale blood flow simulations, and
+has been shown to scale well on arterial geometries on over
+1.6 million MPI tasks of the IBM Blue Gene/Q supercomputer
+[39], [40]. To explore massive parallelization, the GPU adapted
+version of HARVEY was run on the Titan super computer at
+ORNL which consists of 18688 nodes, each equipped with an
+NVIDIA K20x GPU per node. Shared memory is not used
+because we have found that using it is inferior on the Kepler
+architectures.
+Implementation of the indirect addressing scheme is similar
+to that of [30]. For semi-direct addressing, the directly addressed array is extended to include a halo, and points within
+the halo map to a second array that takes in the direction (q)
+and halo index and maps to the index of a third buffer array.
+The buffer array holds the communicated distribution data. The
+buffer array is used to communicate with MPI across GPUs.
+Communication schemes overlap with GPU kernel execution:
+In all four kernels, communication is entirely hidden when
+each GPU launches a sufficient number of threads. This is the
+first verification that semi-direct addressing has similar scaling
+properties to indirect addressing on multiple GPUs.
+To confirm the observations on a single GP hold true at
+scale, tests are examined on all four memory schemes. For
+each kernel, HARVEY is started with a resolution of 84µm
+on 8 GPUs, 42µm on 64 GPUs, and 21µm on 512 GPUs;
+for each fixed resolution, the number of GPUs is increased
+until thread latency is exacerbated due to a reduced number
+of lattice points per GPU. The I(`,C) , SD(`,S) , and SD(`,C)
+kernels all outperform the more standard I(`,S) kernel, and
+the SD(`,C) kernel outperforms all other methods. Speedup ratios are displayed in Figure 7. Utilizing the SD(`,C)
+kernel over I(`,S) increases the computational speed by 1040%. In decoupling the effect of changing addressing and
+layout, the I(`,C) , and SD(`,S) kernels both lead to typical
+performance gains between 5-20% when compared with I(`,S) ;
+however, changing to the CSoA layout generally leads to a
+larger performance improvement than changing to semi-direct
+addressing.
+The above results have favorable strong and weak scaling.
+To show this, the scaling behavior of the I(`,S) kernel over the
+considered tests is shown in Figure 8. For a fixed resolution,
+the amount of work on the GPUs decay as more devices
+are used and thus performance erodes. This is identical to
+the behavior seen in [30]. When the resolution is increased
+at a fixed number of GPUs, the simulations again approach
+optimal behavior. Other deviations from ideal scaling are
+explained by load imbalances – in Figure 8 we model the
+effect of the load imbalance by assuming the device with the
+most lattice points runs with the same MFLUPS as all other
+devices; we then determine how this load imbalance will alter
+ideal scaling away from that predicted by the 8 GPU case.
+This model demonstrates that nearly all deviation from ideal
+scaling is due to either thread latency or load imbalances. The
+favorable strong and weak scaling properties confirm that the
+performance gains of semi-direct and CSoA found on single
+GPUs hold at scale.
+In addition to performance considerations, memory consumption is an important algorithmic consideration because
+GPUs have far less available memory when compared to
+CPUs. For example, a node on Titan has a single K20x GPU
+with 6G of global memory, but has 32G of RAM. For the
+complete geometry, the aorta takes up roughly 2% of the
+volume fraction in the minimal bounding box. Therefore, when
+examining the aorta on a single device, indirect schemes will
+consume less memory (see Figure 3). When performing load
+balancing, local minimal bounding boxes for arterial systems
+tend to grow in fluid volume fraction – this means that as
+the number of GPUs increases on a fixed arterial, semidirect methods may consume less memory. To test the relative
+memory consumption, we examine the histogram of memory
+consumption with each addressing scheme over a range of
+GPUs. We find that as the number of GPUs increase, the
+average memory consumption decays – for example using 512
+GPUs provides an average memory savings of 16%, which is
+1.2
+1.0
+4
+IC:IS
+SDS:IS
+SDS:IS
+SDS:IS
+0.8
+0.6
+SDC:IS
+IC:IS
+Strong Scaling (84 μm)
+10
+Strong Scaling (42 μm)
+100
+No. GPUs
+100
+Strong Scaling (21 μm)
+103
+104
+No. GPUs
+1000
+No. GPUs
+Fig. 7. Relative speedups within the context of the strong scaling results from
+Figure 8. All ordering is lexicographic so the ` is suppressed in the subscripts.
+The resolution in each subfigure is fixed and reported for each sub-figure.
+107
+Ideal scaling
+Ideal w/ load imb.
+84 μm
+42 μm
+21 μm
+MFLUPS
+106
+Semi-dir.
+Ind.
+0.90
+0.85
+10
+3
+100
+No. GPUs
+2
+1
+10
+100
+1000
+No. GPUs
+Fig. 9. Histograms of the memory usage per GPU when using the number of
+GPUs on the x-axis under weak scaling. The inset on the upper left shows the
+overall relative memory usage between semi-direct and indirect. In all cases,
+semi-direct uses less total memory than indirect addressing. At 512 GPUs
+with the aorta resolved at 21µm, there is a memory savings of 16%, which
+is close to the optimal limit of 17% (shown as the dashed line in the inset).
+VI. P ERFORMANCE M ODELING
+105
+104
+101
+SD:I
+SDC:IS
+IC:IS
+Memory/GPU (GB)
+Performance Ratio
+0.95
+SDC:IS
+1.4
+102
+103
+104
+No. GPUs
+Fig. 8. Strong scaling results on the Titan supercomputer for the aorta
+geometry for the I(`,S) kernel. When accounting for load imbalances, we
+obtain close to ideal scaling, on up to 4096 GPUs.
+near the optimal memory savings of 17% (see Figure 9).
+A. Impact on a real world problem
+To assess the impact of the resources used on a nonidealized, real world problem, we consider a study in which
+several different stenosed aortas are subject to a variety of
+stresses, such as exercise, pregnancy or high altitudes [12].
+One hundred variations on geometry, inflow, and blood viscosity were examined in this study; using the ORNL Titan billing
+system of 30 core hours per node along with 16 cores per node,
+we estimate this work, taking place on Titan CPUs, would
+have taken 70.8 million Titan core hours. Using the empirical
+multi-GPU estimates from above, we construct a model to
+estimate the Titan core hours needed; the model assumes room
+for 3GB of memory per GPU (to account for load balance
+imperfections), assumes high fluid volume fractions for each
+subdomain, and approximates MFLUPS from the empirical,
+rather than idealized, scaling results. We estimate that using
+the I`,S kernels on the GPUs would have reduced the core
+hours on this project to 1.2 million core hours; using the
+SD`,C kernel would further reduce the core hours to 0.97
+million core hours. This means that our recommendations
+would save a total of 230,000 core hours between GPU
+implementations, a 19% reduction, due to a combination of
+reduced memory consumption and increased speed.
+To understand why semi-direct addressing with the CSoA
+layout outperforms indirect addressing with the SoA layout,
+we use performance modeling with the Aspen modeling framework [45]. Aspen (Abstract Scalable Performance Engineering
+Notation) is an open-source, domain specific language and
+toolkit for performance modeling of HPC applications and
+architectures. In this work, we use the COMPASS framework [25], one of the Aspen tools, which takes an input
+source code of an application and automatically generates
+a structured, parametrized performance model for the input
+application. Using COMPASS, we are able to quickly develop
+an Aspen application model of the kernels under investigation,
+and these generated models are used to predict memory access
+characteristics and runtime performance of the tested kernels.
+In [26], we validated the performance model for the original
+HARVEY application by comparing resource usage (e.g.,
+floating-point operations (flops), loads, stores, used memory,
+etc.) predicted by COMPASS against hardware-counter values
+measured by a PAPI tool. We also compared the predicted
+execution times by our performance model against measured
+values. To measure the actual resource usage and times,
+we compiled HARVEY with and without optimizations, and
+compared against both versions. The results showed that the
+COMPASS prediction closely follows the measured values of
+optimized versions for all three inputs, and scales similarly
+with the hardware measurements. We also validated models
+used in this work against empirical measurements, but we
+don’t include the validation results due to space limitations.
+A. Model-Based Performance Analysis
+We first investigate why semi-direct addressing significantly
+outperforms indirect addressing on the tested GPUs. In applying LBM on GPUs with double precision, the D3Q19
+algorithm is memory bandwidth bound, rather than compute
+bound. Therefore, in order to explain our results, it is crucial
+to analyze the amount of memory access required by each
+algorithm. Regular and aligned access patterns strongly affect
+Regular Loads
+Irregular Loads
+Regular Stores
+800
+400
+200
+0
+Loads
+600
+Stores
+Memory Access (MB)
+1000
+SD I
+100%
+SD I
+80%
+SD I
+60%
+SD I
+40%
+SD I
+20%
+Fig. 10. Aspen predicts the number of regular/irregular loads and stores per
+time step on the porous media geometry on the bounding box with dimensions
+1283 . The amount of regular stores and irregular loads is identical between
+addressing schemes. However, indirect addressing incurs more regular loads
+than semi-direct addressing.
+performance when utilizing the full memory bandwidth of
+GPUs. We have modified the existing Aspen resource count
+tool to distinguish irregular memory accesses from regular
+ones. Figure 10 shows the predicted memory access characteristics of the indirect addressing and semi-direct addressing for
+the porous media geometry with 1283 lattice points across
+various volume fractions. Compared to indirect addressing,
+semi-direct addressing reduces load operations. Given that
+we are memory bandwidth bound, easing the amount of data
+needed for transfer explains the speed-up. There are roughly
+15% more data transfers needed for indirect addressing scheme
+which is similar to the percent performance gain between the
+methods.
+The number of data stores/loads between CSoA and SoA
+is identical; to examine why CSoA outperforms SoA, we performed a postmortem analysis by fitting the Aspen prediction
+model into the measured execution times. Aspen reveals that
+SoA experiences a lower effective read/write bandwidth than
+CSoA. The higher effective read/write bandwidth incurred by
+CSoA indicates that the cache friendly behavior of CSoA is a
+major reason for its better performance.
+VII. C ONCLUSION
+By examining a large range of addressing schemes, we have
+systematically investigated the efficacy of memory storage and
+access choices. In nearly all examined tests, semi-direct addressing outperforms indirect addressing, and the CSoA layout
+outperforms SoA and bundling layouts. These observations
+are determined from empirical tests on single and multi-GPU
+applications on realistic geometries. In testing on multiple
+GPUs, we have demonstrated the first positive strong scaling
+results on arterial geometries at high resolutions, as well as
+validated an implementation for semi-direct communications
+schemes. In determining the reason for the semi-direct and
+CSoA performance gains, we have employed performance
+modeling that reveals semi-direct schemes reduce memory
+transfers and CSoA layouts lead to more cache friendly
+behavior.
+In terms of the cost to programmer time, switching code
+from the SoA to the CSoA layout is trivial; for comparison,
+switching from SoA to bundling maybe more labor intensive.
+Modifying existing code from indirect to semi-direct address-
+ing is labor intensive; however, the addressing schemes are of
+comparable complexity when built from scratch.
+In addition to these primary discoveries, there are a number
+of interesting tertiary findings: bundling layouts outperform
+SoA layouts and can be competitive with CSoA layouts; using
+a two grid ordering appears to only slightly decay performance
+compared to lexicographic ordering; and regular locally-direct
+schemes can have similar performance to indirect schemes,
+but only at high resolution; in these regimes, they will lead to
+significant memory reduction over other examined schemes.
+These studies have also left some paths for future research.
+Among them are the cost of using different stride lengths
+in CSoA and bundling; investigating more general irregular
+locally-direct methods such as those found in [13], or looking
+at how oct-tree addressing will effect performance on GPUs.
+Overall, our work leads to the recommendation for LBM
+practitioners that CSoA layouts should be used in favor of
+other layouts for GPUs, and that semi-direct addressing should
+be used over indirect addressing.
+ACKNOWLEDGMENT
+The authors would like to thank John Gounley, Luiz A
+Hegele Jr., Ismael Perez, and Erik Draeger for providing
+helpful discussions, insights, and critiques. Research reported
+in this publication was supported by the Office Of The
+Director of the National Institutes of Health under Grant No.
+DP5OD019876, the ORNL joint faculty program, and by the
+National Natural Science Foundation of China under Grant No.
+GS501100001809 and the Young Scientists’ Support Program
+No. GS501100001809. Compute time was supported by the
+Duke Compute Cluster and the ORNL Director’s Discretionary
+Program. The content is solely the responsibility of the authors
+and does not necessarily represent the official views of the
+National Institutes of Health. We gratefully acknowledge the
+support of NVIDIA Corporation with the donation of the Tesla
+K40 GPU used for this research.
+R EFERENCES
+[1] M. Astorino, J.B. Sagredo, and A. Quarteroni. A modular lattice
+boltzmann solver for gpu computing processors. SeMA, 59(1):53–78,
+2012.
+[2] M. Bernaschi, M. Bisson, T. Endo, S. Matsuoka, M. Fatica, and
+S. Melchionna. Petaflop biofluidics simulations on a two million-core
+system. In Hi Perform Comp, Networking, Storage and Analysis (SC),
+2011 International Conference for, pages 1–12. IEEE, 2011.
+[3] M. Bernaschi, M. Bisson, M. Fatica, S. Melchionna, and S. Succi.
+Petaflop hydrokinetic simulations of complex flows on massive gpu
+clusters. Computer Physics Communications, 184(2):329–341, 2013.
+[4] M. Bernaschi, S. Melchionna, S. Succi, and E. Kaxiras. A flexible
+high-performance lattice boltzmann gpu code for the simulations of fluid
+flows in complex geometries. Concurrency and Computation: Practice
+and Experience, 22(1):1–14, 2010.
+[5] M. Bisson, M. Bernaschi, S. Melchionna, S. Succi, and E. Kaxiras.
+Multiscale hemodynamics using gpu clusters. Communications in
+Computational Physics, (11):48–64, 2012.
+[6] E. Calore, A. Gabbana, S.F. Schifano, and R. Tripiccione. Optimization
+of lattice boltzmann simulations on heterogeneous computers. The
+International Journal of High Performance Computing Applications,
+page 1094342017703771, 2017.
+[7] S. Chen and G.D. Doolen. Lattice boltzmann method for fluid flows.
+Annual review of fluid mechanics, 30(1):329–364, 1998.
+[8] A. Dupuis and B. Chopard. Lattice gas: An efficient and reusable parallel
+library based on a graph partitioning technique. In International Conference on High-Performance Computing and Networking, volume 16,
+pages 319–328. Springer, 1999.
+[9] Z. Fan, F. Qui, A. Kaufman, and S. Yaokum-Stover. Gpu cluster for
+high performance computing. 11 2004.
+[10] C. Feichtinger, J. Habich, H. Köstler, G. Hager, U. Rüde, and G. Wellein.
+A flexible patch-based lattice boltzmann parallelization approach for
+heterogeneous gpu–cpu clusters. Parall. Comp., (27):536–549, 9 2011.
+[11] C. Feichtinger, J. Habich, H. Köstler, U. Rüde, and T. Aoki. Performance
+modeling and analysis of heterogeneous lattice boltzmann simulations
+on cpu-gpu clusters. Parallel Computing, (46):1–13, 2015.
+[12] B. Feiger, J. Gounley, D. Adler, J.A. Leopold, E.W. Draeger, R. Chaudhury, J. Ryan, G. Pathangey, K. Winarta, D. Frakes, F. Michor, and
+A. Randles. Assessing the effects of physiological factors on patients
+with coarctation of the aorta using massively parallel computational fluid
+dynamics. In preparation for The Journal of Biomechanics.
+[13] J. Fietz, M.J. Krause, C. Schulz, P. Sanders, and V. Heuveline. Optimized
+hybrid parallel lattice boltzmann fluid flow simulations on complex
+geometries. In European Conference on Parallel Processing, pages 818–
+829. Springer, 2012.
+[14] A. Figueroa, T. Mansi, P. Sharma, and N. Wilson. Cfd challenge:
+Simulation of hemodynamics in a patient-specific aortic coarctation
+model.
+[15] C.G. Fonseca, M. Backhaus, D.A. Bluemke, R.D. Britten, J. Do Chung,
+B.R. Cowan, I.D. Dinov, J.P. Finn, P.J. Hunter, A.H. Kadish, et al. The
+cardiac atlas project–an imaging database for computational modeling
+and statistical atlases of the heart. Bioinformatics, 27(16):2288–2295,
+2011.
+[16] D. Groen, J. Hetherington, H.B. Carver, R.W. Nash, M.O. Bernabeu, ,
+and P.V. Coveney. Analysing and modelling the performance of the
+hemelb lattice-boltzmann simulation environment. J of Comp. Sci.,
+4(5):412–422, 2013.
+[17] J. Habich, C. Feichtinger, H. Köstler, G. Hager, and G. Wellein.
+Performance engineering for the lattice boltzmann method on gpgpus:
+Architectural requirements and performance results. Computers &
+Fluids, 80:276–282, 2013.
+[18] J. Habich, T. Zeiser, G. Hager, and G. Wellein. Performance analysis and
+optimization strategies for a d3q19 lattice boltzmann kernel on nvidia
+gpus using cuda. Advances in Engineering Software, 42:266–272, 2011.
+[19] M. Hasert, K. Masilamani, S. Zimny, H. Klimach, J. Qi, J. Bernsdorf,
+and S. Roller. Complex fluid simulations with the parallel tree-based
+lattice boltzmann solver musubi. J. Comp Sci, 5(5):784–794, 2014.
+[20] R. Hilfer and T. Zauner. High-precision synthetic computed tomography
+of reconstructed porous media. Physical Review E, 84(6):062301, 2011.
+[21] R. Hilfer, T. Zauner, and A. Lemmer. Porous media data from the
+institute for computational physics. 2017.
+[22] D.A. Jacobsen, J.C. Thibault, and I. Senocak. An mpi-cuda implementation for massively parallel incompressible flow computations on
+multi-gpu clusters. Number 16, 2010.
+[23] M. Januszewski and M. Kostur. Sailfish: A flexible multi-gpu implementation of the lattice boltzmann method. Computer Physics
+Communications, (185):2350–2368, 2014.
+[24] K. Kofler, B. Cosenza, and T. Fahringer. Automatic data layout
+optimizations for gpus. In European Conference on Parallel Processing,
+pages 263–274. Springer, 2015.
+[25] S. Lee, J. S. Meredith, and J. S. Vetter. COMPASS: A framework for
+automated performance modeling and prediction. In Proceedings of the
+29th ACM on International Conference on Supercomputing, pages 405–
+414, Newport Beach, California, USA, 2015. ACM.
+[26] Seyong Lee, John Gounley, Amanda Randles, and Jeffrey S. Vetter.
+Performance portability study for massively parallel computational fluid
+dynamics application on scalable heterogeneous architectures. Journal
+of Parallel and Distributed Computing (Submitted), 2018.
+[27] J. Ma, K. Wu, Z. Jiang, and G.D. Couples. Shift: An implementation
+for lattice boltzmann simulation in low-porosity porous media. Phys.
+Rev. E, 81(5):056702, 2010.
+[28] N.S. Martys and J.G. Hagedorn. Multiscale modeling of fluid transport
+in heterogeneous materials using discrete boltzmann methods. Materials
+and structures, 35(10):650–658, 2002.
+[29] K. Mattila, J. Hyväluoma, J. Timonen, and T. Rossi. Comparison
+of implementations of the lattice-boltzmann method. Computers &
+Mathematics with Applications, 55(7):1514–1524, 2008.
+[30] K. Mattila, T. Puurtinen, J. Hyväluoma, R. Surmas, M. Myllys,
+T. Turpeinen, F. Robertsen, J. Westerholm, and J. Timonen. A prospect
+for computing in porous materials research: Very large fluid flow
+simulations. J. Comp Sci, 12:62–76, 2016.
+[31] M.D. Mazzeo and P.V. Coveney. Hemelb: A high performance parallel
+lattice-boltzmann code for large scale fluid flow in complex geometries.
+Computer Physics Communications, 178(12):894–914, 2008.
+[32] S. Melchionna, M. Bernaschi, S. Succi, E. Kaxiras, F.J. Rybicki, D. Mitsouras, A.U. Coskun, and C.L. Feldman. Hydrokinetic approach to largescale cardiovascular blood flow. Computer Physics Communications,
+181(3):462–472, 2010.
+[33] C. Nitä, L.M. Itu, and C. Suciu. Gpu accelerated blood flow computation
+using the lattice boltzmann method. IEEE, 2013.
+[34] C. Obrecht, F. Kuznik, B. Tourancheau, and J.-J. Roux. A new approach
+to the lattice boltzmann method for graphics processing units. Computers
+and Mathematics with Applications, 61(12):3628–3638, 2011.
+[35] C. Obrecht, F. Kuznik, B. Tourancheau, and J.-J Roux. The thelma
+project: Multi-gpu implementation of the lattice boltzmann method. The
+International Journal of High Performance Computing Applications,
+pages 1–9, 2011.
+[36] C. Obrecht, F. Kuznik, B. Tourancheau, and J.-J. Roux. Multi-gpu
+implementation of the lattice boltzmann method. Computers and
+Mathematics with Applications, (65):252–261, 2013.
+[37] C. Pan, J.F. Prins, and C.T. Miller. A high-performance lattice boltzmann
+implementation to model flow in porous media. Computer Physics
+Communications, 158(2):89–105, 2004.
+[38] A. Peters, S. Melchionna, E. Kaxiras, J. Lätt, J. Sircar, M. Bernaschi,
+M. Bison, and S. Succi. Multiscale simulation of cardiovascular flows
+on the IBM Bluegene/P: Full heart-circulation system at red-blood
+cell resolution. In Proceedings of the 2010 ACM/IEEE International
+Conference for High Performance Computing, Networking, Storage and
+Analysis, pages 1–10. IEEE Computer Society, 2010.
+[39] A. Randles, E.W. Draeger, and P.E. Bailey. Massively parallel simulations of hemodynamics in the primary large arteries of the human
+vasculature. J of Comp. Sci., 9:70–75, 2015.
+[40] A. Randles, E.W. Draeger, T. Oppelstrup, L. Krauss, and J.A. Gunnels.
+Massively parallel models of the human circulatory system. In Proceedings of the International Conference for High Performance Computing,
+Networking, Storage and Analysis, page 1. ACM, 2015.
+[41] A.P. Randles, V. Kale, J. Hammond, W. Gropp, and E. Kaxiras.
+Performance analysis of the lattice boltzmann model beyond navierstokes. In Parallel & Distributed Processing (IPDPS), 2013 IEEE 27th
+International Symposium on, pages 1063–1074. IEEE, 2013.
+[42] P.R. Rinaldi, E.A. Dari, M.J. Vénere, and A. Clausse. A latticeboltzmann solver for 3d fluid simulation on gpu. Simulation Modelling
+Practice and Theory, (25):163–171, 2012.
+[43] F. Robertsén, J. Westerholm, and K. Mattila. Lattice boltzmann
+simulations at petascale on multi-gpu systems with asynchronous data
+transfer and strictly enforced memory read alignment. In IEEE, editor,
+23rd Euromicro International Conference on Parallel, Distributed, and
+Network-Based Processing, 2015.
+[44] M. Schulz, M. Krafczyk, J. Tölke, and E. Rank. Parallelization strategies
+and efficiency of cfd computations in complex geometries using lattice
+boltzmann methods on high-performance computers. In High perform.
+scientific and engineer. comp., pages 115–122. Springer, 2002.
+[45] K. L. Spafford and J. S. Vetter. Aspen: A domain specific language
+for performance modeling. In SC12: International Conference for High
+Performance Computing, Networking, Storage and Analysis, pages 1–11,
+Salt Lake City, 2012.
+[46] R. Strzodka. Data layout optimization for multi-valued containers in
+opencl. J of Parall. and Dist. Comp., 72(9):1073–1082, 2012.
+[47] Sauro Succi. The lattice Boltzmann equation: for fluid dynamics and
+beyond. Oxford university press, 2001.
+[48] Nicolas Weber and Michael Goesele. Auto-tuning complex array layouts
+for gpus. In EGPGV, pages 57–64, 2014.
+[49] M. Wittmann, T. Zeiser, G. Hager, and G. Wellein. Comparison of
+different propagation steps for lattice boltzmann methods. Computers
+& Mathematics with Applications, (65):924–935, 2013.
+[50] W. Xian and A. Takayuki. Multi-gpu performance of incompressible
+flow computation by lattice boltzmann method on gpu cluster. Parallel
+Computing, (37):521–535, 2011.
+[51] D.P. Ziegler. Boundary conditions for lattice boltzmann simulations.
+Journal of Statistical Physics, 71(5):1171–1177, 1993.

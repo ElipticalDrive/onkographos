@@ -1,0 +1,120 @@
+CUDA accelerated rasterization of gaussian splatting - PngCompression: fix compressing sh_degree=0 splats (empty shN) and empty tensors by Daceyyreal · Pull Request #1061 · nerfstudio-project/gsplat
+
+PngCompression: fix compressing sh_degree=0 splats (empty shN) and empty tensors by Daceyyreal · Pull Request #1061 · nerfstudio-project/gsplat · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Daceyyreal
+commented
+Sep 16, 2026
+Copy link
+Copy Markdown
+Problem
+With sh_degree=0, examples/simple_trainer.py creates shN as colors[:, 1:, :] with
+colors of shape [N, (sh_degree + 1) ** 2, 3] (L344-347), so shN has shape [N, 0, 3].
+PngCompression.compress sends every parameter to its compress function, so the empty shN
+reaches _compress_kmeans, which imports torchpq before looking at the tensor:
+```
+try:
+    from torchpq.clustering import KMeans
+except:
+    raise ImportError(...)
+
+if torch.numel == 0:  # compares the function torch.numel with 0: always False
+    ...
+kmeans = KMeans(n_clusters=n_clusters, distance="manhattan", verbose=verbose)
+x = params.reshape(params.shape[0], -1).permute(1, 0).contiguous()
+labels = kmeans.fit(x)
+```
+On main (28e794c), splats with shN of shape [16, 0, 3] through
+PngCompression(use_sort=False).compress:
+without torchpq installed:
+```
+gsplat/compression/png_compression.py:365: in _compress_kmeans
+ModuleNotFoundError: No module named 'torchpq'
+gsplat/compression/png_compression.py:367: in _compress_kmeans
+ImportError: Please install extra dependencies with 'pip install torchpq cupy' to use K-means clustering
+```
+with torchpq importable, main goes on to KMeans(n_clusters=65536).fit(x) (L380) with x of
+shape [0, 16], i.e. K-means on data with no features. (Checked by substituting a recording
+stub for torchpq.clustering.KMeans; I could not run the real torchpq here, so the error it
+raises is not quoted.) Even if torchpq returned, the centroids would have 0 features, so
+mins = torch.min(centroids) + eps (L384) raises RuntimeError: min(): Expected reduction dim to be specified for input.numel() == 0. Specify the reduction dim with the 'dim' argument.;
+compression can't succeed on main either way.
+The other empty-tensor branches don't work either:
+_compress_png, _compress_png_16bit and _compress_kmeans check if torch.numel == 0:,
+which is never true. With no Gaussians at all (N = 0), compress fails at
+png_compression.py:253 in _compress_png_16bit:
+```
+RuntimeError: cannot reshape tensor of 0 elements into shape [0, 0, -1] because the unspecified dimension size -1 can be any value and is ambiguous
+```
+_decompress_png, _decompress_png_16bit and _decompress_kmeans create
+params = torch.zeros(meta["shape"], ...) for an empty shape but return meta, so
+decompress hands a dict to inverse_log_transform.
+Fix
+torch.numel == 0 -> params.numel() == 0 in the three compress functions.
+return meta -> return params in the three decompress empty branches.
+In _compress_kmeans, check for an empty tensor before importing torchpq. An empty shN
+needs no K-means, so SH-degree-0 scenes now compress and decompress without torchpq / cupy.
+No behavior change for non-empty tensors.
+Tests
+tests/test_compression.py, all on CPU:
+test_png_compression_empty_splats[no_gaussians]: N = 0 for means, scales, quats,
+opacities, sh0 and an extra NPZ field.
+test_png_compression_empty_splats[sh_degree_0]: 16 Gaussians with shN of shape
+[16, 0, 3].
+Both run PngCompression(use_sort=False).compress -> decompress and check that every field
+comes back as a tensor with its original shape and dtype.
+test_png_compression_empty_kmeans: _compress_kmeans / _decompress_kmeans with an empty
+[0, 15, 3] tensor; no longer needs torchpq.
+On main (without torchpq): 3 failed, 1 skipped (the two parametrized cases and the k-means
+test; errors above). With this PR: 3 passed, 1 skipped (skipped: the existing CUDA-only test),
+run on a machine without torchpq. lint/format-code.sh --check passes.
+Daceyyreal
+added 2 commits
+September 16, 2026 16:36
+PngCompression: fix handling of empty parameter tensors
+…
+f8cf04a
+```
+The empty-tensor early returns in _compress_png, _compress_png_16bit and
+_compress_kmeans compared the function object torch.numel to 0, which is
+never true, so an empty tensor reached reshape() and raised. The matching
+branches in _decompress_png, _decompress_png_16bit and _decompress_kmeans
+built a zero tensor but returned the metadata dict instead.
+
+Check params.numel() and return the zero tensor. Adds a CPU test that runs
+empty splats through compress -> decompress (and the k-means pair when
+torchpq is installed).
+```
+PngCompression: handle empty shN (sh_degree=0) without torchpq
+…
+d1632e8
+```
+examples/simple_trainer.py creates shN as colors[:, 1:, :], so training with
+sh_degree=0 gives shN of shape [N, 0, 3]. compress() sends it to
+_compress_kmeans, which imported torchpq before checking for an empty tensor:
+without torchpq it raised ImportError, with torchpq it called KMeans.fit on a
+[0, N] tensor.
+
+Check for an empty tensor before the import, so SH-degree-0 scenes compress
+and decompress without torchpq. The test runs splats with shN [16, 0, 3]
+through compress -> decompress, and the empty k-means test no longer needs
+torchpq.
+```
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

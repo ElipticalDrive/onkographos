@@ -1,0 +1,247 @@
+Massively parallel tandem traversal of bounding volume hierarchies for geometric queries on distributed meshes - ScienceDirect
+Skip to main contentSkip to article
+Computers & Structures
+Date: September 2025
+Article: 107843
+Volume: Volume 316
+View accessibility information
+Published by: Elsevier
+Published by
+Show more
+Research article
+Get rights and content
+Massively parallel tandem traversal of bounding volume hierarchies for geometric queries on distributed meshes
+Author links open overlay panelA. Motte b a, C. Bovet a, V. Chiaruttini a c, O. Jamond b, B. Prabel b
+Show more
+Cite
+Add to Mendeley
+Share
+10.1016/j.compstruc.2025.107843
+Access through your organizationPurchase PDF
+More actions
+Article preview
+Abstract
+Introduction
+Section snippets
+References (53)
+Abstract
+The efficient computation of geometric queries on large sets of elements, such as intersections or nearest neighbor searches, is crucial for many applications such as contact detection in mechanics simulations. While hierarchical data structures based on spatial or geometric partitioning have been extensively studied over the past 40 years, research detailing their adaptation to massively distributed environments using the message passing interface library—specifically how the communications are done and optimized for parallel efficiency—remains under-explored. We quantify the impact of various design choices to achieve rapid contact detection in massively distributed simulations using bounding volume hierarchies. The memory layout is optimized by reducing the hierarchy node size and ordering them with an innovative “L-filling curve” pattern. Next, the impact of a tandem traversal algorithm is analyzed, along with the optimal exploration order of both hierarchies’ nodes. The parallelization of this tandem traversal is presented, focusing on balancing message latency and volume to enhance parallel efficiency. These design choices extend to a wide range of applications and data structures. Finally, the algorithm’s strong performance is demonstrated up to 20,000 MPI tasks to handle tens of billions of intersections on very large meshes exceeding 100 billion elements.
+Keywords
+Computational geometry
+;
+Contact detection
+;
+High performance computing
+;
+Bounding volume hierarchies
+Previous article in this issue
+Next article in this issue
+Introduction
+Geometric queries are a wide topic including different kinds of computations on large sets of entities. These queries range from nearest neighbor searches [1], [2] to variations of intersection queries, such as static intersections including triangle vs. triangle and points vs. tetrahedrons [3] where time is paused, spatio-temporal 4D intersections [4], [5] where the spatial intersection is solved within a continuous time interval, as well as searches in a nearby neighborhood [6], [7], [8] (find all elements close enough to other elements). These geometric computations must be performed between very large sets of entities in many applications, such as the audiovisual and video game industries, as well as computer vision or engineering software [9]. In particular, mechanical finite element or finite volume simulation codes need to simulate ever-growing industrial systems, which involve meshes exceeding a billion elements. These simulations are run in a massively distributed parallel environment using MPI to handle domain decomposition across hundreds, thousands, or even tens of thousands of MPI tasks. In this context, geometric queries are used, for example, in contact detection, which consists in identifying which mesh elements are in contact. Here, the term contact must be understood in a broad sense, encompassing several definitions. For instance, in the context of structural mechanics, such contact elements are then specifically treated to add contact constraints in the system of equations, or any repulsive forces preserving non-interpenetration.
+There are two key steps to speed up these geometric queries: using bounding volumes (BVs) to reduce the number of operations of the elementary tests, i.e., the final geometric tests to compute on the elements, and building a global data structure to reduce the number of element pairs to test [10]. First, each element must be encapsulated in a simple primitive called a BV which is faster to test. Most commonly used BVs are axis-aligned bounding boxes (AABB) [11], [12], [13], [14], [15], [16], [17], [18], [19], [20], but plenty of other choices exist like spheres [21], ellipsoids [22], superquadrics [23], oriented bounding boxes (OBB) [24], [25], oriented coordinate aligned bounding boxes (CABB) [26] or k-discrete oriented polytopes (K-DOP) [6], [27], [28]. Each of them is a compromise between tightness, memory footprint, and time costs to be paid at different stages of the BV’s lifetime: construction, testing, update, merging, etc.
+The second key step is to build a global data structure to perform pre-detection. Many data structures have been described over the last 40 years, the most common are BVHs [6], [9], [11], [13], [14], [16], [17], [18], [24], [25], [26], bounding interval hierarchies [29], kd-trees [30], [31], octrees [26], [32], uniform grids [3], [9], [33] and hierarchical grids [34], [35]. Variations and combinations of data structures are also commonly used to further improve performance. For example, Aman et al. [36] employ a hybrid data structure derived from a BVH, in which the leaf nodes are tetrahedralized for better ray-surface intersection performance. The choice of the best data structure depends on many characteristics of the application such as the element type, the frequency of construction, the frequency of detection or its parallelism potential.
+While the choice of the best BV can safely be assigned to the end-user of a geometry library, the choice of the best global data structure requires more technical knowledge and is more constrained and performance critical. In the context of generic contact detection and without giving all the technical details in this introduction, we chose to work with BVH because of (i) their ease of building on entities of any dimension (points, curves, surfaces and volumes), (ii) their easy update after the entities’ displacement (which is faster than rebuilding) and (iii) the possibility of using a tandem traversal algorithm with two BVHs.
+Many other libraries offer sequential tools to compute geometric queries with the help of global data structures and BVs [30], [37]. Some of them also handle parallel geometric queries [16], [31] but mostly on shared memory systems, especially GPUs [11], [25]. Historically, the video game industry has had the strongest impact on the development of GPU computations. In particular, they developed a wide range of algorithms for geometric queries involved in collision detection or ray tracing for example. Moreover, parallelism in computational mechanics made significant advances initially in multi-CPU environments, both in shared-memory, multithreaded setups and in distributed-memory architectures. Today, the majority of finite element simulation codes still rely predominantly on CPU-only platforms. Well-established simulation codes [38], [39], [40] have large code bases that were not designed for GPUs and are now too complex to port efficiently. Conversely, although new simulation codes have the choice to design their software for GPUs, some are still primarily designed to operate mainly in CPU-only environments [41]. This is why massively distributed multi-CPU detection tools remain essential. So in addition to the different concerns regarding performance on a single CPU, the massively distributed environment brings one more challenge, which is the optimization of the MPI communications. Communications are necessarily heavy because the problem size forces the data distribution over the MPI tasks. Fortunately, serial optimizations that result in more memory-friendly data structures often improve the performance of MPI communications. Consequently, there is a shared foundation between serial and parallel optimizations. Furthermore, optimizations specific to parallel programming involve finding a balance between volume and latency in MPI communications. This requires reducing both the total size and the frequency of MPI messages.
+We propose a parallel algorithm for geometric queries in massively distributed environments based on the tandem traversal of two BVHs. Although there is a wide variety of applications for this algorithm, its main purpose in our case is contact detection in structural mechanics finite element simulations. Frequent reconstruction of the hierarchy is not required in this context. Instead, only the coordinates of the BV are updated to follow the displacements and deformations of the meshes (see Fig. 1). Fast BVH construction is a research domain in its own right, with several techniques extensively studied, particularly in the context of ray tracing applications [42], [43], [44]. In our case, BVH construction is performed only once at the beginning of the simulation, which allows our research to focus only on the traversal of the BVH. The BVHs are built with surface area heuristic (SAH) even if the construction cost is high [42]. SAH tends to minimize the size of the BV while keeping the tree sufficiently balanced using a cost function depending on the surface area of the BV and their number of bounded mesh elements [13].
+These BVHs are used in pairs: a query BVH and a target BVH, built on top of two sets involved in a geometric query, namely a query set and a target set. The tandem traversal algorithm presented in [6] is extended and optimized to traverse both BVHs simultaneously in a massively distributed environment. The paper is organized as follows: Section 2 introduces the experimental setup, the design of BVH structure is discussed in Section 3, the tandem traversal algorithm is analyzed and optimized in Section 4, the MPI-parallel algorithm is presented in Section 5, and the large scale final results are shown in Section 6.
+Organizational access
+Get full-text access by signing in with your organisationAccess through your organization
+Other access options
+Purchase PDF
+Need help with access?
+Section snippets
+Experimental setup
+We used two test cases in our experiments. The primary test case is employed in every section (except Section 4.2) as a benchmark to evaluate the impact of each optimization on performance. For each optimization, the fully optimized version presented in Section 6 is compared with a version where the optimization is deactivated. The latest fully optimized version is used as a reference because it precisely reflects the final impact on performance. Comparisons using unoptimized code as a
+BVH data structure
+A BVH is a data structure that represents a sequence of increasingly precise geometric approximations of a set of elements, as illustrated in Fig. 5. The BVH construction begins with a root BV that coarsely encapsulates the entire set of elements. At each subsequent level, each BV is subdivided into two smaller volumes, each encapsulating roughly half of the elements within the parent volume. This process doubles the number of BVs at each level, progressively refining the geometric
+Tandem traversal algorithm
+A key feature driving the performance of intersection queries is the use of the tandem traversal algorithm, introduced by Yang and Laursen [6]. Usually, the most classic strategy is to use a single data structure, for example on the target side, and traverse this data structure once for each query element. This leads to Algorithm 1 and will be referred to as multiple simple traversals. On the other side, Algorithm 2 implements the tandem traversal algorithm, which uses two BVHs simultaneously.
+MPI-parallelization
+This section shows how the data structure and the parallel algorithm work in a distributed environment. It then discusses how to achieve the optimal balance between latency and communication volume in MPI messages. Additionally, challenges in implementing various approaches, including classic MPI collectives, neighborhood collectives, and MPI one-sided communications, are explored.
+Large scale final results and comparison with ArborX
+Based on all the design choices discussed in 3 BVH data structure, 4 Tandem traversal algorithm, 5 MPI-parallelization, the best overall configurations were selected to measure pre-detection time and scalability on the experimental setup presented in Section 2.1. This configuration includes the following:
+•
+40 bytes nodes (1 AABB of 6 floats + 2 uint for children nodes’ indices + 8 bytes for leaf data)
+•
+L-filling curve nodes’ numbering
+•
+Tandem traversal algorithm with 1-level unrolled
+depth-first-search
+Conclusion and perspectives
+This research demonstrates a highly efficient MPI implementation for intersection queries on large-scale meshes, with over 100 billion elements distributed across 20,000 MPI tasks. This result is obtained by using a tandem traversal algorithm which is demonstrated to be more performant than multiple simple traversals. Performance improvements stem from a combination of efficient optimizations, including a compact memory footprint of the data structure, its better organization in memory, and
+CRediT authorship contribution statement
+A. Motte: Writing – original draft, Visualization, Validation, Software, Resources, Methodology, Investigation, Formal analysis, Conceptualization. C. Bovet: Writing – review & editing, Validation, Supervision, Software, Resources, Project administration, Methodology, Investigation, Conceptualization. V. Chiaruttini: Writing – review & editing, Validation, Supervision, Software, Resources, Project administration, Methodology, Investigation, Conceptualization. O. Jamond: Writing – review &
+Declaration of generative AI and AI-assisted technologies in the writing process
+During the preparation of this work, the authors used ChatGPT-4 [53] to improve the style and grammar in English, as the authors are not native English speakers. After using this tool, the authors reviewed and edited the content as needed and take full responsibility for the content of the published article.
+Declaration of competing interest
+The authors declare that they have no known competing financial interests or personal relationships that could have appeared to influence the work reported in this paper.
+References (53)
+J. Sankaranarayanan et al.
+A fast k-neighborhood algorithm for large point-clouds
+J. Elseberg et al.
+Comparison on nearest-neighbour-search strategies and implementations for efficient shape registration
+J Softw Eng Robot
+(2012)
+V.A. Yastrebov
+Numerical Methods in contact mechanics, ISTE
+(2013)
+S. Cameron
+Collision detection by four-dimensional intersection testing
+IEEE Trans Robot Autom
+(1990)
+K. Vlack et al.
+Fast and accurate spacio-temporal intersection detection with the GJK algorithm
+ICAT
+(2001)
+T.A. Laursen et al.
+A contact searching algorithm including bounding volume trees applied to finite sliding mortar formulations
+Comput Mech
+(2008)
+M.A. Puso et al.
+A mortar segment-to-segment contact method for large deformation solid mechanics
+Comput Methods Appl Mech Eng
+(2004)
+B.R. Akula
+Extended mortar method for contact and mesh-tying applications
+Theses
+(2019)
+J. Xue et al.
+Efficient GPU out-of-core visualization of large-scale CAD models with voxel representations
+Adv Eng Softw
+(2016)
+C. Ericson
+Real-time collision detection
+(2004)
+D. Lebrun-Grandié et al.
+ArborX: a performance portable geometric search library
+ACM Trans Math Softw
+(2021)
+G.V.D. Bergen
+A fast and robust GJK implementation for collision detection of convex objects
+J Graphics Tools
+(1999)
+I. Wald
+On fast construction of SAH-based bounding volume hierarchies
+Interact Ray Tracing
+(2007)
+Y. Gu et al.
+Efficient BVH construction via approximate agglomerative clustering
+J. Goldsmith et al.
+Automatic creation of object hierarchies for ray tracing
+IEEE Comput Graph Appl
+(1987)
+G.A. Hansen et al.
+An MPI+X implementation of contact global search using Kokkos
+Eng Comput
+(2016)
+V. Beatini et al.
+A regularized non-smooth contact dynamics approach for architectural masonry structures
+Comput Struct
+(2017)
+L. Peng et al.
+Automatic contact detection between rope fibers
+Comput Struct
+(2019)
+Z.-H. Zhong et al.
+A contact searching algorithm for general 3-D contact-impact problems
+Comput Struct
+(1990)
+Z.-H. Zhong et al.
+Automatic contact searching algorithm for dynamic finite element analysis
+Comput Struct
+(1994)
+T. Toczek et al.
+Effficient stackless ray traversal for bounding sphere hierarchies with CUDA
+Procedia Comput Sci
+(2010)
+S. Wu et al.
+A fast and accurate compound collision detector for RRT motion planning
+Robot Auton Syst
+(2023)
+J.R. Williams et al.
+Discrete element simulation and the contact problem
+Arch Comput Methods Eng
+(1999)
+S. Gottschalk et al.
+OBBTree: a hierarchical structure for rapid interference detection
+Comput Graph (ACM)
+(1997)
+C. Lauterbach et al.
+gProximity: hierarchical GPU-based operations for collision and distance queries
+Comput Graphics Forum
+(2010)
+Q. Wang et al.
+A parallel geometric contact algorithm for thin shell finite elements in explicit time integration
+Comput Struct
+(2024)
+View more references
+View full text
+Recommended articles
+Based on reading popularity
+Research article
+Fractional strain-gradient plasticity
+C.F.O. Dahlberg, M. Ortiz
+European Journal of Mechanics - A/Solids • Volume 75 • 2019 • Pages 348-354
+Research articleOpen access
+T-stress evaluation of cracks by means of continuous dislocations model in two-dimensional elasticity
+Koji Fujimoto
+Procedia Structural Integrity • Volume 45 • 2023 • Pages 74-81
+Research article
+FFT-based simulations of slip and kink bands formation in 3D polycrystals: Influence of strain gradient crystal plasticity
+Aldo Marano, …, Samuel Forest
+Journal of the Mechanics and Physics of Solids • Volume 149 • 2021 • Article 104295
+Research article
+A tensorial thermodynamic framework to account for the 𝛾′ rafting in nickel-based single crystal superalloys
+R. Desmorat, …, J. Cormier
+International Journal of Plasticity • Volume 95 • 2017 • Pages 43-81
+Research articleOpen archive
+A stochastic approach applied to directionally solidified turbine blades
+F. Coudon, …, G. Cailletaud
+International Journal of Solids and Structures • Volume 184 • 2020 • Pages 193-201
+Research article
+POD associated with modal projection-based reduced order model for prestress structural vibrations
+C. Hoareau, …, R. Ohayon
+IFAC-PapersOnLine • Volume 55, Issue 20 • 2022 • Pages 169-174
+Metrics
+Captures
+Mendeley Readers2
+Mentions
+News Mentions1
+View details
+© 2025 Elsevier Ltd. All rights are reserved, including those for text and data mining, AI training, and similar technologies.
+Persistent link using digital object identifier (DOI)
+Opt-Out Request Honored
+Cookie Preference Center
+We use cookies which are necessary to make our site work. We may also use additional cookies to analyse, improve and personalise our content and your digital experience. For more information, see our Cookie Policy and the list of Google Ad-Tech Vendors.
+You may choose not to allow some types of cookies. However, blocking some types may impact your experience of our site and the services we are able to offer. See the different category headings below to find out more or change your settings.
+You may also be able to exercise your privacy choices as described in our Privacy Policy
+Allow all
+Manage Consent Preferences
+Strictly Necessary Cookies
+Always active
+These cookies are necessary for the website to function and cannot be switched off in our systems. They are usually only set in response to actions made by you which amount to a request for services, such as setting your privacy preferences, logging in or filling in forms. You can set your browser to block or alert you about these cookies, but some parts of the site will not then work.
+Cookie Details List
+Functional Cookies
+Functional Cookies
+These cookies enable the website to provide enhanced functionality and personalisation. They may be set by us or by third party providers whose services we have added to our pages. If you do not allow these cookies then some or all of these services may not function properly.
+Cookie Details List
+Performance Cookies
+Performance Cookies
+These cookies allow us to count visits and traffic sources so we can measure and improve the performance of our site. They help us to know which pages are the most and least popular and see how visitors move around the site.
+Cookie Details List
+Contextual Advertising Cookies
+Contextual Advertising Cookies
+These cookies are used for properly showing banner advertisements on our site and associated functions such as limiting the number of times ads are shown to each user.
+Cookie Details List
+Back Button
+Cookie List
+Search Icon
+Filter Icon
+Clear
+checkbox label label
+Apply Cancel
+Consent Leg.Interest
+checkbox label label
+checkbox label label
+checkbox label label
+Confirm my choices

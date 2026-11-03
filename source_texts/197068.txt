@@ -1,0 +1,1416 @@
+Rust server for weather data: radar, NWP models, satellite, observations and alerts over OGC API EDR, Features, Maps and Tiles, WMS 1.3.0 and 3D Tiles. Reads GRIB2, Zarr, ODIM HDF5, GeoTIFF/COG, QueryData, NetCDF, BUFR, CAP and PostGIS. Binaries for Linux, macOS and Windows. - feat(3dtiles): isosurface mesh — encoder, API (both representations), viewer toggle (#357) by mrauhala · Pull Request #359 · mrauhala/meteocore
+
+feat(3dtiles): isosurface mesh — encoder, API (both representations), viewer toggle (#357) by mrauhala · Pull Request #359 · mrauhala/meteocore · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+mrauhala
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Owner
+What
+Continuing the OGC 3D Tiles work (epic #346) on the merged VoxelGrid foundation (#358): a marching-tetrahedra isosurface mesher that turns a cylindrical VoxelGrid into a glTF 2.0 .glb triangle mesh — e.g. "the 20 dBZ shell" of a radar volume.
+Why isosurface (and not the draft voxel path)
+The true EXT_primitive_voxels voxel path (#351) is blocked on an unsettled draft spec that needs experimental CesiumJS ≥1.127 to render — not something I can verify at encode time. An isosurface is a plain glTF triangle mesh: it renders in any 3D Tiles 1.1 client, so it's the verifiable way to show a radar volume's 3-D structure, and it builds directly on the same VoxelGrid. The voxel encoder stays tracked in #351 for when the spec settles.
+Changes
+ds-core — geo::destination_point + EARTH_RADIUS_M: shared spherical great-circle so the encoder maps polar (range, azimuth) samples the same way the volume engines do (one formula, one earth radius). Pinned against analytic references (meridian/equator/antimeridian-wrap).
+ds-3dtiles — isosurface.rs: encode_isosurface_glb(grid, threshold, color) + tileset_json_glb(region, uri, rtc_center).
+Marching tetrahedra, not cubes. A tetrahedron is the complete graph K4, so the surface crosses exactly |inside|·|outside| edges (3 → triangle, 4 → quad) and the topology is correct by construction — no 256-case edge/triangle table to mis-transcribe. Deliberate, since the output can't be eyeballed at encode time. Cube → 6 tets via the Kuhn/Freudenthal split (watertight across cube boundaries).
+NaN-aware: any tet touching a nodata corner is skipped → no fabricated surface across the cone of silence / beyond the beam fan.
+Geometry: fractional cell index → ground/azimuth/height (same cell-centre convention the engine sampled with) → destination_point + geodetic_to_ecef, stored antenna-relative and pre-flipped Z-up→Y-up (a runtime re-applies Y-up→Z-up to glTF content — the flip .pnts skips). Tile transform = antenna ECEF; geodetic region unaffected. doubleSided PBR shell coloured at the threshold.
+engine-odim — gen_isosurface example: real fivih PVOL → .glb + tileset.json + a token-free CesiumJS viewer (CARTO dark).
+CLAUDE.md — documents the isosurface path + the marching-tet rationale.
+Verification
+Unit tests (13 in ds-3dtiles, + geo): glb container well-formed (magic/chunks/alignment); the surface lands at the exact expected height over a height-ramp field — this verifies the index→ECEF→Y-up mapping end-to-end without a renderer; empty / NaN-corner / non-finite-threshold guards; tileset transform + region + URI/region validation.
+Real-data demo on the committed-locally fivih fixture: 253,636 finite cells → 178,022 triangles, independently re-parsed — all positions finite, all normals unit-length (0 bad), geodetic region + antenna-ECEF transform correct.
+Render-verify (the one thing I can't check here)
+The math is verified by the height test, but I can't drive CesiumJS in this environment. To eyeball:
+```
+cargo run -p engine-odim --example gen_isosurface
+# then serve target/3dtiles-iso-fivih/ and open index.html
+```
+The shell should stand upright over Vihti. If it renders tipped 90°, that's the glTF up-axis convention for direct 1.1 .glb content (a one-line fix: store ECEF-native + asset.gltfUpAxis: "Z").
+Follow-ups
+API route (serve .glb isosurface from /3dtiles, threshold query param, viewer toggle) — encoder + demo ship first, mirroring .pnts (3D Tiles Phase 1: static .pnts exporter for radar polar volumes (CesiumJS demo) #347 demo → 3D Tiles Phase 3: api-3dtiles HTTP service (tileset.json + content + subtrees) #349 API).
+Angular-seam wrap (a one-cell gap at azimuth 0 today) and vertex sharing (mesh is non-indexed) — noted in code.
+Part of epic #346. Refs #357, #351, #358.
+🤖 Generated with Claude Code
+feat(3dtiles): isosurface mesher — VoxelGrid → glTF .glb triangle she…
+…
+389e86d
+```
+…ll (#357)
+
+Marching-tetrahedra isosurface extraction over the cylindrical VoxelGrid,
+encoded as a glTF 2.0 .glb triangle mesh (e.g. "the 20 dBZ shell"). Unlike
+the draft EXT_primitive_voxels voxel path (#351), a glTF mesh renders in any
+3D Tiles 1.1 client — the verifiable way to show a radar volume's 3-D
+structure on the merged VoxelGrid foundation.
+
+- ds-core: geo::destination_point + EARTH_RADIUS_M — shared great-circle so
+  the encoder maps polar (range, azimuth) samples the same way the volume
+  engines do (one formula, one earth radius).
+- ds-3dtiles: isosurface.rs — encode_isosurface_glb + tileset_json_glb.
+  Marching *tetrahedra*, not cubes: a tet is K4, so the surface crosses
+  exactly |inside|*|outside| edges and the topology is correct by
+  construction — no 256-case table to mis-transcribe (chosen because the
+  output isn't render-checkable at encode time). Kuhn 6-tet cube split; any
+  tet touching a NaN corner is skipped (no surface across the cone of
+  silence); fractional cell index -> ground/azimuth/height -> ECEF,
+  pre-flipped Z-up->Y-up because a runtime re-applies Y-up->Z-up to glTF
+  content; tile transform = antenna ECEF (glTF has no embedded origin, unlike
+  .pnts RTC_CENTER). doubleSided PBR shell.
+- engine-odim: gen_isosurface example — real fivih PVOL -> .glb + tileset +
+  token-free CesiumJS viewer.
+
+Tests: glb container well-formed; surface lands at the exact expected height
+(verifies the index->ECEF->Y-up mapping); empty/NaN/non-finite guards;
+tileset transform+region; destination_point pinned to analytic references.
+Demo on the fixture: 253,636 finite cells -> 178k triangles, all positions
+finite, all normals unit-length.
+
+API route is a follow-up — encoder + demo ship first (mirrors the .pnts path:
+demo #347 -> API #349).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/isosurface.rs
+/// Assemble a single-mesh `.glb` from the accumulated triangles.
+fn build_glb(mesh: &MeshBuilder, color: [u8; 4]) -> Vec<u8> {
+let vertex_count = mesh.positions.len() / 3;
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The comment says t ∈ [0, 1) but the clamp allows t = 1.0. When threshold == vb exactly, t = (vb - va)/(vb - va) = 1.0 and the vertex is placed exactly at corner b. That's geometrically valid, but the comment is wrong — it should say [0, 1]. Minor documentation issue.
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/isosurface.rs
+Outdated
+Comment on lines
++362
+to
++376
+// faces (CesiumJS flips the normal toward the camera per-face).
+"doubleSided": true,
+} ],
+"accessors": [
+{
+"bufferView": 0, "componentType": COMPONENT_FLOAT, "count": vertex_count,
+"type": "VEC3", "min": mesh.min, "max": mesh.max,
+},
+{
+"bufferView": 1, "componentType": COMPONENT_FLOAT, "count": vertex_count,
+"type": "VEC3",
+},
+],
+"bufferViews": [
+{ "buffer": 0, "byteOffset": 0, "byteLength": pos_bytes, "target": TARGET_ARRAY_BUFFER },
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The (1,3) and (3,1) sub-cases reuse the same cross(odd, rest[0..2]) vertex ordering, but the resulting face normal will point in opposite directions: when odd is the single inside corner, the normal faces outward (away from the inside region); when odd is the single outside corner, the crossing triangle has the same topological shape but the inside/outside sense is flipped, so the normal can face inward.
+This isn't a rendering bug because doubleSided: true lights both faces — but it means the stored NORMAL accessor contains inward-pointing normals on roughly half the (1,3) triangles. Any client that uses normals for something other than Lambertian shading (e.g. screen-space effects, normal-map baking, export to another tool) will see a non-orientable mesh.
+Worth a one-line comment here explaining that consistent outward orientation is intentionally deferred to doubleSided.
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/isosurface.rs
+Comment on lines
++551
+to
++561
+let up = {
+let m = (rtc[0] * rtc[0] + rtc[1] * rtc[1] + rtc[2] * rtc[2]).sqrt();
+[rtc[0] / m, rtc[1] / m, rtc[2] / m] // geocentric up ≈ local up
+};
+let pos_len = json["bufferViews"][0]["byteLength"].as_u64().unwrap() as usize;
+let floats: Vec<f32> = bin[..pos_len]
+.chunks_exact(4)
+.map(|w| f32::from_le_bytes(w.try_into().unwrap()))
+.collect();
+assert!(!floats.is_empty(), "surface has vertices");
+for v in floats.chunks_exact(3) {
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+tileset_json_for_region serialises to a String, which is immediately from_str'd back into serde_json::Value just to inject one field. The .expect("…emits valid JSON") is safe, but the round-trip is wasteful and slightly fragile (if tileset_json_for_region ever switches to pretty-printing, the from_str still works, but it's an unnecessary coupling).
+Suggest building the JSON directly here (or having an internal helper that returns a serde_json::Value instead of String) so the transform injection doesn't need a serialise→parse loop.
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/lib.rs
+/// the `.pnts` point cloud.
+pub mod isosurface;
+pub use isosurface::{encode_isosurface_glb, tileset_json_glb};
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pre-emptive note for the follow-up API route: when encode_isosurface_glb is called from an HTTP handler it must follow the same pattern as read_point_cloud — bounded by the shared render semaphore and dispatched via spawn_blocking. The function does a full voxel-grid scan plus an ECEF projection per vertex; called inline on a request worker it will park that thread. See CLAUDE.md "Concurrency / the shared Tokio runtime" and the existing .pnts handler for the pattern.
+claude
+Bot
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+Review: isosurface mesher (#357) -- The core geometry is correct and well-tested. Freudenthal decomposition, cylindrical-to-ECEF coordinate path, Y-up flip, and glTF/GLB container format are all verified by the unit tests. No security issues. Four findings noted via inline comments: (1) march_tet (1,3)/(3,1) face normals point in opposite directions depending on which side has the odd corner -- doubleSided:true is the right fix and is present, but neither the function nor the material block says why; a future edit could silently break it. (2) tileset_json_glb serialises a tileset to String then immediately parses it back just to inject transform -- an internal Value helper would be cleaner. (3) crossing comment says t in [0,1) but clamp(0,1) allows t=1.0 -- minor doc error. (4) encode_isosurface_glb is blocking CPU work; when the API route lands it must follow the spawn_blocking + render-semaphore pattern of read_point_cloud. None of these block merge.
+fix(3dtiles): seal isosurface against clear air (background param) — …
+…
+d0ba4f7
+```
+…kills "curtains"
+
+Render-verifying the isosurface in CesiumJS exposed an artifact: storm
+boundaries rendered as open vertical "curtains"/blades instead of closed
+blobs. Root cause is upstream of the mesher: RawPixels::sample (reader.rs)
+masks BOTH `nodata` ("outside coverage") and `undetect` ("radar looked, saw
+nothing") identically -> NaN, so a no-echo cell is indistinguishable from
+truly-unmeasured space in the VoxelGrid. The mesher skipped every tet
+touching a NaN corner, so it could not close the surface where echo meets
+clear air.
+
+Fix: add a `background: Option<f64>` to encode_isosurface_glb.
+- Some(bg) (bg < threshold): treat NaN corners as no-echo and SEAL the
+  surface into solid blobs. Assumes ABSENCE of echo where unmeasured (the
+  conservative direction — never invents echo); only cost is a cap at the true
+  coverage boundary (narrow cone of silence + max-range cylinder), the
+  standard "no echo where unmeasured" convention every radar 3-D view uses.
+- None: previous behaviour (skip NaN-touching tets; open surface).
+The demo seals with Some(-32.0) (the dBZ floor). Live-verified in CesiumJS:
+curtains -> closed precipitation blobs.
+
+Also: the demo viewer now auto-frames the tileset (zoomTo its bounding
+sphere) + brightens the dark basemap, instead of a hard-coded camera that
+could land on empty sky.
+
+Follow-up: split undetect from nodata in the engine sampler so only the real
+cone of silence stays open (no cap there either).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+mrauhala
+mentioned this pull request
+Jun 9, 2026
+engine-odim: distinguish radar undetect (clear air) from nodata (unmeasured) in the voxel grid
+#360
+Closed
+mrauhala
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Render-verified live in CesiumJS (1.124) — and fixed a real artifact
+Drove the demo in an actual CesiumJS session (served target/3dtiles-iso-fivih/). Findings:
+✅ Placement/orientation correct — the shell sits exactly over Vihti, southern Finland (bounding-sphere centre lon 24.50, lat 60.59), lies flat over the terrain (not tipped 90°), so the Y-up→Z-up flip is right for direct 1.1 .glb content. Colour = radar_dbz at 20 dBZ. Loads with no console errors.
+⚠️ Found "curtains" — storm→clear-air boundaries rendered as open vertical walls/blades instead of closed blobs. Root-caused to RawPixels::sample masking nodata and undetect identically → NaN, so the mesher couldn't tell clear air from unmeasured space and skipped those tets.
+🔧 Fixed (commit d0ba4f7) — added background: Option<f64> to encode_isosurface_glb; Some(bg) seals NaN as no-echo so the surface closes into solid blobs (never invents echo — assumes its absence). Demo seals with Some(-32.0). Re-verified live: clean closed precipitation blobs. The shallow, flat appearance that remains is physical (widespread stratiform precip ~few km thick), not an artifact.
+Engine-side follow-up to split undetect from nodata (so even the real cone of silence stays open): #360.
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/isosurface.rs
+Comment on lines
++315
+to
++319
+if let Some(bg) = background {
+if !bg.is_finite() {
+return Err(Tiles3dError::NonFinite("background"));
+}
+}
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Bug: background >= threshold is not validated.
+The docstring says bg < threshold, but the code only rejects non-finite values. When bg >= threshold, every NaN cell is treated as inside the isosurface, so the surface forms around the finite-below-threshold region instead of the echo core — an inverted shell with no useful meaning.
+Suggested change
+if let Some(bg) = background {
+if !bg.is_finite() {
+return Err(Tiles3dError::NonFinite("background"));
+}
+}
+if let Some(bg) = background {
+if !bg.is_finite() {
+return Err(Tiles3dError::NonFinite("background"));
+}
+if bg >= threshold {
+return Err(Tiles3dError::InvalidParameter(
+"background must be below threshold",
+));
+}
+}
+(Requires adding an InvalidParameter(&'static str) variant to Tiles3dError, or reuse a suitable existing variant.)
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/isosurface.rs
+Outdated
+Comment on lines
++220
+to
++221
+let mut inside = Vec::with_capacity(4);
+let mut outside = Vec::with_capacity(4);
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Performance: heap allocation per tet in the innermost loop.
+march_tet is called 6× per cube — at the default radar grid (~250 km × 1° × 500 m) that's roughly 6–10 million calls per encode. Each call allocates and drops two Vecs here, resulting in millions of allocator round-trips.
+Replace with fixed-size arrays:
+Suggested change
+let mut inside = Vec::with_capacity(4);
+let mut outside = Vec::with_capacity(4);
+let mut inside = [0usize; 4];
+let mut n_inside = 0usize;
+let mut outside = [0usize; 4];
+let mut n_outside = 0usize;
+Then use inside[..n_inside] / outside[..n_outside] slices throughout the function, and match on (n_inside, n_outside) instead of (inside.len(), outside.len()).
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/isosurface.rs
+Comment on lines
++381
+to
++393
+color[3] as f64 / 255.0,
+];
+let gltf = json!({
+"asset": { "version": "2.0", "generator": "MeteoCore ds-3dtiles isosurface" },
+"scene": 0,
+"scenes": [ { "nodes": [0] } ],
+"nodes": [ { "mesh": 0 } ],
+"meshes": [ {
+"primitives": [ {
+"attributes": { "POSITION": 0, "NORMAL": 1 },
+"material": 0,
+"mode": MODE_TRIANGLES,
+} ]
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Inconsistent winding between the (1,3) and (3,1) cases.
+When inside.len() == 1 the odd vertex is inside the surface, so (p1-p0)×(p2-p0) points outward. When inside.len() == 3 (odd vertex is outside), the same vertex ordering flips the cross product, yielding an inward-pointing normal on that triangle.
+doubleSided: true makes this invisible in the renderer (CesiumJS flips the normal toward the camera per face), but the mesh is geometrically non-oriented — future uses (collision detection, SDF, watertight-solid checks) will see inconsistent normals.
+A one-line fix: negate the vertex order for the (3,1) branch:
+```
+} else {
+    // Flip winding so the normal still points outward.
+    (outside[0], &inside) // then push cross(odd,rest[2]), cross(odd,rest[1]), cross(odd,rest[0])
+};
+```
+Not blocking for a visualisation-only mesh, but worth noting as a known limitation.
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/isosurface.rs
+Outdated
+Comment on lines
++465
+to
++466
+let mut tileset: serde_json::Value =
+serde_json::from_str(&base).expect("tileset_json_for_region emits valid JSON");
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Minor: round-tripping through JSON to inject the transform.
+tileset_json_for_region serialises to a String, which is then immediately parsed back into a serde_json::Value here. Consider refactoring tileset_json_for_region to return a serde_json::Value (with a thin to_string wrapper for the .pnts call-sites), so the transform can be injected before the final serialisation — one allocation instead of two.
+claude
+Bot
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+Review
+Adds a marching-tetrahedra isosurface mesher (ds-3dtiles/src/isosurface.rs, 724 lines) that converts a VoxelGrid into a glTF 2.0 .glb triangle mesh, a destination_point / EARTH_RADIUS_M shared geodesy in ds-core, and a real-data demo example. Architecture is correct and follows CLAUDE.md conventions (framework-free encoder crate, domain type in/bytes out, no per-pixel projection in the mesher).
+The test suite is solid — GLB container validation, height-ramp end-to-end geometry check, NaN-sealing guard, non-finite input rejection, tileset transform/region assertions.
+Real issue (must fix)
+background >= threshold not validated (see inline on lines 315–319).
+The docstring says bg < threshold, but the code only checks finiteness. A caller who passes Some(30.0) with threshold = 20.0 gets NaN cells treated as inside the isosurface — an inverted surface with no physical meaning, returned as Ok. Needs an explicit >= threshold rejection.
+Performance issue (should fix before the API route lands)
+Vec::with_capacity(4) in march_tet's innermost loop (see inline on lines 220–221).
+6M+ tet evaluations per encode → millions of allocator round-trips. Swap to fixed-size arrays on the stack; the change is mechanical.
+Correctness / known limitations
+Non-oriented normals (1,3) vs (3,1) winding (inline on lines 381–393): doubleSided: true covers rendering, but the mesh is not geometrically oriented. Fine for visualisation; would break any future solid-geometry use.
+Angular seam gap at azimuth 0: already noted in code and PR description. Acceptable for v1.
+Minor
+tileset_json_glb round-trips through JSON (inline on lines 465–466): serialises then immediately re-parses to inject the transform. Low priority, but worth cleaning up when tileset_json_for_region is next touched.
+VoxelGrid.angle_range units are implicit: the isosurface encoder assumes radians (consistent with the TAU test fixture and the engine), but the field has no doc comment stating the unit. Worth one line on the struct.
+The background validation is the only blocker; everything else can land as follow-ups or alongside the API route PR.
+feat(api-3dtiles): serve isosurface mesh from the API + viewer repres…
+…
+7acecbd
+```
+…entation toggle
+
+Both 3D Tiles representations of a radar volume are now choosable from the
+API and the bundled viewer: the existing `.pnts` point cloud and the new
+`.glb` isosurface mesh (#357).
+
+API (api-3dtiles):
+- tileset.json gains `?representation=points|isosurface` (default points).
+  points → content.pnts (region-only tileset, RTC_CENTER self-places);
+  isosurface → content.glb + a tile `transform` = the antenna ECEF (so the
+  tileset is built without sampling the grid).
+- New `GET /collections/{id}/content.glb?quantity=&datetime=&threshold=`:
+  read_voxel_grid + encode_isosurface_glb on a blocking thread bounded by the
+  shared render semaphore (same rule as content.pnts); content-derived ETag
+  via a shared binary_response helper; empty surface (threshold above all
+  echo) → 404. The seal floor = the colormap's domain min (< threshold).
+- collection JSON advertises a `representations` array; 400 for an unknown
+  representation or for isosurface on a collection that can't voxel-grid.
+
+ds-core: VolumeInfo gains `supports_voxel_grid` (capability) + `origin`
+(antenna lon/lat/h, for the glTF tile transform without sampling). PVOL sets
+both. ds-render: ColorMap gains `domain()` (LutColorMap returns its min/max),
+used as the isosurface no-echo floor.
+
+Viewer: a "View" dropdown (Point cloud / Isosurface), populated from the
+collection's `representations`; the numeric field relabels between "min dBZ"
+(points) and "threshold dBZ" (isosurface). pointSize styling applies only to
+the point cloud.
+
+Verified over HTTP against the live fivih fixture: representations advertised,
+isosurface tileset carries the antenna-ECEF transform, content.glb is valid
+glTF (model/gltf-binary, ETag), points path unchanged. 16 api-3dtiles
+integration tests green.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+mrauhala
+changed the title
+feat(3dtiles): isosurface mesher — VoxelGrid → glTF .glb triangle shell (#357)
+feat(3dtiles): isosurface mesh — encoder, API (both representations), viewer toggle (#357)
+Jun 9, 2026
+mrauhala
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+API + viewer for both representations (commit 7acecbd)
+Per the follow-up ask — point cloud and isosurface mesh now both available from the API and choosable in the viewer, both as proper OGC 3D Tiles tilesets.
+tileset.json?representation=points|isosurface — points → .pnts (region-only, RTC_CENTER self-places); isosurface → .glb + a tile transform = the antenna ECEF (built from VolumeInfo.origin, no sampling).
+GET /content.glb?quantity=&datetime=&threshold= — read_voxel_grid + encode_isosurface_glb on a blocking thread (shared render semaphore), content-ETag, empty→404. Seal floor = the colormap's domain() min.
+Discovery: collection JSON advertises a representations array (driven by VolumeInfo.supports_voxel_grid); the viewer reads it to populate a View dropdown (Point cloud / Isosurface), relabelling the numeric field between min dBZ and threshold dBZ.
+ds-core: VolumeInfo += supports_voxel_grid + origin. ds-render: ColorMap::domain().
+Verified over HTTP against the live fivih fixture: representations: ["points","isosurface"], isosurface tileset carries the antenna-ECEF transform, content.glb is valid glTF (model/gltf-binary), points path unchanged. 16 api-3dtiles integration tests green.
+Next per plan: complete review rounds on this PR, then #360 (split undetect/nodata in the engine sampler so the seal becomes exact).
+claude
+Bot
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+Code Review
+The isosurface mesher is well-structured: marching tetrahedra avoids the 256-case table problem, the Kuhn/Freudenthal 6-tet decomposition is correct, the height test verifies the cylindrical-index → ECEF → glTF-Y-up mapping end-to-end, and the security surface (parameter whitelist, finite-threshold guards, content-URI validation, ETag handling) is solid. CLAUDE.md compliance is good: ds-3dtiles stays framework-free, blocking work is correctly bounded by the render semaphore via spawn_blocking, and the colourmap domain() abstraction is clean.
+Two issues worth fixing before merge:
+1. Heap allocation in the marching-tet inner loop (performance)
+march_tet is called ~1.5 M times for a default-sized radar volume (60 × 360 × 12 grid × 6 tets/cube). Each call allocates two Vec::with_capacity(4) — small heap objects whose cost dominates over the actual work. Replacing them with [usize; 4] arrays plus a length counter eliminates ~3 M small allocations per frame. (See inline comment on march_tet.)
+2. get_content_glb skips the pre-blocking quantity validation (consistency)
+The .pnts get_content handler validates quantity against info.quantities before the spawn_blocking fence, so an unknown quantity is rejected before any HDF5 I/O. get_content_glb passes the quantity through directly and lets the engine reject it inside the blocking task — a full read_voxel_grid call fires before the error surfaces. The error code is still correct (InvalidParameter → 400), but the wasted work and the divergence from the .pnts pattern are worth fixing. (See inline comment on get_content_glb.)
+Non-issues / acknowledged
+Unoriented triangle winding in the (2,2) quad case is compensated by doubleSided: true — not a rendering bug.
+Angular seam gap at azimuth 0 and non-indexed mesh (no vertex sharing) are both called out as known follow-ups.
+The If-None-Match: * → 304 path is correct per RFC 7232 §3.2 and matches the pre-existing .pnts behaviour.
+VolumeInfo struct extension is safe: Rust struct-literal initialization enforces all usages are updated, and both instances in the diff are correct.
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/isosurface.rs
+outside.push(k);
+}
+}
+let cross = |a_local: usize, b_local: usize| {
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This function is called ~1.5 M times for a default-sized radar volume (60 × 360 × 12 × 6 tets). Allocating two heap Vecs per call adds ~3 M small allocations per frame; the allocator overhead dominates the actual computation here.
+Replace with fixed-size arrays and a manual length counter to keep everything on the stack:
+Suggested change
+let cross = |a_local: usize, b_local: usize| {
+let mut inside = [0usize; 4];
+let mut n_inside = 0usize;
+let mut outside = [0usize; 4];
+let mut n_outside = 0usize;
+Then replace inside.push(k) → inside[n_inside] = k; n_inside += 1; (and same for outside), and use &inside[..n_inside] / &outside[..n_outside] where the slices are consumed below. The match (inside.len(), outside.len()) becomes match (n_inside, n_outside).
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/api-3dtiles/src/handlers.rs
+let engine = engine.clone();
+let id_for_err = id.clone();
+let (bytes, etag) =
+tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, String), Tiles3dError> {
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Unlike get_content (the .pnts handler), this doesn't validate quantity against info.quantities before spawning the blocking task. An unknown quantity name will spin up spawn_blocking → full read_voxel_grid (HDF5 open + polar scan) before the engine returns InvalidParameter. Not a correctness bug — the 400 response is still correct — but it wastes a render-semaphore slot and a blocking thread on obviously-bad input.
+Add the same pre-validation the .pnts path uses:
+```
+let quantity = match &params.quantity {
+    None => engine.volume_info().default_quantity.clone(),
+    Some(q) => {
+        if !engine.volume_info().quantities.iter().any(|(id, _)| id == q) {
+            return Err(Tiles3dError::NotFound(format!(
+                "quantity '{q}' not found in collection '{id}'"
+            )));
+        }
+        q.clone()
+    }
+};
+```
+fix(3dtiles): address review round 1 (background guard, march_tet all…
+…
+3be290c
+```
+…ocs, glb validation)
+
+claude-review findings on PR #359:
+
+- **Blocker:** encode_isosurface_glb now rejects `background >= threshold`
+  (new Tiles3dError::BackgroundNotBelowThreshold). Previously the docstring
+  required `bg < threshold` but only finiteness was checked, so a too-high
+  background sealed NaN cells as *inside* → an inverted surface returned Ok.
+- **Perf:** march_tet's per-call `Vec::with_capacity(4)` ×2 replaced with
+  fixed `[usize; 4]` + length counters — the function runs millions of times
+  per encode, so the heap churn dominated. Output is byte-identical (verified:
+  same 17,152,904-byte glb on the fivih fixture).
+- **Consistency:** get_content_glb validates the quantity against the
+  advertised set *before* spawn_blocking, like the .pnts handler — an unknown
+  quantity no longer triggers a full read_voxel_grid just to be rejected.
+- **Cleanup:** tileset_json_glb builds on a shared `tileset_value_for_region`
+  (serde_json::Value) instead of serializing then re-parsing the .pnts tileset
+  string to inject the transform.
+- **Docs:** `crossing` comment corrected to `t ∈ [0, 1]` (clamp allows 1.0);
+  march_tet notes that triangle winding is not oriented and `doubleSided` is
+  the load-bearing compensation.
+
+Tests: +background_not_below_threshold_is_rejected; 15 ds-3dtiles + 16
+api-3dtiles green, clippy clean.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+mrauhala
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Review round 1 — addressed (commit 3be290c)
+#
+Finding
+Resolution
+1
+Blocker: background >= threshold not validated (inverted surface returned Ok)
+encode_isosurface_glb now returns the new Tiles3dError::BackgroundNotBelowThreshold. Test: background_not_below_threshold_is_rejected.
+2
+Perf: Vec::with_capacity(4) ×2 per march_tet (millions of allocs)
+Replaced with fixed [usize; 4] + length counters. Byte-identical output (same 17,152,904-byte glb on fivih).
+3
+Consistency: get_content_glb validates quantity inside the blocking task
+Now validated against info.quantities before spawn_blocking, matching the .pnts handler.
+4
+Cleanup: tileset_json_glb round-trips through a JSON string
+Shared tileset_value_for_region (serde_json::Value); the glb path injects transform on the Value directly — no serialize-then-reparse.
+5
+Doc: crossing says t ∈ [0,1) but clamp allows 1.0
+Corrected to [0, 1].
+6
+Note: winding not oriented; doubleSided is load-bearing
+Comment added in march_tet (and the material block already notes it).
+Acknowledged-as-follow-up (not changed here): angular-seam gap at azimuth 0, non-indexed mesh (no vertex sharing), and the undetect/nodata split (tracked in #360 — next up after this PR's review settles).
+15 ds-3dtiles + 16 api-3dtiles tests green; clippy clean.
+claude
+Bot
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+Code Review
+Overall: The implementation is architecturally sound and correct. The marching-tetrahedra choice is well-motivated (no look-up table → topology correct by construction), the geometry math is verified end-to-end by the height-ramp test, the concurrency model follows the established pattern (semaphore + spawn_blocking), and the security boundary is clean (representation enum-validated, threshold finite-checked, URIs validated by the shared helper). The 13 unit tests + integration tests give good coverage. Two issues below worth fixing before merge.
+Issues
+1 — Missing isosurface links entry in collection doc (minor, discoverability)
+collection_doc now returns a representations array, but the links array only carries the point-cloud tileset URL. API clients that follow links (rather than reading representations and constructing URLs themselves) have no way to discover the isosurface representation. A second "rel": "3dtiles" link with ?representation=isosurface (when supports_voxel_grid is true) would make the collection self-describing.
+2 — floor (sealing background) uses the shared reflectivity colormap for all quantities
+In get_content_glb:
+```
+let floor = state.colormap.domain().map(|(lo, _)| lo)
+    .unwrap_or(threshold - 64.0)
+    .min(threshold - 1.0);
+```
+state.colormap is the single per-collection colormap (currently always radar_dbz, domain (-32, 95)). For non-reflectivity quantities (VRADH, ZDR, RHOHV) the sealing floor of -32.0 is physically meaningless — it just happens to be below any likely threshold, so background < threshold is satisfied and the mesh closes. The result is geometrically correct but semantically accidental. The .pnts path has the same single-colormap limitation, so this is consistent; it just isn't called out in a comment here. A note like // v1: uses the collection-level colormap regardless of quantity; per-quantity colormaps (#350) will fix this would prevent confusion when per-quantity colormaps are added.
+Observations (not blocking)
+Angular seam gap at azimuth 0 (North direction) — The fix (wrap i_a = n_a−1 → 0) is one extra cube iteration; worth noting in the tracking issue that it will always face North for Finnish radars, which is a common storm-track direction.
+Non-indexed mesh — at 178 k triangles the GLB is ~13 MB (72 bytes/tri). Indexed would be ~2 MB. Fine for v1.
+binary_response helper — clean refactor; RFC 7232 If-None-Match: * handling is correct.
+🤖 Generated with Claude Code
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/api-3dtiles/src/handlers.rs
+Outdated
+"quantities": quantities,
+"representations": representations,
+"links": [
+{ "href": format!("{base}/3dtiles/collections/{id}"), "rel": "self", "type": "application/json", "title": "This document" },
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The links array only includes the point-cloud tileset URL. When supports_voxel_grid is true a client following links can't discover the isosurface representation. Consider adding a second "rel": "3dtiles" link for the isosurface case:
+Suggested change
+{ "href": format!("{base}/3dtiles/collections/{id}"), "rel": "self", "type": "application/json", "title": "This document" },
+{ "href": format!("{base}/3dtiles/collections/{id}"), "rel": "self", "type": "application/json", "title": "This document" },
+{ "href": format!("{base}/3dtiles/collections/{id}/tileset.json"), "rel": "3dtiles", "type": "application/json", "title": "3D Tiles tileset (point cloud)" },
+…plus, inside an if supports_voxel_grid block:
+```
+{ "href": format!("{base}/3dtiles/collections/{id}/tileset.json?representation=isosurface"), "rel": "3dtiles", "type": "application/json", "title": "3D Tiles tileset (isosurface)" },
+```
+This makes the collection self-describing for clients that follow rel=3dtiles links rather than reading representations and constructing URLs.
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/api-3dtiles/src/handlers.rs
+Comment on lines
++411
+to
++416
+let color = state.colormap.color(Some(threshold));
+let floor = state
+.colormap
+.domain()
+.map(|(lo, _)| lo)
+.unwrap_or(threshold - 64.0)
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+state.colormap is the single per-collection colormap (today always radar_dbz, domain (-32, 95)). For non-reflectivity quantities like VRADH or ZDR the floor of -32.0 is physically meaningless, but it is always below any reasonable threshold, so background < threshold holds and the surface closes correctly. The result is geometrically fine but semantically accidental.
+Worth a one-line note so this doesn't look like a bug when per-quantity colormaps (#350) are added:
+Suggested change
+let color = state.colormap.color(Some(threshold));
+let floor = state
+.colormap
+.domain()
+.map(|(lo, _)| lo)
+.unwrap_or(threshold - 64.0)
+// Colour the shell at the threshold; seal NaN (clear air / unmeasured) at
+// the colormap's floor so the surface closes into solid blobs. The floor
+// must be < threshold (clamp defensively against an odd colormap domain).
+// v1: uses the collection-level colormap regardless of quantity; per-quantity
+// colormaps (#350) will give each quantity its own correct floor.
+let color = state.colormap.color(Some(threshold));
+let floor = state
+.colormap
+.domain()
+.map(|(lo, _)| lo)
+.unwrap_or(threshold - 64.0)
+.min(threshold - 1.0);
+fix(api-3dtiles): address review round 2 (isosurface link + colormap-…
+…
+f738d63
+```
+…floor note)
+
+claude-review round 2 on PR #359 (both minor, non-blocking):
+
+- Collection doc now emits a second `rel:"3dtiles"` link with
+  `?representation=isosurface` when the collection supports voxel grids, so a
+  link-following client (not just one reading `representations`) can discover
+  both tilesets. Test asserts both links are present.
+- Documented that get_content_glb's sealing `floor` uses the single
+  collection-level colormap regardless of quantity (same v1 limitation as the
+  .pnts path): geometrically fine, semantically approximate for
+  non-reflectivity quantities; per-quantity colormaps (#350) fix it.
+
+16 api-3dtiles tests green, clippy clean.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+mrauhala
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Review round 2 — addressed (commit pushed)
+#
+Finding
+Resolution
+1
+Missing isosurface links entry (discoverability)
+collection_doc now adds a second rel:"3dtiles" link with ?representation=isosurface when supports_voxel_grid. Test asserts both links present.
+2
+Seal floor uses the shared reflectivity colormap for all quantities
+Added a comment: v1 uses the collection-level colormap regardless of quantity (same limitation as the .pnts path) — geometrically fine, semantically approximate for non-reflectivity quantities; per-quantity colormaps (#350) fix it.
+Observations (non-blocking, left as tracked follow-ups): angular-seam gap at azimuth 0 (always North for Finnish radars — noted for #357 follow-up), non-indexed mesh (vertex sharing would cut ~13 MB → ~2 MB).
+claude
+Bot
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+Review: feat(3dtiles): isosurface mesh encoder, API, viewer toggle (#357)
+Summary
+The marching-tetrahedra choice is well-justified: no lookup table, topology correct by construction, NaN-aware sealing. The background parameter cleanly resolves the curtains artifact from d0ba4f7. GLB container format, ETag/304 handling, and concurrency (semaphore + spawn_blocking) all follow project conventions correctly. The height-ramp end-to-end test is the right kind of geometry verification given the no-renderer constraint.
+No blocking issues. Three findings below (two minor correctness, one test gap).
+1 — Normal winding inconsistency causes inverted lighting on ~half the surface
+crates/ds-3dtiles/src/isosurface.rs — march_tet, (1,3)/(3,1) cases
+The (1,3) case (one inside corner, three outside) emits a triangle whose face normal points outward (away from the volume). The (3,1) case (three inside, one outside) uses the same edge-crossing order with the roles swapped — the winding is reversed, so the flat normal points inward. doubleSided: true hides the gap (both faces render), but CesiumJS flips the normal for back-faces, meaning the (3,1) region is lit as if viewed from inside: strong highlights on the shadowed side, dark face toward the light. In practice this is visible when a dense echo core is surrounded by a weaker-echo shell — the interior renders inverted. The fix is to flip the vertex order in the (3,1) arm so both arms produce outward normals (the (2,2) quad has the same issue but is harder to orient without knowing which inside/outside pairing is "exterior").
+2 — Demo region duplicates logic already in VolumeInfo::region
+crates/engine-odim/examples/gen_isosurface.rs — ~lines 88–104
+The example computes a dlon/dlat bounding region from grid.radius_range and grid.origin_lat. info.region (the Option<[f64; 6]> on VolumeInfo) is already computed by derive_site_meta and is the same value the production /tileset.json endpoint uses. Using info.region as the primary source (falling back to the computed approximation only on None) would keep demo and production output consistent. The current lat_r.cos().max(1e-6) clamp also degenerates near the poles (yielding dlon > 15 rad), though harmless for real radar sites.
+3 — No test for supports_voxel_grid = false + isosurface request → 400
+crates/api-3dtiles/tests/integration.rs
+Both the tileset and content handlers guard against supports_voxel_grid: false and return 400, but there is no integration test exercising this path. A second MockVolume with supports_voxel_grid: false and origin: None (matching the default trait impl) plus two assertions (/tileset.json?representation=isosurface and /content.glb both → 400) would complete the coverage.
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/isosurface.rs
+Outdated
+)
+};
+// Triangle winding is NOT consistently oriented across these cases (the
+// (1,3)/(3,1) split flips the normal vs the odd corner's side, and the
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The (1,3) and (3,1) arms produce opposite winding orientations, so their flat normals point in opposite directions. In the (1,3) case the odd corner is inside[0] and the three cross() calls go from inside→outside, producing a roughly outward-pointing normal. In the (3,1) case the odd corner is outside[0] and the same call order goes from outside→inside — the winding reverses and the normal points inward. doubleSided: true prevents the gap from showing as a hole, but CesiumJS negates the normal for back-facing triangles, so the (3,1) portion of the surface (dense echo core) is lit as though viewed from inside: highlights on the shadowed side, dark on the lit side. For a visualization shell this is acceptable, but it will be noticeable whenever strong echo (many inside cells) is surrounded by weaker echo. The fix for the (3,1) arm is to swap two vertex arguments to restore outward winding:
+Suggested change
+// (1,3)/(3,1) split flips the normal vs the odd corner's side, and the
+(1, 3) | (3, 1) => {
+// One odd corner vs three: the surface is the triangle on the three
+// edges from the odd corner to the others.
+let (odd, rest, outward) = if ni == 1 {
+(inside[0], &outside, true)
+} else {
+(outside[0], &inside, false)
+};
+// Swap p1/p2 for the (3,1) case so both arms emit outward-facing normals.
+if outward {
+mesh.push(
+cross(odd, rest[0]),
+cross(odd, rest[1]),
+cross(odd, rest[2]),
+)
+} else {
+mesh.push(
+cross(odd, rest[0]),
+cross(odd, rest[2]),
+cross(odd, rest[1]),
+)
+}
+(The exact swap axis needs a quick render-check — the test suite can verify normals are finite but can't distinguish inward vs outward. Tracking this as a follow-up is fine given doubleSided: true.)
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/engine-odim/examples/gen_isosurface.rs
+Outdated
+let lat_r = grid.origin_lat.to_radians();
+let dlat = radius_max / earth_r;
+let dlon = radius_max / (earth_r * lat_r.cos().max(1e-6));
+let lon_r = grid.origin_lon.to_radians();
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+VolumeInfo::region is already the authoritative geodetic bounding region computed by derive_site_meta in the engine — the same value the production /tileset.json endpoint uses. The demo should use it as the primary source and fall back to the approximate calculation only when it's None:
+Suggested change
+let lon_r = grid.origin_lon.to_radians();
+let region = info.region.unwrap_or_else(|| {
+let earth_r = ds_core::geo::EARTH_RADIUS_M;
+let radius_max = grid.radius_range[1];
+let lat_r = grid.origin_lat.to_radians();
+let dlat = radius_max / earth_r;
+let dlon = radius_max / (earth_r * lat_r.cos().max(1e-6));
+let lon_r = grid.origin_lon.to_radians();
+[
+lon_r - dlon,
+lat_r - dlat,
+lon_r + dlon,
+lat_r + dlat,
+grid.origin_height + grid.height_range[0],
+grid.origin_height + grid.height_range[1],
+]
+});
+Using the fallback path as written also has a latent issue: lat_r.cos().max(1e-6) is too small a floor — at a polar site it still yields dlon > 15 rad (a region wider than the globe). The production engine's region is computed correctly; the demo should not need its own approximation.
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/api-3dtiles/tests/integration.rs
+"/collections/radar-fivih/content.glb?threshold={v}"
+))
+.await;
+assert_eq!(cs, StatusCode::BAD_REQUEST, "content rejects threshold={v}");
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Both the tileset and content handlers have an early-return guard for supports_voxel_grid = false, but there is no test exercising that path. Consider adding a second mock and two assertions:
+```
+// MockVolume that does NOT support voxel grids — simulates a point-cloud-only engine.
+struct PointsOnlyVolume;
+impl VolumeEngine for PointsOnlyVolume {
+    fn read_point_cloud(&self, ...) -> ... { unimplemented!() }
+    fn volume_info(&self) -> Arc<VolumeInfo> {
+        Arc::new(VolumeInfo {
+            // ...same as MockVolume but with:
+            supports_voxel_grid: false,
+            origin: None,
+            ..Default::default() // or list fields explicitly
+        })
+    }
+}
+
+#[tokio::test]
+async fn isosurface_on_points_only_collection_is_400() {
+    // tileset.json with representation=isosurface → 400
+    // content.glb → 400
+}
+```
+This confirms the guards don't regress silently if the control flow is refactored.
+fix(3dtiles): address review round 3 (orient normals outward, demo re…
+…
+8c889dc
+```
+…gion, 400 test)
+
+claude-review round 3 on PR #359 (no blockers; two correctness + one test gap):
+
+- **Normal orientation (real lighting fix).** The marching-tet cases emitted
+  inconsistent winding — (1,3) faces pointed outward, (3,1) inward — so
+  doubleSided hid the gap but ~half the surface lit as if viewed from inside.
+  march_tet now derives the local outward direction (inside-corner centroid →
+  outside-corner centroid, toward lower values) and MeshBuilder::push flips the
+  winding + normal to agree with it, so every stored normal points outward.
+  doubleSided kept as belt-and-suspenders. New test
+  `isosurface_normals_point_outward` (height-ramp ⇒ all normals point down).
+- **Demo region.** gen_isosurface now uses VolumeInfo::region (the same value
+  production /tileset.json uses), falling back to the origin±radius
+  approximation only when absent — demo and production stay consistent.
+- **Coverage.** New api-3dtiles test `isosurface_on_unsupported_collection_is_400`:
+  a MockNoVoxel (supports_voxel_grid=false) advertises only `points` and 400s
+  on both the isosurface tileset and content.glb routes.
+
+16 ds-3dtiles + 17 api-3dtiles tests green; clippy clean; demo output identical
+size (winding flip doesn't change vertex count).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+mrauhala
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Review round 3 — addressed (commit pushed)
+#
+Finding
+Resolution
+1
+Winding inconsistency → inverted lighting on ~half the surface
+march_tet now derives the local outward direction (inside-centroid → outside-centroid, toward lower values) and MeshBuilder::push flips winding+normal to match, so every normal points outward. doubleSided kept as belt-and-suspenders. New test isosurface_normals_point_outward.
+2
+Demo duplicates region logic instead of VolumeInfo::region
+gen_isosurface now uses info.region (the production value), falling back to the approximation only when None.
+3
+No test for supports_voxel_grid=false + isosurface → 400
+New isosurface_on_unsupported_collection_is_400 (a MockNoVoxel advertises only points, 400s on both isosurface routes).
+16 ds-3dtiles + 17 api-3dtiles tests green; clippy clean. The normal-orientation fix is verified by the new unit test (height-ramp ⇒ all normals point down/outward); I can also render-verify it in CesiumJS if you'd like.
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/api-3dtiles/src/handlers.rs
+ds_3dtiles::Tiles3dError::Empty => Tiles3dError::NotFound(format!(
+"no isosurface at threshold {threshold} for collection '{id_for_err}'"
+)),
+other => Tiles3dError::Internal(format!("isosurface encode failed: {other}")),
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Tiles3dError::TooLarge is folded into the other → arm here, so the client receives HTTP 500 ("Internal server error") when the threshold is simply too low. But this is an entirely client-driven condition — the mesh cap is exceeded because the threshold was set below where it should be, not because of a server fault. Returning 500 will make clients (and operators) think the server is broken rather than prompting them to raise the threshold.
+Map TooLarge explicitly to BadRequest so it becomes HTTP 400:
+Suggested change
+other => Tiles3dError::Internal(format!("isosurface encode failed: {other}")),
+ds_3dtiles::Tiles3dError::Empty => Tiles3dError::NotFound(format!(
+"no isosurface at threshold {threshold} for collection '{id_for_err}'"
+)),
+ds_3dtiles::Tiles3dError::TooLarge(_) => Tiles3dError::BadRequest(format!(
+"threshold {threshold} produces too many triangles for collection '{id_for_err}': raise the threshold"
+)),
+other => Tiles3dError::Internal(format!("isosurface encode failed: {other}")),
+Note: Internal message is already suppressed by error.rs ("Internal server error") so the other arm is still safe for NonFinite/BackgroundNotBelowThreshold, which are genuine encoding invariant violations.
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/isosurface.rs
+Outdated
+Comment on lines
++280
+to
++284
+}
+[
+s[0] / count as f64,
+s[1] / count as f64,
+s[2] / count as f64,
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+For every tetrahedron that straddles the threshold, the outward direction is found by mapping two centroids (inside and outside) from index space to glTF space via index_to_gltf_pos — each of which calls destination_point (sin/cos + atan2) and geodetic_to_ecef (sin/cos). That's two full spherical-ECEF conversions per straddling tet, purely to determine a sign for the normal flip.
+At 178K triangles (~120K+ straddling tets based on the PR description) this adds on the order of 240K transcendental-function evaluations, which could be ~100–200 ms on a slow host. If the spawn_blocking budget is already tight, it's worth profiling.
+A cheaper alternative: compute the gradient direction in the raw cylindrical index space (the cidx already has three-axis fractional coordinates) and use that as the outward hint — no ECEF conversion needed for the sign check.
+claude
+Bot
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+Review: feat(3dtiles) isosurface encoder + API
+What the PR does
+Adds a marching-tetrahedra isosurface mesher to ds-3dtiles that turns a cylindrical VoxelGrid into a glTF 2.0 .glb triangle mesh. Wires it into api-3dtiles as a second representation behind ?representation=isosurface on tileset.json and a new content.glb route. Updates the CesiumJS viewer with a representation toggle.
+One real bug
+Tiles3dError::TooLarge maps to HTTP 500 in get_content_glb (see inline).
+When a threshold is low enough to produce more than 3 M triangles, the catch-all other => Tiles3dError::Internal(...) arm fires, and the client sees HTTP 500 + "Internal server error" — indistinguishable from a real server fault. This is a purely client-driven condition (raise the threshold). Needs an explicit TooLarge arm that maps to BadRequest (400).
+Performance note
+Two ECEF round-trips per straddling tetrahedron for normal orientation (see inline).
+The outward-hint direction is found by mapping inside and outside centroids from index space to glTF/ECEF space — two full destination_point + geodetic_to_ecef calls per active tet. For the 178K-triangle fivih demo that is ~240K extra transcendental-function evaluations. Not a correctness issue and probably fine given the spawn_blocking isolation, but worth profiling on a slow host. The gradient in cylindrical index space would give the same sign information without any ECEF conversion.
+Design note (not a bug)
+VolumeInfo.supports_voxel_grid: true + origin: None is an unsanctioned combination: get_tileset hits the .ok_or_else at handlers.rs:284 and returns HTTP 500. All current engines set both fields consistently, but there is no type-level enforcement. A VoxelGridCaps { origin: [f64; 3] } variant (or making the pair a single Option) would prevent a future engine from landing in this state silently.
+Everything else looks solid
+Marching-tetrahedra topology is correct by construction (K4 graph, no lookup table). The (1,3)/(3,1) triangle and (2,2) quad cases are both right; the quad perimeter ordering (ac->bc->bd->ad) is a valid non-self-intersecting cycle.
+MeshBuilder::push increments and checks the triangle count before pushing data, bounding memory at ~216 MB worst case.
+crossing() is only ever called with one inside and one outside corner, so vb - va != 0 and t in [0, 1) is guaranteed — the .clamp is belt-and-suspenders, not a fix for a live NaN path.
+glTF Z-up->Y-up flip is correctly applied to .glb content and correctly skipped for .pnts.
+Threshold and background non-finite/ordering validation is complete at both the encoder and API layers.
+Content-URI path-traversal guard (tileset_value_for_region) covers both tilesets.
+Test coverage is thorough: GLB container structure, height-ramp end-to-end geometry, normal orientation, empty/NaN/sealing/background-below-threshold guards, unknown representation -> 400, non-finite threshold -> 400, no-voxel-grid collection -> 400.
+destination_point is pinned against closed-form analytic references (meridian / equator / antimeridian wrap).
+Viewer JS uses textContent (not innerHTML) for API-derived data and hardcoded string comparisons for representation — no new XSS surface.
+fix(3dtiles): address review round 4 (TooLarge→400, make supports+ori…
+…
+8b61cfc
+```
+…gin atomic, halve orient cost)
+
+claude-review round 4 on PR #359:
+
+- **Bug:** get_content_glb mapped ds_3dtiles::Tiles3dError::TooLarge through the
+  catch-all → HTTP 500. It's client-driven (threshold too low for the grid), so
+  it now maps to 400 with a "raise the threshold" message.
+- **Design (type-safety):** VolumeInfo's `supports_voxel_grid: bool` + `origin:
+  Option<[f64;3]>` allowed the unsanctioned "supports but no origin" state
+  (which 500'd in get_tileset). Collapsed into a single
+  `voxel_grid: Option<VoxelGridCaps { origin: [f64;3] }>` — capability and the
+  origin it requires are now atomic, so that state is unrepresentable and the
+  isosurface tileset can't 500 on a missing origin (→ 400 "unsupported" instead).
+  PVOL + both test mocks updated.
+- **Perf:** normal orientation did two glTF/ECEF projections per straddling tet
+  (inside + outside centroids). Cut to one: push already has the triangle's own
+  centroid, so it only needs the outside-corner centroid as the outward
+  reference (`outward = out_ref − triangle_centroid`). (Kept world-space, not
+  the reviewer's index-space gradient, to avoid a cylindrical→ECEF handedness
+  flip I can't render-verify.)
+
+Output byte-identical (17,152,904-byte glb). 16 ds-3dtiles + 17 api-3dtiles
+tests green; clippy clean; server builds.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+mrauhala
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Review round 4 — addressed (commit pushed)
+#
+Finding
+Resolution
+1
+Bug: TooLarge → HTTP 500 in get_content_glb
+Now mapped to 400 ("raise the threshold") — it's a client-driven condition, not a server fault.
+2
+Design: supports_voxel_grid:true + origin:None representable (→ 500)
+Collapsed the two fields into one VolumeInfo.voxel_grid: Option<VoxelGridCaps { origin }> — capability + origin are atomic, the bad state is unrepresentable, and the isosurface tileset can no longer 500 on a missing origin.
+3
+Perf: two ECEF round-trips per tet for orientation
+Cut to one: push already has the triangle's own centroid, so only the outside-corner centroid needs projecting (outward = out_ref − tri_centroid). Kept world-space rather than the index-space gradient — the cylindrical→ECEF map's handedness isn't something I can render-verify, and a wrong sign would invert every normal.
+Output byte-identical; 16 ds-3dtiles + 17 api-3dtiles tests green; clippy clean.
+claude
+Bot
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+Review: feat(3dtiles): isosurface mesh — encoder, API, viewer toggle (#357)
+Overview
+Adds a marching-tetrahedra isosurface mesher that turns a cylindrical VoxelGrid into a glTF 2.0 .glb triangle mesh, serving it from a new GET /3dtiles/collections/{id}/content.glb route alongside the existing .pnts point-cloud. Both representations are selectable via ?representation= on tileset.json. The implementation follows CLAUDE.md architecture patterns correctly: ds-3dtiles stays framework-free, the handler correctly uses spawn_blocking + the render semaphore, and the glTF tilesets use the antenna ECEF as a column-major transform (the correct 3D Tiles spec placement for content without an embedded origin).
+What looks solid
+Marching-tetrahedra correctness: K4 topology guarantees no case-table transcription bugs. The NaN-skip vs. background-seal duality is well-reasoned and tested. All 13 unit tests are meaningful (not round-trips on the same code path) — the height test verifies the full fractional-index → destination_point → geodetic_to_ecef → Y-up flip pipeline against an analytic expectation, and the normals test pins the outward-orientation fix.
+VoxelGridCaps { origin } coupling: Making capability and origin atomic in one Option is a clean invariant — "supports but no origin" is unrepresentable.
+ETag / If-None-Match handling: binary_response consolidates the 304 logic correctly; the * wildcard and comma-list cases are both covered per RFC 7232 §3.2.
+Content-URI safety: the ../absolute/scheme validation is reused without duplication.
+Viewer UX: the loadToken guard handles rapid representation-switching correctly; superseded CesiumJS tilesets are destroyed before returning.
+Issues
+1. BackgroundNotBelowThreshold silently becomes a 500 (handlers.rs, the other => arm in get_content_glb)
+encode_isosurface_glb can return BackgroundNotBelowThreshold when background >= threshold. The current floor computation (colormap.domain().map(|(lo,_)| lo).unwrap_or(threshold - 64.0).min(threshold - 1.0)) makes this unreachable in practice for any finite threshold — the .min(threshold - 1.0) clamp always gives floor < threshold. But the match arm is incomplete: BackgroundNotBelowThreshold falls through to other => Tiles3dError::Internal(...), so a future change to the floor formula that makes it reachable would silently surface as a 500 with no actionable diagnostic. Adding an explicit arm mapping it to BadRequest (the semantically correct status — it's a bad parameter combination) costs one line and closes the hole.
+2. (2, 2) quad split always fans from q0 (isosurface.rs, the (2,2) arm of march_tet)
+The fan triangulation uses q0-q2 as the shared diagonal without checking whether q1-q3 would be shorter. In the affine (pre-projection) space the quad is always planar and typically convex, so both diagonals produce valid geometry. After the cylindrical→ECEF projection — which is non-linear but small across adjacent cells — the quad can become mildly non-planar; choosing the shorter diagonal would give better triangle aspect ratios near the seam. This is a mesh-quality detail, not a correctness bug, and the visual difference for radar-scale grids is negligible. Worth a follow-up note if vertex sharing (#351 follow-up) is ever added.
+Minor observations (not blocking)
+ISOSURFACE_DEFAULT_THRESHOLD = 20.0 is physically correct for reflectivity but silently wrong for VRADH/ZDR/etc. The code comments this and ties the fix to per-quantity colormaps (3D Tiles Phase 4: time-dynamic tilesets (per-timestep animation) #350) — that's the right place.
+The non-indexed mesh (3× vertex storage) and the angular seam gap are both explicitly noted in code; appropriate for a v1 encoder.
+gen_isosurface.rs uses html_escape before injecting into the HTML — covers &, <, >, " — sufficient for the PLC/NOD strings that appear in hud.
+Verdict
+One genuine correctness gap (the BackgroundNotBelowThreshold → 500 mapping), one minor quality note. Everything else is sound. The geometry math is unit-tested end-to-end. Ready to merge once the error mapping is addressed.
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/api-3dtiles/src/handlers.rs
+ds_3dtiles::Tiles3dError::TooLarge(_) => Tiles3dError::BadRequest(format!(
+"threshold {threshold} produces too large an isosurface; raise it"
+)),
+other => Tiles3dError::Internal(format!("isosurface encode failed: {other}")),
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+BackgroundNotBelowThreshold falls through to Internal here and would surface as a 500. It's unreachable with the current floor formula (colormap_min.min(threshold - 1.0) always gives floor < threshold for any finite threshold), but the match is semantically incomplete. Add an explicit arm so a future change to the floor computation doesn't silently produce a 500:
+Suggested change
+other => Tiles3dError::Internal(format!("isosurface encode failed: {other}")),
+ds_3dtiles::Tiles3dError::BackgroundNotBelowThreshold { .. } => {
+Tiles3dError::BadRequest("isosurface seal floor >= threshold (internal config error)".into())
+}
+other => Tiles3dError::Internal(format!("isosurface encode failed: {other}")),
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/isosurface.rs
+Comment on lines
++315
+to
++321
+(2, 2) => {
+// Two vs two: the surface is a quad on the four crossing edges.
+// Order its corners around the perimeter so the two triangles don't
+// self-intersect: (a–c, b–c, b–d, a–d) — consecutive edges share an
+// endpoint, forming a proper cycle.
+let (a, b) = (inside[0], inside[1]);
+let (c, d) = (outside[0], outside[1]);
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The fan always splits on the q0–q2 diagonal. In affine space the quad is planar and the split is valid; after the cylindrical→ECEF projection it can become mildly non-planar, and choosing the shorter diagonal would give better triangle aspect ratios. Not a correctness bug for radar-scale grids, but worth noting for a future mesh-quality pass (especially if vertex sharing is ever added).
+fix(3dtiles): address review round 5 (BackgroundNotBelowThreshold→400…
+…
+428e545
+```
+…, quad-diagonal note)
+
+claude-review round 5 on PR #359 ("ready to merge once the error mapping is
+addressed"):
+
+- get_content_glb now has an explicit match arm mapping
+  ds_3dtiles::Tiles3dError::BackgroundNotBelowThreshold to 400 instead of
+  letting it fall through the catch-all to 500. It's unreachable today (the
+  seal floor is clamped < threshold), but this closes the hole if the floor
+  formula ever changes — it's a bad parameter combination, not a server fault.
+- Noted in the (2,2) quad arm that we always fan from q0; choosing the shorter
+  diagonal would marginally improve aspect ratios on the projected quad — a
+  follow-up (negligible at radar grid scale), tied to vertex sharing.
+
+16 ds-3dtiles + 17 api-3dtiles tests green; clippy clean.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+mrauhala
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Review round 5 — addressed (commit pushed)
+#
+Finding
+Resolution
+1
+BackgroundNotBelowThreshold falls through to 500
+Explicit match arm → 400 (a bad parameter combination). Unreachable today (the floor is clamped < threshold), but the hole is now closed against a future floor-formula change.
+2
+(2,2) quad always fans from q0 (mesh-quality, non-blocking)
+Added a code note: shorter-diagonal selection is a follow-up tied to vertex sharing; negligible at radar grid scale.
+Minor observations (default threshold for non-reflectivity quantities, non-indexed mesh, angular seam) are all already noted in code and tracked.
+16 ds-3dtiles + 17 api-3dtiles tests green; clippy clean. This was the round-5 verdict's only required change — I believe the review is settled.
+claude
+Bot
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+Review — feat(3dtiles): isosurface mesh (#357)
+No blocking issues. Ready to merge.
+Algorithm (ds-3dtiles/isosurface.rs)
+The Kuhn/Freudenthal 6-tet cube decomposition is correct — verified by tracing all six monotone 0→7 bit-permutation paths. The (1,3), (3,1), and (2,2) marching-tet cases are all correct:
+(1,3)/(3,1): The odd corner's crossing edges to the 3-majority are the only straddling edges; rest[3] is never accessed (ni or no is exactly 3 in each case).
+(2,2): The quad cycle (a–c, b–c, b–d, a–d) is a valid non-self-intersecting perimeter; consecutive edges share a tet corner. The fan from q0 is topologically correct.
+Normal orientation: out_ref = outside-corner centroid projected to glTF-space; MeshBuilder::push flips winding+normal when the computed normal points inward. Correct for all three cases. The degenerate-triangle guard (zero area → return Ok(())) correctly precedes triangles += 1, so degenerate triangles don't inflate the count.
+Geometry (index → ECEF → Y-up)
+The (fr + 0.5) formula in index_to_gltf_pos is consistent with the engine's cell-centre sampling convention, and the crossing interpolation between integer cidx values preserves it. The Z-up→Y-up pre-rotation (dx, dz, -dy) for glTF content is correct and independently verified by the height test (which reconstructs heights from stored positions).
+destination_point uses the same EARTH_RADIUS_M as the volume engines; the antimeridian normalisation (lon + 540).rem_euclid(360) - 180 is correct.
+API (api-3dtiles/handlers.rs)
+Error mapping: TooLarge→400, Empty→404, BackgroundNotBelowThreshold→400 are all correct. The currently-unreachable BackgroundNotBelowThreshold arm is a justified defensive mapping in case the floor formula changes.
+Pre-flight quantity check before spawn_blocking prevents a full HDF5 scan on bad input — consistent with the .pnts handler.
+VoxelGridCaps collapses capability + origin into one Option, making the "supports but no origin" 500 path unrepresentable. Good type-driven design.
+Semaphore: _permit is held for the lifetime of the spawn_blocking await (dropped at function end, after the join). Correct.
+floor clamping (.min(threshold - 1.0)): correctly handles the case where threshold falls below the colormap domain.
+Security
+No new attack surfaces. Content-URI construction uses pct_encode + server-controlled tokens; the existing validator (no .., no scheme, no absolute path) is unchanged and applied to the .glb URI. HTML escaping in gen_isosurface.rs covers the four dangerous characters for HTML content/title context — single quotes are safe there.
+CLAUDE.md compliance
+ds-core gains pure geodesy functions with no framework deps added. ✓
+ds-3dtiles stays framework-free (serde_json only, already present). ✓
+api-3dtiles doesn't touch engine internals; all blocking HDF5 I/O is behind spawn_blocking + render semaphore. ✓
+ColorMap::domain() default returns None — no breaking change for existing implementations. ✓
+Test coverage
+13 encoder unit tests + 7 new API integration tests cover: container well-formedness, height mapping end-to-end, outward normal orientation, sealing behaviour, error guards (Empty, TooLarge, NonFinite, BackgroundNotBelowThreshold), capability-gating (no-voxel engine → 400), ETag, and the tile transform/region structure. Adequate for an encoder whose output can't be eyeballed at CI time.
+Tracked follow-ups (already documented in code, non-blocking)
+Angular seam gap at azimuth 0 (one cube wide — acceptable for a visualisation shell)
+Non-indexed mesh (3× vertex duplication — vertex sharing deferred)
+Single-colormap floor for all quantities (per-quantity colormaps tracked in 3D Tiles Phase 4: time-dynamic tilesets (per-timestep animation) #350)
+Hide details
+View details
+mrauhala
+merged commit 9554855
+into
+main
+Jun 9, 2026
+4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+mrauhala
+deleted the
+feat/357-isosurface
+branch
+June 9, 2026 07:43
+mrauhala
+mentioned this pull request
+Jun 9, 2026
+feat(engine-odim): split radar undetect (clear air) from nodata in the voxel grid (#360)
+#361
+Merged
+mrauhala
+added a commit
+that referenced
+this pull request
+Jun 9, 2026
+fix(3dtiles): keep sealed isosurface as default; #360 distinction sta…
+…
+c4eec85
+```
+…ys as foundation
+
+User feedback: background=None reintroduced the open/"curtain" look (the
+unmeasured boundaries — cone of silence, below the lowest beam — render as open
+walls). The sealed solid-blob look (#359) is preferred. So:
+
+- The isosurface API + demo seal again: background=Some(-32) (clamped <
+  threshold in the API so a sub-floor threshold can't trip the encoder guard).
+  The engine fills clear air with the same -32 floor, so clear-air and
+  unmeasured cells seal at one uniform level → solid closed blobs. Render-
+  verified: curtains gone, byte-identical 17.2 MB to the #359 sealed mesh.
+- #360's engine distinction (sample_class, NO_ECHO_FLOOR, voxel fill) is KEPT
+  as a foundation — invisible under the sealed default, but it's the substrate
+  true voxels (#351) need and enables an opt-in "honest open boundary" mode
+  (background=None).
+- The mock VolumeEngine fills clear air with the -32 floor (matching the
+  post-#360 engine), fixing the api-3dtiles content.glb test that a sealed mock
+  now needs (this was the CI-red: with None, the all-NaN-around-echo mock
+  produced an empty surface → 404).
+
+claude-review round-1 doc fixes (PR #361):
+- VolumeInfo::valid_count() doc: now counts the clear-air floor too, so it is
+  NOT an echo-emptiness check — callers must use the engine echo count.
+- sample_class NaN-undetect comment corrected (a NaN undetect sentinel skips
+  the undetect check, so its clear-air cells classify Masked via raw-is-NaN).
+- voxel fill comment: dropped the stale "valid vs valid_count disagree"
+  rationale (they diverge by design post-#360).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+mrauhala
+added a commit
+that referenced
+this pull request
+Jun 9, 2026
+feat(engine-odim): split radar undetect (clear air) from nodata in th…
+…
+b853ffb
+```
+…e voxel grid (#360) (#361)
+
+## What
+
+Closes #360. Makes the cylindrical `VoxelGrid` distinguish **clear air**
+(`undetect`: the radar looked and saw nothing) from **genuinely
+unmeasured** space (`nodata` / cone of silence / below the lowest beam /
+beyond max range), so the distinction is available to the isosurface
+(#357) and to true voxels (#351).
+
+Before, `RawPixels::sample` masked both as `None` → `NaN` in the grid,
+indistinguishable.
+
+## The visual default: **sealed** (solid blobs)
+
+I first switched the isosurface to `background=None` (leave unmeasured
+cells open). **Render-verify + maintainer feedback:** that reintroduced
+the open/"curtain" look at the unmeasured boundaries (cone of silence,
+below the lowest beam). So the **isosurface seals by default**
+(`background=Some(-32)`, clamped `< threshold`) for the solid-blob look
+— render-verified byte-identical (17.2 MB) to the merged #359 mesh,
+curtains gone. #360's engine distinction is kept as a **foundation**
+(invisible under the seal, but the substrate voxels need) and enables an
+**opt-in** "honest open boundary" mode (`background=None`).
+
+## Changes
+
+- **`reader.rs`** — `RawPixels::sample_class(...) → PixelClass { Value |
+Undetect | Masked }`. `sample()` is reimplemented on it, unchanged for
+raster/EDR (undetect + nodata still both → `None`).
+- **`volume_engine.rs`** — `sample_polar_slant_class` (out-of-envelope /
+range / malformed → `Masked`). `voxel_grid_from_volume` fills `Undetect`
+with the finite **`NO_ECHO_FLOOR` (−32 dBZ)**, leaves `Masked` `NaN`.
+Echo count excludes floor cells (clear-air-only volume → empty → 404).
+- **Isosurface API + demo** seal with `background=Some(-32)` (clamped `<
+threshold`); the engine floor + the seal give one uniform no-echo level.
+`None` remains available for the open-boundary mode.
+- **`ds-render`** — removed the now-unused `ColorMap::domain()` (added
+in #359 only for the API-computed floor).
+
+## Verification
+- **Render-verified live (CesiumJS):** sealed default = solid closed
+blobs, curtains gone, identical to #359.
+- **Tests:** `sample_class` distinguishes
+value/undetect/nodata/out-of-range/NaN; a synthetic all-`undetect`
+volume → finite floor cells + `NaN` cells + zero echo count; the mock
+engine fills the clear-air floor. 137 engine-odim + 75 ds-render + 17
+api-3dtiles green; clippy clean.
+
+## Follow-up
+Per-quantity no-echo floor (today −32 dBZ regardless of quantity) — tied
+to per-quantity colormaps (#350).
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+---------
+
+Co-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+This was referenced Jun 9, 2026
+Epic: OGC 3D Tiles for volumetric weather (radar polar volumes first)
+#346
+Open
+3D Tiles: isosurface (triangle-mesh) representation — storm shells / echo tops via marching cubes
+#357
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

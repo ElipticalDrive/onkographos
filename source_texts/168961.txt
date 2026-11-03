@@ -1,0 +1,214 @@
+NVIDIA’s Holoscan SDK is a powerful toolkit for developing high performance Artificial Intelligence (AI) and Augmented Reality (AR) applications that require scalable and real-time processing of streaming data. These applications span a diverse array of fields, including industrial manufacturing, robotic surgery, and autonomous vehicles. NVIDIA’s HoloHub serves as a central repository where the Holoscan developer […]
+
+Bringing Cutting-Edge Visualization to NVIDIA Holoscan
+Skip Navigation
+Home
+News
+Blog
+post
+Bringing Cutting-Edge Visualization to NVIDIA Holoscan
+April 25, 2024
+Vicente Bolea, Shreeraj Jadhav, Ebrahim Ebrahim and Andinet Enquobahrie
+NVIDIA’s Holoscan SDK is a powerful toolkit for developing high performance Artificial Intelligence (AI) and Augmented Reality (AR) applications that require scalable and real-time processing of streaming data. These applications span a diverse array of fields, including industrial manufacturing, robotic surgery, and autonomous vehicles. NVIDIA’s HoloHub serves as a central repository where the Holoscan developer community is invited to share reusable components and applications. We took this opportunity to explore the idea of bringing our flagship platform, the Visualization Toolkit (VTK), as a rendering engine alternative to Holoscan applications. In this blog post, we detail our initial experiments with incorporating VTK into Holoscan to meet the visualization demands of these advanced applications.
+Benefits of VTK Integration
+VTK is a free and open-source library designed for scientific and medical visualization. VTK allows processing and rendering of complex 3D geometry and image data, thereby bringing more enhanced capabilities to Holoscan application pipelines. By integrating a VTK visualization operator into Holoscan, we aim to assist researchers and product developers in swiftly constructing application prototypes. This will facilitate understanding and demonstrating results early, before investing resources into more efficient implementations for deployment-ready software. Additionally, VTK can simplify the creation of auxiliary visualization needs of an application pipeline such as monitoring dashboards and troubleshooting/debugging views for developers with minimal effort.
+With these objectives in mind, we introduce below an early implementation of a VTK visualization operator to harness VTK rendering capabilities in a Holoscan pipeline. If you are new to Holoscan SDK, we highly recommend reviewing the Core Concepts and Creating Operators chapters in the documentation.
+Our Experience Developing for HoloHub
+Introducing the vtk_renderer Operator
+The Holoscan SDK implements all of its core functions such as data IO, pre/post processing, DL inference, and visualization output as operators. An operator can be considered a single unit of work in the application pipeline or task graph that receives data at its input port, processes it, and publishes its response at an output port. To leverage VTK within Holoscan, we created a new operator named vtk_renderer. This operator allows developers to incorporate VTK instantiated OpenGL windows into their Holoscan applications. The operator handles the communication between the Holoscan framework and the VTK library to simplify the process of integrating 2D and 3D visualizations into the streaming AI pipeline.
+An illustration of a high-level Holoscan pipeline of a typical streaming AI application with VTK visualization operator.
+Enhancing the Endoscopy Tool Tracking Application
+Endoscopy Tool Tracking is an example application already present in HoloHub that tracks tools in real-time endoscopic videos. We modified this application to utilize vtk_renderer as an alternative to the existing holoviz operator and demonstrate a proof-of-concept for using VTK as a rendering engine with Holoscan.
+Preparing Our Environment
+The NVIDIA Clara AGX Developer Kit is one of the recommended platforms by NVIDIA for streaming AI applications developed using Holoscan. Therefore, we choose to use Clara AGX as our environment for development and testing of the VTK operator. Holohub recommends the use of Docker for developing applications in its repository. The first step in preparing the development environment is to build the HoloHub container as described in the HoloHub README.
+The next step is to build and deploy VTK as a separate Docker container for integration with the Holoscan SDK. We created a VTK Dockerfile based on our previously created HoloHub docker image.
+```
+ARG BASE_IMAGE=holohub:ngc-v1.0.3-dgpu
+FROM ${BASE_IMAGE}
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Install dependencies
+RUN apt update && \
+	apt install -y \
+    	libglvnd-dev \
+    	ninja-build
+
+# Create directories
+RUN mkdir -p /tmp/vtk/ && \
+	mkdir -p /opt/vtk/
+
+WORKDIR /tmp/vtk
+
+RUN curl --remote-name https://gitlab.kitware.com/vtk/vtk/-/archive/v9.3.0/vtk-v9.3.0.tar.gz && \
+	tar -xvzf vtk-v9.3.0.tar.gz && \
+	rm vtk-v9.3.0.tar.gz && \
+	cmake -GNinja -S vtk-v9.3.0 -B vtk-build \
+    	-DVTK_MODULE_ENABLE_RenderingCore=YES \
+    	-DVTK_MODULE_ENABLE_RenderingFFMPEGOpenGL2=YES \
+    	-DVTK_MODULE_ENABLE_RenderingOpenGL2=YES && \
+	cmake --build vtk-build && \
+	cmake --install vtk-build --prefix=/opt/vtk && \
+	rm -rf vtk-build
+```
+We can then build the VTK Docker image using the following command:
+```
+docker build -t vtk:latest -f vtk.Dockerfile .
+```
+Adding the VTK Operator
+HoloHub operators are stored in the operator subdir; we created a new sub-directory named operators/vtk_renderer and added the following files, which contains the operator implementation:
+vtk_renderer.hpp (header)
+vtk_renderer.cpp (source)
+The code snippet below shows the compute() function of our VTK Renderer operator:
+```
+void VtkRendererOp::compute(InputContext& op_input, OutputContext&, ExecutionContext& context) {
+  auto annotations = op_input.receive<gxf::Entity>("annotations").value();
+
+  // Render the annotations on the foreground layer.
+  auto scaled_coords_tensor = annotations.get<Tensor>("scaled_coords");
+  if (scaled_coords_tensor) {
+	std::vector<float> scaled_coords(scaled_coords_tensor->size());
+
+	// Copy the data from the tensor to the host.
+	CUDA_TRY(cudaMemcpy(scaled_coords.data(),
+                    	scaled_coords_tensor->data(),
+                    	scaled_coords_tensor->nbytes(),
+                    	cudaMemcpyDeviceToHost));
+
+	…
+    	render_text_at_location(label, x, y, this->internals->foreground_renderer);
+	}
+  }
+
+  // Render the videostream on the background layer.
+  auto videostream = op_input.receive<gxf::Entity>("videostream").value();
+  const auto videostream_tensor = videostream.get<Tensor>("");
+  if (videostream_tensor) {
+	holoscan::gxf::GXFTensor in_tensor_gxf{videostream_tensor->dl_ctx()};
+	auto& shape = in_tensor_gxf.shape();
+	const int y = shape.dimension(0);
+	const int x = shape.dimension(1);
+	const int z = shape.dimension(2);
+	const unsigned int expected_length = x * y * z;  // Each pixel is an uchar (1B)
+	const unsigned int received_length = videostream_tensor->nbytes();
+
+	vtkNew<vtkImageData> imageData;
+	imageData->SetDimensions(x, y, 1);
+	imageData->AllocateScalars(VTK_UNSIGNED_CHAR, z);
+
+	// Copy the data from the tensor to the image data.
+	CUDA_TRY(cudaMemcpy(static_cast<char*>(imageData->GetScalarPointer()),
+                    	videostream_tensor->data(),
+                    	videostream_tensor->nbytes(),
+                    	cudaMemcpyDeviceToHost));
+
+	this->internals->image_actor->SetInputData(imageData);
+
+	// Render first to find the extent of the image.
+	this->internals->renderer_window->Render();
+
+	// Adjust camera so that it can render see the whole extent of the image.
+	reposition_camera(this->internals->background_renderer, imageData);
+
+	// Final render with the camera at the proper position.
+	this->internals->renderer_window->Render();
+  }
+```
+Our operator accepts the following parameters:
+videostream: Input channel for the videostream, type gxf::Tensor
+type: gxf::Handle<gxf::Receiver>
+annotations: Input channel for the annotations, type gxf::Tensor
+type: gxf::Handle<gxf::Receiver>
+window_name: Compositor window name.
+type: std::string
+width: width of the renderer window.
+type: int
+height: height of the renderer window.
+type: int
+labels: labels to be displayed on the rendered image.
+type: std::vector<std::string>>
+Build Script for the Operator
+The new operator requires a CMake file so that it can link with its dependencies and build along with the entire Holohub container.
+```
+cmake_minimum_required(VERSION 3.20)
+project(vtk_renderer LANGUAGES CXX)
+
+find_package(holoscan REQUIRED CONFIG
+         	PATHS "/opt/nvidia/holoscan" "/workspace/holoscan-sdk/install")
+
+find_package(VTK REQUIRED COMPONENTS
+  CommonColor
+  CommonCore
+  FiltersSources
+  ImagingSources
+  InteractionStyle
+  RenderingContextOpenGL2
+  RenderingCore
+  RenderingFreeType
+  RenderingGL2PSOpenGL2
+  RenderingOpenGL2)
+
+add_library(vtk_renderer SHARED vtk_renderer.cpp vtk_renderer.hpp)
+add_library(holoscan::vtk_renderer ALIAS vtk_renderer)
+
+target_link_libraries(vtk_renderer PUBLIC holoscan::core PRIVATE ${VTK_LIBRARIES})
+
+vtk_module_autoinit(
+  TARGETS  vtk_renderer
+  MODULES ${VTK_LIBRARIES})
+
+target_include_directories(vtk_renderer INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(vtk_renderer INTERFACE VTK_RENDERER)
+```
+Changes to the Endoscopy Tool Tracking Application
+We made the following modifications to the main.cpp file of Endoscopy Tool Tracking application so that it can alternatively switch to using our VTK rendering operator.
+```
+#ifdef VTK_RENDERER
+if (this->visualizer_name == "vtk") {
+	visualizer_operator = make_operator<ops::VtkRendererOp>("vtk",
+                                                from_config("vtk_op"),
+                                                Arg("width") = width,
+                                                Arg("height") = height);
+}
+#endif
+
+// Flow definition
+add_flow(lstm_inferer, tool_tracking_postprocessor, {{"tensor", "in"}});
+add_flow(tool_tracking_postprocessor, visualizer_operator, {{"out", input_annotations_signal}});
+add_flow(source, visualizer_operator, {{output_signal, input_video_signal}});
+```
+Changes in the App Configuration YAML File
+We can switch to VTK as the visualizer by using a vtk_renderer instead of holoviz using the following command:
+```
+sed -i -e 's#^visualizer:.*#visualizer: "vtk"#' applications/endoscopy_tool_tracking/cpp/endoscopy_tool_tracking.yaml
+applications/endoscopy_tool_tracking/cpp/endoscopy_tool_tracking --data <data_dir>/endoscopy
+```
+Building the VTK Operator and Modified Application
+We can build the tool tracking application with the provided Dockerfile:
+```
+./dev_container launch --img vtk:latest
+```
+Inside the container we can build the HoloHub suite with:
+```
+./run build --with vtk_renderer
+./run build
+```
+Finally, the tool tracking application can be started using:
+```
+./run launch endoscopy_tool_tracking cpp
+```
+Current Limitations
+The current version of the vtk_renderer is our initial experimental effort to integrate VTK into the Holoscan pipeline. As such, it comes with some limitations:
+The implementation has not yet been optimized or extensively tested for performance.
+The provided demo supports only basic 2D rendering. The operator has not been evaluated with more advanced visualization capabilities, such as 3D rendering.
+Next Steps in Bringing VTK to Holoscan
+This integration of VTK with Holoscan marks our initial step towards bringing VTK’s enhanced visualization features to Holoscan applications. Through this implementation, we aim to engage the Holoscan developer community for feedback, which will help us identify the strengths and limitations of VTK in Holoscan-based edge computing applications. Looking ahead, potential developments could include:
+Refining the vtk_renderer operator: We plan to expand the operator’s functionality to offer more comprehensive control over the visualization processes within Holoscan.
+Performance: We intend to improve rendering performance by leveraging CUDA-OpenGL interoperability between Holoscan and VTK, which would facilitate faster data movement.
+Developing new demo applications: VTK offers various functionalities for volume rendering, iso-surface extraction, and other techniques that can be explored for improved visualization and processing in Holoscan based edge computing applications such as image guided medical procedures and robotic surgery.
+Leveraging open-source and feature-rich libraries such as VTK can further enhance Holoscan SDK as a valuable platform for AR and AI-powered applications.
+Acknowledgment
+We extend our sincere thanks to the Holoscan Product Team at NVIDIA for providing us with a loaner Clara AGX development kit, which was crucial in the development and testing of our VTK Holoscan operator. We are also deeply grateful to the HoloHub core developer team for their dedicated time and effort in reviewing and integrating our pull request into the HoloHub repository.
+Tags:
+Edge ComputingHoloscanMedical ComputingNvidiaVTK
+Leave a ReplyCancel reply

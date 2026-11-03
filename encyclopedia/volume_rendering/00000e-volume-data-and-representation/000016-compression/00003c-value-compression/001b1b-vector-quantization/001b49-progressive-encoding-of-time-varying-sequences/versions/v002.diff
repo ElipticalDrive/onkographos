@@ -1,0 +1,139 @@
+--- v001.md
++++ v002.md
+@@ -7,9 +7,9 @@
+ 
+ ## How it works
+-The method applies Vector Quantization (VQ) to each time step of a volumetric sequence. It utilizes a hierarchical quantization scheme where codebooks are either generated fresh or retrained based on previous frames [S1].
++The method applies Vector Quantization (VQ) to each time step of a volumetric sequence [S1]. It utilizes a hierarchical quantization scheme where codebooks are either generated fresh or retrained based on previous frames [S1].
+ 
+ ### Inputs and Outputs
+-*   **Input:** A sequence of $T$ volumetric frames, where each frame is a 3D grid of data values (e.g., scalar fields).
+-*   **Output:** For each frame, an index texture (mapping grid positions to codebook indices) and, for I-frames, the associated local codebooks. For P-frames, only the index texture is stored, as the codebooks are derived from previous frames [S1].
++*   **Input:** A sequence of $T$ volumetric frames, where each frame is a 3D grid of data values (e.g., scalar fields) [S1].
++*   **Output:** For each frame, an index texture mapping grid positions to codebook indices. For I-frames, the associated local codebooks are also stored [S1].
+ 
+ ### Data Structures
+@@ -20,5 +20,5 @@
+ The encoding process alternates between two modes: I-frame (separate encoding) and P-frame (progressive retraining) [S1].
+ 
+-1.  **Initialize:** For the first frame ($t=0$), encode it as an I-frame.
++1.  **Initialize:** For the first frame ($t=0$), encode it as an I-frame [S1].
+     *   Apply the LBG (Linde-Buzo-Gray) algorithm to generate initial codebooks [S1].
+     *   Store the resulting index texture and codebooks [S1].
+@@ -30,5 +30,5 @@
+         *   Update the "last key-frame" reference to $t$ [S1].
+     *   **If P-frame:**
+-        *   **Reuse Codebooks:** Take the codebooks from the most recent key-frame (or previous frame if no new key-frame was selected) as the *initial* codebooks for the LBG algorithm [S1].
++        *   **Reuse Codebooks:** Take the codebooks from the most recent key-frame as the *initial* codebooks for the LBG algorithm [S1].
+         *   **Reuse Indices:** Use the index sets from the previous frame ($t-1$) to obtain a first guess for the final quantization [S1].
+         *   **Retrain:** Perform LBG relaxation on the current frame's data using the reused codebooks and initial index guess. This allows for fast and partial searches throughout the process [S1].
+@@ -61,18 +61,16 @@
+     encoded_sequence = []
+     last_key_frame_codebooks = None
+-    last_key_frame_indices = None
+-    
++    previous_indices = None
++    last_key_frame_t = -key_frame_interval  # Ensures t=0 is treated as a key-frame
++
+     for t in range(len(frames)):
+-        is_key_frame = (t == 0) or (t % key_frame_interval == 0)
+-        
++        is_key_frame = (t == 0) or (t - last_key_frame_t >= key_frame_interval)
++
+         if is_key_frame:
+-            # I-Frame Mode: Encode separately
+-            # 1. Generate initial codebooks using LBG on current frame data
+-            current_codebooks = linde_buzo_gray(frames[t], initial_codebooks=None)
++            # I-Frame Mode: Encode separately, producing index texture and 2 local codebooks [S1]
++            # Standard LBG split-and-assign to generate initial codebooks [G]
++            current_codebooks = linde_buzo_gray_split_and_assign(frames[t])
++            current_indices = find_nearest_codebook(frames[t], current_codebooks)
+             
+-            # 2. Quantize frame to get indices
+-            current_indices = quantize(frames[t], current_codebooks)
+-            
+-            # 3. Store I-frame data
+             encoded_sequence.append({
+                 'type': 'I',
+@@ -82,29 +80,18 @@
+             })
+             
+-            # Update references for future P-frames
+             last_key_frame_codebooks = current_codebooks
+-            last_key_frame_indices = current_indices
++            last_key_frame_t = t
++            previous_indices = current_indices
++        else:
++            # P-Frame Mode: Retrain codebooks from previous frame [S1]
++            initial_codebooks = last_key_frame_codebooks
++            # Reuse index sets from the previous frame to obtain a first guess [S1]
++            initial_indices = previous_indices
+             
+-        else:
+-            # P-Frame Mode: Retrain from previous key-frame
+-            # 1. Use previous key-frame codebooks as initial codebooks
+-            initial_codebooks = last_key_frame_codebooks
++            # LBG relaxation on current frame using reused codebooks and indices [S1]
++            # Standard LBG relaxation: partial search and centroid update [G]
++            current_codebooks = linde_buzo_gray_relax(frames[t], initial_codebooks, initial_indices)
++            current_indices = find_nearest_codebook(frames[t], current_codebooks)
+             
+-            # 2. Use previous frame indices as a first guess for fast search
+-            # Note: The source mentions reusing index sets from the previous frame.
+-            # For P-frames, this likely refers to the indices of the previous frame
+-            # or the last known good indices to guide the search.
+-            initial_indices = last_key_frame_indices 
+-            
+-            # 3. Retrain codebooks using LBG with initial codebooks and indices
+-            # This performs fast and partial searches
+-            current_codebooks = linde_buzo_gray(frames[t], 
+-                                               initial_codebooks=initial_codebooks,
+-                                               initial_indices=initial_indices)
+-            
+-            # 4. Quantize frame to get final indices
+-            current_indices = quantize(frames[t], current_codebooks)
+-            
+-            # 5. Store P-frame data (only indices needed for decoding if codebooks are shared/reconstructed)
+             encoded_sequence.append({
+                 'type': 'P',
+@@ -113,25 +100,7 @@
+             })
+             
+-            # Update references for next P-frame
+-            last_key_frame_indices = current_indices
+-            
++            previous_indices = current_indices
++
+     return encoded_sequence
+-
+-def linde_buzo_gray(data, initial_codebooks=None, initial_indices=None):
+-    """
+-    Placeholder for the LBG algorithm implementation.
+-    If initial_codebooks is provided, it uses them as starting centroids.
+-    If initial_indices is provided, it uses them to speed up the search.
+-    """
+-    # Implementation details of LBG are not provided in the source.
+-    # Standard LBG involves splitting, assigning, and updating centroids.
+-    pass
+-
+-def quantize(data, codebooks):
+-    """
+-    Maps data vectors to the nearest codebook entry.
+-    """
+-    # Implementation details of quantization are not provided in the source.
+-    pass
+ ```
+ 
+@@ -144,10 +113,10 @@
+ *   **Memory:** Significant reduction in memory requirements. For a shock wave simulation (89 time steps, $256^3$ size), memory dropped from 1.4 GB to 70 MB. For a vortex flow simulation (100 time steps, $128^3$ size), it dropped from 200 MB to 11.1 MB [S1].
+ *   **Encoding Time:** Encoding time decreased from 29 minutes to 13 minutes for an entire shock wave sequence when using progressive encoding compared to separate encoding for all steps. Quantization of the vortex data set took roughly 5 minutes using the progressive scheme [S1].
+-*   **Rendering:** Rendering performance was 24 fps and 16 fps for the respective simulations on the target hardware (P4 2.8 GHz, 512 MB RAM, ATI 9700). Speed-ups were achieved by skipping empty space [S1].
++*   **Rendering:** Rendering performance was 24 fps and 16 fps for the respective simulations on the target hardware (P4 2.8 GHz, 512 MB RAM, ATI 9700). A considerable speed-up is achieved by taking advantage of the advanced rendering method that allows skipping empty space [S1].
+ *   **Strengths:** High compression ratios, fast encoding for P-frames due to codebook reuse and partial searches, and good visual quality when key-frames are selected appropriately [S1].
+ *   **Limitations:** Codebook drift can occur if too many P-frames are used between key-frames, leading to sub-optimal quantization. The method requires careful selection of key-frame intervals [S1].
+ 
+ ## Background
+-The method was proposed in the context of compression domain volume rendering, specifically for hardware-accelerated texture decoding. It was presented in a 2003 paper by the authors of "Compression Domain Volume Rendering" [S1]. The work builds on hierarchical quantization schemes and aims to enable efficient rendering of time-varying volumetric data on graphics hardware [S1].
++The method was proposed in the context of compression domain volume rendering, specifically for hardware-accelerated texture decoding [S1]. It builds on hierarchical quantization schemes to enable efficient rendering of time-varying volumetric data [S1].
+ 
+ ## Sources

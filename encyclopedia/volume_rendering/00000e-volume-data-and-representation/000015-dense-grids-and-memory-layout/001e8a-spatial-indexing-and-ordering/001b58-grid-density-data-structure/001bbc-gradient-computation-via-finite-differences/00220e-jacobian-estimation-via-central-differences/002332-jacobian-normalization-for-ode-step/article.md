@@ -1,0 +1,80 @@
+# Jacobian Normalization for ODE Step
+Also called: Normalize Inverse Jacobian Step, ODE Evaluation
+## Overview
+This method computes the normalized direction vector for an Ordinary Differential Equation (ODE) solver by applying the inverse of an estimated Jacobian matrix to a base direction vector [S1, unofficial]. It differs from raw Jacobian estimation by performing the matrix inversion and vector normalization required for stable stepping [G].
+## How it works
+**Inputs:**
+- `pos`: The current 3D position in the volume [S1, unofficial].
+- `w`: The base direction vector for the ODE step [S1, unofficial].
+- `force`: A parameter passed to the Jacobian estimator [S1, unofficial].
+
+**Outputs:**
+- `step_dir`: The normalized direction vector for the next ODE step [S1, unofficial].
+
+**Data Structures:**
+- The Jacobian matrix $J$ is a $3 \times 3$ matrix estimated by the parent method [Jacobian Estimation via Central Differences](2650-jacobian-estimation-via-central-differences.md) [S1, unofficial].
+- $J^{-1}$ is the inverse of this matrix [G].
+
+**Steps:**
+1. Estimate the Jacobian matrix $J$ at `pos` using `estimateJacobian(pos, force)` [S1, unofficial].
+2. Compute the inverse $J^{-1}$ [G].
+3. Multiply the inverse Jacobian by the direction vector: $v = J^{-1} w$ [G].
+4. Normalize $v$ to obtain `step_dir` [S1, unofficial].
+
+**Formula:**
+$$ step\_dir = \text{normalize}\left( J^{-1} \cdot w \right) $$
+Where $J = \text{estimateJacobian}(pos, force)$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def estimate_jacobian_central_differences(pos, force):
+    # Parent method implementation [S1, unofficial]
+    # Computes 3x3 matrix of partial derivatives via central differences
+    return [[0.0]*3 for _ in range(3)] # Placeholder for parent [S1, unofficial]
+
+def jacobian_normalization_ode_step(pos, w, force):
+    J = estimate_jacobian_central_differences(pos, force)
+    det = (J[0][0]*(J[1][1]*J[2][2] - J[1][2]*J[2][1]) -
+           J[0][1]*(J[1][0]*J[2][2] - J[1][2]*J[2][0]) +
+           J[0][2]*(J[1][0]*J[2][1] - J[1][1]*J[2][0]))
+    if abs(det) < 1e-8:
+        return w # Fallback for singular Jacobian [G]
+    inv_det = 1.0 / det
+    J_inv = [
+        [(J[1][1]*J[2][2] - J[1][2]*J[2][1])*inv_det, (J[0][2]*J[2][1] - J[0][1]*J[2][2])*inv_det, (J[0][1]*J[1][2] - J[0][2]*J[1][1])*inv_det],
+        [(J[1][2]*J[2][0] - J[1][0]*J[2][2])*inv_det, (J[0][0]*J[2][2] - J[0][2]*J[2][0])*inv_det, (J[0][2]*J[1][0] - J[0][0]*J[1][2])*inv_det],
+        [(J[1][0]*J[2][1] - J[1][1]*J[2][0])*inv_det, (J[0][1]*J[2][0] - J[0][0]*J[2][1])*inv_det, (J[0][0]*J[1][1] - J[0][1]*J[1][0])*inv_det]
+    ]
+    v = [
+        J_inv[0][0]*w[0] + J_inv[0][1]*w[1] + J_inv[0][2]*w[2],
+        J_inv[1][0]*w[0] + J_inv[1][1]*w[1] + J_inv[1][2]*w[2],
+        J_inv[2][0]*w[0] + J_inv[2][1]*w[1] + J_inv[2][2]*w[2]
+    ]
+    norm_v = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
+    if norm_v < 1e-8:
+        return w # Fallback for zero vector [G]
+    return [v[0]/norm_v, v[1]/norm_v, v[2]/norm_v]
+```
+
+**Parameters:**
+- `force`: Passed to the Jacobian estimator. Typical values are not given in the sources.
+
+**Edge Cases:**
+- **Singular Jacobian:** If $\det(J) = 0$, the inverse does not exist. A fallback to the unnormalized direction or identity step is required [G].
+- **Zero Vector:** If $J^{-1} w$ results in a zero vector, normalization fails. A fallback to the original direction $w$ is required [G].
+
+## Subtopics
+
+### [Jacobian Computation for Coordinate Transformation](3166-jacobian-computation-for-coordinate-transformation.md)
+Computes a 3x3 Jacobian matrix for a batch of 3D points to facilitate coordinate space transformations or derivative propagation in rendering pipelines. It differs from general numerical Jacobian estimation by using a closed-form analytical derivation based on the input vector's components and Euclidean norm, rather than finite differences.
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] tink-expo/ntsl-graphics, https://github.com/tink-expo/ntsl-graphics, fetched 2026-10-26 (unofficial)

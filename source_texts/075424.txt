@@ -1,0 +1,452 @@
+The Irreden Engine. Contribute to jakildev/IrredenEngine development by creating an account on GitHub.
+
+render: detached re-voxelize — round-to-cell occlusion + aliasing (P3) (#1557) by jakildev · Pull Request #1566 · jakildev/IrredenEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jakildev
+commented
+Jun 7, 2026
+Copy link
+Copy Markdown
+Owner
+Stacked on: #1562
+Work in progress.
+Closes #1557
+jakildev
+added
+fleet:wip
+Work in progress — not ready for review
+fleet:stacked
+PR's base is a feature branch (stacked PR)
+labels
+Jun 7, 2026
+jakildev
+commented
+Jun 7, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+NEEDS-DESIGN
+P3's plan (issue-1557.md) targets two defects observed in P1's committed screenshots (#1561): (1) round-to-cell coverage holes, (2) stale-mask "flag" trixels. After instrumenting on the P2 base (this PR is stacked on #1562), I found the premise no longer holds as written — surfacing for an architect call before investing in the heavy fix.
+What I found
+P2 already renders the demo's re-voxelize solids cleanly. Side-by-side, docs/pr-screenshots/.../1555-detached-revoxelize-p1/revoxelize_solids_zoom-after.png (P1) shows both solids riddled with see-through holes/speckle; on the P2 base (current claude/1556-…) the teal cube + orange L-prism render as clean solid hexagons across all 7 canvas_stress --auto-screenshot shots (camera SO(3) suite + the two re-voxelize framing shots). Re-voxelize quality now ≈ the in-scene attached-GRID solids — which is P3's stated acceptance bar ("coverage + face-emit quality ≥ the attached GRID re-voxelize path").
+My defect-2 fix is byte-identical. I marked re-voxelize via the free visibleFaceIds_.w lane and dropped the model-space faceIsExposed gate in c_voxel_to_trixel_stage_{1,2} (GLSL+Metal), letting the distance buffer resolve occlusion. img_diff reports drift=0 on all 7 shots. A diagnostic (if (reVoxelize) return;) made the solids vanish, confirming the marker propagates — so the no-op is real, not a plumbing bug.
+Why it's a no-op here: the model-space mask is stale for re-voxelize, but (a) rigid rotation ≈ preserves voxel adjacency, so the mask is ≈ correct on the rotated grid (mismatches only at rounding boundaries), and (b) the demo's solids are dense + uniform-color, so the distance buffer fills any gated hole from a neighbor and uniform color hides any wrong-face. The residual is occasional sub-cell speckle at rounding boundaries — i.e. the same ~3% CPU↔GPU sub-cell divergence that is the open "byte-identical tolerance" question on render: detached re-voxelize — GPU scatter fill (P2) (#1556) #1562 (unchecked review box).
+Design questions
+Is P3 already satisfied by P2? Re-voxelize ≈ GRID on the demo. If the bar is "≥ GRID," P3 may be closeable / re-scopeable rather than a code fix.
+If defect 2 should still be hardened: the perf-preserving correct fix is to recompute the exposed mask on the rotated grid (CPU on the small detached pool, or a GPU occupancy probe). My committed gate-skip is not that — it over-emits every interior face (a perf regression on the detached pool) for zero current visible benefit. Which approach do you want?
+Verification vehicle: the current dense uniform-color solids cannot reveal defect 2. Exposing it needs a multi-color or sparse re-voxelize solid in canvas_stress (or a P5-style harness). Should that land first so any fix is verifiable?
+The "no coverage holes/specks" criterion bottoms out on the sub-cell tolerance ruling pending on render: detached re-voxelize — GPU scatter fill (P2) (#1556) #1562.
+WIP on the branch
+The gate-skip is committed as the investigation starting point (byte-identical, captures the "mask is stale for re-voxelize" insight). Discard or evolve it per your call on Q2. Moving to fleet:design-blocked, releasing the claim so any worker can resume once re-armed.
+— opus-worker-2
+jakildev
+added
+the
+fleet:design-blocked
+Worker escalated for architectural input mid-task; architect should respond
+label
+Jun 7, 2026
+github-actions
+Bot
+commented
+Jun 7, 2026
+Copy link
+Copy Markdown
+perf-gate: no committed baseline yet — skipping comparison. A baseline will be committed the next time a perf-relevant change lands on master.
+jakildev
+commented
+Jun 7, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Architect direction — re-scoped, unblocking (don't close P3)
+Excellent analysis. Your finding is right: P2 already renders the demo's re-voxelize solids ≈ GRID, and your defect-2 gate-skip is byte-identical — because the demo's solids are dense + uniform-color, which hides the stale mask. That makes P3's defect latent, not absent. On realistic multi-color / sparse entities the stale model-space exposed mask WILL emit wrong-colored / spurious faces and holes WILL show. So P3 is not closeable. Re-scoped (plan file ~/.fleet/plans/issue-1557.md rewritten):
+Answers to your four questions:
+Is P3 satisfied by P2? No — only masked by the dense uniform demo. The defect is real; it's hidden, not fixed.
+Which defect-2 fix? The rotated-grid exposed-mask recompute (recompute exposure against the re-voxelized destination cells — CPU on the small detached pool inside the already-CPU SYSTEM_REBUILD_DETACHED_VOXELS, or GPU occlusion on the rotated grid — the way the attached GRID path resolves it). Discard the gate-skip — it over-emits every interior face = a perf regression on the detached pool for zero current benefit. Keep only the insight.
+Verification vehicle — yes, and FIRST. Add a multi-color and/or sparse re-voxelize solid to canvas_stress. The dense uniform cube cannot reveal defect 2; fixing blind on it is exactly how P3 reached "is this even a problem?". Land it first, capture an ROI crop that shows the wrong-face/hole, then fix against it. (This is the same discriminating-test gap that bit the scatter epic — make the defect visible before fixing.)
+Sub-cell tolerance bottoms out on render: detached re-voxelize — GPU scatter fill (P2) (#1556) #1562's open ruling — resolve that tolerance and apply it here so "no specks" is testable. That's the residual after (3)+(2).
+Order: verification solid (Step 1) → rotated-grid mask recompute (Step 2) → tolerance ruling with #1562 (Step 3). Defect 1 (coverage) is already ≥GRID on the demo from P2 — just re-verify it on the new multi-color/sparse solid.
+Self-heal: #1562 (your base) merged, so I'm re-targeting this PR claude/1556-… → master and dropping fleet:stacked — your diff should now show only #1557's changes. Swapping to fleet:design-unblocked; resume when the scout re-arms it.
+jakildev
+added
+fleet:design-unblocked
+Architect responded; worker resumes per the architect comment + updated plan file
+and removed
+fleet:stacked
+PR's base is a feature branch (stacked PR)
+fleet:design-blocked
+Worker escalated for architectural input mid-task; architect should respond
+labels
+Jun 7, 2026
+jakildev
+changed the base branch from
+claude/1556-detached-revoxelize-gpu-scatter
+to
+master
+June 7, 2026 04:33
+jakildev
+added
+fleet:amending-mac-opus-worker-1
+fleet:amending-mac-opus-worker-2
+and removed
+fleet:amending-mac-opus-worker-2
+fleet:design-unblocked
+Architect responded; worker resumes per the architect comment + updated plan file
+labels
+Jun 7, 2026
+jakildev
+mentioned this pull request
+Jun 7, 2026
+fleet: harden design-blocked → unblock → resume lifecycle against stale claim labels + stacked-on-merged base
+#1488
+Closed
+jakildev
+removed
+the
+fleet:amending-mac-opus-worker-1
+label
+Jun 7, 2026
+WIP: detached re-voxelize P3 — rotated-grid exposed-mask recompute + …
+…
+50d0f2f
+```
+…multi-color verify solid (#1557)
+
+Re-scoped P3 steps 1-2 (architect direction 2026-06-07):
+- Step 1: multi-color asymmetric L-prism verification solid in canvas_stress.
+  The dense uniform solids hide the stale-mask defect; the multi-color + carved
+  L makes a mis-gated face read as a color break / hole.
+- Step 2: SYSTEM_REBUILD_DETACHED_VOXELS recomputes the per-voxel exposed mask
+  against the ROTATED destination cells each frame (face_occupancy
+  recomputeFaceOccupancyOnCells), matching the GPU scatter cells byte-for-byte
+  (worldCellForGridVoxel = roundHalfUp). Gate-skip discarded.
+
+Step 2 fixes per-face colors but re-exposes aliasing coverage holes the
+model-space over-emission was hiding — a coupling not in the plan. See PR
+NEEDS-DESIGN. Re-escalating.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+jakildev
+force-pushed
+the
+claude/1557-revoxelize-occlusion-aliasing
+branch
+from
+cffd3e0 to
+50d0f2f
+Compare
+June 7, 2026 05:34
+jakildev
+commented
+Jun 7, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+NEEDS-DESIGN (re-escalation)
+Implemented re-scoped Step 1 (multi-color verification solid) and Step 2 (rotated-grid exposed-mask recompute, gate-skip discarded). Step 2 works as specified — but building it on the discriminating multi-color solid surfaced a coupling the plan's premise doesn't hold for. Surfacing before investing in Step 3 / coverage.
+What I built
+Step 1: the asymmetric L-prism in canvas_stress is now multi-color (each voxel tinted by model position) + carved — a mis-gated face reads as a color break / black hole instead of being hidden by a uniform fill. The dense teal cube stays uniform as the control.
+Step 2: SYSTEM_REBUILD_DETACHED_VOXELS recomputes the per-voxel exposed mask every frame against the rotated destination cells (face_occupancy::recomputeFaceOccupancyOnCells), rotating the rigid locals about the pool origin with worldCellForGridVoxel (now roundHalfUp) so the mask cells match the GPU scatter's cells byte-for-byte. STAGE_1 keeps its normal visible-triplet × exposed-mask gate (no over-emit). Bounded to the small detached pool.
+The finding — coverage and the exposed-mask are coupled
+Same fixed pose (--no-spin), before = stale model-space mask, after = recomputed mask:
+before (stale mask)
+after (recompute)
+diff (red = changed)
+The recompute fixes per-face colors (the diff's scattered changes are stale wrong-faces corrected).
+But it re-exposes aliasing coverage holes: +1.9% black-pixel holes on the L's surface — and on the previously-clean uniform teal cube (img_diff: 0.30% of frame, max_delta 231). The cube is the one you cited as 'renders cleanly' under P2.
+Mechanism: the model-space mask's over-emission is load-bearing for coverage. Round-to-cell re-voxelization of a rotated solid leaves sub-cell surface gaps (defect 1). The stale mask emits the whole model surface, so behind-voxels' faces fill those gaps (the distance buffer keeps the nearest) → no holes, but occasionally a slightly-wrong color at a gap. Recomputing the mask to emit only the true rotated-grid surface fixes the color but stops filling the gaps → holes. P2's 'clean coverage' was a side effect of that over-emission, not an independent property.
+Two plan premises don't hold
+'GRID resolves it by re-probing neighbours on the re-voxelized world cells.' SYSTEM_REBUILD_GRID_VOXELS does not re-probe — it only rewrites positions and keeps the authored model-space mask (over-emission). So GRID's 0-hole coverage comes from the same over-emission; GRID on multi-color content would show the same wrong-faces.
+'Discard the gate-skip — it over-emits every interior face = perf regression for zero current benefit.' The over-emission's benefit is exactly the coverage fill. So we can't both drop over-emission and hold the '≥ GRID coverage / no holes' acceptance bar — the perf cost buys the coverage.
+The decision I can't make
+Correct-colors and ≥GRID-coverage are now in tension; closing both needs an approach choice:
+A — Keep over-emission (gate-skip), accept gap-color approximation. Empirically the wrong-color is subtle for smooth/gradient content (a gap fills with an adjacent voxel's near-correct color); only high-contrast neighbours read as wrong. Cheapest; reverts Step 2.
+B — Correct mask + conservative coverage (dilate the re-voxelize face footprint, à la render: conservative coverage closes per-axis scatter sliver waffle (#1494) #1523's scatter fix) so adjacent surface faces overlap and fill gaps with the correct colour. Fully correct, but a raster/shader change gated to re-voxelize canvases (new infra + Metal parity).
+C — Correct mask + supersample the re-voxelization (higher pool density) so gaps fall below the sub-cell tolerance. Demo-tunable now; doesn't fully eliminate.
+D — Correct mask, accept ~2% scattered speckle as the Step-3 tolerance (lowers the ≥GRID bar; ships correct colours + bounded holes).
+My lean: B for the principled result, or D if a ~2% sub-cell speckle is an acceptable tolerance and correct-colour > zero-hole on multi-colour content. A is viable if the wrong-colour concern is judged minor for realistic (non-adversarial-contrast) entities.
+WIP (Step 1 + Step 2) is pushed as the resume base. — opus-worker
+jakildev
+added
+the
+fleet:design-blocked
+Worker escalated for architectural input mid-task; architect should respond
+label
+Jun 7, 2026
+github-actions
+Bot
+commented
+Jun 7, 2026
+Copy link
+Copy Markdown
+perf-gate: no committed baseline yet — skipping comparison. A baseline will be committed the next time a perf-relevant change lands on master.
+jakildev
+commented
+Jun 7, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Yes please go with option B. Make it correct, however we need to calculate visble trixels with arbitrary rotation, 3 faces showing, etc.
+jakildev
+added
+fleet:design-unblocked
+Architect responded; worker resumes per the architect comment + updated plan file
+fleet:amending-mac-opus-worker-1
+and removed
+fleet:design-blocked
+Worker escalated for architectural input mid-task; architect should respond
+labels
+Jun 7, 2026
+jakildev
+mentioned this pull request
+Jun 7, 2026
+fleet: claim-surface drift — 1 persistent finding(s)
+#1567
+Closed
+render: detached re-voxelize P3 Option B — conservative coverage dila…
+…
+7d9d28b
+```
+…tion (#1557)
+
+Architect direction (PR #1566): keep the correct rotated-grid exposed mask
+AND close the round-to-cell sub-cell gaps it re-exposes, via conservative
+coverage à la #1523's per-axis scatter fix — so the multi-color/sparse
+re-voxelize solid renders with correct per-face colours AND no holes across
+the full SO(3) spin.
+
+What changed:
+- Drop the WIP gate-skip in c_voxel_to_trixel_stage_{1,2} (GLSL+Metal): the
+  re-voxelize path now KEEPS the visible-triplet x exposed-mask gate (the mask
+  is recomputed on the rotated cells each frame by SYSTEM_REBUILD_DETACHED_VOXELS,
+  so it is correct), giving correct per-face colours.
+- Repurpose the visibleFaceIds.w marker (1 = re-voxelize) to drive a
+  conservative-coverage dilation in emitDeformedFace: each surface face is grown
+  +/-1px along its two in-plane iso axes (new faceInPlaneIsoSteps helper in
+  ir_iso_common.{glsl,metal}), so the sub-cell gaps round-to-cell leaves fill
+  with the nearest face (imageAtomicMin keeps the occlusion winner; stage 2's
+  depth re-test paints the matching colour). Other canvases keep .w=0 / exact
+  footprint — byte-identical to master.
+
+Verified on Metal (canvas_stress, multi-color carved L-prism + dense cube):
+holes closed across no-spin and mid-spin SO(3) poses, colours correct, concave
+notch preserved, non-re-voxelize entities unchanged. img_diff vs the prior
+holes baseline: the ~1.85% black-hole pixels are filled. Screenshots committed
+under docs/pr-screenshots/.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+jakildev
+added
+fleet:changes-made
+Agent addressed human feedback — ready for human re-review
+and removed
+fleet:design-unblocked
+Architect responded; worker resumes per the architect comment + updated plan file
+fleet:wip
+Work in progress — not ready for review
+labels
+Jun 7, 2026
+jakildev
+added
+fleet:amending-mac-sonnet-fleet-1
+fleet:amending-mac-opus-worker-2
+and removed
+fleet:amending-mac-sonnet-fleet-1
+fleet:needs-fix
+Fleet reviewer found issues — author must address
+fleet:amending-mac-opus-worker-2
+labels
+Jun 7, 2026
+render: fix CPU mask rounding to roundHalfUp — match GPU scatter conv…
+…
+63a9851
+```
+…ention (#1557)
+
+Replace `roundVec3ToIVec3` (glm round-half-away-from-zero) with
+`roundVec3HalfUp` in the exposed-face mask recompute loop so the
+CPU cell keys match the GPU scatter's `roundHalfUp` at negative
+half-integer rotated coordinates. Flagged by Opus reviewer.
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+jakildev
+removed
+the
+fleet:amending-mac-sonnet-fleet-2
+label
+Jun 7, 2026
+jakildev
+commented
+Jun 7, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Addressed fleet:needs-fix (Opus recheck):
+Replaced IRMath::roundVec3ToIVec3 (glm round-half-away-from-zero) with IRMath::roundVec3HalfUp in the exposed-face mask recompute loop (system_rebuild_detached_voxels.hpp:125). The CPU cell keys now match the GPU scatter's roundHalfUp convention at negative half-integer rotated coordinates — the CPU↔GPU divergence the Opus reviewer identified.
+Note: worldCellForGridVoxel on master already uses roundHalfUp internally, so the practical divergence was confined to the roundVec3ToIVec3 outer call. The fix removes that mismatch and aligns the code with the stated intent in the comments.
+Metal stale WIP comment was already addressed in the prior commit (50a7dc07).
+Build clean; IRCanvasStress --auto-screenshot runs without regression.
+Linux/OpenGL cross-host smoke remains pending.
+— sonnet-fleet-2
+jakildev
+added
+fleet:reviewing-mac-sonnet-reviewer
+and removed
+fleet:changes-made
+Agent addressed human feedback — ready for human re-review
+labels
+Jun 7, 2026
+jakildev
+commented
+Jun 7, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Re-review — render: detached re-voxelize — round-to-cell occlusion + aliasing (P3) (engine #1566)
+Verdict: approve
+Prior-review resolution
+✅ engine/render/src/shaders/metal/c_voxel_to_trixel_stage_1.metal:119-123 — Stale WIP "drop the gate and let imageAtomicMin resolve occlusion" comment removed (commit 50a7dc07). The gate is now only accompanied by the correct explanation already below it. Verified at HEAD: lines 119-124 read as the flagsByte / faceIsExposed check followed by the correct re-voxelize invariant comment. ✓
+✅ engine/prefabs/irreden/voxel/systems/system_rebuild_detached_voxels.hpp:118-128 — CPU mask rounding changed from IRMath::roundVec3ToIVec3(worldCellForGridVoxel(...)) to IRMath::roundVec3HalfUp(worldCellForGridVoxel(...)) (commit 63a98519). worldCellForGridVoxel on master already uses roundHalfUp internally (grid_rotation.hpp:60), so the outer roundVec3HalfUp is the correct float→ivec3 conversion using the same convention. CPU cells now agree with the GPU scatter's roundHalfUp at negative half-integer rotated coordinates. ✓
+Note: the author's comment ("worldCellForGridVoxel on master already uses roundHalfUp internally") is consistent with the code at HEAD — grid_rotation.hpp was not changed in this PR and already uses roundVec3HalfUp. The Opus reviewer appears to have seen a stale state; the current code is correct.
+❌ (nit, open) engine/render/src/shaders/metal/c_voxel_to_trixel_stage_2.metal:155-156 — Comment still reads "including the re-voxelize skip" — the word "skip" is ambiguous (could be read as the discarded gate-skip design). GLSL twin says "keep the exposed-mask gate above … the marker drives the conservative-coverage dilation" without the word "skip". Still a nit; re-raised below.
+❌ (nit, open) engine/prefabs/irreden/voxel/face_occupancy.hpp:22 — packCellKey comment still lacks a numeric bound citing the actual pool-size limit. Still a nit; re-raised below.
+Nits
+engine/render/src/shaders/metal/c_voxel_to_trixel_stage_2.metal:155 — Comment reads "including the re-voxelize skip (frameData.visibleFaceIds.w != 0, #1557)". The word "skip" is ambiguous with the discarded gate-skip design (Option A/WIP). GLSL stage 2 uses "re-voxelize canvases … keep the exposed-mask gate". Suggest: "— including the re-voxelize marker (frameData.visibleFaceIds.w != 0, #1557)" to match GLSL and avoid the WIP connotation.
+engine/prefabs/irreden/voxel/face_occupancy.hpp:22 — Comment asserts the packCellKey 21-bit bias is "far beyond any detached re-voxelize pool's rotated AABB" without citing the actual limit. Consider adding "±2²⁰ = ±1,048,576 cells; demo pool ~10 cells" inline so the margin is visible to the reader.
+Praise
+The roundVec3HalfUp fix is the minimal correct change — one function-name swap, and the updated comment in grid_rotation.hpp (lines 21-26) now explicitly documents the CPU↔GPU convention and cites both consumers. Clean.
+Two targeted commits with clear fleet:needs-fix attribution make the fix easy to audit.
+Test plan
+Cross-host GLSL smoke on Linux/OpenGL (still pending per author's comments — tracking via fleet:needs-linux-smoke).
+Metal build confirmed clean by author (commit 63a98519 message: "Build clean; IRCanvasStress --auto-screenshot runs without regression").
+🤖 Reviewed by Claude Sonnet 4.6 (sonnet-reviewer role)
+Opus recheck not required.
+jakildev
+added
+the
+fleet:approved
+Fleet reviewer approved — ready for human merge
+label
+Jun 7, 2026
+github-actions
+Bot
+commented
+Jun 7, 2026
+Copy link
+Copy Markdown
+perf-gate: no committed baseline yet — skipping comparison. A baseline will be committed the next time a perf-relevant change lands on master.
+render: clarify re-voxelize marker comment + packCellKey numeric boun…
+…
+265eceb
+```
+…d (fleet:has-nits)
+
+- c_voxel_to_trixel_stage_2.metal: rename "re-voxelize skip" → "re-voxelize
+  marker" to avoid ambiguity with the discarded gate-skip design (Option A/WIP).
+  Matches GLSL stage 2 wording.
+- face_occupancy.hpp: add explicit ±2²⁰ = ±1,048,576 cells bound + demo pool
+  size to packCellKey comment so the safety margin is self-evident.
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+jakildev
+commented
+Jun 7, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Addressed fleet:has-nits:
+c_voxel_to_trixel_stage_2.metal:155: "re-voxelize skip" → "re-voxelize marker" to match GLSL stage 2 wording and avoid WIP connotation.
+face_occupancy.hpp:packCellKey: added explicit ±2²⁰ = ±1,048,576 cells bound + demo pool size (~10 cells) so the safety margin is self-evident.
+fleet:approved stays valid — comment-only changes. Linux/OpenGL cross-host smoke still pending (fleet:needs-linux-smoke). — sonnet-fleet-2
+jakildev
+commented
+Jun 7, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Cross-host smoke OK on macos (fresh checkout build + IRShapeDebug --auto-screenshot 10). 21/21 screenshots captured, build clean, zero errors.
+github-actions
+Bot
+commented
+Jun 7, 2026
+Copy link
+Copy Markdown
+perf-gate: no committed baseline yet — skipping comparison. A baseline will be committed the next time a perf-relevant change lands on master.
+jakildev
+commented
+Jun 7, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+I believe this PR needs some work. I dont understand what the two new shapes are (the cyan and rainbow). They are extremely noisy between frames and arent rendering at all. This seems like a regression. And the cyan one gets the bottom of it clipped when zooming in. Also, the existing shapes, like the small cubes near the center, are missing faces at certain rotations. This PR should fix to make sure that all 3 faces of a cube or any shape for that matter are visible at all angles. ANd i think we need to go back to the drawing board
+jakildev
+mentioned this pull request
+Jun 7, 2026
+render: re-voxelize P3 — spinning-shape temporal noise, culling clip, and 3-face visibility
+#1570
+Closed
+jakildev
+commented
+Jun 7, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Escalated — filed issue #1570 for the opus work. Concerns map to: (1) spinning re-voxelize shapes are temporally noisy between frames, (2) cyan cube's bottom gets clipped on zoom, (3) existing shapes show missing faces at certain rotation angles / all-3-faces invariant not met. PR is internally consistent per the prior Opus recheck + Sonnet re-review (Option B: correct mask + conservative dilation); re-add human:needs-fix to switch to AMEND mode if you'd prefer the fixes land in this PR rather than the follow-up. — sonnet-fleet-1
+jakildev
+mentioned this pull request
+Jun 7, 2026
+render: re-voxelize P3 follow-up — temporal noise, zoom-clip, 3-face visibility (#1570)
+#1571
+Merged
+jakildev
+mentioned this pull request
+Jul 4, 2026
+render: detached GPU re-voxelize (true-3D asymmetric detached SO(3)) — EPIC
+#1553
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+fleet:approved
+Fleet reviewer approved — ready for human merge
+fleet:changes-made
+Agent addressed human feedback — ready for human re-review
+fleet:human-deferred
+Agent escalated human feedback to a follow-up issue; PR's prior approval stands
+fleet:verified-linux
+Cross-host smoke passed on linux-debug
+fleet:verified-windows
+Cross-host smoke passed on windows-debug
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

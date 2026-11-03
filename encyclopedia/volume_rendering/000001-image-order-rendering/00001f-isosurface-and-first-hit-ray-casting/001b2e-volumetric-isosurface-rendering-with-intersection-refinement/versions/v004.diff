@@ -1,0 +1,214 @@
+--- v003.md
++++ v004.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-Volumetric isosurface rendering with intersection refinement is a real-time technique that extracts an isosurface directly from a 3D volumetric scalar field during ray traversal, avoiding explicit polygon mesh extraction (e.g., Marching Cubes) [S1, S3]. It detects the surface by finding intervals where the scalar field changes sign relative to an isovalue [S1], or stops when the sampled value exceeds the isovalue [S4], and refines the intersection position to reduce discretization artifacts [S4]. Unlike [Differentiable Volumetric Rendering (DVR)](775-differentiable-volumetric-rendering-dvr.md), which composites the entire volume, this method stops at the first hit, offering higher performance for opaque surfaces [S4]. It differs from [Real-Time Ray-Casting and Advanced Shading of Discrete Isosurfaces](838-real-time-ray-casting-and-advanced-shading-of-discrete-isosu.md) by operating on implicit continuous data rather than discrete extracted meshes [S3].
++Volumetric isosurface rendering with intersection refinement is a real-time technique that extracts an isosurface directly from a 3D volumetric scalar field during ray traversal, avoiding explicit polygon mesh extraction (e.g., Marching Cubes) [S3]. It detects the surface by checking if the sampled scalar value equals or crosses the target isovalue [S1, S2, unofficial], stops traversal at the first hit, and refines the intersection position to reduce discretization artifacts [S4]. Unlike [Differentiable Volumetric Rendering (DVR)](775-differentiable-volumetric-rendering-dvr.md), which composites the entire volume, this method stops at the first hit, offering higher performance for opaque surfaces [S4]. It differs from [Real-Time Ray-Casting and Advanced Shading of Discrete Isosurfaces](838-real-time-ray-casting-and-advanced-shading-of-discrete-isosu.md) by operating on implicit continuous data rather than discrete extracted meshes [S3].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D volumetric scalar field texture ($f$), camera parameters (view/projection matrices, position), an isovalue ($uIsovalue$), a ray marching step size ($uStepSize$), and rendering parameters (refinement iterations, shadow enablement) [S1, S2, unofficial].
++*   **Input:** A 3D volumetric scalar field texture ($f$), camera parameters (view/projection matrices, position), an isovalue ($uIsovalue$), a ray marching step size ($uStepSize$), and rendering parameters (refinement iterations, shadow enablement) [S2, unofficial, S3].
+ *   **Output:** A 2D image where each pixel contains the color of the first isosurface intersection, shaded with lighting and shadows [S1, S3].
+ 
+@@ -32,7 +32,7 @@
+ **Algorithm Steps:**
+ 1.  **Ray Construction and Box Intersection:**
+-    For each fragment covered by the volume, construct a ray origin $O$ and direction $D$ from the camera [S2, unofficial]. Compute the intersection parameters $t_{min}$ and $t_{max}$ for the ray with the volume domain $[uDomainMin, uDomainMax]$ [S1]. If $t_{max} \le t_{min}$, the ray misses the volume; return empty/no hit [S1]. Set $t_{start} = \max(t_{min}, 0.0)$ and $t_{end} = t_{max}$ [S2, unofficial].
+-2.  **Ray Marching and Sign Change Detection:**
+-    Initialize $t_{prev} = t_{start}$ [S2, unofficial]. Sample the scalar field at the start position: $d_{prev} = f(O + t_{prev} D) - uIsovalue$ [S2, unofficial]. Iterate $t_{curr}$ from $t_{start} + uStepSize$ to $t_{end}$ with step $uStepSize$ [S1, S2, unofficial]. At each step, sample the field: $d_{curr} = f(O + t_{curr} D) - uIsovalue$ [S2, unofficial]. Check for a sign change between $d_{prev}$ and $d_{curr}$ [S1]. A sign change indicates the isosurface lies within the interval $[t_{prev}, t_{curr}]$ [S1, S2, unofficial].
++    For each fragment covered by the volume, construct a ray origin $O$ and direction $D$ from the camera [S2, unofficial]. Compute the intersection parameters $t_{min}$ and $t_{max}$ for the ray with the volume domain $[uDomainMin, uDomainMax]$ [S2, unofficial]. If $t_{max} \le t_{min}$, the ray misses the volume; return empty/no hit [S2, unofficial]. Set $t_{start} = \max(t_{min}, 0.0)$ and $t_{end} = t_{max}$ [S2, unofficial].
++2.  **Ray Marching and Surface Detection:**
++    Initialize $t_{prev} = t_{start}$ [S2, unofficial]. Sample the scalar field at the start position: $d_{prev} = f(O + t_{prev} D) - uIsovalue$ [S2, unofficial]. Iterate $t_{curr}$ from $t_{start} + uStepSize$ to $t_{end}$ with step $uStepSize$ [S2, unofficial]. At each step, sample the field: $d_{curr} = f(O + t_{curr} D) - uIsovalue$ [S2, unofficial]. Check for a sign change between $d_{prev}$ and $d_{curr}$ [S2, unofficial]. A sign change indicates the isosurface lies within the interval $[t_{prev}, t_{curr}]$ [S2, unofficial]. (Note: Some implementations simply stop when the sampled value exceeds the isovalue [S4]).
+ 3.  **Intersection Refinement:**
+     If a sign change is detected, refine the hit position $t_{hit}$ using one of two methods described in the sources:
+@@ -72,5 +72,5 @@
+     The final color is computed as:
+     $$Color = BaseColor \cdot L \cdot S$$
+-    $BaseColor$ can be a fixed color, a color mapped from the isovalue via a transfer function, or a color derived from a secondary scalar field (e.g., coloring wind speed by temperature) [S2, unofficial, S3]. Using the isovalue to fetch color avoids artifacts caused by transfer function interpolation at the surface [S4].
++    $BaseColor$ can be a fixed color, a color mapped from the isovalue via a transfer function, or a color derived from a secondary scalar field (e.g., coloring wind speed by temperature) [S3, S4]. Using the isovalue to fetch color avoids artifacts caused by transfer function interpolation at the surface [S4].
+ 6.  **Multiple Isosurfaces (Optional):**
+     If the surface is transparent or multiple isosurfaces are supported, the ray traversal continues after the first hit to composite nested surfaces [S3].
+@@ -79,108 +79,94 @@
+ 
+ ```python
+-# Pseudocode for a single pixel/fragment
+-# Inputs: origin, dir, domain_min, domain_max, step_size, isovalue, refinement_iterations, enable_shadows, light_angle, volume_texture
+-
+-def sample_field(pos, volume_texture):
+-    # Standard trilinear interpolation of volume_texture at pos
+-    return textureLod(volume_texture, pos, 0.0)
+-
+-def ray_box_intersection(origin, dir, domain_min, domain_max):
++def render_fragment(origin, direction, domain_min, domain_max, step_size, isovalue, refinement_iterations, enable_shadows, light_angle, volume_data):
++    # 1. Ray-box intersection
+     t_min = float('inf')
+     t_max = float('-inf')
+     for i in range(3):
+-        if dir[i] == 0:
++        if direction[i] == 0.0:
+             if origin[i] < domain_min[i] or origin[i] > domain_max[i]:
+-                return None, None
++                return (0.0, 0.0, 0.0, 0.0)
+         else:
+-            t1 = (domain_min[i] - origin[i]) / dir[i]
+-            t2 = (domain_max[i] - origin[i]) / dir[i]
++            t1 = (domain_min[i] - origin[i]) / direction[i]
++            t2 = (domain_max[i] - origin[i]) / direction[i]
+             t_enter = min(t1, t2)
+             t_exit = max(t1, t2)
+             t_min = max(t_min, t_enter)
+             t_max = min(t_max, t_exit)
+-    if t_max < t_min:
+-        return None, None
+-    return t_min, t_max
+-
+-def refine_intersection_bisection(origin, dir, t_a, t_b, d_a, d_b, iterations):
+-    for _ in range(iterations):
+-        t_m = (t_a + t_b) / 2.0
+-        pos_m = origin + t_m * dir
+-        d_m = sample_field(pos_m, volume_texture) - isovalue
+-        if d_a * d_m <= 0:
+-            t_b = t_m
+-            d_b = d_m
+-        else:
+-            t_a = t_m
+-            d_a = d_m
+-    return (t_a + t_b) / 2.0
+-
+-def compute_normal(pos):
+-    h = step_size
+-    gx = sample_field(pos + vec3(h, 0, 0), volume_texture) - sample_field(pos - vec3(h, 0, 0), volume_texture)
+-    gy = sample_field(pos + vec3(0, h, 0), volume_texture) - sample_field(pos - vec3(0, h, 0), volume_texture)
+-    gz = sample_field(pos + vec3(0, 0, h), volume_texture) - sample_field(pos - vec3(0, 0, h), volume_texture)
+-    grad = vec3(gx, gy, gz)
+-    return normalize(-grad)
+-
+-def trace_shadow(origin, dir, step_size):
+-    t = 2.0 * step_size
+-    while True:
+-        p = origin + t * dir
+-        if p.x < domain_min.x or p.y < domain_min.y or p.z < domain_min.z or \
+-           p.x > domain_max.x or p.y > domain_max.y or p.z > domain_max.z:
+-            return 1.0
+-        if sample_field(p, volume_texture) >= isovalue:
+-            return 0.0
+-        t += step_size
+-
+-def render_fragment(origin, dir):
+-    # 1. Ray setup
+-    t_min, t_max = ray_box_intersection(origin, dir, domain_min, domain_max)
+-    if t_min is None:
+-        return vec4(0, 0, 0, 0)
++    if t_max <= t_min:
++        return (0.0, 0.0, 0.0, 0.0)
+     t_start = max(t_min, 0.0)
+     t_end = t_max
+-    
+-    # 2. Marching
++
++    # 2. Ray marching and sign change detection
+     t_prev = t_start
+-    d_prev = sample_field(origin + t_prev * dir, volume_texture) - isovalue
++    pos_prev = origin + t_prev * direction
++    d_prev = sample_volume(pos_prev, volume_data) - isovalue
+     hit = False
+-    color = vec3(0)
+-    
++    final_color = (0.0, 0.0, 0.0)
++
+     t_curr = t_start + step_size
+     while t_curr <= t_end:
+-        d_curr = sample_field(origin + t_curr * dir, volume_texture) - isovalue
+-        if d_prev * d_curr <= 0:
+-            # Sign change detected
+-            t_hit = refine_intersection_bisection(origin, dir, t_prev, t_curr, d_prev, d_curr, refinement_iterations)
+-            p_hit = origin + t_hit * dir
+-            # 3. Normal
+-            n = compute_normal(p_hit)
+-            # 4. Lighting
+-            angle = light_angle * 6.28318
+-            l_dir = normalize(vec3(cos(angle), sin(angle), -1.0))
+-            diffuse = max(0.0, dot(n, l_dir))
+-            # 5. Shadows
++        pos_curr = origin + t_curr * direction
++        d_curr = sample_volume(pos_curr, volume_data) - isovalue
++        if d_prev * d_curr <= 0.0:
++            # Sign change detected, refine intersection
++            t_a, t_b = t_prev, t_curr
++            d_a, d_b = d_prev, d_curr
++            for _ in range(refinement_iterations):
++                t_m = (t_a + t_b) / 2.0
++                pos_m = origin + t_m * direction
++                d_m = sample_volume(pos_m, volume_data) - isovalue
++                if d_a * d_m <= 0.0:
++                    t_b, d_b = t_m, d_m
++                else:
++                    t_a, d_a = t_m, d_m
++            t_hit = (t_a + t_b) / 2.0
++            p_hit = origin + t_hit * direction
++
++            # 3. Normal computation
++            h = step_size
++            gx = sample_volume(p_hit + (h, 0.0, 0.0), volume_data) - sample_volume(p_hit - (h, 0.0, 0.0), volume_data)
++            gy = sample_volume(p_hit + (0.0, h, 0.0), volume_data) - sample_volume(p_hit - (0.0, h, 0.0), volume_data)
++            gz = sample_volume(p_hit + (0.0, 0.0, h), volume_data) - sample_volume(p_hit - (0.0, 0.0, h), volume_data)
++            grad = (gx, gy, gz)
++            norm_len = sqrt(gx*gx + gy*gy + gz*gz)
++            normal = (-gx/norm_len, -gy/norm_len, -gz/norm_len)
++
++            # 4. Lighting and shadows
++            angle = light_angle * 6.28318530718
++            light_dir = normalize((cos(angle), sin(angle), -1.0))
++            diffuse = max(0.0, dot(normal, light_dir))
+             shadow = 1.0
+             if enable_shadows == 1:
+-                shadow = trace_shadow(p_hit, l_dir, step_size)
+-            # 6. Color
+-            base_color = vec3(1.0) # Or mapped from isovalue
+-            color = base_color * diffuse * shadow
++                t_shadow = 2.0 * step_size
++                while True:
++                    p_shadow = p_hit + t_shadow * light_dir
++                    if p_shadow.x < domain_min.x or p_shadow.y < domain_min.y or p_shadow.z < domain_min.z or \
++                       p_shadow.x > domain_max.x or p_shadow.y > domain_max.y or p_shadow.z > domain_max.z:
++                        break
++                    if sample_volume(p_shadow, volume_data) >= isovalue:
++                        shadow = 0.0
++                        break
++                    t_shadow += step_size
++            base_color = (1.0, 1.0, 1.0) # Fixed color; can be mapped from isovalue or secondary field
++            final_color = (base_color[0]*diffuse*shadow, base_color[1]*diffuse*shadow, base_color[2]*diffuse*shadow)
+             hit = True
+             break
+-        t_prev = t_curr
+-        d_prev = d_curr
++        t_prev, d_prev = t_curr, d_curr
+         t_curr += step_size
+-        
+-    return vec4(color, 1.0)
++
++    return (final_color[0], final_color[1], final_color[2], 1.0)
++
++def sample_volume(pos, volume_data):
++    # Performs trilinear interpolation of the 3D volume texture at pos
++    # Implementation depends on hardware/software backend [G]
++    pass
+ ```
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Linear with respect to the number of samples along the ray [S3]. Refinement adds a constant factor ($k$ iterations) only when a hit is found [S2, unofficial]. Shadow rays add another traversal pass [S2, unofficial].
+-*   **Memory Complexity:** Low [S1]. Requires storage for the 3D volume texture and small UBOs [S1]. No explicit mesh geometry is stored [S1, S3].
+-*   **Performance:** Real-time on modern GPUs [S1]. Performance scales with step size and number of samples [S3]. Smaller step sizes increase accuracy but reduce frame rate [S2, unofficial].
++*   **Memory Complexity:** Low. Requires storage for the 3D volume texture and small UBOs [S2, unofficial]. No explicit mesh geometry is stored [S1, S3].
++*   **Performance:** Real-time on modern GPUs [S2, unofficial]. Performance scales with step size and number of samples [S3]. Smaller step sizes increase accuracy but reduce frame rate [S2, unofficial].
+ *   **Optimizations:**
+     *   **Empty-space skipping:** Using a 32x32x32 brick min/max acceleration structure allows rays to jump over regions that cannot contain the isovalue [S3].
+@@ -189,5 +175,5 @@
+ *   **Strengths:**
+     *   No preprocessing/mesh extraction required [S1, S3].
+-    *   Dynamic isovalue changes are instantaneous [S2, unofficial].
++    *   Dynamic isovalue changes are instantaneous without CPU geometry rebuilds [S3].
+     *   Avoids the high computational cost of full volume rendering (DVR) for opaque surfaces [S4].
+     *   High-quality intersection refinement reduces stair-stepping artifacts [S4].

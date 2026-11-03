@@ -1,0 +1,122 @@
+A WebGPU engine for creative coding. Contribute to Siroko/kansei development by creating an account on GitHub.
+
+Ray tracing grid: a GPU grid of world triangles with kansei_rt_trace (RT 1/3) by Siroko · Pull Request #158 · Siroko/kansei · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Siroko
+commented
+Oct 5, 2026
+Copy link
+Copy Markdown
+Owner
+Part 1 of 3 of the ray-traced reflections milestones from the cluster RT scout (its section 5, milestones 1-3).
+Stack (merge in order; each PR targets the one before it):
+this PR: the grid core (kansei_core::rt)
+the GPU feed: the renderer gathers the grid from its renderables (InstanceCulling and cluster LOD) (to follow)
+RtReflectionsEffect in outdoor-gi and gi-box (to follow)
+Why
+WebGPU has no hardware ray tracing, and voxels can't make a sharp reflection at any cost. The scout measured a near-field uniform grid of world triangles, rebuilt on the GPU, at 0.55 ms for sharp reflections of the forest (106k half-res rays at 1080p), about 2× faster than the best cluster BVH. This PR adds that grid as an engine module.
+The technique combines Hector Arellano's two posts:
+Triangles small enough to act as particles, with the big ones kept apart (miaumiau.cat/?p=1457).
+What each voxel holds, walked by a 3D DDA and tested exactly (miaumiau.cat/?p=1476's ray tracing).
+What
+RtGrid: a box of cells (it follows the eye in snapped steps, or stays fixed for a room). Each rebuild runs on the GPU:
+gather: sources append their world triangles. A source is a mesh placed once per record, by an RtPlacement (an InstanceTransform as cluster LOD reads it, or WGSL). Triangles whose box misses the grid are dropped, and each workgroup takes its survivors' slots with one atomic.
+count, scan, fill: each triangle is listed in the cells it overlaps. It visits only the cells its plane crosses, column by column, then the separating-axis test confirms each cell.
+Epsilon: every cell is widened by a small world-space epsilon (RtGridOptions::epsilon, a 1024th of a cell by default), so a triangle on a cell's face is listed on both sides. The scout lost 0.75% of its hits there.
+Wide triangles: a triangle spanning more than 32 columns is scattered by a workgroup of its own, one column per thread in turn. One thread walking a wall's cells made the scout's gi-box build cost 9.4 ms.
+Big triangles: room-sized ones (big_triangle_cells, 1024 columns) go to a short list that every ray tests, up to 64 of them as in the post. That saves their references and their build.
+Capacities (triangles, references) grow from a readback of what a build needed (read_back, stats).
+RT_GRID_WGSL: kansei_rt_trace(origin, dir, t_min, t_max, flags) returns the closest hit, or any hit with KANSEI_RT_ANY_HIT. It tests the big list, then walks the cells (Amanatides-Woo, leaving empty 4³ macro cells in one step).
+It binds one uniform and two storage buffers (RtGrid::bindings_wgsl / layout_entries / bind_group_entries), well within WebGPU's 8 storage buffers a stage. The build binds four.
+Alpha-tested triangles (RtSurface::with_alpha_layer) call the includer's kansei_rt_covered(layer, uv), so the caller samples its own foliage texture (there are no bindless textures). RT_OPAQUE_WGSL defines one that keeps every hit.
+A hit gives its normal, barycentrics, uv, albedo, source and record.
+RtScene / RtMesh: meshes placed on the CPU, for a grid with no renderer. The next PR feeds the grid from the renderer on the GPU and removes this CPU selection from the examples.
+split_large_triangles: the post's midpoint split, at load.
+Renderer::end_profiled_frame (doc-hidden): ends a profiled frame of offscreen work, so native tools can time passes.
+docs/plans/2026-10-05-rt-grid-design.md: the design of all three milestones.
+Measured
+GPU time on this Mac (M4 Pro), native, from kansei's profiler (cargo test --release -p kansei-core --test rt_grid_gpu -- --ignored --nocapture). The grid is gi-box's: 100 × 96 × 100 cells of 4.75 cm, holding a 4.6 m room.
+Scene
+Thread per triangle
++ wide list
++ big list (default)
+room walls (62 triangles)
+24.7 ms
+0.7 ms
+0.4 ms
+walls + 20k small triangles
+25.5 ms
+0.8 ms
+0.5 ms
+The scan of a million cells is 0.13 ms of each build. In-browser numbers at 1080p come with the effect (part 3).
+Tests
+cargo test -p kansei-core --lib rt:::
+naga validates every shader (the build, the gather with each kind of placement, the library as a caller uses it).
+The uniforms' sizes match their WGSL structs.
+Placements match the cluster cull's.
+The half-float packing and the split are checked.
+cargo test -p kansei-core --test rt_grid_gpu (real GPU, CPU reference in f64). The scene has unit cubes whose faces lie on cell faces (one turned a quarter turn), a soup of 800 small triangles, a sphere half out of the box, a ground too wide for the cells, an alpha-tested quad, and a cube out of the box.
+Every gathered triangle is listed in every cell it exactly overlaps.
+Closest and any hit match a brute-force reference for 5.4k rays: rays aimed at triangles, random rays, and rays running exactly along cell faces.
+They also match without macro skipping, with a big list of one, with no big list, and with coarser cells.
+After the buffers grow from an overflowing first build.
+The shaders compile in Chrome (WebGPU) with no messages.
+cargo test -p kansei-core --lib passes (344 tests, 7 ignored); cargo check -p kansei-core --target wasm32-unknown-unknown is clean.
+feat(rt): a GPU grid of world triangles for rays, with RT_GRID_WGSL's…
+…
+2fc244f
+```
+… kansei_rt_trace
+
+A uniform grid of world triangles in a box round the camera (or a fixed
+one), rebuilt on the GPU from sources (a mesh placed once per record):
+gather, then count, scan and fill, each triangle listed in the cells it
+overlaps by the separating-axis test with every cell widened by an
+epsilon, so triangles on cell faces are listed on both sides. Triangles
+over 32 columns are scattered by a workgroup each, room-sized ones go to
+a short list every ray tests (miaumiau.cat/?p=1457's big triangles), and
+split_large_triangles splits a mesh at load. Capacities grow from a
+readback. The trace binds a uniform and two storage buffers; alpha-tested
+triangles call the includer's kansei_rt_covered.
+
+RtScene places meshes on the CPU for grids without a renderer. GPU tests
+check every triangle is listed in every cell it overlaps and that rays
+find what an f64 brute-force reference finds.
+```
+Siroko
+mentioned this pull request
+Oct 5, 2026
+Ray tracing grid: the renderer gathers it on the GPU from culled views and cluster cuts (RT 2/3)
+#159
+Merged
+Siroko
+merged commit 5b6bcfd
+into
+development
+Oct 5, 2026
+This was referenced Oct 5, 2026
+RtReflectionsEffect: reflections traced through the grid, lit by the voxels, in outdoor-gi and gi-box (RT 3/3)
+#160
+Merged
+feat(ts): RT grid, renderer-fed grid and RtReflectionsEffect (G-5)
+#205
+Merged
+Promote development to main: TS engine port, hybrid RT GI and reflections, worker renderer, curated examples
+#230
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

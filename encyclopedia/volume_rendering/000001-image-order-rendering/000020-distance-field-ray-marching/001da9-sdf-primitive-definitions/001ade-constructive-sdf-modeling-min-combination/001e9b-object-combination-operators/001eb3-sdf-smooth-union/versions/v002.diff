@@ -1,0 +1,215 @@
+--- v001.md
++++ v002.md
+@@ -1,28 +1,28 @@
+ # SDF Smooth Union
+ 
+-Also called: Smooth Minimum, Smooth Union (S-Union), LogSumExp SDF Union
++Also called: LogSumExp SDF Union, S-Union, Smooth Minimum, Smooth Minimum Blend (Cubic), Smooth Union (S-Union), Smooth Union SDF Operator, opSmoothUnion, sminCubic
+ 
+ ## Overview
+-SDF Smooth Union is a method to combine two or more Signed Distance Functions (SDFs) into a single smooth SDF, avoiding sharp edges at the intersection of primitives [S2, S3]. It approximates the boolean union operation using a blending parameter $k$ [S1]. It sets itself apart from its siblings, such as [Multi-Material Distance Fields](1943-multi-material-distance-fields.md), by focusing on geometric blending of distances rather than material interpolation, although it can be extended to blend materials [S3].
++SDF Smooth Union is a method to combine two or more Signed Distance Functions (SDFs) into a single smooth SDF, avoiding sharp edges at the intersection of primitives [S2, unofficial][S3, unofficial]. It approximates the boolean union operation using a blending parameter $k$ [S1, unofficial]. It sets itself apart from its siblings, such as [Multi-Material Distance Fields](1943-multi-material-distance-fields.md), by focusing on geometric blending of distances rather than material interpolation, although it can be extended to blend materials [S4, unofficial].
+ 
+ ## How it works
+-The method combines individual SDF results to produce a unified distance field. Two primary formulations exist: the polynomial smooth minimum (often called `smin`) and the LogSumExp smooth minimum.
++The method combines individual SDF results to produce a unified distance field [S3, unofficial]. Two primary formulations exist: the polynomial smooth minimum (often called `smin` or `sminCubic`) and the LogSumExp smooth minimum [S1, unofficial][S2, unofficial].
+ 
+ ### Inputs and Outputs
+-*   **Inputs**: Two (or more) signed distance values $a$ and $b$ (or $S_i(p)$) at a query point, and a smoothness parameter $k$ (or blend factor).
+-*   **Outputs**: A single signed distance value representing the smooth union.
++*   **Inputs**: Two (or more) signed distance values $a$ and $b$ (or $S_i(p)$) at a query point, and a smoothness parameter $k$ (or blend factor) [S1, unofficial][S2, unofficial].
++*   **Outputs**: A single signed distance value representing the smooth union [S3, unofficial].
+ 
+ ### Data Structures
+-When combining multiple primitives with associated materials, the result is often wrapped in a structure [S3]:
++When combining multiple primitives with associated materials, the result is often wrapped in a structure [S4, unofficial]:
+ *   `SdResult`: A struct containing:
+-    *   `distance` (float): The signed distance value.
+-    *   `material` (struct): Material properties (diffuse, specular, etc.) [S3].
++    *   `distance` (float): The signed distance value, accessed via `.x` [S4, unofficial].
++    *   `material` (struct): Material properties (diffuse, specular, etc.) [S4, unofficial].
+ 
+ ### Formulas
+ 
+-#### 1. Polynomial Smooth Minimum (`smin`)
+-This variant uses a cubic polynomial approximation [S4].
++#### 1. Polynomial Smooth Minimum (`smin` / `sminCubic`)
++This variant uses a cubic polynomial approximation [S4, unofficial].
+ 
+-Let $a$ and $b$ be the two SDF values. Let $k$ be the blend radius (smoothness parameter) [S4].
++Let $a$ and $b$ be the two SDF values. Let $k$ be the blend radius (smoothness parameter) [S4, unofficial].
+ 
+ 1.  Calculate the interpolation factor $h$:
+@@ -30,12 +30,13 @@
+ 2.  Calculate the result:
+     $$ \text{result} = \text{mix}(b, a, h) - k \cdot h \cdot (1.0 - h) $$
+-    Where $\text{mix}(b, a, h) = b + h(a - b)$ [S4].
++    Where $\text{mix}(b, a, h) = b + h(a - b)$ [S5, unofficial].
+ 
+-Alternatively, expressed directly [S1]:
++Alternatively, expressed directly using $d_1$ and $d_2$:
++$$ h = \text{clamp}\left(0.5 + 0.5 \cdot \frac{d_2 - d_1}{k}, 0., 1.\right) $$
+ $$ \text{union}(d_1, d_2, k) = \text{mix}(d_2, d_1, h) - k \cdot h \cdot (1 - h) $$
+-where $h = \text{clamp}(0.5 + 0.5 \cdot \frac{d_2 - d_1}{k}, 0., 1.)$ [S1].
++where $\text{mix}(a, b, t) = a \cdot (1 - t) + b \cdot t$ [S1, unofficial].
+ 
+ #### 2. LogSumExp Smooth Minimum
+-This variant uses the soft-min approximation via exponentials [S2].
++This variant uses the soft-min approximation via exponentials [S2, unofficial].
+ 
+ For a set of SDFs $S_i(p)$:
+@@ -43,111 +44,88 @@
+ Or equivalently:
+ $$ S_{union}(p) = \frac{1}{-k} \text{logsumexp}_{i}(-k \cdot S_i(p)) $$
+-where $k$ is a positive float controlling smoothness [S2].
++where $k$ is a positive float controlling smoothness [S2, unofficial].
+ 
+ ### Parameters
+-*   **$k$ (blend radius / smoothness)**: Controls the width of the transition region between shapes. Higher values result in a smoother union [S1, S2]. Typical values depend on the desired "blobbiness" or scale of the primitives [S4]. In specific implementations, typical values are 0.5 for primitive blending and 0.33 for final scene blending [S3].
++*   **$k$ (blend radius / smoothness)**: Controls the width of the transition region between shapes [S1, unofficial]. Higher values result in a smoother union [S2, unofficial]. Typical values depend on the desired "blobbiness" or scale of the primitives [S4, unofficial]. In specific implementations, typical values are 0.5 for primitive blending and 0.33 for final scene blending [S4, unofficial]. A typical value of 1.0f is also noted [S3, unofficial].
+ 
+ ### Pseudocode
++```python
++import math
+ 
+-```python
++def mix(a: float, b: float, t: float) -> float:
++    """Linear interpolation: a * (1 - t) + b * t"""
++    return a * (1.0 - t) + b * t
++
++def clamp(val: float, min_val: float, max_val: float) -> float:
++    """Clamp value to [min_val, max_val]"""
++    return max(min_val, min(max_val, val))
++
+ def smin_polynomial(a: float, b: float, k: float) -> float:
+-    """
+-    Polynomial smooth union of two SDF values.
+-    :param a: First SDF value
+-    :param b: Second SDF value
+-    :param k: Blend radius (smoothness). Must be > 0.
+-    :return: Smoothly blended distance
+-    """
+-    # Clamp h to [0, 1]
++    """Polynomial smooth union of two SDF values."""
++    if k <= 0.0:
++        return min(a, b)  # Guard against division by zero [G]
+     h = 0.5 + 0.5 * (b - a) / k
+-    h = max(0.0, min(1.0, h))
+-    
+-    # Mix and subtract correction term
+-    mix_val = b + h * (a - b)
+-    result = mix_val - k * h * (1.0 - h)
+-    return result
++    h = clamp(h, 0.0, 1.0)
++    return mix(b, a, h) - k * h * (1.0 - h)
+ 
+ def smin_logsumexp(values: list, k: float) -> float:
+-    """
+-    LogSumExp smooth union for multiple SDF values.
+-    :param values: List of SDF values
+-    :param k: Smoothness parameter
+-    :return: Smoothly blended distance
+-    """
++    """LogSumExp smooth union for multiple SDF values."""
+     if not values:
+         return float('inf')
+-    
+-    # Compute -k * S_i
+     neg_k_s = [-k * s for s in values]
+-    
+-    # Find max for numerical stability
+     max_val = max(neg_k_s)
+-    
+-    # Compute logsumexp
+     sum_exp = sum(math.exp(val - max_val) for val in neg_k_s)
+     log_sum_exp = math.log(sum_exp) + max_val
+-    
+-    # Final result
+     return -log_sum_exp / k
+ 
+-def combine_sdfs_with_materials(sdfs: list, materials: list, p: vec3, k: float) -> dict:
++class SdResult:
++    """Container for distance and material data."""
++    def __init__(self, distance: float, material):
++        self.distance = distance
++        self.material = material
++        self.x = distance  # Alias for .x access [S4, unofficial]
++
++def combine_sdfs(sdfs: list, materials: list, p, k: float) -> SdResult:
+     """
+     Combines multiple SDFs with materials using polynomial smin.
+-    :param sdfs: List of SDF evaluation functions
+-    :param materials: List of material structs
+-    :param p: Query point
+-    :param k: Blend factor
+-    :return: SdResult dict with distance and material
++    Matches nested sminCubic pattern from [S4, unofficial].
+     """
+-    # 1. Evaluate individual SDFs
+-    distances = []
+-    for sdf_func in sdfs:
+-        # Transform point if necessary (e.g., translation, rotation)
+-        # p_transformed = transform(p) 
+-        dist = sdf_func(p)
+-        distances.append(dist)
+-    
+-    # 2. Combine distances using smin
+-    # For more than 2, nest the smin calls or use logsumexp
++    distances = [sdf(p) for sdf in sdfs]
+     combined_dist = distances[0]
+     for i in range(1, len(distances)):
+         combined_dist = smin_polynomial(combined_dist, distances[i], k)
+-        
+-    # 3. Combine materials (simplified: use material of the closest primitive or blend)
+-    # Note: The source [S3] implies material blending is possible but focuses on distance.
+-    # A simple approach is to pick the material of the primitive with the smallest distance.
++    # Material blending: pick closest primitive's material [G]
+     min_idx = distances.index(min(distances))
+-    combined_material = materials[min_idx]
+-    
+-    return {"distance": combined_dist, "material": combined_material}
++    return SdResult(combined_dist, materials[min_idx])
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Precision**: When using LogSumExp, subtracting the maximum value before exponentiation is required for numerical stability [S2, G].
++*   **Precision**: When using LogSumExp, subtracting the maximum value before exponentiation is required for numerical stability [G].
+ *   **Boundary**: The polynomial `smin` is only $C^1$ continuous if $k$ is chosen appropriately relative to the curvature of the primitives [G].
+-*   **Degenerate Input**: If $k=0$, the operation becomes a hard min (boolean union), which may cause discontinuities in derivatives if not handled [S1, G].
++*   **Degenerate Input**: If $k \le 0$, division by zero occurs; the operation falls back to a hard `min` [G].
+ 
+ ## Subtopics
+ 
+ ### Polynomial Smooth Minimum
+-A blending function for combining two SDF values to create organic, metaball-like merges between primitives without branching or trigonometry [S4]. It uses a cubic polynomial approximation [S4]. Choose this when computational efficiency is prioritized over the exact soft-min properties of the LogSumExp variant. It is controlled by the blend radius parameter $k$ (or `uBlendK`) [S4].
++A blending function for combining two SDF values to create organic, metaball-like merges between primitives without branching or trigonometry [S5, unofficial]. It uses a cubic polynomial approximation [S4, unofficial]. It is controlled by the blend radius parameter $k$ (or `uBlendK`) [S5, unofficial].
+ 
+ ### LogSumExp Smooth Minimum
+-A method using the soft-min approximation via exponentials [S2]. It provides a smoother transition and is mathematically equivalent to the soft-min function. Choose this when a more "natural" blending behavior is desired or when combining more than two primitives, as it generalizes easily to $N$ inputs. It is controlled by the positive float `blend_k` [S2].
++A method using the soft-min approximation via exponentials [S2, unofficial]. It is controlled by the positive float `blend_k` [S2, unofficial]. It generalizes easily to $N$ inputs [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(1)$ per pair of SDFs for Polynomial; $O(N)$ for LogSumExp with $N$ inputs.
+-*   **Memory Complexity**: $O(1)$ for Polynomial; $O(N)$ for LogSumExp to store intermediate exponentials.
+-*   **Strengths**: Produces smooth, organic transitions; avoids sharp edges; computationally cheap.
+-*   **Limitations**: The resulting distance field is an approximation and not a true Euclidean distance field [G]. The smoothness parameter $k$ must be tuned per scene scale.
+-*   **When to use**: When creating organic shapes, metaballs, or smooth architectural details.
+-*   **When not to use**: When exact distance properties are required for collision detection or physics [G].
++*   **Time Complexity**: Not given in the sources.
++*   **Memory Complexity**: Not given in the sources.
++*   **Strengths**: Produces smooth, organic transitions; avoids sharp edges [S2, unofficial][S3, unofficial].
++*   **Limitations**: The resulting distance field is an approximation and not a true Euclidean distance field [G]. The smoothness parameter $k$ must be tuned per scene scale [G].
++*   **When to use**: Not given in the sources.
++*   **When not to use**: Not given in the sources.
+ 
+ ## Background
+-The concept of smooth minimum operators for SDFs has been popularized in the context of ray marching and procedural modeling. The polynomial variant (`smin`) is widely used in shader code for its simplicity [S4]. The LogSumExp variant is derived from the soft-min function in optimization and machine learning [S2]. These methods are commonly used in real-time graphics, particularly in demoscene productions and procedural generation tools [S3].
++The concept of smooth minimum operators for SDFs has been popularized in the context of ray marching and procedural modeling [S4, unofficial]. The polynomial variant (`smin`) is widely used in shader code for its simplicity [S4, unofficial]. The LogSumExp variant is derived from the soft-min function in optimization and machine learning [S2, unofficial].
+ 
+ ## Sources
+ [S1] skmhrk1209/Sphere-Tracing-PyTorch3D, https://github.com/skmhrk1209/Sphere-Tracing-PyTorch3D, fetched 2026-10-26 (unofficial)
+ [S2] kyle-rosa/ray_marching, https://github.com/kyle-rosa/ray_marching, fetched 2026-10-26 (unofficial)
+-[S3] cahekp/Raymarching, https://github.com/cahekp/Raymarching, fetched 2026-10-27 (unofficial)
+-[S4] MohammadHossinzehi/sdf-raymarcher, https://github.com/MohammadHossinzehi/sdf-raymarcher, fetched 2026-10-26 (unofficial)+[S3] An Introduction to Raymarching - Maxime Garcia, https://typhomnt.github.io/teaching/ray_tracing/raymarching_intro/, fetched 2026-10-27 (unofficial)
++[S4] cahekp/Raymarching, https://github.com/cahekp/Raymarching, fetched 2026-10-27 (unofficial)
++[S5] MohammadHossinzehi/sdf-raymarcher, https://github.com/MohammadHossinzehi/sdf-raymarcher, fetched 2026-10-26 (unofficial)

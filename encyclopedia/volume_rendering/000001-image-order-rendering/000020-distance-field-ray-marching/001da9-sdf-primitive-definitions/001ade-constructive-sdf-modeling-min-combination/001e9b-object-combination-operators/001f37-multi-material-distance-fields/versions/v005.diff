@@ -1,0 +1,241 @@
+--- v004.md
++++ v005.md
+@@ -4,13 +4,13 @@
+ 
+ ## Overview
+-Multi-Material Distance Fields extend standard Signed Distance Fields (SDFs) by associating material properties (such as color or ID) with geometric primitives, allowing distinct visual identification of objects within a combined scene. Unlike standard SDFs which return only a scalar distance, this method returns a vector containing both the distance and material data, enabling the raymarcher to identify which primitive was hit for shading purposes. It builds on [Object Combination Operators](1801-object-combination-operators.md) to merge these multi-component fields while preserving the distance value for marching and the material ID for rendering.
++Multi-Material Distance Fields extend standard Signed Distance Field (SDF) ray marching by associating material properties (such as color or ID) with geometric primitives. While standard SDFs return a single scalar distance, this method returns a vector containing both the distance and material data, allowing for the rendering of composite scenes with distinct visual attributes. It differs from [SDF Smooth Union](1817-sdf-smooth-union.md) and [Smooth Intersection](1839-smooth-intersection.md) by focusing on attribute propagation rather than geometric blending; it relies on the parent [Object Combination Operators](1801-object-combination-operators.md) to handle the geometric union logic while preserving the associated material payload.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Ray origin $ro$, ray direction $rd$, maximum march steps, and a material lookup texture (Color Ramp).
+-*   **Output:** A final pixel color determined by the material ID of the closest hit surface.
++*   **Input:** Ray origin $ro$, ray direction $rd$, maximum travel distance.
++*   **Output:** Final pixel color, derived from the material ID of the closest hit surface.
+ 
+ **Data Structures:**
+-*   **Multi-Material Point:** A 2D vector `float2` (or similar) where:
++*   **Map Function Output:** A 2D vector `float2` (or equivalent).
+     *   `x` component: The signed distance value $d$.
+     *   `y` component: The material identifier $m$ (e.g., a normalized color index or integer ID).
+@@ -18,114 +18,153 @@
+ **Algorithm Steps:**
+ 
+-1.  **Define Primitive Mappers:** Each geometric primitive (box, sphere, torus, etc.) is wrapped in a function that returns a `float2`. The `x` component is the result of the standard SDF function (e.g., $sdBox(p)$), and the `y` component is a constant material ID specific to that primitive.
+-    $$
+-    \text{map}_{\text{prim}}(p) = \text{float2}( \text{SDF}_{\text{prim}}(p), \text{material\_id}_{\text{prim}} )
+-    $$
++1.  **Define Primitive Maps:** Each geometric primitive (box, sphere, torus, etc.) is wrapped in a function that returns a `float2`. The distance is computed normally, and the material ID is appended.
++    $$ \text{map}_{\text{primitive}}(p) = \text{float2}(d_{\text{primitive}}(p), m_{\text{primitive}}) $$
+ 
+-2.  **Combine Fields:** Use the Union operator from [Object Combination Operators](1801-object-combination-operators.md) to merge primitives. The operator compares only the distance components (`x`) to determine the closest surface, but returns the entire `float2` vector of the winning primitive.
+-    $$
+-    \text{opU}(d_1, d_2) = \begin{cases} d_1 & \text{if } d_1.x < d_2.x \\ d_2 & \text{otherwise} \end{cases}
+-    $$
+-    This ensures the distance field remains valid for ray marching while propagating the correct material ID.
++2.  **Combine Objects:** Use the union operator `opU` to combine the `float2` results of multiple primitives. The operator compares only the distance components (`x`) to determine the closest surface, but returns the entire `float2` vector of the winning primitive. This ensures the material ID travels with the distance.
++    $$ \text{opU}(d_1, d_2) = \begin{cases} d_1 & \text{if } d_1.x < d_2.x \\ d_2 & \text{otherwise} \end{cases} $$
+ 
+-3.  **Ray Marching:**
+-    *   Initialize ray distance $t = 0$.
+-    *   For each step $i$ from $0$ to $maxsteps$:
++3.  **Ray Marching Loop:**
++    *   Initialize ray parameter $t = 0$.
++    *   For each step $i$ up to `maxstep`:
+         *   Calculate world position: $p = ro + rd \cdot t$.
+-        *   Sample the combined scene: $d = \text{map}(p)$.
+-        *   Check for intersection: If $d.x < \epsilon$ (where $\epsilon$ is a small threshold, e.g., $0.001$), a hit has occurred.
+-        *   Break the loop.
+-        *   Otherwise, advance the ray: $t \leftarrow t + d.x$.
++        *   Sample the scene map: $d = \text{map}(p)$.
++        *   Check for intersection: If $d.x < \epsilon$ (where $\epsilon$ is a small threshold, e.g., $0.001$), the ray has hit a surface. Break the loop.
++        *   Advance ray: $t \leftarrow t + d.x$.
+ 
+ 4.  **Shading:**
+     *   Upon hit, extract the material ID from $d.y$.
+-    *   Sample a **Color Ramp** texture (a `sampler2D` uniform) using $d.y$ as the texture coordinate to retrieve the final color.
+-    *   Compute lighting (diffuse/specular) based on the surface normal at $p$ and the retrieved color.
++    *   Sample a **Color Ramp** texture using $d.y$ as the texture coordinate to determine the final color.
++    *   Compute lighting (diffuse/specular) using the surface normal at $p$ and the sampled color.
+ 
+ **Pseudocode:**
+ 
+ ```python
+-# Union operator for multi-material SDFs
+-# Takes two float2 vectors: (distance, material_id)
+-# Returns the vector with the smaller distance component
++import math
++
++def sd_box(p, center, half_size):
++    """Signed distance to a box."""
++    q = abs(p - center) - half_size
++    return min(max(q.x, max(q.y, q.z)), 0.0) + length(max(q, 0.0))
++
++def sd_torus(p, pq):
++    """Signed distance to a torus."""
++    q = abs(p) - pq
++    return length(max(q, 0.0)) - pq.y
++
++def sd_sphere(p, center, radius):
++    """Signed distance to a sphere."""
++    return length(p - center) - radius
++
++def length(v):
++    return math.sqrt(v.x**2 + v.y**2 + v.z**2)
++
+ def opU(d1, d2):
+-    if d1.x < d2.x:
++    """Union operator for multi-material SDFs.
++    Returns the vector (distance, material_id) of the closer object.
++    """
++    if d1[0] < d2[0]:
+         return d1
+     else:
+         return d2
+ 
+-# Example primitive mappers returning float2
+-def map_torus(p):
+-    dist = sd_torus(p, float2(1.0, 0.2))
+-    material_id = 0.5  # Example ID
+-    return float2(dist, material_id)
++def map_scene(p):
++    """
++    Returns float2: [distance, material_id]
++    """
++    # Define primitives with their material IDs
++    # Material IDs are arbitrary floats, typically 0.0-1.0 for texture lookup
++    d_torus = (sd_torus(p, (1.0, 0.2)), 0.5)
++    d_box = (sd_box(p, (-3.0, 0.0, 0.0), (0.75, 0.5, 0.5)), 0.25)
++    d_sphere = (sd_sphere(p, (3.0, 0.0, 0.0), 1.0), 0.75)
+ 
+-def map_box(p):
+-    # Assuming p is already translated
+-    dist = sd_box(p, float3(0.75, 0.5, 0.5))
+-    material_id = 0.25
+-    return float2(dist, material_id)
+-
+-def map_sphere(p):
+-    dist = sd_sphere(p, 1.0)
+-    material_id = 0.75
+-    return float2(dist, material_id)
+-
+-# Combined scene map
+-def map_scene(p):
+-    # Combine torus and box
+-    ret = opU(map_torus(p), map_box(p))
+-    # Combine result with sphere
+-    ret = opU(ret, map_sphere(p))
++    # Combine using union operator
++    ret = opU(d_torus, d_box)
++    ret = opU(ret, d_sphere)
++    
+     return ret
+ 
+-# Raymarching loop
+-def raymarch(ro, rd):
++def raymarch(ro, rd, max_steps=64, epsilon=0.001):
++    """
++    Raymarch the multi-material scene.
++    Returns color based on material ID.
++    """
+     t = 0.0
+-    max_steps = 64
+     hit_material_id = -1.0
+     
+     for i in range(max_steps):
+         p = ro + rd * t
+-        d = map_scene(p)
+         
+-        # d.x is distance, d.y is material ID
+-        if d.x < 0.001:
+-            hit_material_id = d.y
++        # Sample distance and material
++        d_vec = map_scene(p)
++        dist = d_vec[0]
++        mat_id = d_vec[1]
++        
++        # Check for hit
++        if dist < epsilon:
++            hit_material_id = mat_id
+             break
+         
+-        t += d.x
++        # Step forward
++        t += dist
+         
++        if t > 100.0: # Arbitrary max distance
++            break
++            
++    # Shading
+     if hit_material_id >= 0:
+-        # Sample color ramp using material ID
++        # Sample color ramp texture using material ID
++        # In a real shader, this would be texture2D(_ColorRamp, float2(mat_id, 0.5))
+         color = sample_color_ramp(hit_material_id)
+-        # Compute lighting and return final color
+-        return compute_lighting(p, rd, color)
++        
++        # Calculate normal for lighting
++        normal = calc_normal(p)
++        light = compute_lighting(normal, color)
++        return light
+     else:
+         return background_color
++
++def sample_color_ramp(mat_id):
++    """Placeholder for texture sampling."""
++    # Returns a color based on mat_id
++    return (mat_id, 1.0 - mat_id, 0.5, 1.0)
++
++def calc_normal(p):
++    """Calculate normal using finite differences."""
++    eps = 0.01
++    n = (
++        (map_scene(p + (eps, 0, 0))[0] - map_scene(p - (eps, 0, 0))[0],
++         map_scene(p + (0, eps, 0))[0] - map_scene(p - (0, eps, 0))[0],
++         map_scene(p + (0, 0, eps))[0] - map_scene(p - (0, 0, eps))[0])
++    )
++    return normalize(n)
++
++def normalize(v):
++    l = length(v)
++    if l == 0: return (0,0,0)
++    return (v[0]/l, v[1]/l, v[2]/l)
+ ```
+ 
+ **Parameters:**
+-*   **ColorRamp:** A `sampler2D` texture mapping material IDs (values typically in $[0, 1]$) to RGB colors [S1, unofficial].
+-*   **Threshold:** A small epsilon value (e.g., $0.001$) for determining intersection [S1, unofficial].
++*   **ColorRamp:** A 1D or 2D texture (`sampler2D`) mapping material IDs (the `y` component of the map output) to RGB colors. Typical usage involves discrete bands or gradients [S1, unofficial].
++*   **Epsilon:** The hit threshold. Must be small enough to prevent missing thin features but large enough to avoid precision issues [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Material ID Precision:** If material IDs are stored as floats, ensure they are distinct enough to be resolved by the texture sampler. [G] Using integer IDs mapped to discrete texture coordinates is often more robust than continuous floats.
+-*   **Gradient Discontinuity:** While the distance field is continuous, the material ID is discrete. This causes a sharp visual change at the boundary between materials, which is the intended behavior. However, normal calculation must be careful not to blend normals across material boundaries if physically based rendering is desired.
++*   **Gradient Discontinuity:** If the material ID changes abruptly between two objects at the same distance, the `opU` function selects one arbitrarily. This can cause visual artifacts if the objects are perfectly coincident.
++*   **Lipschitz Continuity:** As with all SDF operators, if the gradients of the combined SDFs are not orthogonal, the Lipschitz condition may be violated, leading to ray marching artifacts (overshooting or undershooting) [S1, unofficial][S2, unofficial]. This is a geometric property of the underlying distance functions, not the material encoding.
++*   **Precision:** Using `float2` for distance and material ID requires sufficient precision in the `y` component if the material ID range is large. [G] In practice, material IDs are often normalized to [0, 1] for texture lookup, which fits well within standard float precision.
+ 
+ ## Subtopics
+ 
+-### [Material Object Format](1981-material-object-format.md)
+-A data structure for holding surface shading info, separating geometric displacement from shading calculations.
+-
+ ## Operating characteristics
+-*   **Time Complexity:** Identical to standard SDF ray marching, $O(N)$ where $N$ is the number of march steps. The overhead of returning and comparing `float2` vectors is negligible.
+-*   **Memory Complexity:** Minimal increase; only the material ID needs to be stored per primitive.
+-*   **Strengths:** Enables complex, multi-colored scenes with smooth boolean operations without requiring explicit mesh generation or texture mapping on the geometry itself.
+-*   **Limitations:** Limited to a finite number of materials (determined by the precision of the material ID storage and the resolution of the Color Ramp). Cannot represent continuous material variation across a single object's surface unless the SDF itself encodes that variation (which is a different technique).
++*   **Time Complexity:** $O(N)$, where $N$ is the number of ray marching steps. The cost per step is slightly higher than standard SDFs due to the vector arithmetic and potential texture lookups during shading, but the ray marching loop itself is identical.
++*   **Memory Complexity:** $O(1)$ additional memory per ray. The material ID is stored in the register/stack. The ColorRamp texture adds $O(T)$ memory, where $T$ is the texture size.
++*   **Strengths:** Simple implementation; allows for complex composite scenes with distinct materials without changing the ray marching core; leverages existing SDF primitives.
++*   **Limitations:** Only supports a limited number of materials per scene (determined by the number of primitives); material boundaries are sharp (unless combined with smooth operators, which may complicate the material ID logic); requires a color ramp texture.
++*   **When to use:** Ideal for real-time ray marching of composite geometric scenes where materials are defined by geometry (e.g., CAD models, voxel-like structures) and do not require complex procedural shading per pixel beyond the base color.
++*   **When not to use:** When materials require complex, position-dependent shading (e.g., noise-based textures) that cannot be easily encoded in a simple color ramp; when the number of materials is very large.
+ 
+ ## Background
+-This technique was popularized by Inigo Quilez in his articles on distance functions and raymarching, specifically demonstrating how to extend the `map()` function to return material data alongside distance [S1, unofficial]. It is widely used in GLSL raymarching demos and shader art to create visually rich scenes from simple geometric primitives.
++Multi-Material Distance Fields were popularized by Inigo Quilez in his articles on distance functions and ray marching [S1, unofficial]. The technique is a natural extension of the basic SDF ray marching algorithm, allowing artists and developers to create visually rich scenes using simple geometric primitives. It is widely used in demoscene productions, real-time shaders, and educational graphics programming due to its simplicity and effectiveness.
+ 
+ ## Sources
+-[S1] Raymarching Distance Fields: Concepts and Implementation, https://adrianb.io/2016/10/01/raymarching.html, fetched 2026-10-27 (unofficial)+[S1] Raymarching Distance Fields: Concepts and Implementation ..., https://adrianb.io/2016/10/01/raymarching.html, fetched 2026-10-27 [S1, unofficial]

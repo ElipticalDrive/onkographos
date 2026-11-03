@@ -1,0 +1,263 @@
+arXiv:2312.11729v1 [hep-ex] 18 Dec 2023
+RenderCore – a new WebGPU-based rendering engine for
+ROOT-EVE
+Ciril Bohak4,5 , Dmytro Kovalskyi2 , Sergey Linev3 , Alja Mrak Tadel1 , Sebastien Strban4 ,
+Matevž Tadel1, * , and Avi Yagil1
+1
+UC San Diego, La Jolla, CA, USA 92093
+MIT, Cambridge, MA, USA, 02139
+3
+GSI, Darmstadt, Germany 64291
+4
+University of Ljubljana, Ljubljana, Slovenia 1000
+5
+KAUST, Thuwal, Saudi Arabia, 23955
+2
+Abstract. ROOT-Eve (REve), the new generation of the ROOT event-display
+module, uses a web server-client model to guarantee exact data translation from
+the experiments’ data analysis frameworks to users’ browsers. Data is then
+displayed in various views, including high-precision 2D and 3D graphics views,
+currently driven by THREE.js rendering engine based on WebGL technology.
+RenderCore, a computer graphics research-oriented rendering engine, has been
+integrated into REve to optimize rendering performance and enable the use of
+state-of-the-art techniques for object highlighting and object selection. It also
+allowed for the implementation of optimized instanced rendering through the
+usage of custom shaders and rendering pipeline modifications. To further the
+impact of this investment and ensure the long-term viability of REve, RenderCore is being refactored on top of WebGPU, the next-generation GPU interface
+for browsers that supports compute shaders, storage textures and introduces
+significant improvements in GPU utilization. This has led to optimization of interchange data formats, decreased server-client traffic, and improved offloading
+of data visualization algorithms to the GPU. FireworksWeb, a physics analysisoriented event display of the CMS experiment, is used to demonstrate the results, focusing on high-granularity calorimeters and targeting high data-volume
+events of heavy-ion collisions and High-Luminosity LHC. The next steps and
+directions are also discussed.
+1 Introduction
+The new event visualization environment of the ROOT data processing framework [1] —
+called ROOT-Eve or just REve — is a rewrite of the now more than 15-years old components,
+TEve [2] and TGL [3], for the modern times using web client–server application model,
+web-based graphical user interfaces and 2D & 3D graphics. The code and APIs have been
+modernized in line with the ROOT-7 campaign. On the client side, REve is based on OpenUI5
+JavaScript application framework [4] and JSRoot [5, 6].
+Development of REve has been driven by the needs and requirements of the FireworksWeb application, itself a rewrite of Fireworks, the physics-analysis oriented event-display of
+* e-mail: mtadel@ucsd.edu
+the CMS experiment [7, 8]. Since ROOT version 6 provides a fully C++ standard-compliant
+interpreter, rootcling, including support for lambda expressions, it was possible to port several high-level Fireworks features into REve: support for physics collections & physics items,
+physics item filtering, and table-views with custom column expressions. Proof-of-concept
+implementation and design choices for REve and FireworksWeb were presented at CHEP2018 [9] (client–server core, data exchange, remote method execution) followed a year later,
+at CHEP-2019, by a functional prototype of CMS FireworksWeb [10]. Towards the end of
+2021, event-display service for CMS was deployed at CERN and at UC San Diego. Access
+to any CMS data is available through AAA, the CMS XRootd data federation, from CERN
+EOS, and from CERNBox. To improve the data access locality at UCSD, the AAA access is
+fronted by an XCache instance. REve is the core technology used for CMS visualization. The
+legacy TEve-based application is still supported for online event visualization in the control
+room at P5, geometry browser for simulation geometry development and debugging, and to
+run custom user extensions that have not been ported yet to the new framework.
+JSRoot uses THREE.js [11] to display 3D plots and detector geometry and was initially
+used by REve without much afterthought — it was seen as a very general and well-supported
+option. The fact that REve could use an existing rendering library was even seen as one
+of the benefits of adopting the web as the user interaction layer. However, as development
+reached the level of adding advanced features that were supported in the custom TEve / TGL
+low-level OpenGL-1.x rendering engine & scene graph library, several complications arose,
+as will be discussed in section 2.
+Around that point, a predecessor Med3D [12] to RenderCore, a lightweight JavaScript
+WebGL-2.0 rendering engine, was presented at the HEP Software Foundation workshop in
+Naples (2018) with an expression of interest for collaboration with the HEP community by the
+Laboratory for Computer Graphics and Multimedia at Faculty of Computer and Information
+Science at the University of Ljubljana. While the Med3D was intended for collaborative
+medical visualization on the web, its flexible design allowed easy adaptation for other use
+cases. RenderCore, is even more adaptable, especially in creating custom rendering pipelines
+and supporting arbitrary data to be used within them, making it much more adaptable than
+THREE.js. The first expression of interest from the REve side was made in 2019 with some indepth explorations with partial REve-side implementation following through 2020 and 2021
+when the final commitment to include RenderCore in REve was made from both sides and
+RenderCore software was made publicly available [13]. Since the end of 2022, RenderCore
+is the default render engine for REve.
+2 Motivation for migration to RenderCore
+As mentioned in the introduction, TEve used a custom OpenGL-1.x engine developed in
+sync with TEve as needed to support the CAD-like features of EVE: overlays, overlay eventhandling, overlay GUI elements, high-precision selection, and well-pronounced object outlines and highlights. Controlling the low-level details of the render flow offered great flexibility in implementing these advanced features that are typically unavailable in standard
+rendering engines. Before REve, migration to a modern, shader-based OpenGL was never
+even considered, as it would have required a major rewrite of all components. Client–server
+architecture of REve, however, mandates serialization of visualization data with complete
+decoupling of state between server- and client-side representations. The required rewrite of
+visualization data structures and their generating algorithms was then also used to try to express these structures so that memory buffers from the server (C++) side can be sent directly
+to memory buffers in JavaScript, and then passed on as render-buffers to WebGL without
+any reinterpretation or even reshuffling. These two topics, the ability to implement advanced
+features and efficient data passing, are at the core of the issue of selecting a rendering engine,
+using it, and extending it for implementation of an even-display framework. In this section,
+we discuss the reasons for the transition from a large, fully-featured, community-driven rendering engine to a lightweight, research & teaching-driven one.
+High-level issues with THREE.js
+THREE.js is a large project aiming to provide a cross-browser, general-purpose 3D library.
+As such it has a lot of functionality and features REve does not need. It has an extensive
+user base, and as it also aims to be an easy-to-use framework, the features and functionality
+need to be tightly integrated from API classes through the rendering pipeline all the way to
+shader implementation codes. This means that any significant changes need to be made in
+several places and coexist with several other supported features, however exotic they might
+be from one’s perspective. As we have been learning modern web-based graphics during the
+early development of REve, introducing changes into THREE.js or even just extending it with
+custom algorithms and functionality turned out to require great diligence as implementation
+often required an understanding of several components and layers of the library as well as the
+corresponding computer graphics principles.
+The same argument works against us also once changes are successfully implemented:
+there is no desire from THREE.js maintainers to include them in the main repository as the
+CAD-like features that REve requires are not used by other library users. Therefore, including
+such changes is disruptive because it complicates the code, as explained above, and introduces
+potential maintenance, support, and documentation issues. Even our simpler changes, related
+to the usage of geometry buffers that would allow us to avoid copying data in JavaScript code,
+were rejected as not being of interest to a wider community. This resulted in our changes
+being kept in the REve repository, some as run-time patches for THREE.js code.
+At the same time, the release and low-level change rate for THREE.js is rather large, and
+while API classes are guaranteed to remain supported to some extent, the back-end code can
+and does change significantly between releases. For REve, complete stability of rendering
+code is preferred as very limited developer time is available for its maintenance. For example,
+ROOT’s TGL package used by the legacy TEve has been stable since 2008.
+Unresolved technical & functional issues with THREE.js
+As mentioned above, it was challenging to implement advanced features that spawn across
+multiple levels of the THREE.js framework. An example of such a feature is support for
+memory-optimized, morphable instantiated objects, e.g., polygons or polyhedra with some
+varying properties such as position, angle(s), scale(s), and color, that are required for visualization of high-volume simulation and reconstruction data. Implementing this feature would
+require support in API classes, render-driver pipeline, and shaders, including custom shader
+input on a per-primitive level.
+Another problem was picking or selecting an object or its component drawn at a given
+window position. THREE.js uses ray–mesh intersection for this purpose. This does not work
+well for point data (sprites) and lines, especially at high levels of magnification required for
+visualization of vertex regions. Further, REve uses object and sub-object outlines (highlights)
+to signal selection contents and under-the-mouse objects associated with the pop-up object
+details window. We had a workaround solution for object outlining but never adequately
+resolved the picking problem.
+3D lines of arbitrary thickness are challenging in any post-OpenGL-1.x framework as
+thick lines are no longer required to be supported by the standard. Things are even more
+complicated by the need to perform pixel-correct line picking and draw the outlines. This has
+never been addressed in the THREE.js implementation.
+In hindsight, it is clear that REve requirements for a rendering engine, coupled with our
+inexperience with modern graphics frameworks, led us to underestimate the required time
+to implement the required functionality and overestimate the ease of implementation of the
+mentioned features. It also took us a while to realize and to come to terms with the fact that
+using THREE.js, an off-the-shelf community-based project, does not work in our case.
+Adoption of RenderCore
+The two previous sub-sections list our issues with the THREE.js-based implementation of
+REve. All of them have been successfully addressed in the RenderCore implementation.
+This does not mean the implementation was easy, but it was certainly easier and, in fact,
+possible. Some of the implementation details are discussed in the next section.
+Collaboration on REve–RenderCore integration was extremely productive and efficient.
+It was of great help for REve developers to be able to discuss details of RenderCore code, to
+plan together the required extensions, and to be actively involved in the implementation of
+low-level changes in RenderCore. This work taught them the art of the modern shader-based
+rendering frameworks, provided meaningful extensions to RenderCore, and implemented advanced features in the REve–RenderCore interface.
+3 REve@RenderCore: implementation highlights
+Object & sub-object picking
+Object & sub-object picking got implemented via rendering to off-screen buffers (singlechannel 32-bit unsigned integer). This method gives pixel-perfect results but has to be implemented via dedicated shaders (or code paths in standard shaders) that put the object’s
+unique identifier into the output buffers. The identifiers are assigned automatically during
+the pre-render traversal. A limited viewport, 32x32 pixels around the pick position, reduces
+memory usage and rendering time. View-space z-coordinate is also extracted (as a 32-bit
+floating-point number) to place annotation anchors and set the camera rotation center.
+Sub-object or instance picking is implemented as a two-stage process. After the primary
+object is selected, that object alone is drawn again with a special shader flag that makes it use
+either instance-identifier (for instanced draw) or vertex-identifier (for mesh-encoded instancing) as the output identifier. Optimized implementation required changes in the RenderCore
+mesh renderer code and a custom implementation of two-pass selection in REve render-driver
+as an interpretation of picking results depends on implementation details of REve client-side
+objects.
+Object outlines
+Outline rendering is based on a custom implementation of rendering into textures to extract a
+subset of geometry buffers traditionally used for deferred shading. View-space depth, viewspace normal vectors, and view-direction vectors are used to determine the selected object’s
+edges and sudden changes in the normal direction. This allows for the outlining of the object’s
+silhouette as well as the marking of the inner edges to aid in shape recognition.
+REve supports multiple lists of selected objects (or sub-objects), each having its own
+outline colors and outline widths. Each selection list must be processed separately, and all
+the outlines must be accumulated into the final output buffer. Tight management and reuse of
+render buffers are required for a memory-efficient implementation. Figure 1 shows an image
+of outlines as implemented in a RenderCore test program, and figure 2 shows a composite
+selection & highlight rendering in REve.
+Figure 1. RenderCore test for outline drawing. The selected cubes also have edge outlines. Sprites
+(used for markers in REve) are outlined in accordance with transparency of the defining texture — a
+star marker is outlined as a star despite being drawn as a textured rectangle.
+Figure 2. Selection and highlight in REve. Two selected objects are outlined in red: a muon and a
+sub-selection of calorimeter towers. A highlighted (under the mouse) muon is outlined in green. Notice
+also the pop-up information box showing track parameters.
+Instanced objects
+Instanced objects are used when a large number of physics items need to be drawn, e.g., for
+the display of digits, hits, or calorimeter towers. Grouping a set of such physics items together
+into a single object (both in REve and in RenderCore) allows for a significant reduction in
+object representation, data transport, and data processing overheads. The shared part of the
+state gets stored in the containing object, and the item-specific information gets encoded in
+object-specific data buffers, as needed for the specific case. This can be any combination
+of position, rotation with respect to a fixed axis, scaling, color, or some other parameters
+affecting the shape of the object.1
+Instancing as implemented in REve–RenderCore requires the instance data to be packed
+into "data" textures transferred from the server to the GPU without repacking. However, one
+has to coordinate three things: a) data packing on the server side; b) texture format & size
+interpretation when passing it to WebGL; and c) instance stride and data-texture component
+interpretation in the shader code. This is rather cumbersome and was one of the motivating
+factors for considering WebGPU-based RenderCore implementation for REve.
+Figure 3 shows the visualization of CMS HGCal detector elements implemented via such
+instancing. Figure 4 shows a detail of the same event where simulated hits and reconstructed
+physics objects can also be seen.
+Figure 3. Full view of CMS HGCal visualization. The light-blue halo consists of 1.2 million hexagonal
+prisms, each rendered as 24 triangles. Interactive refresh rates are achieved on 10-year-old hardware
+(NVIDIA GTX-970).
+4 Ongoing & future work
+4.1 Transition to WebGPU
+WebGPU is the upcoming standard for 3D graphics on the web, developed and supported by
+all major browser vendors. Compared to WebGL, WebGPU introduces significant improvements in GPU utilization as well as support for compute shaders and storage textures, which
+1 Standard computer graphics instancing uses the same mesh (unmodifiable) and a full 4x4 transformation matrix
+for each instance.
+Figure 4. Detail of CMS HGCal visualization showing simulated detector hits and reconstructed clusters and tracklets.
+allow storing to arbitrary positions within shaders without the need for texture sampling.
+Storage textures, coupled with compute shaders, can potentially be used with structured data
+to alleviate the need to repack data. Further, WebGPU exposes full control over the rendering
+pipeline elements and allows for complex state changes to be enacted quickly by switching
+between several pre-configured pipelines.
+RenderCore implementation of WebGPU-based rendering is mostly complete. The
+biggest challenge was the design of an elegant and efficient mechanism for the creation and
+management of custom pipelines and their coupling with associated materials and shader programs. Appropriate use of render bundles allowed for the recording of render commands and
+a significant reduction of CPU time usage.
+The transition to WebGPU has been motivated by the above performance improvements
+as well as by the fact that WebGL browser implementations have not received significant updates since 2017 and, in fact, have not been updated beyond the WebGL 2.0 version of the
+standard, which is built on top of OpenGL ES 3.02 . Additionally, WebGPU utilizes modern
+back-ends3 , which are the same for both embedded and desktop versions. From the REve
+side, the main driver was the ability to bind structured data into shaders, therefore eliminating the need to pack data into textures and improving shader-code readability. Further, this
+could enable us to generate such structures on the fly, along with relevant shader-code fragments, and ship them from the server to the client, allowing for further optimizations and
+generalizations of instance rendering.
+At the time of the conference, the transition of REve to use WebGPU-based RenderCore
+was on hold because of issues with the GNU/Linux browser support. Since then, most of the
+issues have been resolved, the transition is resumed, and most core functionalities are already
+ported.
+4.2 Usage of WebAssembly
+In REve, complex processing is done at the server during the geometry preparation stage, in
+C++, and final lightweight calculations are performed on the GPU in shaders. This allows us
+2 OpenGL ES is a version of the standard for embedded systems such as mobile devices and is thus additionally
+limited in comparison to the full version of the standard.
+3 Vulkan, Metal, DirectX 12
+to balance between memory usage, data-transfer volume, and CPU & GPU usage and bypass
+some of the bottlenecks typically encountered in web-based visualization. WebAssembly
+offers additional performance optimization by providing a means to run pre-compiled assembly code within the browser, minimizing the overhead introduced by JavaScript. In addition,
+WebAssembly allows the development of both desktop and web-based applications in C++ or
+Rust which can be coupled with WebGPU for rendering, yielding even higher performance in
+the natively built application while maintaining the same code-base for both web and desktop
+applications.
+We are aiming to explore WebAssembly for some bulk calculations within the scene graph
+processing (e.g., calculating normal and model-view matrices or performing view-frustum &
+clip-plane culling) and for implementation of client-side physics-item filtering.
+5 Conclusion
+RenderCore was selected as the rendering engine for ROOT-Eve. This allowed us to reclaim advanced functionality required for physics-oriented event-display applications and
+gain low-level control over object-data representation and rendering pipeline. Collaboration
+with computer graphics professionals made learning low-level details about browser-based
+3D graphics and implementing advanced functionality reasonably easy and significantly reduced the required time investment. REve and RenderCore are used as the core visualization
+technologies for the CMS experiment. The transition of RenderCore to WebGPU is ongoing,
+proceeding in sync with the finalization of the API and implementation in browsers. This will
+allow us to perform final optimizations of REve and provide ROOT event visualization with
+state-of-the-art 3D graphics.
+Acknowledgements
+This work was supported by the U.S. National Science Foundation under Cooperative Agreements OAC-1836650 and PHY-2121686.
+References
+[1] I. Antcheva et al., Comput. Phys. Commun. 180, 2499 (2009)
+[2] M. Tadel, PoS ACAT 08, 103 (2008)
+[3] M. Tadel, J. Phys. Conf. Ser. 119, 042028 (2008)
+[4] P. Muessing, OpenUI5 [software], Project webpage. https://openui5.org
+[5] S. Linev, JSROOT [software], Project repository. https://github.com/root-project/jsroot
+[6] B. Bellenot and S. Linev, J. Phys. Conf. Ser. 664, no. 6, 062033 (2015)
+[7] D. Kovalskyi et al., J. Phys. Conf. Ser. 219, 032014 (2010)
+[8] L. A. T. Bauerdick et al., J. Phys. Conf. Ser. 331, 072039 (2011)
+[9] A. Mrak Tadel et al., EPJ Web Conf. 214, 05039 (2019)
+[10] A. Mrak Tadel et al., EPJ Web Conf. 245, 08027 (2020)
+[11] R. Cabello, Three.js [software], Project repository. https://github.com/mrdoob/three.js
+[12] P. Lavrič, C. Bohak, M. Marolt, MIPRO-2017, DOI:10.23919/MIPRO.2017.7973430
+(2017)
+[13] C. Bohak et al., RenderCore [software], Project repository. https://github.com/
+UL-FRI-LGM/RenderCore

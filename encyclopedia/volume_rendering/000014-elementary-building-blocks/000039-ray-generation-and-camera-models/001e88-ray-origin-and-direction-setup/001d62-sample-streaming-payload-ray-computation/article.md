@@ -1,0 +1,244 @@
+# Sample Streaming Payload Ray Computation
+
+Also called: Camera Ray Casting, Ray Direction Computation, SampleStreamingPayload, Ray Generation (Pinhole Camera), Ray Generation from NDC Pixels
+
+## Overview
+Sample Streaming Payload Ray Computation is a method for regenerating ray geometry (origins and directions) from discrete pixel indices and stored camera parameters, primarily used in streaming or deferred rendering pipelines where ray data is reconstructed on-demand rather than precomputed [S1, S3]. It solves the problem of resuming ray tracing or computing shadow rays by mapping pixel coordinates to world space using either a direct pinhole camera model or an NDC unprojection approach [S1, S3]. It differs from [NDC Ray Transformation](905-ndc-ray-transformation.md) by explicitly handling the payload context (such as shadow vs. main view) and from [Stochastic Jittering](924-stochastic-jittering.md) by generating deterministic primary or shadow rays without noise injection [S1, S3].
+
+## How it works
+The method supports two distinct computational paths depending on the ray type: **Main View Ray** reconstruction and **Shadow Ray** computation. Both rely on the `SampleStreamingPayload` structure, which stores the pixel index and necessary camera parameters to regenerate the ray [S1].
+
+### Inputs and Outputs
+**Inputs:**
+*   `pixel_index`: Integer identifier for the pixel (or frame buffer index) [S1].
+*   `params`: A configuration object containing:
+    *   `frame.size`: Image dimensions $(W, H)$ [S1].
+    *   `camera`: Camera parameters including position, direction, horizontal/vertical basis vectors, or a full camera-to-world transformation matrix [S1, S3].
+    *   `light_directional_dir`: Direction of the light source (for shadow rays) [S1].
+*   `org`: Stored ray origin (for shadow rays) [S1].
+*   `alpha`, `color`: Payload attributes (for shadow rays) [S1].
+
+**Outputs:**
+*   `RayBundle` or `Ray` structure containing:
+    *   `org`: Ray origin $\mathbf{o}$ (world space) [S1, S3].
+    *   `dir`: Ray direction $\mathbf{d}$ (normalized, world space) [S1, S3].
+    *   `alpha`, `color`: Payload values (for shadow rays) [S1].
+
+### Data Structures
+The `SampleStreamingPayload` typically contains:
+*   `pixel_index`: `int` [S1].
+*   `org`: `vec3` (optional, used for shadow rays) [S1].
+*   `alpha`: `float` (optional) [S1].
+*   `color`: `vec3` (optional) [S1].
+
+The `Ray` structure contains:
+*   `org`: `vec3` [S1].
+*   `dir`: `vec3` [S1].
+*   `alpha`: `float` [S1].
+*   `color`: `vec3` [S1].
+
+### Main View Ray Computation
+This path reconstructs the primary view ray for a given pixel index [S1].
+
+1.  **Pixel Coordinate Extraction**:
+    Compute the integer pixel coordinates $(i_x, i_y)$ from the `pixel_index` (often `fbIndex`) [S1]:
+    $$ i_x = \text{pixel\_index} \pmod W $$
+    $$ i_y = \lfloor \text{pixel\_index} / W \rfloor $$
+    where $W$ is the frame width [S1].
+
+2.  **Screen Position Normalization**:
+    Compute the normalized screen position $\mathbf{s}$ in the range $[0, 1]$ by adding a 0.5 offset for pixel centering:
+    $$ \mathbf{s} = \frac{1}{W, H} \begin{bmatrix} i_x + 0.5 \\ i_y + 0.5 \end{bmatrix} $$
+    [S1].
+
+3.  **Camera Basis Transformation**:
+    Retrieve the camera-to-world transformation matrices: `otw` (object-to-world, often identity or model transform) and `wto` (world-to-object, inverse of view matrix) [S1].
+    *   **Origin**: Transform the camera position $\mathbf{p}_{cam}$ to world space:
+        $$ \mathbf{o} = \text{xfmPoint}(wto, \mathbf{p}_{cam}) $$
+        [S1].
+    *   **Direction**: Compute the direction vector in camera space using the horizontal $\mathbf{h}$ and vertical $\mathbf{v}$ basis vectors and the camera's forward direction $\mathbf{f}_{cam}$:
+        $$ \mathbf{d}_{cam} = \mathbf{f}_{cam} + (s_x - 0.5)\mathbf{h} + (s_y - 0.5)\mathbf{v} $$
+        [S1].
+    *   **World Direction**: Transform and normalize:
+        $$ \mathbf{d} = \text{normalize}(\text{xfmVector}(wto, \mathbf{d}_{cam})) $$
+        [S1].
+
+    *Alternative NDC Approach [S3]*:
+    1.  Generate pixel coordinates $i \in [0, W)$ and $j \in [0, H)$ [S3].
+    2.  Normalize to NDC $[-1, 1]$:
+        $$ x_{ndc} = 2 \frac{i}{W} - 1, \quad y_{ndc} = 1 - 2 \frac{j}{H} $$
+        (Note: Source [S3] uses `2 * (array - min) / (max - min) - 1` and reverses dimensions, effectively mapping to standard NDC) [S3].
+    3.  Form homogeneous coordinates $\mathbf{p}_{ndc} = [x_{ndc}, y_{ndc}, 0, 1]^T$ (or similar depending on camera API) [S3].
+    4.  Unproject to world space: $\mathbf{p}_{world} = \text{camera.unproject\_points}(\mathbf{p}_{ndc})$ [S3].
+    5.  Origin $\mathbf{o}$ is the camera center [S3].
+    6.  Direction $\mathbf{d} = \text{normalize}(\mathbf{p}_{world} - \mathbf{o})$ [S3].
+
+### Shadow Ray Computation
+This path generates rays for shadow testing, often reusing a stored origin [S1].
+
+1.  **Transformations**: Get `otw` and `wto` [S1].
+2.  **Origin**: Set $\mathbf{o}$ to the stored `org` from the payload [S1].
+3.  **Direction**: Compute the direction towards the light:
+    $$ \mathbf{d} = \text{xfmVector}(wto, \text{normalize}(\text{params.light\_directional\_dir})) $$
+    [S1].
+4.  **Payload**: Set `ray.alpha` and `ray.color` from the payload [S1].
+
+### Pseudocode
+The following Python-like pseudocode combines the Main View (NDC-based, as it is more general for streaming payloads) and Shadow ray logic.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_rays(pixel_index, params, ray_type='main'):
+    """
+    Reconstructs ray geometry from a streaming payload.
+    
+    Args:
+        pixel_index (int): The index of the pixel in the frame buffer.
+        params (dict): Camera and scene parameters.
+            - 'W': int, image width.
+            - 'H': int, image height.
+            - 'camera': object with methods get_camera_center() and unproject_points().
+              Alternatively, contains 'position', 'direction', 'horizontal', 'vertical' vectors.
+            - 'light_directional_dir': vec3, light direction (for shadow rays).
+            - 'wto': mat4, world-to-object transformation matrix.
+        ray_type (str): 'main' or 'shadow'.
+        
+    Returns:
+        dict: Ray bundle with 'org' (vec3) and 'dir' (vec3).
+    """
+    W = params['W']
+    H = params['H']
+    
+    if ray_type == 'shadow':
+        # Shadow Ray Computation [S1]
+        # 1. Get transformations
+        wto = params['wto']
+        
+        # 2. Origin from payload (assumed passed or stored in a context)
+        # In a pure function, this would be an input. 
+        # Here we assume 'org' is available in params or a global payload context.
+        # For this implementation, we assume the payload 'org' is passed or retrieved.
+        # Let's assume 'payload_org' is available.
+        org = params.get('payload_org', np.array([0.0, 0.0, 0.0]))
+        
+        # 3. Direction: Transform light direction to world space (or camera space depending on wto definition)
+        # Source [S1] says: xfmVector(wto, normalize(params.light_directional_dir))
+        # Assuming wto transforms vectors from light/camera local to world, or vice versa.
+        # Standard xfmVector applies rotation.
+        light_dir = params['light_directional_dir']
+        dir_cam = light_dir / np.linalg.norm(light_dir)
+        dir_world = transform_vector(wto, dir_cam)
+        
+        return {'org': org, 'dir': dir_world}
+
+    elif ray_type == 'main':
+        # Main View Ray Computation [S3] (NDC approach)
+        
+        # 1. Compute pixel coordinates from index
+        ix = pixel_index % W
+        iy = pixel_index // W
+        
+        # 2. Normalize to NDC [-1, 1]
+        # Source [S3]: 2 * (array - min) / (max - min) - 1
+        # For i in [0, W-1], min=0, max=W-1? Or [0, W]?
+        # Source [S3] uses np.linspace(0, W, W, endpoint=False) -> [0, 1, ..., W-1]
+        # Then 2 * (x - 0) / (W - 0) - 1 ? 
+        # Actually, standard NDC for OpenGL is [-1, 1].
+        # Let's follow Source [S3] logic precisely:
+        # x_ndc = 2 * (ix / W) - 1 ? 
+        # Source [S3] code: ndc_points = torch.cat([ndc_points, ...], dim=-1)
+        # ndc_points derived from: 2 * (array - min) / (max - min) - 1
+        # If array is [0, ..., W-1], min=0, max=W-1.
+        # However, Source [5] uses (i - W/2)/focal.
+        # Let's stick to the NDC unprojection method from [S3] as it's more robust for "Streaming Payload"
+        # which often relies on camera APIs.
+        
+        # Create NDC coordinates
+        # x ranges from -1 to 1 (left to right)
+        # y ranges from 1 to -1 (top to bottom) or -1 to 1 depending on convention.
+        # Source [S3] reverses dimensions, implying y is inverted or handled by unproject.
+        
+        x_ndc = 2.0 * (ix + 0.5) / W - 1.0
+        y_ndc = 1.0 - 2.0 * (iy + 0.5) / H  # Inverted Y for screen coords
+        
+        # 3. Unproject to World Space
+        # Source [S3]: world_pts = camera.unproject_points(ndc_points, from_ndc=True)
+        # This returns a point on the near plane or a ray origin/direction pair.
+        # Assuming camera.unproject_points returns world coordinates of the NDC point on the view plane.
+        
+        # If using the explicit pinhole formula from [S1] or [S5]:
+        # Let's provide the explicit formula version as it's more "from plain text"
+        # than relying on a black-box `unproject_points`.
+        
+        # Pinhole Model [S1, S5]
+        camera = params['camera']
+        wto = params['wto']
+        
+        # Origin
+        cam_pos = camera['position'] # vec3
+        org = transform_point(wto, cam_pos)
+        
+        # Direction
+        # Source [S1]: dir = normalize(camera.direction + (screen.x - 0.5) * camera.horizontal + (screen.y - 0.5) * camera.vertical)
+        # screen.x and screen.y are in [0, 1]
+        screen_x = (ix + 0.5) / W
+        screen_y = (iy + 0.5) / H
+        
+        # Camera basis vectors in camera space
+        forward = camera['direction']
+        right = camera['horizontal']
+        up = camera['vertical']
+        
+        # Offset from center
+        offset = (screen_x - 0.5) * right + (screen_y - 0.5) * up
+        
+        dir_cam = forward + offset
+        dir_world = transform_vector(wto, dir_cam)
+        dir_world = dir_world / np.linalg.norm(dir_world)
+        
+        return {'org': org, 'dir': dir_world}
+
+def transform_point(mat, point):
+    """Transform a point by a 4x4 matrix."""
+    # Homogeneous multiplication
+    p = np.append(point, 1.0)
+    res = mat @ p
+    return res[:3] / res[3]
+
+def transform_vector(mat, vec):
+    """Transform a vector by the rotation part of a 4x4 matrix."""
+    # Only rotation and scale, no translation
+    rot = mat[:3, :3]
+    return rot @ vec
+```
+
+### Parameters and Typical Values
+*   **Focal Length**: Implicit in the camera basis vectors (`horizontal`, `vertical`) or explicit in NDC scaling [S1, S5].
+*   **Image Dimensions**: $W, H$ are integers, typically $1920 \times 1080$ or $1024 \times 1024$ [S1, S3].
+*   **Pixel Centering**: 0.5 offset is standard to align ray with pixel center [S1, S3].
+
+### Edge Cases and Pitfalls
+*   **Precision**: Floating point errors in normalization can cause slight direction drift; use `normalize` carefully [S1, S3].
+*   **Boundary Pixels**: The 0.5 offset ensures rays hit the center of the pixel, avoiding edge artifacts [S1].
+*   **Degenerate Camera**: If `horizontal` or `vertical` are zero or parallel to `direction`, the ray direction is undefined [S1].
+*   **NDC Convention**: Different APIs (OpenGL vs. DirectX) use different NDC ranges ([-1, 1] vs [0, 1]) and Y-axis directions. The implementation must match the camera API [S3].
+
+## Operating characteristics
+*   **Time Complexity**: $O(1)$ per ray. The computation involves basic arithmetic and matrix-vector multiplications [S1, S3].
+*   **Memory Complexity**: $O(1)$ auxiliary space per ray. No large buffers are allocated during ray generation [S1, S3].
+*   **Performance**: Extremely fast, suitable for real-time streaming or deferred shading where rays are generated on the fly [S1].
+*   **Strengths**: Memory efficient (no precomputed ray buffers), flexible (supports both pinhole and NDC models) [S1, S3].
+*   **Limitations**: Requires access to camera parameters and potentially the full transformation matrix [S1]. Not suitable for stochastic jittering without additional noise generation steps [S3].
+
+## Background
+The method originates from implementations of neural volume rendering and NeRF (Neural Radiance Fields) pipelines, where efficient ray generation is critical for training and inference [S1, S2, S3]. The `SampleStreamingPayload` pattern is used in systems like InstantVNR to manage ray data in streaming contexts [S1]. The NDC unprojection approach is common in PyTorch3D-based rendering pipelines [S3].
+
+## Sources
+[S1] VIDILabs/instantvnr, https://github.com/VIDILabs/instantvnr, fetched 2026-10-26 (unofficial)
+[S2] bmild/nerf, https://github.com/bmild/nerf, fetched 2026-10-26 (unofficial)
+[S3] Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
+[S4] DanJbk/Plenoxels, https://github.com/DanJbk/Plenoxels, fetched 2026-10-27 (unofficial)
+[S5] dgsmith7/nerf-mlp, https://github.com/dgsmith7/nerf-mlp, fetched 2026-10-27 (unofficial)

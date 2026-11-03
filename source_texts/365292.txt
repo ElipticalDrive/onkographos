@@ -1,0 +1,921 @@
+ADAPTIVE WAVELET SCHEMES AND FINITE VOLUMES
+Daniele Sarto, Erwan Deriaz, Xavier Lhébrard, Mathieu Rigal
+To cite this version:
+Daniele Sarto, Erwan Deriaz, Xavier Lhébrard, Mathieu Rigal. ADAPTIVE WAVELET SCHEMES AND FINITE
+VOLUMES. 2020. ⟨hal-02504922⟩
+HAL Id: hal-02504922
+https://hal.science/hal-02504922v1
+Preprint submitted on 11 Mar 2020
+HAL is a multi-disciplinary open access archive
+for the deposit and dissemination of scientific research documents, whether they are published or not.
+The documents may come from teaching and research
+institutions in France or abroad, or from public or private research centers.
+L’archive ouverte pluridisciplinaire HAL, est destinée au dépôt et à la diffusion de documents scientifiques de niveau recherche, publiés ou non, émanant
+des établissements d’enseignement et de recherche
+français ou étrangers, des laboratoires publics ou
+privés.
+HAL Authorization
+ADAPTIVE WAVELET SCHEMES AND FINITE VOLUMES
+Daniele Del Sarto 1 , Erwan Deriaz1 , Xavier Lhebrard 2 and Mathieu Rigal3, 4
+Abstract. We consider a procedure for combining high order finite volumes and tree-based nonuniform grids. Especially, we focus on efficient algorithms for third order multidimensional volume interpolation and communication between levels of refinement. In the end, numerical results are reviewed
+to validate our approach.
+Résumé. Nous considérons un processus permettant de combiner volumes finis et grilles non uniformes basées sur une structure d’arbre. En particulier, nous nous intéressons à des algorithmes
+efficaces pour l’interpolation multidimensionnelle en volumes d’ordre trois en précision et pour la communication entre les niveaux de raffinement. Enfin, nous validons notre démarche en analysant les
+résultats numériques obtenus.
+Introduction
+A recurring topic in the modeling of physical phenomenon is the conception of numerical solvers able to
+accurately describe the solution of given models. This can be challenging especially in cases where the range in
+spacial scales is varying a lot. For instance, the domain of the simulation might be very large in contrast to the
+high resolution required to describe steep gradients or even discontinuities in the solution. In such conditions,
+using a uniform mesh will inevitably lead to extremely costly computations. It is thus interesting to consider
+adaptive methods, which rely upon locally refining the mesh nearby those problematic areas. In this way, one
+can hope that most of the domain will be covered by a relatively coarse mesh resulting in faster computations,
+but without giving up on accuracy when and where needed.
+In this paper, we are interested in the study and implementation of high order finite volumes schemes
+compliant with Adaptive Mesh Refinement (AMR) for simple problems of convection. In the AMR framework,
+individual computational cells are organized directly in a tree. Each cell can be refined or coarsened separately
+from the others, as needed. The main advantages of the tree approach are the flexibility in refinement and the
+efficiency in using cells. However, standard grid-based solvers cannot be used on tree. In addition, an access to
+neighboring cells is more difficult in a tree than in an array.
+Our work is organized as follows. In a first section we give an in depth motivation from the physical and
+computational standpoints. Then we briefly recall the basis of finite volumes and discuss some strategies to
+achieve high order convergence. In the third section we aim at reviewing common challenges when dealing
+with AMR, and propose some efficient ways to tackle them. Finally, we present the numerical results obtained
+through a program implemented in C.
+1 Institut Jean Lamour, Université de Lorraine/CNRS
+2 ENS Bretagne
+3 Sorbonne Université
+4 Inria Paris
+Draft 2020
+2
+DRAFT
+1. Physical and computational motivation
+1.1. Singularities in physics simulation
+Adaptive Mesh Refinement proves particularly useful in simulations where different scales interact. For
+instance when an instability triggers a singularity, the large scale needed to simulate the global physical state
+is inadequate to catch the small scale of the singularity. And meshing right away the whole domain with a fine
+mesh is computationally too expansive.
+This does not apply to stable situations like the Lid-driven Cavity, neither to homogeneous turbulence where
+small scales develop everywhere in the domain. AMR can be used to finely track a boundary or to capture the
+boundary layers.
+1.2. Numerical advantages and disadvantages of mesh refinement
+Here we discuss the pros end the cons of the Adaptive Mesh Refinement technique.
+The use of an AMR demands specific numerical solvers and complicates the implementation and the parallelization. The loss of uniformity induces a loss of the error function regularity which allows to apply successive
+discrete operators still retaining the same order of accuracy. It makes the increase in the order of accuracy of
+the numerical schemes more difficult. For finite differences it also impacts the mass conservation. This problem
+may be solved using finite volume techniques. As the data structure is more complex, the computational time
+per point is multiplied by four or five.
+Hence if a singularity occurs only in few percents of the simulation time or on few percents of the simulation
+domain then it may be advantageous to resort to AMR techniques. These techniques optimize the discretisation
+by reducing the number of degrees of freedom of the computation. In some occasions, such as the six-dimensional
+Vlasov equations, given the number of grid points, it is the only way to fit the simulation into the computer
+memory.
+1.3. Three examples in physics
+Thanks to AMR it was possible to simulate and better understand vortex singularity appearing in incompressible Euler equations [GMG98]. In this numerical experiment, the authors used a grid as fine as 20483
+retaining only less than 1% of the points that would have been necessary for the equivalent uniform grid. In
+this paper they used a finite volume second-order upwinding Godunov scheme. In further works these authors
+preferred a central scheme which remains to Lax-Friedrichs type schemes and provides third-order accuracy in
+smooth regions using CWENO reconstruction.
+In [KWA09], AMR applied to simulate the collision of galaxies provided the needed high dynamical ranges.
+3
+A coarse grid at 1283 can be refined up to 13 times, reaching scales of 106 uniform grid equivalent which is
+out of reach of any existing computer.
+The physical phenomenon of magnetic reconnection occurs in an ionized medium at the heart of magnetic
+confinement fusion plasmas but also at the interface between the solar wind and the terrestrial magnetosphere
+and explains the aurora borealis. This penomenon results from a very localized magneto-hydrodynamic instability in space and time. To simulate this singularity, adaptative mesh refinement schemes allow very small
+scales to be reached that are inaccessible to uniform grid schemes.
+However, the equations of the 2D reduced MHD models involve high order derivatives and require high order
+approximations, which are difficult to implement with adaptive schemes. The method presented in [DSD17] is
+based on finite differences, which poses conservation problems. To do this, we can rely on the wavelet approach,
+with interpolettes and interpolation wavelets, which are similar to the one adopted in [DSD17].
+3
+DRAFT
+2. Finite volumes
+2.1. From conservation laws to finite volumes
+In this section, we briefly recall the basis of finite volumes schemes and some strategies to get a higher order
+of convergence. This class of numerical schemes is well suited to study conservation laws. A system of N
+conservation laws models the transport of N quantities of interest u = (u1 , ..., uN )T — also named conserved
+variables — in the space Rd . The equation ruling the behavior of these quantities can be written in integral
+form:
+Z
+Z
+Z Z t2
+u(t2 , x) dx −
+u(t1 , x) dx = −
+f (u(t, s)) nK (s) dt ds
+∀K ⊂ Rd , ∀(t1 , t2 ) ∈ (0, +∞)2
+(1)
+K
+K
+∂K
+t1
+with f ∈ C 1 (RN ; RN ×d ) the analytic flux. When coupled to initial datum u0 : Rd → RN , equation (1) becomes
+equivalent to the following weak conservative formulation:
+
+∂t u + div f (u) = 0 in R+ × Rd
+(2)
+u(t = 0, x) = u0 (x) in Rd
+In order to discretize this problem, we restrain ourselves to a bounded subspace Ω ⊂ Rd . We then have to
+complete the conservation laws with some boundary conditions. To stay in a simple setting, we consider Ω to
+be the unit cube and the boundary conditions are taken periodic. We introduce the uniform Cartesian mesh T ,
+and consider the averaged solution UnK over the cell K ∈ T at time tn . The integral formulation (1) directly
+implies:
+Un+1
+− UnK = −
+K
+1
+|K|
+Z t2
+Z
+f (u(t, s)) nK (s) dt ds
+∂K
+(3)
+t1
+The right hand side cannot be computed in the general case, and this is where an approximation has to be done.
+If we denote E(K) the set of interfaces of the cell K, and if we have an approximation FK,σ of the averaged
+flux on each interface σ ∈ E(K) between times tn and tn+1 , we get the so called finite volumes scheme:
+Un+1
+− UnK = −
+K
+∆tn
+|K|
+X
+|σ| FK,σ
+(4)
+σ∈E(K)
+Thus the main stake when dealing with finite volumes schemes is to find a numerical flux that consistently
+approximates the right term from (3). A common approach to build such approximations is to consider the
+one-dimensional Riemann problem projected along the orthogonal direction to σ:
+
+∂t v + ∂x fσ (v) = 0
+in R+ × R
+(5)
+v(t = 0, x) = 1x<0 UL + 1x≥0 UR in R
+where UL , UR are values of the solution on both sides of the interface σ, and fσ (u) = f (u) nσ . Solutions of
+the Riemann problem depend among other things on the eigenvalues (λi )1≤i≤N of Jac fσ , which is why the
+numerical flux FK,σ itself often depends on them (see table 1 for examples of common numerical fluxes).
+2.2. High order finite volumes schemes
+Before moving to the next topic, we address the issue of achieving high order convergence with finite volumes
+schemes. A first approach would be to draw on the formalism of finite differences schemes. In fact, in the case
+of smooth enough solutions the latter can reach an arbitrary high order by the mean of Taylor expansions. The
+idea is then to try to design stable finite differences schemes that can be rewritten under conservative form (4)
+4
+DRAFT
+Table 1. Some well-known numerical fluxes.
+Godunov
+Rusanov
+HLL
+Numerical flux FK,σ
+Order
+fσ (u? (x/t = 0)), u? self-similar solution of Riemann problem (5)
+O(∆t, ∆x)
+[fσ (UL ) + fσ (UR ) − |a|(UR − UL )]/2, a = maxi (|λi |)
+O(∆t, ∆x)
+[λL λR (UR − UL ) + λR fσ (UL ) − λL fσ (UR )]/[λR − λL ], λL ≤ λmin and λR ≥ λmax
+O(∆t, ∆x)
+by substituting the point-wise values with cell averages. A simple example is given by the Lax-Wendroff scheme.
+Consider u the solution of the 1D scalar linear transport with constant velocity c, and (xi )i the equidistant cells
+centers of some domain discretisation. A first Taylor expansion in time of the solution writes:
+u(tn+1 , x) = u(tn , x) + ∆tut (tn , x) +
+∆t2
+utt (tn , x) + O(∆t3 )
+2
+(6)
+Using the relations ut = −cux and utt = c2 uxx , one can replace the time derivatives in (6) by second order
+Taylor expansions in space:
+u(tn , xi+1 ) − u(tn , xi−1 ) c2 ∆t2 u(tn , xi−1 ) − 2u(tn , xi ) + u(tn , xi+1 )
++
+2∆x
+2
+∆x2
+3
+3
++ O(∆t , ∆x )
+u(tn+1 , xi ) = u(tn , xi ) − c∆t
+(7)
+Relation (7) thus gives the second order finite differences scheme:
+un − uni−1
+c2 ∆t2 uni−1 − 2uni + uni+1
+un+1
+= uni − c∆t i+1
++
+i
+2∆x
+2
+∆x2
+(8)
+where uni stands for the point-wise approximation of the solution at position xi and time tn . Note that the
+last term in (8) adds numerical viscosity, and removing it would result in an unconditionally unstable centered
+scheme. Substituting uni by the average ūni over cell Ci = [xi−1/2 , xi+1/2 ], this scheme can finally be rewritten
+∆t
+under conservative form un+1
+(F (uni , uni+1 ) − F (uni−1 , uni )). Here we have chosen:
+= uni − ∆x
+i
+F (UL , UR ) =
+c
+c2 ∆t
+(UR + UL ) −
+(UR − UL )
+2
+2 ∆x
+for the numerical flux. Hence the Lax-Wendroff method can be interpreted at the same time as a finite volumes
+and a finite differences scheme, and is of order 2 both in time and space. The obvious issue with this example
+is that in a more general case, it is not always possible to rewrite a given finite differences scheme under
+conservative form. Furthermore, this approach is based on an assumption of smoothness, which is not necessarily
+true. More specifically, the Lax-Wendroff scheme is known to have a highly oscillatory behavior for solutions
+with discontinuities.
+Ui−1
+Ui
+Ui+1
+Ui+2
+x
+Figure 1. MUSCL reconstruction using centered slopes.
+5
+DRAFT
+Alternatively, one could try to improve the order of convergence through the use of a reconstruction operator.
+The most celebrated one is the MUSCL reconstruction first introduced by van Leer in [VL79], and which consists
+in replacing the piece-wise constant solution by a piece-wise linear approximation ûni (x) := uni + σin (x − xi )
+with σin a slope determined by some ”interface differencing” discussed below. This way, the numerical flux
+benefits from more accurate left and right interface limits (9) induced by the slopes σin , leading to a second
+order convergence in space if the original scheme is of order one.
+ûni+1/2− = ûni (xi + ∆x/2),
+un+1
+= uni −
+i
+ûni−1/2+ = ûni (xi − ∆x/2)
+∆t
+(F (ûni+1/2− , ûni+1/2+ ) − F (ûni−1/2− , ûni−1/2+ ))
+∆x
+(9)
+(10)
+The update (10) is then replaced by a Runge Kutta time integration to get second order both in time and in space.
+As for the choice of the slope, it should somehow approximate the gradient of the solution, since otherwise the
+reconstruction wouldn’t be of order two. For instance, one could pick the centered slope σin = (uni+1 −uni−1 )/2∆x
+(see fig. 1). A clear advantage of the MUSCL method is that it allows to increase accuracy of any first order
+scheme without changing the numerical flux, and is thus very easy to implement.
+Going even further, one can replace the piece-wise constant solution by a piece-wise second order polynomial
+ci
+ûni (x) = ai + bi (x − xi ) + (x − xi )2 , as studied in [vT09]. This reconstruction generates a third order scheme
+2
+in space if ûni preserves the averaged solution uni , and if it approximates space derivatives of the solution at
+xi−1/2 and xi+1/2 with an error of at most O(∆x2 ). This translates into the following system:
+
+Z xi+1/2
+1
+
+
+ûn (x) dx = uni
+
+
+
+∆x xi−1/2 i
+
+
+un − uni
+= ∂x u(tn , xi−1/2 ) + O(∆x2 )
+(ûni )0 (xi−1/2 ) = i+1
+
+
+∆x n
+
+n
+
+
+u − ui−1
+
+ (ûni )0 (xi+1/2 ) = i
+= ∂x u(tn , xi+1/2 ) + O(∆x2 )
+∆x
+=⇒
+
+∆x2
+
+
+ai +
+ci = uni
+
+
+
+24
+
+uni − uni−1
+∆x
+c
+=
+b
+−
+i
+i
+
+2
+∆x n
+
+
+n
+
+
+ bi + ∆xci = ui+1 − ui
+2
+∆x
+ci =
+uni+1 − 2uni + uni−1
+∆x2
+Solving this system, we get:
+ai =
+26uni − uni−1 − uni+1
+,
+24
+bi =
+uni+1 − uni−1
+,
+2∆x
+Finally we have :
+
+
+
+ ûn
+5 n 1 n
+1
+ui − ui−1 + uni+1
+6
+6
+3
+
+5 n 1 n
+1
+
+n
+n
+ ûi−1/2+ = ûi (xi−1/2 ) = ui − ui+1 + uni−1
+6
+6
+3
+n
+i+1/2− = ûi (xi+1/2 ) =
+(11)
+Interestingly, the stencil of the third order reconstruction operator (11) is of size three, which is the same as for
+the MUSCL reconstruction, yet the former is more precise.
+3. Adaptive mesh refinement framework
+As mentioned in the opening of this paper, there is need for a fine enough grid in order to accurately catch
+fine details of the solution. Given that the scale of the simulation is likely to be too large in comparison to the
+”scales of interest”, one cannot afford to use a uniform mesh. In this section, we present some issues concerning
+non-uniform grids from the algorithmic point of view.
+6
+DRAFT
+3.1. Representing a non-uniform grid
+The main goal is to discretize a space domain of dimension d ∈ N into a non-uniform mesh made of superimposed grids. For the sake of simplicity, we limit ourselves to the unit cube of dimension d, and consider
+an initially uniform grid. Each cell of the initial grid can be subdivided into 2d equally sized sub-cells which
+contribute to a first level of refinement. Of course those sub-cells themselves can be split in a recursive manner, leading to greater levels of refinements. All these levels can be seen as ”layers” applied to the initial
+grid, each added layer being twice as refined as the previous one. A convenient way of representing this
+(0, 1)
+(1, 1)
+2
+3
+(0, 0)
+(1, 0)
+0
+1
+Figure 2. Illustration of a node and its 2d cells for d = 2. Note that the cells can be referenced
+inside the node by their coordinates or the associated binary dyadic combination.
+structure is to use a tree-based representation. The tree connects nodes from consecutive levels between each
+other, every node resulting from the gathering of 2d cells. Inside a node, cells can be referenced either using
+their coordinates i := (i0 , i1 , ..., id−1 ) ∈ {0, 1}d , or using the binary dyadic combination of their coordinates
+α(i) := i0 20 + i1 21 + ... + id−1 2d−1 (see fig. 2 for an example in dimension 2). When a cell is divided for
+refinement, it becomes a node with its proper cells playing the role of leaves.
+root
+
+4
+4
+4
+
+4
+
+4
+4 4 4 4
+4
+
+4
+4
+4 4 4 4
+Figure 3. Tree-based representation (right) of superimposed grids (left) in dimension d = 2.
+In the tree, nodes are represented by squares, while leaves (non-divided cells) are represented
+by triangles. The dotted arrows give an example of neighborhood for a specific cell.
+The advantage of the tree structure lies in the fact that it gives a straightforward way to navigate in the
+node hierarchy: from a given node, it is easy to visit its parent or its children. However, what is less trivial is
+to access nodes at the same level, for instance if one wants to iterate over a cell’s neighbors (see fig. 3). Let
+us show an example of how it can be achieved. For instance, suppose that we have a cell Ci belonging to the
+node N and that we want to access its neighbor at relative position l := 2k + j where k ∈ {0, 1, ..., d − 1} is the
+direction and j ∈ {0, 1} is the sense along that direction (positive if j = 0, negative otherwise). First question
+that one may ask: is the neighbor cell we are looking for in the same node or in a neighbor node ? The answer
+is given by the quantity |j − pk (i)| with pk (i) := (α(i)/2k ) mod 2. The function pk can be interpreted as a
+”parity” argument taking the value 0 if the cell Ci is at the left along direction k inside the node, and 1 if it
+is at the right along the same direction inside the node. Thus we see that the neighbor sought after is in the
+same node if and only if |j − pk (i)| is equal to 0. In that case, the neighbor cell is Ci0 ∈ N with i0 such that
+7
+DRAFT
+α(i0 ) = α(i) + 2k (1 − 2j). In the opposite case, we have to recursively apply the algorithm to the node N itself
+in order to find its own neighbor N 0 in the relative position l = 2k + j. Once this is done, the neighbor cell
+Ci0 ∈ N 0 is given by the coordinates α(i0 ) = α(i) − 2k (1 − 2j).
+A constraint that will be applied from now on is that there can be no direct transitions between nonconsecutive levels of refinement. As a consequence, the example given through figure 3 will in reality not be
+authorized. Moreover in the case of periodic boundary conditions, we shall consider the root node to be its own
+neighbor.
+3.2. Volume interpolation
+When refined, a coarse cell becomes a node and it is necessary to attribute accurate values to its children.
+Knowing the averaged values of the solution in coarser cells next to the refined one, we can approximate the
+average of the solution in the new sub-cells via volume interpolation. In what follows we give an example of
+third order volume interpolation in 1D. Let µ[a,b] : R[X] 7→ R be the application mapping a polynomial to its
+average over the real interval [a, b]. We are looking for values (α, β, γ) ∈ R3 such that:
+∀P ∈ R2 [X],
+µ[0,1] (P ) = αµ[−2,0] (P ) + βµ[0,2] (P ) + γµ[2,4] (P )
+(12)
+Evaluating this equality for polynomials 1, X, X 2 , we get the following system:
+
+
+ α+β+γ =1
+ α = 1/8
+−α + β + 3γ = 1/2 =⇒
+β=1
+
+
+4α + 4β + 28γ = 1
+γ = −1/8
+If instead we wanted to interpolate µ[1,2] (P ), we would have considered the values (α0 β 0 , γ 0 ) ∈ R3 such that:
+∀P ∈ R2 [X],
+µ[1,2] (P ) = α0 µ[−2,0] (P ) + β 0 µ[0,2] (P ) + γ 0 µ[2,4] (P )
+(13)
+By symmetry with the previous interpolation, we get α0 = −1/8, β 0 = 1 and γ 0 = 1/8.
+1/8
+−1/8
+1
+1
+−1/8
+1/8
+Figure 4. Interpolation computed from the point of view of the sub-cells.
+−1/8
+−1/8
+1/8
+1
+1
+1/8
+Figure 5. Interpolation computed in terms of a coarse cell sending its contributions to the sub-cells.
+This volume interpolation is computed from the point of view of the new sub-cells: for each such cell, we
+gather the values of the coarse cells around to compute either (12) or (13). This might be inefficient since
+8
+DRAFT
+we have to retrieve several times the same values at the coarse level, as shown in fig. 4. Alternatively, we
+could adopt another strategy illustrated through fig. 5 by iterating over the coarse cells and ”diffusing” their
+contributions to the new sub-cells. In 1D it is equivalent, however this approach becomes more efficient than
+the former one at higher dimensions. In fact, suppose that we have a 2D mesh where several cells have been
+refined in sub-cells. A third order volume interpolation can be derived from the 1D one by performing a tensor
+product of the stencil presented in figure 5.
+−1/8
+1/8
+1/8
+−1/8
+1/64
+−1/64 −1/8
+−1/8 −1/64
+1/64
+−1/8
+−1/64
+1/64
+1/8
+1/8
+1/64
+−1/64
+1/8
+−1/8
+1/8
+1
+1
+1/8
+−1/8
+1
+−1/8
+1/8
+1
+1
+1/8
+−1/8
+1
+−1/64
+1/64
+1/8
+1/8
+1/64
+−1/64
+1/8
+1/64
+−1/64 −1/8
+−1/8 −1/64
+1/64
+−1/8
+1
+1
+Figure 6. Weights of the third order volume interpolation in 2D. The bold square at the
+center represent a coarse cell sending its contributions. First, we take into account the central
+contributions (in gray). Then we send the contributions to the blue sub-cells, then to the orange
+ones (or the other way around).
+An efficient way of completing the interpolation is to first send the contributions with weights 1 to the
+children. Once this is done for all coarse nodes, we start over again by sending the contributions horizontally
+(those with weights ±1/8) and accumulate them with the previous contributions. Finally, we proceed similarly
+in the vertical direction. Note that exchanging the last two steps would lead to the same result. Here the
+diagonal sub-cells have been omitted because the contributions with weights ±1/64 are indirectly handled. In
+fact contributions are accumulated when combining both horizontal and vertical directions (see fig. 6). The
+general procedure in dimension d is given in algorithm 1.
+Figure 7. At the border some coarse nodes are missing: instead there are undivided cells
+represented by the dashed squares. One has to replace them by ghost nodes in order to take
+into account all contributions.
+DRAFT
+9
+Algorithm 1: Third order volume interpolation of the level of refinement n + 1 in dimension d
+Each cell has an attribute rc (received contribution) and rdc (received directionnal contribution)
+initialized to zero;
+for node N in nth level of refinement do
+for cell Ci in node N do
+Circ ← contribution of node N (weight 1);
+for direction k ∈ {0, ..., d − 1} do
+for node N in nth level of refinement do
+Nleft ← neighbor of N at relative position 2k + 1;
+Nright ← neighbor of N at relative position 2k;
+for cell Ci in node N do
+Ki ← cell of coordinate i in node Nleft , Li ← cell of coordinate i in node Nright ;
+if pk (i) = 0 then
+Kirdc ← Kirdc − Circ /8,
+Lrdc
+← Lrdc
++ Circ /8;
+i
+i
+else
+Kirdc ← Kirdc + Circ /8,
+Lrdc
+← Lrdc
+− Circ /8;
+i
+i
+For each cell, add the value of rdc to rc and initialize rdc to zero;
+A last detail we want to discuss relatively to interpolation is the handling of border cells. For them to be
+correctly interpolated, in the case of the third order interpolation we would have to iterate at the coarser level
+over 3d nodes (the interpolation stencil). However, since the considered sub-cells are at the border of their
+level of refinement, it means that some of these nodes do not exist, in place of what there are undivided coarse
+cells (leaves at the coarser level). This is problematic because it prevents us from sending the accumulated
+contributions to the sub-cells as in algorithm 1. A simple solution is to virtually refine the coarse leaves to get
+the missing nodes: we call them ghost nodes.
+3.3. Brief overview of adaptivity criteria
+The adaptivity criteria directly derives from the interpolation process. Subtracting the interpolated value of
+a cell to its actual value, we are able to quantify exactly the information that it contains.
+For instance applying the interpolation presented in Section 3.2, the detail stored in µ[1,2] (f ) is given by
+d[1,2] (f ) = µ[1,2] (f ) −
+
+1
+−µ[−2,0] (f ) + 8µ[0,2] (f ) + µ[2,4] (f ) .
+8
+If this detail is small enough, it can be removed. If it is large enough, we trigger a refinement process redividing
+the cell into new smaller cells.
+3.4. Finite volumes schemes on a non-uniform mesh
+In this section, we propose an adaptation of finite volumes schemes to non-uniform grids. In order to do so,
+we first concentrate our attention on the main difference with the uniform case, which is the handling of fluxes
+at the boundary of a level of refinement. Support nodes are introduced to this end, after what we describe the
+communication process between levels of refinement allowing to compute the fluxes.
+Given a refined mesh, we want to update the solution using a finite volumes scheme. As such, we need to
+iterate over the interfaces of each level of refinement to compute the fluxes. The problem we are confronted to
+is that some interfaces are located at the border of a level of refinement, meaning that they are not separating
+10
+DRAFT
+∂Ω
+Border cell
+Support cell
+Figure 8. To be computed, some numerical fluxes require support cells. Here ∂Ω is the border
+of the refinement level. The blue area corresponds to a coarse cell that is being divided to get
+support cells at the finer level. After interpolation of those new cells, we are able to compute
+the numerical fluxes at the fine borders.
+two fine cells but a fine cell and a coarse one (see fig. 8). A way to avoid this issue is to split the coarse cell
+into support cells that are then interpolated. As a result, we are able to compute the flux associated to this
+interface as usually. Note that this process is not properly speaking a refinement, since the support cells will
+not be updated — their only goal being to make it possible to compute the flux — and are due to be removed
+at the end of every iteration. As described in section 3.2, interpolating the support cells might require the
+introduction of ghost nodes according to the interpolation stencil.
+Algorithm 2: Updating the solution over an adaptive non-uniform mesh
+According to some criterion, refine and coarsen the cells requiring it;
+Generate support cells at the border of each level of refinement;
+Generate ghost nodes and interpolate the newly refined cells and support cells;
+Compute a time step ∆t verifying the CFL condition at every level of refinement to ensure stability;
+Initialize current level of refinement to the finest one;
+while coarsest level of refinement not reached do
+I ← gathering of current level’s interfaces involving at least one ”classic” cell (not two support cells);
+for interface in I do
+if interface has no sub-interfaces then neighboring cells are leaves
+Compute numerical flux F(UnL , UnR ) using an approximate Riemann solver;
+else at least one of the neighboring cells is a node
+Using (14), set the numerical flux as the average of finer fluxes;
+for cell in current level of refinement do
+Update solution inside the cell using a time integrator;
+Go to next level of refinement;
+Remove support cells and ghost nodes;
+Increment current time by ∆t;
+The next step is to effectively compute the fluxes while taking into account the links between consecutive
+levels of refinement. In fact, what is an interface at a coarse level will be the collection of 2d−1 sub-interfaces
+at the finer level. In order to ensure the conservativity of the scheme, a necessary constraint is that the total
+flux contribution from each of the sub-interfaces should be equal to the flux contribution of the coarse interface.
+More precisely, we show that the coarse flux needs to be equal to the average of the sub-fluxes. Let K be a node
+(refined cell) with children (Ci )i∈{0,1}d and L a non-refined cell such that K and L are neighbors. Let J (K, L)
+11
+DRAFT
+denote the set of indices corresponding to the children of K sharing an interface with L: for all j ∈ J (K, L),
+the interface Cj | L exists and is at the border of a level of refinement. According to the previous paragraph,
+the fluxes FCj |L can be determined through support cells derived from L. The coarse flux FK|L can then be
+related to these finer fluxes by considering the case where K and L form a confined system (no exchange with
+the exterior). In fact the discrete conservativity of total mass reads:
+vol(∆x)[Un+1
+− UnK ] = −vol(∆x)[Un+1
+− UnL ]
+K
+L
+X 
+
+n+1
+n
+=⇒ vol(∆x) 2−d
+Un+1
+− UnL ]
+Ci − UCi = −vol(∆x)[UL
+i∈{0,1}d
+ ∆x d ∆t
+=⇒
+2
+∆x/2
+=⇒ FK|L = 21−d
+X
+FCj |L = ∆xd
+j∈J (K,L)
+X
+∆t
+FK|L
+∆x
+FCj |L
+(14)
+j∈J (K,L)
+The strategy we adopt here is to always compute the fluxes from the finest level to the coarsest level, since
+we might have to compute the average flux of sub-interfaces to get the coarse flux. The communication process
+occurs while iterating over interfaces which admit sub-interfaces, and the overall procedure is summarized in
+algorithm 2.
+4. Implementation and results
+4.1. Visualization on unstructured grids
+Previously discussed algorithms have been implemented in C. The whole implementation is based on a structure named Node presented in Table 2. This structure gathers all the physical values of the simulation in a field
+**tab and connects to the other nodes in order to form the tree structure. The node at the top of the tree is
+called the root. Following the parent-to-children links it gives access to the whole tree.
+Table 2. The Node: basic element of the tree structure
+struct node {
+double **tab;
+/* 2^dim cells referenced by dyadic writing */
+struct noeud *prt; /* parent */
+struct noeud **chd; /* children (0,1,...,2^dim - 1) */
+struct noeud **ngb; /* neighbors (0,1,...,2*dim - 1) */
+int frk;
+/* filiation rank */
+int flag;
+/* flag indicating which nodes are active/support/ghost */
+};
+We use VTK-File-Format for visualization purposes. Unstructured grids are defined by points, cells, and
+cell types. The CELLS keyword requires two parameters: the number of cells n and the size of the cell list size.
+The cell list size is the total number of integer values required to represent the list (i.e., sum of numPoints and
+connectivity indices over each cell). The CELLS TYPES keyword requires a single parameter: the number of cells
+n. This value should match the value specified by the CELLS keyword. The cell types data is a single integer
+value per cell that specifies cell type. In 2D, we choose for all cells VTK PIXEL, see figure 9.
+12
+DRAFT
+DATASET UNSTRUCTURED GRID
+POINTS n dataType
+p0x , p0y , p0z ,
+p1x , p1y , p1z ,
+...
+p(n−1)x , p(n−1)y , p(n−1)z .
+CELLS n size
+numP ointss0 , i, j, k, l, ...,
+numP ointss1 , i, j, k, l, ...,
+...
+numP ointssn−1 , i, j, k, l, ...
+Figure 9. Cell type used for all cells in 2D.
+Table 3. Points and cells of the unstructured grid
+struct points_coord {
+double x_coord;
+double y_coord;
+double z_coord;
+};
+struct cells_connectivity {
+int total;
+int a;
+int b;
+int c;
+int d;
+};
+The implementation is based on two structures named points coord and cells connectivity. From the
+representation in Figure 10, we implement the following:
+/* inside a loop on all nodes */
+/* (xpos,ypos): coordinates of bottom left corner of the four cells associated to */
+/* current node */
+double dx; // dx : size of one cell
+j=0;
+for (i=0; i<9; ++i) {
+if (i%3 == 0) { /* every three integer we go one row up */
+j+=1;
+}
+point_matrix[point_counter+i].x_coord = xpos+(i%3)*dx;
+point_matrix[point_counter+i].y_coord = ypos+(j-1)*dx;
+point_matrix[point_counter+i].z_coord = 0.;
+}
+j=0;
+int aa = point_counter;
+/* bottom left */
+int bb = point_counter+1; /* bottom right */
+int cc = point_counter+4; /* top
+right */
+int dd = point_counter+3; /* top
+left */
+for (i=0; i<4; ++i) {
+if (i%2 == 0){ /*every two integer we go one row up */
+j+=1;
+}
+cell_matrix[cell_counter+i].total=4;
+cell_matrix[cell_counter+i].a = aa + i%2 + (j-1)*3;
+13
+DRAFT
+cell_matrix[cell_counter+i].b = bb + i%2 + (j-1)*3;
+cell_matrix[cell_counter+i].c = cc + i%2 + (j-1)*3;
+cell_matrix[cell_counter+i].d = dd + i%2 + (j-1)*3;
+}
+6
+7
+8
+3
+4
+5
+0
+1
+2
+2
+3
+0
+1
+Figure 10. Numbering of points (left) and cells (right) for each node.
+4.2. Numerical results
+Numerical results based on our program are now presented. A first test-case is implemented to assess the
+order of convergence of the MUSCL and third order reconstructions. To this end, weconsider the 1D scalar
+
+1
+∞
+0
+linear transport equation associated to the C initial datum u (x) := 1[1/4,3/4] (x) exp −
+:
+1 − 16(x − 1/2)2
+
+∂t u(t, x) + v ∂x u(t, x) = 0
+u(t = 0, x) = u0 (x)
+The velocity v is taken equal to 3/4. The mesh we use is made of an initial grid and two additional levels
+of refinement, and stays fixed throughout the simulation (no adaptivity). The initial condition is interpolated
+from the initial grid towards the finer levels. We also compare the results to the case of uniform meshes. We
+choose the Rusanov numerical flux, and the Runge-Kutta 4 method is used for time integration, the stability
+being ensured by taking ∆t = CFL × ∆xf /(2v) with ∆xf the cell size of the finest level of refinement and
+CFL = 0.45. The simulation is stopped at final time T = 73/15. We compute the L2 -error at the coarsest level
+at time T , and we do so for initial grids ranging from depth 4 to depth 10. Results are gathered in tables 4 to
+6.
+Table 4. RK4 + no reconstruction
+Table 5. RK4 + MUSCL reconstruction
+Base depth
+log(L2 -ERR)/ log(2)
+Nonuniform mesh Uniform mesh
+Base depth
+log(L2 -ERR)/ log(2)
+Nonuniform mesh Uniform mesh
+4
+5
+6
+7
+8
+9
+10
+-5.712382
+-6.626516
+-7.634907
+-8.767312
+-9.950684
+-11.179305
+–
+4
+5
+6
+7
+8
+9
+10
+-8.022995
+-9.579418
+-11.244609
+-13.167167
+-15.284343
+-17.591171
+–
+5.415895
+-6.197763
+-7.110404
+-8.136759
+-9.261226
+-10.442954
+-11.669745
+-7.151959
+-8.637820
+-10.203497
+-11.954795
+-13.917454
+-16.094520
+-18.447992
+The order of convergence can be easily computed thanks to this table. In fact, a method of order at least
+k ∈ R+ is characterized by the inequality en+1 ≤ 2−k ×en , where en denotes the error obtained on an initial grid
+at depth n (also called ”base depth”) with possible levels of refinement on top of it, assuming n is big enough.
+Thus, we see that k verifies k ≤ (log en − log en+1 )/ log 2. As expected, finite volumes without reconstruction
+14
+DRAFT
+Table 6. RK4 + third order reconstruction
+Base depth
+log(L2 -ERR)/ log(2)
+Nonuniform mesh Uniform mesh
+4
+5
+6
+7
+8
+9
+10
+11
+-8.632480
+-10.506254
+-12.548737
+-14.970157
+-17.708034
+-20.774341
+-24.089038
+–
+-7.971418
+-9.581725
+-11.507401
+-13.711773
+-16.237445
+-19.103689
+-22.278377
+-25.661788
+are of order at least one, whereas with MUSCL reconstruction (resp. third order reconstruction) they are of
+order at least two (resp. at least three) no matter if the mesh is uniform or not. Without much surprise, the
+order three reconstruction is the most accurate and has a compact stencil of size three.
+Figure 11. Scalar linear transport in 1D. From left to right, top to bottom: initial condition,
+solution without reconstruction, solution with MUSCL reconstruction, solution with third order
+reconstruction. The dashed pikes in red refer to the transitions between consecutive levels of
+refinement.
+Figure 11 helps us to describe the qualitative behavior of these schemes. When no reconstruction is performed,
+the numerical solution exhibits a strongly diffusive behavior with a loss of approximately 13.5% in amplitude
+DRAFT
+15
+at the end of the simulation. This is not the case anymore when reconstructing the solution near cell interfaces.
+However the MUSCL and third order reconstructions tend to favor spurious oscillations, which is especially
+noticeable for the MUSCL reconstruction. To address this issue, a fix would consist to use slope limiters
+ensuring the Total Variation Diminishing property (TVD).
+We then test our program on a 2D transport problem with non-constant velocity across the domain:
+∂t u + ∂x [v(x, y)u] + ∂y [w(x, y)u] = 0
+where v(x, y) = (y − 1/2)/T , w(x, y) = −(x − 1/2)/T , and T = 1/2 the final time. Again, the mesh is refined
+at the beginning and remains as such: there is no adaptivity involved here. More precisely, the mesh is made
+of two levels of refinement on top of the coarse grid initialized at depth 5. The initial condition is taken equal
+to a truncated Gaussian and is only C 0 . Results can be seen in figure 12. The overall shape of the Gaussian is
+better preserved by the third order reconstruction, closely followed by the MUSCL reconstruction. As for the
+1D test case, the latter reconstruction adds more downwind oscillations. This can be seen in figure 13 which
+consists in a plot of the solution at final time over the line y = 1/4.
+5. Conclusion
+This paper was devoted to the combination of high order finite volumes and Adaptive Mesh Refinement.
+These topics are of great interest in computational physics, for they are an efficient and accurate way to deal
+with interacting scales, while conserving the total mass of quantities of interest. After quickly recalling the state
+of the art concerning high order finite volumes, we have concentrated our attention towards AMR. Algorithms for
+third order multidimensional volume interpolation and communication between levels of refinement have been
+proposed. It turns out that reconstruction methods work well through transitions between levels of refinement,
+and do not require any specific treatment during the communication process. Of course, one has to make sure
+the mass conservation holds during this process to make the use of finite volumes relevant. In the end, numerical
+simulations allow to validate our approach, although truly adaptive meshes remains to be tested.
+References
+[DSD17] D Del Sarto and Erwan Deriaz. A multigrid amr algorithm for the study of magnetic reconnection. Journal of Computational Physics, 351:511–533, 2017.
+[GMG98] R. Grauer, C. Marliani, and K. Germaschewski. Adaptive Mesh Refinement for Singular Solutions of the Incompressible
+Euler Equations. Phys. Rev. Lett., 80:4177, 1998.
+[KWA09] J.-H. Kim, J. H. Wise, and T. Abel. Galaxy mergers with adaptive mesh refinement: star formation and hot gas outflow.
+ApJ, 694, 2009.
+[VL79]
+Bram Van Leer. Towards the Ultimate Conservative Difference Scheme. V. A Second-Order Sequel to Godunov’s Method.
+Journal of Computational Physics, 32, 1979.
+[vT09]
+Miroslav Čada and Manuel Torrilhon. Compact third-order limiter functions for finite volume methods. Journal of
+Computational Physics, 228:4118–4145, 2009.
+16
+DRAFT
+Figure 12. Scalar linear transport in 2D. From left to right, top to bottom: refined mesh transitions, initial condition, solution without reconstruction, solution with MUSCL reconstruction,
+solution with third order reconstruction.
+DRAFT
+Figure 13. Plot over the line y = 1/4 at final time. Left: MUSCL reconstruction, right: third
+order reconstruction.
+17

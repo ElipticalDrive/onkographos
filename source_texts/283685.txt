@@ -1,0 +1,136 @@
+I just recently got picking working using the Bullet Physics Engine. Picking is a way to “pick” an object via a primitive (triangle) using a cursor from the camera’s perspective. Hovering your mouse cursor over an object and clicking on it is obviously a very intuitive way to interact with a scene. However, it’s not as intuitive to program, because the location selected is in 2D screen coordinates, and not 3D world coordinates. The difficulty in picking really lies in somehow determining the 3D coordinate space of the object to select. First, lets see what I’m talking about.
+
+Ray Casting and Picking Using Bullet Physics - Halogenica
+I just recently got picking working using the Bullet Physics Engine. Picking is a way to “pick” an object via a primitive (triangle) using a cursor from the camera’s perspective. Hovering your mouse cursor over an object and clicking on it is obviously a very intuitive way to interact with a scene. However, it’s not as intuitive to program, because the location selected is in 2D screen coordinates, and not 3D world coordinates. The difficulty in picking really lies in somehow determining the 3D coordinate space of the object to select. First, lets see what I’m talking about.
+The first step in determining the 3D coordinate associated with a click is to calculate a ray that would pass from camera position (your vantage point of the scene) through whatever object was clicked on. Another way of looking at this is that viewing a 2D representation of a 3D image essentially flattens 3D space into 2D space. Clicking a point in 2D will effectively highlight a line in 3D space. This line is an equation describing all 3D points which contribute to a 2D pixel. This is known as ray casting, and is used very frequently in computer graphics with techniques such as ray tracing, ray marching, etc. It is also used frequently in physics engines, which we will take advantage of.
+In order to get the ray in world coordiantes, we need to work backwards from a final rendered image. This requires undoing the perspective and view transformations that were done by the camera. A bit of background information on cameras is required to fully understand this algorithm. This wikipedia entry on Perspective Projection details how cameras project 3D images, however I suggest just looking at the diagram which is worth a thousand words, courtesy of wikipedia:
+The black “eye” at the bottom represents the camera position, and the origin of all rays that extend through the scene. The horizontal line represents the screen. The grey line extending from the eye to the yellow square can represent our ray. The view transformation redescribes coordinates in relation to the camera position (your view). The projection transformation redescribes coordinates so that the further you are from the camera, the wider and taller your field of view is, or in other words so that objects in the distance appear smaller. Also noteworthy is the near and far clip planes. These are the minimum and maximum distance of a viewable object; anything closer to the camera position than the near clip plane or further than the far clip plane will not be viewable. The following code was adapted from three different sources noted in the comments, the most informational of which is this page on Ray Projection.
+```
+inline D3DXVECTOR3 Camera::GetPickRay(float x, float y)
+{
+    // Ray Casting algorithms from:
+    //
+    // http://www.mvps.org/directx/articles/rayproj.htm
+    // DX SDK Picking sample
+    // Bullet demos
+
+    // Find screen coordinates normalized to -1,1
+    D3DXVECTOR3 coord;
+    coord.x = ( ( ( 2.0f * x ) / SCREEN_WIDTH ) - 1 );
+    coord.y = -( ( ( 2.0f * y ) / SCREEN_HEIGHT ) - 1 );
+    coord.z = 1.0f;
+
+    // Back project the ray from screen to the far clip plane
+    coord.x /= m_matProj._11;
+    coord.y /= m_matProj._22;
+
+    D3DXMATRIX matinv;
+    D3DXMatrixInverse(&matinv, NULL, &m_matView);
+
+    coord*=FAR_CLIP;
+    D3DXVec3TransformCoord(&coord, &coord, &matinv);
+
+    return coord;
+}
+```
+With this ray calculated, we can use it to determine what objects the ray intersects with. More specifically we’re interested in the object closest to the camera, as that’s the object the view is probably going to see and will therefore intend to be picking. However, the question of “what is the closest object this pixel belongs to?” is not a trivial one. The GPU has done all the work to perform the vertex transformations and rasterization, and generally speaking no information is saved to indicate which game object, however you choose to represent it, corresponds with a pixel. This represents a relatively complex search problem, where for every triangle/primitive in a scene, we must determine which ones intersect with the ray, and of those which is the closest to the eye (or more accurately the near clip plane) along that ray. This has linear O(n) complexity with respect to the amount of geometry in the scene.
+My particular game has the advantage of using Bullet physics for the physics engine. The physics engine requires me to describe all physically based objects with a bounding box of some kind; something to represent the physical response of an object of arbitrary geometry. For example, it’s impossible to make a perfect sphere out of triangles, and we do our best to approximate a sphere using triangles when rendering. However with the physics engine, the equation describing a sphere is far more convenient and efficient. This is important for picking because instead of searching all the triangles that may be used to render a sphere, we simply need to perform a hit test with the sphere we registered with the physics engine. Even, better, the physics engine can do all of these hit tests for us in an optimized fashion. And typically, there are less physically based objects in a scene with coarser bounding boxes than geometry, translating to fewer and simpler equations to determine what we are intersecting with.
+Bullet provides a function called rayTest() that takes the start and end coordinates of the ray we computed earlier, and returns a structure defining either all of, or the closest object the ray interscted with, as well as the 3D coordinate of the intersection. The code below shows how I use this to pick an object when a user clicks on it, as well as move it around if the hold and drag the mouse. The specific code for adding the Dof6 constraint comes straight from the demo code that comes with Bullet.
+```
+    m_rayFrom = m_pCamera->m_pos;
+    m_rayTo = m_pCamera->GetPickRay(m_cursorCoords.x(), m_cursorCoords.y());
+
+    btVector3 btRayFrom = btVector3(m_rayFrom.x, m_rayFrom.y, m_rayFrom.z);
+    btVector3 btRayTo = btVector3(m_rayTo.x, m_rayTo.y, m_rayTo.z);
+
+    if (g_pInput->MouseButtonPressed(PICK))
+    {
+        btCollisionWorld::ClosestRayResultCallback rayCallback(btRayFrom,btRayTo);
+        g_pBtDynamicsWorld->rayTest(btRayFrom, btRayTo, rayCallback);
+        if (rayCallback.hasHit())
+        {
+            PhysicsData* pPhysicsData = reinterpret_cast<PhysicsData*>(rayCallback.m_collisionObject->getUserPointer());
+            btRigidBody* pBody = btRigidBody::upcast(rayCallback.m_collisionObject);
+            if (pBody && pPhysicsData)
+            {
+                // Code for adding a constraint from Bullet Demo's DemoApplication.cpp
+                if (!(pBody->isStaticObject() || pBody->isKinematicObject()) &&
+                    (pPhysicsData->m_InitPhysicsData.CollisionGroup & COL_PARTICLE))
+                {
+                    m_pickedBody = pBody;
+
+                    m_pickPos = rayCallback.m_hitPointWorld;
+
+                    btVector3 localPivot = pBody->getCenterOfMassTransform().inverse() * m_pickPos;
+
+                    btTransform tr;
+                    tr.setIdentity();
+                    tr.setOrigin(localPivot);
+                    btGeneric6DofConstraint* dof6 = new btGeneric6DofConstraint(*pBody, tr, false);
+                    dof6->setLinearLowerLimit(btVector3(0,0,0));
+                    dof6->setLinearUpperLimit(btVector3(0,0,0));
+                    dof6->setAngularLowerLimit(btVector3(0,0,0));
+                    dof6->setAngularUpperLimit(btVector3(0,0,0));
+
+                    g_pBtDynamicsWorld->addConstraint(dof6);
+                    m_pickConstraint = dof6;
+
+                    dof6->setParam(BT_CONSTRAINT_STOP_CFM,0.8f,0);
+                    dof6->setParam(BT_CONSTRAINT_STOP_CFM,0.8f,1);
+                    dof6->setParam(BT_CONSTRAINT_STOP_CFM,0.8f,2);
+                    dof6->setParam(BT_CONSTRAINT_STOP_CFM,0.8f,3);
+                    dof6->setParam(BT_CONSTRAINT_STOP_CFM,0.8f,4);
+                    dof6->setParam(BT_CONSTRAINT_STOP_CFM,0.8f,5);
+
+                    dof6->setParam(BT_CONSTRAINT_STOP_ERP,0.1f,0);
+                    dof6->setParam(BT_CONSTRAINT_STOP_ERP,0.1f,1);
+                    dof6->setParam(BT_CONSTRAINT_STOP_ERP,0.1f,2);
+                    dof6->setParam(BT_CONSTRAINT_STOP_ERP,0.1f,3);
+                    dof6->setParam(BT_CONSTRAINT_STOP_ERP,0.1f,4);
+                    dof6->setParam(BT_CONSTRAINT_STOP_ERP,0.1f,5);
+
+                    //save mouse position for dragging
+                    m_pickDist = (m_pickPos - btRayFrom).length();
+                }
+            }
+        }
+    }
+    else if (g_pInput->MouseButtonReleased(PICK))
+    {
+        if (m_pickConstraint && g_pBtDynamicsWorld)
+        {
+            g_pBtDynamicsWorld->removeConstraint(m_pickConstraint);
+            delete m_pickConstraint;
+            m_pickConstraint = NULL;
+            m_pickedBody->setDeactivationTime( 0.f );
+            m_pickedBody = NULL;
+        }
+    }
+    else if (g_pInput->MouseButtonDown(PICK))
+    {
+        btGeneric6DofConstraint* pickCon = static_cast<btGeneric6DofConstraint*>(m_pickConstraint);
+        if (pickCon)
+        {
+            //keep it at the same picking distance
+
+            btVector3 btRayTo = btVector3(m_rayTo.x, m_rayTo.y, m_rayTo.z);
+            btVector3 btRayFrom = btVector3(m_rayFrom.x, m_rayFrom.y, m_rayFrom.z);
+            btVector3 oldPivotInB = pickCon->getFrameOffsetA().getOrigin();
+
+            btVector3 newPivotB;
+
+            btVector3 dir = btRayTo - btRayFrom;
+            dir.normalize();
+            dir *= m_pickDist;
+
+            newPivotB = btRayFrom + dir;
+
+            pickCon->getFrameOffsetA().setOrigin(newPivotB);
+        }
+    }
+```
+Software
+Physics
+DirectX
+Game Engine
+← Previous Post

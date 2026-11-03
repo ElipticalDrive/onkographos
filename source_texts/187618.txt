@@ -1,0 +1,909 @@
+ProbNVS: Fast Novel View Synthesis with
+Learned Probability-Guided Sampling
+Yuemei Zhou1 , Tao Yu1 , Zerong Zheng1 , Ying Fu2 , and Yebin Liu1
+arXiv:2204.03476v1 [cs.CV] 7 Apr 2022
+1
+Department of Automation, Tsinghua University
+2
+Beijing Institute of Technology
+Abstract. Existing state-of-the-art novel view synthesis methods rely
+on either fairly accurate 3D geometry estimation or sampling of the entire
+space for neural volumetric rendering, which limit the overall efficiency.
+In order to improve the rendering efficiency by reducing sampling points
+without sacrificing rendering quality, we propose to build a novel view
+synthesis framework based on learned MVS priors that enables general,
+fast and photo-realistic view synthesis simultaneously. Specifically, fewer
+but important points are sampled under the guidance of depth probability distributions extracted from the learned MVS architecture. Based
+on the learned probability-guided sampling, a neural volume rendering
+module is elaborately devised to fully aggregate source view information
+as well as the learned scene structures to synthesize photorealistic target
+view images. Finally, the rendering results in uncertain, occluded and unreferenced regions can be further improved by incorporating a confidenceaware refinement module. Experiments show that our method achieves
+15 to 40 times faster rendering compared to state-of-the-art baselines,
+with strong generalization capacity and comparable high-quality novel
+view synthesis performance.
+Keywords: view synthesis, image-based rendering, volume rendering
+1
+Introduction
+Novel view synthesis (NVS) from a set of posed images of a scene is a longstanding problem in computer vision and graphics. Generating photo-realistic
+novel view images with high rendering speed is essential for immersive experience
+and has broad applications in sports broadcasting, holographic communications,
+etc. The study of novel view synthesis can be traced back to view interpolation by
+morphing [5,25], rendering combined with modeling [10], and light field rendering
+from dense sampling of scenes [22,16,3]. With the advent of deep learning era,
+deep neural networks learned from a large number of posed image sets [13,19,58]
+were introduced to synthesize novel views and have achieved breakthroughs on
+generality and image quality.
+Regarding to the popular learning-based NVS, one line of work is “geometrybased NVS” that learns to aggregate multi-view information based on 3D geometry estimation [9,41,2,33,34], and another line is “radiance field-based NVS”
+2
+Y. Zhou et al.
+that represents the scenes as neural radiance fields which optimize density and
+color fields implicitly [56,24,7,4,46]. The geometry-based methods heavily rely
+on accurate scene geometry initialization. A 3D geometry scaffold is firstly estimated with the help of traditional Structure-from-Motion (SfM) [35], Multi-view
+Stereo (MVS) [36] and meshing, and then pixels on novel views are rendered by
+aggregating multi-view features accordingly. The pre-calculation of scene geometry is very time-consuming, which usually takes tens of minutes for each new
+scene. Besides, this type of methods premises accurate scene geometry estimation, and the geometry errors will be immediately reflected on the synthesised
+image. In contrast, the radiance field-based methods extend the popular and extensively studied Neural Radiance Field (NeRF) [28] to have generalization abilities by conditioning on various additional factors, such as image features [56,46],
+stereo correspondences [7] and plane-swept cost volumes [4]. However, due to the
+need of querying a large number of 3D points scattered throughout the space,
+these methods generally take much longer time than geometry-based methods
+in rendering a novel view image. Although methods to further accelerate the
+rendering of neural radiation fields have been proposed, they all focus on optimizing a scene-specific model. They either divide the space into a sparse voxel
+octree or thousands of tiny MLPs [23,55], or pre-sample NeRF into a tabulated
+view-dependent volume and render from the cache [14,32].
+Our goal is to achieve efficient and general novel view rendering by reducing
+the number of sampling points while maintaining good quality of radiance field
+rendering. To fulfill this goal, we present ProbNVS, a novel view synthesis framework that enables fast, generic and photo-realistic view synthesis simultaneously.
+The key idea of our work is leveraging learned depth probability distributions
+to guide the sampling for neural volume rendering. To this end, we first present
+multi-scale probability-guided sampling. Specifically, we construct multi-scale
+cost volumes on the target view frustum, and let the network learn the corresponding depth probability distributions to guide the sampling in a coarse-to-fine
+manner. The finest set of sampling points, or the “points for rendering”, along
+with their depth probabilities are utilized for later neural volume rendering. The
+probability-guided sampling not only preserves the realistic rendering quality of
+neural volume rendering, but also significantly improves the rendering efficiency
+with much fewer sampling points. Secondly, a neural volume rendering module
+is elaborately designed to fully aggregate source view information as well as the
+learned scene structures to synthesize target view images. At last, a confidenceaware refinement module is presented to further improve the rendering results of
+uncertain, occluded and unreferenced areas, where the confidence is obtained by
+the depth probabilities learned from the probability-guided sampling module.
+Above all, our ProbNVS is a general NVS architecture, and the learned
+probability-guided sampling can significantly reduce the sampling points, thereby
+dramatically speeding up the rendering procedure. Additionally, the accuracy
+and realism of the rendered image, especially the performance on scenes with
+hidden components, occluded regions and non-Lambertian surfaces, can be promoted by the subsequent neural volume rendering and confidence-aware refine-
+ProbNVS
+3
+ment. Moreover, our framework is fully differentiable and can generalize across
+scenes without re-training for new scene adaption. Experiments demonstrate
+that our ProbNVS shows accurate and realistic photorealistic novel view synthesis ability across various scenes. Our ProbNVS achieves an outstanding rendering speed of around 0.15s for synthesising a 640×480 image, which is about
+15×, 38× and 338× faster than MVSNeRF [4], IBRNet [46] and pixelNeRF [56],
+respectively. In summary, our key contributions are:
+– We propose ProbNVS, a generic novel view synthesis framework that leverages learned MVS priors for fast and photorealistic view synthesis.
+– We design a probability-guided sampling strategy, that multi-scale cost volumes are constructed on the target view frustum, and the network learns to
+sampling points according to the depth probability distributions in a coarseto-fine manner. The learned probability-guided sampling significantly speeds
+up the rendering without losing realistic rendering capacity. (Sect. 3.1)
+– We introduce a subsequent neural volume rendering module (Sect. 3.2) and a
+confidence-aware refinement module (Sect. 3.3) for photorealistic novel view
+synthesis even in the occluded and boundary regions.
+2
+Related Work
+Novel view synthesis has been an appealing research problem in computer vision
+and graphics since the 1990s. The early work [5] by Chens and Williams opened
+up a new research topic for image synthesis via view interpolation, where the
+3D scene representation can be replaced by posed images. Later on, Debevec
+et al. [10] proposed a hybrid approach composed of both geometry modeling
+and image warping from a set of still photographs. In the meantime, light field
+rendering [22,16] was proposed as a research branch by constructing a 4D light
+field and interpolating views without image warping or geometry information.
+A key issue in NVS is how to model the scene from only 2D captures. Some
+work avoids modeling the scene geometry and implements NVS through view
+morphing [5,37,11] by utilizing pixel correspondences and projective mapping,
+or light field rendering [22,21,39,44,45,51,54,47,50,49]. However, to generate 3D
+realistic novel views without dense view capture like light fields, modeling the
+underlying geometry information of scenes plays an important role. Therefore,
+we further divide the previous work into explicit and implicit modeling of scene
+structures: novel view synthesis (or image-based rendering) (1) with explicit
+geometry estimation and (2) with implicit scene representation.
+NVS with explicit geometry estimation. To generate realistic and immersive novel views, some work focused on rendering based on explicit geometric
+estimation of pose images. Chaurasia et al. [5] introduced superpixels augmented
+with synthesized depth and generated novel views by blending the warped superpixels from adjacent input views. Zitnick et al. [59] developed a two-layer
+representation with matting for video view interpolation. With the prospering
+of deep learning, Flynn et al. [13] presented an end-to-end deep architecture that
+learns depth and color rendering together. Penner et al. [31] presented a soft 3D
+4
+Y. Zhou et al.
+reconstruction pipeline that preserves depth uncertainty throughout the geometry estimation and rendering pipeline. Choi et al. [8] incorporated the concept of
+depth probability volumes as the representation of scene geometry to guide view
+extrapolation. Given a pre-computed 3D geometry scaffold, a line of work [33,34]
+focused on neural rendering in terms of the reconstructed surface of the scene,
+enabling sharp and realistic novel view synthesis on the condition of complete
+and accurate geometry estimation. These methods either requires complex and
+time-consuming preprocessing or relies on fairly accurate depth estimates.
+NVS with implicit scene representations. Instead of learning explicit scene
+geometry and color rendering separately, Zhou et al. [58] proposed a multiplane
+image representation that represented the target scene with a set of parallel
+RGB-alpha layers inspired by layered depth image [38]. It allows end-to-end
+training with posed stereo images and supports differentiable view interpolation
+and extrapolation. Following this trend, plenty of view synthesis methods based
+on this scene representation [40,27,12,42] have been proposed to render more
+photorealistic novel view images for scenes collected on a plane. In the last few
+years, representing scenes implicitly with neural networks for 3D reconstruction [29,26,30,18,15] has been a trending research topic, which leverages MLPs
+to map continuous spatial coordinates to signed distance or occupancy indicating the surface locations. Later, Mildenhall et al. [28] proposed Neural Radiance
+Field (NeRF) that achieved impressive view synthesis results by optimizing a
+5D continuous radiance field for each scene. The proposal of this method has inspired many related researches [57,48,24] that further improved the performance
+of neural rendering. Some work were proposed to accelerate rendering process
+by dividing the space into a sparse voxel octree [23], leveraging thousands of
+tiny MLPs [32], pre-sampling NeRF into a tabulated view-dependent volume
+or rendering from the cache [55,14]. Some other work endowed neural volume
+rendering with generalization capabilities by introducing pixel features [56] or
+correspondence matching [7,46,4]. Although high-speed rendering is achieved
+by those methods, they are mainly scene-specific and cannot be generalized to
+new scenes. By contrast, the existing general neural rendering methods suffer
+from long processing time, e.g., rendering a 640×512 image takes at least a
+few seconds. Therefore, to achieve photorealistic novel view synthesis with high
+rendering speed and generalization abilities, we propose a general NVS framework with a novel depth probability-guided sampling strategy. By incorporating
+learned probability-guided sampling, the number of sampling points can be significantly reduced, resulting in 15 to 40 times faster rendering.
+3
+Method
+Given a set of posed images of a real scene, our goal is to synthesize photorealistic novel view images in the blink of an eye without the need for exhaustive
+pre-calculation of the scene geometry or sampling throughout the entire target space. Specifically, the pipeline (Fig. 1) is composed of three main parts: (1)
+the multi-scale probability-guided sampling where sampling is guided by learned
+ProbNVS
+Multi-scale
+feature extractor
+Targetcentered
+view
+frustum
+5
+Multi-scale Probability-Guided Sampling
+Depth probability
+distributions
+Target-centered
+cost volumes
+Scale 1
+Scale 2
+Scale 3
+Neural Volume Rendering
+Warped
+multi-view
+features
+Color feature
+extractor
+Ray
+differences
+Volume Rendering
+𝜎
+𝜎
+RGB
+MLP
+MLP
+Warped
+source colors
+Ray distance
+Confidence-Aware
+Refinement
+Novel view
+image
+Fig. 1. Method overview. Our ProbNVS is composed of three main parts: multi-scale
+probability-guided sampling (light green box), neural volume rendering (light pink box)
+and confidence-aware refinement (light purple box). The probability-guided sampling
+module performs coarse-to-fine sampling based the learned depth probability distributions from the target-centered cost volumes, and the finest samples are feed into the
+neural volume rendering module for novel view synthesis. A confidence-aware refinement module is proposed to improve the results of uncertain, occluded and unreferenced
+areas when the input source views are limited.
+depth probability distributions in a coarse-to-fine manner (Sect. 3.1), (2) a neural volume rendering module that generates the density and color fields of the
+rendering points through aggregating source view information and the learned
+depth probabilities (Sect. 3.2) , and (3) a confidence-aware refinement module
+that further improves rendering quality especially for the uncertain, occluded
+and unreferenced regions (Sect. 3.3).
+3.1
+Multi-scale Probability-Guided Sampling
+In this section, we present a multi-scale probability-guided sampling strategy,
+which samples points that contribute significantly to view synthesis in a coarseto-fine manner guided by the learned depth probability distributions. The input
+of the multi-scale probability-guided sampling is the target camera pose Φtar
+M
+and the nearest M source view images {Ii }M
+i=1 with their camera poses {Φi }i=1 .
+D3 ×H×W
+The output is a set of “points for rendering” Xpf r ∈ R
+on the target
+view frustum, where H × W is the spatial resolution of the input images and D3
+is the number of sampling points along each ray from the finest sampling level.
+Multi-scale feature extractor. Given the selected input views {Ii }M
+i=1 , we
+first extract multi-scale features {Fi,1 , Fi,2 , Fi,3 }M
+with
+a
+multi-scale
+feature
+i=1
+extractor, implemented as a 2D UNet with instance normalization (IN) [43].
+The extracted multi-scale features Fi,1 , Fi,2 , Fi,3 have spatial resolution of H
+4 ×
+W H
+W
+,
+×
+,
+H
+×
+W
+and
+channel
+numbers
+of
+C
+,
+C
+,
+C
+respectively.
+1
+2
+3
+4
+2
+2
+Y. Zhou et al.
+Scale 2
+Scale 1
+Scale 3
+Multi-scale
+feature
+extractor
+*
+Schematic
+diagram of the
+scene structure
+*
+Depth hypothesis
+or sampling points
+Warped source
+features from view 𝑖
+𝑃1
+𝑃2
+Ray-difference
+vector, ∆𝐝𝑖
+Blending
+weights
+Multi-scale cost volumes
+3D CNN
+…
+6
+𝑃3
+MLP
+𝑤
+Colors
+𝒄
+Warped source view
+colors, {𝐶ሚ𝑖 }𝑀
+𝑖=1
+Depth hypothesis
+(scale 1)
+Depth hypothesis
+(scale 2)
+Depth hypothesis
+(scale 3)
+Depth probability distributions
+Sampling from distributions
+(b) Color field prediction for Neural Volume Rendering
+Confidence
+map, 𝑀𝑐𝑜𝑛𝑓
+Rendered
+image, 𝐼ሚ𝑡𝑎𝑟
+𝐗1
+𝐗2
+weights
+C
+RGB
+Alpha
+blending
+Refined
+Image, 𝐼መ𝑡𝑎𝑟
+𝐗 𝑝𝑓𝑟
+“points for rendering”
+(a) Multi-scale Probability-Guided Sampling
+(c) Confidence-Aware Refinement
+Fig. 2. Details of the ProbNVS sub-modules. In (a) multi-scale probability-guided sampling, we first constructed target-centered cost volumes from the variance of the source
+view features, and regularize the cost volumes with 3D CNN to learn depth probability
+distributions. Then points can be sampled guided by the learned depth probability
+distributions in a coarse-to-fine manner. Based on the finest “points for rendering”,
+the (b) color field of neural volume rendering is estimated by aggregating source view
+features, ray-difference vectors and source view colors. The (c) confidence-aware refinement module is conditioned on the confidence calculated from the learned depth
+probability distributions, and the refined image is generated by alpha compositing.
+Target-centered cost volumes. In order to learn the 3D structural information of the target scene for guiding sampling, we build cost volumes on the target
+view frustum. The target-centered cost volumes are constructed on the target
+view frustum via differentiable reprojection of the extracted source view features.
+This is slightly different from accustomed learning based MVS methods [52,6]
+where plane-swepted cost volumes are built on views with known images. Specifically, given the target camera pose Φtar = {Ktar , Rtar , ttar }, the source view
+poses {Φi = {Ki , Ri , ti }}M
+i=1 and a sampling point on the target view frustum
+with depth d, we consider the warping matrix Hi (d) that warps features from
+the source view coordinate to the target view coordinate:
+−1
+Hi (d) = K̂i Ti T−1
+tar K̂tar ,
+(1)
+xi = Hi (d)xtar .
+
+
+
+
+K 0
+R t
+4×4
+∈ R4×4 , and xi and xtar are the
+where K̂ =
+∈ R , T̂ =
+0T 1
+0T 1
+homogeneous vector (di ui , di vi , di , 1)T and (dutar , dvtar , d, 1)T , corresponding to
+the pixel coordinates (ui , vi )T and (utar , vtar )T at the source view and the target
+view respectively. Given a set of sampling points X ∈ RD×H×W on the target
+view frustum, a target-centered cost volume is constructed by the variance of
+the warped features across views. We then regularize the cost volume with a 3D
+CNN. After applying the softmax operation to the regularized cost volume along
+the depth direction for probability normalization, we obtain the corresponding
+ProbNVS
+7
+depth probability distributions P ∈ RD×H×W of the given set of samples X.
+Most importantly, the learned depth probability distributions give hints on how
+to guide the sampling for a more compact solution space.
+Multi-scale depth probability-guided sampling. In order to speed up the
+rendering by reducing the sampling points without losing realistic rendering capacity, we present multi-scale depth probability-guided sampling. The sampling
+procedure is performed in a coarse-to-fine manner at three different scales, where
+points that contribute more to rendering can be gradually sampled guided by
+the learned depth probability distributions. Different from the single peak assumption in [6], we adopt a strategy of sampling from distribution, which takes
+into account the probability of sampling along a entire ray.
+In detail, we devise a coarse-to-fine sampling strategy in three scales which
+are commonly used in learning-based MVS architectures [52,53,17,6], and each
+following scale constructs a target-centered cost volume to refine the previous
+sampling with higher pixel resolution and finer probability-guided sampling.
+In the coarsest scale, points are uniformly sampled along camera rays on the
+target view frustum within a predefined depth interval (dmin , dmax ), denoted
+W
+H
+as X1 ∈ RD1 × 4 × 4 . Subsequently, a target-centered cost volume can be constructed from the image features extracted at the first scale {Fi,1 }M
+i=1 . After regularization with a 3D CNN and normalization, the depth probabilities of the coarsH
+W
+est samples P1 ∈ RD1 × 4 × 4 can be learned accordingly. Afterwards, inverse
+H
+W
+transform sampling is used to sample a smaller set of points X02 ∈ RD2 × 4 × 4
+with more possibilities to represent scene structure according to P1 . We then inH
+W
+terpolate spatial resolution of the samples to the next scale X2 ∈ RD2 × 2 × 2 . In
+the second scale, we follow the same procedure of cost volume construction, regularization and normalization, and obtained the depth probability distributions
+H
+W
+of this scale P2 ∈ RD2 × 2 × 2 . Then, we continue to sample a finer set of samples as “points for rendering” Xpf r ∈ RD3 ×H×W according to the P2 . Similarly,
+we can obtain corresponding depth probability distributions P3 ∈ RD3 ×H×W .
+In brief, embedding the depth probability-guided sampling into a multi-scale
+MVS learning procedure enables more compact and efficient sampling, which
+can significantly speed up rendering without losing realistic rendering capacity.
+3.2
+Neural Volume Rendering
+In this section, we present a neural volume rendering module that takes the
+“points for rendering” and the corresponding depth probabilities from Sect. 3.1
+as inputs and outputs photorealistic novel view images. To perform neural volume rendering as in NeRF [28], we represent the scene observed by the target
+viewpoint as density and color fields, which are built based on the delicate sampling points at the target view by fully aggregating the source view information
+as well as the learned scene structures.
+Density prediction. The densities encode the transmittance of the 3D components in the target space. In most cases, the 3D space of the target view frustum
+is mostly empty with finite objects. Therefore, we utilize the finest rendering
+points from Sect. 3.1 and estimate their densities to fit the real scene structures.
+8
+Y. Zhou et al.
+Moreover, the leaned depth probabilities of the rendering points imply the 3D
+structure of the target scene. As a result, taking the learned depth probabilities
+of the “points for rendering” Xpf r as inputs, we introduce a density estimation
+MLP fσ to predict the densities of corresponding samples.
+σ(r) = fσ (P3 (r)),
+(2)
+D3
+where P3 (r) ∈ R
+is the learned depth probability distribution of a target
+camera ray r, and σ(r) ∈ RD3 is the densities of sampling points on the target
+camera ray. Moreover, gathering the densities σ(r) of rendering points gives us
+the density fields ζ ∈ RD3 ×H×W .
+Color prediction. After the density estimation, we predict the surface colors
+by aggregating the source view color information based on the finest rendering
+points from Sect. 3.1. We find color blending shows more promising results and
+is easier to learn, so we aggregate multi-view colors by blending them with the
+estimated blending weights. Specifically, we first calculate the blending weights
+by thoroughly considering of the extracted features of the source views and
+the relative viewing directions. Then, we warp the source view colors using the
+warping matrix as in Eq. (1) and colors of the “points for rendering” are blended
+using the learned blending weights.
+Specifically, we first extract another set of image features {Fic }M
+i=1 with a 2D
+U-Net for the color blending weights generation, which have spatial resolution
+of H × W and channel number of C3 . We then warp the extracted multi-view
+features to the target view following the warping procedure as in Eq. (1), and
+the warped features are denoted as {F̃ic }M
+i=1 . After that, we calculate the relative
+viewing directions {∆di }M
+,
+which
+is
+the
+difference between the directions of
+i=1
+the target ray and source rays, i.e., ∆di = d − di . With the warped image
+features and the ray direction difference as inputs, blending weights can then be
+generated by applying an MLP network, i.e., wi = fcolor (F̃ic , ∆di ) Finally, the
+colors of the “points for rendering” can be blended using the warped multi-view
+M
+colors {C̃i }M
+i=1 and the blending weights {wi }i=1 through a softmax operator.
+c=
+M
+X
+(C̃i exp (wi )/
+i=1
+M
+X
+exp (wj )),
+(3)
+j=1
+and gathering c of the rendering points gives us the color fields C ∈ R3×D3 ×H×W .
+Volume rendering. With the learned density and color fields, we leverage the
+vanilla volume rendering to obtain the synthesised target view image [28]:
+C̃r =
+D3
+X
+Tk (1 − exp (−σk ))ck ,
+k=1
+where
+Tk = exp (−
+k−1
+X
+(4)
+σm ),
+m=1
+where C̃r is the accumulated pixel color of the predicted target image corresponding to ray r, D3 is number of sampled surface points on the ray, and
+ProbNVS
+9
+{σk , ck } are the density and color of the kth sampling point, and Tk represents
+the transmittance of the kth point.
+3.3
+Confidence-aware Refinement
+After accumulating the colors and densities of the rendering points with volume
+rendering, we obtain the synthesised target view image I˜tar . However, artifacts
+may appear in unreferenced, occluded and textureless regions due to the difficulty
+of correspondence estimation with limited adjacent source views as input (M =
+3 for instance). Thankfully, we can infer artifacts that might appear on the
+synthetic target view image from the confidence of probability-guided sampling.
+As a result, we propose a confidence-aware refinement module, i.e.,
+α, Iˆmid = fu (I˜tar , Mconf ),
+Iˆtar = αI˜tar + (1 − α)I˜mid ,
+(5)
+where fu is the confidence-aware refinement module which learns to refine the
+uncertain, unreferenced (e.g. image boundaries) and occluded area for better
+visual fidelity, and Mconf ∈ RH×W is the confidence map which represents the
+confidence of our multi-scale probability-guided sampling. We obtain the sampling confidence Mconf by summing the interpolated depth probabilities of the
+“points for renderng” corresponding to the normalized depth probability estimated at the first scale. I˜mid is the intermediate output image, and α is the
+learned alpha map. The implementation details and calculation of the sampling
+confidence will be discussed in the supplemental material.
+3.4
+Losses
+Multi-scale depth loss. We adopt the multi-scale depth loss for initializing
+the multi-scale probability-guided sampling. First, we can obtain depth maps
+of three scales {di }3i=1 by multiplying the depth labels and depth probability
+distributions. Then, we apply L1 loss for three stages.
+Ldepth = λ1 kdˆ1 − d1 k1 + λ2 kdˆ2 − d2 k1 + λ3 kdˆ3 − d3 k1 ,
+(6)
+Rendering loss. We adopt L1 loss and perceptual loss for the synthesised novel
+view image output I˜tar .
+X
+Lrender = kI˜tar − Itar k1 +
+kφl (I˜tar ) − φl (Itar )k1 ,
+(7)
+l
+where {φl } is a set of appointed and pre-trained neural layers of VGG-16.
+Refinement loss. For the refinement loss, we adopt L1 for pixel reconstruction
+loss.
+Lref ine = kφl (Iˆtar ) − φl (Itar )k1 + kφl (Iˆmid ) − φl (Itar )k1 .
+(8)
+where Iˆtar is the refined image, and Iˆmid is the intermediate output image of the
+confidence-aware refinement module in Sect. 3.3.
+10
+Y. Zhou et al.
+Table 1. Quantitative results of novel view synthesis on the DTU dataset.
+Method
+Points for
+rendering
+Rendering
+speed/(fps)↑
+pixelNeRF [56]
+IBRNet [46]
+MVSNeRF [4]
+ProbNVS w/o Refine
+ProbNVS
+64+128
+64+64
+128
+8
+8
+0.0174
+0.1567
+0.3897
+6.5342
+5.8824
+3.5
+DTU test set
+PSNR↑
+20.3153
+21.5963
+24.3726
+23.8093
+24.6635
+SSIM↑
+0.632
+0.7494
+0.8453
+0.8167
+0.8316
+LPIPS↓
+0.5093
+0.3957
+0.3269
+0.2622
+0.2516
+Implementation Details
+Network details. The multi-scale feature extractor is vanilla 2D U-Net with
+instance normalization, and the number of feature channels in three scales are
+C1 = 32, C2 = 16, C3 = 8. The 3D CNNs for regularizing the cost volume of
+three scales are 3D U-Net with skip connections and instance normalization.
+The numbers of depth samples in three scales are D1 = 64, D2 = 32, D3 = 8
+respectively, and we use D3 = 8 for the neural volume rendering. Please refer to
+the supplementary material for more details.
+Training details. We train our ProbNVS with M = 3 nearest source views for
+NVS with a image resolution of W × H = 640 × 512 on DTU dataset [1]. We pretrain the multi-scale probability-guided sampling with the multi-scale depth loss
+first, as a better initialization can accelerate the convergence of the remaining
+rendering. After that, we train the sampling and neural rendering together on
+DTU dataset [1] with the rendering loss in Eq. (7). In order to further improve
+the results on unreferenced and occluded regions, we freeze the rendering part
+of network and train the refinement module. The learning rate is 0.0016 for
+pre-training the probability-guided sampling, and 0.0005 for training the whole
+rendering pipeline, and 0.001 for the refinement network. We adopt Adam [20]
+for all the training procedures. We train the three steps for 60 epochs, 15 epochs
+and 300k iterations on two GTX 3090 GPUs.
+4
+Experiments
+In this section, we evaluate our method on three different datasets [1,28,27] from
+synthetic data to real data (Sect. 4.1), and give quantitative and qualitative
+comparisons with state-of-the-art generic novel view synthesis work (Sect. 4.2).
+Moreover, we conduct an ablation study on our ProbNVS architecture, and then
+analysize the relationship between NVS quality and the number of rendered
+samples and input source views (Sect. 4.3).
+4.1
+Datasets
+We first evaluate our model on the DTU dataset [1] consisting of 124 different
+scenes with diverse objects, collected under seven different lighting conditions.
+ProbNVS
+11
+Table 2. Quantitative results of generalization on NeRF Synthetic and LLFF datasets.
+Method
+NeRF Synthetic
+Real Data (Forward-Facing)
+PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+pixelNeRF [56]
+1.4296 0.0865 0.5683
+9.1673 0.3309
+0.7054
+IBRNet*[46]
+30.4011* 0.9599* 0.0678* 24.4858* 0.8145* 0.2080*
+MVSNeRF [4]
+26.0588 0.9515 0.1039 21.7880 0.7131
+0.3179
+ProbNVS w/o Refine 25.9989 0.9397 0.0930 21.7323 0.7658
+0.2330
+ProbNVS
+26.3884 0.9431 0.06360 21.9959 0.7709 0.2327
+*
+IBRNet is trained on various datasets containing both synthetic and real data, achieving
+better generalization results. pixelNeRF, MVSNeRF and our ProbNVS are trained only on
+the DTU dataset.
+Each scene has 49 renderings with a spatial resolution of 640 × 512 pixels. We
+use the same dataset partition protocol as pixelNeRF [56] and MVSNeRF [4]
+by splitting the dataset into 88 training scenes, 15 validation scenes and 16
+testing scenes. To further examine the generalization ability, We evaluate our
+method on the NeRF synthetic dataset [28] and the LLFF dataset [27] containing
+real captures of real-world scenes. The NeRF synthetic dataset is composed
+of rendering from eight objects with complicated geometry and realistic nonLambertian materials. The objects are rendered from viewpoints sampled on
+the upper hemisphere or a full sphere, and each scene has 100 training views
+and 200 testing views with a spatial resolution of 800×800 pixels. We use the
+testing views of the eight objects in our experiments. The LLFF dataset contains
+handheld forward-facing captures of eight complex real-world scenes from the set
+up in [28], and each scene has 20 to 62 images with spatial resolution of 1008
+× 756 pixels. We resize the images to 960 × 640 pixels for testing following
+MVSNeRF [4]. Unless otherwise stated, we use nearest M = 3 source views as
+inputs.
+4.2
+Results and Comparisons
+Comparisons on DTU. We compare our ProbNVS with three recent generic
+novel view synthesis work, pixelNeRF [56], IBRNet [46] and MVSNeRF [4].
+We adopt the released code and trained model of each work. In detail, the
+pixelNeRF and MVSNeRF are trained on DTU similar to ours, and the IBRNet
+is trained on four different datasets ranging from synthetic to real data with
+strong generalization ability. We test all methods with M = 3 nearby source
+views as inputs, and all methods are tested on a single GTX 3090 GPU. We
+first test all the methods on the test set of DTU dataset [1], where we employ
+the same test setup for each method and calculate PSNR, SSIM and LPIPS as
+metrics. We demonstrate the quantitative and qualitative comparison in Tab. 1
+and Fig. 3, respectively. In terms of the rendering efficiency, our ProbNVS takes
+much fewer sampling points for rendering (eight samples V.S. more than one
+hundred samples in the other works), and the rendering speed is about 15×, 38×
+and 338× faster than MVSNeRF, IBRNet and pixelNeRF. More importantly,
+12
+Y. Zhou et al.
+Fig. 3. Qualitative comparison on DTU, NeRF-synthetic and LLFF data. Compared
+with the state-of-the-art general NVS methods, our ProbNVS achieves photo-realistic
+novel view synthesis with finer details in terms of geometry and appearance, and also
+generalizes to new synthetic and real data.
+our method is numerically equivalent or even better than existing methods as
+shown in Tab. 1. Our method can achieve visually high-quality results with
+much fewer sampling points as shown in Fig. 3. Such results are attributed to
+efficient probability-guided sampling, which helps identify the most important
+set of points for volume rendering. Furthermore, the confidence-aware refinement
+leverages the uncertainty of the learned depth probability distribution to further
+improve the rendering of the uncertain, occluded and unreferenced regions.
+Generalization. For testing the generalization ability of our method, we also
+show quantitative and qualitative results on other two datasets, the realistic
+synthetic data from NeRF [28] and forward-facing real data from LLFF [27].
+The PSNR, SSIM and LPIPS metrics are reported in Tab. 2, and the visual
+comparisons are presented in the lower part of Fig. 3. Although our method
+ProbNVS
+13
+Table 3. Quantitative ablation study on ProbNVS.
+Algorithm
+PGS Depth-sup Refinement PSNR SSIM LPIPS
+w/o PGS (single peak)
+X
+19.0473 0.6681 0.3960
+w/o Depth-Sup
+X
+21.8337 0.6335 0.4295
+Freeze Sampling
+X?
+X
+22.5813 0.7952 0.2804
+w/o Refine
+X
+X
+23.8093 0.8167 0.2622
+w Dir-Refine
+X
+X
+?
+24.2247 0.8195 0.2823
+ProbNVS
+X
+X
+X
+24.6635 0.8316 0.2516
+Fig. 4. A case for confidence-aware refinement. The confidence-aware refinement module takes a rendered image and a confidence map calculated from the learned depth
+probability distributions as inputs, outputs blending weights to generate a refined image. The occluded (red arrow), uncertain (green arrow) and unreferenced (blue arrows)
+regions can be refined with reasonable colors.
+is only trained on the DTU dataset, it generalizes well to new datasets with
+significantly different data, and shows better numerical and visual results than
+pixelNeRF and MVSNeRF. PixelNeRF tends to overfit the DTU dataset and
+certain coordinate systems, resulting in poor performance. Note that although
+IBRNet shows the best performance, it is trained on four different datasets with
+both synthetic and real data, whereas our method is trained only on DTU.
+4.3
+Ablations and Analysis
+Ablation studies. In this section, we conduct ablation studies to investigate
+different components of our ProbNVS framework on the test set of DTU, and
+the metrics are recorded in Tab. 3. Specifically, we first replace our probabilityguided sampling (PGS) with the single peak depth assumption where points
+are sampled in a single depth interval defined by the depth prediction and its
+variance, noted as “w/o PGS (single peak)”. The single peak assumption shows
+worse results in the test scenes, as depth predictions from only three input views
+are more likely to fail into wrong locations, leading to incorrect rendering. For
+“w/o Depth-Sup”, we remove the depth-supervised pre-training of the depth
+probability-sampling part, and only use the image loss to train the entire rendering pipeline. As shown in Tab. 3, it is hard for the rendering part to produce
+good results without proper sampling initialization to give the network a learned
+depth prediction prior. In contrast, if we freeze the learned sampling and train
+only the rendering part (“Freeze sampling”), the results are not good neither,
+14
+Y. Zhou et al.
+Table 4. Analysis on number of samples/views (ProbNVS w/o refine tested on DTU).
+Number of samples
+Number of views
+1
+2
+4
+8
+3
+5
+7
+PSNR
+21.7675 21.7794 23.3679 23.8093 23.8093 24.9202 25.0378
+SSIM
+0.7935 0.7937 0.8031 0.8167 0.8167 0.8322 0.8336
+LPIPS
+0.2681 0.2679 0.2644 0.2622 0.2622 0.2496 0.2469
+Rendering speed (fps) 6.8117 6.7281 6.5596 6.5342 6.5342 5.1084 4.2328
+Metric
+indicating that our framework benefits from both depth-supervised sampling initialization and guidance for correct rendering. Thanks to our training schedule,
+“ProbNVS w/o Refine” achieves better results than previous settings, validating
+the effectiveness of the entire rendering process. In order to further improve the
+results of artifacts in uncertain, occluded and unreferenced areas when the input
+source views are limited (e.g., M = 3), we propose a confidence-aware refinement
+module where the confidence is obtained from the probability-guided sampling
+module. The final “ProbNVS” shows the highest quantitative and visual results,
+while “ProbNVS + Dir-Refine” without confidence input only improves PSNR
+and SSIM, but fails to improve LPIPS. Please refer to the supplemental material
+for visual comparisons.
+Analysis. To investigate the performance of our ProbNeRF as a function of the
+number of rendered samples and input views, we also conduct several experiments and the results are presented in Tab. 4. On the one hand, we vary the
+number of points on each ray for rendering as “1, 2, 4, 8”. The metrics show
+that more samples lead to better results with a negligible increasing of rendering
+time. On the other hand, we change the number of the nearest source views for
+NVS to “3, 5, 7” to show the relationship of performance and the number of
+input viewpoints. As shown in the right part of Tab. 4, increasing the number
+of source views provides better results, but slows down rendering.
+5
+Conclusions
+In this paper, we present a method for novel view synthesis with fast rendering speed, strong generalization capacity and photo-realistic rendering performance. We demonstrate that the proposed probability-guided sampling method,
+combined with the subsequent neural rendering module, greatly speeds up the
+rendering without losing realistic rendering quality and generalization capacity.
+Moreover, in the case of limited input source views and severe occlusions, the
+confidence-aware refinement module can optimize uncertain, occluded and unreferenced regions after neural volume rendering. Finally, our method also supports
+different number of input source views and sampling points. Regarding to the
+limitation, the proposed refinement module cannot exactly guarantee cross-view
+rendering consistency, and the rendering speed still needs to be improved to fulfill higher resolution rendering requirements, which we leave as future work. To
+conclude, our ProbNVS contribute a new framework for efficient sampling and
+high-quality neural volume rendering for generic novel view synthesis tasks.
+ProbNVS
+15
+References
+1. Aanæs, H., Jensen, R.R., Vogiatzis, G., Tola, E., Dahl, A.B.: Large-scale data for
+multiple-view stereopsis. International Journal of Computer Vision 120(2), 153–
+168 (2016)
+2. Aliev, K.A., Sevastopolsky, A., Kolos, M., Ulyanov, D., Lempitsky, V.: Neural
+point-based graphics. In: European Conference on Computer Vision. pp. 696–712.
+Springer (2020)
+3. Buehler, C., Bosse, M., McMillan, L., Gortler, S., Cohen, M.: Unstructured lumigraph rendering. In: Proceedings of the 28th annual conference on Computer
+graphics and interactive techniques. pp. 425–432 (2001)
+4. Chen, A., Xu, Z., Zhao, F., Zhang, X., Xiang, F., Yu, J., Su, H.: Mvsnerf: Fast
+generalizable radiance field reconstruction from multi-view stereo. arXiv preprint
+arXiv:2103.15595 (2021)
+5. Chen, S.E., Williams, L.: View interpolation for image synthesis. In: Proceedings
+of the 20th annual conference on Computer graphics and interactive techniques.
+pp. 279–288 (1993)
+6. Cheng, S., Xu, Z., Zhu, S., Li, Z., Li, L.E., Ramamoorthi, R., Su, H.: Deep stereo
+using adaptive thin volume representation with uncertainty awareness. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition.
+pp. 2524–2534 (2020)
+7. Chibane, J., Bansal, A., Lazova, V., Pons-Moll, G.: Stereo radiance fields (srf):
+Learning view synthesis for sparse views of novel scenes. In: Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 7911–
+7920 (2021)
+8. Choi, I., Gallo, O., Troccoli, A., Kim, M.H., Kautz, J.: Extreme view synthesis.
+In: Proceedings of the IEEE/CVF International Conference on Computer Vision.
+pp. 7781–7790 (2019)
+9. Dai, P., Zhang, Y., Li, Z., Liu, S., Zeng, B.: Neural point cloud rendering via
+multi-plane projection. In: Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition. pp. 7830–7839 (2020)
+10. Debevec, P.E., Taylor, C.J., Malik, J.: Modeling and rendering architecture from
+photographs: A hybrid geometry-and image-based approach. In: Proceedings of
+the 23rd annual conference on Computer graphics and interactive techniques. pp.
+11–20 (1996)
+11. Fitzgibbon, A., Wexler, Y., Zisserman, A.: Image-based rendering using imagebased priors. International Journal of Computer Vision 63(2), 141–151 (2005)
+12. Flynn, J., Broxton, M., Debevec, P., DuVall, M., Fyffe, G., Overbeck, R., Snavely,
+N., Tucker, R.: Deepview: View synthesis with learned gradient descent. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 2367–2376 (2019)
+13. Flynn, J., Neulander, I., Philbin, J., Snavely, N.: Deepstereo: Learning to predict
+new views from the world’s imagery. In: Proceedings of the IEEE conference on
+computer vision and pattern recognition. pp. 5515–5524 (2016)
+14. Garbin, S.J., Kowalski, M., Johnson, M., Shotton, J., Valentin, J.: Fastnerf: Highfidelity neural rendering at 200fps. arXiv preprint arXiv:2103.10380 (2021)
+15. Genova, K., Cole, F., Sud, A., Sarna, A., Funkhouser, T.: Local deep implicit
+functions for 3d shape. In: Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition. pp. 4857–4866 (2020)
+16
+Y. Zhou et al.
+16. Gortler, S.J., Grzeszczuk, R., Szeliski, R., Cohen, M.F.: The lumigraph. In: Proceedings of the 23rd annual conference on Computer graphics and interactive techniques. pp. 43–54 (1996)
+17. Gu, X., Fan, Z., Zhu, S., Dai, Z., Tan, F., Tan, P.: Cascade cost volume for
+high-resolution multi-view stereo and stereo matching. In: Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 2495–
+2504 (2020)
+18. Jiang, C., Sud, A., Makadia, A., Huang, J., Nießner, M., Funkhouser, T., et al.:
+Local implicit grid representations for 3d scenes. In: Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition. pp. 6001–6010 (2020)
+19. Kalantari, N.K., Wang, T.C., Ramamoorthi, R.: Learning-based view synthesis for
+light field cameras. ACM Transactions on Graphics (TOG) 35(6), 1–10 (2016)
+20. Kingma, D.P., Ba, J.: Adam: A method for stochastic optimization. arXiv preprint
+arXiv:1412.6980 (2014)
+21. Levin, A., Durand, F.: Linear view synthesis using a dimensionality gap light field
+prior. In: 2010 IEEE Computer Society Conference on Computer Vision and Pattern Recognition. pp. 1831–1838. IEEE (2010)
+22. Levoy, M., Hanrahan, P.: Light field rendering. In: Proceedings of the 23rd annual
+conference on Computer graphics and interactive techniques. pp. 31–42 (1996)
+23. Liu, L., Gu, J., Lin, K.Z., Chua, T.S., Theobalt, C.: Neural sparse voxel fields.
+arXiv preprint arXiv:2007.11571 (2020)
+24. Martin-Brualla, R., Radwan, N., Sajjadi, M.S., Barron, J.T., Dosovitskiy, A., Duckworth, D.: Nerf in the wild: Neural radiance fields for unconstrained photo collections. In: Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition. pp. 7210–7219 (2021)
+25. McMillan, L., Bishop, G.: Plenoptic modeling: An image-based rendering system.
+In: Proceedings of the 22nd annual conference on Computer graphics and interactive techniques. pp. 39–46 (1995)
+26. Mescheder, L., Oechsle, M., Niemeyer, M., Nowozin, S., Geiger, A.: Occupancy
+networks: Learning 3d reconstruction in function space. In: Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 4460–
+4470 (2019)
+27. Mildenhall, B., Srinivasan, P.P., Ortiz-Cayon, R., Kalantari, N.K., Ramamoorthi,
+R., Ng, R., Kar, A.: Local light field fusion: Practical view synthesis with prescriptive sampling guidelines. ACM Transactions on Graphics (TOG) 38(4), 1–14
+(2019)
+28. Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng,
+R.: Nerf: Representing scenes as neural radiance fields for view synthesis. In: European Conference on Computer Vision. pp. 405–421. Springer (2020)
+29. Park, J.J., Florence, P., Straub, J., Newcombe, R., Lovegrove, S.: Deepsdf: Learning
+continuous signed distance functions for shape representation. In: Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 165–
+174 (2019)
+30. Peng, S., Niemeyer, M., Mescheder, L., Pollefeys, M., Geiger, A.: Convolutional occupancy networks. In: Computer Vision–ECCV 2020: 16th European Conference,
+Glasgow, UK, August 23–28, 2020, Proceedings, Part III 16. pp. 523–540. Springer
+(2020)
+31. Penner, E., Zhang, L.: Soft 3d reconstruction for view synthesis. ACM Transactions
+on Graphics (TOG) 36(6), 1–11 (2017)
+32. Reiser, C., Peng, S., Liao, Y., Geiger, A.: Kilonerf: Speeding up neural radiance
+fields with thousands of tiny mlps. arXiv preprint arXiv:2103.13744 (2021)
+ProbNVS
+17
+33. Riegler, G., Koltun, V.: Free view synthesis. In: European Conference on Computer
+Vision. pp. 623–640. Springer (2020)
+34. Riegler, G., Koltun, V.: Stable view synthesis. arXiv preprint arXiv:2011.07233
+(2020)
+35. Schönberger, J.L., Frahm, J.M.: Structure-from-motion revisited. In: Conference
+on Computer Vision and Pattern Recognition (CVPR) (2016)
+36. Schönberger, J.L., Zheng, E., Pollefeys, M., Frahm, J.M.: Pixelwise view selection
+for unstructured multi-view stereo. In: European Conference on Computer Vision
+(ECCV) (2016)
+37. Seitz, S.M., Dyer, C.R.: View morphing. In: Proceedings of the 23rd annual conference on Computer graphics and interactive techniques. pp. 21–30 (1996)
+38. Shade, J., Gortler, S., He, L.w., Szeliski, R.: Layered depth images. In: Proceedings
+of the 25th annual conference on Computer graphics and interactive techniques.
+pp. 231–242 (1998)
+39. Shi, L., Hassanieh, H., Davis, A., Katabi, D., Durand, F.: Light field reconstruction
+using sparsity in the continuous fourier domain. ACM Transactions on Graphics
+(TOG) 34(1), 1–13 (2014)
+40. Srinivasan, P.P., Tucker, R., Barron, J.T., Ramamoorthi, R., Ng, R., Snavely, N.:
+Pushing the boundaries of view extrapolation with multiplane images. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition.
+pp. 175–184 (2019)
+41. Thies, J., Zollhöfer, M., Nießner, M.: Deferred neural rendering: Image synthesis
+using neural textures. ACM Transactions on Graphics (TOG) 38(4), 1–12 (2019)
+42. Tucker, R., Snavely, N.: Single-view view synthesis with multiplane images. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 551–560 (2020)
+43. Ulyanov, D., Vedaldi, A., Lempitsky, V.: Instance normalization: The missing ingredient for fast stylization. arXiv preprint arXiv:1607.08022 (2016)
+44. Vagharshakyan, S., Bregovic, R., Gotchev, A.: Image based rendering technique via
+sparse representation in shearlet domain. In: 2015 IEEE International Conference
+on Image Processing (ICIP). pp. 1379–1383. IEEE (2015)
+45. Vagharshakyan, S., Bregovic, R., Gotchev, A.: Light field reconstruction using
+shearlet transform. IEEE transactions on pattern analysis and machine intelligence
+40(1), 133–147 (2017)
+46. Wang, Q., Wang, Z., Genova, K., Srinivasan, P.P., Zhou, H., Barron, J.T., MartinBrualla, R., Snavely, N., Funkhouser, T.: Ibrnet: Learning multi-view image-based
+rendering. In: Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition. pp. 4690–4699 (2021)
+47. Wang, T.C., Zhu, J.Y., Kalantari, N.K., Efros, A.A., Ramamoorthi, R.: Light field
+video capture using a learning-based hybrid imaging system. ACM Transactions
+on Graphics (TOG) 36(4), 1–13 (2017)
+48. Wang, Z., Wu, S., Xie, W., Chen, M., Prisacariu, V.A.: Nerf–: Neural radiance
+fields without known camera parameters. arXiv preprint arXiv:2102.07064 (2021)
+49. Wu, G., Liu, Y., Dai, Q., Chai, T.: Learning sheared epi structure for light field
+reconstruction. IEEE Transactions on Image Processing 28(7), 3261–3273 (2019)
+50. Wu, G., Liu, Y., Fang, L., Dai, Q., Chai, T.: Light field reconstruction using convolutional network on epi and extended applications. IEEE transactions on pattern
+analysis and machine intelligence 41(7), 1681–1694 (2018)
+51. Wu, G., Masia, B., Jarabo, A., Zhang, Y., Wang, L., Dai, Q., Chai, T., Liu, Y.:
+Light field image processing: An overview. IEEE Journal of Selected Topics in
+Signal Processing 11(7), 926–954 (2017)
+18
+Y. Zhou et al.
+52. Yao, Y., Luo, Z., Li, S., Fang, T., Quan, L.: Mvsnet: Depth inference for unstructured multi-view stereo. In: Proceedings of the European Conference on Computer
+Vision (ECCV). pp. 767–783 (2018)
+53. Yao, Y., Luo, Z., Li, S., Shen, T., Fang, T., Quan, L.: Recurrent mvsnet for highresolution multi-view stereo depth inference. In: Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition. pp. 5525–5534 (2019)
+54. Yoon, Y., Jeon, H.G., Yoo, D., Lee, J.Y., So Kweon, I.: Learning a deep convolutional network for light-field image super-resolution. In: Proceedings of the IEEE
+international conference on computer vision workshops. pp. 24–32 (2015)
+55. Yu, A., Li, R., Tancik, M., Li, H., Ng, R., Kanazawa, A.: Plenoctrees for real-time
+rendering of neural radiance fields. arXiv preprint arXiv:2103.14024 (2021)
+56. Yu, A., Ye, V., Tancik, M., Kanazawa, A.: pixelnerf: Neural radiance fields from
+one or few images. In: Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition. pp. 4578–4587 (2021)
+57. Zhang, K., Riegler, G., Snavely, N., Koltun, V.: Nerf++: Analyzing and improving
+neural radiance fields. arXiv preprint arXiv:2010.07492 (2020)
+58. Zhou, T., Tucker, R., Flynn, J., Fyffe, G., Snavely, N.: Stereo magnification: Learning view synthesis using multiplane images. SIGGRAPH (2018)
+59. Zitnick, C.L., Kang, S.B., Uyttendaele, M., Winder, S., Szeliski, R.: High-quality
+video view interpolation using a layered representation. ACM transactions on
+graphics (TOG) 23(3), 600–608 (2004)

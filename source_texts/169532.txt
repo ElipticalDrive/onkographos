@@ -1,0 +1,181 @@
+不透明度と色を使用して、Windows Mixed Realityで豊富なボリュームイメージを効率的にレンダリングする方法について説明します。
+
+ボリューム レンダリングの概要 - Mixed Reality | Microsoft Learn
+目次
+エディター モードを終了する
+Learn に質問する
+Learn に質問する
+読み取りモード
+目次
+英語で読む
+追加
+計画に追加する
+マークダウンのコピー
+印刷
+Note
+このページにアクセスするには、承認が必要です。 サインインまたはディレクトリの変更を試すことができます。
+このページにアクセスするには、承認が必要です。 ディレクトリの変更を試すことができます。
+ボリューム レンダリングの概要
+フィードバック
+医療 MRI またはエンジニアリングボリュームについては、「 Wikipedia でのボリューム レンダリング」を参照してください。 これらの 「ボリュームイメージ」には、 多角形メッシュなどのサーフェスとして簡単に表現できないボリューム全体の不透明度と色を持つ豊富な情報が含まれています。
+パフォーマンスを向上させるための主なソリューション
+BAD: Naïve アプローチ: ボリューム全体を表示します。一般的に実行速度が遅すぎます
+GOOD: 切断面: ボリュームの 1 つのスライスのみを表示します
+良い:サブボリュームを切断:ボリュームの数層のみを表示します
+GOOD: ボリューム レンダリングの解像度を下げる (「混合解像度シーン レンダリング」を参照)
+特定のフレーム内のアプリケーションから画面に一定量の情報のみを転送できます。 この合計メモリ帯域幅は、転送できるデータの量を制限します。 また、プレゼンテーションのためにそのデータを変換するために必要な処理 (または "網掛け") には時間がかかります。 ボリューム レンダリングを実行する際の主な考慮事項は次のとおりです。
+Screen-Width * Screen-Height * Screen-Count * Volume-Layers-On-That-Pixel = Total-Volume-Samples-Per-Frame
+1028 * 720 * 2 * 256 = 378961920 (100%) (完全な res ボリューム: サンプルが多すぎます)
+1028 * 720 * 2 * 1 = 1480320 (完全な 0.3%) (薄いスライス: ピクセルあたり 1 サンプル、スムーズに実行)
+1028 * 720 * 2 * 10 = 14803200 (フルの 3.9%) (サブボリューム スライス: ピクセルあたり 10 サンプル、かなりスムーズに実行され、3d に見えます)
+200 * 200 * 2 * 256 = 20480000 (フルの 5%) (低い res ボリューム: 少ないピクセル、フル ボリューム、3d に見えますが、少しぼやけています)
+3D テクスチャの表現
+CPU の場合:
+```
+public struct Int3 { public int X, Y, Z; /* ... */ }
+ public class VolumeHeader  {
+   public readonly Int3 Size;
+   public VolumeHeader(Int3 size) { this.Size = size;  }
+   public int CubicToLinearIndex(Int3 index) {
+     return index.X + (index.Y * (Size.X)) + (index.Z * (Size.X * Size.Y));
+   }
+   public Int3 LinearToCubicIndex(int linearIndex)
+   {
+     return new Int3((linearIndex / 1) % Size.X,
+       (linearIndex / Size.X) % Size.Y,
+       (linearIndex / (Size.X * Size.Y)) % Size.Z);
+   }
+   /* ... */
+ }
+ public class VolumeBuffer<T> {
+   public readonly VolumeHeader Header;
+   public readonly T[] DataArray;
+   public T GetVoxel(Int3 pos)        {
+     return this.DataArray[this.Header.CubicToLinearIndex(pos)];
+   }
+   public void SetVoxel(Int3 pos, T val)        {
+     this.DataArray[this.Header.CubicToLinearIndex(pos)] = val;
+   }
+   public T this[Int3 pos] {
+     get { return this.GetVoxel(pos); }
+     set { this.SetVoxel(pos, value); }
+   }
+   /* ... */
+ }
+```
+GPU では、次の手順を実行します。
+```
+float3 _VolBufferSize;
+ int3 UnitVolumeToIntVolume(float3 coord) {
+   return (int3)( coord * _VolBufferSize.xyz );
+ }
+ int IntVolumeToLinearIndex(int3 coord, int3 size) {
+   return coord.x + ( coord.y * size.x ) + ( coord.z * ( size.x * size.y ) );
+ }
+ uniform StructuredBuffer<float> _VolBuffer;
+ float SampleVol(float3 coord3 ) {
+   int3 intIndex3 = UnitVolumeToIntVolume( coord3 );
+   int index1D = IntVolumeToLinearIndex( intIndex3, _VolBufferSize.xyz);
+   return __VolBuffer[index1D];
+ }
+```
+網かけとグラデーション
+MRI などのボリュームを網掛けして、有用な視覚化を行う方法。 主な方法は、内の強度を表示する '強度ウィンドウ' (最小と最大値) を持ち、その空間にスケールして白黒の強度を確認することです。 その後、"カラー ランプ" をその範囲内の値に適用し、テクスチャとして格納して、強度スペクトルのさまざまな部分を異なる色で網掛けすることができます。
+```
+float4 ShadeVol( float intensity ) {
+   float unitIntensity = saturate( intensity - IntensityMin / ( IntensityMax - IntensityMin ) );
+   // Simple two point black and white intensity:
+   color.rgba = unitIntensity;
+   // Color ramp method:
+   color.rgba = tex2d( ColorRampTexture, float2( unitIntensity, 0 ) );
+```
+多くのアプリケーションでは、原強度値と 'セグメント化インデックス' の両方をボリュームに格納します (皮膚や骨などの異なる部分をセグメント化するため、これらのセグメントは専用ツールの専門家によって作成されます)。 これは、上記のアプローチと組み合わせて、セグメント インデックスごとに異なる色または異なるカラー ランプを配置できます。
+```
+// Change color to match segment index (fade each segment towards black):
+ color.rgb = SegmentColors[ segment_index ] * color.a; // brighter alpha gives brighter color
+```
+シェーダーでのボリューム スライス
+優れた最初の手順は、ボリューム内を移動できる "スライス 平面" を作成し、"スライス" し、各ポイントでのスキャン値を作成することです。 これは、ボリュームがワールド空間内の場所を表す 'VolumeSpace' キューブがあることを前提としています。これは、ポイントを配置するための参照として使用できます。
+```
+// In the vertex shader:
+ float4 worldPos = mul(_Object2World, float4(input.vertex.xyz, 1));
+ float4 volSpace = mul(_WorldToVolume, float4(worldPos, 1));
+```
+```
+// In the pixel shader:
+ float4 color = ShadeVol( SampleVol( volSpace ) );
+```
+シェーダーでのボリューム トレース
+GPU を使用してサブボリューム トレースを実行する方法 (いくつかのボクセルを深く歩き、データを背面から前面にレイヤー化する)
+```
+float4 AlphaBlend(float4 dst, float4 src) {
+   float4 res = (src * src.a) + (dst - dst * src.a);
+   res.a = src.a + (dst.a - dst.a*src.a);
+   return res;
+ }
+ float4 volTraceSubVolume(float3 objPosStart, float3 cameraPosVolSpace) {
+   float maxDepth = 0.15; // depth in volume space, customize!!!
+   float numLoops = 10; // can be 400 on nice PC
+   float4 curColor = float4(0, 0, 0, 0);
+   // Figure out front and back volume coords to walk through:
+   float3 frontCoord = objPosStart;
+   float3 backCoord = frontPos + (normalize(cameraPosVolSpace - objPosStart) * maxDepth);
+   float3 stepCoord = (frontCoord - backCoord) / numLoops;
+   float3 curCoord = backCoord;
+   // Add per-pixel random offset, avoids layer aliasing:
+   curCoord += stepCoord * RandomFromPositionFast(objPosStart);
+   // Walk from back to front (to make front appear in-front of back):
+   for (float i = 0; i < numLoops; i++) {
+     float intensity = SampleVol(curCoord);
+     float4 shaded = ShadeVol(intensity);
+     curColor = AlphaBlend(curColor, shaded);
+     curCoord += stepCoord;
+   }
+   return curColor;
+ }
+```
+```
+// In the vertex shader:
+ float4 worldPos = mul(_Object2World, float4(input.vertex.xyz, 1));
+ float4 volSpace = mul(_WorldToVolume, float4(worldPos.xyz, 1));
+ float4 cameraInVolSpace = mul(_WorldToVolume, float4(_WorldSpaceCameraPos.xyz, 1));
+```
+```
+// In the pixel shader:
+ float4 color = volTraceSubVolume( volSpace, cameraInVolSpace );
+```
+ボリューム全体のレンダリング
+上記のサブボリューム コードを変更すると、次の情報が得られます。
+```
+float4 volTraceSubVolume(float3 objPosStart, float3 cameraPosVolSpace) {
+   float maxDepth = 1.73; // sqrt(3), max distance from point on cube to any other point on cube
+   int maxSamples = 400; // just in case, keep this value within bounds
+   // not shown: trim front and back positions to both be within the cube
+   int distanceInVoxels = length(UnitVolumeToIntVolume(frontPos - backPos)); // measure distance in voxels
+   int numLoops = min( distanceInVoxels, maxSamples ); // put a min on the voxels to sample
+```
+混合解像度シーン レンダリング
+低解像度でシーンの一部をレンダリングし、元の場所に戻す方法:
+2 台のオフスクリーン カメラをセットアップします。1 つは各フレームを更新する各目に従います
+カメラがレンダリングする 2 つの低解像度レンダー ターゲット (つまり、それぞれ 200x200) を設定する
+ユーザーの前に移動するクワッドを設定する
+各フレーム:
+低解像度で各目のレンダー ターゲットを描画する (ボリューム データ、高価なシェーダーなど)
+シーンを通常どおりフル解像度 (メッシュ、UI など) として描画する
+ユーザーの前にクワッドを描画し、シーン上に描画し、その上にローレ
+結果: フル解像度要素と低解像度で高密度のボリューム データの視覚的な組み合わせ
+関連項目
+ボリューム レンダリング (C# および HLSL サンプルを使用)
+フィードバック
+このページはお役に立ちましたか?
+はい
+いいえ
+いいえ
+このトピックについてサポートが必要ですか?
+このトピックの意図を把握したり、理解を深めたりするために Ask Learn を使ってみませんか?
+Learn に質問する
+Learn に質問する
+修正を提案しますか?
+その他のリソース
+最終更新:
+2025-11-24

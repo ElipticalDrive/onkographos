@@ -1,0 +1,215 @@
+Examine feasibility and implementation options (isosurfaces / marching cubes / depthfield rendering / splatting) for rendering high dimensional objects solely by their OPNS. (request by @darkshikamo / Vincent Nozick)
+
+Feature request : OPNS based rendering. · Issue #18 · enkimute/ganja.js · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Feature request : OPNS based rendering. #18
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Feature request : OPNS based rendering.#18
+Copy link
+Assignees
+Labels
+enhancement
+Description
+enkimute
+opened on Sep 21, 2018
+Issue body actions
+Examine feasibility and implementation options (isosurfaces / marching cubes / depthfield rendering / splatting) for rendering high dimensional objects solely by their OPNS. (request by @darkshikamo / Vincent Nozick)
+Activity
+enkimute
+added
+enhancement
+on Sep 21, 2018
+enkimute commented on Sep 22, 2018
+enkimute
+on Sep 22, 2018
+OwnerAuthor
+More actions
+Rendering GA entities using their OPNS could be approached in a variety of ways. Currently on the list :
+explicit creation of a polygonal mesh using any of the known isosurface algorithms - marching cubes is the obvious candidate. (this could either directly use the distance function, or an inbetween step where the GA objects are first converted to a (faster to sample) volumetric distance field.)
+explicit signed distance field rendering. Again either evaluating the distance function directly, or via a voxel grid with a precalculated signed distance field.
+When a precalculated distance field is used, other rendering algorithms could be considered. (e.g. point splatting, or minecraft style rendering) - although the nature of the data and the availability of accurate signed distances suggest that signed distance fields will produce higher quality results.
+enkimute
+self-assigned this
+on Oct 10, 2018
+enkimute commented on Oct 10, 2018
+enkimute
+on Oct 10, 2018
+OwnerAuthor
+More actions
+Investigating some of the options in this notebook here
+enkimute commented on Oct 14, 2018
+enkimute
+on Oct 14, 2018
+OwnerAuthor
+More actions
+Current OPNS results based on tracing a distance field are promising. The resulting distance field can easily be rendered in real-time, with high-quality shading and live camera control. Generating the distance field itself however still is a lengthy process, so I want to investigate rendering either directly from the OPNS function translated to GLSL, or generating the distance field on the GPU.
+Progress can be followed in the notebook above, and here's a video of the current state, rendering two quadric surfaces and their intersection. (128*128*128 distance field in the demo).
+http://jr.enki.ws/qcga_realtime.mp4
+Normals in the demo are calculated by a modified version of the central differences method that is typically used on signed distance fields. (Since ours is unsigned, we trace back the probing distance so that normals are not evaluated over the OPNS boundary). (the final result - we can do shading in all spaces and need no parametric method to approximate normals or tangents to our manifolds.)
+vincentnozick commented on Oct 15, 2018
+vincentnozick
+on Oct 15, 2018 via email
+Last edited by enkimute
+More actions
+Hi Steven,
+the video is super cool.
+What is exactly the modified version for the normals?
+Best regards,
+Vincent
+enkimute commented on Oct 15, 2018
+enkimute
+on Oct 15, 2018
+OwnerAuthor
+More actions
+Hi Vincent,
+Since our distance field is not signed - taking its derivatives at the actual OPNS boundary is not an option. So instead the distance field information is used to 'step-back' on the incoming ray for a small but sufficient amount (i.e. h), so that we are guaranteed that the (numerical) derivative is indeed on the 'outside' of the OPNS boundary. After stepping back it's just central differences :
+```
+     boundary_point = trace_ray( camera_position, ray_direction );
+     d = boundary_point - h*ray_direction;
+     n = normalize(vec3(
+        (texture(sdf, d + vec3(h,0.0,0.0))-texture(sdf, d + vec3(-h,0.0,0.0))),
+        (texture(sdf, d + vec3(0.0,h,0.0))-texture(sdf, d + vec3(0.0,-h,0.0))),
+        (texture(sdf, d + vec3(0.0,0.0,h))-texture(sdf, d + vec3(0.0,0.0,-h)))
+     ));
+```
+This all happens on the GPU and key is that the (3D) distance field is interpolated by the texture fetcher.
+vincentnozick commented on Oct 15, 2018
+vincentnozick
+on Oct 15, 2018 via email
+Last edited by enkimute
+More actions
+ok, I see :)
+For the normal computation, we also give a formula in our paper (formula that I forget).
+But I remember that will computed a compact form of this formula with Gaalop.
+Best regards,
+-Vincent
+enkimute commented on Oct 16, 2018
+enkimute
+on Oct 16, 2018
+OwnerAuthor
+More actions
+For the OPNS/IPNS visualizer I would hope we could provide the functionality for any Algebra, without the burden of needing to provide ray intersection or normal/tangent functions. In the current setup, all you need to provide to the visualizer is a way to up-cast euclidean points, and a distance function. (I'm currently using (a^b).Length).
+While of course the visual quality will not be that of a full raytracer, a low-cost entry point to visualization may help people explore new and exotic spaces. (and the quality seems quite acceptable for real-time viz so far.)
+I'm hopeful that the generation of the distance field can either be eliminated entirely, or moved to the GPU, potentially enabling interactive modifications. tbc ...
+enkimute commented on Oct 16, 2018
+enkimute
+on Oct 16, 2018
+OwnerAuthor
+More actions
+Ok .. more very encouraging results in my experiments today. In the video you are seeing an interpolation between two quadric surfaces in R(9,6), being calculated and rendered in real-time, without any precalculations.
+http://jr.enki.ws/qcga_interpolate_realtime.mp4
+In this case, a new experimental ganja was used that can generate fairly optimized glsl code to calculate the OPNS. The rendering happens without texture by using the distance function directly. For the video above, that is the length of the outer product between a grade1 and grade14 element, which was generated in glsl as :
+```
+float dist (in float z, in float y, in float x) {
+   float res;
+   res=-(.5*x*x-.5)*b[11];
+   res+=(.5*y*y-.5)*b[10];
+   res-=(.5*z*z-.5)*b[9];
+   res+=x*y*b[8];
+   res-=x*z*b[7];
+   res+=y*z*b[6];
+   res-=(.5*x*x+.5)*b[5];
+   res+=(.5*y*y+.5)*b[4];
+   res-=(.5*z*z+.5)*b[3];
+   res+=x*y*b[2];
+   res-=x*z*b[1];
+   res+=y*z*b[0];
+   return res;
+}
+```
+In this case b contains the grade14 part of the quadric to be displayed.
+Compared to the results of the distance field earlier, this version will suffer very few if any artefacts from sampling (as its effectively an 'infinite' resolution distance field). As an extra bonus, this is faster than the distance field version.
+Further investigation is needed to examine feasibility of rendering (much bigger) grade13 elements using the same technique.
+tbc ..
+vincentnozick commented on Oct 17, 2018
+vincentnozick
+on Oct 17, 2018 via email
+Last edited by enkimute
+More actions
+Indeed, this is an interesting way to proceed.
+Vincent
+vincentnozick commented on Oct 17, 2018
+vincentnozick
+on Oct 17, 2018 via email
+Last edited by enkimute
+More actions
+That is impressive.
+By the way, during our expérimentation about quadric intersections, we had some numerical issues.
+Do you face similar problems to intersect quadrics of different nature (like intersecting a cone and an ellipsoid)?
+Best regards,
+-Vincent
+enkimute commented on Oct 17, 2018
+enkimute
+on Oct 17, 2018
+OwnerAuthor
+More actions
+Hi Vincent,
+I'm still experimenting - in the CPU version I've been using 64bit floating point, and no issues there .. now on the GPU it could very well be a different story..
+Will let you know :)
+enkimute commented on Oct 17, 2018
+enkimute
+on Oct 17, 2018
+OwnerAuthor
+More actions
+After a minor bugfix on the glsl generator, it seems that Grade13 elements (with 105 coefficients) are no problem either .. (at least not on my GTX1080).
+Here's the video :
+http://jr.enki.ws/qcga_grade13_realtime.mp4
+quality and speed are pretty good. no precalculations are needed.
+enkimute commented on Oct 17, 2018
+enkimute
+on Oct 17, 2018
+OwnerAuthor
+More actions
+And here's the full monty - realtime morphing quadric surfaces and their intersections ..
+http://jr.enki.ws/qcga_full_monty.mp4
+That wraps up my prototyping phase .. moving on ..
+enkimute commented on Oct 18, 2018
+enkimute
+on Oct 18, 2018
+OwnerAuthor
+More actions
+One more .. after bugfixes and optimizations ..
+http://jr.enki.ws/qcga_full_monty2.mp4
+vincentnozick commented on Oct 18, 2018
+vincentnozick
+on Oct 18, 2018 via email
+Last edited by enkimute
+More actions
+cool !
+enkimute commented on Oct 20, 2018
+enkimute
+on Oct 20, 2018
+OwnerAuthor
+More actions
+The initial algebra-independent OPNS viz has been added to the repo, the QCGA example was updated here :
+https://enkimute.github.io/ganja.js/examples/coffeeshop.html#qcga3d_points_and_more
+Closing this issue.
+enkimute
+closed this as completedon Oct 20, 2018
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+enkimute
+Labels
+enhancement
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

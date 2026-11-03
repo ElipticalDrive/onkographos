@@ -1,0 +1,1180 @@
+Fast N-dimensional interpolation package for Julia - (feat): first-class GriddedQuery tensor-product queries by mgyoo86 · Pull Request #184 · ProjectTorreyPines/FastInterpolations.jl
+
+(feat): first-class GriddedQuery tensor-product queries by mgyoo86 · Pull Request #184 · ProjectTorreyPines/FastInterpolations.jl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+mgyoo86
+commented
+Jul 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Summary
+Adds GriddedQuery, a rectilinear tensor-product query container for ND interpolation. Resize-style calls can now evaluate M1 x M2 x ... x MN query axes directly into shaped output instead of expanding the query grid into a point-wise batch. This is the natural API for image resize, resampling a coarse field onto a denser grid, or sampling a surface/volume on a regular output lattice.
+The fast path covers the main separable families: linear, constant, local Hermite (pchip / akima / cardinal), and cubic/quadratic partial-based interpolation. Persistent interpolants and one-shot calls both route through the GriddedQuery path when a supported method tuple is present; unsupported mixes still fall back to the generic point-wise batch path.
+API quick start
+Mental model:
+(xqs, yqs) is a pairwise ND batch: (xqs[i], yqs[i]) -> Vector
+GriddedQuery(xq, yq) is a tensor-product batch: every (x, y) pair -> Matrix
+```
+using FastInterpolations
+
+x = 1:10
+y = 1:20
+data = [sin(xi) + cos(yi) for xi in x, yi in y]
+
+itp = linear_interp((x, y), data)
+
+# Before: scalar-call nested loops re-search every axis at every output point.
+naive = [itp((xq, yq)) for xq in 1:10, yq in [5, 6, 7]]
+
+# Now: resolve each query axis once and reuse it across the tensor-product grid
+# (the same shape as image resize / coarse-to-fine resampling).
+gridded_query = GriddedQuery(1:10, [5, 6, 7])   # Range axis + Vector axis
+
+vals = itp(gridded_query)                       # size(vals) == (10, 3)
+isapprox(vals, naive)                           # same values, much less work
+```
+Printed in the REPL:
+```
+julia> gridded_query
+GriddedQuery{Int64, 2}
+└─ Axes: 2D, 10×3 points
+   ├─ x₁: Range, 10 pts ∈ [1, 10]
+   └─ x₂: Vector, 3 pts ∈ [5, 7]
+```
+Allocating and in-place one-shot:
+```
+one_shot_vals = linear_interp((x, y), data, gridded_query)
+isapprox(one_shot_vals, vals)
+
+out = similar(vals)
+linear_interp!(out, (x, y), data, gridded_query)
+
+# Persistent interpolants use the same shaped query.
+itp(out, gridded_query)
+
+# Method-selected one-shot calls use the unified API.
+interp((x, y), data, gridded_query; method = CubicInterp(), extrap = ClampExtrap())
+interp!(out, (x, y), data, gridded_query; method = CubicInterp(), extrap = ClampExtrap())
+```
+The in-place output is intentionally shaped: for N > 1, pass an N-D array with size(out) == size(gridded_query). A flat vector is not reshaped automatically.
+Changes
+Public GriddedQuery API, query-protocol integration, display support, and shaped in-place output.
+Shared _AxisAnchor-based per-axis anchor pipeline with pooled storage, hint-chained search, fused downsampling, and full-buffer strategies.
+Specialized gridded evaluators for linear, constant, Hermite, cubic, and quadratic paths, including derivative and extrapolation coverage.
+Exclusive-periodic seam handling fixed through right-tap anchors, so wrapped seam and OOB queries agree with scalar evaluation.
+One-shot GriddedQuery output is now explicitly N-dimensional. Flat vectors no longer silently reshape for N > 1.
+Follow-up correctness fixes from the premerge list: quadratic N = 1 coeff forwarding, generic SoA output-type promotion pins, Wrap/NoExtrap gridded coverage, and stale docstring cleanup.
+CI benchmark group 15_gridded_query adds small regression sentinels for linear persistent/one-shot 2D and 3D, plus cubic persistent/one-shot 2D.
+Benchmark
+Local BenchmarkTools min on Apple M1 Pro, persistent interpolants, allocating output in both cases. Source grid is 64 x 64; query is GriddedQuery(range(..., 128), range(..., 96)), i.e. 12,288 output points. The naive baseline is the equivalent scalar comprehension:
+```
+naive = [itp((xq, yq)) for xq in xq_axis, yq in yq_axis]
+gq = GriddedQuery(xq_axis, yq_axis)
+fast = itp(gq)
+```
+method
+naive scalar loop
+GriddedQuery
+speedup
+alloc naive
+alloc GQ
+Constant
+40 us
+6.15 us
+6.2x
+96.1 KiB
+96.1 KiB
+Linear
+60 us
+6.95 us
+8.9x
+96.1 KiB
+96.1 KiB
+Quadratic
+100 us
+29.96 us
+3.3x
+96.1 KiB
+96.1 KiB
+Cubic
+140 us
+42.33 us
+3.4x
+96.1 KiB
+96.1 KiB
+PCHIP
+810 us
+100.46 us
+8.1x
+96.1 KiB
+96.1 KiB
+Cardinal
+590 us
+41.38 us
+14.3x
+96.1 KiB
+96.1 KiB
+Akima
+980 us
+104.96 us
+9.3x
+96.1 KiB
+96.1 KiB
+The allocation is intentionally the same in this table: both forms allocate the returned 128 x 96 matrix. The win is that GriddedQuery resolves each query axis once and reuses those anchors across the tensor-product output instead of doing a full scalar locate/kernel call per pixel.
+mgyoo86
+added 30 commits
+July 6, 2026 15:26
+feat(gridded): GriddedQuery scaffold - separable 2D linear evaluation
+…
+f66aa69
+```
+Validated 2D-linear separable path: per-axis (idx, alpha) anchors resolved
+once via _anchor_loc/_alpha_of, two passes reusing _linear_value_blend.
+Machine-eps vs point-wise; 0.80-1.04x vs hand-rolled separable baseline.
+```
+feat(gridded): op-aware _LinearAnchor axis-anchor primitive
+…
+b280e75
+```
+_LinearAnchor{T, Op, P}: public idx + Op-selected NamedTuple payload with
+Val-dispatch virtual properties (house convention), matched _eval_anchor
+kernel pair, _axis_anchor builder. Forwarder pin test asserts codegen
+equality with a native-field twin (br/select/line counts).
+
+test/Project.toml: add InteractiveUtils (needed by the forwarder pin
+test's code_llvm introspection).
+```
+refactor(gridded): _AxisAnchorBatch plan; executor consumes _eval_anchor
+…
+1fdbf4f
+```
+Batch builder resolves each axis once into an AoS anchor plan with an
+identity flag (pass-elision hook). Output eltype pinned to point-wise
+promotion incl. mixed target eltypes. Correctness matrix: {F64,F32} x
+{Clamp,Extend} x {up,down,mixed,OOB,non-monotonic,M==1} + per-axis mixed
+extraps.
+```
+feat(gridded): two-pass executor with cost-model pass order
+…
+600678b
+```
+Blend/gather pass kernels extracted as pool-agnostic pure functions; runtime
+argmin over the two order costs (measured seeds c_blend=0.2, c_gather=0.65
+ns/elem) picks dim2-first (n1xN mid) vs dim1-first (Mxn2 mid). Forced-order
+test pins mathematical equivalence of both orders.
+```
+feat(gridded): NoExtrap plan-build validation + Wrap/Fill guards
+…
+d4652fa
+```
+NoExtrap OOB throws DomainError naming the axis before any large buffer is
+touched; Wrap/Fill rejected with an explicit ArgumentError at dispatch
+(seam-aware anchors / OOB masks are roadmap items).
+```
+feat(gridded): in-place API with pooled intermediate
+…
+60430f1
+```
+_gridded_linear_2d! writes into a user matrix (FI output-first convention);
+the pass intermediate comes from AdaptiveArrayPools so repeated calls have no
+O(MxN) allocation. DimensionMismatch on size, early return on empty axes,
+single-quantization mid eltype.
+```
+perf(gridded): exact-node column memcpy + identity pass elision
+…
+2897e55
+```
+alpha in {0,1} blend columns degrade to copyto! (endpoint-exact kernel makes
+this bit-equal); identity axis plans skip their pass entirely - one-axis
+resizes run single-pass with no intermediate, double identity is a copy.
+A/B verdict on the exact-node-heavy shape (512x512 data, 300x257 query,
+255 exact-node hits on axis 2): WITH column-copy 64.2 us vs WITHOUT 69.4 us
+(~7-8% faster, 3 repeats stable each side) - KEEP.
+```
+bench(gridded): matrix benchmark + pass-order model calibration
+…
+046098a
+```
+F64/F32 x {down,up,strong-up,mild-up,mixed} with forced-order A/B; verifies
+the cost model picks the measured winner (or within 10% noise) on every
+case. Calibrated c_blend/c_gather seeds recorded: F64 c_blend 0.15-0.25,
+c_gather 0.44-0.47; F32 c_blend 0.08-0.13, c_gather 0.44-0.46 (existing
+_GRIDDED_C_BLEND=0.2 / _GRIDDED_C_GATHER=0.65 already pick correctly in
+every case; left unchanged).
+```
+fix(gridded): keep bench BenchmarkTools-free so Aqua stale-deps stays…
+…
+0875665
+```
+… green
+
+Task 8 added BenchmarkTools to the ROOT Project.toml [deps]/[compat] so
+bench_gridded.jl's calibration section could use @belapsed. That makes
+BenchmarkTools a hard runtime dependency of the shipped package (every
+downstream Pkg.add installs it) even though src/ never imports it, and
+an unused [deps] entry fails test/test_aqua.jl's default stale-deps
+check.
+
+Revert both Project.toml additions and switch the calibration section
+to the file's own manual `best(f, reps)` timing helper (already used by
+the original 4-case table) instead of @belapsed. Timing mechanism only
+changes; MODEL OK/MISPICK logic, 10% agree-tolerance, and printed
+output are unchanged. Also fixes the stale top-of-file comment that no
+longer matched the (contradicted, now restored) BenchmarkTools-free
+design.
+```
+fix(gridded): validate before output alloc; proportional alloc bound;…
+…
+c23aafb
+```
+… branch+bit-exact tests
+
+- Split _gridded_linear_2d! into _gridded_plans (builds+validates axis
+  anchors, owned Vectors, outside the pool scope) and _gridded_apply!
+  (pool-scoped core that only consumes already-built plans). Both the
+  allocating and in-place functors now build+validate plans BEFORE
+  allocating/touching the O(M·N) output, so a NoExtrap OOB DomainError
+  fires before any large buffer is acquired.
+- Replaced the byte-exact zero-alloc test bound (3515 B, one machine's
+  measurement) with a proportional bound (4*(M+N)*16 + 1024) that tracks
+  the true O(M+N) plan cost and stays far below the O(M·N) intermediate
+  it must exclude.
+- Added a test for the p2.identity-only elision branch (axis-2 ≡ full
+  grid, axis-1 resampled), the mirror of the existing p1.identity case.
+- Tightened the exact-node-column and axis-1-identity comparisons to
+  strict == (both survive at full precision through the endpoint-exact
+  kernel); added a light allocation assertion on the NoExtrap throwing
+  path to pin the no-large-alloc structural guarantee.
+```
+refac(gridded): fused-anchor public default + explicit strategy entries
+…
+9f48ba7
+```
+- fused kernel: replace the same-cell run-scan with a branch-free plain
+  loop — bit-identical, 26-61% faster at every ratio; fused now wins all
+  pure downsampling and stays within 3x at strong upsampling
+- public GriddedQuery path evaluates via the fused strategy; two-pass
+  full-buffer takes an explicit dim2_first fold order (auto cost models
+  removed from src; benches carry their own choosers)
+- rename _AxisAnchorBatch -> _AxisPlan; length-gate the identity
+  accumulation (plan-build overhead +27% -> +1.3% on range grids);
+  _anchor_scalar_type accessor replaces positional A.parameters access
+- split experimental candidates (lazy Range plan, sliding-window cores,
+  plan-agnostic fused fallback) into gridded_experimental.jl with
+  measured verdicts in the header; drop dead non-pooled _gridded_plans
+```
+refac(gridded): flatten the call chain onto pooled strategy entries
+…
+09147db
+```
+- drop _gridded_apply! (body was identical to _gridded_apply_fused_pooled!);
+  the in-place functor calls the pooled entry directly
+- _gridded_eval stays as the one documented exception: plans (and NoExtrap
+  validation) must be built before the O(M*N) output allocation, inside the
+  same pool scope
+```
+refac(gridded): canonical two-strategy core (fused + full buffer)
+…
+be5257e
+```
+Collapse the gridded path onto the one idea it adds — per-axis O(M+N)
+anchors reused across O(M*N) outputs — consumed by exactly two strategies
+picked per call: fused (pure downsampling) and two-pass full buffer
+(otherwise, fold order from measured pass costs).
+
+* plain _GriddedAnchor{T} (idx + alpha) replaces the op-payload anchor,
+  Val-dispatch forwarder, and _AxisPlan layering; extrap folding (Clamp
+  clamp / Extend raw / NoExtrap pre-alloc throw) is inlined in the builder
+* identity elision and exact-node copy branches removed: the convex blend
+  is endpoint-exact, so node hits stay bit-identical to point-wise eval
+  (pinned by test); inert @simd annotation dropped (loop is ILP-bound)
+* experimental candidates (lazy Range plan, sliding window) deleted with
+  their file; single src/gridded/gridded_query.jl remains
+
+A/B vs 09147db (512x384 sweep): down2/down4/up2/mixed all within noise
+(0.746/0.939/0.372/0.584 ns/out), warm allocs 0 on every path; only the
+removed node-identity elision case regresses by design.
+```
+refac(gridded): generalize the fused kernel over N dims via @generated
+…
+ef8ed4c
+```
+Replace the hand-written 2D fused loop with an N-generic generated kernel
+consuming NTuple{N, Vector{_GriddedAnchor}}: loop d loads axis-d's anchor
+at its own nesting level (the 2D hoisting, automated), and the corner
+collapse emits the same blend tree the 2D code spelled out — axis-d blend
+wrapping the two axis-d corners, (2^N - 1) blends per output. The
+expression builder is a plain function defined before the generator; the
+generator body only assembles expressions.
+
+Same-process A/B vs the verbatim old 2D loop: bit-identical outputs and
+1.000-1.010x runtime at every ratio (down2 0.726 vs 0.726 ns/out); public
+down2 path unchanged at 0.744 ns/out, warm allocs 0. New 3D/4D kernel
+tests pin correctness against point-wise eval (Clamp/Extend incl. OOB).
+```
+feat(gridded): per-axis deriv ops + full extrap coverage (Wrap/Fill)
+…
+2757484
+```
+Swap the per-axis combine from the value blend to the shared 1D kernel
+_linear_kernel(op, yL, yR, inv_h, alpha) — the same collapse point-wise ND
+eval uses — so per-axis derivative ops fall out of the existing structure:
+
+* _GriddedAnchor gains inv_h (16 -> 24 B; geometry now computed with the
+  same _get_inv_h/_alpha_of arithmetic as point-wise _locate_cell)
+* public entries take deriv (single op or per-axis tuple, resolved by
+  _resolve_deriv_nd exactly like the scalar ND callable)
+* WrapExtrap: the anchor build folds coordinates via _anchor_loc's wrap
+  path (shared _wrap_to_domain); closed-domain endpoint contract holds
+* FillExtrap: anchors clamp like Clamp for safe geometry, then a
+  _gridded_fill_oob! post-pass overwrites OOB slabs mirroring the
+  point-wise _try_fill_oob contract (first Fill axis's value for
+  EvalValue, carrier zero for any deriv op); unsupported-extrap gate
+  deleted — every extrap is now handled
+
+Pinned vs point-wise in new tests: deriv combinations on 2D public path
+(Clamp/Extend, vector grids) and 3D kernel, Wrap 2D/3D incl. mixed
+per-axis, Fill NaN/numeric/deriv/mixed. EvalValue perf unchanged
+(0.750/0.939/0.614/0.372/0.584 ns/out on the fixed sweep, allocs 0).
+```
+refac(gridded): retire the 2D-only path — single N-D gridded pipeline
+…
+1d2c6b9
+```
+The whole pipeline is now generated/generic over N; the 2D-specialized
+code (blend_dim2/gather_dim1 passes, two-order fullbuffer, 2D apply/fill/
+entries/functors) is deleted, subsumed by:
+
+* _gridded_pass! — one generated single-axis pass (axis D anchored,
+  axis 1 innermost): Val(2) reproduces the old contiguous blend, Val(1)
+  the old adjacent-pair gather, same arithmetic
+* N-pass fullbuffer with pass order from an adjacent-exchange cost
+  comparator (gather ~0.65, contiguous ~0.2 ns/elem) that reduces
+  EXACTLY to the old dim2-first model at N = 2; intermediates pooled,
+  each pass a function barrier
+* strategy branch all(M_d < n_d) -> fused, else fullbuffer
+* fill post-pass via selectdim slabs; entries/functors take any N
+
+2D behavior and perf unchanged (0.753/0.960/0.629/0.372/0.568 ns/out on
+the fixed sweep, within run-to-run noise; node bit-exactness tests still
+pass). 3D public path now live: 1.25/0.62/0.88 ns/out (down2/up1.5/
+mixed), 5.3-10.5x over point-wise, warm allocs 0 everywhere.
+```
+style(gridded): descriptive argument names in the gridded pipeline
+…
+08bae7a
+```
+g/t/ex -> grid/targets/extrap in the anchor builders, ts -> targets in
+entries and functors, nsz/msz/sz -> src_size/out_size/cur_size in the
+full-buffer core, fv/zref -> fill_value/data_sample in the fill pass.
+No behavior change; tests unchanged and green.
+```
+test(gridded): pin dense sub-window (zoom) queries in the correctness…
+…
+7db4fe5
+```
+… matrix
+```
+feat(gridded): call-time InBounds extrap override on GriddedQuery
+…
+01d2a78
+```
+Add the extrap kwarg (single InBounds broadcast or per-axis tuple,
+resolved by _resolve_extrap_override_nd — same contract as point-wise ND
+eval, non-InBounds modes rejected). An InBounds axis skips the domain
+classification in the anchor build and takes the lean search directly;
+in-domain anchors are bit-identical to the default path's (pinned by
+test). The resolved extrap tuple threads through anchor build and the
+fill post-pass.
+
+Measured anchor-build saving: -42..-51% on range grids (1.5 -> 0.75
+ns/anchor; classification was half the build), -8..-15% on Vector grids
+(binary search dominates). Build share of a full call is 0.02-2% at
+normal sizes, up to 32% for tiny outputs on Vector grids — the override's
+target regime.
+```
+perf(gridded): hint-chained anchor build for clustered targets
+…
+2d9df27
+```
+On search-based (Vector) grids, when the mean consecutive-target stride
+is within 4 average cells, the anchor build chains a LinearBinarySearch
+hint (walk window 8) so each search starts at the previous anchor's
+interval. Range grids keep the O(1) direct arm; sparse targets keep
+plain binary. The searcher union splits at an @inline loop call — the
+inlining is load-bearing: it keeps the fresh RefHint inside the caller's
+compiled unit so escape analysis elides the Ref(1) heap allocation
+(same mechanism as _ensure_hint_nd on the scalar ND path); warm allocs
+stay 0 on every path.
+
+The threshold is measured, not guessed (n=2048 Vector grid, sorted
+targets): hinted/binary = 6.9x at 0.25-cell stride, 4.3x at 2, 1.2x at
+6, and LOSES at 8 (walk exhaust + binary fallback) — 4 leaves margin
+for non-uniform cells. This targets exactly the M < n but CLUSTERED
+regime (zoom) that a size-ratio condition would miss: 256 targets in a
+10-cell window build at 2.2 ns/anchor vs 11 binary (~5x); sparse
+full-span stays binary; range-grid sweep unchanged.
+```
+perf(gridded): restrict multi-pass work to downstream tap hulls
+…
+4eda342
+```
+Each full-buffer pass now bounds its pass-through axes to the tap hull
+of the not-yet-resolved axes' anchors — slabs no downstream pass will
+read are never computed. A pure loop-bounds tightening of the existing
+strategy (identical arithmetic on computed entries, pinned bit-equal by
+test), unlike the retired sliding-window candidate which was a separate
+execution scheme.
+
+The hull comes from the query coordinates, not an anchor scan: separate
+minimum/maximum over the raw targets (SIMD, ~0.15 ns/elem; Base.extrema
+is ~34x slower and was end-to-end visible) mapped through two locates —
+valid because coordinate -> interval index is monotone for every
+non-wrapping extrap; Wrap keeps the full axis. Computed only on the
+full-buffer branch, so fused calls pay nothing.
+
+The pass call goes through a generated if-chain on the runtime axis id
+(_gridded_pass_dim!): N static call sites instead of one dynamic Val(d)
+dispatch, so the isbits ranges tuple crosses in registers (the dynamic
+form boxed it, 96 B/call) and the pass order tuple needs no pool buffer
+— the full-buffer core now touches the pool for intermediates only.
+Warm allocs stay 0 everywhere.
+
+Measured (512x384 -> 1024x768 fullbuffer): zoom 10x5 cells 2.65x,
+50x40 2.28x, half domain 1.44x, full domain 1.00x (no regression);
+3D zoom-up public path 0.620 -> 0.163 ns/out (3.8x), allocs 0.
+```
+feat(gridded): one-shot linear_interp(grids, data, gq::GriddedQuery)
+…
+f0da616
+```
+Add a one-shot rectilinear-resize API that evaluates an N-D linear
+interpolant at every GriddedQuery axis combination without keeping a
+persistent interpolant alive.
+
+Decouple the gridded eval from LinearInterpolantND: _gridded_apply!,
+_gridded_fill_oob!, and _gridded_eval/! now take (grids, data) as a
+plain pair, and the persistent functor forwards itp.grids/itp.data
+(path and performance unchanged). The one-shot front resolves raw grids
+to the value-matched Tg in a pool-backed _CachedVector/_CachedRange
+(_cache_axis_pooled), released at call scope, so the gridded machinery
+sees exactly the axis type the persistent path feeds it and Vector grids
+pay no permanent cache allocation.
+
+Warm one-shot is zero-allocation apart from the output for every grid
+type (Range, Vector, OneTo) and bit-identical to the persistent functor.
+Scoped to NoExtrap/Clamp/Fill/Extend; WrapExtrap/periodic is reached by
+building the interpolant explicitly.
+```
+feat(gridded): show method for GriddedQuery
+…
+ebabdff
+```
+Display dimensionality, per-axis grid kind (Range/Vector), point count,
+and sampled [min, max] extent — mirroring the ND interpolant tree.
+min/max (not first/last) so an unsorted query axis reports its region
+honestly; empty axes render without throwing.
+```
+refactor(domain): canonical axis-named NoExtrap DomainError
+…
+0d1b283
+```
+GriddedQuery threw an ad-hoc message without the domain bounds; route it
+through the shared _throw_domain_error so it reads like the scalar/ND
+path and reports the physical [lo, hi]. Add an optional axis index to
+_throw_domain_error (0 = axis-agnostic, 1D unchanged) and thread it
+through _validate_nd_domain via a thin _check_domain_axis wrapper, so ND
+scalar and batch NoExtrap OOB now name the offending axis too:
+
+  query point on axis 2 outside interpolation domain [10.0, 20.0]
+
+The wrapper forwards the index only to the NoExtrap thrower; every other
+mode ignores it, so the 45 existing _check_domain call sites and the hot
+promotion path are untouched (no allocation change).
+```
+feat(gridded): route unified interp/interp! for GriddedQuery
+…
+cd93fbd
+```
+interp(grids, data, gq; method=LinearInterp()) previously fell through to
+the batch-query method and failed in _query_eltype (GriddedQuery is not a
+Real-vector container). Add GriddedQuery methods for the unified interp/
+interp!: accept the query only when every axis method is LinearInterp
+(the gridded evaluator is linear-only today), forward per-axis bc from
+the methods, and reject any non-linear method with a clear ArgumentError.
+
+Placed in gridded_query.jl, not hetero/, because GriddedQuery is defined
+after hetero.jl is included whereas interp itself already exists there.
+```
+Revert "feat(gridded): route unified interp/interp! for GriddedQuery"
+…
+52e614a
+```
+This reverts commit cd93fbd.
+```
+feat(gridded): GriddedQuery as a first-class batch query container
+…
+f518d2c
+```
+Make GriddedQuery flow through the existing generic interp path instead
+of a bespoke dispatch: it implements the ND query protocol — _query_length
+(product of axis lengths), _query_extract (column-major unravel to an
+N-tuple), _query_eltype (promoted axis eltype) — plus a new _query_size
+protocol hook (default (_query_length,), a flat vector) that a shaped
+container overrides. So interp(grids, data, gq; method=...) works for
+EVERY method (cubic, constant, mixed, ...) via pointwise batch and returns
+the N-D size(gq) array the GriddedQuery contract promises; ordinary SoA/
+AoS batches keep their flat vector.
+
+interp! accepts any AbstractArray output and, for a shaped query, writes it
+through a flat alias view. A GriddedQuery on an all-LinearInterp method has
+a separable evaluator, so _try_gridded_separable! (dispatched, run before
+flattening) routes it to the gridded one-shot — per-axis anchors resolved
+once, 3-9x faster than pointwise — while every other query/method falls
+through; the hook writes the N-D output directly, so the fast path stays
+zero-allocation.
+
+Build the fullbuffer per-axis hull tuple with a @generated helper
+(_gridded_hulls) instead of an ntuple closure: the closure boxed a
+heterogeneous targets tuple (e.g. a UnitRange{Int} query axis beside a
+Vector), costing 3 allocs/call on that combination.
+
+Tests: protocol methods + column-major extract; interp routing for all
+method families; @which proof that GriddedQuery+linear resolves to the
+separable arm; fused and fullbuffer strategies both allocation-free
+including raw Int axes.
+```
+Refactor GriddedQuery dispatch
+4569cbe
+Add fused GriddedQuery path for partials
+7a780e8
+Fix colorant flat extrapolation inference
+f594af9
+mgyoo86
+added 7 commits
+July 8, 2026 14:17
+Fix exclusive periodic GriddedQuery anchors
+396dab2
+Tighten GriddedQuery one-shot output shape
+4f8c2d0
+Fix quadratic N=1 coeffs forwarding
+e19dd30
+Add tests for persistent and one-shot zero-alloc behavior in cubic/qu…
+…
+a9adaab
+```
+…adratic interpolation
+```
+Implement code changes to enhance functionality and improve performance
+39b7149
+Add GriddedQuery benchmarks for linear and cubic interpolation methods
+a965e9a
+Add GriddedQuery documentation and examples for tensor-product ND que…
+…
+86462c8
+```
+…ries
+```
+mgyoo86
+requested a review
+from Copilot
+July 9, 2026 18:13
+Copilot started reviewing on behalf of
+mgyoo86
+July 9, 2026 18:13
+View session
+Copilot
+AI
+reviewed
+Jul 9, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Adds first-class GriddedQuery support for rectilinear (tensor-product) ND interpolation queries, enabling efficient resize-style evaluation (and shaped in-place output) by resolving per-axis anchors once and reusing them across the full output lattice.
+Changes:
+Introduces the public GriddedQuery type plus query-protocol integration and REPL display support.
+Adds separable gridded fast paths (linear/constant/local-Hermite/cubic/quadratic) and a unified persistent itp(gq) / itp(out, gq) callable that returns size(gq)-shaped output.
+Expands test/benchmark coverage for correctness, allocation behavior, periodic seams, output type promotion, and error messaging.
+Reviewed changes
+Copilot reviewed 35 out of 35 changed files in this pull request and generated 1 comment.
+Show a summary per file
+File
+Description
+test/test_show.jl
+Adds show/REPL formatting tests for GriddedQuery.
+test/test_nd_quadratic.jl
+Adds regression test for N=1 quadratic ND collapse behavior across coeff strategies.
+test/test_nd_output_type_promotion.jl
+Pins output eltype behavior for ND constant vs linear batch results.
+test/test_nd_noextrap_oob.jl
+Adds tests for canonical axis-named NoExtrap OOB DomainError messages.
+test/test_linear_blend_componentwise.jl
+Adds inference/type-parity tests for colorant interpolation across scalar/ND/GQ paths.
+test/test_gridded_query.jl
+New comprehensive correctness/alloc/routing tests for GriddedQuery fast paths.
+test/test_anchor_common.jl
+Adds regression test for exclusive-periodic seam handling in anchor location.
+test/Project.toml
+Adds InteractiveUtils to support which usage in tests.
+src/quadratic/nd/quadratic_nd_interpolant.jl
+Adjusts N=1 quadratic ND entry to accept coeff strategy kw without breaking forwarding.
+src/linear/linear_anchor.jl
+Uses idxR from _anchor_loc to preserve exclusive-periodic seam pairs.
+src/hetero/hetero_oneshot.jl
+Refactors batch interp!/interp to support shaped outputs and a gridded fast-path hook.
+src/hetero/hetero_nointerp.jl
+Switches method-tuple normalization to _method_tuple.
+src/hetero/hetero_interpolant.jl
+Switches method-tuple normalization to _method_tuple.
+src/gridded/gridded_query.jl
+New core implementation of GriddedQuery + linear gridded evaluation and interp! hook for shaped output.
+src/gridded/gridded_partials.jl
+New fused-anchor gridded evaluation for cubic/quadratic partials-based methods.
+src/gridded/gridded_hermite.jl
+New separable fullbuffer gridded evaluation for local Hermite (PCHIP/Cardinal/Akima).
+src/gridded/gridded_dispatch.jl
+New unified persistent itp(gq) / itp(out,gq) entry for all ND interpolants.
+src/gridded/gridded_constant.jl
+New fused gather-only gridded evaluation for constant interpolation.
+src/gridded/axis_anchor.jl
+New shared _AxisAnchor backbone for per-axis anchor building across gridded families.
+src/FastInterpolations.jl
+Wires new gridded modules into the package and exports GriddedQuery.
+src/cubic/cubic_oneshot_series.jl
+Updates comments to reflect new seam-aware anchor behavior expectations.
+src/cubic/cubic_anchor.jl
+Uses idxR from _anchor_loc to preserve exclusive-periodic seam pairs.
+src/core/utils.jl
+Extends domain error helpers to optionally include axis index in messages.
+src/core/show.jl
+Adds show/show(::MIME"text/plain") support for GriddedQuery.
+src/core/query_protocol.jl
+Adds _query_size protocol + threads axis index into NoExtrap domain validation.
+src/core/interpolant_protocol.jl
+Factors shared point-wise batch core for reuse by GriddedQuery fallback.
+src/core/interp_method_types.jl
+Adds _method_tuple helper to normalize scalar vs per-axis method tuples.
+src/core/anchor_common.jl
+Extends _AnchorLoc to carry idxR for exclusive-periodic seam correctness.
+src/constant/constant_anchor.jl
+Uses idxR from _anchor_loc to preserve exclusive-periodic seam pairs.
+ext/FastInterpolationsColorVectorSpaceExt.jl
+Adds extrap-result promotion helpers to keep widened colorant types consistent on OOB shortcuts.
+docs/src/nd/overview.md
+Documents GriddedQuery as an ND query mode and clarifies scalar call forms.
+docs/src/guides/performance_tips.md
+Adds performance guidance for using GriddedQuery for tensor-product ND workloads.
+docs/src/api/types.md
+Documents GriddedQuery in the public API type listing.
+benchmark/ci_benchmark.jl
+Adds CI benchmark group 15_gridded_query for persistent/one-shot shaped evaluation.
+bench_gridded.jl
+Adds a standalone benchmarking script comparing gridded vs hand-rolled vs point-wise tensor evaluation.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+src/hetero/hetero_oneshot.jl
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+codecov
+Bot
+commented
+Jul 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codecov Report
+❌ Patch coverage is 97.00315% with 19 lines in your changes missing coverage. Please review.
+✅ Project coverage is 96.45%. Comparing base (8f3c066) to head (ffff3ef).
+Files with missing lines
+Patch %
+Lines
+src/gridded/gridded_query.jl
+96.22%
+8 Missing ⚠️
+src/gridded/gridded_dispatch.jl
+87.09%
+4 Missing ⚠️
+src/gridded/gridded_constant.jl
+95.83%
+2 Missing ⚠️
+src/gridded/gridded_hermite.jl
+97.22%
+2 Missing ⚠️
+src/gridded/gridded_partials.jl
+97.87%
+2 Missing ⚠️
+src/gridded/axis_anchor.jl
+98.46%
+1 Missing ⚠️
+Additional details and impacted files
+```
+@@            Coverage Diff             @@
+##           master     #184      +/-   ##
+==========================================
++ Coverage   96.43%   96.45%   +0.02%     
+==========================================
+  Files         151      157       +6     
+  Lines       12905    13502     +597     
+==========================================
++ Hits        12445    13024     +579     
+- Misses        460      478      +18     
+```
+Files with missing lines
+Coverage Δ
+ext/FastInterpolationsColorVectorSpaceExt.jl
+100.00% <100.00%> (ø)
+src/FastInterpolations.jl
+100.00% <ø> (ø)
+src/constant/constant_anchor.jl
+98.55% <100.00%> (ø)
+src/core/anchor_common.jl
+100.00% <100.00%> (ø)
+src/core/interp_method_types.jl
+100.00% <100.00%> (ø)
+src/core/interpolant_protocol.jl
+100.00% <100.00%> (ø)
+src/core/query_protocol.jl
+95.71% <100.00%> (+0.06%)
+⬆️
+src/core/show.jl
+96.87% <100.00%> (+0.16%)
+⬆️
+src/core/utils.jl
+89.75% <100.00%> (+0.93%)
+⬆️
+src/cubic/cubic_anchor.jl
+97.82% <100.00%> (ø)
+... and 12 more
+🚀 New features to boost your workflow:
+❄️ Test Analytics: Detect flaky tests, report on failures, and find test suite problems.
+github-actions
+Bot
+commented
+Jul 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+FastInterpolations.jl Benchmarks
+🚨 Regression baseline is a different CPU
+CPU
+This PR run
+`znver3
+Master baseline (latest commit)
+`icelake-server
+The Previous / Imm. Ratio / Grad. Ratio columns compare against master history, but master's most recent commit was benchmarked on a different CPU — so a naive comparison is cross-CPU and unreliable. The ratios below use only same-znver3|4c history and are blank if master has none on this CPU yet.
+All benchmarks (56 total, click to expand)
+Benchmark
+Current: ffff3ef
+Previous
+Imm. Ratio
+Grad. Ratio
+10_nd_construct/bicubic_2d
+38943 ns
+38392.0 ns
+1.014
+1.051
+10_nd_construct/bilinear_2d
+644.8 ns
+635.0 ns
+1.015
+1.049
+10_nd_construct/tricubic_3d
+356425 ns
+355692.0 ns
+1.002
+1.007
+10_nd_construct/trilinear_3d
+1738.26 ns
+1716.2 ns
+1.013
+1.019
+11_nd_eval/bicubic_2d_batch
+1398.6 ns
+1393.6 ns
+1.004
+1.005
+11_nd_eval/bicubic_2d_scalar
+18.03 ns
+17.7 ns
+1.017
+1.009
+11_nd_eval/bilinear_2d_scalar
+8.51 ns
+8.6 ns
+0.988
+0.985
+11_nd_eval/tricubic_3d_batch
+3241 ns
+3221.0 ns
+1.006
+0.993
+11_nd_eval/tricubic_3d_scalar
+33.96 ns
+34.1 ns
+0.997
+0.99
+11_nd_eval/trilinear_3d_scalar
+13.82 ns
+14.5 ns
+0.952
+0.988
+12_cubic_eval_gridquery/range_random
+4226.68 ns
+4223.7 ns
+1.001
+1.026
+12_cubic_eval_gridquery/range_sorted
+4218.08 ns
+4218.4 ns
+1.0
+1.0
+12_cubic_eval_gridquery/vec_random
+9307.76 ns
+9333.2 ns
+0.997
+0.999
+12_cubic_eval_gridquery/vec_sorted
+3217 ns
+3225.2 ns
+0.997
+0.998
+13_nd_oneshot_gridquery/bicubic_2d_rand_rand
+64630.6 ns
+64950.9 ns
+0.995
+1.007
+13_nd_oneshot_gridquery/bicubic_2d_sort_rand
+61588.9 ns
+61964.4 ns
+0.994
+1.011
+13_nd_oneshot_gridquery/bicubic_2d_sort_sort
+59744.6 ns
+60078.8 ns
+0.994
+1.005
+13_nd_oneshot_gridquery/bilinear_2d_rand_rand
+18015.24 ns
+17206.6 ns
+1.047
+1.061
+13_nd_oneshot_gridquery/bilinear_2d_sort_rand
+10118.1 ns
+9975.8 ns
+1.014
+1.11
+13_nd_oneshot_gridquery/bilinear_2d_sort_sort
+5219.54 ns
+5231.1 ns
+0.998
+1.012
+14_series_oneshot_batch/constant_inplace_vec_k8_q1000_rand
+19213.9 ns
+19197.7 ns
+1.001
+1.04
+14_series_oneshot_batch/linear_inplace_vec_k8_q1000_rand
+17663.9 ns
+17711.0 ns
+0.997
+0.981
+15_gridded_query/cubic_oneshot_2d_40x32
+52988.9 ns
+- ns
+-
+-
+15_gridded_query/cubic_persistent_2d_40x32
+8574 ns
+- ns
+-
+-
+15_gridded_query/linear_oneshot_2d_40x32
+1589.98 ns
+- ns
+-
+-
+15_gridded_query/linear_oneshot_3d_12x10x8
+2065.26 ns
+- ns
+-
+-
+15_gridded_query/linear_persistent_2d_40x32
+1545.68 ns
+- ns
+-
+-
+15_gridded_query/linear_persistent_3d_12x10x8
+2126.76 ns
+- ns
+-
+-
+1_cubic_oneshot/q00001
+460.06 ns
+542.0 ns
+0.849
+0.846
+1_cubic_oneshot/q10000
+43413 ns
+43579.0 ns
+0.996
+0.997
+2_cubic_construct/g0100
+1302.84 ns
+1397.0 ns
+0.933
+0.931
+2_cubic_construct/g1000
+12622.6 ns
+12878.9 ns
+0.98
+0.997
+3_cubic_eval/q00001
+20.13 ns
+20.0 ns
+1.005
+1.003
+3_cubic_eval/q00100
+443.62 ns
+443.8 ns
+1.0
+1.031
+3_cubic_eval/q10000
+42627.5 ns
+42634.3 ns
+1.0
+1.026
+4_linear_oneshot/q00001
+26.74 ns
+26.3 ns
+1.015
+0.996
+4_linear_oneshot/q10000
+18458.4 ns
+18460.4 ns
+1.0
+1.002
+5_linear_construct/g0100
+35.26 ns
+36.3 ns
+0.972
+1.025
+5_linear_construct/g1000
+259.29 ns
+269.6 ns
+0.962
+0.959
+6_linear_eval/q00001
+10.41 ns
+10.5 ns
+0.99
+1.0
+6_linear_eval/q00100
+194.76 ns
+194.5 ns
+1.001
+1.007
+6_linear_eval/q10000
+18186 ns
+18252.9 ns
+0.996
+1.024
+7_cubic_range/scalar_query
+8.01 ns
+8.1 ns
+0.988
+0.988
+7_cubic_vec/scalar_query
+11.02 ns
+10.7 ns
+1.029
+1.029
+8_cubic_multi/construct_s001_q100
+544.4 ns
+664.6 ns
+0.819
+0.825
+8_cubic_multi/construct_s010_q100
+4330.08 ns
+4516.8 ns
+0.959
+0.969
+8_cubic_multi/construct_s100_q100
+39598.8 ns
+39793.1 ns
+0.995
+1.018
+8_cubic_multi/eval_s001_q100
+734.56 ns
+803.5 ns
+0.914
+0.901
+8_cubic_multi/eval_s010_q100
+1702.38 ns
+1816.8 ns
+0.937
+0.948
+8_cubic_multi/eval_s010_q100_scalar_loop
+2316.32 ns
+2309.5 ns
+1.003
+0.998
+8_cubic_multi/eval_s100_q100
+11289 ns
+11538.5 ns
+0.978
+0.991
+8_cubic_multi/eval_s100_q100_scalar_loop
+3325.3 ns
+3375.3 ns
+0.985
+0.97
+9_nd_oneshot/bicubic_2d
+36745.6 ns
+46369.2 ns
+0.792
+0.807
+9_nd_oneshot/bilinear_2d
+456.04 ns
+450.8 ns
+1.012
+1.01
+9_nd_oneshot/tricubic_3d
+354152 ns
+436076.4 ns
+0.812
+0.84
+9_nd_oneshot/trilinear_3d
+908.7 ns
+913.7 ns
+0.995
+0.999
+⚠️ Performance Regression Confirmed ⚠️
+After re-running 2 flagged benchmark(s) 10 time(s), 1 regression(s) confirmed.
+Benchmark
+Current
+Previous
+Imm. Ratio
+Grad. Ratio
+Tier
+13_nd_oneshot_gridquery/bilinear_2d_sort_rand
+10118.1 ns
+9975.8 ns
+1.014
+1.11
+gradual
+Thresholds: immediate > 1.1x (vs latest master), gradual > 1.1x (vs sliding window)
+Runner: znver3|4c — AMD EPYC 7763 64-Core Processor, julia 1.12.6. Times are min-merged and compared only against this same machine's history.
+This comment was automatically generated by Benchmark workflow.
+mgyoo86
+added 11 commits
+July 9, 2026 11:28
+Add tests for regression baselines and enhance documentation for one-…
+…
+9863f64
+```
+…shot interpolation
+```
+Fix tests for interpolation results to use approximate equality
+40ca45d
+Refine isclose function to improve numerical stability in comparisons
+5d37ff0
+Refactor _anchor_loc to improve handling of out-of-bounds queries and…
+…
+7fb8d91
+```
+… streamline interval search logic
+```
+Add function to reset task local pool for benchmark isolation
+d47f3f5
+Add Basic setup snippet for test items and update testitem setups to …
+…
+91d9f21
+```
+…use Basic
+```
+Remove redundant isclose function definitions and clean up test items…
+…
+44b6f34
+```
+… for clarity
+```
+Remove redundant using FastInterpolations statements from test items …
+…
+833d163
+```
+…for clarity
+```
+Increase ULP budget for isclose comparisons in tests to account for r…
+…
+0a420a6
+```
+…ounding near clamped boundaries
+```
+Increase timeout for persistent tasks in Aqua.jl tests to 300 seconds
+1930eeb
+Refactor Basic setup snippet to use const instead of import for FastI…
+…
+ffff3ef
+```
+…nterpolations
+```
+Hide details
+View details
+mgyoo86
+merged commit 626603f
+into
+master
+Jul 9, 2026
+16 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+mgyoo86
+deleted the
+feat/gridded-query
+branch
+July 9, 2026 23:35
+mgyoo86
+referenced
+this pull request
+Jul 15, 2026
+Bump version to 0.4.16
+37768ca
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

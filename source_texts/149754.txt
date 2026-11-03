@@ -1,0 +1,214 @@
+In this article I will explore ways to make Signed Distance Fields work in my engine. We can use SDFs for efficient and beautiful 3d renderings not possible otherwise. Signed Distance Fields are basically volume textures that are assigned to a mesh or height map etc.. The idea is to sample a number of locations…
+
+Signed Distance Field Rendering Journey pt.1 – kosmonaut's blog
+Skip to content
+Posted on May 1, 2017June 12, 2017 by kosmonaut
+Hi guys,
+Disclaimer: This post is not an overview of signed distance fields, nor is it a guide on how to create them/work with them.
+I will write a more comprehensive post about the whole topic in future once I’ve “finished” the implementation.
+Note: Usually all my code is available on github, but as this is WIP I’m currently using a private local branch. You can try this stuff at a later date when it’s working and I have a basic scene setup again.
+This is more or less a documentary of my “journey” to integrate SDF into my engine.
+Signed Distance Functions
+We can design a fast ray tracing (ray marching) renderer if we do not have to step in discrete steps, but instead can rely on functions that tell us the minimum distance to all meshes from a given point.
+As said, I won’t go into more detail in this post, but for a brief overview I can highly recommend
+Ray Marching and Signed Distance Functions by Jamie Wong
+and Distance Functions by Íñigo Quílez (who is basically the go-to guy in this area and is the co-founder of Shadertoy.com)
+The issue with a lot of the stuff they do is that we are not using “real” world mesh data, but rely on creating meshes by combining primitives, so it’s not really viable for all purpose game engines.
+Signed Distance Fields
+Daniel Wright and his team at Epic presented a paper called Dynamic Occlusion with Signed Distance Fields (link to .ppt, found here) and describes in how they used distance fields to accelerate efficient world space AO and shadows. Both of these features are in Unreal Engine 4 right now, and available for any type of project, as far as I am aware. Below you can see a screenshot from their presentation.
+I should note that I have not looked at the Unreal implementation code (or even played around with it in the UE4 editor) at all, so the way I am going to do it is probably not remotely related to how the geniuses at Epic did it.
+Signed Distance Fields are basically volume textures that are assigned to a mesh or height map etc.. The idea is to sample a number of locations around a mesh and calculate the shortest distance to any mesh point for each of these samples and finally store all of that in a volume texture.
+Then during runtime you can sample the current location in this volume texture and have the minimum distance at the cost of a texture read!
+Rendering 3d textures
+That’s where I began.
+So the first step for me was to make sure I can correctly apply 3d textures to my scene.
+I started out very simple, by simply rendering the world position offset of each pixel.
+The whole process is very similar to how deferred decals work, but I decided to make this thing work in world space coordinates, so instead of calculating the position of a pixel by multiplying the depth times the interpolation of the FrustumCorners (the camera view direction), we have to use world space frustum corners and add the world space camera position to that. Very simple.
+float4 PixelShaderFunctionBasic(VertexShaderOutput input) : COLOR0
+{
+PixelShaderOutput output;
+int3 texCoordInt = int3(input.Position.xy, 0);
+float linearDepth = DepthMap.Load(texCoordInt).r;
+float3 PositionWS = linearDepth * input.ViewDir + CameraPosition;
+return float4(PositionWS, 0);
+}
+Next I introduced an offset based on the position of an entity I called volumeTextureEntity (just a node i can move around) and clamped the maximum distance.
+The colors matched what I was expecting (+x is red, +y is green etc.) and so I was ready to move on to rendering actual textures.
+Instead of actual 3d textures, I decided to go for a 2d texture instead, with the height layers extending to the side.
+This is my first test texture – you can see it has a resolution of 2x2x2. The black yellow block is the bottom and the red white block sits on top.
+We cannot use hardware texture filtering, since we do not want to interpolate on the edges of different blocks, so here is the result with point filtering (Texture.Load)
+The results are exactly as expected.
+The next thing we need is actual interpolation. This cannot be done by hardware so I’ve written a manual interpolator (same as for the LUTs in the blog article about color grading).
+Et voila – working as intended.
+Note that the locations of the sample points for this interpolation do not match the actual texture locations any more. For a 2px width textures the texCoords would be 0.5 and 1.5, but for my case I have them to interpret them as 0 and 2, so at the edges.
+Generating SDF textures
+Now onto the new part – we want to generate the SDF volume textures for a mesh in order to use it!
+My first idea was to create a large SDF texture for the sponza atrium and use that one as a “base” for all the other things.
+I did not want to make it tailored to meshes, and there are large parts of the atrium that we don’t see by default, so I decided to only consider the meshdata that is inside the bounds of our specified volume texture entity.
+In a first step I extracted all the vertices from our geometry and transformed them with the sponza’s world matrix to match their actual location. (Note that the large flag in the middle of the sponza atrium is also included, I skip it during default rendering, but the vertices are a part of the submesh).
+I then generated a list of triangles, based on the information from index and vertex buffer. I created normals based on clockwise arrangement of the triangle’s edges to note where outside and inside is.
+My idea for generating the distance data for each sample is as follows.
+For each sample point
+Go through all triangles and determine the minimum distance. I used the “Triangle Unsigned” function from Mr. Quilez (http://www.iquilezles.org/www/articles/distfunctions/distfunctions.htm)
+Determine the closest triangle and it’s distance (squared)
+Compute if we are “inside” or “outside” by calculating the dot product of the distance vector to the normal (If we look the opposite direction we are outside, if we look the same way we are inside)
+Adjust the sign based on this (negative means inside)
+If we found the minimum value actually take the square root to get the actual euclidian distance ( sqrt(abs(value)) * sign(value) )
+Before tackling large objects I’ve tried with this simple transparent sphere. As you can see below the samples inside are black (<0) and get brighter outside (>1) depending on distance.
+I was then ready to apply this algorithm to compute samples for the large sponza mesh.
+You can see the white samples are outside geometry and the black ones are inside.
+I went ahead and actually generated a low res 2d texture from this and then rendered the texture value to each pixel.
+The results looked “okayish”. Basically the sponza meshes should be black since the pixels have 0 distance from the actual mesh, but low-resolution sampling made this not as uniform. It’s easy to notice though how the balls and the dragon have a gradient towards the floor –> this is working as we expected!
+On the bottom of the picture you can see a red strip – this is basically the distance field. You can see how it worked its way up from the bottom of the sponza to the roof.
+The generation of this texture however, took a really long time. That’s understandable, since there are around 280000 triangles to check against for each sample point.
+So I wanted to store this texture permanently to not have to generate it each time I start the application and since there was no easy way to store a <float> texture, I made a quick function to write the info, including the x,y and z dimensions to a file. This is even better than a texture save, since x and z dimensions are not obtainable just by reading a texture’s dimension (since width = x * z)
+Regardless, I still wanted to optimize more. Since the task of checking smallest distance per sample does not depend on previous results I went ahead and distributed this work to seperate threads.
+These are the results:
+SDF generated in 30744ms with 1 thread(s)
+SDF generated in 15546ms with 2 thread(s)
+SDF generated in 10009ms with 8 thread(s)
+SDF generated in 10008ms with 4 thread(s)
+It should become evident that my CPU is a quadcore (with 4 threads), so increasing the threads beyond 4 gives us no gains. (Actually the main application still ran on another thread to have it stay interactive, so 3 cores should yield similar results).
+I wanted to improve the results, so I further increased the sampling resolution.
+SDF generated in 5636817ms with 4 thread(s)
+5636817ms = ~1.5h
+The texture above took 1.5 hours to compute. I thought earlier about outsourcing the work to the GPU, but I was maybe to tired to realize how simple that would be.
+The problem is that if we decrease the distance between sampling points in half our computation cost goes up by 8 times. That really prohibits high resolutions.
+Now one could think that simply pre-sorting the triangles by distance or making some form of better hierarchy might increase generation times a lot. Yes, possibly – but it’s not as trivial as you might think.
+For example, the ground floor on the sponza atrium just has 4 vertices at the edges. If our sample point sits right in the middle, hundreds of thousands of other vertices might be closer, but if we are located right on top of the ground – the ground is our closest mesh!
+Instead of geometry sample points I went ahead and wrote a ray marching algorithm that places one sphere and repeats that sphere with the same resolution of the sampling texture. I then color the sphere based on the results. Not how some spheres in the middle get darker even though they are floating in thin air – that’s where our deleted curtains come in.
+I also needed a better way to evaluate the texture’s worth. So I wrote a quick ray marcher that starts follows a ray from the camera to the far clip and stops when we are close enough to a mesh (distance < epsilon). I then display the distance we had to travel, so close objects appear black, distant ones fade to white.
+I first tested this algorithm with a large (mesh) sphere and the results were appropriate.
+Onto the sponza atrium!
+Here are different results based on resolution.
+The last of these images had a texture that took several hours to compute (I went to bed at that time) and the resolution is still horrible.
+The issue is that there is a lot of cloth and thin geometry that is not accurately represented because no sample point is directly inside of these objects and therefore our distance will never get < 0 (= inside).
+Note: If we know a mesh is thin, we could add a negative bias, this *could* work for stuff like tree leafs etc., but we would later make sure that these elements don’t self-shadow. Just a random thought I might explore in future. Also note how we only work with geometry. Materials with alpha test have no effect.
+Plus we have a lot of “random” artifacts floating around.
+A huge disappointment. Not only does the computation take ages, but it’s probably never accurate enough for the curtains to get picked up correctly and we also have these strange floating artifacts.
+A new start (with GPU help)
+It became clear that sponza was not something I should work with. I needed a smaller mesh instead for fast generation of SDFs.
+I found a cool looking model for download here: Sumatran Tiger by Jeremie Louvetz (Sketchfab)
+It’s a low poly (2800 tris) mesh. I went ahead and deleted everything from my scene but the tiger and a ground plane.
+The first thing I wanted to do is to finally make the volume texture directly dependent on the entity’s rotation, size etc. to efficiently use space.
+So the first thing I had to do was to create bounding boxes for the mesh.
+Per default bounding spheres are generated when importing meshes to the engine, but bounding boxes are pretty easy to do, too – find min/max values for all vertices in a mesh and store these 2 coordinates.
+For later use (visualization of the bounding box, see image) we just transform these 6 edge points with the model’s world matrix to make it align to the mesh’s rotation, size and position.
+So now we can go ahead and order our sampling points inside this bounding box (for the untransformed mesh and bounding box) and when we use our SDF later on we just have to fit our volume texture to the bounding box.
+Note1: the mesh’s origin is not necessarily the middle of the bounding box, but for our volume texture generation we want to sample from –boundary to +boundary so we store an offset vector from the mesh’s middle to the bounding box middle and use that one to get the correct “middle”.
+Note2: The SDF’s size does not have to conform to the bounding box – by making it slightly larger we can introduce a space that has no mesh touching it – this will be useful later on.
+So I continued by building the volume textures for our tiger. Obviously this one went much faster and the results approximated the tiger pretty well, but still exhibits some artifacts.
+After a stroll in the park I decided that actually computing the texture on the GPU is trivial, I don’t know why I previously rejected the idea.
+Quick rundown: Create a texture with the size of triangles*3 (if our width > some value, for example 16384 (resolution limit for d3d11 texture) wrap around and make a new line).
+This limits our maximum amount of triangles to 16384 * 16384 / 3 to ~ 89.5m
+For each triangle we upload the 3 vertices’ position. We could precompute more data here, like the edge vectors, but GPUs take longer to read texture data than to crunch such simple formulas.
+Then create a rendertarget with the appropriate output size and calculate the sample position based on texture coordinates in our pixel shader. Read the triangle data and find the smallest distance, like we did before. (All of this could also be done in compute shader, too)
+The speed up is crazy. Here is the debug output for a 50x50x50 SDF of our tiger, once done on GPU and once done with 4 CPU threads.
+SDF generated in 2ms on GPU
+SDF generated in 60610ms with 4 thread(s)
+Well, ok. The code is identical, too, except I precompute edges and normals of the triangle beforehand for the CPU.
+I then tried with 100x100x100 and it took 5ms for my GPU. Seems like the copying of the texture and setting up the targets is the limiting factor here. Well, I’m impressed, even if I suspect the stopwatch function is not very accurate in this case.
+If these numbers turn out to be reliable it might be feasible to update SDFs of animated characters in real time (with lower resolutions possibly).
+However, these artifacts remain.
+I went ahead and checked out the actual texture with RenderDoc and it turns out that these pixels have their value “flipped”. If they had a different sign they would fit right in.
+I spent a lot of time on trying to get them to “behave”. Did I make a mistake somewhere in my code? Possibly, but debugging seemed to not indicate this.
+I thought about maybe comparing them to neighbors, since they all represent a gradient toward the mesh, but when computing larger resolutions sometimes these “faulty” areas would cover more than only one pixel’s width.
+So I finally decided to cut my primitive idea of determining if we are “behind” a pixel or not out in order to implement a more robust system.
+The way I do it now is to cast a ray from each sample point (upwards, but any direction is ok) and find intersections with all triangles.
+The idea is simple – if we have an even amount of intersections we must be outside the mesh, otherwise we are inside.
+I chose the Müller-Trombose intersection algorithm for that.
+That seems like a whole lot of brute-force, but we can do this step simultaneously with the SD for each triangle and it turns out that the overhead is small. The computation results posted above already included this raycast step
+Voila – no more issues.
+Back to another visualization – the distance to the closest mesh per pixel.
+Well this looks pretty good!
+A new issue crops up that I haven’t considered yet – we know the signed distance inside our volume, but what about outside? I just made up some function that measures the distance to the volume and adds the sample distance to that, but it’s something I need to tackle. If our results are not accurate we can experience a lot of artifacts!
+SDF Shadows
+Anyways, I used what I had and made a simple ray marcher that tries to get from the world position of the pixel to the light. Again, this is very simple stuff, I won’t explain it here, but you can find a lot of resources on the web about signed distance raymarching or shadows.
+This was my first result – and at that point the whole work finally accumulated into some viable result! Yay!
+Another time iquilezles.org is a great resource: By adding 2 lines we can basically make our shadows behave like soft shadows with punumbra (at no additional cost!)
+Note how the SDF computation is incorrect for large distances away from our tiger – as mentioned something that I have to tackle!
+I’ve modified the algorithm for the stuff below, but it’s not perfect by any means.
+I’ve added this computation to our light sources as an alternative for PCF shadows:
+Here I show how movement still works, since we don’t have to update anything apart of the transformation values we pass to our shader.
+Note how the order is still wrong in the gif below – the updated sdf’s position is passed after the lighting computation, therefore it’s one frame behind, something I will fix soon.
+Anyways, I’m pretty happy with what I have achieved in the last 2 days.
+What’s next?
+Next up – correctly calculating distance outside the SDFs and managing scenes with multiple SDFs.
+This is all but trivial, we do not want to make our scene come to a crawl with many objects and we also want to retain good quality.
+Afterwards we can work on implementing Ambient Occlusion using this new information! And possibly explore into other areas, too.
+Final words:
+I think it’s funny how my realtime rasterized renderer (and most others, too) slowly transforms to this poor man’s raytracers. First by using ray casting with depth information only – for things like SSR, SSAO etc. – and now with this approximation of our scene with SDFs.
+Just a random thought. Hope you enjoyed.
+Share this:
+Share on X (Opens in new window)
+X
+Share on Facebook (Opens in new window)
+Facebook
+Like Loading...
+Related
+13 thoughts on “Signed Distance Field Rendering Journey pt.1”
+Thanks for the fairly detailed post, very informative!
+I’m curious to see a combination of this and reflective shadow maps for 1 bounce GI:
+https://software.intel.com/en-us/articles/layered-reflective-shadow-maps-for-voxel-based-indirect-illumination
+Basically voxel cone tracing but the opacity/occlusion and RGB are decoupled so only opacity is voxelised (so the SDF essentially) and the colour is sourced from reflective shadow maps after being pre-filtered. Might not be too fast but you could retain a lot of detail at a fraction of the memory usage.
+Reply
+Hey,
+check out this UE4 info post http://timhobsonue4.snappages.com/distance-field-global-illumination
+I suspect they use Reflective Shadow maps as well, I’m not sure. If i had to guess the effect is limited to dominant directional lighting, too. I’m not even sure if that feature is in Unreal Engine by default since I couldn’t find anything about it on the official docs, but it’s certainly interesting. I should check out UE4 someday, but it’s probably too depressing to see how unreachable the level of quality is haha
+Either way, a lot of stuff to that could work and needs trying out.
+Reply
+Hey kosmonaut,
+it is always very interesting for me to read you posts and your practical research.
+In Cry Engine according is an option to achieve Global illumination e.g. for interieur scenes to represent the scene as a intelligent addition of scaled base shapes.
+It seems to me the biggest bang to use SDF is to get fast approximated results by knowing the SDF functions of the base shapes. so only the base shapes and their according SDF functions are calculated.
+But i dont know the technic how to accomplish the step to analyse the given geometry and find a best corresponding ground shape.
+Maby this is done be analysing the change of normals which gives a degree how much the surface changes. ( curviness of curface )
+Bettina from germany
+Reply
+I think base shapes do not get you very far, unless you use them for walls etc. only. In this case it can yield good results, but otherwise I would recommend Signed Distance Fields.
+But yeah, I’m just starting out, I’ll need to research more
+Reply
+That was very entertaining and informative read! Thanks for sharing and good luck with your next steps :)
+Reply
+thank you :)
+Reply
+Pingback: Signed Distance Field Rendering Journey Pt.2 | kosmonaut's blog
+Kosmonaut, Thanks for your great post.
+I’d like to know how to store the volume data(inside or outside mesh) into a a low res 2d texture.
+Reply
+I’m not sure what you mean, but what I do is to split the texture into slices of xy. So if my texture has a resolution of 50x50x50 I have 50 (z) slices of 50×50 (x,y) textures. I simple put them next to each other in a line.
+So if I want to read sample x=10; y=5; z=3 my actual sample point is at
+(10 + 3*50, 5)
+Reply
+Thanks a lot.
+Another question. In this post, you sample the whole scene’s volume data into one texture, but in the production, each submesh’s volume data will be generated individually. My question is, How to send so mush volume data to GPU and do ray-marching efficiently.
+I know, Maybe it’s hard to answer in one word.Thanks again and looking forward to your new post.
+I’ve written more about that here:https://kosmonautblog.wordpress.com/2017/05/09/signed-distance-field-rendering-journey-pt-2/
+The basic idea is that i have these 2d textures and I then give the shader the information about how large, at what position, at what rotation etc. this volume is.
+Then, I can check any position in the world against that volume.
+I can’t quickly explain SDFs in general, but the links provided in the article should help you get up to speed about the general raymarching algorithm.
+It’s very similar to what I would do if I only had a simple box sd function, except I also evaluate the texture information.
+I had what I believe is the same problem as you with the artifacts for voxels where their sign got inverted. In my case the issue was that the closest vertex was shared by two or more triangles whose planes faced in different directions from the voxel, which happened alot for sharp edges. The wrong triangle was chosen as the closest, so that the sign was incorrectly inverted.
+I solved this by storing the closest triangle along with the closest distance while iterating over the triangles, and if a new distance was equal to the current shortest, I also checked if the new triangle’s centroid was closer than that of the currently closest one. This fixed the problem for me. I don’t know if this was the exact same problem, but thought I’d let you know how I solved it!
+Reply
+It’ѕ a рity yoս don’t have a donate button! I’d
+definitely donate to this bｒilⅼiant bⅼߋg!
+I gueѕs for now i’ll settle for book-marking and adding your RSS feed to
+my Googⅼe account. I lοok forward to fresh updates and wіll talk ɑbout this site with mу Facebook group.
+Chat soon!
+Reply
+Leave a Reply Cancel reply
+Comment
+Reblog
+Subscribe
+Subscribed
+kosmonaut's blog
+Have a WordPress.com account? Log in now.
+kosmonaut's blog
+Copy shortlinkView post in Reader
+Manage subscriptionsSign upLog in
+Report this content
+Collapse this bar
+%d
+Create your own website, free on WordPress.com.Create your own website.
+Start free

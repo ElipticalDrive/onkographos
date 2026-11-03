@@ -1,0 +1,1391 @@
+Rasterized Edge Gradients: Handling
+Discontinuities Differentiably
+Stanislav Pidhorskyi , Tomas Simon , Gabriel Schwartz , He Wen, Yaser
+Sheikh, and Jason Saragih
+arXiv:2405.02508v4 [cs.CV] 24 Jul 2024
+Reality Labs, Meta, Pittsburgh, Pennsylvania, USA
+Abstract. Computing the gradients of a rendering process is paramount
+for diverse applications in computer vision and graphics. However, accurate computation of these gradients is challenging due to discontinuities
+and rendering approximations, particularly for surface-based representations and rasterization-based rendering. We present a novel method for
+computing gradients at visibility discontinuities for rasterization-based
+differentiable renderers. Our method elegantly simplifies the traditionally
+complex problem through a carefully designed approximation strategy,
+allowing for a straightforward, effective, and performant solution. We introduce a novel concept of micro-edges, which allows us to treat the rasterized images as outcomes of a differentiable, continuous process aligned
+with the inherently non-differentiable, discrete-pixel rasterization. This
+technique eliminates the necessity for rendering approximations or other
+modifications to the forward pass, preserving the integrity of the rendered
+image, which makes it applicable to rasterized masks, depth, and normals images where filtering is prohibitive. Utilizing micro-edges simplifies
+gradient interpretation at discontinuities and enables handling of geometry intersections, offering an advantage over the prior art. We showcase
+our method in dynamic human head scene reconstruction, demonstrating
+effective handling of camera images and segmentation masks.
+1
+Introduction
+Significant advances have been made in recent years in modeling real 3D objects from image measurements. Much of this advancement can be credited to
+improvements in inverse rendering, which enables the automatic inference of 3D
+scene parameters that best reconstruct the images. While volumetric methods
+like NeRF [31] simplify inverse rendering by eliminating the need for predefined
+scene topology, classical mesh-based representations remain widely used due to
+their efficiency in modeling opaque surfaces. These representations often rely
+on highly performant rasterization, which requires discrete operations to reason
+about ordering and coverage, which poses challenges for gradient computations.
+Our main contribution is a theoretical framework for approximating gradients
+of a rasterization process that simultaneously elucidates previous constructions,
+arrives at a simple, fast, and accurate formulation, and further improves gradient
+approximation accuracy over state-of-the-art methods.
+2
+S. Pidhorskyi et al.
+In rasterization, a rendered pixel’s value is determined by the foremost triangle covering it. Pixels whose footprint lies entirely within a single triangle are
+straightforward to handle, as infinitesimal mesh motion does not change their
+triangle membership. However, pixels on triangle boundaries, either between adjacent triangles, at occlusion boundaries, or at intersections between triangles,
+must account for how their triangle membership changes in response to infinitesimal changes in the mesh. Existing methods employ different approximations of
+soft-membership to account for this, enabling gradient computation in those areas, effectively compositing contributions from member triangles via a weighted
+sum. For example, [20] uses the anti-aliasing approach, [14] averages montecarlo samples during ray-casting, and [40] extends the influence of boundary
+triangles using a falloff function. In this work, we show that all these methods
+exhibit approximation errors that can fail to compute correct gradients in one
+case or another. In particular, none of the existing methods accurately compute
+the gradient at triangle intersections, which can often happen during inverse
+rendering, especially when the current estimate is far from the desired solution.
+In contrast to existing works that directly tackle geometric discontinuities and
+rasterization’s discrete nature, we introduce a micro-edge formulation which allows to interpret the rasterized image as an outcome of a continuous process that
+coincidentally aligns with discrete-pixel rasterization, simplifying gradient computation significantly. Unlike some other works [20,40], our formulation achieves
+good gradient estimates without altering the rasterization forward pass, maintaining the rasterized image’s integrity. This is crucial for optimizing segmentation masks, depth maps, and normal maps where filtering or smoothing is not
+feasible, e.g. anisotropic filtering or soft rasterization would mix normals from
+different surfaces misrepresenting the geometry. The simplifications offered by
+our micro-edge formulation allow us to seamlessly handle discontinuities caused
+by geometry intersections, offering an advantage over the prior art.
+In summary, our paper introduces a straightforward, accurate, and efficient
+method for computing gradients in rasterization, comparable to existing techniques but with greater simplicity and the ability to handle self-intersections.
+We analyze our method’s errors from a theoretical standpoint and compare gradients qualitatively and quantitatively with finite differences and other methods
+across various test cases. We also assess runtime efficiency and accuracy by image
+size and showcase qualitative and quantitative findings on a synthetic blender
+dataset [32]. Our method excels in complex applications, such as detailed dynamic human head reconstructions, effectively managing the intricate details of
+the inner mouth region with significant occlusions and deformations.
+2
+Related work
+Differentiable rendering is one of the critical building blocks for many existing
+computer vision problems, such as 3d object reconstruction [10, 17, 45, 50, 51],
+3d object prediction [5, 8, 9, 12], pose estimation [1, 6, 11, 38] novel view synthesis [4, 18, 32, 33, 54], as well as newly emerging applications such as text-to-3D
+Rasterized Edge Gradients: Handling Discontinuities Differentiably
+3
+generative models [22, 39, 43, 44]. Differentiable rendering employs a wide array
+of underlying 3D representations including explicit surfaces like mesh-based representations [19, 20, 27], implicit surfaces [2, 16, 37, 46], point clouds [18, 42, 48],
+explicit or implicit volume representations [4,23,26,32,35,50,52], and hybrid representations [7,33]. For a comprehensive introduction to differentiable rendering,
+we refer the reader to Zhao et al.’s excellent SIGGRAPH course notes [55].
+Mesh optimization often poses more challenges than implicit and volumetric methods, leading to the latter’s prevalence in the field, as noted by Roessle
+et al. [41]. Despite this, meshes excel in high-performance rendering and imply
+registration with predefined topologies. Mesh rendering methods can be categorized into ray tracing-based and rasterization-based, with the former including
+frameworks like Mitsuba 3 [15, 36]. Differentiable ray tracing, aimed at direct
+illumination or path tracing, is computationally expensive but principled. Key
+advancements by Li et al. [21] and Zhang et al. [53] split this gradient into
+discontinuity integrals with Dirac delta functions and differentiable continuous
+parts. Li et al. replaced Dirac delta integration with boundary line integration,
+while Zhang et al. applied Reynold’s transport theorem for a similar decomposition. Both methods are intricate, necessitating silhouette edge sampling — a
+significant bottleneck in their application. Loubet et al. [28] proposed a variable
+change to simplify discontinuity integration, further refined by Bangaru et al. [3]
+using warped area fields to correct biases, yet practical application challenges
+persist. Despite their flexibility, the computational expense of such ray tracing
+frameworks restrict their practicality in optimization-intensive tasks [20].
+For rasterization-based methods, rendering meshes differentiably is hindered
+by non-differentiable visibility at boundaries. Unlike ray tracing, which uses
+boundary integrals for visibility gradients, rasterization’s fixed-grid and z-buffer
+approach lacks this feature. Solutions typically involve approximating derivatives
+or approximating rendering to achieve inherent differentiability. De La Gorce et
+al. [19] and Loper et al. [27] pioneered derivative approximation in rasterization. De La Gorce et al. distinguished between continuous regions and occlusion
+boundaries, introducing ’occlusion forces’ for the latter. Loper et al. simplified
+this by detecting discontinuities post-rasterization and employing differential filters, like the Sobel filter, for boundary approximation.
+The ’Nvdiffrast’ approach by Laine et al. [20] tackles point-sampled visibility
+issues with innovative differentiable analytic antialiasing, which transforms sharp
+discontinuities into smooth transitions, enabling gradient computation. Analytical antialiasing is achieved by estimating coverage using silhouette edges. A
+limitation of the method is that if triangles containing silhouette edges do not
+overlap with any pixel center, they will be overlooked during the antialiasing process. Moreover, analytical antialiasing is inherently approximate, so the obtained
+gradients are also approximate. Regrettably, the approach is still quite complex,
+modifies the rasterized image, and requires a specialized data structure for connectivity and detailed pixel coverage computations. On the other hand, methods
+like Rhodin et al. [40] and Liu et al.’s ’Soft Rasterizer’ [24] opt for modifying the
+rendering model. Rhodin et al. introduce fuzzy edges to soften discontinuities,
+4
+S. Pidhorskyi et al.
+while ’Soft Rasterizer’ further blurs boundaries and averages depth contributions, facilitating gradient propagation across occluded primitives.
+In this work, we deliberately bypass physically based rendering, global illumination, and lighting/material models, and instead focus exclusively on rasterization-based approaches for their speed. We draw inspiration from the core idea
+of the edge sampling method [21] and analytical antialiasing [20] and distill this
+into a much simpler yet effective method that also provides accurate gradients.
+Notably, our method’s simplicity allows direct handling of self-penetrating geometry, an aspect not addressed in previous research. Other methods to handle
+self-penetrating geometry would require complex and computationally intensive
+geometry preprocessing at each optimization step, involving intersection detection and differentiable splitting of the faces. In contrast, our approach explicitly
+manages interpenetrating geometry with virtually no additional overhead.
+3
+Preliminaries
+Following Li et al. [21], given a 2D pixel filter k and radiance R, a pixel’s color
+can be written:
+I= \iint _{D}^{} k(x,y)R(x,y)\,dx\,dy. \label {eq-pixel_color}
+(1)
+For notational convenience, as in [21], we denote f (x, y) = k(x, y)R(x, y). For
+simplicity, let us first consider the case of a single pixel. We are interested in the
+gradient of ∂L(I)
+∂Φ , where the scalar function L(I) of the rendered pixel I defines
+our loss, and Φ are the scene parameters that we aim to optimize. According to
+the chain rule:
+\frac {\partial L (I)}{\partial \Phi } = \frac {\partial I}{\partial \Phi } \frac {\partial L}{\partial I}, \label {eq-chain}
+(2)
+where ∂L
+∂I is the incoming gradient from the loss function and is typically computed by automatic differentiation (AD). So, our goal becomes to find how the
+pixel value changes with respect to the scene parameters:
+\frac {\partial I}{\partial \Phi } = \frac {\partial }{\partial \Phi } \iint _{D}^{} f(x,y) \,dx\,dy. \label {eq-der1}
+(3)
+While the function f may not in fact be differentiable, its integral remains continuous and thus differentiable. Let us assume that f is partitioned into two
+continuous half-spaces, each represented by two continuous and differentiable
+functions fa and fb , respectively, as follows:
+f(x,y) = \theta (\alpha (x,y)) f_a(x,y) + \theta (-\alpha (x,y)) f_b(x,y), \label {eq-half}
+(4)
+where α specifies the dividing edge, and θ is the Heaviside step function, which
+selects between fa and fb . The differentiation of the integral can be broken into
+two parts by applying the product rule. Let us start with the integrand fa :
+\begin {aligned} & \frac {\partial }{\partial \Phi } \iint _{D}^{} \theta (\alpha (x,y)) f_a(x,y) \,dx\,dy \\ =& \iint _{D}^{} \delta (\alpha (x,y)) \frac {\partial \alpha (x,y)}{\partial \Phi } f_a(x,y) \,dx\,dy + \iint _{D}^{} \frac {\partial f_a(x,y)}{\partial \Phi } \theta (\alpha (x,y)) \,dx\,dy, \end {aligned} \label {eq-product_rule}
+(5)
+Rasterized Edge Gradients: Handling Discontinuities Differentiably
+5
+and a similar derivation can be done for fb . The second term on the right-hand
+side of Eqn. (5) is the integral of the derivative of the smooth function, fa (x, y).
+This derivative is readily computable with AD, and in the context of differentiable rasterizers it typically involves differentiating through the interpolation
+step, the barycentric coordinates, and the texture sampler. Due to its straightforward computation, we will represent it as Ω and omit it from further discussion,
+focusing instead on the first term on the right-hand side of Eqn. (5). This term
+involves a Dirac delta function, and can be interpreted as taking the integral
+over the line α(x, y) = 0:
+\begin {aligned} & \iint _{D}^{} \delta (\alpha (x,y)) \frac {\partial \alpha (x,y)}{\partial \Phi } f_a(x,y) \,dx\,dy\\ =& \int _{\alpha (x,y)=0}^{} \frac {\partial \alpha (x,y)}{\partial \Phi } \| \nabla _{x,y}\alpha (x,y) \| ^{-1} f_a(x,y) \,dt, \end {aligned} \label {eq-integrating_dirac}
+(6)
+where ∥∇x,y α(x, y)∥ is L2 length of the edge equation gradient which accounts
+for the Jacobian of the variable substitution, and t is the parametrization of the
+line along which we integrate.
+4
+Method
+In this section we describe our method that we call EdgeGrad. First we will focus
+on the core assumptions and approximations that form the basis of our method.
+Then we will see that due to our specifically chosen approximation, we can apply
+the prior method of edge sampling to rasterization. From there, we will focus on
+edge detection and classification heuristics, and our discretization scheme. We
+will conclude by describing an extension of our method for handling geometry
+intersections.
+4.1
+Rasterizing Edges
+Our primary objective is to differentiate rasterization while preserving its core
+image formation principles. We aim to calculate the gradients of pixel values
+relative to the mesh vertex positions, including gradients caused by visibility
+changes such as occlusion and disocclusion by primitive geometry. We seek to
+do this with a simple, minimal, and efficient method that does not necessitate
+modifying the initially rasterized image.
+Our main insight is that instead of approximating rasterization using a continuous representation, we assume the rasterized image is the result of some
+other continuous process that coincidentally aligns with our inherently nondifferentiable, discrete-pixel rasterization.1 . In essence, we opt for a direct ap1
+This concept is akin to representing real numbers with floating-point arithmetic. Although there are only 4,294,967,296 single-precision floating-point numbers (a quarter of which lie in the interval [0,1]) , they are still employed for continuous computation. We treat these computations as smooth and differentiable, even though they
+are, in essence, discontinuous.
+S. Pidhorskyi et al.
+Pixel Intensity
+6
+Intensity of pixel B
+Average intensity
+Backpropagate through baricentric interpolation
+and accumulate per-vertex gradients
+Gradients with respect to
+fragment positions
+Intensity of pixel A
+MicroEdge position
+edge
+classification
+Gradients with respect to
+horizontal and vertical
+edge positions
+difference
+Pixel intensities:
+average
+Incoming gradient from the loss
+function:
+Micro Edges
+Loss function
+Fig. 1: Micro-edges and Pixel Pair.
+The figure illustrates construction of the
+micro-edges and the change in pixel intensities A and B with the edge position p
+movement, highlighting the C1 discontinuity at p = 0, absent in average intensity.
+Fig. 2: Gradient computation flow.
+The figure illustrates the backward propagation process, where gradients from the
+loss function are traced back and scattered
+to the fragments.
+proximation to compute gradients, instead of an indirect approach that first
+necessitates that the rendering be made continuous, for instance, through antialiasing filtering. More specifically, we use a construction where all straight
+edges, whether they are sides of triangles or intersections between triangles, are
+comprised of a collection of micro-edges. These micro-edges are assumed to be
+either strictly vertical or horizontal and are always positioned precisely between
+two pixels. An illustration of these constructions is shown in Figure 1.
+Our approximation leads to several key properties: a) boundaries never intersect pixels, only lying exactly between them; b) pixels are always either fully
+covered or not covered at all; c) there is at most one boundary between any
+two neighbouring pixels; d) we do not need to access the source geometry to
+evaluate where the edge is exactly. With this, we can reinterpret the problem
+as if the rasterized image was in fact obtained by applying an antialiasing filter, albeit without visible effects; the resulting image remains identical to the
+pre-antialiasing source. Essentially our construct of the micro-edges renders the
+antialiasing filter as an identity operation.
+With this approximation, gradient estimation becomes a local operation,
+requiring the analysis one edge between two pixels at a time. Note that despite
+the approximation that all edges reside strictly between pixels, we do not assume
+Rasterized Edge Gradients: Handling Discontinuities Differentiably
+7
+that they are fixed, but rather allow them to freely move within an infinitesimal
+range, enabling differentiation of pixel values with respect to the edge location.
+This leads to the greatest advantage of our formulation; it allows us to greatly
+simplify both the theory and computation, since all edges are axis-aligned.
+4.2
+Pixel Pairs
+Let’s analyze two adjacent pixels, A and B, separated by an edge, with their intensities represented as IA and IB respectively (refer to Figure 1 for details). The
+pixel intensities can be expressed using the Heaviside step function to account
+for the discontinuity at the edge as in Eqn. (4):
+\begin {aligned} I_A &= \iint _{D_A}^{} \theta (\alpha (x,y)) f_a(x,y) + \theta (-\alpha (x,y)) f_b(x,y) \,dx\,dy \\ I_B &= \iint _{D_B}^{} \theta (-\alpha (x,y)) f_a(x,y) + \theta (\alpha (x,y)) f_b(x,y) \,dx\,dy. \end {aligned} \label {eq-pixel_pair}
+(7)
+Without loss of generality, assuming a horizontal pair we define α(x, y) = pAB −
+x, where pAB is the edge location. Edge location pAB is now the scene parameter
+with respect to which we want to differentiate the loss function. Since pAB effects
+both IA and IB :
+\frac {\partial L}{\partial p_{AB}} = \frac {\partial L}{\partial I_A} \frac {\partial I_A}{\partial p_{AB}} + \frac {\partial L}{\partial I_B} \frac {\partial I_B}{\partial p_{AB}}, \label {eq-pixel_pair_loss}
+(8)
+∂IA
+∂IB
+where ∂p
+and ∂p
+derivable by applying Eqn. (6) to Eqn. (7). Unfortunately,
+AB
+AB
+with the edge strictly on the pixel boundary, we face a C1 discontinuity at
+pAB = 0, making intensity values non-differentiable. Infinitesimal movement of
+the edge affects IB when moving right and IA when moving left, without affecting
+−
+A
+the other. We still can compute one-sided limits of the derivatives, e.g. ∂I
+from
+∂p
++
+B
+the negative direction and ∂I
+from the positive direction. Applying Eqn. (6)
+∂p
+and taking into account that the term ∥∇x,y α(x, y)∥ becomes 1 as we obtain:
+\frac {\partial I_B}{\partial p_{AB}}^- = \frac {\partial I_A}{\partial p_{AB}}^+ = 0; \ \frac {\partial I_B}{\partial p_{AB}}^+ = \frac {\partial I_A}{\partial p_{AB}}^- = \int _{x=0}^{} \left [ f_a(x,y) - f_b(x,y) \right ] \,dy \label {eq-pixel_pair_loss2}
+(9)
+We can circumvent the problem of C1 discontinuity by averaging the one-sided
+limits of the derivatives from the left and right:
+\frac {\partial I_B}{\partial p_{AB}} = \frac {\partial I_A}{\partial p_{AB}} = \frac {1}{2} \int _{x=0}^{} \left [ f_a(x,y) - f_b(x,y) \right ] \,dy \label {eq-pixel_diff}
+(10)
+Assuming that the pixels have constant value across all of their area (recall the
+rule that “pixels are always either fully covered or not covered at all” ) and
+substituting Eqn. (10) into Eqn. (8) we deduce:
+\boxed {\frac {\partial L }{\partial p_{AB}} = \frac {1}{2} \left ( \frac {\partial L}{\partial I_A} + \frac {\partial L}{\partial I_B} \right ) \left (I_A - I_B \right ) + \Omega }, \label {eq-chain_new}
+(11)
+8
+S. Pidhorskyi et al.
+which is one of our main results. Here, ∂p∂L
+is the gradient of the loss function
+AB
+with respect to the position of the edge between pixels A and B. Additionally,
+we reintroduce Ω which is the second term on the right-hand side of Eqn. (5)
+that accounts for differentiating smooth regions of f . This term was omitted in
+Eqn.(9) and Eqn. (10) for brevity.
+Now, we need to accumulate these gradients into the gradients of the vertex
+positions of the triangle that created those edges. We do that first by scattering
+to the fragments of the triangles associated with the pixels
+the gradients ∂p∂L
+AB
+forming the edge and then by invoking the backward function of the interpolator
+module to gather the fragment gradients into the vertex gradients. Next, we will
+take a look at the gradient scattering mechanism.
+4.3
+Edge Classification and Gradient Scattering
+To backpropagate the gradients to the scene parameters we need to compute
+the gradient with respect to fragment positions, while in §4.2 we only derived
+the gradient ∂p∂L
+with respect to the edge position. We scatter each edge graAB
+dient ∂p∂L
+to
+adjacent
+fragments where we accumulate the fragment gradients,
+AB
+as illustrated in Figure 2. Using the chain rule, we obtain fragment gradients
+AB
+be multiplying ∂p∂L
+with ∂p∂r
+; the later relates the movement of the edge to
+AB
+the movement of the fragment, where r is the position of the fragment. The
+AB
+computation of ∂p∂r
+depends on the type of the edge formed by the fragments.
+We consider several cases: overhanging primitives (either one another or background); adjacent primitives; intersecting primitives. Unlike Laine et al. [20], we
+avoid additional data structures like hash maps for connectivity.
+Our approach examines each neighboring pixel pair, comparing their triangle IDs, see Figure 3 for illustration. Matching IDs indicate no edge; differing
+IDs prompt further tests. A single valid ID suggests a primitive overhanging
+the background. Testing a pixel’s center against the triangle of the other pixel
+discerns overhangs and self-intersections. Non-contained pixels in each other’s
+triangles imply adjacency. If both pixel centers are in the triangle of the other
+pixel, it implies self-intersections, and if in just one - then overhanging. For
+adjacent primitives we do not scatter gradients at all, since it is likely due to
+primitives sharing an edge and there is no discontinuity. Please note that even
+in that case ∂p∂L
+may be non-zero due to Ω contribution. In the overhanging
+AB
+case, we scatter the gradient only to the primitive on top, as the covered primitive can not affect the position of the edge. Thus, in such cases the covered
+∂p
+fragment has ∂p
+∂r = 0 while the foreground fragment has ∂r = 1 reflecting that
+the fragment movement is rigidly tied to the movement of the edge. Please refer
+to supplementary material for more details.
+4.4
+Geometry Intersections
+This subsection details computing the derivative of edge location with respect
+to fragment position ∂p
+∂r in scenarios where the edge arises from intersecting
+Rasterized Edge Gradients: Handling Discontinuities Differentiably
+9
+fixed primitive
+edge
+Same:
+Different:
+
+Test whether one pixel center is
+inside the other pixel’s primitive
+Do not scatter gradient.
+(requires the same point vs primitive
+test used during rasterization)
+applied
+variation
+varying primitive
+Initial position
+Both pixel centers are
+outside of the adjacent
+pixels’s primitive.
+
+
+
+
+Intensity differences are due to
+texture variation but not due to
+visibility discontinuity.
+Do not scatter gradient.
+One pixel is inside the other
+pixel’s primitive, but not
+vice versa. Or there is no
+the other pixel
+Both pixels are inside the other
+pixel’s primitive.
+
+ 
+
+
+One primitive overhangs the
+the other (or background)
+Edge position is controlled only
+by foreground primitive.
+Scatter the gradient to the
+fragments of the foreground
+primitive only .
+
+
+
+
+
+Edge position is controlled by
+both primitives in a complex way
+Scatter the gradient to the
+fragments of both primitives .
+Use intersection formula, Eqn. (14)
+(Or the other way around if
+overlap order is opposite)
+Fig. 3: Edge classification. The accompanying figure provides a schematic representation of our edge classification process. Edges are categorized into four types:
+no edge, adjacent primitives, overhanging
+primitives, and intersecting primitives.
+Fig. 4: Geometry intersection. A geometrical derivation for the partial derivative ∂p
+, essential for converting edge∂r
+related gradients to fragment-related gradients in cases where edges are formed by
+geometry intersections. This shows the x-z
+plane, where the render camera is viewing
+the scene along the z axis so that edges are
+parallel to the y axis (and perpendicular
+to the drawing). Projections of both intersecting primitives are transformed into two
+lines.
+geometry. This situation is inherently complex, and a general-case solution would
+be challenging. However, our micro-edge formulation streamlines the problem
+because intersection lines projected onto the image plane comprised of microedges, e.i. either vertical or horizontal. This allows us to analyze the problem in
+2D, focusing on the x-z or y-z planes, with the z-axis perpendicular to the image
+plane. We derive the derivative of the edge location by analyzing two fragments
+of a micro-edge that belongs to the intersection line, focusing on how the edge
+would move in response to infinitesimal movements of each fragment. Without
+loss of generality we consider the x-z plane:
+\begin {aligned} \frac {\partial p}{\partial r} = -\mathbf {n}^f_z \left [ {\mathbf {n}^f}^T \begin {bmatrix} 0 & 1 \\ -1 & 0 \end {bmatrix} \mathbf {n}^v \right ]^{-1}, \end {aligned} \label {eq-grad_int}
+(12)
+where p is edge position, r is the fragment position (in 3D clip space), nv is
+the varying primitive’s normal, and nf is the fixed primitive’s normal. In this
+context, the x-axis lies on the image plane, and the z-axis is perpendicular to it,
+see Fig. 4. We compute ∂p
+∂r for both fragments that form the intersection edge by
+10
+S. Pidhorskyi et al.
+first fixing one fragment and varying the other, and then switching them. Please
+refer to supplementary material for derivation details.
+4.5
+Theoretical analysis of the approximation
+At first glance, replacing arbitrarily oriented edges with vertical and horizontal
+micro-edges might seem overly simplistic, raising doubts about accuracy. It could
+be argued, for example, that the perimeter defined by micro-edges doesn’t match
+the original as micro-edge size approaches zero. However, applying the twodimensional version of the divergence theorem from vector calculus offers insight:
+\oint _{C}\mathbf {f} \cdot \mathbf {n} \,dt = \iint _{D}\left (\nabla _{\Phi } \cdot \mathbf {f} \right ) \,dx\,dy, \label {eq-green}
+(13)
+where n is normal to boundary C, within which the integrand function is continuous and differentiable. We are free to pick any such boundaries that includes
+a discontinuity. In our case, the term ∂α(x,y)
+in Eqn. (6) is a normal vector to
+∂Φ
+the boundary α(x, y) = 0 thus the integral is equivalent to the left-hand side of
+Eqn. (13). According to Eqn. (13), this recasts the boundary derivative integral
+as an area integral. The difference between the area integrals of micro-edges and
+original edges is confined to a space defined by the micro-edges size. As pixel
+size diminishes, the integral approaches the exact value, and the discrepancy area
+vanishes, confirming the micro-edge approach converges to the same solution as
+the original formulation in the limit.
+5
+Experimental Analysis
+We implement our method in PyTorch with custom CUDA kernels, and largely
+follow the structure of nvdiffrast [20], with the exception for the antialiasing
+module wich we replace with our EdgeGrad module. For all experiments we
+utilize Laplacian preconditioning proposed by Nicolet et al. [34]. We find Laplacian preconditioning extremely helpful for stabilizing training and we use it for
+both, meshes and texture data. While Laplacian preconditioning may reduce selfintersections, this happens only due to much smoother optimization process, but
+it does not account for them in any way.
+Forward gradients. We first analyze the performance of the proposed approach by evaluating the forward gradients on a variety of test cases. Forward
+gradients are per-pixel derivatives with respect to some scene parameter, which
+is depicted with white arrows on the scene images. Fig. 5 shows the forward gradients computed using finite differences, raytracing methods Mitsuba [14, 15, 36]
+and redner [21], and rasterization approaches including nvdiffrast [20] and our
+approach (EdgeGrad). Unlike other methods, our approach still matches finite
+differences gradients in cases of intersecting geometry. While Mitsuba and Redner, which require multiple samples per pixel (256 in these comparisons), typically offer higher accuracy, they fall short at geometry intersections. Nvdiffrast
+Rasterized Edge Gradients: Handling Discontinuities Differentiably
+11
+Fixed
+Fixed
+(a) Scene
+(b) Finite differences
+(c) Mitsuba
+(d) redner
+(e) Nvdiffrast
+(f) EdgeGrad (our)
+Fig. 5: Comparison of forward gradient on several test scenes with the numerical
+solution using finite differences. (a) Synthetic test scene, we show gradients with respect
+to a parameter. We use (b) finite differences as a reference, and compare with (c)
+Mitsuba 3 [15,36], (d) redner [21], (e) nvdiffrast [20], and (f) our edge gradient approach.
+is noisier because it assumes triangles containing silhouette edges always overlap
+pixel centers, which often isn’t the case, leading to omitted gradients.
+Backward gradients. Tab. 1 quantitatively analyzes the accuracy of the backward gradients. We show improved results especially for complex intersecting
+geometry. Compared to raytracing methods, our rasterization-based approach
+yields comparable performance at a fraction of the computational cost.
+Runtime performance end accuracy by image size. Fig. 6 shows running time
+of our method (EdgeGrad) compared to Mitsuba [36] and nvdiffrast [20]. Our
+method significantly outperforms other approaches in running time on all variety of image sizes and triangle count. Our method has comparable accuracy to
+Mitsuba [36] (and even better for the case with geometry intersections) at large
+image sizes, but performs worse for smaller image size due to sub pixel triangles.
+Quantitative scene reconstructions. Tab. 2 shows quantitative results of scene
+reconstruction on blender dataset [32]. We follow the testing procedure described
+in [32] and report PNSR, SSIM and LPIPS metrics. We compare our method
+(EdgeGrad) with a "continues only" baseline (which ignores gradients from discontinuities), nvdiffrast [20], and with a variant of our method that does not have
+a special handling for the geometry intersections. Method optimization procedure is similar to Nicolet et al. [34] we only add MLP for decoding texture values
+in a view conditioned manner similar to [29]. We initialize geometry with some
+coarse manually created meshes shown in Fig. 7. To avoid additional complex-
+S. Pidhorskyi et al.
+Fixed
+101
+101
+Scene
+0
+53.52%
+75.83%
+69.33%
+3.35%
+200
+400
+600
+800
+1000
+1200
+image size [px]
+1400
+104
+1600
+EdgeGrad(our)
+Mitsuba 3
+Nvdiffrast
+80
+(c) initialization
+mesh
+EdgeGrad(our)
+Mitsuba 3
+Nvdiffrast
+80
+40
+40
+20
+20
+(b) predicted
+segmentations
+106
+60
+60
+0
+triangle count
+100
+100
+Table 1: Accuracy of backward gradients. Relative error, % (↓). This table shows relative errors in backward gradient computations for test scenes. Second
+and third scenes include geometry intersections, emphasizing our method’s advantage in managing these complexities.
+105
+(b) Running time vs triangle count
+(a) Running time vs image size
+37.94%
+37.59%
+39.42%
+8.35%
+error [%]
+redner [21] 1.20%
+Mitsuba3 [36] 0.67%
+Nvdiffrast [20] 45.91%
+EdgeGrad(our) 6.01%
+(a) camera image
+EdgeGrad(our)
+Mitsuba 3
+Nvdiffrast
+Nvdiffrast + precomputed hash
+time [ms]
+time [ms]
+102
+Fixed
+102
+EdgeGrad(our)
+Mitsuba 3
+Nvdiffrast
+Nvdiffrast + precomputed hash
+103
+error [%]
+12
+0
+100
+200
+300
+image size [px]
+400
+500
+(c) Gradient error vs image size
+self-intersections absent
+0
+0
+100
+200
+300
+image size [px]
+400
+500
+(d) Gradient error vs image size
+self-intersections present
+Fig. 6: Runtime performance and errors. a) Runtime [ms] by image size [px];
+b) runtime [ms] by triangle count; c) gradient error [%] by image size [px] without
+self-intersections; d) gradient error [%] by
+image size [px] with self-intersections.
+(g) Learned segmentation texture
+for mouth region
+(d) optimized
+mesh
+estimation
+Fixed
+Initialization
+Optimized
+Initialization
+Optimized
+Initialization
+Optimized
+Initialization
+Optimized
+Initialization
+Optimized
+(h) Initialization mesh and reconstructed mesh for synthetic blender dataset
+Fig. 7: Experimental setup details. The figure shows: a) the ground truth camera image; b) predicted segmentation mask for mouth region using HRNet [47]; c)
+initialization mesh from 3DMM; d) optimized avatar mesh; e) rendered image of the
+optimized model; f) rendered segmentation estimation image; g) learned static segmentation texture; h) initialization meshes and optimized meshes for blender dataset [32].
+Fig. 8: Reconstructions from inverse rendering compare our method with nvdiffrast [20]
+and rasterization without discontinuity handling. Although nvdiffrast can match the
+outline of objects well, it suffers from interpenetration (see leaves of Ficus) and does
+not capture as much detail as ours (see the backrest of the chair and ground of lego).
+The method with no edge handling fails completely on these objects.
+Rasterized Edge Gradients: Handling Discontinuities Differentiably
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+Lego
+Chair
+Ship Hotdog Ficus Drums
+16.342 28.151 15.693 27.850 18.399 15.534
+29.44 29.804 26.173 31.684 24.964 23.154
+29.574 33.077 26.731 34.225 26.781 24.08
+29.667 32.981 26.65
+34.081 26.559 24.014
+Lego
+Chair
+Ship Hotdog Ficus Drums
+Continuous only
+0.7550 0.9531 0.6929 0.9374 0.8245 0.7723
+0.9467 0.9416 0.8316 0.9473 0.9323 0.8971
+Nvdiffrast [20]
+EdgeGrad -intersect. 0.9485 0.9765 0.8478 0.9715 0.9468 0.9216
+EdgeGrad (our)
+0.9501 0.9764 0.8472 0.9713 0.9452 0.9220
+Lego
+Chair
+Ship Hotdog Ficus Drums
+Continuous only
+0.3223 0.0611 0.3913 0.1109 0.2046 0.2943
+Nvdiffrast [20]
+0.0653 0.0771 0.2020 0.0936 0.0781 0.1116
+EdgeGrad -intersect. 0.0633 0.0348 0.1899 0.0546 0.0681 0.0871
+0.0614 0.0341 0.1850 0.0548 0.0672 0.0870
+EdgeGrad (our)
+Continuous only
+Nvdiffrast [20]
+EdgeGrad -intersect.
+EdgeGrad (our)
+13
+Mic
+Materials
+21.797
+17.11
+29.638
+24.413
+31.224
+25.221
+31.346
+25.287
+Mic
+Materials
+0.9182
+0.7693
+0.9647
+0.8865
+0.9756
+0.8945
+0.9767
+0.8972
+Mic
+Materials
+0.1272
+0.2511
+0.0549
+0.1291
+0.0439
+0.1200
+0.0399
+0.1185
+Table 2: Per-scene quantitative results from the realistic synthetic blender dataset [32],
+featuring scenes with complex geometries and non-Lambertian materials rendered using
+Blender’s Cycles pathtracer.
+Fig. 9: Example renderings of mesh-based avatars from [29] trained using EdgeGrad,
+capturing complex inner mouth movements, including teeth and tongue dynamics.
+ity we opted out automatic remeshing introduced by Nicolet et al. which would
+necessitate updating UV parametrization in our case.
+Qualitative mesh reconstruction. Qualitatively, we compare the mesh reconstructions obtained on the public NeRF dataset [32] using our approach, a naive
+approach with no special edge handling, and nvdiffrast [20] in Fig. 8. All methods use the same shading model. Our approach shows improved detail in the
+recovered meshes.
+6
+Application to Dynamic Head Scenes
+We show the importance of correct edge gradients on a head modeling application
+by fitting a personalized mesh-based avatar representation to facial performances
+captured in a multiview lightstage. modifying the avatar creation method from
+[29]. As the facial avatar representation, we use an encoder-decoder architecture
+to produce mesh vertices and texture-mapped appearance features [25], which
+are shaded using a pixel-wise MLP producing RGB appearance [29]. We use a
+coarse face tracking produced using traditional computer vision as initialization
+for inverse rendering. Importantly, this coarse face template has a small number
+of vertices (8k) and no geometry in the interior of the mouth.
+Traditionally, fitting the interior of the mouth without strong priors is a complex task due to poor observability and intricately interacting geometry with
+14
+S. Pidhorskyi et al.
+Fixed
+(a) camera image
+(b) Nvdiffrast
+(c) EdgeGrad (our)
+(d) EdgeGrad (our)
+w/o segmentation supervision
+Fig. 10: Qualitative evaluation and ablation on dynamic head scene. We compare: (c) our method, (a)
+ground truth images, (b) Nvdiffrast [20], and ablated version of our method without
+including segmentation mask.
+The avatar model is from [29]
+trained using EdgeGrad and
+Nvdiffrast. We highlight artifacts with white arrows.
+constant contact. Prior work either relies on artists to create alignments, volumetric simulation to prevent self-intersections [13], or on very specific mouth
+interior capture methods to build priors [30, 49]. Instead, we show that by using
+differentiable rasterization with correct edge gradients, we can achieve fully automatic geometric fitting of the complex geometry of the face and mouth interior
+including lips, teeth, and tongue using a mesh-based model of fixed topology. We
+modify [29] in two ways. First, we use the edge gradient rasterization method
+of Sec. 4. Second, we add supervision in the form of 2D segmentation masks
+with separate labels for the regions of the teeth, tongue, and lips, for details see
+Fig. 7. While we can achieve accurate per-frame geometry without the additional
+segmentation loss supervision, we find that segmentation losses help anchor the
+teeth and tongue geometry to a consistent region of the UV map. Fig. 9 shows
+the quality of geometric fitting achievable with this inverse rendering method.
+Note that we accurately reconstruct the complex contact geometry of the tongue
+sliding across teeth, teeth-to-teeth contact, as well as the tongue pushing against
+the lips and cheeks. Fig. 10demonstrates reconstruction quality of complex inner
+mouth details, which are challenging due to frequent self-intersections. We also
+include results without 2D segmentation mask supervision.
+7
+Conclusions and Limitations
+We have presented a fast method for rasterization-based differentiable rendering
+that has accurate gradients across visibility discontinuities such as triangle edges,
+occlusions and geometry intersections. Our results demonstrate enhanced mesh
+reconstruction fidelity across diverse inverse rendering scenarios, comparable to
+implicit and volumetric methods. Our method also unlocks new applications,
+accurate mouth interior fitting in dynamic facial performance capture, through
+fully automatic inverse rendering. Regarding limitations, our method inherits
+the constraints of rasterization, including the inability to manage transparency,
+lack of precise antialiasing without multisampling, and the absence of physically based rendering and global illumination. It may also inaccurately interpret
+adjacent primitives in finely tessellated meshes, leading to sub-pixel triangles.
+Rasterized Edge Gradients: Handling Discontinuities Differentiably
+15
+References
+1. Baek, S., Kim, K.I., Kim, T.K.: Pushing the envelope for rgb-based dense 3d hand
+pose estimation via neural rendering. In: Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition. pp. 1067–1076 (2019)
+2. Bangaru, S.P., Gharbi, M., Luan, F., Li, T.M., Sunkavalli, K., Hasan, M., Bi, S.,
+Xu, Z., Bernstein, G., Durand, F.: Differentiable rendering of neural sdfs through
+reparameterization. In: SIGGRAPH Asia 2022 Conference Papers. pp. 1–9 (2022)
+3. Bangaru, S.P., Li, T.M., Durand, F.: Unbiased warped-area sampling for differentiable rendering. ACM Transactions on Graphics (TOG) 39(6), 1–18 (2020)
+4. Barron, J.T., Mildenhall, B., Tancik, M., Hedman, P., Martin-Brualla, R., Srinivasan, P.P.: Mip-nerf: A multiscale representation for anti-aliasing neural radiance
+fields. In: Proceedings of the IEEE/CVF International Conference on Computer
+Vision. pp. 5855–5864 (2021)
+5. Beker, D., Kato, H., Morariu, M.A., Ando, T., Matsuoka, T., Kehl, W., Gaidon,
+A.: Monocular differentiable rendering for self-supervised 3d object detection. In:
+Computer Vision–ECCV 2020: 16th European Conference, Glasgow, UK, August
+23–28, 2020, Proceedings, Part XXI 16. pp. 514–529. Springer (2020)
+6. Bogo, F., Kanazawa, A., Lassner, C., Gehler, P., Romero, J., Black, M.J.: Keep
+it smpl: Automatic estimation of 3d human pose and shape from a single image.
+In: Computer Vision–ECCV 2016: 14th European Conference, Amsterdam, The
+Netherlands, October 11-14, 2016, Proceedings, Part V 14. pp. 561–578. Springer
+(2016)
+7. Chan, E.R., Lin, C.Z., Chan, M.A., Nagano, K., Pan, B., De Mello, S., Gallo,
+O., Guibas, L.J., Tremblay, J., Khamis, S., et al.: Efficient geometry-aware 3d
+generative adversarial networks. In: Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition. pp. 16123–16133 (2022)
+8. Chen, W., Ling, H., Gao, J., Smith, E., Lehtinen, J., Jacobson, A., Fidler, S.:
+Learning to predict 3d objects with an interpolation-based differentiable renderer.
+Advances in neural information processing systems 32 (2019)
+9. Chen, W., Litalien, J., Gao, J., Wang, Z., Fuji Tsang, C., Khamis, S., Litany,
+O., Fidler, S.: Dib-r++: learning to predict lighting and material with a hybrid
+differentiable renderer. Advances in Neural Information Processing Systems 34,
+22834–22848 (2021)
+10. Choy, C.B., Xu, D., Gwak, J., Chen, K., Savarese, S.: 3d-r2n2: A unified approach
+for single and multi-view 3d object reconstruction. In: Computer Vision–ECCV
+2016: 14th European Conference, Amsterdam, The Netherlands, October 11-14,
+2016, Proceedings, Part VIII 14. pp. 628–644. Springer (2016)
+11. Ge, L., Ren, Z., Li, Y., Xue, Z., Wang, Y., Cai, J., Yuan, J.: 3d hand shape and pose
+estimation from a single rgb image. In: Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition. pp. 10833–10842 (2019)
+12. Henzler, P., Reizenstein, J., Labatut, P., Shapovalov, R., Ritschel, T., Vedaldi, A.,
+Novotny, D.: Unsupervised learning of 3d object categories from videos in the wild.
+In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. pp. 4700–4709 (2021)
+13. Ichim, A.E., Kadleček, P., Kavan, L., Pauly, M.: Phace: Physics-based face modeling and animation. ACM Trans. Graph. 36(4) (jul 2017)
+14. Jakob, W., Speierer, S., Roussel, N., Nimier-David, M., Vicini, D., Zeltner,
+T., Nicolet, B., Crespo, M., Leroy, V., Zhang, Z.: Mitsuba 3 renderer (2022),
+https://mitsuba-renderer.org
+16
+S. Pidhorskyi et al.
+15. Jakob, W., Speierer, S., Roussel, N., Vicini, D.: Dr.jit: A just-in-time compiler for
+differentiable rendering. Transactions on Graphics (Proceedings of SIGGRAPH)
+41(4) (Jul 2022). https://doi.org/10.1145/3528223.3530099
+16. Jiang, Y., Ji, D., Han, Z., Zwicker, M.: Sdfdiff: Differentiable rendering of signed
+distance fields for 3d shape optimization. In: Proceedings of the IEEE/CVF conference on computer vision and pattern recognition. pp. 1251–1261 (2020)
+17. Kato, H., Ushiku, Y., Harada, T.: Neural 3d mesh renderer. In: Proceedings of
+the IEEE conference on computer vision and pattern recognition. pp. 3907–3916
+(2018)
+18. Kerbl, B., Kopanas, G., Leimkühler, T., Drettakis, G.: 3d gaussian splatting for
+real-time radiance field rendering. ACM Transactions on Graphics (ToG) 42(4),
+1–14 (2023)
+19. de La Gorce, M., Fleet, D.J., Paragios, N.: Model-based 3d hand pose estimation
+from monocular video. IEEE Trans. Pattern Anal. Mach. Intell. 33(9), 1793–1805
+(Sep 2011). https://doi.org/10.1109/TPAMI.2011.33, http://dx.doi.org/10.
+1109/TPAMI.2011.33
+20. Laine, S., Hellsten, J., Karras, T., Seol, Y., Lehtinen, J., Aila, T.: Modular primitives for high-performance differentiable rendering. ACM Transactions on Graphics
+(TOG) 39(6), 1–14 (2020)
+21. Li, T.M., Aittala, M., Durand, F., Lehtinen, J.: Differentiable monte carlo ray
+tracing through edge sampling. ACM Trans. Graph. (Proc. SIGGRAPH Asia)
+37(6), 222:1–222:11 (2018)
+22. Lin, C.H., Gao, J., Tang, L., Takikawa, T., Zeng, X., Huang, X., Kreis, K., Fidler,
+S., Liu, M.Y., Lin, T.Y.: Magic3d: High-resolution text-to-3d content creation.
+In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. pp. 300–309 (2023)
+23. Liu, L., Gu, J., Zaw Lin, K., Chua, T.S., Theobalt, C.: Neural sparse voxel fields.
+Advances in Neural Information Processing Systems 33, 15651–15663 (2020)
+24. Liu, S., Li, T., Chen, W., Li, H.: Soft rasterizer: A differentiable renderer for
+image-based 3d reasoning. The IEEE International Conference on Computer Vision
+(ICCV) (Oct 2019)
+25. Lombardi, S., Saragih, J., Simon, T., Sheikh, Y.: Deep appearance models for face
+rendering. ACM Transactions on Graphics (TOG) 37(4), 1–13 (2018)
+26. Lombardi, S., Simon, T., Saragih, J., Schwartz, G., Lehrmann, A., Sheikh, Y.:
+Neural volumes: Learning dynamic renderable volumes from images. arXiv preprint
+arXiv:1906.07751 (2019)
+27. Loper, M.M., Black, M.J.: Opendr: An approximate differentiable renderer. In:
+Computer Vision–ECCV 2014: 13th European Conference, Zurich, Switzerland,
+September 6-12, 2014, Proceedings, Part VII 13. pp. 154–169. Springer (2014)
+28. Loubet, G., Holzschuch, N., Jakob, W.: Reparameterizing discontinuous integrands
+for differentiable rendering. Transactions on Graphics (Proceedings of SIGGRAPH
+Asia) 38(6) (Dec 2019). https://doi.org/10.1145/3355089.3356510
+29. Ma, S., Simon, T., Saragih, J.M., Wang, D., Li, Y., la Torre, F.D., Sheikh, Y.:
+Pixel codec avatars. 2021 IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR) pp. 64–73 (2021)
+30. Medina, S., Tomé, D., Stoll, C., Tiede, M., Munhall, K., Hauptmann, A., Matthews,
+I.: Speech driven tongue animation. In: Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR). IEEE/CVF (2022)
+31. Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng,
+R.: Nerf: Representing scenes as neural radiance fields for view synthesis. In: ECCV
+(2020)
+Rasterized Edge Gradients: Handling Discontinuities Differentiably
+17
+32. Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng,
+R.: Nerf: Representing scenes as neural radiance fields for view synthesis. Communications of the ACM 65(1), 99–106 (2021)
+33. Müller, T., Evans, A., Schied, C., Keller, A.: Instant neural graphics primitives
+with a multiresolution hash encoding. arXiv preprint arXiv:2201.05989 (2022)
+34. Nicolet, B., Jacobson, A., Jakob, W.: Large steps in inverse rendering of geometry.
+ACM Transactions on Graphics (TOG) 40(6), 1–13 (2021)
+35. Niemeyer, M., Mescheder, L., Oechsle, M., Geiger, A.: Differentiable volumetric
+rendering: Learning implicit 3d representations without 3d supervision. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 3504–3515 (2020)
+36. Nimier-David, M., Vicini, D., Zeltner, T., Jakob, W.: Mitsuba 2: A retargetable forward and inverse renderer. Transactions on Graphics (Proceedings of SIGGRAPH
+Asia) 38(6) (Dec 2019). https://doi.org/10.1145/3355089.3356498
+37. Park, J.J., Florence, P., Straub, J., Newcombe, R., Lovegrove, S.: Deepsdf: Learning
+continuous signed distance functions for shape representation. In: Proceedings of
+the IEEE/CVF conference on computer vision and pattern recognition. pp. 165–
+174 (2019)
+38. Pavlakos, G., Zhu, L., Zhou, X., Daniilidis, K.: Learning to estimate 3d human
+pose and shape from a single color image. In: Proceedings of the IEEE conference
+on computer vision and pattern recognition. pp. 459–468 (2018)
+39. Poole, B., Jain, A., Barron, J.T., Mildenhall, B.: Dreamfusion: Text-to-3d using
+2d diffusion. arXiv preprint arXiv:2209.14988 (2022)
+40. Rhodin, H., Robertini, N., Richardt, C., Seidel, H.P., Theobalt, C.: A versatile
+scene model with differentiable visibility applied to generative pose estimation.
+In: Proceedings of the IEEE International Conference on Computer Vision. pp.
+765–773 (2015)
+41. Roessle, B., Barron, J.T., Mildenhall, B., Srinivasan, P.P., Nießner, M.: Dense
+depth priors for neural radiance fields from sparse input views. In: Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp.
+12892–12901 (2022)
+42. Roveri, R., Öztireli, A.C., Pandele, I., Gross, M.: Pointpronets: Consolidation of
+point clouds with convolutional neural networks. In: Computer Graphics Forum.
+vol. 37, pp. 87–99. Wiley Online Library (2018)
+43. Shi, Y., Wang, P., Ye, J., Long, M., Li, K., Yang, X.: Mvdream: Multi-view diffusion
+for 3d generation. arXiv preprint arXiv:2308.16512 (2023)
+44. Tsalicoglou, C., Manhardt, F., Tonioni, A., Niemeyer, M., Tombari, F.:
+Textmesh: Generation of realistic 3d meshes from text prompts. arXiv preprint
+arXiv:2304.12439 (2023)
+45. Tulsiani, S., Zhou, T., Efros, A.A., Malik, J.: Multi-view supervision for singleview reconstruction via differentiable ray consistency. In: Proceedings of the IEEE
+conference on computer vision and pattern recognition. pp. 2626–2634 (2017)
+46. Vicini, D., Speierer, S., Jakob, W.: Differentiable signed distance function rendering. ACM Transactions on Graphics (TOG) 41(4), 1–18 (2022)
+47. Wang, J., Sun, K., Cheng, T., Jiang, B., Deng, C., Zhao, Y., Liu, D., Mu, Y., Tan,
+M., Wang, X., et al.: Deep high-resolution representation learning for visual recognition. IEEE transactions on pattern analysis and machine intelligence 43(10),
+3349–3364 (2020)
+48. Wiles, O., Gkioxari, G., Szeliski, R., Johnson, J.: Synsin: End-to-end view synthesis
+from a single image. In: Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition. pp. 7467–7477 (2020)
+18
+S. Pidhorskyi et al.
+49. Wu, C., Bradley, D., Garrido, P., Zollhöfer, M., Theobalt, C., Gross, M., Beeler,
+T.: Model-based teeth reconstruction. ACM Trans. Graph. 35(6) (dec 2016)
+50. Yan, X., Yang, J., Yumer, E., Guo, Y., Lee, H.: Perspective transformer nets:
+Learning single-view 3d object reconstruction without 3d supervision. Advances in
+neural information processing systems 29 (2016)
+51. Yang, G., Cui, Y., Belongie, S., Hariharan, B.: Learning single-view 3d reconstruction with limited pose supervision. In: Proceedings of the European Conference on
+Computer Vision (ECCV). pp. 86–101 (2018)
+52. Yu, A., Fridovich-Keil, S., Tancik, M., Chen, Q., Recht, B., Kanazawa, A.: Plenoxels: Radiance fields without neural networks (2021)
+53. Zhang, C., Wu, L., Zheng, C., Gkioulekas, I., Ramamoorthi, R., Zhao, S.: A differential theory of radiative transfer. ACM Trans. Graph. 38(6), 227:1–227:16 (2019)
+54. Zhang, K., Riegler, G., Snavely, N., Koltun, V.: Nerf++: Analyzing and improving
+neural radiance fields. arXiv preprint arXiv:2010.07492 (2020)
+55. Zhao, S., Jakob, W., Li, T.M.: Physics-based differentiable rendering: From theory
+to implementation. In: ACM SIGGRAPH 2020 Courses. SIGGRAPH ’20, Association for Computing Machinery, New York, NY, USA (2020). https://doi.org/
+10.1145/3388769.3407454, https://doi.org/10.1145/3388769.3407454
+Rasterized Edge Gradients: Handling Discontinuities Differentiably
+1
+Rasterized Edge Gradients: Handling
+Discontinuities Differentiably
+Supplementary Material
+A
+Additional details
+In this supplementary material, we provide further insights, detailed derivations, and additional qualitative results to complement our work. We start by
+discussing the rationale behind employing one-sided derivatives to address C1
+discontinuities in derivatives, initially introduced in §4.2 of the main paper, detailed here in §A.0. We then explain in more detail edge classification process
+and gradient scattering, introduced in §4.3 of the main paper and further elaborated here in §A.1. Following that, we offer a detailed derivation of Eqn.(12)
+introduced §4.4, in §A.2 of this supplement. Lastly, we provide additional qualitative evaluations including toy example, Blender dataset from Mildenhall et
+al. [32] and demonstrate our method’s application to dynamic head scene mesh
+fitting in §C.
+A.0
+Pixel pairs
+As discussed in Section 4.2, placing an edge precisely at the boundary between
+two pixels complicates matters due to C1 discontinuity. Before addressing these
+complexities, let’s first revisit Eqn. (7) and further expand on the derivations:
+\begin {aligned} I_A &= \iint \limits _{D_A}^{} \theta (\alpha (x,y)) f_a(x,y) + \theta (-\alpha (x,y)) f_b(x,y) \,dx\,dy \\ I_B &= \iint \limits _{D_B}^{} \theta (-\alpha (x,y)) f_a(x,y) + \theta (\alpha (x,y)) f_b(x,y) \,dx\,dy, \end {aligned} \tag {7}\label {eq:sup_pixel_pair}
+(7)
+where IA and IB are intensities of two adjacent pixels, A and B, separated by
+an edge defined by α(x, y). Without loss of generality, we consider a horizontal
+pair, thus we define α(x, y) = pAB − x, where pAB is the edge location:
+\begin {aligned} I_A &= \iint \limits _{D_A}^{} \theta (p_{AB} - x) f_a(x,y) + \theta (x - p_{AB}) f_b(x,y) \,dx\,dy \\ I_B &= \iint \limits _{D_B}^{} \theta (x - p_{AB}) f_a(x,y) + \theta (p_{AB} - x) f_b(x,y) \,dx\,dy, \end {aligned} \label {eq:sup_pixel_pair_2}
+(14)
+As was mentioned in Section 4.2, edge location pAB is now the scene parameter with respect to which we want to differentiate the loss function, which in
+2
+S. Pidhorskyi et al.
+turn would allow us to optimize the edge location pAB . Since pAB effects both
+IA and IB :
+\frac {\partial L}{\partial p_{AB}} = \frac {\partial L}{\partial I_A} \frac {\partial I_A}{\partial p_{AB}} + \frac {\partial L}{\partial I_B} \frac {\partial I_B}{\partial p_{AB}}, \tag {8}\label {eq-pixel_pair_loss_2}
+(8)
+∂L
+and ∂p∂L
+are the known gradients, typically obtained by backwhere ∂I
+B
+AB
+∂IA
+∂IB
+and ∂p
+are the
+propagation the loss through the loss function, while ∂p
+AB
+AB
+unknown derivatives that we want to compute.
+Differentiating Eqn. (14) by pAB and applying chain rule we obtain:
+\begin {aligned} \frac {\partial I_A}{\partial p_{AB}} &= \overbrace {\iint \limits _{D_A}^{} \frac {\partial \theta (p_{AB} - x)}{\partial p_{AB}} f_a(x,y) + \frac {\partial \theta (x - p_{AB})}{\partial p_{AB}} f_b(x,y) \,dx\,dy}^\text {boundary component} \\ &+ \overbrace {\iint \limits _{D_A}^{} \theta (p_{AB} - x) \frac {\partial f_a(x,y)}{\partial p_{AB}} + \theta (x - p_{AB}) \frac {\partial f_b(x,y)}{\partial p_{AB}} \,dx\,dy}^\text {smooth component} \\ \frac {\partial I_B}{\partial p_{AB}} &= \overbrace {\iint \limits _{D_B}^{} \frac {\partial \theta (x - p_{AB})}{\partial p_{AB}} f_a(x,y) + \frac {\partial \theta (p_{AB} - x)}{\partial p_{AB}} f_b(x,y) \,dx\,dy}^\text {boundary component} \\ &+ \overbrace {\iint \limits _{D_B}^{} \theta (x - p_{AB}) \frac {\partial f_a(x,y)}{\partial p_{AB}} + \theta (p_{AB} - x)\frac {\partial f_b(x,y)}{\partial p_{AB}} \,dx\,dy.}^\text {smooth component} \end {aligned} \label {eq:sup_pixel_pair_3}
+(15)
+As discussed in Section 4.2, after applying the chain rule, the integral separates into two. The second integral in both equations in of Eqn. 15 is an integral
+of the derivative of the smooth function, fa (x, y). This derivative is readily computable with AD, thus we ignore it for brevity. We replace it with Ω symbol
+that shows that there is additional smooth component that being omitted.
+Derivative of the Heaviside function is the Dirac delta function: δ(x) = xd θ(x).
+Thus, we can rewrite Eqn. 15 as:
+\begin {aligned} \frac {\partial I_A}{\partial p_{AB}} &= \iint \limits _{D_A}^{} \delta (p_{AB} - x) f_a(x,y) - \delta (x - p_{AB}) f_b(x,y) \,dx\,dy + \Omega _A\\ \frac {\partial I_B}{\partial p_{AB}} &= \iint \limits _{D_B}^{} \delta (x - p_{AB}) f_a(x,y) - \delta (p_{AB} - x) f_b(x,y) \,dx\,dy + \Omega _B\\ \end {aligned} \label {eq:sup_pixel_pair_4}
+(16)
+Unfortunately, Eqn. 16 has a problem preventing us from simply computing
+the integrals. Regions DA and DB which correspond to pixels A and B are
+disjoint. The boundary defined by δ(pAB − x) lies between DA and DB , thus it
+Rasterized Edge Gradients: Handling Discontinuities Differentiably
+3
+∂IA
+∂IB
+is not clear if we should include it to the integral for ∂p
+or ∂p
+. We can not
+AB
+AB
+include it to both. This ambiguity is a direct consequence of IA and IB having
+a C1 discontinuity at pAB = 0.
+Indeed, if we take a closer look at Eqn.14 then we will see that both IA and
+IB are piece-wise linear with respect to pAB . That follows from the micro-edge
+formulation according to which pixels have constant value across all of their area
+(both fa and fb are constant within DA and DB respectively) The breakpoint
+happens to be at the boundary of two pixels, at pAB = 0, but that’s also where
+we want to compute the derivative. Because of this breakpoint, neither IA or IB
+are differentiable at pAB = 0. However, subderivative still exists, which we can
+introduce using one-sided limits:
+\begin {aligned} \frac {\partial I_A}{\partial p_{AB}}^- &= \lim _{x\to 0^{-}}{\frac {I_A(x)-I_A(0)}{x}}, \quad \frac {\partial I_A}{\partial p_{AB}}^+ &= \lim _{x\to 0^{+}}{\frac {I_A(x)-I_A(0)}{x}} \\ \frac {\partial I_B}{\partial p_{AB}}^- &= \lim _{x\to 0^{-}}{\frac {I_B(x)-I_B(0)}{x}}, \quad \frac {\partial I_B}{\partial p_{AB}}^+ &= \lim _{x\to 0^{+}}{\frac {I_B(x)-I_B(0)}{x}}, \end {aligned} \label {eq:sup_pixel_pair_5}
+(17)
+where x → 0− means that x is increasing and approaching 0 from the left, and
+x → 0+ means that x is decreasing and approaching 0 from the right. In order
+∂IA
+∂IB
+to approximate ∂p
+and ∂p
+we can average derivatives from the left and
+AB
+AB
+from the right. That is equivalent to assuming that the Dirac delta in Eqn. 16
+partially belongs to both, DA and DB , which is exactly what
+R ∞ we want. Thus,
+averaging the subderivatives, and taking into account that −∞ δ(x) dx = 1 we
+arrive at:
+\begin {aligned} \frac {\partial I_A}{\partial p_{AB}} &= \frac {1}{2} \int \limits _{D_A \cup x=0}^{} \left [ f_a(x,y) - f_b(x,y) \right ] \,dy + \Omega _A\\ \frac {\partial I_B}{\partial p_{AB}} &= \frac {1}{2} \int \limits _{D_B \cup x=0}^{} \left [ f_a(x,y) - f_b(x,y) \right ] \,dy + \Omega _B. \end {aligned} \label {eq:sup_pixel_pair_6}
+(18)
+Using the mentioned property of micro-edge formulation, that both fa and
+fb are constant within DA and DB respectively:
+\begin {aligned} \frac {\partial I_A}{\partial p_{AB}} &= \frac {1}{2} \left ( I_A - I_B \right ) + \Omega _A\\ \frac {\partial I_B}{\partial p_{AB}} &= \frac {1}{2} \left ( I_A - I_B \right ) + \Omega _B. \end {aligned} \label {eq:sup_pixel_pair_7}
+(19)
+Now we can plug this result into Eqn. (8) and get:
+\boxed {\frac {\partial L }{\partial p_{AB}} = \frac {1}{2} \left ( \frac {\partial L}{\partial I_A} + \frac {\partial L}{\partial I_B} \right ) \left (I_A - I_B \right ) + \Omega }, \tag {11}\label {eq-sup_chain_new}
+(11)
+Notably, we can arrive to the same result from slightly different perspective.
+Instead of averaging subderivatives, we could circumvent the C1 discontinuity by
+4
+S. Pidhorskyi et al.
+B
+considering the pixel pair as a single unit with average pixel value IAB = IA +I
+,
+2
+thus eliminating the discontinuity problem:
+\begin {aligned} I_{AB} &= \frac {1}{2} \iint _{D_{AB}}^{} \left [ \theta (\alpha (x,y)) f_a(x,y) + \theta (-\alpha (x,y)) f_b(x,y) \right ] \,dx\,dy. \end {aligned} \label {eq-sup_pixel_pair_unit}
+(20)
+Similarly, we assume a horizontal pair: α(x, y) = pAB − x:
+\begin {aligned} I_{AB} &= \frac {1}{2} \iint _{D_{AB}}^{} \left [ \theta (p_{AB} - x) f_a(x,y) + \theta (x - p_{AB}) f_b(x,y) \right ] \,dx\,dy. \end {aligned} \label {eq-sup_pixel_pair_unit_2}
+(21)
+Then the derivative with respect to the edge location pAB :
+\begin {aligned} \frac {\partial I_{AB}}{\partial p_{AB}} &= \frac {1}{2} \iint _{D_{AB}}^{} \left [ \frac {\partial \theta (p_{AB} - x) }{\partial p_{AB}} f_a(x,y) + \frac {\partial \theta (x - p_{AB}) }{\partial p_{AB}} f_b(x,y) \right ] \,dx\,dy + \Omega . \end {aligned} \label {eq-sup_pixel_pair_unit_3}
+Using identity δ(x) = xd θ(x):
+(22)
+\begin {aligned} \frac {\partial I_{AB}}{\partial p_{AB}} &= \frac {1}{2} \iint _{D_{AB}}^{} \left [ \delta (p_{AB} - x)f_a(x,y)- \delta (x - p_{AB}) f_b(x,y) \right ] \,dx\,dy + \Omega . \end {aligned} \label {eq-sup_pixel_pair_unit_4}
+Taking into account that
+we arrive at:
+(23)
+δ(x)
+dx
+=
+1
+and
+combining
+into
+one
+integral
+−∞
+R∞
+\begin {aligned} \frac {\partial I_{AB}}{\partial p_{AB}} &= \frac {1}{2} \int \limits _{D_A \cup x=0}^{} \left [ f_a(x,y) - f_b(x,y) \right ] \,dy + \Omega . \end {aligned} \label {eq-sup_pixel_pair_unit_5}
+(24)
+Similarly, taking into account that fa and fb are constant within DA and DB
+respectively:
+\begin {aligned} \frac {\partial I_{AB}}{\partial p} = \frac {1}{2} \left ( I_B - I_A \right ). \end {aligned} \label {eq-pixel_pair_diff_integrated}
+(25)
+Now that we know the derivative of the average intensity, we need to apply
+it to Eqn. (8). Since we only know average intensity, we assume that individual
+∂IA
+∂IB
+AB
+derivatives ∂p
+and ∂p
+are close enough to the average ∂I∂p
+, thus:
+AB
+AB
+\frac {\partial L}{\partial p_{AB}} = \frac {\partial L}{\partial I_A} \frac {\partial I_A}{\partial p_{AB}} + \frac {\partial L}{\partial I_B} \frac {\partial I_B}{\partial p_{AB}} \approx \left ( \frac {\partial L}{\partial I_A} + \frac {\partial L}{\partial I_B} \right ) \frac {\partial I_{AB}}{\partial p_{AB}}. \tag {8}\label {eq-pixel_pair_loss_22}
+(8)
+And finally, if we plug Eqn. (25) into Eqn. (8):
+\boxed {\frac {\partial L }{\partial p} = \frac {1}{2} \left ( \frac {\partial L}{\partial I_A} + \frac {\partial L}{\partial I_B} \right ) \left (I_B - I_A \right )}, \label {eq-chain_new_2}
+(26)
+which coincides with our previous result and resolves the ambiguity of the
+Dirac delta function integration. In summary, our approximation method allows to circumvent the non-existent derivative with the average of two one-sided
+limits, which leads to the solution described in Section 4.2.
+Rasterized Edge Gradients: Handling Discontinuities Differentiably
+A.1
+5
+Edge classification and gradient scattering
+We have devised a method to compute the gradient with respect to the edge
+location, ∂L
+∂p . However, our ultimate goal is to derive the gradient concerning
+vertex positions, which presents a different challenge. As outlined in Section 4.3,
+we utilize Automatic Differentiation (AD) and primarily focus on gradients relative to fragment locations. These gradients are then back-propagated via AD
+to the vertex positions.
+It’s important to note that gradients with respect to fragment positions are
+distinct from gradients with respect to edge position. For the later one, we have
+calculated ∂L
+∂p for vertical and horizontal edges, reside between pixels, hence there
+is no direct mapping from edges to fragments.
+The computation process is more intuitive when approached from an edgecentric perspective, see Figure 2 of the main paper. We iterate over every edge
+in the image. For each edge, we take the average of the incoming gradient from
+the pixels adjacent to the edge, then we multiply it with the difference of the
+pixel pair intensity, and then scatter this computed gradient onto the gradient
+image relative to fragment locations.
+Before scattering, we transform our edge-related gradients ∂L
+∂p into fragment∂p
+related gradients ∂L
+∂r by multiplying with ∂r . These derivatives of edge location
+with respect to the fragment locations ∂p
+∂r greatly dependent on the edge type,
+as detailed in Figure 3 of the main paper.
+In scenarios without an edge, or where the edge doesn’t create a discontinuity
+(adjacent primitives), the value of ∂p
+∂r is zero, so no gradient is scattered. The simplest case for gradient propagation is the overhanging scenario, occurring when
+a front primitive overlaps another or the background. Since for the background
+primitive’s infinitesimal movement doesn’t affect the edge position, its partial
+derivative is zero. Conversely, for the foreground primitive, this derivative is 1
+since the infinitesimal translation of the foreground primitive directly moves the
+edge with the same direction and velocity.
+The most complex case is when the edge is formed with self-intersecting geometry. In this scenario, the fragment translation does not match the translation
+of the edge and in fact, they can even have opposite directions. Therefore, the
+partial derivative ∂p
+∂r might have positive or negative values for both primitives.
+Since both primitives contribute to the edge displacement, we use the product
+rule for differentiation and first fix one primitive and differentiate with respect to
+the movement of the other, and then do it vice versa. For detailed computations
+of these partial derivatives, refer to §A.2.
+A.2
+Geometry intersections
+In this subsection we explore the computation of the derivatives of edge location
+with respect to fragment locations ∂p
+∂r when the edge is formed by intersecting
+geometry rather than from the edges of primitives.
+This situation is inherently complex, and a general-case solution would be
+challenging. However, our specific simplifications, namely, the assumption that
+6
+S. Pidhorskyi et al.
+all edges are either vertical or horizontal, significantly streamline the problem.
+In our framework, intersections are only feasible between two vertical or two
+horizontal edges. Consequently, we can reduce our analysis from 3D to 2D by
+focusing on either the x-z or y-z planes, where the z-axis is perpendicular to the
+image plane and the x and y axes lie within it.
+Without loss of generality, we will only consider the x-z plane; the same logic
+applies to the y-z plane. Recall that the x-z plane is the plane for vertical edges
+and the y-z plane is the plane for horizontal edges.
+Please see Figure 4 of the main paper while following the derivation below.
+We note two observations: translation of the primitives along the primitive
+plane does not cause the edge to move. Local rotation (around the edge) of the
+primitive does not move the edge either. So in order to move the edge we need
+to translate the primitive along its normal.
+As we mentioned previously, we first consider one primitive fixed and vary
+the position of the other, and then switch the primitives roles.
+For brevity, we will only consider one primitive fixed and the other varying.
+Let the normal of the fixed primitive be nf and the normal of the varying
+primitive nv . We compute a unit length, in-plane vector of the fixed primitive,
+b, by rotating the primitive’s normal by 90◦ :
+\mathbf {b} = \begin {bmatrix} 0 & -1 \\ 1 & 0 \end {bmatrix} \mathbf {n}^f. \label {eq-b_vec}
+(27)
+The translation of the varying primitive is ∂r. Let the ∂r be the projection
+of ∂r onto the normal of the varying primitive:
+{\partial \mathbf {r}} = {\partial r} \mathbf {n}^v. \label {eq-r}
+(28)
+Let s be the displacement vector of the edge in 3D. It is obvious, that the edge
+can only move along the line of the fixed primitive, thus s and b are collinear.
+Moreover, ∂r is the projection of s onto nv :
+{\partial \mathbf {r}} = \left ( \mathbf {s} \cdot \mathbf {n}^v \right ) \mathbf {n}^v. \label {eq-projection}
+(29)
+\mathbf {s} = \frac {\mathbf {b}}{\mathbf {b} \cdot \mathbf {n}^v } {\partial r} \label {eq-s}
+(30)
+Thus:
+The change in the edge position, ∂p is projection of s onto the z axis: ∂p =
+s · ex . So, we can rewrite the (30) as:
+\frac {\partial p}{\partial r} = \frac {\mathbf {b}}{\mathbf {b} \cdot \mathbf {n}^v } \cdot \mathbf {e}_x, \label {eq-prs}
+(31)
+\frac {\partial p}{\partial r} = \frac {-\mathbf {n}^f_z }{{\mathbf {n}^f}^T \begin {bmatrix} 0 & 1 \\ -1 & 0 \end {bmatrix} \mathbf {n}^v }, \label {eq-prd}
+(32)
+or by substituting the (27)
+Rasterized Edge Gradients: Handling Discontinuities Differentiably
+(a) barycentric image
+(b) Index image
+(c) Rendered image
+(e) fragment gradient x
+(f) fragment gradient y
+(g) fragment gradient z
+7
+(d) Target image
+(h) image gradient from loss
+Fig. 11: A toy example. The figure shows different intermidiate tensors demonstrating how our method works: a) barycentric image; b) index image; c) rendered image,
+here it was obtained by interpolating flat vertex colors; d) target image, l2 loss is computed between the target and rendered images; e) fragment gradients in x direction,
+∂L
+∂L
+; f) fragment gradients in y direction, ∂r
+; g) fragment gradients in z direction,
+∂rx
+y
+∂L
+∂rz
+; h) image gradient from the loss, ∂I∂L
+i,j
+.
+which coincides with the equation introduced in §4.4 of the main paper.
+B
+Implementation detail
+We implement our method as a collection of CUDA extension modules for PyTorch, and largely follow the structure of nvdiffrast [20], with the exception for
+the antialiasing module which we replace with our EdgeGrad module.
+We implement the following modules:
+1. Vertex transform module.
+2. Rasterization module.
+3. Barycentrics module.
+4. Interpolation module.
+5. EdgeGrad module.
+We implement module for vertex transformation, which transforms the vertices to the camera frame and then projects them onto the image plane.
+Our rasterization module, which rasterizes the triangles to pixels and simultaneously identifies the closest primitive using z-buffer. The output of the
+rasterization module are index image and depth image. Index image records for
+each pixel the triangle ID that was rasterized to it. Depth image records the
+distance to the fragment along the principal axis.
+8
+S. Pidhorskyi et al.
+vertex positions
+(optimizable parameter)
+Vertex transform
+Barricentrtics module
+(differentiable)
+Rasterizer
+(non differentiable)
+vertex indices
+vertex attributes
+(optimizable parameter)
+index image
+EdgeGrad module
+(differentiable)
+baricentric image
+Interpolate module
+(differentiable)
+Custom deffered
+shading
+(differentiable)
+Loss function
+rendered
+image
+Fig. 12: Components. The figure shows components of our differentiable rasterization
+system.
+We implement barycentrics module which takes in geometry data and the
+index image and returns barycentrics image.
+Our interpolation module interpolates vertex attributes within the rasterized
+fragments. It takes vertex attributes, barycentrics image and the index image
+and returns images of the interpolated attributes.
+Vertex transform, Barycentrics, and Interpolation modules implement backward pass, and the backward pass is a straightforward differentiation of the
+forward pass. Rasterization module does not have a backward pass since that
+role is taken by EdgeGrad module.
+In order to make the best use of the AD system, we implement EdgeGrad
+module as a module with both forward and backward passes. Forward pass takes
+in rendered image and vertex positions. However, the forward pass is not doing
+anything, we pass the rendered image through it unchanged. The purpose of it
+is that the backward pass will be called by AD during the backpropagation and
+and will also return gradients
+will receive gradients from the loss function: ∂I∂L
+i,j
+for the vertex positions. It is the backward pass where all computation happens,
+unlike the forward pass which is the identity operation. Please see Fig. 11 for
+more details.
+Given the modular structure, we can e.g. interpolate vertex colors, uv coordinates, etc. After that, we can do deferred shading using various methods of
+our choice. We can render not only rgb image, but also different axillary images, such as masks, segmentations, normals. All of them can be passed though
+the EdgeGrad module to enable propagation of gradients from the boundary
+discontinuities.
+For all experiments we utilize Laplacian preconditioning proposed by Nicolet
+et al. [34]. We find Laplacian preconditioning extremely helpful for stabilizing
+training and we use it for both, meshes and texture data. We use λ = 8..32,
+most of the time λ = 16.
+In all baselines, we use l2 loss as a photometric loss. For all experiments on
+blender datasets, we add Laplacian regularization loss with a very small weight
+of 4e − 08, which is necessary because Laplacian preconditioning still allows
+accumulation of small artifacts over time.
+Additionally, for all experiments we render an image Itriangle_side where each
+pixel is 1 if the wrong side of triangle is visible and 0 otherwise. All meshes are
+watertight, thus the internal side of triangle is visible only if teh mesh has severe
+self-intersections. Such rendered binary mask is not differentiable, but we pass it
+through EdgeGrad module which allows us to add a loss which we call triangle
+Rasterized Edge Gradients: Handling Discontinuities Differentiably
+9
+back face loss: Lback_f ace = ∥Itriangle_side ∥2 . We use weight 10.0 for Lback_f ace
+loss.
+B.1
+Experiments on Blender [32] dataset
+For all experiments with the blender dataset we follow the geometry growing
+procedure proposed by Nicolet et al. [34], except that we do not do re-meshing
+(for simplicity). We start with manually created, rough, low polygon meshes
+with from 300 to 1000 vertices. We also equip the initialization mesh with uv
+parametrization which is not optimized and stays the same. We grow the mesh
+using loop subdivision during optimization up until it reaches 200k vertices. The
+schedule has the following number of iteration per step [1000, 2000, 4000, 8000],
+the last step has as many iterations as needed to achive the highest PSNR score
+on validation set. We add view conditioned MLP for decoding texture values,
+which is similar to [29]. For each rendered pixel, we interpolate uv coordinates,
+and then in deferred shading step using the uv coordinates of the fragment, we
+sample from a neural texture. The neural texture has 8 channels, and it has sizes
+1024 × 1024. The feature sampled from the neural texture is concatenated with
+the per-pixel view vector. The resulting 11 channels feature vector is passed to
+the MLP which has in total 4 layers, with ReLU activations except for the last
+layer which just returns RGB value. All intermediate layers have 32 channels.
+We optimize vertex locations as well as the neural texture. We use Adam optimizer with learning rate schedule [0.0001, 0.001, 0.0005, 0.00005, 0.000025] for
+the geometry (we switch to the next learning rate each time we do geometry
+subdivision) and fixed learning rate of 0.002 for neural texture and MLP.
+B.2
+Application to dynamic head reconstruction
+Please follow Ma et al. [29] for all details on how the avatar model is trained.
+This model is based on encoder-decoder VAE architecture. The encoder produces an expression code of length 256. The decoder network has two branches,
+one of which produces 512 × 512 × 3 displacement for geometry, and the other
+produces 512×512×4 dynamic neural texture. Only the neural texture branch is
+conditioned on a view vector additionally to the expression code. Similar to the
+blender dataset experiments, there is also a static (not produced by a network)
+1024 × 1024 × 4 neural texture. At deferred shading step, we sample both neural
+textures and concatenate results, thus obtaining 8-channel feature which is then
+pass to an MLP. The MLP is applied separatly to each rendered pixel, it has 4
+layers, with ReLU activations except for the last layer which just returns RGB
+value. All intermediate layers have 8 channels.
+We add supervision in the form of 2D segmentation masks with separate
+labels for the regions of the teeth, tongue, and lips, for details see Fig. 7 of teh
+main paper. The 2D segmentation masks are obtained from a detector network:
+HRNet [47], which is applied to the camera image, and it is trained using our inhouse dataset. Additionally, to the neural texture, we add segmentation texture
+10
+S. Pidhorskyi et al.
+which can do one-hot encoding of the label. This segmentation texture is optimizable, and we initialize it to background label. During training, we optimize
+l2 loss between the rendered segmentation texture and segmentation prediction
+from the segmentation detector. In a such way, we learn content of the segmentation texture. We also apply Laplacian preconditioning to the segmentation
+texture.
+C
+Results
+We follow the experimental settings described for synthetic blender dataset
+in [31]. For the mesh fitting, we use 100 training views and terminate the optimization when the highest score is achieved on the validation set of another 100
+views. Subsequent evaluation employs the remaining 100 views of the test set.
+All images used in training, validation, and testing are 800 × 800 pixels. Our
+method, EdgeGrad, is compared against a variant without intersection handling
+and another without edge gradient handling at all. We also benchmark against
+nvdiffrastr, one of the methods most similar to ours.
+The quantitative results are detailed in Table 2. As indicated, intersection
+handling has a nominal impact on PSNR and SSIM. However, it significantly
+enhances the LPIPS score. We observe that intersection handling effectively reduces topological artifacts. Although these artifacts are typically small, they
+significantly impact perceptual quality. We hypothesize that such artifacts minimally affect non-perceptual losses like PSNR and have limited impact on SSIM,
+but significantly deteriorate the LPIPS score.
+Please refer to the Figures 13–17 for qualitative evaluation on blender dataset [31].
+Please refer to the Figures 18–21 for qualitative evaluation of our method on
+fitting mesh-based avatars.
+Rasterized Edge Gradients: Handling Discontinuities Differentiably
+Initialization mesh
+Nvdiffrast [20]
+11
+EdgeGrad (our)
+Fig. 13: Blender dataset [31], Mesh quality. Qualitative evaluation of reconstructed mesh on the blender dataset, test views. The first column is initialization.
+The second column is Nvdiffrast [20], third column is our method EdgeGrad.
+12
+S. Pidhorskyi et al.
+Initialization mesh
+Nvdiffrast [20]
+EdgeGrad (our)
+Fig. 14: Blender dataset [31], Mesh quality (Continuation of Fig. 13). Qualitative evaluation of reconstructed mesh on the blender dataset, test views. The first
+column is initialization. The second column is Nvdiffrast [20], third column is our
+method EdgeGrad.
+Rasterized Edge Gradients: Handling Discontinuities Differentiably
+Continuous only
+EdgeGrad -intersections
+13
+EdgeGrad (our)
+Fig. 15: Blender dataset [31], Ablation, mesh quality. Ablation study of our
+method (EdgeGrad) on the blender dataset, test views. The first column is complete
+absence of gradients due to discontinuity, only the smooth component. Second is EdgeGrad, but without intersections handling. Third is full variant of EdgeGrad (our).
+14
+S. Pidhorskyi et al.
+Ground truth image
+Nvdiffrast [20]
+EdgeGrad (our)
+Fig. 16: Blender dataset [31], Render image quality. Qualitative evaluation of
+reconstructed scene on the blender dataset, test views. The first column is ground truth
+image. The second column is Nvdiffrast [20], third column is our method EdgeGrad.
+Rasterized Edge Gradients: Handling Discontinuities Differentiably
+Initialization mesh
+Nvdiffrast [20]
+15
+EdgeGrad (our)
+Fig. 17: Blender dataset [31], Render quality (Continuation of Fig. 16). Qualitative evaluation of reconstructed scene on the blender dataset, test views. The first
+column is ground truth image. The second column is Nvdiffrast [20], third column is
+our method EdgeGrad.
+16
+S. Pidhorskyi et al.
+Ground truth image
+Nvdiffrast [20]
+EdgeGrad (our)
+Fig. 18: Dynamic head scene. Qualitative evaluation of reconstructed dynamic head
+scene. The first column is ground truth image. The second column is Nvdiffrast [20],
+third column is our method EdgeGrad.
+Rasterized Edge Gradients: Handling Discontinuities Differentiably
+Ground truth image
+Nvdiffrast [20]
+17
+EdgeGrad (our)
+Fig. 19: Dynamic head scene. (Continuation of Fig. 18). Qualitative evaluation
+of reconstructed dynamic head scene. The first column is ground truth image. The
+second column is Nvdiffrast [20], third column is our method EdgeGrad.
+18
+S. Pidhorskyi et al.
+Nvdiffrast [20]
+EdgeGrad (our)
+Fig. 20: Dynamic head scene. Mesh evaluation. Qualitative evaluation of reconstructed mesh for dynamic head scene. The first column is Nvdiffrast [20] and the
+second column is our method EdgeGrad.
+Rasterized Edge Gradients: Handling Discontinuities Differentiably
+Nvdiffrast [20]
+19
+EdgeGrad (our)
+Fig. 21: Dynamic head scene. Mesh evaluation. (Continuation of Fig. 20).
+Qualitative evaluation of reconstructed mesh for dynamic head scene. The first column
+is Nvdiffrast [20] and the second column is our method EdgeGrad.

@@ -1,0 +1,1153 @@
+CTBAKE GS: TRAINING - FREE BAKING OF PHOTOREALISTIC CT
+VOLUME RENDERINGS INTO 3D G AUSSIAN SPLATS
+A P REPRINT
+Haruki Fukuda* 1 , Constantin Lux2 , Wolf Schweitzer2 , Tadashi Hosoya1 , and Lars Ebert3
+arXiv:2610.37406v1 [cs.CV] 27 Oct 2026
+1
+Department of Forensic Medicine, Gunma University Graduate School of Medicine, Maebashi, Japan
+2
+Institute of Forensic Medicine, Universität Zürich, Zürich, Switzerland
+3
+Biometrics/Forensic Imaging, Zurich Forensic Science Institute, Zurich, Switzerland
+A BSTRACT
+Photorealistic volume rendering of computed tomography (CT) may convey anatomy intuitively,
+but it needs the CT data, dedicated software and a powerful graphics processor. Three-dimensional
+Gaussian splatting (3DGS) displays photorealistic scenes in real time on less powerful devices, but
+existing medical approaches train each scene for minutes to hours. We aimed to convert a CT volume
+rendering directly into a 3DGS model without training. Splats were placed on an adaptive octree of
+millimetre-sized cells. Their colour and opacity were computed on the graphics processor with the
+renderer’s lighting, cell opacity was converted analytically into splat opacity, and faint splats were
+retained stochastically above the 1/255 opacity floor of standard 3DGS rasterisers. Six public CT
+scans (1.5-mm voxels) were converted with three transfer functions and compared with converged
+references by peak signal-to-noise ratio (PSNR), structural similarity and a learned perceptual metric.
+Two-million-splat models reached a PSNR of 32.6 +/- 0.9 dB for bone, 30.1 +/- 1.0 dB for contrastenhanced vessels and 32.3 +/- 1.5 dB for skin and bone. A conversion pass (usually two or three
+per model) took 4-30 s on a current laptop and 9-60 s on a desktop with a 4-GB graphics card.
+On the laptop, the models rendered at 68 frames per second at 800 x 800 pixels. Training-free
+conversion produced real-time 3DGS models of photorealistic CT renderings in about a minute or
+less per conversion pass on ordinary computers, with fidelity that we consider sufficient for interactive
+viewing.
+Keywords Computer graphics · Imaging (three-dimensional) · Software · Tomography (X-ray computed) · Image
+processing (computer-assisted)
+1
+Background
+Photorealistic volume rendering of computed tomography (CT) simulates light scattering in tissue and has the capacity
+to depict anatomy with apparent lifelike depth and shading [1–4]. It speeds anatomical understanding compared with
+conventional CT images and serves surgical planning, teaching, patient communication and documentation [5–8].
+However, it needs the CT data, dedicated software and a powerful graphics processing unit (GPU), so results are usually
+shared as still images or videos.
+Three-dimensional Gaussian splatting (3DGS) represents a scene as millions of semi-transparent Gaussians rasterised
+in real time [9]. Standard 3DGS viewers display such models directly, so a 3DGS model of a CT rendering could be
+viewed, also in head-mounted displays, without the CT data or renderer. For medical and scientific volumes, most
+methods optimise Gaussians iteratively against tens to over a thousand rendered views per scene, for minutes to over an
+hour on a dedicated GPU [10–16]; one refines an analytic initialisation [17]. Feed-forward networks predict Gaussians
+within seconds but must first be trained on about 100–1,000 volumes with rendered views [18, 19]. Most optimised
+models must be rebuilt, or extended [15, 16], when the transfer function changes.
+∗
+Corresponding author: haruki1995@gunma-u.ac.jp
+CTBakeGS: training-free baking of CT renderings into 3D Gaussian splats
+Step 1
+CT volume +
+transfer function
+Light volume
+Step 2
+Adaptive octree
+of mm cells
+Step 3
+Step 4
+Bake per cell
+A P REPRINT
+Step 5
+Opacity mapping
+Faint splats
+retained
+α < 1/255
+Standard 3DGS
+α0
+sum = τcell
+Hounsfield units →
+colour and opacity
+sky light in 24
+directions + soft
+shadows
+split where opacity
+changes, down to
+sub-voxel size
+27 samples per cell: τsplat = τcell h 2/(2πs 2) below the 8-bit floor:
+colour and lighting
+kept with p = τ/τ0
+s = 0.55 h
+at opacity α0
+.ply / .spz for
+common viewers
+Fig. 1 Training-free conversion of a CT volume rendering into 3D Gaussian splats. The CT volume is shown with a chosen
+transfer function, which maps Hounsfield units to colour and opacity; the boxes marked Step 1–5 correspond to the steps in the text.
+A light volume, shared with the photorealistic renderer, stores the visibility of a sky dome in 24 directions and the transmittance
+towards a key light with soft shadows. The volume is divided into an adaptive octree of millimetre-sized cubic cells, split only where
+opacity changes, down to sub-voxel size; the finest size is adjusted to reach the requested number of splats. Each cell is sampled at 27
+stratified points with the colour and lighting of the volume renderer, giving one colour with baked lighting and an opacity. Opacity
+mapping replaces each cell by a Gaussian with the same total opacity, fainter at the centre and wider than the cell (s = 0.55h; top);
+in a profile through a row of cells, the overlapping Gaussians add up to the opacity of the cells (bottom). Faint splats, whose opacity
+would fall below the 1/255 floor of standard rasterisers, are retained stochastically with raised opacity. The output is a standard
+3DGS file (.ply or .spz); the example shows case 2 with the contrast-enhanced vessel transfer function. CT, computed tomography;
+3DGS, three-dimensional Gaussian splatting
+A volume, however, already defines what a Gaussian representation needs: where the material is, how opaque it is
+and, once lit, its colour. Gaussian kernels have long served direct volume rendering, notably in elliptical weighted
+average (EWA) splatting [20]. Instead of optimising or learning Gaussians from rendered images, we aimed to bake the
+appearance of a lit CT rendering directly into Gaussians, so that conversion is immediate on ordinary hardware. The
+contribution is not a new rendering model but the removal of the prerequisites of existing 3DGS pipelines: rendered
+training views, a dedicated GPU and per-scene training time. We describe CTBakeGS and measure how faithfully it
+reproduces the original rendering.
+2
+Methods
+2.1
+Conversion
+Principle. A CT volume stores voxel-wise radiodensity values in Hounsfield units. A direct volume rendering is fully
+defined by three inputs: the CT data, a transfer function that maps Hounsfield units to colour and opacity [21], and
+the virtual lighting. A 3DGS model, in turn, is a set of Gaussian splats. Each splat is a small, “soft”, semi-transparent
+blob in space, described by a position, a size and orientation (scale and rotation; a sphere or a stretched ellipsoid), an
+opacity and a colour; its opacity is highest at the centre and fades smoothly with distance from it [9]. A splat differs
+from a voxel in three respects. First, a voxel is one sample of a regular grid, so its position and size are fixed by the grid,
+whereas a splat can be placed anywhere and have any size. Second, a voxel stores a measured quantity, in CT the X-ray
+attenuation in Hounsfield units, and says nothing about appearance; a splat stores the appearance itself, that is, how that
+piece of the scene looks. Third, a voxel volume becomes an image only through volume rendering (transfer function,
+lighting and ray casting) [21], whereas splats are simply projected onto the screen and blended in depth order [9, 20],
+which graphics processors do very quickly.
+CTBakeGS derives splats directly from the volume: the volume is divided into small cells, each cell becomes one splat,
+and each splat receives the colour and opacity that the lit volume rendering gives to its cell.
+This takes five steps, described in turn below (Fig. 1): (1) virtual lighting is precomputed, so that it can be stored in
+the splat colours; (2) the volume is divided into cells, which set the positions and sizes of the splats; (3) colour and
+opacity are sampled within each cell; (4) cell opacity is converted into splat opacity, as neighbouring splats overlap
+to generate a smooth realistic appearance; and (5) faint splats, which would vanish below the 1/255 opacity floor of
+standard rasterisers, are retained stochastically with raised opacity. An anti-aliasing compensation is applied when the
+splats are drawn. The result is written as a standard 3DGS file (.ply or .spz).
+2
+CTBakeGS: training-free baking of CT renderings into 3D Gaussian splats
+A P REPRINT
+Step 1: lighting. In CTBakeGS, each splat has a single view-independent colour that does not change with the
+viewing direction, whereas 3DGS models trained from images usually store view-dependent colour. Lighting and
+shadows must therefore be computed before conversion and stored (baked) in that colour. CTBakeGS uses the lighting
+of its own photorealistic volume renderer, which approximates global illumination with a precomputed light volume of
+about 112 cells along the longest axis. For each light-volume cell, rays cast through the transfer-function opacity give
+the visibility of a sky dome in 24 directions and the transmittance towards a key light, which produces soft shadows. A
+sample’s colour is multiplied by the visibility-weighted sky light plus the transmittance-weighted key light and then
+tone-mapped. The renderer has a real-time view (one pass per frame), which supplies the colours for conversion, and a
+progressive view, which averages jittered frames until the image converges.
+Step 2: cells. The cells determine where splats are placed and how large they are. Cells of one voxel each would spend
+many splats on homogeneous regions and would tie the splat count to the voxel count. Cells are therefore organised as
+an adaptive octree that is refined only where opacity changes. Starting from cells four voxels wide, a cell is split into
+eight when its opacity varies strongly, that is, when the maximum transfer-function opacity over its Hounsfield-unit
+range, αmax , exceeds the smaller of the opacities at the two ends of that range by more than αmax /2 (and αmax > 0.01).
+Homogeneous regions thus keep one large splat, whereas boundaries receive small splats, down to sub-voxel size. The
+split test extends 1.5 cell widths beyond the cell, so that large splats do not protrude through nearby surfaces. Cells are
+cubes measured in millimetres (unit: the finest voxel spacing), so that thick-slice data do not produce elongated cells.
+The number of splats follows from the finest permitted cell size. To reach a chosen target count, this size is adjusted,
+assuming a power law between cell size and splat count, and the conversion is repeated until the count is within 8% of
+the target, usually after two or three conversion passes. If the target falls between two octree levels, as happened once
+(case 3, bone, one-million target), the count overshoots.
+Step 3: colour and opacity. Each cell is now reduced to one colour and one opacity. The cell is sampled on the GPU
+at 27 stratified points (3 × 3 × 3). At each point, the transfer function gives the extinction, and the colour is shaded with
+the lighting model and light volume of the real-time view (Step 1). The point colours are averaged with weights for
+extinction and for the transmittance towards the most open axis direction, so that points lying deep inside the cell do not
+darken it. From the mean extinction σ̄ and the cell size h, the cell opacity is
+αcell = 1 − exp(−σ̄h) .
+(1)
+Step 4: opacity mapping. Each cell is replaced by an isotropic Gaussian splat with standard deviation s. To avoid
+gaps and ripples between splats, s is chosen so that each splat extends beyond its cell. Neighbouring splats therefore
+overlap, and a ray crosses several of them; if every splat simply carried the cell opacity, the model would be too opaque.
+With the optical depth of the cell
+τcell = − ln(1 − αcell ) ,
+(2)
+the optical depths of a lattice of isotropic Gaussians with spacing h and standard deviation s add up along a ray to that
+of the volume when each splat carries
+h2
+τsplat = τcell
+.
+(3)
+2πs2
+With s = 0.55h, the narrowest width for which Gaussians on a lattice of spacing h sum to a constant optical depth
+within 1% along each lattice axis, the splat opacity is
+αsplat = 1 − exp(−0.526 τcell ) .
+(4)
+Step 5: faint splats. Standard 3DGS rasterisers skip splats whose opacity is below 1/255, and compact formats such
+as .spz store opacity with 8 bits, so a splat with αsplat below this floor vanishes. In a thin translucent layer, every cell is
+below the floor, although many such cells along an oblique ray add up to a visible veil; discarding them removes the
+whole layer. CTBakeGS therefore keeps a faint splat (αsplat < α0 , with α0 = 0.01, about 2.5/255, so that it stays above
+the floor after the anti-aliasing compensation) with probability τsplat /τ0 , where τ0 = − ln(1 − α0 ), and assigns it the
+opacity α0 . The expected optical depth of the lattice is unchanged, and fewer splats are needed. The choice uses a hash
+of the cell index, so the conversion remains deterministic.
+Anti-aliasing compensation. To avoid aliasing, 3DGS rasterisers enlarge each projected Gaussian by a small screenspace filter (variance 0.3 pixel2 ). This makes small splats appear thicker than intended [22]. As in Mip-Splatting [22],
+the splat opacity is therefore multiplied at drawing time by
+s
+det(Σ)
+w=
+,
+(5)
+det(Σ + 0.3I)
+where Σ is the projected covariance and I the identity matrix.
+3
+CTBakeGS: training-free baking of CT renderings into 3D Gaussian splats
+2.2
+A P REPRINT
+Implementation
+CTBakeGS is a single HTML file (JavaScript, WebGL 2) that runs locally in a web browser. It is available at
+https://github.com/BocchiSlice/CTBakeGS; version 1.0 was used for all measurements.
+2.3
+Evaluation
+Data. We used six CT scans from two scanner vendors in the TotalSegmentator dataset v2 (CC BY 4.0) [23]: case 1
+(s0289), head CT angiography; case 2 (s0138), heart and thoracic aorta; case 3 (s1340), thorax to pelvis; case 4 (s0970),
+polytrauma; case 5 (s1121), pelvis-to-leg CT angiography; case 6 (s0931), neck-to-leg CT angiography (Supplementary
+Table S1). All have 1.5-mm isotropic voxels (215–519 slices; 4.9–56.7 million voxels). For the thick-slice test, the
+1.5-mm slices of case 1 were also averaged along the slice direction in groups spanning 5 mm, giving voxels of
+1.5 × 1.5 × 5 mm.
+Views and reference. Each scan was rendered with three preset transfer functions (bone; contrast-enhanced vessels;
+skin and bone), giving 18 scenes plus three for the 5-mm data. For each scene, 48 wide views (16 azimuths at three
+elevations) and 16 close-up views were rendered at 800 × 800 pixels on a black background. Close-up views were
+centred on visible surface points chosen by farthest-point sampling, at 0.3 times the wide distance. The reference image
+for each view was rendered by the progressive view of the renderer (Step 1), from the same volume, transfer function
+and lighting, by averaging 128 jittered frames. The same view averaged over 256 frames differed from it by a peak
+signal-to-noise ratio (PSNR; see Metrics) of 54.7–58.7 dB, a root-mean-square (RMS) difference below half an 8-bit
+grey level and far smaller than the differences of the 3DGS models, so the reference was considered converged.
+The 3DGS models were rasterised from the same cameras.
+Metrics. Each 3DGS model was compared with the reference by PSNR, computed over the whole image and over the
+foreground (pixels non-black in either image), the structural similarity index (SSIM) [24] and the learned perceptual
+image patch similarity (LPIPS, VGG backbone) [25]. PSNR is 20 log10 of the full-scale value divided by the RMS
+pixel difference; 20 dB more means a tenfold smaller RMS difference, and 32 dB corresponds to about 2.5% of full
+scale, or 6 of 255 grey levels in an 8-bit image. We also recorded splat counts, conversion times and frame rates; frame
+rates were measured in the built-in WebGL rasteriser of CTBakeGS.
+Variants. To test how splat count and the individual conversion steps affect fidelity, we evaluated models with about
+1, 2 (main setting) and 3 million splats, and five ablations, each of which removes or replaces one step:
+• no opacity mapping (Step 4; cell opacity used as is);
+• no anti-aliasing compensation;
+• without faint splats (Step 5; splats below the 8-bit floor discarded);
+• a uniform grid with one cell per voxel instead of the adaptive octree (Step 2), compared with the octree at the
+same number of splats;
+• voxel-unit instead of millimetre cells (Step 2; 5-mm data only).
+Hardware. Measurements used Chrome 155 on a 14-inch Apple MacBook Pro (2024; M4 Max, 14-core CPU,
+32-core GPU, 36 GB memory, macOS 26.6). Speed was also measured on a Windows desktop (Chrome 155; 2018;
+Intel Core i7-8700, 16 GB memory, NVIDIA GeForce GTX 1050 Ti, 4 GB, Windows 11) and conversion time on a
+13-inch Apple MacBook Air (Chrome 137; 2017; 1.8-GHz dual-core Intel Core i5, Intel HD Graphics 6000, 8 GB
+memory, macOS 12.6).
+Statistics. Metrics were averaged over the views of each scene, and the case was the unit of analysis (mean±standard
+deviation over six cases). Variants were compared with the main setting by the two-sided exact Wilcoxon signed-rank
+test; with six cases the smallest attainable p value is 0.031, and p values are exploratory and not adjusted for multiple
+comparisons. Analyses used Python 3.9 with NumPy 2.0, SciPy 1.13, pandas 2.3 and lpips 0.1.4 (PyTorch 2.8).
+4
+CTBakeGS: training-free baking of CT renderings into 3D Gaussian splats
+A P REPRINT
+Table 1 Image quality of the 3DGS models against converged photorealistic references
+Look, views
+PSNR (dB)
+Bone, wide
+Bone, close-up
+Vessels, wide
+Vessels, close-up
+Skin and bone, wide
+Skin and bone, close-up
+SSIM
+LPIPS
+PSNR, real-time
+1M
+2M
+3M
+2M
+2M
+photorealistic (dB)
+32.02±1.42
+28.46±1.87
+29.17±1.15
+25.23±1.55
+31.78±1.80
+28.24±1.04
+32.61±0.89
+29.63±1.55
+30.09±0.98
+26.56±1.62
+32.32±1.51
+29.09±1.01
+32.52±0.86
+30.21±1.42
+30.43±0.87
+27.29±1.60
+32.19±1.18
+29.43±0.94
+0.980±0.005
+0.949±0.012
+0.960±0.011
+0.895±0.023
+0.961±0.017
+0.925±0.013
+0.028±0.014
+0.135±0.041
+0.036±0.016
+0.150±0.019
+0.091±0.040
+0.314±0.029
+44.61±1.26
+45.89±1.64
+42.28±1.47
+43.89±1.51
+47.12±0.79
+46.70±1.19
+Mean ± standard deviation over six cases; metrics were first averaged over the 48 wide or 16 close-up views of each scene. Models
+had approximately 1, 2 or 3 million (M) splats. Higher PSNR and SSIM and lower LPIPS indicate closer pixel-level agreement
+with the reference; they do not measure anatomical accuracy. LPIPS, learned perceptual image patch similarity; PSNR, peak
+signal-to-noise ratio; SSIM, structural similarity index; 3DGS, three-dimensional Gaussian splatting.
+Table 2 Per-case image quality with two million splats, PSNR (dB) / SSIM / LPIPS
+Look
+Views
+Case 1
+Case 2
+Case 3
+Case 4
+Case 5
+Case 6
+Bone
+Bone
+Vessels
+Vessels
+Skin and bone
+Skin and bone
+wide
+close-up
+wide
+close-up
+wide
+close-up
+33.6/0.982/0.031
+30.0/0.961/0.178
+30.2/0.966/0.042
+27.4/0.925/0.156
+32.3/0.968/0.088
+29.4/0.942/0.306
+32.0/0.971/0.054
+31.2/0.948/0.192
+30.4/0.942/0.065
+28.7/0.911/0.174
+29.8/0.927/0.170
+28.7/0.935/0.356
+33.1/0.980/0.023
+30.0/0.945/0.124
+30.3/0.955/0.034
+25.9/0.861/0.163
+32.9/0.963/0.087
+29.9/0.922/0.322
+31.1/0.979/0.022
+27.1/0.935/0.118
+28.3/0.962/0.030
+24.0/0.877/0.147
+32.0/0.968/0.070
+28.2/0.904/0.314
+33.1/0.980/0.018
+30.9/0.965/0.085
+31.3/0.969/0.019
+27.4/0.903/0.120
+34.5/0.976/0.064
+30.5/0.926/0.267
+32.6/0.985/0.017
+28.5/0.941/0.114
+30.1/0.969/0.024
+26.1/0.893/0.138
+32.5/0.967/0.069
+27.9/0.921/0.316
+Metrics were averaged over the 48 wide or 16 close-up views of each scene; case numbers as in Supplementary Table S1. LPIPS,
+learned perceptual image patch similarity; PSNR, peak signal-to-noise ratio; SSIM, structural similarity index.
+3
+Results
+3.1
+Fidelity
+Splat counts were within 8% of the targets in every scene except one (case 3, bone, 1.37 million for the one-million
+target). With two million splats, wide-view PSNR was 32.6±0.9 dB for bone, 30.1±1.0 dB for contrast-enhanced
+vessels and 32.3±1.5 dB for skin and bone, with SSIM of 0.960–0.980 and LPIPS of 0.028–0.091 (Table 1; Fig. 2).
+Close-up views were about 3 dB lower; the real-time photorealistic view reached 42–47 dB. Errors lay mainly along the
+edges of dense structures for bone and vessels and were spread over the translucent layer for skin and bone (Fig. 2).
+Fidelity was lowest in close-up views of case 4, the largest volume, for bone and vessels (27.1 and 24.0 dB), and in
+wide views of case 2 for skin and bone (29.8 dB; other cases 32.0–34.5 dB; Table 2).
+3.2
+Splat count and speed
+Compared with two million splats, one million lowered close-up PSNR in all cases for bone (median −1.2 dB), vessels
+(−1.3 dB) and skin and bone (−0.9 dB), and three million raised it in all cases (+0.6, +0.8 and +0.4 dB); close-up LPIPS
+followed the same pattern (Supplementary Table S2). A two-million-splat pass took 14.3 s on average (4.2–29.5 s),
+and rendering ran at 68 frames per second (800 × 800 pixels; Table 3). A desktop with a 4-GB graphics card needed
+29.4 s per pass and rendered 28 frames per second. The 2017 laptop needed 106 s (30–216 s) and rendered 7 frames per
+second.
+3.3
+Ablations
+Without opacity mapping, PSNR was lower in all cases for every look (median −4.5 and −5.1 dB for bone in wide
+and close-up views, −1.3 and −1.9 dB for vessels, −5.3 and −5.9 dB for skin and bone; Supplementary Table S2).
+Without anti-aliasing compensation, wide-view PSNR was lower in all cases for bone (−3.8 dB) and vessels (−0.9 dB),
+with little change for skin and bone and in close-up views. At equal splat count, a uniform grid with one cell per voxel
+was as faithful as the octree for vessels and skin and slightly better for bone (+0.4 and +0.6 dB, all cases). The voxel
+grid, however, fixes the splat count (0.14–2.86 million); in the two smallest volumes, two-million-splat octree models
+exceeded it by 1.3–2.7 dB for bone and vessels. With 5-mm slices, millimetre cells gave PSNR similar to the 1.5-mm
+data (bone, wide views: 34.3 vs 33.6 dB), whereas voxel-unit cells gave 22.5 dB (Supplementary Table S3; per-case
+details in Supplementary Table S1). Without faint splats, PSNR was lower in all cases in wide views (bone −0.3 dB,
+5
+CTBakeGS: training-free baking of CT renderings into 3D Gaussian splats
+A P REPRINT
+Fig. 2 Representative results: converged references, 3DGS models and their differences. (a) Bone, case 1; (b) contrast-enhanced
+vessels, case 6; (c) skin and bone, case 3; one wide view each, cropped to the body. Top: converged photorealistic volume rendering
+(reference); middle: 3DGS model with two million splats; bottom: difference from the reference (mean absolute difference over the
+colour channels, 0 to ≥ 50 grey levels of 255). Insets (yellow frames) show a close-up view of the same scene; dashed boxes mark
+the region it covers in the wide view. Errors lie mainly along the edges of dense structures for bone and vessels and are spread over
+the translucent layer for skin and bone. 3DGS, three-dimensional Gaussian splatting
+6
+CTBakeGS: training-free baking of CT renderings into 3D Gaussian splats
+A P REPRINT
+Table 3 Splat counts, conversion times and frame rates
+Model
+Splats (million)
+Conversion time, MacBook Pro (s)
+Frame rate, MacBook Pro (fps)
+Conversion time, Windows desktop (s)
+Frame rate, Windows desktop (fps)
+Conversion time, MacBook Air 2017 (s)
+1M
+2M
+3M
+1.04 (0.92–1.37)
+11.0 (2.2–24.0)
+122 (97–137)
+23.1 (4.6–50.0)
+52 (36–60)
+85 (22–193)
+2.00 (1.89–2.15)
+14.3 (4.2–29.5)
+68 (62–74)
+29.4 (8.8–60.2)
+28 (22–33)
+106 (30–216)
+2.97 (2.76–3.23)
+17.1 (3.1–30.7)
+48 (43–53)
+35.1 (7.4–63.0)
+19 (16–22)
+—a
+Mean (range) over six cases × three looks. Conversion time is one conversion pass at the final cell size; reaching
+the target splat count usually took two or three passes; frame rates at 800 × 800 pixels in Chrome. a Not reported:
+three-million-splat conversions completed in only 10 of 18 scenes on this computer, the others exceeding its graphics
+memory. The .ply files hold 68 bytes per splat (128–146 MB for the 2-M models).
+Table 4 Per-case PSNR (dB) with two million splats, with / without faint splats
+Look
+Views
+Case 1
+Case 2
+Case 3
+Case 4
+Case 5
+Case 6
+Bone
+Bone
+Vessels
+Vessels
+Skin and bone
+Skin and bone
+wide
+close-up
+wide
+close-up
+wide
+close-up
+33.6 / 33.4
+30.0 / 29.7
+30.2 / 30.1
+27.4 / 27.3
+32.3 / 29.8
+29.4 / 27.4
+32.0 / 31.6
+31.2 / 30.7
+30.4 / 29.7
+28.7 / 27.7
+29.8 / 23.8
+28.7 / 23.7
+33.1 / 32.5
+30.0 / 29.2
+30.3 / 29.9
+25.9 / 25.4
+32.9 / 31.4
+29.9 / 28.6
+31.2 / 30.8
+27.1 / 26.7
+28.3 / 27.9
+24.0 / 23.5
+32.0 / 31.2
+28.2 / 27.2
+33.1 / 32.9
+30.9 / 30.0
+31.3 / 30.9
+27.4 / 26.6
+34.5 / 33.7
+30.5 / 29.8
+32.6 / 32.6
+28.5 / 28.5
+30.1 / 29.7
+26.1 / 25.6
+32.5 / 30.7
+27.9 / 26.5
+PSNR averaged over the 48 wide or 16 close-up views of each scene; case numbers as in Supplementary Table S1. With: the full
+method (Step 5); without: splats below the 8-bit opacity floor discarded (ablation). PSNR, peak signal-to-noise ratio.
+vessels −0.4 dB, skin and bone −1.6 dB) and in close-up views of vessels and skin and bone (−0.5 and −1.4 dB),
+with little change in LPIPS; the loss was largest in case 2, where wide-view PSNR for skin and bone fell from 29.8 to
+23.8 dB (Table 4; Fig. 3).
+4
+Discussion
+CTBakeGS converted CT volume renderings into standard 3DGS models in about a minute or less per conversion
+pass, usually two or three passes per model, on a current laptop and on a 2018 desktop with a 4-GB graphics card,
+without training or per-scene optimisation. The idea is simple, but three steps made it work: the opacity mapping for
+overlapping splats, the baked lighting and the retention of faint splats above the 8-bit opacity floor. It is deterministic as
+every splat derives from its cell’s voxels; a new transfer function needs only another conversion; and, with the virtual
+lighting baked in, standard viewers show the lit result. Because the viewer runs in a web browser, no software has to be
+installed, and a converted model could be packaged with the viewer page and sent, for example, to patients as their CT
+scan in a form that runs on ordinary devices. Because splats are a common format, a volume rendering could also be
+combined with splat models of other origin, such as reconstructions of a crime scene.
+The fidelity results may define the scope of use. Bone reached about 33 dB in wide and 30 dB in close-up views,
+corresponding to an RMS pixel difference of about 2.3% and 3.3% of full scale, or 6 and 8 of 255 grey levels, and skin
+and bone about 29 dB in close-up views (3.5%; 9 of 255), whereas the real-time volume renderer reached 42–47 dB
+(0.45–0.8%; 1–2 of 255). Contrast-enhanced vessels were weakest in close-up views (27 dB; 4.7%; 12 of 255), where
+the edges of dense bone and thin vessels were smoothed. In case 4, the largest volume, the same splat budget gave
+coarser cells, and close-up fidelity rose with more splats (vessels 22.8, 24.0 and 24.8 dB with 1, 2 and 3 million splats),
+so large volumes may need more splats.
+Values reported for trained models (about 21–37 dB [10, 12, 18]) used different data, resolutions and references and
+are not directly comparable. Optimisation [10–17], feed-forward networks [18, 19] and hybrid streaming [26] remain
+preferable when the highest fidelity matters and their cost is acceptable. CTBakeGS does not compete with them on
+fidelity but removes their prerequisites.
+Faint splats were the main source of error in translucent layers. Standard 3DGS rasterisers discard opacities below
+1/255, and the thin outer soft-tissue layer of the skin-and-bone look consists of such faint cells, which are visible in the
+volume rendering only because many of them add up along oblique rays. Without the retention of Step 5, this layer
+was largely missing in case 2 and the ribs showed through it (Fig. 3); its wide-view PSNR fell from 29.8 to 23.8 dB,
+7
+CTBakeGS: training-free baking of CT renderings into 3D Gaussian splats
+A P REPRINT
+Fig. 3 Faint splats: case 2, skin and bone, two million splats. (a) Converged photorealistic volume rendering (reference); (b)
+3DGS model without faint splats (ablation of Step 5); (c) 3DGS model with faint splats (CTBakeGS). Top row: one wide view,
+cropped to the body; middle row: close-up of the dashed box; bottom row: difference from the reference as in Fig. 2 (0 to ≥ 50
+grey levels of 255). Without them, the thin outer soft-tissue layer, whose splats fall below the 8-bit opacity floor, is missing and the
+ribs show through (PSNR 22.5 dB in this view); with them it is restored (30.1 dB), with a fine grain visible at close range. 3DGS,
+three-dimensional Gaussian splatting; PSNR, peak signal-to-noise ratio
+8
+CTBakeGS: training-free baking of CT renderings into 3D Gaussian splats
+A P REPRINT
+and bone and vessels in that case lost 0.5 and 0.7 dB (Table 4). In exploratory runs, lowering the discard threshold to
+0.001 or not splitting faint cells did not restore the layer (+0.1 and +0.3 dB); retaining faint splats stochastically with
+raised opacity did. The retained splats are individually denser than the tissue they represent, which gives the layer a
+fine grain at close range. Isotropic splats may still represent thin translucent sheets poorly, and 3DGS rasterisers sort
+whole splats rather than samples along each ray [27]. The translucent skin layer is itself a simplification: real skin has a
+complex, spectrally varying reflectance with subsurface scattering in its upper layers [28], and easy-to-use, realistic
+skin rendering from CT remains for future research.
+At equal splat count, the octree was not more faithful than a uniform grid. Its benefit is that the splat count can be
+chosen, for example two million for every volume, instead of being dictated by the number of voxels, which ranged
+from 0.14 to 2.86 million here.
+This study has limitations. Six cases from one public dataset were used, with 1.5-mm voxels, which are slightly coarser
+than the maximum slice thickness of 1.25 mm proposed for three-dimensional reconstruction in forensic casework [29];
+clinical thin-slice scans have up to ten times more voxels and convert more slowly. We also stopped at three million
+splats; close-up fidelity was still rising at that count, so more splats may improve it further at the cost of file size and
+frame rate, whereas wide-view fidelity had levelled off. The evaluation has two boundaries of its own. Fidelity was
+measured against the converged view of the same renderer, whose lighting only approximates global illumination, so
+agreement with other photorealistic renderers is unknown, and PSNR, SSIM and LPIPS do not establish anatomical
+accuracy. Nor did we test the use of the models: whether they aid teaching or communication, or are suitable for
+diagnostic reading, requires reader studies. Finally, two choices in the method were made rather than optimised. The
+opacity floor of the retained faint splats (α0 = 0.01) is roughly the smallest value that stays above the 1/255 cut-off after
+the anti-aliasing compensation, which reduces the drawn opacity of small splats, and the two interact; and lighting,
+transfer function and clipping are fixed at conversion, so that view-independent colours lose specular highlights.
+Several of these limitations point to the next steps. A larger series, including clinical thin-slice scans, should be tested,
+and conversion of thin-slice and very large volumes should become faster, for example by caching the Hounsfield-unit
+ranges of the volume for the octree. It also remains to be determined which computer is the minimum for displaying
+(rather than converting) the models, how they compare with volume rendering and path tracing in this respect and in
+compressibility. Whether fine structures such as hairline fractures are preserved also needs to be tested, and the error
+between the model and the rendering could be used to place more splats where details are lost. Fidelity could rise further
+with view-dependent colours (spherical harmonics), which would restore highlights, and with flat or anisotropic splats
+for thin translucent layers [30]. The converted model could also be edited directly, cut with a clip plane or recoloured by
+segmented organ, without reconverting. Above all, reader studies are needed to show whether the models aid teaching
+and communication.
+5
+Conclusions
+We could demonstrate that photorealistic CT volume renderings can be converted directly into standard 3D Gaussian
+splats, without training, and displayed in a web browser. Conversion took about a minute or less per pass on a current
+laptop and on a 2018 desktop with a 4-GB graphics card, and under 4 minutes per pass on a 2017 laptop with integrated
+graphics. The models reproduce the rendering with root-mean-square errors of about 2.3–3.1% of full scale in wide
+views. This approach could make complex CT data easier to share and view interactively without the CT data or a
+volume renderer, with potential value for communication and teaching.
+Abbreviations
+3DGS, three-dimensional Gaussian splatting; CT, computed tomography; EWA, elliptical weighted average; GPU,
+graphics processing unit; LPIPS, learned perceptual image patch similarity; PSNR, peak signal-to-noise ratio; RMS,
+root-mean-square; SSIM, structural similarity index.
+Acknowledgements
+Not applicable.
+9
+CTBakeGS: training-free baking of CT renderings into 3D Gaussian splats
+A P REPRINT
+Declaration of the use of artificial intelligence
+The software code was written with the assistance of an artificial intelligence model (Claude Opus 5.5, Anthropic),
+which was also used to help draft, edit and translate the manuscript. The authors reviewed, tested and revised all code
+and text and take full responsibility for the content of this article.
+Authors’ contributions
+Conceptualization, H.F., W.S., C.L.; methodology, H.F.; software, H.F. and W.S. ; validation, H.F.; formal analysis,
+H.F.; investigation, H.F.; resources, H.F.; data curation, H.F.; writing—original draft preparation, H.F.; writing—review
+and editing, H.F., C.L., W.S., T.H. and L.E. ; visualization, H.F.; supervision, H.F.; project administration, H.F.; funding
+acquisition, H.F. All authors have read and agreed to the published version of the manuscript.
+Funding
+This work was supported in part by KAKENHI Grant Number 25K20648 and Overseas Research Fellowships (grant
+number 202560103) from the Japan Society for the Promotion of Science.
+Availability of data and materials
+The source code and the evaluation scripts are available at https://github.com/BocchiSlice/CTBakeGS. The
+evaluation outputs are available from the corresponding author on reasonable request.
+Declarations
+Ethics approval and consent to participate. Not applicable. This study used only publicly available, de-identified
+CT data (TotalSegmentator dataset, CC BY 4.0).
+Consent for publication.
+Competing interests.
+Not applicable.
+The authors declare that they have no competing interests.
+References
+[1] Kroes T, Post FH, Botha CP (2012) Exposure Render: an interactive photo-realistic volume rendering framework. PLoS One
+7:e38586. doi:10.1371/journal.pone.0038586
+[2] Jönsson D, Sundén E, Ynnerman A, Ropinski T (2014) A survey of volumetric illumination techniques for interactive volume
+rendering. Comput Graph Forum 33:27–51. doi:10.1111/cgf.12252
+[3] Dappa E, Higashigaito K, Fornaro J, Leschka S, Wildermuth S, Alkadhi H (2016) Cinematic rendering – an alternative to
+volume rendering for 3D computed tomography imaging. Insights Imaging 7:849–856. doi:10.1007/s13244-016-0518-1
+[4] Eid M, De Cecco CN, Nance JW et al (2017) Cinematic rendering in CT: a novel, lifelike 3D visualization technique. AJR Am
+J Roentgenol 209:370–379. doi:10.2214/AJR.17.17850
+[5] Elshafei M, Binder J, Baecker J et al (2019) Comparison of cinematic rendering and computed tomography for speed and
+comprehension of surgical anatomy. JAMA Surg 154:738–744. doi:10.1001/jamasurg.2019.1168
+[6] Binder JS, Scholz M, Ellmann S et al (2021) Cinematic rendering in anatomy: a crossover study comparing a novel 3D
+reconstruction technique to conventional computed tomography. Anat Sci Educ 14:22–31. doi:10.1002/ase.1989
+[7] Pachowsky ML, Morf H, Simon D et al (2022) Cinematic rendering in rheumatic diseases—photorealistic depiction of
+pathologies improves disease understanding for patients. Front Med (Lausanne) 9:946106. doi:10.3389/fmed.2022.946106
+[8] Ebert LC, Schweitzer W, Gascho D, Ruder T, Flach PM, Thali MJ, Ampanozi G (2017) Forensic 3D visualization of CT data
+using cinematic volume rendering: a preliminary study. AJR Am J Roentgenol 208:233–240. doi:10.2214/AJR.16.16499
+[9] Kerbl B, Kopanas G, Leimkühler T, Drettakis G (2023) 3D Gaussian splatting for real-time radiance field rendering. ACM
+Trans Graph 42:139. doi:10.1145/3592433
+[10] Niedermayr S, Neuhauser C, Petkov K, Engel K, Westermann R (2024) Application of 3D Gaussian splatting for cinematic
+anatomy on consumer class devices. In: Linsen L, Thies J (eds) Vision, Modeling, and Visualization (VMV 2024). The
+Eurographics Association. doi:10.2312/vmv.20241195
+10
+CTBakeGS: training-free baking of CT renderings into 3D Gaussian splats
+A P REPRINT
+[11] Kleinbeck C, Schieber H, Engel K, Gutjahr R, Roth D (2025) Multi-layer Gaussian splatting for immersive anatomy
+visualization. IEEE Trans Vis Comput Graph 31:2353–2363. doi:10.1109/TVCG.2025.3549882
+[12] Li C, Tong Y, Chen K et al (2025) ClipGS: clippable Gaussian splatting for interactive cinematic visualization of volumetric
+medical data. In: Medical Image Computing and Computer Assisted Intervention – MICCAI 2025. Lecture Notes in Computer
+Science, vol 15969. Springer, Cham, pp 127–137. doi:10.1007/978-3-032-05127-1_13
+[13] Gao Z, Planche B, Zheng M, Choudhuri A, Chen T, Wu Z (2025) 6DGS: enhanced direction-aware Gaussian splatting for
+volumetric rendering. In: International Conference on Learning Representations (ICLR 2025). arXiv:2410.04974
+[14] Tang K, Yao S, Wang C (2025) iVR-GS: inverse volume rendering for explorable visualization via editable 3D Gaussian
+splatting. IEEE Trans Vis Comput Graph 31:3783–3795
+[15] Dyken L, Sewell A, Usher W et al (2026) Volume encoding Gaussians: transfer function-agnostic 3D Gaussians for volume
+rendering. IEEE Trans Vis Comput Graph (PacificVis 2026). arXiv:2504.13339
+[16] Gao Z, Planche B, Zheng M, Choudhuri A, Chen T, Wu Z (2026) FactorSplat: appearance-controllable Gaussian proxies for
+medical volume rendering. arXiv:2610.02382
+[17] Li Q, Wang Y, Cai Y, Du H, Liu L (2026) Variable basis mapping for real-time volumetric visualization. arXiv:2601.09417
+[18] Gao Z, Planche B, Zheng M et al (2026) Render-FM: feedforward model for real-time photorealistic volumetric rendering. In:
+European Conference on Computer Vision (ECCV 2026), in press. arXiv:2505.17338
+[19] Wang Y, Li Q, Cai Y, Liu L (2026) VVGT: visual volume-grounded transformer. arXiv:2604.12217
+[20] Zwicker M, Pfister H, van Baar J, Gross M (2001) EWA volume splatting. In: Proceedings of IEEE Visualization 2001. IEEE,
+pp 29–36, 538. doi:10.1109/VISUAL.2001.964490
+[21] Max N (1995) Optical models for direct volume rendering. IEEE Trans Vis Comput Graph 1:99–108. doi:10.1109/2945.468400
+[22] Yu Z, Chen A, Huang B, Sattler T, Geiger A (2024) Mip-Splatting: alias-free 3D Gaussian splatting. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 19447–19456.
+doi:10.1109/CVPR52733.2024.01839
+[23] Wasserthal J, Breit HC, Meyer MT et al (2023) TotalSegmentator: robust segmentation of 104 anatomic structures in CT
+images. Radiol Artif Intell 5:e230024. doi:10.1148/ryai.230024
+[24] Wang Z, Bovik AC, Sheikh HR, Simoncelli EP (2004) Image quality assessment: from error visibility to structural similarity.
+IEEE Trans Image Process 13:600–612. doi:10.1109/TIP.2003.819861
+[25] Zhang R, Isola P, Efros AA, Shechtman E, Wang O (2018) The unreasonable effectiveness of deep features as a perceptual
+metric. In: Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pp 586–595
+[26] Kleinbeck C, Theelke L, Schieber H, Eck U, von Eisenhart-Rothe R, Roth D (2026) Hybrid foveated path tracing with
+peripheral Gaussians for immersive anatomy. In: 2026 IEEE Conference on Virtual Reality and 3D User Interfaces (VR).
+doi:10.1109/VR67842.2026.00078
+[27] Radl L, Steiner M, Parger M, Weinrauch A, Kerbl B, Steinberger M (2024) StopThePop: sorted Gaussian splatting for
+view-consistent real-time rendering. ACM Trans Graph 43:64. doi:10.1145/3658187
+[28] Gitlina Y, Guarnera GC, Dhillon DS, Hansen J, Lattas A, Pai D, Ghosh A (2020) Practical measurement and reconstruction of
+spectral skin reflectance. Comput Graph Forum 39:75–89. doi:10.1111/cgf.14055
+[29] Ford JM, Decker SJ (2016) Computed tomography slice thickness and its effects on three-dimensional reconstruction of
+anatomical structures. J Forensic Radiol Imaging 4:43–46. doi:10.1016/j.jofri.2015.10.004
+[30] Huang B, Yu Z, Chen A, Geiger A, Gao S (2024) 2D Gaussian splatting for geometrically accurate radiance fields. In: ACM
+SIGGRAPH 2024 Conference Papers, article 32. doi:10.1145/3641519.3657428
+11
+CTBakeGS: training-free baking of CT renderings into 3D Gaussian splats
+A P REPRINT
+Supplementary material
+Table S1 Cases (TotalSegmentator dataset v2)
+Case ID
+1
+2
+3
+4
+5
+6
+s0289
+s0138
+s1340
+s0970
+s1121
+s0931
+Description
+Matrix (voxels)
+Head CT angiography
+Heart and thoracic aorta
+Thorax to pelvis
+Polytrauma
+Pelvis-to-leg CT angiography
+Neck-to-leg CT angiography
+145 × 145 × 233
+221 × 221 × 215
+275 × 275 × 431
+333 × 333 × 511
+281 × 281 × 519
+245 × 187 × 479
+Voxels (million) MacBook Pro (s) Windows desktop (s) MacBook Air 2017 (s)
+4.9
+10.5
+32.6
+56.7
+41.0
+21.9
+5.4
+12.7
+18.5
+20.8
+20.5
+8.0
+11.1
+25.4
+37.9
+43.2
+42.4
+16.6
+46
+82
+131
+166
+148
+60
+All images are resampled to 1.5-mm isotropic voxels in the released dataset; the last dimension is the number of slices. The last three
+columns give the conversion time, one pass at the final cell size, for two million splats.
+12
+CTBakeGS: training-free baking of CT renderings into 3D Gaussian splats
+A P REPRINT
+Table S2 Paired comparisons of each variant with the full method (two million splats)
+Look
+Views
+Variant
+p ∆LPIPS
+p
+Bone
+Bone
+Bone
+Bone
+Bone
+Bone
+Bone
+Bone
+Bone
+Bone
+Bone
+Bone
+Bone
+Bone
+wide
+wide
+wide
+wide
+wide
+wide
+wide
+close-up
+close-up
+close-up
+close-up
+close-up
+close-up
+close-up
+1 M splats
+3 M splats
+No anti-aliasing compensation
+No opacity mapping
+Without faint splats
+Uniform grid (1 cell/voxel)
+Uniform grid vs octree, equal count
+1 M splats
+3 M splats
+No anti-aliasing compensation
+No opacity mapping
+Without faint splats
+Uniform grid (1 cell/voxel)
+Uniform grid vs octree, equal count
+∆PSNR (dB)
+−0.885
++0.036
+−3.832
+−4.498
+−0.274
+−0.171
++0.393
+−1.239
++0.614
+−0.398
+−5.061
+−0.445
+−0.594
++0.554
+0.156
+1.000
+0.031
+0.031
+0.031
+0.438
+0.031
+0.031
+0.031
+0.062
+0.031
+0.062
+0.062
+0.031
+p ∆SSIM
+−0.003
+−0.000
+−0.010
+−0.012
+−0.001
+−0.000
++0.001
+−0.010
++0.006
+−0.002
+−0.037
+−0.006
+−0.006
++0.006
+0.312
+0.562
+0.031
+0.062
+0.031
+0.438
+0.031
+0.031
+0.031
+0.094
+0.031
+0.062
+0.062
+0.031
++0.005
+−0.001
++0.001
++0.001
++0.001
++0.001
+−0.001
++0.010
+−0.006
+−0.001
++0.005
+−0.004
++0.005
+−0.006
+0.094
+0.438
+0.562
+1.000
+0.031
+0.219
+0.031
+0.031
+0.062
+0.031
+0.562
+0.031
+0.062
+0.031
+Vessels
+Vessels
+Vessels
+Vessels
+Vessels
+Vessels
+Vessels
+Vessels
+Vessels
+Vessels
+Vessels
+Vessels
+Vessels
+Vessels
+wide
+wide
+wide
+wide
+wide
+wide
+wide
+close-up
+close-up
+close-up
+close-up
+close-up
+close-up
+close-up
+1 M splats
+3 M splats
+No anti-aliasing compensation
+No opacity mapping
+Without faint splats
+Uniform grid (1 cell/voxel)
+Uniform grid vs octree, equal count
+1 M splats
+3 M splats
+No anti-aliasing compensation
+No opacity mapping
+Without faint splats
+Uniform grid (1 cell/voxel)
+Uniform grid vs octree, equal count
+−0.926
++0.445
+−0.854
+−1.327
+−0.385
+−0.035
+−0.004
+−1.313
++0.764
+−0.049
+−1.926
+−0.528
+−0.184
+−0.055
+0.031
+0.062
+0.031
+0.031
+0.031
+0.562
+0.438
+0.031
+0.031
+0.094
+0.031
+0.031
+0.562
+0.438
+−0.007
++0.002
+−0.005
+−0.010
+−0.002
++0.000
++0.000
+−0.016
++0.008
+−0.000
+−0.018
+−0.005
+−0.000
++0.000
+0.031
+0.156
+0.062
+0.031
+0.031
+1.000
+0.042
+0.031
+0.031
+0.312
+0.031
+0.031
+1.000
+0.438
++0.007
+−0.003
++0.001
++0.004
++0.003
++0.000
++0.000
++0.024
+−0.011
+−0.000
++0.009
++0.001
++0.001
+−0.000
+0.031
+0.062
+0.312
+0.062
+0.031
+0.562
+0.438
+0.031
+0.031
+0.844
+0.031
+0.688
+0.562
+0.156
+Skin and bone
+Skin and bone
+Skin and bone
+Skin and bone
+Skin and bone
+Skin and bone
+Skin and bone
+Skin and bone
+Skin and bone
+Skin and bone
+Skin and bone
+Skin and bone
+Skin and bone
+Skin and bone
+wide
+wide
+wide
+wide
+wide
+wide
+wide
+close-up
+close-up
+close-up
+close-up
+close-up
+close-up
+close-up
+1 M splats
+3 M splats
+No anti-aliasing compensation
+No opacity mapping
+Without faint splats
+Uniform grid (1 cell/voxel)
+Uniform grid vs octree, equal count
+1 M splats
+3 M splats
+No anti-aliasing compensation
+No opacity mapping
+Without faint splats
+Uniform grid (1 cell/voxel)
+Uniform grid vs octree, equal count
+−0.645
+−0.115
+−0.308
+−5.274
+−1.632
+−0.242
+−0.125
+−0.857
++0.355
++0.112
+−5.866
+−1.382
+−0.521
+−0.073
+0.062
+0.562
+0.156
+0.031
+0.031
+0.219
+0.438
+0.031
+0.031
+0.031
+0.031
+0.031
+0.094
+0.562
+−0.008
++0.002
++0.000
+−0.015
+−0.003
+−0.003
++0.000
+−0.009
++0.004
++0.000
+−0.025
+−0.004
+−0.006
++0.000
+0.031
+0.438
+1.000
+0.031
+0.031
+0.312
+0.893
+0.031
+0.094
+0.031
+0.031
+0.062
+0.156
+0.844
++0.011
+−0.004
+−0.002
+−0.001
+−0.001
++0.006
+−0.001
++0.012
+−0.007
+−0.000
++0.001
+−0.004
++0.007
+−0.003
+0.031
+0.031
+0.031
+0.562
+0.438
+0.438
+0.438
+0.031
+0.031
+0.031
+0.438
+0.094
+0.156
+0.062
+Median of the per-case differences (variant minus full method) over six cases; metrics were first averaged over the 48 wide or
+16 close-up views of each scene. p: two-sided exact Wilcoxon signed-rank test over six cases (smallest attainable value 0.031);
+exploratory, not adjusted for multiple comparisons.
+Table S3 Thick slices: case 1, PSNR (dB) / SSIM / LPIPS
+Look
+Views
+1.5-mm data, millimetre cells
+5-mm slices, millimetre cells
+5-mm slices, voxel-unit cells
+Bone
+Bone
+Vessels
+Vessels
+Skin and bone
+Skin and bone
+wide
+close-up
+wide
+close-up
+wide
+close-up
+33.61 / 0.982 / 0.031
+30.03 / 0.961 / 0.178
+30.22 / 0.966 / 0.042
+27.39 / 0.925 / 0.156
+32.26 / 0.968 / 0.088
+29.36 / 0.942 / 0.306
+34.33 / 0.983 / 0.032
+31.67 / 0.966 / 0.193
+31.02 / 0.964 / 0.043
+28.00 / 0.924 / 0.181
+32.87 / 0.970 / 0.087
+29.77 / 0.950 / 0.289
+22.54 / 0.898 / 0.109
+17.63 / 0.723 / 0.367
+24.64 / 0.901 / 0.112
+20.07 / 0.761 / 0.309
+20.46 / 0.843 / 0.171
+16.34 / 0.756 / 0.413
+Two million splats in all three conditions. Each condition is compared with the reference rendered from the same data (1.5-mm or
+5-mm).
+13

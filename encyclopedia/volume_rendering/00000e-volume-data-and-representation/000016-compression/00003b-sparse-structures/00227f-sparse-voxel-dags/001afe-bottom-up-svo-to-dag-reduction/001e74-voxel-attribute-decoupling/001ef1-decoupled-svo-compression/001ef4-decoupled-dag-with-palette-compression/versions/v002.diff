@@ -1,0 +1,227 @@
+--- v001.md
++++ v002.md
+@@ -4,115 +4,103 @@
+ 
+ ## Overview
+-Decoupled DAG with Palette Compression is a method for compressing arbitrary voxel data (colors, normals, reflectance) by separating geometry topology from voxel attributes. It uses a Directed Acyclic Graph (DAG) to encode the topology and a palette-based compression scheme for the extracted attributes, allowing efficient GPU storage and real-time raytracing. It outperforms Moxel DAGs [Wil15] by requiring less memory and supporting multi-resolution level-of-detail rendering, whereas Moxel DAGs store empty leaf counts and use two running sums that become prohibitive at quadrillion-scale resolutions.
++Decoupled DAG with Palette Compression is a method for compressing arbitrary voxel data (colors, normals, reflectance) by separating geometry topology from voxel attributes [S1]. It uses a Directed Acyclic Graph (DAG) to encode the topology and a palette-based compression scheme for the extracted attributes, allowing efficient GPU storage and real-time raytracing [S1]. It outperforms Moxel DAGs [Wil15] by requiring less memory and supporting multi-resolution level-of-detail rendering, whereas Moxel DAGs store empty leaf counts and use two running sums that become prohibitive at quadrillion-scale resolutions [S1].
+ 
+ ## How it works
+-**Inputs:** A Sparse Voxel Octree (SVO) containing geometry and arbitrary voxel attributes (e.g., RGB colors).
+-**Outputs:** A compressed DAG structure for geometry and a compressed attribute array for voxel data.
++**Inputs:** A Sparse Voxel Octree (SVO) containing geometry and arbitrary voxel attributes (e.g., RGB colors) [S1].
++**Outputs:** A compressed DAG structure for geometry and a compressed attribute array for voxel data [S1].
+ 
+ **Data Structures:**
+-1.  **DAG Node:** Contains pointers to children and an offset into the attribute array.
+-    *   *Fields:* Child pointers (indices to other DAG nodes), Attribute Offset (index into the dense attribute array).
+-    *   *Note:* Leaf nodes do not require child pointers; geometry is implicit via parent-child masks or leaf status flags.
+-2.  **Dense Attribute Array:** A linear array storing the extracted attributes for all leaf nodes in the order they appear in the traversal.
+-3.  **Compressed Attribute Storage:** The dense array is compressed using palette compression (see [Palette Compression](1873-palette-compression.md)).
++1. **DAG Node:** Contains pointers to children and an offset into the attribute array [S1].
++    * *Fields:* Child pointers (indices to other DAG nodes), Attribute Offset (index into the dense attribute array) [S1].
++    * *Note:* Leaf nodes do not require child pointers; geometry is implicit via parent-child masks or leaf status flags [S1].
++2. **Dense Attribute Array:** A linear array storing the extracted attributes for all leaf nodes in the order they appear in the traversal [S1].
++3. **Compressed Attribute Storage:** The dense array is compressed using palette compression (see [Palette Compression](1873-palette-compression.md)) [S1].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Construct DAG Topology:**
+-    *   Start with the leaves at the lowest level of the input SVO.
+-    *   Compare subtrees bottom-up in a greedy fashion.
+-    *   If two subtrees are identical in geometry (topology), merge them by changing parent pointers to reference a single common subtree.
+-    *   This reduces the node count significantly, especially at lower levels where unique combinations are limited (e.g., max 256 unique combinations for 8 child voxels with 1-bit geometry).
++1. **Construct DAG Topology:**
++    * Start with the leaves at the lowest level of the input SVO [S1].
++    * Compare subtrees bottom-up in a greedy fashion [S1].
++    * If two subtrees are identical in geometry (topology), merge them by changing parent pointers to reference a single common subtree [S1].
++    * This reduces the node count significantly, especially at lower levels where unique combinations are limited (e.g., max 256 unique combinations for 8 child voxels with 1-bit geometry) [S1].
+ 
+-2.  **Decouple Attributes:**
+-    *   Extract all voxel attributes from the SVO/DAG leaves.
+-    *   Store these attributes in a dense, uncompressed attribute array. The order of attributes in this array corresponds to the traversal order of the leaves in the SVO/DAG.
+-    *   For each node in the DAG, store an offset (or index) that maps the node to the correct position(s) in the attribute array. [G] The offset typically points to the start of the attribute block for the subtree rooted at that node, or specifically to the leaf attributes if the node is a leaf.
++2. **Decouple Attributes:**
++    * Extract all voxel attributes from the SVO/DAG leaves [S1].
++    * Store these attributes in a dense, uncompressed attribute array [S1].
++    * The order of attributes in this array corresponds to the traversal order of the leaves in the SVO/DAG [S1].
++    * For each node in the DAG, store an offset (or index) that maps the node to the correct position(s) in the attribute array [S1]. [G] The offset typically points to the start of the attribute block for the subtree rooted at that node, or specifically to the leaf attributes if the node is a leaf.
+ 
+-3.  **Compress Attribute Array:**
+-    *   Apply palette-based compression to the dense attribute array.
+-    *   Identify local palettes of similar attributes (exploiting spatial coherence).
+-    *   Replace full attribute values with indices into these local palettes.
+-    *   [G] If quantization is used, attributes are quantized before compression to improve compression ratios, trading quality for memory savings.
++3. **Compress Attribute Array:**
++    * Apply palette-based compression to the dense attribute array [S1].
++    * Identify local palettes of similar attributes (exploiting spatial coherence) [S1].
++    * Replace full attribute values with indices into these local palettes [S1].
++    * [G] If quantization is used, attributes are quantized before compression to improve compression ratios, trading quality for memory savings.
+ 
+-4.  **Render via DAG Traversal:**
+-    *   During raytracing, traverse the DAG.
+-    *   Use the accumulated offsets stored in the node pointers to retrieve the correct attribute from the compressed attribute array.
+-    *   Decode the palette indices to retrieve the actual attribute value (color, normal, etc.).
++4. **Render via DAG Traversal:**
++    * During raytracing, traverse the DAG [S1].
++    * Use the accumulated offsets stored in the node pointers to retrieve the correct attribute from the compressed attribute array [S1].
++    * Decode the palette indices to retrieve the actual attribute value (color, normal, etc.) [G].
+ 
+ **Pseudocode:**
+ 
+ ```python
++class DAGNode:
++    def __init__(self, geometry_key, children, attr_offset):
++        self.geometry_key = geometry_key
++        self.children = children
++        self.attr_offset = attr_offset
++
+ def build_decoupled_dag(svo):
+-    """
+-    Constructs the DAG topology and decouples attributes.
+-    """
+-    # Step 1: Build DAG topology
++    """Constructs DAG topology and decouples attributes."""
+     dag_nodes = {}
+-    # Greedy bottom-up merge
++    # Step 1: Greedy bottom-up merge
+     for level in reversed(range(svo.max_level)):
+-        nodes_at_level = get_nodes_at_level(svo, level)
++        nodes_at_level = [n for n in svo.nodes if n.level == level]
+         for node in nodes_at_level:
+-            # Create a canonical key for the subtree based on geometry
+-            # For leaves, the key is a marker. For internal nodes, it's the tuple of child keys.
+-            child_keys = tuple(build_dag(child) for child in node.children if child is not None)
++            child_keys = tuple(build_decoupled_dag(child) for child in node.children if child is not None)
+             key = (node.is_leaf, child_keys)
+-            
+             if key not in dag_nodes:
+                 dag_nodes[key] = DAGNode(geometry_key=key, children=[], attr_offset=None)
+-            
+-            # Link parent to the canonical node
+             node.dag_ref = dag_nodes[key]
+-            
+     return dag_nodes
+ 
+ def extract_and_compress_attributes(svo, dag_nodes):
+-    """
+-    Extracts attributes into a dense array and compresses them.
+-    """
+-    # Step 2: Extract attributes
++    """Extracts attributes into a dense array and compresses them."""
+     dense_attr_array = []
+-    # Traverse SVO in a consistent order (e.g., depth-first) to build the array
++    # Step 2: Extract attributes in traversal order
+     for leaf in svo.leaves_in_traversal_order():
+         dense_attr_array.append(leaf.attributes)
++    
++    # Map DAG nodes to attribute positions
++    for node in dag_nodes.values():
++        if node.geometry_key[0]:  # is leaf
++            node.attr_offset = dense_attr_array.index(node.geometry_key[1][0])
++        else:
++            # [G] Offset points to start of attribute block for subtree
++            node.attr_offset = 0
++            
++    # Step 3: Palette compression
++    palettes = {}
++    compressed_attrs = []
++    for attr in dense_attr_array:
++        palette_id = hash(attr) % 256
++        if palette_id not in palettes:
++            palettes[palette_id] = [attr]
++        if attr not in palettes[palette_id]:
++            palettes[palette_id].append(attr)
++        compressed_attrs.append((palette_id, palettes[palette_id].index(attr)))
+         
+-    # Map DAG nodes to their attribute positions
+-    # [G] This requires a mapping from SVO leaf index to DAG node reference.
+-    # Since multiple SVO leaves might map to the same DAG leaf node,
+-    # we store the offset in the DAG node.
+-    # For internal DAG nodes, the offset might point to the start of the 
+-    # attribute block for the first leaf in its subtree, or we store 
+-    # a range. The source implies "accumulated offsets in the node pointers".
+-    
+-    # Step 3: Compress using Palette Compression
+-    compressed_attrs = palette_compress(dense_attr_array)
+-    
+-    return compressed_attrs, dense_attr_array
++    return compressed_attrs, palettes
+ 
+-def raytrace_dag(dag_root, compressed_attrs):
+-    """
+-    Traverses the DAG and retrieves attributes.
+-    """
+-    # Step 4: Traverse and retrieve
++def raytrace_dag(dag_root, compressed_attrs, palettes):
++    """Traverses DAG and retrieves attributes."""
+     stack = [dag_root]
+     while stack:
+         node = stack.pop()
+-        
+-        # Retrieve attribute using offset
+-        # [G] The exact mechanism of "accumulated offsets" implies that 
+-        # the offset in the node allows direct indexing into the compressed 
+-        # structure or the dense array before compression.
+-        # Assuming the offset points to the start of the attribute data 
+-        # for this node's subtree in the dense array (before compression),
+-        # or directly into the compressed structure if the compression 
+-        # supports random access by index.
+-        
+-        attr_index = node.attr_offset
+-        attribute = decompress_attribute(compressed_attrs, attr_index)
+-        
+-        # Process attribute (e.g., shading)
+-        shade(attribute)
+-        
+-        # Push children
++        # Step 4: Retrieve attribute using offset
++        palette_id, index = compressed_attrs[node.attr_offset]
++        attribute = palettes[palette_id][index]
++        # Process attribute
++        compute_shading(attribute)
+         for child in node.children:
+             stack.append(child)
+@@ -120,26 +108,26 @@
+ 
+ **Parameters:**
+-*   **Resolution:** Supports up to 17 hierarchical levels, corresponding to a $128K^3$ voxel resolution ($2.25 \times 10^{12}$ voxels).
+-*   **Memory Usage:** For a $128K^3$ scene with 18.4 billion colored nodes, the compressed representation requires 7.63 GB of GPU memory [S1].
++* **Resolution:** Supports up to 17 hierarchical levels, corresponding to a $128K^3$ voxel resolution ($2.25 \times 10^{12}$ voxels) [S1].
++* **Memory Usage:** For a $128K^3$ scene with 18.4 billion colored nodes, the compressed representation requires 7.63 GB of GPU memory [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Merging Failure:** Merging subtrees fails to compress sufficiently when attributes are tightly linked to topology because adding voxel data reduces the probability of equal subtrees. The decoupling scheme solves this by separating geometry and attributes [S1].
+-*   **Precision:** Quantization of attributes improves compression but reduces quality. The trade-off must be managed [S1].
+-*   **Boundary Conditions:** The DAG construction assumes a consistent traversal order for attribute extraction. Inconsistent ordering will misalign attributes with geometry.
++* **Merging Failure:** Merging subtrees fails to compress sufficiently when attributes are tightly linked to topology because adding voxel data reduces the probability of equal subtrees. The decoupling scheme solves this by separating geometry and attributes [S1].
++* **Precision:** Quantization of attributes improves compression but reduces quality. The trade-off must be managed [S1].
++* **Boundary Conditions:** The DAG construction assumes a consistent traversal order for attribute extraction. Inconsistent ordering will misalign attributes with geometry.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** DAG construction is greedy bottom-up, requiring comparison of subtrees. The complexity depends on the number of nodes and the cost of hashing/comparing subtree keys.
+-*   **Memory Complexity:** Significantly reduced compared to uncompressed SVOs and Moxel DAGs. The DAG reduces geometry storage, and palette compression reduces attribute storage.
+-*   **Measured Performance:** Real-time raytracing performance on commodity GPUs for scenes with up to 17 hierarchical levels [S1].
+-*   **Scaling:** The method scales to very large resolutions ($128K^3$) due to the efficiency of the DAG at lower levels and the compression of attributes.
+-*   **Strengths:** High compression ratio, real-time performance, support for arbitrary attributes, multi-resolution support.
+-*   **Limitations:** Decoupling overhead, potential quality loss from quantization, complexity of implementation compared to simple SVOs.
+-*   **When to Use:** When memory is limited (e.g., GPU core memory) and real-time raytracing of large, detailed voxel scenes is required.
+-*   **When Not to Use:** When attributes are highly unique per voxel and do not exhibit spatial coherence, making palette compression ineffective.
++* **Time Complexity:** DAG construction is greedy bottom-up, requiring comparison of subtrees. The complexity depends on the number of nodes and the cost of hashing/comparing subtree keys.
++* **Memory Complexity:** Significantly reduced compared to uncompressed SVOs and Moxel DAGs. The DAG reduces geometry storage, and palette compression reduces attribute storage.
++* **Measured Performance:** Real-time raytracing performance on commodity GPUs for scenes with up to 17 hierarchical levels [S1].
++* **Scaling:** The method scales to very large resolutions ($128K^3$) due to the efficiency of the DAG at lower levels and the compression of attributes.
++* **Strengths:** High compression ratio, real-time performance, support for arbitrary attributes, multi-resolution support.
++* **Limitations:** Decoupling overhead, potential quality loss from quantization, complexity of implementation compared to simple SVOs.
++* **When to Use:** When memory is limited (e.g., GPU core memory) and real-time raytracing of large, detailed voxel scenes is required.
++* **When Not to Use:** When attributes are highly unique per voxel and do not exhibit spatial coherence, making palette compression ineffective.
+ 
+ ## Background
+-*   **Origin:** The method was presented in the paper "Geometry and Attribute Compression for Voxel Scenes" by Timothy Kol et al. from Delft University of Technology [S1].
+-*   **History:** It builds on the concept of using DAGs for compressing sparse voxel scenes, which were previously restricted to single-bit geometry information. This method extends DAGs to arbitrary data by decoupling geometry and attributes.
+-*   **Usage:** Used in real-time raytracing of voxel-based virtual scenes, particularly on GPU architectures.
++* **Origin:** The method was presented in the paper "Geometry and Attribute Compression for Voxel Scenes" by Timothy Kol et al. from Delft University of Technology [S1].
++* **History:** It builds on the concept of using DAGs for compressing sparse voxel scenes, which were previously restricted to single-bit geometry information. This method extends DAGs to arbitrary data by decoupling geometry and attributes.
++* **Usage:** Used in real-time raytracing of voxel-based virtual scenes, particularly on GPU architectures.
+ 
+ ## Sources

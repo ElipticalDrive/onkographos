@@ -1,0 +1,340 @@
+What feature or change would you like to see made? Cornerstone3D computes ROI statistics (min/max/mean/stdDev/count) for CircleROI, EllipticalROI, RectangleROI, PlanarFreehandROI and the StartEndThreshold tools, but it has never defined ...
+
+[Feature Request] Define voxel-relative annotation statistics and implement a shared oblique-capable voxel iterator · Issue #2889 · cornerstonejs/cornerstone3D · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[Feature Request] Define voxel-relative annotation statistics and implement a shared oblique-capable voxel iterator #2889
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+[Feature Request] Define voxel-relative annotation statistics and implement a shared oblique-capable voxel iterator#2889
+Copy link
+Assignees
+Labels
+FeatureOpen PR
+Description
+wayfarer3130
+opened on Sep 1, 2026
+Issue body actions
+What feature or change would you like to see made?
+Cornerstone3D computes ROI statistics (min/max/mean/stdDev/count) for CircleROI,
+EllipticalROI, RectangleROI, PlanarFreehandROI and the StartEndThreshold tools, but it
+has never defined which voxels those statistics are computed over. Each tool improvised
+its own iteration, the improvisations have diverged, and none of them is correct in an
+oblique/MPR view.
+This issue defines the behaviour normatively, and proposes a single shared voxel iterator
+that delivers it.
+Why the current approach cannot be repaired
+The current oblique path (and #2744,
+adapted from #2619) rasterises
+the ROI in canvas space and maps each canvas pixel back to a voxel. That assumption is
+unsound for two independent reasons:
+Depth collapse. One canvas pixel can correspond to several voxels stacked along the
+view plane normal. Enlarging the canvas never fixes this. A circle drawn at 2 mm
+thickness over two 1 mm frames in acquisition orientation has two voxels behind every
+displayed pixel, and canvas sampling can only ever see one of them.
+Conversion and rounding drift. Assumptions in the world↔index conversion, plus
+rounding to integer indices, cause some voxels to be missed entirely.
+Either failure means max, mean and every other statistic can silently omit voxels.
+Canvas-space sampling also makes results depend on zoom and canvas resolution, which is not
+acceptable for a measurement.
+#2744 fixes a real, user-visible bug (freehand ROI on oblique MPR — see
+OHIF#5889) and should stay open; the plan
+below adapts it onto the new iterator rather than discarding it.
+Normative behaviour
+Terms
+Symbol
+Meaning
+n
+View plane normal. annotation.metadata.viewPlaneNormal is authoritative. The planeRestriction in-plane vectors are for orientation compatibility only and must never be used to derive n — they are chosen heuristically and can be as little as ~18° apart, making their cross product badly conditioned.
+P₀
+Annotation plane anchor: annotation.metadata.planeRestriction.point. Populated at creation from the first annotation point.
+T
+Annotation thickness — full geometric thickness in mm. New field on PlaneRestriction. Defaults to T_v when absent.
+t
+Viewport slab thickness — full geometric thickness in mm.
+T_v
+Voxel thickness along n: T_v = Σᵢ |dᵢ · n| · sᵢ, where dᵢ are the unit voxel-axis direction vectors (the rows of the direction matrix, matching how getSpacingInNormalDirection and the rest of the codebase read it) and sᵢ the spacing along each. This is the support width of the voxel box along n — an L1 norm — and it reduces exactly to the slice spacing in acquisition orientation. Note it is deliberately not getSpacingInNormalDirection, which returns the L2 length of the same projected vector: for 1×1×3 mm voxels at 45° between an in-plane axis and the slice axis, L1 is 2√2 ≈ 2.83 mm against L2's √5 ≈ 2.24 mm.
+ε
+Relative epsilon, T_v × 1e-5. Sized so that inputs carrying float32 error are comfortably inside it — gl-matrix vectors and the surrounding rendering geometry are float32, giving roughly 1e-7 relative precision, and the implementation stays in float32 for consistency.
+Rule D — when an annotation is displayed
+An annotation is displayed in a viewport iff all of:
+FrameOfReferenceUID matches; and
+orientation is compatible — each present planeRestriction in-plane vector is orthogonal
+to the viewport's n (the existing point → point+v1 → point+v1+v2 ladder); and
+|(P₀ − focalPoint) · n| < (t + T)/2 − ε.
+Rule M — which voxels an area annotation contains
+A voxel with centre c is in the ROI iff both:
+Depth: |(c − P₀) · n| < (T + T_v)/2 − ε
+In-shape: the orthogonal projection of c along n onto the plane through P₀ lies
+inside the annotation's 2D area.
+A voxel is therefore excluded either for being too far from the annotation plane or for
+projecting outside the drawn shape. Both are pure world-space predicates over voxel centres.
+The T_v term dilates the slab by half a voxel on each side, so a voxel centre qualifies
+exactly when the voxel itself overlaps the annotation's slab. Consequence: a voxel
+overlapping the slab by any amount counts fully. This is intentional — "every voxel the
+annotation touches".
+The dilation does nothing in the default case. With T = T_v — the default for any
+annotation created on a stack viewport or an acquisition-orientation view — and an anchor on
+a voxel-centre plane, the dilated and undilated tests both include exactly one layer: the
+displayed slice, and neither neighbour. Ordinary acquisition-plane measurements are therefore
+completely unaffected by this clause and are identical to what an undilated implementation
+would produce.
+The dilation matters in exactly two situations. It rescues the case where the annotation
+plane does not pass through voxel centres — common in oblique views — which an undilated test
+leaves empty. And it makes thicker slabs behave: an undilated test asked for two voxels
+of thickness (T = 2·T_v) would measure only one, because with strict inequality
+d = T/2 = T_v excludes both neighbours. Dilated, the same request measures three layers,
+which is the geometrically correct answer — a 2 mm slab centred on a voxel genuinely overlaps
+three 1 mm voxels. Two layers is not achievable by any symmetric rule anchored on a voxel
+centre.
+Note the dilation applies only along the normal. The in-plane test is plain
+centre-in-shape with no dilation, so ROI perimeter voxels are selected by the same convention
+other viewers use. The asymmetry is deliberate: in-plane a shape is always many voxels
+across, so centre-testing is well-conditioned, whereas along the normal the slab may be
+thinner than a single voxel.
+Worked examples (T_v = 1 mm, voxel centres at integer k)
+T
+d = (T+T_v)/2
+anchor
+included
+why
+0.5
+0.75
+centre k=3
+{3}
+exactly the voxel it is centred over
+1.0
+1.0
+centre k=3
+{3}
+k=2's box [1.5,2.5] meets slab [2.5,3.5] at a point only
+1.0
+1.0
+edge 3.5
+{3,4}
+slab [3,4] genuinely overlaps both boxes
+1.001
+~1.0005
+centre k=3
+{2,3,4}
+an increase past T_v beyond the tolerance pulls in both neighbours
+2.0
+1.5
+centre k=3
+{2,3,4}
+slab [2,4] genuinely overlaps all three
+Note the strict inequality is load-bearing: T = T_v centred on a voxel must give exactly
+one layer. Because that case sits exactly on the boundary and |Δ| is computed from world
+coordinates via dot products, the − ε term is required — without it, floating-point
+noise non-deterministically yields three layers instead of one.
+The tolerance has one visible consequence. Since the test is strict, a thickness exceeding an
+exact voxel multiple by less than 2ε still selects the smaller number of layers: T_v + 1e-6
+behaves as T_v rather than pulling in both neighbours. At T_v = 1 mm that dead band is
+20 nm wide, so it is unreachable in practice, but it is the reason the third worked example
+uses T = 1.001 rather than a value closer to T_v.
+Also note the camera focal point always lies on a voxel-centre plane
+(getVolumeActorCorners uses extentToBounds(getExtent()), i.e. index corners;
+snapFocalPointToSlice lands every focal point at min + k·spacing). A symmetric rule
+anchored on a voxel centre therefore yields odd layer counts.
+Invariants (each must be a test)
+I1 Statistics are independent of zoom, pan, canvas size and device pixel ratio.
+I2 No voxel is visited more than once.
+I3 No voxel satisfying Rule M is omitted.
+I4 When T ≥ T_v, at least one layer is always included.
+I5 In acquisition orientation with T = T_v, exactly one layer is included, and a
+viewport displays exactly the annotations created on that slice and none created off it.
+I6 Statistics do not depend on the viewport slab thickness t. t affects display
+only. A new annotation inherits T from t at creation; thereafter T belongs to the
+annotation.
+Statistics semantics
+stdDev — population (÷N), one-pass Welford. (Ratifies current behaviour.)
+count — number of voxels.
+area — analytic, from the 2D geometry; not derived from voxel count.
+volume — count × voxel volume.
+min/max — carry the IJK index where they occurred.
+Non-goals
+Cross-orientation invariance. The same physical region measured in two different
+orientations is a different annotation; there is no requirement that the statistics match.
+Partial-volume weighting beyond the T_v dilation described above.
+Interpolation or resampling. Real voxels are visited; values are never resampled.
+Proposed implementation
+Rule M is the contract. The following is an optimisation and is explicitly not
+normative — it may be tuned or replaced without changing any result.
+Iterate in index space, never canvas space:
+Approximate the index-space normal by an integer vector N with coprime components
+drawn from {0,1,2,3,5,7}, chosen by minimum angle with ‖N‖₁ as tie-break, from a
+precomputed static table. This permits iteration over a thin volume in the new basis that
+visits the voxels near the view plane exactly once, with no repetition. It may cover
+slightly more; the exact span test trims it back. In acquisition orientation the index
+normal is exactly (0,0,1), and an epsilon-guarded fast path skips the search entirely.
+Build a tight bounding region in that basis.
+Sweep two dimensions; for each (outer, middle) a supplied function yields inclusive 1-D
+runs along the innermost axis. Runs may be exact (one run), exact-multiple (several
+disjoint runs, e.g. a non-convex freehand row), or approximate (a superset run plus a
+per-voxel predicate — the fallback any new shape can start from).
+This makes the cost proportional to the voxel boundary rather than the enclosed volume,
+so it should be cheaper than today's iterator while being exact. No voxel cap and no
+subsampling: a cap would silently reintroduce resolution-dependence.
+API
+Extend VoxelManager.forEach's options — it is the de-facto iteration API. The stubbed
+fields already reserved in PointInShapeOptions (orthogonalVector, basisPoints,
+minMaxGenerator) anticipated exactly this and have no users, so they can be renamed.
+The run function is a generator; the iterator derives the swept axes from argmax|Nᵢ|
+with a caller override; the iterator returns each run's world start plus a per-step delta
+so consumers get pointLPS with one vector add rather than a matrix multiply per voxel.
+A separate oblique integer-region utility lives in packages/core, and VoxelManager uses
+it for voxel containment. ROI shape span providers and statistics calculators stay in
+packages/tools; core takes no dependency on tools.
+pointInShapeCallback is reimplemented on top of VoxelManager rather than left as a
+parallel path.
+Multi-component values pass through unchanged; 4D behaviour is unaffected.
+Tests
+Synthetic volumes with anisotropic spacing and non-identity direction. The centrepiece is a
+brute-force reference implementation that iterates every voxel in the volume and applies
+Rule M literally; the fast iterator must return an identical set in every case. Coverage:
+acquisition orientation (existing numbers unchanged), oblique at several angles, the exact
+boundary case from T = T_v, anchors on voxel centres and on voxel edges, and the I1–I6
+invariants.
+Required deliverables
+Documentation — required in PR 1, not deferred
+PR 1 must land a written specification of exactly which voxels are included and which
+annotations are displayed, covering Rules D and M, the worked examples, the invariants and
+the statistics semantics, plus updates to the public documentation pages for any API added or
+changed. This behaviour is too complex to absorb from the code, and anyone doing future work
+needs detailed requirements to work against rather than having to re-derive them.
+PR plan
+PR 1 — iterator and capabilities
+Oblique integer-region iteration utility in packages/core; VoxelManager uses it for containment
+Extended VoxelManager.forEach options with the run-generator contract
+pointInShapeCallback reimplemented on top of VoxelManager
+PlaneRestriction.thickness (T, mm), populated by getViewReference, defaulting to one voxel along n
+Rule D unified across isPlaneViewable and its two copies, plus filterAnnotationsWithinSlice, onto one shared helper
+Brute-force reference implementation and the I1–I6 test suite
+The written specification described above
+Blocking fixes only (see below)
+PR 2 — adapt #2744
+Rework the freehand oblique fix onto the new iterator, pushed onto the contributor's
+branch so authorship is retained
+PR 3 — remaining consumers
+StartEndThreshold tools collapse to T = |end − start|, removing projectionPoints
+and the per-projection-point iteration
+Segmentation/labelmap statistics, SUV peak, and threshold-by-ROI migrate to the shared
+iterator
+Blocking fixes (PR 1 — these corrupt the new tests directly)
+Viewport.getViewReference passes target.planeRestriction to updatePlaneRestriction,
+which expects the whole reference. It type-checks structurally, so it builds a nested
+planeRestriction.planeRestriction and mutates that — point-derived in-plane vectors are
+silently discarded on legacy viewports. planarViewReference.ts does this correctly.
+updatePlaneRestriction's collinearity test is one-sided: an anti-parallel candidate
+(dot ≈ −length) passes dot < length × 0.95 and is accepted as inPlaneVector2 despite
+being collinear. Needs Math.abs. Bites symmetric polylines that double back.
+iterateOverPointsInShape pushes the same reused pointIJK array for every point, so
+all pointsInShape entries alias one array. The VoxelManager path copies; this one does not.
+pointInShapeCallback's default bounds [0, dim] with <= loops over-run by one per axis.
+BasicStatsCalculator.state is static and shared across all tools, and getStatistics
+resets it destructively.
+Filed separately (adjacent, not blocking)
+sampleVoxelsFromCanvas returns early on storePointData: false, silently skipping all
+sampling and all statsCallback calls, so statistics come back empty.
+rleForEach reads options.isWithinObject rather than isInObject, and returns
+undefined instead of pointsInShape.
+SegmentStatsCalculator.statsCallback throws on a falsy segmentIndex, so segment 0 can
+never be measured.
+_createRGBScalarVolumeVoxelManager._set hardcodes index *= 3, wrong for RGBA.
+ViewReference.bounds is declared but never written or read.
+Median retains every value, which will not scale once slabs widen voxel counts.
+Legacy VolumeViewport clips at focal ± slabThickness (total width 2×) while the generic
+path and every tool that draws a slab use half-thickness (total 1×). Legacy viewports are
+being deprecated, so PR 1 works around this rather than fixing it.
+Why should we prioritize this feature?
+ROI statistics are among the most-used measurements in the viewer, and they are currently
+wrong in any oblique or MPR view — silently, with no indication to the user that voxels were
+missed. There is an open community fix (#2744,
+contributed via Flywheel) blocked on this behaviour being defined. Beyond the immediate fix,
+the same iterator is needed by segmentation statistics, SUV peak and threshold-by-ROI, all of
+which currently carry their own voxel enumeration.
+Reactions are currently unavailable
+Activity
+linear commented on Sep 1, 2026
+linearBot
+on Sep 1, 2026 – with Linear
+More actions
+CS-210
+wayfarer3130
+added 4 commits that reference this issue on Sep 2, 2026
+feat(core): add voxel-relative annotation statistics iterator
+...
+f9e97fd
+feat(core): add exact clipping shapes for the voxel slab iterator
+...
+a304366
+feat(core): support internal holes in contour shapes
+...
+2da0f33
+fix(tools): select freehand ROI voxels with the shared slab iterator
+...
+f233165
+linear
+assigned
+sedghi
+on Sep 2, 2026
+linear
+added
+Feature
+Open PR
+on Sep 2, 2026
+wayfarer3130
+added 5 commits that reference this issue on Sep 9, 2026
+docs(core): name the quantities instead of using single-letter symbols
+...
+fec0ec8
+feat(core): define voxel-relative annotation statistics and add a sha…
+...
+cd7f279
+fix (tools): freehand roi in volume viewport for oblique data (#2744)
+...
+c653662
+refactor(tools): fill oblique brushes with the shared voxel slab iter…
+...
+2ba3eef
+fix: improved brush shape for rotated images (#2743)
+...
+c57f949
+Harshika-Chandvani
+added 3 commits that reference this issue on Sep 27, 2026
+feat(core): define voxel-relative annotation statistics and add a sha…
+...
+deebbd4
+fix (tools): freehand roi in volume viewport for oblique data (corner…
+...
+6ba4aaa
+fix: improved brush shape for rotated images (cornerstonejs#2743)
+...
+628150d
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+sedghi
+Labels
+FeatureOpen PR
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

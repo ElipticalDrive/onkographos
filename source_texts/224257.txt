@@ -1,0 +1,175 @@
+Description Implement an API such that users can define their own BVH queries and traversals. Context Geometric primitive distance queries (line, triangle, cone, cylinder, aabb, obb, etc.). Spherecasting or other arbitrary shapes to enab...
+
+[REQ] User defined BVH traversals · Issue #808 · NVIDIA/warp · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[REQ] User defined BVH traversals #808
+New issue
+Copy link
+New issue
+Copy link
+Open
+Enhancement
+Open
+[REQ] User defined BVH traversals#808
+Enhancement
+Copy link
+Labels
+feature requestRequest for something to be addedRequest for something to be addedspatial accelerationBVHs, hash grids, and the spatial queries they accelerateBVHs, hash grids, and the spatial queries they accelerate
+Milestone
+Backlog
+Description
+IkonOne
+opened on Jun 27, 2025
+Issue body actions
+Description
+Implement an API such that users can define their own BVH queries and traversals.
+Context
+Geometric primitive distance queries (line, triangle, cone, cylinder, aabb, obb, etc.). Spherecasting or other arbitrary shapes to enable continuous collision detection. Bvh vs bvh intersection which enables morphological and Boolean operations. Signed distance function contact generation (I am aware that there is related functionality in the sim folder using volumes but there are cases where a field requires too much memory to preserver small features on large SDFs).
+Activity
+IkonOne
+added
+feature requestRequest for something to be addedRequest for something to be added
+on Jun 27, 2025
+AnkaChan commented on Jun 27, 2025
+AnkaChan
+on Jun 27, 2025
+Contributor
+More actions
+Geometric primitive distance queries is supported, just compute the aabb of you primitive and use bvh_query_aabb to query the bvh or mesh_query_aabb to query the mesh.
+Bvh vs bvh collide is not very efficient on GPU. You can collide the leaf nodes of one tree to another
+We have mesh_query_point_** functions that calculate SDF on a given mesh. You can implement contact generation using it.
+IkonOne commented on Jun 27, 2025
+IkonOne
+on Jun 27, 2025
+Author
+More actions
+Thank you for the reply. I have one other query that is not resolved robustly by the previous (excellent) suggestions but is facilitated well by a BVH:
+Minimum orthogonal distance between a mesh and a line segment. More formally, given some non-zero length line segment defined by two points in 3-space, find the closest point on a mesh with the minimum orthogonal distance to the line. I need that type of orthogonal query for potentially non-convex shapes as well defined by a mesh or SDF.
+Maybe providing a way to specify how distance is computed would suffice?
+mmacklin commented on Jun 30, 2025
+mmacklin
+on Jun 30, 2025
+Collaborator
+More actions
+Computing the minimal distance across a line segment to a non-convex shape is I think an non-linear, non-convex optimization problem that will require performing some kind of search along the segment.
+We had a paper on this topic a few years ago:
+https://www.youtube.com/watch?v=icU6Bm-HZ-E
+🚀React with 🚀1Reacted by Erin M Gunn
+IkonOne commented on Jun 30, 2025
+IkonOne
+on Jun 30, 2025
+Last edited by IkonOne
+Author
+More actions
+I love that paper! We are likely to implement that for some of the queries we need in the future and I hope I'm the one that gets to work on the project. Thank you for sharing your work.
+I think I am doing a poor job of explaining my intention with orthogonal distance and why it merits the ability to define a new metric space for queries (much like you can with nanoflann).
+The most basic query I need to make is:
+Define a line segment parallel to the z axis given two points, $a, b$, such that $x_a = x_b, y_a = y_b, z_a &lt; z_b$
+Find the closest point on the line segment, $p$, on a mesh such that $z_p \in [z_a, z_b]$
+If no such point exists, the result is undefined
+In practice, I will have many thousands of these queries to run against the mesh and the line segments will not be axis aligned. The metric space for each line segment is a subspace of the space the BVH was constructed in and a query against the BVH will work fine if the distance is calculated correctly and undefined results are accounted for.
+The current BVH queries do not work in this case unfortunately. They return the 32 closest bounding boxes to the line and there is no guarantee that any of those will be valid when a valid result exists. I misunderstood the purpose of the stack on bvh_query_t.
+IkonOne commented on Jul 1, 2025
+IkonOne
+on Jul 1, 2025
+Last edited by IkonOne
+Author
+More actions
+I have not found precedent in the code for passing a device function pointer from generated code to the native code. That leads me to believe that providing an interface for user defined distance functions would be a significant lift that introduces a significant amount of complexity. User defined distance functions for warp data structures implemented in native code are likely out of scope.
+That brings me back to the original request to enable user defined traversals on the BVH. Maybe an API such as this is viable:
+EDIT: I misunderstood how the query worked when I mocked this up and the following API is invalid.
+```
+@wp.kernel
+def some_bvh_query_kernel(
+    bvh: wp.Bvh,
+):
+    # visitor is used to construct the query
+    # https://github.com/NVIDIA/warp/blob/b58f4e4987e9ff104ba1b5ae90313ab909728eda/warp/native/bvh.h#L331
+    visitor = wp.bvh_visitor_init(bvh, method='greedy_dfs_left')
+    bounds_nr = wp.int32(0)
+    while wp.bvh_visitor_next(visitor, bounds_nr):
+        # replaces this condition
+        # https://github.com/NVIDIA/warp/blob/b58f4e4987e9ff104ba1b5ae90313ab909728eda/warp/native/bvh.h#L360
+        if not some_user_defined_predicate(bounds_nr):
+            continue
+
+        visitor.accept = True
+    
+    # Behaves the same as the existing bvh queries
+    query = wp.bvh_visitor_query(bvh, visitor)
+    while wp.bvh_visitor_query_next(query, bounds_nr):
+        # handle query
+```
+IkonOne commented on Jul 2, 2025
+IkonOne
+on Jul 2, 2025
+Last edited by IkonOne
+Author
+More actions
+After some more spelunking, I think a more appropriate API would be:
+```
+@wp.kernel
+def some_bvh_query_kernel(
+    bvh: wp.Bvh,
+):
+    visitor = wp.bvh_visit(bvh)
+
+    while wp.bvh_visit_next(visitor):
+        if visitor.is_leaf:
+            user_processes_leaf(visitor)
+        else:
+            if not user_defined_predicate(visitor):
+                continue
+
+            # TODO: How to visit right before left?
+            visitor.visit = True
+```
+@AnkaChan @mmacklin Is this a feature that would be accepted? I can likely manage getting the work done if so.
+WenchaoHuang commented on Jul 8, 2025
+WenchaoHuang
+on Jul 8, 2025
+Last edited by WenchaoHuang
+More actions
+Probably, we could hand-write our own BVH construction and traversal directly based on Warp. As long as Warp supports radix sort and thread_fence operation (which I'm still not entirely sure about), we can build the BVH using LBVH and perform traversal using a stackless algorithm : )
+IkonOne commented on Jul 8, 2025
+IkonOne
+on Jul 8, 2025
+Author
+More actions
+My preference would be to leverage the already well optimized and battle tested BVH in Warp directly and accept the potential performance trade offs of a user define traversal. Writing our own BVH is fine if it’s required and radix sort is likely implemented in one of the libraries that implement the supported interoperability interfaces. But it would be duplicating a significant amount of work that then has to be maintained independently from the library.
+shi-eric
+added this to the 1.11.0 milestone on Jul 17, 2025
+shi-eric
+added the
+Enhancement
+issue type on Nov 6, 2025
+shi-eric
+modified the milestones: 1.11.0, Backlog on Nov 13, 2025
+shi-eric
+added
+spatial accelerationBVHs, hash grids, and the spatial queries they accelerateBVHs, hash grids, and the spatial queries they accelerate
+on Aug 21, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+feature requestRequest for something to be addedRequest for something to be addedspatial accelerationBVHs, hash grids, and the spatial queries they accelerateBVHs, hash grids, and the spatial queries they accelerate
+Type
+Enhancement
+Projects
+No projects
+Milestone
+BacklogNo due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

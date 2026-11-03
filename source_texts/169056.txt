@@ -1,0 +1,363 @@
+文章浏览阅读1.3k次。体渲染（Volume Rendering）是NeRF神经场辐射AI模型的基础，与传统渲染使用三角形来显示 3D 图形不同，体渲染使用其他方法，例如体积光线投射 (Volume Ray Casting)。本文介绍体渲染的原理并提供Three.js实现代码，源代码可以从下载。推荐：用快速搭建可编程3D场景。_体渲染
+
+体渲染原理及WebGL实现【Volume Rendering】-CSDN博客
+体渲染原理及WebGL实现【Volume Rendering】
+最新推荐文章于 2023-09-20 16:53:22 发布
+新缸中之脑
+最新推荐文章于 2023-09-20 16:53:22 发布
+阅读量1.3k
+收藏
+1
+点赞数
+文章标签：
+webgl
+版权声明：本文为博主原创文章，遵循 CC 4.0 BY-SA 版权协议，转载请附上原文出处链接和本声明。
+本文链接：https://blog.csdn.net/shebao3333/article/details/132245421
+版权
+体渲染（Volume Rendering）是NeRF神经场辐射AI模型的基础，与传统渲染使用三角形来显示 3D 图形不同，体渲染使用其他方法，例如体积光线投射 (Volume Ray Casting)。本文介绍体渲染的原理并提供Three.js实现代码，源代码可以从Github下载。
+推荐：用 NSDT编辑器 快速搭建可编程3D场景。
+1、体渲染基础
+体渲染是基于图像的方法，通过沿 3D 体积投射光线，将 3D 标量场渲染为 2D 图像。 我们在屏幕上看到的每个像素都是光线穿过立方体并按一定间隔从体素获取强度样本的结果。
+但是我们如何投射光线呢？
+一个简单的选择是使用大小为 (1,1,1) 的 3D 网格立方体，并在两个不同的渲染通道中渲染正面和背面（启用和禁用背面剔除）。
+对于屏幕中生成的每个立方体片段，我们可以创建一条从立方体正面开始并在背面结束的射线。 有了光线的起点和终点，我们就可以开始对体素进行采样，以生成最终的片段颜色。
+标量场表示为包含每个 (x,y,z) 位置处的强度值的体素
+面我们将解释使用 WebGL 和 ThreeJS 实现体渲染的实现步骤。
+2、准备原始文件
+原始文件是非常简单的文件，仅包含体素强度，它们没有标头或元数据，并且通常每个体素具有按 X、Y 和 Z 顺序排列的 8 位（或 16 位）强度值。
+在 OpenGL 或 DirectX 中，我们可以将所有这些数据加载到专门设计的 3D 纹理中，但由于 WebGL 目前不支持存储或采样 3D 纹理，因此我们必须以 2D 纹理可以使用的方式存储它 。 因此，我们可以存储一个 png 图像文件，其中所有 Z 切片一个挨着一个，形成 2D 切片的马赛克。 我开发了一个非常简单的转换器工具，其中包含源代码。 该工具获取原始文件并生成一个 png 图像马赛克，对 alpha 通道中每个体素的强度进行编码（尽管理想的是将 png 存储为 A8 格式只是为了节省一些空间）。
+一旦 png 文件作为 2D 纹理加载到内存中，我们就可以使用我们自己的自定义 SampleAs3DTexture 函数对其进行采样，就好像它是 3D 纹理一样。
+在本文末尾的参考资料部分中查找更多要测试的原始文件。
+3、第一个渲染通道
+在第二步中，我们打算生成用作光线终点的片段。 因此，对于第一个渲染通道，我们不是绘制背面颜色，而是将片段的世界空间位置存储在渲染纹理中，作为 RGB 片段颜色内的 x、y、z 坐标值（此处 RGB 被编码为浮点值）。
+请注意 worldSpaceCoords 如何用于存储立方体背面位置的世界空间位置。
+顶点着色器第一遍：
+```
+varying vec3 worldSpaceCoords;
+ 
+void main()
+{
+//Set the world space coordinates of the back faces vertices as output.
+worldSpaceCoords = position + vec3(0.5, 0.5, 0.5); //move it from [-0.5;0.5] to [0,1]
+gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+}
+```
+片段着色器第一遍：
+```
+varying vec3 worldSpaceCoords;
+ 
+void main()
+{
+//The fragment's world space coordinates as fragment output.
+gl_FragColor = vec4( worldSpaceCoords.x , worldSpaceCoords.y, worldSpaceCoords.z, 1 );
+}
+```
+左：正面颜色坐标 右：背面颜色坐标
+4、第2个渲染通道
+该渲染通道是实际执行体积光线投射的通道，它首先绘制立方体的正面，其中正面的每个点都将是光线起点。
+顶点着色器创建两个输出：投影坐标（片段的 2D 屏幕坐标）和世界空间坐标。
+世界空间坐标将用作光线起点，而投影坐标将用于对存储立方体背面位置的纹理进行采样。
+顶点着色器第二遍：
+```
+varying vec3 worldSpaceCoords;
+varying vec4 projectedCoords;
+ 
+void main()
+{
+worldSpaceCoords = (modelMatrix * vec4(position + vec3(0.5, 0.5,0.5), 1.0 )).xyz;
+gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+projectedCoords = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+}
+```
+第二个渲染通道的片段着色器有点复杂，因此我们将分部分进行介绍。
+在此示例中，光线 R0 到 R4 从立方体的正面片段位置（f0 到 f4）投射，并在背面位置（I0 到 I4）结束
+4.1 获取光线结束位置
+基于上一步的位置，我们对纹理进行采样，得到背面片段的世界空间位置。
+请注意我们如何通过除以 W 将投影坐标转换为 NDC（标准化设备坐标），然后如何将其转换为 [0;1] 范围，以便将其用作 UV 坐标。 当我们对先前渲染通道中生成的 2D 纹理进行采样时，可以获得光线的结束位置。
+片段着色器第二遍第 1 部分：
+```
+//Transform the coordinates it from [-1;1] to [0;1]
+vec2 texc = vec2(((projectedCoords.x / projectedCoords.w) + 1.0 ) / 2.0,
+((projectedCoords.y / projectedCoords.w) + 1.0 ) / 2.0 );
+ 
+//The back position is the world space position stored in the texture.
+vec3 backPos = texture2D(tex, texc).xyz;
+ 
+//The front position is the world space position of the second render pass.
+vec3 frontPos = worldSpaceCoords;
+ 
+//The direction from the front position to back position.
+vec3 dir = backPos - frontPos;
+ 
+float rayLength = length(dir);
+```
+4.2 设置射线
+有了前面和后面的位置，我们现在可以创建一条从 frontPos 开始并在 backPos 结束的射线。
+片段着色器第二遍第 2 部分
+```
+//Calculate how long to increment in each step.
+float delta = 1.0 / steps;
+ 
+//The increment in each direction for each step.
+vec3 deltaDirection = normalize(dir) * delta;
+float deltaDirectionLength = length(deltaDirection);
+ 
+//Start the ray casting from the front position.
+vec3 currentPosition = frontPos;
+ 
+//The color accumulator.
+vec4 accumulatedColor = vec4(0.0);
+ 
+//The alpha value accumulated so far.
+float accumulatedAlpha = 0.0;
+ 
+//How long has the ray travelled so far.
+float accumulatedLength = 0.0;
+ 
+vec4 colorSample;
+float alphaSample;
+```
+4.3 光线行进
+一旦设置了射线，我们就开始从起始位置行进射线并将射线当前位置向方向推进。
+在每个步骤中，我们都会对纹理进行采样以搜索体素强度。 值得注意的是，体素仅包含强度值，因此到目前为止它们没有任何有关颜色的信息。 每个体素的颜色由变换函数给出。 可以查看 sampleAs3DTexture函数代码来了解变换函数是如何工作的。
+在获得由 sampleAs3DTexture 给出的体素颜色后，将通过 alphaCorrection 参数对其进行校正。 可以在线调整该值并查看不同的结果。
+每次迭代的重要部分是实际的颜色组合，其中根据 alpha 值将累积颜色值添加到先前存储的值之上。 我们还保留了一个 alphaAccumulator，它可以让我们知道何时停止光线行进。
+迭代不断进行，直到满足以下三个条件之一：
+光线传播的距离达到了假定的光线长度。 请记住，射线从 startPos 到 endPos。
+累计alpha值达到100%
+迭代达到最大常数 MAX_STEPS
+最后，片段着色器返回所遍历的体素值的合成结果。
+片段着色器第二遍第 3 部分
+```
+//Perform the ray marching iterations
+for(int i = 0 ; i < MAX_STEPS ; i++)
+{
+//Get the voxel intensity value from the 3D texture.
+colorSample = sampleAs3DTexture( currentPosition );
+ 
+//Allow the alpha correction customization
+alphaSample = colorSample.a * alphaCorrection;
+ 
+//Perform the composition.
+accumulatedColor += (1.0 - accumulatedAlpha) * colorSample * alphaSample;
+ 
+//Store the alpha accumulated so far.
+accumulatedAlpha += alphaSample;
+ 
+//Advance the ray.
+currentPosition += deltaDirection;
+accumulatedLength += deltaDirectionLength;
+ 
+//If the length traversed is more than the ray length, or if the alpha accumulated reaches 1.0 then exit.
+if(accumulatedLength >= rayLength || accumulatedAlpha >= 1.0 )
+break;
+ 
+}
+ 
+gl_FragColor = accumulatedColor;
+```
+如果你可以更改每条射线完成的最大迭代次数，则更改控件中的步骤，并且你可能必须相应地调整 alphaCorrection 值。
+原文链接：体渲染Three.js实现 — BimAnt
+优惠劵
+新缸中之脑
+关注
+关注
+0
+点赞
+踩
+1
+收藏
+觉得还不错?
+一键收藏
+打赏
+知道了
+1
+评论
+体渲染原理及WebGL实现【Volume Rendering】
+体渲染（Volume Rendering）是NeRF神经场辐射AI模型的基础，与传统渲染使用三角形来显示 3D 图形不同，体渲染使用其他方法，例如体积光线投射 (Volume Ray Casting)。本文介绍体渲染的原理并提供Three.js实现代码，源代码可以从下载。推荐：用快速搭建可编程3D场景。
+复制链接
+扫一扫
+UnityTMP通用字体电脑端移动端 WebGL端
+07-06
+博客连接;http://t.csdn.cn/dL3My
+在Unity WebGL中实现中文输入是一个复杂的问题，因为浏览器的原生输入框在WebGL中不可用。然而，有一些第三方解决方案可以帮助实现中文输入
+TextMesh Pro 是 Unity 中用于高级文本渲染的强大工具，支持多种语言和字体。然而，在使用 TextMesh Pro 显示中文时，可能会遇到一些问题，因为中文字符集与常规字体的字符集不完全匹配。
+NeRF与三维重建专栏（二）NeRF原文解读与体渲染物理模型
+CV技术指南（微信公众号）
+06-02
+1233
+上一章中我们大致介绍了三维重建的背景、NeRF应用于三维重建的难点以及相关数据集和评估指标，本章节将会详细介绍NeRF原文以及部分源码，以及体渲染的物理模型，来帮助读者更好理解NeRF。
+1 条评论
+您还未登录，请先
+登录
+后发表或查看评论
+体渲染技术解析（Volume Rendering）
+qq_50901081的博客
+09-20
+264
+我们首先假设粒子都是半径为r的球体，光子通过一个底面积为E，厚度（高度）为△s的内部为空心的圆柱体。那么在当前假设的圆柱体中，有ρE△s个粒子，并且每个粒子的投影A = Πr^2。所以当前圆柱体中所有粒子加起来的投影面积为ρAE△s，而总的底面积为E，假设光子均匀分布，所以有ρAE△s/E = ρA△s的概率光子会被粒子吸收掉。I(s)是一个关于s的函数，随着各个区域的不同光的强度也会改变。所谓体渲染，把气体等物质抽象成一团粒子群，光线在穿过这些粒子群时，光子和粒子发生碰撞的过程，然后我们来模拟这个过程。
+FontGL:将字体渲染到 WebGL 中
+06-19
+字体GL
+将字体渲染到 WebGL 上下文中。
+特征
+字体加载
+GL 文本渲染
+字体图集
+用法
+字体
+加载用于应用程序的 WebFont。
+例子
+var face = new FontFace ( 'family' , 'url("http://src.url/font.woff") format("woff")' ) ;
+face . load ( )
+. then ( success , error ) ;
+字体
+创建用于将字体渲染到 GL 的纹理。
+例子
+var font = new Font ( 'family' , { gl : glContext } ) ;
+font . ready . then ( success , error ) ;
+文本
+将字符串呈现给 GL。
+var text = new Text ( 'message' , font , gl ) ;
+volume-rendering:WebGL客户端，用于3D天气场的体积渲染
+05-24
+天气立方
+使用WebGL体积渲染和射线行进来显示来自模型运行的3D大气科学数据。 开发整个系统的一部分，以通过云将数据从Met Office超级计算机提取到您的浏览器。
+Volume-Rendering:使用 Three.js 和行进立方体算法对 3D 医学图像进行体积渲染
+07-07
+#体积渲染
+＃＃介绍
+此应用程序使用 Three.js 实现了行进立方体算法，以便可以在 Web 浏览器中显示医学图像和函数。 查看医学图像时，可以更改表面水平以显示图像的不同元素。 例如，我们可以查看人脚的表面，增加表面值后，我们可以查看脚的骨骼结构。
+＃＃用法
+该应用程序可以在这里找到（ ）。 可以在此处下载其他 .raw 3D 文件 ( )。 要使用该应用程序，用户需要选择要渲染的对象、更新渲染设置并渲染文件。 w,a,s,d 键可用于在渲染场景中移动。 J,K,L,I 可用于旋转对象。
+#####选择要渲染的对象
+按选择对象按钮
+根据对象的类型，可能需要从下拉列表中选择一个值
+按加载 3D 文件、加载函数或上传本地文件
+等待对象加载
+一旦所有对话框自动关闭，就可以渲染对象
+#####更新渲染设置
+按设置按钮
+在下面的对话框中，输入必要的值
+渲染设置特定于正在渲染的文件或函数
+体渲染(Volume Rendering)与光线投射(Ray Casting)算法详解
+Aaron9489的博客
+11-17
+6003
+体渲染和Ray Casting简介
+Cesium Volumn 体渲染
+yue1241630499的博客
+03-17
+5538
+Cesium中的体渲染
+上篇介绍了Cesium中的BoxGeometry的本地坐标获取方法，获取了本地坐标后，我们就可以开始做体渲染相关的东西了。将相机坐标也换算到模型本地坐标，即可计算得到以相机为起点的到立方体的射线。体渲染相关的内容参看这篇文章，里面说明了ThreeJS中体渲染的相关内容。
+先上图
+模型本地坐标
+Cesium中的BoxGeometry渲染流程，及模型本地坐标
+这次模型使用自定义的primitive来实现，直接通过Cesium内置的position来获取本地坐标，不再通过编码后的变量
+体渲染光线行进算法【NeRF必读】
+新缸中之脑
+07-27
+300
+为了积分由于内散射而沿射线产生的入射光，我们将射线穿过的体块分解为小体块元素，并将每个小体块元素对整个体块对象的贡献结合起来，有点像我们在 2D 编辑软件（例如 Photoshop）中将带有遮罩或 Alpha 通道（通常代表对象的不透明度）的图像彼此堆叠在一起。这就是我们在第一章中讨论 Alpha 合成方法的原因。这些小体块元素中的每一个都代表第一章中提到的黎曼和中的一个样本。图 1：向后光线行进。沿着射线以规则的小步向前行进，从 t1 到 t0。
+体渲染简明教程【NeRF基础】
+新缸中之脑
+07-24
+419
+本课程前两章的目标是学习如何在均匀颜色的背景上渲染由单个光源照明的球体形状的体积。这将帮助我们首先直观地了解体积是什么，并介绍我们将用于渲染它们的光线行进算法。在这一章中，我们将只渲染一个具有均匀密度的普通体积。我们将忽略物体从体积外部或内部投射的阴影，以及如何以不同的密度渲染体积。这些将在接下来的章节中进行研究。我们不再提供大量关于什么是体积以及用于渲染它们的方程的详细背景知识，而是直接深入实现并从中获得对体积渲染的更正式的理解。
+体渲染样例数据 VolumeRender data
+11-19
+针对一些想测试体渲染技术的，但又没有数据特上传体渲染样例数据(VolumeRender data)，用于测试使用 单张尺寸256*256，共16*16张
+效果超棒的Webgl模型-人体肺
+04-11
+效果超棒的Webgl模型-
+linux image-wine524 ag
+12-17
+linux image-wine524 ag
+Yapi详细安装过程（亲测可用）
+12-17
+YApi是由去哪儿网移动架构组（简称YMFE，由FE、iOS和Android工程师共同组成的大前端团队）开源的可视化接口管理工具。以下是对YApi的详细介绍：
+YApi是一个可本地部署的、打通前后端及QA的接口管理平台，旨在为开发、产品和测试人员提供更优雅的接口管理服务。利用YApi，开发者可以轻松创建、发布和维护不同项目、不同平台的API。YApi使得测试、管理和维护多个项目的API接口变得方便，并且与Swagger这类随应用生灭（且线上环境下大多数须关闭）的工具不同，YApi是一个独立的服务平台。
+在部署方面，YApi平台部署完成后，用户需要根据部署日志提示信息切换到部署目录，并输入指令node vendors/server/app.js启动服务器。
+基于STM32与Python的智慧教室控制系统-林鹏程.pdf
+最新发布
+12-17
+基于STM32与Python的智慧教室控制系统
+基于单片机的雨量检测系统设计(论文+源码)-kaic.docx
+12-17
+目 录
+第1章 绪论
+1.1 研究背景及现况
+1.2 国内外研究现状
+1.3 研究方法
+第2章 系统设计
+2.1 系统总体方案设计
+2.2 设计系统方案
+2.2.1 单片机选择
+2.2.2 雨滴传感器选择
+2.2.3 无线收发模块选择
+2.2.4 显示器选择
+第3章 硬件设计
+3.1 微控制器电路设计
+3.2 雨滴传感模块电路设计
+3.3 无线收发模块电路设计
+3.4 显示模块电路设计
+3.5 系统电路原理图
+第4章 软件设计
+4.1 采集端软件设计
+4.1.1 雨滴传感模块软件设计
+4.1.2 NRF24L01无线发送软件设计
+4.2 接收端软件设计
+4.2.1 NRF24L01无线接收软件设计
+4.2.2 OLED显示模块软件设计
+第5章 系统调试
+5.1 硬件测试
+5.2 测试结果及分析
+结 论
+参考文献
+致 谢
+附 录
+附录A 原理图
+附录B 程序
+使用webgl 实现聚光灯的原理
+03-21
+聚光灯的原理是通过在场景中添加一个聚光灯光源，然后使用WebGL渲染器将其呈现出来。聚光灯光源可以设置其位置、方向、角度和强度等属性，以控制其照射范围和亮度。在渲染时，需要计算每个像素与聚光灯之间的距离和角度，以确定其受到的光照强度和颜色。这可以通过在着色器中使用光照模型和投影矩阵来实现。
+“相关推荐”对你有帮助么？
+非常没帮助
+没帮助
+一般
+有帮助
+非常有帮助
+提交
+评论 1
+被折叠的 条评论
+为什么被折叠?
+到【灌水乐园】发言
+查看更多评论
+添加红包
+下一步
+知道了
+打赏作者
+新缸中之脑
+你的鼓励将是我创作的最大动力
+¥1
+¥2
+¥4
+¥6
+¥10
+¥20
+扫码支付：¥1
+获取中
+扫码支付
+您的余额不足，请更换扫码支付或充值
+打赏作者
+实付元
+使用余额支付
+点击重新获取
+扫码支付
+钱包余额
+0
+抵扣说明：
+1.余额是钱包充值的虚拟货币，按照1:1的比例进行支付金额的抵扣。
+2.余额无法直接购买下载，可以购买VIP、付费专栏及课程。
+余额充值

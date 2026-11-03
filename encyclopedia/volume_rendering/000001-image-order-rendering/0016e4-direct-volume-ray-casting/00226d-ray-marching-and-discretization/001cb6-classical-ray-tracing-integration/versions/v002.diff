@@ -1,0 +1,241 @@
+--- v001.md
++++ v002.md
+@@ -1,15 +1,15 @@
+ # Classical Ray Tracing Integration
+ 
+-Also called: Analytical Volume Integration for Homogeneous Spheres, Ray Marching Traceray, Ray Tracing Integration for 3DGS, Ray casting with geometry, Ray tracing volume rendering, Ray-Sphere Volume Rendering with Absorption and Uniform Scattering, SciVis Shading
++Also called: Kajiya and Von Herzen
+ 
+ ## Overview
+-Classical Ray Tracing Integration is a volume rendering technique that combines analytical geometric intersection with ray marching to compute pixel color by combining background transmission (attenuated by absorption) and uniform in-scattering [S1]. It solves the problem of rendering volumetric objects with defined boundaries (such as spheres) or integrating geometric visibility into volume pipelines, offering a closed-form solution for homogeneous volumes or a deferred shading heuristic for complex scalar fields [S1, S2]. Unlike standard direct volume ray casting which samples uniformly along the entire ray, this method explicitly calculates entry and exit points to limit sampling to the volume interior and applies Beer's law for transmission [S1]. It is distinguished from [Alpha Compositing Ray Casting](922-alpha-compositing-ray-casting.md) by its handling of homogeneous spheres via analytical integration, and from [Single Scattering Volume Rendering with Ray Marching](1532-single-scattering-volume-rendering-with-ray-marching.md) by its assumption of uniform scattering color [S1].
++Classical Ray Tracing Integration is a volume rendering technique that computes pixel color by combining background transmission (attenuated by absorption) and uniform in-scattering [S1]. It solves the problem of rendering volumetric objects with defined boundaries or integrating geometric visibility directly into volume pipelines, offering a closed-form solution for homogeneous volumes or a deferred shading heuristic for complex scalar fields [S1, S2]. Unlike standard direct volume ray casting which samples uniformly along the entire ray, this method explicitly calculates entry and exit points to limit sampling to the volume interior and applies Beer's law for transmission [S1]. It is distinguished from [Alpha Compositing Ray Casting](922-alpha-compositing-ray-casting.md) by its handling of homogeneous spheres via analytical integration, and from [Single Scattering Volume Rendering with Ray Marching](1532-single-scattering-volume-rendering-with-ray-marching.md) by its assumption of uniform scattering color [S1].
+ 
+ ## How it works
+-The method operates in two primary modes: analytical integration for homogeneous spheres and ray marching with shading heuristics for general volume data. Both modes rely on the volume rendering integral discretized into a summation over sample points along a ray [S5].
++The method operates in two primary modes: analytical integration for homogeneous spheres and ray marching with shading heuristics for general volume data [S1, S2]. Both modes rely on the volume rendering integral discretized into a summation over sample points along a ray [S4].
+ 
+ ### Inputs and Outputs
+-*   **Inputs**: Camera ray (origin $\bar{o}$, direction $\bar{d}$), volume data (3D texture or sphere parameters), transfer function $TF$, shading parameters (absorption coefficient $\sigma_a$, scatter color $C_{scatter}$, shading mode).
+-*   **Outputs**: Final pixel color $C_{final}$ and accumulated opacity $\alpha_{final}$.
++*   **Inputs**: Camera ray (origin $\bar{o}$, direction $\bar{d}$), volume data (3D texture or sphere parameters), transfer function $TF$, shading parameters (absorption coefficient $\sigma_a$, scatter color $C_{scatter}$, shading mode) [S1, S2].
++*   **Outputs**: Final pixel color $C_{final}$ and accumulated opacity $\alpha_{final}$ [S1, S2].
+ 
+ ### Data Structures
+@@ -20,6 +20,6 @@
+     *   `scatter`: `vec3` (uniform scatter color, e.g., $[0.8, 0.1, 0.5]$) [S1].
+ 2.  **Volume Context** (for marching mode):
+-    *   `volume`: 3D texture or grid.
+-    *   `tfn`: Transfer function mapping scalar value to $(C, \alpha)$.
++    *   `volume`: 3D texture or grid [S2].
++    *   `tfn`: Transfer function mapping scalar value to $(C, \alpha)$ [S2].
+     *   `params`: Shading mode (`GRADIENT_SHADING` or `SINGLE_SHADE_HEURISTIC`), `shadingScale`, `gradientStep`, lighting parameters [S2].
+ 
+@@ -42,11 +42,11 @@
+ 
+ 1.  **Initialization**:
+-    *   Initialize `alpha = 0`, `color = 0`.
++    *   Initialize `alpha = 0`, `color = 0` [S2].
+     *   For `SINGLE_SHADE_HEURISTIC`: Initialize `highestOrg = 0`, `highestColor = 0`, `highestAlpha = 0` [S2].
+ 2.  **Intersection Check**: If the ray intersects the volume bounds $[t_{start}, t_{end}]$, proceed. Otherwise, return background [S2].
+-3.  **Jitter**: Generate a random jitter value $j \in [0, 1)$ to prevent banding artifacts [S2, S3].
++3.  **Jitter**: Generate a random jitter value $j \in [0, 1)$ to offset the first sample position [S2]. A fixed random offset is applied to each ray's start position to prevent sample layers from appearing as bands [S3].
+ 4.  **Ray Marching Loop**: Iterate $t$ from $t_{start}$ to $t_{end}$ with step size `marchingStep`.
+-    *   **Position**: Calculate position $\bar{p} = \bar{o} + \text{lerp}(j, t_{start}, t_{end}) \cdot \bar{d}$ (or standard linear interpolation along the ray segment) [S2].
+-    *   **Sample**: Get scalar value $d = \text{sampleVolume}(\bar{p})$ using trilinear interpolation [S1, S5].
++    *   **Position**: Calculate position $\bar{p} = \bar{o} + t \cdot \bar{d}$ [S2].
++    *   **Sample**: Get scalar value $d$ using trilinear interpolation [S1].
+     *   **Transfer Function**: Map $d$ to sample color $C_s$ and opacity $\alpha_s$ [S2].
+     *   **Opacity Correction**: Apply opacity correction based on step size to ensure slice-count invariance [S2, S3].
+@@ -54,11 +54,6 @@
+     *   **Transmittance**: Calculate current transmittance $tr = 1 - \alpha$ [S2].
+     *   **Shading Mode**:
+-        *   **If `GRADIENT_SHADING`**:
+-            *   Transform ray direction to world space.
+-            *   Compute shaded color $C_{shade}$ using lighting model (ambient + directional) with normal $\bar{N}_w$ [S2].
+-            *   Blend sample color: $C_s = \text{lerp}(\text{shadingScale}, C_s, C_{shade})$ [S2].
+-        *   **If `SINGLE_SHADE_HEURISTIC`**:
+-            *   Check if current sample density is highest: if $\alpha_s \cdot (1 - \alpha) > \text{highestAlpha}$, update `highestOrg`, `highestColor`, and `highestAlpha` [S2].
+-            *   Use unshaded $C_s$ for accumulation [S2].
++        *   **If `GRADIENT_SHADING`**: Transform ray direction to world space. Compute shaded color $C_{shade}$ using lighting model (ambient + directional) with normal $\bar{N}_w$ [S2]. Blend sample color: $C_s = \text{lerp}(\text{shadingScale}, C_s, C_{shade})$ [S2].
++        *   **If `SINGLE_SHADE_HEURISTIC`**: Check if current sample density is highest: if $\alpha_s \cdot (1 - \alpha) > \text{highestAlpha}$, update `highestOrg`, `highestColor`, and `highestAlpha` [S2]. Use unshaded $C_s$ for accumulation [S2].
+     *   **Accumulation**:
+         *   Update color: $C_{new} = C_{old} + (1 - \alpha_{old}) \cdot C_s \cdot \alpha_s$ [S2].
+@@ -80,5 +75,15 @@
+     Supports homogeneous spheres (analytical) and general volumes (marching).
+     """
+-    
++    # Helper: Linear interpolation
++    def lerp(a, b, t):
++        return a + t * (b - a)
++
++    # Helper: Vector operations (simplified for self-containment)
++    def vec3_add(a, b): return (a[0]+b[0], a[1]+b[1], a[2]+b[2])
++    def vec3_mul(a, b): return (a[0]*b[0], a[1]*b[1], a[2]*b[2])
++    def vec3_scale(v, s): return (v[0]*s, v[1]*s, v[2]*s)
++    def vec3_pow(v, p): return (v[0]**p, v[1]**p, v[2]**p)
++    def vec3_len(v): return (v[0]**2 + v[1]**2 + v[2]**2)**0.5
++
+     # --- Mode 1: Homogeneous Sphere (Analytical) ---
+     if sphere is not None and volume is None:
+@@ -91,11 +96,12 @@
+         
+         # Beer's Law for transmission [S1]
+-        transmission = exp(-sphere.sigma_a * distance)
++        transmission = math.exp(-sphere.sigma_a * distance)
+         
+         # Final color: attenuated background + uniform scatter [S1]
+-        final_color = background_color * transmission + sphere.scatter * (1.0 - transmission)
++        final_color = vec3_add(vec3_mul(background_color, (transmission, transmission, transmission)), 
++                               vec3_mul(sphere.scatter, (1.0 - transmission, 1.0 - transmission, 1.0 - transmission)))
+         
+         # Gamma correction [S2]
+-        return pow(final_color, vec3(1.0 / 2.2))
++        return vec3_pow(final_color, 1.0 / 2.2)
+ 
+     # --- Mode 2: General Volume (Ray Marching) ---
+@@ -107,35 +113,13 @@
+ 
+         alpha = 0.0
+-        color = vec3(0.0)
++        color = (0.0, 0.0, 0.0)
+         
+         # Heuristic variables for SINGLE_SHADE_HEURISTIC [S2]
+-        highest_org = vec3(0.0)
+-        highest_color = vec3(0.0)
++        highest_org = (0.0, 0.0, 0.0)
++        highest_color = (0.0, 0.0, 0.0)
+         highest_alpha = 0.0
+ 
+         # Jitter to prevent banding [S3]
+-        jitter = random_float(0.0, 1.0)
+-        
+-        # Determine step range based on jitter [S2]
+-        t_curr = lerp(t_start, t_end, jitter)
+-        t_end_actual = t_end
+-        
+-        while alpha < 0.99 and t_curr < t_end_actual:
+-            # Sample position [S2]
+-            # Note: In the source, lerp(jitter, t.x, t.y) implies mapping jitter to the segment [t_start, t_end]
+-            # However, standard ray marching iterates t. The source lambda uses t.x and t.y from the iterator.
+-            # Assuming iterator yields (t_start, t_end) segments or similar, we simplify to standard march:
+-            # Here we assume a standard march from t_start to t_end with step size.
+-            # Re-interpreting source [S2] lambda: it receives t (likely a segment or current t).
+-            # We will implement a standard march for clarity, applying jitter as an offset.
+-            
+-            # Standard march implementation derived from source logic:
+-            # The source iterates t from t0 to t1.
+-            pass # See loop below for corrected logic
+-
+-        # Corrected Marching Loop based on [S2] structure:
+-        t_curr = t_start + jitter * (t_end - t_start) # Initial jittered start? No, jitter is usually sample offset.
+-        # Source [S2]: `p = ray.org + lerp(jitter, t.x, t.y) * ray.dir`
+-        # This implies the iterator yields segments (t.x, t.y). We will assume uniform steps.
++        jitter = random.random()
+         
+         step_size = params.marchingStep if params else 0.01
+@@ -144,11 +128,5 @@
+         while alpha < 0.99 and t_curr < t_end:
+             # Position calculation [S2]
+-            # Using jitter as a random offset within the first step or global? 
+-            # Source [S3] says "fixed random offset... to prevent sample layers".
+-            # Source [S2] uses jitter in lerp. We apply jitter to the first sample position relative to step.
+-            if t_curr == t_start:
+-                t_curr += jitter * step_size
+-            
+-            p = ray_origin + t_curr * ray_direction
++            p = vec3_add(ray_origin, vec3_mul(ray_direction, t_curr))
+             
+             # Sample volume [S2]
+@@ -158,13 +136,10 @@
+             sample_color, sample_alpha = volume.tfn(scalar)
+             
+-            # Opacity correction [S2]
+-            # Assuming correction factor based on step size and density
+-            # Not given exact formula in notes, but applied before shading [S2]
+-            # [G] Standard opacity correction: alpha *= exp(-sigma * step) or similar. 
+-            # Source just says "Apply opacity correction". We assume sample_alpha is corrected.
++            # Opacity correction [G] (Standard slice-count invariance adjustment)
++            sample_alpha = 1.0 - math.exp(-sample_alpha * step_size)
+             
+             # Gradient [S2]
+-            grad = -volume.sample_gradient(p, scalar, params.gradientStep)
+-            normal_world = transform_normal(grad, volume.otw)
++            grad = volume.sample_gradient(p, scalar, params.gradientStep)
++            normal_world = volume.transform_normal(grad)
+             
+             transmittance = 1.0 - alpha
+@@ -172,11 +147,16 @@
+             if params.mode == "GRADIENT_SHADING":
+                 # Lighting [S2]
+-                dir_world = transform_vector(ray_direction, volume.otw)
+-                shaded_color = shade_scivis_light(dir_world, normal_world, sample_color, 
+-                                                  params.mat_gradient_shading, 
+-                                                  params.light_ambient, 
+-                                                  params.light_directional_rgb, 
+-                                                  params.light_directional_dir)
+-                sample_color = lerp(params.shadingScale, sample_color, shaded_color)
++                dir_world = volume.transform_vector(ray_direction)
++                shaded_color = volume.shade_scivis_light(dir_world, normal_world, sample_color, 
++                                                         params.mat_gradient_shading, 
++                                                         params.light_ambient, 
++                                                         params.light_directional_rgb, 
++                                                         params.light_directional_dir)
++                sample_color = vec3_add(vec3_scale(sample_color, params.shadingScale), 
++                                        vec3_mul(vec3_scale(shaded_color, (1.0 - params.shadingScale, 1.0 - params.shadingScale, 1.0 - params.shadingScale)), 
++                                                 (1.0, 1.0, 1.0))) # Simplified lerp for vec3
++                # Correct lerp implementation for vec3:
++                sample_color = vec3_add(vec3_scale(sample_color, 1.0 - params.shadingScale), 
++                                        vec3_scale(shaded_color, params.shadingScale))
+                 
+             elif params.mode == "SINGLE_SHADE_HEURISTIC":
+@@ -190,5 +170,6 @@
+             
+             # Accumulation [S2]
+-            color += transmittance * sample_color * sample_alpha
++            contrib = vec3_mul(sample_color, (transmittance * sample_alpha, transmittance * sample_alpha, transmittance * sample_alpha))
++            color = vec3_add(color, contrib)
+             alpha += transmittance * sample_alpha
+             
+@@ -198,12 +179,12 @@
+         if params.mode == "SINGLE_SHADE_HEURISTIC" and highest_alpha > 0.0:
+             # Shadow ray transmittance [S2]
+-            # [G] Compute transmittance from highest_org to light
+-            shadow_transmittance = compute_shadow_transmittance(volume, highest_org, params.light_directional_dir)
+-            
+-            final_shaded_color = highest_color * highest_alpha * shadow_transmittance
+-            color = lerp(params.shadingScale, color, final_shaded_color)
++            shadow_transmittance = volume.compute_shadow_transmittance(highest_org, params.light_directional_dir)
++            
++            final_shaded_color = vec3_mul(highest_color, (highest_alpha * shadow_transmittance, highest_alpha * shadow_transmittance, highest_alpha * shadow_transmittance))
++            color = vec3_add(vec3_scale(color, 1.0 - params.shadingScale), 
++                             vec3_scale(final_shaded_color, params.shadingScale))
+             
+         # Gamma correction [S2]
+-        return pow(color, vec3(1.0 / 2.2))
++        return vec3_pow(color, 1.0 / 2.2)
+ 
+     return background_color
+@@ -225,13 +206,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N)$ where $N$ is the number of samples along the ray. For analytical spheres, it is $O(1)$ per pixel. For marching, it depends on volume density and step size.
+-*   **Memory Complexity**: $O(1)$ for analytical mode. $O(V)$ for volume data storage in marching mode.
+-*   **Performance**: Analytical integration is extremely fast and exact for homogeneous spheres. Ray marching is slower but handles complex geometries. Early ray termination optimizes performance in dense regions [S2, S3].
+-*   **Strengths**: Exact solution for homogeneous volumes; integrates geometric visibility; supports shading heuristics for complex data.
++*   **Time Complexity**: $O(N)$ where $N$ is the number of samples along the ray [G]. For analytical spheres, it is $O(1)$ per pixel [S1]. For marching, it depends on volume density and step size [S2].
++*   **Memory Complexity**: $O(1)$ for analytical mode. $O(V)$ for volume data storage in marching mode [G].
++*   **Performance**: Analytical integration is extremely fast and exact for homogeneous spheres [S1]. Ray marching is slower but handles complex geometries [S2]. Early ray termination optimizes performance in dense regions [S2, S3].
++*   **Strengths**: Exact solution for homogeneous volumes; integrates geometric visibility; supports shading heuristics for complex data [S1, S2, S3].
+ *   **Limitations**: Analytical mode is limited to simple shapes (spheres); uniform scattering assumption is unrealistic for many volumes; heuristic shading may produce artifacts if the highest density point is not representative [S1, S2].
+ *   **When to use**: Ideal for rendering simple volumetric objects (e.g., clouds, smoke balls) or when integrating geometric surfaces with volume data [S1, S3]. Avoid for highly anisotropic or spatially varying scattering volumes [S1].
+ 
+ ## Background
+-The method originates from early volume rendering techniques that combined ray tracing with volume data [S1]. It was formalized in the context of scientific visualization shading, where analytical integration for homogeneous spheres provided a baseline for more complex methods [S1]. The integration of classical ray tracing into volume rendering pipelines was proposed to handle visibility and geometric merging, such as superimposing radiation treatment planning isodose surfaces over CT data [S3]. The heuristic shading approach was developed to balance performance and visual quality in scientific visualization [S2]. Recent applications include integrating ray tracing for interreflections in 3D Gaussian Splatting [S4].
++The method originates from early volume rendering techniques that combined ray tracing with volume data [S1]. It was formalized in the context of scientific visualization shading, where analytical integration for homogeneous spheres provided a baseline for more complex methods [S1]. The integration of classical ray tracing into volume rendering pipelines was proposed to handle visibility and geometric merging, such as superimposing radiation treatment planning isodose surfaces over CT data [S3]. The heuristic shading approach was developed to balance performance and visual quality in scientific visualization [S2]. Recent applications include integrating ray tracing for interreflections in 3D Gaussian Splatting [S5].
+ 
+ ## Sources
+@@ -239,3 +220,4 @@
+ [S2] VIDILabs/instantvnr, https://github.com/VIDILabs/instantvnr, fetched 2026-10-26 (unofficial)
+ [S3] DTIC ADA193649: Rendering of Surfaces from Volume Data,, https://archive.org/details/DTIC_ADA193649, fetched 2026-10-26
+-[S4] From Volume Rendering to 3D Gaussian Splatting, https://www.visgraf.impa.br/Data/RefBib/PS_PDF/tutorial-sib2025/tutorial-sib2025.pdf, fetched 2026-10-28 (unofficial)+[S4] Production Volume Rendering, https://cg.informatik.uni-freiburg.de/intern/seminar/volumeRenderingProductionFundamentals2011.pdf, fetched 2026-10-27 (unofficial)
++[S5] From Volume Rendering to 3D Gaussian Splatting, https://www.visgraf.impa.br/Data/RefBib/PS_PDF/tutorial-sib2025/tutorial-sib2025.pdf, fetched 2026-10-28 (unofficial)

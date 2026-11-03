@@ -1,0 +1,302 @@
+Contribute to canesesmarjf/2026_surface_mesh_tools development by creating an account on GitHub.
+
+2026_surface_mesh_tools/docs/collision_detection/04_ray_grid_traversal.md at main · canesesmarjf/2026_surface_mesh_tools · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+FilesExpand file tree
+main
+/
+04_ray_grid_traversal.md
+Copy path
+Blame
+More file actions
+Blame
+More file actions
+Latest commit
+History
+History
+History
+334 lines (245 loc) · 11.8 KB
+main
+/
+04_ray_grid_traversal.md
+Copy path
+Top
+File metadata and controls
+Preview
+Code
+Blame
+334 lines (245 loc) · 11.8 KB
+Raw
+Copy raw file
+Download raw file
+Outline
+Edit and raw actions
+Ray traversal through the structured grid
+Breadcrumbs: Documentation portal › Ray–surface collision detection › Ray traversal
+Navigation: ← Previous: Triangle–box SAT filtering ·
+↑ Up: Collision-detection portal ·
+Next: Möller–Trumbore intersection →
+This page defines the implemented contract for one configured ray traversing
+the structured grid. It deliberately stops before ray–triangle intersection.
+1. Purpose
+The structured grid accelerates a ray query only if the program can visit the
+cells crossed by the ray in the correct order. The intended method is a
+three-dimensional digital differential analyzer, normally abbreviated
+3D DDA. It is also called voxel traversal or grid traversal.
+DDA advances exactly from one cell boundary to the next. It does not sample
+the ray at an arbitrary fixed distance.
+2. Configured geometric ray
+The optional TOML input is:
+```
+[ray]
+origin = [0.0, 0.0, 0.0]
+direction = [0.0, 2.0, 0.0]
+```
+origin is specified in centimetres. direction is dimensionless and must
+be nonzero. Configuration normalization converts it to a unit vector, so the
+ray parameter $s$ is distance in centimetres. The ray may begin inside or
+outside the structured grid.
+The table is optional. When it is absent, the existing mesh-indexing and
+cell-inspection workflow is unchanged. Multiple rays, particle speed, and a
+maximum travel distance are outside this milestone.
+Python callers may also construct the lower-level Ray data class directly.
+Its origin and direction must be finite NumPy arrays with shape (3,), and
+its direction length must equal one within a $10^{-12}$ round-off allowance.
+Invalid direct inputs raise RayError instead of producing distances with the
+wrong meaning. Traversal validates the ray again because frozen=True
+prevents data-class fields from being reassigned but does not make the
+contents of a NumPy array immutable.
+3. Why fixed-distance marching is not preferred
+A fixed-step method evaluates points such as
+$$
+\mathbf{r},;
+\mathbf{r}+\Delta s\widehat{\mathbf{d}},;
+\mathbf{r}+2\Delta s\widehat{\mathbf{d}},\ldots
+$$
+If $\Delta s$ is too large, the ray can cross a thin cell or surface
+between samples. If it is very small, many points remain in the same cell and
+repeat work.
+DDA instead computes the next x, y, or z cell boundary analytically. Every
+crossed cell is visited without choosing a sampling distance.
+4. Entering the grid
+A ray may begin inside or outside the structured-grid volume. If it begins
+outside, a ray–box intersection first determines whether it enters the grid
+and finds the entry distance $s_{\mathrm{grid\ entry}}$.
+If the ray misses the grid entirely, the traversal contains no cell segments.
+If it enters, traversal starts at the entry point. A ray starting inside the
+grid has an entry distance of zero.
+The initial cell is the cell the ray enters in its direction of travel. At an
+internal x boundary, for example:
+positive x direction selects the cell on the positive-x side;
+negative x direction selects the cell on the negative-x side; and
+zero x direction uses the lower-index cell as a deterministic convention.
+The index is always clamped to the grid at an outer boundary. SAT assigns
+triangle contact at cell boundaries inclusively, so either deterministic side
+for a zero direction component retains boundary-touching candidates.
+5. Step direction
+For each coordinate direction, the ray travels toward increasing cells,
+decreasing cells, or remains constant:
+$$
+\mathrm{step}_x =
+\begin{cases}
++1 & \widehat{d}_x > 0,\\
+-1 & \widehat{d}_x < 0,\\
+0 & \widehat{d}_x = 0.
+\end{cases}
+$$
+The same definition applies to y and z.
+A zero direction component means the ray never crosses a cell boundary in
+that coordinate direction.
+6. Distances to the next boundaries
+For the current cell, calculate the ray distances at which the ray next
+crosses an x, y, and z boundary:
+```
+s_max_x
+s_max_y
+s_max_z
+```
+The smallest value identifies the next cell boundary reached by the ray.
+The distance increase between consecutive boundaries of the same family is
+$$
+s_{\Delta x}=\frac{\Delta x}{|\widehat{d}_x|},\qquad
+s_{\Delta y}=\frac{\Delta y}{|\widehat{d}_y|},\qquad
+s_{\Delta z}=\frac{\Delta z}{|\widehat{d}_z|}.
+$$
+When a direction component is zero, the corresponding $s_{\max}$ and
+$s_\Delta$ are treated as infinity.
+An optimized implementation can add this fixed increment after crossing an x
+boundary:
+```
+ix = ix + step_x
+s_max_x = s_max_x + s_delta_x
+```
+Repeated floating-point additions can accumulate round-off, however. On a
+fine grid, that drift can eventually make two mathematically tied boundary
+distances appear different. The Python reference implementation therefore
+recomputes s_max_x from the coordinate of the newly selected x boundary:
+```
+ix = ix + step_x
+next_x_boundary = the x boundary ahead of cell ix
+s_max_x = (next_x_boundary - ray_origin_x) / direction_x
+```
+This costs one division for each crossed axis, but keeps the reference result
+close to the original ray equation and protects exact edge and corner ties.
+A later compiled implementation may use incremental additions only after its
+accumulated-error policy has been verified against the reference behaviour.
+7. The traversal interval of one cell
+Each visited cell has a ray-distance interval
+$$
+[s_{\mathrm{cell\ entry}},;s_{\mathrm{cell\ exit}}].
+$$
+The exit distance is the minimum of the three next-boundary distances.
+This interval is essential when interpreting triangle hits.
+A Möller–Trumbore test performed for a triangle in the current cell can find
+an intersection farther along the same triangle but outside the current cell.
+The intersection is accepted in this traversal step only if its distance lies
+within the current cell interval, subject to the reviewed boundary tolerance.
+The DDA milestone records only positive-length intervals. It does not create
+an artificial segment for a side cell that the ray touches only at an edge or
+corner. A ray that only touches the outer grid at one point can still report
+equal grid-entry and grid-exit distances, but it has no positive-length cell
+segment.
+8. Current traversal loop
+The current milestone records the complete ordered grid traversal:
+```
+intersect the ray with the grid box
+find the first cell entered by the ray
+
+while the ray remains inside the grid:
+    determine the current cell exit distance
+    record the cell indices and entry/exit distances
+    advance through the next cell boundary
+```
+The following milestone inserts occupied-cell candidate testing into this
+loop. Because cells are visited in increasing ray distance, the first cell
+that contains a valid in-interval collision contains the nearest collision
+along the ray. Within that cell, all relevant candidates must still be
+compared so the nearest one is selected.
+9. Traversal result
+The immutable result contains:
+Type
+Field
+Meaning
+Ray
+origin
+Ray origin in centimetres
+Ray
+direction
+Unit propagation direction
+RayCellSegment
+cell_indices
+Zero-based (ix, iy, iz)
+RayCellSegment
+cell_entry_distance
+Segment start distance in cm
+RayCellSegment
+cell_exit_distance
+Segment end distance in cm
+RayGridTraversal
+ray
+Geometric ray used for the traversal
+RayGridTraversal
+grid_entry_distance
+Forward distance to the grid, or None for a miss
+RayGridTraversal
+grid_exit_distance
+Forward distance out of the grid, or None for a miss
+RayGridTraversal
+segments
+Ordered immutable cell segments
+The result derives its segment count from segments; it does not store a
+second independent count that could become inconsistent.
+10. Boundary ties
+A ray can cross two cell faces simultaneously at an edge, or three faces at
+a corner. In that case two or three next-boundary distances are tied.
+There is no single main coordinate direction for the whole traversal. At
+each step, DDA asks which boundary or boundaries are reached next.
+In two dimensions, consider a 45-degree ray leaving cell (0, 0) exactly at
+the corner shared by four cells:
+```
+              cell (1, 1)
+                    ↗
+        ------------●------------
+                   /
+        cell      /      cell
+        (0, 0)   /       (1, 0)
+```
+The ray travels directly from (0, 0) into (1, 1). It does not spend a
+positive distance inside (1, 0) or (0, 1). Advancing just x and then y
+would manufacture a zero-length intermediate segment.
+The implementation therefore uses independent decisions:
+```
+next_distance = minimum(next_x, next_y, next_z)
+
+if next_x is tied with next_distance:
+    advance x
+
+if next_y is tied with next_distance:
+    advance y
+
+if next_z is tied with next_distance:
+    advance z
+```
+These are three independent if decisions, not an if/elif chain. A face
+crossing advances one axis, an edge crossing advances two, and a corner
+crossing advances all three.
+Floating-point results must not be compared using exact equality. The tie
+tolerance is an internal, scale-aware multiple of double-precision machine
+epsilon. It is deliberately much smaller than the SAT contact tolerance. A
+near tie outside this round-off allowance remains two ordinary crossings, so
+the short intermediate cell is not skipped.
+The reviewed tolerance is
+$$
+\varepsilon_{\mathrm{DDA}}
+64,\varepsilon_{\mathrm{machine}}\max(1\ \mathrm{cm},L_{\mathrm{grid}}),
+$$
+where $L_{\mathrm{grid}}$ is the largest grid extent. The factor 64 allows
+for the small sequence of floating-point operations used to calculate
+boundary distances; it is not a user-adjustable geometric margin.
+This differs from the current FIDASIM minloc sequence, which selects one
+axis and may visit a zero-time intermediate cell on an exact tie. The new
+policy preserves FIDASIM's boundary-to-boundary method while making edge and
+corner ownership explicit.
+Because triangle–cell assignment treats boundary contact inclusively, the
+directly entered diagonal cell also contains candidates for triangles that
+touch the shared edge or corner. The later Möller–Trumbore milestone must use
+the same inclusive interval convention.
+11. Duplicate triangles
+One triangle can intersect several cells. A ray may therefore encounter the
+same triangle index repeatedly.
+The simplest correct implementation may repeat the detailed test. A later
+optimization can cache triangle results for one ray, but it must preserve the
+cell-interval rule. For example, an intersection calculated while visiting
+one cell may lie in a later cell and cannot be reported prematurely.
+12. Converting distance to particle time
+DDA operates on centimetre distances. After it selects either a cell boundary
+or collision distance $s_{\mathrm{segment}}$, the particle-tracking layer
+calculates
+$$
+\Delta t_{\mathrm{segment}}
+\frac{s_{\mathrm{segment}}}{v_{\mathrm{speed}}}.
+$$
+This produces the same track-segment time stored by FIDASIM while keeping the
+geometric search independent of speed.
+13. Termination conditions
+The current full-grid traversal ends when either:
+The ray leaves the structured-grid volume.
+The ray misses the structured-grid volume and no traversal begins.
+A zero direction is rejected during configuration normalization. There is no
+configured maximum distance in this milestone because the finite grid exit
+is the natural limit.
+After Möller–Trumbore is integrated, a nearest valid collision in the current
+cell becomes an additional early termination condition.
+After a reflecting collision, a new ray begins and traversal is initialized
+again for the new origin and direction.
+Navigation: ← Previous: Triangle–box SAT filtering ·
+↑ Up: Collision-detection portal ·
+Next: Möller–Trumbore intersection →
+You can’t perform that action at this time.

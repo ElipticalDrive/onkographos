@@ -1,0 +1,149 @@
+# RDI-GS: Reliable Depth Initialization for Sparse-View 3D Gaussian Splatting
+
+> Sparse-view 3DGS fails not because depth priors are missing, but because depth-derived capacity arrives
+> **too late** and in the **wrong places**. RDI-GS converts the multi-view-consistent part of a monocular
+> depth prior into footprint-aligned Gaussian surfels **at iteration 0**, deduplicated against SfM coverage —
+> while keeping the renderer, representation, losses, and density control of 3DGS completely unchanged.
+
+Built directly on the official
+[graphdeco-inria/gaussian-splatting](https://github.com/graphdeco-inria/gaussian-splatting)
+codebase (depth-regularization release) and distributed under its [license](LICENSE.md)
+(non-commercial research and evaluation use).
+
+---
+
+**Contents** — [Highlights](#highlights) · [Method](#method) · [Changes vs. 3DGS](#changes-relative-to-vanilla-3dgs) · [Installation](#installation) · [Data preparation](#data-preparation) · [Training](#training) · [Evaluation](#evaluation) · [Ablation ladder](#ablation-ladder) · [Acknowledgements](#acknowledgements-and-license)
+
+## Highlights
+
+- **Drop-in.** One new module (`utils/rdi.py`) plus small hooks in `train.py`; a single flag
+  (`--init_mode depth`) activates the method. `--init_mode sfm --gate_mode none` reproduces vanilla 3DGS
+  bit-for-bit.
+- **Timing, not architecture.** A Gaussian created at iteration `t` receives only
+  `(N − t) · V_see / V_tot` expected updates. In the sparse regime (few views, short schedules), late
+  depth injection leaves new Gaussians under-optimized and their placement errors persist as floaters.
+  RDI-GS moves the same depth capacity to `t = 0`, where the budget is maximal.
+- **Trust before geometry.** Depth is only converted into geometry where independent views agree:
+  a per-pixel median consensus with a scene-adaptive reliability score — no absolute thresholds to tune
+  per scene.
+- **Coverage-aware.** New surfels are only inserted where the SfM cloud is empty, so well-constrained
+  regions are never over-populated.
+- **Verified.** A deterministic 60-check logic gate (`tools/test_rdi.py`) covers every formula and code
+  path, including an end-to-end test of the initialization routine.
+
+## Method
+
+Given sparse training views with COLMAP calibration:
+
+1. **Monocular depth prior.** Depth-Anything-V2 predicts per-view inverse depth (`prepare_depth.py`),
+   affine-aligned to the COLMAP sparse cloud (`utils/make_depth_scale.py`). Views whose alignment scale
+   falls outside `[0.2, 5] × median_scale` are marked unreliable and excluded — identical to the official
+   depth-regularized 3DGS pipeline.
+2. **Multi-view consensus.** Each view's aligned metric depth is unprojected to 3D and cross-checked
+   against every other view's depth hypothesis. The per-pixel **median** over hypotheses gives the
+   refined depth `D_ref`; the agreement score `rel = exp(−spread / median(spread)) ∈ (0, 1]` gives a
+   scene-adaptive reliability map (`utils/rdi.py::refine_depth_maps`).
+3. **Reliability-gated back-projection.** Pixels on a stride-subsampled grid with
+   `rel > digs_rel_floor` are back-projected at `D_ref`, carrying their image color.
+4. **Footprint-aligned surfels.** Each point is initialized as a camera-facing anisotropic disk:
+   lateral std `σ_lat = c_f · z / f` (the world-space width of one pixel's frustum at depth `z`),
+   along-ray std `σ_n = β · σ_lat`, thin axis along the view ray (`utils/rdi.py::frgd_g_shape`).
+   This minimizes along-ray mass — and therefore haze in novel views.
+5. **Coverage-aware merge.** Candidates whose voxel (`percent_dense × scene_extent`) already contains an
+   SfM point are dropped (`utils/rdi.py::frgd_dedup`).
+6. **Standard training.** The merged cloud is inserted **before** the training loop
+   (`train.py::rdi_init`); optimization then proceeds with the standard photometric loss and the
+   standard uniform inverse-depth L1 regularizer.
+
+**Scope of the claim.** RDI-GS uses a monocular depth prior and the standard depth loss; it does **not**
+use diffusion or image-generative priors, does not modify the rasterizer, and does not change the 3DGS
+representation. The intended benefit is robustness in the sparse-view regime (mean and worst-case
+quality), not a universal per-scene win.
+
+## Changes relative to vanilla 3DGS
+
+| File | Change |
+|---|---|
+| `utils/rdi.py` | **New — the only new logic module.** Projection primitives, multi-view depth fusion (`refine_depth_maps`), footprint-disk shape (`frgd_g_shape`), voxel-hash dedup (`frgd_dedup`), candidate selection for the mid-training ablations (`generate_frgd_points`). |
+| `train.py` | `rdi_init` (iteration-0 dense depth initialization), `frgd_step` (mid-training densification ablations), `gate_mode` switch on the depth loss. |
+| `arguments/__init__.py` | Method parameters (see [table](#method-parameters)). |
+| `scene/gaussian_model.py` | `add_frgd_points`: optimizer-safe insertion of new Gaussians through the standard `densification_postfix`. |
+| `scene/dataset_readers.py`, `scene/__init__.py` | Optional reader for pre-split scenes (`<scene>/train/sparse/0` + `<scene>/test/sparse/0`). |
+| `utils/general_utils.py` | Seeding via the `GS_SEED` environment variable for multi-seed evaluation. |
+| `prepare_depth.py` | Depth-Anything-V2 inverse-depth prediction (16-bit PNG). |
+| `eval_metrics.py` | In-memory held-out evaluation: PSNR / SSIM / LPIPS(VGG), #Gaussians, and a cross-view rendered-depth consistency score (`geom_consist`, lower is better). |
+| `tools/test_rdi.py` | Consolidated logic gate: 60 deterministic checks (CPU + GPU), including an end-to-end test of `rdi_init`. |
+
+Everything else — rasterizer, SH appearance model, densify/prune, opacity handling, exposure
+compensation, viewers — is untouched upstream code.
+
+## Installation
+
+Requirements match the official 3DGS codebase (CUDA-capable GPU, PyTorch with CUDA, COLMAP for your own
+scenes). The CUDA extensions are bundled as plain source under `submodules/`.
+
+```shell
+git clone https://github.com/MaiAnhTruong/RDI-GS.git
+cd RDI-GS
+conda env create --file environment.yml
+conda activate gaussian_splatting
+```
+
+or, inside an existing PyTorch + CUDA environment:
+
+```shell
+pip install submodules/diff-gaussian-rasterization submodules/simple-knn submodules/fused-ssim
+pip install plyfile tqdm opencv-python joblib
+# for prepare_depth.py:  pip install transformers pillow
+```
+
+Verified with PyTorch 2.0.1 + CUDA 11.8 (Python 3.8) in addition to the pinned environment file.
+
+**Sanity check (run once before any training):**
+
+```shell
+python tools/test_rdi.py     # must report 60/60 passed
+```
+
+## Data preparation
+
+Two scene layouts are supported:
+
+1. **Standard COLMAP layout** (as in vanilla 3DGS): `<scene>/images`, `<scene>/sparse/0`, evaluated with
+   the usual `--eval` train/test split.
+2. **Pre-split layout** (recommended for sparse-view protocols): `<scene>/train/{images, sparse/0}` and
+   `<scene>/test/{images, sparse/0}` — every camera in `test` is held out; SfM initialization and depth
+   supervision come from the `train` split only. Detected automatically.
+
+Depth preparation (train views only):
+
+```shell
+python prepare_depth.py --images_dir <scene>/train/images --out_dir <scene>/train/depths
+python utils/make_depth_scale.py --base_dir <scene>/train --depths_dir <scene>/train/depths --model_type bin
+```
+
+This writes 16-bit inverse-depth PNGs and `<scene>/train/sparse/0/depth_params.json` (per-image affine
+alignment to COLMAP). For the standard COLMAP layout, replace `<scene>/train` with `<scene>`.
+
+## Training
+
+```shell
+# Vanilla 3DGS reference (no depth anywhere)
+python train.py -s <scene> -m output/base --eval -r -1 --disable_viewer \
+    --iterations 10000 --test_iterations 10000 --save_iterations 10000 \
+    --init_mode sfm --densify_mode none --gate_mode none
+
+# Depth-regularized baseline (depth loss only)
+python train.py -s <scene> -m output/dr --eval -r -1 --disable_viewer -d depths \
+    --iterations 10000 --test_iterations 10000 --save_iterations 10000 \
+    --init_mode sfm --densify_mode none --gate_mode uniform
+
+# RDI-GS (ours): depth as initialization
+python train.py -s <scene> -m output/rdi --eval -r -1 --disable_viewer -d depths \
+    --iterations 10000 --test_iterations 10000 --save_iterations 10000 \
+    --init_mode depth --densify_mode none --gate_mode uniform \
+    --digs_stride 12 --digs_rel_floor 0.3
+```
+
+For multi-seed protocols, set the `GS_SEED` environment variable (e.g. `0`, `1`, `2`) per run and report
+mean, standard deviation, and worst case.

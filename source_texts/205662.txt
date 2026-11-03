@@ -1,0 +1,160 @@
+Add a polygon compound type that accepts an ordered N-gon vertex loop and triangulates it into regular Triangle primitives at scene-build time. No native intersection code — uses the existing Möller–Trumbore path. Motivation A native N-g...
+
+Polygon Triangulation Loader (N-gon → Triangles) · Issue #181 · paulwrubel/luxide · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Polygon Triangulation Loader (N-gon → Triangles) #181
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Polygon Triangulation Loader (N-gon → Triangles)#181
+Copy link
+Labels
+enginerelated to actual pathtracingrelated to actual pathtracinglow priorityui
+Description
+paulwrubel
+opened on Jul 4, 2026
+Issue body actions
+Add a polygon compound type that accepts an ordered N-gon vertex loop and triangulates it into regular Triangle primitives at scene-build time. No native intersection code — uses the existing Möller–Trumbore path.
+Motivation
+A native N-gon primitive with per-ray point-in-polygon tests is slower and more branchy than Möller–Trumbore triangle intersection. The standard approach in production renderers is to triangulate at load time and feed triangles to the BVH. This gives users a convenient way to define polygonal faces (common in architectural and CAD workflows) without sacrificing render performance.
+Design
+A compound type src/geometry/compounds/polygon.rs that:
+Accepts an ordered list of coplanar 3D vertices at construction
+Triangulates them (ear-clipping for general polygons, fan for convex with a convex hint)
+Stores the resulting List of Triangle primitives
+Delegates all Geometric trait methods to the internal list (intersect, bounding box, area, sampling, etc.)
+No new intersection code. No PIP loops. No new trait methods.
+Engine: Backend Changes
+1. New compound: src/geometry/compounds/polygon.rs
+```
+pub struct Polygon {
+    triangles: List,
+    bounding_box: Aabb,
+}
+```
+Constructor Polygon::new(vertices: Vec<Point>, normal: Option<Vector3>, material: Arc<dyn Material>, convex: bool):
+Validate: at least 3 vertices, non-collinear (non-zero area via Newell's method)
+Compute plane normal via Newell's method if not explicitly provided (accumulative, robust for near-planar or slightly non-coplanar vertices)
+Project vertices to 2D: drop the coordinate axis with the largest |normal| component for maximum numerical stability
+Triangulate:
+If convex: simple fan triangulation from vertex 0 — (v₀, v₁, v₂), (v₀, v₂, v₃), ..., (v₀, v_{n-2}, v_{n-1})
+If concave: ear-clipping algorithm — iteratively find "ears" (convex vertices whose triangle contains no other vertices), emit the triangle, remove the ear vertex, repeat until 3 vertices remain
+Each emitted Triangle gets the provided material
+Store triangles in a List, precompute bounding_box from the vertex AABB with epsilon padding
+Trait delegation:
+```
+impl Geometric for Polygon {
+    fn intersect(&self, ray: Ray, ray_t: Interval) -> Option<RayHit> {
+        self.triangles.intersect(ray, ray_t)
+    }
+    fn surface_area(&self) -> f64         { self.triangles.surface_area() }
+    fn bounding_box(&self) -> Aabb        { self.bounding_box }
+    fn sample_direction_from(&self, o: Point) -> Vector3 { self.triangles.sample_direction_from(o) }
+    fn direction_pdf(&self, o: Point, d: Vector3) -> f64 { self.triangles.direction_pdf(o, d) }
+    fn is_emissive(&self) -> bool         { self.triangles.is_emissive() }
+    fn is_transmissive(&self) -> bool     { self.triangles.is_transmissive() }
+    fn is_specular(&self) -> bool         { self.triangles.is_specular() }
+    fn is_empty(&self) -> bool            { self.triangles.is_empty() }
+}
+```
+2. Deserialization support (src/deserialization/geometrics.rs)
+Add to GeometricData enum:
+```
+#[serde(rename = "polygon")]
+CompoundPolygon {
+    vertices: Vec<[f64; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    normal: Option<[f64; 3]>,
+    #[serde(default)]
+    convex: bool,
+    material: MaterialRefOrInline,
+},
+```
+JSON example:
+```
+{
+    "type": "polygon",
+    "vertices": [
+        [-1.0, 0.0, -1.0],
+        [1.0, 0.0, -1.0],
+        [1.0, 0.0, 1.0],
+        [0.0, 0.0, 2.0],
+        [-1.0, 0.0, 1.0]
+    ],
+    "normal": [0.0, 1.0, 0.0],
+    "convex": false,
+    "material": "ground"
+}
+```
+Frontend: UI Changes
+3. Type definitions (ui/src/utils/render/geometric.ts)
+Add polygon to:
+RawGeometricData union
+NormalizedGeometricData union
+normalizeGeometricData() switch statement
+defaultGeometricForType() → default Polygon: vertices: [[0,0,0], [0,0,1], [1,0,1]], normal: [0,1,0] (auto-computed if omitted), convex: true
+Zod schema:
+```
+z.object({
+  type: z.literal("polygon"),
+  vertices: z.array(z.tuple([z.number(), z.number(), z.number()])).min(3),
+  normal: z.tuple([z.number(), z.number(), z.number()]).optional(),
+  convex: z.boolean().optional().default(true),
+  material: z.string(),
+})
+```
+4. Form controls (GeometricFormControls/index.tsx)
+Add case 'polygon': with:
+Note/detail: shows vertex count
+Editable vertex list — could be a simple textarea of coordinates (one vertex per line: x y z) for MVP, or a dynamic list of TextArrayInputControl entries with add/remove buttons
+ToggleControl for Convex hint (affects triangulation strategy)
+TextArrayInputControl for Normal (optional, auto-computed if omitted)
+GeometricMaterialSelect
+5. 3D Preview (GeometricRenderer.tsx)
+Triangulate at preview time (same ear-clipping or fan algorithm, implemented in TypeScript) and render as a THREE.BufferGeometry from the triangulated vertices. This can be a simpler fan-only preview since visual accuracy matters less than render accuracy.
+6. Add to geometric type picker
+Add "polygon" to the geometric type dropdown.
+Acceptance Criteria
+Polygon struct in src/geometry/compounds/polygon.rs with triangulation at construction time
+Fan triangulation for convex polygons (fast path, convex: true)
+Ear-clipping triangulation for concave/general polygons (correct path, convex: false)
+Newell's method for normal computation when not explicitly provided
+Zero-area / degenerate vertex loops rejected with clear error
+Delegates all Geometric trait methods to the internal List of triangles
+Deserialization supports { "type": "polygon", "vertices": [...], ... } in scene JSON
+UI form can create and edit polygon vertices
+3D preview renders triangulated polygon
+Works with all material types (including emissive for area lights)
+Existing scenes render identically
+Activity
+paulwrubel
+added
+enginerelated to actual pathtracingrelated to actual pathtracing
+ui
+low priority
+on Jul 4, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enginerelated to actual pathtracingrelated to actual pathtracinglow priorityui
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

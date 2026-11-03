@@ -1,0 +1,130 @@
+Interactive 3D force-directed graphs in TypeScript, drawn to canvas in perspective - perf: replace all-pairs repulsion with a Barnes-Hut octree by davidbarkhuizen · Pull Request #100 · davidbarkhuizen/cuniform
+
+perf: replace all-pairs repulsion with a Barnes-Hut octree by davidbarkhuizen · Pull Request #100 · davidbarkhuizen/cuniform · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+davidbarkhuizen
+commented
+Sep 27, 2026
+Copy link
+Copy Markdown
+Owner
+Implements Plan 1 (docs/performance/01-barnes-hut-repulsion.md), on top of Plans 2 (#99) and 3 (#98).
+Why
+Repulsion was 85–98% of every step at N ≥ 512 and cleanly quadratic: 48 ms at N=1024 against a 50 ms tick budget, 810 ms at N=4096. Plans 2 and 3 only moved the constant factor; this is the algorithmic change.
+What changed
+New pure src/Octree.ts, added to PURE_MODULES. Structure-of-arrays over pooled Float64Array/Int32Array, rebuilt each step from the frozen pre-step positions, allocating nothing steady-state. Cells hold centre, half-extent, charge total and centre of mass, or a leaf bucket sliced out of a shared body permutation. Near-coincident points stop at barnesHutMaxDepth and stay a bucket, so build always terminates.
+Traversal applies the exact pairwise law inside a leaf and mass × magnitude at the cell's centre of mass for an accepted cell. The magnitude law now lives once in src/Kernel.ts, shared by the exact kernel, the per-node reference and the octree.
+Self-exclusion is explicit: the walk tracks whether a cell contains the body being evaluated and never accepts such a cell, so no opening angle can make a node repel itself.
+Below barnesHutMinNodes (64) the exact pairwise kernel still runs, unchanged, so demo-scale behaviour is bit-for-bit.
+K gains barnesHutTheta 0.5, barnesHutMinNodes 64, barnesHutMaxDepth 28. The README complexity section no longer claims there is no spatial subdivision.
+The benchmark gains per-order mean/max force error against the exact reference, plus an opening-angle table. test/support/physics.ts gains the shared seeded sparse-graph fixture.
+Findings worth reviewing
+The plan's θ bound is wrong and unnecessary. "d ≤ √3·half, so s/d ≥ 2/√3" assumes the centre of mass is at the cell centre; it can sit at the opposite corner, so a θ-only guarantee needs θ < 1/√3 ≈ 0.577. Rather than rely on a tighter θ, the traversal excludes the containing cell explicitly, which is exact for every angle. barnesHutTheta is still clamped to the plan's 2/√3 ceiling as a sanity bound. The plan doc records this.
+test/forces.test.ts needed no edit. The plan expected its exactness and pair-count tests to change; because N=8 stays on the exact side of the crossover, they keep their original meaning. The crossover itself is now pinned by a dedicated test.
+The error metric is normalised by the graph's mean exact force magnitude, not per-node. A body near a force balance has an exact magnitude near zero and dominates a per-node ratio while its absolute error is tiny (one such body pushed a max above 15% at N=256).
+Measurements (npm run bench, this machine)
+θ = 0.5:
+N
+repulsion ms
+before
+mean err
+max err
+1024
+12.1
+48.2
+0.43%
+1.08%
+2048
+31.0
+194
+0.38%
+1.30%
+4096
+90.5
+810
+0.32%
+0.71%
+8192
+195.6
+—
+0.30%
+0.64%
+Full step(): 15.5 ms at N=1024 (inside the 50 ms tick budget), 88.0 ms at N=4096.
+θ = 0.9, N=4096: 23.8 ms, mean error 1.84%.
+Acceptance
+N=1024 repulsion ≤ 30 ms: 12.1 ms. N=4096 ≤ 150 ms at θ=0.5: 90.5 ms; ≤ 70 ms at θ=0.9: 23.8 ms.
+Full step within the 50 ms tick budget at N=1024: 15.5 ms.
+Mean error ≤ 1%, max ≤ 15% at θ=0.5: 0.30–0.52% / 0.64–2.70%.
+./cli ci green: 379 tests pass (10 new), no existing tolerance edited.
+perf: replace all-pairs repulsion with a Barnes-Hut octree
+…
+94def14
+```
+Repulsion was 85-98% of every step at N >= 512 and cleanly quadratic: 48 ms at
+N=1024 against a 50 ms tick budget, 810 ms at N=4096. Plans 2 and 3 only moved
+the constant factor; this is the algorithmic change.
+
+- New pure src/Octree.ts, added to PURE_MODULES. It is structure-of-arrays over
+  pooled Float64Array/Int32Array buffers, rebuilt each step from the frozen
+  pre-step positions, and allocates nothing in steady state. Cells hold centre,
+  half-extent, charge total and centre of mass, or a leaf bucket sliced out of a
+  shared body permutation. Near-coincident points stop at barnesHutMaxDepth and
+  stay a bucket, so build always terminates.
+- Traversal applies the exact pairwise law inside a leaf and the aggregate
+  magnitude *mass* at the centre of mass for an accepted cell; the magnitude law
+  now lives once in src/Kernel.ts and is shared by the exact kernel, the per-node
+  reference and the octree.
+- Self-exclusion is explicit: the walk tracks whether a cell contains the body
+  being evaluated and never accepts such a cell, so no opening angle can make a
+  node repel itself. The plan's theta < 2/sqrt(3) argument is not relied on, and
+  is in fact too loose (the centre of mass can sit at the opposite corner, so a
+  theta-only guarantee needs theta < 1/sqrt(3)); K documents both. Theta is
+  still clamped to the documented ceiling.
+- Below K.physics.barnesHutMinNodes (64) the exact pairwise kernel still runs,
+  unchanged, so demo-scale behaviour is bit-for-bit and the forces.test.ts
+  exactness and pair-count instrumentation tests need no edit.
+- K gains barnesHutTheta 0.5, barnesHutMinNodes 64 and barnesHutMaxDepth 28; the
+  README complexity section no longer claims there is no spatial subdivision.
+- The benchmark gains per-order mean/max force error against the exact reference,
+  normalised by the graph's mean force magnitude so a body near a force balance
+  cannot dominate the ratio, plus an opening-angle table. test/support/physics.ts
+  gains the shared seeded sparse-graph fixture the bench and tests now both use.
+
+Measured on this machine, theta=0.5: repulsion 12.1 ms at N=1024 (from 48 ms)
+and 90.5 ms at N=4096 (from 810 ms); full step 15.5 ms at N=1024, inside the
+50 ms tick budget. Mean force error 0.30-0.52%, max 0.64-2.70%. At theta=0.9,
+N=4096 repulsion is 23.8 ms with mean error 1.84%. 379 tests pass (10 new);
+octree invariants (partition, aggregate, depth cap, buffer pooling) are asserted
+directly.
+```
+Hide details
+View details
+davidbarkhuizen
+merged commit a5b2a18
+into
+main
+Sep 27, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+davidbarkhuizen
+deleted the
+perf/barnes-hut-repulsion
+branch
+September 27, 2026 02:55
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

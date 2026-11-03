@@ -1,0 +1,334 @@
+Renderer 2.x - Porting to CUDA
+
+Renderer 2.x - Porting to CUDA
+Renderer 2.x - Porting to CUDA
+(December 2010)
+Update, February 2011: Complete re-write.
+One month after I wrote this post, I found the time to move from raycasting to raytracing, with lots of new features:
+Real-time raytracing of triangle meshes - my 70$ GT240 renders a 67K triangles chessboard with reflections and shadows at 15-20 frames per second. Interactive navigation and rendering mode changes are allowed (see video below). Overall, compared to the pure C++/OpenMP version, the CUDA implementation runs 10 times faster.
+A Bounding Volume Hierarchy using axis-aligned bounding boxes is created and used for ray/triangle intersections. The BVH is created via the surface-area heuristic, and is stored for fast re-use. If SSE are available, a SIMD implementation is used that builds the BVH faster.
+CUDA 1.2 cards like my GT240 have no support for recursion, so I used C++ template magic to implement compile-time recursion - see cudarenderer.cu in the source tarball for details.
+C++ template-based configuration allows for no-penalty runtime selection of (a) specular lighting (b) Phong interpolation of normals (c) backface culling (e.g. not used in refractions) (d) reflections (e) shadows (f) anti-aliasing.
+Z-order curve is used to cast the primary rays (Morton order) - significantly less divergence => more speed.
+Vertices, triangles and BVH data are stored in textures - major speed boost.
+The sources (latest version: 2.1h, April 2011) of this new raytracer are available from here, and Win32 binaries are also available (compressed with 7-zip). I also included MSVC project files, to make builds under Win32 easier.
+Enjoy!
+Changelog:
+January 30, 2011:Complete re-write, now using Bounding Volume Hierarchy for acceleration of ray/triangle intersections. A C++ template generates a set of CUDA kernels, with selectable different features: reflections, Phong normal interpolation, shadows, Specular lighting, backface culling, anti-aliasing etc.
+January 9, 2011:Added loading of .3ds/.ply models, help screen and Win32 binaries.
+January 7, 2011:Optimal number of threads per block, and re-written kernel for better coalescing - the "train" object (seen in the new uploaded video) now spins at 21.5 fps on my GT240.
+January 2, 2011:Reddit-ed, most popular CUDA post ever in Reddit/programming :‑)
+Introduction
+At work, I recently had an opportunity to implement a project with CUDA, and results were excellent:
+Execution of the code presented a remarkable 30-40x speedup.
+After testing the waters with a simple Mandelbrot implementation,
+I was eager to apply CUDA to my life-long obsession: my SW-only renderer.
+What happened then was interesting, so I decided to document it. And no, the text below is not about graphics. It is about taking a set of algorithms (that simply happen to be graphics algorithms) and trying to implement them in CUDA. Let me say this again: I know all about OpenGL and the shadow ARB extension, but this post is NOT about graphics. It is about a more generic question: "I have an algorithm. Will CUDA/OpenCL/DirectCompute help me execute my algorithm faster"?
+My GT240 offers hundreds of GFlops, so things looked promising.
+First attempt - can I do rasterizing?
+Well, first things first. My SW-only renderer is optimized for CPUs: it renders via rasterizing, which roughly means
+that the top-most loop is of this form:
+```
+for each object
+    for each triangle of the object
+        transform the triangle's vertices into screen space
+        linearly interpolate - per screen pixel - the triangle data
+        (i.e. Z-distance, color in Gouraud, normal vector in Phong, etc)
+        use the Z-distance and a Z-buffer to check if the pixel is visible
+        if it is visible, look at the shadow buffer, to see if it is in shadow
+        if not, perform Phong lighting
+```
+For those of you that are not into graphics, the key point is this: the algorithm tries to optimize the necessary
+computations, by taking advantage of the fact that neighbouring pixels of a rasterized triangle are "related":
+it computes some data on the 3 vertices, and linearly interpolates these values per-pixel, instead of re-computing
+them on each pixel (Which is what a raycaster/raytracer does).
+This means, that for each pixel plotted during the rasterization of the triangle, the algorithm has to check
+the Z-Buffer, to see if the point is indeed the closest one to the screen. That is, we have one access per pixel
+to the Z-buffer. And when we are doing shadow mapping, we are also doing another access per-pixel, to the shadow buffer.
+Both of these buffers are WIDTH x HEIGHT arrays with a floating point value in each cell. And they are accessed
+concurrently by each thread, since each thread is rasterizing one triangle...
+This is the first point where I hit a wall: when doing many accesses in a big enough buffer in a RANDOM access pattern, CUDA loses all its speed advantages.
+Why? because the "global" memory (in CUDA terms) is too slow to allow multiple threads to read/write wherever they want. It has no cache!
+Things are OK if your algorithm performs sequential accesses. The memory coalescing mechanisms can greatly help in that case.
+But if your algorithm is generating "random" offsets in its read/write requests
+- just like triangle rasterizing does, when concurrently executed by one thread per triangle - then your speed
+becomes... glacial. I tested this, and found out that CUDA was... 3 times slower than my CPU, in a window one quarter the size!
+You can survive this if you can adapt your algorithm to work in the small - but fast! - thread-shared memory (16K in
+the case of my 70$ GT240).
+Unfortunately, rasterizing can't be (easily) shoe-horned into this: I tried splitting the screen into tiny "screens" (32x32), small
+enough to fit into the shared memory, and rasterize the triangles inside them. And indeed, the rasterizing speed of each
+tiny "screen" became much faster - but I had GRIDxGRID such tiny screens now, and to display the complete screen I had
+to invoke the CUDA kernel GRIDxGRID times. Resulting speed: 10 times slower than the CPU rasterizer!
+Executive summary: the rasterizing algorithm is fine for a CPU implementation, but at least in its plain form (one CUDA thread per triangle), it doesn't seem to fit the CUDA model.
+Second attempt - what about raycasting?
+Raycasting is a completely different algorithm. It sends a ray of
+"light" from the viewpoint, that "pierces" the screen at each pixel, and checks whether the ray intersects the scene's
+triangles:
+```
+for each screen pixel
+        throw a ray from the viewpoint to the pixel
+        find the closest triangle pierced by the ray
+        at the intersection point, perform Phong lighting
+```
+Or, if we also want shadows:
+```
+for each screen pixel
+        throw a ray from the viewpoint to the pixel
+        find the closest triangle pierced by the ray
+        at the intersection point, throw another ray towards the light
+        if this shadow ray finds any triangle, the pixel is in shadow
+        Otherwise, perform Phong lighting
+```
+Now notice that this algorithm works per-pixel. We only pass over each screen pixel once (in sequence) and doing a bunch of calculations
+that involve reading the triangle data (in sequence). Which means that memory accesses are far more sequential than in rasterizing.
+A number of hours after I realized this, I had finished coding a Phong raycaster, which was 15 times faster than its C++ equivalent!
+The video linked near the end of the page shows a run of the C++ version, followed by a run of the CUDA version - notice the frames per second reported in these first two runs, where a "dragon" object made of 50.000 triangles goes from 1.3 frames per second (with C++) to 20 (with CUDA).
+(When considering these numbers, keep in mind that this is raycasting, not rasterizing: even the SW-only C++ version of my renderer will render the dragon with soft shadows at far more than 50 fps, but the comparison is not fair, since raycasting is a lot "heavier" than rasterizing).
+Update, one month later: The new implementation raytraces the dragon with reflections and shadows at 18 frames per second. Wow.
+Caveat
+To be fair, however, this speedup came at a price: The CUDA code is a lot more complex than the C++ code.
+To accelerate the ray-triangle intersection, I do a pre-processing step: I split the screen in a grid of "bins", and
+project each triangle to see which bins it spans over:
+The triangles are placed in "bin" lists.
+This allows me, when doing the raycasting, to only check the triangles that are in the pixel's "bin" list.
+In C++, the data structure and code to implement this are very simple:
+```
+    ...
+    // re-populate the screen-space triangle bins
+    std::list<Triangle*> bins[RAYCASTBINS][RAYCASTBINS];
+    ...
+    for(auto triIt=triangles.begin(); triIt!=triangles.end(); triIt++) {
+	Triangle& triangle = *triIt;
+	// project triangle to screen space and find the bounding box corners
+	...
+	for(int a=bottomy; a<=topy; a++)
+	    for(int b=bottomx; b<=topx; b++) {
+		bins[a][b].push_back(&triangle);
+	    }
+    }
+```
+What about the CUDA version?
+Well...
+There are no std::lists, of course. I have to know how "deep" each bin list will go, so I do a first pass that does atomic increments in list counters, one per bin (1st CUDA kernel), while calculating each triangle's bounding box. I then do a parallel reduction (2nd CUDA kernel), to calculate the scene's bounding box. I then accumulate the counters in another kernel, to know the starting offset of each bin in the final bin list (3rd CUDA kernel). After accumulation, I know how deep each list will go, so I can allocate enough memory for all bins, and pass it to the placement kernel (4th CUDA kernel). I then do the raycasting (5th CUDA kernel), and I can then free the bin memory - and finally blit the rendered buffer. Phew.
+Which means I had to implement multiple passes over the data, and in fact implement algorithms that had nothing to do with my original problem. A good example is the parallel reduction I had to do, to optimally calculate the total scene bounding box. There were also difficult to debug race condition bugs - thank God for cuda-gdb.
+Was it worth it?
+Well, I did it for fun, so yes it was :‑)
+And it did provide a marvelous 15x speedup over the same algorithm in C++, so... yes, it definitely was.
+Just keep in mind that for many categories of problems, CUDA will force you to make your code a lot more painful, before rewarding you with speed.
+And then there were shadows...
+But that was not the end of it - after all, my rasterizer uses shadow mapping to create very nice-looking shadows.
+Could I reproduce the same 15x gains in the CUDA-based shadow-raycaster?
+No... I couldn't. Not at first.
+The moment I added the shadow ray casting, CUDA lost ALL its speed. It became slower than the C++ code!
+Was it the additional memory accesses that are now done per-pixel? Before, we were just checking the list of triangles
+in the "camera-space" bins, now we are also looking at the list of triangles in the "light-space" bins (the ones
+used for shadows).
+No, it was something different. I verified it by doing all the shadow-raycasting work... and then simply ignoring
+the boolean value "inShadow". And the speed returned!
+```
+__global__ void CoreLoopTrianglesRaycaster(
+    ...
+    // Lots of code doing shadow-raycasting...
+    ...
+    // results in the "inShadow" boolean set or not
+
+    // If I uncomment the line below, then I am reading the "inShadow" boolean,
+    // and the threads diverge here: some will do Phong illumination, some wont.
+    // I get my shadow rendering... but speed is... 0.6 fps :-(
+
+    //if (inShadow) {
+
+    // But by commenting it out, I am back to non-shadow Phong, and
+    // the CUDA warps (32-threads each) are mostly executing the same path... 
+    // And even though the shadow ray calculations are still done, 
+    // (their result is ignored), the speed gets back to 20 fps!
+
+    // Which means that it is the thread divergence that kills speed,
+    // not the shadow ray calculations (they are still done!)
+```
+In the non-shadow version, the threads spawned by CUDA are executing more or less
+the same path. They follow the same "decision paths" in the ray-casting code. In the shadow ray mode, however, depending
+on whether the point is in shadow or not, the path followed per thread is completely different.
+And this is the second point where I hit a wall: the threads spawned must more-or-less execute the same path
+of code - they can't diverge. Or rather, they can - but the moment they do, all your speed benefit goes out the window. As I discovered after the fact, this is also quoted in the wikipedia article about CUDA:
+"Branches in the program code do not impact performance significantly, provided that each of 32 threads takes the same execution path; the SIMD execution model becomes a significant limitation for any inherently divergent task."
+The second part of the video linked below shows how the CUDA raycaster became 30 times slower as soon as the
+shadow ray calculation was introduced.
+Update, one month later: After studying some papers, I implemented a different order in casting rays: instead of doing it in a nested loop that goes from top-to-bottom, left-to-right, I used the Z-order curve, also known as Morton order. This significantly reduced the divergence of the primary rays, and increased speed of primary rays by 30%. Next thing to try: ray packets!
+Texture fetching
+Even though CUDA doesn't have caches, it has read-only "textures" that have small caches. I therefore proceeded to make
+some further changes to the code, by changing things like these:
+```
+int triIdx = ptrCudaCameraBins[i];
+```
+...into things like these:
+```
+int triIdx = tex1Dfetch(cameraBinsTexture, i);
+```
+Naturally, this required the setup of the cameraBinsTexture, right after the ptrCudaCameraBins data had been calculated,
+and before the line above (from the raycaster kernel) was executed.
+I tried this change in many places - the cameraBins, the lightBins, even the pre-calculated cache of light-space normals
+and edge vectors that are used during the shadow ray intersections. To my disappointment, this improved speed only a little (the train object sped up by less than 3%).
+Update, one month later: The "bins" algorithm indeed showed little benefit from using textures. This however was not the case for the new implementation with the Bounding Volume Hierarchy: I used textures to store everything, the data for the vertices, the pre-calculated triangle intersection data, the inner and leaf nodes of the BVH tree... and the speed soared by more than 120% !
+Bins and threads
+An additional optimization that works in CUDA, is figuring out the optimal number of CUDA threads used per block.
+In my algorithm, this value combines with the number of raycasting bins, to form very different memory bandwidth/computation CUDA usage patterns, so... I decided to brute-force:
+I wrote a simple python script that changed these two values, recompiled, spawned the raycaster, and reported timings:
+```
+#!/usr/bin/env python
+import os
+import sys
+
+for t in (32, 64, 96, 128, 160, 192, 224, 256):
+    for b in (32, 64, 128, 192, 256):
+        header = open("src/cudarenderer.h", "w")
+        for line in open("cudarenderer.h.template", 'r').readlines():
+            header.write(line.replace('##BINS##', str(b)))
+        header.close()
+
+        cu = open("src/cudarenderer.cu", "w")
+        for line in open("cudarenderer.cu.template", 'r').readlines():
+            cu.write(line.replace('##THREADS##', str(t)))
+        cu.close()
+
+        if 0 == os.system("make >/dev/null 2>&1"):
+            print "Running with", t, "threads and", b, "bins"
+            sys.stdout.flush()
+            os.system("sync ; ./src/cudaRenderer -b 3D-Objects/trainColor.ply")
+```
+The code simply read two "template" files and created the two real ones, where the number of threads is placed in the '##THREADS##' placeholder, and the same is done for the size of the bin grid (in '##BINS##'). After that, it "make"-ed, and run the raycaster:
+These were the results for the colorful train shown above:
+```
+Running with 32 threads and 32 bins
+Rendering 15 frames in 4.341 seconds. (3.45543 fps)
+Running with 32 threads and 64 bins
+Rendering 15 frames in 2.562 seconds. (5.8548 fps)
+Running with 32 threads and 128 bins
+Rendering 15 frames in 2.461 seconds. (6.09508 fps)
+Running with 32 threads and 192 bins
+Rendering 15 frames in 3.827 seconds. (3.91952 fps)
+Running with 32 threads and 256 bins
+Rendering 15 frames in 7.562 seconds. (1.9836 fps)
+Running with 64 threads and 32 bins
+Rendering 15 frames in 2.835 seconds. (5.29101 fps)
+Running with 64 threads and 64 bins
+Rendering 15 frames in 1.639 seconds. (9.14634 fps)
+Running with 64 threads and 128 bins
+Rendering 15 frames in 1.533 seconds. (9.78474 fps)
+Running with 64 threads and 192 bins
+Rendering 15 frames in 2.366 seconds. (6.33981 fps)
+Running with 64 threads and 256 bins
+Rendering 15 frames in 4.458 seconds. (3.36474 fps)
+Running with 96 threads and 32 bins
+Rendering 15 frames in 3.387 seconds. (4.4287 fps)
+Running with 96 threads and 64 bins
+Rendering 15 frames in 1.989 seconds. (7.53769 fps)
+Running with 96 threads and 128 bins
+Rendering 15 frames in 1.797 seconds. (8.34725 fps)
+Running with 96 threads and 192 bins
+Rendering 15 frames in 2.456 seconds. (6.10749 fps)
+Running with 96 threads and 256 bins
+Rendering 15 frames in 4.371 seconds. (3.43171 fps)
+Running with 128 threads and 32 bins
+Rendering 15 frames in 2.805 seconds. (5.34759 fps)
+Running with 128 threads and 64 bins
+Rendering 15 frames in 1.708 seconds. (8.7822 fps)
+Running with 128 threads and 128 bins
+Rendering 15 frames in 1.499 seconds. (10.0067 fps)  <==  maximum speed achieved for this object here
+Running with 128 threads and 192 bins               using 128 threads per block and a bin size of 128
+Rendering 15 frames in 2.215 seconds. (6.77201 fps)
+Running with 128 threads and 256 bins
+Rendering 15 frames in 4.063 seconds. (3.69185 fps)
+Running with 160 threads and 32 bins
+Rendering 15 frames in 3.295 seconds. (4.55235 fps)
+Running with 160 threads and 64 bins
+Rendering 15 frames in 1.918 seconds. (7.82065 fps)
+Running with 160 threads and 128 bins
+Rendering 15 frames in 1.724 seconds. (8.7007 fps)
+Running with 160 threads and 192 bins
+Rendering 15 frames in 2.44 seconds. (6.14754 fps)
+Running with 160 threads and 256 bins
+Rendering 15 frames in 4.291 seconds. (3.49569 fps)
+```
+Notice that there is quite a difference between the top performing combination and the bottom one: from 1.9 to 10,
+i.e. more than a 5x. So this is also helping quite a lot.
+I used these values (128 bins, 128 threads per block) when creating the video with the train, on the top of this page.
+Coalescing
+In the absence of cache, it is vital to have coalesced memory accesses. I changed the raycasting kernel to work on pixels in a specific order: the order of bins. In fact, by using blocks of threads that span an entire bin, the rays handled by a thread block will always "hit" the same bin. This means that accesses to the triangle list of each bin are now a lot more coalesced ... and speed was instantly improved by another 2x.
+And this is where I will stop working further with the "bins" algorithm. The train currently (Jan 8, 2011) spins at 21.5 frames per second, so I consider my goal of real-time rendering achieved. To put it in perspective, the "pure" C++ code - occupying 100% of both cores of my Core2 Duo (via OpenMP), clocks the same object at 4-5 fps.
+Mission accomplished :‑)
+Update, one month later: The new implementation with the Bounding Volume Hierarchy is a lot faster, and has more features (reflections, anti-aliasing, run-time selection of features (via C++ templates), etc).
+Executive summary
+Will CUDA help you make your code run faster?
+Yes - but there are some things you should know:
+Some algorithms (like rasterizing) depend on large memory buffers, accessed in a random pattern. These will not work efficiently with CUDA, unless you can change your algorithm to perform the random accesses in the fast (but small, only 16KB!) shared memory, and then "flush" the output results to the main (slow) global memory, sequentially.
+If no random accesses to global memory are done, algorithms can greatly benefit from the many threads offered by CUDA - my Phong raycaster became 15 times faster.
+There's another catch, though: the code executed by each thread must follow the same paths (the same "if" decisions taken). Otherwise, you may find you are running slower than on a CPU.
+Try using textures to store your lookup data, since textures offer cache (a small one).
+Finally, make sure you find the optimal number of threads per block to use, via simple benchmarks. If your algorithm has additional configuration parameters (like mine, the bin grid size), benchmark that as well.
+Note 1: NVIDIA added a L1 cache in newer CUDA cards (Fermi), so perhaps the first point will be alleviated. If anyone donates one, I will report back with results :‑)
+Note 2: Yes, I know about OpenGL - custom HW can be used to solve anything. The post above is simply an objective report of what happened when I tried to apply CUDA to a set of algorithms I have experience with. It just so happens that these are also graphics algorithms. I didn't do it to create a commercial raycaster - this was just a weekend project. Note also that, to my knowledge, neither OpenGL nor DirectX have raycasting support - unless you intend to implement one in a fragment shader: using textures to store triangle data, etc... in which case, you are brave, may the Force be with you :‑)
+Note 3: After the posting to Reddit, one of the comments pointed to a presentation given by Brad Peebler of Luxology, about CPU vs GPU rendering. They are of course using tremendously more complex algorithms, but their conclusions match mine: the more complex the algorithm, the more divergent, the harder it becomes to improve speed with a GPU implementation.
+A dragon... in C++ and in CUDA.
+Downloads
+You can download my GPL code for:
+(Deprecated) the source code for the "bins" based raycaster that was described in this article (latest version: 1.1, January 9th, 2011).
+Update: the source code for the new BVH raytracer (latest version: 2.1k, December 2015). This is a complete raytracer, much faster than the preliminary "bins" version, with more features (reflections, anti-aliasing, etc).
+Update: Win32 binaries of the new BVH raytracer, with 2 sample objects.
+Compilation under Linux
+(Should also work on OS/X with minor changes)
+The code has 3 dependencies: You must have installed OpenGL (with GLEW and GLUT), libSDL and the CUDA toolkit.
+If you are using Debian, simply...
+```
+sudo apt-get install libglew1.5-dev freeglut3-dev mesa-common-dev
+```
+...and install the CUDA toolkit from NVIDIA (I downloaded version 3.2, and installed it in /opt/cuda-3.2/).
+After this, a simple...
+```
+    bash$ ./configure --with-cuda=/path/to/your/cudaToolkit
+    bash$ make
+
+...followed by...
+
+    bash$ ./src/cudaRenderer 3D-objects/chessboard.tri 
+```
+And you will see a chessboard with reflections and shadows rotating, like the video shown on the top of this page.
+Compilation under Windows
+Make sure you have the CUDA toolkit installed (I used version 3.2). Then:
+Open the VisualC/cudaRenderer_vc90.sln with your Visual Studio
+Compile in Release mode
+Right-click on "cudaRenderer" in the Solution explorer, and select "Properties"
+Click on "Configuration Properties/Debugging"
+In the "Command Arguments", enter "..\3D-objects\chessboard.tri" and click OK
+Hit Ctrl-F5 to run.
+You should see a rotating chessboard...
+Read below for keyboard control intructions, or just press 'H' for help.
+Note: I used the free Visual C++ 2008 Express Edition, but this should work
+with the commercial one, too.
+Keyboard controls
+You can navigate in realtime:
+Hit 'R' to stop/start auto-spin.
+Use the cursor keys, 'A' and 'Z' to pilot. Don't be afraid to press multiple keys together.
+Rotate the light with 'W', 'Q'.
+'S' and 'F' are 'strafe' left/right, 'E' and 'D' are 'strafe' up/down.
+(strafe keys don't work in auto-spin mode).
+(For the old, deprecated "bins" version:) Page up/page down change the rendering mode, cycling through:
+Points
+Points via backface triangle culling
+Raycasting with diffuse lighting
+Raycasting with diffuse lighting and normal interpolation
+Raycasting with specular lighting and normal interpolation
+Raytracing with specular, normal interpolation and reflections
+Raytracing with reflections and shadows
+Antialiased raytracing with reflections and shadows
+Update: For the new raytracer:
+F4 toggles points mode
+F5 toggles specular lighting
+F6 toggles phong normal interpolation
+F7 toggles reflections
+F8 toggles shadows
+F9 toggles anti-aliasing
+ESC quits.
+Index
+CV
+Updated: Tue Jun 13 21:40:53 2023

@@ -1,0 +1,731 @@
+Contribute to kassyi/Henicos development by creating an account on GitHub.
+
+feat(transpiler): support AsParallel() and GPU BigInt vector reduction by kassyi · Pull Request #318 · kassyi/Henicos · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+kassyi
+commented
+Oct 12, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Description & Context
+Fixes #315
+Enables parallel reduction and aggregation for LINQ method chains on GPU devices. When data.AsStackEnumerable().AsParallel().Sum() is invoked inside [GpuKernel], the Roslyn AST transpiler emits cooperative warp shuffle down (__shfl_down_sync) and shared memory block reduction trees instead of sequential single-thread loops.
+Additionally, this PR introduces contiguous batch storage (GpuBigUIntArray / GpuBigIntArray), vectorized Linq query extensions (SelectMultiply, Sum), and reusable CUDA Graph compilation (CompileToGraph) for arbitrary-precision integers (GpuBigInt). This allows large-scale polynomial commitments, inner products, and multi-scalar accumulation (MSM) in zero-knowledge proofs to execute with zero heap allocations and up to ~40x speedup over multi-threaded CPU PLINQ.
+Type of Change
+Bug fix (non-breaking change fixing an issue)
+New feature (non-breaking change adding functionality)
+Performance improvement
+Refactoring / Code cleanup
+Breaking change (fix or feature that would break existing API or behavior)
+Documentation / Tooling update
+Key Changes
+Detailed Highlights
+GPU Stream Compaction (Blelloch Scan):
+Added parallel BlockExclusiveScan and AddBlockSums for CUDA, enabling highly concurrent zero-allocation Where filtering.
+Implemented multi-block scaling (rounded to powers of two) to prevent CudaErrorLaunchFailed on datasets larger than 2,048 elements.
+Vectorized CUDA Graph Memory Management:
+Eliminated dynamic buffer resizing in VectorWhereExpression. Sub-arrays are now statically allocated (with MemsetZero padding) to prevent topology invalidation during CUDA Graph capture (CudaErrorStreamCaptureInvalidated).
+Unified parameter naming (hStream) across Roslyn transpiler templates to prevent fallback to the default stream (CS1739).
+Compiler & Transpiler (Kassyi.GSharp.Compiler):
+Enhanced StackLinqFusionRule.cs to recognize AsParallel() invocations within StackLinqChain.
+Implemented parallel block reduction emission: transforms linear loops into grid-stride loops followed by warp shuffle down (__shfl_down_sync) and shared memory tree reductions in CUDA C++.
+Fixed compiler warnings in WrapperEmitter.cs.
+Standard Library (Kassyi.ZeroAlloc.Linq):
+Introduced ParallelStackEnumerable ref struct and AsParallel() extension method on StackEnumerable.
+Provided CPU fallback implementations and XML documentation comments for parallel sequences.
+GPU BigNum Arithmetic & Vector LINQ (Kassyi.GSharp.Stdlib.GpuMath):
+Batch Multi-Precision Storage: Added GpuBigUIntArray and GpuBigIntArray for contiguous, strided allocation of multi-precision integers in GPU device memory.
+Vectorized Kernels (GpuBigIntVectorKernels.cu.cs): Implemented grid-stride block kernels for addition, subtraction, scalar multiplication, and multi-pass parallel sum reduction trees.
+Vector LINQ Pipeline (VectorExpressions.cs, GpuBigIntVectorLinqExtensions.cs): Added deferred vectorized expression ASTs (AsVectorizedEnumerable, SelectMultiply, Sum).
+BigNum StackLinq Extensions (GpuBigIntStackLinqExtensions.cs): Added Select, Where, Sum, Max, Min, Average, Count, and Aggregate over ParallelStackEnumerable<GpuBigInt>, constructing balanced binary evaluation trees via ArrayPool.
+CUDA Graph Engine (GpuBigIntExpr.cs, GpuBigIntExecutableGraph.cs): Implemented warm-up pass, AST-to-Graph compilation (CompileToGraph), and one-shot execution (EvaluateWithCudaGraph), eliminating CPU launch latency for repetitive evaluation.
+Benchmark Suite (Henicos.Benchmarks):
+Implemented GpuBigIntLinqBenchmark.cs comparing CPU PLINQ, GPU Sequential AST, GPU CUDA Graph, and GPU Vectorized Array pipelines.
+Registered gbi-linq CLI command in Program.cs.
+Documentation (docs/spec/):
+Added comprehensive API specifications and fluid single-chain code examples for GpuBigUIntArray, GpuBigIntArray, GpuBigIntExpr, GpuBigIntExecutableGraph, GpuBigIntStackLinqExtensions, GpuBigIntVectorLinqExtensions, and IGpuBigIntVectorExpression.
+Updated BCL API math index table of contents.
+Testing & Verification (Kassyi.GSharp.Tests.Shared, Kassyi.GSharp.Stdlib.GpuMath.Tests):
+Added ParallelReductionExecutionTests.cs and ParallelReductionExecutionKernels.cu.cs with verified CPU and CUDA snapshots.
+Added unit test coverage for Where, Aggregate, Average, Count, Sum, and CUDA Graph compilation on GPU workspaces.
+Breaking Changes / API Impact
+None (All existing sequential kernel and transpilation pathways remain fully backward-compatible)
+Verification & Testing
+1. Automated Tests
+All unit tests pass locally (dotnet test):
+Kassyi.GSharp.Tests.Cuda.dll: 872 passed, 0 failed
+Kassyi.GSharp.Tests.Cpu.dll: 863 passed, 0 failed
+Kassyi.GSharp.Stdlib.GpuMath.Tests.dll: 325 passed, 0 failed
+Total: 2,060+ tests passed successfully on NVIDIA GPU runtime.
+Added transpiler snapshot tests (ParallelReductionExecutio_bffde545a2_Cuda.verified.cs) and verified generated block-reduction CUDA C++ output against verified baselines.
+2. Standard Benchmark Reporting
+Environment
+OS: Windows 11 Pro (NT 10.0.26300)
+CPU: AMD Ryzen 9 9900X 12-Core Processor (24 Threads @ 4.40GHz)
+RAM: 64 GB DDR5
+GPU: NVIDIA GeForce RTX 3070 Ti (48 SMs / 6,144 CUDA Cores / 8 GB GDDR6X)
+Compute Capability: sm_86 (Ampere)
+Driver / CUDA: Driver 610.88 / CUDA Toolkit 13.4
+Runtime: .NET 10.0.12 (RyuJIT x86-64-v4) / Henicos Benchmark Suite
+Workload: Multi-Scalar Polynomial Inner Product (Sum(s_i * c))
+Data Type: 256-bit Multi-Precision Integers (8 words = 256 bits, standard ZKP / secp256k1 field size)
+Operation: Vector multiplication by scalar constant followed by parallel sum reduction:
+$$\text{Result} = \sum_{i=0}^{N-1} (s_i \times c)$$
+Throughput Calculation: $\text{Throughput} = \frac{N}{\text{Latency (seconds)}}$
+Baselines:
+CPU (PLINQ): System.Numerics.BigInteger with multi-threaded PLINQ AsParallel().Select().Aggregate()
+GPU Sequential: Individual GpuBigInt AST evaluated via sequential kernel dispatch
+GPU CUDA Graph (On-the-fly): One-shot AST evaluation compiled and launched via CUDA Graph (EvaluateWithCudaGraph)
+GPU CUDA Graph (Precompiled): Reusable AST compiled once and launched repeatedly (CompileToGraph)
+GPU Vectorized + Precompiled Graph: Contiguous memory array (GpuBigIntArray) with multi-pass parallel reduction tree compiled into an executable CUDA Graph
+1. Small Scale Latency & Dispatch Overhead (N = 256, 256-bit BigInt)
+Goal: Measure kernel launch and driver scheduling latency under small element counts.
+Engine / Mode
+Latency (ms)
+Throughput (Elements/sec)
+Speedup vs CPU
+Graph Launch Gain
+Status / Analysis
+CPU (System.Numerics + PLINQ)
+0.10 ms
+2.56 M ops/s
+1.00x
+—
+Fast CPU multi-threading baseline
+GPU (GpuBigInt Sequential Evaluate)
+33.10 ms
+7.73 K ops/s
+0.00x
+1.00x
+Launch latency dominated by 256+ individual kernel dispatches
+GPU (GpuBigInt + CUDA Graph)
+66.30 ms
+3.86 K ops/s
+0.00x
+0.50x
+Capture & instantiate overhead exceeds runtime for one-shot
+GPU (CUDA Graph Precompiled)
+13.40 ms
+19.10 K ops/s
+0.01x
+2.47x
+Captures scalar AST; eliminates CPU scheduling latency
+GPU (Vectorized + Precompiled Graph)
+0.10 ms
+2.56 M ops/s
+1.00x
+331.00x
+Matches CPU latency at small $N$ via contiguous layout & fused graph
+2. Medium Scale Latency (N = 1,024, 256-bit BigInt)
+Goal: Evaluate scaling characteristics as workload begins saturating GPU warps.
+Engine / Mode
+Latency (ms)
+Throughput (Elements/sec)
+Speedup vs CPU
+Graph Launch Gain
+Status / Analysis
+CPU (System.Numerics + PLINQ)
+1.30 ms
+787.70 K ops/s
+1.00x
+—
+CPU begins experiencing thread synchronization overhead
+GPU (GpuBigInt Sequential Evaluate)
+143.10 ms
+7.16 K ops/s
+0.01x
+1.00x
+High driver latency from tree-reduction scheduling
+GPU (GpuBigInt + CUDA Graph)
+351.30 ms
+2.91 K ops/s
+0.00x
+0.41x
+Graph topology synthesis overhead for deep ASTs
+GPU (CUDA Graph Precompiled)
+55.80 ms
+18.35 K ops/s
+0.02x
+2.56x
+Graph replay eliminates all CPU-side AST traversals
+GPU (Vectorized + Precompiled Graph)
+0.10 ms
+10.24 M ops/s
+13.00x
+1,431.00x
+13x faster than CPU; reduction tree collapsed into multi-block grid
+3. Massive Parallel Throughput (N = 1,048,576 / 1M Elements, 256-bit BigInt)
+Zero-Allocation & High-Throughput: Evaluates raw compute and memory bandwidth throughput for ZKP / MSM cryptographic workloads.
+Engine / Mode
+Latency (ms)
+Throughput (Elements/sec)
+Speedup vs CPU
+Graph Launch Gain
+Status / Analysis
+CPU (System.Numerics + PLINQ)
+163.80 ms
+6.40 M ops/s
+1.00x
+—
+CPU 24 threads pinned at 100% capacity
+GPU (Vectorized + Precompiled Graph)
+4.10 ms
+255.75 M ops/s
+39.95x
+(Skipped)
+~40x faster than CPU with 0 B managed heap allocations
+Key Architectural Takeaways
+Near 40x Speedup & 255M ops/sec Throughput at 1M Scale ($N = 1,048,576$):
+For cryptographic / ZKP scalar accumulation workloads, GpuBigIntArray + vectorized CUDA Graph achieves 4.10 ms (255.75 million 256-bit operations/sec), outpacing multi-threaded CPU PLINQ (163.80 ms / 6.40 M ops/sec) by 39.95x.
+Launch Overhead Elimination (Over 1,400x Graph Gain):
+Naive sequential kernel launches suffer from Windows driver / CPU scheduling latency (~33 ms to ~143 ms). Precompiling the reduction pipeline into native CUDA Graphs (CompileToGraph) eliminates host-side dispatch overhead, achieving up to 1,431x launch speedup over sequential execution.
+One-Shot vs. Precompiled Trade-off:
+EvaluateWithCudaGraph (one-shot graph capture) incurs on-the-fly graph instantiation overhead. For high-frequency pipelines (e.g. proof generation loops), precompiling via .CompileToGraph() once and calling .Execute() repeatedly is strictly optimal.
+Checklist
+My code adheres to the project's coding style and zero-allocation guidelines.
+I have performed a self-review of my own code.
+Relevant XML documentation / comments have been added or updated.
+No unintended commits or debug scratch files are included.
+4. End-to-End Pipeline Performance (Filter + Map + Reduce, = 65,536$)
+Goal: Evaluate fully vectorized Where().Select().Sum() chained operations executed as a single unified CUDA Graph.
+Scenario / Mode
+Latency (ms)
+Speedup vs CPU
+M Elements / s
+[Map] CPU (Numerics + PLINQ)
+6.60 ms
+1.00x
+9.93 M/s
+[Map] GPU (Vectorized CUDA Graph)
+1.10 ms
+6.00x
+59.58 M/s
+[Filter] CPU (Numerics + PLINQ)
+6.20 ms
+1.00x
+10.57 M/s
+[Filter] GPU (Vectorized CUDA Graph)
+0.60 ms
+10.33x
+109.23 M/s
+[Pipeline] CPU (Numerics + PLINQ)
+7.50 ms
+1.00x
+8.74 M/s
+[Pipeline] GPU (Vectorized CUDA Graph)
+0.70 ms
+10.71x
+93.62 M/s
+Vectorized pipeline hits ~10.7x speedup (93.6M ops/sec) over PLINQ, entirely free of managed heap allocations.
+kassyi
+added 19 commits
+October 12, 2026 14:07
+feat(stdlib): introduce ParallelStackEnumerable and AsParallel extension
+…
+46128e3
+```
+- Details of changes:
+
+  - Add ParallelStackEnumerable ref struct with complete XML documentation
+
+  - Implement AsParallel extension method on StackEnumerable
+
+  - Provide documented CPU fallback implementations for ParallelStackEnumerable.Sum
+
+  - Complete missing typeparam XML comments for Last, LastOrDefault, and Aggregate
+
+- Technical background:
+
+  - Enable LINQ syntax signaling GPU parallel reduction without heap allocations
+```
+feat(transpiler): implement parallel block reduction for StackLinq
+…
+24082f3
+```
+- Details of changes:
+
+  - Add IsParallel flag to StackLinqChain model
+
+  - Detect AsParallel stage in StackLinq syntax chains
+
+  - Emit grid-stride loops with warp shuffle down and shared memory reduction in CUDA
+
+- Technical background:
+
+  - Transform sequential loops into massively parallel GPU block reductions
+```
+style(compiler): discard unused local variable in WrapperEmitter
+…
+3ecbc41
+```
+- Details of changes:
+
+  - Discard out parameter in KernelLaunchEmitter.IsArrayLikeType call
+
+- Technical background:
+
+  - Eliminate compiler warning for unused elementType local variable
+```
+test(runtime): add execution test and snapshots for parallel reduction
+…
+31147b4
+```
+- Details of changes:
+
+  - Add ParallelReductionExecutionKernels with AsParallel().Sum() kernel
+
+  - Add unit test verifying parallel reduction against CPU LINQ
+
+  - Include CPU and CUDA verified generator snapshots
+
+- Technical background:
+
+  - Validate correctness and code emission for parallel aggregation
+```
+feat(math): add Min and Max expression support for GpuBigIntExpr
+…
+d5105c2
+```
+- Details of changes:
+
+  - Add static Min and Max factory methods on GpuBigIntExpr
+
+  - Implement SignedMaxExpression and SignedMinExpression AST execution nodes
+
+  - Simplify temporary buffer allocation in SignedExpressions
+
+- Technical background:
+
+  - Provide expression tree nodes required for lazy Min/Max reductions
+```
+feat(math): add parallel StackLinq extensions for GpuBigInt
+…
+7473171
+```
+- Details of changes:
+
+  - Add Select overloads projecting GpuBigInt/GpuBigIntExpr to deferred expressions
+
+  - Implement Sum, Max, and Min reduction methods constructing balanced binary trees
+
+  - Use ArrayPool to eliminate heap allocations during tree building
+
+- Technical background:
+
+  - Enable zero-allocation parallel aggregation and reduction for GPU BigNum types
+```
+test(math): add unit tests for GpuBigInt parallel StackLinq
+…
+efa6fcd
+```
+- Details of changes:
+
+  - Add unit tests verifying ParallelStackEnumerable.Sum with GpuBigInt arrays
+
+  - Add unit tests verifying chained Select and Sum expression evaluation
+
+- Technical background:
+
+  - Validate mathematical correctness of balanced tree evaluation on GPU workspace
+```
+feat(math): add Where, Aggregate, Average, and Count for GpuBigInt
+…
+e7f72fd
+```
+- Details of changes:
+
+  - Add Where filtering extension methods for GpuBigInt and GpuBigIntExpr
+
+  - Implement tree-balanced parallel Aggregate reduction
+
+  - Add Average reduction dividing balanced sum tree by count
+
+  - Add Count terminal operations for parallel sequences
+
+- Technical background:
+
+  - Complete parallel StackLinq operator surface for BigNum arithmetic
+```
+test(math): add tests for Where, Aggregate, Average, and Count
+…
+db14d21
+```
+- Details of changes:
+
+  - Add tests validating ParallelStackEnumerable.Where filtering
+
+  - Add tests verifying custom tree-balanced Aggregate operations
+
+  - Add tests verifying Average and Count on GpuBigInt parallel sequences
+
+- Technical background:
+
+  - Ensure correct mathematical evaluation of extended parallel StackLinq operators
+```
+feat(math): add CUDA Graph compilation and execution for GpuBigIntExpr
+…
+eea1723
+```
+- Details of changes:
+
+  - Add CompileToGraph and EvaluateWithCudaGraph on GpuBigIntExpr
+
+  - Introduce GpuBigIntExecutableGraph struct implementing IDisposable
+
+  - Clean up dead code in NativeProvider.ClearMemoryAsync
+
+- Technical background:
+
+  - Eliminate repetitive kernel launch overhead for deferred expression evaluation
+```
+test(math): add CUDA Graph evaluation test for parallel StackLinq
+…
+1620b41
+```
+- Details of changes:
+
+  - Add test verifying ParallelStackEnumerable.Sum with CUDA Graph compilation
+
+  - Simplify GpuBigInt creation helper using public constructor
+
+- Technical background:
+
+  - Validate mathematical correctness and graph capture of parallel StackLinq trees
+```
+perf(bench): add GpuBigInt StackLinq and CUDA Graph benchmark
+…
+9db1df7
+```
+- Details of changes:
+
+  - Add GpuBigIntLinqBenchmark evaluating CPU PLINQ vs GPU Sequential vs CUDA Graph
+
+  - Add precompiled CUDA Graph execution mode for repetitive inner-product workloads
+
+  - Register gbi-linq CLI command and options in Program.cs
+
+- Technical background:
+
+  - Quantify speedup of GPU parallel tree reduction in ZKP/MSM scenarios
+```
+feat(math): add warmup execution prior to CUDA Graph capture
+…
+5199d3f
+```
+- Details of changes:
+  - Add an initial warmup evaluation in GpuBigIntExpr.CompileToGraph before invoking BeginCapture.
+  - Safely dispose intermediate evaluation buffers when a user-specified target buffer is not provided.
+- Technical background:
+  - Any lazy CUDA allocations or kernel JIT compilations occurring within BeginCapture / EndCapture invalidate the CUDA Graph capture stream, triggering runtime failures. Performing an initial evaluation forces all necessary driver initialization and buffers outside the capture scope.
+```
+feat(math): add vectorized GPU BigInt array and Linq pipeline
+…
+16e3b07
+```
+- Details of changes:
+  - Introduce GpuBigUIntArray and GpuBigIntArray for contiguous batch storage of multiprecision integers in GPU device memory.
+  - Implement block-parallel addition, subtraction, multiplication, and multi-block sum reduction kernels in GpuBigIntVectorKernels.cu.cs.
+  - Add zero-allocation vectorized Linq expression nodes (GpuBigIntVectorEnumerable, GpuBigIntVectorSelectMultiplyExpr) and Linq extension methods (SelectMultiply, Sum) in VectorExpressions.cs and GpuBigIntVectorLinqExtensions.cs.
+- Technical background:
+  - Evaluating large-scale inner products (e.g., polynomial commitments / MSM in zero-knowledge proofs) by allocating individual scalar expression trees incurs severe host overhead and memory pressure. Vectorized continuous arrays enable fused multi-element kernel execution with zero per-element allocation.
+```
+perf(bench): add vectorized pipeline to BigInt Linq benchmark
+…
+090d367
+```
+- Details of changes:
+  - Integrate vectorized CUDA Graph execution (Gpu_CudaGraph_Vectorized_PolynomialInnerProduct) into GpuBigIntLinqBenchmark.
+  - Conditionally guard legacy scalar tree evaluation when benchmark element counts exceed 1024 elements to prevent driver timeout and out-of-memory errors.
+  - Output comparative latency and speedup telemetry contrasting CPU PLINQ, sequential GPU, CUDA Graph, and vectorized execution.
+- Technical background:
+  - Enables performance verification for high-degree polynomial inner products up to 65,536 elements without hitting OS display driver TDR limits.
+```
+docs(bignum): add batch array specifications
+…
+e1b341d
+```
+- Details of changes:
+  - Add specification for GpuBigUIntArray.md detailing contiguous GPU memory layouts, strides, and batch construction.
+  - Add specification for GpuBigIntArray.md detailing signed wrappers and batch sign management.
+- Technical background:
+  - Required to document contiguous multi-precision array representations on device memory for batched calculations.
+```
+docs(graph): add CUDA Graph execution specs
+…
+b291faa
+```
+- Details of changes:
+  - Update GpuBigIntExpr.md specification with CompileToGraph, EvaluateWithCudaGraph, Max, Min, and warm-up requirements.
+  - Add specification for GpuBigIntExecutableGraph.md describing reusable CUDA Graph execution with low CPU launch latency.
+- Technical background:
+  - Capturing and compiling AST expressions into native CUDA Graphs eliminates CPU-side launch overhead for high-frequency kernel dispatch.
+```
+docs(linq): add vector and stack LINQ specs
+…
+375baa0
+```
+- Details of changes:
+  - Add specification for GpuBigIntVectorLinqExtensions.md and IGpuBigIntVectorExpression.md for deferred batch expressions and parallel sum reduction.
+  - Add specification for GpuBigIntStackLinqExtensions.md covering zero-allocation stack operations (Select, Where, Sum, Max, Min, Aggregate, Average, Count).
+  - Update math bignum 00_index.md table of contents.
+- Technical background:
+  - Provides comprehensive reference documentation and fluid single-chain code examples for GPU and StackLinq extensions.
+```
+docs(math): add CUDA Graph examples to BigInt Linq specs
+…
+b96518f
+```
+- Details of changes:
+  - Add CUDA Graph execution guidelines (one-liner EvaluateWithCudaGraph and precompiled CompileToGraph) to GpuBigIntStackLinqExtensions.md and GpuBigIntVectorLinqExtensions.md.
+  - Add practical code examples demonstrating high-frequency repetition with zero launch latency.
+  - Update See also navigation sections to reference GpuBigIntExecutableGraph.
+- Technical background:
+  - Document the newly introduced CUDA Graph compilation capabilities for both balanced binary tree reduction and contiguous vectorized pipelines, providing developers with clear patterns to eliminate CPU driver launch overhead in iterative workloads.
+```
+kassyi
+marked this pull request as draft
+October 12, 2026 12:38
+kassyi
+added 10 commits
+October 13, 2026 01:45
+feat(math): add vector comparison kernels and array slicing
+…
+454f145
+```
+- Details of changes:
+  - Add zero-allocation Slice methods to GpuBigIntArray.cs and GpuBigUIntArray.cs.
+  - Implement vector-scalar and vector-vector comparison kernels (VectorCompareScalarKernel, VectorCompareVectorKernel) with warp-reduction in GpuBigIntCmpKernels.cu.cs.
+  - Implement vector boolean reduction kernels (VectorAndKernel, VectorOrKernel, VectorNotKernel, VectorAnyTrueKernel, VectorAllTrueKernel).
+  - Implement sign-magnitude conversion and vector bitwise kernels in GpuBigIntVectorKernels.cu.cs.
+  - Guard zero-word allocations in DefaultGpuMemoryManager.cs and validate arguments in GpuBigUInt.cs.
+- Technical background:
+  - Establishes low-level GPU primitives for vector-wide comparisons and sub-array windowing required by vectorized filtering (Where), slicing (Skip/Take), and boolean aggregation (Any/All).
+```
+feat(math): expand vectorized BigInt LINQ and boolean expressions
+…
+056be5c
+```
+- Details of changes:
+  - Introduce IGpuBoolVectorExpression.cs and concrete AST expression nodes in BoolVectorExpressions.cs (GpuVectorCompareScalarExpr, GpuVectorCompareVectorExpr, GpuVectorLogicalAndExpr, GpuVectorLogicalOrExpr, GpuVectorLogicalNotExpr).
+  - Add slice and arithmetic vector expression nodes in VectorExpressions.cs (GpuBigIntVectorSliceExpr, GpuBigIntVectorBitwiseAndExpr, GpuBigIntVectorBitwiseOrExpr, GpuBigIntVectorBitwiseXorExpr, etc.).
+  - Implement LINQ operator extensions in GpuBigIntVectorLinqExtensions.cs for Skip, Take, Any, All, Min, Max, bitwise operations, and comparison predicates (EqualTo, GreaterThan, LessThan, etc.).
+- Technical background:
+  - Expands the high-performance contiguous vector pipeline so developers can express arbitrary multi-element boolean masking, windowing, and reduction queries without leaving the GPU memory space.
+```
+test(math): add comprehensive tests for vector LINQ pipeline
+…
+54c4f4b
+```
+- Details of changes:
+  - Add test fixtures covering vectorized arithmetic operations (addition, subtraction, multiplication, negation, bitwise AND/OR/XOR).
+  - Add tests for aggregation operations (Sum, Min, Max) across various batch sizes.
+  - Add tests for vector comparison operations, logical combinations, and boolean reductions (Any, All).
+  - Add tests for zero-allocation window slicing (Skip, Take, combined range slices).
+- Technical background:
+  - Ensures numerical correctness and GPU execution stability against CPU reference models across all new vectorized LINQ operators.
+```
+docs(guides): add GPU LINQ and execution guide for C# developers
+…
+3f71cca
+```
+- Details of changes:
+  - Add guide 12_gpu_linq_and_execution_guide.md comparing AsStackEnumerable, AsParallel, and AsVectorizedEnumerable.
+  - Document execution models, memory trade-offs, and CUDA Graph acceleration patterns.
+  - Update guides index in 00_index.md.
+- Technical background:
+  - Bridges standard C# LINQ intuition to GPU execution models, guiding developers toward the optimal execution strategy for their workload scale.
+```
+style(math): add curly braces to single-line if statements
+…
+9ebb475
+```
+- Details of changes:
+  - Add curly braces to single-line if statements across DefaultGpuMemoryManager.cs, GpuBigUInt.cs, GpuBigIntArray.cs, GpuBigUIntArray.cs, GpuBigIntCmpKernels.cu.cs, BoolVectorExpressions.cs, GpuBigIntVectorLinqExtensions.cs, and VectorExpressions.cs.
+- Technical background:
+  - Enforces repository-wide code style guidelines and prevents potential dangling else / scope bugs in transpiled device kernels and host memory management code.
+```
+fix(math): suppress progress output when output is redirected
+…
+71a1e12
+```
+- Details of changes:
+  - Guard terminal progress bar and verification error logs with !Console.IsOutputRedirected in ChudnovskyAlgorithm.cs.
+  - Remove debug upload timing log.
+- Technical background:
+  - Why this change was necessary:
+    - Running unit tests and benchmarks redirected console output, polluting standard test logs with escape sequences and progress messages.
+- Symptom:
+  - Test runner output was interleaved with progress bar animations ([GPU-Pi] [...]).
+- Cause:
+  - Progress updates directly wrote to Console.Write without checking if standard output was attached to an interactive terminal.
+- Solution:
+  - Check Console.IsOutputRedirected before printing progress updates.
+```
+perf(bench): add Map, Filter, and Pipeline scenarios to benchmark
+…
+4a1e709
+```
+- Details of changes:
+  - Expand GpuBigIntLinqBenchmark.cs to measure MapReduce (Select + Sum), FilterReduce (Where + Sum), and combined Pipeline (Where + Select + Sum) workloads.
+  - Precompile distinct CUDA Graphs for Map, Filter, and Pipeline queries.
+  - Add throughput telemetry (M Elements / s) alongside latency and speedup metrics.
+- Technical background:
+  - Provides empirical performance profiles contrasting CPU PLINQ, StackLinq binary-reduction trees, and contiguous vectorized CUDA Graph execution across diverse query patterns.
+```
+feat(math): implement GPU stream compaction and Where operator
+…
+80a04ee
+```
+- Details of changes:
+  - Implement Blelloch prefix scan with bank-conflict-free padding and scatter compaction kernels in GpuStreamCompactionKernels.cu.cs.
+  - Implement multi-block recursive prefix scan coordination in StreamCompactionOrchestrator.cs.
+  - Add VectorWhereExpression in VectorExpressions.cs and expose the Where extension method in GpuBigIntVectorLinqExtensions.cs.
+  - Refactor VectorExpressions.cs to use primary constructors, expression bodies, and collection expressions.
+  - Complete XML documentation across GpuBigIntVectorLinqExtensions.cs, BoolVectorExpressions.cs, IGpuBoolVectorExpression.cs, GpuBigIntArray.cs, and GpuBigUIntArray.cs.
+- Technical background:
+  - Stream Compaction enables zero-allocation filtering (Where) directly on the GPU, allowing subsequent fused kernel stages (e.g. Map, Reduce) to process compacted arrays without transferring predicates to the host CPU.
+```
+test(math): add unit tests for GPU stream compaction
+…
+2972b0a
+```
+- Details of changes:
+  - Add test suite in GpuStreamCompactionTests.cs validating single-block and multi-block Blelloch exclusive prefix scan, block sum accumulation, and data compaction against CPU reference models.
+  - Clean up unused imports in GpuBigIntStackLinqExtensionsTests.cs and GpuBigIntVectorLinqExtensionsTests.cs.
+- Technical background:
+  - Verifies scan correctness across powers-of-two boundaries, arbitrary element counts, and bank-conflict avoidance padding logic.
+```
+perf(bench): add GPU vectorized Where filtering to benchmark
+…
+66cab75
+```
+- Details of changes:
+  - Integrate vectorized CUDA Graph execution for FilterReduce (_precompiledVectorFilterGraph) and Pipeline (_precompiledVectorPipelineGraph) in GpuBigIntLinqBenchmark.cs.
+  - Profile GPU Stream Compaction latency and throughput in combination with Map and Sum reduction stages.
+  - Clean up unused using directives across benchmark project files.
+- Technical background:
+  - Demonstrates end-to-end performance and scaling behavior of GPU-native Stream Compaction versus CPU PLINQ across various batch sizes.
+```
+kassyi
+added 2 commits
+October 13, 2026 04:09
+test(snapshots): update StreamCompactionKernels snapshot to reflect B…
+…
+ec73cfe
+```
+…lelloch Scan kernels
+
+- Details of changes:
+  - Updated `Snap.GpuStreamCompactionKernel_3eca3e959e_Cuda.verified.cs`
+- Technical background:
+  - Adding `BlockExclusiveScan` and `AddBlockSums` generated new C++ kernel prototypes and function pointers via the Source Generator.
+- Symptoms:
+  - CI failed on `GeneratorSnapshotTests` due to `.verified.cs` mismatch.
+- Cause:
+  - Untracked `.received.cs` changes from the previous commit were missing.
+- Remediation:
+  - Accepted the new generated snapshot locally.
+```
+test(snapshots): update StreamCompactionKernels CPU snapshot
+…
+bb593f8
+```
+- Details of changes:
+  - Updated `Snap.GpuStreamCompactionKernel_3eca3e959e_Cpu.verified.cs`
+- Technical background:
+  - The previous commit only updated the CUDA snapshot, missing the CPU fallback generation for the new Blelloch Scan kernels.
+- Symptoms:
+  - CI failed on `GeneratorSnapshotTests` in `Kassyi.GSharp.Tests.Cpu.dll`.
+- Cause:
+  - Untracked `.received.cs` changes for CPU target were missing.
+- Remediation:
+  - Accepted the new generated CPU snapshot locally.
+```
+kassyi
+force-pushed
+the
+feat/issue-315-as-parallel-reduction
+branch
+from
+49d64ea to
+bb593f8
+Compare
+October 12, 2026 19:09
+kassyi
+added 2 commits
+October 13, 2026 04:21
+fix(test): mark GpuStreamCompactionTests as GpuExecution
+…
+52ed97f
+```
+- Details of changes:
+  - Add [Trait("Category", "GpuExecution")] to GpuStreamCompactionTests.
+- Technical background:
+  - Tests executing native GPU kernels require compiled .gfatbin payloads.
+- Symptom:
+  - Cloud CI runners without GPU support failed with System.InvalidOperationException: AOT kernel binary was not found at '...Kassyi.GSharp.Kernels_Kassyi_GSharp_Stdlib_GpuMath.gfatbin'.
+- Cause:
+  - On non-CUDA CI runners, GSHARP_TEST_NO_CUDA skips fatbin compilation and the test filter excludes Category!=GpuExecution. GpuStreamCompactionTests lacked this trait and was incorrectly executed.
+- Solution:
+  - Mark GpuStreamCompactionTests with [Trait("Category", "GpuExecution")] to ensure it is properly skipped during static cloud testing.
+```
+docs(readme): add highlights for zero-allocation and benchmarks
+…
+3548434
+```
+- Details of changes:
+  - Add key highlights section to the project header in README.md.
+- Technical background:
+  - Showcases the zero-allocation architecture, the 10.7x speedup over System.Numerics + PLINQ (109+ M elements/s), and the 1,000,000+ digits/s Chudnovsky Pi calculation capability.
+```
+kassyi
+marked this pull request as ready for review
+October 12, 2026 19:26
+Hide details
+View details
+kassyi
+merged commit 9080471
+into
+main
+Oct 12, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+kassyi
+deleted the
+feat/issue-315-as-parallel-reduction
+branch
+October 12, 2026 19:26
+kassyi
+added
+feature
+New feature or functionality
+performance
+Performance optimization or benchmark improvement
+labels
+Oct 18, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+feature
+New feature or functionality
+performance
+Performance optimization or benchmark improvement
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

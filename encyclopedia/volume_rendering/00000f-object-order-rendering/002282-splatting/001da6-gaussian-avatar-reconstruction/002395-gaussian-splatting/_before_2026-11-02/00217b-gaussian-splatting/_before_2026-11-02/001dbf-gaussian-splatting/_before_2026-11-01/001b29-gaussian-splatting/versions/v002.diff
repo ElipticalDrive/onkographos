@@ -1,0 +1,203 @@
+--- v001.md
++++ v002.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of $M$ 3D Gaussians $\{g_i\}_{i=1}^M$, where each $g_i$ is defined by center $\boldsymbol{\mu}_i$, covariance $\boldsymbol{\Sigma}_i$, opacity $\sigma_i$, and color $c_i$; a camera with intrinsics $K$ and extrinsics $W$; and image dimensions.
++*   **Input:** A set of $M$ 3D Gaussians $\{g_i\}_{i=1}^M$, where each $g_i$ is defined by center $\boldsymbol{\mu}_i$, covariance $\boldsymbol{\Sigma}_i$, opacity $\sigma_i$, and color $c_i$; a camera with intrinsics $K$ and extrinsics $W$; and image dimensions [S4].
+ *   **Output:** A 2D image $I$ of size $H \times W$.
+ 
+@@ -16,5 +16,5 @@
+ *   `scale`: $s \in \mathbb{R}^3$, size along each local axis (stored in log space).
+ *   `rot`: $q \in \mathbb{R}^4$, orientation as a unit quaternion.
+-*   `color`: $c_i \in \mathbb{R}^3$, RGB color. In the standard format, this is decoded from spherical harmonic (SH) coefficients. Band-0 SH coefficients $f_{dc} \in \mathbb{R}^3$ are converted to RGB using $C_0 = \frac{1}{2\sqrt{\pi}} \approx 0.282$ [S3]:
++*   `color`: $c_i \in \mathbb{R}^3$, RGB color. In the standard format, this is decoded from spherical harmonic (SH) coefficients [S3]. Band-0 SH coefficients $f_{dc} \in \mathbb{R}^3$ are converted to RGB using $C_0 = \frac{1}{2\sqrt{\pi}} \approx 0.282$ [S3]:
+     $$ \text{color} = \text{clamp}(0.5 + C_0 \cdot f_{dc}, 0, 1) $$
+ *   `opacity`: $\sigma_i \in \mathbb{R}$, opacity in $[0, 1]$ (stored as a logit).
+@@ -49,39 +49,48 @@
+ def render_gaussian_splats(gaussians, camera, image_width, image_height):
+     # Initialize output image
+-    image = zeros((image_height, image_width, 3))
+-    
+-    # Precompute camera matrices
++    image = [[0.0, 0.0, 0.0] for _ in range(image_height)]
++    
+     W = camera.extrinsics # 4x4 pose matrix
+     K = camera.intrinsics # 3x3 intrinsic matrix
+     
+-    # Project all Gaussians to 2D
+     projected_gaussians = []
+     for g in gaussians:
+         # 1. Compute 3D covariance from scale and rotation
+-        S = diag(exp(g.scale))
++        S = [[exp(g.scale[0]), 0, 0], [0, exp(g.scale[1]), 0], [0, 0, exp(g.scale[2])]]
+         V = quaternion_to_rotation_matrix(g.rot)
+-        Sigma_3d = V @ S @ V.T
++        Sigma_3d = mat_mul(mat_mul(V, S), transpose(V))
+         
+         # 2. Transform to camera space
+-        Sigma_cam = W[:3, :3] @ Sigma_3d @ W[:3, :3].T
+-        
+-        # 3. Compute Jacobian of perspective projection at Gaussian center
+-        # P_K(x) = K * (R*x + t) / z
+-        # Jacobian J depends on camera pose and center position
+-        mu_cam = W[:3, :3] @ g.pos + W[:3, 3]
++        R_cam = W[:3, :3]
++        Sigma_cam = mat_mul(mat_mul(R_cam, Sigma_3d), transpose(R_cam))
++        
++        # 3. Project center to camera space
++        mu_cam = vec3_add(mat_mul(R_cam, g.pos), W[:3, 3])
+         z = mu_cam[2]
+-        J = compute_projection_jacobian(K, mu_cam) # 2x3 matrix
+-        
+-        # 4. Project covariance
+-        Sigma_2d = J @ Sigma_cam @ J.T
+-        
+-        # 5. Project center
+-        mu_2d = K @ mu_cam
+-        mu_2d = mu_2d[:2] / mu_2d[2] # Normalize by z
+-        
+-        # 6. Compute bounding box for rasterization
+-        # Use 3-sigma extent for bounding box
+-        sqrt_Sigma_2d = sqrt_eigenvalues(Sigma_2d)
+-        bbox = compute_bbox(mu_2d, sqrt_Sigma_2d)
++        
++        # 4. Compute Jacobian of perspective projection at Gaussian center
++        # J = (1/z) * K[:2, :3] @ R_cam - (z / z^2) * K[:2, :3] @ R_cam @ mu_cam^T
++        K23 = [K[0][:3], K[1][:3]]
++        term1 = [[K23[0][0]/z, K23[0][1]/z, K23[0][2]/z],
++                 [K23[1][0]/z, K23[1][1]/z, K23[1][2]/z]]
++        tmp = mat_mul(K23, R_cam)
++        tmp_mu = mat_mul(tmp, [mu_cam[0], mu_cam[1], mu_cam[2]])
++        term2 = [[tmp_mu[0]/z, tmp_mu[1]/z, tmp_mu[2]/z]]
++        J = [[term1[0][k] - term2[0][k] for k in range(3)] for _ in range(2)]
++        
++        # 5. Project covariance
++        Sigma_2d = mat_mul(mat_mul(J, Sigma_cam), transpose(J))
++        
++        # 6. Project center to screen
++        mu_2d_hom = mat_mul(K, [mu_cam[0], mu_cam[1], mu_cam[2], 1.0])
++        mu_2d = [mu_2d_hom[0] / mu_2d_hom[2], mu_2d_hom[1] / mu_2d_hom[2]]
++        
++        # 7. Compute bounding box (3-sigma extent along axes)
++        extent_x = 3.0 * sqrt(Sigma_2d[0][0])
++        extent_y = 3.0 * sqrt(Sigma_2d[1][1])
++        x_min, x_max = int(mu_2d[0] - extent_x), int(mu_2d[0] + extent_x)
++        y_min, y_max = int(mu_2d[1] - extent_y), int(mu_2d[1] + extent_y)
++        x_min, y_min = max(0, x_min), max(0, y_min)
++        x_max, y_max = min(image_width, x_max), min(image_height, y_max)
+         
+         projected_gaussians.append({
+@@ -89,37 +98,67 @@
+             'Sigma_2d': Sigma_2d,
+             'sigma': g.opacity,
+-            'color': decode_sh(g.color_coeffs), # Decode SH to RGB
+-            'bbox': bbox,
++            'color': decode_sh_band0(g.color_coeffs),
++            'x_min': x_min, 'y_min': y_min, 'x_max': x_max, 'y_max': y_max,
+             'depth': z
+         })
+     
+-    # Rasterize
++    # Sort all projected Gaussians by depth (back-to-front)
++    projected_gaussians.sort(key=lambda g: g['depth'], reverse=True)
++    
++    # Rasterize with alpha compositing
++    T = 1.0
+     for g_proj in projected_gaussians:
+-        # Clip bbox to image bounds
+-        x_min, y_min, x_max, y_max = clip_bbox(g_proj['bbox'], image_width, image_height)
+-        
+-        for y in range(y_min, y_max):
+-            for x in range(x_min, x_max):
+-                p = vec2(x, y)
++        for y in range(g_proj['y_min'], g_proj['y_max']):
++            for x in range(g_proj['x_min'], g_proj['x_max']):
++                p = [x, y]
++                diff = [p[0] - g_proj['mu_2d'][0], p[1] - g_proj['mu_2d'][1]]
+                 # Evaluate 2D Gaussian
+-                diff = p - g_proj['mu_2d']
+-                G_val = exp(-0.5 * diff.T @ inverse(g_proj['Sigma_2d']) @ diff)
++                inv_Sigma = inverse_2x2(g_proj['Sigma_2d'])
++                quad = diff[0]*(inv_Sigma[0][0]*diff[0] + inv_Sigma[0][1]*diff[1]) + \
++                       diff[1]*(inv_Sigma[1][0]*diff[0] + inv_Sigma[1][1]*diff[1])
++                G_val = exp(-0.5 * quad)
+                 
+-                # Accumulate color with alpha blending
+-                # Note: Standard 3DGS rasterizers sort by depth and composite
+-                # This simplified loop assumes no overlap or uses a simple add
+-                # For correct alpha compositing, a depth-sorted pass is required
+-                # Here we approximate with simple accumulation for brevity
+-                # In practice, use a tile-based sorter and compositing kernel
+                 alpha = g_proj['sigma'] * G_val
+-                image[y, x] += g_proj['color'] * alpha
+-                # Note: This simple accumulation does not handle transparency correctly
+-                # without proper sorting and compositing.
+-    
+-    # Correct compositing requires sorting and back-to-front blending
+-    # See Subtopics for optimized rasterization details
++                if alpha > 1e-4:
++                    color = g_proj['color']
++                    image[y][x] = [
++                        image[y][x][0] * T + color[0] * alpha,
++                        image[y][x][1] * T + color[1] * alpha,
++                        image[y][x][2] * T + color[2] * alpha
++                    ]
++                    T = T * (1.0 - alpha)
++                if T < 1e-4:
++                    break
+     return image
++
++# Helper functions
++def quaternion_to_rotation_matrix(q):
++    x, y, z, w = q
++    return [
++        [1 - 2*(y*y + z*z), 2*(x*y - z*w), 2*(x*z + y*w)],
++        [2*(x*y + z*w), 1 - 2*(x*x + z*z), 2*(y*z - x*w)],
++        [2*(x*z - y*w), 2*(y*z + x*w), 1 - 2*(x*x + y*y)]
++    ]
++
++def decode_sh_band0(f_dc):
++    SH_C0 = 0.28209479177387814
++    return [max(0.0, min(1.0, 0.5 + SH_C0 * c)) for c in f_dc]
++
++def inverse_2x2(M):
++    det = M[0][0]*M[1][1] - M[0][1]*M[1][0]
++    return [[M[1][1]/det, -M[0][1]/det], [-M[1][0]/det, M[0][0]/det]]
++
++def mat_mul(A, B):
++    return [[sum(A[i][k]*B[k][j] for k in range(len(B))) for j in range(len(B[0]))] for i in range(len(A))]
++
++def transpose(M):
++    return [[M[j][i] for j in range(len(M))] for i in range(len(M[0]))]
++
++def vec3_add(a, b): return [a[0]+b[0], a[1]+b[1], a[2]+b[2]]
++def vec3_mul(v, s): return [v[0]*s, v[1]*s, v[2]*s]
++def exp(x): return math.exp(x)
++def sqrt(x): return math.sqrt(x)
++def math: import math
+ ```
+-*Note: The pseudocode above is a simplified illustration. Correct implementation requires depth sorting per pixel or tile-based sorting and proper alpha-compositing as described in the steps [S4].*
+ 
+ ## Subtopics
+@@ -142,6 +181,6 @@
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-*   **Memory:** Complex scenes require approximately 200,000–500,000 Gaussians, resulting in significant memory and storage demands [S4]. Each Gaussian stores position, scale, rotation, SH coefficients, and opacity.
+-*   **Time:** Rendering is $O(M \cdot A)$, where $M$ is the number of Gaussians and $A$ is the average number of splats per pixel. Training is computationally intensive due to the need for gradient computation through the rasterization process.
++*   **Memory:** Complex scenes require approximately 200,000–500,000 Gaussians, resulting in significant memory and storage demands [S4]. Each Gaussian stores position, scale, rotation, SH coefficients, and opacity [S3, S4].
++*   **Time:** Rendering is $O(M \cdot A)$, where $M$ is the number of Gaussians and $A$ is the average number of splats per pixel [G]. Training is computationally intensive due to the need for gradient computation through the rasterization process [S4].
+ 
+ **Performance:**
+@@ -154,9 +193,9 @@
+ 
+ **When to Use:**
+-*   Use for real-time novel view synthesis of static scenes with moderate complexity.
++*   Use for real-time novel view synthesis of static scenes with moderate complexity [S4].
+ *   Avoid for scenes with highly reflective surfaces or when relighting is required [S4].
+ 
+ ## Background
+-3D Gaussian Splatting (3DGS) was introduced by Kerbl et al. in 2023 [S4]. It builds on EWA Volume Splatting [S1, S4] and other point-based rendering works [S4]. The method was developed to overcome the computational cost of evaluating the volume rendering equation via quadrature, which requires querying points outside Gaussian supports [S4]. It provides a fast, high-quality alternative to NeRF by using a hybrid, primitive-based rendering method [S1].
++3D Gaussian Splatting (3DGS) was introduced by Kerbl et al. in 2023 [S4, unofficial]. It builds on EWA Volume Splatting [S1, S4] and other point-based rendering works [S4]. The method was developed to overcome the computational cost of evaluating the volume rendering equation via quadrature, which requires querying points outside Gaussian supports [S4]. It provides a fast, high-quality alternative to NeRF by using a hybrid, primitive-based rendering method [S1].
+ 
+ ## Sources

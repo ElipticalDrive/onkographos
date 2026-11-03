@@ -1,0 +1,775 @@
+Tensors and Dynamic neural networks in Python with strong GPU acceleration - F.quantize_tensor and F.quantize_tensor_dual by vkuzo · Pull Request #199022 · pytorch/pytorch
+
+F.quantize_tensor and F.quantize_tensor_dual by vkuzo · Pull Request #199022 · pytorch/pytorch · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+vkuzo
+commented
+Sep 29, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Stack from ghstack (oldest at bottom):
+fill gaps in swizzle support in F.quantize_tensor #200781
+enable square scaling in F.quantize_tensor_dual #200778
+add stochastic rounding option to F.quantize_tensor #200314
+extend mxfp8 SR reference to dim-km #200298
+add a reference implementation of mxfp8 dim-k stochastic rounding #200159
+-> F.quantize_tensor and F.quantize_tensor_dual #199022
+blockscaled_tma: make unswizzled scales use cute layout #202064
+blockscaled_tma: allow batch_dims in any position #201778
+extend blockscaled_tma kernel to support leading batch dim #201561
+switch blockscaled_tma kernel from quant_orientation to dim #201056
+make to_mxfp reference function and blockscaled_tma kernel return a 2d swizzle #201660
+upstream blockscaled_tma from quant_cast_bench to core #198947
+upstream mxfp8 reference cast numerics from torchao to core #198879
+Summary:
+The previous PR added cuteDSL kernels for mxfp8 quantization. This PR adds a public frontend following #195481, and hooks up the mxfp8 recipes to the kernels from the previous PR.
+Specifically, we add:
+public F.quantize_tensor to quantize along a single 2d axis (dim-k or dim-m) and F.quantize_tensor_dual for quantizing along both a 2d axis and its inverse (dim-km and dim-mk). For now, only mxfp8 with RTNE is supported. Other recipes and argument settings will be added in future PRs.
+_quantize_tensor and _quantize_tensor_dual private APIs to native_functions.yaml for the dispatcher
+The new user facing APIs:
+```
+# docblock in the code, skipped here for brevity
+class ScalingAlgorithm(enum.IntEnum):
+    MXFP_E8M0_RU = 0
+...
+
+# docblock in the code, skipped here for brevity
+def quantize_tensor(
+    input: Tensor,
+    *,
+    dim: tuple[int, int],
+    scaling_type: ScalingType,
+    qdata_dtype: torch.dtype,
+    scaling_algorithm: ScalingAlgorithm,
+    swizzle_type: SwizzleType,
+    scaling_type_use_square_block_size: bool = False,
+) -> tuple[Tensor, Tensor]
+
+# docblock in the code, skipped here for brevity
+def quantize_tensor_dual(
+    input: Tensor,
+    *,
+    dim: tuple[int, int],
+    scaling_type: ScalingType,
+    qdata_dtype: torch.dtype,
+    scaling_algorithm: ScalingAlgorithm,
+    swizzle_type: SwizzleType,
+    scaling_type_use_square_block_size: bool = False,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]
+```
+Quantizing to mxfp8 looks like this:
+```
+_MXFP8_KWARGS = {
+    "scaling_type": F.ScalingType.BlockWise1x32,
+    "qdata_dtype": torch.float8_e4m3fn,
+    "scaling_algorithm": F.ScalingAlgorithm. MXFP_E8M0_RU,
+    "swizzle_type": F.SwizzleType.SWIZZLE_32_4_4,
+}
+
+# dim-k
+x_k_q, x_k_s = F.quantize_tensor(x, dim=(-2, -1), **_MXFP8_KWARGS)
+# dim-m
+x_m_q, x_m_s = F.quantize_tensor(x, dim(-1, -2), **_MXFP8_KWARGS)
+# dim-km
+x_k_q, x_k_s, x_m_q, x_m_s = F.quantize_tensor_dual(x, dim=(-2, -1), **_MXFP8_KWARGS)
+# dim-k with 32x32 scaling
+x_k_32x32_q, x_k_32x32_s = F.quantize_tensor(
+    x, 
+    dim=(-2, -1),
+    scaling_type_use_square_block_size=True,
+    **_MXFP8_KWARGS,
+)
+# batched
+x = torch.randn(B0, M, B1, K, B2, device="cuda")
+xq, s = F.quantize_tensor(x, dim=(1, 3), **_MXFP8_KWARGS)
+```
+Specific list of things scheduled for upcoming PRs:
+nvfp4 support, fully covering https://arxiv.org/abs/2509.25149 with SR and RHT
+mxfp4 support
+stochastic rounding for mxfp8 and nvfp4
+an optional flag to skip outputting the dim-m qdata output for quantize_tensor_dual + square scaling
+Test Plan:
+```
+# unit tests
+pytest test/test_quantize_tensor.py -s
+
+# torchtitan e2e validation on llama 3 8b: https://github.com/pytorch/torchtitan/pull/4964
+```
+Co-developed with Codex
+cc @albanD @voznesenskym @penguinwu @EikanWang @jgong5 @Guobing-Chen @XiaobingSuper @zhuhaozhe @blzheng @wenzhe-nrv @jiayisunx @ipiszy @kadeng @muchulee8 @amjames @chauhang @aakhundov @coconutruben @jataylo
+Update
+…
+d4ad1d4
+```
+[ghstack-poisoned]
+```
+pytorch-bot
+Bot
+commented
+Sep 29, 2026
+Copy link
+Copy Markdown
+Attention! native_functions.yaml was changed
+If you are adding a new function or defaulted argument to native_functions.yaml, you cannot use it from pre-existing Python frontend code until our FC window passes (two weeks). Split your PR into two PRs, one which adds the new C++ functionality, and one that makes use of it from Python, and land them two weeks apart. See https://github.com/pytorch/pytorch/wiki/PyTorch's-Python-Frontend-Backward-and-Forward-Compatibility-Policy#forwards-compatibility-fc for more info.
+pytorch-bot
+Bot
+added
+ciflow/b200
+ciflow/inductor
+ciflow/torchtitan
+Run TorchTitan integration tests
+module: inductor
+labels
+Sep 29, 2026
+vkuzo
+mentioned this pull request
+Sep 28, 2026
+upstream mxfp8 reference cast numerics from torchao to core
+#198879
+Open
+pytorch-bot
+Bot
+commented
+Sep 29, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+🔗 Helpful Links
+🧪 See artifacts and rendered test results at hud.pytorch.org/pr/199022
+📄 Preview Python docs built from this PR
+📄 Preview C++ docs built from this PR
+❓ Need help or want to give feedback on the CI? Visit the bot commands wiki
+Note: Links to docs will display an error until the docs builds have been completed.
+✅ No Failures
+As of commit 3f6dfb3 with merge base 6d587b8 ():
+💚 Looks good so far! There are no failures yet. 💚
+🟡 GreenLight: changes are too big to review
+This comment was automatically generated by Dr. CI and updates every 15 minutes.
+vkuzo
+mentioned this pull request
+Sep 29, 2026
+upstream blockscaled_tma from quant_cast_bench to core
+#198947
+Open
+Update
+…
+665f099
+```
+[ghstack-poisoned]
+```
+vkuzo
+added a commit
+that referenced
+this pull request
+Sep 29, 2026
+create F.quantize_tensor
+…
+d131acf
+```
+Summary:
+
+The previous PR added cuteDSL kernels for mxfp8 quantization.
+This PR adds a public frontend following
+#195481, and hooks up the mxfp8
+recipes to the kernels from the previous PR.
+
+Test Plan:
+ghstack-source-id: 3e3ae8a
+Pull-Request: #199022
+```
+vkuzo
+changed the title
+create F.quantize_tensor
+F.quantize_tensor and F.quantize_tensor_dual
+Sep 29, 2026
+Update
+…
+a12d82a
+```
+[ghstack-poisoned]
+```
+vkuzo
+added a commit
+that referenced
+this pull request
+Sep 29, 2026
+create F.quantize_tensor
+…
+7262b1a
+```
+Summary:
+
+The previous PR added cuteDSL kernels for mxfp8 quantization.
+This PR adds a public frontend following
+#195481, and hooks up the mxfp8
+recipes to the kernels from the previous PR.
+
+Test Plan:
+ghstack-source-id: 92d909f
+Pull-Request: #199022
+```
+vkuzo
+added
+the
+release notes: quantization
+release notes category
+label
+Sep 29, 2026
+Update
+…
+83cbb35
+```
+[ghstack-poisoned]
+```
+vkuzo
+added a commit
+that referenced
+this pull request
+Sep 29, 2026
+create F.quantize_tensor
+…
+f1f5bc9
+```
+Summary:
+
+The previous PR added cuteDSL kernels for mxfp8 quantization.
+This PR adds a public frontend following
+#195481, and hooks up the mxfp8
+recipes to the kernels from the previous PR.
+
+Test Plan:
+ghstack-source-id: 42362cd
+Pull-Request: #199022
+```
+Update
+…
+a360e3b
+```
+[ghstack-poisoned]
+```
+vkuzo
+added a commit
+that referenced
+this pull request
+Sep 29, 2026
+create F.quantize_tensor
+…
+0a21782
+```
+Summary:
+
+The previous PR added cuteDSL kernels for mxfp8 quantization.
+This PR adds a public frontend following
+#195481, and hooks up the mxfp8
+recipes to the kernels from the previous PR.
+
+Test Plan:
+ghstack-source-id: 78c36c3
+Pull-Request: #199022
+```
+Update
+…
+605f8f5
+```
+[ghstack-poisoned]
+```
+vkuzo
+added a commit
+that referenced
+this pull request
+Sep 29, 2026
+create F.quantize_tensor
+…
+6ccc48a
+```
+Summary:
+
+The previous PR added cuteDSL kernels for mxfp8 quantization.
+This PR adds a public frontend following
+#195481, and hooks up the mxfp8
+recipes to the kernels from the previous PR.
+
+Test Plan:
+ghstack-source-id: 1acbf0e
+Pull-Request: #199022
+```
+vkuzo
+added a commit
+that referenced
+this pull request
+Sep 29, 2026
+create F.quantize_tensor
+…
+75bf731
+```
+Summary:
+
+The previous PR added cuteDSL kernels for mxfp8 quantization.
+This PR adds a public frontend following
+#195481, and hooks up the mxfp8
+recipes to the kernels from the previous PR.
+
+Test Plan:
+ghstack-source-id: 1acbf0e
+Pull-Request: #199022
+```
+Update
+…
+32f1e59
+```
+[ghstack-poisoned]
+```
+vkuzo
+added a commit
+that referenced
+this pull request
+Sep 29, 2026
+create F.quantize_tensor
+…
+7baea39
+```
+Summary:
+
+The previous PR added cuteDSL kernels for mxfp8 quantization.
+This PR adds a public frontend following
+#195481, and hooks up the mxfp8
+recipes to the kernels from the previous PR.
+
+Test Plan:
+ghstack-source-id: 36a3670
+Pull-Request: #199022
+```
+Update
+…
+10dbfd7
+```
+[ghstack-poisoned]
+```
+vkuzo
+added a commit
+that referenced
+this pull request
+Sep 29, 2026
+create F.quantize_tensor
+…
+c7762d7
+```
+Summary:
+
+The previous PR added cuteDSL kernels for mxfp8 quantization.
+This PR adds a public frontend following
+#195481, and hooks up the mxfp8
+recipes to the kernels from the previous PR.
+
+Test Plan:
+ghstack-source-id: 9c4d02c
+Pull-Request: #199022
+```
+Update
+…
+285fb13
+```
+[ghstack-poisoned]
+```
+vkuzo
+added a commit
+that referenced
+this pull request
+Sep 29, 2026
+create F.quantize_tensor
+…
+0e367d2
+```
+Summary:
+
+The previous PR added cuteDSL kernels for mxfp8 quantization.
+This PR adds a public frontend following
+#195481, and hooks up the mxfp8
+recipes to the kernels from the previous PR.
+
+Test Plan:
+ghstack-source-id: d23978d
+Pull-Request: #199022
+```
+vkuzo
+mentioned this pull request
+Sep 30, 2026
+[not for land] use mxfp8 kernels from PyTorch core
+pytorch/torchtitan#4964
+Draft
+vkuzo
+marked this pull request as ready for review
+September 30, 2026 12:57
+vkuzo
+added a commit
+that referenced
+this pull request
+Oct 28, 2026
+create F.quantize_tensor
+…
+b5bf762
+```
+Summary:
+
+The previous PR added cuteDSL kernels for mxfp8 quantization.
+This PR adds a public frontend following
+#195481, and hooks up the mxfp8
+recipes to the kernels from the previous PR.
+
+Test Plan:
+ghstack-source-id: 34b2db8
+Pull-Request: #199022
+```
+ngimel
+approved these changes
+Oct 28, 2026
+View reviewed changes
+Update
+…
+72e483f
+```
+[ghstack-poisoned]
+```
+vkuzo
+added a commit
+that referenced
+this pull request
+Oct 29, 2026
+create F.quantize_tensor
+…
+879ea9a
+```
+Summary:
+
+The previous PR added cuteDSL kernels for mxfp8 quantization.
+This PR adds a public frontend following
+#195481, and hooks up the mxfp8
+recipes to the kernels from the previous PR.
+
+Test Plan:
+ghstack-source-id: 6addaf0
+Pull-Request: #199022
+```
+Update
+…
+604be1f
+```
+[ghstack-poisoned]
+```
+vkuzo
+added a commit
+that referenced
+this pull request
+Oct 29, 2026
+create F.quantize_tensor
+…
+ac4296f
+```
+Summary:
+
+The previous PR added cuteDSL kernels for mxfp8 quantization.
+This PR adds a public frontend following
+#195481, and hooks up the mxfp8
+recipes to the kernels from the previous PR.
+
+Test Plan:
+ghstack-source-id: 592c37b
+Pull-Request: #199022
+```
+Update
+…
+7d6f0dc
+```
+[ghstack-poisoned]
+```
+vkuzo
+added a commit
+that referenced
+this pull request
+Oct 29, 2026
+create F.quantize_tensor
+…
+c054272
+```
+Summary:
+
+The previous PR added cuteDSL kernels for mxfp8 quantization.
+This PR adds a public frontend following
+#195481, and hooks up the mxfp8
+recipes to the kernels from the previous PR.
+
+Test Plan:
+ghstack-source-id: a7865ba
+Pull-Request: #199022
+```
+Update
+…
+d59f76c
+```
+[ghstack-poisoned]
+```
+vkuzo
+added a commit
+that referenced
+this pull request
+Oct 29, 2026
+create F.quantize_tensor
+…
+afb6a47
+```
+Summary:
+
+The previous PR added cuteDSL kernels for mxfp8 quantization.
+This PR adds a public frontend following
+#195481, and hooks up the mxfp8
+recipes to the kernels from the previous PR.
+
+Test Plan:
+ghstack-source-id: cde866f
+Pull-Request: #199022
+```
+Update
+…
+af3115e
+```
+[ghstack-poisoned]
+```
+vkuzo
+added a commit
+that referenced
+this pull request
+Oct 29, 2026
+create F.quantize_tensor
+…
+c656d80
+```
+Summary:
+
+The previous PR added cuteDSL kernels for mxfp8 quantization.
+This PR adds a public frontend following
+#195481, and hooks up the mxfp8
+recipes to the kernels from the previous PR.
+
+Test Plan:
+ghstack-source-id: 2c8b049
+Pull-Request: #199022
+```
+Update
+…
+a1e5d2e
+```
+[ghstack-poisoned]
+```
+vkuzo
+added a commit
+that referenced
+this pull request
+Oct 29, 2026
+create F.quantize_tensor
+…
+263fe3f
+```
+Summary:
+
+The previous PR added cuteDSL kernels for mxfp8 quantization.
+This PR adds a public frontend following
+#195481, and hooks up the mxfp8
+recipes to the kernels from the previous PR.
+
+Test Plan:
+ghstack-source-id: 9092fe3
+Pull-Request: #199022
+```
+Update
+…
+d1b84bf
+```
+[ghstack-poisoned]
+```
+vkuzo
+added a commit
+that referenced
+this pull request
+Oct 30, 2026
+create F.quantize_tensor
+…
+98baeae
+```
+Summary:
+
+The previous PR added cuteDSL kernels for mxfp8 quantization.
+This PR adds a public frontend following
+#195481, and hooks up the mxfp8
+recipes to the kernels from the previous PR.
+
+Test Plan:
+ghstack-source-id: 2475ddf
+Pull-Request: #199022
+```
+Update
+…
+56493cd
+```
+[ghstack-poisoned]
+```
+vkuzo
+added a commit
+that referenced
+this pull request
+Oct 30, 2026
+create F.quantize_tensor
+…
+9d03b7b
+```
+Summary:
+
+The previous PR added cuteDSL kernels for mxfp8 quantization.
+This PR adds a public frontend following
+#195481, and hooks up the mxfp8
+recipes to the kernels from the previous PR.
+
+Test Plan:
+ghstack-source-id: df89ffb
+Pull-Request: #199022
+```
+Update
+…
+80333da
+```
+[ghstack-poisoned]
+```
+vkuzo
+added a commit
+that referenced
+this pull request
+Oct 30, 2026
+create F.quantize_tensor
+…
+42dd5dd
+```
+Summary:
+
+The previous PR added cuteDSL kernels for mxfp8 quantization.
+This PR adds a public frontend following
+#195481, and hooks up the mxfp8
+recipes to the kernels from the previous PR.
+
+Test Plan:
+ghstack-source-id: a04818e
+Pull-Request: #199022
+```
+Update
+…
+cfdf8f1
+```
+[ghstack-poisoned]
+```
+vkuzo
+added a commit
+that referenced
+this pull request
+Oct 30, 2026
+create F.quantize_tensor
+…
+24749b3
+```
+Summary:
+
+The previous PR added cuteDSL kernels for mxfp8 quantization.
+This PR adds a public frontend following
+#195481, and hooks up the mxfp8
+recipes to the kernels from the previous PR.
+
+Test Plan:
+ghstack-source-id: 8b3d55c
+Pull-Request: #199022
+```
+vkuzo
+added 8 commits
+October 30, 2026 04:55
+Update
+…
+e566521
+```
+[ghstack-poisoned]
+```
+Update
+…
+d08a63e
+```
+[ghstack-poisoned]
+```
+Update
+…
+26ead97
+```
+[ghstack-poisoned]
+```
+Update
+…
+1770ffe
+```
+[ghstack-poisoned]
+```
+Update
+…
+354bbe8
+```
+[ghstack-poisoned]
+```
+Update
+…
+957bf00
+```
+[ghstack-poisoned]
+```
+Update
+…
+8af36d9
+```
+[ghstack-poisoned]
+```
+Update
+…
+3f6dfb3
+```
+[ghstack-poisoned]
+```
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+ci-no-td
+Do not run TD on this PR
+ciflow/b200
+ciflow/h100
+ciflow/inductor
+ciflow/torchtitan
+Run TorchTitan integration tests
+module: inductor
+release notes: quantization
+release notes category
+skip-pr-sanity-checks
+4 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

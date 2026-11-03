@@ -1,0 +1,608 @@
+raytracing - A recent approach for subsurface scattering - Computer Graphics Stack Exchange
+Teams
+Q&A for work
+Connect and share knowledge within a single location that is structured and easy to search.
+Learn more about Teams
+A recent approach for subsurface scattering
+Ask Question
+Asked
+7 years, 10 months ago
+Modified
+7 years, 9 months ago
+Viewed
+5k times
+9
+$\begingroup$
+I read "A Practical Model for Subsurface Light Transport" and "A Rapid Hierarchical Rendering Technique for Translucent Materials". If I understand correctly, the former does not consider the case when an object is lit behind and we can see the light is going through it.
+The latter can achieve this but there is a preprocessing stage which is not suitable for my CUDA path tracer and I want it to be as natural as possible. So, do you have any paper in mind which is not obsolete or would you suggest me to solve the full radiative transfer equation?
+raytracing
+pathtracing
+global-illumination
+subsurface-scattering
+cuda
+Share
+Improve this question
+Follow
+edited Jun 8, 2017 at 16:23
+Mustafa Işık
+asked Jun 8, 2017 at 10:06
+Mustafa IşıkMustafa Işık
+41711 gold badge44 silver badges88 bronze badges
+$\endgroup$
+8
+1
+$\begingroup$
+Are you looking to estimate subsurface scattering in your path tracer, or evaluate it exactly using full-volumetric scattering?
+$\endgroup$
+– RichieSams
+Commented
+Jun 8, 2017 at 17:17
+$\begingroup$
+I read that simulating full-volumetric scattering is really slow. If it is not that slow I would like to implement it. Although diffusion approximations work faster, they assume lots of things or they need ugly preprocessing steps. Have you done it before? Any suggestion would be great!
+$\endgroup$
+– Mustafa Işık
+Commented
+Jun 8, 2017 at 19:22
+2
+$\begingroup$
+It can be slow, depending on the implementation. I have implemented brute-force, isotropic scattering media in my hobby path tracer. Example image: imgur.com/a/oy9F8. (The FPS / total frame times are in the upper left corner). Using a backscattering phase function like Henyey-Greenstein might make it converge faster for more opaque materials, but I'm not sure since I haven't tried it. If nothing else, implementing full volumetric scattering is a great way to learn what the approximations are trying to approximate.
+$\endgroup$
+– RichieSams
+Commented
+Jun 8, 2017 at 19:57
+$\begingroup$
+I'll try to do a write up later tonight when I get home. In the mean time, here's the link to my path tracer. github.com/RichieSams/lantern It's not production ready at all. Rather, it's just for helping me learn the math behind everything. That said, it's open source under Apache 2.0, so feel free to copy and learn from it yourself.
+$\endgroup$
+– RichieSams
+Commented
+Jun 8, 2017 at 19:59
+1
+$\begingroup$
+Lastly, here are two questions that I asked here about this topic: computergraphics.stackexchange.com/questions/2482/… computergraphics.stackexchange.com/questions/2563/…
+$\endgroup$
+– RichieSams
+Commented
+Jun 8, 2017 at 20:01
+|
+Show 3 more comments
+2 Answers
+2
+Sorted by:
+Reset to default
+Highest score (default)
+Date modified (newest first)
+Date created (oldest first)
+13
+$\begingroup$
+As mentioned in the comments, I would highly suggest starting with Full Volumetric Scattering. This is two fold:
+Since you are doing path tracing, adding volumetrics isn't super difficult.
+Fully understanding how full volumetric scattering works will be a great basis for understanding the estimations. In addition, it can provide great "references" to see if your estimations are performing well / correctly.
+With that in mind, below is a basic introduction to how to implement Full Volumetric Scattering in a backwards path tracer.
+To start, let's look at the code for a backwards path tracer with only reflection, no transmission / refraction:
+```
+void RenderPixel(uint x, uint y, UniformSampler *sampler) {
+    Ray ray = m_scene->Camera->CalculateRayFromPixel(x, y, sampler);
+
+    float3 color(0.0f);
+    float3 throughput(1.0f);
+    SurfaceInteraction interaction;
+
+    // Bounce the ray around the scene
+    const uint maxBounces = 15;
+    for (uint bounces = 0; bounces < maxBounces; ++bounces) {
+        m_scene->Intersect(ray);
+
+        // The ray missed. Return the background color
+        if (ray.GeomID == INVALID_GEOMETRY_ID) {
+            color += throughput * m_scene->BackgroundColor;
+            break;
+        }
+
+        // Fetch the material
+        Material *material = m_scene->GetMaterial(ray.GeomID);
+        // The object might be emissive. If so, it will have a corresponding light
+        // Otherwise, GetLight will return nullptr
+        Light *light = m_scene->GetLight(ray.GeomID);
+
+        // If this is the first bounce or if we just had a specular bounce,
+        // we need to add the emmisive light
+        if ((bounces == 0 || (interaction.SampledLobe & BSDFLobe::Specular) != 0) && light != nullptr) {
+            color += throughput * light->Le();
+        }
+
+        interaction.Position = ray.Origin + ray.Direction * ray.TFar;
+        interaction.Normal = normalize(m_scene->InterpolateNormal(ray.GeomID, ray.PrimID, ray.U, ray.V));
+        interaction.OutputDirection = normalize(-ray.Direction);
+
+
+        // Calculate the direct lighting
+        color += throughput * SampleLights(sampler, interaction, material->bsdf, light);
+
+
+        // Get the new ray direction
+        // Choose the direction based on the bsdf        
+        material->bsdf->Sample(interaction, sampler);
+        float pdf = material->bsdf->Pdf(interaction);
+
+        // Accumulate the weight
+        throughput = throughput * material->bsdf->Eval(interaction) / pdf;
+
+        // Shoot a new ray
+
+        // Set the origin at the intersection point
+        ray.Origin = interaction.Position;
+
+        // Reset the other ray properties
+        ray.Direction = interaction.InputDirection;
+        ray.TNear = 0.001f;
+        ray.TFar = infinity;
+
+
+        // Russian Roulette
+        if (bounces > 3) {
+            float p = std::max(throughput.x, std::max(throughput.y, throughput.z));
+            if (sampler->NextFloat() > p) {
+                break;
+            }
+
+            throughput *= 1 / p;
+        }
+    }
+
+    m_scene->Camera->FrameBufferData.SplatPixel(x, y, color);
+}
+```
+In English:
+Shoot a ray through the scene.
+Check if we hit anything. If not we return the skybox color and break.
+If this is the first ray, or we just bounced off a specular surface, check if we hit a light. If so, we add the light emission to our color accumulation.
+Sample the direct lighting.
+Choose a new direction for the next ray. We can do this uniformly, or importance sample based on the BRDF.
+Evaluate the BRDF and accumulate it.
+Create a new ray based on our chosen direction and where we just came from.
+[Optional] Use Russian Roulette to choose if we should terminate the ray.
+Goto 1.
+For more details on Direct Light Sampling, see this answer.
+BSDFs
+To add transmission, we first need to upgrade some of our BRDF materials to full BSDFs, with a BTDF function.
+For example, a BSDF for an ideal specular dielectric (ie. glass) is:
+```
+class IdealSpecularDielectric : public BSDF {
+public:
+    IdealSpecularDielectric(float3 albedo, float ior)
+        : BSDF(BSDFLobe::Specular, albedo), 
+          m_ior(ior) {
+    }
+
+private:
+    float m_ior;
+
+public:
+    float3 Eval(SurfaceInteraction &interaction) const override {
+        return m_albedo;
+    }
+
+    void Sample(SurfaceInteraction &interaction, UniformSampler *sampler) const override {
+        float VdotN = dot(interaction.OutputDirection, interaction.Normal);
+        float IORo = m_ior;
+        if (VdotN < 0.0f) {
+            IORo = 1.0f;
+            interaction.Normal = -interaction.Normal;
+            VdotN = -VdotN;
+        }
+
+        float eta = interaction.IORi / IORo;
+        float sinSquaredThetaT = SinSquaredThetaT(VdotN, eta);
+        float fresnel = Fresnel(interaction.IORi, IORo, VdotN, sinSquaredThetaT);
+
+        float rand = sampler->NextFloat();
+        if (rand <= fresnel) {
+            // Reflect
+            interaction.InputDirection = reflect(interaction.OutputDirection, interaction.Normal);
+            interaction.SampledLobe = BSDFLobe::SpecularReflection;
+            interaction.IORo = interaction.IORi;
+        } else {
+            // Refract
+            interaction.InputDirection = refract(interaction.OutputDirection, interaction.Normal, VdotN, eta, sinSquaredThetaT);
+            interaction.SampledLobe = BSDFLobe::SpecularTransmission;
+            interaction.IORo = IORo;
+        }
+
+        if (AnyNan(interaction.InputDirection)) {
+            printf("nan");
+        }
+    }
+
+    float Pdf(SurfaceInteraction &interaction) const override {
+        return 1.0f;
+    }
+};
+```
+The interesting part of the code is Sample(). This is where a ray will choose whether to reflect or refract. How we do this is really up to us, as shown in this answer. However, an obvious choice would be to sample based on the Fresnel equations.
+In the case of an ideal Specular Dielectric, there are only two potential output directions: perfect refraction or perfect reflection. So we evaluate the Fresnel and randomly choose to refract / reflect with proportion equal to the Fresnel.
+Media
+Next, we need to talk about media, and how they affect light bouncing around. As explained by Nathan Reed in this answer:
+The way I like to think about volume scattering is that a photon traveling through a medium has a certain probability per unit length of interacting (getting scattered or absorbed). As long as it doesn't interact, it just goes in a straight line unimpeded and without losing energy. The greater the distance, the greater the probability that it interacts somewhere in that distance. The interaction probability per unit length is the coefficient $\sigma$ that you see in the equations. We usually have separate coefficients for scattering and absorption probabilities, so $\sigma = \sigma_s + \sigma_a$
+This probability per unit length is exactly the origin of the Beer-Lambert law. Slice a ray segment into infinitesimal intervals, treat each interval as an independent possible place to interact, then integrate along the ray; you get an exponential distribution (with rate parameter σσ) for the probability of interaction as a function of distance.
+You can technically choose the distance between events however you want, as long as you correctly weight the path for the probability that a photon can make it between two adjacent events without interacting with the medium. In other words, each path segment within the medium contributes a weight factor of $e^{-\sigma x}$, where $x$ is the length of the segment.
+Given this, a usually good choice for the distance is to importance-sample it from the exponential distribution. In other words, you set $x = -(\ln \xi)/\sigma$
+In summary:
+A ray travelling through a medium has some probability to:
+Be absorbed
+Be scattered
+Since this is Monte Carlo Integration, we are free to choose the interaction distance however we want. However, a good choice is to importance sample from an exponential distribution similar to Beer-Lambert.
+I chose to implement this with a scattering coefficient, and letting Beer-Lambert take care of the absorption coefficient.
+```
+class Medium {
+public:
+    Medium(float3 absorptionColor, float absorptionAtDistance) 
+        : m_absorptionCoefficient(-log(absorptionColor) / absorptionAtDistance) {
+        // This method for calculating the absorption coefficient is borrowed from Burley's 2015 Siggraph Course Notes "Extending the Disney BRDF to a BSDF with Integrated Subsurface Scattering"
+        // It's much more intutive to specify a color and a distance, then back-calculate the coefficient
+    }
+    virtual ~Medium() {
+    }
+
+protected:
+    const float3a m_absorptionCoefficient;
+
+public:
+    virtual float SampleDistance(UniformSampler *sampler, float tFar, float *weight, float *pdf) const = 0;
+
+    virtual float3a SampleScatterDirection(UniformSampler *sampler, float3a &wo, float *pdf) const = 0;
+    virtual float ScatterDirectionPdf(float3a &wi, float3a &wo) const = 0;
+
+    virtual float3 Transmission(float distance) const = 0;
+};
+```
+A Non-scattering medium is one where a photon travels straight through, but it is attenuated along the way according to Beer-Lambert:
+```
+class NonScatteringMedium : public Medium {
+public:
+    NonScatteringMedium(float3 color, float atDistance)
+        : Medium(color, atDistance) {
+    }
+
+public:
+    float SampleDistance(UniformSampler *sampler, float tFar, float *weight, float *pdf) const override {
+        *pdf = 1.0f;
+        return tFar;
+    }
+
+    float3a SampleScatterDirection(UniformSampler *sampler, float3a &wo, float *pdf) const override {
+        return wo;
+    }
+    float ScatterDirectionPdf(float3a &wi, float3a &wo) const override {
+        return 1.0f;
+    }
+
+    float3 Transmission(float distance) const override {
+        return exp(-m_absorptionCoefficient * distance);
+    }
+};
+```
+An Isotropic Scattering Medium allows the ray to have scattering (reflection) events while the ray is traveling through it. The ray can be reflected in any direction in the sphere around the interaction point (hence Isotropic).
+The distance between reflections is random, based on an exponential "scatter" probability.
+```
+class IsotropicScatteringMedium : public Medium {
+public:
+    IsotropicScatteringMedium(float3 absorptionColor, float absorptionAtDistance, float scatteringDistance)
+        : Medium(absorptionColor, absorptionAtDistance),
+          m_scatteringCoefficient(1 / scatteringDistance) {
+    }
+
+private:
+    float m_scatteringCoefficient;
+
+public:
+    float SampleDistance(UniformSampler *sampler, float tFar, float *weight, float *pdf) const override {
+        float distance = -logf(sampler->NextFloat()) / m_scatteringCoefficient;
+        // If we sample a distance farther than the next intersecting surface, clamp to the surface distance
+        if (distance >= tFar) {
+            *pdf = 1.0f;
+            return tFar;
+        }
+
+        *pdf = std::exp(-m_scatteringCoefficient * distance);
+        return distance;
+    }
+    float3a SampleScatterDirection(UniformSampler *sampler, float3a &wo, float *pdf) const override {
+        *pdf = 0.25f * M_1_PI; // 1 / (4 * PI)
+        return UniformSampleSphere(sampler);
+    }
+
+    float ScatterDirectionPdf(float3a &wi, float3a &wo) const override {
+        return 0.25f * M_1_PI; // 1 / (4 * PI)
+    }
+    float3 Transmission(float distance) const override {
+        return exp(-m_absorptionCoefficient * distance);
+    }
+};
+```
+At high scattering distances, the material behaves almost like a NonScatteringMedium, because it has a very small probability of scattering before it travels through the medium.
+At low scattering distances, the material behaves like wax or jade.
+As the scattering distance gets lower and lower, we have a higher and higher chance to scatter while traveling through the medium. This presents a few issues:
+The number of bounces per ray is going to explode.
+If Russian Roulette kills the ray, or if you go over "maxBounces", you will "lose" any color contribution from inside the medium.
+Thus, you need to set maxBounces to some high number, and rely on Russian Roulette to terminate rays in the general case. In addition, IsotropicScatteringMedium is extremely inefficient for representing mostly opaque materials. To get better performance, we should use a non Isotropic phase function, like Henyey-Greenstein or Schlick. These bias the scattering in a certain direction. So we could set them to have high back-scattering, thereby lessening the issue of "lost" rays.
+Putting it all together
+So, with this new information, how do we modify the integrator to understand BSDFs and media?
+First, we need to start tracking what medium we are currently in, and its Index of Refraction (IOR).
+```
+SurfaceInteraction interaction;
+interaction.IORi = 1.0f; // Vacuum 
+Medium *medium = nullptr; // nullptr == vacuum
+```
+Then, we break the integrator up into two parts: transmission and material interaction.
+```
+void RenderPixel(uint x, uint y, UniformSampler *sampler) const {
+    Ray ray = m_scene->Camera->CalculateRayFromPixel(x, y, sampler);
+
+    float3 color(0.0f);
+    float3 throughput(1.0f);
+    SurfaceInteraction interaction;
+    interaction.IORi = 1.0f; // Air
+    Medium *medium = nullptr;
+    bool hitSurface = false;
+
+    // Bounce the ray around the scene
+    uint bounces = 0;
+    const uint maxBounces = 1500;
+    for (; bounces < maxBounces; ++bounces) {
+        m_scene->Intersect(ray);
+
+        // The ray missed. Return the background color
+        if (ray.GeomID == INVALID_GEOMETRY_ID) {
+            color += throughput * m_scene->BackgroundColor;
+            break;
+        }
+
+        // We hit an object
+        hitSurface = true;
+
+        // Calculate any transmission
+        if (medium != nullptr) {
+            float weight = 1.0f;
+            float pdf = 1.0f;
+            float distance = medium->SampleDistance(sampler, ray.TFar, &weight, &pdf);
+            float3 transmission = medium->Transmission(distance);
+            throughput = throughput * weight * transmission;
+
+            if (distance < ray.TFar) {
+                // Create a scatter event
+                hitSurface = false;
+
+                ray.Origin = ray.Origin + ray.Direction * distance;
+
+                // Reset the other ray properties
+                float directionPdf;
+                float3a wo = normalize(ray.Direction);
+                ray.Direction = medium->SampleScatterDirection(sampler, wo, &directionPdf);
+                ray.TNear = 0.001f;
+                ray.TFar = infinity;
+                ray.GeomID = INVALID_GEOMETRY_ID;
+                ray.PrimID = INVALID_PRIMATIVE_ID;
+                ray.InstID = INVALID_INSTANCE_ID;
+                ray.Mask = 0xFFFFFFFF;
+                ray.Time = 0.0f;
+            }
+        }
+
+        if (hitSurface) {
+            // Fetch the material
+            Material *material = m_scene->GetMaterial(ray.GeomID);
+            // The object might be emissive. If so, it will have a corresponding light
+            // Otherwise, GetLight will return nullptr
+            Light *light = m_scene->GetLight(ray.GeomID);
+
+            // If this is the first bounce or if we just had a specular bounce,
+            // we need to add the emmisive light
+            if ((bounces == 0 || (interaction.SampledLobe & BSDFLobe::Specular) != 0) && light != nullptr) {
+                color += throughput * light->Le();
+            }
+
+            interaction.Position = ray.Origin + ray.Direction * ray.TFar;
+            interaction.Normal = normalize(m_scene->InterpolateNormal(ray.GeomID, ray.PrimID, ray.U, ray.V));
+            interaction.OutputDirection = normalize(-ray.Direction);
+            interaction.IORo = 0.0f;
+
+
+            // Calculate the direct lighting
+            color += throughput * SampleOneLight(sampler, interaction, material->bsdf, light);
+
+
+            // Get the new ray direction
+            // Choose the direction based on the bsdf        
+            material->bsdf->Sample(interaction, sampler);
+            float pdf = material->bsdf->Pdf(interaction);
+
+            // Accumulate the weight
+            throughput = throughput * material->bsdf->Eval(interaction) / pdf;
+
+            // Update the current IOR and medium if we refracted
+            if (interaction.SampledLobe == BSDFLobe::SpecularTransmission) {
+                interaction.IORi = interaction.IORo;
+                medium = material->medium;
+            }
+
+            // Shoot a new ray
+
+            // Set the origin at the intersection point
+            ray.Origin = interaction.Position;
+
+            // Reset the other ray properties
+            ray.Direction = interaction.InputDirection;
+            if (AnyNan(ray.Direction))
+                printf("bad");
+            ray.TNear = 0.001f;
+            ray.TFar = infinity;
+            ray.GeomID = INVALID_GEOMETRY_ID;
+            ray.PrimID = INVALID_PRIMATIVE_ID;
+            ray.InstID = INVALID_INSTANCE_ID;
+            ray.Mask = 0xFFFFFFFF;
+            ray.Time = 0.0f;
+        }
+
+        // Russian Roulette
+        if (bounces > 3) {
+            float p = std::max(throughput.x, std::max(throughput.y, throughput.z));
+            if (sampler->NextFloat() > p) {
+                break;
+            }
+
+            throughput *= 1 / p;
+        }
+    }
+
+    if (bounces == maxBounces) {
+        printf("Over max bounces");
+    }
+
+    m_scene->Camera->FrameBufferData.SplatPixel(x, y, color);
+}
+```
+In English:
+Shoot a ray through the scene.
+Check if we hit anything. If not we return the skybox color and break.
+Check if we are currently in a medium (not in a vacuum).
+Sample the medium for a distance.
+Evaluate the medium's transmission and accumulate the throughput.
+If the scatter distance is less than the distance from the ray origin to the next surface, make a scatter event.
+Sample the medium for a scatter direction.
+Check if we hit a surface (ie, we didn't have a scatter event).
+If this is the first ray, or we just bounced off a specular surface, check if we hit a light. If so, we add the light emission to our color accumulation.
+Sample the direct lighting.
+Choose a new direction for the next ray. We can do this uniformly, or importance sample based on the BRDF.
+Evaluate the BRDF and accumulate it.
+If we refracted into the material, update the IOR and medium for the next bounce.
+Create a new ray based on our chosen direction and where we just came from.
+[Optional] Use Russian Roulette to choose if we should terminate the ray.
+Goto 1.
+Share
+Improve this answer
+Follow
+edited Jun 12, 2017 at 17:56
+trichoplax is on Codidact now
+6,33233 gold badges2626 silver badges7171 bronze badges
+answered Jun 11, 2017 at 18:53
+RichieSamsRichieSams
+3,8422626 silver badges3535 bronze badges
+$\endgroup$
+3
+$\begingroup$
+Thank you for this amazing answer! The problem is that no matter what I try for the coefficients, my outputs look like a glass. Does this mean I am doing scattering part wrong? Here is the sequence of outputs: imgur.com/a/gg2u1 I only changed the scattering coefficient while keeping absorption the same
+$\endgroup$
+– Mustafa Işık
+Commented
+Jun 12, 2017 at 7:04
+1
+$\begingroup$
+Are you sure that you're not accidentally setting the coefficient equal to the scattering distance? It should be scatteringCoefficient = (1 / scatteringDistance). Also absorptionCoefficient = -log(absorptionColor) / absorptionAtDistance. In the end, it doesn't really matter how you come up with the coefficient. That said, a lower coefficient will mean less absorption / scattering. A higher coefficient will mean less. For artists, it's a bit easier to think of it in terms of distances, so we back-calculate the coefficients from distances.
+$\endgroup$
+– RichieSams
+Commented
+Jun 12, 2017 at 13:25
+$\begingroup$
+No, parameter setting part is the same. I couldn't solve the problem but if I solve it, I will comment here.
+$\endgroup$
+– Mustafa Işık
+Commented
+Jun 15, 2017 at 7:19
+Add a comment
+|
+5
+$\begingroup$
+For cases where the diffusion approximation is preferred over full volumetric path tracing, the method published by Solid Angle is fairly efficient:
+https://www.solidangle.com/research/s2013_bssrdf_slides.pdf
+It is implemented in the Arnold render engine, Blender's Cycles, and pbrt, the latter being open source.
+The file which implements it in PBRT is here:
+https://github.com/mmp/pbrt-v3/blob/7095acfd8331cdefb03fe0bcae32c2fc9bd95980/src/core/bssrdf.cpp
+Share
+Improve this answer
+Follow
+answered Jun 13, 2017 at 19:01
+Stefan WernerStefan Werner
+70633 silver badges77 bronze badges
+$\endgroup$
+2
+$\begingroup$
+PBRT implementation seems like photon beam diffusion. Are photon beam diffusion and the what Solid Angle does the same? I ask because I thought PBD also take point samples on the geometry as a preprocessing step but Solid Angle slides don't do it.
+$\endgroup$
+– Mustafa Işık
+Commented
+Jun 14, 2017 at 12:17
+1
+$\begingroup$
+There are two things to distinguish here: The function to integrate (BSSRDF) and the method of integration. The first one are functions like the dipole, multipole, photon beam diffusion, etc. The second are methods like Jensen's hierarchical octree or Solid Angle's importance sampled ray tracing.
+$\endgroup$
+– Stefan Werner
+Commented
+Jun 21, 2017 at 8:36
+Add a comment
+|
+Start asking to get answers
+Find the answer to your question by asking.
+Ask question
+Explore related questions
+raytracing
+pathtracing
+global-illumination
+subsurface-scattering
+cuda
+See similar questions with these tags.
+The Overflow Blog
+Not all AI is generative: Efficient scheduling with mathematics
+From training to inference: The new role of web data in LLMs
+Featured on Meta
+Changes to reporting for the [status-review] escalation process
+Linked
+18
+Progressive Path Tracing with Explicit Light Sampling
+16
+Choosing Reflection or Refraction in Path Tracing
+10
+Full Monte-Carlo Volumetric Scattering
+Related
+20
+What is the "dipole approximation" for subsurface scattering?
+11
+How does Smith multiple scattering interact with diffuse subsurface scattering?
+7
+Subsurface Scattering Without Rays?
+10
+Using Monte carlo on Rayleigh scattering
+1
+smallpt: ray scattering and Importance Sampling
+2
+Confusion about data types in Jensen's subsurface scattering paper
+1
+[Subsurface Scattering]Reflection from Layered Surfaces due to Subsurface Scattering
+1
+[Subsurface Scattering]What's the meaning of diffuse coefficient `Rd` in bssrdf
+Hot Network Questions
+Geometry node, trim curve, trimming in segments, not continuous
+Can US employers run credit checks on new hires?
+How did the Trump Administration come up with the "tariffs charged to the US" percentages? (E.g. Lesotho charges US 99%, Madagascar charges US 93%)
+Vanna for call vs put intuition
+Counting complexity of SAT with 2 occurrences
+Movie identification: post-apocalyptic low budget vampire movie from 2010’s
+Should we call .mp3, mpeg, mp4, etc are a kind of source coding in telecommunications?
+Do people still follow christian rituals upon graduation in the UK?
+Eco-friendly methods for removing bike chain degreaser
+What does a virus need to transmit through air between humans?
+Dishwasher fuse tripped and burned wire
+Is it possible to define a bash heredoc with a multi-word delimiter that expands variables?
+Is instantaneous causation logically possible?
+Is an unmodified Rubik's cube solvable from looking at three sides?
+Why doesn't the Cosmic Microwave Background have a more complex spectrum?
+RS485 Internal circuit
+Selecting vertices of an edge by custom vertex attribute in Geometry Nodes
+Is there an R function to calculate row sums using a range/window of column indices?
+Quantifying uncertainty after Friedman test with low sample size
+Can using swearwords at a conference be acceptable?
+How can I find replacement HVAC registers for an older home?
+Why does the top quark decay via the weak interaction despite the weak coupling?
+When does PIE labiovelar kʷ become Attic Greek velar k?
+mathematical metaphors in Alice's adventures
+more hot questions
+Question feed

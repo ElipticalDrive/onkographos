@@ -1,0 +1,117 @@
+--- v002.md
++++ v003.md
+@@ -22,5 +22,5 @@
+ The total size of an SVDAG internal node in bytes is calculated as:
+ $$ SVDAG_{nodesize} = (ACHNC + 2) \times 4 \text{ [B]} $$
+-Where $ACHNC$ is the number of active child nodes decremented by 1 (i.e., $ACHNC = \text{ActiveChildren} - 1$) [S1]. In bits, the size is $(ACHNC + 2) \times 32$.
++Where $ACHNC$ is the number of active child nodes decremented by 1 (i.e., $ACHNC = \text{ActiveChildren} - 1$) [S1]. In bits, the size is $(ACHNC + 2) \times 32$ [S1].
+ 
+ **Operating Memory Structure**
+@@ -35,5 +35,5 @@
+ 
+ **Label Transformation Table (LTT)**
+-The LTT maps PSVDAG Labels to SVDAG addresses. It stores triplets `[level, SIZ, VAL]` mapped to the 32-bit address `adr` assigned to the child node [S1].
++The LTT maps PSVDAG Labels and Callers to SVDAG addresses [S1]. It stores triplets `[level, SIZ, VAL]` mapped to the 32-bit address `adr` assigned to the child node [S1].
+ * **Semi-out-of-core**: LTT stored in main memory (RAM) [S1].
+ * **Out-of-core**: LTT stored in secondary storage (disk) [S1].
+@@ -57,4 +57,5 @@
+ def convert_psvdag_to_svdag(input_stream, maxl):
+     """Main entry point. input_stream: Bit stream of linearized PSVDAG."""
++    global nnadr, level, lmax
+     if maxl == 1:
+         process_leaf_node(input_stream)
+@@ -64,12 +65,13 @@
+ def process_leaf_node(stream):
+     """Step 2: Process a leaf node."""
++    global nnadr
+     leaf_bits = read_bits(stream, 8)
+     write_bits(output_buffer, leaf_bits, 8)
+     write_bits(output_buffer, 0, 24)  # Reserved bits
+-    return nnadr + 4
++    nnadr += 4
+ 
+ def process_internal_node(stream):
+     """Step 3: Process an internal node."""
+-    global nnadr, level
++    global nnadr, level, lmax
+     level += 1
+     current_node = {'adr': 0, 'achnc': 0, 'chnm': 0, 'pts': [0]*8, 'ptpt': 0}
+@@ -83,50 +85,41 @@
+     current_node['chnm'] = 0
+ 
+-    child_idx = 0
+     while current_node['ptpt'] < current_node['achnc']:
+         ht = read_bits(stream, 2)
+-        
++        idx = current_node['ptpt']
++
+         if ht == 0:  # Case 0: HT '00' - Passive Child
+-            update_chmn_bit(current_node['chnm'], child_idx, 0)
+-            child_idx += 1
+-            # No pointer added, no recursion. Loop continues.
+-            
++            update_chmn_bit(current_node['chnm'], idx, 0)
++            current_node['ptpt'] += 1
++            # No pointer added, no recursion.
++
+         elif ht == 1:  # Case 1: HT '01' - Active Child / Label
+-            update_chmn_bit(current_node['chnm'], child_idx, 1)
+-            child_idx += 1
+-            
+-            siz, val = read_label(stream)  # [G] Variable-length read
++            update_chmn_bit(current_node['chnm'], idx, 1)
++            current_node['pts'][idx] = nnadr
++            current_node['ptpt'] += 1
++            siz, val = read_label(stream)  # [G] Reads variable-length [siz, val]
+             LTT[(level, siz, val)] = nnadr
+-            current_node['pts'][current_node['ptpt']] = nnadr
++            if level < lmax - 2:
++                process_internal_node(stream)
++            elif level == lmax - 2:
++                process_leaf_node(stream)
++
++        elif ht == 2:  # Case 2: HT '10' - Caller / Shared Child
++            update_chmn_bit(current_node['chnm'], idx, 1)
++            siz, val = read_caller(stream)  # [G] Reads variable-length [siz, val]
++            adr = LTT.get((level, siz, val))
++            current_node['pts'][idx] = adr
+             current_node['ptpt'] += 1
+-            
++
++        elif ht == 3:  # Case 3: HT '11' - Active Child / Unique
++            update_chmn_bit(current_node['chnm'], idx, 1)
++            current_node['pts'][idx] = nnadr
++            current_node['ptpt'] += 1
+             if level < lmax - 2:
+-                nnadr = process_internal_node(stream)
+-            else:
+-                nnadr = process_leaf_node(stream)
+-                
+-        elif ht == 2:  # Case 2: HT '10' - Caller / Shared Child
+-            update_chmn_bit(current_node['chnm'], child_idx, 1)
+-            child_idx += 1
+-            
+-            siz, val = read_caller(stream)  # [G] Variable-length read
+-            adr = LTT.get((level, siz, val))
+-            current_node['pts'][current_node['ptpt']] = adr
+-            current_node['ptpt'] += 1
+-            
+-        elif ht == 3:  # Case 3: HT '11' - Active Child / Unique
+-            update_chmn_bit(current_node['chnm'], child_idx, 1)
+-            child_idx += 1
+-            
+-            current_node['pts'][current_node['ptpt']] = nnadr
+-            current_node['ptpt'] += 1
+-            
+-            if level < lmax - 2:
+-                nnadr = process_internal_node(stream)
+-            else:
+-                nnadr = process_leaf_node(stream)
++                process_internal_node(stream)
++            elif level == lmax - 2:
++                process_leaf_node(stream)
+ 
+     write_inode(current_node)
+-    return nnadr
+ 
+ def update_chmn_bit(chnm, index, value):

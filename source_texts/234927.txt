@@ -1,0 +1,265 @@
+rx (render experience): a modern game engine. Contribute to Force67/rx development by creating an account on GitHub.
+
+RTGI: AC Shadows production techniques (vegetation, scene scaling, leak hardening, specular, ship) by Force67 · Pull Request #20 · Force67/rx · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Force67
+commented
+Jul 16, 2026
+Copy link
+Copy Markdown
+Owner
+Motivation
+The SIGGRAPH 2025 Advances in Real-Time Rendering talk "Ray tracing the world of Assassin's Creed Shadows" (Ubisoft Montréal) documents the production engineering around a cascaded-probe RT-GI system. rx already ships RCGI (engine/render/gi/rcgi.*, RCGI.md) — an idTech8-style radiance-cached GI that is a generation ahead of their probe volume (spatial-hash world radiance cache, SDF software tier, ReSTIR sampling). So this stack does not re-implement their algorithm; it adopts the production engineering the survey flagged as our gaps: vegetation in the rays, RT-scene scalability, leak/occlusion hardening, specular perf shaping, and shipping RCGI as the preset GI.
+Full gap analysis and phased plan: PROPOSAL_AC_SHADOWS_RTGI.md (in the companion recreation PR).
+Each phase is behind its own env for A/B, all default-on, and each is a no-op for existing content when its inputs are absent.
+Phase 1 — vegetation in the rays (511c6a5)
+Alpha-tested vegetation was previously either excluded from the BVH or treated as solid opaque walls (over-dark canopies). This lands their shipped opaque approximation: at upload, masked submeshes get a second BLAS geometry with triangles scaled about their centroid by the submesh's baked average opacity and flagged opaque, so the existing FORCE_OPAQUE diffuse/GI rays get correct-on-average vegetation occlusion at ~their measured 60% of alpha-test cost (RX_RT_VEG). Reflections, where the approximation reads visibly wrong, instead run a bounded (≤4) any-hit alpha test via an inline RayQuery candidate loop (RX_RT_VEG_ANYHIT). The path tracer keeps the real geometry via ray masks.
+Phase 2 — RT scene scalability (dcb1989)
+Headroom for everything else, matching their simplified RT scene description. Solid-angle instance culling (RX_RT_CULL, angle RX_RT_CULL_ANGLE=0.004, RX_RT_CULL_START=40 m) drops instances whose bounding-sphere solid angle falls under threshold beyond a start distance, time-sliced across frames. RT LOD selection (RX_RT_LOD_NEAR=64 m) replaces force_lod0_for_tlas with LOD0-near / LOD1+-far, keeping raster/RT agreement inside the screen-trace range to avoid the self-intersection disparity they call out. Async TLAS build (RX_RT_ASYNC_TLAS) moves the per-frame TLAS build off the graphics timeline onto the async compute queue. New gi/rt_instance_cull.{h,cc} + rt_instance_cull_test.
+Phase 3 — leak & occlusion hardening (2ae87a8)
+RCGI's sparse cascades cannot see fine occlusion, so light leaks. Three additions (see RCGI.md §Phase 3):
+Indoor/outdoor classification (RX_RCGI_INTERIOR): with RenderSettings::interior, ray misses return the authored interior_ambient instead of the sky cube, so cascades stop being fed skylight through ceiling/door gaps. SetInteriorVolumes() uploads ≤64 world AABBs; the gather blends only same-class probes, killing outdoor-probe-through-a-doorway leaks.
+Probe relocation + backface disable (RX_RCGI_RELOCATE): a per-(cascade,probe) offset nudges probes toward the open hemisphere (disabling past ~60% backface), applied consistently in the trace, blend and sample so world positions agree.
+Probe AO (RX_RCGI_PROBE_AO): cascade-fallback gather hits are attenuated by saturate(hitT/spacing·scale+bias), recovering contact occlusion the cascades can't represent.
+New --demo interior and rcgi_interior_test.
+Phase 4 — specular quality & perf (de8aea9)
+Levers on the full-res VNDF specular trace (NRD REBLUR-denoised); all NRD-gated, all default-on. See RCGI.md §Phase 4.
+Half-res reflections + bilateral upscale (RX_REFL_HALF): trace at half×half (4× fewer rays — the dominant cost), edge-aware upscale to full res before NRD (which stays full-res).
+Specular ray-skip via diffuse SH (RX_REFL_SH_SKIP, RX_REFL_SH_SKIP_ROUGH=0.45): when roughness is high or the ray is far from mirror, evaluate the RCGI gather's per-pixel denoised SH instead of tracing.
+Roughness-scaled ray length: TMax = maxDist·((1-roughness)²+0.1) — rough surfaces reflect only the near field the blur swallows anyway.
+One-step fog on specular hits (RX_REFL_FOG): analytic height-fog transmittance integrated once over the reflected segment, fading distant reflections to the horizon inscatter, consistent with raster fog.
+Phase 5 — ship RCGI as the preset GI (8ce4d14)
+RCGI becomes a shippable default (see RCGI.md §Phase 5):
+Presets: kHigh/kUltra set s.rcgi = true (ddgi stays as the automatic fallback; the two are mutually exclusive); low tiers keep ssgi/ddgi, mirroring the AC Shadows platform ladder. RX_RCGI wins in both directions but only when explicitly set, so an unset env no longer clobbers a preset.
+Spec bounce reads RCGI (was black under RCGI): the reflection hit's indirect-diffuse term samples the leak-hardened RCGI irradiance cascades when RCGI is active, else the DDGI probe as before.
+Cache-miss blend fallback (was black): a not-yet-cached probe-ray hit falls back to RcgiSkyMiss (sky outdoors / interior ambient indoors) instead of darkening the cascade.
+Denoiser masks (RX_RCGI_DENOISE_MASK): the prepass writes a per-pixel material class (opaque/vegetation/character) into the normal .a; the RCGI denoise and reflection upscale reject cross-class neighbours; NRD material-ID is forwarded (harmless while the material test is disabled). Plus vegetation-disocclusion relaxation in the temporal filter.
+Quarter-res gather (RX_RCGI_GATHER_SCALE, 2=half default / 4=quarter): the separable denoise radius widens automatically at quarter.
+Environment variables
+Env
+Default
+Phase
+Effect
+RX_RT_VEG
+on
+1
+opaque-approximation vegetation in diffuse/GI rays
+RX_RT_VEG_ANYHIT
+on
+1
+bounded (≤4) any-hit alpha test for masked geometry in reflections
+RX_RT_CULL
+on
+2
+solid-angle TLAS instance culling
+RX_RT_CULL_ANGLE
+0.004
+2
+solid-angle cull threshold (steradians)
+RX_RT_CULL_START
+40.0 m
+2
+distance beyond which culling applies
+RX_RT_LOD_NEAR
+64.0 m
+2
+LOD0-near / LOD1+-far crossover in the TLAS
+RX_RT_ASYNC_TLAS
+on
+2
+build the per-frame TLAS on the async compute queue
+RX_RCGI_INTERIOR
+on
+3
+indoor/outdoor classification (interior ambient on miss + same-class probe blend)
+RX_RCGI_RELOCATE
+on
+3
+probe relocation + backface disable
+RX_RCGI_PROBE_AO
+on
+3
+probe-AO occlusion on cascade-fallback gather hits
+RX_REFL_HALF
+on
+4
+half-res reflection trace + bilateral upscale
+RX_REFL_SH_SKIP
+on
+4
+skip specular trace → RCGI diffuse SH when rough / off-mirror
+RX_REFL_SH_SKIP_ROUGH
+0.45
+4
+roughness cutoff for the SH skip
+RX_REFL_FOG
+on
+4
+one-step height-fog on specular hits
+RX_RCGI_GATHER_SCALE
+2
+5
+gather resolution divisor (2 = half, 4 = quarter)
+RX_RCGI_DENOISE_MASK
+on
+5
+material-ID denoiser mask (vegetation / character / opaque)
+(Master toggle RX_RCGI is off by default and now enabled by the high/ultra presets. Existing debug knobs RX_RCGI_PROBES_ONLY, RX_RCGI_SW are unchanged.)
+Verification
+Built inside nix develop (cmake --preset linux, NRD via tools/get_nrd.sh), zero new warnings.
+ctest: 19/19 passing (incl. rt_instance_cull_test, rcgi_interior_test).
+Real-GPU smokes on NVIDIA GB10 (vkrun): --demo cornell / interior / materials / water with every new env toggled on/off and RCGI on/off — color bleed correct, reflections show lit RCGI bounce, interiors leak-hardened, quarter-res clean, half-res reflections indistinguishable from full.
+Vulkan validation clean apart from the one known pre-existing async indirect-args VUID (an rhi-layer BarrierScope::kIndirectArgs translation that only surfaces on the async compute queue; engine-wide, predates this work, clean with async off — documented in RCGI.md §M2 "Known limitations").
+Evidence
+Interior leak hardening (--demo interior, RX_RCGI=1) — the headline. Left: RX_RCGI_INTERIOR=0, occluded pillar and floor crush toward black where the sparse cascades see no light. Right: RX_RCGI_INTERIOR=1, leak-free interior ambient fills the shadowed geometry (~28% of pixels change).
+RX_RCGI_INTERIOR=0
+RX_RCGI_INTERIOR=1
+Cornell color bleed (--demo cornell, RX_RCGI=1) — RCGI diffuse GI working: the red and green walls bleed onto the white floor and the neutral blockers.
+Specular bounce reads RCGI (--demo materials, --preset high). Left RX_RCGI=0 (DDGI indirect in reflections), right RX_RCGI=1 (RCGI cascades). Subtle in this bright sky-IBL scene (the change is the reflected indirect-diffuse term, largest on the metallic spheres; ~7% of pixels change) — this closes the former "black indirect under RCGI" path rather than being a dramatic visual.
+RX_RCGI=0
+RX_RCGI=1
+Half-res reflections (--demo materials). Left full-res trace, right half-res + bilateral upscale — indistinguishable (mean abs diff 0.04/255, 0.34% of pixels), for 4× fewer reflection rays. That equivalence is the point.
+RX_REFL_HALF=0 (full)
+RX_REFL_HALF=1 (half)
+Gather resolution (--demo cornell). Half-res (default) vs quarter-res gather — the color bleed holds with no splotching (mean abs diff 0.26/255), at lower gather cost.
+RX_RCGI_GATHER_SCALE=2 (half)
+RX_RCGI_GATHER_SCALE=4 (quarter)
+(No vegetation A/B: the shipped demos carry no alpha-masked geometry, so the RX_RT_VEG path is a no-op there — flagged as a standing test for a recreation forest/NPC capture. Same for the denoiser mask, which is all-class-0 in the demos.)
+Deferred / follow-ups
+Precise specs left in place so these can land verified later:
+7 — per-triangle baked hit data (packed face normal + 3 UVs, one fetch): spec in PROPOSAL_AC_SHADOWS_RTGI.md §Phase 2 item 7. Optional feature-flagged perf item; validate against the golden harness.
+12 — RTAO from the gather hitT: RCGI.md §Phase 3 "Not landed" — needs the gather hoisted above the NRD AO block (or a persisted previous-frame hitT).
+13 — secondary sun shadow map for the SW tier: RCGI.md §Phase 3 "Not landed".
+15 — screen-space-first hybrid tracing (RX_REFL_SS_FIRST): RCGI.md §Phase 4 "Deferred — 15" (marcher + backtrack + prev-lit-HDR history plumbing).
+18 — far scene cubemap (RX_FAR_CUBE): RCGI.md §Phase 4 "Deferred … 18" (per-face raster target for the reflection/GI miss fallback).
+21 — thin translucency at RT hits (RX_RCGI_THIN): RCGI.md §Phase 5 item 21 — needs a thin-translucency test scene (Skyrim barred-window interior) for the pdf-rebalance A/B.
+Companion
+The recreation game-side changes (preset/trailer wiring, RX_RT_GRASS grass gate, this proposal) are in Force67/recreation feature/rt-ship.
+🤖 Generated with Claude Code
+Force67
+added 6 commits
+July 16, 2026 07:44
+gi: alpha-tested vegetation in the rays (AC Shadows opaque approximat…
+…
+511c6a5
+```
+…ion)
+```
+gi: RT scene scalability -- solid-angle instance culling, RT LOD, asy…
+…
+dcb1989
+```
+…nc TLAS build (AC Shadows scene description)
+```
+gi: RCGI leak & occlusion hardening -- indoor/outdoor classification,…
+…
+2ae87a8
+```
+… probe relocation, probe AO (AC Shadows)
+```
+gi: half-res reflections + upscale, diffuse-SH ray-skip, roughness re…
+…
+de8aea9
+```
+…ach & one-step hit fog (AC Shadows specular)
+```
+gi: ship RCGI as the preset GI -- spec-bounce/cache-miss fixes, denoi…
+…
+8ce4d14
+```
+…ser masks, quarter-res knob (AC Shadows Phase 5)
+```
+docs: RTGI AC Shadows evidence captures (interior leak, cornell bleed…
+…
+57bb94e
+```
+…, spec bounce, half-res refl, gather scale)
+```
+Force67
+mentioned this pull request
+Jul 16, 2026
+rtgi: wire RCGI quality tier + RT grass gate (AC Shadows adoption, game side)
+Force67/recreation#21
+Merged
+Force67
+commented
+Jul 16, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Review findings at 57bb94e9ffd06dd6243d029e94707ecb29508612:
+[P1] Zero-cleared relocation metadata decodes as the maximum negative offset. engine/render/gi/rcgi.cc:207,637 clears metadata to zero, but engine/render/shaders/gi/rcgi_common.hlsli:198-201 decodes raw zero as (-0.45, -0.45, -0.45). Newly created/reset probes therefore trace up to 7.2 m from the intended position in the largest cascade. Reserve zero as the no-offset representation or initialize metadata with a correctly packed zero value.
+[P1] Async TLAS slots have no validity or invalidation tracking. engine/render/core/renderer.cc:2382-2387 selects the previous slot whenever frame_index_ > 0. Enabling an RT feature after raster-only frames makes consumers bind an unbuilt slot, while replacing a mesh at renderer.cc:1657-1674 destroys BLASes still referenced by previous TLAS slots. This can produce null descriptors, stale device addresses, validation errors, or device loss. Track slot validity and invalidate/prime all slots after BLAS changes or inactive periods.
+[P1] Indoor RCGI is still illuminated by the outdoor sun. Raster lighting selects authored interior direction, intensity, and color at engine/render/core/renderer.cc:2679-2691, but RCGI receives applied_sun_* at renderer.cc:3137-3139. The cache shader uses those values at engine/render/shaders/gi/rcgi_cache_shade_body.hlsli:197-198, so an interior with zero directional intensity can still receive outdoor-sun bounce.
+[P1] Entering or leaving an interior does not invalidate outdoor RCGI history. The mode changes at engine/render/core/renderer.cc:3132, but world history only resets for camera jumps or cascade snaps at engine/render/gi/rcgi.cc:484-515; screen history receives only first_frame at renderer.cc:3906-3909. Nearby interior transitions retain outdoor cache radiance, 0.97-hysteresis probe atlases, and temporal screen history. Track interior/lighting mode changes and invalidate all affected RCGI histories.
+[P2] Half-resolution reflection tracing and upscaling use different guide texels. The trace rotates through the four subpixels at engine/render/shaders/screenspace/reflection_trace.cs.hlsl:260-263, while the upscale always reconstructs the cell center at reflection_upscale.cs.hlsl:61-62. Three frames out of four therefore weight a reflection using unrelated depth, normal, and material guides. Additionally, fp is not clamped, causing out-of-bounds reads on odd render dimensions. Carry the selected subpixel into the upscale pass and clamp it to the full-resolution extent.
+[P2] High/ultra lose indirect reflection lighting when NRD is unavailable. The presets enable RCGI at engine/render/core/presets.cc:137,156, which disables DDGI. Without NRD, including the D3D12 backend, reflections use the inline fallback whose hit shading only samples DDGI at engine/render/shaders/pipeline/mesh_rt.ps.hlsl:550. Reflected hits consequently receive zero indirect bounce. The inline path needs the same RCGI sampling added to the NRD path.
+[P2] Cross-class probe rejection fails when every nearby probe has the wrong class. engine/render/shaders/gi/rcgi_common.hlsli:332 multiplies opposite-class weights by 0.02, but lines 355-356 renormalize by the resulting total. If all eight probes are outdoor, the factor cancels and a small interior receives essentially full outdoor irradiance. Return a conservative fallback when no matching probe contributes instead of normalizing opposite-class probes.
+[P2] Same-sized instance-group updates retain stale culling results. engine/render/gi/rt_instance_cull.cc:64-70 invalidates visibility only for generation or size changes, while InstanceStore::Replace updates transforms without changing generation at engine/render/geometry/instance_store.cc:136-140. A previously culled instance moved nearby can remain missing until its time-sliced sweep index is revisited.
+Verification: built rx_render with NRD enabled (SPIR-V and DXIL shaders), ctest passed 19/19, and git diff --check passed. The current tests do not cover async TLAS activation/replacement or decoding the actual zero-filled relocation metadata.
+gi: address RTGI review — reloc-zero sentinel, async-TLAS slot validi…
+…
+ceda2e2
+```
+…ty, interior sun+history invalidation, half-res guide match, inline RCGI bounce, cross-class fallback, cull revision
+```
+Force67
+commented
+Jul 16, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Addressed all 8 findings in ceda2e2. Per finding:
+1 [P1] Zero relocation metadata decodes to max-negative offset. Reserved the raw word 0 as the "no offset" sentinel in both the shader (rcgi_common.hlsli RcgiUnpackOffset/RcgiPackOffset) and the CPU mirror (rcgi_interior.h): RcgiUnpackOffset(0) now returns (0,0,0), and pack nudges the only real value that would encode to 0 (all-axes -0.45) off the sentinel. Zero-cleared / freshly reset probe meta reads as unrelocated.
+2 [P1] Async TLAS slots had no validity/invalidation tracking. Added TlasSlotTracker (pure logic, rt_slot_tracker.h) tracking per-slot built-this-session + BLAS-set revision. BuildTlas marks the slot built; RemoveBlas/RemoveApproxBlas/RemoveLodBlas bump the revision, retiring every slot built before the change. RayTracingContext::SelectTlasSlots picks the read/build slots and falls back to a synchronous build+read of the current slot when the async previous slot is invalid (RT enabled after raster-only frames, or a mesh replace destroyed referenced BLASes). The renderer now uses this instead of the unconditional frame_index_>0 selection. Mesh replace already WaitIdles before RemoveBlas, so the retired slots are not in flight.
+3 [P1] Indoor RCGI lit by the outdoor sun. The renderer now feeds RCGI the same authored interior directional (dir/intensity/color) the raster path selects when settings_.interior, instead of applied_sun_*. An interior with zero directional intensity gets zero sun bounce.
+4 [P1] Interior transition did not invalidate outdoor RCGI history. RcgiSystem now tracks interior state; on an enter/leave transition AddToGraph clears the world hash cache, forces every cascade's probe atlas to re-converge (like a cascade snap), and resets the temporal screen history (via screen_reset_, the first_frame path). All three histories drop the stale outdoor radiance.
+5 [P2] Half-res reflection trace/upscale used different guide texels + unclamped fp. The upscale now derives the same per-frame subpixel from the frame counter/step (carried into UpscalePush) and samples the identical full-res guide the trace used, instead of the cell center. Both passes clamp the guide coordinate to the full-res extent (trace via GetDimensions), fixing the OOB read on odd render dimensions.
+6 [P2] Inline reflection path lost indirect bounce without NRD. mesh_rt.ps.hlsl's inline TraceReflection now samples the RCGI world irradiance cascades (SampleRcgiIrradiance) when kFrameRcgi is set, matching the NRD reflection_trace path — the DDGI atlas is empty under RCGI. Wired 5 new env-set bindings (36–40: globals/irr/vis/probe_meta/interior_vols) through EnvironmentSystem::WriteEnvSet with placeholders when RCGI is off.
+7 [P2] Cross-class rejection cancelled under renormalization. SampleRcgiIrradiance now tracks same-class weight separately; when no matching-class probe contributes (all 8 taps opposite class), it returns no indirect instead of renormalizing the 0.02-weighted opposite-class probes back to full irradiance. The small interior no longer receives the outdoor bounce.
+8 [P2] Same-sized instance-group updates kept stale culling. Added a revision counter to InstanceStore::Group bumped on every Replace (generation stays stable so handles keep resolving), passed to RtInstanceCuller::UpdateGroup, which now invalidates on a revision change. A moved-but-same-count instance restarts accept-all instead of staying culled until its sweep index returns.
+Tests: extended rcgi_interior_test with the raw-zero decode case (finding 1); extended rt_instance_cull_test with the moved-instance revision case (finding 8); added rt_slot_tracker_test covering slot selection, unbuilt-slot sync fallback, RT-enabled-after-raster, and BLAS-revision invalidation (finding 2). ctest 20/20 green (was 19).
+Verification: cmake --preset linux + full build inside nix develop, zero new warnings. Real-GPU smoke on NVIDIA GB10 (vkrun) with RX_RCGI=1 --preset high --validation: --demo interior, --demo cornell, --demo materials all render clean (exit 0, RCGI active), interior is stably interior-lit with no skylight leak. No new validation errors — only the pre-existing async indirect-args VUID and the pre-existing caustics Rg32f/R16G16 storage-image mismatch (both untouched by this change). Finding 6's inline branch requires an NRD-off build to hit at runtime; both runtime branches compile and the new env-set placeholder bindings (36–40) were accepted by the scene pipeline across all three demos.
+🤖 Generated with Claude Code
+Force67
+commented
+Jul 16, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Follow-up review of ceda2e2:
+[P1] Interior reset can seed the new cache from stale outdoor irradiance. engine/render/gi/rcgi.cc:502-573 invalidates every cascade, then immediately marks the current cascade valid before cache shading. engine/render/shaders/gi/rcgi_cache_shade_body.hlsli:210-212 consequently samples the retained atlas and writes old outdoor bounce into the freshly cleared hash. reset only affects the later blend, so this contamination can persist under hysteresis.
+[P2] Re-enabling RT can read an arbitrarily stale TLAS. engine/render/gi/rt_slot_tracker.h:37-55 considers any slot built under the current BLAS revision valid, regardless of when it was built. After RT effects are disabled for several frames, instance transforms/groups can change without a BLAS revision bump. Re-enabling RT then asynchronously reads the old previous slot for one frame, producing missing or phantom effects. Track build frame/age or invalidate the tracker during inactive frames.
+[P2] Transparent inline reflections still get placeholder RCGI resources. engine/render/core/renderer.cc:2480-2496 does not pass an RcgiWorldBinding to the transparent environment set, while the global RCGI flag remains enabled. With NRD unavailable, engine/render/shaders/pipeline/mesh_rt.ps.hlsl:569-575 selects RCGI and samples zero placeholders. Reflective glass and other transparent materials therefore still lose indirect reflection lighting.
+[P2] Compatible mesh replacements do not invalidate cached culling. engine/render/geometry/instance_store.cc:169-178 recomputes bounds without incrementing Group::revision. Since culling depends on mesh center and radius, a replacement with larger or shifted bounds can retain an old culled mask until the time-sliced sweep revisits each instance.
+[P2] History invalidation tracks a different interior state than lighting selection. engine/render/core/renderer.cc:3140 gates the tracked state with RX_RCGI_INTERIOR, while renderer.cc:3149-3154 changes lighting using raw settings_.interior. With the option disabled, entering or leaving an interior changes RCGI lighting without resetting history. Interior-to-interior authored-light changes are also undetected.
+[P2] A failed synchronous TLAS allocation can still expose a null or destroyed slot. engine/render/gi/raytracing.cc:201-228 ignores the reservation result, and raytracing.cc:259-272 returns without invalidating previously valid tracker state. Initial activation or capacity growth under allocation failure can therefore leave consumers binding a null/destroyed TLAS.
+[P3] New shader includes are missing from incremental-build dependencies. engine/render/CMakeLists.txt:359-386 does not list rcgi_common.hlsli for either mesh_rt.ps.hlsl or reflection_trace.cs.hlsl. The generated Ninja dependency graph confirms changes to the shared RCGI structures/helpers will not rebuild those SPIR-V/DXIL shaders.
+Fixes 1, 3, 5, and 7 from the original review otherwise look correct. Fixes 2, 4, 6, and 8 remain incomplete in the cases above.
+Verification: full rx_render build including SPIR-V and DXIL shaders passed, ctest passed 20/20, and git diff --check passed.
+gi: fix RCGI history and TLAS lifetime regressions
+f171608
+Force67
+merged commit 5567dab
+into
+main
+Jul 16, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

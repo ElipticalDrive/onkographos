@@ -1,0 +1,1415 @@
+Local Gaussian Density Mixtures for Unstructured Lumigraph Rendering
+XIUCHAO WU, State Key Lab of CAD&CG, Zhejiang University, China
+JIAMIN XU, Hangzhou Dianzi University, China
+CHI WANG, State Key Lab of CAD&CG, Zhejiang University, China
+YIFAN PENG, The University of Hong Kong, China
+QIXING HUANG, University of Texas at Austin, USA
+JAMES TOMPKIN, Brown University, USA
+WEIWEI XU∗ , State Key Lab of CAD&CG, Zhejiang University and PazhouLab (Huangpu), Guangdong, China
+GT
+Ours
+3DGS
+Ref-NeRF
+PSNR 29.47
+PSNR 28.80
+PSNR 27.28
+PSNR 30.84
+PSNR 26.69
+PSNR 26.47
+Fig. 1. Image-based rendering is particularly challenging due to complex reflections from curved surfaces and refractions in transparent materials. Compared
+to existing methods (3DGS [Kerbl et al. 2023] and Ref-NeRF [Verbin et al. 2022]), our approach more accurately reproduces high-frequency view-dependent
+appearance, such as the reflected building on the car hood in Blue Car (top), and the multi-bounce refractions in Glass Bust (bottom).
+To improve novel view synthesis of curved-surface reflections and refractions, we revisit local geometry-guided ray interpolation techniques with
+modern differentiable rendering and optimization. In contrast to depth or
+mesh geometries, our approach uses a local or per-view density represented
+as Gaussian mixtures along each ray. To synthesize novel views, we warp and
+fuse local volumes, then alpha-composite using input photograph ray colors
+from a small set of neighboring images. For fusion, we use a neural blending
+weight from a shallow MLP. We optimize the local Gaussian density mixtures
+using both a reconstruction loss and a consistency loss. The consistency
+loss, based on per-ray KL-divergence, encourages more accurate geometry
+reconstruction. In scenes with complex reflections captured in our LGDM
+dataset, the experimental results show that our method outperforms stateof-the-art novel view synthesis methods by 12.2%–37.1% in PSNR, due to its
+ability to maintain sharper view-dependent appearances. Project webpage:
+https://xchaowu.github.io/papers/lgdm/index.html
+CCS Concepts: • Computing methodologies → Image-based rendering;
+Reflectance modeling; Reconstruction.
+Additional Key Words and Phrases: Novel view synthesis, Gaussian mixtures.
+∗ Corresponding author
+Authors’ addresses: Xiuchao Wu, wuxiuchao@zju.edu.cn, State Key Lab of CAD&CG,
+Zhejiang University, China; Jiamin Xu, superxjm@yeah.net, Hangzhou Dianzi University, China; Chi Wang, wangchi1995@zju.edu.cn, State Key Lab of CAD&CG, Zhejiang
+University, China; Yifan Peng, evanpeng@hku.hk, The University of Hong Kong,
+China; Qixing Huang, huangqx@cs.utexas.edu, University of Texas at Austin, USA;
+James Tompkin, james_tompkin@brown.edu, Brown University, USA; Weiwei Xu,
+xww@cad.zju.edu.cn, State Key Lab of CAD&CG, Zhejiang University and PazhouLab
+(Huangpu), Guangdong, China.
+SA Conference Papers ’24, December 3–6, 2024, Tokyo, Japan
+© 2024 Copyright held by the owner/author(s). Publication rights licensed to ACM.
+This is the author’s version of the work. It is posted here for your personal use. Not
+for redistribution. The definitive Version of Record was published in SIGGRAPH Asia
+2024 Conference Papers (SA Conference Papers ’24), December 3–6, 2024, Tokyo, Japan,
+https://doi.org/10.1145/3680528.3687659.
+ACM Reference Format:
+Xiuchao Wu, Jiamin Xu, Chi Wang, Yifan Peng, Qixing Huang, James Tompkin, and Weiwei Xu. 2024. Local Gaussian Density Mixtures for Unstructured
+Lumigraph Rendering. In SIGGRAPH Asia 2024 Conference Papers (SA Conference Papers ’24), December 3–6, 2024, Tokyo, Japan. ACM, New York, NY,
+USA, 11 pages. https://doi.org/10.1145/3680528.3687659
+1
+INTRODUCTION
+There is a spectrum of approaches to novel view synthesis, from local
+ray interpolation to image-based rendering to global radiance fields.
+Local ray interpolation methods, popularized with light fields or
+lumigraphs, interpolate novel ray colors from input photographs via
+two-plane ray parameterization [Gortler et al. 1996; Levoy and Hanrahan 1996]. For accurate scene reproduction, local ray interpolation
+SA Conference Papers ’24, December 3–6, 2024, Tokyo, Japan.
+2 •
+Xiuchao Wu, Jiamin Xu, Chi Wang, Yifan Peng, Qixing Huang, James Tompkin, and Weiwei Xu
+methods require capturing the light field with a high spatio-angular
+resolution. To reduce this capture burden, unstructured lumigraphs
+use geometric proxies to guide the selection of corresponding rays to
+interpolate. Such proxies can be global [Buehler et al. 2001; Eisemann
+et al. 2008] or per input view [Hedman et al. 2018, 2016]. Rendering
+quality is determined by the accuracy of the geometric proxy, which
+itself must be reconstructed. Beyond interpolating input colors,
+we can also create novel views by reconstructing a global scene
+representation of color and geometry, such as a neural radiance
+field (NeRFs) [Mildenhall et al. 2020] or a set of 3D Gaussians
+(3DGS) [Kerbl et al. 2023]. These representations are optimized
+by minimizing the difference between the input photographs and
+their reproduction through volumetric rendering.
+One challenging visual phenomenon is reflections that appear to
+move with camera motion; a second is the related phenomenon of
+refractions through transparent objects. Many methods, including
+NeRF and 3DGS, often handle reflections by optimizing virtual geometry to be ‘behind’ surfaces at the total reflected light path length.
+For planar reflectors, a global virtual reflection geometry provides a
+plausible explanation of the visual phenomenon that is consistent
+with all input photographs [Sinha et al. 2012]. However, for curved
+reflectors, it is difficult to maintain a consistent virtual geometry,
+resulting in blurred reflections (Fig. 1). To better model curved reflections, methods have adopted additional physical modeling through
+surface normal estimation and material decomposition [Verbin et al.
+2022; Zhang et al. 2021b]. Such approaches may assume distant
+environmental lighting conditions [Verbin et al. 2022] that limit
+application to specific real-world scenarios. Factorizing materials
+increases the number of free parameters, leading to increased ambiguity during optimization [Zhang et al. 2021b]. As a result, dealing
+with curved reflective surfaces or transparent objects still poses
+challenges and producing sharp reflections is difficult.
+Given this difficulty, we revisit ideas from geometry-guided ray
+interpolation techniques with modern neural fields, differentiable
+rendering, and end-to-end optimization. Interpolation-based methods can avoid the blurring that occurs in global optimization of viewdependent appearance like reflections because only a few similar
+neighboring photographs are used to produce ray colors. But the
+appearance still depends significantly on the proxy geometry, and
+we know that consistent recovery of reflector geometry is tricky for
+curved reflectors. Rather than a global proxy geometry, we propose
+for each input view to define a local proxy geometry. As each local
+geometry only has to remain consistent across the small set of
+neighboring views used to produce a novel view, this makes it
+possible to represent complex curved reflectors in a ‘piecewise’ way,
+helping to maintain sharp reflections.
+For per-view geometry, we use a density field approximated by a
+mixture of ten Gaussians per ray. The Gaussian parameters per ray
+are encoded via an MLP into a feature, which is then stored within
+a 2D hash grid per photo (Fig. 2). To calculate soft visibility, we
+use the Gaussian mixture cumulative distribution function (CDF)
+along the ray. During rendering, input photo colors are warped
+backwards from a small set of neighboring views, blended using
+optimized weights from an MLP, and alpha-composed. This local
+representation performs well in modeling curved reflectors, producing sharper reflections on objects like cars and glass busts than
+SA Conference Papers ’24, December 3–6, 2024, Tokyo, Japan.
+Ref-NeRF and 3DGS, and producing as sharp results as the global
+front-facing multi-plane geometry method NeX [Wizadwongsa et al.
+2021] without being restricted to front-facing scenes.
+In summary, our main technical contributions are as follows.
+• A per-view Gaussian density mixture representation and imagebased rendering approach that is well-suited to modeling highfrequency reflections for curved and transparent objects.
+• An end-to-end optimization scheme with photometric and consistency losses to encourage coherence across per-view proxies,
+and a sparse voxel grid sampling for efficiency.
+Compared with other state-of-the-art neural- and image-based
+rendering methods, our method can produce sharper results with
+high-fidelity view-dependent appearance (Fig. 1).
+2
+RELATED WORK
+Warping Image-based Rendering. Unstructured lumigraph rendering [Buehler et al. 2001] warps and interpolates a collection of input
+images through a proxy geometry. Many methods rely on global
+geometry reconstructed from captured images [Chaurasia et al. 2011;
+Goesele et al. 2010; Ortiz-Cayon et al. 2015]. Global geometry can
+constitute depth images, visual and opacity hulls for pixel visibility,
+and 3D meshes for view-dependent texturing and surface light
+fields [Chaurasia et al. 2013; Debevec et al. 1996; Fitzgibbon et al.
+2005; Matusik et al. 2000, 2002; Wood et al. 2000]. Later methods use
+per-view information to improve rendering quality. For instance,
+Chaurasia et al. [2013] use super-pixels as constraints to derive perpixel depth, which significantly mitigates image warping artifacts
+along occlusion edges. Hedman et al. [2016] reconstruct a global
+geometry and refine the depth map for each view to align edges
+between the depth channel and the RGB channels. The resulting
+per-view meshes effectively handle large occlusions and motion parallax. Subsequently, the DeepBlending method [Hedman et al. 2018]
+integrates two distinct multi-view stereo (MVS) reconstructions
+for per-view depth refinement. To reduce ghosting, a deep neural
+network blends images warped with per-view meshes.Wang et al.
+[2021] also combine image-based rendering method with neural
+networks and propose a generic view interpolation method.While
+these methods can reproduce view-dependent effects to some extent,
+they struggle with specular effects due to their reliance on a proxy
+geometry with only a single surface—this often fails to represent
+reflections well without considering reflected rays.
+Layered Reflections. We might also try to separate the input images into separate layers containing reflections [Kopf et al. 2013;
+Szeliski et al. 2000]. Sinha et al. [2012] estimate the foreground and
+reflected depth to handle planar reflections. Xu et al. [2021] explicitly
+reconstructed a two-layer geometry along with diffuse and reflected
+images. Rodriguez et al. [2020] estimate curved reflector geometry
+for car windows with a two-layer representation—background and
+car window—using reflective flows. These methods advance our
+ability to model reflections in IBR by introducing a reflection layer.
+Layered Geometry. These representations help to handle complex
+occlusions and appearance. Layered depth images (LDI) [Shade
+et al. 1998] store scene geometry within a projective volume at
+a specific viewpoint. Penner et al. [2017] extend this concept by
+Local Gaussian Density Mixtures for Unstructured Lumigraph Rendering
+Point density 𝛼/, color 𝑐̃
+Volume
+rendering
+x
+𝑑
+𝑑!
+Pe r - v
+iew
+as h
+2D H
+Tiny MLP
+𝑑 − 𝑑!
+grid
+Pixel u
+ℎ!
+𝑐!
+Captured image
+Feature
+𝛼/ =
+𝑐̃ =
+• 3
+∑"! 𝑣! ⋅ 𝛼!
+∑#
+! 𝑣!
+∑"! ℎ! ⋅ 𝑣! ⋅ 𝑐!
+∑#
+! ℎ! ⋅ 𝑣!
+Multi-view blend
+(𝛼! , 𝑣! )
+𝜔! , 𝜇! , 𝜎! "
+Visibility
+Density
+Neighbor view 𝑖
+Neighbor view 𝑗
+Target view
+Shallow MLP
+𝑡
+Per-ray Gaussian mixture
+Fig. 2. Our proposed representation. Left: For each view, the local multi-layer geometry is represented as a per-view density field, with each pixel associated
+with a ray-based Gaussian mixture parameterized as {𝜇𝑛 , 𝜎𝑛 , 𝜔𝑛 }. All Gaussian mixtures with their parameters in each view are encoded in a 2D hash grid.
+Right: During rendering, for each ray in the target view, we sample a set of points and generate each point’s density 𝛼˜ 𝑘 and color c̃𝑘 based on backward
+warping and occlusion-aware neural weighted blending. Then, the final color of each ray is obtained using alpha composition, which is used in the rendering
+loss to end-to-end optimize the parameters of all 2D hash features and the MLPs.
+constructing projective volumes with additional depth uncertainty
+for captured images, leading to higher quality view synthesis at
+occlusion edges. Hedman et al. [2017] use two-layer color-and-depth
+panoramas to produce perspective views near captured viewpoints
+with motion parallax effects. Layered representations can also be
+predicted using deep neural networks, such as end-to-end deep
+stereo for unstructured view interpolation [Flynn et al. 2016], and
+deep view synthesis based on multiplane image (MPI) techniques [Li
+and Khademi Kalantari 2020; Mildenhall et al. 2019; Srinivasan
+et al. 2019; Wizadwongsa et al. 2021; Xu et al. 2019; Zhou et al.
+2018]. LLFF [Mildenhall et al. 2019] and NeX360 [Phongthawee et al.
+2022] extend a single MPI to multiple MPIs, where novel views are
+rendered by blending adjacent MPIs.
+Our method connects to layered representations as we use a fixed
+number of Gaussians per ray. This is related to mixture density
+distributions in stereo matching [Tosi et al. 2021]. However, unlike
+an MPI that shares the same depth sampling for all pixels in each
+plane, our method employs individual depth sampling for each ray.
+Global scenes. Many methods create a global representation via
+reconstruction. Neural radiance fields (NeRF) encode scene density
+and appearance compactly within a multi-layer perceptron (MLP)
+neural network. This is a volume rendered to produce an image.
+Volume rendering has been accelerated through hash grids and
+direct voxel storage [Fridovich-Keil et al. 2022; Müller et al. 2022],
+scaled through tiling [Wu et al. 2023, 2022], and extended to dynamic
+scenes [Pumarola et al. 2021]. Our approach also uses 2D hash grids
+to encode the local Gaussian mixtures.
+Some neural methods are designed for complex appearance [Ma
+et al. 2024; Verbin et al. 2024; Wu et al. 2024]. Ref-NeRF [Verbin et al.
+2022] optimizes a spatial MLP to predict diffuse colors and surface
+normals and then produces specular reflections via normal-reflected
+rays and a directional MLP. Other inverse rendering representations
+incorporate surface details, normals, lighting, albedo, and bidirectional reflectance distribution functions (BRDFs) [Hasselgren et al.
+2022; Laine et al. 2020; Liu et al. 2019; Munkberg et al. 2022; Yao et al.
+2022; Zhang et al. 2021a,b]. These approaches can be susceptible to
+over-fitting and are sensitive to initialization and regularization.
+Points or primitives have also been studied [Kopanas et al. 2021;
+Lassner and Zollhöfer 2021; Yifan et al. 2019]. Kopanas et al. [2022]
+separate reflections among a point cloud using a neural warp field.
+3D Gaussian splatting (3DGS) [Kerbl et al. 2023] uses anisotropic
+Gaussians with color and density as scene primitives, achieving
+faster rendering speed compared to NeRF-based approaches.
+Our method also uses Gaussians to represent the density. However, instead of optimizing a global representation of color and
+density, we optimize local per-ray density only and use input views
+for color rendering. This scheme better renders a high-frequency
+view-dependent appearance. Further, since our Gaussian representation is 1D along each ray, it is challenging to determine the coverage
+area to be splatted onto other views, so we ray cast instead of splat.
+3 METHOD
+3.1 Local Gaussian Density Mixture Representation
+𝑀 ∈ I with corresponding
+Our input is a set of 𝑀 input images {𝐼𝑖 }𝑖=1
+𝑀
+camera poses {𝑃𝑖 }𝑖=1 . Our objective is to reconstruct a local density
+𝑀 that, once rendered using IBR in neighboring views,
+field {D𝑖 }𝑖=1
+will reproduce the input images. We will take a volume rendering approach. The density distributions in the fields D are parametrically
+represented by a Gaussian mixture per ray with 𝑁 = 10 kernels.
+Each pixel u in the image 𝐼 corresponds to a ray with direction
+d. Given a camera origin o, a point x = o + 𝑡d exists along the ray
+at a distance 𝑡. The volume density at the point 𝛼 (x) = 𝛼 (u, 𝑡) is a
+SA Conference Papers ’24, December 3–6, 2024, Tokyo, Japan.
+4
+•
+Xiuchao Wu, Jiamin Xu, Chi Wang, Yifan Peng, Qixing Huang, James Tompkin, and Weiwei Xu
+Neighboring ray
+information from a set of 𝐿 input views that are neighbors to the
+target view. First, we reproject local density into the target view’s
+frame via backward warping. Then, we merge local densities while
+considering occlusion by fusion. Finally, we alpha composite input
+colors via a neural blending weight. Note that we will use symbols
+without subscripts to refer to properties of the target view.
+Target ray
+Small
+angle
+Reflective
+surface
+Large
+angle
+Backward warping. For each pixel coordinate u in the target
+𝐾 along the
+view, we sample a set of world-space points {x𝑘 }𝑘=1
+ray, transform each into the camera space of each neighboring view
+𝑖, then project the point to pixel coordinates to produce u𝑖′ . With
+this, we can obtain a color c𝑘𝑖 , density 𝛼𝑖𝑘 , and visibility 𝑣𝑖𝑘 :
+Fixed blending weight
+Neural blending weight
+PSNR: 33.60
+PSNR: 31.26
+𝜔𝑛 (u) 𝑔(𝑡; 𝜇𝑛 (u), 𝜎𝑛 (u)),
+Color will still contain view-dependent information even with
+local warping. As a result, we fuse the multi-view colors using a
+neural blending weight ℎ𝑘𝑖 :
+∑︁ 𝑘 𝑘 𝑘
+𝑖ℎ ·𝑣 ·𝑐
+𝑘
+c̃ = ∑︁ 𝑖 𝑖 𝑖 .
+(7)
+𝑘
+𝑘
+𝑖 ℎ𝑖 · 𝑣 𝑖
+(1)
+ℎ𝑘𝑖 is encoded in a small MLP:
+𝑛=1
+ℎ𝑘𝑖 = Φ(x𝑘 , d𝑘 − d𝑘𝑖 ; 𝜃 ),
+where each Gaussian 𝑔(·) has an associated mean 𝜇𝑛 (u), standard
+deviation 𝜎𝑛 (u), and weight 𝜔𝑛 (u).
+The soft visibility 𝑣 or transmittance for each point x can be
+calculated analytically from the Gaussian mixture parameterization:
+(︃ ∫ 𝑡
+)︃
+𝑣 (u, 𝑡) = exp −
+𝛼 (u, 𝛿) 𝑑𝛿
+(︄
+= exp −
+𝑠
+𝑁
+∑︂
+)︄
+𝜔𝑛 (u) (𝐺 (𝑡; 𝜇𝑛 (u), 𝜎𝑛 (u)) − 𝐺 (𝑠; 𝜇𝑛 (u), 𝜎𝑛 (u)))
+𝑛=1
+(2)
+where 𝑠 denotes the location of the near plane and 𝐺 (𝑡; 𝜇, 𝜎) is the
+cumulative distribution function (CDF) of the Gaussian function:
+𝑡 −𝜇
+1
+1
+𝐺 (𝑡; 𝜇, 𝜎) = erf( √ ) + ,
+(3)
+2
+2
+𝜎 2
+where erf(·) is the error function.
+3.2
+Warping and Fusing Volumes
+Next, we introduce a differentiable volume rendering procedure to
+create novel views from local Gaussian mixtures. The novel target
+view is formed in three steps via a ray sampling approach, using
+SA Conference Papers ’24, December 3–6, 2024, Tokyo, Japan.
+(5)
+Fusion. We fuse the warped densities and colors by considering
+visibility and using an optimized blending weight. As we expect
+density to represent local and view-independent geometry, we
+consider only visibility when fusing:
+∑︁ 𝑘 𝑘
+𝑖 𝑣 · 𝛼𝑖
+𝛼˜ 𝑘 = ∑︁𝑖
+.
+(6)
+𝑘
+𝑖 𝑣𝑖
+weighted sum of Gaussians:
+𝑁
+∑︂
+(4)
+𝛼𝑖𝑘 = 𝛼𝑖 (u𝑖′, ||x𝑘 − o𝑖 ||), 𝑣𝑖𝑘 = 𝑣𝑖 (u𝑖′, ||x𝑘 − o𝑖 ||),
+where 𝜋𝑖 (·) denotes the projection operation from a point in world
+space to the pixel space of the 𝑖-th neighboring input view. We
+calculate density and visibility using Eq. 1 and 2, respectively.
+Fig. 3. Neural blending weight benefit. Top: The dashed pink curve
+denotes the range of viewing angles in which a reflection is visible. Given
+a target ray (yellow arrow) that falls outside this range, a neighboring ray
+with a smaller angle may not capture the similar reflection component.
+However, using a fixed blending weight function, this neighboring ray will
+still be assigned a larger weight. Bottom: Rendering results using neural
+blending weights versus a fixed blending weight function.
+𝛼 (u, 𝑡) =
+u𝑖′ = 𝜋 (x𝑘 ; 𝑃𝑖 ), c𝑘𝑖 = 𝐼𝑖 (u𝑖′ ),
+(8)
+where d𝑘 and d𝑘𝑖 indicate the ray direction for the point x𝑘 for the
+target and neighboring views, and 𝜃 represents the MLP parameters.
+We use the point position and relative ray direction as inputs to
+allow view dependence.
+In comparison to a fixed blending weight function (ULR [Buehler
+et al. 2001], InsideOut [Hedman et al. 2016]), our neural blending weights are optimized end-to-end and can better capture high
+frequency reflection (Fig. 3). Compared to weights predicted by a
+pre-trained CNN (DeepBlending [Hedman et al. 2018]), our neural
+blending weights use a compact MLP.
+Alpha composition. Finally, we accumulate a fused color c̃𝑘 along
+the ray by using the fused densities 𝛼˜ 𝑘 . This step obtains the rendered color for each pixel:
+)︂
+∑︂ (︂
+c̃ =
+𝑤 𝑘 · c̃𝑘 ,
+(9)
+𝑘
+𝑤 𝑘 = exp(−
+𝑘∑︂
+−1
+𝑗=1
+𝛼˜ 𝑗 · 𝛿 𝑗 ) · (1 − exp(−𝛼˜ 𝑘 · 𝛿 𝑘 ),
+(10)
+Local Gaussian Density Mixtures for Unstructured Lumigraph Rendering
+pixel colors c̃ and their matched input photograph pixel colors c:
+Surface
+y
+Lr = ||c̃ − c|| 22 .
+Selected
+Selected
+Surface
+Neighboring view
+Occluded
+(Low ray-view similarity)
+Target view
+x
+Target view
+Neighboring views
+(High ray-view similarity)
+• 5
+Image plane of target view
+Fig. 4. View selection. Left: Selecting views based only on ray-view
+similarity can result in certain points not being trained with enough
+observations. Rendering artifacts may appear for the surface point invisible
+to two of the selected neighboring views. Right: This issue can be fixed
+by selecting views based on their projected 2D positions with respect to
+the target view, ensuring they are uniformly distributed across all four
+quadrants when projected onto the image space of the target view.
+where 𝑤 𝑘 represents the alpha-blending weight for the point x𝑘 in
+the target view.
+Neighbor view selection. Even with visibility-aware and viewdependent fusion, picking a set of good neighbor views 𝐿 is critical
+to achieving high quality results. This selection is guided by an
+accumulated cosine similarity per ray that considers the angle
+between the target and neighbor view rays:
+(13)
+Consistency loss. Even with a reconstruction loss, the density field
+local to an input view may be inconsistent with the fused density
+field produced when the input view is treated as a target view. We
+add a consistency loss by minimizing the KL divergence between
+alpha-blending weights of 𝐾 sampled points along rays:
+∑︂
+𝑤˜ 𝑘
+),
+(14)
+Lc =
+𝑤˜ 𝑘 · log(
+𝑤𝑘
+𝑘
+where 𝑤˜ 𝑘 is the alpha-blending weight obtained from the fused
+density field of the target view, and 𝑤 𝑘 is the alpha-blending weight
+derived from the (same) input view’s local density field.
+Although it is only a soft constraint, the consistency loss plays an
+important role in improving the view consistency of the rendering
+results, as adding it achieves more accurate geometry in general
+(Fig. 8). We can consider the loss’ effect in two ways: 1) scene areas
+that rely on density alignment, like occlusion edges, are encouraged
+to be similar; and 2) scene areas that can be reproduced using
+a variety of different geometries (say, low-textured regions) are
+encouraged to be similar.
+4
+IMPLEMENTATION DETAILS
+(12)
+Hash grid and network architecture. Storing the Gaussian mixture
+mean, standard deviation, and weight parameters requires 𝑊 × 𝐻 ×
+𝑁 × 3 floats for each 𝑊 × 𝐻 image, which may exceed available
+GPU memory during optimization. To overcome this, we reduce
+memory use by representing the Gaussian parameters compactly.
+The approach uses a hash table of features unique to each image,
+followed by a shallow MLP shared across all features (Fig. 2) [Müller
+et al. 2022]. The hash table features are collectively optimized such
+that the Gaussian mixtures can reproduce the scene. This allows
+similar ray density distributions to share MLP capacity through the
+embedding space while allowing the image-space location of those
+distributions to move.
+Each 2D hash grid has 16 levels, where the coarsest level resolution is 16×16 (e.g., in a 640×480 image, each cell covers 40×30 pixels
+at the coarsest level due its 16 × 16 subdivision) and the highest
+resolution matches that of the input view. The feature size at each
+level is two, and the hash table size for each 2D hash grid is 216 .
+We use three MLPs. The first MLP decodes features from the
+hash grid to produce the Gaussian mixture parameters. The second
+MLP decodes features from the hash grid to produce colors. Both of
+these MLPs have two 64-neuron layers. The third MLP produces the
+neural blending weight and comprises two sub-modules. The first
+sub-module encodes 3D points into 16-dimension features. These
+features are concatenated with ray directions and input to the second
+sub-module. Both submodules have two 32-neuron layers. Every
+MLP is Gaussian activated [Ramasinghe and Lucey 2022] with a
+variance of 0.01.
+Reconstruction loss. To optimize geometry that is local to each
+view, we must enforce constraints between views. Hence, during
+optimization, each input view is treated as a target view to be reconstructed. For this, we minimize the difference between rendered
+Baking and rendering. To accelerate rendering at the cost of memory, we can precompute and store the optimized Gaussian mixture
+parameters {𝜇𝑛 , 𝜎𝑛 , 𝜔𝑛 } for each view as a 2D grid. This eliminates
+the computational overhead of hashing and executing the MLP to
+S𝑖 =
+∑︂
+𝑘
+S𝑘𝑖 =
+∑︂ (o − x𝑘 ) · (o𝑖 − x𝑘 )
+𝑘
+||o − x𝑘 || · ||o𝑖 − x𝑘 ||
+.
+(11)
+S𝑘𝑖 is set to 0 if the projected pixel falls outside the viewport.
+Given ray-view similarities {S𝑖 } for all neighboring views, next
+we select the 𝐿 views. Naïvely selecting views with the highest
+similarity values may select uninformative ‘clumps’ of cameras
+(Fig. 4 left). Instead, we stratify selection (Fig. 4 right): We project
+the centers of all neighboring cameras onto the image plane of the
+target view, which separates neighboring cameras centers into four
+quadrants. Then, we rank view similarity within each quadrant
+and iteratively select neighboring views with the highest similarity
+values from each quadrant in turn. This approach tends to produce
+more balanced neighbors. For instance, when observing an occlusion
+edge, neighbor cameras in one direction will always fail to see a
+point beyond the edge. Our strategy avoids selecting only those
+cameras even if they are nearby.
+3.3
+Optimization
+To optimize the local density fields and neural weights, we define a
+loss L with two components: an L2 reconstruction loss Lr and a
+consistency loss Lc :
+L = Lr + 0.01Lc,
+SA Conference Papers ’24, December 3–6, 2024, Tokyo, Japan.
+6 •
+Xiuchao Wu, Jiamin Xu, Chi Wang, Yifan Peng, Qixing Huang, James Tompkin, and Weiwei Xu
+Table 1. Quantitative comparisons on our new LGDM dataset. Best
+results are highlighted as 1st , 2nd and 3rd . The type of camera
+trajectory for each captured scene is visualized in Fig. 5.
+(a) 360o-circling
+(b) Half-circling
+(c) Forward-facing
+Fig. 5. Four types of camera trajectories in the LGDM dataset.
+recover these parameters. For the neural blending weights, the MLP
+is small enough to be stored in CUDA shared memory. For rendering,
+our method samples 192 points for each ray in the target view and
+blends density and colors for each point across 8 neighboring views.
+Ray sampling strategy. To maintain balanced gradient scales during each optimization iteration, we adopt a strategy of randomly
+sampling an equal number of pixels for each view.
+Point sampling and occupancy grid. We use an occupancy grid
+to speed up volume point sampling. For every sample point, if the
+visibility-aware weight 𝑤 (Eq. 10) exceeds 0.01, the corresponding
+voxel covering this point is occupied. When processing each target
+ray, we begin by sampling 64 points in disparity space. Subsequently,
+we uniformly sample 128 points only within the occupied voxels.
+Further, we adopt a strategy of gradually subdividing our occupied
+grid to increase its resolution [Liu et al. 2020; Wu et al. 2023]. This
+subdivision is performed every 1,000 iterations. We start with an
+initial resolution of 83 and progressively increase it until reaching a
+resolution of 5123 .
+Viewport extension. In certain scenes, some points are only observed from the target view and so will warp outside all neighboring
+views. During optimization, since each input view is treated as a
+target view, these points do not have information from neighboring
+views to correctly minimize the reconstruction loss, resulting in
+floating geometries. To address this issue, we extend each input view
+by 50 pixels on each side. The 2D hash feature grid is also extended
+accordingly. For the extended pixels, as they do not have captured
+colors, we reuse the 2D hash grid features to generate color for the
+extended pixels, using an additional color-MLP shared for all the
+images. The color for the extended pixels is optimized with respect
+to the target view. After optimization, the extended feature grids
+and the color-MLP are discarded.
+Hyperparameters configuration. Throughout all of our experiments, we optimize for 60k iterations, with each batch consisting of
+2,048 rays. We use the Adam [Kingma and Ba 2014] optimizer with
+a learning rate that decays from 1𝑒 −3 to 1𝑒 −4 . The training time for
+each scene is approximately 4-5 hours on a single Nvidia V100 GPU.
+5
+EXPERIMENTS
+Baselines. We compare to NeX [Wizadwongsa et al. 2021] which
+uses a single multi-plane image (MPI) with a neural view-dependent
+appearance basis; LLFF [Mildenhall et al. 2019] which fuses local
+multi-plane image representations; Instant-NGP (INGP) [Müller et al.
+2022] which models scenes as global radiance fields; 3DGS [Kerbl
+et al. 2023] which uses primitives to describe a radiance field; RefNeRF [Verbin et al. 2022] and NeuralCatacaustics (NPC) [Kopanas
+et al. 2022], which are both designed to handle curved reflections.
+SA Conference Papers ’24, December 3–6, 2024, Tokyo, Japan.
+Scene
+Metric
+LLFF
+NPC
+NeX
+Ref-NeRF
+INGP
+3DGS
+Ours
+Blue Car
+67 views
+Forward-facing
+PSNR↑
+SSIM↑
+LPIPS↓
+25.64
+0.903
+0.111
+25.14
+0.913
+0.229
+28.77
+0.930
+0.215
+29.00
+0.915
+0.323
+27.11
+0.907
+0.299
+31.63
+0.965
+0.153
+32.82
+0.974
+0.068
+Red Car
+128 views
+Half-circling
+PSNR↑
+SSIM↑
+LPIPS↓
+26.42
+0.905
+0.137
+22.62
+0.859
+0.292
+N/A
+N/A
+N/A
+28.11
+0.894
+0.291
+27.00
+0.913
+0.198
+28.52
+0.950
+0.141
+31.88
+0.964
+0.091
+Natatorium
+144 views
+Forward-facing
+PSNR↑
+SSIM↑
+LPIPS↓
+23.98
+0.851
+0.119
+23.88
+0.867
+0.229
+25.01
+0.846
+0.287
+25.82
+0.862
+0.277
+25.67
+0.879
+0.219
+27.43
+0.929
+0.136
+31.22
+0.960
+0.071
+Glass Bust
+194 views
+Half-circling
+PSNR↑
+SSIM↑
+LPIPS↓
+26.28
+0.883
+0.165
+20.89
+0.821
+0.389
+N/A
+N/A
+N/A
+27.92
+0.894
+0.327
+25.73
+0.871
+0.373
+29.42
+0.954
+0.125
+33.48
+0.971
+0.087
+Skyscraper
+132 views
+Forward-facing
+PSNR↑
+SSIM↑
+LPIPS↓
+20.67
+0.786
+0.137
+20.21
+0.844
+0.253
+25.89
+0.880
+0.233
+24.26
+0.827
+0.339
+21.95
+0.792
+0.332
+27.83
+0.942
+0.099
+30.66
+0.961
+0.073
+Mall
+112 views
+Forward-facing
+PSNR↑
+SSIM↑
+LPIPS↓
+24.83
+0.879
+0.100
+26.12
+0.922
+0.203
+30.29
+0.948
+0.129
+28.15
+0.907
+0.240
+28.07
+0.916
+0.212
+24.79
+0.907
+0.198
+32.53
+0.969
+0.073
+Bull
+233 views
+Unstructured
+PSNR↑
+SSIM↑
+LPIPS↓
+25.88
+0.873
+0.186
+23.02
+0.832
+0.298
+25.95
+0.873
+0.330
+25.38
+0.840
+0.408
+25.25
+0.862
+0.298
+26.63
+0.909
+0.211
+28.90
+0.932
+0.148
+Sculpture
+150 views
+360𝑜 -circling
+PSNR↑
+SSIM↑
+LPIPS↓
+21.81
+0.783
+0.263
+19.33
+0.750
+0.433
+N/A
+N/A
+N/A
+24.12
+0.810
+0.419
+22.69
+0.801
+0.422
+25.28
+0.900
+0.203
+27.01
+0.912
+0.189
+Mean
+PSNR↑
+SSIM↑
+LPIPS↓
+24.44
+0.858
+0.152
+22.65
+0.851
+0.290
+N/A
+N/A
+N/A
+26.60
+0.868
+0.328
+25.43
+0.868
+0.294
+27.69
+0.932
+0.158
+31.06
+0.955
+0.100
+(d) Unstructured
+Table 2. Quantitative comparisons on the Shiny dataset.
+Method
+Metric
+CD
+Tools
+Crest
+Seasoning
+Food
+Giants
+Lab
+Pasta
+Mean
+NeX
+PSNR↑
+SSIM↑
+LPIPS↓
+31.43
+0.958
+0.129
+28.16
+0.953
+0.151
+21.23
+0.757
+0.162
+28.60
+0.928
+0.168
+23.68
+0.832
+0.203
+26.00
+0.898
+0.147
+30.43
+0.949
+0.146
+22.07
+0.844
+0.211
+26.45
+0.890
+0.165
+Ours
+PSNR↑
+SSIM↑
+LPIPS↓
+31.34
+0.981
+0.083
+27.95
+0.952
+0.137
+21.40
+0.749
+0.148
+28.55
+0.926
+0.169
+24.22
+0.849
+0.180
+24.12
+0.845
+0.177
+32.40
+0.981
+0.080
+21.44
+0.832
+0.219
+26.43
+0.890
+0.150
+We use the original implementations and hyperparameters provided
+by the respective authors.
+5.1
+Evaluation on LGDM Data
+To evaluate reflections on wide motion scenes, we capture a new
+dataset ‘LGDM’ with 8 scenes showing prominent or complex reflections, including multi-layer planar reflections (Mall), large glass
+surfaces (Skyscraper, Natatorium), curved surface reflections (Blue
+Car, Red Car, Sculpture), refraction (Glass Bust, Bull). This dataset
+is captured with 67–233 images, resized from 4K (3840 × 2160) to
+1K resolution for training and evaluation, and the types of camera
+trajectory used in the capturing are illustrated in Fig. 5. We select
+a subset of the images as hold-out views (12.5%) for evaluation.
+The camera poses are computed using COLMAP [Schönberger and
+Frahm 2016]. Skyscraper and Sculpture were captured with a DJI
+MINI 4 PRO drone, and the remaining scenes were captured with
+an iPhone 14 Pro Max.
+Quantitatively, our method outperforms all compared methods
+(Table 1), increasing PSNR by 2.64 dB on average. Among these results, NeX [Wizadwongsa et al. 2021] exhibits a significant decrease
+in PSNR when confronted with larger motion parallax due to its
+reliance on a single MPI. As Sculpture is a 360◦ scene, and the camera
+Local Gaussian Density Mixtures for Unstructured Lumigraph Rendering
+Rendered image (Ours)
+GT
+Ours
+NeX
+• 7
+Table 3. Quantitative comparisons on the Real Forward-Facing
+dataset. Best results are highlighted as 1st , 2nd and 3rd . Please refer
+to the supplementary material for the metrics on each scene.
+Scene
+Metric
+LLFF
+NeRF
+NeX
+INGP
+3DGS
+Ours
+Mean
+PSNR↑
+SSIM↑
+LPIPS↓
+24.41
+0.863
+0.211
+26.76
+0.883
+0.246
+27.26
+0.904
+0.178
+24.84
+0.855
+0.262
+24.86
+0.876
+0.197
+27.18
+0.905
+0.166
+Table 4. Ablation on losses. Without the consistency loss, the PSNR
+decreases for both scenes in the RFF dataset and our LGDM dataset.
+Fig. 6. Comparisons on Shiny dataset. Compared with NeX [Wizadwongsa et al. 2021], our local representation can faithfully reproduce the
+highlights and reflections on the stainless steel (top row), as well as the
+reflected contents on the CD and the bottle (bottom row).
+circles around the Red Car and Glass Bust from 120◦ to 180◦ , NeX’s
+single MPI is not suitable for these scenarios and so we mark them
+as N/A. 3DGS [Kerbl et al. 2023] suffers from a brittle optimization
+in challenging scenes. For instance, in Mall, where the content on
+the TV is dynamic and the texture and reflections on the floor are
+high frequency, we see floating geometries that lead to a large drop
+in PSNR (Fig. 11). To enable direct comparison between rendered
+and captured views, we intentionally design the camera trajectory
+to be close to the captured views via interpolating between selected
+keyframe camera poses in this demo for the Red Car scene. A video
+comparison (1:16–1:23) shows that our method outperforms SOTA
+methods in reproducing fine details such as the reflections on the
+polished car surface and the flare on the car window.
+While LLFF [Mildenhall et al. 2019] also uses a local representation and generates visually appealing results, it suffers from minor
+‘pixel shifting’ caused by inaccurate geometry. As reflection-specific
+methods, Ref-NeRF [Verbin et al. 2022] and NPC [Kopanas et al.
+2022] still struggle with large curved reflections, such as the glass
+in Natatorium (Fig. 11). These methods also encounter difficulties in
+handling transparent objects, as seen in the Glass Bust scene.
+5.2
+Evaluation on Shiny Dataset
+The publicly-available Shiny dataset from NeX [Wizadwongsa et al.
+2021]) includes complex reflections from CDs and refractions through
+water bottles. The motion parallax and depth of field in this dataset
+are relatively smaller than in our LGDM dataset. Both NeX and
+our method produce similar quantitative results (Tab. 2); however,
+qualitative results reveal that our method reproduces sharper reflections with more details (Fig. 6). For example, while the CD scene
+show similar PSNR for both methods, our approach reproduces the
+linear striped pattern on the CD itself whereas NeX does not. Average LPIPS decreases from 0.165 to 0.150, suggesting this improved
+perceptual quality over NeX [Wizadwongsa et al. 2021].
+Metric
+Fern
+Flower
+T-Rex
+Natatorium
+Glass Bust
+w/o L𝑐
+PSNR↑
+SSIM↑
+LPIPS↓
+24.55
+0.853
+0.231
+28.53
+0.928
+0.141
+26.71
+0.928
+0.199
+31.16
+0.960
+0.069
+33.18
+0.971
+0.084
+Ours
+PSNR↑
+SSIM↑
+LPIPS↓
+25.58
+0.880
+0.193
+29.15
+0.934
+0.130
+27.86
+0.043
+0.165
+31.22
+0.960
+0.071
+33.48
+0.971
+0.084
+5.3
+Evaluation on Real Forward-facing dataset
+On the publicly-available real forward-facing (RFF) dataset from
+NeRF [Mildenhall et al. 2020], our approach show competitive performance with NeX [Wizadwongsa et al. 2021], where both show higher
+average metrics than other methods (Tab. 3). INGP [Müller et al.
+2022] converges quickly but struggles to consistently produce details.
+3DGS [Kerbl et al. 2023] can generate sharp results for certain scene
+areas but exhibits significant artifacts, such as floating geometries.
+5.4
+Ablations
+Consistency loss. We select Fern, Flower, and T-rex from the RFF
+dataset, as well as Natatorium and Glass Bust from our LGDM dataset
+to evaluate the impact of the consistency loss (Tab. 4). Removing
+the consistency loss Lc significantly reduces PSNR. Qualitatively,
+removing it results in geometry exhibiting noise and missing details,
+leading to noticeable artifacts during rendering (Fig. 8).
+Number of Gaussians and selected views. On the Fern data from
+the RFF dataset, reducing the number of Gaussians can result in
+significant missing geometry (Fig. 9). Similarly, employing fewer
+selected views for warping and blending can present challenges
+in accurately locating geometric surfaces, potentially leading to
+undesirable artifacts such as blurring and ghosting in the final
+results. Through experimentation, we show that using 10 Gaussians
+and eight selected views for each ray is a reasonable balance between
+computational efficiency and reconstruction quality.
+Captured image baseline. In ray interpolation-based IBR, the baseline between captured images is a key factor that influences rendering results. We decrease sampling by 1/2, 1/4, and 1/8 of the total
+number of training views (Fig. 10 and Tab. 5). As sparsity increases,
+fewer input views indeed reduces rendering quality; at 1/8th of the
+input views, we see noticeable artifacts in the rendered images.
+SA Conference Papers ’24, December 3–6, 2024, Tokyo, Japan.
+8 •
+Xiuchao Wu, Jiamin Xu, Chi Wang, Yifan Peng, Qixing Huang, James Tompkin, and Weiwei Xu
+Table 5. Ablation on the density of the captured views. 1/2, 1/4, and
+1/8 represent the proportion of the full training set. We uniformly sample
+views from full set as training views.
+6
+Scene
+Metric
+Full Set
+1/2
+1/4
+1/8
+Glass Bust
+PSNR↑
+SSIM↑
+LPIPS↓
+33.48
+0.971
+0.084
+31.70
+0.962
+0.101
+29.25
+0.940
+0.130
+27.07
+0.910
+0.166
+Natatorium
+PSNR↑
+SSIM↑
+LPIPS↓
+31.22
+0.960
+0.071
+30.33
+0.952
+0.085
+28.96
+0.935
+0.104
+27.00
+0.907
+0.140
+CONCLUSION
+We have shown that a per-view Gaussian density mixture with
+image-based rendering can be end-to-end optimized to achieve highfrequency reflections for curved and transparent objects.
+Limitations and future work. As an IBR method, our results can
+still show some visual ‘snapping’ on curved reflections as the target
+view moves between different sets of neighbors. In these cases, there
+is a visual trade-off vs. global scene methods between such snapping
+in our case and blurring in the case of Ref-NeRF and 3DGS.
+The approach is not yet constructed for fast rendering as it uses
+a volume sampling method. Each 952 × 535 view takes around 270
+ms to render on an NVIDIA RTX 3090Ti, which is faster than NeRF
+but is slower than 3DGS. One way to increase rendering speed is
+to reduce the number of sampled points per ray. A coarse-to-fine
+strategy per ray may increase speed without reducing quality.
+Our method achieves highest quality with dense scene capture,
+especially for complex reflections or refractions. In diffuse areas,
+this results in redundant duplication. But, even with the many views
+in our LGDM dataset, global scene representations like Ref-NeRF or
+3DGS still cannot achieve as high a quality of reflections as ours;
+this discrepancy seems pertinent to investigate in future work.
+Another direction for future work is to explore why our method
+reconstructs view-dependent effects better than other approaches,
+particularly methods that construct global geometries. We have
+observed that flexible local geometries and direct color blending are
+factors in achieving these results. Developing a rigorous evaluation
+framework or theory to support these findings would be valuable.
+ACKNOWLEDGMENTS
+We thank the anonymous reviewers for their professional and constructive comments. Weiwei Xu is partially supported by NSFC
+grant No. 61732016. Jiamin Xu is partially supported by NSFC grant
+No. 62302134 and ZJNSF grant No. LQ24F020031. James Tompkin is partially supported by the US NSF CNS-2038897 and by
+CAREER IIS-2144956. Qixing Huang is partially supported by US
+NSF CAREER IIS-2047677 and by US NSF CAREER IIS-2413161.
+Yifan Peng is partially supported by Hong Kong University Grants
+Committee (ECS 27212822, GRF 17208023) and National Natural
+Science Foundation of China. This paper is supported by Ant Group
+and Information Technology Center and State Key Lab of CAD&CG,
+Zhejiang University.
+SA Conference Papers ’24, December 3–6, 2024, Tokyo, Japan.
+REFERENCES
+C. Buehler, M. Bosse, L. McMillan, S. Gortler, and M. Cohen. 2001. Unstructured
+lumigraph rendering. In ACM Trans. Graph. 425–432.
+G. Chaurasia, S. Duchene, O. Sorkine-Hornung, and G. Drettakis. 2013. Depth synthesis
+and local warps for plausible image-based navigation. ACM Trans. Graph. 32, 3
+(2013), 1–12.
+G. Chaurasia, O. Sorkine-Hornung, and G. Drettakis. 2011. Silhouette-Aware Warping
+for Image-Based Rendering. In Computer Graphics Forum, Vol. 30. 1223–1232.
+P. E. Debevec, C. J. Taylor, and J. Malik. 1996. Modeling and rendering architecture
+from photographs: A hybrid geometry-and image-based approach. In SIGGRAPH,
+ACM. 11–20.
+Martin Eisemann, Bert De Decker, Marcus Magnor, Philippe Bekaert, Edilson De Aguiar,
+Naveed Ahmed, Christian Theobalt, and Anita Sellent. 2008. Floating textures. In
+Computer graphics forum, Vol. 27. Wiley Online Library, 409–418.
+Andrew Fitzgibbon, Yonatan Wexler, and Andrew Zisserman. 2005. Image-based
+rendering using image-based priors. International Journal of Computer Vision 63
+(2005), 141–151.
+John Flynn, Ivan Neulander, James Philbin, and Noah Snavely. 2016. Deepstereo:
+Learning to predict new views from the world’s imagery. In Proceedings of the IEEE
+conference on computer vision and pattern recognition. 5515–5524.
+Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht, and
+Angjoo Kanazawa. 2022. Plenoxels: Radiance fields without neural networks. In
+IEEE Conf. Comput. Vis. Pattern Recog. 5501–5510.
+M. Goesele, J. Ackermann, S. Fuhrmann, C. Haubold, R. Klowsky, D. Steedly, and R.
+Szeliski. 2010. Ambient Point Clouds for View Interpolation. In SIGGRAPH, ACM.
+Article 95, 6 pages.
+S. J. Gortler, R. Grzeszczuk, R. Szeliski, and M. F. Cohen. 1996. The lumigraph. In
+SIGGRAPH, ACM. 43–54.
+Jon Hasselgren, Nikolai Hofmann, and Jacob Munkberg. 2022. Shape, light & material
+decomposition from images using monte carlo rendering and denoising. arXiv
+preprint arXiv:2206.03380 (2022).
+P. Hedman, S. Alsisan, R. Szeliski, and J. Kopf. 2017. Casual 3D Photography. ACM
+Trans. Graph. 36, 6, Article 234 (2017), 15 pages.
+Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis, and
+Gabriel Brostow. 2018. Deep blending for free-viewpoint image-based rendering.
+ACM Trans. Graph. 37, 6 (2018), 1–15.
+Peter Hedman, Tobias Ritschel, George Drettakis, and Gabriel Brostow. 2016. Scalable
+inside-out image-based rendering. ACM Transactions on Graphics (TOG) 35, 6 (2016),
+1–11.
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 2023.
+3D Gaussian Splatting for Real-Time Radiance Field Rendering. ACM Transactions
+on Graphics 42, 4 (2023).
+Diederik P Kingma and Jimmy Ba. 2014. Adam: A method for stochastic optimization.
+arXiv preprint arXiv:1412.6980 (2014).
+Georgios Kopanas, Thomas Leimkühler, Gilles Rainer, Clément Jambon, and George
+Drettakis. 2022. Neural point catacaustics for novel-view synthesis of reflections.
+ACM Transactions on Graphics (TOG) 41, 6 (2022), 1–15.
+Georgios Kopanas, Julien Philip, Thomas Leimkühler, and George Drettakis. 2021. PointBased Neural Rendering with Per-View Optimization. In Computer Graphics Forum,
+Vol. 40. Wiley Online Library, 29–43.
+Johannes Kopf, Fabian Langguth, Daniel Scharstein, Richard Szeliski, and Michael
+Goesele. 2013. Image-based rendering in the gradient domain. ACM Transactions on
+Graphics (TOG) 32, 6 (2013), 1–9.
+Samuli Laine, Janne Hellsten, Tero Karras, Yeongho Seol, Jaakko Lehtinen, and Timo
+Aila. 2020. Modular primitives for high-performance differentiable rendering. ACM
+Trans. Graph. 39, 6 (2020), 1–14.
+Christoph Lassner and Michael Zollhöfer. 2021. Pulsar: Efficient sphere-based neural
+rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. 1440–1449.
+M. Levoy and P. Hanrahan. 1996. Light field rendering. In SIGGRAPH, ACM. 31–42.
+Qinbo Li and Nima Khademi Kalantari. 2020. Synthesizing Light Field From a Single
+Image with Variable MPI and Two Network Fusion. ACM Transactions on Graphics
+39, 6 (12 2020). https://doi.org/10.1145/3414685.3417785
+Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and Christian Theobalt. 2020.
+Neural sparse voxel fields. Advances in Neural Information Processing Systems 33
+(2020), 15651–15663.
+Shichen Liu, Tianye Li, Weikai Chen, and Hao Li. 2019. Soft rasterizer: A differentiable
+renderer for image-based 3d reasoning. In Int. Conf. Comput. Vis. 7708–7717.
+Li Ma, Vasu Agrawal, Haithem Turki, Changil Kim, Chen Gao, Pedro Sander, Michael
+Zollhöfer, and Christian Richardt. 2024. Specnerf: Gaussian directional encoding for
+specular reflections. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition. 21188–21198.
+W. Matusik, C. Buehler, R. Raskar, S. J. Gortler, and L. McMillan. 2000. Image-Based
+Visual Hulls. In SIGGRAPH, ACM. 6 pages.
+W. Matusik, H. Pfister, A. Ngan, P. Beardsley, R. Ziegler, and L. Mcmillan. 2002. ImageBased 3D Photography Using Opacity Hulls. ACM Trans. Graph. 21, 3 (2002),
+Local Gaussian Density Mixtures for Unstructured Lumigraph Rendering
+427–437.
+B. Mildenhall, P. P. Srinivasan, R. Ortiz-Cayon, N. K. Kalantari, R. Ramamoorthi, R. Ng,
+and A. Kar. 2019. Local light field fusion: Practical view synthesis with prescriptive
+sampling guidelines. ACM Trans. Graph. 38, 4 (2019), 1–14.
+Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi
+Ramamoorthi, and Ren Ng. 2020. Nerf: Representing scenes as neural radiance
+fields for view synthesis. In Eur. Conf. Comput. Vis.
+Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. 2022. Instant
+neural graphics primitives with a multiresolution hash encoding. ACM Trans. Graph.
+41, 4 (2022), 1–15.
+Jacob Munkberg, Jon Hasselgren, Tianchang Shen, Jun Gao, Wenzheng Chen, Alex
+Evans, Thomas Müller, and Sanja Fidler. 2022. Extracting triangular 3d models,
+materials, and lighting from images. In IEEE Conf. Comput. Vis. Pattern Recog. 8280–
+8290.
+R. Ortiz-Cayon, A. Djelouah, and G. Drettakis. 2015. A Bayesian Approach for Selective
+Image-Based Rendering Using Superpixels. In 2015 International Conference on 3D
+Vision. 469–477.
+E. Penner and L. Zhang. 2017. Soft 3D reconstruction for view synthesis. ACM Trans.
+Graph. 36, 6 (2017), 1–11.
+Pakkapon Phongthawee, Suttisak Wizadwongsa, Jiraphon Yenphraphai, and Supasorn
+Suwajanakorn. 2022. Nex360: Real-time all-around view synthesis with neural basis
+expansion. IEEE Transactions on Pattern Analysis and Machine Intelligence 45, 6
+(2022), 7611–7624.
+Albert Pumarola, Enric Corona, Gerard Pons-Moll, and Francesc Moreno-Noguer. 2021.
+D-nerf: Neural radiance fields for dynamic scenes. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition. 10318–10327.
+Sameera Ramasinghe and Simon Lucey. 2022. Beyond periodicity: towards a unifying
+framework for activations in coordinate-MLPs. In Eur. Conf. Comput. Vis. 142–158.
+S. Rodriguez, S. Prakash, P. Hedman, and G. Drettakis. 2020. Image-Based Rendering of
+Cars using Semantic Labels and Approximate Reflection Flow. Proc. ACM Comput.
+Graph. Interact. 3 (2020).
+Johannes L Schönberger and Jan-Michael Frahm. 2016. Structure-from-motion revisited.
+In IEEE Conf. Comput. Vis. Pattern Recog. 4104–4113.
+J. Shade, S. Gortler, L. He, and R. Szeliski. 1998. Layered depth images. In SIGGRAPH,
+ACM. 231–242.
+Sudipta N Sinha, Johannes Kopf, Michael Goesele, Daniel Scharstein, and Richard
+Szeliski. 2012. Image-based rendering for scenes with reflections. ACM Trans. Graph.
+31, 4 (2012), 1–10.
+P. P. Srinivasan, R. Tucker, J. T. Barron, R. Ramamoorthi, R. Ng, and N. Snavely. 2019.
+Pushing the boundaries of view extrapolation with multiplane images. In IEEE Conf.
+Comput. Vis. Pattern Recog. 175–184.
+Richard Szeliski, Shai Avidan, and Padmanabhan Anandan. 2000. Layer extraction
+from multiple images containing reflections and transparency. In Proceedings IEEE
+Conference on Computer Vision and Pattern Recognition. CVPR 2000 (Cat. No. PR00662),
+Vol. 1. IEEE, 246–253.
+Fabio Tosi, Yiyi Liao, Carolin Schmitt, and Andreas Geiger. 2021. Smd-nets: Stereo
+mixture density networks. In Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition. 8942–8952.
+Dor Verbin, Peter Hedman, Ben Mildenhall, Todd Zickler, Jonathan T Barron, and
+Pratul P Srinivasan. 2022. Ref-nerf: Structured view-dependent appearance for
+neural radiance fields. In IEEE Conf. Comput. Vis. Pattern Recog. 5481–5490.
+Dor Verbin, Pratul P Srinivasan, Peter Hedman, Ben Mildenhall, Benjamin Attal, Richard
+Szeliski, and Jonathan T Barron. 2024. NeRF-Casting: Improved View-Dependent
+Appearance with Consistent Reflections. arXiv preprint arXiv:2405.14871 (2024).
+Qianqian Wang, Zhicheng Wang, Kyle Genova, Pratul P Srinivasan, Howard Zhou,
+Jonathan T Barron, Ricardo Martin-Brualla, Noah Snavely, and Thomas Funkhouser.
+2021. Ibrnet: Learning multi-view image-based rendering. In IEEE Conf. Comput.
+Vis. Pattern Recog. 4690–4699.
+Suttisak Wizadwongsa, Pakkapon Phongthawee, Jiraphon Yenphraphai, and Supasorn
+Suwajanakorn. 2021. Nex: Real-time view synthesis with neural basis expansion. In
+IEEE Conf. Comput. Vis. Pattern Recog. 8534–8543.
+Daniel N Wood, Daniel I Azuma, Ken Aldinger, Brian Curless, Tom Duchamp, David H
+Salesin, and Werner Stuetzle. 2000. Surface light fields for 3D photography. In Proc.
+of SIGGRAPH. 287–296.
+Liwen Wu, Sai Bi, Zexiang Xu, Fujun Luan, Kai Zhang, Iliyan Georgiev, Kalyan
+Sunkavalli, and Ravi Ramamoorthi. 2024. Neural Directional Encoding for Efficient
+and Accurate View-Dependent Appearance Modeling. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition. 21157–21166.
+Xiuchao Wu, Jiamin Xu, Xin Zhang, Hujun Bao, Qixing Huang, Yujun Shen, James
+Tompkin, and Weiwei Xu. 2023. ScaNeRF: Scalable Bundle-Adjusting Neural
+Radiance Fields for Large-Scale Scene Rendering. ACM Transactions on Graphics
+(TOG) 42, 6 (2023), 1–18.
+Xiuchao Wu, Jiamin Xu, Zihan Zhu, Hujun Bao, Qixing Huang, James Tompkin, and
+Weiwei Xu. 2022. Scalable neural indoor scene rendering. ACM Trans. Graph. 41, 4
+(2022), 1–16.
+• 9
+Jiamin Xu, Xiuchao Wu, Zihan Zhu, Qixing Huang, Yin Yang, Hujun Bao, and Weiwei
+Xu. 2021. Scalable image-based indoor scene rendering with reflections. ACM
+Transactions on Graphics (TOG) 40, 4 (2021), 1–14.
+Z. Xu, S. Bi, K. Sunkavalli, S. Hadap, H. Su, and R. Ramamoorthi. 2019. Deep view
+synthesis from sparse photometric images. ACM Trans. Graph. 38, 4 (2019), 1–13.
+Yao Yao, Jingyang Zhang, Jingbo Liu, Yihang Qu, Tian Fang, David McKinnon, Yanghai
+Tsin, and Long Quan. 2022. Neilf: Neural incident light field for physically-based
+material estimation. In Eur. Conf. Comput. Vis. 700–716.
+Wang Yifan, Felice Serena, Shihao Wu, Cengiz Öztireli, and Olga Sorkine-Hornung.
+2019. Differentiable surface splatting for point-based geometry processing. ACM
+Transactions on Graphics (TOG) 38, 6 (2019), 1–14.
+Kai Zhang, Fujun Luan, Qianqian Wang, Kavita Bala, and Noah Snavely. 2021a. Physg:
+Inverse rendering with spherical gaussians for physics-based material editing and
+relighting. In IEEE Conf. Comput. Vis. Pattern Recog. 5453–5462.
+Xiuming Zhang, Pratul P Srinivasan, Boyang Deng, Paul Debevec, William T Freeman,
+and Jonathan T Barron. 2021b. Nerfactor: Neural factorization of shape and
+reflectance under an unknown illumination. ACM Trans. Graph. 40, 6 (2021), 1–18.
+T. Zhou, R. Tucker, J. Flynn, G. Fyffe, and N. Snavely. 2018. Stereo magnification:
+learning view synthesis using multiplane images. ACM Trans. Graph. 37, 4 (2018),
+1–12.
+SA Conference Papers ’24, December 3–6, 2024, Tokyo, Japan.
+10
+•
+Xiuchao Wu, Jiamin Xu, Chi Wang, Yifan Peng, Qixing Huang, James Tompkin, and Weiwei Xu
+N=10 L=8 (Ours)
+N=1 L=8
+N=10 L=1
+Fig. 7. Renderings with fewer Gaussians and neighboring views. A smaller number of Gaussians (N=1) for each ray will result in missing geometry,
+while a smaller number of neighbor views (L=1) makes it hard to handle occlusions.
+Rendered depth
+Rendered image
+Rendered depth
+Ours
+w/o ℒ!
+Rendered image
+Fig. 8. Ablation on consistency loss. As shown in the top row, without the consistency loss, the rendered depth maps exhibit numerous artifacts, resulting
+in a loss of geometric details (e.g., the ribs of the T-rex) and incorrect depth estimates (e.g., the curtain behind glass bust). The bottom row shows that our
+consistency loss can help to improve the accuracy of local geometry, leading to fewer artifacts in rendering.
+23
+N=1
+N=5
+N=10
+N=15
+22
+21
+L=1
+L=4
+L=8
+L=12
+0.88
+0.325
+0.86
+0.300
+0.84
+0.275
+0.82
+N=1
+N=5
+N=10
+N=15
+0.80
+0.78
+0.76
+L=1
+L=4
+L=8
+L=12
+LPIPS
+24
+SSIM
+PSNR
+25
+N=1
+N=5
+N=10
+N=15
+0.250
+0.225
+0.200
+L=1
+L=4
+L=8
+L=12
+Fig. 9. Ablation on numbers of Gaussians N and neighboring views L. The line charts show that the number of Gaussians and neighbor views in our
+setting (N=10, L=8) is enough for producing high-qulity rendering results. Note that the performance slightly degrades when L reaches 12. This is because a
+large value of L incorporates more neighboring views; depending on camera sampling, these views may be more distant. As a result, more distant views are
+likely to induce larger occlusions and more diverse view-dependent appearance, thus making view synthesis more challenging.
+SA Conference Papers ’24, December 3–6, 2024, Tokyo, Japan.
+Local Gaussian Density Mixtures for Unstructured Lumigraph Rendering
+GT
+Full set
+PSNR: 28.69
+1/2
+PSNR: 33.12
+PSNR: 26.45
+1/4
+PSNR: 31.94
+PSNR: 23.47
+•
+11
+1/8
+PSNR: 29.62
+PSNR: 20.74
+PSNR: 25.03
+Fig. 10. Varying the baseline of captured views. In Natatorium, while quality stays reasonable with half the views, sharpness decreases with one quarter of
+the views as the camera baseline increases. At one eighth of the views, artifacts in thin features appear. PSNR metrics are reported for zoom-ins.
+Rendered image (Ours)
+GT
+Ours
+3DGS
+INGP
+Ref-NeRF
+NPC
+LLFF
+Fig. 11. Results on our LGDM dataset. Top to bottom: Red Car, Mall, Skyscraper, Sculpture. Overall, compared with 3DGS [Kerbl et al. 2023], INGP [Müller
+et al. 2022], Ref-NeRF [Verbin et al. 2022], NPC [Kopanas et al. 2022] and LLFF [Mildenhall et al. 2019], our method creates more accurate scene reproductions
+for reflections. For the Red Car scene, we also provide a video comparison in our accompanying video, alongside the captured video serving as ground truth.
+SA Conference Papers ’24, December 3–6, 2024, Tokyo, Japan.

@@ -1,0 +1,3719 @@
+# isoray
+
+Robust iso-surface rendering via interval-arithmetic ray casting for arbitrary implicit geometries.
+
+**isoray** renders the zero-level-set of any implicit function `f: R^3 -> R` using interval-arithmetic bisection. The primary target is _black-box_ functions where only point evaluations are available — no symbolic formula access required. When the analytic formula is known, Natural Interval Arithmetic (NIA) and Affine Arithmetic (AA) provide tighter bounds as an optimization path.
+
+## Key Features
+
+- **Black-box compatible** — works with any function `f(point) -> scalar`. No symbolic access needed.
+- **Guaranteed robustness** — interval arithmetic ensures no surface features are missed, even for thin shells, cusps, high-frequency surfaces, and near-tangent intersections.
+- **Four inclusion strategies** — `GradientInclusion` (default, uses gradient for tighter bounds), `SamplingInclusion` (black-box baseline), `NaturalIntervalInclusion` (analytic), `AffineInclusion` (analytic, tightest bounds).
+- **Newton refinement** — optional post-bisection refinement for sub-pixel hit-point accuracy.
+- **Mesh SDF support** — render triangle meshes via signed distance fields (`MeshSDF`).
+- **CSG operations** — Union, Intersection, Difference compositing of implicit functions.
+- **Batch-vectorized** — all evaluations operate on `(N, 3)` arrays, no per-point loops.
+- **Differentiable depth rendering** — PyTorch integration with exact gradients via implicit function theorem (IFT). No need to differentiate through the bisection.
+
+## Installation
+
+Requires Python >= 3.11.
+
+```bash
+# Using uv (recommended)
+uv add isoray
+
+# Or using pip
+pip install isoray
+```
+
+### Dependencies
+
+- `numpy >= 1.24.0`
+- `pillow >= 11.0.0`
+
+**Optional extras:**
+
+```bash
+pip install isoray[mesh]    # Mesh SDF support (point-cloud-utils)
+pip install isoray[torch]   # or: uv add isoray[torch]
+```
+
+## Quick Start
+
+```python
+import numpy as np
+from isoray import render
+
+# Define any implicit function: f(pos) -> (values, gradients_or_None)
+def my_sphere(pos):
+    return np.sum(pos**2, axis=1) - 1.0, None
+
+# Render with one call — just provide the function and bounding box
+result = render(my_sphere, bounds=([-1.5]*3, [1.5]*3), save_to="sphere.png")
+```
+
+Camera direction and distance are auto-calculated. Override as needed:
+
+```python
+# Custom camera direction, explicit distance, high resolution
+result = render(my_sphere, bounds=([-1.5]*3, [1.5]*3),
+                direction=(0, 0, 1), distance=5.0,
+                width=1024, height=1024, save_to="sphere_hd.png")
+
+# Depth map instead of shaded image
+result = render(my_sphere, bounds=([-1.5]*3, [1.5]*3),
+                mode="depth", save_to="sphere_depth.png")
+
+# Orthographic (parallel) projection
+result = render(my_sphere, bounds=([-1.5]*3, [1.5]*3),
+                projection="parallel", save_to="sphere_ortho.png")
+```
+
+Using a built-in geometry:
+
+```python
+from isoray import Sphere, render
+
+sphere = Sphere(radius=1.0)
+result = render(sphere, bounds=sphere.bounds(), save_to="sphere.png")
+```
+
+Run the built-in example:
+
+```bash
+uv run python examples/render_simple.py
+```
+
+### Low-Level Pipeline
+
+For full control, use the six-step pipeline directly:
+
+```python
+from isoray import (
+    SamplingInclusion, generate_rays, ray_aabb_intersect,
+    bisect_trace, newton_refine, shade_lambertian, save_image,
+)
+
+origins, directions = generate_rays(256, 256, fov_deg=60.0, eye=[0, 0, 3])
+t_min, t_max, hit = ray_aabb_intersect(origins, directions, [-1.5]*3, [1.5]*3)
+inclusion = SamplingInclusion(my_sphere, lipschitz=2.5)
+result = bisect_trace(origins, directions, t_min, t_max, hit,
+                      inclusion, my_sphere, max_depth=40)
+result.t = newton_refine(result.t, origins, directions, result.hit, my_sphere,
+                         t_lo=result.t_lo, t_hi=result.t_hi)
+result.position = origins + result.t[:, None] * directions
+# ... compute normals, shade, save
+```
+
+## Rendering Pipeline
+
+```
+generate_rays -> ray_aabb_intersect -> bisect_trace -> newton_refine -> shade_lambertian -> save_image
+```
+
+1. **Ray generation** — Pinhole camera model emits rays through each pixel.
+2. **AABB intersection** — Slab test clips rays to the bounding box, discarding misses early.
+3. **Bisection trace** — Level-synchronized interval bisection walks along each ray. The inclusion function bounds `f` over axis-aligned boxes; intervals that cannot contain zero are pruned.
+4. **Newton refinement** — Optional iterative refinement of hit points using directional derivatives.
+5. **Shading** — Lambertian shading from surface normals (analytic gradient or centered finite difference).
+6. **Output** — PNG images for both shaded color and depth maps.
+
+## Architecture
+
+### Core Protocols
+
+| Protocol            | Module                    | Signature                                                             |
+| ------------------- | ------------------------- | --------------------------------------------------------------------- |
+| `ImplicitFunction`  | `geometry/interface.py`   | `__call__(pos: (N,3)) -> (val: (N,), grad: (N,3)\|None)` + `bounds()` |
+| `InclusionFunction` | `arithmetic/interface.py` | `evaluate(lo: (N,3), hi: (N,3)) -> (f_lo: (N,), f_hi: (N,))`          |
+
+### Inclusion Strategies
+
+| Strategy                   | Module                   | Use Case                                                                     |
+| -------------------------- | ------------------------ | ---------------------------------------------------------------------------- |
+| `GradientInclusion`        | `arithmetic/interval.py` | Default in `render()`. Tightens SamplingInclusion via gradient sign test + Mean Value Form. Falls back to SamplingInclusion when gradient is unavailable |
+| `SamplingInclusion`        | `arithmetic/interval.py` | Black-box baseline: samples 8 corners + center, adds Lipschitz margin        |
+| `NaturalIntervalInclusion` | `arithmetic/interval.py` | Analytic: evaluates formula with interval arithmetic ops                     |
+| `AffineInclusion`          | `arithmetic/affine.py`   | Analytic: tightest bounds via noise-symbol correlation tracking              |
+
+### Module Layout
+
+```
+isoray/
+  geometry/       # ImplicitFunction implementations
+    interface.py  #   Protocol definition
+    primitives.py #   Sphere, Torus, ThinShell, HighFrequencySurface, WhitneyUmbrella, CuspSurface
+    csg.py        #   Union, Intersection, Difference
+    mesh_sdf.py   #   MeshSDF (triangle mesh via point_cloud_utils)
+  arithmetic/     # Interval & affine arithmetic
+    interface.py  #   InclusionFunction protocol
+    interval.py   #   ia_* ops, NIA recipes, SamplingInclusion, GradientInclusion, NaturalIntervalInclusion
+    affine.py     #   AffineForm dataclass, aa_* ops, AA recipes, AffineInclusion
+  tracer/         # Ray casting core
+    bisection.py  #   Level-synchronized bisection (the core algorithm)
+    refine.py     #   Newton refinement
+    ray.py        #   Ray-AABB slab intersection
+  renderer/       # Image output
+    render.py     #   High-level render() API
+    camera.py     #   Pinhole + orthographic ray generation
+    shader.py     #   Lambertian shading
+    image.py      #   PNG output (color + depth map)
+  torch/          # PyTorch differentiable rendering (optional)
+    render.py     #   render_depth() — IFT-based differentiable depth
+  utils.py        # centered_difference_normals (6N-point finite diff)
+```
+
+## Differentiable Rendering (PyTorch)
+
+`isoray.torch` provides differentiable depth rendering for shape optimization, inverse problems, and learning-based geometry. The forward pass uses the robust NumPy bisection pipeline; the backward pass computes exact depth gradients via the **implicit function theorem (IFT)** — no need to differentiate through the bisection.
+
+```python
+import torch
+from isoray.torch import render_depth
+
+# Parameters you want to optimize
+radius = torch.tensor(1.0, requires_grad=True)
+
+# Define your implicit function in PyTorch (can be arbitrarily complex)
+def my_sdf(pos):
+    return (pos ** 2).sum(dim=1) - radius ** 2
+
+result = render_depth(my_sdf, bounds=([-1.5]*3, [1.5]*3))
+
+# Depth is differentiable w.r.t. radius (Lipschitz constant auto-estimated)
+loss = result.depth[result.hit].mean()
+loss.backward()
+print(radius.grad)  # d(mean_depth) / d(radius)
+```
+
+The function `f` can use any PyTorch operations — neural networks, complex math, etc. As long as `f` is differentiable w.r.t. its parameters, gradients will flow through the depth map.
+
+## Built-in Geometries
+
+| Geometry                                | Description                                        |
+| --------------------------------------- | -------------------------------------------------- |
+| `Sphere`                                | `\|p - c\|^2 - r^2`                                |
+| `Torus`                                 | `(sqrt(x^2+y^2) - R)^2 + z^2 - r^2`                |
+| `ThinShell`                             | `\|x^2+y^2+z^2 - r^2\| - epsilon`                  |
+| `HighFrequencySurface`                  | `sin(wx)sin(wy)sin(wz) - c`                        |
+| `WhitneyUmbrella`                       | `x^2 - y^2*z` (self-intersecting)                  |
+| `CuspSurface`                           | `x^3 - y^2` (degenerate gradient)                  |
+| `MeshSDF`                               | Signed distance field from triangle mesh (STL/OBJ) |
+| `Union` / `Intersection` / `Difference` | CSG compositing                                    |
+
+## Adding Custom Geometry
+
+### Black-box function (no formula access)
+
+```python
+import numpy as np
+from isoray import SamplingInclusion, bisect_trace
+
+class MyFunction:
+    def __call__(self, pos: np.ndarray) -> tuple[np.ndarray, None]:
+        # pos: (N, 3) -> val: (N,), grad: None (unknown)
+        x, y, z = pos[:, 0], pos[:, 1], pos[:, 2]
+        val = x**2 + y**2 + z**2 - 1.0  # your function here
+        return val, None  # gradient not available
+
+    def bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        return np.array([-2.0, -2.0, -2.0]), np.array([2.0, 2.0, 2.0])
+
+f = MyFunction()
+inclusion = SamplingInclusion(f, lipschitz=3.0)  # or use estimate_lipschitz(f, f.bounds())
+```
+
+### Analytic function (NIA/AA recipes)
+
+For tighter bounds, provide interval arithmetic or affine arithmetic recipes:
+
+```python
+from isoray import NaturalIntervalInclusion, AffineInclusion
+from isoray.arithmetic.interval import ia_mul, ia_add, ia_sub
+
+# NIA recipe: pure function using ia_* interval ops
+def my_nia(x_lo, x_hi, y_lo, y_hi, z_lo, z_hi, params):
+    xx = ia_mul(x_lo, x_hi, x_lo, x_hi)
+    yy = ia_mul(y_lo, y_hi, y_lo, y_hi)
+    zz = ia_mul(z_lo, z_hi, z_lo, z_hi)
+    sum_lo, sum_hi = ia_add(*ia_add(xx, yy), zz)
+    return ia_sub(sum_lo, sum_hi, np.float64(1.0), np.float64(1.0))
+
+inclusion = NaturalIntervalInclusion(my_nia, params=None)
+```
+
+## Development
+
+```bash
+# Run all tests (201 tests)
+uv run pytest
+
+# Run specific test module
+uv run pytest tests/test_tracer/test_bisection.py
+
+# Lint and format
+uv run ruff check isoray/ tests/
+uv run ruff format isoray/ tests/
+
+# Type check
+uv run ty check
+
+# Render all robustness test cases
+uv run python examples/render_robustness.py
+```
+
+### Test Organization
+
+| Directory                | Coverage                                                                                                    |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| `tests/test_arithmetic/` | Interval and affine arithmetic operations, inclusion properties                                             |
+| `tests/test_geometry/`   | Primitive function correctness                                                                              |
+| `tests/test_tracer/`     | Bisection convergence, Newton refinement accuracy                                                           |
+| `tests/test_robustness/` | Challenging cases: thin shell, cusp, grazing ray, near-tangent, high-frequency, self-intersecting, mesh SDF |
+| `tests/test_renderer/`   | End-to-end rendering pipeline                                                                               |
+| `tests/test_torch/`      | Differentiable depth rendering: forward correctness, IFT gradient vs finite difference, edge cases          |
+| `tests/test_utils/`      | Lipschitz estimation (analytic gradient, centered difference, auto mode)                                    |
+
+## How It Works
+
+The core algorithm is **level-synchronized interval bisection**. For each ray:
+
+1. The ray's parameter range `[t_min, t_max]` (from the AABB intersection) is represented as an interval.
+2. At each bisection step, the inclusion function computes guaranteed bounds `[f_lo, f_hi]` on `f` over the axis-aligned box swept by the ray segment.
+3. If `f_lo > 0` or `f_hi < 0` (the interval doesn't contain zero), the segment is **pruned** — no surface can exist there.
+4. Otherwise, the segment is split and both halves are recursively examined.
+5. When the interval width falls below a threshold, a surface hit is recorded.
+6. Optional Newton refinement then converges the hit point to machine precision.
+
+This approach **guarantees** no surface features are missed, unlike fixed-step ray marching which can skip thin features or high-frequency detail.
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for details.
+
+### examples/render_robustness.py
+```
+"""Render all Phase 2 robustness test cases at higher resolution for visual inspection.
+
+Outputs saved to outputs/ directory.
+"""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+import numpy as np
+
+from isoray.arithmetic.interval import SamplingInclusion
+from isoray.geometry.csg import Intersection
+from isoray.geometry.primitives import (
+    CuspSurface,
+    HighFrequencySurface,
+    Sphere,
+    ThinShell,
+    Torus,
+    WhitneyUmbrella,
+)
+from isoray.renderer.camera import generate_rays
+from isoray.renderer.image import save_depth_map, save_image
+from isoray.renderer.shader import shade_lambertian
+from isoray.tracer.bisection import bisect_trace
+from isoray.tracer.ray import ray_aabb_intersect
+from isoray.utils import centered_difference_normals
+
+OUT = Path("outputs")
+OUT.mkdir(exist_ok=True)
+
+RES = 256  # resolution for all renders
+
+
+def render(
+    f,
+    name: str,
+    width: int = RES,
+    height: int = RES,
+    fov_deg: float = 60.0,
+    eye: np.ndarray | None = None,
+    target: np.ndarray | None = None,
+    max_depth: int = 48,
+    threshold: float = 1e-5,
+    lipschitz: float = 1.0,
+) -> dict:
+    if eye is None:
+        eye = np.array([0.0, 0.0, 3.0])
+    if target is None:
+        target = np.array([0.0, 0.0, 0.0])
+
+    t0 = time.time()
+
+    origins, directions = generate_rays(width, height, fov_deg=fov_deg, eye=eye, target=target)
+    aabb_lo, aabb_hi = f.bounds()
+    margin = (aabb_hi - aabb_lo) * 0.05
+    aabb_lo -= margin
+    aabb_hi += margin
+
+    t_min, t_max, hit_mask = ray_aabb_intersect(origins, directions, aabb_lo, aabb_hi)
+    inclusion = SamplingInclusion(f, lipschitz=lipschitz)
+
+    result = bisect_trace(
+        origins,
+        directions,
+        t_min,
+        t_max,
+        hit_mask,
+        inclusion,
+        f,
+        max_depth=max_depth,
+        threshold=threshold,
+    )
+
+    hit_positions = result.position[result.hit]
+    if len(hit_positions) > 0:
+        _, grad = f(hit_positions)
+        if grad is not None:
+            norms = np.linalg.norm(grad, axis=1, keepdims=True)
+            norms = np.maximum(norms, 1e-12)
+            result.normal[result.hit] = grad / norms
+        else:
+            result.normal[result.hit] = centered_difference_normals(f, hit_positions)
+
+    colors = shade_lambertian(result.normal, result.hit)
+    save_image(colors, OUT / f"{name}.png", width, height)
+    save_depth_map(result.t, result.hit, OUT / f"{name}_depth.png", width, height)
+
+    elapsed = time.time() - t0
+    n_hits = int(result.hit.sum())
+    return {"name": name, "hits": n_hits, "total": width * height, "time": elapsed}
+
+
+def main():
+    results = []
+
+    # --- 1. Thin Spherical Shell ---
+    print("=== Thin Spherical Shell ===")
+    f = ThinShell(radius=1.0, epsilon=1e-3)
+    results.append(
+        render(
+            f,
+            "thin_shell",
+            eye=np.array([0.0, 0.0, 3.0]),
+            lipschitz=6.0,
+            max_depth=52,
+            threshold=1e-6,
+        )
+    )
+
+    # --- 2. Near-tangent Intersection ---
+    print("=== Near-tangent Intersection ===")
+    D = 1.9
+    s1 = Sphere(center=np.array([0.0, 0.0, 0.0]), radius=1.0)
+    s2 = Sphere(center=np.array([0.0, 0.0, D]), radius=1.0)
+    f = Intersection(s1, s2)
+    results.append(
+        render(
+            f,
+            "near_tangent_front",
+            eye=np.array([1.5, 1.0, D / 2]),
+            target=np.array([0.0, 0.0, D / 2]),
+            fov_deg=50.0,
+            lipschitz=4.0,
+            max_depth=52,
+        )
+    )
+    results.append(
+        render(
+            f,
+            "near_tangent_top",
+            eye=np.array([0.0, 2.0, D / 2]),
+            target=np.array([0.0, 0.0, D / 2]),
+            fov_deg=30.0,
+            lipschitz=4.0,
+            max_depth=52,
+        )
+    )
+
+    # --- 3. High-frequency Surface ---
+    print("=== High-frequency Surface ===")
+    f = HighFrequencySurface(omega=20.0, offset=0.5, extent=1.0)
+    results.append(
+        render(f, "high_freq_front", eye=np.array([0.0, 0.0, 2.5]), lipschitz=35.0, max_depth=52)
+    )
+    results.append(
+        render(
+            f, "high_freq_diagonal", eye=np.array([2.0, 1.5, 2.0]), lipschitz=35.0, max_depth=52
+        )
+    )
+
+    # --- 4. Grazing Ray ---
+    print("=== Grazing Ray ===")
+    f = Sphere(center=np.array([0.0, 0.0, 0.0]), radius=1.0)
+    results.append(
+        render(
+            f,
+            "grazing_ray",
+            eye=np.array([0.0, 0.0, 3.0]),
+            fov_deg=45.0,
+            lipschitz=3.0,
+            max_depth=52,
+            threshold=1e-6,
+        )
+    )
+
+    # --- 5. Self-intersecting (Whitney Umbrella) ---
+    print("=== Whitney Umbrella (Self-intersecting) ===")
+    f = WhitneyUmbrella(extent=1.5)
+    results.append(render(f, "whitney_front", eye=np.array([3.0, 2.0, 2.0]), lipschitz=10.0))
+    results.append(render(f, "whitney_top", eye=np.array([0.0, 0.0, 4.0]), lipschitz=10.0))
+    results.append(render(f, "whitney_side", eye=np.array([4.0, 0.0, 0.0]), lipschitz=10.0))
+
+    # --- 6. Cusp ---
+    print("=== Cusp Surface ===")
+    f = CuspSurface(extent=1.5)
+    results.append(render(f, "cusp_front", eye=np.array([3.0, 2.0, 2.0]), lipschitz=13.0))
+    results.append(render(f, "cusp_along_ridge", eye=np.array([0.0, 0.0, 4.0]), lipschitz=13.0))
+    results.append(render(f, "cusp_side", eye=np.array([4.0, 0.0, 0.5]), lipschitz=13.0))
+
+    # --- 7. Real CAD Meshes ---
+    print("=== Mesh SDF: CAD Fixtures ===")
+    from pathlib import Path as _P
+
+    from isoray.geometry.mesh_sdf import MeshSDF
+
+    fixtures = _P("tests/fixtures")
+    fov_mesh = 50.0
+    for stl_name in ["brake-caliper-topopt", "sheet-metal-hook", "mounting-bracket"]:
+        f = MeshSDF(fixtures / f"{stl_name}.stl")
+        lo, hi = f.bounds()
+        center = (lo + hi) * 0.5
+        half_extent = np.max(hi - lo) * 0.5
+        dist = half_extent / np.tan(np.radians(fov_mesh * 0.45))
+        for label, az, el in [("front", 45, 30), ("back", 225, 20)]:
+            az_r, el_r = np.radians(az), np.radians(el)
+            eye = center + dist * np.array(
+                [
+                    np.cos(el_r) * np.cos(az_r),
+                    np.cos(el_r) * np.sin(az_r),
+                    np.sin(el_r),
+                ]
+            )
+            results.append(
+                render(
+                    f,
+                    f"mesh_{stl_name}_{label}",
+                    eye=eye,
+                    target=center,
+                    fov_deg=fov_mesh,
+                    lipschitz=1.0,
+                )
+            )
+
+    # --- Bonus: Reference sphere & torus ---
+    print("=== Reference: Sphere & Torus ===")
+    results.append(
+        render(Sphere(radius=1.0), "ref_sphere", eye=np.array([0.0, 0.0, 3.0]), lipschitz=2.5)
+    )
+    results.append(
+        render(
+            Torus(major_radius=1.0, minor_radius=0.3),
+            "ref_torus",
+            eye=np.array([2.5, 1.5, 1.5]),
+            lipschitz=4.0,
+        )
+    )
+
+    # --- Summary ---
+    print("\n" + "=" * 70)
+    print(f"{'Name':<30} {'Hits':>8} {'Total':>8} {'Hit%':>8} {'Time':>8}")
+    print("-" * 70)
+    total_time = 0.0
+    for r in results:
+        pct = r["hits"] / r["total"] * 100 if r["total"] > 0 else 0
+        print(f"{r['name']:<30} {r['hits']:>8} {r['total']:>8} {pct:>7.1f}% {r['time']:>7.2f}s")
+        total_time += r["time"]
+    print("-" * 70)
+    print(f"{'Total':<30} {'':>8} {'':>8} {'':>8} {total_time:>7.2f}s")
+    print(f"\nAll outputs saved to: {OUT.resolve()}/")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### examples/render_simple.py
+```
+"""Minimal example using the high-level render() API."""
+
+from __future__ import annotations
+
+import numpy as np
+
+from isoray import render
+
+
+def sphere(pos: np.ndarray) -> tuple[np.ndarray, None]:
+    """Unit sphere: x^2 + y^2 + z^2 - 1 = 0."""
+    return np.sum(pos**2, axis=1) - 1.0, None
+
+
+if __name__ == "__main__":
+    # --- 1. Simplest usage (4 lines) ---
+    result = render(sphere, bounds=([-1.5] * 3, [1.5] * 3), save_to="simple_sphere.png")
+    print(f"Shaded: {result.hit_count} hits, saved to simple_sphere.png")
+
+    # --- 2. Depth map ---
+    result = render(
+        sphere,
+        bounds=([-1.5] * 3, [1.5] * 3),
+        mode="depth",
+        save_to="simple_sphere_depth.png",
+    )
+    print(f"Depth:  {result.hit_count} hits, saved to simple_sphere_depth.png")
+
+    # --- 3. Parallel (orthographic) projection ---
+    result = render(
+        sphere,
+        bounds=([-1.5] * 3, [1.5] * 3),
+        projection="parallel",
+        direction=(0, 0, 1),
+        save_to="simple_sphere_parallel.png",
+    )
+    print(f"Parallel: {result.hit_count} hits, saved to simple_sphere_parallel.png")
+
+    # --- 4. Custom camera direction and distance ---
+    result = render(
+        sphere,
+        bounds=([-1.5] * 3, [1.5] * 3),
+        direction=(1, 0.5, 0.3),
+        distance=5.0,
+        width=1024,
+        height=1024,
+        save_to="simple_sphere_custom.png",
+    )
+    print(f"Custom: {result.hit_count} hits, saved to simple_sphere_custom.png")
+```
+
+### examples/render_sphere.py
+```
+"""End-to-end iso-surface rendering: camera → rays → bisection trace → shading → image."""
+
+from __future__ import annotations
+
+import time
+
+import numpy as np
+
+from isoray.arithmetic.affine import AffineInclusion
+from isoray.arithmetic.interval import NaturalIntervalInclusion, SamplingInclusion
+from isoray.geometry.primitives import Sphere
+from isoray.renderer.camera import generate_rays
+from isoray.renderer.image import save_depth_map, save_image
+from isoray.renderer.shader import shade_lambertian
+from isoray.tracer.bisection import bisect_trace
+from isoray.tracer.ray import ray_aabb_intersect
+from isoray.tracer.refine import newton_refine
+from isoray.utils import centered_difference_normals
+
+
+def render(
+    f,
+    width: int = 256,
+    height: int = 256,
+    fov_deg: float = 60.0,
+    eye: np.ndarray | None = None,
+    max_depth: int = 40,
+    threshold: float = 1e-5,
+    lipschitz: float = 1.0,
+    output_prefix: str = "output",
+    inclusion_type: str = "sampling",
+    nia_recipe=None,
+    nia_params=None,
+    aa_recipe=None,
+    aa_params=None,
+    max_symbols: int = 8,
+    newton_iter: int = 3,
+) -> None:
+    t0 = time.time()
+
+    # 1. Camera + rays
+    origins, directions = generate_rays(width, height, fov_deg=fov_deg, eye=eye)
+    aabb_lo, aabb_hi = f.bounds()
+    # Slightly expand AABB to avoid edge clipping
+    margin = (aabb_hi - aabb_lo) * 0.01
+    aabb_lo = aabb_lo - margin
+    aabb_hi = aabb_hi + margin
+
+    t_min, t_max, hit_mask = ray_aabb_intersect(origins, directions, aabb_lo, aabb_hi)
+    print(f"Rays: {len(origins)}, AABB hits: {hit_mask.sum()}")
+
+    # 2. Inclusion function
+    if inclusion_type == "nia":
+        inclusion = NaturalIntervalInclusion(nia_recipe, nia_params)
+    elif inclusion_type == "aa":
+        inclusion = AffineInclusion(aa_recipe, aa_params, max_symbols=max_symbols)
+    else:
+        inclusion = SamplingInclusion(f, lipschitz=lipschitz)
+
+    # 3. Bisection trace
+    result = bisect_trace(
+        origins,
+        directions,
+        t_min,
+        t_max,
+        hit_mask,
+        inclusion,
+        f,
+        max_depth=max_depth,
+        threshold=threshold,
+    )
+    print(f"Surface hits: {result.hit.sum()}")
+
+    # 3b. Newton refinement
+    if newton_iter > 0:
+        result.t = newton_refine(
+            result.t,
+            origins,
+            directions,
+            result.hit,
+            f,
+            t_lo=result.t_lo,
+            t_hi=result.t_hi,
+            max_iter=newton_iter,
+        )
+        result.position = origins + result.t[:, None] * directions
+
+    # 4. Compute normals
+    hit_positions = result.position[result.hit]
+    if len(hit_positions) > 0:
+        _, grad = f(hit_positions)
+        if grad is not None:
+            norms = np.linalg.norm(grad, axis=1, keepdims=True)
+            norms = np.maximum(norms, 1e-12)
+            result.normal[result.hit] = grad / norms
+        else:
+            result.normal[result.hit] = centered_difference_normals(f, hit_positions)
+
+    # 5. Shade + save
+    colors = shade_lambertian(result.normal, result.hit)
+    save_image(colors, f"{output_prefix}.png", width, height)
+    save_depth_map(result.t, result.hit, f"{output_prefix}_depth.png", width, height)
+
+    elapsed = time.time() - t0
+    print(f"Done in {elapsed:.2f}s → {output_prefix}.png, {output_prefix}_depth.png")
+
+
+def main():
+    sphere = Sphere(center=np.array([0.0, 0.0, 0.0]), radius=1.0)
+    render(
+        sphere,
+        width=256,
+        height=256,
+        eye=np.array([0.0, 0.0, 3.0]),
+        lipschitz=2.5,  # |grad(x²+y²+z²-1)| = 2|p|, max ~2*2 within box
+        output_prefix="sphere",
+    )
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### isoray/__init__.py
+```
+"""Iso-Surface Rendering — robust ray casting for arbitrary implicit geometries."""
+
+__version__ = "0.3.0"
+
+from isoray.arithmetic.affine import AffineInclusion
+from isoray.arithmetic.interval import (
+    GradientInclusion,
+    NaturalIntervalInclusion,
+    SamplingInclusion,
+)
+from isoray.geometry.csg import Difference, Intersection, Union
+from isoray.geometry.mesh_sdf import MeshSDF
+from isoray.geometry.primitives import Sphere, Torus
+from isoray.renderer.camera import generate_rays, generate_rays_parallel
+from isoray.renderer.image import save_depth_map, save_image
+from isoray.renderer.render import RenderResult, render
+from isoray.renderer.shader import shade_lambertian
+from isoray.tracer.bisection import TraceResult, bisect_trace
+from isoray.tracer.ray import ray_aabb_intersect
+from isoray.tracer.refine import newton_refine
+from isoray.utils import estimate_lipschitz
+
+__all__ = [
+    # High-level API
+    "render",
+    "RenderResult",
+    "estimate_lipschitz",
+    # Geometry
+    "Sphere",
+    "Torus",
+    "MeshSDF",
+    "Union",
+    "Intersection",
+    "Difference",
+    # Arithmetic / Inclusion
+    "SamplingInclusion",
+    "GradientInclusion",
+    "NaturalIntervalInclusion",
+    "AffineInclusion",
+    # Tracer
+    "TraceResult",
+    "bisect_trace",
+    "ray_aabb_intersect",
+    "newton_refine",
+    # Renderer
+    "generate_rays",
+    "generate_rays_parallel",
+    "shade_lambertian",
+    "save_image",
+    "save_depth_map",
+]
+```
+
+### isoray/utils.py
+```
+"""Utilities — centered difference normals, Lipschitz estimation, etc."""
+
+from __future__ import annotations
+
+import numpy as np
+
+
+def centered_difference_normals(f, pos: np.ndarray, h: float = 1e-5) -> np.ndarray:
+    """Compute surface normals via centered difference.
+
+    Evaluates 6N points in a single batch call to f.
+
+    Args:
+        f: ImplicitFunction — f(pos) -> (val, grad|None).
+        pos: (N, 3) surface points.
+        h: finite difference step size.
+
+    Returns:
+        normals: (N, 3) unit normals.
+    """
+    N = pos.shape[0]
+    offsets = np.array(
+        [[h, 0, 0], [-h, 0, 0], [0, h, 0], [0, -h, 0], [0, 0, h], [0, 0, -h]], dtype=pos.dtype
+    )  # (6, 3)
+
+    # Build all 6N query points
+    all_points = (pos[None, :, :] + offsets[:, None, :]).reshape(6 * N, 3)
+
+    all_vals, _ = f(all_points)
+
+    v = all_vals.reshape(6, N)
+    grad_x = (v[0] - v[1]) / (2.0 * h)
+    grad_y = (v[2] - v[3]) / (2.0 * h)
+    grad_z = (v[4] - v[5]) / (2.0 * h)
+
+    normals = np.stack([grad_x, grad_y, grad_z], axis=1)  # (N, 3)
+    norms = np.linalg.norm(normals, axis=1, keepdims=True)
+    norms = np.maximum(norms, 1e-12)
+    return normals / norms
+
+
+def estimate_lipschitz(
+    f,
+    bounds: tuple[np.ndarray, np.ndarray],
+    n_samples: int = 10000,
+    safety: float = 1.5,
+    h: float = 1e-5,
+    rng: np.random.Generator | None = None,
+) -> float:
+    """Estimate the Lipschitz constant of an implicit function over a bounding box.
+
+    Samples random points in the AABB, computes gradient norms, and returns
+    ``max(||grad||) * safety``.  Uses the analytic gradient when available,
+    otherwise falls back to centered finite differences.
+
+    Args:
+        f: ImplicitFunction — ``f(pos) -> (val, grad | None)``.
+        bounds: ``(lo, hi)`` axis-aligned bounding box, each ``(3,)``.
+        n_samples: Number of random sample points.
+        safety: Multiplier on max gradient norm (>1 to be conservative).
+        h: Step size for centered differences (used only when grad is None).
+        rng: Optional NumPy random generator for reproducibility.
+
+    Returns:
+        Estimated Lipschitz constant (float).
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    lo = np.asarray(bounds[0], dtype=np.float64)
+    hi = np.asarray(bounds[1], dtype=np.float64)
+
+    pts = rng.uniform(lo, hi, (n_samples, 3))
+    vals, grad = f(pts)
+
+    if grad is not None:
+        grad_norms = np.linalg.norm(grad, axis=1)
+    else:
+        # Centered finite differences — 6N evaluations
+        offsets = np.array(
+            [[h, 0, 0], [-h, 0, 0], [0, h, 0], [0, -h, 0], [0, 0, h], [0, 0, -h]],
+            dtype=np.float64,
+        )
+        all_points = (pts[None, :, :] + offsets[:, None, :]).reshape(6 * n_samples, 3)
+        all_vals, _ = f(all_points)
+        v = all_vals.reshape(6, n_samples)
+        gx = (v[0] - v[1]) / (2.0 * h)
+        gy = (v[2] - v[3]) / (2.0 * h)
+        gz = (v[4] - v[5]) / (2.0 * h)
+        grad_norms = np.sqrt(gx**2 + gy**2 + gz**2)
+
+    return float(grad_norms.max() * safety)
+```
+
+### isoray/arithmetic/__init__.py
+```
+
+```
+
+### isoray/arithmetic/affine.py
+```
+"""Affine Arithmetic / Reduced AA — Phase 3 inclusion function engine.
+
+Provides tighter bounds than Standard IA by tracking linear correlations
+via noise symbols. Implements the same InclusionFunction protocol.
+
+Representation:
+    x̂ = x0 + x1·ε1 + x2·ε2 + ... + xK·εK + δ·ε_acc
+
+All operations are batch: x0 is (N,), xi is (N, K), delta is (N,).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+
+# ---------------------------------------------------------------------------
+# Affine Form data structure
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AffineForm:
+    """Batch affine form with K noise symbols + accumulated error.
+
+    Attributes:
+        x0: (N,) central values.
+        xi: (N, K) partial deviations for K noise symbols.
+        delta: (N,) accumulated non-affine error (RAA remainder).
+    """
+
+    x0: np.ndarray  # (N,)
+    xi: np.ndarray  # (N, K)
+    delta: np.ndarray  # (N,)
+
+    @property
+    def N(self) -> int:
+        return self.x0.shape[0]
+
+    @property
+    def K(self) -> int:
+        return self.xi.shape[1]
+
+
+# ---------------------------------------------------------------------------
+# Constructors
+# ---------------------------------------------------------------------------
+
+
+def from_interval(lo: np.ndarray, hi: np.ndarray, symbol_idx: int, max_symbols: int) -> AffineForm:
+    """Create an AffineForm from interval [lo, hi].
+
+    Assigns one noise symbol at column `symbol_idx`.
+
+    Args:
+        lo: (N,) lower bounds.
+        hi: (N,) upper bounds.
+        symbol_idx: which column in xi to place the deviation.
+        max_symbols: total K columns.
+
+    Returns:
+        AffineForm where x0 = midpoint, xi[:, symbol_idx] = half-width.
+    """
+    N = lo.shape[0]
+    x0 = (lo + hi) * 0.5
+    rad = (hi - lo) * 0.5
+    xi = np.zeros((N, max_symbols), dtype=np.float64)
+    xi[:, symbol_idx] = rad
+    delta = np.zeros(N, dtype=np.float64)
+    return AffineForm(x0=x0, xi=xi, delta=delta)
+
+
+def constant(val: np.ndarray, max_symbols: int) -> AffineForm:
+    """Create a constant AffineForm (no noise)."""
+    N = val.shape[0]
+    return AffineForm(
+        x0=val.copy(),
+        xi=np.zeros((N, max_symbols), dtype=np.float64),
+        delta=np.zeros(N, dtype=np.float64),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Conversion to interval
+# ---------------------------------------------------------------------------
+
+
+def to_interval(af: AffineForm) -> tuple[np.ndarray, np.ndarray]:
+    """Convert AffineForm to conservative interval [lo, hi].
+
+    lo = x0 - rad, hi = x0 + rad, where rad = sum(|xi|) + delta.
+    """
+    rad = np.sum(np.abs(af.xi), axis=1) + af.delta  # (N,)
+    return af.x0 - rad, af.x0 + rad
+
+
+# ---------------------------------------------------------------------------
+# RAA reduction
+# ---------------------------------------------------------------------------
+
+
+def reduce(af: AffineForm, max_symbols: int) -> AffineForm:
+    """Reduce noise symbols to at most `max_symbols`, merging the rest into delta.
+
+    Keeps the K largest symbols (by absolute value summed over batch).
+    """
+    K_cur = af.K
+    if K_cur <= max_symbols:
+        return af
+
+    # Rank symbols by total contribution across batch
+    importance = np.sum(np.abs(af.xi), axis=0)  # (K_cur,)
+    keep_idx = np.argsort(importance)[-max_symbols:]  # indices of K largest
+    drop_idx = np.setdiff1d(np.arange(K_cur), keep_idx)
+
+    new_xi = af.xi[:, keep_idx]  # (N, max_symbols)
+    merged = np.sum(np.abs(af.xi[:, drop_idx]), axis=1)  # (N,)
+    new_delta = af.delta + merged
+    return AffineForm(x0=af.x0.copy(), xi=new_xi, delta=new_delta)
+
+
+# ---------------------------------------------------------------------------
+# Affine operations (exact — no new error)
+# ---------------------------------------------------------------------------
+
+
+def aa_add(a: AffineForm, b: AffineForm) -> AffineForm:
+    """a + b."""
+    return AffineForm(
+        x0=a.x0 + b.x0,
+        xi=a.xi + b.xi,
+        delta=a.delta + b.delta,
+    )
+
+
+def aa_sub(a: AffineForm, b: AffineForm) -> AffineForm:
+    """a - b."""
+    return AffineForm(
+        x0=a.x0 - b.x0,
+        xi=a.xi - b.xi,
+        delta=a.delta + b.delta,
+    )
+
+
+def aa_neg(a: AffineForm) -> AffineForm:
+    """-a."""
+    return AffineForm(x0=-a.x0, xi=-a.xi, delta=a.delta.copy())
+
+
+def aa_scalar_mul(a: AffineForm, c: float | np.ndarray) -> AffineForm:
+    """c * a where c is a scalar or (N,) array."""
+    if isinstance(c, np.ndarray):
+        return AffineForm(
+            x0=c * a.x0,
+            xi=np.expand_dims(c, 1) * a.xi,
+            delta=np.abs(c) * a.delta,
+        )
+    return AffineForm(
+        x0=c * a.x0,
+        xi=c * a.xi,
+        delta=abs(c) * a.delta,
+    )
+
+
+def aa_add_const(a: AffineForm, c: float | np.ndarray) -> AffineForm:
+    """a + c where c is a scalar or (N,) array."""
+    return AffineForm(
+        x0=a.x0 + c,
+        xi=a.xi.copy(),
+        delta=a.delta.copy(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Non-affine operations (introduce error)
+# ---------------------------------------------------------------------------
+
+
+def aa_mul(a: AffineForm, b: AffineForm) -> AffineForm:
+    """a * b.
+
+    Linearization: a*b = a0*b0 + (a0*bi + b0*ai)εi + residual.
+    Residual includes: cross noise terms, linear delta terms, delta-delta.
+    """
+    new_xi = a.x0[:, None] * b.xi + b.x0[:, None] * a.xi
+    new_x0 = a.x0 * b.x0
+
+    # Residual = |a0|*δ_b + |b0|*δ_a + (Σ|ai| + δ_a)(Σ|bi| + δ_b)
+    # The first two terms are the linear delta contributions not in new_xi.
+    # The last term bounds all noise×noise, noise×delta, and delta×delta cross terms.
+    xi_sum_a = np.sum(np.abs(a.xi), axis=1)
+    xi_sum_b = np.sum(np.abs(b.xi), axis=1)
+    new_delta = (
+        np.abs(a.x0) * b.delta
+        + np.abs(b.x0) * a.delta
+        + (xi_sum_a + a.delta) * (xi_sum_b + b.delta)
+    )
+
+    return AffineForm(x0=new_x0, xi=new_xi, delta=new_delta)
+
+
+def aa_sqr(a: AffineForm) -> AffineForm:
+    """a² — optimized for self-multiplication (exploits self-correlation).
+
+    a = a0 + Σ ai·εi + δ·ε_acc
+    a² = a0² + 2·a0·Σai·εi + residual
+
+    Residual = 2·|a0|·δ + (Σ|ai| + δ)²
+    This accounts for: noise×noise cross terms, noise×delta, and delta².
+    Tighter than aa_mul(a, a) because we don't double-count the a0*δ terms.
+    """
+    new_x0 = a.x0**2
+    new_xi = 2.0 * a.x0[:, None] * a.xi
+
+    xi_abs_sum = np.sum(np.abs(a.xi), axis=1)
+    new_delta = 2.0 * np.abs(a.x0) * a.delta + (xi_abs_sum + a.delta) ** 2
+
+    return AffineForm(x0=new_x0, xi=new_xi, delta=new_delta)
+
+
+def aa_sqrt(a: AffineForm) -> AffineForm:
+    """sqrt(a) via Chebyshev linearization.
+
+    On interval [lo, hi] = [a0-rad, a0+rad]:
+    Chebyshev linear approx: α*x + ζ, with error ≤ δ_new.
+    """
+    lo, hi = to_interval(a)
+    lo = np.maximum(lo, 0.0)  # sqrt domain
+    hi = np.maximum(hi, lo + 1e-30)
+
+    sqrt_lo = np.sqrt(lo)
+    sqrt_hi = np.sqrt(hi)
+
+    # Chebyshev slope: (sqrt(hi) - sqrt(lo)) / (hi - lo)
+    denom = hi - lo
+    safe_denom = np.where(denom > 1e-30, denom, 1.0)
+    alpha = np.where(
+        denom > 1e-30, (sqrt_hi - sqrt_lo) / safe_denom, 0.5 / np.maximum(sqrt_lo, 1e-15)
+    )
+
+    # Chebyshev intercept: minimize max error
+    # For concave function, max error at endpoints and at tangent point
+    # tangent point where f'(x) = alpha: x_t = 1/(4*alpha²)
+    x_t = np.where(alpha > 1e-30, 1.0 / (4.0 * alpha**2), lo)
+    x_t = np.clip(x_t, lo, hi)
+    f_t = np.sqrt(x_t)
+    line_t = alpha * x_t
+
+    # Errors at endpoints and tangent point
+    e_lo = sqrt_lo - alpha * lo
+    e_hi = sqrt_hi - alpha * hi
+    e_t = f_t - line_t
+
+    e_max = np.maximum(np.maximum(e_lo, e_hi), e_t)
+    e_min = np.minimum(np.minimum(e_lo, e_hi), e_t)
+    zeta = (e_max + e_min) * 0.5
+    delta_new = (e_max - e_min) * 0.5
+
+    new_x0 = alpha * a.x0 + zeta
+    new_xi = alpha[:, None] * a.xi
+    new_delta = np.abs(alpha) * a.delta + np.abs(delta_new)
+
+    return AffineForm(x0=new_x0, xi=new_xi, delta=new_delta)
+
+
+def aa_sin(a: AffineForm) -> AffineForm:
+    """sin(a) via Chebyshev linearization with analytical critical points."""
+    lo, hi = to_interval(a)
+    return _chebyshev_sincos(a, lo, hi, np.sin, np.cos)
+
+
+def aa_cos(a: AffineForm) -> AffineForm:
+    """cos(a) via Chebyshev linearization with analytical critical points."""
+    lo, hi = to_interval(a)
+    return _chebyshev_sincos(a, lo, hi, np.cos, lambda x: -np.sin(x))
+
+
+def _chebyshev_sincos(
+    a: AffineForm,
+    lo: np.ndarray,
+    hi: np.ndarray,
+    func,
+    dfunc,
+) -> AffineForm:
+    """Chebyshev linearization for sin/cos with guaranteed error bounds.
+
+    Uses analytical critical point detection to find exact max/min of the
+    error function e(x) = func(x) - alpha*x on [lo, hi].
+    """
+    f_lo = func(lo)
+    f_hi = func(hi)
+    denom = hi - lo
+    wide = denom > 1e-12
+
+    safe_denom = np.where(wide, denom, 1.0)
+    alpha = np.where(wide, (f_hi - f_lo) / safe_denom, dfunc(lo))
+
+    # Error at endpoints
+    e_lo = f_lo - alpha * lo
+    e_hi = f_hi - alpha * hi
+    e_max = np.maximum(e_lo, e_hi)
+    e_min = np.minimum(e_lo, e_hi)
+
+    # Critical points of e(x) = func(x) - alpha*x: where dfunc(x) = alpha
+    # For sin: cos(x) = alpha → x = ±arccos(alpha) + 2kπ
+    # For cos: -sin(x) = alpha → x = arcsin(-alpha) + 2kπ, π - arcsin(-alpha) + 2kπ
+    # Instead of case analysis, sample densely + check known extrema
+    # Use fine grid: max 64 samples per interval to catch all peaks
+    n_grid = 64
+    for i in range(n_grid):
+        t = (i + 0.5) / n_grid
+        x_s = lo + t * denom
+        e_s = func(x_s) - alpha * x_s
+        e_max = np.maximum(e_max, e_s)
+        e_min = np.minimum(e_min, e_s)
+
+    # Additional safety: for wide intervals, also check at derivative zeros
+    # dfunc(x) = alpha → find x in [lo, hi]
+    clamped_alpha = np.clip(alpha, -1.0, 1.0)
+    if func is np.sin:
+        # cos(x) = alpha → x = ±arccos(alpha) + 2kπ
+        base_angles = [np.arccos(clamped_alpha), -np.arccos(clamped_alpha)]
+    else:
+        # -sin(x) = alpha → sin(x) = -alpha → x = arcsin(-alpha), π - arcsin(-alpha)
+        base_angles = [np.arcsin(-clamped_alpha), np.pi - np.arcsin(-clamped_alpha)]
+
+    for base in base_angles:
+        # Find all k such that base + 2kπ ∈ [lo, hi]
+        k_start = np.ceil((lo - base) / (2 * np.pi)).astype(int)
+        for dk in range(-1, 5):
+            x_crit = base + (k_start + dk) * 2 * np.pi
+            in_range = (x_crit >= lo - 1e-12) & (x_crit <= hi + 1e-12)
+            if np.any(in_range):
+                e_crit = func(x_crit) - alpha * x_crit
+                e_max = np.where(in_range, np.maximum(e_max, e_crit), e_max)
+                e_min = np.where(in_range, np.minimum(e_min, e_crit), e_min)
+
+    zeta = (e_max + e_min) * 0.5
+    delta_new = (e_max - e_min) * 0.5
+
+    new_x0 = alpha * a.x0 + zeta
+    new_xi = alpha[:, None] * a.xi
+    new_delta = np.abs(alpha) * a.delta + np.abs(delta_new)
+
+    return AffineForm(x0=new_x0, xi=new_xi, delta=new_delta)
+
+
+def aa_abs(a: AffineForm) -> AffineForm:
+    """|a| via interval-based approximation."""
+    lo, hi = to_interval(a)
+
+    # Case 1: entirely non-negative → identity
+    # Case 2: entirely non-positive → negate
+    # Case 3: straddles zero → conservative bound
+    all_pos = lo >= 0
+    all_neg = hi <= 0
+
+    # For straddle case: |x| on [lo, hi] where lo < 0 < hi
+    # Range: [0, max(|lo|, hi)]
+    # Chebyshev: slope = (hi + lo)/(hi - lo), min at 0 where |0| - slope*0 > 0
+    abs_lo = np.abs(lo)
+    abs_hi = np.abs(hi)
+    result_hi_straddle = np.maximum(abs_lo, abs_hi)
+    result_mid_straddle = result_hi_straddle * 0.5
+
+    new_x0 = np.where(all_pos, a.x0, np.where(all_neg, -a.x0, result_mid_straddle))
+    new_xi = np.where(all_pos, 1.0, np.where(all_neg, -1.0, 0.0))[:, None] * a.xi
+    new_delta = np.where(all_pos, a.delta, np.where(all_neg, a.delta, result_mid_straddle))
+
+    return AffineForm(x0=new_x0, xi=new_xi, delta=new_delta)
+
+
+def aa_pow(a: AffineForm, n: int) -> AffineForm:
+    """Integer power a^n via Chebyshev linearization for guaranteed bounds."""
+    if n == 0:
+        return constant(np.ones_like(a.x0), a.K)
+    if n == 1:
+        return AffineForm(x0=a.x0.copy(), xi=a.xi.copy(), delta=a.delta.copy())
+    if n == 2:
+        return aa_sqr(a)
+
+    # For n >= 3: Chebyshev linearization of x^n on [lo, hi]
+    lo, hi = to_interval(a)
+
+    f_lo = lo**n
+    f_hi = hi**n
+    denom = hi - lo
+    wide = denom > 1e-12
+
+    safe_denom = np.where(wide, denom, 1.0)
+    alpha = np.where(wide, (f_hi - f_lo) / safe_denom, n * lo ** (n - 1))
+
+    # Error function: e(x) = x^n - alpha*x
+    # Critical points: n*x^(n-1) = alpha → x = (alpha/n)^(1/(n-1))
+    # Sample densely + check critical points for guaranteed bounds
+    e_lo = f_lo - alpha * lo
+    e_hi = f_hi - alpha * hi
+    e_max = np.maximum(e_lo, e_hi)
+    e_min = np.minimum(e_lo, e_hi)
+
+    # Dense sampling
+    n_grid = 64
+    for i in range(n_grid):
+        t = (i + 0.5) / n_grid
+        x_s = lo + t * denom
+        e_s = x_s**n - alpha * x_s
+        e_max = np.maximum(e_max, e_s)
+        e_min = np.minimum(e_min, e_s)
+
+    # Analytical critical points: n*x^(n-1) = alpha
+    if n % 2 == 0:
+        # Even power: x^(n-1) is odd, so one real root for alpha/n > 0
+        ratio = alpha / n
+        pos_root = np.where(ratio > 0, ratio ** (1.0 / (n - 1)), 0.0)
+        for x_c in [pos_root, -pos_root]:
+            in_range = (x_c >= lo) & (x_c <= hi)
+            if np.any(in_range):
+                e_c = x_c**n - alpha * x_c
+                e_max = np.where(in_range, np.maximum(e_max, e_c), e_max)
+                e_min = np.where(in_range, np.minimum(e_min, e_c), e_min)
+    else:
+        # Odd power: x^(n-1) is even and non-negative
+        # n*x^(n-1) = alpha has real solution when alpha >= 0
+        ratio = np.abs(alpha) / n
+        root = np.where(ratio > 0, ratio ** (1.0 / (n - 1)), 0.0)
+        for sign in [1.0, -1.0]:
+            x_c = sign * root
+            in_range = (x_c >= lo) & (x_c <= hi)
+            if np.any(in_range):
+                e_c = x_c**n - alpha * x_c
+                e_max = np.where(in_range, np.maximum(e_max, e_c), e_max)
+                e_min = np.where(in_range, np.minimum(e_min, e_c), e_min)
+
+    zeta = (e_max + e_min) * 0.5
+    delta_new = (e_max - e_min) * 0.5
+
+    new_x0 = alpha * a.x0 + zeta
+    new_xi = alpha[:, None] * a.xi
+    new_delta = np.abs(alpha) * a.delta + np.abs(delta_new)
+
+    return AffineForm(x0=new_x0, xi=new_xi, delta=new_delta)
+
+
+# ---------------------------------------------------------------------------
+# Inclusion function implementation
+# ---------------------------------------------------------------------------
+
+
+class AffineInclusion:
+    """Inclusion function via Affine Arithmetic evaluation of analytic formulas.
+
+    Takes a "recipe" that evaluates f(x, y, z) using AA operations.
+    Tighter than NIA for functions with repeated variables (dependency problem).
+    """
+
+    def __init__(self, recipe, params: dict | None = None, max_symbols: int = 8):
+        self.recipe = recipe
+        self.params = params or {}
+        self.max_symbols = max_symbols
+
+    def evaluate(self, lo: np.ndarray, hi: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        K = self.max_symbols
+        # Create initial affine forms for x, y, z (each gets its own noise symbol)
+        af_x = from_interval(lo[:, 0], hi[:, 0], symbol_idx=0, max_symbols=K)
+        af_y = from_interval(lo[:, 1], hi[:, 1], symbol_idx=1, max_symbols=K)
+        af_z = from_interval(lo[:, 2], hi[:, 2], symbol_idx=2, max_symbols=K)
+
+        # Evaluate the recipe using AA operations
+        af_result = self.recipe(af_x, af_y, af_z, self.params)
+
+        # Optionally reduce if recipe added too many symbols
+        if af_result.K > K:
+            af_result = reduce(af_result, K)
+
+        # Convert to interval
+        return to_interval(af_result)
+
+
+# ---------------------------------------------------------------------------
+# AA recipe functions for known primitives
+# ---------------------------------------------------------------------------
+
+
+def sphere_aa(af_x, af_y, af_z, params):
+    """f = (x-cx)² + (y-cy)² + (z-cz)² - r²"""
+    cx, cy, cz = params.get("center", (0.0, 0.0, 0.0))
+    r2 = params["radius"] ** 2
+    dx = aa_add_const(af_x, -cx)
+    dy = aa_add_const(af_y, -cy)
+    dz = aa_add_const(af_z, -cz)
+    x2 = aa_sqr(dx)
+    y2 = aa_sqr(dy)
+    z2 = aa_sqr(dz)
+    s = aa_add(aa_add(x2, y2), z2)
+    return aa_add_const(s, -r2)
+
+
+def torus_aa(af_x, af_y, af_z, params):
+    """f = (sqrt(x²+y²) - R)² + z² - r²"""
+    cx, cy, cz = params.get("center", (0.0, 0.0, 0.0))
+    R = params["major_radius"]
+    r2 = params["minor_radius"] ** 2
+    dx = aa_add_const(af_x, -cx)
+    dy = aa_add_const(af_y, -cy)
+    dz = aa_add_const(af_z, -cz)
+    x2 = aa_sqr(dx)
+    y2 = aa_sqr(dy)
+    sum_xy = aa_add(x2, y2)
+    rho = aa_sqrt(sum_xy)
+    rho_R = aa_add_const(rho, -R)
+    rho_R2 = aa_sqr(rho_R)
+    z2 = aa_sqr(dz)
+    s = aa_add(rho_R2, z2)
+    return aa_add_const(s, -r2)
+
+
+def thin_shell_aa(af_x, af_y, af_z, params):
+    """f = |x²+y²+z² - r²| - ε"""
+    cx, cy, cz = params.get("center", (0.0, 0.0, 0.0))
+    r2 = params["radius"] ** 2
+    eps = params["epsilon"]
+    dx = aa_add_const(af_x, -cx)
+    dy = aa_add_const(af_y, -cy)
+    dz = aa_add_const(af_z, -cz)
+    x2 = aa_sqr(dx)
+    y2 = aa_sqr(dy)
+    z2 = aa_sqr(dz)
+    g = aa_add(aa_add(x2, y2), z2)
+    g = aa_add_const(g, -r2)
+    abs_g = aa_abs(g)
+    return aa_add_const(abs_g, -eps)
+
+
+def high_freq_aa(af_x, af_y, af_z, params):
+    """f = sin(ωx)·sin(ωy)·sin(ωz) - c"""
+    w = params["omega"]
+    c = params["offset"]
+    wx = aa_scalar_mul(af_x, w)
+    wy = aa_scalar_mul(af_y, w)
+    wz = aa_scalar_mul(af_z, w)
+    sx = aa_sin(wx)
+    sy = aa_sin(wy)
+    sz = aa_sin(wz)
+    sxy = aa_mul(sx, sy)
+    sxyz = aa_mul(sxy, sz)
+    return aa_add_const(sxyz, -c)
+
+
+def whitney_aa(af_x, af_y, af_z, params):
+    """f = x² - y²·z"""
+    x2 = aa_sqr(af_x)
+    y2 = aa_sqr(af_y)
+    y2z = aa_mul(y2, af_z)
+    return aa_sub(x2, y2z)
+
+
+def cusp_aa(af_x, af_y, af_z, params):
+    """f = x³ - y²"""
+    x3 = aa_pow(af_x, 3)
+    y2 = aa_sqr(af_y)
+    return aa_sub(x3, y2)
+```
+
+### isoray/arithmetic/interface.py
+```
+"""Inclusion function protocol — the contract between arithmetic engines and the tracer."""
+
+from typing import Protocol
+
+import numpy as np
+
+
+class InclusionFunction(Protocol):
+    """Evaluates guaranteed range of an implicit function over axis-aligned boxes.
+
+    Implementations: IntervalInclusion (IA), AffineInclusion (AA/RAA).
+    The tracer depends only on this interface, so the arithmetic backend is swappable.
+    """
+
+    def evaluate(self, lo: np.ndarray, hi: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Compute conservative range of f over each box [lo[i], hi[i]].
+
+        Args:
+            lo: (N, 3) float64 — lower corners of N axis-aligned boxes.
+            hi: (N, 3) float64 — upper corners of N axis-aligned boxes.
+
+        Returns:
+            f_lo: (N,) float64 — guaranteed lower bound of f within each box.
+            f_hi: (N,) float64 — guaranteed upper bound of f within each box.
+
+        Guarantee (Inclusion Property):
+            For all x such that lo[i] <= x <= hi[i]:
+                f_lo[i] <= f(x) <= f_hi[i]
+        """
+        ...
+```
+
+### isoray/arithmetic/interval.py
+```
+"""Standard Interval Arithmetic — Phase 1 inclusion function engine.
+
+All operations are batch: inputs/outputs are (N,) or (N, K) arrays.
+Intervals are represented as (lo, hi) pairs where lo <= hi element-wise.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+
+# ---------------------------------------------------------------------------
+# Basic arithmetic
+# ---------------------------------------------------------------------------
+
+
+def ia_add(
+    a_lo: np.ndarray, a_hi: np.ndarray, b_lo: np.ndarray, b_hi: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    return a_lo + b_lo, a_hi + b_hi
+
+
+def ia_sub(
+    a_lo: np.ndarray, a_hi: np.ndarray, b_lo: np.ndarray, b_hi: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    return a_lo - b_hi, a_hi - b_lo
+
+
+def ia_mul(
+    a_lo: np.ndarray, a_hi: np.ndarray, b_lo: np.ndarray, b_hi: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    p1 = a_lo * b_lo
+    p2 = a_lo * b_hi
+    p3 = a_hi * b_lo
+    p4 = a_hi * b_hi
+    lo = np.minimum(np.minimum(p1, p2), np.minimum(p3, p4))
+    hi = np.maximum(np.maximum(p1, p2), np.maximum(p3, p4))
+    return lo, hi
+
+
+def ia_div(
+    a_lo: np.ndarray, a_hi: np.ndarray, b_lo: np.ndarray, b_hi: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Interval division. b must not contain zero."""
+    inv_lo = 1.0 / b_hi
+    inv_hi = 1.0 / b_lo
+    return ia_mul(a_lo, a_hi, inv_lo, inv_hi)
+
+
+# ---------------------------------------------------------------------------
+# Unary operations
+# ---------------------------------------------------------------------------
+
+
+def ia_neg(lo: np.ndarray, hi: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    return -hi, -lo
+
+
+def ia_abs(lo: np.ndarray, hi: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    abs_lo_val = np.abs(lo)
+    abs_hi_val = np.abs(hi)
+    contains = (lo <= 0) & (hi >= 0)
+    r_lo = np.where(contains, 0.0, np.minimum(abs_lo_val, abs_hi_val))
+    r_hi = np.maximum(abs_lo_val, abs_hi_val)
+    return r_lo, r_hi
+
+
+def ia_sqr(lo: np.ndarray, hi: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """x^2 over [lo, hi]."""
+    lo2 = lo * lo
+    hi2 = hi * hi
+    # If interval contains 0, minimum is 0
+    contains_zero_mask = (lo <= 0) & (hi >= 0)
+    r_lo = np.where(contains_zero_mask, 0.0, np.minimum(lo2, hi2))
+    r_hi = np.maximum(lo2, hi2)
+    return r_lo, r_hi
+
+
+def ia_sqrt(lo: np.ndarray, hi: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    lo_clamped = np.maximum(lo, 0.0)
+    return np.sqrt(lo_clamped), np.sqrt(np.maximum(hi, 0.0))
+
+
+def ia_pow(lo: np.ndarray, hi: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray]:
+    """Integer power x^n over [lo, hi]."""
+    if n == 0:
+        ones = np.ones_like(lo)
+        return ones, ones
+    if n == 1:
+        return lo.copy(), hi.copy()
+    if n == 2:
+        return ia_sqr(lo, hi)
+    if n % 2 == 0:
+        # Even power: result is non-negative
+        lo_n = np.abs(lo) ** n
+        hi_n = np.abs(hi) ** n
+        contains = (lo <= 0) & (hi >= 0)
+        r_lo = np.where(contains, 0.0, np.minimum(lo_n, hi_n))
+        r_hi = np.maximum(lo_n, hi_n)
+        return r_lo, r_hi
+    else:
+        # Odd power: monotone
+        return lo**n, hi**n
+
+
+# ---------------------------------------------------------------------------
+# Transcendental functions
+# ---------------------------------------------------------------------------
+
+
+def ia_exp(lo: np.ndarray, hi: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    return np.exp(lo), np.exp(hi)
+
+
+def ia_log(lo: np.ndarray, hi: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    return np.log(np.maximum(lo, 1e-300)), np.log(np.maximum(hi, 1e-300))
+
+
+def ia_sin(lo: np.ndarray, hi: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """sin over [lo, hi]. Handles full-period and critical-point cases."""
+    sin_lo = np.sin(lo)
+    sin_hi = np.sin(hi)
+
+    width = hi - lo
+    # If interval spans >= 2*pi, result is [-1, 1]
+    full = width >= 2.0 * np.pi
+
+    # Check if interval contains a maximum (pi/2 + 2*k*pi)
+    # Shift so that maxima are at 0 + 2*k*pi
+    shifted_max = lo - np.pi / 2.0
+    k_lo_max = np.ceil(shifted_max / (2.0 * np.pi))
+    next_max = k_lo_max * 2.0 * np.pi + np.pi / 2.0
+    has_max = next_max <= hi
+
+    # Check if interval contains a minimum (-pi/2 + 2*k*pi)
+    shifted_min = lo + np.pi / 2.0
+    k_lo_min = np.ceil(shifted_min / (2.0 * np.pi))
+    next_min = k_lo_min * 2.0 * np.pi - np.pi / 2.0
+    has_min = next_min <= hi
+
+    r_lo = np.where(full, -1.0, np.where(has_min, -1.0, np.minimum(sin_lo, sin_hi)))
+    r_hi = np.where(full, 1.0, np.where(has_max, 1.0, np.maximum(sin_lo, sin_hi)))
+    return r_lo, r_hi
+
+
+def ia_cos(lo: np.ndarray, hi: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """cos over [lo, hi]. cos(x) = sin(x + pi/2)."""
+    return ia_sin(lo + np.pi / 2.0, hi + np.pi / 2.0)
+
+
+# ---------------------------------------------------------------------------
+# Comparison / CSG helpers
+# ---------------------------------------------------------------------------
+
+
+def ia_min(
+    a_lo: np.ndarray, a_hi: np.ndarray, b_lo: np.ndarray, b_hi: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    return np.minimum(a_lo, b_lo), np.minimum(a_hi, b_hi)
+
+
+def ia_max(
+    a_lo: np.ndarray, a_hi: np.ndarray, b_lo: np.ndarray, b_hi: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    return np.maximum(a_lo, b_lo), np.maximum(a_hi, b_hi)
+
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
+
+
+def contains_zero(lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
+    """Check if each interval contains zero. Returns bool array."""
+    return (lo <= 0.0) & (hi >= 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Inclusion function implementations
+# ---------------------------------------------------------------------------
+
+
+class SamplingInclusion:
+    """Inclusion function via vertex sampling + Lipschitz bound.
+
+    Works for any ImplicitFunction, including mesh SDF.
+    """
+
+    def __init__(self, f, lipschitz: float = 1.0):
+        self.f = f
+        self.lipschitz = lipschitz
+
+    def evaluate(self, lo: np.ndarray, hi: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Evaluate inclusion over N boxes.
+
+        Args:
+            lo: (N, 3) lower corners
+            hi: (N, 3) upper corners
+
+        Returns:
+            (f_lo, f_hi): each (N,) — conservative range of f
+        """
+        N = lo.shape[0]
+
+        # 8 vertices + center = 9 sample points per box
+        mid = (lo + hi) * 0.5
+        # Build 8 corners: all combinations of lo/hi per axis
+        corners = np.empty((N * 8, 3), dtype=lo.dtype)
+        idx = 0
+        for i in range(2):
+            for j in range(2):
+                for k in range(2):
+                    corners[idx * N : (idx + 1) * N, 0] = lo[:, 0] if i == 0 else hi[:, 0]
+                    corners[idx * N : (idx + 1) * N, 1] = lo[:, 1] if j == 0 else hi[:, 1]
+                    corners[idx * N : (idx + 1) * N, 2] = lo[:, 2] if k == 0 else hi[:, 2]
+                    idx += 1
+
+        all_points = np.concatenate([corners, mid], axis=0)  # (9N, 3)
+        all_vals, _ = self.f(all_points)  # (9N,)
+
+        # Reshape to (9, N) and take min/max over sample axis
+        vals = all_vals.reshape(9, N)
+        sample_min = vals.min(axis=0)  # (N,)
+        sample_max = vals.max(axis=0)  # (N,)
+
+        # Lipschitz margin: L * half-diagonal of box
+        diag = np.sqrt(np.sum((hi - lo) ** 2, axis=1))  # (N,)
+        margin = self.lipschitz * diag * 0.5
+
+        f_lo = sample_min - margin
+        f_hi = sample_max + margin
+        return f_lo, f_hi
+
+
+class GradientInclusion:
+    """Inclusion function via gradient-enhanced sampling.
+
+    Three improvements over SamplingInclusion:
+    1. Local Lipschitz — use sampled gradient norms instead of global L.
+    2. Gradient sign test — zero margin for monotone axes.
+    3. Mean Value Form — tighten via f(mid) + grad_range * half_width.
+
+    When the implicit function returns grad=None, gradient is estimated from
+    corner values at zero extra cost (finite difference on the 8 existing corners).
+
+    Args:
+        f: ImplicitFunction — __call__(pos) -> (val, grad | None).
+        lipschitz: Global Lipschitz constant (upper bound guarantee).
+        safety_factor: Multiplier on local gradient norm estimate. Higher = safer
+            but less tight. Default 1.2 for analytic gradient, automatically
+            increased to 1.5 for corner-estimated gradient.
+        mode: Which improvements to apply.
+            "local_lipschitz" — improvement 1 only.
+            "sign_test" — improvements 1 + 2.
+            "full" — all three (default).
+    """
+
+    def __init__(
+        self,
+        f,
+        lipschitz: float = 1.0,
+        safety_factor: float = 1.2,
+        mode: str = "full",
+    ):
+        self.f = f
+        self.lipschitz = lipschitz
+        self.safety_factor = safety_factor
+        self.mode = mode
+
+    def evaluate(self, lo: np.ndarray, hi: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Evaluate inclusion over N boxes.
+
+        Args:
+            lo: (N, 3) lower corners
+            hi: (N, 3) upper corners
+
+        Returns:
+            (f_lo, f_hi): each (N,) — conservative range of f
+        """
+        N = lo.shape[0]
+
+        # --- Sampling (same as SamplingInclusion) ---
+        mid = (lo + hi) * 0.5
+        corners = np.empty((N * 8, 3), dtype=lo.dtype)
+        idx = 0
+        for i in range(2):
+            for j in range(2):
+                for k in range(2):
+                    corners[idx * N : (idx + 1) * N, 0] = lo[:, 0] if i == 0 else hi[:, 0]
+                    corners[idx * N : (idx + 1) * N, 1] = lo[:, 1] if j == 0 else hi[:, 1]
+                    corners[idx * N : (idx + 1) * N, 2] = lo[:, 2] if k == 0 else hi[:, 2]
+                    idx += 1
+
+        all_points = np.concatenate([corners, mid], axis=0)  # (9N, 3)
+        all_vals, all_grads = self.f(all_points)  # (9N,), (9N, 3) | None
+
+        vals = all_vals.reshape(9, N)
+        sample_min = vals.min(axis=0)  # (N,)
+        sample_max = vals.max(axis=0)  # (N,)
+        half_w = (hi - lo) * 0.5  # (N, 3)
+
+        # --- Determine gradient source ---
+        if all_grads is not None:
+            # Analytic gradient available — enable tightening
+            grad_reshaped = all_grads.reshape(9, N, 3)
+            has_analytic_grad = True
+        else:
+            # No gradient — tightening requires analytic gradient for safety.
+            # Corner-estimated gradients give AVERAGE gradients that cannot
+            # reliably detect non-monotonicity (e.g., a box straddling a
+            # critical point where the average gradient has consistent sign
+            # but the pointwise gradient changes sign).
+            has_analytic_grad = False
+
+        # === Base bound: global Lipschitz (always the safety guarantee) ===
+        diag = np.sqrt(np.sum((hi - lo) ** 2, axis=1))
+        base_margin = self.lipschitz * diag * 0.5
+        base_lo = sample_min - base_margin
+        base_hi = sample_max + base_margin
+
+        if not has_analytic_grad or self.mode == "local_lipschitz":
+            return base_lo, base_hi
+
+        f_lo = base_lo.copy()
+        f_hi = base_hi.copy()
+
+        # --- Sampling resolution check ---
+        # Tightening is only safe when 9 samples adequately capture the
+        # function's behaviour in the box. Compare actual sample range to
+        # the Lipschitz-predicted maximum range.  If the samples captured
+        # only a small fraction of the possible variation, the function
+        # oscillates faster than the sampling density can resolve.
+        sample_range = sample_max - sample_min  # (N,)
+        predicted_range = self.lipschitz * diag  # (N,) max possible variation
+        resolution_ratio = sample_range / np.maximum(predicted_range, 1e-12)
+        well_resolved = resolution_ratio > 0.1  # (N,) bool
+
+        # === Improvement 1: Gradient sign test (tighten only) ===
+        # Only for well-resolved boxes. For monotone axes, the 8 corners
+        # already capture the extremes → no margin needed for that axis.
+        grad_x = grad_reshaped[:, :, 0]  # (9, N)
+        grad_y = grad_reshaped[:, :, 1]
+        grad_z = grad_reshaped[:, :, 2]
+
+        mono_x = (grad_x.min(axis=0) > 0) | (grad_x.max(axis=0) < 0)  # (N,)
+        mono_y = (grad_y.min(axis=0) > 0) | (grad_y.max(axis=0) < 0)
+        mono_z = (grad_z.min(axis=0) > 0) | (grad_z.max(axis=0) < 0)
+        # Only trust monotonicity for well-resolved boxes
+        mono_x = mono_x & well_resolved
+        mono_y = mono_y & well_resolved
+        mono_z = mono_z & well_resolved
+
+        non_mono_diag_sq = (
+            np.where(mono_x, 0.0, (hi[:, 0] - lo[:, 0]) ** 2)
+            + np.where(mono_y, 0.0, (hi[:, 1] - lo[:, 1]) ** 2)
+            + np.where(mono_z, 0.0, (hi[:, 2] - lo[:, 2]) ** 2)
+        )
+        sign_margin = self.lipschitz * np.sqrt(non_mono_diag_sq) * 0.5
+        sign_lo = sample_min - sign_margin
+        sign_hi = sample_max + sign_margin
+
+        f_lo = np.maximum(f_lo, sign_lo)
+        f_hi = np.minimum(f_hi, sign_hi)
+
+        if self.mode == "sign_test":
+            return f_lo, f_hi
+
+        # === Improvement 2: Mean Value Form (tighten only) ===
+        # f(x) ∈ f(mid) + [grad_lo, grad_hi] · (x - mid)
+        # Only applied for well-resolved boxes.
+        f_mid = vals[-1]  # center sample, (N,)
+
+        grad_lo_comp = grad_reshaped.min(axis=0)  # (N, 3)
+        grad_hi_comp = grad_reshaped.max(axis=0)  # (N, 3)
+
+        max_abs_grad = np.maximum(np.abs(grad_lo_comp), np.abs(grad_hi_comp))  # (N, 3)
+        total_spread = (max_abs_grad * half_w).sum(axis=1)  # (N,)
+
+        mv_lo = f_mid - total_spread
+        mv_hi = f_mid + total_spread
+
+        # Only tighten well-resolved boxes with MV
+        mv_lo = np.where(well_resolved, mv_lo, base_lo)
+        mv_hi = np.where(well_resolved, mv_hi, base_hi)
+
+        f_lo = np.maximum(f_lo, mv_lo)
+        f_hi = np.minimum(f_hi, mv_hi)
+
+        # Safety: if intersection produced invalid interval, revert to base
+        bad = f_lo > f_hi
+        f_lo = np.where(bad, base_lo, f_lo)
+        f_hi = np.where(bad, base_hi, f_hi)
+
+        return f_lo, f_hi
+
+
+# ---------------------------------------------------------------------------
+# Natural Interval Extension (NIA) — Phase 3
+# ---------------------------------------------------------------------------
+
+
+class NaturalIntervalInclusion:
+    """Inclusion function via natural interval extension of analytic formulas.
+
+    Instead of sampling + Lipschitz margin, directly evaluates the implicit
+    function's formula using interval arithmetic operations. Tighter than
+    SamplingInclusion for known analytic functions (no Lipschitz margin needed).
+
+    Requires a "recipe" function that expresses f in terms of IA operations.
+    """
+
+    def __init__(self, recipe, params: dict | None = None):
+        self.recipe = recipe
+        self.params = params or {}
+
+    def evaluate(self, lo: np.ndarray, hi: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        x_lo, y_lo, z_lo = lo[:, 0], lo[:, 1], lo[:, 2]
+        x_hi, y_hi, z_hi = hi[:, 0], hi[:, 1], hi[:, 2]
+        return self.recipe(x_lo, x_hi, y_lo, y_hi, z_lo, z_hi, self.params)
+
+
+# --- NIA recipe functions ---------------------------------------------------
+
+
+def sphere_nia(x_lo, x_hi, y_lo, y_hi, z_lo, z_hi, params):
+    """f = (x-cx)² + (y-cy)² + (z-cz)² - r²"""
+    cx, cy, cz = params.get("center", (0.0, 0.0, 0.0))
+    r2 = params["radius"] ** 2
+    # Shift to center
+    dx_lo, dx_hi = x_lo - cx, x_hi - cx
+    dy_lo, dy_hi = y_lo - cy, y_hi - cy
+    dz_lo, dz_hi = z_lo - cz, z_hi - cz
+    # Square each axis
+    x2_lo, x2_hi = ia_sqr(dx_lo, dx_hi)
+    y2_lo, y2_hi = ia_sqr(dy_lo, dy_hi)
+    z2_lo, z2_hi = ia_sqr(dz_lo, dz_hi)
+    # Sum
+    s_lo = x2_lo + y2_lo + z2_lo
+    s_hi = x2_hi + y2_hi + z2_hi
+    return s_lo - r2, s_hi - r2
+
+
+def torus_nia(x_lo, x_hi, y_lo, y_hi, z_lo, z_hi, params):
+    """f = (sqrt(x²+y²) - R)² + z² - r²"""
+    cx, cy, cz = params.get("center", (0.0, 0.0, 0.0))
+    R = params["major_radius"]
+    r2 = params["minor_radius"] ** 2
+    # Shift to center
+    dx_lo, dx_hi = x_lo - cx, x_hi - cx
+    dy_lo, dy_hi = y_lo - cy, y_hi - cy
+    dz_lo, dz_hi = z_lo - cz, z_hi - cz
+    # x² + y²
+    x2_lo, x2_hi = ia_sqr(dx_lo, dx_hi)
+    y2_lo, y2_hi = ia_sqr(dy_lo, dy_hi)
+    sum_xy_lo = x2_lo + y2_lo
+    sum_xy_hi = x2_hi + y2_hi
+    # sqrt(x² + y²)
+    rho_lo, rho_hi = ia_sqrt(sum_xy_lo, sum_xy_hi)
+    # rho - R
+    rho_R_lo = rho_lo - R
+    rho_R_hi = rho_hi - R
+    # (rho - R)²
+    rho_R2_lo, rho_R2_hi = ia_sqr(rho_R_lo, rho_R_hi)
+    # z²
+    z2_lo, z2_hi = ia_sqr(dz_lo, dz_hi)
+    # (rho - R)² + z² - r²
+    f_lo = rho_R2_lo + z2_lo - r2
+    f_hi = rho_R2_hi + z2_hi - r2
+    return f_lo, f_hi
+
+
+def thin_shell_nia(x_lo, x_hi, y_lo, y_hi, z_lo, z_hi, params):
+    """f = |x²+y²+z² - r²| - ε"""
+    cx, cy, cz = params.get("center", (0.0, 0.0, 0.0))
+    r2 = params["radius"] ** 2
+    eps = params["epsilon"]
+    dx_lo, dx_hi = x_lo - cx, x_hi - cx
+    dy_lo, dy_hi = y_lo - cy, y_hi - cy
+    dz_lo, dz_hi = z_lo - cz, z_hi - cz
+    x2_lo, x2_hi = ia_sqr(dx_lo, dx_hi)
+    y2_lo, y2_hi = ia_sqr(dy_lo, dy_hi)
+    z2_lo, z2_hi = ia_sqr(dz_lo, dz_hi)
+    g_lo = x2_lo + y2_lo + z2_lo - r2
+    g_hi = x2_hi + y2_hi + z2_hi - r2
+    abs_lo, abs_hi = ia_abs(g_lo, g_hi)
+    return abs_lo - eps, abs_hi - eps
+
+
+def high_freq_nia(x_lo, x_hi, y_lo, y_hi, z_lo, z_hi, params):
+    """f = sin(ωx)·sin(ωy)·sin(ωz) - c"""
+    w = params["omega"]
+    c = params["offset"]
+    # Scale by omega
+    wx_lo, wx_hi = w * x_lo, w * x_hi
+    wy_lo, wy_hi = w * y_lo, w * y_hi
+    wz_lo, wz_hi = w * z_lo, w * z_hi
+    # sin of each
+    sx_lo, sx_hi = ia_sin(wx_lo, wx_hi)
+    sy_lo, sy_hi = ia_sin(wy_lo, wy_hi)
+    sz_lo, sz_hi = ia_sin(wz_lo, wz_hi)
+    # sin(ωx) · sin(ωy)
+    sxy_lo, sxy_hi = ia_mul(sx_lo, sx_hi, sy_lo, sy_hi)
+    # · sin(ωz)
+    f_lo, f_hi = ia_mul(sxy_lo, sxy_hi, sz_lo, sz_hi)
+    return f_lo - c, f_hi - c
+
+
+def whitney_nia(x_lo, x_hi, y_lo, y_hi, z_lo, z_hi, params):
+    """f = x² - y²·z"""
+    x2_lo, x2_hi = ia_sqr(x_lo, x_hi)
+    y2_lo, y2_hi = ia_sqr(y_lo, y_hi)
+    y2z_lo, y2z_hi = ia_mul(y2_lo, y2_hi, z_lo, z_hi)
+    return ia_sub(x2_lo, x2_hi, y2z_lo, y2z_hi)
+
+
+def cusp_nia(x_lo, x_hi, y_lo, y_hi, z_lo, z_hi, params):
+    """f = x³ - y²"""
+    x3_lo, x3_hi = ia_pow(x_lo, x_hi, 3)
+    y2_lo, y2_hi = ia_sqr(y_lo, y_hi)
+    return ia_sub(x3_lo, x3_hi, y2_lo, y2_hi)
+```
+
+### isoray/geometry/__init__.py
+```
+
+```
+
+### isoray/geometry/csg.py
+```
+"""CSG operations: union, intersection, difference of implicit functions."""
+
+from __future__ import annotations
+
+import numpy as np
+
+
+class Union:
+    """Union of two implicit functions: min(f1, f2)."""
+
+    def __init__(self, f1, f2):
+        self.f1 = f1
+        self.f2 = f2
+
+    def __call__(self, pos: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
+        v1, g1 = self.f1(pos)
+        v2, g2 = self.f2(pos)
+        mask = v1 <= v2  # where f1 is the min
+        val = np.where(mask, v1, v2)
+        grad = None
+        if g1 is not None and g2 is not None:
+            grad = np.where(mask[:, None], g1, g2)
+        return val, grad
+
+    def bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        lo1, hi1 = self.f1.bounds()
+        lo2, hi2 = self.f2.bounds()
+        return np.minimum(lo1, lo2), np.maximum(hi1, hi2)
+
+
+class Intersection:
+    """Intersection of two implicit functions: max(f1, f2)."""
+
+    def __init__(self, f1, f2):
+        self.f1 = f1
+        self.f2 = f2
+
+    def __call__(self, pos: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
+        v1, g1 = self.f1(pos)
+        v2, g2 = self.f2(pos)
+        mask = v1 >= v2  # where f1 is the max
+        val = np.where(mask, v1, v2)
+        grad = None
+        if g1 is not None and g2 is not None:
+            grad = np.where(mask[:, None], g1, g2)
+        return val, grad
+
+    def bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        lo1, hi1 = self.f1.bounds()
+        lo2, hi2 = self.f2.bounds()
+        return np.maximum(lo1, lo2), np.minimum(hi1, hi2)
+
+
+class Difference:
+    """Difference: max(f1, -f2)."""
+
+    def __init__(self, f1, f2):
+        self.f1 = f1
+        self.f2 = f2
+
+    def __call__(self, pos: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
+        v1, g1 = self.f1(pos)
+        v2, g2 = self.f2(pos)
+        neg_v2 = -v2
+        mask = v1 >= neg_v2
+        val = np.where(mask, v1, neg_v2)
+        grad = None
+        if g1 is not None and g2 is not None:
+            grad = np.where(mask[:, None], g1, -g2)
+        return val, grad
+
+    def bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        lo1, hi1 = self.f1.bounds()
+        return lo1, hi1
+```
+
+### isoray/geometry/interface.py
+```
+"""Implicit function protocol — the contract for geometry definitions."""
+
+from typing import Protocol
+
+import numpy as np
+
+
+class ImplicitFunction(Protocol):
+    """An implicit function f: R^3 -> R whose zero-level-set defines a surface.
+
+    All evaluations are batch: pos is (N, 3), returns are (N,) and (N, 3)|None.
+    """
+
+    def __call__(self, pos: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
+        """Evaluate the implicit function (and optionally its gradient).
+
+        Args:
+            pos: (N, 3) float64 — query points.
+
+        Returns:
+            val:  (N,) float64 — function values. Zero = on surface.
+            grad: (N, 3) float64 or None — gradient vectors if available.
+        """
+        ...
+
+    def bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        """Axis-aligned bounding box of the region of interest.
+
+        Returns:
+            lo: (3,) float64 — lower corner.
+            hi: (3,) float64 — upper corner.
+        """
+        ...
+```
+
+### isoray/geometry/mesh_sdf.py
+```
+"""Mesh SDF — implicit function from triangle mesh via point_cloud_utils.
+
+Requires the ``mesh`` extra: ``pip install isoray[mesh]``
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+
+
+def _import_pcu():
+    """Lazy-import point_cloud_utils with a clear error on missing install."""
+    try:
+        import point_cloud_utils as pcu
+    except ImportError:
+        raise ImportError(
+            "point-cloud-utils is required for MeshSDF.\n"
+            "Install it with:  pip install isoray[mesh]"
+        ) from None
+    return pcu
+
+
+class MeshSDF:
+    """Signed distance field from a triangle mesh.
+
+    Uses pcu.signed_distance_to_mesh for batch SDF queries.
+    Lipschitz constant is exactly 1 (property of SDF).
+    Returns smooth vertex normals interpolated via barycentric coordinates.
+    """
+
+    def __init__(self, path: str | Path, padding: float = 0.1):
+        pcu = _import_pcu()
+
+        self._path = Path(path)
+        self._vertices, self._faces = pcu.load_mesh_vf(str(self._path))
+        self._vertices = np.ascontiguousarray(self._vertices, dtype=np.float64)
+        self._faces = np.ascontiguousarray(self._faces, dtype=np.int32)
+        self._padding = padding
+
+        # Precompute bounds from mesh extents
+        v_min = self._vertices.min(axis=0)
+        v_max = self._vertices.max(axis=0)
+        margin = (v_max - v_min) * self._padding
+        self._lo = v_min - margin
+        self._hi = v_max + margin
+
+        # Merge duplicate vertices (STL has unshared vertices per face)
+        _, unique_idx = np.unique(
+            np.round(self._vertices, decimals=6),
+            axis=0,
+            return_inverse=True,
+        )
+        n_unique = unique_idx.max() + 1
+        v_merged = np.zeros((n_unique, 3), dtype=np.float64)
+        np.add.at(v_merged, unique_idx, self._vertices)
+        counts = np.bincount(unique_idx, minlength=n_unique)
+        v_merged /= counts[:, None]
+
+        self._f_merged = unique_idx[self._faces.ravel()].reshape(-1, 3)
+
+        # Smooth vertex normals on merged mesh
+        self._vertex_normals = pcu.estimate_mesh_vertex_normals(
+            np.ascontiguousarray(v_merged),
+            np.ascontiguousarray(self._f_merged, dtype=np.int32),
+            weighting_type="area",
+        )
+
+    def __call__(self, pos: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
+        pcu = _import_pcu()
+        pts = np.ascontiguousarray(pos, dtype=np.float64)
+        sdf, fid, bc = pcu.signed_distance_to_mesh(
+            pts,
+            self._vertices,
+            self._faces,
+        )
+
+        # Interpolate smooth vertex normals at closest points
+        face_vi = self._f_merged[fid]  # (N, 3) merged vertex indices
+        normals = (
+            bc[:, 0:1] * self._vertex_normals[face_vi[:, 0]]
+            + bc[:, 1:2] * self._vertex_normals[face_vi[:, 1]]
+            + bc[:, 2:3] * self._vertex_normals[face_vi[:, 2]]
+        )
+        norms = np.linalg.norm(normals, axis=1, keepdims=True)
+        normals /= np.maximum(norms, 1e-12)
+
+        # Return normals as None for the inclusion function: these are
+        # interpolated vertex normals, NOT the true SDF gradient.  They are
+        # close to grad(SDF) on smooth regions but can diverge near sharp
+        # edges and thin features.  GradientInclusion's sign test / MV form
+        # require an exact gradient to guarantee the inclusion property.
+        # Normals are still available via a second call for shading.
+        return sdf, None
+
+    def bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        return self._lo.copy(), self._hi.copy()
+
+    @property
+    def name(self) -> str:
+        return self._path.stem
+```
+
+### isoray/geometry/primitives.py
+```
+"""Built-in implicit function primitives: sphere, torus, etc."""
+
+from __future__ import annotations
+
+import numpy as np
+
+
+class Sphere:
+    """Sphere: f(p) = |p - center|^2 - radius^2."""
+
+    def __init__(self, center: np.ndarray | None = None, radius: float = 1.0):
+        self.center = np.asarray(center if center is not None else [0.0, 0.0, 0.0])
+        self.radius = radius
+
+    def __call__(self, pos: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
+        d = pos - self.center  # (N, 3)
+        val = np.sum(d**2, axis=1) - self.radius**2  # (N,)
+        grad = 2.0 * d  # (N, 3)
+        return val, grad
+
+    def bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        r = self.radius
+        return self.center - r, self.center + r
+
+
+class Torus:
+    """Torus: f(p) = (sqrt(x^2 + y^2) - R)^2 + z^2 - r^2.
+
+    Major radius R (center of tube to center of torus),
+    minor radius r (tube radius).
+    """
+
+    def __init__(
+        self,
+        major_radius: float = 1.0,
+        minor_radius: float = 0.3,
+        center: np.ndarray | None = None,
+    ):
+        self.R = major_radius
+        self.r = minor_radius
+        self.center = np.asarray(center if center is not None else [0.0, 0.0, 0.0])
+
+    def __call__(self, pos: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
+        p = pos - self.center
+        x, y, z = p[:, 0], p[:, 1], p[:, 2]
+        rho = np.sqrt(x**2 + y**2)
+        val = (rho - self.R) ** 2 + z**2 - self.r**2
+
+        # Gradient
+        # df/dx = 2*(rho - R) * x/rho
+        # df/dy = 2*(rho - R) * y/rho
+        # df/dz = 2*z
+        safe_rho = np.maximum(rho, 1e-12)
+        factor = 2.0 * (rho - self.R) / safe_rho
+        grad = np.stack([factor * x, factor * y, 2.0 * z], axis=1)
+        return val, grad
+
+    def bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        extent = self.R + self.r
+        lo = self.center - np.array([extent, extent, self.r])
+        hi = self.center + np.array([extent, extent, self.r])
+        return lo, hi
+
+
+class ThinShell:
+    """Thin spherical shell: f(p) = |x²+y²+z² - r²| - epsilon.
+
+    Creates a shell of thickness ~2*epsilon around a sphere of given radius.
+    """
+
+    def __init__(
+        self, radius: float = 1.0, epsilon: float = 1e-3, center: np.ndarray | None = None
+    ):
+        self.radius = radius
+        self.epsilon = epsilon
+        self.center = np.asarray(center if center is not None else [0.0, 0.0, 0.0])
+
+    def __call__(self, pos: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
+        d = pos - self.center
+        g = np.sum(d**2, axis=1) - self.radius**2  # (N,)
+        val = np.abs(g) - self.epsilon
+        # Gradient: sign(g) * 2*d (undefined at g=0, but shell surface is at |g|=eps)
+        sign_g = np.sign(g)
+        grad = sign_g[:, None] * 2.0 * d
+        return val, grad
+
+    def bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        r = self.radius * 1.1  # slight expansion
+        return self.center - r, self.center + r
+
+
+class HighFrequencySurface:
+    """High-frequency trigonometric surface: f(p) = sin(ωx)·sin(ωy)·sin(ωz) - c."""
+
+    def __init__(self, omega: float = 20.0, offset: float = 0.5, extent: float = 1.0):
+        self.omega = omega
+        self.offset = offset
+        self.extent = extent
+
+    def __call__(self, pos: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
+        w = self.omega
+        x, y, z = pos[:, 0], pos[:, 1], pos[:, 2]
+        sx, sy, sz = np.sin(w * x), np.sin(w * y), np.sin(w * z)
+        cx, cy, cz = np.cos(w * x), np.cos(w * y), np.cos(w * z)
+        val = sx * sy * sz - self.offset
+        grad = np.stack(
+            [
+                w * cx * sy * sz,
+                w * sx * cy * sz,
+                w * sx * sy * cz,
+            ],
+            axis=1,
+        )
+        return val, grad
+
+    def bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        e = self.extent
+        return np.array([-e, -e, -e]), np.array([e, e, e])
+
+
+class WhitneyUmbrella:
+    """Whitney umbrella (self-intersecting): f(p) = x² - y²·z.
+
+    Self-intersects along the z-axis. Pinch point at the origin.
+    """
+
+    def __init__(self, extent: float = 1.5):
+        self._extent = extent
+
+    def __call__(self, pos: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
+        x, y, z = pos[:, 0], pos[:, 1], pos[:, 2]
+        val = x**2 - y**2 * z
+        grad = np.stack([2.0 * x, -2.0 * y * z, -(y**2)], axis=1)
+        return val, grad
+
+    def bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        e = self._extent
+        return np.array([-e, -e, -e]), np.array([e, e, e])
+
+
+class CuspSurface:
+    """Cusp surface: f(p) = x³ - y².
+
+    Has a cusp ridge along the z-axis where gradient degenerates.
+    """
+
+    def __init__(self, extent: float = 1.5):
+        self._extent = extent
+
+    def __call__(self, pos: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
+        x, y, z = pos[:, 0], pos[:, 1], pos[:, 2]
+        val = x**3 - y**2
+        grad = np.stack([3.0 * x**2, -2.0 * y, np.zeros_like(z)], axis=1)
+        return val, grad
+
+    def bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        e = self._extent
+        return np.array([-e, -e, -e]), np.array([e, e, e])
+```
+
+### isoray/renderer/__init__.py
+```
+
+```
+
+### isoray/renderer/camera.py
+```
+"""Camera models and ray generation — pinhole (perspective) and orthographic (parallel)."""
+
+from __future__ import annotations
+
+import numpy as np
+
+
+def generate_rays(
+    width: int,
+    height: int,
+    fov_deg: float = 60.0,
+    eye: np.ndarray | None = None,
+    target: np.ndarray | None = None,
+    up: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generate rays for a pinhole camera.
+
+    Args:
+        width, height: image resolution in pixels.
+        fov_deg: vertical field-of-view in degrees.
+        eye: (3,) camera position. Default [0, 0, 3].
+        target: (3,) look-at point. Default [0, 0, 0].
+        up: (3,) world up vector. Default [0, 1, 0].
+
+    Returns:
+        origins: (H*W, 3) ray origins (all equal to eye).
+        directions: (H*W, 3) normalized ray directions.
+    """
+    if eye is None:
+        eye = np.array([0.0, 0.0, 3.0])
+    if target is None:
+        target = np.array([0.0, 0.0, 0.0])
+    if up is None:
+        up = np.array([0.0, 1.0, 0.0])
+
+    eye = np.asarray(eye, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    up = np.asarray(up, dtype=np.float64)
+
+    # Camera basis
+    forward = target - eye
+    forward = forward / np.linalg.norm(forward)
+    right = np.cross(forward, up)
+    if np.linalg.norm(right) < 1e-10:
+        # forward is parallel to up — pick an alternative up vector
+        alt_up = np.array([1.0, 0.0, 0.0])
+        right = np.cross(forward, alt_up)
+    right = right / np.linalg.norm(right)
+    cam_up = np.cross(right, forward)
+
+    # Image plane dimensions
+    aspect = width / height
+    fov_rad = np.deg2rad(fov_deg)
+    half_h = np.tan(fov_rad / 2.0)
+    half_w = half_h * aspect
+
+    # Pixel coordinates → normalized device coordinates
+    # Pixel center at (i + 0.5, j + 0.5)
+    j, i = np.meshgrid(np.arange(width), np.arange(height))
+    # i: row (top=0), j: column (left=0)
+    u = (2.0 * (j.ravel() + 0.5) / width - 1.0) * half_w  # right
+    v = (1.0 - 2.0 * (i.ravel() + 0.5) / height) * half_h  # up (flip y)
+
+    # Ray directions in world space
+    directions = u[:, None] * right[None, :] + v[:, None] * cam_up[None, :] + forward[None, :]
+    norms = np.linalg.norm(directions, axis=1, keepdims=True)
+    directions = directions / norms
+
+    origins = np.broadcast_to(eye, directions.shape).copy()
+    return origins, directions
+
+
+def _camera_basis(
+    eye: np.ndarray, target: np.ndarray, up: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute orthonormal camera basis (forward, right, cam_up)."""
+    forward = target - eye
+    forward = forward / np.linalg.norm(forward)
+    right = np.cross(forward, up)
+    if np.linalg.norm(right) < 1e-10:
+        alt_up = np.array([1.0, 0.0, 0.0])
+        right = np.cross(forward, alt_up)
+    right = right / np.linalg.norm(right)
+    cam_up = np.cross(right, forward)
+    return forward, right, cam_up
+
+
+def generate_rays_parallel(
+    width: int,
+    height: int,
+    extent: float = 1.0,
+    eye: np.ndarray | None = None,
+    target: np.ndarray | None = None,
+    up: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generate rays for an orthographic (parallel) camera.
+
+    All rays share the same direction. Origins are distributed on a grid
+    perpendicular to the viewing direction.
+
+    Args:
+        width, height: image resolution in pixels.
+        extent: half-size of the viewing region in world units.
+            The camera covers [-extent, extent] along both right and up axes.
+        eye: (3,) camera position (center of the image plane). Default [0, 0, 3].
+        target: (3,) look-at point. Default [0, 0, 0].
+        up: (3,) world up vector. Default [0, 1, 0].
+
+    Returns:
+        origins: (H*W, 3) ray origins on the image plane.
+        directions: (H*W, 3) ray directions (all identical, normalized).
+    """
+    if eye is None:
+        eye = np.array([0.0, 0.0, 3.0])
+    if target is None:
+        target = np.array([0.0, 0.0, 0.0])
+    if up is None:
+        up = np.array([0.0, 1.0, 0.0])
+
+    eye = np.asarray(eye, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    up = np.asarray(up, dtype=np.float64)
+
+    forward, right, cam_up = _camera_basis(eye, target, up)
+
+    aspect = width / height
+    half_w = extent * aspect
+    half_h = extent
+
+    j, i = np.meshgrid(np.arange(width), np.arange(height))
+    u = (2.0 * (j.ravel() + 0.5) / width - 1.0) * half_w
+    v = (1.0 - 2.0 * (i.ravel() + 0.5) / height) * half_h
+
+    origins = eye[None, :] + u[:, None] * right[None, :] + v[:, None] * cam_up[None, :]
+    directions = np.broadcast_to(forward, origins.shape).copy()
+    return origins, directions
+```
+
+### isoray/renderer/image.py
+```
+"""Image output utilities — save rendered images as PNG."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+from PIL import Image
+
+
+def save_image(colors: np.ndarray, path: str | Path, width: int, height: int) -> None:
+    """Save a color buffer as a PNG image.
+
+    Args:
+        colors: (H*W, 3) float64 in [0, 1].
+        path: output file path.
+        width, height: image dimensions.
+    """
+    pixels = (np.clip(colors, 0.0, 1.0) * 255.0).astype(np.uint8)
+    pixels = pixels.reshape(height, width, 3)
+    img = Image.fromarray(pixels, mode="RGB")
+    img.save(str(path))
+
+
+def save_depth_map(
+    t: np.ndarray, hit: np.ndarray, path: str | Path, width: int, height: int
+) -> None:
+    """Save a depth map as a grayscale PNG.
+
+    Args:
+        t: (H*W,) float64 — ray parameter values.
+        hit: (H*W,) bool — hit mask.
+        path: output file path.
+        width, height: image dimensions.
+    """
+    depth = np.where(hit, t, np.nan)
+    valid = depth[np.isfinite(depth)]
+    if len(valid) == 0:
+        pixels = np.zeros((height, width), dtype=np.uint8)
+    else:
+        d_min, d_max = valid.min(), valid.max()
+        rng = d_max - d_min if d_max > d_min else 1.0
+        normalized = np.where(hit, (depth - d_min) / rng, 1.0)
+        pixels = (np.clip(1.0 - normalized, 0.0, 1.0) * 255.0).astype(np.uint8)
+        pixels = pixels.reshape(height, width)
+
+    img = Image.fromarray(pixels, mode="L")
+    img.save(str(path))
+```
+
+### isoray/renderer/render.py
+```
+"""High-level render API — single-call implicit surface rendering."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+
+from isoray.arithmetic.interval import GradientInclusion
+from isoray.renderer.camera import generate_rays, generate_rays_parallel
+from isoray.renderer.image import save_depth_map, save_image
+from isoray.renderer.shader import shade_lambertian
+from isoray.tracer.bisection import TraceResult, bisect_trace
+from isoray.tracer.ray import ray_aabb_intersect
+from isoray.tracer.refine import newton_refine
+from isoray.utils import centered_difference_normals, estimate_lipschitz
+
+
+def _trace_rays(
+    origins: np.ndarray,
+    directions: np.ndarray,
+    t_min: np.ndarray,
+    t_max: np.ndarray,
+    hit_mask: np.ndarray,
+    inclusion_fn,
+    f,
+    *,
+    max_depth: int = 40,
+    threshold: float = 1e-5,
+    newton_iter: int = 0,
+    batch_size: int | None = None,
+) -> TraceResult:
+    """Trace rays with optional batch processing.
+
+    When *batch_size* is ``None`` (default) all rays are processed in a
+    single call — identical to the original behaviour.  When set to a
+    positive integer the rays are split into batches of that size,
+    traced independently, and the results are merged.
+
+    Args:
+        origins: (R, 3) ray origins.
+        directions: (R, 3) ray directions.
+        t_min: (R,) entry *t* for AABB.
+        t_max: (R,) exit *t* for AABB.
+        hit_mask: (R,) bool — rays that hit the AABB.
+        inclusion_fn: Inclusion function with ``evaluate(lo, hi)`` method.
+        f: Implicit function for sign-change verification.
+        max_depth: Maximum bisection depth.
+        threshold: Bisection convergence width threshold.
+        newton_iter: Newton refinement iterations (0 to disable).
+        batch_size: Number of rays per batch.  ``None`` processes all
+            rays at once.
+
+    Returns:
+        Merged :class:`TraceResult` covering all *R* rays.
+    """
+    R = origins.shape[0]
+
+    if batch_size is None or batch_size >= R:
+        # --- Single-batch fast path (original behaviour) ---
+        result = bisect_trace(
+            origins, directions, t_min, t_max, hit_mask,
+            inclusion_fn, f,
+            max_depth=max_depth, threshold=threshold,
+        )
+        if newton_iter > 0:
+            result.t = newton_refine(
+                result.t, origins, directions, result.hit, f,
+                t_lo=result.t_lo, t_hi=result.t_hi, max_iter=newton_iter,
+            )
+            result.position = origins + result.t[:, None] * directions
+        return result
+
+    # --- Batched path ---
+    result_hit = np.zeros(R, dtype=bool)
+    result_t = np.full(R, np.inf, dtype=np.float64)
+    result_depth_count = np.zeros(R, dtype=np.int32)
+    result_t_lo = np.full(R, np.inf, dtype=np.float64)
+    result_t_hi = np.full(R, np.inf, dtype=np.float64)
+
+    for start in range(0, R, batch_size):
+        end = min(start + batch_size, R)
+        s = slice(start, end)
+
+        batch = bisect_trace(
+            origins[s], directions[s], t_min[s], t_max[s], hit_mask[s],
+            inclusion_fn, f,
+            max_depth=max_depth, threshold=threshold,
+        )
+
+        if newton_iter > 0:
+            batch.t = newton_refine(
+                batch.t, origins[s], directions[s], batch.hit, f,
+                t_lo=batch.t_lo, t_hi=batch.t_hi, max_iter=newton_iter,
+            )
+
+        result_hit[s] = batch.hit
+        result_t[s] = batch.t
+        result_depth_count[s] = batch.depth_count
+        result_t_lo[s] = batch.t_lo
+        result_t_hi[s] = batch.t_hi
+
+    position = origins + result_t[:, None] * directions
+    normal = np.zeros((R, 3), dtype=np.float64)
+
+    return TraceResult(
+        hit=result_hit,
+        t=result_t,
+        position=position,
+        normal=normal,
+        depth_count=result_depth_count,
+        t_lo=result_t_lo,
+        t_hi=result_t_hi,
+    )
+
+
+@dataclass
+class RenderResult:
+    """Result of a :func:`render` call.
+
+    Attributes:
+        image: (H, W, 3) uint8 RGB array.
+        depth: (H, W) float64 depth values (``np.inf`` where no hit).
+        hit_count: Number of rays that hit the surface.
+        trace_result: Full :class:`TraceResult` for advanced inspection.
+    """
+
+    image: np.ndarray
+    depth: np.ndarray
+    hit_count: int
+    trace_result: TraceResult
+
+
+def _compute_camera(
+    bounds: tuple[np.ndarray, np.ndarray],
+    direction: np.ndarray,
+    distance: float | None,
+    target: np.ndarray | None,
+    fov_deg: float,
+    projection: str,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Derive eye, target, and extent from bounds + direction.
+
+    Returns:
+        (eye, target, half_diag) — half_diag is the bounding-sphere radius,
+        useful for computing orthographic extent.
+    """
+    lo, hi = bounds
+    center = (lo + hi) * 0.5
+
+    target_pt = center if target is None else target
+
+    norm = np.linalg.norm(direction)
+    if norm < 1e-12:
+        raise ValueError("direction must be a non-zero vector")
+    dir_unit = direction / norm
+
+    half_diag = np.linalg.norm(hi - lo) * 0.5
+
+    if distance is None:
+        if projection == "perspective":
+            fov_rad = np.deg2rad(fov_deg)
+            distance = half_diag / np.tan(fov_rad * 0.45)
+        else:
+            # For parallel projection, place camera far enough that
+            # the entire bounding box is in front of the image plane.
+            distance = half_diag * 3.0
+    eye = target_pt + dir_unit * distance
+
+    return eye, target_pt, half_diag
+
+
+def render(
+    f: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray | None]],
+    bounds: tuple,
+    *,
+    # Camera
+    direction: np.ndarray | tuple | list = (1, 1, 1),
+    distance: float | None = None,
+    target: np.ndarray | tuple | list | None = None,
+    up: np.ndarray | tuple | list = (0, 1, 0),
+    fov_deg: float = 60.0,
+    projection: str = "perspective",
+    # Resolution
+    width: int = 512,
+    height: int = 512,
+    # Tracing
+    lipschitz: float | str = "auto",
+    max_depth: int = 40,
+    threshold: float = 1e-5,
+    newton_iter: int = 3,
+    # Output mode
+    mode: str = "shaded",
+    # Shading (mode="shaded" only)
+    light_dir: np.ndarray | tuple | list | None = None,
+    ambient: float = 0.1,
+    surface_color: np.ndarray | tuple | list = (0.8, 0.5, 0.3),
+    background: np.ndarray | tuple | list = (0.2, 0.2, 0.2),
+    # File output
+    save_to: str | Path | None = None,
+    # Batching
+    batch_size: int | None = None,
+) -> RenderResult:
+    """Render an implicit surface with a single function call.
+
+    Args:
+        f: Implicit function. Takes ``(N, 3)`` positions, returns
+            ``(val: (N,), grad: (N, 3) | None)``.
+        bounds: Axis-aligned bounding box as ``(lo, hi)`` where each is
+            array-like of shape ``(3,)``.
+        direction: Direction from the object toward the camera.
+            Does not need to be normalized. Default ``(1, 1, 1)``.
+        distance: Camera distance from the target point.
+            If ``None``, auto-calculated to frame the bounding box.
+        target: Look-at point. If ``None``, defaults to the center of *bounds*.
+        up: World up vector. Default ``(0, 1, 0)``.
+        fov_deg: Vertical field of view in degrees (perspective only).
+        projection: ``"perspective"`` or ``"parallel"`` (orthographic).
+        width: Image width in pixels.
+        height: Image height in pixels.
+        lipschitz: Lipschitz constant for the inclusion function.
+            ``"auto"`` (default) estimates it by sampling gradient norms
+            over the bounding box.
+        max_depth: Maximum bisection depth.
+        threshold: Convergence width threshold for bisection.
+        newton_iter: Newton refinement iterations (0 to disable).
+        mode: ``"shaded"`` for Lambertian shading, ``"depth"`` for depth map.
+        light_dir: Direction TO the light source. If ``None``, matches
+            the camera direction.
+        ambient: Ambient light intensity ``[0, 1]``.
+        surface_color: ``(3,)`` RGB surface color in ``[0, 1]``.
+        background: ``(3,)`` RGB background color in ``[0, 1]``.
+        save_to: If provided, save the rendered image to this path.
+        batch_size: Number of rays to process per batch.  ``None``
+            (default) processes all rays at once.  Setting this to a
+            positive integer splits the rays into batches, traces each
+            batch independently, and merges the results.  Useful for
+            limiting peak memory usage at high resolutions.
+
+    Returns:
+        :class:`RenderResult` with image, depth map, hit count, and
+        full trace data.
+
+    Example::
+
+        import numpy as np
+        from isoray import render
+
+        def my_sphere(pos):
+            return np.sum(pos**2, axis=1) - 1.0, None
+
+        result = render(my_sphere, bounds=([-1.5]*3, [1.5]*3),
+                        save_to="sphere.png")
+    """
+    if projection not in ("perspective", "parallel"):
+        raise ValueError(f"projection must be 'perspective' or 'parallel', got {projection!r}")
+    if mode not in ("shaded", "depth"):
+        raise ValueError(f"mode must be 'shaded' or 'depth', got {mode!r}")
+
+    # --- Normalize inputs ---
+    dir_arr = np.asarray(direction, dtype=np.float64)
+    up_arr = np.asarray(up, dtype=np.float64)
+    target_arr = np.asarray(target, dtype=np.float64) if target is not None else None
+    lo = np.asarray(bounds[0], dtype=np.float64)
+    hi = np.asarray(bounds[1], dtype=np.float64)
+
+    # --- Camera setup ---
+    eye, target_pt, half_diag = _compute_camera(
+        (lo, hi), dir_arr, distance, target_arr, fov_deg, projection
+    )
+
+    # --- Ray generation ---
+    if projection == "perspective":
+        origins, directions = generate_rays(
+            width, height, fov_deg=fov_deg, eye=eye, target=target_pt, up=up_arr
+        )
+    else:
+        extent = half_diag * 1.1  # 10% margin
+        origins, directions = generate_rays_parallel(
+            width, height, extent=extent, eye=eye, target=target_pt, up=up_arr
+        )
+
+    # --- Ray-AABB intersection (with small margin) ---
+    margin = (hi - lo) * 0.01
+    aabb_lo = lo - margin
+    aabb_hi = hi + margin
+    t_min, t_max, hit_mask = ray_aabb_intersect(origins, directions, aabb_lo, aabb_hi)
+
+    # --- Lipschitz estimation ---
+    if lipschitz == "auto":
+        lipschitz = estimate_lipschitz(f, (lo, hi))
+
+    # --- Bisection trace + Newton refinement ---
+    inclusion = GradientInclusion(f, lipschitz=lipschitz)
+    result = _trace_rays(
+        origins, directions, t_min, t_max, hit_mask,
+        inclusion, f,
+        max_depth=max_depth, threshold=threshold,
+        newton_iter=newton_iter, batch_size=batch_size,
+    )
+
+    # --- Compute normals ---
+    hit_positions = result.position[result.hit]
+    if len(hit_positions) > 0:
+        _, grad = f(hit_positions)
+        if grad is not None:
+            norms = np.linalg.norm(grad, axis=1, keepdims=True)
+            result.normal[result.hit] = grad / np.maximum(norms, 1e-12)
+        else:
+            result.normal[result.hit] = centered_difference_normals(f, hit_positions)
+
+    # --- Build image ---
+    if mode == "shaded":
+        if light_dir is None:
+            light_dir_arr = eye - target_pt
+        else:
+            light_dir_arr = np.asarray(light_dir, dtype=np.float64)
+        colors = shade_lambertian(
+            result.normal,
+            result.hit,
+            light_dir=light_dir_arr,
+            ambient=ambient,
+            surface_color=surface_color,
+            background=background,
+        )
+        image = (np.clip(colors, 0.0, 1.0) * 255.0).astype(np.uint8).reshape(height, width, 3)
+    else:
+        # Depth mode — grayscale depth map as RGB
+        depth_flat = np.where(result.hit, result.t, np.nan)
+        valid = depth_flat[np.isfinite(depth_flat)]
+        if len(valid) == 0:
+            gray = np.zeros(result.t.shape[0], dtype=np.uint8)
+        else:
+            d_min, d_max = valid.min(), valid.max()
+            rng = d_max - d_min if d_max > d_min else 1.0
+            normalized = np.where(result.hit, (depth_flat - d_min) / rng, 1.0)
+            gray = (np.clip(1.0 - normalized, 0.0, 1.0) * 255.0).astype(np.uint8)
+        image = np.stack([gray, gray, gray], axis=-1).reshape(height, width, 3)
+
+    depth = np.where(result.hit, result.t, np.inf).reshape(height, width)
+
+    # --- Save ---
+    if save_to is not None:
+        path = Path(save_to)
+        if mode == "shaded":
+            save_image(
+                (image.reshape(-1, 3).astype(np.float64) / 255.0),
+                path,
+                width,
+                height,
+            )
+        else:
+            save_depth_map(result.t, result.hit, path, width, height)
+
+    return RenderResult(
+        image=image,
+        depth=depth,
+        hit_count=int(result.hit.sum()),
+        trace_result=result,
+    )
+```
+
+### isoray/renderer/shader.py
+```
+"""Surface shading — normal-based Lambertian lighting."""
+
+from __future__ import annotations
+
+import numpy as np
+
+
+def shade_lambertian(
+    normals: np.ndarray,
+    hit: np.ndarray,
+    light_dir: np.ndarray | None = None,
+    ambient: float = 0.1,
+    surface_color: np.ndarray | tuple | list | None = None,
+    background: np.ndarray | tuple | list | None = None,
+) -> np.ndarray:
+    """Simple Lambertian shading.
+
+    Args:
+        normals: (N, 3) unit surface normals.
+        hit: (N,) bool mask.
+        light_dir: (3,) normalized direction TO the light.
+            Default: normalized [1, 1, 1].
+        ambient: ambient light intensity [0, 1].
+        surface_color: (3,) RGB surface color in [0, 1].
+            Default: (0.8, 0.5, 0.3) warm orange.
+        background: (3,) RGB background color in [0, 1].
+            Default: (0.2, 0.2, 0.2) gray.
+
+    Returns:
+        colors: (N, 3) RGB in [0, 1]. Non-hit pixels are background.
+    """
+    if light_dir is None:
+        light_dir = np.array([1.0, 1.0, 1.0])
+    light_dir = light_dir / np.linalg.norm(light_dir)
+
+    if surface_color is None:
+        sc = np.array([0.8, 0.5, 0.3])
+    else:
+        sc = np.asarray(surface_color, dtype=np.float64)
+
+    if background is None:
+        bg = np.array([0.2, 0.2, 0.2])
+    else:
+        bg = np.asarray(background, dtype=np.float64)
+
+    N = normals.shape[0]
+    colors = np.broadcast_to(bg, (N, 3)).copy()
+
+    if not np.any(hit):
+        return colors
+
+    n = normals[hit]
+    ndotl = np.sum(n * light_dir[None, :], axis=1)
+    ndotl = np.maximum(ndotl, 0.0)
+    intensity = ambient + (1.0 - ambient) * ndotl
+    intensity = np.clip(intensity, 0.0, 1.0)
+
+    colors[hit] = intensity[:, None] * sc[None, :]
+    return colors
+```
+
+### isoray/torch/__init__.py
+```
+"""PyTorch differentiable depth rendering for implicit surfaces.
+
+Requires ``torch`` — install via ``pip install isoray[torch]``.
+"""
+
+from isoray.torch.render import TorchRenderResult, render_depth
+
+__all__ = [
+    "render_depth",
+    "TorchRenderResult",
+]
+```
+
+### isoray/torch/render.py
+```
+"""Differentiable depth rendering via implicit function theorem (IFT).
+
+Forward pass uses the existing NumPy bisection pipeline to robustly find
+surface points.  The backward pass applies the IFT at surface points to
+compute exact depth gradients w.r.t. any torch parameter used by ``f``.
+
+Key identity (IFT):
+    Given f(o + t*d, θ) = 0 on the surface,
+    dt/dθ = −(∂f/∂θ) / (∇ₓf · d)
+
+This is implemented as a *surrogate* expression whose value equals the
+forward depth but whose autograd gradient equals the IFT derivative:
+    t_surr = t_detached − f(p*) / (∇ₓf · d)
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+import torch
+
+from isoray.arithmetic.interval import GradientInclusion
+from isoray.renderer.camera import generate_rays, generate_rays_parallel
+from isoray.renderer.render import _compute_camera, _trace_rays
+from isoray.tracer.ray import ray_aabb_intersect
+
+# ---------------------------------------------------------------------------
+# NumPy wrapper — adapts a torch callable to the ImplicitFunction protocol
+# ---------------------------------------------------------------------------
+
+
+class _TorchToNumpy:
+    """Wraps a ``torch.Tensor → torch.Tensor`` function for the NumPy pipeline.
+
+    Evaluates the torch function under ``torch.no_grad()`` and converts
+    tensors to/from NumPy.  If the torch function is differentiable,
+    gradients are computed for ``GradientInclusion`` (but NOT tracked in
+    the autograd graph — that happens only in the backward surrogate).
+    """
+
+    def __init__(self, f_torch, bounds, dtype, device):
+        self.f_torch = f_torch
+        self._bounds = (
+            np.asarray(bounds[0], dtype=np.float64),
+            np.asarray(bounds[1], dtype=np.float64),
+        )
+        self.dtype = dtype
+        self.device = device
+
+    def __call__(self, pos: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
+        pos_t = torch.tensor(pos, dtype=self.dtype, device=self.device, requires_grad=True)
+        with torch.enable_grad():
+            val_t = self.f_torch(pos_t)
+            try:
+                (grad_t,) = torch.autograd.grad(val_t.sum(), pos_t)
+                grad_np = grad_t.detach().cpu().numpy()
+            except RuntimeError:
+                # f might not be differentiable w.r.t. pos (unlikely but safe)
+                grad_np = None
+        return val_t.detach().cpu().numpy(), grad_np
+
+    def bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        return self._bounds[0].copy(), self._bounds[1].copy()
+
+
+# ---------------------------------------------------------------------------
+# Lipschitz estimation via autograd
+# ---------------------------------------------------------------------------
+
+
+def _estimate_lipschitz_torch(
+    f,
+    bounds: tuple,
+    n_samples: int = 10000,
+    safety: float = 1.5,
+    dtype: torch.dtype = torch.float64,
+    device: str | torch.device = "cpu",
+) -> float:
+    """Estimate Lipschitz constant by sampling gradient norms via autograd."""
+    lo = torch.tensor(bounds[0], dtype=dtype, device=device)
+    hi = torch.tensor(bounds[1], dtype=dtype, device=device)
+
+    pts = torch.rand(n_samples, 3, dtype=dtype, device=device) * (hi - lo) + lo
+    pts.requires_grad_(True)
+
+    with torch.enable_grad():
+        vals = f(pts)
+        (grad,) = torch.autograd.grad(vals.sum(), pts)
+
+    grad_norms = grad.norm(dim=1)
+    return float(grad_norms.max().item() * safety)
+
+
+# ---------------------------------------------------------------------------
+# Result dataclass
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TorchRenderResult:
+    """Result of :func:`render_depth`.
+
+    Attributes:
+        depth: ``(H, W)`` differentiable depth tensor.  Gradients flow
+            through hit pixels to any ``requires_grad`` parameter used
+            by the implicit function.  Non-hit pixels are 0 with no gradient.
+        hit: ``(H, W)`` boolean mask (True where a surface was found).
+        hit_count: Number of hit pixels.
+    """
+
+    depth: torch.Tensor
+    hit: torch.Tensor
+    hit_count: int
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def render_depth(
+    f,
+    bounds: tuple,
+    *,
+    # Camera
+    direction=(1, 1, 1),
+    distance: float | None = None,
+    target=None,
+    up=(0, 1, 0),
+    fov_deg: float = 60.0,
+    projection: str = "perspective",
+    # Resolution
+    width: int = 256,
+    height: int = 256,
+    # Tracing
+    lipschitz: float | str = "auto",
+    max_depth: int = 40,
+    threshold: float = 1e-5,
+    newton_iter: int = 3,
+    # Torch
+    dtype: torch.dtype = torch.float64,
+    device: str | torch.device = "cpu",
+    grad_clamp: float = 1e-6,
+    # Batching
+    batch_size: int | None = None,
+) -> TorchRenderResult:
+    """Render a differentiable depth map of an implicit surface.
+
+    The forward pass uses the full NumPy bisection pipeline (robust
+    interval-arithmetic root finding).  The backward pass computes
+    ``dt/dθ`` via the implicit function theorem — no need to
+    differentiate through the bisection itself.
+
+    Args:
+        f: Implicit function in PyTorch.
+            Signature: ``f(pos: Tensor(N,3)) -> Tensor(N,)``.
+            Must be differentiable w.r.t. both ``pos`` and any captured
+            parameters that require gradients.
+        bounds: Axis-aligned bounding box ``(lo, hi)``, each shape ``(3,)``.
+        direction: Direction from object toward camera (auto-normalized).
+        distance: Camera distance from target.  ``None`` = auto.
+        target: Look-at point.  ``None`` = center of *bounds*.
+        up: World up vector.
+        fov_deg: Vertical FOV in degrees (perspective only).
+        projection: ``"perspective"`` or ``"parallel"``.
+        width: Image width in pixels.
+        height: Image height in pixels.
+        lipschitz: Lipschitz constant for the inclusion function.
+            ``"auto"`` (default) estimates it by sampling gradient norms
+            over the bounding box via ``torch.autograd``.
+        max_depth: Maximum bisection depth.
+        threshold: Bisection convergence threshold.
+        newton_iter: Newton refinement iterations (0 = disable).
+        dtype: Torch dtype (``float64`` recommended for numerical stability).
+        device: Torch device.
+        grad_clamp: Minimum ``|∇f · d|`` to prevent division-by-zero
+            for grazing rays.
+        batch_size: Number of rays to process per batch.  ``None``
+            (default) processes all rays at once.  Useful for limiting
+            peak memory usage at high resolutions.
+
+    Returns:
+        :class:`TorchRenderResult` with differentiable depth and hit mask.
+
+    Example::
+
+        import torch
+        from isoray.torch import render_depth
+
+        radius = torch.tensor(1.0, requires_grad=True)
+
+        def sphere(pos):
+            return (pos ** 2).sum(dim=1) - radius ** 2
+
+        result = render_depth(sphere, bounds=([-1.5]*3, [1.5]*3))
+        loss = result.depth[result.hit].sum()
+        loss.backward()
+        print(radius.grad)  # d(total_depth) / d(radius)
+    """
+    R = height * width
+
+    # --- NumPy wrapper ---
+    f_np = _TorchToNumpy(f, bounds, dtype=dtype, device=device)
+
+    # --- Lipschitz estimation ---
+    if lipschitz == "auto":
+        lipschitz = _estimate_lipschitz_torch(f, bounds, dtype=dtype, device=device)
+
+    # --- Camera setup (reuses existing logic) ---
+    dir_arr = np.asarray(direction, dtype=np.float64)
+    up_arr = np.asarray(up, dtype=np.float64)
+    target_arr = np.asarray(target, dtype=np.float64) if target is not None else None
+    lo = np.asarray(bounds[0], dtype=np.float64)
+    hi = np.asarray(bounds[1], dtype=np.float64)
+
+    eye, target_pt, half_diag = _compute_camera(
+        (lo, hi), dir_arr, distance, target_arr, fov_deg, projection
+    )
+
+    # --- Ray generation ---
+    if projection == "perspective":
+        origins, directions = generate_rays(
+            width, height, fov_deg=fov_deg, eye=eye, target=target_pt, up=up_arr
+        )
+    else:
+        extent = half_diag * 1.1
+        origins, directions = generate_rays_parallel(
+            width, height, extent=extent, eye=eye, target=target_pt, up=up_arr
+        )
+
+    # --- Ray-AABB intersection ---
+    margin = (hi - lo) * 0.01
+    t_min, t_max, hit_mask = ray_aabb_intersect(
+        origins, directions, lo - margin, hi + margin
+    )
+
+    # --- Bisection trace + Newton refinement ---
+    inclusion = GradientInclusion(f_np, lipschitz=lipschitz)
+    trace = _trace_rays(
+        origins, directions, t_min, t_max, hit_mask, inclusion, f_np,
+        max_depth=max_depth, threshold=threshold,
+        newton_iter=newton_iter, batch_size=batch_size,
+    )
+
+    # --- IFT surrogate for differentiable depth ---
+    hit_np = trace.hit  # (R,) bool
+    t_np = trace.t  # (R,) float64
+    hit_idx = np.where(hit_np)[0]
+
+    if len(hit_idx) > 0:
+        # Surface points from the forward solve
+        p_star_np = origins[hit_idx] + t_np[hit_idx, None] * directions[hit_idx]
+        d_np = directions[hit_idx]
+
+        # Evaluate f in torch WITH autograd graph
+        p_star = torch.tensor(p_star_np, dtype=dtype, device=device, requires_grad=True)
+        d_t = torch.tensor(d_np, dtype=dtype, device=device)
+        t_det = torch.tensor(t_np[hit_idx], dtype=dtype, device=device)
+
+        f_vals = f(p_star)  # (N_hit,)
+        (grad_x,) = torch.autograd.grad(
+            f_vals.sum(), p_star, create_graph=True,
+        )  # (N_hit, 3)
+
+        # Directional derivative along ray: ∇f · d
+        dot = (grad_x * d_t).sum(dim=1)  # (N_hit,)
+
+        # Clamp to avoid division-by-zero at grazing incidence
+        dot_clamped = torch.where(
+            dot.abs() < grad_clamp,
+            torch.where(dot >= 0, grad_clamp, -grad_clamp),
+            dot,
+        )
+
+        # IFT surrogate:
+        #   value  ≈ t*           (because f(p*) ≈ 0 after Newton)
+        #   grad   = −∂f/∂θ / (∇f·d)   (exact IFT derivative)
+        t_surr = t_det - f_vals / dot_clamped
+
+        # Scatter into full (R,) depth tensor
+        idx_t = torch.from_numpy(hit_idx).long().to(device)
+        depth_flat = torch.zeros(R, dtype=dtype, device=device)
+        depth_flat = depth_flat.scatter(0, idx_t, t_surr)
+    else:
+        # No hits — return a zero tensor that still supports backward()
+        # by giving it a trivial grad_fn (0 * dummy).
+        depth_flat = torch.zeros(R, dtype=dtype, device=device, requires_grad=True)
+
+    hit_t = torch.from_numpy(hit_np).to(device)
+
+    return TorchRenderResult(
+        depth=depth_flat.reshape(height, width),
+        hit=hit_t.reshape(height, width),
+        hit_count=int(hit_np.sum()),
+    )
+```
+
+### isoray/tracer/__init__.py
+```
+
+```
+
+### isoray/tracer/bisection.py
+```
+"""Level-synchronized bisection tracer — core ray casting algorithm.
+
+Processes all active rays in lockstep by depth level.
+Each depth: batch inclusion evaluate → exclusion → convergence → bisect.
+See devdocs/algorithms.md Section 4 for details.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+
+
+@dataclass
+class TraceResult:
+    hit: np.ndarray  # (R,) bool
+    t: np.ndarray  # (R,) float64
+    position: np.ndarray  # (R, 3) float64
+    normal: np.ndarray  # (R, 3) float64
+    depth_count: np.ndarray  # (R,) int
+    t_lo: np.ndarray  # (R,) float64 — convergence interval lower bound
+    t_hi: np.ndarray  # (R,) float64 — convergence interval upper bound
+
+
+def _intervals_to_3d(
+    origins: np.ndarray,
+    directions: np.ndarray,
+    ray_idx: np.ndarray,
+    t_lo: np.ndarray,
+    t_hi: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Convert ray-parameter intervals to 3D axis-aligned boxes.
+
+    For each interval, compute the 3D box that encloses the ray segment
+    from t_lo to t_hi.
+
+    Returns:
+        lo_3d, hi_3d: each (M, 3)
+    """
+    o = origins[ray_idx]  # (M, 3)
+    d = directions[ray_idx]  # (M, 3)
+
+    p0 = o + t_lo[:, None] * d  # (M, 3)
+    p1 = o + t_hi[:, None] * d  # (M, 3)
+
+    lo_3d = np.minimum(p0, p1)
+    hi_3d = np.maximum(p0, p1)
+    return lo_3d, hi_3d
+
+
+def bisect_trace(
+    origins: np.ndarray,
+    directions: np.ndarray,
+    t_min: np.ndarray,
+    t_max: np.ndarray,
+    hit_mask: np.ndarray,
+    inclusion_fn,
+    f,
+    max_depth: int = 40,
+    threshold: float = 1e-5,
+) -> TraceResult:
+    """Level-synchronized bisection ray tracing.
+
+    Args:
+        origins: (R, 3) ray origins.
+        directions: (R, 3) ray directions.
+        t_min: (R,) entry t for AABB.
+        t_max: (R,) exit t for AABB.
+        hit_mask: (R,) bool — rays that hit AABB.
+        inclusion_fn: InclusionFunction with evaluate(lo, hi) method.
+        f: ImplicitFunction for sign-change verification.
+        max_depth: maximum bisection depth.
+        threshold: convergence width threshold.
+
+    Returns:
+        TraceResult with hit, t, position, normal arrays (flat, R-length).
+    """
+    R = origins.shape[0]
+
+    # Result arrays
+    result_hit = np.zeros(R, dtype=bool)
+    result_t = np.full(R, np.inf, dtype=np.float64)
+    result_t_lo = np.full(R, np.inf, dtype=np.float64)
+    result_t_hi = np.full(R, np.inf, dtype=np.float64)
+    result_depth = np.zeros(R, dtype=np.int32)
+
+    # Initialize active intervals only for rays that hit the AABB
+    active_idx = np.where(hit_mask)[0]
+    if len(active_idx) == 0:
+        return _build_result(
+            R, result_hit, result_t, result_t_lo, result_t_hi, result_depth, origins, directions
+        )
+
+    ray_idx = active_idx.copy()
+    iv_t_lo = t_min[active_idx].copy()
+    iv_t_hi = t_max[active_idx].copy()
+
+    for depth in range(max_depth):
+        if len(ray_idx) == 0:
+            break
+
+        # Step 1: batch inclusion evaluation
+        lo_3d, hi_3d = _intervals_to_3d(origins, directions, ray_idx, iv_t_lo, iv_t_hi)
+        f_lo, f_hi = inclusion_fn.evaluate(lo_3d, hi_3d)
+
+        # Step 2: exclusion — remove intervals that can't contain zero
+        has_zero = (f_lo <= 0.0) & (f_hi >= 0.0)
+        ray_idx = ray_idx[has_zero]
+        iv_t_lo = iv_t_lo[has_zero]
+        iv_t_hi = iv_t_hi[has_zero]
+
+        if len(ray_idx) == 0:
+            break
+
+        # Step 3: convergence check
+        widths = iv_t_hi - iv_t_lo
+        converged = widths < threshold
+
+        if np.any(converged):
+            c_ray_idx = ray_idx[converged]
+            c_t_lo = iv_t_lo[converged]
+            c_t_hi = iv_t_hi[converged]
+            c_t_mid = (c_t_lo + c_t_hi) * 0.5
+
+            # Sign-change verification to avoid false hits
+            p_lo = origins[c_ray_idx] + c_t_lo[:, None] * directions[c_ray_idx]
+            p_hi = origins[c_ray_idx] + c_t_hi[:, None] * directions[c_ray_idx]
+            v_lo, _ = f(p_lo)
+            v_hi, _ = f(p_hi)
+            sign_change = (v_lo * v_hi) <= 0.0
+
+            valid_ray = c_ray_idx[sign_change]
+            valid_t = c_t_mid[sign_change]
+            valid_depth = np.full(valid_ray.shape, depth + 1, dtype=np.int32)
+
+            valid_t_lo = c_t_lo[sign_change]
+            valid_t_hi = c_t_hi[sign_change]
+
+            # Front-to-back: keep only closest hit per ray
+            for i in range(len(valid_ray)):
+                ri = valid_ray[i]
+                if valid_t[i] < result_t[ri]:
+                    result_hit[ri] = True
+                    result_t[ri] = valid_t[i]
+                    result_t_lo[ri] = valid_t_lo[i]
+                    result_t_hi[ri] = valid_t_hi[i]
+                    result_depth[ri] = valid_depth[i]
+
+            # Remove converged intervals
+            ray_idx = ray_idx[~converged]
+            iv_t_lo = iv_t_lo[~converged]
+            iv_t_hi = iv_t_hi[~converged]
+
+        if len(ray_idx) == 0:
+            break
+
+        # Front-to-back pruning: remove intervals beyond known hits
+        keep = iv_t_lo < result_t[ray_idx]
+        ray_idx = ray_idx[keep]
+        iv_t_lo = iv_t_lo[keep]
+        iv_t_hi = iv_t_hi[keep]
+
+        if len(ray_idx) == 0:
+            break
+
+        # Clip far end to known hit distance
+        iv_t_hi = np.minimum(iv_t_hi, result_t[ray_idx])
+
+        # Step 4: bisect
+        t_mid = (iv_t_lo + iv_t_hi) * 0.5
+
+        # Near half (prioritized) + far half
+        new_ray_idx = np.concatenate([ray_idx, ray_idx])
+        new_t_lo = np.concatenate([iv_t_lo, t_mid])
+        new_t_hi = np.concatenate([t_mid, iv_t_hi])
+
+        ray_idx = new_ray_idx
+        iv_t_lo = new_t_lo
+        iv_t_hi = new_t_hi
+
+    return _build_result(
+        R, result_hit, result_t, result_t_lo, result_t_hi, result_depth, origins, directions
+    )
+
+
+def _build_result(
+    R: int,
+    hit: np.ndarray,
+    t: np.ndarray,
+    t_lo: np.ndarray,
+    t_hi: np.ndarray,
+    depth_count: np.ndarray,
+    origins: np.ndarray,
+    directions: np.ndarray,
+) -> TraceResult:
+    """Build TraceResult from flat arrays."""
+    position = origins + t[:, None] * directions
+    # Normal placeholder — will be filled by shader
+    normal = np.zeros((R, 3), dtype=np.float64)
+    return TraceResult(
+        hit=hit,
+        t=t,
+        position=position,
+        normal=normal,
+        depth_count=depth_count,
+        t_lo=t_lo,
+        t_hi=t_hi,
+    )
+```
+
+### isoray/tracer/ray.py
+```
+"""Ray batch generation and Ray-AABB intersection."""
+
+from __future__ import annotations
+
+import numpy as np
+
+
+def ray_aabb_intersect(
+    origins: np.ndarray,
+    directions: np.ndarray,
+    aabb_lo: np.ndarray,
+    aabb_hi: np.ndarray,
+    t_near_clip: float = 1e-4,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Batch Ray-AABB intersection using the slab method.
+
+    Args:
+        origins: (N, 3) ray origins.
+        directions: (N, 3) ray directions (assumed normalized).
+        aabb_lo: (3,) lower corner of AABB.
+        aabb_hi: (3,) upper corner of AABB.
+        t_near_clip: minimum t value (avoids self-intersection).
+
+    Returns:
+        t_min: (N,) entry t values (valid where hit=True).
+        t_max: (N,) exit t values.
+        hit: (N,) bool — whether ray intersects AABB.
+    """
+    inv_dir = 1.0 / np.where(
+        np.abs(directions) < 1e-12, np.sign(directions) * 1e-12 + 1e-30, directions
+    )
+
+    t1 = (aabb_lo[None, :] - origins) * inv_dir  # (N, 3)
+    t2 = (aabb_hi[None, :] - origins) * inv_dir  # (N, 3)
+
+    t_enter = np.minimum(t1, t2)  # (N, 3)
+    t_exit = np.maximum(t1, t2)  # (N, 3)
+
+    t_min = np.maximum(t_enter.max(axis=1), t_near_clip)  # (N,)
+    t_max = t_exit.min(axis=1)  # (N,)
+
+    hit = t_min < t_max
+    return t_min, t_max, hit
+```
+
+### isoray/tracer/refine.py
+```
+"""Newton refinement — optional acceleration when gradient is available.
+
+Applied after bisection has isolated a narrow interval containing the root.
+Falls back to bisection result if Newton diverges or exits the interval.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+
+
+def _centered_diff_directional(
+    f,
+    pos: np.ndarray,
+    directions: np.ndarray,
+    h: float = 1e-7,
+) -> np.ndarray:
+    """Compute directional derivative g'(t) = df/dt along ray direction.
+
+    Uses 2N batch evaluations (forward and backward along ray).
+
+    Args:
+        f: ImplicitFunction — f(pos) -> (val, grad|None).
+        pos: (N, 3) current positions on rays.
+        directions: (N, 3) ray direction vectors (assumed unit).
+        h: finite difference step size.
+
+    Returns:
+        g_prime: (N,) directional derivatives.
+    """
+    pos_fwd = pos + h * directions  # (N, 3)
+    pos_bwd = pos - h * directions  # (N, 3)
+
+    all_points = np.concatenate([pos_fwd, pos_bwd], axis=0)  # (2N, 3)
+    all_vals, _ = f(all_points)
+
+    N = pos.shape[0]
+    v_fwd = all_vals[:N]
+    v_bwd = all_vals[N:]
+    return (v_fwd - v_bwd) / (2.0 * h)
+
+
+def newton_refine(
+    t: np.ndarray,
+    origins: np.ndarray,
+    directions: np.ndarray,
+    hit: np.ndarray,
+    f,
+    t_lo: np.ndarray | None = None,
+    t_hi: np.ndarray | None = None,
+    max_iter: int = 3,
+    tol: float = 1e-12,
+    h_diff: float = 1e-7,
+) -> np.ndarray:
+    """Batch Newton refinement of bisection hit t-values.
+
+    Args:
+        t: (R,) bisection t values.
+        origins: (R, 3) ray origins.
+        directions: (R, 3) ray directions.
+        hit: (R,) bool mask — only refine where True.
+        f: ImplicitFunction — f(pos) -> (val, grad|None).
+        t_lo: (R,) optional interval lower bounds from bisection.
+        t_hi: (R,) optional interval upper bounds from bisection.
+        max_iter: Newton iterations (default 3).
+        tol: early exit when max |f(pos)| < tol.
+        h_diff: step size for centered difference when gradient is None.
+
+    Returns:
+        t_refined: (R,) refined t values. Non-hit entries unchanged.
+    """
+    hit_idx = np.where(hit)[0]
+    if len(hit_idx) == 0 or max_iter <= 0:
+        return t.copy()
+
+    # Extract compact arrays for hit rays only
+    t_curr = t[hit_idx].copy()
+    o = origins[hit_idx]  # (N, 3)
+    d = directions[hit_idx]  # (N, 3)
+
+    has_bounds = t_lo is not None and t_hi is not None
+    if has_bounds:
+        assert t_lo is not None and t_hi is not None
+        lo = t_lo[hit_idx]
+        hi = t_hi[hit_idx]
+
+    for _ in range(max_iter):
+        pos = o + t_curr[:, None] * d  # (N, 3)
+        vals, grads = f(pos)
+
+        if grads is not None:
+            g_prime = np.sum(grads * d, axis=1)  # (N,)
+        else:
+            g_prime = _centered_diff_directional(f, pos, d, h=h_diff)
+
+        # Skip update where directional derivative is near-zero
+        safe = np.abs(g_prime) > 1e-12
+
+        # Newton step: t_new = t - f(t) / f'(t)
+        dt = np.zeros_like(t_curr)
+        dt[safe] = vals[safe] / g_prime[safe]
+        t_new = t_curr - dt
+
+        # Clamp to bisection interval
+        if has_bounds:
+            t_new = np.clip(t_new, lo, hi)
+
+        # Divergence check: only accept if |f(t_new)| < |f(t_old)|
+        pos_new = o + t_new[:, None] * d
+        vals_new, _ = f(pos_new)
+        improved = np.abs(vals_new) < np.abs(vals)
+
+        t_curr = np.where(improved & safe, t_new, t_curr)
+
+        # Early exit if converged
+        if np.max(np.abs(vals_new[improved & safe])) < tol if np.any(improved & safe) else True:
+            break
+
+    # Write back
+    result = t.copy()
+    result[hit_idx] = t_curr
+    return result
+```

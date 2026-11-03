@@ -1,0 +1,378 @@
+A typescript interactive engine, support 2D, 3D, animation, physics, built on WebGL and glTF. - feat: 3D Gaussian Splatting rendering and .ply/.splat/.spz loaders by zhuxudong · Pull Request #3055 · galacean/engine
+
+feat: 3D Gaussian Splatting rendering and .ply/.splat/.spz loaders by zhuxudong · Pull Request #3055 · galacean/engine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+zhuxudong
+commented
+Jun 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Background
+3D Gaussian Splatting (3DGS) has become the dominant representation for the export products of world-model and radiance-field pipelines (e.g. World Labs Marble, Luma, Polycam, Scaniverse, and the reference Inria trainer). These tools output a cloud of anisotropic 3D gaussians — each with a position, covariance (orientation + scale), opacity and color — rather than a triangle mesh. Rendering them requires a dedicated splatting pipeline; a triangle-mesh renderer cannot represent them.
+Goal
+Add native, pipeline-level 3D Gaussian Splatting rendering to the engine — including view-dependent (spherical-harmonic) color — together with a single loader that ingests the three formats these tools commonly export (.ply / .splat / .spz, all SPZ versions).
+Value
+Render world-model / radiance-field captures (large-scene scans, photoreal 3DGS assets) directly in the engine — a major new content category.
+Full-fidelity color: view-dependent spherical harmonics (degrees 0–3), not just flat DC color, for the formats that carry it.
+Used like any other renderer and asset, consistent with the rest of the engine:
+entity.addComponent(GaussianSplatRenderer).splat = splat.
+One loader covers the formats produced across the ecosystem, so users do not need to pre-convert their exports.
+Implementation
+packages/core — pipeline-level renderer (built in, not a plugin)
+GaussianSplat (asset, AssetType.GaussianSplat): builds the GPU data textures (centers, covariance, color, and spherical-harmonic coefficients) from the decoded splat data, addressed by linear splat index. Covariance is precomputed on the CPU and stored half-float to halve texture bandwidth; SH goes in its own RGBA16F texture only when the splat carries it.
+GaussianSplatRenderer: draws instanced, camera-facing quads, depth-sorted back-to-front each frame (off the main thread on a Web Worker, re-run only when the view changes) and composited with alpha "over".
+GaussianSplatMaterial + a ShaderLab shader: EWA splatting — each 3D covariance is projected through the perspective Jacobian into a screen-space ellipse with a 2D gaussian falloff — plus view-dependent color: when a splat carries SH, the vertex shader rebuilds its color from the coefficients and the view direction (standard 3DGS basis, degrees 0–3).
+packages/loader — one loader, every format, full fidelity
+GaussianSplatLoader sniffs the content by magic bytes and decodes .ply, .splat and .spz into a common structured form (positions, covariance inputs, opacity, DC color and higher-order SH).
+SPZ — every version, gzip v1–3 and the current ZSTD v4 — is decoded by the official SPZ reference decoder, an inlined-WASM module fetched from the CDN on first use: no baseline weight, byte-exact with the spec, and it exposes the spherical harmonics the previous DC-only parser dropped.
+PLY reads the f_rest_* SH bands (channel-major in the file, transposed to the renderer's coefficient-major layout) and detects the degree from the property count.
+.splat is DC-only by format.
+Unit-tested across every container; the PLY path cross-checks its SH against the SPZ decoder.
+examples — demo
+A demo with a format switcher (to load and compare each format) and a performance panel.
+Format comparison
+Format
+Source
+SH (view-dependent color)
+Size
+Axis
+Notes
+.ply
+Inria reference 3DGS trainer
+Full
+Largest — lossless master
+Y-down
+The canonical training output: full float precision and full spherical-harmonic color. Best fidelity, heaviest to ship.
+.splat
+antimatter15 web viewer
+None (DC color only)
+32 bytes/splat — compact
+Y-down
+The most common web-shared format. Drops SH and quantizes to a fixed 32-byte record; small and simple, view-independent color.
+.spz
+Niantic
+Full
+~10× smaller than PLY
+Y-up (RUB)
+Quantized + compressed. v1–3 use single-stream gzip; v4 (current) uses parallel per-attribute ZSTD streams for faster decode. The best size/quality trade-off for delivery, and the leading compressed encoding as glTF standardizes 3DGS.
+References
+3D Gaussian Splatting for Real-Time Radiance Field Rendering — Kerbl et al., SIGGRAPH 2023. The splatting model, anisotropic covariance and EWA screen-space projection this renderer implements. https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/
+glTF KHR_gaussian_splatting (Release Candidate) — the standardizing glTF representation for 3D Gaussian splats. It informs the renderer's internal splat attribute layout; the base extension is designed to be extended by compressed encodings, with SPZ the leading candidate. https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_gaussian_splatting
+Format specifications
+PLY (Inria 3DGS): https://github.com/graphdeco-inria/gaussian-splatting
+.splat: https://github.com/antimatter15/splat
+.spz (incl. v4): https://github.com/nianticlabs/spz
+zhuxudong
+added 15 commits
+June 25, 2026 23:31
+feat(core): add gaussian splat rendering
+…
+a86ced3
+```
+- GaussianSplat asset decodes 32-byte splats into center/covariance/color data textures
+- GaussianSplatRenderer draws instanced camera-facing quads, re-sorted back-to-front per frame on CPU
+- EWA projection + gaussian falloff in a ShaderLab GaussianSplat shader; render state fixed to transparent over-blend
+- math mirrors BabylonJS (covariance Sigma=R*diag(4s^2)*R^T, perspective Jacobian, O(n) counting sort)
+```
+feat(loader): add Gaussian Splat loader for .ply and .splat
+…
+b558072
+```
+- one loader registered for both extensions, content-detected by header
+- .splat used as-is; .ply parsed and converted to the 32-byte layout (exp scale, sigmoid opacity, SH DC color)
+- mirrors BabylonJS SPLATFileLoader's single-loader, multi-format dispatch
+```
+feat(examples): add gaussian splatting demo
+…
+b0a16b4
+```
+- loads gs_Skull.splat via AssetType.GaussianSplat, renders and auto-rotates with GaussianSplatRenderer
+- assets hosted on galacean CDN; swap the url to a .ply to exercise that parser
+- verified rendering the skull right-side-up in headless WebGL2
+```
+feat(loader): support .spz gaussian splats (gzip v2/v3)
+…
+db6f6cc
+```
+- detect by header: gzip SPZ decompressed via native DecompressionStream then parsed; "ply" parsed; else raw .splat
+- SPZ decode ported from BabylonJS ParseSpz (24-bit fixed-point positions, log scales, smallest-three quaternion); SH skipped (renderer is DC-only)
+- v4 (NGSP/ZSTD) rejected with a clear message, needs a WASM decoder
+```
+feat(examples): add format switcher and stats to splat demo
+…
+dca4393
+```
+- dat.gui switches between .splat / .ply / .spz scenes through the same renderer
+- OrbitControl (engine-toolkit-controls) for manual orbit, Stats for perf
+- verified all three formats render and switching works in headless WebGL2
+```
+perf(core): re-sort gaussian splats only when the view changes
+…
+452f08c
+```
+- skip the per-frame CPU depth sort and instance-buffer upload when the model-view is unchanged
+- a static view now costs no sort; measured 786K-splat sort is ~8ms and only runs while the camera moves
+- expose lastSortTime for profiling
+```
+fix(examples): orient splat scenes by source axis convention
+…
+e797093
+```
+- Inria .splat/.ply are Y-down (flipped into Galacean Y-up); SPZ defaults to Y-up (RUB), so it is not flipped
+- fixes the SPZ scene rendering upside-down
+```
+feat(examples): use GaussianSplatStats perf panel in splat demo
+…
+2a58915
+```
+- swap the triangle-based Stats for GaussianSplatStats (FPS / GPU / CPU / splat count)
+- feed it the live splat count on each format switch
+```
+perf(core): store splat covariance as half-float
+…
+7f26d03
+```
+- covA/covB textures drop from RGBA32F to RGBA16F, normalized per-splat by center.w and restored in the shader
+- halves covariance texture bandwidth (a GPU-side win) and shrinks the per-frame upload
+```
+perf(core): sort gaussian splats on a Web Worker
+…
+65524cd
+```
+- moves the per-frame depth sort off the main thread; the index buffer ping-pongs via transfer so neither side allocates per sort
+- frees ~8ms/frame of the 60fps budget on large scenes; falls back to the main-thread sort when Workers are unavailable
+```
+fix(core): derive splat focal from the render projection
+…
+c9adc40
+```
+- Galacean flips projection Y when rendering to a framebuffer (camera_ProjMat[1][1] < 0); deriving focal from camera.projectionMatrix gave it the wrong Y sign
+- the sign mismatch mirrored rotated splats' screen-space ellipse, producing spikes at certain view angles (the "broken" surfaces)
+- compute focal from camera_ProjMat in the shader so its Y sign always matches the projection
+```
+fix(core): build splat covariance as R^T*D*R
+…
+cff3c1f
+```
+- R is built from the w-negated (conjugated) quaternion, so R^T is the splat's true orientation; the textbook R*D*R^T applied the inverse rotation
+- rotated splats were sheared into screen-spanning spikes (the "broken" surfaces at certain angles); axis-aligned splats nearly coincided, which is why head-on views looked fine
+- matches the convention of the ported Babylon EWA projection
+```
+fix(core): treat the splat color texture as sRGB
+…
+6c2bdf4
+```
+- Texture2D defaults isSRGBColorSpace to true, but the data textures were all created with it false; the color texture (RGBA8 sRGB) was therefore read as linear and over-brightened
+- the over-bright color made near-edge-on splats' low-opacity tails read as bright streaks instead of fading; data textures (center/covariance) stay linear
+```
+fix(core): run splat color through the engine sRGB color management
+…
+6ccfbf2
+```
+- the splat shader read color with a bare texture2D and output it bare, bypassing the engine color pipeline
+- now linearizes the sRGB color on read where sRGB textures are unsupported (ENGINE_NO_SRGB) and applies the linear->sRGB output correction when rendering to the gamma screen (ENGINE_OUTPUT_SRGB_CORRECT), so splats composite in the same space as every other material
+```
+fix(core): reflect the splat ellipse Y for the flipped offscreen target
+…
+e4d8df2
+```
+- Galacean's sRGB final pass forces the splat pass to render to a Y-flipped offscreen target (camera_ProjMat[1][1] < 0); the previous signed-focal handling was not a correct Y-reflection — it negated the major axis' X component and sheared rotated ellipses into streaks at grazing angles
+- build the ellipse with positive focal in standard screen space, then reflect only the offset's Y; this is provably the reference's render reflected in Y, the form the flipped target needs
+```
+coderabbitai
+Bot
+commented
+Jun 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Important
+Review skipped
+Draft detected.
+Please check the settings in the CodeRabbit UI or the .coderabbit.yaml file in this repository. To trigger a single review, invoke the @coderabbitai review command.
+⚙️ Run configuration
+Configuration used: Repository UI
+Review profile: CHILL
+Plan: Pro
+Run ID: 103bcac9-d0d0-4ad9-b3b0-413bc6f17b38
+You can disable this status message by setting the reviews.review_status to false in the CodeRabbit configuration file.
+Use the checkbox below for a quick retry:
+🔍 Trigger review
+✨ Finishing Touches
+🧪 Generate unit tests (beta)
+Create PR with unit tests
+Commit unit tests in branch feat/gaussian-splat
+Thanks for using CodeRabbit! It's free for OSS, and your support helps us grow. If you like it, consider giving us a shout-out.
+❤️ Share
+X
+Mastodon
+Reddit
+LinkedIn
+Comment @coderabbitai help to get the list of available commands.
+github-actions
+Bot
+added
+the
+documentation
+Improvements or additions to documentation
+label
+Jun 26, 2026
+codecov
+Bot
+commented
+Jun 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codecov Report
+❌ Patch coverage is 63.79045% with 470 lines in your changes missing coverage. Please review.
+✅ Project coverage is 79.12%. Comparing base (9083457) to head (2fad91f).
+⚠️ Report is 1 commits behind head on dev/2.0.
+Files with missing lines
+Patch %
+Lines
+...kages/core/src/gaussian-splatting/GaussianSplat.ts
+35.71%
+207 Missing ⚠️
+...re/src/gaussian-splatting/GaussianSplatRenderer.ts
+39.82%
+136 Missing ⚠️
+...core/src/gaussian-splatting/GaussianSplatSorter.ts
+25.00%
+57 Missing ⚠️
+examples/src/gaussian-splatting.ts
+0.00%
+52 Missing and 1 partial ⚠️
+.../src/gaussian-splatting/GaussianSplatSortWorker.ts
+89.69%
+10 Missing ⚠️
+...re/src/gaussian-splatting/GaussianSplatMaterial.ts
+90.47%
+4 Missing ⚠️
+...core/src/gaussian-splatting/GaussianSplatShader.ts
+99.19%
+2 Missing ⚠️
+packages/core/src/gaussian-splatting/index.ts
+0.00%
+0 Missing and 1 partial ⚠️
+Additional details and impacted files
+```
+@@             Coverage Diff             @@
+##           dev/2.0    #3055      +/-   ##
+===========================================
+- Coverage    79.41%   79.12%   -0.30%     
+===========================================
+  Files          919      913       -6     
+  Lines       102574   101927     -647     
+  Branches     11446    11297     -149     
+===========================================
+- Hits         81460    80648     -812     
+- Misses       20929    21093     +164     
+- Partials       185      186       +1     
+```
+Flag
+Coverage Δ
+unittests
+79.12% <63.79%> (-0.30%)
+⬇️
+Flags with carried forward coverage won't be shown. Click here to find out more.
+☔ View full report in Codecov by Harness.
+📢 Have feedback on the report? Share it here.
+🚀 New features to boost your workflow:
+❄️ Test Analytics: Detect flaky tests, report on failures, and find test suite problems.
+📦 JS Bundle Analysis: Save yourself from yourself by tracking and limiting bundle sizes in JS merges.
+zhuxudong
+added 7 commits
+June 26, 2026 21:17
+docs: cite primary sources in gaussian splat comments
+4c3a943
+feat(loaders): decode SPZ v4 (NGSP/ZSTD) gaussian splats
+…
+d9e41bd
+```
+- v4 (NGSP) stores the same columnar attributes as v2/v3 but in per-attribute ZSTD streams
+- inflate with fzstd (pure JS, no WASM/CDN), reuse the v2/v3 dequant via _decodeSpzColumns
+- validate stream count via the header shDegree; skip the SH stream (renderer is DC-only)
+- corrupt or unexpected v4 data fails with a clear error instead of decoding wrong columns
+```
+test(loaders): cover gaussian splat .ply/.splat/.spz decoding
+…
+875830f
+```
+- one 64-splat scene as fixtures in every format: SPZ v2/v3/v4 (+ no-SH), .splat, .ply
+- assert v3 (gzip) and v4 (NGSP) decode byte-identically; gzip path is ground truth for ZSTD
+- cover container dispatch and error paths (bad version, corrupt stream, invalid SPZ/PLY)
+```
+refactor(core): build splats from structured decoder data
+…
+7a8d951
+```
+- add GaussianSplatData (positions/scales/rotations/opacities/colors/sh) as the decoder output
+- GaussianSplat.setData takes it directly; the loader unpacks the 32-byte layout into it
+- covariance math is unchanged, but the asset is now ready for spherical harmonics
+```
+feat(loaders): decode SPZ with the official reference decoder
+…
+c80b5f2
+```
+- replace the hand-rolled gzip/ZSTD SPZ parser with the official reference decoder
+- it is an inlined-WASM ES module fetched from the CDN on first use (no baseline weight)
+- covers every SPZ version byte-exactly and exposes spherical harmonics the old parser dropped
+- drops the fzstd dependency
+```
+feat(core): shade gaussian splats with view-dependent SH color
+…
+73462f2
+```
+- store the SH coefficients (incl. DC) in an RGBA16F texture, one block per splat
+- the vertex shader rebuilds the full color from the coefficients + view direction (3DGS basis)
+- direction is in the splat's local frame; the result uses the same sRGB path as the DC color
+- compiled in only when a splat carries SH (RENDERER_GS_SH macro)
+```
+feat(loaders): read spherical-harmonic bands from PLY
+…
+2fad91f
+```
+- parse `f_rest_*` and transpose its channel-major layout to coefficient-major (matching SPZ)
+- PLY now produces structured data directly (with SH), no longer via the 32-byte intermediate
+- detect the SH degree from the f_rest property count
+```
+zhuxudong
+closed this
+Jun 29, 2026
+GuoLei1990
+deleted the
+feat/gaussian-splat
+branch
+June 29, 2026 09:01
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+documentation
+Improvements or additions to documentation
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

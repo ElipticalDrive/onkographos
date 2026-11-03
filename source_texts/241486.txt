@@ -1,0 +1,177 @@
+A GPU-driven game engine written in Rust, with meshlet-based rendering and an editor. - epic: GPU-driven SDF rendering pipeline (Lumen/Claybook-class) · Issue #370 · lobinuxsoft/kooch
+
+epic: GPU-driven SDF rendering pipeline (Lumen/Claybook-class) · Issue #370 · lobinuxsoft/kooch · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+epic: GPU-driven SDF rendering pipeline (Lumen/Claybook-class) #370
+New issue
+Copy link
+New issue
+Copy link
+Closed as not planned
+Closed as not planned
+epic: GPU-driven SDF rendering pipeline (Lumen/Claybook-class)#370
+Copy link
+Labels
+difficulty:hardTarea compleja, requiere investigaciónTarea compleja, requiere investigaciónepicUmbrella issue tracking multiple sub-issuesUmbrella issue tracking multiple sub-issuespriority:criticalBloqueante, debe hacerse primeroBloqueante, debe hacerse primero
+Description
+lobinuxsoft
+opened on May 1, 2026
+Issue body actions
+Purpose
+Rewrite the SDF rendering pipeline from the current brute-force fragment-shader TLAS+BLAS traversal to a GPU-driven Lumen/Claybook-class architecture. This epic is gating-blocking for all of Phase 2 (#327 streaming-perf epic) and Phase 3 (planet-scale at 32km radius without hitches).
+Why this epic exists
+PR #369 (#363) closed without merge after audit S2 surfaced the root cause: the current raymarch_pool_eval.wgsl shader re-traverses the TLAS+BLAS per step × per pixel for every chunk resident in the pool. With 432 chunks streaming in (verified) the cost is unbearable, the dither artefacts visible in #369 v2 testing come from max_steps being hit before convergence, and no point-fix to that shader can close the perf gap — the model itself is wrong for multi-chunk scale.
+PRs #357 / #358 / #359 / #361 / #365 / #366 (all PRs of #360) wired the pool with DOD-shaped data (SoA, u32 indices, persistent buffers for primitives / leaves / nodes / descriptors) but the fragment shader consuming that data is naïve. That is the gap this epic closes.
+What state-of-art looks like (Dreams, Claybook, UE5 Lumen, Nanite-Lumen):
+Compute pre-pass produces a hierarchical / tiled visibility structure.
+Fragment shader does single-fetch sampling, not traversal.
+TLAS topology rebuild is itself a compute pass (no CPU loop).
+All persistent buffers, indirect dispatch, zero CPU readback in hot path.
+This epic lands that.
+Roadmap
+Foundation — make every later piece composable
+PR-1: tlas::rebuild from CPU loop to compute shader.
+Karras LBVH on GPU (morton sort + radix tree).
+Rust side: orchestration only (per-frame dispatch + dirty-tracking).
+API stable: OmeAccel::insert_chunk / remove_chunk unchanged at call sites.
+Why first: every later compute pass reads the rebuilt TLAS.
+PR-2: Persistent ChunkContentSource path (re-land scope from closed feat(world): procedural seed loader + ChunkContentSource trait + multi-chunk demo scene #363).
+ChunkContentSource trait + ProceduralCitySource + ChunkManager wiring (CPU side already validated).
+No fragment shader change yet; pool fills, fragment stays current shader.
+Tests: deterministic populate, adjacency, churn 100 cycles bounded.
+Why second: GDF compute pass needs chunks resident in the pool to read from.
+Core — the global distance field
+PR-3: Global Distance Field cascade 0 (single LOD).
+R16F 3D texture, e.g. 128×128×128 voxels covering a 256m cube around the active origin.
+Compute pass (one workgroup per voxel slab) evaluates the TLAS-of-SDFs at each voxel center, writes signed distance.
+Persistent allocation, no per-frame creation.
+Why now: decouples per-pixel cost from chunk count. Single texture sample per ray-march step.
+PR-4: eval_scene_bvh becomes single GDF texture sample.
+Replace TLAS+BLAS traversal in fragment shader with textureSampleLevel(gdf_cascade_0, p_world).
+Surface refinement (last 5% of t) keeps the TLAS+BLAS path for precision.
+Bench old vs new at 432 chunks resident: target ≥ 10× speedup.
+PR-5: Multi-cascade GDF (round-robin update).
+4–6 cascades, e.g. 32m, 128m, 512m, 2km, 8km, 32km — each at 64–128³.
+Per frame, refresh ONE cascade's voxels (round-robin) so the cost is amortised.
+Sphere-trace step picks the cascade whose voxel size matches t (cone footprint).
+Texture3D array binding.
+Performance — make the fragment shader almost trivial
+PR-6: Tile-based ray bounds pre-pass.
+Compute pass: per 8×8 (or 16×16) tile, walk the GDF coarsest cascade once → emit tile_t_min, tile_t_max, tile_chunk_count.
+Persistent SSBO tile_ray_bounds[tile_count].
+Fragment shader reads its tile's bounds, skips empty tiles entirely.
+PR-7: Indirect dispatch for fragment work.
+Tile pre-pass also writes non_empty_tile_indices[] into an indirect buffer.
+Fragment dispatched via draw_indexed_indirect over non-empty tiles only.
+Empty-sky cost goes to zero (sky pass handles those tiles).
+Polish + invariants
+PR-8: Hybrid GDF + TLAS refine near-surface.
+When sphere-trace approaches t where gdf_dist < 2 × voxel_size, switch to TLAS+BLAS traversal for sub-voxel precision.
+Ensures the procedural blobs / sharp box edges stay crisp; GDF only buys the fast traversal across empty space.
+PR-9: Verification + AC pin.
+Visual: editor with a 4-chunk procedural demo, blob coverage from every camera angle, no dither artefacts at any view.
+Perf: VRAM stable (validated via /sys/class/drm/card1/device/mem_info_vram_used), frame time ≤ 16ms at 432 chunks resident on RX 9070XT.
+Determinism: scene hash byte-identical across two runs with same seed.
+AC checklist file in docs/rendering/gpu_driven_ac.md.
+Constraints (non-negotiable)
+DOD always: SoA, u32 indices, plain-old-data, persistent buffers.
+GPU-driven hot loop: zero CPU readback, indirect dispatch, compute-shader BVH rebuild.
+State-of-art day 1: no MVP, no "optimisamos después." Compose with planet-scale + handheld budget (Steam Deck / OneXFly).
+Files <400 LoC. Conventional commits. NO AI signatures. NO --squash.
+Every PR audited with the standard checklist + DOD + GPU-driven verification + visual confirmation real (not logs alone).
+Out of scope (this epic)
+LOD-aware procedural content (CelestialBody LOD pipeline (planet-scale demo enabler) #341) — composable later on top of GDF.
+Disk persistence (feat(streaming,assets): persistent edit log per chunk — disk-backed delta history #312) — orthogonal, post-epic.
+Edit Baker successor (feat(render): RPN edit baker — bridge runtime CSG edits into sparse SDF chunks #309 follow-up).
+StarCatalog / impostor cubemap (Impostor cubemap baking pass (CelestialBody mid-distance LOD) #342, StarCatalog far-distance starfield rendering #343) — separate render pass.
+Dependencies / blocks
+Blocks: feat(epic): streaming performance roadmap #327 (streaming-perf roadmap PHASE 2 onward), feat(world,gpu): GPU-driven streaming pipeline — chunks generated in compute shaders #325 (GPU-driven streaming pipeline — composes naturally with PR-1 here), all of Phase 3 of the planet-scale viaje fatídico (32km radius without hitches), feat(editor): chunk debug visualization overlay (AABB wireframes + LOD rings + focus radius) #364 (chunk debug viz — visual gating on this rendering working).
+Composes with: feat(core): Spatial Acceleration Structure — BVH/Octree compartido #115 (BVH foundation, already done), feat(bvh): TLAS+BLAS pool-based acceleration structure for planet-scale streaming #360 (TLAS+BLAS pool, already done), Archetype-level dirty marker replacing BvhState::hash_scene u64 #336 (archetype dirty marker — hook for compute dispatch dirty-tracking).
+Estimated effort: 5–10 sessions of implementation + audit, possibly more if radv/wgpu surfaces compute-shader portability issues.
+Success criteria
+When this epic closes:
+cargo run --release -p ome_editor opens TestEngine2.0 with a 432-chunk procedural demo scene → blobs visible from every camera angle.
+Frame time ≤ 16ms at 1080p on RX 9070XT, ≤ 33ms on Steam Deck APU.
+VRAM monotonically bounded under camera churn (verified via sysfs).
+No dither artefacts. No conservative-floor patches. The shader is small, single-fetch, GPU-driven.
+Phase 2 of the viaje fatídico (feat(epic): streaming performance roadmap #327 + feat(world,gpu): GPU-driven streaming pipeline — chunks generated in compute shaders #325) can ship on top without any further rendering work.
+The viaje fatídico depends on this. No bypass.
+Activity
+lobinuxsoft
+added
+priority:criticalBloqueante, debe hacerse primeroBloqueante, debe hacerse primero
+difficulty:hardTarea compleja, requiere investigaciónTarea compleja, requiere investigación
+epicUmbrella issue tracking multiple sub-issuesUmbrella issue tracking multiple sub-issues
+on May 1, 2026
+lobinuxsoft commented on May 1, 2026
+lobinuxsoft
+on May 1, 2026
+OwnerAuthor
+More actions
+Design issue gating todo el roadmap: #371 — design: Global Distance Field cascade architecture. Cada PR-3..PR-8 implementa decisiones firmadas allí. PR-1 (TLAS rebuild compute) puede arrancar en paralelo al sign-off de #371 porque es ortogonal al GDF.
+Hasta sign-off de #371: el epic queda en design phase, ningún handoff a la ejecutora.
+lobinuxsoft
+added 9 commits that reference this issue on May 1, 2026
+Merge pull request #376 from lobinuxsoft/370-pr1-tlas-rebuild-compute
+...
+71c23e5
+Merge pull request #377 from lobinuxsoft/370-pr2-chunk-content-source
+...
+85634a8
+feat(render/gdf): add CascadeDescriptor uniform + voxel-grid snapping
+...
+cf9023a
+Merge pull request #382 from lobinuxsoft/370-pr3-gdf-cascade-0
+...
+a915416
+feat(render/gdf): swap eval_scene_bvh to single cascade fetch (PR-4 e…
+...
+40265ed
+test(render/gdf): visual AC + multi-leaf populate test for PR-4 epic #…
+...
+a5fd52f
+Merge pull request #384 from lobinuxsoft/370-pr4-gdf-fragment-sample
+...
+adccd93
+Merge pull request #385 from lobinuxsoft/370-pr5-gdf-multi-cascade
+...
+eae9785
+Merge pull request #386 from lobinuxsoft/370-pr6-tile-cull-prepass
+...
+04a7ee1
+lobinuxsoft commented on May 2, 2026
+lobinuxsoft
+on May 2, 2026
+OwnerAuthor
+More actions
+Cerrada por pivot de stack 2026-05-02 — SDF raymarching deja de ser render principal del engine. Mesh GPU-driven (Nanite-style) reemplaza la pipeline; SDF queda como authoring tool / brushes para CSG suave (futuro: extracción a mesh vía dual contouring).
+Ver docs/research/stack_decisions_2026-05-02.md para el reasoning completo.
+lobinuxsoft
+closed this as not plannedon May 2, 2026
+lobinuxsoft
+added a commit that references this issue on Aug 19, 2026
+perf(render): FSR's own optimisations — FFX_HALF, and four bytes inst…
+...
+66f66fc
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+difficulty:hardTarea compleja, requiere investigaciónTarea compleja, requiere investigaciónepicUmbrella issue tracking multiple sub-issuesUmbrella issue tracking multiple sub-issuespriority:criticalBloqueante, debe hacerse primeroBloqueante, debe hacerse primero
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

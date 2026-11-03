@@ -1,0 +1,606 @@
+Babylon.js is a powerful, beautiful, simple, and open game and rendering engine packed into a friendly JavaScript framework. - Add WebGPU render command batching by matthargett · Pull Request #2 · rebeckerspecialties/Babylon.js
+
+Add WebGPU render command batching by matthargett · Pull Request #2 · rebeckerspecialties/Babylon.js · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+matthargett
+commented
+May 22, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Upstreamed as BabylonJS/Babylon.js#19075, which supersedes #18562 (closed in June; GitHub cannot reopen a PR whose head branch moved).
+Summary
+This PR adds an internal render-command batching layer for WebGPU draw submission, bringing the WebGPU engine into congruence with a pattern Babylon.js core already ships: the bgfx-based NativeEngine batches its engine commands through a CommandBufferEncoder (thinNativeEngine.pure.ts) and flushes them across the JS/native bridge in bulk, rather than paying one Node-API crossing per call. The WebGPU engine had no equivalent layer, so on hosts like BabylonNative with WebGPU backed by wgpu-native, every setPipeline, setBindGroup, setVertexBuffer, setIndexBuffer, and draw* crossed the JavaScriptCore/Node-API boundary individually — the CPU bottleneck profiled in this forum post.
+This is also the same architecture browsers use one layer down for the identical boundary problem: Chromium's Dawn wire protocol serializes WebGPU commands into batched buffers across the renderer-to-GPU-process boundary, and Unreal's FRHICommandList records on the render thread and translates on the RHI thread. The boundary here is N-API rather than IPC or a thread hop; the remedy is the same.
+Scope note: this is transport-level, order-preserving submission batching — not draw merging. It does not reorder, sort, or combine draws, so it composes with (rather than competes against) instancing, and the stream format reserves multi-draw fields for future multi-draw-indirect lowering (wgpu exposes MDI natively even though it is not yet in the WebGPU spec).
+Architecture
+RenderCommandBatcher — small generic lower-or-replay adapter: try the optional lowering path; for a draw that cannot lower, flush pending lowered work first, then replay the original command exactly once. Ordering is preserved unconditionally.
+WebGPURenderPassCommandStream — the WebGPU-specific lowerer: encodes draws as opcode words into a reused Uint32Array, state-diffing pipeline, index/vertex buffers, and bind groups so redundant state is elided before it is ever recorded, then submits the whole batch through a single _recordCommands call on the render pass.
+Flush boundaries: batched draws are recorded before every direct render-pass mutation — viewport, scissor, stencil reference, blend constant, full-quad clears, occlusion query begin/end, debug marker push/pop/insert, and render-pass end — through a ThinWebGPUEngine._flushRenderPassCommands() seam (a no-op for engines that do not batch). Without these boundaries, a draw batched inside an occlusion-query bracket would be recorded after the bracket closes (the query reports zero samples and the mesh wrongly disappears as occluded), and GPU captures would attribute draws to the wrong debug group.
+The draw hot path is allocation-free: the engine reuses two scratch draw-command objects (both the lowering and replay paths consume commands synchronously), and the stream reuses scratch id arrays. With no provider installed — always the case in browsers — the per-draw overhead is a null check and a work-free flush, and draws take the standard WebGPU encoder calls unchanged.
+Failure policy: a protocol-version mismatch or a backend recording failure logs one error (enriched with the provider's diagnostics) and permanently falls back to direct encoder calls for that engine — nothing throws from the render loop.
+Typed indexed/non-indexed draw command variants instead of a magic numeric draw type.
+Host contract
+A host opts in by installing a provider on the engine:
+```
+engine.renderPassCommandRecorderProvider = {
+    protocolVersion: 1,                       // must equal WebGPURenderPassCommandStreamProtocolVersion in the decoder build
+    isEnabled: () => true,                    // host-controlled toggle
+    getResourceId: (resource) => /* host handle id for a pipeline/buffer/bind group, or 0 */,
+    getLastError: () => /* optional backend diagnostics for failure logs */,
+};
+```
+and exposing a _recordCommands(words, drawCount, multiDrawCallCount, multiDrawDrawCount, wordCount) hook on its render-pass encoders. The recorder must consume the words synchronously — the buffer is reused after the call returns. The protocolVersion handshake mirrors the PROTOCOL_VERSION guard the bgfx-based NativeEngine uses to keep the JS encoder and native decoder from drifting.
+Test coverage
+Contract-level unit coverage of the batcher and stream: lowering absent/present/disabled, fallback replay with flush-before-replay ordering, state-diff behavior per state kind, indexed/non-indexed/indirect draws, late resource ids, command storage growth, render-pass boundary flushing, no-provider behavior, protocol-version mismatch, and permanent fallback with diagnostics when backend recording fails.
+Flush-boundary scenario tests (webgpuRenderPassFlushBoundaries.test.ts) drive the real registered engine prototype methods against a semantic model of the native render pass: a GPU timeline that executes direct calls and decoded command-stream batches in submission order, attributing each executed draw to the occlusion query and debug groups open at execution time. Assertions are on user-visible outcomes — "which draws did query N observe", "which draws are inside group X", "did the draws stay on the batched path" — not on encoder-call ordinality.
+Validation
+npx vitest run --project=unit over packages/dev/core/test/unit — 2618 tests pass (111 files), including 30 focused tests across renderCommandBatcher.test.ts, webgpuRenderPassCommandStream.test.ts, and webgpuRenderPassFlushBoundaries.test.ts.
+npx eslint --quiet over all changed source and test files — passed.
+npm --workspace @dev/core run build — passed.
+npm --workspace babylonjs run build:prod — passed.
+Native integration validation using BabylonNative Release/LTO macOS Playground with the non-AR Hill Valley stress scene:
+Scene rendered with material parity checks passing: issues=0; SSAO2 stayed enabled in mode=prepass.
+Command stream enabled, steady windows: roughly 13,920 draws / 2s grouped into roughly 720 command-stream bridge calls — about 94.8% fewer draw-level bridge traversals — at 59.5–60.5 native fps.
+Command stream disabled, steady windows: same draw volume, cmdStreams=0, roughly 59–60 native fps.
+The M4 local stress path is vsync-bound, so that run is bridge-call-reduction proof rather than an FPS claim. The motivating device wins (iPhone XS roughly 40→45 fps with improved 1% lows; reduced peak CPU on iPhone 12/A14) are documented in the forum post linked above.
+Future work
+Multi-draw-indirect lowering through the reserved multiDrawCallCount/multiDrawDrawCount stream fields (wgpu-native exposes MDI; the WebGPU spec does not yet).
+Lower debug markers (pushDebugGroup/popDebugGroup/insertDebugMarker) into stream opcodes so that enabling GPU profiler markers does not fragment batches with boundary flushes — today markers stay correct (flushed) but each marker costs a bridge crossing and splits the batch, which is acceptable for profiling sessions only.
+The command-stream types already admit GPURenderBundleEncoder, so the same lowering could batch bundle construction under compatibilityMode = false if profiling justifies it.
+Comparison numbers against compatibilityMode = false and snapshot rendering on the same scenes.
+matthargett
+force-pushed
+the
+codex/webgpu-wgsl-gui3d-particles
+branch
+3 times, most recently
+from
+64f6f23 to
+64ade89
+Compare
+May 29, 2026 23:59
+matthargett
+force-pushed
+the
+codex/native-webgpu-command-stream-batching
+branch
+3 times, most recently
+from
+b825eb3 to
+667696d
+Compare
+June 2, 2026 20:40
+matthargett
+changed the title
+[codex] Batch NativeWebGPU render pass command streams
+[codex] Add WebGPU render command batching
+Jun 2, 2026
+matthargett
+changed the title
+[codex] Add WebGPU render command batching
+Add WebGPU render command batching
+Jun 2, 2026
+matthargett
+force-pushed
+the
+codex/native-webgpu-command-stream-batching
+branch
+from
+01e476c to
+f8f7da1
+Compare
+June 11, 2026 08:11
+[WebGPU] Add render-pass command stream batching for native hosts
+…
+4f4e502
+```
+Hosts that run the WebGPU engine over a JS/native boundary (e.g.
+BabylonNative over wgpu-native) pay one bridge crossing per render-pass
+encoder call: setPipeline, setBindGroup, setVertexBuffer, setIndexBuffer,
+and draw* each traverse Node-API individually. This brings the WebGPU
+path into congruence with the pattern core already ships for the
+bgfx-based NativeEngine (CommandBufferEncoder + NativeDataStream): encode
+commands as words into a reused buffer and submit them across the
+boundary in batches.
+
+- RenderCommandBatcher: a generic lower-or-replay adapter. Pending
+  lowered work is always flushed before a command replays, so submission
+  order is preserved unconditionally.
+- WebGPURenderPassCommandStream: encodes compatibility-mode draws as
+  opcode words in a reused Uint32Array, state-diffing pipeline,
+  index/vertex buffers, and bind groups so redundant state is elided
+  before it is recorded, then submits each batch through a single
+  _recordCommands call on the render pass.
+- Hosts opt in by installing an IWebGPURenderPassCommandRecorderProvider
+  on engine.renderPassCommandRecorderProvider, supplying resource handle
+  ids, enablement, and diagnostics, with a protocol-version handshake
+  mirroring NativeEngine's PROTOCOL_VERSION guard. A version mismatch or
+  a recording failure logs once and falls back permanently to direct
+  encoder calls; nothing throws from the render loop.
+- Batched draws are recorded before every direct render-pass mutation -
+  viewport, scissor, stencil reference, blend constant, full-quad
+  clears, occlusion query begin/end, debug markers, and pass end -
+  through a ThinWebGPUEngine._flushRenderPassCommands seam, keeping
+  occlusion-query results and GPU-capture debug groups attributed to the
+  correct draws.
+- The draw hot path is allocation-free via reused scratch draw commands
+  and id arrays. With no provider installed (always the case in
+  browsers), the per-draw overhead is a null check and a work-free
+  flush, and draws take the standard WebGPU encoder calls unchanged.
+- Unit tests cover the batcher and stream contracts, plus flush-boundary
+  scenario tests that assert occlusion-query and debug-group draw
+  attribution on a decoded native timeline rather than encoder-call
+  ordinality.
+```
+matthargett
+force-pushed
+the
+codex/native-webgpu-command-stream-batching
+branch
+from
+f8f7da1 to
+4f4e502
+Compare
+June 11, 2026 08:14
+Validate host resource ids as safe integers
+…
+292e403
+```
+Provider-supplied resource ids are encoded into 64-bit command words from
+JS numbers; an id beyond Number.MAX_SAFE_INTEGER would encode imprecisely
+and corrupt the stream. Treat out-of-range ids like missing ones - the
+draw falls back to direct encoder replay - and document the range in the
+provider contract. Also document at the failure site why a failed backend
+recording drops the in-flight batch instead of retaining replayable
+copies of every draw.
+```
+github-actions
+Bot
+commented
+Jul 10, 2026
+Copy link
+Copy Markdown
+This pull request has been marked as stale because it has been inactive for more than 14 days. Please update to "unstale".
+github-actions
+Bot
+added
+the
+stale
+label
+Jul 10, 2026
+matthargett
+pushed a commit
+that referenced
+this pull request
+Oct 28, 2026
+KTX2: transfer a loaded file to the worker, and free the levels once …
+…
+4c48a99
+```
+…uploaded (BabylonJS#19059)
+
+Forum: [64298](https://forum.babylonjs.com/t/64298) #2 and BabylonJS#11: isolated
+PRs with measured gains, each benefit measured separately.
+
+When a KTX2 texture is decoded in a worker (the default), Babylon copies
+the file before posting it to the worker, and the levels the worker
+sends back stay in memory until a garbage collection finds them, long
+after they were uploaded to the GPU. V8 counts ArrayBuffer memory toward
+its next full GC, so an app that loads many KTX2 textures runs full GCs
+far more often than its JavaScript needs. This PR removes the copy when
+nothing else holds the file, and frees the levels once they are
+uploaded.
+
+**What it does.**
+- When the engine loaded the file from the texture's url with no offline
+provider involved, nothing else holds it: the worker gets its buffer
+(transferred) instead of a copy. The engine says so with a new optional
+argument of `IInternalTextureLoader.loadData`, `ownsData`, passed only
+on that path. A provider can keep the buffers it serves in a cache, so a
+file it serves is still copied. Data a texture is created from
+(`buffer`) is still copied, and so is a view on part of a buffer: it can
+belong to the caller, and with `doNotHandleContextLost` a texture does
+not keep it, so the texture alone cannot tell.
+- Once the levels a worker sent are uploaded, their buffers are released
+with `ArrayBuffer.prototype.transfer(0)` where it exists, which frees
+the memory at once. Nothing else holds them: the worker transferred
+them, and the uploads copy them (WebGL's `texImage2D` and
+`compressedTexImage2D`, WebGPU's `writeTexture` or a mapped buffer).
+- The decoder on the main thread (no workers) is unchanged: there, the
+levels can belong to the decoder.
+- Context loss is unaffected: a texture loaded from its url loads it
+again, and one created from data keeps that data (`_buffer`).
+
+**Measured.** In our app, which streams KTX2 textures as the player
+moves, these two changes took full GCs from 30.2 to 17.0 per minute (2
+runs each). The numbers below come from a test page made for this PR,
+which we can share.
+
+Chromium 147, RTX 3080 Laptop GPU, Windows 11, 1280×720. A page that
+keeps rendering a scene loads 64 KTX2 textures, 4 at a time. They are
+2048×2048 UASTC with zstd and a full mip chain, about 5.1 MB each: 8
+files of our own procedural content, each url loaded anew from a local
+server. Babylon's KTX2 decoder and transcoders are served locally, with
+the default worker pool. A Chrome trace counts V8's garbage collections
+on the main thread, from the first load to 2 s after the last. The
+external memory is `backingStorageSize` from `Runtime.getHeapUsage`,
+sampled every 50 ms. Each arm ran 4 times, the arms alternating, with a
+new browser for each run. Ranges are over the 4 runs, on master as of
+today (dbd14a5).
+
+WebGPU with `enableAllFeatures` (the levels are transcoded to BC7, 5.6
+MB per texture):
+
+| | full GCs on the main thread | their pauses, per run | external
+memory, peak | 2 s after the loads | load time |
+|---|---|---|---|---|---|
+| master | 11 | 30-42 ms | 107-128 MB | 29-71 MB | 1657-1780 ms |
+| this PR | 0-1 | 0-3 ms | 28.8 MB | 8.5 MB | 1605-1646 ms |
+
+WebGL2 (BC7):
+
+| | full GCs on the main thread | their pauses, per run | external
+memory, peak | 2 s after the loads | load time |
+|---|---|---|---|---|---|
+| master | 10-11 | 30-35 ms | 118-199 MB | 40-102 MB | 1435-1693 ms |
+| this PR | 0 | 0 | 28.8 MB | 8.4 MB | 1239-1419 ms |
+
+WebGPU as created by default (no optional features, so no BC: the levels
+are RGBA8, 22.4 MB per texture):
+
+| | full GCs on the main thread | their pauses, per run | external
+memory, peak | 2 s after the loads | load time |
+|---|---|---|---|---|---|
+| master | 26-27 | 74-90 ms | 177-199 MB | 114-141 MB | 2317-2561 ms |
+| this PR | 0-2 | 0-10 ms | 8.5-28.8 MB | 8.5 MB | 1940-2231 ms |
+
+Each change alone, measured the same way on c9e77a1, three commits
+before today's master (none of the three touches this code). "Levels
+only" and "transfer only" are this PR with one of its two changes taken
+out. Full GCs on the main thread:
+
+|  | WebGPU, BC7 | WebGPU, RGBA8 |
+|---|---|---|
+| master | 11-12 | 25-28 |
+| levels only | 6-7 | 8-10 |
+| transfer only | 5-6 | 22-25 |
+| this PR | 0 | 0-3 |
+
+What the numbers say:
+- On master, each texture leaves three buffers for the GC: its file (5.1
+MB), the copy of the file, and its levels (5.6 MB in BC7, 22.4 MB in
+RGBA8). For 64 textures that brought 10-11 full GCs with BC7 and 26-27
+with RGBA8. With this PR there were 0 to 2.
+- Each change does part of it. With BC7 the two weigh about the same.
+With RGBA8 the levels dominate.
+- What the loads leave in external memory falls from 29-141 MB to
+8.4-8.5 MB, and its peak from 107-199 MB to 8.5-28.8 MB.
+- Here each full GC pauses the main thread about 3 ms, because this
+page's JavaScript heap is small. In an app with a large heap, each one
+marks much more.
+- The loads took as long or less.
+- The images are the same: in every configuration, each arm's last frame
+is identical to master's, byte for byte.
+
+**Unit tests.** `khronosTextureContainer2.test.ts`, 4: a worker gets the
+buffer of a file nothing else holds, and a copy of data that is not
+owned or that is a view on part of a buffer; the levels a worker sent
+are freed once they are uploaded (after the uploads read them in full);
+the levels of the decoder on the main thread are kept; and the engine
+says it owns the data of a texture loaded from its url, not the data a
+texture is created from. The first, second and fourth fail on master;
+the third passes on both. Engines, Materials and Misc unit suites: 756
+passed, 1 expected fail (already marked on master).
+
+Progress videos: https://forum.babylonjs.com/t/64298/1
+
+Prepared by Mema, the AI of our studio 53ON (Claude in the 53ON harness,
+with MemoriaBios, our long-term memory), and reviewed by me.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+---------
+
+Co-authored-by: Enrique Velasquez <8260822+enriqxxx@users.noreply.github.com>
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+```
+matthargett
+pushed a commit
+that referenced
+this pull request
+Oct 28, 2026
+Materials: keep pipeline names and plugin declarations as flat strings (
+…
+404be0d
+```
+BabylonJS#19060)
+
+Forum: [64298](https://forum.babylonjs.com/t/64298) #2 and BabylonJS#11: isolated
+PRs with measured gains, each benefit measured separately.
+
+An effect's pipeline name and a material's plugin declarations live as
+long as the effect and the material. Today V8 keeps them as ropes,
+strings made of many pieces. The pipeline name comes from a global
+`replace` of each line break (`replace(/\n/g, "|")`), and the plugin
+declarations grow with `+=`, one line per uniform. A rope is one heap
+object per piece, and every full garbage collection marks all of them.
+This PR builds the same strings with `split` and `join`, which V8 keeps
+as one flat string each.
+
+**What it does.**
+- `Effect`: the pipeline name is `key.replace(/\r/g,
+"").split("\n").join("|")` instead of `.replace(/\n/g, "|")`, in the
+constructor and when the pipeline context is created. The same applies
+in `effect.webgl.functions`. The string itself does not change.
+- `MaterialPluginManager`: the ubo, vertex and fragment declarations of
+the plugins are pushed into arrays and joined once, instead of being
+grown with `+=`. The strings do not change either.
+- On WebGL, the pipeline name is also a key of the pipeline cache, and
+V8 flattens a string used as a key, so the effect part matters mostly on
+WebGPU.
+
+**Measured.** In our app (WebGPU), a heap snapshot had 220k concatenated
+strings: 132k under plugin declarations and 54k under pipeline names.
+With this change the heap had 13% fewer nodes. The numbers below come
+from a test page made for this PR, which we can share.
+
+Chromium 147, RTX 3080 Laptop GPU, Windows 11. The page has 512 spheres,
+each with its own PBR material. The bits of the material's index turn on
+clear coat, sheen, iridescence, anisotropy, translucency and specular
+anti-aliasing, so the scene compiles 64 effects. Once every material is
+ready and 60 frames have run, the runner forces 2 full GCs, then 5 more
+inside a Chrome trace (for each, the main thread's pause and its atomic
+mark), and takes a heap snapshot. Each arm ran 4 times, the arms
+alternating, with a new browser for each run, on master as of today
+(dbd14a5). Ranges are over the runs; the GC times are the median of all
+the forced GCs.
+
+WebGPU:
+
+| | heap snapshot nodes | of which concatenated strings | JS heap in use
+| full GC pause | its mark |
+|---|---|---|---|---|---|
+| master | 795,266-797,446 | 139,531-139,533 | 76.4-76.6 MB | 12.5 ms |
+9.6 ms |
+| this PR | 659,336-661,713 | 22,073-22,090 | 74.7-74.9 MB | 10.7 ms |
+7.5 ms |
+
+WebGL2:
+
+| | heap snapshot nodes | of which concatenated strings | JS heap in use
+| full GC pause | its mark |
+|---|---|---|---|---|---|
+| master | 690,852-692,955 | 83,602-83,608 | 71.8-71.9 MB | 10.3 ms |
+7.7 ms |
+| this PR | 607,464-609,570 | 20,818 | 70.7-70.8 MB | 9.5 ms | 6.8 ms |
+
+What the numbers say:
+- On WebGPU there are 117k fewer concatenated strings (-84%) and 136k
+fewer heap nodes (-17%). Each forced full GC pauses 14% less: 12.5 →
+10.7 ms, with the mark going from 9.6 to 7.5 ms. The GC times move with
+the machine's state: an earlier session, on c9e77a1, gave 14.8 → 11.9
+ms. The node counts were the same to a few nodes.
+- Each part's share, from master's snapshot, counted by the first holder
+of each concatenated string that is not a string: on WebGPU, 104,892 are
+under `MaterialPluginManager._uboDeclaration`, about 205 per material,
+and 12,546 under the pipeline contexts' `_name`, about 196 per effect.
+Together they make up the whole drop (117,461). The 22k left belong to
+other holders, the same in both arms.
+- On WebGL2 the drop is smaller: 63k concatenated strings (-75%), 12% of
+the nodes, and the pause goes from 10.3 to 9.5 ms (10.4 to 9.0 ms in the
+earlier session). All of it comes from the plugin declarations: 62,784
+under `_uboDeclaration`, about 123 per material, and none under `_name`,
+because the pipeline cache's key flattens it there.
+- Only the materials and effects change here. In an app, the share
+depends on how many materials and effects it has against the rest of its
+heap.
+
+**Unit tests.** `materialPluginManager.declarations.test.ts` has 3: the
+declarations in GLSL and in WGSL, with an array, a matrix and a float,
+in plugin order, and not doubled when the layout is built again.
+`effect.pipelineName.test.ts` has 1: the pipeline name. They pass on
+master too, because the strings do not change, only how V8 stores them,
+which a unit test cannot see. The bench's heap snapshots show it. The
+Engines, Materials and Misc unit suites have 756 passing tests and 1
+expected fail, already marked on master.
+
+Progress videos: https://forum.babylonjs.com/t/64298/1
+
+Prepared by Mema, the AI of our studio 53ON (Claude in the 53ON harness,
+with MemoriaBios, our long-term memory), and reviewed by me.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+---------
+
+Co-authored-by: Enrique Velasquez <8260822+enriqxxx@users.noreply.github.com>
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+```
+matthargett
+pushed a commit
+that referenced
+this pull request
+Oct 28, 2026
+Meshes: keep no Vector3 per vertex when a mesh's positions are its ge…
+…
+f26ec6a
+```
+…ometry's (BabylonJS#19065)
+
+Forum: [64298](https://forum.babylonjs.com/t/64298) #2 and BabylonJS#11: isolated
+PRs with measured gains, each benefit measured separately.
+
+`refreshBoundingInfo()` runs for every mesh when its vertex data is set.
+Besides the bounding info, it fills the mesh's positions with one
+`Vector3` per vertex, which the mesh keeps. Picking and collisions read
+those points. But when the positions are not transformed (no morph
+targets, skeleton or baked vertex animation applied), they are the
+geometry's own positions. The geometry already makes its own `Vector3`
+points the first time picking or collisions need them
+(`Geometry._generatePointsArray`), and all its meshes share them. So
+today every mesh holds an extra copy, one `Vector3` per vertex, whether
+it is ever picked or not, and each clone of a mesh holds its own.
+
+**What it does.** In `AbstractMesh._getData`, when the positions are not
+transformed, the mesh keeps none of its own. `Mesh._positions` already
+falls back to the geometry's points. Picking, collisions and the WebXR
+near interaction already call `_generatePointsArray()` before they read
+them. With morph targets, a skeleton or baked vertex animation applied,
+the mesh keeps the transformed positions, as before.
+
+**Measured.** In our app, this change took the heap from 2.03 M to 1.95
+M nodes (-4%); 25 meshes held 39,691 of these `Vector3`. The numbers
+below come from a test page made for this PR, which we can share.
+
+Chromium 147, RTX 3080 Laptop GPU, Windows 11. The page makes 20 sphere
+geometries (16 to 54 segments), each used by 10 meshes, the first one
+and its 9 clones: 200 meshes and 623,200 vertices in all. It times the
+creation of the meshes. Once the scene is ready and 60 frames have run,
+the runner forces 2 full GCs, reads the JS heap, traces 5 more forced
+full GCs and takes a heap snapshot. Then it picks every mesh once with a
+ray through its center, and reads the heap again after 2 more forced
+GCs. Each arm ran 4 times, the arms alternating, with a new browser for
+each run, on master as of today (dbd14a5). Ranges are over the runs; the
+GC times are the median of all the forced GCs.
+
+WebGPU:
+
+| | heap snapshot nodes | JS heap in use | after picking every mesh |
+full GC pause | its mark | creating the meshes |
+|---|---|---|---|---|---|---|
+| master | 2,552,763-2,554,816 | 56.9-57.0 MB | 61.1-61.2 MB | 18.3 ms |
+14.0 ms | 155-177 ms |
+| this PR | 308,832-310,968 | 20.5-20.6 MB | 24.7-25.0 MB | 6.1 ms | 3.9
+ms | 116-140 ms |
+
+WebGL2:
+
+| | heap snapshot nodes | JS heap in use | after picking every mesh |
+full GC pause | its mark | creating the meshes |
+|---|---|---|---|---|---|---|
+| master | 2,541,312-2,543,598 | 56.0-56.2 MB | 60.2-60.4 MB | 17.3 ms |
+12.6 ms | 145-163 ms |
+| this PR | 297,481-299,678 | 19.7-19.8 MB | 23.8-24.0 MB | 4.9 ms | 3.1
+ms | 114-140 ms |
+
+What the numbers say:
+- On master every mesh keeps a `Vector3` per vertex. Here that is 2.24 M
+of the 2.55 M heap objects (each vector and its numbers), and 36 MB of
+the heap. With this PR the meshes keep none.
+- Once every mesh has been picked, the geometries have made their
+points, 4.2 MB, once per geometry. On master the meshes still hold their
+own copies too: 61 MB against 25 MB.
+- Each forced full GC pauses about a third as long: 18.3 → 6.1 ms on
+WebGPU, 17.3 → 4.9 ms on WebGL2.
+- The meshes are made faster, since there are no vectors to fill, and
+picking took as long or less. Picking also hits the same points: every
+run of both arms gave the same 200 hits and the same checksum of
+distances and faces.
+- The images are the same: on both engines, this PR's last frame is
+identical to master's, byte for byte.
+
+**Unit tests.** `abstractMesh.positions.test.ts` has 6:
+- a mesh keeps no positions of its own when they are its geometry's;
+- picking uses the geometry's points, which its clones share;
+- collisions work with them;
+- with morph targets applied, the mesh keeps the morphed positions and
+picking uses them;
+- after a first pick, positions written in place and a refreshed
+bounding info: the next pick uses them, with
+`Geometry.updateVerticesDataDirectly` and with `VertexBuffer.update` (a
+refresh resets the geometry's points).
+
+The first two fail on master; the others pass on both, and the last two
+failed on the first revision of this branch (ad25a8b). The Meshes,
+Culling, Collisions, Engines, Materials and Misc unit suites have 1,088
+passing tests and 1 expected fail, already marked on master.
+
+Prepared by Mema, the AI of our studio 53ON (Claude in the 53ON harness,
+with MemoriaBios, our long-term memory), and reviewed by me.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+---------
+
+Co-authored-by: Enrique Velasquez <8260822+enriqxxx@users.noreply.github.com>
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+```
+matthargett
+pushed a commit
+that referenced
+this pull request
+Oct 28, 2026
+RenderTargetTexture: a fresh render id before each pass (BabylonJS#19073
+…
+d7ee32b
+```
+)
+
+Forum: [64422](https://forum.babylonjs.com/t/64422) #1 and #2.
+
+A submesh skips its draw in a shadow map when its render id is the
+scene's (`ShadowGenerator._renderSubMeshForShadowMap`), which keeps a
+pass from drawing it twice. The scene's render target loop increments
+the render id before each target, but `RenderTargetTexture.render()`
+called by hand did not for a 2D target, and incremented it only after
+each face or layer of a cube or array target. So two shadow maps
+rendered by hand, one after the other, shared a render id, and the
+second one skipped the casters the first had drawn; and the first face
+or layer of a cube or array target could inherit an id an earlier render
+had used.
+
+**The change.** `RenderTargetTexture.render()` increments the render id
+before each pass: before the render of a 2D target, and before each face
+or layer, the first one included. The id stays the same during a pass,
+so a submesh is still drawn once in it. In the scene's loop, the passes
+of a target get fresh ids as before, with one more increment for a 2D
+target.
+
+**Measured.** The repro Playground of the forum post
+(https://playground.babylonjs.com/#Q5U9HP#1) counts the shadow map
+texels the caster covers, in a page that runs its code with a given
+build. On 9.32.0 the two maps rendered by hand count 30388 and 0 texels;
+with this branch, 30388 and 30388. With `scene.incrementRenderId()`
+between the two renders, 9.32.0 gives 0 and 30388 (the first map took
+the id the second one had used) and this branch 30388 and 30388; with it
+before each render, both give 30388 and 30388.
+
+**Unit tests.** `renderTargetTexture.renderId.test.ts`, 4 tests: two 2D
+targets rendered by hand both draw a submesh another render drew with
+the current id, as two shadow maps sharing a caster; the first face of a
+cube target and the first layer of an array target get a fresh id, and
+each face or layer its own; and the render id stays the same from the
+start to the end of each pass. On master, the first three fail and the
+last one passes. The Materials, Lights, Scene, Rendering and
+PostProcesses unit suites: 619 passed.
+
+Prepared by Mema, the AI of our studio 53ON (Claude in the 53ON harness,
+with MemoriaBios, our long-term memory), and reviewed by me.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Co-authored-by: Enrique Velasquez <8260822+enriqxxx@users.noreply.github.com>
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+stale
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,666 @@
+Pytorchを使った微分可能なレンダリング(2D:四角形）
+PyTorch
+微分可能なレンダリング
+tech
+こんにちは！今回は「微分可能なレンダリング（Differentiable Rendering）」という、最近注目されているコンピュータグラフィックスと機械学習の融合技術について、PyTorchで実装してみたのでシェアします！
+そもそも微分可能なレンダリングって何？
+みなさんは「逆問題」って聞いたことありますか？通常のレンダリングは「3Dモデルから2D画像を生成する」という順問題ですが、逆に「2D画像から3Dモデルのパラメータを推定する」というのが逆問題。これを解くために微分可能なレンダリングが活躍するんです！
+要するに、レンダリングのプロセス全体を微分可能にすることで、勾配降下法を使って画像からパラメータを逆算できるようになるという魔法のような技術です✨
+まずは簡単な例：2D四角形の位置推定
+今回は入門として、2D空間での四角形の位置推定から始めてみました。
+ざっくり手順はこんな感じ：
+目標となる四角形の画像を用意（これが「観測画像」）
+初期位置からスタートして、四角形をレンダリング
+観測画像との差を損失として計算
+PyTorchの自動微分で勾配を計算し、位置パラメータを更新
+これを繰り返して最適な位置に収束させる
+コードの核心部分はこんな感じです：
+```
+def improved_rect_sdf(x, y, center_x, center_y, half_width, half_height):
+    dx = torch.abs(x - center_x) - half_width
+    dy = torch.abs(y - center_y) - half_height
+    outside_distance = torch.sqrt(torch.maximum(dx, torch.tensor(0.))**2 +
+                              torch.maximum(dy, torch.tensor(0.))**2)
+    inside_distance = torch.minimum(torch.maximum(dx, dy), torch.tensor(0.))
+    return outside_distance + inside_distance
+# これをtanhでシルエット化
+sharpness = 20.0
+silhouette = 0.5 - 0.5 * torch.tanh(sharpness * sdf)
+```
+実行してみると、ちゃんと目標位置に収束していきました！イテレーションを重ねるごとに四角形が目標位置に近づいていく様子は感動ものでした😊
+さらに回転も加えてみた
+位置だけだと物足りないので、回転も加えてみました。ここが結構トリッキーで、回転を含めると最適化がローカルミニマムに陥りやすくなります。そこで工夫として：
+2段階最適化：まず位置だけ、次に位置と回転を同時に最適化
+シミュレーテッドアニーリング：局所解から抜け出すために確率的な摂動を追加
+```
+python# 回転を含むSDFの計算
+def rotated_rect_sdf(x, y, center_x, center_y, half_width, half_height, rotation):
+    # 座標を原点に移動
+    x_centered = x - center_x
+    y_centered = y - center_y
+    
+    # 回転座標系に変換
+    cos_rot = torch.cos(rotation)
+    sin_rot = torch.sin(rotation)
+    x_rot = cos_rot * x_centered + sin_rot * y_centered
+    y_rot = -sin_rot * x_centered + cos_rot * y_centered
+    
+    # 以下は通常のSDF計算
+    # ...
+```
+まとめと今後の展望
+今回は2D四角形という簡単な例でしたが、この技術は3Dモデルの姿勢推定、照明条件の推定、テクスチャ最適化など、様々な応用が考えられます。特にAR/VRの分野では、現実世界と仮想オブジェクトの位置合わせにも使えそうです。
+次回は3D物体での実装にも挑戦してみたいと思います！
+```
+import torch
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+import numpy as np
+
+# 画像サイズ
+width, height = 64, 64
+
+# ターゲット（四角形）のパラメータ設定
+target_x = torch.tensor(0.5, requires_grad=False)
+target_y = torch.tensor(0.3, requires_grad=False)
+target_width = torch.tensor(0.3, requires_grad=False)
+target_height = torch.tensor(0.2, requires_grad=False)
+
+# 画像座標系の作成
+image_x = torch.linspace(-1, 1, width)
+image_y = torch.linspace(-1, 1, height)
+image_y_grid, image_x_grid = torch.meshgrid(image_y, image_x)
+
+# 改良版SDF - よりスムーズな勾配を生成
+def improved_rect_sdf(x, y, center_x, center_y, half_width, half_height):
+    # 中心からの相対座標
+    dx = torch.abs(x - center_x) - half_width
+    dy = torch.abs(y - center_y) - half_height
+
+    # 通常のSDF計算
+    outside_distance = torch.sqrt(torch.maximum(dx, torch.tensor(0.))**2 +
+                                  torch.maximum(dy, torch.tensor(0.))**2)
+    inside_distance = torch.minimum(torch.maximum(dx, dy), torch.tensor(0.))
+
+    # 基本のSDF
+    sdf = outside_distance + inside_distance
+
+    return sdf
+
+# ターゲット画像の生成
+target_sdf = improved_rect_sdf(image_x_grid, image_y_grid, target_x, target_y, target_width, target_height)
+sharpness = 20.0  # シャープネスを増加
+target_image = 0.5 - 0.5 * torch.tanh(sharpness * target_sdf)
+
+
+# 結果保存用
+all_results = []
+
+optim_x = torch.tensor(-0.5, requires_grad=True)
+optim_y = torch.tensor(-0.7, requires_grad=True)
+
+# 固定サイズ
+fixed_width = torch.tensor(0.3, requires_grad=False)
+fixed_height = torch.tensor(0.2, requires_grad=False)
+
+# 最適化のハイパーパラメータ
+iterations = 200  # イテレーション数を増加
+lr = 0.1  # 学習率を大幅に増加
+
+# オプティマイザーの設定
+parameters = [optim_x, optim_y]
+optimizer = torch.optim.Adam(parameters, lr=lr)
+
+# 損失の履歴を保存するリスト
+loss_history = []
+x_history = []
+y_history = []
+grad_history = []
+
+# 初期状態を保存
+initial_x_value = optim_x.item()
+initial_y_value = optim_y.item()
+
+print(f"\n初期位置: x={initial_x_value:.4f}, y={initial_y_value:.4f}での最適化を開始")
+
+# 最適化ループ
+for i in range(iterations):
+    # オプティマイザーの勾配をリセット
+    optimizer.zero_grad()
+
+    # 現在の状態をレンダリング
+    current_sdf = improved_rect_sdf(image_x_grid, image_y_grid, optim_x, optim_y, fixed_width, fixed_height)
+    rendered_image = 0.5 - 0.5 * torch.tanh(sharpness * current_sdf)
+
+    # ピクセル単位のMSE
+    pixel_loss = torch.mean((rendered_image - target_image)**2)
+    # 勾配のスケールを大きくするための係数
+    scale_factor = 10.0
+    loss = scale_factor * pixel_loss
+    loss_history.append(loss.item())
+
+    # 勾配を計算
+    loss.backward()
+
+    # 勾配の大きさを記録
+    grad_x_mag = torch.abs(optim_x.grad).item()
+    grad_y_mag = torch.abs(optim_y.grad).item()
+    grad_history.append((grad_x_mag, grad_y_mag))
+
+    # 現在の位置を記録
+    x_history.append(optim_x.item())
+    y_history.append(optim_y.item())
+
+    # パラメータを更新
+    optimizer.step()
+
+    # 20イテレーションごとに表示
+    if (i + 1) % 20 == 0:
+        print(f"Iteration {i+1}/{iterations}, Loss: {loss.item():.6f}, "
+              f"x: {optim_x.item():.4f}, y: {optim_y.item():.4f}, "
+              f"grad_x: {grad_x_mag:.6f}, grad_y: {grad_y_mag:.6f}")
+
+# 最終結果
+final_loss = loss_history[-1]
+final_x = optim_x.item()
+final_y = optim_y.item()
+
+# 結果を保存
+all_results.append({
+    'initial_pos': init_pos,
+    'final_pos': (final_x, final_y),
+    'final_loss': final_loss,
+    'loss_history': loss_history,
+    'x_history': x_history,
+    'y_history': y_history,
+    'grad_history': grad_history
+})
+
+print(f"最適化結果 - 初期位置: ({init_pos[0]:.2f}, {init_pos[1]:.2f})")
+print(f"最適化後: x={final_x:.4f}, y={final_y:.4f}")
+print(f"目標値: x={target_x.item():.4f}, y={target_y.item():.4f}")
+print(f"最終損失: {final_loss:.6f}")
+
+# 最良の結果を選択
+best_result = min(all_results, key=lambda x: x['final_loss'])
+print("\n最良の結果:")
+print(f"初期位置: ({best_result['initial_pos'][0]:.2f}, {best_result['initial_pos'][1]:.2f})")
+print(f"最終位置: x={best_result['final_pos'][0]:.4f}, y={best_result['final_pos'][1]:.4f}")
+print(f"目標値: x={target_x.item():.4f}, y={target_y.item():.4f}")
+print(f"最終損失: {best_result['final_loss']:.6f}")
+
+# 結果の可視化 - 最良の結果
+plt.figure(figsize=(15, 10))
+
+# 初期状態、最終状態、目標の可視化
+plt.subplot(2, 3, 1)
+initial_sdf = improved_rect_sdf(image_x_grid, image_y_grid,
+                              torch.tensor(best_result['initial_pos'][0]),
+                              torch.tensor(best_result['initial_pos'][1]),
+                              fixed_width, fixed_height)
+initial_image = 0.5 - 0.5 * torch.tanh(sharpness * initial_sdf)
+plt.imshow(initial_image.detach().numpy(), cmap='gray')
+plt.title(f'Initial: x={best_result["initial_pos"][0]:.2f}, y={best_result["initial_pos"][1]:.2f}')
+plt.axis('off')
+
+plt.subplot(2, 3, 2)
+final_sdf = improved_rect_sdf(image_x_grid, image_y_grid,
+                            torch.tensor(best_result['final_pos'][0]),
+                            torch.tensor(best_result['final_pos'][1]),
+                            fixed_width, fixed_height)
+final_image = 0.5 - 0.5 * torch.tanh(sharpness * final_sdf)
+plt.imshow(final_image.detach().numpy(), cmap='gray')
+plt.title(f'Optimized: x={best_result["final_pos"][0]:.2f}, y={best_result["final_pos"][1]:.2f}')
+plt.axis('off')
+
+plt.subplot(2, 3, 3)
+plt.imshow(target_image.detach().numpy(), cmap='gray')
+plt.title(f'Target: x={target_x.item():.2f}, y={target_y.item():.2f}')
+plt.axis('off')
+
+# 損失の推移
+plt.subplot(2, 3, 4)
+plt.plot(best_result['loss_history'])
+plt.title('Loss History')
+plt.xlabel('Iteration')
+plt.ylabel('Loss')
+plt.grid(True)
+
+# 位置の推移
+plt.subplot(2, 3, 5)
+plt.plot(best_result['x_history'], label='x')
+plt.plot(best_result['y_history'], label='y')
+plt.axhline(y=target_x.item(), color='r', linestyle='--', label='target x')
+plt.axhline(y=target_y.item(), color='g', linestyle='--', label='target y')
+plt.title('Position History')
+plt.xlabel('Iteration')
+plt.ylabel('Position')
+plt.legend()
+plt.grid(True)
+
+# 勾配の推移
+plt.subplot(2, 3, 6)
+grad_x = [g[0] for g in best_result['grad_history']]
+grad_y = [g[1] for g in best_result['grad_history']]
+plt.plot(grad_x, label='grad_x')
+plt.plot(grad_y, label='grad_y')
+plt.title('Gradient Magnitude')
+plt.xlabel('Iteration')
+plt.ylabel('Gradient')
+plt.legend()
+plt.grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# すべての初期位置での結果を比較
+plt.figure(figsize=(15, 5))
+
+# 損失の推移
+plt.subplot(1, 3, 1)
+for i, result in enumerate(all_results):
+    plt.plot(result['loss_history'], label=f'Init: {result["initial_pos"]}')
+plt.title('Loss Comparison')
+plt.xlabel('Iteration')
+plt.ylabel('Loss')
+plt.legend()
+plt.grid(True)
+
+# X座標の推移
+plt.subplot(1, 3, 2)
+for i, result in enumerate(all_results):
+    plt.plot(result['x_history'], label=f'Init: {result["initial_pos"]}')
+plt.axhline(y=target_x.item(), color='r', linestyle='--', label='target x')
+plt.title('X Position Comparison')
+plt.xlabel('Iteration')
+plt.ylabel('X Position')
+plt.legend()
+plt.grid(True)
+
+# Y座標の推移
+plt.subplot(1, 3, 3)
+for i, result in enumerate(all_results):
+    plt.plot(result['y_history'], label=f'Init: {result["initial_pos"]}')
+plt.axhline(y=target_y.item(), color='r', linestyle='--', label='target y')
+plt.title('Y Position Comparison')
+plt.xlabel('Iteration')
+plt.ylabel('Y Position')
+plt.legend()
+plt.grid(True)
+
+plt.tight_layout()
+plt.show()
+```
+初期位置: x=-0.5000, y=-0.7000での最適化を開始
+Iteration 20/200, Loss: 0.212560, x: 0.6234, y: 0.4052, grad_x: 1.007026, grad_y: 2.405016
+Iteration 40/200, Loss: 0.004449, x: 0.4736, y: 0.3049, grad_x: 0.067532, grad_y: 0.568503
+Iteration 60/200, Loss: 0.005849, x: 0.5160, y: 0.2972, grad_x: 0.438901, grad_y: 0.360000
+Iteration 80/200, Loss: 0.000253, x: 0.5062, y: 0.3025, grad_x: 0.114061, grad_y: 0.010860
+Iteration 100/200, Loss: 0.000103, x: 0.5023, y: 0.3010, grad_x: 0.052543, grad_y: 0.061580
+Iteration 120/200, Loss: 0.000012, x: 0.5003, y: 0.2995, grad_x: 0.019820, grad_y: 0.018681
+Iteration 140/200, Loss: 0.000001, x: 0.4997, y: 0.3002, grad_x: 0.005085, grad_y: 0.007091
+Iteration 160/200, Loss: 0.000000, x: 0.5001, y: 0.3000, grad_x: 0.000321, grad_y: 0.002573
+Iteration 180/200, Loss: 0.000000, x: 0.5000, y: 0.3000, grad_x: 0.000365, grad_y: 0.000182
+Iteration 200/200, Loss: 0.000000, x: 0.5000, y: 0.3000, grad_x: 0.000039, grad_y: 0.000293
+最適化結果 - 初期位置: (0.00, 0.00)
+最適化後: x=0.5000, y=0.3000
+目標値: x=0.5000, y=0.3000
+最終損失: 0.000000
+最良の結果:
+初期位置: (0.00, 0.00)
+最終位置: x=0.5000, y=0.3000
+目標値: x=0.5000, y=0.3000
+最終損失: 0.000000
+```
+import torch
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+import math
+import numpy as np
+import random
+
+# 画像サイズ
+width, height = 64, 64
+
+# ターゲット（四角形）のパラメータ設定
+target_x = torch.tensor(0.5, requires_grad=False)  # 中心のx座標
+target_y = torch.tensor(0.3, requires_grad=False)  # 中心のy座標
+target_width = torch.tensor(0.3, requires_grad=False)  # 幅の半分
+target_height = torch.tensor(0.2, requires_grad=False)  # 高さの半分
+target_rotation = torch.tensor(math.pi/4, requires_grad=False)  # 回転角（ラジアン）- 45度
+
+# 画像座標系の作成
+image_x = torch.linspace(-1, 1, width)
+image_y = torch.linspace(-1, 1, height)
+image_y_grid, image_x_grid = torch.meshgrid(image_y, image_x)
+
+# 回転を含む四角形のためのSDF（符号付き距離関数）を計算
+def rotated_rect_sdf(x, y, center_x, center_y, half_width, half_height, rotation):
+    # 座標を原点に移動
+    x_centered = x - center_x
+    y_centered = y - center_y
+    
+    # 回転行列の逆を適用して座標系を回転
+    cos_rot = torch.cos(rotation)
+    sin_rot = torch.sin(rotation)
+    
+    # 回転座標系での座標を計算
+    x_rot = cos_rot * x_centered + sin_rot * y_centered
+    y_rot = -sin_rot * x_centered + cos_rot * y_centered
+    
+    # 通常のSDFを回転座標系で計算
+    dx = torch.abs(x_rot) - half_width
+    dy = torch.abs(y_rot) - half_height
+    
+    # 内部では負の値、外部では正の値、境界上では0
+    outside_distance = torch.sqrt(torch.maximum(dx, torch.tensor(0.))**2 + 
+                                  torch.maximum(dy, torch.tensor(0.))**2)
+    inside_distance = torch.minimum(torch.maximum(dx, dy), torch.tensor(0.))
+    
+    return outside_distance + inside_distance
+
+# ターゲット画像の生成
+target_sdf = rotated_rect_sdf(image_x_grid, image_y_grid, target_x, target_y, 
+                             target_width, target_height, target_rotation)
+sharpness = 15.0
+target_image = 0.5 - 0.5 * torch.tanh(sharpness * target_sdf)
+
+# 複数の初期値でテスト
+initial_configs = [
+    {'pos': (-0.5, -0.7), 'rot': 0.0},
+    {'pos': (0.0, 0.0), 'rot': 0.0},
+    {'pos': (0.3, 0.2), 'rot': 0.0},
+    {'pos': (-0.5, -0.7), 'rot': math.pi/8},  # 22.5度
+]
+
+# 結果を保存するリスト
+all_results = []
+
+# 各初期設定で最適化を実行
+for config in initial_configs:
+    init_pos = config['pos']
+    init_rot = config['rot']
+    
+    print(f"\n初期設定: 位置=({init_pos[0]:.2f}, {init_pos[1]:.2f}), 回転={init_rot*180/math.pi:.1f}°")
+    
+    # 最適化するパラメータ（初期値）
+    optim_x = torch.tensor(init_pos[0], requires_grad=True)
+    optim_y = torch.tensor(init_pos[1], requires_grad=True)
+    optim_rotation = torch.tensor(init_rot, requires_grad=True)
+    
+    # 固定パラメータ
+    fixed_width = torch.tensor(0.3, requires_grad=False)
+    fixed_height = torch.tensor(0.2, requires_grad=False)
+    
+    # 最適化のハイパーパラメータ
+    iterations = 300  # イテレーション数を増加
+    
+    # 2段階の最適化: まず位置のみ、次に位置と回転
+    # ステージ1: 位置のみの最適化
+    stage1_iterations = 100
+    optimizer1 = torch.optim.Adam([optim_x, optim_y], lr=0.05)
+    
+    # ステージ2: 位置と回転の最適化
+    stage2_iterations = iterations - stage1_iterations
+    optimizer2 = torch.optim.Adam([
+        {'params': [optim_x, optim_y], 'lr': 0.03},
+        {'params': [optim_rotation], 'lr': 0.01}  # 回転には低い学習率
+    ])
+    
+    # 履歴を保存するリスト
+    loss_history = []
+    param_history = []
+    
+    # ステージ1: 位置のみの最適化
+    print("ステージ1: 位置のみの最適化")
+    
+    # 最適化ループ（位置のみ）
+    for i in range(stage1_iterations):
+        optimizer1.zero_grad()
+        
+        # 現在の状態をレンダリング
+        current_sdf = rotated_rect_sdf(image_x_grid, image_y_grid, optim_x, optim_y, 
+                                     fixed_width, fixed_height, optim_rotation)
+        rendered_image = 0.5 - 0.5 * torch.tanh(sharpness * current_sdf)
+        
+        # 損失を計算
+        loss = 1000.0 * torch.mean((rendered_image - target_image)**2)
+        loss_history.append(loss.item())
+        
+        # 現在のパラメータを記録
+        param_history.append({
+            'x': optim_x.item(),
+            'y': optim_y.item(),
+            'rotation': optim_rotation.item()
+        })
+        
+        # 勾配を計算
+        loss.backward()
+        
+        # パラメータを更新
+        optimizer1.step()
+        
+        # 20イテレーションごとに表示
+        if (i + 1) % 20 == 0:
+            print(f"Iteration {i+1}/{stage1_iterations}, Loss: {loss.item():.6f}, "
+                  f"x: {optim_x.item():.4f}, y: {optim_y.item():.4f}, rot: {optim_rotation.item()*180/math.pi:.1f}°")
+    
+    # ステージ2: 位置と回転の最適化
+    print("\nステージ2: 位置と回転の最適化")
+    
+    # シミュレーテッドアニーリングパラメータ
+    temperature = 0.1  # 初期温度
+    cooling_rate = 0.98  # 冷却率
+    
+    # 最適化ループ（位置と回転）
+    for i in range(stage2_iterations):
+        optimizer2.zero_grad()
+        
+        # 現在の状態をレンダリング
+        current_sdf = rotated_rect_sdf(image_x_grid, image_y_grid, optim_x, optim_y, 
+                                     fixed_width, fixed_height, optim_rotation)
+        rendered_image = 0.5 - 0.5 * torch.tanh(sharpness * current_sdf)
+        
+        # 損失を計算
+        loss = 1000.0 * torch.mean((rendered_image - target_image)**2)
+        loss_history.append(loss.item())
+        
+        # 現在のパラメータを記録
+        param_history.append({
+            'x': optim_x.item(),
+            'y': optim_y.item(),
+            'rotation': optim_rotation.item()
+        })
+        
+        # 勾配を計算
+        loss.backward()
+        
+        # シミュレーテッドアニーリング: ランダムな摂動を追加
+        if i % 10 == 0 and temperature > 0.01:
+            with torch.no_grad():
+                # スカラーテンソルを使用して摂動を追加 (修正部分)
+                optim_rotation.add_(torch.randn(()).item() * temperature * 0.1)
+                # 温度を下げる
+                temperature *= cooling_rate
+        
+        # パラメータを更新
+        optimizer2.step()
+        
+        # 回転角を正規化
+        with torch.no_grad():
+            # 回転を[-pi, pi]の範囲に制限
+            optim_rotation.data = torch.remainder(optim_rotation.data + math.pi, 2*math.pi) - math.pi
+        
+        # 20イテレーションごとに表示
+        if (i + 1) % 20 == 0:
+            print(f"Iteration {i+1}/{stage2_iterations}, Loss: {loss.item():.6f}, "
+                  f"x: {optim_x.item():.4f}, y: {optim_y.item():.4f}, rot: {optim_rotation.item()*180/math.pi:.1f}°")
+    
+    # 最終結果
+    final_loss = loss_history[-1]
+    final_x = optim_x.item()
+    final_y = optim_y.item()
+    final_rot = optim_rotation.item()
+    
+    # 結果を保存
+    all_results.append({
+        'initial_config': config,
+        'final_pos': (final_x, final_y),
+        'final_rot': final_rot,
+        'final_loss': final_loss,
+        'loss_history': loss_history,
+        'param_history': param_history
+    })
+    
+    print(f"\n初期設定からの結果: 位置=({init_pos[0]:.2f}, {init_pos[1]:.2f}), 回転={init_rot*180/math.pi:.1f}°")
+    print(f"最適化後: x={final_x:.4f}, y={final_y:.4f}, rot={final_rot*180/math.pi:.1f}°")
+    print(f"目標値: x={target_x.item():.4f}, y={target_y.item():.4f}, rot={target_rotation.item()*180/math.pi:.1f}°")
+    print(f"最終損失: {final_loss:.6f}")
+
+# 最良の結果を選択
+best_result = min(all_results, key=lambda x: x['final_loss'])
+init_config = best_result['initial_config']
+print("\n最良の結果:")
+print(f"初期設定: 位置=({init_config['pos'][0]:.2f}, {init_config['pos'][1]:.2f}), 回転={init_config['rot']*180/math.pi:.1f}°")
+print(f"最終位置: x={best_result['final_pos'][0]:.4f}, y={best_result['final_pos'][1]:.4f}, rot={best_result['final_rot']*180/math.pi:.1f}°")
+print(f"目標値: x={target_x.item():.4f}, y={target_y.item():.4f}, rot={target_rotation.item()*180/math.pi:.1f}°")
+print(f"最終損失: {best_result['final_loss']:.6f}")
+
+# 最良の結果の可視化
+plt.figure(figsize=(15, 10))
+
+# 初期、最終、目標の状態を可視化
+plt.subplot(2, 3, 1)
+init_pos = init_config['pos']
+init_rot = init_config['rot']
+initial_sdf = rotated_rect_sdf(image_x_grid, image_y_grid, 
+                             torch.tensor(init_pos[0]), 
+                             torch.tensor(init_pos[1]), 
+                             fixed_width, fixed_height, 
+                             torch.tensor(init_rot))
+initial_image = 0.5 - 0.5 * torch.tanh(sharpness * initial_sdf)
+plt.imshow(initial_image.detach().numpy(), cmap='gray')
+plt.title(f'Initial: ({init_pos[0]:.2f}, {init_pos[1]:.2f}), {init_rot*180/math.pi:.1f}°')
+plt.axis('off')
+
+plt.subplot(2, 3, 2)
+final_pos = best_result['final_pos']
+final_rot = best_result['final_rot']
+final_sdf = rotated_rect_sdf(image_x_grid, image_y_grid, 
+                           torch.tensor(final_pos[0]), 
+                           torch.tensor(final_pos[1]), 
+                           fixed_width, fixed_height, 
+                           torch.tensor(final_rot))
+final_image = 0.5 - 0.5 * torch.tanh(sharpness * final_sdf)
+plt.imshow(final_image.detach().numpy(), cmap='gray')
+plt.title(f'Optimized: ({final_pos[0]:.2f}, {final_pos[1]:.2f}), {final_rot*180/math.pi:.1f}°')
+plt.axis('off')
+
+plt.subplot(2, 3, 3)
+plt.imshow(target_image.detach().numpy(), cmap='gray')
+plt.title(f'Target: ({target_x.item():.2f}, {target_y.item():.2f}), {target_rotation.item()*180/math.pi:.1f}°')
+plt.axis('off')
+
+# 損失の推移
+plt.subplot(2, 3, 4)
+plt.plot(best_result['loss_history'])
+plt.axvline(x=stage1_iterations, color='r', linestyle='--', label='Stage 1/2')
+plt.title('Loss History')
+plt.xlabel('Iteration')
+plt.ylabel('Loss')
+plt.legend()
+plt.grid(True)
+
+# 位置の推移
+plt.subplot(2, 3, 5)
+x_vals = [p['x'] for p in best_result['param_history']]
+y_vals = [p['y'] for p in best_result['param_history']]
+plt.plot(x_vals, label='x')
+plt.plot(y_vals, label='y')
+plt.axhline(y=target_x.item(), color='r', linestyle='--', label='target x')
+plt.axhline(y=target_y.item(), color='g', linestyle='--', label='target y')
+plt.axvline(x=stage1_iterations, color='k', linestyle='--')
+plt.title('Position History')
+plt.xlabel('Iteration')
+plt.ylabel('Position')
+plt.legend()
+plt.grid(True)
+
+# 回転の推移
+plt.subplot(2, 3, 6)
+rot_vals = [p['rotation']*180/math.pi for p in best_result['param_history']]
+plt.plot(rot_vals)
+plt.axhline(y=target_rotation.item()*180/math.pi, color='r', linestyle='--', label='target rotation')
+plt.axvline(x=stage1_iterations, color='k', linestyle='--')
+plt.title('Rotation History (degrees)')
+plt.xlabel('Iteration')
+plt.ylabel('Angle')
+plt.legend()
+plt.grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# 全ての結果を比較
+plt.figure(figsize=(15, 5))
+
+# 損失の比較
+plt.subplot(1, 3, 1)
+for i, result in enumerate(all_results):
+    config = result['initial_config']
+    label = f"({config['pos'][0]:.1f}, {config['pos'][1]:.1f}), {config['rot']*180/math.pi:.0f}°"
+    plt.plot(result['loss_history'], label=label)
+plt.axvline(x=stage1_iterations, color='k', linestyle='--')
+plt.title('Loss Comparison')
+plt.xlabel('Iteration')
+plt.ylabel('Loss')
+plt.legend()
+plt.grid(True)
+
+# 位置軌跡の比較
+plt.subplot(1, 3, 2)
+for i, result in enumerate(all_results):
+    config = result['initial_config']
+    x_vals = [p['x'] for p in result['param_history']]
+    y_vals = [p['y'] for p in result['param_history']]
+    final_pos = result['final_pos']
+    label = f"Init {i+1}"
+    plt.plot(x_vals, y_vals, alpha=0.6, label=label)
+    plt.scatter([config['pos'][0]], [config['pos'][1]], marker='o')
+    plt.scatter([final_pos[0]], [final_pos[1]], marker='x')
+
+plt.scatter([target_x.item()], [target_y.item()], color='red', marker='*', s=100, label='Target')
+plt.title('Position Trajectories')
+plt.xlabel('X Position')
+plt.ylabel('Y Position')
+plt.legend()
+plt.grid(True)
+
+# 回転の比較
+plt.subplot(1, 3, 3)
+for i, result in enumerate(all_results):
+    config = result['initial_config']
+    label = f"Init {i+1}"
+    rot_vals = [p['rotation']*180/math.pi for p in result['param_history']]
+    plt.plot(rot_vals, alpha=0.6, label=label)
+plt.axhline(y=target_rotation.item()*180/math.pi, color='r', linestyle='--', label='Target')
+plt.axvline(x=stage1_iterations, color='k', linestyle='--')
+plt.title('Rotation Comparison (degrees)')
+plt.xlabel('Iteration')
+plt.ylabel('Angle')
+plt.legend()
+plt.grid(True)
+
+plt.tight_layout()
+plt.show()
+```
+初期設定からの結果: 位置=(-0.50, -0.70), 回転=22.5°
+最適化後: x=0.0912, y=-1.7823, rot=18.0°
+目標値: x=0.5000, y=0.3000, rot=45.0°
+最終損失: 45.485943
+最良の結果:
+初期設定: 位置=(0.00, 0.00), 回転=0.0°
+最終位置: x=0.5000, y=0.3000, rot=45.0°
+目標値: x=0.5000, y=0.3000, rot=45.0°
+最終損失: 0.000001
+Discussion

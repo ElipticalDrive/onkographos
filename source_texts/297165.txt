@@ -1,0 +1,170 @@
+Experimenting with scientific visualization in wgpu for portability (Rust, Python, and web) - Volume rendering: per-mode visuals (Direct/Additive/MIP/minIP/Average/Iso) by aganders3 · Pull Request #1 · aganders3/bovista
+
+Volume rendering: per-mode visuals (Direct/Additive/MIP/minIP/Average/Iso) by aganders3 · Pull Request #1 · aganders3/bovista · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+aganders3
+commented
+May 21, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Replaces the single VolumeVisual with six concrete visual types, one per rendering algorithm. Each only exposes the parameters that apply to its mode rather than having a fat enum visual with mode-specific fields most users have to ignore.
+DirectVolume — front-to-back composite (Beer-Lambert). Exposes density_scale, early_exit_alpha, debug modes.
+AdditiveVolume — additive accumulation, no occlusion. Just density_scale.
+MipVolume — Maximum Intensity Projection with optional attenuation (0 = plain MIP).
+MinipVolume — Minimum Intensity Projection.
+AverageVolume — mean intensity.
+IsosurfaceVolume — first-hit isosurface with Phong shading; LOD-aware trilinear bisection + gradient stencil so the surface isn't voxel-aligned even with a Nearest-filtered VT atlas.
+Internally, VolumeCore owns the shared state (atlas binding, geometry, colormap, uniforms) and each concrete type owns one RenderPipeline for its mode. Bindings use local declarative macros (py_volume_class! / js_volume_class!) to keep per-type boilerplate tight.
+Bug fixes layered on top of the refactor
+Edge tiles now zero-pad into their atlas slot before upload, fixing the "chunks in (very) wrong places" artefact where a slot's previous tenant's data leaked into the new tile's padding region.
+write_tile_to_atlas clamps source extents to the atlas slot, so oversized chunks are cropped instead of overflowing.
+lru_map now tracks only resident tiles — previously every visible-but-not-yet-loaded tile got an entry that was never removed, leaking under long exploration sessions.
+Iso surface no longer ties its colour to colormap[iso_threshold] (which made it mysteriously dark at low thresholds); uses a fixed near-white base.
+MIP attenuation switched to pure distance-based with below-floor sample skipping. Earlier density-weighted formulation let sparse data bleed through at high attenuation values.
+VRAM dropdown trimmed to actually-allocable sizes.
+Test plan
+uv run python examples/volume_renderer/python/volume_ome_zarr.py and cycle the Mode dropdown across each algorithm on beechnut / marmoset_neurons.
+WASM example builds and runs (./build_wasm.sh; serve examples/ and open volume_renderer/).
+No regression in slice_viewer Python or WASM examples.
+Iso surface visible at default threshold and a wide range of iso_threshold slider values.
+MIP attenuation suppresses far structures as the slider increases (cap at 20 on slider ≈ exp(-20)).
+🤖 Generated with Claude Code
+aganders3
+and others
+added 4 commits
+May 11, 2026 11:25
+README: add pygfx + kiln references, screenshot placeholders
+…
+38b7ff9
+```
+Adds a Related work section pointing at pygfx (Python wgpu visualization)
+and kiln (TypeScript WebGPU volume renderer) — the two nearest neighbors
+in the design space. Also adds a side-by-side image table near the top
+for native-vs-web screenshots (PNG paths reserved in screenshots/), and
+fixes a stale tile.rs reference left over from the gpu_structs.rs rename.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+Volume rendering: per-mode visuals (Direct/Additive/MIP/minIP/Average…
+…
+514ae8c
+```
+…/Iso)
+
+Replace the single VolumeVisual with VolumeCore + six concrete visual types,
+one per rendering algorithm. Each type only exposes the parameters that
+apply to its mode (density on Direct/Additive, attenuation on MIP, threshold
+on Isosurface, etc.) rather than ignoring fields by mode.
+
+Shader changes:
+- Per-mode fragment entry points sharing the ray-setup helpers in
+  volume_raymarch.wgsl.
+- Attenuated MIP follows vispy's algorithm: density-weighted ray
+  accumulation (not raw distance), plus contrast-ceiling early termination
+  so empty space doesn't burn through the attenuation budget.
+- Isosurface uses LOD-aware manual trilinear in the bisection and gradient
+  stencil, since the VT atlas sampler stays Nearest (no border guards yet)
+  and a Nearest sampling makes the iso surface visibly voxel-aligned.
+
+Bindings:
+- Six Python classes and six WASM classes generated via local
+  py_volume_class! / js_volume_class! macros to keep the per-type
+  boilerplate compact.
+
+Examples:
+- Python volume_renderer gains a Mode dropdown that rebuilds the visual on
+  switch and enables only mode-relevant sliders (iso threshold, attenuation).
+- Web volume_renderer gets the same Mode selector and per-mode controls.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+VT: edge-tile padding, lru_map leak, iso color, dropdown cleanup
+…
+7648165
+```
+Several follow-up fixes after the per-mode volume refactor.
+
+- Edge tiles (chunks smaller than the atlas slot) now zero-pad to slot
+  size before upload, so a slot's previous tenant can no longer leak its
+  data into the new tile's padding region. This was the root cause of
+  the "chunks in (very) wrong places" artefact on marmoset / pawpawsaurus.
+- write_tile_to_atlas clamps source extents to the atlas slot, so an
+  oversized chunk (e.g. a coarse LOD shipped as a single mega-chunk) is
+  cropped instead of overflowing into adjacent slots or panicking.
+- lru_map now tracks only resident (slot_map) tiles. Previously every
+  visible-but-not-yet-loaded tile got an lru_map entry that was never
+  removed, leaking under long exploration sessions.
+- Removed an `eprintln!` debug line that was running on every chunk load.
+- Isosurface no longer ties its surface colour to the colormap at the
+  threshold position — that coupled brightness to threshold position
+  and made the surface mysteriously dark for low-threshold values.
+  fs_iso now uses a fixed near-white base; per-iso colour can be exposed
+  via a setter later.
+- VRAM dropdown trimmed to options that actually correspond to allocable
+  atlas sizes (256 MB – 2 GB). The combined "atlas + Dawn dynamic upload
+  staging" must stay under Chrome's 4 GiB per-resource cap.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+MIP attenuation: pure distance, skip below-floor samples
+…
+353c2a7
+```
+Replaces the previous vispy-style density-weighted accumulation with simple
+distance attenuation (scale = exp(-attenuation * t_norm)) so the slider has
+predictable, monotonic behaviour regardless of how sparse the data is.
+
+The earlier density-weighted approach was elegant in theory but failed on
+sparse data: rays passing through mostly empty space barely accumulated
+sumval, so far-side bright points stayed visible even at very high
+attenuation values. With distance attenuation, exp(-attenuation) at the
+ray's far end is the same regardless of what's in between, matching the
+"fog" intuition the user expects.
+
+To avoid the "dark floor" failure mode (an empty ray's brightest near
+sample is raw≈0, which the colormap maps to the floor colour), we now
+skip below-floor samples (`adjusted > 0.001`) inside the attenuation
+loop — they never compete for maxval, and pure-empty rays discard. The
+contrast-ceiling early termination is retained.
+
+Slider trimmed to 0-20 (200 / 10) since exp(-10) ≈ 5e-5 is already
+visually "fully suppressed", and 0-100 was mostly dead range.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+aganders3
+mentioned this pull request
+Jun 10, 2026
+Volume rendering: per-mode visuals (Direct/Additive/MIP/minIP/Average/Iso)
+#6
+Merged
+5 tasks done
+aganders3
+commented
+Jun 10, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Closing in favor of #6
+aganders3
+closed this
+Jun 10, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

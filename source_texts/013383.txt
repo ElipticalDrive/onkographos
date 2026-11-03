@@ -1,0 +1,871 @@
+Contribute to openvdb/fvdb-core development by creating an account on GitHub.
+
+`ray_implicit_intersection` improvements by swahtz · Pull Request #663 · openvdb/fvdb-core · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+swahtz
+commented
+May 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Optimise the per-ray SDF zero-crossing kernel (ray_implicit_intersection) and the shared HDDA traversal layer it sits on, fixing a few correctness issues along the way and carrying two adjacent ray-marching ops (uniform_ray_samples, voxels_along_rays) along for the ride.
+The structural heart of the PR is a reorganization of the HDDA iterators: the formerly named HDDAVoxelIterator becomes HDDAActiveValueIterator, and a new leaf-only HDDALeafVoxelIterator lets ray_implicit_intersection skip active coarse tiles entirely (à la nanovdb::ZeroCrossing). Both are aliases over HDDAValueIteratorImpl, so they share a lot of functionality in one class. The rest of this PR is supporting infrastructure (a shared __ldg/__stwt cache-hint helper), compile-time specialisations, warp-divergence cleanups, and broadened tests.
+This started after being inspired by Efty's 'branchless getValue' work in NanoVDB and wanting to apply the same principles to the ray-marching kernels; as I pulled the thread, more fruit fell out of the tree (to branch metaphors).
+End-to-end on my RTX PRO 6000 Blackwell, 1 M rays per workload: 1.67×–1.95× speedup for ray_implicit_intersection (−48 to −51% kernel instructions, −2 registers/thread) and 1.05×–1.10× speedup for uniform_ray_samples (−6 registers/thread on the count pass). c10::Half inputs are now dispatched for ray_implicit_intersection (previously NotImplementedError). All fp32 outputs are bit-identical to main.
+1. HDDA iterator reorganization (HDDAIterators.h) — the foundational change
+The slight misnomer. HDDAVoxelIterator did not yield voxels — it yielded active values at any node level: active coarse tiles (getDim > 1) as well as active leaf voxels (getDim == 1). Callers were expected to branch on getDim() to tell them apart. Anything indexing a strictly per-leaf-voxel buffer (like ray_implicit_intersection, which reads gridScalars[getValue(ijk) - 1]) was therefore walking tiles it never needs to see.
+The fix — one impl, two named aliases:
+Rename HDDAVoxelIterator → HDDAActiveValueIterator (honest name: walks every active value node, tiles included).
+Add HDDALeafVoxelIterator: yields only active leaf voxels; active tiles are skipped in a single coarse HDDA step.
+Both are aliases over one HDDAValueIteratorImpl<AccT, ScalarT, bool LeafOnly>. LeafOnly is a compile-time gate (like EpsZero/ConeZero below) that reuses the dim already computed by the realign loop, so the active-value path costs nothing extra and the leaf path gets free tile-skipping.
+Why it matters: the leaf alias is exactly the narrow-band structure nanovdb::ZeroCrossing walks, and adopting it in ray_implicit_intersection is the single biggest performance lever in this PR (see §3). It also removes a latent mis-index on tile-bearing grids.
+Control-flow / warp-divergence cleanups in the same header (benefit every consumer):
+HDDASegmentIterator::nextSegment: predicated TimeSpan setters instead of an if/else ladder; only the "active region ended" break stays a real branch, so rays in a warp with differing active state no longer diverge at the setter level.
+nextVoxel: a bounded for (pass < 3) level-realign loop instead of three unrolled getDim/level-update passes; collapses to a single descent in the common level-aligned case.
+Blast radius. The iterators are public API reached by ray_implicit_intersection, uniform_ray_samples, voxels_along_rays, and segments_along_rays. VoxelsAlongRays.cu moves to the renamed HDDAActiveValueIterator with no behaviour change (it intentionally walks all active values).
+2. Shared CUDA cache-hint helpers (Caching.cuh, new) — the other shared building block
+A small header surfacing reusable, host-safe cache hints, consumed by both ops in §3 and §4:
+_loadReadOnly — __ldg (.NC) for read-only SDF data, keeping it off the active-mask working set.
+_storeStreaming / _storeStreamingPair — __stwt (.CS) for write-once outputs so they aren't promoted into L1 (where they'd evict active-mask leaf data).
+Both fall back to a plain load/store on host and for types without the intrinsic (e.g. c10::Half).
+3. ray_implicit_intersection (RayImplicitIntersection.cu) — the headline op
+With the building blocks in place, the op rewrite splits cleanly into correctness and performance.
+Correctness / semantics
+Convention-agnostic seed. The first valid (non-NaN) voxel along each ray seeds the sign reference; the first subsequent opposite-sign voxel is the hit. Previously the kernel baked in a "positive outside, negative inside" sentinel. Now both SDF sign conventions work, and rays that start inside the surface (my primary concern) report the exit crossing instead of a spurious result. Matches nanovdb::ZeroCrossing.
+Band-continuity gating via lastT1. Sub-voxel-interpolate the hit only when the previous voxel is contiguous along the ray (t0 == lastT1); otherwise fall back to bracket-entry time. This stops the kernel from interpolating a "hit" across empty space — a gap between two disjoint SDF regions, or a run of NaN tile values.
+fp16 dispatch. Add c10::kHalf to AT_DISPATCH_V2 so half-precision rays are actually dispatched (previously NotImplementedError once the fp16 test skip was removed).
+Sharper validation message on gridScalars.rsize(0) == totalVoxels(), naming the iterator contract (leaf iterator needs one scalar per voxel; per-active-value data wants HDDAActiveValueIterator).
+Performance
+Iterate leaf voxels only (HDDALeafVoxelIterator from §1) — the dominant speedup. The old active-value traversal ran each coarse tile through the full per-voxel body even though a tile can never be the leaf-level zero crossing; the leaf iterator skips them in one coarse HDDA step.
+bool EpsZero specialisation. The launcher dispatches on eps == 0.0f (the common case), dropping the per-voxel deltaT < eps branch and a register.
+Cache hints (from §2): gridScalars via _loadReadOnly, outTimes via _storeStreaming.
+fp32 math on half inputs: interpolation/time arithmetic in at::opmath_type<ScalarT>, cast back only at the store.
+Branchless sign-flip detection (scalarSign != voxelSign).
+4. uniform_ray_samples (SampleRaysUniform.cu) — adjacent op tightening
+Same playbook applied to the neighbouring sampler:
+Adopt the shared Caching.cuh helpers (drop the local copies).
+Factor _emitSample into a free function template — extended __device__ lambdas can't nest in the launchers' generic lambdas; separately-deduced pair types avoid per-call casts of at::opmath_type<Half> back to c10::Half.
+Compile-time specialise countSamplesPerRayCallback / generateRaySamplesCallback on ConeZero / IncludeEndpoints / ReturnMidpoint. The ConeZero case hoists stepSize = minStepSize out of the inner loop, dropping a Clamp+mul and registers (count pass goes from 80 → 74 registers).
+5. Docs & tests
+Docstrings (fvdb/grid.py, fvdb/grid_batch.py, fvdb/functional/_ray.py): document the convention-agnostic semantics — first valid voxel seeds the sign reference, first opposite-sign voxel is the hit; both conventions work, inside-surface rays report the exit crossing.
+Python (tests/unit/test_basic_ops.py):
+Two regressions for the correctness fixes: ..._starts_inside_surface (inside-origin ray reports the exit crossing) and ..._two_disjoint_regions (reports the first surface, not the empty gap).
+7 new all_device_dtype_combos tests (34 instances) adapted from OpenVDB's TestLevelSetRayIntersector.cc / TestNanoVDB.cc: sign-of-zero equivalence, axis-aligned & diagonal analytic roots, four miss configs, non-trivial transform, a 64×64 sweep, and single-voxel bracket-entry interpolation.
+..._wrong_scalar_count_errors: a mismatched gridScalars count raises an error naming the iterator contract.
+C++ (src/tests/HDDAIteratorsTest.cpp, new gtest): builds a NanoGrid<float> and drives both aliases on the host. A pure-leaf region yields identical voxels; on a ray crossing an active 128³ tile, HDDAActiveValueIterator surfaces it (getDim > 1) while HDDALeafVoxelIterator skips it. (Only way to exercise the active-tile path — fvdb's Python builders produce leaf-only grids.)
+6. Performance
+Measured on RTX PRO 6000 Blackwell. Timing uses torch.cuda.Event over a 1024² = 1,048,576-ray camera-pinhole bundle aimed at each grid's active bbox; median of 20 iterations after trimming the top and bottom two outliers. ncu metrics use --profile-from-start off with a cudaProfilerStart/Stop window around a single 512² = 262,144-ray launch, fp32, on the optimization-engaged setting (eps = 0 / cone_angle = 0).
+Wall-clock timing (median ms per call, 1 M rays)
+op
+dataset
+dtype
+setting
+main
+wip
+speedup
+ray_implicit_intersection
+dragon (267 MB SDF)
+fp32
+eps=0
+1.263
+0.646
+1.95×
+ray_implicit_intersection
+dragon
+fp32
+eps=1e-3
+1.267
+0.658
+1.93×
+ray_implicit_intersection
+dragon
+fp16
+eps=0
+n/a (unsupported)
+0.687
+new on wip
+ray_implicit_intersection
+dragon
+fp16
+eps=1e-3
+n/a (unsupported)
+0.692
+new on wip
+ray_implicit_intersection
+emu (1.0 GB SDF)
+fp32
+eps=0
+1.832
+1.059
+1.73×
+ray_implicit_intersection
+emu
+fp32
+eps=1e-3
+1.830
+1.093
+1.67×
+ray_implicit_intersection
+emu
+fp16
+eps=0
+n/a (unsupported)
+1.058
+new on wip
+ray_implicit_intersection
+emu
+fp16
+eps=1e-3
+n/a (unsupported)
+1.075
+new on wip
+ray_implicit_intersection
+crawler (1.6 GB SDF)
+fp32
+eps=0
+3.586
+2.143
+1.67×
+ray_implicit_intersection
+crawler
+fp32
+eps=1e-3
+3.649
+2.145
+1.70×
+ray_implicit_intersection
+crawler
+fp16
+eps=0
+n/a (unsupported)
+2.541
+new on wip
+ray_implicit_intersection
+crawler
+fp16
+eps=1e-3
+n/a (unsupported)
+2.539
+new on wip
+uniform_ray_samples
+dragon
+fp32
+cone=0
+2.953
+2.790
+1.06×
+uniform_ray_samples
+dragon
+fp32
+cone=1e-3
+2.943
+2.776
+1.06×
+uniform_ray_samples
+dragon
+fp16
+cone=0
+2.973
+2.750
+1.08×
+uniform_ray_samples
+dragon
+fp16
+cone=1e-3
+2.986
+2.802
+1.07×
+uniform_ray_samples
+wdas_cloud (2.6 GB fog)
+fp32
+cone=0
+17.216
+16.391
+1.05×
+uniform_ray_samples
+wdas_cloud
+fp32
+cone=1e-3
+17.154
+16.346
+1.05×
+uniform_ray_samples
+wdas_cloud
+fp16
+cone=0
+18.144
+16.493
+1.10×
+uniform_ray_samples
+wdas_cloud
+fp16
+cone=1e-3
+18.235
+17.186
+1.06×
+All fp32 outputs are bit-equivalent main vs this PR branch (output checksum match within atol=1e-3 * max(|main|, |wip|)), including the ray_implicit_intersection rows where the leaf iterator now skips tiles.
+ncu microarchitecture (single launch, fp32, 262k rays)
+Columns are main → wip. Lower-is-better for registers, instructions, cycles, and DRAM bytes; higher-is-better for occupancy, SIMD efficiency (smsp__thread_inst_executed_per_inst_executed.ratio, out of 32), and L1 hit rate.
+op
+dataset
+pass
+regs
+occ %
+SIMD eff /32
+insts
+inst Δ
+cycles
+L1 hit %
+DRAM MB
+ray_implicit_intersection
+dragon
+implicit
+80 → 78
+14.0 → 14.6
+10.62 → 8.46
+1.29e+08 → 6.35e+07
+−50.6%
+2.08e+06 → 1.02e+06
+94.5 → 87.8
+17.8 → 17.7
+ray_implicit_intersection
+emu
+implicit
+80 → 78
+12.3 → 12.8
+9.67 → 7.75
+1.89e+08 → 9.89e+07
+−47.6%
+3.11e+06 → 1.59e+06
+94.0 → 87.2
+30.9 → 30.7
+ray_implicit_intersection
+crawler
+implicit
+80 → 78
+8.4 → 9.2
+7.32 → 6.92
+1.57e+08 → 7.73e+07
+−50.8%
+9.19e+06 → 5.87e+06
+93.4 → 87.0
+29.9 → 29.6
+uniform_ray_samples
+dragon
+count
+80 → 74
+14.1 → 14.4
+7.36 → 7.74
+2.23e+08 → 2.41e+08
++8.2%
+3.19e+06 → 2.97e+06
+93.5 → 93.5
+22.0 → 21.6
+uniform_ray_samples
+dragon
+emit
+78 → 80
+14.0 → 14.2
+7.35 → 7.66
+2.26e+08 → 2.20e+08
+−2.6%
+3.24e+06 → 3.04e+06
+92.9 → 92.9
+23.0 → 23.0
+uniform_ray_samples
+wdas_cloud
+count
+80 → 74
+16.0 → 16.1
+4.68 → 4.86
+1.55e+09 → 1.62e+09
++4.4%
+1.88e+07 → 1.77e+07
+88.4 → 88.4
+211.6 → 211.9
+uniform_ray_samples
+wdas_cloud
+emit
+78 → 80
+16.1 → 16.1
+4.68 → 4.82
+1.56e+09 → 1.56e+09
+−0.2%
+1.89e+07 → 1.77e+07
+88.2 → 88.1
+230.6 → 222.8
+Reading the numbers:
+The ≈ −50% instruction drop on ray_implicit_intersection is overwhelmingly the leaf-iterator switch (§1). Skipped tile steps no longer run the full per-voxel body; output is bit-identical, confirming that work never affected the result. EpsZero, the __ldg/__stwt hints, and the predicated HDDAIterators setters contribute the remainder.
+Registers/thread: 80 → 78 on the implicit kernel, 80 → 74 on the uniform_ray_samples count pass (the ConeZero step-size hoist).
+Occupancy gains are small (+0.3 to +0.8 pts) — the kernel is register-bound on Blackwell and −2 registers doesn't cross a boundary; the win is instruction- and cycle-driven (cycles roughly halve on the implicit kernel).
+SIMD efficiency on ray_implicit_intersection falls (10.62 → 8.46 on dragon) — expected and benign: the skipped tile steps were perfectly convergent, so removing them lowers the per-instruction average while removing far more total instructions. uniform_ray_samples SIMD efficiency improves from the HDDAIterators predication.
+L1 hit rate dips on ray_implicit_intersection (94.5 → 87.8 on dragon): the streaming-store path bypasses L1 deliberately and tile-skipping removes trivially cache-friendly reads, so narrow-band accesses dominate the average. Net wall-clock is ~2× faster.
+Instruction count rises on the uniform_ray_samples count pass (+8.2% dragon) even as cycles fall — the specialised count callback does more per-thread work but with a better register profile, keeping more eligible warps in flight.
+7. Notes / risks / migration
+API semantics change for ray_implicit_intersection. Now SDF-sign-agnostic; reports the EXIT crossing for rays that start inside the surface (previously -1 or a spurious bracket-entry). Matches nanovdb::ZeroCrossing. Pinned by ..._starts_inside_surface and ..._two_disjoint_regions. Callers relying on the old "positive-outside-only" assumption will see different outputs on inside-surface rays — but those were almost certainly being treated as no-hit anyway.
+c10::Half is now dispatched. Code that caught NotImplementedError and fell back to fp32 conversion at the Python boundary should drop that branch.
+Leaf-iterator switch is correct-by-construction for active tiles. fvdb's own Python builders only produce leaf voxels, but a grid loaded via from_nanovdb may contain active coarse tiles authored elsewhere; the old iterator would have walked those into the per-voxel body (mis-indexing or reading gridScalars[-1]). The leaf iterator skips them, and HDDAIteratorsTest exercises this directly.
+swahtz
+added 2 commits
+April 30, 2026 11:53
+Optimize and harden ray_implicit_intersection
+…
+688ea62
+```
+Rewrite the per-ray SDF zero-crossing kernel for performance, precision,
+and correctness, surface a shared cache-hint helper that other ops can
+reuse, lift compile-time specialisations into `SampleRaysUniform.cu`,
+and broaden the test surface with 7 new behavioural tests adapted from
+the OpenVDB level-set / volume ray-intersector unit tests.
+
+Indirectly benefits from `HDDAIterators.h` cleanups landed alongside
+this change (branchless TimeSpan bookkeeping in `HDDASegmentIterator`,
+bounded-loop level convergence in `HDDAVoxelIterator`), which the
+ray-implicit, sample-rays-uniform, voxels-along-rays, and
+segments-along-rays kernels all reach through the public iterator API.
+
+## Source changes
+
+`src/fvdb/detail/utils/cuda/Caching.cuh` (new):
+
+  - `_storeStreaming` / `_storeStreamingPair`: write-once stores via
+    `__stwt` (`.CS` qualifier in SASS) so write-once output tensors
+    don't get promoted into L1 and evict the voxel-data working set.
+  - `_loadReadOnly`: read-mostly load via `__ldg` (`.NC` qualifier) so
+    side-buffer SDF data shares cache capacity instead of competing
+    with the active-mask leaf data. Both fall back to plain
+    assignment/dereference on host and for types without a matching
+    intrinsic overload (e.g. `c10::Half`); NVCC fully inlines both
+    branches, so the CPU path is unaffected. Lives in
+    `fvdb::detail::ops` so any op `.cu` file can reach it via
+    unqualified name lookup from inside an anonymous namespace.
+
+`src/fvdb/detail/ops/RayImplicitIntersection.cu`:
+
+  - Add a `bool EpsZero` template parameter on `rayImplicitCallback`.
+    The launcher branches once on `eps == 0.0f` (the overwhelmingly
+    common case) and dispatches the corresponding specialisation on
+    both CPU and CUDA paths, so NVCC drops the per-voxel
+    `if (deltaT < eps) continue;` branch and one register entirely
+    when `eps == 0`.
+  - Do all interpolation / time arithmetic in
+    `MathType = at::opmath_type<ScalarT>` so `c10::Half` rays compute
+    interpolation in fp32 and only cast back to `ScalarT` at the
+    streaming-store boundary.
+  - Route the per-voxel `gridScalars` load through `_loadReadOnly`
+    and every `outTimes` write (early-out, hit, miss) through
+    `_storeStreaming`.
+  - Detect sign flips with a single predicated check
+    (`scalarSign != voxelSign`) instead of nested `if`s.
+  - Track band continuity via `lastT1`. When the next valid voxel is
+    contiguous along the ray (`t0 == lastT1`), emit a sub-voxel
+    linear-interpolated hit time between the bracketing samples; when
+    there's a gap (inactive voxels in the iterator, or a run of NaN
+    tile values), fall back to the bracket-entry time, matching
+    `nanovdb::ZeroCrossing` precision in that case. This prevents the
+    kernel from interpolating across empty space between disjoint SDF
+    regions.
+  - Seed the sign reference from the FIRST valid (non-NaN) voxel along
+    the ray (matching `nanovdb::ZeroCrossing` semantics) instead of a
+    fixed sentinel. This handles both rays that start outside the
+    surface (first sample positive, hit on crossing into the negative
+    band) AND rays that start inside the surface (first sample
+    negative, hit on crossing back out) without baking a fixed
+    "positive = outside" SDF convention into the kernel.
+  - Add `c10::kHalf` to the `AT_DISPATCH_V2` types so half-precision
+    rays are actually dispatched on CUDA (previously raised
+    `NotImplementedError: "RayImplicitIntersection" not implemented
+    for 'Half'` at runtime once the unconditional fp16 test skip was
+    removed).
+
+`src/fvdb/detail/ops/SampleRaysUniform.cu`:
+
+  - Adopt the shared `Caching.cuh` helpers (drops the local
+    `_storeStreaming` / `_storeStreamingPair` definitions).
+  - Factor `_emitSample` out of the per-launcher lambdas as a function
+    template. NVCC forbids extended `__device__` lambdas inside generic
+    lambdas (which the launchers use), so a free-function template is
+    the only place the streaming-store helpers can live without
+    redundant inline-at-call-site repetition. The template takes the
+    `(a, b)` pair as separately-deduced types `A, B` so callers don't
+    have to cast `at::opmath_type<Half> = float` HDDA times back to
+    `c10::Half` at every call site.
+  - Compile-time specialise `countSamplesPerRayCallback` and
+    `generateRaySamplesCallback` on three runtime predicates
+    (`ConeZero`, `IncludeEndpoints`, `ReturnMidpoint`). NVCC then
+    prunes the dead branches and, critically, hoists
+    `stepSize = minStepSize` out of the inner while-loops in the
+    `ConeZero` case, removing a `Clamp+mul` from the hot per-sample
+    body and dropping several live registers from this latency-bound
+    traversal.
+
+`src/fvdb/detail/utils/nanovdb/HDDAIterators.h`:
+
+  - `HDDASegmentIterator::nextSegment`: replace the entering / leaving
+    `if`/`else` ladder around `mTimespan.t0` / `mTimespan.t1` with
+    predicated select expressions. Only the "active region just ended"
+    `break` remains a real control-flow branch; rays in the same warp
+    whose `active` state differs no longer diverge at the setter
+    level.
+  - `HDDAVoxelIterator::nextVoxel`: replace the three unrolled
+    `getDim` / level-update passes with a bounded `for (pass < 3)`
+    loop. Same worst-case behaviour (the level hierarchy stabilises
+    in <= 3 passes) but the body collapses to a single descent for
+    level-aligned iterations, which dominate the trace.
+
+## Python docstrings
+
+`fvdb/grid.py`, `fvdb/grid_batch.py`, `fvdb/functional/_ray.py`:
+
+  - Document the new convention-agnostic semantics of
+    `ray_implicit_intersection*`: the first valid (non-NaN) voxel along
+    each ray seeds the sign reference, and the first subsequent voxel
+    with the opposite sign is reported as the intersection. Both
+    "positive outside" and "negative outside" SDF conventions are
+    handled identically; rays that enter the bbox already inside the
+    surface are reported at the *exit* crossing along the ray.
+
+## Tests
+
+`tests/unit/test_basic_ops.py`:
+
+  - Drop the unconditional `if dtype == torch.float16: return` early
+    return in `test_ray_implicit_intersection` so the half-precision
+    dispatch is now actually exercised by the existing test.
+  - Two regressions for the algorithmic fixes in this commit:
+      * `..._starts_inside_surface`: ray whose origin sits inside the
+        SDF sphere must report the EXIT crossing — not -1, not the
+        bracket-entry of the very first active voxel. Pins the
+        `nanovdb::ZeroCrossing`-style "first valid voxel seeds the
+        reference" semantics.
+      * `..._two_disjoint_regions`: ray that crosses two separated SDF
+        spheres must report the FIRST surface, not a time inside the
+        empty gap between them. Pins the band-continuity gating.
+  - 7 new `@parameterized.expand(all_device_dtype_combos)` tests
+    adapted from `openvdb-jswartz/openvdb/openvdb/unittest/`
+    (`TestLevelSetRayIntersector.cc` + `TestNanoVDB.cc` for sign-of-
+    zero), giving 34 additional test instances:
+
+    | Test | Adapts from | Purpose |
+    |---|---|---|
+    | `..._sign_of_zero` | `TestLevelSetRayIntersector.cc:71-215` + `TestNanoVDB.cc:1520-1552` | `dir(1, +0, +0)` and `dir(1, -0, -0)` produce identical hit times across all 6 axis-aligned directions (`torch.equal` exact match). |
+    | `..._axis_aligned_analytic` | `TestLevelSetRayIntersector.cc:43-247` | Hit time for axis-aligned rays through sphere centre matches the analytic ray-sphere root within a voxel diagonal; covers `±x/±y/±z` (subsumes the OpenVDB negative-direction case). |
+    | `..._diagonal_analytic` | `TestLevelSetRayIntersector.cc:249-278` | Diagonal ray exercising 3-axis HDDA stepping; hit time within voxel diagonal of analytic root. |
+    | `..._explicit_misses` | `TestLevelSetRayIntersector.cc:311-389` (`testMissedIntersections`) | Four miss configurations all return `-1`: ray bypassing bbox, ray clipping bbox corner away from sphere, ray pointed away from bbox, ray grazing inside bbox outside sphere. |
+    | `..._non_trivial_transform` | `TestLevelSetRayIntersector.cc:99-216` | Non-unit `voxel_size=0.25` and non-zero `origins=(10, 20, 30)` — exercises `transform.applyToRay` (`RayImplicitIntersection.cu:82`), previously untested. |
+    | `..._high_resolution_sweep` | `TestLevelSetRayIntersector.cc:280-308` | 64×64 = 4096 ray sweep; geometric check `(hit_pt - center).norm() ≈ sphere_rad` per ray. fp16 explicitly skipped (precision insufficient for voxel-diagonal tolerance). |
+    | `..._single_voxel_bracket_entry` | (no direct OpenVDB analogue — pins `RayImplicitIntersection.cu:121-136`) | Symmetric `+1/-1` step SDF; verifies the linear-interp branch lands the zero exactly at the midpoint between two bracketing primal-voxel samples. |
+
+  - Convention pinned by the bracket-entry test: under fvdb's
+    `voxel_to_world`, primal voxel `i` is at world
+    `i*voxel_size + origin` (treated as a node, not a cell with a
+    `+0.5` offset). Combined with the dual transform's `+0.5` shift,
+    the kernel's linear interpolation between SDF samples at primal
+    voxels 3 (+1) and 4 (-1) produces a zero crossing at world
+    `x = 3.5`, not `x = 4.0` as you'd get under a cell-centred
+    convention. The test comment documents this for future readers.
+
+## Test plan
+
+  - Build: `./build.sh install` (cp312, fvdb conda env).
+  - Targeted: `cd tests && pytest unit/test_basic_ops.py -v -k ray_implicit`
+    -> 49 passed, 1 skipped (deliberate fp16 skip in
+    `..._high_resolution_sweep`).
+  - Adjacent regressions (no behavioural changes expected, sanity
+    only):
+      * `pytest unit/test_basic_ops.py`         -> 265 passed, 1 skipped.
+      * `pytest unit/test_basic_ops_single.py`  -> 154 passed.
+      * `pytest unit/test_ray_marching.py unit/test_sample.py`
+                                                -> 455 passed, 4 skipped.
+  - C++: `RayImplicitIntersection` has no `gtest` coverage today, so
+    `./build.sh ctest` would not exercise this change.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Merge branch 'main' into raytrace_improvements_wip
+…
+2e7703d
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+added this to the
+v0.5 milestone
+May 28, 2026
+swahtz
+added
+optimization
+Performance or memory optimization
+core library
+Core fVDB library. i.e. anything in the _Cpp module (C++) or fvdb python module
+labels
+May 28, 2026
+swahtz
+requested a review
+from Copilot
+May 28, 2026 06:40
+Copilot started reviewing on behalf of
+swahtz
+May 28, 2026 06:41
+View session
+Copilot
+AI
+reviewed
+May 28, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+This PR optimizes ray traversal kernels and updates ray_implicit_intersection semantics to be sign-convention agnostic, including CUDA half dispatch and broader behavioral coverage.
+Changes:
+Adds shared CUDA cache-hint helpers for read-only loads and streaming stores.
+Reworks ray_implicit_intersection, uniform_ray_samples, and HDDA iterators with compile-time specialization and traversal optimizations.
+Updates Python docs and adds/expands tests for ray implicit intersection edge cases.
+Reviewed changes
+Copilot reviewed 8 out of 8 changed files in this pull request and generated no comments.
+Show a summary per file
+File
+Description
+src/fvdb/detail/utils/cuda/Caching.cuh
+Adds reusable cache-hint load/store helpers.
+src/fvdb/detail/ops/RayImplicitIntersection.cu
+Rewrites zero-crossing traversal semantics and dispatch specialization.
+src/fvdb/detail/ops/SampleRaysUniform.cu
+Specializes sampling callbacks and reuses streaming-store helpers.
+src/fvdb/detail/utils/nanovdb/HDDAIterators.h
+Refactors HDDA segment/voxel iteration control flow.
+fvdb/grid.py
+Documents updated single-grid ray intersection semantics.
+fvdb/grid_batch.py
+Documents updated batch ray intersection semantics.
+fvdb/functional/_ray.py
+Documents functional ray intersection semantics.
+tests/unit/test_basic_ops.py
+Enables half coverage and adds ray intersection behavioral tests.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+swahtz
+marked this pull request as ready for review
+June 5, 2026 00:18
+swahtz
+requested a review
+from a team
+as a code owner
+June 5, 2026 00:18
+swahtz
+requested review from
+harrism and
+matthewdcong
+June 5, 2026 00:18
+swahtz
+and others
+added 3 commits
+June 5, 2026 00:30
+Add leaf-only HDDA iterator and use it in ray_implicit_intersection
+…
+bac931a
+```
+Rename the misnamed HDDAVoxelIterator (it yields active values at any
+node level, not just voxels) to HDDAActiveValueIterator, and add a
+leaf-only HDDALeafVoxelIterator alias. Both are aliases over a shared
+HDDAValueIteratorImpl<AccT, ScalarT, bool LeafOnly>; the LeafOnly gate
+reuses the dim already computed by the realign loop, so the
+active-value path costs nothing extra.
+
+ray_implicit_intersection now iterates with HDDALeafVoxelIterator. It
+indexes gridScalars by getValue(ijk)-1, valid only for leaf voxels;
+the old iterator also yielded active coarse tiles, which the kernel
+ran through its full per-voxel body. Skipping them in a single coarse
+HDDA step is the dominant speedup (ray_implicit_intersection 1.3-1.5x
+-> 1.7-1.95x vs main, ~-50% kernel instructions) and removes a latent
+mis-index on externally-loaded tile-bearing grids. Output is
+bit-identical to the previous active-value traversal on all tested
+SDF datasets. Matches nanovdb::ZeroCrossing's narrow-band structure.
+
+VoxelsAlongRays.cu moves to the renamed HDDAActiveValueIterator with
+no behaviour change. The gridScalars validation message now names the
+iterator contract.
+
+Tests:
+- New C++ gtest HDDAIteratorsTest.cpp: builds a NanoGrid<float> with an
+  active 128^3 tile and drives both aliases on the host, asserting the
+  active-value iterator surfaces the tile (getDim > 1) while the leaf
+  iterator skips it. Only way to exercise the active-tile path, since
+  fvdb's Python grid builders produce leaf-only grids.
+- New test_ray_implicit_intersection_wrong_scalar_count_errors checks
+  the sharpened validation message.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Comment updates and formatting
+…
+9c73ad4
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+format fix
+…
+82bdc8f
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+force-pushed
+the
+raytrace_improvements_wip
+branch
+from
+1b98ba6 to
+82bdc8f
+Compare
+June 5, 2026 00:32
+swahtz
+requested a review
+from Copilot
+June 5, 2026 00:33
+Copilot started reviewing on behalf of
+swahtz
+June 5, 2026 00:33
+View session
+swahtz
+requested a review
+from areidmeyer
+June 5, 2026 00:35
+Copilot
+AI
+reviewed
+Jun 5, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 11 out of 11 changed files in this pull request and generated 1 comment.
+Comment thread
+fvdb/functional/_ray.py
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Remove repeated docstring
+…
+6dbd8b1
+```
+Co-authored-by: Copilot Autofix powered by AI <175728472+Copilot@users.noreply.github.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+areidmeyer
+reviewed
+Jun 5, 2026
+View reviewed changes
+Comment thread
+src/fvdb/detail/utils/nanovdb/HDDAIterators.h
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+areidmeyer
+approved these changes
+Jun 5, 2026
+View reviewed changes
+areidmeyer
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Approved, but one experiment I think worth trying.
+Comment thread
+src/fvdb/detail/utils/nanovdb/HDDAIterators.h
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Force-unroll the HDDA realign loop to drop a warp-divergent backedge
+…
+da3df08
+```
+The bounded `for (pass < 3 && mHdda.dim() != dim)` realign loop in
+nextVoxel does not auto-unroll: its body is two getDim tree-walks plus
+an HDDA update, which ptxas keeps rolled, emitting a data-dependent
+backedge. That backedge adds warp divergence whenever lanes in a warp
+need different numbers of realign passes (i.e. at level transitions).
+
+Forcing `#pragma unroll` turns the <=3 passes into predicated
+straight-line code with no backedge. Verified in SASS (sm_120): the
+data-dependent backedge present in the rolled form is gone in the
+unrolled form, leaving only the unrelated 3-axis loops inside
+HDDA::init/update. Output is bit-identical to the rolled loop
+(checksum match vs main ~1e-8 across dragon/emu/crawler) and timing is
+neutral (-0.7% to +1.9% vs the rolled loop, within noise); the
+ray_implicit_intersection speedup vs main (1.7-1.95x) is unchanged.
+
+Collapsing the loop to a single pass instead was rejected: the
+multi-pass descent is not redundant and a single pass changes results
+on rays crossing several node levels at once (~0.12% on crawler).
+
+The pragma is guarded by `#if defined(__CUDA_ARCH__)` because this
+header is also included by host translation units, where the host
+compiler rejects unknown pragmas under -Werror=unknown-pragmas.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+swahtz
+enabled auto-merge (squash)
+June 6, 2026 03:45
+Hide details
+View details
+swahtz
+merged commit 9d94fde
+into
+openvdb:main
+Jun 6, 2026
+39 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+mentioned this pull request
+Sep 1, 2026
+Use fused NanoVDB ReadAccessor::getDimAndActive in the HDDA iterators
+#754
+Merged
+swahtz
+added a commit
+that referenced
+this pull request
+Sep 1, 2026
+Use fused NanoVDB ReadAccessor::getDimAndActive in the HDDA iterato…
+…
+171fc63
+```
+…rs (#754)
+
+## Summary
+
+OpenVDB PR
+[#2220](AcademySoftwareFoundation/openvdb#2220)
+added the fused `ReadAccessor::getDimAndActive` API to NanoVDB: a single
+Root→Internal→Leaf descent (or accessor-cache lookup) that returns both
+the HDDA step size and the active state of a voxel, packed into one
+register. This PR bumps the NanoVDB pin to that merge commit
+(`9df9ec06`) and adopts the fused call in both HDDA iterators, replacing
+the separate `getDim` + `isActive` pair that previously cost two tree
+walks per iteration.
+
+This restores the methodology originally prototyped alongside #663,
+which had to be reverted before merge because the fused accessor only
+existed in a fork at the time.
+
+## Changes
+
+**`HDDASegmentIterator::nextSegment`**
+- One `getDimAndActive` call per iteration under the default
+`ActiveExact` policy, which is byte-for-byte equivalent to the separate
+calls. `ActiveExact` is required here because the iterator reads
+`active` unconditionally, including at coarse-tile levels.
+- When the HDDA re-aligns to a different level, `HDDA::update` snaps
+`mVoxel` to the new grid, so the result is re-queried after the update
+to keep `active` consistent with the voxel the TimeSpan logic reads. The
+two-descent cost is thus only paid on (rare) level-change iterations.
+
+**`HDDAValueIteratorImpl::nextVoxel`**
+- The realign-loop `getDim` queries and the post-convergence `isActive`
+fuse into one `getDimAndActive` per pass; each re-query runs at the
+voxel `HDDA::update` just snapped to, so on loop exit the result always
+describes the current voxel. The force-unrolled ≤3-pass structure is
+unchanged.
+- Policy is selected per instantiation: `HDDALeafVoxelIterator`
+(`LeafOnly=true`) gates on `dim == 1` before consulting `active`, which
+is exactly the `ActiveOnLeafOnly` contract, so it keeps `getDim`'s
+skip-flag fast path. `HDDAActiveValueIterator` (`LeafOnly=false`) must
+yield active coarse tiles, so it uses `ActiveExact`.
+
+No callers change — `ray_implicit_intersection`, `uniform_ray_samples`,
+`voxels_along_rays`, and `segments_along_rays` consume the iterators
+through their public API.
+
+## Benchmarks
+
+RTX PRO 6000 Blackwell, 512×512 pinhole-camera rays, fp32, median of 20
+CUDA-event-timed iterations (top/bottom-2 trimmed), NanoVDB example
+grids. Output checksums are bit-identical to main across all workloads —
+this is a pure performance change.
+
+| Op | Dataset | main (ms) | fused (ms) | Speedup |
+|---|---|---|---|---|
+| `voxels_along_rays` | dragon | 4.902 | 2.911 | **1.68×** |
+| `voxels_along_rays` | emu | 8.343 | 5.031 | **1.66×** |
+| `voxels_along_rays` | wdas_cloud | 24.140 | 16.970 | **1.42×** |
+| `voxels_along_rays` | crawler | 18.920 | 13.939 | **1.36×** |
+| `segments_along_rays` | crawler | 7.544 | 5.795 | **1.30×** |
+| `segments_along_rays` | emu | 3.703 | 2.900 | **1.28×** |
+| `segments_along_rays` | wdas_cloud | 12.676 | 9.945 | **1.27×** |
+| `segments_along_rays` | dragon | 1.634 | 1.351 | **1.21×** |
+| `uniform_ray_samples` | wdas_cloud | 12.798 | 10.033 | **1.28×** |
+| `uniform_ray_samples` | dragon | 1.669 | 1.385 | **1.21×** |
+| `ray_implicit_intersection` | emu | 0.587 | 0.478 | **1.23×** |
+| `ray_implicit_intersection` | crawler | 1.901 | 1.630 | **1.17×** |
+| `ray_implicit_intersection` | dragon | 0.384 | 0.374 | **1.03×** |
+
+`ray_implicit_intersection` gains the least because its leaf-only
+iterator already skips coarse tiles cheaply (and now additionally
+benefits from `ActiveOnLeafOnly` keeping the skip-flag fast path).
+
+## Test plan
+
+- `pytest tests/unit/test_ray_marching.py tests/unit/test_sample.py` —
+455 passed, 4 skipped.
+- `pytest tests/unit/test_basic_ops.py -k "ray or implicit or
+voxels_along or segments"` — 56 passed, 1 skipped, including the #692
+zero-prefix regression test.
+- Benchmark outputs checksum-identical to main on all 13 workloads
+above.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+Co-authored-by: Claude Fable 5 <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+core library
+Core fVDB library. i.e. anything in the _Cpp module (C++) or fvdb python module
+optimization
+Performance or memory optimization
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

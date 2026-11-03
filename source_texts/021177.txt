@@ -1,0 +1,1286 @@
+GSurf: Learning Signed Distance Fields from Splatting Opaque Gaussians for
+High-quality 3D Reconstruction
+1
+Baixin Xu1 Jiangbei Hu2 Jiaze Li1 Ying He1 *
+College of Computing and Data Science, Nanyang Technological University
+2
+School of Software, Dalian University of Technology
+arXiv:2411.15723v4 [cs.CV] 9 Jul 2026
+Abstract
+High-fidelity surface reconstruction from multi-view images
+is a core problem in 3D computer vision. While neural implicit surfaces like SDFs offer smooth geometry, they are
+often bottlenecked by the computational intensity of volume rendering. Conversely, 3D Gaussian Splatting (3DGS)
+provides rapid training but lacks geometry continuity, often
+leading to fragmented surfaces. This paper presents a novel
+framework that integrates Signed Distance Fields directly
+into the splatting pipeline. By leveraging the continuous nature of SDFs to regularize Gaussian primitives, our method
+effectively fills geometric holes and suppresses noise inherent in sparse point clouds. Unlike hybrid approaches that
+rely on heavy volumetric sampling, our approach utilizes
+the efficiency of splatting to achieve faster convergence. Extensive evaluations demonstrate that our method produces
+high-quality surfaces with significantly fewer primitives, offering a more compact and efficient representation for both
+indoor and outdoor environments. The source code is available at https://github.com/xubaixinxbx/Gsurf.
+1. Introduction
+Reconstructing high-quality 3D geometry from multi-view
+images is a central problem in 3D vision, essential for applications such as virtual reality [15], robotics [57, 73, 88],
+and animation, among others. Neural Radiance Fields
+(NeRF) [43] have demonstrated impressive performance
+in novel view synthesis by combining implicit representations [42, 46, 49] with volume rendering. Numerous NeRF
+variants have extended its applications to geometry reconstruction [58, 76], inverse rendering [14, 25, 26, 83, 86],
+editing [1, 52, 72, 80], and generation [6, 7]. However, these
+NeRF-based approaches encounter limitations in training
+and rendering efficiency due to the computational demands
+of implicit representations coupled with volume rendering.
+To address these limitations, explicit 3D supervision
+* Corresponding author: Y. He (yhe@ntu.edu.sg).
+and discrete representations, such as point-based methods [12, 81, 87], have been introduced to improve efficiency. By transitioning from implicit to discrete representations, these approaches aim to reduce computational
+demands without compromising reconstruction quality. In
+this context, 3D Gaussian Splatting (3DGS) [29] introduces
+a discrete representation with CUDA-based rasterization,
+reducing training times to minutes and enabling real-time
+rendering. Beyond appearance modeling [5, 37, 79], 3DGS
+also enhances surface reconstruction [11, 35]. A common
+way for obtaining 3D geometry from 3DGS is to extract
+meshes by fusing rendered depth maps. This approach can
+achieve high-resolution geometry, but it often lacks robustness, leading to inconsistencies across different views and
+producing artifacts in regions with insufficient depth information. Another approach is to train an SDF network in
+conjunction with a volume rendering branch [9, 77]. Despite the improved geometry quality, incorporating volume
+rendering with Gaussian splatting introduces redundancy in
+the differentiable rendering pipeline, resulting in extended
+training times, ranging from 2 hours [77] to as much as 16
+hours [9].
+In this paper, we introduce a novel reconstruction
+method, GSurf, which combines SDF, a continuous representation, with 3D Gaussians, a discrete representation,
+achieving a balance between the accuracy of implicit representations and the computational efficiency of explicit ones.
+Specifically, we train the SDF directly under Gaussian supervision, eliminating the need for volume rendering and
+thereby maintaining high training efficiency. To improve
+the alignment of Gaussians with the surface, we regularize opacity using an entropy-based loss, which effectively
+reduces redundant transparent Gaussians. Additionally, we
+incorporate an MLP to integrate geometry cues–such as normals and geometric features–into the appearance modeling,
+moving beyond a sole reliance on spherical harmonics. This
+approach enhances geometric detail compared to existing
+GS-based reconstruction methods. Figure 1 shows an example of reconstructed surfaces by our method and stateof-the-art approaches.
+CD(×103 ) ↓, NC↑
+Reference
+GT
+16.21, 0.923
+2DGS
+10.25, 0.916
+GOF
+17.06, 0.934
+GaussianSurfels
+17.90, 0.931
+VolSDF
+12.45, 0.899
+Voxurf
+9.10, 0.938
+Ours
+Figure 1. GSurf learns an SDF directly from Gaussian primitives, using its smoothness and continuity for robust reconstruction. It surpasses
+state-of-the-art GS-based methods [13, 23, 78] and Voxurf [68], particularly in challenging scenarios such as varying lighting and reflective
+surfaces, while maintaining comparable surface smoothness and faster training than neural implicit methods like VolSDF [76].
+In summary, this paper makes the following contributions:
+• We propose GSurf, a single-branch framework that jointly
+optimizes Gaussian primitives and an SDF without an additional volume-rendering branch.
+• We introduce direct SDF supervision form Gaussian centroids, together with opacity entropy regularization and
+pruning, to obtain a compact set of surface-supporting
+Gaussian primitives.
+• We incorporate SDF-derived normals and geometric features into appearance modeling, improving geometric detail and view-dependent rendering quality.
+2. Related Work
+Implicit function-based reconstruction from point
+clouds Reconstructing 3D surfaces from point clouds is
+a fundamental problem in computer graphics that has been
+studied for over three decades. Classical methods typically compute an implicit function whose level set at a
+specified iso-value represents the target surface [20, 21,
+27, 28, 38, 39, 45, 74]. With the rise of 3D deep learning, combining implicit functions, especially signed distance fields, with neural networks has become a mainstream
+approach [3, 22, 46, 51, 59, 64]. Common strategies for regularizing SDFs include the Eikonal loss [18], the neural pull
+loss [2], and the singular Hessian loss [65].
+Multi-view reconstruction NeuS [58] and VolSDF [76]
+are seminal works that enable volume rendering using SDFs
+by mapping signed distances to densities. Using the continuity and smoothness of SDFs, these methods improve
+the quality of reconstruction compared to density-based
+methods such as NeRF [43]. They have inspired further
+efforts aimed at runtime acceleration [17, 61], improved
+geometric fidelity [60], and robustness to sparse-view input [32, 40, 71]. To address the computational cost of
+volume rendering, recent works adopt hybrid structures,
+such as regular grids [16, 53, 68], octrees [33, 34], triplanes [7, 62], and hash grids [36, 44, 48, 63], to replace
+or enhance MLPs in NeRFs.
+Reconstruction with 3DGS 3D Gaussian Splatting [29]
+was originally proposed for real-time novel view synthesis, enabling fast training and rendering via CUDA-based
+rasterization. However, it does not explicitly reconstruct
+surface geometry. To address this, 2D Gaussian Splatting
+(2DGS) [23] uses flat 2D disks to better align with scene
+surfaces.
+Most existing works aim to improve depth accuracy [8,
+10, 66, 84] and extract meshes via TSDF fusion. Other
+methods such as SuGaR [19] and GaussianSurfels [13] apply Poisson reconstruction [27, 28]. However, geometry extracted from depth maps typically suffers from holes, surface noise, and poor smoothness. Moreover, the recovered
+geometry cannot directly influence the training of Gaussians. GOF [78] bypasses TSDF or Poisson fusion by directly extracting geometry as a level set from the Gaussian
+opacity field. Several recent works [41, 67, 70, 77] incorporate SDFs into Gaussian splatting, using Marching Cubes
+for smoother geometry.
+As summarized in Table 1, most 3DGS-based methods
+either (1) decouple geometry and appearance, preventing
+RGB loss from directly supervising geometry, or (2) combine splatting with volume rendering, leading to redundant
+computation and increased training cost. In contrast, our
+method reconstructs SDFs using an entropy-based opacity
+regularization, which effectively reduces semi-transparent
+Gaussian primitives. Furthermore, by incorporating both
+viewing direction and geometry cues into appearance rendering, GSurf achieves sharper detail without requiring a
+dual rendering pipeline. Compared to GS-Pull [85], a stateof-the-art reconstruction model that deforms point clouds
+toward a learned SDF but often produces oversmoothed
+surfaces, our geometry-guided appearance modeling yields
+more accurate and detailed reconstructions.
+Table 1. Comparison of neural surface reconstruction methods. We explicitly contrast our method with prior works, detailing how
+geometric guidance is injected. While hybrid methods bottleneck efficiency via ray-marching (O(Nray Nsmp )), both GS-Pull and our
+method operate exclusively on Gaussian primitives (O(Ngs )). Crucially, unlike GS-Pull which relies on local pulling operations without
+explicit opacity constraints, we enforce an Entropy Opacity Regularization. This actively binarizes primitives into an opaque bounding
+shell, inherently satisfying conditions for stable Eikonal and Normal regularization directly at the zero-level set, avoiding the surface
+degradation observed in prior single-branch attempts.
+Category
+Method
+NeRF-based VolSDF [76]
+GS-based
+GS+SDF
+2DGS [23]
+GOF [78]
+GSurfels [13]
+PGSR [8]
+RTG-SLAM [47]
+VCR-GauS [10]
+Computation
+Graph
+Primary SDF Supervision
+SDF Regularization
+Vol. Rend.
+Volumetric Weights (Ray)
+Eikonal
+Splatting
+N/A
+MLP Queries
+Opacity Reg.
+(Complexity)
+Appearance
+O(Nray Nsmp )
+Imp. (Cond.)
+N/A
+None
+N/A
+None
+Filter
+Bell curve
+Exp. (Decoupled)
+None
+Fixed Value
+None
+NeuSG [9]
+GSDF [77]
+3DGSR [41]
+Dual-Branch Vol. Weights + Aux. Centroids
+Dual-Branch
+Volumetric Weights (Ray)
+Dual-Branch
+Volumetric Weights (Ray)
+Eikonal + Normal
+Eikonal + Normal
+Eikonal + Normal
+O(Nray Nsmp )
+O(Nray Nsmp )
+O(Nray Nsmp )
+None
+None
+None
+Exp. (Decoupled)
+Exp. (Decoupled)
+Exp. (Decoupled)
+GS-Pull [85]
+Ours
+Splatting
+Splatting
+Neural Pulling
+Eikonal + Normal
+O(Ngs )
+O(Ngs )
+None
+Entropy
+Exp. (Decoupled)
+Imp. (Cond.)
+Distance to Gaussian Disk
+Zero-level Set at Centroids
+Several recent methods [41, 67, 70, 77] integrate SDFs
+into Gaussian splatting, extracting meshes with Marching
+Cubes to produce smoother and more complete geometry.
+We note that most 3DGS methods either decouple geometry and appearance, preventing direct backpropagation from
+RGB loss to geometry, or combine Gaussian splatting and
+volume rendering, introducing redundant computation and
+slowing down training. In contrast, our approach reconstructs SDFs using an opacity prior and models appearance
+with both view and geometry cues, achieving finer detail
+without dual rendering. Compared to GS-Pull [85], which
+pulls points toward a learned SDF and tends to oversmooth,
+our method directly integrates geometric cues into appearance, producing sharper and more accurate reconstructions.
+3. Method
+3.1. Overview
+Given a set of posed multi-view RGB images, denoted as I,
+our objective is to reconstruct the following components:
+• A set of Gaussian primitives, each characterized by opacity, scale, and rotation, collectively defining the object in
+a discrete manner;
+• A signed distance field, which defines the object’s geometry in a continuous manner; and
+• An appearance field, representing the object’s radiance.
+Both the signed distance field and the appearance field are
+parameterized using MLPs. In the original 3DGS rendering pipeline, Gaussian primitives are not required to lie exactly on the surface, and off-surface primitives, which are
+semi-transparent, can still contribute to rendering. While
+these off-surface primitives are acceptable for rendering
+purposes, they can adversely affect 3D reconstruction and
+may introduce significant distortions in the reconstructed
+surface. Therefore, a primary goal in GSurf is to minimize the number of off-surface primitives. To achieve this,
+we regularize the Gaussian primitives using an opacity entropy loss, which drives opacities toward binary value, and
+periodic pruning removes the low-opacity branch; consequently, the retained primitives form a compact, mostly
+opaque surface-supporting set. Figure 2 illustrates the algorithmic pipeline of GSurf, with technical details provided in
+the following subsections.
+3.2. Gaussian Splatting
+We adopt 2DGS [23] for rendering, which represents 3D
+objects with a set of 2D Gaussian primitives (i.e. elliptical
+disks). Each primitive is parameterized by a central position
+pk ∈ R3 , two principal tangent vectors tu , tv ∈ R3 , and
+two scaling factors su , sv ∈ R. Let Rk = [tu , tv , tu × tv ]
+be the rotation matrix, and Sk = diag(su , sv , 0) be the diagonal matrix for scaling. This setup defines a 2D Gaussian
+within a local tangent plane in the world coordinate system
+as:
+P(u, v) = pk + su tu u + sv tv v = H(u, v, 1, 1)T ,
+where
+
+H=
+Rk Sk
+0
+pk
+1
+
+is a 4×4 transformation matrix. For each point u = (u, v)T ,
+its 2D Gaussian value is computed using the standard Gaussian formula:
+ 2
+
+u + v2
+G(u) = exp −
+.
+2
+Figure 2. Algorithmic pipeline. During the optimization of Gaussian primitives, we feed Gaussian centroids to learn an SDF supervised
+by the Lsdf while simultaneously regularizing opacities with an entropy loss Lent . Gaussian positions, normals, geometric features, and
+viewing directions are then fed into the appearance module to obtain view-dependent colors via the image reconstruction loss Lgs . Finally,
+the 3D Gaussians are rasterized into image space to produce images.
+These 2D Gaussians are then sorted based on the depth of
+their centers. To render a pixel x, we cast a ray into the
+scene and accumulate color using volumetric alpha blending as follows:
+X
+c(x) =
+wi ci ,
+i=1
+where
+wi = oi Gi (u(x))
+i−1
+Y
+(1 − oj Gj (u(x))) ,
+j=1
+and oi represents the opacity.
+Supervised with a color loss Lrgb , 2DGS also introduces
+regularization terms for depth distortion Ldep and depthnormal consistency Ldnc , formulated as:
+Lgs = Lrgb + Ldep + Ldnc .
+(1)
+We refer the reader to [23] for more details about these
+terms.
+It is important to note that we have made two modifications to 2DGS to tailor it to our task. First, in our setting,
+the color ci is not represented by spherical harmonics (SH)
+as in vanilla-GS [23, 29]; instead, we use an MLP to predict ci . Second, we require that the majority of Gaussian
+disks have high opacity, ensuring they align closely with
+the surface of the target object. This differs from 2DGS
+and 3DGS, which typically contain many semi-transparent
+primitives spread throughout the entire space. Details on
+the appearance modeling and the regularization strategy for
+opacity are provided in a later section.
+3.3. Learning SDF from Gaussians
+Inspired by recent advances in shape representation using
+SDF [3, 46, 51, 59, 64, 65] and their application in neural
+rendering (e.g., NeuS [58] and VolSDF [76]), we propose
+to fit an SDF directly to the Gaussian centroids. This offers two key advantages: (1) It enables geometric regularization using SDF-based losses, such as the Eikonal loss,
+which helps address issues like holes and surface irregularities commonly observed in TSDF fusion. (2) The learned
+SDF provides rich geometric cues that enhance Gaussian
+appearance modeling, unlike TSDF-based methods that rely
+solely on opacity and spherical harmonics and cannot directly affect appearance learning during training.
+Unlike NeuS-based methods, which are purely trained
+from 2D images and lack direct 3D supervision, our approach with Gaussians provides explicit 3D supervision,
+similar to surface reconstruction from point clouds. Given
+the central positions of the Gaussians, pk , as discrete representations of the 3D object, our goal is to learn an SDF
+parameterized by an MLP fsdf .
+Specifically, we impose the following conditions on the
+SDF:
+P
+• The position constraint Lpos = k |fsdf (pk )| encourages
+the zero-level set to align with the Gaussians.
+• The Eikonal constraint Leik = Σx∈χeik (∥∇fsdf (x)∥2 −1)2
+enforces unit gradient norm and promotes SDF smoothness, where χeik is a set of samples
+Pin the space.
+• Off-surface constraint: Loff =
+k exp (−α|fsdf (qk )|),
+applied to query points qk that are uniformly sampled in
+the space. This constraint ensures function values for offsurface points remain relatively large, keeping them away
+from zero. We set α = 100 in our implementation.
+∇fsdf (pk )
+,
+• Orientation constraint: Lori = 1 − nk · ∥∇f
+sdf (pk )∥
+which enforces alignment between the Gaussian orientation nk and the SDF’s gradient. Here, nk is defined by
+the shortest axis of the disk.
+Table 2. Quantitative evaluation on the DTU dataset. We compare our method with volume rendering-based and Gaussian splatting-based
+reconstruction methods using CD (×103 , ↓).
+Method
+24
+37
+40
+55
+63
+65
+69
+83
+97
+105
+106
+110
+114
+118
+122
+Mean
+NeuS [58]
+VolSDF [76]
+3DGS [29]
+SuGaR [19]
+DN-Splatter [54]
+2DGS [23]
+GOF [78]
+GSurfels [13]
+Ours
+1.00
+1.14
+2.14
+1.47
+1.60
+0.48
+0.50
+0.66
+0.52
+1.37
+1.26
+1.53
+1.33
+2.03
+0.91
+0.82
+0.93
+1.00
+0.93
+0.81
+2.08
+1.13
+1.42
+0.39
+0.37
+0.54
+0.48
+0.43
+0.49
+1.68
+0.61
+1.44
+0.39
+0.37
+0.41
+0.47
+1.10
+1.25
+3.49
+2.25
+2.37
+1.01
+1.12
+1.06
+0.79
+0.65
+0.70
+2.21
+1.71
+2.11
+0.83
+0.74
+1.14
+1.27
+0.57
+0.72
+1.43
+1.15
+1.62
+0.81
+0.73
+0.85
+0.82
+1.48
+1.29
+2.07
+1.63
+1.95
+1.36
+1.18
+1.29
+1.24
+1.09
+1.18
+2.22
+1.62
+1.88
+1.27
+1.29
+1.53
+1.27
+0.83
+0.70
+1.75
+1.07
+1.48
+0.76
+0.68
+0.79
+0.65
+0.52
+0.66
+1.79
+0.79
+1.63
+0.70
+0.77
+0.82
+0.89
+1.20
+1.08
+2.55
+2.45
+1.82
+1.40
+0.90
+1.58
+1.26
+0.35
+0.42
+1.53
+0.98
+1.20
+0.40
+0.42
+0.45
+0.52
+0.49
+0.61
+1.52
+0.88
+1.50
+0.76
+0.66
+0.66
+0.76
+0.54
+0.55
+1.50
+0.79
+1.40
+0.52
+0.49
+0.53
+0.73
+0.84
+0.86
+1.97
+1.32
+1.70
+0.80
+0.74
+0.88
+0.84
+• Normal map constraint: Lnor = 1 − Ngs · Nsdf , which
+minimizes the discrepancy between the normal maps Nsdf
+and Ngs rendered from the SDF and 2DGS.
+Combining all terms, the total SDF loss is defined as:
+Lsdf = λ1 Lpos + λ2 Leik + λ3 Loff + λ4 Lori + λ5 Lnor . (2)
+3.4. Gaussian Regularization
+As previously discussed, the color loss alone is insufficient to constrain Gaussian primitives to the object surface, since semi-transparent Gaussians located off-surface
+can still contribute to rendering. To ensure that all Gaussian centroids align with the object surface, which is crucial
+for learning an accurate SDF, we introduce a regularization
+term that penalizes low-opacity Gaussians.
+Given our focus on opaque objects, we encourage Gaussians to be highly opaque. Rather than fixing the opacity
+values, as done in prior work [47], we employ an entropybased loss to drive opacities toward binary values (0 or 1):
+!
+X
+Lent = λ6 −
+ok ln(ok ) ,
+(3)
+k
+where ok is the opacity of the k-th Gaussian.
+During training, we further prune Gaussians whose
+opacities fall below a predefined threshold, effectively reducing redundancy and enhancing SDF learning stability.
+Opacity is parameterized using a sigmoid activation ok =
+σ(õk ) ∈ (0, 1), where õk ∈ R is the unbounded learnable
+parameter optimized during training. The entropy loss actively drives ok toward the binary extremes. This loss is
+coupled with a hard pruning threshold τ = 0.05. Gaussians
+with opacities falling below this threshold are periodically
+removed.
+3.5. Geometry-guided Appearance Modeling
+As noted in previous works [68, 71], appearance modeling
+based solely on spatial position and viewing direction often fails to capture fine-grained geometry. To address this,
+incorporating geometric cues, such as normals and learned
+geometric features, has proven effective in neural implicit
+surface methods [75]. Following this insight, we use the
+SDF module fsdf to predict both the signed distance s and
+a geometric feature vector Fgeo for each Gaussian centroid
+pk :
+(s, Fgeo ) = fsdf (pk ).
+(4)
+The appearance module frgb then takes as input the centroid
+position pk , viewing direction d, the normal vector ∇fsdf ,
+and the geometry feature Fgeo :
+ck = frgb (pk , d, ∇fsdf , Fgeo ) ,
+(5)
+producing the RGB color ck for each Gaussian.
+3.6. Implementation Details
+The overall loss function in GSurf is defined as follows.
+Ltotal = Lgs + Lsdf + Lent .
+(6)
+We model the SDF and the appearance with MLPs of 8 and
+4 layers, respectively, each with 256 hidden units and ReLU
+activation.
+The 3D Gaussians are initialized randomly for the OmniObjects3D [69] dataset, and from sparse, noisy Structurefrom-Motion (SfM) [50] point clouds for the DTU [24]
+dataset, we delay the activation of SDF learning, beginning SDF training only after the first 500 iterations. To promote robust convergence, the SDF is initialized as a sphere.
+Both Gaussians and MLPs are optimized using the Adam
+optimizer [30], trained on a single NVIDIA A800 GPU.
+We adopt the same densification strategies as those used
+in 2DGS [23]. The hyperparameters are empirically set to
+λ1 = 0.1, λ2 = λ3 = λ6 = 0.01, and λ4 = λ5 = 0.05.
+4. Experimental results
+4.1. Setup
+Datasets and metrics We evaluated our method on the
+DTU dataset [24], a widely used benchmark for 3D re-
+Reference
+Ours
+2DGS
+GOF
+GaussianSurfels
+DN-Splatter
+SuGaR
+VolSDF
+Figure 3. Visualizations of cropped meshes using scripts from 2DGS [23] and GOF [78].
+construction, as well as the OmniObject3D-d and OO3DSL datasets, both of which are subsets of the OmniObject3D dataset [69]. OmniObject3D-d focuses on object
+categories such as antiques and ornaments, comprising 8
+objects with rich geometric details. OO3D-SL, used in [34],
+contains 24 objects captured under strong lighting conditions, which pose significant challenges for multi-view 3D
+reconstruction methods. Each object in the OmniObject3D
+dataset includes approximately 100 images at a resolution
+of 800×800 pixels, along with a ground-truth mesh. Furthermore, we evaluated our method on the α-NeuS [82] and
+Ref-NeRF [55] datasets, which include objects with semitransparent and reflective materials.
+We report Chamfer distance (CD) as a measure of geometric accuracy. For models in the OmniObjects3D dataset,
+we also included normal consistency (NC), which is computed using the available ground-truth meshes. NC is
+generally more consistent with the perception of surface
+quality by humans. The evaluation scripts for the DTU
+and OmniObjects3D datasets are adapted from 2DGS [23],
+GOF [78], and the official OmniObjects3D repository [69].
+Baselines We compared our method with the latest 3DGS-based reconstruction approaches, including
+2DGS [23], GOF [78], SuGaR [19], DN-Splatter [54], and
+GaussianSurfels [13]. For GaussianSurfels [13], we observed that its pre-trained normal prediction model often
+generated inaccurate normals, occasionally with completely
+flipped orientations, when applied to models from the OmniObjects3D dataset. Therefore, we disabled the pre-trained
+normal estimation during our evaluations on this dataset.
+Figure 4. Impact of the delayed SDF activation strategy. Our
+500-iteration delay provides the SDF with high-confidence spatial
+anchors, avoiding early optimization collapse while maintaining
+training efficiency.
+4.2. Comparisons
+Training time Our method achieves competitive training
+efficiency, requiring only 40 minutes to 1.3 hours on a single
+NVIDIA A800 GPU. Prior methods that integrate Gaussian
+splatting with SDFs typically require 2-16 hours of training,
+for example, 2 hours for GSDF [77] and up to 16 hours for
+NeuSG [9].
+Mitigating Cold-Start Divergence. At initialization (Iteration 1, Figure 4), Gaussian primitives derived from initial point clouds exhibit a highly chaotic and noisy spatial
+distribution. Supervising the continuous implicit field with
+these unaligned, raw centroids would inherently pull the
+zero-level set away from the true surface, leading to severe
+geometric distortion and optimization collapse.
+To circumvent this cold-start problem, we propose a
+500-iteration delayed SDF activation strategy. During this
+initial warm-up phase, the multi-view photometric loss,
+tightly coupled with our entropy-based opacity regularization, operates independently to rapidly prune severe out-
+Table 3. Quantitative evaluation on the OmniObjects3D-d dataset. We report CD (×103 ↓) and Normal Consistency (NC ↑). OR and GAM
+stand for opacity regularization and geometry-guided appearance modeling, respectively. 2DGS+NSH refers to the integration of Gaussian
+splatting with NSH [65], a deep learning model for point cloud reconstruction, where the generated Gaussian primitives are fed into the
+NSH network.
+CD
+NC
+CD
+NC
+Ornaments
+4
+CD
+NC
+CD
+NC
+CD
+NC
+CD
+NC
+Antique
+19
+CD
+NC
+CD
+NC
+CD
+NC
+VolSDF [76]
+2DGS [23]
+GOF [78]
+GSurfels [13]
+2DGS+NSH [65]
+Ours
+12.13
+8.27
+7.90
+11.13
+11.26
+7.04
+0.950
+0.954
+0.956
+0.950
+0.922
+0.959
+4.32
+19.63
+4.66
+7.57
+12.85
+3.11
+0.992
+0.924
+0.992
+0.980
+0.936
+0.978
+14.00
+8.74
+12.16
+9.55
+16.12
+8.34
+0.939
+0.964
+0.961
+0.970
+0.905
+0.967
+9.11
+5.82
+5.97
+8.05
+9.68
+6.35
+0.959
+0.962
+0.966
+0.962
+0.942
+0.960
+22.89
+32.74
+44.08
+13.95
+11.27
+18.04
+0.903
+0.813
+0.790
+0.886
+0.893
+0.856
+29.45
+10.86
+23.71
+11.84
+23.13
+14.99
+0.938
+0.939
+0.898
+0.943
+0.901
+0.922
+11.60
+11.68
+15.44
+9.28
+15.37
+8.46
+0.906
+0.853
+0.834
+0.918
+0.860
+0.882
+12.56
+12.11
+21.76
+9.36
+33.18
+5.47
+0.932
+0.940
+0.966
+0.962
+0.873
+0.956
+14.50
+13.73
+16.95
+10.09
+16.60
+8.97
+0.939
+0.918
+0.920
+0.946
+0.904
+0.934
+Ours (w/o GAM)
+Ours (w/o OR)
+7.83
+12.50
+0.938
+0.917
+6.73
+25.20
+0.964
+0.920
+9.43
+27.18
+0.963
+0.869
+7.46
+21.92
+0.952
+0.888
+20.56
+27.19
+0.812
+0.831
+17.88
+28.13
+0.918
+0.845
+10.43
+18.83
+0.886
+0.828
+5.97
+13.72
+0.962
+0.924
+10.78
+21.83
+0.924
+0.877
+Method
+1
+3
+5
+8
+liers. As demonstrated in the primitive evolution visualization (Figure 4), this provides the implicit network with
+high-confidence spatial anchors from the very first step of
+geometric learning, effectively averting early optimization
+divergence. While extending the delay to 1,000 or 3,000
+iterations yields marginally denser point clouds, our empirical evaluations indicate that 500 iterations provide the
+optimal trade-off between securing geometric stability and
+maintaining overall training efficiency.
+Results on DTU and OmniObjects3D-d As shown
+in Figure 3, our method produces more robust geometry
+reconstruction than GS-based baselines. On Scan 63 (first
+row), it produces smoother surfaces and preserves fine details such as the apple stem, while other methods struggle with noise in reflective regions. We note that Chamfer
+distance in Table 2 should not be the sole evaluation metric on DTU due to (1) noise and holes in the ground-truth
+point clouds and (2) potential bias from cropping, which retains boundary regions contributing to higher CD. Accurate
+thresholding for cropping is difficult to define manually.
+VolSDF [76] requires over 10 hours of training per model
+on OmniObjects3D due to the high cost of volume rendering. While 2DGS and GOF offer faster training, they often produce fragmented surfaces and yield higher CD as
+reported in Table 3. GaussianSurfels [13] better handles
+holes, common in depth fusion pipelines [23], but at the
+cost of using significantly more Gaussian primitives than
+our method (see Figure 5).
+Opacity distribution Figure 5 (bottom) shows the opacity distribution across Gaussians. In 2DGS, 37.6% of Gaussians have opacity below 0.5. Our method produces only
+2.6% transparent Gaussians and achieves the highest proportion of opaque Gaussians, with 97.1% having opacity
+greater than 0.9, compared to 56.3% for 2DGS, 88.3% for
+GOF, and 90.9% for GaussianSurfels. This supports our
+design, which relies on reliable SDF learning from well-
+16
+Mean
+21
+localized, opaque Gaussian centroids. GOF filters Gaussians based on opacity contribution, while GaussianSurfels
+applies a bell-shaped exponential regularization. In contrast, our entropy-based approach yields better compactness
+and higher reconstruction quality.
+Results on OO3D-SL, α-NeuS, and RefNeRF These
+datasets feature models with strong lighting conditions, as
+well as semi-transparent and reflective materials. As shown
+in Figure 1 and Figure 5, lighting variation has minimal impact on our method due to the stability provided by integrating SDF with Gaussian splatting. In Figure 6, GSurf
+reconstructs semi-transparent and reflective surfaces more
+smoothly than other methods. TSDF fusion [23] and Poisson reconstruction [13] rely on potentially unreliable depth
+maps and often fail in such scenarios. Our method avoids
+this by supervising the continuous SDF directly via the centroids of Gaussians. Following UniSDF [56], we also use
+reflective viewpoints to model the view-dependent appearance of reflective materials. In reflective scenes such as the
+toaster exterior, our approach produces more realistic rendering compared to 2DGS and GOF, which struggle with
+rendering artifacts.
+Scene-level reconstructions For indoor and outdoor
+scene data, our method captures fine structural details, such
+as the bonsai in Figure 7, and produces more coherent and
+less fragmented surfaces. Compared to the state-of-the-art
+GS-Pull [85], our approach offers improved geometric fidelity and greater robustness.
+4.3. Ablation Studies
+Opacity regularization Low-opacity Gaussians contribute little to rendering, but severely disrupt the SDF module, leading to distorted and inaccurate geometry. Therefore, reducing the number of low-opacity Gaussians is crucial for effective integration of SDF and Gaussian splatting.
+Antique 016
+44,827
+64,711
+123,826
+54,160
+Table 019
+Opacity Distribution
+Reference
+39,191
+Ours
+26,098
+2DGS
+43,063
+GaussianSurfels
+32,471
+GOF
+Figure 5. Comparison on the Antique 016 and Table 019 models from the OmniObjects3D dataset. The number shown below each
+image indicates the number of Gaussians used by each method. Bar charts illustrate the distribution of low- and high-opacity Gaussians
+on the Antique 016 model. Our entropy-based opacity regularization significantly reduces the low-opacity Gaussians while maintaining
+comparable or better reconstruction quality.
+Ours
+Reference
+Ref.
+Ours
+2DGS
+GOF
+G-Surfels
+Ref.
+2DGS
+Ours
+2DGS
+G-Surfels
+Figure 6. Visual comparison on the α-NeuS dataset [82] for semi-transparent objects and RefNeRF [55] for reflective objects.
+As shown in Table 3 and Figure 5, our entropy-based opacity regularization reduces the total number of Gaussians
+(from 58,148 to 44,827) and increases their opacity, encouraging better alignment with the SDF’s zero-level set.
+Without opacity regularization, the centroids of Gaussians become unreliable and tend to shift slightly during
+training, introducing instability and noise in the SDF learning process. This results in a higher CD when the opacity is
+unconstrained, as shown in Table 3.
+Geometry-guided appearance modeling Removing geometric features from appearance modeling leads to a slight
+degradation in both geometry reconstruction and rendering
+quality, as shown in Tables 3 and 4. Figure 8 shows that
+spherical harmonics fail to capture fine geometric details.
+By incorporating geometry features and surface normals,
+GSurf improves geometry reconstruction by using richer
+structural cues. This also improves rendering quality, particularly for reflective surfaces, as demonstrated in Figure 6.
+Reference
+GS-Pull
+Ours
+Reference
+GS-Pull
+Ours
+Reference
+GS-Pull
+Ours
+Reference
+GS-Pull
+Ours
+Figure 7. Visual comparison with GS-Pull [85] on the MipNeRF 360 [4] and Tank & Temple [31] datasets, featuring scene-level data.
+GT
+w/o GAM
+w/ GAM
+Reference
+GT
+w/o GAM
+w/ GAM
+Figure 8. Ablation study on geometry-guided appearance modeling.
+Table 4. Ablation studies on OmniObject3D. OR and GAM stand
+for opacity regularization and geometry-guided appearance modeling.
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+Ours(full)
+w/o GAM
+w/o OR
+2DGS
+GOF
+40.06
+0.986
+0.025
+39.19
+0.984
+0.031
+37.12
+0.972
+0.039
+39.24
+0.982
+0.027
+40.02
+0.983
+0.026
+Limitations We acknowledge the limitations of our
+method when reconstructing scenes with genuinely translucent structures (e.g., the glass jar). By mathematically
+forcing the opacity ok → 1 via entropy regularization,
+our method treats semi-transparent volumes as equivalent
+opaque outer shells. To minimize the photometric loss, the
+geometry-conditioned appearance MLP is forced to “bake”
+the visual information of internal volumetric transmissions
+Figure 9. Visual comparison of surface extraction on a semitransparent object. Accurate depth estimation on refractive glass
+is highly ill-posed. 2DGS completely fails to reconstruct the glass
+envelope, capturing only fragments of the internal strawberries.
+GaussianSurfels extracts a chaotic, fragmented shell. Due to our
+binarization strategy (ok → 1), GSurf introduces a geometric bias
+that robustly extracts a clean, structurally sound, opaque outermost
+envelope.
+(e.g., the strawberries inside the jar) into high-frequency,
+view-dependent textures directly onto this solid boundary.
+As a result, suppressing semi-transparent Gaussians introduces a geometric bias: the method does not model internal structures and depth correctly. However, as shown
+in Figure 9, accurately reconstructing transparent refractive objects remains a significant challenge for standard
+splatting-based surface extraction pipelines. Because multilayered refractive ray paths severely disrupt linear depth estimation, baselines such as 2DGS completely miss the glass
+envelope (only partially capturing internal items), while
+GaussianSurfels produces severely fragmented, noisy geometry. In this highly ill-posed context, GSurf provides a
+predictable and structurally advantageous failure mode by
+robustly outputting a clean, outermost envelope.
+5. Conclusion
+We presented GSurf, a single-branch framework that couples continuous SDF learning with discrete Gaussian splatting for efficient multi-view surface reconstruction. By
+supervising the SDF directly from Gaussian centroids,
+regularizing opacity to remove low-confidence primitives,
+and using SDF-derived features for appearance modeling, GSurf improves surface completeness and fine geometric detail without requiring an additional volumerendering branch. Experiments on object-level and scenelevel datasets demonstrate that the method is competitive with, and often improves upon, existing GS-based reconstruction approaches, especially in challenging cases
+involving strong lighting, reflective materials, and semitransparent objects. Moreover, GSurf is computationally
+more efficient than existing GS+SDF approaches, requiring less training time and producing fewer Gaussians while
+maintaining or exceeding reconstruction quality. These results validate the effectiveness of bridging continuous and
+discrete representations and highlight the potential of hybrid, multi-level frameworks for 3D reconstruction in realworld applications.
+Acknowledgment
+This project was partially supported by the Ministry of Education, Singapore, under its Academic Research Fund Grant
+(RT19/22).
+References
+[1] Chong Bao, Yinda Zhang, Bangbang Yang, Tianxing Fan,
+Zesong Yang, Hujun Bao, Guofeng Zhang, and Zhaopeng
+Cui. Sine: Semantic-driven image-based nerf editing with
+prior-guided editing field. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 20919–20929, 2023. 1
+[2] Ma Baorui, Han Zhizhong, Liu Yu-Shen, and Zwicker
+Matthias. Neural-pull: Learning signed distance functions
+from point clouds by learning to pull space onto surfaces.
+In International Conference on Machine Learning (ICML),
+2021. 2
+[3] Ma Baorui, Liu Yu-Shen, and Han Zhizhong. Reconstructing surfaces for sparse point clouds with on-surface priors.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), 2022. 2, 4
+[4] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P
+Srinivasan, and Peter Hedman. Mip-nerf 360: Unbounded
+anti-aliased neural radiance fields.
+In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 5470–5479, 2022. 9
+[5] Jiazhong Cen, Jiemin Fang, Chen Yang, Lingxi Xie, Xiaopeng Zhang, Wei Shen, and Qi Tian. Segment any 3d
+Gaussians. In Proceedings of the AAAI Conference on Artificial Intelligence, pages 1971–1979, 2025. 1
+[6] Eric R Chan, Marco Monteiro, Petr Kellnhofer, Jiajun Wu,
+and Gordon Wetzstein. pi-gan: Periodic implicit generative
+adversarial networks for 3d-aware image synthesis. In Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pages 5799–5809, 2021. 1
+[7] Eric R Chan, Connor Z Lin, Matthew A Chan, Koki Nagano,
+Boxiao Pan, Shalini De Mello, Orazio Gallo, Leonidas J
+Guibas, Jonathan Tremblay, Sameh Khamis, et al. Efficient
+geometry-aware 3d generative adversarial networks. In Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pages 16123–16133, 2022. 1, 2
+[8] Danpeng Chen, Hai Li, Weicai Ye, Yifan Wang, Weijian
+Xie, Shangjin Zhai, Nan Wang, Haomin Liu, Hujun Bao,
+and Guofeng Zhang. Pgsr: Planar-based gaussian splatting
+for efficient and high-fidelity surface reconstruction. IEEE
+Transactions on Visualization and Computer Graphics, 31
+(9):6100–6111, 2024. 2, 3
+[9] Hanlin Chen, Chen Li, and Gim Hee Lee. Neusg: Neural implicit surface reconstruction with 3d Gaussian splatting guidance. arXiv preprint arXiv:2312.00846, 2023. 1, 3, 6
+[10] Hanlin Chen, Fangyin Wei, Chen Li, Tianxin Huang, Yunsong Wang, and Gim Hee Lee. Vcr-gaus: View consistent
+depth-normal regularizer for gaussian surface reconstruction.
+Advances in Neural Information Processing Systems, 37:
+139725–139750, 2024. 2, 3
+[11] Junyi Chen, Weicai Ye, Yifan Wang, Danpeng Chen, Di
+Huang, Wanli Ouyang, Guofeng Zhang, Yu Qiao, and Tong
+He. Gigags: 3d Gaussian based planar representation for
+large-scene surface reconstruction. In Proceedings of the
+AAAI Conference on Artificial Intelligence, pages 2088–
+2096, 2025. 1
+[12] Zhang Chen, Zhong Li, Liangchen Song, Lele Chen, Jingyi
+Yu, Junsong Yuan, and Yi Xu. Neurbf: A neural fields representation with adaptive radial basis functions. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV), pages 4182–4194, 2023. 1
+[13] Pinxuan Dai, Jiamin Xu, Wenxiang Xie, Xinguo Liu,
+Huamin Wang, and Weiwei Xu. High-quality surface reconstruction using Gaussian surfels. In ACM SIGGRAPH 2024
+Conference Papers, pages 1–11, 2024. 2, 3, 5, 6, 7
+[14] Yuxin Dai, Qi Wang, Jingsen Zhu, Yuchi Huo, Chen Qian,
+and Ying He. Inverse rendering using multi-bounce path
+tracing and reservoir sampling. In International Conference
+on Learning Representations, pages 20526–20547, 2025. 1
+[15] Leon Foo, Songjia Shen, Ambrose Wee, and Chek Tien Tan.
+Progressive 3d reconstruction for collaborative construction
+of digital twins. In Proceedings of the AAAI Symposium Series, pages 7–10, 2023. 1
+[16] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong
+Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels:
+Radiance fields without neural networks. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 5501–5510, 2022. 2
+[17] Qiancheng Fu, Qingshan Xu, Yew Soon Ong, and Wenbing
+Tao. Geo-neus: Geometry-consistent neural implicit surfaces learning for multi-view reconstruction. In Advances in
+Neural Information Processing Systems, pages 3403–3416,
+2022. 2
+[18] Amos Gropp, Lior Yariv, Niv Haim, Matan Atzmon, and
+Yaron Lipman. Implicit geometric regularization for learning
+shapes. In Proceedings of Machine Learning and Systems
+2020, pages 3569–3579. 2020. 2
+[19] Antoine Guédon and Vincent Lepetit. Sugar: Surfacealigned Gaussian splatting for efficient 3d mesh reconstruction and high-quality mesh rendering. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 5354–5363, 2024. 2, 5, 6
+[20] Hugues Hoppe, Tony DeRose, Tom Duchamp, John McDonald, and Werner Stuetzle. Surface reconstruction from unorganized points. In Proceedings of the 19th Annual Conference on Computer Graphics and Interactive Techniques,
+page 71–78, New York, NY, USA, 1992. 2
+[21] Fei Hou, Chiyu Wang, Wencheng Wang, Hong Qin, Chen
+Qian, and Ying He. Iterative Poisson surface reconstruction
+(iPSR) for unoriented points. ACM Trans. Graph., 41(4),
+2022. 2
+[22] Jiangbei Hu, Ying He, Baixin Xu, Shengfa Wang, Na
+Lei, and Zhongxuan Luo. If-tonir: iteration-free topology optimization based on implicit neural representations.
+Computer-Aided Design, 167:103639, 2024. 2
+[23] Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and
+Shenghua Gao. 2d Gaussian splatting for geometrically accurate radiance fields. In ACM SIGGRAPH 2024 Conference
+Papers, pages 1–11, 2024. 2, 3, 4, 5, 6, 7
+[24] Rasmus Jensen, Anders Dahl, George Vogiatzis, Engil Tola,
+and Henrik Aanæs. Large scale multi-view stereopsis evaluation. In 2014 IEEE Conference on Computer Vision and
+Pattern Recognition, pages 406–413. IEEE, 2014. 5
+[25] Daisheng Jin, Jiangbei Hu, Baixin Xu, Yuxin Dai, Chen
+Qian, and Ying He. Robust geometry and reflectance disentanglement for 3d face reconstruction from sparse-view images. In Proceedings of the IEEE/CVF International Conference on Computer Vision, 2025. 1
+[26] Haian Jin, Isabella Liu, Peijia Xu, Xiaoshuai Zhang, Songfang Han, Sai Bi, Xiaowei Zhou, Zexiang Xu, and Hao
+Su. Tensoir: Tensorial inverse rendering. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 165–174, 2023. 1
+[27] Michael Kazhdan and Hugues Hoppe. Screened Poisson surface reconstruction. ACM Transactions on Graphics, 32(3):
+1–13, 2013. 2
+[28] Michael Kazhdan, Matthew Bolitho, and Hugues Hoppe.
+Poisson surface reconstruction. In Proceedings of the fourth
+Eurographics symposium on Geometry processing, 2006. 2
+[29] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler,
+and George Drettakis. 3d Gaussian splatting for real-time
+radiance field rendering. ACM Trans. Graph., 42(4):139–1,
+2023. 1, 2, 4, 5
+[30] Diederik P Kingma. Adam: A method for stochastic optimization. arXiv preprint arXiv:1412.6980, 2014. 5
+[31] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen
+Koltun. Tanks and temples: Benchmarking large-scale scene
+reconstruction. ACM Transactions on Graphics, 36(4):1–13,
+2017. 9
+[32] Artem Komarichev, Jing Hua, and Zichun Zhong. Diffsvr:
+Differentiable neural implicit surface rendering for singleview reconstruction with highly sparse depth prior.
+Computer-Aided Design, 164:103604, 2023. 2
+[33] J. Li, Z. Wen, L. Zhang, J. Hu, F. Hou, Z. Zhang, and Y. He.
+GS-Octree: Octree-based 3d Gaussian splatting for robust
+object-level 3d reconstruction under strong lighting. Computer Graphics Forum, 2024. 2
+[34] Jiaze Li, Luo Zhang, Jiangbei Hu, Zhebin Zhang, Hongyu
+Sun, Gaochao Song, and Ying He. Real-time volume rendering with octree-based implicit surface representation. Computer Aided Geometric Design, 111:102322, 2024. 2, 6
+[35] Kunyi Li, Michael Niemeyer, Zeyu Chen, Nassir Navab, and
+Federico Tombari. Monogsdf: Exploring monocular geometric cues for Gaussian splatting-guided implicit surface
+reconstruction. arXiv preprint arXiv:2411.16898, 2024. 1
+[36] Zhaoshuo Li, Thomas Müller, Alex Evans, Russell H Taylor, Mathias Unberath, Ming-Yu Liu, and Chen-Hsuan Lin.
+Neuralangelo: High-fidelity neural surface reconstruction. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 8456–8465, 2023. 2
+[37] Jiaqi Lin, Zhihao Li, Binxiao Huang, Xiao Tang, Jianzhuang
+Liu, Shiyong Liu, Xiaofei Wu, Fenglong Song, and Wenming Yang. Decoupling appearance variations with 3d consistent features in Gaussian splatting. In Proceedings of
+the AAAI Conference on Artificial Intelligence, pages 5236–
+5244, 2025. 1
+[38] Siyou Lin, Dong Xiao, Zuoqiang Shi, and Bin Wang. Surface reconstruction from point clouds without normals by
+parametrizing the gauss formula. ACM Trans. Graph., 42
+(2), 2022. 2
+[39] Weizhou Liu, Jiaze Li, Xuhui Chen, Fei Hou, Shiqing Xin,
+Xingce Wang, Zhongke Wu, Chen Qian, and Ying He. Diffusing winding gradients (DWG): A parallel and scalable
+method for 3d reconstruction from unoriented point clouds.
+ACM Trans. Graph., 44(2):19:1–19:18, 2025. 2
+[40] Xiaoxiao Long, Cheng Lin, Peng Wang, Taku Komura, and
+Wenping Wang. Sparseneus: Fast generalizable neural surface reconstruction from sparse views. In European Conference on Computer Vision (ECCV), pages 210–227, 2022.
+2
+[41] Xiaoyang Lyu, Yang-Tian Sun, Yi-Hua Huang, Xiuzhe Wu,
+Ziyi Yang, Yilun Chen, Jiangmiao Pang, and Xiaojuan Qi.
+3dgsr: Implicit surface reconstruction with 3d gaussian splatting. ACM Transactions on Graphics (TOG), 43(6):1–12,
+2024. 2, 3
+[42] Lars Mescheder, Michael Oechsle, Michael Niemeyer, Sebastian Nowozin, and Andreas Geiger. Occupancy networks:
+Learning 3d reconstruction in function space. In Proceedings
+of the IEEE/CVF conference on computer vision and pattern
+recognition, pages 4460–4470, 2019. 1
+[43] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik,
+Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65(1):99–106, 2021. 1,
+2
+[44] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM Trans. Graph., 41(4):102:1–
+102:15, 2022. 2
+[45] Yutaka Ohtake, Alexander Belyaev, Marc Alexa, Greg Turk,
+and Hans-Peter Seidel. Multi-level partition of unity implicits. ACM Trans. Graph., 22(3):463–470, 2003. 2
+[46] Jeong Joon Park, Peter Florence, Julian Straub, Richard
+Newcombe, and Steven Lovegrove. Deepsdf: Learning continuous signed distance functions for shape representation.
+In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages 165–174, 2019. 1, 2,
+4
+[47] Zhexi Peng, Tianjia Shao, Yong Liu, Jingke Zhou, Yin Yang,
+Jingdong Wang, and Kun Zhou. Rtg-slam: Real-time 3d reconstruction at scale using Gaussian splatting. In ACM SIGGRAPH 2024 Conference Papers, pages 1–11, 2024. 3, 5
+[48] Christian Reiser, Stephan Garbin, Pratul Srinivasan, Dor
+Verbin, Richard Szeliski, Ben Mildenhall, Jonathan Barron,
+Peter Hedman, and Andreas Geiger. Binary opacity grids:
+Capturing fine geometric detail for mesh-based view synthesis. ACM Transactions on Graphics (TOG), 43(4):1–14,
+2024. 2
+[49] Shunsuke Saito, Zeng Huang, Ryota Natsume, Shigeo Morishima, Angjoo Kanazawa, and Hao Li. Pifu: Pixel-aligned
+implicit function for high-resolution clothed human digitization. In Proceedings of the IEEE/CVF international conference on computer vision, pages 2304–2314, 2019. 1
+[50] Johannes Lutz Schönberger and Jan-Michael Frahm.
+Structure-from-motion revisited. In Conference on Computer Vision and Pattern Recognition (CVPR), 2016. 5
+[51] Liu Shi-Lin, Guo Hao-Xiang, Pan Hao, Peng-Shuai Wang,
+Tong Xin, and Liu Yang. Deep implicit moving least-squares
+functions for 3d reconstruction. In IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, 2021. 2, 4
+[52] Pratul P Srinivasan, Stephan J Garbin, Dor Verbin,
+Jonathan T Barron, and Ben Mildenhall. Nuvo: Neural uv
+mapping for unruly 3d representations. In European Conference on Computer Vision, pages 18–34. Springer, 2025.
+1
+[53] Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct voxel
+grid optimization: Super-fast convergence for radiance fields
+reconstruction. In Proceedings of the IEEE/CVF conference
+on computer vision and pattern recognition, pages 5459–
+5469, 2022. 2
+[54] Matias Turkulainen, Xuqian Ren, Iaroslav Melekhov, Otto
+Seiskari, Esa Rahtu, and Juho Kannala. Dn-splatter: Depth
+and normal priors for Gaussian splatting and meshing. In
+Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision (WACV), 2025. 5, 6
+[55] Dor Verbin, Peter Hedman, Ben Mildenhall, Todd Zickler,
+Jonathan T Barron, and Pratul P Srinivasan. Ref-nerf: Structured view-dependent appearance for neural radiance fields.
+IEEE Transactions on Pattern Analysis and Machine Intelligence, 47(11):9426–9437, 2024. 6, 8
+[56] Fangjinhua Wang, Marie-Julie Rakotosaona, Michael
+Niemeyer, Richard Szeliski, Marc Pollefeys, and Federico
+Tombari. Unisdf: Unifying neural representations for highfidelity 3d reconstruction of complex scenes with reflections.
+Advances in Neural Information Processing Systems, 37:
+3157–3184, 2024. 7
+[57] Guangming Wang, Lei Pan, Songyou Peng, Shaohui Liu,
+Chenfeng Xu, Yanzi Miao, Wei Zhan, Masayoshi Tomizuka,
+Marc Pollefeys, and Hesheng Wang. Nerfs in robotics: A
+survey. The International Journal of Robotics Research, 45
+(6):858–892, 2026. 1
+[58] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku
+Komura, and Wenping Wang. Neus: Learning neural implicit surfaces by volume rendering for multi-view reconstruction. In Advances in Neural Information Processing
+Systems, pages 27171–27183, 2021. 1, 2, 4, 5
+[59] Peng-Shuai Wang, Yang Liu, and Xin Tong. Dual octree
+graph networks for learning adaptive volumetric shape representations. ACM Transactions on Graphics, 41(4):1–15,
+2022. 2, 4
+[60] Yiqun Wang, Ivan Skorokhodov, and Peter Wonka. Hf-neus:
+Improved surface reconstruction using high-frequency details. Advances in Neural Information Processing Systems,
+35:1966–1978, 2022. 2
+[61] Yiming Wang, Qin Han, Marc Habermann, Kostas Daniilidis, Christian Theobalt, and Lingjie Liu. Neus2: Fast
+learning of neural implicit surfaces for multi-view reconstruction. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision (ICCV), 2023. 2
+[62] Yiqun Wang, Ivan Skorokhodov, and Peter Wonka. Pet-neus:
+Positional encoding tri-planes for neural surfaces. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pages 12598–12607, 2023. 2
+[63] Zian Wang, Tianchang Shen, Merlin Nimier-David, Nicholas
+Sharp, Jun Gao, Alexander Keller, Sanja Fidler, Thomas
+Müller, and Zan Gojcic. Adaptive shells for efficient neural
+radiance field rendering. ACM Trans. Graph., 42(6), 2023. 2
+[64] Zixiong Wang, Pengfei Wang, Pengshuai Wang, Qiujie
+Dong, Junjie Gao, Shuangmin Chen, Shiqing Xin, Changhe
+Tu, and Wenping Wang. Neural-imls: Self-supervised implicit moving least-squares network for surface reconstruction. IEEE Transactions on Visualization and Computer
+Graphics, pages 1–16, 2023. 2, 4
+[65] Zixiong Wang, Yunxiao Zhang, Rui Xu, Fan Zhang, PengShuai Wang, Shuangmin Chen, Shiqing Xin, Wenping Wang,
+and Changhe Tu. Neural-singular-hessian: Implicit neural
+representation of unoriented point clouds by enforcing singular hessian. ACM Transactions on Graphics, 42(6):1–14,
+2023. 2, 4, 7
+[66] Yaniv Wolf, Amit Bracha, and Ron Kimmel. GS2Mesh:
+Surface reconstruction from Gaussian splatting via novel
+stereo views. In European Conference on Computer Vision
+(ECCV), 2024. 2
+[67] Qianyi Wu, Jianmin Zheng, and Jianfei Cai. Surface reconstruction from 3d Gaussian splatting via local structural
+hints. In European Conference on Computer Vision, 2024. 2,
+3
+[68] Tong Wu, Jiaqi Wang, Xingang Pan, Xudong Xu, Christian
+Theobalt, Ziwei Liu, and Dahua Lin. Voxurf: Voxel-based
+efficient and accurate neural surface reconstruction. In International Conference on Learning Representations (ICLR),
+2023. 2, 5
+[69] Tong Wu, Jiarui Zhang, Xiao Fu, Yuxin Wang, Liang Pan
+Jiawei Ren, Wayne Wu, Lei Yang, Jiaqi Wang, Chen Qian,
+Dahua Lin, and Ziwei Liu. Omniobject3d: Large-vocabulary
+3d object dataset for realistic perception, reconstruction and
+generation. In IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR), 2023. 5, 6
+[70] Haodong Xiang, Xinghui Li, Kai Cheng, Xiansong Lai,
+Wanting Zhang, Zhichao Liao, Long Zeng, and Xueping Liu.
+Gaussianroom: Improving 3d gaussian splatting with sdf
+guidance and monocular cues for indoor scene reconstruction. In 2025 IEEE International Conference on Robotics
+and Automation (ICRA), pages 2686–2693. IEEE, 2025. 2, 3
+[71] Baixin Xu, Jiarui Zhang, Kwan-Yee Lin, Chen Qian, and
+Ying He. Deformable model-driven neural rendering for
+high-fidelity 3d reconstruction of human heads under lowview settings. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, pages 17924–17934, 2023.
+2, 5
+[72] Baixin Xu, Jiangbei Hu, Fei Hou, Kwan-Yee Lin, Wayne
+Wu, Chen Qian, and Ying He. Parameterization-driven neural surface reconstruction for object-oriented editing in neural rendering. In European Conference on Computer Vision,
+2024. 1
+[73] Jiahui Xu, Wenbo Shao, Weida Wang, Cheng Liu, Chao
+Yang, Jun Li, and Hong Wang. From component to system:
+A task-unified planning system with planning-oriented predictor. IEEE Transactions on Vehicular Technology, 74(4):
+5335–5348, 2025. 1
+[74] Rui Xu, Zhiyang Dou, Ningna Wang, Shiqing Xin, Shuangmin Chen, Mingyan Jiang, Xiaohu Guo, Wenping Wang,
+and Changhe Tu. Globally consistent normal orientation for
+point clouds by regularizing the winding-number field. ACM
+Trans. Graph., 42(4), 2023. 2
+[75] Lior Yariv, Yoni Kasten, Dror Moran, Meirav Galun, Matan
+Atzmon, Basri Ronen, and Yaron Lipman. Multiview neural surface reconstruction by disentangling geometry and appearance. In Advances in Neural Information Processing
+Systems, pages 2492–2502, 2020. 5
+[76] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. Volume rendering of neural implicit surfaces. In Advances in
+Neural Information Processing Systems, pages 4805–4815,
+2021. 1, 2, 3, 4, 5, 7
+[77] Mulin Yu, Tao Lu, Linning Xu, Lihan Jiang, Yuanbo Xiangli, and Bo Dai. Gsdf: 3dgs meets sdf for improved neural
+rendering and reconstruction. Advances in Neural Information Processing Systems, 37:129507–129530, 2024. 1, 2, 3,
+6
+[78] Zehao Yu, Torsten Sattler, and Andreas Geiger. Gaussian
+opacity fields: Efficient adaptive surface reconstruction in
+unbounded scenes. ACM Transactions on Graphics (ToG),
+43(6):1–13, 2024. 2, 3, 5, 6, 7
+[79] Zhaojie Zeng, Yuesong Wang, Lili Ju, and Tao Guan.
+Frequency-aware density control via reparameterization for
+high-quality rendering of 3d Gaussian splatting. In Proceedings of the AAAI Conference on Artificial Intelligence, pages
+9833–9841, 2025. 1
+[80] Fangneng Zhan, Lingjie Liu, Adam Kortylewski, and Christian Theobalt. General neural gauge fields. In The
+Eleventh International Conference on Learning Representations, 2023. 1
+[81] Chen Zhang, Wanjuan Su, Qingshan Xu, Xinyao Liao, and
+Wenbing Tao. Pg-neus: Robust and efficient point guidance
+for multi-view neural surface reconstruction. IEEE Transactions on Visualization and Computer Graphics, 31(9):6410–
+6424, 2024. 1
+[82] Haoran Zhang, Junkai Deng, Xuhui Chen, Fei Hou,
+Wencheng Wang, Hong Qin, Chen Qian, and Ying He. From
+transparent to opaque: Rethinking neural implicit surfaces
+with α-neus. In Advances in Neural Information Processing
+Systems (NeurIPS), 2024. 6, 8
+[83] Jingyang Zhang, Yao Yao, Shiwei Li, Jingbo Liu, Tian Fang,
+David McKinnon, Yanghai Tsin, and Long Quan. Neilf++:
+Inter-reflectable light fields for geometry and material estimation. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 3601–3610, 2023. 1
+[84] Weixing Zhang, Zongrui Li, De Ma, Huajin Tang, Xudong
+Jiang, Qian Zheng, and Gang Pan. Spiking gs: Towards high-accuracy and low-cost surface reconstruction via
+spiking neuron-based Gaussian splatting. arXiv preprint
+arXiv:2410.07266, 2024. 2
+[85] Wenyuan Zhang, Yu-Shen Liu, and Zhizhong Han. Neural signed distance function inference through splatting 3d
+gaussians pulled on zero-level set. In Advances in Neural
+Information Processing Systems, 2024. 2, 3, 7, 9
+[86] Xiuming Zhang, Pratul P Srinivasan, Boyang Deng, Paul Debevec, William T Freeman, and Jonathan T Barron. Nerfactor: Neural factorization of shape and reflectance under an
+unknown illumination. ACM Transactions on Graphics, 40
+(6):1–18, 2021. 1
+[87] Yufeng Zheng, Wang Yifan, Gordon Wetzstein, Michael J
+Black, and Otmar Hilliges.
+Pointavatar: Deformable
+point-based head avatars from videos. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 21057–21067, 2023. 1
+[88] Jiaru Zhong, Jiahao Wang, Jiahui Xu, Xiaofan Li, Zaiqing
+Nie, and Haibao Yu. Cooptrack: Exploring end-to-end
+learning for efficient cooperative sequential perception. In
+Proceedings of the IEEE/CVF International Conference on
+Computer Vision, pages 26954–26965, 2025. 1

@@ -1,0 +1,1179 @@
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+1
+TemporalGS: Training-Free Plug-and-Play
+Acceleration for 3D Gaussian Splatting Rendering
+via Temporal Priors
+arXiv:2607.03390v1 [cs.CV] 3 Jul 2026
+Yuhongze Zhou, Zihao Yang, Xinxin Zuo, Juwei Lu
+Abstract—3D Gaussian Splatting (3DGS) has revolutionized
+novel-view synthesis with its fast and high-fidelity rendering.
+However, rendering at high FPS and low latency across various
+scenes remains a challenge, especially when large amounts of 3D
+Gaussian ellipsoids appear in the scene. To address this issue, we
+introduce TemporalGS, to the best of our knowledge, the first
+training-free plug-and-play algorithmic approach to accelerate
+3DGS rendering without any post-training or post-processing,
+implemented on top of tile-based software rasterization. The
+key idea is that, instead of rendering frames independently as
+3DGS, we leverage the temporal priors, represented by novel
+geometry and appearance buffers, etc., to reduce redundancy
+of Gaussian preprocessing, sorting, and rasterization operations
+of consecutive frames. Specifically, we propose two acceleration strategies: (1) temporal dynamic culling, which filters
+out Gaussians that contribute less to current frame rendering;
+(2) selective rendering, which renders only a small portion
+of tiles that cannot be approximated by the temporal priors.
+By adapting and interleaving these two strategies, TemporalGS
+yields a simple but effective plug-and-play solution for 3DGS
+rendering speed-up without any training. Extensive experiments
+show that TemporalGS achieves comparable or even better performance compared to existing state-of-the-art post-training or
+post-processing-based 3DGS rendering acceleration approaches.
+TemporalGS can significantly enhance the rendering speed of
+various 3DGS methods, achieving up to 1.48× acceleration, while
+maintaining competitive rendering quality. We further extend our
+TemporalGS to hardware rasterization-based 3DGS to show the
+portability of our algorithm.
+Index Terms—3D Gaussian Splatting, Rendering acceleration.
+I. I NTRODUCTION
+D Gaussian Splatting (3DGS) [1] has recently emerged
+as a more powerful 3D scene representation than Neural
+Radiance Field (NeRF) for novel-view synthesis with efficient
+training and rendering. 3DGS utilizes tile-based software rasterization and consists of preprocessing, sorting, and rasterization steps. Among these three steps, sorting and rasterization
+are the two major 3DGS computational burdens that correlate
+with the number of Gaussians. To further enhance the user
+roaming experience, this paper focuses on enhancing the
+rendering efficiency of 3DGS with higher FPS and lower
+3
+Y. Zhou is with McGill University, Montréal, Canada. (email:
+yuhongze.zhou@mail.mcgill.ca)
+Z. Yang is with University of Waterloo, Waterloo, Canada. (email:
+zh2yang@uwaterloo.ca)
+X. Zuo is with Concordia University, Montréal, Canada. (email: xinxinzuo2353@gmail.com)
+J. Lu is with University of Toronto, Toronto, Canada. (email:
+juwei@ieee.org)
+(a) 3DGS
+(b) TemporalGS
+FPS: 259
+FPS: 383
+FPS: 126
+FPS: 320
+Fig. 1. Our TemporalGS can speed up rendering across various-scale scenes
+and maintain similar visual quality as 3DGS.
+latency across various-scale 3D scenes, especially large-scale
+scenes.
+Existing 3DGS rendering acceleration methods focus
+mainly on two aspects, including Gaussian pruning/culling [2],
+[3], [4], [5], [6], [7] and implementation optimization [8], [9],
+[10]. For pruning/culling, many works, such as LightGaussian [2] and C3DGS [4], prune redundant Gaussians during
+(post-)training to improve rendering speed. RadSplat [6] and
+OccluGaussian [7], to speed up test-time rendering, introduce
+visibility-based filtering strategies as post-processing to eliminate Gaussians that are unlikely to contribute to rendering
+for each viewpoint. GScore [8] and FlashGS [9] introduce
+more precise Gaussian-tile intersection tests to reduce the
+number of Gaussians online. For implementation optimization,
+GScore [8] presents a hardware acceleration unit for 3DGS
+on the mobile GPU. FlashGS [9] introduces an optimized
+execution pipeline, refined control and scheduling mechanisms, and memory access optimizations. TC-GS [10] introduces a hardware-dependent module utilizing Tensor Cores for
+3DGS speed-up. In addition, StochasticSplats [11] introduces
+a sorting-free 3DGS by post-training, which uses the number
+of Monte Carlo samples to trade off computation time and
+quality.
+In contrast to existing 3DGS rendering acceleration approaches that rely on (post-)training/post-processing, or are
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+tightly coupled with the 3DGS rendering pipeline and the underlying hardware, we propose TemporalGS, the first trainingfree plug-and-play algorithmic approach, to speed up 3DGS
+rendering without any post-training or post-processing. Our
+key motivation is that, when rendering neighboring frames,
+the sets of 3D Gaussians contributing to the rendering exist
+significant overlap. The rendering of a previous frame actually
+provides valuable information to reduce the redundancy of
+Gaussian preprocessing, sorting, and rasterization operations
+of the current frame rendering. Specifically, we propose novel
+temporal priors of the previous frame, which contain temporal
+geometry and appearance buffers, etc. We further introduce
+two strategies to strain the capability of temporal priors for
+efficient new frame rendering. First, we introduce temporal
+dynamic culling to eliminate unnecessary Gaussians. It contains two culling policies: (1) adaptive frustum culling to
+filter Gaussians that are physically outside the new viewpoint;
+(2) temporal occlusion culling to filter Gaussians behind the
+warped temporal geometry buffer (TGB). Second, we propose
+a selective rendering strategy to reduce the sorting and rasterization cost. It leverages a tile selection algorithm to only
+render a small portion of tiles that cannot be approximated
+by the warped temporal appearance buffer (TAB). Then, we
+construct new frames by stitching rendered tiles and the
+warped TAB together. During the stream rendering process,
+our TemporalGS combines and interleaves the above two
+strategies to achieve high FPS and low latency rendering.
+Through extensive experiments, we demonstrate that trainingfree TemporalGS is able to achieve performance on par with,
+or surpassing, existing state-of-the-art post-training or postprocessing-based 3DGS rendering acceleration methods. In
+addition, TemporalGS can be seamlessly incorporated as a
+plug-in module into software- or hardware-based 3DGS rasterization pipelines for rendering acceleration, while preserving
+competitive image quality, as illustrated in Fig. 1.
+Our contributions can be summarized as follows: (1) We
+introduce TemporalGS, the first training-free plug-and-play
+algorithm, to improve the rendering efficiency of 3DGS or
+its variants up to 1.48× without any post-training or postprocessing. (2) With our novel temporal prior representations, our temporal dynamic culling and selective rendering
+strategies efficiently reduce the number of Gaussians and
+select a small set of tiles to render online. (3) Our trainingfree TemporalGS achieves comparable or better performance
+than the state-of-the-art post-training or post-processing-based
+3DGS rendering acceleration methods.
+II. R ELATED W ORK
+A. 3D Gaussian Splatting
+Despite the superiority of 3DGS in 3D reconstruction and
+novel view synthesis, there remain issues that hinder its real
+application, such as excessive and incontrollable memory
+consumption, difficult training of large-scale scenes, and its inefficient design and implementation. Therefore, there are three
+main streams of work that address each issue, respectively.
+To reduce memory consumption, many attempts [3], [2],
+[12], [4], [13], [5], [6] have been made. They usually leverage
+2
+pruning and vector quantization or knowledge distillation to
+compress Gaussian features during training for smaller model
+size and faster training and rendering. To improve 3DGS
+training on large-scale scenes, previous work leverages the
+divide-and-conquer approach [14], [15], [16], [7] or introduces
+a 3DGS distributed training system [17], [18], [19].
+Instead of addressing the first two issues, some papers [12],
+[20], [8], [9], [5], [6], [10] focus on improving 3DGS algorithm design and implementation in training or rendering.
+For training optimization, Taming3DGS [12] derives faster
+and numerically equivalent solutions for gradient computation
+and parameter updates, leading to efficient backpropagation.
+DISTWAR [20] is a software approach to accelerate atomic
+operations during gradient computation. For rendering optimization, GScore [8] tailors the 3DGS implementation to
+the mobile GPU with Gaussian shape-aware intersection test,
+hierarchical sorting, and sub-tile skipping. FlashGS [9] applies
+algebraic simplifications to its precise Gaussian-tile intersection in preprocessing and introduces an optimized pipeline
+to enhance hardware utilization. TC-GS [10] is hardwaredependent and relies on mapping alpha-blending to matrix
+multiplications to fully utilize Tensor Cores for rendering
+acceleration. RadSplat [6] clusters input cameras and gathers visible Gaussians for each region to reduce redundancy.
+CityGaussian [15] generates different detail levels using LightGaussian [2] and introduces an adaptive block-wise LOD rendering strategy. OccluGaussian [7] introduces a region-based
+rendering strategy that culls invisible Gaussians by regionbased visibility calculation and subdivision. Our TemporalGS
+acts as a training-free plug-and-play algorithmic approach to
+speed up 3DGS and is complementary to these methods.
+B. Temporal Coherence based Rendering
+Temporal coherence has been widely investigated to accelerate surface-based rendering [21], [22], [23], [24], [25],
+[26], [27], volume rendering [28], [29], point cloud visualization [30], and NeRF rendering [31], [32], [33]. However,
+it is infeasible to directly adapt these acceleration methods to
+3DGS. Also, recent concurrent works [34], [35] show some efforts to accelerate 3DGS with temporal coherence. NeoG [34]
+proposes a reuse-and-update sorting algorithm, but is only
+applicable to sorting-based Gaussian Splatting and provides
+relatively limited benefits when implemented purely in software. GS-Cache [35] eliminates redundant anchor decoding
+of Scaffold-GS based variants across consecutive frames and
+introduces a system-level framework utilizing multi-GPU parallel rendering for large-scale scenes on VR devices. Different
+from existing works, TemporalGS fully explores temporal
+coherence in 3DGS rendering and introduces a training-free
+plug-and-play acceleration solution for both software- and
+hardware-based 3DGS rasterization.
+III. A PPROACH
+A. Preliminary: 3D Gaussian Splatting
+3D Gaussian Splatting (3DGS) [1] models a scene with
+a set of 3D Gaussians G. Each 3D Gaussian Gi ∈ G is
+parameterized by mean µi , covariance matrix Σi , opacity oi ,
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+3
+(b)
+(a)
+
+...
+G3
+
+T1
+T2
+G4
+G1
+...
+G2
+t
+t
+SR
+t
+frame
+TDC
+use temporal prior
+frame
+rendered
+by 3DGS
+frame
+rendered
+by TDC
+frame rendered
+by TDC and SR
+Gi , di
+Gaussian Gi with depth di
+in orange tile T2
+filtered Gaussian and tile
+T4
+T3
+G1 , d1
+G1 , d1
+G1 , d1
+G3 , d3
+G1 , d1
+G4 , d 4
+G1 , d1
+G1 , d1
+G2 , d 2
+G3 , d3
+G2 , d 2
+G4 , d 4
+G3 , d3
+G1 , d1
+G3 , d3
+G2 , d 2
+G4 , d 4
+G4 , d 4
+G4 , d 4
+G1 , d1
+G4 , d 4
+G2 , d 2
+G4 , d 4
+
+
+
+
+ 
+Preprocessing
+1
+, c1
+3
+, c3
+4
+2
+I (2, 2)
+, c4
+, c2
+c
+1 1
+(1
+1
+) 2 c2
+G4 , d 4
+
+  
+
+
+
+Sorting
+Rasterization
+Fig. 2. (a) We present the high-level comparison about rendering a sequence of frames between vanilla 3DGS and TemporalGS. TemporalGS leverages
+temporal priors for efficient rendering while 3DGS renders independently. (b) We illustrate how our TemporalGS speeds up 3DGS forward pass. Please refer
+to Section III-A for 3DGS forward pass details. TemporalGS leverages temporal dynamic culling to filter a redundant Gaussian G4 behind the surface in the
+preprocessing step. It uses selective rendering to only render a tile T4 and approximates T1 , T2 , and T3 by the warped temporal appearance buffer. Therefore,
+it significantly reduces sorting and rasterization cost. Unnecessary Gaussians and tiles are marked by dotted line.
+and spherical harmonics (SH) coefficients. It can be divided
+into three steps: preprocessing, sorting, and rasterization. In
+the preprocessing step, given a world-to-camera transformation
+matrix W , intrinsic matrix K, and a 16×16 tile-split screen
+space T, near-plane culling is performed to filter Gaussians
+behind the camera. Each remaining Gaussian is transformed
+and projected onto the 2D screen space. Gaussians that do
+not intersect with any tiles are discarded, while Gaussians
+that intersect with multiple tiles are duplicated. Then, each
+Gaussian is characterized by the 2D mean µ′i , 2D covariance
+matrix Σ′i , opacity oi , depth di , and color ci . The sorting
+process, for each tile Tk ∈ T, sorts its intersected Gaussians
+by depth from front to back. For simplicity, Gaussians that
+intersect with Tk are denoted as {Gi | Gi ∈ Tk }. Finally, the
+rasterization step renders an image using α-blending.
+B. Problem Formulation and Overview
+We formulate our problem as follows. We perform two types
+of rendering, i.e., vanilla 3DGS rendering and TemporalGS
+accelerated rendering. A frame rendered by the former is
+considered as a reference frame. Our goal is to accelerate the
+rendering of λ − 1 frames {I¯t+1 , I¯t+2 , . . . I¯t+λ−1 } between
+two neighboring reference frames It and It+λ .
+In Fig. 2, we provide an overview of our TemporalGS.
+As shown in Fig. 2(a), Unlike 3DGS which renders each
+frame independently, we utilize temporal priors to accelerate
+new frame rendering. Specifically, when rendering a reference
+frame, we construct the temporal priors by caching temporal
+geometry and appearance buffers, etc. Then, we introduce two
+strategies, i.e., temporal dynamic culling (TDC) and selective
+rendering (SR). They collaborate and interleave with each
+other adaptively between every λTDC and λSR interval to take
+full advantage of temporal priors for efficient rendering.
+In the following subsections, we first describe the detailed
+procedure for constructing temporal priors (Section III-C) and
+then present the two key strategies that utilize those temporal
+priors for rendering acceleration (Section III-D, Section III-E).
+C. Construction of Temporal Priors
+Temporal Geometry Buffer (TGB) Given the scene geometry
+seen from the reference frame, we create a temporal geometry
+buffer (TGB) as a geometric prior. Assuming that neighboring
+frames usually share a similar geometry, we can propagate the
+TGB to subsequent frames through a warping operation.
+In detail, while rendering the reference frame It , we can
+compute its frame depth at pixel (x, y) as
+P
+wi (x, y)di
+,
+(1)
+Dt (x, y) = PGi ∈Tk
+Gi ∈Tk wi (x, y)
+and its standard deviation as
+sP
+σt (x, y) =
+2
+Gi ∈Tk wi (x, y)(di − Dt (x, y))
+P
+Gi ∈Tk wi (x, y)
+,
+(2)
+where the pixel (x, y) lies within the tile Tk . {Dt , σt } forms
+the temporal geometry buffer (TGB).
+At frame t + i, i ∈ [1, λ − 1], given Dt , σt , the worldto-camera transformation matrices of the reference frame and
+frame t + i, denoted as Wt and Wt+i , and the intrinsic matrix
+K, we can map the pixel (x, y) in the reference frame to frame
+t + i by forward warping:
+(x′ , y ′ ) ≃ KWt+i Wt−1 Dt (x, y)K −1 [x, y, 1]T ,
+(3)
+where we ignore the last element of homogeneous coordinates
+for illustration simplicity. According to this, we can not
+only do depth warping but also unproject the depth standard
+deviation map σt using Dt to 3D space and reproject them to
+frame t + i. The warped destination usually lands “between”
+pixels, so we clip it to its nearest pixel. Since multiple source
+pixels might overlap at the same destination, we preserve
+the geometry closer to the camera and the maximum depth
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+camera
+zfar
+fov x
+preprocessed Gaussian
+4
+filtered Gaussian
+t
+surface
+
+Dtmin
+t
+i
+t
+znear
+t i
+(a)
+t i
+(b)
+new
+surface
+newly visible
+Gaussian
+t
+t i
+(c)
+t i
+(d)
+Fig. 3. We visualize, at frame t + i, (a) 3DGS near-plane culling, (b) adaptive frustum culling, (c) temporal occlusion culling, and (d) selective rendering
+regions. All Gaussians within the pink region are preprocessed at frame t + i.
+standard deviation to obtain high recall. Note that before
+warping, the default warped depth and standard deviation are
+initialized by zfar +ϵ and 0, respectively. We denote the warped
+→
+−
+→max
+−
+Dt and σt at frame t + i as D min
+t→t+i and σ t→t+i , which
+maintain the minimum projected depth and the maximum
+depth standard deviation at the destination.
+→
+−
+→max
+−
+After obtaining the warped TGB { D min
+t→t+i , σ t→t+i }, we
+can model the surface range that appears in the reference frame
+→
+−
+→min
+→max −
+−
+→max
+−
+as [ D min
+t→t+i −λ1 σ t→t+i , D t→t+i +λ2 σ t→t+i ] at frame t+i,
+where λ1 and λ2 are set to adjust the variance range. We find
+that this simple surface formulation works well for 3DGS. In
+our experiments, we set λ1 and λ2 to 3 and 0.
+Temporal Appearance Buffer (TAB) Since consecutive
+frames are usually similar, we can use the reference frame It ,
+known as the temporal appearance buffer, to approximate the
+shared content of the frame It+i . Given TAB and the warped
+→
+−
+←
+−
+depth D min
+t→t+i , we can obtain the warped TAB I t→t+i by
+backward warping for a fast rendering approximation. Here
+we use bilinear interpolation.
+Temporal Gaussian Buffer Thanks to temporal coherence,
+the Gaussians that contribute to the rendering of It are likely
+to contribute to the rendering of frame t + i. We define this
+set of Gaussians as Grendered = {Gi | max (wi (x, y)) > 0},
+(x,y)∈It
+and consider it as the temporal Gaussian buffer.
+D. Temporal Dynamic Culling (TDC)
+Given the temporal priors of the reference frame It , at frame
+t + i, i ∈ [1, λTDC − 1], we perform the following two dynamic
+cullings to reduce the number of preprocessed Gaussians.
+Adaptive Frustum Culling (AFC) As shown in Fig. 3(a),
+since vanilla 3DGS performs near-plane culling, it can result
+in the computational cost of projecting redundant Gaussians
+onto 2D screen. Although a regular frustum constrained by
+the field of view has been widely used in traditional rendering, simply applying it to 3DGS leads to artifacts around
+image boundaries. Therefore, for the rendering of It , we
+define an adaptive frustum as Fmin =
+min (ndci ) and
+Gi ∈Grendered
+Fmax =
+max
+Gi ∈Grendered
+(ndci ), where ndci = Pix2NDC(µ′i ) is the
+normalized device coordinate (NDC) of Gaussian Gi and the
+function Pix2NDC(·) transforms the screen space coordinates
+to NDC coordinates. To render frame t + i, after near-plane
+culling, we only keep Gaussians within our adaptive frustum,
+denoted as {Gi | Fmin ≤ ndci ≤ Fmax }, for further
+preprocessing.
+Temporal Occlusion Culling (TOC) The Gaussians that are
+far behind the visible surface are usually unnecessary for
+rendering. To this end, during the rendering of frame t + i,
+we perform occlusion culling on Gaussians whose 2D means
+are within the screen space to remove Gaussians behind the
+warped TGB. The filtered Gaussians are denoted as {Gi |
+→
+−
+→max
+−
+′
+′
+Gi ∈
+/ Grendered and di > D min
+t→t+i (µ̄i ) + λ2 σ t→t+i (µ̄i )},
+′
+where µ̄i is the nearest screen pixel position of Gaussian Gi .
+→
+−
+→max
+−
+Note that in D min
+t→t+i and σ t→t+i , pixels that do not have
+warped geometry maintain zfar + ϵ as depth and 0 as standard
+deviation, as shown in Fig. 3(c). This mechanism helps to
+include Gaussians that represent a new surface closer to the
+camera.
+E. Selective Rendering (SR)
+The content of most regions and their view-dependent
+effects are similar among neighboring frames. As a result,
+only those dissimilar regions need to be rendered at frame
+t + i, while others can be efficiently warped from the previous
+reference frame. As shown in Fig. 3(d), regions that appear
+different and cannot be warped due to geometrical discrepancy
+between frame t and t + i include: (1) the occluded regions,
+where Gaussians that do not contribute to It form a new
+surface closer to the camera in frame t + i; (2) the unmatched
+regions, where it fails to establish pixel-wise geometrical
+correspondences with the reference frame. Since 3DGS utilizes tile-based software rasterization, we name the tiles in
+dissimilar regions as “selected tiles” Tselected , which should
+go through the forward rendering pass. We detect those tiles
+using the following processes.
+Occluded Tile Detection To render I¯t+i properly, we need
+to detect tiles that are occluded by a new surface. As shown
+in Fig. 3(d), we first detect newly visible Gaussians, {Gi |
+→
+−
+→max
+−
+′
+′
+Gi ∈
+/ Grendered and di ≤ D min
+t→t+i (µ̄i ) − λ1 σ t→t+i (µ̄i )},
+which do not contribute to It and are closer to the camera
+than Grendered . To avoid false positives, we filter out the newly
+visible Gaussians with trivial contribution to their intersected
+tiles. In our work, we use α to measure the contribution and set
+1
+. We denote the tiles selected
+the filtering threshold to be 255
+by the occlusion detection process as Toc
+selected .
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+Unmatched Tile Detection Due to viewpoint changes, some
+→
+−
+regions of the depth map D min
+t→t+i may not have warped geometry, i.e., having zfar +ϵ value. We consider those regions as nohit regions where pixel-to-pixel matching with the reference
+frame can fail. To take full advantage of TAB, we propose
+→
+−
+a depth filling method to repair D min
+t→t+i . For each no-hit
+pixel, if all its 3 × 3 neighboring pixels have valid values, we
+fill this pixel with the average of its neighboring depths. We
+→ ′
+−
+denote the repaired depth as D min
+t→t+i . Based on the repaired
+depth, we perform the pixel-to-pixel correspondence query by
+a backward version of Equation (3) to check if all pixels within
+a tile can find their correspondence in the reference frame.
+If not, the tile is selected for rendering and is denoted as
+Tum
+selected . Note that the obtained pixel-to-pixel correspondence
+information is also used for later backward warping.
+Adaptive Warping and Rendering Combining Toc
+selected ∪
+,
+we
+can
+obtain
+the
+tiles
+that
+need
+to
+be
+rendered
+at
+Tum
+selected
+frame t+i, denoted as Tselected . Then, the Gaussians intersected
+with Tselected are sorted, and the frame t + i is rendered as
+(
+It+i (x, y), (x, y) ∈ Tselected ,
+I¯t+i (x, y) = ←
+,
+−′
+I t→t+i (x, y), (x, y) ∈ T \ Tselected ,
+(4)
+←
+−
+where I ′t→t+i is the warped TAB based on the repaired depth
+→min ′
+−
+D t→t+i . We find that this direct stitching does not produce
+noticeable sewn lines and much view-dependent discrepancies,
+as shown in Fig. 1. Please see more visual results in the
+supplement. In real applications, we can encounter significant
+camera motion and the less accurate surface representation of
+3DGS. It can increase unmatched tiles, lead to severe warping
+errors, and decrease TemporalGS speed gain. Therefore, for a
+trade-off of rendering efficiency and quality, we propose an
+adaptive reference frame insertion mechanism. Specifically,
+we introduce pseudo reference frames, which are standard
+reference frames with AFC. The adaptive mechanism forces
+the frame t+i+1 to be a pseudo reference frame if the number
+of selected tiles at frame t + i exceeds η(%) of the total tiles.
+We find that η = 40% works well in the work.
+IV. E XPERIMENTS
+A. Benchmark
+Datasets (1) Small-scale scene datasets: We evaluate our
+approach on nine scenes of Mip-NeRF-360 [36]. Following
+the common protocol, images are downsampled by a factor of
+4 for outdoor scenes and by a factor of 2 for indoor scenes.
+(2) Large-scale aerial and street-view scene datasets: For aerial
+views, we not only adopt Small City scene of synthetic
+MatrixCity [37] dataset, but also use public real-world scene
+datasets, including Residence, Building, and Rubble [38]. We
+use the same image resolution configuration as CityGaussian [15]. For street views, we evaluate our method on Small
+City scene of Hierarchical Gaussian [16] dataset. (3) Largescale indoor scene datasets: We choose OccluScene3D [7],
+which contains canteen, class building, and gallery scenes, for
+its complex layouts and significant occlusions. Note that we
+provide quantitative results and analysis of OccluScene3D in
+the supplement.
+5
+Smooth Trajectory Data Generation We not only synthesize
+smooth trajectories, but also use real user roaming trajectories
+to evaluate performance in a real environment. For synthetic
+trajectories, we fit curves based on given consecutive test
+camera poses and interpolate camera poses along curves at a
+fixed interval. For real trajectories, we record user movements
+in 3DGS SIBR viewer.
+Metrics We compute PSNR, SSIM, and LPIPS on originally
+provided test images. We report the averaged frames per
+second (FPS) for all images along the trajectories.
+B. Implementation Details
+We implement our TemporalGS in CUDA and plug it into
+3DGS methods without any alteration of their design and
+implementation. For more implementation details, please refer
+to the supplementary materials. We conduct all experiments in
+Python under a headless rendering setting on a single Nvidia
+RTX 4090 GPU card. We set λTDC and λSR to 50 and 5,
+respectively. Note that we downscale the TGB by a factor of
+2 on the large-scale scenes, while we do not downscale the
+TGB on the small-scale scenes.
+C. Results
+1) Comparison to State-of-the-Art Methods: We compare our TemporalGS with vanilla 3DGS, state-of-the-art
+3DGS pruning and compression approaches, i.e., LightGaussian (LightGS) [2], CP3DGS [13], and C3DGS [4], postprocessing-based RadSplat [6], StochasticSplats [11], and the
+temporal-coherence-based NeoG [34]. We reproduce LightGS,
+CP3DGS, C3DGS, StochasticSplats, and NeoG according to
+their official public available code. We perform the visibility
+computation on the training images of each dataset to reimplement RadSplat’s visibility-based filtering on vanilla 3DGS, denoted as RadSplat† . We denote our TemporalGS-based extensions as 3DGS-TGS, LightGS-TGS, CP3DGS-TGS, C3DGSTGS, RadSplat† -TGS and StochasticSplats-TGS respectively.
+In Table III and I, we present quantitative comparisons
+on the small-scale Mip-NeRF-360 dataset and five largescale aerial and street-view scene datasets. We use CityGaussian (CityGS) [15] to reconstruct these five large-scale
+scenes because of their better reconstruction quality. Note
+that LightGS, CP3DGS, StochasticSplats, and RadSplat can
+be applied to any reconstructed scenes for post-training or
+post-processing. Therefore, for a fair comparison, LightGS,
+CP3DGS, StochasticSplats, RadSplat† , and NeoG share the
+same scene reconstruction checkpoints as baselines.
+For small-scale scenes, as shown in Table III, compared
+to methods that require (post-)training, 3DGS-TGS achieves
+higher PSNR and FPS than CP3DGS and StochasticSplats,
+and obtains performance on par with LightGS and C3DGS.
+Specifically, compared to LightGS, 3DGS-TGS is only 5
+FPS slower with 0.16 lower PSNR. In addition, it offers
+a more favorable balance between visual quality and efficiency than post-processing-based RadSplat. Furthermore,
+3DGS-TGS, LightGS-TGS, CP3DGS-TGS, and C3DGS-TGS
+achieve average FPS gains of 74, 109, 121, and 102, equivalent to 25%, 29%, 33% and 27% faster than their original
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+6
+TABLE I
+Q UANTITATIVE COMPARISON ON FIVE LARGE - SCALE AERIAL AND STREET- VIEW SCENE DATASETS . M EM MEANS P EAK M EMORY (GB).
+MatrixCity
+Residence
+Building
+Rubble
+Small City
+Average
+PSNR↑ SSIM↑ LPIPS↓ FPS↑ PSNR↑ SSIM↑ LPIPS↓ FPS↑ PSNR↑ SSIM↑ LPIPS↓ FPS↑ PSNR↑ SSIM↑ LPIPS↓ FPS↑ PSNR↑ SSIM↑ LPIPS↓ FPS↑ Mem PSNR↑ SSIM↑ LPIPS↓ FPS↑
+Baseline
+CityGS
+27.44 0.866 0.205 106 22.03 0.814 0.213 126 21.96 0.784 0.243 95 25.59 0.811 0.233 195 25.13 0.802 0.295 90 8.22 24.43 0.815 0.238 122
+LightGS
+26.54 0.824 0.283 291 21.57 0.793 0.232 238 21.56 0.751 0.279 268 24.65 0.747 0.296 347 19.55 0.649 0.463 190 2.23 22.77 0.753 0.311 267
+Post-training
+CP3DGS
+25.86 0.806 0.276 153 21.19 0.758 0.270 175 20.34 0.693 0.332 159 24.00 0.731 0.314 251 24.89 0.775 0.330 140 2.50 23.26 0.753 0.304 176
+StochasticSplats
+24.73 0.654 0.420 101 20.15 0.566 0.418 84 19.18 0.504 0.431 90 21.63 0.522 0.406 128 23.24 0.538 0.456 62 7.44 21.79 0.557 0.426 93
+Training
+C3DGS
+23.05 0.666 0.475 405 19.84 0.708 0.335 220 18.44 0.596 0.444 375 22.19 0.674 0.384 423 22.89 0.722 0.417 898 1.27 21.28 0.673 0.411 464
+Post-processing
+RadSplat†
+26.14 0.848 0.221 181 21.92 0.813 0.214 192 21.88 0.783 0.244 181 25.55 0.810 0.234 274 25.13 0.802 0.295 250 8.28 24.12 0.811 0.241 216
+Temporal-coherence NeoG
+27.14 0.864 0.206 131 21.95 0.814 0.213 174 21.55 0.781 0.246 72 25.26 0.810 0.233 242 21.29 0.765 0.322 33 12.37 23.44 0.807 0.244 130
+CityGS-TGS
+26.57 0.834 0.219 236 21.16 0.758 0.237 320 21.41 0.738 0.261 271 24.66 0.752 0.255 409 24.67 0.787 0.303 200 8.48 23.69 0.774 0.255 287
+LightGS-TGS
+25.85 0.795 0.293 540 20.90 0.743 0.255 550 21.12 0.710 0.293 609 24.15 0.705 0.309 753 19.59 0.646 0.465 345 2.35 22.32 0.720 0.323 559
+Training-free
+CP3DGS-TGS
+25.37 0.784 0.288 340 20.61 0.715 0.290 476 19.92 0.652 0.346 455 23.46 0.684 0.332 602 24.54 0.763 0.337 310 2.72 22.78 0.720 0.319 437
+plug-and-play
+StochasticSplats-TGS 24.74 0.670 0.397 146 20.23 0.594 0.386 169 19.34 0.521 0.407 200 22.16 0.556 0.373 259 23.46 0.581 0.430 161 7.70 21.99 0.584 0.399 187
+C3DGS-TGS
+22.97 0.660 0.477 668 19.51 0.677 0.348 633 18.32 0.574 0.451 977 22.00 0.647 0.393 973 22.65 0.714 0.420 1337 1.31 21.09 0.654 0.418 918
+RadSplat†-TGS
+25.41 0.817 0.234 320 21.06 0.755 0.239 385 21.32 0.735 0.262 376 24.61 0.750 0.256 498 24.62 0.785 0.304 381 8.54 23.40 0.769 0.259 392
+Category
+Methods
+TABLE II
+Q UANTITATIVE COMPARISON BETWEEN SOFTWARE AND HARDWARE RASTERIZATION ON M IP -N E RF-360 AND FIVE LARGE - SCALE AERIAL AND
+STREET- VIEW SCENE DATASETS . WEB - SPLAT FAILED ON M ATRIX C ITY THAT HAS OVER 20 MILLION G AUSSIANS .
+Mip-NeRF-360
+MatrixCity
+Residence
+Building
+Rubble
+Small City
+PSNR↑ SSIM↑ LPIPS↓ FPS↑ PSNR↑ SSIM↑ LPIPS↓ FPS↑ PSNR↑ SSIM↑ LPIPS↓ FPS↑ PSNR↑ SSIM↑ LPIPS↓ FPS↑ PSNR↑ SSIM↑ LPIPS↓ FPS↑ PSNR↑ SSIM↑ LPIPS↓ FPS↑
+3DGS/CityGS 27.35 0.815 0.218 298 27.44 0.866 0.205 106 22.03 0.814 0.213 126 21.96 0.784 0.243 95 25.59 0.811 0.233 195 25.13 0.802 0.295 90
+fast gauss
+26.99 0.803 0.220 72 27.06 0.859 0.206 30 21.73 0.804 0.216 33 21.23 0.763 0.251 23 24.47 0.792 0.249 39 24.02 0.792 0.293 21
+web-splat
+27.19 0.811 0.219 933 failed failed failed failed 21.57 0.800 0.221 404 20.83 0.732 0.270 365 24.06 0.780 0.248 508 23.60 0.786 0.302 372
+TemporalGS
+26.57 0.782 0.250 485 26.57 0.834 0.219 236 20.90 0.743 0.255 550 21.12 0.710 0.293 609 24.15 0.705 0.309 753 24.54 0.763 0.337 310
+fast gauss-TGS 26.52 0.784 0.229 138 26.52 0.838 0.216 168 20.93 0.751 0.240 143 20.74 0.717 0.267 125 23.86 0.737 0.268 153 23.80 0.780 0.302 132
+web-splat-TGS 26.71 0.796 0.222 949 failed failed failed failed 21.45 0.780 0.234 418 20.60 0.712 0.281 374 23.71 0.748 0.269 511 23.15 0.762 0.314 551
+Methods
+TABLE III
+Q UANTITATIVE COMPARISON ON THE M IP -N E RF-360 DATASET. M EM
+MEANS P EAK M EMORY (GB).
+Methods
+Mem PSNR↑ SSIM↑ LPIPS↓ FPS↑
+3DGS
+2.04 27.35 0.815 0.218 298
+LightGS
+0.71 26.99 0.802 0.239 377
+Post-training
+CP3DGS
+0.75 26.21 0.788 0.250 370
+StochasticSplats
+1.93 24.66 0.645 0.357 184
+Training
+C3DGS
+0.74 26.97 0.800 0.244 383
+Post-processing
+RadSplat†
+2.17 23.63 0.753 0.264 422
+Temporal-coherence NeoG
+6.15 27.28 0.813 0.219 331
+3DGS-TGS
+2.15 26.83 0.795 0.226 372
+LightGS-TGS
+0.77 26.48 0.780 0.248 486
+Training-free
+CP3DGS-TGS
+0.85 25.83 0.768 0.259 491
+plug-and-play
+StochasticSplats-TGS 2.04 24.67 0.649 0.352 194
+C3DGS-TGS
+0.79 26.57 0.782 0.250 485
+RadSplat†-TGS
+2.28 23.31 0.735 0.272 475
+Category
+Baseline
+counterparts, respectively. Meanwhile, it maintains competitive
+quantitative performance with only 0.52, 0.51, 0.38 and 0.4
+drop in PSNR.
+For large-scale scenes, as shown in Table I, CityGS-TGS
+on average delivers better qualitative results than LightGS,
+CP3DGS, and StochasticSplats, achieves performance comparable to RadSplat, and provides a better quality-efficiency
+trade-off than C3DGS. Specifically, compared to LightGS,
+CityGS-TGS is 20 FPS faster with 0.92 higher PSNR in
+Table I. As a plug-in algorithm, in Table I, TemporalGS
+achieves 135%, 109%, 148%, 101%, 98%, and 81% faster
+than CityGS, LightGS, CP3DGS, StochasticSplats, C3DGS,
+and RadSplat at a cost of 0.74, 0.45, 0.48, -0.2, 0.19, and
+0.72 drop in PSNR, respectively. The results demonstrate not
+only the competitive rendering performance of TemporalGS
+but also its generalization capability.
+Furthermore, compared to NeoG, a concurrent temporalcoherence-based work, TemporalGS delivers higher FPS while
+preserving decent rendering quality. However, NeoG does not
+scale well to large scenes, as shown in Table I. Although
+NeoG uses the same checkpoints as our 3DGS-TGS/CityGSTGS, it requires up to 2.01× the memory of 3DGS/CityGS,
+whereas our method incurs only a 0.05× memory overhead.
+The presented statistics of Peak Memory (GB) show that the
+memory consumption of TemporalGS is affordable. Besides,
+NeoG is a reuse-and-update sorting scheme for 3DGS, which
+prevents its applicability to sorting-free Gaussian Splatting.
+It can be observed that TemporalGS is less efficient on
+small-scale scenes. One reason is that, compared to largescale scenes, the percentage of Gaussians participating in each
+frame rendering is much higher because of less occlusion and
+more complete scene observation in small-scale scenes. As a
+result, not many Gaussians can be filtered out through temporal
+dynamic culling.
+We present visual results in Fig. 1 and additional comparisons, including those based on real user roaming trajectories,
+in the supplement. It can be seen that TemporalGS can
+maintain reasonable visual quality. We also present additional
+quantitative results on OccluScene3D and runtime breakdown
+comparison in the supplement.
+2) Comparison/Integration to Hardware Rasterization
+Methods: Recently, hardware rasterization has been
+incorporated into 3DGS rendering through APIs such
+as OpenGL, Vulkan, and WebGPU. In Table II, we
+compare CUDA-based 3DGS/CityGS and our TemporalGS
+with two representative hardware-accelerated methods,
+including web-splat [13] and fast-gaussian-rasterization
+(fast gauss) [39]. The results show that TemporalGS is
+comparable to hardware rasterization-based 3DGS methods
+and can achieve a reasonable balance between rendering
+quality and acceleration, especially on large-scale scenes. In
+contrast, the performance advantage of hardware rasterization
+diminishes as the number of Gaussians increases. This
+degradation arises from (1) representing Gaussian ellipsoids
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+7
+TABLE IV
+I MPACT OF INDIVIDUAL MODULES OF T EMPORAL GS.
+TABLE VI
+I MPACT OF DIFFERENT HYPERPARAMETERS OF T EMPORAL GS. TGSF(%)
+DENOTES THE PERCENTAGE OF #T EMPORAL GS FRAMES ( RENDERED
+WITH AFC+TOC+SR) AMONG THE TOTAL NUMBER OF RENDERED
+FRAMES .
+Kitchen
+PSNR↑ FPS↑
+Residence
+PSNR↑ FPS↑
+✓
+30.03
+30.03
+30.04
+30.82
+30.03
+328
+313
+311
+244
+331
+21.13
+21.16
+21.13
+22.05
+21.16
+300
+258
+246
+165
+320
+3DGS/CityGS
+30.84
+231
+22.03
+126
+AFC
+TOC
+SR
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+TABLE V
+I MPACT OF CAMERA MOTION SPEEDS . W E SIMULATE DIFFERENT CAMERA
+MOTION SPEEDS USING DIFFERENT INTERPOLATION INTERVALS . SR
+T ILE (%) DENOTES THE AVERAGE PERCENTAGE OF #SR RENDERED TILES
+AMONG THE TOTAL NUMBER OF TILES IN EACH SR FRAME .
+Interval
+0.02
+0.05
+0.1
+PSNR↑
+Kitchen
+FPS↑ SR Tile(%)
+30.03
+30.15
+30.29
+331
+282
+255
+33.59
+45.65
+63.87
+Interval
+0.1
+0.2
+0.4
+PSNR↑
+Residence
+FPS↑ SR Tile(%)
+21.16
+21.58
+21.23
+320
+302
+260
+9.22
+15.84
+23.69
+by quads in traditional hardware rasterization introduces
+redundancies and (2) a large number of Gaussians lead
+to many small triangles, which lowers the pixel-to-point
+ratio and is not well optimized by hardware. Taking into
+account the above, we implement TemporalGS in CUDA for
+its popularity and excellent performance across small- and
+large-scale scenes. Furthermore, to show the portability of
+our TemporalGS, we adapt our algorithm to fast gauss and
+web-splat, denoted as fast gauss-TGS and web-splat-TGS, as
+shown in Table II. The results demonstrate that TemporalGS
+is compatible with hardware rasterization pipelines and leads
+to a decent speed-up. It is observed that TemporalGS does not
+significantly boost web-splat in some cases. The main reason
+is that depth rendering requires float16 instead of uint8, and
+WebGPU does not optimize float16 as it does for uint8.
+3) Ablation Study: We conduct ablation studies on representative scenes, i.e., the Kitchen scene from the small-scale
+scene dataset and the Residence scene from the large-scale
+scene datasets.
+Impact of Individual Modules We adopt a leave-one-out
+strategy to evaluate three key modules of TemporalGS, i.e.,
+AFC, TOC, and SR. The results are shown in Table IV. For
+high FPS rendering, it is not surprising that the SR module
+plays the most significant role in TemporalGS, followed by
+TOC and AFC. TemporalGS gains 87/155 FPS with SR, 18/62
+FPS with TOC and 3/20 FPS with AFC on Kitchen/Residence
+scenes, respectively. For image quality, TOC and AFC have a
+small impact on PSNR.
+Impact of Camera Motion Speeds To investigate the robustness of TemporalGS to camera motion speeds, similar to
+NeRFBuff [32], we simulate different camera motion speeds
+by using different interpolation intervals on test trajectory
+generation. A bigger interval corresponds to a faster speed. The
+assumption behind TemporalGS is that neighboring frames
+share similar geometry and appearance. Therefore, rapid camera movements may cause FPS performance degradation due
+PSNR↑
+Kitchen
+FPS↑ TGSF(%)
+PSNR↑
+20
+40
+60
+30.171
+30.026
+29.907
+305
+331
+349
+46.98
+62.74
+76.08
+21.156
+21.156
+21.156
+315
+320
+320
+79.08
+80.00
+80.00
+5
+5
+5
+40
+40
+40
+30.021
+30.026
+30.034
+331
+331
+331
+62.96
+62.74
+62.62
+21.159
+21.156
+21.166
+320
+320
+315
+80.00
+80.00
+80.00
+10
+5
+2
+40
+40
+40
+30.029
+30.026
+30.060
+341
+331
+324
+68.35
+62.74
+49.96
+21.084
+21.156
+21.711
+335
+320
+241
+89.44
+80.00
+50.00
+λTDC
+λSR
+η(%)
+50
+50
+50
+5
+5
+5
+75
+50
+25
+50
+50
+50
+Residence
+FPS↑ TGSF(%)
+to less content overlap. From Table V, it can be seen that the
+FPS decreases as the interval increases. This can be explained
+by a corresponding increase in the percentage of SR rendered
+tiles, denoted as SR Tile(%). Even so, TemporalGS still shows
+a considerable gain in FPS when the camera moves fast. Note
+that the PSNR remains similar as the interval changes. Also,
+since the test trajectory of Kitchen exhibits less content overlap
+between consecutive frames than Residence, it has a higher
+percentage of SR rendered tiles.
+Impact of Hyperparameters The key hyperparameters of
+TemporalGS include the TDC frame interval λTDC , the SR
+frame interval λSR , and the maximum allowed percentage
+of SR rendered tiles η. From Table VI, it can be seen that
+TemporalGS is most sensitive to changes of η because η
+directly controls the number of TemporalGS frames (rendered
+with AFC+TOC+SR) through the adaptive reference frame
+insertion mechanism. In the Residence scene, the results
+change slightly as η increases from 20 to 60. This is because,
+as shown in Table V, its percentage of SR rendered tiles is
+9.22%, which is much smaller than the minimal η value, 20.
+Therefore, the proposed adaptive mechanism is rarely triggered to insert reference frames. In addition, this mechanism
+makes TemporalGS less sensitive to λSR and λTDC . When these
+two parameters become large, the percentage of TemporalGS
+frames (rendered with AFC+TOC+SR), denoted as TGSF(%),
+is bounded, and a good trade-off in rendering quality and speed
+is maintained.
+V. C ONCLUSION , L IMITATION , AND F UTURE W ORK
+In this paper, we present TemporalGS, the first training-free
+plug-and-play algorithm for 3DGS rendering acceleration. By
+leveraging novel temporal priors and interleaving two acceleration strategies, TemporalGS speeds up rendering without posttraining or post-processing and can be easily integrated into
+existing 3DGS systems. Extensive experiments show that TemporalGS achieves performance comparable to or better than
+existing state-of-the-art post-training or post-processing 3DGS
+rendering acceleration methods. TemporalGS can serve as a
+drop-in module to significantly boost the rendering speed of
+various 3DGS methods across software- and hardware-based
+3DGS rasterization. The major limitation is that the frame
+similarity assumption might not hold when the camera moves
+too fast. However, it is rare in real user roaming scenarios.
+Besides, when the adaptive threshold η is set too high, too few
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+reference frames are inserted, and the accumulated errors can
+result in flickering effects. For future work, it is promising to
+further enhance rendering quality by introducing a lightweight
+network to remove artifacts caused by TemporalGS. It is
+also interesting to develop a TemporalGS counterpart in 4D
+Gaussian Splatting.
+R EFERENCES
+[1] B. Kerbl, G. Kopanas, T. Leimkühler, and G. Drettakis, “3d gaussian
+splatting for real-time radiance field rendering.” ACM Trans. Graph.,
+vol. 42, no. 4, pp. 139–1, 2023.
+[2] Z. Fan, K. Wang, K. Wen, Z. Zhu, D. Xu, and Z. Wang,
+“Lightgaussian: Unbounded 3d gaussian compression with 15x
+reduction and 200+ FPS,” in The Thirty-eighth Annual Conference
+on Neural Information Processing Systems, 2024. [Online]. Available:
+https://openreview.net/forum?id=6AeIDnrTN2
+[3] P. Papantonakis, G. Kopanas, B. Kerbl, A. Lanvin, and G. Drettakis,
+“Reducing the memory footprint of 3d gaussian splatting,” Proceedings
+of the ACM on Computer Graphics and Interactive Techniques, vol. 7,
+no. 1, pp. 1–17, 2024.
+[4] J. C. Lee, D. Rho, X. Sun, J. H. Ko, and E. Park, “Compact 3d gaussian
+representation for radiance field,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, 2024, pp.
+21 719–21 728.
+[5] A. Hanson, A. Tu, G. Lin, V. Singla, M. Zwicker, and T. Goldstein,
+“Speedy-splat: Fast 3d gaussian splatting with sparse pixels and sparse
+primitives,” in Proceedings of the Computer Vision and Pattern Recognition Conference, 2025, pp. 21 537–21 546.
+[6] M. Niemeyer, F. Manhardt, M.-J. Rakotosaona, M. Oechsle, D. Duckworth, R. Gosula, K. Tateno, J. Bates, D. Kaeser, and F. Tombari,
+“Radsplat: Radiance field-informed gaussian splatting for robust realtime rendering with 900+ fps,” in 2025 International Conference on 3D
+Vision (3DV). IEEE, 2025, pp. 134–144.
+[7] S. Liu, X. Tang, Z. Li, Y. He, C. Ye, J. Liu, B. Huang, S. Zhou, and
+X. Wu, “Occlugaussian: Occlusion-aware gaussian splatting for large
+scene reconstruction and rendering,” arXiv preprint arXiv:2503.16177,
+2025.
+[8] J. Lee, S. Lee, J. Lee, J. Park, and J. Sim, “GScore: Efficient radiance
+field rendering via architectural support for 3d gaussian splatting,” in
+Proceedings of the 29th ACM International Conference on Architectural
+Support for Programming Languages and Operating Systems, Volume 3,
+2024, pp. 497–511.
+[9] G. Feng, S. Chen, R. Fu, Z. Liao, Y. Wang, T. Liu, B. Hu, L. Xu, Z. Pei,
+H. Li et al., “Flashgs: Efficient 3d gaussian splatting for large-scale and
+high-resolution rendering,” in Proceedings of the Computer Vision and
+Pattern Recognition Conference, 2025, pp. 26 652–26 662.
+[10] Z. Liao, J. Ding, S. Cui, R. Gong, B. Hu, Y. Wang, H. Li, H. Wang,
+X. Zhang, and R. Fu, “Tc-gs: A faster gaussian splatting module utilizing
+tensor cores,” in Proceedings of the SIGGRAPH Asia 2025 Conference
+Papers, 2025, pp. 1–9.
+[11] S. Kheradmand, D. Vicini, G. Kopanas, D. Lagun, K. M. Yi,
+M. Matthews, and A. Tagliasacchi, “Stochasticsplats: Stochastic rasterization for sorting-free 3d gaussian splatting,” arXiv preprint
+arXiv:2503.24366, 2025.
+[12] S. S. Mallick, R. Goel, B. Kerbl, M. Steinberger, F. V. Carrasco, and
+F. De La Torre, “Taming 3dgs: High-quality radiance fields with limited
+resources,” in SIGGRAPH Asia 2024 Conference Papers, 2024, pp. 1–
+11.
+[13] S. Niedermayr, J. Stumpfegger, and R. Westermann, “Compressed 3d
+gaussian splatting for accelerated novel view synthesis,” in Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, 2024, pp. 10 349–10 358.
+[14] J. Lin, Z. Li, X. Tang, J. Liu, S. Liu, J. Liu, Y. Lu, X. Wu, S. Xu, Y. Yan
+et al., “Vastgaussian: Vast 3d gaussians for large scene reconstruction,”
+in Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, 2024, pp. 5166–5175.
+[15] Y. Liu, C. Luo, L. Fan, N. Wang, J. Peng, and Z. Zhang, “Citygaussian:
+Real-time high-quality large-scale scene rendering with gaussians,” in
+European Conference on Computer Vision. Springer, 2024, pp. 265–
+282.
+[16] B. Kerbl, A. Meuleman, G. Kopanas, M. Wimmer, A. Lanvin, and
+G. Drettakis, “A hierarchical 3d gaussian representation for real-time
+rendering of very large datasets,” ACM Transactions on Graphics (TOG),
+vol. 43, no. 4, pp. 1–15, 2024.
+8
+[17] Y. Chen and G. H. Lee, “DOGS: Distributed-oriented gaussian splatting
+for large-scale 3d reconstruction via gaussian consensus,” in The
+Thirty-eighth Annual Conference on Neural Information Processing
+Systems, 2024. [Online]. Available: https://openreview.net/forum?id=
+HAocQ9dSAX
+[18] H. Zhao, H. Weng, D. Lu, A. Li, J. Li, A. Panda, and S. Xie,
+“On scaling up 3d gaussian splatting training,” in The Thirteenth
+International Conference on Learning Representations, 2025. [Online].
+Available: https://openreview.net/forum?id=pQqeQpMkE7
+[19] B. Li, S. Chen, L. Wang, K. Liao, S. Yan, and Y. Xiong, “Retinags: Scalable training for dense scene rendering with billion-scale 3d gaussians,”
+arXiv preprint arXiv:2406.11836, 2024.
+[20] S. Durvasula, A. Zhao, F. Chen, R. Liang, P. K. Sanjaya, and N. Vijaykumar, “Distwar: Fast differentiable rendering on raster-based rendering
+pipelines,” arXiv preprint arXiv:2401.05345, 2023.
+[21] J. Shade, S. Gortler, L.-w. He, and R. Szeliski, “Layered depth images,”
+in Proceedings of the 25th annual conference on Computer graphics
+and interactive techniques, 1998, pp. 231–242.
+[22] H. Bowles, K. Mitchell, R. W. Sumner, J. Moore, and M. Gross,
+“Iterative image warping,” in Computer graphics forum, vol. 31, no.
+2pt1. Wiley Online Library, 2012, pp. 237–246.
+[23] S. Hauswiesner, M. Straka, and G. Reitmayr, “Temporal coherence in
+image-based visual hull rendering,” IEEE transactions on visualization
+and computer graphics, vol. 19, no. 10, pp. 1758–1767, 2013.
+[24] T. Müller, F. Rousselle, J. Novák, and A. Keller, “Real-time neural
+radiance caching for path tracing,” ACM Transactions on Graphics
+(TOG), vol. 40, no. 4, pp. 1–16, 2021.
+[25] X. Xu, L. Wang, A. Pérard-Gayot, R. Membarth, C. Li, C. Yang,
+and P. Slusallek, “Temporal coherence-based distributed ray tracing of
+massive scenes,” IEEE Transactions on Visualization and Computer
+Graphics, vol. 30, no. 2, pp. 1489–1501, 2022.
+[26] S. Yang, Q. Zhu, J. Zhuge, Q. Qiu, C. Li, Y. Yan, H. Xu, L.-Q. Yan, and
+X. Jin, “Mob-fgsr: Frame generation and super resolution for mobile
+real-time rendering,” in ACM SIGGRAPH 2024 Conference Papers,
+2024, pp. 1–11.
+[27] S. Wu, D. Vembar, A. Sochenov, S. Panneer, S. Kim, A. Kaplanyan,
+and L.-Q. Yan, “Gffe: G-buffer free frame extrapolation for low-latency
+real-time rendering,” ACM Transactions on Graphics (TOG), vol. 43,
+no. 6, pp. 1–15, 2024.
+[28] O. Elek, T. Ritschel, A. Wilkie, and H.-P. Seidel, “Interactive cloud
+rendering using temporally coherent photon mapping,” Computers &
+Graphics, vol. 36, no. 8, pp. 1109–1118, 2012.
+[29] J. A. Iglesias-Guitian, P. Mane, and B. Moon, “Real-time denoising of
+volumetric path tracing for direct volume rendering,” IEEE Transactions
+on Visualization and Computer Graphics, vol. 28, no. 7, pp. 2734–2747,
+2020.
+[30] M. Schütz, G. Mandlburger, J. Otepka, and M. Wimmer, “Progressive
+real-time rendering of one billion points without hierarchical acceleration structures,” in Computer Graphics Forum, vol. 39, no. 2. Wiley
+Online Library, 2020, pp. 51–64.
+[31] S. Li, H. Li, Y. Wang, Y. Liao, and L. Yu, “Steernerf: Accelerating
+nerf rendering via smooth viewpoint trajectory,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2023, pp. 20 701–20 711.
+[32] A. Liu, Y. Liu, X. Long, P. Wang, C. Lin, P. Luo, and W. Wang,
+“Nerfbuff: Fast neural rendering via inter-frame feature buffering,” IEEE
+Transactions on Visualization and Computer Graphics, 2024.
+[33] M. Steiner, T. Köhler, L. Radl, and M. Steinberger, “Frustum volume
+caching for accelerated nerf rendering,” Proceedings of the ACM on
+Computer Graphics and Interactive Techniques, vol. 7, no. 3, pp. 1–22,
+2024.
+[34] C. Oh, S. Oh, J. Hwang, Y. Kim, H. Sharma, and J. Park, “Neo:
+Real-time on-device 3d gaussian splatting with reuse-and-update sorting
+acceleration,” in Proceedings of the 31st ACM International Conference
+on Architectural Support for Programming Languages and Operating
+Systems, Volume 2, 2026, pp. 1268–1284.
+[35] M. Tao, Y. Zhou, H. Xu, Z. He, Z. Yang, Y. Zhang, Z. Su, L. Xu, Z. Ma,
+R. Fu et al., “Gs-cache: A gs-cache inference framework for large-scale
+gaussian splatting models,” arXiv preprint arXiv:2502.14938, 2025.
+[36] J. T. Barron, B. Mildenhall, D. Verbin, P. P. Srinivasan, and P. Hedman,
+“Mip-NeRF 360: Unbounded anti-aliased neural radiance fields,” in
+Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, 2022, pp. 5470–5479.
+[37] Y. Li, L. Jiang, L. Xu, Y. Xiangli, Z. Wang, D. Lin, and B. Dai,
+“Matrixcity: A large-scale city dataset for city-scale neural rendering
+and beyond,” in Proceedings of the IEEE/CVF International Conference
+on Computer Vision, 2023, pp. 3205–3215.
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+[38] H. Turki, D. Ramanan, and M. Satyanarayanan, “Mega-nerf: Scalable
+construction of large-scale nerfs for virtual fly-throughs,” in Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, 2022, pp. 12 922–12 931.
+[39] Z. Xu, Y. Xu, Z. Yu, S. Peng, J. Sun, H. Bao, and X. Zhou, “Representing long volumetric video with temporal gaussian hierarchy,” ACM
+Transactions on Graphics (TOG), vol. 43, no. 6, pp. 1–18, 2024.
+9

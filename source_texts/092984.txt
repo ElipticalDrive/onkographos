@@ -1,0 +1,245 @@
+Comparing four quad-based techniques for rendering cube voxels: display lists, VAOs, and geometry shaders, with performance benchmarks.
+
+Quads All the Way Down: Simple Voxel Rendering | Caleb Leak
+Skip to content
+Go back
+Quads All the Way Down: Simple Voxel Rendering
+May 23, 2017
+|
+Okay, time for some results. Previously I wrote about several techniques for rendering voxels — specifically ones that give hard cube edges like Minecraft.
+The simplest rendering technique for voxels is to just give each voxel 6 quads (one per side, just like a 6-side die) and then render out colored polygons. There are a few ways do this and I’ll compare them here. Specifically:
+Display Lists. Yes, one of those OpenGL 1.0 fixed-pipeline functions that’s been deprecated, but still hangs around.
+Vertex Array Objects with per-vertex color information. Simple, direct, but not compact. There’s a lot of duplicate information here.
+Geometry Shader quads generated each frame from voxels. A set of visible hull voxels is stored similar to how quads are stored in the previous technique. Each voxel stores only its center position, color, and some bit flags to indicate which faces to generate. Each primitive can generate up to 6 quads.
+Geometry Shader quads generated each frame from faces. Similar to technique 3, except voxels are further broken down and each face is stored with a location, a color, and a normal. Each primitive is responsible for generating exactly one quad.
+The short of it: Display lists win in terms of render time, but with some serious drawbacks — high memory usage, long setup time, and inability to modify them after creation. Geometry shaders provide very low memory usage and come a close second in render time.
+Test setup
+To compare techniques, there needs to be some test cases. While nothing will be perfect — who knows what tradeoffs your application will find important—they can at least be consistent. To compare these techniques I threw a bunch of 32x32x32 voxel spheres at them and measured the memory impact and per-frame render time.
+For each technique, the test is repeated for different numbers of objects to allow trends to emerge. The largest data set contains 16k voxel spheres and is enough to strain the test system.
+All tests were run in 1920x1080 on Windows 10 using a GTX 980 Ti, Intel i7–4790k, and 16GB of main memory.
+I posted the full source for these tests on GitHub. I encourage you take a look — a source file is worth a thousand words.
+The voxel object used.
+For these tests I used voxel objects of size 32x32x32 with each voxel containing a single color value. No textures or special shaders — more Cube World than Minecraft.
+The base object for these tests is a sphere with a diameter of 32 to span the whole area.
+Tests are run with grids of 32x32 of these (so 1024 per layer) spheres. The number of layers is increased to add more objects.
+Multiple layers of voxel objects.
+Display Lists technique
+This is the simplest way of drawing lots of objects in OpenGL and dates back to its 1.0 days. They’ve been deprecated for a decade now, but are still very useful in certain scenarios (such as this one). Nvidia has pledged long term support for them, so there’s no worry that they’ll vanish from the API.
+For this setup each display list contains a single voxel object — our sphere. Each instance of the object has its own display list to make the test nontrivial. The display lists are created in a simple manner like:
+```
+glNewList(curentDisplayList, GL_COMPILE);
+glBegin(GL_QUADS);
+for (auto& f : faces) {
+    glColor3fv(f.color);
+    glVertex3fv(f.points[0]);
+    glVertex3fv(f.points[1]);
+    glVertex3fv(f.points[2]);
+    glVertex3fv(f.points[3]);
+}
+glEnd();
+glEndList();
+```
+Interior voxels and faces are removed before creating the display list.
+Only specifying the color once per face, as opposed to once per vertex helps perf. However, it’s up to the driver to decided how to store this color, and it’s not as efficient as could be chosen by hand.
+The display list creation is slow this way, but hey, it works. There are much faster ways to create these lists of course, but the setup time doesn’t matter for these tests.
+Vertex Array Objects (VAOs) technique
+VAOs are straightforward though a bit more work to create. A single vertex buffer per object is created to draw quads with. Position and color information is stored per-vertex and interleaved in a single structure:
+```
+struct Vertex {
+    vec3 position;
+    uint32_t packedColor;
+};
+```
+A vertex buffer object (VBO) containing all of the needed vertices is built first and then VAO is created to specify its format. Each frame, every voxel object is drawn directly with glDrawArrays(GL_QUADS, …). No indexing here.
+Geometry Shader (Voxels) technique
+The geometry shader approach is an interesting set of tradeoffs. It works by converting each voxel to a single point (as in GL_POINTS). Every point contains the center position of the voxel, color information, and a bit field for which faces are drawn.
+```
+struct PointVertex {
+    vec3 position;
+    uint32_t packedColor;
+    uint8_t enabledFaces;
+};
+```
+The voxel extents are axis aligned and thus can be extracted directly from the transform matrix in the geometry shader.
+This format is much more memory efficient than the previous two. It goes from a range of 96 to 576 bytes per voxel in the previous techniques (depending on the number of faces enabled) to simply 25 bytes per voxel. The actual savings is pretty significant (see Figure 3 below).
+The geometry shader itself takes in this stream of points and generates quads on the GPU each frame:
+```
+#version 410
+
+layout(points) in;
+layout(triangle_strip, max_vertices = 12) out;
+
+flat in lowp vec3 gColor[];
+flat in int gEnabledFaces[];
+
+flat out lowp vec3 fColor;
+
+uniform float voxSize = 0.25;
+uniform mat4 mvp;
+
+void AddQuad(vec4 center, vec4 dy, vec4 dx) {
+    fColor = gColor[0];
+    gl_Position = center + (dx - dy);
+    EmitVertex();
+
+    fColor = gColor[0];
+    gl_Position = center + (-dx - dy);
+    EmitVertex();
+
+    fColor = gColor[0];
+    gl_Position = center + (dx + dy);
+    EmitVertex();
+
+    fColor = gColor[0];
+    gl_Position = center + (-dx + dy);
+    EmitVertex();
+
+    EndPrimitive();
+}
+
+bool IsCulled(vec4 normal) {
+    return normal.z > 0;
+}
+
+void main() {
+    vec4 center = gl_in[0].gl_Position;
+
+    vec4 dx = mvp[0] / 2.0f * voxSize;
+    vec4 dy = mvp[1] / 2.0f * voxSize;
+    vec4 dz = mvp[2] / 2.0f * voxSize;
+
+    if ((gEnabledFaces[0] & 0x01) != 0 && !IsCulled(dx))
+        AddQuad(center + dx, dy, dz);
+
+    if ((gEnabledFaces[0] & 0x02) != 0 && !IsCulled(-dx))
+        AddQuad(center - dx, dz, dy);
+
+    if ((gEnabledFaces[0] & 0x04) != 0 && !IsCulled(dy))
+        AddQuad(center + dy, dz, dx);
+
+    if ((gEnabledFaces[0] & 0x08) != 0 && !IsCulled(-dy))
+        AddQuad(center - dy, dx, dz);
+
+    if ((gEnabledFaces[0] & 0x10) != 0 && !IsCulled(dz))
+        AddQuad(center + dz, dx, dy);
+
+    if ((gEnabledFaces[0] & 0x20) != 0 && !IsCulled(-dz))
+        AddQuad(center - dz, dy, dx);
+}
+```
+Geometry Shader (Quads) technique
+An extension of the geometry shader technique above is to break voxels further down into the faces they represent, with each GL_POINT representing a single quad. It’s not quite as compact as the previous specification, but still quite nice:
+```
+struct PointQuad {
+    vec3 position;
+    uint32_t packedColor;
+    uint8_t faceIdx;
+};
+```
+The face index here represents which of the 6 possible quads is being created. The actual geometry shader is simpler, with the main part being:
+```
+void main() {
+    const vec3 dxs[6] = vec3[6](
+        vec3(0, 1, 0),
+        vec3(0, 0, 1),
+        vec3(0, 0, 1),
+        vec3(1, 0, 0),
+        vec3(1, 0, 0),
+        vec3(0, 1, 0)
+    );
+
+    const vec3 dys[6] = vec3[6](
+        vec3(0, 0, 1),
+        vec3(0, 1, 0),
+        vec3(1, 0, 0),
+        vec3(0, 0, 1),
+        vec3(0, 1, 0),
+        vec3(1, 0, 0)
+    );
+
+    vec4 center = gl_in[0].gl_Position;
+    AddQuad(center,
+        mvp * vec4(dxs[gFaceIdx[0]] / 2.0f * voxSize, 0),
+        mvp * vec4(dys[gFaceIdx[0]] / 2.0f * voxSize, 0));
+}
+```
+There are two big advantages to approaching it this way. First, the number of vertices output by the geometry shader is limited to 4, down from 12 in the previous technique. This reduces the amount of buffer space needed and generally plays better with current GPU architectures.
+Results
+The results here — after quite a bit of optimization — are pretty close in terms of frame time. Gavan Woolery previously posted that display lists beat out VAOs, so I was expecting them to win. One thing to note is that display lists took almost no optimization; they simply performed well from the start.
+Figure 1 below, which plots average frame-time vs number of voxel objects, shows display lists as the clear winner.
+Figure 1. Average amount of time spent per frame for each data set.
+Objects (k)Display ListsVAOsGS VoxelsGS Quads
+11.722.132.622.36
+23.534.195.044.33
+35.016.047.446.35
+46.768.029.708.39
+58.189.8512.1510.55
+610.0011.6914.4012.46
+711.4713.7716.6514.46
+813.1615.6719.0016.41
+914.5817.5121.3918.41
+1016.2219.2623.7320.49
+1117.4721.2426.0922.54
+1219.1223.1328.4224.51
+1320.4125.0330.7126.52
+1421.8726.8733.0628.51
+1523.0628.7835.4630.43
+1624.5031.0537.7632.48
+Display lists win when it comes to render time, but lose out to other techniques for memory usage. When compared to geometry shaders, their memory usage is an order of magnitude greater.
+Both the display lists keep a significant amount of data hanging around in main memory. Figure 2 shows this problem. This is likely driver dependent, but the overhead is there for at least some fraction of users — enough to force it to be a consideration.
+Main memory usage for the VAO voxel (quads) techniques are negligible.
+Figure 2. Main memory used by each technique per data set.
+Objects (k)Display ListsVAOsGS VoxelsGS Quads
+1472.723.066.08.9
+2911.728.7130.314.2
+31106.931.6192.317.8
+41469.536.4254.821.9
+51797.340.8321.230.7
+62125.348.6383.434.5
+72473.551.8445.538.3
+82817.456.3510.334.1
+93171.661.9572.948.3
+103486.268.8635.151.9
+113836.768.8699.155.7
+124387.174.2760.863.0
+134524.578.8821.365.9
+144864.785.5893.768.8
+155210.392.5947.173.1
+165527.289.71011.070.4
+Memory usage on the video card shows a huge savings for geometry shaders. Figure 3 shows an order of magnitude difference between geometry shaders and the other techniques.
+Figure 3. Video memory used by each technique per data set.
+Objects (k)Display ListsVAOsGS VoxelsGS Quads
+1340.5294.560.576.5
+2684.5586.5118.5152.5
+31026.5880.5176.5228.5
+41366.51172.5234.5304.5
+51708.51464.5294.5380.5
+62059.11756.5352.5456.5
+72390.52050.5410.5532.5
+82732.52342.5468.5618.8
+93074.52634.5528.5684.8
+103423.12928.5586.5760.4
+113756.53220.5644.5836.5
+124107.13512.5702.5908.8
+134438.53804.5762.5986.5
+144789.14098.5810.61062.5
+155122.54390.5878.61138.5
+165471.14691.1936.51223.1
+The specific numbers in these tests aren’t important — it’s their relative performance that matters of course.
+Where to go from here
+Display lists are win for render time performance but come with a pretty big footprint in main memory and VRAM. Geometry shaders are extremely compact with a small render time overhead. They’ll vary more from architecture to architecture, but limiting the number of vertex outputs to 4 should limit this variation. There’s plenty more to look at though and I’m optimistic that some fiddling will yield better results.
+A related approach to explore is command buffers in Vulkan. They could push this approach further in a way that’s not deprecated—though ironically less supported.
+The setup time for the approach used above in display lists is slow and can be improved. Compositing object display lists from other per-voxel display lists should be much faster and only requires a table of 63 base display lists (6 potentially enabled faces, so 2⁶-1 combos).
+Be sure to poke around with the source on GitHub and leave a comment if you see something that can be improved.
+cleak/VoxelPerf — Performance testing sandbox for voxel graphics
+graphics
+opengl
+voxels
+gamedev
+Back To Top
+Share this post on:
+Share this post via WhatsApp Share this post on Facebook Share this post on X Share this post via Telegram Share this post on Pinterest Share this post via email
+Previous Post
+Raymarching Voxel Rendering
+Next Post
+Cube Voxel Rendering

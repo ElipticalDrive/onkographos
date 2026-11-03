@@ -1,0 +1,230 @@
+# modelforge
+
+A Rust library for building 3D models by describing them — designed for authors
+who cannot see the result, which is to say for language models, and for anyone
+scripting geometry without a viewport.
+
+```rust
+use modelforge::prelude::*;
+
+let body = cuboid(60.0, 40.0, 20.0).round(4.0).color(palette::BLUE);
+let cavity = cuboid(52.0, 32.0, 16.0).round(3.0).move_z(3.0);
+let port = cylinder(3.0, 30.0).rotate_x(90.0);
+
+body.cut(cavity).cut(port).on_ground()
+    .build(Quality::Normal)?
+    .print_report()          // is it closed? one piece? thick enough?
+    .preview("case.png")?    // four labelled views, so you can look
+    .save("case.glb")?;
+```
+
+Zero dependencies. `cargo add` nothing; it builds with the standard library
+alone, including the PNG encoder.
+
+---
+
+## Why it is built this way
+
+Three problems make 3D modelling hard to do blind, and each one drove a design
+decision.
+
+**Mesh booleans fail in ways you cannot predict.** Subtracting one triangle
+mesh from another is a minefield of coplanar faces, near-degenerate slivers and
+floating-point tie-breaks. So shapes here are not meshes at all: every solid is
+a *signed distance field*, and boolean operations are `min` and `max` on that
+field. They cannot fail. Triangles are generated once at the end, from a field
+that is already correct. If the description makes sense, the mesh will too.
+
+**Positioning is arithmetic, and arithmetic is where mistakes hide.** "Put the
+knob on the lid" becomes `knob.above(&lid, 0.0)`, not a hand-computed Z offset
+that silently goes stale when the lid gets thicker. Every shape can report its
+exact bounding box without being meshed, so relative placement is a first-class
+operation rather than a comment explaining a magic number.
+
+**You cannot fix what you cannot perceive.** `preview()` renders a labelled
+multi-view PNG with silhouette outlines and an axis indicator — readable enough
+to catch a part facing the wrong way. `report()` measures what no render shows:
+whether the surface is closed, how many disconnected pieces it turned into,
+average wall thickness, whether a part is floating unattached to everything
+else. Between them, the two cover both classes of error.
+
+---
+
+## The model
+
+Everything is a `Shape`. Shapes are immutable and cheap to clone.
+
+**Primitives**, all centred on the origin, all taking full dimensions except
+where a parameter is named a radius:
+
+```rust
+sphere(radius)                       cuboid(width, depth, height)
+cube(size)                           cylinder(radius, height)
+tube(outer_r, inner_r, height)       cone(bottom_r, top_r, height)
+capsule(radius, height)              torus(major_r, tube_r)
+prism(sides, radius, height)         pipe(&points, radius)
+extrude(profile, height)             revolve(profile)
+```
+
+**Combining:**
+
+```rust
+a.add(b)              // union            also: a + b
+a.cut(b)              // difference       also: a - b
+a.intersect(b)        // intersection     also: a & b
+a.blend(b, k)         // union with a fillet of radius ~k at the seam
+a.smooth_cut(b, k)    // subtraction with a softened edge
+```
+
+`blend` is the one worth remembering. It is the difference between parts that
+look stacked and parts that look moulded.
+
+**Shaping:**
+
+```rust
+.round(r)             // fillet every primitive's edges, keeping outer size
+.shell(t)             // hollow out, leaving a wall of thickness t
+.stretch(x, y, z)     // lengthen without distorting the end caps
+.grow(d) / .shrink(d) // offset the surface
+.twist(deg_per_unit)  // twist about Z
+```
+
+**Placing** — all bounding-box driven, so they stay correct when sizes change:
+
+```rust
+.above(&other, gap)   .below(&other, gap)
+.right_of(&other, g)  .left_of(&other, g)
+.in_front_of(&o, g)   .behind(&o, g)
+.center_on(&other)    .center_xy_on(&other)
+.on_ground()          .center()
+```
+
+A negative `gap` overlaps the parts, which is usually what you want so they
+actually fuse.
+
+**Repeating:**
+
+```rust
+.array_x(count, spacing)      .grid(nx, ny, sx, sy)
+.ring(count, radius)          .revolve_copies(count)
+.symmetric_x()                // union with its own mirror image
+```
+
+**Appearance:**
+
+```rust
+.color(palette::RED)          .color("#c0392b")
+.surface(Surface::metal(palette::GOLD))
+```
+
+Colours are sRGB — the numbers you would write in CSS. Nested colours win, so
+colouring an assembly does not clobber parts you already coloured.
+
+## Assemblies
+
+Parts meshed separately keep their own materials and get their own tight voxel
+grid, so a small detail on a large object stays detailed.
+
+```rust
+let mut scene = Scene::new("toy car");
+scene.add("body", body)
+     .add("wheels", wheels).expect_pieces(4)   // four wheels is correct
+     .add("lamps", lamps).expect_pieces(2);
+
+scene.build(Quality::High)?
+     .print_report()
+     .preview("car.png")?
+     .save("car.glb")?;
+```
+
+## Output
+
+| extension | carries | good for |
+|-----------|---------|----------|
+| `.glb` / `.gltf` | geometry, PBR materials, part names | viewing, sharing, engines |
+| `.obj` | geometry, per-material colour (writes `.mtl`) | other modelling tools |
+| `.stl` | geometry only | 3D printing, CAD |
+
+`.preview()` writes a PNG. `Preview::hero()` gives one large isometric view;
+`Preview::all_views()` gives eight.
+
+## Quality
+
+`Quality` is the number of voxels along the model's longest axis.
+
+| | voxels | use |
+|---|---|---|
+| `Draft` | 56 | checking layout while iterating |
+| `Normal` | 112 | previews |
+| `High` | 176 | final renders |
+| `Ultra` | 256 | export |
+| `VoxelSize(s)` | — | when a tolerance matters: `VoxelSize(0.2)` resolves 0.2 mm features |
+
+Measured on a 12-thread machine, for a ~120k-triangle part (`cargo run
+--release --example timing`):
+
+| quality | triangles | mesh | render (4 views) | png | glb |
+|---|---|---|---|---|---|
+| `Draft` | 12k | 6 ms | 226 ms | 39 ms | 2 ms |
+| `Normal` | 48k | 34 ms | 246 ms | 37 ms | 9 ms |
+| `High` | 120k | 84 ms | 244 ms | 31 ms | 17 ms |
+| `Ultra` | 255k | 177 ms | 249 ms | 34 ms | 35 ms |
+
+Rendering is flat across quality levels because it is pixel-bound, not
+triangle-bound: the cost is the shading and outline passes over
+4 × 420² × 4 supersamples, and the triangle count barely registers.
+
+## Conventions
+
+* **Z is up.** `+X` right, `+Y` away from the viewer, `+Z` up.
+* Angles are **degrees**.
+* Units are whatever you decide. Millimetres if you plan to print.
+
+---
+
+## Known limits
+
+Worth knowing before you hit them:
+
+* **Sharp edges are rounded at the voxel scale.** Surface nets place one vertex
+  per cell, so a knife edge comes out with a radius of roughly half a voxel.
+  Raise `Quality` where it matters.
+* **Sharp creases at an angle to the voxel grid produce non-manifold edges.**
+  One vertex per cell cannot represent two surface sheets meeting in a single
+  cell. An upright prism meshes perfectly; twist it and the now-helical edges
+  pick up a scattering of edges shared by three triangles. The same happens
+  where two surfaces touch without crossing. The report counts them, and the
+  fix is to soften the crease — `.round(r)`, `.smooth_cut(tool, k)`,
+  `.blend(other, k)` — or to make a grazing cut pass right through. **Raising
+  quality does not help**, and usually reports more, because the crease is real
+  geometry rather than a sampling artefact.
+* **Memory grows with the cube of resolution.** `Ultra` on a large model is
+  hundreds of megabytes. Splitting into parts is cheaper than raising quality,
+  because each part gets its own tight grid.
+* **Non-uniform `scale_xyz` makes the distance field conservative** rather than
+  exact, so blends applied afterwards come out softer than requested. Use
+  `stretch` when you just want something longer.
+* No text or font support, no mesh import, no UV coordinates or textures.
+
+## Running the examples
+
+```bash
+cargo run --release --example mug
+cargo run --release --example toy_car
+cargo run --release --example lantern
+```
+
+Each writes a PNG and a GLB into `out/`.
+
+## Tests
+
+```bash
+cargo test --release
+```
+
+Volumes are checked against closed-form answers, meshes against watertightness,
+and the PNG output is inflated by an independently written decoder.
+
+## Licence
+
+MIT.

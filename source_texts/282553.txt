@@ -1,0 +1,158 @@
+Game Engine. Contribute to The-Ludus-Project/Ludus development by creating an account on GitHub.
+
+Add RT1 resampled projected-solid-angle light sampling by Alegruz · Pull Request #736 · The-Ludus-Project/Ludus · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Alegruz
+commented
+Oct 29, 2026
+Copy link
+Copy Markdown
+Collaborator
+Summary
+Stage 2 of the many-area-light resampling review: an explicit second RT1 light-sampling profile, delivered in the CPU oracle and the GPU-compute reference together, with parity evidence.
+API. ReferenceLightSampling on ReferenceCaptureDescription (UniformArea default, ResampledProjectedSolidAngle). It is recorded in ReferenceCaptureInfo with its sampler version and joins the integral key.
+Estimator (sampler version 2, 128 dimensions per bounce). RIS over the power-CDF with the LTC target (M = 32), then one projected-solid-angle and one LTC sample under Peters' clamped optimal MIS (v = 1/2). BSDF hits use the surrogate density P̃(p₀ + p₁) with an independent Ẑ (K = 8). It reuses FoundationMath's projected_solid_angle, linearly_transformed_cosine and weighted_reservoir and the renderer's LTC table, and matches the template's diffuse albedo, baseColor · (1 − metallic) · (1 − F₀) clamped to 0.01.
+CPU oracle. The estimator lives in a new private reference_light_sampling.{h,cpp}, called from reference_path.cpp.
+Paths carry up to two shadow rays, plus the previous receiver's frame, LTC and Ẑ, so both MIS sites read identical inputs.
+In this mode, NativeQueries tiles need three queries per path; a capture whose tile exceeds MaxRays returns Unsupported.
+Static-lighting diffuse probes reject the mode.
+GPU-compute.
+renderer_reference.slang ports the estimator, with the scene-independent pieces in shaders/reference_light_sampling.slang.
+One trace kernel serves both modes: a flag in Sampling.z selects sampler version 2.
+The LTC table is binding 5, declared last. It is uploaded once per EnableReferenceRendering and charged to GpuByteBudget.
+LUDUS_REFERENCE_KERNEL_VERSION is now 3.
+LUHDR. Sampler 2 is written with flag 128. scripts/reference-hdr accepts only the pairs (1, no flag) and (2, flag 128), and records light_sampling in its manifest.
+Docs. Light-sampling modes, plus updates to the GPU-compute and raw-capture sections. The review's status and the new RT1 implementation notes are updated.
+ProfileVersion is unchanged. The GPU preview is out of scope.
+Evidence (Apple M5, Metal, macOS 26.6, debug, pinned Clang 23)
+UniformArea identity. Before writing any code I built the unchanged tree with a temporary hidden test. It dumps raw pixel bits and query/event counts for CPU-oracle and GPU-compute captures at depths 1, 4 and 8. After the change, and again after formatting, the dump is bit-identical. The test is not committed.
+CPU vs GPU, resampled mode (16×12, 64 spp; L6 at depth 4 with a sun, the dense glossy sphere at depth 6, and a room where most vertices have Ẑ = 0):
+The largest per-pixel difference is 3.2e-5, and no pixel diverges. The existing UniformArea tolerances are used unchanged.
+Closest, null-BSDF and roulette counts are equal; visibility counts differ by at most 3 of 16,160.
+Against UniformArea. Six seeds of 64 spp at depths 1, 3, 4 and 6.
+The largest difference is 1.4 combined seed standard errors. The test allows 5 plus a 2e-4 floor.
+Primary emission is bit-identical.
+Seed error falls: direct light by 1.3× on L6, 1.4× on the glossy sphere and 2.6× in the room; glossy-sphere indirect light by 2×.
+Edge cases, in both implementations.
+Ẑ = 0 applies the inclusion bound exactly.
+An empty LTC-space clip disables the specular technique.
+An emitter behind every receiver gives zero radiance and no shadow rays.
+Contributions stay finite, and the weights partition unity.
+The light density is bit-identical at both MIS sites on the CPU.
+A new shader parity kernel compares the Slang pieces with the C++ pieces. 3 of 4,096 drawn receivers differ by more than 1e-3 relative in an integral or density above 1e-5; smaller slivers are limited by FP32 in both.
+Native queries. The existing native-vs-CPU RT1 test now runs both modes, with native ray queries active on Metal.
+Checks run
+Metal: ludus_renderer_tests (211 cases), the full ludus_renderer_render_tests (60 cases, before the final refactor) and the [reference-compute], [resampled-light] and [rt1] subsets after it. The ray-labelled CTest graph tests and ludus_graph_workgroup_tests also pass.
+./scripts/check --format and --tidy-changed. Full clang-tidy on the new and changed sources is clean except a pre-existing render_tests.cpp:1032 finding.
+source_policy.py --base <merge-base> --clang-format <pinned>.
+Docs: check-docs, strict MkDocs, build-api --bootstrap (no new gaps), check-wiki --documentation-only, test_docs.py, test_wiki.py.
+Python: test_ray_reference.py and the render-graph tests.
+Not verified
+Vulkan, WebGPU and D3D12 builds and pixel parity; these first run in batch CI.
+ASan/UBSan builds.
+No fixture has textured emitters or thousands of emissive triangles, and the equal-time evaluation (review acceptance item 5) is not done.
+Follow-ups
+The template and RT1 each keep a copy of the scene-independent Slang. Sharing one source is possible.
+The GPU preview may adopt the mode later.
+🤖 Generated with Claude Code
+Add RT1 resampled projected-solid-angle light sampling
+…
+87667c5
+```
+ReferenceCaptureDescription::LightSampling selects RT1's emissive-triangle
+next-event estimator. UniformArea stays the default and bit-identical
+(sampler version 1). ResampledProjectedSolidAngle (sampler version 2, 128
+dimensions per bounce) resamples one triangle from 32 power-CDF candidates
+with the unshadowed LTC target, takes one projected-solid-angle and one LTC
+sample of it under Peters' clamped optimal MIS, and weighs BSDF hits against
+the surrogate density with an 8-candidate estimate of the target's total.
+
+Both implementations land together:
+- CPU oracle: reference_light_sampling.cpp, called from reference_path.cpp.
+  Paths carry up to two shadow rays and the previous receiver's frame, LTC
+  and Z-hat, so both MIS sites read identical inputs. Native tiles need three
+  queries per path; diffuse probes reject the mode.
+- GPU-compute reference: renderer_reference.slang ports the estimator, with
+  the scene-independent pieces in reference_light_sampling.slang. One trace
+  kernel serves both modes through a parameter flag; the renderer's LTC table
+  is its sixth binding, uploaded once and charged to the GPU budget.
+  LUDUS_REFERENCE_KERNEL_VERSION is 3.
+
+The mode joins the integral key and ReferenceCaptureInfo. LUHDR records
+sampler 2 with flag 128; scripts/reference-hdr accepts only matching pairs
+and records light_sampling.
+
+Tests cover the mode in both implementations on Apple M5 Metal: statistical
+agreement with UniformArea across six seeds and depths 1-6, CPU/GPU raw AOV
+parity within the UniformArea tolerances, Z-hat = 0, an empty LTC clip,
+emitters behind every receiver, weights that partition unity, a shader
+parity kernel against the C++ pieces and the native-query path. UniformArea
+captures are bit-identical to before in both implementations.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Copilot
+AI
+balanced review requested due to automatic review settings
+October 29, 2026 04:44
+Copilot started reviewing on behalf of
+Alegruz
+October 29, 2026 04:45
+View session
+Copilot
+AI
+reviewed
+Oct 29, 2026
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Copilot encountered an error and was unable to review this pull request. You can try again by re-requesting a review.
+Merge origin/develop into codex/rt1-resampled-projected-solid-angle
+…
+c22c5b0
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Hide details
+View details
+Alegruz
+merged commit da35d03
+into
+develop
+Oct 29, 2026
+29 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Alegruz
+deleted the
+codex/rt1-resampled-projected-solid-angle
+branch
+October 29, 2026 15:53
+This was referenced Oct 30, 2026
+Raise the artifact budget with approved template programs, log Metal error codes, clear batch tidy findings
+#764
+Merged
+Restore Slang [noinline] in emitted Metal so the reference kernel builds on macOS 15
+#765
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

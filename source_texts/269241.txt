@@ -1,0 +1,91 @@
+Problem The ocean simulation at 1024x512 is effectively frozen because: SOR Poisson solver doesn't scale: At 360x180, 25 red-black SOR iterations converge. At 1024x512, convergence requires ~750 iterations — the spectral radius is 0.994 ...
+
+GPU FFT Poisson solver + compute architecture for high-res sim · Issue #43 · JDerekLomas/amoc · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+GPU FFT Poisson solver + compute architecture for high-res sim #43
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+GPU FFT Poisson solver + compute architecture for high-res sim#43
+Copy link
+Description
+JDerekLomas
+opened on Apr 26, 2026
+Issue body actions
+Problem
+The ocean simulation at 1024x512 is effectively frozen because:
+SOR Poisson solver doesn't scale: At 360x180, 25 red-black SOR iterations converge. At 1024x512, convergence requires ~750 iterations — the spectral radius is 0.994 per iteration vs 0.983 at lower res.
+CPU FFT is too slow: The CPU FFT solver works correctly but at 1024x512, the Float64Array allocations and O(N log N) computation per frame is ~30ms — too slow for real-time.
+Solution: GPU FFT Poisson Solver
+Replace the iterative SOR Poisson solver with an exact FFT-based solver on GPU:
+Pipeline (12 dispatches vs 160+ SOR dispatches)
+Bit-reversal permutation — reorder each row of ζ for in-place FFT (1 dispatch)
+Butterfly passes — log₂(1024) = 10 passes, each fully parallel (10 dispatches)
+Transpose — row-major [jNX+i] → mode-major [mNY+j] for real+imag (2 dispatches)
+Tridiagonal solve — Thomas algorithm per Fourier mode, 1024 independent solves (@workgroup_size(1) per mode) (1 dispatch)
+Transpose back — mode-major → row-major for real+imag (2 dispatches)
+Inverse butterfly — 10 more passes (10 dispatches)
+Scale + mask — divide by N, zero land cells (1 dispatch, optional — see note below)
+Note: simamoc found that zeroing psi on land corrupts the Laplacian at coastlines. The FFT solver should NOT zero land cells — the non-physical values there are harmless since the vorticity equation skips land.
+Existing code
+Simamoc has all 5 WGSL shaders written (commit 6ffcd11): fftButterflyShaderCode, fftBitRevShaderCode, fftTridiagShaderCode, fftTransposeShaderCode, fftScaleMaskShaderCode
+The shaders compiled but were never wired into the GPU dispatch loop (simamoc used CPU FFT as fallback)
+The tridiagonal shader uses grid Laplacian (no cos(lat) in the Poisson operator), which is correct
+GPU buffers needed (all F32)
+fftRe, fftIm — working buffers for FFT (NX*NY each)
+fftReOut, fftImOut — output from tridiagonal solve (NX*NY each, or reuse fftRe/Im)
+fftParams — uniform: {nx, ny, passStride, direction}
+cosLatArr — precomputed cos(lat) per row (NY floats, currently unused by grid Laplacian but kept for binding)
+Total new GPU memory: ~16MB at 1024x512 (4 buffers × 1024 × 512 × 4 bytes)
+Compute Architecture (Apple Silicon)
+Running on Apple M-series with unified memory. Key advantages:
+Zero-copy CPU↔GPU: No PCIe transfer — mapAsync is essentially free
+Metal underneath: WebGPU compiles to Metal compute shaders
+Shared L2 cache: CPU and GPU cache hierarchy is unified
+Approach
+All physics on GPU: timestep, Poisson, temperature, salinity — already mostly done
+FFT on GPU: 12 dispatches per Poisson solve instead of 160+ SOR dispatches
+Readback only for diagnostics: particles, AMOC strength, stability checks — every 5 frames
+CPU for rendering overlays only: particles, labels, colorbar
+Research needed
+WebGPU workgroup size tuning for M-series (8x8? 16x16?)
+Whether mapAsync non-blocking readback is truly zero-copy on Apple
+Subgroup operations in WebGPU for butterfly reduction
+Whether to batch multiple timesteps in a single command encoder
+Files
+v4-physics/sim-engine.js — main simulation (single file, working UI)
+GPU FFT shaders from simamoc/model.js commit 6ffcd11
+Data files in data/ directory (1024x512)
+Plan
+Extract FFT shaders into v4-physics sim-engine.js
+Create GPU FFT pipelines and buffers in initWebGPU()
+Wire FFT dispatches into gpuRunSteps() replacing SOR loop
+Test convergence: compare psi from GPU FFT vs CPU FFT
+Tune: workgroup sizes, readback frequency, steps per frame
+Activity
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

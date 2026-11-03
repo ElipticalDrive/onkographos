@@ -1,0 +1,602 @@
+Dual Contouring places one vertex per grid cell using gradient data, reproducing sharp features that Marching Cubes rounds off. Explore it with an interactive demo.
+
+Dual Contouring – Meshes That Keep Their Sharp Edges | KipuHub
+Cookies & privacy
+We use essential cookies to run the site (session, security, and your theme/language preferences). With your permission we also load embedded third-party content, such as YouTube videos. Cookie Policy
+Accept all Essential only Preferences
+Skip to content
+Dual Contouring
+Extracting sharp meshes from scalar fields
+Author(s):Elier Rodríguez García
+December 14, 2024
+Print / PDF
+Index
+Introduction
+Take any smooth function that assigns a real number to every point in space — a density, a distance, a temperature. The isosurface is the set of points where the function equals a chosen threshold: think of it as the skin of an object implied by the numbers. Extracting a polygon mesh from that surface is one of the core tasks in computer graphics, medicine, and scientific simulation.
+The classic solution is Marching Cubes (Lorensen & Cline, 1987): divide space into a regular grid, check which cell corners are inside the object, look up one of 256 vertex patterns, and output triangles. It works beautifully for smooth shapes, but every corner and crease gets rounded off — the algorithm literally has no way to represent a sharp edge.
+Dual Contouring (Ju et al., 2002) fixes this with one elegant idea: instead of placing vertices on cell edges, it places one vertex per cell, positioned by solving a least-squares problem against the Hermite data — the surface normals recorded where the isosurface crosses each edge. The result is a mesh that can reproduce sharp features exactly, because the gradient information tells the solver precisely where a corner or crease belongs.
+The "dual" in the name reflects the duality between the regular grid and the mesh: grid cells become mesh vertices, and grid edges that cross the surface become mesh faces.
+Try It
+The demo below samples a 2D scalar field whose zero-level set forms a square — a shape with four perfectly sharp corners. Toggle between Dual Contouring and Marching Cubes to see how each algorithm extracts the boundary.
+```
+<!-- Controls and canvas for dual contouring vs marching cubes demo -->
+<div class="controls">
+  <label class="toggle-label">
+    <span>Algorithm</span>
+    <span class="toggle-group" role="group" aria-label="Choose algorithm">
+      <button id="btn-dc" class="mode-btn active" type="button">Dual Contouring</button>
+      <button id="btn-mc" class="mode-btn" type="button">Marching Cubes</button>
+    </span>
+  </label>
+  <label class="toggle-label">
+    <span>Shape</span>
+    <span class="toggle-group" role="group" aria-label="Choose test shape">
+      <button id="btn-square" class="shape-btn active" type="button">Square</button>
+      <button id="btn-cross" class="shape-btn" type="button">Cross</button>
+      <button id="btn-diamond" class="shape-btn" type="button">Diamond</button>
+    </span>
+  </label>
+</div>
+<canvas id="canvas" width="380" height="280" aria-label="2D isosurface extraction comparison canvas"></canvas>
+<div id="info" class="info">Select an algorithm above to begin.</div>
+```
+```
+/* Styles for the dual contouring demo */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, sans-serif; color: #222; background: transparent; padding: .5rem; }
+.controls { display: flex; flex-wrap: wrap; gap: .7rem; margin-bottom: .6rem; }
+.toggle-label { display: flex; align-items: center; gap: .5rem; font-size: .85rem; font-weight: 600; color: #444; }
+.toggle-group { display: flex; gap: 2px; }
+.mode-btn, .shape-btn {
+  font: 600 .78rem system-ui, sans-serif;
+  padding: .3rem .65rem;
+  border: 1px solid #1d3557;
+  background: #fff;
+  color: #1d3557;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background .12s, color .12s;
+}
+.mode-btn.active, .shape-btn.active {
+  background: #1d3557;
+  color: #fff;
+}
+canvas { display: block; border: 1px solid #cdd9e3; border-radius: 8px; background: #f5f8fb; width: 100%; max-width: 380px; }
+.info { font-size: .82rem; color: #555; margin-top: .45rem; min-height: 1.3em; line-height: 1.4; }
+```
+```
+const i18nFmt = (s, v) => s.replace(/%(\w+)%/g, (_, k) => String(v[k] ?? ''));
+/* Dual Contouring vs Marching Cubes — 2D interactive comparison */
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const info = document.getElementById('info');
+
+/* Grid dimensions and padding */
+const COLS = 9, ROWS = 7;
+const PAD = 28;
+const cellW = (canvas.width - PAD * 2) / COLS;
+const cellH = (canvas.height - PAD * 2) / ROWS;
+
+/* Signed distance functions for test shapes (negative = inside) */
+const SHAPES = {
+  square:  (x, y) => Math.max(Math.abs(x - 0.5), Math.abs(y - 0.5)) - 0.28,
+  cross:   (x, y) => Math.min(Math.max(Math.abs(x - 0.5) - 0.12, Math.abs(y - 0.5) - 0.28),
+                               Math.max(Math.abs(x - 0.5) - 0.28, Math.abs(y - 0.5) - 0.12)),
+  diamond: (x, y) => Math.abs(x - 0.5) + Math.abs(y - 0.5) - 0.3,
+};
+
+let currentMode = 'dc';  // dc = Dual Contouring, mc = Marching Cubes
+let currentShape = 'square';
+
+/* Finite-difference gradient of the SDF, normalized to a unit normal */
+function gradSDF(fn, x, y) {
+  const EPS = 1e-4;
+  const gx = (fn(x + EPS, y) - fn(x - EPS, y)) / (2 * EPS);
+  const gy = (fn(x, y + EPS) - fn(x, y - EPS)) / (2 * EPS);
+  const len = Math.sqrt(gx * gx + gy * gy) || 1;
+  return [gx / len, gy / len];
+}
+
+/* Find where the isosurface crosses an edge and return the Hermite data */
+function edgeCrossing(fn, x0, y0, x1, y1) {
+  const v0 = fn(x0, y0), v1 = fn(x1, y1);
+  if ((v0 < 0) === (v1 < 0)) return null;
+  const t = v0 / (v0 - v1);
+  const cx = x0 + t * (x1 - x0);
+  const cy = y0 + t * (y1 - y0);
+  const [nx, ny] = gradSDF(fn, cx, cy);
+  return { px: cx, py: cy, nx, ny };
+}
+
+/* Solve the 2D quadric error function via normal equations */
+function solveQEF(hermiteList) {
+  /* Build AtA and Atb from Hermite constraints, then solve the 2x2 system AtA x = Atb */
+  let a00 = 0, a01 = 0, a11 = 0, b0 = 0, b1 = 0;
+  let mx = 0, my = 0;
+  for (const { px, py, nx, ny } of hermiteList) {
+    a00 += nx * nx; a01 += nx * ny; a11 += ny * ny;
+    b0 += nx * (nx * px + ny * py);
+    b1 += ny * (nx * px + ny * py);
+    mx += px; my += py;
+  }
+  mx /= hermiteList.length; my /= hermiteList.length;
+  const det = a00 * a11 - a01 * a01;
+  if (Math.abs(det) < 1e-8) return [mx, my]; // Ill-conditioned system — fall back to centroid of crossing points
+  const vx = (a11 * b0 - a01 * b1) / det;
+  const vy = (a00 * b1 - a01 * b0) / det;
+  return [vx, vy];
+}
+
+/* Convert normalized field coordinates to canvas pixels */
+function toCanvas(nx, ny) {
+  return [PAD + nx * COLS * cellW, PAD + ny * ROWS * cellH];
+}
+
+function draw() {
+  const fn = SHAPES[currentShape];
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  /* Draw background grid */
+  ctx.strokeStyle = '#d0dae3';
+  ctx.lineWidth = 0.5;
+  for (let c = 0; c <= COLS; c++) {
+    const x = PAD + c * cellW;
+    ctx.beginPath(); ctx.moveTo(x, PAD); ctx.lineTo(x, PAD + ROWS * cellH); ctx.stroke();
+  }
+  for (let r = 0; r <= ROWS; r++) {
+    const y = PAD + r * cellH;
+    ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(PAD + COLS * cellW, y); ctx.stroke();
+  }
+
+  /* Sample the SDF at every grid corner */
+  const val = [];
+  for (let r = 0; r <= ROWS; r++) {
+    val[r] = [];
+    for (let c = 0; c <= COLS; c++) {
+      val[r][c] = fn(c / COLS, r / ROWS);
+    }
+  }
+
+  /* Shade cells fully inside the shape */
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const inside = val[r][c] < 0 && val[r][c+1] < 0 && val[r+1][c] < 0 && val[r+1][c+1] < 0;
+      if (inside) {
+        const [cx, cy] = toCanvas(c / COLS, r / ROWS);
+        ctx.fillStyle = '#d0e8f7';
+        ctx.fillRect(cx, cy, cellW, cellH);
+      }
+    }
+  }
+
+  /* Branch on selected algorithm */
+  if (currentMode === 'dc') {
+    /* Dual Contouring — one QEF solve per cell */
+    const dcVertices = []; // Stores one vertex per intersected cell
+    for (let r = 0; r < ROWS; r++) {
+      dcVertices[r] = [];
+      for (let c = 0; c < COLS; c++) {
+        const hermite = [];
+        const x0 = c / COLS, y0 = r / ROWS;
+        const x1 = (c + 1) / COLS, y1 = (r + 1) / ROWS;
+        const cross = [
+          edgeCrossing(fn, x0, y0, x1, y0), // top edge
+          edgeCrossing(fn, x0, y1, x1, y1), // bottom edge
+          edgeCrossing(fn, x0, y0, x0, y1), // left edge
+          edgeCrossing(fn, x1, y0, x1, y1), // right edge
+        ].filter(Boolean);
+        if (cross.length === 0) { dcVertices[r][c] = null; continue; }
+        hermite.push(...cross);
+        const [vx, vy] = solveQEF(hermite);
+        dcVertices[r][c] = [vx, vy];
+      }
+    }
+
+    /* Connect adjacent DC vertices across sign-changing edges */
+    ctx.strokeStyle = '#e63946';
+    ctx.lineWidth = 2;
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const v = dcVertices[r][c];
+        if (!v) continue;
+        /* Connect to the cell on the right across their shared vertical edge */
+        if (c + 1 < COLS && dcVertices[r][c + 1]) {
+          const cross = edgeCrossing(fn, (c + 1) / COLS, r / ROWS, (c + 1) / COLS, (r + 1) / ROWS);
+          if (cross) {
+            const [ax, ay] = toCanvas(v[0], v[1]);
+            const [bx, by] = toCanvas(dcVertices[r][c + 1][0], dcVertices[r][c + 1][1]);
+            ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+          }
+        }
+        /* Connect to the cell below across their shared horizontal edge */
+        if (r + 1 < ROWS && dcVertices[r + 1][c]) {
+          const cross = edgeCrossing(fn, c / COLS, (r + 1) / ROWS, (c + 1) / COLS, (r + 1) / ROWS);
+          if (cross) {
+            const [ax, ay] = toCanvas(v[0], v[1]);
+            const [bx, by] = toCanvas(dcVertices[r + 1][c][0], dcVertices[r + 1][c][1]);
+            ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+          }
+        }
+      }
+    }
+
+    /* Draw DC vertex positions */
+    ctx.fillStyle = '#1d3557';
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const v = dcVertices[r][c];
+        if (!v) continue;
+        const [cx, cy] = toCanvas(v[0], v[1]);
+        ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    const dcCount = dcVertices.flat().filter(Boolean).length;
+    info.textContent = i18nFmt('Dual Contouring: %n% cell vertices placed using QEF (normals). Corners are sharp.', { n: dcCount });
+  } else {
+    /* Marching Cubes — connect edge crossings directly */
+    ctx.strokeStyle = '#e67700';
+    ctx.lineWidth = 2;
+    let segCount = 0;
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const x0 = c / COLS, y0 = r / ROWS;
+        const x1 = (c + 1) / COLS, y1 = (r + 1) / ROWS;
+        const crossings = [
+          edgeCrossing(fn, x0, y0, x1, y0), // top edge crossing
+          edgeCrossing(fn, x0, y1, x1, y1), // bottom edge crossing
+          edgeCrossing(fn, x0, y0, x0, y1), // left edge crossing
+          edgeCrossing(fn, x1, y0, x1, y1), // right edge crossing
+        ].filter(Boolean);
+        /* Pair edge crossings and draw segments */
+        for (let i = 0; i < crossings.length - 1; i += 2) {
+          const [ax, ay] = toCanvas(crossings[i].px, crossings[i].py);
+          const [bx, by] = toCanvas(crossings[i + 1].px, crossings[i + 1].py);
+          ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+          segCount++;
+        }
+      }
+    }
+    info.textContent = i18nFmt('Marching Cubes: %n% edge segments drawn. Corners are rounded.', { n: segCount });
+  }
+}
+
+/* Wire algorithm and shape toggle buttons */
+document.getElementById('btn-dc').addEventListener('click', () => {
+  currentMode = 'dc';
+  document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('btn-dc').classList.add('active');
+  draw();
+});
+document.getElementById('btn-mc').addEventListener('click', () => {
+  currentMode = 'mc';
+  document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('btn-mc').classList.add('active');
+  draw();
+});
+const shapeBtns = document.querySelectorAll('.shape-btn');
+shapeBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    shapeBtns.forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentShape = btn.id.replace('btn-', '');
+    draw();
+  });
+});
+
+draw();
+```
+HTML
+CSS
+JS
+Reset
+Copy
+Download .zip
+```
+<!-- Controls and canvas for dual contouring vs marching cubes demo -->
+<div class="controls">
+  <label class="toggle-label">
+    <span>Algorithm</span>
+    <span class="toggle-group" role="group" aria-label="Choose algorithm">
+      <button id="btn-dc" class="mode-btn active" type="button">Dual Contouring</button>
+      <button id="btn-mc" class="mode-btn" type="button">Marching Cubes</button>
+    </span>
+  </label>
+  <label class="toggle-label">
+    <span>Shape</span>
+    <span class="toggle-group" role="group" aria-label="Choose test shape">
+      <button id="btn-square" class="shape-btn active" type="button">Square</button>
+      <button id="btn-cross" class="shape-btn" type="button">Cross</button>
+      <button id="btn-diamond" class="shape-btn" type="button">Diamond</button>
+    </span>
+  </label>
+</div>
+<canvas id="canvas" width="380" height="280" aria-label="2D isosurface extraction comparison canvas"></canvas>
+<div id="info" class="info">Select an algorithm above to begin.</div>
+```
+```
+/* Styles for the dual contouring demo */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, sans-serif; color: #222; background: transparent; padding: .5rem; }
+.controls { display: flex; flex-wrap: wrap; gap: .7rem; margin-bottom: .6rem; }
+.toggle-label { display: flex; align-items: center; gap: .5rem; font-size: .85rem; font-weight: 600; color: #444; }
+.toggle-group { display: flex; gap: 2px; }
+.mode-btn, .shape-btn {
+  font: 600 .78rem system-ui, sans-serif;
+  padding: .3rem .65rem;
+  border: 1px solid #1d3557;
+  background: #fff;
+  color: #1d3557;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background .12s, color .12s;
+}
+.mode-btn.active, .shape-btn.active {
+  background: #1d3557;
+  color: #fff;
+}
+canvas { display: block; border: 1px solid #cdd9e3; border-radius: 8px; background: #f5f8fb; width: 100%; max-width: 380px; }
+.info { font-size: .82rem; color: #555; margin-top: .45rem; min-height: 1.3em; line-height: 1.4; }
+```
+```
+const i18nFmt = (s, v) => s.replace(/%(\w+)%/g, (_, k) => String(v[k] ?? ''));
+/* Dual Contouring vs Marching Cubes — 2D interactive comparison */
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const info = document.getElementById('info');
+
+/* Grid dimensions and padding */
+const COLS = 9, ROWS = 7;
+const PAD = 28;
+const cellW = (canvas.width - PAD * 2) / COLS;
+const cellH = (canvas.height - PAD * 2) / ROWS;
+
+/* Signed distance functions for test shapes (negative = inside) */
+const SHAPES = {
+  square:  (x, y) => Math.max(Math.abs(x - 0.5), Math.abs(y - 0.5)) - 0.28,
+  cross:   (x, y) => Math.min(Math.max(Math.abs(x - 0.5) - 0.12, Math.abs(y - 0.5) - 0.28),
+                               Math.max(Math.abs(x - 0.5) - 0.28, Math.abs(y - 0.5) - 0.12)),
+  diamond: (x, y) => Math.abs(x - 0.5) + Math.abs(y - 0.5) - 0.3,
+};
+
+let currentMode = 'dc';  // dc = Dual Contouring, mc = Marching Cubes
+let currentShape = 'square';
+
+/* Finite-difference gradient of the SDF, normalized to a unit normal */
+function gradSDF(fn, x, y) {
+  const EPS = 1e-4;
+  const gx = (fn(x + EPS, y) - fn(x - EPS, y)) / (2 * EPS);
+  const gy = (fn(x, y + EPS) - fn(x, y - EPS)) / (2 * EPS);
+  const len = Math.sqrt(gx * gx + gy * gy) || 1;
+  return [gx / len, gy / len];
+}
+
+/* Find where the isosurface crosses an edge and return the Hermite data */
+function edgeCrossing(fn, x0, y0, x1, y1) {
+  const v0 = fn(x0, y0), v1 = fn(x1, y1);
+  if ((v0 < 0) === (v1 < 0)) return null;
+  const t = v0 / (v0 - v1);
+  const cx = x0 + t * (x1 - x0);
+  const cy = y0 + t * (y1 - y0);
+  const [nx, ny] = gradSDF(fn, cx, cy);
+  return { px: cx, py: cy, nx, ny };
+}
+
+/* Solve the 2D quadric error function via normal equations */
+function solveQEF(hermiteList) {
+  /* Build AtA and Atb from Hermite constraints, then solve the 2x2 system AtA x = Atb */
+  let a00 = 0, a01 = 0, a11 = 0, b0 = 0, b1 = 0;
+  let mx = 0, my = 0;
+  for (const { px, py, nx, ny } of hermiteList) {
+    a00 += nx * nx; a01 += nx * ny; a11 += ny * ny;
+    b0 += nx * (nx * px + ny * py);
+    b1 += ny * (nx * px + ny * py);
+    mx += px; my += py;
+  }
+  mx /= hermiteList.length; my /= hermiteList.length;
+  const det = a00 * a11 - a01 * a01;
+  if (Math.abs(det) < 1e-8) return [mx, my]; // Ill-conditioned system — fall back to centroid of crossing points
+  const vx = (a11 * b0 - a01 * b1) / det;
+  const vy = (a00 * b1 - a01 * b0) / det;
+  return [vx, vy];
+}
+
+/* Convert normalized field coordinates to canvas pixels */
+function toCanvas(nx, ny) {
+  return [PAD + nx * COLS * cellW, PAD + ny * ROWS * cellH];
+}
+
+function draw() {
+  const fn = SHAPES[currentShape];
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  /* Draw background grid */
+  ctx.strokeStyle = '#d0dae3';
+  ctx.lineWidth = 0.5;
+  for (let c = 0; c <= COLS; c++) {
+    const x = PAD + c * cellW;
+    ctx.beginPath(); ctx.moveTo(x, PAD); ctx.lineTo(x, PAD + ROWS * cellH); ctx.stroke();
+  }
+  for (let r = 0; r <= ROWS; r++) {
+    const y = PAD + r * cellH;
+    ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(PAD + COLS * cellW, y); ctx.stroke();
+  }
+
+  /* Sample the SDF at every grid corner */
+  const val = [];
+  for (let r = 0; r <= ROWS; r++) {
+    val[r] = [];
+    for (let c = 0; c <= COLS; c++) {
+      val[r][c] = fn(c / COLS, r / ROWS);
+    }
+  }
+
+  /* Shade cells fully inside the shape */
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const inside = val[r][c] < 0 && val[r][c+1] < 0 && val[r+1][c] < 0 && val[r+1][c+1] < 0;
+      if (inside) {
+        const [cx, cy] = toCanvas(c / COLS, r / ROWS);
+        ctx.fillStyle = '#d0e8f7';
+        ctx.fillRect(cx, cy, cellW, cellH);
+      }
+    }
+  }
+
+  /* Branch on selected algorithm */
+  if (currentMode === 'dc') {
+    /* Dual Contouring — one QEF solve per cell */
+    const dcVertices = []; // Stores one vertex per intersected cell
+    for (let r = 0; r < ROWS; r++) {
+      dcVertices[r] = [];
+      for (let c = 0; c < COLS; c++) {
+        const hermite = [];
+        const x0 = c / COLS, y0 = r / ROWS;
+        const x1 = (c + 1) / COLS, y1 = (r + 1) / ROWS;
+        const cross = [
+          edgeCrossing(fn, x0, y0, x1, y0), // top edge
+          edgeCrossing(fn, x0, y1, x1, y1), // bottom edge
+          edgeCrossing(fn, x0, y0, x0, y1), // left edge
+          edgeCrossing(fn, x1, y0, x1, y1), // right edge
+        ].filter(Boolean);
+        if (cross.length === 0) { dcVertices[r][c] = null; continue; }
+        hermite.push(...cross);
+        const [vx, vy] = solveQEF(hermite);
+        dcVertices[r][c] = [vx, vy];
+      }
+    }
+
+    /* Connect adjacent DC vertices across sign-changing edges */
+    ctx.strokeStyle = '#e63946';
+    ctx.lineWidth = 2;
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const v = dcVertices[r][c];
+        if (!v) continue;
+        /* Connect to the cell on the right across their shared vertical edge */
+        if (c + 1 < COLS && dcVertices[r][c + 1]) {
+          const cross = edgeCrossing(fn, (c + 1) / COLS, r / ROWS, (c + 1) / COLS, (r + 1) / ROWS);
+          if (cross) {
+            const [ax, ay] = toCanvas(v[0], v[1]);
+            const [bx, by] = toCanvas(dcVertices[r][c + 1][0], dcVertices[r][c + 1][1]);
+            ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+          }
+        }
+        /* Connect to the cell below across their shared horizontal edge */
+        if (r + 1 < ROWS && dcVertices[r + 1][c]) {
+          const cross = edgeCrossing(fn, c / COLS, (r + 1) / ROWS, (c + 1) / COLS, (r + 1) / ROWS);
+          if (cross) {
+            const [ax, ay] = toCanvas(v[0], v[1]);
+            const [bx, by] = toCanvas(dcVertices[r + 1][c][0], dcVertices[r + 1][c][1]);
+            ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+          }
+        }
+      }
+    }
+
+    /* Draw DC vertex positions */
+    ctx.fillStyle = '#1d3557';
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const v = dcVertices[r][c];
+        if (!v) continue;
+        const [cx, cy] = toCanvas(v[0], v[1]);
+        ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    const dcCount = dcVertices.flat().filter(Boolean).length;
+    info.textContent = i18nFmt('Dual Contouring: %n% cell vertices placed using QEF (normals). Corners are sharp.', { n: dcCount });
+  } else {
+    /* Marching Cubes — connect edge crossings directly */
+    ctx.strokeStyle = '#e67700';
+    ctx.lineWidth = 2;
+    let segCount = 0;
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const x0 = c / COLS, y0 = r / ROWS;
+        const x1 = (c + 1) / COLS, y1 = (r + 1) / ROWS;
+        const crossings = [
+          edgeCrossing(fn, x0, y0, x1, y0), // top edge crossing
+          edgeCrossing(fn, x0, y1, x1, y1), // bottom edge crossing
+          edgeCrossing(fn, x0, y0, x0, y1), // left edge crossing
+          edgeCrossing(fn, x1, y0, x1, y1), // right edge crossing
+        ].filter(Boolean);
+        /* Pair edge crossings and draw segments */
+        for (let i = 0; i < crossings.length - 1; i += 2) {
+          const [ax, ay] = toCanvas(crossings[i].px, crossings[i].py);
+          const [bx, by] = toCanvas(crossings[i + 1].px, crossings[i + 1].py);
+          ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+          segCount++;
+        }
+      }
+    }
+    info.textContent = i18nFmt('Marching Cubes: %n% edge segments drawn. Corners are rounded.', { n: segCount });
+  }
+}
+
+/* Wire algorithm and shape toggle buttons */
+document.getElementById('btn-dc').addEventListener('click', () => {
+  currentMode = 'dc';
+  document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('btn-dc').classList.add('active');
+  draw();
+});
+document.getElementById('btn-mc').addEventListener('click', () => {
+  currentMode = 'mc';
+  document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('btn-mc').classList.add('active');
+  draw();
+});
+const shapeBtns = document.querySelectorAll('.shape-btn');
+shapeBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    shapeBtns.forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentShape = btn.id.replace('btn-', '');
+    draw();
+  });
+});
+
+draw();
+```
+Result
+Console
+Clear
+Notice that Marching Cubes cuts each grid edge at the crossing point and connects them, producing a rounded staircase. Dual Contouring solves for each cell's vertex using the surface normals, snapping it to the true corner. The same gradient data that lets it find sharp features also makes the algorithm more complex to implement — but the visual payoff is immediate.
+The Real Complexity
+The elegance of Dual Contouring hides real algorithmic subtlety.
+The per-cell solve. For each grid cell that intersects the isosurface, the algorithm collects the Hermite data: the crossing points pi\mathbf{p}_ipi​ on cell edges and the surface normals n^i\hat{\mathbf{n}}_in^i​ at those points. It then minimizes the quadric error function (QEF):
+QEF(x)=∑i(n^i⋅(x−pi))2\text{QEF}(\mathbf{x}) = \sum_{i} \bigl(\hat{\mathbf{n}}_i \cdot (\mathbf{x} - \mathbf{p}_i)\bigr)^2QEF(x)=i∑​(n^i​⋅(x−pi​))2
+This asks: where is the point x\mathbf{x}x whose distance to every tangent plane is minimized? The closed-form solution is a small least-squares system, solvable in O(1)O(1)O(1) per cell. When all normals agree (a flat surface) the system has a unique minimum; when two planes meet at an angle (a sharp edge) the QEF minimum lands precisely on the edge; when three planes meet (a corner), it lands on the corner.
+The catch. If the normals are noisy or nearly parallel, the system becomes ill-conditioned and the computed vertex flies far outside the cell. Practical implementations clamp the result to the cell or fall back to the cell centroid. Sharp features survive only if the gradient data is accurate.
+Topology. Unlike Marching Cubes, Dual Contouring can produce non-manifold meshes (edges shared by more than two faces) because a single cell vertex connects to all adjacent edge-crossing faces. Fixing topology requires extra post-processing or a modified variant such as Dual Marching Cubes or Extended Marching Cubes.
+Compared to marching cubes and related surface extraction methods, Dual Contouring trades guaranteed manifold output for the ability to represent sharp features — a trade-off that matters enormously in CAD, game assets, and medical imaging.
+Where It Matters
+Any time a scalar field encodes a shape with corners, creases, or flat faces, Dual Contouring outperforms smoother alternatives:
+CAD and reverse engineering: reconstructing a machined part from a point cloud or CT scan. Flat faces and right-angle edges must be reproduced exactly, not approximated by a bumpy smooth surface.
+Voxel game engines: Minecraft-style and procedural terrain systems store worlds as scalar density fields. Dual Contouring extracts terrain meshes that preserve cliff faces and building walls without the stepped look of Marching Cubes.
+Medical imaging: segmenting bone from CT data. Bone has hard, flat cortical surfaces; Marching Cubes produces a blob; Dual Contouring keeps the geometry anatomically faithful.
+Signed-distance-field (SDF) rendering: ray-marched scenes often bake SDFs for collision or LOD meshes. Dual Contouring converts an SDF back into a polygon mesh without losing the sharp silhouettes the artist intended.
+The algorithm belongs to a broader family of isosurface extraction techniques. If you want to understand the landscape, convex hull algorithms share the theme of extracting geometry from point data, while dimensionality reduction techniques deal with the same curse of working in high-dimensional spaces where intuition fails.
+Conclusion
+Dual Contouring is a beautiful example of how the right data changes everything. Marching Cubes ignores the gradient and so must round every corner. Dual Contouring records the surface normal at every edge crossing and uses it to solve for the best vertex position — a tiny 3×33 \times 33×3 least-squares problem per cell that costs almost nothing yet preserves information that no amount of post-processing can recover after the fact.
+The lesson generalizes far beyond mesh extraction: recording more than just "inside or outside" at sampling time unlocks qualitatively better reconstructions. In that sense, Dual Contouring is less about meshes and more about the value of derivative information — the same insight behind finite-element methods, Hermite interpolation, and the broader field of dimensionality reduction.
+Sharp edges are not an edge case. They are the rule in the engineered and natural world, and Dual Contouring is the algorithm that refuses to pretend otherwise.
+Sources: Ju et al. (2002) – Dual Contouring of Hermite Data (original paper) (opens in a new tab), Wikipedia – Marching Cubes (opens in a new tab)
+Copy link
+X (Twitter) (opens in a new tab)
+LinkedIn (opens in a new tab)
+WhatsApp (opens in a new tab)
+Telegram (opens in a new tab)
+Facebook (opens in a new tab)
+Reddit (opens in a new tab)
+Pinterest (opens in a new tab)
+Bluesky (opens in a new tab)
+Hacker News (opens in a new tab)
+Email (opens in a new tab)
+Show QR code
+Sign in
+Sign in to leave a comment.
+Loading comments...
+https://www.kipuhub.com/en/article/dual-contouring/Content licensed under CC BY-NC 4.0.

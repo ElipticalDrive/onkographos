@@ -1,0 +1,1561 @@
+ByteSplat: Efficient Distributed 3D Gaussian Splatting Training via Intra- and
+Inter-GPU communication reduction
+SHUO WU, HE ZHU, and HAN ZHAO, Shanghai Jiao Tong University, China
+XIAOHUI ZHANG, YAQIAN ZHAO, and HUI WEI, IEIT SYSTEMS Co., Ltd., China
+RUYANG LI, HONGZHI SHI, and LIHUA LU, IEIT SYSTEMS Co., Ltd., China
+JINGWEN LENG, YU FENG∗ , and MINYI GUO∗ , Shanghai Jiao Tong University, China
+3D Gaussian Splatting (3DGS) enables photorealistic scene reconstruction, but training large-scale scenes requires substantial memory
+arXiv:2610.02851v1 [cs.DC] 2 Oct 2026
+and computation. Distributing training across multiple GPUs increases available memory capacity, yet its performance is strictly
+constrained by data movement. We identify two dominant bottlenecks: repeated off-chip memory accesses during forward and
+backward rasterization, and inter-GPU communication of partial Gaussian gradients. To address these bottlenecks, we present
+ByteSplat, a distributed 3DGS training framework that jointly reduces intra- and inter-GPU data movement. First, ByteSplat
+fuses forward rasterization and backward rasterization into a single GPU kernel, retaining intermediate results on-chip to eliminate
+redundant off-chip transfers. Second, to alleviate the increased on-chip storage by fused rasterization, ByteSplat introduces hardwareaware pruning that considers both rendering quality and per-tile shared-memory constraints, increasing the overall performance
+of fused execution. Lastly, ByteSplat exploits gradient sparsity to eliminate zero partial gradients from inter-GPU communication.
+GPU-efficient encoder and decoder kernels compact the remaining records and directly aggregate the received gradients on their
+owner GPUs, reducing both communication volume and local aggregation overhead. We evaluate ByteSplat across six datasets.
+Compared with the baseline, ByteSplat reduces intra-GPU off-chip traffic and backward inter-GPU communication volume by 63.4%
+and 65.8%, respectively. On eight GPUs, ByteSplat achieves up to 6.1× training speedup while preserving reconstruction quality.
+ACM Reference Format:
+Shuo Wu, He Zhu, Han Zhao, Xiaohui Zhang, Yaqian Zhao, Hui Wei, Ruyang Li, Hongzhi Shi, Lihua Lu, Jingwen Leng, Yu Feng,
+and Minyi Guo. 2026. ByteSplat: Efficient Distributed 3D Gaussian Splatting Training via Intra- and Inter-GPU communication
+reduction. 1, 1 (October 2026), 22 pages. https://doi.org/10.1145/nnnnnnn.nnnnnnn
+1
+Introduction
+3D Gaussian Splatting (3DGS) [7, 8, 19, 36, 54] has emerged as a promising representation for photorealistic scene
+reconstruction. More recently, 3DGS has also become the foundational substrate for world models, including Spark [22]
+and HY-World 2.0 [40]. However, scaling 3DGS training to large scenes [20, 33, 39, 47] requires optimizing an increasingly
+large number of Gaussians. Studies [53] show that training these large-scale scenes can require more than 80 GB of
+∗ Corresponding Authors.
+Authors’ Contact Information: Shuo Wu, wushuo123@sjtu.edu.cn; He Zhu, zhcon16@sjtu.edu.cn; Han Zhao, Shanghai Jiao Tong University, Shanghai,
+China, zhao-han@cs.sjtu.edu.cn; Xiaohui Zhang, zhangxiaohui06@ieisystem.com; Yaqian Zhao, zhaoyaqian@ieisystem.com; Hui Wei, IEIT SYSTEMS
+Co., Ltd., Beijing, China, weihui@ieisystem.com; Ruyang Li, liruyang@ieisystem.com; Hongzhi Shi, shihzh@ieisystem.com; Lihua Lu, IEIT SYSTEMS
+Co., Ltd., Beijing, China, lulihua@ieisystem.com; Jingwen Leng, leng-jw@sjtu.edu.cn; Yu Feng, y-feng@sjtu.edu.cn; Minyi Guo, Shanghai Jiao Tong
+University, Shanghai, China, guo-my@sjtu.edu.cn.
+Permission to make digital or hard copies of all or part of this work for personal or classroom use is granted without fee provided that copies are not
+made or distributed for profit or commercial advantage and that copies bear this notice and the full citation on the first page. Copyrights for components
+of this work owned by others than the author(s) must be honored. Abstracting with credit is permitted. To copy otherwise, or republish, to post on
+servers or to redistribute to lists, requires prior specific permission and/or a fee. Request permissions from permissions@acm.org.
+© 2026 Copyright held by the owner/author(s). Publication rights licensed to ACM.
+Manuscript submitted to ACM
+Manuscript submitted to ACM
+1
+2
+Shuo Wu et al.
+memory, far exceeding the capacity of a single GPU. Therefore, distributing Gaussians across multiple GPUs is necessary
+to provide sufficient memory capacity.
+In mainstream distributed 3DGS training frameworks [18, 53], Gaussians are typically partitioned across multiple
+GPUs. At the beginning of each training iteration, each GPU retrieves the Gaussians required to render its assigned
+image regions from other GPUs. After completing its local computation, each GPU then sends partial Gaussian gradients
+back to the corresponding owner GPUs for gradient aggregation and parameter updates. Our characterization in Sec. 3
+shows that this computing paradigm leads to major performance bottlenecks. Thus, it is important for us to revisit its
+training dataflow.
+Bottlenecks. In Sec. 3, we identify two dominant bottlenecks during 3DGS training. The first bottleneck is the
+data movement within local GPU computation. Specifically, forward and backward rasterization introduce substantial
+off-chip memory traffic. During tile-based forward rasterization, each thread block loads the related Gaussian attributes
+from off-chip DRAM into on-chip SRAMs. Later on, backward rasterization reloads the same attributes again and writes
+a large volume of partial Gaussian gradients to off-chip memory for aggregation. Consequently, forward and backward
+rasterization account for 29.9% of the end-to-end training time and 37.9% of the off-chip memory traffic.
+The second bottleneck is from the inter-GPU communication. Before rasterization, Gaussian attributes are transferred
+from the owner GPUs to the rendering GPUs responsible for rendering the corresponding image regions and computing
+partial gradients. After backward rasterization, the partial gradients are then returned to the owner GPUs for aggregation
+and parameter updates. We show that this gradient aggregation stage is one of the bottleneck stages and accounts
+for 23.9% of the total training time. These observations show that distributed 3DGS training is constrained by both
+intra-GPU off-chip traffic and inter-GPU gradient communication. This motivates us to design ByteSplat, which
+optimizes data movement at both levels.
+Fused Rasterization. To reduce intra-GPU data movement, we propose a mega-kernel that fuses forward rasterization, loss computation, and backward rasterization into a single mega-kernel. Doing so, the kernel retains all
+necessary attributes on-chip throughout these stages and eliminates off-chip transfers of intermediate data between
+stages. In the conventional pipeline, forward and backward rasterization execute as separate kernels and exchange
+data through off-chip memory. Consequently, Gaussian attributes accessed during the forward rasterization must be
+reloaded during the backward rasterization, while the intermediate results between these two must be written back to
+DRAM. In contrast, our mega-kernel retains Gaussian attributes and intermediate results on-chip across both stages. For
+each tile, it loads the Gaussian data once, performs forward rasterization and the corresponding backward computation
+within a single kernel invocation. This way, it only writes the final outputs required by subsequent stages to off-chip
+memory. In Sec. 8.2, we show that this fused dataflow reduces off-chip memory traffic by 63.4%.
+Hardware-Aware Pruning. Although fused rasterization reduces off-chip memory traffic, a naive mega-kernel
+implementation can impose substantial pressure on on-chip memory. Because fusing forward and backward rasterization
+extends the lifetime of Gaussian attributes and intermediate results, it increases the shared-memory requirement of
+each thread block. This pressure can be further exacerbated by the uneven distribution of Gaussians across image tiles.
+Those tiles whose working sets exceed the per-block shared-memory limit cannot use the fused kernel. Even below this
+limit, large shared-memory allocations can reduce thread-block occupancy and offset the benefits of fusion.
+To address this challenge, we propose a hardware-aware Gaussian pruning strategy that explicitly accounts for the
+on-chip resource constraints of the target GPU. During training, our strategy first identifies image tiles for which fused
+execution is infeasible without pruning. For overloaded tiles, we then progressively remove low-importance Gaussians
+associated with these tiles and increase the fraction of tiles that satisfy the mega-kernel’s register and shared-memory
+Manuscript submitted to ACM
+ByteSplat : Efficient Distributed 3D Gaussian Splatting Training
+3
+budgets. Unlike conventional pruning methods that primarily target model size, our method incorporates hardware
+resource constraints and directly optimizes the execution efficiency of fused rasterization. By integrating pruning into
+the training process, the remaining Gaussians can adapt to compensate for the removed primitives. ByteSplat can
+alleviate on-chip resource pressure and improve fused-kernel efficiency while preserving reconstruction quality.
+Zero-Eliding Gradient Communication. To reduce inter-GPU data movement, we exploit the sparsity of partial
+Gaussian gradients. Existing distributed systems return the partial Gaussian gradients of every Gaussian received for
+local rendering, regardless of whether that gradient contributes to the final parameter update. Our characterization
+shows that up to 72.0% of these partial gradients are zero. Communicating zero gradients consumes interconnect
+bandwidth without contributing to gradient aggregation.
+Based on this observation, we propose zero-eliding gradient communication, which transfers only nonzero partial
+gradients required for gradient aggregation. Before communication, ByteSplat identifies partial gradients whose
+components are all exactly zero and compacts the remaining gradient results. After receiving the compacted data, each
+owner GPU decodes the representation and accumulates the nonzero gradients into the corresponding Gaussian parameters. To make compaction and reconstruction efficient, we further develop specialized encoder and decoder kernels
+that perform encoding and decoding with low overhead. Together, these techniques reduce inter-GPU communication
+volume by 46.2% and accelerate the end-to-end training time by 1.2×.
+Result. We integrate these three techniques into ByteSplat, an efficient distributed 3DGS training framework. We
+evaluate ByteSplat across six datasets with up to 21.6 million Gaussians. Compared with other baselines, ByteSplat
+reduces intra-GPU and backward inter-GPU data traffic by 63.4% and 65.8%, respectively. Together, ByteSplat achieves
+up to 6.1× speedup, while retaining reconstruction quality. The contributions of this paper are as follows:
+• We characterize the intra- and inter-GPU data movement in distributed 3DGS training and identify that data
+movement is the main performance bottleneck.
+• We propose fused rasterization, which fuses forward rasterization, loss computation, and backward rasterization,
+reducing off-chip transfers of intermediate results.
+• We propose hardware-aware training to maximize the performance benefits of the fused rasterization.
+• We introduce zero-eliding gradient communication, which avoids transmitting zero-valued partial gradients
+between rendering and owner GPUs with low processing overhead.
+• We integrate these techniques into ByteSplat and achieve up to 6.1× speedup over 8-GPU baseline.
+2
+Background
+We first describe the single-GPU pipeline of 3DGS training in Sec. 2.1. We then explain how distributed systems partition
+the training workload across multiple GPUs in Sec. 2.2.
+2.1
+Single-GPU Training Pipeline
+The goal of 3DGS training is to optimize a set of Gaussians, G = {𝐺𝑖 }, that represent a 3D scene. Each Gaussian
+𝐺𝑖 contains 3D information, opacity, and a set of spherical-harmonic coefficients that describe its view-dependent
+color. Given an initial point cloud and a set of posed training images, 3DGS training iteratively refines its Gaussian
+representation via a forward pass and a backward pass [19]. The overall pipeline is shown in Fig. 1.
+Forward Pass. The forward pass renders an image from a selected camera view and computes its loss against the
+corresponding ground-truth image with four stages: projection, sorting, forward rasterization, and loss computation.
+Manuscript submitted to ACM
+4
+Shuo Wu et al.
+GPUN-1
+GPU0
+6
+1
+9
+2
+10
+3
+11
+…
+Projection
+5
+16
+7
+19
+12
+T2 4
+4
+7
+T1 2
+T3 3
+5
+7
+Forward All-to-All
+Communication
+Sorting
+…
+…
+Local
+Aggregation
+Gaussian
+Scene,
+1
+: (0.1, …, 0.2)
+2
+: (0.2, …, 0.1)
+9
+7
+: (0.2, …, 0.2)
+…
+T0 1
+11
+T2 4
+12
+4
+10
+7
+13
+T1 2
+6
+T3 3
+14
+5
+9
+7
+16
+Legend
+Forward
+Rasterization
+Gaussian-wise
+Stages
+All-to-All
+Communication
+Tile-Gaussian
+Sorted List
+Tile-Gaussian
+Intersection List
+4
+14
+T0 1
+Backward All-to-All
+Communication
+1
+: 0.6
+2
+: 0.8
+9
+7
+M
+M : (0.2, …, 0.2)
+Backward
+Rasterization
+: 2.3
+…
+: 1.6
+Tile-wise
+Stages
+(
+Rendered
+Image
+,
+Ground
+Truth
+)
+Partial
+Gradient
+Aggregated
+Gradient List
+Fig. 1. Overview of the distributed 3DGS training pipeline. Each owner GPU projects its locally stored Gaussians for each selected
+camera view and performs forward Gaussian all-to-all communication to send the attributes of intersected Gaussians to the rendering
+GPUs responsible for the intersected image tiles. The rendering GPUs then construct and sort tile-Gaussian lists, perform forward
+and backward rasterization, and compute partial Gaussian gradients. Backward gradient all-to-all communication then returns these
+partial gradients to the corresponding owner GPUs for local aggregation and parameter updates. Blue, pink, and orange boxes denote
+Gaussian-wise stages, inter-GPU communication, and tile-wise stages, respectively.
+Projection. Given a camera pose, projection first transforms each Gaussian from the world coordinate system into
+the camera coordinate system. It then projects the Gaussian onto the 2D image plane. This stage operates Gaussian-byGaussian. Based on the projected results, this stage determines which image tiles are intersected by each Gaussian and
+generates a tile-Gaussian intersection list.
+Sorting. After projection, each image tile obtains a list of intersecting Gaussians. These Gaussians are then sorted by
+their depths to the camera, from the nearest to the farthest.
+Forward Rasterization. This stage renders the image tile by tile. Each pixel traverses the Gaussians in its tile-Gaussian
+sorted list and performs 𝛼-checking to determine whether a Gaussian contributes to that pixel. For a pixel p, its color is
+computed through front-to-back alpha compositing:
+C(p) =
+𝑁p
+∑︁
+𝑇𝑖 𝛼𝑖 c𝑖 ,
+𝑖=1
+𝑇𝑖 =
+𝑖 −1
+Ö
+(1 − 𝛼 𝑗 ),
+(1)
+𝑗=1
+where 𝑁 p is the number of Gaussians traversed by pixel p. Here, 𝛼𝑖 denotes the effective opacity of the 𝑖th Gaussian at
+pixel p, and c𝑖 denotes its view-dependent RGB color. 𝑇𝑖 represents the accumulated transmittance before that Gaussian.
+Rasterization terminates once the transmittance 𝑇𝑖 falls below a threshold, 𝜃𝑇 .
+Loss Computation. After rendering the selected view, the pipeline compares the rendered image with its ground-truth
+image. The training objective often combines an L1 loss L1 with a structural similarity loss LSSIM :
+L = (1 − 𝜆)L1 + 𝜆LSSIM,
+(2)
+where 𝜆 controls the relative weights of the two terms.
+Backward Pass. The backward pass propagates the pixel-wise loss to individual Gaussians. It consists of backward
+rasterization, gradient aggregation, and parameter updates.
+Backward Rasterization. This stage propagates the pixel-wise loss gradients to individual Gaussians. Loss computation
+first computes the color gradient of each rendered pixel, 𝜕L/𝜕C(p). Then, backward rasterization performs computation
+tile-by-tile. Specifically, it traverses the corresponding tile-Gaussian sorted list and computes the partial gradient
+Manuscript submitted to ACM
+ByteSplat : Efficient Distributed 3D Gaussian Splatting Training
+5
+contributed by each pixel-Gaussian pair:
+gp,𝑖 =
+𝜕L 𝜕C(p)
+,
+e𝑖
+𝜕C(p) 𝜕𝐺
+(3)
+e𝑖 denotes the screen-space attributes of Gaussian 𝐺𝑖 . Since one Gaussian can contribute to multiple pixels,
+where 𝐺
+backward rasterization generates multiple partial gradients for one Gaussian, which need to be aggregated later.
+Gradient Aggregation and Update. We perform Gaussian-wise gradient updates. For a Gaussian 𝐺𝑖 , its gradient is
+the sum of the partial gradients from all pixels to which it contributes:
+∑︁ 𝜕Lp
+g𝑖 =
+,
+e
+p:𝑖 ∈ I (p) 𝜕𝐺𝑖
+(4)
+e𝑖 denotes the screenwhere I (p) is the set of Gaussians contributing to pixel p, Lp is the pixel-wise loss of that pixel, and 𝐺
+space attributes of Gaussian 𝐺𝑖 . Because one Gaussian can contribute to many pixels, current GPU implementations
+commonly rely on atomic operations to accumulate these partial gradients correctly. After aggregation, the gradients
+are backpropagated through Gaussian projection and color evaluation to obtain gradients of the original 3D Gaussian
+parameters. The optimizer then updates the Gaussian positions, scales, rotations, opacities, and SH coefficients.
+2.2
+Distributed Training Pipeline
+To support large-scale scenes, distributed 3DGS training partitions both Gaussians and rendering workloads across
+multiple GPUs [53]. As shown in Fig. 1, different stages expose different execution granularities. Thus, distributed
+training adopts different data partitions for different stages.
+Overview. At initialization, all Gaussians are divided into subsets and distributed across the GPUs. Each Gaussian is
+assigned to an owner GPU, which stores its trainable parameters and optimization state. This Gaussian-wise partition is
+used in projection and Gaussian update, where each GPU processes its locally owned Gaussians independently.
+For the remaining stages, each selected training image is divided into fixed-size tiles, e.g., tiles of 16 × 16 pixels. The
+tiles are partitioned into subsets. Each subset is assigned to a rendering GPU. Each rendering GPU performs sorting,
+forward rasterization, loss computation, and backward rasterization for its assigned tiles. Because different tiles may
+have different Gaussian workloads, the tile assignment can be periodically adjusted to mitigate workload imbalance.
+Note that, the owner GPUs and the rendering GPUs are two logical roles of the same physical GPUs. Because the
+Gaussians required for a tile may be distributed across multiple owner GPUs, a rendering GPU generally does not
+locally store all the Gaussians for its assigned tiles. Therefore, Gaussian data need to be exchanged in distributed
+training when transitioning between Gaussian-wise and tile-wise stages. Next, the following paragraphs describe the
+two communication points introduced by these transitions.
+Forward Gaussian Communication. During this stage, for each selected camera view, each owner GPU projects
+its locally owned Gaussians and identifies the rendering GPUs responsible for their intersected tiles. Based on their
+projected results, the owner GPU determines which image tiles each Gaussian intersects and identifies the rendering
+GPUs responsible for those tiles. The owner GPUs then perform sparse all-to-all communication to send the required
+Gaussians to the corresponding rendering GPUs. Here, sparsity refers to the subset of Gaussians exchanged between
+GPU pairs. For each Gaussian, we transfer its Gaussian depth, transmittance, and color attributes required by the
+subsequent stages. After receiving these attributes, each rendering GPU constructs the tile-Gaussian intersection lists
+and performs sorting, forward rasterization, and loss computation for its assigned tiles. This communication transitions
+the pipeline from the Gaussian-wise execution to the tile-wise execution.
+Manuscript submitted to ACM
+1248 1248 1248 1248 1248 1248
+s
+g
+D
+ity
+60
+19
+Mill- nScene3 MatrixC -NeRF 3 Blendin& Temple
+p
+Mip
+Dee Tanks
+Urba
+Exec. Breakdown (%)
+2000
+1000
+500
+200
+100
+50
+OOM
+Shuo Wu et al.
+Iteration
+Time (ms)
+6
+Forward Rast.
+Backward Rast.
+Gradient Agg.
+Para. Update
+Others
+100
+80
+60
+40
+20
+0
+Fig. 2. The Per-iteration Latency as the GPU Count Increases.
+s
+-19
+360
+City
+e3D
+ding emple
+Mill
+cen Matrix -NeRF p Blen
+T
+anS
+ks &
+Mip
+Dee
+Urb
+Tan
+Fig. 3. Execution-time Breakdown on A6000.
+Backward Gradient Communication. The second transition happens when each rendering GPU finishes backward
+rasterization and prepares to send the partial gradients back to the corresponding owner GPUs. Because a Gaussian
+may contribute to tiles assigned to multiple rendering GPUs, its partial gradients may be distributed across several
+GPUs. The rendering GPUs therefore perform reverse sparse all-to-all communication to send the partial gradients,
+together with their Gaussian IDs, back to the corresponding owner GPUs. Each owner GPU aggregates the received
+partial gradients for its locally owned Gaussians and updates the Gaussian parameters. In this case, the pipeline is
+transitioned from tile-wise execution to Gaussian-wise execution.
+3
+Motivation
+With the distributed training pipeline described in Sec. 2, we characterize the performance of the original 3DGS
+training [53] across six datasets [1, 16, 21, 29, 31, 42] and show four key insights that motivate our ByteSplat design.
+Insight 1: Forward/backward rasterization, gradient aggregation, and parameter update dominate training time.
+First, Fig. 2 shows the per-iteration latency of distributed 3DGS training as the GPU count increases from one
+to eight. We profile training on six datasets, including three large-scale datasets [29, 31, 42] and three small-scale
+datasets [1, 16, 21]. On a single GPU, iteration latency ranges from hundreds of milliseconds to over one second.
+Although additional GPUs reduce this latency, the overall per-iteration latency is still significant. For example, Mill19 [29] requires approximately 1.2 seconds per iteration on one GPU and 0.15 seconds on eight GPUs. These results
+motivate us to examine the execution-time breakdown and identify the bottleneck stages in the entire pipeline.
+Fig. 3 shows the execution breakdown of distributed training. Here, we evaluate over the six datasets on eight Nvidia
+A6000 GPUs [41]. Here, gradient aggregation includes the communication of partial gradients and their subsequent
+accumulation on the owner GPUs. Across the evaluated scenes, forward rasterization, backward rasterization, distributed
+gradient aggregation, and the following parameter updates take 17.0%, 13.0%, 23.8%, and 18.1% of the training time,
+respectively. Together, these four stages consume over 71.9% of the total execution time. Although their individual
+contributions vary across scenes, these stages collectively account for most training time. Therefore, accelerating all
+these stages is critical to improving the end-to-end performance of distributed 3DGS training.
+Insight 2: Forward and backward rasterization are memory-bound and incur redundant off-chip memory accesses.
+To understand the root cause of the rasterization overhead, Fig. 4 shows the roofline analysis of two bottleneck
+stages, forward rasterization and backward rasterization. The numbers are measured on eight Nvidia A6000 GPUs.
+Overall, these two stages are primarily memory-bound. This is because each thread block repeatedly loads the Gaussian
+attributes associated with an image tile from off-chip DRAM into on-chip memory in both forward and backward
+Manuscript submitted to ACM
+101
+DRAM roof
+Mill-19
+UrbanScene3D
+MatrixCity
+Mip-NeRF 360
+Deep Blending
+Tanks & Temples
+100
+10−1
+100
+101
+102
+Arithmetic Intensity (FP32 FLOP/byte)
+103
+7
+Performance
+(FP32 TFLOP/s)
+Performance
+(FP32 TFLOP/s)
+ByteSplat : Efficient Distributed 3D Gaussian Splatting Training
+101
+DRAM roof
+Mill-19
+UrbanScene3D
+MatrixCity
+Mip-NeRF 360
+Deep Blending
+Tanks & Temples
+100
+10−1
+100
+101
+102
+Arithmetic Intensity (FP32 FLOP/byte)
+(a) Forward rasterization.
+103
+(b) Backward rasterization.
+Fig. 4. The Roofline Analysis of Forward and Backward Rasterization.
+400
+200
+0
+100
+Backward
+248 248 248 248 248 248
+s
+g
+D
+ity
+60
+19
+Mill- nScene3MatrixC -NeRF 3 Blendin& Temple
+p
+Mip
+Dee Tanks
+Urba
+Zero-gradient
+Ratio (%)
+Comm. Volume
+(MB/view)
+Forward
+80
+72.0
+60
+40
+20
+47.9
+45.1
+49.8
+41.2
+21.4
+0
+s
+g
+D
+ity
+60
+19
+Mill- nScene3MatrixC -NeRF 3 Blendin& Temple
+p
+Mip
+Dee Tanks
+Urba
+Fig. 5. The Volume of Communication During Forward and Back- Fig. 6. The Percentage of Zero Gradients During Backward Graward.
+dient Communication.
+rasterization. Overall, repeated Gaussian-attribute accesses and intermediate-data transfers account for 63.4% of the
+off-chip traffic in these two stages. These results show an opportunity to reduce rasterization latency by retaining
+reusable data on-chip across the forward and backward rasterization.
+Insight 3: Backward gradient communication is nontrivial in the overall inter-GPU data communication.
+Distributed 3DGS training introduces inter-GPU communication at two places in the training pipeline: forward
+Gaussian communication and backward gradient communication. Specifically, after projection, forward Gaussian communication transfers the projected Gaussian attributes from their owner GPUs to rendering GPUs. After backward
+rasterization, backward gradient communication returns the Gaussian gradients from rendering GPUs to owner GPUs.
+Fig. 5 compares the communication volumes of these two stages across six datasets. Overall, as the GPU count
+increases from two to eight, the total all-to-all communication volume nearly doubles. This growth increases with
+the number of GPUs because distributing image tiles across more rendering GPUs can require the same Gaussian’s
+attributes to be sent to multiple GPUs and its partial gradients to be returned from each. Meanwhile, Both stages transfer
+substantial amounts of data, with backward gradient communication accounting for 45.0% of the total volume. Here,
+forward gradient communication cannot be avoided because it transfers necessary Gaussian attributes for rendering.
+Thus, reducing backward gradient communication can improve the scalability of distributed 3DGS training.
+Insight 4: A substantial fraction of communicated partial gradients are zero.
+We further examine the partial gradients transferred during backward gradient communication. We classify a partial
+gradient as zero when all gradient fields of a Gaussian are exactly zero. As shown in Fig. 6, up to 72.0% of partial gradients
+are zero. This sparsity remains consistently high across different datasets. The high zero ratio is because an overlap
+between a projected Gaussian and an assigned image tile does not guarantee that this Gaussian contributes to any pixel
+Manuscript submitted to ACM
+8
+Shuo Wu et al.
+Gaussian Attributes & Gaussian Statues
+Forward
+Rasterization
+Gaussian
+Attributes
+Pixel Values &
+Gaussian statues
+Loss
+Computation
+Pixel
+Values
+Per-Pixel
+Loss
+Backward
+Rasterization
+Gaussian Attributes
+& Per-PixeL Loss
+Forward
+Rasterization
+Partial
+Gradients
+Pixel Values
+Loss
+Computation
+Per-Pixel Loss
+Backward
+Rasterization
+Partial
+Gradients
+Gaussian
+Attributes
+DRAM
+DRAM
+(a) Off-chip memory traffic in the conventional 3DGS pipeline.
+(b) Off-chip memory traffic in ByteSplat fused rasterization.
+Fig. 7. Off-chip memory traffic comparison between the conventional 3DGS pipeline and our proposed fused rasterization in ByteSplat.
+Our fused rasterization eliminates the unnecessary intermediate data movements.
+processed by that rendering GPU. Early termination in rasterization can prevent the Gaussian from contributing to the
+rendered pixels and their loss. Thus, their partial gradient is zero. Since accumulating zero gradients does not affect the
+Gaussian update, these transfers consume interconnect bandwidth without affecting training.
+Together, these observations expose two major opportunities to reduce data movement in distributed 3DGS training.
+First, ByteSplat fuses forward and backward rasterization to eliminate redundant off-chip memory accesses. Second,
+ByteSplat elides zero-valued partial gradients to reduce backward inter-GPU communication.
+4
+Fused Rasterization
+As discussed in Sec. 3, forward rasterization and backward rasterization account for a large fraction of the training
+time. Meanwhile, existing pipelines execute them as separate GPU kernels. Consequently, intermediate results must
+be repeatedly written back to off-chip memory and reloaded by subsequent kernels. To eliminate this intra-GPU data
+movement, ByteSplat proposes a fused rasterization kernel.
+4.1
+Issues of the Existing Pipeline
+Fig. 7a illustrates the dataflow of the original pipeline. Forward rasterization processes each tile by loading its tileGaussian list and the corresponding Gaussian attributes from off-chip memory into on-chip shared memory. Since a tile
+can contain more Gaussians than shared memory can accommodate, the kernel loads and processes these Gaussians in
+batches. The kernel then performs front-to-back alpha blending and writes the rendered pixel colors required by the
+backward rasterization to off-chip memory.
+Then, loss computation is launched as a separate kernel after forward rasterization. This kernel reloads the rendered
+pixel colors from off-chip memory and compares them with the ground-truth image to compute the L1 and SSIM losses.
+It then writes the pixel-wise loss values and per-pixel gradients, 𝜕L/𝜕C(p), back to off-chip memory.
+Lastly, backward rasterization is launched as a standalone kernel. For each tile, it reloads the tile-Gaussian list, the
+Gaussian attributes, and the per-pixel gradients from off-chip memory. The kernel then traverses the tile-Gaussian list
+in reverse order and computes the partial gradient of each pixel-Gaussian pair. Finally, it writes the partial Gaussian
+gradients to off-chip memory for subsequent gradient aggregation.
+As shown in Fig. 7a, this execution paradigm introduces substantial redundant memory traffic. In particular, the
+Gaussian attributes are loaded twice in both forward and backward rasterization. Moreover, intermediate results, e.g.,
+the rendered pixels and per-pixel gradients, are written to off-chip memory by one kernel only to be immediately
+reloaded by another. These redundant memory accesses make both rasterization stages memory-bound.
+Manuscript submitted to ACM
+ByteSplat : Efficient Distributed 3D Gaussian Splatting Training
+4.2
+9
+Fused Rasterization Dataflow
+Overview. To address this inefficiency, ByteSplat fuses forward rasterization, loss computation, and backward
+rasterization into a single mega-kernel, as shown in Fig. 7b. For each tile, the fused kernel loads the relevant Gaussian
+attributes from off-chip memory and retains them on-chip across the forward and backward rasterization. After forward
+rasterization produces the rendered pixels, the kernel immediately computes the corresponding per-pixel gradients.
+These intermediate gradients remain on-chip and are directly consumed by backward rasterization without being
+written back to off-chip memory. Backward rasterization then computes the partial Gaussian gradients and writes only
+the outputs to off-chip memory for gradient aggregation.
+This fused dataflow eliminates the round trips of rendered pixels, intermediate rasterization states, and per-pixel
+gradients through off-chip memory. It also allows the forward and backward rasterization to reuse Gaussian attributes
+while avoiding redundant attribute loading.
+Tile-Local Loss Computation. One caveat here is that fusing loss computation with rasterization is challenging.
+Because the conventional SSIM loss introduces dependencies across image tiles. SSIM loss computes the structural
+similarity over a spatial window surrounding each pixel. For pixels near a tile boundary, this window can contain pixels
+processed by other thread blocks or rendering GPUs. A thread block therefore cannot compute SSIM loss using only
+the pixel values generated for its own tile.
+To eliminate these dependencies, ByteSplat adopts the stochastic structural similarity loss, S3IM [48], and applies it
+independently within each image tile. For a tile 𝑡, ByteSplat computes the training loss as,
+
+
+L𝑡 = (1 − 𝜆)L1 C𝑡 , C𝑡∗ + 𝜆LS3IM C𝑡 , C𝑡∗ ,
+(5)
+where C𝑡 and C𝑡∗ denote the rendered and ground-truth pixel colors of tile 𝑡, respectively. The LS3IM term makes its
+structural comparisons using only pixels belonging to the same tile. Consequently, each thread block can compute its
+pixel-wise gradients using only its locally generated pixels.
+After forward rasterization, the fused kernel retains the rendered pixels in shared memory and directly evaluates the
+loss function. It then keeps the pixel-wise gradients on-chip for immediate consumption by backward rasterization.
+Because the computation has no dependencies on neighboring tiles, it requires neither cross-block synchronization
+nor boundary-data exchange between GPUs. Our evaluation in Sec. 8 shows that the tile-local loss preserves the same
+reconstruction quality as the original implementation.
+5
+Hardware-Aware Training
+Although fused rasterization eliminates substantial off-chip memory traffic, it introduces a new challenge: increased onchip resource pressure. In this section, we first explain why applying fused rasterization to all image tiles is impractical.
+We then present a novel hardware-aware training that increases the fraction of tiles that can benefit from fusion.
+5.1
+Challenges
+In the conventional pipeline, forward rasterization, loss computation, and backward rasterization execute as separate
+GPU kernels, as shown in Fig. 7a. Between kernels, intermediate results have to be written to off-chip memory and
+subsequently reloaded by the consumer kernel. Thus, this execution model incurs substantial off-chip memory traffic.
+Fused rasterization makes the opposite tradeoff. It retains all intermediate data, e.g., Gaussian attributes and pixel
+values, on-chip until backward rasterization completes, e.g., Fig. 7b. Keeping the data on-chip eliminates intermediate
+Manuscript submitted to ACM
+10
+Shuo Wu et al.
+Stage 1: Classic Training Process
+Stage 2: Contribution-Based Pruning
+N
+Training
+Initial
+Point Cloud
+Ik iterations
+Gaussian
+Densification
+Are all densification
+rounds completed?
+Y
+Find Top Contributor
+for Each Pixel
+Remove Non-Dominant
+Gaussians
+Finetune
+IM iterations
+Stage 3: Hardware-Aware Pruning
+Final
+Gaussian Model
+Y
+Tiles within budgets? Or
+predefined round reached?
+Hardware-Aware Pruning
+Remove High-Qi Gaussian
+Rank Gaussian
+Priority, Qi
+Compute Tile
+Overload, Pt
+Derive Tile Budget B from
+Shared-Memory Capacity
+N
+Fig. 8. Overview of ByteSplat’s three-stage training strategy. Stage 1 follows the classic 3DGS training process. Stage 2 then identifies
+the dominant Gaussian contributor for each training pixel, removes Gaussians that never become a dominant contributor, and
+fine-tunes the remaining representation. Stage 3 computes the per-tile Gaussian budget 𝐵 from the shared-memory capacity of the
+target GPU, calculates the tile overload 𝑃𝑡 , and ranks Gaussians using the pruning priority 𝑄𝑖 . It then iteratively removes high-priority
+Gaussians until all tiles satisfy their budgets or the predefined pruning-round limit is reached.
+off-chip accesses but substantially increases the shared-memory pressure of the fused kernel. Moreover, the sharedmemory requirement varies across thread blocks. Because each thread block processes one image tile, its on-chip
+memory requirement depends on how many Gaussians intersect with that tile. A tile intersected by more Gaussians
+requires the fused kernel to retain a larger amount of data on-chip.
+If the shared-memory requirement of a tile exceeds the per-block capacity, that tile cannot execute through the fused
+kernel. Even when the requirement remains below the hardware limit, a large per-block shared-memory allocation can
+reduce the number of concurrently resident thread blocks on each streaming multiprocessor. This could weaken the
+GPU’s ability to overlap compute and memory latency, potentially offsetting its benefits of reduced off-chip traffic.
+Therefore, directly applying fused rasterization to every tile is neither practical nor efficient. ByteSplat must
+determine which tiles can execute efficiently within the shared-memory budget of the target GPU. Tiles that exceed
+this budget must follow the conventional execution path and store their intermediate data back to off-chip memory.
+Thus, we introduce a training strategy in Sec. 5.2 to maximize fusion coverage while preserving reconstruction quality.
+5.2
+Training Strategy
+To alleviate shared-memory pressure, ByteSplat proposes a three-stage training strategy in Fig. 8 that increases the
+fraction of tiles eligible for fused rasterization. The first stage follows the classic 3DGS training procedure to construct an
+initial Gaussian representation. Then, the second stage removes insignificant Gaussians that make no major contribution
+to any image in the training set. Lastly, the final stage accounts for the GPU shared-memory capacity and progressively
+removes unimportant Gaussians from overloaded tiles. Thus, more tiles can leverage fused rasterization.
+Stage 1: Initial Training and Densification. Starting from the initial point cloud, ByteSplat first trains a
+Gaussian representation using the classic 3DGS training procedure. At each predefined iteration interval, 𝐼𝑘 , it performs
+densification to add Gaussians in scene regions that require more fine-grained representations. This training process
+is repeated for multiple rounds until the overall training reaches the predefined training iteration, 𝐼 𝑁 . At this stage,
+ByteSplat does not impose any hardware-dependent constraints.
+Stage 2: Contribution-Based Initial Pruning. After standard training, ByteSplat first removes Gaussians that
+make no major contribution to any rendered pixel. Specifically, we identify the Gaussian with the largest rendering
+Manuscript submitted to ACM
+ByteSplat : Efficient Distributed 3D Gaussian Splatting Training
+11
+contribution to each pixel p in the training set,
+𝑖 ∗ (p) = arg max (𝑇𝑖 𝛼𝑖 c𝑖 ),
+𝑖 ∈ I (p)
+(6)
+where I (p) is the set of intersected Gaussians contributing to pixel p, and (𝑇𝑖 𝛼𝑖 c𝑖 ) is the rendering contribution of
+Gaussian 𝐺𝑖 to that pixel. 𝑖 ∗ (p) is the index of that important Gaussian. We then retain the union of the important
+Gaussians, Gi∗ , selected by all pixels across the training set.
+This initial pruning stage is independent of the target hardware. Its purpose is to eliminate redundant Gaussians
+before applying the more aggressive hardware-aware pruning. After initial pruning, ByteSplat further finetunes the
+remaining Gaussians for 𝐼𝑀 iterations without densification so that they can compensate for the removed Gaussians.
+Stage 3: Hardware-Aware Pruning. After finetuning, ByteSplat further prunes the Gaussian representation based
+on the shared-memory capacity of the target GPU. We first translate the shared-memory constraint into the maximum
+number of Gaussians that can be processed by one fused thread block. Here, 𝑀budget is the shared-memory budget
+assigned to each thread block, 𝑀fixed is the fixed storage requirement per tile, and 𝑀g is the on-chip storage required for
+each Gaussian. The Gaussian budget of each tile is,
+
+𝐵=
+
+𝑀budget − 𝑀fixed
+.
+𝑀g
+(7)
+Because 𝑀budget and 𝑀fixed can be determined offline by the target GPU and the implementation, the budget 𝐵 explicitly
+reflects the underlying hardware configuration.
+For each tile 𝑡, ByteSplat then counts the number of intersected Gaussians, denoted by 𝑁𝑡 . The number of excess
+Gaussians in that tile can be expressed as,
+𝐸𝑡 = max (0, 𝑁𝑡 − 𝐵) .
+(8)
+A tile is eligible for fused rasterization when 𝐸𝑡 = 0, and it is overloaded when 𝐸𝑡 > 0.
+To reduce the number of overloaded tiles, we first propose a metric to quantify the severity of this overload using
+the tile-level overload pressure, 𝑃𝑡 :
+max (0, 𝑁𝑡 − 𝐵)
+.
+(9)
+𝑁𝑡
+𝑃𝑡 is 0 when 𝑁𝑡 = 0. A larger 𝑃𝑡 means that a larger fraction of the Gaussians intersecting tile 𝑡 must be removed before
+𝑃𝑡 =
+this tile can satisfy the hardware budget.
+Meanwhile, one Gaussian can intersect multiple tiles. We need to determine which Gaussian should be removed to
+achieve the maximal shared-memory pressure reduction across multiple thread blocks simultaneously. We therefore
+define the overload pressure of Gaussian 𝐺𝑖 as,
+𝑃𝑖 =
+∑︁
+𝑃𝑡 ,
+(10)
+𝑡 ∈ T𝑖
+where T𝑖 is the set of tiles intersected by Gaussian 𝐺𝑖 . We assign a high pressure score, 𝑃𝑖 , to a Gaussian that contributes
+to many severely overloaded tiles.
+However, hardware pressure alone cannot determine which Gaussians to remove because we must preserve visually
+important Gaussians. Thus, we define 𝐼𝑖 to be the normalized relative importance of Gaussian 𝐺𝑖 , derived from its
+rendering contribution. We calculate its pruning priority as,
+𝑄𝑖 =
+𝑃𝑖
+,
+𝐼𝑖 + 𝜖
+(11)
+Manuscript submitted to ACM
+12
+Shuo Wu et al.
+where 𝜖 is a small constant that prevents numerical instability. A Gaussian receives a high pruning priority when it has
+high contributions to the overloaded tiles but has low relative importance to reconstruction quality.
+During our last stage, ByteSplat performs several rounds of pruning. Each time, ByteSplat ranks the candidate
+Gaussians in descending order of 𝑄𝑖 . It then removes the 𝛽 percent highest-priority candidates from the overall Gaussian
+representation. Next, ByteSplat would finetune 𝐼𝑜 iterations. The pruning process continues until the targeted tiles
+satisfy their Gaussian budgets or the predefined round of pruning is reached. This way, we can remove low-importance
+Gaussians whose removal creates the greatest number of additional fusion opportunities.
+Unlike conventional pruning methods that primarily minimize the global model size, our strategy directly reshapes
+the per-tile Gaussian distribution according to the shared-memory capacity of the target GPU. The results in Sec. 8.3
+show that our training process increases the fraction of fusion-eligible tiles from 33.2% to 50.7% while preserving
+reconstruction quality, compared to prior pruning methods.
+6
+Zero-Eliding Gradient Communication
+As discussed in Sec. 3, the gradient aggregation in the backward pass dominates the inter-GPU communication latency
+of distributed 3DGS training. Existing systems communicate all partial gradients of every Gaussian processed by a
+rendering GPU, regardless of the value of that gradient. However, our characterization shows that up to 72.0% of these
+gradients are zeros. This motivates ByteSplat to eliminate zero-value gradients before communication.
+We first present Zero-Gradient Elision that identifies and removes zero-value gradients without changing the training
+semantics. Then, we present an efficient Sparse Gradient Transmission for effective encoding and communication.
+6.1
+Zero-Gradient Elision
+As described in Sec. 2.1, projection associates a Gaussian with every intersecting image tile. However, a tile-Gaussian
+intersection does not guarantee that this Gaussian contributes to any pixel in this image tile. This is because a Gaussian
+may be skipped by a pixel when the accumulated transmittance of the pixel reaches the early-termination threshold.
+Consequently, many Gaussians communicated to a rendering GPU do not contribute to any pixel assigned to that GPU.
+Naturally, those skipped Gaussians will obtain zero gradient during the gradient backpropagation.
+However, existing distributed 3DGS systems use the same indexing during forward Gaussian communication to
+return partial gradients to owner GPUs. This symmetric indexing simplifies gradient routing because the owner GPU
+can recover the destination Gaussian directly from the original communication order. However, it also forces the
+rendering GPU to return gradients of every Gaussian, including those whose partial gradients are zero.
+To avoid this redundant data communication, ByteSplat examines each partial-gradient record after backward
+rasterization and flags those Gaussians whose gradients are zero. After flagging, ByteSplat removes these zero-value
+gradients from the reverse-communication buffer without deleting the corresponding Gaussians from the model. It
+retains only the Gaussians and their partial gradients containing at least one nonzero gradient value. Because every
+omitted partial gradient is exactly zero, this optimization preserves the result of gradient aggregation and does not affect
+training semantics. By avoiding these redundant gradients, ByteSplat reduces both the inter-GPU communication
+volume and the local gradient aggregation overhead. The next subsection describes how ByteSplat efficiently packs
+and transmits the remaining nonzero gradient records.
+6.2
+Sparse Gradient Transmission
+To support zero-gradient elision, ByteSplat introduces a GPU-efficient encoding and sparse communication scheme.
+Manuscript submitted to ACM
+ByteSplat : Efficient Distributed 3D Gaussian Splatting Training
+G0
+G1
+G2
+G3
+G4
+G5
+G6
+G7
+Partial Gradients
+Encoding
+Kernel
+Bitmap: 1 0 0 0 1 1 0 0
+Index List: 0, 4, 5
+13
+Sparse
+All-to-All
+Decoding
+Kernel
+Sparse Local
+Gradient Aggregation
+G0
+… GN
+Local
+Gaussians
+Fig. 9. Overview of zero-gradient elision and sparse gradient transmission in ByteSplat. The rendering GPU packs nonzero gradients
+using a bitmap, and the owner GPU decodes and directly aggregates the sparse gradients.
+Encoding Scheme. In Fig. 9, after backward rasterization, ByteSplat first groups the partial gradients according to
+their destination owner GPUs, and then divides each partition into fixed-size chunks. The encoder assigns one thread
+block to each chunk and one thread to a subset of gradients in a chunk. Each thread checks whether the gradients are
+nonzero, and the threads collectively construct a bitmap that identifies the nonzero gradients. The thread block then
+performs an on-chip prefix sum to determine the packed position of each nonzero gradient. Finally, the encoder writes
+the nonzero gradients contiguously into a compact array.
+Sparse Communication and Local Aggregation. After encoding, the rendering GPUs exchange their compact
+array with the corresponding bitmap and perform a variable-length sparse all-to-all communication. On each owner
+GPU, the decoder assigns each received chunk to one thread block and uses its bitmap to recover the original positions
+of the retained gradients. The decoder then uses the forward communication indexing to map those partial gradients to
+its local Gaussian indices. Rather than reconstructing the original dense gradient array, the decoder directly accumulates
+each nonzero gradient into the corresponding Gaussian gradient buffer. Because a Gaussian may receive gradients
+from multiple rendering GPUs, these updates use atomic operations to ensure correctness. By completely skipping the
+zero-value gradients, this design reduces the workloads in both inter-GPU communication and local aggregation.
+7
+Experimental Setup
+Hardware platforms. To evaluate the robustness of our training framework, we evaluate ByteSplat on two GPU
+servers with different interconnect configurations. One is an A6000 server with eight Nvidia A6000 GPUs. Each has
+48 GB GDDR6 memory. The other one is an A100 server with eight Nvidia A100 GPUs. Each has 80 GB HBM memory.
+We then measure the end-to-end performance of distributed training, including the kernel launch time.
+Datasets. Our evaluation covers six widely-used datasets, including Mill-19 [42], UrbanScene3D [31], MatrixCity [29], Mip-NeRF 360 [1], DeepBlending [16], Tanks&Temples [21]. The first three datasets are for large-scale scene
+reconstruction, including various urban scenes. The remaining scenes are well-known 3DGS datasets with different
+indoor and outdoor scenes. For both training and evaluation, we all use the native image resolution. For testing, we
+reserve every eighth view in the dataset, following the standard 3DGS protocol [53].
+Training Settings. We train every scene at its native resolution on eight GPUs with one camera per GPU. Because
+the scenes differ substantially in scale, we do not terminate initial training at a common iteration count. Instead, we
+resume densification from intermediate checkpoints until the Gaussian population and validation quality stabilize,
+and then disable densification and opacity reset for a final convergence phase. Across our workloads, initial training
+takes approximately 200k iterations on average, with the exact stopping point adjusted to scene scale and convergence.
+We apply pruning only after this initial model has converged. The retained Gaussians are then fine-tuned for another
+30k iterations with densification disabled; all quality and performance results use the checkpoint at the end of this
+fine-tuning phase. The unpruned and pruned runs otherwise use the same data split, image resolution, loss, and
+optimizer hyperparameters.
+Manuscript submitted to ACM
+14
+Shuo Wu et al.
+Original
+ByteSplat
+29.4 29.5
+27.7 27.9
+28.5 28.6
+25.2 25.1
+23.8 23.8
+21.9 21.9
+-19
+360
+City
+e3D
+ples
+ding
+Mill
+cen Matrix -NeRF p Blen & Tem
+anS
+Mip
+Dee Tanks
+Urb
+(a) PSNR. Higher is better.
+SSIM
+PSNR (dB)
+Original
+32
+30
+28
+26
+24
+22
+20
+0.95
+0.90
+0.85
+0.80
+0.75
+0.70
+0.65
+0.87 0.87
+ByteSplat
+0.86 0.86
+0.89 0.89
+0.84 0.84
+0.74 0.73
+0.70 0.69
+-19
+360
+City
+e3D
+ples
+ding
+Mill
+cen Matrix -NeRF p Blen & Tem
+anS
+Mip
+Dee Tanks
+Urb
+(b) SSIM. Higher is better.
+Fig. 10. Rendering quality before and after hardware-aware pruning.
+Metrics. We evaluate training performance using end-to-end latency and speedup, and reconstruction quality using
+PSNR and SSIM. To assess our hardware-aware training, we report the pruning ratio, defined as the fraction of Gaussians
+removed from the original training. Meanwhile, we also report the percentage of image tiles whose Gaussian working
+sets fit within the fused-kernel resource budget before and after applying our pruning technique.
+Variants. Our evaluation also includes several variants to dissect the contributions in ByteSplat:
+• Base: this variant follows the techniques in the original Grendel-GS [53].
+• Base+Fused: this variant only applies our fused rasterization on top of Base.
+• Base+Fused+SpComm: this variant applies both our fused rasterization and our sparse communication.
+• ByteSplat: this one is our full-fledged implementation of ByteSplat design with all proposed techniques.
+8
+Evaluation
+8.1
+Rendering Quality
+Fig. 10 shows the overall quality comparison between the original Grendel-GS framework [53] and ByteSplat with
+hardware-aware training. Specifically, Fig. 10a shows the PSNR results of two methods over six different datasets.
+Overall, ByteSplat achieves similar visual quality with virtually no PSNR degradation. The largest degradation is only
+0.1 dB, while the average PSNR increases by 0.04 dB. Notably, several scenes improve the quality slightly after pruning.
+This shows that our hardware-aware training allows the remaining Gaussians to accommodate the contribution of
+removed Gaussian primitives.
+Similarly, Fig. 10b shows the same trend in SSIM. On average, Grendel-GS achieves 0.82 in SSIM, while ByteSplat
+achieves 0.81. The largest SSIM decrease is 0.01. Together, the PSNR and SSIM results show that ByteSplat can reshape
+the Gaussian distribution for fused execution without causing a noticeable loss in rendering quality.
+8.2
+Performance
+Overall Performance. Next, we show the performance comparison between Grendel-GS and ByteSplat in Fig. 11. To
+show the robustness of ByteSplat, we measure the performance on two different server platforms: an A6000 server
+with eight Nvidia A6000 GPUs in Fig. 11a and an A100 server with eight Nvidia A100 GPUs in Fig. 11b. Here, we
+measure the per-iteration latency and calculate the relative speedup of ByteSplat compared to Grendel-GS. On the
+A6000 server, ByteSplat achieves an average speedup of 3.4× and up to 6.1× over the original pipeline. On A100, the
+corresponding average and maximum speedups are 2.7× and 3.6×. These improvements include all three sources of
+Manuscript submitted to ACM
+ByteSplat : Efficient Distributed 3D Gaussian Splatting Training
+Original
+ByteSplat
+Original
+Small-scale
+4
+6.1
+3.3
+3.1
+2.6
+ByteSplat
+Large-scale
+Speedup
+Speedup
+Large-scale
+7
+6
+5
+4
+3
+2
+1
+0
+15
+2.9
+2.4
+Small-scale
+3.6
+3.0
+3
+2.8
+2.8
+2.1
+2.1
+2
+1
+0
+-19
+360
+City
+e3D
+ples
+ding
+Mill
+cen Matrix -NeRF p Blen & Tem
+anS
+Mip
+Dee Tanks
+Urb
+-19
+360
+City
+e3D
+ples
+ding
+Mill
+cen Matrix -NeRF p Blen & Tem
+anS
+Mip
+Dee Tanks
+Urb
+(a) Eight Nvidia A6000 GPUs.
+(b) Eight Nvidia A100 GPUs.
+Fig. 11. End-to-end per-iteration training speedup. We normalize all numbers to the corresponding Grendel-GS baselines.
+Read
+78.3
+Write
+spComm
+73.3
+2.5
+76.6
+69.1
+59.4
+60
+46.0
+40
+26.0
+20
+Pruning
+100
+81.7
+81.2
+9.8
+0
+s
+g
+D
+ity
+60
+19
+Mill- nScene3 MatrixC -NeRF 3 Blendin& Temple
+p
+s
+Mip
+Dee
+Urba
+Tank
+80
+2.0
+14.5
+60
+21.2
+16.8
+35.5
+13.7
+40
+72.0
+15.8
+20
+47.9
+45.1
+49.8
+41.2
+Speedup
+80.2
+75.7
+Backward Comm.
+Reduction (%)
+Off-chip Traffic
+Reduction (%)
+80
+2.02
+1.97
+20
+40
+1.95
+1.99
+1.98
+1.98
+100
+120
+1.5
+1.0
+0.5
+21.4
+0
+s
+g
+D
+ity
+60
+19
+Mill- nScene3 MatrixC -NeRF 3 Blendin& Temple
+p
+s
+Mip
+Dee
+Urba
+Tank
+0.0
+60
+80
+Gaussian Count (M)
+Fig. 12. Reduction of Off-chip Memory Ac- Fig. 13. Reduction of Inter-GPU Commu- Fig. 14. Training Speedup with Increasing
+cesses.
+nication.
+Gaussian Count.
+data-movement reduction: fused rasterization avoids redundant DRAM traffic, hardware-aware pruning increases the
+fraction of tiles that use the fused path, and zero-gradient elision reduces backward communication and aggregation.
+Sec. 8.3 further shows an ablation study of ByteSplat on an A6000 server to show the contribution of each component.
+Cross-Platform Performance. ByteSplat improves training performance across both large-scale and small-scale
+scenes. The variation across scenes shows two things: 1) the amount of work removed by pruning and 2) the fraction of
+the original iteration spent in rasterization and gradient aggregation. Dense scenes often provide more opportunities to
+reduce data movement, while pruned bounded scenes can also obtain large gains. The consistent performance gains on
+A6000 and A100 servers further show that ByteSplat is not tied to one particular GPU compute resource, memory
+bandwidth, or interconnect performance.
+Performance with Various Model Sizes. We also evaluate whether the performance benefit of ByteSplat persists
+as the Gaussian representation grows beyond the scale of our main evaluation. Specifically, we keep the training
+configuration unchanged and increase the representation from 20.3 million to 120.2 million Gaussians on the A100
+server. As shown in Fig. 14, ByteSplat maintains a stable 1.9-2.0× speedup over the Grendel-GS implementation across
+all six model sizes under the same Gaussian counts, even as the representation grows over 100 million Gaussians. At
+the largest scale, ByteSplat reduces the per-iteration latency from 114.4 to 57.8 ms. The consistent speedup confirms
+that the reduction in redundant data movement continues to benefit training as the Gaussian workload increases.
+Reduction of Off-chip Memory Accesses. To further show the source of our performance gain, we first show the
+reduction of off-chip memory accesses. This shows why our fused rasterization can improve performance. Specifically,
+we use GPU performance counters to compare Base with Base+Fused while keeping the Gaussian representation
+and all other training settings unchanged. We report off-chip reads and writes separately in Fig. 12 because fused
+Manuscript submitted to ACM
+16
+Shuo Wu et al.
+Base
+Base+Fused
+Base+Fused+SpComm
+Large-scale
+Small-scale
+6.1
+6
+Speedup
+ByteSplat
+5
+4
+3.3
+3
+2
+1.6
+9
+e3D
+Scen
+Urban
+1.4
+1.1
+City
+Matrix
+2.9
+2.4
+1.8
+1.2 1.4
+1
+Mill-1
+3.1
+2.6
+2.0
+60
+eRF 3
+Mip-N
+1.7
+1.1
+Deep
+1.4
+ing
+Blend
+Tanks
+1.0 1.2
+ples
+& Tem
+Fig. 15. The ablation study of per-iteration performance on the four variants shown in Sec. 7. All performance numbers are normalized
+to the Base variant. The performance is measured on an A6000 server with eight A6000 GPUs.
+rasterization affects them in different ways. Across the six datasets, it reduces read traffic by 55.4% on average and by up
+to 78.3%, mainly by avoiding repeated loads of Gaussian attributes and intermediate states. It also reduces write traffic
+by 70.9% on average and by up to 81.7%, as rendered colors and loss gradients no longer need to be stored between
+separate stages. The consistent reductions in both directions confirm that retaining reusable data on chip removes a
+large fraction of the data movement in the original pipeline.
+Reduction of Inter-GPU Communication. In addition, we further show the effectiveness of both hardware-aware
+training and zero-gradient elision by showing the inter-GPU communication reduction. Specifically, Fig. 13 shows the
+inter-communication reductions in the backward pass. Each stacked bar normalizes the reduction to the communication
+volume of the original pipeline in Grendel-GS. First, sparse communication removes zero gradients from the unpruned
+representation, reducing traffic by 46.2% on average and by up to 72.0% across the six datasets. Applying hardware-aware
+pruning next contributes a further 19.6% on average and up to 35.5% by reducing the unnecessary Gaussian points.
+Together, the two stages reduce backward communication by 65.8% on average and by up to 86.5% relative to the original
+pipeline. The benefits are complementary: hardware-aware pruning reduces the number of Gaussians in communication,
+while zero-gradient elision removes the remaining records that do not affect the model update. Because ByteSplat
+elides only exactly zero gradients, this communication optimization does not change the final rendering quality.
+8.3
+Ablation Study
+Setup. We use a cumulative ablation study to show how each major component contributes to the end-to-end
+performance of ByteSplat. All configurations use the same eight-GPU A6000 server, camera order, and training setup
+as the end-to-end experiment. Base follows the original Grendel-GS pipeline; Base+Fused adds fused rasterization;
+Base+Fused+SpComm further enables sparse gradient communication while retaining the same unpruned models; and
+ByteSplat evaluates the full-fledged system on the corresponding hardware-aware pruned models. Every bar shows
+speedup relative to Base on the original unpruned Gaussian model.
+Overall Performance. As shown in Fig. 15, across the six datasets, Base+Fused achieves a geometric-mean speedup
+of 1.2×. By introducing zero-eliding elision, Base+Fused+SpComm boosts the speedup to 1.6×, i.e., a further 1.3×
+improvement over Base+Fused. Applying the full-fledged system, ByteSplat raises the end-to-end speedup to 3.2×,
+which is 2.1× faster than Base+Fused+SpComm.
+Manuscript submitted to ACM
+ByteSplat : Efficient Distributed 3D Gaussian Splatting Training
+After
+80
+60
+40
+500
+74.1
+49.4
+65.3
+44.1
+55.2
+41.2
+20
+54.8
+38.7
+39.2
+18.9
+6.9
+15.8
+0
+s
+g
+ity
+60
+19
+3D
+ndin
+mple
+Mill- nScene MatrixC NeRF 3
+p Ble ks & Te
+MipDee
+Urba
+Tan
+Fig. 16. Fraction of tiles satisfying the Gaussian budget before
+and after applying our hardware-aware training.
+Iteration
+Time (ms)
+Tiles within
+Budget (%)
+100
+200
+100
+50
+20
+10
+8.9
+7.8
+16
+10.4
+8
+5.4
+4
+1.6
+1.3
+2
+Speedup
+Before
+17
+1
+1248
+1248
+1248
+1248
+1248
+1248
+y
+g
+19
+3D
+360
+ples
+ndin
+ixCit
+ene
+MillTem
+eRF
+nSc
+Matr
+p Ble
+s&
+Mip-N
+Dee
+Urba
+Tank
+Fig. 17. The scalability analysis. The per-iteration latency of
+ByteSplat as the GPU count increases.
+The benefits also vary with scene scale. For the three large-scale datasets, the complete ByteSplat runtime achieves
+3.7× geometric-mean speedup, compared with 2.8× for the three small-scale datasets. Fused rasterization, sparse communication, and hardware-aware pruning provide speedups of 1.3×, 1.3×, and 2.2× on large-scale datasets, respectively.
+The corresponding increments on small-scale datasets are 1.2×, 1.2×, and 1.9×. Overall, these results demonstrate that
+ByteSplat is particularly effective for large-scale scenes, whose larger Gaussian populations expose more opportunities
+for eliminating redundant computation and data movement.
+Tile-Budget Satisfaction. Fig. 16 further compares the fraction of tiles that satisfy the fused-kernel Gaussian budget
+before and after hardware-aware pruning. Pruning improves this fraction on all six datasets, with gains ranging from
+8.9% to 24.7% and an average gain of 17.5%. The improvement holds for both large- and small-scale scenes, showing that
+the training strategy consistently reshapes crowded tiles rather than merely reducing the total number of Gaussians. As
+a result, more tiles can use fused rasterization and benefit from its lower off-chip traffic.
+8.4
+Scalability Analysis
+Multi-GPU Performance. Fig. 17 shows the per-iteration latency of ByteSplat as the GPU count increases from
+one to eight. Using eight GPUs provides an average speedup of 5.9× and a maximum speedup of 10.4× over a single
+GPU. The three large-scale datasets achieve 7.8-10.4× speedup, while the small-scale scenes achieve 1.3-5.4×. The
+super-linear scalability is because distributed training largely reduces the frequent off-chip traffic. Large scenes benefit
+more because they provide sufficient work for additional GPUs, whereas inter-communication overhead accounts for a
+larger fraction of the iteration time in smaller scenes. These results show that ByteSplat scales most effectively on the
+large workloads for which distributed training is essential.
+8.5
+Sensitivity Study
+Pruning Ratio. Here, we show the sensitivity of performance and reconstruction quality to the pruning ratio in
+hardware-aware training. In this study, we choose two datasets, one is a large-scale dataset, Mill-19, the other is a
+small-scale dataset, Mip-NeRF 360. For each scene, we start from the same converged model, then vary the fraction
+of pruned Gaussians, and fine-tune every pruned model for the same number of iterations. We report both PSNR for
+rendering quality and end-to-end iteration latency on eight A6000 GPUs for training efficiency in Fig. 18.
+On the Mill-19 dataset, increasing the pruning ratio from 0% to 63.7% reduces per-iteration latency from 69.2 ms to
+29.8 ms, yielding a 2.3× speedup. However, the reconstruction quality decreases from 25.2 dB to 22.8 dB. With light
+pruning at 34.7%, the Mill-19 dataset already achieves 1.8× speedup while retaining the same reconstruction quality.
+Manuscript submitted to ACM
+18
+Shuo Wu et al.
+2.50
+Rubble
+26.5
+Garden
+Test PSNR (dB)
+Speedup
+2.25
+2.00
+1.75
+1.50
+1.25
+26.0
+25.5
+25.0
+24.5
+24.0
+23.5
+23.0
+1.00
+0
+20
+40
+60
+Rubble
+0
+Gaussian Reduction (%)
+(a) Per-iteration training speedup.
+Garden
+20
+40
+60
+Gaussian Reduction (%)
+(b) PSNR evaluation.
+Fig. 18. Sensitivity of performance and reconstruction quality to the pruning ratio in hardware-aware training. Here, we pick one
+large-scale dataset, Mill-19, and one small-scale dataset, Mip-NeRF 360.
+Further increasing the ratio to 45.5% improves the speedup to 1.9×, but introduces noticeable quality loss to 1.8 dB,
+revealing a clear quality-efficiency turning point.
+The Mip-NeRF 360 dataset reveals a smoother tradeoff. Increasing its pruning ratio from 0% to 66.6% reduces iteration
+latency from 64.0 ms to 36.1 ms and provides a 1.8× speedup, while test PSNR decreases by only 0.3 dB. When removing
+58.3% of the total Gaussians, ByteSplat reduces latency to 41.0 ms and achieves a 1.6× speedup with a 0.1 dB quality
+loss. The light and moderate settings also retain essentially unchanged reconstruction quality. This shows that the
+small-scale scenes are less sensitive to the pruning ratio than large-scale scenes.
+Overall, the Mill-19 dataset shows a noticeable turning point after a given pruning ratio, whereas small-scale scenes
+degrade more gradually. This is because a large-scale scene often requires more Gaussians to represent its geometry
+and appearance. Once pruning removes this necessary representation capacity, its reconstruction quality decreases
+rapidly. However, the pruning ratios used by ByteSplat capture most of the available efficiency improvement without
+entering the range where additional pruning causes significant quality loss.
+9
+Related Work
+3DGS GPU Optimization. Existing studies improve GPU-based 3DGS efficiency through various techniques, including
+compact representations, finer-grained culling, and optimized rasterization. For instance, CompactGS [27], EAGLES [12],
+and Compressed 3DGS [37] reduce representation size through compact parameter encodings and quantization. On the
+other hand, HAC [3] and HAC++ [4] further improve compression through context-based coding. These approaches
+primarily reduce model storage requirements, while another line of work optimizes runtime execution. For example,
+AdR-Gaussian [44] and Speedy-Splat [14] tighten the regions processed for each Gaussian to avoid unnecessary
+rasterization. FlashGS [10] combines precise intersection tests, workload-aware scheduling, and software pipelining.
+Balanced 3DGS [13] improves workload distribution through Gaussian-wise parallelism and fine-grained tiling, while
+TC-GS [30] maps Gaussian evaluation to matrix operations on Tensor Cores. Seele [54] combines scene preprocessing,
+online filtering, and contribution-aware rasterization to improve mobile GPU efficiency.
+In contrast to representation compression and optimizations within rendering stages, ByteSplat reduces repeated
+off-chip accesses across forward rasterization, loss computation, and backward rasterization through fused execution.
+3DGS Training Acceleration. Numerous approaches reduce training cost by controlling Gaussian population,
+optimizing densification, or simplifying parameter updates. For instance, LightGaussian [7] and MiniSplatting [8] use
+importance-driven pruning or simplification to obtain compact representations. LP-3DGS [51] and MaskGaussian [34]
+Manuscript submitted to ACM
+ByteSplat : Efficient Distributed 3D Gaussian Splatting Training
+19
+instead incorporate learnable selection mechanisms into Gaussian optimization. Taming 3DGS [36] combines budgetconstrained densification with efficient gradient computation and parameter updates. Mini-Splatting2 [9] accelerates
+convergence through aggressive densification and visibility culling, while DashGaussian [2] jointly schedules rendering
+resolution and Gaussian growth. ContraGS [5] enables training directly on compressed Gaussian representations to
+reduce memory requirements and data movement.
+Unlike methods that primarily control representation size or optimization complexity, ByteSplat incorporates
+per-tile shared-memory constraints into pruning to increase the fraction of tiles eligible for fused rasterization.
+System-level approaches further address the memory and execution demands of large-scale training. GS-Scale [23]
+and CLM [52] leverage host-memory offloading and pipelined execution to reduce GPU memory requirements. GS-Scale
+additionally defers optimizer updates for Gaussians with zero gradients. Grendel [53] distributes Gaussian parameters
+and rendering workloads across multiple GPUs, exchanging Gaussian attributes and partial gradients between partitions.
+Splaxel [18] instead uses local rendering and global composition through pixel-level communication.
+ByteSplat targets a different combination of opportunities: retaining intermediate data on-chip within each rendering
+GPU and eliminating exactly zero partial-gradient records from inter-GPU communication. Its sparse decoder directly
+aggregates the retained gradients without reconstructing dense communication buffers.
+3DGS Accelerators. Dedicated architectures exploit the computation and memory-access characteristics of Gaussian
+rendering and training. GSCore [26], GBU [49], and GCC [38] introduce specialized hardware for Gaussian rendering.
+Lumina [11] reduces repeated computation through caching, while StreamingGS [50] introduces a memory-centric
+streaming dataflow to reduce DRAM traffic. VR-Pipe [25] augments GPU graphics hardware for Gaussian rasterization,
+and GRTX [24] combines streamlined acceleration structures with hardware-supported traversal reuse for Gaussian
+ray tracing. For training, GSArch [15] addresses memory-system bottlenecks, while ARC [6] reduces atomic operation
+overhead through adaptive warp-level reduction. Cambricon-GS [45] combines Gaussian-pixel hybrid parallelism with
+tiled SSIM-based pipelining. ByteSplat instead implements its optimizations on existing GPUs and jointly addresses
+on-chip data residency, tile-level resource constraints, and distributed gradient communication.
+Acceleration of Other 3DGS Applications. Application-specific systems exploit additional opportunities in SLAM,
+virtual reality, and large-scale mobile rendering. GauSPU [46], REACT3D [43], and RTGS [28] accelerate 3DGS-based
+SLAM through specialized processing and reductions in redundant computation. Splatonic [17] combines adaptive
+sparse pixel sampling and Gaussian-parallel pixel rendering to accelerate tracking and mapping. For virtual reality,
+MetaSapiens [32] exploits foveated rendering, while Nebula [55] combines cloud-client collaborative rendering with
+accelerated stereo rasterization. Hierarchical 3DGS [20] and Octree-GS [39] organize Gaussians into multiresolution
+representations to support efficient rendering at different levels of detail. Voyager [35] further targets city-scale Gaussian
+rendering on resource-constrained mobile devices. These systems primarily address the latency, memory, and energy
+constraints of online tracking or interactive rendering. In contrast, ByteSplat focuses on distributed scene training and
+reduces data movement both within individual GPUs and across the GPUs participating in gradient aggregation.
+10
+Conclusion
+Distributed training is increasingly important for scaling 3D Gaussian Splatting to large scenes, but its efficiency
+remains constrained by data movement. We present ByteSplat, which reduces intra-GPU off-chip traffic and inter-GPU
+gradient communication via three techniques: fused rasterization, hardware-aware pruning, and zero-gradient elision.
+With these techniques, ByteSplat achieves up to 6.1× training efficiency while maintaining the same reconstruction
+quality. Nevertheless, ByteSplat represents one step toward addressing the data-movement challenges of distributed
+Manuscript submitted to ACM
+20
+Shuo Wu et al.
+3DGS training. More fundamental improvements will require algorithm-architecture co-design that jointly optimizes
+on-chip storage, execution scheduling, and inter-GPU communication in the future.
+References
+[1] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter Hedman. 2022. Mip-NeRF 360: Unbounded Anti-Aliased Neural
+Radiance Fields. CVPR (2022).
+[2] Youyu Chen, Junjun Jiang, Kui Jiang, Xiao Tang, Zhihao Li, Xianming Liu, and Yinyu Nie. 2025. DashGaussian: Optimizing 3D Gaussian Splatting in
+200 Seconds. In Proceedings of the Computer Vision and Pattern Recognition Conference. 11146–11155.
+[3] Yihang Chen, Qianyi Wu, Weiyao Lin, Mehrtash Harandi, and Jianfei Cai. 2024. Hac: Hash-grid assisted context for 3d gaussian splatting compression.
+In European Conference on Computer Vision. Springer, 422–438.
+[4] Yihang Chen, Qianyi Wu, Weiyao Lin, Mehrtash Harandi, and Jianfei Cai. 2025. Hac++: Towards 100x compression of 3d gaussian splatting. arXiv
+preprint arXiv:2501.12255 (2025).
+[5] Sankeerth Durvasula, Sharanshangar Muhunthan, Zain Moustafa, Richard Chen, Ruofan Liang, Yushi Guan, Nilesh Ahuja, Nilesh Jain, Selvakumar
+Panneer, and Nandita Vijaykumar. 2025. ContraGS: Codebook-Condensed and Trainable Gaussian Splatting for Fast, Memory-Efficient Reconstruction.
+In Proceedings of the IEEE/CVF International Conference on Computer Vision. 28935–28945.
+[6] Sankeerth Durvasula, Adrian Zhao, Fan Chen, Ruofan Liang, Pawan Kumar Sanjaya, Yushi Guan, Christina Giannoula, and Nandita Vijaykumar.
+2025. ARC: Warp-level Adaptive Atomic Reduction in GPUs to Accelerate Differentiable Rendering. In Proceedings of the 30th ACM International
+Conference on Architectural Support for Programming Languages and Operating Systems, Volume 1. 64–83.
+[7] Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia Xu, and Zhangyang Wang. 2024. LightGaussian: Unbounded 3D Gaussian Compression
+with 15x Reduction and 200+ FPS. In Advances in Neural Information Processing Systems.
+[8] Guangchi Fang and Bing Wang. 2024. Mini-Splatting: Representing Scenes with a Constrained Number of Gaussians. arXiv preprint arXiv:2403.14166
+(2024).
+[9] Guangchi Fang and Bing Wang. 2024. Mini-splatting2: Building 360 scenes within minutes via aggressive gaussian densification. arXiv preprint
+arXiv:2411.12788 (2024).
+[10] Guofeng Feng, Siyan Chen, Rong Fu, Zimu Liao, Yi Wang, Tao Liu, Boni Hu, Linning Xu, Zhilin Pei, Hengjie Li, et al. 2025. Flashgs: Efficient
+3d gaussian splatting for large-scale and high-resolution rendering. In Proceedings of the Computer Vision and Pattern Recognition Conference.
+26652–26662.
+[11] Yu Feng, Weikai Lin, Yuge Cheng, Zihan Liu, Jingwen Leng, Minyi Guo, Chen Chen, Shixuan Sun, and Yuhao Zhu. 2025. Lumina: Real-Time Mobile
+Neural Rendering by Exploiting Computational Redundancy. arXiv preprint arXiv:2506.05682 (2025).
+[12] Sharath Girish, Kamal Gupta, and Abhinav Shrivastava. 2025. Eagles: Efficient accelerated 3d gaussians with lightweight encodings. In European
+Conference on Computer Vision. Springer, 54–71.
+[13] Hao Gui, Lin Hu, Rui Chen, Mingxiao Huang, Yuxin Yin, Jin Yang, and Yong Wu. 2024. Balanced 3DGS: Gaussian-wise Parallelism Rendering with
+Fine-Grained Tiling. arXiv preprint arXiv:2412.17378 (2024).
+[14] Alex Hanson, Allen Tu, Geng Lin, Vasu Singla, Matthias Zwicker, and Tom Goldstein. 2025. Speedy-splat: Fast 3d gaussian splatting with sparse
+pixels and sparse primitives. In Proceedings of the Computer Vision and Pattern Recognition Conference. 21537–21546.
+[15] Houshu He, Gang Li, Fangxin Liu, Li Jiang, Xiaoyao Liang, and Zhuoran Song. 2025. GSArch: Breaking Memory Barriers in 3D Gaussian Splatting
+Training via Architectural Support. In 2025 IEEE International Symposium on High Performance Computer Architecture (HPCA). IEEE, 366–379.
+[16] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis, and Gabriel Brostow. 2018. Deep blending for free-viewpoint
+image-based rendering. ACM Transactions on Graphics (ToG) 37, 6 (2018), 1–15.
+[17] Xiaotong Huang, He Zhu, Tianrui Ma, Yuxiang Xiong, Fangxin Liu, Zhezhi He, Yiming Gan, Zihan Liu, Jingwen Leng, Yu Feng, and Minyi Guo. 2026.
+Splatonic: Architectural Support for 3D Gaussian Splatting SLAM via Sparse Processing. In Proceedings of the 32nd IEEE International Symposium on
+High Performance Computer Architecture.
+[18] Wenqi Jia, Zhewen Hu, Ying Huang, Yu Gong, Stavros Kalafatis, Yuke Wang, Wei Niu, Chengming Zhang, Ang Li, Sheng Di, et al. 2026. Splaxel:
+Efficient Distributed Training of 3D Gaussian Splatting for Large-scale Scene Reconstruction via Pixel-level Communication. arXiv preprint
+arXiv:2606.18588 (2026).
+[19] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 2023. 3d gaussian splatting for real-time radiance field rendering.
+ACM Transactions on Graphics 42, 4 (2023), 1–14.
+[20] Bernhard Kerbl, Andreas Meuleman, Georgios Kopanas, Michael Wimmer, Alexandre Lanvin, and George Drettakis. 2024. A hierarchical 3d gaussian
+representation for real-time rendering of very large datasets. ACM Transactions on Graphics (TOG) 43, 4 (2024), 1–15.
+[21] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. 2017. Tanks and Temples: Benchmarking Large-Scale Scene Reconstruction. ACM
+Transactions on Graphics 36, 4 (2017).
+[22] World Labs. 2026. Spark 2.0: Streaming 3DGS worlds on the web. https://www.worldlabs.ai/blog/spark-2.0
+[23] Donghyun Lee, Dawoon Jeong, Jae W. Lee, and Hongil Yoon. 2026. GS-Scale: Unlocking Large-Scale 3D Gaussian Splatting Training via Host
+Offloading. In Proceedings of the 31st ACM International Conference on Architectural Support for Programming Languages and Operating Systems,
+Manuscript submitted to ACM
+ByteSplat : Efficient Distributed 3D Gaussian Splatting Training
+21
+Volume 2 (USA) (ASPLOS ’26). Association for Computing Machinery, New York, NY, USA, 860–875. doi:10.1145/3779212.3790167
+[24] Junseo Lee, Sangyun Jeon, Jungi Lee, Junyong Park, and Jaewoong Sim. 2026. GRTX: Efficient Ray Tracing for 3D Gaussian-Based Rendering. In
+Proceedings of the 32nd IEEE International Symposium on High-Performance Computer Architecture (HPCA).
+[25] Junseo Lee, Jaisung Kim, Junyong Park, and Jaewoong Sim. 2025. VR-Pipe: Streamlining Hardware Graphics Pipeline for Volume Rendering. In 2025
+IEEE International Symposium on High Performance Computer Architecture (HPCA). IEEE, 217–230.
+[26] Junseo Lee, Seokwon Lee, Jungi Lee, Junyong Park, and Jaewoong Sim. 2024. Gscore: Efficient radiance field rendering via architectural support for
+3d gaussian splatting. In Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating
+Systems, Volume 3. 497–511.
+[27] Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko, and Eunbyung Park. 2024. Compact 3d gaussian representation for radiance field. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. 21719–21728.
+[28] Leshu Li, Jiayin Qin, Jie Peng, Zishen Wan, Huaizhi Qu, Ye Han, Pingqing Zheng, Hongsen Zhang, Yu Cao, Tianlong Chen, and Yang Zhao.
+2025. RTGS: Real-Time 3D Gaussian Splatting SLAM via Multi-Level Redundancy Reduction. In 2025 58th IEEE/ACM International Symposium on
+Microarchitecture (MICRO). 1838–1851. doi:10.1145/3725843.3756099
+[29] Yixuan Li, Lihan Jiang, Linning Xu, Yuanbo Xiangli, Zhenzhi Wang, Dahua Lin, and Bo Dai. 2023. Matrixcity: A large-scale city dataset for city-scale
+neural rendering and beyond. In Proceedings of the IEEE/CVF International Conference on Computer Vision. 3205–3215.
+[30] Zimu Liao, Jifeng Ding, Siwei Cui, Ruixuan Gong, Boni Hu, Yi Wang, Hengjie Li, Xingcheng Zhang, Hui Wang, and Rong Fu. 2025. Tc-gs: A faster
+gaussian splatting module utilizing tensor cores. arXiv preprint arXiv:2505.24796 (2025).
+[31] Liqiang Lin, Yilin Liu, Yue Hu, Xingguang Yan, Ke Xie, and Hui Huang. 2022. Capturing, reconstructing, and simulating: the urbanscene3d dataset.
+In European Conference on Computer Vision. Springer, 93–109.
+[32] Weikai Lin, Yu Feng, and Yuhao Zhu. 2025. Metasapiens: Real-time neural rendering with efficiency-aware pruning and accelerated foveated
+rendering. In Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems,
+Volume 1. 669–682.
+[33] Yang Liu, Chuanchen Luo, Lue Fan, Naiyan Wang, Junran Peng, and Zhaoxiang Zhang. 2024. Citygaussian: Real-time high-quality large-scale scene
+rendering with gaussians. In European Conference on Computer Vision. Springer, 265–282.
+[34] Yifei Liu, Zhihang Zhong, Yifan Zhan, Sheng Xu, and Xiao Sun. 2025. Maskgaussian: Adaptive 3d gaussian representation from probabilistic masks.
+In Proceedings of the Computer Vision and Pattern Recognition Conference. 681–690.
+[35] Zheng Liu, He Zhu, Xinyang Li, Yirun Wang, Yujiao Shi, Wei Li, Jingwen Leng, Minyi Guo, and Yu Feng. 2025. Voyager: Real-Time Splatting
+City-Scale 3D Gaussians on Your Phone. arXiv preprint arXiv:2506.02774 (2025).
+[36] Saswat Subhajyoti Mallick, Rahul Goel, Bernhard Kerbl, Markus Steinberger, Francisco Vicente Carrasco, and Fernando De La Torre. 2024. Taming
+3dgs: High-quality radiance fields with limited resources. In SIGGRAPH Asia 2024 Conference Papers. 1–11.
+[37] Simon Niedermayr, Josef Stumpfegger, and Rüdiger Westermann. 2024. Compressed 3d gaussian splatting for accelerated novel view synthesis. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. 10349–10358.
+[38] Minnan Pei, Gang Li, Junwen Si, Zeyu Zhu, Zitao Mo, Peisong Wang, Zhuoran Song, Xiaoyao Liang, and Jian Cheng. 2025. GCC: A 3DGS Inference
+Architecture with Gaussian-Wise and Cross-Stage Conditional Processing. In 2025 58th IEEE/ACM International Symposium on Microarchitecture
+(MICRO). 1824–1837. doi:10.1145/3725843.3756072
+[39] Kerui Ren, Lihan Jiang, Tao Lu, Mulin Yu, Linning Xu, Zhangkai Ni, and Bo Dai. 2024. Octree-gs: Towards consistent real-time rendering with
+lod-structured 3d gaussians. arXiv preprint arXiv:2403.17898 (2024).
+[40] Team HY-World. 2026. HY-World 2.0: A Multi-Modal World Model for Reconstructing, Generating, and Simulating 3D Worlds. arXiv preprint
+arXiv:2604.14268 (2026). doi:10.48550/arXiv.2604.14268
+[41] Techpowerup. [n. d.]. NVIDIA RTX A6000. https://www.techpowerup.com/gpu-specs/rtx-a6000.c3686
+[42] Haithem Turki, Deva Ramanan, and Mahadev Satyanarayanan. 2022. Mega-nerf: Scalable construction of large-scale nerfs for virtual fly-throughs.
+In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition. 12922–12931.
+[43] Hongyi Wang, Zhenhua Zhu, Tianchen Zhao, Yunfei Xiang, Zehao Wang, Jincheng Yu, Huazhong Yang, Yuan Xie, and Yu Wang. 2025. REACT3D:
+Real-time Edge Accelerator for Incremental Training in 3D Gaussian Splatting based SLAM Systems. In 2025 58th IEEE/ACM International Symposium
+on Microarchitecture (MICRO). 1852–1866. doi:10.1145/3725843.3756109
+[44] Xinzhe Wang, Ran Yi, and Lizhuang Ma. 2024. AdR-Gaussian: Accelerating Gaussian Splatting with Adaptive Radius. In SIGGRAPH Asia 2024
+Conference Papers. 1–10.
+[45] Rui Wen, Zhifei Yue, Tianbo Liu, Xinkai Song, Jin Li, Di Huang, Jiaming Guo, Xing Hu, Zidong Du, Qi Guo, and Tianshi Chen. 2026. Cambricon-GS:
+An Accelerator for 3D Gaussian Splatting Training with Gaussian-Pixel Hybrid Parallelism. In Proceedings of the 32nd IEEE International Symposium
+on High Performance Computer Architecture.
+[46] Lizhou Wu, Haozhe Zhu, Siqi He, Jiapei Zheng, Chixiao Chen, and Xiaoyang Zeng. 2024. GauSPU: 3D Gaussian Splatting Processor for Real-Time
+SLAM Systems. In 2024 57th IEEE/ACM International Symposium on Microarchitecture (MICRO). IEEE, 1562–1573.
+[47] Yongchang Wu, Zipeng Qi, Zhenwei Shi, and Zhengxia Zou. 2025. BlockGaussian: Efficient Large-Scale Scene Novel View Synthesis via Adaptive
+Block-Based Gaussian Splatting. arXiv preprint arXiv:2504.09048 (2025).
+[48] Zeke Xie, Xindi Yang, Yujie Yang, Qi Sun, Yixiang Jiang, Haoran Wang, Yunfeng Cai, and Mingming Sun. 2023. S3IM: Stochastic Structural SIMilarity
+and Its Unreasonable Effectiveness for Neural Fields. In International Conference on Computer Vision.
+Manuscript submitted to ACM
+22
+Shuo Wu et al.
+[49] Zhifan Ye, Yonggan Fu, Jingqun Zhang, Leshu Li, Yongan Zhang, Sixu Li, Cheng Wan, Chenxi Wan, Chaojian Li, Sreemanth Prathipati, et al. 2025.
+Gaussian Blending Unit: An Edge GPU Plug-in for Real-Time Gaussian-Based Rendering in AR/VR. In 2025 IEEE International Symposium on High
+Performance Computer Architecture (HPCA). IEEE, 353–365.
+[50] Chenqi Zhang, Yu Feng, Jieru Zhao, Guangda Liu, Wenchao Ding, Chentao Wu, and Minyi Guo. 2025. StreamingGS: Voxel-Based Streaming 3D
+Gaussian Splatting with Memory Optimization and Architectural Support. In 62nd ACM/IEEE Design Automation Conference (DAC). IEEE, 1–9.
+[51] Zhaoliang Zhang, Tianchen Song, Yongjae Lee, Li Yang, Cheng Peng, Rama Chellappa, and Deliang Fan. 2024. Lp-3dgs: Learning to prune 3d
+gaussian splatting. Advances in Neural Information Processing Systems 37 (2024), 122434–122457.
+[52] Hexu Zhao, Xiwen Min, Xiaoteng Liu, Moonjun Gong, Yiming Li, Ang Li, Saining Xie, Jinyang Li, and Aurojit Panda. 2026. CLM: Removing the
+GPU Memory Barrier for 3D Gaussian Splatting. In Proceedings of the 31st ACM International Conference on Architectural Support for Programming
+Languages and Operating Systems, Volume 2 (USA) (ASPLOS ’26). Association for Computing Machinery, New York, NY, USA, 377–393. doi:10.1145/
+3779212.3790140
+[53] Hexu Zhao, Haoyang Weng, Daohan Lu, Ang Li, Jinyang Li, Aurojit Panda, and Saining Xie. 2025. On Scaling Up 3D Gaussian Splatting
+Training. In International Conference on Learning Representations, Y. Yue, A. Garg, N. Peng, F. Sha, and R. Yu (Eds.), Vol. 2025. 35642–35661.
+https://proceedings.iclr.cc/paper_files/paper/2025/file/57fabaa549352c52d5d312171b16970e-Paper-Conference.pdf
+[54] He Zhu, Xiaotong Huang, Zihan Liu, Weikai Lin, Xiaohong Liu, Zhezhi He, Jingwen Leng, Minyi Guo, and Yu Feng. 2026. SEELE: A Unified
+Acceleration Framework for Real-Time Gaussian Splatting on Mobile Devices. In Proceedings of the Computer Vision and Pattern Recognition
+Conference.
+[55] He Zhu, Zheng Liu, Xingyang Li, Anbang Wu, Jieru Zhao, Fangxin Liu, Yiming Gan, Jingwen Leng, and Yu Feng. 2026. Nebula: Infinite-Scale 3D
+Gaussian Splatting in VR via Collaborative Rendering and Accelerated Stereo Rasterization (ASPLOS ’26). Association for Computing Machinery,
+New York, NY, USA, 1235–1250. doi:10.1145/3779212.3790190
+Manuscript submitted to ACM

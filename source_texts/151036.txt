@@ -1,0 +1,442 @@
+Warp-Level Culling for Efficient Blending in 3D Gaussian Splatting | Proceedings of the ACM on Computer Graphics and Interactive Techniques
+skip to main content
+ACM is now Open Access
+×
+As part of the Digital Library's transition to Open Access, new features for researchers are available in the Premium Edition. Click here to learn more.
+You are currently in the Basic Edition. Features requiring a subscription appear in grey.
+Sign In
+Upgrade
+Several features on this page require Premium Access.
+Learn moreSign in
+Contents
+AbstractAI Summary
+To view this AI-generated summary, you must have Premium access.
+Learn moreSign in
+Abstract
+Abstract
+3D Gaussian Splatting (3DGS) is the de facto standard for capturing and rendering radiance fields in real time and has seen widespread adoption across a wide range of applications. Several recent methods have been proposed for improving rendering speed; however, these solutions often reduce model resolution, rely on approximations that degrade image quality, or require special hardware. We carefully analyze the performance of the standard CUDA-based pipeline used for rendering, focusing on overall memory transfer, synchronization bottlenecks, and computation load. Based on this analysis, we present three optimizations to 3DGS’s alpha blending stage that improve rendering performance without changing the rendered output. First, we use warp-level collaboration to subdivide an image tile and efficiently cull splats that have no geometric overlap with pixels, avoiding expensive alpha evaluation. Second, we choose render batch sizes that better optimize compute and memory load in the kernel. And third, we rearrange splatting data to make it easier to move through shared memory. Our algorithm modifications can be directly applied to the standard CUDA-based pipeline, making it easy to add to future implementations. We evaluate our method against other modern implementations to illustrate the computation gains achieved by our contributions.
+AI Summary
+AI-Generated Summary (Experimental)
+This summary was generated using automated tools and was not authored or reviewed by the article's author(s). It is provided to support discovery, help readers assess relevance, and assist readers from adjacent research areas in understanding the work. It is intended to complement the author-supplied abstract, which remains the primary summary of the paper. The full article remains the authoritative version of record. Click here to learn more.
+Click here to comment on the accuracy, clarity, and usefulness of this summary. Doing so will help inform refinements and future regenerated versions.
+To view this AI-generated plain language summary, you must have Premium access.
+3DGS rendering FPS comparison across several methods demonstrating that compared to Faster-GS, our method is up to 19% faster on the RTX 4090 and 32% faster on the 2070 Super while producing the exact same image.
+1 Introduction
+3D Gaussian Splatting (3DGS) [Kerbl et al. 2023] has rapidly become a dominant technique for novel view synthesis, with literally thousands of follow-up methods that use and extend the standard CUDA pipeline for rendering. Surprisingly, despite this vast body of work in the field, we will show that there is still room for improvement in rendering speed. We achieve this by presenting a faster 3DGS rendering algorithm that produces exactly the same output as previous solutions. In addition, our method is implemented in the existing CUDA differentiable pipeline, making it usable in training. We achieve a speedup in rendering performance by using warp-level sub-tile culling, adjusting render batch sizes, and rearranging splat data in the alpha-over compositing kernel.
+Most methods for improving 3DGS inference result in image quality limitations. For example, PUP 3D-GS [Hanson et al. 2025b] removes Gaussians from the model based on importance to the final output, Sort-Free Gaussians [Hou et al. 2025] avoids costly sorting to approximate alpha-over compositing, and VKRayGS [Rota Bulò et al. 2025] uses proxy geometry and fixed-function hardware separate from the CUDA pipeline to increase rendering speed. These methods provide speedups but sacrifice image quality or differentiability, often requiring different code bases for rendering and optimization. Faster-GS [Hahlbohm et al. 2026] is a recent method that seeks to improve training and rendering performance without making changes that would impact image quality.
+To overcome these limitations, we aim to improve the rendering speed of the standard, differentiable CUDA pipeline, without changing image quality. Our work builds on Faster-GS [Hahlbohm et al. 2026] in which Hahlbohm et al. present a survey of several recent contributions and combine them to produce the fastest training implementations for 3DGS. Faster-GS also maintains the same visual fidelity as the original 3DGS implementation and stays in the CUDA differentiable framework. Hahlbohm et al. focused their efforts on improving training speed and placed improving rendering speed outside the scope of their work. In contrast, we focused our efforts on analyzing their state-of-the-art inference pipeline for rendering, improving it further, and porting it to their training loop for use in future optimization implementations.
+We start with a peak theoretical throughput analysis of the inference pipeline to identify where it is possible to improve rendering speed. Our analysis shows that the alpha-blending GPU kernel performs two to three times slower than the optimistic theoretical bound.
+Based on the results of our analysis, we introduce three optimizations to improve the final alpha blending kernel in the inference pipeline:
+(1)
+Subdivide image tiles and use warp-level parallelism to cull splats with no contribution to pixels in the sub-tile.
+(2)
+Adjust the render batch size for better memory and compute throughput.
+(3)
+Rearrange splat data into optimized structures for shared memory.
+For our dataset, these changes reduce frame time over Faster-GS by 17% (+20% FPS) on average (geometric mean) overall across all GPUs tested, and up to 24% (+32% FPS) on the RTX 2070 Super.
+We tested our implementation on three generations of GPUs: NVIDIA RTX 4090, NVIDIA RTX 3090, and NVIDIA RTX 2070 Super, demonstrating our computational gains.
+The code implementation can be found in the supplemental materials and can be used in the ICG Neural Radiance Fields and Novel View Synthesis Framework (NeRFICG) [Kappel et al. 2026], like Faster-GS.
+2 Related Work
+Recent performance improvements in 3DGS generally fall in three categories: model compression, alpha blending approximations, and GPU kernel optimizations. Our work falls into the third category and is focused on maintaining identical output as Faster-GS while providing rendering speed improvements. Work in 3DGS is advancing rapidly, thus we focus on more well-known prior work.
+2.1 Model Compression
+Rendering Gaussians is primarily a memory-intensive problem. Each Gaussian contains a lot of data, and a large part of the render pipeline is transferring and staging the data where it is needed. The largest bottleneck comes from reading and moving Gaussian data between GPU kernels through global memory (DRAM). This makes reducing model sizes and memory bandwidth an effective method for improving rendering speeds. Recent methods such as LightGaussian [Fan et al. 2024], Mini-Splatting [Fang and Wang 2024], and PUP 3D-GS [Hanson et al. 2025b] remove splats based on importance or sensitivity scores, while Speedy-Splats [Hanson et al. 2025a], Taming-3DGS [Mallick et al. 2024], and FastGS [Ren et al. 2025] use similar quality-based metrics to improve densification and prune Gaussians during optimization. The results are models that have significantly fewer Gaussians, making rendering faster at the cost of lower image quality due to the sparser representation. In contrast, our implementation improves rendering performance without modifying the underlying model, thus maintaining the same visual quality. Importantly, it also means our implementation works on existing/trained models.
+2.2 Rendering Modifications
+Alpha-over compositing is the most accurate method of rendering overlapping transparencies. However, its requirement for splats to be processed in sorted order is a computational bottleneck. StochasticSplats [Kheradmand et al. 2025] uses an estimator to sample the final color, and Sort-Free Gaussians [Hou et al. 2025] replace in-order rendering with a weighted sum to approximate the final color. While these provide improved throughput, they produce approximate results that sacrifice visual quality. Hardware rasterization approaches, including NVIDIA’s vk_gaussian_splatting [nvpro samples 2026] and VKRayGS [Rota Bulò et al. 2025], use proxy geometry for rasterization by fixed-function hardware. This improves throughput but is incompatible with the CUDA differentiable pipeline and cannot be used for training. A non-differentiable renderer would mean that a model optimized for the renderer cannot be created, and a separate code base would need to be maintained to handle training. Our implementation does not abandon alpha-over compositing, thus maintaining image quality, and is fully compatible with the differentiable pipeline.
+2.3 Kernel Optimizations
+Finally, other options seek to improve the GPU kernel engineering. This will maintain visual quality while improving rendering performance. FlashGS [Feng et al. 2024] and Faster-GS both use tighter tile-based intersection testing to significantly reduce redundant splats. They also improve how data is handled between stages of the pipeline to minimize traffic. TC-GS [Liao et al. 2025] makes alpha compositing faster by using Tensor Cores. Their implementation ensures Tensor Core half-precision computation does not degrade image quality significantly. Our implementation falls in this category. We provide speed-ups by optimizing the kernel engineering to use less compute and memory traffic.
+3 Background
+Our work builds on Faster-GS. Here, we provide context to clarify the foundation Faster-GS provides and how our changes fit into its pipeline.
+3.1 How Faster-GS Renders an Image
+Faster-GS has two rendering pipelines: a “forward” pipeline used in training, and an “inference” pipeline for rendering trained models. We will focus on the inference pipeline.
+In the inference pipeline, an image is rendered in four stages (groups of GPU kernels):
+(1)
+Preprocessing: selecting relevant 3D Gaussians from a model for rendering and projecting them into screen space as 2D “splat” primitives. This is handled by the preprocess_cu kernel.
+(2)
+Depth Sorting: sort these splats by distance to the camera. This is handled by the CUB Device Radix Sort kernels.
+(3)
+Instancing: divide the image into tiles for tile-based rasterization and duplicate splats into each image tile. This is handled by a series of small custom kernels we do not analyze.
+(4)
+Blend: alpha-over composite the splats for each tile to produce the final image. This is handled by the blend_cu kernel.
+Figure 3 shows the relative runtimes of these four stages in a typical render. Notably, the preprocessing and blend stages take up the vast majority of the render time, which makes them interesting candidates for optimization.
+Each stage of the pipeline is responsible for increasing levels of data granularity. The preprocessing stage works with the Gaussians from the model. The depth sorting stage works with the screen-space splats produced. The instancing stage duplicates these splats and assigns them to tiles. And the blend stage works on the pixel level within each tile.
+Faster-GS primarily achieves its high performance through the removal of redundant splats in the “preprocessing” and “instancing” stages. A redundant splat has exactly zero contribution to the final image, meaning discarding them will not affect the final image. Faster-GS uses a rectangular bounding box to better fit the elliptical shape of a splat and uses this bounding box for coarse culling and tile assignment. Then, during instancing, the splat’s maximum opacity is computed in each tile it is assigned to. If the opacity is below the minimum threshold to contribute color, it is culled from the tile. Faster-GS uses the minimum value of 8-bit RGB color as the contribution threshold: 1256. This reduces the number of redundant splats that must be processed. Our optimizations further this process and reduce redundant splats processing in the final “blend” stage.
+3.2 How Does the Blend Stage Work
+Diagram showing how an image is broken into tiles that are processed by a GPU thread block. Each pixel in the block is rendered by a thread in two stages: fetch from DRAM, then render.
+We chose to focus our efforts on the blend stage as it is one of the longest-running stages in the inference pipeline. Optimizing it will have a significant impact on the render time.
+By default, Faster-GS divides images into 16 × 16 pixel tiles. A pixel’s color is the alpha-over composite of the splats that were assigned to the containing tile. This is done in Faster-GS’s blend_cu kernel. The kernel is threaded on the number of pixels in an image, with thread blocks mapped to tiles. This is illustrated in Figure 2.
+Threads in the blend_cu kernel work collaboratively in blocks to render an image. Since each block is mapped to a tile, the data and computation in a block are only focused on the splats in that tile. Hundreds of splats can be assigned to a tile. Splat data is processed in batches of 256 splats. A batch is processed in two synchronization fenced stages: a data fetching stage and a rendering stage. In the data fetching stage, each thread is assigned one of 256 splats to fetch, and they concurrently fetch the data from global memory into block-shared memory. Splat data consists of the splat’s position, orientation, opacity, and color. A synchronization fence ensures all threads have completed data fetching before moving on to rendering. In the rendering stage, each thread is mapped to one of 256 pixels in the tile and individually iterates over the fetched batch of splats. For each splat, a thread will check if the splat will contribute to the pixel (has an alpha above a minimum threshold) and, if so, will compute the alpha-over composite. Another synchronization fence after this stage ensures all threads have consumed the batch before the next batch is fetched. Blocks iterate through batches until all splats in the tile have been processed.
+4 Method
+To develop our optimization, we first analyzed the inference pipeline’s performance to identify bottlenecks.
+4.1 Analysis
+4.1.1 Overall Inference Pipeline Analysis.
+Example NVIDIA Nsight Systems profile of the inference pipeline rendering a single frame from the Mip-NeRF 360 Garden scene. The four render stages are labeled. Notably, preprocessing (1) and blending (4) take most of the pipeline time.
+We begin by analyzing the overall pipeline with NVIDIA Nsight Systems. Figure 3 shows the relative duration of each GPU kernel in the pipeline and any stalls between them. Importantly, we can see that the preprocessing stage and the blending stage take up a significant portion of the runtime. Optimizing these two stages will have a larger impact on the performance of the render. An analysis of each of these stages shows that the preprocessing stage is already very well optimized. However, the blend stage appears to show significant room for improvement.
+4.1.2 Blend Stage Peak Theoretical Throughput Analysis.
+To evaluate the potential performance of the blend stage, we perform a peak theoretical throughput analysis of the blend_cu kernel.
+NameTypeSize (bytes)
+tile_instance_rangesuint28 × T
+instance_primitive_indicesuint4 × N
+primitive_mean2dfloat28 × N
+primitive_conic_opacityfloat416 × N
+primitive_colorfloat312 × N
+bg_colorfloat312
+imagefloat3 × 4 × W × H
+blend_cu kernel arguments pointing to global memory input/output where W, H ≔ pixel width and height of the image, T ≔ number of image tiles =⌈H16⌉⌈W16⌉, and N ≔ number of splat-tile pairs (total number of splats instanced across all tiles).
+We start by counting the total sum of data input and output from global memory as a function of per-scene properties. The properties needed by blend_cu are the pixel width W and height H of the image, the number of image tiles T=⌈H16⌉⌈W16⌉, and the number of splat-tile pairs (total number of splats instanced across all tiles) N. Table 1 shows the size distribution for each kernel argument pointing to global memory. This results in the expression 12WH + 40N + 8T + 12 which represents the memory in and out of the kernel in bytes.
+We then gather T, N, W, H by averaging them from the test subset for each scene in the dataset. Applying these empirical values to the formula, we have the average memory requirements values in Table 2.
+Mip-NeRF 360Tanks & TemplesDeep Blending
+81.5977.1975.61
+blend_cu arithmetic mean memory input + output per dataset in megabytes.
+Next, we used 32-bit floating point operations (FLOP) as a proxy for the kernel’s compute load. NVIDIA Nsight Compute provides the metric
+```
+  smsp__sass_thread_inst_executed_op_fp32_pred_on.sum
+```
+that counts the total number of 32-bit floating point operations across all active threads on the GPU. We gathered this into Table 3, which we average across runs for each scene.
+Mip-NeRF 360Tanks & TemplesDeep Blending
+5,249,080,3975,615,645,8353,514,107,275
+blend_cu arithmetic mean number of 32-bit floating point operations per dataset.
+RTX 4090RTX 3090RTX 2070 Super
+Memory bandwidth (TB/s)1.0080.9360.448
+Peak FP32 FLOPS (TFLOPS)82.635.69.062
+Maximum global memory bandwidth and 32-bit floating point operations per second specifications for the RTX 4090 [NVIDIA Corporation 2022], RTX 3090 [NVIDIA Corporation 2020], and RTX 2070 Super [NVIDIA Corporation 2019].
+Finally, we compute the theoretical minimum duration D needed for a kernel to run as
+D=Memory load (TB)Memory throughput (TB/s)+Floating point operationsFLOPS (TFLOPS)
+using the device specifications in Table 4 and metrics in Tables 2 and 3. We use the sum of the memory and compute throughput as opposed to the typical maximum between the two because the blend kernel’s phased construction explicitly makes global memory loading sequential to compute.
+RTX 2070 SuperRTX 3090RTX 4090
+TheoreticalActualTheoreticalActualTheoreticalActual
+Mip-NeRF 3607611,884235899144317
+Tanks & Temples7921,875240842145328
+Deep Blending5571,524180944118387
+Arithmetic mean duration at peak theoretical throughput (in milliseconds) compared to average profiled (actual) durations of the blend_cu kernel.
+We detail our resulting averages for each dataset in Table 5 compared to the profiled durations using NVIDIA Nsight Compute for our tested GPUs. This analysis demonstrates that there is a significant gap between the measured performance of the kernel and the theoretical peak due to factors other than pure data movement and 32-bit floating point operations. A deeper analysis of the kernel profile will identify additional sources of stalling that can explain the discrepancy.
+4.1.3 Profiling the Blend Stage Kernel.
+When compiled with line information enabled, NVIDIA Nsight Compute can show performance metrics for each line in the source code. This is a useful method for identifying optimization paths in a kernel. We use this strategy to analyze the blend_cu kernel and try to explain the discrepancy between our peak theoretical throughput duration and the profiled durations. Through profiling, we identified three key bottlenecks in the kernel: high instruction count in splat alpha evaluation, heavy stalling at the block-wide synchronization fences, and stalls related to shared memory operations. We illustrate this empirically in Figure 4 by using the metrics profiled from performing inference on the first test view (image 8) from the Mip-NeRF 360 [Barron et al. 2021] Garden scene on an RTX 4090. We discuss the main findings of this analysis next.
+Select segment of blend_cu kernel from NVIDIA Nsight Compute. Source listing, Attributed Stalls, Thread Instructions Executed, Warp Stall Sampling, and Stall Barrier metrics are displayed. Percentage values represent the proportion of the entire kernel this line contributes to a metric. A high percentage represents a higher relative value. In the source listing, variables prefixed with collected_ are the fetched batches stored in shared memory.
+The alpha evaluation of a splat at a pixel’s location accounts for an overwhelming majority of all instructions in the kernel. Profiling metrics in Figure 4 show high thread instructions executed and high warp stall sampling counts for the lines of code relevant to computing the alpha of a splat at a pixel’s coordinate (lines 423-433). These metrics show that not only does the kernel hit these instructions frequently, but they are also where stalls are observed. This section of code has a large impact on the runtime of the kernel, meaning reducing the number of times this piece of code must run may significantly speed up the kernel.
+Block-wide synchronization fences contribute significant stalling. The two-stage approach to processing splat data in a thread block requires a strict synchronization fence to separate memory gathering from computation between batches of data. Synchronization fences involving all threads in a block force the block to execute as slowly as the slowest thread. Profile data in Figure 4 shows very high cycles at the sync barriers (stall_barrier), which indicate that balancing the load on threads in these phases will help reduce stalling.
+Splat data shape contributes to poorly optimized shared memory operations. Rendering a splat requires fetching the splat’s position, opacity, location, and color from global memory into shared memory. This data is organized in a 128-bit 4D float vector (position and opacity are combined), a 64-bit 2D float vector (location), and a 96-bit 3D float vector (color). Shared memory has movement instructions for 32, 64, and 128-bit data structures, but not 96-bit vectors, meaning additional instructions must be issued to read this data in.
+4.2 Solution
+Following the three key bottlenecks found in the blend kernel, we introduce three optimizations that target these findings.
+4.2.1 Warp-level culling.
+A pixel in an image tile must check the contribution of every splat assigned to a tile. Checking a splat’s contribution to a pixel means evaluating the Gaussian at the pixel, which is both memory and computationally expensive. As Figure 4 shows, the thread must pull all the splat’s data from shared memory (lines 423 - 426), and then perform the expensive evaluation (lines 427 - 430). Instead of immediately doing a precise evaluation, we first reject splats that have no geometric overlap with the pixel. This is a significantly cheaper check, which only involves fetching a splat’s bounding box and doing a boolean overlap check to reject splats that have no contribution to a pixel. Importantly, this means our renders will be bit-identical to Faster-GS since we continue to render the same contributing splats and are only more efficiently culling non-contributing splats.
+Diagram showing the additional warp-level culling step in between the block/tile and the thread/pixel. The warp-level cull can collaboratively reject splats from a tile that will not geometrically intersect with a pixel, which will reduce the memory pull and compute needed to render the pixel.
+To implement this check, we subdivide image tiles into sub-tiles of 32 pixels (8 × 4) where each pixel in the sub-tile is mapped to a thread in a warp. A warp is a unit of 32 threads that share an instruction counter and can broadcast local data to each other. Warps iterate through splat batches 32 splats at a time, with the 32 threads in the warp mapping to one of the 32 splats. The warp then concurrently determines if each splat will overlap this warp’s sub-tile by pulling the splat’s bounding box and geometrically evaluating the intersection with the sub-tile. Threads will share their findings with the rest of the warp using the ballot primitive to create a 32-bit bitmask. This intersection test is cheap Boolean math and does not require pulling all data for a splat. Each thread in the warp then iterates through the tested 32 splats and uses the bitmask to skip the splats that did not intersect the sub-tile. Therefore, all threads in the warp can avoid loading the full splat data and doing the expensive alpha evaluation for splats that will never contribute to any pixels in the sub-tile. Importantly, this algorithm does not change how splats are rendered and which splats get rendered, meaning the same splats that would have contributed to the pixel still do, keeping the output image unaffected. This process is illustrated in Figure 5
+An important reason why this method works well is the utilization of warps. This culling algorithm has the same two-stage behavior as the blend stage as a whole: concurrently fetch data and then render. Because threads in a warp progress in lock-step, synchronization is maintained, meaning the ballot “fence” does not create stalls. The threads can safely go to the next iteration of 32 splats once it has completed the last iteration.
+4.2.2 Optimize Render Batch Size.
+Not all splats in a tile will overlap and contribute to a pixel in a tile. Because of this, threads (which are mapped to pixels) have an uneven distribution of work, with some having fewer splats to composite than others. This unevenness materializes in stalled threads at synchronization fences. Since our warp-level culling kernel ingests splat batches 32-at-a-time, we test the range of splat batch sizes in multiples of 32 from 32 splats per fetch batch up to 256 splats per fetch batch to find the optimal batch size for each of the three GPUs we test on.
+4.2.3 Rearrange Splat Data Into 128-bit Data Structures.
+The main splat data that was not structured well for shared memory access was the color vector, which used a 96-bit 3D float vector. By padding it into a 128-bit 4D float vector, we trade higher memory usage for fewer memory instructions issued. When we implemented image tile subdivision, we also needed to pass in an additional 4D vector that stored the splat’s bounding box information. Since this was in pixel space, we can use 16-bit unsigned integers, meaning the 4D vector only needed 64-bits. To make reading this data more efficient, we packed the splat bounding box data with the splat’s screen position (a 64-bit 2D float vector), creating a single 128-bit data structure. We trade compute instructions to unpack the data with further reductions in memory operation instructions. The new splat data structure is illustrated in Figure 6.
+Splat data rearrangement diagram. Before, color was a 96-bit 3D float, which did not have an optimized load instruction. The new arrangement pads it into a 128-bit 4D float, which has an optimized load instruction. Warp-culling also needs bounding box information. This was rearranged into a 4D 16-bit unsigned integer vector that was packed into the space for a 64-bit 2D vector and packed alongside the 64-bit 2D position vector to make a 128-bit 4D float vector.
+5 Results and Discussion
+We present how we gather results of our optimizations and discuss their impact on performance.
+5.1 Experiment Setup
+To evaluate our performance gains, we developed and tested our implementation using the NeRFICG framework [Kappel et al. 2026] and benchmarked against the same 13 scenes as 3DGS’s dataset (nine from Mip-NeRF 360 [Barron et al. 2021], two from Tanks & Temples [Knapitsch et al. 2017], and two from Deep Blending [Hedman et al. 2018]). To ensure consistent test models, we used Faster-GS [Hahlbohm et al. 2026] to create a trained set of models for the 13 scenes. We tested Faster-GS and our methods using the NeRFICG style model format, while 3DGS [Kerbl et al. 2023], TC-GS [Liao et al. 2025], and FlashGS [Feng et al. 2024] used the 3DGS style model format.
+Due to the RTX 2070 Super’s 8 GB of global memory, it was unable to render the scenes Bicycle, Dr. Johnson, Flowers, Garden, Playroom, Stump, and Tree Hill when using FlashGS. Since these (heavier) scenes were being omitted, frame time results would appear inflated for FlashGS. Therefore, these scenes were omitted from the results for all methods when comparing performance metrics in Table 7. The RTX 2070 Super was able to render all scenes using Faster-GS (and our method), so results for all scenes were used when comparing our method to Faster-GS in other tables.
+Rendering metrics such as frame time (in milliseconds) and image quality were gathered using the test subset of images from a scene’s dataset. The split is 7:1 training to test (Mip-NeRF style). Tests were run using a script that iterated through the 13 models. The script would first render the test set and save the results for image quality evaluation, then it would render the set 200 times as a “warm up”, and finally render the set 200 times and measure how long that took. The average frame time is computed as the duration of the timed 200 iteration run divided by 200. The PSNR, SSIM, and LPIPS were computed for the rendered images against the ground truth and averaged (arithmetic mean) for each scene. We loaded and rendered the quarter-resolution image size (images would be between 720p and 1080p).
+To identify the optimal batch size for load balancing the kernel, we experimented with eight batch sizes from 32 to 256 in increments of 32. We chose increments of 32 splats to match how we would process the batch in warp-sized iterations for warp-level culling. In Table 6 we show the percent improvement in frame time for each of the eight levels of batch sizes. We conclude that batches of 192 splats were the best for the RTX 4090 and 3090, while the RTX 2070 Super performed best with the original 256 splat fetches. This difference implies that, for the RTX 2070 Super, fetching data may cost more, and doing fewer rounds of it (through more collaboration) is worth it over potential compute stalls. Performance results for our method used 192 splat batch sizes for the RTX 4090 and 3090, and 256 splat batch sizes for the RTX 2070 Super.
+Dataset326496128160192224256
+RTX 4090
+Mip-NeRF36010.07%13.13%13.97%14.61%15.61%15.78%15.53%15.62%
+Tanks &Temples9.58%12.33%13.18%13.80%14.80%15.00%14.81%14.96%
+DeepBlending10.08%13.09%13.81%14.34%15.31%15.22%14.96%15.05%
+All9.92%13.01%13.87%14.51%15.51%15.67%15.43%15.53%
+RTX 3090
+Mip-NeRF36012.99%16.56%17.49%18.15%19.39%19.48%18.86%18.85%
+Tanks &Temples7.60%9.65%10.04%10.36%11.64%11.40%10.75%10.56%
+DeepBlending10.22%15.48%16.71%17.52%18.97%19.19%18.70%18.97%
+All11.78%15.29%16.18%16.81%18.09%18.15%17.53%17.52%
+RTX 2070 Super
+Mip-NeRF36012.34%15.86%16.67%17.38%18.86%22.96%24.95%25.09%
+Tanks &Temples8.11%10.73%10.88%11.41%13.00%18.90%18.99%18.90%
+DeepBlending10.51%14.50%15.30%15.87%17.40%23.50%23.50%23.50%
+All11.40%14.82%15.53%16.19%17.71%22.26%23.78%23.87%
+Geometric mean frame time percent improvement for a dataset with render batches of varying splat counts in increments of 32 splats. Values represent percent improvement compared to baseline Faster-GS. Best improvements are bolded.
+5.2 Rendering Performance Comparison
+We use frame time as the render performance metric and PSNR, SSIM, and LPIPS against the ground-truth images for image quality. Table 7 shows our method compared to other methods in the kernel optimization category with 3DGS as the baseline. We reiterate how our method and Faster-GS produce the same image and thus have the same image quality. This was not a finding of the presented empirical evidence, but rather, we designed the algorithm so that this is the case.
+Overall, our method demonstrates up to 17% frame time improvement (20% FPS improvement) over Faster-GS across all tested GPUs and up to 24% frame time improvement (32% FPS improvement) with the RTX 2070 Super.
+Due to the memory limitations of the RTX 2070 Super, there were several scenes that could not be rendered using FlashGS. In our performance table, we omitted these scenes from all methods for the 2070 Super so the remaining scenes could be compared. Faster-GS (and our algorithm) were able to render within the RTX 2070 Super’s memory limits. Percent improvement of our optimizations over Faster-GS for the RTX 2070 Super on all scenes in the dataset can be viewed in Table 6. The results demonstrate that the improvements greatly benefit weaker cards, where faster compute and memory capabilities were unavailable to mask stalling.
+MethodRTX4090↓RTX3090↓RTX2070Super↓PSNR↑SSIM↑LPIPS↓
+Mip-NeRF 360
+3DGS5.1356.99710.04327.560.820.18
+TC-GS3.6375.3846.90827.550.820.18
+FlashGS1.3312.4152.61528.420.870.18
+Faster-GS1.0831.5892.30427.840.820.21
+Ours0.9051.3781.74627.840.820.21
+Tanks & Temples
+3DGS6.6129.426-29.630.900.24
+TC-GS3.6094.730-29.620.900.24
+FlashGS0.8961.471-33.470.950.26
+Faster-GS0.9091.499-29.800.910.30
+Ours0.8191.424-29.800.910.30
+Deep Blending
+3DGS4.9026.86414.36523.670.850.17
+TC-GS2.9013.5598.90723.670.850.17
+FlashGS1.6272.3603.92325.780.880.19
+Faster-GS1.1691.6673.16323.830.850.20
+Ours0.9601.4552.42023.830.850.20
+All
+3DGS5.3017.30411.31627.280.840.19
+TC-GS3.5094.9527.51927.270.840.19
+FlashGS1.2922.2302.99328.790.880.19
+Faster-GS1.0671.5862.56127.520.840.22
+Ours0.9001.3961.94627.520.840.22
+Comparison of various methods’ geometric mean frame time in milliseconds and arithmetic mean image quality on the dataset. Due to memory limitations, the RTX 2070 Super was unable to compare its performance for many scenes in datasets, including Tanks & Temples.
+In addition to frame time, we also demonstrate how our implementation uses significantly fewer 32-bit floating point operations in Table 8.
+DatasetFaster-GSOursDecrease
+Mip-NeRF 3605,249,080,3972,308,867,77456.01%
+Tanks & Temples5,615,645,8353,853,577,54531.38%
+Deep Blending3,514,107,2751,784,174,42449.23%
+Comparison of our kernel’s arithmetic mean 32-bit floating point operations to Faster-GS.
+5.3 Training Performance Comparison
+Improving training was outside the scope of our work. However, we ensured our implementation was compatible with differentiable rendering. Since the algorithm does not change the image output and information passed, the trained model does not change either (so the quality stays the same). We also compared durations and found no difference. Future work may consider using our optimizations to further improve training.
+5.4 Ablation
+The incremental contribution of our three optimizations is shown in Table 9. Warp culling was first implemented using batch sizes of 32 to match the size of a warp. This also made it very natural to introduce batch sizes less than the default 256 and explore optimizing render batch sizes next. These two optimizations are tightly coupled together and combined make the “warp-level culling” optimization. Finally, following our analysis, we added splat data rearrangement.
+Dataset+ WarpCull+ OptimalBatch Size+ RearrangedSplat Data
+RTX 4090
+Mip-NeRF 36010.44%5.48%2.15%
+Tanks & Temples5.75%2.39%3.08%
+Deep Blending9.88%7.45%2.04%
+RTX 3090
+Mip-NeRF 36013.57%6.23%3.04%
+Tanks & Temples6.07%2.21%4.50%
+Deep Blending10.54%8.75%2.70%
+RTX 2070 Super
+Mip-NeRF 36012.10%6.17%3.90%
+Tanks & Temples5.50%3.03%5.44%
+Deep Blending10.17%6.31%3.51%
+Geometric mean percent frame time improvement as each of our three optimizations is added to Faster-GS. Values represent percent improvement over the previous column. Warp cull starts with 32 splat fetch and is compared to Faster-GS.
+6 Conclusion
+In this paper, we have presented a careful peak throughput analysis of the standard CUDA-based pipeline used for rendering in 3DGS, focusing on memory throughput, synchronization bottlenecks, and computation load. Based on the findings of this analysis, we presented three algorithmic improvements to Faster-GS’s alpha blending kernel, which provide significant performance gains without affecting image output. Our improvements are implemented in the standard CUDA framework and are compatible with the differentiable pipeline, making it easy to add to future implementations. Our optimizations aim to provide an easy speedup to ongoing efforts in 3DGS without any change in visual quality. Future work may seek ways to optimize training with our warp-level culling techniques.
+Acknowledgments
+G. Drettakis was funded by the European Union, European Research Council (ERC) Advanced Grant NERPHYS, number 101141721 https://project.inria.fr/nerphys. Views and opinions expressed are however those of the author(s) only and do not necessarily reflect those of the European Union or the European Research Council. Neither the European Union nor the granting authority can be held responsible for them.
+Supplemental Material
+ZIP File - Warp-Level Culling Source Code
+Fork of Faster-GS with Warp-Level Culling implemented in the inference and training pipelines. This is the same source used in the paper's evaluations.
+Download | ZIP (14.24 MB)
+References
+[1]
+Jonathan T. Barron, Ben Mildenhall, Matthew Tancik, Peter Hedman, Ricardo Martin-Brualla, and Pratul P. Srinivasan. 2021. Mip-NeRF: A Multiscale Representation for Anti-Aliasing Neural Radiance Fields. arxiv:https://arXiv.org/abs/2103.13415 [cs.CV]
+Google Scholar
+a [...] 8) from the Mip-NeRF 360 [Barron et al.
+b [...] (nine from Mip-NeRF 360 [Barron et al.
+[2]
+Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia Xu, and Zhangyang Wang. 2024. LightGaussian: Unbounded 3D Gaussian Compression with 15x Reduction and 200+ FPS. In Advances in Neural Information Processing Systems, A. Globerson, L. Mackey, D. Belgrave, A. Fan, U. Paquet, J. Tomczak, and C. Zhang (Eds.), Vol. 37. Curran Associates, Inc., 140138–140158.
+Go to Citation
+Crossref
+Google Scholar
+[3]
+Guangchi Fang and Bing Wang. 2024. Mini-Splatting: Representing Scenes with a Constrained Number of Gaussians. arxiv:https://arXiv.org/abs/2403.14166 [cs.CV] https://arxiv.org/abs/2403.14166
+Go to Citation
+Google Scholar
+[4]
+Guofeng Feng, Siyan Chen, Rong Fu, Zimu Liao, Yi Wang, Tao Liu, Zhilin Pei, Hengjie Li, Xingcheng Zhang, and Bo Dai. 2024. Flashgs: Efficient 3d gaussian splatting for large-scale and high-resolution rendering. arXiv preprint arXiv:https://arXiv.org/abs/2408.07967 (2024).
+Google Scholar
+a [...] rendering performance. FlashGS [Feng et al.
+b [...] ], and FlashGS [Feng et al.
+[5]
+Florian Hahlbohm, Linus Franke, Martin Eisemann, and Marcus Magnor. 2026. Faster-GS: Analyzing and Improving Gaussian Splatting Optimization. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR).
+Google Scholar
+a [...] optimization. Faster-GS [Hahlbohm et al.
+b [...] work builds on Faster-GS [Hahlbohm et al.
+c [...] models, we used Faster-GS [Hahlbohm et al.
+[6]
+Alex Hanson, Allen Tu, Geng Lin, Vasu Singla, Matthias Zwicker, and Tom Goldstein. 2025a. Speedy-Splat: Fast 3D Gaussian Splatting with Sparse Pixels and Sparse Primitives. In Proceedings of the Computer Vision and Pattern Recognition Conference (CVPR). 21537–21546. https://speedysplat.github.io/
+Go to Citation
+Crossref
+Google Scholar
+[7]
+Alex Hanson, Allen Tu, Vasu Singla, Mayuka Jayawardhana, Matthias Zwicker, and Tom Goldstein. 2025b. PUP 3D-GS: Principled Uncertainty Pruning for 3D Gaussian Splatting. In Proceedings of the Computer Vision and Pattern Recognition Conference (CVPR). 5949–5958. https://pup3dgs.github.io/
+Crossref
+Google Scholar
+a [...] For example, PUP 3D-GS [Hanson et al.
+b [...] ], and PUP 3D-GS [Hanson et al.
+[8]
+Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis, and Gabriel Brostow. 2018. Deep blending for free-viewpoint image-based rendering. ACM Trans. Graph. 37, 6, Article 257 (Dec. 2018), 15 pages.
+Go to Citation
+Digital Library
+Google Scholar
+[9]
+Qiqi Hou, Randall Rauwendaal, Zifeng Li, Hoang Le, Farzad Farhadzadeh, Fatih Porikli, Alexei Bourd, and Amir Said. 2025. Sort-free Gaussian Splatting via Weighted Sum Rendering. In The Thirteenth International Conference on Learning Representations. https://openreview.net/forum?id=y8uPsxR8PN
+Google Scholar
+a [...] output, Sort-Free Gaussians [Hou et al.
+b [...] color, and Sort-Free Gaussians [Hou et al.
+[10]
+Moritz Kappel, Florian Hahlbohm, and Timon Scholz. 2026. NeRFICG. https://github.com/nerficg-project
+Google Scholar
+a [...] Framework (NeRFICG) [Kappel et al.
+b [...] using the NeRFICG framework [Kappel et al.
+[11]
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 2023. 3D Gaussian Splatting for Real-Time Radiance Field Rendering. ACM Transactions on Graphics 42, 4 (July 2023). https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/
+Google Scholar
+a [...] 3D Gaussian Splatting (3DGS) [Kerbl et al.
+b [...] model format, while 3DGS [Kerbl et al.
+[12]
+Shakiba Kheradmand, Delio Vicini, George Kopanas, Dmitry Lagun, Kwang Moo Yi, Mark Matthews, and Andrea Tagliasacchi. 2025. StochasticSplats: Stochastic Rasterization for Sorting-Free 3D Gaussian Splatting. arxiv:https://arXiv.org/abs/2503.24366 [cs.CV] https://arxiv.org/abs/2503.24366
+Go to Citation
+Google Scholar
+[13]
+Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. 2017. Tanks and temples: benchmarking large-scale scene reconstruction. ACM Trans. Graph. 36, 4, Article 78 (July 2017), 13 pages.
+Go to Citation
+Digital Library
+Google Scholar
+[14]
+Zimu Liao, Jifeng Ding, Siwei Cui, Ruixuan Gong, Boni Hu, Yi Wang, Hengjie Li, Hui Wang, Xingcheng Zhang, and Rong Fu. 2025. TC-GS: A Faster Gaussian Splatting Module Utilizing Tensor Cores. In Proceedings of the SIGGRAPH Asia 2025 Conference Papers(SA Conference Papers ’25). Association for Computing Machinery, New York, NY, USA, Article 181, 9 pages.
+Digital Library
+Google Scholar
+a [...] to minimize traffic. TC-GS [Liao et al.
+b [...] ], TC-GS [Liao et al.
+[15]
+Saswat Subhajyoti Mallick, Rahul Goel, Bernhard Kerbl, Markus Steinberger, Francisco Vicente Carrasco, and Fernando De La Torre. 2024. Taming 3DGS: High-Quality Radiance Fields with Limited Resources. In SIGGRAPH Asia 2024 Conference Papers(SA ’24). Association for Computing Machinery, New York, NY, USA, Article 2, 11 pages.
+Go to Citation
+Digital Library
+Google Scholar
+[16]
+NVIDIA Corporation. 2019. GeForce RTX 2070 SUPER Specifications. https://www.nvidia.com/en-us/geforce/graphics-cards/rtx-2070-super/ Accessed: April 7, 2026.
+Go to Citation
+Google Scholar
+[17]
+NVIDIA Corporation. 2020. NVIDIA Ampere GA102 GPU Architecture. Technical Report. NVIDIA Corporation. https://www.nvidia.com/content/PDF/nvidia-ampere-ga-102-gpu-architecture-whitepaper-v2.1.pdf Accessed: April 7, 2026.
+Go to Citation
+Google Scholar
+[18]
+NVIDIA Corporation. 2022. NVIDIA Ada GPU Architecture: Technical Brief. Technical Report. NVIDIA Corporation. https://images.nvidia.com/aem-dam/Solutions/geforce/ada/nvidia-ada-gpu-architecture.pdf Accessed: April 7, 2026.
+Go to Citation
+Google Scholar
+[19]
+nvpro samples. 2026. Vulkan Gaussian Splatting. https://github.com/nvpro-samples/vk_gaussian_splatting
+Go to Citation
+Google Scholar
+[20]
+Shiwei Ren, Tianci Wen, Yongchun Fang, and Biao Lu. 2025. FastGS: Training 3D Gaussian Splatting in 100 Seconds. arxiv:https://arXiv.org/abs/2511.04283 [cs.CV] https://arxiv.org/abs/2511.04283
+Go to Citation
+Google Scholar
+[21]
+Samuel Rota Bulò, Nemanja Bartolovic, Lorenzo Porzi, and Peter Kontschieder. 2025. Hardware-Rasterized Ray-Based Gaussian Splatting. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR).
+Google Scholar
+a [...] compositing, and VKRayGS [Rota Bulò et al.
+b [...] ] and VKRayGS [Rota Bulò et al.
+Show all references
+Index Terms
+Index Terms (Premium feature)
+Warp-Level Culling for Efficient Blending in 3D Gaussian Splatting
+Computing methodologies
+Recommendations
+Recommendations (Premium feature)
+Shadows Optimizations in Cyberpunk 2077
+SIGGRAPH '21: ACM SIGGRAPH 2021 Talks
+This talk presents significant rendering-related CPU and GPU optimizations concerning
+shadows in Cyberpunk 2077. Given the scale of the game and the variety of platforms
+that it has to support, different solutions had to be implemented and coupled in ...
+Read More
+Light Path Guided Culling for Hybrid Real-Time Path Tracing
+Rendering visually convincing images requires realistic lighting. Path tracing has
+long been used in offline rendering to produce photorealistic images. While recent
+hardware advancements allow ray tracing methods to be employed in real-time renderers,
+...
+Read More
+Deferred blending: Image composition for single-pass point rendering
+In this paper, we propose novel GPU accelerated algorithms for interactive point-based
+rendering (PBR) and high-quality shading of transparent point surfaces. By introducing
+the concept of deferred blending we are able to formulate the smooth point ...
+Read More
+Comments
+Comments (Premium feature)
+InformationContributors
+Information
+Published In
+Proceedings of the ACM on Computer Graphics and Interactive Techniques Volume 9, Issue 4
+July 2026
+268 pages
+EISSN:2577-6193
+DOI:10.1145/3828970
+Editor:
+Michael Doggett
+Issue’s Table of Contents
+Copyright © 2026 Copyright held by the owner/author(s).
+This work is licensed under a Creative Commons Attribution 4.0 International License.
+Publisher
+Association for Computing Machinery
+New York, NY, United States
+Publication History
+Published: 29 June 2026
+Published in PACMCGIT Volume 9, Issue 4
+Check for updates
+Author Tags
+rendering
+optimization
+alpha blending
+kernel
+warp
+culling
+Qualifiers
+Research-article
+Contributors
+Other Metrics
+View Article Metrics
+BibliometricsCitations
+Bibliometrics
+Article Metrics
+0
+Total Citations
+1,222
+Total Downloads
+Downloads (Last 12 months)Advanced metrics (Premium feature)...
+Downloads (Last 6 weeks) Advanced metrics (Premium feature)...
+Reflects downloads up to 29 Oct 2026
+Other Metrics
+View Author Metrics
+Citations
+Share
+Share this Publication link
+https://dl.acm.org/doi/10.1145/3820019
+Copy Link
+Copied!
+Copying failed.
+Share on social media
+XLinkedInRedditFacebookThreadsemail
+Reading Options
+Affiliations
+View full text|Download PDF
+View Issue’s Table of Contents
+Close modal
+Export Citations
+Close modal
+New Citation Alert added!
+This alert has been successfully added and will be sent to:
+You will be notified whenever a record that you have chosen has been cited.
+To manage your alert preferences, click on the button below.
+Manage my Alerts
+Close modal
+Add a Citation Alert
+To add a citation alert, please log in to your account
+Your Search Results Download Request
+We are preparing your search results for download ...
+We will inform you here when the file is ready.
+Download now!
+Your Search Results Download Request
+Your file of search results citations is now ready.
+Download now!
+Your Search Results Download Request
+Your search export query has expired. Please try again.
+Close crossmark popup
+Feedback
+What would you like to report?
+What is your opinion?
+Please select your feedback category:*
+Other
+Compliment
+Bug
+Content Error
+Suggestion
+Accessibility Issue
+AI Generated Content
+Please leave your feedback below:We appreciate as much detail as you can provide.
+We appreciate as much detail as you can provide.
+What is your opinion of this page?*
+If you 'd like us to contact you regarding your feedback, please provide your contact details here.
+Name
+E-mail
+Website data
+Send
+Powered by
+PDFHelp

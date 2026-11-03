@@ -1,0 +1,122 @@
+Summary Scene3D.extruded_polygons() reads only each polygon's exterior ring, so every interior ring — a courtyard, a lake inside an island, a cut-out of any kind — is silently filled in. A polygon with a hole and the same polygon without...
+
+extruded_polygons() silently fills polygon holes · Issue #199 · serapeum-org/Digital-Earth · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+extruded_polygons() silently fills polygon holes #199
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#429
+Closed
+extruded_polygons() silently fills polygon holes#199
+#429
+Copy link
+Labels
+backend: 3dAffects the PyVista (3d) rendering backendAffects the PyVista (3d) rendering backend
+Description
+MAfarrag
+opened on Sep 10, 2026
+Issue body actions
+Summary
+Scene3D.extruded_polygons() reads only each polygon's exterior ring, so every interior ring — a courtyard, a
+lake inside an island, a cut-out of any kind — is silently filled in. A polygon with a hole and the same polygon
+without one produce byte-identical meshes. Nothing warns, and the rendered prism looks perfectly plausible.
+Evidence
+src/digitalearth/three_d/vector.py:28 yields exteriors only, and says so at :31:
+```
+def _exterior_rings(geom: Any) -> Iterator[np.ndarray]:
+    """... Handles ``Polygon`` (one ring) and ``MultiPolygon`` (one ring per part). Holes are ignored — exterior
+    footprints only. ..."""
+    ...
+    for part in parts:
+        yield np.asarray(part.exterior.coords, dtype="float64")
+```
+_extrude_ring (vector.py:53) then builds a single face from that one ring and extrudes it.
+Rendering a 4x4 square and the same square with a 2x2 hole:
+```
+solid : n_points= 10  bounds_xy=[0.0, 4.0, 0.0, 4.0]  cell_at_hole_centre=0
+donut : n_points= 10  bounds_xy=[0.0, 4.0, 0.0, 4.0]  cell_at_hole_centre=0
+```
+Identical point count, identical bounds, and a cap cell present at the centre of the hole in both.
+To be clear about what is not broken: concave footprints are handled correctly. An L-shaped polygon extrudes to a
+closed solid of exactly the right volume (n_cells=14, n_open_edges=0, volume=7.0 against a true 7.0), so this
+is specifically about interior rings, not about the triangulation in general.
+Why it matters
+Holes are not an exotic case in the data this tier is aimed at. Building footprints with courtyards, administrative
+polygons with enclaves, catchments containing lakes, land polygons containing water bodies — a hole is how a
+GeoJSON or shapefile expresses "there is nothing here". Filling it in turns absence into presence, and because the
+result is a well-formed solid there is no visual cue that anything was dropped. It is the kind of error that
+survives review because the picture looks right.
+Suggested approach
+The obvious fix does not work — worth recording so it is not retried:
+delaunay_2d(edge_source=...) with both rings as a constrained edge source still fills the hole. Verified:
+cap area 16.0 where the correct donut area is 12.0.
+What does work, with no new dependency (vtk is already transitive under pyvista):
+vtkContourTriangulator (vtkmodules.vtkFiltersGeneral) honours interior rings. Verified: feeding it a
+line PolyData built from the exterior ring plus each interior ring gives cap area 12.0, and
+cap.extrude((0, 0, h), capping=True) produces a 24-cell prism with the hole walled correctly.
+So the shape of the change is: replace _exterior_rings with a helper that yields all rings of a part
+(geom.exterior plus geom.interiors, still duck-typed — no shapely import), build one line PolyData per part,
+triangulate it with the contour triangulator, then extrude. Ring winding does not need normalising for this filter
+(the verification used shapely's own reversed interior winding unchanged).
+Two details worth pinning while in there:
+A MultiPolygon part with its own holes must be handled per part, not per geometry.
+The per-prism VALUE scalar (vector.py) is currently filled with np.full(prism.n_cells, ...); the cell count
+changes with the new triangulation, so that fill must stay derived from the built mesh, not precomputed.
+Acceptance criteria
+A polygon with an interior ring extrudes to a prism with a real hole through it.
+The test asserts a geometric quantity (cap area or closed-surface volume), not just that a layer registered —
+the current tests pass with holes dropped.
+MultiPolygon parts each keep their own holes.
+Concave footprints still extrude to the correct volume (the L-shape case above stays green).
+Colouring by column still lands on the right prism after the cell count changes.
+No shapely or geopandas import is added (tests/test_no_competitor_imports.py stays green).
+Found in an audit of the 3-D backend.
+Activity
+MAfarrag
+added
+backend: 3dAffects the PyVista (3d) rendering backendAffects the PyVista (3d) rendering backend
+on Sep 10, 2026
+MAfarrag
+added a commit that references this issue on Sep 14, 2026
+feat(base): declare the style keys and make a channel a key, not a pa…
+...
+53de5c8
+MAfarrag
+added a commit that references this issue on Oct 8, 2026
+feat(three_d): clear the unblocked 3-D capability backlog (#429)
+...
+e8a6135
+MAfarrag
+closed this as completedin #429on Oct 8, 2026
+MAfarrag
+added a commit that references this issue on Oct 8, 2026
+fix(three_d): honest band rationale, drawer-level hole test, opacity …
+...
+e959e01
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+backend: 3dAffects the PyVista (3d) rendering backendAffects the PyVista (3d) rendering backend
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

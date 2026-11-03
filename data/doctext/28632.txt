@@ -1,0 +1,397 @@
+# Sphere-Tracing-PyTorch3D
+
+<br>
+<div align="center">
+<img src="result.png" width="800">
+<span>Constructive Solid Geometry (CSG) rendered by Sphere Tracing<span>
+</div>
+<br>
+
+### main.py
+```
+import torch
+import torchvision
+import numpy as np
+from torch import nn
+from torch import autograd
+from pytorch3d import renderer
+from modules import *
+import logging
+import sdf
+
+
+def main():
+
+    device = torch.device("cuda:0")
+    image_size = (256, 256)
+
+    R, T = renderer.look_at_view_transform(
+        dist=(10.,),
+        elev=(np.pi / 5.,),
+        azim=(np.pi / 4.,),
+        degrees=False,
+        device=device,
+    )
+    cameras = renderer.PerspectiveCameras(
+        R=R, T=T, 
+        device=device,
+    )
+
+    signed_distance_functions = [
+        lambda p: sdf.sphere(p, 5.),
+        # lambda p: sdf.round(sdf.box(p, 4.), 0.2),
+        lambda p: sdf.union(sdf.sphere(p, 5.), sdf.round(sdf.box(p, 4.), 0.2), 0.2),
+        lambda p: sdf.intersection(sdf.sphere(p, 5.), sdf.round(sdf.box(p, 4.), 0.2), 0.2),
+        lambda p: sdf.subtraction(sdf.sphere(p, 5.), sdf.round(sdf.box(p, 4.), 0.2), 0.2),
+        lambda p: sdf.union(sdf.sphere(p - p.new_tensor([[[0., 2., 0.]]]), 3.), sdf.round(sdf.box(p, p.new_tensor([[[4., 1., 4.]]])), 0.2), 0.2),
+        lambda p: sdf.subtraction(sdf.sphere(p - p.new_tensor([[[0., 2., 0.]]]), 3.), sdf.round(sdf.box(p, p.new_tensor([[[4., 1., 4.]]])), 0.2), 0.2),
+        lambda p: sdf.torus(p, p.new_tensor([[[4., 2.]]])),
+        lambda p: sdf.torus(sdf.twist(p, 0.4), p.new_tensor([[[4., 2.]]])),
+        # lambda p: sdf.round(sdf.box(sdf.bend(p, 0.3), p.new_tensor([[[8., 2., 2.]]])), 0.2),
+        # lambda p: sdf.sphere(sdf.repetition(p, 2), 0.5),
+        # lambda p: sdf.round(sdf.box(sdf.repetition(p, 2), 0.4), 0.2),
+    ]
+
+    images = []
+
+    for signed_distance_function in signed_distance_functions:
+
+        y = torch.linspace(1., -1., image_size[-2], device=device)
+        x = torch.linspace(1., -1., image_size[-1], device=device)
+        y, x = torch.meshgrid(y, x)
+        z = torch.ones_like(y)
+        positions = torch.stack((x, y, z), dim=-1)
+        positions = positions.reshape(1, -1, 3)
+        positions = cameras.unproject_points(positions, world_coordinates=True)
+        directions = positions - cameras.get_camera_center().reshape(-1, 1, 3)
+        directions = nn.functional.normalize(directions, dim=-1)
+
+        lights = renderer.DirectionalLights(
+            ambient_color=torch.full((1, 3), 0.2) + (torch.rand(1, 3) * 2 - 1) * 0.04,
+            diffuse_color=torch.full((1, 3), 0.8) + (torch.rand(1, 3) * 2 - 1) * 0.16,
+            specular_color=((1., 1., 1.),),
+            direction=((0.8, 0.2, 0.),),
+            device=device,
+        )
+        materials = renderer.Materials(
+            ambient_color=((1., 1., 1.),),
+            diffuse_color=((1., 1., 1.),),
+            specular_color=((1., 1., 1.),),
+            device=device,
+        )
+
+        positions, converged = SphereTracing.apply(signed_distance_function, positions, directions, None, 1000, 1e-3)
+        normals = compute_normal(signed_distance_function, positions, 0.0)
+        textures = torch.ones_like(positions)
+
+        renderings = phong_shading(positions, normals, textures, cameras, lights, materials)
+        renderings = torch.where(converged, renderings, torch.zeros_like(renderings))
+        renderings = torch.min(renderings, torch.ones_like(renderings))
+        renderings = renderings.reshape(*image_size, 3)
+        renderings = renderings.permute(2, 0, 1)
+        
+        images.append(renderings)
+
+    images = torch.stack(images)
+    torchvision.utils.save_image(images, "result.png", nrow=4)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### modules.py
+```
+import torch
+from torch import nn
+from torch import autograd
+
+
+class SphereTracing(autograd.Function):
+
+    @staticmethod
+    def forward(
+        ctx, 
+        signed_distance_function, 
+        positions, 
+        directions, 
+        foreground_masks, 
+        num_iterations, 
+        convergence_threshold,
+        *parameters,
+    ):
+        # vanilla sphere tracing
+        with torch.no_grad():
+            positions, converged = sphere_tracing(
+                signed_distance_function=signed_distance_function, 
+                positions=positions, 
+                directions=directions, 
+                foreground_masks=foreground_masks,
+                num_iterations=num_iterations, 
+                convergence_threshold=convergence_threshold,
+            )
+            positions = torch.where(converged, positions, torch.zeros_like(positions))
+
+        # save tensors for backward pass
+        ctx.save_for_backward(positions, directions, foreground_masks, converged)
+        ctx.signed_distance_function = signed_distance_function
+        ctx.parameters = parameters
+
+        return positions, converged
+
+    @staticmethod
+    def backward(ctx, grad_outputs, *_):
+        
+        # restore tensors from forward pass
+        positions, directions, foreground_masks, converged = ctx.saved_tensors
+        signed_distance_function = ctx.signed_distance_function
+        parameters = ctx.parameters
+
+        # compute gradients using implicit differentiation
+        with torch.enable_grad():
+            positions = positions.detach()
+            positions.requires_grad_(True)
+            signed_distances = signed_distance_function(positions)
+            grad_positions, = autograd.grad(
+                outputs=signed_distances, 
+                inputs=positions, 
+                grad_outputs=torch.ones_like(signed_distances), 
+                retain_graph=True,
+            )
+            grad_outputs_dot_directions = torch.sum(grad_outputs * directions, dim=-1, keepdim=True)
+            grad_positions_dot_directions = torch.sum(grad_positions * directions, dim=-1, keepdim=True)
+            # NOTE: avoid division by zero
+            grad_positions_dot_directions = torch.where(
+                grad_positions_dot_directions > 0,
+                torch.max(grad_positions_dot_directions, torch.full_like(grad_positions_dot_directions, +1e-6)),
+                torch.min(grad_positions_dot_directions, torch.full_like(grad_positions_dot_directions, -1e-6)),
+            )
+            grad_outputs = -grad_outputs_dot_directions / grad_positions_dot_directions
+            # NOTE: zero gradient for unconverged points 
+            grad_outputs = torch.where(converged, grad_outputs, torch.zeros_like(grad_outputs))
+            grad_parameters = autograd.grad(
+                outputs=signed_distances, 
+                inputs=parameters, 
+                grad_outputs=grad_outputs, 
+                retain_graph=True,
+            )
+
+        return (None, None, None, None, None, None, *grad_parameters)
+
+
+def sphere_tracing(
+    signed_distance_function, 
+    positions, 
+    directions, 
+    foreground_masks, 
+    num_iterations, 
+    convergence_threshold,
+):
+    for i in range(num_iterations):
+        signed_distances = signed_distance_function(positions)
+        if i:
+            positions = torch.where(converged, positions, positions + directions * signed_distances)
+        else:
+            positions = positions + directions * signed_distances
+        converged = torch.abs(signed_distances) < convergence_threshold
+        if torch.all(converged[foreground_masks] if foreground_masks else converged):
+            break
+
+    return positions, converged
+
+
+def compute_normal(signed_distance_function, positions, finite_difference_epsilon):
+
+    if finite_difference_epsilon:
+        finite_difference_epsilon = positions.new_tensor(finite_difference_epsilon)
+        finite_difference_epsilon = finite_difference_epsilon.reshape(1, 1, 1)
+        finite_difference_epsilon_x = nn.functional.pad(finite_difference_epsilon, (0, 2))
+        finite_difference_epsilon_y = nn.functional.pad(finite_difference_epsilon, (1, 1))
+        finite_difference_epsilon_z = nn.functional.pad(finite_difference_epsilon, (2, 0))
+        normals_x = signed_distance_function(positions + finite_difference_epsilon_x) - signed_distance_function(positions - finite_difference_epsilon_x)
+        normals_y = signed_distance_function(positions + finite_difference_epsilon_y) - signed_distance_function(positions - finite_difference_epsilon_y)
+        normals_z = signed_distance_function(positions + finite_difference_epsilon_z) - signed_distance_function(positions - finite_difference_epsilon_z)
+        normals = torch.cat((normals_x, normals_y, normals_z), dim=-1)
+
+    else:
+        create_graph = positions.requires_grad
+        positions.requires_grad_(True)
+        with torch.enable_grad():
+            signed_distances = signed_distance_function(positions)
+            normals, = autograd.grad(
+                outputs=signed_distances, 
+                inputs=positions, 
+                grad_outputs=torch.ones_like(signed_distances),
+                create_graph=create_graph,
+            )
+            
+    return normals
+
+
+def phong_shading(positions, normals, textures, cameras, lights, materials):
+    light_diffuse_color = lights.diffuse(
+        normals=normals, 
+        points=positions,
+    )
+    light_specular_color = lights.specular(
+        normals=normals,
+        points=positions,
+        camera_position=cameras.get_camera_center(),
+        shininess=materials.shininess,
+    )
+    ambient_colors = materials.ambient_color * lights.ambient_color
+    diffuse_colors = materials.diffuse_color * light_diffuse_color
+    specular_colors = materials.specular_color * light_specular_color
+    # NOTE: pytorch3d.renderer.phong_shading should be fixed as well
+    assert diffuse_colors.shape == specular_colors.shape
+    ambient_colors = ambient_colors.reshape(-1, *[1] * len(diffuse_colors.shape[1:-1]), 3)
+    colors = (ambient_colors + diffuse_colors) * textures + specular_colors
+    return colors
+```
+
+### sdf.py
+```
+import torch
+from torch import nn
+
+
+def length(x):
+    return torch.norm(x, dim=-1, keepdim=True)
+
+
+def maximum(x, y, *z):
+    if not isinstance(y, torch.Tensor):
+        y = torch.full_like(x, y)
+    m = torch.max(x, y)
+    return maximum(m, *z) if z else m
+
+
+def minimum(x, y, *z):
+    if not isinstance(y, torch.Tensor):
+        y = torch.full_like(x, y)
+    m = torch.min(x, y)
+    return minimum(m, *z) if z else m
+
+
+def clamp(x, a, b):
+    return minimum(maximum(x, a), b)
+
+
+def mix(x, y, a):
+    return x * (1 - a) + y * a
+
+
+def stack(*x):
+    return torch.stack(x, dim=-2)
+
+
+def unstack(x):
+    return torch.unbind(x, dim=-2)
+
+
+def concat(*x):
+    return torch.cat(x, dim=-1)
+
+
+def unconcat(x):
+    return torch.unbind(unsqueeze(x), dim=-2)
+
+
+def squeeze(x):
+    return torch.squeeze(x, dim=-1)
+
+
+def unsqueeze(x):
+    return torch.unsqueeze(x, dim=-1)
+
+
+def abs(x):
+    return torch.abs(x)
+
+
+def cos(x):
+    return torch.cos(x)
+
+
+def sin(x):
+    return torch.sin(x)
+
+
+def relu(x):
+    return nn.functional.relu(x)
+
+
+def mod(x, y):
+    return torch.fmod(x, y)
+
+
+def sphere(p, r):
+    return length(p) - r
+
+
+def box(p, b):
+    q = torch.abs(p) - b
+    return length(relu(q)) - relu(-maximum(*unconcat(q)))
+
+
+def torus(p, t):
+    px, py, pz = unconcat(p)
+    tx, ty = unconcat(t)
+    q = concat(length(concat(px, pz)) - tx, py)
+    return length(q) - ty
+
+
+def round(d, r):
+    return d - r
+
+
+def twist(p, k):
+    px, py, pz = unconcat(p)
+    c = cos(k * py)
+    s = sin(k * py)
+    m = stack(concat(c, -s), concat(s, c))
+    p = stack(px, pz)
+    q = concat(squeeze(m @ p), py)
+    return q
+
+
+def bend(p, k):
+    px, py, pz = unconcat(p)
+    c = cos(k * px)
+    s = sin(k * px)
+    m = stack(concat(c, -s), concat(s, c))
+    p = stack(px, py)
+    q = concat(squeeze(m @ p), pz)
+    return q
+
+
+def repetition(p, c):
+    return mod(p + 0.5 * c, c) - 0.5 * c
+
+
+def union(d1, d2):
+    return minimum(d1, d2)
+
+
+def union(d1, d2, k):
+    h = clamp(0.5 + 0.5 * (d2 - d1) / k, 0., 1.)
+    return mix(d2, d1, h) - k * h * (1. - h)
+
+
+def intersection(d1, d2):
+    return maximum(d1, d2)
+
+
+def intersection(d1, d2, k):
+    h = clamp(0.5 - 0.5 * (d2 - d1) / k, 0., 1.)
+    return mix(d2, d1, h) + k * h * (1. - h)
+
+
+def subtraction(d1, d2):
+    return maximum(-d1, d2)
+
+
+def subtraction(d1, d2, k):
+    h = clamp(0.5 - 0.5 * (d2 + d1) / k, 0., 1.)
+    return mix(d2, -d1, h) + k * h * (1. - h)
+```

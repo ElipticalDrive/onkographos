@@ -1,0 +1,982 @@
+Corvid Game Framework. Contribute to peasanttide/corvid development by creating an account on GitHub.
+
+feat(shape): add the geometry a camera and a picker are written against by lizelive · Pull Request #26 · peasanttide/corvid · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+lizelive
+commented
+Aug 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Next crate off the buildout branch. Boxes, spheres, planes, rays, triangles and a view volume, computed in the same fixed point as everything else in the simulation ring, so a cast that decides a hit decides it the same way on every machine.
+What it is
+Aabb, Sphere, Plane, Ray, Triangle and Frustum. Triangle is Moller-Trumbore.
+Frustum stores four numbers rather than six planes, and it is worth saying so plainly because an earlier version of this description claimed the latter. The half-height at a forward distance is a straight line, h(d) = base + slope * d, and perspective and orthographic are its two ends -- base == 0 for one, slope == 0 for the other. One type covers both with no discriminant, which is what lets it be Pod; an enum could not be. near_half_height and far_half_height are the geometric reading, derived.
+The arithmetic, and where it ended up
+This crate contains no integer type and reads no bit pattern, and nothing in the cast path is wider than a word. Every quantity here is an I24F8, an I16F16, a Direction or a GlobalPoint, and every operation is named for the geometry rather than for the width it needs.
+It took three review rounds to get there and each one invalidated the last one's reasoning, which is the useful part of the history:
+Round one: the widening was in the wrong place. The crate's claim is "accumulate wide, narrow once" -- and it was skipping that at its inputs. GlobalPoint's subtraction saturates each component, so every difference of two points was clamped before any accumulator saw it. Measured, before the fix:
+```
+box [-6000 km, 6000 km]:  half_extent 4194 km (should be 6000)
+                          centre     -1805 km (should be 0)
+sphere at one end of the world, radius 8388 km:
+                          contains(other end, 16000 km away) = true
+triangle spanning the world:
+                          normal (-0.707, 0, 0.707), 31 degrees out
+```
+Round two: most of the widening was not needed, and my justification for it was wrong. The module comment argued that three Q39 products cannot fit an i64 because 3 * 2^62 exceeds i64::MAX. A Direction is a unit vector, so the sum is a dot product and Cauchy-Schwarz bounds it by sqrt(3) * 2^62 -- 7.99e18 against 9.22e18, 13% of headroom. I had widened from a bound I never checked. corvid_vector/tests/project.rs now searches for the corner of the range that reaches it and finds it exactly: the bound is tight, so the headroom is real and it is all there is.
+Round three: the wide offset was not worth its type, and it was the thing forcing the rest. A WideOffset -- the difference of two points, one bit wider than either -- was what made a cross product 2^65 and a triple product 2^98. Deleting it takes the whole cast back inside an i64. An offset is a GlobalPoint like any other, which is a constraint rather than an observation: two points more than 8388 km apart have no offset in this type, and checked_sub is how a caller finds that out. A saturated difference clamps one axis and not the next, so what comes back is a different bearing rather than a shorter one; a miss is the better answer, and every method here already had somewhere to put one.
+So the arithmetic lives in the crates that own the scales, and every bound is argued rather than widened past:
+operation
+where it lives
+bound
+width
+project, align, along
+GlobalPoint / Direction
+sqrt(3) * 2^62, Cauchy-Schwarz against a unit vector
+i64
+distance_squared, rejection_squared
+GlobalPoint
+3 * 2^62, taken unsigned since a square has no sign to lose
+u64
+cross_direction
+GlobalPoint
+sqrt(2) * 2^62 per two-by-two minor
+i64
+a barycentric determinant
+Volume
+2^62.6, the cross halved on the way past
+i64
+squared, root, checked_div_signed32
+I24F8 / I48F16
+2^62
+i64
+corvid_vector/tests/measure.rs goes looking for the corner of the range that reaches each of those rather than taking the algebra's word for it -- for the determinant, every pair of the eight corners against two thousand directions, checking the sign against an f64 reference.
+Three things came out better than a relocation:
+The sphere's discriminant is exact where it was not. It was disc = b^2 - c with c = |oc|^2 - r^2; both terms are near 2^62 at the edge of the range and their difference is the small number that decides hit from miss. It asks rejection_squared for the squared closest approach directly now, so whether a ray finds the sphere is exact even when the distance it answers has to clamp.
+The triangle's fourth determinant is gone rather than bounded. It is a volume where the other three are areas -- a whole metre of scale further out, reaching 5.9e20, and the only thing in the workspace that ever needed more than a word. Once u and v are known the hit is located already, so the routine walks to it and projects back onto the ray.
+A box wider than a component needs no special path at all. Its middle is the corners interpolated halfway, which is in range because a midpoint lies between two points that are, and lerp never leaves the interval it is given. The half extent follows from the middle.
+Everything else review found
+Every comment was real. Besides the arithmetic:
+An inverted box reported overlapping. [1, 0] satisfies both interval comparisons against [-1, 2], so an empty box met things. Empty operands are rejected first.
+The frustum culled spheres that were partly inside -- the one answer its documentation promises never to give. It inflated the half-height vertically, which is not conservative for a plane that leans; the radius is projected onto the plane's normal now, which is radius * slope.hypot(1) using corvid_fixed's own hypot.
+A negative radius was visible to the frustum, while Sphere reads one as empty everywhere else.
+Angle16::half clamped silently. 270 degrees halved to 90. It answers Option now, None past a half turn.
+slope_of derived a tangent from sin_cos and a division, including its own guard for the quarter turn -- eleven lines re-deriving what Pitch32::tan already does. Two lines now, over a new I24F8::to_i16f16.
+direction(0, 1, 0) did not compile. The signed-normalized types take an i8 now, saturating: the range is -1.0 ..= 1.0, so three integers are all it holds, and i8 is the narrowest width that spells them.
+The nursery lint group was not ready, and was forcing thirteen files' worth of allow attributes -- mostly redundant_pub_crate, which argues with the workspace's unreachable_pub rather than with the code. Gone, and the allows with it.
+Three dependencies were not used. corvid_transform was named nowhere in src and was pulling corvid_rotation into every build; corvid_hash is tests-only; corvid_bits has since lost its last caller here.
+The README said everything was world space while shipping a frustum whose methods take eye-space FinePoint. Corrected, and the missing Frustum row added.
+The integer conversions had no tests, despite my doc comment saying tests/conversion.rs checked them. It does now, at both endpoints of all four pairs.
+every_shape_round_trips omitted Frustum. Included.
+What is still known-wrong
+tests/wire.rs freezes digests with literal values but round-trips the encoding rather than recording bytes. The digest table catches a width change, since corvid_hash absorbs declared widths; it would not catch a pure reordering. Literal hex for every public type belongs in one pass.
+One i128 remains in corvid_vector that is not inherent to GlobalFinePoint's own width: unit_component, the private last step of normalize, multiplies a Q30 by a Q31 by the 2^31 - 1 unit, which is 2^92. Any two of the three already reach 2^61, so no reordering helps; splitting it into two shifts would fit an i64 and cost a last bit on every normalized direction.
+The landed-crate additions
+Each lands with its first caller rather than ahead of one: Direction::X/Y/Z, the lowercase point builders, the integer conversions on the fixed-point scalars, Angle16::half, and the ones review asked for --
+From for the signed-normalized types, saturating. Lossy, unlike most From, and deliberately so: clamping is what the type already does everywhere. One impl and no more -- an unsuffixed literal reaches an impl Into parameter as an inference variable and rustc commits it only when exactly one candidate applies, so a second impl would make direction(0, 1, 0) ambiguous and stop it compiling again.
+Direction::from_ratio([i64; 3]), whose caller is GlobalPoint::cross_direction: a cross product of two Q8 bit patterns reaches 2^62, so it fits a word and fits nothing narrower. The scale cancels -- but not always exactly, since the reduction shifts by a whole number of bits, so a power-of-two scale is bit-identical and any other can differ in the last places. Both cases are pinned as tests rather than left to be discovered.
+GlobalPoint::project / distance_squared / rejection_squared / cross_direction / volume, Direction::align / along, and Volume in corvid_vector; I24F8::squared / to_i16f16 / the two div_signed32, and I48F16::root in corvid_fixed. These are the relocation.
+Tests
+56 in corvid_shape across four files, plus 13 new in corvid_vector for the projections and the determinants, plus doctests. tests/frustum.rs is new -- there was no frustum test at all, which is how both of its bugs survived -- and holds the reviewer's own counterexample.
+Every behaviour fix is pinned by a test that fails against the old code, checked by reverting rather than assumed. That caught one test that proved nothing: the first triangle I wrote for normal was coplanar, and a vector already axis-aligned does not move when its components saturate, so both versions answered +Z. Tilting the face is what separates them.
+Several of the new ones check a claim rather than a behaviour, which is the point of them: every bound in the table above is asserted both to hold and to be approached, so a bound that were merely generous fails too. a_projection_is_the_same_number_the_narrow_one_answers checked fifty thousand cases before the wide path was deleted; what survives it is the_widest_projection_in_the_world_still_fits_an_i64 and a_volume_at_the_corner_of_the_range_still_fits_a_word.
+check.sh exits 0 on 1.97.1, every file under the size limits. The crate-wide allow attributes flagged as a NOTE are expect_used/unwrap_used and cast lints in tests, matching what main already does.
+claude
+and others
+added 2 commits
+August 9, 2026 22:26
+feat(shape): add the geometry a camera and a picker are written against
+…
+601801d
+```
+Boxes, spheres, planes, rays, triangles and a frustum, in the same fixed
+point everything else in the simulation ring computes in, so a cast that
+decides a hit decides it the same way on every machine.
+
+Every intermediate that can overflow is widened first and narrowed once
+at the end, which is what the `i128` in the ray tests is measuring rather
+than decorating.
+
+`corvid_vector` and `corvid_fixed` gain the four things this crate calls
+and neither had: the axis constants, the lowercase point builders, the
+integer conversions those builders convert through, and `Angle16::half`,
+which a field of view is halved by. Each lands with its first caller
+rather than ahead of one.
+```
+Merge branch 'main' into shape/init
+72244fc
+lizelive
+requested a balanced review from Copilot
+August 9, 2026 22:50
+Copilot started reviewing on behalf of
+lizelive
+August 9, 2026 22:51
+View session
+Copilot
+AI
+reviewed
+Aug 9, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Adds deterministic, fixed-point geometry and raycasting through the new corvid_shape crate.
+Changes:
+Adds ray-cast primitives, intersections, and camera frustum calculations.
+Extends fixed-point and vector APIs with builders, axis constants, conversions, and angle halving.
+Adds documentation, tests, and workspace integration.
+Reviewed changes
+Copilot reviewed 19 out of 20 changed files in this pull request and generated 12 comments.
+Show a summary per file
+File
+Description
+Cargo.toml
+Registers the shape crate.
+Cargo.lock
+Locks shape dependencies.
+crates/corvid_fixed/src/fixed/angle/macros.rs
+Adds angle halving.
+crates/corvid_fixed/src/fixed/point/mod.rs
+Adds integer conversions.
+crates/corvid_vector/src/lib.rs
+Exports point builders.
+crates/corvid_vector/src/point/base.rs
+Generates point builders.
+crates/corvid_vector/src/point/mod.rs
+Adds builders and direction axes.
+crates/corvid_shape/Cargo.toml
+Defines crate dependencies and features.
+crates/corvid_shape/README.md
+Documents geometry APIs.
+crates/corvid_shape/src/lib.rs
+Exposes the shape API.
+crates/corvid_shape/src/project.rs
+Implements fixed-point projections.
+crates/corvid_shape/src/ray.rs
+Defines rays, hits, and casting.
+crates/corvid_shape/src/aabb.rs
+Implements boxes and slab casting.
+crates/corvid_shape/src/sphere.rs
+Implements spheres and ray intersections.
+crates/corvid_shape/src/plane.rs
+Implements planes and ray intersections.
+crates/corvid_shape/src/triangle.rs
+Implements triangle geometry and casting.
+crates/corvid_shape/src/frustum.rs
+Implements camera volumes and culling.
+crates/corvid_shape/tests/aabb.rs
+Tests box behavior.
+crates/corvid_shape/tests/cast.rs
+Tests ray casting.
+crates/corvid_shape/tests/wire.rs
+Tests serialization and hashing.
+Suppressed comments (8)
+crates/corvid_shape/src/aabb.rs:116
+An inverted box is empty, but this overlap formula can still return true; for example, an x interval [1, 0] reports an intersection with [-1, 2]. This contradicts new's contract that every method handles reversed corners. Reject either empty operand before applying the interval test.
+```
+    pub fn intersects(&self, other: &Self) -> bool {
+        let (amin, amax) = (self.min.to_array(), self.max.to_array());
+        let (bmin, bmax) = (other.min.to_array(), other.max.to_array());
+        (0..3).all(|axis| amin[axis] <= bmax[axis] && bmin[axis] <= amax[axis])
+```
+crates/corvid_shape/src/sphere.rs:80
+This subtraction clamps each coordinate before the supposedly wide quadratic runs. For origins and centres more than one component range apart, independent clamping changes the offset's direction and magnitude, so a ray aimed at the sphere can miss. Keep the raw coordinate differences in i128, as GlobalPoint::direction_to already does for this reason.
+```
+        let offset = ray.origin - self.centre;
+```
+crates/corvid_shape/src/sphere.rs:83
+project narrows the dot product back to I24F8 here, losing the full-range value before it is squared. For a centre near [MAX; 3] and a ray aimed along the normalized diagonal, the true projection is about sqrt(3) * MAX but b clamps to MAX; then b² - c becomes negative and the ray misses a sphere directly ahead. The sphere quadratic needs a wide projection helper rather than the public narrowed result.
+```
+        let b = i128::from(project(offset, ray.direction).to_bits());
+        let radius = i128::from(self.radius.to_bits());
+        let c = i128::from(offset.length_squared()) - radius * radius;
+```
+crates/corvid_shape/src/triangle.rs:90
+These edge subtractions saturate in GlobalPoint before being converted to i128. Triangles whose vertices span more than one component range therefore run Moller-Trumbore against distorted edges, despite this implementation's stated full-range widening guarantee. Build the edge bit triples by subtracting the original component bits in i128.
+```
+        let first = self.b - self.a;
+        let second = self.c - self.a;
+```
+crates/corvid_shape/src/triangle.rs:99
+to_origin has the same premature saturating subtraction as the edge vectors. A ray origin and vertex on opposite sides of the coordinate range produce incorrect barycentric numerators and can change a hit into a miss. Subtract their component bit patterns after widening to i128.
+```
+        let to_origin = ray.origin - self.a;
+        let u = dot_wide(point_bits(to_origin), pitch);
+```
+crates/corvid_shape/src/frustum.rs:283
+Adding the radius independently to the vertical extent is not conservative for a sloped side plane. With slope 1, centre (0, 10, 11.2), and radius 1, the sphere is only 1.2 / sqrt(2) < 1 from the side plane, but this compares 11.2 <= 11 and culls it. Inflate by the radius projected onto each side-plane normal (r * sqrt(1 + slope²), and the aspect-adjusted equivalent horizontally) so partly visible spheres never return false.
+```
+        let half = self.half_height_at(clamped).saturating_add(radius);
+        let wide = self
+            .half_height_at(clamped)
+            .saturating_mul(aspect)
+            .saturating_add(radius);
+```
+crates/corvid_shape/README.md:40
+The public API table omits Frustum, even though it is one of this crate's primary exported geometry types. Add it to the “What is here” list so the crate-level documentation accurately describes the new API.
+```
+| [`Triangle`] | Moller-Trumbore, for picking a face out of a mesh |
+| [`project`], [`align`] | the mixed-width dot products the rest is built from |
+```
+crates/corvid_shape/Cargo.toml:19
+The library does not use corvid_transform; it is present only to forward features to the actual corvid_vector/corvid_fixed field types. This unnecessarily pulls corvid_rotation and the transform crate into every shape build. Depend on and forward serde, bytemuck, and std directly to the two crates used by these structs.
+```
+corvid_transform = { workspace = true }
+```
+💡 Add a code-review agent skill or configure MCP servers for context-aware, tailored reviews. Learn more in the docs.
+Comment thread
+crates/corvid_shape/src/aabb.rs
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/corvid_shape/src/sphere.rs
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/corvid_shape/src/triangle.rs
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/corvid_fixed/src/fixed/angle/macros.rs
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/corvid_vector/src/point/mod.rs
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/corvid_shape/tests/wire.rs
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/corvid_shape/src/frustum.rs
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/corvid_shape/Cargo.toml
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/corvid_shape/src/frustum.rs
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/corvid_shape/README.md
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+fix(shape): widen before subtracting, and stop the empty cases answer…
+…
+ad675bd
+```
+…ing yes
+
+Review found the crate skipping the widening it is built on at the one
+place it matters: its inputs. `GlobalPoint`'s subtraction saturates each
+component, so every difference of two points was clamped before any of
+the `i128` accumulators saw it -- and the clamp is reached by exactly the
+geometry the wide arithmetic was written for.
+
+Measured, on a box 12 000 km across: `half_extent` answered 4 194 km and
+`centre` landed 1 805 km from the middle of a box symmetric about the
+origin. A sphere at one end of the world reported that it contained a
+point at the other, 16 000 km away, with a radius of 8 388.
+
+`offset_bits` is the missing primitive -- the component differences in
+`i128`, before anything narrows -- and the box, the sphere and the
+triangle's intersection all start there now.
+
+Three more, all cases where an empty thing answered as though it held
+points. An inverted box reported overlapping a box it shares nothing
+with; a negative radius was visible to the frustum while `Sphere` reads
+it as empty; and `Angle16::half` clamped 270 degrees to 90 instead of
+saying it has no half a pitch can hold, so it answers an `Option` now.
+
+The frustum's sphere test also inflated by the radius vertically, which
+is not conservative for a plane that leans and culled a sphere partly
+inside -- the one answer its documentation promises never to give. The
+radius is projected onto the plane's normal instead.
+
+`corvid_transform` is dropped: it was named nowhere in `src`, and the
+feature forwarding it carried now goes to the two crates the shapes are
+actually built from. `corvid_hash` moves to dev-dependencies.
+```
+Copilot
+AI
+review requested due to automatic review settings
+August 9, 2026 23:18
+Copilot
+AI
+reviewed
+Aug 9, 2026
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Copilot was unable to review this pull request because the user who requested the review has reached their quota limit.
+Merge branch 'main' into shape/init
+bac5808
+lizelive
+pushed a commit
+that referenced
+this pull request
+Aug 9, 2026
+fix(fixed): make Angle16::half fallible rather than silently clamping
+…
+0dae59c
+```
+`Pitch32` covers a quarter turn either way, so an angle past a half turn
+has no half it can hold and the old signature answered the clamped value:
+270 degrees halved to 90, with nothing said. It answers an `Option` now.
+
+`corvid_shape`'s `slope_of` is the one caller. A field of view that wide
+is not a field of view, so it saturates there -- the same answer the
+quarter-turn case, whose tangent is infinite, already gives.
+
+Carried back from the review of #26, where this landed first.
+```
+lizelive
+commented
+Aug 10, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+make the change to corvid_vector to fix Triangle::normal
+Triangle::normal still computes its cross product from saturating subtraction, so a triangle spanning more than a component's range can report a normal pointing the wrong way -- while its intersection is now correct. Fixing it needs a public wide-normalize on corvid_vector (normalize_bits exists there but is pub(crate)), and this PR already carries four additions to landed crates. It is the next thing.
+claude
+added 2 commits
+August 10, 2026 01:05
+feat(fixed): saturate an integer into the signed-normalized types
+…
+d8eb328
+```
+`direction(0, 1, 0)` did not compile, because the point builders take
+anything that converts into their component and nothing converted an
+integer into a `Signed32`. Three of the four points read as bare numbers
+and the fourth needed `Signed32::MAX` spelled out, which is the axis
+written as an implementation detail.
+
+The conversion is lossy, which is unusual for `From` and deliberate
+here: the range is -1.0 ..= 1.0, so -1, 0 and 1 are the only integers it
+holds and everything else clamps to the nearer end. That is the clamping
+the rest of the type already does -- SNORM is a clamped range and the
+arithmetic saturates rather than wraps -- so an integer behaving any
+other way would be the surprise.
+
+`i32` and no other width. An unsuffixed literal reaches an
+`impl Into<Self>` parameter as an inference variable, and rustc commits
+it only when exactly one candidate applies; a second impl would make
+`direction(0, 1, 0)` stop compiling again.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LFXQSmQf7QZKdBnok4jKMa
+```
+fix(shape): take the triangle normal from the corners, not the narrow…
+…
+a813a24
+```
+…ed edges
+
+`Triangle::normal` subtracted the corners into `GlobalPoint` edges and
+crossed those. Both steps leave a component's range for a triangle
+spanning much of the world, and the components saturate rather than
+wrap, so the answer was not a rounder normal but a different one: a face
+whose corners describe (-0.2425, 0, 0.9701) reported
+(-0.707, 0, 0.707), about 31 degrees out.
+
+The wide arithmetic to do it properly already existed inside
+`corvid_shape` -- `offset_bits` and `cross_wide` -- but there was no way
+to turn the `i128` triple they produce into a `Direction` without
+narrowing it back through a `GlobalPoint` and undoing the point of the
+exercise. `Direction::from_ratio` is that missing step: it takes three
+wide components as a ratio, at any scale, and reduces them the way
+`normalize` already did internally.
+
+The scale cancels but not always exactly, since the reduction shifts by
+a whole number of bits: a power-of-two scale is bit-identical and any
+other lands the mantissa differently. That is pinned as two tests rather
+than left for a caller to discover.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LFXQSmQf7QZKdBnok4jKMa
+```
+lizelive
+commented
+Aug 10, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Done in a813a24. Direction::from_ratio([i128; 3]) -> Option<Direction> is public on corvid_vector, and Triangle::normal goes through it:
+```
+pub fn normal(&self) -> Option<Direction> {
+    let first = offset_bits(self.b, self.a);
+    let second = offset_bits(self.c, self.a);
+    Direction::from_ratio(cross_wide(first, second))
+}
+```
+from_ratio is normalize_bits with a name and a contract rather than a new algorithm -- it is the same reduction every normalize on a point type already calls, exposed for the caller whose vector is a cross product or a difference of far-apart points and has therefore already left a component's range.
+It was measurably wrong, not just theoretically. Reverting to the old body makes the new test fail, which is the check worth reporting. A face whose corners describe (-0.2425, 0, 0.9701):
+```
+old: (-0.707, 0, 0.707)   -- about 31 degrees out
+new: (-0.2425, 0, 0.9701)
+```
+My first attempt to demonstrate this proved nothing: I used a coplanar triangle, which gives +Z under both versions because saturating a vector that is already axis-aligned does not move it. Tilting the face is what separates them.
+tests/cast.rs gains a_triangle_spanning_the_world_reports_the_normal_its_corners_describe, with the expected value worked from the corners by hand rather than copied from the output.
+One caveat on from_ratio, documented on the method and pinned by two tests rather than left to be discovered: the scale cancels, but the reduction shifts by a whole number of bits, so a power-of-two scale is bit-identical and any other scale lands the mantissa differently and can differ in the last places. scaling_a_ratio_by_a_power_of_two_does_not_move_the_direction asserts the exact case across 40 shifts; any_other_scale_agrees_to_within_a_last_bit states the inexact one so nobody reads the first as a stronger promise than it is.
+That clears the last item in the "known-wrong" section of the description, which I have updated.
+Generated by Claude Code
+Merge remote-tracking branch 'origin/main' into shape/init
+f00e2e4
+lizelive
+commented
+Aug 10, 2026
+View reviewed changes
+lizelive
+left a comment
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+this crate shouldn't have any u128/i128 or bit manipulation in it
+those operations belong in corvid_fixed and corvid_vector.
+Comment thread
+crates/corvid_vector/src/point/mod.rs
+Outdated
+/// which is the rule everywhere else here too.
+#[must_use]
+#[inline]
+pub const fn from_ratio(components: [i128; 3]) -> Option<Self> {
+lizelive
+Aug 10, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+not a fan of using i128 bit unless required.
+i64 bits is good enough here
+lizelive
+Aug 10, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Done in 63b4505. Direction::from_ratio takes [i64; 3].
+i64 is enough for every caller there is, which is the part I should have checked when I wrote it. The two things that reach this are a cross product of two edges and a difference of two far-apart points, and both are computed inside corvid_vector now -- WideOffset::cross_direction and WideOffset::direction -- so the public signature only has to hold what an outside caller can hand it, and nothing outside has a ratio wider than a word.
+tests/normalize.rs pins both ends of the new width rather than the old 4 * i64::MAX it was reaching for:
+```
+assert_eq!(Direction::from_ratio([0, 0, i64::MAX]), Some(Direction::Z));
+assert_eq!(Direction::from_ratio([0, 0, i64::MIN]), Some(-Direction::Z));
+```
+One i128 remains behind this, and I would rather name it than let you find it: unit_component, the private last step, multiplies a Q30 by a Q31 by the 2^31 - 1 unit, which is 2^92. Reordering does not help -- any two of the three already reach 2^61. Splitting it into two shifts would fit an i64 and cost a last bit on every normalized direction, which tests/normalize.rs would catch and which is not worth the width. If you would rather have the bit back than the i128, say so and I will make that trade instead.
+Generated by Claude Code
+Comment thread
+crates/corvid_fixed/src/fixed/signed/macros.rs
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/corvid_shape/src/aabb.rs
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/corvid_shape/src/aabb.rs
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/corvid_shape/src/aabb.rs
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/corvid_shape/src/frustum.rs
+Comment on lines
++327
+to
++351
+/// The tangent of half an angle, in integers.
+///
+/// The one trigonometric quantity a frustum has. Computed from the workspace's
+/// integer sine and cosine and divided in Q16, so it is bit-identical on every
+/// target -- and so that a half-angle of a quarter turn, whose tangent is
+/// infinite, saturates instead of dividing by zero.
+///
+/// A field of view past a half turn has no half a pitch can hold, and is not a
+/// field of view: it saturates here, which is the same answer the quarter-turn
+/// case already gives.
+const fn slope_of(fov_y: Angle16) -> I16F16 {
+let Some(half) = fov_y.half() else {
+return I16F16::MAX;
+};
+let (sine, cosine) = half.sin_cos();
+// `as` rather than `i64::from`, which is not callable in a `const fn`:
+// `From` is not a const trait yet. Both sources are `i32`, so the widening
+// is exact either way.
+let (sine, cosine) = (sine.to_bits() as i64, cosine.to_bits() as i64);
+if cosine == 0 {
+return I16F16::MAX;
+}
+// Q31 shifted into Q47 over Q31 is a Q16.
+I16F16::from_bits(corvid_bits::narrow_i64((sine << 16) / cosine))
+}
+lizelive
+Aug 10, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+why not use tan directly?
+lizelive
+Aug 10, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+No good reason. It uses tan now, in 7670fbe:
+```
+const fn slope_of(fov_y: Angle16) -> I16F16 {
+    let Some(half) = fov_y.half() else {
+        return I16F16::MAX;
+    };
+    half.tan().to_i16f16()
+}
+```
+Eleven lines to two. The hand-written version derived the tangent from sin_cos and a division, including its own guard for the quarter turn where the cosine is zero -- and Pitch32::tan saturates there already. So the guard was this function re-deriving a property the type has.
+One thing was genuinely missing, and it is the answer to "why not": tan answers a Q8, because a tangent is unbounded and Q8 has the range for it, while a frustum works in Q16. There was no conversion between the two scalars. I24F8::to_i16f16 is that conversion, and it lives in a new convert module in corvid_fixed -- a change of binary scale can clamp, which makes it a different kind of operation from the arithmetic around it, and it will not be the last one.
+tests/frustum.rs still pins the half-turn saturation, so the None arm and the unbounded-tangent arm both still answer I16F16::MAX.
+Generated by Claude Code
+Comment thread
+Cargo.toml
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/corvid_shape/src/lib.rs
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/corvid_shape/src/project.rs
+Outdated
+lizelive
+Aug 10, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+re-write this to properly use corvid_fixed and corvid_vector.
+lizelive
+Aug 10, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Agreed, and this is the one I want to check the shape of with you before writing it, because doing it properly turns up something that changes what "no 128-bit" can mean.
+Most of the width here is unjustified, and my own module comment is why. It argues that three Q39 products cannot fit an i64 because 3 * 2^62 exceeds i64::MAX. That bound is wrong: a Direction is a unit vector, so offset . direction is bounded by |offset| rather than by three maxed products. Three components at 2^31 is not a unit vector. Taking the real bound, |offset| * 1 <= sqrt(3) * 2^31 * 2^31, which is about 0.87 of i64::MAX -- so project, align and along all fit in i64 and always did. I widened them from a bound I never checked.
+One case genuinely does not fit, and it is the one your sphere.rs and aabb.rs comments are pointing at. The difference of two far-apart GlobalPoints reaches 2^32, not 2^31 -- that is what offset_bits exists for -- and dotting that with a direction reaches sqrt(3) * 2^63. There is no i64 answer for a ray cast from one side of the world at a point on the other.
+So the plan, unless you would rather something else:
+project, align, along and cross become corvid_vector operations on GlobalPoint and Direction, in i64. corvid_shape calls them and names no integer type.
+The wide-offset case becomes one corvid_vector type -- an offset that has already left a component's range -- carrying its own i128 internally and answering I24F8. Still 128-bit, but in the crate that owns the arithmetic, and it is the only place.
+divide, narrow and UNIT go with them. project.rs disappears rather than being rewritten.
+On the GPU point: everything above stays integer and the public surface is I24F8 / Signed32 / I16F16, which are i32 underneath, so a shader-side port has the same types to work with. The i128 is confined to one function that a GPU path would not call, because a shader does not cast rays across 16 000 km.
+If you would rather the wide case go away entirely -- accepting that a cast spanning the world saturates rather than answering -- say so and I will do that instead; it is strictly less code. I did not assume it because saturating there is what produced the three bugs in your last review.
+Generated by Claude Code
+lizelive
+Aug 10, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Done in 63b4505, taking the plan above and not the fallback. crates/corvid_shape/src/project.rs is gone rather than rewritten.
+The bound held, and I checked it before building on it. Analytically sqrt(3) * 2^31 * 2^31 is 7.9877e18 against i64::MAX's 9.2234e18 -- 13.4% of headroom. tests/project.rs goes looking for the corner of the world that reaches it rather than taking that on trust, and finds 7.9877e18 exactly: the bound is tight, so what is there is all there is.
+What moved where.
+corvid_vector gained GlobalPoint::project, Direction::align and Direction::along, all i64, and a WideOffset for the case that does not fit -- the difference of two points, which is one bit wider than a component and no more. It answers GlobalPoint, I24F8, I48F16 and Direction, never a bit pattern.
+corvid_fixed gained I24F8::squared, I48F16::root and checked_div_signed32 / saturating_div_signed32. That pair is your "add it to the fixed type": a plane's cast and a box's slab test were each a length over how much two directions agree, spelled by hand in i128 in this crate, and they are now one method call on the scalar.
+What that does to the widths. Six of the seven wide sites are gone:
+was
+now
+project, align, along
+i64 in corvid_vector
+half_extent's widen-halve-narrow
+WideOffset::half, i64
+the slab test's (bound - start) * UNIT / slope
+I24F8::saturating_div_signed32, i64
+the plane cast's numerator * UNIT / denominator
+I24F8::checked_div_signed32, i64
+the sphere's b^2 - c
+WideOffset::rejection_squared, i128
+the triangle's four dots over two crosses
+Volume, i128
+Two remain, both inside corvid_vector, and both are a product of two wide offsets rather than a sum of narrow ones -- so no reordering removes them:
+A cross product of two offsets reaches 2^65. WideOffset::cross_direction computes it and normalizes it in one step, so it is never named.
+A scalar triple product of three reaches 2^98. That is Volume, and it is opaque for exactly that reason: a volume of world-spanning offsets has no fixed-point type to be, and none of the things it is for need one -- a barycentric coordinate is a ratio of two volumes and a winding is a sign.
+One thing came out better than a relocation. The sphere's quadratic used to be disc = b^2 - c with c = |oc|^2 - r^2. For a cast from the far side of the world both |oc|^2 and b^2 are near 2^64 and their difference is small -- subtracting two large numbers to get the small one that decides hit from miss. It now asks for the squared closest approach directly, so whether a ray finds the sphere is exact even when the distance it answers has to clamp. That was not the plan; it fell out of having to name the operation.
+On the GPU point specifically. Everything above is integer, and the public surface of both crates is I24F8 / I16F16 / Signed32 / I48F16, which are i32 and i64 underneath. The two i128 functions are the triangle cast's, which a shader would not run -- a fragment shader does not cast rays across 16 000 km.
+Direction::from_ratio takes [i64; 3] now, which is the other thread. corvid_bits is out of this crate's dependencies.
+Generated by Claude Code
+Comment thread
+crates/corvid_shape/src/sphere.rs
+Outdated
+// leaves a positive discriminant and the quadratic reports a hit at a
+// distance the ray never travels.
+let offset = offset_bits(ray.origin, self.centre);
+let b = project_bits(offset, ray.direction);
+lizelive
+Aug 10, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+shouldn't need to be doing bit manipulation in this crate.
+lizelive
+Aug 10, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Right, and it does not any more -- 63b4505. There is no to_bits, no from_bits and no integer type anywhere in sphere.rs now. contains is the whole of it:
+```
+WideOffset::between(point, self.centre).length_squared() <= self.radius.squared()
+```
+Squared on both sides, so no square root; wide on the left, because the point may be further from the centre than a component reaches. I24F8::squared answers an I48F16 -- squaring doubles the scale, so the wide type is where a squared length belongs -- and I48F16::root takes it back. The two are new in corvid_fixed.
+The cast got the better end of it. It was disc = b^2 - c with c = |oc|^2 - r^2, and for a ray starting on the far side of the world both |oc|^2 and b^2 are near 2^64 while their difference is small -- subtracting two large numbers to get the one that decides hit from miss. It now asks WideOffset::rejection_squared for the squared closest approach directly:
+```
+let discriminant = self.radius.squared().saturating_sub(offset.rejection_squared(ray.direction));
+```
+So whether the ray finds the sphere is exact even when the distance it answers has to clamp, which the old arrangement could not promise. a_sphere_does_not_swallow_the_far_side_of_the_world -- the test from your first review -- still passes, as does the grazing case.
+Detail on where the widening went is on the project.rs thread.
+Generated by Claude Code
+claude
+added 2 commits
+August 10, 2026 16:58
+refactor(shape): answer review, first pass
+…
+7670fbe
+```
+Five of the twelve comments, the ones that stand alone. The arithmetic
+relocation the review is mostly about is a separate change.
+
+**The nursery group is gone from `[workspace.lints.clippy]`**, and with it
+every allow that existed only to silence it: thirteen files lose a
+`redundant_pub_crate` or `missing_const_for_fn` attribute, including the
+crate-wide one on `corvid_shape/src/lib.rs`. The group and
+`unreachable_pub` want opposite things of a private module's items, so
+each of those allows was a rule arguing with another rule rather than
+with the code.
+
+**`inflate` is `radius * slope.hypot(1)`**, which is what it always
+meant. `corvid_fixed::hypot` computes it from the exact sum of squares,
+so the Q32 widening this spelled out by hand happens where the scale is
+known.
+
+**`slope_of` uses `tan`.** It was computing a tangent from `sin_cos` and
+a division, including a hand-written guard for the quarter turn where
+the cosine is zero -- and `Pitch32::tan` already saturates there. The
+guard is the type's answer now rather than this function's.
+
+**`Aabb::centre` is `self.min + self.half_extent()`.** It works, and my
+comment claiming it would saturate was wrong: the centre lies between
+the corners, both of which are points already, so only the *extent*
+needs widening and that is `half_extent`'s business.
+
+**The signed-normalized conversion takes an `i8`.** It is the narrowest
+integer that spells the three values the type holds, so the width says
+what the conversion is for; `direction(0, 1, 0)` still compiles, since
+what an unsuffixed literal needs is one candidate impl rather than a
+particular one.
+
+`I24F8::to_i16f16` is new, in a `convert` module beside the scalars --
+the tangent comes back as a Q8 and a frustum works in Q16. Its own
+module rather than `point/mod.rs` because a conversion that changes the
+binary scale can clamp, which is a different kind of operation from the
+arithmetic around it, and there will be more of them.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LFXQSmQf7QZKdBnok4jKMa
+```
+refactor(shape): move the arithmetic to the crates that own the scales
+…
+63b4505
+```
+corvid_shape now names no integer type and reads no bit pattern. Every
+quantity in it is an I24F8, an I16F16, a Direction or a GlobalPoint, and
+every operation is named for the geometry rather than for the width it
+needs.
+
+corvid_vector gains the mixed-scale products a raycast is built from --
+GlobalPoint::project, Direction::align and Direction::along -- all in i64.
+The bound that made them i128 was wrong: a Direction is a unit vector, so
+Cauchy-Schwarz holds the sum of three Q39 products to sqrt(3) * 2^62 rather
+than to 3 * 2^62, which is the difference between fitting an i64 and not.
+tests/project.rs goes looking for the corner of the world that reaches the
+bound rather than taking the algebra's word for it.
+
+WideOffset is the difference of two GlobalPoints taken before anything
+narrows, which is one bit wider than a component and no more. Its
+projection carries a remainder between the three terms so it answers the
+same integer the narrow one does, checked over fifty thousand cases.
+Volume is the scalar triple product a triangle's barycentric tests are, and
+it is opaque because a volume of world-spanning offsets has no fixed-point
+type to be.
+
+corvid_fixed gains I24F8::squared, I48F16::root and the division by a
+Signed32 that a plane and a slab test each are.
+
+Direction::from_ratio takes [i64; 3] rather than [i128; 3], and
+corvid_shape no longer depends on corvid_bits.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LFXQSmQf7QZKdBnok4jKMa
+```
+lizelive
+commented
+Aug 10, 2026
+View reviewed changes
+Comment thread
+crates/corvid_shape/README.md
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/corvid_vector/src/point/mod.rs
+#[inline]
+pub const fn from_ratio(components: [i128; 3]) -> Option<Self> {
+normalize_bits(components, false)
+pub const fn from_ratio(components: [i64; 3]) -> Option<Self> {
+lizelive
+Aug 10, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+what requires i64 input for ratio?
+lizelive
+Aug 10, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+When you asked, nothing did -- grep from_ratio crates/*/src found no caller at all, only tests. So the honest answer was "nothing", and I should have caught that.
+It has one now, in 3bc5274, and it is the reason the width is a word:
+```
+pub const fn cross_direction(self, other: Self) -> Option<Direction>
+```
+A triangle's normal is the cross product of two edges. Both edges are GlobalPoints, so each component is a Q8 i32, and their products reach 2^62 -- a word, and nothing narrower. Going through GlobalPoint::cross instead divides the result back into a component's range first, and a normal recovered from three saturated components points somewhere the face does not: tests/measure.rs has the pair side by side, where the narrowed one comes back 31 degrees out.
+So the shape of it is: from_ratio takes the widest thing a cross product of two points can be, cross_direction is the caller that makes one, and nothing else in the workspace needs the entry point at all. If you would rather it were not public, cross_direction is enough surface for corvid_shape and from_ratio could go pub(crate) -- I left it public because a caller with a ratio from somewhere else has no other way in.
+The one i128 still behind this is unchanged and still worth naming: unit_component, the private last step of normalize, multiplies a Q30 by a Q31 by the 2^31 - 1 unit, which is 2^92. Any two of the three already reach 2^61, so no reordering helps; splitting it into two shifts would fit an i64 and cost a last bit on every normalized direction.
+Generated by Claude Code
+Comment thread
+crates/corvid_vector/src/point/wide.rs
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/corvid_vector/src/point/volume.rs
+Outdated
+lizelive
+Aug 10, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+use U16F16 (M^3) for volume.
+lizelive
+Aug 10, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+volume.rs is gone in 3bc5274 and Volume is an i64, not an i128. But I have not given it metres cubed, and the reason is worth checking rather than taking from me, because two facts landed against it.
+It is not a volume. det = e1 . (direction x e2) has two offsets and a direction in it, and a direction is dimensionless -- so the quantity is an area, m^2. The one that genuinely was m^3 was the fourth determinant, e2 . (s x e1), and it is the reason this ever needed more than a word: a whole metre of scale further out than the other three, reaching (8.4e6)^3 which is 5.9e20 and past every fixed-point type here by six orders of magnitude. That one is deleted rather than narrowed. Once u and v are known the hit is located already, so the routine walks to it and projects back onto the ray:
+```
+let hit = self.a.lerp(self.b, u.ratio(determinant))
+    + GlobalPoint::ZERO.lerp(second, v.ratio(determinant));
+let distance = hit.checked_sub(ray.origin)?.project(ray.direction);
+```
+Same distance, out of quantities that are all in range, and the textbook's fourth cross product disappears with it.
+A named scale would make it saturate, and a determinant must not. The three that remain reach sqrt(3) * 2^31 against sqrt(3) * 2^31, which is 2.1e14 m^2. I48F16 stops at 1.407e14, so a triangle with edges past about 6 000 km would clamp -- and a clamped determinant is not an imprecise answer, it is a broken comparison: u and det saturate to the same value and every ray reads as exactly on the edge. The arbitrary shared factor is what makes that unreachable. It exists to keep the sum inside a word (2^62.6 rather than 3 * 2^62) and nothing asked of a Volume can see it -- a sign, a comparison against another one, and a ratio between two are all scale-free.
+So the choice is between a type that names its units and clamps, and an opaque one that cannot. I took the second. If you would rather have the named units, the way to make them safe is to cap the triangle -- a mesh face is metres, not thousands of kilometres -- and I can add that cap explicitly and give it I48F16 in m^2. Say the word.
+tests/measure.rs sweeps every pair of the range's eight corners against two thousand directions, checking the sign against an f64 reference and that the widest it reaches is over half of i64::MAX and under all of it -- so the bound is neither exceeded nor merely generous.
+Generated by Claude Code
+refactor(vector)!: drop the wide offset and keep every cast inside a …
+…
+3bc5274
+```
+…word
+
+An offset is a GlobalPoint like any other. Two points more than 8388 km
+apart have no offset in this type, and checked_sub is how a caller finds
+that out -- a saturated difference clamps one axis and not the next, so
+what comes back is a different bearing rather than a shorter one, which is
+the defect the wide type existed to avoid. A miss is the better answer, and
+every method here already had somewhere to put one.
+
+Narrowing the inputs by that one bit is what brings the arithmetic back
+inside an i64, and every bound is now argued rather than widened past:
+
+- A cross product is three two-by-two minors, so Cauchy-Schwarz holds each
+  to sqrt(2) * 2^62 rather than the 2^63 two maxed products suggest.
+- A squared length goes unsigned, where 3 * 2^62 fits with room to spare.
+- A scalar triple product halves the cross on the way past, which takes it
+  from 3 * 2^62 to 2^62.6, a quarter inside a word.
+
+tests/measure.rs searches for the corner of the range that reaches each of
+those rather than taking the algebra's word for it.
+
+The triangle's fourth determinant is gone rather than bounded. It is a
+volume where the other three are areas -- a whole metre of scale further
+out, and the only thing in the workspace that needed more than a word. Once
+u and v are known the hit is located already, so walking to it and
+projecting back onto the ray answers the same distance out of quantities
+that are all in range.
+
+A box wider than a component no longer needs a wide type either: the middle
+is the corners interpolated halfway, which is in range because a midpoint
+lies between two points that are, and the half extent follows from it.
+
+Direction::from_ratio keeps its i64 and gets its caller back --
+GlobalPoint::cross_direction, whose product of two Q8 patterns reaches 2^62
+and fits a word and nothing narrower.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LFXQSmQf7QZKdBnok4jKMa
+```
+Hide details
+View details
+lizelive
+merged commit 73cffd3
+into
+main
+Aug 10, 2026
+8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+lizelive
+deleted the
+shape/init
+branch
+August 10, 2026 19:07
+lizelive
+mentioned this pull request
+Aug 11, 2026
+feat(camera): add the orbit, the walker, and the ray a screen position denotes
+#34
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

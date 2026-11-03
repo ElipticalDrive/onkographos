@@ -1,0 +1,264 @@
+Been working on clustered rendering over the past few weekends. 
+So first of all, a quick refresher on what is clustered rendering and why we care. 
+Clustered rendering is a technique for optimizing shader performance wh…
+
+Clustered Rendering on WebGPU - Showcase - three.js forum
+Clustered Rendering on WebGPU
+Showcase
+lights,
+clustered-rendering,
+shaders,
+webgpu
+Usnul
+April 10, 2025, 9:32pm
+1
+Been working on clustered rendering over the past few weekends.
+So first of all, a quick refresher on what is clustered rendering and why we care.
+Clustered rendering is a technique for optimizing shader performance when you have lots of lights in the scene.
+If you look inside three.js, you will see that for each light we do a simple iteration inside the shader:
+What this means, is that for each light in the scene, you will have to do some computation for each pixel on the screen. And light calculations happen to be the most expensive part of the whole thing.
+Say you have a scene of a street at night with 20 street lights. Your POV is at the ground level, half of the street lights are far behind the camera, 5 more are behind a building, so really you only have 5 lights that are contributing to what you see on screen.
+In this situation, you would still run lighting calculations for those other 15 lights that are not contributing. You can extrapolate this and quickly see how the whole thing becomes a huge bottleneck.
+to demonstrate this, I’m going to use Toji’s implementation.
+If we have a scene with 1024 point lights, and we run a this whole thing on RTX 4090, with the loop approach we get ~50 FPS
+image1075×1078 124 KB
+If we stare straight at the floor, we do a bit better, now we’re ~80 FPS
+image1074×1075 77.8 KB
+Now, if we use clustered
+image1075×1072 101 KB
+image1077×1072 47.5 KB
+we’re at around 240 FPS in both cases, which is my monitor’s limit.
+You may think that this example is contrived and proves little, as 50FPS is already pretty good, but remember that we’re on RTX 4090 here
+So clustered rendering is a very simple thing conceptually, you just slice up your view frustum into parts called “clusters”, and do a bit of precomputation before each frame to bin lights to clusters. That is - for each cluster we record what lights overlap that cluster.
+In our shader, we then simply lookup what cluster a pixel belongs to, and only iterate over the lights that the cluster overlaps. Pretty simple really, at least in concept.
+Shade
+So, now that we’re up to date on what clustered rendering is, back to the new part.
+I’ve written a clustered renderer in the past, and I was pretty happy with it, expect the fact that binning was done on the CPU, which imposed pretty hard limits on number of lights and how finely you can slice up your frustum. As I was working on a new WebGPU renderer, I had it in the back of my mind to port my existing work over, but run binning work on the GPU instead, so that’s pretty much all I did.
+Turned out to be a lot more work than I imagined, as what’s fast on CPU is not the same for GPU, so I had to rewrite the whole thing pretty much from scratch. Toji’s code was actually quite helpful, even if I ended up doing things quite differently.
+Biggest 2 differences from standard approaches:
+Using actual frusta, instead of AABB approximation for each cluster, resulting in much tighter bounds and far fewer false positives.
+Pre-culling. We start with say 1024 lights in the scene, we could bin them all, but 99.9% of the time, some of the lights will not be visible at all, so by culling the initial list before binning, we can typically reduce amount of lights to be binned quite drastically.
+I don’t really have numbers to back up my claims for the first point, you just going to have to take my word for it, but you can convince yourself by imagining a frustum, and how one would create an AABB around it, it should be obvious that AABB has a larger volume, and being axis-aligned, it would grow even larger if frustum is unaligned.
+I do have some pictures and numbers though, so fret not.
+First, let’s take a test scene with 1025 lights
+Screenshot 2025-04-10 1521301077×1077 86 KB
+There is, obviously 1 directional light and 1024 randomly placed point lights of different colors.
+We slice up our frustum into 32x18x48 clusters, here’s what that looks like in Z axis:
+Screenshot 2025-04-10 1522201075×1074 73.2 KB
+X and Y are boring, as they just alight with the screen
+image1075×1077 98.2 KB
+Now, if we visualize each pixel’s cluster, hopefully it will make some sense
+image1077×1080 119 KB
+here’s the same thing, with cluster resolution dropped to 4x4x48
+image1078×1075 86 KB
+Okay, so that’s not very interesting, more interesting is the data that’s stored in the clusters, let’s visualize that:
+image1078×1075 66.3 KB
+The scale goes up to 11 light, here’s the scale:
+So on average we’re shading about 3 lights per pixel here, instead of the original 1024
+And here’s the actual perfect contribution:
+image1075×1075 60.4 KB
+Now, for the numbers, shading scales incredibly well
+Light count
+Shading time
+Binning
+Without Clusters (default)
+Speedup (including binning)
+16
+302.08 µs
+21.50 µs
+369.66 µs
++ 14.2%
+256
+306.18 µs
+83.97 µs
+1.93 ms
++ 394%
+1024
+318.46 µs
+462.85 µs
+5.42 ms
++ 594%
+16384
+401.41 µs
+2.85 ms
+54.90 ms
++ 1588%
+NOTE: µs is micro second (1/1000 of millisecond)
+NOTE: All lights are point-lights with radius of 1, the sponza dimensions are default: 29.7 x 12.5 x 18.3
+Theoretically the system scales to infinity, but realistically speaking about 64 thousand lights in the scene should be about the point where further optimization would be required.
+For those that are curious, I’m using log2 scale for Z slices, and the limit per cluster is set to 128, which realistically is plenty, as if you have more than 128 lights overlapping a single small cluster of space - you’re probably doing something wrong in your scene. That said, limits are adjustable.
+References:
+Dr.Strangelight or: How I Learned to Stop Worrying and Love the Cluster (see for more references)
+https://advances.realtimerendering.com/s2020/RenderingDoomEternal.pdf
+A Primer On Efficient Rendering Algorithms & Clustered Shading.
+WebGPU Clustered Forward Shading
+12 Likes
+Reverse Z infinite projection
+Usnul
+April 15, 2025, 9:15pm
+2
+Managed to connect PIX profiler to Shade today, so I collected actual GPU timings for the first time. Previously I was using WebGPU’s timestamp-query, which have wonky timings for “security reasons”.
+Here are precise timings from PIX for 1024 lights scenario:
+Culling - 7.84 µs
+Binning - 193 µs
+Shading - 274.37 µs
+This is pretty much the first time I’ve been using a real GPU profiler, and I must say I’m really impressed. I’ve been creating a lot of tooling in Shade just to provide a window into what the GPU is doing, and this tool does it all and more our of the box. I wouldn’t say I regret writing the tools that I have, but I will definitely be relying on PIX more in the future.
+That said, setting it up has been a real pain. I’ve done it in the past only to get fail to record anything, today I managed to obtain a recording, but only on Chrome Canary, and only with a very specific version of PIX (tried 5 different version, only one worked). And even then, many of the recording features don’t work and recording only works about 20% of the time. So a lot left to be desired.
+For posterity,
+I’m on Windows 11 x64
+PIX version is 2405.15.002-OneBranch_release
+Chrome Canary is Version 137.0.7125.0 (Official Build) canary (64-bit)
+Launch parameters are: --disable-gpu-sandbox --disable-gpu-watchdog --enable-dawn-features=emit_hlsl_debug_symbols,disable_symbol_renaming "http://localhost:5173/"
+Tickboxes
+When everything works (The 20% I mentioned), you get something like this:
+image1870×490 16.2 KB
+Especially enlightening for me was wave occupancy on ray traced shadows:
+image1633×526 51.5 KB
+The warps are only ~30% utilized on average, with the rest sitting idle. Another way to picture this would be to imagine something like this:
+```
+if(x){
+   // code 1
+}else if(y){
+   // code 2
+}else{
+   // code 3
+}
+```
+Where each each thread hits a random branch on average, so only 30% of the threads are running the same branch at any given time on average.
+This is not too bad for an inline ray tracer for somewhat obvious reasons. But the main takeaway for me here was that optimizing the memory access further is pointless, and any BVH improvements will have marginal gains, as the main issue is occupancy. I’m curious about that last bit at the end where we see a lot of blue, this indicates a lot of stragglers.
+Imagine if you could reach close to 90% occupancy - suddenly ray tracing would be 3 times faster.
+More relevant to this topic, is shading. Here’s shading occupancy:
+image1252×124 1.33 KB
+Red is occupied, orange is idle and blue is free. occupancy is ~40% throughout.
+The reasons seems to be register pressure
+image1327×114 789 Bytes
+which hovers around 93% at the peak, so we can only schedule about 40% of the threads in a warp it seems
+Also, take the timings with a grain of salt, GPU timings are not super reliable because:
+GPU has acceleration/parking strategies to limit power usage. This causes timings to drift
+Ambient temperature has impact on the above, I (and I assume you too) are not in a temperature-controlled environment
+GPU is doing other stuff, from drawing your other application windows, to doing stuff like video decoding
+Modern GPUs runs on virtual memory, so there’s paging involved
+Browser actually interacts with the driver for you, so there’s a fat layer of abstraction between WebGPU and the GPU
+GPU scheduler provides no guarantees on reproducibility of scheduling. That is - your thread/warp allocation will vary pretty much every time, and some allocations might lead to better occupancy
+GPU has caches
+I’m sure I’m missing at least a few extra reasons in there, the point is - timings will vary. The only useful metrics are averages for relatively large sample sizes, and relative to other metrics.
+3 Likes
+manthrax
+April 15, 2025, 9:37pm
+3
+I’m guessing this is also deferred? Very cool writeup. really interested in the pix stuff too..i will be revisiting this at some point.
+Usnul
+April 16, 2025, 4:54pm
+4
+Yep, deferred. Shade is explicitly deferred. Except for the transparencies of course, but that’s the same everywhere right now.
+1 Like
+Usnul
+June 20, 2025, 10:54pm
+5
+I thought I would make a demo to show application of clustered lighting, here are a few screenshots:
+image1075×1075 101 KB
+Screenshot 2025-06-20 2332461078×1078 123 KB
+Screenshot 2025-06-20 2333131076×1076 71.5 KB
+Screenshot 2025-06-20 2333451078×1076 85.4 KB
+And in case you’re wondering, yes - every candle has a separate spherical light attached to it:
+image1920×1080 127 KB
+There are a total of 16 torches, 22 lanterns, 91 candles and handful of other lights in the scene. Took me a few hours in blender to actually place them
+In other news, I tweaked my clustering solution a bit. Saw an interesting trend where a few engines would create 2 separate lookup structures:
+Clusters
+Tiles
+The tiles are old hat, but because we don’t need to do Z splitting - you can get more fine-grained tiles than clusters. Then inside the lighting pass - you check both and take the smallest set. I thought this was wasteful, but I liked the idea.
+So I thought why not make XY clustering resolution-dependent. After some research - turns out a few engines including Unreal do exactly that. So I’m in good company it appears. Anyway - I did just that, we have a fixed number of Z slices, but XY slices are done every 32 pixels, giving us best of both worlds more or less. Since we get very fine-grained XY slices, I dropped Z resolution to 24 slices. Seems to work very well. Here’s a debug view of Sponza with 1024 spherical lights:
+Screenshot 2025-06-06 0918141074×1080 63.1 KB
+The scale goes up to 13 here, that is - only a few pixels have to look up 13 lights here, mostly it’s ~5.
+Speaking of lights themselves - I expanded the concept of point lights to spherical lights, which lets us have softer lighting and better match emitter size.
+For comparisson, here are two versions of the previous scene, with the lights
+Screenshot 2025-06-20 2338211075×1076 101 KB
+and without
+image1078×1074 98.3 KB
+and a few more
+image1075×1075 115 KB
+Screenshot 2025-06-20 2358201077×1078 115 KB
+Although a darker environment benefits more from numerous lights, of course
+image1077×1075 66 KB
+image1077×1078 32.9 KB
+2 Likes
+Shade - WebGPU graphics
+Usnul
+June 20, 2025, 11:36pm
+6
+For comparrison, I loaded the same scene in three.js
+image1077×1170 80.2 KB
+Getting about 96 FPS in Shade vs 24 in three.js
+image1075×1078 67.1 KB
+To try and dial in lighting costs, I loaded a version of the scene without lights
+image1075×1165 197 KB
+A frame takes ~25ms without lights and ~47ms with for three.js, then again, there are 130 lights in the scene, so it’s not too bad. Still, Shade does 10.4 ms, while also doing:
+4 cascades of CSM at 2k resolution each
+SSR post fx
+SSAO post fx
+Bloom post fx
+TAA post fx
+6 Likes
+Related topics
+Topic
+Replies
+Views
+Activity
+Dr.Strangelight or: How I Learned to Stop Worrying and Love the Cluster
+Showcase
+shaders
+,
+lights
+,
+rendering
+,
+forward-rendering
+,
+deferred-rendering
+,
+forward-plus-rendering
+,
+clustered-rendering
+25
+7013
+December 17, 2021
+Optimizing Point Lights
+Discussion
+materials
+,
+shaders
+,
+lights
+,
+fragment-shader
+25
+4578
+November 14, 2023
+Shade - WebGPU graphics
+Showcase
+webgpu
+,
+rendering
+184
+24274
+October 21, 2026
+R168 WebGPU - Chasing Shadows - fixed in r169
+Questions
+shadows
+,
+webgpu
+37
+1237
+September 17, 2024
+OI, you got a license for that T?
+Showcase
+materials
+,
+shaders
+,
+transparency
+,
+webgpu
+19
+1777
+November 13, 2025

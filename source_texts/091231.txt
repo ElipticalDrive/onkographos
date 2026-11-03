@@ -1,0 +1,166 @@
+Opening the discussion for improvements for transparent rendering. I find the current results disturbing as AO makes the whole thing appear opaque. Here are potential approaches I’m considering to introduce, any insight …
+
+Improve ambient occlusion in volume rendering - Development - 3D Slicer Community
+Improve ambient occlusion in volume rendering
+Development
+volume-rendering
+LucasGandel
+(Lucas Gandel)
+December 22, 2023, 4:49pm
+1
+Opening the discussion for improvements for transparent rendering. I find the current results disturbing as AO makes the whole thing appear opaque. Here are potential approaches I’m considering to introduce, any insight would be appreciated.
+Introduce a SSAO intensity factor to reduce the amount of AO applied on the model
+Introduce a flag to use the fragment opacity value as an intensity factor to reduce the amount of AO based on the pixel transparency
+This is how it would look like. From left to right:
+Current rendering with SSAO enabled (equivalent to Approach 1. with a factor of 1.0)
+Approach 1. with a factor of 0.5
+Approach 2. (It could also be combined with Approach 1., but here the factor would be 1.0)
+Current rendering with SSAO disabled
+comp.PNG1920×575 89.5 KB
+Screen-space ambient occlusion for volume rendering
+lassoan
+(Andras Lasso)
+January 2, 2024, 9:16pm
+2
+I see some strange effects with transparent surfaces, but I’m not sure if they are the same that you are describing.
+I see two main issues:
+Darkening: where opacity of a semi-transparent surface reaches the volume opacity threshold the image becomes much darker.
+Only color is coming through: the semi-transparent region’s surface seems to determine the surface normal (the surface texture of the structure behind is not visible, as if the semi-transparent surface was opaque), while the structure behind can strongly change the color.
+image1493×803 100 KB
+Making the opacity value scale the AO may be a good solution. Instead of using a single threshold value, we would use a ramp function. “Volume opacity threshold” could specify the center of the ramp function, and a new “volume opacity window” could specify the width of the ramp:
+AO intensity factor = 0 if fragment opacity <= threshold - window/2
+AO intensity factor = 1 if fragment opacity >= threshold + window/2
+AO intensity factor is linearly interpolated between
+Can you push your experimental changes to github/gitlab so that I can experiment with them?
+LucasGandel
+(Lucas Gandel)
+January 3, 2024, 4:30pm
+3
+Thank you so much for your wonderful insight as always. I love the idea of using a ramp function for scaling AO, I will try to play around with it and will update.
+In the meantime, here is a WIP change where I hardcoded the scaling of AO for both approaches I presented in my previous post: WIP: Improve SSAO for translucent volumes (e0781fd6) · Commits · Lucas Gandel / VTK · GitLab
+I confirm we are on the same page about “Darkening”, and scaling AO with a good approach should fix this.
+Regarding “Only color is coming through”, I confirm this is a limitation of the approach, the semi-transparent surface writes to the depth buffer as soon as the opacity threshold is reached, anything behind is “occluded” in the depth texture. However, this side-effect is probably even more visible because AO is too strong, I need to play a bit with it to be sure, as I don’t reproduce such strong artefacts for now.
+LucasGandel
+(Lucas Gandel)
+January 16, 2024, 2:30pm
+4
+I have updated the WIP branch referenced in the previous post to provide a fixed version of the second approach: ssao contribution premultiplied by the sample opacity.
+One can now call vtkSSAOPass::VolumeOpacityPremultipliedOn() to scale down the SSAO intensity with the opacity value of the sample that writes to the depth buffer.
+From left to right: VolumeOpacityPremultipliedOff, VolumeOpacityPremultipliedOn, SSAO disabled
+comp.PNG1920×737 99.5 KB
+This approach is almost equivalent to multiplying the SSAO intensity by the VolumeOpacityThreshold value and results in almost no SSAO being applied if the volume opacity is very low. I think this is a good improvement towards enabling SSAO by default for volumes.
+Besides that, I am still investigating how to improve further the approach, to try to work around the limitation that only color is coming through. Using a window with a linear ramp for the opacity threshold, or even multiple contour values as the existing isosurface blending mode, does not help because we can only write one voxel depth value in the depth texture…
+lassoan
+(Andras Lasso)
+January 17, 2024, 11:45pm
+5
+Thanks for the update, it looks promising!
+Can you post some pictures about the effect of IntensityScale value?
+I’m wondering if we adding scaling&offset instead of just scaling would allow to achieve nicer rendering, i.e., instead of the current
+```
+gl_FragData[0] = vec4(vec3(1.0 - occlusion * "<< this->IntensityScale <<"), 1.0);
+```
+could we get better results by using this (probably we also need to clamp the result to 0…1 range):
+```
+gl_FragData[0] = vec4(vec3(1.0 - (occlusion - " << this->IntensityOffset << ") * "<< this->IntensityScale <<"), 1.0);
+```
+lassoan
+(Andras Lasso)
+January 18, 2024, 10:51pm
+6
+@LucasGandel I’ve experimented with your code a bit and I think that IntensityScale property is not used optimally. If we use scaling < 1 values then the shadows are just become too weak - almost no shadowing occurs. However, using scaling > 1 values seem useful, as they can increase darkening. But we would not want to darken values that are below the VolumeOpacityThreshold, because that would just make the entire image dark. To solve this, I would propose to scale around the VolumeOpacityThresholdValue.
+Currently in your branch (everything gets darker as scaling increases):
+```
+"  gl_FragData[0] = vec4(vec3(1.0 - occlusion * " << this->"  gl_FragData[0] = vec4(vec3(1.0 - (occlusion - " << this->VolumeOpacityThreshold << ") * " << this->IntensityScale << "), 1.0); \n"; << "), 1.0); \n";
+```
+image1920×502 146 KB
+Proposed (only occluded regions get darker with increased scaling):
+```
+"  gl_FragData[0] = vec4(vec3(1.0 - clamp((occlusion - " << this->VolumeOpacityThreshold <<" ) * "<< this->IntensityScale <<", 0.0, 1.0)), 1.0); \n";
+```
+image1920×511 160 KB
+The set function of IntensityScale also needs to be changed to allow >1 values (range of 0.0 to about 5.0 should suffice).
+I have not looked at the OpacityPremultiplied option yet.
+Shadow rendering issue with transparency
+SpatialLabs stereoscopic display
+3D modeling pathway for printing
+Best Practices for 3D Slicer Volume Rendering of DICOM Data
+Can't download because the source file cannot be read
+LucasGandel
+(Lucas Gandel)
+January 19, 2024, 1:48pm
+7
+This is brilliant @lassoan, thank you so much for working on this, this looks like great improvements. I will try to experiment with your code today and see how it behaves with premultiplied alpha.
+lassoan
+(Andras Lasso)
+January 19, 2024, 4:27pm
+8
+I have tried the OpacityPremultiplied option but I could not really find any useful applications of it, as the improved IntensityScale option already provides much more stable control over how transparent regions are renderered.
+I experimented with tuning how scale is computed, but then I realized that I don’t understand how scale value is used to . Could you explain how the scale is used to control “ssao contribution”?
+```
+l_ssaoFragNormal = normalize(g_dataNormal) * scale;
+```
+What is l_ssaoFragNormal used for? How the magnitude of the normal controls SSAO contribution?
+LucasGandel
+(Lucas Gandel)
+January 19, 2024, 4:47pm
+9
+After a quick try, I can already say that what you proposed is a great improvement.
+I agree it makes sense to have a scale > 1.0
+I also think using an offset value is a great improvements. Coupled with the scale > 1, it offers some kind of control over the “slope” of the shadow intensity.
+However, I think using a separate variable as in your 1st proposition (IntensityOffset) makes more sense than using the VolumeOpacityThreshold value. The side-effect of using VolumeOpacityThreshold is that it shifts the position of the shadow layer. Having both variables should offer more control.
+Finally, the premultiplied alpha option is not very useful as the scale can manage reducing the ambient occlusion effect on transparent volumes.
+Just saw your feedback. Basically the magnitude of the normal is used to “encode” the raycast sample opacity value. The idea was to multiply the occlusion value with the alpha value of the sample (which is actually different from using the fragment (screenspace) alpha value as I initially implemented). Because the sample alpha value is only accessible during the raycasting of the volume and not in the SSAO texture where the occlusion is computed, I decided to encode it in the normal magnitude. It’s just a way to avoid adding additional textures to pass float values to the SSAO pass.
+LucasGandel
+(Lucas Gandel)
+January 22, 2024, 4:05pm
+10
+Using the gradient (normal magnitude) instead of the opacity value should also be considered at some point. (i.e. replacing "if (!g_skip && g_fragColor.a >" with "if (!g_skip && length(g_dataNormal) > "). I am currently experimenting with it to improve rendering of highly transparent volumes. It seems to provide more controls for highlighting different structures when changing the VolumeOpacityThreshold. Here is an example with different VolumeOpacityThreshold values but without scaling down the shadows.
+image1433×1523 95.1 KB
+image1590×1627 92.2 KB
+My ultimate goal is to find an approach that produces acceptable results by default, without having to tune parameters of the transfer function.
+lassoan
+(Andras Lasso)
+January 22, 2024, 4:39pm
+11
+Does g_fragColor.a already contain the gradient opacity mapping result? If yes, then it should not be necessary to use the raw gradient magnitude value, but the desired effect should be possible to achieve by tuning the gradient opacity function.
+This would be really nice, but it is not impossible to have a single set of rendering parameters (volume rendering transfer functions and SSAO parameters) that work well for a wide range of images. We always work with parameter sets optimized for a certain clinical task for a certain image type. Still, we need to expose at least an intensity offset value in the scalar opacity transfer function, because image intensity values are standardized mostly for just CT (but even then there is some variety due contrast dilution, bone density, etc.). A feasible goal is to have a parameter set for showing skin surface on CT, another parameter set for showing bones in CT, and another for soft tissues on CT.
+I would try to prioritize for finding independent SSAO parameters, i.e., each parameter affecting only a single aspect of the rendering result (no crosstalk between them) and affecting only the darkened regions. For example, if the user adjusts “ssao intensity” parameter then it should not be necessary to adjust the “ssao volume opacity threshold”, or to adjust lighting to preserve the overall brightness of the rendered image. This would allow the user to start from a parameter set and then tune just 1-2 parameters in a couple of seconds to achieve the desired visualization. I think most of the SSAO parameters are already mostly independent, we just need to make sure any new one that we introduce are like that, too.
+Related topics
+Topic
+Replies
+Views
+Activity
+Screen-space ambient occlusion for volume rendering
+Development
+volume-rendering
+49
+3790
+December 19, 2023
+Help regarding "Synchronize with Volumes module"
+Support
+dicom
+,
+volume-rendering
+7
+761
+July 15, 2021
+Generating an opaque volume using volume rendering
+Support
+volume
+,
+volume-rendering
+1
+580
+July 14, 2020
+Viewing a volume with two different volume rendering properties at same time
+Support
+volume-rendering
+9
+1732
+March 8, 2021
+VTK multivolume/cinematic volume rendering
+Support
+56
+5396
+September 3, 2024

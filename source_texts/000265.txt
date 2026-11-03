@@ -1,0 +1,503 @@
+OpenVDB: openvdb/math/DDA.h Source File
+OpenVDB
+9.0.1
+Main Page
+Related Pages
+Namespaces
+Classes
+Files
+File List
+File Members
+openvdb
+math
+DDA.h
+Go to the documentation of this file.
+1 // Copyright Contributors to the OpenVDB Project
+2 // SPDX-License-Identifier: MPL-2.0
+3 //
+4 /// @file DDA.h
+5 ///
+6 /// @author Ken Museth
+7 ///
+8 /// @brief Digital Differential Analyzers specialized for VDB.
+9
+10 #ifndef OPENVDB_MATH_DDA_HAS_BEEN_INCLUDED
+11 #define OPENVDB_MATH_DDA_HAS_BEEN_INCLUDED
+12
+13 #include "Coord.h"
+14 #include "Math.h"
+15 #include "Vec3.h"
+16 #include <openvdb/Types.h>
+17 #include <iostream> // for std::ostream
+18 #include <limits> // for std::numeric_limits<Type>::max()
+19
+20 namespace openvdb {
+21 OPENVDB_USE_VERSION_NAMESPACE
+22 namespace OPENVDB_VERSION_NAME {
+23 namespace math {
+24
+25 /// @brief A Digital Differential Analyzer specialized for OpenVDB grids
+26 /// @note Conceptually similar to Bresenham's line algorithm applied
+27 /// to a 3D Ray intersecting OpenVDB nodes or voxels. Log2Dim = 0
+28 /// corresponds to a voxel and Log2Dim a tree node of size 2^Log2Dim.
+29 ///
+30 /// @note The Ray template class is expected to have the following
+31 /// methods: test(time), t0(), t1(), invDir(), and operator()(time).
+32 /// See the example Ray class above for their definition.
+33 template<typename RayT, Index Log2Dim = 0>
+34 class DDA
+35 {
+36 public:
+37 using RealType = typename RayT::RealType;
+38 using RealT = RealType;
+39 using Vec3Type = typename RayT::Vec3Type;
+40 using Vec3T = Vec3Type;
+41
+42 /// @brief uninitialized constructor
+43 DDA() {}
+44
+45 DDA(const RayT& ray) { this->init(ray); }
+46
+47 DDA(const RayT& ray, RealT startTime) { this->init(ray, startTime); }
+48
+49 DDA(const RayT& ray, RealT startTime, RealT maxTime) { this->init(ray, startTime, maxTime); }
+50
+51 inline void init(const RayT& ray, RealT startTime, RealT maxTime)
+52 {
+53 assert(startTime <= maxTime);
+54 static const int DIM = 1 << Log2Dim;
+55 mT0 = startTime;
+56 mT1 = maxTime;
+57 const Vec3T &pos = ray(mT0), &dir = ray.dir(), &inv = ray.invDir();
+58 mVoxel = Coord::floor(pos) & (~(DIM-1));
+59 for (int axis = 0; axis < 3; ++axis) {
+60 if (math::isZero(dir[axis])) {//handles dir = +/- 0
+61 mStep[axis] = 0;//dummy value
+62 mNext[axis] = std::numeric_limits<RealT>::max();//i.e. disabled!
+63 mDelta[axis] = std::numeric_limits<RealT>::max();//dummy value
+64 } else if (inv[axis] > 0) {
+65 mStep[axis] = DIM;
+66 mNext[axis] = mT0 + (mVoxel[axis] + DIM - pos[axis]) * inv[axis];
+67 mDelta[axis] = mStep[axis] * inv[axis];
+68 } else {
+69 mStep[axis] = -DIM;
+70 mNext[axis] = mT0 + (mVoxel[axis] - pos[axis]) * inv[axis];
+71 mDelta[axis] = mStep[axis] * inv[axis];
+72 }
+73 }
+74 }
+75
+76 inline void init(const RayT& ray) { this->init(ray, ray.t0(), ray.t1()); }
+77
+78 inline void init(const RayT& ray, RealT startTime) { this->init(ray, startTime, ray.t1()); }
+79
+80 /// @brief Increment the voxel index to next intersected voxel or node
+81 /// and returns true if the step in time does not exceed maxTime.
+82 inline bool step()
+83 {
+84 const int stepAxis = static_cast<int>(math::MinIndex(mNext));
+85 mT0 = mNext[stepAxis];
+86 mNext[stepAxis] += mDelta[stepAxis];
+87 mVoxel[stepAxis] += mStep[stepAxis];
+88 return mT0 <= mT1;
+89 }
+90
+91 /// @brief Return the index coordinates of the next node or voxel
+92 /// intersected by the ray. If Log2Dim = 0 the return value is the
+93 /// actual signed coordinate of the voxel, else it is the origin
+94 /// of the corresponding VDB tree node or tile.
+95 /// @note Incurs no computational overhead.
+96 inline const Coord& voxel() const { return mVoxel; }
+97
+98 /// @brief Return the time (parameterized along the Ray) of the
+99 /// first hit of a tree node of size 2^Log2Dim.
+100 /// @details This value is initialized to startTime or ray.t0()
+101 /// depending on the constructor used.
+102 /// @note Incurs no computational overhead.
+103 inline RealType time() const { return mT0; }
+104
+105 /// @brief Return the maximum time (parameterized along the Ray).
+106 inline RealType maxTime() const { return mT1; }
+107
+108 /// @brief Return the time (parameterized along the Ray) of the
+109 /// second (i.e. next) hit of a tree node of size 2^Log2Dim.
+110 /// @note Incurs a (small) computational overhead.
+111 inline RealType next() const { return math::Min(mT1, mNext[0], mNext[1], mNext[2]); }
+112
+113 /// @brief Print information about this DDA for debugging.
+114 /// @param os a stream to which to write textual information.
+115 void print(std::ostream& os = std::cout) const
+116 {
+117 os << "Dim=" << (1<<Log2Dim) << " time=" << mT0 << " next()="
+118 << this->next() << " voxel=" << mVoxel << " next=" << mNext
+119 << " delta=" << mDelta << " step=" << mStep << std::endl;
+120 }
+121
+122 private:
+123 RealT mT0, mT1;
+124 Coord mVoxel, mStep;
+125 Vec3T mDelta, mNext;
+126 }; // class DDA
+127
+128 /// @brief Output streaming of the Ray class.
+129 /// @note Primarily intended for debugging.
+130 template<typename RayT, Index Log2Dim>
+131 inline std::ostream& operator<<(std::ostream& os, const DDA<RayT, Log2Dim>& dda)
+132 {
+133 os << "Dim=" << (1<<Log2Dim) << " time=" << dda.time()
+134 << " next()=" << dda.next() << " voxel=" << dda.voxel();
+135 return os;
+136 }
+137
+138 /////////////////////////////////////////// LevelSetHDDA ////////////////////////////////////////////
+139
+140
+141 /// @brief Helper class that implements Hierarchical Digital Differential Analyzers
+142 /// and is specialized for ray intersections with level sets
+143 template<typename TreeT, int NodeLevel>
+144 struct LevelSetHDDA
+145 {
+146 using ChainT = typename TreeT::RootNodeType::NodeChainType;
+147 using NodeT = typename ChainT::template Get<NodeLevel>;
+148
+149 template <typename TesterT>
+150 static bool test(TesterT& tester)
+151 {
+152 math::DDA<typename TesterT::RayT, NodeT::TOTAL> dda(tester.ray());
+153 do {
+154 if (tester.template hasNode<NodeT>(dda.voxel())) {
+155 tester.setRange(dda.time(), dda.next());
+156 if (LevelSetHDDA<TreeT, NodeLevel-1>::test(tester)) return true;
+157 }
+158 } while(dda.step());
+159 return false;
+160 }
+161 };
+162
+163 /// @brief Specialization of Hierarchical Digital Differential Analyzer
+164 /// class that intersects a ray against the voxels of a level set
+165 template<typename TreeT>
+166 struct LevelSetHDDA<TreeT, -1>
+167 {
+168 template <typename TesterT>
+169 static bool test(TesterT& tester)
+170 {
+171 math::DDA<typename TesterT::RayT, 0> dda(tester.ray());
+172 tester.init(dda.time());
+173 do { if (tester(dda.voxel(), dda.next())) return true; } while(dda.step());
+174 return false;
+175 }
+176 };
+177
+178 //////////////////////////////////////////// VolumeHDDA /////////////////////////////////////////////
+179
+180 /// @brief Helper class that implements Hierarchical Digital Differential Analyzers
+181 /// for ray intersections against a generic volume.
+182 ///
+183 /// @details The template argument ChildNodeLevel specifies the entry
+184 /// upper node level used for the hierarchical ray-marching. The final
+185 /// lowest level is always the leaf node level, i.e. not the voxel level!
+186 template <typename TreeT, typename RayT, int ChildNodeLevel>
+187 class VolumeHDDA
+188 {
+189 public:
+190
+191 using ChainT = typename TreeT::RootNodeType::NodeChainType;
+192 using NodeT = typename ChainT::template Get<ChildNodeLevel>;
+193 using TimeSpanT = typename RayT::TimeSpan;
+194
+195 VolumeHDDA() {}
+196
+197 template <typename AccessorT>
+198 TimeSpanT march(RayT& ray, AccessorT &acc)
+199 {
+200 TimeSpanT t(-1, -1);
+201 if (ray.valid()) this->march(ray, acc, t);
+202 return t;
+203 }
+204
+205 /// ListType is a list of RayType::TimeSpan and is required to
+206 /// have the two methods: clear() and push_back(). Thus, it could
+207 /// be std::vector<typename RayType::TimeSpan> or
+208 /// std::deque<typename RayType::TimeSpan>.
+209 template <typename AccessorT, typename ListT>
+210 void hits(RayT& ray, AccessorT &acc, ListT& times)
+211 {
+212 TimeSpanT t(-1,-1);
+213 times.clear();
+214 this->hits(ray, acc, times, t);
+215 if (t.valid()) times.push_back(t);
+216 }
+217
+218 private:
+219
+220 friend class VolumeHDDA<TreeT, RayT, ChildNodeLevel+1>;
+221
+222 template <typename AccessorT>
+223 bool march(RayT& ray, AccessorT &acc, TimeSpanT& t)
+224 {
+225 mDDA.init(ray);
+226 do {
+227 if (acc.template probeConstNode<NodeT>(mDDA.voxel()) != nullptr) {//child node
+228 ray.setTimes(mDDA.time(), mDDA.next());
+229 if (mHDDA.march(ray, acc, t)) return true;//terminate
+230 } else if (acc.isValueOn(mDDA.voxel())) {//hit an active tile
+231 if (t.t0<0) t.t0 = mDDA.time();//this is the first hit so set t0
+232 } else if (t.t0>=0) {//hit an inactive tile after hitting active values
+233 t.t1 = mDDA.time();//set end of active ray segment
+234 if (t.valid()) return true;//terminate
+235 t.set(-1, -1);//reset to an empty and invalid time-span
+236 }
+237 } while (mDDA.step());
+238 if (t.t0>=0) t.t1 = mDDA.maxTime();
+239 return false;
+240 }
+241
+242 /// ListType is a list of RayType::TimeSpan and is required to
+243 /// have the two methods: clear() and push_back(). Thus, it could
+244 /// be std::vector<typename RayType::TimeSpan> or
+245 /// std::deque<typename RayType::TimeSpan>.
+246 template <typename AccessorT, typename ListT>
+247 void hits(RayT& ray, AccessorT &acc, ListT& times, TimeSpanT& t)
+248 {
+249 mDDA.init(ray);
+250 do {
+251 if (acc.template probeConstNode<NodeT>(mDDA.voxel()) != nullptr) {//child node
+252 ray.setTimes(mDDA.time(), mDDA.next());
+253 mHDDA.hits(ray, acc, times, t);
+254 } else if (acc.isValueOn(mDDA.voxel())) {//hit an active tile
+255 if (t.t0<0) t.t0 = mDDA.time();//this is the first hit so set t0
+256 } else if (t.t0>=0) {//hit an inactive tile after hitting active values
+257 t.t1 = mDDA.time();//set end of active ray segment
+258 if (t.valid()) times.push_back(t);
+259 t.set(-1,-1);//reset to an empty and invalid time-span
+260 }
+261 } while (mDDA.step());
+262 if (t.t0>=0) t.t1 = mDDA.maxTime();
+263 }
+264
+265 math::DDA<RayT, NodeT::TOTAL> mDDA;
+266 VolumeHDDA<TreeT, RayT, ChildNodeLevel-1> mHDDA;
+267 };
+268
+269 /// @brief Specialization of Hierarchical Digital Differential Analyzer
+270 /// class that intersects against the leafs or tiles of a generic volume.
+271 template <typename TreeT, typename RayT>
+272 class VolumeHDDA<TreeT, RayT, 0>
+273 {
+274 public:
+275
+276 using LeafT = typename TreeT::LeafNodeType;
+277 using TimeSpanT = typename RayT::TimeSpan;
+278
+279 VolumeHDDA() {}
+280
+281 template <typename AccessorT>
+282 TimeSpanT march(RayT& ray, AccessorT &acc)
+283 {
+284 TimeSpanT t(-1, -1);
+285 if (ray.valid()) this->march(ray, acc, t);
+286 return t;
+287 }
+288
+289 template <typename AccessorT, typename ListT>
+290 void hits(RayT& ray, AccessorT &acc, ListT& times)
+291 {
+292 TimeSpanT t(-1,-1);
+293 times.clear();
+294 this->hits(ray, acc, times, t);
+295 if (t.valid()) times.push_back(t);
+296 }
+297
+298 private:
+299
+300 friend class VolumeHDDA<TreeT, RayT, 1>;
+301
+302 template <typename AccessorT>
+303 bool march(RayT& ray, AccessorT &acc, TimeSpanT& t)
+304 {
+305 mDDA.init(ray);
+306 do {
+307 if (acc.template probeConstNode<LeafT>(mDDA.voxel()) ||
+308 acc.isValueOn(mDDA.voxel())) {//hit a leaf or an active tile
+309 if (t.t0<0) t.t0 = mDDA.time();//this is the first hit
+310 } else if (t.t0>=0) {//hit an inactive tile after hitting active values
+311 t.t1 = mDDA.time();//set end of active ray segment
+312 if (t.valid()) return true;//terminate
+313 t.set(-1, -1);//reset to an empty and invalid time-span
+314 }
+315 } while (mDDA.step());
+316 if (t.t0>=0) t.t1 = mDDA.maxTime();
+317 return false;
+318 }
+319
+320 template <typename AccessorT, typename ListT>
+321 void hits(RayT& ray, AccessorT &acc, ListT& times, TimeSpanT& t)
+322 {
+323 mDDA.init(ray);
+324 do {
+325 if (acc.template probeConstNode<LeafT>(mDDA.voxel()) ||
+326 acc.isValueOn(mDDA.voxel())) {//hit a leaf or an active tile
+327 if (t.t0<0) t.t0 = mDDA.time();//this is the first hit
+328 } else if (t.t0>=0) {//hit an inactive tile after hitting active values
+329 t.t1 = mDDA.time();//set end of active ray segment
+330 if (t.valid()) times.push_back(t);
+331 t.set(-1, -1);//reset to an empty and invalid time-span
+332 }
+333 } while (mDDA.step());
+334 if (t.t0>=0) t.t1 = mDDA.maxTime();
+335 }
+336 math::DDA<RayT, LeafT::TOTAL> mDDA;
+337 };
+338
+339 } // namespace math
+340 } // namespace OPENVDB_VERSION_NAME
+341 } // namespace openvdb
+342
+343 #endif // OPENVDB_MATH_DDA_HAS_BEEN_INCLUDED
+Vec3.h
+openvdb::v9_0::math::DDA::voxel
+const Coord & voxel() const
+Return the index coordinates of the next node or voxel intersected by the ray. If Log2Dim = 0 the ret...
+Definition: DDA.h:96
+openvdb::v9_0::math::VolumeHDDA< TreeT, RayT, 0 >::march
+TimeSpanT march(RayT &ray, AccessorT &acc)
+Definition: DDA.h:282
+openvdb::v9_0::math::DDA< RayT, LeafT::TOTAL >::Vec3Type
+typename RayT::Vec3Type Vec3Type
+Definition: DDA.h:39
+Math.h
+General-purpose arithmetic and comparison routines, most of which accept arbitrary value types (or at...
+openvdb::v9_0::math::DDA::init
+void init(const RayT &ray, RealT startTime)
+Definition: DDA.h:78
+Coord.h
+openvdb::v9_0::math::DDA::maxTime
+RealType maxTime() const
+Return the maximum time (parameterized along the Ray).
+Definition: DDA.h:106
+openvdb::v9_0::math::VolumeHDDA< openvdb::v9_0::tree::Tree, RayType, NodeLevel >::TimeSpanT
+typename RayType::TimeSpan TimeSpanT
+Definition: DDA.h:193
+openvdb::v9_0::math::DDA::DDA
+DDA(const RayT &ray)
+Definition: DDA.h:45
+openvdb::v9_0::math::MinIndex
+size_t MinIndex(const Vec3T &v)
+Return the index [0,1,2] of the smallest value in a 3D vector.
+Definition: Math.h:938
+openvdb::v9_0::math::DDA::time
+RealType time() const
+Return the time (parameterized along the Ray) of the first hit of a tree node of size 2^Log2Dim...
+Definition: DDA.h:103
+openvdb::v9_0::math::VolumeHDDA
+Helper class that implements Hierarchical Digital Differential Analyzers for ray intersections agains...
+Definition: DDA.h:187
+openvdb::v9_0::math::LevelSetHDDA::test
+static bool test(TesterT &tester)
+Definition: DDA.h:150
+openvdb::v9_0::math::Coord
+Signed (x, y, z) 32-bit integer coordinates.
+Definition: Coord.h:24
+openvdb::v9_0::math::VolumeHDDA< openvdb::v9_0::tree::Tree, RayType, NodeLevel >::NodeT
+typename ChainT::template Get< ChildNodeLevel > NodeT
+Definition: DDA.h:192
+openvdb::v9_0::math::DDA::DDA
+DDA(const RayT &ray, RealT startTime, RealT maxTime)
+Definition: DDA.h:49
+openvdb::v9_0::tools::composite::max
+const std::enable_if<!VecTraits< T >::IsVec, T >::type & max(const T &a, const T &b)
+Definition: Composite.h:107
+openvdb::v9_0::math::LevelSetHDDA< TreeT,-1 >::test
+static bool test(TesterT &tester)
+Definition: DDA.h:169
+openvdb::v9_0::math::DDA::next
+RealType next() const
+Return the time (parameterized along the Ray) of the second (i.e. next) hit of a tree node of size 2^...
+Definition: DDA.h:111
+openvdb::v9_0::math::VolumeHDDA< TreeT, RayT, 0 >::LeafT
+typename TreeT::LeafNodeType LeafT
+Definition: DDA.h:276
+openvdb::v9_0::math::LevelSetHDDA::ChainT
+typename TreeT::RootNodeType::NodeChainType ChainT
+Definition: DDA.h:146
+Types.h
+openvdb::v9_0::math::DDA::step
+bool step()
+Increment the voxel index to next intersected voxel or node and returns true if the step in time does...
+Definition: DDA.h:82
+openvdb::v9_0::math::VolumeHDDA::hits
+void hits(RayT &ray, AccessorT &acc, ListT &times)
+Definition: DDA.h:210
+openvdb::v9_0::math::LevelSetHDDA::NodeT
+typename ChainT::template Get< NodeLevel > NodeT
+Definition: DDA.h:147
+openvdb::v9_0::math::DDA< RayT, LeafT::TOTAL >::RealT
+RealType RealT
+Definition: DDA.h:38
+openvdb::v9_0::math::DDA::init
+void init(const RayT &ray)
+Definition: DDA.h:76
+openvdb::v9_0::math::DDA::DDA
+DDA(const RayT &ray, RealT startTime)
+Definition: DDA.h:47
+openvdb
+Definition: Exceptions.h:13
+openvdb::v9_0::math::DDA
+A Digital Differential Analyzer specialized for OpenVDB grids.
+Definition: DDA.h:34
+openvdb::v9_0::math::VolumeHDDA::VolumeHDDA
+VolumeHDDA()
+Definition: DDA.h:195
+openvdb::v9_0::math::Min
+const Type & Min(const Type &a, const Type &b)
+Return the minimum of two values.
+Definition: Math.h:659
+openvdb::v9_0::math::VolumeHDDA::march
+TimeSpanT march(RayT &ray, AccessorT &acc)
+Definition: DDA.h:198
+openvdb::v9_0::math::VolumeHDDA< TreeT, RayT, 0 >::TimeSpanT
+typename RayT::TimeSpan TimeSpanT
+Definition: DDA.h:277
+openvdb::v9_0::math::VolumeHDDA< TreeT, RayT, 0 >::VolumeHDDA
+VolumeHDDA()
+Definition: DDA.h:279
+openvdb::v9_0::math::DDA< RayT, LeafT::TOTAL >::RealType
+typename RayT::RealType RealType
+Definition: DDA.h:37
+openvdb::v9_0::math::DDA::init
+void init(const RayT &ray, RealT startTime, RealT maxTime)
+Definition: DDA.h:51
+openvdb::v9_0::math::DDA< RayT, LeafT::TOTAL >::Vec3T
+Vec3Type Vec3T
+Definition: DDA.h:40
+openvdb::v9_0::math::DDA::print
+void print(std::ostream &os=std::cout) const
+Print information about this DDA for debugging.
+Definition: DDA.h:115
+openvdb::v9_0::math::isZero
+bool isZero(const Type &x)
+Return true if x is exactly equal to zero.
+Definition: Math.h:338
+openvdb::v9_0::math::VolumeHDDA< openvdb::v9_0::tree::Tree, RayType, NodeLevel >::ChainT
+typename openvdb::v9_0::tree::Tree::RootNodeType::NodeChainType ChainT
+Definition: DDA.h:191
+OPENVDB_VERSION_NAME
+#define OPENVDB_VERSION_NAME
+The version namespace name for this library version.
+Definition: version.h.in:116
+openvdb::v9_0::math::VolumeHDDA< TreeT, RayT, 0 >::hits
+void hits(RayT &ray, AccessorT &acc, ListT &times)
+Definition: DDA.h:290
+openvdb::v9_0::math::DDA::DDA
+DDA()
+uninitialized constructor
+Definition: DDA.h:43
+openvdb::v9_0::math::LevelSetHDDA
+Helper class that implements Hierarchical Digital Differential Analyzers and is specialized for ray i...
+Definition: DDA.h:144
+OPENVDB_USE_VERSION_NAMESPACE
+#define OPENVDB_USE_VERSION_NAMESPACE
+Definition: version.h.in:202
+Generated by
+1.8.11

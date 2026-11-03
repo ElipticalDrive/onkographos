@@ -1,0 +1,213 @@
+A 3D engine in Rust for large open-world games on cutting-edge hardware. - Mix dielectric and metal as glTF 2.0 Appendix B does by gariasf · Pull Request #246 · gariasf/praxis
+
+Mix dielectric and metal as glTF 2.0 Appendix B does by gariasf · Pull Request #246 · gariasf/praxis · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+gariasf
+commented
+Oct 22, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Part 3 of 4 of #199 (split), after #245. Part 4 follows and closes #199.
+What
+The lit pass's BRDF is glTF 2.0 Appendix B's mix(dielectric_brdf, metal_brdf, metallic), and cook_torrance is gone.
+The mix.
+A dielectric's Fresnel, from its fixed F0 of 0.04, mixes its diffuse and specular lobes: the light its surface does not reflect enters, scatters and leaves diffuse.
+A metal's Fresnel, from its base colour, tints its specular lobe.
+cook_torrance weighted the diffuse lobe by one Fresnel from an F0 already blended by metallic, which agrees with Appendix B only where metallic is 0 or 1.
+Gathered by lobe. Mixed as Appendix B writes it, the lit pass took up to 25 µs (5%) longer at 1440p on the M4 Pro, since the metal's Fresnel is computed per light. Gathered by lobe it is the same function:
+the dielectric's diffuse lobe, weighted by (1 − metallic)(1 − F) with the dielectric's own F;
+one specular lobe whose Fresnel, Schlick's F being linear in F0, is F at the F0 that metallic mixes, which no light changes.
+The f64 oracle compares it with Appendix B's own code.
+The Fresnel weight, (1 − |V·H|)⁵, is multiplied out like Appendix B's fresnel_w: pow has no value for the negative base that a |V·H| rounded just past 1 gives.
+reflected_luminance is the per-light term: f(L, V) E (N·L)⁺ from unit vectors, in ADR 0023's photometric terms. Where L and V are opposite, H is left zero instead of NaN, and χ⁺ zeroes the specular lobe.
+Where images change. No Golden scene has a fractional metallic, so the Goldens change only at silhouettes, where Appendix B's |N·V| replaces the old clamp to 0, mostly on metals. SciFiHelmet's metallic Texture is fractional, about 0.2 to 0.3 over most of it, and there the mix itself moves the helmet by up to 23 steps.
+Size. 370 changed lines (327 added, 43 removed).
+Verification
+```
+ok    fmt        0s
+ok    clippy     2s
+ok    build      6s
+ok    test      75s
+ok    bench      6s
+ok    verify    89s
+```
+metallic_roughness_brdf_matches_appendix_b_and_is_reciprocal: 675 cases of cosines from lights and views between the normal and grazing, at the roughness floor, 0.5 and 1, for a dielectric, a metal and half of each, against Appendix B's "full code" in f64 within 4e-6; light and view swapped give the same value. It fails with Appendix B's simplified mix, with metallic's mix reversed, or with the diffuse lobe missing 1/π.
+reflected_luminance_follows_the_brdf_and_a_white_metal_reflects_at_most_what_it_receives:
+from unit vectors around a tilted normal, matches the f64 reference within 5e-5, since f32 rounds the directions themselves;
+0 for a light at or below the horizon, finite where L = −V at the roughness floor;
+a white metal's directional albedo, summed over 16,200 directions of the hemisphere, stays at most 1 at roughness 0.5 and 1, seen from 0°, 60° and 85°.
+Appendix B's dielectric is not held to that bound: its fresnel_mix is not energy conserving, as Appendix B says in "Coupling Diffuse and Specular Reflection" (it reflects 1.11 at 85° when white, at roughness 0.5).
+It fails without the half-vector guard (NaN), or with N·V in place of N·L.
+fresnel_rises_from_the_base_reflectance_to_one_at_grazing takes the weight, at ±0.5 and just past 1 too.
+Review (/code-review over the four parts, numbers on #243). This part's five findings:
+fixed: the f64 reference spells its names out (fresnel_w, the mix's x, y, a);
+fixed: Appendix B's licence is cited;
+fixed: pow could see a negative base;
+fixed: the tests built Surface by position three times, now in one place;
+fixed: luminance in ADR 0023's terms.
+Metrics
+Lit pass GPU time, M4 Pro at 2560×1440, two sessions of three interleaved rounds each, median of each session's run medians, in µs:
+Scene
+part 2
+this part
+part 2
+this part
+far-coplanar
+493.8
+496.2
+497.3
+499.0
+helmet
+620.7
+628.2
+625.6
+627.4
+minification
+549.2
+552.3
+556.6
+552.1
+normal-tangent
+389.1
+391.7
+397.0
+390.2
+orrery
+271.4
+278.2
+282.5
+271.7
+pbr-sweep
+362.8
+361.2
+368.1
+363.7
+texture-wall
+930.4
+928.0
+930.3
+928.2
+uv-grid
+361.2
+360.7
+364.4
+361.1
+The mix as Appendix B writes it, in a session before: +7 to +25 µs over part 2 (far-coplanar +24.6, helmet +23.2). A focused session of three rounds on the five heaviest scenes, part 2 against the gathered form: −0.9 to +5.3 µs.
+Within each session's spread. Counters unchanged.
+Images
+Metal Goldens, before (#245) and after, and the Goldens test's difference image (after dimmed, red where a channel moves past 1). The software-Vulkan Goldens are CI's captures (run 39744673401), which the shipping build's job matched byte for byte; on lavapipe too only pbr-sweep and normal-tangent move.
+Scene
+Before
+After
+Difference
+pbr-sweep: metal silhouettes; 70 px, up to 8
+normal-tangent: the metal column's bump edges; 160 px, up to 14
+helmet (no Golden; captures at 1280×720, shown at half): silhouettes and its fractional metallic; 1,727 px, up to 23
+orrery moves 21 pixels by 1, inside tolerance; the other scenes are unchanged. A metal sphere's rim in pbr-sweep, zoomed 4x (before, after, difference):
+Decide
+None. The owner judges #199's images at visual check 2, on #200's PR.
+🤖 Generated with Claude Code
+gariasf
+added 2 commits
+October 22, 2026 09:58
+Mix dielectric and metal as glTF 2.0 Appendix B does
+…
+ee23089
+```
+Part 3 of #199. The lit pass's BRDF is now Appendix B's
+mix(dielectric_brdf, metal_brdf, metallic): a dielectric's Fresnel,
+from its fixed 0.04, mixes its diffuse and specular lobes, and a metal's,
+from its base colour, tints its specular lobe. cook_torrance mixed one
+Fresnel from a base reflectance already blended by metallic, which only
+agrees with Appendix B where metallic is 0 or 1.
+
+reflected_radiance, the per-light term under its oracle, turns unit
+vectors into the BRDF's cosines and returns f(L, V) E (N·L)⁺. Where L and
+V are opposite, H is left zero instead of NaN, so χ⁺ zeroes the specular
+lobe. A white metal's directional albedo stays at or under 1; Appendix B's
+dielectric is not held to that, since its fresnel_mix is not energy
+conserving, as Appendix B says. Goldens change.
+```
+Gather the mix by lobe, and name its result luminance
+…
+b197fcd
+```
+Review of #199's third part. Appendix B's mix, as it writes it, cost the
+lit pass up to 25 µs (5%) at 1440p on the M4 Pro: it computes the metal's
+Fresnel per light. Gathered by lobe it is the same function: the
+dielectric's diffuse lobe weighted by its own Fresnel, and one specular
+lobe whose Fresnel, Schlick's being linear in F0, is at the F0 metallic
+mixes, which no light changes. Measured against part 2, the lit pass is
+within 5 µs on every scene again; the f64 oracle still checks it against
+Appendix B's code, and no Golden changes.
+
+The Fresnel weight is (1 − |V·H|)⁵ multiplied out, as Appendix B's
+fresnel_w: pow had no value for the negative base a |V·H| rounded past 1
+gives. Per-light results are luminance, in ADR 0023's photometric terms.
+The f64 reference spells its names out and cites Appendix B's licence,
+and the tests build each Surface in one place.
+```
+gariasf
+added a commit
+that referenced
+this pull request
+Oct 22, 2026
+Images for #246
+19fa55e
+Take software Vulkan's Goldens for Appendix B's mix from CI
+…
+e3f2912
+```
+Captures from run 39744673401's golden-differences artifact, which the
+shipping build's job matched byte for byte, as did each scene at 100 km.
+```
+gariasf
+marked this pull request as ready for review
+October 22, 2026 08:16
+Hide details
+View details
+gariasf
+merged commit 877ea94
+into
+main
+Oct 22, 2026
+7 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+gariasf
+deleted the
+feat/appendix-b-brdf-mix
+branch
+October 22, 2026 08:16
+This was referenced Oct 22, 2026
+Inverse-square point lights, and ambient and background per scene
+#247
+Merged
+Lit pass from glTF 2.0 Appendix B with inverse-square falloff
+#199
+Closed
+Cite the glTF specification source the lit pass follows
+#249
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

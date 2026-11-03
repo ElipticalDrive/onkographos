@@ -1,0 +1,1629 @@
+Feature-Guided Diffusion for Non-Differentiable Inverse Rendering
+ANDREI-TIMOTEI ARDELEAN, Friedrich-Alexander-Universität, Germany
+MICHAEL FISCHER, Adobe Research, United Kingdom
+TIM WEYRICH, Friedrich-Alexander-Universität, Germany
+TOMÁŠ ISER, Charles University, Faculty of Mathematics and Physics, Czech Republic
+Improved
+candidates
+Target
+Initialization
+Candidate
+renderings
+Candidate
+solutions
+arXiv:2607.17411v1 [cs.GR] 19 Jul 2026
+Visual
+features
+Feature
+Extractor
+CMA-ES
+Our method
+Renderer
+(black box)
+Fig. 1. Feature-guided diffusion in parameter space. Starting from a black-box optimization problem and an initial candidate population, our method samples
+candidate solutions, renders their respective outcome images, and — instead of simply assigning a scalar cost or fitness value to each — computes their visual
+features, which are used to train a diffusion denoiser to generate improved candidates in the next iteration.
+A vast amount of scientific research is dedicated to inferring causes
+from effects, since many practical problems can be formulated as
+inverse optimization. In graphics, the dominant approach in recent years has been analysis-by-synthesis powered by differentiable
+renderers [Jakob et al. 2022; Laine et al. 2020; Li et al. 2018, 2020;
+Nimier-David et al. 2020], which propagate gradients through the
+image formation process to update parameters via gradient descent.
+While powerful, this approach faces two fundamental challenges.
+First, making a renderer differentiable is rarely straightforward:
+obtaining unbiased derivatives in the presence of discontinuities and
+visibility changes typically requires careful mathematical derivations and problem-specific algorithms. The techniques used to differentiate vector graphics rasterization [Li et al. 2020], for instance,
+differ markedly from those used in light transport simulation [Li
+et al. 2018; Vicini et al. 2022; Zhang et al. 2023]. Second, even
+when correct gradients are available, the resulting optimization
+landscapes are often riddled with local minima, and gradient descent – a fundamentally local procedure – routinely fails to find the
+global optimum [Fischer and Ritschel 2023; Zhang et al. 2025]. Even
+a correctly differentiated renderer is therefore not always sufficient
+for solving inverse rendering problems reliably.
+A growing body of work side-steps the first challenge by relaxing
+the strict unbiased differentiability requirement and instead estimating or perturbing gradients stochastically [Deliot et al. 2024;
+Fischer and Ritschel 2023, 2024; Wang et al. 2025; Zhang et al. 2025].
+We share this perspective but take it one step further: we propose
+a framework that solves the inverse problem in a fully black-box
+manner, treating the renderer as an arbitrary function whose only
+requirement is that it produces images. Importantly, our method
+never explicitly calculates or estimates gradients of the rendering
+function, and requires no special initialization, while still being able
+to converge to a global minimum, even in the presence of many local
+minima. Our approach, Feature-Informed Diffusion Evolution
+(FIDE), achieves this through two complementary principles:
+Authors’ Contact Information: Andrei-Timotei Ardelean, Friedrich-AlexanderUniversität, Erlangen-Nürnberg, Germany, timotei.ardelean@fau.de; Michael Fischer,
+Adobe Research, London, United Kingdom, mifischer@adobe.com; Tim Weyrich,
+Friedrich-Alexander-Universität, Erlangen-Nürnberg, Germany, tim.weyrich@fau.de;
+Tomáš Iser, Charles University, Faculty of Mathematics and Physics, Prague, Czech
+Republic, tomas.iser@matfyz.cuni.cz.
+Principle 1: Feature guiding. The obvious difference between gradient-based methods and black-box optimizers is that the former
+have access to per-pixel derivatives, which provide the optimizer
+with spatial awareness of how to improve the current solution. Blackbox optimizers, on the contrary, have no such luxury; methods like
+Inverse rendering is traditionally solved via differentiable renderers and gradient descent, which requires substantial problem-specific engineering and
+is prone to getting stuck in local minima due to ambiguities. Derivative-free
+approaches alleviate engineering requirements, but often heavily depend on
+a good problem initialization. In this work, we propose Feature-Informed
+Diffusion Evolution (FIDE), a fully black-box framework that requires no
+gradients or specific initialization: the renderer is treated as an opaque function whose only requirement is to produce images. Our key insight is feature
+guiding: rather than reducing each candidate rendering to a scalar loss value,
+we use a Vision Transformer (ViT) to extract dense visual features from it.
+We subsequently use these features to train a diffusion-based candidate proposal model, allowing the network to use visual cues to predict parameters
+that would match the target image. The candidate solutions proposed by
+this diffusion model are then refined in a closed loop with a CMA evolution strategy, continuously narrowing the proposal region as optimization
+progresses. We validate across diverse inverse problems from path tracing,
+vector splines, Voronoi shaders, and robotics, and demonstrate that featureguiding substantially improves convergence over scalar-loss baselines and
+reliably escapes local minima where gradient-based methods stall.
+1
+Introduction
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+2
+•
+Andrei-Timotei Ardelean, Michael Fischer, Tim Weyrich, and Tomáš Iser
+CMA-ES [Hansen 2006] or Bayesian optimization (Sec. 2) have to
+base all of their decisions on a single number per candidate, the
+value of the loss function. This is a central limitation we address:
+disregarding the image information and collapsing the current rendered solution to a single scalar value does not tell the optimizer
+what is wrong with a rendered image or where the error lies.
+Our key idea is to overcome this information bottleneck by introducing feature guiding. Instead of merely reducing each rendered
+image to a scalar acquisition score, we extract dense visual features
+using a frozen feature extractor (in our case, DINOv3 [Siméoni et al.
+2025]) to learn a mapping between visual features and the parameters that produced them. Then, the features of the target image
+guide the proposal of new solutions. As graphics problems produce
+structured image-domain output, this observation is particularly
+natural here – and, to our knowledge, has not yet been exploited
+by existing black-box optimization methods (Sec. 2). We emphasize
+that our use of image features to propose candidate solutions is complementary to the use of neural features as part of the loss function
+(as in, e.g., LPIPS).
+Principle 2: Handling ambiguity through diffusion. Additionally, inverse rendering is a frequently ill-posed task, since the forward mapping is non-injective: many parameter configurations can produce
+identical or perceptually indistinguishable images (Fig. 2). Accordingly, a candidate proposer trained to regress parameters directly
+from images or visual features will suffer from two well-known
+problems: mode averaging, i.e., returning the numerical average of
+the several possible candidate solutions [Bishop 1994], and mode
+collapse, a loss of diversity across stochastic proposals, i.e., concentrating on the same candidate [Salimans et al. 2016].
+To alleviate these issues, we approximate the inverse function as
+a multi-modal, conditional distribution using a diffusion model, and,
+based on the target image features, use it to propose several candidates. The candidates from the diffusion process are subsequently
+refined through an evolutionary optimization step (Sec. 3.3). This
+combination of diffusion and evolution addresses both challenges
+raised above: maintaining a population of candidates that evolves
+through stochastic search lets us escape the local minima that trap
+gradient-based methods, while the diffusion-based proposer lets us
+represent the inherent ambiguity of the inverse problem and recover
+valid solutions – something neither a one-shot inverse predictor
+nor a generic black-box optimizer achieve on their own.
+Contributions. In summary, we make two contributions. First, we
+introduce a novel black-box inverse-rendering framework that couples a learned, diffusion-based candidate proposer with populationbased optimization and requires neither gradients nor initialization. Second, we present a thorough empirical study across diverse
+graphics problems — camera pose estimation, robot arm estimation,
+path tracing, vector splines, and Voronoi shaders — and show that
+feature-guiding substantially improves convergence over scalar-loss
+baselines and that our method remains robust to far-from-optimum
+initialization and using various loss functions.
+2
+Related work
+Our work draws inspiration from several lines of research in inverse
+rendering and numerical optimization, each addressed below; the
+relationship is illustrated in Fig. 3.
+Gradient-based inverse rendering. Inverse rendering often relies
+on differentiating the image formation process, either exactly or
+approximately, to obtain gradients with respect to scene parameters.
+Exact differentiation is non-trivial, primarily due to discontinuities
+in the image formation process. A substantial line of research has addressed this for path tracing through edge sampling [Li et al. 2018],
+reparameterization [Bangaru et al. 2020; Loubet et al. 2019; Xu et al.
+2023], and specialized formulations for signed distance fields [Vicini
+et al. 2022], while rasterization-based pipelines pursue different
+strategies based on prefiltering [Li et al. 2020], anti-aliasing [Laine
+et al. 2020], or specialized shading languages [Bangaru et al. 2023].
+Diff. rendering
+e.g., Mitsuba, PSDR, ...
+DFO methods
+Our method
+e.g., CMA-ES, GA, SA, ...
+Reference image
+State:
+single x
+State:
+population
+State:
+population
+50%
+Feat.
+extr.
+50%
+Predictor
+Naïve pedictions without diffusion
+Target
+B
+A
+B
+A
+B
+A
+Diff. renderer
+Renderer
+Renderer
+Image
+Image(s)
+Images
+Our predictions with diffusion
+Target
+A
+B
+B
+A
+B
+A
+A
+Feat.
+extr.
+B
+Fig. 2. Inferring the centers A and B of two Voronoi cells from an image
+of their distance transform is ambiguous: the labels are interchangeable.
+A naïve predictor (top row) suffers from mode averaging, as both cell coordinates are numerically averaged. Our predictor is multi-modal using a
+diffusion model (bottom row); sampling from it yields both global minima.
+Online training
+B
+A
+Loss
+Loss
+Backprop.,
+update via GD
+Update
+proposal strategy
+Loss
+Update
+proposal strategy
+Fig. 3. Different optimization methods. Black arrows denote the control
+flow of the target image or its features. The feature extractor is frozen.
+Feature-Guided Diffusion for Non-Differentiable Inverse Rendering
+Other works focused on time and memory efficiency in differentiable light transport, such as radiative backpropagation [NimierDavid et al. 2020; Vicini et al. 2021]. The Mitsuba 3 rendering framework [Jakob et al. 2022] provides a widely-used implementation of
+such techniques and is an example of the first column in Fig. 3.
+A different class of methods relaxes the strict differentiability criterion and instead aims to approximate gradients. A classic example
+is the finite difference estimator, where perturbed function evaluations allow defining a derivative, and its multi-dimensional extension SPSA [Spall 2002]. More recent examples include PRDPT [Fischer and Ritschel 2023] with a Gaussian convolution that reduces
+plateaus in the loss landscape, which was later extended to second
+order [Wang et al. 2025]; ZeroGrads [Fischer and Ritschel 2024]
+with a differentiable neural surrogate; and a per-pixel stochastic gradient estimation [Deliot et al. 2024]. While these algorithms do not
+require differentiability, they still perform gradient-based iterative
+optimization. Our proposed method, in contrast, does not compute
+or estimate gradients, but instead combines a feature-guided candidate proposal with an evolutionary search in the parameter space.
+Derivative-free optimization. In contrast to gradient-based methods, derivative-free optimization (DFO), also known as black-box
+optimization, operates purely through function evaluations and does
+not rely on any gradient information. As DFO is a wide and mature
+field, we limit our discussion to algorithms relevant to our approach
+and refer the interested reader to the comprehensive overview by
+Conn et al. [2009]. DFO algorithms are often classified as either
+search-based or evolution-based. Search-based methods explore the
+parameter space stochastically without assuming locally coherent
+behavior. A well-known example is simulated annealing [Kirkpatrick
+et al. 1983], which accepts worsening of the loss, up to an acceptance threshold that decreases with a cooling schedule, and has
+been successfully used in inverse reflector design [Weyrich et al.
+2009]. Bayesian optimization fits a probabilistic surrogate – typically
+a Gaussian process – and selects candidates by maximizing an acquisition function; AutoInverse [Ansari et al. 2022] similarly builds
+surrogates and focuses sampling on uncertain regions.
+Evolution-based methods, in contrast, maintain a population of
+candidates that coherently evolves over time as it explores the search
+space. Examples include differential evolution [Storn and Price 1997]
+and genetic algorithms [Holland 1973], where the population procreates according to a quality measure, and particle swarm optimization [Kennedy and Eberhart 1995], which defines population
+motion via a velocity field. CMA-ES [Hansen 2006] additionally
+adapts the search distribution by maintaining a multivariate Gaussian whose covariance is updated from successful samples. A related
+line of work augments evolutionary strategies with surrogate models [Loshchilov et al. 2013] to reduce the number of expensive function evaluations. When applied to problems in graphics, all of these
+methods share the limitation we identified in the introduction: their
+decisions are based on a single scalar fitness value per candidate,
+discarding the spatial information present in rendered images. Our
+method extends the family of evolution-based algorithms with a
+learned, conditional generative proposer that consumes dense image
+features rather than the loss function scalars.
+•
+3
+Direct inverse prediction. Instead of performing iterative optimization, a complementary class of methods learns a direct mapping
+from images to scene parameters in a single forward pass. Recent
+examples include intrinsic decomposition [Liang et al. 2025; Zeng
+et al. 2024] and large reconstruction models [Hong et al. 2024; Li
+et al. 2025]. This paradigm has two major limitations. First, training
+such models relies on large, representative datasets and an extensive
+offline training stage that requires millions of images. This is necessary since the model must learn the task globally, e.g., the whole
+domain of 3D objects. In contrast, our method works adaptively, in
+an online fashion, fitting an observation with a limited number of
+training samples/rendering calls and without a dataset (Sec. 4). Second, direct prediction methods produce their answer in a single pass
+through the network, without rendering again to check whether the
+predicted parameters actually reproduce the target image. There is
+no mechanism to refine the prediction against a specific target or
+recover from a wrong prediction. In contrast, our method trains its
+proposer online during the optimization of a specific target image;
+the proposer’s outputs serve as candidates that are subsequently
+verified and refined by a population-based evolution.
+Diffusion-based optimization. Adjacent to our method, recent
+work has explored diffusion models for black-box optimization.
+DDOM [Krishnamoorthy et al. 2023] train a conditional diffusion
+model to map desired objective values to candidate solutions but operates in an offline setting, requiring a pre-collected dataset without
+providing a mechanism for incorporating new evaluations. DiffBBO [Wu et al. 2024] and DiBO [Yun et al. 2025] extend this idea to
+the online setting. These methods are conceptually close to Bayesian
+optimization as they use the notion of uncertainty in the acquisition
+function to select the next candidates. In contrast to our method,
+they are still conditioned only on scalar loss, not on dense visual
+features, and they also suffer from the significant performance overhead induced by learning the uncertainty. On our experiments in
+Sec. 4, not only does DiBO run for several hours compared to minutes of our method, it still cannot converge to the correct solutions
+because of the missing feature guidance (see Fig. 5).
+Combining features and optimization. Recent work has shown
+the effectiveness of large pre-trained networks as visual descriptors
+that can be used during optimization [Johnson et al. 2016; Zhang
+et al. 2018]. AlexNet [Krizhevsky et al. 2012] and VGG [Simonyan
+and Zisserman 2014] features have been used as part of the loss in
+numerous learning-based methods, including style transfer [Gatys
+et al. 2015], image-to-image translation [Wang et al. 2018], neural rendering [Aliev et al. 2020], and super-resolution [Yuan et al.
+2022]. At the same time, using frozen pretrained features as input
+has proven useful in downstream tasks like Content-Based Image
+Retrieval [Babenko et al. 2014], Zero-Shot Object Detection [Radford et al. 2021], Appearance Transfer [Fischer et al. 2024] and
+Anomaly Localization [Ardelean and Weyrich 2024]. Our proposed
+method employs both ways of leveraging pretrained networks: DINOv3 [Siméoni et al. 2025] features condition our diffusion-based
+proposer, allowing it to reason directly about the spatial and semantic content of the current rendered image. In addition, we use LPIPS
+features as our cost function to avoid common issues of pixel-level
+objectives and achieve a more robust optimization.
+4
+•
+3
+Andrei-Timotei Ardelean, Michael Fischer, Tim Weyrich, and Tomáš Iser
+Our method consists of two key elements: an inverse prediction step,
+followed by an evolutionary search step. We now briefly outline the
+problem definition and then describe each step in more detail.
+3.1
+Problem formulation
+We aim to solve an inverse problem for a given function for which
+the gradients are assumed to be unknown – either due to discontinuities or zero-gradients in the forward model, or due to a black-box
+pipeline. Concretely, given a function 𝑓 and the desired output 𝑦 ∗ ,
+the task is to find the 𝑑-dimensional input parameters 𝑥 ∗ for which
+𝑓 (𝑥 ∗ ) = 𝑦 ∗ . Specific to our work, we assume 𝑓 is an unknown rendering function, rather than an arbitrary black-box function. That
+is, 𝑓 : R𝑑 → I, with I ⊂ R𝐻 ×𝑊 ×3 being the space of images.
+While there exist many, widely-varying optimization methods,
+we largely identify two categories that differ in how the goal is
+formulated: direct inversion and progressive optimization. Direct
+inversion methods seek to arrive at 𝑥 ∗ by learning a parametric function 𝑓˜𝜃−1 : 𝐼 → R𝑑 , where 𝜃 denotes a set of learnable parameters,
+that approximates the true inverse 𝑓 −1 . This inverse can, for example, take the form of a neural network, trained with a standard loss
+(e.g., the mean square error) in the parameter space R𝑑 , on a dataset
+of random (𝑥, 𝑓 (𝑥)) pairs. After optimizing such a function, it can
+be used to directly predict the desired parameters 𝑥˜ = 𝑓˜𝜃−1 (𝑦 ∗ ). This
+technique characterizes offline / amortized optimization methods
+such as SVBRDF estimation [Deschaintre et al. 2019]
+Progressive optimization methods start from one or more initial
+candidates 𝑥 and refine them to approach 𝑥 ∗ by minimizing a cost
+L (𝑦) defined in the output space I, i.e., finding 𝑥˜ = arg min𝑥 L (𝑓 (𝑥)).
+As described in Sec. 2, this is usually achieved by estimating gradients or using a population-based method.
+In this paper, we propose a novel approach that can be seen as a
+combination of direct inversion and progressive optimization. That
+is, our approach performs the optimization by alternating two steps:
+inverse prediction and evolution.
+3.2
+Table 1. Notation used throughout the paper.
+Method
+Inverse prediction step
+A limitation of formulating 𝑓˜𝜃−1 as a direct prediction function is
+that it is, by definition, unable to accommodate non-injective rendering functions 𝑓 . A well-known example is the ambiguity between
+lighting and shading: an image of a diffusely shaded red sphere can
+either be created by a white light and a sphere with red material, or
+a white sphere lit by red light; the rendering process collapses the
+underlying different physical parameters to the same image-space
+representation. A direct inverse predictor confronted with such an
+image must commit to a single output, and since several parameter
+settings are equally consistent with the observation, it is driven
+toward the mean of the valid explanations – a setting that typically
+explains the image worse than any of the individual modes it averages over (for a didactic example, see Fig. 2). Since non-injectivity
+is the rule rather than the exception in inverse graphics, we instead
+formulate 𝑓˜𝜃−1 as a generative model, which represents the full posterior over parameters consistent with the observation and lets us
+sample several valid explanations rather than collapsing them.
+Symbol
+Meaning
+Symbol
+Meaning
+𝑑
+I
+𝑓
+𝑓 −1
+𝑥
+𝑥∗
+𝑥˜
+𝑦
+𝑦∗
+Problem dimensionality
+Image space, ⊂ R𝐻 ×𝑊 ×3
+Forward function
+True inverse of 𝑓
+Parameter vector in R𝑑
+Optimal parameters
+Predicted parameters
+Image, 𝑦 ∈ I
+Reference image
+L
+𝜃
+𝑓˜−1
+Cost function
+Network weights
+Learned inverse
+Noisy parameter
+Diffusion timestep
+Noise std. dev. at 𝑠
+CMA-ES distribution mean
+CMA-ES covariance matrix
+Population size
+𝜃
+𝑧
+𝑠
+𝜎 (𝑠 )
+𝜇
+Σ
+𝑘
+More specifically, we implement 𝑓˜𝜃−1 (𝑧, 𝑦, 𝑠) → R𝑑 as a denoising
+diffusion model, where 𝑧 ∈ R𝑑 is a noisy parameter estimate, 𝑦 ∈ I
+is the conditioning image, and 𝑠 represents the strength of the noise
+(timestep in the diffusion process); the noisy 𝑧 is assumed to come
+from a Gaussian distribution of standard deviation 𝑠 around the
+true 𝑥 that produces 𝑦. Intuitively, the denoising model uses the
+noisy 𝑧 to predict the clean parameters ˜𝑥, using 𝑦 as guidance; the
+objective is for the predicted 𝑥˜ to match 𝑥. Such a model can be
+trained in a standard diffusion model fashion; i.e., we sample random
+parameter vectors 𝑥 ∈ R𝑑 and random noise factors 𝑠. To obtain the
+noisy 𝑧 we use a 𝑑-dimensional, multivariate Gaussian distribution
+N (𝑥, 𝜎 (𝑠) 2 ). Following Li and He [2025], we use the x-pred and
+x-loss, so that the objective is simply ∥ 𝑓˜𝜃−1 (𝑧, 𝑓 (𝑥), 𝑠) − 𝑥 ∥ 22 . After
+the model is trained, we obtain the ˜𝑥-prediction by running the
+backward diffusion process for any random 𝑥 using the ground
+truth 𝒚 ∗ as condition. We sample from the diffusion model using
+a first-order Euler solver applied to the reverse-time ODE.
+Having access to image information from 𝑦 allows the model to
+correlate changes in parameters to changes in rendered output and
+produce valid solutions accordingly. Due to memory constraints, we
+condition the model not directly on image pixels, but on features of
+image patches instead, which are extracted by the feature extractor
+𝐸. Intuitively, this allows the proposal network to “see” the current
+solutions and propose candidates accordingly. In Sec. 4.3, we show
+that the model is surprisingly robust to the feature representation
+and emphasize that an unconditional proposal network does not
+make sense in an inverse rendering setting, since it would just
+produce random samples from the parameter space.
+We show that our conditioned denoising formulation is able to
+solve simple inverse problems in Sec. 4.1. However, since this approach aims to solve the inverse problem globally, it becomes exponentially more difficult as the problem dimensionality 𝑑 increases,
+and the solution quality quickly degrades. Considering that we only
+want to solve the problem for a single 𝑦 ∗ , estimating 𝑓 −1 on the entire domain is not needed. In fact, it would be sufficient to only train
+the model on parameters 𝑥 from the vicinity of 𝑥 ∗ – however, we of
+course do not know 𝑥 ∗ , and thus cannot constrain the sampling to
+this region of the parameter space.
+3.3
+Evolution step
+We therefore introduce our second key idea: progressive refinement
+of our diffusion model’s training domain by combining our inverse
+prediction step with an evolutionary strategy.
+Feature-Guided Diffusion for Non-Differentiable Inverse Rendering
+=2
+Algorithm 1: Feature-informed diffusion evolution (FIDE)
+=3
+Input: Renderer 𝑓 : R𝑑 → I, target image 𝑦 ∗ ∈ I,
+pretrained feature extractor 𝐸 : I → Rℎ×𝑤×𝑐
+Parameter: Population size 𝑘, Iterations 𝑁 , Initial 𝜎0
+•
+5
+Initialize CMA-ES: 𝜇 = 0𝑑 , Σ = 𝜎0 𝐼𝑑 ×𝑑 .
+Initialize weights 𝜃 of the denoiser: 𝑓˜𝜃−1 (𝑧, 𝐸 (𝑦), Σ) → R𝑑 .
+3 for i in 1 . . . 𝑁 do
+4
+Sample {𝑥𝑖 }𝑘𝑖=0 ∼ N (𝜇, Σ)
+5
+{𝑥𝑖 }𝑘/2 ← 𝑓˜−1 ({𝑥𝑖 }𝑘/2, 𝐸 (𝑦 ∗ ), Σ) // denoise 50% of samples
+1
+=4
+2
+=5
+𝑖=0
+6
+Inverse step only
+Full method
+Target
+Fig. 4. Spline optimization with 𝑚 control points (2𝑚 parameters; rows).
+The first four columns are outcomes using only our inverse step method (no
+evolution), followed by our full method and the target image.
+7
+𝜃
+𝑖=0
+{𝑦𝑖 }𝑘𝑖=0 ← 𝑓 ({𝑥𝑖 }𝑘𝑖=0 )
+{𝑒𝑖 }𝑘𝑖=0 ← 𝐸 ({𝑦𝑖 }𝑘𝑖=0 )
+using target features
+// render all samples
+// extract visual features
+// Noise is sampled during training using Σ
+8
+Update 𝑓˜𝜃−1 by training 𝜃 using {(𝑥𝑖 , 𝑒𝑖 )}𝑘𝑖=0
+9
+{𝑐𝑖 }𝑘𝑖=0 ← L ({𝑦𝑖 }𝑘𝑖=0 )
+// compute costs
+𝜇, Σ ← CMA-ES(𝜇, Σ, {𝑥𝑖 }𝑘𝑖=0, {𝑐𝑖 }𝑘𝑖=0 )
+11 end
+12 return 𝜇
+10
+Using the candidates proposed by the inverse model, the evolution step explores the parameter space and updates the search
+distribution based on the achieved loss value of the proposed samples. In this way, the denoiser provides strong candidates, while
+the evolutionary loop refines the search space while maintaining
+exploration and avoiding poor local minima.
+We base the evolution step of our proposed two-stage algorithm
+on CMA-ES [Hansen 2006], an established black-box optimizer that
+has consistently shown good results across different domains. However, we note here that our framework is not restricted to this
+specific evolutionary method, and a different algorithm could be
+used instead, as demonstrated in the supplement (Sec. S4).
+CMA-ES maintains a search distribution N (𝜇, Σ) over the parameter space, where the anisotropic covariance Σ captures correlations between parameters. Each iteration draws 𝑘 candidates
+{𝑥𝑖 }𝑘𝑖=0 ∼ N (𝜇, Σ), evaluates their cost 𝑐𝑖 according to a pre-defined
+loss function, and updates (𝜇, Σ) by computing a weighted average
+of the candidates, ranked by their cost. By assigning higher weights
+to top-scoring candidates during the update step, CMA-ES adapts
+the search distribution to the local loss landscape.
+The synergy between our diffusion-based inverse prediction and
+CMA is bidirectional. Firstly, the diffusion model 𝑓˜𝜃−1 estimates a
+good set of candidates {𝑥𝑖 }𝑘𝑖=0 . Having better candidates (closer to
+𝑥 ∗ ) intuitively accelerates the convergence of CMA’s covariance
+matrix toward the desired distribution N (𝑥 ∗, 0). Secondly, since
+CMA-ES models the search space as a Gaussian, we can directly use
+this distribution to train the diffusion denoiser. Concretely, we adapt
+the usual formulation of diffusion models that assume an isotropic
+noise model, but instead use the anisotropic Gaussian derived by
+CMA to create training samples. Therefore, in our formulation,
+the timestep scalar 𝑠 is replaced by the covariance matrix Σ; in
+practice, we observe that using the diagonal of the matrix as input
+to the network is sufficient. By using the CMA distribution both
+for training and sampling using the backward diffusion process, we
+effectively reduce the parameter space which must be modeled by
+the network. This reduction is crucial in order for a small network
+with limited training samples to provide meaningful predictions.
+As is customary with optimization methods, finding the right
+balance between exploration of the search space and exploitation
+of existing high-ranking candidates is essential for avoiding local
+minima. In our approach, this manifests especially in early stages
+of the optimization, where relying exclusively on the denoising network’s predictions to seed the next iteration risks mode collapse: the
+network overfits to its current estimates collapsing prematurely to
+a single solution. To preserve diversity, we apply partial denoising —
+only half of the CMA candidates are denoised in each iteration, while
+the remainder is passed through unmodified. The full procedure is
+detailed in Algorithm 1.
+During training (line 8), the diffusion network starts from noisy
+parameters and is tasked to predict clean parameters conditioned
+on their renderings, thereby learning a mapping from “what an
+image looks like” to the parameters that produced it. During inference (line 5), we condition the model on the target image in order
+to guide the denoising toward parameters that would render the
+target. In summary, our method combines the advantages of its two
+components: The diffusion-based inverse step leverages the rich
+signal from the target image to generate promising candidates (as
+opposed to random samples). The evolutionary step inherits CMA’s
+ability to adapt to the local loss landscape via covariance updates,
+and, since it is population-based, provides robustness against local
+minima without explicit gradient information. Crucially, the two
+components reinforce each other — CMA-ES shrinks the region
+the denoiser must model, while the denoiser accelerates CMA-ES’s
+convergence by seeding it with high-quality candidates.
+3.4
+Loss function
+The loss function L (𝑦) can be represented by any image-level cost
+function that measures how far a certain rendering 𝑦 is from the
+target 𝑦 ∗ . Although something like the squared error can be trivially
+6
+•
+Andrei-Timotei Ardelean, Michael Fischer, Tim Weyrich, and Tomáš Iser
+Initialization
+Target
+Loss function: MSE
+0.160
+Loss function: LPIPS
+LPIPS
+MSE
+Spline
+0.080
+0.00
+0.020
+0.20
+0.016
+0.16
+0.012
+0.12
+LPIPS
+MSE
+Robot
+0.10
+0.008
+0.04
+0.000
+0.00
+0.125
+0.80
+0.60
+0.075
+LPIPS
+MSE
+San Miguel
+0.050
+0.40
+0.20
+0.000
+0.00
+0.100
+0.60
+0.080
+0.50
+LPIPS
+0.060
+0.040
+0.40
+0.30
+0.20
+0.020
+0.10
+0.000
+0.00
+0.020
+0.60
+0.016
+0.50
+0.012
+LPIPS
+MSE
+MSE
+0.08
+0.004
+0.025
+Voronoi
+0.30
+0.000
+0.100
+Beads
+0.40
+0.20
+0.040
+0.008
+0.40
+0.30
+0.20
+0.004
+0.10
+0k
+5k
+10k
+15k
+20k
+25k 0k
+Render calls
+Our overall best result
+Loss function: LPIPS
+0.50
+0.120
+0.000
+Loss function: MSE
+0.60
+Our method
+5k
+10k
+15k
+20k
+25k
+0.00
+0k
+5k
+Render calls
+CMA-ES
+Dual annealing
+10k
+15k
+20k
+25k 0k
+Render calls
+DiBO
+5k
+10k
+15k
+20k
+25k
+Render calls
+ZeroGrads
+Fig. 5. Comparison of optimization curves on our five test cases. We run both our method and the baselines with two different loss functions – what the
+optimizer acts on –, namely MSE or LPIPS (columns). For each experiment (rows), we additionally cross-report both MSE and LPIPS metrics on the vertical
+axis, leading to four plots for each test case. Each method was executed 10 times with different random seeds and we plot the median (bold line) as well as the
+approximated 25-75 and 5-95 quantiles (shaded areas). Please see the supplement for additional loss function experiments.
+applied, this is generally suboptimal as it is computed at the level of
+pixels, not taking into account neighboring information. In Fig. 5,
+we show that a perceptual metric, such as LPIPS [Zhang et al. 2018]
+generally provides a better optimization objective. Similarly, Mehta
+et al. [2025] have proposed the Locally Orderless Images (LOI) loss
+to avoid pixel-space problems, on which we evaluate our method
+in the supplement (Fig. S3). However, rather than advocating for a
+specific loss function, we argue that robustness across loss functions
+is itself a desirable property of the optimization method. Thanks
+to our feature-guided diffusion-based candidate proposal, we recover sensible solutions more reliably across different cost functions
+than previous approaches (see also Fig. 5 and supplement Sec. S2).
+Additional implementation details are in the supplement (Sec. S1).
+4 Experiments and results
+4.1 Validating the inverse step
+Before we evaluate our full method (inverse prediction and evolution), we first validate our inverse predictor on its own and show the
+intuition behind using the diffusion model for candidate proposals.
+We train the diffusion network globally, that is, on random samples
+from the entire domain of input parameters R𝑑 .
+The task in this experiment is to optimize the control points
+of a spline to match a target image. In Fig. 4, we show samples
+generated by the predictor for the given target images, alongside
+the results of our full method for reference. The target images have
+an increasing number of spline control points (two to five). Solving
+the inversion globally is feasible for few parameters, but learning it
+Feature-Guided Diffusion for Non-Differentiable Inverse Rendering
+0.197
+0.211
+0.297
+0.379
+0.022
+0.031
+0.016
+0.063
+0.073
+0.000
+0.000
+0.402
+0.500
+0.530
+0.019
+0.376
+0.063
+0.321
+0.474
+0.062
+0.152
+0.181
+0.326
+0.420
+Ours
+CMA-ES
+Annealing
+DiBO
+ZeroGrads
+7
+Beads
+Voronoi
+San Miguel
+Robot
+Spline
+0.161
+•
+Initialization
+Target
+Fig. 6. Qualitative analysis. We show the outcome of the median run for our method and the competitors (columns) across all experiments (rows). For
+visualizations of the best and worst outcome for each method, please see the supplement. Our method achieves a faithful reconstruction in all experiments,
+even where other methods fail. We display the final LPIPS loss inset in each image, with the best (lowest) outcome per row in bold.
+over the whole domain suffers from the curse of dimensionality. As
+Fig. 4 shows, the inverse predictor achieves plausible approximation
+of the target for up to four control points, but struggles to generate
+good solutions when the number of control points increases further
+(last row). Crucially, however, even the imperfect samples are closer
+to the target than purely random draws, meaning the denoiser still
+identifies a useful, restricted region of R𝑑 .
+Obtaining such a region significantly diminishes the curse of
+dimensionality, and a same-capacity network with access to this
+region will model the local inverse much more accurately. This
+suggests a natural remedy to the global denoiser’s degradation: progressively tune the network on samples from the neighborhood of
+its own best predictions. In our full method, this neighborhood is precisely what the evolution algorithm tracks and refines – CMA-ES’s
+search distribution provides both the region to sample training data
+from and the starting point for the backward diffusion (sampling).
+4.2
+Evaluation benchmarks
+We test our method on five inverse rendering tasks, ranging from
+robotics to path tracing (Fig. 5). Each task is difficult for a different
+reason, discussed below. As all methods we compare against are
+stochastic, they depend on a random seed, so we execute each ten
+times to account for variations. In the figures, we report both the
+median score and quantiles for both our method and the baselines.
+Please also see our supplement (Sec. S1) for implementation details.
+Spline. We optimize the 2D coordinates of seven control points of
+a quadratic B-spline, together with the spline’s thickness (15 parameters in total). The target image is the ampersand symbol created by
+rendering its font glyph. This is a hard task since the target image
+is a filled outline defined by independent Bezier curves, and the
+optimized spline can only approximate it. Additionally, the relationship between control points and the resulting curve is non-local:
+changing a single point deforms the entire curve. Further, the target
+has complex topology with a self-intersecting loop, and the order
+•
+Andrei-Timotei Ardelean, Michael Fischer, Tim Weyrich, and Tomáš Iser
+Initialization
+Target
+Our method
+Mitsuba 3 • Run 1
+Mitsuba 3 • Run 2
+Mitsuba 3 • Run 3
+San Miguel. We optimize a camera placement (position and rotation, five parameters) together with a point light position (three
+parameters). Both the camera and point light are placed in the San
+Miguel scene to create a reference image. The optimizer’s task then
+is to recover all eight parameters, starting at an initial estimate that
+is far from the optimum. The loss landscape here is highly nonconvex, and the problem is ill-conditioned: small changes in camera
+and point light positions can lead to big changes in image space
+(e.g., shadows, visibility behind geometry).
+Voronoi. We optimize the parameters of eight Voronoi cells to
+match a reference image. Each cell is parametrized by its 2D center
+position and RGB color, leading to 40 parameters in total. The difficulty lies in the task’s strong permutation symmetry: swapping
+any two cells (center and color) leaves the image unchanged, producing 8! = 40,320 global optima. Further, the Voronoi partition
+changes discontinuously whenever cell centers swap, making the
+loss landscape piecewise flat with non-differentiable boundaries.
+Beads. This task takes a twist on the classic Cornell box to simulate advanced light transport: we optimize the 3D positions of six
+glass beads (18 parameters in total) illuminated by an overhead area
+light. The caustics, shadows, and reflections within the box create
+non-local effects, and the optimizer must operate in the presence of
+strong Monte Carlo noise.
+Baselines. We compare against four baselines ranging from classical to modern, learned optimization methods. CMA-ES [Hansen
+2006] serves as our primary evolutionary baseline (see Sec. 3 for
+details). Dual annealing [Tsallis and Stariolo 1996] combines simulated annealing with a local search strategy to improve convergence;
+we use the standard SciPy implementation [Virtanen et al. 2020].
+From more recent methods, we use ZeroGrads [Fischer and Ritschel
+2024], which trains a differentiable surrogate of the black-box function’s loss landscape and uses it to derive optimization gradients;
+and DiBO [Yun et al. 2025], a diffusion-based method that combines
+a diffusion prior with a learned reward proxy to sample candidates
+from an approximate posterior over high-performing solutions. Note
+that we do not compare directly to the classical BO, because its performance overhead is non-linear with iterations and several orders
+of magnitude higher than that of all other methods.
+0
+Iterations →
+Mitsuba 3 • Run 4
+Fig. 7. Differentiable rendering is susceptible to diverging if the initial estimate is far from the optimum. As an example on our Beads task, we executed
+the projective sampling integrator (prb_projective) in Mitsuba 3 based
+on Zhang et al. [2023] and it diverged every time. In contrast, our method
+converges even for a suboptimal initializations (Fig. 5). The Monte Carlo
+noise is left on purpose to demonstrate what all optimizers actually see.
+Initialization
+8 cells (40 param.)
+0.020
+0k
+10k
+20k
+30k
+40k
+Loss function: LPIPS
+0.60
+0.040
+0.000
+12 cells (60 param.) 16 cells (80 param.)
+Loss function: MSE
+0.060
+MSE
+Robot. We optimize the joints of the Franka Emika Panda robot
+arm [Haddadin 2024] such that its pose (seven parameters) matches
+the reference image; a non-trivial task: since the mapping from
+joint angles to image is a composition of highly non-linear forward
+kinematics under perspective projection. Additionally, the joints
+have different effective ranges, leading to a poorly scaled Hessian
+(e.g., one joint affects the entire arm’s position, while another only
+changes the topmost segment). Finally, the arm covers only a small
+area of the final image, so the loss metric varies just slightly.
+Mitsuba 3 loss
+← Loss
+of the control points must be correct. Finally, the pixel-space loss
+is indifferent to small position perturbations of points that lie far
+from the reference, creating plateaus in the loss landscape.
+LPIPS
+8
+50k
+0.40
+0.20
+0.00
+0k
+Render calls
+8 cells (40 param.)
+10k
+20k
+30k
+40k
+50k
+Render calls
+12 cells (60 param.)
+16 cells (80 param.)
+Fig. 8. Demonstration of our method with a varying number of optimized
+parameters on the Voronoi task. The initialization remains the same, but
+the target images have an increasing number of cells. It is evident that more
+iterations are required for higher-dimensional problems.
+4.3
+Results
+Main quantitative evaluation. Fig. 5 presents the main quantitative
+evaluation, comparing our method to the baselines across our five
+test cases. Under the LPIPS loss, our approach consistently finds a
+better solution, and it is less prone to getting stuck in local minima.
+Even though on some test cases dual annealing or CMA-ES find
+solutions on par in metrics, ours is the only method that recovers
+them reliably across all tasks. The observation remains true under
+the MSE loss, except on the San Miguel and Beads experiments,
+where all approaches uniformly fail to obtain a meaningful result
+for MSE. We also tested all the optimization algorithms on the
+locally-orderless images (LOI) loss function based on Mehta et al.
+[2025], which is discussed further in the supplement (Sec. S2).
+Qualitative results. Fig. 6 shows the final outcome of all methods
+qualitatively. To avoid judging a method by outliers, we report the
+Feature-Guided Diffusion for Non-Differentiable Inverse Rendering
+Spline
+LPIPS
+0.40
+Robot
+0.10
+San Miguel
+0.60
+Voronoi
+0.60
+0.08
+0.45
+0.45
+0.45
+0.20
+0.05
+0.30
+0.30
+0.30
+0.10
+0.03
+0.15
+0.15
+0.15
+0.00
+0.00
+0.00
+0.00
+0k
+5k
+10k
+15k
+20k
+25k
+0k
+5k
+Render calls
+10k
+15k
+20k
+25k
+0k
+5k
+Render calls
+10k
+15k
+20k
+25k
+0k
+Render calls
+Our method (DINOv3)
+Our method (VGG-19)
+5k
+10k
+15k
+20k
+Render calls
+25k
+0.00
+9
+Beads
+0.60
+0.30
+•
+0k
+5k
+10k
+15k
+20k
+25k
+Render calls
+Our method (simple patch embedding)
+Fig. 9. Comparison of optimization results using our method with different visual feature extractors. It is evident that our method is compatible with a wide
+range of features, but pretrained networks such as VGG-19 and DINOv3 improve convergence over a simple patch embedding, especially on images with
+Monte Carlo rendering noise (San Miguel, Beads).
+0.020
+0.000
+0k
+5k 10k 15k 20k 25k
+0.40
+0.20
+0.00
+Render calls
+4 epochs
+10
+Minutes
+0.60
+LPIPS
+MSE
+0.040
+0k
+5k 10k 15k 20k 25k
+Render calls
+8 epochs
+12 epochs
+5
+0
+0k
+5k 10k 15k 20k 25k
+unconditional diffusion model sampling from the parameter space
+randomly. While the performance decreases without pretrained features, we observe a graceful deterioration, showing that our method
+is robust to the type of visual features used.
+Render calls
+16 epochs
+20 epochs
+Fig. 10. Increasing the number of epochs in our predictor training improves
+convergence, as shown here on the Voronoi test case, but comes at a higher
+performance overhead and is better suited for expensive black-box functions.
+result of a middle run – 4th out of 10 – in sorted LPIPS order. By
+visual assessment, our approach is the only one that reliably solves
+all five test cases. Further comparisons and a video sequence of our
+method’s convergence are available in the supplementary materials.
+Comparison to differentiable rendering. In Fig. 7, we compare our
+method with Mitsuba 3. Using the prb_projective integrator, Mitsuba computes an unbiased estimate of the gradients, which can be
+directly used to optimize the parameters; however, due to the gradients being local and noisy, the optimization fails in the presence of
+plateaus, as the initial estimate is far from the solution. We use the
+default initialization that all experiments see; specialized scheduling
+and multi-resolution optimization could likely improve Mitsuba’s
+behavior, but the broader point — that gradient-based methods require informed initialization — remains. In contrast, our approach
+is able to contend with both noise and unfavorable initialization.
+Scaling with dimensionality. We run the Voronoi task in three
+variants, at 40, 60, and 80 parameters. The per-iteration runtime
+stays roughly constant across all three settings. The number of
+render calls required to converge, however, grows non-linearly with
+dimensionality: convergence is fast up to 60 parameters; however
+reaching a comparable loss at 80 parameters would require more
+than 50,000 render calls (Fig. 8). This scaling behavior is also taskdependent: Fig. 5 shows that different problems converge at very
+different rates even at similar dimensionality.
+Feature extractors. In Fig. 9, we compare the effectiveness of DINOv3 and VGG-19 as feature extractors. Both perform well on average, and we keep DINOv3 (small) as our default for its speed. Fig. 9
+also includes a “simple patch embedding”, which uses a learnable,
+one-layer patch embedding (16×16) instead of a pretrained feature
+extractor. Note that it would not make sense to run our method
+completely without any image features, since that would yield an
+4.4
+Limitations
+Our approach for optimizing black-box rendering functions combines an inverse-prediction model with a CMA-based evolutionary
+strategy and inherits their shared strength as well as limitations.
+Due to the quadratic memory complexity of CMA-ES, our method
+is best suited for small-to-medium sized optimization problems (up
+to 100 parameters). This is reinforced by the diffusion model’s architecture, which includes quadratic self-attention over the parameters,
+and poses an interesting question for future research.
+Runtime overhead. Additionally, our image-informed method improves convergence w.r.t. the number of rendering calls. This comes
+at the cost of computational overhead for online predictor training,
+the latter of which varies with training epochs. In Fig. 10, we show
+the convergence and total runtime (including render time) for various numbers of training epochs on the Voronoi task. Further, for
+the Beads task with 25,000 render calls at 224×224 pixels and LPIPS
+as the loss, the full CMA-ES execution takes about 4.5 minutes on a
+desktop computer, while our method takes between 6 to 13 minutes
+(4 to 20 epochs, respectively), and DiBO about 4 hours. Naturally,
+for black-box functions that are more expensive to compute, our
+method’s overhead becomes proportionally smaller. More importantly, the baselines’ lower overhead is irrelevant when they get
+stuck in poor local optima or fail to converge, as Fig. 5 shows.
+5
+Conclusion
+We introduce a novel approach to derivative-free optimization,
+specifically tailored to black-box rendering functions. Our method
+brings together the benefits of inverse prediction and evolutionary
+strategies by using a diffusion model conditioned on image features
+to propose candidates, and leveraging the CMA-ES algorithm to iteratively refine the search space. As shown by our experiments, the
+mutual synergy between the two components allows our algorithm
+to navigate local minima more robustly and find better solutions
+compared to the baselines, using the same number of calls to the
+rendering function.
+10
+•
+Andrei-Timotei Ardelean, Michael Fischer, Tim Weyrich, and Tomáš Iser
+Acknowledgments
+The authors gratefully acknowledge the scientific support and HPC
+resources provided by the Erlangen National High Performance
+Computing Center (NHR@FAU) of Friedrich-Alexander-Universität
+Erlangen-Nürnberg (FAU). The hardware is partially funded by the
+German Research Foundation (DFG).
+References
+Kara-Ali Aliev, Artem Sevastopolsky, Maria Kolos, Dmitry Ulyanov, and Victor Lempitsky. 2020. Neural point-based graphics. In European conference on computer vision.
+Springer, 696–712.
+Navid Ansari, Hans-Peter Seidel, Nima Vahidi Ferdowsi, and Vahid Babaei. 2022. Autoinverse: Uncertainty aware inversion of neural networks. Advances in Neural
+Information Processing Systems 35 (2022), 8675–8686.
+Andrei-Timotei Ardelean and Tim Weyrich. 2024. High-fidelity zero-shot texture
+anomaly localization using feature correspondence analysis. In Proceedings of the
+IEEE/CVF Winter Conference on Applications of Computer Vision. 1134–1144.
+Artem Babenko, Anton Slesarev, Alexandr Chigorin, and Victor Lempitsky. 2014. Neural
+codes for image retrieval. In European conference on computer vision. Springer, 584–
+599.
+Sai Bangaru, Tzu-Mao Li, and Frédo Durand. 2020. Unbiased Warped-Area Sampling
+for Differentiable Rendering. ACM Trans. Graph. 39, 6 (2020), 245:1–245:18.
+Sai Praveen Bangaru, Lifan Wu, Tzu-Mao Li, Jacob Munkberg, Gilbert Bernstein,
+Jonathan Ragan-Kelley, Fredo Durand, Aaron Lefohn, and Yong He. 2023. Slang.
+d: Fast, modular and differentiable shader programming. ACM Transactions on
+Graphics (TOG) 42, 6 (2023), 1–28.
+Christopher M Bishop. 1994. Mixture density networks. (1994).
+Andrew R Conn, Katya Scheinberg, and Luis N Vicente. 2009. Introduction to derivativefree optimization. SIAM.
+Thomas Deliot, Eric Heitz, and Laurent Belcour. 2024. Transforming a non-differentiable
+rasterizer into a differentiable one with stochastic gradient estimation. arXiv preprint
+arXiv:2404.09758 (2024).
+Valentin Deschaintre, Miika Aittala, Frédo Durand, George Drettakis, and Adrien
+Bousseau. 2019. Flexible svbrdf capture with a multi-image deep network. In
+Computer graphics forum, Vol. 38. Wiley Online Library, 1–13.
+Michael Fischer, Zhengqin Li, Thu Nguyen-Phuoc, Aljaz Bozic, Zhao Dong, Carl Marshall, and Tobias Ritschel. 2024. Nerf analogies: Example-based visual attribute
+transfer for nerfs. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition. 4640–4650.
+Michael Fischer and Tobias Ritschel. 2023. Plateau-reduced differentiable path tracing.
+In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition.
+4285–4294.
+Michael Fischer and Tobias Ritschel. 2024. ZeroGrads: Learning Local Surrogates for
+Non-Differentiable Graphics. ACM Transactions on Graphics (TOG) 43, 4 (2024),
+1–15.
+Leon A Gatys, Alexander S Ecker, and Matthias Bethge. 2015. A neural algorithm of
+artistic style. arXiv preprint arXiv:1508.06576 (2015).
+Sami Haddadin. 2024. The Franka Emika robot: a standard platform in robotics research
+[survey]. IEEE Robotics & Automation Magazine 31, 4 (2024), 136–148.
+Nikolaus Hansen. 2006. The CMA evolution strategy: a comparing review. Towards a
+new evolutionary computation: Advances in the estimation of distribution algorithms
+(2006), 75–102.
+John H Holland. 1973. Genetic algorithms and the optimal allocation of trials. SIAM
+journal on computing 2, 2 (1973), 88–105.
+Yicong Hong, Kai Zhang, Jiuxiang Gu, Sai Bi, Yang Zhou, Difan Liu, Feng Liu, Kalyan
+Sunkavalli, Trung Bui, and Hao Tan. 2024. LRM: Large Reconstruction Model for Single Image to 3D. In The Twelfth International Conference on Learning Representations.
+https://openreview.net/forum?id=sllU8vvsFF
+Wenzel Jakob, Sébastien Speierer, Nicolas Roussel, Merlin Nimier-David, Delio Vicini,
+Tizian Zeltner, Baptiste Nicolet, Miguel Crespo, Vincent Leroy, and Ziyi Zhang. 2022.
+Mitsuba 3 renderer. https://mitsuba-renderer.org.
+Justin Johnson, Alexandre Alahi, and Li Fei-Fei. 2016. Perceptual losses for real-time
+style transfer and super-resolution. In European Conference on Computer Vision.
+James Kennedy and Russell Eberhart. 1995. Particle swarm optimization. In Proceedings
+of ICNN’95-international conference on neural networks, Vol. 4. ieee, 1942–1948.
+S. Kirkpatrick, C. D. Gelatt, and M. P. Vecchi. 1983.
+Optimization by Simulated Annealing.
+Science 220, 4598 (1983), 671–680.
+arXiv:https://www.science.org/doi/pdf/10.1126/science.220.4598.671
+doi:10.1126/science.220.4598.671
+Siddarth Krishnamoorthy, Satvik Mehul Mashkaria, and Aditya Grover. 2023. Diffusion
+models for black-box optimization. In International Conference on Machine Learning.
+PMLR, 17842–17857.
+Alex Krizhevsky, Ilya Sutskever, and Geoffrey E Hinton. 2012. Imagenet classification
+with deep convolutional neural networks. Advances in neural information processing
+systems 25 (2012).
+Samuli Laine, Janne Hellsten, Tero Karras, Yeongho Seol, Jaakko Lehtinen, and Timo
+Aila. 2020. Modular primitives for high-performance differentiable rendering. ACM
+Transactions on Graphics (ToG) 39, 6 (2020), 1–14.
+Tianhong Li and Kaiming He. 2025. Back to basics: Let denoising generative models
+denoise. arXiv preprint arXiv:2511.13720 (2025).
+Tzu-Mao Li, Miika Aittala, Frédo Durand, and Jaakko Lehtinen. 2018. Differentiable
+monte carlo ray tracing through edge sampling. ACM Transactions on Graphics
+(TOG) 37, 6 (2018), 1–11.
+Tzu-Mao Li, Michal Lukáč, Michaël Gharbi, and Jonathan Ragan-Kelley. 2020. Differentiable vector graphics rasterization for editing and learning. ACM Transactions on
+Graphics (TOG) 39, 6 (2020), 1–15.
+Zhengqin Li, Dilin Wang, Ka Chen, Zhaoyang Lv, Thu Nguyen-Phuoc, Milim Lee,
+Jia-Bin Huang, Lei Xiao, Yufeng Zhu, Carl S Marshall, et al. 2025. Lirm: Large
+inverse rendering model for progressive reconstruction of shape, materials and
+view-dependent radiance fields. In Proceedings of the Computer Vision and Pattern
+Recognition Conference. 505–517.
+Ruofan Liang, Zan Gojcic, Huan Ling, Jacob Munkberg, Jon Hasselgren, Zhihui Lin,
+Jun Gao, Alexander Keller, Nandita Vijaykumar, Sanja Fidler, and Zian Wang. 2025.
+DiffusionRenderer: Neural Inverse and Forward Rendering with Video Diffusion
+Models. 2025 IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR) (2025), 26069–26080. https://api.semanticscholar.org/CorpusID:275993796
+Ilya Loshchilov, Marc Schoenauer, and Michèle Sebag. 2013. Bi-population CMA-ES
+agorithms with surrogate models and line searches. In Proceedings of the 15th annual
+conference companion on Genetic and evolutionary computation. 1177–1184.
+Guillaume Loubet, Nicolas Holzschuch, and Wenzel Jakob. 2019. Reparameterizing
+discontinuous integrands for differentiable rendering. ACM Transactions on Graphics
+(TOG) 38, 6 (2019), 1–14.
+Ishit Mehta, Manmohan Chandraker, and Ravi Ramamoorthi. 2025. Locally Orderless
+Images for Optimization in Differentiable Rendering. In Proceedings of the Computer
+Vision and Pattern Recognition Conference. 5763–5772.
+Merlin Nimier-David, Sébastien Speierer, Benoît Ruiz, and Wenzel Jakob. 2020. Radiative
+backpropagation: An adjoint method for lightning-fast differentiable rendering.
+ACM Transactions on Graphics (TOG) 39, 4 (2020), 146–1.
+Ethan Perez, Florian Strub, Harm De Vries, Vincent Dumoulin, and Aaron Courville.
+2018. Film: Visual reasoning with a general conditioning layer. In Proceedings of the
+AAAI conference on artificial intelligence, Vol. 32.
+Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh, Sandhini
+Agarwal, Girish Sastry, Amanda Askell, Pamela Mishkin, Jack Clark, et al. 2021.
+Learning transferable visual models from natural language supervision. In International conference on machine learning. PmLR, 8748–8763.
+Tim Salimans, Ian Goodfellow, Wojciech Zaremba, Vicki Cheung, Alec Radford, and Xi
+Chen. 2016. Improved techniques for training gans. Advances in neural information
+processing systems 29 (2016).
+Oriane Siméoni, Huy V Vo, Maximilian Seitzer, Federico Baldassarre, Maxime Oquab,
+Cijo Jose, Vasil Khalidov, Marc Szafraniec, Seungeun Yi, Michaël Ramamonjisoa,
+et al. 2025. Dinov3. arXiv preprint arXiv:2508.10104 (2025).
+Karen Simonyan and Andrew Zisserman. 2014. Very deep convolutional networks for
+large-scale image recognition. arXiv preprint arXiv:1409.1556 (2014).
+James C Spall. 2002. Multivariate stochastic approximation using a simultaneous
+perturbation gradient approximation. IEEE transactions on automatic control 37, 3
+(2002), 332–341.
+Rainer Storn and Kenneth Price. 1997. Differential evolution–a simple and efficient
+heuristic for global optimization over continuous spaces. Journal of global optimization 11, 4 (1997), 341–359.
+Constantino Tsallis and Daniel A Stariolo. 1996. Generalized simulated annealing.
+Physica A: Statistical Mechanics and its Applications 233, 1-2 (1996), 395–406.
+Delio Vicini, Sébastien Speierer, and Wenzel Jakob. 2021. Path Replay Backpropagation:
+Differentiating Light Paths using Constant Memory and Linear Time. Transactions
+on Graphics (Proceedings of SIGGRAPH) 40, 4 (Aug. 2021), 108:1–108:14. doi:10.1145/
+3450626.3459804
+Delio Vicini, Sébastien Speierer, and Wenzel Jakob. 2022. Differentiable Signed Distance
+Function Rendering. Transactions on Graphics (Proceedings of SIGGRAPH) 41, 4 (July
+2022), 125:1–125:18. doi:10.1145/3528223.3530139
+Pauli Virtanen, Ralf Gommers, Travis E. Oliphant, Matt Haberland, Tyler Reddy, David
+Cournapeau, Evgeni Burovski, Pearu Peterson, Warren Weckesser, Jonathan Bright,
+Stéfan J. van der Walt, Matthew Brett, Joshua Wilson, K. Jarrod Millman, Nikolay
+Mayorov, Andrew R. J. Nelson, Eric Jones, Robert Kern, Eric Larson, C J Carey, İlhan
+Polat, Yu Feng, Eric W. Moore, Jake VanderPlas, Denis Laxalde, Josef Perktold, Robert
+Cimrman, Ian Henriksen, E. A. Quintero, Charles R. Harris, Anne M. Archibald,
+Antônio H. Ribeiro, Fabian Pedregosa, Paul van Mulbregt, and SciPy 1.0 Contributors.
+2020. SciPy 1.0: Fundamental Algorithms for Scientific Computing in Python. Nature
+Methods 17 (2020), 261–272. doi:10.1038/s41592-019-0686-2
+Feature-Guided Diffusion for Non-Differentiable Inverse Rendering
+Ting-Chun Wang, Ming-Yu Liu, Jun-Yan Zhu, Andrew Tao, Jan Kautz, and Bryan
+Catanzaro. 2018. High-resolution image synthesis and semantic manipulation with
+conditional gans. In Proceedings of the IEEE conference on computer vision and pattern
+recognition. 8798–8807.
+Zican Wang, Michael Fischer, and Tobias Ritschel. 2025. Stochastic Gradient Estimation for Higher-order Differentiable Rendering. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision. 28198–28206.
+Tim Weyrich, Pieter Peers, Wojciech Matusik, and Szymon Rusinkiewicz. 2009. Fabricating Microgeometry for Custom Surface Reflectance. ACM Trans. on Graphics
+(Proc. SIGGRAPH) 28, 3 (27 July 2009), 32:1–32:6. doi:10.1145/1576246.1531338
+Dongxia Wu, Nikki Lijing Kuang, Ruijia Niu, Yian Ma, and Rose Yu. 2024. Diff-BBO:
+Diffusion-Based Inverse Modeling for Black-Box Optimization. (2024).
+Peiyu Xu, Sai Bangaru, Tzu-Mao Li, and Shuang Zhao. 2023. Warped-Area Reparameterization of Differential Path Integrals. ACM Trans. Graph. 42, 6 (2023), 213:1–213:18.
+Cao Yuan, Kaidi Deng, Chen Li, Xueting Zhang, and Yaqin Li. 2022. Improving image
+super-resolution based on multiscale generative adversarial networks. Entropy 24,
+8 (2022), 1030.
+Taeyoung Yun, Kiyoung Om, Jaewoo Lee, Sujin Yun, and Jinkyoo Park. 2025. Posterior
+inference with diffusion models for high-dimensional black-box optimization. arXiv
+preprint arXiv:2502.16824 (2025).
+Zheng Zeng, Valentin Deschaintre, Iliyan Georgiev, Yannick Hold-Geoffroy, Yiwei Hu,
+Fujun Luan, Ling-Qi Yan, and Milos Hasan. 2024. RGBX: Image decomposition and
+synthesis using material- and lighting-aware diffusion models. ACM SIGGRAPH
+2024 Conference Papers (2024). https://api.semanticscholar.org/CorpusID:269484178
+Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. 2018. The
+unreasonable effectiveness of deep features as a perceptual metric. In Proceedings of
+the IEEE conference on computer vision and pattern recognition. 586–595.
+Ziyi Zhang, Nicolas Roussel, and Wenzel Jakob. 2023. Projective Sampling for Differentiable Rendering of Geometry. Transactions on Graphics (Proceedings of SIGGRAPH
+Asia) 42, 6 (Dec. 2023). doi:10.1145/3618385
+Ziyi Zhang, Nicolas Roussel, and Wenzel Jakob. 2025. Many-Worlds Inverse Rendering.
+ACM Transactions on Graphics 45, 1 (2025), 1–17.
+•
+11
+Feature-Guided Diffusion for Non-Differentiable Inverse Rendering
+•
+1
+Feature-Guided Diffusion for Non-Differentiable Inverse Rendering
+SUPPLEMENTARY MATERIAL
+This document accompanies the main paper Feature-Guided Diffusion for Non-Differentiable Inverse Rendering and contains supplemental material referenced therein.
+Voronoi, the cell centers are mapped to the image bounds and the
+colors are mapped to the RGB range. In Beads, the beads positions
+are mapped to the bounds of the scene, within the walls.
+S1
+Tasks implementation. All our tasks are rendered at 224×224 pixels
+for performance reasons. The Spline task is implemented as a simple
+Python CPU renderer, which interpolates the spline curves using
+SciPy [Virtanen et al. 2020] and draws the subdivided lines using
+OpenCV. For Robot, we use the Genesis library and load the scene
+using genesis.morhps.MJCF from the library’s panda.xml file. For
+San Miguel and Beads, we use Mitsuba 3 in the CUDA mode, with
+the direct (single bounce) integrator at 8 samples per pixel (spp) for
+San Miguel, and a path tracer with 64 spp for Beads. For Voronoi,
+we use an OpenGL fragment shader.
+Training and implementation details
+Our diffusion model is implemented as a transformer-based parameter refinement architecture, conditioned by image features using
+cross attention. Firstly, the image features are flattened into a sequence of tokens, to which we add learned positional embeddings,
+in order to facilitate working with features either from transformer
+architectures (e.g., DINOv3) or convolutional networks (e.g., VGG19). Secondly, the noisy parameters 𝑧 are projected into a sequence
+of tokens using a learned linear layer, which implicitly encodes
+position information. Then, the parameter tokens are processed
+by four self-attention blocks followed by cross-attention with the
+image tokens. Finally, the parameter tokens are concatenated and
+projected back to the problem dimension 𝑑 using a linear layer.
+To inject the information about the timesteps we use Feature-wise
+Linear Modulation (FiLM) [Perez et al. 2018]. This conditioning is
+applied in each attention block. We leverage the anisotropic noise
+model from CMA by using a varying timestep for each parameter;
+specifically, we use the square root of the diagonal of the covariance
+matrix as the timestep at the end of the diffusion process. To obtain
+a candidate from the diffusion model, we use a sample from CMA
+as a starting point and solve the reverse-time ODE with Euler’s
+method with a very small number of steps. In our experiments, we
+empirically observed that 3 steps were sufficient, which correspond
+to the manually selected schedule of [0.3, 0.2, 0.1].
+As described in Algorithm 1, we train the diffusion network online, in tandem with the evolution strategy. At each iteration, the
+population of 𝑘 samples is rendered using the black-box function 𝑓 ,
+creating a dataset of parameter-image pairs. The diffusion model
+is then trained on this dataset, starting from the weights from the
+previous iteration of the algorithm. For consistency, we use the
+same hyperparameters across all five inverse rendering tasks (see
+Sec. 4.2), namely: population size 𝑘 = 500, number of evolution
+cycles 𝑁 = 50, initial standard deviation 𝜎 = 1/6, and training for
+20 epochs using the Adam optimizer with a learning rate of 0.001.
+Tasks parametrization. All our tasks have their parameters normalized to values in the [0, 1] interval and the initial parameters
+are always at 0.5, the middle of the interval. That also motivates
+our method’s initial standard deviation 𝜎 = 1/6, as the entire parameter space [0, 1] is within 3𝜎 of the initialization. In Spline, the
+control points are allowed to be anywhere in the image, so 0 and 1
+correspond to the image bounds; the maximum thickness is equal
+to the image size. In Robot, the [0, 1] interval is mapped to the joint
+limits of the Franka Emika Panda robot. In San Miguel, the camera
+and point light positions are parametrized by their XYZ coordinates
+roughly within the inner scene bounds ([7, 25], [1, 10], [−2, 12]),
+and the camera orientation is parametrized by spherical angles. In
+Baseline hyperparameters. For our baseline algorithms, we consistently use the same hyperparameters for all tasks. In CMA-ES, to ensure a fair comparison to our method, we settled on the same population size 𝑘 = 500, number of evolution cycles 𝑁 = 50, and initial 𝜎 =
+1/6 as in our method. Note that 𝑘 ·𝑁 = 25000, which is the total number of render calls reported in most our figures. For dual annealing,
+we use the default settings of scipy.optimize.dual_annealing
+with the maximum number of function evaluation calls set to 25,000.
+For ZeroGrads, we consulted the hyperparameters with the authors:
+we use the defaults in their source codes in the low-dimensional
+problem regime, set 𝜎 = 1/6 following our task parametrization,
+1,250 epochs, batch size of 10, and enabled antithetic sampling,
+which doubles the render calls to a total of 25,000. For DiBO, we use
+the hyperparameters from similar-dimensional problems in their
+source code: batch size 50, 100 initial samples, 50 epochs (proxy,
+prior, posterior), 30 local search epochs, 30 diffusion steps, and a
+buffer size of 300; the total evaluations are again capped at 25,000.
+Source code. While we deem the implementation details above to
+be sufficient to fully replicate our work, we intend to release our
+source code upon acceptance.
+S2
+Additional loss metrics
+In the main paper, Fig. 5 is only a subset of the experiments we ran.
+To show the robustness of our method, we further optimized all test
+cases with an additional loss function based on the locally-orderless
+images (LOI) [Mehta et al. 2025]. Because the LOI optimizer requires
+a differentiable renderer, which we do not have in the context of
+our paper, we instead use their histogram-based LOI values directly
+as a loss function.
+In Fig. S3, we show the full report showing the MSE and LPIPS
+scores while the optimizations themselves used MSE, LPIPS, and
+LOI as optimization objectives (loss functions). We observe that
+our method is more robust to the loss function selection than other
+methods. For example, it converged on the San Miguel, Voronoi, and
+Beads tasks with LOI loss, even though the other methods could
+2
+•
+Andrei-Timotei Ardelean, Michael Fischer, Tim Weyrich, and Tomáš Iser
+not. However, on our specific tasks, we did not observe that the LOI
+loss would necessarily yield better results than LPIPS.
+We therefore left this part for the supplement, although it serves
+as an interesting confirmation that our approach is relying both on
+the extracted visual features and also the loss values of the particular
+loss function to help drive the population to the global optima. This
+is further evident from the fact that the San Miguel and Beads tasks,
+for instance, did not converge under MSE loss for any method, but
+converged both under LPIPS and LOI with our method.
+S3
+Extended qualitative comparison
+In the main paper, Fig. 6 shows the images of the median results on
+our five tasks using all the methods. As we executed each method
+10 times, for completeness, we also include the best results (Fig. S1)
+and worst results (Fig. S2). The figures confirm that our method is the
+most robust and consistent. While the other methods can sometimes
+succeed with a “lucky” random seed driving their stochastic process,
+our method remains consistent across most of the runs.
+S4
+Extension to dual annealing
+In the main paper, we present our method using CMA-ES as the
+underlying mechanism for refining the search distribution. This
+coupling is especially fitting due to the explicit representation of
+this distribution as a covariance matrix in CMA; nevertheless, our
+approach can be conceptually coupled with other global search
+heuristics. To demonstrate this versatility, we also combine our
+inverse step prediction with dual annealing instead of CMA-ES, and
+we present these results in Fig. S4.
+There are only a few changes relative to Algorithm 1: The simulated annealing implementation uses a distorted Cauchy-Lorentz
+visiting distribution. To account for this, we calculate the covariance
+matrix empirically using previous samples. That is, we accumulate
+both the samples produced by the visiting distributions and the ones
+denoised using our model up to the population size 𝑘 (which we
+set in the same way as for CMA-ES). After reaching 𝑘 samples we
+train the model for 12 epochs and continue the simulated annealing
+procedure. Similarly to line 5 in algorithm 1, we always use half
+of the samples produced by the visiting distribution directly and
+denoise the other half using our diffusion model. The accept-reject
+decision is then applied uniformly to the usual samples and the
+denoised samples. The local search part of dual annealing is left
+unchanged, using L-BFGS-B as per the implementation in Scipy.
+The experiment in Fig. S4 shows that combining our method with
+dual annealing consistently outperforms dual annealing by itself.
+This suggest the potential of our framework to adapt to different
+global search heuristics.
+Feature-Guided Diffusion for Non-Differentiable Inverse Rendering
+0.143
+0.183
+0.278
+0.359
+0.019
+0.030
+0.003
+0.037
+0.058
+0.000
+0.000
+0.229
+0.449
+0.519
+0.017
+0.329
+0.044
+0.306
+0.445
+0.061
+0.127
+0.105
+0.238
+0.404
+Ours
+CMA-ES
+Annealing
+DiBO
+ZeroGrads
+3
+Beads
+Voronoi
+San Miguel
+Robot
+Spline
+0.183
+•
+Initialization
+Target
+Fig. S1. Best outcome of each method’s 10 optimization runs across all experiments (rows). We display the final LPIPS loss inset in each image, with the best
+(lowest LPIPS) outcome per row in bold.
+•
+Andrei-Timotei Ardelean, Michael Fischer, Tim Weyrich, and Tomáš Iser
+0.223
+0.241
+0.240
+0.375
+0.407
+0.037
+0.038
+0.044
+0.085
+0.086
+0.001
+0.000
+0.455
+0.544
+0.552
+0.180
+0.393
+0.165
+0.406
+0.517
+0.072
+0.244
+0.208
+0.370
+0.442
+Ours
+CMA-ES
+Annealing
+DiBO
+ZeroGrads
+Beads
+Voronoi
+San Miguel
+Robot
+Spline
+4
+Initialization
+Target
+Fig. S2. Worst outcome of each method’s 10 optimization runs across all experiments (rows). We display the final LPIPS loss inset in each image, with the
+best (lowest LPIPS) outcome per row in bold.
+Feature-Guided Diffusion for Non-Differentiable Inverse Rendering
+Initialization
+Target
+0.160
+Loss function: MSE Loss function: LPIPS Loss function: LOI
+0.60
+LPIPS
+MSE
+Spline
+0.080
+0.20
+0.00
+0.020
+0.20
+0.016
+0.16
+0.012
+0.12
+LPIPS
+MSE
+0.008
+0.08
+0.004
+0.04
+0.000
+0.00
+0.125
+0.80
+0.60
+0.075
+LPIPS
+MSE
+0.30
+0.10
+0.050
+0.40
+0.20
+0.025
+0.000
+0.00
+0.100
+0.60
+0.080
+0.50
+LPIPS
+0.060
+0.040
+0.40
+0.30
+0.20
+0.020
+0.10
+0.000
+0.00
+0.020
+0.60
+0.016
+0.50
+0.012
+LPIPS
+MSE
+Loss function: MSE Loss function: LPIPS Loss function: LOI
+0.40
+0.000
+0.100
+MSE
+Voronoi
+San Miguel
+Robot
+0.040
+Beads
+5
+0.50
+0.120
+0.008
+0.004
+0.000
+•
+0.40
+0.30
+0.20
+0.10
+0k 5k 10k 15k 20k 25k 0k 5k 10k 15k 20k 25k 0k 5k 10k 15k 20k 25k
+Render calls
+Our overall best result
+Render calls
+Our method
+0.00
+Render calls
+CMA-ES
+Dual annealing
+0k 5k 10k 15k 20k 25k 0k 5k 10k 15k 20k 25k 0k 5k 10k 15k 20k 25k
+Render calls
+DiBO
+Render calls
+Render calls
+ZeroGrads
+Fig. S3. Extended version of Fig. 5 in the main text. In addition to it, we plot here the results obtained using LOI as an optimization objective. For each
+experiment (rows), we cross-report both MSE and LPIPS metrics on the vertical axis. Each method was executed 10 times with different random seeds and we
+plot the median (bold line) as well as the approximated 25-75 and 5-95 quantiles (shaded areas).
+6
+•
+Andrei-Timotei Ardelean, Michael Fischer, Tim Weyrich, and Tomáš Iser
+Initialization
+Target
+Loss function: MSE
+0.160
+Loss function: LPIPS
+LPIPS
+MSE
+Spline
+0.080
+0.10
+0.00
+0.020
+0.20
+0.016
+0.16
+0.012
+0.12
+LPIPS
+MSE
+Robot
+0.008
+0.04
+0.000
+0.00
+0.125
+0.80
+0.60
+0.075
+0.050
+0.000
+0.00
+0.100
+0.60
+0.080
+0.50
+LPIPS
+0.060
+0.040
+0.40
+0.30
+0.20
+0.020
+0.10
+0.000
+0.00
+0.020
+0.60
+0.016
+0.50
+0.012
+LPIPS
+MSE
+0.40
+0.20
+0.025
+MSE
+0.08
+0.004
+LPIPS
+MSE
+San Miguel
+0.30
+0.000
+0.100
+Voronoi
+0.40
+0.20
+0.040
+Beads
+Loss function: LPIPS
+0.50
+0.120
+0.008
+0.40
+0.30
+0.20
+0.004
+0.000
+Loss function: MSE
+0.60
+0.10
+0k
+5k
+10k
+15k
+Render calls
+Our method (as in the main paper, based on CMA-ES)
+20k
+25k 0k
+5k
+10k
+15k
+20k
+25k
+Render calls
+Our method (based on simulated annealing)
+0.00
+0k
+5k
+10k
+15k
+Render calls
+CMA-ES
+20k
+25k 0k
+5k
+10k
+15k
+20k
+25k
+Render calls
+Dual annealing
+Fig. S4. Application of our method to different algorithms, using the same figure format as Fig. 5 in the main text. Here we show that our method can also
+be executed with dual annealing instead of CMA-ES as the evolutionary step, and that it improves over the standard dual annealing baseline. We also add
+CMA-ES and our method combined with CMA-ES (as reported in the main paper) for reference. Note that this experiment uses 12 epochs for both ours +
+annealing and ours + CMA-ES.

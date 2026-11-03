@@ -1,0 +1,188 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Inverse Transform Sampling with Piecewise Linear Density is a differentiable method for generating samples along a ray according to a density distribution induced by linearly interpolating the volume density $\sigma_{\mathbf{r}}$. It solves the problem of finding the ray parameter $t$ corresponding to a target cumulative density value $y$, ensuring that samples strictly follow the Beer-Lambert law within each bin. Unlike NeRF’s hierarchical sampling, which interpolates exponentiated densities (probabilities), this method interpolates the density field directly, offering better numerical stability for end-to-end optimization [S1].
++Inverse Transform Sampling with Piecewise Linear Density is a differentiable method for generating samples along a ray according to a distribution induced by linearly interpolating the volume density $\sigma_{\mathbf{r}}$ [S1]. It solves the problem of finding the ray parameter $t$ corresponding to a target cumulative density value $y$, ensuring that samples strictly follow the Beer-Lambert law within each bin [S1]. Unlike NeRF’s hierarchical sampling, which interpolates exponentiated densities (probabilities), this method interpolates the density field directly, offering better numerical stability for end-to-end optimization [S1].
+ 
+ ## How it works
+@@ -14,5 +14,5 @@
+ 
+ **Outputs:**
+-- $t_{sample}$: The sampled ray parameter.
++- $t_{\text{sample}}$: The sampled ray parameter.
+ 
+ **Data Structures:**
+@@ -22,58 +22,31 @@
+ **Steps:**
+ 
+-1.  **Compute Bin Integrals:**
+-    Calculate the integral of density over each interval assuming piecewise constant density for the NeRF baseline or linear for RVS. For the RVS method, the source notes indicate the preparation involves `bin_integrals = sigmas * np.diff(ts)`. However, the quadratic formulation relies on linear interpolation. The source code snippet provided for RVS uses `np.interp` on `prefix_integrals` derived from `sigmas * np.diff(ts)`. To align with the quadratic formula derivation which assumes linear density $\sigma(t) = \sigma_i + \frac{\sigma_{i+1}-\sigma_i}{t_{i+1}-t_i}(t-t_i)$, the integral over $[t_i, t_{i+1}]$ is $\frac{\sigma_i + \sigma_{i+1}}{2}(t_{i+1}-t_i)$. The source code `bin_integrals = sigmas * np.diff(ts)` appears to correspond to the NeRF (piecewise constant) or a simplified RVS implementation. Given the explicit quadratic formulas (19-23) are derived for linear density, we use the linear integral for the prefix sum calculation in the general case, but the source code explicitly shows `sigmas * np.diff(ts)` for the RVS mode in Listing 1. We follow the source code's explicit implementation for the data structure preparation as it is the "numpy implementation" provided [S1].
+-    
+-    $$ \text{bin\_integrals}_i = \sigma_{\mathbf{r}}(t_i) \cdot (t_{i+1} - t_i) $$
+-    
+-    $$ \text{prefix\_integrals}_0 = 0 $$
+-    $$ \text{prefix\_integrals}_{i+1} = \text{prefix\_integrals}_i + \text{bin\_integrals}_i $$
++1. **Compute Bin Integrals and Prefix Sums:**
++   Calculate the integral of density over each interval using linear interpolation, as required by the quadratic derivation [S1]. The source code provides a piecewise constant approximation for comparison, but the method uses linear interpolation for the solver [S1].
++   $$ \text{bin\_integrals}_i = \frac{\sigma_{\mathbf{r}}(t_i) + \sigma_{\mathbf{r}}(t_{i+1})}{2} (t_{i+1} - t_i) $$
++   $$ \text{prefix\_integrals}_0 = 0 $$
++   $$ \text{prefix\_integrals}_{i+1} = \text{prefix\_integrals}_i + \text{bin\_integrals}_i $$
+ 
+-2.  **Compute Inverse Opacity Input $y$:**
+-    Calculate the target cumulative density value $y$ from the uniform sample $u$ and the total ray opacity. The total optical depth is $\tau = \int_{t_s}^{t_e} \sigma_{\mathbf{r}}(s) ds = \text{prefix\_integrals}_{N-1}$.
+-    
+-    Using the numerically stable logsumexp operator [S1]:
+-    $$ y = -\log \left( \exp(\log(1-u)) + \exp(\log u - \tau) \right) $$
+-    
+-    *Edge Case:* If the ray is opaque ($\tau \approx 0$ or very large opacity implies $\tau$ is large, but the note says "for opaque rays $\int \sigma \approx 0$" which seems contradictory to standard physics where opaque means high $\tau$. The note states: "In practice, for opaque rays $\int_{t_n}^{t_f} \sigma_r(s) ds \approx 0$ implementation of logsumexp becomes computationally unstable." This likely refers to the case where the exponential term $\exp(-\tau)$ dominates or underflows. If $\tau$ is small (transparent), $\exp(-\tau) \approx 1$. If $\tau$ is large (opaque), $\exp(-\tau) \approx 0$. The instability arises when $\tau$ is small? The note says "opaque rays... $\approx 0$". This is likely a typo in the source note or refers to the integral of *transmittance*? No, it says $\sigma$. Let's look at the formula: $y = -\log(1 - y_f u)$ where $y_f = 1 - e^{-\tau}$. If $\tau$ is large, $y_f \approx 1$. If $\tau$ is small, $y_f \approx \tau$. The logsumexp form is used to avoid precision loss. The note says "for opaque rays... $\approx 0$". If $\tau$ is large, $e^{-\tau} \approx 0$. The term $\exp(\log u - \tau)$ becomes very small. The term $\exp(\log(1-u))$ is $1-u$. If $u$ is close to 1, $1-u$ is small. The instability is likely when $\tau$ is very large (opaque) causing underflow in the second term, or very small. The source suggests replacing $y$ with $u \cdot \tau$ if unstable. We will implement the logsumexp and add a guard for small $\tau$ [G].
++2. **Compute Inverse Opacity Input $y$:**
++   Calculate the target cumulative density value $y$ from the uniform sample $u$ and the total ray optical depth $\tau = \text{prefix\_integrals}_{N-1}$ [S1]. Using the numerically stable logsumexp operator:
++   $$ y = -\log \left( \exp(\log(1-u)) + \exp(\log u - \tau) \right) $$
++   *Edge Case:* The source notes that when the integral is approximately zero, the logsumexp implementation becomes computationally unstable, and $y$ is replaced with a first-order approximation $u \cdot \tau$ [S1]. (Note: The source refers to this condition as "opaque rays $\int \sigma \approx 0$", which physically corresponds to transparent rays with small optical depth.)
+ 
+-3.  **Find the Interval:**
+-    Find the index $i$ such that $\text{prefix\_integrals}_i \le y < \text{prefix\_integrals}_{i+1}$. If $y \ge \text{prefix\_integrals}_{N-1}$, set $t_{sample} = t_e$.
++3. **Find the Interval:**
++   Find the index $i$ such that $\text{prefix\_integrals}_i \le y < \text{prefix\_integrals}_{i+1}$ [G]. If $y \ge \text{prefix\_integrals}_{N-1}$, set $t_{\text{sample}} = t_e$ [G].
+ 
+-4.  **Solve for $\Delta t$:**
+-    Within the interval $[t_i, t_{i+1}]$, assume linear density interpolation. We solve for $\Delta t = t - t_i$ in the quadratic equation:
+-    $$ 0 = a \Delta t^2 + b \Delta t + c $$
+-    
+-    Where:
+-    $$ a = \frac{\sigma_{\mathbf{r}}(t_{i+1}) - \sigma_{\mathbf{r}}(t_i)}{2} $$
+-    $$ b = \sigma_{\mathbf{r}}(t_i) \cdot (t_{i+1} - t_i) $$
+-    $$ c = \left( \text{prefix\_integrals}_i - y \right) \cdot (t_{i+1} - t_i) \quad \text{[Note: Source Eq 20 has a scaling factor $(t_{i+1}-t_i)$ outside the sum. Let's re-read Eq 20 carefully.]} $$
+-    
+-    Re-reading Source [S1] Eq 20:
+-    $$ c = \left( \sum_{j=1}^i \frac{\sigma_{\mathbf{r}}(t_j) + \sigma_{\mathbf{r}}(t_{j-1})}{2} (t_j - t_{j-1}) - y \right) \times (t_{i+1} - t_i) $$
+-    
+-    The sum term $\sum_{j=1}^i \dots$ represents the integral from $t_0$ to $t_i$ assuming linear interpolation. Let $I_i = \int_{t_0}^{t_i} \sigma(s) ds$.
+-    So, $c = (I_i - y) (t_{i+1} - t_i)$.
+-    
+-    However, the quadratic equation is derived from:
+-    $$ \int_{t_i}^{t_i+\Delta t} \sigma(s) ds = y - I_i $$
+-    With linear $\sigma(s) = \sigma_i + \frac{\sigma_{i+1}-\sigma_i}{\Delta T} (s-t_i)$, where $\Delta T = t_{i+1}-t_i$.
+-    Integral is $\sigma_i \Delta t + \frac{\sigma_{i+1}-\sigma_i}{2 \Delta T} \Delta t^2 = y - I_i$.
+-    Multiply by $\Delta T$:
+-    $\sigma_i \Delta T \Delta t + \frac{\sigma_{i+1}-\sigma_i}{2} \Delta t^2 = (y - I_i) \Delta T$.
+-    Rearranging to $a \Delta t^2 + b \Delta t + c = 0$:
+-    $a = \frac{\sigma_{i+1}-\sigma_i}{2}$.
+-    $b = \sigma_i \Delta T$.
+-    $c = -(y - I_i) \Delta T = (I_i - y) \Delta T$.
+-    
+-    This matches the source definitions.
+-    
+-    Compute the root using the stable formula to avoid cancellation when $a \approx 0$ [S1]:
+-    $$ \Delta t = \frac{2c}{b + \sqrt{b^2 - 4ac}} $$
+-    
+-    *Pitfall:* If $b^2 - 4ac < 0$, clamp to 0. If the denominator is 0, $\Delta t = 0$ [G].
++4. **Solve for $\Delta t$:**
++   Within the interval $[t_i, t_{i+1}]$, assume linear density interpolation. We solve for $\Delta t = t - t_i$ in the quadratic equation:
++   $$ 0 = a \Delta t^2 + b \Delta t + c $$
++   Where:
++   $$ a = \frac{\sigma_{\mathbf{r}}(t_{i+1}) - \sigma_{\mathbf{r}}(t_i)}{2} $$
++   $$ b = \sigma_{\mathbf{r}}(t_i) \cdot (t_{i+1} - t_i) $$
++   $$ c = \left( \text{prefix\_integrals}_i - y \right) \cdot (t_{i+1} - t_i) $$
++   Compute the root using the stable formula to avoid cancellation when $a \approx 0$ [S1]:
++   $$ \Delta t = \frac{2c}{b + \sqrt{b^2 - 4ac}} $$
++   *Pitfall:* If $b^2 - 4ac < 0$, clamp the discriminant to $0$. If the denominator is $0$, set $\Delta t = 0$ [G].
+ 
+-5.  **Return Result:**
+-    $$ t_{sample} = t_i + \Delta t $$
++5. **Return Result:**
++   $$ t_{\text{sample}} = t_i + \Delta t $$
+ 
+ **Pseudocode:**
+@@ -98,57 +71,20 @@
+         return ts[0]
+         
+-    # 1. Compute Prefix Integrals
+-    # Note: Source code uses sigmas * diff(ts) for bin_integrals.
+-    # However, the quadratic derivation assumes linear interpolation.
+-    # The source code snippet for 'rvs' mode uses np.interp on prefix_integrals
+-    # computed from sigmas * diff(ts). This implies the source code implements
+-    # a piecewise CONSTANT density approximation for the prefix sum, but
+-    # the quadratic formula is for linear. 
+-    # The prompt asks for "Inverse Transform Sampling with Piecewise Linear Density".
+-    # The quadratic formulas (19-23) are explicitly for linear density.
+-    # The source code Listing 1 shows:
+-    # bin_integrals = sigmas * np.diff(ts)
+-    # prefix_integrals = np.cumsum(bin_integrals)
+-    # This is piecewise constant.
+-    # BUT the text says "we do inverse transform sampling from a distribution 
+-    # induced by a piecewise interpolation of sigma_r".
+-    # And "samples follow the Beer-Lambert law within each bin" due to linear interpolation.
+-    # The quadratic formula IS the linear interpolation solver.
+-    # The source code's 'rvs' branch uses np.interp. 
+-    # np.interp on prefix_integrals (piecewise constant) is equivalent to 
+-    # piecewise constant sampling.
+-    # There is a contradiction in the source between the quadratic derivation (linear) 
+-    # and the provided numpy code (constant).
+-    # However, the quadratic formula is the "method" described in the notes.
+-    # We will implement the quadratic formula as it is the distinct feature 
+-    # described in the "How it works" notes.
+-    
+-    # Calculate total optical depth for inverse opacity
+-    # Using linear interpolation for total integral to be consistent with method
+-    bin_integrals_linear = (sigmas[:-1] + sigmas[1:]) / 2 * np.diff(ts)
+-    prefix_integrals = np.concatenate([[0.0], np.cumsum(bin_integrals_linear)])
++    # 1. Compute Prefix Integrals (linear interpolation per source derivation)
++    bin_integrals = (sigmas[:-1] + sigmas[1:]) / 2.0 * np.diff(ts)
++    prefix_integrals = np.concatenate([[0.0], np.cumsum(bin_integrals)])
+     total_tau = prefix_integrals[-1]
+     
+     # 2. Compute y (Inverse Opacity Input)
+-    # y = -log( exp(log(1-u)) + exp(log(u) - tau) )
+-    # Handle numerical stability
+-    if total_tau > 20: # Opaque ray, exp(-tau) underflows
+-        y = -np.log(1.0 - u) # Approximation if tau is large? 
+-        # Actually if tau is large, y_f = 1. y = -log(1-u).
+-        # But the formula is y = -log(1 - y_f * u). If y_f=1, y=-log(1-u).
+-        pass
+-    elif total_tau < 1e-5: # Transparent ray
+-        # Approximation: y = u * tau
++    # Handle numerical stability for small optical depth (transparent rays)
++    if total_tau < 1e-5:
+         y = u * total_tau
+     else:
+         term1 = np.log(1.0 - u)
+         term2 = np.log(u) - total_tau
+-        # logsumexp
+         max_val = np.maximum(term1, term2)
+         y = - (max_val + np.log(np.exp(term1 - max_val) + np.exp(term2 - max_val)))
+         
+     # 3. Find interval
+-    # Find i such that prefix_integrals[i] <= y < prefix_integrals[i+1]
+-    # Use searchsorted
+     i = np.searchsorted(prefix_integrals, y, side='right') - 1
+     i = np.clip(i, 0, N - 2)
+@@ -168,5 +104,5 @@
+     discriminant = b*b - 4*a*c
+     if discriminant < 0:
+-        discriminant = 0
++        discriminant = 0.0
+         
+     denom = b + np.sqrt(discriminant)
+@@ -176,5 +112,5 @@
+         delta_t = (2.0 * c) / denom
+         
+-    # Clamp delta_t to interval
++    # Clamp delta_t to interval bounds
+     delta_t = np.clip(delta_t, 0.0, dt_interval)
+     
+@@ -183,8 +119,8 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ to compute prefix integrals, $O(\log N)$ or $O(1)$ to find the interval and solve the quadratic.
+-- **Memory Complexity:** $O(N)$ to store prefix integrals.
+-- **Strengths:** Differentiable; samples follow Beer-Lambert law within bins; numerically stable for end-to-end optimization compared to exponentiated density interpolation [S1].
+-- **Limitations:** Requires computing prefix integrals; quadratic solution has edge cases for $a \approx 0$ handled by stable formula [S1].
++- **Time Complexity:** $O(N)$ to compute prefix integrals; $O(\log N)$ or $O(1)$ to find the interval and solve the quadratic [G].
++- **Memory Complexity:** $O(N)$ to store prefix integrals [G].
++- **Strengths:** Differentiable; samples follow the Beer-Lambert law within bins; numerically stable for end-to-end optimization compared to exponentiated density interpolation [S1].
++- **Limitations:** Requires computing prefix integrals; quadratic solution has edge cases for $a \approx 0$ handled by the stable formula [S1].
+ - **When to use:** When differentiable sampling from a linearly interpolated density field is required, particularly in neural volume rendering contexts like RVS [S1].
+ 

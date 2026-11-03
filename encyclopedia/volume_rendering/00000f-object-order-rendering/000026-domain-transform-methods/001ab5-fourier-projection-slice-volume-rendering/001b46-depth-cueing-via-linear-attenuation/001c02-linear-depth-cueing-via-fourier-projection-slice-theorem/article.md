@@ -1,0 +1,135 @@
+# Linear Depth Cueing via Fourier Projection-Slice Theorem
+
+Also called: Fourier Projection-Slice Depth Cueing, Linear Attenuation via Fourier Projection-Slice, Linear Depth Cueing
+
+## Overview
+A shading model that enhances depth perception in X-ray projections by weighting volume points based on their distance from the viewer, without introducing occlusion [S1]. It replaces per-voxel shading followed by projection with projection followed by per-pixel shading, allowing depth cueing (linear attenuation) to be computed efficiently by factoring the viewing direction out of the integral [S1]. Unlike opaque volume renderings, this method produces X-ray-like projections with no occlusion, but the linear shading provides sufficient shape cues for spatial understanding, especially in motion [S1].
+
+## How it works
+**Inputs:**
+- Volume density $\rho(x,y,z)$ and emission coefficient $C(x,y,z)$, combined as $f(x,y,z) = \rho(x,y,z)C(x,y,z)$ [S1, S2].
+- Normalized viewing direction vector $\mathbf{V} = (V_x, V_y, V_z)$, pointing away from the eye [S1, S2].
+- Constant linear attenuation coefficient $\tau$ [S1, S2].
+- Linear depth function $\mathbf{D}(P) = mP + b$, where $P$ is position along the ray [S1, S2].
+
+**Outputs:**
+- 2D projection image $I$ [S1, S2].
+
+**Data Structures:**
+- Four 3D spectra (frequency domain representations) of the volume, each of size $N_x \times N_y \times N_z$ (complex values) [S1].
+- Two-dimensional slices extracted from these spectra for inverse transformation [S1].
+
+**Steps:**
+1. **Precomputation:**
+   - Create four copies of the volume data $f(x,y,z)$ [S1].
+   - Multiply the first copy by $1$ [S1].
+   - Multiply the second copy by $D_x(x,y,z)$, the x-component of the depth function [S1].
+   - Multiply the third copy by $D_y(x,y,z)$, the y-component of the depth function [S1].
+   - Multiply the fourth copy by $D_z(x,y,z)$, the z-component of the depth function [S1].
+   - Compute the 3D Fourier Transform of each of the four modified volumes to yield four 3D spectra: $\mathcal{F}\{f\}$, $\mathcal{F}\{D_x f\}$, $\mathcal{F}\{D_y f\}$, and $\mathcal{F}\{D_z f\}$ [S1].
+
+2. **Per-view Rendering:**
+   - For the current viewing direction $\mathbf{V}$, extract 2D slices from each of the four 3D spectra corresponding to the projection plane defined by $\mathbf{V}$ [S1].
+   - Compute the 2D Inverse Fourier Transform of each extracted slice to obtain spatial domain images [S1].
+   - Weight the inverse-transformed images by the components of $\mathbf{V}$ and the constant terms derived from the attenuation model:
+     - Multiply the image from $\mathcal{F}\{D_x f\}$ by $V_x$ [S1].
+     - Multiply the image from $\mathcal{F}\{D_y f\}$ by $V_y$ [S1].
+     - Multiply the image from $\mathcal{F}\{D_z f\}$ by $V_z$ [S1].
+     - Multiply the image from $\mathcal{F}\{f\}$ by the constant $c_1 = \tau/2 - \tau/2 (V_x + V_y + V_z)$ [S2].
+   - Sum the four weighted images to produce the final output image $I$ [S1, S2].
+
+**Formula:**
+The intensity $I$ at a pixel is given by [S2]:
+$$ I = V_x \Pi_{\mathbf{V}} \left[ \left(\frac{\tau}{2} + \frac{\tau}{2} D_x \right) \rho C \right] + V_y \Pi_{\mathbf{V}} \left[ \left(\frac{\tau}{2} + \frac{\tau}{2} D_y \right) \rho C \right] + V_z \Pi_{\mathbf{V}} \left[ \left(\frac{\tau}{2} + \frac{\tau}{2} D_z \right) \rho C \right] + c_1 \Pi_{\mathbf{V}} [\rho C] $$
+where $\Pi_{\mathbf{V}}$ is the projection operator, $D_x, D_y, D_z$ are components of $\mathbf{D}$, and $c_1 = \tau/2 - \tau/2 (V_x + V_y + V_z)$ [S2].
+
+The underlying integral being approximated is [S2]:
+$$ I_P = \int_a^b \rho(P(t)) C(P(t)) \left[ \frac{\tau}{2} + \frac{\tau}{2} (\mathbf{D}(P(t)) \cdot \mathbf{V}) \right] dt $$
+where $\mathbf{D} = mP + b$ is a linear function of position [S2].
+
+**Parameters:**
+- $\tau$: Constant linear attenuation coefficient [S1, S2].
+- $\mathbf{V}$: Normalized viewing direction vector [S1, S2].
+- $m, b$: Constants defining the linear depth function $\mathbf{D}$ [S1, S2].
+
+**Edge Cases and Pitfalls:**
+- **Ghosting:** To avoid ghosting artifacts caused by spectral leakage, the input volume must be surrounded by a margin of zeros [S2]. The margin width is $N(k_2-1)/2$ on each side, where $k_2$ is the factor by which the volume width is increased [S2].
+- **Viewing Direction Convention:** $\mathbf{V}$ must point away from the eye, not towards it [S1, S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def precompute_spectra(rho, C, Dx, Dy, Dz):
+    """
+    Precomputes the four 3D spectra required for linear depth cueing.
+    Args:
+        rho: 3D array of density values.
+        C: 3D array of emission coefficients.
+        Dx, Dy, Dz: 3D arrays of depth function components.
+    Returns:
+        spectra: List of four 3D complex arrays [S_f, S_Dx, S_Dy, S_Dz].
+    """
+    f = rho * C
+    # [G] Standard 3D FFT implementation
+    S_f = fft3d(f)
+    S_Dx = fft3d(f * Dx)
+    S_Dy = fft3d(f * Dy)
+    S_Dz = fft3d(f * Dz)
+    return [S_f, S_Dx, S_Dy, S_Dz]
+
+def render_linear_depth_cueing(spectra, V, tau):
+    """
+    Renders a single view using linear depth cueing via Fourier Projection-Slice Theorem.
+    Args:
+        spectra: List of four 3D complex arrays [S_f, S_Dx, S_Dy, S_Dz].
+        V: Tuple (Vx, Vy, Vz) normalized vector pointing away from eye.
+        tau: Constant linear attenuation coefficient.
+    Returns:
+        image: 2D array representing the rendered projection.
+    """
+    S_f, S_Dx, S_Dy, S_Dz = spectra
+    Vx, Vy, Vz = V
+    c1 = tau / 2.0 - (tau / 2.0) * (Vx + Vy + Vz)
+
+    # [G] Extracts a 2D slice from the 3D spectrum along the plane orthogonal to V, per the Fourier slice theorem
+    slice_f = extract_slice(S_f, V)
+    slice_Dx = extract_slice(S_Dx, V)
+    slice_Dy = extract_slice(S_Dy, V)
+    slice_Dz = extract_slice(S_Dz, V)
+
+    # [G] Standard 2D IFFT implementation
+    img_f = ifft2d(slice_f)
+    img_Dx = ifft2d(slice_Dx)
+    img_Dy = ifft2d(slice_Dy)
+    img_Dz = ifft2d(slice_Dz)
+
+    # Weight and sum according to the projection formula [S2]
+    # The tau/2 factor is applied here to match the exact mathematical formulation
+    term_base = c1 * img_f
+    term_Dx = Vx * (tau / 2.0) * img_Dx
+    term_Dy = Vy * (tau / 2.0) * img_Dy
+    term_Dz = Vz * (tau / 2.0) * img_Dz
+
+    image = term_base + term_Dx + term_Dy + term_Dz
+    return image.real
+```
+
+## Subtopics
+
+### [Composite Depth Cueing and Directional Shading](1143-composite-depth-cueing-and-directional-shading.md)
+Composite Depth Cueing and Directional Shading is a frequency-domain rendering technique that simultaneously applies linear depth cueing (attenuation) and hemispherical directional shading to volume data. It solves the problem of efficiently computing both effects within the Fourier Projection-Slice framework, where naive spatial-domain computation would be prohibitively expensive. It sets itself apart from its parent method, [Linear Depth Cueing via Fourier Projection-Slice Theorem](1129-linear-depth-cueing-via-fourier-projection-slice-theorem.md), by combining the attenuation model with a hemispherical illumination model that avoids the nonlinear absolute value operator, allowing the lighting direction to be factored out of the integral. This requires 16 precomputed spectra and is slower than individual models due to a high constant factor, though asymptotically less expensive than conventional rendering.
+
+## Operating characteristics
+- **Memory:** 48 megabytes for the 128^3 voxel cube implementation described [S1].
+- **Performance:** Rendering time was approximately 6 seconds per view on a 36 MHz Silicon Graphics 4D/320 VGX for the linear depth cueing equation (approx. 1.5 seconds per extracted slice) [S1].
+- **Scaling:** Per-view processing time increases by a factor of $k_2^2$ if the volume width is increased by a factor of $k_2$ due to zero padding [S2]. Memory requirements increase by a factor of $k_2^3$ [S2].
+- **Strengths:** Efficient computation of depth cueing in the frequency domain; produces X-ray-like projections with shape cues [S1].
+- **Limitations:** No occlusion; requires zero-padding to avoid ghosting artifacts [S2].
+
+## Background
+Originated in the work of Marc Levoy, described in "Volume Rendering using the Fourier Projection-Slice Theorem" [S1, S2]. The method is part of a family of algorithms for generating realistically shaded renderings of volume data using the Fourier projection-slice theorem [S1].
+
+## Sources
+[S1] Volume Rendering using the Fourier Projection-Slice Theorem, https://graphics.stanford.edu/papers/fourier/fourier.pdf, fetched 2026-10-27
+[S2] Fourier Projection-Slice Theorem in Volume Rendering, https://www.scribd.com/document/796298963/Marc-Levoy-Volume-rendering-using-the-Fourier-projection-slice-theorem, fetched 2026-10-27 (unofficial)

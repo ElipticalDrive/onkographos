@@ -1,0 +1,2757 @@
+# Volume Data Visualization
+
+This software allows for the 3D visualization of volumetric datasets. The current implementation makes use of raycasting in order to render the data using various ray functions such as maximum and average intensity projection, first-hit ray casting and compositing. More features such as a custom transfer function, and support for other ray functions are in progress. The .GIF below shows a demonstration of the current functionality of the software. The dataset used in the demonstration is the CT scan of a <i>Pseudotherium argentinus</i> gathered from [1].
+
+<img src="img/output.gif" alt="Demo .gif showing the user interface and camera controls" width="100%"/>
+
+## Dependencies
+
+- [ImGUI](https://github.com/ocornut/imgui/), [ImGradientHDR](https://github.com/effekseer/ImGradientHDR) and [GLFW](https://github.com/glfw/glfw) for the UI and input controls
+- OpenGL Extension Wrangler Library (or GLEW, for extended OpenGL 3D rendering functionality, [link](https://glew.sourceforge.net/))
+- OpenGL Mathematics (or glm, mathematics library used for linear algebra functions, [link](https://github.com/g-truc/glm))
+
+## References:
+
+[1] Dr. Rachel Wallace, Ricardo Martínez and Timothy Rowe, 2019, "Pseudotherium argentinus" (On-line), Digital Morphology. Accessed October 10, 2022 at http://digimorph.org/specimens/Pseudotherium_argentinus/.
+
+### shaders/screen_quad_frag.glsl
+```
+#version 450 core
+
+in  vec2 TextureCoords;
+out vec4 FragmentColor;
+
+uniform sampler2D quadTexture;
+
+void main()
+{
+    FragmentColor = texture(quadTexture, TextureCoords);
+}
+```
+
+### shaders/screen_quad_vert.glsl
+```
+#version 450 core
+
+layout (location = 0) in vec2 vertexPosition;
+layout (location = 0) in vec2 textureCoords;
+
+out vec2 TextureCoords;
+
+void main()
+{
+    gl_Position   = vec4(vertexPosition, 0.0f, 1.0f);
+    TextureCoords = textureCoords;
+}
+```
+
+### shaders/volume_cross_section_frag.glsl
+```
+#version 330 core
+
+in  vec2 TextureCoords;
+out vec4 FragmentColor;
+
+uniform sampler3D texture3d;
+uniform sampler2D transferTexture;
+uniform mat3  uvPermutation;
+uniform float sliceOffset;
+uniform float maxValue;
+uniform float minValue;
+
+void main()
+{    
+    vec3 sampleCoord   = uvPermutation * vec3(TextureCoords.x, TextureCoords.y, sliceOffset);
+    float textureSample = (texture(texture3d, sampleCoord).r - minValue) / (maxValue - minValue);
+    FragmentColor = texture(transferTexture, vec2(textureSample, 0.0f));
+}
+```
+
+### shaders/volume_cross_section_vert.glsl
+```
+#version 330 core
+
+layout (location = 0) in vec2 vertexPosition;
+layout (location = 1) in vec2 textureCoords;
+
+out vec2 TextureCoords;
+
+uniform mat4 model;
+uniform mat4 view;
+uniform mat4 projection;
+
+void main()
+{
+    gl_Position   = projection * view * model * vec4(vertexPosition, 0.0f, 1.0f);
+    TextureCoords = textureCoords;
+}
+```
+
+### shaders/volume_raycast_border_frag.glsl
+```
+#version 330 core
+
+out vec4 FragmentColor;
+
+void main()
+{
+	FragmentColor = vec4(vec3(0.25f), 1.0f);
+}
+```
+
+### shaders/volume_raycast_composite_frag.glsl
+```
+#version 450 core
+
+in  vec3 PosInWorld;
+in  vec3 Origin;
+out vec4 FragmentColor;
+
+uniform float minValue = 0.0f;
+uniform float maxValue = 1.0f;
+
+uniform mat4 rotation;
+uniform vec3 volumeSize;
+uniform vec3 cameraPosition;
+
+uniform sampler3D texture3d;
+uniform sampler2D transferTexture;
+
+
+/**
+* 
+* @param r0	Ray origin
+* @param rd	Ray direction
+* @param p0	Plane origin
+* @param n		Plane normal
+* 
+* Returns a vec2 wherein:
+* x - t-value for the ray if there is an intersection
+* y - 0 if there is no intersection, 1 if there is
+**/
+vec2 TestRayIntersection(vec3 r0, vec3 rd, vec3 p0, vec3 n)
+{
+	float denom = dot(n, rd);
+	if (abs(denom) < 1e-16) {
+		return vec2(1e8);
+	}
+	return vec2(dot(n, normalize(p0 - r0)) / denom, 1.0f);
+}
+
+vec3 CalculateTexturePos(vec3 currPos)
+{
+	vec3 texturePos = vec3(transpose(rotation) * vec4(currPos - Origin, 1.0f));
+	texturePos = vec3(round(texturePos.x), round(texturePos.y), round(texturePos.z)) / volumeSize;
+
+	return texturePos;
+}
+
+void main()
+{
+	vec3 rayDir  = normalize(PosInWorld - cameraPosition);
+	vec3 currPos = PosInWorld;
+
+	float currIntensity = (texture(texture3d, currPos).r - minValue) / (maxValue - minValue);
+
+	vec3 texturePos  = vec3(0.5f);
+	vec4 outputColor = vec4(0.0f, 0.0f, 0.0f, 0.0f);
+
+	const vec3 dx = vec3(1.0f, 0.0f, 0.0f);
+	const vec3 dy = vec3(0.0f, 1.0f, 0.0f);
+	const vec3 dz = vec3(0.0f, 0.0f, 1.0f);
+
+	float contribution = 1.0f;
+
+	while(true)
+	{
+		// The (currPos - rotatedOrigin) vector needs to be transformed with the inverse
+		// of the rotation applied to it in order to get valid coordinates within the space
+		// of the 3d texture.
+		texturePos = vec3(transpose(rotation) * vec4(currPos - Origin, 1.0f));
+		texturePos = vec3(round(texturePos.x), round(texturePos.y), round(texturePos.z)) / volumeSize;
+
+		// Check if the point to sample the 3d texture is still within the bounds of the actual 
+		// texture
+		bool isOutsideX = (texturePos.x < 0.0 || texturePos.x > 1.0f);
+		bool isOutsideY = (texturePos.y < 0.0 || texturePos.y > 1.0f);
+		bool isOutsideZ = (texturePos.z < 0.0 || texturePos.z > 1.0f);
+
+		if (isOutsideX || isOutsideY || isOutsideZ)
+			break;
+
+		currIntensity = (texture(texture3d, texturePos).r - minValue) / (maxValue - minValue);
+
+		// Compute gradient
+		float gx = texture(texture3d, CalculateTexturePos(currPos + dx)).r - texture(texture3d, CalculateTexturePos(currPos - dx)).r;
+		float gy = texture(texture3d, CalculateTexturePos(currPos + dy)).r - texture(texture3d, CalculateTexturePos(currPos - dy)).r;
+		float gz = texture(texture3d, CalculateTexturePos(currPos + dz)).r - texture(texture3d, CalculateTexturePos(currPos - dz)).r;
+
+		vec3 gradient   = -normalize(vec3(gx, gy, gz) / 2.0f);
+		vec3 lightDir   = normalize(volumeSize - currPos);	// volumeSize is the position of the light upper right corner
+		vec3 reflectDir = reflect(-lightDir, gradient);
+
+		vec3 ambient  = vec3(0.25f);
+		vec3 diffuse  = vec3(1.00f) * max(0.5f, dot(gradient, lightDir));
+		vec3 specular = vec3(1.00f) * pow(max(dot(rayDir, reflectDir), 0.0f), 32) * 0.5f;
+
+		vec4 transfer   = vec4(ambient + diffuse + specular, 1.0f) * texture(transferTexture, vec2(currIntensity, 0.0f));
+
+		outputColor.rgb += contribution * transfer.a * transfer.rgb;
+		contribution    *= (1 - transfer.a);
+		outputColor.a    = mix(outputColor.a, 1.0f, transfer.a);
+
+		// Early ray termination on arbitrary threshold
+		if(outputColor.a >= 0.90)
+			break;
+
+		// Recall that:
+		//		>  ceil(x) - 1 is the greatest integer strictly less than x
+		//		> floor(x) + 1 is the lowest integer strictly greater than x
+
+		// Check intersection with the adjacent Y-Z plane (normal facing the x axis)
+
+		vec3 xNorm = vec3((rayDir.x > 0.0f ? -1.0f : 1.0f), 0.0f, 0.0f);
+		vec3 xOrig = vec3((rayDir.x > 0.0f ? floor(currPos.x) + 1: ceil(currPos.x) - 1), currPos.y, currPos.z);
+		vec2 xTest = TestRayIntersection(currPos, rayDir, xOrig, xNorm);
+
+		// Check intersection with the adjacent X-Z plane (normal facing the y axis)
+		vec3 yNorm = vec3(0.0f, (rayDir.y > 0 ? -1.0f : 1.0f), 0.0f);
+		vec3 yOrig = vec3(currPos.x, (rayDir.y > 0.0f ? floor(currPos.y) + 1 : ceil(currPos.y) - 1), currPos.z);
+		vec2 yTest = TestRayIntersection(currPos, rayDir, yOrig, yNorm);
+
+		// Check intersection with the adjacent X-Y plane (normal facing the z axis)
+		vec3 zNorm = vec3(0.0f, 0.0f, (rayDir.z > 0 ?  -1.0f : 1.0f ));
+		vec3 zOrig = vec3(currPos.x, currPos.y, (rayDir.z > 0.0f ? floor(currPos.z) + 1 : ceil(currPos.z) - 1));
+		vec2 zTest = TestRayIntersection(currPos, rayDir, zOrig, zNorm);
+
+		// Move in the minimum amount possible such that only one voxel is traversed
+		// at any given iteration to ensure full coverage
+		float tMin = min(zTest.x, min(yTest.x, xTest.x));
+
+		currPos += tMin * rayDir;
+	}
+
+	FragmentColor = outputColor;
+}
+```
+
+### shaders/volume_raycast_frag.glsl
+```
+#version 450 core
+
+in  vec3 PosInWorld;
+in  vec3 Origin;
+out vec4 FragmentColor;
+
+/**
+ * 0 - Maximum intensity projecition
+ * 2 - Average intensity projection
+ * 1 - First-hit 
+**/
+uniform uint   projMethod = 0u;
+uniform float  firstHitThreshold = 1.0f;
+
+uniform float minValue = 0.0f;
+uniform float maxValue = 1.0f;
+
+uniform mat4 rotation;
+uniform vec3 volumeSize;
+uniform vec3 cameraPosition;
+
+uniform sampler3D texture3d;
+uniform sampler2D transferTexture;
+
+
+/**
+* 
+* @param r0	Ray origin
+* @param rd	Ray direction
+* @param p0	Plane origin
+* @param n		Plane normal
+* 
+* Returns a vec2 wherein:
+* x - t-value for the ray if there is an intersection
+* y - 0 if there is no intersection, 1 if there is
+**/
+vec2 TestRayIntersection(vec3 r0, vec3 rd, vec3 p0, vec3 n)
+{
+	float denom = dot(n, rd);
+	if (abs(denom) < 1e-16) {
+		return vec2(1e8);
+	}
+	return vec2(dot(n, normalize(p0 - r0)) / denom, 1.0f);
+}
+
+vec3 CalculateTexturePos(vec3 currPos)
+{
+	vec3 texturePos = vec3(transpose(rotation) * vec4(currPos - Origin, 1.0f));
+	texturePos = vec3(round(texturePos.x), round(texturePos.y), round(texturePos.z)) / volumeSize;
+
+	return texturePos;
+}
+
+void main()
+{
+	vec3 rayDir  = normalize(PosInWorld - cameraPosition);
+	vec3 currPos = PosInWorld;
+
+	float currIntensity  = (texture(texture3d, currPos).r - minValue) / (maxValue - minValue);
+	float maxIntensity   = currIntensity;
+	float totalIntensity = currIntensity;
+
+	vec3 texturePos  = vec3(0.5f);
+	vec3 posAtMax    = currPos;
+	vec4 outputColor = vec4(0.0f, 0.0f, 0.0f, 0.0f);
+
+	const vec3 dx = vec3(1.0f, 0.0f, 0.0f);
+	const vec3 dy = vec3(0.0f, 1.0f, 0.0f);
+	const vec3 dz = vec3(0.0f, 0.0f, 1.0f);
+
+	float contribution    = 1.0f;
+	float numTotalSamples = 1.0f;
+
+	while(true)
+	{
+		// The (currPos - rotatedOrigin) vector needs to be transformed with the inverse
+		// of the rotation applied to it in order to get valid coordinates within the space
+		// of the 3d texture.
+		texturePos = vec3(transpose(rotation) * vec4(currPos - Origin, 1.0f));
+		texturePos = vec3(round(texturePos.x), round(texturePos.y), round(texturePos.z)) / volumeSize;
+	
+		// Check if the point to sample the 3d texture is still within the bounds of the actual 
+		// texture
+		bool isOutsideX = (texturePos.x < 0.0 || texturePos.x > 1.0f);
+		bool isOutsideY = (texturePos.y < 0.0 || texturePos.y > 1.0f);
+		bool isOutsideZ = (texturePos.z < 0.0 || texturePos.z > 1.0f);
+	
+		if (isOutsideX || isOutsideY || isOutsideZ)
+			break;
+	
+		currIntensity = (texture(texture3d, texturePos).r - minValue) / (maxValue - minValue);	
+		posAtMax	  = currIntensity > maxIntensity ? currPos : posAtMax;
+		maxIntensity = max(maxIntensity, currIntensity);
+
+		totalIntensity  += currIntensity;
+		numTotalSamples += 1.0f;
+
+		if (projMethod == 2u && currIntensity > firstHitThreshold)
+			break;
+	
+		// Recall that:
+		//		>  ceil(x) - 1 is the greatest integer strictly less than x
+		//		> floor(x) + 1 is the lowest integer strictly greater than x
+	
+		// Check intersection with the adjacent Y-Z plane (normal facing the x axis)
+		
+		vec3 xNorm = vec3((rayDir.x > 0.0f ? -1.0f : 1.0f), 0.0f, 0.0f);
+		vec3 xOrig = vec3((rayDir.x > 0.0f ? floor(currPos.x) + 1: ceil(currPos.x) - 1), currPos.y, currPos.z);
+		vec2 xTest = TestRayIntersection(currPos, rayDir, xOrig, xNorm);
+	
+		// Check intersection with the adjacent X-Z plane (normal facing the y axis)
+		vec3 yNorm = vec3(0.0f, (rayDir.y > 0 ? -1.0f : 1.0f), 0.0f);
+		vec3 yOrig = vec3(currPos.x, (rayDir.y > 0.0f ? floor(currPos.y) + 1 : ceil(currPos.y) - 1), currPos.z);
+		vec2 yTest = TestRayIntersection(currPos, rayDir, yOrig, yNorm);
+	
+		// Check intersection with the adjacent X-Y plane (normal facing the z axis)
+		vec3 zNorm = vec3(0.0f, 0.0f, (rayDir.z > 0 ?  -1.0f : 1.0f ));
+		vec3 zOrig = vec3(currPos.x, currPos.y, (rayDir.z > 0.0f ? floor(currPos.z) + 1 : ceil(currPos.z) - 1));
+		vec2 zTest = TestRayIntersection(currPos, rayDir, zOrig, zNorm);
+	
+		// Move in the minimum amount possible such that only one voxel is traversed
+		// at any given iteration to ensure full coverage
+		float tMin = min(zTest.x, min(yTest.x, xTest.x));
+	
+		currPos += tMin * rayDir;
+	}
+
+
+	// Compute gradient
+	float gx = texture(texture3d, CalculateTexturePos(posAtMax + dx)).r - texture(texture3d, CalculateTexturePos(posAtMax - dx)).r;
+	float gy = texture(texture3d, CalculateTexturePos(posAtMax + dy)).r - texture(texture3d, CalculateTexturePos(posAtMax - dy)).r;
+	float gz = texture(texture3d, CalculateTexturePos(posAtMax + dz)).r - texture(texture3d, CalculateTexturePos(posAtMax - dz)).r;
+
+	vec3 gradient   = -normalize(vec3(gx, gy, gz) / 2.0f);
+	vec3 lightDir   = normalize(volumeSize - currPos);	// volumeSize is the position of the light upper right corner
+	vec3 reflectDir = reflect(-lightDir, gradient);
+
+	vec3 ambient  = vec3(0.25f);
+	vec3 diffuse  = vec3(1.00f) * max(0.5f, dot(gradient, lightDir));
+	vec3 specular = vec3(1.00f) * pow(max(dot(rayDir, reflectDir), 0.0f), 32) * 0.5f;
+
+	float finalIntensity = maxIntensity;
+
+	switch (projMethod)
+	{
+		case 1u: finalIntensity = totalIntensity * 2.0f / numTotalSamples;break;
+		case 2u: finalIntensity = currIntensity ;break;
+		default: ;break;
+	}
+
+	FragmentColor = vec4(ambient + diffuse + specular, 1.0f) * texture(transferTexture, vec2(finalIntensity, 0.0f));;
+}
+```
+
+### shaders/volume_raycast_vert.glsl
+```
+#version 450 core
+
+layout (location = 0) in vec3 vertexPosition;
+
+uniform mat4 model;
+uniform mat4 view;
+uniform mat4 rotation;
+uniform mat4 projection;
+uniform vec3 origin;
+
+out vec3 PosInWorld;
+out vec3 Origin;
+
+void main()
+{
+	Origin	    = vec3(rotation * vec4(origin, 1.0f));
+	PosInWorld  = vec3(rotation * model * vec4(vertexPosition, 1.0f));
+	gl_Position = projection * view * rotation * model * vec4(vertexPosition, 1.0f);
+}
+```
+
+### src/AsyncTask.h
+```
+#pragma once
+
+#include <future>
+#include <chrono>
+#include <optional>
+
+namespace vr
+{
+    template <typename T>
+    struct AsyncTask
+    {
+        AsyncTask() = default;
+
+        template<typename Func, typename ... Args>
+        void Dispatch(Func f, Args ... args)
+        {
+            m_taskFuture = std::async(std::launch::async, f, args...);
+            m_hasStarted = true;
+        }
+
+        bool IsInProgress() const
+        {
+            return m_hasStarted && !m_hasFinished;
+        }
+
+        bool HasRetrieved() const
+        {
+            return m_hasRetrieved;
+        }
+
+        bool CheckIfFinished() 
+        { 
+            if (IsInProgress() && m_taskFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+            {
+                m_hasFinished = true;
+                m_hasStarted  = false;
+                return false;
+            }
+            return m_hasFinished;
+        }
+
+        T GetResult()
+        {
+            m_hasRetrieved = true;
+            return m_taskFuture.get();
+        }
+
+        std::future<T> m_taskFuture;
+        bool m_hasStarted   = false;
+        bool m_hasFinished  = false;
+        bool m_hasRetrieved = false;
+    };
+}
+```
+
+### src/MainApplication.cpp
+```
+#include "MainApplication.h"
+#include <imgui/imgui.h>
+#include <imgui/backends/imgui_impl_glfw.h>
+#include <imgui/backends/imgui_impl_opengl3.h>
+#include <ImGradientHDR.h>
+
+#include <functional>
+#include <thread>
+#include <atomic>
+#include <tinyfiledialogs.h>
+
+#include "UI/VolumeViewWindow.h"
+#include "UI/VolumeViewWindow3D.h"
+
+namespace vr
+{
+    void MainApplication::ProcessMouseClick()
+    {   
+        m_leftMouseBtn.HandleInput(m_window);
+    }
+
+    void MainApplication::Init()
+    {
+
+        glfwInit();
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
+        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+        glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
+
+        m_window = glfwCreateWindow(800, 600, "Volume Visualization", nullptr, nullptr);
+
+        if (m_window == nullptr)
+            throw std::runtime_error("Error: Could not initialize GLFW window");
+
+        glfwMakeContextCurrent(m_window);
+        glfwSwapInterval(0);
+
+        if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
+            throw std::runtime_error("Error: Could not initialize GLAD");
+
+        std::cout << "GL_VERSION:  " << glGetString(GL_VERSION) << '\n'
+                  << "GL_RENDERER: " << glGetString(GL_RENDERER) << '\n'
+                  << "GL_VENDOR:   " << glGetString(GL_VENDOR) << '\n';
+        
+        // Initialize ImGUI
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        ImGuiIO& io = ImGui::GetIO(); (void) io;
+        io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+
+        // ImGui::StyleColorsLight();
+        ImGui_ImplGlfw_InitForOpenGL(m_window, true);
+        ImGui_ImplOpenGL3_Init("#version 450");
+
+        m_viewport3d.Initialize();
+        for (VolumeViewWindow2D& view : m_crossSectionViews)
+        {
+            view.Initialize();
+        }
+    }
+
+    void MainApplication::RunMainLoop()
+    {
+        ImGuiWindowFlags windowFlags = ImGuiWindowFlags_MenuBar               | ImGuiWindowFlags_NoDocking   |
+                                       ImGuiWindowFlags_NoTitleBar            | ImGuiWindowFlags_NoCollapse  |
+                                       ImGuiWindowFlags_NoResize              | ImGuiWindowFlags_NoMove      |
+                                       ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
+        ImGuiIO& io = ImGui::GetIO();
+
+        io.FontDefault = io.Fonts->AddFontFromFileTTF("res/fonts/Lato/Lato-Regular.ttf", 18);
+
+        bool willOpenMetadataDlg = false;
+        bool isProcessingFile    = false;
+        std::string filePath = "";
+
+        ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
+
+        int32_t stateID = 10;
+
+        ImGradientHDRState state;
+        ImGradientHDRTemporaryState tempState;
+
+        state.AddColorMarker(0.0f, {0.0f, 0.8f, 1.0f}, 1.0f);
+        state.AddColorMarker(1.0f, {1.0f, 0.8f, 0.0f}, 1.0f);
+        state.AddAlphaMarker(0.0f, 0.0f);
+        state.AddAlphaMarker(1.0f, 1.0f);
+
+
+        while (!glfwWindowShouldClose(m_window))
+        {
+            glfwPollEvents();
+
+            ProcessMouseClick();
+
+            m_viewport3d.ProcessInput(m_window);
+
+            ImGui_ImplOpenGL3_NewFrame();
+            ImGui_ImplGlfw_NewFrame();
+            ImGui::NewFrame();
+
+            glClearColor(0.3f, 0.1f, 0.3f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+
+            // Set styling parameters for the root dockspace
+            ImGuiDockNodeFlags dockspaceFlags = ImGuiDockNodeFlags_None;
+
+            const ImGuiViewport* viewport = ImGui::GetMainViewport();
+            ImGui::SetNextWindowPos(viewport->WorkPos);
+            ImGui::SetNextWindowSize(viewport->WorkSize);
+            ImGui::SetNextWindowViewport(viewport->ID);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+
+            ImGui::Begin("RootDockspace", nullptr, windowFlags);
+            ImGui::PopStyleVar(3);
+
+            if (io.ConfigFlags & ImGuiConfigFlags_DockingEnable)
+            {
+                ImGuiID dockspaceId = ImGui::GetID("RootDockspace");
+                ImGui::DockSpace(dockspaceId, ImVec2(0.0f, 0.0f), dockspaceFlags);
+            }
+
+            if (ImGui::BeginMenuBar())
+            {
+                if (ImGui::BeginMenu("File"))
+                {
+                    if (ImGui::MenuItem("Open", "Ctrl+O"))
+                    {
+			const char * filePatterns[] = { "*.raw", ".RAW" };
+                        m_volumeFilePath = std::string(tinyfd_openFileDialog("Choose volume dataset", 
+									     "",
+									     2, filePatterns,
+									     "Raw data files",
+									     0));
+
+                        if(!m_volumeFilePath.empty())
+                            willOpenMetadataDlg = true;
+                    }
+                    
+                    if (ImGui::MenuItem("Quit", "Ctrl+Q"))
+                        glfwSetWindowShouldClose(m_window, GLFW_TRUE);
+
+                    ImGui::EndMenu();
+                }
+
+                if (ImGui::BeginMenu("Options"))
+                {
+                    ImGui::MenuItem("Settings");
+                    ImGui::EndMenu();
+                }
+
+                if (ImGui::BeginMenu("Help"))
+                {
+                    ImGui::MenuItem("About");
+                    ImGui::EndMenu();
+                }
+
+                ImGui::EndMenuBar();
+            }
+
+            if (willOpenMetadataDlg)
+            {
+                ImGui::OpenPopup("Dataset Properties");
+                willOpenMetadataDlg = false;
+            }
+
+            ShowMetadataModal();
+
+            if (m_loadDatasetTask.IsInProgress())
+            {
+                ImGui::OpenPopup("Loading");
+
+                ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+                ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+                if (ImGui::BeginPopupModal("Loading", NULL, ImGuiWindowFlags_AlwaysAutoResize))
+                {
+                    ImGui::Text("Loading the dataset. This might take a while...");
+                    ImGui::EndPopup();
+                }
+            }
+            if (m_loadDatasetTask.CheckIfFinished())
+            {
+                if (!m_loadDatasetTask.HasRetrieved())
+                {
+                    auto res  = m_loadDatasetTask.GetResult();
+                    if (res.has_value())
+                    {
+                        VolumeDataset dataset = std::move(res.value());
+                        GLenum dataType = 0;
+                        switch (dataset.DataType())
+                        {
+                            case VolumeDataType::UINT8:  dataType = GL_UNSIGNED_BYTE ; break;
+                            case VolumeDataType::UINT16: dataType = GL_UNSIGNED_SHORT; break;
+                            case VolumeDataType::FLOAT : dataType = GL_FLOAT;          break;
+                            case VolumeDataType::DOUBLE: dataType = GL_DOUBLE;         break;
+                            default: assert(false); break;
+                        }
+
+                        TextureProperties props;
+                        props.width       = dataset.DataSize()[0];
+                        props.height      = dataset.DataSize()[1];
+                        props.depth       = dataset.DataSize()[2];
+                        props.target      = GL_TEXTURE_3D;
+                        props.datatype    = dataType;
+                        props.minFilter   = GL_LINEAR_MIPMAP_NEAREST;
+                        props.magFilter   = GL_LINEAR;
+                        props.wrappingS   = GL_CLAMP_TO_BORDER;
+                        props.wrappingT   = GL_CLAMP_TO_BORDER;
+                        props.wrappingR   = GL_CLAMP_TO_BORDER;
+                        props.fmtInternal = GL_RED;
+                        props.fmtSource   = GL_RED;
+                        props.areMipmapsEnabled = true;
+                        
+                        Texture texture3d { dataset.RawData(), props };
+
+                        m_volumeModel.reset(new VolumeModel(std::move(dataset), std::move(texture3d)));
+                        
+                        TransferFunction1D tf = {};
+                        for (int i = 0; i < state.ColorCount; i++)
+                        {
+                            ImGradientHDRState::ColorMarker marker = state.Colors[i];
+                            tf.AddColorStop(marker.Position, 
+                                            marker.Color[0] * marker.Intensity, 
+                                            marker.Color[1] * marker.Intensity, 
+                                            marker.Color[2] * marker.Intensity);
+                        }
+                        for (int i = 0; i < state.AlphaCount; i++)
+                        {
+                            ImGradientHDRState::AlphaMarker marker = state.Alphas[i];
+                            tf.AddOpacityStop(marker.Position, marker.Alpha);
+                        }
+                        
+                        tf.CreateTransferFunctionTexture();
+
+                        m_volumeModel->AddTransferFunction("GreenRed", tf);
+
+                        // Update the volume model of the viewports
+                        m_viewport3d.UpdateVolumeModel(m_volumeModel.get());
+                        m_viewport3d.Refresh();
+                        for (VolumeViewWindow2D& view : m_crossSectionViews)
+                        {
+                            view.UpdateVolumeModel(m_volumeModel.get());
+                            view.Refresh();
+                        }
+                    }
+                    else
+                    {
+                        ImGui::OpenPopup("Error");
+                    }
+                    m_loadDatasetTask = {};
+                }
+            }
+
+            ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+            ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            if (ImGui::BeginPopupModal("Error", NULL, ImGuiWindowFlags_AlwaysAutoResize))
+            {
+                ImGui::Text("Invalid dataset size specified.");
+                if (ImGui::Button("Ok"))
+                {
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+
+            ImGui::Begin("Dataset");
+            {
+                if (m_volumeModel)
+                {
+                    if (ImGui::BeginTable("datasetDims", 2))
+                    {
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::Text("Slice width");
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::Text("%d", m_volumeModel->GetDataSize()[0]);
+                        
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::Text("Slice height");
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::Text("%d", m_volumeModel->GetDataSize()[1]);
+
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::Text("Total slices");
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::Text("%d", m_volumeModel->GetDataSize()[2]);
+
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::Text("Spacing X");
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::Text("%.3f", m_volumeModel->GetDataSpacing()[0]);
+
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::Text("Spacing X");
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::Text("%.3f", m_volumeModel->GetDataSpacing()[1]);
+
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::Text("Spacing X");
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::Text("%.3f", m_volumeModel->GetDataSpacing()[2]);
+
+                        ImGui::EndTable();
+                    }
+                }
+                else
+                {
+                    ImGui::Text("No dataset is currently loaded.");
+                }
+            }
+            ImGui::End();
+
+            //ImGui::ShowDemoWindow();
+
+            ImGui::Begin("Render Settings");
+            {
+                ImVec2 availArea = ImGui::GetContentRegionAvail();
+
+                static int inputRayFunctionIdx = 0;
+                static int prevInputRayFunctionIdx = inputRayFunctionIdx;
+
+                static float firstHitThreshold = 1.0f;
+                static float prevFirstHitThreshold = prevFirstHitThreshold;
+
+                static const char* rayFunctionChoices[] = { 
+                    "Maximum intensity projection", 
+                    "Average intensity projection", 
+                    "First-hit", 
+                    "Composite"
+                };
+
+                static const ProjectionMethod rayFunctionVals[] = { 
+                    ProjectionMethod::MAX_INTENSITY,
+                    ProjectionMethod::AVG_INTENSITY,
+                    ProjectionMethod::FIRST_HIT,
+                    ProjectionMethod::COMPOSITE,
+                };
+
+                if (m_volumeModel)
+                {
+                    ImGui::Combo("Ray function", &inputRayFunctionIdx, rayFunctionChoices, IM_ARRAYSIZE(rayFunctionChoices));
+
+                    if (rayFunctionVals[inputRayFunctionIdx] == ProjectionMethod::FIRST_HIT)
+                        ImGui::SliderFloat("Threshold", &firstHitThreshold, 0.0f, 1.0f);
+
+                    ImGui::Text("Transfer Function");
+
+                    if (inputRayFunctionIdx != prevInputRayFunctionIdx || firstHitThreshold != prevFirstHitThreshold)
+                    {
+                        m_viewport3d.UpdateProjectionMethod(rayFunctionVals[inputRayFunctionIdx], firstHitThreshold);
+                        prevInputRayFunctionIdx = inputRayFunctionIdx;
+                        prevFirstHitThreshold   = firstHitThreshold;
+                    }
+
+                    static bool isMarkerShown = true;
+                    ImGradientHDR(stateID, state, tempState, isMarkerShown);
+
+                    if (ImGui::IsItemHovered())
+                    {
+                        ImGui::SetTooltip("Gradient");
+                    }
+
+                    if (tempState.selectedMarkerType == ImGradientHDRMarkerType::Color)
+                    {
+                        auto selectedColorMarker = state.GetColorMarker(tempState.selectedIndex);
+                        if (selectedColorMarker != nullptr)
+                        {
+                            ImGui::ColorEdit3("Color", selectedColorMarker->Color.data(), ImGuiColorEditFlags_Float);
+                            ImGui::DragFloat("Intensity", &selectedColorMarker->Intensity, 0.1f, 0.0f, 100.0f, "%f", 1.0f);
+                        }
+                    }
+
+                    if (tempState.selectedMarkerType == ImGradientHDRMarkerType::Alpha)
+                    {
+                        auto selectedAlphaMarker = state.GetAlphaMarker(tempState.selectedIndex);
+                        if (selectedAlphaMarker != nullptr)
+                        {
+                            ImGui::DragFloat("Alpha", &selectedAlphaMarker->Alpha, 0.1f, 0.0f, 1.0f, "%f", 1.0f);
+                        }
+                    }
+
+                    if (tempState.selectedMarkerType != ImGradientHDRMarkerType::Unknown)
+                    {
+                        if (ImGui::Button("Delete"))
+                        {
+                            if (tempState.selectedMarkerType == ImGradientHDRMarkerType::Color)
+                            {
+                                state.RemoveColorMarker(tempState.selectedIndex);
+                                tempState = ImGradientHDRTemporaryState{};
+                            }
+                            else if (tempState.selectedMarkerType == ImGradientHDRMarkerType::Alpha)
+                            {
+                                state.RemoveAlphaMarker(tempState.selectedIndex);
+                                tempState = ImGradientHDRTemporaryState{};
+                            }
+                        }
+                    }
+
+                    if (ImGui::Button("Apply"))
+                    {
+                        TransferFunction1D tf = {};
+                        for (int i = 0; i < state.ColorCount; i++)
+                        {
+                            ImGradientHDRState::ColorMarker marker = state.Colors[i];
+                            tf.AddColorStop(marker.Position, 
+                                marker.Color[0] * marker.Intensity, 
+                                marker.Color[1] * marker.Intensity, 
+                                marker.Color[2] * marker.Intensity);
+                        }
+                        for (int i = 0; i < state.AlphaCount; i++)
+                        {
+                            ImGradientHDRState::AlphaMarker marker = state.Alphas[i];
+                            tf.AddOpacityStop(marker.Position, marker.Alpha);
+                        }
+
+                        // Recreate transfer function texture
+                        tf.CreateTransferFunctionTexture();
+
+                        m_volumeModel->AddTransferFunction("GreenRed", tf);
+
+                        // Refresh all views
+                        m_viewport3d.Refresh();
+                        for (VolumeViewWindow2D& view : m_crossSectionViews) 
+                        {
+                            view.Refresh();
+                        }
+
+                    }
+                    
+                }
+                else
+                {
+                    ImGui::Text("No dataset is currently loaded.");
+                }
+            }
+            ImGui::End();
+
+            // Debug window
+#ifdef _DEBUG
+            ImGui::Begin("Debug Info");
+            {
+                ImGui::Text("GL_VERSION : %s", glGetString(GL_VERSION));
+                ImGui::Text("Frames/sec : %.2f", ImGui::GetIO().Framerate);
+            }
+            ImGui::End();
+#endif
+
+            // Main viewports
+            m_viewport3d.RenderUI(m_window);
+            for (VolumeViewWindow2D& view : m_crossSectionViews)
+            {
+                view.RenderUI(m_window);
+            }
+            
+            ImGui::End(); // dockspace
+
+            ImGui::Render();
+            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+            
+            glfwSwapBuffers(m_window);  
+        }
+
+    }
+
+
+    void MainApplication::ShowMetadataModal()
+    {
+
+        ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+        ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+        if (ImGui::BeginPopupModal("Dataset Properties", NULL, ImGuiWindowFlags_AlwaysAutoResize))
+        {
+            ImGui::Text("Enter additional information about the dataset.\n\n");
+            ImGui::Separator();
+
+            static const char* items[] = { 
+                "8-bit unsigned integer", 
+                "16-bit unsigned integer", 
+                "32-bit float (IEEE-754)", 
+            };
+
+            ImGui::InputScalarN("Dimensions (Width, height, depth)", ImGuiDataType_U32, (void*)m_inputDimensions.data(), 3);
+            ImGui::InputScalarN("Spacing (X, Y, Z)", ImGuiDataType_Double, (void*)m_inputSpacings.data(), 3);
+            ImGui::Combo("Data type", &m_inputTypeIndex, items, IM_ARRAYSIZE(items));
+
+            ImGui::Separator();
+
+            bool isOkClicked = ImGui::Button("OK", ImVec2(120, 0));
+            if (isOkClicked)
+            {
+                AsyncLoadDataset();
+                ImGui::CloseCurrentPopup();
+            }
+
+            ImGui::SetItemDefaultFocus();
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) 
+            { 
+                ImGui::CloseCurrentPopup(); 
+            }
+            ImGui::EndPopup();
+        }
+    }
+
+    void MainApplication::AsyncLoadDataset()
+    {
+        static const VolumeDataType types[] = {
+            VolumeDataType::UINT8, VolumeDataType::UINT16,
+            VolumeDataType::FLOAT,
+        };
+
+        m_loadDatasetTask.Dispatch([&]() -> std::optional<VolumeDataset> {
+            try {
+                return std::move(VolumeDataset(m_volumeFilePath,
+                                               types[m_inputTypeIndex],
+                                               m_inputDimensions,
+                                               m_inputSpacings));
+            }
+            catch (std::exception& e) {
+                std::cerr << e.what() << '\n';
+                return {};
+            }
+            
+        });
+    }
+
+    MainApplication::MainApplication()
+    {
+        Init();
+    }
+
+    MainApplication::~MainApplication()
+    {
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
+
+        glfwDestroyWindow(m_window);
+        glfwTerminate();
+    }
+}
+```
+
+### src/MainApplication.h
+```
+#pragma once
+
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+#include <iostream>
+#include <memory>
+
+#include "Model/VolumeDataset.h"
+#include "Model/VolumeModel.h"
+#include "Graphics/Texture.h"
+#include "Graphics/Shader.h"
+#include "IO/MouseButtonState.h"
+#include "UI/VolumeViewWindow3D.h"
+#include "UI/VolumeViewWindow2D.h"
+#include "AsyncTask.h"
+
+namespace vr
+{
+    class MainApplication
+    {
+        public:
+            MainApplication();
+            MainApplication(const MainApplication&)            = delete;
+            MainApplication& operator=(const MainApplication&) = delete;
+
+            void RunMainLoop();
+
+            ~MainApplication();
+        private:
+            void ProcessMouseClick();
+            void ShowMetadataModal();
+            void AsyncLoadDataset();
+
+            void Init();
+            
+            std::string m_volumeFilePath = "";
+            std::array<U32, 3> m_inputDimensions = { 0 , 0 , 0 , };
+            std::array<R64, 3> m_inputSpacings   = { 1., 1., 1., };
+            int m_inputTypeIndex = 0;
+
+            Shader m_raycastShader;
+
+            VolumeViewWindow2D m_crossSectionViews[3] = {
+                VolumeViewWindow2D{ "Coronal"   , AnatomicalAxis::CORONAL    },
+                VolumeViewWindow2D{ "Sagittal"  , AnatomicalAxis::SAGITTAL   },
+                VolumeViewWindow2D{ "Horizontal", AnatomicalAxis::HORIZONTAL },
+            };
+            VolumeViewWindow3D m_viewport3d;
+
+            std::unique_ptr<VolumeModel> m_volumeModel = {};
+            AsyncTask<std::optional<VolumeDataset>> m_loadDatasetTask;
+            
+            // Mouse input state
+            MouseButtonState m_leftMouseBtn{ GLFW_MOUSE_BUTTON_LEFT };
+
+            GLFWwindow* m_window = nullptr;
+    };
+}
+```
+
+### src/main.cpp
+```
+#include <iostream>
+
+#include "MainApplication.h"
+
+int main()
+{
+    try {
+        vr::MainApplication app {};
+        app.RunMainLoop();
+    }
+    catch (std::exception& e) {
+        std::cerr << "[MainApplication] " << e.what() << '\n';
+    }
+    return 0;
+}
+```
+
+### src/Graphics/Shader.cpp
+```
+#include "Shader.h"
+
+Shader::Shader(const std::string& vsPath, const std::string& fsPath):
+    m_vertSourcePath(vsPath),
+    m_fragSourcePath(fsPath)
+{
+    CompileAndLinkProgram();
+    m_isValid = true;
+}
+
+Shader::Shader(Shader&& shader) noexcept:
+    m_isValid  (std::move(shader.m_isValid)),
+    m_programId(std::move(shader.m_programId)),
+    m_vertSourcePath(std::move(shader.m_vertSourcePath)),
+    m_fragSourcePath(std::move(shader.m_fragSourcePath))
+{
+    shader.m_programId = 0;
+    shader.m_isValid   = false;
+}
+
+Shader& Shader::operator=(Shader&& shader) noexcept
+{
+    m_isValid		 = std::move(shader.m_isValid);
+    m_programId	     = std::move(shader.m_programId);
+    m_vertSourcePath = std::move(shader.m_vertSourcePath);
+    m_fragSourcePath = std::move(shader.m_fragSourcePath);
+
+    shader.m_isValid   = false;
+    shader.m_programId = 0;
+
+    return *this;
+}
+
+void Shader::UseProgram() {
+    glUseProgram(m_programId);
+}
+
+void Shader::SetMatrix4x4(const char* uniformName, const glm::mat4& mat)
+{
+    glUniformMatrix4fv(glGetUniformLocation(m_programId, uniformName), 1, GL_FALSE, glm::value_ptr(mat));
+}
+
+void Shader::SetMatrix3x3(const char* uniformName, const glm::mat3& mat)
+{
+    glUniformMatrix3fv(glGetUniformLocation(m_programId, uniformName), 1, GL_FALSE, glm::value_ptr(mat));
+}
+
+void Shader::SetVector3(const char* uniformName, const glm::vec3& vec)
+{
+    glUniform3fv(glGetUniformLocation(m_programId, uniformName), 1, glm::value_ptr(vec));
+}
+
+void Shader::SetVector2(const char* uniformName, float f1, float f2)
+{
+    glUniform2f(glGetUniformLocation(m_programId, uniformName), f1, f2);
+}
+
+void Shader::SetFloat(const char* uniformName, const float f)
+{
+    glUniform1f(glGetUniformLocation(m_programId, uniformName), f);
+}
+
+void Shader::SetInt(const char* uniformName, const int32_t i)
+{
+    glUniform1i(glGetUniformLocation(m_programId, uniformName), i);
+}
+
+void Shader::SetUint(const char* uniformName, const uint32_t i)
+{
+    glUniform1ui(glGetUniformLocation(m_programId, uniformName), i);
+}
+
+void Shader::CompileAndLinkProgram()
+{
+    const std::string vertSource = LoadShaderSource(m_vertSourcePath);
+    const std::string fragSource = LoadShaderSource(m_fragSourcePath);
+
+    const char* vertSourceCStr = vertSource.c_str();
+    const char* fragSourceCStr = fragSource.c_str();
+
+    GLuint vertShader = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource (vertShader, 1, &vertSourceCStr, NULL);
+    glCompileShader(vertShader);
+
+    if (!CheckIfCompileOrLinkSuccessful(vertShader, m_vertSourcePath))
+    {
+        std::cerr << "Vertex shader compilation failed!";
+        return;
+    }
+
+    GLuint fragShader = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource (fragShader, 1, &fragSourceCStr, NULL);
+    glCompileShader(fragShader);
+
+    if (!CheckIfCompileOrLinkSuccessful(fragShader, m_fragSourcePath))
+    {
+        std::cerr << "Fragment shader compilation failed!";
+        return;
+    }
+
+    m_programId = glCreateProgram();
+    glAttachShader(m_programId, vertShader);
+    glAttachShader(m_programId, fragShader);
+    glLinkProgram(m_programId);
+
+    glDeleteShader(vertShader);
+    glDeleteShader(fragShader);
+
+    if (!CheckIfCompileOrLinkSuccessful(m_programId))
+    {
+        std::cerr << "Program linking failed!";
+        return;
+    }
+}
+
+
+bool Shader::CheckIfCompileOrLinkSuccessful(GLuint id, const std::string& shaderPath)
+{
+    int success;
+    char infoLog[512];
+
+    if (shaderPath.empty())	// id is for a program
+    {
+        glGetProgramiv(id, GL_LINK_STATUS, &success);
+        if (!success)
+        {
+            glGetProgramInfoLog(id, 512, NULL, infoLog);
+            std::printf("Program link: %s\n", infoLog);
+            return false;
+        }
+    }
+    else // id is for a shader
+    {
+        glGetShaderiv(id, GL_COMPILE_STATUS, &success);
+        if (!success)
+        {
+            glGetShaderInfoLog(id, 512, NULL, infoLog);
+            std::printf("In \'%s\': %s\n", shaderPath.c_str(), infoLog);
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string Shader::LoadShaderSource(const std::string& path)
+{
+    std::ifstream file(path);
+    std::ostringstream oss;
+
+    oss << file.rdbuf();
+    return oss.str();
+}
+
+Shader::~Shader()
+{
+    if (m_isValid)
+    {
+        glDeleteProgram(m_programId);
+    }
+}
+```
+
+### src/Graphics/Shader.h
+```
+#pragma once
+
+#include <glad/glad.h>
+#include <string>
+#include <iostream>
+#include <fstream>
+#include <sstream>
+
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
+class Shader {
+
+public:
+	Shader() = default;
+	Shader(const std::string& vsPath, const std::string& fsPath);
+
+	Shader(const Shader&)			 = delete;
+	Shader& operator=(const Shader&) = delete;
+
+	Shader(Shader&& s) noexcept;
+	Shader& operator=(Shader&& s) noexcept;
+
+	void UseProgram();
+	void SetMatrix4x4(const char* uniformName, const glm::mat4& mat);
+	void SetMatrix3x3(const char* uniformName, const glm::mat3& mat);
+	void SetVector3(const char* uniformName, const glm::vec3& vec);
+	void SetVector2(const char* uniformName, float f1, float f2);
+	void SetFloat(const char* uniformName, const float f);
+	void SetUint(const char* uniformName, const uint32_t i);
+	void SetInt(const char* uniformName, const int32_t i);
+	~Shader();
+private:
+	void CompileAndLinkProgram();
+	bool CheckIfCompileOrLinkSuccessful(GLuint id, const std::string& shaderPath = "");
+	std::string LoadShaderSource(const std::string& path);
+
+	bool   m_isValid = false;
+	GLuint m_programId;
+	std::string m_vertSourcePath;
+	std::string m_fragSourcePath;
+};
+```
+
+### src/Graphics/Texture.cpp
+```
+#include "Texture.h"
+
+namespace vr
+{
+    Texture::Texture(const uint8_t* data, const TextureProperties& props)
+    {
+        UpdateTexture(data, props);
+    }
+
+    void Texture::UpdateTexture(const uint8_t* data, const TextureProperties& props)
+    {
+        Deallocate();
+
+        const bool isTexture3d = props.target == GL_TEXTURE_3D;
+
+        glGenTextures(1, &m_textureId);
+        glBindTexture(props.target, m_textureId);
+
+        glTexParameteri(props.target, GL_TEXTURE_WRAP_S, props.wrappingS);
+        glTexParameteri(props.target, GL_TEXTURE_WRAP_T, props.wrappingT);
+        glTexParameteri(props.target, GL_TEXTURE_MIN_FILTER, props.minFilter);
+        glTexParameteri(props.target, GL_TEXTURE_MAG_FILTER, props.magFilter);
+
+        if ( props.wrappingS == GL_CLAMP_TO_BORDER ||
+             props.wrappingT == GL_CLAMP_TO_BORDER ||
+            (props.wrappingR == GL_CLAMP_TO_BORDER && isTexture3d))
+        {
+            glTexParameterfv(props.target, GL_TEXTURE_BORDER_COLOR, props.border);
+        }
+
+        if(props.target == GL_TEXTURE_3D)
+            glTexParameteri(props.target, GL_TEXTURE_WRAP_R, props.wrappingR);
+        if (isTexture3d)
+        {
+            glTexImage3D(props.target, 0, props.fmtInternal,
+                props.width, props.height, props.depth,
+                0, props.fmtSource, props.datatype, data);
+        }
+        else
+        {
+            glTexImage2D(props.target,  0, props.fmtInternal, 
+                props.width, props.height, 0,
+                props.fmtSource, props.datatype, data);
+        }
+
+        if (props.areMipmapsEnabled)
+            glGenerateMipmap(props.target);
+
+        m_target = props.target;
+
+        glBindTexture(props.target, 0);
+        m_isValid = true;
+
+        m_prevProps = props;
+    }
+
+    Texture::Texture(Texture&& other):
+        m_target   (std::move(other.m_target   )),
+        m_textureId(std::move(other.m_textureId)),
+        m_prevProps(std::move(other.m_prevProps)),
+        m_isValid  (std::move(other.m_isValid  ))
+    {
+        other.m_isValid   = false;
+        other.m_prevProps = {};
+        other.m_textureId = 0;
+    }
+
+    Texture& Texture::operator=(Texture&& other) noexcept
+    {
+        Deallocate();
+
+        m_target    = std::move(other.m_target);
+        m_textureId = std::move(other.m_textureId);
+        m_prevProps = std::move(other.m_prevProps);
+        m_isValid   = std::move(other.m_isValid);
+
+        other.m_isValid   = false;
+        other.m_prevProps = {};
+        other.m_textureId = 0;
+
+        return *this;
+    }
+
+    Texture::~Texture()
+    {
+        Deallocate();
+    }
+    
+    void Texture::Deallocate()
+    {
+        if (m_isValid)
+        {
+            glDeleteTextures(1, &m_textureId);
+            m_isValid = false;
+        }
+    }
+}
+```
+
+### src/Graphics/Texture.h
+```
+#pragma once
+
+#include <glad/glad.h>
+#include <cstdint>
+#include <memory>
+
+namespace vr
+{
+    struct TextureProperties
+    {
+        GLuint width       = 0;
+        GLuint height      = 0;
+        GLuint depth       = 0;
+        GLenum target      = GL_TEXTURE_2D;
+        GLenum datatype    = GL_UNSIGNED_BYTE;
+        GLuint numChannels = 4; 
+        GLuint minFilter   = GL_LINEAR;
+        GLuint magFilter   = GL_LINEAR;
+        GLuint wrappingS   = GL_CLAMP_TO_EDGE;
+        GLuint wrappingT   = GL_CLAMP_TO_EDGE;
+        GLuint wrappingR   = GL_CLAMP_TO_EDGE;
+        GLuint fmtInternal = GL_RGBA;
+        GLuint fmtSource   = GL_RGBA;
+        GLfloat border[4]  = {0.0f, 0.0f, 0.0f, 0.0f};
+        bool areMipmapsEnabled = true;
+
+        bool operator==(const TextureProperties& o)
+        {
+            return (width      == o.width)     && (height    == o.height)    && (depth       == o.depth)       &&
+                   (target     == o.target)    && (datatype  == o.datatype)  && (numChannels == o.numChannels) &&
+                   (minFilter  == o.minFilter) && (magFilter == o.magFilter) && (wrappingS   == o.wrappingS)   &&
+                   (wrappingT  == o.wrappingT) && (wrappingR == o.wrappingR) && (fmtInternal == o.fmtInternal) &&
+                   (fmtSource  == o.fmtSource);
+        }
+    };
+
+    class Texture
+    {
+    public:
+        Texture() = default;
+        Texture(const uint8_t* data, const TextureProperties& props);
+        Texture(Texture&&);
+        Texture& operator=(Texture&&) noexcept;
+
+        Texture(const Texture&) = delete;
+        Texture& operator=(const Texture&) = delete;
+
+        void UpdateTexture(const uint8_t* data, const TextureProperties& props);
+        
+        void BindTexture() const 
+        { 
+            glBindTexture(m_target, m_textureId);
+        }
+
+        void UnbindTexture() const 
+        { 
+            glBindTexture(m_target, 0);
+        }
+        
+        GLuint GetTextureID() const 
+        { 
+            return m_textureId; 
+        }
+        
+        bool IsValid() const 
+        { 
+            return m_isValid;   
+        }
+
+        ~Texture();
+    private:
+        void Deallocate();
+        GLenum m_target    = GL_TEXTURE_2D;
+        GLuint m_textureId = {};
+        TextureProperties  m_prevProps = {};
+        bool   m_isValid   = false;
+    };
+}
+```
+
+### src/IO/MouseButtonState.cpp
+```
+#include "MouseButtonState.h"
+
+void MouseButtonState::HandleInput(GLFWwindow* window)
+{
+    int state = glfwGetMouseButton(window, m_mouseButton);
+    glfwGetCursorPos(window, &m_currXPos, &m_currYPos);
+
+    m_isPressed   = (state == GLFW_PRESS);
+    m_wasReleased = (!m_isPressed && m_wasPressed);
+    m_isDragging  = (!m_wasReleased && m_isDragging);
+    m_wasDragging = (m_wasReleased && !m_isDragging && !m_wasDragging);
+
+    if (m_isPressed)
+    {
+        double deltaX = m_currXPos - m_prevXPos;
+        double deltaY = m_currYPos - m_prevYPos;
+
+        if (!m_isDragging && (deltaX != 0 || deltaY != 0))
+        {
+            m_isDragging = true;
+            m_dragStartX = m_prevXPos;
+            m_dragStartY = m_prevYPos;
+        }
+
+        m_dragVecX = m_currXPos - m_dragStartX;
+        m_dragVecY = m_currYPos - m_dragStartY;
+    }
+
+    m_prevXPos   = m_currXPos;
+    m_prevYPos   = m_currYPos;
+    m_wasPressed = m_isPressed;
+}
+```
+
+### src/IO/MouseButtonState.h
+```
+#pragma once
+
+#include <GLFW/glfw3.h>
+
+struct MouseButtonState
+{
+private:
+    int  m_mouseButton = GLFW_MOUSE_BUTTON_LEFT;
+    bool m_wasPressed  = false;
+    bool m_isPressed   = false;
+    bool m_wasReleased = false;
+    bool m_wasDragging = false;
+    bool m_isDragging  = false;
+
+    double m_currXPos = 0.0, m_currYPos = 0.0;
+    double m_prevXPos = 0.0, m_prevYPos = 0.0;
+
+    double m_deltaX = 0.0f;
+    double m_deltaY = 0.0f;
+
+    double m_dragStartX = 0.0, m_dragStartY = 0.0;
+    double m_dragVecX   = 0.0, m_dragVecY   = 0.0;
+public:
+
+    double GetButtonX()  const { return m_currXPos; }
+    double GetButtonY()  const { return m_currYPos; }
+
+    double GetDragVecX() const { return m_dragVecX; }
+    double GetDragVecY() const { return m_dragVecY; }
+
+    bool WasDragged()  const { return m_wasDragging; }
+    bool WasReleased() const { return m_wasReleased; }
+    bool IsPressed()   const { return m_isPressed;   }
+    bool IsDragging()  const { return m_isDragging;  }
+
+    MouseButtonState(int button) :
+        m_mouseButton(button)
+    {
+
+    }
+
+    void HandleInput(GLFWwindow* window);
+};
+```
+
+### src/Model/TransferFunction1D.cpp
+```
+#include "TransferFunction1D.h"
+
+void TransferFunction1D::AddOpacityStop(R32 intensity, R32 opacity)
+{
+    m_omap.m_intensities.push_back(intensity);
+    m_omap.m_opacities.push_back(opacity);
+}
+
+void TransferFunction1D::AddColorStop(R32 intensity, R32 red, R32 green, R32 blue)
+{
+    m_cmap.m_intensities.push_back(intensity);
+    m_cmap.m_rgb.push_back({ red, green, blue });
+}
+
+GLuint TransferFunction1D::CreateTransferFunctionTexture()
+{
+    auto image = CreateImageFromData();
+    glEnable   (GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    if (m_isValid)
+        glGenTextures(1, &m_cmapTex);   
+    
+    glBindTexture(GL_TEXTURE_2D, m_cmapTex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 100, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, (U8*) image.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+    m_isValid = true;
+
+    return m_cmapTex;
+}
+
+std::array<U8, 4 * 100> TransferFunction1D::CreateImageFromData()
+{
+    U32 leftColorEnd  = 0, leftOpacityEnd  = 0;
+    U32 rightColorEnd = 1, rightOpacityEnd = 1;
+
+    std::array<U8, 4 * 100> textureData = {};
+    for (U32 i = 0; i < 100; ++i)
+    {
+        R32 t  = (R32) i / 100.0f;
+        R32 colRightIntensity     = m_cmap.m_intensities[rightColorEnd];
+        R32 opacityRightIntensity = m_omap.m_intensities[rightOpacityEnd];
+
+        if (t > colRightIntensity)
+        {
+            leftColorEnd  = std::min((U32) m_cmap.m_intensities.size() - 1, leftColorEnd + 1);
+            rightColorEnd = std::min((U32) m_cmap.m_intensities.size() - 1, rightColorEnd + 1);
+        }
+
+        if (t > opacityRightIntensity)
+        {
+            leftOpacityEnd  = std::min((U32) m_omap.m_intensities.size() - 1, leftOpacityEnd + 1);
+            rightOpacityEnd = std::min((U32) m_omap.m_intensities.size() - 1, rightOpacityEnd + 1);
+        }
+
+        colRightIntensity     = m_cmap.m_intensities[rightColorEnd];
+        opacityRightIntensity = m_omap.m_intensities[rightOpacityEnd];
+        R32 colLeftIntensity     = m_cmap.m_intensities[leftColorEnd];
+        R32 opacityLeftIntensity = m_omap.m_intensities[leftOpacityEnd];
+
+        R32 cL_r = m_cmap.m_rgb[leftColorEnd][0];
+        R32 cL_g = m_cmap.m_rgb[leftColorEnd][1];
+        R32 cL_b = m_cmap.m_rgb[leftColorEnd][2];
+
+        R32 cR_r = m_cmap.m_rgb[rightColorEnd][0];
+        R32 cR_g = m_cmap.m_rgb[rightColorEnd][1];
+        R32 cR_b = m_cmap.m_rgb[rightColorEnd][2];
+
+        R32 opacityLeft  = m_omap.m_opacities[leftOpacityEnd];
+        R32 opacityRight = m_omap.m_opacities[rightOpacityEnd];
+
+        float tWithinRGB = (t - colLeftIntensity) / (colRightIntensity - colLeftIntensity);
+        float tWithinA   = (t - opacityLeftIntensity) / (opacityRightIntensity - opacityLeftIntensity);
+
+        U8 r = (U8)(lerp(cL_r, cR_r, tWithinRGB) * 255.0f);
+        U8 g = (U8)(lerp(cL_g, cR_g, tWithinRGB) * 255.0f);
+        U8 b = (U8)(lerp(cL_b, cR_b, tWithinRGB) * 255.0f);
+        U8 a = (U8)(lerp(opacityLeft, opacityRight, tWithinA) * 255.0f);
+
+        textureData[i * 4 + 0] = r;
+        textureData[i * 4 + 1] = g;
+        textureData[i * 4 + 2] = b;
+        textureData[i * 4 + 3] = a;
+    }
+
+    return textureData;
+}
+```
+
+### src/Model/TransferFunction1D.h
+```
+#pragma once
+
+#include <glad/glad.h>
+#include <vector>
+#include <array>
+
+#include "VolumeDataset.h"
+
+struct ColorMap
+{
+    std::vector<R32> m_intensities;
+    std::vector<std::array<R32, 3>> m_rgb;         // low 3 bytes are used as rgb values
+};
+
+struct OpacityMap
+{
+    std::vector<R32> m_intensities;
+    std::vector<R32> m_opacities;
+};
+
+template <typename T>
+T lerp(const T& a, const T& b, const R32 t)
+{
+    return (T)((1 - t) * (R32) a + t * (R32) b);
+}
+
+struct TransferFunction1D
+{
+    public:
+        TransferFunction1D() = default;
+
+        void AddOpacityStop(R32 intensity, R32 opacity);
+        void AddColorStop(R32 intensity, R32 red, R32 green, R32 blue);
+        std::array<U8, 4 * 100> CreateImageFromData();
+        GLuint CreateTransferFunctionTexture();
+
+        ColorMap   m_cmap    = { };
+        OpacityMap m_omap    = { };
+        GLuint     m_cmapTex = {0};
+        bool m_isValid = false;
+};
+```
+
+### src/Model/VolumeDataset.cpp
+```
+#include "VolumeDataset.h"
+
+#include <fstream>
+#include <filesystem>
+#include <iostream>
+#include <thread>
+#include <algorithm>
+
+VolumeDataset::VolumeDataset(const std::string& path, 
+							 const VolumeDataType type,
+							 const std::array<U32, 3> size,
+							 const std::array<R64, 3> spacing):
+	m_filePath(path),
+	m_dataType(type),
+	m_dataSize(size),
+	m_spacing(spacing)
+{
+	ReadVolumeDatasetFile(m_filePath);
+}
+
+template <typename T>
+void VolumeDataset::ComputeStatistics()
+{
+	const U64 pointSize = sizeof(T);
+	
+	T min_value = *reinterpret_cast<T*>(&m_rawBytes[0]);
+	T max_value = *reinterpret_cast<T*>(&m_rawBytes[pointSize]);
+
+	const auto compute = [&](const T& val) {
+		min_value = std::min<T>(val, min_value);
+		max_value = std::max<T>(val, max_value);
+	};
+
+	std::for_each(reinterpret_cast<T*>(&m_rawBytes[0]),
+				  reinterpret_cast<T*>(&m_rawBytes[m_rawBytes.size() - pointSize]),
+				  compute);
+
+	constexpr auto range = std::numeric_limits<T>::max() - std::numeric_limits<T>::min();
+
+	m_maxInDouble = (R64) max_value / (R64) range;
+	m_minInDouble = (R64) min_value / (R64) range;
+}
+
+void VolumeDataset::ReadVolumeDatasetFile(const std::string& path)
+{
+	std::ifstream inputFile(path, std::ios::binary);
+	if(!inputFile)
+		throw std::runtime_error(std::string(std::string("File not found: ") + path).c_str());
+
+	std::uintmax_t size = std::filesystem::file_size(path);
+	const U64 pointSize = static_cast<std::underlying_type<VolumeDataType>::type>(m_dataType);
+	const U64 totalSize = (U64) m_dataSize[0] * m_dataSize[1] * m_dataSize[2] * pointSize;
+
+	if (size != totalSize)
+		throw std::runtime_error("Invalid size specified");
+
+	m_rawBytes.resize(totalSize);
+	inputFile.read(reinterpret_cast<char*>(m_rawBytes.data()), totalSize);
+
+	switch (m_dataType)
+	{
+		case VolumeDataType::UINT8 : ComputeStatistics<U8>() ; break;
+		case VolumeDataType::UINT16: ComputeStatistics<U16>(); break;
+		case VolumeDataType::FLOAT : ComputeStatistics<R32>(); break;
+	}
+}
+```
+
+### src/Model/VolumeDataset.h
+```
+#pragma once
+
+#include <vector>
+#include <array>
+#include <string>
+
+using R32 = float;
+using R64 = double;
+using U64 = uint64_t;
+using U32 = uint32_t;
+using U16 = uint16_t;
+using U8  = uint8_t;
+using I64 = int64_t;
+using I32 = int32_t;
+using I16 = int16_t;
+using I8  = int8_t;
+
+enum class VolumeDataType { 
+	INT8  = 1, INT16  = 2, INT32  = 4, INT64  = 8, 
+	UINT8 = 1, UINT16 = 2, UINT32 = 4, UINT64 = 8, 
+	FLOAT = 4, DOUBLE = 8
+};
+
+class VolumeDataset
+{
+	public:
+		VolumeDataset() = default;
+		VolumeDataset(const std::string& path, 
+					  const VolumeDataType type,
+					  const std::array<U32, 3> size,
+					  const std::array<R64, 3> spacing);
+		
+		VolumeDataset(const VolumeDataset&) = delete;
+		VolumeDataset& operator=(const VolumeDataset&) = delete;
+
+		VolumeDataset(VolumeDataset&&) = default;
+		VolumeDataset& operator=(VolumeDataset&&) = default;
+
+		auto DataSize() const 
+		{ 
+			return m_dataSize; 
+		}
+
+		auto DataSpacing() const
+		{
+			return m_spacing;
+		}
+		
+		auto DataType() const 
+		{ 
+			return m_dataType; 
+		}
+		
+		const U8* RawData() const 
+		{ 
+			return m_rawBytes.data(); 
+		}
+
+		const R64 GetMaxInDoubleRange() const
+		{
+			return m_maxInDouble;
+		}
+
+		const R64 GetMinInDoubleRange() const
+		{
+			return m_minInDouble;
+		}
+	private:
+		void ReadVolumeDatasetFile(const std::string& path);
+		
+		template <typename T>
+		void ComputeStatistics();
+
+		R64 m_maxInDouble = 1.0f;
+		R64 m_minInDouble = 0.0f;
+
+		std::string		   m_filePath;
+		std::vector<U8>    m_rawBytes;
+		std::array<R64, 3> m_spacing    = {0};
+		std::array<R32, 3> m_actualSize = {0};
+		std::array<U32, 3> m_dataSize   = {0};
+		VolumeDataType     m_dataType;
+};
+```
+
+### src/Model/VolumeModel.h
+```
+#pragma once
+
+#include "../Graphics/Texture.h"
+#include "VolumeDataset.h"
+#include "TransferFunction1D.h"
+
+#include <vector>
+#include <string>
+#include <unordered_map>
+
+namespace vr
+{
+    class VolumeModel
+    {
+        public:
+            VolumeModel() = default;
+            VolumeModel(VolumeDataset&& dataset, Texture&& texture)             
+            {
+                m_dataset   = std::move(dataset);
+                m_texture3d = std::move(texture);
+            }
+
+            VolumeModel(VolumeModel&&)            = default;
+            VolumeModel& operator=(VolumeModel&&) = default;
+            
+            VolumeModel(const VolumeModel&)            = delete;
+            VolumeModel& operator=(const VolumeModel&) = delete;
+
+            R64 GetMaxInDoubleRange() const
+            {
+                return m_dataset.GetMaxInDoubleRange();
+            }
+
+            R64 GetMinInDoubleRange() const
+            {
+                return m_dataset.GetMinInDoubleRange();
+            }
+
+            auto GetDataSpacing() const
+            {
+                return m_dataset.DataSpacing();
+            }
+
+            auto GetDataSize() const
+            {
+                return m_dataset.DataSize();
+            }
+
+            GLuint GetTextureID() const
+            {
+                return m_texture3d.GetTextureID();
+            }
+
+            void BindTexture() const
+            {
+                m_texture3d.BindTexture();
+            }
+
+            void UnbindTexture() const
+            {
+                m_texture3d.BindTexture();
+            }
+
+            GLuint GetTransferTextureID(const std::string& name) const
+            {
+                return m_transferFunctions.at(name).m_cmapTex;
+            }
+
+            void AddTransferFunction(const std::string& name, const TransferFunction1D& f)
+            {
+                m_transferFunctions[name] = f;
+            }
+        private:
+            Texture m_texture3d;
+            VolumeDataset m_dataset;
+            std::unordered_map<std::string, TransferFunction1D> m_transferFunctions;
+    };
+}
+```
+
+### src/UI/VolumeViewWindow.cpp
+```
+#include "VolumeViewWindow.h"
+#include <vector>
+#include <cstdint>
+
+#include <imgui/imgui.h>
+#include <GLFW/glfw3.h>
+#include <iostream>
+
+namespace vr
+{
+    void VolumeViewWindow::Refresh()
+    {
+        m_isCacheValid = false;
+    }
+
+    void VolumeViewWindow::UpdateVolumeModel(VolumeModel* newModel)
+    {
+        m_volumeModel = newModel;
+    }
+
+    void VolumeViewWindow::ProcessInput(GLFWwindow* window)
+    {
+        
+    }
+
+    void VolumeViewWindow::UpdateScreenFrame(uint32_t width, uint32_t height)
+    {
+        glBindTexture(GL_TEXTURE_2D, m_screenColor);
+        glTexImage2D (GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        
+        glBindRenderbuffer(GL_RENDERBUFFER, m_screenRbo);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width, height);
+        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+        m_prevWidth    = width;
+        m_prevHeight   = height;
+        m_isCacheValid = true;
+
+    }
+}
+```
+
+### src/UI/VolumeViewWindow.h
+```
+#pragma once
+
+#include "../Graphics/Texture.h"
+#include "../Graphics/Shader.h"
+#include "../Model/VolumeModel.h"
+
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#include <GLFW/glfw3.h>
+#include "../IO/MouseButtonState.h"
+
+namespace vr
+{
+    enum class ProjectionMethod
+    {
+        MAX_INTENSITY = 0,
+        AVG_INTENSITY = 1,
+        FIRST_HIT = 2,
+        COMPOSITE = 3
+    };
+
+    class VolumeViewWindow
+    {
+        public:
+            VolumeViewWindow() = default;
+            
+            void UpdateVolumeModel(VolumeModel* newModel);
+
+            virtual void Initialize() = 0;
+            virtual void RenderUI(GLFWwindow* window) = 0;
+
+            void ProcessInput(GLFWwindow* window);
+            void Refresh();
+            void UpdateProjectionMethod(ProjectionMethod newMethod, const float firstHitThreshold = 1.0f);
+
+            virtual ~VolumeViewWindow() {};
+
+        protected:
+            void UpdateScreenFrame(uint32_t width, uint32_t height);
+            
+
+            /**
+             *  The model of the volume itself is simply stored as a raw pointer given that
+             *  no ownership responsibilities are placed on the views themselves. 
+             **/
+            VolumeModel* m_volumeModel = nullptr;
+
+            /**
+             *  Identifiers for the OpenGL buffers that are used for the framebuffer,
+             *  framebuffers are used in this project to render to multiple windows but also 
+             *  have a way of managing the state of the buffer such that the 3D/2D views are only
+             *  re-rendered when necessary, i.e. whenever m_isCacheValid == false
+             **/
+            GLuint m_screenColor {0};
+            GLuint m_framebuffer {0};
+            GLuint m_screenRbo   {0};
+
+            uint32_t m_prevWidth  = 1;
+            uint32_t m_prevHeight = 1;
+
+            //The current framebuffer is 'invalidated' whenever this is false
+            bool m_isCacheValid = false;
+            
+    };
+}
+```
+
+### src/UI/VolumeViewWindow2D.cpp
+```
+#include "VolumeViewWindow2D.h"
+#include <imgui/imgui.h>
+
+template <typename T>
+bool IsWithin(const T& val, const T& left, const T& right)
+{
+    return val >= left && val <= right;
+}
+
+namespace vr
+{
+    void VolumeViewWindow2D::Initialize()
+    {
+        // TODO: refactor into Initialize() that gets called from the base class
+        // since this is just the steps to setup the framebuffer.
+        glGenFramebuffers(1, &m_framebuffer);
+        glBindFramebuffer(GL_FRAMEBUFFER, m_framebuffer);
+
+        glGenTextures(1, &m_screenColor);
+        glBindTexture(GL_TEXTURE_2D, m_screenColor);
+        glTexImage2D (GL_TEXTURE_2D, 0, GL_RGB, m_prevWidth, m_prevHeight, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_screenColor, 0);
+
+        glGenRenderbuffers(1, &m_screenRbo);
+        glBindRenderbuffer(GL_RENDERBUFFER, m_screenRbo);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, m_prevWidth, m_prevHeight);
+        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, m_screenRbo);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        {
+            std::cerr << "Error: Incomplete framebuffer\n";
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        
+
+        const float imageQuadVertices[] = {
+             0.0f,  0.0f,  0.0f, 0.0f, // Lower left
+             1.0f,  0.0f,  1.0f, 0.0f, // Lower right
+             1.0f,  1.0f,  1.0f, 1.0f, // Upper right
+             0.0f,  1.0f,  0.0f, 1.0f, // Upper left
+        };
+
+        const uint32_t imageQuadIndices[] = { 
+            0, 1, 2, 0, 2, 3 
+        };
+
+        glGenVertexArrays(1, &m_volumeImageVao);
+        glGenBuffers(1, &m_volumeImageVbo);
+        glGenBuffers(1, &m_volumeImageEbo);
+
+        glBindVertexArray(m_volumeImageVao);
+        glBindBuffer(GL_ARRAY_BUFFER, m_volumeImageVbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(imageQuadVertices), imageQuadVertices, GL_STATIC_DRAW);
+
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_volumeImageEbo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(imageQuadIndices), imageQuadIndices, GL_STATIC_DRAW);
+
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*) 0);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*) (2 * sizeof(float)));
+        glEnableVertexAttribArray(0);
+        glEnableVertexAttribArray(1);
+
+        glBindVertexArray(0);
+
+        m_imageQuadShader = Shader("shaders/volume_cross_section_vert.glsl", "shaders/volume_cross_section_frag.glsl");
+    }
+
+    void VolumeViewWindow2D::RenderUI(GLFWwindow* window)
+    {
+        // Minor workaround to avoid causing the view to drag when interacting with the slider
+        // will try to figure out the proper way to do this later on.
+        static bool acceptDragEvents = false;
+        ImGui::Begin(m_name.c_str());
+        {
+            ImVec2 initialAvail = ImGui::GetContentRegionAvail();
+
+            if (m_volumeModel)
+            {
+                ImGui::SliderInt("Slice index", &m_currSliceIndex, 0, m_sliceExtent);
+
+                if (m_prevSliceIndex != m_currSliceIndex)
+                {
+                    acceptDragEvents = false;
+                    Refresh();
+                    m_prevSliceIndex = m_currSliceIndex;
+                }
+            }
+
+            ImVec2 viewportAvail = ImGui::GetContentRegionAvail();
+
+            m_leftButtonState.HandleInput(window);
+
+            uint32_t currWidth  = (uint32_t) viewportAvail.x;
+            uint32_t currHeight = (uint32_t) viewportAvail.y;
+
+            if(m_prevHeight != currHeight || m_prevWidth != currWidth)
+                Refresh();
+
+            if (m_leftButtonState.WasReleased())
+            {
+                m_prevCameraPan = m_currCameraPan;
+                acceptDragEvents = true;
+            }
+
+            if (ImGui::GetIO().MouseWheel != 0 && ImGui::IsWindowHovered())
+            {
+                m_zoomLevel = std::max(50.0f, std::min(m_zoomLevel + ImGui::GetIO().MouseWheel, 200.0f));
+                Refresh();
+            }
+
+            if (m_leftButtonState.IsDragging() && ImGui::IsWindowFocused() && acceptDragEvents)
+            {
+                glm::vec2 currDragVec = glm::vec2(m_leftButtonState.GetDragVecX(), m_leftButtonState.GetDragVecY());
+                m_currCameraPan = glm::translate(m_prevCameraPan, glm::vec3(currDragVec, 0.0f));
+                Refresh();
+            }
+
+            if (!m_isCacheValid)
+            {
+                UpdateScreenFrame(currWidth, currHeight);
+
+                glBindFramebuffer(GL_FRAMEBUFFER, m_framebuffer);
+                glViewport(0, 0, currWidth, currHeight);
+                glDisable(GL_DEPTH_TEST);
+                glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+                glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+                const float aspect = (float) currWidth / (float) currHeight;
+
+                if (m_volumeModel != nullptr)
+                {
+                    glm::vec2 dimension = glm::vec2(0.0f);
+                    
+                    glm::vec3 x_permute = glm::vec3(0.0f);
+                    glm::vec3 y_permute = glm::vec3(0.0f);
+                    glm::vec3 z_permute = glm::vec3(0.0f);
+                    
+                    const auto dataSpacing = m_volumeModel->GetDataSpacing();
+                    const auto spacing = glm::vec3(dataSpacing[0], dataSpacing[1], dataSpacing[2]) / (R32) dataSpacing[0];
+
+                    glm::vec2 imageDimension = glm::vec2(0.0f);
+
+                    switch (m_axis)
+                    {
+                        case AnatomicalAxis::CORONAL:
+                        {
+                            dimension = glm::vec2(m_volumeModel->GetDataSize()[0], m_volumeModel->GetDataSize()[1]);
+                            imageDimension = glm::vec2(dimension.x * spacing.x, dimension.y * spacing.y);
+                            m_sliceExtent = (I32) m_volumeModel->GetDataSize()[2] - 1;
+
+                            // Permute [ x, y, z ] -> [ x, y, z ]
+                            x_permute = glm::vec3(1.0f, 0.0f, 0.0f);
+                            y_permute = glm::vec3(0.0f, 1.0f, 0.0f);
+                            z_permute = glm::vec3(0.0f, 0.0f, 1.0f);
+                        } break;
+                        case AnatomicalAxis::SAGITTAL:
+                        {
+                            dimension = glm::vec2(m_volumeModel->GetDataSize()[2], m_volumeModel->GetDataSize()[1]);
+                            imageDimension = glm::vec2(dimension.x * spacing.z, dimension.y * spacing.y);
+                            m_sliceExtent = (I32) m_volumeModel->GetDataSize()[0] - 1;
+
+                            // Permute [ x, y, z ] -> [ z, y, x ]
+                            x_permute = glm::vec3(0.0f, 0.0f, 1.0f);
+                            y_permute = glm::vec3(0.0f, 1.0f, 0.0f);
+                            z_permute = glm::vec3(1.0f, 0.0f, 0.0f);
+                        } break;
+                        case AnatomicalAxis::HORIZONTAL:
+                        {
+                            dimension = glm::vec2(m_volumeModel->GetDataSize()[0], m_volumeModel->GetDataSize()[2]);
+                            imageDimension = glm::vec2(dimension.x * spacing.x, dimension.y * spacing.z);
+                            m_sliceExtent = (I32) m_volumeModel->GetDataSize()[1] - 1;
+
+                            // Permute [ x, y, z ] -> [ z, y, x ]
+                            x_permute = glm::vec3(1.0f, 0.0f, 0.0f);
+                            y_permute = glm::vec3(0.0f, 0.0f, 1.0f);
+                            z_permute = glm::vec3(0.0f, 1.0f, 0.0f);
+                        } break;
+                    }
+
+                    dimension = imageDimension;
+
+                    glm::mat3 uvPermutationMatrix = glm::mat3(x_permute, y_permute, z_permute);
+                    const float scaleFactor = dimension.x >= dimension.y ? (currWidth / dimension.x) : (currHeight / dimension.y);
+                    const glm::vec2 imageDimensions = glm::vec2(dimension.x, dimension.y) * scaleFactor * (m_zoomLevel / 100.0f);
+                    
+                    // Once the image has been rescaled properly, it must then be centered to the screen
+                    const glm::vec3 vecToTranslateCenter = glm::vec3((currWidth - imageDimensions.x) / 2.0, (currHeight - imageDimensions.y) / 2.0, 0.0);
+                    const glm::mat4 imageCenterTranslate = glm::translate(glm::mat4(1.0f), vecToTranslateCenter);
+
+                    m_modelScaleMat = glm::scale(glm::mat4(1.0f), glm::vec3(imageDimensions, 1.0));
+                    m_viewMat       = m_currCameraPan * imageCenterTranslate;
+                    m_projectionmat = glm::ortho(0.0f, (float) currWidth, (float) currHeight, 0.0f, -1.0f, 1.0f);
+
+                    // Since two textures -- the 3d volume and 2d transfer function texture -- are
+                    // being used, OpenGL requires that both must be assigned to unique texture identifiers or 'units'
+                    glActiveTexture(GL_TEXTURE0);
+                    glBindTexture(GL_TEXTURE_3D, m_volumeModel->GetTextureID());
+
+                    glActiveTexture(GL_TEXTURE1);
+                    glBindTexture(GL_TEXTURE_2D, m_volumeModel->GetTransferTextureID("GreenRed"));
+
+                    m_imageQuadShader.UseProgram();
+
+                    // Set the transformation matrices so that the geometry is displayed correctly
+                    // i.e., that how the model is translated and scaled corresponds to the current
+                    // user zoom and camera pan for this panel
+                    m_imageQuadShader.SetMatrix4x4("model", m_modelScaleMat);
+                    m_imageQuadShader.SetMatrix4x4("view", m_viewMat);
+                    m_imageQuadShader.SetMatrix4x4("projection", m_projectionmat);
+            
+                    // Set necessary values to be used by the fragment shader
+                    // minValue and maxValue are used to determine the interpolation between the colors in the transfer function
+                    // texture3d is the actual 3d texture for the dataset
+                    // transferTexture is the texture representing the transfer function 
+                    m_imageQuadShader.SetFloat("minValue", (float) m_volumeModel->GetMinInDoubleRange());
+                    m_imageQuadShader.SetFloat("maxValue", (float) m_volumeModel->GetMaxInDoubleRange());
+                    m_imageQuadShader.SetInt("texture3d", 0);
+                    m_imageQuadShader.SetInt("transferTexture", 1);
+
+                    // TODO: 
+                    // Reconsider in the future especially if there are plans to allow for viewing cross-sections 
+                    // from arbitrary axes
+                   
+                    // Since the volume cross-sections are gathered from the principal axes, then
+                    // a possible solution to change UV coordinates depending on the axis is to multiply
+                    // the UV coordinates by a permutation matrix. 
+                    glm::mat3 permutation = glm::mat3(1.0f);
+
+                    m_imageQuadShader.SetMatrix3x3("uvPermutation", uvPermutationMatrix);
+                    m_imageQuadShader.SetFloat("sliceOffset", (float) m_currSliceIndex / (float) m_sliceExtent);
+
+                    glBindVertexArray(m_volumeImageVao);
+                    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+                    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+                }
+
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            }
+
+            m_prevHeight = (uint32_t) viewportAvail.y;
+            m_prevWidth  = (uint32_t) viewportAvail.x;
+
+            ImGui::Image(
+                (ImTextureID) m_screenColor, 
+                { viewportAvail.x, viewportAvail.y },
+                ImVec2(0, 1),
+                ImVec2(1, 0)
+            );
+        }
+        ImGui::End();
+    }
+}
+```
+
+### src/UI/VolumeViewWindow2D.h
+```
+#pragma once
+
+#include "VolumeViewWindow.h"
+#include "../IO/MouseButtonState.h"
+#include "../Graphics/Shader.h"
+
+#include <GLFW/glfw3.h>
+
+namespace vr
+{
+    enum class AnatomicalAxis {
+        CORONAL,
+        SAGITTAL,
+        HORIZONTAL
+    };
+
+    class VolumeViewWindow2D : public VolumeViewWindow
+    {
+        public:
+            VolumeViewWindow2D(const std::string& windowName, AnatomicalAxis axis) :
+                VolumeViewWindow(), 
+                m_name(windowName),
+                m_axis(axis)
+            {
+
+            }
+
+            virtual void Initialize() override;
+            virtual void RenderUI(GLFWwindow* window) override;
+        private:
+            // OpenGL buffers to store data about the curent image to be rendered
+            // and its geometry
+            GLuint m_volumeImageVao {0};
+            GLuint m_volumeImageVbo {0};
+            GLuint m_volumeImageEbo {0};
+
+            // Shaders to render a quad to the screen
+            Shader m_imageQuadShader;
+
+            // Stores the orthographic projection matrix for the 2D view
+            glm::mat4 m_projectionmat = glm::mat4(1.0f);
+
+            // Stores the transformation corresponding to camera zoom
+            glm::mat4 m_modelScaleMat = glm::mat4(1.0f);
+
+            // Stores the transformation corresponding to camera panning
+            glm::mat4 m_viewMat = glm::mat4(1.0f);
+
+            MouseButtonState m_leftButtonState = { GLFW_MOUSE_BUTTON_LEFT };
+
+            // Text displayed in the titlebar of the panel
+            const std::string m_name;
+
+            // Which anatomical axis is this panel viewing from
+            AnatomicalAxis m_axis   = AnatomicalAxis::CORONAL;
+
+            // Index of the currently viewed slice along this axis
+            I32 m_currSliceIndex = 0;
+            I32 m_prevSliceIndex = 0;
+
+            // Maximum number of slices along this axis
+            I32 m_sliceExtent = 0;    
+
+            /**
+             * Variables for camera controls
+            **/
+            R32 m_zoomLevel = 100.0f;
+            glm::mat4 m_currCameraPan = glm::mat4(1.0f);
+            glm::mat4 m_prevCameraPan = glm::mat4(1.0f);
+    };
+}
+```
+
+### src/UI/VolumeViewWindow3D.cpp
+```
+#include "VolumeViewWindow3D.h"
+
+#include <vector>
+#include <cstdint>
+
+#include <imgui/imgui.h>
+#include <GLFW/glfw3.h>
+#include <iostream>
+
+namespace vr
+{
+    void VolumeViewWindow3D::Initialize()
+    {
+        glGenFramebuffers(1, &m_framebuffer);
+        glBindFramebuffer(GL_FRAMEBUFFER, m_framebuffer);
+
+        glGenTextures(1, &m_screenColor);
+        glBindTexture(GL_TEXTURE_2D, m_screenColor);
+        glTexImage2D (GL_TEXTURE_2D, 0, GL_RGB, m_prevWidth, m_prevHeight, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_screenColor, 0);
+        
+        glGenRenderbuffers(1, &m_screenRbo);
+        glBindRenderbuffer(GL_RENDERBUFFER, m_screenRbo);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, m_prevWidth, m_prevHeight);
+        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, m_screenRbo);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        {
+            std::cerr << "Error: Incomplete framebuffer\n";
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+        const float cubeVertices[] = {
+            -0.5f, -0.5f, -0.5f,
+             0.5f, -0.5f, -0.5f,
+            -0.5f,  0.5f, -0.5f,
+             0.5f,  0.5f, -0.5f,
+            -0.5f, -0.5f,  0.5f,
+             0.5f, -0.5f,  0.5f,
+            -0.5f,  0.5f,  0.5f,
+             0.5f,  0.5f,  0.5f,
+        };
+        
+        const uint32_t cubeIndices[36] = {
+            0, 1, 3, 0, 3, 2, // Back face
+            4, 0, 2, 4, 2, 6, // West face,
+            5, 1, 3, 5, 3, 7, // East face
+            4, 5, 1, 4, 1, 0, // Bottom
+            6, 7, 3, 6, 3, 2, // Top face
+            4, 5, 7, 4, 7, 6, // Front face
+        };
+
+        glGenVertexArrays(1, &m_volumeVao);
+        glGenBuffers(1, &m_volumeVbo);
+        glGenBuffers(1, &m_volumeEbo);
+
+        glBindVertexArray(m_volumeVao);
+        glBindBuffer(GL_ARRAY_BUFFER, m_volumeVbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(cubeVertices), cubeVertices, GL_STATIC_DRAW);
+
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_volumeEbo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(cubeIndices), cubeIndices, GL_STATIC_DRAW);
+
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*) 0);
+        glEnableVertexAttribArray(0);
+
+        glBindVertexArray(0);
+
+        m_volumeShaderComposite = Shader("shaders/volume_raycast_vert.glsl", "shaders/volume_raycast_composite_frag.glsl");
+        m_volumeShaderSimple    = Shader("shaders/volume_raycast_vert.glsl", "shaders/volume_raycast_frag.glsl");
+        m_volumeBoundsShader    = Shader("shaders/volume_raycast_vert.glsl", "shaders/volume_raycast_border_frag.glsl");
+    }
+
+    void VolumeViewWindow3D::RenderUI(GLFWwindow* window)
+    {
+        ImGui::Begin("3D Viewport");
+        {
+            
+            ImVec2 avail = ImGui::GetContentRegionAvail();
+
+            uint32_t currWidth  = (uint32_t) avail.x;
+            uint32_t currHeight = (uint32_t) avail.y;
+
+            // Input
+            m_leftButtonState.HandleInput(window);
+
+            if (m_leftButtonState.WasReleased())
+            {
+                m_prevRotation = m_currRotation;
+            }
+
+            if (ImGui::GetIO().MouseWheel != 0 && ImGui::IsWindowHovered())
+            {
+                m_distAlongZoomAxis = std::max(0.0f, std::min(m_distAlongZoomAxis - ImGui::GetIO().MouseWheel, 100.0f));
+            }
+
+            if (m_distAlongZoomAxis != m_prevDistAlongZoomAxis)
+            {
+                Refresh();
+                m_prevDistAlongZoomAxis = m_distAlongZoomAxis;
+            }
+
+            if (m_leftButtonState.IsDragging() && ImGui::IsWindowFocused())
+            {
+                auto cursorScreenPos = ImGui::GetCursorScreenPos();
+                
+                {
+                    m_mouseHemi1.x =  (2.0 * (m_leftButtonState.GetButtonX() - cursorScreenPos.x) - avail.x) / (R32) avail.x;
+                    m_mouseHemi1.y = -(2.0 * (m_leftButtonState.GetButtonY() - cursorScreenPos.y) - avail.y) / (R32) avail.y;
+
+                    const R32 lengthSquared = (m_mouseHemi1.x * m_mouseHemi1.x) + (m_mouseHemi1.y * m_mouseHemi1.y);
+
+                    if (lengthSquared <= 1.0f)
+                        m_mouseHemi1.z = std::sqrt(1 - lengthSquared);
+                    else
+                        m_mouseHemi1 = glm::normalize(m_mouseHemi1);
+                }
+                
+                {
+                    glm::vec2 currDragVec = glm::vec2(m_leftButtonState.GetDragVecX(), m_leftButtonState.GetDragVecY());
+                    if (currDragVec != m_prevDragVec)
+                        Refresh();
+                        
+
+                    m_mouseHemi0.x =  (2.0 * (m_leftButtonState.GetButtonX() - m_leftButtonState.GetDragVecX() - cursorScreenPos.x) - avail.x) / (R32) avail.x;
+                    m_mouseHemi0.y = -(2.0 * (m_leftButtonState.GetButtonY() - m_leftButtonState.GetDragVecY() - cursorScreenPos.y) - avail.y) / (R32) avail.y;
+
+                    const R32 lengthSquared = (m_mouseHemi0.x * m_mouseHemi0.x) + (m_mouseHemi0.y * m_mouseHemi0.y);
+
+                    if (lengthSquared <= 1.0f)
+                        m_mouseHemi0.z = std::sqrt(1 - lengthSquared);
+                    else
+                        m_mouseHemi0 = glm::normalize(m_mouseHemi0);
+
+                    m_prevDragVec.x = m_leftButtonState.GetDragVecX();
+                    m_prevDragVec.y = m_leftButtonState.GetDragVecY();
+                }                     
+
+                const float rotateSpeed = 75.0f;
+
+                m_rotateAxis  = glm::normalize(glm::cross(m_mouseHemi0, m_mouseHemi1));
+                m_rotateAngle = glm::acos(glm::dot(m_mouseHemi0, m_mouseHemi1)) * rotateSpeed;
+
+                m_currRotation = glm::rotate(m_prevRotation, 
+                                             glm::radians(m_rotateAngle), 
+                                             glm::vec3(glm::transpose(m_prevRotation) * glm::vec4(m_rotateAxis, 1.0f)));
+                
+            }
+
+            if (m_prevHeight != currHeight || m_prevWidth != currWidth)
+                Refresh();
+
+            if (!m_isCacheValid)
+            {
+                UpdateScreenFrame(currWidth, currHeight);
+
+                glBindFramebuffer(GL_FRAMEBUFFER, m_framebuffer);
+                glViewport(0, 0, currWidth, currHeight);
+                glEnable(GL_DEPTH_TEST);
+                glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+                glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+                const float aspect = (float) currWidth / (float) currHeight;
+
+                if (m_volumeModel != nullptr)
+                {
+                    // Find optimal camera position
+                    const auto dataSize     = m_volumeModel->GetDataSize();
+                    const auto dataSpacing  = m_volumeModel->GetDataSpacing();
+                    const glm::vec3 sizeV3  = glm::vec3(dataSize[0], dataSize[1], dataSize[2]);
+
+                    // Rescale the model so that spacing x is 1
+                    const glm::vec3 spacing = glm::vec3(dataSpacing[0], dataSpacing[1], dataSpacing[2]) / (R32) dataSpacing[0];
+
+                    const glm::vec3 origin  = -0.5f * (sizeV3 * spacing);
+                    
+                    // The minimum distance that the viewer can be without falling within the box when it is rotated around
+                    // In this case, this is length of the diagonal of the volume itself, accounting for spacing
+                    // the division by 2.0 is because the volume is centered at the origin
+                    const auto minDistance  = glm::length(sizeV3 * spacing / 2.0f);
+                    const auto MAX_DISTANCE = 1500.0f;
+
+                    m_cameraPos     = glm::vec3(0.0f, 0.0f, minDistance + (m_distAlongZoomAxis * MAX_DISTANCE / 100.0f));
+                    m_projectionMat = glm::perspective(glm::radians(45.0f), aspect, 0.1f, (minDistance + MAX_DISTANCE) * 2.0f);
+                    m_viewMat       = glm::lookAt(m_cameraPos, glm::vec3(0.0), glm::vec3(0.0f, 1.0f, 0.0f));
+
+                    m_modelScaleMat = glm::scale(glm::mat4(1.0f), sizeV3 * spacing);
+                    m_rotationMat   = m_currRotation;
+
+                    glBindVertexArray(m_volumeVao);
+
+                    m_volumeBoundsShader.UseProgram();
+                    m_volumeBoundsShader.SetMatrix4x4("model", m_modelScaleMat);
+                    m_volumeBoundsShader.SetMatrix4x4("view", m_viewMat);
+                    m_volumeBoundsShader.SetMatrix4x4("rotation", m_rotationMat);
+                    m_volumeBoundsShader.SetMatrix4x4("projection", m_projectionMat);
+                    m_volumeBoundsShader.SetVector3("origin", origin);
+
+                    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+                    glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
+
+                    Shader* m_currShader = m_projMethod == ProjectionMethod::COMPOSITE ? 
+                                                &m_volumeShaderComposite : 
+                                                &m_volumeShaderSimple;
+
+                    glActiveTexture(GL_TEXTURE0);
+                    glBindTexture(GL_TEXTURE_3D, m_volumeModel->GetTextureID());
+
+                    glActiveTexture(GL_TEXTURE1);
+                    glBindTexture(GL_TEXTURE_2D, m_volumeModel->GetTransferTextureID("GreenRed"));
+
+
+                    m_currShader->UseProgram();
+                    m_currShader->SetMatrix4x4("model", m_modelScaleMat);
+                    m_currShader->SetMatrix4x4("view", m_viewMat);
+                    m_currShader->SetMatrix4x4("rotation", m_rotationMat);
+                    m_currShader->SetMatrix4x4("projection", m_projectionMat);
+                    
+                    m_currShader->SetFloat("minValue", (float) m_volumeModel->GetMinInDoubleRange());
+                    m_currShader->SetFloat("maxValue", (float) m_volumeModel->GetMaxInDoubleRange());
+                    
+                    U32 projIdx = std::underlying_type<ProjectionMethod>::type(m_projMethod);
+                    m_currShader->SetUint("projMethod", projIdx);
+                    m_currShader->SetFloat("firstHitThreshold", m_firstHitThreshold);
+
+                    m_currShader->SetInt("texture3d", 0);
+                    m_currShader->SetInt("transferTexture", 1);
+                    
+                    m_currShader->SetVector3("origin", origin);
+                    m_currShader->SetVector3("volumeSize", sizeV3 * spacing);
+                    m_currShader->SetVector3("cameraPosition", m_cameraPos);
+
+                    
+
+
+                    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+                    glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
+                }
+                
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            }
+
+            m_prevHeight = (uint32_t) avail.y;
+            m_prevWidth  = (uint32_t) avail.x;
+
+            ImGui::Image(
+                (ImTextureID) m_screenColor, 
+                { avail.x, avail.y },
+                ImVec2(0, 1),
+                ImVec2(1, 0)
+            );
+
+        }
+        ImGui::End();
+    }
+
+    VolumeViewWindow3D::~VolumeViewWindow3D()
+    {
+        glDeleteVertexArrays(1, &m_volumeVao);
+        glDeleteBuffers(1, &m_volumeVbo);
+        glDeleteBuffers(1, &m_volumeEbo);
+        glDeleteTextures(1, &m_screenColor);
+        glDeleteFramebuffers(1, &m_framebuffer);
+        glDeleteRenderbuffers(1, &m_screenRbo);
+    }
+
+
+    void VolumeViewWindow3D::UpdateProjectionMethod(ProjectionMethod newMethod, const float firstHitThreshold)
+    {
+        m_projMethod = newMethod;
+        m_firstHitThreshold = firstHitThreshold;
+        Refresh();
+    }
+}
+```
+
+### src/UI/VolumeViewWindow3D.h
+```
+#pragma once
+
+#include "VolumeViewWindow.h"
+
+namespace vr
+{
+    class VolumeViewWindow3D final : public VolumeViewWindow
+    {
+        public:
+
+            virtual void Initialize() override;
+            virtual void RenderUI(GLFWwindow* window) override;
+            void UpdateProjectionMethod(ProjectionMethod newMethod, const float firstHitThreshold = 1.0f);
+
+            ~VolumeViewWindow3D();
+
+        private:
+
+            GLuint m_volumeVao {0};
+            GLuint m_volumeVbo {0};
+            GLuint m_volumeEbo {0};
+
+            ProjectionMethod m_projMethod = ProjectionMethod::MAX_INTENSITY;
+            float m_firstHitThreshold     = 0.0f;
+
+            MouseButtonState m_leftButtonState { GLFW_MOUSE_BUTTON_LEFT };
+
+            glm::mat4 m_modelScaleMat = glm::mat4(1.0f);
+            glm::mat4 m_projectionMat = glm::mat4(1.0f);
+            glm::mat4 m_viewMat       = glm::mat4(1.0f);
+            glm::mat4 m_rotationMat   = glm::mat4(1.0f);
+            glm::vec3 m_cameraPos     = glm::vec3(0.0f);
+
+            glm::vec3 m_mouseHemi0    = glm::vec3(0.0f);
+            glm::vec3 m_mouseHemi1    = glm::vec3(0.0f);
+            glm::vec3 m_rotateAxis    = glm::vec3(0.0f);
+            float     m_rotateAngle   = 0.0f;
+            glm::mat4 m_currRotation  = glm::mat4(1.0f);
+            glm::mat4 m_prevRotation  = glm::mat4(1.0f);
+
+            glm::vec2 m_prevDragVec   = glm::vec2(1.0f);
+            R32 m_distAlongZoomAxis     = 0.0f;
+            R32 m_prevDistAlongZoomAxis = m_distAlongZoomAxis;
+
+            // Shader responsible for drawing the outline box around the 3d visualization
+            Shader m_volumeBoundsShader;
+            
+            // Shader responsible for MIP, AIP and first-hit raycasting
+            Shader m_volumeShaderSimple;
+
+            // Shader responsible for composite shading
+            Shader m_volumeShaderComposite;
+
+
+    };
+}
+```

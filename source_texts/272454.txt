@@ -1,0 +1,210 @@
+The run layer ("The shape of just run", roadmap items 15 and 16) defines one rendering call: "a fragment entry called from the host takes the canvas and its uniforms and draws one frame". Real rendering is not one pass. This issue is the...
+
+Design: rendering with more than one pass — a frame is a sequence of calls that return images (the run layer's rendering half) · Issue #204 · typeshade/typeshade · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Design: rendering with more than one pass — a frame is a sequence of calls that return images (the run layer's rendering half) #204
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Design: rendering with more than one pass — a frame is a sequence of calls that return images (the run layer's rendering half)#204
+Copy link
+Description
+Seungup
+opened on Sep 23, 2026
+Issue body actions
+The run layer ("The shape of just run", roadmap items 15 and 16) defines one rendering call: "a fragment entry called from the host takes the canvas and its uniforms and draws one frame". Real rendering is not one pass. This issue is the design question for the rest, raised by writing a path tracer in "use typeshade" for #199's generality claim.
+What holds today
+The shader half is there. Measured on main at 52c3f3e:
+A path tracer compiles on both targets with zero diagnostics and renders on WebGPU (Tint and SwiftShader, 64 samples per pixel, 8 bounces). It uses iterative bounces, random(seed), a constant array of structs, enum and switch materials, and reflect/refract.
+BVH traversal with a stack array compiles for WGSL.
+Accumulation reads the previous frame through textureLoad.
+The registered examples cover the rest of what a renderer's shaders need:
+shadow maps (shadow-compare);
+image-based lighting from a cube map (cube-env);
+MSAA (msaa-resolve);
+multiple render targets (_mrt-gate);
+picking (id-pick);
+clip planes (clip-planes).
+The host half is not. Drawing that one path-traced frame took 20 WebGPU calls:
+the adapter and the device;
+the shader module;
+a texture;
+a render pipeline;
+a uniform buffer, packed from reflect()'s field offsets;
+a bind group;
+a command encoder and a render pass;
+draw;
+a copy and a readback.
+A renderer multiplies that by its passes:
+shadow map, then the main pass;
+G-buffer, then lighting, then post-processing;
+a bloom mip chain;
+progressive accumulation, which ping-pongs two textures.
+It adds the state between passes: render targets, their formats and sizes, blending, depth test, and culling. None of it has a TypeShade shape today, so "no GPU vocabulary" (#199) has no design at all for rendering.
+The idea: a pass is a call that returns an image
+```
+import { shadow, gbuffer, lighting, tonemap } from './scene.shade.ts'
+
+const sm = shadow(mesh, light) //    a depth image
+const g = gbuffer(mesh, camera) //   a struct return (MRT) → { albedo, normal, depth } images
+const hdr = lighting(g, sm, lights) // images in, image out
+tonemap(hdr, canvas) //               the last pass draws to the canvas
+```
+```
+let acc = blank(canvas) // progressive accumulation
+function frame(n: number) {
+  acc = accumulate(acc, trace(camera, n), n) // two images in, one out; nothing waits
+  tonemap(acc, canvas)
+}
+```
+This follows the rules the roadmap and #199 already set:
+A call is the whole API.
+Data is plain values.
+An image is a value that stays on the GPU, which is the residency question of Design: CPU/GPU boundary abstraction. The compiler manages the boundary instead of the programmer #97 and Design (deferred): one file, two worlds, B1 as sugar over "just run" (roadmap B1, #97 Phase 0) #198.
+Calls queue asynchronously.
+A fragment entry's return type already says what an image holds: f32, vec4 or a struct of render targets.
+Decisions
+What a fragment call returns. An image whose format follows the return type. Which format for vec4: rgba8unorm for a final color, or rgba16float for an intermediate? Is that inferred from where the image goes, or written as f16/unorm in the type? A float render target needs the floatRenderTarget capability on WebGL2 (EXT_color_buffer_float).
+Size. The canvas's size by default. A pass that reads an image at a different size, such as a mip chain or a shadow map resolution, says so how?
+Geometry. A vertex entry's @location inputs come from typed arrays. reflect().vertex already derives the layout. Is a mesh a plain object of typed arrays? How are indices and instancing (instance_index) spelled?
+Fixed-function state. Blending, depth test and culling are not shader language (docs: the developer experience — the GPU is an optimization level, and the bar it is held to #199 principle 7). Where do they go: options at the call, inference from the entry (a depth output implies a depth test), or both?
+Scheduling and lifetimes. A frame is a sequence of queued calls, and nothing waits until something is read back. Intermediate images are reused by the runtime, which knows when each one is last read. This is the same analysis Design: CPU/GPU boundary abstraction. The compiler manages the boundary instead of the programmer #97 Phase 3 asks for.
+WebGL2 tier. Each pass is a framebuffer draw. MRT maps to drawBuffers, as it already does. Formats WebGL2 cannot render to fail closed, with the capability named.
+Escape hatch. compile(), reflect() and the emitted WGSL and GLSL stay the way into a hand-built WebGPU renderer. Reaching them never requires rewriting the shaders.
+Relation to the roadmap
+This builds on item 16: the plugin is what turns an import into callable entries.
+It shares residency with Design (deferred): one file, two worlds, B1 as sugar over "just run" (roadmap B1, #97 Phase 0) #198 (B1), B2 and B3.
+Its checks belong under "The DX bar" (docs: the developer experience — the GPU is an optimization level, and the bar it is held to #199): no GPU vocabulary in a rendering program, measured over the path tracer and a deferred renderer.
+Out of scope, as libraries rather than language (docs: the developer experience — the GPU is an optimization level, and the bar it is held to #199 principle 7): scene graphs, materials systems, asset loading, and cameras.
+Evidence to carry into the implementation
+Path tracer: the "use typeshade" source, and the rendered image on WebGPU. It will be registered as an example in its own PR.
+The 20-call host program for one pass. Its line count is the baseline this design removes.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_018Sc2PXGC9Ua8cryCXqMAjE
+Activity
+Seungup
+added 4 commits that reference this issue on Sep 23, 2026
+docs: the domain table gains path tracing, and rendering's missing ho…
+...
+e26e8dd
+feat(host): a host file draws a full-screen @Fragment entry into a ca…
+...
+520f933
+changes: 0013 narrowed, a kernel function that writes a texture waits…
+...
+22120e7
+feat(runtime): a kernel function over doubles runs on the GPU; 0013 i…
+...
+fd9ce67
+Seungup commented on Oct 5, 2026
+Seungup
+on Oct 5, 2026 – with Claude
+ContributorAuthor
+More actions
+Decision: a call draws into a Texture, and a call does not return an image
+This records a decision made on evidence at c9c0f47a (main, 2026-10-05). It gives the proposal its content. The proposal's merge as accepted stays the agreement (AGENTS.md).
+Decision. TypeShade adds a call-shaped rendering half in one narrow form: a full-screen fragment call may draw into a Texture the host made with rt.texture(), and it returns Promise<void> as a canvas draw does. TypeShade does not add calls that return images with an inferred format, size or reuse. Calls that take meshes stay at the program runtime for now. #204 is not superseded as a whole. 0025 and #335 answer its decisions 3, 4, 5 and 7, but nothing lets a call target a Texture, and decisions 1 and 2 need that.
+Proposed shape (not supported on main; trace, accumulate and present are the fs entries of three shader modules):
+```
+const rt = await runtime();
+const fresh = rt.texture({ size, format: 'rgba16float' });
+let read = rt.texture({ size, format: 'rgba16float' });
+let write = rt.texture({ size, format: 'rgba16float' });
+
+function frame(n: number) {
+  trace(fresh, { u: { resolution: size, frame: n, camPos } });
+  accumulate(write, { prev: read, fresh, p: { n } });
+  present(canvas, { img: write });
+  [read, write] = [write, read];
+}
+```
+In the dx researcher's count the whole host file is 15 lines this way, 27 on the runtime (three of them canvas setup) and 8 in the issue's sketch. Only the runtime version was type-checked.
+What holds at c9c0f47a
+A draw takes only a canvas: callDraw refuses any other target with a TypeError (src/core/host-draw.ts:188). A runtime Texture is an input only, and WebGL2 refuses it (:584).
+The call layer shares the runtime's device and Resident, not its pipelines. Its WebGPU draw builds its own pipeline (renderPipelineFor, :295) and a buffer and bind group per draw, and its dispatch does the same (src/core/host-entry.ts:731). docs/runtime-architecture.md says the call layer is built on the runtime, not beside it.
+program.render() cannot draw a fragment-only module: it rejects with The program has no @vertex entry. (src/runtime/program.ts:340). The layer above can do what the layer below cannot.
+Of 104 shader modules under examples/, examples/passes/ and journeys/, 83 have exactly one vertex entry with no @location input, and only 14 fragment entries are callable. 68 of the 87 fragment entries read values their own vertex entry writes, which the call layer refuses. Counted with hostFace() and packModule().
+The runtime checks a colour target for float against integer class only (#targets, program.ts:550), binds any Texture to any texture binding, and Frame.pass never compares an attachment with its pipeline (runtime.ts:343). WebGPU refuses the mismatch at submit, in its own words. tsc accepts format: 'rgb16float', compare: 'lesss' and topology: 'triangle-lst', because those fields are string.
+The emitted GLSL for a vertex entry writes gl_Position unchanged: no y negation and no z remap. No rule states that convention, and both WebGL2 gates draw three vertices only (scripts/compile-gate.ts:814, scripts/gpu-differential.ts:784). The CPU oracle has no texture memory (typeshade/cpu: unbound img).
+registry.npmjs.org lists only the 0.0.0 placeholder, and there is no 0.1.0 tag or release.
+The seven decisions
+Format. The destination decides. A call returns nothing, and the Texture's format is stated once, at rt.texture(). One shared check compares it with the entry's output (component count, float or integer class) before WebGPU sees it. A fragment return type has no format to follow: vec4<f32> fits rgba8unorm, rgba16float and r8unorm, and the same fragment stores 1000.3 as 1.0, 1000.5 or 1000.3 in them with no error (SwiftShader, dx researcher). A default would choose values silently, and Rule 13.10's window is a compile-time warning that cannot see a host call, so it could not be corrected later. unorm and f16 have no source (Rules 2.1, 4.7, 13.6). The word is Texture, since Rule 8.21 already uses image source for DOM values.
+Size. The destination's own size is the viewport. There is no ambient canvas size, since a call can run with no canvas. A pass that reads another size uses textureDimensions, and the host makes a Texture of that size.
+Geometry. Layer 2 keeps Geometry. A name-keyed object of typed arrays, using the vertex parameter names and the manifest's offsets, is added there as sugar. Per-instance attributes are host state WGSL cannot say, so they wait for a request.
+State. The host's, in RenderState, never in the shader source. The call has none. A depth output does not imply a depth test. HLSL Effects, which kept state in the shader file, is archived. This closes 0025's open line and Design: one stack, four entry points — a public program runtime under the call layer, and an official engine on top of it #335's open question.
+Scheduling and lifetimes. Calls run in the order made. A Texture joins the call queue as a Resident does, and the host ends its life with destroy(). There is no last-read reuse. JavaScript cannot tell when a returned image is last read, and the engines that reuse (Unity, Unreal, Babylon) declare and compile a frame first. Eager APIs needed tf.tidy or shipped an aliasing default (gpu.js). Symbol.dispose is not in stable Safari (MDN), so nothing rests on using.
+WebGL2. A Texture target is WebGPU only and refuses elsewhere with the reason. The runtime's WebGL2 tier is one proposal that every layer inherits. A format WebGL2 cannot render fails closed and names EXT_color_buffer_float or EXT_color_buffer_half_float. 0026's RGBA8 fallback stays site policy.
+Escape hatch. Unchanged, and it must not need a shader rewrite, which slice 0 fixes. The bar 'no GPU vocabulary in a rendering program' becomes 'no raw WebGPU vocabulary', which journeys/_harness.mjs already enforces on the engine journey, because docs/dx.md says rendering keeps some shader concepts.
+Slices, in order
+Slice 0, no new call shape. (a) The runtime draws a fragment-only program with a built-in full-screen triangle. (b) The shared fit check runs before submit and names the entry, the binding and the fix. (c) The call layer's WebGPU draws and dispatches run on the runtime's pipelines, which completes 0025 section 3. (d) Every refusal that cites Design: rendering with more than one pass — a frame is a sequence of calls that return images (the run layer's rendering half) #204 names the path that works today. (e) The runtime's option types become literal unions with overloads. This is its own small proposal, and it comes first while 0.1.0 is unpublished, since narrowing an exported type after a publish is breaking (Rule 13.9).
+Slice 1, WebGPU only. The target is a canvas, a Texture, or a record of Textures keyed by the entry's output field names. Scalar, integer and several outputs are callable for Texture targets. Texture is the host value of every texture binding kind it can make (depth, multisampled, storage, 3D), and a Sampler serves a comparison sampler. The destination decides the clear: opaque black for a canvas as today, transparent black for a Texture as in a runtime pass. A Texture that is both target and binding of one call is a TypeError. The gate is a call-layer image journey (a progressive path tracer and a blur chain, 60 frames, a JavaScript reference, no GPU object after frame 1, no WebGPU word in the host file), and each refusal is tested in both halves: the host view under tsc and the runtime's TypeError.
+Slice 2, a later proposal. After 0(c), pair the module's only attribute-less vertex entry with the fragment entry the call names. The call passes { count } and draws a triangle list, on WebGPU only. A vertex count and a topology are not in the source, so the call must state them, which is why this is not in slice 1. Measure it by how many of the 83 corpus pairs become callable.
+Slice 3 is declined. Meshes at the call layer are declined for now.
+What reopens the declined parts. Meshes: the GLSL clip-space convention as a rule with a writer fix and a mesh gate, name-keyed arrays at layer 2, and a real host whose mesh passes show the ceremony dominating. Returned images: a frame scope that ends lifetimes, the runtime's WebGL2 tier, a CPU texture memory, a measured saving and #97 phase 3. The shape would then be caller-owned with an explicit { size, format }.
+What this trades away. The host names, sizes and destroys each Texture, so the same chain is 15 lines, not 8. Image chains have no CPU or WebGL2 tier, so they cannot run in a Node test without a GPU or on Firefox Android. Most gallery fragment shaders stay uncallable until slice 2.
+How the evidence was ordered. Rules first, then what libraries settled on, then ergonomics, with no departure. Ergonomics ordered the work inside the sound set and lost where it conflicted.
+Limits. Line numbers moved after 0031 to 0040 merged, and 0030 is accepted but not implemented on main. No GPU was run for this decision: the format measurement is a researcher's on SwiftShader, and the WebGL2 orientation consequence is derived, not measured on a driver (Rule 13.3).
+Next steps
+Correct docs/dx.md line 69 now (Change: none, documentation).
+Open the typed-options proposal while 0.1.0 is unpublished.
+Draft the slice 0 and slice 1 proposal as a proposal-only draft pull request.
+Comment on Design: one stack, four entry points — a public program runtime under the call layer, and an official engine on top of it #335 that principle 3 is met by Texture and that decision 3 means the runtime's frames and passes.
+Retitle Design: rendering with more than one pass — a frame is a sequence of calls that return images (the run layer's rendering half) #204 to the narrowed scope. Close it, linked to the proposal, when the proposal merges as accepted.
+Implement slice 0, then slice 1, one pull request per step with Change: NNNN.
+Draft the slice 2 proposal once the call layer runs on the runtime's pipelines.
+Keep Runtime: a mesh draw needs buffers the runtime does not make, and textures have no mip levels #391, Runtime: the render path is tested against a fake device only #392 and Host views: the bindings of draw() and dispatch() are untyped, so a binding or field a shader gains is checked only at run time #408 ahead of any call-layer mesh work.
+Generated by Claude Code
+Seungup
+added 8 commits that reference this issue on Oct 5, 2026
+docs(dx): a renderer with more than one pass has its host half at the…
+...
+57e04be
+feat(0054): a compute entry on WebGL2 reads every texture GLSL ES 3.0…
+...
+6272f49
+feat(0054): a compute entry's storage texture runs on WebGL2 as a mem…
+...
+08241cc
+test(0054): the compile gate dispatches program cases on the program …
+...
+46ed63b
+feat(0054): a compute entry on WebGL2 reads every texture GLSL ES 3.0…
+...
+a107093
+feat(0054): a compute entry's storage texture runs on WebGL2 as a mem…
+...
+0bca400
+test(0054): the compile gate dispatches program cases on the program …
+...
+9abe4d5
+feat(0054): a compute entry on WebGL2 reads every texture GLSL ES 3.0…
+...
+683222b
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

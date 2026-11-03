@@ -1,0 +1,187 @@
+Contribute to Simulasi-Ekonomi/FauzanEngine2- development by creating an account on GitHub.
+
+PBR-2: Cook-Torrance dynamic lighting by Simulasi-Ekonomi · Pull Request #39 · Simulasi-Ekonomi/FauzanEngine2- · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Simulasi-Ekonomi
+commented
+Sep 15, 2026
+•
+edited by devin-ai-integration
+Bot
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+PBR-2 implements direct physically based lighting on top of the merged PBR-1 foundation.
+Changes:
+Cook-Torrance BRDF with GGX distribution
+Smith/Schlick-GGX geometry visibility
+Fresnel-Schlick
+Directional, point, and spot light GPU layouts
+Dynamic-light fragment shader with inverse-square/radius attenuation and spot cone falloff
+World-position and transformed-normal shader outputs
+CPU reference lighting terms and light payload validation
+PBR-2 smoke test
+PBR shader validation in CI
+CMake canonical Renderer path repair plus PBR-2 registration
+Policy: no full engine build/benchmark yet; those remain deferred until the engine reaches 100%. PBR branch code is gated by smoke tests.
+Simulasi-Ekonomi
+added 10 commits
+September 15, 2026 13:26
+PBR-2: add physically based lighting utilities
+c840bee
+PBR-2: implement Cook-Torrance lighting terms
+4013fdd
+PBR-2: add Cook-Torrance dynamic lighting shader
+1af01ae
+PBR-2: expose world position and transformed normal
+f742f07
+PBR-2: fix portable PI constant in lighting implementation
+fea06b3
+PBR-2: add lighting math and light payload smoke test
+81ef133
+CMake: repair canonical Renderer paths and register PBR-2 sources/smoke
+3f80c25
+CI: validate PBR-1 and PBR-2 smoke tests and shaders
+cab405e
+PBR-2: include explicit GLM norm dependency for light validation
+9fe1e87
+PBR-2: use core GLM dot product for portable light validation
+fe771ac
+Copilot
+AI
+lite review requested due to automatic review settings
+September 15, 2026 06:28
+Copilot
+AI
+reviewed
+Sep 15, 2026
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Copilot was unable to review this pull request because the user who requested the review has reached their quota limit.
+Hide details
+View details
+Simulasi-Ekonomi
+merged commit 433b671
+into
+main
+Sep 15, 2026
+8 of 14 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+devin-ai-integration
+Bot
+reviewed
+Sep 15, 2026
+View reviewed changes
+devin-ai-integration
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Devin Review found 3 potential issues.
+4 flags not posted on this PR by your GitHub settings — view them in Devin Review. (Configure)
+Comment thread
+Source/NeoEngine/Shaders/neo_mesh.vert
+Comment on lines
++15
+to
++17
+layout(location = 0) out vec3 outWorldPosition;
+layout(location = 1) out vec3 outNormal;
+layout(location = 2) out vec2 outUV;
+devin-ai-integration
+Bot
+Sep 15, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔴 Existing mesh pipelines lose varyings
+neo_mesh.vert moves normal and UV outputs, but existing fragment shaders still consume locations 0 and 1. The resulting interface is invalid, so existing mesh pipelines can fail creation or render corrupted inputs.
+Learn more
+The shared vertex shader previously exported normal at location 0 and UV at location 1. Both the mesh fragment shader and the material fragment shader retain that interface. The changed vertex shader instead exports world position at location 0, normal at location 1, and UV at location 2. Location 1 also changes from a vec2 consumer to a vec3 producer. Vulkan3DRenderer still constructs a pipeline from neo_mesh.vert and neo_mesh.frag, so this affects the current renderer rather than only the new PBR path.
+Example: The standard renderer loads neo_mesh.vert.spv with neo_mesh.frag.spv. The fragment shader requests a normal from location 0 and UV coordinates from location 1, while the vertex shader supplies world position and normal there. Pipeline validation can reject the pair; otherwise shading reads the wrong values.
+Recommended fix: Preserve the existing location 0/1 interface in the shared shader and use a separate PBR vertex shader, or migrate every fragment consumer and pipeline as one atomic interface change. CI must link each supported vertex/fragment pair, not only compile stages independently.
+Was this helpful? React with 👍 or 👎 to provide feedback.
+Comment thread
+Source/NeoEngine/Shaders/pbr_lighting.frag
+float distanceToLight = length(toLight);
+if (distanceToLight <= EPSILON || distanceToLight >= light.positionRadius.w) return vec3(0.0);
+vec3 l = toLight / distanceToLight;
+float cone = dot(normalize(-light.directionInnerCos.xyz), -l);
+devin-ai-integration
+Bot
+Sep 15, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔴 Spotlights face the opposite direction
+EvaluateSpot negates the configured direction before comparing it with the light-to-fragment vector. Fragments inside the configured cone receive zero spotlight radiance.
+Learn more
+l points from the fragment toward the light, so -l points from the light toward the fragment. directionInnerCos.xyz also represents the light's configured forward direction. Negating that direction compares the cone axis against its opposite.
+Example: A light at (0, 3, 0) points down with direction (0, -1, 0). For a fragment directly below it, -l is (0, -1, 0), but the current first operand is (0, 1, 0). Their dot product is -1, so coneFade becomes zero instead of one.
+Recommended fix: Compare normalized light.directionInnerCos.xyz directly with -l.
+Suggested change
+float cone = dot(normalize(-light.directionInnerCos.xyz), -l);
+float cone = dot(normalize(light.directionInnerCos.xyz), -l);
+Was this helpful? React with 👍 or 👎 to provide feedback.
+Comment thread
+Source/NeoEngine/Shaders/neo_mesh.vert
+vec4 worldPosition = instanceTransform * vec4(inPosition, 1.0);
+gl_Position = transform.mvp * worldPosition;
+outWorldPosition = worldPosition.xyz;
+outNormal = normalize(mat3(instanceTransform) * inNormal);
+devin-ai-integration
+Bot
+Sep 15, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 Nonuniform scaling distorts surface normals
+outNormal uses the instance matrix directly for nonuniformly scaled instances. Their normals lose perpendicularity, producing incorrect diffuse and specular lighting.
+Learn more
+A normal must use the inverse-transpose of the position transform. Direct multiplication only remains correct for rotations and uniform scales. Instance transforms are arbitrary matrices, and the renderer does not restrict them to uniform scaling.
+Example: Scaling an angled surface by (2, 1, 1) changes its tangent direction. Directly scaling its normal no longer leaves the normal perpendicular to that tangent, so BRDF dot products use the wrong angle.
+Recommended fix: Apply transpose(inverse(mat3(instanceTransform))) to inNormal, then normalize the result.
+Suggested change
+outNormal = normalize(mat3(instanceTransform) * inNormal);
+outNormal = normalize(transpose(inverse(mat3(instanceTransform))) * inNormal);
+Was this helpful? React with 👍 or 👎 to provide feedback.
+Simulasi-Ekonomi
+deleted the
+feature/pbr-lighting-r2
+branch
+September 15, 2026 06:32
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

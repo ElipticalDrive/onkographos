@@ -1,0 +1,170 @@
+A physically-based path tracer in safe Rust, USD-native, capable of rendering production datasets like Moana and ALab. - Add neural visibility cache for light selection by doubleailes · Pull Request #216 · doubleailes/Crust
+
+Add neural visibility cache for light selection by doubleailes · Pull Request #216 · doubleailes/Crust · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+doubleailes
+commented
+Oct 6, 2026
+Copy link
+Copy Markdown
+Owner
+This change introduces neural, an opt-in light selection mode that predicts per-light visibility using a small neural network, as an experiment to measure whether it beats the learned grid at equal time on a CPU.
+Summary
+Adds a new light selection mode (neural) alongside the existing power, uniform, and learned modes. The mode weights the power table by predicted visibility from a multi-resolution hash-grid encoding feeding a small MLP, trained deterministically on the same receiver walk that learned uses. The experiment is gated by a benchmark (nvc_bench) that measures inference cost before integration work begins.
+Key Changes
+New crate crust-nn: A tiny, dependency-free, forbid(unsafe_code) neural-network kit with:
+HashGrid: multi-resolution hash encoding with trilinear interpolation
+Dense: fully-connected layers with forward and backward passes
+ReLU, sigmoid, and binary cross-entropy loss
+Adam optimizer with per-group learning rates
+Gradient checking for verification
+Deterministic training via openqmc draws and fixed loop order
+New module crust-core/src/light_visibility.rs: Handles training and inference:
+Splits the receiver walk from light_cache::train to report per-light visibility labels
+Trains the network on "delivered light" fractions (nonzero radiance + clear shadow ray)
+Implements the D2 formula: pℓ(x) = (1 − D) · πℓ · V̂ℓ(x) / Σw + D / n_live
+Provides a pure p ↦ (pmf, cdf) function with thread-local memoization for MIS consistency
+Integration into light selection:
+Adds LightSelection::Neural variant
+Routes pick_index_at, pmf_at, find_index_by_geom_at, infinite_at through the network
+Falls back to power silently for <2 lights or no receivers; logs WARN for >64 lights
+Installs over the power table, sharing the defensive uniform share (0.3)
+Benchmark gate (nvc_bench example): Times one inference, one shadow ray, and one learned lookup on the same receivers to measure cost before full integration
+Documentation: Adds design record, task list, and spec delta covering:
+Unbiasedness and MIS consistency requirements
+Determinism across tiles/scanlines and thread counts
+Fallback behavior and light limits
+Equal-time measurement plan against learned and power
+Implementation Details
+Determinism: All randomness comes from openqmc under a new K_NVC key; training uses fixed epoch count (8), fixed mini-batch order (256 samples, 32-sample chunks summed in order), and plain f32 arithmetic with no mul_add to ensure bit-identity across thread counts and SIMD codegen.
+MIS consistency: The bounce side recomputes the pmf at prev.pos from the same pure function, giving identical bits. A single-entry thread-local memo keyed on exact Vec3A bits makes the bounce lookup free when it follows NEE at the same vertex.
+Network shape: 8-level hash grid (L=8, F=2, T=2¹⁴, ~1 MiB) → 16 → 32 → 32 → N logits, ReLU hidden, sigmoid output. Supports up to 64 lights.
+Labels: Reuse the shadow rays NEE would cast; a label is the fraction of LIGHT_SAMPLES samples that delivered light (nonzero radiance + clear ray), folding in backfacing and below-horizon.
+Existing modes unchanged: power, uniform, and learned render bit-identically before and after this change (verified by check_images.sh).
+The experiment is additive and opt-in; rollback is removing the variant and crate. No scene or file format changes.
+https://claude.ai/code/session_01GEcYukPTd9MowduUd16QbW
+openspec: propose neural-visibility-light-selection
+…
+63f0705
+```
+A Bokšanský & Meister style neural visibility cache as an opt-in
+`neural` light selection mode: proposal, lighting spec delta, design
+(crust-nn crate, power x predicted visibility, deterministic training,
+an inference-cost go/no-go gate) and tasks.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GEcYukPTd9MowduUd16QbW
+```
+qodo-code-review
+Bot
+commented
+Oct 6, 2026
+Copy link
+Copy Markdown
+Contributor
+Code Review by Qodo
+🐞 Bugs (0) 📘 Rule violations (0) 📎 Requirement gaps (0)
+Great, no issues found!
+Qodo reviewed your code and found no material issues that require review
+Tip of the day
+```
+💡 Did you know, you can add REVIEW.md to your repo root and Qodo follows it on every PR
+```
+More tips ↗ | Customize Qodo ↗ | Qodo docs ↗
+qodo-code-review
+Bot
+commented
+Oct 6, 2026
+Copy link
+Copy Markdown
+Contributor
+PR Summary by Qodo
+Propose a neural visibility cache for light selection
+📝 Documentation 🕐 20-40 Minutes
+AI Description
+```
+• Proposes an opt-in neural light-selection experiment to address visibility limits in the learned
+ grid.
+• Specifies fallback, unbiasedness, MIS consistency, and determinism requirements without changing
+ renderer behavior.
+• Plans an inference-cost gate and equal-time benchmarks before committing to integration.
+```
+Diagram
+```
+graph TD
+  A["Receiver walk"] --> B["Visibility labels"] --> C["Neural model"] --> E["Selection PMF"] --> F["NEE sampling"]
+  D["Power table"] --> E --> G["Bounce MIS"]
+```
+Loading
+High-Level Assessment
+The following are alternative approaches to this PR:
+1. Interpolate the existing learned grid
+➕ Reuses existing training and tables with potentially cheaper CPU lookups.
+➖ May retain fixed-resolution limits and blur visibility across shadow boundaries.
+Recommendation: Keep the proposed inference-cost gate before implementing the neural mode. Include an interpolated-grid control in the equal-time comparison if the gate passes; its lower lookup cost makes it a meaningful test of whether the network earns its complexity.
+Files changed (5) +399 / -0
+Documentation (4) +397 / -0
+design.mdDocument the proposed neural selection design +146/-0
+Document the proposed neural selection design
+```
+• Records the network, training, light-weighting, fallback, and MIS decisions. Defines the inference-cost go/no-go gate and identifies correctness and performance risks.
+```
+openspec/changes/neural-visibility-light-selection/design.md
+proposal.mdMotivate the opt-in visibility-cache experiment +58/-0
+Motivate the opt-in visibility-cache experiment
+```
+• Explains the learned grid’s limitations and proposes testing whether neural visibility prediction improves CPU rendering at equal time. Describes intended scope and impact; it does not add the mode.
+```
+openspec/changes/neural-visibility-light-selection/proposal.md
+spec.mdSpecify neural light-selection behavior +81/-0
+Specify neural light-selection behavior
+```
+• Adds proposed lighting requirements and scenarios for selecting neural mode, falling back to power, preserving unbiasedness and MIS consistency, and producing deterministic images.
+```
+openspec/changes/neural-visibility-light-selection/specs/lighting/spec.md
+tasks.mdPlan implementation and measurement checkpoints +112/-0
+Plan implementation and measurement checkpoints
+```
+• Breaks the proposed crate, training integration, benchmark gate, selection mode, correctness checks, and equal-time evaluation into unchecked tasks. Includes validation and documentation follow-ups.
+```
+openspec/changes/neural-visibility-light-selection/tasks.md
+Other (1) +2 / -0
+.openspec.yamlRegister the OpenSpec change +2/-0
+Register the OpenSpec change
+```
+• Adds the spec-driven change metadata and creation date.
+```
+openspec/changes/neural-visibility-light-selection/.openspec.yaml
+Merge branch 'main' into claude/admiring-dijkstra-r30cnc
+38db3cf
+Hide details
+View details
+doubleailes
+merged commit 2860ef5
+into
+main
+Oct 6, 2026
+10 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+doubleailes
+deleted the
+claude/admiring-dijkstra-r30cnc
+branch
+October 6, 2026 18:55
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,303 @@
+python - Trilinear Interpolation on Voxels at specific angle - Stack Overflow
+How are we doing? Please help us improve Stack Overflow. Take our short survey
+Collectives™ on Stack Overflow
+Find centralized, trusted content and collaborate around the technologies you use most.
+Learn more about Collectives
+How are we doing?
+Take our short survey
+Trilinear Interpolation on Voxels at specific angle
+Ask Question
+Asked
+9 years, 2 months ago
+Modified
+9 years, 2 months ago
+Viewed
+833 times
+Report this ad
+This question shows research effort; it is useful and clear
+2
+This question does not show any research effort; it is unclear or not useful
+Save this question.
+Show activity on this post.
+I'm currently attempting to implement this algorithm for volume rendering in Python, and am conceptually confused about their method of generating the LH histogram (see section 3.1, page 4).
+I have a 3D stack of DICOM images, and calculated its gradient magnitude and the 2 corresponding azimuth and elevation angles with it (which I found out about here), as well as finding the second derivative.
+Now, the algorithm is asking me to iterate through a set of voxels, and "track a path by integrating the gradient field in both directions...using the second order Runge-Kutta method with an integration step of one voxel".
+What I don't understand is how to use the 2 angles I calculated to integrate the gradient field in said direction. I understand that you can use trilinear interpolation to get intermediate voxel values, but I don't understand how to get the voxel coordinates I want using the angles I have.
+In other words, I start at a given voxel position, and want to take a 1 voxel step in the direction of the 2 angles calculated for that voxel (one in the x-y direction, the other in the z-direction). How would I take this step at these 2 angles and retrieve the new (x, y, z) voxel coordinates?
+Apologies in advance, as I have a very basic background in Calc II/III, so vector fields/visualization of 3D spaces is still a little rough for me.
+Creating 3D stack of DICOM images:
+```
+Copydef collect_data(data_path):
+    print "collecting data"
+    files = []  # create an empty list
+    for dirName, subdirList, fileList in os.walk(data_path):
+        for filename in fileList:
+            if ".dcm" in filename:
+                files.append(os.path.join(dirName,filename))
+    # Get reference file
+    ref = dicom.read_file(files[0])
+
+    # Load dimensions based on the number of rows, columns, and slices (along the Z axis)
+    pixel_dims = (int(ref.Rows), int(ref.Columns), len(files))
+
+    # Load spacing values (in mm)
+    pixel_spacings = (float(ref.PixelSpacing[0]), float(ref.PixelSpacing[1]), float(ref.SliceThickness))
+
+    x = np.arange(0.0, (pixel_dims[0]+1)*pixel_spacings[0], pixel_spacings[0])
+    y = np.arange(0.0, (pixel_dims[1]+1)*pixel_spacings[1], pixel_spacings[1])
+    z = np.arange(0.0, (pixel_dims[2]+1)*pixel_spacings[2], pixel_spacings[2])
+
+    # Row and column directional cosines
+    orientation = ref.ImageOrientationPatient
+
+    # This will become the intensity values
+    dcm = np.zeros(pixel_dims, dtype=ref.pixel_array.dtype)
+
+    origins = []
+
+    # loop through all the DICOM files
+    for filename in files:
+        # read the file
+        ds = dicom.read_file(filename)
+        #get pixel spacing and origin information
+        origins.append(ds.ImagePositionPatient) #[0,0,0] coordinates in real 3D space (in mm)
+
+        # store the raw image data
+        dcm[:, :, files.index(filename)] = ds.pixel_array
+    return dcm, origins, pixel_spacings, orientation
+```
+Calculating gradient magnitude:
+```
+Copydef calculate_gradient_magnitude(dcm):
+    print "calculating gradient magnitude"
+    gradient_magnitude = []
+    gradient_direction = []
+
+    gradx = np.zeros(dcm.shape)
+    sobel(dcm,0,gradx)
+    grady = np.zeros(dcm.shape)
+    sobel(dcm,1,grady)
+    gradz = np.zeros(dcm.shape)
+    sobel(dcm,2,gradz)
+
+    gradient = np.sqrt(gradx**2 + grady**2 + gradz**2)
+
+    azimuthal = np.arctan2(grady, gradx)
+    elevation = np.arctan(gradz,gradient)
+
+    azimuthal = np.degrees(azimuthal)
+    elevation = np.degrees(elevation)
+
+    return gradient, azimuthal, elevation
+```
+Converting to patient coordinate system to get actual voxel position:
+```
+Copydef get_patient_position(dcm, origins, pixel_spacing, orientation):
+    """
+        Image Space --> Anatomical (Patient) Space is an affine transformation
+        using the Image Orientation (Patient), Image Position (Patient), and
+        Pixel Spacing properties from the DICOM header
+    """
+    print "getting patient coordinates"
+
+    world_coordinates = np.empty((dcm.shape[0], dcm.shape[1],dcm.shape[2], 3))
+    affine_matrix = np.zeros((4,4), dtype=np.float32)
+
+    rows = dcm.shape[0]
+    cols = dcm.shape[1]
+    num_slices = dcm.shape[2]
+
+    image_orientation_x = np.array([ orientation[0], orientation[1], orientation[2]  ]).reshape(3,1)
+    image_orientation_y = np.array([ orientation[3], orientation[4], orientation[5]  ]).reshape(3,1)
+    pixel_spacing_x = pixel_spacing[0]
+
+    # Construct affine matrix
+    # Method from:
+    # http://nipy.org/nibabel/dicom/dicom_orientation.html
+    T_1 = origins[0]
+    T_n = origins[num_slices-1]
+
+
+    affine_matrix[0,0] = image_orientation_y[0] * pixel_spacing[0]
+    affine_matrix[0,1] = image_orientation_x[0] * pixel_spacing[1]
+    affine_matrix[0,3] = T_1[0]
+    affine_matrix[1,0] = image_orientation_y[1] * pixel_spacing[0]
+    affine_matrix[1,1] = image_orientation_x[1] * pixel_spacing[1]
+    affine_matrix[1,3] = T_1[1]
+    affine_matrix[2,0] = image_orientation_y[2] * pixel_spacing[0]
+    affine_matrix[2,1] = image_orientation_x[2] * pixel_spacing[1]
+    affine_matrix[2,3] = T_1[2]
+    affine_matrix[3,3] = 1
+
+    k1 = (T_1[0] - T_n[0])/ (1 - num_slices)
+    k2 = (T_1[1] - T_n[1])/ (1 - num_slices)
+    k3 = (T_1[2] - T_n[2])/ (1 - num_slices)
+
+    affine_matrix[:3, 2] = np.array([k1,k2,k3])
+
+    for z in range(num_slices):
+        for r in range(rows):
+            for c in range(cols):
+                vector = np.array([r, c, 0, 1]).reshape((4,1))
+                result = np.matmul(affine_matrix, vector)
+                result = np.delete(result, 3, axis=0)
+                result = np.transpose(result)
+                world_coordinates[r,c,z] = result
+        # print "Finished slice ", str(z)
+    # np.save('./data/saved/world_coordinates_3d.npy', str(world_coordinates))
+    return world_coordinates
+```
+Now I'm at the point where I want to write this function:
+```
+Copydef create_lh_histogram(patient_positions, dcm, magnitude, azimuthal, elevation):
+    print "constructing LH histogram"
+    # Get 2nd derivative
+    second_derivative = gaussian_filter(magnitude, sigma=1, order=1)
+
+    # Determine if voxels lie on boundary or not (thresholding)
+
+    # Still have to code out: let's say the thresholded voxels are in 
+    # a numpy array called voxels
+
+    #Iterate through all thresholded voxels and integrate gradient field in
+    # both directions using 2nd-order Runge-Kutta
+    vox_it = voxels.nditer(voxels, flags=['multi_index'])
+    while not vox_it.finished:
+        # ???
+```
+python
+vector
+computer-vision
+voxel
+3d-rendering
+Share
+Share a link to this question
+Copy linkCC BY-SA 3.0
+Short permalink to this question
+Improve this question
+Follow
+Follow this question to receive notifications
+edited Sep 1, 2017 at 20:57
+asked Aug 30, 2017 at 20:29
+Radhika
+2144 bronze badges
+3
+1
+welcome to so! usually it is helpful if you post your code here, as rudimentary as it might be atm. stackoverflow.com/help/how-to-ask
+patrick
+–
+patrick
+2017-08-30 20:38:23 +00:00
+Commented
+Aug 30, 2017 at 20:38
+Your link is behind a paywall
+Sneaky Polar Bear
+–
+Sneaky Polar Bear
+2017-08-30 21:50:21 +00:00
+Commented
+Aug 30, 2017 at 21:50
+@SneakyPolarBear Fixed!
+Radhika
+–
+Radhika
+2017-08-31 15:28:52 +00:00
+Commented
+Aug 31, 2017 at 15:28
+Add a comment
+|
+Related questions
+3
+Given an octree of voxels, how do you render with smooth surfaces?
+0
+3D grid interpolation in Python
+1
+Triangulating a set of voxels
+Related questions
+3
+Given an octree of voxels, how do you render with smooth surfaces?
+0
+3D grid interpolation in Python
+1
+Triangulating a set of voxels
+5
+Interpolation/subsampling of 3D data in python without VTK
+22
+Fast interpolation of regularly sampled 3D data with different intervals in x,y, and z
+4
+Interpolation of 3D data in Python
+3
+3D with value interpolation in R (X, Y, Z, V)
+1
+python: Noiseless 3-D rotation?
+2
+Linear interpolation of 3D data in python
+0
+Interpolate 3D Vector Field with Python
+Load 7 more related questions
+Show fewer related questions
+0
+Sorted by:
+Reset to default
+Highest score (default)
+Trending (recent votes count more)
+Date modified (newest first)
+Date created (oldest first)
+Know someone who can answer? Share a link to this question via email, Twitter, or Facebook.
+Start asking to get answers
+Find the answer to your question by asking.
+Ask question
+Explore related questions
+python
+vector
+computer-vision
+voxel
+3d-rendering
+See similar questions with these tags.
+The Overflow Blog
+Elevators, toasters, and the birth of Java
+A JSON schema Is not an AI governance layer
+Featured on Meta
+We’ve reworked automatic question deletion. Let’s talk about why
+How can we improve duplicate handling?
+Policy: Generative AI (e.g., ChatGPT) is banned
+You're doing it wrong: A plea for sanity in close voting
+Community activity
+Last 1 hr
+Users online activity
+1591 users online
+Number of questions asked 0 questions
+Number of questions that received an answer 4 answers
+Number of comments posted 21 comments
+Number of upvotes on posts 107 upvotes
+Popular tags
+Popular tags
+bashpythonccore-datadockercocoa
+Hot Network Questions
+attaching cement board to a plaster and lath wall
+Can skirmish apply to each attack here, or does the volley rules block that?
+Filipina residing in Romania travelling to my home country. I have 6-hour layover in South Korea. Do I need a visa?
+How to tweak the position of super/subscript of `mathop` of custom symbol?
+Does "quand + imparfait" ever introduce a single punctual event, or only a background/habitual situation?
+Short story ID: deadly sickness targeting the wealthy in a cyberpunk setting
+How do I ensure job safety and legal liability against AI related damage at work
+Leetcode Twosum with a single loop
+What's the harmonic function of the VI-VII-v-i progression in minor?
+Force cross-clef chords to align
+The legendary crossing of the strait: could it have actually happened?
+Rubato in Schubert's Chamber Music
+That would be A
+Can I swap new ears onto an old work electric box?
+Is it practical to ask for a letter of reference from someone when I think I did not perform very well?
+Reuse last entered value takes precedence over duplicate feature value. Is there a work-around to change that?
+How does Derrida define the concept of an 'axis'?
+-ta and its aspect
+How to remove (some) differences in indentation between LaTeX environments?
+Rotating the wheel while keeping the freehub fixed creates a jerky feeling/movement, is this a typical sign of worn/damaged freehub?
+How do I reduce charge on my glassware before weighing?
+Auxiliary Circle of Ellipse, Focal radii as diameter of circle property
+The hair doesn’t move with the body/a problem with the armature
+Five staff, one keypad, and a liar
+Question feed
+lang-py
+Report this ad

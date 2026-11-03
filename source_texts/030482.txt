@@ -1,0 +1,1573 @@
+Inline Vector Compression for Computational Physics
+W. Trojak
+∗
+Department of Ocean Engineering, Texas A&M University, College Station
+arXiv:2003.02633v2 [cs.CE] 24 Jun 2020
+F. D. Witherden
+Department of Ocean Engineering, Texas A&M University, College Station
+Abstract
+A novel inline data compression method is presented for single-precision vectors in three dimensions. The primary application of the method is for accelerating computational physics calculations where the throughput is bound by
+memory bandwidth. The scheme employs spherical polar coordinates, angle
+quantisation, and a bespoke floating-point representation of the magnitude
+to achieve a fixed compression ratio of 1.5. The anisotropy of this method
+is considered, along with companding and fractional splitting techniques to
+improve the efficiency of the representation. We evaluate the scheme numerically within the context of high-order computational fluid dynamics.
+For both the isentropic convecting vortex and the Taylor–Green vortex test
+cases, the results are found to be comparable to those without compression.
+Performance is evaluated for a vector addition kernel on an NVIDIA Titan
+V GPU; it is demonstrated that a speedup of 1.5 can be achieved.
+Keywords: Vector Compression, GPU computing, Flux Reconstruction
+∗
+Corresponding author
+Email addresses: wt247@tamu.edu (W. Trojak
+Witherden )
+Preprint submitted to Elsevier
+), fdw@tamu.edu (F. D.
+June 25, 2020
+2010 MSC: 68U20, 68W40, 68P30, 65M60, 76F65
+1. Introduction
+Over the past 30 years, improvements in computing capabilities, measured in floating-point operations per second, have consistently outpaced
+improvements in memory bandwidth [1]. A consequence of this is that many
+numerical methods for partial differential equations are memory bandwidth
+bound algorithms. Additionally, over the past 10 years, there has been a
+trend towards the use of graphics processing units (GPUs) for simulations.
+These accelerators have increased computational power and memory bandwidth compared to CPUs. However, one limitation is that the total amount
+of memory is substantially less than what would accompany an equivalently
+capable CPU. To this end, there is substantial interest in techniques that can
+conserve either memory or memory bandwidth.
+Arguably the simplest technique is to migrate the numerical scheme from
+eight-byte double-precision numbers to four-byte single-precision numbers.
+Such migration has the potential to halve the bandwidth and storage requirements for a code. The feasibility of this depends heavily on both the numerical scheme and its application area. Studies indicate that single-precision
+arithmetic may be appropriate in computational geosciences, molecular dynamics, and implicit large eddy simulation [2, 3, 4, 5]. More recently, driven
+primarily by the requirements of the machine learning community, hardware
+vendors have started to include support for two-byte half-precision arithmetic [6]. However, the restricted range of half-precision floating-point numbers [7] renders them unsuitable for general-purpose computation.
+2
+Another promising approach is that of in-line data compression. This
+takes advantage of the fact that the data in scientific simulations often exhibits spatial correlations and is hence amenable to compression. When
+evaluating compression schemes in the context of scientific computing, there
+are several factors to consider. The first is whether the scheme is lossless or
+lossy. Next is the extent to which the scheme admits random access to the
+compressed data. A third factor is the degree of asymmetry, if any, between
+the cost of compression and that of decompression. For schemes that are
+lossy, a fourth factor to consider is if the compression ratio is fixed or variable. Additionally, with lossy schemes, a further consideration is the ability
+to bound the magnitude of any loss.
+A variety of compression schemes, both general purpose and domainspecific, have been proposed. When considering lossless compression, it follows from the Pigeonhole principle that no scheme can guarantee to reduce
+the size of an input. An immediate consequence of this is that the compression ratio of a lossless scheme must always be a function of the input. A
+corollary of this is that the maximum problem size in which a code employing lossless in-line compression can robustly handle is identical to that of the
+same code without compression. Moreover, the variability in the compression
+ratio makes it difficult to predict the run-time performance of such a code.
+As such, within the context of in-line compression for scientific codes, lossy
+schemes are preferable.
+The primary advantage of lossy compression schemes is that not only
+can higher compression ratios be obtained, but they may admit a fixed compression ratio. Some early work on block data compression was aimed at
+3
+computer graphics and was based on Vector Quantisation (VQ) [8, 9, 10]. A
+prominent methodology within VQ is the LBG approach of Linde et al. [11].
+This approach used a compression codebook learned a priori through optimisation. This allows for efficient vector decompression with a low error
+when the vector domain is similar to the learned codebook sub-domain. Subsequent methods that have evolved from this include the S3TC method [12],
+which operates on textures consisting of several pixels. These techniques
+typically have a large asymmetry between compression and decompression,
+with compression being orders of magnitude slower. An additional method
+of importance is the adaptation of LBG by Schneider et al. [13], which employed a codebook initialisation method using principal component analysis
+based splitting.
+More recently, the ZFP algorithm and library were developed [14] to
+work across small blocks (4d in size, where d is the dimensionality) with
+user-controlled fixed-rate compression. This method allowed for independent block access and boasted near symmetric compression and decompression. However, due to the larger block size, this is inappropriate for our
+desired unstructured application. An algorithm more closely related to the
+issue of memory-bound compute is the BLOSC methodology and library [15].
+BLOSC utilises several compression techniques, including DEFLATE and related methods as well as LZ compression [16, 17]. LZ compression is designed
+for compression of sequential data-sets, and as a consequence, BLOSC is
+highly efficient for bandwidth limited calculations with sequential or blocked
+data access. Yet, similar to ZFP, these techniques are not well suited to the
+unstructured data access we are concerned with.
+4
+Evidently, if compression is to improve the performance of a numerical
+scheme, a baseline requirement is that the decompression rate must exceed
+memory bandwidth. An associated requirement is that compression and decompression have comparable costs. This is to enable the compression of
+dynamic data; that is to say, the output generated by kernels rather than
+just constant inputs. A tertiary requirement, albeit one which is particularly relevant for numerical schemes on unstructured grids, is for there to
+be little to no penalty associated with random access to data. Finally, it is
+desired that the multiple applications of compression/decompression to the
+same data should not result in substantially different data, i.e. the compression/decompression operator should be idempotent or near-idempotent.
+A more applicable set of techniques arises from the compression of individual three-component pixel data. A review of some techniques in this area
+was presented by Cigolle et al. [18]. It has also been shown by Meyer et al. [19]
+that 51-bits is sufficient to losslessly represent unit vectors formed of three
+32-bit floating-point numbers. More recently, Smith et al. [20] considered
+applying lossy compression to this case. The approach quantizes three component unit vectors by initially transforming them into spherical coordinates,
+and subsequently discretising the two angles into bins. In this approach the
+number of bins depends on both the desired error tolerance and the angles
+themselves. Using this approach it is possible to reduce the storage requirement from 96-bits to between eight and 30-bits depending on the desired
+error tolerance and the inputs themselves. Since the scheme generates output at the bit level and admits a variable compression ratio it is only suitable
+for applications whose access patterns are both serial and sequential.
+5
+In this paper, we propose a scheme for the compression of triplets of
+single-precision numbers which occur frequently in computational physics
+applications. Building upon the ideas presented in Smith et al. [20] this approach is capable of compressing three component vectors of any magnitude
+whilst achieving a fixed 50% compression ratio—reducing a 96-bit vector
+down to 64-bits. This ratio enables non-sequential and high-performance
+parallel access to vectors, even on hardware platforms with eight byte alignment requirements. Despite the fact that this scheme has to deal with the
+additional complexities associated with non-unit vectors the overall compression and decompression routines end up being somewhat less computationally
+expensive than those of Smith et al.. Furthermore, complexity of the compression and decompression routines in our proposed approach is similar,
+enabling it to be employed in an in-line capacity.
+The remainder of this paper is structured as follows. In Section 2, we outline our compression scheme and analyse its numerical properties through
+a series of synthetic benchmarks. Implementation details are discussed in
+Section 3. In Section 4, we implement our scheme into a high-order computational fluid dynamics code and assess its impact on accuracy. Here the
+performance of our approach on an NVIDIA Titan V GPU is evaluated.
+Finally, the conclusions are discussed in Section 6.
+6
+2. Methodology
+2.1. Basic Compression Methodology
+Given a vector x = [x, y, z]T , we begin by writing the transformation from
+Cartesian to spherical polar coordinates as
+  
+
+x
+r cos θ sin φ
+  
+
+  
+
+x = y  =  r sin θ sin φ  ,
+  
+
+z
+r cos φ
+(1)
+where r, θ and φ are defined as
+r =kxk2 ,
+ 
+y
+−1
+,
+θ = tan
+x
+ 
+z
+−1
+φ = cos
+.
+r
+(2a)
+(2b)
+(2c)
+Here φ ∈ [0, π) and θ ∈ [−π, π). We note here that both of these ranges
+are substantially smaller than those which can be represented by a 32-bit
+floating-point number. As a starting point, we consider discretising these
+angles by representing them as a pair of integers according to
+
+
+
+
+nφ max φ
+nθ max (θ + π)
+and nφ = nint
+,
+nθ = nint
+2π
+π
+(3)
+where nθ max and nφ max are defined as the maximum values supported by
+the integer type used to store θ and φ, respectively. The function nint(x) is
+defined as that which rounds x to the nearest integer as per
+
+
+b2xc
+nint(x) =
+,
+2
+7
+(4)
+where we have adopted the round half up tie-breaking rule. The corresponding inverse mappings are
+
+
+
+
+2nθ
+πnφ
+θ̂ = π
+−1
+and φ̂ =
+.
+nθ max
+nφ max
+(5)
+Here, the hat is used to represent a reconstructed angle. The associated
+absolute errors are then given according to
+θ = θ̂ + θ + ηθ
+and φ = φ̂ + φ + ηφ ,
+(6)
+where  is a quantisation error and η is an arithmetic error. To proceed we
+shall assume that it is possible to implement the aforementioned compression procedure in a numerically stable manner such the arithmetic error is
+insignificant compared to the quantisation error. This point shall be explored
+in Section 3. From the definitions of θ and φ it is clear that
+θ ∈
+π
+nθ max
+[−1, 1] and φ ∈
+1 π
+[−1, 1].
+2 nφ max
+(7)
+The quantisation errors on θ and φ then give rise to a reconstructed vector
+x̂ = [x̂, ŷ, ẑ]T with:
+x̂ = r cos (θ + θ ) sin (φ + φ ),
+(8a)
+ŷ = r sin (θ + θ ) sin (φ + φ ),
+(8b)
+ẑ = r cos (φ + φ ).
+(8c)
+Let us define then error vector as [x , y , z ]T = x̂ − x. Applying the trigonometric sum-to-product identities and assuming (|θ |, |φ |)
+1 we find
+x ≈ r(φ cos θ cos φ − θ sin θ sin φ),
+(9a)
+y ≈ r(φ sin θ cos φ + θ cos θ sin φ),
+(9b)
+z ≈ rφ sin φ.
+(9c)
+8
+2.2. Base Scheme Evaluation
+We now wish to evaluate the error of the base method by which we mean
+discretising nθ and nφ with 16-bits and storing the magnitude as a standard single-precision floating-point (SPFP). This evaluation was performed
+by randomly sampling θ and φ such that the Cartesian points are uniformly
+distributed over a unit sphere. This, together with the computation of x,
+is carried out using double-precision floating-point (DPFP) numbers. Then,
+before x is compressed, the components are converted to SPFP. This was
+to ensure that all points on the unit ball, in single-precision, could be sampled. To minimise the arithmetic error in the compression and decompression
+steps, all the intermediary real numbers used were cast as DPFP numbers.
+Then the L2 norm of the error between the SPFP x and the vector after compression and decompression, x̂, was calculated. These results can be seen in
+Fig. 1. Here, the level of anisotropy in the method is clearly visible, with
+both the error described in Eq. (9) and the larger range of θ contributing to
+this.
+·10−5
+π
+φ π/2
+2
+π/4
+1
+0
+−π
+−π/2
+0
+θ
+π/2
+π
+Figure 1: Base scheme compression error on unit ball.
+9
+0
+kx − x̂k2
+3
+3π/4
+2.3. Increasing Discretisation Resolution
+In Sections 2.1 and 2.2, the basic compression methodology was presented
+and evaluated. We now wish to investigate if the error magnitude and degree of anisotropy can be reduced while still limiting the result to 64-bits.
+It is proposed that bits from the vector magnitude may be redistributed to
+increase the quantisation on the angles. An aspect of this compression technique that should be used to inform bit redistribution is that the range of θ
+is twice that of φ. From Eq. (7 & 9), it can be seen that this will impact the
+error; hence, θ should be quantised with an additional bit.
+The most straightforward bit to repurpose is the sign bit of r since the
+magnitude will always be positive. Two subsequent techniques will be introduced as a means of recovering further bits from the magnitude. The first
+method is to remove bits from the exponent of the SPFP number representing
+r. This is motivated by the maximum and minimum values of the exponent
+being 2127 ≈ 1038 and 2−126 ≈ 10−38 , respectively. This range of values is
+larger than is typically encountered in the simulation of physical phenomena,
+and hence it may be possible to reduce the range of the exponent without
+adversely affecting the results. Such a reduction may be accomplished as follows, beginning by describing the procedure for calculating the exponent [7],
+e, as
+e = E 8 − b8 ,
+(10)
+where E8 is the 8 bit integer representation of the exponent bits stored in the
+SPFP number and b8 is a bias that shifts the range of E8 such that e can take
+negative values. In the case of SPFP, b8 = 127 such that e ∈ {−126, . . . , 127}.
+Reducing the exponent length, instead storing E7 , will then lead to a
+10
+reduction in the range of e. Therefore, the method is
+Ê8 = E7 + b8 − b7 ,
+(11)
+where b7 is a new bias to be set and Ê8 is the reconstructed exponent integer
+needed for SPFP arithmetic. It can then be seen that this will lead to
+e = Ê8 − b8 = E7 − b7 ,
+(12)
+such that
+−(b7 + 1) ≤ e ≤ 27 − (b7 + 2).
+When removing a single bit from the exponent it was hypothesised that
+b7 = 80 was a reasonable compromise for computational fluids calculations.
+An asymmetric bias was chosen based on the hypothesis that, often in physical simulations, small numbers and zeros are important in the phenomena
+exhibited. Conversely, very large numbers in properly normalised calculations are typically indicative of a diverging solution and hence limiting the
+range here is deemed reasonable. However, the degree of exponent compression and bias could be varied on a case-by-case basis.
+Going further, we will now consider how bits may be removed from the
+mantissa. Starting from SPFP numbers [7], the mantissa, T , or the fraction,
+is defined using 24-bits as:
+T24 = d0 .d1 · · · d22 d23 = 1.d1 · · · d22 d23 ,
+(13)
+where, through proper normalisation, d0 is assumed to always be 1 and hence
+only 23 bits are stored. Bits may then be removed from the tail of the
+mantissa and repurposed. Taking the example of removing one bit, d23 , and
+11
+replacing it by zero in the reconstructed mantissa we get
+T̂24 = 1.d1 · · · d22 .
+(14)
+Within the set of SPFP numbers there is a subset called normal numbers.
+This is the case when the bit d0 is always 1, i.e. the binary point of the
+mantissa is shifted such that the d0 = 1. To normalise the number, the
+binary point is moved by increasing or decreasing the exponent. In the case
+of SPFP, if the exponent, E8 , equals 1 and d0 6= 1 then the number is said
+to be subnormal. The handling of this exception is usually done by the
+hardware based on the compiler options. However, with E7 this has to be
+handled by the compression algorithm. Hence, we impose that subnormal
+numbers, i.e. when E7 = 1, are set to the lowest supported value.
+Throughout the remainder of this work we will use the following notation
+to describe how the 64 bits are used: hs, e, mi-p-t, where s indicates the
+presence of a sign bit; e is the number of exponent bits; m is the number of
+mantissa bits; and p and t are the number of bits in nφ and nθ respectively.
+Some potential bit layouts are shown in Fig. 2 which are investigated later.
+We will now compare the error on the unit ball of three different bit distributions: h0, 8, 23i-16-17, h0, 7, 23i-17-17, and h0, 7, 22i-17-18. The methodology followed here is the same as in Section 2.1. The impact of bit utilisation
+on the error is shown in Fig. 3. It is clear that, not only are all three methods
+an improvement over the base scheme shown in Fig. 1, but that the additional angle resolution has a significant impact on the error. In this instance,
+the average error over the samples was found to be 1.55 × 10−5 , 1.07 × 10−5 ,
+and 7.74 × 10−6 , respectively.
+12
+Exponent
+63
+Mantissa
+nφ
+56
+33
+nθ
+17
+0
+(a) h0, 8, 23i-16-17
+Exponent
+63
+Mantissa
+57
+nφ
+34
+nθ
+17
+0
+(b) h0, 7, 23i-17-17
+Exponent
+63
+Mantissa
+57
+nφ
+35
+nθ
+18
+0
+(c) h0, 7, 22i-17-18
+Figure 2: Compression regimes under consideration.
+A further investigation was performed where the average error was calculated while varying the ball radius in [10−8 , 108 ]. It was found that the
+average error, normalised by the radius, was approximately constant. Therefore, in this range, the exponent and mantissa contraction has not led to any
+additional dependence of error on r.
+2.4. Fractional Splitting
+The schemes so far described have discretised the angles using powers of
+two due to their connection to binary representations. For example, nφ,max =
+216 − 1, nθ,max = 217 − 1. It is proposed that it may be possible to split the
+available discretisation at some other interface. This can be defined in the
+general form for some number np , where the total number of bits available is
+13
+3π/4
+φ π/2
+2
+π/4
+1
+0
+−π
+−π/2
+0
+θ
+π/2
+π
+kx − x̂k2
+·10−5
+3
+π
+0
+·10−5
+3
+π
+3π/4
+φ π/2
+2
+π/4
+1
+0
+−π
+−π/2
+0
+θ
+π/2
+π
+kx − x̂k2
+(a) h0, 8, 23i-16-17.
+0
+·10−5
+3
+π
+3π/4
+φ π/2
+2
+π/4
+1
+0
+−π
+−π/2
+0
+θ
+π/2
+π
+kx − x̂k2
+(b) h0, 7, 23i-17-17.
+0
+(c) h0, 7, 22i-17-18.
+Figure 3: Error of random vector field on unit ball for 108 samples.
+14
+p, and nφ and nθ are encoded based on:
+np = nφ (nθ,max + 1) + nθ ,
+(15a)
+np,max = (nφ,max + 1)(nθ,max + 1) − 1 < 2p .
+(15b)
+For the case of p = 35, where the additional bits have been obtained through a
+reduction in the exponent range and mantissa precision, we will vary nφ,max +
+1 ∈ [216 , . . . , 218 ]. By setting nφ,max , Eq. (15) then constrains nθ,max . For each
+of the splitting choices we will then calculate the mean and standard sample
+deviation of the error on the unit ball, as defined by
+N
+ei = kxi − x̂i k2 ,
+1.3
+e=
+1 X
+ei ,
+N i=1
+σ(e)2 =
+·10−5
+7
+N
+1 X
+(ei − e)2 .
+N − 1 i=1
+(16)
+·10−6
+6
+e
+σ(e)
+1.1
+5
+0.9
+4
+0.7 16
+2
+217
+3 16
+2
+218
+nφ,max
+217
+218
+nφ,max
+(a) Mean error.
+(b) Error standard deviation.
+Figure 4: Fractional splitting error for a 35-bit quantisation. Plots were obtained with
+N = 104 samples.
+As evident from Fig. 4, variation of the splitting location from nφ,max = 217
+has only a minor impact on the error exhibited by the compression method.
+15
+Therefore, as the reduction in σ that can be achieved is small and as fractional
+splitting would increase code complexity, it is deemed to be of insufficient
+benefit to be used.
+2.5. Angle Discretisation Companding
+Equation (9), together with Eq. (7), made clear that a uniform discretisation will give rise to anisotropy in this compression method. We will now
+discuss some alternative discretisation methods with the aim of reducing
+this anisotropy. Firstly, for an angle discretisation to be practical it must
+be easily invertible; for example, Eq. (3) is straightforwardly inverted as in
+Eq. (5). Therefore, we can straightforwardly use any transformation where
+n = nintf (ψ) and ψ̂ = f −1 (n) are computable in finite time. This does, however, severely limit the possible choices to functions implementedtogether
+with their inverseby compilers. For example, nmax f (ψ) = ψ is admissible
+but nmax f (ψ) = ψ + sin (4πψ)/4π is not. This latter example was chosen
+as, from the previous error analysis, it can be thought to be a good candidate to reduce the error. However, to invert the discretisation, a root finding
+method, such as the fixed point iteration, has to be used. This is due to the
+stationary points in the mapping which can lead to large inaccuracies when
+a high degree of angle discretisation is used. That leads us to the question
+that, if stationary points could be avoided, could it be permissible to use a
+mapping that is not simply inverted? At the present time it is believed that
+it may be possible, but the root finding method is likely to be computationally expensive, especially to the desired level of precision, which in this case
+is close to machine precision.
+Smith et al. [20] proposed a method where the number of bins used for
+16
+θ was varied based on an error tolerance, τ , and the value of φ that would
+remove anisotropy. This was defined as
+1
+n̂θ,max
+= cos−1
+ cos τ − cos φ cos φ +
+π
+2nφ,max
+π
+sin φ sin φ + 2nφ,max
+
+
+,
+(17a)
+nθ,max = dπn̂θ,max e.
+(17b)
+From this definition it should be clear that this poses a high computational cost for both compression and decompression, due to several trigonometric function evaluations, each of which can run to hundreds of clock cycles.
+Furthermore, it can be shown that for this relationship, the maximum number of bins as the tolerance tends to zero is equal to 2nφ,max , which in turn
+means that this method achieves isotropy by removing θ bins as φ → π/2.
+Therefore, resolution will be wasted when fixed rate compression is used.
+Hence, this method is deemed unsuitable for the application proposed here.
+Two alternative invertible mappings were tested. The first was n =
+nint(nmax (1 − cos ψ)/2), which does contain stationary points, and was found
+to give far worse error performance when applied to φ and θ. A second mapping that was attempted was
+
+h
+i
+
+n = nint mnmax tanh γ(2ψ − 1) + c ,
+c = tanh γ,
+m=
+1
+.
+2c
+(18)
+Performance was again measured by the mean and standard deviation of
+the error defined in Eq. (16). It was found that γ = 0.5 could only give a
+reduction in σ(e) of ∼ 2%. Therefore, it is clear that the additional cost
+of this discretisation distribution outweighs the benefits. A final attempt is
+made to reduce the anisotropy by optimising the discretisation brackets to
+reduce σ(e). This was initially performed for nθ,max = 200 and nφ,max =
+17
+100, with the error evaluated on a unit sphere at ∼ 3 × 105 points. The
+optimisation was performed using a simulated annealing approach [21] where
+the cost function was σ(e). In this case, the uniform distribution gave σ(e) ≈
+7.3 × 10−3 and the optimal distribution gave σ(e) ≈ 4.8 × 10−3 . However, the
+optimal distribution found was non-smooth, with large variation in bucket
+width even when smoothing was applied. It follows that the incorporation of
+such a distribution is likely to require a device such as a lookup table, which
+in turn has a negative impact on computational efficiency.
+3. Implementation
+The analysis in the previous sections concluded that the average error
+and the absolute level of anisotropy can be reduced significantly when using
+a bit layout of h0, 7, 22i-17-18. During these experiments, all intermediate
+calculations were performed using double-precision floating-point (DPFP)
+arithmetic. This has a clear increase in computational cost and, after characterising the schemes, we wished to move some or all of the calculation to
+single-precision. However, through experimentation, differences in the error
+were noticed as the implementation of the compression routine was varied
+slightly. This highlighted that under some circumstances the assumption that
+arithmetic errors, η, were small is false unless care is taken during implementation of these methods. Here we present an exploration of these variations
+and demonstrate some of the sensitivities of the compression method to the
+intermediate working precision. Recommendations will be made based on
+this investigation as to how the arithmetic error can be kept small when
+implementing this technique.
+18
+In summary, three SPFP numbers, x, are passed to a function where θ,
+φ, and r are calculated according to Eq. (2). Then, θ and φ are quantised
+and the exponent and mantissa of r are manipulated. Finally, the resulting
+bits are combined and 64 bits are returned from the function. The effect of
+manipulating r and the degree of quantisation of θ and φ were explored in
+Section 2, but the intermediate precision when calculating and quantising θ
+and φ were not discussed.
+When calculating θ or φ there are two clear options: all intermediates are
+either SPFP or DPFP. For double-precision, this requires that x is converted
+to double when used, while the single-precision case is more straightforward.
+To characterise the difference, a similar test to Section 2 was used where
+points on the unit sphere, S2 , were sampled and the mean error and maximum
+error were calculated. The error from points in [−1, 1]3 is also considered and
+the error is normalised by the vector magnitude before averaging and finding
+the maximum. Throughout these investigations we have used h0, 7, 22i-17-18
+compression. The results for a C++ implementation are shown in Table 1.
+Table 1 shows that the error is largely invariant to the intermediate precision of tan−1 used in the θ calculation. However, the error was found to
+be susceptible to the intermediate precision of φ, where moving to singleprecision caused a significant increase in the error. When calculating φ the
+quotient z/r is required which serves as a potential source for catastrophic
+cancellation. Any error in this quotient will then propagate through several
+subsequent steps in the compression routine. Two remedies were considered
+where DPFP was used for the division and the result was converted to SPFP
+before use in cos−1 , as well as the division in SPFP and cos−1 in double.
+19
+Table 1: Normalised error for x ∈ X.
+tan−1
+cos−1
+e
+max (e)
+X
+Single
+Single
+8.2832 × 10−6
+6.4805 × 10−5
+S2
+Single
+Double
+8.2828 × 10−6
+1.7059 × 10−5
+S2
+Double
+Single
+8.2831 × 10−6
+6.4805 × 10−5
+S2
+Double
+Double
+8.2827 × 10−6
+1.7017 × 10−5
+S2
+Single
+Single
+8.3016 × 10−6
+2.7380 × 10−4
+[−1, 1]3
+Single
+Double
+8.3013 × 10−6
+1.7064 × 10−5
+[−1, 1]3
+Double
+Single
+8.3014 × 10−6
+2.7380 × 10−4
+[−1, 1]3
+Double
+Double
+8.3012 × 10−6
+1.7064 × 10−5
+[−1, 1]3
+However, both gave the similar results as entirely SPFP processes. It is concluded that the calculation of φ should be performed in DPFP but θ can be
+performed in SPFP. To further highlight this, the value of nθ and nφ calculated in SPFP were compared to using DPFP. Table 2 records the number
+of misses and it is clear that φ is significantly more lossy than θ.
+Table 2: Single precision bin misses compared to double for x ∈ X.
+nθ misses
+0.2008%
+X = S2
+nθ misses
+0.2039%
+X = [−1, 1]3
+nφ misses
+0.2411%
+X = S2
+nφ misses
+0.2603%
+X = [−1, 1]3
+The effect of precision on the quantisation of θ and φ was also investigated.
+In the quantisation of φ it was found that the error and bin misses were
+20
+invariant with precision. Therefore, after calculating φ in DPFP, it can be
+cast to a SPFP number for the quantisation. Similar results were found for
+θ. A further, albeit small, reduction in the θ quantisation error was obtained
+by moving the domain for θ from [0, 2π] to [−π, π]. This avoids the addition,
+but the minus sign has to be detected and accounted for in the quantisation.
+For completeness, these tests were also performed using CUDA-C, Fortran, and CUDA-Fortran using the same sample points. The results were
+found to be similar and in the case of the error terms were identical to the
+third and fourth significant figures. Sample implementations in the respective
+languages are included in the ESM.
+4. Applications to high-order CFD
+The computational setting chosen to perform the numerical testing within
+is the flux reconstruction discontinuous spectral element method [22, 23, 24].
+This is a high-order method where the domain is meshed with elements
+within which polynomials are fitted. We will restrict the computational subdomains here to be hexahedral, but other topologies are supported within
+FR. The internal solution point locations, as well as the interface flux point
+locations, will be a tensor product of Guass–Legendre quadrature points.
+The invisicid common interface flux is calculated using Rusanov’s method
+with Davis wave speeds [25, 26]. Furthermore, the common viscous interface
+flux is set using the BR1 method of Bassi and Rebay [27]. Throughout this
+section, temporal integration is performed by a 4th order low-storage explicit
+Runge–Kutta scheme [28]. The time step, ∆t, was set such that the results
+were independent of the time scheme.
+21
+Table 3: Steps for calculating flux divergence of Navier–Stokes with FR, with terms defined
+in accompanying text. Quantities which may be subject to compression are highlighted in
+blue.
+Step
+Input
+1
+qs
+2
+Output
+→ qf
+[qf , nf ] → nf · FIinv
+Description
+Interpolate solution to flux points
+Common interface invsicid flux
+3
+qf
+→ wI
+Common interface primitives
+4
+qs
+→ ws
+Primitives at solution points
+5
+ws
+→
+∇ws
+Gradient of primitives
+6
+[ ∇ws , wI ] →
+∇wc
+Correct gradient of primitives
+7
+∇wc
+∇wf
+Interpolate solution to flux points
+[ ∇wf , nf , Jf ,|Jf |, qf ] → n · FIvis
+Common interface viscous flux
+8
+9
+10
+11
+12
+→
+[ ∇ws , Js , |Js |, qs ] →
+Fs
+→
+Fs
+∇ · Fs
+[ Fs , n · (FIinv − FIvis )] → Ff c
+[Ff c , ∇ · Fs ] →
+∇ · Fc
+22
+Flux at solution points
+Divergence of flux
+Correction to flux at interfaces
+Correct divergence of flux
+Table 3 details the steps required to calculate the divergence of the flux
+(right-hand side) for the Navier–Stokes equations using the FR algorithm.
+Here q indicates the conserved variables, w the primitive variables, and F
+the flux tensor. Superscript s indicates quantities at the solution points, f
+at the flux points, I the common interface values, c corrected values at the
+solution points, and cf the correction at the flux points. Terms which can
+be subject to compression are highlighted in blue.
+Higher dimensional terms, such as fluxes and solution gradients, are handled by applying compression in a row-wise fashion. For example, consider
+the inviscid flux tensor given by
+
+ρu
+ρv
+ρw
+
+ ρu2 + p
+ρuv
+ρuw
+
+
+ρuv
+ρv 2 + p
+ρvw
+F=
+
+
+ρuw
+ρvw
+ρw2 + p
+
+
+u(E + p) v(E + p) w(E + p)
+
+
+
+
+
+,
+
+
+
+
+(19)
+where p is the pressure, E is the total energy, and γ is the ratio of specific
+heats. Here, each colour-coded row is treated as a three component vector
+and compressed independently of any other row.
+The means by which compression is incorporated into a kernel is shown
+in Alg. 1. This kernel, which corresponds to step 10 (divergence of the flux)
+s
+applies the divergence operator, D, to the flux tensor, F = compress(Fs ) at
+each nodal point, to give ∇ · Fs . The decompression operation is highlighted
+in red.
+23
+Algorithm 1: Divergence of compressed flux (see Table 3, step 10).
+Difference from uncompressed kernel highlighted in red. Here ne is
+the number of elements, ns is the number of solution points, nf is the
+number of flux points, and np = 5 is the number of equations.
+S
+Data: F ∈ Rnc ×ns ×np , D ∈ R3ns ×ns
+Result: ∇ · Fs ∈ Rnc ×ns ×np
+∇ · FS ← 0
+// Loop over elements
+for i ∈ [1, . . . , ne ] do
+// Outer loop over solution points
+for j ∈ [1, . . . , ns ] do
+// Decompress flux
+s
+X ← decompress(Fij ) to give X ∈ Rnp ×3
+// Inner loop over solution points
+for k ∈ [1, . . . , ns ] do
+// Prepare divergence operator
+d ← [Djk , D(j+ns )k , D(j+2ns )k ]
+// Accumulate contribution to divergence
+∇ · Fsik ← ∇ · Fsik + d · X
+end
+end
+end
+24
+For each step in the FR algorithm it is possible to directly calculate how
+much data must be read from and written out to memory. The amount
+of data movement required by each step of the FR approach as described
+in Table 3, along with the reduction factor enabled by compression, can
+be seen in Table 4. These figures may be used to form a prediction for
+the performance improvement due compression an assumption which is wellsupported by previous studies of FR on hexahedral domains [1, 29]. From
+this analysis we conclude that performance improvements of 20.1%, 20.6%,
+and 21.0% for k ∈ {3, 4, 5} respectively can be obtained.
+25
+Table 4: Uncompressed memory transfer requirements (T / KiB) per step per hexahedral
+element for FR applied to the Navier–Stokes Equations, and the memory compression
+ratio, Γ.
+k=3
+k=4
+k=5
+Step
+T
+Γ
+T
+Γ
+T
+Γ
+1
+3.13
+1.00
+5.37
+1.00
+8.44
+1.00
+2
+4.88
+0.92
+7.62
+0.92
+10.97
+0.92
+3
+3.75
+1.00
+5.86
+1.00
+8.44
+1.00
+4
+2.50
+1.00
+2.50
+1.00
+2.50
+1.00
+5
+5.00
+0.75
+9.77
+0.75
+16.88
+0.75
+6
+9.38
+0.73
+17.58
+0.72
+29.53
+0.71
+7
+9.38
+0.67
+16.11
+0.67
+25.31
+0.67
+8
+16.13
+0.79
+25.20
+0.79
+36.28
+0.79
+9
+11.25
+0.71
+21.97
+0.71
+37.97
+0.71
+10
+5.00
+0.75
+9.77
+0.75
+16.88
+0.75
+11
+7.50
+0.83
+13.18
+0.81
+21.09
+0.80
+12
+3.75
+1.00
+7.32
+1.00
+12.66
+1.00
+Weighted average
+81.63
+0.80
+142.25
+0.79
+226.94
+0.79
+26
+4.1. Isentropic Convecting Vortex
+We will begin our numerical experiments with the isentropic convecting
+vortex (ICV) as defined by Shu [30]. This is a solution to the compressible
+Euler’s equations for an ideal gas, written in 3D as
+qt + ∇ · F = 0,
+h
+iT
+q = ρ ρu ρv ρw E ,
+1
+p
+E = ρ(u2 + v 2 + w2 ) +
+,
+2
+γ−1
+(20a)
+(20b)
+(20c)
+where the flux tensor, F, is defined in Eq. (19). The initial condition for the
+ICV was taken to be defined as
+
+
+β
+1 − r2
+u = u0 +
+(y0 − y) exp
+,
+2π
+2
+
+
+1 − r2
+β
+(x0 − x) exp
+v = v0 −
+,
+2π
+2
+w = 0,
+ γ
+
+ γ−1
+(γ − 1)β 2
+2
+exp 1 − r
+,
+p= 1−
+8γπ 2
+1
+(21a)
+(21b)
+(21c)
+(21d)
+ρ = pγ ,
+(21e)
+r = kx − x0 k2 ,
+(21f)
+where β is a constant controlling vortex strength, typically set to β = 5. For
+the purposes of this test the convective velocities, u0 and v0 , were set such
+that they vary on the unit circle, as
+u0 = cos ψ
+and v0 = sin ψ.
+(22)
+This flow was applied to a fully periodic domain with Ω = [0, 20]×[0, 20]×
+[0, 2], which was divided into 20 × 20 × 2 subdomains.
+27
+20
+U0
+15
+ψ
+y 10
+5
+00
+5
+10
+x
+15
+20
+Figure 5: ICV density showing orientation of convective velocity.
+The ICV test case permits the actual solution error to be analytically
+calculated at later times, and this is the primary advantage of using this test
+case. Here the results presented will focus on the absolute error in ρ averaged
+over the whole domain, denoted as e1 and defined as
+N
+1 X
+e1 (t) =
+kρexact (t, xi ) − ρ(t, xi )k1
+N i=1
+(23)
+where N is the number of points used for averaging. Here we have averaged
+over all the solution points in the domain, which for the grid defined is
+20 × 20 × 2 × (4 + 1)3 = 105 . The error was considered at t = 20, which
+for ψ = {0, 90} should lead to the vortex returning to the start position.
+The error as the convective velocity angle is varied is displayed in Fig. 6; the
+line labelled as ‘base’ is the behaviour for the unaltered scheme running in
+single precision. Anisotropy of the maximal-order polynomial basis used in
+28
+this tensor product formulation is clearly visible as a reduction in the error
+by approximately half as the angle is varied.
+·10−4
+2.0
+Base
+h1, 8, 23i-16-16
+h0, 8, 23i-16-17
+h0, 7, 23i-17-17
+h0, 7, 22i-17-18
+1.5
+e1
+1.0
+0.5
+0
+30
+60
+90
+ψ
+Figure 6: ICV error with flow angle for various methods for degree k = 4 FR.
+Going on to examine the impact of compression, it is clear the additional
+bits obtained from the sign, exponent, and mantissa have a significant effect
+on the error of the scheme, with h0, 7, 22i-17-18 having comparative error to
+the base scheme.
+29
+4.2. Taylor–Green Vortex
+We will now move on to consideration of the more complex compressible
+Navier–Stokes Equation set, written in the form
+qt + ∇ · F = ∇ · Fv , where
+(24a)
+
+
+0
+0
+0
+
+
+
+
+
+
+τxx
+τyx
+τzx
+
+
+
+
+Fv = 
+
+τxy
+τyy
+τzy
+
+
+
+
+
+
+τxz
+τyz
+τzz
+
+
+uτxx + vτxy + wτxz − bx uτyx + vτyy + wτyz − by uτzx + vτzy + wτzz − bz
+(24b)
+Here τij is the standard viscous stress tensor and bi are the components of
+−κ∇T , where T is the temperature. Setting the bulk viscosity to zero, these
+may be written as
+τxy = τyx = µ(uy + vx ),
+τxx = 2λux − λ(vy + wz ),
+(25a)
+τyz = τzy = µ(vz + wy ),
+τyy = 2λvy − λ(wz + ux ),
+(25b)
+τzx = τxz = µ(wx + uz ),
+τzz = 2λwz − λ(ux + vy ),
+(25c)
+b = [bx , by , bz ]T = −κ∇T,
+(25d)
+where λ = 2µ/3 and κ is the thermal diffusivity. This equation set, after application to the FR methodology, offers several opportunities for compression.
+Again the flux terms can be compressed, as in Eq. (19), with compression
+being applied to the aggregate of F − Fv with compression applied for these
+flux terms at both the FR solution and flux points. Furthermore, the gradient terms used in the construction of τij can be compressed once again at
+the FR solution and flux points.
+30
+The case which was applied to the Navier–Stokes equations was the
+Taylor–Green vortex [31, 32], whose initial condition is defined with
+
+
+U0 f (x, y, z)
+
+
+
+
+u = −U0 f (y, x, z) , p = p(x, y, z).
+
+
+0
+(26)
+Here we have defined the functions f and p for simplicity, and they take the
+form:
+x
+y
+z
+cos cos ,
+k
+k k
+
+
+ρ0 U02
+2y
+2x
+2z
+p(x, y, z) = p0 +
++ cos
+cos
+2 + cos
+.
+16
+k
+k
+k
+f (x, y, z) = sin
+(27a)
+(27b)
+The density is then set based on Boyle’s Law, assuming an ideal gas,
+ρ=
+pρ0
+.
+p0
+We introduced these functions in the definition of the TGV as it permits clear
+notation for spatial transformation of the initial condition with the condition
+in Eq. (26) being traditionally used. The proposed compression was shown
+in Section 2 to have some degree on anisotropy. Hence, we also investigated
+a slight modification of the initial condition
+
+
+U f (y, x, z)
+ 0
+
+
+
+u = −U0 f (x, y, z) , p = p(z, y, x).
+
+
+0
+(28)
+This condition exhibits a rotation through 90◦ . Evaluation was performed
+using the following dissipation metrics:
+Z
+1
+d
+1
+ξ1 = −
+ρ(x, t)(u · u)dx,
+2
+ρ0 U0 |Ω| dt Ω 2
+Z
+1
+1
+ξ2 =
+ρ(x, t)(ω · ω )dx, where ω = ∇ × u.
+2
+2µU0 |Ω| Ω 2
+31
+(29)
+(30)
+Throughout, a TGV was considered for Ω = [0, 2π]3 with Re = 1600,
+M a = 0.08 and P r = 0.71, based on U0 = 1, k = 1, ρ0 = 1 and p0 = 100.
+Furthermore, low-storage explicit four-stage fourth-order Runge–Kutta time
+integration was used and a time step was chosen such that results were independent of ∆t. For the cases investigated here, that meant a value of
+∆t = 10−3 . Comparative DNS results were obtained from DeBonis [33].
+Initially, a comparison is made between the three compression regimes using the initial condition set out in Eq. (26). The results can be seen in Fig. 7.
+This particular flow is initially laminar and transition to turbulence occurs
+around 3 < t < 7. Looking at the figure, it is evident that compression has
+had a limited impact on the laminar region, which may have been predicted
+from the ICV results. Throughout transition as turbulent structures develop
+small scale motions begin to have an increased importance. In particular, the
+compression method will introduce small perturbations, which can affect the
+energy at the smallest scales. It can be seen from Fig. 7b that compression
+has led to a small reduction in the peak turbulent dissipation. This may be
+attributed to the compression error having the greatest impact at the smallest scales, the scales are known to have a large contribution to the scheme
+dissipation, as was demonstrated by Trojak et al. [34]. The TGV results
+here conform with ICV tests with the h0, 7, 22i-17-18 compression regime
+introducing the least error.
+As was noted in Section 2.3, the proposed compression method has some
+degree of anisotropy. To understand if this anisotropy has a significant impact on the TGV test case the initial condition was transformed to that of
+Eq. (28). Comparison is displayed in Fig. 8a for the compression regime
+32
+·10−2
+1.4
+DNS
+Base
+h0, 8, 23i-16-17
+h0, 7, 23i-17-17
+h0, 7, 22i-17-18
+1.2
+1.0
+ξ2 0.8
+0.6
+0.4
+0.2
+0.0
+5
+0
+10
+t
+15
+20
+(a) u = U0 [f (x, y, z), −f (y, x, z), 0]T
+·10−2
+1.1
+1.0
+ξ2
+0.9
+DNS
+Base
+h0, 8, 23i-16-17
+h0, 7, 23i-17-17
+h0, 7, 22i-17-18
+0.8
+7
+8
+9
+10
+11
+12
+t
+(b) u = U0 [f (x, y, z), −f (y, x, z), 0]T
+Figure 7: Taylor–Green Vortex enstrophy based decay rate, compression comparison for
+Re = 1600 and M a = 0.08 on a 163 element hexahedral grid with degree k = 4 FR.
+33
+·10−2
+1.0
+ξ2
+0.9
+DNS
+Base
+h0, 7, 22i-17-18, xyz
+h0, 7, 22i-17-18, yxz
+0.8
+7
+8
+9
+10
+11
+12
+t
+(a) Comparison of Eq. (26) and Eq. (28).
+·10−2
+1.1
+1.0
+ξ2
+0.9
+DNS
+Base
+h0, 7, 22i-17-18, both
+h0, 7, 22i-17-18, flux
+h0, 7, 22i-17-18, grad
+0.8
+7
+8
+9
+10
+11
+12
+t
+(b) Flux vs. gradient compression
+Figure 8: Taylor–Green Vortex enstrophy based decay rate, transformed and partial compression comparison for Re = 1600 and M a = 0.08 on a 163 element hexahedral grid with
+degree k = 4 FR.
+34
+h0, 7, 22i-17-18. It is clear that anisotropy has affected the results in this
+case, but the difference is small compared to the potential difference caused
+by reduction to h0, 8, 23i-16-17. Therefore, the degree of isotropy achieved
+by h0, 7, 22i-17-18 is deemed to be acceptable.
+Within FR there is the potential for compression to be applied to either
+the flux terms, gradient terms, or both of these components. As gradient
+terms are solely used in the calculation of the viscous flux, and as the viscous
+flux typically has significantly smaller magnitude than the inviscid flux, it is
+hypothesised that compressing the flux will have a larger impact than the
+gradient in this case. Figure 8b makes this comparison. It may be observed
+that the differences are of the order of the differences observed in Fig. 7
+and the application of compression of both terms leads to smaller observed
+differences.
+Finally, to demonstrate the effect of compression with varying k and h,
+tests were conducted for k ∈ {2, 3, 4} and DoF ∈ {803 , 1603 }. The outcomes
+of which are presented in Fig. 9 where small variations in the enstophy between the compressed and uncompressed scheme can be observed. When
+considering the highest resolution case of k = 4 and DoF = 1603 , the increased fidelity made the difference more pronounced. However, we remark
+here that the differences are similar in magnitude to what one would observe
+when changing the approximate Riemann solver.
+35
+·10−2
+1.4
+DNS
+k=2
+k=3
+k=4
+1.2
+1.0
+ξ2 0.8
+0.6
+0.4
+0.2
+0.0
+0
+5
+10
+t
+15
+20
+(a) DoF ≈ 803 .
+·10−2
+1.4
+DNS
+k=2
+k=3
+k=4
+1.2
+1.0
+ξ2 0.8
+0.6
+0.4
+0.2
+0.0
+0
+5
+10
+t
+15
+20
+(b) DoF ≈ 1603 .
+Figure 9: Taylor–Green Vortex enstrophy derived dissipation for various k and DoF. Solid
+lines indicate the uncompressed version, and dashed the compressed with h0, 7, 22i-17-18.
+36
+5. Performance Evaluation
+In this section we will evaluate the computational performance of our
+proposed scheme. For this, the following problem was considered:
+C = A + B,
+(31)
+where A, B, and C are 3 × N matrices of single-precision numbers. This
+case was chosen as it has an extremely low arithmetic intensity.
+A kernel was designed that took in two 64-bit unsigned integers and
+returned one 64-bit unsigned integer. Within the kernel, the inputs were
+decompressed into two 3D vectors, the vectors were added, and the result was
+compressed to give the output. Throughout h0, 7, 22i-17-18 compression was
+used. All benchmarks were performed on an NVIDIA Titan V GPU which is
+representative of the hardware typically employed by high performance FR
+codes. The specifications of the GPU can be seen in Table. 5.
+Table 5: NVIDIA Titan V key statistics.
+Global Memory
+12.6 GB
+L2 Cache
+4.5 MiB
+Clock Rate
+1.455 GHz
+Registers/Block
+65536
+The results comparing the speedup afforded by the kernel incorporating
+compression as matrix size varies are shown in Fig. 10. Included are lines
+to indicate the theoretical peak speedup (dashed line), as well as a line indicating the baseline problem size which exceeds the capacity of the L2 cache
+37
+(dotted line). It is clear that once the matrices may no longer be entirely
+resident in L2 cache, the compression kernel becomes more favourable. This
+proves our hypothesis that this form of compression may aid in reducing
+computation time in applications that are bound by global memory bandwidth. Furthermore, by N = 222 close to peak speedup is obtained, which
+is equivalent to 144 MiB of data in the baseline case. We remark here that
+144 MiB is a relatively small amount of data relative to the size of global
+memory. As such, we expect a large proportion of bandwidth bound kernels
+to be able to achieve the optimal speedup.
+1.6
+Speedup
+1.4
+1.2
+1
+0.8
+0.6
+210 212 214 216 218 220 222 224
+N
+Figure 10: Speedup of compression vs. array size on NVIDIA Titan V GPU shown in red.
+The additional blue line corresponds to theoretical maximum speedup of 1.5 whilst the
+the array size corresponding to the 4.5MiB L2 cache is shown in green.
+6. Conclusions
+A compression algorithm was presented for three-dimensional single-precision
+vectors that was designed to work on local data to reduce memory bandwidth
+38
+when retrieving vectors from global memory. The method utilised spherical
+polar coordinates, discretising the angles using integers, and using a modified floating-point bit layout. It was found that a seven-bit exponent and
+22-bit mantissa were sufficient to increase the quantisation of the angles to
+such a point that in numerical test cases on Euler’s equations, the error was
+appreciably similar to the baseline scheme. Further tests were performed
+on the compressible Navier–Stokes equations, particularly the transitional
+Taylor-Green test case. Only limited variation in results was observed when
+compression was applied in this case. Lastly, performance evaluation showed
+that a speedup close to the theoretical peak could be achieved for cases that
+could not be entirely resident in the L2 cache.
+Acknowledgements
+The authors would like to thank Chris Cox, Tarik Dzanic, and Lai Wang
+for their technical editing, language editing, and proofreading.
+References
+[1] F. D. Witherden, A. M. Farrington, P. E. Vincent, PyFR: An Open
+Source Framework for Solving Advection-Diffusion Type Problems on
+Streaming Architectures Using the Flux Reconstruction Approach,
+Computer Physics Communications 185 (11) (2014) 3028–3040. arXiv:
+1312.1638, doi:10.1016/j.cpc.2014.07.011.
+URL http://dx.doi.org/10.1016/j.cpc.2014.07.011
+[2] F. D. Witherden, A. Jameson, Impact of Number Representation for
+39
+High-Order Implicit Large-Eddy Simulations, AIAA Journal 58 (1)
+(2019) 1–14. doi:10.2514/1.j058434.
+[3] H. Homann, J. Dreher, R. Grauer, Impact of the Floating-Point Precision and Interpolation Scheme on the Results of DNS of Turbulence by
+Pseudo-Spectral Codes, Computer Physics Communications 177 (2007)
+560–565. doi:10.1016/j.cpc.2007.05.019.
+[4] D. H. Bailey, High-Precision Floating-Point Arithmetic in Scientific
+Computing, Computing in Science and Engineering 7 (3) (2005) 54–61.
+[5] W. Trojak, A. Scillitoe, R. Watson, Effect of Flux Function Order and
+Working Precision in Spectral Element Methods, in: AIAA Scitech 2020
+Forum, no. January, American Institute of Aeronautics and Astronautics, Orlando, FL, 2020, pp. 1–21. doi:10.2514/6.2020-0566.
+URL https://arc.aiaa.org/doi/10.2514/6.2020-0566
+[6] Nvidia, Nvidai Tesla v100 Gpu Architecture; The Wolrd’s Most Advanced Data Center Gpu, Tech. Rep. August (2017).
+[7] D. Zuras, M. Cowlishaw, A. Aiken, M. Applegate, D. Bailey, S. Bass,
+D. Bhandarkar, M. Bhat, D. Bindel, S. Boldo, S. Canon, S. R. Carlough, M. Cornea, J. H. Crawford, J. D. Darcy, D. Das, S. M. Daumas,
+B. Davis, M. Davis, D. Delp, J. Demmel, M. A. Erle, H. A. H. Fahmy,
+J. P. Fasano, R. Fateman, E. Feng, W. E. Ferguson, A. Fit-Florea,
+L. Fournier, C. Freitag, I. Godard, R. A. Golliver, D. Gustafson,
+M. Hack, J. R. Harrison, J. Hauser, Y. Hida, C. N. Hinds, G. Hoare,
+D. G. Hough, J. Huck, J. Hull, M. Ingrassia, D. V. James, R. James,
+40
+W. Kahan, J. Kapernick, R. Karpinski, J. Kidder, P. Koev, R.-C.
+Li, Z. A. Liu, R. Mak, P. Markstein, D. Matula, G. Melquiond,
+N. Mori, R. Morin, N. Nedialkov, C. Nelson, S. Oberman, J. Okada,
+I. Ollmann, M. Parks, T. Pittman, E. Postpischil, J. Riedy, E. M.
+Schwarz, D. Scott, D. Senzig, I. Sharapov, J. Shearer, M. Siu, R. Smith,
+C. Stevens, P. Tang, P. J. Taylor, J. W. Thomas, B. Thompson,
+W. Thrash, N. Toda, S. D. Trong, L. Tsai, C. Tsen, F. Tydeman, L. K.
+Wang, S. Westbrook, S. Winkler, A. Wood, U. Yalcinalp, F. Zemke,
+P. Zimmermann, IEEE Std 754-2008 (Revision of IEEE Std 754-1985),
+IEEE Standard for Floating-Point Arithmetic, Tech. Rep. 754-2008
+(2008). doi:10.1109/IEEESTD.2008.4610935.
+URL
+http://ieeexplore.ieee.org/xpl/freeabs{_}all.jsp?
+arnumber=4610935{%}5Cnhttp://ieeexplore.ieee.org/servlet/
+opac?punumber=4610933
+[8] E. J. Delp, O. R. Mitchell, Image Compression Using Block Truncation
+Coding, IEEE Transactions on Coimmunication 27 (9) (1979) 1335–
+1342. arXiv:arXiv:1011.1669v3, doi:10.1017/CBO9781107415324.
+004.
+[9] P. Ning, L. Hesselink, Vector Quantization for Volume Rendering, in:
+VVS ’92 Proceedings of the 1992 workshop on Volume visualization,
+1992, pp. 69–74.
+[10] G. Campbell, T. A. DeFanti, J. Frederiksen, S. A. Joyce, L. A. Leske,
+J. A. Lindberg, D. J. Sandin, Two Bit/Pixel Full Color Encoding, in:
+SIGGRAPH ’86 Proceedings of the 13th annual conference on Computer
+41
+graphics and interactive techniques, Vol. 20, 1986, pp. 215–223. arXiv:
+arXiv:1011.1669v3, doi:10.1017/CBO9781107415324.004.
+[11] Y. Linde, A. Buzo, R. M. Gray, An Algorithm for Vector Quantizer
+Design, IEEE Transactions on Communications 28 (1) (1980) 84–95.
+doi:10.1109/TCOM.1980.1094577.
+[12] I. K. Iourcha, K. S. Nayak, Z. Hong, System and Method for Fixed-Rate
+Block-Based Image Compression with Inferred Pixel Values (1999).
+[13] J. Schneider, R. Westermann, Compression Domain Volume Rendering,
+in: Proceedings of the IEEE Visualization Conference, 2003, pp. 293–
+300. doi:10.1109/VISUAL.2003.1250385.
+[14] P. Lindstrom, Fixed-rate compressed floating-point arrays, IEEE Transactions on Visualization and Computer Graphics 20 (12) (2014) 2674–
+2683. doi:10.1109/TVCG.2014.2346458.
+[15] F. Alted, Why modern CPUs are starving and what can be done about
+it, Computing in Science and Engineering 12 (2) (2010) 68–71. doi:
+10.1109/MCSE.2010.51.
+[16] J. Ziv, A. Lempel, A Universal Algorithm for Sequential Data Compression, IEEE Transactions on Information Theory 23 (3) (1977) 337–343.
+doi:10.1109/TIT.1977.1055714.
+[17] J. Ziv, A. Lempel, Compression of lndiwdual Sequences, IEEE Transactions on Information Theory 24 (5) (1978) 530–536.
+42
+[18] Z. H. Cigolle, M. Mara, S. Donow, M. Mcguire, D. Evangelakos,
+Q. Meyer, A Survey of Efficient Representations for Independent Unit
+Vectors, Journal of Computer Graphics Techniques 3 (2) (2014) 1–30.
+[19] Q. Meyer, J. Süßmuth, G. Sußner, M. Stamminger, G. Greiner, On
+floating-point normal vectors, Computer Graphics Forum 29 (4) (2010)
+1405–1409. doi:10.1111/j.1467-8659.2010.01737.x.
+[20] J. Smith, G. Petrova, S. Schaefer, Encoding normal vectors using optimized spherical coordinates, Computers and Graphics 36 (5) (2012)
+360–365. doi:10.1016/j.cag.2012.03.017.
+URL http://dx.doi.org/10.1016/j.cag.2012.03.017
+[21] D. Bertsimas, J. Sitsiklis, Simulated Annealing (1993).
+URL
+http://www.mit.edu/{~}dbertsim/papers/Optimization/
+Simulatedannealing.pdf
+[22] H. T. Huynh, A Flux Reconstruction Approach to High-Order Schemes
+Including Discontinuous Galerkin Methods, in: 18th AIAA Computational Fluid Dynamics Conference, Vol. 2007-4079, 2007, pp. 1–42.
+doi:10.2514/6.2007-4079.
+URL http://arc.aiaa.org/doi/pdf/10.2514/6.2007-4079
+[23] H. T. Huynh, A Flux Reconstruction Approach to High-Order Schemes
+Including Discontinuous Galerkin for Diffusion, in:
+47th AIAA
+Aerospace Science Meeting, no. January in Fluid Dynamics and Colocated Conferences, American Institute of Aeronautics and Astronautics, 2009, pp. 1–34. doi:doi:10.2514/6.2007-4079.
+43
+URL http://arc.aiaa.org/doi/pdf/10.2514/6.2007-4079http://
+dx.doi.org/10.2514/6.2007-4079
+[24] P. E. Vincent, P. Castonguay, A. Jameson, A New Class of High-Order
+Energy Stable Flux Reconstruction Schemes, Journal of Scientific Computing 47 (1) (2010) 50–72. doi:10.1007/s10915-010-9420-z.
+URL http://link.springer.com/10.1007/s10915-010-9420-z
+[25] V.
+Rusanov,
+Stationary
+The
+Shock
+Calculation
+Waves
+with
+of
+the
+Interaction
+Barriers,
+Mat. Fiz. 1 (2) (1961) 267–279.
+Zh.
+of
+Non-
+Vychisl.
+Mat.
+arXiv:arXiv:1011.1669v3,
+doi:10.18287/0134-2452-2015-39-4-453-458.
+[26] S. Davis, Simplified Second-order Godunov-type Methods, SIAM Journal on Scientific and Statistical Computing 9 (3) (1988) 445–473.
+[27] F. Bassi, S. Rebay, A High-Order Accurate Discontinuous Finite
+Element Method for the Numerical Solution of the Compressible
+NavierStokes Equations, Journal of Computational Physics 131 (2)
+(1997) 267–279. doi:10.1006/jcph.1996.5572.
+URL
+http://linkinghub.elsevier.com/retrieve/pii/
+S0021999196955722
+[28] C. A. Kennedy, M. H. Carpenter, R. M. Lewis, Low-Storage, Explicit
+Runge-Kutta Schemes for the Compressible Navier-Stokes Equations,
+Applied Numerical Mathematics 35 (1) (2000) 177–219.
+[29] J. Romero, J. Crabill, J. Watkins, F. Witherden, A. Jameson, ZEFR: A
+GPU-accelerated high-order solver for compressible viscous flows using
+44
+the flux reconstruction method, Computer Physics Communications 250
+(2020) 107169. doi:10.1016/j.cpc.2020.107169.
+URL https://doi.org/10.1016/j.cpc.2020.107169
+[30] C.-w. Shu, Essentially Non-Oscillatory and Weighted Essentially NonOscillatory Schemes for Hyperbolic Conservation Laws Operated by Universities Space Research Association, ICASE Report (97-65) (1997) 1–
+78. doi:10.1007/BFb0096355.
+[31] G. I. Taylor, A. E. Green, Mechanism of the Production of Small
+Eddies from Large Ones, Proceedings of the Royal Society A: Mathematical, Physical and Engineering Sciences 158 (895) (1937) 499–521.
+arXiv:arXiv:1205.0516v2, doi:10.1098/rspa.1937.0036.
+URL
+http://rspa.royalsocietypublishing.org/cgi/doi/10.
+1098/rspa.1937.0036
+[32] M. E. Brachet, S. A. Orszag, B. G. Nickel, R. H. Morf, U. Frisch, SmallScale Structure of the Taylor-Green Vortex, Journal of Fluid Mechanics
+130 (1983) 411–452.
+[33] J. R. DeBonis, Solutions of the Taylor-Green Vortex Problem Using High-Resolution Explicit Finite Difference Methods, 51st AIAA
+Aerospace Sciences Meeting including the New Horizons Forum and
+Aerospace Exposition (February 2013). doi:10.2514/6.2013-382.
+URL http://arc.aiaa.org/doi/10.2514/6.2013-382
+[34] W. Trojak, R. Watson, A. Scillitoe, P. G. Tucker, Effect of Mesh Quality
+on Flux Reconstruction in Multi-Dimensions, Tech. rep. (2018). arXiv:
+45
+arXiv:1809.05189v1.
+URL https://arxiv.org/pdf/1809.05189.pdf
+46

@@ -1,0 +1,97 @@
+# Early Scanline Termination
+
+
+## Overview
+Early Scanline Termination is an optimization that stops processing a scanline as soon as a local ray through a pixel does not intersect any iso-surfaces, reducing the number of local rays cast per pixel [S1, unofficial]. It builds on [Early Shader Termination](969-early-shader-termination.md) by adding a spatial coherence check along the scanline direction, allowing the renderer to skip entire segments of empty space within a macro-cell projection [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Projected macro-cell, set of surface cells within the macro-cell, current scanline (row or column of pixels), and the image buffer [S1, unofficial].
+*   **Output:** Updated image buffer with colors for intersected pixels; identification of erroneous blank pixels (holes) for post-processing [S1, unofficial].
+
+**Data Structures:**
+*   **Image Buffer:** Stores color values for each pixel [S1, unofficial].
+*   **Sequence Flags:** Two flags per pixel indicating whether the pixel was recently dropped due to horizontal or vertical early scanline termination [S1, unofficial]. Flags are set to 1 for all empty dropped pixels [S1, unofficial]. The bounds of each new sequence of dropped pixels are marked by setting the sequence flag of the pixel immediately preceding the sequence and the pixel immediately following the sequence to 0 [S1, unofficial]. A pixel through which a regular local ray has been cast has its sequence flags reset to 0 [S1, unofficial].
+
+**Steps:**
+1.  Identify all scanlines intersecting the macro-cell projection [S1, unofficial].
+2.  Check for problem cases by calculating a representative surface normal for each surface cell and checking dot products with two reference vectors [S1, unofficial]. If a boundary cell prohibits termination, project its center point [S1, unofficial]. The collection of these projections forms a critical region [S1, unofficial].
+3.  Iterate through pixels of a scanline from one boundary to the other [S1, unofficial]. If a local ray does not intersect any iso-surface and the pixel is outside the critical region, stop processing the scanline [S1, unofficial]. Mark all remaining empty pixels as dropped, setting the appropriate sequence flag (horizontal or vertical) to 1 [S1, unofficial]. Set the sequence flag of the pixel immediately preceding the first dropped pixel and the pixel immediately following the last dropped pixel to 0 to mark the sequence bounds [S1, unofficial]. If a regular local ray is cast through a pixel, reset its sequence flags to 0 [S1, unofficial].
+4.  After frame completion, identify sequences of blank pixels with sequence flags set, bounded on both sides by non-blank pixels with unset flags [S1, unofficial]. Cast rays from these pixels through the complete volume to fill the holes [S1, unofficial].
+
+**Formulas:**
+Not given in the sources.
+
+**Parameters:**
+Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Left-facing surface normals:** If projected surface normals point towards the left, early termination is disallowed for scanlines intersecting those parts until all such intersections are processed [S1, unofficial].
+*   **Dangerous faces:** Certain surface orientations can cause errors if termination is applied [S1, unofficial].
+*   **Errors:** Early scanline termination can lead to errors in about 0.017 percent of pixels on average, resulting in visible holes [S1, unofficial]. These holes must be identified and filled after frame completion [S1, unofficial].
+*   **Sequence Flag Management:** Flags must be carefully managed to correctly identify erroneous sequences [S1, unofficial]. Pixels erroneously dropped will never be part of a dropped sequence again [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def early_scanline_termination(macro_cell, scanline_pixels, image_buffer, sequence_flags, is_horizontal):
+    # [G] Standard projection of 3D cell centers to 2D image coordinates
+    critical_points = [project_to_image(cell.center) for cell in macro_cell.surface_cells if cell.prohibits_termination]
+
+    terminated = False
+    first_dropped_idx = None
+    last_dropped_idx = None
+
+    for i, pixel in enumerate(scanline_pixels):
+        if terminated:
+            break
+
+        # [G] Standard local ray intersection with macro-cell iso-surfaces
+        intersection = cast_local_ray(pixel)
+
+        if intersection is not None:
+            # [G] Standard shading and color computation
+            image_buffer[pixel] = compute_color(intersection)
+            sequence_flags[pixel] = (0, 0)
+        else:
+            # [G] Standard spatial query to check if pixel is outside the critical region
+            if is_outside_critical_region(pixel, critical_points):
+                terminated = True
+                first_dropped_idx = i
+                for j in range(i, len(scanline_pixels)):
+                    p = scanline_pixels[j]
+                    image_buffer[p] = BLANK
+                    if is_horizontal:
+                        sequence_flags[p] = (1, sequence_flags[p][1])
+                    else:
+                        sequence_flags[p] = (sequence_flags[p][0], 1)
+                    last_dropped_idx = j
+
+                # Mark sequence bounds by setting preceding/following flags to 0
+                if first_dropped_idx > 0:
+                    sequence_flags[scanline_pixels[first_dropped_idx - 1]] = (0, 0)
+                if last_dropped_idx + 1 < len(scanline_pixels):
+                    sequence_flags[scanline_pixels[last_dropped_idx + 1]] = (0, 0)
+
+def fill_holes(image_buffer, sequence_flags, image_height, image_width):
+    for y in range(image_height):
+        for x in range(image_width):
+            if image_buffer[y, x] == BLANK and sequence_flags[y, x] != (0, 0):
+                # [G] Verify bounds: preceding and following pixels must be non-blank with flags (0,0)
+                # to confirm it is an erroneously dropped sequence
+                image_buffer[y, x] = cast_local_ray((x, y))
+```
+
+## Operating characteristics
+*   **Performance:** Saves another 17 percent of overall rendering time on average [S1, unofficial]. Reduces rays per pixel from 2.483 to 1.285 in the tested scenario [S1, unofficial].
+*   **Memory Complexity:** Requires two sequence flags per pixel for tracking [S1, unofficial].
+*   **Limitations:** Errors occur in about 0.017 percent of pixels on average, resulting in visible holes that require post-processing [S1, unofficial]. Performance is dependent on the data set and the position of the view point [S1, unofficial].
+*   **When to use:** Not given in the sources.
+*   **When not to use:** Not given in the sources.
+
+## Background
+Early Scanline Termination was introduced by Neubauer, Mroz, Hauser, and Wegenkittl in their paper "Cell-Based First-Hit Ray Casting" [S1, unofficial]. It is part of a broader strategy to optimize volume rendering by skipping empty space and reducing redundant ray casting operations [S1, unofficial].
+
+## Sources
+[S1] Cell-Based First-Hit Ray Casting, https://www.researchgate.net/publication/2521319_Cell-Based_First-Hit_Ray_Casting, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,1250 @@
+Contribute to openvdb/fvdb-reality-capture development by creating an account on GitHub.
+
+GARfVDB by swahtz · Pull Request #308 · openvdb/fvdb-reality-capture · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+swahtz
+commented
+Jul 17, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Summary
+Adds GARfVDB scale-conditioned instance segmentation as a first-class fvdb-reality-capture method (Python API plus frgs segment-instances), where an existing Gaussian reconstruction is consumed as input and the learned scale-conditioned feature field is the product.
+Introduces a portable, pickle-free .garfvdb bundle containing NanoVDBs (encoder grids and features), safetensors (dense network weights and scale-quantile buffers), and a PLY Gaussian model, with explicit schema versioning, checksums, and validation on load. This is the trained end-product of a GARfVDB model (i.e. the equivalent of a .ply file for the optimized Gaussian splat reconstruction scene), not a resumable checkpoint.
+Adds shared, method-neutral infrastructure so GARfVDB and any future, non-Gaussian products fit cleanly:
+versioned training-checkpoint container with a reader registry
+a CLI resume-handler registry
+a reusable scene-transform configuration
+a namespaced scene attribute for per-image mask supervision
+> frgs segment-instances DATASET --reconstruction-path scene.ply --out-path scene.garfvdb trains from an existing reconstruction and writes a portable bundle
+Motivation
+GARfVDB previously lived as a standalone project in fvdb-examples that was already coupled to fvdb-reality-capture for SfM loading and Gaussian reconstruction, but its deliverable is a second learned product (based on a filtered Gaussian scene) rather than more Gaussians. This is the first fvdb-reality-capture method whose product is not a Gaussian splat, so the integration deliberately separates shared workflow infrastructure from product-specific behavior instead of bolting a training script onto the Gaussian commands. The shared pieces are designed against a concrete second method (for example integrating the LangSplatV2 method that also uses SAM2) so they generalize rather than hard-coding GARfVDB.
+Artifact contract
+The .garfvdb/ bundle is the trained end-product of the instance segmentation method (equivalent to what the .ply file is to the reconstruct process).
+A *.garfvdb/ bundle contains no PyTorch pickle files: manifest.json, encoder.nvdb, network.safetensors, and gaussians.ply.
+encoder.nvdb stores all encoder grid topologies and their learned per-voxel features through fVDB NanoVDB I/O with compression; grids are named deterministically (encoder_00 ... encoder_NN) and that order is validated on load.
+network.safetensors stores the MLP weights, optional sparse-convolution weights, maximum scale, and scale-quantile lookup buffers as named dense tensors.
+gaussians.ply stores the exact filtered GaussianSplat3d model plus reconstruction and camera metadata.
+Note: The manifest carries an explicit integer schema_version and per-payload SHA-256 checksums. Loading dispatches through a version-specific reader that validates canonical grid names and order, grid/voxel counts, voxel sizes and origins, feature shape and dtype, Gaussian count, and every payload checksum. Missing, renamed, reordered, corrupted, or incompatible payloads fail with clear errors, and newer-than-supported bundle versions fail before any payload is read.
+Checkpoint and resume architecture
+To accommodate checkpoints beyond the reconstruction method checkpoints being resumed (and without specific methods needed to be invoked by users resume-instance-segmentation, etc.), this method formalizes the checkpoint container concept.
+New training checkpoints use a generic container: schema, schema_version, method, method_version, and method-owned state. Parsing first validates the container, selects an exact schema-version reader, and can consult registered legacy adapters for pre-container formats.
+The container carries two independent versions on orthogonal axes.
+schema/schema_version version the container format itself — the fixed top-level keys and how they are parsed; schema is a constant shared by every method and schema_version is owned centrally, bumped only when the wrapper structure changes (which affects all methods at once).
+method/method_version version the method-owned payload in state: method is the stable id of the producing method and method_version, owned by the method's package as a single source of truth, versions that method's state layout and is bumped only when that one method's state changes. Everything method-specific — model weights, optimizer/scheduler state, config, global step, and method metadata — lives opaquely inside state; the container layer never interprets it.
+The generic module contains no method names, CLI options, or product extensions. Method identity and legacy recognition are owned by their packages:
+radiance_fields.checkpoint defines the Gaussian method id (radiance_fields.gaussian_splat) and a legacy adapter for released flat Gaussian checkpoints;
+instance_segmentation.checkpoint defines the GARfVDB method id (instance_segmentation.garfvdb).
+Each method exposes a single version constant that both its state_dict/from_state_dict and its disk writer container derive from, so the recorded container version and the method state version cannot drift.
+frgs resume loads one validated container, resolves the stable method id, and invokes a CLI-owned resume handler that also owns the default output name. Unknown methods fail explicitly.
+The Gaussian reconstruction writer and reader now use the same container, and previously released flat Gaussian checkpoints remain loadable through the legacy adapter.
+Transform and scene-attribute integration
+So that a second, non-Gaussian method can reuse the reconstruction's scene preprocessing without duplicating it or overwriting shared scene state, the standard transform stages are factored into a reusable SceneTransformConfig, and each method's per-image supervision is carried as a namespaced scene attribute rather than by replacing the scene cache.
+A reusable SceneTransformConfig builds the standard alignment, point filtering, image downsampling, low-point image filtering, and cropping stages; both reconstruction and GARfVDB build on it. Reconstruction supplies normalization while GARfVDB injects the reconstruction's saved alignment transform.
+SAM2 mask and scene-unit scale supervision is attached as a registered, namespaced GARfVDBMaskAttribute on SfmScene rather than replacing the scene cache, so existing caches and attributes are preserved and the dataset consumes only its named attribute.
+Mask generation runs last and rejects later downsample, crop, or spatial transforms, because resizing or rescaling after generation would invalidate mask pixels or scene-unit scales. Other segmentation methods can attach their own attribute types and generators through the same generic mechanism without adopting the GARfVDB supervision format.
+Interactive viewer
+Updated the viewer to be able to visualize the segmentation mask output (using PCA to project the mask to a 3-channel RGB visualization) as an overlay with interactive parameters to control the visualization.
+Adds GARfVDBOverlayViewer, which renders the GARfVDB feature field as a live overlay on the Gaussians in the fvdb viewer with interactive "Scene Params" widgets:
+a normalized grouping-scale slider (mapped to the model's maximum grouping scale)
+an overlay-opacity slider, a show/hide checkbox for the overlay
+a "Lock PCA colors" checkbox that freezes the PCA-to-RGB transform so the feature coloring does not flicker during camera movement
+A single shared core drives both the offline frgs show viewer and a new live training viewer enabled with frgs segment-instances --viewer, which pumps overlay renders from the training loop between steps so the in-progress feature field can be inspected while training runs.
+The offline viewer renders continuously while the camera or any widget is changing
+SAM2 mask-generation performance
+In addition to porting the SAM2 mask-generation transforms from fvdb-examples, this PR also makes some performance improvements during the transition:
+Vectorizes the two hottest per-image post-processing steps in mask generation: pixel_to_mask_id construction becomes a single cumulative-sum plus scatter instead of an O(masks * max_overlap) Python loop that forced a device synchronization on every inner iteration, and per-mask scale computation deduplicates on integer gaussian ids rather than sorting float3 world points. Both are equivalent to the originals.
+Stops storing the per-pixel mask-selection CDF on disk (the largest field in the mask cache, a full [H, W, max_overlap] float32 tensor) and recomputes it from pixel_to_mask_id at load time via instance_segmentation.util.compute_mask_cdf. This roughly quarters both the on-disk artifact size and the disk-bound write time.
+Overlaps cache writes with computation by handing each image's disk write to a background writer thread while the next image's SAM2 pass runs on the GPU. SfmCache's FileLock now only arms its SIGALRM-based timeout on the main thread and falls back to a plain blocking flock on worker threads, since signal-based timeouts cannot be used off the main thread.
+Exposes and raises SAM2 points_per_batch so more point prompts are processed per mask-decoder forward pass.
+Device defaults and import updates
+Defaults the compute device to cuda:0 across the CLI, foundation models, config, and docs, because the current fvdb build requires an explicit device index and cuda alone raises "Device must specify an index".
+Dependencies
+Requires fvdb-core>=0.6.0 and adds safetensors.
+The new fvdb.viz features that bring the API changes to add interactive, definable parameters require this PR to merge before this branch will work: Add viewer widgets fvdb-core#649
+cuML clustering, NVOS evaluation, and discrete-instance export remain out of the core dependency set and stay in fvdb-examples for the moment.
+Documentation
+Adds an instance-segmentation tutorial and API pages, a checkpoints API page, and resume/show/transforms updates describing the bundle layout, grid naming, coordinate transforms, versioning, and how future readers or migrations are introduced.
+Testing
+Ported training math is at parity with the prototype for loss (including per-view pair-count normalization), mask-CDF sampling, scale interpolation, pixel sampling, encoder feature extraction, MLP forward paths, and SAM2 mask/scale preprocessing. The port additionally fixes the prototype's scheduler-resume gap by checkpointing and restoring scheduler state.
+The interactive viewer is covered by unit/test_garfvdb_viewer.py (widget registration, normalized-to-raw scale mapping, camera/widget change detection and the render/idle contract, show/hide, and PCA lock), and the vectorized mask post-processing and recomputed mask CDF were checked for equivalence against the original implementations, including against a real on-disk cache file.
+Backwards compatibility and follow-ups
+Released flat Gaussian reconstruction checkpoints remain loadable and resumable through the registered legacy adapter; a Gaussian .ply remains an export product and is not resumable.
+Standalone fvdb-examples GARfVDB checkpoints are intentionally not migrated; there is no importer for the prototype format, and old SAM2 mask caches must be regenerated because supervision is now a versioned scene attribute.
+use_grid_conv=True remains experimental and is not exercised by the first-class path; the per-Gaussian affinity path references a grid attribute that does not exist and would fail if enabled. First-class training and products require use_grid=True, so this does not affect the supported configuration, but the option should be fixed or gated before it is advertised as supported.
+The overlay-opacity slider depends on an upstream nanovdb-editor fix (its image2d.slang composited the image view opaquely and ignored per-pixel alpha) Fix compositing image2d over the scene using per-pixel alpha nanovdb-editor#217
+swahtz
+and others
+added 7 commits
+July 9, 2026 16:03
+Add first-class GARfVDB instance segmentation with portable NanoVDB a…
+…
+601285e
+```
+…rtifacts
+
+Integrate GARfVDB scale-conditioned instance segmentation as a first-class fvdb-reality-capture method, treating the Gaussian reconstruction as an input carrier and the learned scale-conditioned feature field as the product. This ports the model, loss, optimizer, datasets, SAM2 preprocessing, trainer, writer, and visualization out of the fvdb-examples prototype and into fvdb_reality_capture.instance_segmentation, and adds the shared infrastructure needed to support learned products that are not Gaussian splats.
+
+Add a portable, pickle-free .garfvdb bundle (manifest.json, encoder.nvdb, network.safetensors, carrier.ply). The encoder grid topology and per-voxel features round-trip through fVDB NanoVDB I/O, dense network tensors go through safetensors, and the exact filtered Gaussian carrier is stored as PLY. Manifests carry an explicit integer schema_version and per-payload checksums, and loading dispatches through a version-specific reader that validates canonical grid names/order, topology, transforms, feature shape/dtype, carrier count, and checksums.
+
+Add a method-neutral, versioned training-checkpoint envelope (schema, schema_version, method, method_version, state) with a schema-version reader registry and a legacy-adapter hook. Method identity and legacy recognition live in their owning packages (radiance_fields.checkpoint, instance_segmentation.checkpoint) rather than in the generic module, and each method exposes a single version constant that both its state and its writer envelope derive from so the two cannot drift. frgs resume now loads one validated envelope, resolves a stable method id, and invokes a CLI-owned resume handler; unknown methods fail explicitly instead of falling through to Gaussian reconstruction, and portable .garfvdb products are rejected as non-resumable.
+
+Integrate GARfVDB preprocessing with the standard scene-transform pipeline via a shared SceneTransformConfig, and represent SAM2 mask/scale supervision as a registered, namespaced GARfVDBMaskAttribute on SfmScene instead of overwriting the scene cache. Mask generation is terminal in the pipeline and refuses later image/crop/spatial transforms, so other segmentation methods can attach their own attributes and generators without inheriting the GARfVDB supervision format.
+
+Add frgs instance-segmentation, product-aware frgs show, and dispatched frgs resume; add safetensors and require fvdb-core>=0.5.0. Add API, CLI, artifact, scene-transform, and checkpoint tests, plus workflow and API documentation. Keep cuML clustering and NVOS evaluation out of the core dependency set.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Switch CDF to be calculated on data load and not stored in the SAM2 a…
+…
+1117de4
+```
+…ttributes cache
+
+Switch batch size default to 1
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Add interactive GARfVDB feature-overlay viewer with live controls
+…
+a1dc408
+```
+Add GARfVDBOverlayViewer, which renders the GARfVDB feature field as an
+overlay on top of the Gaussian carrier in the fvdb viewer with interactive
+"Scene Params" widgets:
+
+- Grouping scale (normalized 0..1, mapped to the model's max grouping scale)
+- Overlay opacity
+- Show/hide the segmentation overlay (removes the image view so the carrier
+  shows through, since ImageView has no visibility toggle)
+- Lock PCA colors: freeze the PCA->RGB transform (mean/basis/min-max) so the
+  feature coloring does not flicker as the camera moves; refit on unlock or
+  when the grouping scale changes
+
+The overlay is driven by a shared core reused by both the offline `frgs show`
+viewer and a new live training viewer (`frgs instance-segmentation --viewer`),
+which pumps render_once() from the training loop between steps. render_once()
+now reports whether anything changed so the offline loop renders continuously
+while the camera moves and only idle-sleeps when nothing changed, tracking
+camera motion in real time instead of waiting for the mouse to stop.
+
+Add fit_pca_projection/apply_pca_projection helpers for the lockable PCA
+transform and unit tests covering widget registration, normalized->raw scale
+mapping, change detection, show/hide, lock behavior, and the render/idle
+contract.
+
+Default the compute device to "cuda:0" across the CLI, foundation models,
+config, and docs: the rebuilt fvdb/nanovdb-editor requires an explicit device
+index ("cuda" alone raised "Device must specify an index").
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Merge branch 'main' into garfvdb
+…
+5d6418c
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Restore changes
+…
+c77005f
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Fix imports from fvdb-core -> fvdb_reality_capture move
+…
+52c7a74
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Format fix
+…
+dc8cb76
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+harrism
+reviewed
+Jul 17, 2026
+View reviewed changes
+harrism
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Submitting a partial review. Haven't reviewed the big files yet.
+Comment thread
+docs/api/frgs/mesh_basic.rst
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+docs/api/frgs/mesh_dlnr.rst
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+docs/api/checkpoints.rst
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+docs/api/frgs.rst
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+docs/api/frgs.rst
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+docs/api/frgs.rst
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+docs/tutorials/instance_segmentation.rst
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+and others
+added 11 commits
+July 20, 2026 14:28
+Update docs/api/frgs/mesh_basic.rst
+…
+27c2067
+```
+Co-authored-by: Mark Harris <mharris@nvidia.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Update docs/api/frgs/mesh_dlnr.rst
+…
+d379fcb
+```
+Co-authored-by: Mark Harris <mharris@nvidia.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Update docs/api/frgs.rst
+…
+1573d72
+```
+Co-authored-by: Mark Harris <mharris@nvidia.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Update docs/api/frgs.rst
+…
+f6ea5f6
+```
+Co-authored-by: Mark Harris <mharris@nvidia.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Update docs/tutorials/instance_segmentation.rst
+…
+cd5f4e2
+```
+Co-authored-by: Mark Harris <mharris@nvidia.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Rename "carrier" to "gaussians" in the GARfVDB integration
+…
+eae2e78
+```
+Rename the underlying Gaussian model from "carrier" to "gaussians"
+throughout the GARfVDB integration for clarity: the GARfVDB.gaussians
+property, the add_gaussians viewer option, the "Gaussian Splats" viewer
+label, and the associated variables, docstrings, messages, and docs.
+
+Also rename the on-disk names since this feature has not shipped yet
+(no compatibility to preserve and no ARTIFACT_SCHEMA_VERSION bump):
+the bundle payload gaussians.ply and its manifest key "gaussians", and
+the resume checkpoint keys gaussian_filter_threshold, num_gaussians, and
+gaussian_means_sha256. Checkpoint write/read and manifest write/read keys
+were updated together and verified consistent.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Add .garfvdb to gitignore
+…
+1a7208b
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Rename checkpoint "envelope" to "container"
+…
+09ce838
+```
+Rename the versioned, method-neutral checkpoint structure from "envelope"
+to "container" across docstrings, comments, the local variables in the
+disk writers, test names, and the resume/checkpoints/tutorial docs. The
+concept and its fields (schema, schema_version, method, method_version,
+state) are unchanged; this is wording only.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Fix grammar in parse_training_checkpoint docstring
+…
+de91da8
+```
+"Validate an container" -> "Validate a container" (leftover from the
+envelope -> container rename).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Document the container schema vs. method version axes
+…
+af4e61b
+```
+Add a "Container schema versus method" section to the training-checkpoints
+docs explaining the two independent version axes: schema/schema_version
+version the container format (owned centrally, bumped when the wrapper
+structure changes), while method/method_version version the method-owned
+state payload (owned per method). Clarifies what lives in state.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Change default image downsample factor to 4 to match reconstruction
+…
+5f708f8
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from Copilot
+July 20, 2026 05:44
+Copilot started reviewing on behalf of
+swahtz
+July 20, 2026 05:45
+View session
+Copilot
+AI
+reviewed
+Jul 20, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+This PR integrates GARfVDB scale-conditioned instance segmentation into fvdb-reality-capture as a first-class method, including a portable .garfvdb inference bundle format, shared checkpoint/resume infrastructure, and viewer/transform updates to support non-Gaussian derived products alongside Gaussian reconstruction.
+Changes:
+Added GARfVDB training + inference product support (artifact I/O, CLI command, scene attribute/transforms, viewer overlay, and unit tests).
+Introduced a method-neutral, versioned training checkpoint container plus a CLI resume-handler registry; migrated Gaussian checkpoints to the container while keeping legacy flat Gaussian checkpoints loadable.
+Refactored common scene preprocessing into a reusable SceneTransformConfig and updated CLI/device defaults and docs accordingly.
+Reviewed changes
+Copilot reviewed 68 out of 69 changed files in this pull request and generated 5 comments.
+Show a summary per file
+File
+Description
+tests/unit/test_training_checkpoints.py
+Tests for checkpoint container parsing/loading and resume dispatch registry behavior.
+tests/unit/test_garfvdb_viewer.py
+Unit tests for GARfVDB overlay viewer core behavior and widget-driven rerendering.
+tests/unit/test_garfvdb_scene_transforms.py
+Tests for GARfVDB mask attribute + transform ordering and cache behaviors.
+tests/unit/test_garfvdb_cli.py
+CLI contract tests for frgs instance-segmentation, frgs show, and frgs resume.
+tests/unit/test_garfvdb_artifact.py
+Tests for .garfvdb bundle format, schema versioning, validation, and round-trips.
+tests/benchmarks/test_3dgs.py
+Updated benchmark to load Gaussian checkpoints via the container loader.
+tests/benchmarks/contract.py
+Contract bump + validation through container parsing and method ID checking.
+README.md
+README updated to mention instance feature fields alongside radiance fields.
+pyproject.toml
+Adds safetensors dependency.
+fvdb_reality_capture/transforms/scene_transform_config.py
+New reusable scene transform configuration/pipeline builder.
+fvdb_reality_capture/transforms/init.py
+Exposes SceneTransformConfig in transforms public API.
+fvdb_reality_capture/sfm_scene/sfm_cache.py
+File lock updated to avoid SIGALRM timeout logic on worker threads.
+fvdb_reality_capture/radiance_fields/io.py
+New helper to load splats from PLY or checkpoint container.
+fvdb_reality_capture/radiance_fields/gaussian_splat_reconstruction.py
+Uses method version constant; default device updated to cuda:0.
+fvdb_reality_capture/radiance_fields/gaussian_splat_reconstruction_writer.py
+Writes checkpoints as versioned containers.
+fvdb_reality_capture/radiance_fields/checkpoint.py
+New Gaussian method ID/version constants + legacy adapter registration.
+fvdb_reality_capture/radiance_fields/init.py
+Re-exports method ID/version constants and load_splats_from_file.
+fvdb_reality_capture/instance_segmentation/viewer.py
+Interactive GARfVDB overlay viewer + show_garfvdb_bundle.
+fvdb_reality_capture/instance_segmentation/util.py
+New utilities incl. PCA projection helpers and mask CDF computation.
+fvdb_reality_capture/instance_segmentation/training/segmentation_writer.py
+New GARfVDB training writer (images/metrics/checkpoints).
+fvdb_reality_capture/instance_segmentation/training/dataset.py
+Segmentation dataset that loads mask attribute and recomputes mask CDF.
+fvdb_reality_capture/instance_segmentation/training/dataset_transforms.py
+Dataset transforms for mask selection, pixel sampling, resizing, etc.
+fvdb_reality_capture/instance_segmentation/training/init.py
+Training package initializer.
+fvdb_reality_capture/instance_segmentation/scene_transforms/init.py
+Exposes GenerateGARfVDBMasks.
+fvdb_reality_capture/instance_segmentation/scene_attribute.py
+New namespaced scene attribute for per-image GARfVDB mask supervision.
+fvdb_reality_capture/instance_segmentation/optim.py
+Adds Exponential LR scheduler with ramp-up for segmentation training.
+fvdb_reality_capture/instance_segmentation/loss.py
+Adds GARfVDB contrastive loss implementation and per-view normalization.
+fvdb_reality_capture/instance_segmentation/garfvdb.py
+Public GARfVDB inference product API (render, affinities, save/load).
+fvdb_reality_capture/instance_segmentation/config.py
+GARfVDB model/training/transform configs leveraging shared transform config.
+fvdb_reality_capture/instance_segmentation/checkpoint.py
+GARfVDB checkpoint method ID/version constants.
+fvdb_reality_capture/instance_segmentation/artifact.py
+Portable .garfvdb bundle save/load with schema versioning + checksums.
+fvdb_reality_capture/instance_segmentation/init.py
+Public instance-segmentation module exports.
+fvdb_reality_capture/foundation_models/sam2.py
+Default device cuda:0 + points_per_batch applied in flat mode.
+fvdb_reality_capture/foundation_models/sam1.py
+Default device updated to cuda:0.
+fvdb_reality_capture/foundation_models/openclip.py
+Default device updated to cuda:0.
+fvdb_reality_capture/foundation_models/dlnr.py
+Default device updated to cuda:0 and docstring updated.
+fvdb_reality_capture/cli/frgs/_show.py
+frgs show now supports .garfvdb bundles and GARfVDB overlay controls.
+fvdb_reality_capture/cli/frgs/_resume.py
+frgs resume now dispatches via checkpoint container + resume registry.
+fvdb_reality_capture/cli/frgs/_resume_registry.py
+New CLI-owned resume-handler registry + method lookup.
+fvdb_reality_capture/cli/frgs/_reconstruct.py
+CLI transform config now subclasses shared SceneTransformConfig; device default cuda:0.
+fvdb_reality_capture/cli/frgs/_points.py
+Device default updated to cuda:0.
+fvdb_reality_capture/cli/frgs/_mesh_dlnr.py
+Device default updated to cuda:0.
+fvdb_reality_capture/cli/frgs/_mesh_basic.py
+Device default updated to cuda:0.
+fvdb_reality_capture/cli/frgs/_instance_segmentation.py
+New frgs instance-segmentation command.
+fvdb_reality_capture/cli/frgs/_evaluate.py
+Loads Gaussian checkpoints via container loader; device default cuda:0.
+fvdb_reality_capture/cli/frgs/_convert.py
+Loads Gaussian checkpoints via container loader for conversion paths.
+fvdb_reality_capture/cli/frgs/_common.py
+Switches to library-layer load_splats_from_file and re-exports it.
+fvdb_reality_capture/cli/frgs/init.py
+Registers InstanceSegmentation command with CLI entrypoint.
+fvdb_reality_capture/checkpoints.py
+New method-neutral, versioned training checkpoint container + legacy adapters.
+fvdb_reality_capture/init.py
+Exposes new submodules (including checkpoints and instance_segmentation).
+docs/tutorials/instance_segmentation.rst
+New tutorial covering training, artifact layout, viewing, and resume.
+docs/index.rst
+Adds instance segmentation tutorial/API docs and checkpoints API page.
+docs/api/transforms.rst
+Documents SceneTransformConfig in transforms API listing.
+docs/api/instance_segmentation.rst
+New instance segmentation API page.
+docs/api/frgs/show.rst
+Updates frgs show docs for .garfvdb support and device default.
+docs/api/frgs/resume.rst
+Updates frgs resume docs for container dispatch and new options.
+docs/api/frgs/reconstruct.rst
+Updates reconstruct docs for device default cuda:0.
+docs/api/frgs/points.rst
+Updates points docs for device default cuda:0.
+docs/api/frgs/mesh_dlnr.rst
+Updates mesh-dlnr docs for device default cuda:0.
+docs/api/frgs/mesh_basic.rst
+Updates mesh-basic docs for device default cuda:0.
+docs/api/frgs/instance_segmentation.rst
+New CLI doc snippet for frgs instance-segmentation.
+docs/api/frgs/evaluate.rst
+Updates evaluate docs for device default cuda:0.
+docs/api/frgs.rst
+Updates CLI overview and includes instance-segmentation docs.
+docs/api/checkpoints.rst
+New documentation page for the training checkpoint container design.
+CHANGES.md
+Adds an unreleased 0.6.0 changelog section describing GARfVDB + infra.
+.gitignore
+Ignores .garfvdb bundles.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+fvdb_reality_capture/instance_segmentation/util.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+fvdb_reality_capture/instance_segmentation/training/dataset_transforms.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+fvdb_reality_capture/instance_segmentation/training/segmentation_writer.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+docs/api/transforms.rst
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+fvdb_reality_capture/instance_segmentation/training/segmentation_writer.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+and others
+added 5 commits
+July 20, 2026 17:51
+Add safetensors to docs requirements
+…
+9a71e02
+```
+Change default max epochs in garfvdb
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Fix mask-selection CDF: index probabilities by mask id, drop -1 padding
+…
+d70720e
+```
+The ported prototype built the per-pixel mask-selection CDF by sorting the
+per-mask areas by size and then indexing that sorted table by mask id. After
+the sort the probability table no longer lined up with the mask ids, so each
+pixel was weighted by the wrong mask's area, and `num_pix_per_mask[0] = 0`
+zeroed the smallest-area mask instead of the -1 "no mask" padding (which was
+left in with a nonzero probability).
+
+Reimplement with a bincount indexed by (id + 1) that zeroes the -1 padding and
+gathers each pixel's mask probability by id. Verified against an independent
+reference over random inputs. Because mask_cdf is recomputed from
+pixel_to_mask_id at load time, the fix applies to existing caches without
+regenerating them; it does change the training mask-selection distribution.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Fix JPEG rescale, Resize intrinsics, retry counter, and doc indentation
+…
+f12232e
+```
+- save_image: the JPEG branch multiplied an already-uint8 image by 255 again,
+  saturating saved JPEGs to white; drop the redundant rescale (matches the PNG
+  branch).
+- Resize: scale camera intrinsics with the image (multiply fx/fy/cx/cy by the
+  scale factor) instead of dividing, so they stay consistent with the resized
+  image. Resize is currently unused, so this was a latent bug.
+- segmentation_writer: use max_attempts in the retry-loop condition instead of
+  a hard-coded 50.
+- docs/transforms.rst: align the inconsistent Sphinx option indentation on the
+  Identity/SceneTransformConfig autoclass directives.
+
+Addresses GitHub Copilot review comments on openvdb#308.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Convert SAM2 inputs to RGB, apply true 3x3 mask erosion, and keep Gau…
+…
+a939db5
+```
+…ssian affinities in the training feature space. Add regression coverage for each fix.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Apply optimized reconstruction poses before mask generation, persist …
+…
+497d04a
+```
+…image IDs for stable pose matching, and include camera parameters in mask-cache keys. Scale intrinsics using actual rounded resize dimensions and add regression coverage.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from Copilot
+July 20, 2026 12:51
+Copilot started reviewing on behalf of
+swahtz
+July 20, 2026 12:52
+View session
+Copilot
+AI
+reviewed
+Jul 20, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 72 out of 73 changed files in this pull request and generated 3 comments.
+Comment thread
+fvdb_reality_capture/instance_segmentation/viewer.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+fvdb_reality_capture/instance_segmentation/training/dataset_transforms.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+fvdb_reality_capture/radiance_fields/gaussian_splat_reconstruction.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+harrism
+reviewed
+Sep 9, 2026
+View reviewed changes
+harrism
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Four issues found while benchmarking #331's effect on GARfVDB training (kitchen, mipnerf360). None are caused by #331 — they're pre-existing in this branch, and three of them are why the effect was hard to measure at all. Line numbers are from pr308-head (66dcd5b).
+1. Evaluation silently never runs, and the log says it did
+training/segmentation.py:1021-1023
+```
+logging.info(f"Running evaluation at epoch {epoch}")
+if len(self._validation_dataset) > 0 and self._global_step > self._start_step:
+    self.eval(log_tag=log_tag + "_eval")
+```
+frgs segment-instances defaults --use-every-n-as-val to -1 (cli/frgs/_segment_instances.py:58), which yields 0 test images, so the guard short-circuits and eval() is never called. The log line sits above the guard, so a default run prints "Running evaluation at epoch N" ten times having evaluated zero times. Verified on a 50-epoch default run: 10 Running evaluation at epoch lines, 0 Running evaluation... lines (the latter is emitted inside eval()).
+This is the most costly of the four: with defaults, GARfVDB reports no held-out number at all, and the log actively suggests otherwise.
+Suggest moving the log line inside the guard, and warning explicitly when eval_at_percent is set but the validation set is empty.
+2. log_evaluation_iteration is dead code
+training/segmentation.py:106
+Defined and documented, writes eval/loss plus four images to TensorBoard — and is called from nowhere (no references in the tree). eval() logs via self._writer.log_metric instead, so the TensorBoard eval scalars and images this advertises are never produced. Either wire it up or drop it.
+3. The importance-sampling path is unreachable
+training/segmentation.py:453 and :637 both construct:
+```
+RandomSamplePixels(config.sample_pixels_per_image, scale_bias_strength=0.0)
+```
+scale_bias_strength is hardcoded to 0.0 at both call sites and has no field in GARfVDBTrainingConfig, so the entire importance-sampling branch at training/dataset_transforms.py:290-338 can never execute. It's implemented, documented, and dead.
+Worth exposing — see below for why non-uniform sampling looks valuable here.
+4. The "duplicates are negligible" comment is wrong, and inverts the relevant quantity
+training/dataset_transforms.py:342-343
+```
+# Uniform random sampling (with replacement, but duplicates are negligible)
+# For 4096 samples from 2M pixels: ~4 expected duplicates (0.1%)
+```
+The count is right but it's the wrong statistic. What matters is P(a batch contains at least one duplicate), and by the birthday bound that is 1 - exp(-n(n-1)/2N). For the comment's own example — 4096 samples from 2M pixels — that is 98.5%, not 0.1%. Expected duplicate pairs being small does not make duplicate-free batches likely.
+At this branch's defaults (256 samples, 778x519 images) it is 7.77%, which matched measurement closely: on a 50-epoch run before #331, 7.7% of steps had loss > 0.10, versus 0.1% after. Essentially every duplicate-containing batch was a corrupted step.
+#331 makes duplicates correct, so this is no longer a correctness issue. But the branch 11 lines above (:335) already samples with multinomial(..., replacement=False); using the same for the uniform path removes the case entirely and is cheaper than handling it. Suggest at minimum correcting the comment, since as written it invites raising sample_pixels_per_image into the regime where the pre-#331 bug was catastrophic.
+Measured context, in case it's useful
+Held-out evaluation on kitchen with a real validation split (-vn 8), using a same-instance-separation AUC against the SAM2 masks:
+Bulk grouping converges in ~2 epochs (all-pixel AUC 0.989 of a final 0.993).
+Boundary quality converges far slower — restricting both pixels of each pair to a ±2px band around instance borders: 0.949 at 2 epochs, 0.984 at 50, 0.987 at 200. Still improving at 200 epochs.
+Plausible cause: only ~9% of labelled pixels are within ±2px of a border, so with uniform sampling ~0.8% of the all-pairs matrix is boundary-vs-boundary. Additionally instance_loss_1/_2 are plain L2 with no margin, while the negative term instance_loss_4 is a hinge — so solved positive pairs keep contributing gradient indefinitely while solved negatives correctly stop.
+That combination points at (3) being worth more than it looks: boundary-biased sampling would target the one component that is slow, without touching the loss.
+🤖 Generated with Claude Code
+swahtz
+and others
+added 4 commits
+September 9, 2026 21:09
+Merge branch 'main' into garfvdb
+…
+c32d258
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Sample training pixels without replacement and reject collapsed renders
+…
+94cd222
+```
+RandomSamplePixels drew uniform pixels with replacement, so at the default
+256 samples roughly one batch in twelve contained a duplicate pixel, and at
+4096 samples nearly every batch did. Duplicates double-weight the loss and
+form degenerate positive pairs, and before openvdb#331 they also triggered openvdb#328,
+which misattributed contributing Gaussians between pixels.
+
+Sampling now draws distinct indices by rejection: draw with replacement,
+deduplicate, top up the shortfall. This keeps the cost proportional to the
+sample count (~20 us per image on CPU) where randperm or multinomial over
+every pixel cost 4-40 ms. It falls back to randperm when the sample count
+exceeds half the pixel count.
+
+GARfVDBModel.get_encoded_features now raises if the contributing-Gaussian
+render returns a 1-level JaggedTensor instead of silently skipping the
+per-pixel weighted sum. The render always returns 2-level output, including
+for pixels with one or zero contributors, so a 1-level result means the
+per-pixel segments were lost upstream.
+
+Also fix the all-invalid-ids branch, which read .shape on a JaggedTensor
+and would have crashed on any batch that hit no Gaussians.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Unify per-view loss normalization and make per-step debug logs lazy
+…
+42e7b09
+```
+calculate_loss had two normalization branches: per-view mean for multi-view
+batches and a global sum over pair count for a single view. They agree in
+value at one view but were separate code paths that could drift. The
+per-view path is now the only one. Its pair counts come from the row sums
+of the block-diagonal mask grouped by view rather than a Python loop of
+per-view slices, and _sum_loss_per_view uses a single index_add_ instead of
+a boolean mask per view. Tests check the result pair by pair against the
+definition for one and several views.
+
+Four debug logs in the training step formatted a CUDA scalar eagerly via
+f-string, forcing a device sync on every step whether or not debug logging
+was enabled. They now use lazy %-formatting, so the sync only happens when
+the message is actually emitted. This makes the tensor accumulation of the
+running loss effective, as its comment already claimed.
+
+Also correct the pixel_to_mask_id comment, which described masks as sorted
+by increasing area when they are sorted by decreasing area.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Only log "Running evaluation" when evaluation runs, and drop dead eva…
+…
+3e3c118
+```
+…l logger
+
+The evaluation log line sat above the guard that checks for a non-empty
+validation set, so a default run (use_every_n_as_val=-1, zero validation
+images) printed "Running evaluation at epoch N" at every eval epoch while
+never evaluating. The line now sits inside the guard, and the trainer warns
+once at construction when eval_at_percent is set but the validation set is
+empty, naming the option that enables it.
+
+TensorboardLogger.log_evaluation_iteration was defined and documented but
+never called. eval() already logs its loss and images through the writer,
+so the method is removed.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+commented
+Sep 9, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Following up on the four items from the September 9 comment.
+1. Evaluation silently never runs. Fixed in 3e3c118. The "Running evaluation at epoch N" line now sits inside the guard, so it only prints when eval() actually runs. The trainer also warns once at construction when eval_at_percent is set but the validation set is empty, and names use_every_n_as_val as the option that enables it. I left the CLI default at -1 for now rather than change the default split.
+2. log_evaluation_iteration is dead code. Removed in 3e3c118. eval() already logs its loss and images through the writer, so there was nothing to wire it to.
+3. Importance-sampling path is unreachable. Still open. The measurements on boundary convergence are a good argument for exposing it, and that is being looked at separately rather than as a mechanical fix.
+4. Duplicates comment. Addressed in 94cd222 with the blocking fix, see the thread on dataset_transforms.py. The uniform path now samples distinct pixels, so the comment is gone along with the case it described.
+swahtz
+and others
+added 2 commits
+September 9, 2026 21:46
+Remove unused TensorboardLogger class
+…
+8f45d18
+```
+Nothing in the repo constructed it. GARfVDBWriter already writes metrics
+and evaluation images to TensorBoard when use_tensorboard and
+save_images_to_tensorboard are enabled, and the trainer logs through that
+writer, so the class duplicated a path that was never taken.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Expose scale_bias_strength in the training config
+…
+15890f9
+```
+RandomSamplePixels has supported importance sampling toward small-scale
+masks since it was written, but both call sites hardcoded the strength to
+0.0 and no config field carried it, so the branch could never run. It is
+now a GARfVDBTrainingConfig field, defaulting to 0.0 so behavior is
+unchanged, and the CLI picks it up as --cfg.scale-bias-strength. Training
+transforms use it in both new() and resume_from_checkpoint(); validation
+stays uniform. Old checkpoints restore with the default.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+commented
+Sep 9, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Item 3 from the September 9 list, the unreachable importance-sampling path, is now reachable in 15890f9.
+scale_bias_strength is a GARfVDBTrainingConfig field, exposed by the CLI as --cfg.scale-bias-strength, and both training call sites read it. The default stays at 0.0, so nothing changes unless it is set. Validation keeps uniform sampling. Older checkpoints restore with the default since the config is rebuilt from a dict.
+One clarification worth having on record, since the boundary-convergence measurements are what motivated this. The existing path biases toward pixels whose covering mask has a small 3D scale, weighting by 1 / scale**strength. That favors small objects and fine structure, which correlates with instance borders but is not a boundary-distance bias. For reference, GARField itself has no importance sampling at all, its pixel sampler is nerfstudio's uniform sampler grouped by image, so this knob is a GARfVDB addition. If boundary-biased sampling turns out to be the thing that matters, that would be a separate weight computed from the mask id map.
+With this, everything raised in the September 3 and September 9 reviews has a commit against it.
+Fix resumed and evaluated GARfVDB runs crashing in GPU mask selection
+…
+f6412bf
+```
+GARfVDBTrainer.from_state_dict composed the CPU RandomSelectMaskIDAndScale
+into its per-item transforms, while new() did not. The CPU transform
+collapses mask_ids from [num_samples, MM] to [num_samples], and the
+training and eval loops then apply GPURandomSelectMaskIDAndScale to the
+collated batch, which unpacks three dimensions and raised
+"not enough values to unpack" on the first step. Every path through
+from_state_dict was affected: frgs resume at its first training step and
+frgs evaluate at its first validation batch.
+
+Both constructors now build their transforms through one helper,
+make_pixel_transforms, which only samples pixels. A test runs the helper's
+output through collation and the GPU transform for both splits.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+added this to the
+v0.6 milestone
+Sep 10, 2026
+harrism
+reviewed
+Sep 16, 2026
+View reviewed changes
+harrism
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Re-review at f6412bf, following up on my review of 66dcd5b.
+Previously filed, now fixed
+All four verified against the current head.
+defect
+fixed by
+Evaluation never ran at default settings, and the log line above the guard reported it anyway
+3e3c118
+log_evaluation_iteration had no callers
+3e3c118, plus 8f45d18 removing TensorboardLogger
+scale_bias_strength hardcoded to 0.0 with no config field
+15890f9
+Uniform sampling drew with replacement
+94cd222
+94cd222 goes past what I filed. get_encoded_features now raises on a 1-level JaggedTensor
+instead of silently skipping the per-pixel weighted sum, which closes the corruption path rather
+than just removing its trigger. _sample_distinct_indices also reads correctly to me: drawing
+i.i.d. uniform and keeping the first n distinct gives a uniform n-subset, and the randperm
+fallback covers the dense case. One behavioral note, since the docstring says nothing downstream
+depends on it: the new path returns sorted indices where randint returned unsorted. The pair
+matrix in calculate_loss is order-invariant so this looks safe, but it is now a property worth
+keeping true.
+42e7b09 also corrects the pixel_to_mask_id ordering comment. That comment previously said
+increasing area where line 446 sorts descending, and it is the reason an earlier analysis of mine
+read slot 0 as the finest mask rather than the largest.
+Still open
+1. use_grid_conv=True cannot execute (high)
+instance_segmentation/model.py:738
+```
+conv_output = self.encoder_convnet(self.encoder_grids)
+```
+GARfVDBModel has no encoder_grids attribute. It stores encoder_gridbatch; encoder_grids is
+a property on the product class in garfvdb.py. SparseConvWithSkips.forward also takes two
+arguments. The sibling call at line 629 gets both right:
+```
+conv_output = self.encoder_convnet(self.enc_features, self.encoder_gridbatch)
+```
+frgs segment-instances --cfg.model.use-grid-conv reaches this through get_mask_output at the
+first eval epoch and raises AttributeError. It also reaches it through
+get_gaussian_affinity_output, so to_product() fails at save time after a completed training run.
+This was in my first review and is unchanged.
+2. Zero SAM2 masks aborts the whole mask pass (medium)
+scene_transforms/image_segmentation_masks.py:447
+torch.stack([...]) over sam_masks is unguarded. An image where SAM2 returns nothing, whether a
+blank frame or one where the IoU and stability thresholds filter everything, raises
+RuntimeError: stack expects a non-empty TensorList and aborts mask generation partway through the
+dataset rather than writing an empty artifact for that image.
+3. Resume discards a completed run on a name collision (medium)
+cli/frgs/_resume.py:142
+_resume_garfvdb runs the full training loop, then calls trainer.to_product().save(out_path),
+which raises FileExistsError from artifact.py:88 if the bundle exists. _segment_instances.py
+checks out_path.exists() before training. Resume does not, and its default output name is fixed,
+so a stale bundle in the working directory throws away the whole run at the final save.
+4. --use-every-n-as-val 1 empties the training split (medium)
+training/segmentation.py:384
+```
+mask = np.ones(len(indices), dtype=bool)
+mask[::use_every_n_as_val] = False
+```
+At 1 this sets every entry False, so train_indices is empty and every image goes to validation.
+Worth rejecting the degenerate split at parse time rather than entering training with nothing to
+sample.
+5. pca_projection_fast does not guard the masked size (medium)
+instance_segmentation/util.py:134
+features[mask] can be empty or have fewer rows than n_components. torch.pca_lowrank(..., q=3)
+requires q <= min(m, n), and the subsequent min(dim=0) fails on an empty tensor. A validation
+view whose render alpha is zero everywhere takes down the eval pass mid-training instead of
+skipping the frame. viewer.py has the same exposure.
+6. Empty-ray fallbacks build CPU float32 tensors (low)
+instance_segmentation/model.py:573, :584, :597
+torch.empty([0]) and torch.empty([0, ...]) default to CPU float32, and are appended alongside
+CUDA int64 id tensors before the fvdb.JaggedTensor construction. The branch exists for pixels
+with no contributing gaussian, so it is wrong exactly when it fires. Needs device= and dtype=
+matching the tensors they join.
+7. from_state_dict hardcodes logging config (low)
+training/segmentation.py:609
+log_interval_steps=10 and viewer_update_interval_epochs=-1 are fixed, and _resume_garfvdb has
+no way to pass them, so frgs resume --io.log-every 1 is silently ignored where
+frgs segment-instances honors it.
+8. new() recomputes grouping_scale_stats (low)
+training/segmentation.py:400 computes grouping_scale_stats = full_dataset.scales and passes it
+to _init_model, but the GARfVDBTrainer(...) construction at line 427 omits it. __init__ then
+falls through to line 182 and builds a second SegmentationDataset to recompute the same values
+against an empty cache, re-reading every mask file. The constructor already accepts the argument.
+Verified against f6412bf. Findings 1 through 8 were checked directly in the current tree rather
+than inherited from the earlier review.
+🤖 Generated with Claude Code
+Address September 16 GARfVDB review findings
+…
+190631c
+```
+- use_grid_conv now raises NotImplementedError at construction instead
+  of failing deep in the forward pass with an AttributeError
+- Zero SAM2 masks no longer aborts the whole mask-generation pass
+- Resume checks the output path before training instead of after
+- use_every_n_as_val=1 is rejected instead of silently emptying the
+  training split
+- PCA projection guards against views with too few valid pixels
+- Empty-ray fallback tensors match the device/dtype of their siblings
+- Resume threads through log_interval_steps instead of hardcoding it
+- new() reuses the grouping_scale_stats it already computed instead of
+  recomputing them from a second dataset scan
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+commented
+Sep 16, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Following up on the re-review at f6412bf. Pushed 190631c addressing all 8 open items.
+1. use_grid_conv=True cannot execute. This is a research-only mode that isn't implemented yet, so rather than fixing the broken call sites, GARfVDBModel.__init__ now raises NotImplementedError immediately (next to the existing num_grids validation), with the config docstring updated to say so. The broken call sites at model.py:629/:738 are left as-is since they're now unreachable — no attempt to guess at a real implementation.
+2. Zero SAM2 masks aborts the mask pass. _generate_segmentation_mask now builds an explicit [0, H, W] empty mask tensor instead of calling torch.stack on an empty list, both for sam_masks and for the per-mask scales computation. A blank or fully-filtered frame now writes an empty mask entry instead of crashing the dataset pass.
+3. Resume discards a completed run on a name collision. _resume_garfvdb now checks out_path.exists() before training starts, matching the check frgs segment-instances already does.
+4. --use-every-n-as-val 1 empties the training split. GARfVDBTrainer.new() now rejects use_every_n_as_val == 1 with a ValueError instead of silently sending every image to validation.
+5. pca_projection_fast / fit_pca_projection don't guard the masked size. Both now check for fewer valid pixels than n_components (e.g. a validation view whose render alpha is zero everywhere) and return zeros instead of crashing torch.pca_lowrank. Covers both the eval path (util.py) and the viewer (viewer.py calls fit_pca_projection, same guard).
+6. Empty-ray fallbacks build CPU float32 tensors. The three torch.empty(...) fallbacks in get_encoded_features's stochastic-sampling branch now take device=/dtype= from their sibling tensors instead of defaulting to CPU float32.
+7. from_state_dict hardcodes logging config. log_interval_steps and viewer_update_interval_epochs are now parameters on from_state_dict/from_checkpoint_state (defaults unchanged), and _resume_garfvdb passes command.io.log_every through, matching what the Gaussian-splat resume path already does.
+8. new() recomputes grouping_scale_stats. The constructor call now passes the grouping_scale_stats already computed at the top of new(), so it no longer builds a second SegmentationDataset and re-reads every mask file.
+GARfVDB test suite is at 52 (was 49), covering items 1, 2, and 5 directly.
+Formatting fixes
+…
+5d801a5
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+harrism
+reviewed
+Sep 16, 2026
+View reviewed changes
+harrism
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Re-reviewed at 5d801a5. All eight findings from the September 16 review are addressed, and the fixes are correct where I checked the details:
+use_grid_conv raising at construction is the right call given the forward path was never written against the current fvdb API. Config docstring updated to match.
+The empty-ray fallbacks now carry device and dtype, and the index tensor correctly uses torch.long to match multinomial output rather than copying the probs dtype.
+use_every_n_as_val == 1 is rejected before the split is computed, resume checks out_path before building the writer, log_interval_steps is threaded through, and new() now passes the grouping_scale_stats it already computed.
+One follow-up on the zero-mask fix.
+Empty mask sets are written, then crash at training
+scene_transforms/image_segmentation_masks.py:484
+Keeping the pipeline running is right, but an image with no masks now produces max_masks = 0 and a pixel_to_mask_id of shape [H, W, 0], which is saved to the artifact. Nothing filters that image out of the dataset, so it reaches GPURandomSelectMaskIDAndScale, where MM = 0 gives:
+```
+random_index = torch.clamp(random_index, 0, MM - 1)   # clamp(0, 0, -1) -> -1
+per_pixel_mask = torch.gather(mask_ids, -1, random_index.unsqueeze(-1))
+```
+Verified directly on this commit with MM=0:
+```
+clamp(0, 0, MM-1) = -1
+RuntimeError: setStorage: sizes [1, 8, 1], strides [8, 1, 0], ... out of bounds for storage of size 0
+```
+So the failure moves from mask generation to the first training batch that samples the image, which is later and more expensive to hit.
+Worth noting this is reachable by a second route that predates the fix: keep = scales < max_scale at :471 can filter every mask for an image, which also lands at num_masks == 0. So the empty case was already possible; the zero-SAM2-mask fix just adds a way in.
+Two options, either is fine: skip images with no masks when building the dataset split, or handle MM == 0 in GPURandomSelectMaskIDAndScale by returning all -1 mask ids and zero scales, which the loss already masks out via labels != -1.
+🤖 Generated with Claude Code
+Drop images with no segmentation masks from the GARfVDB training split
+…
+09f9914
+```
+An image whose mask artifact holds zero masks (SAM2 found nothing, or the
+scale threshold filtered everything) has no supervision: every pixel is
+background and contributes zero pairs to the loss. Alone in a batch, which
+is the default batch size and always the case in eval, it also cannot go
+through GPU mask selection, since MM is 0 and the index clamp yields -1.
+
+GARfVDBTrainer.new() now drops such images from both splits, reusing the
+mask pass it already makes for grouping_scale_stats, and fails clearly if
+no training images remain. GPURandomSelectMaskIDAndScale additionally
+returns all -1 ids and zero scales for an MM == 0 batch so hand-built
+datasets cannot hit the index error either.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+commented
+Sep 17, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Thanks for catching the follow-through on the empty-mask case. Reproduced the MM == 0 failure on this branch, and also confirmed the second route you mentioned (scales < max_scale filtering every mask) lands in the same place. Fixed in 09f9914, taking the first option with the second as a backstop.
+Images with no masks are dropped from the split. GARfVDBTrainer.new() now removes any image whose mask artifact holds zero masks before the train/val split, alongside the existing exclude_indices handling, and logs a warning listing the dropped image ids. It reuses the mask pass new() already makes to build grouping_scale_stats (SegmentationDataset.per_image_scales() now backs the scales property), so there is no extra I/O. Dropping rather than tolerating was the right call here for two reasons beyond the crash: an all-background image contributes exactly zero pairs to the loss, so keeping it in training is a wasted render-plus-MLP step, and in eval(), which averages per-image loss, it would bias the reported number toward zero. The split is persisted in the checkpoint, so resume and evaluate see the same set without recomputing anything. If dropping leaves no training images, new() now raises rather than starting with an empty sampler.
+GPURandomSelectMaskIDAndScale also handles MM == 0. It returns all -1 mask ids and zero scales, which the loss already masks via labels != -1. This should now be unreachable from the CLI, but it protects anyone building a dataset by hand or evaluating an older checkpoint whose saved val_indices include an empty image.
+One thing worth noting for completeness: the importance-sampling path in RandomSamplePixels (scale_bias_strength > 0) would also have failed on an empty image, at torch.min over the zero-size MM dimension. Dropping at the split resolves that route too, so I left it alone.
+Tests cover both the drop (per_image_scales on a mixed cache, drop_images_without_masks preserving order) and the MM == 0 transform path. GARfVDB suite is at 54.
+Finish zero-mask handling and fix the LR scheduler step count
+…
+41d5a01
+```
+GenerateGARfVDBMasks.__call__ narrowed the pixel_to_mask_id dtype with
+min()/max(), which raises on the empty [H, W, 0] tensor that an image with
+no masks now produces, so the mask pass still aborted. _smallest_int_dtype
+returns int8 for empty input, and the test now runs the whole transform
+over a normal and an empty image. The CPU RandomSelectMaskIDAndScale gets
+the same MM == 0 guard as its GPU counterpart.
+
+The exponential LR scheduler was given total_steps, a sample count, as its
+horizon, but it advances once per optimizer step. With batch_size > 1 or
+gradient accumulation the decay never reached lr_final. The horizon is now
+total_steps divided by samples per optimizer step.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+commented
+Sep 17, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+One more follow-through on the zero-mask case, plus a scheduler fix, in 41d5a01.
+The empty mask entry still didn't reach disk. _generate_segmentation_mask returned the empty [H, W, 0] tensor correctly, but __call__ then narrowed its dtype via _smallest_int_dtype, which calls .min()/.max() and raises on an empty tensor. So the mask pass still aborted on the first image with no masks, just one line later. _smallest_int_dtype now returns int8 for empty input, and the test drives the whole transform over a normal image and an empty one rather than only the inner method. The CPU RandomSelectMaskIDAndScale also gets the same MM == 0 guard as the GPU transform, for parity.
+LR scheduler horizon was in the wrong unit. ExponentialLRWithRampUpScheduler.max_steps was set to total_steps, which counts samples (max_epochs * num_images), but scheduler.step() runs once per optimizer step. With batch_size > 1 or accumulate_grad_steps > 1 the decay only covered a fraction of training and never reached lr_final. The horizon is now total_steps // (batch_size * accumulate_grad_steps). Default settings are unaffected; this only changes the curve for non-default batch sizes, which is worth knowing if you compare against earlier benchmark runs.
+GARfVDB suite is at 56.
+Key the mask cache on the SAM2 checkpoint, share bundle permissions, …
+…
+4cca9f0
+```
+…drop dead --tx.device
+
+The mask cache folder name and per-file metadata did not include the SAM2
+checkpoint size, so switching between large/small/tiny/base_plus reused
+masks produced by a different model. The checkpoint is now part of both.
+
+save_garfvdb_bundle built the bundle under tempfile.mkdtemp, which creates
+the directory 0700, and renamed it into place, so every bundle ended up
+owner-only readable. The directory now gets the umask-derived mode a plain
+mkdir would have produced.
+
+GARfVDBTransformConfig.device was exposed by tyro as --tx.device but the
+CLI unconditionally overwrote it with --device, so it was a silent no-op.
+The field is gone; build_scene_transforms takes device directly.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+commented
+Sep 17, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Three smaller items from a local review pass, fixed in 4cca9f0. None were raised here but they are all in this PR's code, so noting them for the record.
+Mask cache did not key on the SAM2 checkpoint. The cache folder name and the per-file metadata covered points_per_side, the IoU/stability thresholds, the gaussian hash, and the camera-parameter hash, but not the SAM2 model size. Constructing GenerateGARfVDBMasks(checkpoint="tiny") after a "large" run on the same scene was a cache hit, so it trained on the other model's masks while the attribute provenance claimed tiny. The checkpoint is now in both the folder name (_m{checkpoint}) and the metadata check. This does mean existing caches get a new folder name and regenerate once.
+Saved .garfvdb bundles were owner-only readable. save_garfvdb_bundle writes into a tempfile.mkdtemp directory, which is created 0700, then os.replaces it into place, so the final bundle kept that mode. On a shared filesystem anyone else running frgs show on it got a PermissionError on manifest.json. The temporary directory is now chmod'ed to the umask-derived mode a plain mkdir would have produced before the rename.
+--tx.device was a silent no-op. GARfVDBTransformConfig.device was surfaced by tyro, but frgs segment-instances overwrote it with --device unconditionally. The field is removed and build_scene_transforms takes device as an argument, which the CLI passes from --device. tyro now rejects --tx.device rather than accepting and ignoring it.
+GARfVDB suite is at 64 including the checkpoint tests.
+harrism
+reviewed
+Sep 17, 2026
+View reviewed changes
+harrism
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Re-reviewed at 4cca9f0. The zero-mask follow-up is resolved and I found no new defects.
+Zero masks. Verified directly on this commit, where the same input raised RuntimeError before:
+```
+GPU  MM=0 -> ids (1, 8) all -1: True | scales all 0: True
+CPU  MM=0 -> ids (8,)   all -1: True
+```
+Handled at three layers, which is more than I asked for: images with no masks are dropped from both splits, both transforms guard MM == 0, and _smallest_int_dtype returning int8 for empty input fixes the min()/max() narrowing that would still have aborted the mask pass before any of that was reached.
+LR scheduler horizon. Checked the arithmetic rather than the claim. total_steps is max_epochs * len(training_dataset) and _global_step += batch_size, so it counts samples, while scheduler.step() sits under if (step + 1) % gradient_accumulation_steps == 0 with step counting batches. Optimizer steps are therefore total_steps / (batch_size * accumulate_grad_steps), which is what the fix computes. No-op at the defaults, correct above them.
+Mask cache keying. Correct, and belt-and-braces with both the folder name and per-file metadata carrying the checkpoint. Worth noting checkpoint="large" is hardcoded at config.py:151 and not reachable from the CLI, so this currently only protects API callers. Not a complaint, just a note that the scenario in the commit message cannot be reached through frgs today.
+Bundle permissions. The os.umask(0) / restore / chmod sequence is the standard idiom, and import os is present. The umask is process-global, so the read window would be a hazard if anything created files concurrently, but the only background worker here is the mask-writer executor and it is shut down with wait=True well before the bundle is saved. Not reachable. If you want to remove the footgun entirely, taking the mode from output_path.parent via stat.S_IMODE avoids touching the umask at all.
+Nothing blocking from my side.
+🤖 Generated with Claude Code
+harrism
+approved these changes
+Sep 17, 2026
+View reviewed changes
+harrism
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Approving.
+Every finding I raised across the three review rounds is fixed, and I verified the fixes against the current head rather than taking the commit messages for them. The zero-mask handling in particular came back with guards at three layers plus the _smallest_int_dtype narrowing bug that would have aborted the mask pass before any of them was reached.
+Scope of what I actually looked at, so the approval is not read as broader than it is:
+The four defects from the September 9 review and the eight from September 16, plus their fixes.
+94cd222 distinct sampling and the 1-level JaggedTensor guard, 42e7b09 loss normalization, f6412bf the resume/evaluate transform mismatch, 41d5a01 the LR scheduler horizon arithmetic, 4cca9f0 cache keying and bundle permissions.
+Empirical checks of the duplicate-pixel exposure, the MM == 0 paths, and a kitchen training comparison across arms.
+I did not review the viewer, the USD/PLY export paths, or the checkpoint container in depth beyond confirming the legacy adapter round-trips.
+harrism
+reviewed
+Sep 17, 2026
+View reviewed changes
+harrism
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Reviewed the three areas I had explicitly excluded from my approval scope: the checkpoint container, the bundle export path, and the viewer. One low-severity finding, inline.
+Checkpoint container (checkpoints.py, both checkpoint.py adapters, radiance_fields/io.py): solid. Version dispatch is an explicit reader table, the schema_version check correctly excludes bool, and the legacy adapter is registered transitively by the package __init__, so a flat GaussianSplattingCheckpoint parses even when only the container module is imported. Verified that directly, since an import-order-dependent registry was my first suspicion. Re-import does not double-register.
+Bundle export (artifact.py): careful. Atomic os.replace from a temp dir with cleanup on failure, sha256 over all three payloads verified on load, and _payload_path rejects traversal via Path(filename).name != filename. The manifest-versus-payload cross-checks (grid names, counts, voxel counts, feature dim and dtype, transforms, gaussian count) are more thorough than I expected.
+Viewer (viewer.py): defensive. Non-finite features and fewer-than-3 channels are both skipped with a warning rather than raising, the scale slider is bounded 0..1 so _validate_scale cannot trip, and the render path catches RuntimeError/ValueError to keep the session alive. It also inherits the degenerate-PCA guard added for the September 16 review.
+Nothing here changes my approval.
+Comment thread
+fvdb_reality_capture/instance_segmentation/artifact.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Report unknown model_config fields in a GARfVDB bundle as a version e…
+…
+64ee739
+```
+…rror
+
+A bundle written by a newer release that adds a GARfVDBConfig field without
+bumping the schema version previously surfaced as a bare TypeError from the
+dataclass constructor. The loader now checks the manifest keys against the
+dataclass fields and raises GARfVDBArtifactVersionError naming the unknown
+ones, matching the rest of the loader's error surface.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+enabled auto-merge (squash)
+September 17, 2026 02:31
+Hide details
+View details
+swahtz
+merged commit 718f614
+into
+openvdb:main
+Sep 17, 2026
+17 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+mentioned this pull request
+Sep 17, 2026
+docs: complete v0.6.0 release notes
+#334
+Merged
+swahtz
+added a commit
+that referenced
+this pull request
+Sep 17, 2026
+docs: complete v0.6.0 release notes (#334)
+…
+b241d57
+```
+The v0.6.0 changelog omitted most changes merged since v0.5.0. Expand it
+to match the 0.4.0/0.5.0 organization, with release statistics,
+highlights, contributors, topic sections, and PR attribution.
+
+Audited `v0.5.0..718f614`: 19 commits, 131 changed files, and 17
+substantive merged PRs. Coverage includes GARfVDB, the Gaussian API
+migration, reconstruction and rendering improvements, checkpoint
+compatibility, legacy USDZ fixes, and benchmark/CI changes. Earlier
+release notes are unchanged.
+
+Related: #306, #307, #308, #309, #310, #311, #313, #315, #316, #317,
+#318, #319, #320, #326, #329, #330, #331.
+
+## Test plan
+
+- `git diff upstream/main...HEAD --check` — passed.
+- `git log --oneline v0.5.0..718f614` and `git diff --stat v0.5.0
+718f614` — checked audit range and statistics against merged PR metadata
+and source changes.
+- Verified all 17 substantive PRs are referenced and the
+v0.5.0-and-earlier notes are unchanged.
+- GPU tests not run: documentation-only change.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

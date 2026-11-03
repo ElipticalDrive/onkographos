@@ -1,0 +1,148 @@
+Summary Upgrade the DDA ray marcher with three visual improvements that make the simulation dramatically more readable and visually appealing: ordered transparency for water/gas, screen-space ambient occlusion, and proper emissive glow w...
+
+Rendering improvements: transparency, AO, emissive glow · Issue #62 · hgenru/vox · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Rendering improvements: transparency, AO, emissive glow #62
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#180
+Closed
+Rendering improvements: transparency, AO, emissive glow#62
+#180
+Copy link
+Labels
+architectureArchitecture and design decisionsArchitecture and design decisionsrenderRender/shader agent tasksRender/shader agent tasks
+Description
+hgenru
+opened on Apr 2, 2026
+Issue body actions
+Summary
+Upgrade the DDA ray marcher with three visual improvements that make the simulation dramatically more readable and visually appealing: ordered transparency for water/gas, screen-space ambient occlusion, and proper emissive glow with bloom.
+Current State
+`shaders/src/compute/render.rs`: DDA ray marcher, opaque voxels only, simple directional lighting
+`material_color()`: hardcoded if/else, no transparency
+Lava emissive is a hardcoded additive term (line 333-340)
+Water has opacity=0.3 in MaterialParams but the shader ignores it
+No ambient occlusion -- flat surfaces look the same regardless of corners/crevices
+No bloom/glow -- emissive materials just look like a slightly different color
+Design
+1. Ordered Transparency
+When the DDA hits a translucent voxel (opacity < 1.0 from material buffer), continue marching and accumulate:
+```
+// During DDA traversal
+let alpha = material_opacity;  // from material buffer
+if alpha < 1.0 {
+    // Blend: front-to-back compositing
+    let contribution = color * alpha * (1.0 - accumulated_alpha);
+    accumulated_color += contribution;
+    accumulated_alpha += alpha * (1.0 - accumulated_alpha);
+    
+    if accumulated_alpha > 0.95 {
+        break; // effectively opaque
+    }
+    // Continue marching through translucent voxels
+} else {
+    // Opaque hit -- standard shading, break
+}
+```
+This naturally handles water (opacity=0.3), ice (opacity=0.5), steam (opacity=0.1) seeing through multiple layers.
+2. Voxel Ambient Occlusion
+Check the 6 face-adjacent voxels of the hit point. Occupied neighbors darken the surface:
+```
+fn compute_ao(hit_voxel: IVec3, normal: IVec3, voxels: &[UVec4], grid_size: u32) -> f32 {
+    let mut occlusion = 0.0;
+    // Check 4 neighbors on the face plane perpendicular to the normal
+    // e.g., for normal=(0,1,0), check +x, -x, +z, -z at (hit + normal)
+    // Each occupied neighbor adds 0.15 occlusion
+    // Also check the 4 diagonal edge neighbors for softer AO
+    1.0 - occlusion.min(0.6)  // clamp so it never goes fully black
+}
+```
+This is cheap (8-12 voxel lookups) and dramatically improves depth perception in corners and crevices of the stone basin.
+3. Emissive Glow
+Materials with temperature above `emissive_temp` (from material buffer `visual.y`) emit light:
+```
+let emissive_temp = material_buffer[mat_id].visual.y;
+let particle_temp = /* from voxel buffer temp_bits */;
+if particle_temp > emissive_temp {
+    let glow_intensity = ((particle_temp - emissive_temp) / 500.0).min(1.0);
+    let emissive_color = material_color * glow_intensity * 2.0;  // HDR
+    final_color += emissive_color;
+}
+```
+For a simple bloom effect, run a second pass that reads the render output, blurs bright pixels (>1.0 in any channel), and adds them back. This can be a simple 2-pass separable Gaussian blur compute shader.
+4. Temperature-Based Color
+Hot materials shift color toward red/white regardless of base material color:
+```
+fn temperature_tint(base_color: Vec3, temp: f32, emissive_temp: f32) -> Vec3 {
+    if temp <= emissive_temp { return base_color; }
+    let t = ((temp - emissive_temp) / 1000.0).min(1.0);
+    // Lerp from base -> orange-red -> white
+    let hot = Vec3::new(1.0, 0.3 + t * 0.7, t * 0.8);
+    lerp(base_color, hot, t)
+}
+```
+This makes molten metal glow orange, heated stone glow red, etc. Purely visual, no simulation impact.
+Files to Touch
+Modify: `shaders/src/compute/render.rs` (transparency, AO, emissive, temp tint)
+New: `shaders/src/compute/bloom.rs` (optional Gaussian blur post-process)
+Modify: `shaders/src/compute/voxelize.rs` (pack temperature into voxel data for render access)
+Modify: `server/src/lib.rs` (add bloom pass to dispatch chain if implemented)
+Performance Budget
+Transparency: adds ~30% to ray march cost (continues through translucent voxels)
+AO: 8-12 extra voxel buffer reads per hit, ~0.1ms for 720p
+Bloom: 2 separable blur passes at 1/4 resolution, ~0.2ms
+Total target: render pass stays under 3ms at 1280x720
+Acceptance Criteria
+Water is see-through (can see stone floor through water pool)
+Steam/gas particles are barely visible wisps
+Stone corners in the basin have visible darkening (AO)
+Lava glows based on temperature from material buffer, not hardcoded
+Hot metal glows orange-red when above emissive temperature
+Render stays under 3ms at 1280x720 on RTX 4090
+Dependencies
+Benefits from: Data-driven material registry: RON config + GPU uniform buffer #55 (material buffer for opacity/emissive_temp values)
+Benefits from: Expand material palette: wood, sand, metal, ice, steam #56 (more materials to visualize)
+Independent of: Mouse interaction: spawn/remove materials + raycasting #57, Scene descriptions in RON: shapes, spawners, and presets #58, Scale to 64^3 grid: buffer resizing, push constant grid_size, perf #60
+Priority
+P2 -- visual polish that makes everything look dramatically better. Can be done in parallel with gameplay features.
+Reactions are currently unavailable
+Activity
+hgenru
+added
+renderRender/shader agent tasksRender/shader agent tasks
+architectureArchitecture and design decisionsArchitecture and design decisions
+on Apr 2, 2026
+hgenru
+added a commit that references this issue on Apr 3, 2026
+feat(shaders): add water transparency, blackbody emissive, refactor r…
+...
+This issue will close once commit c78067e is merged into the 'main' branch.
+c78067e
+hgenru
+closed this as completedin #180on Apr 3, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+architectureArchitecture and design decisionsArchitecture and design decisionsrenderRender/shader agent tasksRender/shader agent tasks
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

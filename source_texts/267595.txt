@@ -1,0 +1,48 @@
+bitsquid: development blog: July 2016
+Sunday, July 31, 2016
+Volumetric Clouds
+There has been a lot of progress made recently with volumetric clouds in games. The folks from Reset have posted a great article regarding their custom dynamic clouds solution, Egor Yusov published Real-time Rendering of Physics-Based Clouds using Precomputed Scattering in GPU Pro 6, last year Andrew Schneider presented Real-time Volumetric Cloudscapes of Horizon: Zero Dawn, and just last week Sébastien Hillaire presented Physically Based Sky, Atmosphere and Cloud Rendering in Frostbite. Inspired by all this latest progress we decided to implement a Stingray plugin to get a feel for the challenge that is real time clouds rendering.
+Note: This article isn't an introduction to volumetric cloud rendering but more of a small log of the development process of the plugin. Also, you can try it out for yourself or look at the code by downloading the Stingray plugin. Feel free to contribute!
+Modeling
+The modeling of our clouds is heavily inspired by the Real-time Volumetric Rendering Course Notes and Real-time Volumetric Cloudscapes of Horizon: Zero Dawn. It uses a set of 3d and 2d noises that are modulated by a coverage and altitude term to generate the 3d volume to be rendered.
+I was really impressed at the shapes that can be created from such simple building blocks. While you can definitely see cases where some tiling occurs, it’s not as bad as you would imagine. Once the textures are generated the tough part is to find the right sampling spaces and scales at which they should be sampled in the atmosphere. It's difficult to get a good balance between tiling artifacts vs getting enough high frequency details for the clouds. On top of that cache hits are greatly affected by the sampling scale used so it's another factor to consider.
+Finding good sampling scales for all of these textures and choosing by how much the extrusion texture should affect the low frequency clouds is very time consuming. With some time you eventually build intuition for what will look good in most scenarios but it’s definitely a difficult part of the process.
+We also generate some curl noise which is used to perturb and animate the clouds slightly. I've found that adding noise to the sampling position also reduces linear filtering artifacts that can arise when ray marching these low resolution 3d textures.
+One thing that often bothered me is the oddly shaped cumulus clouds that can arise from tilled 3d noise. Those cases are particularly noticeable for distant clouds. Adding extra cloud coverage for lower altitude sampling positions minimizes this artifact.
+Raymarching the volume at full resolution is too expensive even for high end graphics cards. So as suggested by Real-time Volumetric Cloudscapes of Horizon: Zero Dawn we reconstruct a full frame over 16 frames. I've found that to retain enough high frequency details of the clouds, we need a fairly high number of samples. We are currently using 256 steps when raymarching. We offset the starting position of the ray by a 4x4 Bayer matrix pattern to reduce banding artifacts that might appear due to undersampling. Mikkel Gjoel shared some great tips for banding reduction while presenting The Rendering Of Inside and encouraged the use of blue noise to remove banding patterns. While this gives better results there is a nice advantage of using a 4x4 pattern here: since we are rendering interleaved pixels it means that when rendering one frame we are rendering all pixels with the same Bayer offset. This yields a significant improvement in cache coherency compared to using a random noise offset per pixel. We also use an animated offset which allows us to gather a few extra samples through time. We use a 1d Halton sequence of 8 values and instead of using 100% of the 16ᵗʰ frame we use something like 75% to absorb the Halton samples.
+To re-project the cloud volume we try to find a good approximation of the cloud's world position. While raymarching we track a weighted sum of the absorption position and generate a motion vector from it.
+This allows us to reproject clouds with some degree of accuracy. Since we build one full resolution frame every 16ᵗʰ frame it’s important to track the samples as precisely as possible. This is especially true when the clouds are animated. Finding the right number of temporal samples you want to integrate over time is a compromise between getting a smoother signal for trackable pixels vs having a more noisy signal for invalidated pixels.
+Lighting
+To light the volume we use the "Beer-Powder" term described by Real-time Volumetric Cloudscapes of Horizon: Zero Dawn. It's a nice model since it simulates some of the out-scattering that occurs at the edges of the clouds. We discovered early on that it was going to be difficult to find terms that looked good for both close and distant clouds. So (for now anyways) a lot of the scattering and extinction coefficients are view dependent. This proved to be a useful way of building intuition for how each term affects the lighting of the clouds.
+We also added the ambient term described by the Real-time Volumetric Rendering Course Notes which is very useful to add detail where all light is absorbed by the volume.
+The ambient function described takes three parameters: sampling altitude, bottom color and top color. Instead of using constant values, we calculate these values by sampling the atmosphere at a few key locations. This means our ambient term is dynamic and will reflect the current state of the atmosphere. We use two pairs of samples perpendicular to the sun vector and average them to get the bottom and top ambient colors respectively.
+Since we already calculated an approximate absorption position for the reprojection, we use this position to change the absorption color based on the absorption altitude.
+Finally, we can reduce the alpha term by a constant amount to skew the absorption color towards the overlayed atmospheric color. By default this is disabled but it can be interesting to create some very hazy skyscapes. If this hack is used, it's important to protect the scattering highlight colors somewhat.
+Animation
+The animation of the clouds consists of a 2d wind vector, a vertical draft amount and a weather system.
+We dynamically calculate a 512x512 weather map which consists of 5 octaves of animated Perlin noise. We remap the noise value differently for each rgb component. This weather map is then sampled during the raymarch to update the coverage, cloud type and wetness terms of the current cloud sample. Right now we resample this weather term for each ray step but a possible optimization would be to sample the weather data and the start and end of the ray positions and interpolate these values at each step. All of the weather terms come in sunny/stormy pairs so that we can lerp them based in a probability of rain percentage. This allows the weather system to have storms coming in and out.
+The wetness term is used to update a structure of terms which defines how the clouds look based on how much humidity they carry. This is a very expensive lerp which happens per ray march and should be reduced to the bare minimum (the raymarch is instruction bound so each removed lerp is a big win optimization wise). But for the current exploratory phase it’s proving useful to be able to tweak a lot of these terms individually.
+Future work
+I think that as hardware gets more powerful realtime cloudscape solutions will be used more and more. There is tons of work left to do in this area. It is absolutely fascinating, challenging and beautiful. I am personally interested in improving the sense of scale the rendered clouds can have. To do so, I feel that the key is to reveal more and more of the high frequency details that shape the clouds. I think smaller cloud features are key to put in perspective the larger cloud features around them. But extracting higher frequency details usually comes at the cost of increasing the sampling rate.
+We also need to think of how to handle shadows and reflections. We've done some quick tests by updating a 512x512 opacity shadow map which seemed to work ok. Since it is not a view frustum dependent term we can absorb the cost of updating the map over a much longer period of time than 16 frames. Also, we could generate this map by taking fewer samples in a coarser representation of the clouds. The same approach would work for generating a global specular cubemap.
+I hope we continue to see more awesome presentations at GDC and Siggraph in the coming years regarding this topic!
+Links
+Physically Based Sky, Atmosphere and Cloud Rendering in Frostbite
+Real-time Rendering of Physics-Based Clouds using Precomputed Scattering
+Real-time Volumetric Cloudscapes of Horizon: Zero Dawn
+Real-time Volumetric Rendering Course Notes
+Real-time Cloud Rendering
+In Praxis: Atmosphere
+Common Cloud Names, Shapes, and Altitudes
+"Clouds" by iq
+Upplagd av
+Jp
+kl.
+1:19 PM
+771 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Newer Posts
+Older Posts
+Home
+Subscribe to:
+Posts (Atom)
